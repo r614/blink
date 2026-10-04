@@ -8,7 +8,7 @@ Status: OPEN / ACTIVE / RESOLVED. Resolved items stay listed with their resoluti
 | U-001 | P0 | RESOLVED | Can cooked packages be read at all (compression, versions)? | Resolved: v801/30, LZO chunks; 470/470 open. |
 | U-002 | P0 | RESOLVED | Export table layout for this licensee | Resolved: 68+4N bytes, flags high dword first; strict end check passes everywhere. |
 | U-003 | P0 | RESOLVED | StaticMesh serialization | Resolved: generic UE3 v801 + legacy kDOP; 405/405 decode on Boyle Ext. |
-| U-004 | P0 | ACTIVE | Does imported geometry render recognizably with correct transforms? | Render Boyle Ext in Bevy, screenshot, compare against original. |
+| U-004 | P0 | RESOLVED | Does imported geometry render recognizably with correct transforms? | Resolved visually 2026-10-04 (LOG: First render). A numeric transform check against the original is still owed under U-011. |
 | U-005 | P2 | OPEN | 137 unresolved cross-package resource imports on Boyle Ext | Index `DishonoredGame.upk` and startup packages; log which paths miss. |
 | U-006 | P2 | OPEN | World offset between `L_Boyle_Ext_P` and `L_Boyle_Int_P` | Compare door and transition actor positions in both maps. |
 | U-007 | P1 | OPEN | Is any walkable geometry BSP (`Model`/`BrushComponent`) rather than static meshes? | Count `Model` nodes and surfaces in Boyle packages; render BSP if it exists. |

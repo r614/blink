@@ -10,3 +10,6 @@ anyhow.workspace = true
 glam.workspace = true
 ue3_package.workspace = true
 dishonored_ir.workspace = true
+
+[dev-dependencies]
+glam.workspace = true

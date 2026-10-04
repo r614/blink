@@ -70,13 +70,44 @@ pub fn resolve_material(pkg: &Package, mat: ObjRef) -> Result<ResolvedMaterial> 
             None => break,
         }
     }
-    for (name, tex) in &out.texture_params {
-        let tname = pkg.obj_name(*tex);
-        if out.normal.is_none() && is_normal_name(name, &tname) {
-            out.normal = Some(*tex);
-        } else if out.diffuse.is_none() && is_diffuse_name(name, &tname) {
-            out.diffuse = Some(*tex);
+    // Arkane's parameter naming convention (observed across all 420 Boyle Ext
+    // materials): `D_` diffuse, `N_` normal, `S_` specular, `O_` opacity, `E_` emissive,
+    // `D2_`/`N2_` variation layers. Rank exact conventions above heuristics.
+    let rank_diffuse = |n: &str, t: &str| -> u8 {
+        let l = n.to_ascii_lowercase();
+        if l.starts_with("d_") && !l.contains("mask") {
+            3
+        } else if l == "diffuse" || l.starts_with("diffuse") {
+            2
+        } else if is_diffuse_name(n, t) && !l.contains("mask") && !l.starts_with("d2_") {
+            1
+        } else {
+            0
         }
+    };
+    let rank_normal = |n: &str, t: &str| -> u8 {
+        let l = n.to_ascii_lowercase();
+        if l.starts_with("n_") {
+            2
+        } else if is_normal_name(n, t) && !l.starts_with("n2_") && !l.starts_with("dn_") {
+            1
+        } else {
+            0
+        }
+    };
+    let best = |f: &dyn Fn(&str, &str) -> u8| {
+        out.texture_params
+            .iter()
+            .map(|(n, t)| (f(n, &pkg.obj_name(*t)), *t))
+            .filter(|(r, _)| *r > 0)
+            .max_by_key(|(r, _)| *r)
+            .map(|(_, t)| t)
+    };
+    if out.diffuse.is_none() {
+        out.diffuse = best(&rank_diffuse);
+    }
+    if out.normal.is_none() {
+        out.normal = best(&rank_normal);
     }
     if out.diffuse.is_none() {
         out.diffuse = out

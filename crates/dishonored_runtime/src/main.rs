@@ -21,6 +21,7 @@ struct Args {
     yaw: Option<f32>,
     pitch: f32,
     show_hidden: bool,
+    show_fx: bool,
     max_tex: u32,
     screenshot: Option<String>,
     frames: u32,
@@ -38,6 +39,7 @@ fn parse_args() -> Args {
         yaw: get("--yaw").and_then(|s| s.parse().ok()),
         pitch: get("--pitch").and_then(|s| s.parse().ok()).unwrap_or(-10.0),
         show_hidden: a.iter().any(|x| x == "--show-hidden"),
+        show_fx: a.iter().any(|x| x == "--show-fx"),
         max_tex: get("--max-tex").and_then(|s| s.parse().ok()).unwrap_or(1024),
         screenshot: get("--screenshot"),
         frames: get("--frames").and_then(|s| s.parse().ok()).unwrap_or(30),
@@ -110,6 +112,7 @@ fn setup(
         &mut images,
         &mut materials,
         args.show_hidden,
+        args.show_fx,
     );
     info.summary = format!(
         "{}  |  {} packages  {} instances  {} meshes  {} textures  {} entities  import {:.1?}",

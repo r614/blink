@@ -347,11 +347,19 @@ impl Importer<'_> {
         };
         let diffuse = tex(self, resolved.diffuse);
         let normal = tex(self, resolved.normal);
+        let source = pkg.obj_path(ObjRef::Export(k.1));
+        // Volumetric cards (fog sheets, smoke, light shafts) are translucent in the
+        // original; their parent Material is often a cross-package import, so the
+        // BlendMode is not always available. Naming is consistent enough to rely on.
+        let lname = source.to_ascii_lowercase();
+        let fx_card = ["fog", "smoke", "lightray", "light_ray", "godray", "mist"]
+            .iter()
+            .any(|k| lname.contains(k));
         let asset = MaterialAsset {
-            source: pkg.obj_path(ObjRef::Export(k.1)),
+            source,
             diffuse,
             normal,
-            blend: if resolved.translucent {
+            blend: if resolved.translucent || fx_card {
                 BlendHint::Translucent
             } else if resolved.masked {
                 BlendHint::Masked

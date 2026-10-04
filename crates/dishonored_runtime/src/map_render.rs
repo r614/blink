@@ -65,6 +65,7 @@ pub fn spawn_map(
     images: &mut Assets<Image>,
     materials: &mut Assets<StandardMaterial>,
     show_hidden: bool,
+    show_fx: bool,
 ) -> usize {
     let image_handles: Vec<Handle<Image>> = map.textures.iter().map(|t| images.add(to_image(t))).collect();
     let material_handles: Vec<Handle<StandardMaterial>> = map
@@ -146,6 +147,10 @@ pub fn spawn_map(
         let mesh = &map.meshes[inst.mesh];
         let transform = Transform::from_matrix(coords::transform(inst.transform));
         for (si, section) in mesh.sections.iter().enumerate() {
+            let mat_id = inst.materials.get(si).copied().flatten().or(section.material);
+            if !show_fx && mat_id.is_some_and(|m| map.materials[m].blend == BlendHint::Translucent) {
+                continue;
+            }
             let mat = if inst.hidden {
                 hidden_material.clone()
             } else {

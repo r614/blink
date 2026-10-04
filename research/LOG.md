@@ -88,3 +88,11 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Confidence:** CONFIRMED (values exist); runtime effect still to be measured
 - **Implementation consequence:** Add an INI reader to `dishonored_assets`. The
   simulation should take constants from INI + class defaults, not hard-coded numbers.
+
+## 2026-10-04 — First render of an original map (M4)
+- **Question:** Does the decoded geometry come out in the right place, at the right scale, with usable textures?
+- **Evidence:** Bevy screenshots of `L_Boyle_Ext_P` and its sublevels: an aerial shot from (-6000,-6000,6000) and a street-level shot from PlayerStart_1 (-2663,-1879,98).
+- **Experiment:** Converted to Bevy space with a Y/Z swap and 0.02 m/uu. Collection matrices are applied as `ParentToWorld * component local`. BC textures are uploaded directly with their mip chains.
+- **Result:** The Boyle estate is recognizable: mansion, walled garden, street perimeter, surrounding terraces. Transforms and scale are consistent at player eye height. Material texture params follow a consistent convention (`D_` diffuse, `N_` normal, `S_` specular, `O_` opacity, `E_` emissive, `D2_`/`N2_` variation). Ranking by that convention fixed the false-colour surfaces.
+- **Confidence:** STRONG (visual). The transform convention still needs a numeric check against the original game (U-011).
+- **Implementation consequence:** M4 is reached. Remaining visual gaps are unresolved cross-package materials (U-005, e.g. street cobbles), translucent FX cards (hidden by default) and lightmaps (U-013). None of these block collision work.
