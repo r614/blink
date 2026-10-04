@@ -20,6 +20,7 @@ dishonored_world = { path = "crates/dishonored_world" }
 dishonored_sim = { path = "crates/dishonored_sim" }
 dishonored_net = { path = "crates/dishonored_net" }
 dishonored_content = { path = "crates/dishonored_content" }
+dishonored_multiplayer = { path = "crates/dishonored_multiplayer" }
 
 [profile.dev]
 opt-level = 1

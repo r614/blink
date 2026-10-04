@@ -132,7 +132,6 @@ pub fn step_movement(
     ctx: &MoveCtx,
     events: &mut Vec<SimEvent>,
 ) {
-    let cfg = ctx.cfg;
     p.yaw = input.yaw;
     p.pitch = input.pitch.clamp(-89.0, 89.0);
     if p.mode == MoveMode::Dead {

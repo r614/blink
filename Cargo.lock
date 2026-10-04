@@ -2350,6 +2350,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "dishonored_master"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dishonored_net",
+]
+
+[[package]]
+name = "dishonored_multiplayer"
+version = "0.1.0"
+dependencies = [
+ "dishonored_ir",
+ "dishonored_sim",
+ "dishonored_world",
+ "glam",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dishonored_net"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "dishonored_multiplayer",
+ "dishonored_sim",
+ "dishonored_world",
+ "glam",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dishonored_runtime"
 version = "0.1.0"
 dependencies = [
@@ -2357,6 +2391,18 @@ dependencies = [
  "bevy",
  "dishonored_assets",
  "dishonored_ir",
+]
+
+[[package]]
+name = "dishonored_server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dishonored_content",
+ "dishonored_multiplayer",
+ "dishonored_net",
+ "dishonored_sim",
+ "serde_json",
 ]
 
 [[package]]

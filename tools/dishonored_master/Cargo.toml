@@ -1,0 +1,10 @@
+[package]
+name = "dishonored_master"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Minimal control plane: in-memory server list with TTL heartbeats"
+
+[dependencies]
+anyhow.workspace = true
+dishonored_net.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "dishonored_multiplayer"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Multiplayer match rules (FFA debug mode, Contracts) layered on the faithful simulation"
+
+[dependencies]
+glam = { workspace = true, features = ["serde"] }
+serde.workspace = true
+dishonored_sim.workspace = true
+dishonored_world.workspace = true
+dishonored_ir.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "dishonored_net"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "UDP netcode: authoritative server, predicted clients, link conditioner, control-plane client"
+
+[dependencies]
+anyhow.workspace = true
+glam = { workspace = true, features = ["serde"] }
+serde.workspace = true
+serde_json.workspace = true
+bincode = { version = "2", features = ["serde"] }
+dishonored_sim.workspace = true
+dishonored_world.workspace = true
+dishonored_multiplayer.workspace = true

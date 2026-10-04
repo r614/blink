@@ -8,7 +8,7 @@
 //! `superclass CDO chain -> class CDO -> instance`, recursively for structs.
 
 use crate::content::Content;
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use ue3_package::properties::{Property, Value};

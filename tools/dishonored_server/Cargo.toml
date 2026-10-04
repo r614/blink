@@ -1,0 +1,14 @@
+[package]
+name = "dishonored_server"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Headless authoritative dedicated server"
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+dishonored_content.workspace = true
+dishonored_multiplayer.workspace = true
+dishonored_net.workspace = true
+dishonored_sim.workspace = true
