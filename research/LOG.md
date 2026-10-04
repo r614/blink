@@ -258,3 +258,15 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Implementation consequence:** A custom sky material is needed for the gradient/cloud animation. The clear
   colour stays the old dark blue: the sky gradient's bottom colour rendered as saturated cyan in gaps below the
   dome rim.
+
+## 2026-10-04 — Fidelity harness
+- **Question:** How do we keep before/after evidence for every visual feature reproducible?
+- **Experiment:** `harness fidelity` (`tools/harness/src/fidelity.rs`): one `dishonored_runtime --inspect --script`
+  run per feature config (full, baseline, no-lightmaps, no-materials, no-fx, no-dynamic-lights, no-fog, no-post,
+  no-sky, legacy-geometry), 8 fixed viewpoints each (aerial, street, garden, spawn1, mansion, sewer, moon,
+  skyline), `feature-off | full` pairs composed with ffmpeg, REPORT.md with an image table. `--reference DIR`
+  computes SSIM against original captures named `<viewpoint>.png` (hook for U-011; none exist yet).
+- **Result:** `harness_out/fidelity_run/REPORT.md`: 11/11 checks pass, 80 renders, 72 pairs.
+- **Confidence:** CONFIRMED (tooling).
+- **Implementation consequence:** Once original-game captures exist at the same poses, the SSIM table turns the
+  approximations above (lightmap formula, light falloff, exposure) into measurable targets.

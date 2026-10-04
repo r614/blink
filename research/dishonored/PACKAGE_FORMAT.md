@@ -278,6 +278,27 @@ distance field shadows). They hold precomputed shadowing for lights that are not
 the lightmap (dominant/toggleable). Not used by the renderer yet; the dominant light uses
 Bevy's real-time shadow maps instead.
 
+## Lights, fog, post, sky — CONFIRMED (data), see LOG for render mapping
+
+- Light actors: `LightComponent` → `{Point,Spot,DominantPoint,DominantSpot,DominantDirectional}LightComponent`
+  with `Brightness` (default 1), `LightColor` (FColor, sRGB), `Radius` (1024), `FalloffExponent` (2),
+  `InnerConeAngle`/`OuterConeAngle` (half-angles, deg), `LightGuid`, `LightmapGuid`, `CastShadows`,
+  `CachedParentToWorld`. Static lights live in `StaticLightCollectionActor` components (baked).
+- Tagged `Matrix` struct properties store each row as **(W, X, Y, Z)** (64 bytes), unlike native
+  `FMatrix` data (X, Y, Z, W).
+- `DominantDirectionalLightComponent` also has `DominantLightShadowInfo{WorldToLight, LightToWorld,
+  LightSpaceImportanceBounds, ShadowMapSizeX/Y}` describing the cooked u16 shadow map.
+- Fog: `Engine.DisFog` actor (`Component` → `DisFogComponent`): `Opacity`, `LightColor`, `Origin`,
+  `Height`, `NearPlane`, `FarPlane`, `NoFogPlane`, `SunPower`, `bCustomTransition`,
+  `fCustomTransitionHeight`, `FogLUT`, `m_RawLut` (128 bytes), `HeightDensityFactor`, `Density`,
+  `bUseExponentialAttenuation`, `bInteriorFog`, `m_IsExclusive`. Defaults in `Engine.Default__DisFogComponent`.
+- Post: `WorldInfo.m_ArkDefaultPpSettings: ArkPpConfig{ m_UberPpParameters{ m_DOFParameters,
+  m_CBParameters{m_CrMgYbShadTones, m_CrMgYbMidTones}, m_HDRParameters{m_Exposure, m_GammaAdjustment,
+  m_FilmGrainNoise, m_GimpContrast, m_bOverride*} }, m_PpBloomParameters{m_Tint, m_Scale} }`.
+- Reflection: `WorldInfo.mSceneReflection` → `TextureCube` (`FacePosX`..`FaceNegZ` Texture2D faces).
+- Sky: ordinary collection meshes whose materials derive from `Skies.Skies_PMAT` (dome) and
+  `Vfx_Materials.main_materials.Moon_PMAT` / `Vfx_Materials.Material.Sun_PMAT`.
+
 ## Remaining parse gaps
 
 - Script packages: component templates under class defaults and a handful of exotic

@@ -9,10 +9,14 @@
 //! harness visual [--seconds 20]
 //!                             server + bots + one rendered client recording MP4 and
 //!                             a scripted offline smoke run with screenshots
+//! harness fidelity [--configs a,b] [--reference DIR]
+//!                             fixed Boyle Ext viewpoints with each visual feature on/off;
+//!                             before/after pairs + optional SSIM vs original captures
 //! harness replay FILE         re-simulate a server replay and verify every state hash
 //! harness all                 everything above; writes harness_out/<run>/REPORT.md
 //! ```
 
+mod fidelity;
 mod netsoak;
 mod report;
 mod scenarios;
@@ -50,6 +54,7 @@ fn main() -> Result<()> {
         "sim" => scenarios::run(&ctx, &mut rep)?,
         "net" => netsoak::run(&ctx, &mut rep)?,
         "visual" => visual::run(&ctx, &mut rep)?,
+        "fidelity" => fidelity::run(&ctx, &mut rep)?,
         "replay" => {
             let file = args.get(1).expect("replay file");
             netsoak::verify_replay_file(&PathBuf::from(file), &mut rep)?;
