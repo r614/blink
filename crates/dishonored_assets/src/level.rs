@@ -4,6 +4,7 @@
 use crate::content::Content;
 use crate::lightmap::{LightMap2DRef, LightMapRef, decode_bc1, flat_irradiance, pack_rgb9e5, read_static_mesh_component_lods, srgb_to_linear};
 use crate::material_chain;
+use crate::spline_mesh;
 use crate::texture::decode_rgba8;
 use crate::static_mesh::read_static_mesh;
 use crate::texture::read_texture;
@@ -23,6 +24,8 @@ pub struct ImportOptions {
     pub load_textures: bool,
     /// Decode and bake lightmaps (only when `load_textures` is also set).
     pub load_lightmaps: bool,
+    /// Import StaticMesh/SplineMesh components of non-static actor classes.
+    pub other_actors: bool,
 }
 
 impl Default for ImportOptions {
@@ -31,6 +34,7 @@ impl Default for ImportOptions {
             max_texture_size: 1024,
             load_textures: true,
             load_lightmaps: true,
+            other_actors: true,
         }
     }
 }
@@ -39,6 +43,10 @@ impl Default for ImportOptions {
 pub struct ImportStats {
     pub static_mesh_actors: usize,
     pub collection_components: usize,
+    /// Instances from StaticMeshComponents of other actor classes (render-only).
+    pub other_actor_components: usize,
+    /// SplineMeshComponents baked into deformed mesh copies.
+    pub spline_meshes: usize,
     pub instances: usize,
     pub meshes: usize,
     pub mesh_failures: usize,
@@ -202,8 +210,28 @@ impl Importer<'_> {
 
     fn import_actors(&mut self, slot: usize) -> Result<()> {
         let pkg = self.pkgs[slot].clone();
+        // Placed StaticMeshComponents owned by other actor classes (InterpActor, KActor,
+        // DishonoredMovable, DisDoor, pickups, usable objects...): outer -> components.
+        let mut owned: HashMap<usize, Vec<usize>> = HashMap::new();
+        for i in 0..pkg.exports.len() {
+            if matches!(pkg.export_class(i).as_str(), "StaticMeshComponent" | "SplineMeshComponent") {
+                if let ObjRef::Export(o) = ObjRef::from_index(pkg.exports[i].outer) {
+                    owned.entry(o).or_default().push(i);
+                }
+            }
+        }
         for i in 0..pkg.exports.len() {
             let class = pkg.export_class(i);
+            if !matches!(class.as_str(), "StaticMeshActor" | "StaticMeshCollectionActor")
+                && self.opts.other_actors
+                && owned.contains_key(&i)
+                && self.is_in_persistent_level(&pkg, i)
+            {
+                if let Err(e) = self.import_owned_components(slot, i, &owned[&i]) {
+                    self.stats.errors.push(format!("{}: {e:#}", pkg.obj_path(ObjRef::Export(i))));
+                }
+                continue;
+            }
             match class.as_str() {
                 "StaticMeshActor" if self.is_in_persistent_level(&pkg, i) => {
                     if let Err(e) = self.import_static_mesh_actor(slot, i) {
@@ -230,6 +258,29 @@ impl Importer<'_> {
                 }
                 _ => {}
             }
+        }
+        Ok(())
+    }
+
+    /// Static mesh components of non-static actors, imported at their initial transform as
+    /// render-only instances (`collides = false`, so gameplay collision is unchanged:
+    /// doors, movables and pickups are dynamic in the original).
+    fn import_owned_components(&mut self, slot: usize, actor: usize, comps: &[usize]) -> Result<()> {
+        let pkg = self.pkgs[slot].clone();
+        let props = pkg.read_object(actor)?.properties;
+        let hidden = bool_or(&props, "bHidden", false);
+        let world = actor_transform(&props);
+        let class = pkg.export_class(actor);
+        for &ci in comps {
+            let before = self.map.instances.len();
+            let src = format!("{} [{class}]", pkg.obj_path(ObjRef::Export(ci)));
+            if let Err(e) = self.add_component(slot, ci, world, hidden, src) {
+                self.stats.errors.push(format!("{}: {e:#}", pkg.obj_path(ObjRef::Export(ci))));
+            }
+            for inst in &mut self.map.instances[before..] {
+                inst.collides = false;
+            }
+            self.stats.other_actor_components += self.map.instances.len() - before;
         }
         Ok(())
     }
@@ -294,9 +345,18 @@ impl Importer<'_> {
         let Some(mesh_ref) = find(&props, "StaticMesh").and_then(|p| p.as_object()) else {
             return Ok(());
         };
-        let Some(mesh) = self.resolve(slot, ObjRef::from_index(mesh_ref)).and_then(|k| self.mesh(k)) else {
+        let Some(mut mesh) = self.resolve(slot, ObjRef::from_index(mesh_ref)).and_then(|k| self.mesh(k)) else {
             return Ok(());
         };
+        let is_spline = pkg.export_class(ci) == "SplineMeshComponent";
+        if is_spline {
+            if let Some(sp) = spline_mesh::read_params(&props) {
+                let deformed = spline_mesh::deform(&self.map.meshes[mesh], &sp);
+                self.map.meshes.push(deformed);
+                mesh = self.map.meshes.len() - 1;
+                self.stats.spline_meshes += 1;
+            }
+        }
         let mut materials = Vec::new();
         if let Some(p) = find(&props, "Materials") {
             for m in p.array_objects().unwrap_or_default() {
@@ -320,6 +380,7 @@ impl Importer<'_> {
                     Some(LightMapRef::Vertex { .. }) => self.stats.lightmaps_vertex += 1,
                     _ => self.stats.lightmaps_none += 1,
                 },
+                Err(_) if is_spline => self.stats.lightmaps_none += 1,
                 Err(e) => {
                     self.stats.lightmap_parse_failures += 1;
                     self.stats.errors.push(format!("lightmap {}: {e:#}", pkg.obj_path(ObjRef::Export(ci))));

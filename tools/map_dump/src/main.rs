@@ -12,6 +12,29 @@ fn main() -> Result<()> {
     }
     let pkgs = map_packages(&content, map);
     println!("packages: {pkgs:?}");
+    if args.iter().any(|a| a == "--survey") {
+        // Which actor classes own primitive components, per package (coverage audit).
+        use ue3_package::ObjRef;
+        for p in &pkgs {
+            let pkg = content.package(p)?;
+            let mut owners: BTreeMap<String, usize> = BTreeMap::new();
+            for i in 0..pkg.exports.len() {
+                let c = pkg.export_class(i);
+                if !(c.ends_with("MeshComponent") || c == "BrushComponent" || c == "Model") {
+                    continue;
+                }
+                let outer = ObjRef::from_index(pkg.exports[i].outer);
+                let oc = if outer == ObjRef::Null { "<none>".into() } else { pkg.class_name(outer) };
+                let in_level = pkg.obj_name(pkg.obj_outer(outer)) == "PersistentLevel" || pkg.obj_name(outer) == "PersistentLevel";
+                *owners.entry(format!("{c} <- {oc}{}", if in_level { "" } else { " (not placed)" })).or_default() += 1;
+            }
+            println!("== {p}");
+            for (k, n) in owners {
+                println!("  {n:5} {k}");
+            }
+        }
+        return Ok(());
+    }
     let t = std::time::Instant::now();
     let opts = ImportOptions {
         load_textures: !args.iter().any(|a| a == "--no-textures"),

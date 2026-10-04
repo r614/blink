@@ -228,8 +228,11 @@ fn connect(addr: &str, args: &Args) -> NetClient {
 
 fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, mut materials: ResMut<Assets<StandardMaterial>>) {
     let content = Content::locate().expect("Dishonored install not found (set DISHONORED_DIR)");
-    let pkgs = map_packages(&content, &args.map);
-    let opts = ImportOptions { max_texture_size: args.max_tex, ..Default::default() };
+    // --legacy-geometry: the pre-fidelity package/actor coverage (prefix-matched sublevels,
+    // StaticMeshActor + StaticMeshCollectionActor only), for before/after comparisons.
+    let legacy = std::env::args().any(|a| a == "--legacy-geometry");
+    let pkgs = if legacy { dishonored_assets::map_packages_by_prefix(&content, &args.map) } else { map_packages(&content, &args.map) };
+    let opts = ImportOptions { max_texture_size: args.max_tex, other_actors: !legacy, ..Default::default() };
     let (map, stats) = import_level(&content, &args.map, &pkgs, &opts).expect("map import failed");
     let spawned = map_render::spawn_map(&map, &mut commands, &mut meshes, &mut images, &mut materials, args.show_hidden, &args.features);
     info!("{}: {} instances, {} meshes, {} textures, {} entities", args.map, stats.instances, stats.meshes, stats.textures, spawned);

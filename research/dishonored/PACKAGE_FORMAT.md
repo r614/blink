@@ -195,6 +195,31 @@ Formats seen in Boyle Ext: `PF_DXT1` (sRGB and linear), `PF_DXT5`, `PF_V8U8` (no
 - `PlayerStart` actors give spawn candidates.
 - Rotator → matrix uses UE3 `FRotationMatrix` (see `dishonored_assets::util`).
 
+### Streaming levels — CONFIRMED
+The persistent level's `WorldInfo.StreamingLevels` lists `LevelStreaming*` objects (outer
+`TheWorld`) whose `PackageName` names each sublevel. Boyle Ext: `L_Boyle_Ext_{Audio,Env,Fx,
+Light,Nav,Script}` and `L_BoyleStreet_Ext_Script` (all `LevelStreamingAlwaysLoaded`).
+
+### Other placed primitives
+- Any placed actor may own `StaticMeshComponent`s (outer = the actor): InterpActor, KActor,
+  DishonoredMovable, DisDoor, pickups... Transform = actor `Location/Rotation/DrawScale*` ×
+  component local transform, like StaticMeshActor.
+- `SplineMeshComponent` (on `SplineLoftActor`): `SplineParams{StartPos, StartTangent,
+  StartScale: Vector2D, EndPos, EndTangent, EndScale}` in component space, `SplineXDir`,
+  `bSmoothInterpRollScale`; the mesh's X extent is mapped onto the Hermite segment.
+- BSP: level `Model`s on Boyle Ext are empty (156–192 bytes); `BrushComponent`s belong to volumes.
+
+### Materials across packages — CONFIRMED
+MIC `Parent` references are frequently imports that the same level package also exports
+(cooker duplicates); base `Material`s (`Materials_ref.main_materials.*_PMAT`,
+`Vfx_Materials.main_materials.*`) and shared textures live in `DishonoredGame.upk`, a few
+objects in `Startup.upk`. MIC properties: `TextureParameterValues`, `ScalarParameterValues`,
+`VectorParameterValues` (arrays of `{ParameterName, ParameterValue}` structs), `Parent`,
+`bHasStaticPermutationResource`, `ReferencedTextureGuids`. Base material properties used:
+`BlendMode`, `TwoSided`, `LightingModel`, `OpacityMaskClipValue`; parameter expressions
+(`MaterialExpression{TextureSampleParameter2D,ScalarParameter,VectorParameter}`) are exports
+whose outer is the material and carry `ParameterName` + `Texture`/`DefaultValue`.
+
 ## Precomputed lighting on static mesh components — STRONG
 
 Implementation: `dishonored_assets::lightmap`. Validated on all 3,401 Boyle Ext static mesh
