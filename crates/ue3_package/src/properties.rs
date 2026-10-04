@@ -1,1 +1,249 @@
-//! UE3 tagged property stream (placeholder; filled in once the export layout is confirmed).
+//! UE3 tagged property stream as serialized by Dishonored (file version 801).
+//!
+//! Tag layout: `Name:FName Type:FName Size:i32 ArrayIndex:i32`, then
+//! `StructName:FName` for StructProperty, `Value:u8` for BoolProperty and
+//! `EnumName:FName` for ByteProperty, then `Size` bytes of payload.
+//! Array element types are not recorded in the stream, so arrays are kept raw
+//! and decoded by callers that know the owning class.
+
+use crate::reader::Reader;
+use crate::{FName, ObjRef, Package};
+use anyhow::{Context, Result, bail};
+
+#[derive(Debug, Clone)]
+pub enum Value {
+    Int(i32),
+    Float(f32),
+    Bool(bool),
+    Byte(u8),
+    Enum(String),
+    Name(String),
+    Str(String),
+    Object(i32),
+    Vector([f32; 3]),
+    /// Pitch, Yaw, Roll in UE3 rotation units (65536 = 360 degrees).
+    Rotator([i32; 3]),
+    Color([u8; 4]),
+    LinearColor([f32; 4]),
+    Vector2D([f32; 2]),
+    Guid([u32; 4]),
+    Struct(String, Vec<Property>),
+    /// Raw array payload (element count + elements); see [`Property::array_raw`].
+    Array(Vec<u8>),
+    Raw(String, Vec<u8>),
+}
+
+#[derive(Debug, Clone)]
+pub struct Property {
+    pub name: String,
+    pub type_name: String,
+    pub array_index: i32,
+    pub value: Value,
+}
+
+/// Immutable structs are serialized natively (no nested tags) in cooked packages.
+fn native_struct(r: &mut Reader, name: &str, size: usize) -> Result<Option<Value>> {
+    let v = match (name, size) {
+        ("Vector", 12) => Value::Vector(r.vec3()?),
+        ("Rotator", 12) => Value::Rotator([r.i32()?, r.i32()?, r.i32()?]),
+        ("Color", 4) => {
+            let b = r.array::<4>()?;
+            // Stored BGRA.
+            Value::Color([b[2], b[1], b[0], b[3]])
+        }
+        ("LinearColor", 16) => Value::LinearColor([r.f32()?, r.f32()?, r.f32()?, r.f32()?]),
+        ("Vector2D", 8) => Value::Vector2D([r.f32()?, r.f32()?]),
+        ("Guid", 16) => Value::Guid(r.guid()?),
+        _ => return Ok(None),
+    };
+    Ok(Some(v))
+}
+
+pub fn read_properties(pkg: &Package, r: &mut Reader) -> Result<Vec<Property>> {
+    let mut out = Vec::new();
+    loop {
+        let at = r.pos();
+        let name_ref = FName::read(r)?;
+        let name = pkg.name(name_ref);
+        if name == "None" {
+            break;
+        }
+        let type_name = pkg.name(FName::read(r)?);
+        let size = r.i32()?;
+        let array_index = r.i32()?;
+        if !(0..=0x0400_0000).contains(&size) {
+            bail!("property {name} at {at:#x}: implausible size {size}");
+        }
+        let size = size as usize;
+        let value = match type_name.as_str() {
+            "IntProperty" => Value::Int(sub(r, size)?.i32()?),
+            "FloatProperty" => Value::Float(sub(r, size)?.f32()?),
+            "BoolProperty" => Value::Bool(r.u8()? != 0),
+            "ByteProperty" => {
+                let enum_name = pkg.name(FName::read(r)?);
+                let mut s = sub(r, size)?;
+                if enum_name == "None" || size == 1 {
+                    Value::Byte(s.u8()?)
+                } else {
+                    Value::Enum(pkg.name(FName::read(&mut s)?))
+                }
+            }
+            "NameProperty" => Value::Name(pkg.name(FName::read(&mut sub(r, size)?)?)),
+            "StrProperty" => Value::Str(sub(r, size)?.fstring()?),
+            "ObjectProperty" | "ComponentProperty" | "ClassProperty" | "InterfaceProperty" => {
+                Value::Object(sub(r, size)?.i32()?)
+            }
+            "StructProperty" => {
+                let struct_name = pkg.name(FName::read(r)?);
+                let body = r.bytes(size)?;
+                let mut s = Reader::new(body);
+                match native_struct(&mut s, &struct_name, size)? {
+                    Some(v) => v,
+                    None => match read_properties(pkg, &mut s) {
+                        Ok(props) if s.pos() == size => Value::Struct(struct_name, props),
+                        _ => Value::Raw(struct_name, body.to_vec()),
+                    },
+                }
+            }
+            "ArrayProperty" => Value::Array(r.bytes(size)?.to_vec()),
+            other => Value::Raw(other.to_string(), r.bytes(size)?.to_vec()),
+        };
+        out.push(Property {
+            name,
+            type_name,
+            array_index,
+            value,
+        });
+    }
+    Ok(out)
+}
+
+/// Take `size` bytes as an independent reader, advancing `r` past them.
+fn sub<'a>(r: &mut Reader<'a>, size: usize) -> Result<Reader<'a>> {
+    Ok(Reader::new(r.bytes(size)?))
+}
+
+/// Header fields every exported object starts with, followed by its properties.
+pub struct ObjectHeader {
+    pub net_index: i32,
+    pub properties: Vec<Property>,
+    /// Offset into the export data where native (class-specific) serialization begins.
+    pub native_offset: usize,
+}
+
+/// RF_HasStack: object carries a script state frame before its properties.
+pub const RF_HAS_STACK: u64 = 0x0200_0000;
+pub const RF_CLASS_DEFAULT_OBJECT: u64 = 0x0200;
+
+impl Package {
+    /// Whether an export's class derives from `Component`. The class hierarchy lives in
+    /// other packages, so this uses the naming convention every UE3 component class follows.
+    pub fn is_component_class(&self, export: usize) -> bool {
+        let c = self.export_class(export);
+        c.ends_with("Component") || c == "Component"
+    }
+}
+
+impl Package {
+    /// Parse the generic UObject header + tagged properties of an export.
+    pub fn read_object(&self, export: usize) -> Result<ObjectHeader> {
+        let data = self.export_data(export)?;
+        let mut r = Reader::new(data);
+        let flags = self.exports[export].object_flags;
+        if flags & RF_HAS_STACK != 0 {
+            // FStateFrame: Node, StateNode, ProbeMask(u64), LatentAction(u16?), StateStack, Offset.
+            // Not needed for level geometry; fail loudly so it gets implemented when hit.
+            bail!("export {export} has a script stack (flags {flags:#x}); not supported yet");
+        }
+        let class = self.export_class(export);
+        if self.is_component_class(export) {
+            // UComponent: TemplateOwnerClass, plus TemplateName for class-default templates.
+            // Observed in L_Boyle_Ext_Env StaticMeshComponents: i32 0 precedes NetIndex.
+            let _template_owner_class = r.i32()?;
+            if flags & RF_CLASS_DEFAULT_OBJECT != 0 {
+                let _template_name = FName::read(&mut r)?;
+            }
+        }
+        let net_index = r.i32()?;
+        let properties = read_properties(self, &mut r)
+            .with_context(|| format!("properties of export {export} ({class})"))?;
+        Ok(ObjectHeader {
+            net_index,
+            properties,
+            native_offset: r.pos(),
+        })
+    }
+
+    pub fn obj_ref_name(&self, idx: i32) -> String {
+        self.obj_path(ObjRef::from_index(idx))
+    }
+}
+
+pub fn find<'p>(props: &'p [Property], name: &str) -> Option<&'p Property> {
+    props.iter().find(|p| p.name.eq_ignore_ascii_case(name))
+}
+
+impl Property {
+    /// Decode an array of i32 object references.
+    pub fn array_objects(&self) -> Result<Vec<i32>> {
+        let Value::Array(b) = &self.value else {
+            bail!("{} is not an array", self.name)
+        };
+        let mut r = Reader::new(b);
+        let n = r.count(4)?;
+        (0..n).map(|_| r.i32()).collect()
+    }
+
+    pub fn array_raw(&self) -> Option<(usize, &[u8])> {
+        let Value::Array(b) = &self.value else {
+            return None;
+        };
+        let n = i32::from_le_bytes(b.get(..4)?.try_into().ok()?) as usize;
+        Some((n, &b[4..]))
+    }
+
+    pub fn as_object(&self) -> Option<i32> {
+        match self.value {
+            Value::Object(i) => Some(i),
+            _ => None,
+        }
+    }
+    pub fn as_vector(&self) -> Option<[f32; 3]> {
+        match self.value {
+            Value::Vector(v) => Some(v),
+            _ => None,
+        }
+    }
+    pub fn as_rotator(&self) -> Option<[i32; 3]> {
+        match self.value {
+            Value::Rotator(v) => Some(v),
+            _ => None,
+        }
+    }
+    pub fn as_float(&self) -> Option<f32> {
+        match self.value {
+            Value::Float(v) => Some(v),
+            Value::Int(v) => Some(v as f32),
+            _ => None,
+        }
+    }
+}
+
+pub fn format_value(pkg: &Package, v: &Value) -> String {
+    match v {
+        Value::Object(i) => format!("-> {}", pkg.obj_ref_name(*i)),
+        Value::Struct(n, props) => {
+            let inner: Vec<String> = props
+                .iter()
+                .map(|p| format!("{}={}", p.name, format_value(pkg, &p.value)))
+                .collect();
+            format!("{n}{{{}}}", inner.join(", "))
+        }
+        Value::Array(b) => {
+            let n = b.get(..4).map(|x| i32::from_le_bytes(x.try_into().unwrap())).unwrap_or(-1);
+            format!("[{n} elems, {} bytes]", b.len())
+        }
+        Value::Raw(t, b) => format!("<{t} {} bytes>", b.len()),
+        other => format!("{other:?}"),
+    }
+}

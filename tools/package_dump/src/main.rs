@@ -1,4 +1,5 @@
 use anyhow::Result;
+use ue3_package::properties::format_value;
 use ue3_package::{ObjRef, Package};
 
 fn main() -> Result<()> {
@@ -60,10 +61,32 @@ fn main() -> Result<()> {
             );
         }
     }
+    if let Some(p) = args.iter().position(|a| a == "--props") {
+        let i: usize = args[p + 1].parse()?;
+        println!("export[{i}] {} ({})", pkg.obj_path(ObjRef::Export(i)), pkg.export_class(i));
+        match pkg.read_object(i) {
+            Ok(h) => {
+                println!(
+                    "net_index={} native_offset={:#x} of {:#x}",
+                    h.net_index, h.native_offset, pkg.exports[i].serial_size
+                );
+                for prop in &h.properties {
+                    println!(
+                        "  {}[{}] : {} = {}",
+                        prop.name,
+                        prop.array_index,
+                        prop.type_name,
+                        format_value(&pkg, &prop.value)
+                    );
+                }
+            }
+            Err(e) => println!("error: {e:#}"),
+        }
+    }
     if let Some(p) = args.iter().position(|a| a == "--hex") {
         let i: usize = args[p + 1].parse()?;
         let d = pkg.export_data(i)?;
-        for (row, chunk) in d.chunks(16).enumerate().take(64) {
+        for (row, chunk) in d.chunks(16).enumerate() {
             let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
             println!("{:06x}: {}", row * 16, hex.join(" "));
         }
