@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct LinkConditions {
-    /// One-way latency added to every outgoing datagram.
+    /// One-way latency, applied to outgoing and incoming datagrams.
     pub latency_ms: f32,
     pub jitter_ms: f32,
     /// 0..1 probability of dropping a datagram.
@@ -16,7 +16,8 @@ pub struct LinkConditions {
 
 impl LinkConditions {
     pub fn rtt(rtt_ms: f32, loss: f32) -> Self {
-        Self { latency_ms: rtt_ms * 0.5, jitter_ms: rtt_ms * 0.05, loss }
+        // Split across both directions; loss applies per direction.
+        Self { latency_ms: rtt_ms * 0.5, jitter_ms: rtt_ms * 0.05, loss: loss * 0.5 }
     }
 }
 
@@ -31,6 +32,7 @@ pub struct NetSocket {
     pub conditions: LinkConditions,
     rng: u64,
     queue: VecDeque<Delayed>,
+    inbound: VecDeque<Delayed>,
     pub sent_bytes: u64,
     pub recv_bytes: u64,
     pub dropped: u64,
@@ -40,7 +42,7 @@ impl NetSocket {
     pub fn bind(addr: &str) -> std::io::Result<Self> {
         let udp = UdpSocket::bind(addr)?;
         udp.set_nonblocking(true)?;
-        Ok(Self { udp, conditions: LinkConditions::default(), rng: 0x9E37_79B9_7F4A_7C15, queue: VecDeque::new(), sent_bytes: 0, recv_bytes: 0, dropped: 0 })
+        Ok(Self { udp, conditions: LinkConditions::default(), rng: 0x9E37_79B9_7F4A_7C15, queue: VecDeque::new(), inbound: VecDeque::new(), sent_bytes: 0, recv_bytes: 0, dropped: 0 })
     }
 
     pub fn with_conditions(mut self, c: LinkConditions, seed: u64) -> Self {
@@ -89,13 +91,37 @@ impl NetSocket {
         }
     }
 
+    /// Receive one datagram. With conditions set, inbound traffic is delayed/dropped too,
+    /// so a conditioned endpoint experiences the full round trip on its own.
     pub fn recv(&mut self, buf: &mut [u8]) -> Option<(usize, SocketAddr)> {
-        match self.udp.recv_from(buf) {
-            Ok((n, a)) => {
-                self.recv_bytes += n as u64;
-                Some((n, a))
-            }
-            Err(_) => None,
+        let c = self.conditions;
+        if c.latency_ms <= 0.0 && c.loss <= 0.0 {
+            return match self.udp.recv_from(buf) {
+                Ok((n, a)) => {
+                    self.recv_bytes += n as u64;
+                    Some((n, a))
+                }
+                Err(_) => None,
+            };
         }
+        let mut tmp = vec![0u8; buf.len()];
+        while let Ok((n, a)) = self.udp.recv_from(&mut tmp) {
+            self.recv_bytes += n as u64;
+            if c.loss > 0.0 && self.rand() < c.loss {
+                self.dropped += 1;
+                continue;
+            }
+            let delay = (c.latency_ms + (self.rand() * 2.0 - 1.0) * c.jitter_ms).max(0.0);
+            let due = Instant::now() + Duration::from_secs_f32(delay / 1000.0);
+            let pos = self.inbound.iter().position(|d| d.due > due).unwrap_or(self.inbound.len());
+            self.inbound.insert(pos, Delayed { due, to: a, bytes: tmp[..n].to_vec() });
+        }
+        if self.inbound.front().is_some_and(|d| d.due <= Instant::now()) {
+            let d = self.inbound.pop_front().unwrap();
+            let n = d.bytes.len().min(buf.len());
+            buf[..n].copy_from_slice(&d.bytes[..n]);
+            return Some((n, d.to));
+        }
+        None
     }
 }

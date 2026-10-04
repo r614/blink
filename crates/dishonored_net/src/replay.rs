@@ -30,6 +30,9 @@ pub struct ReplayFrame {
     pub roster: Vec<Roster>,
     pub inputs: Vec<(PlayerId, PlayerInput)>,
     pub hash: u64,
+    /// Per-player digest after the tick (id, position, health) for divergence diagnosis.
+    #[serde(default)]
+    pub digest: Vec<(PlayerId, [f32; 3], f32)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +86,19 @@ pub fn resimulate(replay: &Replay, world: &dyn WorldQuery, sim: &SimConfig, mut 
         }
         m.step(&f.inputs, world, sim);
         rep.frames += 1;
+        if state_hash(&m.world) != f.hash && rep.mismatches == 0 {
+            for (id, pos, hp) in &f.digest {
+                if let Some(p) = m.world.player(*id) {
+                    let d = p.position.distance(glam::Vec3::from(*pos));
+                    if d > 1e-4 || (p.vitals.health - hp).abs() > 1e-4 {
+                        eprintln!("tick {}: player {id} diverged: replay pos {:?} hp {hp} vs resim {:?} hp {} mode {:?}", f.tick, pos, p.position, p.vitals.health, p.mode);
+                    }
+                } else {
+                    eprintln!("tick {}: player {id} missing in resim", f.tick);
+                }
+            }
+            eprintln!("inputs at tick {}: {:?}", f.tick, f.inputs);
+        }
         if state_hash(&m.world) != f.hash {
             rep.mismatches += 1;
             rep.first_mismatch_tick.get_or_insert(f.tick);

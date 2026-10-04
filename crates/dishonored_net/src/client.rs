@@ -38,6 +38,8 @@ pub struct NetMetrics {
     pub correction_max: f32,
     pub corrections_over_10uu: u64,
     pub pending_inputs: usize,
+    /// Discontinuities (respawn, server teleport) excluded from the error statistics.
+    pub resyncs: u64,
     pub server_tick: u64,
 }
 
@@ -192,10 +194,15 @@ impl NetClient {
             if let Some((_, pred)) = self.history.iter().find(|(seq, _)| *seq == s.ack_input) {
                 let err = pred.position.distance(auth.position);
                 let m = &mut self.metrics;
+                // Respawns and other server-side teleports are resyncs, not mispredictions.
+                if err > 500.0 || pred.alive != auth.alive {
+                    m.resyncs += 1;
+                } else {
                 m.prediction_error = err;
                 m.prediction_error_max = m.prediction_error_max.max(err);
                 m.prediction_error_sum += err as f64;
                 m.prediction_error_samples += 1;
+                }
             }
         }
         while self.pending.front().is_some_and(|i| i.tick <= s.ack_input) {
@@ -219,8 +226,12 @@ impl NetClient {
             let c = b.distance(a);
             let m = &mut self.metrics;
             m.correction = c;
-            m.correction_max = m.correction_max.max(c);
-            if c > 10.0 {
+            if c <= 500.0 {
+                m.correction_max = m.correction_max.max(c);
+            }
+            if c > 500.0 {
+                m.correction = 0.0;
+            } else if c > 10.0 {
                 m.corrections_over_10uu += 1;
             }
         }

@@ -151,16 +151,9 @@ pub fn update(
         match target {
             Some(to) if can && spend_mana(p, cfg.mana_cost, vitals) => {
                 let from = p.position;
-                // Travel the full capsule path; stop early if the body would collide.
-                let cap = Capsule { center: from, radius: ctx.cfg.collision_radius, half_height: crate::movement::half_height(p, ctx.cfg) };
-                let to = match ctx.world.sweep_capsule(&cap, to - from, channel::PAWN) {
-                    Some(h) if !h.start_penetrating && h.fraction < 1.0 => {
-                        // The probe found the target; let the body stop at first contact
-                        // only if that is not the destination itself (ledge case).
-                        if from.distance(to) * (1.0 - h.fraction) < ctx.cfg.collision_radius * 2.0 { to } else { from + (to - from) * h.fraction }
-                    }
-                    _ => to,
-                };
+                // The target query (eye-level probe sweep + destination clearance) is the
+                // validation; travel follows it without re-sweeping the body, so ledge and
+                // drop-down Blinks are not clipped by the edge they pass over.
                 if p.crouched {
                     p.crouched = false;
                 }

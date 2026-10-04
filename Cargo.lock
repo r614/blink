@@ -3020,6 +3020,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "harness"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dishonored_bots",
+ "dishonored_content",
+ "dishonored_multiplayer",
+ "dishonored_net",
+ "dishonored_sim",
+ "dishonored_world",
+ "glam",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hash32"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

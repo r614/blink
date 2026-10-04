@@ -21,6 +21,8 @@ pub struct ProjectileVisual;
 #[derive(Component)]
 pub struct GameCamera {
     pub third_person: bool,
+    /// Player being followed (None = local player). Cycle with N.
+    pub follow: Option<PlayerId>,
 }
 
 #[derive(Resource)]
@@ -116,7 +118,7 @@ pub fn sync_players(
                 *t = body_transform(p, mv);
                 mesh.0 = if p.crouched { assets.crouch_body.clone() } else { assets.body.clone() };
                 mat.0 = if p.alive { assets.materials[p.id as usize % assets.materials.len()].clone() } else { assets.dead.clone() };
-                let hide = Some(p.id) == me_id && !third;
+                let hide = Some(p.id) == me_id && !third && cams.iter().all(|c| c.follow.is_none_or(|f| f == p.id));
                 *vis = if hide || p.mode == MoveMode::Blinking { Visibility::Hidden } else { Visibility::Inherited };
             }
             None => commands.entity(e).despawn(),
@@ -160,6 +162,10 @@ pub fn sync_projectiles(mut commands: Commands, view: Res<SessionView>, assets: 
     }
 }
 
+fn session_is_spectating(view: &SessionView) -> bool {
+    view.status.starts_with("spectating")
+}
+
 pub fn camera_follow(
     view: Res<SessionView>,
     session: Res<Session>,
@@ -168,14 +174,22 @@ pub fn camera_follow(
     mut q: Query<(&mut Transform, &mut GameCamera)>,
 ) {
     let mv = &session.content.sim.gameplay.movement;
-    let Some(me) = view.me.as_ref() else { return };
+    let Some(local_me) = view.me.as_ref() else { return };
     for (mut t, mut cam) in &mut q {
         if keys.just_pressed(KeyCode::KeyV) {
             cam.third_person = !cam.third_person;
         }
-        // Look comes from local input (immediate), position from the simulation.
-        let yaw = local.yaw;
-        let pitch = local.pitch;
+        if keys.just_pressed(KeyCode::KeyN) {
+            let mut ids: Vec<PlayerId> = view.others.iter().map(|p| p.id).chain(std::iter::once(local_me.id)).collect();
+            ids.sort();
+            let cur = cam.follow.unwrap_or(local_me.id);
+            let i = ids.iter().position(|x| *x == cur).unwrap_or(0);
+            cam.follow = Some(ids[(i + 1) % ids.len()]);
+        }
+        let me = cam.follow.and_then(|id| view.others.iter().find(|p| p.id == id)).unwrap_or(local_me);
+        // Look comes from local input (immediate) for the local player, otherwise from
+        // the followed player's replicated view.
+        let (yaw, pitch) = if me.id == local_me.id && local.override_input.is_none() && !session_is_spectating(&view) { (local.yaw, local.pitch) } else { (me.yaw, me.pitch.min(10.0) - 10.0) };
         let eye = coords::pos(eye_position(me, mv));
         let fwd = coords::dir(dishonored_sim::movement::view_vector(yaw, pitch));
         let pos = if cam.third_person { eye - fwd * 3.0 + Vec3::Y * 0.6 } else { eye };

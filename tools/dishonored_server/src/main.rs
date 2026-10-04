@@ -34,6 +34,14 @@ fn main() -> Result<()> {
     let replay_dir = get("--replay-dir");
     let duration: Option<f64> = get("--duration").and_then(|s| s.parse().ok());
 
+    if let Some(file) = get("--verify") {
+        // Re-simulate a replay with this binary (determinism check).
+        let r = dishonored_net::replay::Replay::load(std::path::Path::new(&file))?;
+        let mc = load_match(&r.header.map)?;
+        let v = dishonored_net::replay::resimulate(&r, &mc.collision, &mc.sim, |_, _| {});
+        println!("{} ticks, {} mismatches, first {:?}", v.frames, v.mismatches, v.first_mismatch_tick);
+        return Ok(());
+    }
     let t = Instant::now();
     let mc = load_match(&map)?;
     println!("loaded {map}: {} collision tris, {} spawns in {:.1?}", mc.collision.tris.len(), mc.spawns.len(), t.elapsed());

@@ -210,6 +210,7 @@ impl<'w> GameServer<'w> {
                 roster: std::mem::take(&mut self.roster_this_tick),
                 inputs: inputs.clone(),
                 hash,
+                digest: self.game.world.players.iter().map(|p| (p.id, p.position.to_array(), p.vitals.health)).collect(),
             });
         }
         for c in self.clients.iter_mut() {

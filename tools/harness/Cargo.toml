@@ -1,0 +1,18 @@
+[package]
+name = "harness"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "End-to-end verification: plays the game headless and rendered, records evidence, writes reports"
+
+[dependencies]
+anyhow.workspace = true
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dishonored_bots.workspace = true
+dishonored_content.workspace = true
+dishonored_multiplayer.workspace = true
+dishonored_net.workspace = true
+dishonored_sim.workspace = true
+dishonored_world.workspace = true

@@ -16,7 +16,8 @@ use std::sync::Arc;
 pub const LOCAL_ID: PlayerId = 1;
 
 pub enum SessionKind {
-    Offline { game: FfaMatch, bots: Vec<Bot> },
+    /// `spectator`: when set, the local slot is also driven by a bot (watch mode).
+    Offline { game: FfaMatch, bots: Vec<Bot>, spectator: Option<Bot> },
     Online { client: NetClient },
 }
 
@@ -48,11 +49,11 @@ pub struct SessionView {
 }
 
 impl Session {
-    pub fn offline(content: Arc<MatchContent>, bots: usize) -> Self {
+    pub fn offline(content: Arc<MatchContent>, bots: usize, spectate: bool) -> Self {
         let spawns: Vec<SpawnPoint> = content.spawns.iter().map(|s| SpawnPoint { position: s.position, yaw: s.yaw }).collect();
         let rules = FfaRules { warmup_time: 1.0, min_players: 1, ..Default::default() };
         let mut game = FfaMatch::new(rules, spawns);
-        game.add_player(LOCAL_ID, "you", &content.sim);
+        game.add_player(LOCAL_ID, if spectate { "bot0" } else { "you" }, &content.sim);
         let mut bot_list = Vec::new();
         for i in 0..bots {
             let id = LOCAL_ID + 1 + i as u32;
@@ -64,7 +65,8 @@ impl Session {
             game.add_player(id, &format!("bot{}", i + 1), &content.sim);
             bot_list.push(Bot::new(id, style, 1000 + i as u64));
         }
-        Self { kind: SessionKind::Offline { game, bots: bot_list }, content, last_input: PlayerInput::default() }
+        let spectator = spectate.then(|| Bot::new(LOCAL_ID, BotStyle::Duelist, 999));
+        Self { kind: SessionKind::Offline { game, bots: bot_list, spectator }, content, last_input: PlayerInput::default() }
     }
 
     pub fn online(content: Arc<MatchContent>, client: NetClient) -> Self {
@@ -98,9 +100,13 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
     let world = &content.collision;
     let sim = &content.sim;
     match &mut session.kind {
-        SessionKind::Offline { game, bots } => {
-            let mut inputs = vec![(LOCAL_ID, input)];
+        SessionKind::Offline { game, bots, spectator } => {
             let snapshot: Vec<PlayerState> = game.world.players.clone();
+            let local_input = match (spectator.as_mut(), snapshot.iter().find(|p| p.id == LOCAL_ID)) {
+                (Some(b), Some(me)) => b.think(me, &snapshot, world),
+                _ => input,
+            };
+            let mut inputs = vec![(LOCAL_ID, local_input)];
             for b in bots.iter_mut() {
                 if let Some(me) = snapshot.iter().find(|p| p.id == b.id) {
                     inputs.push((b.id, b.think(me, &snapshot, world)));
@@ -118,7 +124,7 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
             view.matchv = game.view.clone();
             view.tick = game.world.tick;
             view.connected = true;
-            view.status = format!("offline vs {} bots", bots.len());
+            view.status = if spectator.is_some() { format!("spectating {} bots (N: next player, V: camera)", bots.len() + 1) } else { format!("offline vs {} bots", bots.len()) };
             view.dark_vision_reveals = dishonored_sim::left_hand::dark_vision_reveals(&game.world, LOCAL_ID, &sim.tuning);
             view.respawn_in = game.respawn_time_left(LOCAL_ID);
         }

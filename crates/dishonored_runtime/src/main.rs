@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! dishonored_runtime [--map L_Boyle_Ext_P]
-//!     (default)              offline FFA vs --bots N (default 3)
+//!     (default)              offline FFA vs --bots N (default 3); --spectate to watch bots
 //!     --connect HOST:PORT    join a dedicated server
 //!     --browse MASTER        list servers from a control plane and join the best one
 //!     --inspect              free camera, no gameplay (--pos x,y,z --yaw --pitch)
@@ -37,6 +37,7 @@ struct Args {
     mode: Mode,
     name: String,
     bots: usize,
+    spectate: bool,
     pos: Option<Vec3>,
     yaw: Option<f32>,
     pitch: f32,
@@ -84,6 +85,7 @@ fn parse_args() -> Args {
         mode,
         name: get("--name").unwrap_or_else(|| "player".into()),
         bots: get("--bots").and_then(|s| s.parse().ok()).unwrap_or(3),
+        spectate: has("--spectate"),
         pos: get("--pos").and_then(|s| {
             let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
             (v.len() == 3).then(|| Vec3::new(v[0], v[1], v[2]))
@@ -130,7 +132,7 @@ fn main() {
     } else {
         let content = Arc::new(dishonored_content::load_match(&args.map).expect("loading match content from the install"));
         let session = match &args.mode {
-            Mode::Offline => session::Session::offline(content, args.bots),
+            Mode::Offline => session::Session::offline(content, args.bots, args.spectate),
             Mode::Connect(addr) => session::Session::online(content, connect(addr, &args)),
             Mode::Browse(master) => {
                 let servers = dishonored_net::control_plane::list_servers(master).expect("listing servers");
@@ -223,7 +225,7 @@ fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Asset
     if args.mode == Mode::Inspect {
         commands.spawn((Camera3d::default(), projection, Transform::from_translation(coords::pos(start)), FreeCam { yaw, pitch: args.pitch }));
     } else {
-        commands.spawn((Camera3d::default(), projection, Transform::default(), players::GameCamera { third_person: false }));
+        commands.spawn((Camera3d::default(), projection, Transform::default(), players::GameCamera { third_person: args.spectate, follow: None }));
     }
     commands.spawn((
         DirectionalLight { illuminance: 6000.0, shadow_maps_enabled: false, color: Color::srgb(0.75, 0.8, 1.0), ..default() },
