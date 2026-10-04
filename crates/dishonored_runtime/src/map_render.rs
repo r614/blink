@@ -13,6 +13,42 @@ pub struct MapGeometry {
     pub instance: usize,
 }
 
+/// Per-feature switches for the visual-fidelity work, so every feature can be compared
+/// on/off with otherwise identical frames (`harness fidelity`).
+#[derive(Resource, Clone, Debug)]
+pub struct RenderFeatures {
+    /// Baked lightmaps (LightMap2D) on UV1.
+    pub lightmaps: bool,
+    /// Full material slots (normal, specular, emissive, opacity, cubemap) instead of diffuse only.
+    pub materials: bool,
+    /// Translucent/additive FX cards (fog sheets, smoke, light shafts).
+    pub fx: bool,
+    /// Lights from the `_Light` packages (dominant + movable).
+    pub dynamic_lights: bool,
+    /// Distance/height fog.
+    pub fog: bool,
+    /// Post stack from the level's post-process settings.
+    pub post: bool,
+    /// Skydome and distant backdrop cards.
+    pub sky: bool,
+}
+
+impl RenderFeatures {
+    pub fn from_flags(has: &dyn Fn(&str) -> bool) -> Self {
+        let base = has("--baseline");
+        let on = |f: &str| !base && !has(f);
+        Self {
+            lightmaps: on("--no-lightmaps"),
+            materials: on("--no-materials"),
+            fx: on("--no-fx"),
+            dynamic_lights: on("--no-dynamic-lights"),
+            fog: on("--no-fog"),
+            post: on("--no-post"),
+            sky: on("--no-sky"),
+        }
+    }
+}
+
 pub fn to_image(t: &TextureAsset) -> Image {
     let format = match (t.format, t.srgb) {
         (TextureFormat::Bc1, true) => WgpuFormat::Bc1RgbaUnormSrgb,
@@ -65,8 +101,9 @@ pub fn spawn_map(
     images: &mut Assets<Image>,
     materials: &mut Assets<StandardMaterial>,
     show_hidden: bool,
-    show_fx: bool,
+    features: &RenderFeatures,
 ) -> usize {
+    let show_fx = features.fx;
     let image_handles: Vec<Handle<Image>> = map.textures.iter().map(|t| images.add(to_image(t))).collect();
     let material_handles: Vec<Handle<StandardMaterial>> = map
         .materials

@@ -65,7 +65,17 @@ pub enum Step {
     Screenshot { screenshot: String },
     Dump { dump: String },
     Wait { wait_ticks: u32 },
+    /// Inspect mode only: move the free camera (Dishonored units, degrees).
+    Camera { camera: CameraStep },
     Quit { quit: bool },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CameraStep {
+    pub pos: [f32; 3],
+    pub yaw: f32,
+    #[serde(default)]
+    pub pitch: f32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -204,11 +214,68 @@ pub fn script_fixed(mut runner: ResMut<ScriptRunner>, mut local: ResMut<LocalInp
                 let p = runner.out_dir.join(format!("{dump}.json"));
                 let _ = std::fs::write(&p, serde_json::to_string_pretty(&state_json(&view, &session)).unwrap());
             }
+            Step::Camera { .. } => {}
             Step::Quit { .. } => {
                 runner.done = true;
                 shots.quit_in = Some(30);
                 return;
             }
+        }
+    }
+}
+
+/// Requested free-camera pose from an inspect-mode script (consumed by `inspect_cam`).
+#[derive(Resource, Default)]
+pub struct CameraRequest(pub Option<CameraStep>);
+
+/// Inspect-mode script runner: one step per rendered frame (`wait_ticks` counts frames).
+/// Supports `camera`, `screenshot`, `wait_ticks` and `quit`; used by `harness fidelity`.
+pub fn inspect_script(
+    mut commands: Commands,
+    mut runner: ResMut<ScriptRunner>,
+    mut shots: ResMut<ShotQueue>,
+    mut cam: ResMut<CameraRequest>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if let Some(p) = shots.pending.first().cloned() {
+        shots.pending.remove(0);
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(p));
+        shots.frames_since_last_shot = 0;
+        return;
+    }
+    shots.frames_since_last_shot += 1;
+    if let Some(n) = shots.quit_in.as_mut() {
+        if *n == 0 {
+            exit.write(AppExit::Success);
+        } else {
+            *n -= 1;
+        }
+        return;
+    }
+    if runner.done || runner.steps.is_empty() {
+        return;
+    }
+    if runner.ticks_left > 0 {
+        runner.ticks_left -= 1;
+        return;
+    }
+    let Some(step) = runner.steps.get(runner.index).cloned() else {
+        runner.done = true;
+        return;
+    };
+    runner.index += 1;
+    match step {
+        Step::Wait { wait_ticks } => runner.ticks_left = wait_ticks,
+        Step::Input { ticks, .. } => runner.ticks_left = ticks,
+        Step::Camera { camera } => cam.0 = Some(camera),
+        Step::Screenshot { screenshot } => shots.pending.push(runner.out_dir.join(format!("{screenshot}.png"))),
+        Step::Dump { .. } => {}
+        Step::Quit { .. } => {
+            runner.done = true;
+            shots.quit_in = Some(30);
         }
     }
 }

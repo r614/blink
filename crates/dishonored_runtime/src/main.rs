@@ -7,9 +7,14 @@
 //!     --connect HOST:PORT    join a dedicated server
 //!     --browse MASTER        list servers from a control plane and join the best one
 //!     --inspect              free camera, no gameplay (--pos x,y,z --yaw --pitch)
-//!   options: --name NAME --show-hidden --show-fx --max-tex N --lat MS --loss P
+//!   options: --name NAME --show-hidden --max-tex N --lat MS --loss P
+//!   rendering (all on by default; for before/after comparisons):
+//!            --no-lightmaps --no-materials --no-fx --no-dynamic-lights --no-fog
+//!            --no-post --no-sky, or --baseline for all of them (diffuse-only renderer
+//!            with the placeholder sun/ambient)
 //!   harness: --script FILE --out DIR --control PORT --record DIR --record-every N
 //!            --record-fps F --exit-after SECONDS --size WxH
+//!            (--inspect also runs scripts: camera / screenshot / wait_ticks / quit)
 //! ```
 
 mod coords;
@@ -43,7 +48,7 @@ struct Args {
     yaw: Option<f32>,
     pitch: f32,
     show_hidden: bool,
-    show_fx: bool,
+    features: map_render::RenderFeatures,
     max_tex: u32,
     exit_after: Option<f32>,
     record: Option<PathBuf>,
@@ -94,7 +99,7 @@ fn parse_args() -> Args {
         yaw: get("--yaw").and_then(|s| s.parse().ok()),
         pitch: get("--pitch").and_then(|s| s.parse().ok()).unwrap_or(-10.0),
         show_hidden: has("--show-hidden"),
-        show_fx: has("--show-fx"),
+        features: map_render::RenderFeatures::from_flags(&has),
         max_tex: get("--max-tex").and_then(|s| s.parse().ok()).unwrap_or(1024),
         exit_after: get("--exit-after").and_then(|s| s.parse().ok()),
         record: get("--record").map(PathBuf::from),
@@ -129,7 +134,16 @@ fn main() {
     .add_systems(Startup, setup_world);
 
     if args.mode == Mode::Inspect {
-        app.add_systems(Update, inspect_cam);
+        let mut runner = harness::ScriptRunner { out_dir: args.out.clone(), ..default() };
+        if let Some(p) = &args.script {
+            let s: harness::Script = serde_json::from_str(&std::fs::read_to_string(p).expect("script")).expect("script json");
+            runner.steps = s.steps;
+            std::fs::create_dir_all(&args.out).ok();
+        }
+        app.insert_resource(runner)
+            .init_resource::<harness::ShotQueue>()
+            .init_resource::<harness::CameraRequest>()
+            .add_systems(Update, (harness::inspect_script, inspect_cam).chain());
     } else {
         let content = Arc::new(dishonored_content::load_match(&args.map).expect("loading match content from the install"));
         let session = match &args.mode {
@@ -217,7 +231,7 @@ fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Asset
     let pkgs = map_packages(&content, &args.map);
     let opts = ImportOptions { max_texture_size: args.max_tex, ..Default::default() };
     let (map, stats) = import_level(&content, &args.map, &pkgs, &opts).expect("map import failed");
-    let spawned = map_render::spawn_map(&map, &mut commands, &mut meshes, &mut images, &mut materials, args.show_hidden, args.show_fx);
+    let spawned = map_render::spawn_map(&map, &mut commands, &mut meshes, &mut images, &mut materials, args.show_hidden, &args.features);
     info!("{}: {} instances, {} meshes, {} textures, {} entities", args.map, stats.instances, stats.meshes, stats.textures, spawned);
 
     let spawn = map.spawn_candidates.first();
@@ -248,7 +262,17 @@ fn inspect_cam(
     motion: Res<AccumulatedMouseMotion>,
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
     mut q: Query<(&mut Transform, &mut FreeCam)>,
+    request: Option<ResMut<harness::CameraRequest>>,
 ) {
+    if let Some(mut req) = request {
+        if let Some(c) = req.0.take() {
+            for (mut tf, mut cam) in &mut q {
+                tf.translation = coords::pos(glam::Vec3::from(c.pos));
+                cam.yaw = c.yaw;
+                cam.pitch = c.pitch;
+            }
+        }
+    }
     let mut locked = false;
     for mut c in &mut cursor {
         if keys.just_pressed(KeyCode::Tab) {
