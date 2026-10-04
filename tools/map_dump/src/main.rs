@@ -54,6 +54,29 @@ fn main() -> Result<()> {
         acc
     });
     println!("texture formats {fmts:?}");
+    // Baked irradiance distribution (luminance of non-empty texels), for calibration.
+    let mut lum: Vec<f32> = m
+        .lightmaps
+        .iter()
+        .flat_map(|a| a.texels.iter().filter(|&&t| t != 0))
+        .map(|&t| {
+            let c = dishonored_assets::lightmap::unpack_rgb9e5(t);
+            0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+        })
+        .collect();
+    if !lum.is_empty() {
+        lum.sort_by(f32::total_cmp);
+        let pct = |p: f32| lum[((lum.len() - 1) as f32 * p) as usize];
+        println!(
+            "lightmap irradiance luminance: {} texels, p10 {:.3} p50 {:.3} p90 {:.3} p99 {:.3} max {:.3}",
+            lum.len(),
+            pct(0.1),
+            pct(0.5),
+            pct(0.9),
+            pct(0.99),
+            lum[lum.len() - 1]
+        );
+    }
     report_unmaterialed(&m);
     Ok(())
 }

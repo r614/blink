@@ -2,6 +2,7 @@
 //! level packages into a normalized [`DishonoredMap`].
 
 use crate::content::Content;
+use crate::lightmap::{LightMap2DRef, LightMapRef, decode_bc1, flat_irradiance, pack_rgb9e5, read_static_mesh_component_lods, srgb_to_linear};
 use crate::material::resolve_material;
 use crate::static_mesh::read_static_mesh;
 use crate::texture::read_texture;
@@ -19,6 +20,8 @@ pub struct ImportOptions {
     /// Largest texture side to load (smaller mips are kept).
     pub max_texture_size: u32,
     pub load_textures: bool,
+    /// Decode and bake lightmaps (only when `load_textures` is also set).
+    pub load_lightmaps: bool,
 }
 
 impl Default for ImportOptions {
@@ -26,6 +29,7 @@ impl Default for ImportOptions {
         Self {
             max_texture_size: 1024,
             load_textures: true,
+            load_lightmaps: true,
         }
     }
 }
@@ -41,7 +45,19 @@ pub struct ImportStats {
     pub textures: usize,
     pub texture_failures: usize,
     pub unresolved_refs: usize,
+    /// Components by LOD0 lightmap kind, and LODData parse failures.
+    pub lightmaps_texture: usize,
+    pub lightmaps_vertex: usize,
+    pub lightmaps_none: usize,
+    pub lightmap_parse_failures: usize,
+    pub lightmap_atlases: usize,
     pub errors: Vec<String>,
+}
+
+struct PendingLightmap {
+    instance: usize,
+    slot: usize,
+    lm: LightMap2DRef,
 }
 
 type Key = (usize, usize); // (package slot, export index)
@@ -56,6 +72,7 @@ struct Importer<'a> {
     mesh_ids: HashMap<Key, Option<MeshId>>,
     mat_ids: HashMap<Key, Option<MaterialId>>,
     tex_ids: HashMap<Key, Option<TextureId>>,
+    pending_lightmaps: Vec<PendingLightmap>,
     stats: ImportStats,
 }
 
@@ -100,10 +117,14 @@ pub fn import_level(
         mesh_ids: HashMap::new(),
         mat_ids: HashMap::new(),
         tex_ids: HashMap::new(),
+        pending_lightmaps: Vec::new(),
         stats: ImportStats::default(),
     };
     for slot in 0..imp.pkgs.len() {
         imp.import_actors(slot)?;
+    }
+    if opts.load_textures && opts.load_lightmaps {
+        imp.bake_lightmaps();
     }
     imp.stats.instances = imp.map.instances.len();
     imp.stats.meshes = imp.map.meshes.len();
@@ -241,7 +262,9 @@ impl Importer<'_> {
         source: String,
     ) -> Result<()> {
         let pkg = self.pkgs[slot].clone();
-        let props = pkg.read_object(ci)?.properties;
+        let hdr = pkg.read_object(ci)?;
+        let native_offset = hdr.native_offset;
+        let props = hdr.properties;
         let Some(mesh_ref) = find(&props, "StaticMesh").and_then(|p| p.as_object()) else {
             return Ok(());
         };
@@ -261,6 +284,22 @@ impl Importer<'_> {
         }
         let hidden = actor_hidden || bool_or(&props, "HiddenGame", false);
         let collides = bool_or(&props, "CollideActors", true) && bool_or(&props, "BlockActors", true);
+        if self.opts.load_textures && self.opts.load_lightmaps {
+            match pkg.export_data(ci).and_then(|d| read_static_mesh_component_lods(d, native_offset)) {
+                Ok(lods) => match lods.into_iter().next().map(|l| l.lightmap) {
+                    Some(LightMapRef::Texture(lm)) => {
+                        self.stats.lightmaps_texture += 1;
+                        self.pending_lightmaps.push(PendingLightmap { instance: self.map.instances.len(), slot, lm });
+                    }
+                    Some(LightMapRef::Vertex { .. }) => self.stats.lightmaps_vertex += 1,
+                    _ => self.stats.lightmaps_none += 1,
+                },
+                Err(e) => {
+                    self.stats.lightmap_parse_failures += 1;
+                    self.stats.errors.push(format!("lightmap {}: {e:#}", pkg.obj_path(ObjRef::Export(ci))));
+                }
+            }
+        }
         self.map.instances.push(MeshInstance {
             mesh,
             transform: parent * component_transform(&props),
@@ -268,8 +307,86 @@ impl Importer<'_> {
             hidden,
             collides,
             source,
+            lightmap: None,
         });
         Ok(())
+    }
+
+    /// Decode every referenced lightmap texture pair once and bake each component's
+    /// region (with its own coefficient scales) into a linear irradiance atlas that keeps
+    /// the original atlas layout, so the component's UV rect is unchanged.
+    fn bake_lightmaps(&mut self) {
+        let pending = std::mem::take(&mut self.pending_lightmaps);
+        let mut groups: HashMap<(Key, Key), Vec<usize>> = HashMap::new();
+        for (i, p) in pending.iter().enumerate() {
+            let avg = self.resolve(p.slot, ObjRef::from_index(p.lm.textures[0]));
+            let dir = self.resolve(p.slot, ObjRef::from_index(p.lm.textures[1]));
+            if let (Some(a), Some(d)) = (avg, dir) {
+                groups.entry((a, d)).or_default().push(i);
+            }
+        }
+        let mut keys: Vec<_> = groups.keys().copied().collect();
+        keys.sort();
+        for (ka, kd) in keys {
+            let decode = |s: &Self, k: Key| -> Result<(u32, u32, Vec<[u8; 3]>)> {
+                let pkg = &s.pkgs[k.0];
+                let t = read_texture(s.content, pkg, k.1, 4096)?;
+                anyhow::ensure!(t.format == TextureFormat::Bc1, "{}: lightmap format {:?}", t.source, t.format);
+                Ok((t.width, t.height, decode_bc1(&t.mips[0], t.width, t.height)))
+            };
+            let (a, d) = match (decode(self, ka), decode(self, kd)) {
+                (Ok(a), Ok(d)) if (a.0, a.1) == (d.0, d.1) => (a, d),
+                (a, d) => {
+                    self.stats.texture_failures += 1;
+                    self.stats.errors.push(format!("lightmap pair {ka:?}/{kd:?}: {:?} {:?}", a.err(), d.err()));
+                    continue;
+                }
+            };
+            let (w, h) = (a.0 as usize, a.1 as usize);
+            let mut out = vec![[0f32; 3]; w * h];
+            // 0 = empty, 1 = padding, 2 = inside a component's rect.
+            let mut mask = vec![0u8; w * h];
+            let members = &groups[&(ka, kd)];
+            for pass in [2u8, 1u8] {
+                let pad = if pass == 2 { 0 } else { 1 };
+                for &m in members {
+                    let lm = &pending[m].lm;
+                    let rx0 = (lm.coordinate_bias[0] * w as f32).floor() as i64 - pad;
+                    let ry0 = (lm.coordinate_bias[1] * h as f32).floor() as i64 - pad;
+                    let rx1 = ((lm.coordinate_bias[0] + lm.coordinate_scale[0]) * w as f32).ceil() as i64 + pad;
+                    let ry1 = ((lm.coordinate_bias[1] + lm.coordinate_scale[1]) * h as f32).ceil() as i64 + pad;
+                    for y in ry0.max(0)..ry1.min(h as i64) {
+                        for x in rx0.max(0)..rx1.min(w as i64) {
+                            let i = y as usize * w + x as usize;
+                            if mask[i] >= pass {
+                                continue;
+                            }
+                            mask[i] = pass;
+                            let avg = a.2[i].map(srgb_to_linear);
+                            let dir = d.2[i].map(srgb_to_linear);
+                            out[i] = flat_irradiance(avg, dir, lm.scales[0], lm.scales[1]);
+                        }
+                    }
+                }
+            }
+            let atlas = self.map.lightmaps.len();
+            self.map.lightmaps.push(LightmapAtlas {
+                source: self.pkgs[ka.0].obj_path(ObjRef::Export(ka.1)),
+                width: w as u32,
+                height: h as u32,
+                texels: out.into_iter().map(pack_rgb9e5).collect(),
+            });
+            for &m in members {
+                let lm = &pending[m].lm;
+                let min = Vec2::from(lm.coordinate_bias);
+                self.map.instances[pending[m].instance].lightmap = Some(InstanceLightmap {
+                    atlas,
+                    uv_min: min,
+                    uv_max: min + Vec2::from(lm.coordinate_scale),
+                });
+            }
+        }
+        self.stats.lightmap_atlases = self.map.lightmaps.len();
     }
 
     fn resolve(&mut self, slot: usize, r: ObjRef) -> Option<Key> {
@@ -310,7 +427,17 @@ impl Importer<'_> {
                     normals: raw.normals,
                     tangents: raw.tangent_x,
                     uv0: raw.uvs.first().cloned().unwrap_or_else(|| vec![Vec2::ZERO; raw.positions.len()]),
-                    uv1: raw.uvs.get(1).cloned().unwrap_or_default(),
+                    // Lightmap UVs: the set named by `LightMapCoordinateIndex` (serialized when
+                    // non-zero, e.g. 1 on air_duct_10; absent means the UE3 default 0).
+                    uv1: {
+                        let lmi = pkg
+                            .read_object(k.1)
+                            .ok()
+                            .and_then(|h| find(&h.properties, "LightMapCoordinateIndex").and_then(|p| p.as_float()))
+                            .map(|v| v as usize)
+                            .unwrap_or(0);
+                        raw.uvs.get(lmi).or(raw.uvs.get(1)).cloned().unwrap_or_default()
+                    },
                     indices: raw.indices.iter().map(|&i| i as u32).collect(),
                     sections,
                     collision_triangles: raw

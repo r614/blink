@@ -129,7 +129,7 @@ fn main() {
     }))
     .add_plugins(FrameTimeDiagnosticsPlugin::default())
     .insert_resource(ClearColor(Color::srgb(0.08, 0.09, 0.12)))
-    .insert_resource(GlobalAmbientLight { color: Color::srgb(0.85, 0.88, 1.0), brightness: 900.0, affects_lightmapped_meshes: true })
+    .insert_resource(GlobalAmbientLight { color: Color::srgb(0.85, 0.88, 1.0), brightness: 900.0, affects_lightmapped_meshes: !args.features.lightmaps })
     .insert_resource(args.clone())
     .add_systems(Startup, setup_world);
 
@@ -244,7 +244,7 @@ fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Asset
         commands.spawn((Camera3d::default(), projection, Transform::default(), players::GameCamera { third_person: args.spectate, follow: None }));
     }
     commands.spawn((
-        DirectionalLight { illuminance: 6000.0, shadow_maps_enabled: false, color: Color::srgb(0.75, 0.8, 1.0), ..default() },
+        DirectionalLight { illuminance: 6000.0, shadow_maps_enabled: false, color: Color::srgb(0.75, 0.8, 1.0), affects_lightmapped_mesh_diffuse: !args.features.lightmaps, ..default() },
         Transform::default().looking_to(Vec3::new(-0.4, -1.0, -0.3), Vec3::Y),
     ));
 }

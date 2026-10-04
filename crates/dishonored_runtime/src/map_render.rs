@@ -6,7 +6,7 @@ use bevy::image::Image;
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat as WgpuFormat};
-use dishonored_ir::{BlendHint, DishonoredMap, TextureAsset, TextureFormat};
+use dishonored_ir::{BlendHint, DishonoredMap, LightmapAtlas, TextureAsset, TextureFormat};
 
 #[derive(Component)]
 pub struct MapGeometry {
@@ -31,6 +31,8 @@ pub struct RenderFeatures {
     pub post: bool,
     /// Skydome and distant backdrop cards.
     pub sky: bool,
+    /// Debug: white albedo so only lighting is visible (`--debug-lighting`).
+    pub debug_lighting: bool,
 }
 
 impl RenderFeatures {
@@ -45,6 +47,7 @@ impl RenderFeatures {
             fog: on("--no-fog"),
             post: on("--no-post"),
             sky: on("--no-sky"),
+            debug_lighting: has("--debug-lighting"),
         }
     }
 }
@@ -88,6 +91,31 @@ pub fn to_image(t: &TextureAsset) -> Image {
     img
 }
 
+/// Multiplier that maps UE3 linear radiance 1.0 to display 1.0 under Bevy's default
+/// camera exposure (EV100 9.7). Lightmaps and light intensities are expressed in this unit.
+pub fn light_unit() -> f32 {
+    1.0 / bevy::camera::Exposure::default().exposure()
+}
+
+pub fn lightmap_image(l: &LightmapAtlas) -> Image {
+    let data: Vec<u8> = l.texels.iter().flat_map(|t| t.to_le_bytes()).collect();
+    let mut img = Image::new(
+        Extent3d { width: l.width, height: l.height, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data,
+        WgpuFormat::Rgb9e5Ufloat,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    img.sampler = bevy::image::ImageSampler::Descriptor(bevy::image::ImageSamplerDescriptor {
+        address_mode_u: bevy::image::ImageAddressMode::ClampToEdge,
+        address_mode_v: bevy::image::ImageAddressMode::ClampToEdge,
+        mag_filter: bevy::image::ImageFilterMode::Linear,
+        min_filter: bevy::image::ImageFilterMode::Linear,
+        ..Default::default()
+    });
+    img
+}
+
 /// Deterministic pastel colour for untextured materials so surfaces stay readable.
 fn fallback_color(seed: usize) -> Color {
     let h = (seed.wrapping_mul(2654435761) % 360) as f32;
@@ -110,9 +138,9 @@ pub fn spawn_map(
         .iter()
         .enumerate()
         .map(|(i, m)| {
-            let base_color_texture = m.diffuse.map(|t| image_handles[t].clone());
+            let base_color_texture = m.diffuse.filter(|_| !features.debug_lighting).map(|t| image_handles[t].clone());
             materials.add(StandardMaterial {
-                base_color: if base_color_texture.is_some() {
+                base_color: if base_color_texture.is_some() || features.debug_lighting {
                     Color::WHITE
                 } else {
                     fallback_color(i)
@@ -127,10 +155,16 @@ pub fn spawn_map(
                     BlendHint::Masked => AlphaMode::Mask(0.33),
                     BlendHint::Translucent => AlphaMode::Blend,
                 },
+                lightmap_exposure: light_unit(),
                 ..default()
             })
         })
         .collect();
+    let lightmap_handles: Vec<Handle<Image>> = if features.lightmaps {
+        map.lightmaps.iter().map(|l| images.add(lightmap_image(l))).collect()
+    } else {
+        Vec::new()
+    };
     let default_material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.6, 0.6, 0.6),
         cull_mode: None,
@@ -159,17 +193,21 @@ pub fn spawn_map(
                 .map(|n| coords::dir(*n).normalize_or_zero().to_array())
                 .collect();
             let uvs: Vec<[f32; 2]> = m.uv0.iter().map(|u| u.to_array()).collect();
+            let uv1: Vec<[f32; 2]> = m.uv1.iter().map(|u| u.to_array()).collect();
             m.sections
                 .iter()
                 .map(|s| {
                     let start = s.first_index as usize;
                     let end = (start + s.num_triangles as usize * 3).min(m.indices.len());
                     let idx = m.indices[start..end].to_vec();
-                    let mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
+                    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
                         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions.clone())
                         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals.clone())
                         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs.clone())
                         .with_inserted_indices(Indices::U32(idx));
+                    if m.uv1.len() == m.positions.len() {
+                        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1.clone());
+                    }
                     meshes.add(mesh)
                 })
                 .collect()
@@ -199,12 +237,19 @@ pub fn spawn_map(
                     .map(|m| material_handles[m].clone())
                     .unwrap_or_else(|| default_material.clone())
             };
-            commands.spawn((
+            let mut e = commands.spawn((
                 Mesh3d(section_meshes[inst.mesh][si].clone()),
                 MeshMaterial3d(mat),
                 transform,
                 MapGeometry { instance: ii },
             ));
+            if let Some(lm) = inst.lightmap.filter(|_| features.lightmaps && mesh.uv1.len() == mesh.positions.len()) {
+                e.insert(bevy::pbr::Lightmap {
+                    image: lightmap_handles[lm.atlas].clone(),
+                    uv_rect: Rect::from_corners(lm.uv_min, lm.uv_max),
+                    bicubic_sampling: false,
+                });
+            }
             spawned += 1;
         }
     }

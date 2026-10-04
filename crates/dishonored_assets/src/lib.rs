@@ -3,6 +3,7 @@
 pub mod characters;
 pub mod content;
 pub mod level;
+pub mod lightmap;
 pub mod material;
 pub mod skeletal_mesh;
 pub mod static_mesh;

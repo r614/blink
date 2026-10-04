@@ -96,3 +96,28 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Result:** The Boyle estate is recognizable: mansion, walled garden, street perimeter, surrounding terraces. Transforms and scale are consistent at player eye height. Material texture params follow a consistent convention (`D_` diffuse, `N_` normal, `S_` specular, `O_` opacity, `E_` emissive, `D2_`/`N2_` variation). Ranking by that convention fixed the false-colour surfaces.
 - **Confidence:** STRONG (visual). The transform convention still needs a numeric check against the original game (U-011).
 - **Implementation consequence:** M4 is reached. Remaining visual gaps are unresolved cross-package materials (U-005, e.g. street cobbles), translucent FX cards (hidden by default) and lightmaps (U-013). None of these block collision work.
+
+## 2026-10-04 — Baked lighting: component lightmaps (U-013)
+- **Question:** Where and how are lightmaps stored on Boyle Ext static geometry, and can they drive Bevy's lightmap path?
+- **Evidence:** Hex of `L_Boyle_Ext_Env` `StaticMeshActor_1737.StaticMeshComponent0` after its properties
+  (offset 0x218): LOD count 1, one ShadowMap2D ref, zero shadow vertex buffers, `LightMapType = 2`,
+  6 light GUIDs, then 3 × (object ref + 3 floats), UV scale/bias, then a single zero byte that ends
+  the export. The two non-null references are `NormalizedAverageColor0_139` (scale 1,1,1) and
+  `DirectionalMaxComponent0_139` (HDR scale). Env holds 185 textures of each name plus 11 more in
+  other sublevels, all DXT1 in `Lighting.tfc`. `StaticMeshCollectionActor` components use the same layout.
+- **Experiment:** `lightmap::read_static_mesh_component_lods` with a strict end-of-export check over the
+  full Boyle Ext import; bake each component's rect into an RGB9E5 irradiance atlas (same layout as the
+  source atlas), attach `bevy::pbr::Lightmap` on UV1, ambient and placeholder sun no longer affect
+  lightmapped meshes. Screenshots: `harness_out/step0_baseline/{aerial,street,garden}.png` (before) vs
+  `harness_out/step1_lightmaps/*.png` (after, lightmaps only) and `harness_out/step1_debug/*.png`
+  (`--debug-lighting`: white albedo, lighting only). Irradiance luminance over all baked texels
+  (`map_dump`): p10 0.003, p50 0.033, p90 0.21, p99 1.84, max 7.3.
+- **Result:** 3,387 components with texture lightmaps, 14 without, 0 vertex lightmaps, 0 parse failures,
+  196 atlases; import still takes ~3.5 s. The render shows the expected night look: blue moonlit
+  surfaces, warm pools under the street lamps, dark interiors and occluded corners.
+- **Confidence:** STRONG for the layout (strict end check on every component). LIKELY for the meaning of
+  the two coefficients; the reconstruction formula is an APPROXIMATION (flat-normal average of the three
+  basis intensities), see U-016.
+- **Implementation consequence:** Static lights are already in the lightmaps, so step 3 must only add
+  lights that UE3 also renders dynamically (dominant + movable). Normal maps cannot modulate the
+  baked light until a custom material samples both coefficient textures.

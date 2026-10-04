@@ -195,6 +195,63 @@ Formats seen in Boyle Ext: `PF_DXT1` (sRGB and linear), `PF_DXT5`, `PF_V8U8` (no
 - `PlayerStart` actors give spawn candidates.
 - Rotator → matrix uses UE3 `FRotationMatrix` (see `dishonored_assets::util`).
 
+## Precomputed lighting on static mesh components — STRONG
+
+Implementation: `dishonored_assets::lightmap`. Validated on all 3,401 Boyle Ext static mesh
+components (3,387 with a texture lightmap, 14 without, 0 vertex lightmaps, 0 parse
+failures; the strict check that the stream ends exactly at the export end holds for all).
+
+`StaticMeshComponent` native data (after `None`), identical for components of
+`StaticMeshActor` and `StaticMeshCollectionActor`:
+```
+TArray<FStaticMeshComponentLODInfo> LODData:
+  TArray<UShadowMap2D*> ShadowMaps
+  TArray<UShadowMap1D*> ShadowVertexBuffers
+  FLightMapRef:
+    u32 LightMapType          0 = none, 1 = FLightMap1D (vertex), 2 = FLightMap2D
+    TArray<FGuid> LightGuids  (lights baked into this lightmap)
+    FLightMap2D (type 2):
+      3 x { UTexture2D* Texture, FVector ScaleVector }     <- 3 floats, not FVector4
+      FVector2D CoordinateScale
+      FVector2D CoordinateBias
+  u8 bLoadVertexColorData     (0 on Boyle Ext; non-zero is followed by FColorVertexBuffer:
+                               u32 Stride, u32 NumVerts, BulkArray<FColor>)
+```
+Lightmap UV = `UV[LightMapCoordinateIndex] * CoordinateScale + CoordinateBias`.
+Example (`StaticMeshActor_1737.StaticMeshComponent0`): textures
+`NormalizedAverageColor0_139` scale (1,1,1), `DirectionalMaxComponent0_139` scale
+(8.32, 5.27, 6.98), null scale (3.49, 4.92, 5.78); UV scale (1/32, 1/4), bias (0.78125, 0.25).
+
+### Dishonored's directional lightmap encoding — LIKELY
+This is **not** UE3's classic 3-coefficient (+ simple) directional encoding. Every texture
+lightmap has exactly two non-null textures, always created in pairs with the same suffix:
+
+| Slot | Texture name | Scale | Meaning (inferred) |
+|---|---|---|---|
+| 0 | `NormalizedAverageColor0_N` | always (1,1,1) | chroma: average incident colour normalized to its max channel |
+| 1 | `DirectionalMaxComponent0_N` | HDR, per lightmap (≈1–10) | intensity along each of 3 tangent-space basis directions in R, G, B |
+| 2 | null | non-zero | the UE3 "simple lightmap" coefficient, stripped by the cooker on PC |
+
+Both are `LightMapTexture2D`, `PF_DXT1`, sRGB (class default), streamed from `Lighting.tfc`,
+packed as atlases (several components per texture, disjoint rects; scale vectors are
+per component, not per texture). `ULightMapTexture2D` native = `UTexture2D` native + one
+extra zero dword + `u32 LightmapFlags` (1 = `LMF_Streamed`).
+
+Renderer reconstruction (APPROXIMATION, see LOG and UNKNOWNS U-016):
+`irradiance = srgb(avg) * Scale0 * mean_i(srgb(dirmax)_i * Scale1_i)` — the exact value for
+a flat normal if the original weights the three basis intensities by `saturate(N·B_i)²`
+normalized to sum 1. Per-pixel normal-map interaction is dropped. Each component's rect
+(padded by 1 texel) is baked with its own scales into an `RGB9E5` atlas that keeps the
+original layout, so Bevy's `Lightmap { uv_rect }` uses the UE3 bias/scale directly.
+
+### Shadow maps
+`ShadowMap2D` (one per light per component, 888 in Boyle Ext Env): properties
+`Texture` (→ `ShadowMapTexture2D`, `PF_G8`, `SRGB=false`, `Lighting.tfc`),
+`CoordinateScale`, `CoordinateBias`, `LightGuid`, `bIsShadowFactorTexture` (false = signed
+distance field shadows). They hold precomputed shadowing for lights that are not baked into
+the lightmap (dominant/toggleable). Not used by the renderer yet; the dominant light uses
+Bevy's real-time shadow maps instead.
+
 ## Remaining parse gaps
 
 - Script packages: component templates under class defaults and a handful of exotic

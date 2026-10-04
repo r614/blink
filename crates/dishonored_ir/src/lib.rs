@@ -29,6 +29,29 @@ pub struct DishonoredMap {
     pub spawn_candidates: Vec<SpawnCandidate>,
     /// Objects the importer saw but did not convert, kept for later work.
     pub unconverted: Vec<UnconvertedObject>,
+    /// Baked irradiance atlases referenced by [`MeshInstance::lightmap`].
+    #[serde(default)]
+    pub lightmaps: Vec<LightmapAtlas>,
+}
+
+/// Linear irradiance atlas baked from a pair of Dishonored lightmap textures
+/// (`NormalizedAverageColor_N` + `DirectionalMaxComponent_N`). Values are in UE3 lightmap
+/// units: final diffuse = albedo * irradiance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LightmapAtlas {
+    pub source: String,
+    pub width: u32,
+    pub height: u32,
+    /// Row-major texels packed as RGB9E5 (`Rgb9e5Ufloat`).
+    pub texels: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct InstanceLightmap {
+    pub atlas: usize,
+    /// Lightmap UV = mix(uv_min, uv_max, mesh UV1) (UE3 CoordinateBias / Bias+Scale).
+    pub uv_min: Vec2,
+    pub uv_max: Vec2,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +62,7 @@ pub struct StaticMeshAsset {
     pub normals: Vec<Vec3>,
     pub tangents: Vec<Vec3>,
     pub uv0: Vec<Vec2>,
+    /// Lightmap UVs (the set selected by `LightMapCoordinateIndex`).
     pub uv1: Vec<Vec2>,
     pub indices: Vec<u32>,
     pub sections: Vec<MeshSection>,
@@ -139,6 +163,9 @@ pub struct MeshInstance {
     pub hidden: bool,
     pub collides: bool,
     pub source: String,
+    /// Baked lighting for this component (LOD0), if any.
+    #[serde(default)]
+    pub lightmap: Option<InstanceLightmap>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
