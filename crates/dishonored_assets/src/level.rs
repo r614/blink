@@ -248,6 +248,7 @@ impl Importer<'_> {
                         self.stats.errors.push(format!("{}: {e:#}", pkg.obj_path(ObjRef::Export(i))));
                     }
                 }
+                "DisFog" if self.is_in_persistent_level(&pkg, i) => self.import_fog(slot, i),
                 c if (c.ends_with("Light") || c.contains("LightToggleable") || c.contains("LightMovable")) && self.is_in_persistent_level(&pkg, i) => {
                     self.import_light(slot, i, c);
                 }
@@ -268,6 +269,34 @@ impl Importer<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Arkane `DisFog` layer (defaults from `Engine.Default__DisFogComponent`: Opacity 0.8,
+    /// white, Height 20, NearPlane 2000, FarPlane 10000, Origin 0).
+    fn import_fog(&mut self, slot: usize, actor: usize) {
+        let pkg = self.pkgs[slot].clone();
+        let Ok(h) = pkg.read_object(actor) else { return };
+        let Some(ObjRef::Export(ci)) = find(&h.properties, "Component").and_then(|p| p.as_object()).map(ObjRef::from_index) else {
+            return;
+        };
+        let Ok(ch) = pkg.read_object(ci) else { return };
+        let c = &ch.properties;
+        if !bool_or(c, "bEnabled", true) || !bool_or(&h.properties, "bEnabled", true) {
+            return;
+        }
+        let color = match find(c, "LightColor").map(|p| &p.value) {
+            Some(Value::Color(rgba)) => [0, 1, 2].map(|k| crate::lightmap::srgb_to_linear(rgba[k])),
+            _ => [1.0; 3],
+        };
+        self.map.environment.fog.push(FogSettings {
+            source: format!("{}:{}", pkg.name, pkg.obj_path(ObjRef::Export(ci))),
+            color,
+            opacity: float_or(c, "Opacity", 0.8),
+            near: float_or(c, "NearPlane", 2000.0),
+            far: float_or(c, "FarPlane", 10000.0),
+            origin: float_or(c, "Origin", 0.0),
+            height: float_or(c, "Height", 20.0),
+        });
     }
 
     /// Lights that UE3 renders dynamically: dominant lights (their direct light is not in

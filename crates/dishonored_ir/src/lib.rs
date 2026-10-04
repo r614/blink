@@ -80,21 +80,25 @@ pub struct MaterialParams {
 pub struct Environment {
     /// Reflection cubemap faces (+X, -X, +Y, -Y, +Z, -Z in UE3 face order).
     pub cubemap_faces: Vec<TextureId>,
-    pub fog: Option<FogSettings>,
+    /// Arkane `DisFog` layers (Dishonored has no HeightFog/ExponentialHeightFog actors).
+    pub fog: Vec<FogSettings>,
     pub post: Option<PostSettings>,
 }
 
+/// One `DisFog` actor's `DisFogComponent`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FogSettings {
     pub source: String,
+    /// Linear colour (from `LightColor`).
     pub color: [f32; 3],
-    /// Density per uu (exponential).
-    pub density: f32,
-    pub start_distance: f32,
-    /// World Z of the fog plane (height fog), uu.
-    pub height: Option<f32>,
-    pub height_falloff: f32,
-    pub max_opacity: f32,
+    /// Maximum fog opacity (`Opacity`).
+    pub opacity: f32,
+    /// Fog fades in between these view distances, uu (`NearPlane`, `FarPlane`).
+    pub near: f32,
+    pub far: f32,
+    /// The layer spans world Z `origin .. origin + height` (`Origin`, `Height`).
+    pub origin: f32,
+    pub height: f32,
 }
 
 /// Arkane post-process configuration (`ArkPpConfig`), only the fields set on the level.

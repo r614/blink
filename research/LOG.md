@@ -210,3 +210,29 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   (Bevy inverse-square matched to UE3's radial falloff at R/4) and for dominant shadows (Bevy real-time
   cascades instead of the cooked `DominantLightShadowMap` / per-component distance-field `ShadowMap2D`).
 - **Implementation consequence:** Light functions (`LightFunction`, 3 in Light) and lighting channels are ignored.
+
+## 2026-10-04 — Atmosphere and post
+- **Question:** Where are fog and post-process settings, and how do they map to Bevy?
+- **Evidence:** Boyle Ext has no HeightFog/ExponentialHeightFog/PostProcessVolume actors. Fog is Arkane's
+  `Engine.DisFog` actor + `DisFogComponent` (3 placed in `L_Boyle_Ext_Env`): `Opacity`, `LightColor`,
+  `Origin`, `Height`, `NearPlane`, `FarPlane`, `NoFogPlane`, `SunPower`, `bCustomTransition`,
+  `fCustomTransitionHeight`, `FogLUT`/`m_RawLut` (128-byte LUT); class defaults (`Engine.Default__DisFogComponent`)
+  Opacity 0.8, white, Height 20, Near 2000, Far 10000. Layers: DisFog_0 (z -2075..3425, near 3000, opacity 0.4,
+  dark blue), DisFog_2 (z -2075..13925, near 20000, far 100000, opacity 0.5, lighter blue), DisFog_3 (ground
+  layer z -2075..-1275, near 800, far 7500, opacity 0.65). Post is `WorldInfo.m_ArkDefaultPpSettings`
+  (`ArkPpConfig`): DOF focus 5500 uu / far blur 0.2; colour balance CrMgYb shadows (0, .03, .04) and
+  midtones (0, .3, .4); HDR exposure 0.3, gamma 0.95, film grain 3.0, "GimpContrast" 0.05; bloom tint
+  (1, .95, .72) scale 0.4. Only overridden fields are serialized; the ArkPpConfig struct defaults are not
+  decoded yet.
+- **Experiment:** `atmosphere.rs`: per-frame layer selection by camera height -> Bevy linear `DistanceFog`
+  (colour alpha = opacity); TonyMcMapface tonemapping, `ColorGrading` exposure = log2(0.3 / 0.18) EV,
+  temperature/tint from the midtone colour balance, `Bloom` intensity 0.4 x scale. Calibration sweep of
+  tonemappers and EV offsets in `harness_out/cal/` (sheet.png): Bevy section gamma/contrast with Arkane's
+  values crushed the shadows to black, so those two are left unmapped.
+- **Result:** Distant geometry fades into blue-teal haze, foreground keeps the warm lamp pools.
+  `harness_out/step3_lights/*` (before) vs `harness_out/step4_post/*` (after; `sheet.png`).
+- **Confidence:** CONFIRMED for the data; APPROXIMATION for every mapping (single fog layer, exposure key
+  interpretation, colour balance -> white balance). DOF is opt-in (`--dof`) because Bevy also blurs the near
+  field while Arkane's is far-only; film grain and bloom tint have no Bevy equivalent.
+- **Implementation consequence:** Matching brightness needs original-game captures (U-011); the exposure can
+  be tuned with `DISHONORED_EV_BIAS` / `DISHONORED_TONEMAP` without rebuilding.

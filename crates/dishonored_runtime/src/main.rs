@@ -23,6 +23,7 @@ mod debug;
 mod harness;
 mod hud;
 mod input_map;
+mod atmosphere;
 mod lighting;
 mod map_render;
 mod players;
@@ -133,7 +134,9 @@ fn main() {
     // Placeholder ambient; with real lights it only fills non-lightmapped meshes at night level.
     .insert_resource(GlobalAmbientLight { color: Color::srgb(0.85, 0.88, 1.0), brightness: if args.features.dynamic_lights { 60.0 } else { 900.0 }, affects_lightmapped_meshes: !args.features.lightmaps })
     .insert_resource(args.clone())
-    .add_systems(Startup, setup_world);
+    .init_resource::<atmosphere::FogLayers>()
+    .add_systems(Startup, setup_world)
+    .add_systems(Update, atmosphere::update_fog);
 
     if args.mode == Mode::Inspect {
         let mut runner = harness::ScriptRunner { out_dir: args.out.clone(), ..default() };
@@ -253,6 +256,8 @@ fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Asset
             commands.entity(camera).insert(env);
         }
     }
+    let fog = atmosphere::setup_camera(&map, &mut commands.entity(camera), &args.features);
+    commands.insert_resource(fog);
     let lights = lighting::spawn_lights(&map, &mut commands, &args.features);
     info!("{} map lights", lights);
     if lights == 0 {
