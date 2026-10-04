@@ -56,7 +56,9 @@ impl<'w> Net<'w> {
 }
 
 fn setup<'w>(world: &'w CollisionWorld, sim: &SimConfig, spawns: Vec<SpawnPoint>, cond: LinkConditions, rules: FfaRules) -> Net<'w> {
-    let ssock = NetSocket::bind("127.0.0.1:0").unwrap().with_conditions(cond, 1);
+    // The client-side conditioner delays both directions, so the server socket stays clean
+    // (conditioning both ends would double the latency).
+    let ssock = NetSocket::bind("127.0.0.1:0").unwrap();
     let addr = ssock.local_addr();
     let server = GameServer::new(
         ServerConfig { name: "test".into(), map: "fixture".into(), setup: GameSetup::Ffa { rules, spawns }, snapshot_interval: 1 },
