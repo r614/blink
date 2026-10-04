@@ -89,6 +89,8 @@ pub enum TextureFormat {
     Bgra8,
     /// 8-bit single channel
     R8,
+    /// Signed two-channel (UE3 PF_V8U8 normal maps)
+    Rg8Snorm,
 }
 
 impl TextureFormat {
@@ -102,6 +104,7 @@ impl TextureFormat {
             Self::Bc2 | Self::Bc3 | Self::Bc5 => 16,
             Self::Bgra8 => 4,
             Self::R8 => 1,
+            Self::Rg8Snorm => 2,
         }
     }
     pub fn mip_size(self, w: u32, h: u32) -> usize {

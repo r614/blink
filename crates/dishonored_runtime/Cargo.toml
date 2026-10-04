@@ -1,0 +1,12 @@
+[package]
+name = "dishonored_runtime"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Bevy presentation runtime: renders imported Dishonored maps"
+
+[dependencies]
+anyhow.workspace = true
+bevy = "0.19"
+dishonored_assets.workspace = true
+dishonored_ir.workspace = true

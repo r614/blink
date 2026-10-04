@@ -145,6 +145,26 @@ impl Package {
         // prefix on DistributionFloatUniform in L_BoyleStreet_Ext_Script).
         c.ends_with("Component") || c == "Component" || c.starts_with("Distribution")
     }
+
+    /// Components owned by a class default object (directly or via a Class) are
+    /// templates and serialize a TemplateName. Archetype-flagged level prefabs are not
+    /// (observed: `Env_Blockout.collisions.*.StaticMeshComponent0` in L_Boyle_Ext_Env).
+    pub fn is_template(&self, export: usize) -> bool {
+        let mut cur = self.exports[export].outer;
+        for _ in 0..32 {
+            match ObjRef::from_index(cur) {
+                ObjRef::Export(o) => {
+                    let e = &self.exports[o];
+                    if e.object_flags & RF_CLASS_DEFAULT_OBJECT != 0 || e.class == 0 {
+                        return true;
+                    }
+                    cur = e.outer;
+                }
+                _ => return false,
+            }
+        }
+        false
+    }
 }
 
 impl Package {
@@ -176,7 +196,7 @@ impl Package {
             // UComponent: TemplateOwnerClass, plus TemplateName for class-default templates.
             // Observed in L_Boyle_Ext_Env StaticMeshComponents: i32 0 precedes NetIndex.
             let _template_owner_class = r.i32()?;
-            if flags & RF_CLASS_DEFAULT_OBJECT != 0 {
+            if self.is_template(export) {
                 let _template_name = FName::read(&mut r)?;
             }
         }

@@ -65,6 +65,7 @@ fn map_format(name: &str) -> Option<TextureFormat> {
         "PF_BC5" | "PF_ATI2" => TextureFormat::Bc5,
         "PF_A8R8G8B8" => TextureFormat::Bgra8,
         "PF_G8" | "PF_L8" => TextureFormat::R8,
+        "PF_V8U8" => TextureFormat::Rg8Snorm,
         _ => return None,
     })
 }
