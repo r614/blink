@@ -13,6 +13,7 @@
 //! harness all                 everything above; writes harness_out/<run>/REPORT.md
 //! ```
 
+mod contracts;
 mod netsoak;
 mod report;
 mod scenarios;
@@ -50,6 +51,7 @@ fn main() -> Result<()> {
         "sim" => scenarios::run(&ctx, &mut rep)?,
         "net" => netsoak::run(&ctx, &mut rep)?,
         "visual" => visual::run(&ctx, &mut rep)?,
+        "contracts" => contracts::run(&ctx, &mut rep)?,
         "replay" => {
             let file = args.get(1).expect("replay file");
             netsoak::verify_replay_file(&PathBuf::from(file), &mut rep)?;
@@ -58,6 +60,7 @@ fn main() -> Result<()> {
             scenarios::run(&ctx, &mut rep)?;
             netsoak::run(&ctx, &mut rep)?;
             visual::run(&ctx, &mut rep)?;
+            contracts::run(&ctx, &mut rep)?;
         }
         other => anyhow::bail!("unknown command {other}"),
     }

@@ -581,6 +581,17 @@ impl ContractsMatch {
 
     fn resolve_events(&mut self, events: &[SimEvent], world: &dyn WorldQuery) {
         let _ = world;
+        // Being hurt by your pursuer reveals them.
+        for e in events {
+            if let SimEvent::Damage { victim, attacker: Some(a), .. } = *e {
+                if let Some(c) = self.contract_mut(victim) {
+                    if c.pursuer == Some(a) && c.awareness < PursuitAwareness::Aware {
+                        c.awareness = PursuitAwareness::Aware;
+                        c.awareness_level = c.awareness_level.max(1.6);
+                    }
+                }
+            }
+        }
         for e in events {
             let SimEvent::Death { victim, killer, cause } = *e else { continue };
             let victim_kind = self.world.player(victim).map(|p| p.kind).unwrap_or(PawnKind::Human);
@@ -628,12 +639,18 @@ impl ContractsMatch {
                     _ => 0,
                 } as u32;
                 let close = matches!(cause, DamageCause::Sword | DamageCause::SwordCounter | DamageCause::Assassination | DamageCause::DropAssassination);
+                let quiet_ranged = matches!(cause, DamageCause::Crossbow | DamageCause::CrossbowHeadshot);
+                // Loud weapons carry an information cost, not a damage penalty: no stealth
+                // or stalk credit for gunfire; half credit for the comparatively quiet crossbow.
+                let stealth_scale = if close { 1.0 } else if quiet_ranged { 0.5 } else { 0.0 };
+                let stalk_scale = if close { 1.0 } else { 0.0 };
+                let stealth = (stealth as f32 * stealth_scale) as u32;
                 let ks = KillScore {
                     base,
                     stealth_bonus: stealth,
                     proximity_bonus: if close { sv.proximity as u32 } else { 0 },
                     method_bonus: 0,
-                    stalk_bonus: ((kc.stalk_time * sv.stalk_per_second) as i32).min(sv.stalk_cap).max(0) as u32,
+                    stalk_bonus: (((kc.stalk_time * sv.stalk_per_second) as i32).min(sv.stalk_cap).max(0) as f32 * stalk_scale) as u32,
                     escape_bonus: 0,
                 };
                 let kpos = self.world.player(k).map(|p| p.position).unwrap_or(Vec3::ZERO);

@@ -14,4 +14,5 @@ dishonored_ir.workspace = true
 dishonored_ai.workspace = true
 
 [dev-dependencies]
+dishonored_bots.workspace = true
 serde_json.workspace = true

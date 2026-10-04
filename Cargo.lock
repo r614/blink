@@ -2382,6 +2382,7 @@ name = "dishonored_multiplayer"
 version = "0.1.0"
 dependencies = [
  "dishonored_ai",
+ "dishonored_bots",
  "dishonored_ir",
  "dishonored_sim",
  "dishonored_world",
@@ -3045,6 +3046,7 @@ name = "harness"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dishonored_ai",
  "dishonored_bots",
  "dishonored_content",
  "dishonored_multiplayer",

@@ -20,3 +20,11 @@ Status: OPEN / ACTIVE / RESOLVED. Resolved items stay listed with their resoluti
 | U-013 | P2 | OPEN | Lightmap/shadowmap usage (`LightMapTexture2D`, `ShadowMap2D`) | Decode lightmap coordinates (UV1) and textures for recognizable lighting. |
 | U-014 | P2 | OPEN | Remaining property-parse failures in script packages (~0.09%) | Re-sweep after the template-name fix; the class-specific prefixes are listed in `PACKAGE_FORMAT.md`. |
 | U-015 | P1 | OPEN | Collision source for gameplay: kDOP triangles vs `RB_BodySetup` convex hulls vs simplified collision meshes | Compare against PhysX/NxCharacter use in the exe; test whether hidden `Collision_model*` actors are player blockers. |
+| U-016 | P2 | OPEN | Pawn collision is a capsule vs UE3's flat-bottomed cylinder | Walkability uses contact face normals and step-ups check the support point height (cylinder emulation). Measure ledge-edge behaviour in the original. |
+| U-017 | P2 | OPEN | Crouch height: `m_fCrouchHeight` (33) vs `m_fSneakHeight` (65) | Using 65 as the sneak half-height. Verify with original-game capture. |
+| U-018 | P1 | OPEN | Blink travel speed/duration (SPECULATIVE 9000 uu/s) and exact target query shape | Capture Blink traces from the original (U-011); disassemble the Blink power class. |
+| U-019 | P2 | OPEN | Mantle timings (animation-driven) and probe pattern | Now decodable via Edge: read mantle anim lengths and notifies. |
+| U-020 | P0 (Phase II) | OPEN | Core product test: do humans hesitate between NPCs and players? | Needs human playtests. Automated proxies: compare player vs NPC motion statistics. |
+| U-021 | P1 | OPEN | Sword timings, parry window, reload/equip times (SPECULATIVE constants in `CombatTuning`) | Read player sword/pistol AnimSequence lengths and DisNotify markers (Edge decoder now available). |
+| U-022 | P2 | OPEN | Edge fixed-format channel path (410 clips with flags=2) | Port 0x009D4D90/0x009D5390. |
+| U-023 | P2 | OPEN | Edge root motion / translation tracks (rotation-only retargeting today) | Compare against original playback. |
