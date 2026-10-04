@@ -23,6 +23,7 @@ mod debug;
 mod harness;
 mod hud;
 mod input_map;
+mod lighting;
 mod map_render;
 mod players;
 mod session;
@@ -129,7 +130,8 @@ fn main() {
     }))
     .add_plugins(FrameTimeDiagnosticsPlugin::default())
     .insert_resource(ClearColor(Color::srgb(0.08, 0.09, 0.12)))
-    .insert_resource(GlobalAmbientLight { color: Color::srgb(0.85, 0.88, 1.0), brightness: 900.0, affects_lightmapped_meshes: !args.features.lightmaps })
+    // Placeholder ambient; with real lights it only fills non-lightmapped meshes at night level.
+    .insert_resource(GlobalAmbientLight { color: Color::srgb(0.85, 0.88, 1.0), brightness: if args.features.dynamic_lights { 60.0 } else { 900.0 }, affects_lightmapped_meshes: !args.features.lightmaps })
     .insert_resource(args.clone())
     .add_systems(Startup, setup_world);
 
@@ -251,10 +253,15 @@ fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Asset
             commands.entity(camera).insert(env);
         }
     }
-    commands.spawn((
-        DirectionalLight { illuminance: 6000.0, shadow_maps_enabled: false, color: Color::srgb(0.75, 0.8, 1.0), affects_lightmapped_mesh_diffuse: !args.features.lightmaps, ..default() },
-        Transform::default().looking_to(Vec3::new(-0.4, -1.0, -0.3), Vec3::Y),
-    ));
+    let lights = lighting::spawn_lights(&map, &mut commands, &args.features);
+    info!("{} map lights", lights);
+    if lights == 0 {
+        // Placeholder sun when real lights are disabled (or the map has none).
+        commands.spawn((
+            DirectionalLight { illuminance: 6000.0, shadow_maps_enabled: false, color: Color::srgb(0.75, 0.8, 1.0), affects_lightmapped_mesh_diffuse: !args.features.lightmaps, ..default() },
+            Transform::default().looking_to(Vec3::new(-0.4, -1.0, -0.3), Vec3::Y),
+        ));
+    }
 }
 
 fn exit_after(time: Res<Time>, args: Res<Args>, mut exit: MessageWriter<AppExit>) {

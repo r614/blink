@@ -77,6 +77,13 @@ fn main() -> Result<()> {
         acc
     });
     println!("texture formats {fmts:?}");
+    for l in &m.lights {
+        println!(
+            "light {:?} dominant={} shadows={} pos {:.0} dir {:.2} color {:.2?} brightness {} radius {} falloff {} <- {}",
+            l.kind, l.dominant, l.casts_shadows, l.position, l.direction, l.color, l.brightness, l.radius, l.falloff_exponent, l.source
+        );
+    }
+    println!("environment: cubemap faces {}, post {:?}", m.environment.cubemap_faces.len(), m.environment.post);
     // `--dump-texture SUBSTR OUT.rgba`: raw RGBA8 of the first texture whose source contains
     // SUBSTR (local inspection only; convert with ffmpeg -f rawvideo -pix_fmt rgba -s WxH).
     if let Some(n) = args.iter().position(|a| a == "--dump-texture") {

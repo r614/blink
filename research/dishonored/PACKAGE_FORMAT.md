@@ -101,7 +101,8 @@ class default objects carry `0x200` in the *first* dword.
 ## Object serialization (export payload) — CONFIRMED for level content
 
 ```
-[Dominant*LightComponent only]  TArray<u16> DominantLightShadowMap
+[DominantDirectional/DominantSpot LightComponent only]  TArray<u16> DominantLightShadowMap
+                                                         (DominantPointLightComponent has none)
 [RF_HasStack]  i32 Node, i32 StateNode, u64 ProbeMask, u16 LatentAction, [i32 Offset if Node != 0]
 [Component classes]  i32 TemplateOwnerClass, [FName TemplateName if owned by a CDO/Class]
 i32 NetIndex

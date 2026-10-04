@@ -186,7 +186,9 @@ impl Package {
             }
         }
         let class = self.export_class(export);
-        if class.starts_with("Dominant") && class.ends_with("LightComponent") {
+        // DominantPointLightComponent has no shadow map: its data starts with
+        // TemplateOwnerClass = 0 and the first tag at offset 8 (L_Boyle_Ext_Light export 7).
+        if class == "DominantDirectionalLightComponent" || class == "DominantSpotLightComponent" {
             // Dominant light components serialize `TArray<WORD> DominantLightShadowMap`
             // before everything else (observed in L_Boyle_Ext_Light exports 5 and 10).
             let n = r.count(2)?;

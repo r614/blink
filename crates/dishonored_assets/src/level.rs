@@ -47,6 +47,8 @@ pub struct ImportStats {
     pub other_actor_components: usize,
     /// SplineMeshComponents baked into deformed mesh copies.
     pub spline_meshes: usize,
+    /// Static light actors skipped because their light is baked into the lightmaps.
+    pub static_lights_skipped: usize,
     pub instances: usize,
     pub meshes: usize,
     pub mesh_failures: usize,
@@ -246,6 +248,9 @@ impl Importer<'_> {
                         self.stats.errors.push(format!("{}: {e:#}", pkg.obj_path(ObjRef::Export(i))));
                     }
                 }
+                c if (c.ends_with("Light") || c.contains("LightToggleable") || c.contains("LightMovable")) && self.is_in_persistent_level(&pkg, i) => {
+                    self.import_light(slot, i, c);
+                }
                 "PlayerStart" | "DishonoredPlayerStart" if self.is_in_persistent_level(&pkg, i) => {
                     if let Ok(h) = pkg.read_object(i) {
                         let yaw = find(&h.properties, "Rotation")
@@ -263,6 +268,71 @@ impl Importer<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Lights that UE3 renders dynamically: dominant lights (their direct light is not in
+    /// the lightmaps) and toggleable/movable lights (direct light kept out of the lightmaps
+    /// as shadow maps). Static lights (StaticLightCollectionActor, plain PointLight/SpotLight)
+    /// are already baked and are counted but not imported.
+    fn import_light(&mut self, slot: usize, actor: usize, class: &str) {
+        let pkg = self.pkgs[slot].clone();
+        let dynamic = class.starts_with("Dominant") || class.contains("Toggleable") || class.contains("Movable");
+        if !dynamic {
+            self.stats.static_lights_skipped += 1;
+            return;
+        }
+        let Ok(h) = pkg.read_object(actor) else { return };
+        let Some(ObjRef::Export(ci)) = find(&h.properties, "LightComponent").and_then(|p| p.as_object()).map(ObjRef::from_index) else {
+            return;
+        };
+        let Ok(ch) = pkg.read_object(ci) else {
+            self.stats.errors.push(format!("light component {}", pkg.obj_path(ObjRef::Export(ci))));
+            return;
+        };
+        let c = &ch.properties;
+        if !bool_or(c, "bEnabled", true) {
+            return;
+        }
+        let cclass = pkg.export_class(ci);
+        // Prefer the component's cooked CachedParentToWorld: spot light actors rely on a
+        // class-default Rotation (pointing down) that is not serialized.
+        let cached = match find(c, "CachedParentToWorld").map(|p| &p.value) {
+            Some(Value::Raw(_, b)) if b.len() == 64 => {
+                let f: Vec<f32> = b.chunks_exact(4).map(|x| f32::from_le_bytes([x[0], x[1], x[2], x[3]])).collect();
+                // As a *tagged* Matrix property each row is stored (W, X, Y, Z), unlike the
+                // native FMatrix after StaticMeshCollectionActor properties (observed on
+                // SpotLightToggleable_0: rows (0 | 0 0 -3), (0 | 0 3 0), (0 | 3 0 0), (1 | loc)).
+                let row = |i: usize| [f[4 * i + 1], f[4 * i + 2], f[4 * i + 3], f[4 * i]];
+                Some(fmatrix_rows([row(0), row(1), row(2), row(3)]))
+            }
+            _ => None,
+        };
+        let world = cached.unwrap_or_else(|| actor_transform(&h.properties)) * component_transform(c);
+        let position = world.w_axis.truncate();
+        let direction = world.x_axis.truncate().normalize_or(Vec3::NEG_Z);
+        let color = match find(c, "LightColor").map(|p| &p.value) {
+            Some(Value::Color(rgba)) => [0, 1, 2].map(|k| crate::lightmap::srgb_to_linear(rgba[k])),
+            _ => [1.0; 3],
+        };
+        let kind = if cclass.contains("Directional") {
+            LightKind::Directional
+        } else if cclass.contains("Spot") {
+            LightKind::Spot { inner_cone_deg: float_or(c, "InnerConeAngle", 0.0), outer_cone_deg: float_or(c, "OuterConeAngle", 44.0) }
+        } else {
+            LightKind::Point
+        };
+        self.map.lights.push(Light {
+            kind,
+            position,
+            direction,
+            color,
+            brightness: float_or(c, "Brightness", 1.0),
+            radius: float_or(c, "Radius", 1024.0),
+            source: format!("{}:{}", pkg.name, pkg.obj_path(ObjRef::Export(ci))),
+            falloff_exponent: float_or(c, "FalloffExponent", 2.0),
+            dominant: class.starts_with("Dominant"),
+            casts_shadows: bool_or(c, "CastShadows", true) && bool_or(c, "CastDynamicShadows", true),
+        });
     }
 
     /// Level-wide settings from the persistent level's WorldInfo: the reflection cubemap

@@ -190,3 +190,23 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   per-material cubemap mask. Depth-biased alpha, distortion and UV panning of FX materials are not reproduced.
 - **Implementation consequence:** A custom material would be needed for Arkane's per-material cubemap mask
   and the scrolling fog/smoke parameters (`Mo_Motion_Speed`, `UV_Multiply_*`).
+
+## 2026-10-04 — Dynamic lights
+- **Question:** Which lights must be rendered in real time, and with what parameters?
+- **Evidence:** `L_Boyle_Ext_Light`: 1 `DominantDirectionalLight` (moon: Brightness 0.25, LightColor (164,209,255),
+  pitch ~-18 deg), 2 `DominantSpotLight`, 1 `DominantPointLight`; 3 `StaticLightCollectionActor`s with 216 spot +
+  83 point static components (baked; their GUIDs are in the lightmaps' LightGuids). `L_Boyle_Ext_Env`: 4
+  `SpotLightToggleable` + 58 static collection lights; `*_Script`: 2 `DisPointLightToggleable` (dim red).
+  `DominantPointLightComponent` has **no** `DominantLightShadowMap` array (first tag at offset 8, export 7),
+  unlike the directional/spot variants: the old rule mis-parsed it (garbage `AdjustSaturation_135` tag).
+  Tagged `Matrix` properties (`CachedParentToWorld`) store each row as (W, X, Y, Z); spot light actors leave
+  their (class default, pointing down) `Rotation` unserialized, so the component matrix is the reliable source.
+- **Experiment:** Import dominant + toggleable/movable lights (10 on Boyle Ext), convert units (see
+  `crates/dishonored_runtime/src/lighting.rs` header), shadows only from dominant lights, cap 64 local lights,
+  drop the placeholder sun and reduce the placeholder ambient to fill only non-lightmapped meshes.
+- **Result:** Moonlight now lights the scene directionally with cascaded shadows; lamp spots light the garden
+  and balloons. `harness_out/step2_materials/*` (before) vs `harness_out/step3_lights/*` (after).
+- **Confidence:** CONFIRMED (which lights, parse fix, matrix layout); APPROXIMATION for point/spot falloff
+  (Bevy inverse-square matched to UE3's radial falloff at R/4) and for dominant shadows (Bevy real-time
+  cascades instead of the cooked `DominantLightShadowMap` / per-component distance-field `ShadowMap2D`).
+- **Implementation consequence:** Light functions (`LightFunction`, 3 in Light) and lighting channels are ignored.

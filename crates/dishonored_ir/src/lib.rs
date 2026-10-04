@@ -261,6 +261,14 @@ pub struct Light {
     pub brightness: f32,
     pub radius: f32,
     pub source: String,
+    /// UE3 radial falloff `(1 - (d / radius)^2)^falloff_exponent`.
+    #[serde(default)]
+    pub falloff_exponent: f32,
+    /// Dominant lights: direct light is not in the lightmaps and they cast the main shadows.
+    #[serde(default)]
+    pub dominant: bool,
+    #[serde(default)]
+    pub casts_shadows: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
