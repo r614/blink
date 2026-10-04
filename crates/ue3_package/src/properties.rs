@@ -133,14 +133,17 @@ pub struct ObjectHeader {
 
 /// RF_HasStack: object carries a script state frame before its properties.
 pub const RF_HAS_STACK: u64 = 0x0200_0000;
-pub const RF_CLASS_DEFAULT_OBJECT: u64 = 0x0200;
+pub const RF_CLASS_DEFAULT_OBJECT: u64 = 0x0000_0200_0000_0000;
+pub const RF_ARCHETYPE_OBJECT: u64 = 0x0000_0400_0000_0000;
 
 impl Package {
     /// Whether an export's class derives from `Component`. The class hierarchy lives in
     /// other packages, so this uses the naming convention every UE3 component class follows.
     pub fn is_component_class(&self, export: usize) -> bool {
         let c = self.export_class(export);
-        c.ends_with("Component") || c == "Component"
+        // UDistributionFloat/Vector derive from UComponent (observed: TemplateOwnerClass
+        // prefix on DistributionFloatUniform in L_BoyleStreet_Ext_Script).
+        c.ends_with("Component") || c == "Component" || c.starts_with("Distribution")
     }
 }
 
@@ -151,11 +154,24 @@ impl Package {
         let mut r = Reader::new(data);
         let flags = self.exports[export].object_flags;
         if flags & RF_HAS_STACK != 0 {
-            // FStateFrame: Node, StateNode, ProbeMask(u64), LatentAction(u16?), StateStack, Offset.
-            // Not needed for level geometry; fail loudly so it gets implemented when hit.
-            bail!("export {export} has a script stack (flags {flags:#x}); not supported yet");
+            // FStateFrame as observed in Dishonored (e.g. L_Boyle_Ext_Env StaticMeshActor_1737):
+            // Node:i32 StateNode:i32 ProbeMask:u64 LatentAction:u16 [Offset:i32 if Node != 0].
+            // No StateStack array is present at this version/licensee.
+            let node = r.i32()?;
+            let _state_node = r.i32()?;
+            let _probe_mask = r.u64()?;
+            let _latent_action = r.u16()?;
+            if node != 0 {
+                let _offset = r.i32()?;
+            }
         }
         let class = self.export_class(export);
+        if class.starts_with("Dominant") && class.ends_with("LightComponent") {
+            // Dominant light components serialize `TArray<WORD> DominantLightShadowMap`
+            // before everything else (observed in L_Boyle_Ext_Light exports 5 and 10).
+            let n = r.count(2)?;
+            r.skip(n * 2)?;
+        }
         if self.is_component_class(export) {
             // UComponent: TemplateOwnerClass, plus TemplateName for class-default templates.
             // Observed in L_Boyle_Ext_Env StaticMeshComponents: i32 0 precedes NetIndex.
@@ -192,6 +208,16 @@ impl Property {
         let mut r = Reader::new(b);
         let n = r.count(4)?;
         (0..n).map(|_| r.i32()).collect()
+    }
+
+    /// Decode an array whose elements are non-native structs (nested tagged properties).
+    pub fn array_structs(&self, pkg: &Package) -> Result<Vec<Vec<Property>>> {
+        let Value::Array(b) = &self.value else {
+            bail!("{} is not an array", self.name)
+        };
+        let mut r = Reader::new(b);
+        let n = r.count(8)?;
+        (0..n).map(|_| read_properties(pkg, &mut r)).collect()
     }
 
     pub fn array_raw(&self) -> Option<(usize, &[u8])> {

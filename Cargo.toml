@@ -14,6 +14,8 @@ glam = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ue3_package = { path = "crates/ue3_package" }
+dishonored_ir = { path = "crates/dishonored_ir" }
+dishonored_assets = { path = "crates/dishonored_assets" }
 
 [profile.dev]
 opt-level = 1

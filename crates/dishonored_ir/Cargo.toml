@@ -1,0 +1,10 @@
+[package]
+name = "dishonored_ir"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Normalized, engine-agnostic representation of Dishonored content"
+
+[dependencies]
+glam = { workspace = true, features = ["serde"] }
+serde.workspace = true

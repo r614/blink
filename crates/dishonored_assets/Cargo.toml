@@ -1,0 +1,12 @@
+[package]
+name = "dishonored_assets"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Dishonored-specific decoders: UE3 objects -> dishonored_ir"
+
+[dependencies]
+anyhow.workspace = true
+glam.workspace = true
+ue3_package.workspace = true
+dishonored_ir.workspace = true

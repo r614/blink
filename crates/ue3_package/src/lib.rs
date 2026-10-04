@@ -421,7 +421,10 @@ fn read_export(r: &mut Reader) -> Result<Export> {
     let outer = r.i32()?;
     let object_name = FName::read(r)?;
     let archetype = r.i32()?;
-    let object_flags = r.u64()?;
+    // 64-bit EObjectFlags are stored as two dwords, high half first.
+    let flags_hi = r.u32()? as u64;
+    let flags_lo = r.u32()? as u64;
+    let object_flags = flags_hi << 32 | flags_lo;
     let serial_size = r.i32()?;
     let serial_offset = if serial_size > 0 { r.i32()? } else { r.i32()? };
     let export_flags = r.u32()?;

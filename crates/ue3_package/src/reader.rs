@@ -134,6 +134,19 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// UE3 `TArray::BulkSerialize`: `ElementSize:i32 Count:i32` then `Count*ElementSize` bytes.
+    /// Returns (element size, count, payload).
+    pub fn bulk_array(&mut self) -> Result<(usize, usize, &'a [u8])> {
+        let at = self.pos;
+        let elem = self.i32()?;
+        let n = self.i32()?;
+        if elem < 0 || n < 0 || (n > 0 && elem == 0) {
+            bail!("bad bulk array header elem={elem} count={n} at {at:#x}");
+        }
+        let bytes = self.bytes(elem as usize * n as usize)?;
+        Ok((elem as usize, n as usize, bytes))
+    }
+
     /// UE3 `FGuid`.
     pub fn guid(&mut self) -> Result<[u32; 4]> {
         Ok([self.u32()?, self.u32()?, self.u32()?, self.u32()?])
