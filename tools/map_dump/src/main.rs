@@ -54,6 +54,36 @@ fn main() -> Result<()> {
         acc
     });
     println!("texture formats {fmts:?}");
+    // `--dump-texture SUBSTR OUT.rgba`: raw RGBA8 of the first texture whose source contains
+    // SUBSTR (local inspection only; convert with ffmpeg -f rawvideo -pix_fmt rgba -s WxH).
+    if let Some(n) = args.iter().position(|a| a == "--dump-texture") {
+        if let Some(t) = m.textures.iter().find(|t| t.source.contains(&args[n + 1])) {
+            if let Some((w, h, px)) = dishonored_assets::texture::decode_rgba8(t, 0) {
+                std::fs::write(&args[n + 2], px.concat())?;
+                println!("dumped {} {}x{}", t.source, w, h);
+            }
+        }
+    }
+    if args.iter().any(|a| a == "--material-params") {
+        for (i, p) in m.material_params.iter().enumerate() {
+            println!(
+                "MAT {} | blend {:?} known={} two_sided={} unlit={} spec={} emis={:?} opac={} cube={} diffuse={:?} | base {:?}\n    scalars {:?}\n    vectors {:?}",
+                m.materials[i].source,
+                p.blend,
+                p.blend_known,
+                p.two_sided,
+                p.unlit,
+                p.specular.is_some(),
+                p.emissive.map(|t| &m.textures[t].source),
+                p.opacity.is_some(),
+                p.uses_cubemap,
+                m.materials[i].diffuse.map(|t| &m.textures[t].source),
+                p.base_material,
+                p.scalars,
+                p.vectors
+            );
+        }
+    }
     // Baked irradiance distribution (luminance of non-empty texels), for calibration.
     let mut lum: Vec<f32> = m
         .lightmaps

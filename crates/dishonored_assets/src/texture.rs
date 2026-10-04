@@ -160,3 +160,114 @@ pub fn read_texture(
         srgb,
     })
 }
+
+/// Decode one mip of a texture to RGBA8 (stored values; no colour-space conversion).
+/// Supports the formats seen in level content: BC1, BC2 (colour only), BC3, BGRA8, G8, V8U8.
+pub fn decode_rgba8(t: &TextureAsset, mip: usize) -> Option<(u32, u32, Vec<[u8; 4]>)> {
+    let data = t.mips.get(mip)?;
+    let w = (t.width >> mip).max(1);
+    let h = (t.height >> mip).max(1);
+    let n = (w * h) as usize;
+    let px = match t.format {
+        TextureFormat::Bc1 => decode_bc_blocks(data, w, h, 8, false),
+        TextureFormat::Bc2 => decode_bc_blocks(data, w, h, 16, false),
+        TextureFormat::Bc3 => decode_bc_blocks(data, w, h, 16, true),
+        TextureFormat::Bgra8 => data.chunks_exact(4).take(n).map(|c| [c[2], c[1], c[0], c[3]]).collect(),
+        TextureFormat::R8 => data.iter().take(n).map(|&v| [v, v, v, 255]).collect(),
+        TextureFormat::Rg8Snorm => data
+            .chunks_exact(2)
+            .take(n)
+            .map(|c| [(c[0] as i8 as i16 + 128) as u8, (c[1] as i8 as i16 + 128) as u8, 255, 255])
+            .collect(),
+        TextureFormat::Bc5 => return None,
+    };
+    Some((w, h, px))
+}
+
+fn bc_color_block(block: &[u8], out: &mut [[u8; 4]; 16], force_four: bool) {
+    let c0 = u16::from_le_bytes([block[0], block[1]]);
+    let c1 = u16::from_le_bytes([block[2], block[3]]);
+    let expand = |c: u16| -> [u32; 3] {
+        let r = ((c >> 11) & 31) as u32;
+        let g = ((c >> 5) & 63) as u32;
+        let b = (c & 31) as u32;
+        [(r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2)]
+    };
+    let (a, b) = (expand(c0), expand(c1));
+    let mut pal = [[0u32; 4]; 4];
+    pal[0] = [a[0], a[1], a[2], 255];
+    pal[1] = [b[0], b[1], b[2], 255];
+    for k in 0..3 {
+        if c0 > c1 || force_four {
+            pal[2][k] = (2 * a[k] + b[k]) / 3;
+            pal[3][k] = (a[k] + 2 * b[k]) / 3;
+        } else {
+            pal[2][k] = (a[k] + b[k]) / 2;
+            pal[3][k] = 0;
+        }
+    }
+    pal[2][3] = 255;
+    pal[3][3] = if c0 > c1 || force_four { 255 } else { 0 };
+    let bits = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+    for (i, o) in out.iter_mut().enumerate() {
+        let c = pal[((bits >> (2 * i)) & 3) as usize];
+        *o = [c[0] as u8, c[1] as u8, c[2] as u8, c[3] as u8];
+    }
+}
+
+fn bc3_alpha_block(block: &[u8], out: &mut [[u8; 4]; 16]) {
+    let (a0, a1) = (block[0] as u32, block[1] as u32);
+    let mut pal = [0u32; 8];
+    pal[0] = a0;
+    pal[1] = a1;
+    if a0 > a1 {
+        for i in 1..7 {
+            pal[i + 1] = ((7 - i as u32) * a0 + i as u32 * a1) / 7;
+        }
+    } else {
+        for i in 1..5 {
+            pal[i + 1] = ((5 - i as u32) * a0 + i as u32 * a1) / 5;
+        }
+        pal[6] = 0;
+        pal[7] = 255;
+    }
+    let mut bits = 0u64;
+    for (i, b) in block[2..8].iter().enumerate() {
+        bits |= (*b as u64) << (8 * i);
+    }
+    for (i, o) in out.iter_mut().enumerate() {
+        o[3] = pal[((bits >> (3 * i)) & 7) as usize] as u8;
+    }
+}
+
+fn decode_bc_blocks(data: &[u8], w: u32, h: u32, block_bytes: usize, bc3: bool) -> Vec<[u8; 4]> {
+    let (w, h) = (w as usize, h as usize);
+    let bw = w.div_ceil(4);
+    let mut out = vec![[0u8, 0, 0, 255]; w * h];
+    let mut px = [[0u8; 4]; 16];
+    for (bi, block) in data.chunks_exact(block_bytes).enumerate() {
+        let (bx, by) = (bi % bw, bi / bw);
+        if by * 4 >= h {
+            break;
+        }
+        let color = &block[block_bytes - 8..];
+        bc_color_block(color, &mut px, block_bytes == 16);
+        if bc3 {
+            bc3_alpha_block(&block[..8], &mut px);
+        } else if block_bytes == 16 {
+            for (i, o) in px.iter_mut().enumerate() {
+                let nib = (block[i / 2] >> (4 * (i % 2))) & 15;
+                o[3] = nib * 17;
+            }
+        }
+        for py in 0..4 {
+            for pxx in 0..4 {
+                let (x, y) = (bx * 4 + pxx, by * 4 + py);
+                if x < w && y < h {
+                    out[y * w + x] = px[py * 4 + pxx];
+                }
+            }
+        }
+    }
+    out
+}

@@ -6,7 +6,7 @@ use bevy::image::Image;
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat as WgpuFormat};
-use dishonored_ir::{BlendHint, DishonoredMap, LightmapAtlas, TextureAsset, TextureFormat};
+use dishonored_ir::{BlendHint, DishonoredMap, LightmapAtlas, MaterialAsset, MaterialBlend, MaterialParams, TextureAsset, TextureFormat};
 
 #[derive(Component)]
 pub struct MapGeometry {
@@ -64,9 +64,15 @@ pub fn to_image(t: &TextureAsset) -> Image {
         (TextureFormat::Bgra8, true) => WgpuFormat::Bgra8UnormSrgb,
         (TextureFormat::Bgra8, false) => WgpuFormat::Bgra8Unorm,
         (TextureFormat::R8, _) => WgpuFormat::R8Unorm,
-        (TextureFormat::Rg8Snorm, _) => WgpuFormat::Rg8Snorm,
+        // Converted to unorm below so Bevy recognises a two-channel normal map.
+        (TextureFormat::Rg8Snorm, _) => WgpuFormat::Rg8Unorm,
     };
-    let data: Vec<u8> = t.mips.concat();
+    let mut data: Vec<u8> = t.mips.concat();
+    if t.format == TextureFormat::Rg8Snorm {
+        for b in data.iter_mut() {
+            *b = (*b as i8 as i16 + 128) as u8;
+        }
+    }
     let mut img = Image::new(
         Extent3d {
             width: t.width,
@@ -116,6 +122,92 @@ pub fn lightmap_image(l: &LightmapAtlas) -> Image {
     img
 }
 
+fn scalar(p: &MaterialParams, name: &str) -> Option<f32> {
+    p.scalars.iter().find(|(n, _)| n.trim().eq_ignore_ascii_case(name)).map(|v| v.1)
+}
+fn vector(p: &MaterialParams, name: &str) -> Option<[f32; 4]> {
+    p.vectors.iter().find(|(n, _)| n.trim().eq_ignore_ascii_case(name)).map(|v| v.1)
+}
+
+/// Map a Dishonored material (Arkane slot convention) onto Bevy's StandardMaterial.
+///
+/// Approximations (documented in research/LOG.md, "Full materials"):
+/// - UE3 Phong `SP_Specular_Power` n -> GGX via alpha = sqrt(2 / (n + 2)).
+/// - `S_` map -> specular tint texture, `S_Specular_color` rgb * a -> tint * reflectance.
+/// - Colour vectors use Arkane's rgb * a intensity convention for emissive/specular; the
+///   alpha of `D_Diffuse_color` is ignored (its meaning is unknown).
+/// - Detail normals (`DN_`) and per-slot tiling other than `D_Diffuse_Tilling` are ignored
+///   (Bevy has a single UV transform per material).
+pub fn build_material(i: usize, m: &MaterialAsset, p: &MaterialParams, images: &[Handle<Image>], f: &RenderFeatures) -> StandardMaterial {
+    let tex = |t: Option<usize>| t.map(|t| images[t].clone());
+    let base_color_texture = tex(m.diffuse).filter(|_| !f.debug_lighting);
+    let mut mat = StandardMaterial {
+        base_color: if base_color_texture.is_some() || f.debug_lighting { Color::WHITE } else { fallback_color(i) },
+        base_color_texture,
+        perceptual_roughness: 0.85,
+        metallic: 0.0,
+        reflectance: 0.3,
+        cull_mode: None,
+        double_sided: true,
+        alpha_mode: match m.blend {
+            BlendHint::Opaque => AlphaMode::Opaque,
+            BlendHint::Masked => AlphaMode::Mask(0.33),
+            BlendHint::Translucent => AlphaMode::Blend,
+        },
+        lightmap_exposure: light_unit(),
+        ..default()
+    };
+    if !f.materials {
+        return mat;
+    }
+    mat.alpha_mode = match p.blend {
+        MaterialBlend::Opaque => AlphaMode::Opaque,
+        MaterialBlend::Masked => AlphaMode::Mask(p.opacity_clip.clamp(0.01, 0.99)),
+        MaterialBlend::Translucent => AlphaMode::Blend,
+        MaterialBlend::Additive => AlphaMode::Add,
+        MaterialBlend::Modulate => AlphaMode::Multiply,
+    };
+    // UE3 culls back faces unless the material is TwoSided. Mirroring Z-up/LH into
+    // Y-up/RH turns UE3's clockwise front faces into Bevy's counter-clockwise ones.
+    if !p.two_sided {
+        mat.cull_mode = Some(bevy::render::render_resource::Face::Back);
+        mat.double_sided = false;
+    }
+    mat.unlit = p.unlit;
+    if let Some(c) = vector(p, "D_Diffuse_color").or(vector(p, "D_DiffuseColorTweak")) {
+        let a = if p.unlit && p.blend != MaterialBlend::Opaque { c[3].clamp(0.0, 1.0) } else { 1.0 };
+        if !f.debug_lighting {
+            mat.base_color = Color::linear_rgba(c[0], c[1], c[2], a);
+        }
+    }
+    if let Some(t) = scalar(p, "D_Diffuse_Tilling").filter(|t| *t > 0.0 && (*t - 1.0).abs() > 1e-3) {
+        mat.uv_transform = bevy::math::Affine2::from_scale(Vec2::splat(t));
+    }
+    if let Some(n) = m.normal.filter(|_| !p.unlit) {
+        mat.normal_map_texture = Some(images[n].clone());
+        // UE3 normal maps are DirectX-style (green = -Y in Bevy's convention).
+        mat.flip_normal_map_y = true;
+    }
+    if let Some(s) = p.specular {
+        let c = vector(p, "S_Specular_color").unwrap_or([1.0; 4]);
+        mat.specular_tint_texture = Some(images[s].clone());
+        mat.specular_tint = Color::linear_rgb(c[0], c[1], c[2]);
+        mat.reflectance = (0.5 * c[3]).clamp(0.0, 1.0);
+        let n = scalar(p, "SP_Specular_Power").unwrap_or(20.0).max(1.0);
+        mat.perceptual_roughness = (2.0 / (n + 2.0)).sqrt().sqrt().clamp(0.089, 1.0);
+    } else {
+        mat.reflectance = 0.1;
+    }
+    if let Some(e) = p.emissive {
+        let c = vector(p, "E_Emissive_Color").unwrap_or([1.0; 4]);
+        mat.emissive_texture = Some(images[e].clone());
+        // Bevy does not apply camera exposure to emissive (emissive_exposure_weight 0), so
+        // UE3 emissive radiance maps to display values directly.
+        mat.emissive = LinearRgba::rgb(c[0] * c[3], c[1] * c[3], c[2] * c[3]);
+    }
+    mat
+}
+
 /// Deterministic pastel colour for untextured materials so surfaces stay readable.
 fn fallback_color(seed: usize) -> Color {
     let h = (seed.wrapping_mul(2654435761) % 360) as f32;
@@ -133,31 +225,14 @@ pub fn spawn_map(
 ) -> usize {
     let show_fx = features.fx;
     let image_handles: Vec<Handle<Image>> = map.textures.iter().map(|t| images.add(to_image(t))).collect();
+    let default_params = MaterialParams::default();
     let material_handles: Vec<Handle<StandardMaterial>> = map
         .materials
         .iter()
         .enumerate()
         .map(|(i, m)| {
-            let base_color_texture = m.diffuse.filter(|_| !features.debug_lighting).map(|t| image_handles[t].clone());
-            materials.add(StandardMaterial {
-                base_color: if base_color_texture.is_some() || features.debug_lighting {
-                    Color::WHITE
-                } else {
-                    fallback_color(i)
-                },
-                base_color_texture,
-                perceptual_roughness: 0.85,
-                metallic: 0.0,
-                cull_mode: None,
-                double_sided: true,
-                alpha_mode: match m.blend {
-                    BlendHint::Opaque => AlphaMode::Opaque,
-                    BlendHint::Masked => AlphaMode::Mask(0.33),
-                    BlendHint::Translucent => AlphaMode::Blend,
-                },
-                lightmap_exposure: light_unit(),
-                ..default()
-            })
+            let p = map.material_params.get(i).unwrap_or(&default_params);
+            materials.add(build_material(i, m, p, &image_handles, features))
         })
         .collect();
     let lightmap_handles: Vec<Handle<Image>> = if features.lightmaps {
@@ -205,6 +280,11 @@ pub fn spawn_map(
                         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals.clone())
                         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs.clone())
                         .with_inserted_indices(Indices::U32(idx));
+                    if features.materials {
+                        // MikkTSpace in Bevy space (equivalent to the packed UE3 basis up to
+                        // the handedness flip of the coordinate change).
+                        let _ = mesh.generate_tangents();
+                    }
                     if m.uv1.len() == m.positions.len() {
                         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1.clone());
                     }

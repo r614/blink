@@ -7,7 +7,7 @@ description = "Bevy presentation runtime: renders imported Dishonored maps"
 
 [dependencies]
 anyhow.workspace = true
-bevy = "0.19"
+bevy = { version = "0.19", features = ["pbr_specular_textures"] }
 dishonored_assets.workspace = true
 dishonored_ir.workspace = true
 dishonored_sim.workspace = true

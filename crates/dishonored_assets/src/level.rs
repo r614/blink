@@ -3,7 +3,8 @@
 
 use crate::content::Content;
 use crate::lightmap::{LightMap2DRef, LightMapRef, decode_bc1, flat_irradiance, pack_rgb9e5, read_static_mesh_component_lods, srgb_to_linear};
-use crate::material::resolve_material;
+use crate::material_chain;
+use crate::texture::decode_rgba8;
 use crate::static_mesh::read_static_mesh;
 use crate::texture::read_texture;
 use crate::util::{fmatrix_rows, rotator_matrix};
@@ -51,6 +52,12 @@ pub struct ImportStats {
     pub lightmaps_none: usize,
     pub lightmap_parse_failures: usize,
     pub lightmap_atlases: usize,
+    /// Distinct cross-package references that no indexed package defines.
+    pub unresolved_paths: Vec<String>,
+    /// MIC parent chains that end at an undefined import.
+    pub material_chain_breaks: Vec<String>,
+    /// Materials whose diffuse resolves to nothing (with their texture parameter names).
+    pub materials_without_diffuse: Vec<String>,
     pub errors: Vec<String>,
 }
 
@@ -73,6 +80,7 @@ struct Importer<'a> {
     mat_ids: HashMap<Key, Option<MaterialId>>,
     tex_ids: HashMap<Key, Option<TextureId>>,
     pending_lightmaps: Vec<PendingLightmap>,
+    merged_ids: HashMap<(TextureId, TextureId, u32, u32), Option<TextureId>>,
     stats: ImportStats,
 }
 
@@ -81,7 +89,12 @@ const RESOURCE_CLASSES: &[&str] = &[
     "Texture2D",
     "Material",
     "MaterialInstanceConstant",
+    "TextureCube",
 ];
+
+/// Always-loaded packages whose resources level packages import without cooking a copy
+/// (U-005: every unresolved Boyle Ext import was found in one of these).
+pub const LIBRARY_PACKAGES: &[&str] = &["DishonoredGame", "Startup"];
 
 /// Import the given level packages (e.g. `L_Boyle_Ext_P`, `L_Boyle_Ext_Env`, ...).
 pub fn import_level(
@@ -93,6 +106,14 @@ pub fn import_level(
     let mut pkgs = Vec::new();
     for p in packages {
         pkgs.push(content.package(p).with_context(|| format!("loading {p}"))?);
+    }
+    let level_slots = pkgs.len();
+    if opts.load_textures {
+        for p in LIBRARY_PACKAGES {
+            if content.has_package(p) {
+                pkgs.push(content.package(p).with_context(|| format!("loading {p}"))?);
+            }
+        }
     }
     let mut index = HashMap::new();
     for (slot, pkg) in pkgs.iter().enumerate() {
@@ -118,14 +139,19 @@ pub fn import_level(
         mat_ids: HashMap::new(),
         tex_ids: HashMap::new(),
         pending_lightmaps: Vec::new(),
+        merged_ids: HashMap::new(),
         stats: ImportStats::default(),
     };
-    for slot in 0..imp.pkgs.len() {
+    for slot in 0..level_slots {
         imp.import_actors(slot)?;
     }
     if opts.load_textures && opts.load_lightmaps {
         imp.bake_lightmaps();
     }
+    imp.stats.unresolved_paths.sort();
+    imp.stats.unresolved_paths.dedup();
+    imp.stats.material_chain_breaks.sort();
+    imp.stats.material_chain_breaks.dedup();
     imp.stats.instances = imp.map.instances.len();
     imp.stats.meshes = imp.map.meshes.len();
     imp.stats.materials = imp.map.materials.len();
@@ -399,6 +425,7 @@ impl Importer<'_> {
                 let k = self.index.get(&path).copied();
                 if k.is_none() {
                     self.stats.unresolved_refs += 1;
+                    self.stats.unresolved_paths.push(format!("{} ({})", pkg.obj_path(r), pkg.class_name(r)));
                 }
                 k
             }
@@ -467,37 +494,190 @@ impl Importer<'_> {
             return *id;
         }
         let pkg = self.pkgs[k.0].clone();
-        let resolved = resolve_material(&pkg, ObjRef::Export(k.1)).unwrap_or_default();
-        let tex = |s: &mut Self, r: Option<ObjRef>| -> Option<TextureId> {
-            let key = s.resolve(k.0, r?)?;
-            s.texture(key)
+        let pkgs = self.pkgs.clone();
+        let chain = material_chain::walk(&pkgs, k, &mut |slot, r| self.resolve(slot, r));
+        if let Some(b) = &chain.broken_at {
+            self.stats.material_chain_breaks.push(b.clone());
+        }
+        // Arkane slot convention first, then the base material's wired inputs, then names.
+        let named = |subs: &[&str], excl: &[&str]| {
+            chain
+                .textures
+                .iter()
+                .find(|(n, _)| {
+                    let l = n.to_ascii_lowercase();
+                    subs.iter().any(|s| l.contains(s)) && !excl.iter().any(|x| l.contains(x))
+                })
+                .map(|(_, k)| *k)
         };
-        let diffuse = tex(self, resolved.diffuse);
-        let normal = tex(self, resolved.normal);
+        let diffuse_key = material_chain::slot(&chain, "d_", &["mask"])
+            .or(chain.diffuse_input)
+            .or_else(|| named(&["diffuse", "albedo", "diff"], &["mask", "variation", "d2_"]))
+            // Blockout greybox materials carry a single checker texture.
+            .or_else(|| named(&["blockout"], &[]))
+            .or_else(|| material_chain::slot_in(&chain.default_textures, "d_", &["mask"]));
+        let normal_key = material_chain::slot(&chain, "n_", &[])
+            .or(chain.normal_input)
+            .or_else(|| named(&["normal"], &["n2_", "dn_", "detail", "variation", "wave"]))
+            .or_else(|| material_chain::slot_in(&chain.default_textures, "n_", &[]));
+        let spec_key = material_chain::slot(&chain, "s_", &["mask"]);
+        let emissive_key = material_chain::slot(&chain, "e_", &["mask"]);
+        let opacity_key = material_chain::slot(&chain, "o_", &[]).or_else(|| named(&["opacity", "alpha"], &[]));
+        let detail_key = material_chain::slot(&chain, "dn_", &["mask"]);
         let source = pkg.obj_path(ObjRef::Export(k.1));
-        // Volumetric cards (fog sheets, smoke, light shafts) are translucent in the
-        // original; their parent Material is often a cross-package import, so the
-        // BlendMode is not always available. Naming is consistent enough to rely on.
         let lname = source.to_ascii_lowercase();
         let fx_card = ["fog", "smoke", "lightray", "light_ray", "godray", "mist"]
             .iter()
             .any(|k| lname.contains(k));
+        let (blend, blend_known) = match chain.blend_mode.as_deref() {
+            Some("BLEND_Masked") => (MaterialBlend::Masked, true),
+            Some("BLEND_Translucent") | Some("BLEND_AlphaComposite") => (MaterialBlend::Translucent, true),
+            Some("BLEND_Additive") => (MaterialBlend::Additive, true),
+            Some("BLEND_Modulate") | Some("BLEND_ModulateAndAdd") => (MaterialBlend::Modulate, true),
+            Some(_) => (MaterialBlend::Opaque, true),
+            // BlendMode not serialized on a reached base material = class default (opaque).
+            None if chain.base_material.is_some() => (MaterialBlend::Opaque, true),
+            // Base material unreachable: volumetric cards are translucent in the
+            // original and the naming is consistent enough to rely on.
+            None if fx_card => (MaterialBlend::Translucent, false),
+            None if opacity_key.is_some() => (MaterialBlend::Masked, false),
+            None => (MaterialBlend::Opaque, false),
+        };
+        let mut diffuse = diffuse_key.and_then(|key| self.texture(key));
+        let normal = normal_key.and_then(|key| self.texture(key));
+        let opacity = opacity_key.and_then(|key| self.texture(key));
+        if blend != MaterialBlend::Opaque {
+            if let Some(o) = opacity {
+                let sc = |n: &str, d: f32| chain.scalars.iter().find(|(k, _)| k.trim().eq_ignore_ascii_case(n)).map(|v| v.1).unwrap_or(d);
+                let (lo, hi) = if blend == MaterialBlend::Masked { (0.0, 1.0) } else { (sc("O_Minimum_Opacity", 0.0), sc("O_Maximum_Opacity", 1.0)) };
+                diffuse = self.merged_opacity(diffuse, o, lo, hi).or(diffuse);
+            }
+        }
+        // Channel-packed masks: when the emissive slot reuses the opacity texture, opacity
+        // lives in R and the emissive mask (lit windows on vista cards) in G.
+        let emissive = match emissive_key {
+            Some(e) if Some(e) == opacity_key => self.texture(e).and_then(|t| self.channel_texture(t, 1)),
+            Some(e) => self.texture(e),
+            None => None,
+        };
+        let params = MaterialParams {
+            specular: spec_key.and_then(|key| self.texture(key)),
+            emissive,
+            opacity,
+            detail_normal: detail_key.and_then(|key| self.texture(key)),
+            uses_cubemap: chain.textures.iter().any(|(n, _)| n.to_ascii_lowercase().starts_with("c_cubemap_texture")),
+            blend,
+            blend_known,
+            two_sided: chain.two_sided.unwrap_or(false),
+            unlit: chain.lighting_model.as_deref() == Some("MLM_Unlit"),
+            opacity_clip: chain.opacity_clip.unwrap_or(0.3333),
+            scalars: chain.scalars.clone(),
+            vectors: chain.vectors.clone(),
+            base_material: chain.base_material.clone(),
+        };
+        if diffuse.is_none() {
+            self.stats.materials_without_diffuse.push(format!(
+                "{source} (params: {})",
+                chain.textures.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(",")
+            ));
+        }
         let asset = MaterialAsset {
             source,
             diffuse,
             normal,
-            blend: if resolved.translucent || fx_card {
-                BlendHint::Translucent
-            } else if resolved.masked {
-                BlendHint::Masked
-            } else {
-                BlendHint::Opaque
+            blend: match blend {
+                MaterialBlend::Opaque => BlendHint::Opaque,
+                MaterialBlend::Masked => BlendHint::Masked,
+                _ => BlendHint::Translucent,
             },
-            texture_params: Vec::new(),
+            texture_params: [("diffuse", diffuse), ("normal", normal), ("specular", params.specular), ("emissive", params.emissive), ("opacity", params.opacity)]
+                .into_iter()
+                .filter_map(|(n, t)| Some((n.to_string(), t?)))
+                .collect(),
         };
         self.map.materials.push(asset);
-        let id = Some(self.map.materials.len() - 1);
-        self.mat_ids.insert(k, id);
+        let id = self.map.materials.len() - 1;
+        self.map.material_params.resize(id, MaterialParams::default());
+        self.map.material_params.push(params);
+        self.mat_ids.insert(k, Some(id));
+        Some(id)
+    }
+
+    /// Greyscale BGRA8 copy of one channel of a texture (all mips).
+    fn channel_texture(&mut self, t: TextureId, ch: usize) -> Option<TextureId> {
+        let key = (t, usize::MAX - 1, ch as u32, 0);
+        if let Some(id) = self.merged_ids.get(&key) {
+            return *id;
+        }
+        let src = self.map.textures[t].clone();
+        let mips: Vec<Vec<u8>> = (0..src.mips.len())
+            .map_while(|m| decode_rgba8(&src, m))
+            .map(|(_, _, px)| px.iter().flat_map(|p| [p[ch], p[ch], p[ch], 255]).collect())
+            .collect();
+        let id = (!mips.is_empty()).then(|| {
+            self.map.textures.push(TextureAsset {
+                source: format!("{}[{}]", src.source, ["r", "g", "b", "a"][ch]),
+                format: TextureFormat::Bgra8,
+                width: src.width,
+                height: src.height,
+                mips,
+                srgb: src.srgb,
+            });
+            self.map.textures.len() - 1
+        });
+        self.merged_ids.insert(key, id);
+        id
+    }
+
+    /// Diffuse (or white) with the opacity mask's red channel remapped to `[lo, hi]` as
+    /// alpha (RGBA8, full mip chain), so masked/translucent materials alpha-test or blend
+    /// with the original mask (`O_Minimum_Opacity` / `O_Maximum_Opacity`).
+    fn merged_opacity(&mut self, d: Option<TextureId>, o: TextureId, lo: f32, hi: f32) -> Option<TextureId> {
+        let key = (d.unwrap_or(usize::MAX), o, lo.to_bits(), hi.to_bits());
+        if let Some(id) = self.merged_ids.get(&key) {
+            return *id;
+        }
+        let ot = &self.map.textures[o];
+        let osrc = ot.source.clone();
+        let (ow, oh, opx) = decode_rgba8(ot, 0)?;
+        let dt = match d {
+            Some(d) => self.map.textures[d].clone(),
+            None => TextureAsset {
+                source: "white".into(),
+                format: TextureFormat::Bgra8,
+                width: ow,
+                height: oh,
+                mips: vec![vec![255u8; (ow * oh * 4) as usize]],
+                srgb: true,
+            },
+        };
+        let dt = &dt;
+        let mut mips = Vec::new();
+        for m in 0..dt.mips.len() {
+            let Some((w, h, mut px)) = decode_rgba8(dt, m) else { break };
+            for y in 0..h {
+                for x in 0..w {
+                    let sx = (x as u64 * ow as u64 / w as u64) as usize;
+                    let sy = (y as u64 * oh as u64 / h as u64) as usize;
+                    let a = opx[sy * ow as usize + sx][0] as f32 / 255.0;
+                    px[(y * w + x) as usize][3] = ((lo + (hi - lo) * a).clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+            }
+            mips.push(px.iter().flat_map(|p| [p[2], p[1], p[0], p[3]]).collect::<Vec<u8>>());
+        }
+        let id = (!mips.is_empty()).then(|| {
+            let t = TextureAsset {
+                source: format!("{}+{}", dt.source, osrc),
+                format: TextureFormat::Bgra8,
+                width: dt.width,
+                height: dt.height,
+                mips,
+                srgb: dt.srgb,
+            };
+            self.map.textures.push(t);
+            self.map.textures.len() - 1
+        });
+        self.merged_ids.insert(key, id);
         id
     }
 
