@@ -13,6 +13,7 @@
 //! ```
 
 mod coords;
+mod characters;
 mod debug;
 mod harness;
 mod hud;
@@ -172,7 +173,7 @@ fn main() {
             .init_resource::<harness::ControlOverride>()
             .init_resource::<debug::DebugToggles>()
             .init_gizmo_group::<debug::XRayGizmos>()
-            .add_systems(Startup, (players::setup_player_assets, hud::setup_hud, debug::setup_gizmos))
+            .add_systems(Startup, (players::setup_player_assets, hud::setup_hud, debug::setup_gizmos, characters::load_library))
             .add_systems(FixedUpdate, (harness::script_fixed, session::fixed_tick).chain())
             .add_systems(
                 Update,
@@ -180,6 +181,7 @@ fn main() {
                     input_map::gather_input,
                     input_map::cursor_lock,
                     players::sync_players,
+                    characters::animate_characters,
                     players::sync_projectiles,
                     players::camera_follow,
                     hud::update_hud,

@@ -99,7 +99,8 @@ pub fn sync_players(
     view: Res<SessionView>,
     session: Res<Session>,
     assets: Res<PlayerAssets>,
-    mut bodies: Query<(Entity, &PlayerBody, &mut Transform, &mut Mesh3d, &mut MeshMaterial3d<StandardMaterial>, &mut Visibility), Without<SwordVisual>>,
+    mut bodies: Query<(Entity, &PlayerBody, &mut Transform, Option<&mut Mesh3d>, Option<&mut MeshMaterial3d<StandardMaterial>>, &mut Visibility), Without<SwordVisual>>,
+    lib: Option<Res<crate::characters::CharacterLibrary>>,
     mut swords: Query<(Entity, &SwordVisual, &mut Transform, &mut Visibility), Without<PlayerBody>>,
     cams: Query<&GameCamera>,
 ) {
@@ -116,12 +117,12 @@ pub fn sync_players(
             Some(p) => {
                 seen.insert(p.id, true);
                 *t = body_transform(p, mv);
-                mesh.0 = if p.crouched { assets.crouch_body.clone() } else { assets.body.clone() };
-                mat.0 = if p.alive { assets.materials[p.id as usize % assets.materials.len()].clone() } else { assets.dead.clone() };
+                if let Some(mesh) = mesh.as_mut() { mesh.0 = if p.crouched { assets.crouch_body.clone() } else { assets.body.clone() }; }
+                if let Some(mat) = mat.as_mut() { mat.0 = if p.alive { assets.materials[p.id as usize % assets.materials.len()].clone() } else { assets.dead.clone() }; }
                 let hide = Some(p.id) == me_id && !third && cams.iter().all(|c| c.follow.is_none_or(|f| f == p.id));
                 *vis = if hide || p.mode == MoveMode::Blinking { Visibility::Hidden } else { Visibility::Inherited };
             }
-            None => commands.entity(e).despawn(),
+            None => { commands.entity(e).despawn(); }
         }
     }
     for (e, s, mut t, mut vis) in &mut swords {
@@ -136,19 +137,28 @@ pub fn sync_players(
                 let _ = base;
                 *vis = if p.alive && p.mode != MoveMode::Blinking { Visibility::Inherited } else { Visibility::Hidden };
             }
-            None => commands.entity(e).despawn(),
+            None => { commands.entity(e).despawn(); }
         }
     }
     for p in all {
         if seen.contains_key(&p.id) {
             continue;
         }
-        commands.spawn((
-            Mesh3d(assets.body.clone()),
-            MeshMaterial3d(assets.materials[p.id as usize % assets.materials.len()].clone()),
-            body_transform(p, mv),
-            PlayerBody(p.id),
-        ));
+        match lib.as_ref().filter(|l| !l.models.is_empty()) {
+            Some(lib) => {
+                // Dishonored character model (archetype by player id).
+                let root = commands.spawn((body_transform(p, mv), Visibility::Inherited, PlayerBody(p.id))).id();
+                crate::characters::spawn_character(&mut commands, root, lib, p.id as usize);
+            }
+            None => {
+                commands.spawn((
+                    Mesh3d(assets.body.clone()),
+                    MeshMaterial3d(assets.materials[p.id as usize % assets.materials.len()].clone()),
+                    body_transform(p, mv),
+                    PlayerBody(p.id),
+                ));
+            }
+        }
         commands.spawn((Mesh3d(assets.sword.clone()), MeshMaterial3d(assets.steel.clone()), Transform::default(), SwordVisual(p.id)));
     }
 }

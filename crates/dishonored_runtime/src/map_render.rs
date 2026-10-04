@@ -13,7 +13,7 @@ pub struct MapGeometry {
     pub instance: usize,
 }
 
-fn to_image(t: &TextureAsset) -> Image {
+pub fn to_image(t: &TextureAsset) -> Image {
     let format = match (t.format, t.srgb) {
         (TextureFormat::Bc1, true) => WgpuFormat::Bc1RgbaUnormSrgb,
         (TextureFormat::Bc1, false) => WgpuFormat::Bc1RgbaUnorm,

@@ -177,3 +177,36 @@ pub struct UnconvertedObject {
     pub class: String,
     pub path: String,
 }
+
+/// A skinned character part (body, head, mask...) in UE3 mesh space, plus the transform
+/// from mesh space to pawn space (cylinder centre, Z-up, uu).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkeletalMeshAsset {
+    pub source: String,
+    pub positions: Vec<Vec3>,
+    pub normals: Vec<Vec3>,
+    pub uv0: Vec<Vec2>,
+    pub joints: Vec<[u16; 4]>,
+    pub weights: Vec<[f32; 4]>,
+    pub indices: Vec<u32>,
+    pub sections: Vec<MeshSection>,
+    pub bones: Vec<BoneAsset>,
+    pub mesh_to_pawn: Mat4,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoneAsset {
+    pub name: String,
+    pub parent: i32,
+    pub rotation: glam::Quat,
+    pub translation: Vec3,
+}
+
+/// A playable/NPC character archetype assembled from parts sharing one skeleton.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CharacterModel {
+    pub name: String,
+    pub parts: Vec<SkeletalMeshAsset>,
+    pub materials: Vec<MaterialAsset>,
+    pub textures: Vec<TextureAsset>,
+}
