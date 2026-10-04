@@ -4,6 +4,7 @@ pub mod characters;
 pub mod content;
 pub mod level;
 pub mod material;
+pub mod npcs;
 pub mod skeletal_mesh;
 pub mod static_mesh;
 pub mod edge_anim;

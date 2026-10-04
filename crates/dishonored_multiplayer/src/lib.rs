@@ -2,7 +2,9 @@
 //! Faithful mechanics stay in `dishonored_sim`; this crate decides spawning, scoring,
 //! respawn and match flow, and (later) Contracts.
 
+pub mod contracts;
 pub mod ffa;
+pub mod game;
 
 use dishonored_sim::state::PlayerId;
 use serde::{Deserialize, Serialize};

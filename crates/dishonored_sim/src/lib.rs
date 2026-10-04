@@ -196,3 +196,12 @@ pub fn state_hash(state: &WorldState) -> u64 {
     }
     h
 }
+
+/// Spawn (or respawn) an AI pawn. Mechanically identical to a player.
+pub fn spawn_npc(state: &mut WorldState, id: PlayerId, kind: state::PawnKind, archetype: u8, position: Vec3, yaw: f32, cfg: &SimConfig) {
+    spawn_player(state, id, position, yaw, cfg);
+    if let Some(p) = state.player_mut(id) {
+        p.kind = kind;
+        p.archetype = archetype;
+    }
+}

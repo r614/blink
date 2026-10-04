@@ -11,7 +11,9 @@
 //! by direct address; with it, it heartbeats the control plane every 5 s.
 use anyhow::Result;
 use dishonored_content::load_match;
+use dishonored_multiplayer::contracts::ContractsRules;
 use dishonored_multiplayer::ffa::{FfaRules, SpawnPoint};
+use dishonored_multiplayer::game::{CrowdSource, GameSetup, crowd_center, default_crowd};
 use dishonored_net::control_plane::{send_deregister, send_heartbeat};
 use dishonored_net::server::{GameServer, ServerConfig};
 use dishonored_net::socket::NetSocket;
@@ -46,9 +48,20 @@ fn main() -> Result<()> {
     let mc = load_match(&map)?;
     println!("loaded {map}: {} collision tris, {} spawns in {:.1?}", mc.collision.tris.len(), mc.spawns.len(), t.elapsed());
     let spawns: Vec<SpawnPoint> = mc.spawns.iter().map(|s| SpawnPoint { position: s.position, yaw: s.yaw }).collect();
+    let setup = if get("--mode").as_deref() == Some("contracts") {
+        let mut crules = ContractsRules { max_players: rules.max_players, time_limit: rules.time_limit.max(300.0), ..Default::default() };
+        let center = crowd_center(&mc.spawns.iter().map(|s| (s.position, s.yaw)).collect::<Vec<_>>());
+        if !args.iter().any(|a| a == "--no-crowd") {
+            crules.crowd = Some(default_crowd(center));
+        }
+        let pts: Vec<(glam::Vec3, f32)> = mc.spawns.iter().map(|s| (s.position, s.yaw)).collect();
+        GameSetup::contracts(crules, pts, Some(CrowdSource { points: &mc.ai_points, guard_spawns: &mc.guard_spawns }), &mc.collision)
+    } else {
+        GameSetup::Ffa { rules, spawns }
+    };
     let socket = NetSocket::bind(&format!("0.0.0.0:{port}"))?;
-    let cfg = ServerConfig { name: name.clone(), map: map.clone(), rules, snapshot_interval: (TICK_HZ as u64 / snapshot_hz.max(1)).max(1) };
-    let mut server = GameServer::new(cfg, mc.sim.clone(), &mc.collision, socket, spawns);
+    let cfg = ServerConfig { name: name.clone(), map: map.clone(), setup, snapshot_interval: (TICK_HZ as u64 / snapshot_hz.max(1)).max(1) };
+    let mut server = GameServer::new(cfg, mc.sim.clone(), &mc.collision, socket);
     println!("listening on udp/{port} as \"{name}\"");
 
     let shared_info = Arc::new(Mutex::new(server.info()));
@@ -72,7 +85,7 @@ fn main() -> Result<()> {
         *shared_info.lock().unwrap() = server.info();
         if last_report.elapsed() > Duration::from_secs(10) {
             last_report = Instant::now();
-            println!("tick {} players {} phase {:?} starved {} snapshots {}", server.game.world.tick, server.player_count(), server.game.view.phase, server.stats.inputs_starved, server.stats.snapshots_sent);
+            println!("tick {} players {} phase {:?} starved {} snapshots {}", server.game.world().tick, server.player_count(), server.game.view().phase, server.stats.inputs_starved, server.stats.snapshots_sent);
         }
         if duration.is_some_and(|d| start.elapsed().as_secs_f64() >= d) {
             break;
@@ -87,7 +100,7 @@ fn main() -> Result<()> {
     }
     if let (Some(dir), Some(r)) = (replay_dir, server.replay.as_ref()) {
         std::fs::create_dir_all(&dir)?;
-        let path = std::path::Path::new(&dir).join(format!("{map}-{}.replay", server.game.world.tick));
+        let path = std::path::Path::new(&dir).join(format!("{map}-{}.replay", server.game.world().tick));
         r.replay.save(&path)?;
         println!("replay saved to {}", path.display());
     }

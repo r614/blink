@@ -58,6 +58,8 @@ pub struct Snapshot {
     pub players: Vec<PlayerState>,
     pub projectiles: Vec<ProjectileState>,
     pub matchv: MatchView,
+    /// Private contract info for the receiving player only (Contracts mode).
+    pub private: Option<dishonored_multiplayer::contracts::TargetInfo>,
     /// Gameplay events since the previous snapshot (tick, event).
     pub events: Vec<(u64, SimEvent)>,
     /// Authoritative state hash at `tick` (desync detection).

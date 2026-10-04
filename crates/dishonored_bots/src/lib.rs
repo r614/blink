@@ -140,3 +140,46 @@ impl Bot {
         input
     }
 }
+
+impl Bot {
+    /// Contracts behaviour (test bot): pursue only the assigned target, walking to blend
+    /// in until close, then strike; avoid everyone else. Bots know their target's identity
+    /// (humans must infer it) — they exist to exercise the rules, not to be fair.
+    pub fn think_contract(&mut self, me: &PlayerState, others: &[PlayerState], world: &dyn WorldQuery, target: Option<PlayerId>) -> PlayerInput {
+        self.tick += 1;
+        let mut input = PlayerInput { yaw: me.yaw, left_hand: LeftHand::Blink, ..Default::default() };
+        if !me.alive {
+            return input;
+        }
+        let Some(t) = target.and_then(|id| others.iter().find(|o| o.id == id && o.alive)) else {
+            // No contract yet: stroll like a civilian.
+            if self.tick % 240 == 0 {
+                self.wander_yaw += (self.rand() - 0.5) * 140.0;
+            }
+            input.yaw = self.wander_yaw;
+            input.forward = 100;
+            input.buttons |= buttons::WALK;
+            return input;
+        };
+        let _ = world;
+        // Aim for a point behind the target (back assassination).
+        let behind = t.position - Vec3::new(t.yaw.to_radians().cos(), t.yaw.to_radians().sin(), 0.0) * 90.0;
+        let to = behind - me.position;
+        let dist = (t.position - me.position).truncate().length();
+        input.yaw = to.y.atan2(to.x).to_degrees();
+        if dist > 1500.0 {
+            input.forward = 127;
+            input.buttons |= buttons::SPRINT;
+        } else if dist > 160.0 {
+            input.forward = 127;
+            input.buttons |= buttons::WALK;
+        } else {
+            let tt = t.position - me.position;
+            input.yaw = tt.y.atan2(tt.x).to_degrees();
+            if self.tick % 20 == 0 {
+                input.buttons |= buttons::PRIMARY;
+            }
+        }
+        input
+    }
+}

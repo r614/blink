@@ -3,6 +3,7 @@
 //! -> replay determinism. Latency/loss come from the link conditioner.
 
 use dishonored_multiplayer::ffa::{FfaRules, SpawnPoint};
+use dishonored_multiplayer::game::GameSetup;
 use dishonored_net::client::{ConnState, NetClient, query_info};
 use dishonored_net::control_plane::{Master, list_servers, send_heartbeat};
 use dishonored_net::replay::resimulate;
@@ -58,11 +59,10 @@ fn setup<'w>(world: &'w CollisionWorld, sim: &SimConfig, spawns: Vec<SpawnPoint>
     let ssock = NetSocket::bind("127.0.0.1:0").unwrap().with_conditions(cond, 1);
     let addr = ssock.local_addr();
     let server = GameServer::new(
-        ServerConfig { name: "test".into(), map: "fixture".into(), rules, snapshot_interval: 1 },
+        ServerConfig { name: "test".into(), map: "fixture".into(), setup: GameSetup::Ffa { rules, spawns }, snapshot_interval: 1 },
         sim.clone(),
         world,
         ssock,
-        spawns,
     );
     let clients = (0..2)
         .map(|i| NetClient::new(NetSocket::bind("127.0.0.1:0").unwrap().with_conditions(cond, 10 + i), addr, &format!("bot{i}")))
@@ -123,7 +123,7 @@ fn predicted_movement_under_latency_and_loss() {
     assert!(m.rtt_ms > 60.0 && m.rtt_ms < 200.0, "rtt {}", m.rtt_ms);
     assert!(mean_err < 2.0, "mean prediction error {mean_err}");
     // Authoritative position moved ~ sprinting for ~5 s.
-    let server_p0 = net.server.game.world.players.iter().find(|p| p.id == c0.player_id.unwrap()).unwrap().position;
+    let server_p0 = net.server.game.world().players.iter().find(|p| p.id == c0.player_id.unwrap()).unwrap().position;
     assert!(server_p0.x > 1500.0, "server x {}", server_p0.x);
     // Remote view on client 1 is close to the server (interpolation delay ~ 100 ms of travel).
     let remote = c1.remote_players(6.0);
@@ -165,7 +165,7 @@ fn networked_combat_kill_and_score() {
             PlayerInput { yaw: 180.0, left_hand: LeftHand::Blink, ..Default::default() }
         }
     });
-    let mv = &net.server.game.view;
+    let mv = net.server.game.view();
     println!("scores {:?} phase {:?}", mv.scores, mv.phase);
     let shooter = net.clients[0].player_id.unwrap();
     let s = mv.scores.iter().find(|s| s.id == shooter).unwrap();

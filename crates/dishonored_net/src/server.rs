@@ -4,7 +4,7 @@
 use crate::protocol::*;
 use crate::replay::{ReplayFrame, ReplayHeader, ReplayRecorder, Roster};
 use crate::socket::NetSocket;
-use dishonored_multiplayer::ffa::{FfaMatch, FfaRules, SpawnPoint};
+use dishonored_multiplayer::game::{Game, GameSetup};
 use dishonored_sim::input::PlayerInput;
 use dishonored_sim::state::PlayerId;
 use dishonored_sim::{SimConfig, state_hash};
@@ -14,13 +14,15 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 pub const JITTER_BUFFER_MAX: usize = 6;
+/// Player bodies share the civilian archetype pool (no unique player appearance).
+pub const PLAYER_ARCHETYPES: [u8; 3] = [0, 2, 3];
 pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub name: String,
     pub map: String,
-    pub rules: FfaRules,
+    pub setup: GameSetup,
     /// Send a snapshot every N ticks (1 = 60 Hz).
     pub snapshot_interval: u64,
 }
@@ -50,7 +52,7 @@ pub struct GameServer<'w> {
     pub sim: SimConfig,
     pub world: &'w dyn WorldQuery,
     pub socket: NetSocket,
-    pub game: FfaMatch,
+    pub game: Game,
     clients: Vec<Client>,
     next_id: PlayerId,
     snapshot_seq: u64,
@@ -61,14 +63,13 @@ pub struct GameServer<'w> {
 }
 
 impl<'w> GameServer<'w> {
-    pub fn new(cfg: ServerConfig, sim: SimConfig, world: &'w dyn WorldQuery, socket: NetSocket, spawns: Vec<SpawnPoint>) -> Self {
+    pub fn new(cfg: ServerConfig, sim: SimConfig, world: &'w dyn WorldQuery, socket: NetSocket) -> Self {
         let config_hash = config_hash(&sim);
-        let game = FfaMatch::new(cfg.rules.clone(), spawns.clone());
+        let game = cfg.setup.build(&sim);
         let replay = Some(ReplayRecorder::new(ReplayHeader {
             map: cfg.map.clone(),
             config_hash,
-            rules: cfg.rules.clone(),
-            spawns,
+            setup: cfg.setup.clone(),
         }));
         Self { cfg, sim, world, socket, game, clients: Vec::new(), next_id: 1, snapshot_seq: 0, config_hash, stats: ServerStats::default(), replay, roster_this_tick: Vec::new() }
     }
@@ -77,9 +78,9 @@ impl<'w> GameServer<'w> {
         ServerInfo {
             name: self.cfg.name.clone(),
             map: self.cfg.map.clone(),
-            mode: self.game.view.mode.clone(),
+            mode: self.game.view().mode.clone(),
             players: self.clients.len() as u32,
-            max_players: self.cfg.rules.max_players as u32,
+            max_players: self.cfg.setup.max_players() as u32,
             version: PROTOCOL_VERSION,
         }
     }
@@ -104,15 +105,16 @@ impl<'w> GameServer<'w> {
                     c.last_heard = now;
                     c.id
                 } else {
-                    if self.clients.len() >= self.cfg.rules.max_players {
+                    if self.clients.len() >= self.cfg.setup.max_players() {
                         self.socket.send(from, encode(&Packet::Reject { reason: "server full".into() }));
                         return;
                     }
                     let id = self.next_id;
                     self.next_id += 1;
                     let name: String = name.chars().filter(|c| !c.is_control()).take(24).collect();
-                    self.game.add_player(id, &name, &self.sim);
-                    self.roster_this_tick.push(Roster::Join(id, name.clone()));
+                    let arch = PLAYER_ARCHETYPES[id as usize % PLAYER_ARCHETYPES.len()];
+                    self.game.add_player(id, &name, arch, self.world, &self.sim);
+                    self.roster_this_tick.push(Roster::Join(id, name.clone(), arch));
                     self.clients.push(Client {
                         addr: from,
                         id,
@@ -129,7 +131,7 @@ impl<'w> GameServer<'w> {
                 let welcome = Packet::Welcome {
                     player_id: id,
                     map: self.cfg.map.clone(),
-                    tick: self.game.world.tick,
+                    tick: self.game.world().tick,
                     tick_hz: dishonored_sim::movement::TICK_HZ,
                     config_hash: self.config_hash,
                     server_name: self.cfg.name.clone(),
@@ -155,7 +157,7 @@ impl<'w> GameServer<'w> {
                 if let Some(c) = self.clients.iter_mut().find(|c| c.addr == from) {
                     c.last_heard = now;
                 }
-                let tick = self.game.world.tick;
+                let tick = self.game.world().tick;
                 self.socket.send(from, encode(&Packet::Pong { client_time, server_tick: tick }));
             }
             Packet::Disconnect => self.drop_client(from),
@@ -201,16 +203,16 @@ impl<'w> GameServer<'w> {
             };
             inputs.push((c.id, input));
         }
-        let tick = self.game.world.tick;
+        let tick = self.game.world().tick;
         let out = self.game.step(&inputs, self.world, &self.sim);
-        let hash = state_hash(&self.game.world);
+        let hash = state_hash(self.game.world());
         if let Some(r) = self.replay.as_mut() {
             r.push(ReplayFrame {
                 tick,
                 roster: std::mem::take(&mut self.roster_this_tick),
                 inputs: inputs.clone(),
                 hash,
-                digest: self.game.world.players.iter().map(|p| (p.id, p.position.to_array(), p.vitals.health)).collect(),
+                digest: self.game.world().players.iter().map(|p| (p.id, p.position.to_array(), p.vitals.health)).collect(),
             });
         }
         for c in self.clients.iter_mut() {
@@ -218,16 +220,17 @@ impl<'w> GameServer<'w> {
         }
         self.stats.ticks += 1;
 
-        if self.game.world.tick % self.cfg.snapshot_interval.max(1) == 0 {
+        if self.game.world().tick % self.cfg.snapshot_interval.max(1) == 0 {
             self.snapshot_seq += 1;
             for i in 0..self.clients.len() {
                 let snap = Snapshot {
                     seq: self.snapshot_seq,
-                    tick: self.game.world.tick,
+                    tick: self.game.world().tick,
                     ack_input: self.clients[i].last_applied,
-                    players: self.game.world.players.clone(),
-                    projectiles: self.game.world.projectiles.clone(),
-                    matchv: self.game.view.clone(),
+                    players: self.game.world().players.clone(),
+                    projectiles: self.game.world().projectiles.clone(),
+                    matchv: self.game.view().clone(),
+                    private: self.game.target_info(self.clients[i].id),
                     events: std::mem::take(&mut self.clients[i].pending_events),
                     state_hash: hash,
                 };

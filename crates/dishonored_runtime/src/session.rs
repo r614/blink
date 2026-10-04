@@ -6,7 +6,9 @@ use bevy::prelude::*;
 use dishonored_bots::{Bot, BotStyle};
 use dishonored_content::MatchContent;
 use dishonored_multiplayer::MatchView;
-use dishonored_multiplayer::ffa::{FfaMatch, FfaRules, SpawnPoint};
+use dishonored_multiplayer::contracts::{ContractsRules, TargetInfo};
+use dishonored_multiplayer::ffa::{FfaRules, SpawnPoint};
+use dishonored_multiplayer::game::{CrowdSource, Game, GameSetup, crowd_center, default_crowd};
 use dishonored_net::client::{ConnState, NetClient};
 use dishonored_sim::events::SimEvent;
 use dishonored_sim::input::PlayerInput;
@@ -17,7 +19,7 @@ pub const LOCAL_ID: PlayerId = 1;
 
 pub enum SessionKind {
     /// `spectator`: when set, the local slot is also driven by a bot (watch mode).
-    Offline { game: FfaMatch, bots: Vec<Bot>, spectator: Option<Bot> },
+    Offline { game: Game, bots: Vec<Bot>, spectator: Option<Bot> },
     Online { client: NetClient },
 }
 
@@ -46,14 +48,23 @@ pub struct SessionView {
     /// Recent events for presentation (kill feed, hit markers).
     pub feed: Vec<String>,
     pub respawn_in: Option<f32>,
+    /// Contracts private info for the local player.
+    pub target_info: Option<TargetInfo>,
 }
 
 impl Session {
-    pub fn offline(content: Arc<MatchContent>, bots: usize, spectate: bool) -> Self {
-        let spawns: Vec<SpawnPoint> = content.spawns.iter().map(|s| SpawnPoint { position: s.position, yaw: s.yaw }).collect();
-        let rules = FfaRules { warmup_time: 1.0, min_players: 1, ..Default::default() };
-        let mut game = FfaMatch::new(rules, spawns);
-        game.add_player(LOCAL_ID, if spectate { "bot0" } else { "you" }, &content.sim);
+    pub fn offline(content: Arc<MatchContent>, bots: usize, spectate: bool, contracts: bool) -> Self {
+        let setup = if contracts {
+            let rules = ContractsRules { warmup_time: 2.0, min_players: 2, crowd: Some(default_crowd(crowd_center(&content.spawns.iter().map(|s| (s.position, s.yaw)).collect::<Vec<_>>()))), ..Default::default() };
+            let pts: Vec<(glam::Vec3, f32)> = content.spawns.iter().map(|s| (s.position, s.yaw)).collect();
+            GameSetup::contracts(rules, pts, Some(CrowdSource { points: &content.ai_points, guard_spawns: &content.guard_spawns }), &content.collision)
+        } else {
+            let spawns: Vec<SpawnPoint> = content.spawns.iter().map(|s| SpawnPoint { position: s.position, yaw: s.yaw }).collect();
+            GameSetup::Ffa { rules: FfaRules { warmup_time: 1.0, min_players: 1, ..Default::default() }, spawns }
+        };
+        let mut game = setup.build(&content.sim);
+        let arch = |id: u32| dishonored_net::server::PLAYER_ARCHETYPES[id as usize % 3];
+        game.add_player(LOCAL_ID, if spectate { "bot0" } else { "you" }, arch(LOCAL_ID), &content.collision, &content.sim);
         let mut bot_list = Vec::new();
         for i in 0..bots {
             let id = LOCAL_ID + 1 + i as u32;
@@ -62,7 +73,7 @@ impl Session {
                 1 => BotStyle::Gunner,
                 _ => BotStyle::Duelist,
             };
-            game.add_player(id, &format!("bot{}", i + 1), &content.sim);
+            game.add_player(id, &format!("bot{}", i + 1), arch(id), &content.collision, &content.sim);
             bot_list.push(Bot::new(id, style, 1000 + i as u64));
         }
         let spectator = spectate.then(|| Bot::new(LOCAL_ID, BotStyle::Duelist, 999));
@@ -101,31 +112,43 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
     let sim = &content.sim;
     match &mut session.kind {
         SessionKind::Offline { game, bots, spectator } => {
-            let snapshot: Vec<PlayerState> = game.world.players.clone();
+            let snapshot: Vec<PlayerState> = game.world().players.clone();
+            let contracts = matches!(game, Game::Contracts(_));
+            let mut think = |b: &mut Bot, me: &PlayerState| -> PlayerInput {
+                if contracts {
+                    let target = game.target_info(b.id).and_then(|t| t.target);
+                    b.think_contract(me, &snapshot, world, target)
+                } else {
+                    b.think(me, &snapshot, world)
+                }
+            };
             let local_input = match (spectator.as_mut(), snapshot.iter().find(|p| p.id == LOCAL_ID)) {
-                (Some(b), Some(me)) => b.think(me, &snapshot, world),
+                (Some(b), Some(me)) => think(b, me),
                 _ => input,
             };
             let mut inputs = vec![(LOCAL_ID, local_input)];
             for b in bots.iter_mut() {
                 if let Some(me) = snapshot.iter().find(|p| p.id == b.id) {
-                    inputs.push((b.id, b.think(me, &snapshot, world)));
+                    inputs.push((b.id, think(b, me)));
                 }
             }
             let out = game.step(&inputs, world, sim);
             for e in &out.events {
-                if let Some(s) = describe(e, &game.view) {
+                if let Some(s) = describe(e, game.view()) {
                     view.feed.push(s);
                 }
             }
-            view.me = game.world.player(LOCAL_ID).copied();
-            view.others = game.world.players.iter().filter(|p| p.id != LOCAL_ID).copied().collect();
-            view.projectiles = game.world.projectiles.clone();
-            view.matchv = game.view.clone();
-            view.tick = game.world.tick;
+            let w = game.world();
+            view.me = w.player(LOCAL_ID).copied();
+            view.others = w.players.iter().filter(|p| p.id != LOCAL_ID).copied().collect();
+            view.projectiles = w.projectiles.clone();
+            view.tick = w.tick;
+            view.dark_vision_reveals = dishonored_sim::left_hand::dark_vision_reveals(w, LOCAL_ID, &sim.tuning);
+            view.matchv = game.view().clone();
+            view.target_info = game.target_info(LOCAL_ID);
             view.connected = true;
-            view.status = if spectator.is_some() { format!("spectating {} bots (N: next player, V: camera)", bots.len() + 1) } else { format!("offline vs {} bots", bots.len()) };
-            view.dark_vision_reveals = dishonored_sim::left_hand::dark_vision_reveals(&game.world, LOCAL_ID, &sim.tuning);
+            let npcs = view.others.iter().filter(|p| p.kind != dishonored_sim::state::PawnKind::Human).count();
+            view.status = if spectator.is_some() { format!("spectating {} bots, {npcs} NPCs (N: next, V: camera)", bots.len() + 1) } else { format!("offline vs {} bots, {npcs} NPCs", bots.len()) };
             view.respawn_in = game.respawn_time_left(LOCAL_ID);
         }
         SessionKind::Online { client } => {
@@ -153,6 +176,7 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
             view.correction = client.metrics.correction;
             view.dark_vision_reveals = me.map(|id| dishonored_sim::left_hand::dark_vision_reveals(&client.predicted, id, &sim.tuning)).unwrap_or_default();
             view.respawn_in = None;
+            view.target_info = client.target_info.clone();
         }
     }
     let n = view.feed.len();

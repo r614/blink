@@ -148,7 +148,7 @@ pub fn sync_players(
             Some(lib) => {
                 // Dishonored character model (archetype by player id).
                 let root = commands.spawn((body_transform(p, mv), Visibility::Inherited, PlayerBody(p.id))).id();
-                crate::characters::spawn_character(&mut commands, root, lib, p.id as usize);
+                crate::characters::spawn_character(&mut commands, root, lib, p.archetype as usize);
             }
             None => {
                 commands.spawn((

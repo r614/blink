@@ -12,3 +12,4 @@ dishonored_content.workspace = true
 dishonored_multiplayer.workspace = true
 dishonored_net.workspace = true
 dishonored_sim.workspace = true
+glam.workspace = true

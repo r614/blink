@@ -78,6 +78,48 @@ pub fn update_hud(
             };
         }
     }
+    if let Some(ti) = view.target_info.as_ref() {
+        use dishonored_multiplayer::contracts::{Proximity, PursuitAwareness};
+        let arrows = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"];
+        let looks = match ti.appearance {
+            Some(0) => "masked gentleman, dark coat, metal mask",
+            Some(2) => "masked gentleman, shirtsleeves, metal mask",
+            Some(3) => "masked lady, black mask",
+            Some(1) => "guard uniform",
+            Some(_) => "unknown",
+            None => "-",
+        };
+        // Bearing relative to where you look (octant arrow), never coordinates.
+        let rel = ti.bearing_octant.map(|o| {
+            let me_yaw = local.yaw.rem_euclid(360.0);
+            let ang = (o as f32 * 45.0 - me_yaw).rem_euclid(360.0);
+            ["ahead", "ahead-left", "left", "behind-left", "behind", "behind-right", "right", "ahead-right"][(((ang + 22.5) / 45.0) as usize) % 8]
+        });
+        s += &format!(
+            "CONTRACT  target looks like: {looks}   direction: {}   distance: {}   compass {}\n",
+            rel.unwrap_or("reacquiring..."),
+            match ti.proximity {
+                Some(Proximity::Far) => "far",
+                Some(Proximity::Medium) => "medium",
+                Some(Proximity::Near) => "near",
+                Some(Proximity::VeryNear) => "VERY NEAR",
+                None => "-",
+            },
+            ti.bearing_octant.map(|o| arrows[o as usize]).unwrap_or("-")
+        );
+        s += &format!(
+            "target is {}   exposure {}   {}{}\n",
+            match ti.target_awareness {
+                PursuitAwareness::Unaware => "unaware of you",
+                PursuitAwareness::Suspicious => "suspicious",
+                PursuitAwareness::Aware => "AWARE of you",
+                PursuitAwareness::Pursuit => "FLEEING (chase!)",
+            },
+            "#".repeat((ti.exposure * 4.0).round() as usize),
+            if ti.being_chased { "YOU ARE BEING CHASED  " } else if ti.pursuer_near { "you sense your pursuer nearby  " } else { "" },
+            ti.escaping.map(|t| format!("ESCAPE! {t:.0}s")).unwrap_or_default()
+        );
+    }
     s += "\nWASD move  mouse look  Space jump  Ctrl sneak  Shift sprint  LMB sword  RMB left hand  F block  Q/E lean  1-5 hand  V 3rd person  F3 collision  Tab scores  Esc release mouse\n";
     for f in &view.feed {
         s += &format!("{f}\n");

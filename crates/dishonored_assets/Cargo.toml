@@ -7,9 +7,11 @@ description = "Dishonored-specific decoders: UE3 objects -> dishonored_ir"
 
 [dependencies]
 anyhow.workspace = true
-glam.workspace = true
+glam = { workspace = true, features = ["serde"] }
+serde.workspace = true
 ue3_package.workspace = true
 dishonored_ir.workspace = true
 
 [dev-dependencies]
-glam.workspace = true
+glam = { workspace = true, features = ["serde"] }
+serde.workspace = true

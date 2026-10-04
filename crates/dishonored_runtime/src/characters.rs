@@ -96,7 +96,7 @@ pub fn load_library(
     let mut lib = CharacterLibrary::default();
     let hh = session.content.sim.gameplay.movement.collision_half_height;
     let Ok(content) = dishonored_assets::Content::locate() else { return };
-    for (name, _, _) in ARCHETYPES {
+    for (name, _) in ARCHETYPES {
         match load_character(&content, name, hh, 1024) {
             Ok(m) => lib.models.push(upload(&m, &mut meshes, &mut images, &mut mats, &mut binds)),
             Err(e) => warn!("character {name}: {e:#}"),

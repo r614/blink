@@ -11,23 +11,45 @@ use glam::{Mat4, Vec3};
 use std::collections::HashMap;
 use ue3_package::ObjRef;
 
-/// (archetype name, package, part object paths). All parts share a skeleton.
-pub const ARCHETYPES: &[(&str, &str, &[&str])] = &[
-    ("aristocrat", "L_Boyle_Ext_Script", &["Npc_Aristo.Mesh.skm_MaleAristo02_Body"]),
-    ("elite_guard", "L_Boyle_Ext_Script", &["Npc_EliteGuard.Mesh.Skm_EliteGuard_Body", "Npc_EliteGuard.Mesh.Skm_EliteGuard_Head"]),
-    ("aristocrat_b", "L_Boyle_Int_Script", &["Npc_Aristo.Mesh.skm_MaleAristo01_Body"]),
-    ("outsider", "L_Boyle_Ext_Script", &["Npc_Outsider.Mesh.Skm_Outsider_Body", "Npc_Outsider.Mesh.Skm_Outsider_Head"]),
+/// (archetype name, parts as (package, object path)). All parts are skinned to
+/// compatible skeletons and share the first part's mesh->pawn transform (attached meshes
+/// such as masks are authored in the body's mesh space with MeshOrigin 0).
+pub const ARCHETYPES: &[(&str, &[(&str, &str)])] = &[
+    // 0: masked male aristocrat (party guest)
+    ("aristocrat", &[
+        ("L_BoyleStreet_Ext_Script", "Npc_Aristo.Mesh.skm_MaleAristo02_Body"),
+        ("L_BoyleStreet_Ext_Script", "Npc_Aristo.Mesh.skm_MaleAristo02_Head"),
+        ("L_BoyleStreet_Ext_Script", "Npc_Masks.metalface01.skm_metalface01"),
+    ]),
+    // 1: elite guard
+    ("elite_guard", &[
+        ("L_Boyle_Ext_Script", "Npc_EliteGuard.Mesh.Skm_EliteGuard_Body"),
+        ("L_Boyle_Ext_Script", "Npc_EliteGuard.Mesh.Skm_EliteGuard_Head"),
+    ]),
+    // 2: masked male aristocrat B
+    ("aristocrat_b", &[
+        ("L_Boyle_Int_Script", "Npc_Aristo.Mesh.skm_MaleAristo01_Body"),
+        ("L_Brothel_Script", "Npc_Aristo.Mesh.skm_MaleAristo01_Head"),
+        ("L_BoyleStreet_Ext_Script", "Npc_Masks.metalface02.skm_metalface02"),
+    ]),
+    // 3: masked female aristocrat
+    ("female_aristocrat", &[
+        ("L_BoyleStreet_Ext_Script", "Npc_FemaleAristo.Mesh.skm_FemaleAristo02_Body"),
+        ("L_BoyleStreet_Ext_Script", "Npc_FemaleAristo.Mesh.skm_FemaleAristo02_Head"),
+        ("L_BoyleStreet_Ext_Script", "Npc_Female_Masks.black_mask.Female_BlackMask"),
+    ]),
 ];
 
 /// Load one archetype. `pawn_half_height` aligns the feet with the collision cylinder.
 pub fn load_character(content: &Content, name: &str, pawn_half_height: f32, max_tex: u32) -> Result<CharacterModel> {
-    let (_, pkg_name, parts) = ARCHETYPES.iter().find(|a| a.0 == name).with_context(|| format!("unknown archetype {name}"))?;
-    let pkg = content.package(pkg_name)?;
+    let (_, parts) = ARCHETYPES.iter().find(|a| a.0 == name).with_context(|| format!("unknown archetype {name}"))?;
+    let mut shared_m2p: Option<Mat4> = None;
     let mut model = CharacterModel { name: name.to_string(), parts: Vec::new(), materials: Vec::new(), textures: Vec::new() };
-    let mut mat_ids: HashMap<usize, Option<usize>> = HashMap::new();
-    let mut tex_ids: HashMap<usize, Option<usize>> = HashMap::new();
+    let mut mat_ids: HashMap<(String, usize), Option<usize>> = HashMap::new();
+    let mut tex_ids: HashMap<(String, usize), Option<usize>> = HashMap::new();
     let mut feet_z = f32::MAX;
-    for part in parts.iter() {
+    for (pkg_name, part) in parts.iter() {
+        let pkg = content.package(pkg_name)?;
         let idx = (0..pkg.exports.len())
             .find(|&i| pkg.export_class(i) == "SkeletalMesh" && pkg.obj_path(ObjRef::Export(i)).eq_ignore_ascii_case(part))
             .with_context(|| format!("{part} not in {pkg_name}"))?;
@@ -35,7 +57,7 @@ pub fn load_character(content: &Content, name: &str, pawn_half_height: f32, max_
         // Mesh -> pawn: R(RotOrigin) * (v + MeshOrigin); verified numerically on
         // skm_MaleAristo02_Body (feet at -97, head top at +79 around the pawn centre).
         let r = rotator_matrix(raw.rot_origin[0], raw.rot_origin[1], raw.rot_origin[2]);
-        let m2p = r * Mat4::from_translation(raw.mesh_origin);
+        let m2p = *shared_m2p.get_or_insert(r * Mat4::from_translation(raw.mesh_origin));
         for p in &raw.positions {
             feet_z = feet_z.min(m2p.transform_point3(*p).z);
         }
@@ -43,11 +65,11 @@ pub fn load_character(content: &Content, name: &str, pawn_half_height: f32, max_
         for s in &raw.sections {
             let mref = raw.materials.get(s.material_index.max(0) as usize).copied().unwrap_or(0);
             let material = match ObjRef::from_index(mref) {
-                ObjRef::Export(mi) => *mat_ids.entry(mi).or_insert_with(|| {
+                ObjRef::Export(mi) => *mat_ids.entry((pkg_name.to_string(), mi)).or_insert_with(|| {
                     let res = resolve_material(&pkg, ObjRef::Export(mi)).unwrap_or_default();
                     let mut tex = |r: Option<ObjRef>| -> Option<usize> {
                         let ObjRef::Export(ti) = r? else { return None };
-                        *tex_ids.entry(ti).or_insert_with(|| match read_texture(content, &pkg, ti, max_tex) {
+                        *tex_ids.entry((pkg_name.to_string(), ti)).or_insert_with(|| match read_texture(content, &pkg, ti, max_tex) {
                             Ok(t) => {
                                 model.textures.push(t);
                                 Some(model.textures.len() - 1)

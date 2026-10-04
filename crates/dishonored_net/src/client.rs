@@ -60,6 +60,8 @@ pub struct NetClient {
     /// Locally predicted world (own player predicted, others extrapolated).
     pub predicted: WorldState,
     pub matchv: MatchView,
+    /// Private Contracts info for this player (None in FFA).
+    pub target_info: Option<dishonored_multiplayer::contracts::TargetInfo>,
     pub metrics: NetMetrics,
     /// Authoritative events received (tick, event).
     pub events: VecDeque<(u64, SimEvent)>,
@@ -91,6 +93,7 @@ impl NetClient {
             server_config_hash: 0,
             predicted: WorldState::default(),
             matchv: MatchView::default(),
+            target_info: None,
             metrics: NetMetrics::default(),
             events: VecDeque::new(),
             local_events: Vec::new(),
@@ -180,6 +183,7 @@ impl NetClient {
         self.metrics.snapshots += 1;
         self.metrics.server_tick = s.tick;
         self.matchv = s.matchv.clone();
+        self.target_info = s.private.clone();
         self.last_server_hash = s.state_hash;
         self.interp.push_back(Interp { tick: s.tick, players: s.players.clone() });
         while self.interp.len() > 32 {

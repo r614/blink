@@ -1,0 +1,93 @@
+//! Original NPC placement data from a map's script packages: spawners (with their pawn
+//! tweak archetype), navigation/target/watch points used for patrols and idling.
+
+use crate::content::Content;
+use anyhow::Result;
+use glam::Vec3;
+use serde::{Deserialize, Serialize};
+use ue3_package::ObjRef;
+use ue3_package::properties::{Value, find};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NpcRole {
+    Guard,
+    Civilian,
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NpcSpawnPoint {
+    pub position: Vec3,
+    pub yaw: f32,
+    pub tweak: String,
+    pub role: NpcRole,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PointKind {
+    Nav,
+    Target,
+    GuardWatch,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiPoint {
+    pub position: Vec3,
+    pub yaw: f32,
+    pub kind: PointKind,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NpcData {
+    pub spawns: Vec<NpcSpawnPoint>,
+    pub points: Vec<AiPoint>,
+}
+
+pub fn role_from_tweak(t: &str) -> NpcRole {
+    let l = t.to_ascii_lowercase();
+    if l.contains("guard") || l.contains("overseer") || l.contains("watch") || l.contains("officer") {
+        NpcRole::Guard
+    } else if l.contains("aristo") || l.contains("party") || l.contains("civ") || l.contains("guest") || l.contains("servant") || l.contains("maid") || l.contains("noble") {
+        NpcRole::Civilian
+    } else {
+        NpcRole::Other
+    }
+}
+
+pub fn extract_npc_data(content: &Content, packages: &[String]) -> Result<NpcData> {
+    let mut out = NpcData::default();
+    for name in packages {
+        if !content.has_package(name) {
+            continue;
+        }
+        let pkg = content.package(name)?;
+        for i in 0..pkg.exports.len() {
+            let outer = ObjRef::from_index(pkg.exports[i].outer);
+            if pkg.obj_name(outer) != "PersistentLevel" {
+                continue;
+            }
+            let class = pkg.export_class(i);
+            let interesting = matches!(class.as_str(), "DishonoredSpawner" | "DisTravelSpawner" | "DishonoredNavPoint" | "TargetPoint" | "DisGuardWatchPoint");
+            if !interesting {
+                continue;
+            }
+            let Ok(h) = pkg.read_object(i) else { continue };
+            let pos = find(&h.properties, "Location").and_then(|p| p.as_vector()).map(Vec3::from).unwrap_or(Vec3::ZERO);
+            let yaw = find(&h.properties, "Rotation").and_then(|p| p.as_rotator()).map(|r| r[1] as f32 * 360.0 / 65536.0).unwrap_or(0.0);
+            match class.as_str() {
+                "DishonoredSpawner" | "DisTravelSpawner" => {
+                    let tweak = match find(&h.properties, "m_pPawnTweaks").map(|p| &p.value) {
+                        Some(Value::Object(o)) => pkg.obj_path(ObjRef::from_index(*o)),
+                        _ => String::new(),
+                    };
+                    out.spawns.push(NpcSpawnPoint { position: pos, yaw, role: role_from_tweak(&tweak), tweak, source: format!("{name}:{}", pkg.obj_path(ObjRef::Export(i))) });
+                }
+                "DishonoredNavPoint" => out.points.push(AiPoint { position: pos, yaw, kind: PointKind::Nav }),
+                "TargetPoint" => out.points.push(AiPoint { position: pos, yaw, kind: PointKind::Target }),
+                _ => out.points.push(AiPoint { position: pos, yaw, kind: PointKind::GuardWatch }),
+            }
+        }
+    }
+    Ok(out)
+}

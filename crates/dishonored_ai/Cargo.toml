@@ -1,0 +1,12 @@
+[package]
+name = "dishonored_ai"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "NPC crowd and guard behaviour (deterministic, acts through PlayerInput)"
+
+[dependencies]
+glam = { workspace = true, features = ["serde"] }
+serde.workspace = true
+dishonored_sim.workspace = true
+dishonored_world.workspace = true

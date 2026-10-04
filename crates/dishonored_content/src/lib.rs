@@ -25,6 +25,9 @@ pub struct MatchContent {
     pub collision: CollisionWorld,
     pub spawns: Vec<Spawn>,
     pub sim: SimConfig,
+    /// Original AI points (nav/target/watch) and guard spawners, for crowds.
+    pub ai_points: Vec<(Vec3, f32)>,
+    pub guard_spawns: Vec<(Vec3, f32)>,
 }
 
 pub fn cache_dir() -> PathBuf {
@@ -98,5 +101,20 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     };
     let curated = load_spawns(map, None);
     let spawns = if curated.is_empty() { spawns } else { curated };
-    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim })
+    let npc_path = dir.join(format!("{map}.npcs.json"));
+    let npcs: dishonored_assets::npcs::NpcData = match std::fs::read_to_string(&npc_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
+        Some(n) => n,
+        None => {
+            let mut pkgs = map_packages(&content, map);
+            if map.starts_with("L_Boyle_Ext") {
+                pkgs.push("L_BoyleStreet_Ext_Script".into());
+            }
+            let n = dishonored_assets::npcs::extract_npc_data(&content, &pkgs).unwrap_or_default();
+            std::fs::write(&npc_path, serde_json::to_string(&n)?).ok();
+            n
+        }
+    };
+    let ai_points = npcs.points.iter().map(|p| (p.position, p.yaw)).collect();
+    let guard_spawns = npcs.spawns.iter().filter(|s| s.role == dishonored_assets::npcs::NpcRole::Guard).map(|s| (s.position, s.yaw)).collect();
+    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns })
 }

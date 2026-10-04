@@ -93,9 +93,21 @@ pub struct Vitals {
     pub dark_vision_remaining: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PawnKind {
+    #[default]
+    Human,
+    /// AI-driven pawn (crowd civilian or guard). Mechanically identical to players.
+    Civilian,
+    Guard,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PlayerState {
     pub id: PlayerId,
+    pub kind: PawnKind,
+    /// Visual archetype index (presentation only; players and NPCs share the pool).
+    pub archetype: u8,
     /// Collision cylinder centre (UE `Location`), Dishonored world space.
     pub position: Vec3,
     pub velocity: Vec3,
@@ -122,6 +134,8 @@ impl PlayerState {
     pub fn new(id: PlayerId, position: Vec3, yaw: f32) -> Self {
         Self {
             id,
+            kind: PawnKind::Human,
+            archetype: 0,
             position,
             velocity: Vec3::ZERO,
             yaw,
