@@ -80,7 +80,10 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
     let mantle_path = format!("{CORVO}.pMantleTweaks");
     let mantle = l.obj(&mantle_path)?;
     let pawn = l.db.class_defaults("DishonoredPawn")?;
-    let cyl = l.obj("Default__DishonoredPawn.CollisionCylinder")?;
+    // Subobject templates in a subclass CDO are deltas against the parent class CDO's
+    // template of the same name: player radius 35 over the base pawn cylinder.
+    let mut cyl = l.obj("Default__DishonoredPawn.CollisionCylinder")?;
+    crate::tweaks::merge(&mut cyl, &l.db.delta("Default__DishonoredPlayerPawn.CollisionCylinder")?);
 
     let gravity_z = game_ini
         .get_f32("Engine.WorldInfo", "DefaultGravityZ")
@@ -91,6 +94,7 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
     );
     // UE3 stock values not overridden anywhere we have found (LIKELY; see UNKNOWNS).
     l.prov.insert("movement.ground_friction".into(), "UE3 stock PhysicsVolume.GroundFriction = 8.0 (LIKELY)".into());
+    l.prov.insert("movement.terminal_velocity".into(), "UE3 stock PhysicsVolume.TerminalVelocity = 4000.0 (LIKELY)".into());
     l.prov.insert("movement.walkable_floor_z".into(), "UE3 stock Pawn.WalkableFloorZ = 0.7 (LIKELY)".into());
 
     let a = &attrs_path;
@@ -105,10 +109,11 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
         jump_z: l.attr(&attrs, a, "m_JumpZ", "movement.jump_z")?,
         air_control: l.f(&corvo, CORVO, "m_fAirControl", "movement.air_control")?,
         max_fall_speed: l.f(&corvo, CORVO, "m_fMaxFallSpeed", "movement.max_fall_speed")?,
+        terminal_velocity: 4000.0,
         max_step_height: l.f(&pawn, "Default__DishonoredPawn", "MaxStepHeight", "movement.max_step_height")?,
-        collision_radius: l.f(&cyl, "Default__DishonoredPawn.CollisionCylinder", "CollisionRadius", "movement.collision_radius")?,
-        collision_half_height: l.f(&cyl, "Default__DishonoredPawn.CollisionCylinder", "CollisionHeight", "movement.collision_half_height")?,
-        crouch_half_height: l.f(&corvo, CORVO, "m_fCrouchHeight", "movement.crouch_half_height")?,
+        collision_radius: l.f(&cyl, "Default__DishonoredPlayerPawn.CollisionCylinder (over DishonoredPawn template)", "CollisionRadius", "movement.collision_radius")?,
+        collision_half_height: l.f(&cyl, "Default__DishonoredPawn.CollisionCylinder (inherited by DishonoredPlayerPawn)", "CollisionHeight", "movement.collision_half_height")?,
+        crouch_half_height: l.f(&corvo, CORVO, "m_fSneakHeight", "movement.crouch_half_height")?,
         base_eye_height: l.f(&pawn, "Default__DishonoredPawn", "BaseEyeHeight", "movement.base_eye_height")?,
         strafe_mult_run: l.attr(&attrs, a, "m_GroundStrafeMultiplierRun", "movement.strafe_mult_run")?,
         strafe_mult_sprint: l.attr(&attrs, a, "m_GroundStrafeMultiplierSprint", "movement.strafe_mult_sprint")?,

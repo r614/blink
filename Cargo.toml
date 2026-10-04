@@ -16,6 +16,10 @@ serde_json = "1"
 ue3_package = { path = "crates/ue3_package" }
 dishonored_ir = { path = "crates/dishonored_ir" }
 dishonored_assets = { path = "crates/dishonored_assets" }
+dishonored_world = { path = "crates/dishonored_world" }
+dishonored_sim = { path = "crates/dishonored_sim" }
+dishonored_net = { path = "crates/dishonored_net" }
+dishonored_content = { path = "crates/dishonored_content" }
 
 [profile.dev]
 opt-level = 1

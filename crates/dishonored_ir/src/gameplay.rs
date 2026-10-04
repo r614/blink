@@ -19,7 +19,11 @@ pub struct MovementConfig {
     pub ground_friction: f32,
     pub jump_z: f32,
     pub air_control: f32,
+    /// UE3 `Pawn.MaxFallSpeed` semantics: max landing speed without damage (NOT a velocity clamp).
     pub max_fall_speed: f32,
+    /// UE3 `PhysicsVolume.TerminalVelocity` (stock 4000, LIKELY).
+    #[serde(default = "default_terminal_velocity")]
+    pub terminal_velocity: f32,
     pub max_step_height: f32,
     /// `CylinderComponent` radius / half-height (standing).
     pub collision_radius: f32,
@@ -38,6 +42,10 @@ pub struct MovementConfig {
     pub max_speed_before_falling_damage: f32,
     pub max_speed_before_falling_death: f32,
     pub mantle: MantleConfig,
+}
+
+fn default_terminal_velocity() -> f32 {
+    4000.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -192,6 +192,15 @@ impl Package {
             let n = r.count(2)?;
             r.skip(n * 2)?;
         }
+        if self.is_component_class(export) && flags & RF_CLASS_DEFAULT_OBJECT != 0 {
+            // Component class default objects: a single dword, then properties, with no
+            // NetIndex (Default__Component is 4 bytes + "None"; Default__CylinderComponent
+            // has its first tag at offset 4).
+            let _template_owner_class = r.i32()?;
+            let properties = read_properties(self, &mut r)
+                .with_context(|| format!("properties of component CDO {export} ({class})"))?;
+            return Ok(ObjectHeader { net_index: 0, properties, native_offset: r.pos() });
+        }
         if self.is_component_class(export) {
             // UComponent: TemplateOwnerClass, plus TemplateName for class-default templates.
             // Observed in L_Boyle_Ext_Env StaticMeshComponents: i32 0 precedes NetIndex.

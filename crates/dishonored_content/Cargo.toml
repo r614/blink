@@ -1,0 +1,16 @@
+[package]
+name = "dishonored_content"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Loads everything a match needs from the local install: collision, spawns, gameplay config"
+
+[dependencies]
+anyhow.workspace = true
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dishonored_assets.workspace = true
+dishonored_ir.workspace = true
+dishonored_world.workspace = true
+dishonored_sim.workspace = true

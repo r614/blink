@@ -1,0 +1,17 @@
+[package]
+name = "dishonored_sim"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Fixed-step authoritative Dishonored gameplay simulation (engine-independent)"
+
+[dependencies]
+glam = { workspace = true, features = ["serde"] }
+serde.workspace = true
+dishonored_ir.workspace = true
+dishonored_world.workspace = true
+
+serde_json.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "dishonored_world"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Collision world and spatial queries for the Dishonored simulation"
+
+[dependencies]
+glam = { workspace = true, features = ["serde"] }
+serde.workspace = true
+dishonored_ir.workspace = true
+anyhow.workspace = true
+bincode = { version = "2", features = ["serde"] }

@@ -169,12 +169,20 @@ impl TweakDb {
                 // variant we do not parse yet; they carry no gameplay tuning, so skip them.
                 match self.read(*loc) {
                     Ok(m) => merge(&mut out, &m),
-                    Err(_) if c != class => {}
+                    Err(_) if c != class => {} // tolerate unparsed engine CDOs
                     Err(e) => return Err(e.context(format!("CDO of {c}"))),
                 }
             }
         }
         Ok(out)
+    }
+
+    /// The object's own serialized delta, without class defaults.
+    pub fn delta(&self, path: &str) -> Result<TMap> {
+        let Some(loc) = self.objects.get(&path.to_ascii_lowercase()).copied() else {
+            bail!("tweak object {path} not found");
+        };
+        self.read(loc)
     }
 
     pub fn class_of(&self, path: &str) -> Option<String> {
