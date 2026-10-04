@@ -2328,6 +2328,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dishonored_bots"
+version = "0.1.0"
+dependencies = [
+ "dishonored_sim",
+ "dishonored_world",
+ "glam",
+]
+
+[[package]]
 name = "dishonored_content"
 version = "0.1.0"
 dependencies = [
@@ -2390,7 +2399,16 @@ dependencies = [
  "anyhow",
  "bevy",
  "dishonored_assets",
+ "dishonored_bots",
+ "dishonored_content",
  "dishonored_ir",
+ "dishonored_multiplayer",
+ "dishonored_net",
+ "dishonored_sim",
+ "dishonored_world",
+ "glam",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,0 +1,11 @@
+[package]
+name = "dishonored_bots"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Test bots that produce PlayerInput from observed state (harness / offline play only)"
+
+[dependencies]
+glam.workspace = true
+dishonored_sim.workspace = true
+dishonored_world.workspace = true

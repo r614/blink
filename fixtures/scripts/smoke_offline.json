@@ -1,0 +1,16 @@
+{"steps":[
+  {"wait_ticks": 90},
+  {"screenshot": "01_spawn"},
+  {"dump": "01_spawn"},
+  {"ticks": 120, "input": {"forward": 127, "yaw": 180, "buttons": ["SPRINT"]}},
+  {"screenshot": "02_after_sprint"},
+  {"dump": "02_after_sprint"},
+  {"ticks": 20, "input": {"yaw": 180, "pitch": -8, "buttons": ["SECONDARY"], "left_hand": "Blink"}},
+  {"screenshot": "03_blink_aim"},
+  {"ticks": 40, "input": {"yaw": 180, "pitch": -8, "left_hand": "Blink"}},
+  {"screenshot": "04_after_blink"},
+  {"dump": "04_after_blink"},
+  {"ticks": 30, "input": {"yaw": 90, "buttons": ["PRIMARY"]}},
+  {"screenshot": "05_swing"},
+  {"quit": true}
+]}

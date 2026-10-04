@@ -5,3 +5,4 @@
 /extracted/
 /cache/
 *.local.*
+/harness_out/
