@@ -21,6 +21,7 @@ mod input_map;
 mod map_render;
 mod players;
 mod session;
+mod viewmodel;
 
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::input::mouse::AccumulatedMouseMotion;
@@ -175,7 +176,8 @@ fn main() {
             .init_resource::<harness::ControlOverride>()
             .init_resource::<debug::DebugToggles>()
             .init_gizmo_group::<debug::XRayGizmos>()
-            .add_systems(Startup, (players::setup_player_assets, hud::setup_hud, debug::setup_gizmos, (characters::load_library, characters::load_animations).chain()))
+            .add_systems(Startup, (players::setup_player_assets, hud::setup_hud, debug::setup_gizmos, (characters::load_library, characters::load_animations).chain(), viewmodel::load_view_rig))
+            .init_resource::<viewmodel::ViewAnim>()
             .add_systems(FixedUpdate, (harness::script_fixed, session::fixed_tick).chain())
             .add_systems(
                 Update,
@@ -184,6 +186,9 @@ fn main() {
                     input_map::cursor_lock,
                     players::sync_players,
                     characters::animate_characters,
+                    viewmodel::spawn_view_rig,
+                    viewmodel::apply_fov,
+                    viewmodel::animate_view_rig.after(players::camera_follow),
                     players::sync_projectiles,
                     players::camera_follow,
                     hud::update_hud,
@@ -233,6 +238,7 @@ fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Asset
     }
     commands.spawn((
         DirectionalLight { illuminance: 6000.0, shadow_maps_enabled: false, color: Color::srgb(0.75, 0.8, 1.0), ..default() },
+        bevy::camera::visibility::RenderLayers::from_layers(&[0, viewmodel::VIEW_LAYER]),
         Transform::default().looking_to(Vec3::new(-0.4, -1.0, -0.3), Vec3::Y),
     ));
 }

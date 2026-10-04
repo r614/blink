@@ -1,0 +1,9 @@
+{"steps":[
+  {"wait_ticks": 240}, {"screenshot": "tp_01"},
+  {"wait_ticks": 20}, {"screenshot": "tp_02"},
+  {"wait_ticks": 20}, {"screenshot": "tp_03"},
+  {"wait_ticks": 120}, {"screenshot": "tp_04"},
+  {"wait_ticks": 20}, {"screenshot": "tp_05"},
+  {"wait_ticks": 200}, {"screenshot": "tp_06"},
+  {"quit": true}
+]}

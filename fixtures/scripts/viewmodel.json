@@ -1,0 +1,23 @@
+{"steps":[
+  {"wait_ticks": 120},
+  {"screenshot": "fp_01_sword_idle"},
+  {"ticks": 9, "input": {"buttons": ["PRIMARY"]}},
+  {"screenshot": "fp_02_swing_active"},
+  {"ticks": 20, "input": {}},
+  {"screenshot": "fp_03_swing_follow"},
+  {"ticks": 40, "input": {"buttons": ["BLOCK"]}},
+  {"screenshot": "fp_04_block"},
+  {"ticks": 60, "input": {"left_hand": "Pistol"}},
+  {"screenshot": "fp_05_pistol"},
+  {"ticks": 4, "input": {"left_hand": "Pistol", "buttons": ["SECONDARY"]}},
+  {"ticks": 6, "input": {"left_hand": "Pistol"}},
+  {"screenshot": "fp_06_pistol_fire"},
+  {"ticks": 60, "input": {"left_hand": "Crossbow"}},
+  {"screenshot": "fp_07_crossbow"},
+  {"ticks": 60, "input": {"left_hand": "Blink"}},
+  {"ticks": 30, "input": {"left_hand": "Blink", "buttons": ["SECONDARY"]}},
+  {"screenshot": "fp_08_blink_aim"},
+  {"ticks": 40, "input": {"left_hand": "Blink", "forward": 127}},
+  {"screenshot": "fp_09_walk"},
+  {"quit": true}
+]}

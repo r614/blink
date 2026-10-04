@@ -6,6 +6,10 @@ use dishonored_sim::input::{LeftHand, PlayerInput, buttons};
 use dishonored_sim::state::{PlayerId, PlayerState};
 use dishonored_world::{WorldQuery, channel};
 use glam::Vec3;
+use std::sync::Arc;
+
+pub mod nav;
+pub use nav::NavGraph;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BotStyle {
@@ -29,11 +33,13 @@ pub struct Bot {
     blink_hold: u32,
     fire_cooldown: u32,
     pub target: Option<PlayerId>,
+    nav: Option<Arc<NavGraph>>,
+    follow: nav::Follower,
 }
 
 impl Bot {
     pub fn new(id: PlayerId, style: BotStyle, seed: u64) -> Self {
-        Self { id, style, rng: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1, tick: 0, wander_yaw: (seed % 360) as f32, last_pos: Vec3::ZERO, stuck_ticks: 0, blink_hold: 0, fire_cooldown: 0, target: None }
+        Self { id, style, rng: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1, tick: 0, wander_yaw: (seed % 360) as f32, last_pos: Vec3::ZERO, stuck_ticks: 0, blink_hold: 0, fire_cooldown: 0, target: None, nav: None, follow: nav::Follower::default() }
     }
 
     fn rand(&mut self) -> f32 {
@@ -151,6 +157,20 @@ impl Bot {
         if !me.alive {
             return input;
         }
+        // Stuck: hop, sidestep and replan.
+        if me.position.distance(self.last_pos) < 0.5 {
+            self.stuck_ticks += 1;
+        } else {
+            self.stuck_ticks = 0;
+        }
+        self.last_pos = me.position;
+        let unstick = self.stuck_ticks > 30;
+        if unstick {
+            self.stuck_ticks = 0;
+            self.wander_yaw = self.rand() * 360.0;
+            self.blink_hold = 20;
+            self.follow.force_replan();
+        }
         let Some(t) = target.and_then(|id| others.iter().find(|o| o.id == id && o.alive)) else {
             // No contract yet: stroll like a civilian.
             if self.tick % 240 == 0 {
@@ -159,15 +179,29 @@ impl Bot {
             input.yaw = self.wander_yaw;
             input.forward = 100;
             input.buttons |= buttons::WALK;
+            if unstick {
+                input.buttons |= buttons::JUMP;
+            }
             return input;
         };
-        let _ = world;
         // Aim for a point behind the target (back assassination).
         let behind = t.position - Vec3::new(t.yaw.to_radians().cos(), t.yaw.to_radians().sin(), 0.0) * 90.0;
-        let to = behind - me.position;
         let dist = (t.position - me.position).truncate().length();
+        let goal = match self.nav.clone() {
+            Some(nav) if dist > 250.0 => self.follow.steer(&nav, world, me.position, behind),
+            _ => behind,
+        };
+        let to = goal - me.position;
         input.yaw = to.y.atan2(to.x).to_degrees();
-        if dist > 1500.0 {
+        if self.blink_hold > 0 {
+            // Sidestep out of whatever we are wedged against.
+            self.blink_hold -= 1;
+            input.yaw = self.wander_yaw;
+            input.forward = 127;
+            if self.blink_hold == 19 {
+                input.buttons |= buttons::JUMP;
+            }
+        } else if dist > 1500.0 {
             input.forward = 127;
             input.buttons |= buttons::SPRINT;
         } else if dist > 160.0 {
@@ -181,5 +215,11 @@ impl Bot {
             }
         }
         input
+    }
+
+    /// Use a navigation graph for pathing (Contracts bots).
+    pub fn with_nav(mut self, nav: Arc<NavGraph>) -> Self {
+        self.nav = Some(nav);
+        self
     }
 }

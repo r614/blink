@@ -33,11 +33,11 @@ pub struct CharacterLibrary {
 }
 
 /// C: Dishonored pawn space (Z-up, uu) -> Bevy (Y-up, scaled).
-fn to_bevy(m: glam::Mat4) -> Mat4 {
+pub fn to_bevy(m: glam::Mat4) -> Mat4 {
     coords::transform(m)
 }
 
-fn upload(model: &CharacterModel, meshes: &mut Assets<Mesh>, images: &mut Assets<Image>, mats: &mut Assets<StandardMaterial>, binds: &mut Assets<SkinnedMeshInverseBindposes>) -> CharacterGpu {
+pub fn upload(model: &CharacterModel, meshes: &mut Assets<Mesh>, images: &mut Assets<Image>, mats: &mut Assets<StandardMaterial>, binds: &mut Assets<SkinnedMeshInverseBindposes>) -> CharacterGpu {
     let tex: Vec<Handle<Image>> = model.textures.iter().map(|t| images.add(to_image(t))).collect();
     let materials: Vec<Handle<StandardMaterial>> = model
         .materials
@@ -224,7 +224,13 @@ pub fn load_animations(mut commands: Commands, lib: Option<Res<CharacterLibrary>
     let Some(lib) = lib else { return };
     let Ok(content) = dishonored_assets::Content::locate() else { return };
     match dishonored_assets::characters::load_anim_set(&content, "L_Boyle_Ext_Script", "Npc_EliteGuard_empty_as.Npc_EliteGuard_empty_as", LOCOMOTION) {
-        Ok(anims) => {
+        Ok(mut anims) => {
+            // The set belongs to the elite guard skeleton (archetype 1); Edge joints follow its bone order.
+            if let Some(guard) = lib.models.get(1).and_then(|m| m.parts.first()) {
+                let before = anims.tracks.clone();
+                anims.edge_order(&guard.bones);
+                info!("locomotion tracks reordered to skeleton order: {}", before != anims.tracks);
+            }
             let track_to_bone = lib
                 .models
                 .iter()

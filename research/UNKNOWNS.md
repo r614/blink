@@ -28,3 +28,5 @@ Status: OPEN / ACTIVE / RESOLVED. Resolved items stay listed with their resoluti
 | U-021 | P2 | PARTLY RESOLVED | Sword timings, parry window, reload/equip times | Swing, parry, assassination, equip and reload now come from AnimNotify data (LOG 2026-10-04). Stagger and blocked recoil are still SPECULATIVE; verify the windows in the original game (U-011). |
 | U-022 | P2 | OPEN | Edge fixed-format channel path (410 clips with flags=2) | Port 0x009D4D90/0x009D5390. |
 | U-023 | P2 | OPEN | Edge root motion / translation tracks (rotation-only retargeting today) | Compare against original playback. |
+| U-024 | P2 | OPEN | Edge clips with fewer joints than their AnimSet tracks (e.g. Powers_Sprint 29/30, Empty_AimAdd* 67/69): which tracks are omitted | Compare per-clip joint tables against the set; check the blend-tree evaluator for a per-sequence track map. |
+| U-025 | P2 | LIKELY | First-person weapon socket convention (weapon mesh -> handAttachment_*_jnt) | Sword: Rz(180)*inverse(RotOrigin) (blade leaves the thumb side and points forward-up in Sword_Ready_Idle); guns: inverse(RotOrigin). Chosen visually; confirm against original captures (U-011). |

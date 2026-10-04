@@ -124,3 +124,43 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Result:** All mechanics and contracts tests pass with the measured values.
 - **Confidence:** LIKELY. Notify times are CONFIRMED data. Mapping them to gameplay windows (for example, reload = sum of the In/Mag/Out sequences) is an inference. Stagger and blocked recoil are still SPECULATIVE.
 - **Implementation consequence:** U-021 is mostly resolved. Swings are faster and parries more forgiving than the earlier guesses.
+
+## 2026-10-04 — First-person rig and Edge joint order
+- **Question:** Can the first-person view use Corvo's real arms, weapons and animations?
+- **Evidence:**
+  - `Engine.upk` contains `Ply_Player.Skm_Player`, a 79-bone full-body rig. It has `camera_jnt`, `handAttachment_R/L_jnt` and legs.
+  - `Startup.upk` contains the weapons (`Wpn_PlySword01`, `Wpn_PlyGunElite`, `crossbow_01`, each with a `Root_Attachment_jnt`) and the player AnimSets (`Ply_Sword_*`, `Ply_Guns_as`, `Ply_Powers_as`, `Ply_Pistol_as`, `Ply_Crossbow_as`).
+  - The sword sets animate 69 tracks (the whole rig minus the legs). The gun and power sets animate 30 (root plus the left arm).
+  - The `fp_probe` tool poses the rig and prints bones relative to the camera bone.
+- **Experiment:**
+  1. Track mapping. Under `TrackBoneNames` order, `head_jnt` received exactly camera_jnt's bind translation. Re-mapping Edge joints to the set's tracks sorted by skeleton bone index made every animated translation match its bind length.
+  2. Camera frame. The rig is placed so the animated camera bone coincides with the game camera (forward = −Z, right = +Y, up = +X of camera_jnt).
+  3. Sockets. I compared candidate socket conventions numerically (blade axis against the fist's pinky→index axis) and visually with scripted screenshots.
+  4. FOV. `DefaultCamera.ini` `m_fDefaultFOV=75` is applied as a horizontal FOV. It had been fed to Bevy as a vertical FOV, which made the world view much too wide.
+- **Result:** The first-person view shows the following:
+  - the left hand in the power idle, lower left
+  - the sword tip in the lower right in Ready idle
+  - full slash arcs synchronised to the simulation's swing phases
+  - block/parry poses
+  - pistol and crossbow equip, fire and reload in the left hand
+  - Blink aim
+
+  The NPC locomotion set was also reordered (its third-person walk still reads correctly).
+- **Confidence:**
+  - Joint order: CONFIRMED.
+  - Camera-bone placement: STRONG (the left-arm poses frame naturally).
+  - Socket conventions: LIKELY (U-025).
+  - FOV: CONFIRMED value; the horizontal interpretation is LIKELY (UE3 convention).
+- **Implementation consequence:** `crates/dishonored_runtime/src/viewmodel.rs` adds an overlay camera on render layer 1 with its own depth. Its clip state machine is presentation-only, driven by sword/left-hand phase, movement mode, speed and crouch.
+
+## 2026-10-04 — Contracts bots navigate the original nav points
+- **Question:** Why did the 10-minute 8-bot Contracts harness produce 0 kills?
+- **Evidence:** Per-bot traces showed every bot frozen against geometry within 10 s. Bots steered in a straight line toward their target.
+- **Experiment:** Built `dishonored_bots::nav::NavGraph` over the map's original AI points and PlayerStarts:
+  - 235 nodes and 788 edges on L_Boyle_Ext_P
+  - edges are segments with clearance at knee and chest height and ground under the path
+  - A* pathing with waypoint skipping
+  - stuck recovery (hop, sidestep, replan)
+- **Result:** The harness passes 15/15: 29 contract kills, 34 chase transitions, guard and civilian responses, determinism, and the networked checks.
+- **Confidence:** CONFIRMED (harness).
+- **Implementation consequence:** Contracts bots in the harness use the nav graph. Test bots remain clients that act only through `PlayerInput`.

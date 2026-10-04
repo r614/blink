@@ -135,7 +135,9 @@ pub fn sync_players(
                 t.translation = eye + yaw_rot * off - Vec3::Y * 0.3;
                 t.rotation = yaw_rot * rot;
                 let _ = base;
-                *vis = if p.alive && p.mode != MoveMode::Blinking { Visibility::Inherited } else { Visibility::Hidden };
+                // The local first-person view draws the real sword on the arms rig instead.
+                let own_fp = Some(p.id) == me_id && !third && cams.iter().all(|c| c.follow.is_none_or(|f| f == p.id));
+                *vis = if p.alive && p.mode != MoveMode::Blinking && !own_fp { Visibility::Inherited } else { Visibility::Hidden };
             }
             None => { commands.entity(e).despawn(); }
         }

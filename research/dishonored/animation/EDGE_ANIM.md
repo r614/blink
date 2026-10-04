@@ -94,7 +94,20 @@ probably a polynomial slerp approximation (LIKELY; `nlerp` is used meanwhile).
 
 `anim_sheet` renders `Empty_Idle`, `Empty_WalkN` and `Empty_RunN` on the elite-guard
 skeleton: walk shows alternating legs with counter-swinging arms, and run shows knee drive and
-arm pumping. Joint `j` maps to `AnimSet.TrackBoneNames[j]`, then to the mesh bone by name.
+arm pumping.
+
+**Joint order (corrected 2026-10-04).** Edge joint `j` is *not* `TrackBoneNames[j]`. It is the
+`j`-th track of the set in the bone order of the skeleton the set was compressed against
+(`AnimLibrary::edge_order`). On `Ply_Sword_Idle_as` (69 tracks) against Engine
+`Ply_Player.Skm_Player` (79 bones), the order is the mesh bone order minus the ten leg bones.
+Every animated translation then equals its bone's bind translation (camera_jnt (5.5, 0, -7.0),
+sleeve_R 22, handAttachment_R (7, 6, 0), Root_jnt 100). Under `TrackBoneNames` order, `head_jnt`
+received camera_jnt's translation. CONFIRMED. The earlier elite-guard validation only looked
+plausible because locomotion plays rotations alone; that set is also reordered now.
+
+Some clips carry fewer joints than the set has tracks (e.g. `Powers_Sprint` 29 of 30,
+`Empty_AimAdd*` 67 of 69). Which tracks are dropped is open (U-024). Sampling past the clip's
+joint count returns nothing.
 
 ## Open items
 

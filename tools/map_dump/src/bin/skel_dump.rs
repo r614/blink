@@ -23,8 +23,19 @@ fn main() -> Result<()> {
                 for (label, f) in [("R*(v-o)", 0), ("R*v-o", 1), ("R*(v+o)", 2)] { let (mut zl, mut zh) = (f32::MAX, f32::MIN); let mut fwd = glam::Vec3::ZERO; for p in &m.positions { let q = match f { 0 => rm.transform_vector3(*p - m.mesh_origin), 1 => rm.transform_vector3(*p) - m.mesh_origin, _ => rm.transform_vector3(*p + m.mesh_origin) }; zl = zl.min(q.z); zh = zh.max(q.z); fwd += q; } println!("   {label}: z {zl:.0}..{zh:.0} mean {:.1}", fwd / m.positions.len() as f32); }
                 println!("OK {path}: {} bones, {} verts, {} tris, {} sections, {} mats, edge skel {} B, origin {:?} rot {:?}, bounds {lo:.0}..{hi:.0}", m.bones.len(), m.positions.len(), m.indices.len() / 3, m.sections.len(), m.materials.len(), m.edge_skeleton_bytes, m.mesh_origin, m.rot_origin);
                 if a.iter().any(|x| x == "--conv") { for conj in [false, true] { let g = globals(&m.bones, conj); for (bi, b) in m.bones.iter().enumerate() { if ["wrist", "ankle", "toe", "hand_jnt", "knee", "elbow"].iter().any(|k| b.name.contains(k)) { println!("  conj={conj} {} -> {:.1}", b.name, g[bi]); } } } }
+                if let Some(bn) = a.iter().position(|x| x == "--bone").and_then(|i| a.get(i + 1)) {
+                    let bones: Vec<dishonored_ir::BoneAsset> = m.bones.iter().map(|b| dishonored_ir::BoneAsset { name: b.name.clone(), parent: b.parent, rotation: b.orientation, translation: b.position }).collect();
+                    let g = dishonored_assets::characters::bind_globals(&bones);
+                    let m2p = rm * glam::Mat4::from_translation(m.mesh_origin);
+                    for (bi, b) in bones.iter().enumerate() {
+                        if b.name.to_ascii_lowercase().contains(&bn.to_ascii_lowercase()) {
+                            let w = m2p * g[bi];
+                            println!("  {} pawn pos {:.1} X {:.2} Y {:.2} Z {:.2}", b.name, w.w_axis.truncate(), w.x_axis.truncate(), w.y_axis.truncate(), w.z_axis.truncate());
+                        }
+                    }
+                }
                 if a.iter().any(|x| x == "--bones") {
-                    for (bi, b) in m.bones.iter().enumerate().take(80) { println!("  bone {bi} {} parent {} pos {:.1} rot {:.3}", b.name, b.parent, b.position, b.orientation); }
+                    for (bi, b) in m.bones.iter().enumerate() { println!("  bone {bi} {} parent {} pos {:.1} rot {:.3}", b.name, b.parent, b.position, b.orientation); }
                 }
             }
             Err(e) => { fail += 1; println!("FAIL {path}: {e:#}"); }

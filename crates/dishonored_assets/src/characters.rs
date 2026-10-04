@@ -43,6 +43,14 @@ pub const ARCHETYPES: &[(&str, &[(&str, &str)])] = &[
 /// Load one archetype. `pawn_half_height` aligns the feet with the collision cylinder.
 pub fn load_character(content: &Content, name: &str, pawn_half_height: f32, max_tex: u32) -> Result<CharacterModel> {
     let (_, parts) = ARCHETYPES.iter().find(|a| a.0 == name).with_context(|| format!("unknown archetype {name}"))?;
+    load_model(content, name, parts, Some(pawn_half_height), max_tex)
+}
+
+/// Load skeletal mesh parts sharing the first part's mesh->pawn transform. With
+/// `pawn_half_height`, the model is turned to face +X and stood on the cylinder bottom
+/// (pawn bodies); without it, mesh->pawn is just R(RotOrigin)*(v+MeshOrigin) (first-person
+/// rig, weapons).
+pub fn load_model(content: &Content, name: &str, parts: &[(&str, &str)], pawn_half_height: Option<f32>, max_tex: u32) -> Result<CharacterModel> {
     let mut shared_m2p: Option<Mat4> = None;
     let mut model = CharacterModel { name: name.to_string(), parts: Vec::new(), materials: Vec::new(), textures: Vec::new() };
     let mut mat_ids: HashMap<(String, usize), Option<usize>> = HashMap::new();
@@ -99,6 +107,7 @@ pub fn load_character(content: &Content, name: &str, pawn_half_height: f32, max_
             mesh_to_pawn: m2p,
         });
     }
+    let Some(pawn_half_height) = pawn_half_height else { return Ok(model) };
     // Face +X in pawn space: the toes point along mesh +Z.
     if let Some(p0) = model.parts.first() {
         let f = p0.mesh_to_pawn.transform_vector3(Vec3::Z);
@@ -171,4 +180,16 @@ pub fn load_anim_set(content: &Content, pkg_name: &str, set_path: &str, wanted: 
         }
     }
     Ok(AnimLibrary { tracks, clips })
+}
+
+impl AnimLibrary {
+    /// Put `tracks` in Edge joint order: Edge clip joint `j` is the set's `j`-th track in
+    /// the bone order of the skeleton the set was compressed against, not the order of
+    /// `TrackBoneNames` (verified on Ply_Sword_* vs Engine Ply_Player.Skm_Player: every
+    /// animated translation then matches its bone's bind length). Tracks missing from the
+    /// skeleton keep their relative order at the end.
+    pub fn edge_order(&mut self, skeleton: &[BoneAsset]) {
+        let idx = |n: &String| skeleton.iter().position(|b| b.name.eq_ignore_ascii_case(n)).unwrap_or(usize::MAX);
+        self.tracks.sort_by_key(idx);
+    }
 }

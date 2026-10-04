@@ -1,0 +1,14 @@
+{"steps":[
+  {"wait_ticks": 100},
+  {"ticks": 1, "input": {"buttons": ["PRIMARY"]}},
+  {"ticks": 3, "input": {}}, {"screenshot": "sw_04"},
+  {"ticks": 4, "input": {}}, {"screenshot": "sw_08"},
+  {"ticks": 4, "input": {}}, {"screenshot": "sw_12"},
+  {"ticks": 4, "input": {}}, {"screenshot": "sw_16"},
+  {"ticks": 4, "input": {}}, {"screenshot": "sw_20"},
+  {"ticks": 6, "input": {}}, {"screenshot": "sw_26"},
+  {"ticks": 8, "input": {}}, {"screenshot": "sw_34"},
+  {"ticks": 12, "input": {}}, {"screenshot": "sw_46"},
+  {"ticks": 20, "input": {}}, {"screenshot": "sw_66"},
+  {"quit": true}
+]}

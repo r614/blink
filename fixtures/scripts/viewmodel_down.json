@@ -1,0 +1,12 @@
+{"steps":[
+  {"wait_ticks": 100},
+  {"ticks": 30, "input": {"pitch": -40, "left_hand": "Empty"}},
+  {"screenshot": "down_idle"},
+  {"ticks": 12, "input": {"pitch": -10, "left_hand": "Empty", "buttons": ["PRIMARY"]}},
+  {"screenshot": "swing_12"},
+  {"ticks": 6, "input": {"pitch": -10, "left_hand": "Empty"}},
+  {"screenshot": "swing_18"},
+  {"ticks": 6, "input": {"pitch": -10, "left_hand": "Empty"}},
+  {"screenshot": "swing_24"},
+  {"quit": true}
+]}

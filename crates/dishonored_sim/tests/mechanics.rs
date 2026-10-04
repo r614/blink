@@ -257,10 +257,11 @@ fn sword_hit_block_parry() {
     r.steps(40, &[(1, input(0., 0, 0)), (2, input(180., 0, buttons::BLOCK))]);
     assert!(r.events.iter().any(|e| matches!(e, SimEvent::SwordBlocked { .. })));
     assert!((r.p(2).vitals.health - 56.0).abs() < 1e-3);
-    // Perfect block (block pressed right before the hit lands): attacker staggered.
+    // Perfect block (block pressed right before the hit lands, ~0.13 s after the swing):
+    // attacker staggered.
     r.steps(30, &[(1, input(0., 0, 0)), (2, input(180., 0, 0))]);
     r.step(&[(1, input(0., 0, buttons::PRIMARY)), (2, input(180., 0, 0))]);
-    r.steps(10, &[(1, input(0., 0, 0)), (2, input(180., 0, 0))]);
+    r.steps(3, &[(1, input(0., 0, 0)), (2, input(180., 0, 0))]);
     r.step(&[(1, input(0., 0, 0)), (2, input(180., 0, buttons::BLOCK))]);
     r.steps(20, &[(1, input(0., 0, 0)), (2, input(180., 0, buttons::BLOCK))]);
     assert!(r.events.iter().any(|e| matches!(e, SimEvent::SwordParried { .. })), "no parry");

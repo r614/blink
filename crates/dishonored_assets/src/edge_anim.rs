@@ -499,7 +499,7 @@ impl EdgeClip {
 impl BakedClip {
     /// Sample at `time` seconds (looping), blending neighbouring frames.
     pub fn sample(&self, time: f32, joint: usize) -> (Option<Quat>, Option<Vec3>) {
-        if self.num_frames == 0 {
+        if self.num_frames == 0 || self.rotations.first().is_none_or(|r| joint >= r.len()) {
             return (None, None);
         }
         let len = (self.num_frames - 1).max(1) as f32;
