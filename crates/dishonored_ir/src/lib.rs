@@ -71,6 +71,10 @@ pub struct MaterialParams {
     pub opacity_clip: f32,
     pub scalars: Vec<(String, f32)>,
     pub vectors: Vec<(String, [f32; 4])>,
+    /// Sky dome / moon / sun material (`Skies.*`, `Moon_PMAT`, `Sun_PMAT` bases): rendered
+    /// unlit, without fog, shadows or lightmaps.
+    #[serde(default)]
+    pub sky: bool,
     /// Path of the root `Material` of the chain, if reached.
     pub base_material: Option<String>,
 }

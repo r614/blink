@@ -167,6 +167,7 @@ pub fn environment_light(map: &DishonoredMap, images: &mut Assets<Image>) -> Opt
     })
 }
 
+
 fn scalar(p: &MaterialParams, name: &str) -> Option<f32> {
     p.scalars.iter().find(|(n, _)| n.trim().eq_ignore_ascii_case(name)).map(|v| v.1)
 }
@@ -242,6 +243,29 @@ pub fn build_material(i: usize, m: &MaterialAsset, p: &MaterialParams, images: &
         mat.perceptual_roughness = (2.0 / (n + 2.0)).sqrt().sqrt().clamp(0.089, 1.0);
     } else {
         mat.reflectance = 0.1;
+    }
+    if p.sky && f.sky {
+        // Sky dome, moon and sun: unlit, unfogged (UE3 skies sit beyond the fog's reach),
+        // visible from inside. APPROXIMATION of Skies_PMAT (gradient + two scrolling cloud
+        // layers + horizon glow): texture * (D_Diffuse_color + mean(gradient top, bottom)).
+        mat.unlit = true;
+        mat.fog_enabled = false;
+        mat.cull_mode = None;
+        mat.double_sided = true;
+        mat.normal_map_texture = None;
+        if let Some(c) = vector(p, "Moon_Color").or(vector(p, "Color")) {
+            let k = c[3] * scalar(p, "SunIntensity").unwrap_or(1.0);
+            mat.base_color = Color::linear_rgb(c[0] * k, c[1] * k, c[2] * k);
+            mat.alpha_mode = AlphaMode::Add;
+        } else {
+            let d = vector(p, "D_Diffuse_color").unwrap_or([0.0; 4]);
+            let t = vector(p, "G_Gradiant_Top").unwrap_or([0.0; 4]);
+            let b = vector(p, "G_Gradiant_Bottom").unwrap_or([0.0; 4]);
+            let c = [0, 1, 2].map(|i| d[i] + 0.5 * (t[i] + b[i]));
+            mat.base_color = Color::linear_rgb(c[0], c[1], c[2]);
+            mat.alpha_mode = AlphaMode::Opaque;
+        }
+        return mat;
     }
     if let Some(e) = p.emissive {
         let c = vector(p, "E_Emissive_Color").unwrap_or([1.0; 4]);
@@ -368,7 +392,12 @@ pub fn spawn_map(
                 transform,
                 MapGeometry { instance: ii },
             ));
-            if let Some(lm) = inst.lightmap.filter(|_| features.lightmaps && mesh.uv1.len() == mesh.positions.len()) {
+            let is_sky = features.sky && mat_id.and_then(|m| map.material_params.get(m)).is_some_and(|p| p.sky);
+            let translucent = mat_id.is_some_and(|m| map.materials[m].blend == BlendHint::Translucent);
+            if is_sky || translucent {
+                e.insert(bevy::light::NotShadowCaster);
+            }
+            if let Some(lm) = inst.lightmap.filter(|_| !is_sky && features.lightmaps && mesh.uv1.len() == mesh.positions.len()) {
                 e.insert(bevy::pbr::Lightmap {
                     image: lightmap_handles[lm.atlas].clone(),
                     uv_rect: Rect::from_corners(lm.uv_min, lm.uv_max),

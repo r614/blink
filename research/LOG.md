@@ -236,3 +236,25 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   field while Arkane's is far-only; film grain and bloom tint have no Bevy equivalent.
 - **Implementation consequence:** Matching brightness needs original-game captures (U-011); the exposure can
   be tuned with `DISHONORED_EV_BIAS` / `DISHONORED_TONEMAP` without rebuilding.
+
+## 2026-10-04 — Skydome, moon and backdrop cards
+- **Question:** What forms the sky and the distant city, and why did it look wrong?
+- **Evidence:** `StaticMeshCollectionActor_32[99]` = `Skies.SkyDome_Multi_UV` (bounds +-205,852 uu, height 123,511,
+  centred at (35379, -6871, 1793)) with `Skies02.BOYLE.Boyle_2_inst` (base `Skies.Skies_PMAT`, MLM_Unlit:
+  gradient top/bottom, two scrolling cloud layers, horizon glow; `D_Diffuse_color` 0.07). `StaticMeshCollectionActor_33[0]`
+  = `Skies.Mesh.Stm_SunDome` scaled ~4000x at (27976, -127954, 73119) with `Moon_Boyle_INST` (base
+  `Vfx_Materials.main_materials.Moon_PMAT`, translucent, `Moon_Color` (0.95, 0.95, 1) x 2, texture only as a base
+  default). Backdrop: `Boyle_vista_buildings_*`/`Boyle_vista_far_*` cards (up to ~83,000 uu out, masked, lit windows
+  in the G channel of the `_o` mask, see Cross-package materials) plus `vista_buildings_01.*` meshes. The far edge of
+  the dome is ~244,000 uu (4.9 km Bevy) from the estate, close to the old 6 km far plane.
+- **Experiment:** Sky materials (base `Skies.*`, `Moon_PMAT`, `Sun_PMAT`) render unlit, unfogged, double-sided,
+  without lightmaps or shadow casting; the moon is additive with `Moon_Color` x intensity; sky dome colour =
+  texture x (D_Diffuse_color + mean gradient). Far plane 12 km. Translucent FX no longer cast shadows.
+- **Result:** The moon appears as the large pale disc behind the estate and the cloud dome is visible above
+  the fog. `harness_out/step5_nosky/{moon,skyline}.png` (before) vs `harness_out/step5_sky/{moon,skyline}.png`
+  (after, side by side in `harness_out/step5_sky/sky_sheet.png`); full views `harness_out/step5_sky/sheet.png`.
+- **Confidence:** CONFIRMED for which meshes/materials form the sky; APPROXIMATION for their shading (no cloud
+  scrolling, no horizon glow, moon uses the material's default cloud texture instead of the real moon shader).
+- **Implementation consequence:** A custom sky material is needed for the gradient/cloud animation. The clear
+  colour stays the old dark blue: the sky gradient's bottom colour rendered as saturated cyan in gaps below the
+  dome rim.

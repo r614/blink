@@ -754,6 +754,9 @@ impl Importer<'_> {
             None if opacity_key.is_some() => (MaterialBlend::Masked, false),
             None => (MaterialBlend::Opaque, false),
         };
+        let sky = chain.base_material.as_deref().is_some_and(|b| b.starts_with("Skies.") || b.contains("Moon_PMAT") || b.contains("Sun_PMAT"));
+        // Sky shaders sample their own (default) textures, e.g. Moon_PMAT's moon disc.
+        let diffuse_key = diffuse_key.or_else(|| if sky { chain.textures.first().or(chain.default_textures.first()).map(|t| t.1) } else { None });
         let mut diffuse = diffuse_key.and_then(|key| self.texture(key));
         let normal = normal_key.and_then(|key| self.texture(key));
         let opacity = opacity_key.and_then(|key| self.texture(key));
@@ -784,6 +787,7 @@ impl Importer<'_> {
             opacity_clip: chain.opacity_clip.unwrap_or(0.3333),
             scalars: chain.scalars.clone(),
             vectors: chain.vectors.clone(),
+            sky,
             base_material: chain.base_material.clone(),
         };
         if diffuse.is_none() {

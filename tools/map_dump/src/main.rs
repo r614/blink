@@ -77,6 +77,9 @@ fn main() -> Result<()> {
         acc
     });
     println!("texture formats {fmts:?}");
+    for mesh in m.meshes.iter().filter(|x| x.source.starts_with("Skies") || x.source.contains("vista")) {
+        println!("mesh {} bounds {:.0} .. {:.0}", mesh.source, mesh.bounds_min, mesh.bounds_max);
+    }
     for l in &m.lights {
         println!(
             "light {:?} dominant={} shadows={} pos {:.0} dir {:.2} color {:.2?} brightness {} radius {} falloff {} <- {}",
@@ -84,6 +87,9 @@ fn main() -> Result<()> {
         );
     }
     println!("environment: cubemap faces {}, post {:?}", m.environment.cubemap_faces.len(), m.environment.post);
+    for f in &m.environment.fog {
+        println!("fog {f:?}");
+    }
     // `--dump-texture SUBSTR OUT.rgba`: raw RGBA8 of the first texture whose source contains
     // SUBSTR (local inspection only; convert with ffmpeg -f rawvideo -pix_fmt rgba -s WxH).
     if let Some(n) = args.iter().position(|a| a == "--dump-texture") {
