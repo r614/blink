@@ -6,3 +6,4 @@
 /cache/
 *.local.*
 /harness_out/
+/.claude/
