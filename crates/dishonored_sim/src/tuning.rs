@@ -1,7 +1,6 @@
-//! Combat/power values derived from `GameplayConfig`, plus the explicitly SPECULATIVE
-//! timings that the original drives from animation data we cannot decode yet (U-008).
-//! Each SPECULATIVE value is listed in research/UNKNOWNS.md and must be replaced by a
-//! measurement from the original game.
+//! Combat/power values derived from `GameplayConfig`. Timings the original drives from
+//! animation notifies are read from the decoded Startup.upk AnimSets (`anim_notifies`,
+//! U-021); the remaining SPECULATIVE values are listed in research/UNKNOWNS.md.
 
 use dishonored_ir::gameplay::GameplayConfig;
 use serde::{Deserialize, Serialize};
@@ -16,7 +15,8 @@ pub struct CombatTuning {
     pub normal_damage_ratio: f32,
     /// Fraction for counter-attacks on a staggered target (`m_fHealthRatio_BigDamage`).
     pub big_damage_ratio: f32,
-    // --- sword timings (SPECULATIVE until animation notifies are decoded/measured) ---
+    // --- sword timings (LIKELY: Ply_Sword_Attack_as / Ply_Sword_Versus_as notifies;
+    // stagger and recoil still SPECULATIVE) ---
     pub swing_startup: f32,
     pub swing_active: f32,
     pub swing_recovery: f32,
@@ -38,7 +38,7 @@ pub struct CombatTuning {
     pub bullet_close_range: f32,
     pub bullet_close_mult: f32,
     pub pistol_reserve: u16,
-    // pistol timings (SPECULATIVE)
+    // pistol timings (LIKELY: Ply_Pistol_as / Ply_Guns_as / CorvoGun_Mag_as notifies)
     pub pistol_equip: f32,
     pub pistol_fire_recovery: f32,
     pub pistol_reload: f32,
@@ -86,13 +86,17 @@ impl CombatTuning {
             assassinate_range: v(m, "assassinate.m_fMaxContextRange", 275.0),
             normal_damage_ratio: v(m, "attack.m_fHealthRatio_NormalDamage", 0.2),
             big_damage_ratio: v(m, "attack.m_fHealthRatio_BigDamage", 0.7),
-            swing_startup: 0.25,
-            swing_active: 0.15,
-            swing_recovery: 0.35,
-            parry_window: 0.2,
+            // "Small" attacks: DishonoredNotify_AttackZone starts 0.104-0.158 s (mean 0.13),
+            // lasts 0.186-0.243 s (mean 0.21); AttackInterruptable at ~0.6 s.
+            swing_startup: 0.13,
+            swing_active: 0.21,
+            swing_recovery: 0.26,
+            // DisNotify_BlockParryZone on Sword_Block_*: t=0.001, duration 0.430.
+            parry_window: 0.43,
             stagger_time: 1.0,
             blocked_recoil: 0.4,
-            assassination_time: 1.2,
+            // Sword_Ready_Assassination_Back_Master AnimStateExit at 1.886 s.
+            assassination_time: 1.886,
             block_half_angle: 70.0,
             back_half_angle: 60.0,
             drop_assassination_min_fall_speed: 300.0,
@@ -103,17 +107,21 @@ impl CombatTuning {
             bullet_close_range: v(pb, "projectile.m_fCloseRange", 400.0),
             bullet_close_mult: v(pb, "projectile.m_fDamageMultiplier_CloseRange", 1.5),
             pistol_reserve: 10,
-            pistol_equip: 0.4,
+            // Guns_Ready_Equip AnimStateExit 0.43; Pistol_Fire exit 0.30;
+            // reload = Reload_In 0.433 + CorvoGun_Mag 0to1 0.433 + Reload_Out 0.333.
+            pistol_equip: 0.43,
             pistol_fire_recovery: 0.3,
-            pistol_reload: 1.6,
+            pistol_reload: 1.2,
 
             bolt_gravity_mult: v(cb, "projectile.m_fGravityMultiplier", 1.3),
             bolt_stealth_mult: v(cb, "projectile.m_fDamageMultiplier_Stealth", 2.0),
             bolt_damage: 35.0,
             bolt_speed: 4500.0,
             crossbow_reserve: 10,
-            crossbow_equip: 0.4,
-            crossbow_reload: 1.0,
+            // Guns_Ready_Equip exit 0.43; reload = Reload_In 0.233 + RapidReload 0.4 +
+            // Reload_Out 0.333 (Ply_Crossbow_as / Crossbows_as).
+            crossbow_equip: 0.43,
+            crossbow_reload: 0.97,
 
             windblast_cost: c.windblast.mana_cost,
             windblast_angle: v(wb, "m_Levels[1].m_Angle", v(wb, "m_Levels.m_Angle", 135.0)),

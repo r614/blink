@@ -25,6 +25,6 @@ Status: OPEN / ACTIVE / RESOLVED. Resolved items stay listed with their resoluti
 | U-018 | P1 | OPEN | Blink travel speed/duration (SPECULATIVE 9000 uu/s) and exact target query shape | Capture Blink traces from the original (U-011); disassemble the Blink power class. |
 | U-019 | P2 | OPEN | Mantle timings (animation-driven) and probe pattern | Now decodable via Edge: read mantle anim lengths and notifies. |
 | U-020 | P0 (Phase II) | OPEN | Core product test: do humans hesitate between NPCs and players? | Needs human playtests. Automated proxies: compare player vs NPC motion statistics. |
-| U-021 | P1 | OPEN | Sword timings, parry window, reload/equip times (SPECULATIVE constants in `CombatTuning`) | Read player sword/pistol AnimSequence lengths and DisNotify markers (Edge decoder now available). |
+| U-021 | P2 | PARTLY RESOLVED | Sword timings, parry window, reload/equip times | Swing, parry, assassination, equip and reload now come from AnimNotify data (LOG 2026-10-04). Stagger and blocked recoil are still SPECULATIVE; verify the windows in the original game (U-011). |
 | U-022 | P2 | OPEN | Edge fixed-format channel path (410 clips with flags=2) | Port 0x009D4D90/0x009D5390. |
 | U-023 | P2 | OPEN | Edge root motion / translation tracks (rotation-only retargeting today) | Compare against original playback. |
