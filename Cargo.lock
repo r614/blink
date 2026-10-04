@@ -3429,6 +3429,7 @@ dependencies = [
  "dishonored_assets",
  "dishonored_ir",
  "glam",
+ "serde_json",
  "ue3_package",
 ]
 

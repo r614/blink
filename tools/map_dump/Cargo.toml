@@ -10,3 +10,4 @@ glam.workspace = true
 dishonored_assets.workspace = true
 dishonored_ir.workspace = true
 ue3_package.workspace = true
+serde_json.workspace = true

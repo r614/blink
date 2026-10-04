@@ -4,7 +4,10 @@ pub mod content;
 pub mod level;
 pub mod material;
 pub mod static_mesh;
+pub mod gameplay;
+pub mod ini;
 pub mod texture;
+pub mod tweaks;
 pub mod util;
 
 pub use content::Content;
