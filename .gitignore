@@ -1,0 +1,7 @@
+/target
+*.upk
+*.tfc
+*.bin
+/extracted/
+/cache/
+*.local.*

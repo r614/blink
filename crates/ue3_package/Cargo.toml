@@ -1,0 +1,10 @@
+[package]
+name = "ue3_package"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Minimal Unreal Engine 3 package reader targeting Dishonored (file version 801, licensee 30)"
+
+[dependencies]
+anyhow.workspace = true
+lzokay-native.workspace = true

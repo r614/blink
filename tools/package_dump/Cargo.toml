@@ -1,0 +1,9 @@
+[package]
+name = "package_dump"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ue3_package.workspace = true
