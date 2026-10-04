@@ -173,7 +173,7 @@ fn main() {
             .init_resource::<harness::ControlOverride>()
             .init_resource::<debug::DebugToggles>()
             .init_gizmo_group::<debug::XRayGizmos>()
-            .add_systems(Startup, (players::setup_player_assets, hud::setup_hud, debug::setup_gizmos, characters::load_library))
+            .add_systems(Startup, (players::setup_player_assets, hud::setup_hud, debug::setup_gizmos, (characters::load_library, characters::load_animations).chain()))
             .add_systems(FixedUpdate, (harness::script_fixed, session::fixed_tick).chain())
             .add_systems(
                 Update,

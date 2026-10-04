@@ -43,6 +43,7 @@ pub struct RawSkeletalMesh {
     pub joints: Vec<[u16; 4]>,
     pub weights: Vec<[f32; 4]>,
     pub edge_skeleton_bytes: usize,
+    pub edge_skeleton: Vec<u8>,
 }
 
 fn tarray_skip(r: &mut Reader, elem: usize) -> Result<usize> {
@@ -74,7 +75,9 @@ fn decode(pkg: &Package, r: &mut Reader, has_vertex_colors: bool) -> Result<RawS
     m.mesh_origin = Vec3::from(r.vec3()?);
     m.rot_origin = [r.i32()?, r.i32()?, r.i32()?];
     // [Dishonored] TArray<byte> EdgeSkeleton
-    m.edge_skeleton_bytes = tarray_skip(r, 1)?;
+    let n = r.count(1)?;
+    m.edge_skeleton = r.bytes(n)?.to_vec();
+    m.edge_skeleton_bytes = n;
     let nbones = r.count(52)?;
     for _ in 0..nbones {
         let name = pkg.name(FName::read(r)?);

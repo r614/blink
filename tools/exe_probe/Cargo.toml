@@ -1,0 +1,10 @@
+[package]
+name = "exe_probe"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Read-only static analysis helpers for Dishonored.exe (PE sections, disassembly, xrefs)"
+
+[dependencies]
+anyhow.workspace = true
+iced-x86 = { version = "1", default-features = false, features = ["std", "decoder", "intel", "instr_info"] }

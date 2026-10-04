@@ -2617,6 +2617,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "exe_probe"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "iced-x86",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3110,6 +3118,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
+name = "iced-x86"
+version = "1.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c447cff8c7f384a7d4f741cfcff32f75f3ad02b406432e8d6c878d56b1edf6b"
+dependencies = [
+ "lazy_static",
+]
+
+[[package]]
 name = "icu_collections"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3566,6 +3583,7 @@ dependencies = [
  "dishonored_assets",
  "dishonored_ir",
  "glam",
+ "image",
  "serde_json",
  "ue3_package",
 ]

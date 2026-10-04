@@ -6,6 +6,7 @@ pub mod level;
 pub mod material;
 pub mod skeletal_mesh;
 pub mod static_mesh;
+pub mod edge_anim;
 pub mod gameplay;
 pub mod ini;
 pub mod texture;

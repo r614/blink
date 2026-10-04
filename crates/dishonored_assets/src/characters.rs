@@ -108,3 +108,45 @@ pub fn bind_globals(bones: &[BoneAsset]) -> Vec<Mat4> {
     }
     g
 }
+
+/// Decoded locomotion clips plus their track (bone name) order.
+pub struct AnimLibrary {
+    pub tracks: Vec<String>,
+    pub clips: HashMap<String, crate::edge_anim::BakedClip>,
+}
+
+/// Load and bake the named sequences of an AnimSet.
+pub fn load_anim_set(content: &Content, pkg_name: &str, set_path: &str, wanted: &[&str]) -> Result<AnimLibrary> {
+    use ue3_package::properties::{Value, find};
+    use ue3_package::reader::Reader;
+    let pkg = content.package(pkg_name)?;
+    let set = (0..pkg.exports.len()).find(|&i| pkg.obj_path(ObjRef::Export(i)).eq_ignore_ascii_case(set_path)).with_context(|| format!("{set_path} not in {pkg_name}"))?;
+    let sh = pkg.read_object(set)?;
+    let (n, raw) = find(&sh.properties, "TrackBoneNames").and_then(|p| p.array_raw()).context("TrackBoneNames")?;
+    let mut r = Reader::new(raw);
+    let tracks: Vec<String> = (0..n).map(|_| ue3_package::FName::read(&mut r).map(|f| pkg.name(f)).unwrap_or_default()).collect();
+    let mut clips = HashMap::new();
+    for s in find(&sh.properties, "Sequences").context("Sequences")?.array_objects()? {
+        let ObjRef::Export(e) = ObjRef::from_index(s) else { continue };
+        let h = pkg.read_object(e)?;
+        let name = match find(&h.properties, "SequenceName").map(|p| &p.value) {
+            Some(Value::Name(n)) => n.clone(),
+            _ => continue,
+        };
+        if !wanted.is_empty() && !wanted.iter().any(|w| w.eq_ignore_ascii_case(&name)) {
+            continue;
+        }
+        let data = pkg.export_data(e)?;
+        let mut r = Reader::at(data, h.native_offset);
+        let _raw_tracks = r.i32()?;
+        let len = r.count(1)?;
+        let clip = crate::edge_anim::EdgeClip::parse(r.bytes(len)?)?;
+        match clip.bake() {
+            Ok(b) => {
+                clips.insert(name, b);
+            }
+            Err(e) => eprintln!("skipping {name}: {e:#}"),
+        }
+    }
+    Ok(AnimLibrary { tracks, clips })
+}

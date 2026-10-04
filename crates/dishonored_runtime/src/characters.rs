@@ -1,8 +1,8 @@
 //! Skinned Dishonored character models for player bodies.
 //!
 //! Each part is uploaded once; every player gets a joint hierarchy (flat, children of the
-//! body root) driven by a pose source. Until the Edge animation decoder exists (U-008)
-//! the pose comes from `procedural_pose` (clearly a placeholder, presentation only).
+//! body root) driven by decoded Edge animation clips (locomotion chosen from simulation
+//! state); `procedural_pose` remains only as a fallback when a clip is unavailable.
 
 use crate::coords;
 use crate::map_render::to_image;
@@ -165,19 +165,41 @@ pub fn procedural_pose(part: &PartGpu, speed: f32, phase: f32, crouched: bool) -
 }
 
 pub fn animate_characters(
+    anims: Option<Res<Animations>>,
+    mut commands: Commands,
+    mut states: Query<&mut AnimState>,
     lib: Option<Res<CharacterLibrary>>,
     view: Res<crate::session::SessionView>,
     time: Res<Time>,
-    roots: Query<(&CharacterRoot, &crate::players::PlayerBody, &Children)>,
+    roots: Query<(Entity, &CharacterRoot, &crate::players::PlayerBody, &Children)>,
     mut joints: Query<(&Joint, &mut Transform)>,
 ) {
     let Some(lib) = lib else { return };
-    for (root, body, children) in &roots {
+    for (entity, root, body, children) in &roots {
         let Some(p) = view.others.iter().chain(view.me.iter()).find(|p| p.id == body.0) else { continue };
         let model = &lib.models[root.archetype];
         let speed = p.velocity.truncate().length();
         let phase = time.elapsed_secs() * (speed / 400.0).max(0.2) * 7.0 + p.id as f32;
-        let poses: Vec<Vec<Mat4>> = model.parts.iter().map(|part| procedural_pose(part, speed, phase, p.crouched)).collect();
+        let poses: Vec<Vec<Mat4>> = match anims.as_ref() {
+            Some(a) => {
+                let (clip_name, rate) = choose_clip(p);
+                let t = match states.get_mut(entity) {
+                    Ok(mut s) => {
+                        s.time += time.delta_secs() * rate;
+                        s.time
+                    }
+                    Err(_) => {
+                        commands.entity(entity).insert(AnimState::default());
+                        0.0
+                    }
+                };
+                match a.lib.clips.get(clip_name) {
+                    Some(clip) => model.parts.iter().enumerate().map(|(pi, part)| decoded_pose(part, a, root.archetype, pi, clip, t + p.id as f32 * 0.37)).collect(),
+                    None => model.parts.iter().map(|part| procedural_pose(part, speed, phase, p.crouched)).collect(),
+                }
+            }
+            None => model.parts.iter().map(|part| procedural_pose(part, speed, phase, p.crouched)).collect(),
+        };
         for c in children.iter() {
             if let Ok((j, mut t)) = joints.get_mut(c) {
                 if let Some(m) = poses.get(j.part).and_then(|v| v.get(j.bone)) {
@@ -186,4 +208,81 @@ pub fn animate_characters(
             }
         }
     }
+}
+
+/// Locomotion clip names in `Npc_EliteGuard_empty_as` (decoded Edge animation).
+pub const LOCOMOTION: &[&str] = &["Empty_Idle", "Empty_WalkN", "Empty_WalkS_Revert", "Empty_WalkE", "Empty_WalkW_Revert", "Empty_RunN", "Empty_RunS_Revert", "Empty_RunE", "Empty_RunW_Revert"];
+
+#[derive(Resource)]
+pub struct Animations {
+    pub lib: dishonored_assets::characters::AnimLibrary,
+    /// Per model, per part: bone index for each track (None = bone missing).
+    pub track_to_bone: Vec<Vec<Vec<Option<usize>>>>,
+}
+
+pub fn load_animations(mut commands: Commands, lib: Option<Res<CharacterLibrary>>) {
+    let Some(lib) = lib else { return };
+    let Ok(content) = dishonored_assets::Content::locate() else { return };
+    match dishonored_assets::characters::load_anim_set(&content, "L_Boyle_Ext_Script", "Npc_EliteGuard_empty_as.Npc_EliteGuard_empty_as", LOCOMOTION) {
+        Ok(anims) => {
+            let track_to_bone = lib
+                .models
+                .iter()
+                .map(|m| m.parts.iter().map(|p| anims.tracks.iter().map(|t| p.bones.iter().position(|b| b.name.eq_ignore_ascii_case(t))).collect()).collect())
+                .collect();
+            info!("decoded {} Edge clips ({} tracks)", anims.clips.len(), anims.tracks.len());
+            commands.insert_resource(Animations { lib: anims, track_to_bone });
+        }
+        Err(e) => warn!("animations: {e:#}"),
+    }
+}
+
+/// Pick a locomotion clip from velocity relative to facing (simulation owns motion;
+/// animation only presents it).
+pub fn choose_clip(p: &dishonored_sim::state::PlayerState) -> (&'static str, f32) {
+    let v = p.velocity.truncate();
+    let speed = v.length();
+    if speed < 20.0 || p.mode != dishonored_sim::state::MoveMode::Walking {
+        return ("Empty_Idle", 1.0);
+    }
+    let fwd = dishonored_sim::movement::forward_vector(p.yaw).truncate();
+    let right = dishonored_sim::movement::right_vector(p.yaw).truncate();
+    let (f, r) = (v.dot(fwd), v.dot(right));
+    let run = speed > 300.0;
+    let name = if f.abs() >= r.abs() {
+        match (f >= 0.0, run) {
+            (true, false) => "Empty_WalkN",
+            (true, true) => "Empty_RunN",
+            (false, false) => "Empty_WalkS_Revert",
+            (false, true) => "Empty_RunS_Revert",
+        }
+    } else {
+        match (r >= 0.0, run) {
+            (true, false) => "Empty_WalkE",
+            (true, true) => "Empty_RunE",
+            (false, false) => "Empty_WalkW_Revert",
+            (false, true) => "Empty_RunW_Revert",
+        }
+    };
+    // Playback rate follows ground speed (walk clips authored around 200 uu/s, run ~400).
+    let rate = if run { speed / 400.0 } else { speed / 200.0 };
+    (name, rate.clamp(0.5, 1.8))
+}
+
+#[derive(Component, Default)]
+pub struct AnimState {
+    pub time: f32,
+}
+
+pub fn decoded_pose(part: &PartGpu, anims: &Animations, model: usize, part_i: usize, clip: &dishonored_assets::edge_anim::BakedClip, time: f32) -> Vec<Mat4> {
+    let mut bones = part.bones.clone();
+    for (t, bone) in anims.track_to_bone[model][part_i].iter().enumerate() {
+        let Some(b) = bone else { continue };
+        let (r, _tr) = clip.sample(time, t);
+        if let Some(q) = r {
+            // Rotation-only retargeting: bind translations keep each body's proportions.
+            bones[*b].rotation = q;
+        }
+    }
+    bind_globals(&bones).iter().map(|g| to_bevy(part.mesh_to_pawn * *g)).collect()
 }
