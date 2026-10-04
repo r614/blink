@@ -241,10 +241,15 @@ fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Asset
     let start = args.pos.or(spawn.map(|s| s.position + glam::Vec3::Z * 64.0)).unwrap_or(glam::Vec3::new(0.0, 0.0, 500.0));
     let yaw = args.yaw.or(spawn.map(|s| s.yaw_deg)).unwrap_or(0.0);
     let projection = Projection::Perspective(PerspectiveProjection { fov: 75f32.to_radians(), near: 0.05, far: 6000.0, ..default() });
-    if args.mode == Mode::Inspect {
-        commands.spawn((Camera3d::default(), projection, Transform::from_translation(coords::pos(start)), FreeCam { yaw, pitch: args.pitch }));
+    let camera = if args.mode == Mode::Inspect {
+        commands.spawn((Camera3d::default(), projection, Transform::from_translation(coords::pos(start)), FreeCam { yaw, pitch: args.pitch })).id()
     } else {
-        commands.spawn((Camera3d::default(), projection, Transform::default(), players::GameCamera { third_person: args.spectate, follow: None }));
+        commands.spawn((Camera3d::default(), projection, Transform::default(), players::GameCamera { third_person: args.spectate, follow: None })).id()
+    };
+    if args.features.materials {
+        if let Some(env) = map_render::environment_light(&map, &mut images) {
+            commands.entity(camera).insert(env);
+        }
     }
     commands.spawn((
         DirectionalLight { illuminance: 6000.0, shadow_maps_enabled: false, color: Color::srgb(0.75, 0.8, 1.0), affects_lightmapped_mesh_diffuse: !args.features.lightmaps, ..default() },

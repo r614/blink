@@ -156,6 +156,9 @@ pub fn import_level(
     if opts.load_textures && opts.load_lightmaps {
         imp.bake_lightmaps();
     }
+    if level_slots > 0 {
+        imp.import_environment(0);
+    }
     imp.stats.unresolved_paths.sort();
     imp.stats.unresolved_paths.dedup();
     imp.stats.material_chain_breaks.sort();
@@ -260,6 +263,54 @@ impl Importer<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Level-wide settings from the persistent level's WorldInfo: the reflection cubemap
+    /// (`mSceneReflection` -> TextureCube faces) and Arkane's post settings
+    /// (`m_ArkDefaultPpSettings`, flattened to dotted names).
+    fn import_environment(&mut self, slot: usize) {
+        let pkg = self.pkgs[slot].clone();
+        let Some(wi) = (0..pkg.exports.len()).find(|&i| pkg.export_class(i) == "WorldInfo" && self.is_in_persistent_level(&pkg, i)) else {
+            return;
+        };
+        let Ok(h) = pkg.read_object(wi) else { return };
+        if let Some(cube) = find(&h.properties, "mSceneReflection").and_then(|p| p.as_object()) {
+            if let Some(ck) = self.resolve(slot, ObjRef::from_index(cube)) {
+                let cpkg = self.pkgs[ck.0].clone();
+                if let Ok(ch) = cpkg.read_object(ck.1) {
+                    let mut faces = Vec::new();
+                    for f in ["FacePosX", "FaceNegX", "FacePosY", "FaceNegY", "FacePosZ", "FaceNegZ"] {
+                        let t = find(&ch.properties, f)
+                            .and_then(|p| p.as_object())
+                            .and_then(|r| self.resolve(ck.0, ObjRef::from_index(r)))
+                            .and_then(|k| self.texture(k));
+                        faces.extend(t);
+                    }
+                    if faces.len() == 6 {
+                        self.map.environment.cubemap_faces = faces;
+                    }
+                }
+            }
+        }
+        if let Some(Value::Struct(_, s)) = find(&h.properties, "m_ArkDefaultPpSettings").map(|p| &p.value) {
+            let mut post = PostSettings { source: pkg.obj_path(ObjRef::Export(wi)), ..Default::default() };
+            fn flatten(prefix: &str, props: &[Property], post: &mut PostSettings) {
+                for p in props {
+                    let name = if prefix.is_empty() { p.name.clone() } else { format!("{prefix}.{}", p.name) };
+                    match &p.value {
+                        Value::Struct(_, s) => flatten(&name, s, post),
+                        Value::Float(v) => post.values.push((name, *v)),
+                        Value::Int(v) => post.values.push((name, *v as f32)),
+                        Value::Bool(b) => post.values.push((name, if *b { 1.0 } else { 0.0 })),
+                        Value::Vector(v) => post.vectors.push((name, [v[0], v[1], v[2], 0.0])),
+                        Value::LinearColor(c) => post.vectors.push((name, *c)),
+                        _ => {}
+                    }
+                }
+            }
+            flatten("", s, &mut post);
+            self.map.environment.post = Some(post);
+        }
     }
 
     /// Static mesh components of non-static actors, imported at their initial transform as

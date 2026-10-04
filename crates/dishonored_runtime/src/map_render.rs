@@ -122,6 +122,51 @@ pub fn lightmap_image(l: &LightmapAtlas) -> Image {
     img
 }
 
+/// The level's reflection cubemap (`WorldInfo.mSceneReflection`) as a GPU-filtered
+/// environment light for specular reflections (`C_` cubemap slots). Diffuse is left to the
+/// lightmaps (`affects_lightmapped_mesh_diffuse: false`).
+///
+/// APPROXIMATION: UE3 Z-up faces are reassigned to Bevy's Y-up face slots
+/// (+X, -X, +Z(UE) -> +Y, -Z(UE) -> -Y, +Y(UE) -> +Z, -Y(UE) -> -Z) without per-face
+/// rotation, and reflections apply to every material through Bevy's Fresnel term instead of
+/// Arkane's per-material `C_Cubemap_Mask`/`C_Cubemap_color`.
+pub fn environment_light(map: &DishonoredMap, images: &mut Assets<Image>) -> Option<bevy::light::GeneratedEnvironmentMapLight> {
+    let faces = &map.environment.cubemap_faces;
+    if faces.len() != 6 {
+        return None;
+    }
+    let order = [0usize, 1, 4, 5, 2, 3];
+    let mut size = 0;
+    let mut data = Vec::new();
+    for &f in &order {
+        let (w, h, px) = dishonored_assets::texture::decode_rgba8(&map.textures[faces[f]], 0)?;
+        if size == 0 {
+            size = w;
+        }
+        if w != size || h != size {
+            return None;
+        }
+        data.extend(px.iter().flat_map(|p| [p[0], p[1], p[2], 255]));
+    }
+    let mut img = Image::new(
+        Extent3d { width: size, height: size, depth_or_array_layers: 6 },
+        TextureDimension::D2,
+        data,
+        WgpuFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    img.texture_view_descriptor = Some(bevy::render::render_resource::TextureViewDescriptor {
+        dimension: Some(bevy::render::render_resource::TextureViewDimension::Cube),
+        ..default()
+    });
+    Some(bevy::light::GeneratedEnvironmentMapLight {
+        environment_map: images.add(img),
+        intensity: light_unit(),
+        rotation: Quat::IDENTITY,
+        affects_lightmapped_mesh_diffuse: false,
+    })
+}
+
 fn scalar(p: &MaterialParams, name: &str) -> Option<f32> {
     p.scalars.iter().find(|(n, _)| n.trim().eq_ignore_ascii_case(name)).map(|v| v.1)
 }

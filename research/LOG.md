@@ -173,3 +173,20 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Implementation consequence:** `dishonored_content::import_geometry` uses `map_packages` too, so the
   collision world now includes the 30 static `L_BoyleStreet_Ext_Script` collection components. Other-actor
   instances are not collidable, so doors/movables/pickups do not block the simulation.
+
+## 2026-10-04 — Reflection cubemap and FX cards
+- **Question:** Where do `C_` cubemap reflections come from, and can the translucent cards be shown?
+- **Evidence:** `WorldInfo_4.mSceneReflection -> Level_Cubemap.BOYLE.boyle_ext_cubemap` (TextureCube,
+  `FacePosX..FaceNegZ` -> six 256x256 DXT1 `CubemapFace*` Texture2D, no mips) in `L_Boyle_Ext_P`. 59
+  materials set `C_Cubemap_texture`. FX materials now resolve their base material (`DefaultTranslu_PMAT`,
+  `generic_translucent_PMAT`, unlit fog sheets with `D_DiffuseColorTweak` rgb + a).
+- **Experiment:** Cube image -> `GeneratedEnvironmentMapLight` on the camera (GPU prefiltered, specular only).
+  Translucent/additive/modulate materials render with Bevy Blend/Add/Multiply; unlit fog sheets use the tweak
+  colour with alpha = tweak.a x opacity mask (remapped by `O_Minimum/Maximum_Opacity`). FX cards are no longer
+  hidden by default (`--no-fx` hides them).
+- **Result:** Works; reflections are subtle at night. Screenshot set `harness_out/step2_materials/*`.
+- **Confidence:** CONFIRMED for the data path; APPROXIMATION for face orientation (UE3 faces reassigned to
+  Bevy's Y-up slots without rotation) and for applying reflections to all materials via Fresnel instead of the
+  per-material cubemap mask. Depth-biased alpha, distortion and UV panning of FX materials are not reproduced.
+- **Implementation consequence:** A custom material would be needed for Arkane's per-material cubemap mask
+  and the scrolling fog/smoke parameters (`Mo_Motion_Speed`, `UV_Multiply_*`).
