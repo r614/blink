@@ -116,7 +116,7 @@ pub fn import_level(
         pkgs.push(content.package(p).with_context(|| format!("loading {p}"))?);
     }
     let level_slots = pkgs.len();
-    if opts.load_textures {
+    {
         for p in LIBRARY_PACKAGES {
             if content.has_package(p) {
                 pkgs.push(content.package(p).with_context(|| format!("loading {p}"))?);
