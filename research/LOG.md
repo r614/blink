@@ -604,3 +604,41 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
     - The player sits in `StatePlayerMasterInScriptedChoice` meanwhile.
     - Boyle's doors set that flag on "Go to ..." and not on "Stay ...".
 - **Port changes:** arrival now takes the PlayerStart's rotation (pitch reset) per the class default. The rest of the travel and choice behaviour already matched: travel commits within one tick, so no input window remains.
+
+## 2026-10-05: Player mechanics from the original executable (movement, Blink, Windblast, parry, vitals)
+
+- **Question:** How does the original compute player speeds, Blink targets and travel, Windblast, parries and regeneration, beyond the tweak constants already extracted?
+- **Method:** Ghidra on `Dishonored.exe` with new helpers:
+  - `ClassDecomp2.java` picks the primary vtable (Actor subclasses store native-interface vtables too);
+  - `Decomp.java` decompiles by address or by global reference and prints the constants read;
+  - `FNameMap.java` maps 1,111 hard-coded `FName` globals to their strings (attribute reads become legible);
+  - `prop_layout` (tools/package_dump) recomputes UE3 property offsets (`UStruct::Link` rules), checked against interface thunks and known field reads.
+- **Findings** (details and addresses in `research/dishonored/PLAYER.md`):
+  - Speed is `GroundSpeed x MaxSpeedModifier` (0x00B56C40).
+    - The controller (0x00AAE610) sets discrete flags by stick angle: strafing below 10 deg (forward) or 50 deg (back) from the side axis, backwards within 40 deg.
+    - The strafe/back multipliers replace the base rather than blend; diagonal forward runs at full speed.
+    - Sprint works in any direction above stick 0.8. The sword factor 0.9 applies to sprint too.
+    - Speed drops blend at 8/s.
+    - Walk and slow walk come from stick deflection (0.95 / 0.45).
+  - Blink:
+    - targeting is a range envelope, an extent sweep, close-obstacle offset retries, a crawl-box back-off and a ground lift;
+    - travel moves 100 uu per frame without collision and restores the pre-Blink velocity and physics, then tries the Blink mantle (min edge height 0).
+  - Windblast:
+    - starts 0.1 s after the cast, and its front expands at 5000 uu/s;
+    - factor `(1 - d/r)^2 x ((dot - cos)/(1 - cos))^2`, with a horizontal cone of half 67.5 deg;
+    - push along the aim plus a distance-scaled up force; damage `round(30 k)`.
+  - Parry: block age < 0.2 s (tap) or inside the block anim's parry zone, but not during the 0.3 s forced block after a tap parry. Block cone 50 deg.
+  - Mana:
+    - after a spend, a 20-point pool with a 3 s delay, then 1 point per 0.1 s (timer set, not added);
+    - mana always refills to 20.
+  - Health: below 10 only, 1 point every 0.03 s after a 10 s delay. Health and damage are integers.
+  - Falling damage: `(int)(HealthMax x frac)`.
+  - Slide: cosine ease from the sprint velocity to sneak speed over 1.1 s, ending on a 25 deg turn.
+  - Crossbow bolt speed 20000.
+- **Port changes:**
+  - `dishonored_sim` movement, blink, left_hand (Windblast state in `WorldState`), combat (parry), vitals, slide.
+  - New config fields with provenance (`slow_walk_speed`, `speed_blend_down_speed`, input thresholds, mantle face angles, Blink step time, slide).
+  - Cache bumped to `gameplay_config.v3.json` and the fixture regenerated.
+  - Tests for each decoded rule.
+  - Harness expectations changed only where the original demands it (sprint 540, delayed Windblast).
+- **Confidence:** CONFIRMED for the formulas read in code. Mapping onto player-vs-player (Windblast momentum on players, parry stagger) is LIKELY or SPECULATIVE, as listed in UNKNOWNS U-047 to U-053.

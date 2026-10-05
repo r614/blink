@@ -37,6 +37,11 @@ pub fn update(
     if !p.alive {
         return;
     }
+    // A Blink move in progress finishes whatever the left hand selects.
+    if p.mode == MoveMode::Blinking {
+        blink::update(p, false, false, ctx, &cfg.blink, &cfg.vitals, events);
+        return;
+    }
     // Item switch.
     if input.left_hand != p.left.item {
         p.left.item = input.left_hand;
@@ -63,7 +68,7 @@ pub fn update(
         }
         LeftHand::Windblast => {
             match p.left.phase {
-                LeftPhase::Recovering if p.left.timer >= t.windblast_recovery => p.left.phase = LeftPhase::Idle,
+                LeftPhase::Recovering if p.left.timer >= windblast_lockout(t) => p.left.phase = LeftPhase::Idle,
                 LeftPhase::Idle if pressed && !busy => {
                     if spend_mana(p, t.windblast_cost, &cfg.vitals) {
                         p.left.phase = LeftPhase::Recovering;
@@ -139,37 +144,122 @@ pub fn update(
     }
 }
 
-/// Windblast effect, applied after all players updated (reads caster state).
-pub fn resolve_windblasts(
+/// Windblast warmup before the blast starts (`m_fWarmupTime` default, 0.1 s) and cooldown
+/// after the front reached its range (`m_fCooldownTime`, 1.0 s): class defaults of
+/// `DishonoredActivePowerComponent_WindBlast`.
+pub const WINDBLAST_WARMUP: f32 = 0.1;
+pub const WINDBLAST_COOLDOWN: f32 = 1.0;
+
+/// Seconds from the cast until Windblast can be cast again (warmup, front travel, cooldown).
+pub fn windblast_lockout(t: &CombatTuning) -> f32 {
+    WINDBLAST_WARMUP + t.windblast_distance / t.windblast_speed.max(1.0) + WINDBLAST_COOLDOWN
+}
+
+/// Strength of the blast on a target (0x00BE8570): zero outside the cone (tested in the
+/// horizontal plane against the unnormalized direction's x/y); inside,
+/// `(1 - min(d / range, 1))^2`, times `((dot - cos) / (1 - cos))^2` beyond 100 uu.
+pub fn windblast_factor(dir: Vec3, center: Vec3, origin: Vec3, range: f32, cos_half: f32) -> f32 {
+    let d = center.distance(origin);
+    let flat = (center - origin).truncate().normalize_or_zero();
+    let dot = flat.x * dir.x + flat.y * dir.y;
+    if dot <= cos_half {
+        return 0.0;
+    }
+    let r = 1.0 - (d / range).min(1.0);
+    let range_f = r * r;
+    if d > 100.0 {
+        let a = (dot - cos_half) / (1.0 - cos_half);
+        a * a * range_f
+    } else {
+        range_f
+    }
+}
+
+/// Velocity given to a pawn hit by the blast (0x00BF6AF0 then 0x00BE9770): the impulse is
+/// `direction * m_Force` with its z raised to the extra up force
+/// `(1 - min(d / range, 1)) * m_ExtraUpForce` (added when the aim points down), and the
+/// momentum handed to `TakeDamage` is `(impulse.xy * k, 0.15 * |impulse| * k)` with `k` the
+/// blast factor. Applying the momentum as a velocity change is an inference (the original
+/// only ever blasts NPCs, which ragdoll).
+pub fn windblast_momentum(dir: Vec3, force: f32, up_force: f32, d: f32, range: f32, k: f32) -> Vec3 {
+    let mut imp = dir * force;
+    let up = (1.0 - (d / range).min(1.0)) * up_force;
+    if up > imp.z {
+        imp.z += (up - imp.z).min(up);
+    }
+    let mag = imp.length();
+    Vec3::new(imp.x * k, imp.y * k, 0.15 * mag * k)
+}
+
+/// Start Windblasts cast this tick (after the warmup) and advance blast fronts.
+pub fn step_windblasts(
     state: &mut WorldState,
     world: &dyn WorldQuery,
     mv: &MovementConfig,
+    vitals: &dishonored_ir::gameplay::VitalsConfig,
     t: &CombatTuning,
-    cast_by: &[u32],
+    dt: f32,
     events: &mut Vec<SimEvent>,
 ) {
-    for &cid in cast_by {
-        let Some(caster) = state.player(cid).copied() else { continue };
-        let eye = eye_position(&caster, mv);
-        let dir = view_vector(caster.yaw, caster.pitch);
-        let half = (t.windblast_angle * 0.5).to_radians().cos();
-        for v in state.players.iter_mut() {
-            if v.id == cid || !v.alive {
+    let range = t.windblast_distance;
+    let cos_half = (t.windblast_angle * 0.5).to_radians().cos();
+    let mut blasts = std::mem::take(&mut state.windblasts);
+    for wb in blasts.iter_mut() {
+        if !wb.started {
+            wb.warmup -= dt;
+            if wb.warmup > 0.0 {
                 continue;
             }
-            let to = v.position - eye;
-            let d = to.length();
-            if d > t.windblast_distance || d < 1e-3 || to.normalize().dot(dir) < half {
+            // Blast start (0x00BF9570): origin and direction from the caster's view.
+            let Some(c) = state.player(wb.caster).copied().filter(|c| c.alive) else {
+                wb.started = true;
+                wb.targets.clear();
+                continue;
+            };
+            wb.started = true;
+            wb.origin = eye_position(&c, mv);
+            let mut dir = view_vector(c.yaw, c.pitch);
+            if !t.windblast_directional {
+                dir.z = 0.0;
+                dir = dir.normalize_or_zero();
+            }
+            wb.direction = dir;
+            // Targets (0x00BF6780): within range and with a positive blast factor.
+            wb.targets = state
+                .players
+                .iter()
+                .filter(|v| v.id != wb.caster && v.alive)
+                .filter(|v| v.position.distance(wb.origin) < range && windblast_factor(dir, v.position, wb.origin, range, cos_half) > 0.0)
+                .map(|v| v.id)
+                .collect();
+            // Projectiles in the cone are knocked away (the original redirects them).
+            let (o, d) = (wb.origin, dir);
+            state.projectiles.retain(|pr| windblast_factor(d, pr.position, o, range, cos_half) <= 0.0 || pr.position.distance(o) >= range);
+        }
+        // Front advance (0x00BF7090): reach = (elapsed + dt) * speed, capped at the range.
+        let reach = ((wb.elapsed + dt) * t.windblast_speed).min(range);
+        let mut remaining = Vec::new();
+        for &vid in &wb.targets {
+            let Some(v) = state.player_mut(vid) else { continue };
+            if !v.alive {
                 continue;
             }
-            if let Some(h) = world.raycast(eye, to, d, channel::PROJECTILE) {
+            let d = v.position.distance(wb.origin);
+            if d > reach {
+                remaining.push(vid);
+                continue;
+            }
+            let to = v.position - wb.origin;
+            if let Some(h) = world.raycast(wb.origin, to, d, channel::PROJECTILE) {
                 if h.distance < d - mv.collision_radius {
                     continue;
                 }
             }
-            let falloff = 1.0 - d / t.windblast_distance;
-            let push = to.normalize() * t.windblast_force * falloff + Vec3::Z * t.windblast_up_force * falloff;
-            v.velocity += push;
+            let k = windblast_factor(wb.direction, v.position, wb.origin, range, cos_half);
+            if k <= 0.0 {
+                continue;
+            }
+            v.velocity += windblast_momentum(wb.direction, t.windblast_force, t.windblast_up_force, d, range, k);
             if matches!(v.mode, MoveMode::Walking) {
                 v.mode = MoveMode::Falling;
                 v.fall_time = 0.0;
@@ -177,14 +267,17 @@ pub fn resolve_windblasts(
             if v.sword.phase == crate::state::SwordPhase::Blocking {
                 v.sword.phase = crate::state::SwordPhase::Idle;
             }
-            apply_damage(v, t.windblast_damage * falloff.max(0.25), Some(cid), DamageCause::Windblast, events);
+            let dmg = (t.windblast_damage * k + 0.5).floor();
+            apply_damage(v, dmg, Some(wb.caster), DamageCause::Windblast, events, vitals);
         }
-        // Windblast destroys projectiles in the cone.
-        state.projectiles.retain(|pr| {
-            let to = pr.position - eye;
-            !(to.length() < t.windblast_distance && to.normalize_or_zero().dot(dir) >= half)
-        });
+        wb.targets = remaining;
+        wb.elapsed += dt;
+        if reach >= range {
+            wb.targets.clear();
+        }
     }
+    blasts.retain(|wb| !wb.started || !wb.targets.is_empty());
+    state.windblasts = blasts;
 }
 
 /// Advance projectiles: sub-stepped segment tests against world and player bodies.
@@ -193,6 +286,7 @@ pub fn step_projectiles(
     world: &dyn WorldQuery,
     mv: &MovementConfig,
     t: &CombatTuning,
+    vitals: &dishonored_ir::gameplay::VitalsConfig,
     gravity_z: f32,
     dt: f32,
     events: &mut Vec<SimEvent>,
@@ -242,7 +336,7 @@ pub fn step_projectiles(
                     dmg *= t.bullet_close_mult;
                 }
                 events.push(SimEvent::ProjectileImpact { projectile: pr.id, point, victim: Some(v.id) });
-                apply_damage(v, dmg, Some(pr.owner), cause, events);
+                apply_damage(v, dmg, Some(pr.owner), cause, events, vitals);
             }
             (_, Some(w)) => {
                 events.push(SimEvent::ProjectileImpact { projectile: pr.id, point: from + delta.normalize_or_zero() * w, victim: None });

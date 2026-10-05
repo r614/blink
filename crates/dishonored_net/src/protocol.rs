@@ -10,7 +10,7 @@
 use dishonored_multiplayer::MatchView;
 use dishonored_sim::events::SimEvent;
 use dishonored_sim::input::PlayerInput;
-use dishonored_sim::state::{PlayerId, PlayerState, ProjectileState};
+use dishonored_sim::state::{PlayerId, PlayerState, ProjectileState, WindblastState};
 use serde::{Deserialize, Serialize};
 
 pub const MAGIC: u32 = 0x4449_5331; // "DIS1"
@@ -57,6 +57,8 @@ pub struct Snapshot {
     pub ack_input: u64,
     pub players: Vec<PlayerState>,
     pub projectiles: Vec<ProjectileState>,
+    /// Windblasts in flight (warmup and expanding front).
+    pub windblasts: Vec<WindblastState>,
     pub matchv: MatchView,
     /// Private contract info for the receiving player only (Contracts mode).
     pub private: Option<dishonored_multiplayer::contracts::TargetInfo>,

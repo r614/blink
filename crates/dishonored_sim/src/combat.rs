@@ -37,9 +37,11 @@ pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, 
         }
         SwordPhase::Blocking => {
             s.block_time += dt;
-            if !input.pressed(buttons::BLOCK) {
+            s.force_block -= dt;
+            if !input.pressed(buttons::BLOCK) && s.force_block <= 0.0 {
                 s.phase = SwordPhase::Idle;
                 s.timer = 0.0;
+                s.force_block = 0.0;
             }
         }
         SwordPhase::Startup if s.timer >= t.swing_startup => {
@@ -78,6 +80,19 @@ fn body_distance(eye: Vec3, dir: Vec3, range: f32, v: &PlayerState, mv: &Movemen
     let a1 = v.position + Vec3::Z * (hh - mv.collision_radius);
     let (on_swing, on_body) = closest_segment_segment(eye, eye + dir * range, a0, a1);
     (on_swing.distance(on_body) - mv.collision_radius, (on_swing - eye).length())
+}
+
+/// `UDisItemContext_MeleeBlockPlayer` blocked-attack handler (0x00C22B60): the hit is
+/// parried when the block started less than `m_fTapForPerfectParryWindow` ago or the
+/// block animation's `DisNotify_BlockParryZone` is active (t = 0.001..0.431 s of
+/// Sword_Block, U-021), unless the post-tap forced block is still running.
+pub fn parries(s: &crate::state::SwordState, t: &CombatTuning) -> bool {
+    if s.force_block > 1e-8 {
+        return false;
+    }
+    let tap = s.block_time < t.parry_tap_window;
+    let zone = s.block_time >= 0.001 && s.block_time <= 0.001 + t.parry_window;
+    tap || zone
 }
 
 fn angle_deg(a: Vec3, b: Vec3) -> f32 {
@@ -154,10 +169,13 @@ pub fn resolve_sword_hits(
         let to_attacker = attacker.position - victim.position;
         let facing = angle_deg(forward_vector(victim.yaw), to_attacker) <= t.block_half_angle;
         if victim.sword.phase == SwordPhase::Blocking && facing {
-            if victim.sword.block_time <= t.parry_window {
+            if parries(&victim.sword, t) {
                 let a = &mut state.players[ai];
                 a.sword.phase = SwordPhase::Staggered;
                 a.sword.timer = 0.0;
+                if victim.sword.block_time < t.parry_tap_window {
+                    state.players[vi].sword.force_block = t.force_block_after_tap;
+                }
                 events.push(SimEvent::SwordParried { attacker: attacker.id, defender: victim.id });
             } else {
                 let a = &mut state.players[ai];
@@ -176,7 +194,7 @@ pub fn resolve_sword_hits(
         let dmg = ratio * vitals.health_max;
         let v = &mut state.players[vi];
         events.push(SimEvent::Sound { position: v.position, radius: 600.0, category: SoundCategory::SwordImpact, source: attacker.id });
-        apply_damage(v, dmg, Some(attacker.id), cause, events);
+        apply_damage(v, dmg, Some(attacker.id), cause, events, vitals);
         // Interrupt the victim's own swing.
         if v.alive && matches!(v.sword.phase, SwordPhase::Startup) {
             v.sword.phase = SwordPhase::Idle;

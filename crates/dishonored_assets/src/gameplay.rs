@@ -18,6 +18,9 @@ use std::collections::BTreeMap;
 
 pub const CORVO: &str = "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release";
 pub const DIFFICULTY_FIELD: &str = "m_fBaseValue2_Normal";
+/// The player's input tweak (`DishonoredPlayerInput`): walk/sprint thresholds and the
+/// strafe/backward angles the speed modifier uses.
+pub const PLAYER_INPUT: &str = "Twk_Pawn_DefaultPlayer.Twk_Pawn_PlayerInput";
 
 struct Loader<'a> {
     db: &'a TweakDb,
@@ -135,6 +138,47 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
             forward_move_amount: l.f(&mantle, &mantle_path, "m_fMantleForwardMoveAmount", "mantle.forward_move_amount")?,
             max_fall_speed_for_mantle: l.f(&mantle, &mantle_path, "m_fMaxFallSpeedForMantle", "mantle.max_fall_speed_for_mantle")?,
             fall_speed_for_ledge_grab: l.f(&mantle, &mantle_path, "m_fFallSpeedForLedgeGrab", "mantle.fall_speed_for_ledge_grab")?,
+            line_check_step_size: l.f(&mantle, &mantle_path, "m_LineCheckStepSize", "mantle.line_check_step_size")?,
+            max_vertical_angle_edge_face: l.f(&mantle, &mantle_path, "m_MaxVerticalAngleForEdgeFace", "mantle.max_vertical_angle_edge_face")?,
+            max_horizontal_angle_edge_face: l.f(&mantle, &mantle_path, "m_MaxHorizontalAngleForEdgeFace", "mantle.max_horizontal_angle_edge_face")?,
+            ledge_grab_min_edge_height: l.f(&mantle, &mantle_path, "m_fLedgeGrabMantleMinEdgeHeight", "mantle.ledge_grab_min_edge_height")?,
+        },
+        slow_walk_speed: l.attr(&attrs, a, "m_GroundSpeedSlowWalk", "movement.slow_walk_speed")?,
+        sword_sheathed_speed_factor: l.attr(&attrs, a, "m_SwordSheathedSpeedFactor", "movement.sword_sheathed_speed_factor")?,
+        speed_blend_down_speed: l.f(&corvo, CORVO, "m_fSpeedBlendDownSpeed", "movement.speed_blend_down_speed")?,
+        crawl_half_height: l.f(&corvo, CORVO, "m_fCrouchHeight", "movement.crawl_half_height")?,
+        slide_time: l.f(&corvo, CORVO, "m_fSlideTime", "movement.slide_time")?,
+        slide_deactivate_angle: l.f(&corvo, CORVO, "m_fSlideVelocityDeactivateAngle", "movement.slide_deactivate_angle")?,
+        lean: {
+            let cam = Ini::load_layered(&content.root, "Camera");
+            let sec = "DishonoredGame.DishonoredCamera_Lean";
+            let d = LeanConfig::default();
+            let spring = cam.get(sec, "m_LeanConstants").unwrap_or("");
+            let field = |name: &str| -> Option<f32> {
+                let i = spring.find(name)? + name.len() + 1;
+                spring[i..].split([',', ')']).next()?.trim().parse().ok()
+            };
+            l.prov.insert("movement.lean".into(), format!("DefaultCamera.ini [{sec}]"));
+            LeanConfig {
+                height_pct: cam.get_f32(sec, "m_fLeanHeightPct").unwrap_or(d.height_pct),
+                max_angle: cam.get_f32(sec, "m_fMaxLeanAngle").unwrap_or(d.max_angle),
+                max_angle_crouched: cam.get_f32(sec, "m_fMaxLeanAngle_Crouched").unwrap_or(d.max_angle_crouched),
+                springiness: field("m_Springiness").unwrap_or(d.springiness),
+                damping: field("m_Damping").unwrap_or(d.damping),
+            }
+        },
+        input: {
+            let ip = PLAYER_INPUT;
+            let pi = l.obj(ip)?;
+            PlayerInputConfig {
+                slow_walk_threshold: l.f(&pi, ip, "m_fSlowWalk_Trigger_Threshold", "input.slow_walk_threshold")?,
+                walk_threshold: l.f(&pi, ip, "m_fWalk_Trigger_Threshold", "input.walk_threshold")?,
+                stop_sprint_threshold: l.f(&pi, ip, "m_fStopSprint_Threshold", "input.stop_sprint_threshold")?,
+                strafe_angle_forward: l.f(&pi, ip, "m_fStrafeAngle_Forward", "input.strafe_angle_forward")?,
+                strafe_angle_back: l.f(&pi, ip, "m_fStrafeAngle_Back", "input.strafe_angle_back")?,
+                backwards_angle: l.f(&pi, ip, "m_fBackwardsAngle", "input.backwards_angle")?,
+                min_speed_to_slide: l.f(&pi, ip, "m_fMinSpeedToSlide", "input.min_speed_to_slide")?,
+            }
         },
     };
 
@@ -180,6 +224,14 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
         step_length_big: l.f(&blink_c, comp_p, "m_fStepLength_Big", "blink.step_length_big")?,
         step_length_small: l.f(&blink_c, comp_p, "m_fStepLength_Small", "blink.step_length_small")?,
         impulse_radius: l.f(&blink_c, comp_p, "m_fImpulseRadius", "blink.impulse_radius")?,
+        time_between_steps: {
+            let mut v = Vec::new();
+            for (i, key) in ["m_Levels", "m_Levels[1]"].iter().enumerate() {
+                v.push(l.f(&blink_t, bp, &format!("{key}.m_fDefaultTimeBetweenBlinkSteps"), &format!("blink.time_between_steps[{i}]"))?);
+            }
+            v
+        },
+        limit_vertical_from_ground: matches!(get(&blink_t, "m_bLimitVerticalDistanceFromGround"), Some(TVal::B(true))),
     };
 
     let power = |l: &mut Loader, path: &str, name: &str| -> Result<PowerConfig> {

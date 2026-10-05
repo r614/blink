@@ -9,7 +9,7 @@
 
 use crate::events::SimEvent;
 use crate::input::{PlayerInput, buttons};
-use crate::state::{MoveMode, PlayerState, Traversal};
+use crate::state::{MoveMode, PlayerState, SlideState, Traversal};
 use dishonored_ir::gameplay::MovementConfig;
 use dishonored_world::{Capsule, WorldQuery, channel};
 use glam::{Vec2, Vec3};
@@ -19,8 +19,6 @@ pub const TICK_HZ: u32 = 60;
 pub const DT: f32 = 1.0 / TICK_HZ as f32;
 /// World kill plane (`WorldInfo.KillZ` on L_Boyle_Ext_P).
 pub const KILL_Z: f32 = -20000.0;
-/// Camera lean offset at full lean (SPECULATIVE; not yet found in tweaks).
-pub const LEAN_DISTANCE: f32 = 40.0;
 
 pub fn half_height(p: &PlayerState, cfg: &MovementConfig) -> f32 {
     if p.crouched { cfg.crouch_half_height } else { cfg.collision_half_height }
@@ -31,15 +29,56 @@ pub fn capsule(p: &PlayerState, cfg: &MovementConfig) -> Capsule {
 }
 
 /// Eye position: UE `BaseEyeHeight` above the cylinder centre when standing; the same
-/// offset from the top of the cylinder when crouched.
+/// offset from the top of the cylinder when crouched; swung sideways by the lean.
 pub fn eye_position(p: &PlayerState, cfg: &MovementConfig) -> Vec3 {
     let top_gap = cfg.collision_half_height - cfg.base_eye_height;
     let mut eye = p.position + Vec3::Z * (half_height(p, cfg) - top_gap);
     if p.lean != 0.0 {
-        eye += right_vector(p.yaw) * p.lean * LEAN_DISTANCE;
+        eye += lean_offset(p, cfg);
     }
     eye
 }
+
+/// `DishonoredCamera_Lean` (0x00AC5420 / 0x00AC5950): the eye is a spring point kept at
+/// `m_fCurLeanHeight = m_fLeanHeightPct x CollisionHeight x 2` from a pivot that far below
+/// it, so a lean of angle `a` moves it `L sin a` sideways and `L (1 - cos a)` down, `a`
+/// limited to `m_fMaxLeanAngle`. `p.lean` is the angle as a fraction of the maximum.
+pub fn lean_offset(p: &PlayerState, cfg: &MovementConfig) -> Vec3 {
+    let l = cfg.lean.height_pct * half_height(p, cfg) * 2.0;
+    let max = if p.crouched { cfg.lean.max_angle_crouched } else { cfg.lean.max_angle };
+    let a = (p.lean * max).to_radians();
+    right_vector(p.yaw) * (l * a.sin()) - Vec3::Z * (l * (1.0 - a.cos()))
+}
+
+/// Lean spring (`m_LeanConstants`): `a'' = k (target - a) - c a'`, semi-implicit, in
+/// units of the maximum angle (the camera's spring acts on the head point; LIKELY).
+fn step_lean(p: &mut PlayerState, target: f32, ctx: &MoveCtx) {
+    let lc = &ctx.cfg.lean;
+    p.lean_velocity += (lc.springiness * (target - p.lean) - lc.damping * p.lean_velocity) * ctx.dt;
+    p.lean = (p.lean + p.lean_velocity * ctx.dt).clamp(-1.0, 1.0);
+    if target == 0.0 && p.lean.abs() < 1e-3 && p.lean_velocity.abs() < 1e-2 {
+        p.lean = 0.0;
+        p.lean_velocity = 0.0;
+    }
+    // Camera collision (`m_bHandleCameraCollision`): the eye stops short of geometry.
+    // Simplified to a ray from the upright eye (SPECULATIVE margin, U-047).
+    if p.lean != 0.0 {
+        let off = lean_offset(p, ctx.cfg);
+        let len = off.length();
+        let lean = p.lean;
+        p.lean = 0.0;
+        let base = eye_position(p, ctx.cfg);
+        p.lean = lean;
+        if let Some(h) = ctx.world.raycast(base, off, len + LEAN_CAMERA_MARGIN, channel::PAWN) {
+            let allowed = ((h.distance - LEAN_CAMERA_MARGIN).max(0.0) / len).min(1.0);
+            p.lean *= allowed;
+            p.lean_velocity = 0.0;
+        }
+    }
+}
+
+/// Distance kept between the leaning eye and walls (SPECULATIVE).
+pub const LEAN_CAMERA_MARGIN: f32 = 10.0;
 
 pub fn forward_vector(yaw: f32) -> Vec3 {
     let (s, c) = yaw.to_radians().sin_cos();
@@ -61,28 +100,94 @@ pub fn feet(p: &PlayerState, cfg: &MovementConfig) -> Vec3 {
     p.position - Vec3::Z * half_height(p, cfg)
 }
 
-/// Directional max speed from Dishonored's stance speeds and strafe/backward multipliers.
-fn max_speed(p: &PlayerState, input: &PlayerInput, cfg: &MovementConfig, sword_out: bool) -> f32 {
+/// Per-tick locomotion flags, as the player controller sets them before the pawn moves
+/// (`Dishonored.exe` 0x00AAE610, called from the controller tick at 0x00AAEB10):
+/// - stick magnitude `m = |(forward, strafe)|` (raw axes, keyboard = 1);
+/// - sprinting: sprint held, `m > m_fStopSprint_Threshold`, not sneaking (any direction);
+/// - `bIsWalking`: not sprinting and `0 < m <= m_fWalk_Trigger_Threshold`
+///   (`WalkingPct` = SlowWalk or Walk speed over GroundSpeed by `m_fSlowWalk_Trigger_Threshold`);
+///   the WALK button stands for a half-deflected stick (NPCs and the walk binding);
+/// - strafing / moving backwards (exclusive, only when not walking): the stick angle from
+///   the pure sideways axis is below `m_fStrafeAngle_Forward` (stick forward) or
+///   `m_fStrafeAngle_Back` (stick back); else, stick back within `m_fBackwardsAngle` of
+///   straight back.
+pub fn update_locomotion_flags(p: &mut PlayerState, input: &PlayerInput, cfg: &MovementConfig, can_sprint: bool) {
     let (f, r) = input.axes();
-    let sprinting = input.pressed(buttons::SPRINT) && f > 0.1 && !p.crouched;
-    let (base, strafe, back) = if p.crouched {
-        (cfg.crouch_speed, cfg.strafe_mult_sneak, cfg.back_mult_sneak)
-    } else if sprinting {
-        (cfg.sprint_speed, cfg.strafe_mult_sprint, cfg.back_mult_sprint)
-    } else if input.pressed(buttons::WALK) {
-        (cfg.walk_speed, cfg.strafe_mult_run, cfg.back_mult_run)
+    let m = (f * f + r * r).sqrt();
+    let ic = &cfg.input;
+    p.sprinting = can_sprint && input.pressed(buttons::SPRINT) && m > ic.stop_sprint_threshold && !p.crouched;
+    p.walking = !p.sprinting && m > 1e-4 && (input.pressed(buttons::WALK) || m <= ic.walk_threshold);
+    p.strafing = false;
+    p.moving_backwards = false;
+    if !p.walking && m > 1e-4 {
+        let inv = 1.0 / m;
+        let side_angle = (r.abs() * inv).clamp(-1.0, 1.0).acos().to_degrees();
+        let axis_angle = (f.abs() * inv).clamp(-1.0, 1.0).acos().to_degrees();
+        let forward = f * inv >= 0.0;
+        let strafe_limit = if forward { ic.strafe_angle_forward } else { ic.strafe_angle_back };
+        if side_angle < strafe_limit {
+            p.strafing = true;
+        } else if !forward && axis_angle < ic.backwards_angle {
+            p.moving_backwards = true;
+        }
+    }
+}
+
+/// `ADishonoredPawn::MaxSpeedModifier` (0x00B56C40): the multiplier of `GroundSpeed`
+/// (`Attribute_GroundSpeed`) used by walking physics.
+/// - base (UE3 `APawn::MaxSpeedModifier`): `WalkingPct` when walking, else 1;
+/// - not sprinting, not sneaking: strafing -> `StrafeMultiplierRun`, backwards ->
+///   `BackwardMultiplierRun`, else the base (the multipliers replace it);
+/// - sneaking: strafing -> `StrafeMultiplierSneak`, else `CrouchedPct * base` with
+///   `CrouchedPct = GroundSpeedCrouch / GroundSpeed` (the backward sneak multiplier is
+///   unreachable: the controller never sets both flags);
+/// - sprinting: `GroundSpeedSprint * (StrafeMultiplierSprint | BackwardMultiplierSprint | 1)
+///   / GroundSpeed`;
+/// - times the sword factor (`Attribute_SwordUnsheathedSpeedFactor` with a weapon drawn,
+///   in every stance including sprint);
+/// - a drop of more than 1e-4 below last tick's value is blended:
+///   `last + (new - last) * clamp(dt * m_fSpeedBlendDownSpeed, 0, 1)`; rises are instant.
+pub fn speed_modifier(p: &mut PlayerState, input: &PlayerInput, cfg: &MovementConfig, sword_out: bool, dt: f32) -> f32 {
+    let ground = cfg.run_speed;
+    let base = if p.walking {
+        let (f, r) = input.axes();
+        let m = (f * f + r * r).sqrt();
+        let slow = !input.pressed(buttons::WALK) && m <= cfg.input.slow_walk_threshold;
+        (if slow { cfg.slow_walk_speed } else { cfg.walk_speed }) / ground
     } else {
-        (cfg.run_speed, cfg.strafe_mult_run, cfg.back_mult_run)
-    };
-    let (af, ar) = (f.abs(), r.abs());
-    let dir_mult = if af + ar < 1e-4 {
         1.0
-    } else {
-        let fm = if f >= 0.0 { 1.0 } else { back };
-        (af * fm + ar * strafe) / (af + ar)
     };
-    let sword = if sword_out && !sprinting { cfg.sword_unsheathed_speed_factor } else { 1.0 };
-    base * dir_mult * sword
+    let mut m = if p.sprinting {
+        let dir = if p.strafing {
+            cfg.strafe_mult_sprint
+        } else if p.moving_backwards {
+            cfg.back_mult_sprint
+        } else {
+            1.0
+        };
+        cfg.sprint_speed * dir / ground
+    } else if p.crouched {
+        if p.strafing { cfg.strafe_mult_sneak } else { cfg.crouch_speed / ground * base }
+    } else if p.strafing {
+        cfg.strafe_mult_run
+    } else if p.moving_backwards {
+        cfg.back_mult_run
+    } else {
+        base
+    };
+    m *= if sword_out { cfg.sword_unsheathed_speed_factor } else { cfg.sword_sheathed_speed_factor };
+    let last = p.speed_mod;
+    if m < last && last - m > 1e-4 {
+        let a = (dt * cfg.speed_blend_down_speed).clamp(0.0, 1.0);
+        m = (m - last) * a + last;
+    }
+    p.speed_mod = m;
+    m
+}
+
+/// Ground max speed this tick: `GroundSpeed * MaxSpeedModifier()`.
+fn max_speed(p: &mut PlayerState, input: &PlayerInput, cfg: &MovementConfig, sword_out: bool, dt: f32) -> f32 {
+    cfg.run_speed * speed_modifier(p, input, cfg, sword_out, dt)
 }
 
 /// UE3 `APawn::CalcVelocity` (LIKELY): braking when there is no acceleration,
@@ -108,13 +213,12 @@ fn calc_velocity(vel: Vec3, accel: Vec3, max_speed: f32, friction: f32, dt: f32)
     Vec3::new(v.x, v.y, vel.z)
 }
 
+/// UE3 `PlayerController` `PlayerWalking.PlayerMove`: `Acceleration = AccelRate *
+/// Normal(aForward * X + aStrafe * Y)`; stick deflection only selects the walk speed.
 fn input_accel(p: &PlayerState, input: &PlayerInput, cfg: &MovementConfig) -> Vec3 {
     let (f, r) = input.axes();
-    let mut dir = forward_vector(p.yaw) * f + right_vector(p.yaw) * r;
-    if dir.length() > 1.0 {
-        dir = dir.normalize();
-    }
-    dir * cfg.accel_rate
+    let dir = forward_vector(p.yaw) * f + right_vector(p.yaw) * r;
+    dir.normalize_or_zero() * cfg.accel_rate
 }
 
 pub struct MoveCtx<'a> {
@@ -138,18 +242,26 @@ pub fn step_movement(
         return;
     }
 
-    // Sneak toggle (keeps feet planted; standing up requires headroom).
-    if p.just_pressed(input, buttons::CROUCH) && p.mode == MoveMode::Walking {
-        set_crouch(p, !p.crouched, ctx);
+    // `Dis_SneakOrSlide`: sneak toggle (keeps feet planted; standing up requires
+    // headroom), or a slide when sprinting at `m_fMinSpeedToSlide` or faster.
+    if p.just_pressed(input, buttons::CROUCH) && p.mode == MoveMode::Walking && !p.slide.active {
+        if p.sprinting && can_move && p.velocity.truncate().length() >= ctx.cfg.input.min_speed_to_slide {
+            start_slide(p, sword_out, ctx);
+        } else {
+            set_crouch(p, !p.crouched, ctx);
+        }
     }
 
-    // Lean only while standing still on the ground.
+    // Lean only while standing still on the ground (moving breaks the lean).
     let lean_target = if p.mode == MoveMode::Walking && p.velocity.truncate().length() < 10.0 {
         (input.pressed(buttons::LEAN_RIGHT) as i32 - input.pressed(buttons::LEAN_LEFT) as i32) as f32
     } else {
         0.0
     };
-    p.lean += (lean_target - p.lean).clamp(-ctx.dt * 5.0, ctx.dt * 5.0);
+    step_lean(p, lean_target, ctx);
+
+    let can_sprint = can_move && p.mode == MoveMode::Walking && p.sword.phase != crate::state::SwordPhase::Blocking;
+    update_locomotion_flags(p, input, ctx.cfg, can_sprint);
 
     match p.mode {
         MoveMode::Walking => walking(p, input, sword_out, can_move, ctx, events),
@@ -175,6 +287,51 @@ pub fn advance_traversal(p: &mut PlayerState, dt: f32) -> bool {
     let a = if t.duration <= 0.0 { 1.0 } else { (t.elapsed / t.duration).min(1.0) };
     p.position = t.from.lerp(t.to, a);
     a >= 1.0
+}
+
+/// Slide start (`StatePlayerMasterSlide` enter, 0x00A67FA0): the slide eases the
+/// horizontal velocity from its value at the start to the same direction at
+/// `Attribute_GroundSpeedCrouch` (times the sword factor) over `m_fSlideTime`, sneaking.
+fn start_slide(p: &mut PlayerState, sword_out: bool, ctx: &MoveCtx) {
+    let cfg = ctx.cfg;
+    let v0 = Vec3::new(p.velocity.x, p.velocity.y, 0.0);
+    let sword = if sword_out { cfg.sword_unsheathed_speed_factor } else { cfg.sword_sheathed_speed_factor };
+    let target = v0.normalize_or_zero() * cfg.crouch_speed * sword;
+    set_crouch(p, true, ctx);
+    p.sprinting = false;
+    p.slide = SlideState { active: true, elapsed: 0.0, start_velocity: v0, target_velocity: target, stop_interpolating: false };
+}
+
+/// Slide physics (0x00A6F440): `v = v0 + (target - v0) * (1 - cos(pi * t / SlideTime)) / 2`
+/// until the speed drops below the target speed (then the velocity is left alone); the
+/// slide ends when the velocity turns more than `m_fSlideVelocityDeactivateAngle` from
+/// its start direction, or after `m_fSlideTime` (0x00A7B220).
+fn slide(p: &mut PlayerState, ctx: &MoveCtx) {
+    let cfg = ctx.cfg;
+    let s = &mut p.slide;
+    s.elapsed += ctx.dt;
+    if s.elapsed > cfg.slide_time {
+        s.active = false;
+        return;
+    }
+    if !s.stop_interpolating {
+        let t = (s.elapsed / cfg.slide_time).clamp(0.0, 1.0);
+        let e = (1.0 - (t * std::f32::consts::PI).cos()) * 0.5;
+        let v = s.start_velocity + (s.target_velocity - s.start_velocity) * e;
+        p.velocity.x = v.x;
+        p.velocity.y = v.y;
+    }
+    p.velocity.z = 0.0;
+    let delta = Vec3::new(p.velocity.x, p.velocity.y, 0.0) * ctx.dt;
+    move_and_slide(p, delta, true, ctx);
+    let s = &mut p.slide;
+    let cur = p.velocity.truncate();
+    let start_dir = s.start_velocity.truncate().normalize_or_zero();
+    if cur.normalize_or_zero().dot(start_dir) < cfg.slide_deactivate_angle.to_radians().cos() {
+        s.active = false;
+    } else if cur.length() < s.target_velocity.truncate().length() {
+        s.stop_interpolating = true;
+    }
 }
 
 fn set_crouch(p: &mut PlayerState, crouch: bool, ctx: &MoveCtx) {
@@ -222,12 +379,18 @@ fn walking(
             return;
         }
     }
-    let accel = if can_move { input_accel(p, input, cfg) } else { Vec3::ZERO };
-    let vmax = max_speed(p, input, cfg, sword_out);
-    p.velocity = calc_velocity(p.velocity, accel, vmax, cfg.ground_friction, ctx.dt);
-    p.velocity.z = 0.0;
-    let delta = Vec3::new(p.velocity.x, p.velocity.y, 0.0) * ctx.dt;
-    move_and_slide(p, delta, true, ctx);
+    if p.slide.active {
+        slide(p, ctx);
+        // The speed modifier keeps tracking so the exit blends down from the slide.
+        p.speed_mod = p.velocity.truncate().length() / cfg.run_speed;
+    } else {
+        let accel = if can_move { input_accel(p, input, cfg) } else { Vec3::ZERO };
+        let vmax = max_speed(p, input, cfg, sword_out, ctx.dt);
+        p.velocity = calc_velocity(p.velocity, accel, vmax, cfg.ground_friction, ctx.dt);
+        p.velocity.z = 0.0;
+        let delta = Vec3::new(p.velocity.x, p.velocity.y, 0.0) * ctx.dt;
+        move_and_slide(p, delta, true, ctx);
+    }
 
     // Stay glued to the floor within step height, otherwise start falling.
     let cap = capsule(p, cfg);
@@ -251,6 +414,8 @@ fn falling(p: &mut PlayerState, input: &PlayerInput, can_move: bool, ctx: &MoveC
     let cfg = ctx.cfg;
     let dt = ctx.dt;
     p.fall_time += dt;
+    // Leaving the ground ends a slide (the slide physics exits on a fall, 0x00A6F440).
+    p.slide.active = false;
 
     // Auto-mantle while airborne and pushing forward (Dishonored grabs ledges mid-jump).
     if can_move && input.forward > 0 && -p.velocity.z < cfg.mantle.max_fall_speed_for_mantle {
@@ -380,35 +545,76 @@ fn try_step_up(p: &mut PlayerState, delta: Vec3, ctx: &MoveCtx) -> bool {
     }
 }
 
-/// Ledge detection and mantle start (SPECULATIVE probe pattern, CONFIRMED thresholds).
+/// Ledge detection and mantle start for the player's own mantle (jump into a ledge, or
+/// grab one while airborne). Thresholds are the `pMantleTweaks` values; falling faster
+/// than `m_fFallSpeedForLedgeGrab` only grabs edges at least
+/// `m_fLedgeGrabMantleMinEdgeHeight` high, and nothing faster than
+/// `m_fMaxFallSpeedForMantle`.
 pub fn try_mantle(p: &mut PlayerState, input: &PlayerInput, ctx: &MoveCtx, events: &mut Vec<SimEvent>) -> bool {
-    let cfg = ctx.cfg;
-    let m = &cfg.mantle;
+    let m = &ctx.cfg.mantle;
     if input.forward <= 0 {
         return false;
     }
-    let fwd = forward_vector(p.yaw);
+    let fall = -p.velocity.z;
+    if p.mode == MoveMode::Falling && fall >= m.max_fall_speed_for_mantle {
+        return false;
+    }
+    let min_edge = if p.mode == MoveMode::Falling && fall > m.fall_speed_for_ledge_grab { m.ledge_grab_min_edge_height } else { m.min_edge_height };
+    try_mantle_from(p, forward_vector(p.yaw), min_edge, ctx, events)
+}
+
+/// The mantle the original tries when a Blink ends (`ADishonoredPlayerPawn` 0x00AD78D0
+/// called from 0x00BE7420): the Blink edge finder uses `pMantleBlinkTweaks`, which leave
+/// `m_MantleMinEdgeHeight` at its class default 0 and match the normal tweaks otherwise.
+pub fn try_blink_mantle(p: &mut PlayerState, ctx: &MoveCtx, events: &mut Vec<SimEvent>) -> bool {
+    let dir = forward_vector(p.yaw);
+    try_mantle_from(p, dir, 0.0, ctx, events)
+}
+
+/// Edge search in the spirit of `DisMantleFinderState_ForwardSearches` (0x00ADA6F0 /
+/// 0x00AD6600): horizontal traces `m_MantleEdgeSearchDist` beyond the cylinder, every
+/// `m_LineCheckStepSize` from the lowest edge height up to `m_MantleMaxEdgeHeight`; the
+/// wall must be within `m_MaxVerticalAngleForEdgeFace` of vertical and
+/// `m_MaxHorizontalAngleForEdgeFace` of the facing; the first clear trace above it marks
+/// the edge, whose top (slope within `m_MaxSlopeAngleForEdgeTop`) is found straight down.
+/// The finder's later states (destination valid, can stand, `m_FinalVerifyLocationGridSize`
+/// grid) are reduced to a capsule clearance test, standing then sneaking.
+pub fn try_mantle_from(p: &mut PlayerState, fwd: Vec3, min_edge: f32, ctx: &MoveCtx, events: &mut Vec<SimEvent>) -> bool {
+    let cfg = ctx.cfg;
+    let m = &cfg.mantle;
     let base = feet(p, cfg);
     let r = cfg.collision_radius;
-    // There must be something in front of us at chest height.
-    let chest = base + Vec3::Z * (m.min_edge_height * 0.5 + 10.0);
     let reach = r + m.edge_search_dist;
-    let wall = ctx.world.raycast(chest, fwd, reach, channel::PAWN);
-    let wall_dist = match wall {
-        Some(h) if h.normal.z.abs() < 0.7 => h.distance,
-        _ => {
-            // Also allow when the wall only starts above knee height (e.g. a ledge while airborne).
-            match ctx.world.raycast(base + Vec3::Z * m.min_edge_height, fwd, reach, channel::PAWN) {
-                Some(h) if h.normal.z.abs() < 0.7 => h.distance,
-                _ => return false,
+    let step = m.line_check_step_size.max(1.0);
+    let max_vert = m.max_vertical_angle_edge_face.to_radians().sin();
+    let min_facing = m.max_horizontal_angle_edge_face.to_radians().cos();
+    let mut wall_dist = None;
+    let mut edge_clear_h = None;
+    let mut h = min_edge.max(step);
+    while h <= m.max_edge_height + step {
+        match ctx.world.raycast(base + Vec3::Z * h, fwd, reach, channel::PAWN) {
+            Some(hit) => {
+                let face_ok = hit.normal.z.abs() <= max_vert && (-hit.normal.truncate().normalize_or_zero()).dot(fwd.truncate()) >= min_facing;
+                if !face_ok {
+                    return false;
+                }
+                wall_dist = Some(hit.distance);
             }
+            None if wall_dist.is_some() => {
+                edge_clear_h = Some(h);
+                break;
+            }
+            None => {}
         }
+        h += step;
+    }
+    let (Some(wall_dist), Some(clear_h)) = (wall_dist, edge_clear_h) else {
+        return false;
     };
-    // Probe downward just beyond the wall face for a top surface.
+    // Top of the edge, just beyond the wall face.
     let probe_xy = base + fwd * (wall_dist + r * 0.5 + 4.0);
-    let top_start = probe_xy + Vec3::Z * (m.max_edge_height + 5.0);
-    let Some(top) = ctx.world.raycast(top_start, -Vec3::Z, m.max_edge_height - m.min_edge_height + 5.0, channel::PAWN)
-    else {
+    let top_start = probe_xy + Vec3::Z * clear_h;
+    let Some(top) = ctx.world.raycast(top_start, -Vec3::Z, step + 1.0, channel::PAWN) else {
         return false;
     };
     let max_slope_z = m.max_slope_angle_edge_top.to_radians().cos();
@@ -416,7 +622,7 @@ pub fn try_mantle(p: &mut PlayerState, input: &PlayerInput, ctx: &MoveCtx, event
         return false;
     }
     let edge_h = top.point.z - base.z;
-    if edge_h < m.min_edge_height || edge_h > m.max_edge_height {
+    if edge_h < min_edge || edge_h > m.max_edge_height {
         return false;
     }
     // Standing clearance on top (crouched clearance is accepted too).
