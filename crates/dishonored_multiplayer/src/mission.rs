@@ -90,6 +90,8 @@ pub struct MapInput<'a> {
     pub world: &'a dyn WorldQuery,
     /// The map's original spawners.
     pub spawners: &'a [dishonored_ir::spawners::Spawner],
+    /// [ai] Factions, forbidden zones, alarm bells and probe lights of the map.
+    pub ai_level: &'a dishonored_ir::ai::AiLevel,
 }
 
 /// Everything needed to rebuild the mission deterministically (stored in replays).
@@ -130,6 +132,9 @@ pub struct MissionSetup {
     /// [kismet] The original Kismet of the mission maps (`MissionDef::original_kismet`).
     #[serde(default)]
     pub kismet: Option<kismet_host::KismetSetup>,
+    /// [ai] AI level data per map (lowercase name).
+    #[serde(default)]
+    pub ai_levels: BTreeMap<String, dishonored_ir::ai::AiLevel>,
 }
 
 /// Resolve a place to (position, yaw, map index).
@@ -230,6 +235,9 @@ impl MissionSetup {
                 {
                     let mut crowd = Crowd::populate(&cfg, maps[mi].ai_points, maps[mi].guard_spawns, maps[mi].world);
                     crowd.set_routes(maps[mi].routes, maps[mi].world);
+                    // [ai] factions (crowd guards and civilians take their spawners'), zones, bells, lights.
+                    crowd.set_level(maps[mi].ai_level);
+                    crowd.assign_crowd_factions(maps[mi].spawners);
                     (Some(crowd), maps[mi].name.clone())
                 }
             }
@@ -275,7 +283,7 @@ impl MissionSetup {
                 }
             }
         }
-        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances, kismet: None, routes: maps
+        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances, kismet: None, ai_levels: maps.iter().map(|m| (m.name.to_ascii_lowercase(), m.ai_level.clone())).collect(), routes: maps
                 .iter()
                 .map(|m| {
                     // Snapped to the floor as `Crowd::set_routes` does for the crowd's map.
@@ -294,6 +302,8 @@ struct LevelState {
     brains: Vec<Brain>,
     layout: CrowdLayout,
     spawns: Vec<NpcSpawn>,
+    /// [ai] faction table (brains index it), forbidden zones, alarm bells, lights, overrides.
+    level: Crowd,
 }
 
 /// What a player is about to interact with.
@@ -402,9 +412,22 @@ impl MissionMatch {
                 self.crowd.brains.extend(c.brains);
                 self.crowd.layout = c.layout;
                 self.crowd.spawns = c.spawns;
+                // [ai] the crowd's faction table (its brains index it) and level data.
+                self.crowd.factions = c.factions;
+                self.crowd.player_faction = c.player_faction;
+                self.crowd.tweak_factions = c.tweak_factions;
+                self.crowd.zones = c.zones;
+                self.crowd.alarms = c.alarms;
+                self.crowd.lights = c.lights;
             }
         }
         self.crowd.layout.flee_points = self.setup.flee.get(&self.current_map.to_ascii_lowercase()).cloned().unwrap_or_default();
+        // [ai] the map's factions, forbidden zones, alarm bells and probe lights.
+        if self.crowd.player_faction.is_none() {
+            if let Some(l) = self.setup.ai_levels.get(&self.current_map.to_ascii_lowercase()) {
+                self.crowd.set_level(l);
+            }
+        }
         // The map's own patrol routes (the crowd of the start map already has them).
         if self.crowd.routes.is_empty() {
             self.crowd.routes = self.setup.routes.get(&self.current_map.to_ascii_lowercase()).cloned().unwrap_or_default();
@@ -446,10 +469,24 @@ impl MissionMatch {
         }
         let mut b = Brain::new(s.id, s.kind, s.position, 0x5EED ^ s.id as u64);
         b.stay = !o.props.patrol_on_startup;
+        // [ai] DisSpawnerInfo: faction override (else the pawn tweak's), squad, and the
+        // spawner's m_SpawnAtSuspicionLevel.
+        b.faction = self.crowd.spawner_faction(&o.props.faction, &o.tweak);
+        b.squad = o.props.squad.clone();
+        b.suspecting = o.props.at_suspicion.as_deref() == Some("DAISL_Suspecting");
         self.crowd.brains.retain(|x| x.id != s.id);
         self.crowd.brains.push(b);
-        if alert || o.props.aware_on_startup {
+        if alert {
             self.alert_npc(s.id);
+        } else if o.props.aware_on_startup {
+            // [ai] m_bAwareOfPlayerUponStartup: max attention (Psychic) on the player.
+            if let Some(t) = self.nearest_human(s.position) {
+                let at = self.world.player(t).map(|p| p.position).unwrap_or(s.position);
+                let ai = self.crowd.ai.clone();
+                if let Some(b) = self.crowd.brains.iter_mut().find(|b| b.id == s.id) {
+                    b.aware_of(&ai, t, at);
+                }
+            }
         }
     }
 
@@ -604,7 +641,7 @@ impl MissionMatch {
             let npcs: Vec<PlayerState> = self.world.players.iter().filter(|p| !humans.contains(&p.id)).cloned().collect();
             let fresh = Crowd { ai: self.crowd.ai.clone(), ..Default::default() };
             let crowd = std::mem::replace(&mut self.crowd, fresh);
-            self.saved.insert(self.current_map.to_ascii_lowercase(), LevelState { npcs, brains: crowd.brains, layout: crowd.layout, spawns: crowd.spawns });
+            self.saved.insert(self.current_map.to_ascii_lowercase(), LevelState { npcs, brains: crowd.brains.clone(), layout: crowd.layout.clone(), spawns: crowd.spawns.clone(), level: Crowd { brains: Vec::new(), ..crowd } });
             self.world.players.retain(|p| humans.contains(&p.id));
             self.world.projectiles.clear();
             self.current_map = self.setup.maps.iter().find(|m| m.eq_ignore_ascii_case(dest_map)).cloned().unwrap_or_else(|| dest_map.to_string());
@@ -612,7 +649,7 @@ impl MissionMatch {
                 Some(ls) => {
                     self.world.players.extend(ls.npcs);
                     let routes = self.setup.routes.get(&self.current_map.to_ascii_lowercase()).cloned().unwrap_or_default();
-                    self.crowd = Crowd { brains: ls.brains, layout: ls.layout, spawns: ls.spawns, ai: self.crowd.ai.clone(), routes, ..Default::default() };
+                    self.crowd = Crowd { brains: ls.brains, layout: ls.layout, spawns: ls.spawns, ai: self.crowd.ai.clone(), routes, factions: ls.level.factions, player_faction: ls.level.player_faction, tweak_factions: ls.level.tweak_factions, zones: ls.level.zones, overrides: ls.level.overrides, alarms: ls.level.alarms, lights: ls.level.lights, ..Default::default() };
                 }
                 None => self.populate_fresh(cfg),
             }
@@ -820,10 +857,7 @@ impl MissionMatch {
                 let calm_before = self.engaged.is_empty();
                 if self.engaged.insert(b.id) {
                     events.push(MissionEvent::PlayerDetected);
-                    // An alarm is the watch going from calm to engaged, not every guard joining.
-                    if calm_before {
-                        events.push(MissionEvent::AlarmRaised);
-                    }
+                    let _ = calm_before;
                 }
             }
             if !hunting_human {
@@ -838,14 +872,31 @@ impl MissionMatch {
                 }
             }
         }
-        // The alarm brings the map's alarm squads (`m_SpawnAtSuspicionLevel` spawners that do not
-        // spawn on begin play, e.g. Boyle's `alarm_guards`), already hunting.
-        if events.iter().any(|e| matches!(e, MissionEvent::AlarmRaised)) {
-            for i in 0..self.setup.original.len() {
-                let o = &self.setup.original[i];
-                if o.map.eq_ignore_ascii_case(&self.current_map) && o.props.at_suspicion.is_some() && o.props.travel_tags.is_empty() && !o.props.on_begin_play {
-                    self.spawn_original(i, true, cfg);
+        // [ai] The alarm comes from the original mechanism: a guard rang a `DisAlarmBell`
+        // (AlarmRaised); after the bell's ring delay its `m_TriggeredSpawners` spawn, aware of
+        // the alarm's enemy (`alarm_spawn_choice`).
+        let ai_events = self.crowd.events.clone();
+        for e in &ai_events {
+            match e {
+                dishonored_ai::AiEvent::AlarmRang { .. } => events.push(MissionEvent::AlarmRaised),
+                dishonored_ai::AiEvent::AlarmSpawn { bell, enemy_pos, .. } => {
+                    let Some(def) = self.crowd.alarms.get(*bell).map(|a| a.def.clone()) else { continue };
+                    let here: Vec<(String, Vec3)> = self.setup.original.iter().filter(|o| o.map.eq_ignore_ascii_case(&self.current_map)).map(|o| (o.name.clone(), o.spawn.position)).collect();
+                    for name in dishonored_ai::alarm_spawn_choice(&def, &here, *enemy_pos) {
+                        if let Some(i) = self.setup.original.iter().position(|o| o.map.eq_ignore_ascii_case(&self.current_map) && o.name.eq_ignore_ascii_case(&name)) {
+                            self.spawn_original(i, true, cfg);
+                        }
+                    }
                 }
+                dishonored_ai::AiEvent::Bark { npc, hook, initiator } => {
+                    // Mission NPCs bark as their speaker actor, original NPCs as their spawner.
+                    let named = self.npc_by_id.get(npc).and_then(|n| self.setup.def.npcs.iter().find(|d| &d.id == n).map(|d| (n.clone(), d.speaker_actor().unwrap_or(n).to_string())));
+                    let named = named.or_else(|| self.setup.original.iter().find(|o| o.spawn.id == *npc).map(|o| (o.name.clone(), o.name.clone())));
+                    if let Some((name, actor)) = named {
+                        self.state.ai_hooks.push((name, actor, hook.clone(), *initiator));
+                    }
+                }
+                dishonored_ai::AiEvent::AlarmEnded { .. } => {}
             }
         }
         // Respawns (if the mission allows them).

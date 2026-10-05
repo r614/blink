@@ -210,6 +210,19 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
     if let Some(m) = beh("AI_BehaviorTweaks_TriggerAlarm.TweaksBehavior_TriggerAlarm_Party") {
         out.alarm_companion_range = get_f32(&m, "m_fCompanionRange").unwrap_or(out.alarm_companion_range);
         out.alarm_fight_radius = get_f32(&m, "m_fFightRadius").unwrap_or(out.alarm_fight_radius);
+        // Unset chances keep the class default 0.
+        let ta = &mut out.trigger_alarm;
+        let g = |k: &str| get_f32(&m, k).unwrap_or(0.0);
+        ta.chance_sighting_alone = g("m_fAlarmChanceUponSighting_Alone");
+        ta.chance_sighting_in_group = g("m_fAlarmChanceUponSighting_InGroup");
+        ta.chance_found_corpse = g("m_fAlarmChanceUponFoundCorpse");
+        ta.chance_witness_death = g("m_fAlarmChanceUponWitnessDeath");
+        ta.chance_help = g("m_fAlarmChanceUponHelp");
+        ta.fight_radius = out.alarm_fight_radius;
+        ta.companion_range = out.alarm_companion_range;
+        ta.wait_before_ring = get_f32(&m, "m_fWaitTimeBeforeRing").unwrap_or(ta.wait_before_ring);
+        ta.companion_must_be_ally = matches!(m.get("m_bCompanionMustBeAlly"), Some(TVal::B(true)));
+        ta.companion_must_match_squad = matches!(m.get("m_bCompanionMustMatchSquad"), Some(TVal::B(true)));
         prov.insert("ai.alarm".into(), "AI_BehaviorTweaks_TriggerAlarm.TweaksBehavior_TriggerAlarm_Party".into());
     }
     if let Some(m) = beh("AI_BehaviorTweaks_EliteGuard.TweaksBehavior_CombatEliteGuard") {

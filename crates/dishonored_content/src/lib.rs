@@ -138,7 +138,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     }
     let curated = load_spawns(map, None);
     let spawns = if curated.is_empty() { spawns } else { curated };
-    let npc_path = dir.join(format!("{map}.npcs5.json"));
+    let npc_path = dir.join(format!("{map}.npcs6.json"));
     let npcs: dishonored_assets::npcs::NpcData = match std::fs::read_to_string(&npc_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(n) => n,
         None => {
@@ -258,6 +258,7 @@ pub fn mission_setup(maps: &MapContents, def: dishonored_mission::MissionDef) ->
             routes: &mc.routes,
             world: &mc.collision,
             spawners: &mc.spawners,
+            ai_level: &mc.ai_level,
         });
     }
     let refs = def.conversation_refs();

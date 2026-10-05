@@ -252,7 +252,7 @@ pub fn default_melee_contexts() -> Vec<MeleeContextConfig> {
 }
 
 /// A `DishonoredRoute` (an engine `Route` of `DishonoredNavPoint`s) used by `DisBehaviorPatrol`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PatrolRoute {
     pub name: String,
     /// `ERouteType`: 0 Linear (once, then adopt another route), 1 Loop (back and forth),
@@ -261,6 +261,46 @@ pub struct PatrolRoute {
     /// `m_Capacity` (-1 = unlimited).
     pub capacity: i32,
     pub points: Vec<RoutePoint>,
+    /// `m_SupportedSquads`: when set, only pawns of these squads may adopt the route.
+    #[serde(default)]
+    pub squads: Vec<String>,
+    /// `m_AdoptionRange` (negative: any distance).
+    #[serde(default = "minus_one")]
+    pub adoption_range: f32,
+    /// `m_NeglectThreshold`: a route nobody walked for longer is preferred.
+    #[serde(default = "thirty")]
+    pub neglect_threshold: f32,
+    /// `m_bIsActive`.
+    #[serde(default = "yes")]
+    pub active: bool,
+    /// The route actor's location (adoption range origin).
+    #[serde(default)]
+    pub location: glam::Vec3,
+}
+
+fn minus_one() -> f32 {
+    -1.0
+}
+fn thirty() -> f32 {
+    30.0
+}
+
+impl Default for PatrolRoute {
+    fn default() -> Self {
+        PatrolRoute { name: String::new(), kind: 2, capacity: -1, points: Vec::new(), squads: Vec::new(), adoption_range: -1.0, neglect_threshold: 30.0, active: true, location: glam::Vec3::ZERO }
+    }
+}
+
+impl PatrolRoute {
+    /// `DishonoredRoute` adoption check (0x00a4bc70): active, has points, the pawn's squad is
+    /// supported, capacity left, and the pawn within `m_AdoptionRange`.
+    pub fn adoptable(&self, users: i32, squad: &str, pos: glam::Vec3) -> bool {
+        self.active
+            && !self.points.is_empty()
+            && (self.squads.is_empty() || self.squads.iter().any(|s| s.eq_ignore_ascii_case(squad)))
+            && (self.capacity < 0 || users < self.capacity)
+            && (self.adoption_range < 0.0 || pos.distance(self.location) < self.adoption_range)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

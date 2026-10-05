@@ -119,7 +119,7 @@ fn full_match_with_crowd_completes_without_deadlock() {
     let crowd = CrowdConfig { civilians: 20, guards: 3, center: Vec3::ZERO, radius: 5000.0, seed: 7, civilian_archetypes: vec![0, 2, 3], guard_archetypes: vec![1] };
     let rules = ContractsRules { warmup_time: 1.0, time_limit: 240.0, crowd: Some(crowd), ..Default::default() };
     let guard_spawns = vec![(Vec3::new(0., 0., 100.), 0.0)];
-    let setup = GameSetup::contracts(rules, spawns(), Some(CrowdSource { points: &pts, guard_spawns: &guard_spawns, flee_points: &[], routes: &[] }), &w);
+    let setup = GameSetup::contracts(rules, spawns(), Some(CrowdSource { points: &pts, guard_spawns: &guard_spawns, flee_points: &[], routes: &[], ai: None }), &w);
     let mut g = setup.build(&sim);
     let mut bots: Vec<Bot> = (1..=8).map(|i| Bot::new(i, BotStyle::Duelist, 40 + i as u64)).collect();
     for b in &bots {

@@ -132,7 +132,7 @@ fn probe_light(l: &Light) -> ProbeLight {
     ProbeLight { kind, position: l.position, direction: l.direction, intensity: l.brightness * lum, radius: l.radius, falloff_exponent: l.falloff_exponent, inner_cone: inner, outer_cone: outer, casts_shadows: l.casts_shadows }
 }
 
-fn obj_list(pkg: &Package, props: &[Property], name: &str) -> Vec<i32> {
+fn obj_list(_pkg: &Package, props: &[Property], name: &str) -> Vec<i32> {
     find(props, name).and_then(|p| p.array_objects().ok()).unwrap_or_default()
 }
 
@@ -163,7 +163,8 @@ fn read_zone(pkg: &Package, i: usize) -> Option<ForbiddenZone> {
                 for k in 0..n {
                     let Some(b) = raw.get(k * 16..k * 16 + 16) else { break };
                     let f = |o: usize| f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
-                    let (nl, w) = (Vec3::new(f(0), f(4), f(8)), f(12));
+                    // Serialized (W, X, Y, Z), like tagged matrix rows.
+                    let (nl, w) = (Vec3::new(f(4), f(8), f(12)), f(0));
                     // local q = S^-1 R^-1 (x - loc) + pivot; n.q <= w.
                     let nw = r * (nl / ds3.max(Vec3::splat(1e-6)));
                     let d = w - nl.dot(pivot) + nw.dot(loc);

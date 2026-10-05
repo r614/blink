@@ -70,7 +70,7 @@ impl Session {
         } else if contracts {
             let rules = ContractsRules { warmup_time: 2.0, min_players: 2, crowd: Some(default_crowd(crowd_center(&content.spawns.iter().map(|s| (s.position, s.yaw)).collect::<Vec<_>>()))), ..Default::default() };
             let pts: Vec<(glam::Vec3, f32)> = content.spawns.iter().map(|s| (s.position, s.yaw)).collect();
-            GameSetup::contracts(rules, pts, Some(CrowdSource { points: &content.ai_points, guard_spawns: &content.guard_spawns, flee_points: &content.flee_points, routes: &content.routes }), &content.collision)
+            GameSetup::contracts(rules, pts, Some(CrowdSource { points: &content.ai_points, guard_spawns: &content.guard_spawns, flee_points: &content.flee_points, routes: &content.routes, ai: Some((&content.ai_level, &content.spawners)) }), &content.collision)
         } else {
             let spawns: Vec<SpawnPoint> = content.spawns.iter().map(|s| SpawnPoint { position: s.position, yaw: s.yaw }).collect();
             GameSetup::Ffa { rules: FfaRules { warmup_time: 1.0, min_players: 1, ..Default::default() }, spawns }
