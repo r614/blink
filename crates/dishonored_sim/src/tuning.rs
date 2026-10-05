@@ -21,6 +21,12 @@ pub struct CombatTuning {
     pub swing_active: f32,
     pub swing_recovery: f32,
     pub parry_window: f32,
+    /// `DisTweaks_MeleeBlockPlayer.m_fTapForPerfectParryWindow`: a block started this
+    /// recently always parries (CONFIRMED, 0x00C22B60).
+    pub parry_tap_window: f32,
+    /// `m_fForceBlockTimeOnPerfectParryTap`: after a tap parry the block is held this long
+    /// and further hits in that time are plain blocks (CONFIRMED, 0x00C22B60).
+    pub force_block_after_tap: f32,
     pub stagger_time: f32,
     pub blocked_recoil: f32,
     pub assassination_time: f32,
@@ -49,6 +55,9 @@ pub struct CombatTuning {
     // (SPECULATIVE)
     pub bolt_damage: f32,
     pub bolt_speed: f32,
+    /// `DisTweaks_Arrow.m_fLegsAndArmsDamageCap` (CONFIRMED data; limb hits are not
+    /// modelled, the sim has head and body only).
+    pub bolt_limb_damage_cap: f32,
     pub crossbow_reserve: u16,
     pub crossbow_equip: f32,
     pub crossbow_reload: f32,
@@ -60,8 +69,11 @@ pub struct CombatTuning {
     pub windblast_force: f32,
     pub windblast_up_force: f32,
     pub windblast_damage: f32,
+    /// Speed of the blast front (`m_Speed`): targets are hit when it reaches them.
+    pub windblast_speed: f32,
+    /// `m_bUseDirectionalWindblast`: keep the aim pitch (else flattened).
+    pub windblast_directional: bool,
     pub windblast_wall_damage: f32,
-    pub windblast_recovery: f32,
 
     // --- Dark Vision (CONFIRMED: Twk_DarkVision) ---
     pub dark_vision_cost: f32,
@@ -93,11 +105,14 @@ impl CombatTuning {
             swing_recovery: 0.26,
             // DisNotify_BlockParryZone on Sword_Block_*: t=0.001, duration 0.430.
             parry_window: 0.43,
+            parry_tap_window: v(m, "block.m_fTapForPerfectParryWindow", 0.2),
+            force_block_after_tap: v(m, "block.m_fForceBlockTimeOnPerfectParryTap", 0.3),
             stagger_time: 1.0,
             blocked_recoil: 0.4,
             // Sword_Ready_Assassination_Back_Master AnimStateExit at 1.886 s.
             assassination_time: 1.886,
-            block_half_angle: 70.0,
+            // DisTweaks_MeleeBlock.m_fBlockAngle (horizontal half-angle of the block cone).
+            block_half_angle: v(m, "block.m_fBlockAngle", 50.0),
             back_half_angle: 60.0,
             drop_assassination_min_fall_speed: 300.0,
 
@@ -116,7 +131,9 @@ impl CombatTuning {
             bolt_gravity_mult: v(cb, "projectile.m_fGravityMultiplier", 1.3),
             bolt_stealth_mult: v(cb, "projectile.m_fDamageMultiplier_Stealth", 2.0),
             bolt_damage: 35.0,
-            bolt_speed: 4500.0,
+            // DisTweaks_FireCrossbow.m_fArrowFireSpeed x DisTweaks_Projectile.m_fSpeedMultiplier.
+            bolt_speed: v(cb, "fire.m_fArrowFireSpeed", 20000.0) * v(cb, "projectile.m_fSpeedMultiplier", 1.0),
+            bolt_limb_damage_cap: v(cb, "projectile.m_fLegsAndArmsDamageCap", 15.0),
             crossbow_reserve: 10,
             // Guns_Ready_Equip exit 0.43; reload = Reload_In 0.233 + RapidReload 0.4 +
             // Reload_Out 0.333 (Ply_Crossbow_as / Crossbows_as).
@@ -129,8 +146,9 @@ impl CombatTuning {
             windblast_force: v(wb, "m_Levels[1].m_Force", 2700.0),
             windblast_up_force: v(wb, "m_Levels[1].m_ExtraUpForce", 1600.0),
             windblast_damage: v(wb, "m_Levels[1].m_Damage", 30.0),
+            windblast_speed: v(wb, "m_Levels[1].m_Speed", 5000.0),
+            windblast_directional: v(wb, "m_bUseDirectionalWindblast", 1.0) != 0.0,
             windblast_wall_damage: v(wb, "m_HitWallAdditionalDamage", 100.0),
-            windblast_recovery: 0.6,
 
             dark_vision_cost: c.dark_vision.mana_cost,
             dark_vision_duration: v(dv, "m_Levels[1].m_fDuration", v(dv, "m_Levels.m_fDuration", 30.0)),

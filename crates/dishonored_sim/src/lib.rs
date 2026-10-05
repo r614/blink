@@ -123,19 +123,22 @@ pub fn step_world(
 
     combat::resolve_sword_hits(state, world, mv, &cfg.gameplay.vitals, &cfg.tuning, &mut out.events);
 
-    let casters: Vec<u32> = out
-        .events
-        .iter()
-        .filter_map(|e| match e {
-            SimEvent::WindblastCast { id } => Some(*id),
-            _ => None,
-        })
-        .collect();
-    if !casters.is_empty() {
-        left_hand::resolve_windblasts(state, world, mv, &cfg.tuning, &casters, &mut out.events);
+    for e in &out.events {
+        if let SimEvent::WindblastCast { id } = e {
+            state.windblasts.push(state::WindblastState {
+                caster: *id,
+                warmup: left_hand::WINDBLAST_WARMUP,
+                elapsed: 0.0,
+                origin: Vec3::ZERO,
+                direction: Vec3::X,
+                targets: Vec::new(),
+                started: false,
+            });
+        }
     }
+    left_hand::step_windblasts(state, world, mv, &cfg.gameplay.vitals, &cfg.tuning, DT, &mut out.events);
 
-    left_hand::step_projectiles(state, world, mv, &cfg.tuning, mv.gravity_z, DT, &mut out.events);
+    left_hand::step_projectiles(state, world, mv, &cfg.tuning, &cfg.gameplay.vitals, mv.gravity_z, DT, &mut out.events);
 
     // Environmental damage from this tick's movement events.
     let env: Vec<SimEvent> = out.events.clone();
@@ -146,15 +149,14 @@ pub fn step_world(
                     vitals::kill(p, None, DamageCause::World, &mut out.events);
                 }
             }
-            SimEvent::Landed { id, speed, .. } if speed > mv.max_speed_before_falling_damage => {
-                if let Some(p) = state.player_mut(id) {
-                    if speed >= mv.max_speed_before_falling_death {
-                        vitals::kill(p, None, DamageCause::Fall, &mut out.events);
-                    } else {
-                        let f = (speed - mv.max_speed_before_falling_damage)
-                            / (mv.max_speed_before_falling_death - mv.max_speed_before_falling_damage);
-                        let dmg = f * cfg.gameplay.vitals.health_max;
-                        vitals::apply_damage(p, dmg, None, DamageCause::Fall, &mut out.events);
+            SimEvent::Landed { id, speed, .. } => {
+                // `ADishonoredPawn::TakeFallingDamage` (0x00B4DCC0, DishonoredPawn vtable +0x528):
+                // damage = (int)(HealthMax * clamp((v - dmg) / (death - dmg), 0, 1)) for
+                // an impact speed v above Attribute_MaxSpeedBeforeFallingDamage.
+                let dmg = fall_damage(speed, mv, cfg.gameplay.vitals.health_max);
+                if dmg > 0.0 {
+                    if let Some(p) = state.player_mut(id) {
+                        vitals::apply_damage(p, dmg, None, DamageCause::Fall, &mut out.events, &cfg.gameplay.vitals);
                     }
                 }
             }
@@ -164,6 +166,19 @@ pub fn step_world(
 
     state.tick += 1;
     out
+}
+
+/// Falling damage for a landing at `speed` (positive, downward), whole points.
+pub fn fall_damage(speed: f32, mv: &dishonored_ir::gameplay::MovementConfig, health_max: f32) -> f32 {
+    let (lo, hi) = {
+        let (a, b) = (mv.max_speed_before_falling_damage, mv.max_speed_before_falling_death);
+        if b < a { (b, a) } else { (a, b) }
+    };
+    if speed <= lo {
+        return 0.0;
+    }
+    let f = ((speed - lo) / (hi - lo)).clamp(0.0, 1.0);
+    (health_max * f).trunc()
 }
 
 /// Order-stable hash of the authoritative state (desync detection, replay verification).
@@ -187,6 +202,12 @@ pub fn state_hash(state: &WorldState) -> u64 {
         mix(p.left.phase as u64);
         mix(p.alive as u64);
         mix(p.crouched as u64);
+    }
+    for wb in &state.windblasts {
+        mix(wb.caster as u64);
+        mix(wb.elapsed.to_bits() as u64);
+        mix(wb.warmup.to_bits() as u64);
+        mix(wb.targets.len() as u64);
     }
     for pr in &state.projectiles {
         mix(pr.id as u64);

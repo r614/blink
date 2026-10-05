@@ -130,7 +130,9 @@ fn run_and_sprint_speeds() {
     assert!((run - 360.0).abs() < 1.0, "run {run}");
     r.steps(60, &[(1, input(0., 127, buttons::SPRINT))]);
     let sprint = r.p(1).velocity.truncate().length();
-    assert!((sprint - 600.0).abs() < 1.0, "sprint {sprint}");
+    // MaxSpeedModifier (0x00B56C40) applies the sword factor in every stance, sprint too:
+    // 600 x 0.9.
+    assert!((sprint - 540.0).abs() < 1.0, "sprint {sprint}");
     // Stop: braking with ground friction brings us to rest quickly.
     r.steps(30, &[(1, input(0., 0, 0))]);
     assert!(r.p(1).velocity.truncate().length() < 1.0);
@@ -146,6 +148,78 @@ fn backward_and_strafe_multipliers() {
     r.steps(60, &[(1, PlayerInput { right: 127, ..input(0., 0, 0) })]);
     let strafe = r.p(1).velocity.truncate().length();
     assert!((strafe - 400.0 * 0.7 * 0.9).abs() < 1.0, "strafe {strafe}");
+    // Diagonal forward (45 deg from the side axis, beyond the 10 deg strafe angle): full
+    // run speed, no blend of multipliers.
+    r.steps(90, &[(1, PlayerInput { right: 127, ..input(0., 127, 0) })]);
+    let diag = r.p(1).velocity.truncate().length();
+    assert!((diag - 360.0).abs() < 1.0, "diagonal {diag}");
+    // Diagonal backward (45 deg < m_fStrafeAngle_Back 50): the strafe multiplier.
+    r.steps(90, &[(1, PlayerInput { right: 127, ..input(0., -127, 0) })]);
+    let back_diag = r.p(1).velocity.truncate().length();
+    assert!((back_diag - 400.0 * 0.7 * 0.9).abs() < 1.0, "back diagonal {back_diag}");
+}
+
+#[test]
+fn sprint_in_any_direction_and_walk_speeds() {
+    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.0), 0.)]);
+    r.settle();
+    // Sprinting sideways: GroundSpeedSprint x StrafeMultiplierSprint x sword factor.
+    r.steps(90, &[(1, PlayerInput { right: 127, ..input(0., 0, buttons::SPRINT) })]);
+    let v = r.p(1).velocity.truncate().length();
+    assert!((v - 600.0 * 0.6 * 0.9).abs() < 1.0, "strafe sprint {v}");
+    assert!(r.p(1).sprinting);
+    // Half-deflected stick: walk speed (GroundSpeedWalk); barely deflected: slow walk.
+    r.steps(120, &[(1, input(0., 80, 0))]);
+    let v = r.p(1).velocity.truncate().length();
+    assert!((v - 200.0 * 0.9).abs() < 1.0, "walk {v}");
+    r.steps(120, &[(1, input(0., 40, 0))]);
+    let v = r.p(1).velocity.truncate().length();
+    assert!((v - 100.0 * 0.9).abs() < 1.0, "slow walk {v}");
+    // Below m_fStopSprint_Threshold the sprint button does nothing.
+    r.steps(5, &[(1, input(0., 80, buttons::SPRINT))]);
+    assert!(!r.p(1).sprinting);
+}
+
+#[test]
+fn sprint_slide_eases_to_sneak_speed() {
+    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.0), 0.)]);
+    r.settle();
+    r.steps(90, &[(1, input(0., 127, buttons::SPRINT))]);
+    r.step(&[(1, input(0., 127, buttons::SPRINT | buttons::CROUCH))]);
+    assert!(r.p(1).slide.active && r.p(1).crouched);
+    // Halfway through m_fSlideTime the ease is at half: (540 + 275 x 0.9) / 2.
+    let half = (1.1f32 / 2.0 * 60.0).round() as usize - 1;
+    r.steps(half, &[(1, input(0., 127, buttons::SPRINT))]);
+    let v = r.p(1).velocity.truncate().length();
+    assert!((v - (540.0 + 247.5) / 2.0).abs() < 8.0, "mid-slide {v}");
+    r.steps(40, &[(1, input(0., 127, buttons::SPRINT))]);
+    assert!(!r.p(1).slide.active && r.p(1).crouched, "slide ends sneaking");
+}
+
+#[test]
+fn lean_swings_the_eye_about_the_pivot() {
+    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.0), 0.)]);
+    r.settle();
+    let eye0 = dishonored_sim::movement::eye_position(r.p(1), &r.cfg.gameplay.movement);
+    r.steps(60, &[(1, input(0., 0, buttons::LEAN_RIGHT))]);
+    let eye = dishonored_sim::movement::eye_position(r.p(1), &r.cfg.gameplay.movement);
+    // Pivot 2.0 x 87.5 x 2 = 350 uu below the eye, 15 deg: 90.6 uu right, 11.9 down.
+    let d = eye - eye0;
+    assert!((d.y + 350.0 * 15f32.to_radians().sin()).abs() < 2.0 || (d.y - 350.0 * 15f32.to_radians().sin()).abs() < 2.0, "lean {d}");
+    assert!((d.z + 350.0 * (1.0 - 15f32.to_radians().cos())).abs() < 1.0, "lean drop {d}");
+}
+
+#[test]
+fn speed_drop_is_blended_down() {
+    // Sprint, then release: the modifier falls at m_fSpeedBlendDownSpeed (8/s), so the
+    // max speed does not drop to run speed in one tick.
+    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.0), 0.)]);
+    r.settle();
+    r.steps(90, &[(1, input(0., 127, buttons::SPRINT))]);
+    r.step(&[(1, input(0., 127, 0))]);
+    let m = r.p(1).speed_mod;
+    let expect = 1.5 * 0.9 + (0.9 - 1.5 * 0.9) * (8.0 / 60.0);
+    assert!((m - expect).abs() < 1e-4, "modifier {m} expected {expect}");
 }
 
 #[test]
@@ -303,11 +377,86 @@ fn windblast_pushes_and_damages() {
     r.settle();
     let wb = |b| PlayerInput { yaw: 0.0, buttons: b, left_hand: LeftHand::Windblast, ..Default::default() };
     r.step(&[(1, wb(buttons::SECONDARY)), (2, input(180., 0, 0))]);
+    // Nothing yet: 0.1 s warmup, then the front travels at 5000 uu/s.
+    assert_eq!(r.p(2).mode, MoveMode::Walking);
+    assert_eq!(r.p(1).vitals.mana, 50.0);
+    r.steps(12, &[(1, wb(0)), (2, input(180., 0, 0))]);
     let v = r.p(2);
     assert_eq!(v.mode, MoveMode::Falling);
     assert!(v.velocity.x > 1000.0, "push vx {}", v.velocity.x);
-    assert!(v.vitals.health < 70.0);
-    assert_eq!(r.p(1).vitals.mana, 50.0);
+    // Damage = round(30 x factor), factor = (1 - d/3000)^2 straight ahead (d ~ 400).
+    let d = 400.0f32 - 0.0;
+    let k = (1.0 - d / 3000.0).powi(2);
+    let expect = 70.0 - (30.0 * k + 0.5).floor();
+    assert!((v.vitals.health - expect).abs() <= 1.0, "health {} expected ~{expect}", v.vitals.health);
+}
+
+#[test]
+fn windblast_factor_and_momentum_rules() {
+    use dishonored_sim::left_hand::{windblast_factor, windblast_momentum};
+    let cos_half = (135.0f32 * 0.5).to_radians().cos();
+    // Straight ahead within 100 uu: range factor only.
+    let k = windblast_factor(Vec3::X, Vec3::new(50., 0., 0.), Vec3::ZERO, 3000.0, cos_half);
+    assert!((k - (1.0 - 50.0 / 3000.0f32).powi(2)).abs() < 1e-5);
+    // Outside the 67.5 deg half-angle (in the horizontal plane): nothing.
+    assert_eq!(windblast_factor(Vec3::X, Vec3::new(100., 300., 0.), Vec3::ZERO, 3000.0, cos_half), 0.0);
+    // Level aim at 300 uu: z = 0.15 x |(2700, 0, up)| x k, up = (1 - 0.1) x 1600.
+    let m = windblast_momentum(Vec3::X, 2700.0, 1600.0, 300.0, 3000.0, 1.0);
+    assert!((m.x - 2700.0).abs() < 1e-2);
+    let up = 0.9 * 1600.0;
+    assert!((m.z - 0.15 * (2700.0f32 * 2700.0 + up * up).sqrt()).abs() < 1e-2, "{m}");
+}
+
+#[test]
+fn parry_tap_window_and_forced_block() {
+    use dishonored_sim::combat::parries;
+    use dishonored_sim::state::SwordState;
+    let t = &cfg().tuning;
+    assert!((t.parry_tap_window - 0.2).abs() < 1e-6 && (t.force_block_after_tap - 0.3).abs() < 1e-6);
+    assert!((t.block_half_angle - 50.0).abs() < 1e-6);
+    let s = |block_time: f32, force_block: f32| SwordState { phase: SwordPhase::Blocking, block_time, force_block, ..Default::default() };
+    assert!(parries(&s(0.05, 0.0), t));
+    assert!(parries(&s(0.4, 0.0), t), "inside the BlockParryZone notify");
+    assert!(!parries(&s(0.6, 0.0), t));
+    assert!(!parries(&s(0.05, 0.2), t), "a forced block after a tap parry only blocks");
+}
+
+#[test]
+fn blink_keeps_momentum_and_travels_in_steps() {
+    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.0), 0.)]);
+    r.settle();
+    let blink = |b, fwd| PlayerInput { yaw: 0.0, pitch: 0.0, forward: fwd, buttons: b, left_hand: LeftHand::Blink, ..Default::default() };
+    // Run, aim, release: 100 uu per tick (m_fDefaultBlinkStepDistance, one step per tick).
+    r.steps(60, &[(1, blink(buttons::SECONDARY, 127))]);
+    let v0 = r.p(1).velocity;
+    let x0 = r.p(1).position.x;
+    r.step(&[(1, blink(0, 127))]);
+    assert_eq!(r.p(1).mode, MoveMode::Blinking);
+    r.step(&[(1, blink(0, 127))]);
+    assert!((r.p(1).position.x - x0 - 100.0).abs() < 8.0, "step {}", r.p(1).position.x - x0);
+    // Until the end, then the pre-Blink velocity is back.
+    for _ in 0..40 {
+        if r.p(1).mode != MoveMode::Blinking {
+            break;
+        }
+        r.step(&[(1, blink(0, 0))]);
+    }
+    assert!(r.events.iter().any(|e| matches!(e, SimEvent::BlinkEnd { .. })));
+    assert!(r.p(1).position.x - x0 > 1400.0, "x {}", r.p(1).position.x - x0);
+    assert!(v0.x > 300.0 && (r.p(1).velocity.x - v0.x).abs() < 1.0, "velocity {} before {}", r.p(1).velocity, v0);
+}
+
+#[test]
+fn blink_cancels_when_target_is_too_close() {
+    // A wall right in front: the target backs off to the pawn, closer than the bounding
+    // sphere radius, so the release fizzles and no mana is spent.
+    let mut r = Run::new(floor_world(|t| boxy(t, Vec3::new(60., -500., 0.), Vec3::new(100., 500., 600.))), &[(1, Vec3::new(0., 0., STAND_Z + 1.0), 0.)]);
+    r.settle();
+    let blink = |b| PlayerInput { yaw: 0.0, pitch: 0.0, buttons: b, left_hand: LeftHand::Blink, ..Default::default() };
+    r.steps(3, &[(1, blink(buttons::SECONDARY))]);
+    r.step(&[(1, blink(0))]);
+    assert!(r.events.iter().any(|e| matches!(e, SimEvent::BlinkFizzle { .. })));
+    assert_eq!(r.p(1).vitals.mana, 100.0);
 }
 
 #[test]
