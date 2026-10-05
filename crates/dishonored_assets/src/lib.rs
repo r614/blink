@@ -7,6 +7,7 @@ pub mod material;
 pub mod npcs;
 pub mod skeletal_mesh;
 pub mod static_mesh;
+pub mod swf;
 pub mod edge_anim;
 pub mod gameplay;
 pub mod ini;
