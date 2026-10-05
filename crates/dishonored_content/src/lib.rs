@@ -261,7 +261,22 @@ pub fn mission_setup(maps: &MapContents, def: dishonored_mission::MissionDef) ->
         });
     }
     let refs = def.conversation_refs();
+    // [kismet] Missions running the original Kismet take their objectives from the original
+    // data (localized) and their travel from the Kismet instead of the extracted door table.
+    let mut def = def;
+    let kismet = match &def.original_kismet {
+        Some(ok) => {
+            let ks = load_kismet_setup(&def, ok).map_err(|e| format!("original Kismet: {e:#}"))?;
+            def.objectives = kismet_objectives(&ks.db);
+            Some(ks)
+        }
+        None => None,
+    };
     let mut setup = dishonored_multiplayer::mission::MissionSetup::new(def, &inputs)?;
+    if let Some(ks) = kismet {
+        setup.doors.clear();
+        setup.kismet = Some(ks);
+    }
     if !refs.is_empty() || !setup.def.dialog_packages.is_empty() {
         let db = load_mission_conversations(&setup.def).map_err(|e| format!("dialog data: {e:#}"))?;
         let errs = dishonored_mission::validate_conversations(&setup.def, &db);
@@ -271,6 +286,71 @@ pub fn mission_setup(maps: &MapContents, def: dishonored_mission::MissionDef) ->
         setup.conversations = Some(db);
     }
     Ok(dishonored_multiplayer::game::GameSetup::Mission(Box::new(setup)))
+}
+
+/// [kismet] The original Kismet of a mission's maps plus the global game sequence
+/// (`DishonoredGameFull_P`), with the localized texts the host shows: scripted choice options
+/// and use prompts.
+pub fn load_kismet_setup(def: &dishonored_mission::MissionDef, ok: &dishonored_mission::OriginalKismet) -> Result<dishonored_multiplayer::mission::kismet_host::KismetSetup> {
+    let content = Content::locate()?;
+    let groups: Vec<(String, Vec<String>)> = mission_maps(def).into_iter().map(|m| {
+        let pk = map_packages(&content, &m);
+        (m, pk)
+    }).collect();
+    let db = dishonored_kismet::load::load(&content, &["DishonoredGameFull_P".to_string()], &groups)?;
+    let loc = localization();
+    let mut choices = std::collections::BTreeMap::new();
+    for o in &db.ops {
+        if o.class == "DisSeqAct_DialogScriptedChoice" {
+            let pkg = db.package_name(o.package).to_string();
+            let mut opts = loc.choices(&pkg, &o.path);
+            if opts.is_empty() {
+                if let Some(dishonored_kismet::Value::Array(a)) = o.props.get("m_Choices") {
+                    opts = a.iter().map(|c| c.field("m_ChoiceText").and_then(|t| t.as_str()).unwrap_or("").to_string()).collect();
+                }
+            }
+            choices.insert(o.id, opts);
+        }
+    }
+    let mut prompts = std::collections::BTreeMap::new();
+    for (i, a) in db.actors.iter().enumerate() {
+        if let Some(dishonored_kismet::Obj::Path(t)) = a.props.get("m_pUsableObjTweaks").and_then(|v| v.as_obj()) {
+            if let Some(text) = loc.get(t, "m_InteractText") {
+                prompts.insert(i as u32, dishonored_assets::localization::with_keys(text, "F"));
+            }
+        }
+    }
+    Ok(dishonored_multiplayer::mission::kismet_host::KismetSetup { db, start_event: ok.start_event.clone(), seed: ok.seed, choices, prompts })
+}
+
+/// [kismet] Mission objectives from the original `DishonoredObjective`s (hidden until the
+/// Kismet adds them; tasks keep their initial state and hidden flag).
+pub fn kismet_objectives(db: &dishonored_kismet::KismetDb) -> Vec<dishonored_mission::ObjectiveDef> {
+    db.objectives
+        .iter()
+        .map(|o| dishonored_mission::ObjectiveDef {
+            id: o.path.rsplit('.').next().unwrap_or(&o.path).to_string(),
+            description: o.description.clone(),
+            hidden: true,
+            tasks: o
+                .tasks
+                .iter()
+                .map(|t| dishonored_mission::TaskDef {
+                    id: t.name.clone(),
+                    description: t.description.clone(),
+                    initial: match t.initial.as_str() {
+                        "DTS_Active" => dishonored_mission::TaskState::Active,
+                        "DTS_Completed" => dishonored_mission::TaskState::Completed,
+                        "DTS_Failed" => dishonored_mission::TaskState::Failed,
+                        _ => dishonored_mission::TaskState::Inactive,
+                    },
+                    hidden: t.hidden,
+                    optional: t.description.starts_with("(Optional)"),
+                    target: None,
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// Original dialog graphs a mission references, with VO lengths from the voice banks

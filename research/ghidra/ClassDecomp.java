@@ -157,16 +157,18 @@ public class ClassDecomp extends GhidraScript {
             Function ctor = ctorOf(rec);
             Address vt = vtableOf(ctor, 0);
             List<Address> mine = vt == null ? new ArrayList<>() : slots(vt);
-            Set<Address> parent = new HashSet<>();
+            // Compared slot by slot: a shared trivial function (an empty override) can sit in other
+            // slots of the parent, so set membership would hide real overrides.
+            List<Address> parent = new ArrayList<>();
             if (cp.length > 1) {
                 Address prec = record(cp[1]);
                 Address pvt = prec == null ? null : vtableOf(ctorOf(prec), 0);
-                if (pvt != null) parent.addAll(slots(pvt));
+                if (pvt != null) parent = slots(pvt);
             }
             sb.append("// constructor ").append(ctor == null ? "?" : ctor.getEntryPoint()).append(", vtable ").append(vt).append(" (").append(mine.size()).append(" slots)\n");
             int n = 0;
             for (int s = 0; s < mine.size(); s++) {
-                if (parent.contains(mine.get(s))) continue;
+                if (s < parent.size() && parent.get(s).equals(mine.get(s))) continue;
                 if (cp.length == 1 && s < 0) continue;
                 Function f = func(mine.get(s));
                 if (f == null) continue;
