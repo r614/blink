@@ -17,6 +17,8 @@ pub mod swf;
 pub mod swf_font;
 pub mod edge_anim;
 pub mod gameplay;
+pub mod items_config;
+pub mod pickups;
 pub mod ini;
 pub mod kismet;
 pub mod font;

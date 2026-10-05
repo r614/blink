@@ -75,6 +75,11 @@ impl Ini {
             .map(String::as_str)
     }
 
+    /// Every value of a repeated key (UE3 array entries), in file order.
+    pub fn get_all(&self, section: &str, key: &str) -> Vec<String> {
+        self.sections.get(section).and_then(|s| s.get(key)).cloned().unwrap_or_default()
+    }
+
     pub fn get_f32(&self, section: &str, key: &str) -> Option<f32> {
         self.get(section, key)?.parse().ok()
     }

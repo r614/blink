@@ -247,6 +247,9 @@ pub struct GameplayConfig {
     /// NPC perception and behaviour.
     #[serde(default)]
     pub ai: crate::ai::AiConfig,
+    /// Inventory, takedowns, powers and gadgets.
+    #[serde(default)]
+    pub items: crate::items::ItemsConfig,
     /// field -> evidence (tweak object path / INI key / class default / UE3 stock).
     pub provenance: BTreeMap<String, String>,
 }

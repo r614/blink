@@ -7,6 +7,7 @@
 
 pub mod ai;
 pub mod gameplay;
+pub mod items;
 pub mod nav;
 pub mod spawners;
 

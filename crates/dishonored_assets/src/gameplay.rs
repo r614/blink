@@ -288,7 +288,9 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
         "crossbow",
     )?;
 
+    let items = crate::items_config::load_items_config(content, &db, &mut l.prov);
     Ok(GameplayConfig {
+        items,
         movement,
         vitals,
         blink,
