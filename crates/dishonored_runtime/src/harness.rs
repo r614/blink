@@ -290,6 +290,8 @@ pub fn harness_frame(
     mut ctrl: ResMut<ControlOverride>,
     view: Res<SessionView>,
     session: Res<Session>,
+    settings: Option<Res<crate::settings::GameSettings>>,
+    mut pause: Option<ResMut<crate::pause_menu::PauseMenu>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     shots.frames_since_last_shot += 1;
@@ -316,7 +318,15 @@ pub fn harness_frame(
             let v: serde_json::Value = serde_json::from_str(&msg.line).unwrap_or(serde_json::Value::Null);
             let cmd = v.get("cmd").and_then(|c| c.as_str()).unwrap_or("");
             let reply = match cmd {
-                "state" => state_json(&view, &session).to_string(),
+                "state" => {
+                    // Plus the settings the game runs with and the pause menu state (launcher checks).
+                    let mut j = state_json(&view, &session);
+                    if let Some(s) = &settings {
+                        j["settings"] = serde_json::json!({ "path": s.path.display().to_string(), "fov": s.s.graphics.fov, "mouse_sensitivity": s.s.mouse.sensitivity, "invert_y": s.s.mouse.invert_y, "jump_key": s.s.key_for("GBA_Jump"), "global_volume": s.s.audio.global });
+                    }
+                    j["paused"] = serde_json::json!(pause.as_ref().is_some_and(|p| p.open));
+                    j.to_string()
+                }
                 "input" => {
                     let si: ScriptInput = serde_json::from_value(v.get("input").cloned().unwrap_or_default()).unwrap_or_default();
                     local.override_input = Some(si.to_input());
@@ -332,6 +342,12 @@ pub fn harness_frame(
                     let path = v.get("path").and_then(|p| p.as_str()).unwrap_or("shot.png");
                     shots.pending.push(PathBuf::from(path));
                     "{\"ok\":true,\"queued\":true}".into()
+                }
+                "pause" => {
+                    if let Some(p) = pause.as_mut() {
+                        p.request = true;
+                    }
+                    "{\"ok\":true}".into()
                 }
                 "quit" => {
                     shots.quit_in = Some(20);

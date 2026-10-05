@@ -128,6 +128,40 @@ pub struct Movie {
     pub tag_counts: BTreeMap<u16, usize>,
     /// Embedded fonts (DefineFont2/3).
     pub fonts: Vec<crate::swf_font::SwfFont>,
+    /// Text fields (DefineEditText): font, size, colour, alignment, variable and initial text.
+    pub edit_texts: BTreeMap<u16, EditText>,
+    /// Local font character id -> font name (DefineFont2/3).
+    pub font_names: BTreeMap<u16, String>,
+    /// Imported characters (ImportAssets / ImportAssets2): id -> (source movie URL, export name).
+    /// Scaleform resolves the URL against the movie's `ReferencedSwfs` (e.g. `gfxfontlib.swf`
+    /// for fonts, the options movie for shared screens).
+    pub imports: BTreeMap<u16, (String, String)>,
+    /// DefineButton2 characters: (state flags, character, depth, matrix) per record.
+    pub buttons: BTreeMap<u16, Vec<ButtonRecord>>,
+}
+
+/// DefineEditText. Heights are in pixels (twips / 20); `bounds` in twips.
+#[derive(Debug, Clone, Default)]
+pub struct EditText {
+    pub bounds: Rect,
+    pub font: Option<u16>,
+    pub height: f32,
+    pub color: Option<[u8; 4]>,
+    /// 0 left, 1 right, 2 centre, 3 justify.
+    pub align: u8,
+    pub multiline: bool,
+    pub html: bool,
+    pub variable: String,
+    pub initial: Option<String>,
+}
+
+/// One DefineButton2 record. `states`: bit 0 up, 1 over, 2 down, 3 hit test.
+#[derive(Debug, Clone)]
+pub struct ButtonRecord {
+    pub states: u8,
+    pub character: u16,
+    pub depth: u16,
+    pub matrix: Matrix,
 }
 
 struct Bits<'a> {
@@ -294,6 +328,43 @@ fn parse_fills(b: &mut Bits, shape_ver: u8) -> Vec<Fill> {
     out
 }
 
+fn parse_edit_text(b: &mut Bits, bounds: Rect, end: usize) -> EditText {
+    let f1 = b.u8();
+    let f2 = b.u8();
+    let mut t = EditText { bounds, multiline: f1 & 0x20 != 0, html: f2 & 0x02 != 0, ..Default::default() };
+    let (has_text, has_color, has_max, has_font) = (f1 & 0x80 != 0, f1 & 0x04 != 0, f1 & 0x02 != 0, f1 & 0x01 != 0);
+    let (has_font_class, has_layout) = (f2 & 0x80 != 0, f2 & 0x20 != 0);
+    if has_font {
+        t.font = Some(b.u16());
+    }
+    if has_font_class {
+        b.cstr();
+    }
+    if has_font || has_font_class {
+        t.height = b.u16() as f32 / 20.0;
+    }
+    if has_color {
+        t.color = Some([b.u8(), b.u8(), b.u8(), b.u8()]);
+    }
+    if has_max {
+        b.u16();
+    }
+    if has_layout {
+        t.align = b.u8();
+        b.u16();
+        b.u16();
+        b.u16();
+        b.u16();
+    }
+    if b.pos < end {
+        t.variable = b.cstr();
+    }
+    if has_text && b.pos < end {
+        t.initial = Some(b.cstr());
+    }
+    t
+}
+
 fn parse_place(b: &mut Bits, ver: u8, end: usize) -> Place {
     let flags = b.u8();
     let flags2 = if ver == 3 { b.u8() } else { 0 };
@@ -373,8 +444,51 @@ fn parse_tags(d: &[u8], mut pos: usize, end: usize, movie: &mut Movie, sprite: &
                 let id = b.u16();
                 let r = b.rect();
                 movie.texts.insert(id, r);
+                movie.edit_texts.insert(id, parse_edit_text(&mut b, r, tend));
             }
-            56 | 57 => {
+            57 | 71 => {
+                // ImportAssets(2): URL, [reserved u16 for v2], count, (id, name)*.
+                let url = b.cstr();
+                if code == 71 {
+                    b.u16();
+                }
+                let n = b.u16();
+                for _ in 0..n {
+                    if b.pos + 2 > tend {
+                        break;
+                    }
+                    let id = b.u16();
+                    let name = b.cstr();
+                    movie.imports.insert(id, (url.clone(), name));
+                }
+            }
+            34 => {
+                // DefineButton2: id, flags, action offset, records until a 0 flag byte.
+                let id = b.u16();
+                b.u8();
+                b.u16();
+                let mut recs = Vec::new();
+                while b.pos < tend {
+                    let flags = b.u8();
+                    if flags == 0 {
+                        break;
+                    }
+                    let character = b.u16();
+                    let depth = b.u16();
+                    let matrix = b.matrix();
+                    b.cxform(true);
+                    if flags & 0x10 != 0 {
+                        // filter list: skip the rest (not used by these menus)
+                        break;
+                    }
+                    if flags & 0x20 != 0 {
+                        b.u8();
+                    }
+                    recs.push(ButtonRecord { states: flags & 0x0f, character, depth, matrix });
+                }
+                movie.buttons.insert(id, recs);
+            }
+            56 => {
                 let n = b.u16();
                 for _ in 0..n {
                     let id = b.u16();
@@ -393,6 +507,7 @@ fn parse_tags(d: &[u8], mut pos: usize, end: usize, movie: &mut Movie, sprite: &
             }
             48 | 75 => {
                 if let Ok(f) = crate::swf_font::parse_define_font(&d[body..tend], code == 75) {
+                    movie.font_names.insert(u16::from_le_bytes([d[body], d[body + 1]]), f.name.clone());
                     movie.fonts.push(f);
                 }
             }
@@ -444,6 +559,28 @@ pub struct Quad {
     pub character: u16,
 }
 
+/// A text field placed in the stage by [`Movie::flatten_texts`].
+#[derive(Debug, Clone)]
+pub struct TextPlacement {
+    pub id: u16,
+    pub text: EditText,
+    /// Field space (twips) -> stage (twips).
+    pub matrix: Matrix,
+    pub color: ColorTransform,
+    pub path: String,
+}
+
+impl TextPlacement {
+    /// Stage-pixel rectangle (axis-aligned bounds of the transformed field).
+    pub fn stage_rect(&self) -> (f32, f32, f32, f32) {
+        let b = self.text.bounds;
+        let pts = [(b.xmin, b.ymin), (b.xmax, b.ymin), (b.xmax, b.ymax), (b.xmin, b.ymax)].map(|(x, y)| self.matrix.apply(x, y));
+        let xs = pts.iter().map(|p| p.0 / 20.0);
+        let ys = pts.iter().map(|p| p.1 / 20.0);
+        (xs.clone().fold(f32::MAX, f32::min), ys.clone().fold(f32::MAX, f32::min), xs.fold(f32::MIN, f32::max), ys.fold(f32::MIN, f32::max))
+    }
+}
+
 impl Movie {
     /// Display list of a sprite after running frames `0..=frame` (placements only).
     pub fn display_list(&self, sprite: &Sprite, frame: usize) -> Vec<Place> {
@@ -481,6 +618,81 @@ impl Movie {
     /// Frame index of a label inside a sprite.
     pub fn label_frame(sprite: &Sprite, label: &str) -> Option<usize> {
         sprite.frames.iter().position(|f| f.iter().any(|op| matches!(op, FrameOp::Label(l) if l.eq_ignore_ascii_case(label))))
+    }
+
+    /// Every text field reachable from a character (same traversal as [`Movie::flatten`]).
+    pub fn flatten_texts(&self, character: u16, m: Matrix, color: ColorTransform, path: &str, frame_of: &dyn Fn(&str, &Sprite) -> usize, out: &mut Vec<TextPlacement>) {
+        if let Some(t) = self.edit_texts.get(&character) {
+            out.push(TextPlacement { id: character, text: t.clone(), matrix: m, color, path: path.to_string() });
+            return;
+        }
+        let Some(sprite) = self.sprites.get(&character) else { return };
+        let frame = frame_of(path, sprite);
+        for p in self.display_list(sprite, frame) {
+            let Some(ch) = p.character else { continue };
+            let pm = m.mul(&p.matrix.unwrap_or_default());
+            let pc = match p.color {
+                Some(c) => ColorTransform { mul: std::array::from_fn(|i| color.mul[i] * c.mul[i]), add: std::array::from_fn(|i| color.add[i] + c.add[i] * color.mul[i]) },
+                None => color,
+            };
+            let child = match &p.name {
+                Some(n) if path.is_empty() => n.clone(),
+                Some(n) => format!("{path}/{n}"),
+                None => path.to_string(),
+            };
+            self.flatten_texts(ch, pm, pc, &child, frame_of, out);
+        }
+    }
+
+    /// Solid-colour shapes reachable from a character (backdrops such as the options
+    /// screens' `_black_mc`), as stage-pixel corner quads with RGBA (colour transform applied).
+    pub fn flatten_solids(&self, character: u16, m: Matrix, color: ColorTransform, path: &str, frame_of: &dyn Fn(&str, &Sprite) -> usize, out: &mut Vec<([(f32, f32); 4], [f32; 4], String)>) {
+        if let Some(shape) = self.shapes.get(&character) {
+            if let Some(Fill::Solid(c)) = shape.fills.first() {
+                let b = shape.bounds;
+                let dst = [(b.xmin, b.ymin), (b.xmax, b.ymin), (b.xmax, b.ymax), (b.xmin, b.ymax)].map(|(x, y)| {
+                    let (px, py) = m.apply(x, y);
+                    (px / 20.0, py / 20.0)
+                });
+                let rgba = std::array::from_fn(|i| (c[i] as f32 / 255.0 * color.mul[i] + color.add[i]).clamp(0.0, 1.0));
+                out.push((dst, rgba, path.to_string()));
+            }
+            return;
+        }
+        let Some(sprite) = self.sprites.get(&character) else { return };
+        let frame = frame_of(path, sprite);
+        for p in self.display_list(sprite, frame) {
+            let Some(ch) = p.character else { continue };
+            let pm = m.mul(&p.matrix.unwrap_or_default());
+            let pc = match p.color {
+                Some(c) => ColorTransform { mul: std::array::from_fn(|i| color.mul[i] * c.mul[i]), add: std::array::from_fn(|i| color.add[i] + c.add[i] * color.mul[i]) },
+                None => color,
+            };
+            let child = match &p.name {
+                Some(n) if path.is_empty() => n.clone(),
+                Some(n) => format!("{path}/{n}"),
+                None => path.to_string(),
+            };
+            self.flatten_solids(ch, pm, pc, &child, frame_of, out);
+        }
+    }
+
+    /// Font name of a text field's font id (local DefineFont or an imported font export).
+    pub fn font_name(&self, id: u16) -> Option<&str> {
+        self.font_names.get(&id).map(String::as_str).or_else(|| self.imports.get(&id).map(|(_, n)| n.as_str()))
+    }
+
+    /// Frame labels of a sprite in timeline order: (frame, label).
+    pub fn labels(sprite: &Sprite) -> Vec<(usize, String)> {
+        let mut v = Vec::new();
+        for (i, f) in sprite.frames.iter().enumerate() {
+            for op in f {
+                if let FrameOp::Label(l) = op {
+                    v.push((i, l.clone()));
+                }
+            }
+        }
+        v
     }
 
     /// Flatten a character into quads. `frame_of` picks the frame for each sprite path

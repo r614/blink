@@ -5,6 +5,8 @@
 //! mouse look, Space jump, C sneak (toggle), Shift sprint, LMB sword, RMB left hand (hold to
 //! aim Blink), Left Ctrl block, F use, Q/E lean, R reload, X walk (no original binding),
 //! 1 Blink, 2 Windblast, 3 Dark Vision, 4 Pistol, 5 Crossbow.
+//! The keys come from the player's settings (`settings::Bindings`, rebindable in Options ->
+//! Controls -> Keyboard Mapping); the list above is the default.
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
@@ -39,60 +41,105 @@ impl LocalInput {
     }
 }
 
+/// Mouse smoothing (`PSI_Mouse_bSmooting`): average of this and the previous frame's motion,
+/// like UE3's `bEnableMouseSmoothing` (APPROXIMATION: the engine's sample-time weighting is
+/// not reproduced).
+#[derive(Default)]
+pub struct Smoothing(Vec2);
+
+#[allow(clippy::too_many_arguments)]
 pub fn gather_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
+    scroll: Res<bevy::input::mouse::AccumulatedMouseScroll>,
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
+    settings: Option<Res<crate::settings::GameSettings>>,
+    bindings: Option<Res<crate::settings::Bindings>>,
+    mut smooth: Local<Smoothing>,
     mut local: ResMut<LocalInput>,
 ) {
     if !local.enabled || local.override_input.is_some() {
         return;
     }
+    let default_bindings;
+    let bind = match &bindings {
+        Some(b) => b.as_ref(),
+        None => {
+            default_bindings = crate::settings::Bindings::from_settings(&dishonored_settings::Settings::default());
+            &default_bindings
+        }
+    };
+    let (scale, invert, smoothing) = settings.as_ref().map(|s| (s.s.mouse_degrees_per_count(), s.s.mouse.invert_y, s.s.mouse.smoothing)).unwrap_or((0.1, false, false));
     let locked = cursor.iter().any(|c| c.grab_mode != CursorGrabMode::None);
     if locked {
-        local.yaw = (local.yaw + motion.delta.x * 0.1).rem_euclid(360.0);
-        local.pitch = (local.pitch - motion.delta.y * 0.1).clamp(-89.0, 89.0);
+        let raw = motion.delta;
+        let d = if smoothing { (raw + smooth.0) * 0.5 } else { raw };
+        smooth.0 = raw;
+        let dy = if invert { -d.y } else { d.y };
+        local.yaw = (local.yaw + d.x * scale).rem_euclid(360.0);
+        local.pitch = (local.pitch - dy * scale).clamp(-89.0, 89.0);
     }
-    let axis = |pos: KeyCode, neg: KeyCode| -> i8 { (keys.pressed(pos) as i8 - keys.pressed(neg) as i8) * 127 };
-    local.forward = axis(KeyCode::KeyW, KeyCode::KeyS);
-    local.right = axis(KeyCode::KeyD, KeyCode::KeyA);
+    let wheel = scroll.delta.y;
+    let on = |action: &str| bind.pressed(action, &keys, &mouse, wheel) && (locked || !is_mouse(bind, action));
+    let axis = |pos: &str, neg: &str| -> i8 { (on(pos) as i8 - on(neg) as i8) * 127 };
+    local.forward = axis("GBA_MoveForward", "GBA_MoveBackward");
+    local.right = axis("GBA_StrafeRight", "GBA_StrafeLeft");
     let mut held = 0u16;
     let map = [
-        (keys.pressed(KeyCode::Space), buttons::JUMP),
-        (keys.pressed(KeyCode::KeyC), buttons::CROUCH),
-        (keys.pressed(KeyCode::ShiftLeft), buttons::SPRINT),
-        (keys.pressed(KeyCode::KeyX), buttons::WALK),
-        (locked && mouse.pressed(MouseButton::Left), buttons::PRIMARY),
-        (locked && mouse.pressed(MouseButton::Right), buttons::SECONDARY),
-        (keys.pressed(KeyCode::ControlLeft), buttons::BLOCK),
-        (keys.pressed(KeyCode::KeyF), buttons::USE),
-        (keys.pressed(KeyCode::KeyQ), buttons::LEAN_LEFT),
-        (keys.pressed(KeyCode::KeyE), buttons::LEAN_RIGHT),
-        (keys.pressed(KeyCode::KeyR), buttons::RELOAD),
+        ("GBA_Jump", buttons::JUMP),
+        ("GBA_Sneak", buttons::CROUCH),
+        ("GBA_Sprint", buttons::SPRINT),
+        ("PORT_Walk", buttons::WALK),
+        ("GBA_Primary", buttons::PRIMARY),
+        ("GBA_Secondary", buttons::SECONDARY),
+        ("GBA_Block", buttons::BLOCK),
+        ("GBA_Use", buttons::USE),
+        ("GBA_LeanLeft", buttons::LEAN_LEFT),
+        ("GBA_LeanRight", buttons::LEAN_RIGHT),
+        ("PORT_Reload", buttons::RELOAD),
     ];
-    for (on, b) in map {
-        if on {
+    for (action, b) in map {
+        if on(action) {
             held |= b;
         }
     }
     local.latched |= held & !local.held;
     local.held = held;
-    for (k, h) in [
-        (KeyCode::Digit1, LeftHand::Blink),
-        (KeyCode::Digit2, LeftHand::Windblast),
-        (KeyCode::Digit3, LeftHand::DarkVision),
-        (KeyCode::Digit4, LeftHand::Pistol),
-        (KeyCode::Digit5, LeftHand::Crossbow),
+    for (action, h) in [
+        ("GBA_Shortcut_0", LeftHand::Blink),
+        ("GBA_Shortcut_1", LeftHand::Windblast),
+        ("GBA_Shortcut_2", LeftHand::DarkVision),
+        ("GBA_Shortcut_3", LeftHand::Pistol),
+        ("GBA_Shortcut_4", LeftHand::Crossbow),
     ] {
-        if keys.just_pressed(k) {
+        if bind.just_pressed(action, &keys, &mouse, wheel) {
             local.left_hand = h;
         }
     }
 }
 
-pub fn cursor_lock(mouse: Res<ButtonInput<MouseButton>>, keys: Res<ButtonInput<KeyCode>>, mut q: Query<&mut CursorOptions, With<PrimaryWindow>>) {
+fn is_mouse(b: &crate::settings::Bindings, action: &str) -> bool {
+    matches!(b.input(action), Some(crate::settings::Input::Mouse(_)))
+}
+
+/// Click captures the mouse; Escape releases it (and opens the pause menu, `pause_menu.rs`).
+/// While the pause menu is open the cursor stays free.
+pub fn cursor_lock(
+    mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    paused: Option<Res<crate::pause_menu::PauseMenu>>,
+    mut q: Query<&mut CursorOptions, With<PrimaryWindow>>,
+) {
+    let open = paused.is_some_and(|p| p.open);
     for mut c in &mut q {
+        if open {
+            if c.grab_mode != CursorGrabMode::None {
+                c.grab_mode = CursorGrabMode::None;
+                c.visible = true;
+            }
+            continue;
+        }
         if mouse.just_pressed(MouseButton::Left) && c.grab_mode == CursorGrabMode::None {
             c.grab_mode = CursorGrabMode::Locked;
             c.visible = false;

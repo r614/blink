@@ -4,6 +4,7 @@ pub mod characters;
 pub mod content;
 pub mod level;
 pub mod lightmap;
+pub mod loc;
 pub mod material;
 pub mod npcs;
 pub mod material_chain;

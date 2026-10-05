@@ -47,6 +47,27 @@ pub struct HudQuad {
     quad: Quad,
 }
 
+impl HudQuad {
+    /// Group of the quad, for the HUD options (`hud_settings.rs`).
+    pub fn group_name(&self) -> &'static str {
+        match self.group {
+            Group::Static => "static",
+            Group::HealthFill | Group::HealthGhost | Group::ManaFill | Group::ManaGhost => "gauge",
+            Group::CrossDot => "cross_dot",
+            Group::CrossGun | Group::CrossCrossbow | Group::CrossPower => "cross",
+            Group::Crouch => "stance",
+            Group::Objectives => "objectives",
+            Group::TargetNote => "target_note",
+            Group::Marker => "marker",
+            Group::OutcomeBg => "outcome",
+        }
+    }
+    /// Quad belongs to the health/mana gauge frame (`masterHUD_mc`).
+    pub fn in_gauges(&self) -> bool {
+        self.quad.path.starts_with("masterHUD_mc")
+    }
+}
+
 #[derive(Component)]
 pub struct EquipIcon {
     /// Stage-space centre and size.

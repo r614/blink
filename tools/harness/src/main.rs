@@ -16,6 +16,9 @@
 //!                             mapping resolves to a decodable original sound
 //! harness replay FILE         re-simulate a server replay and verify every state hash
 //! harness mission [--mission FILE]  plays a custom mission end to end (headless + dedicated server)
+//! harness launcher           the launcher end to end: screenshots of every screen, settings
+//!                             persisted and picked up by a launched game, pause menu, host +
+//!                             browse + join a local server through the launcher
 //! harness all                 sim, net, visual, contracts, audio; writes harness_out/<run>/REPORT.md
 //! ```
 
@@ -23,6 +26,7 @@ mod audio;
 mod contracts;
 mod mission;
 mod fidelity;
+mod launcher;
 mod netsoak;
 mod report;
 mod scenarios;
@@ -64,6 +68,7 @@ fn main() -> Result<()> {
         "fidelity" => fidelity::run(&ctx, &mut rep)?,
         "audio" => audio::run(&ctx, &mut rep)?,
         "mission" => mission::run(&ctx, &mut rep)?,
+        "launcher" => launcher::run(&ctx, &mut rep)?,
         "replay" => {
             let file = args.get(1).expect("replay file");
             netsoak::verify_replay_file(&PathBuf::from(file), &mut rep)?;

@@ -13,6 +13,20 @@ fn main() -> Result<()> {
     let h = pkg.read_object(i)?;
     for p in &h.properties {
         println!("prop {}", p.name);
+        // Imported movies (GFx ImportAssets resolve against these package paths).
+        if p.name == "ReferencedSwfs" {
+            if let Some((n, raw)) = p.array_raw() {
+                let mut o = 0usize;
+                for _ in 0..n {
+                    let Some(len) = raw.get(o..o + 4).map(|b| i32::from_le_bytes(b.try_into().unwrap())) else { break };
+                    o += 4;
+                    let l = len.unsigned_abs() as usize * if len < 0 { 2 } else { 1 };
+                    let s = raw.get(o..o + l).map(|b| String::from_utf8_lossy(b).trim_end_matches('\0').to_string()).unwrap_or_default();
+                    o += l;
+                    println!("  referenced swf: {s}");
+                }
+            }
+        }
     }
     let (n, raw) = find(&h.properties, "RawData").and_then(|p| p.array_raw()).context("RawData")?;
     println!("RawData {n} bytes, magic {:?} version {} len {}", std::str::from_utf8(&raw[0..3]).unwrap_or("?"), raw[3], u32::from_le_bytes(raw[4..8].try_into()?));
@@ -21,6 +35,25 @@ fn main() -> Result<()> {
     }
     if a.iter().any(|x| x == "--tree") {
         tree(&raw[..n])?;
+    }
+    if a.iter().any(|x| x == "--texts") {
+        // Text fields, imports and every sprite with frame labels (menu states).
+        let m = dishonored_assets::swf::Movie::parse(&raw[..n])?;
+        for (id, (url, name)) in &m.imports {
+            println!("import {id}: {name} from {url}");
+        }
+        for (id, t) in &m.edit_texts {
+            println!("text {id}: font {:?} ({:?}) {}px colour {:?} align {} var {:?} initial {:?} bounds {:?}", t.font, t.font.and_then(|f| m.font_name(f)), t.height, t.color, t.align, t.variable, t.initial, (t.bounds.xmin / 20.0, t.bounds.ymin / 20.0, t.bounds.xmax / 20.0, t.bounds.ymax / 20.0));
+        }
+        for (id, s) in &m.sprites {
+            let l = dishonored_assets::swf::Movie::labels(s);
+            if !l.is_empty() {
+                println!("labels {id} ({} frames): {:?}", s.frames.len(), l);
+            }
+        }
+        for (id, b) in &m.buttons {
+            println!("button {id}: {:?}", b.iter().map(|r| (r.states, r.character)).collect::<Vec<_>>());
+        }
     }
     if let Some(dir) = a.iter().position(|x| x == "--fonts").and_then(|i| a.get(i + 1)) {
         fonts(&raw[..n], dir)?;
