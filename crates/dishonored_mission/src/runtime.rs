@@ -632,6 +632,38 @@ impl MissionState {
         out
     }
 
+    /// Run actions for a host that drives the mission itself (the original Kismet): the same
+    /// effects as a rule's `then`, with the rules they trigger cascading as in [`Self::step`].
+    /// Returns the commands for the host.
+    pub fn apply(&mut self, acts: &[Action], npc_positions: &BTreeMap<String, Vec3>) -> Vec<Command> {
+        let mut out = Vec::new();
+        if self.view.outcome.is_some() {
+            return out;
+        }
+        let mut queue: VecDeque<Ev> = VecDeque::new();
+        self.run(acts, &mut queue, &mut out, npc_positions);
+        let mut guard = 0;
+        while let Some(ev) = queue.pop_front() {
+            guard += 1;
+            if guard > 2000 || self.view.outcome.is_some() {
+                break;
+            }
+            for ri in 0..self.def.rules.len() {
+                if !self.rule_enabled[ri] || (self.def.rules[ri].once && self.rule_fired[ri]) {
+                    continue;
+                }
+                if !self.matches(ri, &ev) || !self.def.rules[ri].when.iter().all(|c| self.cond(c)) {
+                    continue;
+                }
+                self.rule_fired[ri] = true;
+                let acts = self.def.rules[ri].then.clone();
+                self.run(&acts, &mut queue, &mut out, npc_positions);
+            }
+        }
+        self.refresh_view(npc_positions);
+        out
+    }
+
     /// Talking to an NPC with `talk_conversation` enters it (low priority: an NPC already
     /// in a conversation ignores the request, like the original's use hook).
     fn talk_conversation(&mut self, npc: &str, player: Option<u32>, queue: &mut VecDeque<Ev>) {

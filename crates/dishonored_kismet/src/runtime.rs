@@ -134,6 +134,8 @@ pub struct Kismet {
     /// Sequence whose ops are executing (new impulses queue into it).
     exec_seq: Option<OpId>,
     level_roots: Vec<OpId>,
+    /// Touch events: pawns touching (engine `TouchedList`).
+    pub touched: BTreeMap<OpId, Vec<Obj>>,
     /// Requested event class (lowercase) -> static events of that class or a subclass.
     event_index: std::sync::Mutex<BTreeMap<String, Vec<OpId>>>,
 }
@@ -142,6 +144,35 @@ pub struct Kismet {
 pub struct Ctx<'a> {
     pub k: &'a mut Kismet,
     pub op: OpId,
+}
+
+/// What an op's `DeActivated` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeAct {
+    /// `SequenceOp::DeActivated`: every output when `bAutoActivateOutputLinks`.
+    Auto,
+    /// No automatic outputs (the class fires its own, or a host does).
+    None,
+    /// `SeqAct_Latent::DeActivated`: output 0 ("Finished"), or 1 ("Aborted") when aborted.
+    Latent,
+    /// Output 0 only when aborted (`DisSeqAct_DialogScriptedChoice`: "Player Busy").
+    AbortedFirst,
+}
+
+/// `DeActivated` per class, from the vtables of `Dishonored.exe` (slot 94): the engine
+/// default (`SequenceOp`, automatic outputs), an empty override, `SeqAct_Latent`'s, or a
+/// class's own. Classes not listed keep the engine default. (research/dishonored/KISMET.md)
+pub fn deactivation(class: &str) -> DeAct {
+    match class {
+        // Empty overrides: the class fires its outputs itself.
+        "SeqAct_Switch" | "SeqAct_RandomSwitch" | "SeqAct_Delay" | "SeqAct_StreamInTextures" | "DisSeqAct_StartSpawn" | "DisSeqAct_AIDoFollow" | "DisSeqAct_AIDoSimpleBehaviors" | "DisSeqAct_NPCMarkForVanish" => DeAct::None,
+        // SeqAct_Latent's (PrepareMapChange and AutoSave call it from their own).
+        "SeqAct_Latent" | "DisSeqAct_Latent" | "SeqAct_PrepareMapChange" | "DisSeqAct_AutoSave" | "DisSeqAct_ActivateUsable" | "DisSeqAct_BackupAndClearInventory" | "SeqAct_WaitForLevelsVisible" => DeAct::Latent,
+        "DisSeqAct_DialogScriptedChoice" => DeAct::AbortedFirst,
+        // Own outputs decided by the op (matinee position; the AI behaviour's result).
+        "SeqAct_Interp" | "DisSeqAct_AIGoToActor" | "DisSeqAct_AIShoot" | "SeqAct_ActorFactory" => DeAct::None,
+        _ => DeAct::Auto,
+    }
 }
 
 fn xorshift(s: &mut u64) -> u64 {
@@ -199,6 +230,7 @@ impl Kismet {
             exec_seq: None,
             level_roots: Vec::new(),
             event_index: Default::default(),
+            touched: BTreeMap::new(),
         };
         for g in k.db.global.clone() {
             k.loaded[g as usize] = true;
@@ -814,7 +846,62 @@ impl Kismet {
         fired
     }
 
-    fn event_originator(&self, e: OpId) -> Option<Obj> {
+    /// `SeqEvent_Touch` (decoded): a pawn starting to touch passes `CheckActivate` as a test,
+    /// then the event activates its "Touched" output and remembers the pawn; a remembered
+    /// pawn leaving activates "UnTouched" (with `bPlayerOnly` and the retrigger delay
+    /// ignored), plus "Empty" when nobody is left. `MaxTriggerCount` still applies.
+    pub fn touch(&mut self, host: &mut dyn Host, ev: OpId, instigator: Obj, entering: bool) -> bool {
+        if !self.ops[ev as usize].enabled || !self.is_loaded(ev) {
+            return false;
+        }
+        let orig = self.event_originator(ev).unwrap_or(Obj::Path("WorldInfo".into()));
+        let list = self.touched.entry(ev).or_default().clone();
+        if entering {
+            if list.contains(&instigator) {
+                return false;
+            }
+            if !self.check_activate(host, ev, orig.clone(), instigator.clone(), true, None, false) {
+                return false;
+            }
+            self.activate_event(host, ev, orig, instigator.clone(), Some(vec![0]), false);
+            self.touched.entry(ev).or_default().push(instigator);
+            true
+        } else {
+            if !list.contains(&instigator) {
+                return false;
+            }
+            let po = self.prop(ev, "bPlayerOnly");
+            let at = self.ops[ev as usize].activation_time;
+            self.set_prop(ev, "bPlayerOnly", Value::Bool(false));
+            self.ops[ev as usize].activation_time = 0.0;
+            let delay = self.prop_float(ev, "ReTriggerDelay");
+            self.set_prop(ev, "ReTriggerDelay", Value::Float(0.0));
+            let ok = self.check_activate(host, ev, orig.clone(), instigator.clone(), true, None, false);
+            self.set_prop(ev, "ReTriggerDelay", Value::Float(delay));
+            self.ops[ev as usize].activation_time = at;
+            match po {
+                Some(v) => self.set_prop(ev, "bPlayerOnly", v),
+                None => {
+                    self.ops[ev as usize].props.0.retain(|(k, _)| k != "bPlayerOnly");
+                }
+            }
+            if !ok {
+                return false;
+            }
+            let l = self.touched.entry(ev).or_default();
+            l.retain(|x| *x != instigator);
+            let idx = if l.is_empty() { vec![1, 2] } else { vec![1] };
+            self.activate_event(host, ev, orig, instigator, Some(idx), false);
+            true
+        }
+    }
+
+    /// Pawns an event considers touching it.
+    pub fn touching(&self, ev: OpId) -> &[Obj] {
+        self.touched.get(&ev).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    pub fn event_originator(&self, e: OpId) -> Option<Obj> {
         let o = if (e as usize) < self.n_static() { self.db.ops[e as usize].props.obj("Originator") } else { self.dups[e as usize - self.n_static()].originator.clone() };
         if o.is_none() { None } else { Some(o) }
     }
@@ -1054,12 +1141,11 @@ impl Kismet {
         }
     }
 
-    /// `DeActivated`: automatic outputs (`bAutoActivateOutputLinks`); latent actions fire
-    /// "Finished" or, when aborted, "Aborted".
+    /// `DeActivated` (vtable slot 94, decoded per class; see [`deactivation`]).
     fn deactivated(&mut self, op: OpId) {
-        match self.class(op) {
-            "SeqAct_Interp" => {}
-            _ if self.is_a(op, "SeqAct_Latent") && !self.op(op).class.starts_with("DisSeq") => {
+        match deactivation(self.class(op)) {
+            DeAct::None => {}
+            DeAct::Latent => {
                 let aborted = self.ops[op as usize].flags & 1 != 0;
                 let n = self.ops[op as usize].out_imp.len();
                 if n > 0 {
@@ -1067,7 +1153,13 @@ impl Kismet {
                 }
                 self.ops[op as usize].flags &= !1;
             }
-            _ => {
+            DeAct::AbortedFirst => {
+                if self.ops[op as usize].flags & 1 != 0 {
+                    self.fire(op, 0);
+                }
+                self.ops[op as usize].flags &= !1;
+            }
+            DeAct::Auto => {
                 if self.prop_bool(op, "bAutoActivateOutputLinks") {
                     for i in 0..self.ops[op as usize].out_imp.len() {
                         self.fire(op, i);

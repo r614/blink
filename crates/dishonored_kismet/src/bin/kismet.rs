@@ -113,7 +113,11 @@ fn main() -> Result<()> {
             let db = db_for(&content, &args[2..])?;
             let q = args[1].to_ascii_lowercase();
             for o in &db.ops {
-                let hay = format!("{} {} {} {:?}", o.class, o.name, o.comment, o.props.0).to_ascii_lowercase();
+                let actors: Vec<String> = o.props.0.iter().filter_map(|(_, v)| match v {
+                    Value::Obj(Obj::Actor(a)) => Some(db.actors[*a as usize].name.clone()),
+                    _ => None,
+                }).collect();
+                let hay = format!("{} {} {} {:?} {}", o.class, o.name, o.comment, o.props.0, actors.join(" ")).to_ascii_lowercase();
                 if hay.contains(&q) {
                     print_op(&db, o.id);
                 }
