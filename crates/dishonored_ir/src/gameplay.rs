@@ -117,6 +117,9 @@ pub struct GameplayConfig {
     pub pistol: WeaponConfig,
     pub crossbow: WeaponConfig,
     pub melee: WeaponConfig,
+    /// NPC perception and behaviour.
+    #[serde(default)]
+    pub ai: crate::ai::AiConfig,
     /// field -> evidence (tweak object path / INI key / class default / UE3 stock).
     pub provenance: BTreeMap<String, String>,
 }

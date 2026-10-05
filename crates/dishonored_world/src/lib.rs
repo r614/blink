@@ -10,6 +10,7 @@
 
 pub mod bvh;
 pub mod geom;
+pub mod nav;
 
 use anyhow::Result;
 use bvh::Bvh;
@@ -98,6 +99,10 @@ pub trait WorldQuery {
     fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32, channels: u8) -> Option<RayHit>;
     fn capsule_contacts(&self, cap: &Capsule, channels: u8, out: &mut Vec<Contact>);
     fn sweep_capsule(&self, cap: &Capsule, delta: Vec3, channels: u8) -> Option<SweepHit>;
+    /// The map's original navigation mesh, when loaded.
+    fn nav(&self) -> Option<&nav::NavWorld> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -106,6 +111,9 @@ pub struct CollisionWorld {
     pub bvh: Bvh,
     pub sources: Vec<String>,
     pub bounds: Option<Aabb>,
+    /// Original navigation (attached after loading; not part of the collision cache).
+    #[serde(skip)]
+    pub nav: Option<std::sync::Arc<nav::NavWorld>>,
 }
 
 const SKIN: f32 = 0.05;
@@ -124,7 +132,7 @@ impl CollisionWorld {
             .collect();
         let total = bounds.iter().fold(Aabb::EMPTY, |acc, b| acc.union(b));
         let bvh = Bvh::build(&bounds);
-        CollisionWorld { tris, bvh, sources, bounds: Some(total) }
+        CollisionWorld { tris, bvh, sources, bounds: Some(total), nav: None }
     }
 
     /// Build from an imported map: every colliding instance (hidden blockers included).
@@ -210,6 +218,10 @@ impl CollisionWorld {
 }
 
 impl WorldQuery for CollisionWorld {
+    fn nav(&self) -> Option<&nav::NavWorld> {
+        self.nav.as_deref()
+    }
+
     fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32, channels: u8) -> Option<RayHit> {
         let d = dir.normalize_or_zero();
         if d == Vec3::ZERO {
@@ -413,5 +425,8 @@ impl WorldQuery for MapSet {
     }
     fn sweep_capsule(&self, cap: &Capsule, delta: Vec3, channels: u8) -> Option<SweepHit> {
         self.cur().sweep_capsule(cap, delta, channels)
+    }
+    fn nav(&self) -> Option<&nav::NavWorld> {
+        self.cur().nav()
     }
 }

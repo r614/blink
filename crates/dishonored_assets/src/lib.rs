@@ -1,10 +1,12 @@
 //! Dishonored-specific decoding of UE3 objects into `dishonored_ir`.
 
 pub mod characters;
+pub mod ai_config;
 pub mod content;
 pub mod level;
 pub mod lightmap;
 pub mod material;
+pub mod navigation;
 pub mod npcs;
 pub mod material_chain;
 pub mod skeletal_mesh;

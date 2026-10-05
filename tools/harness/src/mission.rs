@@ -1,6 +1,6 @@
 //! `harness mission [--mission FILE]`: plays a custom mission end to end.
 //!
-//! Headless: a scripted agent (nav-graph pathing, back assassination) follows the mission's
+//! Headless: a scripted agent (original-navmesh pathing, back assassination) follows the mission's
 //! own structure (informant -> host -> extraction) on the authoritative simulation with
 //! the ambient crowd and guards, and the report records every task transition, message and
 //! the final statistics. The run is repeated to check determinism. Networked: a dedicated
@@ -10,7 +10,7 @@ use crate::Ctx;
 use crate::netsoak::{KillOnDrop, free_port, spawn_server};
 use crate::report::Report;
 use anyhow::Result;
-use dishonored_bots::NavGraph;
+use dishonored_bots::nav::PathOpts;
 use dishonored_bots::nav::Follower;
 use dishonored_content::{MapContents, MatchContent};
 use anyhow::Context;
@@ -20,6 +20,7 @@ use dishonored_net::client::{ConnState, NetClient};
 use dishonored_net::socket::NetSocket;
 use dishonored_sim::input::{LeftHand, PlayerInput, buttons};
 use dishonored_sim::state_hash;
+use dishonored_world::WorldQuery;
 use glam::Vec3;
 use std::time::{Duration, Instant};
 
@@ -49,16 +50,15 @@ fn play(maps: &MapContents, def: &MissionDef, max_secs: f32) -> Result<Run> {
     let setup = dishonored_content::mission_setup(maps, def.clone()).map_err(|e| anyhow::anyhow!(e))?;
     let mut g = setup.build(&mc.sim);
     g.add_player(AGENT, "agent", 0, &mc.collision, &mc.sim);
-    let nav = NavGraph::build(&mc.collision, mc.ai_points.iter().map(|p| p.0).chain(mc.spawns.iter().map(|s| s.position)));
+    // The agent paths on the map's original navmesh (carried by the collision world).
+    let nav = mc.collision.nav();
     if std::env::var_os("MISSION_NAV_DEBUG").is_some() {
-        if let Game::Mission(m) = &g {
+        if let (Game::Mission(m), Some(nav)) = (&g, nav) {
             let pts: Vec<(String, Vec3)> = m.setup.markers.iter().map(|(k, v)| (k.clone(), v.0)).chain(m.setup.npcs.iter().map(|(n, s)| (format!("npc:{n}"), s.position))).collect();
             let start = std::env::var("MISSION_NAV_FROM").ok().and_then(|n| m.setup.npcs.iter().find(|x| x.0 == n).map(|x| x.1.position)).unwrap_or(m.setup.starts[0].0);
-            let s_nodes = nav.visible_nodes(&mc.collision, start + Vec3::Z * 50.0, 4);
             for (name, p) in pts {
-                let g_nodes = nav.visible_nodes(&mc.collision, p + Vec3::Z * 50.0, 4);
-                let path = nav.path(&s_nodes, &g_nodes, p);
-                eprintln!("nav start->{name} at {p:.0}: start nodes {} goal nodes {} path {:?}", s_nodes.len(), g_nodes.len(), path.map(|v| v.len()));
+                let path = nav.find_path(start, p, &PathOpts::default());
+                eprintln!("nav start->{name} at {p:.0}: start on mesh {} goal on mesh {} path {:?}", nav.closest_point(start, 200.0).is_some(), nav.closest_point(p, 300.0).is_some(), path.map(|v| v.len()));
             }
         }
     }
@@ -105,7 +105,7 @@ fn play(maps: &MapContents, def: &MissionDef, max_secs: f32) -> Result<Run> {
                     input.buttons |= buttons::PRIMARY;
                 }
             } else {
-                let p = follow.steer(&nav, &mc.collision, me.position, goal);
+                let p = follow.steer(nav, me.position, goal);
                 let to = p - me.position;
                 input.yaw = to.y.atan2(to.x).to_degrees();
                 input.forward = 127;

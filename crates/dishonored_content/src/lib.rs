@@ -8,6 +8,7 @@ use dishonored_assets::{Content, ImportOptions, import_level, map_packages};
 use dishonored_ir::DishonoredMap;
 use dishonored_sim::SimConfig;
 use dishonored_world::CollisionWorld;
+use dishonored_world::nav::NavWorld;
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -34,6 +35,8 @@ pub struct MatchContent {
     pub travel: Vec<dishonored_assets::travel::TravelLink>,
     /// `PlayerStart`s with their travel tags.
     pub tagged_starts: Vec<dishonored_assets::travel::TaggedStart>,
+    /// `DisFleePointActor` positions (civilian panic destinations).
+    pub flee_points: Vec<Vec3>,
 }
 
 pub fn cache_dir() -> PathBuf {
@@ -71,7 +74,7 @@ fn load_spawns(map: &str, m: Option<&DishonoredMap>) -> Vec<Spawn> {
 }
 
 pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
-    let path = cache_dir().join("gameplay_config.json");
+    let path = cache_dir().join("gameplay_config.v2.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);
@@ -81,6 +84,23 @@ pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
     std::fs::create_dir_all(cache_dir()).ok();
     std::fs::write(&path, serde_json::to_string(&cfg)?).ok();
     Ok(SimConfig::new(cfg))
+}
+
+/// The map's original navigation mesh (the `L_*_Nav` pylons plus doors and nav blockers),
+/// cached as `cache/<map>.nav.bin`.
+pub fn load_nav(content: &Content, map: &str) -> Result<NavWorld> {
+    let path = cache_dir().join(format!("{map}.nav.bin"));
+    if let Ok(w) = NavWorld::load(&path) {
+        if !w.polys.is_empty() {
+            return Ok(w);
+        }
+    }
+    let data = dishonored_assets::navigation::load_nav_data(content, &map_packages(content, map))?;
+    anyhow::ensure!(!data.pylons.is_empty(), "no pylons in the map packages");
+    let w = NavWorld::from_data(&data);
+    std::fs::create_dir_all(cache_dir()).ok();
+    w.save(&path).ok();
+    Ok(w)
 }
 
 pub fn load_match(map: &str) -> Result<MatchContent> {
@@ -105,6 +125,11 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
             (w, s)
         }
     };
+    let mut collision = collision;
+    match load_nav(&content, map) {
+        Ok(nav) => collision.nav = Some(std::sync::Arc::new(nav)),
+        Err(e) => eprintln!("warning: no original navigation for {map}: {e:#}"),
+    }
     let curated = load_spawns(map, None);
     let spawns = if curated.is_empty() { spawns } else { curated };
     let npc_path = dir.join(format!("{map}.npcs3.json"));
@@ -133,7 +158,8 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
             t
         }
     };
-    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts })
+    let flee_points = markers.iter().filter(|m| m.class == "DisFleePointActor").map(|m| m.position).collect();
+    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts, flee_points })
 }
 
 /// Persistent maps a mission uses: its start map, then the maps reachable through travel.
@@ -250,6 +276,9 @@ impl dishonored_world::WorldQuery for MatchContent {
     }
     fn sweep_capsule(&self, cap: &dishonored_world::Capsule, delta: Vec3, channels: u8) -> Option<dishonored_world::SweepHit> {
         self.collision.sweep_capsule(cap, delta, channels)
+    }
+    fn nav(&self) -> Option<&dishonored_world::nav::NavWorld> {
+        self.collision.nav.as_deref()
     }
 }
 

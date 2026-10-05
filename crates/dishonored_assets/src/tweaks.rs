@@ -109,13 +109,20 @@ pub fn merge(base: &mut TMap, over: &TMap) {
 
 impl TweakDb {
     pub fn load(content: &Content) -> Result<Self> {
+        Self::load_with(content, &[])
+    }
+
+    /// Like [`TweakDb::load`], plus level packages: NPC pawn tweaks such as
+    /// `Twk_Pawn_Boyle_Party.*` are cooked into the level script packages.
+    pub fn load_with(content: &Content, extra: &[String]) -> Result<Self> {
         let mut db = TweakDb {
             pkgs: Vec::new(),
             objects: HashMap::new(),
             supers: HashMap::new(),
             cdos: HashMap::new(),
         };
-        for name in TWEAK_PACKAGES {
+        let names: Vec<String> = TWEAK_PACKAGES.iter().map(|s| s.to_string()).chain(extra.iter().cloned()).collect();
+        for name in &names {
             if !content.has_package(name) {
                 continue;
             }
@@ -197,9 +204,57 @@ impl TweakDb {
         };
         let class = self.pkgs[loc.0].export_class(loc.1);
         let mut out = self.class_defaults(&class)?;
-        let inst = self.read(loc)?;
-        merge(&mut out, &inst);
+        // Archetype chain (instance -> the template object it was made from -> ...).
+        let mut chain = vec![loc];
+        let mut cur = loc;
+        while chain.len() < 16 {
+            let pkg = &self.pkgs[cur.0];
+            let arch = ObjRef::from_index(pkg.exports[cur.1].archetype);
+            if arch == ObjRef::Null || pkg.obj_name(arch).starts_with("Default__") {
+                break;
+            }
+            let Some(next) = self.objects.get(&pkg.obj_path(arch).to_ascii_lowercase()).copied() else { break };
+            if chain.contains(&next) {
+                break;
+            }
+            chain.push(next);
+            cur = next;
+        }
+        // Arkane's tweak fallback chain: `m_FallbackChainCooked` lists, nearest first, the
+        // tweaks this one inherits from (`Pkg.Obj` or `Pkg.Obj:SubObject`); the instance's
+        // own properties win (`m_FallbackSkip` names them). Missing fallbacks are skipped.
+        let own = self.read(loc)?;
+        if let Some(TVal::List(fb)) = own.get("m_FallbackChainCooked") {
+            for f in fb.iter().rev() {
+                if let Some(TVal::Name(n)) = f.get("m_FallbackName") {
+                    let p = n.replace(':', ".");
+                    if let Some(l) = self.objects.get(&p.to_ascii_lowercase()).copied() {
+                        if let Ok(m) = self.read(l) {
+                            merge(&mut out, &m);
+                        }
+                    }
+                }
+            }
+        }
+        // Properties listed in `m_FallbackSkip` are owned by this tweak: the fallback's value is
+        // dropped, not merged (a struct set here keeps its own defaults for unset members).
+        if let Some(TVal::List(skips)) = own.get("m_FallbackSkip") {
+            for s in skips {
+                if let Some(TVal::Str(path)) = s.get("m_PropertyPathName") {
+                    remove_path(&mut out, path);
+                }
+            }
+        }
+        for l in chain.iter().rev() {
+            let m = self.read(*l)?;
+            merge(&mut out, &m);
+        }
         Ok(out)
+    }
+
+    /// Resolve an object if present (`None` when missing or unreadable).
+    pub fn try_resolve(&self, path: &str) -> Option<TMap> {
+        self.resolve(path).ok()
     }
 
     pub fn paths_with_class(&self, class: &str) -> Vec<String> {
@@ -215,6 +270,25 @@ impl TweakDb {
 }
 
 /// Dotted lookup: `m_JumpZ.m_fBaseValue2_Normal`, `m_Levels[1].m_HorizDistance`.
+/// Remove a dotted property path (all static-array elements of the last component).
+fn remove_path(m: &mut TMap, path: &str) {
+    let (head, rest) = match path.split_once('.') {
+        Some((h, r)) => (h, Some(r)),
+        None => (path, None),
+    };
+    match rest {
+        None => {
+            let prefix = format!("{head}[");
+            m.retain(|k, _| k != head && !k.starts_with(&prefix));
+        }
+        Some(r) => {
+            if let Some(TVal::Struct(s)) = m.get_mut(head) {
+                remove_path(s, r);
+            }
+        }
+    }
+}
+
 pub fn get<'a>(m: &'a TMap, path: &str) -> Option<&'a TVal> {
     let mut cur = m;
     let parts: Vec<&str> = path.split('.').collect();

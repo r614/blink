@@ -9,6 +9,7 @@ anyhow.workspace = true
 glam.workspace = true
 dishonored_assets.workspace = true
 dishonored_ir.workspace = true
+dishonored_world.workspace = true
 ue3_package.workspace = true
 serde_json.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }

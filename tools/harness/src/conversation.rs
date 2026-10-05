@@ -17,7 +17,7 @@
 use crate::Ctx;
 use crate::report::Report;
 use anyhow::{Context, Result};
-use dishonored_bots::NavGraph;
+
 use dishonored_bots::nav::Follower;
 use dishonored_content::MapContents;
 use dishonored_conversation::model::{ConversationDb, NodeKind, Target};
@@ -273,7 +273,7 @@ fn mission_run(maps: &MapContents, def: &MissionDef) -> Result<MissionRun> {
     let setup = dishonored_content::mission_setup(maps, def.clone()).map_err(|e| anyhow::anyhow!(e))?;
     let mut g = setup.build(&mc.sim);
     g.add_player(1, "agent", 0, &mc.collision, &mc.sim);
-    let nav = NavGraph::build(&mc.collision, mc.ai_points.iter().map(|p| p.0).chain(mc.spawns.iter().map(|s| s.position)));
+    let nav = dishonored_world::WorldQuery::nav(&mc.collision);
     let mut follow = Follower::default();
     // Plan: doorman (refused), Lydia (choices), Miss White, Brisby (approach, then use),
     // invitation, doorman again.
@@ -330,7 +330,7 @@ fn mission_run(maps: &MapContents, def: &MissionDef) -> Result<MissionRun> {
                         input.buttons |= buttons::USE;
                     }
                 } else {
-                    let p = follow.steer(&nav, &mc.collision, me.position, gp);
+                    let p = follow.steer(nav, me.position, gp);
                     let to = p - me.position;
                     input.yaw = to.y.atan2(to.x).to_degrees();
                     input.forward = 127;

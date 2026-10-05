@@ -2331,6 +2331,7 @@ dependencies = [
 name = "dishonored_ai"
 version = "0.1.0"
 dependencies = [
+ "dishonored_ir",
  "dishonored_sim",
  "dishonored_world",
  "glam",
@@ -3651,6 +3652,7 @@ dependencies = [
  "anyhow",
  "dishonored_assets",
  "dishonored_ir",
+ "dishonored_world",
  "glam",
  "image",
  "serde_json",

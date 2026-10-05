@@ -5,7 +5,9 @@
 //! original constants (speeds, gravity, ranges) apply unchanged. Presentation layers
 //! convert to their own frame (see `dishonored_runtime::coords`).
 
+pub mod ai;
 pub mod gameplay;
+pub mod nav;
 
 use glam::{Mat4, Vec2, Vec3};
 use serde::{Deserialize, Serialize};

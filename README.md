@@ -35,10 +35,15 @@ crates/
                      dialog VO banks (Bk_<GUID>.INT)
   dishonored_conversation  original dialog graphs (DisConversation) read at runtime +
                      deterministic conversation runner (subtitles, VO, choices, story flags)
+  dishonored_world   collision world (BVH) and pathfinding on the original navigation mesh
+                     (`L_*_Nav` pylons; research/dishonored/NAVIGATION.md)
+  dishonored_ai      NPC brains on Arkane's attention model and AI tweaks
+                     (research/dishonored/AI.md)
 tools/
   package_dump       inspect a package: names / imports / exports / properties / hex
                      (package_scan: sweep a whole directory)
   map_dump           run the full map import and report statistics
+                     (nav_dump: navmesh survey/islands/OBJ; tweaks: resolve a tweak object)
   audio_dump         Wwise packages/banks: survey, list, resolve an event, decode to WAV
                      under harness_out/ (`audio_dump event Snd_Power_P_Blink_Start Bank_Power_Player`)
 research/            evidence log, unknowns register, format notes, prior art

@@ -6,7 +6,7 @@ use crate::netsoak::{KillOnDrop, PROFILES, free_port, spawn_server};
 use crate::report::Report;
 use anyhow::Result;
 use dishonored_ai::BrainState;
-use dishonored_bots::{Bot, BotStyle, NavGraph};
+use dishonored_bots::{Bot, BotStyle};
 use dishonored_content::{DEFAULT_MAP, MatchContent, load_match};
 use dishonored_multiplayer::MatchPhase;
 use dishonored_multiplayer::contracts::{ContractsRules, PursuitAwareness, validate_cycle};
@@ -25,7 +25,7 @@ const S: &str = "Phase II: Contracts (social stealth)";
 fn setup(mc: &MatchContent, time_limit: f32) -> GameSetup {
     let pts: Vec<(glam::Vec3, f32)> = mc.spawns.iter().map(|s| (s.position, s.yaw)).collect();
     let rules = ContractsRules { warmup_time: 2.0, time_limit, crowd: Some(default_crowd(crowd_center(&pts))), ..Default::default() };
-    GameSetup::contracts(rules, pts, Some(CrowdSource { points: &mc.ai_points, guard_spawns: &mc.guard_spawns }), &mc.collision)
+    GameSetup::contracts(rules, pts, Some(CrowdSource { points: &mc.ai_points, guard_spawns: &mc.guard_spawns, flee_points: &mc.flee_points }), &mc.collision)
 }
 
 struct Stats {
@@ -45,11 +45,12 @@ struct Stats {
 
 fn run_headless(mc: &MatchContent, minutes: f32, seed: u64) -> Stats {
     let mut g = setup(mc, minutes * 60.0 - 20.0).build(&mc.sim);
-    let nav = Arc::new(NavGraph::build(&mc.collision, mc.ai_points.iter().map(|p| p.0).chain(mc.spawns.iter().map(|s| s.position))));
     if std::env::var_os("CONTRACTS_DEBUG").is_some() {
-        eprintln!("nav graph: {} nodes, {} edges", nav.nodes.len(), nav.edge_count());
+        if let Some(nav) = dishonored_world::WorldQuery::nav(&mc.collision) {
+            eprintln!("original navmesh: {} polys, {} links", nav.polys.len(), nav.link_count());
+        }
     }
-    let mut bots: Vec<Bot> = (1..=8).map(|i| Bot::new(i, BotStyle::Duelist, seed + i as u64).with_nav(nav.clone())).collect();
+    let mut bots: Vec<Bot> = (1..=8).map(|i| Bot::new(i, BotStyle::Duelist, seed + i as u64)).collect();
     for b in &bots {
         g.add_player(b.id, &format!("bot{}", b.id), [0u8, 2, 3][b.id as usize % 3], &mc.collision, &mc.sim);
     }
@@ -167,15 +168,13 @@ fn net(ctx: &Ctx, rep: &mut Report, mc: &Arc<MatchContent>) -> Result<()> {
     let _server: KillOnDrop = spawn_server(ctx, port, None, secs as u64 + 12, &["--mode", "contracts", "--time-limit", "300", "--snapshot-hz", "30"], "contracts_server.log")?;
     std::thread::sleep(Duration::from_secs(3));
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse()?;
-    let nav = Arc::new(NavGraph::build(&mc.collision, mc.ai_points.iter().map(|p| p.0).chain(mc.spawns.iter().map(|s| s.position))));
     let handles: Vec<_> = (0..8)
         .map(|i| {
             let mc = mc.clone();
-            let nav = nav.clone();
             std::thread::spawn(move || {
                 let sock = NetSocket::bind("127.0.0.1:0").unwrap().with_conditions(LinkConditions::rtt(PROFILES[i % 5].0, PROFILES[i % 5].1), 300 + i as u64);
                 let mut c = NetClient::new(sock, addr, &format!("cbot{i}"));
-                let mut bot = Bot::new(0, BotStyle::Duelist, 900 + i as u64).with_nav(nav);
+                let mut bot = Bot::new(0, BotStyle::Duelist, 900 + i as u64);
                 let (mut got_target, mut kills) = (0usize, 0usize);
                 let end = Instant::now() + Duration::from_secs_f32(secs);
                 let tick = Duration::from_secs_f64(1.0 / 60.0);

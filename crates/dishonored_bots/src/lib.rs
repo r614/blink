@@ -6,7 +6,6 @@ use dishonored_sim::input::{LeftHand, PlayerInput, buttons};
 use dishonored_sim::state::{PlayerId, PlayerState};
 use dishonored_world::{WorldQuery, channel};
 use glam::Vec3;
-use std::sync::Arc;
 
 pub mod nav;
 pub use nav::NavGraph;
@@ -33,13 +32,12 @@ pub struct Bot {
     blink_hold: u32,
     fire_cooldown: u32,
     pub target: Option<PlayerId>,
-    nav: Option<Arc<NavGraph>>,
     follow: nav::Follower,
 }
 
 impl Bot {
     pub fn new(id: PlayerId, style: BotStyle, seed: u64) -> Self {
-        Self { id, style, rng: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1, tick: 0, wander_yaw: (seed % 360) as f32, last_pos: Vec3::ZERO, stuck_ticks: 0, blink_hold: 0, fire_cooldown: 0, target: None, nav: None, follow: nav::Follower::default() }
+        Self { id, style, rng: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1, tick: 0, wander_yaw: (seed % 360) as f32, last_pos: Vec3::ZERO, stuck_ticks: 0, blink_hold: 0, fire_cooldown: 0, target: None, follow: nav::Follower::default() }
     }
 
     fn rand(&mut self) -> f32 {
@@ -187,10 +185,8 @@ impl Bot {
         // Aim for a point behind the target (back assassination).
         let behind = t.position - Vec3::new(t.yaw.to_radians().cos(), t.yaw.to_radians().sin(), 0.0) * 90.0;
         let dist = (t.position - me.position).truncate().length();
-        let goal = match self.nav.clone() {
-            Some(nav) if dist > 250.0 => self.follow.steer(&nav, world, me.position, behind),
-            _ => behind,
-        };
+        // Path on the original navmesh when far; straight in when close or off the mesh.
+        let goal = if dist > 250.0 { self.follow.steer(world.nav(), me.position, behind) } else { behind };
         let to = goal - me.position;
         input.yaw = to.y.atan2(to.x).to_degrees();
         if self.blink_hold > 0 {
@@ -215,11 +211,5 @@ impl Bot {
             }
         }
         input
-    }
-
-    /// Use a navigation graph for pathing (Contracts bots).
-    pub fn with_nav(mut self, nav: Arc<NavGraph>) -> Self {
-        self.nav = Some(nav);
-        self
     }
 }

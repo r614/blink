@@ -83,6 +83,9 @@ pub struct MissionSetup {
     pub doors: Vec<TravelDoor>,
     /// (map, tag, position, yaw)
     pub tagged_starts: Vec<(String, String, Vec3, f32)>,
+    /// `DisFleePointActor` positions per map (lowercase name), on the floor.
+    #[serde(default)]
+    pub flee: BTreeMap<String, Vec<Vec3>>,
     /// Original dialog graphs the mission references, read from the install by the host
     /// (stored in replays so they play back identically).
     #[serde(default)]
@@ -188,6 +191,11 @@ impl MissionSetup {
             }
             None => (None, start_map.clone()),
         };
+        // Civilian panic destinations per map: the level's `DisFleePointActor`s.
+        let flee: BTreeMap<String, Vec<Vec3>> = maps
+            .iter()
+            .map(|m| (m.name.to_ascii_lowercase(), m.actors.iter().filter(|a| a.1.starts_with("DisFleePointActor")).map(|a| snap_floor(m.world, a.2).unwrap_or(a.2)).collect()))
+            .collect();
         let mut doors = Vec::new();
         let mut tagged = Vec::new();
         for m in maps {
@@ -201,7 +209,7 @@ impl MissionSetup {
                 }
             }
         }
-        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None })
+        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee })
     }
 }
 
@@ -267,7 +275,7 @@ impl MissionMatch {
             world: WorldState::default(),
             view: MatchView { mode: "mission".into(), phase: MatchPhase::Playing, mission: Some(state.view.clone()), map: current_map.clone(), ..Default::default() },
             state,
-            crowd: Crowd { brains: Vec::new(), layout: Default::default(), spawns: Vec::new(), respawn: Vec::new() },
+            crowd: Crowd { ai: cfg.gameplay.ai.clone(), ..Default::default() },
             setup,
             last_events: Vec::new(),
             current_map,
@@ -304,6 +312,7 @@ impl MissionMatch {
                 self.crowd.spawns = c.spawns;
             }
         }
+        self.crowd.layout.flee_points = self.setup.flee.get(&self.current_map.to_ascii_lowercase()).cloned().unwrap_or_default();
         for i in 0..self.setup.npcs.len() {
             let name = self.setup.npcs[i].0.clone();
             let here = self.setup.npc_map.get(&name).is_some_and(|m| m.eq_ignore_ascii_case(&self.current_map));
@@ -378,7 +387,8 @@ impl MissionMatch {
             // Save the level being left.
             let humans = self.humans.clone();
             let npcs: Vec<PlayerState> = self.world.players.iter().filter(|p| !humans.contains(&p.id)).cloned().collect();
-            let crowd = std::mem::replace(&mut self.crowd, Crowd { brains: Vec::new(), layout: Default::default(), spawns: Vec::new(), respawn: Vec::new() });
+            let fresh = Crowd { ai: self.crowd.ai.clone(), ..Default::default() };
+            let crowd = std::mem::replace(&mut self.crowd, fresh);
             self.saved.insert(self.current_map.to_ascii_lowercase(), LevelState { npcs, brains: crowd.brains, layout: crowd.layout, spawns: crowd.spawns });
             self.world.players.retain(|p| humans.contains(&p.id));
             self.world.projectiles.clear();
@@ -386,7 +396,7 @@ impl MissionMatch {
             match self.saved.remove(&self.current_map.to_ascii_lowercase()) {
                 Some(ls) => {
                     self.world.players.extend(ls.npcs);
-                    self.crowd = Crowd { brains: ls.brains, layout: ls.layout, spawns: ls.spawns, respawn: Vec::new() };
+                    self.crowd = Crowd { brains: ls.brains, layout: ls.layout, spawns: ls.spawns, ai: self.crowd.ai.clone(), ..Default::default() };
                 }
                 None => self.populate_fresh(cfg),
             }
@@ -449,10 +459,17 @@ impl MissionMatch {
                 if let Some(id) = brain(self, &npc) {
                     let pos = self.world.player(id).map(|p| p.position).unwrap_or(Vec3::ZERO);
                     let target = self.nearest_human(pos);
+                    let ai = self.crowd.ai.clone();
                     if let Some(b) = self.crowd.brains.iter_mut().find(|b| b.id == id) {
+                        let tpos = target.and_then(|t| self.world.player(t)).map(|p| p.position);
+                        // Like `DisSeqAct_SetDisposition` / `AISetSuspicionLevel`: the human
+                        // becomes an enemy at full attention, so perception keeps it alerted.
+                        if let (Some(t), Some(p)) = (target, tpos) {
+                            b.alert_to(&ai, t, p);
+                        }
                         b.target = target;
                         b.state = if b.kind == PawnKind::Guard { BrainState::Combat } else { BrainState::Flee };
-                        b.threat_pos = target.and_then(|t| self.world.player(t)).map(|p| p.position);
+                        b.threat_pos = tpos;
                         b.timer = 0.0;
                     }
                 }
@@ -460,9 +477,8 @@ impl MissionMatch {
             Command::Calm(npc) => {
                 if let Some(id) = brain(self, &npc) {
                     if let Some(b) = self.crowd.brains.iter_mut().find(|b| b.id == id) {
+                        b.calm();
                         b.state = BrainState::Idle;
-                        b.target = None;
-                        b.threat_pos = None;
                     }
                 }
             }
