@@ -500,8 +500,10 @@ impl WorldState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PickupState {
     pub id: u32,
-    /// Level actor name (missions refer to it).
+    /// Level actor name (missions refer to it) and the level package it is in.
     pub name: String,
+    #[serde(default)]
+    pub package: String,
     pub position: Vec3,
     pub kind: dishonored_ir::items::PickupKind,
     /// Taken (destroyed) or still in the world.

@@ -74,7 +74,7 @@ impl Run {
     }
     fn pickup(&mut self, kind: PickupKind, pos: Vec3) -> u32 {
         let id = 9000 + self.state.pickups.len() as u32;
-        self.state.pickups.push(PickupState { id, name: format!("P{id}"), position: pos, kind, active: true, ammo_left: [0; 8], carried_by: None });
+        self.state.pickups.push(PickupState { id, name: format!("P{id}"), package: String::new(), position: pos, kind, active: true, ammo_left: [0; 8], carried_by: None });
         id
     }
 }

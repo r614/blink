@@ -124,5 +124,194 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     let dump = ctx.out.join("state_dump.json");
     std::fs::write(&dump, serde_json::to_string_pretty(&m.world.players)?)?;
     rep.artifact("authoritative state dump", &dump);
+    items(&mc, rep);
     Ok(())
+}
+
+/// Inventory, takedowns, powers and gadgets on the real map (research/dishonored/INVENTORY.md).
+fn items(mc: &MatchContent, rep: &mut Report) {
+    use dishonored_ir::items::{AmmoType, ElixirType, PickupKind};
+    use glam::Vec3;
+    use dishonored_sim::input::actions;
+    use dishonored_sim::state::{Condition, PawnKind, PossessStage, power};
+    const T: &str = "Inventory, takedowns, powers, gadgets";
+    let cfg = &mc.sim;
+    // Spawn 1: open ground in front (it walks 1700+ uu in 5 s).
+    let s0 = &mc.spawns[1.min(mc.spawns.len() - 1)];
+    let fwd = |yaw: f32| Vec3::new(yaw.to_radians().cos(), yaw.to_radians().sin(), 0.0);
+    // A fresh world: player 1 at spawn 0, NPC guards at offsets in front (distance, facing offset).
+    let setup = |npcs: &[(f32, f32)]| -> WorldState {
+        let mut st = WorldState::default();
+        spawn_player(&mut st, 1, s0.position, s0.yaw, cfg);
+        for (k, (d, face)) in npcs.iter().enumerate() {
+            dishonored_sim::spawn_npc(&mut st, 100 + k as u32, PawnKind::Guard, 1, s0.position + fwd(s0.yaw) * *d, s0.yaw + *face, cfg);
+        }
+        settle(mc, &mut st, 120);
+        st
+    };
+    let step = |st: &mut WorldState, ins: &[(u32, PlayerInput)], ev: &mut Vec<SimEvent>| {
+        let mut all = ins.to_vec();
+        for p in &st.players {
+            if p.kind != PawnKind::Human && !all.iter().any(|(id, _)| *id == p.id) {
+                all.push((p.id, PlayerInput { yaw: p.yaw, ..Default::default() }));
+            }
+        }
+        ev.extend(step_world(st, &all, &mc.collision, cfg).events);
+    };
+    let me = |b: u16, lh: LeftHand| PlayerInput { yaw: s0.yaw, buttons: b, left_hand: lh, ..Default::default() };
+
+    // 1. Pick up the map's first placed health elixir (walk up to it), then drink it.
+    let mut st = setup(&[]);
+    let mut ev = Vec::new();
+    let placed: Vec<_> = mc.pickups.iter().filter(|p| matches!(p.kind, PickupKind::Elixir(ElixirType::Health))).cloned().collect();
+    let ok_pick = if let Some(pp) = placed.first() {
+        dishonored_sim::inventory::spawn_pickups(&mut st, std::slice::from_ref(pp), 1, &|_| None);
+        // Stand 80 uu from it on its floor (first free side of eight) and look at it.
+        let base = st.clone();
+        let (mut yaw, mut pitch) = (0.0, 0.0);
+        for k in 0..8 {
+            st = base.clone();
+            let to = fwd(k as f32 * 45.0);
+            if let Some(p) = st.player_mut(1) {
+                p.position = pp.position - to * 80.0 + Vec3::Z * 60.0;
+                p.velocity = Vec3::ZERO;
+            }
+            settle(mc, &mut st, 60);
+            let mut p = *st.player(1).unwrap();
+            let eye = dishonored_sim::movement::eye_position(&p, &cfg.gameplay.movement);
+            let d = pp.position - eye;
+            yaw = d.y.atan2(d.x).to_degrees();
+            pitch = (d.z / d.truncate().length().max(1.0)).atan().to_degrees();
+            p.yaw = yaw;
+            p.pitch = pitch;
+            if p.mode == dishonored_sim::state::MoveMode::Walking && dishonored_sim::inventory::pickup_in_view(&st, &p, &mc.collision, &cfg.gameplay).is_some() {
+                break;
+            }
+        }
+        step(&mut st, &[(1, PlayerInput { yaw, pitch, buttons: buttons::USE, ..Default::default() })], &mut ev);
+        let got = st.player(1).unwrap().inv.elixirs[0];
+        st.player_mut(1).unwrap().vitals.health = 15.0;
+        step(&mut st, &[(1, PlayerInput { yaw, pitch, action: actions::DRINK_HEALTH, ..Default::default() })], &mut ev);
+        let h = st.player(1).unwrap().vitals.health;
+        rep.check(T, "pick up a placed health elixir and drink it", got == 1 && h == 55.0, format!("{} ({}) at {:.0},{:.0},{:.0}: elixirs {got}, health 15 -> {h}", pp.name, pp.package, pp.position.x, pp.position.y, pp.position.z));
+        got == 1
+    } else {
+        rep.check(T, "pick up a placed health elixir and drink it", false, "no placed health elixir in the map".to_string());
+        false
+    };
+    let counts = {
+        let mut c = std::collections::BTreeMap::new();
+        for p in &mc.pickups {
+            let k = format!("{:?}", p.kind);
+            *c.entry(k.split([' ', '(', '{']).next().unwrap_or("").to_string()).or_insert(0) += 1;
+        }
+        c
+    };
+    rep.check(T, "placed pickups extracted", !mc.pickups.is_empty(), format!("{} pickups {:?}, {} carried by NPCs (pickpocketable)", mc.pickups.len(), counts, mc.pickups.iter().filter(|p| p.stealable_from.is_some()).count()));
+    let _ = ok_pick;
+
+    // 2. Choke a guard from behind to a knock-out, carry the body, drop it.
+    let mut st = setup(&[(110.0, 0.0)]);
+    let mut ev = Vec::new();
+    let hold = me(buttons::USE, LeftHand::Blink);
+    let t0 = st.tick;
+    let mut ko_t = None;
+    for _ in 0..(8 * 60) {
+        step(&mut st, &[(1, hold)], &mut ev);
+        if ko_t.is_none() && ev.iter().any(|e| matches!(e, SimEvent::KnockedOut { victim: 100, .. })) {
+            ko_t = Some((st.tick - t0) as f32 / 60.0);
+        }
+        if st.player(1).unwrap().carrying.is_some() {
+            break;
+        }
+    }
+    let ko_tick = ev.iter().position(|e| matches!(e, SimEvent::KnockedOut { victim: 100, .. }));
+    let carried = st.player(1).unwrap().carrying == Some(100);
+    let start = st.player(1).unwrap().position;
+    for _ in 0..120 {
+        step(&mut st, &[(1, me(0, LeftHand::Blink))], &mut ev);
+    }
+    let mut speed: f32 = 0.0;
+    for _ in 0..120 {
+        step(&mut st, &[(1, PlayerInput { forward: 127, ..me(0, LeftHand::Blink) })], &mut ev);
+        speed = speed.max(st.player(1).unwrap().velocity.truncate().length());
+    }
+    let moved = st.player(1).unwrap().position.distance(start);
+    step(&mut st, &[(1, me(buttons::USE, LeftHand::Blink))], &mut ev);
+    for _ in 0..120 {
+        step(&mut st, &[(1, me(0, LeftHand::Blink))], &mut ev);
+    }
+    let body = *st.player(100).unwrap();
+    rep.check(
+        T,
+        "choke to knock-out, carry and drop the body",
+        ko_tick.is_some() && carried && body.carried_by.is_none() && body.alive && body.condition == Condition::Unconscious && (speed - 350.0).abs() < 5.0,
+        format!("knocked out after {:.2} s, carried {carried}, carry speed {speed:.0} uu/s, moved {moved:.0} uu, dropped at z {:.0}, alive {} {:?}", ko_t.unwrap_or(0.0), body.position.z, body.alive, body.condition),
+    );
+
+    // 3. Possess a guard and release it.
+    let mut st = setup(&[(500.0, 180.0)]);
+    let mut ev = Vec::new();
+    st.player_mut(1).unwrap().inv.power_levels[power::POSSESSION] = 2;
+    for _ in 0..5 {
+        step(&mut st, &[(1, me(buttons::SECONDARY, LeftHand::Possession))], &mut ev);
+    }
+    for _ in 0..90 {
+        step(&mut st, &[(1, me(0, LeftHand::Possession))], &mut ev);
+    }
+    let active = st.player(1).unwrap().possess.stage == PossessStage::Active && st.player(100).unwrap().condition == Condition::Possessed;
+    let left = st.player(1).unwrap().possess.timer;
+    step(&mut st, &[(1, me(buttons::SECONDARY, LeftHand::Possession))], &mut ev);
+    for _ in 0..10 {
+        step(&mut st, &[(1, me(0, LeftHand::Possession))], &mut ev);
+    }
+    let ended = ev.iter().any(|e| matches!(e, SimEvent::PossessEnd { id: 1, host: 100 })) && st.player(100).unwrap().condition == Condition::Normal;
+    rep.check(T, "possess a guard, then release it", active && ended, format!("active {active} ({left:.1} s of 15 left), released {ended}, mana {:.0}", st.player(1).unwrap().vitals.mana));
+
+    // 4. Stop time (Bend Time level 2): a walking guard does not move.
+    let mut st = setup(&[(400.0, 90.0)]);
+    let mut ev = Vec::new();
+    st.player_mut(1).unwrap().inv.power_levels[power::BEND_TIME] = 2;
+    step(&mut st, &[(1, me(buttons::SECONDARY, LeftHand::BendTime))], &mut ev);
+    for _ in 0..30 {
+        step(&mut st, &[(1, me(0, LeftHand::BendTime))], &mut ev);
+    }
+    let p0 = st.player(100).unwrap().position;
+    let walk = PlayerInput { forward: 127, yaw: s0.yaw + 90.0, ..Default::default() };
+    for _ in 0..180 {
+        step(&mut st, &[(1, me(0, LeftHand::BendTime)), (100, walk)], &mut ev);
+    }
+    let frozen = st.player(100).unwrap().position == p0;
+    for _ in 0..(7 * 60) {
+        step(&mut st, &[(1, me(0, LeftHand::BendTime)), (100, walk)], &mut ev);
+    }
+    let resumed = st.player(100).unwrap().position.distance(p0) > 50.0;
+    rep.check(T, "stop time: the world freezes for 8 s", frozen && resumed, format!("frozen {frozen}, moving again after the end {resumed}"));
+
+    // 5. Spring Razor: placed in front, a guard walks into it.
+    let mut st = setup(&[(700.0, 180.0)]);
+    let mut ev = Vec::new();
+    st.player_mut(1).unwrap().inv.ammo[AmmoType::SpringRazor as usize] = 1;
+    let place = |b| PlayerInput { pitch: -40.0, ..me(b, LeftHand::SpringRazor) };
+    step(&mut st, &[(1, place(buttons::SECONDARY))], &mut ev);
+    for _ in 0..40 {
+        step(&mut st, &[(1, place(0))], &mut ev);
+    }
+    let trap = st.traps.first().map(|t| t.position);
+    for _ in 0..90 {
+        step(&mut st, &[(1, PlayerInput { forward: -127, ..place(0) })], &mut ev);
+    }
+    let walk = PlayerInput { forward: 127, yaw: s0.yaw + 180.0, ..Default::default() };
+    let mut closest = f32::MAX;
+    for _ in 0..(6 * 60) {
+        step(&mut st, &[(1, place(0)), (100, walk)], &mut ev);
+        if let Some(t) = trap {
+            closest = closest.min(st.player(100).unwrap().position.distance(t));
+        }
+        if !st.player(100).unwrap().alive {
+            break;
+        }
+    }
+    let killed = ev.iter().any(|e| matches!(e, SimEvent::Death { victim: 100, cause: dishonored_sim::events::DamageCause::SpringRazor, .. }));
+    rep.check(T, "set off a Spring Razor", killed, format!("trap at {:?}, guard came within {closest:.0} uu, killed by it {killed}", trap.map(|t| (t.x.round(), t.y.round(), t.z.round()))));
 }

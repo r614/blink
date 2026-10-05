@@ -41,6 +41,8 @@ pub struct MatchContent {
     pub spawners: Vec<dishonored_ir::spawners::Spawner>,
     /// `DishonoredRoute` patrol routes.
     pub routes: Vec<dishonored_ir::ai::PatrolRoute>,
+    /// Pickups placed in the map's levels.
+    pub pickups: Vec<dishonored_ir::items::PlacedPickup>,
 }
 
 pub fn cache_dir() -> PathBuf {
@@ -179,7 +181,21 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         }
     };
     let spawners = npcs.spawns.iter().map(|s| dishonored_ir::spawners::Spawner { name: s.source.rsplit('.').next().unwrap_or("").to_string(), position: s.position, yaw: s.yaw, tweak: s.tweak.clone(), guard: s.role == dishonored_assets::npcs::NpcRole::Guard, props: s.spawner.clone(), appearance: looks.get(&s.tweak).cloned().unwrap_or_default() }).collect();
-    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts, flee_points, spawners, routes: npcs.routes.clone() })
+    // Placed pickups (with the spawners that carry one), cached per map.
+    let pickup_path = dir.join(format!("{map}.pickups1.json"));
+    let pickups: Vec<dishonored_ir::items::PlacedPickup> = match std::fs::read_to_string(&pickup_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
+        Some(p) => p,
+        None => {
+            let mut pkgs = map_packages(&content, map);
+            if map.starts_with("L_Boyle_Ext") {
+                pkgs.push("L_BoyleStreet_Ext_Script".into());
+            }
+            let p = dishonored_assets::pickups::extract_pickups(&content, &pkgs).unwrap_or_default();
+            std::fs::write(&pickup_path, serde_json::to_string(&p)?).ok();
+            p
+        }
+    };
+    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts, flee_points, spawners, routes: npcs.routes.clone(), pickups })
 }
 
 /// Persistent maps a mission uses: its start map, then the maps reachable through travel.
@@ -256,6 +272,11 @@ pub fn mission_setup(maps: &MapContents, def: dishonored_mission::MissionDef) ->
         None => None,
     };
     let mut setup = dishonored_multiplayer::mission::MissionSetup::new(def, &inputs)?;
+    for name in mission_maps(&setup.def) {
+        if let Some(mc) = maps.get(&name) {
+            setup.pickups.insert(name.to_ascii_lowercase(), mc.pickups.clone());
+        }
+    }
     if let Some(ks) = kismet {
         setup.doors.clear();
         setup.kismet = Some(ks);

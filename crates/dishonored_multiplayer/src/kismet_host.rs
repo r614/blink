@@ -916,6 +916,21 @@ pub fn usables(m: &MissionMatch) -> Vec<(KUse, Vec3, String)> {
     out
 }
 
+/// [inventory] Pickup actors the Kismet scripts (`DisSeqEvent_PickupPickedUp`): (package, name).
+/// They stay Kismet usables (scripts move and destroy them), so the simulation's inventory
+/// does not hold a second copy.
+pub fn scripted_pickups(m: &MissionMatch) -> Vec<(String, String)> {
+    let Some(run) = &m.kismet else { return Vec::new() };
+    let k = &run.k;
+    k.events_for("DisSeqEvent_PickupPickedUp", &[])
+        .into_iter()
+        .filter_map(|e| match k.event_originator(e) {
+            Some(Obj::Actor(a)) => Some((k.db.actors[a as usize].package.clone(), k.db.actors[a as usize].name.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Interaction candidates for `MissionMatch::interaction`.
 pub fn interactions(m: &MissionMatch) -> Vec<(Vec3, f32, Interaction)> {
     usables(m).into_iter().enumerate().map(|(i, (_, p, _))| (p, 220.0, Interaction::Kismet(i))).collect()
@@ -992,6 +1007,39 @@ fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
                 h.note(format!("talk {oneshot}"));
                 h.act(vec![Action::Conversation(oneshot, Vec::new())]);
             }
+        }
+    }
+    // [inventory] Pickups taken through the simulation's inventory fire their actor's
+    // `DisSeqEvent_PickupPickedUp`; knock-outs fire `DisSeqEvent_KnockedOut` /
+    // `DisSeqEvent_PutToSleep` and `DisSeqEvent_NPCIncapacitated` output 1 (Asleep).
+    for e in sim_events {
+        match e {
+            SimEvent::PickedUp { id, pickup } => {
+                let Some((name, pkg)) = h.m.world.pickups.iter().find(|p| p.id == *pickup).map(|p| (p.name.clone(), p.package.clone())) else { continue };
+                let Some(a) = h.db.actors.iter().position(|x| x.name.eq_ignore_ascii_case(&name) && (pkg.is_empty() || x.package.eq_ignore_ascii_case(&pkg))) else { continue };
+                let a = a as u32;
+                if h.st.gone.contains(&a) {
+                    continue;
+                }
+                h.note(format!("picked up {name} (inventory)"));
+                k.trigger(h, "DisSeqEvent_PickupPickedUp", &[Obj::Actor(a)], Obj::Pawn(*id), None);
+                h.st.gone.insert(a);
+            }
+            SimEvent::KnockedOut { victim, by, cause } => {
+                if h.m.humans.contains(victim) {
+                    continue;
+                }
+                let mut origs = vec![Obj::Pawn(*victim)];
+                if let Some((&a, _)) = h.st.spawner.iter().find(|(_, i)| h.m.setup.original[**i].spawn.id == *victim) {
+                    origs.push(Obj::Actor(a));
+                }
+                let inst = by.map(Obj::Pawn).unwrap_or(Obj::Pawn(*victim));
+                let class = if *cause == dishonored_sim::events::KnockoutCause::Choke { "DisSeqEvent_KnockedOut" } else { "DisSeqEvent_PutToSleep" };
+                let a = k.trigger(h, class, &origs, inst.clone(), None);
+                let n = k.trigger(h, "DisSeqEvent_NPCIncapacitated", &origs, inst, Some(vec![1]));
+                h.note(format!("knock-out of pawn {victim}: {} {class} / {} incapacitated events", a.len(), n.len()));
+            }
+            _ => {}
         }
     }
     // Deaths.

@@ -130,6 +130,9 @@ pub struct MissionSetup {
     /// [kismet] The original Kismet of the mission maps (`MissionDef::original_kismet`).
     #[serde(default)]
     pub kismet: Option<kismet_host::KismetSetup>,
+    /// Pickups placed in each mission map (lowercase name), put in the world on a first visit.
+    #[serde(default)]
+    pub pickups: BTreeMap<String, Vec<dishonored_ir::items::PlacedPickup>>,
 }
 
 /// Resolve a place to (position, yaw, map index).
@@ -275,7 +278,7 @@ impl MissionSetup {
                 }
             }
         }
-        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances, kismet: None, routes: maps
+        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances, pickups: BTreeMap::new(), kismet: None, routes: maps
                 .iter()
                 .map(|m| {
                     // Snapped to the floor as `Crowd::set_routes` does for the crowd's map.
@@ -291,6 +294,7 @@ impl MissionSetup {
 #[derive(Debug, Clone, Default)]
 struct LevelState {
     npcs: Vec<PlayerState>,
+    pickups: Vec<dishonored_sim::state::PickupState>,
     brains: Vec<Brain>,
     layout: CrowdLayout,
     spawns: Vec<NpcSpawn>,
@@ -340,6 +344,8 @@ pub struct MissionMatch {
     /// [kismet] Original Kismet runtime, and original spawners spawned since it last looked.
     pub kismet: Option<kismet_host::KismetRun>,
     spawn_log: Vec<usize>,
+    /// Pickups carried by spawners whose pawn has not spawned yet: (pickup id, spawner name).
+    pending_stealables: Vec<(u32, String)>,
 }
 
 impl MissionMatch {
@@ -382,6 +388,7 @@ impl MissionMatch {
             choice_held: BTreeMap::new(),
             kismet: None,
             spawn_log: Vec::new(),
+            pending_stealables: Vec::new(),
         };
         // [kismet]
         m.kismet = m.setup.kismet.as_ref().map(|k| kismet_host::KismetRun::new(k, &m.setup));
@@ -423,6 +430,24 @@ impl MissionMatch {
                 self.spawn_mission_npc(i, cfg);
             }
         }
+        // The map's placed pickups; a spawner's `m_pStealablePickup` rides on its pawn.
+        if let Some(mut placed) = self.setup.pickups.get(&self.current_map.to_ascii_lowercase()).cloned() {
+            // [kismet] Pickups with a `DisSeqEvent_PickupPickedUp` stay Kismet usables.
+            let scripted = kismet_host::scripted_pickups(self);
+            placed.retain(|p| !scripted.iter().any(|(pk, n)| n.eq_ignore_ascii_case(&p.name) && pk.eq_ignore_ascii_case(&p.package)));
+            let owners: BTreeMap<String, PlayerId> = self.setup.original.iter().filter(|o| o.map.eq_ignore_ascii_case(&self.current_map) && self.original_spawned.contains(&o.spawn.id)).map(|o| (o.name.to_ascii_lowercase(), o.spawn.id)).collect();
+            let seed = self.setup.def.title.bytes().fold(0x811C_9DC5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+            let first = self.world.pickups.len();
+            dishonored_sim::inventory::spawn_pickups(&mut self.world, &placed, seed, &|s: &str| owners.get(&s.to_ascii_lowercase()).copied());
+            // Carried by a spawner whose pawn has not spawned yet: attach when it does.
+            for (k, pp) in placed.iter().enumerate() {
+                if let (Some(s), Some(pk)) = (&pp.stealable_from, self.world.pickups.get(first + k)) {
+                    if pk.carried_by.is_none() {
+                        self.pending_stealables.push((pk.id, s.clone()));
+                    }
+                }
+            }
+        }
     }
 
     /// Spawn an original spawner's pawn (once). Corpse / knocked-out spawners lie on the floor;
@@ -440,7 +465,12 @@ impl MissionMatch {
         spawn_npc(&mut self.world, s.id, s.kind, arch, s.position, s.yaw, cfg);
         if o.props.spawn_dead || o.props.knocked_out {
             if let Some(p) = self.world.player_mut(s.id) {
-                p.alive = false;
+                // `m_bTreatAsKnockedOut`: unconscious (non-lethal, can be carried), not dead.
+                if o.props.spawn_dead {
+                    p.alive = false;
+                } else {
+                    p.condition = dishonored_sim::state::Condition::Unconscious;
+                }
             }
             return;
         }
@@ -604,13 +634,14 @@ impl MissionMatch {
             let npcs: Vec<PlayerState> = self.world.players.iter().filter(|p| !humans.contains(&p.id)).cloned().collect();
             let fresh = Crowd { ai: self.crowd.ai.clone(), ..Default::default() };
             let crowd = std::mem::replace(&mut self.crowd, fresh);
-            self.saved.insert(self.current_map.to_ascii_lowercase(), LevelState { npcs, brains: crowd.brains, layout: crowd.layout, spawns: crowd.spawns });
+            self.saved.insert(self.current_map.to_ascii_lowercase(), LevelState { npcs, pickups: std::mem::take(&mut self.world.pickups), brains: crowd.brains, layout: crowd.layout, spawns: crowd.spawns });
             self.world.players.retain(|p| humans.contains(&p.id));
             self.world.projectiles.clear();
             self.current_map = self.setup.maps.iter().find(|m| m.eq_ignore_ascii_case(dest_map)).cloned().unwrap_or_else(|| dest_map.to_string());
             match self.saved.remove(&self.current_map.to_ascii_lowercase()) {
                 Some(ls) => {
                     self.world.players.extend(ls.npcs);
+                    self.world.pickups = ls.pickups;
                     let routes = self.setup.routes.get(&self.current_map.to_ascii_lowercase()).cloned().unwrap_or_default();
                     self.crowd = Crowd { brains: ls.brains, layout: ls.layout, spawns: ls.spawns, ai: self.crowd.ai.clone(), routes, ..Default::default() };
                 }
@@ -810,6 +841,38 @@ impl MissionMatch {
                     let kind = if k == PawnKind::Guard { NpcKind::Guard } else { NpcKind::Civilian };
                     events.push(MissionEvent::NpcKilled { npc: self.npc_by_id.get(victim).cloned(), by_player, kind });
                     self.crowd.brains.retain(|b| b.id != *victim);
+                }
+            }
+            // Inventory and non-lethal takedowns.
+            match e {
+                SimEvent::PickedUp { id, pickup } => {
+                    if let Some(pk) = self.world.pickups.iter().find(|p| p.id == *pickup) {
+                        let item = match &pk.kind {
+                            dishonored_ir::items::PickupKind::Abstract { item, .. } | dishonored_ir::items::PickupKind::Inventory { item } => Some(item.clone()),
+                            _ => None,
+                        };
+                        events.push(MissionEvent::PickedUp { player: *id, pickup: pk.name.clone(), item });
+                    }
+                }
+                SimEvent::KnockedOut { victim, by, .. } if !self.humans.contains(victim) => {
+                    let by_player = by.is_some_and(|k| self.humans.contains(&k));
+                    let kind = if self.world.player(*victim).is_some_and(|p| p.kind == PawnKind::Guard) { NpcKind::Guard } else { NpcKind::Civilian };
+                    events.push(MissionEvent::NpcKnockedOut { npc: self.npc_by_id.get(victim).cloned(), by_player, kind });
+                    // Unconscious for good: its brain stops (the sim ignores its input anyway).
+                    self.crowd.brains.retain(|b| b.id != *victim);
+                }
+                _ => {}
+            }
+        }
+        // Stealable pickups whose carrier has spawned since.
+        if !self.pending_stealables.is_empty() {
+            let pend = std::mem::take(&mut self.pending_stealables);
+            for (pid, spawner) in pend {
+                let owner = self.setup.original.iter().find(|o| o.name.eq_ignore_ascii_case(&spawner) && self.original_spawned.contains(&o.spawn.id)).map(|o| o.spawn.id);
+                match (owner, self.world.pickups.iter_mut().find(|p| p.id == pid)) {
+                    (Some(o), Some(pk)) if pk.active => pk.carried_by = Some(o),
+                    (None, Some(pk)) if pk.active => self.pending_stealables.push((pid, spawner)),
+                    _ => {}
                 }
             }
         }

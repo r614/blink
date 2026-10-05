@@ -310,6 +310,11 @@ pub enum Trigger {
     ConversationOutput(String),
     /// An original conversation ends (label, `OneShot/label` or `Package:OneShot/label`).
     ConversationEnded(String),
+    /// A player picked up an item (`DisSeqEvent_PickupPickedUp`): the pickup actor name
+    /// (`DisAbstractItemPickup_11`) or the abstract item it gives (`Rune_AbsItm`, full or short).
+    PickedUp(String),
+    /// A mission NPC was knocked out (choke, sleep dart): `DisSeqEvent_KnockedOut`.
+    NpcKnockedOut(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -509,7 +514,7 @@ impl MissionDef {
                 Trigger::NpcKilled(n) | Trigger::NpcAlerted(n) => npc(n, &mut e),
                 Trigger::FlagSet(x) | Trigger::FlagCleared(x) => flag(x, &mut e),
                 Trigger::Use(m) => marker(m, &mut e),
-                Trigger::Talk(n) => npc(n, &mut e),
+                Trigger::Talk(n) | Trigger::NpcKnockedOut(n) => npc(n, &mut e),
                 Trigger::TaskState(t, _) => task(t, &mut e),
                 Trigger::CounterAtLeast(c, _) => counter(c, &mut e),
                 Trigger::Timer(s) | Trigger::Every(s) if *s <= 0.0 => e.push("timer must be > 0".into()),
