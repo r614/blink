@@ -126,7 +126,9 @@ fn spawner_props(pkg: &ue3_package::Package, props: &[ue3_package::properties::P
         Some(Value::Bool(v)) => *v,
         _ => d,
     };
-    s.on_begin_play = b("m_bSpawnOnBeginPlay", true);
+    // `DisTravelSpawner` overrides the class default to false (decompiled defaultproperties).
+    let travel = find(props, "m_PlayerTravelLocationTags").is_some();
+    s.on_begin_play = b("m_bSpawnOnBeginPlay", !travel);
     s.patrol_on_startup = b("m_bPatrolUponStartup", false);
     s.aware_on_startup = b("m_bAwareOfPlayerUponStartup", false);
     s.capable_of_fleeing = b("m_bCapableOfFleeing", true);
