@@ -624,6 +624,11 @@ fn interaction_prompt(mv: &dishonored_mission::runtime::MissionView, view: &Sess
     if mv.outcome.is_some() {
         return String::new();
     }
+    // An open dialog choice replaces the prompt (keys 1-4 pick an option).
+    if let Some((_, opts)) = mv.choices.iter().find(|c| c.0 == me.id) {
+        return opts.iter().enumerate().map(|(i, o)| format!("{}   {o}", i + 1)).collect::<Vec<_>>().join("
+");
+    }
     let eye = me.position + glam::Vec3::Z * 64.0;
     let fwd = dishonored_sim::movement::view_vector(yaw, pitch);
     let mut best: Option<(f32, String)> = None;

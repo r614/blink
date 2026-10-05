@@ -17,6 +17,12 @@ pub mod buttons {
     pub const LEAN_RIGHT: u16 = 1 << 8;
     pub const USE: u16 = 1 << 9;
     pub const RELOAD: u16 = 1 << 10;
+    /// Pick option 1..4 of an open dialog choice (`DisSeqAct_DialogScriptedChoice`, conversations).
+    pub const CHOICE_1: u16 = 1 << 11;
+    pub const CHOICE_2: u16 = 1 << 12;
+    pub const CHOICE_3: u16 = 1 << 13;
+    pub const CHOICE_4: u16 = 1 << 14;
+    pub const CHOICES: [u16; 4] = [CHOICE_1, CHOICE_2, CHOICE_3, CHOICE_4];
 }
 
 /// Left-hand selection (Dishonored binds powers and gadgets to the left hand).

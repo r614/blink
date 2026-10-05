@@ -70,6 +70,12 @@ fn main() -> Result<()> {
             let pkgs = dishonored_assets::map_packages(&c, map);
             for l in dishonored_assets::travel::extract_travel(&c, &pkgs)? {
                 println!("{:<28} {:<30} ({:.0},{:.0},{:.0}) -> {:<24} via {} -> {:?}", l.door, l.door_tweak, l.door_position.x, l.door_position.y, l.door_position.z, l.destination_tag, l.change_event, l.destination_map);
+                if a.iter().any(|x| x == "--chain") {
+                    for s in &l.chain {
+                        let props: Vec<String> = s.props.iter().filter(|(k, _)| !matches!(k.as_str(), "ObjInstanceVersion" | "ParentSequence" | "ObjPosX" | "ObjPosY" | "DrawWidth" | "DrawHeight" | "OutputLinks" | "InputLinks" | "VariableLinks" | "EventLinks" | "ObjComment")).map(|(k, v)| format!("{k}={v}")).collect();
+                        println!("    {:<36} {:<28} --{}--> {}", s.class, s.name, s.via, props.join(" "));
+                    }
+                }
             }
             for s in dishonored_assets::travel::tagged_starts(&c, &pkgs) {
                 println!("start {:<14} tag {:<28} ({:.0},{:.0},{:.0})", s.name, s.tag, s.position.x, s.position.y, s.position.z);

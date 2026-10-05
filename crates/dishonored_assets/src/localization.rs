@@ -94,3 +94,25 @@ fn decode(bytes: &[u8]) -> String {
 pub fn with_keys(text: &str, use_key: &str) -> String {
     text.replace("`k", use_key)
 }
+
+impl Localization {
+    /// Value in the section of an object of a level package, by its Kismet path
+    /// (`TheWorld.PersistentLevel.Main_Sequence.X` is written `TheWorld:PersistentLevel...`).
+    pub fn get_object(&self, package: &str, object_path: &str, key: &str) -> Option<&str> {
+        let pkg = package.to_ascii_lowercase();
+        let want = object_path.replacen('.', ":", 1).to_ascii_lowercase();
+        let key = key.to_ascii_lowercase();
+        self.entries.iter().find(|((p, s), _)| *p == pkg && s.split(' ').next() == Some(want.as_str())).and_then(|(_, kv)| kv.get(&key)).map(|s| s.as_str())
+    }
+
+    /// `DisSeqAct_DialogScriptedChoice` options (`m_Choices[n]=(m_ChoiceText="...")`).
+    pub fn choices(&self, package: &str, object_path: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for i in 0..8 {
+            let Some(v) = self.get_object(package, object_path, &format!("m_Choices[{i}]")) else { break };
+            let text = v.split_once("m_ChoiceText=\"").and_then(|(_, r)| r.split_once('"')).map(|(t, _)| t.to_string()).unwrap_or_default();
+            out.push(text);
+        }
+        out
+    }
+}

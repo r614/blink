@@ -35,6 +35,26 @@ pub struct TravelLink {
     pub change_event: String,
     /// Destination persistent map from the global `SeqAct_PrepareMapChange`.
     pub destination_map: Option<String>,
+    /// The Kismet chain from the use event to the travel (class, output link taken, key
+    /// properties), for conditions and research.
+    #[serde(default)]
+    pub chain: Vec<ChainStep>,
+    /// The confirmation the door asks first (`DisSeqAct_DialogScriptedChoice`): its object path
+    /// in the Kismet package (localized `m_Choices[n].m_ChoiceText`: go / stay).
+    #[serde(default)]
+    pub choice: Option<String>,
+    /// Sound the chosen option posts (`SeqAct_AkPostEvent`, e.g. `Door_Metal_Level_Transition`).
+    #[serde(default)]
+    pub sound: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChainStep {
+    pub class: String,
+    pub name: String,
+    /// Output link of this node that leads on (e.g. `True`/`False` of a condition).
+    pub via: String,
+    pub props: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -93,6 +113,31 @@ impl MapKismet {
         MapKismet { graphs, listeners }
     }
 
+    /// Path from the BFS root to `end`, each step with the output link that leads on.
+    fn chain(&self, end: (usize, usize), parent: &BTreeMap<(usize, usize), (usize, usize)>) -> Vec<ChainStep> {
+        let mut nodes = vec![end];
+        let mut c = end;
+        while let Some(p) = parent.get(&c) {
+            if nodes.contains(p) || nodes.len() > 64 {
+                break;
+            }
+            nodes.push(*p);
+            c = *p;
+        }
+        nodes.reverse();
+        let mut out = Vec::new();
+        for (i, at) in nodes.iter().enumerate() {
+            let op = self.op(*at);
+            let via = nodes.get(i + 1).and_then(|n| {
+                let next = self.op(*n).export;
+                op.outputs.iter().find(|(_, ts)| ts.iter().any(|(t, _)| *t == next)).map(|(l, _)| l.clone())
+            });
+            let name = op.path.rsplit('.').next().unwrap_or(&op.path).to_string();
+            out.push(ChainStep { class: op.class.clone(), name, via: via.unwrap_or_default(), props: op.props.clone() });
+        }
+        out
+    }
+
     fn op(&self, at: (usize, usize)) -> &KismetOp {
         &self.graphs[at.0].1.ops[at.1]
     }
@@ -148,7 +193,9 @@ pub fn extract_travel(content: &Content, packages: &[String]) -> Result<Vec<Trav
             // Breadth-first along the graph until the ChangeLvl remote event.
             let mut queue = VecDeque::from([(gi, oi)]);
             let mut visited = std::collections::BTreeSet::new();
+            let mut parent: BTreeMap<(usize, usize), (usize, usize)> = BTreeMap::new();
             let (mut tag, mut change) = (None, None);
+            let mut change_at = None;
             while let Some(at) = queue.pop_front() {
                 if !visited.insert(at) || visited.len() > 400 {
                     continue;
@@ -161,15 +208,38 @@ pub fn extract_travel(content: &Content, packages: &[String]) -> Result<Vec<Trav
                     if let Some(n) = prop(o, "EventName").map(unwrap_value) {
                         if n.to_ascii_lowercase().starts_with("changelvl") {
                             change = Some(n);
+                            change_at = Some(at);
                         }
                     }
                 }
                 if tag.is_some() && change.is_some() {
                     break;
                 }
-                queue.extend(k.next(at));
+                for n in k.next(at) {
+                    if !visited.contains(&n) {
+                        parent.entry(n).or_insert(at);
+                    }
+                    queue.push_back(n);
+                }
             }
             let (Some(tag), Some(change)) = (tag, change) else { continue };
+            let chain = change_at.map(|end| k.chain(end, &parent)).unwrap_or_default();
+            // The confirmation dialog on the way, and the sound its "go" option posts.
+            let (mut choice, mut sound) = (None, None);
+            let step = chain.iter().find(|s| s.class == "DisSeqAct_DialogScriptedChoice");
+            if let Some(at) = step.and_then(|s| visited.iter().copied().find(|a| k.op(*a).path.ends_with(&s.name))) {
+                let op = k.op(at);
+                choice = Some(op.path.clone());
+                if let Some((_, targets)) = op.outputs.first() {
+                    for (t, _) in targets {
+                        if let Some(n) = k.by_export(at.0, *t) {
+                            if k.op(n).class == "SeqAct_AkPostEvent" {
+                                sound = prop(k.op(n), "Event").map(unwrap_value);
+                            }
+                        }
+                    }
+                }
+            }
             // Global Kismet: ChangeLvl_* -> sequence -> SeqAct_PrepareMapChange(MainLevelName).
             let mut dest = None;
             if let Some(ls) = global.listeners.get(&change.to_ascii_lowercase()) {
@@ -191,7 +261,7 @@ pub fn extract_travel(content: &Content, packages: &[String]) -> Result<Vec<Trav
             if links.iter().any(|l: &TravelLink| l.door == door && l.destination_tag == tag) {
                 continue;
             }
-            links.push(TravelLink { door_package: pkg_name.clone(), door, door_position: pos, door_tweak: tweak, destination_tag: tag, change_event: change, destination_map: dest });
+            links.push(TravelLink { door_package: pkg_name.clone(), door, door_position: pos, door_tweak: tweak, destination_tag: tag, change_event: change, destination_map: dest, chain, choice, sound });
         }
     }
     Ok(links)

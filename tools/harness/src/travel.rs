@@ -57,10 +57,13 @@ struct Travelled {
     pos: Vec3,
     z_after: f32,
     detail: String,
+    /// Options the door asked (from the match view), if any.
+    asked: Vec<String>,
 }
 
-/// Stand at a door, press use, then let the game run a second on the other side.
-fn use_door(g: &mut Game, maps: &MapContents, door: &TravelDoor, tick: &mut u64) -> Result<Travelled> {
+/// Stand at a door, press use, answer its confirmation with option `answer` (1 = go), then let
+/// the game run a second.
+fn use_door(g: &mut Game, maps: &MapContents, door: &TravelDoor, answer: usize, tick: &mut u64) -> Result<Travelled> {
     let world = maps.get(&door.map).context("door map")?;
     let (spot, yaw, pitch) = approach(&world.collision, door).context("no clear approach to the door")?;
     let Game::Mission(m) = g else { anyhow::bail!("not a mission") };
@@ -71,21 +74,30 @@ fn use_door(g: &mut Game, maps: &MapContents, door: &TravelDoor, tick: &mut u64)
     me.pitch = pitch;
     let mut z_after = 0.0;
     let mut pos = Vec3::ZERO;
+    let mut asked = Vec::new();
     for i in 0..90 {
         *tick += 1;
-        let inp = PlayerInput { tick: *tick, yaw, pitch, buttons: if i == 3 { buttons::USE } else { 0 }, ..Default::default() };
+        let b = match i {
+            3 => buttons::USE,
+            10 => buttons::CHOICES[answer - 1],
+            _ => 0,
+        };
+        let inp = PlayerInput { tick: *tick, yaw, pitch, buttons: b, ..Default::default() };
         let sim = &maps.maps[0].sim;
         g.step(&[(AGENT, inp)], &maps.set, sim);
         if let Some(cm) = g.current_map() {
             maps.set.set_active(cm);
         }
-        if i == 4 {
+        if i == 6 {
+            asked = g.view().mission.as_ref().and_then(|m| m.choices.iter().find(|c| c.0 == AGENT).map(|c| c.1.clone())).unwrap_or_default();
+        }
+        if i == 11 {
             pos = g.world().player(AGENT).map(|p| p.position).unwrap_or_default();
         }
         z_after = g.world().player(AGENT).map(|p| p.position.z).unwrap_or_default();
     }
     let map = g.current_map().unwrap_or_default().to_string();
-    Ok(Travelled { map, pos, z_after, detail: format!("from ({:.0},{:.0},{:.0}) yaw {yaw:.0} pitch {pitch:.0}", spot.x, spot.y, spot.z) })
+    Ok(Travelled { map, pos, z_after, detail: format!("from ({:.0},{:.0},{:.0}) yaw {yaw:.0} pitch {pitch:.0}", spot.x, spot.y, spot.z), asked })
 }
 
 pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
@@ -128,7 +140,10 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
 
     // Ext -> Int through the first door leading inside.
     let door_in = doors.iter().find(|d| d.map.eq_ignore_ascii_case(EXT) && d.dest_map.eq_ignore_ascii_case(INT)).cloned().context("Ext->Int door")?;
-    let t = use_door(&mut g, &maps, &door_in, &mut tick)?;
+    // The original asks first ("Go to ..." / "Stay in ..."); staying keeps the player outside.
+    let t = use_door(&mut g, &maps, &door_in, 2, &mut tick)?;
+    rep.check(S, &format!("{} asks the original confirmation; \"stay\" keeps the player on {EXT}", door_in.door), t.asked.len() == 2 && t.asked == door_in.choices && t.map.eq_ignore_ascii_case(EXT), format!("asked {:?}; still on {}", t.asked, t.map));
+    let t = use_door(&mut g, &maps, &door_in, 1, &mut tick)?;
     let start_in = int.tagged_starts.iter().find(|s| s.tag.eq_ignore_ascii_case(&door_in.dest_tag)).context("destination start")?;
     let d_in = t.pos.truncate().distance(start_in.position.truncate());
     rep.check(S, &format!("use {} -> arrive at {} on {INT}", door_in.door, door_in.dest_tag), t.map.eq_ignore_ascii_case(INT) && d_in < 200.0, format!("{}; now on {}, {:.0} uu from the PlayerStart", t.detail, t.map, d_in));
@@ -140,7 +155,7 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
 
     // Int -> Ext back through a door leading out.
     let door_out = doors.iter().find(|d| d.map.eq_ignore_ascii_case(INT) && d.dest_map.eq_ignore_ascii_case(EXT)).cloned().context("Int->Ext door")?;
-    let t = use_door(&mut g, &maps, &door_out, &mut tick)?;
+    let t = use_door(&mut g, &maps, &door_out, 1, &mut tick)?;
     let start_out = ext.tagged_starts.iter().find(|s| s.tag.eq_ignore_ascii_case(&door_out.dest_tag)).context("return start")?;
     let d_out = t.pos.truncate().distance(start_out.position.truncate());
     rep.check(S, &format!("use {} -> arrive at {} on {EXT}", door_out.door, door_out.dest_tag), t.map.eq_ignore_ascii_case(EXT) && d_out < 200.0, format!("{}; now on {}, {:.0} uu from the PlayerStart", t.detail, t.map, d_out));

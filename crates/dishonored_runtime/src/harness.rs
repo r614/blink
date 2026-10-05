@@ -51,6 +51,10 @@ impl ScriptInput {
                 "LEAN_RIGHT" => buttons::LEAN_RIGHT,
                 "USE" => buttons::USE,
                 "RELOAD" => buttons::RELOAD,
+                "CHOICE_1" => buttons::CHOICE_1,
+                "CHOICE_2" => buttons::CHOICE_2,
+                "CHOICE_3" => buttons::CHOICE_3,
+                "CHOICE_4" => buttons::CHOICE_4,
                 _ => 0,
             };
         }

@@ -123,6 +123,9 @@ pub struct MissionView {
     /// Mission NPC id -> pawn id (set by the host), so clients can find talkers.
     #[serde(default)]
     pub npc_ids: Vec<(String, u32)>,
+    /// Open dialog choices: (player id, options). Picked with the CHOICE_n buttons.
+    #[serde(default)]
+    pub choices: Vec<(u32, Vec<String>)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -416,6 +419,16 @@ impl MissionState {
         }
     }
 
+    /// Post a sound for clients (original Wwise event name), as `Action::Sound` does.
+    pub fn post_sound(&mut self, s: &str) {
+        let id = self.id();
+        self.view.sounds.push((id, s.to_string()));
+        let n = self.view.sounds.len();
+        if n > 8 {
+            self.view.sounds.drain(..n - 8);
+        }
+    }
+
     fn id(&mut self) -> u32 {
         self.next_id += 1;
         self.next_id
@@ -516,12 +529,7 @@ impl MissionState {
                     }
                 }
                 Action::Sound(s) => {
-                    let id = self.id();
-                    self.view.sounds.push((id, s.clone()));
-                    let n = self.view.sounds.len();
-                    if n > 8 {
-                        self.view.sounds.drain(..n - 8);
-                    }
+                    self.post_sound(s);
                     out.push(Command::Sound(s.clone()));
                 }
                 Action::Usable(m, p) => {

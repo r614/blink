@@ -204,6 +204,7 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
             follow_map(&session.maps, &mut session.content, (!m.is_empty()).then_some(m.as_str()));
         }
     }
+    local.choice_open = view.me.as_ref().is_some_and(|me| view.matchv.mission.as_ref().is_some_and(|m| m.choices.iter().any(|c| c.0 == me.id)));
     // Audio hook: events for crate::audio (drained there each frame; capped if audio is off).
     let n = view.audio_events.len();
     if n > 256 {

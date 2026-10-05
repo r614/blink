@@ -123,7 +123,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     let ai_points = npcs.points.iter().map(|p| (p.position, p.yaw)).collect();
     let guard_spawns = npcs.spawns.iter().filter(|s| s.role == dishonored_assets::npcs::NpcRole::Guard).map(|s| (s.position, s.yaw)).collect();
     let markers = npcs.markers.clone();
-    let travel_path = dir.join(format!("{map}.travel2.json"));
+    let travel_path = dir.join(format!("{map}.travel4.json"));
     let (travel, tagged_starts): (Vec<dishonored_assets::travel::TravelLink>, Vec<dishonored_assets::travel::TaggedStart>) = match std::fs::read_to_string(&travel_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(t) => t,
         None => {
@@ -179,6 +179,8 @@ pub fn mission_setup(maps: &MapContents, def: dishonored_mission::MissionDef) ->
                     prompt: travel_prompt(l, "F"),
                     dest_map: l.destination_map.clone()?,
                     dest_tag: l.destination_tag.clone(),
+                    choices: l.choice.as_ref().map(|c| localization().choices(&l.door_package, c)).unwrap_or_default(),
+                    sound: l.sound.as_ref().map(|s| s.rsplit('.').next().unwrap_or(s).to_string()),
                 })
             })
             .collect();

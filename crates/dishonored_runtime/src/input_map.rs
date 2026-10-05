@@ -23,6 +23,8 @@ pub struct LocalInput {
     /// When set (harness script / control socket), replaces keyboard input.
     pub override_input: Option<PlayerInput>,
     pub enabled: bool,
+    /// A dialog choice is open for the local player: number keys pick options instead of powers.
+    pub choice_open: bool,
 }
 
 impl LocalInput {
@@ -78,6 +80,14 @@ pub fn gather_input(
     }
     local.latched |= held & !local.held;
     local.held = held;
+    if local.choice_open {
+        for (k, b) in [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4].into_iter().zip(buttons::CHOICES) {
+            if keys.just_pressed(k) {
+                local.latched |= b;
+            }
+        }
+        return;
+    }
     for (k, h) in [
         (KeyCode::Digit1, LeftHand::Blink),
         (KeyCode::Digit2, LeftHand::Windblast),

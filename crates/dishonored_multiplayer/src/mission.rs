@@ -42,6 +42,13 @@ pub struct TravelDoor {
     pub prompt: String,
     pub dest_map: String,
     pub dest_tag: String,
+    /// The original confirmation (`DisSeqAct_DialogScriptedChoice`): option 1 travels
+    /// ("Go to Boyle Mansion Ballroom"), option 2 stays ("Stay in the Garden"). Empty: travel at once.
+    #[serde(default)]
+    pub choices: Vec<String>,
+    /// Sound the "go" option posts (`Door_Metal_Level_Transition`).
+    #[serde(default)]
+    pub sound: Option<String>,
 }
 
 /// Everything the setup needs from one persistent map.
@@ -231,6 +238,8 @@ pub struct MissionMatch {
     started: bool,
     use_held: BTreeSet<PlayerId>,
     pending_travel: Option<(String, String)>,
+    /// Players with a door confirmation open (player -> door index).
+    choosing: BTreeMap<PlayerId, usize>,
     arrived: Option<String>,
 }
 
@@ -263,6 +272,7 @@ impl MissionMatch {
             started: false,
             use_held: BTreeSet::new(),
             pending_travel: None,
+            choosing: BTreeMap::new(),
             arrived: None,
         };
         m.populate_fresh(cfg);
@@ -372,6 +382,7 @@ impl MissionMatch {
             }
             self.engaged.clear();
             self.alerted.clear();
+            self.choosing.clear();
         }
         for (i, h) in self.humans.clone().into_iter().enumerate() {
             let (p, y) = Self::fan(i, (pos, yaw));
@@ -456,22 +467,55 @@ impl MissionMatch {
 
     pub fn step(&mut self, inputs: &[(PlayerId, PlayerInput)], world: &dyn WorldQuery, cfg: &SimConfig) -> StepOutput {
         let dt = dishonored_sim::movement::DT;
-        let mut all = inputs.to_vec();
+        // A player answering a dialog choice does not move or act (the original takes control away).
+        let mut all: Vec<(PlayerId, PlayerInput)> = inputs
+            .iter()
+            .map(|(id, i)| {
+                if self.choosing.contains_key(id) {
+                    (*id, PlayerInput { tick: i.tick, yaw: i.yaw, pitch: i.pitch, left_hand: i.left_hand, ..Default::default() })
+                } else {
+                    (*id, *i)
+                }
+            })
+            .collect();
         all.extend(self.crowd.think(&self.world, &self.last_events, world, dt));
         let out = step_world(&mut self.world, &all, world, cfg);
         let mut events = Vec::new();
         if let Some(m) = self.arrived.take() {
             events.push(MissionEvent::Arrived(m));
         }
+        // Open door confirmations: option 1 travels, any other option stays.
+        for (id, inp) in inputs {
+            let Some(&door) = self.choosing.get(id) else { continue };
+            let picked = dishonored_sim::input::buttons::CHOICES.iter().position(|b| inp.buttons & b != 0);
+            if let Some(n) = picked {
+                self.choosing.remove(id);
+                self.use_held.insert(*id);
+                if n == 0 {
+                    let d = &self.setup.doors[door];
+                    if let Some(s) = d.sound.clone() {
+                        self.state.post_sound(&s);
+                    }
+                    self.pending_travel = Some((d.dest_map.clone(), d.dest_tag.clone()));
+                }
+            }
+        }
         // F (use): on press, interact with what the player is looking at.
         for (id, inp) in inputs {
+            if self.choosing.contains_key(id) {
+                continue;
+            }
             let pressed = inp.buttons & dishonored_sim::input::buttons::USE != 0;
             if pressed && self.use_held.insert(*id) {
                 match self.interaction(*id) {
                     Some(Interaction::Mission(e)) => events.push(e),
                     Some(Interaction::Door(i)) => {
                         let d = &self.setup.doors[i];
-                        self.pending_travel = Some((d.dest_map.clone(), d.dest_tag.clone()));
+                        if d.choices.is_empty() {
+                            self.pending_travel = Some((d.dest_map.clone(), d.dest_tag.clone()));
+                        } else {
+                            self.choosing.insert(*id, i);
+                        }
                     }
                     None => {}
                 }
@@ -574,6 +618,7 @@ impl MissionMatch {
         for d in self.setup.doors.iter().filter(|d| d.map.eq_ignore_ascii_case(&self.current_map)) {
             mv.usables.push(((d.position + Vec3::Z * 60.0).to_array(), d.prompt.clone()));
         }
+        mv.choices = self.choosing.iter().map(|(p, d)| (*p, self.setup.doors[*d].choices.clone())).collect();
         self.view.mission = Some(mv);
         self.view.map = self.current_map.clone();
         self.last_events = out.events.clone();
