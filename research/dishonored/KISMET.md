@@ -257,8 +257,18 @@ The original mission runs from its first event to its last:
    `BoyleCanal_PlayerIsReadyTogo` -> `ChangeLvl_fromBoyle_toHub` -> global PrepareMapChange
    `L_Pub_Morning_P` -> CommitMapChange: the mission ends.
 
-The agent is placed next to what it uses (it does not path across the maps). Coverage and the
-activation table are in the harness report.
+The agent is placed next to what it uses (it does not path across the maps). It ends the
+mission at 58.7 s of play (seed 1; the matinee and conversation timings are the original's).
+Coverage on that run: 78 op classes executed of the 153 op classes in the data (the rest are
+on paths the run does not take: nonlethal route, duel, alarms, ...), 885 activations of 771
+distinct ops, 43 presentation-only activations, 14 activations of 6 unsupported classes
+(`DisSeqAct_AISetSenses`, `DisSeqAct_Door`, `SeqAct_AttachToActor`, faction
+`DisSeqAct_SetDisposition`, `DisSeqAct_ActivateUsable`, `SeqAct_ActorFactory`). The same seed
+gives the same Kismet state hash; over seeds 1-6 all three sisters come out guilty. The full
+activation tables are in the harness report.
+
+Not exercised headless yet: Miss White's drink (the other way to learn the dress), the
+nonlethal Brisby route (knock-out, carrying a body to the boat), Lord Shaw's duel.
 
 ## 4. Open points
 
