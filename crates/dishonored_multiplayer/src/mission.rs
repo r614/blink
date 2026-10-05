@@ -12,7 +12,7 @@
 //! destination's saved state or populates it fresh, and places players at the `PlayerStart`
 //! with the destination tag (`GotoPlayerTravelDestination`).
 
-use crate::{MatchPhase, MatchView, ScoreEntry};
+use crate::{Look, MatchPhase, MatchView, ScoreEntry};
 use dishonored_ai::{Brain, BrainState, Crowd, CrowdConfig, CrowdLayout, NPC_ID_BASE, NpcSpawn, snap_floor};
 use dishonored_mission::runtime::{Command, MissionEvent, MissionState, StepInput};
 use dishonored_mission::{Behavior, MissionDef, NpcKind, Place, resolve_actor};
@@ -37,6 +37,9 @@ pub const APPEARANCE_BASE: u8 = 4;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OriginalNpc {
     pub map: String,
+    /// Spawner actor name (`DishonoredSpawner_11`).
+    #[serde(default)]
+    pub name: String,
     pub spawn: NpcSpawn,
     pub tweak: String,
     pub props: dishonored_ir::spawners::SpawnerProps,
@@ -110,7 +113,7 @@ pub struct MissionSetup {
     pub original: Vec<OriginalNpc>,
     /// Looks of original NPCs: archetype `APPEARANCE_BASE + i` is `appearances[i]` (mesh parts).
     #[serde(default)]
-    pub appearances: Vec<Vec<(String, String)>>,
+    pub appearances: Vec<Look>,
     /// Original dialog graphs the mission references, read from the install by the host
     /// (stored in replays so they play back identically).
     #[serde(default)]
@@ -222,7 +225,7 @@ impl MissionSetup {
             .map(|m| (m.name.to_ascii_lowercase(), m.actors.iter().filter(|a| a.1.starts_with("DisFleePointActor")).map(|a| snap_floor(m.world, a.2).unwrap_or(a.2)).collect()))
             .collect();
         let mut original = Vec::new();
-        let mut appearances: Vec<Vec<(String, String)>> = Vec::new();
+        let mut appearances: Vec<Look> = Vec::new();
         for m in maps.iter().filter(|m| def.original_npcs.iter().any(|o| o.eq_ignore_ascii_case(&m.name))) {
             for s in m.spawners {
                 let (kind, mut archetype) = original_archetype(s);
@@ -231,8 +234,8 @@ impl MissionSetup {
                 // picks one of `m_RandomHeadMeshes`); the role archetype is the fallback.
                 let parts = s.appearance.parts(id);
                 if !parts.is_empty() {
-                    let i = appearances.iter().position(|a| *a == parts).unwrap_or_else(|| {
-                        appearances.push(parts.clone());
+                    let i = appearances.iter().position(|a| a.parts == parts && a.materials.is_empty()).unwrap_or_else(|| {
+                        appearances.push(Look { parts: parts.clone(), materials: Vec::new() });
                         appearances.len() - 1
                     });
                     if i + (APPEARANCE_BASE as usize) < 256 {
@@ -240,7 +243,7 @@ impl MissionSetup {
                     }
                 }
                 let p = snap_floor(m.world, s.position).unwrap_or(s.position);
-                original.push(OriginalNpc { map: m.name.clone(), spawn: NpcSpawn { id, kind, archetype, position: p, yaw: s.yaw }, tweak: s.tweak.clone(), props: s.props.clone(), parts });
+                original.push(OriginalNpc { map: m.name.clone(), name: s.name.clone(), spawn: NpcSpawn { id, kind, archetype, position: p, yaw: s.yaw }, tweak: s.tweak.clone(), props: s.props.clone(), parts });
             }
         }
         let mut doors = Vec::new();
@@ -297,6 +300,10 @@ pub struct MissionMatch {
     started: bool,
     use_held: BTreeSet<PlayerId>,
     pending_travel: Option<(String, String)>,
+    /// Each NPC's own archetype before material swaps (`ClearMaterials` restores it).
+    own_look: BTreeMap<PlayerId, u8>,
+    /// Current look of NPCs whose materials a mission changed (also for ones not spawned yet).
+    look_override: BTreeMap<PlayerId, u8>,
     /// Original spawners that have spawned their pawn (ids are unique across maps).
     original_spawned: BTreeSet<PlayerId>,
     /// Players with a door confirmation open (player -> door index).
@@ -340,6 +347,8 @@ impl MissionMatch {
             pending_travel: None,
             choosing: BTreeMap::new(),
             original_spawned: BTreeSet::new(),
+            own_look: BTreeMap::new(),
+            look_override: BTreeMap::new(),
             arrived: None,
             choice_held: BTreeMap::new(),
         };
@@ -387,7 +396,8 @@ impl MissionMatch {
             return;
         }
         let s = o.spawn;
-        spawn_npc(&mut self.world, s.id, s.kind, s.archetype, s.position, s.yaw, cfg);
+        let arch = self.look_override.get(&s.id).copied().unwrap_or(s.archetype);
+        spawn_npc(&mut self.world, s.id, s.kind, arch, s.position, s.yaw, cfg);
         if o.props.spawn_dead || o.props.knocked_out {
             if let Some(p) = self.world.player_mut(s.id) {
                 p.alive = false;
@@ -400,6 +410,63 @@ impl MissionMatch {
         self.crowd.brains.push(b);
         if alert || o.props.aware_on_startup {
             self.alert_npc(s.id);
+        }
+    }
+
+    /// A mission NPC id or an original spawner name -> pawn id.
+    fn npc_pawn(&self, name: &str) -> Option<PlayerId> {
+        self.id_by_npc.get(name).copied().or_else(|| self.setup.original.iter().find(|o| o.name.eq_ignore_ascii_case(name)).map(|o| o.spawn.id))
+    }
+
+    /// `DisSeqAct_NPCSetMaterials`: give the NPC a look with these materials over its own (Set), or
+    /// its own look back (Clear). Looks are shared in `MatchView::appearances`.
+    pub fn set_materials(&mut self, npc: &str, mats: Option<Vec<(u8, u32, String)>>) {
+        let Some(id) = self.npc_pawn(npc) else { return };
+        let base = APPEARANCE_BASE;
+        // Not spawned yet (a map not visited): its spawner's look, applied when it spawns.
+        let Some(cur) = self
+            .world
+            .player(id)
+            .map(|p| p.archetype)
+            .or_else(|| self.saved.values().flat_map(|l| l.npcs.iter()).find(|p| p.id == id).map(|p| p.archetype))
+            .or_else(|| self.look_override.get(&id).copied())
+            .or_else(|| self.setup.original.iter().find(|o| o.spawn.id == id).map(|o| o.spawn.archetype))
+        else {
+            return;
+        };
+        let own = *self.own_look.entry(id).or_insert(cur);
+        let new = match mats {
+            None => own,
+            Some(m) => {
+                // Only tweak-resolved looks have the parts to re-material.
+                let Some(look) = own.checked_sub(base).and_then(|i| self.view.appearances.get(i as usize)).cloned() else { return };
+                let mut materials = look.materials.clone();
+                for (p, i, path) in m {
+                    materials.retain(|x| !(x.0 == p && x.1 == i));
+                    materials.push((p, i, path));
+                }
+                let want = Look { parts: look.parts, materials };
+                let idx = match self.view.appearances.iter().position(|l| *l == want) {
+                    Some(i) => i,
+                    None => {
+                        self.view.appearances.push(want);
+                        self.view.appearances.len() - 1
+                    }
+                };
+                if idx + base as usize >= 256 {
+                    return;
+                }
+                base + idx as u8
+            }
+        };
+        self.look_override.insert(id, new);
+        if let Some(p) = self.world.player_mut(id) {
+            p.archetype = new;
+        }
+        for l in self.saved.values_mut() {
+            if let Some(p) = l.npcs.iter_mut().find(|p| p.id == id) {
+                p.archetype = new;
+            }
         }
     }
 
@@ -595,6 +662,11 @@ impl MissionMatch {
                     }
                 }
             }
+            Command::SetMaterials { npc, body, head } => {
+                let mats: Vec<(u8, u32, String)> = body.iter().map(|(i, m)| (0u8, *i, m.clone())).chain(head.iter().map(|(i, m)| (1u8, *i, m.clone()))).collect();
+                self.set_materials(&npc, Some(mats));
+            }
+            Command::ClearMaterials(npc) => self.set_materials(&npc, None),
             Command::Travel(tag) => {
                 if let Some(t) = self.setup.tagged_starts.iter().find(|t| t.1.eq_ignore_ascii_case(&tag)).cloned() {
                     self.pending_travel = Some((t.0, t.1));

@@ -379,6 +379,11 @@ pub fn spawn_map(
                 continue;
             }
             let is_sky = features.sky && mat_id.and_then(|m| map.material_params.get(m)).is_some_and(|p| p.sky);
+            if is_sky && std::env::var_os("DISHONORED_SKY_DEBUG").is_some() {
+                let c = inst.transform.w_axis;
+                let r = mesh.positions.iter().map(|p| inst.transform.transform_point3(glam::Vec3::from(*p)).distance(c.truncate())).fold(0.0f32, f32::max);
+                info!("sky instance {} section {si}: centre ({:.0},{:.0},{:.0}) radius {:.0} uu", mesh.source, c.x, c.y, c.z, r);
+            }
             let translucent = mat_id.is_some_and(|m| map.materials[m].blend == BlendHint::Translucent);
             // Static opaque/masked geometry is merged into world-space batches (one draw per
             // material, lightmap page and cell instead of one per instance section); sorted

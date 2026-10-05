@@ -99,7 +99,7 @@ pub fn sync_players(
     view: Res<SessionView>,
     session: Res<Session>,
     assets: Res<PlayerAssets>,
-    mut bodies: Query<(Entity, &PlayerBody, &mut Transform, Option<&mut Mesh3d>, Option<&mut MeshMaterial3d<StandardMaterial>>, &mut Visibility), Without<SwordVisual>>,
+    mut bodies: Query<(Entity, &PlayerBody, &mut Transform, Option<&mut Mesh3d>, Option<&mut MeshMaterial3d<StandardMaterial>>, &mut Visibility, Option<&crate::characters::CharacterRoot>), Without<SwordVisual>>,
     lib: Option<Res<crate::characters::CharacterLibrary>>,
     weapons: Option<Res<crate::characters::WeaponLibrary>>,
     mut swords: Query<(Entity, &SwordVisual, &mut Transform, &mut Visibility), Without<PlayerBody>>,
@@ -113,8 +113,13 @@ pub fn sync_players(
     }
     let me_id = view.me.as_ref().map(|m| m.id);
     let mut seen: HashMap<PlayerId, bool> = HashMap::new();
-    for (e, b, mut t, mut mesh, mut mat, mut vis) in &mut bodies {
+    for (e, b, mut t, mut mesh, mut mat, mut vis, root) in &mut bodies {
         match all.iter().find(|p| p.id == b.0) {
+            // The NPC's look changed (`DisSeqAct_NPCSetMaterials`) and the new model is loaded:
+            // rebuild the body below.
+            Some(p) if root.is_some_and(|r| r.archetype != p.archetype as usize) && lib.as_ref().is_some_and(|l| (p.archetype as usize) < l.models.len()) => {
+                commands.entity(e).despawn();
+            }
             Some(p) => {
                 seen.insert(p.id, true);
                 *t = body_transform(p, mv);

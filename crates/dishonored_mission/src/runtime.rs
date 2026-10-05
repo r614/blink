@@ -77,6 +77,8 @@ pub enum Command {
     Sound(String),
     /// Level travel to a tagged start.
     Travel(String),
+    SetMaterials { npc: String, body: Vec<(u32, String)>, head: Vec<(u32, String)> },
+    ClearMaterials(String),
 }
 
 pub struct StepInput<'a> {
@@ -808,6 +810,8 @@ impl MissionState {
                     self.usable.remove(m);
                 }
                 Action::Travel(tag) => out.push(Command::Travel(tag.clone())),
+                Action::SetMaterials { npc, body, head } => out.push(Command::SetMaterials { npc: npc.clone(), body: body.clone(), head: head.clone() }),
+                Action::ClearMaterials(npc) => out.push(Command::ClearMaterials(npc.clone())),
                 Action::Conversation(c, speakers) => self.start_conversation(c, speakers, None, None, true, queue),
                 Action::StopConversation(c) => {
                     let c = c.clone();

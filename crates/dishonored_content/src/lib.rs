@@ -176,7 +176,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
             l
         }
     };
-    let spawners = npcs.spawns.iter().map(|s| dishonored_ir::spawners::Spawner { position: s.position, yaw: s.yaw, tweak: s.tweak.clone(), guard: s.role == dishonored_assets::npcs::NpcRole::Guard, props: s.spawner.clone(), appearance: looks.get(&s.tweak).cloned().unwrap_or_default() }).collect();
+    let spawners = npcs.spawns.iter().map(|s| dishonored_ir::spawners::Spawner { name: s.source.rsplit('.').next().unwrap_or("").to_string(), position: s.position, yaw: s.yaw, tweak: s.tweak.clone(), guard: s.role == dishonored_assets::npcs::NpcRole::Guard, props: s.spawner.clone(), appearance: looks.get(&s.tweak).cloned().unwrap_or_default() }).collect();
     Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts, flee_points, spawners })
 }
 

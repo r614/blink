@@ -52,12 +52,21 @@ pub fn load_character(content: &Content, name: &str, pawn_half_height: f32, max_
 /// (pawn bodies); without it, mesh->pawn is just R(RotOrigin)*(v+MeshOrigin) (first-person
 /// rig, weapons).
 pub fn load_model(content: &Content, name: &str, parts: &[(&str, &str)], pawn_half_height: Option<f32>, max_tex: u32) -> Result<CharacterModel> {
+    load_model_with(content, name, parts, &[], pawn_half_height, max_tex)
+}
+
+/// A material replacing one of a part's materials (`DisMaterialSetting`): part index, material
+/// index, then (package, object path) of the material.
+pub type MaterialOverride = (usize, usize, String, String);
+
+/// [`load_model`] with material overrides (`DisSeqAct_NPCSetMaterials`, tweak variations).
+pub fn load_model_with(content: &Content, name: &str, parts: &[(&str, &str)], overrides: &[MaterialOverride], pawn_half_height: Option<f32>, max_tex: u32) -> Result<CharacterModel> {
     let mut shared_m2p: Option<Mat4> = None;
     let mut model = CharacterModel { name: name.to_string(), parts: Vec::new(), materials: Vec::new(), material_params: Vec::new(), textures: Vec::new() };
     let mut mat_ids: HashMap<(String, usize), Option<usize>> = HashMap::new();
     let mut tex_ids: HashMap<(String, usize), Option<usize>> = HashMap::new();
     let mut feet_z = f32::MAX;
-    for (pkg_name, part) in parts.iter() {
+    for (part_i, (pkg_name, part)) in parts.iter().enumerate() {
         let pkg = content.package(pkg_name)?;
         let idx = (0..pkg.exports.len())
             .find(|&i| pkg.export_class(i) == "SkeletalMesh" && pkg.obj_path(ObjRef::Export(i)).eq_ignore_ascii_case(part))
@@ -73,12 +82,26 @@ pub fn load_model(content: &Content, name: &str, parts: &[(&str, &str)], pawn_ha
         let mut sections = Vec::new();
         for s in &raw.sections {
             let mref = raw.materials.get(s.material_index.max(0) as usize).copied().unwrap_or(0);
-            let material = match ObjRef::from_index(mref) {
-                ObjRef::Export(mi) => *mat_ids.entry((pkg_name.to_string(), mi)).or_insert_with(|| {
-                    let res = resolve_material(&pkg, ObjRef::Export(mi)).unwrap_or_default();
+            // An override material may live in another package than the mesh.
+            let ovr = overrides.iter().find(|o| o.0 == part_i && o.1 == s.material_index.max(0) as usize).and_then(|o| {
+                let p = content.package(&o.2).ok()?;
+                let i = (0..p.exports.len()).find(|&i| p.obj_path(ObjRef::Export(i)).eq_ignore_ascii_case(&o.3))?;
+                Some((o.2.clone(), p, i))
+            });
+            let (mpkg_name, mpkg, target) = match ovr {
+                Some((n, p, i)) => (n, p, Some(i)),
+                None => (pkg_name.to_string(), pkg.clone(), match ObjRef::from_index(mref) {
+                    ObjRef::Export(mi) => Some(mi),
+                    _ => None,
+                }),
+            };
+            let material = match target {
+                Some(mi) => *mat_ids.entry((mpkg_name.clone(), mi)).or_insert_with(|| {
+                    let pkg = &mpkg;
+                    let res = resolve_material(pkg, ObjRef::Export(mi)).unwrap_or_default();
                     // Full Arkane chain (instance -> parents in DishonoredGame/Startup) for the
                     // specular/emissive slots, scalars and blend state, as for level materials.
-                    let (pkgs, chain) = character_chain(content, &pkg, mi);
+                    let (pkgs, chain) = character_chain(content, pkg, mi);
                     let mut tex_key = |k: Option<(usize, usize)>| -> Option<usize> {
                         let (slot, ti) = k?;
                         let p = pkgs.get(slot)?.clone();

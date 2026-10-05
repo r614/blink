@@ -59,6 +59,14 @@ MissionDef(
             Notify("Target", "A lady in a black mask. Two others wear the same."),
         ]),
 
+        // Inside the mansion the three Boyle ladies wear red, white and black, as the original
+        // interior setup dresses them (`DisSeqAct_NPCSetMaterials` on their own spawners).
+        RuleDef(on: Arrived("L_Boyle_Int_P"), then: [
+            SetMaterials(npc: "DishonoredSpawner_11", body: [(0, "Npc_Boyle.Materials.Boyle_red_inst")], head: [(0, "Npc_Masks.BOYLE.BoyleMask_red_inst")]),
+            SetMaterials(npc: "DishonoredSpawner_2", body: [(0, "Npc_Boyle.Materials.Boyle_inst")], head: [(0, "Npc_Masks.BOYLE.BoyleMask_white_inst")]),
+            SetMaterials(npc: "DishonoredSpawner_4", body: [(0, "Npc_Boyle.Materials.Boyle_black_inst")], head: [(0, "Npc_Masks.BOYLE.BoyleMask_black_inst")]),
+        ]),
+
         // The informant: talking to him reveals the kill task and its marker.
         RuleDef(on: Talk("informant"), then: [
             SetFlag("know_host"),

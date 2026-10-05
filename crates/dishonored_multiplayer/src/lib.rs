@@ -41,11 +41,20 @@ pub struct MatchView {
     /// NPC looks for archetypes from `mission::APPEARANCE_BASE` on: mesh parts (package, object
     /// path) resolved by the host from the pawn tweaks.
     #[serde(default)]
-    pub appearances: Vec<Vec<(String, String)>>,
+    pub appearances: Vec<Look>,
     /// Active persistent map (changes on level travel; clients reload the renderer).
     #[serde(default)]
     pub map: String,
     /// Mission mode: objectives, messages, outcome and stats.
     #[serde(default)]
     pub mission: Option<dishonored_mission::runtime::MissionView>,
+}
+
+/// An NPC look: skeletal mesh parts (package, object path; body first, then head) and material
+/// replacements `(part, material index, material object path)` (`DisSeqAct_NPCSetMaterials`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Look {
+    pub parts: Vec<(String, String)>,
+    #[serde(default)]
+    pub materials: Vec<(u8, u32, String)>,
 }

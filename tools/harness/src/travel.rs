@@ -158,6 +158,17 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     let looked = g.world().players.iter().filter(|p| p.kind != PawnKind::Human && p.archetype >= dishonored_multiplayer::mission::APPEARANCE_BASE).count();
     let table = g.view().appearances.len();
     rep.check(S, "interior NPCs wear their pawn tweak's body and head (not role stand-ins)", looked * 10 >= npcs_int * 9 && table > 0, format!("{looked}/{npcs_int} NPCs use one of {table} tweak-resolved looks"));
+    // `DisSeqAct_NPCSetMaterials` as Boyle's "apply red": the lady's body and mask materials.
+    let lady = originals.iter().find(|o| o.map.eq_ignore_ascii_case(INT) && o.props.squad == "LadiesBoyle" && o.props.on_begin_play).map(|o| (o.name.clone(), o.spawn.id));
+    if let (Some((lady, lid)), Game::Mission(m)) = (lady, &mut g) {
+        let before = m.world.player(lid).map(|p| p.archetype).unwrap_or(0);
+        m.set_materials(&lady, Some(vec![(0, 0, "Npc_Boyle.Materials.Boyle_red_inst".into()), (1, 0, "Npc_Masks.BOYLE.BoyleMask_red_inst".into())]));
+        let after = m.world.player(lid).map(|p| p.archetype).unwrap_or(0);
+        let look = after.checked_sub(dishonored_multiplayer::mission::APPEARANCE_BASE).and_then(|i| m.view.appearances.get(i as usize)).cloned().unwrap_or_default();
+        m.set_materials(&lady, None);
+        let cleared = m.world.player(lid).map(|p| p.archetype).unwrap_or(0);
+        rep.check(S, "NPCSetMaterials: a Boyle lady takes the red dress and mask materials, Clear restores her own", after != before && look.materials.len() == 2 && look.parts.len() >= 2 && cleared == before, format!("{lady}: archetype {before} -> {after} ({:?}) -> {cleared}", look.materials));
+    }
     let view_map = g.view().map.clone();
     let int_doors_usable = g.view().mission.as_ref().map(|m| m.usables.iter().filter(|u| doors.iter().any(|d| d.map.eq_ignore_ascii_case(INT) && d.prompt == u.1)).count()).unwrap_or(0);
     rep.check(S, "match view reports the new map and its doors", view_map.eq_ignore_ascii_case(INT) && int_doors_usable > 0, format!("view.map {view_map}, {int_doors_usable} Int doors usable, {npcs_int} NPCs present"));

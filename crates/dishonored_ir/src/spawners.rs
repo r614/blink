@@ -33,6 +33,9 @@ impl Default for SpawnerProps {
 /// One original spawner of a level, as missions use it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Spawner {
+    /// Spawner actor name (`DishonoredSpawner_11`): how missions address an original NPC.
+    #[serde(default)]
+    pub name: String,
     pub position: glam::Vec3,
     pub yaw: f32,
     /// Pawn tweak object path (decides the character).

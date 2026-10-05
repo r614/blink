@@ -655,3 +655,12 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   - An offline match does not tick while the screen is up.
 - **Validation:** a recorded travel into Boyle Int shows `LoadingBoyle` with the map name on the painted banner and a Boyle hint in the lower band. `harness visual` 6/6, launcher 14/14.
 - **Open:** the shadow offset of the map name (2 px assumed), and the save-notification and "press any key" variants (not used in travel).
+
+## 2026-10-05: NPC material swaps (`DisSeqAct_NPCSetMaterials`): the Boyle dresses
+
+- **Finding:** `DisSeqAct_NPCSetMaterials` has `m_NewBodyMaterials` and `m_NewHeadMaterials`, arrays of `DisMaterialSetting {m_MaterialIndex, m_pMaterial}`, with "Set" and "Clear" inputs. Boyle's interior setup applies to each sister body slot 0 `Npc_Boyle.Materials.Boyle_{red_inst, inst, black_inst}` and mask slot 0 `Npc_Masks.BOYLE.BoyleMask_{red,white,black}_inst`, all cooked in `L_Boyle_Int_Script`.
+- **Implementation:**
+  - Mission actions `SetMaterials { npc, body, head }` and `ClearMaterials(npc)`. The NPC is a mission NPC id or an original spawner name such as `DishonoredSpawner_11`.
+  - A swap derives a new `Look` (parts plus material replacements) in `MatchView::appearances`, so it replicates like any look. Pending looks apply when an unspawned NPC spawns; Clear restores the NPC's own look.
+  - The renderer resolves each material's package through an index over the session's map packages, loads the model with the overrides (`load_model_with`), and rebuilds the body when the look changes.
+- **Validation:** `harness travel` 12/12. The new check: a Boyle lady goes to red and back. A rendered capture shows the sisters in red and black inside the mansion. Mission 7/7, conversation 17/17.

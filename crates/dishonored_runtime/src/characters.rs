@@ -34,6 +34,8 @@ pub struct CharacterGpu {
 #[derive(Resource, Default)]
 pub struct CharacterLibrary {
     pub models: Vec<CharacterGpu>,
+    /// Material object path (lowercase) -> package cooking it, over the session's map packages.
+    material_index: Option<HashMap<String, String>>,
     /// Entries of `MatchView::appearances` loaded so far (model `APPEARANCE_BASE + i`).
     pub looks: usize,
 }
@@ -547,10 +549,20 @@ pub fn load_appearances(
     // A few per frame so a large table does not stall one frame for long.
     for _ in 0..4 {
         let i = lib.looks;
-        let Some(parts) = table.get(i) else { break };
+        let Some(look) = table.get(i) else { break };
+        let parts = &look.parts;
         let refs: Vec<(&str, &str)> = parts.iter().map(|(p, m)| (p.as_str(), m.as_str())).collect();
+        // Material swaps (`DisSeqAct_NPCSetMaterials`): find the package cooking each material.
+        let overrides: Vec<dishonored_assets::characters::MaterialOverride> = look
+            .materials
+            .iter()
+            .filter_map(|(part, index, path)| {
+                let pkg = lib.material_package(&content, &session, path)?;
+                Some((*part as usize, *index as usize, pkg, path.clone()))
+            })
+            .collect();
         let name = parts.first().map(|p| p.1.rsplit('.').next().unwrap_or("npc").to_string()).unwrap_or_default();
-        let gpu = match dishonored_assets::characters::load_model(&content, &name, &refs, Some(hh), 1024) {
+        let gpu = match dishonored_assets::characters::load_model_with(&content, &name, &refs, &overrides, Some(hh), 1024) {
             Ok(m) => upload(&m, &mut meshes, &mut images, &mut mats, &mut binds, &feat),
             Err(e) => {
                 warn!("NPC look {i} ({name}): {e:#}");
@@ -566,5 +578,27 @@ pub fn load_appearances(
         }
         lib.models.push(gpu);
         lib.looks += 1;
+    }
+}
+
+impl CharacterLibrary {
+    /// The level package that cooks a material (index built once from the session's maps).
+    fn material_package(&mut self, content: &dishonored_assets::Content, session: &crate::session::Session, path: &str) -> Option<String> {
+        let index = self.material_index.get_or_insert_with(|| {
+            let mut m = HashMap::new();
+            for mc in &session.maps.maps {
+                for p in dishonored_assets::map_packages(content, &mc.map_name) {
+                    let Ok(pkg) = content.package(&p) else { continue };
+                    for i in 0..pkg.exports.len() {
+                        let c = pkg.export_class(i);
+                        if c == "MaterialInstanceConstant" || c == "Material" {
+                            m.entry(pkg.obj_path(ue3_package::ObjRef::Export(i)).to_ascii_lowercase()).or_insert_with(|| p.clone());
+                        }
+                    }
+                }
+            }
+            m
+        });
+        index.get(&path.to_ascii_lowercase()).cloned()
     }
 }

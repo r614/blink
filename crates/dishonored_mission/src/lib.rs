@@ -354,6 +354,14 @@ pub enum Action {
     NotUsable(String),
     /// Level travel to a tagged `PlayerStart` (`SetPlayerTravelDestination` + change level).
     Travel(String),
+    /// `DisSeqAct_NPCSetMaterials` "Set": replace materials of an NPC's body and head meshes
+    /// (`m_NewBodyMaterials` / `m_NewHeadMaterials`: material index, material object path), e.g.
+    /// Boyle's dresses: `SetMaterials(npc: "DishonoredSpawner_11", body: [(0, "Npc_Boyle.Materials.Boyle_red_inst")],
+    /// head: [(0, "Npc_Masks.BOYLE.BoyleMask_red_inst")])`. The NPC is a mission NPC id or an
+    /// original spawner name (maps listed in `original_npcs`).
+    SetMaterials { npc: String, body: Vec<(u32, String)>, head: Vec<(u32, String)> },
+    /// `DisSeqAct_NPCSetMaterials` "Clear": back to the NPC's own materials.
+    ClearMaterials(String),
     /// Start an original conversation (`DisSeqAct_DialogInputs`): a conversation
     /// (`"Package:DisDialogOneShot_N/<label>"`), a Kismet hook name of the one-shot
     /// (`".../Come In"`) or a one-shot (its use hook). The NPC ids speak the one-shot's
