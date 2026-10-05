@@ -123,7 +123,7 @@ pub fn handle(mut p: ResMut<PauseMenu>, mut nav: ResMut<MenuNav>, mut gs: ResMut
 
 fn build(p: &PauseMenu, art: &MenuArt, t: &MenuTexts, gs: &GameSettings, nav: &MenuNav) -> DisplayList {
     let mut dl = DisplayList::default();
-    dl.fill(Rect::new(-2000.0, -2000.0, 3280.0, 2720.0), Color::srgba(0.0, 0.0, 0.0, 0.55));
+    dl.fill(Rect::new(-640.0, -360.0, 1920.0, 1080.0), Color::srgba(0.0, 0.0, 0.0, 0.55));
     if let (Some(o), Some(opts)) = (art.get("options"), p.options.as_ref()) {
         let _ = o;
         opts.build(&mut dl, art, t, gs, nav, true);

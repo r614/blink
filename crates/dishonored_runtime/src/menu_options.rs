@@ -155,7 +155,7 @@ impl OptionsMenu {
         let saved_only = o.effect == Effect::SavedOnly;
         self.line_frame(dl, art, "o_options_line", y, focused, &t.option_label(o.id), TEXT);
         if saved_only {
-            dl.text("not yet effective", Rect::new(LIST_X + 240.0, y - 12.0, WIDGET_X - 195.0, y + 12.0), 14.0, FontKind::Normal, TEXT_DIM, Justify::Right);
+            dl.text("not yet effective", Rect::new(WIDGET_X + 200.0, y - 12.0, 1125.0, y + 12.0), 14.0, FontKind::Normal, TEXT_DIM, Justify::Left);
         }
         dl.item(&id, Rect::new(LIST_X, y - LINE_H * 0.5 + 2.0, 1130.0, y + LINE_H * 0.5 - 2.0), true);
         let st = States::all(if focused { "over" } else { "default" });
@@ -230,7 +230,7 @@ impl OptionsMenu {
             }
         }
         if !applied {
-            dl.text("not yet effective", Rect::new(LIST_X + 280.0, y - 12.0, LIST_X + 520.0, y + 12.0), 14.0, FontKind::Normal, TEXT_DIM, Justify::Right);
+            dl.text("not yet effective", Rect::new(WIDGET_X + 200.0, y - 12.0, 1125.0, y + 12.0), 14.0, FontKind::Normal, TEXT_DIM, Justify::Left);
         }
         dl.item(&id, Rect::new(LIST_X, y - LINE_H * 0.5 + 2.0, 1130.0, y + LINE_H * 0.5 - 2.0), true);
     }
@@ -279,7 +279,7 @@ impl OptionsMenu {
     /// gamma by raising their luminance to `2.2 / gamma`.
     fn build_gamma(&self, dl: &mut DisplayList, art: &MovieArt, gamma_art: Option<&MovieArt>, t: &MenuTexts, s: &Settings, nav: &MenuNav) {
         let focus = nav.focus.as_deref().unwrap_or("");
-        dl.fill(Rect::new(-2000.0, -2000.0, 3280.0, 2720.0), Color::srgb(23.0 / 255.0, 25.0 / 255.0, 28.0 / 255.0));
+        dl.fill(Rect::new(-640.0, -360.0, 1920.0, 1080.0), Color::srgb(23.0 / 255.0, 25.0 / 255.0, 28.0 / 255.0));
         if let Some((c, g)) = gamma_art.and_then(|g| g.export("gamma_logo").map(|c| (c, g))) {
             let exp = 2.2 / s.graphics.gamma.max(0.1);
             for (i, v) in [0.998f32, 0.99, 0.95, 0.90, 0.80].iter().enumerate() {
@@ -515,7 +515,7 @@ impl OptionsMenu {
 /// Options backdrop: the screen is dimmed (the movie's script fades the menu behind it) and
 /// `options_mc/_bkgdTexture_mc` laid over it.
 pub fn backdrop(dl: &mut DisplayList, art: &MovieArt) {
-    dl.fill(Rect::new(-2000.0, -2000.0, 3280.0, 2720.0), Color::srgba(23.0 / 255.0, 25.0 / 255.0, 28.0 / 255.0, 0.72));
+    dl.fill(Rect::new(-640.0, -360.0, 1920.0, 1080.0), Color::srgba(23.0 / 255.0, 25.0 / 255.0, 28.0 / 255.0, 0.72));
     if let Some((ch, m)) = art.root_child("options_mc") {
         dl.movie(art, ch, m, &States::default(), 1.0);
     }

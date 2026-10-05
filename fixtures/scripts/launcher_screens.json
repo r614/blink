@@ -1,5 +1,5 @@
 {"steps":[
-  {"wait_frames":240},
+  {"wait_level":true},
   {"screenshot":"01_main"},
   {"activate":"main:play"},{"wait_frames":10},{"screenshot":"02_play"},{"back":true},
   {"activate":"main:missions"},{"wait_frames":10},{"screenshot":"03_missions"},{"back":true},

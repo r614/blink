@@ -180,7 +180,6 @@ pub struct DisplayList {
 /// Text colour of the menus (`#e3f2d6`) and the dimmed variant (`#828a7b`).
 pub const TEXT: Color = Color::srgb(227.0 / 255.0, 242.0 / 255.0, 214.0 / 255.0);
 pub const TEXT_DIM: Color = Color::srgb(130.0 / 255.0, 138.0 / 255.0, 123.0 / 255.0);
-pub const TEXT_DARK: Color = Color::srgb(23.0 / 255.0, 25.0 / 255.0, 28.0 / 255.0);
 
 pub fn px_matrix(x: f32, y: f32) -> Matrix {
     Matrix { tx: x * 20.0, ty: y * 20.0, ..Default::default() }
@@ -315,6 +314,8 @@ impl DisplayList {
 /// Root of a menu layer's UI entities.
 #[derive(Component)]
 pub struct MenuLayer {
+    /// Draw order of the layer (also its `GlobalZIndex`).
+    #[allow(dead_code)]
     pub z: i32,
 }
 

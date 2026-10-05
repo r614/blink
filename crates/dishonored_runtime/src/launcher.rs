@@ -33,7 +33,7 @@ use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::window::PrimaryWindow;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
@@ -360,6 +360,7 @@ fn h_master_port(master: &str) -> Option<u16> {
 
 /// Script step for `--script` in launcher mode.
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // marker fields of the untagged JSON steps
 #[serde(untagged)]
 pub enum LStep {
     Activate { activate: String },
@@ -368,6 +369,8 @@ pub enum LStep {
     Text { text: (String, String) },
     Screenshot { screenshot: String },
     Wait { wait_frames: u32 },
+    /// Wait until the menu level has loaded (or failed).
+    WaitLevel { wait_level: bool },
     Quit { quit: bool },
 }
 
@@ -709,7 +712,14 @@ fn build_mp(dl: &mut DisplayList, o: &MovieArt, l: &Launcher, t: &MenuTexts, gs:
         generic_line(dl, o, y, "join:refresh", "Refresh server list", &l.browse_status, LineWidget::Button, focus == "join:refresh");
         y += GENERIC_LINE_H + 10.0;
         // Server list.
-        dl.text("SERVER                                  MAP                    MODE           PLAYERS    PING", Rect::new(LIST_X_TEXT, y - 14.0, 1180.0, y + 14.0), 18.0, FontKind::Normal, TEXT_DIM, Justify::Left);
+        // Columns: server, map, mode, players, ping.
+        const COLS: [f32; 6] = [LIST_X_TEXT, 580.0, 800.0, 940.0, 1050.0, 1150.0];
+        let row = |dl: &mut DisplayList, y: f32, cells: [String; 5], size: f32, col: Color| {
+            for (i, c) in cells.into_iter().enumerate() {
+                dl.text(c, Rect::new(COLS[i], y - 14.0, COLS[i + 1] - 10.0, y + 14.0), size, FontKind::Normal, col, Justify::Left);
+            }
+        };
+        row(dl, y, ["SERVER".into(), "MAP".into(), "MODE".into(), "PLAYERS".into(), "PING".into()], 18.0, TEXT_DIM);
         y += 34.0;
         if l.servers.is_empty() {
             dl.text(t.t(SEC_BASE, "t_EmptyList"), Rect::new(LIST_X_TEXT, y - 14.0, 1180.0, y + 14.0), 20.0, FontKind::Normal, TEXT, Justify::Left);
@@ -717,11 +727,10 @@ fn build_mp(dl: &mut DisplayList, o: &MovieArt, l: &Launcher, t: &MenuTexts, gs:
         for (i, s) in l.servers.iter().enumerate().take(6) {
             let id = format!("join:server:{i}");
             let ping = s.ping_ms.map(|p| format!("{p:.0} ms")).unwrap_or_else(|| "-".into());
-            let line = format!("{:<40}{:<23}{:<15}{:>3}/{:<8}{}", truncate(&s.name, 38), truncate(&s.map, 21), s.mode, s.players, s.max_players, ping);
             if focus == id {
                 dl.fill(Rect::new(LIST_X_TEXT - 10.0, y - 16.0, 1150.0, y + 16.0), Color::srgba(0.89, 0.95, 0.84, 0.15));
             }
-            dl.text(line, Rect::new(LIST_X_TEXT, y - 14.0, 1180.0, y + 14.0), 20.0, FontKind::Normal, TEXT, Justify::Left);
+            row(dl, y, [truncate(&s.name, 34), truncate(&s.map, 20), s.mode.clone(), format!("{}/{}", s.players, s.max_players), ping], 20.0, TEXT);
             dl.item(&id, Rect::new(LIST_X_TEXT - 10.0, y - 16.0, 1150.0, y + 16.0), true);
             y += 34.0;
         }
@@ -1104,7 +1113,7 @@ fn state_json(l: &Launcher, gs: &GameSettings, nav: &MenuNav, bg: Option<&MenuBa
 }
 
 /// `--script` runner (one step per frame, `wait_frames` pauses) and screenshot pacing.
-fn run_script(mut commands: Commands, mut s: ResMut<LauncherScript>, mut nav: ResMut<MenuNav>, mut exit: MessageWriter<AppExit>) {
+fn run_script(mut commands: Commands, mut s: ResMut<LauncherScript>, mut nav: ResMut<MenuNav>, bg: Option<Res<MenuBackground>>, mut exit: MessageWriter<AppExit>) {
     if let Some(p) = (!s.shots.is_empty()).then(|| s.shots.remove(0)) {
         if let Some(d) = p.parent() {
             let _ = std::fs::create_dir_all(d);
@@ -1125,6 +1134,9 @@ fn run_script(mut commands: Commands, mut s: ResMut<LauncherScript>, mut nav: Re
         return;
     }
     let Some(step) = s.steps.get(s.index).cloned() else { return };
+    if matches!(step, LStep::WaitLevel { .. }) && bg.as_ref().is_some_and(|b| b.state == "loading") {
+        return;
+    }
     s.index += 1;
     match step {
         LStep::Activate { activate } => nav.events.push(MenuEvent::Activate { id: activate, at: None }),
@@ -1137,11 +1149,7 @@ fn run_script(mut commands: Commands, mut s: ResMut<LauncherScript>, mut nav: Re
             s.wait = 2;
         }
         LStep::Wait { wait_frames } => s.wait = wait_frames,
+        LStep::WaitLevel { .. } => s.wait = 30,
         LStep::Quit { .. } => s.quit_in = Some(20),
     }
-}
-
-/// Resolve a path relative to the working directory (for display).
-pub fn display_path(p: &Path) -> String {
-    p.display().to_string()
 }

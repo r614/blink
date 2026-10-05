@@ -8,8 +8,8 @@
 //! - value types, ranges, steps and defaults: `Engine.upk` `Default__ArkProfileSettings`
 //!   (`DefaultSettings` + `ProfileMappings`, ids 29..133);
 //! - menu categories: `Twk_InGameUI.int` `[Twk_GFxMoviePlayerMenuBase]` `m_SettingsCategory_*`;
-//! - default key bindings: `DefaultInput.ini` `[DishonoredGame.DisPlayerInput]`-style
-//!   `m_PCBindings` (UE3 key names).
+//! - default key bindings: `DefaultInput.ini` `[Engine.PlayerInput]` `.m_PCBindings` (UE3 key
+//!   names; gamepad schemes are `.m_PadBindingSet1..4` in the same section).
 //!
 //! The original keeps these in the player profile (Steam/GOG cloud or `SaveData` profile
 //! blob) plus `[SystemSettings]` in `DishonoredEngine.ini` for resolution/fullscreen/vsync;
