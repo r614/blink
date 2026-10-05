@@ -38,6 +38,10 @@ pub struct MatchView {
     pub scores: Vec<ScoreEntry>,
     pub winner: Option<PlayerId>,
     pub match_number: u32,
+    /// NPC looks for archetypes from `mission::APPEARANCE_BASE` on: mesh parts (package, object
+    /// path) resolved by the host from the pawn tweaks.
+    #[serde(default)]
+    pub appearances: Vec<Vec<(String, String)>>,
     /// Active persistent map (changes on level travel; clients reload the renderer).
     #[serde(default)]
     pub map: String,

@@ -278,6 +278,7 @@ fn main() {
                     input_map::cursor_lock,
                     players::sync_players,
                     characters::animate_characters,
+                    characters::load_appearances,
                     viewmodel::spawn_view_rig,
                     viewmodel::apply_fov,
                     viewmodel::animate_view_rig.after(players::camera_follow),

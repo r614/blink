@@ -39,4 +39,39 @@ pub struct Spawner {
     pub tweak: String,
     pub guard: bool,
     pub props: SpawnerProps,
+    /// The pawn tweak's look (empty when unresolved).
+    #[serde(default)]
+    pub appearance: Appearance,
 }
+/// An NPC's look from its pawn tweak (`DisTweaks_NPCPawn`, resolved through Arkane's fallback
+/// chain): the body `m_pSkeletalMesh` and the `m_RandomHeadMeshes` options. Mesh references are
+/// (package, object path) of the level package that cooks each `SkeletalMesh`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Appearance {
+    pub body: Option<(String, String)>,
+    /// (mesh, m_fRandomChance)
+    pub heads: Vec<((String, String), f32)>,
+}
+
+impl Appearance {
+    /// Parts for one pawn: body plus the head picked by `seed` (the original picks a random head
+    /// weighted by `m_fRandomChance`; `seed` makes the pick deterministic per pawn).
+    pub fn parts(&self, seed: u32) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = self.body.iter().cloned().collect();
+        let total: f32 = self.heads.iter().map(|h| h.1.max(0.0)).sum();
+        if total > 0.0 {
+            let mut x = (seed.wrapping_mul(2654435761) >> 8) as f32 / (1u32 << 24) as f32 * total;
+            for (m, w) in &self.heads {
+                if x < w.max(0.0) {
+                    v.push(m.clone());
+                    break;
+                }
+                x -= w.max(0.0);
+            }
+        } else if let Some((m, _)) = self.heads.first() {
+            v.push(m.clone());
+        }
+        v
+    }
+}
+

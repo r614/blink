@@ -10,6 +10,7 @@ use dishonored_ir::*;
 use glam::{Mat4, Vec3};
 use std::collections::HashMap;
 use ue3_package::ObjRef;
+pub use dishonored_ir::spawners::Appearance;
 
 /// (archetype name, parts as (package, object path)). All parts are skinned to
 /// compatible skeletons and share the first part's mesh->pawn transform (attached meshes
@@ -255,4 +256,48 @@ fn character_chain(content: &Content, pkg: &std::sync::Arc<ue3_package::Package>
         })
     };
     (pkgs, chain)
+}
+
+/// Resolve pawn tweaks to appearances. `level_packages` are the map's packages (the meshes and
+/// the `Twk_Pawn_*` level tweaks are cooked into them).
+pub fn resolve_appearances(content: &Content, level_packages: &[String], tweaks: &[String]) -> Result<HashMap<String, Appearance>> {
+    use crate::tweaks::{TVal, TweakDb};
+    let db = TweakDb::load_with(content, level_packages)?;
+    // Where each SkeletalMesh is cooked (first package wins).
+    let mut meshes: HashMap<String, String> = HashMap::new();
+    for p in level_packages {
+        let Ok(pkg) = content.package(p) else { continue };
+        for i in 0..pkg.exports.len() {
+            if pkg.export_class(i) == "SkeletalMesh" {
+                meshes.entry(pkg.obj_path(ObjRef::Export(i)).to_ascii_lowercase()).or_insert_with(|| p.clone());
+            }
+        }
+    }
+    let locate = |path: &str| meshes.get(&path.to_ascii_lowercase()).map(|p| (p.clone(), path.to_string()));
+    let mut out = HashMap::new();
+    for t in tweaks {
+        if out.contains_key(t) {
+            continue;
+        }
+        let Some(m) = db.try_resolve(t) else { continue };
+        let mut a = Appearance::default();
+        if let Some(TVal::Obj(o)) = m.get("m_pSkeletalMesh") {
+            a.body = locate(o);
+        }
+        if let Some(TVal::List(heads)) = m.get("m_RandomHeadMeshes") {
+            for h in heads {
+                let chance = match h.get("m_fRandomChance") {
+                    Some(TVal::F(f)) => *f,
+                    _ => 1.0,
+                };
+                if let Some(TVal::Obj(o)) = h.get("m_pMesh") {
+                    if let Some(l) = locate(o) {
+                        a.heads.push((l, chance));
+                    }
+                }
+            }
+        }
+        out.insert(t.clone(), a);
+    }
+    Ok(out)
 }

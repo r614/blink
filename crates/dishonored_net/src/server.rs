@@ -222,6 +222,11 @@ impl<'w> GameServer<'w> {
 
         if self.game.world().tick % self.cfg.snapshot_interval.max(1) == 0 {
             self.snapshot_seq += 1;
+            // Static-ish data (the NPC look table) is sent on every 60th snapshot only.
+            let mut matchv = self.game.view().clone();
+            if self.snapshot_seq % 60 != 1 {
+                matchv.appearances.clear();
+            }
             for i in 0..self.clients.len() {
                 let snap = Snapshot {
                     seq: self.snapshot_seq,
@@ -229,7 +234,7 @@ impl<'w> GameServer<'w> {
                     ack_input: self.clients[i].last_applied,
                     players: self.game.world().players.clone(),
                     projectiles: self.game.world().projectiles.clone(),
-                    matchv: self.game.view().clone(),
+                    matchv: matchv.clone(),
                     private: self.game.target_info(self.clients[i].id),
                     events: std::mem::take(&mut self.clients[i].pending_events),
                     state_hash: hash,

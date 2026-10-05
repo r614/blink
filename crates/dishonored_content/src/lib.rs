@@ -161,7 +161,22 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         }
     };
     let flee_points = markers.iter().filter(|m| m.class == "DisFleePointActor").map(|m| m.position).collect();
-    let spawners = npcs.spawns.iter().map(|s| dishonored_ir::spawners::Spawner { position: s.position, yaw: s.yaw, tweak: s.tweak.clone(), guard: s.role == dishonored_assets::npcs::NpcRole::Guard, props: s.spawner.clone() }).collect();
+    // Each spawner's look from its pawn tweak (body + head options), resolved once per map.
+    let look_path = dir.join(format!("{map}.appearance1.json"));
+    let looks: std::collections::HashMap<String, dishonored_ir::spawners::Appearance> = match std::fs::read_to_string(&look_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
+        Some(l) => l,
+        None => {
+            let mut pkgs = map_packages(&content, map);
+            if map.starts_with("L_Boyle_Ext") {
+                pkgs.push("L_BoyleStreet_Ext_Script".into());
+            }
+            let tweaks: Vec<String> = npcs.spawns.iter().map(|s| s.tweak.clone()).filter(|t| !t.is_empty()).collect();
+            let l = dishonored_assets::characters::resolve_appearances(&content, &pkgs, &tweaks).unwrap_or_default();
+            std::fs::write(&look_path, serde_json::to_string(&l)?).ok();
+            l
+        }
+    };
+    let spawners = npcs.spawns.iter().map(|s| dishonored_ir::spawners::Spawner { position: s.position, yaw: s.yaw, tweak: s.tweak.clone(), guard: s.role == dishonored_assets::npcs::NpcRole::Guard, props: s.spawner.clone(), appearance: looks.get(&s.tweak).cloned().unwrap_or_default() }).collect();
     Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts, flee_points, spawners })
 }
 

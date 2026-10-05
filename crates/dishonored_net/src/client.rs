@@ -182,7 +182,12 @@ impl NetClient {
         self.last_snapshot_seq = s.seq;
         self.metrics.snapshots += 1;
         self.metrics.server_tick = s.tick;
+        // The NPC look table only rides on some snapshots (it rarely changes): keep the last one.
+        let looks = std::mem::take(&mut self.matchv.appearances);
         self.matchv = s.matchv.clone();
+        if self.matchv.appearances.is_empty() {
+            self.matchv.appearances = looks;
+        }
         self.target_info = s.private.clone();
         self.last_server_hash = s.state_hash;
         self.interp.push_back(Interp { tick: s.tick, players: s.players.clone() });

@@ -155,6 +155,9 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     let squads = originals.iter().filter(|o| o.map.eq_ignore_ascii_case(INT) && !o.props.on_begin_play && o.props.at_suspicion.is_some()).count();
     let pursuers_ballroom = originals.iter().filter(|o| o.props.travel_tags.iter().any(|t| t.eq_ignore_ascii_case(&door_in.dest_tag))).count();
     rep.check(S, "first visit populates the interior from its original begin-play spawners", expect_int > 0 && npcs_int == expect_int, format!("{npcs_int} NPCs present, {expect_int} begin-play spawners ({} spawners on Int: {squads} alarm-squad, {pursuers_ballroom} pursuers for {})", originals.iter().filter(|o| o.map.eq_ignore_ascii_case(INT)).count(), door_in.dest_tag));
+    let looked = g.world().players.iter().filter(|p| p.kind != PawnKind::Human && p.archetype >= dishonored_multiplayer::mission::APPEARANCE_BASE).count();
+    let table = g.view().appearances.len();
+    rep.check(S, "interior NPCs wear their pawn tweak's body and head (not role stand-ins)", looked * 10 >= npcs_int * 9 && table > 0, format!("{looked}/{npcs_int} NPCs use one of {table} tweak-resolved looks"));
     let view_map = g.view().map.clone();
     let int_doors_usable = g.view().mission.as_ref().map(|m| m.usables.iter().filter(|u| doors.iter().any(|d| d.map.eq_ignore_ascii_case(INT) && d.prompt == u.1)).count()).unwrap_or(0);
     rep.check(S, "match view reports the new map and its doors", view_map.eq_ignore_ascii_case(INT) && int_doors_usable > 0, format!("view.map {view_map}, {int_doors_usable} Int doors usable, {npcs_int} NPCs present"));

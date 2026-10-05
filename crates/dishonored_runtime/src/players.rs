@@ -147,6 +147,10 @@ pub fn sync_players(
         if seen.contains_key(&p.id) {
             continue;
         }
+        // A host-published look that is still loading: spawn the body once its model exists.
+        if p.archetype as usize >= dishonored_multiplayer::mission::APPEARANCE_BASE as usize && lib.as_ref().is_some_and(|l| p.archetype as usize >= l.models.len()) {
+            continue;
+        }
         match lib.as_ref().filter(|l| !l.models.is_empty()) {
             Some(lib) => {
                 // Dishonored character model (archetype by player id).

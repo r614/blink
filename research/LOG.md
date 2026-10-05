@@ -625,3 +625,16 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 ### Addendum: UnrealScript decompilation (UE Explorer's UELib) and the travel spawner defaults
 - `package_inflate` writes a package with its LZO chunks inflated and the compression flag cleared, to scratch space. `research/ghidra/uc_decompile.ps1` then drives UE Explorer's `Eliot.UELib.dll` to decompile its UnrealScript classes; all 2,284 classes of `DishonoredGame.upk` decompile. Most Dishonored logic is native, so the script mainly gives class layouts, defaults, script functions and the list of natives (`// Export UClass::execX`), which match the names `NativeTable.java` labels in Ghidra.
 - `DisTravelSpawner` defaultproperties: `m_bSpawnOnBeginPlay=false`, `m_bCanSpawnWhenVisible=true`, `m_bCanSpawnWhenPlayerNear=true`; pursuers may appear in view and next to the player. The extraction now applies the class's begin-play default. `DisTravelSpawner` has no native overrides of its own (Ghidra: only the destructor), and its `DisTravelSpawnerComponent` keeps the resolved `m_PlayerTravelLocations`; the trigger is in native `DishonoredSpawner` / AI manager code (U-047).
+
+## 2026-10-05: NPC looks from their pawn tweaks
+
+- **Question:** What does an NPC look like in the original, given its spawner?
+- **Method:** Resolve each spawner's `m_pPawnTweaks` (`DisTweaks_NPCPawn`) through Arkane's fallback chain (`TweakDb::resolve`, with the map's packages loaded, since `Twk_Pawn_*` level tweaks are cooked into them). Read `m_pSkeletalMesh` (body) and `m_RandomHeadMeshes` (head options, `m_pMesh` and `m_fRandomChance`), then find which map package cooks each `SkeletalMesh`.
+- **Findings:** Boyle Int's 54 spawners resolve to bodies and heads. Examples: elite guards get `Skm_EliteGuard_Body` with one of `Skm_EliteGuard_Head`/`Head02`/`Head03`; party aristocrats get `skm_MaleAristo01_Body` with a mask face (`Npc_Masks.Primitive.skm_primitive_face`); Lady Esma Boyle gets `Npc_Masks.BOYLE.Skm_Boyle_Body` with `skm_Boylemask`.
+- **Implementation:**
+  - Appearances are cached per map in `cache/<map>.appearance1.json`.
+  - Original NPCs get archetype `APPEARANCE_BASE + i`, indexing a look table that the host publishes in `MatchView::appearances`. The head is picked per pawn, deterministically and weighted by `m_fRandomChance`.
+  - The table rides on every 60th snapshot; clients keep the last one.
+  - The runtime loads looks on demand and binds the third-person Edge sets to them by joint name.
+  - Per-material variations (`m_MaterialVariation`) are not applied yet.
+- **Validation:** `harness travel` 11/11, with 33/33 interior NPCs on 19 tweak-resolved looks. A rendered capture shows an elite guard with his tweak's own head variant. `harness net` 8/8, mission 7/7, conversation 17/17.

@@ -29,6 +29,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const MISSION_NPC_BASE: PlayerId = NPC_ID_BASE + 500;
 /// First id for NPCs from the levels' original spawners.
 pub const ORIGINAL_NPC_BASE: PlayerId = NPC_ID_BASE + 1000;
+/// First archetype that indexes `MatchView::appearances` (0..4 are the built-in presentation
+/// archetypes).
+pub const APPEARANCE_BASE: u8 = 4;
 
 /// One original `DishonoredSpawner` / `DisTravelSpawner` of a mission map.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +40,9 @@ pub struct OriginalNpc {
     pub spawn: NpcSpawn,
     pub tweak: String,
     pub props: dishonored_ir::spawners::SpawnerProps,
+    /// Mesh parts (package, object path) of this pawn's look: body + its picked head.
+    #[serde(default)]
+    pub parts: Vec<(String, String)>,
 }
 
 /// A named original actor of a level: (package, name, position, yaw).
@@ -102,6 +108,9 @@ pub struct MissionSetup {
     /// Original spawners of the maps listed in `MissionDef::original_npcs`.
     #[serde(default)]
     pub original: Vec<OriginalNpc>,
+    /// Looks of original NPCs: archetype `APPEARANCE_BASE + i` is `appearances[i]` (mesh parts).
+    #[serde(default)]
+    pub appearances: Vec<Vec<(String, String)>>,
     /// Original dialog graphs the mission references, read from the install by the host
     /// (stored in replays so they play back identically).
     #[serde(default)]
@@ -213,12 +222,25 @@ impl MissionSetup {
             .map(|m| (m.name.to_ascii_lowercase(), m.actors.iter().filter(|a| a.1.starts_with("DisFleePointActor")).map(|a| snap_floor(m.world, a.2).unwrap_or(a.2)).collect()))
             .collect();
         let mut original = Vec::new();
+        let mut appearances: Vec<Vec<(String, String)>> = Vec::new();
         for m in maps.iter().filter(|m| def.original_npcs.iter().any(|o| o.eq_ignore_ascii_case(&m.name))) {
             for s in m.spawners {
-                let (kind, archetype) = original_archetype(s);
+                let (kind, mut archetype) = original_archetype(s);
                 let id = ORIGINAL_NPC_BASE + original.len() as PlayerId;
+                // The pawn tweak's own body and head (the head picked per pawn, as the original
+                // picks one of `m_RandomHeadMeshes`); the role archetype is the fallback.
+                let parts = s.appearance.parts(id);
+                if !parts.is_empty() {
+                    let i = appearances.iter().position(|a| *a == parts).unwrap_or_else(|| {
+                        appearances.push(parts.clone());
+                        appearances.len() - 1
+                    });
+                    if i + (APPEARANCE_BASE as usize) < 256 {
+                        archetype = APPEARANCE_BASE + i as u8;
+                    }
+                }
                 let p = snap_floor(m.world, s.position).unwrap_or(s.position);
-                original.push(OriginalNpc { map: m.name.clone(), spawn: NpcSpawn { id, kind, archetype, position: p, yaw: s.yaw }, tweak: s.tweak.clone(), props: s.props.clone() });
+                original.push(OriginalNpc { map: m.name.clone(), spawn: NpcSpawn { id, kind, archetype, position: p, yaw: s.yaw }, tweak: s.tweak.clone(), props: s.props.clone(), parts });
             }
         }
         let mut doors = Vec::new();
@@ -234,7 +256,7 @@ impl MissionSetup {
                 }
             }
         }
-        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original })
+        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances })
     }
 }
 
@@ -300,7 +322,7 @@ impl MissionMatch {
         }
         let mut m = MissionMatch {
             world: WorldState::default(),
-            view: MatchView { mode: "mission".into(), phase: MatchPhase::Playing, mission: Some(state.view.clone()), map: current_map.clone(), ..Default::default() },
+            view: MatchView { mode: "mission".into(), phase: MatchPhase::Playing, mission: Some(state.view.clone()), map: current_map.clone(), appearances: setup.appearances.clone(), ..Default::default() },
             state,
             crowd: Crowd { ai: cfg.gameplay.ai.clone(), ..Default::default() },
             setup,

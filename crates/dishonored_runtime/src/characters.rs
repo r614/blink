@@ -15,6 +15,7 @@ use dishonored_ir::CharacterModel;
 use dishonored_sim::state::{MoveMode, PlayerState, SwordPhase};
 use std::collections::HashMap;
 
+#[derive(Clone)]
 pub struct PartGpu {
     pub sections: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
     pub inverse_bindposes: Handle<SkinnedMeshInverseBindposes>,
@@ -24,6 +25,7 @@ pub struct PartGpu {
     pub mesh_to_pawn: glam::Mat4,
 }
 
+#[derive(Clone)]
 pub struct CharacterGpu {
     pub name: String,
     pub parts: Vec<PartGpu>,
@@ -32,6 +34,8 @@ pub struct CharacterGpu {
 #[derive(Resource, Default)]
 pub struct CharacterLibrary {
     pub models: Vec<CharacterGpu>,
+    /// Entries of `MatchView::appearances` loaded so far (model `APPEARANCE_BASE + i`).
+    pub looks: usize,
 }
 
 /// C: Dishonored pawn space (Z-up, uu) -> Bevy (Y-up, scaled).
@@ -376,17 +380,23 @@ pub struct Animations {
     pub track_to_bone: Vec<Vec<Vec<Vec<Option<usize>>>>>,
 }
 
+/// Edge joint names per set (to bind models loaded later).
+#[derive(Resource, Default)]
+pub struct AnimTracks(pub Vec<Vec<String>>);
+
 pub fn load_animations(mut commands: Commands, lib: Option<Res<CharacterLibrary>>) {
     let Some(lib) = lib else { return };
     let Ok(content) = dishonored_assets::Content::locate() else { return };
     // The sets belong to the elite guard skeleton (archetype 1); Edge joints follow its bone order.
     let Some(guard) = lib.models.get(1).and_then(|m| m.parts.first()) else { return };
     let mut clips = HashMap::new();
+    let mut tracks = Vec::new();
     let mut track_to_bone = Vec::new();
     for (si, set) in TP_SETS.iter().enumerate() {
         match dishonored_assets::characters::load_anim_set(&content, "L_Boyle_Ext_Script", &format!("{set}.{set}"), TP_CLIPS) {
             Ok(mut anims) => {
                 anims.edge_order(&guard.bones);
+                tracks.push(anims.tracks.clone());
                 track_to_bone.push(lib.models.iter().map(|m| m.parts.iter().map(|p| anims.tracks.iter().map(|t| p.bones.iter().position(|b| b.name.eq_ignore_ascii_case(t))).collect()).collect()).collect());
                 for (name, clip) in anims.clips {
                     clips.insert(name, (si, clip));
@@ -395,11 +405,13 @@ pub fn load_animations(mut commands: Commands, lib: Option<Res<CharacterLibrary>
             Err(e) => {
                 warn!("{set}: {e:#}");
                 track_to_bone.push(Vec::new());
+                tracks.push(Vec::new());
             }
         }
     }
     info!("decoded {} third-person Edge clips", clips.len());
     commands.insert_resource(Animations { clips, track_to_bone });
+    commands.insert_resource(AnimTracks(tracks));
 }
 
 pub struct TpClip {
@@ -504,4 +516,55 @@ fn from_bevy(m: Mat4) -> glam::Mat4 {
     let swap = glam::Mat4::from_cols(glam::Vec4::X, glam::Vec4::Z, glam::Vec4::Y, glam::Vec4::W);
     let c = glam::Mat4::from_scale(glam::Vec3::splat(coords::UU_TO_BEVY)) * swap;
     c.inverse() * m * c
+}
+
+/// Load the NPC looks the host published (`MatchView::appearances`: each pawn tweak's body and
+/// head meshes) as models `APPEARANCE_BASE + i`, and bind the third-person animation sets to
+/// them. A look that fails to load falls back to the first built-in model so indices stay
+/// aligned.
+#[allow(clippy::too_many_arguments)]
+pub fn load_appearances(
+    view: Res<crate::session::SessionView>,
+    session: Res<crate::session::Session>,
+    features: Option<Res<crate::map_render::RenderFeatures>>,
+    lib: Option<ResMut<CharacterLibrary>>,
+    anims: Option<ResMut<Animations>>,
+    tracks: Option<Res<AnimTracks>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+    mut binds: ResMut<Assets<SkinnedMeshInverseBindposes>>,
+) {
+    let (Some(mut lib), Some(mut anims), Some(tracks)) = (lib, anims, tracks) else { return };
+    let base = dishonored_multiplayer::mission::APPEARANCE_BASE as usize;
+    let table = &view.matchv.appearances;
+    if lib.models.len() != base + lib.looks || lib.looks >= table.len() {
+        return;
+    }
+    let Ok(content) = dishonored_assets::Content::locate() else { return };
+    let feat = features.map(|f| f.clone()).unwrap_or_else(|| crate::map_render::RenderFeatures::from_flags(&|_| false));
+    let hh = session.content.sim.gameplay.movement.collision_half_height;
+    // A few per frame so a large table does not stall one frame for long.
+    for _ in 0..4 {
+        let i = lib.looks;
+        let Some(parts) = table.get(i) else { break };
+        let refs: Vec<(&str, &str)> = parts.iter().map(|(p, m)| (p.as_str(), m.as_str())).collect();
+        let name = parts.first().map(|p| p.1.rsplit('.').next().unwrap_or("npc").to_string()).unwrap_or_default();
+        let gpu = match dishonored_assets::characters::load_model(&content, &name, &refs, Some(hh), 1024) {
+            Ok(m) => upload(&m, &mut meshes, &mut images, &mut mats, &mut binds, &feat),
+            Err(e) => {
+                warn!("NPC look {i} ({name}): {e:#}");
+                lib.models[0].clone()
+            }
+        };
+        for (set, names) in tracks.0.iter().enumerate() {
+            if let Some(per_model) = anims.track_to_bone.get_mut(set) {
+                if !names.is_empty() {
+                    per_model.push(gpu.parts.iter().map(|p| names.iter().map(|t| p.bones.iter().position(|b| b.name.eq_ignore_ascii_case(t))).collect()).collect());
+                }
+            }
+        }
+        lib.models.push(gpu);
+        lib.looks += 1;
+    }
 }
