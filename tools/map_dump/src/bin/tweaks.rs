@@ -6,7 +6,9 @@ use dishonored_assets::tweaks::{TweakDb, dump};
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let content = Content::locate()?;
-    let db = TweakDb::load(&content)?;
+    // Extra (level) packages: `TWEAK_PKGS=L_Boyle_Ext_Script,L_Boyle_Int_Script tweaks ...`.
+    let extra: Vec<String> = std::env::var("TWEAK_PKGS").map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
+    let db = TweakDb::load_with(&content, &extra)?;
     if args.first().map(String::as_str) == Some("--class") {
         for p in db.paths_with_class(&args[1]) {
             println!("{p}");

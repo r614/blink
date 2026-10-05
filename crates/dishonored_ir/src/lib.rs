@@ -6,6 +6,7 @@
 //! convert to their own frame (see `dishonored_runtime::coords`).
 
 pub mod gameplay;
+pub mod nav;
 
 use glam::{Mat4, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
