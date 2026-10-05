@@ -29,6 +29,108 @@ pub struct DishonoredMap {
     pub spawn_candidates: Vec<SpawnCandidate>,
     /// Objects the importer saw but did not convert, kept for later work.
     pub unconverted: Vec<UnconvertedObject>,
+    /// Baked irradiance atlases referenced by [`MeshInstance::lightmap`].
+    #[serde(default)]
+    pub lightmaps: Vec<LightmapAtlas>,
+    /// Extended material data, parallel to `materials` (same index; may be shorter,
+    /// missing entries mean defaults).
+    #[serde(default)]
+    pub material_params: Vec<MaterialParams>,
+    /// Level-wide presentation settings (fog, post, environment).
+    #[serde(default)]
+    pub environment: Environment,
+}
+
+/// UE3 `EBlendMode` of the base material.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MaterialBlend {
+    #[default]
+    Opaque,
+    Masked,
+    Translucent,
+    Additive,
+    Modulate,
+}
+
+/// Everything beyond diffuse/normal that the renderer needs from a material, resolved
+/// through the MIC parent chain (including parents in other packages) using Arkane's
+/// parameter-name prefixes (`S_`, `E_`, `O_`, `DN_`, `C_`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MaterialParams {
+    pub specular: Option<TextureId>,
+    pub emissive: Option<TextureId>,
+    pub opacity: Option<TextureId>,
+    pub detail_normal: Option<TextureId>,
+    /// Material samples a `C_` cubemap (reflections).
+    pub uses_cubemap: bool,
+    pub blend: MaterialBlend,
+    /// Whether `blend` came from the base Material (true) or from naming heuristics.
+    pub blend_known: bool,
+    pub two_sided: bool,
+    pub unlit: bool,
+    pub opacity_clip: f32,
+    pub scalars: Vec<(String, f32)>,
+    pub vectors: Vec<(String, [f32; 4])>,
+    /// Sky dome / moon / sun material (`Skies.*`, `Moon_PMAT`, `Sun_PMAT` bases): rendered
+    /// unlit, without fog, shadows or lightmaps.
+    #[serde(default)]
+    pub sky: bool,
+    /// Path of the root `Material` of the chain, if reached.
+    pub base_material: Option<String>,
+}
+
+/// Level-wide presentation settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Environment {
+    /// Reflection cubemap faces (+X, -X, +Y, -Y, +Z, -Z in UE3 face order).
+    pub cubemap_faces: Vec<TextureId>,
+    /// Arkane `DisFog` layers (Dishonored has no HeightFog/ExponentialHeightFog actors).
+    pub fog: Vec<FogSettings>,
+    pub post: Option<PostSettings>,
+}
+
+/// One `DisFog` actor's `DisFogComponent`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FogSettings {
+    pub source: String,
+    /// Linear colour (from `LightColor`).
+    pub color: [f32; 3],
+    /// Maximum fog opacity (`Opacity`).
+    pub opacity: f32,
+    /// Fog fades in between these view distances, uu (`NearPlane`, `FarPlane`).
+    pub near: f32,
+    pub far: f32,
+    /// The layer spans world Z `origin .. origin + height` (`Origin`, `Height`).
+    pub origin: f32,
+    pub height: f32,
+}
+
+/// Arkane post-process configuration (`ArkPpConfig`), only the fields set on the level.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PostSettings {
+    pub source: String,
+    pub values: Vec<(String, f32)>,
+    pub vectors: Vec<(String, [f32; 4])>,
+}
+
+/// Linear irradiance atlas baked from a pair of Dishonored lightmap textures
+/// (`NormalizedAverageColor_N` + `DirectionalMaxComponent_N`). Values are in UE3 lightmap
+/// units: final diffuse = albedo * irradiance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LightmapAtlas {
+    pub source: String,
+    pub width: u32,
+    pub height: u32,
+    /// Row-major texels packed as RGB9E5 (`Rgb9e5Ufloat`).
+    pub texels: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct InstanceLightmap {
+    pub atlas: usize,
+    /// Lightmap UV = mix(uv_min, uv_max, mesh UV1) (UE3 CoordinateBias / Bias+Scale).
+    pub uv_min: Vec2,
+    pub uv_max: Vec2,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +141,7 @@ pub struct StaticMeshAsset {
     pub normals: Vec<Vec3>,
     pub tangents: Vec<Vec3>,
     pub uv0: Vec<Vec2>,
+    /// Lightmap UVs (the set selected by `LightMapCoordinateIndex`).
     pub uv1: Vec<Vec2>,
     pub indices: Vec<u32>,
     pub sections: Vec<MeshSection>,
@@ -139,6 +242,9 @@ pub struct MeshInstance {
     pub hidden: bool,
     pub collides: bool,
     pub source: String,
+    /// Baked lighting for this component (LOD0), if any.
+    #[serde(default)]
+    pub lightmap: Option<InstanceLightmap>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -163,6 +269,14 @@ pub struct Light {
     pub brightness: f32,
     pub radius: f32,
     pub source: String,
+    /// UE3 radial falloff `(1 - (d / radius)^2)^falloff_exponent`.
+    #[serde(default)]
+    pub falloff_exponent: f32,
+    /// Dominant lights: direct light is not in the lightmaps and they cast the main shadows.
+    #[serde(default)]
+    pub dominant: bool,
+    #[serde(default)]
+    pub casts_shadows: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

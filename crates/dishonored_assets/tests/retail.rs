@@ -44,11 +44,13 @@ fn air_duct_static_mesh() {
 fn boyle_ext_import() {
     let Some(c) = content() else { return };
     let pkgs = map_packages(&c, "L_Boyle_Ext_P");
-    assert_eq!(pkgs.len(), 7);
+    // Persistent level + the 7 WorldInfo.StreamingLevels (incl. L_BoyleStreet_Ext_Script).
+    assert_eq!(pkgs.len(), 8);
     let opts = ImportOptions { load_textures: false, ..Default::default() };
     let (map, stats) = import_level(&c, "L_Boyle_Ext_P", &pkgs, &opts).unwrap();
     assert_eq!(stats.mesh_failures, 0);
-    assert_eq!(map.meshes.len(), 405);
-    assert_eq!(map.instances.len(), 3401);
+    // Includes 33 spline-deformed mesh copies and meshes resolved through DishonoredGame.upk.
+    assert_eq!(map.meshes.len(), 511);
+    assert_eq!(map.instances.len(), 3754);
     assert_eq!(map.spawn_candidates.len(), 5);
 }

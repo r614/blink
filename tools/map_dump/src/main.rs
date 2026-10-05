@@ -12,6 +12,29 @@ fn main() -> Result<()> {
     }
     let pkgs = map_packages(&content, map);
     println!("packages: {pkgs:?}");
+    if args.iter().any(|a| a == "--survey") {
+        // Which actor classes own primitive components, per package (coverage audit).
+        use ue3_package::ObjRef;
+        for p in &pkgs {
+            let pkg = content.package(p)?;
+            let mut owners: BTreeMap<String, usize> = BTreeMap::new();
+            for i in 0..pkg.exports.len() {
+                let c = pkg.export_class(i);
+                if !(c.ends_with("MeshComponent") || c == "BrushComponent" || c == "Model") {
+                    continue;
+                }
+                let outer = ObjRef::from_index(pkg.exports[i].outer);
+                let oc = if outer == ObjRef::Null { "<none>".into() } else { pkg.class_name(outer) };
+                let in_level = pkg.obj_name(pkg.obj_outer(outer)) == "PersistentLevel" || pkg.obj_name(outer) == "PersistentLevel";
+                *owners.entry(format!("{c} <- {oc}{}", if in_level { "" } else { " (not placed)" })).or_default() += 1;
+            }
+            println!("== {p}");
+            for (k, n) in owners {
+                println!("  {n:5} {k}");
+            }
+        }
+        return Ok(());
+    }
     let t = std::time::Instant::now();
     let opts = ImportOptions {
         load_textures: !args.iter().any(|a| a == "--no-textures"),
@@ -54,6 +77,72 @@ fn main() -> Result<()> {
         acc
     });
     println!("texture formats {fmts:?}");
+    for mesh in m.meshes.iter().filter(|x| x.source.starts_with("Skies") || x.source.contains("vista")) {
+        println!("mesh {} bounds {:.0} .. {:.0}", mesh.source, mesh.bounds_min, mesh.bounds_max);
+    }
+    for l in &m.lights {
+        println!(
+            "light {:?} dominant={} shadows={} pos {:.0} dir {:.2} color {:.2?} brightness {} radius {} falloff {} <- {}",
+            l.kind, l.dominant, l.casts_shadows, l.position, l.direction, l.color, l.brightness, l.radius, l.falloff_exponent, l.source
+        );
+    }
+    println!("environment: cubemap faces {}, post {:?}", m.environment.cubemap_faces.len(), m.environment.post);
+    for f in &m.environment.fog {
+        println!("fog {f:?}");
+    }
+    // `--dump-texture SUBSTR OUT.rgba`: raw RGBA8 of the first texture whose source contains
+    // SUBSTR (local inspection only; convert with ffmpeg -f rawvideo -pix_fmt rgba -s WxH).
+    if let Some(n) = args.iter().position(|a| a == "--dump-texture") {
+        if let Some(t) = m.textures.iter().find(|t| t.source.contains(&args[n + 1])) {
+            if let Some((w, h, px)) = dishonored_assets::texture::decode_rgba8(t, 0) {
+                std::fs::write(&args[n + 2], px.concat())?;
+                println!("dumped {} {}x{}", t.source, w, h);
+            }
+        }
+    }
+    if args.iter().any(|a| a == "--material-params") {
+        for (i, p) in m.material_params.iter().enumerate() {
+            println!(
+                "MAT {} | blend {:?} known={} two_sided={} unlit={} spec={} emis={:?} opac={} cube={} diffuse={:?} | base {:?}\n    scalars {:?}\n    vectors {:?}",
+                m.materials[i].source,
+                p.blend,
+                p.blend_known,
+                p.two_sided,
+                p.unlit,
+                p.specular.is_some(),
+                p.emissive.map(|t| &m.textures[t].source),
+                p.opacity.is_some(),
+                p.uses_cubemap,
+                m.materials[i].diffuse.map(|t| &m.textures[t].source),
+                p.base_material,
+                p.scalars,
+                p.vectors
+            );
+        }
+    }
+    // Baked irradiance distribution (luminance of non-empty texels), for calibration.
+    let mut lum: Vec<f32> = m
+        .lightmaps
+        .iter()
+        .flat_map(|a| a.texels.iter().filter(|&&t| t != 0))
+        .map(|&t| {
+            let c = dishonored_assets::lightmap::unpack_rgb9e5(t);
+            0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+        })
+        .collect();
+    if !lum.is_empty() {
+        lum.sort_by(f32::total_cmp);
+        let pct = |p: f32| lum[((lum.len() - 1) as f32 * p) as usize];
+        println!(
+            "lightmap irradiance luminance: {} texels, p10 {:.3} p50 {:.3} p90 {:.3} p99 {:.3} max {:.3}",
+            lum.len(),
+            pct(0.1),
+            pct(0.5),
+            pct(0.9),
+            pct(0.99),
+            lum[lum.len() - 1]
+        );
+    }
     report_unmaterialed(&m);
     Ok(())
 }

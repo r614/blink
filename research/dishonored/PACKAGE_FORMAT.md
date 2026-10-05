@@ -101,7 +101,8 @@ class default objects carry `0x200` in the *first* dword.
 ## Object serialization (export payload) — CONFIRMED for level content
 
 ```
-[Dominant*LightComponent only]  TArray<u16> DominantLightShadowMap
+[DominantDirectional/DominantSpot LightComponent only]  TArray<u16> DominantLightShadowMap
+                                                         (DominantPointLightComponent has none)
 [RF_HasStack]  i32 Node, i32 StateNode, u64 ProbeMask, u16 LatentAction, [i32 Offset if Node != 0]
 [Component classes]  i32 TemplateOwnerClass, [FName TemplateName if owned by a CDO/Class]
 i32 NetIndex
@@ -194,6 +195,109 @@ Formats seen in Boyle Ext: `PF_DXT1` (sRGB and linear), `PF_DXT5`, `PF_V8U8` (no
   `T * R * S`; component local transform composed on top.
 - `PlayerStart` actors give spawn candidates.
 - Rotator → matrix uses UE3 `FRotationMatrix` (see `dishonored_assets::util`).
+
+### Streaming levels — CONFIRMED
+The persistent level's `WorldInfo.StreamingLevels` lists `LevelStreaming*` objects (outer
+`TheWorld`) whose `PackageName` names each sublevel. Boyle Ext: `L_Boyle_Ext_{Audio,Env,Fx,
+Light,Nav,Script}` and `L_BoyleStreet_Ext_Script` (all `LevelStreamingAlwaysLoaded`).
+
+### Other placed primitives
+- Any placed actor may own `StaticMeshComponent`s (outer = the actor): InterpActor, KActor,
+  DishonoredMovable, DisDoor, pickups... Transform = actor `Location/Rotation/DrawScale*` ×
+  component local transform, like StaticMeshActor.
+- `SplineMeshComponent` (on `SplineLoftActor`): `SplineParams{StartPos, StartTangent,
+  StartScale: Vector2D, EndPos, EndTangent, EndScale}` in component space, `SplineXDir`,
+  `bSmoothInterpRollScale`; the mesh's X extent is mapped onto the Hermite segment.
+- BSP: level `Model`s on Boyle Ext are empty (156–192 bytes); `BrushComponent`s belong to volumes.
+
+### Materials across packages — CONFIRMED
+MIC `Parent` references are frequently imports that the same level package also exports
+(cooker duplicates); base `Material`s (`Materials_ref.main_materials.*_PMAT`,
+`Vfx_Materials.main_materials.*`) and shared textures live in `DishonoredGame.upk`, a few
+objects in `Startup.upk`. MIC properties: `TextureParameterValues`, `ScalarParameterValues`,
+`VectorParameterValues` (arrays of `{ParameterName, ParameterValue}` structs), `Parent`,
+`bHasStaticPermutationResource`, `ReferencedTextureGuids`. Base material properties used:
+`BlendMode`, `TwoSided`, `LightingModel`, `OpacityMaskClipValue`; parameter expressions
+(`MaterialExpression{TextureSampleParameter2D,ScalarParameter,VectorParameter}`) are exports
+whose outer is the material and carry `ParameterName` + `Texture`/`DefaultValue`.
+
+## Precomputed lighting on static mesh components — STRONG
+
+Implementation: `dishonored_assets::lightmap`. Validated on all 3,401 Boyle Ext static mesh
+components (3,387 with a texture lightmap, 14 without, 0 vertex lightmaps, 0 parse
+failures; the strict check that the stream ends exactly at the export end holds for all).
+
+`StaticMeshComponent` native data (after `None`), identical for components of
+`StaticMeshActor` and `StaticMeshCollectionActor`:
+```
+TArray<FStaticMeshComponentLODInfo> LODData:
+  TArray<UShadowMap2D*> ShadowMaps
+  TArray<UShadowMap1D*> ShadowVertexBuffers
+  FLightMapRef:
+    u32 LightMapType          0 = none, 1 = FLightMap1D (vertex), 2 = FLightMap2D
+    TArray<FGuid> LightGuids  (lights baked into this lightmap)
+    FLightMap2D (type 2):
+      3 x { UTexture2D* Texture, FVector ScaleVector }     <- 3 floats, not FVector4
+      FVector2D CoordinateScale
+      FVector2D CoordinateBias
+  u8 bLoadVertexColorData     (0 on Boyle Ext; non-zero is followed by FColorVertexBuffer:
+                               u32 Stride, u32 NumVerts, BulkArray<FColor>)
+```
+Lightmap UV = `UV[LightMapCoordinateIndex] * CoordinateScale + CoordinateBias`.
+Example (`StaticMeshActor_1737.StaticMeshComponent0`): textures
+`NormalizedAverageColor0_139` scale (1,1,1), `DirectionalMaxComponent0_139` scale
+(8.32, 5.27, 6.98), null scale (3.49, 4.92, 5.78); UV scale (1/32, 1/4), bias (0.78125, 0.25).
+
+### Dishonored's directional lightmap encoding — LIKELY
+This is **not** UE3's classic 3-coefficient (+ simple) directional encoding. Every texture
+lightmap has exactly two non-null textures, always created in pairs with the same suffix:
+
+| Slot | Texture name | Scale | Meaning (inferred) |
+|---|---|---|---|
+| 0 | `NormalizedAverageColor0_N` | always (1,1,1) | chroma: average incident colour normalized to its max channel |
+| 1 | `DirectionalMaxComponent0_N` | HDR, per lightmap (≈1–10) | intensity along each of 3 tangent-space basis directions in R, G, B |
+| 2 | null | non-zero | the UE3 "simple lightmap" coefficient, stripped by the cooker on PC |
+
+Both are `LightMapTexture2D`, `PF_DXT1`, sRGB (class default), streamed from `Lighting.tfc`,
+packed as atlases (several components per texture, disjoint rects; scale vectors are
+per component, not per texture). `ULightMapTexture2D` native = `UTexture2D` native + one
+extra zero dword + `u32 LightmapFlags` (1 = `LMF_Streamed`).
+
+Renderer reconstruction (APPROXIMATION, see LOG and UNKNOWNS U-026):
+`irradiance = srgb(avg) * Scale0 * mean_i(srgb(dirmax)_i * Scale1_i)` — the exact value for
+a flat normal if the original weights the three basis intensities by `saturate(N·B_i)²`
+normalized to sum 1. Per-pixel normal-map interaction is dropped. Each component's rect
+(padded by 1 texel) is baked with its own scales into an `RGB9E5` atlas that keeps the
+original layout, so Bevy's `Lightmap { uv_rect }` uses the UE3 bias/scale directly.
+
+### Shadow maps
+`ShadowMap2D` (one per light per component, 888 in Boyle Ext Env): properties
+`Texture` (→ `ShadowMapTexture2D`, `PF_G8`, `SRGB=false`, `Lighting.tfc`),
+`CoordinateScale`, `CoordinateBias`, `LightGuid`, `bIsShadowFactorTexture` (false = signed
+distance field shadows). They hold precomputed shadowing for lights that are not baked into
+the lightmap (dominant/toggleable). Not used by the renderer yet; the dominant light uses
+Bevy's real-time shadow maps instead.
+
+## Lights, fog, post, sky — CONFIRMED (data), see LOG for render mapping
+
+- Light actors: `LightComponent` → `{Point,Spot,DominantPoint,DominantSpot,DominantDirectional}LightComponent`
+  with `Brightness` (default 1), `LightColor` (FColor, sRGB), `Radius` (1024), `FalloffExponent` (2),
+  `InnerConeAngle`/`OuterConeAngle` (half-angles, deg), `LightGuid`, `LightmapGuid`, `CastShadows`,
+  `CachedParentToWorld`. Static lights live in `StaticLightCollectionActor` components (baked).
+- Tagged `Matrix` struct properties store each row as **(W, X, Y, Z)** (64 bytes), unlike native
+  `FMatrix` data (X, Y, Z, W).
+- `DominantDirectionalLightComponent` also has `DominantLightShadowInfo{WorldToLight, LightToWorld,
+  LightSpaceImportanceBounds, ShadowMapSizeX/Y}` describing the cooked u16 shadow map.
+- Fog: `Engine.DisFog` actor (`Component` → `DisFogComponent`): `Opacity`, `LightColor`, `Origin`,
+  `Height`, `NearPlane`, `FarPlane`, `NoFogPlane`, `SunPower`, `bCustomTransition`,
+  `fCustomTransitionHeight`, `FogLUT`, `m_RawLut` (128 bytes), `HeightDensityFactor`, `Density`,
+  `bUseExponentialAttenuation`, `bInteriorFog`, `m_IsExclusive`. Defaults in `Engine.Default__DisFogComponent`.
+- Post: `WorldInfo.m_ArkDefaultPpSettings: ArkPpConfig{ m_UberPpParameters{ m_DOFParameters,
+  m_CBParameters{m_CrMgYbShadTones, m_CrMgYbMidTones}, m_HDRParameters{m_Exposure, m_GammaAdjustment,
+  m_FilmGrainNoise, m_GimpContrast, m_bOverride*} }, m_PpBloomParameters{m_Tint, m_Scale} }`.
+- Reflection: `WorldInfo.mSceneReflection` → `TextureCube` (`FacePosX`..`FaceNegZ` Texture2D faces).
+- Sky: ordinary collection meshes whose materials derive from `Skies.Skies_PMAT` (dome) and
+  `Vfx_Materials.main_materials.Moon_PMAT` / `Vfx_Materials.Material.Sun_PMAT`.
 
 ## Remaining parse gaps
 

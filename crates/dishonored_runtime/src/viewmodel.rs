@@ -166,12 +166,17 @@ pub fn load_view_rig(
 }
 
 /// Overlay camera (child of the game camera) plus the rig entities.
-pub fn spawn_view_rig(mut commands: Commands, rig: Option<Res<ViewRig>>, cams: Query<Entity, With<GameCamera>>, existing: Query<(), With<ViewRoot>>) {
+pub fn spawn_view_rig(
+    mut commands: Commands,
+    rig: Option<Res<ViewRig>>,
+    cams: Query<(Entity, Option<&bevy::core_pipeline::tonemapping::Tonemapping>, Option<&bevy::render::view::ColorGrading>, Has<bevy::camera::Hdr>), With<GameCamera>>,
+    existing: Query<(), With<ViewRoot>>,
+) {
     let Some(rig) = rig else { return };
     if !existing.is_empty() {
         return;
     }
-    let Some(game_cam) = cams.iter().next() else { return };
+    let Some((game_cam, tonemap, grading, hdr)) = cams.iter().next() else { return };
     let layer = RenderLayers::layer(VIEW_LAYER);
     let cam = commands
         .spawn((
@@ -184,6 +189,17 @@ pub fn spawn_view_rig(mut commands: Commands, rig: Option<Res<ViewRig>>, cams: Q
             ChildOf(game_cam),
         ))
         .id();
+    // Same output format and grading as the world camera so the overlay composites on the
+    // same target with matching brightness.
+    if hdr {
+        commands.entity(cam).insert(bevy::camera::Hdr);
+    }
+    if let Some(t) = tonemap {
+        commands.entity(cam).insert(*t);
+    }
+    if let Some(g) = grading {
+        commands.entity(cam).insert(g.clone());
+    }
     let root = commands.spawn((Transform::default(), Visibility::Hidden, ViewRoot, ChildOf(cam))).id();
     let part = &rig.arms.parts[0];
     let joints: Vec<Entity> = part.bind.iter().enumerate().map(|(i, b)| commands.spawn((Transform::from_matrix(*b), ViewJoint(i), ChildOf(root))).id()).collect();

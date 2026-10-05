@@ -7,9 +7,14 @@
 //!     --connect HOST:PORT    join a dedicated server
 //!     --browse MASTER        list servers from a control plane and join the best one
 //!     --inspect              free camera, no gameplay (--pos x,y,z --yaw --pitch)
-//!   options: --name NAME --show-hidden --show-fx --max-tex N --lat MS --loss P
+//!   options: --name NAME --show-hidden --max-tex N --lat MS --loss P
+//!   rendering (all on by default; for before/after comparisons):
+//!            --no-lightmaps --no-materials --no-fx --no-dynamic-lights --no-fog
+//!            --no-post --no-sky, or --baseline for all of them (diffuse-only renderer
+//!            with the placeholder sun/ambient)
 //!   harness: --script FILE --out DIR --control PORT --record DIR --record-every N
 //!            --record-fps F --exit-after SECONDS --size WxH
+//!            (--inspect also runs scripts: camera / screenshot / wait_ticks / quit)
 //! ```
 
 mod coords;
@@ -18,6 +23,8 @@ mod debug;
 mod harness;
 mod hud;
 mod input_map;
+mod atmosphere;
+mod lighting;
 mod map_render;
 mod players;
 mod session;
@@ -45,7 +52,7 @@ struct Args {
     yaw: Option<f32>,
     pitch: f32,
     show_hidden: bool,
-    show_fx: bool,
+    features: map_render::RenderFeatures,
     max_tex: u32,
     exit_after: Option<f32>,
     record: Option<PathBuf>,
@@ -97,7 +104,7 @@ fn parse_args() -> Args {
         yaw: get("--yaw").and_then(|s| s.parse().ok()),
         pitch: get("--pitch").and_then(|s| s.parse().ok()).unwrap_or(-10.0),
         show_hidden: has("--show-hidden"),
-        show_fx: has("--show-fx"),
+        features: map_render::RenderFeatures::from_flags(&has),
         max_tex: get("--max-tex").and_then(|s| s.parse().ok()).unwrap_or(1024),
         exit_after: get("--exit-after").and_then(|s| s.parse().ok()),
         record: get("--record").map(PathBuf::from),
@@ -127,12 +134,24 @@ fn main() {
     }))
     .add_plugins(FrameTimeDiagnosticsPlugin::default())
     .insert_resource(ClearColor(Color::srgb(0.08, 0.09, 0.12)))
-    .insert_resource(GlobalAmbientLight { color: Color::srgb(0.85, 0.88, 1.0), brightness: 900.0, affects_lightmapped_meshes: true })
+    // Placeholder ambient; with real lights it only fills non-lightmapped meshes at night level.
+    .insert_resource(GlobalAmbientLight { color: Color::srgb(0.85, 0.88, 1.0), brightness: if args.features.dynamic_lights { 60.0 } else { 900.0 }, affects_lightmapped_meshes: !args.features.lightmaps })
     .insert_resource(args.clone())
-    .add_systems(Startup, setup_world);
+    .init_resource::<atmosphere::FogLayers>()
+    .add_systems(Startup, setup_world)
+    .add_systems(Update, atmosphere::update_fog);
 
     if args.mode == Mode::Inspect {
-        app.add_systems(Update, inspect_cam);
+        let mut runner = harness::ScriptRunner { out_dir: args.out.clone(), ..default() };
+        if let Some(p) = &args.script {
+            let s: harness::Script = serde_json::from_str(&std::fs::read_to_string(p).expect("script")).expect("script json");
+            runner.steps = s.steps;
+            std::fs::create_dir_all(&args.out).ok();
+        }
+        app.insert_resource(runner)
+            .init_resource::<harness::ShotQueue>()
+            .init_resource::<harness::CameraRequest>()
+            .add_systems(Update, (harness::inspect_script, inspect_cam).chain());
     } else {
         let content = Arc::new(dishonored_content::load_match(&args.map).expect("loading match content from the install"));
         let session = match &args.mode {
@@ -221,26 +240,43 @@ fn connect(addr: &str, args: &Args) -> NetClient {
 
 fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, mut materials: ResMut<Assets<StandardMaterial>>) {
     let content = Content::locate().expect("Dishonored install not found (set DISHONORED_DIR)");
-    let pkgs = map_packages(&content, &args.map);
-    let opts = ImportOptions { max_texture_size: args.max_tex, ..Default::default() };
+    // --legacy-geometry: the pre-fidelity package/actor coverage (prefix-matched sublevels,
+    // StaticMeshActor + StaticMeshCollectionActor only), for before/after comparisons.
+    let legacy = std::env::args().any(|a| a == "--legacy-geometry");
+    let pkgs = if legacy { dishonored_assets::map_packages_by_prefix(&content, &args.map) } else { map_packages(&content, &args.map) };
+    let opts = ImportOptions { max_texture_size: args.max_tex, other_actors: !legacy, ..Default::default() };
     let (map, stats) = import_level(&content, &args.map, &pkgs, &opts).expect("map import failed");
-    let spawned = map_render::spawn_map(&map, &mut commands, &mut meshes, &mut images, &mut materials, args.show_hidden, args.show_fx);
+    let spawned = map_render::spawn_map(&map, &mut commands, &mut meshes, &mut images, &mut materials, args.show_hidden, &args.features);
     info!("{}: {} instances, {} meshes, {} textures, {} entities", args.map, stats.instances, stats.meshes, stats.textures, spawned);
 
     let spawn = map.spawn_candidates.first();
     let start = args.pos.or(spawn.map(|s| s.position + glam::Vec3::Z * 64.0)).unwrap_or(glam::Vec3::new(0.0, 0.0, 500.0));
     let yaw = args.yaw.or(spawn.map(|s| s.yaw_deg)).unwrap_or(0.0);
-    let projection = Projection::Perspective(PerspectiveProjection { fov: 75f32.to_radians(), near: 0.05, far: 6000.0, ..default() });
-    if args.mode == Mode::Inspect {
-        commands.spawn((Camera3d::default(), projection, Transform::from_translation(coords::pos(start)), FreeCam { yaw, pitch: args.pitch }));
+    // The Boyle sky dome reaches ~4.9 km from the estate (radius 205,852 uu around (35379, -6871)).
+    let far = if args.features.sky { 12000.0 } else { 6000.0 };
+    let projection = Projection::Perspective(PerspectiveProjection { fov: 75f32.to_radians(), near: 0.05, far, ..default() });
+    let camera = if args.mode == Mode::Inspect {
+        commands.spawn((Camera3d::default(), projection, Transform::from_translation(coords::pos(start)), FreeCam { yaw, pitch: args.pitch })).id()
     } else {
-        commands.spawn((Camera3d::default(), projection, Transform::default(), players::GameCamera { third_person: args.spectate, follow: None }));
+        commands.spawn((Camera3d::default(), projection, Transform::default(), players::GameCamera { third_person: args.spectate, follow: None })).id()
+    };
+    if args.features.materials {
+        if let Some(env) = map_render::environment_light(&map, &mut images) {
+            commands.entity(camera).insert(env);
+        }
     }
-    commands.spawn((
-        DirectionalLight { illuminance: 6000.0, shadow_maps_enabled: false, color: Color::srgb(0.75, 0.8, 1.0), ..default() },
-        bevy::camera::visibility::RenderLayers::from_layers(&[0, viewmodel::VIEW_LAYER]),
-        Transform::default().looking_to(Vec3::new(-0.4, -1.0, -0.3), Vec3::Y),
-    ));
+    let fog = atmosphere::setup_camera(&map, &mut commands.entity(camera), &args.features);
+    commands.insert_resource(fog);
+    let lights = lighting::spawn_lights(&map, &mut commands, &args.features);
+    info!("{} map lights", lights);
+    if lights == 0 {
+        // Placeholder sun when real lights are disabled (or the map has none).
+        commands.spawn((
+            DirectionalLight { illuminance: 6000.0, shadow_maps_enabled: false, color: Color::srgb(0.75, 0.8, 1.0), affects_lightmapped_mesh_diffuse: !args.features.lightmaps, ..default() },
+            Transform::default().looking_to(Vec3::new(-0.4, -1.0, -0.3), Vec3::Y),
+            bevy::camera::visibility::RenderLayers::from_layers(&[0, viewmodel::VIEW_LAYER]),
+        ));
+    }
 }
 
 fn exit_after(time: Res<Time>, args: Res<Args>, mut exit: MessageWriter<AppExit>) {
@@ -256,7 +292,17 @@ fn inspect_cam(
     motion: Res<AccumulatedMouseMotion>,
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
     mut q: Query<(&mut Transform, &mut FreeCam)>,
+    request: Option<ResMut<harness::CameraRequest>>,
 ) {
+    if let Some(mut req) = request {
+        if let Some(c) = req.0.take() {
+            for (mut tf, mut cam) in &mut q {
+                tf.translation = coords::pos(glam::Vec3::from(c.pos));
+                cam.yaw = c.yaw;
+                cam.pitch = c.pitch;
+            }
+        }
+    }
     let mut locked = false;
     for mut c in &mut cursor {
         if keys.just_pressed(KeyCode::Tab) {
