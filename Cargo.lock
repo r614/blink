@@ -2422,6 +2422,7 @@ dependencies = [
  "glam",
  "serde",
  "serde_json",
+ "ue3_package",
 ]
 
 [[package]]
