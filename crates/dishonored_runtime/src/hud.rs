@@ -23,12 +23,6 @@ pub fn setup_hud(mut commands: Commands) {
         HudText,
     ));
     commands.spawn((
-        Text::new("+"),
-        TextFont { font_size: FontSize::Px(22.0), ..default() },
-        Node { position_type: PositionType::Absolute, top: percent(50), left: percent(50), margin: UiRect { left: px(-6), top: px(-14), ..default() }, ..default() },
-        Crosshair,
-    ));
-    commands.spawn((
         Text::new(""),
         TextFont { font_size: FontSize::Px(16.0), ..default() },
         TextColor(Color::srgb(1.0, 0.95, 0.8)),
@@ -43,12 +37,24 @@ pub fn update_hud(
     session: Res<Session>,
     local: Res<LocalInput>,
     keys: Res<ButtonInput<KeyCode>>,
+    mut debug: ResMut<DebugHud>,
     mut hud: Query<&mut Text, (With<HudText>, Without<Scoreboard>)>,
     mut board: Query<&mut Text, (With<Scoreboard>, Without<HudText>)>,
 ) {
+    if keys.just_pressed(KeyCode::F1) {
+        debug.0 = !debug.0;
+    }
     let fps = diag.get(&FrameTimeDiagnosticsPlugin::FPS).and_then(|d| d.smoothed()).unwrap_or(0.0);
-    let mut s = format!("{}  |  fps {fps:.0}  tick {}  ping {:.0} ms  pred err {:.1}  corr {:.1}\n", view.status, view.tick, view.rtt_ms, view.prediction_error, view.correction);
-    if let Some(me) = view.me.as_ref() {
+    // The game HUD (gfx_hud) shows gauges, item and crosshair; this text is the F1 debug
+    // readout plus match information the original HUD has no slot for.
+    let mut s = if debug.0 { format!("{}  |  fps {fps:.0}  tick {}  ping {:.0} ms  pred err {:.1}  corr {:.1}\n", view.status, view.tick, view.rtt_ms, view.prediction_error, view.correction) } else { String::new() };
+    if view.me.as_ref().is_some_and(|m| !m.alive) {
+        s += &match view.respawn_in {
+            Some(t) => format!("YOU DIED - respawn in {t:.1}s\n"),
+            None => "YOU DIED\n".into(),
+        };
+    }
+    if let Some(me) = view.me.as_ref().filter(|_| debug.0) {
         let speed = me.velocity.truncate().length();
         let ammo = match local.left_hand {
             dishonored_sim::input::LeftHand::Pistol => format!(" [{}|{}]", me.left.pistol_loaded, me.left.pistol_reserve),
@@ -71,14 +77,9 @@ pub fn update_hud(
             if me.crouched { " sneaking" } else { "" },
             if me.vitals.dark_vision_remaining > 0.0 { format!("  DARK VISION {:.0}s ({} revealed)", me.vitals.dark_vision_remaining, view.dark_vision_reveals.len()) } else { String::new() }
         );
-        if !me.alive {
-            s += &match view.respawn_in {
-                Some(t) => format!("YOU DIED - respawn in {t:.1}s\n"),
-                None => "YOU DIED\n".into(),
-            };
-        }
     }
-    if let Some(ti) = view.target_info.as_ref() {
+    // Contract clues are drawn on the target paper (gfx_hud); the debug readout keeps them too.
+    if let Some(ti) = view.target_info.as_ref().filter(|_| debug.0) {
         use dishonored_multiplayer::contracts::{Proximity, PursuitAwareness};
         let arrows = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"];
         let looks = match ti.appearance {
@@ -120,7 +121,9 @@ pub fn update_hud(
             ti.escaping.map(|t| format!("ESCAPE! {t:.0}s")).unwrap_or_default()
         );
     }
-    s += "\nWASD move  mouse look  Space jump  Ctrl sneak  Shift sprint  LMB sword  RMB left hand  F block  Q/E lean  1-5 hand  V 3rd person  F3 collision  Tab scores  Esc release mouse\n";
+    if debug.0 {
+        s += "\nWASD move  mouse look  Space jump  Ctrl sneak  Shift sprint  LMB sword  RMB left hand  F block  Q/E lean  1-5 hand  V 3rd person  F1 debug  F3 collision  Tab scores  Esc release mouse\n";
+    }
     for f in &view.feed {
         s += &format!("{f}\n");
     }
@@ -129,7 +132,8 @@ pub fn update_hud(
     }
     let m = &view.matchv;
     let show = keys.pressed(KeyCode::Tab) || m.phase == MatchPhase::Ended;
-    let mut b = format!("{} {:?}  {:.0}:{:02.0}  to {}\n", m.mode.to_uppercase(), m.phase, (m.time_left / 60.0).floor(), m.time_left % 60.0, m.score_limit);
+    // Mode and clock live on the objectives banner (gfx_hud); the board is Tab / match end.
+    let mut b = if show { format!("{} {:?}  to {}\n", m.mode.to_uppercase(), m.phase, m.score_limit) } else { String::new() };
     if show {
         for e in &m.scores {
             b += &format!("{:<12} {:>3}  K {:>3}  D {:>3}\n", e.name, e.score, e.kills, e.deaths);
@@ -145,3 +149,7 @@ pub fn update_hud(
         t.0 = b.clone();
     }
 }
+
+/// F1: full debug readout (position, velocity, net stats, controls).
+#[derive(Resource, Default)]
+pub struct DebugHud(pub bool);

@@ -22,6 +22,9 @@ fn main() -> Result<()> {
     if a.iter().any(|x| x == "--tree") {
         tree(&raw[..n])?;
     }
+    if let Some(dir) = a.iter().position(|x| x == "--fonts").and_then(|i| a.get(i + 1)) {
+        fonts(&raw[..n], dir)?;
+    }
     if let Some(ids) = a.iter().position(|x| x == "--sub").and_then(|i| a.get(i + 1)) {
         subs(&raw[..n], ids)?;
     }
@@ -83,5 +86,18 @@ pub fn subs(raw: &[u8], ids: &str) -> Result<()> {
         println!("sub {id}: {:?} image {:?}", m.sub_images.get(&id), m.images.get(&(id as u32)).map(|i| &i.file_name));
     }
     println!("first subs: {:?}", m.sub_images.iter().take(5).collect::<Vec<_>>());
+    Ok(())
+}
+
+/// Convert embedded fonts to TTF files in a scratch directory (`--fonts DIR`).
+pub fn fonts(raw: &[u8], dir: &str) -> Result<()> {
+    let m = dishonored_assets::swf::Movie::parse(raw)?;
+    std::fs::create_dir_all(dir)?;
+    for f in &m.fonts {
+        let ttf = f.to_ttf(&f.name);
+        let path = std::path::Path::new(dir).join(format!("{}.ttf", f.name.replace([' ', '-'], "_")));
+        std::fs::write(&path, &ttf)?;
+        println!("font {:?}: {} glyphs, ascent {} descent {}, {} bytes -> {}", f.name, f.glyphs.len(), f.ascent, f.descent, ttf.len(), path.display());
+    }
     Ok(())
 }

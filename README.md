@@ -47,6 +47,36 @@ Requires a GOG install of Dishonored: Definitive Edition. The default path is
 cargo run --release -p dishonored_runtime -- --map L_Boyle_Ext_P
 ```
 
+### Playing
+
+Offline against bots (FFA by default, `--mode contracts` for the social-stealth mode;
+`--spectate` to watch the bots):
+
+```bash
+cargo run --release -p dishonored_runtime -- --bots 3 --mode contracts
+```
+
+Dedicated server and the optional control plane (an in-memory server list kept alive by
+heartbeats):
+
+```bash
+cargo run --release -p dishonored_server -- --port 27015 --mode contracts --master 127.0.0.1:27900
+```
+
+```bash
+cargo run --release -p dishonored_master -- --bind 0.0.0.0:27900
+```
+
+Join with `--connect HOST:27015`, or `--browse MASTER` to pick from the list.
+
+In game: WASD move, mouse look, Space jump, Ctrl sneak, Shift sprint, C walk, LMB sword,
+RMB left hand (hold to aim Blink), F block, Q/E lean, R reload, 1-5 Blink / Windblast /
+Dark Vision / pistol / crossbow, V third person, Tab scores, F1 debug readout, F3 collision.
+The HUD is Dishonored's own (gauges, emblem, crosshairs, objectives banner and fonts are
+read from `UI_HUD_SF`, the icon packs and `DisFonts_SF` at startup).
+
+### Map viewer (`--inspect`)
+
 Controls: hold RMB (or Tab to lock the cursor) to look; WASD to move; Q/E down/up;
 Shift fast; Alt slow. Options: `--pos x,y,z` and `--yaw`/`--pitch` (Dishonored units),
 `--show-hidden` (blockers/invisible collision), per-feature render switches for

@@ -126,6 +126,8 @@ pub struct Movie {
     pub exports: BTreeMap<String, u16>,
     pub root: Sprite,
     pub tag_counts: BTreeMap<u16, usize>,
+    /// Embedded fonts (DefineFont2/3).
+    pub fonts: Vec<crate::swf_font::SwfFont>,
 }
 
 struct Bits<'a> {
@@ -389,6 +391,11 @@ fn parse_tags(d: &[u8], mut pos: usize, end: usize, movie: &mut Movie, sprite: &
                 let file_name = b.pstr();
                 movie.images.insert(id, ExternalImage { export_name, file_name, width, height });
             }
+            48 | 75 => {
+                if let Ok(f) = crate::swf_font::parse_define_font(&d[body..tend], code == 75) {
+                    movie.fonts.push(f);
+                }
+            }
             1008 => {
                 let id = b.u16();
                 let img = b.u16();
@@ -433,6 +440,8 @@ pub struct Quad {
     pub color: ColorTransform,
     /// Instance-name path of the placement chain (e.g. "masterHUD_mc/health_mc").
     pub path: String,
+    /// Shape character the quad came from.
+    pub character: u16,
 }
 
 impl Movie {
@@ -499,7 +508,7 @@ impl Movie {
                     (px / 20.0, py / 20.0)
                 });
                 let texture = tex.trim_end_matches(".tga").trim_end_matches(".dds").to_string();
-                out.push(Quad { texture, src: [s0x.min(s1x) + off.0, s0y.min(s1y) + off.1, s0x.max(s1x) + off.0, s0y.max(s1y) + off.1], dst, color, path: path.to_string() });
+                out.push(Quad { texture, src: [s0x.min(s1x) + off.0, s0y.min(s1y) + off.1, s0x.max(s1x) + off.0, s0y.max(s1y) + off.1], dst, color, path: path.to_string(), character });
                 break;
             }
             return;

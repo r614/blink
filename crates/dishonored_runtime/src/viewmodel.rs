@@ -200,6 +200,9 @@ pub fn spawn_view_rig(
     if let Some(g) = grading {
         commands.entity(cam).insert(g.clone());
     }
+    // The rig has no lightmap; a fill ambient stands in for the light environment that
+    // lights dynamic objects in the original (only dominant/toggleable lights are dynamic).
+    commands.entity(cam).insert(AmbientLight { color: Color::srgb(0.75, 0.82, 0.9), brightness: 350.0, ..default() });
     let root = commands.spawn((Transform::default(), Visibility::Hidden, ViewRoot, ChildOf(cam))).id();
     let part = &rig.arms.parts[0];
     let joints: Vec<Entity> = part.bind.iter().enumerate().map(|(i, b)| commands.spawn((Transform::from_matrix(*b), ViewJoint(i), ChildOf(root))).id()).collect();

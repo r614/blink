@@ -28,6 +28,7 @@ mod lighting;
 mod map_render;
 mod players;
 mod session;
+mod gfx_hud;
 mod viewmodel;
 
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
@@ -195,7 +196,8 @@ fn main() {
             .init_resource::<harness::ControlOverride>()
             .init_resource::<debug::DebugToggles>()
             .init_gizmo_group::<debug::XRayGizmos>()
-            .add_systems(Startup, (players::setup_player_assets, hud::setup_hud, debug::setup_gizmos, (characters::load_library, characters::load_animations).chain(), characters::load_weapons, viewmodel::load_view_rig))
+            .add_systems(Startup, (players::setup_player_assets, hud::setup_hud, debug::setup_gizmos, (characters::load_library, characters::load_animations).chain(), characters::load_weapons, viewmodel::load_view_rig, gfx_hud::setup_gfx_hud, gfx_hud::load_game_fonts))
+            .init_resource::<hud::DebugHud>()
             .init_resource::<viewmodel::ViewAnim>()
             .add_systems(FixedUpdate, (harness::script_fixed, session::fixed_tick).chain())
             .add_systems(
@@ -211,6 +213,9 @@ fn main() {
                     players::sync_projectiles,
                     players::camera_follow,
                     hud::update_hud,
+                    gfx_hud::update_gfx_hud,
+                    gfx_hud::apply_game_fonts,
+                    gfx_hud::update_anchored_text,
                     debug::draw_debug,
                     harness::harness_frame,
                 ),
