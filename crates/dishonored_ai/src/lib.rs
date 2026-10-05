@@ -37,7 +37,8 @@
 //! simulation has no light probe: `LIGHT_LEVEL`), the speed normalisation of the player's
 //! visibility, squad restrictions of routes, and alarm bells.
 
-use dishonored_ir::ai::{AiConfig, AttentionConfig, AttentionIncrease, DAL_BUSTED, DAL_HEAD_TRACK, DAL_INVESTIGATE, DAL_TURN_TO_FACE, PatrolRoute, PlayerVisibilityConfig, VisionConfig, reason};
+use dishonored_ir::ai::{AiConfig, AiLevel, AlarmBellDef, AttentionConfig, AttentionIncrease, DAL_BUSTED, DAL_HEAD_TRACK, DAL_INVESTIGATE, DAL_TURN_TO_FACE, FactionTable, ForbiddenZone, PatrolRoute, PlayerVisibilityConfig, ProbeLight, Relationship, VisionConfig, reason};
+use std::collections::BTreeMap;
 use dishonored_sim::events::{SimEvent, SoundCategory};
 use dishonored_sim::input::{LeftHand, PlayerInput, buttons};
 use dishonored_sim::state::{PawnKind, PlayerId, PlayerState, SwordPhase, WorldState};
@@ -54,12 +55,9 @@ const MAX_SAFE_DROP: f32 = 160.0;
 /// Eye height above the pawn centre (the `camera_jnt` bone sits near the top of the
 /// 87.5 uu half-height cylinder).
 const EYE: f32 = 70.0;
-/// Raw light value at the player (SPECULATIVE: no light probe in the simulation; fully lit,
-/// which the Boyle party is).
+/// Raw light value at the player when the level has no probe lights (fully lit, which the
+/// Boyle party is). With lights, [`light_at`] computes it.
 pub const LIGHT_LEVEL: f32 = 1.0;
-/// Speed giving the speed value 1 in the player's visibility (SPECULATIVE normalisation of
-/// `DishonoredVisibilityComponent.m_fCurrentSpeedValue`: the sprint speed).
-const VIS_SPEED_REF: f32 = 600.0;
 /// Panic triggered by a behaviour rule rather than an attention reason (the original's
 /// `DisAIBrainProcessPanic` starts the behaviour directly; here it is modelled as Busted
 /// attention toward the place, which no reason gate may block).
@@ -97,6 +95,40 @@ pub enum BrainState {
     Search,
     /// Panicked civilian with the enemy too close to run (`DisAISubStateCower`).
     Cower,
+    /// Going to an alarm bell and ringing it (`DisBehaviorTriggerAlarm`).
+    RingAlarm,
+}
+
+/// What a crowd reports to its host after a tick.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum AiEvent {
+    /// The original fires this dialog hook (`eDisDialogHook` name) on the NPC at this
+    /// transition (`DisAIBehavior` bark points, `FUN_00af00f0` callers). `initiator` is the
+    /// stimulus' pawn when there is one (a player, or an ally for group variants).
+    Bark { npc: PlayerId, hook: String, initiator: Option<PlayerId> },
+    /// A guard rang an alarm bell (index into `Crowd::alarms`): the alarm is raised.
+    AlarmRang { bell: usize, name: String, ringer: PlayerId, enemy: Option<PlayerId> },
+    /// `m_fAlarmRingDelayBeforeAINoise` after the ring: the bell's AI noise goes out and its
+    /// triggered spawners are asked to spawn ([`alarm_spawn_choice`]), aware of `enemy`.
+    AlarmSpawn { bell: usize, enemy: Option<PlayerId>, enemy_pos: Option<Vec3> },
+    /// No NPC hunts the alarm's enemy any more: the bell stops (`DisSeqEvent_AlarmEnded`).
+    AlarmEnded { bell: usize },
+}
+
+/// Runtime state of a `DisAlarmBell`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AlarmBell {
+    pub def: AlarmBellDef,
+    /// `m_bAlarmIsRinging`.
+    pub ringing: bool,
+    /// Seconds until the AI noise and the spawns (`m_fDelayBeforeAINoise`); <= 0 once done.
+    pub noise_timer: f32,
+    pub noise_done: bool,
+    /// `m_fCooldownTimer` (`m_fTimeInBetweenUses`) after it stops.
+    pub cooldown: f32,
+    /// The guard on his way to ring it (`m_pNPCOnHisWayToRing`) and the alarm's enemy.
+    pub ringer: Option<PlayerId>,
+    pub enemy: Option<PlayerId>,
 }
 
 impl BrainState {
@@ -1234,6 +1266,9 @@ impl Brain {
             && let Some(t) = self.target
             && self.attn.iter().find(|a| a.who == t).is_none_or(|a| a.level < DAL_BUSTED)
         {
+            if std::env::var("DISH_AI_TRACE").is_ok() {
+                eprintln!("TRACE {} combat->search attn {:?}", self.id, self.attn);
+            }
             self.go_search(ai);
             return;
         }
@@ -1585,6 +1620,9 @@ impl Brain {
         let idle = PlayerInput { yaw: me.yaw, left_hand: LeftHand::Empty, ..Default::default() };
         let Some(t) = self.target.and_then(|id| ws.player(id)).filter(|p| p.alive).cloned() else {
             // Target gone: search where it was last seen.
+            if std::env::var("DISH_AI_TRACE").is_ok() {
+                eprintln!("TRACE {} combat target gone {:?} attn {:?}", self.id, self.target, self.attn);
+            }
             self.target = None;
             self.go_search(ai);
             return idle;

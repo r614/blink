@@ -312,17 +312,29 @@ impl Importer<'_> {
             self.stats.static_lights_skipped += 1;
             return;
         }
-        let Ok(h) = pkg.read_object(actor) else { return };
+        match read_light(&pkg, actor, class) {
+            Ok(Some(l)) => self.map.lights.push(l),
+            Ok(None) => {}
+            Err(e) => self.stats.errors.push(e),
+        }
+    }
+}
+
+/// A placed light actor of `pkg` (`PointLight`, `SpotLightToggleable`, `DominantDirectionalLight`,
+/// ...): `None` when it has no component or is disabled. Shared by the level import and the
+/// AI light probe data.
+pub fn read_light(pkg: &Package, actor: usize, class: &str) -> std::result::Result<Option<Light>, String> {
+    {
+        let Ok(h) = pkg.read_object(actor) else { return Ok(None) };
         let Some(ObjRef::Export(ci)) = find(&h.properties, "LightComponent").and_then(|p| p.as_object()).map(ObjRef::from_index) else {
-            return;
+            return Ok(None);
         };
         let Ok(ch) = pkg.read_object(ci) else {
-            self.stats.errors.push(format!("light component {}", pkg.obj_path(ObjRef::Export(ci))));
-            return;
+            return Err(format!("light component {}", pkg.obj_path(ObjRef::Export(ci))));
         };
         let c = &ch.properties;
         if !bool_or(c, "bEnabled", true) {
-            return;
+            return Ok(None);
         }
         let cclass = pkg.export_class(ci);
         // Prefer the component's cooked CachedParentToWorld: spot light actors rely on a
@@ -352,7 +364,7 @@ impl Importer<'_> {
         } else {
             LightKind::Point
         };
-        self.map.lights.push(Light {
+        Ok(Some(Light {
             kind,
             position,
             direction,
@@ -363,9 +375,11 @@ impl Importer<'_> {
             falloff_exponent: float_or(c, "FalloffExponent", 2.0),
             dominant: class.starts_with("Dominant"),
             casts_shadows: bool_or(c, "CastShadows", true) && bool_or(c, "CastDynamicShadows", true),
-        });
+        }))
     }
+}
 
+impl Importer<'_> {
     /// Level-wide settings from the persistent level's WorldInfo: the reflection cubemap
     /// (`mSceneReflection` -> TextureCube faces) and Arkane's post settings
     /// (`m_ArkDefaultPpSettings`, flattened to dotted names).
