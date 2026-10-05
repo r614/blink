@@ -1,0 +1,25 @@
+[package]
+name = "dishonored_kismet"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "UE3 Kismet as Dishonored uses it: a typed model of a level's sequences read from the install, and a deterministic interpreter with a host interface for the game"
+
+[features]
+default = ["load"]
+# Reading sequences, class defaults, level actors and objectives from the cooked packages.
+load = ["dep:ue3_package", "dep:dishonored_assets", "dep:anyhow", "dep:dishonored_conversation"]
+
+[[bin]]
+name = "kismet"
+required-features = ["load"]
+
+[dependencies]
+serde.workspace = true
+ue3_package = { workspace = true, optional = true }
+dishonored_assets = { workspace = true, optional = true }
+dishonored_conversation = { workspace = true, optional = true, features = ["load"] }
+anyhow = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
