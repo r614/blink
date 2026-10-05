@@ -18,3 +18,4 @@ dishonored_world.workspace = true
 dishonored_sim.workspace = true
 dishonored_conversation = { workspace = true, features = ["load"] }
 dishonored_audio = { path = "../dishonored_audio" }
+dishonored_kismet = { workspace = true, features = ["load"] }

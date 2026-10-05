@@ -22,6 +22,10 @@ use dishonored_sim::state::{PawnKind, PlayerId, PlayerState, WorldState};
 use dishonored_sim::{SimConfig, StepOutput, spawn_npc, spawn_player, step_world};
 use dishonored_world::WorldQuery;
 use glam::Vec3;
+
+// [kismet] Original Kismet host (kismet_host.rs), a child module so it can drive the match.
+#[path = "kismet_host.rs"]
+pub mod kismet_host;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -126,6 +130,9 @@ pub struct MissionSetup {
     /// (stored in replays so they play back identically).
     #[serde(default)]
     pub conversations: Option<dishonored_conversation::ConversationDb>,
+    /// [kismet] The original Kismet of the mission maps (`MissionDef::original_kismet`).
+    #[serde(default)]
+    pub kismet: Option<kismet_host::KismetSetup>,
 }
 
 /// Resolve a place to (position, yaw, map index).
@@ -284,7 +291,7 @@ impl MissionSetup {
                 }
             }
         }
-        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances, anim_profiles, routes: maps
+        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances, anim_profiles, kismet: None, routes: maps
                 .iter()
                 .map(|m| {
                     // Snapped to the floor as `Crowd::set_routes` does for the crowd's map.
@@ -311,6 +318,8 @@ pub enum Interaction {
     Mission(MissionEvent),
     /// Index into `MissionSetup::doors`.
     Door(usize),
+    /// [kismet] Index into `kismet_host::usables` of this step.
+    Kismet(usize),
 }
 
 pub struct MissionMatch {
@@ -344,6 +353,9 @@ pub struct MissionMatch {
     arrived: Option<String>,
     /// Dialog choice buttons held last tick (edge detection).
     choice_held: BTreeMap<PlayerId, u16>,
+    /// [kismet] Original Kismet runtime, and original spawners spawned since it last looked.
+    pub kismet: Option<kismet_host::KismetRun>,
+    spawn_log: Vec<usize>,
 }
 
 impl MissionMatch {
@@ -384,7 +396,11 @@ impl MissionMatch {
             look_override: BTreeMap::new(),
             arrived: None,
             choice_held: BTreeMap::new(),
+            kismet: None,
+            spawn_log: Vec::new(),
         };
+        // [kismet]
+        m.kismet = m.setup.kismet.as_ref().map(|k| kismet_host::KismetRun::new(k, &m.setup));
         m.populate_fresh(cfg);
         for c in m.state.initial_commands() {
             m.apply(c, cfg);
@@ -432,6 +448,9 @@ impl MissionMatch {
         if !self.original_spawned.insert(o.spawn.id) {
             return;
         }
+        if self.setup.kismet.is_some() {
+            self.spawn_log.push(index); // [kismet] DisSeqEvent_Spawned
+        }
         let s = o.spawn;
         let arch = self.look_override.get(&s.id).copied().unwrap_or(s.archetype);
         spawn_npc(&mut self.world, s.id, s.kind, arch, s.position, s.yaw, cfg);
@@ -459,6 +478,11 @@ impl MissionMatch {
     /// its own look back (Clear). Looks are shared in `MatchView::appearances`.
     pub fn set_materials(&mut self, npc: &str, mats: Option<Vec<(u8, u32, String)>>) {
         let Some(id) = self.npc_pawn(npc) else { return };
+        self.set_materials_id(id, mats);
+    }
+
+    /// [kismet] `set_materials` by pawn id (original spawner names repeat across sublevels).
+    pub fn set_materials_id(&mut self, id: PlayerId, mats: Option<Vec<(u8, u32, String)>>) {
         let base = APPEARANCE_BASE;
         // Not spawned yet (a map not visited): its spawner's look, applied when it spawns.
         let Some(cur) = self
@@ -721,7 +745,7 @@ impl MissionMatch {
         let mut all: Vec<(PlayerId, PlayerInput)> = inputs
             .iter()
             .map(|(id, i)| {
-                if self.choosing.contains_key(id) || conv_chooser == Some(*id) {
+                if self.choosing.contains_key(id) || conv_chooser == Some(*id) || self.kismet.as_ref().is_some_and(|k| k.choosing(*id)) {
                     (*id, PlayerInput { tick: i.tick, yaw: i.yaw, pitch: i.pitch, left_hand: i.left_hand, ..Default::default() })
                 } else {
                     (*id, *i)
@@ -774,6 +798,7 @@ impl MissionMatch {
                             self.choosing.insert(*id, i);
                         }
                     }
+                    Some(Interaction::Kismet(i)) => kismet_host::use_usable(self, *id, i),
                     None => {}
                 }
             } else if !pressed {
@@ -881,10 +906,12 @@ impl MissionMatch {
                     Some((n.clone(), level))
                 })
                 .collect();
+            kismet_host::filter_events(self, &mut events); // [kismet] scripted choices
             let cmds = self.state.step(&StepInput { dt, map: &map, players: &players, npc_positions: &npc_positions, events: &events, total_npcs: total });
             for c in cmds {
                 self.apply(c, cfg);
             }
+            kismet_host::step(self, &out.events, dt, cfg); // [kismet]
             if self.state.outcome().is_some() && self.view.phase != MatchPhase::Ended {
                 self.view.phase = MatchPhase::Ended;
             }
@@ -914,6 +941,7 @@ impl MissionMatch {
                 }
             }
         }
+        kismet_host::view(self, &mut mv); // [kismet] usables, scripted choice, task target
         self.view.mission = Some(mv);
         self.view.map = self.current_map.clone();
         self.last_events = out.events.clone();
@@ -959,6 +987,9 @@ impl MissionMatch {
             if d.map.eq_ignore_ascii_case(&self.current_map) {
                 consider(d.position + Vec3::Z * 60.0, 220.0, Interaction::Door(i));
             }
+        }
+        for (pos, reach, it) in kismet_host::interactions(self) {
+            consider(pos, reach, it); // [kismet]
         }
         best.map(|b| b.1)
     }
