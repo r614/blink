@@ -46,7 +46,7 @@ pub fn spawn_lights(map: &DishonoredMap, commands: &mut Commands, features: &Ren
         let dir = coords::dir(l.direction).normalize_or(Vec3::NEG_Y);
         let up = if dir.abs().dot(Vec3::Y) > 0.99 { Vec3::Z } else { Vec3::Y };
         let at = Transform::from_translation(coords::pos(l.position)).looking_to(dir, up);
-        let shadows = l.casts_shadows && l.dominant;
+        let shadows = l.casts_shadows && l.dominant && std::env::var("DISHONORED_NO_SHADOWS").is_err();
         match l.kind {
             LightKind::Directional => {
                 commands.spawn((
@@ -58,7 +58,7 @@ pub fn spawn_lights(map: &DishonoredMap, commands: &mut Commands, features: &Ren
                         affects_lightmapped_mesh_diffuse: true,
                         ..default()
                     },
-                    CascadeShadowConfigBuilder { num_cascades: 4, first_cascade_far_bound: 12.0, maximum_distance: 220.0, ..default() }.build(),
+                    CascadeShadowConfigBuilder { num_cascades: 3, first_cascade_far_bound: 15.0, maximum_distance: 200.0, ..default() }.build(),
                     at,
                     MapLight { source: l.source.clone() },
                 ));
@@ -72,7 +72,9 @@ pub fn spawn_lights(map: &DishonoredMap, commands: &mut Commands, features: &Ren
                         intensity: local_intensity(l),
                         range: l.radius * coords::UU_TO_BEVY,
                         radius: 0.1,
-                        shadow_maps_enabled: shadows,
+                        // Cube shadow maps cost six scene passes; the one dominant point light
+                        // (sewer) is left unshadowed for frame time.
+                        shadow_maps_enabled: false,
                         affects_lightmapped_mesh_diffuse: true,
                         ..default()
                     },

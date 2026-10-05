@@ -62,6 +62,8 @@ pub struct ImportStats {
     pub lightmaps_none: usize,
     pub lightmap_parse_failures: usize,
     pub lightmap_atlases: usize,
+    /// Pages after packing the atlases for batching.
+    pub lightmap_pages: usize,
     /// Distinct cross-package references that no indexed package defines.
     pub unresolved_paths: Vec<String>,
     /// MIC parent chains that end at an undefined import.
@@ -624,6 +626,56 @@ impl Importer<'_> {
             }
         }
         self.stats.lightmap_atlases = self.map.lightmaps.len();
+        self.pack_lightmap_pages(4096);
+        self.stats.lightmap_pages = self.map.lightmaps.len();
+    }
+
+    /// Shelf-pack the baked atlases (each kept intact) into a few large pages. Every distinct
+    /// lightmap image breaks Bevy's draw batching; 196 atlases cost ~4x frame time on Boyle Ext.
+    fn pack_lightmap_pages(&mut self, page: u32) {
+        let atlases = std::mem::take(&mut self.map.lightmaps);
+        let mut order: Vec<usize> = (0..atlases.len()).collect();
+        order.sort_by_key(|&i| (std::cmp::Reverse(atlases[i].height), std::cmp::Reverse(atlases[i].width)));
+        // atlas -> (page, x, y)
+        let mut place = vec![(0usize, 0u32, 0u32); atlases.len()];
+        let mut pages: Vec<LightmapAtlas> = Vec::new();
+        let (mut x, mut y, mut shelf_h) = (0u32, 0u32, 0u32);
+        for &i in &order {
+            let a = &atlases[i];
+            let (w, h) = (a.width.min(page), a.height.min(page));
+            if pages.is_empty() || x + w > page {
+                x = 0;
+                y += shelf_h;
+                shelf_h = 0;
+            }
+            if pages.is_empty() || y + h > page {
+                pages.push(LightmapAtlas { source: format!("lightmap page {}", pages.len()), width: page, height: page, texels: vec![0; (page * page) as usize] });
+                x = 0;
+                y = 0;
+                shelf_h = 0;
+            }
+            let p = pages.len() - 1;
+            for row in 0..h {
+                let src = (row * a.width) as usize;
+                let dst = ((y + row) * page + x) as usize;
+                pages[p].texels[dst..dst + w as usize].copy_from_slice(&a.texels[src..src + w as usize]);
+            }
+            place[i] = (p, x, y);
+            x += w;
+            shelf_h = shelf_h.max(h);
+        }
+        let pf = page as f32;
+        for inst in &mut self.map.instances {
+            if let Some(lm) = inst.lightmap.as_mut() {
+                let a = &atlases[lm.atlas];
+                let (p, ox, oy) = place[lm.atlas];
+                let map_uv = |uv: Vec2| Vec2::new((ox as f32 + uv.x * a.width as f32) / pf, (oy as f32 + uv.y * a.height as f32) / pf);
+                lm.atlas = p;
+                lm.uv_min = map_uv(lm.uv_min);
+                lm.uv_max = map_uv(lm.uv_max);
+            }
+        }
+        self.map.lightmaps = pages;
     }
 
     fn resolve(&mut self, slot: usize, r: ObjRef) -> Option<Key> {

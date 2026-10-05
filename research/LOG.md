@@ -270,3 +270,17 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Confidence:** CONFIRMED (tooling).
 - **Implementation consequence:** Once original-game captures exist at the same poses, the SSIM table turns the
   approximations above (lightmap formula, light falloff, exposure) into measurable targets.
+
+## 2026-10-04 — Frame time
+- **Question:** What do the fidelity features cost?
+- **Evidence:** HUD fps after 35 s of the offline game (960x540, 1 bot, same spawn), `harness_out/perf/*/t35.png`:
+  baseline 160, full renderer with 208 separate lightmap atlases 18, `--no-lightmaps` 81. After shelf-packing all
+  atlases into one 4096x4096 RGB9E5 page (`Importer::pack_lightmap_pages`): full 31-34, `--no-dynamic-lights` 69,
+  `--no-materials` 33. Disabling all shadows (`DISHONORED_NO_SHADOWS=1`) did not measurably help (27); readings
+  vary by roughly +-10 fps between runs (other GPU work on the machine).
+- **Result:** Packing gave ~1.8x. The dominant point light's cube shadow is disabled and the moon uses 3 cascades.
+  The remaining gap to baseline is not yet attributed (candidates: per-light clustered shading over ~4,400 entities,
+  lightmapped + normal-mapped pipeline variants, env-map prefiltering, bloom).
+- **Confidence:** LIKELY (noisy measurements, no GPU profiler run).
+- **Implementation consequence:** Needs a proper GPU profile before shipping; merging static meshes per material
+  would cut draw calls the most.
