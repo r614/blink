@@ -33,9 +33,14 @@
 //!   guard entering Combat) is an `AllyBusted` group stimulus for civilians within
 //!   `m_fGroupDistance`.
 //!
-//! What is inferred (LIKELY/SPECULATIVE in `research/UNKNOWNS.md`): the light level (the
-//! simulation has no light probe: `LIGHT_LEVEL`), the speed normalisation of the player's
-//! visibility, squad restrictions of routes, and alarm bells.
+//! - **Factions** (`DisTweaks_Faction`, forbidden zones, `SetDisposition`): relationships per
+//!   tick (`Social`); **alarm bells** (`DisBehaviorTriggerAlarm`, `DisAlarmBell`); **barks**
+//!   (`AiEvent::Bark` at the original's dialog-hook points); the light probe (`light_at`) and
+//!   hearing occlusion.
+//!
+//! What is inferred (LIKELY/SPECULATIVE in `research/UNKNOWNS.md` U-120..U-125): the light
+//! probe's scale, hearing through audio cells, the bark attachment to this port's states, and
+//! the alarm decision details.
 
 use dishonored_ir::ai::{AiConfig, AiLevel, AlarmBellDef, AttentionConfig, AttentionIncrease, DAL_BUSTED, DAL_HEAD_TRACK, DAL_INVESTIGATE, DAL_TURN_TO_FACE, FactionTable, ForbiddenZone, PatrolRoute, PlayerVisibilityConfig, ProbeLight, Relationship, VisionConfig, reason};
 use std::collections::BTreeMap;
