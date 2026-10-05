@@ -2413,6 +2413,7 @@ name = "dishonored_mission"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dishonored_conversation",
  "glam",
  "ron",
  "serde",
@@ -2424,6 +2425,7 @@ version = "0.1.0"
 dependencies = [
  "dishonored_ai",
  "dishonored_bots",
+ "dishonored_conversation",
  "dishonored_ir",
  "dishonored_mission",
  "dishonored_sim",

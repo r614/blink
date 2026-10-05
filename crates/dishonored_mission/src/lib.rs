@@ -55,6 +55,11 @@ pub struct MissionDef {
     pub crowd: Option<CrowdDef>,
     #[serde(default)]
     pub settings: MissionSettings,
+    /// Extra cooked packages whose dialog graphs to load (the packages named by
+    /// conversation references, and the map's packages when a reference is unqualified,
+    /// are loaded anyway).
+    #[serde(default)]
+    pub dialog_packages: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -183,6 +188,26 @@ pub struct NpcDef {
     /// Talk prompt: the NPC can be talked to with F (`Talk(npc)` trigger).
     #[serde(default)]
     pub talk: Option<String>,
+    /// Original conversation played when a player talks to this NPC: a one-shot
+    /// (`"L_Boyle_Int_Script:DisDialogOneShot_9"`, entered through its `DDH_PLAYER_USED`
+    /// hook like pressing use in the original) or a conversation
+    /// (`"L_Boyle_Int_Script:DisDialogOneShot_9/Hits_On_Player"`). Implies a "Talk" prompt.
+    #[serde(default)]
+    pub talk_conversation: Option<String>,
+    /// Original actor this NPC stands in for (normally the `DishonoredSpawner_N` a dialog
+    /// one-shot attaches its speaker to). Defaults to `at` when that is an `Actor(..)`.
+    #[serde(default)]
+    pub speaker: Option<String>,
+}
+
+impl NpcDef {
+    /// The original actor whose dialog lines this NPC speaks.
+    pub fn speaker_actor(&self) -> Option<&str> {
+        self.speaker.as_deref().or(match &self.at {
+            Place::Actor(a) => Some(a.as_str()),
+            _ => None,
+        })
+    }
 }
 
 fn yes() -> bool {
@@ -257,6 +282,12 @@ pub enum Trigger {
     Use(String),
     /// A player talks to an NPC (F).
     Talk(String),
+    /// An original conversation reaches a `DisConv_KismetActivateRemoteEvent` (the
+    /// `DisSeqEvent_DialogOutputs` output of that name). `"Name"` or
+    /// `"DisDialogOneShot_N/Name"` to require the one-shot.
+    ConversationOutput(String),
+    /// An original conversation ends (label, `OneShot/label` or `Package:OneShot/label`).
+    ConversationEnded(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -318,6 +349,14 @@ pub enum Action {
     NotUsable(String),
     /// Level travel to a tagged `PlayerStart` (`SetPlayerTravelDestination` + change level).
     Travel(String),
+    /// Start an original conversation (`DisSeqAct_DialogInputs`): a conversation
+    /// (`"Package:DisDialogOneShot_N/<label>"`), a Kismet hook name of the one-shot
+    /// (`".../Come In"`) or a one-shot (its use hook). The NPC ids speak the one-shot's
+    /// speakers in order (me, then others); unlisted speakers bind to NPCs standing in for
+    /// the speaker's original actor (`NpcDef.speaker`/`at`). Interrupts the one-shot.
+    Conversation(String, Vec<String>),
+    /// Stop conversations matching a reference (`""` = all); their `Interrupted` output runs.
+    StopConversation(String),
     /// End the mission.
     Complete(String),
     Fail(String),
@@ -473,6 +512,12 @@ impl MissionDef {
                         route.iter().for_each(|m| marker(m, &mut e));
                     }
                     Action::EnableRule(r) | Action::DisableRule(r) if !rules.contains(r.as_str()) => e.push(format!("unknown rule '{r}'")),
+                    Action::Conversation(c, speakers) => {
+                        if c.trim().is_empty() {
+                            e.push("Conversation needs a reference".into());
+                        }
+                        speakers.iter().filter(|s| !s.is_empty()).for_each(|s| npc(s, &mut e));
+                    }
                     _ => {}
                 });
             }
@@ -487,6 +532,49 @@ impl MissionDef {
         }
         errs
     }
+}
+
+impl MissionDef {
+    /// Every original conversation reference in the mission (actions and NPC talk).
+    pub fn conversation_refs(&self) -> Vec<String> {
+        fn walk(a: &[Action], out: &mut Vec<String>) {
+            for x in a {
+                match x {
+                    Action::Conversation(c, _) => out.push(c.clone()),
+                    Action::After(_, v) => walk(v, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut out: Vec<String> = self.npcs.iter().filter_map(|n| n.talk_conversation.clone()).collect();
+        for r in &self.rules {
+            walk(&r.then, &mut out);
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Cooked packages whose dialog graphs the mission needs: the package prefix of each
+    /// qualified reference, `dialog_packages`, and `map_packages` when a reference has no
+    /// package.
+    pub fn dialog_packages_needed(&self, map_packages: &[String]) -> Vec<String> {
+        let mut out = self.dialog_packages.clone();
+        for r in self.conversation_refs() {
+            match r.split_once(':') {
+                Some((p, _)) => out.push(p.to_string()),
+                None => out.extend(map_packages.iter().cloned()),
+            }
+        }
+        let mut seen = BTreeSet::new();
+        out.retain(|p| seen.insert(p.to_ascii_lowercase()));
+        out
+    }
+}
+
+/// Check every conversation reference against the loaded dialog data.
+pub fn validate_conversations(def: &MissionDef, db: &dishonored_conversation::ConversationDb) -> Vec<String> {
+    def.conversation_refs().iter().filter_map(|r| db.resolve(r).err()).collect()
 }
 
 fn contains_end(actions: &[Action]) -> bool {

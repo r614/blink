@@ -83,6 +83,10 @@ pub struct MissionSetup {
     pub doors: Vec<TravelDoor>,
     /// (map, tag, position, yaw)
     pub tagged_starts: Vec<(String, String, Vec3, f32)>,
+    /// Original dialog graphs the mission references, read from the install by the host
+    /// (stored in replays so they play back identically).
+    #[serde(default)]
+    pub conversations: Option<dishonored_conversation::ConversationDb>,
 }
 
 /// Resolve a place to (position, yaw, map index).
@@ -197,7 +201,7 @@ impl MissionSetup {
                 }
             }
         }
-        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged })
+        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None })
     }
 }
 
@@ -241,6 +245,8 @@ pub struct MissionMatch {
     /// Players with a door confirmation open (player -> door index).
     choosing: BTreeMap<PlayerId, usize>,
     arrived: Option<String>,
+    /// Dialog choice buttons held last tick (edge detection).
+    choice_held: BTreeMap<PlayerId, u16>,
 }
 
 impl MissionMatch {
@@ -254,6 +260,9 @@ impl MissionMatch {
         let mut state = MissionState::new(setup.def.clone(), setup.markers.clone());
         state.marker_map = setup.marker_map.clone();
         let current_map = setup.start_map.clone();
+        if let Some(db) = &setup.conversations {
+            state.set_conversations(std::sync::Arc::new(db.clone()));
+        }
         let mut m = MissionMatch {
             world: WorldState::default(),
             view: MatchView { mode: "mission".into(), phase: MatchPhase::Playing, mission: Some(state.view.clone()), map: current_map.clone(), ..Default::default() },
@@ -274,6 +283,7 @@ impl MissionMatch {
             pending_travel: None,
             choosing: BTreeMap::new(),
             arrived: None,
+            choice_held: BTreeMap::new(),
         };
         m.populate_fresh(cfg);
         for c in m.state.initial_commands() {
@@ -468,10 +478,11 @@ impl MissionMatch {
     pub fn step(&mut self, inputs: &[(PlayerId, PlayerInput)], world: &dyn WorldQuery, cfg: &SimConfig) -> StepOutput {
         let dt = dishonored_sim::movement::DT;
         // A player answering a dialog choice does not move or act (the original takes control away).
+        let conv_chooser = self.state.view.choice.as_ref().and_then(|c| c.player);
         let mut all: Vec<(PlayerId, PlayerInput)> = inputs
             .iter()
             .map(|(id, i)| {
-                if self.choosing.contains_key(id) {
+                if self.choosing.contains_key(id) || conv_chooser == Some(*id) {
                     (*id, PlayerInput { tick: i.tick, yaw: i.yaw, pitch: i.pitch, left_hand: i.left_hand, ..Default::default() })
                 } else {
                     (*id, *i)
@@ -502,12 +513,19 @@ impl MissionMatch {
         }
         // F (use): on press, interact with what the player is looking at.
         for (id, inp) in inputs {
+            let held = inp.buttons & dishonored_sim::input::buttons::CHOICES.iter().fold(0, |a, b| a | b);
+            let prev = self.choice_held.insert(*id, held).unwrap_or(0);
             if self.choosing.contains_key(id) {
                 continue;
+            }
+            // Conversation choices (`DisConv_PlayerChoice`), on the CHOICE_n press edge.
+            if let Some(k) = dishonored_sim::input::buttons::CHOICES.iter().position(|b| held & b != 0 && prev & b == 0) {
+                events.push(MissionEvent::Choice { player: *id, index: k });
             }
             let pressed = inp.buttons & dishonored_sim::input::buttons::USE != 0;
             if pressed && self.use_held.insert(*id) {
                 match self.interaction(*id) {
+                    Some(Interaction::Mission(MissionEvent::Talked(npc))) => events.push(MissionEvent::TalkedBy { npc, player: *id }),
                     Some(Interaction::Mission(e)) => events.push(e),
                     Some(Interaction::Door(i)) => {
                         let d = &self.setup.doors[i];
@@ -599,6 +617,21 @@ impl MissionMatch {
             let npc_positions: BTreeMap<String, Vec3> = self.npc_by_id.iter().filter_map(|(id, n)| self.world.player(*id).filter(|p| p.alive).map(|p| (n.clone(), p.position))).collect();
             let total = (self.setup.crowd.as_ref().map(|c| c.spawns.len()).unwrap_or(0) + self.setup.npcs.len()) as u32;
             let map = self.current_map.clone();
+            // Speaker gating for conversations (m_bNotWhileInCombat / Fearful / Suspicious).
+            self.state.npc_suspicion = self
+                .crowd
+                .brains
+                .iter()
+                .filter_map(|b| {
+                    let n = self.npc_by_id.get(&b.id)?;
+                    let level = match b.state {
+                        BrainState::Combat | BrainState::Flee => 2,
+                        BrainState::React | BrainState::Investigate => 1,
+                        _ => 0,
+                    };
+                    Some((n.clone(), level))
+                })
+                .collect();
             let cmds = self.state.step(&StepInput { dt, map: &map, players: &players, npc_positions: &npc_positions, events: &events, total_npcs: total });
             for c in cmds {
                 self.apply(c, cfg);
@@ -619,6 +652,18 @@ impl MissionMatch {
             mv.usables.push(((d.position + Vec3::Z * 60.0).to_array(), d.prompt.clone()));
         }
         mv.choices = self.choosing.iter().map(|(p, d)| (*p, self.setup.doors[*d].choices.clone())).collect();
+        // A conversation choice joins the same list (one input path for both).
+        if let Some(c) = &mv.choice {
+            let who: Vec<PlayerId> = match c.player {
+                Some(p) => vec![p],
+                None => self.humans.clone(),
+            };
+            for p in who {
+                if !mv.choices.iter().any(|x| x.0 == p) {
+                    mv.choices.push((p, c.options.clone()));
+                }
+            }
+        }
         self.view.mission = Some(mv);
         self.view.map = self.current_map.clone();
         self.last_events = out.events.clone();

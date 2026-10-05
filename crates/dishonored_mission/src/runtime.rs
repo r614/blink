@@ -4,9 +4,12 @@
 //! does within a frame), and returns commands for the host to apply to NPCs.
 
 use crate::{Action, Behavior, Condition, MissionDef, NpcKind, TargetRef, TaskState, Trigger};
+use dishonored_conversation::runner::{ConvEnv, ConvEvent, Runner, StartSpec};
+use dishonored_conversation::{ConversationDb, Target};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 /// Gameplay facts reported by the host.
 #[derive(Debug, Clone, PartialEq)]
@@ -23,6 +26,43 @@ pub enum MissionEvent {
     Talked(String),
     /// Players arrived in a persistent map.
     Arrived(String),
+    /// A player talked to an NPC (the player becomes the conversation's initiator, who
+    /// makes its choices).
+    TalkedBy { npc: String, player: u32 },
+    /// A player picked option `index` (0-based) of the dialog choice shown to them.
+    Choice { player: u32, index: usize },
+}
+
+/// A line being spoken (replicated; the HUD shows the subtitle, clients play the VO).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DialogueLineView {
+    pub id: u32,
+    pub speaker: String,
+    /// Mission NPC speaking it (3D VO on its pawn); None with `player` false = unbound.
+    pub npc: Option<String>,
+    pub player: bool,
+    pub text: String,
+    /// Wwise event + voice bank (`Bk_<GUID>`) of the original VO.
+    pub vo_event: Option<String>,
+    pub vo_bank: Option<String>,
+    /// Conversation time the line started (seconds) and its length.
+    pub start: f32,
+    pub duration: f32,
+    /// Seconds left at the time of this view.
+    pub remaining: f32,
+    /// `m_bMainSubtitle` (false for barks).
+    pub main: bool,
+    pub conversation: String,
+}
+
+/// A player choice waiting for input.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DialogueChoiceView {
+    pub id: u32,
+    pub options: Vec<String>,
+    /// Player who chooses (the initiator); None = anyone.
+    pub player: Option<u32>,
+    pub conversation: String,
 }
 
 /// Requests for the host.
@@ -124,8 +164,15 @@ pub struct MissionView {
     #[serde(default)]
     pub npc_ids: Vec<(String, u32)>,
     /// Open dialog choices: (player id, options). Picked with the CHOICE_n buttons.
+    /// Scripted choices (travel doors) and conversation choices share this list.
     #[serde(default)]
     pub choices: Vec<(u32, Vec<String>)>,
+    /// Lines being spoken in original conversations (oldest first).
+    #[serde(default)]
+    pub dialogue: Vec<DialogueLineView>,
+    /// Player choice waiting for input.
+    #[serde(default)]
+    pub choice: Option<DialogueChoiceView>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -147,6 +194,52 @@ enum Ev {
     Use(String),
     Talk(String),
     Arrived(String),
+    ConvOutput { name: String, oneshot: Option<String> },
+    ConvEnded { name: String, label: String },
+}
+
+/// The mission as seen by the conversation runner.
+struct Env<'a> {
+    flags: &'a mut BTreeMap<String, bool>,
+    changed: Vec<(String, bool)>,
+    alive: &'a BTreeSet<String>,
+    suspicion: &'a BTreeMap<String, u8>,
+    npc_pos: &'a BTreeMap<String, Vec3>,
+    players: &'a [(u32, Vec3, bool)],
+}
+
+impl ConvEnv for Env<'_> {
+    fn flag(&self, name: &str) -> bool {
+        self.flags.get(name).copied().unwrap_or(false)
+    }
+    fn set_flag(&mut self, name: &str, value: bool) {
+        if self.flags.insert(name.to_string(), value) != Some(value) {
+            self.changed.push((name.to_string(), value));
+        }
+    }
+    fn speaker_available(&self, npc: Option<&str>) -> bool {
+        npc.is_none_or(|n| self.alive.contains(n))
+    }
+    fn suspicion(&self, npc: Option<&str>) -> u8 {
+        npc.and_then(|n| self.suspicion.get(n).copied()).unwrap_or(0)
+    }
+    fn distance(&self, player: Option<u32>, npc: Option<&str>) -> Option<f32> {
+        let np = self.npc_pos.get(npc?)?;
+        let p = self.players.iter().find(|p| Some(p.0) == player || player.is_none())?;
+        Some(p.1.distance(*np))
+    }
+}
+
+fn actor_matches(reference: &str, package: &str, name: &str) -> bool {
+    match reference.split_once(':') {
+        Some((p, n)) => p.eq_ignore_ascii_case(package) && n.eq_ignore_ascii_case(name),
+        None => reference.eq_ignore_ascii_case(name),
+    }
+}
+
+/// `ConversationEnded(x)`: label, `OneShot/label` or the full `Package:OneShot/label`.
+fn conv_name_matches(want: &str, name: &str, label: &str) -> bool {
+    want.eq_ignore_ascii_case(name) || (!label.is_empty() && want.eq_ignore_ascii_case(label)) || name.to_ascii_lowercase().ends_with(&format!(":{}", want.to_ascii_lowercase()))
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +270,16 @@ pub struct MissionState {
     pub usable: BTreeMap<String, String>,
     pub talk: BTreeMap<String, String>,
     pub view: MissionView,
+    /// Original conversations (when the mission references any and the host loaded them).
+    pub conv: Option<Runner>,
+    /// Every conversation event so far (tools and the harness read it; capped).
+    pub conv_log: Vec<ConvEvent>,
+    /// Conversation references that failed to start, with the reason.
+    pub conv_errors: Vec<String>,
+    /// Mission NPC -> 0 calm / 1 suspicious / 2 combat or fleeing (set by the host).
+    pub npc_suspicion: BTreeMap<String, u8>,
+    last_players: Vec<(u32, Vec3, bool)>,
+    last_npc_pos: BTreeMap<String, Vec3>,
 }
 
 impl MissionState {
@@ -196,7 +299,7 @@ impl MissionState {
         let npc_alive = def.npcs.iter().filter(|n| n.spawn_at_start).map(|n| n.id.clone()).collect();
         let view = MissionView { title: def.title.clone(), briefing: def.briefing.clone(), ..Default::default() };
         let usable = def.markers.iter().filter_map(|m| m.usable.clone().map(|p| (m.id.clone(), p))).collect();
-        let talk = def.npcs.iter().filter_map(|n| n.talk.clone().map(|p| (n.id.clone(), p))).collect();
+        let talk = def.npcs.iter().filter_map(|n| n.talk.clone().or_else(|| n.talk_conversation.as_ref().map(|_| "Talk".to_string())).map(|p| (n.id.clone(), p))).collect();
         let mut s = MissionState {
             def,
             markers,
@@ -221,9 +324,88 @@ impl MissionState {
             usable,
             talk,
             view,
+            conv: None,
+            conv_log: Vec::new(),
+            conv_errors: Vec::new(),
+            npc_suspicion: BTreeMap::new(),
+            last_players: Vec::new(),
+            last_npc_pos: BTreeMap::new(),
         };
         s.refresh_view(&BTreeMap::new());
         s
+    }
+
+    /// Attach the original dialog data the mission references (loaded by the host from the
+    /// install). The runner seed derives from the mission title, so replays match.
+    pub fn set_conversations(&mut self, db: Arc<ConversationDb>) {
+        let seed = self.def.title.bytes().fold(0xC0FFEEu64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64));
+        self.conv = Some(Runner::new(db, seed));
+    }
+
+    fn conv_bindings(&self, target: &Target, explicit: &[String], talker: Option<&str>) -> Vec<Option<String>> {
+        let Some(r) = &self.conv else { return Vec::new() };
+        let oneshot = match target {
+            Target::Conversation { oneshot, .. } => *oneshot,
+            Target::Hook { oneshot, .. } => Some(*oneshot),
+        };
+        let pick = |k: usize| explicit.get(k).filter(|s| !s.is_empty()).cloned();
+        let Some(o) = oneshot else { return (0..explicit.len().max(1)).map(|k| pick(k).or_else(|| (k == 0).then(|| talker.map(str::to_string)).flatten())).collect() };
+        let os = &r.db.oneshots[o as usize];
+        (0..os.speakers.len().max(1))
+            .map(|k| {
+                if let Some(e) = pick(k) {
+                    return Some(e);
+                }
+                let auto = os.speakers.get(k).and_then(|sp| sp.actor.as_ref()).and_then(|actor| self.def.npcs.iter().find(|n| n.speaker_actor().is_some_and(|a| actor_matches(a, &os.package, actor)))).map(|n| n.id.clone());
+                auto.or_else(|| (k == 0).then(|| talker.map(str::to_string)).flatten())
+            })
+            .collect()
+    }
+
+    /// Start an original conversation by reference (mission action, NPC talk).
+    fn start_conversation(&mut self, reference: &str, speakers: &[String], initiator: Option<u32>, talker: Option<&str>, force: bool, queue: &mut VecDeque<Ev>) {
+        let Some(r) = &self.conv else {
+            self.conv_errors.push(format!("{reference}: no dialog data loaded"));
+            return;
+        };
+        let target = match r.db.resolve(reference) {
+            Ok(t) => t,
+            Err(e) => {
+                self.conv_errors.push(e);
+                return;
+            }
+        };
+        let bindings = self.conv_bindings(&target, speakers, talker);
+        let initiator = initiator.or_else(|| self.last_players.iter().find(|p| p.2).map(|p| p.0));
+        let spec = StartSpec { target, initiator, bindings, force };
+        self.with_conv(queue, move |runner, env| {
+            runner.start(spec, env);
+        });
+    }
+
+    /// Run something against the conversation runner, then feed its events into the rule
+    /// queue (Kismet-style cascade within the step).
+    fn with_conv(&mut self, queue: &mut VecDeque<Ev>, f: impl FnOnce(&mut Runner, &mut dyn ConvEnv)) {
+        let Some(runner) = self.conv.as_mut() else { return };
+        let mut env = Env { flags: &mut self.flags, changed: Vec::new(), alive: &self.npc_alive, suspicion: &self.npc_suspicion, npc_pos: &self.last_npc_pos, players: &self.last_players };
+        f(runner, &mut env);
+        let changed = env.changed;
+        let events = runner.take_events();
+        for (name, v) in changed {
+            queue.push_back(Ev::Flag(name, v));
+        }
+        for e in events {
+            match &e {
+                ConvEvent::Output { name, oneshot, .. } => queue.push_back(Ev::ConvOutput { name: name.clone(), oneshot: oneshot.clone() }),
+                ConvEvent::Ended { name, label, .. } => queue.push_back(Ev::ConvEnded { name: name.clone(), label: label.clone() }),
+                _ => {}
+            }
+            self.conv_log.push(e);
+        }
+        let n = self.conv_log.len();
+        if n > 4096 {
+            self.conv_log.drain(..n - 4096);
+        }
     }
 
     pub fn outcome(&self) -> Option<&Outcome> {
@@ -262,6 +444,8 @@ impl MissionState {
         self.current_map = input.map.to_string();
         self.view.stats.time = self.time;
         self.view.stats.total_npcs = input.total_npcs;
+        self.last_players = input.players.to_vec();
+        self.last_npc_pos = input.npc_positions.clone();
         let mut queue: VecDeque<Ev> = VecDeque::new();
         if !self.started {
             self.started = true;
@@ -324,10 +508,26 @@ impl MissionState {
                     queue.push_back(Ev::PlayerKilled);
                 }
                 MissionEvent::Used(m) => queue.push_back(Ev::Use(m.clone())),
-                MissionEvent::Talked(n) => queue.push_back(Ev::Talk(n.clone())),
                 MissionEvent::Arrived(m) => queue.push_back(Ev::Arrived(m.clone())),
+                MissionEvent::Talked(n) => {
+                    queue.push_back(Ev::Talk(n.clone()));
+                    self.talk_conversation(n, None, &mut queue);
+                }
+                MissionEvent::TalkedBy { npc, player } => {
+                    queue.push_back(Ev::Talk(npc.clone()));
+                    self.talk_conversation(npc, Some(*player), &mut queue);
+                }
+                MissionEvent::Choice { player, index } => {
+                    let (p, i) = (*player, *index);
+                    self.with_conv(&mut queue, |r, env| {
+                        r.choose(p, i, env);
+                    });
+                }
             }
         }
+        // Conversations advance (lines end, the next nodes run).
+        let dt = input.dt;
+        self.with_conv(&mut queue, |r, env| r.update(dt, env));
         // Delayed actions that are due run before rules (they were scheduled earlier).
         let due: Vec<Vec<Action>> = {
             let t = self.time;
@@ -373,6 +573,13 @@ impl MissionState {
         out
     }
 
+    /// Talking to an NPC with `talk_conversation` enters it (low priority: an NPC already
+    /// in a conversation ignores the request, like the original's use hook).
+    fn talk_conversation(&mut self, npc: &str, player: Option<u32>, queue: &mut VecDeque<Ev>) {
+        let Some(reference) = self.def.npcs.iter().find(|n| n.id == npc).and_then(|n| n.talk_conversation.clone()) else { return };
+        self.start_conversation(&reference, &[], player, Some(npc), false, queue);
+    }
+
     fn matches(&mut self, ri: usize, ev: &Ev) -> bool {
         let r = &self.def.rules[ri];
         match (&r.on, ev) {
@@ -399,6 +606,11 @@ impl MissionState {
             (Trigger::Use(m), Ev::Use(x)) => m == x,
             (Trigger::Talk(n), Ev::Talk(x)) => n == x,
             (Trigger::Arrived(m), Ev::Arrived(x)) => m.eq_ignore_ascii_case(x),
+            (Trigger::ConversationOutput(want), Ev::ConvOutput { name, oneshot }) => match want.split_once('/') {
+                Some((os, n)) => n.eq_ignore_ascii_case(name) && oneshot.as_deref().is_some_and(|o| o.eq_ignore_ascii_case(os.rsplit(':').next().unwrap_or(os))),
+                None => want.eq_ignore_ascii_case(name),
+            },
+            (Trigger::ConversationEnded(want), Ev::ConvEnded { name, label }) => conv_name_matches(want, name, label),
             _ => false,
         }
     }
@@ -539,6 +751,22 @@ impl MissionState {
                     self.usable.remove(m);
                 }
                 Action::Travel(tag) => out.push(Command::Travel(tag.clone())),
+                Action::Conversation(c, speakers) => self.start_conversation(c, speakers, None, None, true, queue),
+                Action::StopConversation(c) => {
+                    let c = c.clone();
+                    let db = self.conv.as_ref().map(|r| r.db.clone());
+                    self.with_conv(queue, |r, env| {
+                        let Some(db) = db else { return };
+                        r.stop_where(env, |i| {
+                            if c.is_empty() {
+                                return true;
+                            }
+                            let os = i.oneshot.map(|o| db.oneshots[o as usize].name.clone()).unwrap_or_default();
+                            let (name, label) = i.conversation.map(|cv| (db.conversation_name(cv), db.conversations[cv as usize].label.clone())).unwrap_or_default();
+                            conv_name_matches(&c, &name, &label) || os.eq_ignore_ascii_case(c.rsplit(':').next().unwrap_or(&c))
+                        });
+                    });
+                }
                 Action::Complete(t) => self.end(true, t.clone()),
                 Action::Fail(t) => self.end(false, t.clone()),
             }
@@ -566,6 +794,34 @@ impl MissionState {
         let on_map = |m: &String| self.current_map.is_empty() || self.marker_map.get(m).is_none_or(|mm| mm.eq_ignore_ascii_case(&self.current_map));
         self.view.usables = self.usable.iter().filter(|(m, _)| on_map(m)).filter_map(|(m, p)| self.markers.get(m).map(|x| (x.0.to_array(), p.clone()))).collect();
         self.view.talkers = self.talk.iter().filter(|(n, _)| self.npc_alive.contains(*n)).map(|(n, p)| (n.clone(), p.clone())).collect();
+        self.view.dialogue.clear();
+        self.view.choice = None;
+        if let Some(r) = &self.conv {
+            for inst in r.active() {
+                let conversation = inst.conversation.map(|c| r.db.conversation_name(c)).unwrap_or_default();
+                if let Some(l) = &inst.line {
+                    let elapsed = (r.time - l.started) as f32;
+                    self.view.dialogue.push(DialogueLineView {
+                        id: l.id,
+                        speaker: l.speaker.name.clone(),
+                        npc: l.speaker.npc.clone(),
+                        player: l.speaker.player,
+                        text: l.text.clone(),
+                        vo_event: l.vo.as_ref().map(|v| v.event.clone()),
+                        vo_bank: l.vo.as_ref().map(|v| v.bank.clone()),
+                        start: l.started as f32,
+                        duration: l.duration,
+                        remaining: (l.duration - elapsed).max(0.0),
+                        main: l.main,
+                        conversation: conversation.clone(),
+                    });
+                }
+                if let (Some(c), None) = (&inst.choice, &self.view.choice) {
+                    self.view.choice = Some(DialogueChoiceView { id: c.id, options: c.options.clone(), player: c.player, conversation });
+                }
+            }
+            self.view.dialogue.sort_by_key(|l| l.id);
+        }
         // Marker: first visible active task with a target (required tasks first).
         let mut best: Option<(bool, [f32; 3])> = None;
         for (oi, o) in self.def.objectives.iter().enumerate() {

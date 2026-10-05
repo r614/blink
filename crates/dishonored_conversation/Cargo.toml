@@ -10,6 +10,10 @@ default = ["load"]
 # Reading graphs from the cooked packages and resolving VO lengths from the Wwise banks.
 load = ["dep:ue3_package", "dep:dishonored_audio", "dep:anyhow"]
 
+[[bin]]
+name = "conv"
+required-features = ["load"]
+
 [dependencies]
 serde.workspace = true
 ue3_package = { workspace = true, optional = true }
