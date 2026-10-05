@@ -735,6 +735,7 @@ impl Importer<'_> {
                         .iter()
                         .map(|t| [t[0] as u32, t[1] as u32, t[2] as u32])
                         .collect(),
+                    collision_materials: raw.kdop_triangles.iter().map(|t| t[3]).collect(),
                     bounds_min: raw.bounds_origin - raw.bounds_extent,
                     bounds_max: raw.bounds_origin + raw.bounds_extent,
                     positions: raw.positions,
@@ -750,6 +751,31 @@ impl Importer<'_> {
         };
         self.mesh_ids.insert(k, id);
         id
+    }
+
+    /// `DisContactType_*` class of a `PhysicalMaterial`: its `PhysicalMaterialProperty`
+    /// (`DisContactPhysicalMaterial.m_pContactType`, default `DisContactType_Environment`),
+    /// else its `Parent`'s.
+    fn contact_type(&mut self, mut k: Key) -> Option<String> {
+        for _ in 0..8 {
+            let pkg = self.pkgs[k.0].clone();
+            let props = pkg.read_object(k.1).ok()?.properties;
+            if let Some(pp) = find(&props, "PhysicalMaterialProperty").and_then(|p| p.as_object()).filter(|o| *o != 0) {
+                let r = ObjRef::from_index(pp);
+                let ct = match self.resolve(k.0, r) {
+                    Some(pk) => {
+                        let ppkg = self.pkgs[pk.0].clone();
+                        let pprops = ppkg.read_object(pk.1).ok().map(|h| h.properties).unwrap_or_default();
+                        find(&pprops, "m_pContactType").and_then(|p| p.as_object()).filter(|o| *o != 0).map(|c| ppkg.obj_name(ObjRef::from_index(c)))
+                    }
+                    None => None,
+                };
+                return Some(ct.unwrap_or_else(|| "DisContactType_Environment".to_string()));
+            }
+            let parent = find(&props, "Parent").and_then(|p| p.as_object()).filter(|o| *o != 0)?;
+            k = self.resolve(k.0, ObjRef::from_index(parent))?;
+        }
+        None
     }
 
     fn material(&mut self, k: Key) -> Option<MaterialId> {
@@ -861,6 +887,7 @@ impl Importer<'_> {
                 .into_iter()
                 .filter_map(|(n, t)| Some((n.to_string(), t?)))
                 .collect(),
+            contact_type: chain.phys_material.and_then(|pm| self.contact_type(pm)),
         };
         self.map.materials.push(asset);
         let id = self.map.materials.len() - 1;

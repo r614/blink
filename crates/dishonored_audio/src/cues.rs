@@ -139,6 +139,8 @@ pub fn surface_from_name(name: &str) -> &'static str {
 pub struct MapAmbience {
     pub banks: &'static [&'static str],
     pub state_events: &'static [&'static str],
+    /// States set directly (no event sets them for this map; see AUDIO_FORMAT.md).
+    pub states: &'static [(u32, u32)],
     pub bed: &'static str,
     pub music: Option<&'static str>,
 }
@@ -147,13 +149,17 @@ pub fn map_ambience(map: &str) -> Option<MapAmbience> {
     match map.to_ascii_lowercase().as_str() {
         "l_boyle_ext_p" => Some(MapAmbience {
             banks: &["Bank_Amb_LVL_Boyle_Estate", "Bank_Music_Boyle"],
-            state_events: &["Set_State_Amb_LVL_Boyle_Ext_Streets", "Music_State_Boyle_Explor"],
+            state_events: &["Set_State_Amb_LVL_Boyle_Ext_Streets"],
+            // Music interior/exterior group (0x0956DE29): exterior (0x3369_2463). No Boyle
+            // event sets it; the interior ambience events set the interior state.
+            states: &[(156687913, 862528611)],
             bed: "Play_Amb_LVL_Boyle_Estate",
             music: Some("Play_Music_Boyle"),
         }),
         "l_boyle_int_p" => Some(MapAmbience {
             banks: &["Bank_Amb_LVL_Boyle_Int", "Bank_Music_Boyle"],
-            state_events: &["Set_State_Amb_LVL_Boyle_Int_Hall_01", "Music_State_Boyle_Explor"],
+            state_events: &["Set_State_Amb_LVL_Boyle_Int_Hall_01"],
+            states: &[],
             bed: "Play_Amb_LVL_Boyle_Int",
             music: Some("Play_Music_Boyle"),
         }),

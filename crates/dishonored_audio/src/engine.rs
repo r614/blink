@@ -204,6 +204,11 @@ pub(crate) struct Voice {
     pub done: bool,
     pub ended_at: Option<u64>,
     pub max_distance: f32,
+    /// Media length and rate from the header (virtual voices advance without the PCM).
+    pub media_frames: f64,
+    pub media_rate: u32,
+    /// Consecutive inaudible frames.
+    pub virt_frames: u64,
 }
 
 /// Memory of a random/sequence container (per game object unless global).
@@ -280,7 +285,7 @@ pub struct Engine {
     pub init: InitBank,
     pub rate: u32,
     pub store: Arc<PcmStore>,
-    decode_tx: Option<Mutex<Sender<MediaKey>>>,
+    decode_tx: Option<Mutex<Sender<(Arc<SoundLibrary>, MediaKey)>>>,
     sync_decode: bool,
     pub clock: u64,
     rng: u64,
@@ -363,19 +368,33 @@ impl Engine {
         }
     }
 
+    /// Swap the loaded banks (level travel): everything playing stops; states, switches and
+    /// game parameters persist (they are global in Wwise).
+    pub fn replace_library(&mut self, lib: Arc<SoundLibrary>) {
+        self.voices.clear();
+        self.drivers.clear();
+        self.watches.clear();
+        self.music.clear();
+        self.deferred.clear();
+        self.modifiers.clear();
+        self.objs.clear();
+        self.store.map.lock().unwrap().clear();
+        self.store.failed.lock().unwrap().clear();
+        self.lib = lib;
+    }
+
     /// Decode media on `threads` worker threads instead of inline.
     pub fn spawn_decoders(&mut self, threads: usize) {
-        let (tx, rx) = channel::<MediaKey>();
+        let (tx, rx) = channel::<(Arc<SoundLibrary>, MediaKey)>();
         let rx = Arc::new(Mutex::new(rx));
         for i in 0..threads.max(1) {
             let rx = rx.clone();
-            let lib = self.lib.clone();
             let store = self.store.clone();
             std::thread::Builder::new()
                 .name(format!("wwise-decode-{i}"))
                 .spawn(move || {
                     loop {
-                        let k = match rx.lock().unwrap().recv() {
+                        let (lib, k) = match rx.lock().unwrap().recv() {
                             Ok(k) => k,
                             Err(_) => return,
                         };
@@ -421,7 +440,7 @@ impl Engine {
         }
         if self.store.pending.lock().unwrap().insert(k) {
             if let Some(tx) = &self.decode_tx {
-                let _ = tx.lock().unwrap().send(k);
+                let _ = tx.lock().unwrap().send((self.lib.clone(), k));
             }
         }
     }
@@ -1116,7 +1135,10 @@ impl Engine {
                 _ => None,
             })
             .unwrap_or(0.0);
-        self.request(media);
+        let (media_frames, media_rate) = self.lib.media_info(media).map(|i| (i.0 as f64, i.1)).unwrap_or((0.0, 48000));
+        if !is_3d || media_frames <= 0.0 {
+            self.request(media);
+        }
         let pcm = self.store.get(media);
         let id = self.next_voice;
         self.next_voice += 1;
@@ -1157,6 +1179,9 @@ impl Engine {
             done: false,
             ended_at: None,
             max_distance,
+            media_frames,
+            media_rate,
+            virt_frames: 0,
         });
         self.stats.voices_started += 1;
         Some(id)
@@ -1332,14 +1357,56 @@ impl Engine {
             let g = if muted { [0.0; 2] } else { [g[0] * cat, g[1] * cat] };
             params.push((g, v.pitch_cents + dpitch, (v.lpf + dlpf + att_lpf).clamp(0.0, 100.0)));
         }
+        let mut requests = Vec::new();
         for (vi, v) in self.voices.iter_mut().enumerate() {
             if v.done || v.paused {
                 continue;
             }
+            let (target, cents, lpf) = params[vi];
+            let audible = target[0] + target[1] > 1e-7 || v.gain[0] + v.gain[1] > 1e-7;
+            if !audible && v.is_3d && v.media_frames > 0.0 {
+                // Virtual voice (out of range): time advances without decoding or mixing,
+                // and the media is released after a while (resumes from the elapsed time).
+                let first = if v.start_at > clock { (v.start_at - clock) as usize } else { 0 };
+                if first >= n {
+                    continue;
+                }
+                v.started = true;
+                let step = v.media_rate as f64 / rate as f64 * 2f64.powf(cents as f64 / 1200.0);
+                v.pos += (n - first) as f64 * step;
+                let end = v.src_end.unwrap_or(v.media_frames).min(v.media_frames);
+                if v.pos >= end {
+                    if v.loops_left == 1 {
+                        v.done = true;
+                        v.ended_at = Some(clock + n as u64);
+                        continue;
+                    }
+                    if v.loops_left > 1 {
+                        v.loops_left -= 1;
+                    }
+                    let ls = v.pcm.as_ref().and_then(|p| p.loop_range).map(|l| l.0 as f64).unwrap_or(0.0);
+                    v.pos = ls + (v.pos - end) % (end - ls).max(1.0);
+                }
+                if v.stop_at.is_some_and(|s| clock + n as u64 >= s) {
+                    v.done = true;
+                    continue;
+                }
+                v.virt_frames += n as u64;
+                if v.virt_frames > rate as u64 * 5 {
+                    v.pcm = None;
+                }
+                continue;
+            }
+            v.virt_frames = 0;
             let Some(pcm) = v.pcm.clone() else {
                 // Media not ready: the voice waits (starts late).
+                requests.push(v.media);
                 if v.start_at < clock + n as u64 {
-                    v.start_at = clock + n as u64;
+                    if v.started {
+                        // Coming back from virtual: keep the elapsed position.
+                    } else {
+                        v.start_at = clock + n as u64;
+                    }
                 }
                 continue;
             };
@@ -1350,7 +1417,6 @@ impl Engine {
             if !v.started {
                 v.started = true;
             }
-            let (target, cents, lpf) = params[vi];
             let ch = pcm.channels.max(1) as usize;
             let frames = pcm.frames() as f64;
             let end = v.src_end.unwrap_or(frames).min(frames);
@@ -1419,6 +1485,9 @@ impl Engine {
                     v.ended_at = Some(clock + n as u64);
                 }
             }
+        }
+        for k in requests {
+            self.request(k);
         }
     }
 

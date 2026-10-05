@@ -141,7 +141,7 @@ pub fn load_model_with(content: &Content, name: &str, parts: &[(&str, &str)], ov
                         base_material: chain.base_material.clone(),
                         ..Default::default()
                     });
-                    model.materials.push(MaterialAsset { source: pkg.obj_path(ObjRef::Export(mi)), diffuse, normal, blend: if masked { BlendHint::Masked } else { BlendHint::Opaque }, texture_params: Vec::new() });
+                    model.materials.push(MaterialAsset { source: pkg.obj_path(ObjRef::Export(mi)), diffuse, normal, blend: if masked { BlendHint::Masked } else { BlendHint::Opaque }, texture_params: Vec::new(), contact_type: None });
                     Some(model.materials.len() - 1)
                 }),
                 _ => None,

@@ -302,6 +302,7 @@ pub fn animate_characters(
     mut joints: Query<(&Joint, &mut Transform), Without<TpWeaponJoint>>,
     mut wjoints: Query<(&TpWeaponJoint, &mut Transform), Without<Joint>>,
     mut wmeshes: Query<(&TpWeaponMesh, &mut Visibility)>,
+    mut anim_sounds: Option<ResMut<crate::audio::AnimSounds>>,
 ) {
     let Some(lib) = lib else { return };
     let contracts = view.matchv.mode.eq_ignore_ascii_case("contracts");
@@ -320,7 +321,13 @@ pub fn animate_characters(
                             s.key = choice.key.clone();
                             s.time = 0.0;
                         }
+                        let from = s.time;
                         s.time += time.delta_secs() * choice.rate;
+                        // Sound notifies (AnimNotify_AkEvent, footfalls) in the advanced window.
+                        if let Some(snd) = anim_sounds.as_mut() {
+                            let off = if choice.looped { p.id as f32 * 0.37 } else { 0.0 };
+                            snd.advance(p.id, choice.clip, from + off, s.time + off, choice.looped);
+                        }
                         s.time
                     }
                     Err(_) => {

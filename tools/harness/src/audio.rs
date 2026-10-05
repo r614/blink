@@ -163,6 +163,7 @@ pub fn run(_ctx: &Ctx, rep: &mut Report) -> Result<()> {
             });
         }
     }
+    crate::audio_playback::run(rep, &root)?;
     rep.check(sec, "audio checks finished", true, format!("{:.1}s", t0.elapsed().as_secs_f32()));
     Ok(())
 }

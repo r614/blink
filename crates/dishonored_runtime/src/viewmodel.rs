@@ -368,6 +368,7 @@ pub fn animate_view_rig(
     mut joints: Query<(&ViewJoint, &mut Transform), (Without<ViewRoot>, Without<WeaponJoint>)>,
     mut wjoints: Query<(&WeaponJoint, &mut Transform), (Without<ViewRoot>, Without<ViewJoint>)>,
     mut wmeshes: Query<(&WeaponMesh, &mut Visibility), Without<ViewRoot>>,
+    mut anim_sounds: Option<ResMut<crate::audio::AnimSounds>>,
 ) {
     let Some(rig) = rig else { return };
     let Ok((mut root_t, mut root_vis)) = roots.single_mut() else { return };
@@ -391,7 +392,12 @@ pub fn animate_view_rig(
         None => a.left.set(String::new(), "", true, 1.0, Some(snap)),
     }
     for l in [&mut a.right, &mut a.left] {
+        let from = l.time;
         l.time += dt * l.rate;
+        // Sound notifies (AnimNotify_AkEvent, footfalls) of the advanced window.
+        if let Some(s) = anim_sounds.as_mut() {
+            s.advance(me.id, &l.clip, from, l.time, l.looped);
+        }
         l.fade += dt;
     }
     let mut locals: Vec<(Quat, Vec3)> = rig.bones.iter().map(|b| (b.rotation, b.translation)).collect();

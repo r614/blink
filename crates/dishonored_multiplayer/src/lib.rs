@@ -28,6 +28,20 @@ pub struct ScoreEntry {
     pub score: i32,
 }
 
+/// One NPC as the music manager sees it (presentation only).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
+pub struct AiPresence {
+    pub id: PlayerId,
+    /// Hostile to the human players (guards, or a brain holding a human as enemy).
+    pub hostile: bool,
+    /// In combat with a human player.
+    pub combat: bool,
+    /// `Brain::suspicion_level`.
+    pub suspicion: u8,
+    /// `EDisCombatMusicIntensityObjectType` of the pawn (4 = guard).
+    pub music_type: u8,
+}
+
 /// What clients see of the match (replicated in snapshots).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct MatchView {
@@ -48,6 +62,10 @@ pub struct MatchView {
     /// Mission mode: objectives, messages, outcome and stats.
     #[serde(default)]
     pub mission: Option<dishonored_mission::runtime::MissionView>,
+    /// NPC awareness near the human players, for client presentation (the original music
+    /// manager, `DisGlobalMusicManager`). Host-filled; empty outside missions.
+    #[serde(default)]
+    pub ai: Vec<AiPresence>,
 }
 
 /// An NPC look: skeletal mesh parts (package, object path; body first, then head) and material

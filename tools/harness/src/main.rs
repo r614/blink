@@ -26,6 +26,7 @@
 //! ```
 
 mod audio;
+mod audio_playback;
 mod contracts;
 mod conversation;
 mod kismet;

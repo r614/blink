@@ -111,6 +111,13 @@ pub struct CollisionWorld {
     pub bvh: Bvh,
     pub sources: Vec<String>,
     pub bounds: Option<Aabb>,
+    /// Per triangle (parallel to `tris`): index into `surfaces` (0 = none). Presentation only
+    /// (footsteps and impact sounds); the simulation never reads it.
+    #[serde(default)]
+    pub tri_surface: Vec<u16>,
+    /// Contact type class names of the physical materials (`surfaces[0]` is empty).
+    #[serde(default)]
+    pub surfaces: Vec<String>,
     /// Original navigation (attached after loading; not part of the collision cache).
     #[serde(skip)]
     pub nav: Option<std::sync::Arc<nav::NavWorld>>,
@@ -132,20 +139,39 @@ impl CollisionWorld {
             .collect();
         let total = bounds.iter().fold(Aabb::EMPTY, |acc, b| acc.union(b));
         let bvh = Bvh::build(&bounds);
-        CollisionWorld { tris, bvh, sources, bounds: Some(total), nav: None }
+        CollisionWorld { tris, bvh, sources, bounds: Some(total), nav: None, tri_surface: Vec::new(), surfaces: Vec::new() }
     }
 
     /// Build from an imported map: every colliding instance (hidden blockers included).
     pub fn from_map(map: &DishonoredMap) -> Self {
         let mut tris = Vec::new();
         let mut sources = Vec::new();
+        let mut tri_surface = Vec::new();
+        let mut surfaces: Vec<String> = vec![String::new()];
+        let mut surface_id = |name: Option<&String>| -> u16 {
+            let Some(n) = name else { return 0 };
+            match surfaces.iter().position(|s| s == n) {
+                Some(i) => i as u16,
+                None => {
+                    surfaces.push(n.clone());
+                    (surfaces.len() - 1) as u16
+                }
+            }
+        };
         for inst in map.instances.iter().filter(|i| i.collides) {
             let mesh = &map.meshes[inst.mesh];
             let src = sources.len() as u32;
             sources.push(format!("{} <- {}", mesh.source, inst.source));
+            // Surface (contact type) per section: instance override, else the mesh material.
+            let section_surface: Vec<u16> = (0..mesh.sections.len())
+                .map(|i| {
+                    let m = inst.materials.get(i).copied().flatten().or(mesh.sections[i].material);
+                    surface_id(m.and_then(|m| map.materials.get(m)).and_then(|m| m.contact_type.as_ref()))
+                })
+                .collect();
             let xf = inst.transform;
             let mirrored = xf.determinant() < 0.0;
-            let mut push = |i0: u32, i1: u32, i2: u32| {
+            let mut push = |i0: u32, i1: u32, i2: u32, surface: u16| {
                 let (Some(a), Some(b), Some(c)) = (
                     mesh.positions.get(i0 as usize),
                     mesh.positions.get(i1 as usize),
@@ -160,22 +186,34 @@ impl CollisionWorld {
                     return;
                 }
                 tris.push(Tri { a, b, c, n: n.normalize(), channels: channel::ALL, source: src });
+                tri_surface.push(surface);
             };
             if !mesh.collision_triangles.is_empty() {
-                for t in &mesh.collision_triangles {
-                    push(t[0], t[1], t[2]);
+                for (i, t) in mesh.collision_triangles.iter().enumerate() {
+                    let s = mesh.collision_materials.get(i).and_then(|m| section_surface.get(*m as usize)).copied().unwrap_or(0);
+                    push(t[0], t[1], t[2], s);
                 }
             } else {
-                for s in mesh.sections.iter().filter(|s| s.enable_collision) {
+                for (si, s) in mesh.sections.iter().enumerate().filter(|s| s.1.enable_collision) {
                     let start = s.first_index as usize;
                     let end = (start + s.num_triangles as usize * 3).min(mesh.indices.len());
                     for t in mesh.indices[start..end].chunks_exact(3) {
-                        push(t[0], t[1], t[2]);
+                        push(t[0], t[1], t[2], section_surface[si]);
                     }
                 }
             }
         }
-        Self::from_triangles(tris, sources)
+        let mut w = Self::from_triangles(tris, sources);
+        w.tri_surface = tri_surface;
+        w.surfaces = surfaces;
+        w
+    }
+
+    /// Contact type (`DisContactType_*` class) of a triangle's physical material; `None` when
+    /// the material sets none (the game then uses `DisContactType_Environment`).
+    pub fn surface_of(&self, tri: u32) -> Option<&str> {
+        let s = *self.tri_surface.get(tri as usize)? as usize;
+        self.surfaces.get(s).map(String::as_str).filter(|s| !s.is_empty())
     }
 
     pub fn save(&self, path: &std::path::Path) -> Result<()> {

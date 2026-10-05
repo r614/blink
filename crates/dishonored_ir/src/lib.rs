@@ -151,6 +151,9 @@ pub struct StaticMeshAsset {
     /// Collision triangles from the mesh's kDOP tree (indices into `positions`) with the
     /// per-triangle material index. Empty when the mesh has no per-poly collision.
     pub collision_triangles: Vec<[u32; 3]>,
+    /// Material (section) index of each collision triangle (kDOP `MaterialIndex`).
+    #[serde(default)]
+    pub collision_materials: Vec<u16>,
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
 }
@@ -173,6 +176,11 @@ pub struct MaterialAsset {
     pub blend: BlendHint,
     /// Every texture parameter found while resolving, for later material work.
     pub texture_params: Vec<(String, TextureId)>,
+    /// Contact type class of the material's physical material (`PhysMaterial` ->
+    /// `PhysicalMaterialProperty` = `DisContactPhysicalMaterial.m_pContactType`, following
+    /// `Parent`), e.g. `DisContactType_Env_Wood`: drives footstep and impact sounds.
+    #[serde(default)]
+    pub contact_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
