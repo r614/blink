@@ -57,6 +57,9 @@ pub struct LocoConfig {
     pub table: Vec<i32>,
     /// `m_Transitions`: (sequence, from modifier, to modifier).
     pub transitions: Vec<(String, i32, i32)>,
+    /// `m_SkeletalRefMeshName`: the skeleton the config's sequences were authored on.
+    #[serde(default)]
+    pub ref_mesh: String,
 }
 
 impl LocoConfig {
@@ -139,6 +142,7 @@ pub enum NpcAnim {
     AttackLong = 39,
     AttackMedium = 40,
     AttackShort = 41,
+    ParryAwaitingImpact = 61,
     Parry = 62,
     ParryVersus = 63,
     AmbientIdle = 66,

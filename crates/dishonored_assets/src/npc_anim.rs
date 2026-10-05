@@ -58,7 +58,7 @@ fn anim_names(pkg: &Package, props: &[Property], n: &str) -> Vec<String> {
 pub fn read_loco_config(pkg: &Package, export: usize) -> Result<LocoConfig> {
     let h = pkg.read_object(export)?;
     let p = &h.properties;
-    let mut c = LocoConfig { name: pkg.obj_path(ObjRef::Export(export)), speed_names: names(pkg, p, "m_SpeedNames"), table: ints(p, "m_SpeedModes"), ..Default::default() };
+    let mut c = LocoConfig { name: pkg.obj_path(ObjRef::Export(export)), speed_names: names(pkg, p, "m_SpeedNames"), table: ints(p, "m_SpeedModes"), ref_mesh: name_of(p, "m_SkeletalRefMeshName"), ..Default::default() };
     for m in structs(pkg, p, "m_Modifiers") {
         c.modifiers.push(LocoModifier { name: name_of(&m, "m_ModifierName"), acceleration: f32_of(&m, "m_fAcceleration"), deceleration: f32_of(&m, "m_fDeceleration"), speed_multiplier: find(&m, "m_fSpeedMultiplier").and_then(|x| x.as_float()).unwrap_or(1.0) });
     }
