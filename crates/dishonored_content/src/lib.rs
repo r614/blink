@@ -37,6 +37,8 @@ pub struct MatchContent {
     pub tagged_starts: Vec<dishonored_assets::travel::TaggedStart>,
     /// `DisFleePointActor` positions (civilian panic destinations).
     pub flee_points: Vec<Vec3>,
+    /// Original NPC spawners with their settings (for missions that use the level's own NPCs).
+    pub spawners: Vec<dishonored_ir::spawners::Spawner>,
 }
 
 pub fn cache_dir() -> PathBuf {
@@ -132,7 +134,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     }
     let curated = load_spawns(map, None);
     let spawns = if curated.is_empty() { spawns } else { curated };
-    let npc_path = dir.join(format!("{map}.npcs3.json"));
+    let npc_path = dir.join(format!("{map}.npcs4.json"));
     let npcs: dishonored_assets::npcs::NpcData = match std::fs::read_to_string(&npc_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(n) => n,
         None => {
@@ -159,7 +161,8 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         }
     };
     let flee_points = markers.iter().filter(|m| m.class == "DisFleePointActor").map(|m| m.position).collect();
-    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts, flee_points })
+    let spawners = npcs.spawns.iter().map(|s| dishonored_ir::spawners::Spawner { position: s.position, yaw: s.yaw, tweak: s.tweak.clone(), guard: s.role == dishonored_assets::npcs::NpcRole::Guard, props: s.spawner.clone() }).collect();
+    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts, flee_points, spawners })
 }
 
 /// Persistent maps a mission uses: its start map, then the maps reachable through travel.
@@ -219,6 +222,7 @@ pub fn mission_setup(maps: &MapContents, def: dishonored_mission::MissionDef) ->
             ai_points: &mc.ai_points,
             guard_spawns: &mc.guard_spawns,
             world: &mc.collision,
+            spawners: &mc.spawners,
         });
     }
     let refs = def.conversation_refs();

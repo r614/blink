@@ -53,6 +53,11 @@ pub struct MissionDef {
     /// Ambient crowd (civilians/guards from the original placement data).
     #[serde(default)]
     pub crowd: Option<CrowdDef>,
+    /// Maps populated from their original spawners (`DishonoredSpawner`s that spawn on begin
+    /// play) on first visit; their alarm squads and `DisTravelSpawner` pursuers follow the
+    /// original rules (see dishonored_multiplayer::mission).
+    #[serde(default)]
+    pub original_npcs: Vec<String>,
     #[serde(default)]
     pub settings: MissionSettings,
     /// Extra cooked packages whose dialog graphs to load (the packages named by

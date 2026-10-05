@@ -604,3 +604,20 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
     - The player sits in `StatePlayerMasterInScriptedChoice` meanwhile.
     - Boyle's doors set that flag on "Go to ..." and not on "Stay ...".
 - **Port changes:** arrival now takes the PlayerStart's rotation (pitch reset) per the class default. The rest of the travel and choice behaviour already matched: travel commits within one tick, so no input window remains.
+
+## 2026-10-05: Level population from the original spawners (Boyle Int)
+
+- **Question:** What does the original put in a map on arrival, and how do guards follow the player between maps?
+- **Method:** `mission spawners <map>` lists each `DishonoredSpawner` / `DisTravelSpawner` with its settings, read from the level packages. Class defaults come from `Default__DishonoredSpawner` (`m_bSpawnOnBeginPlay` true, `m_bCapableOfFleeing` true).
+- **Findings (Boyle Int, 54 spawners):**
+  - 33 spawn on begin play: party guests and servants (faction `Neutral_Civilian` / `Neutral_Guard`), guards (`UpstairsGuards`, `MainStair_Guard`, `overseer`, ...), the Boyle ladies (`LadiesBoyle`) and Brisby, Mrs White and Mr Ramsey, each with a squad name and `m_bPatrolUponStartup`.
+  - 5 do not spawn on begin play: 4 `alarm_guards` with `m_SpawnAtSuspicionLevel = DAISL_Suspecting` (alarm reinforcements), plus a Kismet-spawned Lydia variant.
+  - 16 `DisTravelSpawner`s carry `m_PlayerTravelLocationTags` (8 for `PlayerStart_Ballroom`, 8 for `PlayerStart_Foyer`), `m_SpawnAtSuspicionLevel = DAISL_Suspecting` and `m_bAwareOfPlayerUponStartup`. When the player arrives at that tag while the AI is suspecting, guards come through after them.
+- **Implementation:** `MissionDef::original_npcs` lists the maps to populate this way.
+  - First visit spawns the begin-play spawners. Corpse and knocked-out spawners lie on the floor. Patrol-on-startup decides whether the brain patrols.
+  - Raising the alarm on a map spawns its alarm squads, already hunting.
+  - Arriving through a door while a guard is investigating, searching or fighting a player spawns that tag's travel spawners, hunting.
+  - Each spawner spawns once.
+  - Characters still use the four presentation archetypes chosen by role; pawn tweak -> mesh resolution is open.
+- **Validation:** `harness travel` 10/10. First visit: 33 NPCs, equal to the 33 begin-play spawners. Pursuit through the ballroom door: 8/8 pursuers present, all targeting the player.
+- **Confidence:** CONFIRMED for the data. LIKELY for the trigger rules: "suspecting" is approximated from guard brain states, and how often a travel spawner fires per travel is not decoded (U-047).

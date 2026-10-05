@@ -8,6 +8,7 @@
 pub mod ai;
 pub mod gameplay;
 pub mod nav;
+pub mod spawners;
 
 use glam::{Mat4, Vec2, Vec3};
 use serde::{Deserialize, Serialize};

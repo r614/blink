@@ -64,6 +64,15 @@ fn main() -> Result<()> {
                 println!("  most used nodes: {}", top.join(", "));
             }
         }
+        "spawners" => {
+            let c = Content::locate()?;
+            let map = a.get(1).context("map")?;
+            let pkgs = dishonored_assets::map_packages(&c, map);
+            for s in extract_npc_data(&c, &pkgs)?.spawns {
+                let p = &s.spawner;
+                println!("{:<44} {:?} begin_play={} susp={:?} squad={} patrol={} dead={} ko={} faction={} travel={:?}", s.source.rsplit('.').next().unwrap_or(""), s.role, p.on_begin_play, p.at_suspicion, p.squad, p.patrol_on_startup, p.spawn_dead, p.knocked_out, p.faction.rsplit('.').next().unwrap_or(""), p.travel_tags);
+            }
+        }
         "travel" => {
             let c = Content::locate()?;
             let map = a.get(1).context("map")?;

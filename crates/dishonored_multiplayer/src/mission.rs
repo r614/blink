@@ -27,6 +27,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// First id for mission NPCs (crowd NPCs start at `NPC_ID_BASE`).
 pub const MISSION_NPC_BASE: PlayerId = NPC_ID_BASE + 500;
+/// First id for NPCs from the levels' original spawners.
+pub const ORIGINAL_NPC_BASE: PlayerId = NPC_ID_BASE + 1000;
+
+/// One original `DishonoredSpawner` / `DisTravelSpawner` of a mission map.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OriginalNpc {
+    pub map: String,
+    pub spawn: NpcSpawn,
+    pub tweak: String,
+    pub props: dishonored_ir::spawners::SpawnerProps,
+}
 
 /// A named original actor of a level: (package, name, position, yaw).
 pub type LevelActor = (String, String, Vec3, f32);
@@ -62,6 +73,8 @@ pub struct MapInput<'a> {
     pub ai_points: &'a [(Vec3, f32)],
     pub guard_spawns: &'a [(Vec3, f32)],
     pub world: &'a dyn WorldQuery,
+    /// The map's original spawners.
+    pub spawners: &'a [dishonored_ir::spawners::Spawner],
 }
 
 /// Everything needed to rebuild the mission deterministically (stored in replays).
@@ -86,6 +99,9 @@ pub struct MissionSetup {
     /// `DisFleePointActor` positions per map (lowercase name), on the floor.
     #[serde(default)]
     pub flee: BTreeMap<String, Vec<Vec3>>,
+    /// Original spawners of the maps listed in `MissionDef::original_npcs`.
+    #[serde(default)]
+    pub original: Vec<OriginalNpc>,
     /// Original dialog graphs the mission references, read from the install by the host
     /// (stored in replays so they play back identically).
     #[serde(default)]
@@ -196,6 +212,15 @@ impl MissionSetup {
             .iter()
             .map(|m| (m.name.to_ascii_lowercase(), m.actors.iter().filter(|a| a.1.starts_with("DisFleePointActor")).map(|a| snap_floor(m.world, a.2).unwrap_or(a.2)).collect()))
             .collect();
+        let mut original = Vec::new();
+        for m in maps.iter().filter(|m| def.original_npcs.iter().any(|o| o.eq_ignore_ascii_case(&m.name))) {
+            for s in m.spawners {
+                let (kind, archetype) = original_archetype(s);
+                let id = ORIGINAL_NPC_BASE + original.len() as PlayerId;
+                let p = snap_floor(m.world, s.position).unwrap_or(s.position);
+                original.push(OriginalNpc { map: m.name.clone(), spawn: NpcSpawn { id, kind, archetype, position: p, yaw: s.yaw }, tweak: s.tweak.clone(), props: s.props.clone() });
+            }
+        }
         let mut doors = Vec::new();
         let mut tagged = Vec::new();
         for m in maps {
@@ -209,7 +234,7 @@ impl MissionSetup {
                 }
             }
         }
-        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee })
+        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original })
     }
 }
 
@@ -250,6 +275,8 @@ pub struct MissionMatch {
     started: bool,
     use_held: BTreeSet<PlayerId>,
     pending_travel: Option<(String, String)>,
+    /// Original spawners that have spawned their pawn (ids are unique across maps).
+    original_spawned: BTreeSet<PlayerId>,
     /// Players with a door confirmation open (player -> door index).
     choosing: BTreeMap<PlayerId, usize>,
     arrived: Option<String>,
@@ -290,6 +317,7 @@ impl MissionMatch {
             use_held: BTreeSet::new(),
             pending_travel: None,
             choosing: BTreeMap::new(),
+            original_spawned: BTreeSet::new(),
             arrived: None,
             choice_held: BTreeMap::new(),
         };
@@ -313,12 +341,62 @@ impl MissionMatch {
             }
         }
         self.crowd.layout.flee_points = self.setup.flee.get(&self.current_map.to_ascii_lowercase()).cloned().unwrap_or_default();
+        // Original spawners that spawn on begin play (not alarm squads or travel pursuers).
+        for i in 0..self.setup.original.len() {
+            let o = &self.setup.original[i];
+            if o.map.eq_ignore_ascii_case(&self.current_map) && o.props.on_begin_play && o.props.travel_tags.is_empty() && o.props.at_suspicion.is_none() {
+                self.spawn_original(i, false, cfg);
+            }
+        }
         for i in 0..self.setup.npcs.len() {
             let name = self.setup.npcs[i].0.clone();
             let here = self.setup.npc_map.get(&name).is_some_and(|m| m.eq_ignore_ascii_case(&self.current_map));
             if here && self.state.npc_alive.contains(&name) {
                 self.spawn_mission_npc(i, cfg);
             }
+        }
+    }
+
+    /// Spawn an original spawner's pawn (once). Corpse / knocked-out spawners lie on the floor;
+    /// `alert` (or `m_bAwareOfPlayerUponStartup`) starts it hunting the nearest player.
+    fn spawn_original(&mut self, index: usize, alert: bool, cfg: &SimConfig) {
+        let o = self.setup.original[index].clone();
+        if !self.original_spawned.insert(o.spawn.id) {
+            return;
+        }
+        let s = o.spawn;
+        spawn_npc(&mut self.world, s.id, s.kind, s.archetype, s.position, s.yaw, cfg);
+        if o.props.spawn_dead || o.props.knocked_out {
+            if let Some(p) = self.world.player_mut(s.id) {
+                p.alive = false;
+            }
+            return;
+        }
+        let mut b = Brain::new(s.id, s.kind, s.position, 0x5EED ^ s.id as u64);
+        b.stay = !o.props.patrol_on_startup;
+        self.crowd.brains.retain(|x| x.id != s.id);
+        self.crowd.brains.push(b);
+        if alert || o.props.aware_on_startup {
+            self.alert_npc(s.id);
+        }
+    }
+
+    /// Put an NPC brain into combat (guards) or flight (civilians) against the nearest player.
+    pub fn alert_npc(&mut self, id: PlayerId) {
+        let pos = self.world.player(id).map(|p| p.position).unwrap_or(Vec3::ZERO);
+        let target = self.nearest_human(pos);
+        let threat = target.and_then(|t| self.world.player(t)).map(|p| p.position);
+        let ai = self.crowd.ai.clone();
+        if let Some(b) = self.crowd.brains.iter_mut().find(|b| b.id == id) {
+            // Like `DisSeqAct_SetDisposition` / `AISetSuspicionLevel`: the human becomes an enemy
+            // at full attention, so perception keeps it alerted.
+            if let (Some(t), Some(p)) = (target, threat) {
+                b.alert_to(&ai, t, p);
+            }
+            b.target = target;
+            b.state = if b.kind == PawnKind::Guard { BrainState::Combat } else { BrainState::Flee };
+            b.threat_pos = threat;
+            b.timer = 0.0;
         }
     }
 
@@ -383,6 +461,9 @@ impl MissionMatch {
     /// Level travel (see module docs). Runs between steps' simulation and next think.
     fn travel(&mut self, dest_map: &str, tag: &str, cfg: &SimConfig) {
         let Some((_, _, pos, yaw)) = self.setup.tagged_starts.iter().find(|t| t.0.eq_ignore_ascii_case(dest_map) && t.1.eq_ignore_ascii_case(tag)).cloned() else { return };
+        // Guards investigating, searching or fighting a player: the AI is at least "suspecting",
+        // so `DisTravelSpawner`s at the arrival tag send pursuers through the door.
+        let pursued = self.crowd.brains.iter().any(|b| b.kind == PawnKind::Guard && matches!(b.state, BrainState::Investigate | BrainState::Search | BrainState::Combat) && b.target.is_some_and(|t| self.humans.contains(&t)));
         if !dest_map.eq_ignore_ascii_case(&self.current_map) {
             // Save the level being left.
             let humans = self.humans.clone();
@@ -412,6 +493,14 @@ impl MissionMatch {
                 // m_bUseDestinationTargetRotation defaults to true: the PlayerStart's rotation.
                 pl.pitch = 0.0;
                 pl.velocity = Vec3::ZERO;
+            }
+        }
+        if pursued {
+            for i in 0..self.setup.original.len() {
+                let o = &self.setup.original[i];
+                if o.map.eq_ignore_ascii_case(&self.current_map) && o.props.at_suspicion.is_some() && o.props.travel_tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+                    self.spawn_original(i, true, cfg);
+                }
             }
         }
         self.arrived = Some(self.current_map.clone());
@@ -608,6 +697,16 @@ impl MissionMatch {
                 }
             }
         }
+        // The alarm brings the map's alarm squads (`m_SpawnAtSuspicionLevel` spawners that do not
+        // spawn on begin play, e.g. Boyle's `alarm_guards`), already hunting.
+        if events.iter().any(|e| matches!(e, MissionEvent::AlarmRaised)) {
+            for i in 0..self.setup.original.len() {
+                let o = &self.setup.original[i];
+                if o.map.eq_ignore_ascii_case(&self.current_map) && o.props.at_suspicion.is_some() && o.props.travel_tags.is_empty() && !o.props.on_begin_play {
+                    self.spawn_original(i, true, cfg);
+                }
+            }
+        }
         // Respawns (if the mission allows them).
         let mut due = Vec::new();
         for (id, t) in self.respawn_queue.iter_mut() {
@@ -733,5 +832,17 @@ impl MissionMatch {
 
     pub fn respawn_time_left(&self, id: PlayerId) -> Option<f32> {
         self.respawn_queue.iter().find(|(p, _)| *p == id).map(|(_, t)| *t)
+    }
+}
+
+/// Pawn kind and presentation archetype for an original spawner. The pawn tweak decides the
+/// real model; until tweak -> mesh resolution exists, guards use the elite guard and civilians
+/// the party models (female tweaks the female aristocrat).
+fn original_archetype(s: &dishonored_ir::spawners::Spawner) -> (PawnKind, u8) {
+    let t = s.tweak.to_ascii_lowercase();
+    match s.guard {
+        true => (PawnKind::Guard, 1),
+        _ if t.contains("_f_") || t.contains("female") || t.contains("lady") || t.contains("servant_f") => (PawnKind::Civilian, 3),
+        _ => (PawnKind::Civilian, if s.position.x as i64 % 2 == 0 { 0 } else { 2 }),
     }
 }

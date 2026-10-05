@@ -7,6 +7,9 @@ MissionDef(
     map: "L_Boyle_Ext_P",
     // Boyle Mansion interior, reached through the original doors (level state kept per map).
     maps: ["L_Boyle_Int_P"],
+    // The mansion is populated by its own original spawners (guests, servants, guards, alarm
+    // squads and the guards that pursue the player through the doors).
+    original_npcs: ["L_Boyle_Int_P"],
     briefing: "One of three masked ladies at tonight's party is the host. Learn which, end her evening, and slip away.",
 
     objectives: [

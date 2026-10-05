@@ -5,6 +5,7 @@ use crate::content::Content;
 use anyhow::Result;
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
+pub use dishonored_ir::spawners::SpawnerProps;
 use ue3_package::ObjRef;
 use ue3_package::properties::{Value, find};
 
@@ -22,7 +23,11 @@ pub struct NpcSpawnPoint {
     pub tweak: String,
     pub role: NpcRole,
     pub source: String,
+    /// The spawner's own settings (`DishonoredSpawner` / `DisTravelSpawner` properties).
+    #[serde(default)]
+    pub spawner: SpawnerProps,
 }
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PointKind {
@@ -103,7 +108,8 @@ pub fn extract_npc_data(content: &Content, packages: &[String]) -> Result<NpcDat
                         Some(Value::Object(o)) => pkg.obj_path(ObjRef::from_index(*o)),
                         _ => String::new(),
                     };
-                    out.spawns.push(NpcSpawnPoint { position: pos, yaw, role: role_from_tweak(&tweak), tweak, source: format!("{name}:{}", pkg.obj_path(ObjRef::Export(i))) });
+                    let spawner = spawner_props(&pkg, &h.properties);
+                    out.spawns.push(NpcSpawnPoint { position: pos, yaw, role: role_from_tweak(&tweak), tweak, source: format!("{name}:{}", pkg.obj_path(ObjRef::Export(i))), spawner });
                 }
                 "DishonoredNavPoint" => out.points.push(AiPoint { position: pos, yaw, kind: PointKind::Nav }),
                 "TargetPoint" => out.points.push(AiPoint { position: pos, yaw, kind: PointKind::Target }),
@@ -112,4 +118,39 @@ pub fn extract_npc_data(content: &Content, packages: &[String]) -> Result<NpcDat
         }
     }
     Ok(out)
+}
+
+fn spawner_props(pkg: &ue3_package::Package, props: &[ue3_package::properties::Property]) -> SpawnerProps {
+    let mut s = SpawnerProps::default();
+    let b = |n: &str, d: bool| match find(props, n).map(|p| &p.value) {
+        Some(Value::Bool(v)) => *v,
+        _ => d,
+    };
+    s.on_begin_play = b("m_bSpawnOnBeginPlay", true);
+    s.patrol_on_startup = b("m_bPatrolUponStartup", false);
+    s.aware_on_startup = b("m_bAwareOfPlayerUponStartup", false);
+    s.capable_of_fleeing = b("m_bCapableOfFleeing", true);
+    s.spawn_dead = b("m_bSpawnDead", false);
+    s.knocked_out = b("m_bTreatAsKnockedOut", false);
+    s.at_suspicion = match find(props, "m_SpawnAtSuspicionLevel").map(|p| &p.value) {
+        Some(Value::Enum(e)) => Some(e.clone()),
+        _ => None,
+    };
+    if let Some(Value::Name(n)) = find(props, "m_Squad").map(|p| &p.value) {
+        s.squad = n.clone();
+    }
+    if let Some(Value::Object(o)) = find(props, "m_pFactionTweakOverride").map(|p| &p.value) {
+        s.faction = pkg.obj_path(ObjRef::from_index(*o));
+    }
+    // Array of FName: i32 count, then (index, number) pairs.
+    if let Some(Value::Array(raw)) = find(props, "m_PlayerTravelLocationTags").map(|p| &p.value) {
+        let rd = |o: usize| raw.get(o..o + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+        let n = rd(0).unwrap_or(0).max(0) as usize;
+        for k in 0..n.min(64) {
+            if let (Some(index), Some(number)) = (rd(4 + k * 8), rd(8 + k * 8)) {
+                s.travel_tags.push(pkg.name(ue3_package::FName { index, number }));
+            }
+        }
+    }
+    s
 }

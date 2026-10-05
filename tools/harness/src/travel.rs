@@ -149,6 +149,12 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     rep.check(S, &format!("use {} -> arrive at {} on {INT}", door_in.door, door_in.dest_tag), t.map.eq_ignore_ascii_case(INT) && d_in < 200.0, format!("{}; now on {}, {:.0} uu from the PlayerStart", t.detail, t.map, d_in));
     rep.check(S, "collision follows the active map (agent stands on the Int floor)", (t.z_after - t.pos.z).abs() < 60.0 && maps.set.active_name().eq_ignore_ascii_case(INT), format!("z {:.0} -> {:.0} after 1.4 s, active {}", t.pos.z, t.z_after, maps.set.active_name()));
     let npcs_int = g.world().players.iter().filter(|p| p.kind != PawnKind::Human).count();
+    // First visit: exactly the interior's begin-play spawners (no alarm squads, no pursuers).
+    let originals = ms.original.clone();
+    let expect_int = originals.iter().filter(|o| o.map.eq_ignore_ascii_case(INT) && o.props.on_begin_play && o.props.travel_tags.is_empty() && o.props.at_suspicion.is_none()).count();
+    let squads = originals.iter().filter(|o| o.map.eq_ignore_ascii_case(INT) && !o.props.on_begin_play && o.props.at_suspicion.is_some()).count();
+    let pursuers_ballroom = originals.iter().filter(|o| o.props.travel_tags.iter().any(|t| t.eq_ignore_ascii_case(&door_in.dest_tag))).count();
+    rep.check(S, "first visit populates the interior from its original begin-play spawners", expect_int > 0 && npcs_int == expect_int, format!("{npcs_int} NPCs present, {expect_int} begin-play spawners ({} spawners on Int: {squads} alarm-squad, {pursuers_ballroom} pursuers for {})", originals.iter().filter(|o| o.map.eq_ignore_ascii_case(INT)).count(), door_in.dest_tag));
     let view_map = g.view().map.clone();
     let int_doors_usable = g.view().mission.as_ref().map(|m| m.usables.iter().filter(|u| doors.iter().any(|d| d.map.eq_ignore_ascii_case(INT) && d.prompt == u.1)).count()).unwrap_or(0);
     rep.check(S, "match view reports the new map and its doors", view_map.eq_ignore_ascii_case(INT) && int_doors_usable > 0, format!("view.map {view_map}, {int_doors_usable} Int doors usable, {npcs_int} NPCs present"));
@@ -163,5 +169,23 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     let victim_dead = after.iter().any(|(id, alive)| *id == victim && !alive);
     let same_set = before.iter().all(|b| after.iter().any(|a| a.0 == b.0));
     rep.check(S, "level state kept: the NPC killed on Ext is still dead, the rest still there", victim_dead && same_set, format!("{} NPCs before, {} after; victim #{victim} dead: {victim_dead}", before.len(), after.len()));
+
+    // Pursuit: a guard on Ext hunts the agent, who escapes through the ballroom door; the
+    // ballroom's `DisTravelSpawner`s (DAISL_Suspecting) send pursuers in after the player.
+    let hunter = {
+        let Game::Mission(m) = &mut g else { unreachable!() };
+        let me = m.world.player(AGENT).map(|p| p.position).unwrap_or_default();
+        let gid = m.world.players.iter().filter(|p| p.kind == PawnKind::Guard && p.alive).min_by(|a, b| a.position.distance(me).total_cmp(&b.position.distance(me))).map(|p| p.id).context("a guard on Ext")?;
+        m.alert_npc(gid);
+        gid
+    };
+    let t = use_door(&mut g, &maps, &door_in, 1, &mut tick)?;
+    let ids: Vec<u32> = originals.iter().filter(|o| o.props.travel_tags.iter().any(|x| x.eq_ignore_ascii_case(&door_in.dest_tag))).map(|o| o.spawn.id).collect();
+    let present: Vec<&dishonored_sim::state::PlayerState> = g.world().players.iter().filter(|p| ids.contains(&p.id) && p.alive).collect();
+    let hunting = match &g {
+        Game::Mission(m) => m.crowd.brains.iter().filter(|b| ids.contains(&b.id) && b.target == Some(AGENT)).count(),
+        _ => 0,
+    };
+    rep.check(S, "pursued through the door: the arrival tag's DisTravelSpawner guards follow, hunting the player", t.map.eq_ignore_ascii_case(INT) && present.len() == ids.len() && !ids.is_empty() && hunting > 0, format!("guard #{hunter} hunting on Ext; on {}: {}/{} pursuers present, {hunting} targeting the agent", t.map, present.len(), ids.len()));
     Ok(())
 }
