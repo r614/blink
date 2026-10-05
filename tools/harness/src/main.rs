@@ -15,11 +15,13 @@
 //! harness audio               Wwise media decode sanity per codec + every simulation-event
 //!                             mapping resolves to a decodable original sound
 //! harness replay FILE         re-simulate a server replay and verify every state hash
+//! harness mission [--mission FILE]  plays a custom mission end to end (headless + dedicated server)
 //! harness all                 sim, net, visual, contracts, audio; writes harness_out/<run>/REPORT.md
 //! ```
 
 mod audio;
 mod contracts;
+mod mission;
 mod fidelity;
 mod netsoak;
 mod report;
@@ -61,6 +63,7 @@ fn main() -> Result<()> {
         "contracts" => contracts::run(&ctx, &mut rep)?,
         "fidelity" => fidelity::run(&ctx, &mut rep)?,
         "audio" => audio::run(&ctx, &mut rep)?,
+        "mission" => mission::run(&ctx, &mut rep)?,
         "replay" => {
             let file = args.get(1).expect("replay file");
             netsoak::verify_replay_file(&PathBuf::from(file), &mut rep)?;
@@ -70,6 +73,7 @@ fn main() -> Result<()> {
             netsoak::run(&ctx, &mut rep)?;
             visual::run(&ctx, &mut rep)?;
             contracts::run(&ctx, &mut rep)?;
+            mission::run(&ctx, &mut rep)?;
             audio::run(&ctx, &mut rep)?;
         }
         other => anyhow::bail!("unknown command {other}"),

@@ -1,7 +1,7 @@
 //! Headless dedicated server.
 //!
 //! ```text
-//! dishonored_server [--map L_Boyle_Ext_P] [--port 27015] [--name "My Server"]
+//! dishonored_server [--map L_Boyle_Ext_P] [--port 27015] [--name "My Server"] [--mode contracts | --mission FILE.ron]
 //!                   [--max-players 8] [--score-limit 20] [--time-limit 600]
 //!                   [--master host:27900] [--snapshot-hz 60] [--replay-dir replays]
 //!                   [--duration SECONDS]
@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let get = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1)).cloned();
-    let map = get("--map").unwrap_or_else(|| dishonored_content::DEFAULT_MAP.to_string());
+    // `--mission FILE`: host a custom mission (co-op); the map comes from the mission.
+    let mission = get("--mission").map(|p| dishonored_mission::MissionDef::load(std::path::Path::new(&p))).transpose()?;
+    let map = get("--map").or_else(|| mission.as_ref().map(|m| m.map.clone())).unwrap_or_else(|| dishonored_content::DEFAULT_MAP.to_string());
     let port: u16 = get("--port").and_then(|s| s.parse().ok()).unwrap_or(27015);
     let name = get("--name").unwrap_or_else(|| "dishonored-rs server".into());
     let mut rules = FfaRules::default();
@@ -48,7 +50,9 @@ fn main() -> Result<()> {
     let mc = load_match(&map)?;
     println!("loaded {map}: {} collision tris, {} spawns in {:.1?}", mc.collision.tris.len(), mc.spawns.len(), t.elapsed());
     let spawns: Vec<SpawnPoint> = mc.spawns.iter().map(|s| SpawnPoint { position: s.position, yaw: s.yaw }).collect();
-    let setup = if get("--mode").as_deref() == Some("contracts") {
+    let setup = if let Some(def) = mission {
+        dishonored_content::mission_setup(&mc, def).map_err(|e| anyhow::anyhow!("mission: {e}"))?
+    } else if get("--mode").as_deref() == Some("contracts") {
         let mut crules = ContractsRules { max_players: rules.max_players, time_limit: rules.time_limit.max(300.0), ..Default::default() };
         let center = crowd_center(&mc.spawns.iter().map(|s| (s.position, s.yaw)).collect::<Vec<_>>());
         if !args.iter().any(|a| a == "--no-crowd") {

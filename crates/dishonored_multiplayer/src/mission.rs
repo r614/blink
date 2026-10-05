@@ -289,9 +289,15 @@ impl MissionMatch {
         // Detection / alarm / alerted mission NPCs from brain states (edge-triggered).
         for b in &self.crowd.brains {
             let hunting_human = b.state == BrainState::Combat && b.target.is_some_and(|t| self.humans.contains(&t));
-            if b.kind == PawnKind::Guard && hunting_human && self.engaged.insert(b.id) {
-                events.push(MissionEvent::PlayerDetected);
-                events.push(MissionEvent::AlarmRaised);
+            if b.kind == PawnKind::Guard && hunting_human {
+                let calm_before = self.engaged.is_empty();
+                if self.engaged.insert(b.id) {
+                    events.push(MissionEvent::PlayerDetected);
+                    // An alarm is the watch going from calm to engaged, not every guard joining.
+                    if calm_before {
+                        events.push(MissionEvent::AlarmRaised);
+                    }
+                }
             }
             if !hunting_human {
                 self.engaged.remove(&b.id);

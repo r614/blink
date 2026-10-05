@@ -103,7 +103,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     };
     let curated = load_spawns(map, None);
     let spawns = if curated.is_empty() { spawns } else { curated };
-    let npc_path = dir.join(format!("{map}.npcs2.json"));
+    let npc_path = dir.join(format!("{map}.npcs3.json"));
     let npcs: dishonored_assets::npcs::NpcData = match std::fs::read_to_string(&npc_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(n) => n,
         None => {
@@ -120,4 +120,13 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     let guard_spawns = npcs.spawns.iter().filter(|s| s.role == dishonored_assets::npcs::NpcRole::Guard).map(|s| (s.position, s.yaw)).collect();
     let markers = npcs.markers.clone();
     Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers })
+}
+
+/// Build a mission game setup from loaded match content (markers resolved against the
+/// level's named actors, crowd from the original placement data).
+pub fn mission_setup(mc: &MatchContent, def: dishonored_mission::MissionDef) -> Result<dishonored_multiplayer::game::GameSetup, String> {
+    let actors: Vec<dishonored_multiplayer::mission::LevelActor> = mc.markers.iter().map(|m| (m.package.clone(), m.name.clone(), m.position, m.yaw)).collect();
+    let starts: Vec<(Vec3, f32)> = mc.spawns.iter().map(|s| (s.position, s.yaw)).collect();
+    let setup = dishonored_multiplayer::mission::MissionSetup::new(def, &actors, &starts, &mc.ai_points, &mc.guard_spawns, &mc.collision)?;
+    Ok(dishonored_multiplayer::game::GameSetup::Mission(Box::new(setup)))
 }

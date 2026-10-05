@@ -55,8 +55,13 @@ pub struct SessionView {
 }
 
 impl Session {
-    pub fn offline(content: Arc<MatchContent>, bots: usize, spectate: bool, contracts: bool) -> Self {
-        let setup = if contracts {
+    pub fn offline(content: Arc<MatchContent>, bots: usize, spectate: bool, contracts: bool, mission: Option<dishonored_mission::MissionDef>) -> Self {
+        let is_mission = mission.is_some();
+        // Missions are solo/co-op against the level's NPCs: no deathmatch bots.
+        let bots = if is_mission { 0 } else { bots };
+        let setup = if let Some(def) = mission {
+            dishonored_content::mission_setup(&content, def).unwrap_or_else(|e| panic!("mission setup: {e}"))
+        } else if contracts {
             let rules = ContractsRules { warmup_time: 2.0, min_players: 2, crowd: Some(default_crowd(crowd_center(&content.spawns.iter().map(|s| (s.position, s.yaw)).collect::<Vec<_>>()))), ..Default::default() };
             let pts: Vec<(glam::Vec3, f32)> = content.spawns.iter().map(|s| (s.position, s.yaw)).collect();
             GameSetup::contracts(rules, pts, Some(CrowdSource { points: &content.ai_points, guard_spawns: &content.guard_spawns }), &content.collision)

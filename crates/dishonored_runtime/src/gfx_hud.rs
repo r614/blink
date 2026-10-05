@@ -35,6 +35,10 @@ enum Group {
     Objectives,
     /// Target notification paper (top right, below): Contracts target clues.
     TargetNote,
+    /// Mission objective marker (`objectiveMarker_primary`), projected on the task target.
+    Marker,
+    /// Backdrop of the end-of-mission panel (`hud_obj_bkgdR`).
+    OutcomeBg,
 }
 
 #[derive(Component)]
@@ -143,6 +147,16 @@ pub fn setup_gfx_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) 
         movie.flatten(*id, p.matrix.unwrap_or_default(), ColorTransform::default(), "crouch", &frame0, &mut qs);
         pieces.extend(qs.into_iter().map(|q| (Group::Crouch, q)));
     }
+    // Objective marker sprite at the stage origin (moved per frame) and the outcome backdrop.
+    if let Some(id) = movie.exports.get("objectiveMarker_primary") {
+        let mut qs = Vec::new();
+        movie.flatten(*id, Matrix::default(), ColorTransform::default(), "marker", &frame0, &mut qs);
+        pieces.extend(qs.into_iter().map(|q| (Group::Marker, q)));
+    }
+    if let Some(img) = movie.images.values().find(|i| i.export_name.starts_with("hud_obj_bkgdR")) {
+        let tex = img.file_name.trim_end_matches(".tga").to_string();
+        pieces.push((Group::OutcomeBg, Quad { texture: tex, src: [0.0, 0.0, img.width as f32, img.height as f32], dst: [(290.0, 190.0), (990.0, 190.0), (990.0, 470.0), (290.0, 470.0)], color: ColorTransform { mul: [1.0, 1.0, 1.0, 0.92], add: [0.0; 4] }, path: "outcome".into(), character: 0 }));
+    }
     // Equipment emblem position (masterHUD_mc/_equipment_mc).
     let equip = placed("masterHUD_mc").and_then(|p| {
         let sp = movie.sprites.get(&p.character?)?;
@@ -169,6 +183,8 @@ pub fn setup_gfx_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) 
         (TextKind::ObjTitle, rect_of(&|_, q| q.path.contains("title_mc"))),
         (TextKind::ObjName, rect_of(&|_, q| q.path.contains("name_mc"))),
         (TextKind::TargetBody, rect_of(&|g, _| *g == Group::TargetNote)),
+        (TextKind::Message, Some(Rect::new(290.0, 600.0, 990.0, 640.0))),
+        (TextKind::Outcome, Some(Rect::new(330.0, 225.0, 950.0, 440.0))),
     ];
     // Textures.
     let mut tex: HashMap<String, Handle<Image>> = HashMap::new();
@@ -216,7 +232,7 @@ pub fn setup_gfx_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) 
             Text::new(""),
             TextFont { font_size: FontSize::Px(16.0), ..default() },
             TextColor(if kind == TextKind::ObjTitle { Color::srgb(0.08, 0.08, 0.08) } else { Color::srgb(0.93, 0.91, 0.84) }),
-            TextLayout::justify(Justify::Right),
+            TextLayout::justify(if matches!(kind, TextKind::Message | TextKind::Outcome) { Justify::Center } else { Justify::Right }),
             Node { position_type: PositionType::Absolute, ..default() },
             AnchoredText { kind, rect },
             ChildOf(root),
@@ -253,6 +269,7 @@ pub fn update_gfx_hud(
     mut quads: Query<(&HudQuad, &mut Node, &mut UiTransform, &mut ImageNode, &mut Visibility), (Without<EquipIcon>, Without<AmmoText>)>,
     mut icon: Query<(&EquipIcon, &mut Node, &mut ImageNode, &mut Visibility), (Without<HudQuad>, Without<AmmoText>)>,
     mut ammo: Query<(&AmmoText, &mut Node, &mut Text, &mut TextFont), (Without<HudQuad>, Without<EquipIcon>)>,
+    cams: Query<(&Camera, &GlobalTransform), With<crate::players::GameCamera>>,
 ) {
     let Some(hud) = hud.filter(|h| h.loaded) else { return };
     let Some(window) = windows.iter().next() else { return };
@@ -267,6 +284,16 @@ pub fn update_gfx_hud(
     let aiming_power = me.is_some_and(|m| m.left.phase == LeftPhase::Aiming && matches!(m.left.item, LeftHand::Blink));
     let crouched = me.is_some_and(|m| m.crouched);
     let has_match = !view.matchv.mode.is_empty();
+    let mission = view.matchv.mission.as_ref();
+    let ended = mission.is_some_and(|m| m.outcome.is_some());
+    // Objective marker: active task target projected into the stage (stage units).
+    let marker = mission.and_then(|m| m.target).filter(|_| !ended).and_then(|t| {
+        let (cam, gt) = cams.iter().next()?;
+        let world = crate::coords::pos(Vec3::from(t) + Vec3::Z * 60.0);
+        let v = cam.world_to_viewport(gt, world).ok()?;
+        Some((v - off) / s)
+    });
+    let has_match = !view.matchv.mode.is_empty();
     for (hq, mut node, mut xf, mut img, mut vis) in &mut quads {
         let (show, frac) = match hq.group {
             Group::Static => (alive, None),
@@ -280,12 +307,18 @@ pub fn update_gfx_hud(
             Group::CrossPower => (alive && aiming_power, None),
             Group::Crouch => (alive && crouched, None),
             Group::Objectives => (has_match, None),
-            Group::TargetNote => (view.target_info.is_some(), None),
+            Group::TargetNote => (view.target_info.is_some() || (mission.is_some() && !ended), None),
+            Group::Marker => (alive && marker.is_some(), None),
+            Group::OutcomeBg => (ended, None),
         };
         *vis = if show && frac.is_none_or(|f| f > 0.001) { Visibility::Inherited } else { Visibility::Hidden };
         let (src, dst) = match frac {
             Some(f) => crop(&hq.quad, f),
             None => (hq.quad.src, hq.quad.dst),
+        };
+        let dst = match (hq.group, marker) {
+            (Group::Marker, Some(at)) => dst.map(|(x, y)| (x + at.x, y + at.y)),
+            _ => dst,
         };
         img.rect = Some(Rect::new(src[0], src[1], src[2], src[3]));
         let p = |c: (f32, f32)| Vec2::new(c.0, c.1) * s + off;
@@ -384,6 +417,10 @@ pub enum TextKind {
     ObjTitle,
     ObjName,
     TargetBody,
+    /// HUD message (bottom centre, where the movie places `gameMsg_mc`).
+    Message,
+    /// End-of-mission panel.
+    Outcome,
 }
 
 /// Text laid out inside a stage-space rectangle of the movie.
@@ -441,6 +478,8 @@ fn target_lines(view: &SessionView, yaw: f32) -> String {
 pub fn update_anchored_text(
     view: Res<SessionView>,
     local: Res<crate::input_map::LocalInput>,
+    time: Res<Time>,
+    mut seen: Local<HashMap<u32, f32>>,
     windows: Query<&Window>,
     mut texts: Query<(&AnchoredText, &mut Node, &mut Text, &mut TextFont, &mut Visibility)>,
 ) {
@@ -451,9 +490,13 @@ pub fn update_anchored_text(
     let mine = m.scores.iter().find(|e| Some(e.id) == me_id);
     let leader = m.scores.iter().max_by_key(|e| e.score);
     for (at, mut node, mut text, mut font, mut vis) in &mut texts {
-        let (content, size) = match at.kind {
-            TextKind::ObjTitle => (format!("{}   {}:{:02}", if m.mode.eq_ignore_ascii_case("contracts") { "CONTRACTS" } else { "FREE FOR ALL" }, (m.time_left / 60.0).floor() as i32, (m.time_left % 60.0) as i32), 17.0),
-            TextKind::ObjName => (
+        let mission = m.mission.as_ref();
+        let (content, size) = match (at.kind, mission) {
+            (TextKind::ObjTitle, Some(mv)) => (mission_title(mv), 17.0),
+            (TextKind::ObjName, Some(mv)) => (mission_task(mv), 15.0),
+            (TextKind::TargetBody, Some(mv)) => (mission_paper(mv, time.elapsed_secs(), &mut seen), 15.0),
+            (TextKind::ObjTitle, None) => (format!("{}   {}:{:02}", if m.mode.eq_ignore_ascii_case("contracts") { "CONTRACTS" } else { "FREE FOR ALL" }, (m.time_left / 60.0).floor() as i32, (m.time_left % 60.0) as i32), 17.0),
+            (TextKind::ObjName, None) => (
                 match (mine, leader) {
                     (Some(me), Some(l)) if l.id != me.id => format!("You {}   ·   {} leads with {}", me.score, l.name, l.score),
                     (Some(me), _) => format!("You lead with {}", me.score),
@@ -461,7 +504,10 @@ pub fn update_anchored_text(
                 },
                 15.0,
             ),
-            TextKind::TargetBody => (target_lines(&view, local.yaw), 15.0),
+            (TextKind::TargetBody, None) => (target_lines(&view, local.yaw), 15.0),
+            (TextKind::Message, Some(mv)) => (mission_message(mv, time.elapsed_secs(), &mut seen), 20.0),
+            (TextKind::Outcome, Some(mv)) => (mission_outcome(mv), 19.0),
+            (TextKind::Message | TextKind::Outcome, None) => (String::new(), 15.0),
         };
         *vis = if content.is_empty() || m.mode.is_empty() { Visibility::Hidden } else { Visibility::Inherited };
         text.0 = content;
@@ -471,10 +517,97 @@ pub fn update_anchored_text(
         // Banner strips: right-aligned inside the strip; target paper: inset block.
         let (inset, top) = match at.kind {
             TextKind::TargetBody => (Vec2::new(0.1, 0.0), min.y + (max.y - min.y) * 0.3),
+            TextKind::Message | TextKind::Outcome => (Vec2::new(0.0, 0.0), min.y),
             _ => (Vec2::new(0.04, 0.0), (min.y + max.y) * 0.5 - size * s * 0.65),
         };
         node.left = px(min.x + (max.x - min.x) * inset.x);
         node.width = px((max.x - min.x) * (1.0 - 2.0 * inset.x));
         node.top = px(top);
     }
+}
+
+/// Banner title strip in a mission: the first visible objective with work left.
+fn mission_title(mv: &dishonored_mission::runtime::MissionView) -> String {
+    use dishonored_mission::TaskState;
+    mv.objectives
+        .iter()
+        .find(|o| !o.hidden && o.tasks.iter().any(|t| !t.hidden && t.state == TaskState::Active && !t.optional))
+        .or_else(|| mv.objectives.iter().find(|o| !o.hidden))
+        .map(|o| o.description.to_uppercase())
+        .unwrap_or_else(|| mv.title.to_uppercase())
+}
+
+/// Banner name strip: the current required task.
+fn mission_task(mv: &dishonored_mission::runtime::MissionView) -> String {
+    use dishonored_mission::TaskState;
+    if let Some(o) = &mv.outcome {
+        return o.text.clone();
+    }
+    mv.objectives
+        .iter()
+        .filter(|o| !o.hidden)
+        .flat_map(|o| o.tasks.iter())
+        .find(|t| !t.hidden && t.state == TaskState::Active && !t.optional)
+        .map(|t| t.description.clone())
+        .unwrap_or_default()
+}
+
+/// Target paper: a fresh notification for a few seconds, otherwise the task list.
+fn mission_paper(mv: &dishonored_mission::runtime::MissionView, now: f32, seen: &mut HashMap<u32, f32>) -> String {
+    use dishonored_mission::TaskState;
+    if let Some((id, title, text)) = &mv.notification {
+        let t0 = *seen.entry(*id).or_insert(now);
+        if now - t0 < 8.0 {
+            return format!("{}\n{}", title.to_uppercase(), text);
+        }
+    }
+    let mut s = String::new();
+    for o in mv.objectives.iter().filter(|o| !o.hidden) {
+        for t in o.tasks.iter().filter(|t| !t.hidden && t.state != TaskState::Inactive) {
+            let mark = match t.state {
+                TaskState::Completed => "  (done)",
+                TaskState::Failed => "  (failed)",
+                _ => "",
+            };
+            s += &format!("{}{mark}\n", t.description);
+        }
+    }
+    s
+}
+
+/// Newest HUD message, for four seconds after it first appears.
+fn mission_message(mv: &dishonored_mission::runtime::MissionView, now: f32, seen: &mut HashMap<u32, f32>) -> String {
+    if mv.outcome.is_some() {
+        return String::new();
+    }
+    match mv.messages.last() {
+        Some((id, text)) => {
+            let t0 = *seen.entry(*id).or_insert(now);
+            if now - t0 < 4.0 { text.clone() } else { String::new() }
+        }
+        None => String::new(),
+    }
+}
+
+/// End-of-mission summary in the shape of Dishonored's mission statistics.
+fn mission_outcome(mv: &dishonored_mission::runtime::MissionView) -> String {
+    let Some(o) = &mv.outcome else { return String::new() };
+    let st = &mv.stats;
+    let mins = (st.time / 60.0).floor() as i32;
+    let secs = (st.time % 60.0) as i32;
+    let mut s = format!("{}\n{}\n\n", if o.success { "MISSION COMPLETE" } else { "MISSION FAILED" }, o.text);
+    s += &format!("Hostiles killed  {}      Civilians killed  {}\n", st.hostiles_killed, st.civilians_killed);
+    s += &format!("Detected  {}      Alarms  {}      Time  {mins}:{secs:02}\n", st.detected, st.alarms);
+    s += &format!("Chaos  {}", if mv.high_chaos { "High" } else { "Low" });
+    let mut feats = Vec::new();
+    if st.ghost() {
+        feats.push("Ghost");
+    }
+    if st.clean_hands() {
+        feats.push("Clean Hands");
+    }
+    if !feats.is_empty() {
+        s += &format!("      {}", feats.join(", "));
+    }
+    s
 }

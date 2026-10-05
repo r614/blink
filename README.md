@@ -59,6 +59,13 @@ Offline against bots (FFA by default, `--mode contracts` for the social-stealth 
 cargo run --release -p dishonored_runtime -- --bots 3 --mode contracts
 ```
 
+Custom missions (solo, or co-op with `--mission` on the dedicated server). Authoring guide:
+`missions/README.md`; how the original game builds missions: `research/dishonored/MISSIONS.md`.
+
+```bash
+cargo run --release -p dishonored_runtime -- --mission missions/boyle_masked_host.ron
+```
+
 Dedicated server and the optional control plane (an in-memory server list kept alive by
 heartbeats):
 

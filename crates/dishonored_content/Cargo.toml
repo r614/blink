@@ -6,6 +6,8 @@ license.workspace = true
 description = "Loads everything a match needs from the local install: collision, spawns, gameplay config"
 
 [dependencies]
+dishonored_multiplayer.workspace = true
+dishonored_mission.workspace = true
 anyhow.workspace = true
 glam.workspace = true
 serde.workspace = true

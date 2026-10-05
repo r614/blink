@@ -10,6 +10,7 @@ anyhow.workspace = true
 serde_json.workspace = true
 dishonored_content.workspace = true
 dishonored_multiplayer.workspace = true
+dishonored_mission.workspace = true
 dishonored_net.workspace = true
 dishonored_sim.workspace = true
 glam.workspace = true

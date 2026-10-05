@@ -50,6 +50,8 @@ struct Args {
     bots: usize,
     spectate: bool,
     contracts: bool,
+    /// `--mission FILE`: play a custom mission (RON, see missions/README.md).
+    mission: Option<dishonored_mission::MissionDef>,
     pos: Option<Vec3>,
     yaw: Option<f32>,
     pitch: f32,
@@ -92,8 +94,10 @@ fn parse_args() -> Args {
     let size = get("--size")
         .and_then(|s| s.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))))
         .unwrap_or((1600, 900));
+    let mission = get("--mission").map(|p| dishonored_mission::MissionDef::load(std::path::Path::new(&p)).unwrap_or_else(|e| panic!("mission {p}: {e:#}")));
     Args {
-        map: get("--map").unwrap_or_else(|| dishonored_content::DEFAULT_MAP.into()),
+        map: get("--map").or_else(|| mission.as_ref().map(|m| m.map.clone())).unwrap_or_else(|| dishonored_content::DEFAULT_MAP.into()),
+        mission,
         mode,
         name: get("--name").unwrap_or_else(|| "player".into()),
         bots: get("--bots").and_then(|s| s.parse().ok()).unwrap_or(3),
@@ -169,7 +173,7 @@ fn main() {
     } else {
         let content = Arc::new(dishonored_content::load_match(&args.map).expect("loading match content from the install"));
         let session = match &args.mode {
-            Mode::Offline => session::Session::offline(content, args.bots, args.spectate, args.contracts),
+            Mode::Offline => session::Session::offline(content, args.bots, args.spectate, args.contracts, args.mission.clone()),
             Mode::Connect(addr) => session::Session::online(content, connect(addr, &args)),
             Mode::Browse(master) => {
                 let servers = dishonored_net::control_plane::list_servers(master).expect("listing servers");

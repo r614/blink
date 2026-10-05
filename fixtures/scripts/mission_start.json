@@ -1,0 +1,6 @@
+{"steps":[
+  {"wait_ticks": 140}, {"screenshot": "m_01_start"},
+  {"wait_ticks": 300}, {"screenshot": "m_02_after_notify"},
+  {"ticks": 1, "input": {"yaw": 250}}, {"wait_ticks": 20}, {"screenshot": "m_03_turned"},
+  {"quit": true}
+]}

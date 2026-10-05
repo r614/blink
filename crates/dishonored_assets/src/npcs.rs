@@ -72,8 +72,10 @@ pub fn role_from_tweak(t: &str) -> NpcRole {
 
 pub fn extract_npc_data(content: &Content, packages: &[String]) -> Result<NpcData> {
     let mut out = NpcData::default();
+    let mut seen_pkgs = std::collections::BTreeSet::new();
     for name in packages {
-        if !content.has_package(name) {
+        // Package lists can repeat a sublevel (streaming list + name prefix); read each once.
+        if !content.has_package(name) || !seen_pkgs.insert(name.to_ascii_lowercase()) {
             continue;
         }
         let pkg = content.package(name)?;
