@@ -64,7 +64,7 @@ impl Session {
         } else if contracts {
             let rules = ContractsRules { warmup_time: 2.0, min_players: 2, crowd: Some(default_crowd(crowd_center(&content.spawns.iter().map(|s| (s.position, s.yaw)).collect::<Vec<_>>()))), ..Default::default() };
             let pts: Vec<(glam::Vec3, f32)> = content.spawns.iter().map(|s| (s.position, s.yaw)).collect();
-            GameSetup::contracts(rules, pts, Some(CrowdSource { points: &content.ai_points, guard_spawns: &content.guard_spawns }), &content.collision)
+            GameSetup::contracts(rules, pts, Some(CrowdSource { points: &content.ai_points, guard_spawns: &content.guard_spawns, flee_points: &content.flee_points }), &content.collision)
         } else {
             let spawns: Vec<SpawnPoint> = content.spawns.iter().map(|s| SpawnPoint { position: s.position, yaw: s.yaw }).collect();
             GameSetup::Ffa { rules: FfaRules { warmup_time: 1.0, min_players: 1, ..Default::default() }, spawns }
@@ -72,7 +72,7 @@ impl Session {
         let mut game = setup.build(&content.sim);
         let arch = |id: u32| dishonored_net::server::PLAYER_ARCHETYPES[id as usize % 3];
         game.add_player(LOCAL_ID, if spectate { "bot0" } else { "you" }, arch(LOCAL_ID), &content.collision, &content.sim);
-        let nav = std::sync::Arc::new(dishonored_bots::NavGraph::build(&content.collision, content.ai_points.iter().map(|p| p.0).chain(content.spawns.iter().map(|s| s.position))));
+        // Bots path on the original navmesh carried by the collision world.
         let mut bot_list = Vec::new();
         for i in 0..bots {
             let id = LOCAL_ID + 1 + i as u32;
@@ -82,9 +82,9 @@ impl Session {
                 _ => BotStyle::Duelist,
             };
             game.add_player(id, &format!("bot{}", i + 1), arch(id), &content.collision, &content.sim);
-            bot_list.push(Bot::new(id, style, 1000 + i as u64).with_nav(nav.clone()));
+            bot_list.push(Bot::new(id, style, 1000 + i as u64));
         }
-        let spectator = spectate.then(|| Bot::new(LOCAL_ID, BotStyle::Duelist, 999).with_nav(nav.clone()));
+        let spectator = spectate.then(|| Bot::new(LOCAL_ID, BotStyle::Duelist, 999));
         Self { kind: SessionKind::Offline { game, bots: bot_list, spectator }, content, last_input: PlayerInput::default() }
     }
 

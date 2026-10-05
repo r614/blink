@@ -92,10 +92,15 @@ impl MissionSetup {
                     None => starts.first().map(|s| s.0).unwrap_or(Vec3::ZERO),
                 };
                 let cfg = CrowdConfig { civilians: c.civilians, guards: c.guards, center, radius: c.radius, seed: 7, civilian_archetypes: vec![0, 2, 3], guard_archetypes: vec![1] };
-                Some(Crowd::populate(&cfg, ai_points, guard_spawns, world))
+                Crowd::populate(&cfg, ai_points, guard_spawns, world)
             }
-            None => None,
+            None => Crowd::default(),
         };
+        // Civilian panic destinations: the level's `DisFleePointActor`s.
+        let mut crowd = crowd;
+        let flee: Vec<Vec3> = actors.iter().filter(|a| a.1.starts_with("DisFleePointActor")).map(|a| a.2).collect();
+        crowd.set_flee_points(&flee, world);
+        let crowd = Some(crowd);
         Ok(MissionSetup { def, markers, starts, npcs, crowd })
     }
 }
@@ -121,7 +126,8 @@ pub struct MissionMatch {
 impl MissionMatch {
     pub fn new(setup: MissionSetup, cfg: &SimConfig) -> Self {
         let mut world = WorldState::default();
-        let mut crowd = setup.crowd.clone().unwrap_or(Crowd { brains: Vec::new(), layout: Default::default(), spawns: Vec::new(), respawn: Vec::new() });
+        let mut crowd = setup.crowd.clone().unwrap_or_default();
+        crowd.ai = cfg.gameplay.ai.clone();
         for s in crowd.spawns.clone() {
             spawn_npc(&mut world, s.id, s.kind, s.archetype, s.position, s.yaw, cfg);
         }
@@ -237,10 +243,17 @@ impl MissionMatch {
                 if let Some(id) = brain(self, &npc) {
                     let pos = self.world.player(id).map(|p| p.position).unwrap_or(Vec3::ZERO);
                     let target = self.nearest_human(pos);
+                    let ai = self.crowd.ai.clone();
                     if let Some(b) = self.crowd.brains.iter_mut().find(|b| b.id == id) {
+                        let tpos = target.and_then(|t| self.world.player(t)).map(|p| p.position);
+                        // Like `DisSeqAct_SetDisposition` / `AISetSuspicionLevel`: the human
+                        // becomes an enemy at full attention, so perception keeps it alerted.
+                        if let (Some(t), Some(p)) = (target, tpos) {
+                            b.alert_to(&ai, t, p);
+                        }
                         b.target = target;
                         b.state = if b.kind == PawnKind::Guard { BrainState::Combat } else { BrainState::Flee };
-                        b.threat_pos = target.and_then(|t| self.world.player(t)).map(|p| p.position);
+                        b.threat_pos = tpos;
                         b.timer = 0.0;
                     }
                 }
@@ -248,9 +261,8 @@ impl MissionMatch {
             Command::Calm(npc) => {
                 if let Some(id) = brain(self, &npc) {
                     if let Some(b) = self.crowd.brains.iter_mut().find(|b| b.id == id) {
+                        b.calm();
                         b.state = BrainState::Idle;
-                        b.target = None;
-                        b.threat_pos = None;
                     }
                 }
             }

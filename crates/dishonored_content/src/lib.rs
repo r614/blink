@@ -31,6 +31,8 @@ pub struct MatchContent {
     pub guard_spawns: Vec<(Vec3, f32)>,
     /// Named original actors (target points, spawners, player starts, triggers...) for missions.
     pub markers: Vec<dishonored_assets::npcs::LevelMarker>,
+    /// `DisFleePointActor` positions (civilian panic destinations).
+    pub flee_points: Vec<Vec3>,
 }
 
 pub fn cache_dir() -> PathBuf {
@@ -68,7 +70,7 @@ fn load_spawns(map: &str, m: Option<&DishonoredMap>) -> Vec<Spawn> {
 }
 
 pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
-    let path = cache_dir().join("gameplay_config.json");
+    let path = cache_dir().join("gameplay_config.v2.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);
@@ -142,7 +144,8 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     let ai_points = npcs.points.iter().map(|p| (p.position, p.yaw)).collect();
     let guard_spawns = npcs.spawns.iter().filter(|s| s.role == dishonored_assets::npcs::NpcRole::Guard).map(|s| (s.position, s.yaw)).collect();
     let markers = npcs.markers.clone();
-    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers })
+    let flee_points = markers.iter().filter(|m| m.class == "DisFleePointActor").map(|m| m.position).collect();
+    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers, flee_points })
 }
 
 /// Build a mission game setup from loaded match content (markers resolved against the

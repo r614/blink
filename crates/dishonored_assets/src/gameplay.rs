@@ -246,6 +246,7 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
         pistol,
         crossbow,
         melee,
+        ai: crate::ai_config::load_ai_config(content, &[]),
         provenance: l.prov,
     })
 }

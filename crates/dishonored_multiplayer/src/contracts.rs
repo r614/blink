@@ -216,7 +216,9 @@ impl ContractsMatch {
     pub fn new(rules: ContractsRules, spawns: Vec<(Vec3, f32)>, crowd: Option<Crowd>, cfg: &SimConfig) -> Self {
         let view = MatchView { mode: "contracts".into(), phase: MatchPhase::Warmup, time_left: rules.time_limit, score_limit: 0, ..Default::default() };
         let mut m = Self { rules, world: WorldState::default(), view, spawns, contracts: Vec::new(), crowd, last_events: Vec::new(), phase_timer: 0.0, respawn_queue: Vec::new(), rng: 0xC0FF_EE11 };
-        if let Some(c) = m.crowd.as_ref() {
+        if let Some(c) = m.crowd.as_mut() {
+            // Original AI tuning (perception, thresholds, search, panic) from the install.
+            c.ai = cfg.gameplay.ai.clone();
             for s in c.spawns.clone() {
                 spawn_npc(&mut m.world, s.id, s.kind, s.archetype, s.position, s.yaw, cfg);
             }

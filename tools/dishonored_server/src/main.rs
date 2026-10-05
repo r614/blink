@@ -59,7 +59,7 @@ fn main() -> Result<()> {
             crules.crowd = Some(default_crowd(center));
         }
         let pts: Vec<(glam::Vec3, f32)> = mc.spawns.iter().map(|s| (s.position, s.yaw)).collect();
-        GameSetup::contracts(crules, pts, Some(CrowdSource { points: &mc.ai_points, guard_spawns: &mc.guard_spawns }), &mc.collision)
+        GameSetup::contracts(crules, pts, Some(CrowdSource { points: &mc.ai_points, guard_spawns: &mc.guard_spawns, flee_points: &mc.flee_points }), &mc.collision)
     } else {
         GameSetup::Ffa { rules, spawns }
     };

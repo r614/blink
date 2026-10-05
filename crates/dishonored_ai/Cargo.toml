@@ -10,3 +10,4 @@ glam = { workspace = true, features = ["serde"] }
 serde.workspace = true
 dishonored_sim.workspace = true
 dishonored_world.workspace = true
+dishonored_ir.workspace = true

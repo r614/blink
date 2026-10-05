@@ -5,6 +5,7 @@
 //! original constants (speeds, gravity, ranges) apply unchanged. Presentation layers
 //! convert to their own frame (see `dishonored_runtime::coords`).
 
+pub mod ai;
 pub mod gameplay;
 pub mod nav;
 

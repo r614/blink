@@ -30,12 +30,18 @@ pub enum Game {
 pub struct CrowdSource<'a> {
     pub points: &'a [(Vec3, f32)],
     pub guard_spawns: &'a [(Vec3, f32)],
+    /// `DisFleePointActor` positions (civilian panic destinations).
+    pub flee_points: &'a [Vec3],
 }
 
 impl GameSetup {
     pub fn contracts(rules: ContractsRules, spawns: Vec<(Vec3, f32)>, source: Option<CrowdSource>, world: &dyn WorldQuery) -> Self {
         let crowd = match (&rules.crowd, source) {
-            (Some(cfg), Some(src)) => Some(Crowd::populate(cfg, src.points, src.guard_spawns, world)),
+            (Some(cfg), Some(src)) => {
+                let mut c = Crowd::populate(cfg, src.points, src.guard_spawns, world);
+                c.set_flee_points(src.flee_points, world);
+                Some(c)
+            }
             _ => None,
         };
         GameSetup::Contracts { rules, spawns, crowd }
