@@ -362,6 +362,9 @@ pub fn update_gfx_hud(
         LeftHand::Pistol => Some("pistol"),
         LeftHand::Crossbow => Some("crossbow"),
         LeftHand::Empty => Some("sword"),
+        LeftHand::SleepDart | LeftHand::IncendiaryBolt => Some("crossbow"),
+        // Icons for these are not loaded yet (owned by the HUD work).
+        LeftHand::Possession | LeftHand::BendTime | LeftHand::DevouringSwarm | LeftHand::Grenade | LeftHand::StickyGrenade | LeftHand::SpringRazor => None,
     };
     for (ei, mut node, mut img, mut vis) in &mut icon {
         match key.and_then(|k| hud.icons.get(k)).filter(|_| alive) {

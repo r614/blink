@@ -6,7 +6,8 @@ use crate::blink;
 use crate::events::{DamageCause, SimEvent, SoundCategory};
 use crate::input::{LeftHand, PlayerInput, buttons};
 use crate::movement::{MoveCtx, eye_position, view_vector};
-use crate::state::{LeftPhase, MoveMode, PlayerState, ProjectileKind, ProjectileState, WorldState};
+use crate::state::{LeftPhase, MoveMode, PawnKind, PlayerState, ProjectileKind, ProjectileState, WorldState, power};
+use dishonored_ir::items::AmmoType;
 use crate::tuning::CombatTuning;
 use crate::vitals::{apply_damage, spend_mana};
 use dishonored_ir::gameplay::{GameplayConfig, MovementConfig};
@@ -23,7 +24,27 @@ pub fn reset_loadout(p: &mut PlayerState, t: &CombatTuning) {
     p.left.blink_target = None;
 }
 
-/// Per-player left-hand update. Spawned projectiles are pushed to `spawn`.
+/// World-level effects a left-hand item asks for this tick (resolved by `step_world`, which
+/// can see the other pawns).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LeftAction {
+    /// `DisNotify_BendTime`.
+    BendTime,
+    /// The power used again while active: end it.
+    EndBendTime,
+    /// `DisNotify_DevouringSwarm`.
+    Swarm,
+    /// Possession: release of the targeting (find the host, pay, travel in).
+    PossessRelease,
+    /// Possession used again while possessing: leave the host.
+    PossessEnd,
+    /// `DisNotify_PlaceSpringRazor`.
+    PlaceTrap,
+}
+
+/// Per-player left-hand update. Spawned projectiles are pushed to `spawn`, world effects to
+/// `actions`.
+#[allow(clippy::too_many_arguments)]
 pub fn update(
     p: &mut PlayerState,
     input: &PlayerInput,
@@ -31,10 +52,12 @@ pub fn update(
     cfg: &GameplayConfig,
     t: &CombatTuning,
     spawn: &mut Vec<(ProjectileKind, Vec3, Vec3)>,
+    actions: &mut Vec<LeftAction>,
+    bend_active: bool,
     events: &mut Vec<SimEvent>,
 ) {
     let dt = ctx.dt;
-    if !p.alive {
+    if !p.alive || p.incapacitated() {
         return;
     }
     // A Blink move in progress finishes whatever the left hand selects.
@@ -42,23 +65,137 @@ pub fn update(
         blink::update(p, false, false, ctx, &cfg.blink, &cfg.vitals, events);
         return;
     }
-    // Item switch.
-    if input.left_hand != p.left.item {
+    let casting = p.left.phase == LeftPhase::Recovering && is_cast(p.left.item);
+    // Item switch (not in the middle of a power cast or gadget throw).
+    if input.left_hand != p.left.item && !casting {
         p.left.item = input.left_hand;
         p.left.blink_target = None;
-        p.left.phase = match p.left.item {
-            LeftHand::Pistol | LeftHand::Crossbow => LeftPhase::Equipping,
-            _ => LeftPhase::Idle,
-        };
+        p.left.phase = if input.left_hand.is_crossbow() || input.left_hand == LeftHand::Pistol { LeftPhase::Equipping } else { LeftPhase::Idle };
         p.left.timer = 0.0;
     }
+    let prev_timer = p.left.timer;
     p.left.timer += dt;
+    let crossed = |at: f32| prev_timer < at && p.left.timer >= at;
     let held = input.pressed(buttons::SECONDARY);
     let pressed = p.just_pressed(input, buttons::SECONDARY);
     let released = p.just_released(input, buttons::SECONDARY);
-    let busy = matches!(p.mode, MoveMode::Mantling | MoveMode::Dead) || crate::combat::sword_locks_movement(p);
+    let busy = matches!(p.mode, MoveMode::Mantling | MoveMode::Dead) || crate::combat::sword_locks_movement(p) || p.choke.phase != crate::state::ChokePhase::None || p.action_lock > 0.0;
+    // Carrying a body only leaves Blink usable.
+    if p.carrying.is_some() && p.left.item != LeftHand::Blink {
+        return;
+    }
+    let level = |i: usize| p.inv.power_levels[i];
 
     match p.left.item {
+        LeftHand::BendTime | LeftHand::DevouringSwarm => {
+            let swarm = p.left.item == LeftHand::DevouringSwarm;
+            let (idx, cost, notify, exit) = if swarm {
+                (power::DEVOURING_SWARM, cfg.items.swarm.mana_cost, crate::powers::SWARM_NOTIFY, crate::powers::SWARM_EXIT)
+            } else {
+                (power::BEND_TIME, cfg.items.bend_time.mana_cost, crate::powers::BEND_TIME_NOTIFY, crate::powers::BEND_TIME_EXIT)
+            };
+            match p.left.phase {
+                LeftPhase::Recovering => {
+                    if crossed(notify) {
+                        actions.push(if swarm { LeftAction::Swarm } else { LeftAction::BendTime });
+                    }
+                    if p.left.timer >= exit {
+                        p.left.phase = LeftPhase::Idle;
+                    }
+                }
+                _ if pressed && !busy && level(idx) > 0 => {
+                    if !swarm && bend_active {
+                        actions.push(LeftAction::EndBendTime);
+                    } else if spend_mana(p, cost, &cfg.vitals) {
+                        p.left.phase = LeftPhase::Recovering;
+                        p.left.timer = 0.0;
+                    }
+                }
+                _ => {}
+            }
+        }
+        LeftHand::Possession => {
+            use crate::state::PossessStage;
+            match p.possess.stage {
+                PossessStage::Active | PossessStage::PrePossess => {
+                    if pressed {
+                        actions.push(LeftAction::PossessEnd);
+                    }
+                }
+                PossessStage::Inactive | PossessStage::Targeting if level(power::POSSESSION) > 0 && !busy => {
+                    if pressed {
+                        p.left.phase = LeftPhase::Aiming;
+                        p.possess.stage = PossessStage::Targeting;
+                    } else if released && p.left.phase == LeftPhase::Aiming {
+                        p.left.phase = LeftPhase::Idle;
+                        p.possess.stage = PossessStage::Inactive;
+                        actions.push(LeftAction::PossessRelease);
+                    } else if !held && p.left.phase == LeftPhase::Aiming {
+                        p.left.phase = LeftPhase::Idle;
+                        p.possess.stage = PossessStage::Inactive;
+                    }
+                }
+                _ => {}
+            }
+        }
+        LeftHand::Grenade | LeftHand::StickyGrenade | LeftHand::SpringRazor => {
+            let ammo = match p.left.item {
+                LeftHand::Grenade => AmmoType::Grenade,
+                LeftHand::StickyGrenade => AmmoType::StickyGrenade,
+                _ => AmmoType::SpringRazor,
+            };
+            let razor = ammo == AmmoType::SpringRazor;
+            let (fire, exit) = if razor { (crate::gadgets::RAZOR_PLACE, crate::gadgets::RAZOR_EXIT) } else { (crate::gadgets::GRENADE_FIRE, crate::gadgets::GRENADE_EXIT) };
+            match p.left.phase {
+                LeftPhase::Recovering => {
+                    if crossed(fire) && crate::inventory::remove_ammo(p, ammo, 1) {
+                        if razor {
+                            actions.push(LeftAction::PlaceTrap);
+                        } else {
+                            let kind = if ammo == AmmoType::Grenade { ProjectileKind::Grenade } else { ProjectileKind::StickyGrenade };
+                            let g = crate::gadgets::grenade_cfg(cfg, kind);
+                            spawn.push((kind, eye_position(p, ctx.cfg), crate::gadgets::throw_velocity(p.yaw, p.pitch, g)));
+                            events.push(SimEvent::Sound { position: p.position, radius: 300.0, category: SoundCategory::SwordSwing, source: p.id });
+                        }
+                    }
+                    if p.left.timer >= exit {
+                        p.left.phase = LeftPhase::Idle;
+                    }
+                }
+                _ if pressed && !busy && crate::inventory::ammo(p, ammo) > 0 => {
+                    p.left.phase = LeftPhase::Recovering;
+                    p.left.timer = 0.0;
+                }
+                _ => {}
+            }
+        }
+        LeftHand::SleepDart | LeftHand::IncendiaryBolt => {
+            let (ammo, kind, speed) = if p.left.item == LeftHand::SleepDart {
+                (AmmoType::SleepDart, ProjectileKind::SleepDart, t.sleep_dart_speed)
+            } else {
+                (AmmoType::IncendiaryBolt, ProjectileKind::IncendiaryBolt, t.incendiary_speed)
+            };
+            match p.left.phase {
+                LeftPhase::Equipping if p.left.timer >= t.crossbow_equip => p.left.phase = LeftPhase::Idle,
+                LeftPhase::Recovering if p.left.timer >= 0.2 => {
+                    p.left.phase = if crate::inventory::ammo(p, ammo) > 0 { LeftPhase::Reloading } else { LeftPhase::Idle };
+                    p.left.timer = 0.0;
+                }
+                LeftPhase::Reloading if p.left.timer >= t.crossbow_reload => {
+                    p.left.phase = LeftPhase::Idle;
+                    events.push(SimEvent::Reloaded { id: p.id });
+                }
+                LeftPhase::Idle if !busy && pressed && crate::inventory::ammo(p, ammo) > 0 => {
+                    crate::inventory::remove_ammo(p, ammo, 1);
+                    let eye = eye_position(p, ctx.cfg);
+                    spawn.push((kind, eye, view_vector(p.yaw, p.pitch) * speed));
+                    p.left.phase = LeftPhase::Recovering;
+                    p.left.timer = 0.0;
+                    events.push(SimEvent::Sound { position: eye, radius: 500.0, category: SoundCategory::Crossbow, source: p.id });
+                }
+                _ => {}
+            }
+        }
         LeftHand::Blink => {
             if p.mode == MoveMode::Blinking {
                 blink::update(p, false, false, ctx, &cfg.blink, &cfg.vitals, events);
@@ -142,6 +279,11 @@ pub fn update(
         }
         LeftHand::Empty => {}
     }
+}
+
+/// Items whose use plays an uninterruptible cast/throw (no item switch until it ends).
+fn is_cast(item: LeftHand) -> bool {
+    matches!(item, LeftHand::BendTime | LeftHand::DevouringSwarm | LeftHand::Grenade | LeftHand::StickyGrenade | LeftHand::SpringRazor)
 }
 
 /// Windblast warmup before the blast starts (`m_fWarmupTime` default, 0.1 s) and cooldown
@@ -294,6 +436,10 @@ pub fn step_projectiles(
     let mut keep = Vec::with_capacity(state.projectiles.len());
     let projectiles = std::mem::take(&mut state.projectiles);
     for mut pr in projectiles {
+        if pr.kind.is_grenade() {
+            keep.push(pr);
+            continue;
+        }
         pr.age += dt;
         let old_v = pr.velocity;
         pr.velocity.z += gravity_z * pr.gravity_mult * dt;
@@ -306,7 +452,7 @@ pub fn step_projectiles(
         // Body hits (capsule vs segment), owner excluded.
         let mut body: Option<(usize, f32, Vec3)> = None;
         for (i, v) in state.players.iter().enumerate() {
-            if !v.alive || v.id == pr.owner {
+            if !v.alive || v.id == pr.owner || v.carried_by.is_some() || crate::powers::is_hidden(v) {
                 continue;
             }
             let hh = crate::movement::half_height(v, mv);
@@ -326,11 +472,35 @@ pub fn step_projectiles(
                 let hh = crate::movement::half_height(v, mv);
                 let head = point.z > v.position.z + hh * 0.6;
                 let dist = (pr.age - dt).max(0.0) * old_v.length() + along;
+                // Sleep darts (`m_bPutToSleep`, `m_fTimeBeforeSleep`) and incendiary bolts
+                // (`m_bPutToFire`, `m_bCannotKillNPC`) act on NPCs; on players they only hit.
+                if pr.kind == ProjectileKind::SleepDart {
+                    events.push(SimEvent::ProjectileImpact { projectile: pr.id, point, victim: Some(v.id) });
+                    if v.kind != PawnKind::Human && v.condition == crate::state::Condition::Normal && v.sleep_timer <= 0.0 {
+                        v.sleep_timer = crate::takedown::SLEEP_DELAY;
+                        v.condition_by = Some(pr.owner);
+                    }
+                    continue;
+                }
+                if pr.kind == ProjectileKind::IncendiaryBolt {
+                    events.push(SimEvent::ProjectileImpact { projectile: pr.id, point, victim: Some(v.id) });
+                    let mut dmg = pr.damage;
+                    if v.kind != PawnKind::Human {
+                        dmg = dmg.min(v.vitals.health - 1.0).max(0.0);
+                        if v.burning <= 0.0 {
+                            v.burning = 1e-4;
+                            v.condition_by = Some(pr.owner);
+                            events.push(SimEvent::Ignited { victim: v.id, by: pr.owner });
+                        }
+                    }
+                    apply_damage(v, dmg, Some(pr.owner), DamageCause::Crossbow, events, vitals);
+                    continue;
+                }
                 let (mut dmg, cause) = match (pr.kind, head) {
                     (ProjectileKind::Bullet, true) => (pr.damage * t.bullet_headshot_mult, DamageCause::PistolHeadshot),
                     (ProjectileKind::Bullet, false) => (pr.damage, DamageCause::Pistol),
-                    (ProjectileKind::Bolt, true) => (v.vitals.health.max(pr.damage), DamageCause::CrossbowHeadshot),
-                    (ProjectileKind::Bolt, false) => (pr.damage, DamageCause::Crossbow),
+                    (_, true) => (v.vitals.health.max(pr.damage), DamageCause::CrossbowHeadshot),
+                    (_, false) => (pr.damage, DamageCause::Crossbow),
                 };
                 if pr.kind == ProjectileKind::Bullet && dist <= t.bullet_close_range {
                     dmg *= t.bullet_close_mult;
@@ -356,8 +526,12 @@ pub fn make_projectile(id: u32, owner: u32, kind: ProjectileKind, pos: Vec3, vel
     let (damage, gravity_mult) = match kind {
         ProjectileKind::Bullet => (t.bullet_damage, 0.0),
         ProjectileKind::Bolt => (t.bolt_damage, t.bolt_gravity_mult),
+        ProjectileKind::SleepDart => (t.sleep_dart_damage, t.sleep_dart_gravity_mult),
+        ProjectileKind::IncendiaryBolt => (t.incendiary_damage, t.incendiary_gravity_mult),
+        // Grenades carry their own gravity (`step_grenades`).
+        ProjectileKind::Grenade | ProjectileKind::StickyGrenade => (0.0, 0.0),
     };
-    ProjectileState { id, kind, owner, position: pos, velocity: vel, age: 0.0, damage, gravity_mult }
+    ProjectileState { id, kind, owner, position: pos, velocity: vel, age: 0.0, damage, gravity_mult, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO }
 }
 
 /// Players revealed to `viewer` by Dark Vision (within range; occlusion ignored, as in

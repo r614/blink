@@ -95,6 +95,17 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
     let pistol_m = l.obj(pistol);
     inv.pistol_ranged_damage = l.attr(&pistol_m, pistol, "m_RangedDamage", "items.inventory.pistol_ranged_damage", d.pistol_ranged_damage);
 
+    {
+        let ini = Ini::load_layered(&content.root, "Player");
+        let sec = "DishonoredGame.DishonoredPlayerPawn";
+        for (i, k) in ["m_fMinSpeedRayScale", "m_fRaySpeedScale", "m_fRaySpeedScale_Max"].iter().enumerate() {
+            if let Some(v) = ini.get_f32(sec, k) {
+                cfg.inventory.melee_ray_speed[i] = v;
+            }
+        }
+        l.prov.insert("items.inventory.melee_ray_speed".into(), format!("DefaultPlayer.ini [{sec}] = {:?}", cfg.inventory.melee_ray_speed));
+    }
+
     // --- Possession ---
     let pp = "Twk_Powers_Possess.Twk_Powers_Possess";
     let pm = l.obj(pp);

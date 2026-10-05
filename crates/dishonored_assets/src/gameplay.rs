@@ -149,6 +149,7 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
         crawl_half_height: l.f(&corvo, CORVO, "m_fCrouchHeight", "movement.crawl_half_height")?,
         slide_time: l.f(&corvo, CORVO, "m_fSlideTime", "movement.slide_time")?,
         slide_deactivate_angle: l.f(&corvo, CORVO, "m_fSlideVelocityDeactivateAngle", "movement.slide_deactivate_angle")?,
+        slide_percent_not_cancelable: l.f(&corvo, CORVO, "m_fSlidePercentNotCancelable", "movement.slide_percent_not_cancelable")?,
         lean: {
             let cam = Ini::load_layered(&content.root, "Camera");
             let sec = "DishonoredGame.DishonoredCamera_Lean";

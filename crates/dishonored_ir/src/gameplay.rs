@@ -66,6 +66,10 @@ pub struct MovementConfig {
     /// from its starting direction.
     #[serde(default = "d_slide_angle")]
     pub slide_deactivate_angle: f32,
+    /// `m_fSlidePercentNotCancelable`: a slide can be cancelled once `SlideTime * this` has
+    /// passed (0x00A71450).
+    #[serde(default = "d_slide_cancel")]
+    pub slide_percent_not_cancelable: f32,
     /// `DishonoredCamera_Lean` (DefaultCamera.ini): the eye swings about a pivot
     /// `lean_height_pct x 2 x CollisionHeight` below it, up to `lean_max_angle` degrees,
     /// driven by a spring (`m_LeanConstants`).
@@ -93,6 +97,9 @@ fn d_slide_time() -> f32 {
 }
 fn d_slide_angle() -> f32 {
     25.0
+}
+fn d_slide_cancel() -> f32 {
+    0.5
 }
 
 fn default_terminal_velocity() -> f32 {

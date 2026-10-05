@@ -9,10 +9,14 @@
 pub mod blink;
 pub mod combat;
 pub mod events;
+pub mod gadgets;
 pub mod input;
+pub mod inventory;
 pub mod left_hand;
 pub mod movement;
+pub mod powers;
 pub mod state;
+pub mod takedown;
 pub mod tuning;
 pub mod vitals;
 
@@ -87,38 +91,164 @@ pub fn step_world(
     cfg: &SimConfig,
 ) -> StepOutput {
     let mut out = StepOutput::default();
-    let mv = &cfg.gameplay.movement;
-    let ctx = MoveCtx { world, cfg: mv, dt: DT };
+    let g = &cfg.gameplay;
+    let mv = &g.movement;
     let mut spawns = Vec::new();
+    let mut actions: Vec<(usize, left_hand::LeftAction)> = Vec::new();
 
-    for p in state.players.iter_mut() {
-        let input = inputs
-            .iter()
-            .find(|(id, _)| *id == p.id)
-            .map(|(_, i)| *i)
-            .unwrap_or(PlayerInput { tick: state.tick, ..p.last_input });
-        if p.alive {
-            let locked = combat::sword_locks_movement(p) || p.mode == MoveMode::Blinking;
-            let sword_out = true;
-            movement::step_movement(p, &input, sword_out, !locked, &ctx, &mut out.events);
-            combat::update_sword(p, &input, &cfg.tuning, DT, &mut out.events);
-            let mut local = Vec::new();
-            left_hand::update(p, &input, &ctx, &cfg.gameplay, &cfg.tuning, &mut local, &mut out.events);
-            spawns.extend(local.into_iter().map(|(k, pos, vel)| (p.id, k, pos, vel)));
-            vitals::tick(p, &cfg.gameplay.vitals, DT);
-        } else {
+    // Inputs (late packets repeat the last input without its one-shot action).
+    let mut ins: Vec<PlayerInput> = state
+        .players
+        .iter()
+        .map(|p| inputs.iter().find(|(id, _)| *id == p.id).map(|(_, i)| *i).unwrap_or(PlayerInput { tick: state.tick, action: 0, ..p.last_input }))
+        .collect();
+    // A possessed host is driven by its possessor (movement, look, jump/sneak/sprint/walk).
+    for i in 0..state.players.len() {
+        let p = &state.players[i];
+        if p.possess.stage != state::PossessStage::Active {
+            continue;
+        }
+        let Some(h) = p.possess.host.and_then(|h| state.players.iter().position(|q| q.id == h)) else { continue };
+        let pi = ins[i];
+        let keep = input::buttons::JUMP | input::buttons::CROUCH | input::buttons::SPRINT | input::buttons::WALK;
+        ins[h] = PlayerInput { tick: pi.tick, forward: pi.forward, right: pi.right, yaw: pi.yaw, pitch: pi.pitch, buttons: pi.buttons & keep, left_hand: state.players[h].left.item, action: 0 };
+    }
+    // Bend Time: each pawn's rate this tick.
+    for i in 0..state.players.len() {
+        let id = state.players[i].id;
+        state.players[i].time_scale = powers::pawn_time_scale(state, id, g);
+    }
+
+    for i in 0..state.players.len() {
+        let input = ins[i];
+        let scale = state.players[i].time_scale;
+        if scale <= 0.0 {
+            // Stopped in time: nothing happens to this pawn (input waits).
+            continue;
+        }
+        let dt = DT * scale;
+        let p0 = state.players[i];
+        let mvc = powers::effective_movement(&p0, g);
+        let ctx = MoveCtx { world, cfg: &mvc, dt };
+        if !p0.alive || p0.incapacitated() {
+            let p = &mut state.players[i];
+            if p.alive && p.condition == state::Condition::BeingChoked {
+                p.velocity = Vec3::ZERO;
+            } else if p.carried_by.is_none() {
+                takedown::step_body(p, world, g, dt);
+            }
+            if !p.alive {
+                p.yaw = input.yaw;
+                p.pitch = input.pitch;
+            }
+            takedown::step_afflictions(state, i, dt, g, &mut out.events);
+            let p = &mut state.players[i];
+            p.prev_buttons = input.buttons;
+            p.last_input = input;
+            continue;
+        }
+        if powers::is_hidden(&p0) {
+            // Inside a host: only the left hand (to leave) and the vitals run.
+            let p = &mut state.players[i];
             p.yaw = input.yaw;
             p.pitch = input.pitch;
+            let mut local = Vec::new();
+            let mut acts = Vec::new();
+            left_hand::update(p, &input, &ctx, g, &cfg.tuning, &mut local, &mut acts, false, &mut out.events);
+            actions.extend(acts.into_iter().map(|a| (i, a)));
+            vitals::tick(p, &powers::effective_vitals(&p0, g), dt);
+            p.prev_buttons = input.buttons;
+            p.last_input = input;
+            continue;
         }
+
+        // Takedowns, bodies, pickups (Use), elixirs: aimed with this tick's view.
+        state.players[i].yaw = input.yaw;
+        state.players[i].pitch = input.pitch.clamp(-89.0, 89.0);
+        let choking = takedown::step_choke(state, i, &input, dt, g, &mut out.events);
+        takedown::step_carry(state, i, &input, dt, world, g, &mut out.events);
+        let p = state.players[i];
+        if !choking && p.carrying.is_none() && p.just_pressed(&input, input::buttons::USE) && p.mode == MoveMode::Walking && p.action_lock <= 0.0 && p.sword.phase == state::SwordPhase::Idle {
+            if let Some(vi) = takedown::choke_target(state, &p, world, g, &cfg.tuning) {
+                takedown::start_choke(state, i, vi, g, &mut out.events);
+            } else if !inventory::try_use_pickup(state, i, world, g, &mut out.events) {
+                if let Some(b) = takedown::body_in_view(state, &p, world, g) {
+                    takedown::lift(state, p.id, b, &mut out.events);
+                }
+            }
+        }
+        match input.action {
+            input::actions::DRINK_HEALTH => {
+                inventory::drink(&mut state.players[i], dishonored_ir::items::ElixirType::Health, g, &mut out.events);
+            }
+            input::actions::DRINK_MANA => {
+                inventory::drink(&mut state.players[i], dishonored_ir::items::ElixirType::Mana, g, &mut out.events);
+            }
+            _ => {}
+        }
+        let bend_active = state.time_bends.iter().any(|b| b.caster == p.id);
+        let p = &mut state.players[i];
+        let choke_lock = p.choke.phase != state::ChokePhase::None;
+        let locked = combat::sword_locks_movement(p) || p.mode == MoveMode::Blinking || choke_lock || p.action_lock > 0.0 || p.carry_anim > 0.0;
+        let sword_out = p.carrying.is_none();
+        movement::step_movement(p, &input, sword_out, !locked, &ctx, &mut out.events);
+        // No sword while choking, carrying or in an action.
+        let sword_input = if choke_lock || p.carrying.is_some() || p.action_lock > 0.0 {
+            PlayerInput { buttons: input.buttons & !(input::buttons::PRIMARY | input::buttons::BLOCK), ..input }
+        } else {
+            input
+        };
+        combat::update_sword(p, &sword_input, &cfg.tuning, dt, &mut out.events);
+        let mut local = Vec::new();
+        let mut acts = Vec::new();
+        left_hand::update(p, &input, &ctx, g, &cfg.tuning, &mut local, &mut acts, bend_active, &mut out.events);
+        actions.extend(acts.into_iter().map(|a| (i, a)));
+        spawns.extend(local.into_iter().map(|(k, pos, vel)| (p.id, k, pos, vel)));
+        vitals::tick(p, &powers::effective_vitals(&p0, g), dt);
+        p.action_lock = (p.action_lock - dt).max(0.0);
         p.prev_buttons = input.buttons;
         p.last_input = input;
+        takedown::step_afflictions(state, i, dt, g, &mut out.events);
+    }
+
+    // World effects asked for by left hands.
+    for (i, a) in actions {
+        let id = state.players[i].id;
+        match a {
+            left_hand::LeftAction::BendTime => powers::start_bend_time(state, id, g, &mut out.events),
+            left_hand::LeftAction::EndBendTime => {
+                powers::end_bend_time_early(state, id, g);
+            }
+            left_hand::LeftAction::Swarm => powers::summon_swarm(state, id, world, g, &mut out.events),
+            left_hand::LeftAction::PlaceTrap => gadgets::place_trap(state, id, world, g, &mut out.events),
+            left_hand::LeftAction::PossessRelease => {
+                let p = state.players[i];
+                if let Some(host) = powers::possess_target(state, &p, world, g) {
+                    if vitals::spend_mana(&mut state.players[i], g.items.possess.mana_cost, &g.vitals) {
+                        powers::begin_possession(state, id, host, g);
+                    }
+                }
+            }
+            left_hand::LeftAction::PossessEnd => {
+                let ctx = MoveCtx { world, cfg: mv, dt: DT };
+                let had = state.players[i].possess.stage == state::PossessStage::Active;
+                powers::end_possession(state, i, had, &ctx, g, &mut out.events);
+            }
+        }
+    }
+    for i in 0..state.players.len() {
+        if matches!(state.players[i].possess.stage, state::PossessStage::PrePossess | state::PossessStage::Active | state::PossessStage::Cooldown) {
+            let dt = DT * state.players[i].time_scale;
+            let ctx = MoveCtx { world, cfg: mv, dt };
+            powers::step_possession(state, i, &ctx, g, &mut out.events);
+        }
     }
 
     for (owner, kind, pos, vel) in spawns {
         let id = state.next_projectile_id;
         state.next_projectile_id = state.next_projectile_id.wrapping_add(1);
         state.projectiles.push(left_hand::make_projectile(id, owner, kind, pos, vel, &cfg.tuning));
-        out.events.push(SimEvent::Fired { id: owner, bolt: kind == state::ProjectileKind::Bolt, projectile: id });
+        out.events.push(SimEvent::Fired { id: owner, bolt: kind.is_bolt(), projectile: id });
     }
 
     combat::resolve_sword_hits(state, world, mv, &cfg.gameplay.vitals, &cfg.tuning, &mut out.events);
@@ -136,9 +266,21 @@ pub fn step_world(
             });
         }
     }
-    left_hand::step_windblasts(state, world, mv, &cfg.gameplay.vitals, &cfg.tuning, DT, &mut out.events);
-
-    left_hand::step_projectiles(state, world, mv, &cfg.tuning, &cfg.gameplay.vitals, mv.gravity_z, DT, &mut out.events);
+    let world_dt = DT * powers::world_time_scale(state, g, false);
+    let proj_dt = DT * powers::world_time_scale(state, g, true);
+    if world_dt > 0.0 {
+        left_hand::step_windblasts(state, world, mv, &cfg.gameplay.vitals, &cfg.tuning, world_dt, &mut out.events);
+    }
+    if proj_dt > 0.0 {
+        left_hand::step_projectiles(state, world, mv, &cfg.tuning, &cfg.gameplay.vitals, mv.gravity_z, proj_dt, &mut out.events);
+        gadgets::step_grenades(state, world, g, proj_dt, &mut out.events);
+    }
+    if world_dt > 0.0 {
+        gadgets::step_traps(state, world, g, world_dt, &mut out.events);
+        powers::step_swarms(state, world_dt, g, &mut out.events);
+    }
+    powers::step_time_bends(state, DT, &mut out.events);
+    inventory::update_carried(state, mv);
 
     // Environmental damage from this tick's movement events.
     let env: Vec<SimEvent> = out.events.clone();
@@ -160,12 +302,42 @@ pub fn step_world(
                     }
                 }
             }
+            SimEvent::Death { victim, killer: Some(k), cause } => {
+                let (Some(kp), Some(vp)) = (state.player(k).copied(), state.player(victim).copied()) else { continue };
+                // Shadow Kill (0x00A87B60): the corpse burns to ash.
+                if powers::shadow_kill_applies(&kp, &vp, cause, vp.condition == state::Condition::Unconscious) {
+                    if let Some(v) = state.player_mut(victim) {
+                        v.no_body = true;
+                    }
+                    out.events.push(SimEvent::BodyRemoved { body: victim, ash: true });
+                }
+                // Falling Star charm (0x00ABBD10): mana and health on a drop assassination.
+                if cause == DamageCause::DropAssassination {
+                    let mana = powers::attribute(&kp, g, "Attribute_DropAssassinationManaBonus", 0.0).trunc();
+                    let health = powers::attribute(&kp, g, "Attribute_DropAssassinationHealthBonus", 0.0).trunc();
+                    if mana > 0.0 || health > 0.0 {
+                        let hmax = powers::health_max(&kp, g);
+                        let mmax = powers::mana_max(&kp, g);
+                        if let Some(a) = state.player_mut(k) {
+                            a.vitals.mana = (a.vitals.mana + mana).min(mmax);
+                            a.vitals.health = (a.vitals.health + health).min(hmax);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
 
     state.tick += 1;
     out
+}
+
+/// Grant a player the items and power levels a mission or test hands out.
+pub fn grant(state: &mut WorldState, id: PlayerId, f: impl FnOnce(&mut PlayerState)) {
+    if let Some(p) = state.player_mut(id) {
+        f(p);
+    }
 }
 
 /// Falling damage for a landing at `speed` (positive, downward), whole points.
@@ -202,6 +374,32 @@ pub fn state_hash(state: &WorldState) -> u64 {
         mix(p.left.phase as u64);
         mix(p.alive as u64);
         mix(p.crouched as u64);
+        mix(p.condition as u64);
+        mix(p.choke.phase as u64);
+        mix(p.carrying.map_or(0, |c| c as u64 + 1));
+        mix(p.possess.stage as u64);
+        mix(p.time_scale.to_bits() as u64);
+        mix(p.no_body as u64);
+        for a in p.inv.ammo {
+            mix(a as u64);
+        }
+        mix(p.inv.elixirs[0] as u64 | (p.inv.elixirs[1] as u64) << 8);
+        mix(p.inv.coins as u64);
+    }
+    for pk in &state.pickups {
+        mix(pk.id as u64 | (pk.active as u64) << 32);
+    }
+    for t in &state.traps {
+        mix(t.id as u64 | (t.triggered as u64) << 32 | (t.detonated as u64) << 33);
+    }
+    for s in &state.swarms {
+        mix(s.id as u64);
+        mix(s.position.x.to_bits() as u64);
+        mix(s.position.y.to_bits() as u64);
+    }
+    for b in &state.time_bends {
+        mix(b.caster as u64);
+        mix(b.elapsed.to_bits() as u64);
     }
     for wb in &state.windblasts {
         mix(wb.caster as u64);

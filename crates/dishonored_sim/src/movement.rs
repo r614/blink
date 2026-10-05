@@ -379,6 +379,11 @@ fn walking(
             return;
         }
     }
+    // Slide cancel (0x00A71450): once `m_fSlideTime * m_fSlidePercentNotCancelable` has passed,
+    // releasing the stick ends the slide (the cancel request's source is LIKELY the stick).
+    if p.slide.active && p.slide.elapsed > cfg.slide_time * cfg.slide_percent_not_cancelable && input.forward == 0 && input.right == 0 {
+        p.slide.active = false;
+    }
     if p.slide.active {
         slide(p, ctx);
         // The speed modifier keeps tracking so the exit blends down from the slide.

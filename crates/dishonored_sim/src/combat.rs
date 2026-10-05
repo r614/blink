@@ -73,6 +73,19 @@ pub fn sword_locks_movement(p: &PlayerState) -> bool {
     matches!(p.sword.phase, SwordPhase::Staggered | SwordPhase::Assassinating)
 }
 
+/// Melee reach (0x00C0A060 with 0x00AB2050): `m_fMaxContextRange` scaled by the forward-speed
+/// factor `1 + clamp((v . view - m_fMinSpeedRayScale) * m_fRaySpeedScale, 0, m_fRaySpeedScale_Max)`
+/// blended by `m_fRayScalePercent`: `range * ((factor - 1) * percent + 1)`. Sprinting forward
+/// at 540 uu/s reaches 210 x 1.35 = 283.5 uu.
+pub fn reach(a: &PlayerState, t: &CombatTuning) -> f32 {
+    let along = a.velocity.dot(view_vector(a.yaw, a.pitch));
+    if t.reach_speed_scale <= 0.0 || along <= t.reach_min_speed {
+        return t.attack_range;
+    }
+    let factor = 1.0 + ((along - t.reach_min_speed) * t.reach_speed_scale).clamp(0.0, t.reach_speed_scale_max);
+    t.attack_range * ((factor - 1.0) * t.reach_scale_percent + 1.0)
+}
+
 /// Distance from the attacker's swing segment to the victim's body axis.
 fn body_distance(eye: Vec3, dir: Vec3, range: f32, v: &PlayerState, mv: &MovementConfig) -> (f32, f32) {
     let hh = crate::movement::half_height(v, mv);
@@ -112,7 +125,7 @@ pub fn resolve_sword_hits(
     // Deterministic order: players are kept sorted by id.
     for ai in 0..n {
         let attacker = state.players[ai];
-        if !attacker.alive {
+        if !attacker.alive || attacker.incapacitated() || attacker.carrying.is_some() {
             continue;
         }
         let wants_attack = attacker.sword.phase == SwordPhase::Startup && attacker.sword.timer == 0.0;
@@ -144,10 +157,10 @@ pub fn resolve_sword_hits(
         let dir = view_vector(attacker.yaw, attacker.pitch);
         let mut best: Option<(usize, f32)> = None;
         for vi in 0..n {
-            if vi == ai || !state.players[vi].alive {
+            if vi == ai || !state.players[vi].alive || state.players[vi].carried_by.is_some() || crate::powers::is_hidden(&state.players[vi]) {
                 continue;
             }
-            let (gap, along) = body_distance(eye, dir, t.attack_range, &state.players[vi], mv);
+            let (gap, along) = body_distance(eye, dir, reach(&attacker, t), &state.players[vi], mv);
             if gap > t.attack_sweep_size * 0.5 {
                 continue;
             }

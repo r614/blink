@@ -95,6 +95,14 @@ pub struct InventoryConfig {
     pub pistol_ranged_damage: f32,
     /// `m_MaxActivatedBoneCharmCount`.
     pub max_equipped_charms: u8,
+    /// `DishonoredPlayerPawn` `m_fMinSpeedRayScale`, `m_fRaySpeedScale`, `m_fRaySpeedScale_Max`
+    /// (DefaultPlayer.ini): melee reach grows with forward speed (0x00AB2050).
+    #[serde(default = "d_ray")]
+    pub melee_ray_speed: [f32; 3],
+}
+
+fn d_ray() -> [f32; 3] {
+    [400.0, 0.005, 1.5]
 }
 
 impl Default for InventoryConfig {
@@ -116,6 +124,7 @@ impl Default for InventoryConfig {
             crossbow_ranged_damage: 20.0,
             pistol_ranged_damage: 10.0,
             max_equipped_charms: 3,
+            melee_ray_speed: d_ray(),
         }
     }
 }

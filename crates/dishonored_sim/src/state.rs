@@ -463,6 +463,39 @@ pub struct WorldState {
     pub next_entity_id: u32,
 }
 
+/// The world parts added with inventory, gadgets and powers, replicated as one block in
+/// snapshots (additive to the original protocol fields).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct WorldExtras {
+    pub pickups: Vec<PickupState>,
+    pub abstract_items: Vec<HeldItem>,
+    pub traps: Vec<TrapState>,
+    pub time_bends: Vec<TimeBendState>,
+    pub swarms: Vec<SwarmState>,
+    pub next_entity_id: u32,
+}
+
+impl WorldState {
+    pub fn extras(&self) -> WorldExtras {
+        WorldExtras {
+            pickups: self.pickups.clone(),
+            abstract_items: self.abstract_items.clone(),
+            traps: self.traps.clone(),
+            time_bends: self.time_bends.clone(),
+            swarms: self.swarms.clone(),
+            next_entity_id: self.next_entity_id,
+        }
+    }
+    pub fn set_extras(&mut self, e: WorldExtras) {
+        self.pickups = e.pickups;
+        self.abstract_items = e.abstract_items;
+        self.traps = e.traps;
+        self.time_bends = e.time_bends;
+        self.swarms = e.swarms;
+        self.next_entity_id = e.next_entity_id;
+    }
+}
+
 /// A pickup actor (`DisPickup_Base`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PickupState {
