@@ -7,3 +7,4 @@
 *.local.*
 /harness_out/
 /.claude/
+**/cache/
