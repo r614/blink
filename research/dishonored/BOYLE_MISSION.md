@@ -706,6 +706,8 @@ The runtime has:
 **Hand-authored in `missions/boyle_original.ron`:**
 - The mission rules, i.e. a re-expression of the ~200 relevant Kismet nodes listed above. The
   Kismet graph is not executed. It depends on matinees, `AttachToEvent` and native behaviours.
+  (Superseded 2026-10-05: the original Kismet now runs as data, `missions/boyle_original.ron`,
+  see `KISMET.md`.)
 - The random setup.
 - The clue dispatcher.
 - Kill and KO resolution.

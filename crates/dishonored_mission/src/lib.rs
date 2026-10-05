@@ -65,6 +65,23 @@ pub struct MissionDef {
     /// are loaded anyway).
     #[serde(default)]
     pub dialog_packages: Vec<String>,
+    /// Run the original Kismet of the mission maps and the global game sequence
+    /// (`dishonored_kismet`) instead of hand-written rules: objectives and tasks, travel,
+    /// spawns and the scripted logic come from the original data.
+    #[serde(default)]
+    pub original_kismet: Option<OriginalKismet>,
+}
+
+/// How a mission runs the original Kismet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OriginalKismet {
+    /// Remote event of the global game sequence that starts the mission, the way the
+    /// original's level change into the first map does (`ChangeLvl_fromHub_toBoyle`).
+    pub start_event: String,
+    /// Seed of the original random switches (`SeqAct_RandomSwitch`); runs with the same seed
+    /// play out the same.
+    #[serde(default)]
+    pub seed: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -537,10 +554,11 @@ impl MissionDef {
             let label = r.id.clone().unwrap_or_else(|| format!("#{ri}"));
             errs.extend(e.into_iter().map(|m| format!("rule {label}: {m}")));
         }
-        if self.objectives.is_empty() {
+        // Original-Kismet missions take their objectives and their end from the original data.
+        if self.objectives.is_empty() && self.original_kismet.is_none() {
             errs.push("mission has no objectives".into());
         }
-        if !self.rules.iter().any(|r| contains_end(&r.then)) {
+        if self.original_kismet.is_none() && !self.rules.iter().any(|r| contains_end(&r.then)) {
             errs.push("no rule ever completes the mission (Complete action)".into());
         }
         errs
