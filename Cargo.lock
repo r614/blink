@@ -3635,6 +3635,7 @@ dependencies = [
  "anyhow",
  "dishonored_assets",
  "dishonored_ir",
+ "dishonored_world",
  "glam",
  "image",
  "serde_json",

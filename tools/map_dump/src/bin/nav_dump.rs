@@ -94,6 +94,56 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Some("comps") => {
+            // Undirected connected components of the runtime graph, and which skipped
+            // (`Removed`) edges would bridge them.
+            let map = a.get(1).cloned().unwrap_or("L_Boyle_Ext_P".into());
+            let nav = load_nav_data(&c, &map_packages(&c, &map))?;
+            let w = dishonored_world::nav::NavWorld::from_data(&nav);
+            let n = w.polys.len();
+            let mut adj = vec![Vec::new(); n];
+            for (u, ls) in w.links.iter().enumerate() {
+                for l in ls {
+                    adj[u].push(l.to as usize);
+                    adj[l.to as usize].push(u);
+                }
+            }
+            let mut comp = vec![usize::MAX; n];
+            let mut sizes = Vec::new();
+            for s in 0..n {
+                if comp[s] != usize::MAX {
+                    continue;
+                }
+                let id = sizes.len();
+                let mut st = vec![s];
+                comp[s] = id;
+                let mut k = 0;
+                while let Some(u) = st.pop() {
+                    k += 1;
+                    for &v in &adj[u] {
+                        if comp[v] == usize::MAX {
+                            comp[v] = id;
+                            st.push(v);
+                        }
+                    }
+                }
+                sizes.push(k);
+            }
+            println!("{} components, sizes {:?}", sizes.len(), sizes);
+            let mut base = 0;
+            for p in &nav.pylons {
+                for (i, e) in p.mesh.edges.iter().enumerate() {
+                    let (a0, a1) = (base + e.poly0 as usize, base + e.poly1 as usize);
+                    if e.class == NavEdgeClass::Base && a0 < n && a1 < n && comp[a0] != comp[a1] {
+                        println!("  edge {i} {:?}/{:?} bridges {}<->{} at {:.0?} len {:.0}/{:.0}", e.class, e.kind, comp[a0], comp[a1], e.center, e.length, e.effective_length);
+                    }
+                }
+                base += p.mesh.polys.len();
+            }
+            for o in &nav.path_objects {
+                println!("  path object {} {} at {:.0?} blocking {}", o.class, o.name, o.location, o.blocking);
+            }
+        }
         Some("obj") => {
             let map = a.get(1).cloned().unwrap_or("L_Boyle_Ext_P".into());
             let nav = load_nav_data(&c, &map_packages(&c, &map))?;

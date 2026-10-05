@@ -8,6 +8,7 @@ use dishonored_assets::{Content, ImportOptions, import_level, map_packages};
 use dishonored_ir::DishonoredMap;
 use dishonored_sim::SimConfig;
 use dishonored_world::CollisionWorld;
+use dishonored_world::nav::NavWorld;
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -79,6 +80,23 @@ pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
     Ok(SimConfig::new(cfg))
 }
 
+/// The map's original navigation mesh (the `L_*_Nav` pylons plus doors and nav blockers),
+/// cached as `cache/<map>.nav.bin`.
+pub fn load_nav(content: &Content, map: &str) -> Result<NavWorld> {
+    let path = cache_dir().join(format!("{map}.nav.bin"));
+    if let Ok(w) = NavWorld::load(&path) {
+        if !w.polys.is_empty() {
+            return Ok(w);
+        }
+    }
+    let data = dishonored_assets::navigation::load_nav_data(content, &map_packages(content, map))?;
+    anyhow::ensure!(!data.pylons.is_empty(), "no pylons in the map packages");
+    let w = NavWorld::from_data(&data);
+    std::fs::create_dir_all(cache_dir()).ok();
+    w.save(&path).ok();
+    Ok(w)
+}
+
 pub fn load_match(map: &str) -> Result<MatchContent> {
     let content = Content::locate()?;
     let sim = load_sim_config(&content).context("gameplay config")?;
@@ -101,6 +119,11 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
             (w, s)
         }
     };
+    let mut collision = collision;
+    match load_nav(&content, map) {
+        Ok(nav) => collision.nav = Some(std::sync::Arc::new(nav)),
+        Err(e) => eprintln!("warning: no original navigation for {map}: {e:#}"),
+    }
     let curated = load_spawns(map, None);
     let spawns = if curated.is_empty() { spawns } else { curated };
     let npc_path = dir.join(format!("{map}.npcs3.json"));

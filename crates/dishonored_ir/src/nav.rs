@@ -110,6 +110,10 @@ pub struct NavMesh {
 pub struct NavPylon {
     pub name: String,
     pub package: String,
+    /// Object reference of the pylon inside its package (export index + 1), as used by
+    /// `FPolyReference`s of the same package.
+    #[serde(default)]
+    pub object_ref: i32,
     pub location: Vec3,
     pub nav_guid: [u32; 4],
     pub tall_boy: bool,

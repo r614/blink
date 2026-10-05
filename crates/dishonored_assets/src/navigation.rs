@@ -167,7 +167,7 @@ pub fn read_package_pylons(pkg: &Package) -> Result<Vec<NavPylon>> {
             ObjRef::Export(oe) => Some(read_nav_mesh(pkg, oe).with_context(|| format!("{}: obstacle mesh", pkg.name))?),
             _ => None,
         };
-        out.push(NavPylon { name: pkg.obj_name(ObjRef::Export(i)).to_string(), package: pkg.name.clone(), location, nav_guid, tall_boy, mesh, obstacle });
+        out.push(NavPylon { name: pkg.obj_name(ObjRef::Export(i)).to_string(), package: pkg.name.clone(), object_ref: i as i32 + 1, location, nav_guid, tall_boy, mesh, obstacle });
     }
     Ok(out)
 }
