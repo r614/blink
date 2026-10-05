@@ -2,10 +2,10 @@
 //!
 //! The original swaps the persistent map on travel (`SeqAct_PrepareMapChange` ->
 //! `SeqAct_CommitMapChange`) behind its loading screen. Here the renderer follows
-//! `Session::content` (which the session switches to the server's active map): on a change a
-//! loading overlay is shown for a frame, then the destination level is imported and spawned on
-//! its first visit, or simply made visible again on later visits, and the camera's post/fog
-//! settings are switched to that level's. Boyle Ext and Int share one coordinate frame, so the
+//! `Session::content` (which the session switches to the server's active map): on a change the
+//! original loading screen comes up (`crate::loading_screen`), the destination level is imported
+//! on a worker thread and spawned on its first visit, or simply made visible again on later
+//! visits, and the camera's post/fog settings are switched to that level's. Boyle Ext and Int share one coordinate frame, so the
 //! level that was left is hidden rather than kept on screen.
 
 use crate::map_render::{self, BakedMaterial, MapGeometry, RenderFeatures};
@@ -30,12 +30,10 @@ pub struct Levels {
     /// The level currently shown (newly spawned map entities are tagged with it).
     pub active: String,
     looks: HashMap<String, LevelLook>,
-    /// A level change waiting for the loading overlay to be on screen (frames to wait).
-    pending: Option<(String, u8)>,
+    /// A level change in progress: the target, and its import running on a worker thread.
+    pending: Option<String>,
+    import: Option<std::sync::Mutex<std::sync::mpsc::Receiver<Result<DishonoredMap, String>>>>,
 }
-
-#[derive(Component)]
-pub struct LoadingOverlay;
 
 pub struct LevelOptions {
     pub max_tex: u32,
@@ -62,8 +60,34 @@ pub fn spawn_level(
     let pkgs = if opts.legacy { dishonored_assets::map_packages_by_prefix(&content, name) } else { map_packages(&content, name) };
     let iopts = ImportOptions { max_texture_size: opts.max_tex, other_actors: !opts.legacy, ..Default::default() };
     let (map, stats) = import_level(&content, name, &pkgs, &iopts).expect("map import failed");
+    spawn_imported(name, map, stats.instances, opts, features, commands, meshes, images, materials, baked, levels)
+}
+
+/// Import a level (worker-thread safe).
+fn import(name: &str, opts: &LevelOptions) -> Result<DishonoredMap, String> {
+    let content = Content::locate().map_err(|e| e.to_string())?;
+    let pkgs = if opts.legacy { dishonored_assets::map_packages_by_prefix(&content, name) } else { map_packages(&content, name) };
+    let iopts = ImportOptions { max_texture_size: opts.max_tex, other_actors: !opts.legacy, ..Default::default() };
+    import_level(&content, name, &pkgs, &iopts).map(|r| r.0).map_err(|e| format!("{e:#}"))
+}
+
+/// Spawn an imported level's geometry and lights and record its look.
+#[allow(clippy::too_many_arguments)]
+fn spawn_imported(
+    name: &str,
+    map: DishonoredMap,
+    instances: usize,
+    opts: &LevelOptions,
+    features: &RenderFeatures,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    images: &mut Assets<Image>,
+    materials: &mut Assets<StandardMaterial>,
+    baked: &mut Assets<BakedMaterial>,
+    levels: &mut Levels,
+) -> DishonoredMap {
     let spawned = map_render::spawn_map(&map, commands, meshes, images, materials, baked, opts.show_hidden, features);
-    info!("{}: {} instances, {} meshes, {} textures, {} entities", name, stats.instances, stats.meshes, stats.textures, spawned);
+    info!("{}: {} instances, {} meshes, {} textures, {} entities", name, instances, map.meshes.len(), map.textures.len(), spawned);
     let lights = lighting::spawn_lights(&map, commands, features);
     info!("{} map lights", lights);
     if lights == 0 {
@@ -104,12 +128,14 @@ pub fn tag_level_entities(mut commands: Commands, levels: Res<Levels>, q: Query<
     }
 }
 
-/// Follow the session's active map (level travel).
+/// Follow the session's active map (level travel): loading screen up, import on a worker
+/// thread (first visit) or re-show (later visits), switch the camera's look, screen down.
 #[allow(clippy::too_many_arguments)]
 pub fn follow_level(
     mut commands: Commands,
     session: Res<Session>,
     mut levels: ResMut<Levels>,
+    mut loading: ResMut<crate::loading_screen::LoadingScreen>,
     opts: Res<crate::LevelSettings>,
     features: Res<RenderFeatures>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -118,42 +144,51 @@ pub fn follow_level(
     mut baked: ResMut<Assets<BakedMaterial>>,
     mut vis: Query<(&LevelOf, &mut Visibility)>,
     camera: Query<Entity, With<Camera3d>>,
-    overlay: Query<Entity, With<LoadingOverlay>>,
 ) {
     let want = session.content.map_name.clone();
-    if levels.pending.is_none() {
+    let Some(target) = levels.pending.clone() else {
         if levels.active.is_empty() || levels.active.eq_ignore_ascii_case(&want) {
             return;
         }
-        // Show the loading screen first; the swap happens once it has been presented.
-        commands.spawn((
-            LoadingOverlay,
-            Node { position_type: PositionType::Absolute, width: Val::Percent(100.0), height: Val::Percent(100.0), justify_content: JustifyContent::FlexEnd, align_items: AlignItems::FlexEnd, padding: UiRect::all(Val::Px(48.0)), ..default() },
-            BackgroundColor(Color::BLACK),
-            GlobalZIndex(100),
-            children![(Text::new("Loading..."), TextFont { font_size: bevy::text::FontSize::Px(28.0), ..default() }, TextColor(Color::srgb(0.85, 0.8, 0.7)))],
-        ));
-        levels.pending = Some((want, 2));
+        loading.begin(&mut commands, &mut images, &want);
+        if !levels.looks.contains_key(&want.to_ascii_lowercase()) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let name = want.clone();
+            let o = LevelOptions { max_tex: opts.0.max_tex, show_hidden: opts.0.show_hidden, legacy: opts.0.legacy };
+            std::thread::Builder::new()
+                .name(format!("import {name}"))
+                .spawn(move || {
+                    let _ = tx.send(import(&name, &o));
+                })
+                .ok();
+            levels.import = Some(std::sync::Mutex::new(rx));
+        }
+        levels.pending = Some(want);
         return;
-    }
-    let (target, wait) = levels.pending.clone().unwrap();
-    if wait > 0 {
-        levels.pending = Some((target, wait - 1));
-        return;
+    };
+    // First visit: wait for the worker's import, then spawn it.
+    if let Some(rx) = levels.import.take() {
+        let got = rx.lock().ok().and_then(|r| r.try_recv().ok());
+        match got {
+            None => {
+                levels.import = Some(rx);
+                return;
+            }
+            Some(Ok(map)) => {
+                let n = map.instances.len();
+                spawn_imported(&target, map, n, &opts.0, &features, &mut commands, &mut meshes, &mut images, &mut materials, &mut baked, &mut levels);
+            }
+            Some(Err(e)) => error!("importing {target}: {e}"),
+        }
     }
     levels.pending = None;
     for (l, mut v) in &mut vis {
         *v = if l.0.eq_ignore_ascii_case(&target) { Visibility::Inherited } else { Visibility::Hidden };
     }
-    if !levels.looks.contains_key(&target.to_ascii_lowercase()) {
-        spawn_level(&target, &opts.0, &features, &mut commands, &mut meshes, &mut images, &mut materials, &mut baked, &mut levels);
-    }
     levels.active = target.clone();
     if let Ok(cam) = camera.single() {
         apply_look(&levels, &target, cam, &mut commands, &features);
     }
-    for e in &overlay {
-        commands.entity(e).despawn();
-    }
+    loading.end();
     info!("level travel: now showing {target}");
 }

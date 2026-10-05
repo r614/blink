@@ -30,6 +30,7 @@ mod input_map;
 mod atmosphere;
 mod audio;
 mod level;
+mod loading_screen;
 mod lighting;
 mod map_render;
 mod players;
@@ -265,6 +266,7 @@ fn main() {
             .insert_resource(recorder)
             .init_resource::<harness::ShotQueue>()
             .init_resource::<harness::ControlOverride>()
+            .init_resource::<loading_screen::LoadingScreen>()
             .init_resource::<debug::DebugToggles>()
             .init_gizmo_group::<debug::XRayGizmos>()
             .add_systems(Startup, (players::setup_player_assets, hud::setup_hud, debug::setup_gizmos, (characters::load_library, characters::load_animations).chain(), characters::load_weapons, viewmodel::load_view_rig, gfx_hud::setup_gfx_hud, gfx_hud::load_game_fonts))
@@ -290,6 +292,7 @@ fn main() {
                     gfx_hud::update_anchored_text,
                     debug::draw_debug,
                     harness::harness_frame,
+                    loading_screen::update_loading_screen,
                     level::follow_level,
                     level::tag_level_entities,
                 ),

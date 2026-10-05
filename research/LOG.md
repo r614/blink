@@ -638,3 +638,20 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   - The runtime loads looks on demand and binds the third-person Edge sets to them by joint name.
   - Per-material variations (`m_MaterialVariation`) are not applied yet.
 - **Validation:** `harness travel` 11/11, with 33/33 interior NPCs on 19 tweak-resolved looks. A rendered capture shows an elite guard with his tweak's own head variant. `harness net` 8/8, mission 7/7, conversation 17/17.
+
+## 2026-10-05: The original loading screen (`DisBinkOverlayManager`)
+
+- **Question:** What does the original show while a level loads?
+- **Method:** Read `DishonoredEngine` / `DisBinkOverlayManager` (decompiled UnrealScript class layouts) together with their config and localization.
+- **Findings:**
+  - Not a Scaleform movie. `DefaultEngine.ini [DishonoredGame.DishonoredEngine] m_MapConfig` gives per map a Bink movie (`m_LoadingMovieName`, `Movies/<name>.bik`; Boyle Ext/Int: `LoadingBoyle`) and `m_bShowLoadingTexts`.
+  - `DefaultUI.ini [DishonoredGame.DisBinkOverlayManager]` lays out the texts as `DisBinkTextOverlayInfo`: position, wrap width, rotation in degrees, scale, colour. For example the map name sits at (105,109), rotated -3.42 deg, scale (0.8,0.96), dark, with a light shadow; hints at (106,550), wrapped to 1080, rotated -3 deg; "LOADING" right-aligned at (1180,625). It also sets `m_fHintDuration` (7 s) and `m_MapHintBindings` (Boyle -> hint set `Boyle`).
+  - Text comes from `DishonoredGame.int`: `[MapNames]`, `[DisBinkOverlayManager]` (font names and `m_LoadingText`) and `[DisBinkOverlayManager_HintSet_<set>] Hint=`.
+  - The fonts are UE3 bitmap `Font` objects in `UI_Loading_SF_LOC_INT`: `Emerge_BF` for titles and `ChaletComprime-CologneEighty` for text.
+- **Implementation:**
+  - `dishonored_assets::font` reads UE3 bitmap fonts: `Characters` (21-byte native `FontCharacter`), glyph pages, and the native `CharRemap` map.
+  - `loading_screen.rs` plays the Bink through an ffmpeg pipe (RGBA frames at the movie rate) and draws the texts as glyph quads with the configured layout. Hints rotate every `m_fHintDuration`.
+  - First visits import on a worker thread behind the screen.
+  - An offline match does not tick while the screen is up.
+- **Validation:** a recorded travel into Boyle Int shows `LoadingBoyle` with the map name on the painted banner and a Boyle hint in the lower band. `harness visual` 6/6, launcher 14/14.
+- **Open:** the shadow offset of the map name (2 px assumed), and the save-notification and "press any key" variants (not used in travel).

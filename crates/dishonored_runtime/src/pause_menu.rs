@@ -37,8 +37,10 @@ pub fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
 }
 
 /// Fixed-tick run condition: an offline match stops while paused.
-pub fn sim_running(p: Option<Res<PauseMenu>>, session: Res<crate::session::Session>) -> bool {
-    !(p.is_some_and(|p| p.open) && matches!(session.kind, crate::session::SessionKind::Offline { .. }))
+pub fn sim_running(p: Option<Res<PauseMenu>>, loading: Option<Res<crate::loading_screen::LoadingScreen>>, session: Res<crate::session::Session>) -> bool {
+    // The loading screen also stops an offline match (the original loads levels synchronously).
+    let stopped = p.is_some_and(|p| p.open) || loading.is_some_and(|l| l.active);
+    !(stopped && matches!(session.kind, crate::session::SessionKind::Offline { .. }))
 }
 
 #[allow(clippy::too_many_arguments)]
