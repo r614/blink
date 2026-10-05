@@ -123,6 +123,9 @@ pub struct MissionSetup {
     /// Looks of original NPCs: archetype `APPEARANCE_BASE + i` is `appearances[i]` (mesh parts).
     #[serde(default)]
     pub appearances: Vec<Look>,
+    /// Animation setups referenced by `Look::anim`.
+    #[serde(default)]
+    pub anim_profiles: Vec<dishonored_ir::npc_anim::AnimProfile>,
     /// Original dialog graphs the mission references, read from the install by the host
     /// (stored in replays so they play back identically).
     #[serde(default)]
@@ -242,6 +245,7 @@ impl MissionSetup {
             .collect();
         let mut original = Vec::new();
         let mut appearances: Vec<Look> = Vec::new();
+        let mut anim_profiles: Vec<dishonored_ir::npc_anim::AnimProfile> = Vec::new();
         for m in maps.iter().filter(|m| def.original_npcs.iter().any(|o| o.eq_ignore_ascii_case(&m.name))) {
             for s in m.spawners {
                 let (kind, mut archetype) = original_archetype(s);
@@ -250,8 +254,20 @@ impl MissionSetup {
                 // picks one of `m_RandomHeadMeshes`); the role archetype is the fallback.
                 let parts = s.appearance.parts(id);
                 if !parts.is_empty() {
-                    let i = appearances.iter().position(|a| a.parts == parts && a.materials.is_empty()).unwrap_or_else(|| {
-                        appearances.push(Look { parts: parts.clone(), materials: Vec::new() });
+                    // Per-pawn material variations (`m_MaterialVariation`, `m_BodyVariationMaterials`)
+                    // and the tweak's animation setup ride with the look.
+                    let anim = if s.appearance.anim.sets.is_empty() {
+                        0
+                    } else {
+                        let k = anim_profiles.iter().position(|p| *p == s.appearance.anim).unwrap_or_else(|| {
+                            anim_profiles.push(s.appearance.anim.clone());
+                            anim_profiles.len() - 1
+                        });
+                        (k + 1) as u16
+                    };
+                    let look = Look { parts: parts.clone(), materials: s.appearance.materials(id), anim };
+                    let i = appearances.iter().position(|a| *a == look).unwrap_or_else(|| {
+                        appearances.push(look);
                         appearances.len() - 1
                     });
                     if i + (APPEARANCE_BASE as usize) < 256 {
@@ -275,7 +291,7 @@ impl MissionSetup {
                 }
             }
         }
-        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances, kismet: None, routes: maps
+        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances, anim_profiles, kismet: None, routes: maps
                 .iter()
                 .map(|m| {
                     // Snapped to the floor as `Crowd::set_routes` does for the crowd's map.
@@ -358,7 +374,7 @@ impl MissionMatch {
         }
         let mut m = MissionMatch {
             world: WorldState::default(),
-            view: MatchView { mode: "mission".into(), phase: MatchPhase::Playing, mission: Some(state.view.clone()), map: current_map.clone(), appearances: setup.appearances.clone(), ..Default::default() },
+            view: MatchView { mode: "mission".into(), phase: MatchPhase::Playing, mission: Some(state.view.clone()), map: current_map.clone(), appearances: setup.appearances.clone(), anim_profiles: setup.anim_profiles.clone(), ..Default::default() },
             state,
             crowd: Crowd { ai: cfg.gameplay.ai.clone(), ..Default::default() },
             setup,
@@ -490,7 +506,7 @@ impl MissionMatch {
                     materials.retain(|x| !(x.0 == p && x.1 == i));
                     materials.push((p, i, path));
                 }
-                let want = Look { parts: look.parts, materials };
+                let want = Look { parts: look.parts, materials, anim: look.anim };
                 let idx = match self.view.appearances.iter().position(|l| *l == want) {
                     Some(i) => i,
                     None => {
@@ -901,6 +917,7 @@ impl MissionMatch {
             }
             self.view.time_left = if self.setup.def.settings.time_limit > 0.0 { (self.setup.def.settings.time_limit - self.state.view.stats.time).max(0.0) } else { 0.0 };
         }
+        self.view.npc_poses = crate::npc_poses(&self.crowd.brains);
         // Level travel happens at the end of the step (the host swaps collision before the next).
         if let Some((m, tag)) = self.pending_travel.take() {
             self.travel(&m, &tag, cfg);

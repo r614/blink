@@ -413,6 +413,7 @@ impl ContractsMatch {
             for s in crowd.tick_respawns(&out.events, dt) {
                 spawn_npc(&mut self.world, s.id, s.kind, s.archetype, s.position, s.yaw, cfg);
             }
+            self.view.npc_poses = crate::npc_poses(&crowd.brains);
         }
 
         match self.view.phase {

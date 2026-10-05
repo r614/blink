@@ -73,6 +73,8 @@ pub enum Step {
     Camera { camera: CameraStep },
     /// Offline sessions only: place the local player (Dishonored units, degrees).
     Teleport { teleport: CameraStep },
+    /// Game camera: third person, follow a pawn id, orbit angle (degrees) around it.
+    View { view: ViewStep },
     Quit { quit: bool },
 }
 
@@ -82,6 +84,30 @@ pub struct CameraStep {
     pub yaw: f32,
     #[serde(default)]
     pub pitch: f32,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ViewStep {
+    #[serde(default)]
+    pub third_person: bool,
+    #[serde(default)]
+    pub follow: Option<u32>,
+    #[serde(default)]
+    pub orbit: f32,
+    /// Camera distance and height above the eye (Bevy units; defaults 3.0 and 0.6).
+    #[serde(default)]
+    pub distance: Option<f32>,
+    #[serde(default)]
+    pub height: Option<f32>,
+}
+
+/// Camera view requested by a script `view` step (read by `players::camera_follow`).
+#[derive(Resource, Default)]
+pub struct ViewRequest {
+    pub pending: Option<ViewStep>,
+    pub orbit: Option<f32>,
+    pub distance: Option<f32>,
+    pub height: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -161,6 +187,9 @@ pub fn state_json(view: &SessionView, session: &Session) -> serde_json::Value {
             "left": format!("{:?}", p.left.item), "left_phase": format!("{:?}", p.left.phase),
             "blink_target": p.left.blink_target.map(|t| [t.x, t.y, t.z]),
             "pistol": [p.left.pistol_loaded, p.left.pistol_reserve as u8], "dark_vision": p.vitals.dark_vision_remaining,
+            "kind": format!("{:?}", p.kind), "archetype": p.archetype,
+            "stance": view.matchv.npc_poses.iter().find(|x| x.0 == p.id).map(|x| format!("{:?}", x.1)),
+            "look": (p.archetype as usize).checked_sub(dishonored_multiplayer::mission::APPEARANCE_BASE as usize).and_then(|i| view.matchv.appearances.get(i)).and_then(|l| l.parts.first()).map(|b| b.1.clone()),
         })
     };
     serde_json::json!({
@@ -177,7 +206,7 @@ pub fn state_json(view: &SessionView, session: &Session) -> serde_json::Value {
 }
 
 /// Fixed-tick side of scripting: choose the override input for this tick.
-pub fn script_fixed(mut runner: ResMut<ScriptRunner>, mut local: ResMut<LocalInput>, mut shots: ResMut<ShotQueue>, view: Res<SessionView>, mut session: ResMut<Session>, mut ctrl: ResMut<ControlOverride>) {
+pub fn script_fixed(mut runner: ResMut<ScriptRunner>, mut local: ResMut<LocalInput>, mut shots: ResMut<ShotQueue>, view: Res<SessionView>, mut session: ResMut<Session>, mut ctrl: ResMut<ControlOverride>, mut vreq: ResMut<ViewRequest>) {
     if let Some(t) = ctrl.ticks_left.as_mut() {
         if *t == 0 {
             local.override_input = None;
@@ -221,6 +250,12 @@ pub fn script_fixed(mut runner: ResMut<ScriptRunner>, mut local: ResMut<LocalInp
                 let _ = std::fs::write(&p, serde_json::to_string_pretty(&state_json(&view, &session)).unwrap());
             }
             Step::Camera { .. } => {}
+            Step::View { view } => {
+                vreq.orbit = Some(view.orbit);
+                vreq.distance = view.distance;
+                vreq.height = view.height;
+                vreq.pending = Some(view);
+            }
             Step::Teleport { teleport } => {
                 if let crate::session::SessionKind::Offline { game, .. } = &mut session.kind {
                     if let Some(p) = game.world_mut().player_mut(crate::session::LOCAL_ID) {
@@ -288,7 +323,7 @@ pub fn inspect_script(
         Step::Input { ticks, .. } => runner.ticks_left = ticks,
         Step::Camera { camera } => cam.0 = Some(camera),
         Step::Screenshot { screenshot } => shots.pending.push(runner.out_dir.join(format!("{screenshot}.png"))),
-        Step::Dump { .. } | Step::Teleport { .. } => {}
+        Step::Dump { .. } | Step::Teleport { .. } | Step::View { .. } => {}
         Step::Quit { .. } => {
             runner.done = true;
             shots.quit_in = Some(30);

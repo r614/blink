@@ -778,3 +778,41 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Result:** `harness kismet` 14/14. From `ChangeLvl_fromHub_toBoyle`: Samuel's intro conversation and its 29.8 s matinee add the objectives with their localized text (33.9 s); the estate entrance trigger; the garden door's own Kismet (choice, travel destination, global PrepareMapChange / SaveLevelState / CommitMapChange) into the ballroom; the sisters' positions, dresses and the guilty sister from the original random switches (all three sisters come out over 6 seeds); the guilty sister's note picked up shows her dress task; killing her fires the death event the Kismet attached at runtime, completing the eliminations and activating the escape task; back through the ballroom door; the canal trigger; Samuel's "Lets_Go" choice; the final exit runs the original end-of-mission Kismet to `ChangeLvl_fromBoyle_toHub`, which ends the mission at 58.7 s of play. Same seed, same Kismet state hash. Coverage on that run: 78 op classes executed of 153 in the data, 885 activations of 771 ops; 43 presentation-only activations (fades, HUD, chapters, statistics, achievements); 14 activations of 6 unsupported classes (`AISetSenses`, `Door`, `AttachToActor`, `SetDisposition` on factions, `ActivateUsable`, `ActorFactory`). The agent is placed next to what it uses; it does not path across the maps. Unit tests: 17 interpreter semantics tests. `harness travel` 12/12 (its material check now starts from the lady's own look, since the mission dresses her on arrival), `mission` 7/7, `conversation` 17/17, `sim` 12/12.
 - **Confidence:** CONFIRMED for the decoded engine semantics and the data; LIKELY for level-loaded outputs on a return visit, camera fade timing and event instigators (U-080, U-081, U-084); APPROXIMATION for matinees (timed, not animated), AI go-to results and NPC vanishing (U-085..U-087).
 - **Implementation consequence:** a mission can run its maps' original Kismet with `original_kismet: OriginalKismet(start_event: ...)`; the hand-written rule interpreter stays for custom missions.
+
+## 2026-10-05: NPC animation selection from the original (AnimSets, locomotion configs, animation definitions)
+
+- **Question:** Which animations does the original play on an NPC, and how does it pick them?
+- **Method:** pawn tweaks through the fallback chain (`m_AnimSets`, `m_pAnimDefClass`,
+  `m_pComponentLocomotionConfig`, `m_RandomHeadMeshes[*].m_MaterialVariation`,
+  `m_BodyVariationMaterials`); the cooked AnimTree `Npc_Common_at.NPC_Human_at`; the
+  `DisNPCAnimDefinitions_*` default objects; Ghidra on `ArkAnimNodeLocomotion` (0x0091B280 and
+  callees), `DisAISubProcessAmbientAnims` (0x00B39620) and the pawn spawn setup (0x00B7F8A0,
+  0x00B76390, 0x00B7B0D0). New tool `npc_anim_dump`. Details: `research/dishonored/ANIMATION.md`.
+- **Findings:**
+  - Sequences are found from the last AnimSet to the first: the aristocrats' `Npc_Aristo_Empty_as`
+    replaces the guard walk. Women use the 14 `Npc_CivFemale_*` sets and `FemaleLocomotionConfig`.
+  - Locomotion: modifier (stance) x speed -> speed mode; each mode lists S, W, N, E loops with
+    authored ground speeds. Directions blend by angle, the two speed modes around the current
+    speed blend linearly (0.98 snap), and **S and W play with rate -1** (`_Revert` loops are
+    authored reversed; the old renderer played them forward).
+  - One-shots: `DisAnimDefinitions.m_Animations[eDisNPCAnimations]` chains (groups of steps,
+    item prefixes, blend times, directional end-after-one groups).
+  - Ambient idles: random timer in [2, 6] s, a random one of the leading steps that exist.
+  - Material variations: one roll per listed slot, running sum of unnormalized chances.
+  - Every Boyle tweak has `m_bRagdollOnDeath` false; deaths animate, then a
+    `DishonoredNotify_Ragdoll` (2.3 s into `Generic_DeathFrontA`) hands over to physics.
+  - NPC swing timing is in `DishonoredNotify_AttackZone` (0.49-0.59 s into the 1.767 s `Small`
+    attacks), documented for the simulation.
+- **Implementation:** looks carry an animation profile index (`MatchView::anim_profiles`) and
+  their material variations; the host publishes `MatchView::npc_poses` (brain state -> stance).
+  `dishonored_runtime::npc_anim` evaluates locomotion, full-body chains (attacks, parries, stuns,
+  hit reactions, deaths, assassinations, panic, cower, ambient idles, modifier transitions) and
+  upper-body talk gestures, with root translations for falls. Cache bumped to
+  `<map>.appearance2.json`. Harness scripts gained a `view` step (third person, follow a pawn,
+  orbit, distance, height); state dumps list kind, archetype, stance and look.
+- **Validation:** captures in `harness_out/C_cap/{A,B,C,E}` (Boyle Ext with the original
+  spawners: idle aristocrat, guard, woman; guards walking while searching; Lydia gesturing while
+  she talks; an elite guard assassinated and lying as a corpse). Looks on Int: 33/33 NPCs on 24
+  looks (19 before: head material variations now split looks). `harness` travel 12/12, visual
+  6/6, launcher 14/14, kismet 14/14, net 8/8, mission 7/7, conversation 17/17.
+- **Open:** U-140..U-147.

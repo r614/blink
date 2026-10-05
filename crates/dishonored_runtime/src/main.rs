@@ -23,6 +23,7 @@
 
 mod coords;
 mod characters;
+mod npc_anim;
 mod debug;
 mod harness;
 mod hud;
@@ -266,6 +267,7 @@ fn main() {
             .insert_resource(recorder)
             .init_resource::<harness::ShotQueue>()
             .init_resource::<harness::ControlOverride>()
+            .init_resource::<harness::ViewRequest>()
             .init_resource::<loading_screen::LoadingScreen>()
             .init_resource::<debug::DebugToggles>()
             .init_gizmo_group::<debug::XRayGizmos>()

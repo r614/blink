@@ -197,10 +197,21 @@ pub fn camera_follow(
     local: Res<LocalInput>,
     keys: Res<ButtonInput<KeyCode>>,
     mut q: Query<(&mut Transform, &mut GameCamera)>,
+    vreq: Option<ResMut<crate::harness::ViewRequest>>,
 ) {
+    let mut vreq = vreq;
+    let req = vreq.as_mut().and_then(|v| v.pending.take());
+    let req_orbit = vreq.as_ref().and_then(|v| v.orbit);
+    let dist = vreq.as_ref().and_then(|v| v.distance).unwrap_or(3.0);
+    let height = vreq.as_ref().and_then(|v| v.height).unwrap_or(0.6);
+    let aim_at_body = vreq.as_ref().is_some_and(|v| v.distance.is_some());
     let mv = &session.content.sim.gameplay.movement;
     let Some(local_me) = view.me.as_ref() else { return };
     for (mut t, mut cam) in &mut q {
+        if let Some(r) = req.as_ref() {
+            cam.third_person = r.third_person;
+            cam.follow = r.follow;
+        }
         if keys.just_pressed(KeyCode::KeyV) {
             cam.third_person = !cam.third_person;
         }
@@ -218,9 +229,13 @@ pub fn camera_follow(
         let eye = coords::pos(eye_position(me, mv));
         let fwd = coords::dir(dishonored_sim::movement::view_vector(yaw, pitch));
         // Harness: DISH_TP_ORBIT=<deg> orbits the third-person camera around the followed pawn.
-        let orbit = std::env::var("DISH_TP_ORBIT").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
+        let orbit = req_orbit.or_else(|| std::env::var("DISH_TP_ORBIT").ok().and_then(|s| s.parse::<f32>().ok())).unwrap_or(0.0);
         let ofwd = Quat::from_rotation_y(orbit.to_radians()) * fwd;
-        let pos = if cam.third_person { eye - ofwd * 3.0 + Vec3::Y * 0.6 } else { eye };
+        let pos = if cam.third_person { eye - ofwd * dist + Vec3::Y * height } else { eye };
         *t = Transform::from_translation(pos).looking_to(if cam.third_person { ofwd } else { fwd }, Vec3::Y);
+        if cam.third_person && aim_at_body {
+            // Script view: frame the followed pawn's body.
+            t.look_at(eye - Vec3::Y * 0.7, Vec3::Y);
+        }
     }
 }

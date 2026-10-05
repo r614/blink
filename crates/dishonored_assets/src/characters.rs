@@ -286,17 +286,35 @@ fn character_chain(content: &Content, pkg: &std::sync::Arc<ue3_package::Package>
 pub fn resolve_appearances(content: &Content, level_packages: &[String], tweaks: &[String]) -> Result<HashMap<String, Appearance>> {
     use crate::tweaks::{TVal, TweakDb};
     let db = TweakDb::load_with(content, level_packages)?;
-    // Where each SkeletalMesh is cooked (first package wins).
+    // Where each SkeletalMesh / AnimSet / locomotion config is cooked (first package wins).
     let mut meshes: HashMap<String, String> = HashMap::new();
     for p in level_packages {
         let Ok(pkg) = content.package(p) else { continue };
         for i in 0..pkg.exports.len() {
-            if pkg.export_class(i) == "SkeletalMesh" {
+            if matches!(pkg.export_class(i).as_str(), "SkeletalMesh" | "AnimSet" | "ArkComponentLocomotionConfig") {
                 meshes.entry(pkg.obj_path(ObjRef::Export(i)).to_ascii_lowercase()).or_insert_with(|| p.clone());
             }
         }
     }
     let locate = |path: &str| meshes.get(&path.to_ascii_lowercase()).map(|p| (p.clone(), path.to_string()));
+    // `DisMeshMaterialVariationList`: per material slot, the (material, chance) options.
+    let variations = |v: Option<&TVal>| -> Vec<Vec<(String, f32)>> {
+        let Some(TVal::Struct(s)) = v else { return Vec::new() };
+        let Some(TVal::List(slots)) = s.get("m_VariationMaterialIndex") else { return Vec::new() };
+        slots
+            .iter()
+            .map(|slot| match slot.get("m_MaterialVariation") {
+                Some(TVal::List(opts)) => opts
+                    .iter()
+                    .filter_map(|o| match (o.get("m_pMaterial"), o.get("m_fRandomChance")) {
+                        (Some(TVal::Obj(m)), c) if !m.is_empty() => Some((m.clone(), if let Some(TVal::F(f)) = c { *f } else { 0.0 })),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect()
+    };
     let mut out = HashMap::new();
     for t in tweaks {
         if out.contains_key(t) {
@@ -316,10 +334,25 @@ pub fn resolve_appearances(content: &Content, level_packages: &[String], tweaks:
                 if let Some(TVal::Obj(o)) = h.get("m_pMesh") {
                     if let Some(l) = locate(o) {
                         a.heads.push((l, chance));
+                        a.head_variations.push(variations(h.get("m_MaterialVariation")));
                     }
                 }
             }
         }
+        a.body_variations = variations(m.get("m_BodyVariationMaterials"));
+        if let Some(TVal::List(sets)) = m.get("m_AnimSets") {
+            a.anim.sets = sets.iter().filter_map(|s| match s.get("obj") {
+                Some(TVal::Obj(o)) => locate(o),
+                _ => None,
+            }).collect();
+        }
+        if let Some(TVal::Obj(o)) = m.get("m_pComponentLocomotionConfig") {
+            a.anim.locomotion = locate(o);
+        }
+        if let Some(TVal::Obj(o)) = m.get("m_pAnimDefClass") {
+            a.anim.defs = o.rsplit('.').next().unwrap_or("").to_string();
+        }
+        a.anim.ragdoll_on_death = matches!(m.get("m_bRagdollOnDeath"), Some(TVal::B(true)));
         out.insert(t.clone(), a);
     }
     Ok(out)

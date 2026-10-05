@@ -1,0 +1,18 @@
+{"steps":[
+  {"wait_ticks":240},
+  {"teleport":{"pos":[-2150.0,-4526.0,-740.0],"yaw":0.0,"pitch":-4.0}},
+  {"ticks":30,"input":{"yaw":0.0,"pitch":-4.0}},
+  {"ticks":2,"input":{"yaw":0.0,"pitch":-4.0,"buttons":["USE"]}},
+  {"view":{"third_person":true,"follow":1502,"orbit":200,"distance":3.5,"height":0.6}},
+  {"ticks":20,"input":{"yaw":0.0,"pitch":-4.0}},
+  {"screenshot":"c1_lydia_talks"},
+  {"dump":"c_talk"},
+  {"ticks":25,"input":{"yaw":0.0,"pitch":-4.0}},
+  {"screenshot":"c2_lydia_talks"},
+  {"ticks":2,"input":{"yaw":0.0,"pitch":-4.0,"buttons":["CHOICE_2"]}},
+  {"ticks":25,"input":{"yaw":0.0,"pitch":-4.0}},
+  {"screenshot":"c3_lydia_talks"},
+  {"ticks":25,"input":{"yaw":0.0,"pitch":-4.0}},
+  {"screenshot":"c4_lydia_talks"},
+  {"quit":true}
+]}

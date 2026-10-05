@@ -55,6 +55,8 @@ pub struct SessionView {
     pub target_info: Option<TargetInfo>,
     /// Simulation events for audio presentation (see `crate::audio`).
     pub audio_events: Vec<SimEvent>,
+    /// Simulation events for third-person animation (hits, deaths, swings; `crate::npc_anim`).
+    pub anim_events: Vec<SimEvent>,
 }
 
 impl Session {
@@ -149,6 +151,7 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
             }
             let out = game.step(&inputs, world, sim);
             view.audio_events.extend(out.events.iter().copied());
+            view.anim_events.extend(out.events.iter().copied());
             for e in &out.events {
                 if let Some(s) = describe(e, game.view()) {
                     view.feed.push(s);
@@ -173,9 +176,11 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
             client.send_input(input, world, sim);
             if client.state == ConnState::Connected {
                 view.audio_events.extend(client.local_events.iter().copied());
+                view.anim_events.extend(client.local_events.iter().copied());
             }
             let me = client.player_id;
             for (_, e) in client.events.drain(..) {
+                view.anim_events.push(e);
                 if !crate::audio::predicted_locally(&e, me) {
                     view.audio_events.push(e);
                 }
@@ -209,6 +214,10 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
     let n = view.audio_events.len();
     if n > 256 {
         view.audio_events.drain(0..n - 256);
+    }
+    let n = view.anim_events.len();
+    if n > 256 {
+        view.anim_events.drain(0..n - 256);
     }
     let n = view.feed.len();
     if n > 6 {

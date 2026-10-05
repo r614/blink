@@ -164,7 +164,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     };
     let flee_points = markers.iter().filter(|m| m.class == "DisFleePointActor").map(|m| m.position).collect();
     // Each spawner's look from its pawn tweak (body + head options), resolved once per map.
-    let look_path = dir.join(format!("{map}.appearance1.json"));
+    let look_path = dir.join(format!("{map}.appearance2.json"));
     let looks: std::collections::HashMap<String, dishonored_ir::spawners::Appearance> = match std::fs::read_to_string(&look_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(l) => l,
         None => {
