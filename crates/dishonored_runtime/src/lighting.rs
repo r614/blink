@@ -64,7 +64,6 @@ pub fn spawn_lights(map: &DishonoredMap, commands: &mut Commands, features: &Ren
                     },
                     at,
                     MapLight { source: l.source.clone() },
-                    bevy::camera::visibility::RenderLayers::from_layers(&[0, crate::viewmodel::VIEW_LAYER]),
                 ));
             }
             _ if local >= MAX_LIGHTS => continue,
@@ -84,7 +83,6 @@ pub fn spawn_lights(map: &DishonoredMap, commands: &mut Commands, features: &Ren
                     },
                     at,
                     MapLight { source: l.source.clone() },
-                    bevy::camera::visibility::RenderLayers::from_layers(&[0, crate::viewmodel::VIEW_LAYER]),
                 ));
             }
             LightKind::Spot { inner_cone_deg, outer_cone_deg } => {
@@ -103,7 +101,6 @@ pub fn spawn_lights(map: &DishonoredMap, commands: &mut Commands, features: &Ren
                     },
                     at,
                     MapLight { source: l.source.clone() },
-                    bevy::camera::visibility::RenderLayers::from_layers(&[0, crate::viewmodel::VIEW_LAYER]),
                 ));
             }
         }

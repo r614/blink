@@ -1,6 +1,6 @@
 //! First-person view: Corvo's rig (Engine `Ply_Player.Skm_Player`) with the real sword,
-//! pistol and crossbow on the hand sockets, rendered by an overlay camera (own FOV and
-//! depth) and driven by decoded player AnimSets chosen from simulation state.
+//! pistol and crossbow on the hand sockets, drawn in the world camera (scaled about the eye)
+//! and driven by decoded player AnimSets chosen from simulation state.
 //!
 //! Layering follows the data: the sword sets animate the whole rig (camera, spine, both
 //! arms), the gun/power sets only the left arm, which overrides it. The rig is placed so
@@ -10,7 +10,7 @@
 use crate::characters::{CharacterGpu, to_bevy, upload};
 use crate::players::GameCamera;
 use crate::session::SessionView;
-use bevy::camera::visibility::{NoFrustumCulling, RenderLayers};
+use bevy::camera::visibility::NoFrustumCulling;
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::prelude::*;
 use dishonored_assets::characters::{bind_globals, load_anim_set, load_model};
@@ -20,8 +20,11 @@ use dishonored_sim::input::LeftHand;
 use dishonored_sim::state::{LeftPhase, MoveMode, PlayerState, SwordPhase};
 use std::collections::HashMap;
 
-/// Render layer of the first-person overlay.
-pub const VIEW_LAYER: usize = 1;
+/// The rig is drawn in the world camera, shrunk about the eye: uniform scaling about the
+/// projection centre leaves the image unchanged, keeps the arms within a few centimetres of
+/// the eye (so they rarely intersect walls), and avoids a second render view (which cost a
+/// full extra pass including shadow cascades).
+const VIEW_SCALE: f32 = 0.2;
 /// Horizontal field of view (`DefaultCamera.ini` m_fDefaultFOV=75, UE3 FOV is horizontal).
 /// The first-person rig uses the same FOV (UE3 foreground depth group, no separate weapon FOV
 /// found in the INIs).
@@ -89,8 +92,6 @@ pub struct ViewRig {
 
 #[derive(Component)]
 pub struct ViewRoot;
-#[derive(Component)]
-pub struct ViewCamera;
 #[derive(Component)]
 pub struct ViewJoint(usize);
 #[derive(Component)]
@@ -167,11 +168,11 @@ pub fn load_view_rig(
     commands.insert_resource(ViewRig { arms: arms_gpu, bones, m2p, weapons, sets, clips, left_arm, cam_bone });
 }
 
-/// Overlay camera (child of the game camera) plus the rig entities.
+/// The rig, parented to the game camera and drawn in the main view (see `VIEW_SCALE`).
 pub fn spawn_view_rig(
     mut commands: Commands,
     rig: Option<Res<ViewRig>>,
-    cams: Query<(Entity, Option<&bevy::core_pipeline::tonemapping::Tonemapping>, Option<&bevy::render::view::ColorGrading>, Has<bevy::camera::Hdr>), With<GameCamera>>,
+    cams: Query<Entity, With<GameCamera>>,
     existing: Query<(), With<ViewRoot>>,
 ) {
     let Some(rig) = rig else { return };
@@ -181,45 +182,19 @@ pub fn spawn_view_rig(
     if std::env::var_os("DISHONORED_NO_VIEWMODEL").is_some() {
         return;
     }
-    let Some((game_cam, tonemap, grading, hdr)) = cams.iter().next() else { return };
-    let layer = RenderLayers::layer(VIEW_LAYER);
-    let cam = commands
-        .spawn((
-            Camera3d::default(),
-            Camera { order: 1, clear_color: ClearColorConfig::None, ..default() },
-            Projection::Perspective(PerspectiveProjection { fov: 47f32.to_radians(), near: 0.01, far: 50.0, ..default() }),
-            Transform::default(),
-            layer.clone(),
-            ViewCamera,
-            ChildOf(game_cam),
-        ))
-        .id();
-    // Same output format and grading as the world camera so the overlay composites on the
-    // same target with matching brightness.
-    if hdr {
-        commands.entity(cam).insert(bevy::camera::Hdr);
-    }
-    if let Some(t) = tonemap {
-        commands.entity(cam).insert(*t);
-    }
-    if let Some(g) = grading {
-        commands.entity(cam).insert(g.clone());
-    }
-    // The rig has no lightmap; a fill ambient stands in for the light environment that
-    // lights dynamic objects in the original (only dominant/toggleable lights are dynamic).
-    commands.entity(cam).insert(AmbientLight { color: Color::srgb(0.75, 0.82, 0.9), brightness: 350.0, ..default() });
-    let root = commands.spawn((Transform::default(), Visibility::Hidden, ViewRoot, ChildOf(cam))).id();
+    let Some(game_cam) = cams.iter().next() else { return };
+    let root = commands.spawn((Transform::default(), Visibility::Hidden, ViewRoot, ChildOf(game_cam))).id();
     let part = &rig.arms.parts[0];
     let joints: Vec<Entity> = part.bind.iter().enumerate().map(|(i, b)| commands.spawn((Transform::from_matrix(*b), ViewJoint(i), ChildOf(root))).id()).collect();
     for (mesh, mat) in &part.sections {
-        commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), SkinnedMesh { inverse_bindposes: part.inverse_bindposes.clone(), joints: joints.clone() }, Transform::default(), layer.clone(), NoFrustumCulling, ChildOf(root)));
+        commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), SkinnedMesh { inverse_bindposes: part.inverse_bindposes.clone(), joints: joints.clone() }, Transform::default(), NoFrustumCulling, bevy::light::NotShadowCaster, ChildOf(root)));
     }
     for (wi, w) in rig.weapons.iter().enumerate() {
         let wp = &w.gpu.parts[0];
         let wroot = commands.spawn((Transform::default(), Visibility::Inherited, WeaponMesh(wi), ChildOf(root))).id();
         let joints: Vec<Entity> = wp.bind.iter().enumerate().map(|(i, b)| commands.spawn((Transform::from_matrix(*b), WeaponJoint { weapon: wi, bone: i }, ChildOf(root))).id()).collect();
         for (mesh, mat) in &wp.sections {
-            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), SkinnedMesh { inverse_bindposes: wp.inverse_bindposes.clone(), joints: joints.clone() }, Transform::default(), layer.clone(), NoFrustumCulling, ChildOf(wroot)));
+            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), SkinnedMesh { inverse_bindposes: wp.inverse_bindposes.clone(), joints: joints.clone() }, Transform::default(), NoFrustumCulling, bevy::light::NotShadowCaster, ChildOf(wroot)));
         }
     }
 }
@@ -438,7 +413,7 @@ pub fn animate_view_rig(
     let v = glam::Mat4::from_cols(-cam.z_axis, cam.y_axis, cam.x_axis, cam.w_axis);
     // Pawn canonical (X fwd, Y right, Z up) in Bevy-converted space -> camera local.
     let a_rot = Mat4::from_quat(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
-    *root_t = Transform::from_matrix(a_rot * to_bevy(v).inverse());
+    *root_t = Transform::from_matrix(Mat4::from_scale(Vec3::splat(VIEW_SCALE)) * a_rot * to_bevy(v).inverse());
     for (j, mut t) in &mut joints {
         *t = Transform::from_matrix(to_bevy(rig.m2p * globals[j.0]));
     }

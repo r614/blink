@@ -277,7 +277,7 @@ fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Asset
     let yaw = args.yaw.or(spawn.map(|s| s.yaw_deg)).unwrap_or(0.0);
     // The Boyle sky dome reaches ~4.9 km from the estate (radius 205,852 uu around (35379, -6871)).
     let far = if args.features.sky { 12000.0 } else { 6000.0 };
-    let projection = Projection::Perspective(PerspectiveProjection { fov: 75f32.to_radians(), near: 0.05, far, ..default() });
+    let projection = Projection::Perspective(PerspectiveProjection { fov: 75f32.to_radians(), near: 0.005, far, ..default() });
     let camera = if args.mode == Mode::Inspect {
         commands.spawn((Camera3d::default(), projection, Transform::from_translation(coords::pos(start)), FreeCam { yaw, pitch: args.pitch })).id()
     } else {
@@ -297,7 +297,6 @@ fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Asset
         commands.spawn((
             DirectionalLight { illuminance: 6000.0, shadow_maps_enabled: false, color: Color::srgb(0.75, 0.8, 1.0), affects_lightmapped_mesh_diffuse: !args.features.lightmaps, ..default() },
             Transform::default().looking_to(Vec3::new(-0.4, -1.0, -0.3), Vec3::Y),
-            bevy::camera::visibility::RenderLayers::from_layers(&[0, viewmodel::VIEW_LAYER]),
         ));
     }
 }
