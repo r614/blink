@@ -908,7 +908,12 @@ impl Crowd {
     /// the most common civilian spawner faction.
     pub fn assign_crowd_factions(&mut self, spawners: &[dishonored_ir::spawners::Spawner]) {
         let mut civ: BTreeMap<String, usize> = BTreeMap::new();
-        for s in spawners.iter().filter(|s| !s.guard && s.props.on_begin_play && !s.props.spawn_dead) {
+        // Civilian pawn tweaks only (weepers and other non-guards are not crowd civilians).
+        let civilian = |t: &str| {
+            let l = t.to_ascii_lowercase();
+            ["aristo", "party", "civ", "guest", "servant", "maid", "noble"].iter().any(|k| l.contains(k)) && !l.contains("guard") && !l.contains("overseer") && !l.contains("weep")
+        };
+        for s in spawners.iter().filter(|s| !s.guard && s.props.on_begin_play && !s.props.spawn_dead && civilian(&s.tweak)) {
             let n = if s.props.faction.is_empty() { self.tweak_factions.get(&s.tweak).cloned().unwrap_or_default() } else { s.props.faction.clone() };
             if !n.is_empty() {
                 *civ.entry(n).or_default() += 1;

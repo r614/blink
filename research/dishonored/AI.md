@@ -210,25 +210,142 @@ curve alone reaches 1 (clamped). Auto-crouching (-1) hides a still player beyond
 
 - One attention entry per stimulus source; anonymous stimuli (noises, corpses, help barks) use
   one "place" entry whose proxy is the stimulus position.
-- Players start **neutral** (the Boyle party guests are neutral; `Boyle_Factions`), so guards
-  only head-track them. Seen violence (sword attack, firing), being attacked, a witnessed
-  kill, or an ally guard fighting them makes a player an enemy at full attention.
+- Relationships follow the factions section below (`Social`, `Brain::relation`): each tick a
+  brain's enemies are its individual enemies, trespassers against its faction and its
+  faction's enemies (disposition overrides applied). Neutral and allied pawns are only
+  head-tracked. Seen violence (sword attack, firing) by a player, being hurt by a player, a
+  witnessed kill, or an ally guard fighting someone makes that pawn an individual enemy.
 - Vision, rate, increases, leak, level update, stop rolls and the Busted check follow the
   decoded code above (`Cone`, `vision_distance`, `seen_rate`, `player_visibility`,
   `level_after`, `Attn::change`). The eye is 70 uu above the pawn centre, oriented by the
   pawn's yaw; line of sight is traced to three points (60, 0, -50 uu from the centre).
-- Light: the simulation has no light probe; `LIGHT_LEVEL` = 1 (lit) is SPECULATIVE. Speed
-  value: horizontal speed / 600 uu/s (SPECULATIVE normalisation). The moving multipliers
-  are 0.
+- Light: `light_at` over the level's lights (1 when a level has none); speed value: horizontal
+  speed / `Attribute_GroundSpeedSprint`, unclamped. The moving multipliers are 0.
 - Combat ends when the target's attention leaves Busted; unseen targets are chased at the
   proxy. Melee uses the BerserkerElite Short/StepBack/Medium contexts in pattern order with
   their cooldowns and the per-target inhibition (all three are one sword swing on the shared
   pawn).
-- Guards adopt the level's routes (nearest with free capacity; squads are not modelled),
+- Guards adopt the level's routes (adoption check and neglect priority below),
   wait `m_fGuardDuration` at points, stay forever on single-point routes and
   `m_bGuardForever` points; without routes the previous loop of nearby nav points is used.
 - A civilian entering Panic, or a guard entering Combat, emits an AllyBusted group stimulus;
   civilians within 1000 uu panic (from a guard only if they see it).
+
+## Factions (decoded 2026-10-06)
+
+Data: `DisTweaks_Faction` (`m_AlliedFactions`, `m_EnemyFactions`), cooked in
+`DisFaction_Defaults` and in level packages (`Boyle_Factions` in `L_Boyle_Ext_Script`). A pawn's
+faction is its spawner's `m_pFactionTweakOverride`, else its pawn tweak's `m_pFactionTweak`
+(`DisSpawnerInfo`); the player's is `Twk_Pawn_Corvo_Release.m_pFactionTweak` =
+`Faction_Corvo_Default`. Boyle: the party guards use `Neutral_Guard` (allies: guards,
+civilians, `Neutral_Civilian`; enemies: weepers, slackjaws, thugs, assassins - not Corvo), the
+guests `Neutral_Civilian` or `Faction_Civilian_Default` (no lists), the street guards
+`Neutral_Guard_Street` (enemies: weepers, **Corvo**); spawners without override (alarm squads,
+pursuers, `Pwn_EliteGuard_*`) resolve to `Faction_Guard_Default` (enemy of Corvo). The masked
+player is neutral to the party and an enemy of the squads that come for him.
+
+Relationship of a pawn toward a target (`DisGlobalFactionManager`, cached):
+- 0x00c62f20 -> 0x00b043d0: the pawn's own individual relationships first (the brain's
+  `hostile` list: reaction responses such as `m_Response_HurtByPlayerNeutral`, witnessed
+  violence, scripted dispositions), then its faction's toward the target (0x00c63070):
+- 0x00c5fc20: a target registered as a **trespasser** of a faction the pawn's faction is ->
+  Enemy. `DisForbiddenZone` (0x00c953f0 on touch, 0x00c95660 on untouch): a pawn whose faction
+  is one of `m_ForbiddenFactions` inside the zone trespasses against every `m_OwningFactions`.
+  Boyle Int: zones 1 and 2 (upstairs; owner `Neutral_Guard`; forbidden Corvo and
+  `Neutral_Civilian`); zone 0 is disabled until Kismet enables it. The brush hulls are the
+  `BrushAggGeom` convex elements' `FacePlaneData` (serialized W, X, Y, Z).
+- 0x00c5fca0: `DisSeqAct_SetDisposition` overrides (per recipient pawn, then per recipient
+  faction).
+- 0x00c5fd00 -> 0x00c4ceb0: faction lists. Same faction (0x00c6f360: equal or along the tweak
+  fallback chain) -> Ally; else `a`'s enemies, then `a`'s allies; else Neutral. Only `a`'s
+  lists count (not symmetric).
+- `DisSeqAct_SetDisposition` -> `DisTweaks_Faction::OnSetDisposition` (0x00c79000): inputs Set /
+  Clear / ClearAll; recipients are factions (0x00c638e0) or pawns (0x00c636d0), reciprocated
+  with `m_bReciprocate` (a pawn recipient then sets its own relationship to the faction,
+  0x00b04430). A pawn target uses `ADishonoredPawn::OnSetDisposition`.
+- NPC friendly fire changes no relationship: only the reaction responses (players) do.
+
+## Alarm bells (decoded 2026-10-06)
+
+`DisAlarmBell` with `DisTweaks_AlarmBell` (`SecuritySystems_twk.Alarm.Alarm_Loudness4_twk`:
+`EAINoiseLoudness4` = 6000 uu, go-to closeness 5000, use closeness 150, ring delay 2.5 s,
+spawner min distance 1500, 2 spawns per ring (Boyle Int's bell overrides 6), 30 s between
+uses). Boyle: one bell on Int (`DisAlarmBell_0`, 4 triggered spawners), two on Ext
+(`L_BoyleStreet_Ext_Script`).
+- `DisBehaviorTriggerAlarm` (first in the guard behaviour list, slot Alert): chance by what made
+  the guard aware (`TweaksBehavior_TriggerAlarm_Party`: sighting alone / in group, found corpse,
+  witnessed death 1.0, help 0); "alone" = no other pawn within `m_fCompanionRange` 2000 that is
+  an ally (`m_bCompanionMustBeAlly`) (0x00af5fe0); an enemy within `m_fFightRadius` 500 is fought
+  instead (0x00af6bd0). The bell keeps the pending ringer nearest to it (0x00a1e140). The guard
+  runs to the bell, waits `m_fWaitTimeBeforeRing` 0.25 s within use closeness and rings.
+- Ring (0x00a37410): ringing, allowed spawns = max per ring, AI-noise timer = ring delay. After
+  it (0x00a36dd0) an AI noise of the bell's loudness with context `AlarmBell` (6) goes out (into
+  the bell's listener volumes when it has them) and the triggered spawners spawn - those farther
+  than `m_fSpawnerMinDistFromPlayer` from the enemy, else all - aware of the ringer's enemy. The
+  bell rings while an NPC still hunts that enemy (tick 0x00a3d0c0), then stops;
+  `DisAlarmGlobalManager.m_fAlarmCooldown` 10 s.
+- `m_SpawnAtSuspicionLevel` is the suspicion the spawned pawn starts with (passed to the brain
+  on spawn, 0x00a590e0; PostLoad clamps it to `DAISL_Suspecting`), not a spawn trigger.
+
+## Spawn awareness (U-055)
+
+`m_bAwareOfPlayerUponStartup` (spawner flags bit 9, post-spawn 0x00a590e0) sends the brain
+`EAIStimID_MaxOutAttention` (61) for the player (0x00b23be0, 0x00b19ee0). The attention
+process' handler (0x00b3f6a0) adds a `DACRT_Psychic` change to `DALFI_MaxAttention` with the
+proxy at the player's location. U-055 was a misdiagnosis: the harness' stationary agent was
+killed by the pursuers, whose target was then gone.
+
+## Perception details (decoded 2026-10-06)
+
+- Light (`DishonoredVisibilityComponent` tick 0x00ad51e0): the raw light is the pawn's light
+  environment (0x004e1db0: static + dynamic SH coefficients summed, reduced to a brightness,
+  times a runtime scale `DAT_01435230`, raised to 1/2.2 (constant 0.454545) above 0.0001, else
+  0; -1 without an environment, clamped to 0), normalized between `Twk_GlobalPlayerVisSettings`
+  darkest / brightest (0x00bc9040). Port (`light_at`): the level's light actors
+  (`AiLevel::lights`, static ones included) summed as `Brightness x luminance x
+  (1-(d/r)^2)^FalloffExponent` (spot cones, shadow traces for shadow casters, directional lights
+  traced along their direction), then `^(1/2.2)`; server and client compute it from the same
+  cached data (U-121).
+- Speed (0x00ac33b0): `|Velocity.xy| / Attribute_GroundSpeedSprint` (600), not clamped.
+- Target visibility: `Attribute_Visibility` with `Modifier_VisComp_Base` (light and speed),
+  `Modifier_StealthBonus` (stance) and `Modifier_ForcePlayerVisible` (+1) (FName globals
+  0x0145e1c0 / 2a8 / 2a0 / 270); NPCs keep the base.
+- Hearing (0x00c5a760, 0x00bb50d0): radius = `m_LoudnessDistanceArray[loudness] x (1 -
+  attenuation)`; a listener hears when strictly inside it and, if the listener or the noise is
+  outside the audio cells, when a trace (flags 0x2286) from the listener to the noise is clear;
+  between two cells the noise follows the cell graph (not modelled, U-120).
+
+## Barks (decoded 2026-10-06)
+
+The behaviours fire hooks through `FUN_00af00f0(hook, initiator)`. Callers: Notice begin / end
+(108 / 109); search start `SEARCH_NEAR/FAR_VDETECTION` (21/22, near within
+`m_fVisualDetectionRatioNear` 0.3 of the range), `SEARCH_ADETECTION` / `_DANGER` (24/25),
+`SEARCH_DETECT_CORPSE` / `SEARCH_WITNESS_DEATH` (27/28), from an ally (23 / 26 / 33); search end
+`MUSTHAVEBEENARAT` (29), `GIVEUP_POSTCORPSE` (30), `SEARCH_STOPHUNTING` / `_GROUP` (35/36);
+`SEARCH_FIND_ENEMY` (34); combat barks sub-process (0x00b41f70) `COMBAT_THREAT_OFFSCREEN` (42),
+`COMBAT_THREAT` / `_GROUP` (40/41), `COMBAT_HELP` (47); `COMBAT_LOST` / `_GROUP` (49/50,
+0x00bbb0f0); `COMBAT_RANGED_BEGIN` (64), `COMBAT_GOING_HOME` (65), `ALARM_GO_TO_RING_ALARM` (66),
+`ALARM_HEAR_AND_RESPOND` (68), `PANIC_START` (83), `FLEEING` (85), `COMBAT_BEGGING` (51),
+`PATROL_ATTACKED_BY_ENEMY` (16); melee `m_AttackBark` (`DDH_COMBAT_ATTACK`). `dishonored_ai` emits
+`AiEvent::Bark` at the matching transitions (U-123); the mission host queues them on
+`MissionState::ai_hooks`, which calls `Runner::fire_hook` on the trees of the NPC's one-shots
+(refire delays and fire groups apply there; generic per-voice trees: U-122).
+
+## Routes (decoded 2026-10-06)
+
+Adoption check 0x00a4bc70 (`DishonoredRoute`): `m_bIsActive`, route points present, the pawn's
+squad in `m_SupportedSquads` (any when empty), `m_NumNPCAdopters < m_Capacity`, the pawn within
+`m_AdoptionRange` (-1 = any). 0x00c41590 prefers the nearest **neglected** route
+(`m_NeglectTimer > m_NeglectThreshold` 30 s, 0x00a43860); a pawn that has a route only switches
+to a neglected one.
+
+## Combat details (data)
+
+Item-context class defaults (`DisTweaks_NPCAttack*`): Short max range 250, StepBack 100, Medium
+350, Long 450, jump attack 550-800 (`DDH_COMBAT_BIG_ATTACK`), allowed angle 45 deg, height
+difference 200. Elite guards: `m_GunUsageStart` 0-0.5 s, `m_GunUsageCooldown` 1-2 s
+(`TweaksBehavior_CombatEliteGuard`); the port waits the start delay before the single pistol
+shot. Long / jump attacks need NPC animations (U-124).
 
 ## Behaviours
 
@@ -260,16 +377,11 @@ or sword clashes by ear, they turn and look). Decoded from the raw `m_ScaryNoise
   2 Fearful, 3 Other. The mapping from behaviours (Combat; Notice/Investigate/Search; Panic;
   rest) is LIKELY: the native accessor was not traced.
 
-## Inferred or missing (see UNKNOWNS U-041..U-046)
 
-- Light at the player (no light probe) and the speed normalisation of the visibility.
-- Which test points the vision scheduler traces for NPC targets, and the target-side
-  virtual that returns the cached visibility (LIKELY the `Attribute_Visibility` copy).
-- Route squads (`m_SupportedSquads` / spawner squads) and the "neglected route" priority
-  (0x00a43860, `m_NeglectTimer` / `m_NeglectThreshold` 30 s).
-- Melee context ranges (per-weapon item-context tweaks) and attack selection among
-  contexts beyond pattern order; the long/jump attacks and dodges.
-- Hearing: radii are `m_LoudnessDistanceArray`; whether propagation is straight-line or
-  path-based was not traced.
-- Alarm bells (`DisBehaviorTriggerAlarm`), conversations, distractions, watch points and
-  head-track barks are not implemented.
+## Inferred or missing (see UNKNOWNS U-120..U-125)
+
+- Hearing through audio cells (U-120); the light scale and the SH light environment (U-121).
+- Barks on the NPCs' generic per-voice trees (U-122); the mapping of bark points onto this
+  port's simpler states (U-123).
+- Long / jump attacks, dodges, the pistol substates (U-124); alarm decision details (U-125).
+- Which test points the vision scheduler traces for NPC targets; distractions, watch points.
