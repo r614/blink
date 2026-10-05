@@ -409,6 +409,8 @@ impl MissionMatch {
             if let Some(pl) = self.world.player_mut(h) {
                 pl.position = p;
                 pl.yaw = y;
+                // m_bUseDestinationTargetRotation defaults to true: the PlayerStart's rotation.
+                pl.pitch = 0.0;
                 pl.velocity = Vec3::ZERO;
             }
         }

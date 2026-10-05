@@ -584,3 +584,23 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   Games run as child processes with `--from-launcher`. Unimplemented options are saved and
   marked "not yet effective". The subtitle mode is available to the dialogue HUD through the
   `GameSettings` resource.
+
+## 2026-10-05: Decompiling the original executable (Ghidra) for travel, choices and conditions
+
+- **Method:** Ghidra 12.1.4 headless analysis of `Binaries/Win32/Dishonored.exe`. Scripts are in `research/ghidra/`; the project and decompiled output stay outside the repo.
+  - `NativeTable.java` labels the 2,560 native `exec*` functions from the engine's `FNativeFunctionLookup` tables. Names carry their class prefix, e.g. `UObjectexecGetEngineVersion`; 626 belong to Dishonored classes.
+  - `ClassDecomp.java` finds a class's static registration record (it points at the UTF-16 class name), its InternalConstructor and vtable, and decompiles the slots that differ from the parent class.
+  - Vtable slot 93 (+0x174) is `Activated()` for sequence ops, slot 92 (+0x170) is the latent `Update()`, and slot 80 (+0x140) is a conversation condition's `Evaluate()`.
+- **Findings:**
+  - `DisSeqCond_CheckStoryFlag::Activated` fires output 0 when the flag is set and output 1 when it is not. Output links live at +0xAC with a 0x38 stride and the impulse bit at +0x18. This matches the data's link names ("True", then "False").
+  - `DisConv_CheckStoryFlag::Evaluate` returns 1 when the flag is set. Which output the conversation runner then fires is still open (U-034): the caller of +0x140 was not found in the conversation code range.
+  - `DisSeqAct_SetPlayerTravelDestination` stores `m_Tag` **and the name of the outermost package (the map being left)** on the game object.
+  - `DisSeqAct_GotoPlayerTravelDestination` teleports only when the current map differs from that stored map and a tag is set. It iterates actors for the one whose `Tag` matches, moves the pawn there, and takes that actor's rotation when `m_bUseDestinationTargetRotation` is set (class default **true**). It then clears the tag. The arriving map's own Kismet runs it from its "Loaded and Visible" / "State Restored" outputs.
+  - `DisSeqAct_SaveLevelState` saves the current level, with a full (non-`m_bPartial`) save on the Boyle Ext <-> Int paths of the global Kismet (PrepareMapChange -> SaveLevelState -> CommitMapChange). `DisSeqAct_DiscardAllLevelStates` wipes all saved levels; the Kismet uses it on the path back to the main menu / leaving the mission.
+  - `DisSeqAct_DialogScriptedChoice`:
+    - Output 0 is "Player Busy" and output i+1 is "[choice i]"; the link names are built natively from `m_ChoiceText`.
+    - `Activated` tries to open the choice UI. If that fails it sets `m_bFailed` and fires "Player Busy".
+    - `Update` waits while the UI is open and fires the chosen option's output (no pick means it keeps waiting). A choice with `m_bDisablePlayerInputUntilMapChange` disables player input first.
+    - The player sits in `StatePlayerMasterInScriptedChoice` meanwhile.
+    - Boyle's doors set that flag on "Go to ..." and not on "Stay ...".
+- **Port changes:** arrival now takes the PlayerStart's rotation (pitch reset) per the class default. The rest of the travel and choice behaviour already matched: travel commits within one tick, so no input window remains.
