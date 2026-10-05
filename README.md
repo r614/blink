@@ -31,10 +31,13 @@ crates/
   dishonored_ir      engine-agnostic map representation (Dishonored world space: Z-up, Unreal units)
   dishonored_assets  Dishonored decoders: StaticMesh, Texture2D (+ .tfc streaming), materials, levels
   dishonored_runtime Bevy presentation: renders an imported map with a free camera
+  dishonored_audio   Wwise AKPK/soundbank/WEM readers, Wwise Vorbis decoding, event resolution
 tools/
   package_dump       inspect a package: names / imports / exports / properties / hex
                      (package_scan: sweep a whole directory)
   map_dump           run the full map import and report statistics
+  audio_dump         Wwise packages/banks: survey, list, resolve an event, decode to WAV
+                     under harness_out/ (`audio_dump event Snd_Power_P_Blink_Start Bank_Power_Player`)
 research/            evidence log, unknowns register, format notes, prior art
 ```
 
@@ -74,6 +77,11 @@ RMB left hand (hold to aim Blink), F block, Q/E lean, R reload, 1-5 Blink / Wind
 Dark Vision / pistol / crossbow, V third person, Tab scores, F1 debug readout, F3 collision.
 The HUD is Dishonored's own (gauges, emblem, crosshairs, objectives banner and fonts are
 read from `UI_HUD_SF`, the icon packs and `DisFonts_SF` at startup).
+Sound is the game's own too: Wwise banks are read and their Vorbis media decoded from the
+install at startup (the codebook table is located inside `Dishonored.exe`), and simulation
+events post the original events (sword, guns, powers, footsteps by surface, pain/death),
+plus the Boyle bed, score and placed emitters. `--no-audio` disables it, `--volume V` scales it.
+See `research/dishonored/AUDIO_FORMAT.md`.
 
 ### Map viewer (`--inspect`)
 

@@ -431,7 +431,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   store group id and default switch before the children; music switches end with (state, child) pairs.
 - **Experiment:** `dishonored_audio::hirc` decodes those fields; children come from inverting the parent links;
   `audio_dump event` prints the resolved tree and writes picks to `harness_out/audio/`.
-- **Result:** All 29 mapped player/combat cues resolve to decodable sounds; `Play_Amb_LVL_Boyle_Estate` with
+- **Result:** All 29 mapped player/combat cues resolve to decodable sounds (147 of 149 postable events including surface variants; the two missing footstep variants fall back to stone); `Play_Amb_LVL_Boyle_Estate` with
   `Set_State_Amb_LVL_Boyle_Ext_Streets` selects the 78 s exterior street bed; `Play_Music_Boyle` with
   `Music_State_Boyle_Explor` selects the exploration branch. Volumes (dB, summed along the parent chain),
   pitch offsets and attenuation curves (e.g. footsteps 3,000 uu, sword whoosh 2,000 uu) are read.

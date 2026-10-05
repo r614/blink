@@ -85,6 +85,21 @@ pub fn landing_event(surface: &str, high: bool) -> String {
     format!("FS_P_{surface}_Fall_{}", if high { "High" } else { "Small" })
 }
 
+/// Surfaces with `Imp_{Bullet,Arrow}_on_<Surface>` events in Bank_Impact.
+pub const IMPACT_SURFACES: &[&str] = &["Carpet", "Dirt", "Glass", "Grass", "Gravel", "Metal", "Mud", "Stone", "Tile", "Water", "Wood"];
+
+/// World impact of a bullet or crossbow bolt on a footstep surface.
+pub fn impact_event(bolt: bool, surface: &str) -> String {
+    let s = match surface {
+        "Rooftile" => "Tile",
+        "Foliage" | "Garbage" => "Dirt",
+        "Stone_Wet" => "Stone",
+        o if IMPACT_SURFACES.contains(&o) => o,
+        _ => "Stone",
+    };
+    format!("Imp_{}_on_{s}", if bolt { "Arrow" } else { "Bullet" })
+}
+
 /// Surface guess from the colliding mesh/actor name. The game picks footsteps from
 /// the material's physical material, which is not imported yet (APPROXIMATION).
 pub fn surface_from_name(name: &str) -> &'static str {
@@ -159,6 +174,10 @@ pub fn all_player_events() -> Vec<String> {
         }
         v.push(landing_event(s, false));
         v.push(landing_event(s, true));
+    }
+    for s in IMPACT_SURFACES {
+        v.push(impact_event(false, s));
+        v.push(impact_event(true, s));
     }
     v.sort();
     v.dedup();

@@ -382,6 +382,23 @@ fn surface_at(session: &Session, pos: Vec3) -> &'static str {
     }
 }
 
+/// Surface of the nearest collision triangle around an impact point (short probes
+/// along the six axes, since the hit normal is not part of the event).
+fn surface_near(session: &Session, p: Vec3) -> &'static str {
+    let world = &session.content.collision;
+    let mut best: Option<(f32, u32)> = None;
+    for d in [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z] {
+        if let Some(hit) = world.raycast(p - d * 12.0, d, 36.0, dishonored_world::channel::ALL) {
+            if best.is_none_or(|b| hit.distance < b.0) {
+                best = Some((hit.distance, hit.tri));
+            }
+        }
+    }
+    let Some((_, tri)) = best else { return "Stone" };
+    let src = world.tris[tri as usize].source as usize;
+    cues::surface_from_name(world.sources.get(src).map(String::as_str).unwrap_or(""))
+}
+
 /// Events the online client already played from its own prediction (skip the
 /// authoritative copy for the local player to avoid doubling).
 pub fn predicted_locally(e: &SimEvent, me: Option<PlayerId>) -> bool {
@@ -463,14 +480,8 @@ fn play_sim_events(
             }
             SimEvent::ProjectileImpact { projectile, point, victim: None } => {
                 let bolt = a.projectiles.remove(&projectile).unwrap_or(false);
-                let s = surface_at(&session, point + Vec3::Z * 5.0);
-                let s = match s {
-                    "Rooftile" => "Tile",
-                    "Foliage" | "Garbage" => "Dirt",
-                    "Stone_Wet" => "Stone",
-                    o => o,
-                };
-                posts.push((format!("Imp_{}_on_{s}", if bolt { "Arrow" } else { "Bullet" }), None, Some(point), 0.0));
+                let s = surface_near(&session, point);
+                posts.push((cues::impact_event(bolt, s), None, Some(point), 0.0));
             }
             SimEvent::ProjectileImpact { projectile, .. } => {
                 a.projectiles.remove(&projectile);

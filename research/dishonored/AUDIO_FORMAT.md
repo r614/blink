@@ -13,7 +13,7 @@ written outside `harness_out/`.
 | `.pck` file packages (base + DLC05/06/07) | 503 (311 in `CookedPCConsole`) |
 | Soundbanks | 503, one per package, all **bank version 65** |
 | Banks with an STID section | 489 (each names only itself) |
-| Embedded media (DIDX/DATA) | 3,265 files, 89 min of audio |
+| Embedded media (DIDX/DATA) | 3,265 files, 89 min of audio (one, in Bank_Power_Player, is only the prefetched head of a streamed file) |
 | Streamed media (package stream table) | 1,908 files, 1,463 MB, ~16.5 h |
 | `Init.bnk` | v65, sections BKHD, STMG, HIRC, ENVS (no media) |
 | Other | `MISSIONAUDIOCACHINGLIST.AKMAP`, `WwiseDefaultBank_WwiseGlobal.pck` |
