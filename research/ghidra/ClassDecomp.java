@@ -98,7 +98,8 @@ public class ClassDecomp extends GhidraScript {
                 for (Object o : ins.getOpObjects(i)) {
                     if (o instanceof Scalar) {
                         Address v = toAddr(((Scalar) o).getUnsignedValue());
-                        if (mem.contains(v) && !isCode(v) && isCode(ptr(v)) && isCode(ptr(v.add(4))) && isCode(ptr(v.add(8)))) best = v;
+                        // Classes with interfaces store several vtables: keep the largest (the primary).
+                        if (mem.contains(v) && !isCode(v) && isCode(ptr(v)) && isCode(ptr(v.add(4))) && isCode(ptr(v.add(8))) && (best == null || slots(v).size() > slots(best).size())) best = v;
                     }
                 }
             }
