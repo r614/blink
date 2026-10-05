@@ -136,6 +136,12 @@ fn name_array(pkg: &Package, props: &[Property], n: &str) -> Vec<String> {
         .collect()
 }
 
+/// Array of floats (`DisConv_RandomBranch.m_Branches`).
+fn float_array(props: &[Property], n: &str) -> Option<Vec<f32>> {
+    let (count, body) = find(props, n).and_then(|p| p.array_raw())?;
+    (body.len() == count * 4).then(|| body.chunks(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect())
+}
+
 fn object_array(props: &[Property], n: &str) -> Vec<Option<usize>> {
     find(props, n)
         .and_then(|p| p.array_objects().ok())
@@ -153,13 +159,17 @@ pub struct Loader {
     pub cooked: PathBuf,
     pub flags: StoryFlags,
     pub db: ConversationDb,
+    /// Subtitle language (`DISHONORED_LANGUAGE`, default `INT`). The GOG install cooks INT
+    /// only; other languages read `DisConv_Blurb.m_PerLanguageData`.
+    pub language: String,
 }
 
 impl Loader {
     pub fn new(cooked: impl Into<PathBuf>) -> Result<Self> {
         let cooked = cooked.into();
         let flags = StoryFlags::load(&cooked).context("story flags (Startup.upk)")?;
-        Ok(Self { cooked, flags, db: ConversationDb::default() })
+        let language = std::env::var("DISHONORED_LANGUAGE").unwrap_or_else(|_| "INT".into());
+        Ok(Self { cooked, flags, db: ConversationDb::default(), language })
     }
 
     /// Default install location (`DISHONORED_DIR` or the GOG path).
@@ -335,12 +345,22 @@ impl Loader {
                     other => SpeakerSlot::Other(other.to_string()),
                 });
                 speaker_nicks.push(linked.as_ref().and_then(|n| pstr(n, "m_NickName")).filter(|s| !s.is_empty()));
-                speaker_gates.push(linked.as_ref().map(|n| (pbool(n, "m_bNotWhileInCombat", false), pbool(n, "m_bNotWhileFearful", false), pbool(n, "m_bNotWhileSuspicious", false))).unwrap_or_default());
+                speaker_gates.push(
+                    linked
+                        .as_ref()
+                        .map(|n| SpeakerGate {
+                            not_in_combat: pbool(n, "m_bNotWhileInCombat", false),
+                            not_fearful: pbool(n, "m_bNotWhileFearful", false),
+                            not_suspicious: pbool(n, "m_bNotWhileSuspicious", false),
+                            optional: pbool(n, "m_bOptional", false),
+                        })
+                        .unwrap_or_default(),
+                );
             }
             if speakers.is_empty() {
                 speakers = vec![SpeakerSlot::Me, SpeakerSlot::Initiator, SpeakerSlot::Player];
                 speaker_nicks = vec![None; 3];
-                speaker_gates = vec![(false, false, false); 3];
+                speaker_gates = vec![SpeakerGate::default(); 3];
             }
             conv_speakers.insert(id, speakers.clone());
             let outs = output_links(&pkg, &props);
@@ -390,7 +410,16 @@ impl Loader {
                     let vo_length = voref.as_ref().and_then(|v| vo.length(v));
                     NodeKind::Line(Line {
                         guid: guid_hex(&g),
-                        text: pstr(&props, "m_Text").unwrap_or_default(),
+                        // `FUN_00c92ce0`: language INT reads `m_Text`; any other language reads
+                        // the single `m_PerLanguageData` entry its cooked packages carry.
+                        text: if self.language.eq_ignore_ascii_case("INT") {
+                            pstr(&props, "m_Text").unwrap_or_default()
+                        } else {
+                            match find(&props, "m_PerLanguageData").and_then(|p| p.array_structs(&pkg).ok()).as_deref() {
+                                Some([one]) => pstr(one, "m_LocalizedText").unwrap_or_default(),
+                                _ => pstr(&props, "m_Text").unwrap_or_default(),
+                            }
+                        },
                         nonword: class == "DisConv_NonWord",
                         spoken_to: pint(&props, "m_SpokenTo", -1),
                         main_subtitle: pbool(&props, "m_bMainSubtitle", class != "DisConv_NonWord"),
@@ -403,22 +432,41 @@ impl Loader {
                     })
                 }
                 "DisConv_PlayerChoice" => NodeKind::Choice {
-                    options: find(&props, "m_Choices_Static").and_then(|p| p.array_structs(&pkg).ok()).unwrap_or_default().iter().map(|c| pstr(c, "m_ChoiceText").unwrap_or_default()).collect(),
+                    // Cooked data omits the class default (one static choice); its text is not
+                    // read here, a neutral label stands in.
+                    options: match find(&props, "m_Choices_Static").and_then(|p| p.array_structs(&pkg).ok()) {
+                        Some(v) => v.iter().map(|c| pstr(c, "m_ChoiceText").unwrap_or_default()).collect(),
+                        None => vec!["Continue".into()],
+                    },
+                    optional: find(&props, "m_Choices_Optional")
+                        .and_then(|p| p.array_structs(&pkg).ok())
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|c| OptionalChoice { text: pstr(c, "m_ChoiceText").unwrap_or_default(), flag: flag(c), must_be_false: pbool(c, "m_bStoryFlagMustBeFalse", false) })
+                        .collect(),
                 },
-                "DisConv_RandomBranch" => NodeKind::RandomBranch { keep_unique: pbool(&props, "m_bTryKeepUnique", true) },
+                "DisConv_RandomBranch" => NodeKind::RandomBranch { keep_unique: pbool(&props, "m_bTryKeepUnique", true), weights: float_array(&props, "m_Branches").unwrap_or_else(|| vec![50.0, 50.0]) },
                 "DisConv_SequentialBranch" => NodeKind::SequentialBranch { looping: pbool(&props, "m_bLooping", false), global: pbool(&props, "m_bApplyGlobally", false) },
                 "DisConv_RandomSequentialBranch" => NodeKind::RandomSequentialBranch {
                     global: pbool(&props, "m_bApplyGlobally", true),
-                    branches: find(&props, "m_Branches").and_then(|p| p.array_raw()).map(|(n, _)| n as u32).unwrap_or(outs.len() as u32),
+                    branches: find(&props, "m_Branches").and_then(|p| p.array_raw()).map(|(n, _)| n as u32).unwrap_or(outs.len().saturating_sub(1) as u32),
+                    looping: pbool(&props, "m_bLooping", false),
                 },
                 "DisConv_TimeLimit" => NodeKind::TimeLimit { seconds: pfloat(&props, "m_fTimeLimitInSeconds", 30.0), global: pbool(&props, "m_bApplyGlobally", true) },
                 "DisConv_CheckStoryFlag" => NodeKind::CheckFlag { flag: flag(&props) },
                 "DisConv_SetStoryFlag" => NodeKind::SetFlag { flag: flag(&props), value: pbool(&props, "m_bValue", true) },
-                "DisConv_SeenDialogLabel" => NodeKind::SeenLabel { oneshot: pobj(&props, "m_pDialogOneShot").map(|o| pkg.obj_name(ObjRef::Export(o))), label: pstr(&props, "m_LabelToCheck").unwrap_or_default() },
+                "DisConv_SeenDialogLabel" => NodeKind::SeenLabel {
+                    oneshot: pobj(&props, "m_pDialogOneShot").map(|o| pkg.obj_name(ObjRef::Export(o))),
+                    conversation: pobj(&props, "m_pConversation").and_then(|c| conv_id.get(&c).copied()),
+                    label: pstr(&props, "m_LabelToCheck").unwrap_or_default(),
+                },
+                "DisConv_HadConversation" => NodeKind::HadConversation { conversation: pobj(&props, "m_pConversation").and_then(|c| conv_id.get(&c).copied()) },
+                "DisConv_ConversationFired" => NodeKind::ConversationFired { conversation: pobj(&props, "m_pConversation").and_then(|c| conv_id.get(&c).copied()) },
+                "DisConv_SpeakerCombatStatus" => NodeKind::CombatStatus,
                 "DisConv_KismetActivateRemoteEvent" => NodeKind::KismetOutput { name: pstr(&props, "m_EventName").unwrap_or_default() },
                 "DisConv_Soiree" => {
                     let g = pguid(&props, "m_SoireeGUID").unwrap_or_default();
-                    NodeKind::Soiree { guid: guid_hex(&g), matinee: matinees.get(&g).cloned() }
+                    NodeKind::Soiree { guid: guid_hex(&g), matinee: matinees.get(&g).cloned(), preview_only: pbool(&props, "m_UsePreviewBlurbsOnly", false) }
                 }
                 "DisConv_ConversationRef" => {
                     // The referenced conversation is output 0's target.
@@ -437,16 +485,36 @@ impl Loader {
                 "DisConv_HasInventoryItem" | "DisConv_HasInventoryItemEquipped" | "DisConv_HasAbstractItem" => NodeKind::HasItem {
                     item: pobj_name(&pkg, &props, "m_pItemClass").or_else(|| pobj_name(&pkg, &props, "m_pItem")).unwrap_or_default(),
                     equipped: class == "DisConv_HasInventoryItemEquipped",
+                    quantity: (class == "DisConv_HasAbstractItem").then(|| pint(&props, "m_Quantity", 0)),
                 },
                 "DisConv_IsSpeakerAvailable" => NodeKind::SpeakerAvailable,
-                "DisConv_SpeakerInStoryGroup" | "DisConv_SpeakerHasTweaks" | "DisConv_FactionBranch" | "DisConv_SpawnerBranch" | "DisConv_SpeakerSupportsDialogTree" => NodeKind::GroupBranch {
-                    groups: find(&props, "m_Branches")
-                        .and_then(|p| p.array_structs(&pkg).ok())
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|b| b.iter().find_map(|p| if let Value::Object(o) = p.value { (o != 0).then(|| pkg.obj_name(ObjRef::from_index(o))) } else { None }).unwrap_or_default())
-                        .collect(),
-                },
+                "DisConv_SpeakerInStoryGroup" | "DisConv_SpeakerHasTweaks" | "DisConv_FactionBranch" | "DisConv_SpawnerBranch" | "DisConv_SpeakerSupportsDialogTree" => {
+                    let kind = match class.as_str() {
+                        "DisConv_SpeakerInStoryGroup" => GroupKind::StoryGroup,
+                        "DisConv_SpeakerHasTweaks" => GroupKind::Tweaks,
+                        "DisConv_FactionBranch" => GroupKind::Faction,
+                        "DisConv_SpawnerBranch" => GroupKind::Spawner,
+                        _ => GroupKind::DialogTree,
+                    };
+                    let name_of = |o: i32| if o != 0 { pkg.obj_name(ObjRef::from_index(o)) } else { String::new() };
+                    // Spawner and dialog-tree branches list objects; the others list structs
+                    // { object, exact-match flag }.
+                    let entries: Vec<GroupEntry> = if matches!(kind, GroupKind::Spawner | GroupKind::DialogTree) {
+                        find(&props, "m_Branches").and_then(|p| p.array_objects().ok()).unwrap_or_default().into_iter().map(|o| GroupEntry { name: name_of(o), exact: true }).collect()
+                    } else {
+                        find(&props, "m_Branches")
+                            .and_then(|p| p.array_structs(&pkg).ok())
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|b| GroupEntry {
+                                name: b.iter().find_map(|p| if let Value::Object(o) = p.value { Some(name_of(o)) } else { None }).unwrap_or_default(),
+                                exact: b.iter().any(|p| matches!(p.value, Value::Bool(true)) && p.name.starts_with("m_bExact")),
+                            })
+                            .collect()
+                    };
+                    // The node has one output per entry plus "Everyone Else".
+                    NodeKind::GroupBranch { groups: entries.iter().map(|e| e.name.clone()).collect(), kind, entries }
+                }
                 "DisConv_TryFallbackTree" => NodeKind::TryFallbackTree,
                 "DisConv_MeSpeaker" | "DisConv_OneShotSpeaker" | "DisConv_InitiatorSpeaker" => NodeKind::Speaker {
                     oneshot_index: (class == "DisConv_OneShotSpeaker").then(|| pint(&props, "m_iOneShotSpeaker", -1)),
@@ -462,7 +530,7 @@ impl Loader {
             };
             // A ConversationRef's output 0 points at a conversation, not a node.
             let outputs = if matches!(kind, NodeKind::ConversationRef { .. }) { outs.iter().enumerate().map(|(k, o)| if k == 0 { None } else { *o }).collect() } else { outs };
-            self.db.nodes.push(Node { path: pkg.obj_path(ObjRef::Export(i)), class, tree, conversation: conv, speaker, outputs, kind });
+            self.db.nodes.push(Node { path: pkg.obj_path(ObjRef::Export(i)), class, tree, conversation: conv, speaker, label: pstr(&props, "m_Label"), outputs, kind });
         }
         Ok(())
     }

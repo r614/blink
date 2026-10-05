@@ -3,6 +3,7 @@
 //!
 //! conv stats <pkg>...                      node classes, lines, VO coverage
 //! conv list <pkg>...                       one-shots, conversations, hooks, outputs
+//! conv survey <pkg>...                     branch / condition / conversation settings (counts)
 //! conv flags <pkg>...                      story flags checked / set by conversations
 //! conv play <pkg>... -- <ref> [choice...]  run a conversation headless (choices 1-based)
 use anyhow::Result;
@@ -78,6 +79,35 @@ fn main() -> Result<()> {
                 let _ = oi;
             }
         }
+        "survey" => {
+            // Node settings that decide branch semantics (no retail text printed).
+            let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+            let mut bump = |k: String| *counts.entry(k).or_default() += 1;
+            for n in &db.nodes {
+                let outs = n.outputs.len();
+                match &n.kind {
+                    NodeKind::RandomBranch { keep_unique, weights } => bump(format!("random keep_unique={keep_unique} weights={weights:?} outputs={outs}")),
+                    NodeKind::SequentialBranch { looping, global } => bump(format!("sequential looping={looping} global={global} outputs={outs}")),
+                    NodeKind::RandomSequentialBranch { global, branches, looping } => bump(format!("randseq looping={looping} global={global} branches={branches} outputs={outs}")),
+                    NodeKind::TimeLimit { seconds, global } => bump(format!("timelimit {seconds}s global={global} tree_level={}", n.conversation.is_none())),
+                    NodeKind::Soiree { preview_only, matinee, .. } => bump(format!("soiree preview_only={preview_only} matinee={} preview_link={}", matinee.is_some(), n.outputs.get(1).copied().flatten().is_some())),
+                    NodeKind::Choice { options, optional } => bump(format!("choice static={} optional={}", options.len(), optional.len())),
+                    NodeKind::GroupBranch { kind, entries, .. } => bump(format!("group {kind:?} entries={} outputs={outs}", entries.len())),
+                    NodeKind::CheckSuspicion | NodeKind::IsPossessed | NodeKind::CombatStatus | NodeKind::SpeakerAvailable => bump(format!("{} outputs={outs}", n.class)),
+                    NodeKind::SeenLabel { conversation, .. } => bump(format!("seenlabel conversation_set={}", conversation.is_some())),
+                    NodeKind::HadConversation { .. } | NodeKind::ConversationFired { .. } => bump(n.class.clone()),
+                    NodeKind::Line(l) => bump(format!("line vo={} length={} labelled={}", l.vo.is_some(), l.vo_length.is_some(), n.label.is_some())),
+                    _ if n.label.is_some() => bump(format!("labelled {}", n.class)),
+                    _ => {}
+                }
+            }
+            for c in &db.conversations {
+                bump(format!("conversation prio={:?} blocking={} blocking_player={} near={} once={} walked_away_link={} interrupted_link={}", c.priority, c.blocking, c.blocking_player, c.player_must_be_near, c.fire_once, c.walked_away.is_some(), c.interrupted.is_some()));
+            }
+            for (k, v) in counts {
+                println!("{v:6} {k}");
+            }
+        }
         "flags" => {
             for n in &db.nodes {
                 match &n.kind {
@@ -121,7 +151,7 @@ fn main() -> Result<()> {
             }
             println!("flags {:?}", env.flags);
         }
-        _ => eprintln!("usage: conv stats|list|flags|play <pkg>... [-- <ref> [choices]]"),
+        _ => eprintln!("usage: conv stats|list|survey|flags|play <pkg>... [-- <ref> [choices]]"),
     }
     Ok(())
 }

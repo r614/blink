@@ -283,8 +283,8 @@ pub struct MissionState {
     /// `DDH_PLAYER_APPROACHES` hooks of one-shots whose me-speaker a mission NPC stands in
     /// for: (npc, one-shot, hook node, close/medium/far distances).
     approach: Vec<(String, u32, u32, [f32; 3])>,
-    /// Current distance band per NPC (0 close .. 3 outside far).
-    approach_band: BTreeMap<String, u8>,
+    /// Distance tracker per (NPC, approach hook node), as `DisConv_Hook_Distance_InGameData`.
+    approach_track: BTreeMap<(String, u32), dishonored_conversation::hooks::DistanceHook>,
 }
 
 impl MissionState {
@@ -336,7 +336,7 @@ impl MissionState {
             last_players: Vec::new(),
             last_npc_pos: BTreeMap::new(),
             approach: Vec::new(),
-            approach_band: BTreeMap::new(),
+            approach_track: BTreeMap::new(),
         };
         s.refresh_view(&BTreeMap::new());
         s
@@ -358,7 +358,7 @@ impl MissionState {
                 for h in &db.trees[t as usize].hooks {
                     let node = db.node(*h);
                     if let dishonored_conversation::NodeKind::Hook { hook, distances: Some(d), .. } = &node.kind {
-                        if hook == "DDH_PLAYER_APPROACHES" && node.outputs.iter().any(|o| o.is_some()) {
+                        if (hook == "DDH_PLAYER_APPROACHES" || hook == "DDH_PLAYER_APPROACHES_RADIAL") && node.outputs.iter().any(|o| o.is_some()) {
                             self.approach.push((n.id.clone(), oi as u32, *h, *d));
                         }
                     }
@@ -369,27 +369,20 @@ impl MissionState {
     }
 
     /// Players coming closer to an NPC enter its one-shot's approach hook at the band's
-    /// output (close / medium / far), like the original's `DisConv_Hook_Distance`.
+    /// output (close / medium / far), with the original's `DisConv_Hook_Distance` edge rules
+    /// ([`dishonored_conversation::hooks::DistanceHook`]; the "aware" check of
+    /// `DDH_PLAYER_APPROACHES` is not modelled: the NPC counts as aware of the player).
     fn approach_hooks(&mut self, queue: &mut VecDeque<Ev>) {
         for k in 0..self.approach.len() {
             let (npc, oneshot, hook, d) = self.approach[k].clone();
             let Some(np) = self.last_npc_pos.get(&npc).copied() else { continue };
             let nearest = self.last_players.iter().filter(|p| p.2).map(|p| (p.0, p.1.distance(np))).min_by(|a, b| a.1.total_cmp(&b.1));
-            let band = match nearest {
-                Some((_, x)) if x < d[0] => 0u8,
-                Some((_, x)) if x < d[1] => 1,
-                Some((_, x)) if x < d[2] => 2,
-                _ => 3,
-            };
-            let prev = self.approach_band.insert(npc.clone(), band).unwrap_or(3);
-            if band >= prev || band == 3 {
-                continue;
-            }
             let Some(r) = &self.conv else { return };
-            if r.db.node(hook).outputs.get(band as usize).copied().flatten().is_none() {
-                continue;
-            }
-            let target = Target::Hook { oneshot, hook, output: band as usize };
+            let Some((_, dist)) = nearest else { continue };
+            let outs = &r.db.node(hook).outputs;
+            let linked = [0, 1, 2].map(|i| outs.get(i).copied().flatten().is_some());
+            let Some(band) = self.approach_track.entry((npc.clone(), hook)).or_default().update(dist, d, linked) else { continue };
+            let target = Target::Hook { oneshot, hook, output: band };
             let bindings = self.conv_bindings(&target, &[], Some(&npc));
             let spec = StartSpec { target, initiator: nearest.map(|n| n.0), bindings, force: false };
             self.with_conv(queue, move |runner, env| {
@@ -403,6 +396,7 @@ impl MissionState {
         let oneshot = match target {
             Target::Conversation { oneshot, .. } => *oneshot,
             Target::Hook { oneshot, .. } => Some(*oneshot),
+            Target::TreeHook { tree, .. } => r.db.trees[*tree as usize].oneshot,
         };
         let pick = |k: usize| explicit.get(k).filter(|s| !s.is_empty()).cloned();
         let Some(o) = oneshot else { return (0..explicit.len().max(1)).map(|k| pick(k).or_else(|| (k == 0).then(|| talker.map(str::to_string)).flatten())).collect() };
@@ -808,7 +802,9 @@ impl MissionState {
                     self.usable.remove(m);
                 }
                 Action::Travel(tag) => out.push(Command::Travel(tag.clone())),
-                Action::Conversation(c, speakers) => self.start_conversation(c, speakers, None, None, true, queue),
+                // Kismet starts go through `DDH_KISMET_ACTIVATED` (flags 0x500, not "interrupts"):
+                // busy speakers refuse unless the conversation outranks theirs.
+                Action::Conversation(c, speakers) => self.start_conversation(c, speakers, None, None, false, queue),
                 Action::StopConversation(c) => {
                     let c = c.clone();
                     let db = self.conv.as_ref().map(|r| r.db.clone());
@@ -854,24 +850,33 @@ impl MissionState {
         self.view.dialogue.clear();
         self.view.choice = None;
         if let Some(r) = &self.conv {
+            // A line shows (and plays) only when the original would show a subtitle: lines
+            // without a VO event are silent skips there. Lines started by an `Interrupted`
+            // branch play out detached from their ended conversation.
+            let line_view = |l: &dishonored_conversation::runner::ActiveLine, conversation: String| {
+                let elapsed = (r.time - l.started) as f32;
+                DialogueLineView {
+                    id: l.id,
+                    speaker: l.speaker.name.clone(),
+                    npc: l.speaker.npc.clone(),
+                    player: l.speaker.player,
+                    text: l.text.clone(),
+                    vo_event: l.vo.as_ref().map(|v| v.event.clone()),
+                    vo_bank: l.vo.as_ref().map(|v| v.bank.clone()),
+                    start: l.started as f32,
+                    duration: l.duration,
+                    remaining: (l.duration - elapsed).max(0.0),
+                    main: l.main,
+                    conversation,
+                }
+            };
+            for l in r.detached.iter().filter(|l| l.subtitle) {
+                self.view.dialogue.push(line_view(l, String::new()));
+            }
             for inst in r.active() {
                 let conversation = inst.conversation.map(|c| r.db.conversation_name(c)).unwrap_or_default();
-                if let Some(l) = &inst.line {
-                    let elapsed = (r.time - l.started) as f32;
-                    self.view.dialogue.push(DialogueLineView {
-                        id: l.id,
-                        speaker: l.speaker.name.clone(),
-                        npc: l.speaker.npc.clone(),
-                        player: l.speaker.player,
-                        text: l.text.clone(),
-                        vo_event: l.vo.as_ref().map(|v| v.event.clone()),
-                        vo_bank: l.vo.as_ref().map(|v| v.bank.clone()),
-                        start: l.started as f32,
-                        duration: l.duration,
-                        remaining: (l.duration - elapsed).max(0.0),
-                        main: l.main,
-                        conversation: conversation.clone(),
-                    });
+                if let Some(l) = inst.line.as_ref().filter(|l| l.subtitle) {
+                    self.view.dialogue.push(line_view(l, conversation.clone()));
                 }
                 if let (Some(c), None) = (&inst.choice, &self.view.choice) {
                     self.view.choice = Some(DialogueChoiceView { id: c.id, options: c.options.clone(), player: c.player, conversation });
