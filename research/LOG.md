@@ -604,3 +604,45 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
     - The player sits in `StatePlayerMasterInScriptedChoice` meanwhile.
     - Boyle's doors set that flag on "Go to ..." and not on "Stay ...".
 - **Port changes:** arrival now takes the PlayerStart's rotation (pitch reset) per the class default. The rest of the travel and choice behaviour already matched: travel commits within one tick, so no input window remains.
+
+## 2026-10-05: NPC attention, vision, patrols and combat decoded from the executable
+
+- **Question:** How does the original turn vision, hearing and stimuli into attention and
+  behaviour (U-041..U-045)?
+- **Evidence / method:** Ghidra on `Dishonored.exe` (70da9613…). New helpers in
+  `research/ghidra/`: `FuncDecomp.java` (functions with callees; seeds by address, name,
+  `str:` string users, `ref:` data users, `vt:` whole vtable; lists the constants each function
+  reads), `OffsetScan.java` (functions using given field offsets). `ClassDecomp.java` now picks
+  the longest vtable a constructor stores (the UObject one, not an interface's).
+  `package_dump --classes` prints the class hierarchy; `class_layout` computes native field
+  offsets from the cooked reflection data (reproduces `DisAttentionInfo_Complex` = 0x66c).
+  The UnrealScript decompile of `DishonoredGame.upk` gave enums and defaults.
+- **Result** (details and addresses in `dishonored/AI.md`, "Decompiled attention code"):
+  - Vision (`ArkComponentVisionNPC`): normalized distance = d / range of the first cone,
+    inner then outer, that contains the target (0x00bf1580); the cones are elliptical
+    (0x00bec910, vertical half angle = scale * horizontal). Rate = scalar * clamp01(distance
+    curve(1 - norm) + target `Attribute_Visibility`) (0x00b4fa50). The curve is zero beyond 45 %
+    of the range, so far targets are seen only through their visibility.
+  - Player visibility: 0.1 * light01 + 0.25 * speed (0 while sneaking) + stance bonus (only
+    auto-crouch and swimming, -1) (0x00ad1590, `Twk_PlayerVisibility`).
+  - Increases add their amount, then floor at the threshold (0x00b60ca0) (U-042). The value
+    leaks only on ticks without any change (0x00b61040). Stops are rolled per brain with
+    `m_fStoppingVariance` (0x00b30270). Busted needs a reason with `m_bCanIncreaseToBusted`
+    (hearing cannot bust) and is refused for an unsighted target at a stale proxy (0x00b4fce0).
+  - Patrol: `DishonoredRoute`s adopted by distance and capacity (0x00c41590), with guard
+    waits from `m_fGuardDuration`. 48 routes in Boyle Ext, mostly single-point posts.
+  - Attack patterns are per-context cooldowns plus a group inhibition per attack class.
+  - Panic contagion: `AllyBusted` group stimulus (0x00b61430), range `m_fGroupDistance` 1000.
+- **Confidence:** CONFIRMED for the formulas, cones, increase/leak/level rules and route
+  adoption. LIKELY: target visibility = cached `Attribute_Visibility` (0x00c86bf0), the group
+  range, the inhibition semantics. SPECULATIVE: light level 1.0 (no light probe), speed
+  normalisation 600 uu/s.
+- **Implementation consequence:** `dishonored_ai` uses these rules (13 unit tests). Guards
+  walk the original routes, combat ends through attention (no 5 s timer), melee follows the
+  BerserkerElite cooldowns. Harness, before -> after (same seeds; replay hashes stable within each
+  version):
+  - contracts 3 min: pursuits 9 -> 11; guard-combat ticks 13685 -> 14661; civilian-flee
+    ticks 206173 -> 207540 (68.2 % -> 68.6 % of civilian time: the help-bark chain, which is
+    original behaviour, keeps panics going).
+  - mission (Masked Host): detected 7 -> 3, alarms 2 -> 1, completion 23 s -> 21 s.
+  - sim 12/12, travel 16/16 and conversation 8/8 pass.

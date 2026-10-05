@@ -61,6 +61,8 @@ pub struct MapInput<'a> {
     pub doors: Vec<TravelDoor>,
     pub ai_points: &'a [(Vec3, f32)],
     pub guard_spawns: &'a [(Vec3, f32)],
+    /// `DishonoredRoute` patrol routes.
+    pub routes: &'a [dishonored_ir::ai::PatrolRoute],
     pub world: &'a dyn WorldQuery,
 }
 
@@ -187,7 +189,11 @@ impl MissionSetup {
                     None => (starts.first().map(|s| s.0).unwrap_or(Vec3::ZERO), maps.iter().position(|m| m.name == start_map).unwrap_or(0)),
                 };
                 let cfg = CrowdConfig { civilians: c.civilians, guards: c.guards, center, radius: c.radius, seed: 7, civilian_archetypes: vec![0, 2, 3], guard_archetypes: vec![1] };
-                (Some(Crowd::populate(&cfg, maps[mi].ai_points, maps[mi].guard_spawns, maps[mi].world)), maps[mi].name.clone())
+                {
+                    let mut crowd = Crowd::populate(&cfg, maps[mi].ai_points, maps[mi].guard_spawns, maps[mi].world);
+                    crowd.set_routes(maps[mi].routes, maps[mi].world);
+                    (Some(crowd), maps[mi].name.clone())
+                }
             }
             None => (None, start_map.clone()),
         };

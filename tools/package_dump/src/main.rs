@@ -61,6 +61,21 @@ fn main() -> Result<()> {
             );
         }
     }
+    if flag("--classes") {
+        // Class exports with their super class (for the native class hierarchy).
+        for (i, e) in pkg.exports.iter().enumerate() {
+            if pkg.export_class(i) == "Class" {
+                let sup = if e.super_ == 0 {
+                    "-".to_string()
+                } else if e.super_ > 0 {
+                    pkg.obj_path(ObjRef::Export(e.super_ as usize - 1))
+                } else {
+                    pkg.obj_path(ObjRef::Import((-e.super_ - 1) as usize))
+                };
+                println!("class[{i}] {} : {}", pkg.obj_path(ObjRef::Export(i)), sup);
+            }
+        }
+    }
     if let Some(p) = args.iter().position(|a| a == "--props") {
         let i: usize = args[p + 1].parse()?;
         println!("export[{i}] {} ({})", pkg.obj_path(ObjRef::Export(i)), pkg.export_class(i));

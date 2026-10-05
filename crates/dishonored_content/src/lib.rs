@@ -37,6 +37,8 @@ pub struct MatchContent {
     pub tagged_starts: Vec<dishonored_assets::travel::TaggedStart>,
     /// `DisFleePointActor` positions (civilian panic destinations).
     pub flee_points: Vec<Vec3>,
+    /// `DishonoredRoute` patrol routes.
+    pub routes: Vec<dishonored_ir::ai::PatrolRoute>,
 }
 
 pub fn cache_dir() -> PathBuf {
@@ -132,7 +134,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     }
     let curated = load_spawns(map, None);
     let spawns = if curated.is_empty() { spawns } else { curated };
-    let npc_path = dir.join(format!("{map}.npcs3.json"));
+    let npc_path = dir.join(format!("{map}.npcs4.json"));
     let npcs: dishonored_assets::npcs::NpcData = match std::fs::read_to_string(&npc_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(n) => n,
         None => {
@@ -159,7 +161,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         }
     };
     let flee_points = markers.iter().filter(|m| m.class == "DisFleePointActor").map(|m| m.position).collect();
-    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts, flee_points })
+    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts, flee_points, routes: npcs.routes.clone() })
 }
 
 /// Persistent maps a mission uses: its start map, then the maps reachable through travel.
@@ -218,6 +220,7 @@ pub fn mission_setup(maps: &MapContents, def: dishonored_mission::MissionDef) ->
             doors,
             ai_points: &mc.ai_points,
             guard_spawns: &mc.guard_spawns,
+            routes: &mc.routes,
             world: &mc.collision,
         });
     }
