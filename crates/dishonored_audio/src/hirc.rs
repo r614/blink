@@ -214,7 +214,7 @@ pub struct Attenuation {
 pub struct RanSeqParams {
     /// 0 = infinite, 1 = play once.
     pub loop_count: u16,
-    /// Transition duration (seconds) for crossfade / delay / trigger rate.
+    /// Transition duration (ms) for crossfade / delay / trigger rate (+ random min..max).
     pub transition_time: f32,
     pub transition_min: f32,
     pub transition_max: f32,

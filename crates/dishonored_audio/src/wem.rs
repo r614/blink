@@ -81,6 +81,22 @@ pub struct Pcm {
     pub channels: u16,
     pub sample_rate: u32,
     pub samples: Vec<f32>,
+    /// Loop region in frames [start, end) from the WEM `smpl` chunk (Wwise writes the
+    /// loop points of looping sounds there; the end sample is inclusive in the chunk).
+    pub loop_range: Option<(usize, usize)>,
+}
+
+/// First loop of a `smpl` chunk: (start, end exclusive) in frames.
+pub fn smpl_loop(r: &Riff) -> Option<(usize, usize)> {
+    let c = r.chunk(b"smpl")?;
+    let n = u32::from_le_bytes(c.get(28..32)?.try_into().ok()?);
+    if n == 0 {
+        return None;
+    }
+    let l = c.get(36..60)?;
+    let start = u32::from_le_bytes(l[8..12].try_into().ok()?) as usize;
+    let end = u32::from_le_bytes(l[12..16].try_into().ok()?) as usize + 1;
+    (end > start).then_some((start, end))
 }
 
 impl Pcm {
@@ -128,12 +144,15 @@ impl Pcm {
 /// Decode any supported WEM.
 pub fn decode(b: &[u8], codebooks: &crate::vorbis::CodebookLibrary) -> Result<Pcm> {
     let r = Riff::parse(b)?;
-    match r.codec {
+    let mut p = match r.codec {
         CODEC_PCM => decode_pcm(&r),
         CODEC_IMA => crate::adpcm::decode_ima(&r),
         CODEC_VORBIS => crate::vorbis::decode(&r, codebooks),
         c => bail!("unsupported WEM codec 0x{c:04x}"),
-    }
+    }?;
+    let frames = p.frames();
+    p.loop_range = smpl_loop(&r).filter(|l| l.1 <= frames);
+    Ok(p)
 }
 
 fn decode_pcm(r: &Riff) -> Result<Pcm> {
@@ -146,5 +165,6 @@ fn decode_pcm(r: &Riff) -> Result<Pcm> {
             .chunks_exact(2)
             .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
             .collect(),
+        loop_range: None,
     })
 }

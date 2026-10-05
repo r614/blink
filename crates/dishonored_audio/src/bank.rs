@@ -30,6 +30,8 @@ pub struct Bank {
     pub hirc: Vec<HircObject>,
     /// STID: bank id -> bank name.
     pub bank_names: HashMap<u32, String>,
+    /// STMG section (Init.bnk: state groups, switch groups, game parameters).
+    pub stmg: Vec<u8>,
 }
 
 pub(crate) fn rd32(b: &[u8], o: usize) -> Result<u32> {
@@ -62,6 +64,7 @@ impl Bank {
                     }
                 }
                 b"DATA" => bank.data = body.to_vec(),
+                b"STMG" => bank.stmg = body.to_vec(),
                 b"HIRC" => {
                     let n = rd32(body, 0)? as usize;
                     let mut p = 4;

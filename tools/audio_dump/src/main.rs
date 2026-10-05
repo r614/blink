@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use dishonored_audio::bank::Bank;
 use dishonored_audio::pck::Pck;
 use dishonored_audio::wem::Riff;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 fn install() -> PathBuf {
@@ -469,6 +469,101 @@ fn main() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("survey") => survey(),
         Some("hirc") => hirc_survey(args.get(1).and_then(|s| s.parse().ok())),
+        Some("render") => {
+            // render <Bank,...> <seconds> [T:Event ...]: post events at times through the
+            // playback engine and write harness_out/audio/render.wav.
+            let mut lib = dishonored_audio::library::SoundLibrary::new(install())?;
+            for b in args.get(1).context("banks")?.split(',') {
+                lib.load_bank(b)?;
+            }
+            let secs: f32 = args.get(2).context("seconds")?.parse()?;
+            let mut eng = dishonored_audio::engine::Engine::new(std::sync::Arc::new(lib), 48000);
+            let mut cmds: Vec<(f32, String)> = args[3..].iter().filter_map(|a| a.split_once(':').map(|(t, e)| (t.parse().unwrap_or(0.0), e.to_string()))).collect();
+            cmds.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut out = Vec::new();
+            let mut t = 0.0f32;
+            let t0 = std::time::Instant::now();
+            for (at, ev) in cmds.iter().chain(std::iter::once(&(secs, String::new()))) {
+                if *at > t {
+                    out.extend(eng.render_seconds(at - t));
+                    t = *at;
+                }
+                if !ev.is_empty() {
+                    let p = match ev.split_once("=") {
+                        Some((g, s)) => {
+                            eng.set_state(g.parse().unwrap_or(0), s.parse().unwrap_or(0));
+                            0
+                        }
+                        None => eng.post_event_name(ev, 0),
+                    };
+                    println!("{t:7.2}s post {ev} -> playing {p}; voices {}", eng.active_voices());
+                }
+            }
+            let (loud, gap) = dishonored_audio::engine::silence_profile(&out, 48000, 1e-4);
+            println!("rendered {:.1}s in {:.1}s: {loud:.1}s audible, longest gap {gap:.2}s; stats {:?}", secs, t0.elapsed().as_secs_f32(), eng.stats);
+            for m in eng.music_history() {
+                println!("  music {:8.2}s segment {}", m.0 as f32 / 48000.0, m.1);
+            }
+            std::fs::create_dir_all("harness_out/audio")?;
+            let pcm = dishonored_audio::Pcm { channels: 2, sample_rate: 48000, samples: out, loop_range: None };
+            std::fs::write("harness_out/audio/render.wav", pcm.to_wav())?;
+            Ok(())
+        }
+        Some("setters") => {
+            // setters <group id>: events (named through harness_out/audio/ak_events.tsv from
+            // ak_survey) whose SetState/SetSwitch actions write a group.
+            let group: u32 = args.get(1).context("group")?.parse()?;
+            let names: HashMap<u32, String> = std::fs::read_to_string("harness_out/audio/ak_events.tsv")
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| {
+                    let f: Vec<&str> = l.split('\t').collect();
+                    Some((f.get(1)?.parse().ok()?, f[0].to_string()))
+                })
+                .collect();
+            use dishonored_audio::hirc::{Node, decode_object};
+            for p in all_pcks() {
+                let Ok(pck) = Pck::open(&p) else { continue };
+                for be in &pck.banks {
+                    let Ok(raw) = pck.read(be) else { continue };
+                    let Ok(b) = dishonored_audio::bank::Bank::parse(&raw) else { continue };
+                    let mut acts: HashMap<u32, (u32, u16)> = HashMap::new();
+                    for o in &b.hirc {
+                        if let (Some(Node::Action(a)), _) = decode_object(o) {
+                            if let Some((g, s)) = a.set_group {
+                                if g == group {
+                                    acts.insert(o.id, (s, a.action_type));
+                                }
+                            }
+                        }
+                    }
+                    for o in &b.hirc {
+                        if let (Some(Node::Event { actions }), _) = decode_object(o) {
+                            for a in actions {
+                                if let Some((s, t)) = acts.get(&a) {
+                                    println!("{} {} ({}) sets {} (type 0x{t:04x})", p.file_name().unwrap().to_string_lossy(), names.get(&o.id).map(String::as_str).unwrap_or("?"), o.id, s);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        Some("init") => {
+            let raw = std::fs::read(install().join("DishonoredGame/CookedPCConsole/Init.bnk"))?;
+            let b = Bank::parse(&raw)?;
+            let hex = |v: &[u8]| v.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ");
+            println!("STMG {} bytes: {}", b.stmg.len(), hex(&b.stmg[..b.stmg.len().min(256)]));
+            for o in &b.hirc {
+                println!("kind {} id {} ({} bytes): {}", o.kind, o.id, o.body.len(), hex(&o.body[..o.body.len().min(96)]));
+            }
+            match dishonored_audio::init::InitBank::parse(&b) {
+                Ok(i) => println!("{i:#?}"),
+                Err(e) => println!("init parse: {e:#}"),
+            }
+            Ok(())
+        }
         Some("nodes") => {
             // nodes <Bank> <kind> [max]: decoded objects of one HIRC type.
             let mut lib = dishonored_audio::library::SoundLibrary::new(install())?;

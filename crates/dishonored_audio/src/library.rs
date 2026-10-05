@@ -92,10 +92,43 @@ pub struct SoundLibrary {
     /// HIRC object id -> bank index.
     objects: HashMap<u32, usize>,
     cache: Mutex<HashMap<MediaKey, Arc<Pcm>>>,
+    info_cache: Mutex<HashMap<MediaKey, (u64, u32, u16)>>,
     /// Global state/switch values (group id -> value), as set by SetState actions.
     pub states: Mutex<HashMap<u32, u32>>,
     /// Extension of the dialog banks to load (`INT` = english(us)).
     pub vo_language: String,
+}
+
+/// (frames, rate, channels) from a RIFF/WEM header (tolerates a truncated file).
+fn wem_header_info(b: &[u8]) -> Option<(u64, u32, u16)> {
+    let rd16 = |o: usize| b.get(o..o + 2).map(|s| u16::from_le_bytes([s[0], s[1]]));
+    let rd32 = |o: usize| b.get(o..o + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap()));
+    if b.get(0..4)? != b"RIFF" {
+        return None;
+    }
+    let mut o = 12;
+    let (mut codec, mut ch, mut rate, mut align, mut frames) = (0u16, 0u16, 0u32, 1u16, None);
+    while o + 8 <= b.len() {
+        let tag = &b[o..o + 4];
+        let size = rd32(o + 4)? as usize;
+        let body = o + 8;
+        if tag == b"fmt " {
+            codec = rd16(body)?;
+            ch = rd16(body + 2)?;
+            rate = rd32(body + 4)?;
+            align = rd16(body + 12)?;
+            if codec == crate::wem::CODEC_VORBIS {
+                frames = Some(rd32(body + 0x18)? as u64);
+            }
+        } else if tag == b"data" {
+            if codec == crate::wem::CODEC_PCM {
+                frames = Some(size as u64 / align.max(1) as u64);
+            }
+            break;
+        }
+        o = body + size + (size & 1);
+    }
+    Some((frames?, rate, ch))
 }
 
 pub fn pck_dirs(root: &Path) -> Vec<PathBuf> {
@@ -111,7 +144,7 @@ impl SoundLibrary {
     pub fn new(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         let codebooks = CodebookLibrary::from_install(&root)?;
-        Ok(Self { root, codebooks, banks: Vec::new(), objects: HashMap::new(), cache: Mutex::new(HashMap::new()), states: Mutex::new(HashMap::new()), vo_language: "INT".into() })
+        Ok(Self { root, codebooks, banks: Vec::new(), objects: HashMap::new(), cache: Mutex::new(HashMap::new()), info_cache: Mutex::new(HashMap::new()), states: Mutex::new(HashMap::new()), vo_language: "INT".into() })
     }
 
     pub fn find_pck(&self, name: &str) -> Option<PathBuf> {
@@ -253,7 +286,7 @@ impl SoundLibrary {
         (vol, pitch, looping, att)
     }
 
-    fn media_key(&self, bank: usize, s: &hirc::Source) -> Option<MediaKey> {
+    pub fn media_key(&self, bank: usize, s: &hirc::Source) -> Option<MediaKey> {
         let streamed = s.stream != StreamType::Embedded;
         let has = |b: &LoadedBank| {
             if streamed {
@@ -363,6 +396,24 @@ impl SoundLibrary {
         } else {
             b.bank.media_by_id(k.id).map(<[u8]>::to_vec).context("media not in bank")
         }
+    }
+
+    /// (frames, sample rate, channels) from the first bytes of the media only (cached), so
+    /// the playback engine can time sequences without reading a whole stream.
+    pub fn media_info(&self, k: MediaKey) -> Result<(u64, u32, u16)> {
+        if let Some(i) = self.info_cache.lock().unwrap().get(&k) {
+            return Ok(*i);
+        }
+        let b = &self.banks[k.bank];
+        let head = if k.streamed {
+            let e = b.pck.streams.iter().find(|e| e.id == k.id).context("stream not in package")?;
+            b.pck.read(&crate::pck::PckEntry { size: e.size.min(8192), ..*e })?
+        } else {
+            b.bank.media_by_id(k.id).context("media not in bank")?.to_vec()
+        };
+        let info = wem_header_info(&head).context("media header")?;
+        self.info_cache.lock().unwrap().insert(k, info);
+        Ok(info)
     }
 
     /// Length in seconds from the media header alone (Vorbis `vorb` sample count, PCM data

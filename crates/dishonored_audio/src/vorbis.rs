@@ -624,7 +624,7 @@ pub fn decode(r: &Riff, lib: &CodebookLibrary) -> Result<Pcm> {
     if samples.len() > want && want > 0 {
         samples.truncate(want);
     }
-    Ok(Pcm { channels: r.channels, sample_rate: r.sample_rate, samples })
+    Ok(Pcm { channels: r.channels, sample_rate: r.sample_rate, samples, loop_range: None })
 }
 
 #[cfg(test)]
