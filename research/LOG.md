@@ -385,3 +385,67 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   - The debug text moved behind F1.
 - **Confidence:** CONFIRMED (layout, textures and fonts come straight from the movie). Script-driven animation (refill flashes, upgrade lengths, the stealth indicator) is not reproduced.
 - **Implementation consequence:** `crates/dishonored_runtime/src/gfx_hud.rs`. Nothing from the movie is written to disk or committed; research renders go to `harness_out/` only.
+
+## 2026-10-04 — Audio containers and codecs
+- **Question:** How is the game's audio stored, and which codecs must be decoded?
+- **Evidence:** 503 `.pck` files (base + DLC) start with `AKPK`; each holds one soundbank (BKHD version 65)
+  and a stream table. `audio_dump survey`: 3,265 embedded + 1,908 streamed media files, all RIFF/WAVE with
+  format tag `0xFFFF` (Wwise Vorbis), 0x42-byte `fmt ` with the `vorb` block at +0x18; no PCM/ADPCM/XMA.
+- **Experiment:** AKPK/bank/WEM readers in `crates/dishonored_audio`; layouts in `dishonored/AUDIO_FORMAT.md`.
+- **Result:** Every package and bank parses; codec survey as above.
+- **Confidence:** CONFIRMED
+- **Implementation consequence:** Only Wwise Vorbis needs a decoder.
+
+## 2026-10-04 — Wwise Vorbis codebooks come from the game executable
+- **Question:** The setup headers reference external codebooks by 10-bit index (44 codebooks in a 228-byte
+  setup). Where can the codebook library come from without third-party files?
+- **Evidence:** The Wwise runtime is statically linked into `Dishonored.exe`. `exescan` finds a run of 599
+  ascending pointers at file offset 0xFAEE78 (`.data`) into `.rdata` (VA 0x011D89F8..0x011EA32F); expanding
+  each target with the packed-codebook grammar consumes exactly the pointer stride for all 598 codebooks.
+- **Experiment:** `CodebookLibrary::from_exe_bytes` locates the table by content at runtime; the stripped setup
+  and modified audio packets are rebuilt to standard Vorbis and decoded with `lewton`.
+- **Result:** `audio_dump decodeall --streams`: 5,173 / 5,173 files decode, 0 silent or non-finite,
+  1,083.7 min of audio; decoded lengths equal the `vorb` sample counts. Spectrograms of sword sounds show
+  structured metallic partials (`harness_out/audio/sword_spec.png`).
+- **Confidence:** CONFIRMED
+- **Implementation consequence:** Audio decodes from the install alone; nothing is downloaded or shipped.
+
+## 2026-10-04 — Event ids and names
+- **Question:** How are events named, and how do game objects reference them?
+- **Evidence:** `STID` only names banks. 9,821 `AkEvent` exports (1,553 distinct names) in the base packages,
+  each with `RequiredBank`. `ak_survey`: FNV-1 32-bit of the lowercased name matches a bank event id for
+  1,553 / 1,553 names.
+- **Experiment:** Name -> id by hashing; event index over all banks (HIRC only).
+- **Result:** Player/combat events (`Snd_Weapon_Sword_Whooshe_ak`, `Snd_Power_P_Blink_Start`, ...),
+  per-surface footsteps (`FS_P_<Surface>_{Sn,R,Sp}`, `_Fall_{Small,High}`), impacts
+  (`Imp_<Projectile>_on_<Surface>`) and level ambience (`Play_Amb_LVL_Boyle_Estate`, `Play_Music_Boyle`) are
+  addressed by name in `dishonored_audio::cues`. L_Boyle_Ext places 89 `AkAmbientSound` emitters
+  (`PlayEvent` + `Location`), all of which resolve.
+- **Confidence:** CONFIRMED (hash, names); the SimEvent -> event choice is a design mapping (see AUDIO_FORMAT.md).
+- **Implementation consequence:** No name table has to be stored; ids are computed from names.
+
+## 2026-10-04 — HIRC v65 resolution
+- **Question:** Can events be resolved to playable media without a complete v65 HIRC parser?
+- **Evidence:** Play actions target sounds/containers; every node stores its direct parent after the FX block;
+  Sound sources give media id and stream type; SetState actions carry (group, state); switch containers
+  store group id and default switch before the children; music switches end with (state, child) pairs.
+- **Experiment:** `dishonored_audio::hirc` decodes those fields; children come from inverting the parent links;
+  `audio_dump event` prints the resolved tree and writes picks to `harness_out/audio/`.
+- **Result:** All 29 mapped player/combat cues resolve to decodable sounds; `Play_Amb_LVL_Boyle_Estate` with
+  `Set_State_Amb_LVL_Boyle_Ext_Streets` selects the 78 s exterior street bed; `Play_Music_Boyle` with
+  `Music_State_Boyle_Explor` selects the exploration branch. Volumes (dB, summed along the parent chain),
+  pitch offsets and attenuation curves (e.g. footsteps 3,000 uu, sword whoosh 2,000 uu) are read.
+- **Confidence:** LIKELY for the layouts (validated by consistency across all banks, not by a reference parser);
+  container play modes, randomizer ranges, RTPCs and loop counts are not decoded (U-029, U-030).
+- **Implementation consequence:** Random containers are played as weighted random picks, sequence containers
+  as random, switches by state when known else by default switch; ambience re-picks when a pick ends.
+
+## 2026-10-04 — Runtime audio
+- **Question:** How should simulation events become sound, presentation-only?
+- **Experiment:** `crates/dishonored_runtime/src/audio.rs`: worker-thread load + decode, `SimEvent` mapping,
+  movement-generated footsteps (surface from the colliding mesh name), local player 2D, others 3D with
+  bevy_audio panning and the Wwise dry-volume curve, level bed/score and placed emitters (culled beyond their
+  attenuation range). `--no-audio`, `--volume V`.
+- **Result:** `harness audio` passes (decode sanity per codec class, every cue resolves, Boyle ambience).
+- **Confidence:** APPROXIMATION for footstep surfaces, stride lengths, ambience looping and emitter selection.
+- **Implementation consequence:** Original-game captures (U-011) are needed to tune footstep cadence/levels.

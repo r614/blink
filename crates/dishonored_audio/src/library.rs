@@ -48,6 +48,8 @@ pub struct Leaf {
     pub looping: bool,
     /// End of the attenuation's dry volume curve; `None` = 2D (no attenuation).
     pub max_distance: Option<f32>,
+    /// Attenuation object (distance -> volume curve), see [`SoundLibrary::attenuation_db`].
+    pub attenuation: Option<u32>,
 }
 
 impl Cue {
@@ -199,7 +201,7 @@ impl SoundLibrary {
         }
     }
 
-    fn chain_props(&self, mut id: u32) -> (f32, f32, bool, Option<f32>) {
+    fn chain_props(&self, mut id: u32) -> (f32, f32, bool, Option<(f32, u32)>) {
         let (mut vol, mut pitch, mut looping, mut att) = (0.0, 0.0, false, None);
         let mut first = true;
         for _ in 0..32 {
@@ -217,7 +219,7 @@ impl SoundLibrary {
             if att.is_none() {
                 if let Some(a) = base.attenuation {
                     if let Some((_, Node::Attenuation(at))) = self.node(a) {
-                        att = Some(at.max_distance);
+                        att = Some((at.max_distance, a));
                     }
                 }
             }
@@ -253,15 +255,16 @@ impl SoundLibrary {
         match node {
             Node::Sound { source, .. } => {
                 let media = self.media_key(bank, source)?;
-                let (volume_db, pitch_cents, looping, max_distance) = self.chain_props(id);
-                Some(Cue::Leaf(Leaf { media, volume_db, pitch_cents, looping, max_distance }))
+                let (volume_db, pitch_cents, looping, att) = self.chain_props(id);
+                let (max_distance, attenuation) = (att.map(|a| a.0), att.map(|a| a.1));
+                Some(Cue::Leaf(Leaf { media, volume_db, pitch_cents, looping, max_distance, attenuation }))
             }
             Node::MusicTrack { sources } => {
                 let v: Vec<(Cue, f32)> = sources
                     .iter()
                     .filter_map(|s| {
                         let media = self.media_key(bank, s)?;
-                        Some((Cue::Leaf(Leaf { media, volume_db: 0.0, pitch_cents: 0.0, looping: true, max_distance: None }), 1.0))
+                        Some((Cue::Leaf(Leaf { media, volume_db: 0.0, pitch_cents: 0.0, looping: true, max_distance: None, attenuation: None }), 1.0))
                     })
                     .collect();
                 (!v.is_empty()).then_some(Cue::Random(v))
@@ -312,6 +315,26 @@ impl SoundLibrary {
         }
     }
 
+    /// Volume (dB) of an attenuation's dry curve at `distance` (game units), linear
+    /// interpolation between points; beyond the last point the last value holds.
+    pub fn attenuation_db(&self, att: u32, distance: f32) -> f32 {
+        let Some((_, Node::Attenuation(a))) = self.node(att) else { return 0.0 };
+        let c = &a.volume_curve;
+        if c.is_empty() {
+            return 0.0;
+        }
+        if distance <= c[0].0 {
+            return c[0].1;
+        }
+        for w in c.windows(2) {
+            if distance <= w[1].0 {
+                let t = (distance - w[0].0) / (w[1].0 - w[0].0).max(1e-3);
+                return w[0].1 + (w[1].1 - w[0].1) * t;
+            }
+        }
+        c.last().unwrap().1
+    }
+
     pub fn media_bytes(&self, k: MediaKey) -> Result<Vec<u8>> {
         let b = &self.banks[k.bank];
         if k.streamed {
@@ -320,6 +343,14 @@ impl SoundLibrary {
         } else {
             b.bank.media_by_id(k.id).map(<[u8]>::to_vec).context("media not in bank")
         }
+    }
+
+    /// Decode without caching (long ambience/music picks that are played once).
+    pub fn decode_uncached(&self, k: MediaKey) -> Result<Pcm> {
+        if let Some(p) = self.cache.lock().unwrap().get(&k) {
+            return Ok((**p).clone());
+        }
+        crate::wem::decode(&self.media_bytes(k)?, &self.codebooks)
     }
 
     /// Decode (and cache) a media file.

@@ -626,3 +626,31 @@ pub fn decode(r: &Riff, lib: &CodebookLibrary) -> Result<Pcm> {
     }
     Ok(Pcm { channels: r.channels, sample_rate: r.sample_rate, samples })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bit_writer_reader_roundtrip() {
+        let mut w = BitWriter::default();
+        let vals = [(5u32, 3u32), (0x3ff, 10), (1, 1), (0x12345, 20), (0, 7), (0xdead_beef, 32)];
+        for (v, n) in vals {
+            w.write(v, n);
+        }
+        w.write_bytes(&[0xa5, 0x5a]);
+        let mut r = BitReader::new(&w.bytes);
+        for (v, n) in vals {
+            assert_eq!(r.read(n).unwrap(), v & if n == 32 { u32::MAX } else { (1 << n) - 1 });
+        }
+        assert_eq!(r.read(8).unwrap(), 0xa5);
+        assert_eq!(r.read(8).unwrap(), 0x5a);
+    }
+
+    #[test]
+    fn quantvals() {
+        assert_eq!(maptype1_quantvals(81, 4), 3);
+        assert_eq!(maptype1_quantvals(1024, 2), 32);
+        assert_eq!(maptype1_quantvals(9, 1), 9);
+    }
+}

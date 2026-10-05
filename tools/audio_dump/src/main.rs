@@ -230,12 +230,17 @@ fn wem(name: &str, id: u32, out: Option<&str>) -> Result<()> {
 fn decode_all(streams: bool) -> Result<()> {
     let lib = dishonored_audio::vorbis::CodebookLibrary::from_install(&install())?;
     let t0 = std::time::Instant::now();
-    let (mut ok, mut fail, mut secs, mut silent) = (0usize, 0usize, 0f64, 0usize);
+    let (mut ok, mut fail, mut secs, mut silent, mut short) = (0usize, 0usize, 0f64, 0usize, 0usize);
     let mut errors: BTreeMap<String, usize> = BTreeMap::new();
     let mut check = |b: &[u8], what: String| match dishonored_audio::wem::decode(b, &lib) {
         Ok(p) => {
             ok += 1;
             secs += p.duration() as f64;
+            let want = Riff::parse(b).ok().and_then(|r| dishonored_audio::vorbis::vorb_info(&r).ok()).map(|v| v.sample_count as usize).unwrap_or(0);
+            if want != p.frames() {
+                short += 1;
+                println!("LENGTH {what}: {} frames, header {want}", p.frames());
+            }
             if p.peak() < 1e-4 || p.samples.iter().any(|s| !s.is_finite()) {
                 silent += 1;
             }
@@ -249,12 +254,17 @@ fn decode_all(streams: bool) -> Result<()> {
             *errors.entry(k).or_default() += 1;
         }
     };
+    let mut prefetch_total = 0usize;
     for p in all_pcks() {
         let pck = Pck::open(&p)?;
         let name = p.file_stem().unwrap().to_string_lossy().into_owned();
         for be in &pck.banks {
             let bank = Bank::parse(&pck.read(be)?)?;
             for m in &bank.media {
+                if pck.streams.iter().any(|s| s.id == m.id) {
+                    prefetch_total += 1;
+                    continue;
+                }
                 if let Some(b) = bank.media_bytes(m) {
                     check(b, format!("{name} media {}", m.id));
                 }
@@ -267,7 +277,7 @@ fn decode_all(streams: bool) -> Result<()> {
         }
     }
     println!(
-        "decoded {ok}, failed {fail}, silent/non-finite {silent}, total {:.1} min audio in {:.1}s",
+        "decoded {ok}, failed {fail}, silent/non-finite {silent}, length mismatches {short}, prefetch heads skipped {prefetch_total}, total {:.1} min audio in {:.1}s",
         secs / 60.0,
         t0.elapsed().as_secs_f32()
     );

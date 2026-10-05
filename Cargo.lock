@@ -2431,6 +2431,7 @@ dependencies = [
  "anyhow",
  "bevy",
  "dishonored_assets",
+ "dishonored_audio",
  "dishonored_bots",
  "dishonored_content",
  "dishonored_ir",
@@ -3067,6 +3068,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dishonored_ai",
+ "dishonored_audio",
  "dishonored_bots",
  "dishonored_content",
  "dishonored_multiplayer",

@@ -5,6 +5,7 @@
 
 pub mod adpcm;
 pub mod bank;
+pub mod cues;
 pub mod emitters;
 pub mod index;
 pub mod hirc;
