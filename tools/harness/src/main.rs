@@ -17,11 +17,14 @@
 //! harness replay FILE         re-simulate a server replay and verify every state hash
 //! harness mission [--mission FILE]  plays a custom mission end to end (headless + dedicated server)
 //! harness travel              Ext -> Int -> Ext through the original doors; level state kept
+//! harness conversation        original Boyle conversations headless (subtitles, VO, choices,
+//!                             outputs, flags) + the conversation mission end to end
 //! harness all                 sim, net, visual, contracts, audio; writes harness_out/<run>/REPORT.md
 //! ```
 
 mod audio;
 mod contracts;
+mod conversation;
 mod mission;
 mod travel;
 mod fidelity;
@@ -67,6 +70,7 @@ fn main() -> Result<()> {
         "audio" => audio::run(&ctx, &mut rep)?,
         "mission" => mission::run(&ctx, &mut rep)?,
         "travel" => travel::run(&ctx, &mut rep)?,
+        "conversation" => conversation::run(&ctx, &mut rep)?,
         "replay" => {
             let file = args.get(1).expect("replay file");
             netsoak::verify_replay_file(&PathBuf::from(file), &mut rep)?;

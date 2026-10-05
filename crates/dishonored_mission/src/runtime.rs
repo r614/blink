@@ -280,6 +280,11 @@ pub struct MissionState {
     pub npc_suspicion: BTreeMap<String, u8>,
     last_players: Vec<(u32, Vec3, bool)>,
     last_npc_pos: BTreeMap<String, Vec3>,
+    /// `DDH_PLAYER_APPROACHES` hooks of one-shots whose me-speaker a mission NPC stands in
+    /// for: (npc, one-shot, hook node, close/medium/far distances).
+    approach: Vec<(String, u32, u32, [f32; 3])>,
+    /// Current distance band per NPC (0 close .. 3 outside far).
+    approach_band: BTreeMap<String, u8>,
 }
 
 impl MissionState {
@@ -330,6 +335,8 @@ impl MissionState {
             npc_suspicion: BTreeMap::new(),
             last_players: Vec::new(),
             last_npc_pos: BTreeMap::new(),
+            approach: Vec::new(),
+            approach_band: BTreeMap::new(),
         };
         s.refresh_view(&BTreeMap::new());
         s
@@ -339,7 +346,56 @@ impl MissionState {
     /// install). The runner seed derives from the mission title, so replays match.
     pub fn set_conversations(&mut self, db: Arc<ConversationDb>) {
         let seed = self.def.title.bytes().fold(0xC0FFEEu64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64));
+        self.approach.clear();
+        for n in &self.def.npcs {
+            let Some(actor) = n.speaker_actor() else { continue };
+            for (oi, o) in db.oneshots.iter().enumerate() {
+                let me = o.speakers.first().and_then(|s| s.actor.as_deref());
+                if !me.is_some_and(|m| actor_matches(actor, &o.package, m)) {
+                    continue;
+                }
+                let Some(t) = o.tree else { continue };
+                for h in &db.trees[t as usize].hooks {
+                    let node = db.node(*h);
+                    if let dishonored_conversation::NodeKind::Hook { hook, distances: Some(d), .. } = &node.kind {
+                        if hook == "DDH_PLAYER_APPROACHES" && node.outputs.iter().any(|o| o.is_some()) {
+                            self.approach.push((n.id.clone(), oi as u32, *h, *d));
+                        }
+                    }
+                }
+            }
+        }
         self.conv = Some(Runner::new(db, seed));
+    }
+
+    /// Players coming closer to an NPC enter its one-shot's approach hook at the band's
+    /// output (close / medium / far), like the original's `DisConv_Hook_Distance`.
+    fn approach_hooks(&mut self, queue: &mut VecDeque<Ev>) {
+        for k in 0..self.approach.len() {
+            let (npc, oneshot, hook, d) = self.approach[k].clone();
+            let Some(np) = self.last_npc_pos.get(&npc).copied() else { continue };
+            let nearest = self.last_players.iter().filter(|p| p.2).map(|p| (p.0, p.1.distance(np))).min_by(|a, b| a.1.total_cmp(&b.1));
+            let band = match nearest {
+                Some((_, x)) if x < d[0] => 0u8,
+                Some((_, x)) if x < d[1] => 1,
+                Some((_, x)) if x < d[2] => 2,
+                _ => 3,
+            };
+            let prev = self.approach_band.insert(npc.clone(), band).unwrap_or(3);
+            if band >= prev || band == 3 {
+                continue;
+            }
+            let Some(r) = &self.conv else { return };
+            if r.db.node(hook).outputs.get(band as usize).copied().flatten().is_none() {
+                continue;
+            }
+            let target = Target::Hook { oneshot, hook, output: band as usize };
+            let bindings = self.conv_bindings(&target, &[], Some(&npc));
+            let spec = StartSpec { target, initiator: nearest.map(|n| n.0), bindings, force: false };
+            self.with_conv(queue, move |runner, env| {
+                runner.start(spec, env);
+            });
+        }
     }
 
     fn conv_bindings(&self, target: &Target, explicit: &[String], talker: Option<&str>) -> Vec<Option<String>> {
@@ -528,6 +584,7 @@ impl MissionState {
         // Conversations advance (lines end, the next nodes run).
         let dt = input.dt;
         self.with_conv(&mut queue, |r, env| r.update(dt, env));
+        self.approach_hooks(&mut queue);
         // Delayed actions that are due run before rules (they were scheduled earlier).
         let due: Vec<Vec<Action>> = {
             let t = self.time;

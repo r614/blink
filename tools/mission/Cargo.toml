@@ -9,3 +9,4 @@ description = "Mission authoring tool: level markers, original objectives/Kismet
 anyhow.workspace = true
 dishonored_assets.workspace = true
 dishonored_mission.workspace = true
+dishonored_content.workspace = true

@@ -94,6 +94,17 @@ fn main() -> Result<()> {
                 Ok(c) => {
                     let names: Vec<(String, String)> = level_markers(&c, &def.map)?.into_iter().map(|m| (m.package, m.name)).collect();
                     errs.extend(validate_actors(&def, &names));
+                    // Original conversation references resolve against the dialog data.
+                    if !def.conversation_refs().is_empty() {
+                        match dishonored_content::load_mission_conversations(&def) {
+                            Ok(db) => {
+                                errs.extend(dishonored_mission::validate_conversations(&def, &db));
+                                let (lines, vo, len) = db.line_stats();
+                                println!("dialog: {} packages, {} conversations, {lines} lines ({vo} with VO, {len} decodable)", db.packages.len(), db.conversations.len());
+                            }
+                            Err(e) => errs.push(format!("dialog data: {e:#}")),
+                        }
+                    }
                 }
                 Err(_) => println!("(install not found: original actor names not checked)"),
             }

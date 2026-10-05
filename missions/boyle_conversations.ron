@@ -1,0 +1,82 @@
+// "Guests at the Gate" -- original conversations played from the install.
+// The doorman runs the original invitation check (his Kismet wiring re-expressed as rules:
+// InvitationPlease -> Come In / CantLetYouIn), and three guests of the interior party stand
+// in the street speaking their own original dialog trees: Lydia Boyle (player choices),
+// Miss White (her use hook and drink request) and Lord Brisby (his approach hook, then his
+// use hook once Boyle_BrisbyInPosition is set). Subtitles, choices and VO are read from the
+// game files at runtime; this file only references them.
+// Check it with:  mission check missions/boyle_conversations.ron
+MissionDef(
+    title: "Guests at the Gate",
+    map: "L_Boyle_Ext_P",
+    briefing: "Talk your way past the doorman and hear what the guests have to say.",
+
+    objectives: [
+        ObjectiveDef(id: "gate", description: "Get past the doorman", tasks: [
+            TaskDef(id: "invite", description: "Find an invitation", initial: Active, target: Marker("invitation")),
+            TaskDef(id: "doorman", description: "Show the doorman your invitation", initial: Active, target: Npc("doorman")),
+        ]),
+        ObjectiveDef(id: "guests", description: "Hear the guests out", tasks: [
+            TaskDef(id: "white", description: "(Optional) Speak with Miss White", initial: Active, optional: true, target: Npc("white")),
+            TaskDef(id: "lydia", description: "(Optional) Speak with the lady in the mask", initial: Active, optional: true, target: Npc("lydia")),
+            TaskDef(id: "brisby", description: "(Optional) Speak with Lord Brisby", initial: Active, optional: true, target: Npc("brisby")),
+        ]),
+    ],
+
+    // Original SF_LadyBoyle story flags: conversations read and write them by name.
+    flags: ["Boyle_Has_Invitation", "GaveInvitationtoGuard", "WhiteQuestforDrink", "Boyle_BrisbyInPosition"],
+
+    markers: [
+        MarkerDef(id: "start", at: Actor("L_BoyleStreet_Ext_Script:TargetPoint_7")),
+        MarkerDef(id: "invitation", at: Actor("L_BoyleStreet_Ext_Script:TargetPoint_52"), radius: 120.0, usable: "Pick up the invitation"),
+    ],
+
+    npcs: [
+        // The window guard at the gate (his one-shot is L_BoyleStreet_Ext_Script:DisDialogOneShot_4).
+        NpcDef(id: "doorman", kind: Guard, at: Offset(Actor("L_BoyleStreet_Ext_Script:DishonoredSpawner_2"), (-130.0, 0.0, 0.0)), speaker: "L_BoyleStreet_Ext_Script:DishonoredSpawner_2", behavior: Idle, name: "Doorman", talk: "Talk"),
+        NpcDef(id: "white", kind: Civilian, archetype: 3, at: Actor("L_BoyleStreet_Ext_Script:TargetPoint_27"), behavior: Idle, name: "Miss White",
+            speaker: "L_Boyle_Int_Script:DishonoredSpawner_20", talk_conversation: "L_Boyle_Int_Script:DisDialogOneShot_9"),
+        NpcDef(id: "lydia", kind: Civilian, archetype: 3, at: Actor("L_BoyleStreet_Ext_Script:TargetPoint_19"), behavior: Idle, name: "Lydia Boyle",
+            speaker: "L_Boyle_Int_Script:DishonoredSpawner_11", talk_conversation: "L_Boyle_Int_Script:DisDialogOneShot_10/Hunting Lydia"),
+        NpcDef(id: "brisby", kind: Civilian, archetype: 2, at: Actor("L_BoyleStreet_Ext_Script:DishonoredNavPoint_15"), behavior: Idle, name: "Lord Brisby",
+            speaker: "L_Boyle_Int_Script:DishonoredSpawner_9", talk_conversation: "L_Boyle_Int_Script:DisDialogOneShot_6"),
+    ],
+
+    player_start: "start",
+    settings: MissionSettings(respawn: false, respawn_delay: 5.0, time_limit: 0.0, high_chaos_kill_ratio: 0.2),
+
+    rules: [
+        RuleDef(on: Start, then: [Message("Guests at the Gate")]),
+
+        RuleDef(on: Use("invitation"), then: [
+            SetFlag("Boyle_Has_Invitation"), NotUsable("invitation"), SetTask("gate.invite", Completed), Message("Invitation taken"),
+        ]),
+
+        // Doorman (original: DialogOutputs of BoyleGuard1 -> CheckStoryFlag Boyle_Has_Invitation).
+        RuleDef(on: Talk("doorman"), when: [NotFlag("GaveInvitationtoGuard")], once: false, then: [
+            Conversation("L_BoyleStreet_Ext_Script:DisDialogOneShot_4/InvitationPlease", ["doorman"]),
+        ]),
+        RuleDef(on: ConversationOutput("DisDialogOneShot_4/InvitationPlease_DONE"), when: [Flag("Boyle_Has_Invitation")], once: false, then: [
+            SetFlag("GaveInvitationtoGuard"),
+            Conversation("L_BoyleStreet_Ext_Script:DisDialogOneShot_4/Come In", ["doorman"]),
+        ]),
+        RuleDef(on: ConversationOutput("DisDialogOneShot_4/InvitationPlease_DONE"), when: [NotFlag("Boyle_Has_Invitation")], once: false, then: [
+            Conversation("L_BoyleStreet_Ext_Script:DisDialogOneShot_4/CantLetYouIn", ["doorman"]),
+        ]),
+        RuleDef(on: ConversationEnded("DisDialogOneShot_4/Come In"), then: [SetTask("gate.doorman", Completed)]),
+
+        // Miss White's request (her conversation sets WhiteQuestforDrink itself).
+        RuleDef(on: ConversationOutput("Quest For the Drink"), then: [SetTask("guests.white", Completed), Message("Miss White wants a drink")]),
+
+        // Lydia's choices end in one of her Kismet outputs.
+        RuleDef(on: ConversationEnded("Hunting Lydia"), then: [SetTask("guests.lydia", Completed)]),
+
+        // Brisby's approach hook plays Lord_Brisby_Quest_Start; its output sends him to a
+        // private room in the original (AIGoToActor), after which Kismet sets the flag that
+        // opens his use hook to Brisby_Boyle_Invite.
+        RuleDef(on: ConversationOutput("Join_Brisby_in_Private"), then: [SetFlag("Boyle_BrisbyInPosition")]),
+        RuleDef(on: ConversationEnded("Brisby_Boyle_Invite"), then: [SetTask("guests.brisby", Completed)]),
+
+        RuleDef(on: TaskState("gate.doorman", Completed), then: [After(2.0, [Complete("The doorman lets you in")])]),
+    ],
+)

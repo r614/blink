@@ -195,8 +195,50 @@ pub fn mission_setup(maps: &MapContents, def: dishonored_mission::MissionDef) ->
             world: &mc.collision,
         });
     }
-    let setup = dishonored_multiplayer::mission::MissionSetup::new(def, &inputs)?;
+    let refs = def.conversation_refs();
+    let mut setup = dishonored_multiplayer::mission::MissionSetup::new(def, &inputs)?;
+    if !refs.is_empty() || !setup.def.dialog_packages.is_empty() {
+        let db = load_mission_conversations(&setup.def).map_err(|e| format!("dialog data: {e:#}"))?;
+        let errs = dishonored_mission::validate_conversations(&setup.def, &db);
+        if !errs.is_empty() {
+            return Err(errs.join("; "));
+        }
+        setup.conversations = Some(db);
+    }
     Ok(dishonored_multiplayer::game::GameSetup::Mission(Box::new(setup)))
+}
+
+/// Original dialog graphs a mission references, with VO lengths from the voice banks
+/// (`Bk_<GUID>.INT`). Cached under `cache/` (derived from the install; never committed).
+pub fn load_mission_conversations(def: &dishonored_mission::MissionDef) -> Result<dishonored_conversation::ConversationDb> {
+    let content = Content::locate()?;
+    let mut map_pkgs = Vec::new();
+    for m in mission_maps(def) {
+        map_pkgs.extend(map_packages(&content, &m));
+    }
+    let pkgs = def.dialog_packages_needed(&map_pkgs);
+    load_conversations(&content, &pkgs)
+}
+
+/// Dialog graphs of the given cooked packages (cached per package list).
+pub fn load_conversations(content: &Content, pkgs: &[String]) -> Result<dishonored_conversation::ConversationDb> {
+    let key = pkgs.iter().map(|p| p.to_ascii_lowercase()).collect::<Vec<_>>().join("+");
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in key.bytes().chain(env!("CARGO_PKG_VERSION").bytes()) {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let path = cache_dir().join(format!("dialog_{h:016x}.json"));
+    if let Some(db) = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<dishonored_conversation::ConversationDb>(&t).ok()) {
+        if db.packages.len() == pkgs.len() {
+            return Ok(db);
+        }
+    }
+    let mut vo = dishonored_audio::vo::VoResolver::open(&content.root)?;
+    let db = dishonored_conversation::load::load_packages(&content.cooked, pkgs, &mut vo)?;
+    std::fs::create_dir_all(cache_dir()).ok();
+    std::fs::write(&path, serde_json::to_string(&db)?).ok();
+    Ok(db)
 }
 
 impl dishonored_world::WorldQuery for MatchContent {
