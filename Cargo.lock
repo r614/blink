@@ -362,6 +362,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "audio_dump"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dishonored_audio",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2336,6 +2344,14 @@ dependencies = [
  "glam",
  "serde",
  "ue3_package",
+]
+
+[[package]]
+name = "dishonored_audio"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lewton",
 ]
 
 [[package]]

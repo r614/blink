@@ -1,0 +1,10 @@
+[package]
+name = "audio_dump"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+default-run = "audio_dump"
+
+[dependencies]
+anyhow.workspace = true
+dishonored_audio = { path = "../../crates/dishonored_audio" }
