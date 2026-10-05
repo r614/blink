@@ -112,9 +112,8 @@ pub struct Conversation {
     pub speakers: Vec<SpeakerSlot>,
     /// Per speaker slot: the linked speaker node's `m_NickName` (e.g. "Samuel The Boatman").
     pub speaker_nicks: Vec<Option<String>>,
-    /// Per speaker slot: gating of the linked speaker node (`m_bNotWhileInCombat`,
-    /// `m_bNotWhileFearful`, `m_bNotWhileSuspicious`).
-    pub speaker_gates: Vec<(bool, bool, bool)>,
+    /// Per speaker slot: gating of the linked speaker node.
+    pub speaker_gates: Vec<SpeakerGate>,
     /// Output links `Start`, `Interrupted`, `Player Walked Away`.
     pub start: Option<NodeId>,
     pub interrupted: Option<NodeId>,
@@ -130,6 +129,17 @@ pub struct Conversation {
     pub always_interrupt_for_combat: bool,
 }
 
+/// Flags of a conversation's linked speaker node (`DisConv_Speaker`). The bit layout at
+/// +0x94 is `m_bNotWhileInCombat` 1, `m_bNotWhileSuspicious` 2, `m_bNotWhileFearful` 4,
+/// `m_bOptional` 8 (`FUN_00c9e2b0` lets an optional speaker fail to bind).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpeakerGate {
+    pub not_in_combat: bool,
+    pub not_fearful: bool,
+    pub not_suspicious: bool,
+    pub optional: bool,
+}
+
 /// One graph node (conversation-level or tree-level).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Node {
@@ -140,6 +150,10 @@ pub struct Node {
     pub conversation: Option<u32>,
     /// `m_iSpeaker` (index into the conversation's speakers), -1 when absent.
     pub speaker: i32,
+    /// `DisConv_Node.m_Label`. Every node that runs with a label records it in the memory of
+    /// each bound speaker (`FUN_00ca3a80`), not only lines.
+    #[serde(default)]
+    pub label: Option<String>,
     /// `m_OutputLinks[i].m_pLink`, in order.
     pub outputs: Vec<Option<NodeId>>,
     pub kind: NodeKind,
@@ -179,63 +193,171 @@ pub struct Line {
 }
 
 impl Line {
-    /// How long the line holds the conversation: the VO clip, else an estimate from the
-    /// subtitle length (APPROXIMATION for the ~1% of lines whose event is missing).
+    /// How long the line holds the conversation.
+    ///
+    /// The original (`DisConv_Blurb` update `FUN_00c9e0f0`) waits until the speaker reports
+    /// that no voice is playing any more (`FUN_00c9a160`: the Wwise playing IDs of the
+    /// speaker), then counts `m_fBlurbEndDelay` down. There is no reading-time fallback: a
+    /// blurb whose speaker has no event for its GUID posts nothing, shows no subtitle
+    /// (`FUN_00c9fbf0` only adds a subtitle for a playing ID) and ends on the next tick.
+    /// - VO event and clip length known: the clip, plus the end delay.
+    /// - No VO event: only the end delay (the original's silent skip).
+    /// - VO event whose clip we cannot measure: a reading-time estimate stands in for the
+    ///   unknown clip length (APPROXIMATION; the original plays the clip).
     pub fn duration(&self) -> f32 {
-        self.vo_length.unwrap_or_else(|| text_duration(&self.text)) + self.end_delay.max(0.0)
+        let speech = match (&self.vo, self.vo_length) {
+            (_, Some(len)) => len,
+            (None, None) => 0.0,
+            (Some(_), None) => text_duration(&self.text),
+        };
+        speech + self.end_delay.max(0.0)
+    }
+
+    /// Whether the original shows a subtitle for this line: a playing voice and text.
+    pub fn has_subtitle(&self) -> bool {
+        self.vo.is_some() && !self.text.trim().is_empty()
     }
 }
 
-/// Reading-time fallback for lines without VO: 15 characters per second, at least 1.5 s.
+/// Reading-time stand-in for a clip whose length is unknown: 15 characters per second, at
+/// least 1.5 s (not from the original; see [`Line::duration`]).
 pub fn text_duration(text: &str) -> f32 {
     (text.trim().chars().count() as f32 / 15.0).max(1.5)
 }
 
+/// `DisPlayerChoice_Optional`: shown after the static choices while its story flag equals
+/// `!m_bStoryFlagMustBeFalse` (`FUN_00c8b810`); choosing it fires output
+/// `static count + its index in the optional list`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OptionalChoice {
+    pub text: String,
+    pub flag: String,
+    pub must_be_false: bool,
+}
+
+/// What a group branch compares the speaker's pawn against.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GroupKind {
+    /// `DisConv_SpeakerInStoryGroup`: `DisSpeakerStoryGroup { m_pStoryGroup, m_bExactMatch }`.
+    StoryGroup,
+    /// `DisConv_SpeakerHasTweaks`: `DisSpeakerTweaks { m_pTweaks, m_bExactMatch }` (exact =
+    /// the pawn's tweaks object itself, else any tweaks it derives from).
+    Tweaks,
+    /// `DisConv_FactionBranch`: `DisFactionBranch { m_pFaction, m_bExactMatchOnly }`.
+    Faction,
+    /// `DisConv_SpawnerBranch`: the pawn was spawned by this `DishonoredSpawner`.
+    Spawner,
+    /// `DisConv_SpeakerSupportsDialogTree`: the speaker can play this tree.
+    DialogTree,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GroupEntry {
+    /// Object name of the group / tweaks / faction / spawner / tree ("" when unset).
+    pub name: String,
+    pub exact: bool,
+}
+
+/// Every node's `Evaluate` (vtable +0x140) returns the index of the output link to follow,
+/// or -1 to wait (lines, choices, matinees); the walker `FUN_00ca3c10` follows
+/// `m_OutputLinks[index]`. A null link ends the conversation normally, an index past the
+/// links ends it as an error (research/dishonored/CONVERSATIONS.md).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum NodeKind {
     Line(Line),
-    /// `DisConv_PlayerChoice`: `m_Choices_Static[].m_ChoiceText`; output i = choice i.
-    Choice { options: Vec<String> },
-    /// `DisConv_RandomBranch` (`m_bTryKeepUnique`: avoid repeating the previous pick).
-    RandomBranch { keep_unique: bool },
-    /// `DisConv_SequentialBranch`: output k on the k-th pass; `m_bLooping` wraps, otherwise
-    /// the last output repeats.
+    /// `DisConv_PlayerChoice`: `m_Choices_Static[].m_ChoiceText` (output i = choice i), then
+    /// the optional choices whose flag test passes. No static choice: output 0 at once.
+    Choice {
+        options: Vec<String>,
+        #[serde(default)]
+        optional: Vec<OptionalChoice>,
+    },
+    /// `DisConv_RandomBranch`: `m_Branches` are percentage weights (default 50/50). A roll
+    /// `rand() * 100 / 32767` takes the first output whose cumulative weight exceeds it
+    /// (the last output if none does). With `m_bTryKeepUnique` (default true) a repeat of the
+    /// previous pick moves to the other output whose weight is closest to it.
+    RandomBranch {
+        keep_unique: bool,
+        #[serde(default)]
+        weights: Vec<f32>,
+    },
+    /// `DisConv_SequentialBranch`: counter c, next = c + 1; past the last output it stays
+    /// there, or restarts at 1 with `m_bLooping`; output = next - 1.
     SequentialBranch { looping: bool, global: bool },
-    /// `DisConv_RandomSequentialBranch`: shuffle bag over the first `branches` outputs; an
-    /// extra output after them is "Depleted" (taken once the bag is empty).
-    RandomSequentialBranch { global: bool, branches: u32 },
-    /// `DisConv_TimeLimit`: output 0 when `seconds` have passed since it last let a pass
-    /// through (or never did), else output 1.
+    /// `DisConv_RandomSequentialBranch` (extends the sequential branch): the counter walks a
+    /// shuffled order of the `branches` outputs; past the end it takes the extra "Depleted"
+    /// output, or restarts with `m_bLooping` (reshuffled when the pass commits).
+    RandomSequentialBranch {
+        global: bool,
+        branches: u32,
+        #[serde(default)]
+        looping: bool,
+    },
+    /// `DisConv_TimeLimit`: output 1 while `now - last <= seconds` after a pass, else output 0
+    /// (which records the time).
     TimeLimit { seconds: f32, global: bool },
     /// `DisConv_CheckStoryFlag`: output 0 = flag false, 1 = flag true.
     CheckFlag { flag: String },
     /// `DisConv_SetStoryFlag` (`m_bValue`, default true).
     SetFlag { flag: String, value: bool },
-    /// `DisConv_SeenDialogLabel`: output 0 = label not heard yet, 1 = heard.
-    SeenLabel { oneshot: Option<String>, label: String },
+    /// `DisConv_SeenDialogLabel`: output 1 when the speaker `m_iSpeaker` has heard the label
+    /// `m_LabelToCheck` in conversation `m_pConversation` (no conversation set: output 0).
+    SeenLabel {
+        oneshot: Option<String>,
+        #[serde(default)]
+        conversation: Option<u32>,
+        label: String,
+    },
+    /// `DisConv_HadConversation`: output 1 when the speaker `m_iSpeaker` took part in
+    /// `m_pConversation` before.
+    HadConversation { conversation: Option<u32> },
+    /// `DisConv_ConversationFired`: output 1 when `m_pConversation` ever started (global).
+    ConversationFired { conversation: Option<u32> },
     /// `DisConv_KismetActivateRemoteEvent`: fires the same-named output of the Kismet
     /// `DisSeqEvent_DialogOutputs` bound to the one-shot.
     KismetOutput { name: String },
-    /// `DisConv_Soiree`: plays the matinee whose `m_MatineeGUID` equals `guid`. Output 1 runs
-    /// when it starts, output 0 when it finishes.
-    Soiree { guid: String, matinee: Option<String> },
+    /// `DisConv_Soiree`: plays the matinee whose `m_MatineeGUID` equals `guid` and waits for it;
+    /// output 0 follows. Output 1 is the chain of preview blurbs played instead when
+    /// `m_UsePreviewBlurbsOnly` is set. In a non-blocking conversation it is skipped.
+    Soiree {
+        guid: String,
+        matinee: Option<String>,
+        #[serde(default)]
+        preview_only: bool,
+    },
     /// `DisConv_ConversationRef` -> `DisConversation`.
     ConversationRef { conversation: Option<u32> },
     /// Tree hook: `m_HookEnum` (`DDH_*`), `m_iHookIndex`, Kismet names for
     /// `DisConv_Hook_KismetActivated` (output i = name i).
     Hook { hook: String, index: i32, names: Vec<String>, priority: Option<Priority>, distances: Option<[f32; 3]> },
-    /// `DisConv_CheckSpeakerSuspicionLevel`: output 0 = calm, 1 = suspicious or worse.
+    /// `DisConv_CheckSpeakerSuspicionLevel`: the output is the speaker's suspicion level.
     CheckSuspicion,
-    /// `DisConv_IsPossessed`: output 0 = not possessed.
+    /// `DisConv_IsPossessed`: 0 = not possessed, 1 = possessed, 2 = possessed by the player's
+    /// own possession (three outputs).
     IsPossessed,
+    /// `DisConv_SpeakerCombatStatus`: four outputs, see [`crate::runner::ConvEnv::combat_status`].
+    CombatStatus,
     /// `DisConv_HasInventoryItem` / `_HasInventoryItemEquipped` / `_HasAbstractItem`:
-    /// output 0 = no, 1 = yes.
-    HasItem { item: String, equipped: bool },
+    /// output 0 = no, 1 = yes. The speaker must be the player.
+    HasItem {
+        item: String,
+        equipped: bool,
+        /// `DisConv_HasAbstractItem.m_Quantity` (count must be at least this).
+        #[serde(default)]
+        quantity: Option<i32>,
+    },
     /// `DisConv_IsSpeakerAvailable`: output 0 = unavailable, 1 = available.
     SpeakerAvailable,
     /// `DisConv_SpeakerInStoryGroup` / `_SpeakerHasTweaks` / `_FactionBranch` /
-    /// `_SpawnerBranch`: one output per listed group, the last is "Everyone Else".
-    GroupBranch { groups: Vec<String> },
+    /// `_SpawnerBranch` / `_SpeakerSupportsDialogTree`: the first matching entry's output,
+    /// else output `entries` ("Everyone Else").
+    GroupBranch {
+        groups: Vec<String>,
+        #[serde(default = "default_group_kind")]
+        kind: GroupKind,
+        #[serde(default)]
+        entries: Vec<GroupEntry>,
+    },
     /// `DisConv_TryFallbackTree`.
     TryFallbackTree,
     /// Speaker declarations (`DisConv_MeSpeaker`, `_OneShotSpeaker`, `_InitiatorSpeaker`):
@@ -246,6 +368,10 @@ pub enum NodeKind {
     LookAt { speaker: Option<i32> },
     /// Anything else: passes through output 0.
     Other,
+}
+
+fn default_group_kind() -> GroupKind {
+    GroupKind::StoryGroup
 }
 
 impl ConversationDb {
@@ -408,4 +534,6 @@ pub enum Target {
     Conversation { oneshot: Option<u32>, conversation: u32 },
     /// Enter a tree hook at one of its outputs (Kismet hook names / use / approach).
     Hook { oneshot: u32, hook: NodeId, output: usize },
+    /// Enter a hook of a tree that no one-shot owns (an NPC's generic dialog tree: barks).
+    TreeHook { tree: u32, hook: NodeId, output: usize },
 }

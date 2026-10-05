@@ -8,6 +8,7 @@
 //! Nothing read from the install is stored in the repository: subtitles, choices and VO
 //! stay in the player's own game files.
 
+pub mod hooks;
 pub mod model;
 pub mod runner;
 
@@ -17,4 +18,4 @@ pub mod load;
 pub mod vo;
 
 pub use model::{ConversationDb, NodeId, NodeKind, Target};
-pub use runner::{ConvEnv, ConvEvent, Runner, StartSpec};
+pub use runner::{ConvEnv, ConvEvent, EndReason, HookRequest, Runner, StartSpec};
