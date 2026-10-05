@@ -642,3 +642,5 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   - Tests for each decoded rule.
   - Harness expectations changed only where the original demands it (sprint 540, delayed Windblast).
 - **Confidence:** CONFIRMED for the formulas read in code. Mapping onto player-vs-player (Windblast momentum on players, parry stagger) is LIKELY or SPECULATIVE, as listed in UNKNOWNS U-047 to U-053.
+- **Addendum (lean):** `DishonoredCamera_Lean` (0x00AC5420, 0x00AC5950) swings the eye about a pivot `m_fLeanHeightPct x CollisionHeight x 2` (350 uu) below it, up to 15 deg (90.6 uu sideways, 11.9 down), on a spring (80 / 12) from DefaultCamera.ini. This replaces the speculative 40 uu slide. A ray stop against walls stands in for the lean camera collision.
+- **Harness:** sim 12/12, net 8/8, contracts (3 min) 16/16, mission 7/7, travel 8/8, conversation 17/17.
