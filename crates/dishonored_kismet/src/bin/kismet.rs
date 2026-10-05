@@ -216,6 +216,54 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Some("bwd") => {
+            // bwd PACKAGE EXPORT [DEPTH]: what leads to an op (incoming links, remote event
+            // senders, sequence entries, finish ops).
+            let db = db_for(&content, &[])?;
+            let id = db.find_export(&args[1], args[2].parse()?).ok_or_else(|| anyhow::anyhow!("no such op"))?;
+            let depth: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(8);
+            let mut incoming: std::collections::BTreeMap<OpId, Vec<(OpId, String)>> = Default::default();
+            for o in &db.ops {
+                for (i, l) in o.outputs.iter().enumerate() {
+                    for (t, ix) in &l.links {
+                        incoming.entry(*t).or_default().push((o.id, format!("{} {i} -> in {ix}", l.name)));
+                    }
+                }
+                if o.class == "SeqAct_ActivateRemoteEvent" {
+                    let n = o.props.str("EventName").to_ascii_lowercase();
+                    for e in db.ops.iter().filter(|e| e.class == "SeqEvent_RemoteEvent" && e.props.str("EventName").to_ascii_lowercase() == n) {
+                        incoming.entry(e.id).or_default().push((o.id, "remote".into()));
+                    }
+                }
+                if o.kind == Kind::Sequence {
+                    for l in &o.inputs {
+                        if let Some(e) = l.linked_op {
+                            incoming.entry(e).or_default().push((o.id, format!("sequence input {}", l.name)));
+                        }
+                    }
+                    for l in &o.outputs {
+                        if let Some(f) = l.linked_op {
+                            for (t, _) in &l.links {
+                                incoming.entry(*t).or_default().push((f, format!("finish {}", l.name)));
+                            }
+                        }
+                    }
+                }
+            }
+            fn walk(db: &KismetDb, inc: &std::collections::BTreeMap<OpId, Vec<(OpId, String)>>, o: OpId, d: usize, max: usize, seen: &mut std::collections::BTreeSet<OpId>) {
+                let op = db.op(o);
+                let extra: Vec<String> = op.props.0.iter().filter(|(k, _)| matches!(k.as_str(), "EventName" | "m_StoryFlagName" | "m_Tag" | "Originator" | "InputLabel" | "ConsoleEventName")).map(|(k, v)| format!("{k}={}", short(v))).collect();
+                println!("{}{} {} {} {}", "  ".repeat(d), db.describe(o), op.class, if op.comment.is_empty() { String::new() } else { format!("// {}", op.comment) }, extra.join(" "));
+                if d >= max || !seen.insert(o) {
+                    return;
+                }
+                for (src, via) in inc.get(&o).cloned().unwrap_or_default() {
+                    print!("{}  <- [{via}] ", "  ".repeat(d));
+                    walk(db, inc, src, d + 1, max, seen);
+                }
+            }
+            walk(&db, &incoming, id, 0, depth, &mut Default::default());
+        }
         Some("actors") => {
             let db = db_for(&content, &args[1..])?;
             for a in &db.actors {

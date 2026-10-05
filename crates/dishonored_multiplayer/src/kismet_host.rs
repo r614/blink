@@ -58,7 +58,6 @@ pub struct KismetSetup {
 /// Classes that only present something (camera, HUD, tutorials, saves, statistics, ambient
 /// audio, materials): run as no-ops, counted apart from the unsupported ones.
 pub const PRESENTATION: &[&str] = &[
-    "SeqAct_CameraFade",
     "SeqAct_ToggleCinematicMode",
     "SeqAct_ToggleHUD",
     "SeqAct_Log",
@@ -72,7 +71,6 @@ pub const PRESENTATION: &[&str] = &[
     "DisSeqAct_SetTutorialMessage",
     "DisSeqAct_SetCurrentChapter",
     "DisSeqAct_MissionStatsTracking",
-    "DisSeqAct_ShowMissionStats",
     "DisSeqAct_EvalAchievement",
     "DisSeqAct_ToggleAchievementEval",
     "DisSeqAct_IncrementPlayerStat",
@@ -136,6 +134,8 @@ pub struct HostState {
     pub matinees: Vec<(OpId, f32, f64, Option<f64>)>,
     /// Pawns killed (for NPCIncapacitated / death bookkeeping).
     pub dead: BTreeSet<PlayerId>,
+    /// `SeqAct_CameraFade` time left per op.
+    fades: BTreeMap<OpId, f32>,
 }
 
 pub struct KismetRun {
@@ -662,13 +662,45 @@ impl Host for H<'_> {
                 HostResult::Done
             }
             "DisSeqAct_AutoSave" => HostResult::Latent,
+            "SeqAct_CameraFade" => {
+                // Not drawn; its timing is kept: "Out" now, "Finished" after FadeTime.
+                *self.st.presentation.entry(class).or_insert(0) += 1;
+                cx.fire(0);
+                let t = cx.prop_float("FadeTime");
+                self.st.fades.insert(cx.op, t);
+                HostResult::Latent
+            }
+            "DisSeqAct_ShowMissionStats" => {
+                // The end-of-mission statistics screen: shown and closed at once (the player
+                // closes it in the original), so "Out" then "Closed".
+                *self.st.presentation.entry(class).or_insert(0) += 1;
+                self.note("mission statistics screen".into());
+                cx.fire(0);
+                cx.fire_name("Closed");
+                HostResult::Done
+            }
+            "SeqAct_WaitForLevelsVisible" => {
+                // Every level of a map is loaded and visible with it.
+                HostResult::Done
+            }
             _ => HostResult::Unhandled,
         }
     }
 
-    fn update(&mut self, cx: &mut Ctx, _dt: f32) -> bool {
+    fn update(&mut self, cx: &mut Ctx, dt: f32) -> bool {
         match cx.class() {
             "SeqAct_PrepareMapChange" => true,
+            "SeqAct_CameraFade" => {
+                let left = self.st.fades.get(&cx.op).copied().unwrap_or(0.0) - dt;
+                if left <= 0.0 {
+                    self.st.fades.remove(&cx.op);
+                    cx.fire(1);
+                    true
+                } else {
+                    self.st.fades.insert(cx.op, left);
+                    false
+                }
+            }
             "DisSeqAct_AutoSave" => {
                 // Saving is not available: the original's "saves disabled" path (output 1).
                 cx.fire(1);

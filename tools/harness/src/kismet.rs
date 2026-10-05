@@ -262,7 +262,100 @@ fn play(p: &mut Play, rep: &mut Report, db: &dishonored_kismet::KismetDb) -> Res
     let guilty: Vec<&str> = ["Esma", "Lydia", "Waverly"].into_iter().filter(|n| matches!(var(p.m(), "L_Boyle_Int_Script", &format!("{n} Guilty")), Some(dishonored_kismet::Value::Bool(true)))).collect();
     let dresses: Vec<String> = p.history().iter().filter(|h| h.contains("materials of pawn")).cloned().collect();
     rep.check(S, "the original random switches dress the three sisters and pick one guilty sister", ok && guilty.len() == 1 && dresses.len() >= 3, format!("guilty {guilty:?}; {}", dresses.join("; ")));
+    let Some(sister) = guilty.first().map(|s| s.to_string()) else { return Ok(()) };
+    // 5. The guilty sister's clue: the note for her dress that the Kismet placed in her bedroom.
+    let notes: Vec<(String, u32)> = ["Red", "White", "Black"].iter().filter_map(|c| match var(p.m(), "L_Boyle_Int_Script", &format!("{sister}{c}Note")) {
+        Some(dishonored_kismet::Value::Obj(Obj::Actor(a))) => Some((c.to_string(), a)),
+        _ => None,
+    }).collect();
+    let placed: Vec<(String, u32)> = notes.iter().filter(|(_, a)| p.m().kismet.as_ref().is_some_and(|k| k.st.actor_pos.contains_key(a))).cloned().collect();
+    let dress_task_before: Vec<String> = dress_tasks(p, &sister, TaskState::Active);
+    let mut picked = false;
+    if let Some((_, a)) = placed.first() {
+        picked = p.use_actor(*a);
+        p.idle(1.0);
+    }
+    let dress_task = dress_tasks(p, &sister, TaskState::Active);
+    let t22 = format!("{BA}.DishonoredTask_Custom_22");
+    rep.check(S, "picking up the guilty sister's clue note (placed by the original teleports) shows her dress task", picked && placed.len() == 1 && dress_task_before.is_empty() && dress_task.len() == 1, format!("notes placed {:?}; picked {picked}; active dress task {:?}; T22 {:?}", placed.iter().map(|(c, a)| format!("{sister} {c}: {}", db.actors[*a as usize].name)).collect::<Vec<_>>(), dress_task.iter().map(|t| p.task_text(t)).collect::<Vec<_>>(), p.task(&t22)));
+    // 6. The kill: the guilty sister, from behind with the sword.
+    let spawner = match sister.as_str() {
+        "Esma" => "L_Boyle_Int_Script:DishonoredSpawner_2",
+        "Lydia" => "L_Boyle_Int_Script:DishonoredSpawner_11",
+        _ => "L_Boyle_Int_Script:DishonoredSpawner_4",
+    };
+    let sa = actor(db, spawner)?;
+    let pawn = p.m().kismet.as_ref().and_then(|k| k.k.spawned.get(&sa).and_then(|v| v.first().copied()));
+    let mut killed = false;
+    if let Some(id) = pawn {
+        for i in 0..(40 * 60) {
+            let Some(t) = p.m().world.player(id).cloned() else { break };
+            if !t.alive {
+                killed = true;
+                break;
+            }
+            let back = Vec3::new(t.yaw.to_radians().cos(), t.yaw.to_radians().sin(), 0.0);
+            let spot = t.position - back * 60.0;
+            {
+                let me = p.mm().world.player_mut(AGENT).unwrap();
+                me.position = spot;
+                me.velocity = Vec3::ZERO;
+            }
+            let to = t.position - spot;
+            let input = PlayerInput { yaw: to.y.atan2(to.x).to_degrees(), pitch: -5.0, buttons: if i % 20 == 0 { buttons::PRIMARY } else { 0 }, ..Default::default() };
+            p.step(input);
+        }
+    }
+    p.idle(2.0);
+    let t6 = format!("{BA}.DishonoredTask_Custom_6");
+    let complete_flag = p.m().state.flag("Boyle_Return_To_Boat");
+    rep.check(S, "killing the identified guilty sister fires her attached SeqEvent_Death: elimination complete, T6 \"escape\" active", killed && complete_flag && p.task(&t6) == TaskState::Active, format!("{sister} (pawn {pawn:?}) killed {killed}; Boyle_Return_To_Boat {complete_flag}; dress task {:?}; T6 {:?} \"{}\"", dress_task.iter().map(|t| p.task(t)).collect::<Vec<_>>(), p.task(&t6), p.task_text(&t6)));
+    // 7. Out of the mansion through the ballroom door, then the street exit.
+    let door = actor(db, "L_Boyle_Int_P:DishonoredUsableObject_10")?;
+    p.idle(1.0);
+    let used = p.use_actor(door);
+    p.idle(0.2);
+    let opts = p.choose(0);
+    let ok = p.until(5.0, |m| m.current_map().eq_ignore_ascii_case("L_Boyle_Ext_P"));
+    rep.check(S, "the ballroom door's Kismet takes the agent back to the garden (exterior state restored)", used && ok, format!("choice {opts:?}; map {}", p.m().current_map()));
+    if !ok {
+        return Ok(());
+    }
+    p.idle(2.0);
+    let tv = actor(db, "L_BoyleStreet_Ext_Script:TriggerVolume_23")?;
+    p.enter(tv);
+    let t10 = format!("{BA}.DishonoredTask_Custom_10");
+    let ok = p.until(5.0, |m| m.state.task(&t10) == Some(TaskState::Active));
+    rep.check(S, "the canal path trigger (TriggerVolume_23) moves the objective to Samuel's new mooring (T10)", ok, format!("T6 {:?}, T10 {:?} \"{}\"", p.task(&t6), p.task(&t10), p.task_text(&t10)));
+    let mut ended = false;
+    let mut asked = Vec::new();
+    for t in ["L_BoyleStreet_Ext_Script:DisTrigger_35", "L_BoyleStreet_Ext_Script:DisTrigger_0", "L_BoyleStreet_Ext_Script:DisTrigger_34"] {
+        let a = actor(db, t)?;
+        p.enter(a);
+        // Samuel asks (a conversation choice): "let's go".
+        if p.until(30.0, |m| m.state.view.choice.is_some()) {
+            asked = p.choose(0);
+        }
+        if p.until(60.0, |m| m.state.outcome().is_some()) {
+            ended = true;
+            break;
+        }
+    }
+    let outcome = p.m().state.outcome().cloned();
+    let hist = p.history();
+    let path: Vec<String> = hist.iter().filter(|h| h.contains("prepare map change L_Pub") || h.contains("leaves the mission")).cloned().collect();
+    rep.check(S, "Samuel's boat: T10 completes, Lets_Go asks to leave, and the original level change out of Boyle (ChangeLvl_fromBoyle_toHub -> PrepareMapChange L_Pub_*) ends the mission", ended && outcome.as_ref().is_some_and(|o| o.success), format!("Samuel asks {asked:?}; outcome {outcome:?} at {:.1} s; {}; T10 {:?}; T5 {:?}", p.time(), path.join("; "), p.task(&t10), p.task(&format!("{BA}.DishonoredTask_Custom_5"))));
     Ok(())
+}
+
+/// Dress tasks of a sister (T13..T21) in a state.
+fn dress_tasks(p: &Play, sister: &str, s: TaskState) -> Vec<String> {
+    let first = match sister {
+        "Esma" => 13,
+        "Lydia" => 16,
+        _ => 19,
+    };
+    (first..first + 3).map(|n| format!("{BA}.DishonoredTask_Custom_{n}")).filter(|t| p.task(t) == s).collect()
 }
 
 fn coverage(p: &Play, rep: &mut Report, db: &dishonored_kismet::KismetDb) {
@@ -316,6 +409,25 @@ fn dump(p: &Play) {
     }
     println!("map {} players at {:?}", m.current_map(), m.world.player(AGENT).map(|p| p.position));
     println!("unhandled {:?}", k.k.coverage.unhandled);
+    println!("conversation errors {:?}", m.state.conv_errors);
+    for e in &m.state.conv_log {
+        match e {
+            dishonored_conversation::runner::ConvEvent::Line { .. } | dishonored_conversation::runner::ConvEvent::Flag { .. } => {}
+            other => println!("conv {other:?}"),
+        }
+    }
+    // KISMET_TRACE=Package:Export,... : activation counts and state of chosen ops.
+    if let Ok(t) = std::env::var("KISMET_TRACE") {
+        for item in t.split(',') {
+            let Some((pkg, e)) = item.split_once(':') else { continue };
+            let Some(id) = e.parse().ok().and_then(|e| k.k.db.find_export(pkg, e)) else { continue };
+            let rt = &k.k.ops[id as usize];
+            println!("trace {} {}: activations {} active {} trigger {} enabled {} props {:?}", k.k.db.describe(id), k.k.class(id), k.k.coverage.activations.get(&id).copied().unwrap_or(0), rt.active, rt.trigger_count, rt.enabled, rt.props.0);
+        }
+        for (s, o) in k.k.pending() {
+            println!("pending in {}: {} {}", k.k.db.describe(s), k.k.db.describe(o), k.k.class(o));
+        }
+    }
     println!("presentation {:?}", k.st.presentation);
     let _ = (Obj::None, 0 as OpId, buttons::USE, Vec3::ZERO, kismet_host::PRESENTATION);
 }
