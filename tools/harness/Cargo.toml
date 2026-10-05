@@ -17,3 +17,4 @@ dishonored_net.workspace = true
 dishonored_sim.workspace = true
 dishonored_world.workspace = true
 dishonored_ai.workspace = true
+dishonored_audio = { path = "../../crates/dishonored_audio" }

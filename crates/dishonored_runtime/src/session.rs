@@ -50,6 +50,8 @@ pub struct SessionView {
     pub respawn_in: Option<f32>,
     /// Contracts private info for the local player.
     pub target_info: Option<TargetInfo>,
+    /// Simulation events for audio presentation (see `crate::audio`).
+    pub audio_events: Vec<SimEvent>,
 }
 
 impl Session {
@@ -134,6 +136,7 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
                 }
             }
             let out = game.step(&inputs, world, sim);
+            view.audio_events.extend(out.events.iter().copied());
             for e in &out.events {
                 if let Some(s) = describe(e, game.view()) {
                     view.feed.push(s);
@@ -155,8 +158,14 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
         SessionKind::Online { client } => {
             client.poll(world, sim);
             client.send_input(input, world, sim);
+            if client.state == ConnState::Connected {
+                view.audio_events.extend(client.local_events.iter().copied());
+            }
             let me = client.player_id;
             for (_, e) in client.events.drain(..) {
+                if !crate::audio::predicted_locally(&e, me) {
+                    view.audio_events.push(e);
+                }
                 if let Some(s) = describe(&e, &client.matchv) {
                     view.feed.push(s);
                 }
@@ -179,6 +188,11 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
             view.respawn_in = None;
             view.target_info = client.target_info.clone();
         }
+    }
+    // Audio hook: events for crate::audio (drained there each frame; capped if audio is off).
+    let n = view.audio_events.len();
+    if n > 256 {
+        view.audio_events.drain(0..n - 256);
     }
     let n = view.feed.len();
     if n > 6 {

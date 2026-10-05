@@ -1,0 +1,11 @@
+[package]
+name = "dishonored_audio"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Wwise containers (AKPK, SoundBank, WEM) and Wwise Vorbis decoding, read from the install at runtime"
+
+[dependencies]
+anyhow.workspace = true
+lewton = "0.10"
+ue3_package.workspace = true

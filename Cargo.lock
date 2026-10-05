@@ -362,6 +362,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "audio_dump"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dishonored_assets",
+ "dishonored_audio",
+ "ue3_package",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2339,6 +2349,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dishonored_audio"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lewton",
+ "ue3_package",
+]
+
+[[package]]
 name = "dishonored_bots"
 version = "0.1.0"
 dependencies = [
@@ -2412,6 +2431,7 @@ dependencies = [
  "anyhow",
  "bevy",
  "dishonored_assets",
+ "dishonored_audio",
  "dishonored_bots",
  "dishonored_content",
  "dishonored_ir",
@@ -3048,6 +3068,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dishonored_ai",
+ "dishonored_audio",
  "dishonored_bots",
  "dishonored_content",
  "dishonored_multiplayer",

@@ -24,6 +24,7 @@ mod harness;
 mod hud;
 mod input_map;
 mod atmosphere;
+mod audio;
 mod lighting;
 mod map_render;
 mod players;
@@ -129,7 +130,7 @@ struct FreeCam {
 fn main() {
     let args = parse_args();
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+    let mut plugins = DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: format!("dishonored-rs - {}", args.map),
             resolution: args.size.into(),
@@ -137,7 +138,11 @@ fn main() {
             ..default()
         }),
         ..default()
-    }))
+    });
+    if !audio::AudioSettings::from_args().enabled {
+        plugins = plugins.disable::<bevy::audio::AudioPlugin>();
+    }
+    app.add_plugins(plugins)
     .add_plugins(FrameTimeDiagnosticsPlugin::default())
     .add_plugins(MaterialPlugin::<map_render::BakedMaterial>::default())
     .add_plugins(bevy::diagnostic::EntityCountDiagnosticsPlugin::default())
@@ -194,6 +199,7 @@ fn main() {
         if let Some(port) = args.control {
             app.insert_resource(harness::start_control_server(port));
         }
+        app.add_plugins(audio::GameAudioPlugin);
         app.insert_resource(session)
             .insert_resource(session::SessionView::default())
             .insert_resource(input_map::LocalInput { enabled: true, ..default() })

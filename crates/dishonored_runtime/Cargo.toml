@@ -17,6 +17,7 @@ dishonored_content.workspace = true
 dishonored_multiplayer.workspace = true
 dishonored_net.workspace = true
 dishonored_bots.workspace = true
+dishonored_audio = { path = "../dishonored_audio" }
 glam.workspace = true
 serde.workspace = true
 serde_json.workspace = true
