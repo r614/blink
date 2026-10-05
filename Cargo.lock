@@ -2376,6 +2376,7 @@ dependencies = [
  "dishonored_audio",
  "dishonored_conversation",
  "dishonored_ir",
+ "dishonored_kismet",
  "dishonored_mission",
  "dishonored_multiplayer",
  "dishonored_sim",
@@ -2401,6 +2402,18 @@ version = "0.1.0"
 dependencies = [
  "glam",
  "serde",
+]
+
+[[package]]
+name = "dishonored_kismet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dishonored_assets",
+ "dishonored_conversation",
+ "serde",
+ "serde_json",
+ "ue3_package",
 ]
 
 [[package]]
@@ -2430,6 +2443,7 @@ dependencies = [
  "dishonored_bots",
  "dishonored_conversation",
  "dishonored_ir",
+ "dishonored_kismet",
  "dishonored_mission",
  "dishonored_sim",
  "dishonored_world",
@@ -3113,6 +3127,7 @@ dependencies = [
  "dishonored_bots",
  "dishonored_content",
  "dishonored_conversation",
+ "dishonored_kismet",
  "dishonored_mission",
  "dishonored_multiplayer",
  "dishonored_net",

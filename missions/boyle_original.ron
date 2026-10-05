@@ -1,0 +1,30 @@
+// "Lady Boyle's Last Party", run by the original Kismet.
+//
+// Nothing of the mission logic is written here: the maps' own Kismet (L_Boyle_Ext_P and
+// L_Boyle_Int_P with all their sublevels) and the always-loaded global game sequence of
+// DishonoredGameFull_P run as data (crates/dishonored_kismet). Objectives and tasks are the
+// original DishonoredObjectives with their localized text, travel goes through the original
+// door Kismet and level changes, NPCs come from the original spawners, and the mission ends
+// on the original level change out of the Boyle maps.
+//
+// The mission starts the way the original enters it: the global sequence's
+// "ChangeLvl_fromHub_toBoyle" remote event (PrepareMapChange L_Boyle_Ext_P, travel
+// destination PlayerStart_SamuelDropOff, CommitMapChange).
+//
+// `flags_set` is the story state the original has when Boyle starts from the full game:
+// SF_Global_RealGameStarted gates the door chain's level change ("running inside the full
+// game"; its False branch is the standalone-map console command).
+// Check it with:  mission check missions/boyle_original.ron
+MissionDef(
+    title: "Lady Boyle's Last Party",
+    map: "L_Boyle_Ext_P",
+    maps: ["L_Boyle_Int_P"],
+    briefing: "The original mission, run by its own Kismet.",
+    objectives: [],
+    flags_set: ["SF_Global_RealGameStarted"],
+    original_npcs: ["L_Boyle_Ext_P", "L_Boyle_Int_P"],
+    // Dialog graphs of every Boyle script package (DialogInputs / DialogOutputs).
+    dialog_packages: ["L_BoyleStreet_Ext_Script", "L_Boyle_Ext_Script", "L_Boyle_Ext_P", "L_Boyle_Int_Script", "L_Boyle_Int_P"],
+    original_kismet: OriginalKismet(start_event: "ChangeLvl_fromHub_toBoyle", seed: 1),
+    settings: MissionSettings(respawn: true, respawn_delay: 3.0, time_limit: 0.0, high_chaos_kill_ratio: 0.2),
+)

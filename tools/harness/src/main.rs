@@ -28,6 +28,7 @@
 mod audio;
 mod contracts;
 mod conversation;
+mod kismet;
 mod mission;
 mod travel;
 mod fidelity;
@@ -75,6 +76,7 @@ fn main() -> Result<()> {
         "mission" => mission::run(&ctx, &mut rep)?,
         "travel" => travel::run(&ctx, &mut rep)?,
         "conversation" => conversation::run(&ctx, &mut rep)?,
+        "kismet" => kismet::run(&ctx, &mut rep)?,
         "launcher" => launcher::run(&ctx, &mut rep)?,
         "replay" => {
             let file = args.get(1).expect("replay file");
