@@ -12,6 +12,7 @@ dishonored_sim.workspace = true
 dishonored_world.workspace = true
 dishonored_ir.workspace = true
 dishonored_ai.workspace = true
+dishonored_mission.workspace = true
 
 [dev-dependencies]
 dishonored_bots.workspace = true

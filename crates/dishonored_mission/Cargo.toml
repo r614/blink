@@ -1,0 +1,12 @@
+[package]
+name = "dishonored_mission"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Custom mission framework: objectives/tasks, story flags, markers, NPCs and event rules (inspired by Arkane's Kismet objectives)"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+glam.workspace = true
+ron = "0.12"

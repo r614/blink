@@ -1,0 +1,33 @@
+// Mission file (RON). Guide: missions/README.md. Original-game background: research/dishonored/MISSIONS.md.
+// List original actors usable as markers with:  mission markers {MAP}
+MissionDef(
+    title: "{TITLE}",
+    map: "{MAP}",
+    briefing: "Describe the job here.",
+    objectives: [
+        ObjectiveDef(id: "main", description: "Eliminate the target", tasks: [
+            TaskDef(id: "find", description: "Find the target", initial: Active, target: Npc("target")),
+            TaskDef(id: "escape", description: "Escape", hidden: true, target: Marker("exit")),
+        ]),
+    ],
+    flags: ["target_dead"],
+    markers: [
+        MarkerDef(id: "start", at: Actor("PlayerStart_1")),
+        MarkerDef(id: "exit", at: Marker("start"), radius: 300.0),
+        MarkerDef(id: "target_spot", at: Offset(Marker("start"), (1200.0, 0.0, 0.0))),
+    ],
+    npcs: [
+        NpcDef(id: "target", kind: Civilian, archetype: 3, at: Marker("target_spot"), behavior: Wander, name: "The target"),
+    ],
+    player_start: "start",
+    crowd: CrowdDef(civilians: 12, guards: 3, radius: 3000.0),
+    rules: [
+        RuleDef(on: Start, then: [Message("{TITLE}"), Notify("Target", "A lady in a black mask")]),
+        RuleDef(on: NpcKilled("target"), then: [
+            SetFlag("target_dead"), SetTask("main.find", Completed), SetTask("main.escape", Active),
+            Message("Target eliminated. Get out."),
+        ]),
+        RuleDef(on: Enter("exit"), when: [Flag("target_dead")], then: [SetTask("main.escape", Completed), Complete("Mission complete")]),
+        RuleDef(on: AlarmRaised, then: [Message("The guards are alerted!")]),
+    ],
+)

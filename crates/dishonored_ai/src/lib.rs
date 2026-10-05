@@ -49,6 +49,12 @@ pub struct Brain {
     pub spot: Option<usize>,
     pub last_pos: Vec3,
     pub stuck: f32,
+    /// Mission control: hold position when idle instead of wandering.
+    #[serde(default)]
+    pub stay: bool,
+    /// Mission control: run (not walk) to `goal` in `WalkToPoint`.
+    #[serde(default)]
+    pub run: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -199,7 +205,7 @@ impl Crowd {
     }
 }
 
-fn snap_floor(world: &dyn WorldQuery, p: Vec3) -> Option<Vec3> {
+pub fn snap_floor(world: &dyn WorldQuery, p: Vec3) -> Option<Vec3> {
     let h = world.raycast(p + Vec3::Z * 120.0, -Vec3::Z, 400.0, channel::PAWN)?;
     (h.normal.z > 0.7).then(|| h.point + Vec3::Z * 90.0)
 }
@@ -211,7 +217,7 @@ fn criminal(p: &PlayerState) -> bool {
 
 impl Brain {
     pub fn new(id: PlayerId, kind: PawnKind, home: Vec3, seed: u64) -> Self {
-        Brain { id, kind, state: BrainState::Idle, rng: seed | 1, timer: 0.0, goal: None, home, route: Vec::new(), route_i: 0, threat_pos: None, target: None, spot: None, last_pos: home, stuck: 0.0 }
+        Brain { id, kind, state: BrainState::Idle, rng: seed | 1, timer: 0.0, goal: None, home, route: Vec::new(), route_i: 0, threat_pos: None, target: None, spot: None, last_pos: home, stuck: 0.0, stay: false, run: false }
     }
 
     fn sees(&self, me: &PlayerState, other: &PlayerState, world: &dyn WorldQuery, range: f32, fov_deg: f32) -> bool {
@@ -323,6 +329,9 @@ impl Brain {
         };
         match self.state {
             BrainState::Idle => {
+                if self.stay {
+                    return idle;
+                }
                 if self.timer > 3.0 + rng_next(&mut self.rng) * 6.0 {
                     self.timer = 0.0;
                     let r = rng_next(&mut self.rng);
@@ -342,7 +351,7 @@ impl Brain {
                 idle
             }
             BrainState::Wander | BrainState::WalkToPoint => match self.goal {
-                Some(g) if g.truncate().distance(me.position.truncate()) > 60.0 => self.walk_to(me, g, false),
+                Some(g) if g.truncate().distance(me.position.truncate()) > 60.0 => self.walk_to(me, g, self.run),
                 _ => {
                     self.goal = None;
                     self.timer = 0.0;

@@ -5,6 +5,7 @@
 pub mod contracts;
 pub mod ffa;
 pub mod game;
+pub mod mission;
 
 use dishonored_sim::state::PlayerId;
 use serde::{Deserialize, Serialize};
@@ -37,4 +38,7 @@ pub struct MatchView {
     pub scores: Vec<ScoreEntry>,
     pub winner: Option<PlayerId>,
     pub match_number: u32,
+    /// Mission mode: objectives, messages, outcome and stats.
+    #[serde(default)]
+    pub mission: Option<dishonored_mission::runtime::MissionView>,
 }

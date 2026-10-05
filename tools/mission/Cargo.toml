@@ -1,0 +1,11 @@
+[package]
+name = "mission"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Mission authoring tool: level markers, original objectives/Kismet for reference, scaffolding, validation, rule graphs"
+
+[dependencies]
+anyhow.workspace = true
+dishonored_assets.workspace = true
+dishonored_mission.workspace = true

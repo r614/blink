@@ -1,0 +1,100 @@
+// "The Masked Host" -- a custom mission on the Boyle estate exterior.
+// Structure borrowed from the original Boyle mission (identify the right masked lady,
+// optional stealth goals, escape), written with this repo's mission framework.
+// Check it with:  mission check missions/boyle_masked_host.ron
+MissionDef(
+    title: "The Masked Host",
+    map: "L_Boyle_Ext_P",
+    briefing: "One of three masked ladies at tonight's party is the host. Learn which, end her evening, and slip away.",
+
+    objectives: [
+        ObjectiveDef(id: "host", description: "Eliminate the masked host", tasks: [
+            TaskDef(id: "clue", description: "Find the informant near the stables", initial: Active, target: Marker("informant")),
+            TaskDef(id: "identify", description: "Identify which masked lady is the host", initial: Active),
+            TaskDef(id: "kill", description: "Eliminate the host", hidden: true, target: Npc("host")),
+            TaskDef(id: "escape", description: "Return to the balcony", hidden: true, target: Marker("exfil")),
+        ]),
+        ObjectiveDef(id: "style", description: "Professional conduct", tasks: [
+            TaskDef(id: "precise", description: "(Optional) Harm no other guest", initial: Active, optional: true),
+            TaskDef(id: "ghost", description: "(Optional) Remain undetected", initial: Active, optional: true),
+        ]),
+    ],
+
+    flags: ["know_host", "host_dead"],
+    counters: ["wrong_kills"],
+
+    markers: [
+        MarkerDef(id: "start", at: Actor("PlayerStart_1")),
+        MarkerDef(id: "exfil", at: Actor("L_BoyleStreet_Ext_Script:TargetPoint_56"), radius: 220.0),
+        MarkerDef(id: "informant", at: Actor("L_Boyle_Ext_Script:TargetPoint_52"), radius: 200.0),
+        MarkerDef(id: "bell", at: Actor("DisAlarmBell_1"), radius: 300.0),
+        MarkerDef(id: "post_a", at: Actor("DisGuardWatchPoint_5")),
+        MarkerDef(id: "post_b", at: Actor("DisGuardWatchPoint_3")),
+        MarkerDef(id: "post_c", at: Actor("DisGuardWatchPoint_4")),
+        MarkerDef(id: "barracks", at: Actor("DishonoredSpawner_7")),
+    ],
+
+    npcs: [
+        NpcDef(id: "host", kind: Civilian, archetype: 3, at: Actor("L_Boyle_Ext_Script:DishonoredSpawner_10"), behavior: Wander, name: "The host"),
+        NpcDef(id: "decoy_a", kind: Civilian, archetype: 3, at: Actor("DishonoredSpawner_30"), behavior: Wander, name: "A masked guest"),
+        NpcDef(id: "decoy_b", kind: Civilian, archetype: 3, at: Actor("L_Boyle_Ext_Script:DishonoredSpawner_6"), behavior: Wander, name: "A masked guest"),
+        NpcDef(id: "captain", kind: Guard, at: Marker("post_a"), behavior: Patrol(["post_a", "post_b", "post_c"]), name: "Captain of the watch"),
+        NpcDef(id: "reinforcement_a", kind: Guard, at: Marker("barracks"), spawn_at_start: false),
+        NpcDef(id: "reinforcement_b", kind: Guard, at: Offset(Marker("barracks"), (80.0, 60.0, 0.0)), spawn_at_start: false),
+    ],
+
+    player_start: "start",
+    crowd: CrowdDef(civilians: 18, guards: 3, center: Actor("L_Boyle_Ext_Script:DishonoredSpawner_10"), radius: 2500.0),
+    settings: MissionSettings(respawn: false, respawn_delay: 5.0, time_limit: 900.0, high_chaos_kill_ratio: 0.2),
+
+    rules: [
+        RuleDef(on: Start, then: [
+            Message("The Masked Host"),
+            Notify("Target", "A lady in a black mask. Two others wear the same."),
+        ]),
+
+        // The informant: learning who the host is reveals the kill task and its marker.
+        RuleDef(on: Enter("informant"), then: [
+            SetFlag("know_host"),
+            SetTask("host.clue", Completed),
+            SetTask("host.identify", Completed),
+            SetTask("host.kill", Active),
+            Notify("The host", "She keeps close to the alarm bell and never stays still for long."),
+            Message("New mission clue"),
+        ]),
+        // A hint if the player wanders for a while without the clue.
+        RuleDef(on: Timer(90.0), when: [NotFlag("know_host")], then: [Message("Someone near the stables knows more about the host.")]),
+
+        RuleDef(on: NpcKilled("host"), then: [
+            SetFlag("host_dead"),
+            SetTask("host.identify", Completed),
+            SetTask("host.kill", Completed),
+            SetTask("host.clue", Completed),
+            SetTask("host.escape", Active),
+            Message("The host is dead. Get out."),
+        ]),
+
+        // Wrong guests.
+        RuleDef(id: "decoy_a_down", on: NpcKilled("decoy_a"), then: [Add("wrong_kills", 1)]),
+        RuleDef(id: "decoy_b_down", on: NpcKilled("decoy_b"), then: [Add("wrong_kills", 1)]),
+        RuleDef(on: CounterAtLeast("wrong_kills", 1), when: [NotFlag("host_dead")], then: [Message("That was not the host.")]),
+        RuleDef(on: AnyKill, when: [Not(Task("host.kill", Completed))], then: [SetTask("style.precise", Failed)]),
+        RuleDef(on: TaskState("host.kill", Completed), when: [Task("style.precise", Active), CounterBelow("wrong_kills", 1)], then: [SetTask("style.precise", Completed)]),
+
+        // Detection and the alarm: reinforcements come out of the barracks.
+        RuleDef(on: PlayerDetected, then: [SetTask("style.ghost", Failed)]),
+        RuleDef(on: AlarmRaised, then: [
+            Message("The watch has been alerted!"),
+            After(4.0, [Spawn("reinforcement_a"), Spawn("reinforcement_b"), Alert("reinforcement_a"), Alert("reinforcement_b")]),
+        ]),
+        // The host flees when she notices trouble near her.
+        RuleDef(on: NpcAlerted("host"), when: [NotFlag("host_dead")], then: [Message("The host is fleeing!")]),
+
+        // Extraction.
+        RuleDef(on: Enter("exfil"), when: [Flag("host_dead")], then: [
+            SetTask("host.escape", Completed),
+            Complete("The host's party is over."),
+        ]),
+        RuleDef(on: Enter("exfil"), when: [Flag("host_dead"), Not(Detected)], then: [SetTask("style.ghost", Completed)], once: true),
+    ],
+)

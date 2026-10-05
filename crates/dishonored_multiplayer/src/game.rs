@@ -17,11 +17,13 @@ use serde::{Deserialize, Serialize};
 pub enum GameSetup {
     Ffa { rules: FfaRules, spawns: Vec<SpawnPoint> },
     Contracts { rules: ContractsRules, spawns: Vec<(Vec3, f32)>, crowd: Option<Crowd> },
+    Mission(Box<crate::mission::MissionSetup>),
 }
 
 pub enum Game {
     Ffa(FfaMatch),
     Contracts(Box<ContractsMatch>),
+    Mission(Box<crate::mission::MissionMatch>),
 }
 
 /// Original AI points + guard spawns used to build a crowd.
@@ -43,6 +45,7 @@ impl GameSetup {
         match self {
             GameSetup::Ffa { rules, spawns } => Game::Ffa(FfaMatch::new(rules.clone(), spawns.clone())),
             GameSetup::Contracts { rules, spawns, crowd } => Game::Contracts(Box::new(ContractsMatch::new(rules.clone(), spawns.clone(), crowd.clone(), cfg))),
+            GameSetup::Mission(s) => Game::Mission(Box::new(crate::mission::MissionMatch::new((**s).clone(), cfg))),
         }
     }
 
@@ -50,6 +53,7 @@ impl GameSetup {
         match self {
             GameSetup::Ffa { rules, .. } => rules.max_players,
             GameSetup::Contracts { rules, .. } => rules.max_players,
+            GameSetup::Mission(_) => 8,
         }
     }
 }
@@ -64,54 +68,63 @@ impl Game {
                 }
             }
             Game::Contracts(m) => m.add_player(id, name, archetype, world, cfg),
+            Game::Mission(m) => m.add_player(id, name, archetype, cfg),
         }
     }
     pub fn remove_player(&mut self, id: PlayerId) {
         match self {
             Game::Ffa(m) => m.remove_player(id),
             Game::Contracts(m) => m.remove_player(id),
+            Game::Mission(m) => m.remove_player(id),
         }
     }
     pub fn step(&mut self, inputs: &[(PlayerId, PlayerInput)], world: &dyn WorldQuery, cfg: &SimConfig) -> StepOutput {
         match self {
             Game::Ffa(m) => m.step(inputs, world, cfg),
             Game::Contracts(m) => m.step(inputs, world, cfg),
+            Game::Mission(m) => m.step(inputs, world, cfg),
         }
     }
     pub fn world(&self) -> &WorldState {
         match self {
             Game::Ffa(m) => &m.world,
             Game::Contracts(m) => &m.world,
+            Game::Mission(m) => &m.world,
         }
     }
     pub fn world_mut(&mut self) -> &mut WorldState {
         match self {
             Game::Ffa(m) => &mut m.world,
             Game::Contracts(m) => &mut m.world,
+            Game::Mission(m) => &mut m.world,
         }
     }
     pub fn view(&self) -> &MatchView {
         match self {
             Game::Ffa(m) => &m.view,
             Game::Contracts(m) => &m.view,
+            Game::Mission(m) => &m.view,
         }
     }
     pub fn target_info(&self, id: PlayerId) -> Option<TargetInfo> {
         match self {
             Game::Ffa(_) => None,
             Game::Contracts(m) => Some(m.target_info(id)),
+            Game::Mission(_) => None,
         }
     }
     pub fn respawn_time_left(&self, id: PlayerId) -> Option<f32> {
         match self {
             Game::Ffa(m) => m.respawn_time_left(id),
             Game::Contracts(_) => None,
+            Game::Mission(m) => m.respawn_time_left(id),
         }
     }
     pub fn last_events(&self) -> &[SimEvent] {
         match self {
             Game::Ffa(_) => &[],
             Game::Contracts(m) => &m.last_events,
+            Game::Mission(m) => &m.last_events,
         }
     }
 }

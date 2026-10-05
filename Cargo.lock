@@ -2397,12 +2397,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "dishonored_mission"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glam",
+ "ron",
+ "serde",
+]
+
+[[package]]
 name = "dishonored_multiplayer"
 version = "0.1.0"
 dependencies = [
  "dishonored_ai",
  "dishonored_bots",
  "dishonored_ir",
+ "dishonored_mission",
  "dishonored_sim",
  "dishonored_world",
  "glam",
@@ -3667,6 +3678,15 @@ checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
 dependencies = [
  "adler2",
  "simd-adler32",
+]
+
+[[package]]
+name = "mission"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dishonored_assets",
+ "dishonored_mission",
 ]
 
 [[package]]

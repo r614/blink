@@ -38,10 +38,25 @@ pub struct AiPoint {
     pub kind: PointKind,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LevelMarker {
+    /// Actor name within its level, e.g. `TargetPoint_5`.
+    pub name: String,
+    pub class: String,
+    /// Package the actor lives in.
+    pub package: String,
+    pub position: Vec3,
+    pub yaw: f32,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NpcData {
     pub spawns: Vec<NpcSpawnPoint>,
     pub points: Vec<AiPoint>,
+    /// Named level actors usable as mission markers (target points, spawners, nav points,
+    /// player starts, triggers, flee points), in world space.
+    #[serde(default)]
+    pub markers: Vec<LevelMarker>,
 }
 
 pub fn role_from_tweak(t: &str) -> NpcRole {
@@ -69,12 +84,17 @@ pub fn extract_npc_data(content: &Content, packages: &[String]) -> Result<NpcDat
             }
             let class = pkg.export_class(i);
             let interesting = matches!(class.as_str(), "DishonoredSpawner" | "DisTravelSpawner" | "DishonoredNavPoint" | "TargetPoint" | "DisGuardWatchPoint");
-            if !interesting {
+            let marker = interesting || matches!(class.as_str(), "PlayerStart" | "DisTrigger" | "Trigger" | "TriggerVolume" | "DisFleePointActor" | "Note" | "DisAlarmBell");
+            if !marker {
                 continue;
             }
             let Ok(h) = pkg.read_object(i) else { continue };
             let pos = find(&h.properties, "Location").and_then(|p| p.as_vector()).map(Vec3::from).unwrap_or(Vec3::ZERO);
             let yaw = find(&h.properties, "Rotation").and_then(|p| p.as_rotator()).map(|r| r[1] as f32 * 360.0 / 65536.0).unwrap_or(0.0);
+            out.markers.push(LevelMarker { name: pkg.obj_name(ObjRef::Export(i)).to_string(), class: class.to_string(), package: name.clone(), position: pos, yaw });
+            if !interesting {
+                continue;
+            }
             match class.as_str() {
                 "DishonoredSpawner" | "DisTravelSpawner" => {
                     let tweak = match find(&h.properties, "m_pPawnTweaks").map(|p| &p.value) {

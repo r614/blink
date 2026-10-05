@@ -23,6 +23,7 @@ dishonored_content = { path = "crates/dishonored_content" }
 dishonored_multiplayer = { path = "crates/dishonored_multiplayer" }
 dishonored_bots = { path = "crates/dishonored_bots" }
 dishonored_ai = { path = "crates/dishonored_ai" }
+dishonored_mission = { path = "crates/dishonored_mission" }
 
 [profile.dev]
 opt-level = 1
