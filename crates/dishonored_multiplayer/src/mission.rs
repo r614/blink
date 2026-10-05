@@ -81,6 +81,8 @@ pub struct MapInput<'a> {
     pub doors: Vec<TravelDoor>,
     pub ai_points: &'a [(Vec3, f32)],
     pub guard_spawns: &'a [(Vec3, f32)],
+    /// `DishonoredRoute` patrol routes.
+    pub routes: &'a [dishonored_ir::ai::PatrolRoute],
     pub world: &'a dyn WorldQuery,
     /// The map's original spawners.
     pub spawners: &'a [dishonored_ir::spawners::Spawner],
@@ -108,6 +110,9 @@ pub struct MissionSetup {
     /// `DisFleePointActor` positions per map (lowercase name), on the floor.
     #[serde(default)]
     pub flee: BTreeMap<String, Vec<Vec3>>,
+    /// `DishonoredRoute` patrol routes per map (lowercase name), as each map's crowd uses them.
+    #[serde(default)]
+    pub routes: BTreeMap<String, Vec<dishonored_ir::ai::PatrolRoute>>,
     /// Original spawners of the maps listed in `MissionDef::original_npcs`.
     #[serde(default)]
     pub original: Vec<OriginalNpc>,
@@ -215,7 +220,11 @@ impl MissionSetup {
                     None => (starts.first().map(|s| s.0).unwrap_or(Vec3::ZERO), maps.iter().position(|m| m.name == start_map).unwrap_or(0)),
                 };
                 let cfg = CrowdConfig { civilians: c.civilians, guards: c.guards, center, radius: c.radius, seed: 7, civilian_archetypes: vec![0, 2, 3], guard_archetypes: vec![1] };
-                (Some(Crowd::populate(&cfg, maps[mi].ai_points, maps[mi].guard_spawns, maps[mi].world)), maps[mi].name.clone())
+                {
+                    let mut crowd = Crowd::populate(&cfg, maps[mi].ai_points, maps[mi].guard_spawns, maps[mi].world);
+                    crowd.set_routes(maps[mi].routes, maps[mi].world);
+                    (Some(crowd), maps[mi].name.clone())
+                }
             }
             None => (None, start_map.clone()),
         };
@@ -259,7 +268,15 @@ impl MissionSetup {
                 }
             }
         }
-        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances })
+        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances, routes: maps
+                .iter()
+                .map(|m| {
+                    // Snapped to the floor as `Crowd::set_routes` does for the crowd's map.
+                    let mut c = Crowd::default();
+                    c.set_routes(m.routes, m.world);
+                    (m.name.to_ascii_lowercase(), c.routes)
+                })
+                .collect() })
     }
 }
 
@@ -372,6 +389,10 @@ impl MissionMatch {
             }
         }
         self.crowd.layout.flee_points = self.setup.flee.get(&self.current_map.to_ascii_lowercase()).cloned().unwrap_or_default();
+        // The map's own patrol routes (the crowd of the start map already has them).
+        if self.crowd.routes.is_empty() {
+            self.crowd.routes = self.setup.routes.get(&self.current_map.to_ascii_lowercase()).cloned().unwrap_or_default();
+        }
         // Original spawners that spawn on begin play (not alarm squads or travel pursuers).
         for i in 0..self.setup.original.len() {
             let o = &self.setup.original[i];
@@ -550,9 +571,9 @@ impl MissionMatch {
     /// Level travel (see module docs). Runs between steps' simulation and next think.
     fn travel(&mut self, dest_map: &str, tag: &str, cfg: &SimConfig) {
         let Some((_, _, pos, yaw)) = self.setup.tagged_starts.iter().find(|t| t.0.eq_ignore_ascii_case(dest_map) && t.1.eq_ignore_ascii_case(tag)).cloned() else { return };
-        // Guards investigating, searching or fighting a player: the AI is at least "suspecting",
+        // A guard at `DAISL_Suspecting` or above (or investigating, searching or fighting):
         // so `DisTravelSpawner`s at the arrival tag send pursuers through the door.
-        let pursued = self.crowd.brains.iter().any(|b| b.kind == PawnKind::Guard && matches!(b.state, BrainState::Investigate | BrainState::Search | BrainState::Combat) && b.target.is_some_and(|t| self.humans.contains(&t)));
+        let pursued = self.crowd.brains.iter().any(|b| b.kind == PawnKind::Guard && (b.suspicion_level() >= 1 || matches!(b.state, BrainState::Investigate | BrainState::Search | BrainState::Combat)));
         if !dest_map.eq_ignore_ascii_case(&self.current_map) {
             // Save the level being left.
             let humans = self.humans.clone();
@@ -566,7 +587,8 @@ impl MissionMatch {
             match self.saved.remove(&self.current_map.to_ascii_lowercase()) {
                 Some(ls) => {
                     self.world.players.extend(ls.npcs);
-                    self.crowd = Crowd { brains: ls.brains, layout: ls.layout, spawns: ls.spawns, ai: self.crowd.ai.clone(), ..Default::default() };
+                    let routes = self.setup.routes.get(&self.current_map.to_ascii_lowercase()).cloned().unwrap_or_default();
+                    self.crowd = Crowd { brains: ls.brains, layout: ls.layout, spawns: ls.spawns, ai: self.crowd.ai.clone(), routes, ..Default::default() };
                 }
                 None => self.populate_fresh(cfg),
             }

@@ -199,9 +199,15 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     let ids: Vec<u32> = originals.iter().filter(|o| o.props.travel_tags.iter().any(|x| x.eq_ignore_ascii_case(&door_in.dest_tag))).map(|o| o.spawn.id).collect();
     let present: Vec<&dishonored_sim::state::PlayerState> = g.world().players.iter().filter(|p| ids.contains(&p.id) && p.alive).collect();
     let hunting = match &g {
-        Game::Mission(m) => m.crowd.brains.iter().filter(|b| ids.contains(&b.id) && b.target == Some(AGENT)).count(),
+        // Hunting: suspecting and fighting, searching or investigating (the target may be lost
+        // when they spawn facing away, see U-055).
+        Game::Mission(m) => m.crowd.brains.iter().filter(|b| ids.contains(&b.id) && b.suspicion_level() >= 1 && matches!(b.state, dishonored_ai::BrainState::Combat | dishonored_ai::BrainState::Search | dishonored_ai::BrainState::Investigate)).count(),
         _ => 0,
     };
-    rep.check(S, "pursued through the door: the arrival tag's DisTravelSpawner guards follow, hunting the player", t.map.eq_ignore_ascii_case(INT) && present.len() == ids.len() && !ids.is_empty() && hunting > 0, format!("guard #{hunter} hunting on Ext; on {}: {}/{} pursuers present, {hunting} targeting the agent", t.map, present.len(), ids.len()));
+    let states: Vec<String> = match &g {
+        Game::Mission(m) => m.crowd.brains.iter().filter(|b| ids.contains(&b.id)).map(|b| format!("{:?}/{:?}/s{}", b.state, b.target, b.suspicion_level())).collect(),
+        _ => Vec::new(),
+    };
+    rep.check(S, "pursued through the door: the arrival tag's DisTravelSpawner guards follow, suspecting and hunting", t.map.eq_ignore_ascii_case(INT) && present.len() == ids.len() && !ids.is_empty() && hunting == ids.len(), format!("guard #{hunter} hunting on Ext; on {}: {}/{} pursuers present, {hunting} hunting; brains {states:?}", t.map, present.len(), ids.len()));
     Ok(())
 }

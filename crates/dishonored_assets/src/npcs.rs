@@ -62,6 +62,46 @@ pub struct NpcData {
     /// player starts, triggers, flee points), in world space.
     #[serde(default)]
     pub markers: Vec<LevelMarker>,
+    /// `DishonoredRoute`s (patrol routes of `DishonoredNavPoint`s) in world space.
+    #[serde(default)]
+    pub routes: Vec<dishonored_ir::ai::PatrolRoute>,
+}
+
+/// A `DishonoredRoute`: `RouteList` (native `ActorReference` array: object index + GUID),
+/// `RouteType` (`ERouteType`, class default `ERT_Circle`), `m_Capacity` (default -1); each
+/// point's `m_fGuardDuration` / `m_bGuardForever`.
+fn read_route(pkg: &ue3_package::Package, props: &[ue3_package::properties::Property], name: String) -> dishonored_ir::ai::PatrolRoute {
+    use dishonored_ir::ai::{PatrolRoute, RoutePoint};
+    let kind = match find(props, "RouteType").map(|p| &p.value) {
+        Some(Value::Enum(e)) | Some(Value::Name(e)) => match e.as_str() {
+            "ERT_Linear" => 0,
+            "ERT_PingPong" => 1,
+            _ => 2,
+        },
+        Some(Value::Byte(b)) => *b,
+        _ => 2,
+    };
+    let capacity = match find(props, "m_Capacity").map(|p| &p.value) {
+        Some(Value::Int(c)) => *c,
+        _ => -1,
+    };
+    let mut points = Vec::new();
+    if let Some((n, raw)) = find(props, "RouteList").and_then(|p| p.array_raw()) {
+        let stride = if n > 0 { raw.len() / n } else { 0 };
+        for k in 0..n {
+            let Some(b) = raw.get(k * stride..k * stride + 4) else { break };
+            let r = i32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            let ObjRef::Export(i) = ObjRef::from_index(r) else { continue };
+            let Ok(h) = pkg.read_object(i) else { continue };
+            let Some(pos) = find(&h.properties, "Location").and_then(|p| p.as_vector()) else { continue };
+            points.push(RoutePoint {
+                position: Vec3::from(pos),
+                guard_duration: find(&h.properties, "m_fGuardDuration").and_then(|p| p.as_float()).unwrap_or(0.0),
+                guard_forever: matches!(find(&h.properties, "m_bGuardForever").map(|p| &p.value), Some(Value::Bool(true))),
+            });
+        }
+    }
+    PatrolRoute { name, kind, capacity, points }
 }
 
 pub fn role_from_tweak(t: &str) -> NpcRole {
@@ -90,6 +130,15 @@ pub fn extract_npc_data(content: &Content, packages: &[String]) -> Result<NpcDat
                 continue;
             }
             let class = pkg.export_class(i);
+            if class == "DishonoredRoute" {
+                if let Ok(h) = pkg.read_object(i) {
+                    let r = read_route(&pkg, &h.properties, format!("{name}:{}", pkg.obj_name(ObjRef::Export(i))));
+                    if !r.points.is_empty() {
+                        out.routes.push(r);
+                    }
+                }
+                continue;
+            }
             let interesting = matches!(class.as_str(), "DishonoredSpawner" | "DisTravelSpawner" | "DishonoredNavPoint" | "TargetPoint" | "DisGuardWatchPoint");
             let marker = interesting || matches!(class.as_str(), "PlayerStart" | "DisTrigger" | "Trigger" | "TriggerVolume" | "DisFleePointActor" | "Note" | "DisAlarmBell");
             if !marker {

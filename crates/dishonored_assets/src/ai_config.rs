@@ -6,7 +6,7 @@
 use crate::content::Content;
 use crate::ini::Ini;
 use crate::tweaks::{TMap, TVal, TweakDb, get_f32};
-use dishonored_ir::ai::{AiConfig, AttentionConfig, AttentionIncrease};
+use dishonored_ir::ai::{AiConfig, AttentionConfig, AttentionIncrease, MeleeContextConfig, VisTuning};
 
 /// Attention profiles: (field, tweak object). The civilian profiles are cooked into level
 /// script packages (`L_Boyle_Ext_Script`); without them their fallback (the guard profile)
@@ -58,9 +58,35 @@ fn attention(m: &TMap, d: &AttentionConfig) -> AttentionConfig {
         Some(TVal::Struct(s)) => get_f32(s, "m_fBaseValue2_Normal").unwrap_or(d.seeing_scalar_player),
         _ => d.seeing_scalar_player,
     };
-    let distance_points = match crate::tweaks::get(m, "m_DistanceValueTuning.m_Points") {
-        Some(TVal::List(pts)) => pts.iter().map(|p| [get_f32(p, "m_fInputValue").unwrap_or(0.0), get_f32(p, "m_fOutputValue").unwrap_or(0.0)]).collect(),
-        _ => d.distance_points.clone(),
+    let distance_tuning = match m.get("m_DistanceValueTuning") {
+        Some(TVal::Struct(s)) => tuning(s, &d.distance_tuning),
+        _ => d.distance_tuning.clone(),
+    };
+    let mut stopping_variance = d.stopping_variance;
+    for (i, v) in stopping_variance.iter_mut().enumerate() {
+        let key = if i == 0 { "m_AttentionThresholds".to_string() } else { format!("m_AttentionThresholds[{i}]") };
+        if let Some(TVal::Struct(s)) = m.get(&key) {
+            *v = get_f32(s, "m_fStoppingVariance").unwrap_or(0.0);
+        }
+    }
+    // `m_ReasonSettings[i].m_bCanIncreaseToBusted` (struct default false).
+    let mut can_bust = 0u32;
+    let mut any_reason = false;
+    for i in 0..21 {
+        let key = if i == 0 { "m_ReasonSettings".to_string() } else { format!("m_ReasonSettings[{i}]") };
+        if let Some(TVal::Struct(s)) = m.get(&key) {
+            any_reason = true;
+            if matches!(s.get("m_bCanIncreaseToBusted"), Some(TVal::B(true))) {
+                can_bust |= 1 << i;
+            }
+        }
+    }
+    if !any_reason {
+        can_bust = d.can_bust;
+    }
+    let clamp_target_visibility = match m.get("m_bClampTargetVisibility") {
+        Some(TVal::B(b)) => *b,
+        _ => d.clamp_target_visibility,
     };
     AttentionConfig {
         leak_rate: f("m_fAttentionLeakRate", d.leak_rate),
@@ -83,7 +109,34 @@ fn attention(m: &TMap, d: &AttentionConfig) -> AttentionConfig {
         seeing_scalar_player,
         seeing_scalar_npc: f("m_fSeeingPawnAttentionIncreaseScalar_ToLiveNPC", d.seeing_scalar_npc),
         distance_to_lose_sight: f("m_fDistanceToLoseSight", d.distance_to_lose_sight),
-        distance_points,
+        distance_tuning,
+        clamp_target_visibility,
+        stopping_variance,
+        can_bust,
+        seeing_scalar_dead_npc: f("m_fSeeingPawnAttentionIncreaseScalar_ToDeadNPC", d.seeing_scalar_dead_npc),
+        min_range_unsighted_busted_proxy: f("m_fMinRangeToUnsightedBustedProxy", d.min_range_unsighted_busted_proxy),
+    }
+}
+
+/// A `DisVisCalcTuningParams` struct.
+fn tuning(s: &TMap, d: &VisTuning) -> VisTuning {
+    let points = match s.get("m_Points") {
+        Some(TVal::List(pts)) => pts.iter().map(|p| [get_f32(p, "m_fInputValue").unwrap_or(0.0), get_f32(p, "m_fOutputValue").unwrap_or(0.0)]).collect(),
+        _ => d.points.clone(),
+    };
+    VisTuning {
+        multiply: match s.get("m_ApplyOp") {
+            Some(TVal::Name(n)) => n == "DVCTPAO_Multiply",
+            _ => d.multiply,
+        },
+        scalar: get_f32(s, "m_fScalar").unwrap_or(d.scalar),
+        bias: get_f32(s, "m_fBias").unwrap_or(d.bias),
+        exponent: get_f32(s, "m_fExponent").unwrap_or(d.exponent),
+        use_points: match s.get("m_bUsePointsInsteadOfFormula") {
+            Some(TVal::B(b)) => *b,
+            _ => d.use_points,
+        },
+        points,
     }
 }
 
@@ -173,8 +226,74 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
         out.combat.reachable_melee_height = get_f32(&m, "m_fReachableMeleeHeight").unwrap_or(out.combat.reachable_melee_height);
         prov.insert("ai.combat.reachable_melee".into(), "guard brain tweak m_fReachableMelee{Range,Height}".into());
     }
+    // Player visibility (`DishonoredVisibilityComponent` tuning).
+    if let Some(m) = beh("Twk_PlayerVisibility.Twk_PlayerVisibility") {
+        let pv = &mut out.player_visibility;
+        if let Some(TVal::Struct(s)) = m.get("m_LightValueTuning") {
+            pv.light = tuning(s, &pv.light);
+        }
+        if let Some(TVal::Struct(s)) = m.get("m_SpeedValueTuning") {
+            pv.speed = tuning(s, &pv.speed);
+        }
+        // Unset bonuses keep the class default 0.
+        let b = |k: &str| get_f32(&m, k).unwrap_or(0.0);
+        pv.bonus_autocrouching = b("m_fVisLevelBonus_Autocrouching");
+        pv.bonus_sneaking = b("m_fVisLevelBonus_Sneaking");
+        pv.bonus_sliding = b("m_fVisLevelBonus_Sliding");
+        pv.bonus_standing = b("m_fVisLevelBonus_Standing");
+        pv.bonus_walking = b("m_fVisLevelBonus_Walking");
+        pv.bonus_sprinting = b("m_fVisLevelBonus_Sprinting");
+        pv.bonus_swimming = b("m_fVisLevelBonus_Swimming");
+        pv.zero_speed_sneaking = matches!(m.get("m_bForceZeroSpeedWhileSneaking"), Some(TVal::B(true)));
+        prov.insert("ai.player_visibility".into(), "Twk_PlayerVisibility.Twk_PlayerVisibility".into());
+    }
+    if let Some(m) = beh("Twk_GlobalPlayerVisSettings.Twk_GlobalPlayerVisSettings") {
+        out.player_visibility.light_darkest = get_f32(&m, "m_fLightValueDarkestVal").unwrap_or(out.player_visibility.light_darkest);
+        out.player_visibility.light_brightest = get_f32(&m, "m_fLightValueBrightestVal").unwrap_or(out.player_visibility.light_brightest);
+    }
     // INIs.
     let ai = Ini::load_layered(&content.root, "AI");
+    if let Some(v) = ai.get_f32("DishonoredGame.DishonoredGlobalAIManager", "m_fGroupDistance") {
+        out.group_distance = v;
+        prov.insert("ai.group_distance".into(), "DefaultAI.ini [DishonoredGame.DishonoredGlobalAIManager] m_fGroupDistance".into());
+    }
+    // Melee contexts: the elite guard attack pattern's cooldowns (cooked into the level script
+    // packages; without them the defaults hold the same values) and the combat manager's
+    // inhibition times.
+    let path = "AI_AttackPatterns_Shared.TwkAttackPattern_BerserkerElite";
+    if let Some(m) = beh(path) {
+        if let Some(TVal::List(items)) = m.get("m_ItemContextOverrides") {
+            let inhibit = |class: &str| -> f32 {
+                let key = match class {
+                    "DisItemContext_NPCAttackShort" => "m_fInhibitionTimeShortAttack",
+                    "DisItemContext_NPCAttackMedium" => "m_fInhibitionTimeMediumAttack",
+                    "DisItemContext_NPCAttackStepBack" => "m_fInhibitionTimeStepBackAttack",
+                    _ => return 0.0,
+                };
+                ai.get_f32("DishonoredGame.DisGlobalCombatManager", key).unwrap_or(0.0)
+            };
+            let mut ctx = Vec::new();
+            // Pattern order is the tweak's; the shared pawn only has the short sword swings.
+            for it in items {
+                let class = match it.get("m_pContextToOverride") {
+                    Some(TVal::Obj(o)) => o.rsplit('.').next().unwrap_or(o).to_string(),
+                    _ => continue,
+                };
+                if !matches!(it.get("m_bContextEnabled"), Some(TVal::B(true))) || inhibit(&class) == 0.0 {
+                    continue;
+                }
+                let cd = match it.get("m_ContextCooldown") {
+                    Some(TVal::Struct(s)) => [get_f32(s, "m_fMinValue").unwrap_or(0.0), get_f32(s, "m_fMaxValue").unwrap_or(0.0)],
+                    _ => [0.0, 0.0],
+                };
+                ctx.push(MeleeContextConfig { inhibition: inhibit(&class), name: class, cooldown: cd });
+            }
+            if !ctx.is_empty() {
+                out.combat.melee_contexts = ctx;
+                prov.insert("ai.combat.melee_contexts".into(), format!("{path}.m_ItemContextOverrides + DefaultAI.ini m_fInhibitionTime*"));
+            }
+        }
+    }
     if let Some(v) = ai.sections.get("DishonoredGame.DisAINoiseManager").and_then(|s| s.get("m_LoudnessDistanceArray")) {
         let d: Vec<f32> = v.iter().filter_map(|x| x.parse().ok()).collect();
         if !d.is_empty() {

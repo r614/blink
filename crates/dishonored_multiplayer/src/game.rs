@@ -32,6 +32,8 @@ pub struct CrowdSource<'a> {
     pub guard_spawns: &'a [(Vec3, f32)],
     /// `DisFleePointActor` positions (civilian panic destinations).
     pub flee_points: &'a [Vec3],
+    /// `DishonoredRoute` patrol routes.
+    pub routes: &'a [dishonored_ir::ai::PatrolRoute],
 }
 
 impl GameSetup {
@@ -40,6 +42,7 @@ impl GameSetup {
             (Some(cfg), Some(src)) => {
                 let mut c = Crowd::populate(cfg, src.points, src.guard_spawns, world);
                 c.set_flee_points(src.flee_points, world);
+                c.set_routes(src.routes, world);
                 Some(c)
             }
             _ => None,

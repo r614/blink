@@ -25,7 +25,7 @@ const S: &str = "Phase II: Contracts (social stealth)";
 fn setup(mc: &MatchContent, time_limit: f32) -> GameSetup {
     let pts: Vec<(glam::Vec3, f32)> = mc.spawns.iter().map(|s| (s.position, s.yaw)).collect();
     let rules = ContractsRules { warmup_time: 2.0, time_limit, crowd: Some(default_crowd(crowd_center(&pts))), ..Default::default() };
-    GameSetup::contracts(rules, pts, Some(CrowdSource { points: &mc.ai_points, guard_spawns: &mc.guard_spawns, flee_points: &mc.flee_points }), &mc.collision)
+    GameSetup::contracts(rules, pts, Some(CrowdSource { points: &mc.ai_points, guard_spawns: &mc.guard_spawns, flee_points: &mc.flee_points, routes: &mc.routes }), &mc.collision)
 }
 
 struct Stats {

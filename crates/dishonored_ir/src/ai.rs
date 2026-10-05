@@ -15,12 +15,12 @@ pub const DAL_BUSTED: u8 = 4;
 /// `DALFI_MaxAttention` (only as an increase target).
 pub const DALFI_MAX_ATTENTION: u8 = 5;
 
-/// `DisTweaks_PawnAttention.DisAttentionIncrease`: raise attention by `amount`, but not past
-/// the start threshold of `to_level` (`EDisAttentionLevelForIncrease`: 0 None, 1 HeadTrack,
-/// 2 TurnToFace, 3 Investigate, 4 Busted, 5 MaxAttention). The struct default is
-/// `amount = 0` (read from the `DisAttentionIncrease` ScriptStruct defaults); with no amount
-/// the attention is raised straight to that threshold (LIKELY: otherwise `AttackedBy` would
-/// do nothing).
+/// `DisTweaks_PawnAttention.DisAttentionIncrease`: add `amount`, then raise the attention to
+/// at least the start threshold of `to_level` (`EDisAttentionLevelForIncrease`: 0 None,
+/// 1 HeadTrack, 2 TurnToFace, 3 Investigate, 4 Busted, 5 MaxAttention). CONFIRMED in the
+/// pending-change pass of `DisAttentionInfo_Complex` (0x00b60ca0): the amount is accumulated
+/// first, then the value is floored at the threshold, so an increase with no amount (the
+/// struct default 0) sets the attention straight to its threshold.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
 pub struct AttentionIncrease {
     pub amount: f32,
@@ -54,8 +54,213 @@ pub struct AttentionConfig {
     pub seeing_scalar_player: f32,
     pub seeing_scalar_npc: f32,
     pub distance_to_lose_sight: f32,
-    /// `m_DistanceValueTuning` points (input, output), applied with `DVCTPAO_Add`.
-    pub distance_points: Vec<[f32; 2]>,
+    /// `m_DistanceValueTuning`: maps `1 - normalized vision distance` to the seen value; the
+    /// target's `Attribute_Visibility` is its operand (`DVCTPAO_Add`).
+    #[serde(default = "VisTuning::guard_distance")]
+    pub distance_tuning: VisTuning,
+    /// `m_bClampTargetVisibility`: clamp the seen value to [0, 1] before the scalar.
+    #[serde(default = "yes")]
+    pub clamp_target_visibility: bool,
+    /// `m_AttentionThresholds[i].m_fStoppingVariance`: each brain rolls its stop thresholds
+    /// once as `stop + uniform(-variance, variance)`.
+    #[serde(default = "guard_variance")]
+    pub stopping_variance: [f32; 4],
+    /// `m_ReasonSettings[EDisAttentionChangeReasonType].m_bCanIncreaseToBusted`, one bit per
+    /// reason (`DACRT_*`).
+    #[serde(default = "guard_can_bust")]
+    pub can_bust: u32,
+    /// `m_fSeeingPawnAttentionIncreaseScalar_ToDeadNPC`.
+    #[serde(default = "ten")]
+    pub seeing_scalar_dead_npc: f32,
+    /// `m_fMinRangeToUnsightedBustedProxy`: an unsighted target cannot stay Busted once the
+    /// NPC is this close to the proxy while the target is farther from it.
+    #[serde(default = "min_range_unsighted")]
+    pub min_range_unsighted_busted_proxy: f32,
+}
+
+fn yes() -> bool {
+    true
+}
+fn ten() -> f32 {
+    10.0
+}
+fn min_range_unsighted() -> f32 {
+    250.0
+}
+fn guard_variance() -> [f32; 4] {
+    [0.025; 4]
+}
+/// Reasons allowed to raise attention to Busted in the guard and neutral profiles:
+/// HeardHelpRequest (6), SeeAllyCombat (10), TalkedTo (12), Magic (13), HideOutTransition
+/// (14), AttackedBy (16), AttackedEnemy (17), Touched (18), Seen (19), Psychic (20).
+fn guard_can_bust() -> u32 {
+    [6u32, 10, 12, 13, 14, 16, 17, 18, 19, 20].iter().fold(0, |m, b| m | (1 << b))
+}
+
+/// `EDisAttentionChangeReasonType` (DisAttentionDefs).
+pub mod reason {
+    pub const DRAIN: u8 = 0;
+    pub const FOUND_CORPSE: u8 = 1;
+    pub const HEARD_DEATH: u8 = 2;
+    pub const ALARM: u8 = 3;
+    pub const HEARD_NOTICE_REQUEST: u8 = 4;
+    pub const HEARD_SEARCH_REQUEST: u8 = 5;
+    pub const HEARD_HELP_REQUEST: u8 = 6;
+    pub const HEARD: u8 = 7;
+    pub const SAW_DEATH: u8 = 8;
+    pub const SEE_ALLY_SEARCH: u8 = 9;
+    pub const SEE_ALLY_COMBAT: u8 = 10;
+    pub const SEE_ALLY_PANIC: u8 = 11;
+    pub const TALKED_TO: u8 = 12;
+    pub const MAGIC: u8 = 13;
+    pub const HIDEOUT_TRANSITION: u8 = 14;
+    pub const ATTACKED_BY_INDIRECT: u8 = 15;
+    pub const ATTACKED_BY: u8 = 16;
+    pub const ATTACKED_ENEMY: u8 = 17;
+    pub const TOUCHED: u8 = 18;
+    pub const SEEN: u8 = 19;
+    pub const PSYCHIC: u8 = 20;
+}
+
+/// `DisVisCalcTuningParams` (DisAttentionDefs): a curve or a formula of an input in [0, 1],
+/// combined with an operand. Native evaluation at 0x00b0b350: with `use_points` the
+/// piecewise-linear curve (clamped to the first/last output), otherwise
+/// `(x^exponent + bias) * scalar`; then `+ operand` (`DVCTPAO_Add`) or `* operand`
+/// (`DVCTPAO_Multiply`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VisTuning {
+    pub multiply: bool,
+    pub scalar: f32,
+    pub bias: f32,
+    pub exponent: f32,
+    pub use_points: bool,
+    pub points: Vec<[f32; 2]>,
+}
+
+impl VisTuning {
+    /// `m_DistanceValueTuning` of the guard and neutral attention profiles.
+    pub fn guard_distance() -> Self {
+        VisTuning { multiply: false, scalar: 3.0, bias: 0.0, exponent: 4.0, use_points: true, points: vec![[0.55, 0.0], [0.875, 0.8], [0.93, 2.0]] }
+    }
+
+    /// Plain formula `x * scalar`, added to the operand (`Twk_PlayerVisibility` light and
+    /// speed tunings).
+    pub fn linear_add(scalar: f32) -> Self {
+        VisTuning { multiply: false, scalar, bias: 0.0, exponent: 1.0, use_points: false, points: Vec::new() }
+    }
+
+    pub fn value(&self, x: f32) -> f32 {
+        if !self.use_points {
+            return (x.powf(self.exponent) + self.bias) * self.scalar;
+        }
+        let p = &self.points;
+        match p.len() {
+            0 => 0.0,
+            _ if x <= p[0][0] => p[0][1],
+            n if x >= p[n - 1][0] => p[n - 1][1],
+            _ => {
+                for w in p.windows(2) {
+                    if x >= w[0][0] && x <= w[1][0] {
+                        let span = w[1][0] - w[0][0];
+                        if span == 0.0 {
+                            return (w[0][1] + w[1][1]) * 0.5;
+                        }
+                        return (x - w[0][0]) / span * (w[1][1] - w[0][1]) + w[0][1];
+                    }
+                }
+                0.0
+            }
+        }
+    }
+
+    pub fn apply(&self, x: f32, operand: f32) -> f32 {
+        let v = self.value(x);
+        if self.multiply { v * operand } else { v + operand }
+    }
+}
+
+/// `Twk_PlayerVisibility` (`DisTweaks_PlayerVisibility`): how the player's
+/// `Attribute_Visibility` is built by `DishonoredVisibilityComponent` (0x00ad1590): the light
+/// tuning of the normalized light value is the operand of the speed tuning of the speed value
+/// (one modifier), plus the stance bonus (a second modifier).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlayerVisibilityConfig {
+    pub light: VisTuning,
+    pub speed: VisTuning,
+    pub bonus_autocrouching: f32,
+    pub bonus_sneaking: f32,
+    pub bonus_sliding: f32,
+    pub bonus_standing: f32,
+    pub bonus_walking: f32,
+    pub bonus_sprinting: f32,
+    pub bonus_swimming: f32,
+    /// `m_bForceZeroSpeedWhileSneaking`.
+    pub zero_speed_sneaking: bool,
+    /// `Twk_GlobalPlayerVisSettings.m_fLightValue{Darkest,Brightest}Val`.
+    pub light_darkest: f32,
+    pub light_brightest: f32,
+}
+
+impl Default for PlayerVisibilityConfig {
+    fn default() -> Self {
+        PlayerVisibilityConfig {
+            light: VisTuning::linear_add(0.1),
+            speed: VisTuning::linear_add(0.25),
+            bonus_autocrouching: -1.0,
+            bonus_sneaking: 0.0,
+            bonus_sliding: 0.0,
+            bonus_standing: 0.0,
+            bonus_walking: 0.0,
+            bonus_sprinting: 0.0,
+            bonus_swimming: -1.0,
+            zero_speed_sneaking: true,
+            light_darkest: 0.05,
+            light_brightest: 1.0,
+        }
+    }
+}
+
+/// One melee attack context of an attack pattern (`DisTweaks_AIAttackPattern
+/// .m_ItemContextOverrides`) with the matching `DisGlobalCombatManager.m_fInhibitionTime*`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MeleeContextConfig {
+    pub name: String,
+    /// Per-NPC cooldown after use (`m_ContextCooldown`, seconds).
+    pub cooldown: [f32; 2],
+    /// After any NPC uses it on a target, other NPCs may not use the same attack class on that
+    /// target for this long (`m_NPCAttackHistory*` with `m_fInhibitionTime*`).
+    pub inhibition: f32,
+}
+
+/// Elite guard melee contexts (`TwkAttackPattern_BerserkerElite`, Short/StepBack/Medium; the
+/// jump and long attacks need animations the shared pawn does not have).
+pub fn default_melee_contexts() -> Vec<MeleeContextConfig> {
+    vec![
+        MeleeContextConfig { name: "DisItemContext_NPCAttackShort".into(), cooldown: [1.0, 3.0], inhibition: 2.0 },
+        MeleeContextConfig { name: "DisItemContext_NPCAttackStepBack".into(), cooldown: [0.5, 2.0], inhibition: 1.0 },
+        MeleeContextConfig { name: "DisItemContext_NPCAttackMedium".into(), cooldown: [3.0, 5.0], inhibition: 1.0 },
+    ]
+}
+
+/// A `DishonoredRoute` (an engine `Route` of `DishonoredNavPoint`s) used by `DisBehaviorPatrol`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PatrolRoute {
+    pub name: String,
+    /// `ERouteType`: 0 Linear (once, then adopt another route), 1 Loop (back and forth),
+    /// 2 Circle (wrap; the `DishonoredRoute` default).
+    pub kind: u8,
+    /// `m_Capacity` (-1 = unlimited).
+    pub capacity: i32,
+    pub points: Vec<RoutePoint>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RoutePoint {
+    pub position: glam::Vec3,
+    /// `DishonoredNavPoint.m_fGuardDuration` (0 = walk past).
+    pub guard_duration: f32,
+    /// `m_bGuardForever`.
+    pub guard_forever: bool,
 }
 
 /// `DisTweaks_Vision`: two view cones.
@@ -110,6 +315,9 @@ pub struct CombatAiConfig {
     /// `DisGlobalCombatManager` skirmish caps (Normal): melee attackers per target / total.
     pub skirmish_inner: u32,
     pub skirmish_total: u32,
+    /// Melee attack contexts in pattern order with cooldowns and group inhibition.
+    #[serde(default = "default_melee_contexts")]
+    pub melee_contexts: Vec<MeleeContextConfig>,
 }
 
 /// NPC perception and behaviour tuning.
@@ -142,7 +350,18 @@ pub struct AiConfig {
     pub auto_glance_radius: f32,
     pub auto_look_radius: f32,
     pub glance_time: f32,
+    /// How the player's `Attribute_Visibility` is built (light, speed, stance).
+    #[serde(default)]
+    pub player_visibility: PlayerVisibilityConfig,
+    /// `DishonoredGlobalAIManager.m_fGroupDistance` (DefaultAI.ini): range of the group
+    /// stimuli such as `EAIStimID_AllyBusted`.
+    #[serde(default = "group_distance")]
+    pub group_distance: f32,
     pub provenance: BTreeMap<String, String>,
+}
+
+fn group_distance() -> f32 {
+    1000.0
 }
 
 fn inc(amount: f32, to_level: u8) -> AttentionIncrease {
@@ -174,7 +393,12 @@ impl AttentionConfig {
             seeing_scalar_player: 1.0,
             seeing_scalar_npc: 10.0,
             distance_to_lose_sight: 300.0,
-            distance_points: vec![[0.55, 0.0], [0.875, 0.8], [0.93, 2.0]],
+            distance_tuning: VisTuning::guard_distance(),
+            clamp_target_visibility: true,
+            stopping_variance: guard_variance(),
+            can_bust: guard_can_bust(),
+            seeing_scalar_dead_npc: 10.0,
+            min_range_unsighted_busted_proxy: 250.0,
         }
     }
 
@@ -213,8 +437,15 @@ impl AttentionConfig {
             ally_combat_target: inc(1.0, 3),
             ally_panic_target: inc(0.0, 2),
             ally_search_target: inc(0.0, 2),
+            // Thresholds are its own (fallback skip), so their variance is the struct default 0.
+            stopping_variance: [0.0; 4],
             ..Self::guard_unsuspecting()
         }
+    }
+
+    /// May a change of this reason (`reason::*`) raise attention to Busted?
+    pub fn reason_can_bust(&self, reason: u8) -> bool {
+        self.can_bust & (1 << reason) != 0
     }
 
     /// Start threshold of an increase target level (`to_level` 5 = max attention).
@@ -240,9 +471,30 @@ impl Default for AiConfig {
             neutral: AttentionConfig::neutral(),
             loudness_distances: vec![0.0, 200.0, 300.0, 400.0, 500.0, 600.0, 800.0, 1000.0, 1200.0, 1500.0, 2000.0, 2500.0, 3000.0, 4000.0, 5000.0, 6000.0, 0.0],
             reaction_delay: [0.18, 0.3],
-            search: SearchConfig { crumbs: 25, crumb_spacing: 800.0, crumb_lifetime: 150.0, heartbeat: 0.8, wander_min: 500.0, wander_max: 1000.0, wander_angle_deg: 60.0, cancel_investigate_wait: [0.5, 1.0], proximity: 250.0, reached_broadcast_range: 2000.0, stationary_duration: [2.0, 3.0] },
+            search: SearchConfig {
+                crumbs: 25,
+                crumb_spacing: 800.0,
+                crumb_lifetime: 150.0,
+                heartbeat: 0.8,
+                wander_min: 500.0,
+                wander_max: 1000.0,
+                wander_angle_deg: 60.0,
+                cancel_investigate_wait: [0.5, 1.0],
+                proximity: 250.0,
+                reached_broadcast_range: 2000.0,
+                stationary_duration: [2.0, 3.0],
+            },
             panic: PanicConfig { cower_distance: 350.0, flee_point_claim_radius: 500.0, flee_interception_distance: 300.0, free_flight_time: 2.0, forbidden_angle_deg: 50.0, forbidden_radius: 500.0 },
-            combat: CombatAiConfig { reachable_melee_range: 150.0, reachable_melee_height: 150.0, aim_time_before_shooting: 0.75, gun_usage_start: [0.0, 0.5], gun_usage_cooldown: [1.0, 2.0], skirmish_inner: 2, skirmish_total: 3 },
+            combat: CombatAiConfig {
+                reachable_melee_range: 150.0,
+                reachable_melee_height: 150.0,
+                aim_time_before_shooting: 0.75,
+                gun_usage_start: [0.0, 0.5],
+                gun_usage_cooldown: [1.0, 2.0],
+                skirmish_inner: 2,
+                skirmish_total: 3,
+                melee_contexts: default_melee_contexts(),
+            },
             guard_attention_span: 3.0,
             alarm_companion_range: 2000.0,
             alarm_fight_radius: 500.0,
@@ -251,6 +503,8 @@ impl Default for AiConfig {
             auto_glance_radius: 1000.0,
             auto_look_radius: 400.0,
             glance_time: 2.5,
+            player_visibility: PlayerVisibilityConfig::default(),
+            group_distance: 1000.0,
             provenance: BTreeMap::new(),
         }
     }
