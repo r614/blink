@@ -231,9 +231,11 @@ pub fn place_trap(state: &mut WorldState, owner: PlayerId, world: &dyn WorldQuer
             }
         }
     };
+    let bonus = crate::powers::attribute(&p, cfg, "Attribute_SpringRazorRadiusBonus", 0.0);
+    let radius_scale = if bonus > 1.0 { bonus } else { 1.0 };
     let id = state.next_entity_id;
     state.next_entity_id = state.next_entity_id.wrapping_add(1);
-    state.traps.push(TrapState { id, owner, position: pos, normal, arming: cfg.items.gadgets.springrazor.arming_time, detonation: 0.0, damage_timer: 0.0, triggered: false, detonated: false, emitted: false });
+    state.traps.push(TrapState { id, owner, position: pos, normal, arming: cfg.items.gadgets.springrazor.arming_time, detonation: 0.0, damage_timer: 0.0, triggered: false, detonated: false, emitted: false, radius_scale });
     events.push(SimEvent::TrapPlaced { id: owner, trap: id, position: pos });
 }
 
@@ -269,7 +271,7 @@ pub fn step_traps(state: &mut WorldState, world: &dyn WorldQuery, cfg: &Gameplay
                 }
                 let hh = half_height(v, mv) * 0.5;
                 let pts = [v.position, v.position + Vec3::Z * hh, v.position - Vec3::Z * hh];
-                let hit = pts.iter().any(|p| in_cylinder(t.position, t.normal, rc.detection_radius, rc.detection_height, *p) && world.raycast(sensor, *p - sensor, (*p - sensor).length(), channel::PROJECTILE).is_none_or(|h| h.distance >= (*p - sensor).length() - mv.collision_radius));
+                let hit = pts.iter().any(|p| in_cylinder(t.position, t.normal, rc.detection_radius * t.radius_scale, rc.detection_height, *p) && world.raycast(sensor, *p - sensor, (*p - sensor).length(), channel::PROJECTILE).is_none_or(|h| h.distance >= (*p - sensor).length() - mv.collision_radius));
                 if hit {
                     t.triggered = true;
                     t.detonation = rc.trigger_reaction_time;
@@ -302,7 +304,7 @@ pub fn step_traps(state: &mut WorldState, world: &dyn WorldQuery, cfg: &Gameplay
                 }
                 let hh = half_height(v, mv) * 0.5;
                 let pts = [v.position, v.position + Vec3::Z * hh, v.position - Vec3::Z * hh];
-                let inside = pts.iter().any(|p| in_cylinder(t.position, t.normal, rc.detonation_radius, rc.detonation_height, *p) && p.distance(t.position) <= rc.max_damage_distance && world.raycast(sensor, *p - sensor, (*p - sensor).length(), channel::PROJECTILE).is_none_or(|h| h.distance >= (*p - sensor).length() - mv.collision_radius));
+                let inside = pts.iter().any(|p| in_cylinder(t.position, t.normal, rc.detonation_radius * t.radius_scale, rc.detonation_height, *p) && p.distance(t.position) <= rc.max_damage_distance && world.raycast(sensor, *p - sensor, (*p - sensor).length(), channel::PROJECTILE).is_none_or(|h| h.distance >= (*p - sensor).length() - mv.collision_radius));
                 if !inside {
                     continue;
                 }

@@ -348,6 +348,24 @@ fn shadow_kill_turns_a_stealth_kill_to_ash() {
 }
 
 #[test]
+fn workshop_upgrades_raise_capacity_and_make_darts_instant() {
+    let mut r = Run::new(&[(Vec3::new(800.0, 0.0, Z), 180.0)]);
+    let cfg = r.cfg.gameplay.clone();
+    assert!(!cfg.items.upgrades.is_empty());
+    // Grenade Belt: `Attribute_GrenadeCapacity` +4.
+    assert!(powers::give_upgrade(r.pm(1), "GrenadeBelt", &cfg));
+    assert_eq!(inventory::capacity(r.p(1), AmmoType::Grenade, &cfg), 9);
+    // Instant Sleep: `Attribute_SleepDelayReduction` 1000 removes `m_fTimeBeforeSleep`.
+    assert!(powers::give_upgrade(r.pm(1), "InstantSleepArrow", &cfg));
+    r.pm(1).inv.ammo[AmmoType::SleepDart as usize] = 1;
+    let aim = |b| PlayerInput { buttons: b, left_hand: LeftHand::SleepDart, ..Default::default() };
+    r.steps(40, &[(1, aim(0))]);
+    r.step(&[(1, aim(buttons::SECONDARY))]);
+    r.steps(10, &[(1, aim(0))]);
+    assert_eq!(r.p(100).condition, Condition::Unconscious);
+}
+
+#[test]
 fn melee_reach_grows_with_forward_speed() {
     let c = cfg();
     let mut p = dishonored_sim::state::PlayerState::new(1, Vec3::ZERO, 0.0);

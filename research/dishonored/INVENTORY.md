@@ -13,7 +13,7 @@ as elsewhere: CONFIRMED, LIKELY, SPECULATIVE. Movement, Blink, Windblast, parry 
 
 `dishonored_assets::items_config` reads everything into `GameplayConfig::items`
 (`dishonored_ir::items`), with each value's source in the provenance; the cache file is
-`gameplay_config.v4.json`.
+`gameplay_config.v5.json`.
 
 | What | Source | Values (Normal difficulty) |
 |---|---|---|
@@ -32,6 +32,7 @@ as elsewhere: CONFIRMED, LIKELY, SPECULATIVE. Movement, Blink, Windblast, parry 
 | Bone charms | `Twk_Pawn_Corvo_Release.pCharmListTweaks` `m_Charms` (29), `m_MaxActivatedBoneCharmCount` 3 | attribute + value per charm (Strong Arms ChokeTime -1.5, Undertaker carry speed +38, Swift Shadow sneak speed +100, ...) |
 | Spring Razor | `Twk_Inv_SpringRazor.Twk_Inv_SpringRazorPlaced` | arming 0.5 s, detection and detonation cylinders 250 x 250, trigger reaction 0, damage reaction 0.75, damage delay 0.35, non-NPC damage 5, immune-NPC damage 50 |
 | Grenades | `Twk_Proj_Grenade` / `Twk_Proj_StickyGrenade` + their `DisTweaks_GrenadeComponent` and `DisTweaks_Explosion`, `DisTweaks_ThrowGrenade` | thrown at 2500 uu/s raised 5 deg; detonation 0.5 s after impact; 50 damage inside 300 uu falling to 0 at 600 (players 150 / 600); attached (sticky) +75 |
+| Workshop upgrades | `DisTweaks_Upgrade` (`Twk_Upgrades.*`) `m_Attributes` | Ammo Pouch / Quiver +10 bullets / bolts, Grenade Belt +4 grenades and sticky grenades, Spring Razor Pouch +4, Spring Razor radius x2, Instant Sleep (`SleepDelayReduction` 1000), pistol magazine / reload speed, crossbow range / reload / accuracy, armour 5, silent running. The sim applies them as attribute additions (capacities, sleep delay, razor radius); the others are carried for the HUD |
 | Melee reach | DefaultPlayer.ini `m_fMinSpeedRayScale` 400, `m_fRaySpeedScale` 0.005, `m_fRaySpeedScale_Max` 1.5 | see PLAYER.md |
 
 Placed pickups: `dishonored_assets::pickups::extract_pickups` (tool `pickup_dump`, cache

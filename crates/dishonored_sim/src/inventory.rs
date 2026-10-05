@@ -37,7 +37,7 @@ pub fn ammo(p: &PlayerState, t: AmmoType) -> u16 {
 
 /// `AddAmmo` (0x00C052E0): adds what fits under the capacity, returns the amount added.
 pub fn add_ammo(p: &mut PlayerState, t: AmmoType, n: u16, cfg: &GameplayConfig) -> u16 {
-    let cap = cfg.items.inventory.ammo_capacity[t as usize];
+    let cap = capacity(p, t, cfg);
     let added = n.min(cap.saturating_sub(ammo(p, t)));
     match t {
         AmmoType::Bullet => p.left.pistol_reserve += added,
@@ -45,6 +45,12 @@ pub fn add_ammo(p: &mut PlayerState, t: AmmoType, n: u16, cfg: &GameplayConfig) 
         _ => p.inv.ammo[t as usize] += added,
     }
     added
+}
+
+/// Capacity of an ammo type: `Attribute_*Capacity` with upgrades (Ammo Pouch, Grenade Belt, ...)
+/// and charms (0x00B56880 copies the attribute into `m_AmmoCapacity`).
+pub fn capacity(p: &PlayerState, t: AmmoType, cfg: &GameplayConfig) -> u16 {
+    attribute(p, cfg, t.capacity_attribute(), cfg.items.inventory.ammo_capacity[t as usize] as f32).max(0.0) as u16
 }
 
 /// `RemoveAmmo` (0x00C05260): all or nothing.
@@ -158,7 +164,7 @@ pub fn can_take(p: &PlayerState, pk: &PickupState, cfg: &GameplayConfig) -> bool
     match &pk.kind {
         PickupKind::Elixir(k) => p.inv.elixirs[*k as usize] < max_elixirs(cfg, *k),
         PickupKind::Stat { health, mana, .. } => {
-            *health != 0 || *mana != 0 || AmmoType::ALL.iter().any(|t| pk.ammo_left[*t as usize] > 0 && ammo(p, *t) < cfg.items.inventory.ammo_capacity[*t as usize])
+            *health != 0 || *mana != 0 || AmmoType::ALL.iter().any(|t| pk.ammo_left[*t as usize] > 0 && ammo(p, *t) < capacity(p, *t, cfg))
         }
         PickupKind::Abstract { item, .. } => !item.is_empty(),
         PickupKind::BoneCharm(_) => true,

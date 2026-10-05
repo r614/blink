@@ -272,7 +272,10 @@ pub fn step_world(
         left_hand::step_windblasts(state, world, mv, &cfg.gameplay.vitals, &cfg.tuning, world_dt, &mut out.events);
     }
     if proj_dt > 0.0 {
-        left_hand::step_projectiles(state, world, mv, &cfg.tuning, &cfg.gameplay.vitals, mv.gravity_z, proj_dt, &mut out.events);
+        // `m_fTimeBeforeSleep` less the owner's `Attribute_SleepDelayReduction` (Instant Sleep upgrade, LIKELY).
+        let delays: Vec<(PlayerId, f32)> = state.players.iter().map(|p| (p.id, (takedown::SLEEP_DELAY - powers::attribute(p, g, "Attribute_SleepDelayReduction", 0.0)).max(0.0))).collect();
+        let sleep_delay = |id: u32| delays.iter().find(|d| d.0 == id).map_or(takedown::SLEEP_DELAY, |d| d.1);
+        left_hand::step_projectiles(state, world, mv, &cfg.tuning, &cfg.gameplay.vitals, mv.gravity_z, proj_dt, &sleep_delay, &mut out.events);
         gadgets::step_grenades(state, world, g, proj_dt, &mut out.events);
     }
     if world_dt > 0.0 {

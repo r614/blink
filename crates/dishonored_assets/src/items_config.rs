@@ -290,6 +290,25 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
     }
     l.prov.insert("items.active_rune_costs".into(), "m_RuneCosts of each power tweak".into());
 
+    // --- upgrades (Twk_Upgrades) ---
+    for path in l.db.paths_with_class("DisTweaks_Upgrade") {
+        if path.starts_with("Default__") {
+            continue;
+        }
+        let m = l.obj(&path);
+        let mut attrs = Vec::new();
+        if let Some(TVal::List(list)) = m.get("m_Attributes") {
+            for a in list {
+                if let Some(TVal::Name(n)) = a.get("m_AttributeName") {
+                    attrs.push((n.clone(), get_f32(a, "m_fValue").unwrap_or(0.0)));
+                }
+            }
+        }
+        let name = path.rsplit('.').next().unwrap_or(&path).trim_start_matches("Twk_Upgrade_").to_string();
+        cfg.upgrades.push((name, attrs));
+    }
+    l.prov.insert("items.upgrades".into(), format!("DisTweaks_Upgrade objects ({}) :: m_Attributes", cfg.upgrades.len()));
+
     // --- bone charms ---
     if let Some(TVal::Obj(list)) = get(&corvo, "m_pCharmListTweaks") {
         let m = l.obj(list);

@@ -431,6 +431,7 @@ pub fn step_projectiles(
     vitals: &dishonored_ir::gameplay::VitalsConfig,
     gravity_z: f32,
     dt: f32,
+    sleep_delay: &dyn Fn(u32) -> f32,
     events: &mut Vec<SimEvent>,
 ) {
     let mut keep = Vec::with_capacity(state.projectiles.len());
@@ -477,7 +478,7 @@ pub fn step_projectiles(
                 if pr.kind == ProjectileKind::SleepDart {
                     events.push(SimEvent::ProjectileImpact { projectile: pr.id, point, victim: Some(v.id) });
                     if v.kind != PawnKind::Human && v.condition == crate::state::Condition::Normal && v.sleep_timer <= 0.0 {
-                        v.sleep_timer = crate::takedown::SLEEP_DELAY;
+                        v.sleep_timer = sleep_delay(pr.owner).max(1e-3);
                         v.condition_by = Some(pr.owner);
                     }
                     continue;

@@ -222,6 +222,9 @@ pub struct Inventory {
     pub charms_owned: u32,
     pub charms_equipped: u32,
     pub power_levels: [u8; power::COUNT],
+    /// Owned workshop upgrades (bit per `ItemsConfig::upgrades` index).
+    #[serde(default)]
+    pub upgrades: u32,
 }
 
 impl Default for Inventory {
@@ -232,7 +235,7 @@ impl Default for Inventory {
         power_levels[power::BLINK] = 2;
         power_levels[power::WINDBLAST] = 2;
         power_levels[power::DARK_VISION] = 2;
-        Self { ammo: [0; 8], elixirs: [0; 2], coins: 0, runes: 0, charms_owned: 0, charms_equipped: 0, power_levels }
+        Self { ammo: [0; 8], elixirs: [0; 2], coins: 0, runes: 0, charms_owned: 0, charms_equipped: 0, power_levels, upgrades: 0 }
     }
 }
 
@@ -537,6 +540,9 @@ pub struct TrapState {
     pub triggered: bool,
     pub detonated: bool,
     pub emitted: bool,
+    /// Radius scale (`Attribute_SpringRazorRadiusBonus` of the owner when above 1, 0x00C2D360).
+    #[serde(default = "one")]
+    pub radius_scale: f32,
 }
 
 /// `DishonoredActivePowerComponent_BendTime` while active.

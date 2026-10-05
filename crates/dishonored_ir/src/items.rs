@@ -429,6 +429,26 @@ pub struct ItemsConfig {
     pub charms: Vec<BoneCharm>,
     /// Rune costs of the active powers per level (`m_RuneCosts`): (power, [level 1, level 2]).
     pub active_rune_costs: Vec<(String, [i32; 2])>,
+    /// `DisTweaks_Upgrade` objects of `Twk_Upgrades` (Piero's workshop): name and
+    /// `m_Attributes` (attribute, value added).
+    #[serde(default)]
+    pub upgrades: Vec<(String, Vec<(String, f32)>)>,
+}
+
+impl AmmoType {
+    /// The `Attribute_*Capacity` that sets this ammo's capacity.
+    pub fn capacity_attribute(self) -> &'static str {
+        match self {
+            AmmoType::Bullet => "Attribute_BulletCapacity",
+            AmmoType::BulletExplosive => "Attribute_ExplosiveBulletCapacity",
+            AmmoType::Bolt => "Attribute_ArrowCapacity",
+            AmmoType::SleepDart => "Attribute_SleepArrowCapacity",
+            AmmoType::IncendiaryBolt => "Attribute_FlareArrowCapacity",
+            AmmoType::SpringRazor => "Attribute_SpringRazorCapacity",
+            AmmoType::Grenade => "Attribute_GrenadeCapacity",
+            AmmoType::StickyGrenade => "Attribute_StickyGrenadeCapacity",
+        }
+    }
 }
 
 /// What a placed pickup gives (the actor class and its tweak).

@@ -51,6 +51,13 @@ pub fn attribute(p: &PlayerState, cfg: &GameplayConfig, name: &str, base: f32) -
             }
         }
     }
+    if p.inv.upgrades != 0 {
+        for (i, (_, attrs)) in items.upgrades.iter().enumerate().take(32) {
+            if p.inv.upgrades & (1 << i) != 0 {
+                v += attrs.iter().filter(|(n, _)| n == name).map(|(_, x)| *x).sum::<f32>();
+            }
+        }
+    }
     if p.inv.charms_equipped != 0 {
         for (i, c) in items.charms.iter().enumerate().take(32) {
             if p.inv.charms_equipped & (1 << i) != 0 && c.attribute == name {
@@ -61,8 +68,19 @@ pub fn attribute(p: &PlayerState, cfg: &GameplayConfig, name: &str, base: f32) -
     v
 }
 
+/// Give a workshop upgrade by name (`Twk_Upgrade_<name>`, e.g. `GrenadeBelt`).
+pub fn give_upgrade(p: &mut PlayerState, name: &str, cfg: &GameplayConfig) -> bool {
+    match cfg.items.upgrades.iter().take(32).position(|(n, _)| n.eq_ignore_ascii_case(name)) {
+        Some(i) => {
+            p.inv.upgrades |= 1 << i;
+            true
+        }
+        None => false,
+    }
+}
+
 fn any_modifiers(p: &PlayerState) -> bool {
-    p.inv.charms_equipped != 0 || p.inv.power_levels[power::VITALITY] > 0 || p.inv.power_levels[power::AGILITY] > 0 || p.inv.power_levels[power::BLOOD_THIRSTY] > 0
+    p.inv.charms_equipped != 0 || p.inv.upgrades != 0 || p.inv.power_levels[power::VITALITY] > 0 || p.inv.power_levels[power::AGILITY] > 0 || p.inv.power_levels[power::BLOOD_THIRSTY] > 0
 }
 
 pub fn health_max(p: &PlayerState, cfg: &GameplayConfig) -> f32 {
