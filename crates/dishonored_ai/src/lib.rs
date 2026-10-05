@@ -17,6 +17,8 @@ use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
 pub const NPC_ID_BASE: PlayerId = 1000;
+/// Largest drop (uu) an NPC will step off deliberately.
+const MAX_SAFE_DROP: f32 = 160.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrainState {
@@ -302,7 +304,31 @@ impl Brain {
         i
     }
 
-    fn act(&mut self, me: &PlayerState, ws: &WorldState, layout: &CrowdLayout, _world: &dyn WorldQuery, dt: f32) -> PlayerInput {
+    /// Behaviour step plus a ledge guard: NPCs never walk off a drop that would hurt them
+    /// (wander and patrol goals are straight lines between AI points at different heights).
+    fn act(&mut self, me: &PlayerState, ws: &WorldState, layout: &CrowdLayout, world: &dyn WorldQuery, dt: f32) -> PlayerInput {
+        let mut i = self.act_inner(me, ws, layout, world, dt);
+        if i.forward > 0 && me.mode == dishonored_sim::state::MoveMode::Walking {
+            let dir = Vec3::new(i.yaw.to_radians().cos(), i.yaw.to_radians().sin(), 0.0);
+            let feet = me.position.z - 87.5;
+            let probe = me.position + dir * 70.0;
+            let ground = world.raycast(Vec3::new(probe.x, probe.y, feet + 60.0), -Vec3::Z, 60.0 + MAX_SAFE_DROP, channel::PAWN);
+            if ground.is_none() {
+                i.forward = 0;
+                i.buttons &= !(buttons::SPRINT | buttons::WALK);
+                self.goal = None;
+                if matches!(self.state, BrainState::Wander | BrainState::WalkToPoint) {
+                    self.state = if self.spot.is_some() { BrainState::GroupIdle } else { BrainState::Idle };
+                    self.timer = 0.0;
+                } else if self.state == BrainState::Patrol && !self.route.is_empty() {
+                    self.route_i = (self.route_i + 1) % self.route.len();
+                }
+            }
+        }
+        i
+    }
+
+    fn act_inner(&mut self, me: &PlayerState, ws: &WorldState, layout: &CrowdLayout, _world: &dyn WorldQuery, dt: f32) -> PlayerInput {
         self.timer += dt;
         // Stuck detection.
         if me.position.distance(self.last_pos) < 0.5 && self.goal.is_some() {

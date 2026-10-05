@@ -37,9 +37,12 @@ fn clean_run_completes_with_optional_goals() {
     assert_eq!(m.view.messages.first().map(|x| x.1.as_str()), Some("The Masked Host"));
     assert!(m.view.notification.is_some());
     assert_eq!(m.task("host.kill"), Some(TaskState::Inactive));
-    // Informant reveals the host.
-    let p = pos(&m, "informant");
+    // Walking past the informant is not enough; talking to him reveals the host.
+    let p = pos(&m, "informant_spot");
     step(&mut m, p, &[]);
+    assert!(!m.flag("know_host"));
+    assert!(m.view.talkers.iter().any(|t| t.0 == "informant"));
+    step(&mut m, p, &[MissionEvent::Talked("informant".into())]);
     assert!(m.flag("know_host"));
     assert_eq!(m.task("host.kill"), Some(TaskState::Active));
     assert_eq!(m.view.target, Some([500.0, 500.0, 0.0]), "marker follows the host");

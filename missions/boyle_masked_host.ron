@@ -9,10 +9,10 @@ MissionDef(
 
     objectives: [
         ObjectiveDef(id: "host", description: "Eliminate the masked host", tasks: [
-            TaskDef(id: "clue", description: "Find the informant near the stables", initial: Active, target: Marker("informant")),
+            TaskDef(id: "clue", description: "Talk to the informant by the north lawn", initial: Active, target: Npc("informant")),
             TaskDef(id: "identify", description: "Identify which masked lady is the host", initial: Active),
             TaskDef(id: "kill", description: "Eliminate the host", hidden: true, target: Npc("host")),
-            TaskDef(id: "escape", description: "Return to the balcony", hidden: true, target: Marker("exfil")),
+            TaskDef(id: "escape", description: "Slip away to the north gate", hidden: true, target: Marker("exfil")),
         ]),
         ObjectiveDef(id: "style", description: "Professional conduct", tasks: [
             TaskDef(id: "precise", description: "(Optional) Harm no other guest", initial: Active, optional: true),
@@ -24,9 +24,9 @@ MissionDef(
     counters: ["wrong_kills"],
 
     markers: [
-        MarkerDef(id: "start", at: Actor("PlayerStart_1")),
-        MarkerDef(id: "exfil", at: Actor("L_BoyleStreet_Ext_Script:TargetPoint_56"), radius: 220.0),
-        MarkerDef(id: "informant", at: Actor("L_Boyle_Ext_Script:TargetPoint_52"), radius: 200.0),
+        MarkerDef(id: "start", at: Actor("L_Boyle_Ext_Script:DishonoredNavPoint_12")),
+        MarkerDef(id: "exfil", at: Actor("L_Boyle_Ext_Script:DishonoredNavPoint_11"), radius: 220.0),
+        MarkerDef(id: "informant_spot", at: Actor("L_Boyle_Ext_Script:DishonoredNavPoint_15"), radius: 200.0),
         MarkerDef(id: "bell", at: Actor("DisAlarmBell_1"), radius: 300.0),
         MarkerDef(id: "post_a", at: Actor("DisGuardWatchPoint_5")),
         MarkerDef(id: "post_b", at: Actor("DisGuardWatchPoint_3")),
@@ -35,6 +35,7 @@ MissionDef(
     ],
 
     npcs: [
+        NpcDef(id: "informant", kind: Civilian, archetype: 2, at: Marker("informant_spot"), behavior: Idle, name: "The informant", talk: "Talk"),
         NpcDef(id: "host", kind: Civilian, archetype: 3, at: Actor("L_Boyle_Ext_Script:DishonoredSpawner_10"), behavior: Wander, name: "The host"),
         NpcDef(id: "decoy_a", kind: Civilian, archetype: 3, at: Actor("DishonoredSpawner_30"), behavior: Wander, name: "A masked guest"),
         NpcDef(id: "decoy_b", kind: Civilian, archetype: 3, at: Actor("L_Boyle_Ext_Script:DishonoredSpawner_6"), behavior: Wander, name: "A masked guest"),
@@ -53,8 +54,8 @@ MissionDef(
             Notify("Target", "A lady in a black mask. Two others wear the same."),
         ]),
 
-        // The informant: learning who the host is reveals the kill task and its marker.
-        RuleDef(on: Enter("informant"), then: [
+        // The informant: talking to him reveals the kill task and its marker.
+        RuleDef(on: Talk("informant"), then: [
             SetFlag("know_host"),
             SetTask("host.clue", Completed),
             SetTask("host.identify", Completed),
@@ -63,7 +64,7 @@ MissionDef(
             Message("New mission clue"),
         ]),
         // A hint if the player wanders for a while without the clue.
-        RuleDef(on: Timer(90.0), when: [NotFlag("know_host")], then: [Message("Someone near the stables knows more about the host.")]),
+        RuleDef(on: Timer(90.0), when: [NotFlag("know_host")], then: [Message("Someone by the north lawn knows more about the host.")]),
 
         RuleDef(on: NpcKilled("host"), then: [
             SetFlag("host_dead"),
@@ -96,5 +97,12 @@ MissionDef(
             Complete("The host's party is over."),
         ]),
         RuleDef(on: Enter("exfil"), when: [Flag("host_dead"), Not(Detected)], then: [SetTask("style.ghost", Completed)], once: true),
+        // Enter is edge-triggered (like SeqEvent_Touch): cover a player already standing in the
+        // exit zone when the escape task opens.
+        RuleDef(on: TaskState("host.escape", Active), when: [Inside("exfil")], then: [
+            SetTask("host.escape", Completed),
+            Complete("The host's party is over."),
+        ]),
+        RuleDef(on: TaskState("host.escape", Active), when: [Inside("exfil"), Not(Detected)], then: [SetTask("style.ghost", Completed)]),
     ],
 )

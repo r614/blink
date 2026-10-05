@@ -17,6 +17,10 @@ pub enum MissionEvent {
     PlayerDetected,
     AlarmRaised,
     PlayerKilled(u32),
+    /// A player used a usable marker.
+    Used(String),
+    /// A player talked to an NPC.
+    Talked(String),
 }
 
 /// Requests for the host.
@@ -104,6 +108,15 @@ pub struct MissionView {
     /// World position the HUD marker points at (active task target).
     pub target: Option<[f32; 3]>,
     pub sounds: Vec<(u32, String)>,
+    /// Usable markers: (position, prompt).
+    #[serde(default)]
+    pub usables: Vec<([f32; 3], String)>,
+    /// Talkable mission NPCs: (npc id, prompt).
+    #[serde(default)]
+    pub talkers: Vec<(String, String)>,
+    /// Mission NPC id -> pawn id (set by the host), so clients can find talkers.
+    #[serde(default)]
+    pub npc_ids: Vec<(String, u32)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -122,6 +135,8 @@ enum Ev {
     Task(String, TaskState),
     Counter(String),
     Remote(String),
+    Use(String),
+    Talk(String),
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +160,9 @@ pub struct MissionState {
     detected_any: bool,
     alarm: bool,
     next_id: u32,
+    /// Enabled interactions: marker -> prompt, npc -> prompt.
+    pub usable: BTreeMap<String, String>,
+    pub talk: BTreeMap<String, String>,
     pub view: MissionView,
 }
 
@@ -164,6 +182,8 @@ impl MissionState {
         let every_next = def.rules.iter().map(|r| if let Trigger::Every(s) = r.on { s } else { 0.0 }).collect();
         let npc_alive = def.npcs.iter().filter(|n| n.spawn_at_start).map(|n| n.id.clone()).collect();
         let view = MissionView { title: def.title.clone(), briefing: def.briefing.clone(), ..Default::default() };
+        let usable = def.markers.iter().filter_map(|m| m.usable.clone().map(|p| (m.id.clone(), p))).collect();
+        let talk = def.npcs.iter().filter_map(|n| n.talk.clone().map(|p| (n.id.clone(), p))).collect();
         let mut s = MissionState {
             def,
             markers,
@@ -183,6 +203,8 @@ impl MissionState {
             detected_any: false,
             alarm: false,
             next_id: 1,
+            usable,
+            talk,
             view,
         };
         s.refresh_view(&BTreeMap::new());
@@ -282,6 +304,8 @@ impl MissionState {
                     self.view.stats.player_deaths += 1;
                     queue.push_back(Ev::PlayerKilled);
                 }
+                MissionEvent::Used(m) => queue.push_back(Ev::Use(m.clone())),
+                MissionEvent::Talked(n) => queue.push_back(Ev::Talk(n.clone())),
             }
         }
         // Delayed actions that are due run before rules (they were scheduled earlier).
@@ -352,6 +376,8 @@ impl MissionState {
             (Trigger::TaskState(t, s), Ev::Task(x, y)) => t == x && s == y,
             (Trigger::CounterAtLeast(c, v), Ev::Counter(x)) => c == x && self.counters.get(c).copied().unwrap_or(0) >= *v,
             (Trigger::Remote(n), Ev::Remote(x)) => n == x,
+            (Trigger::Use(m), Ev::Use(x)) => m == x,
+            (Trigger::Talk(n), Ev::Talk(x)) => n == x,
             _ => false,
         }
     }
@@ -480,6 +506,12 @@ impl MissionState {
                     }
                     out.push(Command::Sound(s.clone()));
                 }
+                Action::Usable(m, p) => {
+                    self.usable.insert(m.clone(), p.clone());
+                }
+                Action::NotUsable(m) => {
+                    self.usable.remove(m);
+                }
                 Action::Complete(t) => self.end(true, t.clone()),
                 Action::Fail(t) => self.end(false, t.clone()),
             }
@@ -504,6 +536,8 @@ impl MissionState {
             })
             .collect();
         self.view.high_chaos = self.view.stats.high_chaos(self.def.settings.high_chaos_kill_ratio);
+        self.view.usables = self.usable.iter().filter_map(|(m, p)| self.markers.get(m).map(|x| (x.0.to_array(), p.clone()))).collect();
+        self.view.talkers = self.talk.iter().filter(|(n, _)| self.npc_alive.contains(*n)).map(|(n, p)| (n.clone(), p.clone())).collect();
         // Marker: first visible active task with a target (required tasks first).
         let mut best: Option<(bool, [f32; 3])> = None;
         for (oi, o) in self.def.objectives.iter().enumerate() {

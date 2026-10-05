@@ -1,8 +1,9 @@
 //! Keyboard/mouse -> `PlayerInput`. Button presses between fixed ticks are latched so a
 //! short click is never lost; look is applied immediately for responsiveness.
 //!
-//! Bindings: WASD move, mouse look, Space jump, Ctrl sneak (toggle), Shift sprint,
-//! C walk, LMB sword, RMB left hand (hold to aim Blink), F block, Q/E lean, R reload,
+//! Bindings follow the original PC layout (`DefaultInput.ini` m_PCBindings): WASD move,
+//! mouse look, Space jump, C sneak (toggle), Shift sprint, LMB sword, RMB left hand (hold to
+//! aim Blink), Left Ctrl block, F use, Q/E lean, R reload, X walk (no original binding),
 //! 1 Blink, 2 Windblast, 3 Dark Vision, 4 Pistol, 5 Crossbow.
 
 use bevy::input::mouse::AccumulatedMouseMotion;
@@ -59,12 +60,13 @@ pub fn gather_input(
     let mut held = 0u16;
     let map = [
         (keys.pressed(KeyCode::Space), buttons::JUMP),
-        (keys.pressed(KeyCode::ControlLeft), buttons::CROUCH),
+        (keys.pressed(KeyCode::KeyC), buttons::CROUCH),
         (keys.pressed(KeyCode::ShiftLeft), buttons::SPRINT),
-        (keys.pressed(KeyCode::KeyC), buttons::WALK),
+        (keys.pressed(KeyCode::KeyX), buttons::WALK),
         (locked && mouse.pressed(MouseButton::Left), buttons::PRIMARY),
         (locked && mouse.pressed(MouseButton::Right), buttons::SECONDARY),
-        (keys.pressed(KeyCode::KeyF), buttons::BLOCK),
+        (keys.pressed(KeyCode::ControlLeft), buttons::BLOCK),
+        (keys.pressed(KeyCode::KeyF), buttons::USE),
         (keys.pressed(KeyCode::KeyQ), buttons::LEAN_LEFT),
         (keys.pressed(KeyCode::KeyE), buttons::LEAN_RIGHT),
         (keys.pressed(KeyCode::KeyR), buttons::RELOAD),

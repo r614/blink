@@ -101,6 +101,11 @@ MissionDef(
 | `After(s, [..])`, `Fire(name)`, `EnableRule(id)`, `DisableRule(id)` | flow |
 | `Complete(text)`, `Fail(text)` | end the mission |
 
+`Enter`/`Leave` are edge-triggered, like the original's touch events: a player already inside
+a zone when a rule becomes relevant does not re-enter it. Pair such rules with a
+`TaskState(..)` or `FlagSet(..)` trigger and an `Inside(marker)` condition (see the sample's
+exit rules).
+
 Rules fire once by default (`once: false` to repeat). They cascade within a simulation step,
 the way Kismet chains within a frame: an action that sets a flag or task immediately triggers
 rules listening for it.

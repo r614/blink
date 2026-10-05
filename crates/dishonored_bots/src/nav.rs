@@ -25,6 +25,22 @@ pub fn floor_below(world: &dyn WorldQuery, p: Vec3, depth: f32) -> Option<Vec3> 
     world.raycast(p + Vec3::Z * 40.0, -Vec3::Z, depth + 40.0, channel::PAWN).filter(|h| h.normal.z > 0.6).map(|h| h.point)
 }
 
+/// Largest deliberate drop for bots (uu), well under the fall-damage height.
+const MAX_DROP: f32 = 1000.0;
+
+/// Walk off a ledge at `a` towards lower `b`: clear at body height all the way over `b`, and
+/// the column above `b` lands on `b`'s floor.
+fn droppable(world: &dyn WorldQuery, a: Vec3, b: Vec3) -> bool {
+    for h in [50.0, 130.0] {
+        let o = a + Vec3::Z * h;
+        let t = Vec3::new(b.x, b.y, a.z + h) - o;
+        if world.raycast(o, t, t.length(), channel::PAWN).is_some() {
+            return false;
+        }
+    }
+    matches!(floor_below(world, Vec3::new(b.x, b.y, a.z + 40.0), a.z - b.z + 120.0), Some(f) if (f.z - b.z).abs() < 60.0)
+}
+
 /// Whether a pawn can walk the straight segment between two floor points.
 pub fn walkable(world: &dyn WorldQuery, a: Vec3, b: Vec3) -> bool {
     let d = b - a;
@@ -72,6 +88,22 @@ impl NavGraph {
                 if d <= MAX_EDGE && walkable(world, nodes[i], nodes[j]) {
                     edges[i].push((j as u32, d));
                     edges[j].push((i as u32, d));
+                }
+            }
+        }
+        // One-way drops: players survive falls far larger than any step (fall damage starts at
+        // MaxFallSpeed 2100 uu/s, about 1470 uu), so a ledge connects down to lower ground when
+        // the way off the edge is clear and there is floor to land on.
+        for i in 0..nodes.len() {
+            for j in 0..nodes.len() {
+                let (a, b) = (nodes[i], nodes[j]);
+                let drop = a.z - b.z;
+                let flat = (b - a).truncate().length();
+                if !(120.0..=MAX_DROP).contains(&drop) || flat > 700.0 || flat < 40.0 || edges[i].iter().any(|e| e.0 as usize == j) {
+                    continue;
+                }
+                if droppable(world, a, b) {
+                    edges[i].push((j as u32, flat + drop * 0.5));
                 }
             }
         }

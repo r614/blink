@@ -133,6 +133,9 @@ pub struct MarkerDef {
     /// Zone radius for Enter/Leave events (uu).
     #[serde(default = "default_radius")]
     pub radius: f32,
+    /// Interaction prompt ("Open", "Pick up", "Read"...): the marker can be used with F.
+    #[serde(default)]
+    pub usable: Option<String>,
 }
 
 fn default_radius() -> f32 {
@@ -171,6 +174,9 @@ pub struct NpcDef {
     /// Display name for messages and the target notification.
     #[serde(default)]
     pub name: Option<String>,
+    /// Talk prompt: the NPC can be talked to with F (`Talk(npc)` trigger).
+    #[serde(default)]
+    pub talk: Option<String>,
 }
 
 fn yes() -> bool {
@@ -239,6 +245,10 @@ pub enum Trigger {
     CounterAtLeast(String, i32),
     /// Fired by the `Fire` action (`SeqEvent_RemoteEvent`).
     Remote(String),
+    /// A player uses a usable marker (F), `DisSeqEvent_Used`.
+    Use(String),
+    /// A player talks to an NPC (F).
+    Talk(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -295,6 +305,9 @@ pub enum Action {
     DisableRule(String),
     /// `SeqAct_AkPostEvent`: a Wwise event name (presentation only).
     Sound(String),
+    /// Make a marker usable with a prompt, or not usable.
+    Usable(String, String),
+    NotUsable(String),
     /// End the mission.
     Complete(String),
     Fail(String),
@@ -416,6 +429,8 @@ impl MissionDef {
                 Trigger::Enter(m) | Trigger::Leave(m) => marker(m, &mut e),
                 Trigger::NpcKilled(n) | Trigger::NpcAlerted(n) => npc(n, &mut e),
                 Trigger::FlagSet(x) | Trigger::FlagCleared(x) => flag(x, &mut e),
+                Trigger::Use(m) => marker(m, &mut e),
+                Trigger::Talk(n) => npc(n, &mut e),
                 Trigger::TaskState(t, _) => task(t, &mut e),
                 Trigger::CounterAtLeast(c, _) => counter(c, &mut e),
                 Trigger::Timer(s) | Trigger::Every(s) if *s <= 0.0 => e.push("timer must be > 0".into()),
@@ -438,6 +453,7 @@ impl MissionDef {
                     Action::SetFlag(x) | Action::ClearFlag(x) => flag(x, &mut e),
                     Action::Add(x, _) | Action::Set(x, _) => counter(x, &mut e),
                     Action::Spawn(n) | Action::Despawn(n) | Action::Alert(n) | Action::Calm(n) => npc(n, &mut e),
+                    Action::Usable(m, _) | Action::NotUsable(m) => marker(m, &mut e),
                     Action::MoveNpc(n, m) | Action::RunNpc(n, m) => {
                         npc(n, &mut e);
                         marker(m, &mut e);

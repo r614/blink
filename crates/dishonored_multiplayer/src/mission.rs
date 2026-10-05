@@ -115,6 +115,7 @@ pub struct MissionMatch {
     engaged: BTreeSet<PlayerId>,
     alerted: BTreeSet<PlayerId>,
     started: bool,
+    use_held: BTreeSet<PlayerId>,
 }
 
 impl MissionMatch {
@@ -145,6 +146,7 @@ impl MissionMatch {
             engaged: BTreeSet::new(),
             alerted: BTreeSet::new(),
             started: false,
+            use_held: BTreeSet::new(),
         };
         for (i, n) in m.setup.def.npcs.clone().iter().enumerate() {
             if n.spawn_at_start {
@@ -262,6 +264,17 @@ impl MissionMatch {
         all.extend(self.crowd.think(&self.world, &self.last_events, world, dt));
         let out = step_world(&mut self.world, &all, world, cfg);
         let mut events = Vec::new();
+        // F (use): on press, interact with what the player is looking at.
+        for (id, inp) in inputs {
+            let pressed = inp.buttons & dishonored_sim::input::buttons::USE != 0;
+            if pressed && self.use_held.insert(*id) {
+                if let Some(e) = self.interaction(*id) {
+                    events.push(e);
+                }
+            } else if !pressed {
+                self.use_held.remove(id);
+            }
+        }
         for e in &out.events {
             if let SimEvent::Death { victim, killer, .. } = e {
                 let vk = self.world.player(*victim).map(|p| p.kind);
@@ -346,9 +359,46 @@ impl MissionMatch {
             }
             self.view.time_left = if self.setup.def.settings.time_limit > 0.0 { (self.setup.def.settings.time_limit - self.state.view.stats.time).max(0.0) } else { 0.0 };
         }
-        self.view.mission = Some(self.state.view.clone());
+        let mut mv = self.state.view.clone();
+        mv.npc_ids = self.id_by_npc.iter().map(|(n, i)| (n.clone(), *i)).collect();
+        self.view.mission = Some(mv);
         self.last_events = out.events.clone();
         out
+    }
+
+    /// What a player would interact with right now (nearest usable marker or talkable NPC
+    /// within reach, in front of the view).
+    pub fn interaction(&self, id: PlayerId) -> Option<MissionEvent> {
+        let p = self.world.player(id).filter(|p| p.alive)?;
+        let eye = p.position + Vec3::Z * 64.0;
+        let fwd = dishonored_sim::movement::view_vector(p.yaw, p.pitch);
+        let mut best: Option<(f32, MissionEvent)> = None;
+        let mut consider = |pos: Vec3, reach: f32, ev: MissionEvent| {
+            let d = pos - eye;
+            let dist = d.length();
+            if dist > reach || dist < 1.0 {
+                return;
+            }
+            let facing = d.normalize().dot(fwd);
+            if facing < 0.6 {
+                return;
+            }
+            let score = dist * (2.0 - facing);
+            if best.as_ref().is_none_or(|b| score < b.0) {
+                best = Some((score, ev));
+            }
+        };
+        for m in self.state.usable.keys() {
+            if let Some((pos, _)) = self.state.markers.get(m) {
+                consider(*pos, 220.0, MissionEvent::Used(m.clone()));
+            }
+        }
+        for n in self.state.talk.keys() {
+            if let Some(np) = self.id_by_npc.get(n).and_then(|i| self.world.player(*i)).filter(|x| x.alive) {
+                consider(np.position + Vec3::Z * 40.0, 200.0, MissionEvent::Talked(n.clone()));
+            }
+        }
+        best.map(|b| b.1)
     }
 
     pub fn respawn_time_left(&self, id: PlayerId) -> Option<f32> {

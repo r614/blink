@@ -185,6 +185,7 @@ pub fn setup_gfx_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) 
         (TextKind::TargetBody, rect_of(&|g, _| *g == Group::TargetNote)),
         (TextKind::Message, Some(Rect::new(290.0, 600.0, 990.0, 640.0))),
         (TextKind::Outcome, Some(Rect::new(330.0, 225.0, 950.0, 440.0))),
+        (TextKind::Prompt, Some(PROMPT_RECT)),
     ];
     // Textures.
     let mut tex: HashMap<String, Handle<Image>> = HashMap::new();
@@ -232,7 +233,7 @@ pub fn setup_gfx_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) 
             Text::new(""),
             TextFont { font_size: FontSize::Px(16.0), ..default() },
             TextColor(if kind == TextKind::ObjTitle { Color::srgb(0.08, 0.08, 0.08) } else { Color::srgb(0.93, 0.91, 0.84) }),
-            TextLayout::justify(if matches!(kind, TextKind::Message | TextKind::Outcome) { Justify::Center } else { Justify::Right }),
+            TextLayout::justify(if matches!(kind, TextKind::Message | TextKind::Outcome | TextKind::Prompt) { Justify::Center } else { Justify::Right }),
             Node { position_type: PositionType::Absolute, ..default() },
             AnchoredText { kind, rect },
             ChildOf(root),
@@ -421,7 +422,11 @@ pub enum TextKind {
     Message,
     /// End-of-mission panel.
     Outcome,
+    /// "F  Talk" under the crosshair.
+    Prompt,
 }
+/// Interaction prompt under the crosshair (`crosshairInfosTxt_mc`).
+const PROMPT_RECT: Rect = Rect { min: Vec2::new(440.0, 392.0), max: Vec2::new(840.0, 424.0) };
 
 /// Text laid out inside a stage-space rectangle of the movie.
 #[derive(Component)]
@@ -507,7 +512,8 @@ pub fn update_anchored_text(
             (TextKind::TargetBody, None) => (target_lines(&view, local.yaw), 15.0),
             (TextKind::Message, Some(mv)) => (mission_message(mv, time.elapsed_secs(), &mut seen), 20.0),
             (TextKind::Outcome, Some(mv)) => (mission_outcome(mv), 19.0),
-            (TextKind::Message | TextKind::Outcome, None) => (String::new(), 15.0),
+            (TextKind::Prompt, Some(mv)) => (interaction_prompt(mv, &view, local.yaw, local.pitch), 16.0),
+            (TextKind::Message | TextKind::Outcome | TextKind::Prompt, None) => (String::new(), 15.0),
         };
         *vis = if content.is_empty() || m.mode.is_empty() { Visibility::Hidden } else { Visibility::Inherited };
         text.0 = content;
@@ -517,7 +523,7 @@ pub fn update_anchored_text(
         // Banner strips: right-aligned inside the strip; target paper: inset block.
         let (inset, top) = match at.kind {
             TextKind::TargetBody => (Vec2::new(0.1, 0.0), min.y + (max.y - min.y) * 0.3),
-            TextKind::Message | TextKind::Outcome => (Vec2::new(0.0, 0.0), min.y),
+            TextKind::Message | TextKind::Outcome | TextKind::Prompt => (Vec2::new(0.0, 0.0), min.y),
             _ => (Vec2::new(0.04, 0.0), (min.y + max.y) * 0.5 - size * s * 0.65),
         };
         node.left = px(min.x + (max.x - min.x) * inset.x);
@@ -610,4 +616,40 @@ fn mission_outcome(mv: &dishonored_mission::runtime::MissionView) -> String {
         s += &format!("      {}", feats.join(", "));
     }
     s
+}
+
+/// Same reach/facing rule as the server (`MissionMatch::interaction`), for the prompt.
+fn interaction_prompt(mv: &dishonored_mission::runtime::MissionView, view: &SessionView, yaw: f32, pitch: f32) -> String {
+    let Some(me) = view.me.as_ref().filter(|m| m.alive) else { return String::new() };
+    if mv.outcome.is_some() {
+        return String::new();
+    }
+    let eye = me.position + glam::Vec3::Z * 64.0;
+    let fwd = dishonored_sim::movement::view_vector(yaw, pitch);
+    let mut best: Option<(f32, String)> = None;
+    let mut consider = |pos: glam::Vec3, reach: f32, prompt: &str| {
+        let d = pos - eye;
+        let dist = d.length();
+        if dist > reach || dist < 1.0 {
+            return;
+        }
+        let facing = d.normalize().dot(fwd);
+        if facing < 0.6 {
+            return;
+        }
+        let score = dist * (2.0 - facing);
+        if best.as_ref().is_none_or(|b| score < b.0) {
+            best = Some((score, prompt.to_string()));
+        }
+    };
+    for (p, prompt) in &mv.usables {
+        consider(glam::Vec3::from(*p), 220.0, prompt);
+    }
+    for (npc, prompt) in &mv.talkers {
+        let Some(id) = mv.npc_ids.iter().find(|x| &x.0 == npc).map(|x| x.1) else { continue };
+        if let Some(o) = view.others.iter().find(|o| o.id == id && o.alive) {
+            consider(o.position + glam::Vec3::Z * 40.0, 200.0, prompt);
+        }
+    }
+    best.map(|b| format!("F   {}", b.1)).unwrap_or_default()
 }

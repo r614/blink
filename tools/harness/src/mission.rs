@@ -34,6 +34,8 @@ struct Run {
     reached_informant: bool,
     host_dead: bool,
     agent_deaths: u32,
+    final_pos: Vec3,
+    host_killed_by_agent: bool,
 }
 
 fn play(mc: &MatchContent, def: &MissionDef, max_secs: f32) -> Result<Run> {
@@ -45,8 +47,20 @@ fn play(mc: &MatchContent, def: &MissionDef, max_secs: f32) -> Result<Run> {
     let mut g = setup.build(&mc.sim);
     g.add_player(AGENT, "agent", 0, &mc.collision, &mc.sim);
     let nav = NavGraph::build(&mc.collision, mc.ai_points.iter().map(|p| p.0).chain(mc.spawns.iter().map(|s| s.position)));
+    if std::env::var_os("MISSION_NAV_DEBUG").is_some() {
+        if let Game::Mission(m) = &g {
+            let pts: Vec<(String, Vec3)> = m.setup.markers.iter().map(|(k, v)| (k.clone(), v.0)).chain(m.setup.npcs.iter().map(|(n, s)| (format!("npc:{n}"), s.position))).collect();
+            let start = std::env::var("MISSION_NAV_FROM").ok().and_then(|n| m.setup.npcs.iter().find(|x| x.0 == n).map(|x| x.1.position)).unwrap_or(m.setup.starts[0].0);
+            let s_nodes = nav.visible_nodes(&mc.collision, start + Vec3::Z * 50.0, 4);
+            for (name, p) in pts {
+                let g_nodes = nav.visible_nodes(&mc.collision, p + Vec3::Z * 50.0, 4);
+                let path = nav.path(&s_nodes, &g_nodes, p);
+                eprintln!("nav start->{name} at {p:.0}: start nodes {} goal nodes {} path {:?}", s_nodes.len(), g_nodes.len(), path.map(|v| v.len()));
+            }
+        }
+    }
     let mut follow = Follower::default();
-    let mut run = Run { hash: 0, outcome: None, outcome_tick: None, timeline: Vec::new(), stats: String::new(), reached_informant: false, host_dead: false, agent_deaths: 0 };
+    let mut run = Run { hash: 0, outcome: None, outcome_tick: None, timeline: Vec::new(), stats: String::new(), reached_informant: false, host_dead: false, agent_deaths: 0, final_pos: Vec3::ZERO, host_killed_by_agent: false };
     let mut last_tasks: Vec<(String, TaskState)> = Vec::new();
     let mut seen_msgs = 0u32;
     let mut last_pos = Vec3::ZERO;
@@ -55,7 +69,7 @@ fn play(mc: &MatchContent, def: &MissionDef, max_secs: f32) -> Result<Run> {
     for tick in 0..(max_secs * 60.0) as usize {
         let Game::Mission(m) = &g else { anyhow::bail!("not a mission game") };
         let host_id = m.setup.npcs.iter().find(|(n, _)| n == "host").map(|(_, s)| s.id);
-        let informant = m.state.markers.get("informant").map(|x| x.0);
+        let informant = m.setup.npcs.iter().find(|(n, _)| n == "informant").and_then(|(_, s)| m.world.player(s.id)).map(|p| p.position);
         let exfil = m.state.markers.get("exfil").map(|x| x.0);
         let know = m.state.flag("know_host");
         let host = host_id.and_then(|id| m.world.player(id)).filter(|p| p.alive).cloned();
@@ -70,8 +84,17 @@ fn play(mc: &MatchContent, def: &MissionDef, max_secs: f32) -> Result<Run> {
                 }
                 (None, true) => (exfil.unwrap_or(me.position), None),
             };
+            let talk_to = informant.filter(|_| !know);
             let near = strike.as_ref().is_some_and(|h| h.position.distance(me.position) < 150.0);
-            if near {
+            if let Some(ip) = talk_to.filter(|ip| ip.distance(me.position) < 130.0) {
+                // Face the informant and press F (edge: press every 12 ticks).
+                let to = ip - me.position;
+                input.yaw = to.y.atan2(to.x).to_degrees();
+                input.pitch = -10.0;
+                if tick % 12 == 0 {
+                    input.buttons |= buttons::USE;
+                }
+            } else if near {
                 let h = strike.unwrap();
                 let to = h.position - me.position;
                 input.yaw = to.y.atan2(to.x).to_degrees();
@@ -107,7 +130,15 @@ fn play(mc: &MatchContent, def: &MissionDef, max_secs: f32) -> Result<Run> {
             }
             last_pos = me.position;
         }
-        g.step(&[(AGENT, input)], &mc.collision, &mc.sim);
+        let out = g.step(&[(AGENT, input)], &mc.collision, &mc.sim);
+        for e in &out.events {
+            if let dishonored_sim::events::SimEvent::Death { victim, killer, cause } = e {
+                if Some(*victim) == host_id {
+                    run.host_killed_by_agent |= *killer == Some(AGENT);
+                    run.timeline.push((tick as f32 / 60.0, format!("host died: killer {killer:?} cause {cause:?}")));
+                }
+            }
+        }
         let Game::Mission(m) = &g else { unreachable!() };
         let t = tick as f32 / 60.0;
         // Timeline: task transitions and new messages.
@@ -141,6 +172,9 @@ fn play(mc: &MatchContent, def: &MissionDef, max_secs: f32) -> Result<Run> {
             break;
         }
     }
+    if let Game::Mission(m) = &g {
+        run.final_pos = m.world.player(AGENT).map(|p| p.position).unwrap_or_default();
+    }
     run.hash = state_hash(g.world());
     Ok(run)
 }
@@ -161,8 +195,8 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     let max: f32 = ctx.opt("--seconds").and_then(|s| s.parse().ok()).unwrap_or(600.0);
     let a = play(&mc, &def, max)?;
     rep.check(S, "agent finds the informant (clue reveals the host)", a.reached_informant, a.timeline.iter().find(|x| x.1.contains("host.kill -> Active")).map(|x| format!("at {:.0}s", x.0)).unwrap_or_default());
-    rep.check(S, "host eliminated", a.host_dead, a.timeline.iter().find(|x| x.1.contains("host.kill -> Completed")).map(|x| format!("at {:.0}s", x.0)).unwrap_or_default());
-    rep.check(S, "mission completes successfully", a.outcome.as_ref().is_some_and(|o| o.0), format!("{:?}; {}", a.outcome, a.stats));
+    rep.check(S, "host eliminated by the agent", a.host_killed_by_agent, a.timeline.iter().find(|x| x.1.contains("host.kill -> Completed")).map(|x| format!("at {:.0}s", x.0)).unwrap_or_default());
+    rep.check(S, "mission completes successfully", a.outcome.as_ref().is_some_and(|o| o.0), format!("{:?}; {}; agent ended at {:.0}", a.outcome, a.stats, a.final_pos));
     rep.table("Mission timeline (simulated seconds)", &["t", "event"], a.timeline.iter().map(|(t, e)| vec![format!("{t:.1}"), e.clone()]).collect());
     let b = play(&mc, &def, max)?;
     rep.check(S, "determinism: identical mission runs", a.hash == b.hash && a.outcome_tick == b.outcome_tick, format!("{:016x} @ {:?} vs {:016x} @ {:?}", a.hash, a.outcome_tick, b.hash, b.outcome_tick));

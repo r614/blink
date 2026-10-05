@@ -79,9 +79,10 @@ cargo run --release -p dishonored_master -- --bind 0.0.0.0:27900
 
 Join with `--connect HOST:27015`, or `--browse MASTER` to pick from the list.
 
-In game: WASD move, mouse look, Space jump, Ctrl sneak, Shift sprint, C walk, LMB sword,
-RMB left hand (hold to aim Blink), F block, Q/E lean, R reload, 1-5 Blink / Windblast /
-Dark Vision / pistol / crossbow, V third person, Tab scores, F1 debug readout, F3 collision.
+In game (the original PC layout): WASD move, mouse look, Space jump, C sneak, Shift sprint,
+LMB sword, RMB left hand (hold to aim Blink), Left Ctrl block, F use / talk, Q/E lean, R reload,
+J journal, X walk, 1-5 Blink / Windblast / Dark Vision / pistol / crossbow, V third person,
+Tab scores, F1 debug readout, F3 collision.
 The HUD is Dishonored's own (gauges, emblem, crosshairs, objectives banner and fonts are
 read from `UI_HUD_SF`, the icon packs and `DisFonts_SF` at startup).
 Sound is the game's own too: Wwise banks are read and their Vorbis media decoded from the

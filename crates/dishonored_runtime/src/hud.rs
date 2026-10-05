@@ -122,7 +122,7 @@ pub fn update_hud(
         );
     }
     if debug.0 {
-        s += "\nWASD move  mouse look  Space jump  Ctrl sneak  Shift sprint  LMB sword  RMB left hand  F block  Q/E lean  1-5 hand  V 3rd person  F1 debug  F3 collision  Tab scores  Esc release mouse\n";
+        s += "\nWASD move  mouse look  Space jump  C sneak  Shift sprint  X walk  LMB sword  RMB left hand  Ctrl block  F use  Q/E lean  1-5 hand  V 3rd person  F1 debug  F3 collision  Tab scores  Esc release mouse\n";
     }
     for f in &view.feed {
         s += &format!("{f}\n");
