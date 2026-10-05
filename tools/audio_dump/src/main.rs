@@ -469,6 +469,18 @@ fn main() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("survey") => survey(),
         Some("hirc") => hirc_survey(args.get(1).and_then(|s| s.parse().ok())),
+        Some("nodes") => {
+            // nodes <Bank> <kind> [max]: decoded objects of one HIRC type.
+            let mut lib = dishonored_audio::library::SoundLibrary::new(install())?;
+            lib.load_bank(args.get(1).context("bank")?)?;
+            let kind: u8 = args.get(2).context("kind")?.parse()?;
+            let max: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
+            let b = &lib.banks[0];
+            for o in b.bank.hirc.iter().filter(|o| o.kind == kind).take(max) {
+                println!("{} {:#?}", o.id, b.hier.nodes.get(&o.id));
+            }
+            Ok(())
+        }
         Some("emitters") => emitters(args.get(1).map(String::as_str).unwrap_or("L_Boyle_Ext_P")),
         Some("event") => event(args.get(1).context("event name")?, args.get(2).context("bank list")?),
         Some("decodeall") => decode_all(args.get(1).is_some_and(|a| a == "--streams")),
