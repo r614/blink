@@ -103,11 +103,13 @@ pub struct WeaponMesh(usize);
 
 pub fn load_view_rig(
     mut commands: Commands,
+    features: Option<Res<crate::map_render::RenderFeatures>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut binds: ResMut<Assets<SkinnedMeshInverseBindposes>>,
 ) {
+    let feat = features.map(|f| f.clone()).unwrap_or_else(|| crate::map_render::RenderFeatures::from_flags(&|_| false));
     let Ok(content) = dishonored_assets::Content::locate() else { return };
     let arms = match load_model(&content, "fp_arms", &[("Engine", "Ply_Player.Skm_Player")], None, 2048) {
         Ok(m) => m,
@@ -136,7 +138,7 @@ pub fn load_view_rig(
             Ok(w) => {
                 let Some(socket) = find(socket) else { continue };
                 let part = &w.parts[0];
-                weapons.push(WeaponGpu { held: *held, socket, bind: bind_globals(&part.bones), m2p: part.mesh_to_pawn, gpu: upload(&w, &mut meshes, &mut images, &mut mats, &mut binds) });
+                weapons.push(WeaponGpu { held: *held, socket, bind: bind_globals(&part.bones), m2p: part.mesh_to_pawn, gpu: upload(&w, &mut meshes, &mut images, &mut mats, &mut binds, &feat) });
                 let _ = wi;
             }
             Err(e) => warn!("weapon {path}: {e:#}"),
@@ -161,7 +163,7 @@ pub fn load_view_rig(
         }
     }
     info!("first-person rig: {} bones, {} weapons, {} clips", bones.len(), weapons.len(), clips.len());
-    let arms_gpu = upload(&arms, &mut meshes, &mut images, &mut mats, &mut binds);
+    let arms_gpu = upload(&arms, &mut meshes, &mut images, &mut mats, &mut binds, &feat);
     commands.insert_resource(ViewRig { arms: arms_gpu, bones, m2p, weapons, sets, clips, left_arm, cam_bone });
 }
 
@@ -174,6 +176,9 @@ pub fn spawn_view_rig(
 ) {
     let Some(rig) = rig else { return };
     if !existing.is_empty() {
+        return;
+    }
+    if std::env::var_os("DISHONORED_NO_VIEWMODEL").is_some() {
         return;
     }
     let Some((game_cam, tonemap, grading, hdr)) = cams.iter().next() else { return };

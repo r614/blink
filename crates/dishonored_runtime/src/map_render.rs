@@ -5,7 +5,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::Image;
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat as WgpuFormat};
+use bevy::render::render_resource::{AsBindGroup, Extent3d, TextureDimension, TextureFormat as WgpuFormat};
 use dishonored_ir::{BlendHint, DishonoredMap, LightmapAtlas, MaterialAsset, MaterialBlend, MaterialParams, TextureAsset, TextureFormat};
 
 #[derive(Component)]
@@ -289,6 +289,7 @@ pub fn spawn_map(
     meshes: &mut Assets<Mesh>,
     images: &mut Assets<Image>,
     materials: &mut Assets<StandardMaterial>,
+    baked: &mut Assets<BakedMaterial>,
     show_hidden: bool,
     features: &RenderFeatures,
 ) -> usize {
@@ -325,11 +326,14 @@ pub fn spawn_map(
         ..default()
     });
 
-    // One Bevy mesh per (static mesh, section).
-    let section_meshes: Vec<Vec<Handle<Mesh>>> = map
-        .meshes
-        .iter()
-        .map(|m| {
+    // One Bevy mesh per (static mesh, section), built only for geometry drawn per instance
+    // (merged batches carry their own vertices).
+    let mut section_cache: std::collections::HashMap<(usize, usize), Handle<Mesh>> = std::collections::HashMap::new();
+    let mut section_mesh = |mi: usize, si: usize, meshes: &mut Assets<Mesh>| -> Handle<Mesh> {
+        section_cache
+            .entry((mi, si))
+            .or_insert_with(|| {
+                let m = &map.meshes[mi];
             let positions: Vec<[f32; 3]> = m.positions.iter().map(|p| coords::pos(*p).to_array()).collect();
             let normals: Vec<[f32; 3]> = m
                 .normals
@@ -338,9 +342,7 @@ pub fn spawn_map(
                 .collect();
             let uvs: Vec<[f32; 2]> = m.uv0.iter().map(|u| u.to_array()).collect();
             let uv1: Vec<[f32; 2]> = m.uv1.iter().map(|u| u.to_array()).collect();
-            m.sections
-                .iter()
-                .map(|s| {
+                let s = &m.sections[si];
                     let start = s.first_index as usize;
                     let end = (start + s.num_triangles as usize * 3).min(m.indices.len());
                     let idx = m.indices[start..end].to_vec();
@@ -357,12 +359,13 @@ pub fn spawn_map(
                     if m.uv1.len() == m.positions.len() {
                         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1.clone());
                     }
-                    meshes.add(mesh)
-                })
-                .collect()
-        })
-        .collect();
+                meshes.add(mesh)
+            })
+            .clone()
+    };
 
+    let merge = std::env::var_os("DISHONORED_NO_MERGE").is_none();
+    let mut batches: std::collections::HashMap<BatchKey, Batch> = std::collections::HashMap::new();
     let mut spawned = 0;
     for (ii, inst) in map.instances.iter().enumerate() {
         if inst.hidden && !show_hidden {
@@ -373,6 +376,25 @@ pub fn spawn_map(
         for (si, section) in mesh.sections.iter().enumerate() {
             let mat_id = inst.materials.get(si).copied().flatten().or(section.material);
             if !show_fx && mat_id.is_some_and(|m| map.materials[m].blend == BlendHint::Translucent) {
+                continue;
+            }
+            let is_sky = features.sky && mat_id.and_then(|m| map.material_params.get(m)).is_some_and(|p| p.sky);
+            let translucent = mat_id.is_some_and(|m| map.materials[m].blend == BlendHint::Translucent);
+            // Static opaque/masked geometry is merged into world-space batches (one draw per
+            // material, lightmap page and cell instead of one per instance section); sorted
+            // translucent, sky and debug geometry stays per instance.
+            if merge && !inst.hidden && !is_sky && !translucent {
+                let has_uv1 = mesh.uv1.len() == mesh.positions.len();
+                let lm = inst.lightmap.filter(|_| features.lightmaps && has_uv1);
+                let t = inst.transform.w_axis;
+                let key = BatchKey {
+                    material: mat_id.map(|m| m as u32).unwrap_or(u32::MAX),
+                    atlas: lm.map(|l| l.atlas as u32),
+                    cell: ((t.x / BATCH_CELL).floor() as i32, (t.y / BATCH_CELL).floor() as i32),
+                    uv1: has_uv1,
+                };
+                let b = batches.entry(key).or_default();
+                b.append(mesh, si, coords::transform(inst.transform), lm.map(|l| (l.uv_min, l.uv_max)));
                 continue;
             }
             let mat = if inst.hidden {
@@ -387,13 +409,11 @@ pub fn spawn_map(
                     .unwrap_or_else(|| default_material.clone())
             };
             let mut e = commands.spawn((
-                Mesh3d(section_meshes[inst.mesh][si].clone()),
+                Mesh3d(section_mesh(inst.mesh, si, meshes)),
                 MeshMaterial3d(mat),
                 transform,
                 MapGeometry { instance: ii },
             ));
-            let is_sky = features.sky && mat_id.and_then(|m| map.material_params.get(m)).is_some_and(|p| p.sky);
-            let translucent = mat_id.is_some_and(|m| map.materials[m].blend == BlendHint::Translucent);
             if is_sky || translucent {
                 e.insert(bevy::light::NotShadowCaster);
             }
@@ -407,5 +427,125 @@ pub fn spawn_map(
             spawned += 1;
         }
     }
+    let n_batches = batches.len();
+    let mut baked_cache: std::collections::HashMap<(u32, u32), Handle<BakedMaterial>> = std::collections::HashMap::new();
+    for (key, b) in batches {
+        if b.indices.is_empty() {
+            continue;
+        }
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, b.positions)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, b.normals)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, b.uv0)
+            .with_inserted_indices(Indices::U32(b.indices));
+        if key.uv1 {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, b.uv1);
+        }
+        if features.materials {
+            let _ = mesh.generate_tangents();
+        }
+        let mat = if key.material == u32::MAX { default_material.clone() } else { material_handles[key.material as usize].clone() };
+        let mut e = commands.spawn((Mesh3d(meshes.add(mesh)), Transform::IDENTITY, MapGeometry { instance: usize::MAX }));
+        match key.atlas {
+            // Lightmap regions are already folded into UV1: one shared material per
+            // (material, atlas page).
+            Some(atlas) => {
+                let h = baked_cache.entry((key.material, atlas)).or_insert_with(|| {
+                    let base = materials.get(&mat).cloned().unwrap_or_default();
+                    let exposure = base.lightmap_exposure;
+                    baked.add(BakedMaterial { base, extension: BakedLightmap { params: Vec4::new(exposure, 0.0, 0.0, 0.0), lightmap: lightmap_handles[atlas as usize].clone() } })
+                });
+                e.insert(MeshMaterial3d(h.clone()));
+            }
+            None => {
+                e.insert(MeshMaterial3d(mat));
+            }
+        }
+        spawned += 1;
+    }
+    if merge {
+        info!("static geometry merged into {n_batches} batches");
+    }
     spawned
 }
+
+/// Batch cell size (Dishonored units): coarse enough to cut draw calls, fine enough to keep
+/// frustum and shadow-cascade culling useful.
+const BATCH_CELL: f32 = 4096.0;
+
+#[derive(Hash, PartialEq, Eq, Clone, Copy)]
+struct BatchKey {
+    material: u32,
+    atlas: Option<u32>,
+    cell: (i32, i32),
+    uv1: bool,
+}
+
+#[derive(Default)]
+struct Batch {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uv0: Vec<[f32; 2]>,
+    uv1: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+}
+
+impl Batch {
+    /// Append one section of a static mesh transformed to Bevy world space (`m`), with its
+    /// lightmap region (if any) baked into UV1.
+    fn append(&mut self, mesh: &dishonored_ir::StaticMeshAsset, section: usize, m: Mat4, lightmap: Option<(Vec2, Vec2)>) {
+        let s = &mesh.sections[section];
+        let start = s.first_index as usize;
+        let end = (start + s.num_triangles as usize * 3).min(mesh.indices.len());
+        let normal_m = Mat3::from_mat4(m).inverse().transpose();
+        let flip = m.determinant() < 0.0;
+        let mut remap: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let mut tri = [0u32; 3];
+        for (k, &vi) in mesh.indices[start..end].iter().enumerate() {
+            let out = *remap.entry(vi).or_insert_with(|| {
+                let v = vi as usize;
+                let p = m.transform_point3(coords::pos(mesh.positions[v]));
+                let n = mesh.normals.get(v).map(|n| (normal_m * coords::dir(*n)).normalize_or_zero()).unwrap_or(Vec3::Y);
+                self.positions.push(p.to_array());
+                self.normals.push(n.to_array());
+                self.uv0.push(mesh.uv0.get(v).map(|u| u.to_array()).unwrap_or([0.0, 0.0]));
+                let u1 = mesh.uv1.get(v).copied().unwrap_or(Vec2::ZERO);
+                let u1 = match lightmap {
+                    Some((lo, hi)) => lo + u1 * (hi - lo),
+                    None => u1,
+                };
+                self.uv1.push(u1.to_array());
+                (self.positions.len() - 1) as u32
+            });
+            tri[k % 3] = out;
+            if k % 3 == 2 {
+                if flip {
+                    self.indices.extend_from_slice(&[tri[0], tri[2], tri[1]]);
+                } else {
+                    self.indices.extend_from_slice(&tri);
+                }
+            }
+        }
+    }
+}
+
+/// Baked lightmap as a material extension (see `lightmap_ext.wgsl`): one bind group per
+/// material instead of Bevy's per-entity lightmap slots, which cost ~4 ms/frame of
+/// `prepare_mesh_bind_groups` on Boyle and prevented batching.
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+pub struct BakedLightmap {
+    /// x = exposure (UE3 lightmap scale to Bevy units).
+    #[uniform(100)]
+    pub params: Vec4,
+    #[texture(101)]
+    #[sampler(102)]
+    pub lightmap: Handle<Image>,
+}
+
+impl bevy::pbr::MaterialExtension for BakedLightmap {
+    fn fragment_shader() -> bevy::shader::ShaderRef {
+        "embedded://dishonored_runtime/lightmap_ext.wgsl".into()
+    }
+}
+
+pub type BakedMaterial = bevy::pbr::ExtendedMaterial<StandardMaterial, BakedLightmap>;

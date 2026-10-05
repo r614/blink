@@ -130,14 +130,22 @@ fn main() {
     let args = parse_args();
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window { title: format!("dishonored-rs - {}", args.map), resolution: args.size.into(), ..default() }),
+        primary_window: Some(Window {
+            title: format!("dishonored-rs - {}", args.map),
+            resolution: args.size.into(),
+            present_mode: if std::env::var_os("DISHONORED_NOVSYNC").is_some() { bevy::window::PresentMode::AutoNoVsync } else { bevy::window::PresentMode::AutoVsync },
+            ..default()
+        }),
         ..default()
     }))
     .add_plugins(FrameTimeDiagnosticsPlugin::default())
+    .add_plugins(MaterialPlugin::<map_render::BakedMaterial>::default())
+    .add_plugins(bevy::diagnostic::EntityCountDiagnosticsPlugin::default())
     .insert_resource(ClearColor(Color::srgb(0.08, 0.09, 0.12)))
     // Placeholder ambient; with real lights it only fills non-lightmapped meshes at night level.
     .insert_resource(GlobalAmbientLight { color: Color::srgb(0.85, 0.88, 1.0), brightness: if args.features.dynamic_lights { 60.0 } else { 900.0 }, affects_lightmapped_meshes: !args.features.lightmaps })
     .insert_resource(args.clone())
+    .insert_resource(args.features.clone())
     .init_resource::<atmosphere::FogLayers>()
     .add_systems(Startup, setup_world)
     .add_systems(Update, atmosphere::update_fog);
@@ -221,6 +229,10 @@ fn main() {
                 ),
             );
     }
+    bevy::asset::embedded_asset!(app, "lightmap_ext.wgsl");
+    if std::env::args().any(|a| a == "--profile") {
+        app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin).add_systems(Update, profile_report);
+    }
     app.add_systems(Update, exit_after);
     let exit = app.run();
     if let Some(dir) = &args.record {
@@ -243,7 +255,7 @@ fn connect(addr: &str, args: &Args) -> NetClient {
     NetClient::new(sock, server, &args.name)
 }
 
-fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, mut materials: ResMut<Assets<StandardMaterial>>) {
+fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, mut materials: ResMut<Assets<StandardMaterial>>, mut baked: ResMut<Assets<map_render::BakedMaterial>>) {
     let content = Content::locate().expect("Dishonored install not found (set DISHONORED_DIR)");
     // --legacy-geometry: the pre-fidelity package/actor coverage (prefix-matched sublevels,
     // StaticMeshActor + StaticMeshCollectionActor only), for before/after comparisons.
@@ -251,7 +263,7 @@ fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Asset
     let pkgs = if legacy { dishonored_assets::map_packages_by_prefix(&content, &args.map) } else { map_packages(&content, &args.map) };
     let opts = ImportOptions { max_texture_size: args.max_tex, other_actors: !legacy, ..Default::default() };
     let (map, stats) = import_level(&content, &args.map, &pkgs, &opts).expect("map import failed");
-    let spawned = map_render::spawn_map(&map, &mut commands, &mut meshes, &mut images, &mut materials, args.show_hidden, &args.features);
+    let spawned = map_render::spawn_map(&map, &mut commands, &mut meshes, &mut images, &mut materials, &mut baked, args.show_hidden, &args.features);
     info!("{}: {} instances, {} meshes, {} textures, {} entities", args.map, stats.instances, stats.meshes, stats.textures, spawned);
 
     let spawn = map.spawn_candidates.first();
@@ -263,7 +275,7 @@ fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Asset
     let camera = if args.mode == Mode::Inspect {
         commands.spawn((Camera3d::default(), projection, Transform::from_translation(coords::pos(start)), FreeCam { yaw, pitch: args.pitch })).id()
     } else {
-        commands.spawn((Camera3d::default(), projection, Transform::default(), players::GameCamera { third_person: args.spectate, follow: None })).id()
+        commands.spawn((Camera3d::default(), projection, Transform::default(), players::GameCamera { third_person: args.spectate, follow: None }, if std::env::var_os("DISHONORED_NOMSAA").is_some() { Msaa::Off } else { Msaa::Sample4 })).id()
     };
     if args.features.materials {
         if let Some(env) = map_render::environment_light(&map, &mut images) {
@@ -337,4 +349,31 @@ fn inspect_cam(
         let target = tf.translation + fwd;
         tf.look_at(target, Vec3::Y);
     }
+}
+
+/// `--profile`: every 5 s log fps, frame time, entity count and the most expensive render
+/// passes (GPU and CPU time from `RenderDiagnosticsPlugin`).
+fn profile_report(diag: Res<bevy::diagnostic::DiagnosticsStore>, time: Res<Time>, mut last: Local<f32>) {
+    if time.elapsed_secs() - *last < 5.0 {
+        return;
+    }
+    *last = time.elapsed_secs();
+    let val = |d: &bevy::diagnostic::Diagnostic| d.smoothed().or(d.value()).unwrap_or(0.0);
+    let mut gpu: Vec<(String, f64)> = Vec::new();
+    let mut cpu: Vec<(String, f64)> = Vec::new();
+    let mut head = String::new();
+    for d in diag.iter() {
+        let p = d.path().as_str().to_string();
+        if p.ends_with("elapsed_gpu") {
+            gpu.push((p, val(d)));
+        } else if p.ends_with("elapsed_cpu") {
+            cpu.push((p, val(d)));
+        } else if p == "fps" || p == "frame_time" || p == "entity_count" {
+            head += &format!("{p} {:.1}  ", val(d));
+        }
+    }
+    gpu.sort_by(|a, b| b.1.total_cmp(&a.1));
+    cpu.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let fmt = |v: &[(String, f64)]| v.iter().take(8).map(|(p, t)| format!("{}={t:.2}ms", p.trim_start_matches("render/").trim_end_matches("/elapsed_gpu").trim_end_matches("/elapsed_cpu"))).collect::<Vec<_>>().join(" ");
+    info!("PROFILE {head}\n  GPU: {}\n  CPU: {}", fmt(&gpu), fmt(&cpu));
 }

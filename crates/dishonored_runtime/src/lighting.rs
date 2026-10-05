@@ -58,7 +58,10 @@ pub fn spawn_lights(map: &DishonoredMap, commands: &mut Commands, features: &Ren
                         affects_lightmapped_mesh_diffuse: true,
                         ..default()
                     },
-                    CascadeShadowConfigBuilder { num_cascades: 3, first_cascade_far_bound: 15.0, maximum_distance: 200.0, ..default() }.build(),
+                    {
+                        let env = |k: &str, d: f32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+                        CascadeShadowConfigBuilder { num_cascades: env("DISHONORED_CASCADES", 3.0) as usize, first_cascade_far_bound: env("DISHONORED_CASCADE_FIRST", 15.0), maximum_distance: env("DISHONORED_SHADOW_DIST", 200.0), ..default() }.build()
+                    },
                     at,
                     MapLight { source: l.source.clone() },
                     bevy::camera::visibility::RenderLayers::from_layers(&[0, crate::viewmodel::VIEW_LAYER]),

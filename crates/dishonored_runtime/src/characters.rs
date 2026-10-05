@@ -39,12 +39,18 @@ pub fn to_bevy(m: glam::Mat4) -> Mat4 {
     coords::transform(m)
 }
 
-pub fn upload(model: &CharacterModel, meshes: &mut Assets<Mesh>, images: &mut Assets<Image>, mats: &mut Assets<StandardMaterial>, binds: &mut Assets<SkinnedMeshInverseBindposes>) -> CharacterGpu {
+pub fn upload(model: &CharacterModel, meshes: &mut Assets<Mesh>, images: &mut Assets<Image>, mats: &mut Assets<StandardMaterial>, binds: &mut Assets<SkinnedMeshInverseBindposes>, features: &crate::map_render::RenderFeatures) -> CharacterGpu {
     let tex: Vec<Handle<Image>> = model.textures.iter().map(|t| images.add(to_image(t))).collect();
     let materials: Vec<Handle<StandardMaterial>> = model
         .materials
         .iter()
-        .map(|m| {
+        .enumerate()
+        .map(|(i, m)| {
+            // Same Arkane material mapping as the level (normal, specular, emissive, blend,
+            // two-sidedness, specular power) when the chain was resolved.
+            if let Some(p) = model.material_params.get(i).filter(|_| features.materials) {
+                return mats.add(crate::map_render::build_material(i, m, p, &tex, features));
+            }
             mats.add(StandardMaterial {
                 base_color_texture: m.diffuse.map(|t| tex[t].clone()),
                 base_color: if m.diffuse.is_some() { Color::WHITE } else { Color::srgb(0.5, 0.45, 0.4) },
@@ -72,13 +78,16 @@ pub fn upload(model: &CharacterModel, meshes: &mut Assets<Mesh>, images: &mut As
         for s in &p.sections {
             let start = s.first_index as usize;
             let end = (start + s.num_triangles as usize * 3).min(p.indices.len());
-            let mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
+            let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
                 .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, pos.clone())
                 .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, nrm.clone())
                 .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uv.clone())
                 .with_inserted_attribute(Mesh::ATTRIBUTE_JOINT_INDEX, VertexAttributeValues::Uint16x4(joints.clone()))
                 .with_inserted_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, weights.clone())
                 .with_inserted_indices(Indices::U32(p.indices[start..end].to_vec()));
+            if features.materials {
+                let _ = mesh.generate_tangents();
+            }
             let mat = s.material.map(|m| materials[m].clone()).unwrap_or_else(|| fallback.clone());
             sections.push((meshes.add(mesh), mat));
         }
@@ -89,18 +98,20 @@ pub fn upload(model: &CharacterModel, meshes: &mut Assets<Mesh>, images: &mut As
 
 pub fn load_library(
     mut commands: Commands,
+    features: Option<Res<crate::map_render::RenderFeatures>>,
     session: Res<crate::session::Session>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut binds: ResMut<Assets<SkinnedMeshInverseBindposes>>,
 ) {
+    let feat = features.map(|f| f.clone()).unwrap_or_else(|| crate::map_render::RenderFeatures::from_flags(&|_| false));
     let mut lib = CharacterLibrary::default();
     let hh = session.content.sim.gameplay.movement.collision_half_height;
     let Ok(content) = dishonored_assets::Content::locate() else { return };
     for (name, _) in ARCHETYPES {
         match load_character(&content, name, hh, 1024) {
-            Ok(m) => lib.models.push(upload(&m, &mut meshes, &mut images, &mut mats, &mut binds)),
+            Ok(m) => lib.models.push(upload(&m, &mut meshes, &mut images, &mut mats, &mut binds, &feat)),
             Err(e) => warn!("character {name}: {e:#}"),
         }
     }
@@ -199,11 +210,13 @@ pub struct WeaponLibrary {
 
 pub fn load_weapons(
     mut commands: Commands,
+    features: Option<Res<crate::map_render::RenderFeatures>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut binds: ResMut<Assets<SkinnedMeshInverseBindposes>>,
 ) {
+    let feat = features.map(|f| f.clone()).unwrap_or_else(|| crate::map_render::RenderFeatures::from_flags(&|_| false));
     let mut lib = WeaponLibrary::default();
     let Ok(content) = dishonored_assets::Content::locate() else { return };
     for (kind, path, socket, blade) in TP_WEAPONS {
@@ -212,7 +225,7 @@ pub fn load_weapons(
                 let part = &w.parts[0];
                 let inv = part.mesh_to_pawn.inverse();
                 let to_socket = if *blade { glam::Mat4::from_rotation_z(std::f32::consts::PI) * inv } else { inv };
-                lib.weapons.push(TpWeaponGpu { kind: *kind, socket_name: socket, to_socket, bind: bind_globals(&part.bones), gpu: upload(&w, &mut meshes, &mut images, &mut mats, &mut binds) });
+                lib.weapons.push(TpWeaponGpu { kind: *kind, socket_name: socket, to_socket, bind: bind_globals(&part.bones), gpu: upload(&w, &mut meshes, &mut images, &mut mats, &mut binds, &feat) });
             }
             Err(e) => warn!("weapon {path}: {e:#}"),
         }

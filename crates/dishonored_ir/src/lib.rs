@@ -322,5 +322,8 @@ pub struct CharacterModel {
     pub name: String,
     pub parts: Vec<SkeletalMeshAsset>,
     pub materials: Vec<MaterialAsset>,
+    /// Arkane material parameters per material (same meaning as `DishonoredMap::material_params`).
+    #[serde(default)]
+    pub material_params: Vec<MaterialParams>,
     pub textures: Vec<TextureAsset>,
 }

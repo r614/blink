@@ -8,3 +8,4 @@
 /harness_out/
 /.claude/
 **/cache/
+/target-trace

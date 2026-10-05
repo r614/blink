@@ -52,7 +52,7 @@ pub fn load_character(content: &Content, name: &str, pawn_half_height: f32, max_
 /// rig, weapons).
 pub fn load_model(content: &Content, name: &str, parts: &[(&str, &str)], pawn_half_height: Option<f32>, max_tex: u32) -> Result<CharacterModel> {
     let mut shared_m2p: Option<Mat4> = None;
-    let mut model = CharacterModel { name: name.to_string(), parts: Vec::new(), materials: Vec::new(), textures: Vec::new() };
+    let mut model = CharacterModel { name: name.to_string(), parts: Vec::new(), materials: Vec::new(), material_params: Vec::new(), textures: Vec::new() };
     let mut mat_ids: HashMap<(String, usize), Option<usize>> = HashMap::new();
     let mut tex_ids: HashMap<(String, usize), Option<usize>> = HashMap::new();
     let mut feet_z = f32::MAX;
@@ -75,9 +75,13 @@ pub fn load_model(content: &Content, name: &str, parts: &[(&str, &str)], pawn_ha
             let material = match ObjRef::from_index(mref) {
                 ObjRef::Export(mi) => *mat_ids.entry((pkg_name.to_string(), mi)).or_insert_with(|| {
                     let res = resolve_material(&pkg, ObjRef::Export(mi)).unwrap_or_default();
-                    let mut tex = |r: Option<ObjRef>| -> Option<usize> {
-                        let ObjRef::Export(ti) = r? else { return None };
-                        *tex_ids.entry((pkg_name.to_string(), ti)).or_insert_with(|| match read_texture(content, &pkg, ti, max_tex) {
+                    // Full Arkane chain (instance -> parents in DishonoredGame/Startup) for the
+                    // specular/emissive slots, scalars and blend state, as for level materials.
+                    let (pkgs, chain) = character_chain(content, &pkg, mi);
+                    let mut tex_key = |k: Option<(usize, usize)>| -> Option<usize> {
+                        let (slot, ti) = k?;
+                        let p = pkgs.get(slot)?.clone();
+                        *tex_ids.entry((p.name.clone(), ti)).or_insert_with(|| match read_texture(content, &p, ti, max_tex) {
                             Ok(t) => {
                                 model.textures.push(t);
                                 Some(model.textures.len() - 1)
@@ -85,9 +89,35 @@ pub fn load_model(content: &Content, name: &str, parts: &[(&str, &str)], pawn_ha
                             Err(_) => None,
                         })
                     };
-                    let diffuse = tex(res.diffuse);
-                    let normal = tex(res.normal);
-                    model.materials.push(MaterialAsset { source: pkg.obj_path(ObjRef::Export(mi)), diffuse, normal, blend: if res.masked { BlendHint::Masked } else { BlendHint::Opaque }, texture_params: Vec::new() });
+                    let local = |r: Option<ObjRef>| match r {
+                        Some(ObjRef::Export(ti)) => Some((0usize, ti)),
+                        _ => None,
+                    };
+                    let diffuse = tex_key(crate::material_chain::slot(&chain, "d_", &["mask"]).or(chain.diffuse_input)).or_else(|| tex_key(local(res.diffuse)));
+                    let normal = tex_key(crate::material_chain::slot(&chain, "n_", &[]).or(chain.normal_input)).or_else(|| tex_key(local(res.normal)));
+                    let specular = tex_key(crate::material_chain::slot(&chain, "s_", &["mask"]));
+                    let emissive = tex_key(crate::material_chain::slot(&chain, "e_", &["mask"]));
+                    let masked = res.masked || chain.blend_mode.as_deref() == Some("BLEND_Masked");
+                    let blend = match chain.blend_mode.as_deref() {
+                        Some("BLEND_Translucent") | Some("BLEND_AlphaComposite") => MaterialBlend::Translucent,
+                        Some("BLEND_Additive") => MaterialBlend::Additive,
+                        _ if masked => MaterialBlend::Masked,
+                        _ => MaterialBlend::Opaque,
+                    };
+                    model.material_params.push(MaterialParams {
+                        specular,
+                        emissive,
+                        blend,
+                        blend_known: chain.base_material.is_some(),
+                        two_sided: chain.two_sided.unwrap_or(false),
+                        unlit: chain.lighting_model.as_deref() == Some("MLM_Unlit"),
+                        opacity_clip: chain.opacity_clip.unwrap_or(0.3333),
+                        scalars: chain.scalars.clone(),
+                        vectors: chain.vectors.clone(),
+                        base_material: chain.base_material.clone(),
+                        ..Default::default()
+                    });
+                    model.materials.push(MaterialAsset { source: pkg.obj_path(ObjRef::Export(mi)), diffuse, normal, blend: if masked { BlendHint::Masked } else { BlendHint::Opaque }, texture_params: Vec::new() });
                     Some(model.materials.len() - 1)
                 }),
                 _ => None,
@@ -192,4 +222,37 @@ impl AnimLibrary {
         let idx = |n: &String| skeleton.iter().position(|b| b.name.eq_ignore_ascii_case(n)).unwrap_or(usize::MAX);
         self.tracks.sort_by_key(idx);
     }
+}
+
+/// Path -> (library package, export) for the shared material libraries that character
+/// material instances parent into (built once per process).
+fn library_index(content: &Content) -> &'static (Vec<std::sync::Arc<ue3_package::Package>>, HashMap<String, (usize, usize)>) {
+    static INDEX: std::sync::OnceLock<(Vec<std::sync::Arc<ue3_package::Package>>, HashMap<String, (usize, usize)>)> = std::sync::OnceLock::new();
+    INDEX.get_or_init(|| {
+        let libs: Vec<_> = ["DishonoredGame", "Startup"].iter().filter_map(|n| content.package(n).ok()).collect();
+        let mut map = HashMap::new();
+        for (li, p) in libs.iter().enumerate() {
+            for i in 0..p.exports.len() {
+                map.entry(p.obj_path(ObjRef::Export(i)).to_ascii_lowercase()).or_insert((li, i));
+            }
+        }
+        (libs, map)
+    })
+}
+
+/// Walk a character material's chain. Returns the package slots used by the chain's keys
+/// (slot 0 = the character package, then the libraries) and the chain.
+fn character_chain(content: &Content, pkg: &std::sync::Arc<ue3_package::Package>, material: usize) -> (Vec<std::sync::Arc<ue3_package::Package>>, crate::material_chain::MaterialChain) {
+    let (libs, index) = library_index(content);
+    let mut pkgs = vec![pkg.clone()];
+    pkgs.extend(libs.iter().cloned());
+    let chain = {
+        let pk = pkgs.clone();
+        crate::material_chain::walk(&pkgs, (0, material), &mut |slot, r| match r {
+            ObjRef::Null => None,
+            ObjRef::Export(i) => Some((slot, i)),
+            ObjRef::Import(_) => index.get(&pk[slot].obj_path(r).to_ascii_lowercase()).map(|(li, i)| (li + 1, *i)),
+        })
+    };
+    (pkgs, chain)
 }

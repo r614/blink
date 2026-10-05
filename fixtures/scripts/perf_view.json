@@ -1,0 +1,6 @@
+{"steps":[
+  {"wait_ticks": 200}, {"screenshot": "view_a"},
+  {"ticks": 1, "input": {"yaw": 90}}, {"wait_ticks": 30}, {"screenshot": "view_b"},
+  {"ticks": 1, "input": {"yaw": 200, "pitch": -15}}, {"wait_ticks": 30}, {"screenshot": "view_c"},
+  {"quit": true}
+]}
