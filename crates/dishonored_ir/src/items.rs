@@ -75,11 +75,11 @@ pub struct InventoryConfig {
     pub max_mana_elixirs: u8,
     /// `DisTweaks_InteractableInterface.m_fMaxDistance` (class default; pickups do not override it).
     pub interact_distance: f32,
-    /// `Attribute_ChokeTime`: hold time after the grab animation.
+    /// `Attribute_ChokeTime`, added to the choke animation length (0x00A7AA00).
     pub choke_time: f32,
-    /// Length of the choke-in animation added to the choke time (`FUN_00c4de20` of anim state
-    /// 0x5f). Not read from the AnimSet yet (U-101).
-    pub choke_in_time: f32,
+    /// Length of the choke animation the timer adds (`FUN_00c4de20` of anim state 0x5f): the
+    /// `Sword_Choke_Loop_Master` sequence of `Ply_Sword_Choke_as` (LIKELY mapping, U-101).
+    pub choke_anim_time: f32,
     /// `DisTweaks_PlayerInput.m_fChokeHoldToAutoCarry` / `m_fAssassinateHoldToAutoCorpseCarry`.
     pub choke_hold_to_auto_carry: f32,
     pub assassinate_hold_to_auto_carry: f32,
@@ -107,7 +107,7 @@ impl Default for InventoryConfig {
             max_mana_elixirs: 10,
             interact_distance: 200.0,
             choke_time: 1.5,
-            choke_in_time: 0.0,
+            choke_anim_time: 5.033,
             choke_hold_to_auto_carry: 0.2,
             assassinate_hold_to_auto_carry: 0.2,
             carry_ground_speed: 350.0,

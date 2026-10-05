@@ -148,6 +148,151 @@ pub struct PlayerState {
     pub blink: BlinkTravel,
     /// Sprint-slide (`StatePlayerMasterSlide`).
     pub slide: SlideState,
+    /// Ammo, elixirs, coins, runes, bone charms, power levels (`DishonoredInventory`,
+    /// `DishonoredPowersComponent`).
+    #[serde(default)]
+    pub inv: Inventory,
+    /// Choke / knock-out / possession state of this pawn as a victim or host.
+    #[serde(default)]
+    pub condition: Condition,
+    /// Who caused `condition` (choker, possessor, sleeper).
+    #[serde(default)]
+    pub condition_by: Option<PlayerId>,
+    /// Seconds until a sleep dart puts this pawn to sleep (`m_fTimeBeforeSleep`), 0 = none.
+    #[serde(default)]
+    pub sleep_timer: f32,
+    /// Seconds this pawn has been burning (incendiary bolt), 0 = not burning.
+    #[serde(default)]
+    pub burning: f32,
+    /// The attacker side of a choke (`StatePlayerMasterChoke`).
+    #[serde(default)]
+    pub choke: ChokeState,
+    /// Body this pawn carries (`StatePlayerCarryCorpseIdle`), and the carrier of this body.
+    #[serde(default)]
+    pub carrying: Option<PlayerId>,
+    #[serde(default)]
+    pub carried_by: Option<PlayerId>,
+    /// Lift / drop animation in progress (seconds left) while carrying.
+    #[serde(default)]
+    pub carry_anim: f32,
+    /// Possession (`DishonoredActivePowerComponent_Possess`).
+    #[serde(default)]
+    pub possess: PossessState,
+    /// Rate this pawn's time ran at this tick (Bend Time), 1 = normal, 0 = stopped.
+    #[serde(default = "one")]
+    pub time_scale: f32,
+    /// Corpse turned to ash (Shadow Kill) or eaten: no body remains.
+    #[serde(default)]
+    pub no_body: bool,
+    /// Action animation lock (power cast, gadget throw, drink): seconds left.
+    #[serde(default)]
+    pub action_lock: f32,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+/// Power and charm progression indices (`DishonoredPowersComponent`): level 0 = not owned.
+pub mod power {
+    pub const BLINK: usize = 0;
+    pub const WINDBLAST: usize = 1;
+    pub const DARK_VISION: usize = 2;
+    pub const POSSESSION: usize = 3;
+    pub const BEND_TIME: usize = 4;
+    pub const DEVOURING_SWARM: usize = 5;
+    pub const VITALITY: usize = 6;
+    pub const BLOOD_THIRSTY: usize = 7;
+    pub const SHADOW_KILL: usize = 8;
+    pub const AGILITY: usize = 9;
+    pub const COUNT: usize = 10;
+    /// Names as the power tweaks / `m_Powers` call them.
+    pub const NAMES: [&str; COUNT] = ["Blink", "WindBlast", "DarkVision", "Possess", "BendTime", "DevouringSwarm", "Vitality", "BloodThirsty", "ShadowKill", "Celerity"];
+}
+
+/// The player's inventory (`DishonoredInventory`): ammo counts by `eDisAmmoType` (bullets and
+/// bolts stay in [`LeftHandState`]'s reserves), `m_ElixirCounts`, the coin and rune abstract
+/// items, owned/equipped bone charms (bit per `m_Charms` index) and power levels.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Inventory {
+    pub ammo: [u16; 8],
+    pub elixirs: [u8; 2],
+    pub coins: u32,
+    pub runes: u16,
+    pub charms_owned: u32,
+    pub charms_equipped: u32,
+    pub power_levels: [u8; power::COUNT],
+}
+
+impl Default for Inventory {
+    fn default() -> Self {
+        // Players start with Blink, Windblast and Dark Vision at the levels the multiplayer
+        // loadout has always used (level 2 Blink/Windblast, Dark Vision 2).
+        let mut power_levels = [0; power::COUNT];
+        power_levels[power::BLINK] = 2;
+        power_levels[power::WINDBLAST] = 2;
+        power_levels[power::DARK_VISION] = 2;
+        Self { ammo: [0; 8], elixirs: [0; 2], coins: 0, runes: 0, charms_owned: 0, charms_equipped: 0, power_levels }
+    }
+}
+
+/// What has been done to this pawn (`StateNPCMasterBeingChoked`, unconscious NPCs,
+/// `DisPossessablePawn`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Condition {
+    #[default]
+    Normal,
+    /// Held in a choke (cannot act).
+    BeingChoked,
+    /// Knocked out (choke win, sleep dart): non-lethal, stays down; can be carried.
+    Unconscious,
+    /// Controlled by a possessor.
+    Possessed,
+}
+
+/// `DisItemContext_Choke.eChokeState`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ChokePhase {
+    #[default]
+    None,
+    In,
+    Loop,
+    Win,
+    Lose,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct ChokeState {
+    pub phase: ChokePhase,
+    pub target: Option<PlayerId>,
+    /// `m_fTimer` (counts down from `m_fRequiredTime`).
+    pub timer: f32,
+    pub required: f32,
+    /// Seconds into the current phase.
+    pub phase_time: f32,
+    /// `m_fHoldTimeForAutoCarry`.
+    pub hold: f32,
+}
+
+/// `EDisPossessPowerStage`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PossessStage {
+    #[default]
+    Inactive,
+    Targeting,
+    PrePossess,
+    Active,
+    Cooldown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct PossessState {
+    pub stage: PossessStage,
+    pub host: Option<PlayerId>,
+    /// `m_fPossessionTimer` (seconds of possession left) / pre-possess and cooldown timers.
+    pub timer: f32,
+    pub cooldown: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
@@ -205,7 +350,31 @@ impl PlayerState {
             walking: false,
             blink: BlinkTravel::default(),
             slide: SlideState::default(),
+            inv: Inventory::default(),
+            condition: Condition::Normal,
+            condition_by: None,
+            sleep_timer: 0.0,
+            burning: 0.0,
+            choke: ChokeState::default(),
+            carrying: None,
+            carried_by: None,
+            carry_anim: 0.0,
+            possess: PossessState::default(),
+            time_scale: 1.0,
+            no_body: false,
+            action_lock: 0.0,
         }
+    }
+
+    /// Cannot act: knocked out, held in a choke, carried, or possessed (the possessor drives
+    /// it). AI brains should not think for such pawns (hook for `dishonored_ai`).
+    pub fn incapacitated(&self) -> bool {
+        matches!(self.condition, Condition::BeingChoked | Condition::Unconscious) || self.carried_by.is_some()
+    }
+
+    /// A body on the ground: dead or unconscious, not carried (can be picked up).
+    pub fn is_body(&self) -> bool {
+        (!self.alive || self.condition == Condition::Unconscious) && self.carried_by.is_none() && !self.no_body
     }
 
     pub fn just_pressed(&self, input: &PlayerInput, b: u16) -> bool {
@@ -220,6 +389,23 @@ impl PlayerState {
 pub enum ProjectileKind {
     Bullet,
     Bolt,
+    /// `Twk_Proj_Arrow_Sleep`: puts NPCs to sleep (`DisDamageType_Arrow_Sleep`).
+    SleepDart,
+    /// `Twk_Proj_Arrow_Flare`: sets the target on fire (`DisDamageType_Arrow_Flare`).
+    IncendiaryBolt,
+    /// `DisProjectile_Grenade`: bounces, explodes after impact (`DisGrenadeComponent`).
+    Grenade,
+    /// `DisProjectile_StickyGrenade`: sticks to what it hits.
+    StickyGrenade,
+}
+
+impl ProjectileKind {
+    pub fn is_bolt(self) -> bool {
+        matches!(self, Self::Bolt | Self::SleepDart | Self::IncendiaryBolt)
+    }
+    pub fn is_grenade(self) -> bool {
+        matches!(self, Self::Grenade | Self::StickyGrenade)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -232,6 +418,21 @@ pub struct ProjectileState {
     pub age: f32,
     pub damage: f32,
     pub gravity_mult: f32,
+    /// Grenades: armed by the first impact (`DisGrenadeComponent` +0x64 bit 1), seconds to
+    /// detonation (+0xB0) and the floor it cannot go below (+0xB4).
+    #[serde(default)]
+    pub armed: bool,
+    #[serde(default)]
+    pub fuse: f32,
+    #[serde(default)]
+    pub min_fuse: f32,
+    /// Sticky grenade: pawn it is stuck to (and the offset from its centre), or stuck in the world.
+    #[serde(default)]
+    pub stuck_to: Option<PlayerId>,
+    #[serde(default)]
+    pub stuck: bool,
+    #[serde(default)]
+    pub stuck_offset: Vec3,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -243,6 +444,97 @@ pub struct WorldState {
     /// Windblasts in flight (`DishonoredActivePowerComponent_WindBlast` warmup / blast).
     #[serde(default)]
     pub windblasts: Vec<WindblastState>,
+    /// Pickups in the world (placed by the level or dropped).
+    #[serde(default)]
+    pub pickups: Vec<PickupState>,
+    /// Abstract items held (`DishonoredInventory.m_AbstractItem`): keys, notes, mission items.
+    #[serde(default)]
+    pub abstract_items: Vec<HeldItem>,
+    /// Placed Spring Razors (`DisGadget_SpringRazorPlaced`).
+    #[serde(default)]
+    pub traps: Vec<TrapState>,
+    /// Active Bend Time casts (`DishonoredActivePowerComponent_BendTime`).
+    #[serde(default)]
+    pub time_bends: Vec<TimeBendState>,
+    /// Devouring Swarms (`DisRatSwarm`).
+    #[serde(default)]
+    pub swarms: Vec<SwarmState>,
+    #[serde(default)]
+    pub next_entity_id: u32,
+}
+
+/// A pickup actor (`DisPickup_Base`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PickupState {
+    pub id: u32,
+    /// Level actor name (missions refer to it).
+    pub name: String,
+    pub position: Vec3,
+    pub kind: dishonored_ir::items::PickupKind,
+    /// Taken (destroyed) or still in the world.
+    pub active: bool,
+    /// Stat pickups: ammo left per type, rolled once from `m_AmmoRanges` (`FUN_00c3d4e0`).
+    pub ammo_left: [u16; 8],
+    /// Carried by this NPC (`m_pStealablePickup`): follows it, can be pickpocketed.
+    pub carried_by: Option<PlayerId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeldItem {
+    pub owner: PlayerId,
+    pub item: String,
+    pub quantity: i32,
+}
+
+/// `DisGadget_SpringRazorPlaced`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TrapState {
+    pub id: u32,
+    pub owner: PlayerId,
+    pub position: Vec3,
+    /// Up direction of the surface it is on.
+    pub normal: Vec3,
+    /// `m_fArmingTimer`, `m_fDetonationTimer`, `m_fDamageActorTimer`.
+    pub arming: f32,
+    pub detonation: f32,
+    pub damage_timer: f32,
+    /// `m_bTriggered`, `m_bDetonated`, `m_bEmittedDamage`.
+    pub triggered: bool,
+    pub detonated: bool,
+    pub emitted: bool,
+}
+
+/// `DishonoredActivePowerComponent_BendTime` while active.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TimeBendState {
+    pub caster: PlayerId,
+    /// 0-based level.
+    pub level: u8,
+    /// Real (undilated) seconds since start, and `m_fMaxDuration`.
+    pub elapsed: f32,
+    pub duration: f32,
+    pub world_dilation: f32,
+    pub self_dilation: f32,
+}
+
+/// A Devouring Swarm.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SwarmState {
+    pub id: u32,
+    pub owner: PlayerId,
+    pub level: u8,
+    pub position: Vec3,
+    /// Seconds until the rats appear (`m_fRatSwarmSpawnDelay`), then seconds alive.
+    pub spawn_delay: f32,
+    pub age: f32,
+    pub rats: u16,
+    pub target: Option<PlayerId>,
+    /// Seconds on the current target (before `m_fInitialDelayBeforeDealingDamage`), and to the next bite.
+    pub attack_time: f32,
+    pub bite_timer: f32,
+    /// Corpse being eaten and seconds into eating it.
+    pub eating: Option<PlayerId>,
+    pub eat_time: f32,
 }
 
 /// A Windblast: `m_fWarmupTime` after the cast the origin and direction are taken from

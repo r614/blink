@@ -82,7 +82,7 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
     let interact = l.obj("Default__DisTweaks_InteractableInterface");
     inv.interact_distance = l.f(&interact, "Default__DisTweaks_InteractableInterface", "m_fMaxDistance", "items.inventory.interact_distance", d.interact_distance);
     inv.choke_time = l.attr(&attrs, &attrs_path, "m_ChokeTime", "items.inventory.choke_time", d.choke_time);
-    l.prov.insert("items.inventory.choke_in_time".into(), "choke-in animation length (anim state 0x5f) not read yet; 0 (U-101)".into());
+    l.prov.insert("items.inventory.choke_anim_time".into(), "Startup.upk Ply_Sword_Choke_as Sword_Choke_Loop_Master length 5.033 s (anim state 0x5f mapping LIKELY, U-101)".into());
     inv.choke_hold_to_auto_carry = l.f(&input, input_path, "m_fChokeHoldToAutoCarry", "items.inventory.choke_hold_to_auto_carry", d.choke_hold_to_auto_carry);
     inv.assassinate_hold_to_auto_carry = l.f(&input, input_path, "m_fAssassinateHoldToAutoCorpseCarry", "items.inventory.assassinate_hold_to_auto_carry", d.assassinate_hold_to_auto_carry);
     inv.carry_ground_speed = l.attr(&attrs, &attrs_path, "m_GroundSpeedCarryingCorpse", "items.inventory.carry_ground_speed", d.carry_ground_speed);
