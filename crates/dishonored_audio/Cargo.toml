@@ -8,3 +8,4 @@ description = "Wwise containers (AKPK, SoundBank, WEM) and Wwise Vorbis decoding
 [dependencies]
 anyhow.workspace = true
 lewton = "0.10"
+ue3_package.workspace = true

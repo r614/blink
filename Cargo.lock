@@ -366,7 +366,9 @@ name = "audio_dump"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dishonored_assets",
  "dishonored_audio",
+ "ue3_package",
 ]
 
 [[package]]
@@ -2352,6 +2354,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "lewton",
+ "ue3_package",
 ]
 
 [[package]]

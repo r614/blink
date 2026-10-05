@@ -8,3 +8,5 @@ default-run = "audio_dump"
 [dependencies]
 anyhow.workspace = true
 dishonored_audio = { path = "../../crates/dishonored_audio" }
+ue3_package.workspace = true
+dishonored_assets.workspace = true

@@ -170,7 +170,7 @@ fn list(name: &str) -> Result<()> {
             println!("  media {:10} {:8}B {}", m.id, m.size, bank.media_bytes(m).map(describe).unwrap_or_default());
         }
         for o in &bank.hirc {
-            println!("  hirc type {:2} id {:10} len {:4} {:02x?}", o.kind, o.id, o.body.len(), &o.body[..o.body.len().min(48)]);
+            println!("  hirc type {:2} id {:10} len {:4} {:02x?}", o.kind, o.id, o.body.len(), &o.body[..o.body.len().min(std::env::var("HEXLEN").ok().and_then(|s| s.parse().ok()).unwrap_or(48))]);
         }
         for (id, n) in &bank.bank_names {
             println!("  stid {id:08x} {n}");
@@ -277,10 +277,106 @@ fn decode_all(streams: bool) -> Result<()> {
     Ok(())
 }
 
+fn print_cue(lib: &dishonored_audio::library::SoundLibrary, c: &dishonored_audio::library::Cue, depth: usize) {
+    use dishonored_audio::library::Cue;
+    let pad = "  ".repeat(depth);
+    match c {
+        Cue::Leaf(l) => println!(
+            "{pad}leaf {} media {} {} vol {:+.1} dB pitch {:+.0} loop {} att {:?}",
+            lib.banks[l.media.bank].name,
+            l.media.id,
+            if l.media.streamed { "stream" } else { "embedded" },
+            l.volume_db,
+            l.pitch_cents,
+            l.looping,
+            l.max_distance
+        ),
+        Cue::All(v) => {
+            println!("{pad}all ({})", v.len());
+            v.iter().for_each(|c| print_cue(lib, c, depth + 1));
+        }
+        Cue::Random(v) => {
+            println!("{pad}random ({})", v.len());
+            v.iter().take(12).for_each(|c| print_cue(lib, &c.0, depth + 1));
+            if v.len() > 12 {
+                println!("{pad}  ... {} more", v.len() - 12);
+            }
+        }
+    }
+}
+
+/// `event <Event> <Bank>[,<Bank>...]`: resolve an event and decode one pick per leaf group.
+fn event(name: &str, banks: &str) -> Result<()> {
+    let mut lib = dishonored_audio::library::SoundLibrary::new(install())?;
+    for b in banks.split(',') {
+        lib.load_bank(b)?;
+    }
+    let id = dishonored_audio::fnv1_32(name);
+    println!("{name}: id {id}");
+    if let Some((b, dishonored_audio::hirc::Node::Event { actions })) = lib.node(id) {
+        println!("  in {} with actions:", lib.banks[b].name);
+        for a in actions {
+            if let Some((_, dishonored_audio::hirc::Node::Action(act))) = lib.node(*a) {
+                println!("    action {a} type 0x{:04x} target {} set {:x?}", act.action_type, act.target, act.set_group);
+            }
+        }
+    }
+    for s in std::env::var("AK_STATES").unwrap_or_default().split(',').filter(|s| !s.is_empty()) {
+        println!("  state event {s}: {}", lib.apply_state_event(s));
+    }
+    if let Ok(t) = std::env::var("AK_NODE") { if let Some((_, n)) = lib.node(t.parse()?) { println!("  node {t}: {:?}", match n { dishonored_audio::hirc::Node::Container { kind, children, switch_groups, default_switch, group_id, .. } => format!("kind {kind} children {} groups {:x?} default {default_switch:x} group {group_id:x}", children.len(), switch_groups), _ => "other".into() }); } }
+    println!("  states {:x?}", lib.states.lock().unwrap());
+    let cue = lib.resolve(name).context("event does not resolve to any sound")?;
+    print_cue(&lib, &cue, 1);
+    let mut seed = 12345u32;
+    let mut rnd = move || {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        (seed >> 8) as f32 / (1u32 << 24) as f32
+    };
+    let mut leaves = Vec::new();
+    cue.pick(&mut rnd, &mut leaves);
+    std::fs::create_dir_all("harness_out/audio")?;
+    for (i, l) in leaves.iter().enumerate() {
+        let p = lib.decode(l.media)?;
+        let out = format!("harness_out/audio/{name}_{i}.wav");
+        std::fs::write(&out, p.to_wav())?;
+        println!("  pick {i}: media {} {:.2}s peak {:.3} -> {out}", l.media.id, p.duration(), p.peak());
+    }
+    Ok(())
+}
+
+/// `emitters <Map_P>`: placed AkAmbientSound actors, their banks and whether they resolve.
+fn emitters(map: &str) -> Result<()> {
+    let t0 = std::time::Instant::now();
+    let idx = dishonored_audio::index::EventIndex::build(&install())?;
+    println!("event index: {} events in {} packages ({:.2}s)", idx.events.len(), idx.packages.len(), t0.elapsed().as_secs_f32());
+    let content = dishonored_assets::Content::locate()?;
+    let pkgs = dishonored_assets::map_packages(&content, map);
+    let mut lib = dishonored_audio::library::SoundLibrary::new(install())?;
+    let (mut n, mut ok) = (0, 0);
+    for p in &pkgs {
+        let pkg = content.package(p)?;
+        for e in dishonored_audio::emitters::ambient_emitters(&pkg) {
+            n += 1;
+            let bank = idx.bank_of(&e.event).map(str::to_string);
+            let resolved = bank.as_ref().is_some_and(|b| lib.load_bank(b).is_ok() && lib.resolve(&e.event).is_some());
+            ok += resolved as usize;
+            println!(
+                "{p:24} {:40} {:>9.0},{:>9.0},{:>7.0} auto {} bank {:?} resolves {resolved}",
+                e.event, e.position[0], e.position[1], e.position[2], e.auto_play, bank
+            );
+        }
+    }
+    println!("{n} emitters, {ok} resolve to sounds ({:.2}s)", t0.elapsed().as_secs_f32());
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("survey") => survey(),
+        Some("emitters") => emitters(args.get(1).map(String::as_str).unwrap_or("L_Boyle_Ext_P")),
+        Some("event") => event(args.get(1).context("event name")?, args.get(2).context("bank list")?),
         Some("decodeall") => decode_all(args.get(1).is_some_and(|a| a == "--streams")),
         Some("list") => list(args.get(1).context("bank name")?),
         Some("wem") => wem(

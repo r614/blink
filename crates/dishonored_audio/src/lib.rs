@@ -5,6 +5,10 @@
 
 pub mod adpcm;
 pub mod bank;
+pub mod emitters;
+pub mod index;
+pub mod hirc;
+pub mod library;
 pub mod pck;
 pub mod vorbis;
 pub mod wem;
