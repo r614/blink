@@ -11,6 +11,7 @@ pub mod index;
 pub mod hirc;
 pub mod library;
 pub mod pck;
+pub mod vo;
 pub mod vorbis;
 pub mod wem;
 

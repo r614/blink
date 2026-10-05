@@ -2383,6 +2383,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dishonored_conversation"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dishonored_audio",
+ "serde",
+ "ue3_package",
+]
+
+[[package]]
 name = "dishonored_ir"
 version = "0.1.0"
 dependencies = [

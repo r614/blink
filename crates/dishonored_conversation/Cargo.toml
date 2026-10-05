@@ -1,0 +1,20 @@
+[package]
+name = "dishonored_conversation"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Dishonored conversation graphs (DisDialogOneShot / DisDialogTree / DisConversation / DisConv_*) read from the install, and a deterministic server-side conversation runner"
+
+[features]
+default = ["load"]
+# Reading graphs from the cooked packages and resolving VO lengths from the Wwise banks.
+load = ["dep:ue3_package", "dep:dishonored_audio", "dep:anyhow"]
+
+[dependencies]
+serde.workspace = true
+ue3_package = { workspace = true, optional = true }
+dishonored_audio = { path = "../dishonored_audio", optional = true }
+anyhow = { workspace = true, optional = true }
+
+[dev-dependencies]
+anyhow.workspace = true

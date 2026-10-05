@@ -94,6 +94,8 @@ pub struct SoundLibrary {
     cache: Mutex<HashMap<MediaKey, Arc<Pcm>>>,
     /// Global state/switch values (group id -> value), as set by SetState actions.
     pub states: Mutex<HashMap<u32, u32>>,
+    /// Extension of the dialog banks to load (`INT` = english(us)).
+    pub vo_language: String,
 }
 
 pub fn pck_dirs(root: &Path) -> Vec<PathBuf> {
@@ -109,7 +111,7 @@ impl SoundLibrary {
     pub fn new(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         let codebooks = CodebookLibrary::from_install(&root)?;
-        Ok(Self { root, codebooks, banks: Vec::new(), objects: HashMap::new(), cache: Mutex::new(HashMap::new()), states: Mutex::new(HashMap::new()) })
+        Ok(Self { root, codebooks, banks: Vec::new(), objects: HashMap::new(), cache: Mutex::new(HashMap::new()), states: Mutex::new(HashMap::new()), vo_language: "INT".into() })
     }
 
     pub fn find_pck(&self, name: &str) -> Option<PathBuf> {
@@ -125,12 +127,35 @@ impl SoundLibrary {
         None
     }
 
-    /// Load a bank package by name (e.g. `Bank_Player`). Idempotent.
+    /// Per-voice dialog banks are AKPK files named `Bk_<GUID>.<LANG>` (`.INT`, `.DEU`, `.FRA`,
+    /// ...) in `CookedPCConsole`, not `.pck` (research/dishonored/BOYLE_MISSION.md section 4).
+    pub fn find_vo_bank(&self, name: &str, lang: &str) -> Option<PathBuf> {
+        let want = format!("{}.{}", name, lang).to_ascii_lowercase();
+        for d in pck_dirs(&self.root) {
+            let direct = d.join(format!("{name}.{lang}"));
+            if direct.is_file() {
+                return Some(direct);
+            }
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                if e.file_name().to_string_lossy().to_ascii_lowercase() == want {
+                    return Some(e.path());
+                }
+            }
+        }
+        None
+    }
+
+    /// Load a bank package by name (e.g. `Bank_Player`, or a dialog bank `Bk_<GUID>`, which
+    /// is looked up as `Bk_<GUID>.INT`). Idempotent.
     pub fn load_bank(&mut self, name: &str) -> Result<()> {
         if self.banks.iter().any(|b| b.name.eq_ignore_ascii_case(name)) {
             return Ok(());
         }
-        let path = self.find_pck(name).with_context(|| format!("no package {name}.pck"))?;
+        let path = self
+            .find_pck(name)
+            .or_else(|| name.starts_with("Bk_").then(|| self.find_vo_bank(name, &self.vo_language)).flatten())
+            .with_context(|| format!("no package {name}.pck"))?;
         let pck = Pck::open(&path)?;
         let be = *pck.banks.first().context("package has no soundbank")?;
         let bank = Bank::parse(&pck.read(&be)?)?;
@@ -343,6 +368,19 @@ impl SoundLibrary {
         } else {
             b.bank.media_by_id(k.id).map(<[u8]>::to_vec).context("media not in bank")
         }
+    }
+
+    /// Length in seconds from the media header alone (Vorbis `vorb` sample count, PCM data
+    /// size), without decoding.
+    pub fn media_length(&self, k: MediaKey) -> Result<f32> {
+        let b = self.media_bytes(k)?;
+        let r = crate::wem::Riff::parse(&b)?;
+        let frames = match r.codec {
+            crate::wem::CODEC_VORBIS => crate::vorbis::vorb_info(&r)?.sample_count as f32,
+            crate::wem::CODEC_PCM => r.data()?.len() as f32 / r.block_align.max(1) as f32,
+            c => anyhow::bail!("no length rule for codec 0x{c:04x}"),
+        };
+        Ok(frames / r.sample_rate.max(1) as f32)
     }
 
     /// Decode without caching (long ambience/music picks that are played once).
