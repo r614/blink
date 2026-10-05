@@ -1,0 +1,19 @@
+{"steps":[
+  {"wait_level":true},
+  {"screenshot":"01_main"},
+  {"activate":"main:play"},{"wait_frames":10},{"screenshot":"02_play"},{"back":true},
+  {"activate":"main:missions"},{"wait_frames":10},{"screenshot":"03_missions"},{"back":true},
+  {"activate":"main:multiplayer"},{"wait_frames":10},{"screenshot":"04_multiplayer_join"},
+  {"activate":"mp:tab:host"},{"wait_frames":10},{"screenshot":"05_multiplayer_host"},{"back":true},
+  {"activate":"main:options"},{"wait_frames":10},{"screenshot":"06_options_general_gameplay"},
+  {"activate":"opt:sub:1"},{"wait_frames":5},{"screenshot":"07_options_general_ui"},
+  {"activate":"opt:tab:1"},{"wait_frames":5},{"screenshot":"08_options_controls_keyboard"},
+  {"activate":"opt:sub:1"},{"wait_frames":5},{"screenshot":"09_options_controls_mouse"},
+  {"activate":"opt:sub:2"},{"wait_frames":5},{"screenshot":"10_options_controls_gamepad"},
+  {"activate":"opt:line:t_Modify_ControlsScheme"},{"wait_frames":5},{"screenshot":"11_options_gamepad_scheme"},{"back":true},
+  {"activate":"opt:tab:2"},{"wait_frames":5},{"screenshot":"12_options_graphics"},
+  {"activate":"opt:line:t_Modify_VideoSettings"},{"wait_frames":5},{"screenshot":"13_options_video"},{"activate":"video:cancel"},
+  {"activate":"opt:line:t_Modify_Gamma"},{"wait_frames":5},{"screenshot":"14_options_brightness"},{"back":true},
+  {"activate":"opt:tab:3"},{"wait_frames":5},{"screenshot":"15_options_audio"},
+  {"quit":true}
+]}

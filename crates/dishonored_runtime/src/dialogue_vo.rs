@@ -94,8 +94,9 @@ fn db(v: f32) -> f32 {
 }
 
 /// Request new lines, start decoded ones, stop voices whose line is gone.
-pub fn play_dialogue_vo(mut commands: Commands, vo: Option<ResMut<DialogueVo>>, view: Res<SessionView>, mut clips: ResMut<Assets<PcmClip>>, voices: Query<(Entity, &DialogueVoice)>) {
-    let Some(mut vo) = vo else { return };
+pub fn play_dialogue_vo(mut commands: Commands, vo: Option<ResMut<DialogueVo>>, view: Res<SessionView>, clips: Option<ResMut<Assets<PcmClip>>>, voices: Query<(Entity, &DialogueVoice)>) {
+    // No clip assets when audio is disabled (--no-audio).
+    let (Some(mut vo), Some(mut clips)) = (vo, clips) else { return };
     let Some(mv) = view.matchv.mission.as_ref() else { return };
     let live: HashSet<u32> = mv.dialogue.iter().map(|l| l.id).collect();
     for l in &mv.dialogue {

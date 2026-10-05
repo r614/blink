@@ -43,15 +43,43 @@ const EMITTER_MARGIN: f32 = 500.0;
 #[derive(Resource, Clone, Copy)]
 pub struct AudioSettings {
     pub enabled: bool,
+    /// Master gain: `--volume` x the settings global volume.
     pub volume: f32,
+    /// `--volume` alone.
+    pub cli: f32,
+    /// Bus gains from the settings (music / SFX / voices, 0..1).
+    pub music: f32,
+    pub sfx: f32,
+    pub voice: f32,
 }
 
 impl AudioSettings {
     pub fn from_args() -> Self {
         let a: Vec<String> = std::env::args().collect();
         let volume = a.iter().position(|x| x == "--volume").and_then(|i| a.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(1.0f32);
-        Self { enabled: !a.iter().any(|x| x == "--no-audio"), volume: volume.max(0.0) }
+        Self { enabled: !a.iter().any(|x| x == "--no-audio"), volume: volume.max(0.0), cli: volume.max(0.0), music: 1.0, sfx: 1.0, voice: 1.0 }
     }
+}
+
+fn bus_gain(s: &AudioSettings, bus: u8) -> f32 {
+    match bus {
+        1 => s.music,
+        2 => s.voice,
+        _ => s.sfx,
+    }
+}
+
+/// Options -> Audio volumes (global, music, SFX, voices) onto the mixer.
+fn sync_volumes(gs: Option<Res<crate::settings::GameSettings>>, mut s: ResMut<AudioSettings>) {
+    let Some(gs) = gs else { return };
+    if !gs.is_changed() {
+        return;
+    }
+    let a = &gs.s.audio;
+    s.volume = s.cli * a.global / 100.0;
+    s.music = a.music / 100.0;
+    s.sfx = a.sfx / 100.0;
+    s.voice = a.voices / 100.0;
 }
 
 /// Decoded PCM as a bevy_audio source.
@@ -96,6 +124,8 @@ impl Decodable for PcmClip {
 
 /// Continuous ambience slot (level bed, score, placed emitter).
 struct AmbientSlot {
+    /// The level score (music bus) rather than ambience (SFX bus).
+    music: bool,
     cue: Cue,
     /// Dishonored world position; `None` = 2D.
     pos: Option<Vec3>,
@@ -144,6 +174,8 @@ pub struct Voice {
     gain_db: f32,
     attenuation: Option<u32>,
     max_distance: Option<f32>,
+    /// Mixer bus for the settings volumes: 0 SFX, 1 music, 2 voices.
+    bus: u8,
 }
 
 #[derive(Component)]
@@ -161,7 +193,7 @@ impl Plugin for GameAudioPlugin {
         app.add_audio_source::<PcmClip>()
             .init_resource::<GameAudio>()
             .add_systems(Startup, start_loading)
-            .add_systems(Update, (finish_loading, attach_listener, play_sim_events, footsteps, ambience, update_voices, stats).chain());
+            .add_systems(Update, (sync_volumes, finish_loading, attach_listener, play_sim_events, footsteps, ambience, update_voices, stats).chain());
     }
 }
 
@@ -238,10 +270,10 @@ fn load(map: &str) -> anyhow::Result<Loaded> {
     let mut ambience = Vec::new();
     if let Some(a) = &amb {
         if let Some(c) = lib.resolve(a.bed) {
-            ambience.push(AmbientSlot { cue: c, pos: None, gain_db: 0.0, range: f32::MAX, next_try: 0.0 });
+            ambience.push(AmbientSlot { music: false, cue: c, pos: None, gain_db: 0.0, range: f32::MAX, next_try: 0.0 });
         }
         if let Some(c) = a.music.and_then(|m| lib.resolve(m)) {
-            ambience.push(AmbientSlot { cue: c, pos: None, gain_db: -8.0, range: f32::MAX, next_try: 0.0 });
+            ambience.push(AmbientSlot { music: true, cue: c, pos: None, gain_db: -8.0, range: f32::MAX, next_try: 0.0 });
         }
     }
     let mut placed = 0;
@@ -251,7 +283,7 @@ fn load(map: &str) -> anyhow::Result<Loaded> {
         c.leaves(&mut leaves);
         let range = leaves.iter().filter_map(|l| l.max_distance).fold(0.0f32, f32::max);
         let range = if range > 0.0 { range } else { FALLBACK_RANGE };
-        ambience.push(AmbientSlot { cue: c, pos: Some(Vec3::from(e.position)), gain_db: 0.0, range, next_try: 0.0 });
+        ambience.push(AmbientSlot { music: false, cue: c, pos: Some(Vec3::from(e.position)), gain_db: 0.0, range, next_try: 0.0 });
         placed += 1;
     }
 
@@ -347,15 +379,16 @@ impl GameAudio {
         let n = leaves.len();
         self.posted += 1;
         debug!("post {event} ({n} voices, {})", if anchor.is_some() { "3D" } else { "2D" });
+        let bus = if event.contains("VO_") { 2 } else { 0 };
         for l in leaves {
-            self.spawn_leaf(commands, assets, &l, anchor, at, extra_db);
+            self.spawn_leaf(commands, assets, &l, anchor, at, extra_db, bus);
         }
         n
     }
 
-    fn spawn_leaf(&mut self, commands: &mut Commands, assets: &mut Assets<PcmClip>, l: &Leaf, anchor: Option<Anchor>, at: Vec3, extra_db: f32) {
+    fn spawn_leaf(&mut self, commands: &mut Commands, assets: &mut Assets<PcmClip>, l: &Leaf, anchor: Option<Anchor>, at: Vec3, extra_db: f32, bus: u8) {
         let Some(h) = self.clip(assets, l.media) else { return };
-        spawn_voice(commands, h, l, anchor, at, extra_db, None);
+        spawn_voice(commands, h, l, anchor, at, extra_db, None, bus);
     }
 }
 
@@ -602,10 +635,10 @@ fn ambience(
         audio.pending[i] = false;
         // Commands apply at the end of the frame; do not re-pick before the voice exists.
         audio.ambience[i].next_try = now + 0.5;
-        let (pos, gain) = (audio.ambience[i].pos, audio.ambience[i].gain_db);
+        let (pos, gain, music) = (audio.ambience[i].pos, audio.ambience[i].gain_db, audio.ambience[i].music);
         for (l, pcm) in items {
             let h = assets.add(PcmClip(pcm));
-            spawn_voice(&mut commands, h, &l, pos.map(Anchor::Point), pos.unwrap_or_default(), gain, Some(i));
+            spawn_voice(&mut commands, h, &l, pos.map(Anchor::Point), pos.unwrap_or_default(), gain, Some(i), if music { 1 } else { 0 });
         }
     }
     let Some(lib) = audio.lib.clone() else { return };
@@ -634,7 +667,8 @@ fn ambience(
     }
 }
 
-fn spawn_voice(commands: &mut Commands, h: Handle<PcmClip>, l: &Leaf, anchor: Option<Anchor>, at: Vec3, extra_db: f32, ambient: Option<usize>) {
+#[allow(clippy::too_many_arguments)]
+fn spawn_voice(commands: &mut Commands, h: Handle<PcmClip>, l: &Leaf, anchor: Option<Anchor>, at: Vec3, extra_db: f32, ambient: Option<usize>, bus: u8) {
     let speed = 2f32.powf(l.pitch_cents / 1200.0).clamp(0.25, 4.0);
     let settings = PlaybackSettings {
         mode: PlaybackMode::Despawn,
@@ -649,7 +683,7 @@ fn spawn_voice(commands: &mut Commands, h: Handle<PcmClip>, l: &Leaf, anchor: Op
         AudioPlayer(h),
         settings,
         Transform::from_translation(coords::pos(at)),
-        Voice { anchor, gain_db: l.volume_db + extra_db, attenuation: l.attenuation, max_distance: l.max_distance },
+        Voice { anchor, gain_db: l.volume_db + extra_db, attenuation: l.attenuation, max_distance: l.max_distance, bus },
     ));
     if let Some(i) = ambient {
         e.insert(AmbientVoice(i));
@@ -684,10 +718,10 @@ fn update_voices(
                 if t <= 0.0 { -200.0 } else { 40.0 * t.log10() }
             }
         };
-        sink.set_volume(Volume::Linear(db(v.gain_db + att_db) * settings.volume));
+        sink.set_volume(Volume::Linear(db(v.gain_db + att_db) * settings.volume * bus_gain(&settings, v.bus)));
     }
     for (v, mut sink) in &mut flat {
-        sink.set_volume(Volume::Linear(db(v.gain_db) * settings.volume));
+        sink.set_volume(Volume::Linear(db(v.gain_db) * settings.volume * bus_gain(&settings, v.bus)));
     }
 }
 

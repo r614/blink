@@ -19,6 +19,9 @@
 //! harness travel              Ext -> Int -> Ext through the original doors; level state kept
 //! harness conversation        original Boyle conversations headless (subtitles, VO, choices,
 //!                             outputs, flags) + the conversation mission end to end
+//! harness launcher           the launcher end to end: screenshots of every screen, settings
+//!                             persisted and picked up by a launched game, pause menu, host +
+//!                             browse + join a local server through the launcher
 //! harness all                 sim, net, visual, contracts, audio; writes harness_out/<run>/REPORT.md
 //! ```
 
@@ -28,6 +31,7 @@ mod conversation;
 mod mission;
 mod travel;
 mod fidelity;
+mod launcher;
 mod netsoak;
 mod report;
 mod scenarios;
@@ -71,6 +75,7 @@ fn main() -> Result<()> {
         "mission" => mission::run(&ctx, &mut rep)?,
         "travel" => travel::run(&ctx, &mut rep)?,
         "conversation" => conversation::run(&ctx, &mut rep)?,
+        "launcher" => launcher::run(&ctx, &mut rep)?,
         "replay" => {
             let file = args.get(1).expect("replay file");
             netsoak::verify_replay_file(&PathBuf::from(file), &mut rep)?;

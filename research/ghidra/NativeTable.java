@@ -1,5 +1,5 @@
-// UE3 native function tables of the original executable: `FNameNativePtrPair { const ANSICHAR*
-// Name; Native Func; }` arrays ({"execFoo", &UClass::execFoo}, ..., {NULL, NULL}), one per class.
+// UE3 native function tables of the original executable: `FNativeFunctionLookup { const ANSICHAR*
+// Name; Native Func; }` arrays ({"UClassexecFoo", &UClass::execFoo}, ..., {NULL, NULL}), one per class.
 // Labels each native `exec*` function in the program and writes "table / name / address" lines.
 //
 // analyzeHeadless <proj> dishonored -process Dishonored.exe -noanalysis
@@ -56,7 +56,7 @@ public class NativeTable extends GhidraScript {
                     Address n = ptr(a);
                     String s = n == null ? null : ascii(n);
                     Address f = ptr(a.add(4));
-                    boolean pair = s != null && s.startsWith("exec") && f != null && mem.getBlock(f) != null && mem.getBlock(f).isExecute();
+                    boolean pair = s != null && s.matches("[UA][A-Za-z0-9_]*exec[A-Za-z0-9_]+") && f != null && mem.getBlock(f) != null && mem.getBlock(f).isExecute();
                     if (!pair) {
                         a = a.add(4);
                         continue;
@@ -67,11 +67,11 @@ public class NativeTable extends GhidraScript {
                         Address nn = ptr(t);
                         String ss = nn == null ? null : ascii(nn);
                         Address ff = ptr(t.add(4));
-                        if (ss == null || ff == null || !ss.startsWith("exec")) break;
+                        if (ss == null || ff == null || !ss.matches("[UA][A-Za-z0-9_]*exec[A-Za-z0-9_]+")) break;
                         w.println(a + "\t" + ss + "\t" + ff);
                         try {
                             if (getFunctionAt(ff) == null) createFunction(ff, null);
-                            getSymbolTable().createLabel(ff, ss, SourceType.ANALYSIS);
+                            currentProgram.getSymbolTable().createLabel(ff, ss, SourceType.ANALYSIS);
                         } catch (Exception e) {
                         }
                         natives++;

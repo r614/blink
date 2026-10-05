@@ -22,6 +22,7 @@ from your install.
 | M3 target map | done: Lady Boyle's Last Party (`research/dishonored/maps/TARGET_MAP.md`) |
 | M4 render map | **done: Boyle estate renders in Bevy** |
 | M5 collision | next (kDOP collision triangles already extracted) |
+| Launcher | main menu, missions, server browser / creator, every original option (`research/dishonored/MENUS.md`) |
 
 ## Layout
 
@@ -39,6 +40,7 @@ crates/
                      (`L_*_Nav` pylons; research/dishonored/NAVIGATION.md)
   dishonored_ai      NPC brains on Arkane's attention model and AI tweaks
                      (research/dishonored/AI.md)
+  dishonored_settings player settings modelled on ArkProfileSettings (options, defaults, bindings)
 tools/
   package_dump       inspect a package: names / imports / exports / properties / hex
                      (package_scan: sweep a whole directory)
@@ -57,6 +59,40 @@ Requires a GOG install of Dishonored: Definitive Edition. The default path is
 ```bash
 cargo run --release -p dishonored_runtime -- --map L_Boyle_Ext_P
 ```
+
+### Launcher
+
+Without arguments the runtime opens the launcher. This is Dishonored's own main menu, drawn
+from the `UI_MainMenu` / `UI_OptionsMenu` movies over the `Dishonored_MainMenu` level, with
+the menu music and UI sounds. Its entries:
+
+- Play: offline match against bots.
+- Missions: `missions/*.ron`.
+- Multiplayer:
+  - Join: server browser through the master, plus direct connect.
+  - Host: server creator. It starts a local `dishonored_server` and optionally a local
+    `dishonored_master`.
+- Options: every original setting, in the original categories.
+- Quit.
+
+Settings are saved to `%APPDATA%/dishonored-rs/settings.ron` (`--settings FILE` or
+`DISHONORED_RS_SETTINGS` overrides the path). The game reads them at startup. Options the
+port does not implement yet are kept and marked "not yet effective". In game, Esc opens the
+pause menu: Resume, Options, Back to Main Menu. See `research/dishonored/MENUS.md`.
+
+```bash
+cargo run --release -p dishonored_runtime
+```
+
+`harness launcher` drives it end to end:
+
+- screenshots of every screen;
+- a settings change, persisted and picked up by a launched game;
+- the pause menu;
+- hosting, browsing and joining a local server.
+
+The launcher also takes `--control PORT` and `--script FILE`; see
+`fixtures/scripts/launcher_screens.json`.
 
 ### Playing
 

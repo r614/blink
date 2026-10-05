@@ -542,3 +542,45 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   - Harness (3-minute Contracts, same seeds): contract kills 10 -> 7, pursuits 14 -> 9, guard-combat ticks 4,565 -> 13,685, civilian-flee ticks 13,792 -> 206,173 (panics last until attention leaks below the Investigate stop: 0.015-0.025/s), NPC deaths 1 -> 5. Mission: completes (host at 13 s, done at 23 s) but the assassination is now witnessed (wider original outer cone 160 deg / 1700 uu): detected 7, alarms 2, one agent death.
 - **Confidence:** data CONFIRMED; vision-rate combination SPECULATIVE (U-041); no-amount increase semantics LIKELY (U-042); patrol topology, attack patterns, alarms OPEN (U-043, U-044).
 - **Implementation consequence:** `SimConfig.gameplay.ai` (cache `gameplay_config.v2.json`) feeds every crowd at match start; mission `Alert`/`Calm` commands go through the attention model.
+## 2026-10-05 — Menus, settings and the launcher
+- **Question:** How are the original main, pause and options menus built, where do their texts
+  and settings come from, and can the port reproduce them from the install?
+- **Evidence:**
+  - `UI_MainMenu.MainMenu` (in `Dishonored_MainMenu.upk`) imports `o_OptionsScreen`,
+    `o_videoSettings`, the gamma and pad screens from `UI_OptionsMenu.OptionsMenu` (`Startup.upk`).
+    `SwfMovie.ReferencedSwfs` and the GFx `ImportAssets2` tags name them.
+  - Widgets carry state labels (`default`, `over`, `selected`, `unselected`, `bind_in`, ...).
+  - Every text field holds a placeholder. The labels are in `Settings.int`, `Twk_InGameUI.int` and
+    `DishonoredGame.int`.
+  - Settings are `Engine.ArkProfileSettings`. Its class default object holds 113 defaults and
+    124 value mappings (types, ranges, value-label keys).
+  - The menu level `Dishonored_MainMenu` imports with the map importer. Its matinee cameras
+    share one main pose.
+  - The UI sound theme is `Twk_InGameUI.UISoundTheme_Common` -> `Bank_UI` events. The menu
+    music is `Musics.Music_Menu`.
+  - Details: `dishonored/MENUS.md`.
+- **Experiment:**
+  - Extended the SWF reader additively: `DefineEditText`, ImportAssets, DefineButton2, font ids,
+    solid-fill shapes, label listing. `swf_dump --texts` prints them.
+  - Added a UE3 localization reader (`dishonored_assets::loc`).
+  - Built the `dishonored_settings` crate (every original option with its type, range and
+    default; RON file).
+  - Built a launcher and pause menu in the runtime that draw the movies' sprites at their
+    state frames and fill their fields.
+  - `harness launcher` drives it through a control socket.
+- **Result:**
+  - Main menu over the 3D menu level, with the menu music and UI sounds.
+  - Screens: Play, Missions, Multiplayer (browser and server creator), Options (4 tabs,
+    7 lists, video / brightness / pad screens), and the in-game pause menu.
+  - Ids 29-133 map to `PSI_*` by order. Each group's types and ranges match its labels.
+  - `harness launcher`: 14/14 checks. These cover screenshots of 15 screens, settings
+    persisted, a launched game reading the new FOV / invert / rebound key, the pause menu, and
+    hosting, browsing and joining a local server through the launcher.
+- **Confidence:** CONFIRMED for structure, texts, sounds and defaults (read from data); LIKELY for
+  the id -> `PSI_*` correspondence; APPROXIMATION for layout computed by ActionScript (list
+  rows, button bar spacing), the static menu camera (matinee keys not decoded) and colour
+  transforms with additive terms.
+- **Implementation consequence:** `dishonored_runtime` without arguments opens the launcher.
+  Games run as child processes with `--from-launcher`. Unimplemented options are saved and
+  marked "not yet effective". The subtitle mode is available to the dialogue HUD through the
+  `GameSettings` resource.

@@ -2,12 +2,16 @@
 //! `dishonored_sim`, run locally (offline) or predicted against a dedicated server.
 //!
 //! ```text
+//! dishonored_runtime                  (no arguments, or --launcher) the launcher: main menu,
+//!                                     missions, multiplayer browser / server creator, options
 //! dishonored_runtime [--map L_Boyle_Ext_P]
 //!     (default)              offline FFA vs --bots N (default 3); --spectate to watch bots
 //!     --connect HOST:PORT    join a dedicated server
 //!     --browse MASTER        list servers from a control plane and join the best one
 //!     --inspect              free camera, no gameplay (--pos x,y,z --yaw --pitch)
 //!   options: --name NAME --show-hidden --max-tex N --lat MS --loss P
+//!            --settings FILE (default %APPDATA%/dishonored-rs/settings.ron) --fullscreen
+//!            --from-launcher (set by the launcher: window from the settings, Esc menu returns)
 //!   rendering (all on by default; for before/after comparisons):
 //!            --no-lightmaps --no-materials --no-fx --no-dynamic-lights --no-fog
 //!            --no-post --no-sky, or --baseline for all of them (diffuse-only renderer
@@ -34,6 +38,15 @@ mod gfx_hud;
 mod viewmodel;
 mod hud_dialogue;
 mod dialogue_vo;
+mod settings;
+mod menu_art;
+mod menu_ui;
+mod menu_audio;
+mod menu_options;
+mod launcher;
+mod launcher_bg;
+mod pause_menu;
+mod hud_settings;
 
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::input::mouse::AccumulatedMouseMotion;
@@ -135,13 +148,32 @@ struct FreeCam {
 }
 
 fn main() {
-    let args = parse_args();
+    // No game-mode argument (or `--launcher`): the launcher (main menu, options, server creator).
+    if launcher::wanted() {
+        if let AppExit::Error(c) = launcher::run() {
+            std::process::exit(c.get() as i32);
+        }
+        return;
+    }
+    let mut args = parse_args();
+    let game_settings = settings::GameSettings::load();
+    if !std::env::args().any(|a| a == "--max-tex") {
+        args.max_tex = settings::max_texture_size(&game_settings.s);
+    }
+    // Window: unchanged for command-line runs; from the settings when the launcher started us.
+    let from_launcher = std::env::args().any(|a| a == "--from-launcher");
+    let (size, mode, present) = if from_launcher || std::env::args().any(|a| a == "--fullscreen") {
+        settings::startup_window(Some(args.size), std::env::args().any(|a| a == "--fullscreen"), &game_settings.s)
+    } else {
+        (args.size, bevy::window::WindowMode::Windowed, if std::env::var_os("DISHONORED_NOVSYNC").is_some() { bevy::window::PresentMode::AutoNoVsync } else { bevy::window::PresentMode::AutoVsync })
+    };
     let mut app = App::new();
     let mut plugins = DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: format!("dishonored-rs - {}", args.map),
-            resolution: args.size.into(),
-            present_mode: if std::env::var_os("DISHONORED_NOVSYNC").is_some() { bevy::window::PresentMode::AutoNoVsync } else { bevy::window::PresentMode::AutoVsync },
+            resolution: size.into(),
+            mode,
+            present_mode: present,
             ..default()
         }),
         ..default()
@@ -213,6 +245,18 @@ fn main() {
         }
         app.add_plugins(audio::GameAudioPlugin);
         app.add_plugins(hud_dialogue::DialoguePlugin);
+        // Settings, pause menu (Esc) and the HUD options.
+        if audio::AudioSettings::from_args().enabled {
+            app.add_plugins(menu_audio::MenuAudioPlugin { register_source: false, music: false });
+        } else {
+            app.init_resource::<menu_audio::MenuSounds>();
+        }
+        app.insert_resource(settings::Bindings::from_settings(&game_settings.s))
+            .insert_resource(game_settings.clone())
+            .init_resource::<menu_ui::MenuNav>()
+            .add_systems(Startup, pause_menu::setup)
+            .add_systems(Update, (settings::sync_bindings, settings::apply_window, settings::apply_camera, hud_settings::apply.after(gfx_hud::update_gfx_hud).after(gfx_hud::update_anchored_text)))
+            .add_systems(Update, (pause_menu::toggle, menu_ui::gather_menu_input, pause_menu::handle, pause_menu::rebuild, menu_art::layout_prims).chain().before(input_map::gather_input));
         app.insert_resource(session)
             .insert_resource(session::SessionView::default())
             .insert_resource(input_map::LocalInput { enabled: true, ..default() })
@@ -226,7 +270,7 @@ fn main() {
             .add_systems(Startup, (players::setup_player_assets, hud::setup_hud, debug::setup_gizmos, (characters::load_library, characters::load_animations).chain(), characters::load_weapons, viewmodel::load_view_rig, gfx_hud::setup_gfx_hud, gfx_hud::load_game_fonts))
             .init_resource::<hud::DebugHud>()
             .init_resource::<viewmodel::ViewAnim>()
-            .add_systems(FixedUpdate, (harness::script_fixed, session::fixed_tick).chain())
+            .add_systems(FixedUpdate, (harness::script_fixed, session::fixed_tick).chain().run_if(pause_menu::sim_running))
             .add_systems(
                 Update,
                 (

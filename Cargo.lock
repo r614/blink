@@ -2466,6 +2466,7 @@ dependencies = [
  "dishonored_mission",
  "dishonored_multiplayer",
  "dishonored_net",
+ "dishonored_settings",
  "dishonored_sim",
  "dishonored_world",
  "glam",
@@ -2486,6 +2487,15 @@ dependencies = [
  "dishonored_sim",
  "glam",
  "serde_json",
+]
+
+[[package]]
+name = "dishonored_settings"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ron",
+ "serde",
 ]
 
 [[package]]
@@ -3106,6 +3116,7 @@ dependencies = [
  "dishonored_mission",
  "dishonored_multiplayer",
  "dishonored_net",
+ "dishonored_settings",
  "dishonored_sim",
  "dishonored_world",
  "glam",
