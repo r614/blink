@@ -101,6 +101,7 @@ pub fn sync_players(
     assets: Res<PlayerAssets>,
     mut bodies: Query<(Entity, &PlayerBody, &mut Transform, Option<&mut Mesh3d>, Option<&mut MeshMaterial3d<StandardMaterial>>, &mut Visibility), Without<SwordVisual>>,
     lib: Option<Res<crate::characters::CharacterLibrary>>,
+    weapons: Option<Res<crate::characters::WeaponLibrary>>,
     mut swords: Query<(Entity, &SwordVisual, &mut Transform, &mut Visibility), Without<PlayerBody>>,
     cams: Query<&GameCamera>,
 ) {
@@ -151,6 +152,9 @@ pub fn sync_players(
                 // Dishonored character model (archetype by player id).
                 let root = commands.spawn((body_transform(p, mv), Visibility::Inherited, PlayerBody(p.id))).id();
                 crate::characters::spawn_character(&mut commands, root, lib, p.archetype as usize);
+                if let Some(w) = weapons.as_ref() {
+                    crate::characters::spawn_weapons(&mut commands, root, w, p.kind);
+                }
             }
             None => {
                 commands.spawn((
@@ -159,9 +163,9 @@ pub fn sync_players(
                     body_transform(p, mv),
                     PlayerBody(p.id),
                 ));
+                commands.spawn((Mesh3d(assets.sword.clone()), MeshMaterial3d(assets.steel.clone()), Transform::default(), SwordVisual(p.id)));
             }
         }
-        commands.spawn((Mesh3d(assets.sword.clone()), MeshMaterial3d(assets.steel.clone()), Transform::default(), SwordVisual(p.id)));
     }
 }
 
@@ -204,7 +208,10 @@ pub fn camera_follow(
         let (yaw, pitch) = if me.id == local_me.id && local.override_input.is_none() && !session_is_spectating(&view) { (local.yaw, local.pitch) } else { (me.yaw, me.pitch.min(10.0) - 10.0) };
         let eye = coords::pos(eye_position(me, mv));
         let fwd = coords::dir(dishonored_sim::movement::view_vector(yaw, pitch));
-        let pos = if cam.third_person { eye - fwd * 3.0 + Vec3::Y * 0.6 } else { eye };
-        *t = Transform::from_translation(pos).looking_to(fwd, Vec3::Y);
+        // Harness: DISH_TP_ORBIT=<deg> orbits the third-person camera around the followed pawn.
+        let orbit = std::env::var("DISH_TP_ORBIT").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
+        let ofwd = Quat::from_rotation_y(orbit.to_radians()) * fwd;
+        let pos = if cam.third_person { eye - ofwd * 3.0 + Vec3::Y * 0.6 } else { eye };
+        *t = Transform::from_translation(pos).looking_to(if cam.third_person { ofwd } else { fwd }, Vec3::Y);
     }
 }

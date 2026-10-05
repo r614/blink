@@ -176,7 +176,7 @@ fn main() {
             .init_resource::<harness::ControlOverride>()
             .init_resource::<debug::DebugToggles>()
             .init_gizmo_group::<debug::XRayGizmos>()
-            .add_systems(Startup, (players::setup_player_assets, hud::setup_hud, debug::setup_gizmos, (characters::load_library, characters::load_animations).chain(), viewmodel::load_view_rig))
+            .add_systems(Startup, (players::setup_player_assets, hud::setup_hud, debug::setup_gizmos, (characters::load_library, characters::load_animations).chain(), characters::load_weapons, viewmodel::load_view_rig))
             .init_resource::<viewmodel::ViewAnim>()
             .add_systems(FixedUpdate, (harness::script_fixed, session::fixed_tick).chain())
             .add_systems(

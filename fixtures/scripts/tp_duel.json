@@ -1,0 +1,9 @@
+{"steps":[
+  {"wait_ticks": 150}, {"screenshot": "duel_01"},
+  {"wait_ticks": 40}, {"screenshot": "duel_02"},
+  {"wait_ticks": 40}, {"screenshot": "duel_03"},
+  {"wait_ticks": 40}, {"screenshot": "duel_04"},
+  {"wait_ticks": 40}, {"screenshot": "duel_05"},
+  {"wait_ticks": 40}, {"screenshot": "duel_06"},
+  {"quit": true}
+]}

@@ -65,6 +65,7 @@ impl Session {
         let mut game = setup.build(&content.sim);
         let arch = |id: u32| dishonored_net::server::PLAYER_ARCHETYPES[id as usize % 3];
         game.add_player(LOCAL_ID, if spectate { "bot0" } else { "you" }, arch(LOCAL_ID), &content.collision, &content.sim);
+        let nav = std::sync::Arc::new(dishonored_bots::NavGraph::build(&content.collision, content.ai_points.iter().map(|p| p.0).chain(content.spawns.iter().map(|s| s.position))));
         let mut bot_list = Vec::new();
         for i in 0..bots {
             let id = LOCAL_ID + 1 + i as u32;
@@ -74,9 +75,9 @@ impl Session {
                 _ => BotStyle::Duelist,
             };
             game.add_player(id, &format!("bot{}", i + 1), arch(id), &content.collision, &content.sim);
-            bot_list.push(Bot::new(id, style, 1000 + i as u64));
+            bot_list.push(Bot::new(id, style, 1000 + i as u64).with_nav(nav.clone()));
         }
-        let spectator = spectate.then(|| Bot::new(LOCAL_ID, BotStyle::Duelist, 999));
+        let spectator = spectate.then(|| Bot::new(LOCAL_ID, BotStyle::Duelist, 999).with_nav(nav.clone()));
         Self { kind: SessionKind::Offline { game, bots: bot_list, spectator }, content, last_input: PlayerInput::default() }
     }
 

@@ -12,6 +12,8 @@ use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 use dishonored_assets::characters::{ARCHETYPES, bind_globals, load_character};
 use dishonored_ir::CharacterModel;
+use dishonored_sim::state::{MoveMode, PlayerState, SwordPhase};
+use std::collections::HashMap;
 
 pub struct PartGpu {
     pub sections: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
@@ -164,131 +166,329 @@ pub fn procedural_pose(part: &PartGpu, speed: f32, phase: f32, crouched: bool) -
     bind_globals(&bones).iter().map(|g| to_bevy(part.mesh_to_pawn * *g)).collect()
 }
 
+/// Third-person weapon models (shared by all characters; NPC skeletons have the same
+/// `handAttachment_R/L_jnt` sockets as the player rig).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TpWeapon {
+    PlayerSword,
+    GuardSword,
+    Pistol,
+    Crossbow,
+}
+
+const TP_WEAPONS: &[(TpWeapon, &str, &str, bool)] = &[
+    (TpWeapon::PlayerSword, "Wpn_PlySwords.Wpn_PlySword01", "handAttachment_R_jnt", true),
+    (TpWeapon::GuardSword, "Wpn_EliteSword.Wpn_EliteSword", "handAttachment_R_jnt", true),
+    (TpWeapon::Pistol, "Wpn_PlyGuns.Wpn_PlyGunElite", "handAttachment_L_jnt", false),
+    (TpWeapon::Crossbow, "Crossbows.crossbow_01", "handAttachment_L_jnt", false),
+];
+
+pub struct TpWeaponGpu {
+    pub kind: TpWeapon,
+    pub gpu: CharacterGpu,
+    pub socket_name: &'static str,
+    /// Weapon mesh space -> socket space (U-025: blades leave the thumb side of the fist).
+    pub to_socket: glam::Mat4,
+    pub bind: Vec<glam::Mat4>,
+}
+
+#[derive(Resource, Default)]
+pub struct WeaponLibrary {
+    pub weapons: Vec<TpWeaponGpu>,
+}
+
+pub fn load_weapons(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+    mut binds: ResMut<Assets<SkinnedMeshInverseBindposes>>,
+) {
+    let mut lib = WeaponLibrary::default();
+    let Ok(content) = dishonored_assets::Content::locate() else { return };
+    for (kind, path, socket, blade) in TP_WEAPONS {
+        match dishonored_assets::characters::load_model(&content, path, &[("Startup", path)], None, 512) {
+            Ok(w) => {
+                let part = &w.parts[0];
+                let inv = part.mesh_to_pawn.inverse();
+                let to_socket = if *blade { glam::Mat4::from_rotation_z(std::f32::consts::PI) * inv } else { inv };
+                lib.weapons.push(TpWeaponGpu { kind: *kind, socket_name: socket, to_socket, bind: bind_globals(&part.bones), gpu: upload(&w, &mut meshes, &mut images, &mut mats, &mut binds) });
+            }
+            Err(e) => warn!("weapon {path}: {e:#}"),
+        }
+    }
+    commands.insert_resource(lib);
+}
+
+#[derive(Component)]
+pub struct TpWeaponJoint {
+    pub weapon: usize,
+    pub bone: usize,
+}
+#[derive(Component)]
+pub struct TpWeaponMesh(pub usize);
+
+/// Spawn hidden weapon meshes under a character root (shown per frame from state).
+pub fn spawn_weapons(commands: &mut Commands, root: Entity, weapons: &WeaponLibrary, kind: dishonored_sim::state::PawnKind) {
+    use dishonored_sim::state::PawnKind;
+    for (wi, w) in weapons.weapons.iter().enumerate() {
+        // Only what this kind can ever show (civilians carry nothing).
+        let usable = match kind {
+            PawnKind::Civilian => false,
+            PawnKind::Guard => w.kind == TpWeapon::GuardSword,
+            PawnKind::Human => w.kind != TpWeapon::GuardSword,
+        };
+        if !usable {
+            continue;
+        }
+        let part = &w.gpu.parts[0];
+        let holder = commands.spawn((Transform::default(), Visibility::Hidden, TpWeaponMesh(wi), ChildOf(root))).id();
+        let joints: Vec<Entity> = part.bind.iter().enumerate().map(|(i, b)| commands.spawn((Transform::from_matrix(*b), TpWeaponJoint { weapon: wi, bone: i }, ChildOf(root))).id()).collect();
+        for (mesh, mat) in &part.sections {
+            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), SkinnedMesh { inverse_bindposes: part.inverse_bindposes.clone(), joints: joints.clone() }, Transform::default(), bevy::camera::visibility::NoFrustumCulling, ChildOf(holder)));
+        }
+    }
+}
+
+/// Which weapons a pawn shows. In Contracts, players keep weapons hidden until they draw
+/// (attack, block, aim, fire) so their silhouette matches the civilians.
+pub fn shown_weapons(p: &PlayerState, contracts: bool) -> (Option<TpWeapon>, Option<TpWeapon>) {
+    use dishonored_sim::input::LeftHand;
+    use dishonored_sim::state::{LeftPhase, PawnKind};
+    match p.kind {
+        PawnKind::Civilian => (None, None),
+        PawnKind::Guard => (Some(TpWeapon::GuardSword), None),
+        PawnKind::Human => {
+            let drawn_sword = !contracts || p.sword.phase != SwordPhase::Idle;
+            let gun_out = !contracts || p.left.phase != LeftPhase::Idle;
+            let left = match p.left.item {
+                LeftHand::Pistol if gun_out => Some(TpWeapon::Pistol),
+                LeftHand::Crossbow if gun_out => Some(TpWeapon::Crossbow),
+                _ => None,
+            };
+            (drawn_sword.then_some(TpWeapon::PlayerSword), left)
+        }
+    }
+}
+
 pub fn animate_characters(
     anims: Option<Res<Animations>>,
     mut commands: Commands,
     mut states: Query<&mut AnimState>,
     lib: Option<Res<CharacterLibrary>>,
+    weapons: Option<Res<WeaponLibrary>>,
     view: Res<crate::session::SessionView>,
     time: Res<Time>,
     roots: Query<(Entity, &CharacterRoot, &crate::players::PlayerBody, &Children)>,
-    mut joints: Query<(&Joint, &mut Transform)>,
+    mut joints: Query<(&Joint, &mut Transform), Without<TpWeaponJoint>>,
+    mut wjoints: Query<(&TpWeaponJoint, &mut Transform), Without<Joint>>,
+    mut wmeshes: Query<(&TpWeaponMesh, &mut Visibility)>,
 ) {
     let Some(lib) = lib else { return };
+    let contracts = view.matchv.mode.eq_ignore_ascii_case("contracts");
     for (entity, root, body, children) in &roots {
         let Some(p) = view.others.iter().chain(view.me.iter()).find(|p| p.id == body.0) else { continue };
         let model = &lib.models[root.archetype];
         let speed = p.velocity.truncate().length();
         let phase = time.elapsed_secs() * (speed / 400.0).max(0.2) * 7.0 + p.id as f32;
-        let poses: Vec<Vec<Mat4>> = match anims.as_ref() {
+        let (right_w, left_w) = shown_weapons(p, contracts);
+        let globals: Vec<Vec<glam::Mat4>> = match anims.as_ref() {
             Some(a) => {
-                let (clip_name, rate) = choose_clip(p);
+                let choice = choose_tp_clip(p, right_w.is_some() || left_w.is_some());
                 let t = match states.get_mut(entity) {
                     Ok(mut s) => {
-                        s.time += time.delta_secs() * rate;
+                        if s.key != choice.key {
+                            s.key = choice.key.clone();
+                            s.time = 0.0;
+                        }
+                        s.time += time.delta_secs() * choice.rate;
                         s.time
                     }
                     Err(_) => {
-                        commands.entity(entity).insert(AnimState::default());
+                        commands.entity(entity).insert(AnimState { time: 0.0, key: choice.key.clone() });
                         0.0
                     }
                 };
-                match a.lib.clips.get(clip_name) {
-                    Some(clip) => model.parts.iter().enumerate().map(|(pi, part)| decoded_pose(part, a, root.archetype, pi, clip, t + p.id as f32 * 0.37)).collect(),
-                    None => model.parts.iter().map(|part| procedural_pose(part, speed, phase, p.crouched)).collect(),
+                match a.clips.get(choice.clip) {
+                    Some((set, clip)) => {
+                        let t = if choice.looped { t + p.id as f32 * 0.37 } else { t.min(clip.duration - 1e-3) };
+                        model.parts.iter().enumerate().map(|(pi, part)| decoded_globals(part, &a.track_to_bone[*set][root.archetype][pi], clip, t)).collect()
+                    }
+                    None => model.parts.iter().map(|part| procedural_globals(part, speed, phase, p.crouched)).collect(),
                 }
             }
-            None => model.parts.iter().map(|part| procedural_pose(part, speed, phase, p.crouched)).collect(),
+            None => model.parts.iter().map(|part| procedural_globals(part, speed, phase, p.crouched)).collect(),
         };
         for c in children.iter() {
             if let Ok((j, mut t)) = joints.get_mut(c) {
-                if let Some(m) = poses.get(j.part).and_then(|v| v.get(j.bone)) {
-                    *t = Transform::from_matrix(*m);
+                if let Some(m) = globals.get(j.part).and_then(|v| v.get(j.bone)) {
+                    *t = Transform::from_matrix(to_bevy(*m));
                 }
+            }
+        }
+        let Some(weapons) = weapons.as_ref() else { continue };
+        let body_bones = &model.parts[0].bones;
+        for c in children.iter() {
+            if let Ok((wm, mut vis)) = wmeshes.get_mut(c) {
+                let k = weapons.weapons[wm.0].kind;
+                let show = p.alive && p.mode != MoveMode::Blinking && (Some(k) == right_w || Some(k) == left_w);
+                *vis = if show { Visibility::Inherited } else { Visibility::Hidden };
+            }
+            if let Ok((wj, mut t)) = wjoints.get_mut(c) {
+                let w = &weapons.weapons[wj.weapon];
+                let Some(sock) = body_bones.iter().position(|b| b.name.eq_ignore_ascii_case(w.socket_name)) else { continue };
+                *t = Transform::from_matrix(to_bevy(globals[0][sock] * w.to_socket * w.bind[wj.bone]));
             }
         }
     }
 }
 
-/// Locomotion clip names in `Npc_EliteGuard_empty_as` (decoded Edge animation).
-pub const LOCOMOTION: &[&str] = &["Empty_Idle", "Empty_WalkN", "Empty_WalkS_Revert", "Empty_WalkE", "Empty_WalkW_Revert", "Empty_RunN", "Empty_RunS_Revert", "Empty_RunE", "Empty_RunW_Revert"];
+/// NPC AnimSets (all compressed against the elite guard skeleton) used for third person.
+const TP_SETS: &[&str] = &["Npc_EliteGuard_empty_as", "Npc_EliteGuard_Sword_as", "Npc_EliteGuard_Generic_as", "Npc_EliteGuard_Gun_as"];
+
+/// Clips used by the third-person state machine.
+pub const TP_CLIPS: &[&str] = &[
+    "Empty_Idle", "Empty_WalkN", "Empty_WalkS_Revert", "Empty_WalkE", "Empty_WalkW_Revert", "Empty_RunN", "Empty_RunS_Revert", "Empty_RunE", "Empty_RunW_Revert", "Empty_RunN_Panic1",
+    "Sword_Idle", "Sword_WalkN", "Sword_WalkS_Revert", "Sword_WalkE", "Sword_WalkW_Revert", "Sword_RunN", "Sword_RunS_Revert", "Sword_RunE", "Sword_RunW_Revert",
+    "Sword_Patrol_Idle", "Sword_Patrol_WalkN", "Sword_Patrol_WalkS_Revert", "Sword_Patrol_WalkE", "Sword_Patrol_WalkW_Revert",
+    "Sword_Attack_ShortBigA", "Sword_Attack_ShortBigB", "Sword_Attack_ShortBigC", "Sword_Ready_ParryIdle", "Sword_Versus_Stun_In", "Sword_Attack_FastA", "Sword_Cover_Loop",
+    "Sword_Gun_IdleHold", "Sword_Gun_Fire", "Sword_Gun_Reload", "Sword_Gun_Draw",
+    "Generic_DeathFrontA", "Generic_DeathBackA", "Generic_WindBlast_Back",
+];
 
 #[derive(Resource)]
 pub struct Animations {
-    pub lib: dishonored_assets::characters::AnimLibrary,
-    /// Per model, per part: bone index for each track (None = bone missing).
-    pub track_to_bone: Vec<Vec<Vec<Option<usize>>>>,
+    pub clips: HashMap<String, (usize, dishonored_assets::edge_anim::BakedClip)>,
+    /// Per set, per model, per part: bone index for each Edge joint (None = bone missing).
+    pub track_to_bone: Vec<Vec<Vec<Vec<Option<usize>>>>>,
 }
 
 pub fn load_animations(mut commands: Commands, lib: Option<Res<CharacterLibrary>>) {
     let Some(lib) = lib else { return };
     let Ok(content) = dishonored_assets::Content::locate() else { return };
-    match dishonored_assets::characters::load_anim_set(&content, "L_Boyle_Ext_Script", "Npc_EliteGuard_empty_as.Npc_EliteGuard_empty_as", LOCOMOTION) {
-        Ok(mut anims) => {
-            // The set belongs to the elite guard skeleton (archetype 1); Edge joints follow its bone order.
-            if let Some(guard) = lib.models.get(1).and_then(|m| m.parts.first()) {
-                let before = anims.tracks.clone();
+    // The sets belong to the elite guard skeleton (archetype 1); Edge joints follow its bone order.
+    let Some(guard) = lib.models.get(1).and_then(|m| m.parts.first()) else { return };
+    let mut clips = HashMap::new();
+    let mut track_to_bone = Vec::new();
+    for (si, set) in TP_SETS.iter().enumerate() {
+        match dishonored_assets::characters::load_anim_set(&content, "L_Boyle_Ext_Script", &format!("{set}.{set}"), TP_CLIPS) {
+            Ok(mut anims) => {
                 anims.edge_order(&guard.bones);
-                info!("locomotion tracks reordered to skeleton order: {}", before != anims.tracks);
+                track_to_bone.push(lib.models.iter().map(|m| m.parts.iter().map(|p| anims.tracks.iter().map(|t| p.bones.iter().position(|b| b.name.eq_ignore_ascii_case(t))).collect()).collect()).collect());
+                for (name, clip) in anims.clips {
+                    clips.insert(name, (si, clip));
+                }
             }
-            let track_to_bone = lib
-                .models
-                .iter()
-                .map(|m| m.parts.iter().map(|p| anims.tracks.iter().map(|t| p.bones.iter().position(|b| b.name.eq_ignore_ascii_case(t))).collect()).collect())
-                .collect();
-            info!("decoded {} Edge clips ({} tracks)", anims.clips.len(), anims.tracks.len());
-            commands.insert_resource(Animations { lib: anims, track_to_bone });
+            Err(e) => {
+                warn!("{set}: {e:#}");
+                track_to_bone.push(Vec::new());
+            }
         }
-        Err(e) => warn!("animations: {e:#}"),
     }
+    info!("decoded {} third-person Edge clips", clips.len());
+    commands.insert_resource(Animations { clips, track_to_bone });
 }
 
-/// Pick a locomotion clip from velocity relative to facing (simulation owns motion;
-/// animation only presents it).
-pub fn choose_clip(p: &dishonored_sim::state::PlayerState) -> (&'static str, f32) {
+pub struct TpClip {
+    pub key: String,
+    pub clip: &'static str,
+    pub looped: bool,
+    pub rate: f32,
+}
+
+/// Directional locomotion clip from velocity relative to facing.
+fn directional(p: &PlayerState, n: &'static str, s: &'static str, e: &'static str, w: &'static str) -> &'static str {
     let v = p.velocity.truncate();
-    let speed = v.length();
-    if speed < 20.0 || p.mode != dishonored_sim::state::MoveMode::Walking {
-        return ("Empty_Idle", 1.0);
-    }
     let fwd = dishonored_sim::movement::forward_vector(p.yaw).truncate();
     let right = dishonored_sim::movement::right_vector(p.yaw).truncate();
     let (f, r) = (v.dot(fwd), v.dot(right));
-    let run = speed > 300.0;
-    let name = if f.abs() >= r.abs() {
-        match (f >= 0.0, run) {
-            (true, false) => "Empty_WalkN",
-            (true, true) => "Empty_RunN",
-            (false, false) => "Empty_WalkS_Revert",
-            (false, true) => "Empty_RunS_Revert",
-        }
+    if f.abs() >= r.abs() {
+        if f >= 0.0 { n } else { s }
+    } else if r >= 0.0 {
+        e
     } else {
-        match (r >= 0.0, run) {
-            (true, false) => "Empty_WalkE",
-            (true, true) => "Empty_RunE",
-            (false, false) => "Empty_WalkW_Revert",
-            (false, true) => "Empty_RunW_Revert",
-        }
-    };
+        w
+    }
+}
+
+/// Third-person clip from simulation state (simulation owns motion and timing; animation
+/// only presents it). `armed`: a weapon is visibly drawn.
+pub fn choose_tp_clip(p: &PlayerState, armed: bool) -> TpClip {
+    use dishonored_sim::input::LeftHand;
+    use dishonored_sim::state::{LeftPhase, PawnKind};
+    let one = |key: &str, clip: &'static str| TpClip { key: key.to_string(), clip, looped: false, rate: 1.0 };
+    let lp = |clip: &'static str, rate: f32| TpClip { key: clip.to_string(), clip, looped: true, rate };
+    let gun = matches!(p.left.item, LeftHand::Pistol | LeftHand::Crossbow);
+    if !p.alive || p.mode == MoveMode::Dead {
+        return one("dead", if p.id % 2 == 0 { "Generic_DeathFrontA" } else { "Generic_DeathBackA" });
+    }
+    match p.sword.phase {
+        SwordPhase::Startup | SwordPhase::Active | SwordPhase::Recovery => return one("swing", ["Sword_Attack_ShortBigA", "Sword_Attack_ShortBigB", "Sword_Attack_ShortBigC"][p.id as usize % 3]),
+        SwordPhase::Blocking => return lp("Sword_Ready_ParryIdle", 1.0),
+        SwordPhase::Staggered => return one("stagger", "Sword_Versus_Stun_In"),
+        SwordPhase::Assassinating => return one("assassinate", "Sword_Attack_FastA"),
+        SwordPhase::Idle => {}
+    }
+    match p.left.phase {
+        LeftPhase::Recovering if gun => return one("fire", "Sword_Gun_Fire"),
+        LeftPhase::Reloading => return one("reload", "Sword_Gun_Reload"),
+        LeftPhase::Equipping if gun && armed => return one("draw", "Sword_Gun_Draw"),
+        LeftPhase::Aiming if gun => return lp("Sword_Gun_IdleHold", 1.0),
+        _ => {}
+    }
+    // Launched sideways (Windblast); a plain fall keeps the locomotion pose.
+    if p.mode == MoveMode::Falling && p.velocity.truncate().length() > 700.0 {
+        return one("flung", "Generic_WindBlast_Back");
+    }
+    let speed = p.velocity.truncate().length();
+    if p.mode != MoveMode::Walking || speed < 20.0 {
+        return match (p.kind, armed) {
+            (PawnKind::Guard, _) => lp("Sword_Patrol_Idle", 1.0),
+            (_, true) if p.crouched => lp("Sword_Cover_Loop", 1.0),
+            (_, true) => lp("Sword_Idle", 1.0),
+            _ => lp("Empty_Idle", 1.0),
+        };
+    }
+    let run = speed > 300.0;
     // Playback rate follows ground speed (walk clips authored around 200 uu/s, run ~400).
-    let rate = if run { speed / 400.0 } else { speed / 200.0 };
-    (name, rate.clamp(0.5, 1.8))
+    let rate = if run { speed / 400.0 } else { speed / 200.0 }.clamp(0.5, 1.8);
+    let clip = match (p.kind, armed, run) {
+        (PawnKind::Civilian, _, true) => "Empty_RunN_Panic1",
+        (PawnKind::Guard, _, false) => directional(p, "Sword_Patrol_WalkN", "Sword_Patrol_WalkS_Revert", "Sword_Patrol_WalkE", "Sword_Patrol_WalkW_Revert"),
+        (PawnKind::Guard, _, true) | (_, true, true) => directional(p, "Sword_RunN", "Sword_RunS_Revert", "Sword_RunE", "Sword_RunW_Revert"),
+        (_, true, false) => directional(p, "Sword_WalkN", "Sword_WalkS_Revert", "Sword_WalkE", "Sword_WalkW_Revert"),
+        (_, false, true) => directional(p, "Empty_RunN", "Empty_RunS_Revert", "Empty_RunE", "Empty_RunW_Revert"),
+        (_, false, false) => directional(p, "Empty_WalkN", "Empty_WalkS_Revert", "Empty_WalkE", "Empty_WalkW_Revert"),
+    };
+    lp(clip, rate)
 }
 
 #[derive(Component, Default)]
 pub struct AnimState {
     pub time: f32,
+    pub key: String,
 }
 
-pub fn decoded_pose(part: &PartGpu, anims: &Animations, model: usize, part_i: usize, clip: &dishonored_assets::edge_anim::BakedClip, time: f32) -> Vec<Mat4> {
+/// Pawn-space bone globals for a decoded clip (rotation-only retargeting by bone name:
+/// bind translations keep each body's proportions).
+pub fn decoded_globals(part: &PartGpu, map: &[Option<usize>], clip: &dishonored_assets::edge_anim::BakedClip, time: f32) -> Vec<glam::Mat4> {
     let mut bones = part.bones.clone();
-    for (t, bone) in anims.track_to_bone[model][part_i].iter().enumerate() {
+    for (t, bone) in map.iter().enumerate() {
         let Some(b) = bone else { continue };
-        let (r, _tr) = clip.sample(time, t);
-        if let Some(q) = r {
-            // Rotation-only retargeting: bind translations keep each body's proportions.
+        if let (Some(q), _) = clip.sample(time, t) {
             bones[*b].rotation = q;
         }
     }
-    bind_globals(&bones).iter().map(|g| to_bevy(part.mesh_to_pawn * *g)).collect()
+    bind_globals(&bones).iter().map(|g| part.mesh_to_pawn * *g).collect()
+}
+
+fn procedural_globals(part: &PartGpu, speed: f32, phase: f32, crouched: bool) -> Vec<glam::Mat4> {
+    procedural_pose(part, speed, phase, crouched).iter().map(|m| from_bevy(*m)).collect()
+}
+
+/// Inverse of [`to_bevy`].
+fn from_bevy(m: Mat4) -> glam::Mat4 {
+    let swap = glam::Mat4::from_cols(glam::Vec4::X, glam::Vec4::Z, glam::Vec4::Y, glam::Vec4::W);
+    let c = glam::Mat4::from_scale(glam::Vec3::splat(coords::UU_TO_BEVY)) * swap;
+    c.inverse() * m * c
 }
