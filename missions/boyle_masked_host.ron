@@ -5,6 +5,8 @@
 MissionDef(
     title: "The Masked Host",
     map: "L_Boyle_Ext_P",
+    // Boyle Mansion interior, reached through the original doors (level state kept per map).
+    maps: ["L_Boyle_Int_P"],
     briefing: "One of three masked ladies at tonight's party is the host. Learn which, end her evening, and slip away.",
 
     objectives: [

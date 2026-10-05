@@ -26,6 +26,10 @@ pub struct MissionDef {
     pub title: String,
     /// Map the mission plays on (persistent level name, e.g. `L_Boyle_Ext_P`).
     pub map: String,
+    /// Further persistent maps reachable through the original travel doors
+    /// (e.g. `L_Boyle_Int_P`). Level state is saved per map, as in the original.
+    #[serde(default)]
+    pub maps: Vec<String>,
     #[serde(default)]
     pub briefing: String,
     pub objectives: Vec<ObjectiveDef>,
@@ -120,6 +124,8 @@ pub enum Place {
     /// An original level actor by name (`TargetPoint_5`, `DishonoredSpawner_46`,
     /// `PlayerStart_1`, `DisTrigger_32`...), optionally `Package:Name`.
     Actor(String),
+    /// A `PlayerStart` by its travel tag (`PlayerStart_Garden`), in any mission map.
+    Start(String),
     /// Another marker of this mission.
     Marker(String),
     /// Offset from a place.
@@ -245,6 +251,8 @@ pub enum Trigger {
     CounterAtLeast(String, i32),
     /// Fired by the `Fire` action (`SeqEvent_RemoteEvent`).
     Remote(String),
+    /// Players arrived in a persistent map after level travel (`SeqEvent_LevelLoaded`).
+    Arrived(String),
     /// A player uses a usable marker (F), `DisSeqEvent_Used`.
     Use(String),
     /// A player talks to an NPC (F).
@@ -308,6 +316,8 @@ pub enum Action {
     /// Make a marker usable with a prompt, or not usable.
     Usable(String, String),
     NotUsable(String),
+    /// Level travel to a tagged `PlayerStart` (`SetPlayerTravelDestination` + change level).
+    Travel(String),
     /// End the mission.
     Complete(String),
     Fail(String),

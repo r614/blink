@@ -64,6 +64,17 @@ fn main() -> Result<()> {
                 println!("  most used nodes: {}", top.join(", "));
             }
         }
+        "travel" => {
+            let c = Content::locate()?;
+            let map = a.get(1).context("map")?;
+            let pkgs = dishonored_assets::map_packages(&c, map);
+            for l in dishonored_assets::travel::extract_travel(&c, &pkgs)? {
+                println!("{:<28} {:<30} ({:.0},{:.0},{:.0}) -> {:<24} via {} -> {:?}", l.door, l.door_tweak, l.door_position.x, l.door_position.y, l.door_position.z, l.destination_tag, l.change_event, l.destination_map);
+            }
+            for s in dishonored_assets::travel::tagged_starts(&c, &pkgs) {
+                println!("start {:<14} tag {:<28} ({:.0},{:.0},{:.0})", s.name, s.tag, s.position.x, s.position.y, s.position.z);
+            }
+        }
         "new" => {
             let map = a.get(1).context("map")?;
             let title = a.get(2).cloned().unwrap_or_else(|| "New Mission".into());

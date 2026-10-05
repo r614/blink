@@ -120,6 +120,13 @@ impl Game {
             Game::Mission(m) => m.respawn_time_left(id),
         }
     }
+    /// Active persistent map (missions can travel between maps).
+    pub fn current_map(&self) -> Option<&str> {
+        match self {
+            Game::Mission(m) => Some(m.current_map()),
+            _ => None,
+        }
+    }
     pub fn last_events(&self) -> &[SimEvent] {
         match self {
             Game::Ffa(_) => &[],

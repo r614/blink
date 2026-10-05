@@ -22,7 +22,7 @@ fn pos(m: &MissionState, marker: &str) -> Vec3 {
 
 fn step(m: &mut MissionState, player: Vec3, events: &[MissionEvent]) -> Vec<Command> {
     let npcs: BTreeMap<String, Vec3> = BTreeMap::from([("host".to_string(), Vec3::new(500.0, 500.0, 0.0))]);
-    m.step(&StepInput { dt: 1.0 / 60.0, players: &[(1, player, true)], npc_positions: &npcs, events, total_npcs: 24 })
+    m.step(&StepInput { dt: 1.0 / 60.0, map: "", players: &[(1, player, true)], npc_positions: &npcs, events, total_npcs: 24 })
 }
 
 fn kill(npc: &str) -> MissionEvent {
@@ -104,7 +104,7 @@ fn exfil_without_the_kill_does_nothing_and_time_limit_fails() {
 fn death_without_respawn_fails() {
     let mut m = mission();
     let npcs = BTreeMap::new();
-    m.step(&StepInput { dt: 1.0 / 60.0, players: &[(1, Vec3::ZERO, false)], npc_positions: &npcs, events: &[MissionEvent::PlayerKilled(1)], total_npcs: 0 });
+    m.step(&StepInput { dt: 1.0 / 60.0, map: "", players: &[(1, Vec3::ZERO, false)], npc_positions: &npcs, events: &[MissionEvent::PlayerKilled(1)], total_npcs: 0 });
     assert!(matches!(m.outcome(), Some(o) if !o.success));
 }
 

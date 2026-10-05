@@ -30,6 +30,10 @@ pub struct MatchContent {
     pub guard_spawns: Vec<(Vec3, f32)>,
     /// Named original actors (target points, spawners, player starts, triggers...) for missions.
     pub markers: Vec<dishonored_assets::npcs::LevelMarker>,
+    /// Original travel doors of this map (extracted from its Kismet + the global Kismet).
+    pub travel: Vec<dishonored_assets::travel::TravelLink>,
+    /// `PlayerStart`s with their travel tags.
+    pub tagged_starts: Vec<dishonored_assets::travel::TaggedStart>,
 }
 
 pub fn cache_dir() -> PathBuf {
@@ -119,14 +123,111 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     let ai_points = npcs.points.iter().map(|p| (p.position, p.yaw)).collect();
     let guard_spawns = npcs.spawns.iter().filter(|s| s.role == dishonored_assets::npcs::NpcRole::Guard).map(|s| (s.position, s.yaw)).collect();
     let markers = npcs.markers.clone();
-    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers })
+    let travel_path = dir.join(format!("{map}.travel2.json"));
+    let (travel, tagged_starts): (Vec<dishonored_assets::travel::TravelLink>, Vec<dishonored_assets::travel::TaggedStart>) = match std::fs::read_to_string(&travel_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
+        Some(t) => t,
+        None => {
+            let pkgs = map_packages(&content, map);
+            let t = (dishonored_assets::travel::extract_travel(&content, &pkgs).unwrap_or_default(), dishonored_assets::travel::tagged_starts(&content, &pkgs));
+            std::fs::write(&travel_path, serde_json::to_string(&t)?).ok();
+            t
+        }
+    };
+    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts })
 }
 
-/// Build a mission game setup from loaded match content (markers resolved against the
-/// level's named actors, crowd from the original placement data).
-pub fn mission_setup(mc: &MatchContent, def: dishonored_mission::MissionDef) -> Result<dishonored_multiplayer::game::GameSetup, String> {
-    let actors: Vec<dishonored_multiplayer::mission::LevelActor> = mc.markers.iter().map(|m| (m.package.clone(), m.name.clone(), m.position, m.yaw)).collect();
-    let starts: Vec<(Vec3, f32)> = mc.spawns.iter().map(|s| (s.position, s.yaw)).collect();
-    let setup = dishonored_multiplayer::mission::MissionSetup::new(def, &actors, &starts, &mc.ai_points, &mc.guard_spawns, &mc.collision)?;
+/// Persistent maps a mission uses: its start map, then the maps reachable through travel.
+pub fn mission_maps(def: &dishonored_mission::MissionDef) -> Vec<String> {
+    let mut v = vec![def.map.clone()];
+    for m in &def.maps {
+        if !v.iter().any(|x| x.eq_ignore_ascii_case(m)) {
+            v.push(m.clone());
+        }
+    }
+    v
+}
+
+/// Localized original strings (`Localization/INT/*.int`), loaded once.
+pub fn localization() -> &'static dishonored_assets::localization::Localization {
+    static LOC: std::sync::OnceLock<dishonored_assets::localization::Localization> = std::sync::OnceLock::new();
+    LOC.get_or_init(|| Content::locate().map(|c| dishonored_assets::localization::Localization::load(&c, "INT")).unwrap_or_default())
+}
+
+/// The original prompt of a travel door: its usable tweak's localized `m_InteractText`.
+pub fn travel_prompt(link: &dishonored_assets::travel::TravelLink, use_key: &str) -> String {
+    match localization().get(&link.door_tweak, "m_InteractText") {
+        Some(t) => dishonored_assets::localization::with_keys(t, use_key),
+        None => format!("Press {use_key} to travel"),
+    }
+}
+
+/// Build a mission game setup from the loaded maps (markers resolved against the levels'
+/// named actors, crowd from the original placement data, travel doors from the original
+/// Kismet with their localized prompts).
+pub fn mission_setup(maps: &MapContents, def: dishonored_mission::MissionDef) -> Result<dishonored_multiplayer::game::GameSetup, String> {
+    let mut inputs = Vec::new();
+    for name in mission_maps(&def) {
+        let mc = maps.get(&name).ok_or_else(|| format!("map {name} not loaded"))?;
+        let doors = mc
+            .travel
+            .iter()
+            .filter_map(|l| {
+                Some(dishonored_multiplayer::mission::TravelDoor {
+                    map: mc.map_name.clone(),
+                    door: l.door.clone(),
+                    position: l.door_position,
+                    prompt: travel_prompt(l, "F"),
+                    dest_map: l.destination_map.clone()?,
+                    dest_tag: l.destination_tag.clone(),
+                })
+            })
+            .collect();
+        inputs.push(dishonored_multiplayer::mission::MapInput {
+            name: mc.map_name.clone(),
+            actors: mc.markers.iter().map(|m| (m.package.clone(), m.name.clone(), m.position, m.yaw)).collect(),
+            default_starts: mc.spawns.iter().map(|s| (s.position, s.yaw)).collect(),
+            tagged_starts: mc.tagged_starts.iter().map(|s| (s.tag.clone(), s.position, s.yaw)).collect(),
+            doors,
+            ai_points: &mc.ai_points,
+            guard_spawns: &mc.guard_spawns,
+            world: &mc.collision,
+        });
+    }
+    let setup = dishonored_multiplayer::mission::MissionSetup::new(def, &inputs)?;
     Ok(dishonored_multiplayer::game::GameSetup::Mission(Box::new(setup)))
+}
+
+impl dishonored_world::WorldQuery for MatchContent {
+    fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32, channels: u8) -> Option<dishonored_world::RayHit> {
+        self.collision.raycast(origin, dir, max_dist, channels)
+    }
+    fn capsule_contacts(&self, cap: &dishonored_world::Capsule, channels: u8, out: &mut Vec<dishonored_world::Contact>) {
+        self.collision.capsule_contacts(cap, channels, out)
+    }
+    fn sweep_capsule(&self, cap: &dishonored_world::Capsule, delta: Vec3, channels: u8) -> Option<dishonored_world::SweepHit> {
+        self.collision.sweep_capsule(cap, delta, channels)
+    }
+}
+
+/// The persistent maps a session can travel between, loaded up front (the original swaps
+/// persistent maps; loading both avoids a hitch mid-game) behind a [`dishonored_world::MapSet`].
+pub struct MapContents {
+    pub maps: Vec<std::sync::Arc<MatchContent>>,
+    pub set: dishonored_world::MapSet,
+}
+
+impl MapContents {
+    pub fn load(maps: &[String]) -> Result<Self> {
+        let mut loaded = Vec::new();
+        for m in maps {
+            if !loaded.iter().any(|x: &std::sync::Arc<MatchContent>| x.map_name.eq_ignore_ascii_case(m)) {
+                loaded.push(std::sync::Arc::new(load_match(m)?));
+            }
+        }
+        let set = dishonored_world::MapSet::new(loaded.iter().map(|m| (m.map_name.clone(), m.clone() as std::sync::Arc<dyn dishonored_world::WorldQuery + Send + Sync>)).collect());
+        Ok(MapContents { maps: loaded, set })
+    }
+    pub fn get(&self, name: &str) -> Option<&std::sync::Arc<MatchContent>> {
+        self.maps.iter().find(|m| m.map_name.eq_ignore_ascii_case(name))
+    }
 }

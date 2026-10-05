@@ -12,7 +12,8 @@ use crate::report::Report;
 use anyhow::Result;
 use dishonored_bots::NavGraph;
 use dishonored_bots::nav::Follower;
-use dishonored_content::{MatchContent, load_match};
+use dishonored_content::{MapContents, MatchContent};
+use anyhow::Context;
 use dishonored_mission::{MissionDef, TaskState};
 use dishonored_multiplayer::game::Game;
 use dishonored_net::client::{ConnState, NetClient};
@@ -38,12 +39,14 @@ struct Run {
     host_killed_by_agent: bool,
 }
 
-fn play(mc: &MatchContent, def: &MissionDef, max_secs: f32) -> Result<Run> {
+fn play(maps: &MapContents, def: &MissionDef, max_secs: f32) -> Result<Run> {
+    let mc: &MatchContent = maps.get(&def.map).context("mission map")?;
+    maps.set.set_active(&def.map);
     let mut def = def.clone();
     // The agent is not a careful player: let it respawn so the mission logic is exercised
     // to the end (death without respawn is covered by the interpreter tests).
     def.settings.respawn = true;
-    let setup = dishonored_content::mission_setup(mc, def.clone()).map_err(|e| anyhow::anyhow!(e))?;
+    let setup = dishonored_content::mission_setup(maps, def.clone()).map_err(|e| anyhow::anyhow!(e))?;
     let mut g = setup.build(&mc.sim);
     g.add_player(AGENT, "agent", 0, &mc.collision, &mc.sim);
     let nav = NavGraph::build(&mc.collision, mc.ai_points.iter().map(|p| p.0).chain(mc.spawns.iter().map(|s| s.position)));
@@ -130,7 +133,7 @@ fn play(mc: &MatchContent, def: &MissionDef, max_secs: f32) -> Result<Run> {
             }
             last_pos = me.position;
         }
-        let out = g.step(&[(AGENT, input)], &mc.collision, &mc.sim);
+        let out = g.step(&[(AGENT, input)], &maps.set, &mc.sim);
         for e in &out.events {
             if let dishonored_sim::events::SimEvent::Death { victim, killer, cause } = e {
                 if Some(*victim) == host_id {
@@ -185,20 +188,21 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     let errs = def.validate();
     rep.check(S, "mission file parses and validates", errs.is_empty(), if errs.is_empty() { format!("{path}: \"{}\"", def.title) } else { errs.join("; ") });
     let t = Instant::now();
-    let mc = load_match(&def.map)?;
-    let setup = dishonored_content::mission_setup(&mc, def.clone());
+    let maps = MapContents::load(&dishonored_content::mission_maps(&def))?;
+    let mc = maps.get(&def.map).context("mission map")?.clone();
+    let setup = dishonored_content::mission_setup(&maps, def.clone());
     rep.check(S, "markers and NPCs resolve against the level", setup.is_ok(), match &setup {
         Ok(dishonored_multiplayer::game::GameSetup::Mission(s)) => format!("{} markers, {} mission NPCs, crowd {} in {:.1?}", s.markers.len(), s.npcs.len(), s.crowd.as_ref().map(|c| c.brains.len()).unwrap_or(0), t.elapsed()),
         Ok(_) => String::new(),
         Err(e) => e.clone(),
     });
     let max: f32 = ctx.opt("--seconds").and_then(|s| s.parse().ok()).unwrap_or(600.0);
-    let a = play(&mc, &def, max)?;
+    let a = play(&maps, &def, max)?;
     rep.check(S, "agent finds the informant (clue reveals the host)", a.reached_informant, a.timeline.iter().find(|x| x.1.contains("host.kill -> Active")).map(|x| format!("at {:.0}s", x.0)).unwrap_or_default());
     rep.check(S, "host eliminated by the agent", a.host_killed_by_agent, a.timeline.iter().find(|x| x.1.contains("host.kill -> Completed")).map(|x| format!("at {:.0}s", x.0)).unwrap_or_default());
     rep.check(S, "mission completes successfully", a.outcome.as_ref().is_some_and(|o| o.0), format!("{:?}; {}; agent ended at {:.0}", a.outcome, a.stats, a.final_pos));
     rep.table("Mission timeline (simulated seconds)", &["t", "event"], a.timeline.iter().map(|(t, e)| vec![format!("{t:.1}"), e.clone()]).collect());
-    let b = play(&mc, &def, max)?;
+    let b = play(&maps, &def, max)?;
     rep.check(S, "determinism: identical mission runs", a.hash == b.hash && a.outcome_tick == b.outcome_tick, format!("{:016x} @ {:?} vs {:016x} @ {:?}", a.hash, a.outcome_tick, b.hash, b.outcome_tick));
     // Dedicated server hosting the mission; a client must see the replicated mission view.
     let port = free_port();

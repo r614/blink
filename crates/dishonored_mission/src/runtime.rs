@@ -21,6 +21,8 @@ pub enum MissionEvent {
     Used(String),
     /// A player talked to an NPC.
     Talked(String),
+    /// Players arrived in a persistent map.
+    Arrived(String),
 }
 
 /// Requests for the host.
@@ -33,10 +35,14 @@ pub enum Command {
     Alert(String),
     Calm(String),
     Sound(String),
+    /// Level travel to a tagged start.
+    Travel(String),
 }
 
 pub struct StepInput<'a> {
     pub dt: f32,
+    /// Active persistent map (zones of markers on other maps are ignored; empty = all).
+    pub map: &'a str,
     /// (player id, position, alive)
     pub players: &'a [(u32, Vec3, bool)],
     /// Positions of living mission NPCs (for task targets).
@@ -137,6 +143,7 @@ enum Ev {
     Remote(String),
     Use(String),
     Talk(String),
+    Arrived(String),
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +151,9 @@ pub struct MissionState {
     pub def: MissionDef,
     /// Resolved marker positions and radii.
     pub markers: BTreeMap<String, (Vec3, f32)>,
+    /// Map of each marker (empty = the mission's start map). Set by the host.
+    pub marker_map: BTreeMap<String, String>,
+    current_map: String,
     task_state: Vec<Vec<TaskState>>,
     task_hidden: Vec<Vec<bool>>,
     obj_hidden: Vec<bool>,
@@ -187,6 +197,8 @@ impl MissionState {
         let mut s = MissionState {
             def,
             markers,
+            marker_map: BTreeMap::new(),
+            current_map: String::new(),
             task_state,
             task_hidden,
             obj_hidden,
@@ -244,6 +256,7 @@ impl MissionState {
             return out;
         }
         self.time += input.dt;
+        self.current_map = input.map.to_string();
         self.view.stats.time = self.time;
         self.view.stats.total_npcs = input.total_npcs;
         let mut queue: VecDeque<Ev> = VecDeque::new();
@@ -259,6 +272,9 @@ impl MissionState {
                 continue;
             }
             for (m, (c, r)) in &self.markers {
+                if !input.map.is_empty() && self.marker_map.get(m).is_some_and(|mm| !mm.eq_ignore_ascii_case(input.map)) {
+                    continue;
+                }
                 if (pos.truncate() - c.truncate()).length() <= *r && (pos.z - c.z).abs() <= r.max(200.0) {
                     now.insert((m.clone(), *id));
                 }
@@ -306,6 +322,7 @@ impl MissionState {
                 }
                 MissionEvent::Used(m) => queue.push_back(Ev::Use(m.clone())),
                 MissionEvent::Talked(n) => queue.push_back(Ev::Talk(n.clone())),
+                MissionEvent::Arrived(m) => queue.push_back(Ev::Arrived(m.clone())),
             }
         }
         // Delayed actions that are due run before rules (they were scheduled earlier).
@@ -378,6 +395,7 @@ impl MissionState {
             (Trigger::Remote(n), Ev::Remote(x)) => n == x,
             (Trigger::Use(m), Ev::Use(x)) => m == x,
             (Trigger::Talk(n), Ev::Talk(x)) => n == x,
+            (Trigger::Arrived(m), Ev::Arrived(x)) => m.eq_ignore_ascii_case(x),
             _ => false,
         }
     }
@@ -512,6 +530,7 @@ impl MissionState {
                 Action::NotUsable(m) => {
                     self.usable.remove(m);
                 }
+                Action::Travel(tag) => out.push(Command::Travel(tag.clone())),
                 Action::Complete(t) => self.end(true, t.clone()),
                 Action::Fail(t) => self.end(false, t.clone()),
             }
@@ -536,7 +555,8 @@ impl MissionState {
             })
             .collect();
         self.view.high_chaos = self.view.stats.high_chaos(self.def.settings.high_chaos_kill_ratio);
-        self.view.usables = self.usable.iter().filter_map(|(m, p)| self.markers.get(m).map(|x| (x.0.to_array(), p.clone()))).collect();
+        let on_map = |m: &String| self.current_map.is_empty() || self.marker_map.get(m).is_none_or(|mm| mm.eq_ignore_ascii_case(&self.current_map));
+        self.view.usables = self.usable.iter().filter(|(m, _)| on_map(m)).filter_map(|(m, p)| self.markers.get(m).map(|x| (x.0.to_array(), p.clone()))).collect();
         self.view.talkers = self.talk.iter().filter(|(n, _)| self.npc_alive.contains(*n)).map(|(n, p)| (n.clone(), p.clone())).collect();
         // Marker: first visible active task with a target (required tasks first).
         let mut best: Option<(bool, [f32; 3])> = None;

@@ -484,3 +484,15 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   - Packages could appear twice in a map's package list, which duplicated NPC data; extraction now reads each package once.
 - **Confidence:** CONFIRMED (structure read from data; harness).
 - **Implementation consequence:** Conversations, pickups, possession and cutscene matinees from the original model are not implemented yet; chaos is a kill-ratio approximation.
+
+## 2026-10-05: Level travel between persistent maps (Boyle Ext <-> Int)
+
+- **Question:** How does the original move the player between persistent maps, and can the port do the same from the data?
+- **Method:** `mission travel <map>` (new `dishonored_assets::travel`) walks each `DisSeqEvent_Used` in the map's Kismet (output links, remote events to their listeners, sub-sequence activation) to the `SetPlayerTravelDestination` tag and the `ChangeLvl_*` remote event, then follows that event in the global `DishonoredGameFull_P` Kismet to `SeqAct_PrepareMapChange(MainLevelName)`. Door prompts are the localized `m_InteractText` of each door's `m_pUsableObjTweaks` (`Localization/INT/<Package>.int`, read at runtime).
+- **Findings:**
+  - Boyle Ext has 4 travel doors (`DishonoredUsableObject_5..8`), Int has 4 (`_10..13`); Ext has 5 tagged `PlayerStart`s, Int 4. Example: `_7` (`LTD_Garden_to_Ballroom`, "Press `k to go to Boyle Mansion Ballroom") -> `PlayerStart_Ballroom` via `ChangeLvl_fromBoyleExterior_toBoyleInterior` -> `L_Boyle_Int_P`.
+  - Ext and Int share one coordinate frame, so a renderer must hide the level being left.
+  - Actor names repeat across the two maps (`DisGuardWatchPoint_5`), so each map is its own actor namespace; unqualified names resolve on the start map first.
+- **Implementation:** `MissionMatch` saves the level state of the map being left (NPC states and brains, as `DisSeqAct_SaveLevelState`), restores or freshly populates the destination, places players at the tagged start, and emits `Arrived`. The host swaps the active collision map (`MapSet`), `MatchView.map` tells clients, and the runtime shows a loading overlay, spawns the level on its first visit, and re-shows it on later visits.
+- **Validation:** `harness travel` 7/7: Ext -> `PlayerStart_Ballroom` on Int (0 uu), standing on the Int floor, Int doors usable, back through `_13` -> `PlayerStart_FrontDoors` on Ext, and an NPC killed before leaving is still dead on return (26/26 NPCs kept). A rendered client run through `_7` shows the loading overlay, then the interior with the original return-door prompt.
+- **Confidence:** CONFIRMED for the travel table and the arrival points. The story-flag gates on doors (for example "Mansion Second Floor (Forbidden!)") are not evaluated yet (U-032).

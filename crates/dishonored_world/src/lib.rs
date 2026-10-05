@@ -370,3 +370,48 @@ mod tests {
         assert!(p.z >= 87.4, "{p}");
     }
 }
+
+/// The persistent maps of a multi-map session (e.g. Boyle exterior + interior). The original
+/// swaps the persistent map on level travel (`SeqAct_PrepareMapChange` /
+/// `SeqAct_CommitMapChange`), so queries go to the active map only.
+pub struct MapSet {
+    maps: Vec<(String, std::sync::Arc<dyn WorldQuery + Send + Sync>)>,
+    active: std::sync::atomic::AtomicUsize,
+}
+
+impl MapSet {
+    pub fn new(maps: Vec<(String, std::sync::Arc<dyn WorldQuery + Send + Sync>)>) -> Self {
+        MapSet { maps, active: std::sync::atomic::AtomicUsize::new(0) }
+    }
+    /// Activate a map by name (case-insensitive). Returns false if unknown.
+    pub fn set_active(&self, name: &str) -> bool {
+        match self.maps.iter().position(|(n, _)| n.eq_ignore_ascii_case(name)) {
+            Some(i) => {
+                self.active.store(i, std::sync::atomic::Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
+    pub fn active_name(&self) -> &str {
+        &self.maps[self.active.load(std::sync::atomic::Ordering::Relaxed)].0
+    }
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.maps.iter().map(|(n, _)| n.as_str())
+    }
+    fn cur(&self) -> &dyn WorldQuery {
+        self.maps[self.active.load(std::sync::atomic::Ordering::Relaxed)].1.as_ref()
+    }
+}
+
+impl WorldQuery for MapSet {
+    fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32, channels: u8) -> Option<RayHit> {
+        self.cur().raycast(origin, dir, max_dist, channels)
+    }
+    fn capsule_contacts(&self, cap: &Capsule, channels: u8, out: &mut Vec<Contact>) {
+        self.cur().capsule_contacts(cap, channels, out)
+    }
+    fn sweep_capsule(&self, cap: &Capsule, delta: Vec3, channels: u8) -> Option<SweepHit> {
+        self.cur().sweep_capsule(cap, delta, channels)
+    }
+}

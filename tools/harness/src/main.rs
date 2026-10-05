@@ -16,12 +16,14 @@
 //!                             mapping resolves to a decodable original sound
 //! harness replay FILE         re-simulate a server replay and verify every state hash
 //! harness mission [--mission FILE]  plays a custom mission end to end (headless + dedicated server)
+//! harness travel              Ext -> Int -> Ext through the original doors; level state kept
 //! harness all                 sim, net, visual, contracts, audio; writes harness_out/<run>/REPORT.md
 //! ```
 
 mod audio;
 mod contracts;
 mod mission;
+mod travel;
 mod fidelity;
 mod netsoak;
 mod report;
@@ -64,6 +66,7 @@ fn main() -> Result<()> {
         "fidelity" => fidelity::run(&ctx, &mut rep)?,
         "audio" => audio::run(&ctx, &mut rep)?,
         "mission" => mission::run(&ctx, &mut rep)?,
+        "travel" => travel::run(&ctx, &mut rep)?,
         "replay" => {
             let file = args.get(1).expect("replay file");
             netsoak::verify_replay_file(&PathBuf::from(file), &mut rep)?;
@@ -74,6 +77,7 @@ fn main() -> Result<()> {
             visual::run(&ctx, &mut rep)?;
             contracts::run(&ctx, &mut rep)?;
             mission::run(&ctx, &mut rep)?;
+            travel::run(&ctx, &mut rep)?;
             audio::run(&ctx, &mut rep)?;
         }
         other => anyhow::bail!("unknown command {other}"),

@@ -25,6 +25,7 @@ mod hud;
 mod input_map;
 mod atmosphere;
 mod audio;
+mod level;
 mod lighting;
 mod map_render;
 mod players;
@@ -36,7 +37,7 @@ use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
-use dishonored_assets::{Content, ImportOptions, import_level, map_packages};
+
 use dishonored_net::client::NetClient;
 use dishonored_net::socket::{LinkConditions, NetSocket};
 use std::path::PathBuf;
@@ -171,9 +172,14 @@ fn main() {
             .init_resource::<harness::CameraRequest>()
             .add_systems(Update, (harness::inspect_script, inspect_cam).chain());
     } else {
-        let content = Arc::new(dishonored_content::load_match(&args.map).expect("loading match content from the install"));
+        // Every persistent map the session can travel between (the mission's maps, or --map).
+        let names = match &args.mission {
+            Some(def) => dishonored_content::mission_maps(def),
+            None => vec![args.map.clone()],
+        };
+        let content = Arc::new(dishonored_content::MapContents::load(&names).expect("loading match content from the install"));
         let session = match &args.mode {
-            Mode::Offline => session::Session::offline(content, args.bots, args.spectate, args.contracts, args.mission.clone()),
+            Mode::Offline => session::Session::offline(content.clone(), args.bots, args.spectate, args.contracts, args.mission.clone()),
             Mode::Connect(addr) => session::Session::online(content, connect(addr, &args)),
             Mode::Browse(master) => {
                 let servers = dishonored_net::control_plane::list_servers(master).expect("listing servers");
@@ -236,6 +242,8 @@ fn main() {
                     gfx_hud::update_anchored_text,
                     debug::draw_debug,
                     harness::harness_frame,
+                    level::follow_level,
+                    level::tag_level_entities,
                 ),
             );
     }
@@ -265,16 +273,14 @@ fn connect(addr: &str, args: &Args) -> NetClient {
     NetClient::new(sock, server, &args.name)
 }
 
+/// Level import options, kept for levels loaded later by travel.
+#[derive(Resource)]
+pub struct LevelSettings(pub level::LevelOptions);
+
 fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, mut materials: ResMut<Assets<StandardMaterial>>, mut baked: ResMut<Assets<map_render::BakedMaterial>>) {
-    let content = Content::locate().expect("Dishonored install not found (set DISHONORED_DIR)");
-    // --legacy-geometry: the pre-fidelity package/actor coverage (prefix-matched sublevels,
-    // StaticMeshActor + StaticMeshCollectionActor only), for before/after comparisons.
-    let legacy = std::env::args().any(|a| a == "--legacy-geometry");
-    let pkgs = if legacy { dishonored_assets::map_packages_by_prefix(&content, &args.map) } else { map_packages(&content, &args.map) };
-    let opts = ImportOptions { max_texture_size: args.max_tex, other_actors: !legacy, ..Default::default() };
-    let (map, stats) = import_level(&content, &args.map, &pkgs, &opts).expect("map import failed");
-    let spawned = map_render::spawn_map(&map, &mut commands, &mut meshes, &mut images, &mut materials, &mut baked, args.show_hidden, &args.features);
-    info!("{}: {} instances, {} meshes, {} textures, {} entities", args.map, stats.instances, stats.meshes, stats.textures, spawned);
+    let opts = level::LevelOptions { max_tex: args.max_tex, show_hidden: args.show_hidden, legacy: std::env::args().any(|a| a == "--legacy-geometry") };
+    let mut levels = level::Levels::default();
+    let map = level::spawn_level(&args.map, &opts, &args.features, &mut commands, &mut meshes, &mut images, &mut materials, &mut baked, &mut levels);
 
     let spawn = map.spawn_candidates.first();
     let start = args.pos.or(spawn.map(|s| s.position + glam::Vec3::Z * 64.0)).unwrap_or(glam::Vec3::new(0.0, 0.0, 500.0));
@@ -287,22 +293,9 @@ fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Asset
     } else {
         commands.spawn((Camera3d::default(), projection, Transform::default(), players::GameCamera { third_person: args.spectate, follow: None }, if std::env::var_os("DISHONORED_NOMSAA").is_some() { Msaa::Off } else { Msaa::Sample4 })).id()
     };
-    if args.features.materials {
-        if let Some(env) = map_render::environment_light(&map, &mut images) {
-            commands.entity(camera).insert(env);
-        }
-    }
-    let fog = atmosphere::setup_camera(&map, &mut commands.entity(camera), &args.features);
-    commands.insert_resource(fog);
-    let lights = lighting::spawn_lights(&map, &mut commands, &args.features);
-    info!("{} map lights", lights);
-    if lights == 0 {
-        // Placeholder sun when real lights are disabled (or the map has none).
-        commands.spawn((
-            DirectionalLight { illuminance: 6000.0, shadow_maps_enabled: false, color: Color::srgb(0.75, 0.8, 1.0), affects_lightmapped_mesh_diffuse: !args.features.lightmaps, ..default() },
-            Transform::default().looking_to(Vec3::new(-0.4, -1.0, -0.3), Vec3::Y),
-        ));
-    }
+    level::apply_look(&levels, &args.map, camera, &mut commands, &args.features);
+    commands.insert_resource(levels);
+    commands.insert_resource(LevelSettings(opts));
 }
 
 fn exit_after(time: Res<Time>, args: Res<Args>, mut exit: MessageWriter<AppExit>) {

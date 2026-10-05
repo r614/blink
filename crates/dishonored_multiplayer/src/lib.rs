@@ -38,6 +38,9 @@ pub struct MatchView {
     pub scores: Vec<ScoreEntry>,
     pub winner: Option<PlayerId>,
     pub match_number: u32,
+    /// Active persistent map (changes on level travel; clients reload the renderer).
+    #[serde(default)]
+    pub map: String,
     /// Mission mode: objectives, messages, outcome and stats.
     #[serde(default)]
     pub mission: Option<dishonored_mission::runtime::MissionView>,

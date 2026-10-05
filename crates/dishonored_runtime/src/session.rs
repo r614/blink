@@ -4,7 +4,7 @@
 use crate::input_map::LocalInput;
 use bevy::prelude::*;
 use dishonored_bots::{Bot, BotStyle};
-use dishonored_content::MatchContent;
+use dishonored_content::{MapContents, MatchContent};
 use dishonored_multiplayer::MatchView;
 use dishonored_multiplayer::contracts::{ContractsRules, TargetInfo};
 use dishonored_multiplayer::ffa::{FfaRules, SpawnPoint};
@@ -26,7 +26,10 @@ pub enum SessionKind {
 #[derive(Resource)]
 pub struct Session {
     pub kind: SessionKind,
+    /// The active persistent map (swapped on level travel).
     pub content: Arc<MatchContent>,
+    /// Every map this session can travel between; `maps.set` is the collision world.
+    pub maps: Arc<MapContents>,
     /// Input actually applied on the last fixed tick (for HUD / harness).
     pub last_input: PlayerInput,
 }
@@ -55,12 +58,15 @@ pub struct SessionView {
 }
 
 impl Session {
-    pub fn offline(content: Arc<MatchContent>, bots: usize, spectate: bool, contracts: bool, mission: Option<dishonored_mission::MissionDef>) -> Self {
+    pub fn offline(maps: Arc<MapContents>, bots: usize, spectate: bool, contracts: bool, mission: Option<dishonored_mission::MissionDef>) -> Self {
+        let start = mission.as_ref().map(|m| m.map.clone()).unwrap_or_else(|| maps.maps[0].map_name.clone());
+        let content = maps.get(&start).cloned().expect("start map loaded");
+        maps.set.set_active(&content.map_name);
         let is_mission = mission.is_some();
         // Missions are solo/co-op against the level's NPCs: no deathmatch bots.
         let bots = if is_mission { 0 } else { bots };
         let setup = if let Some(def) = mission {
-            dishonored_content::mission_setup(&content, def).unwrap_or_else(|e| panic!("mission setup: {e}"))
+            dishonored_content::mission_setup(&maps, def).unwrap_or_else(|e| panic!("mission setup: {e}"))
         } else if contracts {
             let rules = ContractsRules { warmup_time: 2.0, min_players: 2, crowd: Some(default_crowd(crowd_center(&content.spawns.iter().map(|s| (s.position, s.yaw)).collect::<Vec<_>>()))), ..Default::default() };
             let pts: Vec<(glam::Vec3, f32)> = content.spawns.iter().map(|s| (s.position, s.yaw)).collect();
@@ -85,11 +91,12 @@ impl Session {
             bot_list.push(Bot::new(id, style, 1000 + i as u64).with_nav(nav.clone()));
         }
         let spectator = spectate.then(|| Bot::new(LOCAL_ID, BotStyle::Duelist, 999).with_nav(nav.clone()));
-        Self { kind: SessionKind::Offline { game, bots: bot_list, spectator }, content, last_input: PlayerInput::default() }
+        Self { kind: SessionKind::Offline { game, bots: bot_list, spectator }, content, maps, last_input: PlayerInput::default() }
     }
 
-    pub fn online(content: Arc<MatchContent>, client: NetClient) -> Self {
-        Self { kind: SessionKind::Online { client }, content, last_input: PlayerInput::default() }
+    pub fn online(maps: Arc<MapContents>, client: NetClient) -> Self {
+        let content = maps.maps[0].clone();
+        Self { kind: SessionKind::Online { client }, content, maps, last_input: PlayerInput::default() }
     }
 
     pub fn local_id(&self) -> Option<PlayerId> {
@@ -116,7 +123,7 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
     let session = &mut *session;
     session.last_input = input;
     let content = session.content.clone();
-    let world = &content.collision;
+    let world = &session.maps.set;
     let sim = &content.sim;
     match &mut session.kind {
         SessionKind::Offline { game, bots, spectator } => {
@@ -159,6 +166,7 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
             let npcs = view.others.iter().filter(|p| p.kind != dishonored_sim::state::PawnKind::Human).count();
             view.status = if spectator.is_some() { format!("spectating {} bots, {npcs} NPCs (N: next, V: camera)", bots.len() + 1) } else { format!("offline vs {} bots, {npcs} NPCs", bots.len()) };
             view.respawn_in = game.respawn_time_left(LOCAL_ID);
+            follow_map(&session.maps, &mut session.content, game.current_map());
         }
         SessionKind::Online { client } => {
             client.poll(world, sim);
@@ -192,6 +200,8 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
             view.dark_vision_reveals = me.map(|id| dishonored_sim::left_hand::dark_vision_reveals(&client.predicted, id, &sim.tuning)).unwrap_or_default();
             view.respawn_in = None;
             view.target_info = client.target_info.clone();
+            let m = client.matchv.map.clone();
+            follow_map(&session.maps, &mut session.content, (!m.is_empty()).then_some(m.as_str()));
         }
     }
     // Audio hook: events for crate::audio (drained there each frame; capped if audio is off).
@@ -202,5 +212,21 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
     let n = view.feed.len();
     if n > 6 {
         view.feed.drain(0..n - 6);
+    }
+}
+
+/// Level travel: make the server's active persistent map the collision world and the
+/// presented content (the renderer follows `Session::content`, see `crate::level`).
+fn follow_map(maps: &MapContents, content: &mut Arc<MatchContent>, active: Option<&str>) {
+    let Some(m) = active else { return };
+    if content.map_name.eq_ignore_ascii_case(m) {
+        return;
+    }
+    match maps.get(m) {
+        Some(c) => {
+            maps.set.set_active(m);
+            *content = c.clone();
+        }
+        None => warn!("server travelled to {m}, which this client did not load"),
     }
 }

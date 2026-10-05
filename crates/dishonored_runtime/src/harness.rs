@@ -67,6 +67,8 @@ pub enum Step {
     Wait { wait_ticks: u32 },
     /// Inspect mode only: move the free camera (Dishonored units, degrees).
     Camera { camera: CameraStep },
+    /// Offline sessions only: place the local player (Dishonored units, degrees).
+    Teleport { teleport: CameraStep },
     Quit { quit: bool },
 }
 
@@ -171,7 +173,7 @@ pub fn state_json(view: &SessionView, session: &Session) -> serde_json::Value {
 }
 
 /// Fixed-tick side of scripting: choose the override input for this tick.
-pub fn script_fixed(mut runner: ResMut<ScriptRunner>, mut local: ResMut<LocalInput>, mut shots: ResMut<ShotQueue>, view: Res<SessionView>, session: Res<Session>, mut ctrl: ResMut<ControlOverride>) {
+pub fn script_fixed(mut runner: ResMut<ScriptRunner>, mut local: ResMut<LocalInput>, mut shots: ResMut<ShotQueue>, view: Res<SessionView>, mut session: ResMut<Session>, mut ctrl: ResMut<ControlOverride>) {
     if let Some(t) = ctrl.ticks_left.as_mut() {
         if *t == 0 {
             local.override_input = None;
@@ -215,6 +217,16 @@ pub fn script_fixed(mut runner: ResMut<ScriptRunner>, mut local: ResMut<LocalInp
                 let _ = std::fs::write(&p, serde_json::to_string_pretty(&state_json(&view, &session)).unwrap());
             }
             Step::Camera { .. } => {}
+            Step::Teleport { teleport } => {
+                if let crate::session::SessionKind::Offline { game, .. } = &mut session.kind {
+                    if let Some(p) = game.world_mut().player_mut(crate::session::LOCAL_ID) {
+                        p.position = glam::Vec3::from(teleport.pos);
+                        p.velocity = glam::Vec3::ZERO;
+                        p.yaw = teleport.yaw;
+                        p.pitch = teleport.pitch;
+                    }
+                }
+            }
             Step::Quit { .. } => {
                 runner.done = true;
                 shots.quit_in = Some(30);
@@ -272,7 +284,7 @@ pub fn inspect_script(
         Step::Input { ticks, .. } => runner.ticks_left = ticks,
         Step::Camera { camera } => cam.0 = Some(camera),
         Step::Screenshot { screenshot } => shots.pending.push(runner.out_dir.join(format!("{screenshot}.png"))),
-        Step::Dump { .. } => {}
+        Step::Dump { .. } | Step::Teleport { .. } => {}
         Step::Quit { .. } => {
             runner.done = true;
             shots.quit_in = Some(30);

@@ -47,11 +47,18 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let t = Instant::now();
-    let mc = load_match(&map)?;
+    // A mission may travel between persistent maps (all loaded up front, see MapContents).
+    let names = match &mission {
+        Some(def) => dishonored_content::mission_maps(def),
+        None => vec![map.clone()],
+    };
+    let maps = dishonored_content::MapContents::load(&names)?;
+    let mc = maps.get(&map).cloned().unwrap_or_else(|| maps.maps[0].clone());
+    maps.set.set_active(&mc.map_name);
     println!("loaded {map}: {} collision tris, {} spawns in {:.1?}", mc.collision.tris.len(), mc.spawns.len(), t.elapsed());
     let spawns: Vec<SpawnPoint> = mc.spawns.iter().map(|s| SpawnPoint { position: s.position, yaw: s.yaw }).collect();
     let setup = if let Some(def) = mission {
-        dishonored_content::mission_setup(&mc, def).map_err(|e| anyhow::anyhow!("mission: {e}"))?
+        dishonored_content::mission_setup(&maps, def).map_err(|e| anyhow::anyhow!("mission: {e}"))?
     } else if get("--mode").as_deref() == Some("contracts") {
         let mut crules = ContractsRules { max_players: rules.max_players, time_limit: rules.time_limit.max(300.0), ..Default::default() };
         let center = crowd_center(&mc.spawns.iter().map(|s| (s.position, s.yaw)).collect::<Vec<_>>());
@@ -65,7 +72,7 @@ fn main() -> Result<()> {
     };
     let socket = NetSocket::bind(&format!("0.0.0.0:{port}"))?;
     let cfg = ServerConfig { name: name.clone(), map: map.clone(), setup, snapshot_interval: (TICK_HZ as u64 / snapshot_hz.max(1)).max(1) };
-    let mut server = GameServer::new(cfg, mc.sim.clone(), &mc.collision, socket);
+    let mut server = GameServer::new(cfg, mc.sim.clone(), &maps.set, socket);
     println!("listening on udp/{port} as \"{name}\"");
 
     let shared_info = Arc::new(Mutex::new(server.info()));
@@ -86,6 +93,12 @@ fn main() -> Result<()> {
     let mut last_report = Instant::now();
     loop {
         server.tick();
+        // Level travel: collide against the map the mission is on now.
+        if let Some(m) = server.game.current_map() {
+            if !maps.set.active_name().eq_ignore_ascii_case(m) && maps.set.set_active(m) {
+                println!("level travel -> {m}");
+            }
+        }
         *shared_info.lock().unwrap() = server.info();
         if last_report.elapsed() > Duration::from_secs(10) {
             last_report = Instant::now();

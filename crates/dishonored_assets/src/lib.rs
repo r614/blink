@@ -16,6 +16,8 @@ pub mod edge_anim;
 pub mod gameplay;
 pub mod ini;
 pub mod kismet;
+pub mod localization;
+pub mod travel;
 pub mod texture;
 pub mod tweaks;
 pub mod util;
