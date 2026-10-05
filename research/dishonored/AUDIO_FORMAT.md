@@ -172,3 +172,10 @@ listener = game camera) with the Wwise dry-volume attenuation curve per sound;
 footsteps generated from movement with the surface guessed from the colliding mesh
 name; ambience = level bed + score + placed emitters. `harness audio` verifies decode
 sanity per codec class and that every mapped cue resolves to decodable sound.
+
+Dialog VO: the per-voice `Bk_<GUID>.<LANG>` AKPK files (BOYLE_MISSION.md section 4) load
+through `SoundLibrary::load_bank` (a `Bk_` name falls back to `<name>.INT`), and
+`dishonored_audio::vo::VoResolver` maps a line's `Play_<hex>` event to its clip; clip lengths
+come from the WEM header alone (`media_length`: `vorb` sample count / rate) so the server can
+time lines without decoding. `crates/dishonored_runtime/src/dialogue_vo.rs` decodes and plays
+them (3D on the speaker, Wwise attenuation curve of the sound).

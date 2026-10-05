@@ -32,6 +32,8 @@ mod players;
 mod session;
 mod gfx_hud;
 mod viewmodel;
+mod hud_dialogue;
+mod dialogue_vo;
 
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::input::mouse::AccumulatedMouseMotion;
@@ -210,6 +212,7 @@ fn main() {
             app.insert_resource(harness::start_control_server(port));
         }
         app.add_plugins(audio::GameAudioPlugin);
+        app.add_plugins(hud_dialogue::DialoguePlugin);
         app.insert_resource(session)
             .insert_resource(session::SessionView::default())
             .insert_resource(input_map::LocalInput { enabled: true, ..default() })

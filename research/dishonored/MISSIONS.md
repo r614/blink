@@ -50,9 +50,11 @@ Deliberate differences:
   in replays and in the harness.
 - **Chaos is approximated** by the kill ratio (`high_chaos_kill_ratio`). The original's exact
   formula is not reverse-engineered.
-- **Not yet covered:** conversations (`DisConversation`, 386 `DisConv_Blurb` in Boyle),
-  pickups and abstract items, possession, distraction events, location discovery, matinee
-  cutscenes.
+- **Conversations are data:** the original `DisConversation` graphs run as-is in
+  `dishonored_conversation` (`Conversation(..)` action = `DisSeqAct_DialogInputs`,
+  `ConversationOutput(..)` trigger = `DisSeqEvent_DialogOutputs`, story flags shared by name).
+- **Not yet covered:** pickups and abstract items, possession, distraction events, location
+  discovery, matinee cutscenes (soirees are recorded, not played).
 
 ## Importing original data
 

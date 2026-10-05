@@ -216,6 +216,34 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     rep.check(S, "mission view replicates subtitles (speaker, text, VO event) and the choice", a.view_lines > 0 && a.view_vo > 0 && a.view_choice, format!("{} distinct lines in the view, {} with a VO event", a.view_lines, a.view_vo));
     rep.check(S, "determinism: identical mission runs", a.hash == b.hash && a.log == b.log, format!("{:016x} vs {:016x}, {} vs {} conversation events", a.hash, b.hash, a.log.len(), b.log.len()));
     rep.table("Mission conversation timeline", &["t", "event"], a.log.iter().map(|l| l.splitn(2, ' ').map(str::to_string).collect()).collect());
+    if !ctx.args.iter().any(|a| a == "--no-render") {
+        render_capture(ctx, rep, &path)?;
+    }
+    Ok(())
+}
+
+/// Rendered client: talk to Lydia, capture the subtitle and the choice menu in the HUD
+/// movie's slots, answer with the number keys; the log must show her VO playing in 3D.
+fn render_capture(ctx: &Ctx, rep: &mut Report, mission: &str) -> Result<()> {
+    let dir = ctx.out.join("conversation_capture");
+    std::fs::create_dir_all(&dir)?;
+    let log = std::fs::File::create(dir.join("runtime.log"))?;
+    let status = std::process::Command::new(ctx.bin("dishonored_runtime"))
+        .args(["--mission", mission, "--script", "tools/harness/scripts/conversation_capture.json", "--out"])
+        .arg(&dir)
+        .args(["--size", "1280x720", "--exit-after", "300"])
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .status()?;
+    let shots = ["conversation_subtitle", "conversation_choice", "conversation_reply", "conversation_choice2", "conversation_reply2"];
+    let have: Vec<&str> = shots.iter().copied().filter(|s| dir.join(format!("{s}.png")).is_file()).collect();
+    let text = std::fs::read_to_string(dir.join("runtime.log")).unwrap_or_default();
+    let vo3d = text.lines().filter(|l| l.contains("dialogue VO: playing") && l.contains("3D")).count();
+    rep.check(S, "rendered: subtitles and the choice menu drawn in the HUD movie's slots (screenshots)", status.success() && have.len() == shots.len(), format!("{}/{} screenshots in {}", have.len(), shots.len(), dir.display()));
+    rep.check(S, "rendered: original VO plays on the speaking NPC (3D)", vo3d >= 2, format!("{vo3d} lines played 3D"));
+    for s in have {
+        rep.artifact(s, &dir.join(format!("{s}.png")));
+    }
     Ok(())
 }
 

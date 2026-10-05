@@ -31,7 +31,10 @@ crates/
   dishonored_ir      engine-agnostic map representation (Dishonored world space: Z-up, Unreal units)
   dishonored_assets  Dishonored decoders: StaticMesh, Texture2D (+ .tfc streaming), materials, levels
   dishonored_runtime Bevy presentation: renders an imported map with a free camera
-  dishonored_audio   Wwise AKPK/soundbank/WEM readers, Wwise Vorbis decoding, event resolution
+  dishonored_audio   Wwise AKPK/soundbank/WEM readers, Wwise Vorbis decoding, event resolution,
+                     dialog VO banks (Bk_<GUID>.INT)
+  dishonored_conversation  original dialog graphs (DisConversation) read at runtime +
+                     deterministic conversation runner (subtitles, VO, choices, story flags)
 tools/
   package_dump       inspect a package: names / imports / exports / properties / hex
                      (package_scan: sweep a whole directory)

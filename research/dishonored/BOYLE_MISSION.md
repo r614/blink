@@ -226,14 +226,16 @@ BS = L_BoyleStreet_Ext_Script, ES = L_Boyle_Ext_Script, E_P = L_Boyle_Ext_P.
 1. **Meet Brisby.** Brisby is `DishonoredSpawner_9`, tweak `Twk_Pawn_Boyle_Party.Twk_Pawn_LordBrisby_NoCorpseReaction`,
    placed near (4697,-1627,15).
    - His conversation tree is `DisDialogOneShot_6`. `Lord_Brisby_Quest_Start` (`DisConversation_0`)
-     is started by tree hooks (use/approach), not by Kismet (LIKELY: no `DialogInputs` targets
-     it).
+     is started by his `DDH_PLAYER_APPROACHES` hook (close distance 250,
+     `NOT_INTERRUPTABLE_CONV`, then `IsPossessed(initiator)` output 0) (CONFIRMED, LOG
+     2026-10-05).
    - It fires `Join_Brisby_in_Private`. `DialogOutputs` [8941] -> Brisby walks to
      `TargetPoint_120` [8331] -> T26 Active -> patrol from `DishonoredNavPoint_208` -> idle
      matinee [15999] ("Brisby Window Trigger Active").
 2. **The private talk.**
-   - Conversation `Brisby_Boyle_Invite` (`DisConversation_47`, one soiree). LIKELY started by the
-     tree, since hook name index 0 has no output.
+   - Conversation `Brisby_Boyle_Invite` (`DisConversation_47`, one soiree) is started by his use
+     hook once `Boyle_BrisbyInPosition` is set (`CheckStoryFlag` -> `SequentialBranch`
+     [invite, nothing]) (CONFIRMED, LOG 2026-10-05).
    - Then one of `Esma_KO`/`Lydia_KO`/`Waverly KO` (`DisConversation_1495/1496/1497`), chosen by
      the `<Sister> Guilty` booleans. These are DialogInputs [8498] inputs 1–3 on hook
      `DisConv_Hook_KismetActivated_0` [5612].
@@ -818,7 +820,7 @@ Outsider shrine, runes and bone charms, lip sync.
    - VO for about 1% of lines;
    - FaceFX lip sync not decoded;
    - non-English subtitles not found;
-   - `Brisby_Boyle_Invite`'s start condition not fully traced (hook output 0 is empty);
+   - (resolved) `Brisby_Boyle_Invite` starts from Brisby's use hook once `Boyle_BrisbyInPosition` is set;
    - `DisTravelSpawner` semantics are LIKELY only.
 5. **Name collisions across sublevels** (`TriggerVolume_0`, `DisAbstractItemPickup_67`,
    `DishonoredSpawner_1/_2`, …). The mission file must use package-qualified references, and
