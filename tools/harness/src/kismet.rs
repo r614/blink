@@ -482,7 +482,7 @@ fn nonlethal(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<(Stri
         return Ok(rows);
     };
     let mut carrying = false;
-    for _ in 0..(12 * 60) {
+    for _ in 0..(30 * 60) {
         let Some(t) = p.m().world.player(her).cloned() else { break };
         let me = *p.m().world.player(AGENT).unwrap();
         if me.carrying == Some(her) {
