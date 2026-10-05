@@ -71,7 +71,7 @@ fn main() -> Result<()> {
     if filter.is_none() && !check_props {
         let mut v: Vec<_> = classes.into_iter().collect();
         v.sort_by(|a, b| b.1.cmp(&a.1));
-        for (c, n) in v.iter().take(80) {
+        for (c, n) in v.iter().take(100000) {
             println!("{n:8} {c}");
         }
     }

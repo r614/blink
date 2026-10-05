@@ -1022,6 +1022,7 @@ impl Engine {
                 let (playing, wobj) = (w.playing, w.obj);
                 let c = *c;
                 self.stop_where(|v| v.playing == playing && v.obj == wobj && (v.via.contains(&c) || v.chain.contains(&c)), fade, 4);
+                self.drivers.iter_mut().filter(|d| d.playing == playing && d.obj == wobj && (d.node == c || d.via.contains(&c))).for_each(|d| d.stopped = true);
             }
             for c in &new {
                 if old.contains(c) {

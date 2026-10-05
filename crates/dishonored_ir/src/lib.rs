@@ -8,6 +8,7 @@
 pub mod ai;
 pub mod gameplay;
 pub mod nav;
+pub mod particles;
 pub mod spawners;
 
 use glam::{Mat4, Vec2, Vec3};
@@ -42,6 +43,12 @@ pub struct DishonoredMap {
     /// Level-wide presentation settings (fog, post, environment).
     #[serde(default)]
     pub environment: Environment,
+    /// Particle systems used by the level's emitters (and any requested by the importer).
+    #[serde(default)]
+    pub particle_systems: Vec<particles::ParticleSystemAsset>,
+    /// Placed emitters (`Emitter` actors).
+    #[serde(default)]
+    pub emitters: Vec<particles::EmitterInstance>,
 }
 
 /// UE3 `EBlendMode` of the base material.

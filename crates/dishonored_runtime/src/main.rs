@@ -24,6 +24,7 @@
 mod coords;
 mod characters;
 mod debug;
+mod effects;
 mod harness;
 mod hud;
 mod input_map;
@@ -193,6 +194,7 @@ fn main() {
     .insert_resource(args.features.clone())
     .init_resource::<atmosphere::FogLayers>()
     .add_systems(Startup, setup_world)
+    .add_plugins(effects::EffectsPlugin)
     .add_systems(Update, atmosphere::update_fog);
 
     if args.mode == Mode::Inspect {
@@ -328,10 +330,10 @@ fn connect(addr: &str, args: &Args) -> NetClient {
 #[derive(Resource)]
 pub struct LevelSettings(pub level::LevelOptions);
 
-fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, mut materials: ResMut<Assets<StandardMaterial>>, mut baked: ResMut<Assets<map_render::BakedMaterial>>) {
+fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, mut materials: ResMut<Assets<StandardMaterial>>, mut baked: ResMut<Assets<map_render::BakedMaterial>>, mut fx: ResMut<effects::Effects>) {
     let opts = level::LevelOptions { max_tex: args.max_tex, show_hidden: args.show_hidden, legacy: std::env::args().any(|a| a == "--legacy-geometry") };
     let mut levels = level::Levels::default();
-    let map = level::spawn_level(&args.map, &opts, &args.features, &mut commands, &mut meshes, &mut images, &mut materials, &mut baked, &mut levels);
+    let map = level::spawn_level(&args.map, &opts, &args.features, &mut commands, &mut meshes, &mut images, &mut materials, &mut baked, &mut levels, &mut fx);
 
     let spawn = map.spawn_candidates.first();
     let start = args.pos.or(spawn.map(|s| s.position + glam::Vec3::Z * 64.0)).unwrap_or(glam::Vec3::new(0.0, 0.0, 500.0));

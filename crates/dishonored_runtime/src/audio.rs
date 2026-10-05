@@ -185,6 +185,13 @@ struct Emitter {
     obj: ObjId,
     event: String,
     pos: [f32; 3],
+    /// "package:actor name" (matches `MissionView::ambient` from Kismet).
+    key: String,
+    auto_play: bool,
+    /// Last Kismet state applied.
+    kismet: Option<bool>,
+    /// Playing id while it plays.
+    playing: u32,
 }
 
 struct Loaded {
@@ -280,8 +287,9 @@ fn load(map: &str) -> anyhow::Result<Loaded> {
     for p in dishonored_assets::map_packages(&content, map) {
         let Ok(pkg) = content.package(&p) else { continue };
         event_bank.extend(dishonored_audio::emitters::ak_event_banks(&pkg));
-        for (i, e) in dishonored_audio::emitters::ambient_emitters(&pkg).into_iter().filter(|e| e.auto_play).enumerate() {
-            emitters.push(Emitter { obj: EMITTER_OBJ + ((map_pkgs.len() as u64) << 16) + i as u64, event: e.event, pos: e.position });
+        for (i, e) in dishonored_audio::emitters::ambient_emitters(&pkg).into_iter().enumerate() {
+            let key = format!("{}:{}", pkg.name, e.actor.rsplit('.').next().unwrap_or(""));
+            emitters.push(Emitter { obj: EMITTER_OBJ + ((map_pkgs.len() as u64) << 16) + i as u64, event: e.event, pos: e.position, key, auto_play: e.auto_play, kismet: None, playing: 0 });
         }
         map_pkgs.push(pkg);
     }
@@ -372,7 +380,7 @@ fn finish_loading(mut commands: Commands, mut audio: ResMut<GameAudio>, mut stre
     }
     let Some(rx) = &audio.rx else { return };
     let msg = rx.lock().unwrap().try_recv();
-    let l = match msg {
+    let mut l = match msg {
         Ok(Ok(l)) => l,
         Ok(Err(e)) => {
             warn!("audio disabled: {e:#}");
@@ -416,9 +424,9 @@ fn finish_loading(mut commands: Commands, mut audio: ResMut<GameAudio>, mut stre
                 e.post_event_name(m, GLOBAL_OBJ);
             }
         }
-        for em in &l.emitters {
+        for em in l.emitters.iter_mut().filter(|em| em.auto_play) {
             e.set_position(em.obj, em.pos);
-            e.post_event_name(&em.event, em.obj);
+            em.playing = e.post_event_name(&em.event, em.obj);
         }
     }
     audio.music = l.tweaks.map(MusicManager::new);
@@ -533,7 +541,7 @@ impl GameAudio {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn drive(
+pub fn drive(
     mut audio: ResMut<GameAudio>,
     settings: Res<AudioSettings>,
     mut view: ResMut<SessionView>,
@@ -725,6 +733,25 @@ fn drive(
         }
     }
 
+    // Ambient sound actors started, stopped or toggled by Kismet.
+    if let Some(mv) = view.matchv.mission.as_ref() {
+        for (key, on) in &mv.ambient {
+            let Some(i) = audio.emitters.iter().position(|em| em.key.eq_ignore_ascii_case(key)) else { continue };
+            if audio.emitters[i].kismet == Some(*on) {
+                continue;
+            }
+            audio.emitters[i].kismet = Some(*on);
+            let (obj, playing) = (audio.emitters[i].obj, audio.emitters[i].playing);
+            if *on && (playing == 0 || !e.is_playing(playing)) {
+                let ev = audio.emitters[i].event.clone();
+                e.set_position(obj, audio.emitters[i].pos);
+                audio.emitters[i].playing = e.post_event_name(&ev, obj);
+            } else if !*on && playing != 0 {
+                e.stop_playing(playing, 500.0);
+                audio.emitters[i].playing = 0;
+            }
+        }
+    }
     // Music manager from the replicated NPC awareness around the local player.
     if let (Some(m), Some(me_p)) = (audio.music.as_mut(), view.me.as_ref()) {
         let npcs: Vec<MusicNpc> = view
