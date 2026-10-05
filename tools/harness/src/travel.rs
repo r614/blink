@@ -161,6 +161,8 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     // `DisSeqAct_NPCSetMaterials` as Boyle's "apply red": the lady's body and mask materials.
     let lady = originals.iter().find(|o| o.map.eq_ignore_ascii_case(INT) && o.props.squad == "LadiesBoyle" && o.props.on_begin_play).map(|o| (o.name.clone(), o.spawn.id));
     if let (Some((lady, lid)), Game::Mission(m)) = (lady, &mut g) {
+        // The mission already dressed her on arrival: start from her own look.
+        m.set_materials(&lady, None);
         let before = m.world.player(lid).map(|p| p.archetype).unwrap_or(0);
         m.set_materials(&lady, Some(vec![(0, 0, "Npc_Boyle.Materials.Boyle_red_inst".into()), (1, 0, "Npc_Masks.BOYLE.BoyleMask_red_inst".into())]));
         let after = m.world.player(lid).map(|p| p.archetype).unwrap_or(0);

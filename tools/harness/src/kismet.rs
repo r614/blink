@@ -128,7 +128,71 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
         dump(&p);
     }
     coverage(&p, rep, &db);
+    let first = fingerprint(&p);
+    drop(p);
+    // Determinism: the same seed replays the same mission.
+    let mut q = fresh(&setup, &maps, &def)?;
+    play(&mut q, &mut Report::new(&ctx.out.join("replay")), &db)?;
+    let second = fingerprint(&q);
+    drop(q);
+    rep.check(S, "same seed, same run (Kismet state hash, history and task timeline)", first == second, format!("hash {:016x} vs {:016x}; {} history lines", first.0, second.0, first.1));
+    // The original random switches across seeds (setup only: up to the interior randomisation).
+    let mut rows = Vec::new();
+    let mut guilty_seen = std::collections::BTreeSet::new();
+    let mut dress_sets = std::collections::BTreeSet::new();
+    for seed in 1..=6u64 {
+        let mut d = def.clone();
+        if let Some(ok) = d.original_kismet.as_mut() {
+            ok.seed = seed;
+        }
+        let s = dishonored_content::mission_setup(&maps, d.clone()).map_err(|e| anyhow::anyhow!(e))?;
+        maps.set.set_active(&d.map);
+        let mut r = Play { g: s.build(&ext.sim), maps: &maps, tick: 0, tasks: Vec::new(), last: Vec::new() };
+        r.g.add_player(AGENT, "agent", 0, &maps.set, &ext.sim);
+        let (guilty, dresses) = interior_setup(&mut r, &db)?;
+        guilty_seen.insert(guilty.clone());
+        dress_sets.insert(dresses.clone());
+        rows.push(vec![seed.to_string(), guilty, dresses]);
+    }
+    rep.check(S, "different seeds: the original switches pick different guilty sisters and dresses", guilty_seen.len() >= 2 && dress_sets.len() >= 2, format!("guilty sisters {guilty_seen:?}; {} distinct dress assignments over 6 seeds", dress_sets.len()));
+    rep.table("Interior randomisation by seed", &["seed", "guilty", "dresses (pawn: body material)"], rows);
     Ok(())
+}
+
+fn fresh<'a>(setup: &dishonored_multiplayer::game::GameSetup, maps: &'a MapContents, def: &MissionDef) -> Result<Play<'a>> {
+    let ext = maps.get(&def.map).context("ext")?;
+    maps.set.set_active(&def.map);
+    let mut p = Play { g: setup.build(&ext.sim), maps, tick: 0, tasks: Vec::new(), last: Vec::new() };
+    p.g.add_player(AGENT, "agent", 0, &maps.set, &ext.sim);
+    Ok(p)
+}
+
+/// (Kismet state hash, history length, history text hash).
+fn fingerprint(p: &Play) -> (u64, usize, u64) {
+    let k = p.m().kismet.as_ref().unwrap();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in k.st.history.join("\n").bytes().chain(format!("{:?}", p.tasks).bytes()) {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (k.k.state_hash(), k.st.history.len(), h)
+}
+
+/// Run a fresh match to the interior randomisation: (guilty sister, dresses).
+fn interior_setup(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<(String, String)> {
+    p.until(90.0, |m| m.state.task(&format!("{BA}.DishonoredTask_Custom_12")) == Some(TaskState::Active));
+    let tv = actor(db, "L_Boyle_Ext_Script:TriggerVolume_14")?;
+    p.enter(tv);
+    p.idle(3.0);
+    let door = actor(db, "L_Boyle_Ext_P:DishonoredUsableObject_7")?;
+    p.use_actor(door);
+    p.idle(0.2);
+    p.choose(0);
+    p.until(15.0, |m| ["Esma Guilty", "Lydia Guilty", "Waverly Guilty"].iter().any(|n| matches!(var(m, "L_Boyle_Int_Script", n), Some(dishonored_kismet::Value::Bool(true)))));
+    let guilty: Vec<&str> = ["Esma", "Lydia", "Waverly"].into_iter().filter(|n| matches!(var(p.m(), "L_Boyle_Int_Script", &format!("{n} Guilty")), Some(dishonored_kismet::Value::Bool(true)))).collect();
+    let mut dresses: Vec<String> = p.history().iter().filter(|h| h.contains("materials of pawn")).map(|h| h.split("materials of pawn ").nth(1).unwrap_or("").split(',').next().unwrap_or("").to_string()).collect();
+    dresses.sort();
+    Ok((guilty.join("+"), dresses.join("; ")))
 }
 
 /// Actor index by `Package:Name`.

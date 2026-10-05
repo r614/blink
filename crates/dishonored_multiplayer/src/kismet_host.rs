@@ -136,6 +136,10 @@ pub struct HostState {
     pub dead: BTreeSet<PlayerId>,
     /// `SeqAct_CameraFade` time left per op.
     fades: BTreeMap<OpId, f32>,
+    /// Actors hidden by `SeqAct_ToggleHidden`.
+    pub hidden: BTreeSet<u32>,
+    /// `NPCMarkForVanish` in progress: op -> (pawns, seconds left).
+    vanish: BTreeMap<OpId, (Vec<PlayerId>, f32)>,
 }
 
 pub struct KismetRun {
@@ -679,6 +683,63 @@ impl Host for H<'_> {
                 cx.fire_name("Closed");
                 HostResult::Done
             }
+            "DisSeqCond_PawnIsPossessed" => {
+                // Possession is not available in the port: nobody is possessed.
+                cx.fire(1);
+                HostResult::Done
+            }
+            "DisSeqAct_SetPlayerHealth" | "DisSeqAct_SetPlayerMana" => {
+                let health = class == "DisSeqAct_SetPlayerHealth";
+                let pct = (if health { cx.prop_int("m_Health") } else { cx.prop_int("m_Mana") }) as f32 / 100.0;
+                let v = &self.cfg.gameplay.vitals;
+                let (hmax, mmax) = (v.health_max, v.mana_max);
+                for p in self.players() {
+                    if let Some(pl) = self.m.world.player_mut(p) {
+                        if health {
+                            pl.vitals.health = hmax * pct;
+                        } else {
+                            pl.vitals.mana = mmax * pct;
+                            pl.vitals.mana_regen_cap = pl.vitals.mana_regen_cap.max(pl.vitals.mana);
+                        }
+                    }
+                }
+                HostResult::Done
+            }
+            "SeqAct_ToggleHidden" | "SeqAct_ChangeCollision" => {
+                // Hidden or collision-less level actors cannot be used or touched.
+                let off = match class.as_str() {
+                    "SeqAct_ChangeCollision" => Some(cx.prop_str("CollisionType") == "COLLIDE_NoCollision"),
+                    _ => match cx.input() {
+                        Some(0) => Some(true),
+                        Some(1) => Some(false),
+                        _ => None,
+                    },
+                };
+                for t in cx.objects("Target") {
+                    let Obj::Actor(a) = t else { continue };
+                    let set = if class == "SeqAct_ToggleHidden" { &mut self.st.hidden } else { &mut self.st.off };
+                    let now = off.unwrap_or(!set.contains(&a));
+                    if now {
+                        set.insert(a);
+                    } else {
+                        set.remove(&a);
+                    }
+                }
+                HostResult::Done
+            }
+            "DisSeqAct_NPCMarkForVanish" => {
+                // The NPC vanishes once it has been off screen for m_fOffscreenTimeRequired;
+                // headless nothing is on screen, so it vanishes after that time.
+                if cx.input() == Some(1) {
+                    self.st.vanish.remove(&cx.op);
+                    return HostResult::Done;
+                }
+                let pawns: Vec<PlayerId> = cx.objects("Target").iter().filter_map(|o| self.pawn_of(o)).collect();
+                cx.fire(0);
+                let t = cx.prop_float("m_fOffscreenTimeRequired");
+                self.st.vanish.insert(cx.op, (pawns, t));
+                HostResult::Latent
+            }
             "SeqAct_WaitForLevelsVisible" => {
                 // Every level of a map is loaded and visible with it.
                 HostResult::Done
@@ -690,6 +751,24 @@ impl Host for H<'_> {
     fn update(&mut self, cx: &mut Ctx, dt: f32) -> bool {
         match cx.class() {
             "SeqAct_PrepareMapChange" => true,
+            "DisSeqAct_NPCMarkForVanish" => {
+                let Some((pawns, left)) = self.st.vanish.get(&cx.op).cloned() else { return true };
+                if cx.has_impulse(1) {
+                    self.st.vanish.remove(&cx.op);
+                    return true;
+                }
+                let left = left - dt;
+                if left > 0.0 {
+                    self.st.vanish.insert(cx.op, (pawns, left));
+                    return false;
+                }
+                for p in pawns {
+                    self.destroy(&Obj::Pawn(p));
+                }
+                self.st.vanish.remove(&cx.op);
+                cx.fire(1);
+                true
+            }
             "SeqAct_CameraFade" => {
                 let left = self.st.fades.get(&cx.op).copied().unwrap_or(0.0) - dt;
                 if left <= 0.0 {
@@ -809,7 +888,7 @@ pub fn usables(m: &MissionMatch) -> Vec<(KUse, Vec3, String)> {
                 continue;
             }
             let Some(Obj::Actor(a)) = k.event_originator(e) else { continue };
-            if run.st.gone.contains(&a) || run.st.off.contains(&a) || !seen.insert(a) {
+            if run.st.gone.contains(&a) || run.st.off.contains(&a) || run.st.hidden.contains(&a) || !seen.insert(a) {
                 continue;
             }
             let max = k.prop_int(e, "MaxTriggerCount");
