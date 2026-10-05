@@ -236,6 +236,15 @@ impl TweakDb {
                 }
             }
         }
+        // Properties listed in `m_FallbackSkip` are owned by this tweak: the fallback's value is
+        // dropped, not merged (a struct set here keeps its own defaults for unset members).
+        if let Some(TVal::List(skips)) = own.get("m_FallbackSkip") {
+            for s in skips {
+                if let Some(TVal::Str(path)) = s.get("m_PropertyPathName") {
+                    remove_path(&mut out, path);
+                }
+            }
+        }
         for l in chain.iter().rev() {
             let m = self.read(*l)?;
             merge(&mut out, &m);
@@ -261,6 +270,25 @@ impl TweakDb {
 }
 
 /// Dotted lookup: `m_JumpZ.m_fBaseValue2_Normal`, `m_Levels[1].m_HorizDistance`.
+/// Remove a dotted property path (all static-array elements of the last component).
+fn remove_path(m: &mut TMap, path: &str) {
+    let (head, rest) = match path.split_once('.') {
+        Some((h, r)) => (h, Some(r)),
+        None => (path, None),
+    };
+    match rest {
+        None => {
+            let prefix = format!("{head}[");
+            m.retain(|k, _| k != head && !k.starts_with(&prefix));
+        }
+        Some(r) => {
+            if let Some(TVal::Struct(s)) = m.get_mut(head) {
+                remove_path(s, r);
+            }
+        }
+    }
+}
+
 pub fn get<'a>(m: &'a TMap, path: &str) -> Option<&'a TVal> {
     let mut cur = m;
     let parts: Vec<&str> = path.split('.').collect();

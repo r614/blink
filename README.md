@@ -32,10 +32,15 @@ crates/
   dishonored_assets  Dishonored decoders: StaticMesh, Texture2D (+ .tfc streaming), materials, levels
   dishonored_runtime Bevy presentation: renders an imported map with a free camera
   dishonored_audio   Wwise AKPK/soundbank/WEM readers, Wwise Vorbis decoding, event resolution
+  dishonored_world   collision world (BVH) and pathfinding on the original navigation mesh
+                     (`L_*_Nav` pylons; research/dishonored/NAVIGATION.md)
+  dishonored_ai      NPC brains on Arkane's attention model and AI tweaks
+                     (research/dishonored/AI.md)
 tools/
   package_dump       inspect a package: names / imports / exports / properties / hex
                      (package_scan: sweep a whole directory)
   map_dump           run the full map import and report statistics
+                     (nav_dump: navmesh survey/islands/OBJ; tweaks: resolve a tweak object)
   audio_dump         Wwise packages/banks: survey, list, resolve an event, decode to WAV
                      under harness_out/ (`audio_dump event Snd_Power_P_Blink_Start Bank_Power_Player`)
 research/            evidence log, unknowns register, format notes, prior art

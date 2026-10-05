@@ -484,3 +484,26 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   - Packages could appear twice in a map's package list, which duplicated NPC data; extraction now reads each package once.
 - **Confidence:** CONFIRMED (structure read from data; harness).
 - **Implementation consequence:** Conversations, pickups, possession and cutscene matinees from the original model are not implemented yet; chaos is a kill-ratio approximation.
+
+## 2026-10-05 — Original navigation is a UE3 navmesh (replaces the invented waypoint graph)
+- **Question:** What is in the `L_*_Nav` packages, and can bots/NPCs path on it instead of the invented AI-point graph?
+- **Evidence:** `L_Boyle_Ext_Nav` holds one `DisPylon` (Arkane `Pylon` subclass) with two `NavigationMeshBase` exports (walkable mesh and obstacle mesh), `NavMeshBoundsVolume`s and the empty `DisPatrolManager`/`DisFleePointManager`. No PathNode/ReachSpec network anywhere. `ENavMeshEdgeType` values read from `Engine.upk`. Path-object GUIDs match `DisDoor.NavGuid` and `DishonoredBreakableNavBlock.m_NavGuid`.
+- **Experiment:** Decoded the native serialization step by step (`nav_dump`, `enum_dump`); format in `research/dishonored/NAVIGATION.md`. Reader `dishonored_assets::navigation`, IR `dishonored_ir::nav`, pathfinding `dishonored_world::nav` (poly A* + funnel, door/blocker gating). Survey of the whole game; real-map test `crates/dishonored_content/tests/real_nav.rs`.
+- **Result:**
+  - 40/40 pylon packages decode with exact byte accounting (navmesh version 28). Edge classes: base, basic one-way, cross-pylon, path-object; types used: Normal, Removed, PathObject only. No mantle/drop/jump edges exist in any shipped mesh.
+  - Boyle Ext: 2120 verts, 984 polys, 1345 edges, 22 path objects (8 doors, 14 plank blockers). Polys sit on the collision floor (median +3 uu). 8 islands: the estate (353 polys) and the street/approach (554 polys) share no edge.
+  - Same-island paths: 100% ignoring path objects, 90% with level-start lock states; 38 ms for ~2000 queries.
+  - `nextNavigationPoint` on `DishonoredNavPoint`s is the engine's flat point list, not patrol links.
+- **Confidence:** CONFIRMED (layout, sizes, cross-references); UE3 field names LIKELY; two cross-pylon fields UNKNOWN (U-037).
+- **Implementation consequence:** `CollisionWorld` carries the map's `NavWorld` (cached `cache/<map>.nav.bin`); Contracts/FFA bots, offline session bots, the harness mission agent and NPC brains path on it through `WorldQuery::nav()`. The previous `NavGraph` (AI points + raycast and drop edges) is gone; bots no longer take drops the original data does not have.
+
+## 2026-10-05 — NPC perception and behaviour from Arkane's AI tweaks
+- **Question:** Which original data drives NPC perception and reactions, and how close can `dishonored_ai` follow it?
+- **Evidence:** pawn tweaks (`Twk_Pawn_Boyle_Party.*`, level script packages) -> brain tweaks (`AI_BrainTweaks_Elite.BrainTweaks_Guard_Elite_Party`, `AI_BrainTweaks_Civilian.BrainTweaks_Civilian`) -> attention process -> `DisTweaks_PawnAttention` profiles (`Twk_Attn_Guard_Unsuspecting/Suspecting`, `Twk_Attn_Default_Neutral`, `Twk_Attn_Noncombatant_*`), `Twk_Vision_Default`, behaviour/sub-state tweaks (Search, Panic, Combat, TriggerAlarm, Guard), `DefaultAI.ini` (noise loudness table, reaction delay, search crumbs, skirmish caps), `DefaultNPC.ini`. Enums via `enum_dump`. Arkane tweak inheritance (`m_FallbackChainCooked`, `m_FallbackSkip`) now resolved by `TweakDb`.
+- **Experiment:** `AiConfig` loader (`dishonored_assets::ai_config`, retail test checks it against the documented values); brains rewritten around per-stimulus attention with the original thresholds/leaks/increases, vision cones, noise contexts, reaction delay, Notice/Investigate/Search/Combat/Panic behaviours, skirmish caps, flee points and help barks (`research/dishonored/AI.md`). Harness runs before (`harness_out/baseline_*`, binaries built at b23dec7) and after.
+- **Result:**
+  - Party civilians panic on AlarmBell/Help/DeathRattle noises, not on gunshots by ear (raw `m_ScaryNoises` arrays), plus seen enemies, deaths, corpses, fighting guards and fleeing guests.
+  - Players are neutral guests until seen attacking (neutral profile only head-tracks).
+  - Harness (3-minute Contracts, same seeds): contract kills 10 -> 7, pursuits 14 -> 9..19, guard-combat ticks 4,565 -> 13,685, civilian-flee ticks 13,792 -> 206,173 (panics last until attention leaks below the Investigate stop: 0.015-0.025/s), NPC deaths 1 -> 5. Mission: completes (host at 13 s, done at 23 s) but the assassination is now witnessed (wider original outer cone 160 deg / 1700 uu): detected 7, alarms 2, one agent death.
+- **Confidence:** data CONFIRMED; vision-rate combination SPECULATIVE (U-032); no-amount increase semantics LIKELY (U-033); patrol topology, attack patterns, alarms OPEN (U-034, U-035).
+- **Implementation consequence:** `SimConfig.gameplay.ai` (cache `gameplay_config.v2.json`) feeds every crowd at match start; mission `Alert`/`Calm` commands go through the attention model.
