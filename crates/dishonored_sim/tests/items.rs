@@ -340,11 +340,35 @@ fn sleep_dart_knocks_out_after_one_and_a_half_seconds() {
 fn shadow_kill_turns_a_stealth_kill_to_ash() {
     let mut r = Run::new(&[(Vec3::new(100.0, 0.0, Z), 0.0)]);
     r.pm(1).inv.power_levels[power::SHADOW_KILL] = 1;
+    // Level 1 needs the victim unaware (the AI's hook, 0x00A87B60).
+    r.pm(100).ai_unaware = true;
     r.step(&[(1, input(0.0, 0.0, buttons::PRIMARY))]);
     r.steps(10, &[(1, input(0.0, 0.0, 0))]);
     assert!(!r.p(100).alive);
     assert!(r.p(100).no_body);
     assert!(r.events.iter().any(|e| matches!(e, SimEvent::BodyRemoved { body: 100, ash: true })));
+}
+
+#[test]
+fn shadow_kill_level_one_spares_an_aware_victim() {
+    let mut r = Run::new(&[(Vec3::new(100.0, 0.0, Z), 0.0)]);
+    r.pm(1).inv.power_levels[power::SHADOW_KILL] = 1;
+    r.step(&[(1, input(0.0, 0.0, buttons::PRIMARY))]);
+    r.steps(10, &[(1, input(0.0, 0.0, 0))]);
+    assert!(!r.p(100).alive);
+    assert!(!r.p(100).no_body, "an aware victim leaves a body at level 1");
+}
+
+#[test]
+fn sleep_dart_is_instant_on_an_unaware_npc() {
+    let mut r = Run::new(&[(Vec3::new(800.0, 0.0, Z), 180.0)]);
+    r.pm(1).inv.ammo[AmmoType::SleepDart as usize] = 1;
+    r.pm(100).ai_unaware = true;
+    let aim = |b| PlayerInput { buttons: b, left_hand: LeftHand::SleepDart, ..Default::default() };
+    r.steps(40, &[(1, aim(0))]);
+    r.step(&[(1, aim(buttons::SECONDARY))]);
+    r.steps(10, &[(1, aim(0))]);
+    assert_eq!(r.p(100).condition, Condition::Unconscious);
 }
 
 #[test]

@@ -104,6 +104,15 @@ pub struct CombatTuning {
     pub dark_vision_cost: f32,
     pub dark_vision_duration: f32,
     pub dark_vision_distance: f32,
+    /// `m_PpPerLevelParameters.m_EyeLidClosingDuration` (fade-in before the duration runs),
+    /// `m_PowerFadeOutDuration` (after it), `m_fCooldownTimer` (minimum time before it can be
+    /// switched off) of `Twk_DarkVision`.
+    #[serde(default)]
+    pub dark_vision_fade_in: f32,
+    #[serde(default)]
+    pub dark_vision_fade_out: f32,
+    #[serde(default)]
+    pub dark_vision_cooldown: f32,
 }
 
 fn v(map: &std::collections::BTreeMap<String, f32>, key: &str, default: f32) -> f32 {
@@ -188,6 +197,9 @@ impl CombatTuning {
             dark_vision_cost: c.dark_vision.mana_cost,
             dark_vision_duration: v(dv, "m_Levels[1].m_fDuration", v(dv, "m_Levels.m_fDuration", 30.0)),
             dark_vision_distance: v(dv, "m_Levels[1].m_fDistance", v(dv, "m_Levels.m_fDistance", 2000.0)),
+            dark_vision_fade_in: v(dv, "m_Levels[1].m_PpPerLevelParameters.m_EyeLidClosingDuration", 0.5),
+            dark_vision_fade_out: v(dv, "m_Levels[1].m_PpPerLevelParameters.m_PowerFadeOutDuration", 2.0),
+            dark_vision_cooldown: v(dv, "m_fCooldownTimer", 1.0),
         }
     }
 }

@@ -26,12 +26,18 @@ pub fn reset(p: &mut PlayerState, cfg: &VitalsConfig) {
     p.vitals.mana_regen_cap = cfg.mana_max;
     p.vitals.health_regen_timer = 0.0;
     p.vitals.dark_vision_remaining = 0.0;
+    p.dark = Default::default();
 }
 
 /// Spend mana if available. Returns false (and spends nothing) otherwise.
 pub fn spend_mana(p: &mut PlayerState, cost: f32, cfg: &VitalsConfig) -> bool {
     if p.vitals.mana + 1e-3 < cost {
         return false;
+    }
+    // `Attribute_ChanceUseNoManaForSpell` (a bone charm): the spend is skipped when the roll is
+    // below it (0x00AA93E0).
+    if p.free_spell_chance > 0.0 && p.roll() < p.free_spell_chance {
+        return true;
     }
     let v = &mut p.vitals;
     v.mana -= cost;
@@ -68,9 +74,6 @@ pub fn tick(p: &mut PlayerState, cfg: &VitalsConfig, dt: f32) {
             v.health_regen_timer += cfg.health_regen_rate.max(1e-3);
         }
     }
-    if v.dark_vision_remaining > 0.0 {
-        v.dark_vision_remaining = (v.dark_vision_remaining - dt).max(0.0);
-    }
 }
 
 /// Apply damage; emits Damage and (if lethal) Death. Returns true if the victim died.
@@ -84,9 +87,15 @@ pub fn apply_damage(
     events: &mut Vec<SimEvent>,
     cfg: &VitalsConfig,
 ) -> bool {
-    let amount = amount.trunc();
+    let mut amount = amount.trunc();
     if !p.alive || amount <= 0.0 {
         return false;
+    }
+    // The player's armour (0x00AB0A30): `damage - (int)Attribute_DamageReduction`, at least 1, for
+    // damage types with `m_bApplyDamageReduction` (all but bites, electricity, plague, whiskey fire,
+    // music and energy of the base game's types).
+    if p.damage_reduction > 0.0 && applies_damage_reduction(cause) {
+        amount = (amount - p.damage_reduction).max(1.0);
     }
     if cfg.health_regen_amount > 0.0 && (p.vitals.health - amount).max(0.0) < cfg.health_regen_limit {
         p.vitals.health_regen_timer = cfg.health_regen_initial_delay;
@@ -100,6 +109,12 @@ pub fn apply_damage(
     false
 }
 
+/// Damage types of the sim's causes that carry `m_bApplyDamageReduction` (DefaultWeapon.ini:
+/// `DishonoredDamageType_Bite` is one of the few that do not).
+pub fn applies_damage_reduction(cause: DamageCause) -> bool {
+    !matches!(cause, DamageCause::Rats | DamageCause::RatBite | DamageCause::World | DamageCause::Drowning | DamageCause::Adrenaline)
+}
+
 pub fn kill(p: &mut PlayerState, killer: Option<PlayerId>, cause: DamageCause, events: &mut Vec<SimEvent>) {
     if !p.alive {
         return;
@@ -109,6 +124,7 @@ pub fn kill(p: &mut PlayerState, killer: Option<PlayerId>, cause: DamageCause, e
     p.mode = MoveMode::Dead;
     p.velocity = glam::Vec3::ZERO;
     p.vitals.dark_vision_remaining = 0.0;
+    p.dark = Default::default();
     events.push(SimEvent::Death { victim: p.id, killer, cause });
 }
 

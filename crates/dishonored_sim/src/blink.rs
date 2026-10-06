@@ -30,7 +30,7 @@ use crate::movement::{MoveCtx, eye_position, view_vector};
 use crate::state::{BlinkTravel, MoveMode, PlayerState};
 use crate::vitals::spend_mana;
 use dishonored_ir::gameplay::{BlinkConfig, MovementConfig, VitalsConfig};
-use dishonored_world::{Capsule, WorldQuery, channel};
+use dishonored_world::{PawnBox, WorldQuery, channel};
 use glam::Vec3;
 
 pub const BLINK_LEVEL: usize = 1; // Contracts/FFA give level 2 Blink (index 1).
@@ -63,14 +63,14 @@ pub fn range_vector(dir: Vec3, horiz: f32, vert: f32, limit_from_ground: bool, h
 }
 
 fn sweep_box(world: &dyn WorldQuery, from: Vec3, delta: Vec3, extent: [f32; 3]) -> Option<(f32, Vec3, bool)> {
-    let probe = Capsule { center: from, radius: extent[0], half_height: extent[2] };
-    world.sweep_capsule(&probe, delta, channel::PAWN).map(|h| (h.fraction, h.normal, h.start_penetrating))
+    let probe = PawnBox { center: from, half: Vec3::from(extent) };
+    world.sweep_box(&probe, delta, channel::PAWN).map(|h| (h.fraction, h.normal, h.start_penetrating))
 }
 
 fn box_fits(world: &dyn WorldQuery, center: Vec3, radius: f32, half_height: f32) -> bool {
-    let cap = Capsule { center, radius, half_height };
+    let b = PawnBox::new(center, radius, half_height);
     let mut contacts = Vec::new();
-    world.capsule_contacts(&cap, channel::PAWN, &mut contacts);
+    world.box_contacts(&b, channel::PAWN, &mut contacts);
     contacts.iter().all(|c| c.depth < 0.5)
 }
 

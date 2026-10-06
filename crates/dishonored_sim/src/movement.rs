@@ -1,17 +1,26 @@
-//! Player locomotion (M7): a port of UE3 `PHYS_Walking` / `PHYS_Falling` semantics
-//! driven by Dishonored's tuning values.
+//! Locomotion: a port of the engine physics of `Dishonored.exe` (`APawn::physWalking`
+//! 0x006BD150, `APawn::physFalling` 0x006BF0E0, `APawn::CalcVelocity` 0x006ACD50, braking
+//! 0x006A2AC0, `APawn::stepUp` 0x006ADC10, `APawn::physSwimming` 0x006B7820,
+//! `NewFallVelocity` 0x006A3860) driven by Dishonored's tuning values, see
+//! research/dishonored/PLAYER.md "Engine physics".
 //!
-//! Evidence levels (see research/dishonored/movement/MOVEMENT.md):
-//! - constants: CONFIRMED (tweaks / class defaults / INI, see `GameplayConfig::provenance`)
-//! - integration scheme, friction/braking model, step-up and floor snapping: LIKELY (stock
-//!   UE3 behaviour; to be validated with traces from the original game, U-011)
-//! - mantle timing and probe pattern: SPECULATIVE until measured (U-019)
+//! - The pawn sweeps an axis-aligned box `(radius, radius, half height)` against the world
+//!   (UE3 extent traces, U-016), and walks hovering between `MIN_FLOOR_DIST` and
+//!   `MAX_FLOOR_DIST` above the floor.
+//! - The engine constants are UE3's scaled by 1.27 in this build (MAXSTEPHEIGHTFUDGE 2.54,
+//!   MINFLOORDIST 2.413, MAXFLOORDIST 3.048, MAXSTEPSIDEZ 0.1016, MINSTEPSIZESQUARED 232.26,
+//!   braking stop speed 12.7).
+//! - Falling integrates `v1 = v0 + a dt`, moves by `v1 dt`, then sets the velocity to twice
+//!   the measured average minus `v0` ("end velocity has twice the acceleration"): the pawn
+//!   gains `2 a dt` per tick, so gravity and air control act twice as strongly as the raw
+//!   values suggest (a JumpZ 800 jump rises 107 uu, not 213).
+//! - Mantle timings remain SPECULATIVE (U-019).
 
 use crate::events::SimEvent;
 use crate::input::{PlayerInput, buttons};
-use crate::state::{MoveMode, PlayerState, SlideState, Traversal};
+use crate::state::{MoveMode, PawnKind, PlayerState, SlideState, Traversal};
 use dishonored_ir::gameplay::MovementConfig;
-use dishonored_world::{Capsule, WorldQuery, channel};
+use dishonored_world::{Capsule, PawnBox, WorldQuery, channel};
 use glam::{Vec2, Vec3};
 
 /// Fixed tick rate of the simulation.
@@ -20,17 +29,60 @@ pub const DT: f32 = 1.0 / TICK_HZ as f32;
 /// World kill plane (`WorldInfo.KillZ` on L_Boyle_Ext_P).
 pub const KILL_Z: f32 = -20000.0;
 
+/// `MAXSTEPHEIGHTFUDGE` (UE3 2.0, x1.27).
+pub const STEP_FUDGE: f32 = 2.54;
+/// `MINFLOORDIST` / `MAXFLOORDIST` / their mean: the walking pawn hovers this far above the floor.
+pub const MIN_FLOOR_DIST: f32 = 2.413;
+pub const MAX_FLOOR_DIST: f32 = 3.048;
+pub const FLOOR_DIST: f32 = 2.7305;
+/// `MAXSTEPSIDEZ`: walls with a normal Z below this are steps (0x006ADC10).
+pub const MAX_STEP_SIDE_Z: f32 = 0.1016;
+/// `MINSTEPSIZESQUARED`: a further step needs at least this much of the move left.
+pub const MIN_STEP_SIZE_SQ: f32 = 232.2576;
+/// Braking stops below this speed squared (`DAT_0103AB7C`, 12.7^2).
+pub const BRAKE_STOP_SPEED_SQ: f32 = 161.29;
+/// Braking sub-step (`DAT_0103C798`).
+pub const BRAKE_STEP: f32 = 0.03;
+/// Floors steeper than this (normal Z) are not "flat" for the uphill test of physWalking.
+pub const FLAT_FLOOR_Z: f32 = 0.98;
+/// Physics sub-step limit: moves longer than this are split (`DAT_00FBA454`).
+pub const MAX_TIME_STEP: f32 = 0.05;
+
+/// Rat pawns: `DisGameCrowdAgentSkeletalRat` (search extent 15, `GroundOffset` 10, `MaxSpeed` 350 of
+/// `RatSwarm.CrowdAgent_SmallRat`).
+pub const RAT_RADIUS: f32 = 15.0;
+pub const RAT_HALF_HEIGHT: f32 = 10.0;
+
 pub fn half_height(p: &PlayerState, cfg: &MovementConfig) -> f32 {
-    if p.crouched { cfg.crouch_half_height } else { cfg.collision_half_height }
+    if p.kind == PawnKind::Rat {
+        RAT_HALF_HEIGHT
+    } else if p.crouched {
+        cfg.crouch_half_height
+    } else {
+        cfg.collision_half_height
+    }
 }
 
+pub fn radius(p: &PlayerState, cfg: &MovementConfig) -> f32 {
+    if p.kind == PawnKind::Rat { RAT_RADIUS } else { cfg.collision_radius }
+}
+
+/// The pawn's collision box (cylinder extent).
+pub fn pawn_box(p: &PlayerState, cfg: &MovementConfig) -> PawnBox {
+    PawnBox::new(p.position, radius(p, cfg), half_height(p, cfg))
+}
+
+/// The capsule of the same size (body hit tests of projectiles and swords).
 pub fn capsule(p: &PlayerState, cfg: &MovementConfig) -> Capsule {
-    Capsule { center: p.position, radius: cfg.collision_radius, half_height: half_height(p, cfg) }
+    Capsule { center: p.position, radius: radius(p, cfg), half_height: half_height(p, cfg) }
 }
 
 /// Eye position: UE `BaseEyeHeight` above the cylinder centre when standing; the same
 /// offset from the top of the cylinder when crouched; swung sideways by the lean.
 pub fn eye_position(p: &PlayerState, cfg: &MovementConfig) -> Vec3 {
+    if p.kind == PawnKind::Rat {
+        return p.position + Vec3::Z * RAT_HALF_HEIGHT * 0.5;
+    }
     let top_gap = cfg.collision_half_height - cfg.base_eye_height;
     let mut eye = p.position + Vec3::Z * (half_height(p, cfg) - top_gap);
     if p.lean != 0.0 {
@@ -50,8 +102,8 @@ pub fn lean_offset(p: &PlayerState, cfg: &MovementConfig) -> Vec3 {
     right_vector(p.yaw) * (l * a.sin()) - Vec3::Z * (l * (1.0 - a.cos()))
 }
 
-/// Lean spring (`m_LeanConstants`): `a'' = k (target - a) - c a'`, semi-implicit, in
-/// units of the maximum angle (the camera's spring acts on the head point; LIKELY).
+/// Lean spring (`m_LeanConstants`, integrator 0x00AC0A00: semi-implicit Euler,
+/// `v += (-k (x - target) - c v) dt; x += v dt`), in units of the maximum angle.
 fn step_lean(p: &mut PlayerState, target: f32, ctx: &MoveCtx) {
     let lc = &ctx.cfg.lean;
     p.lean_velocity += (lc.springiness * (target - p.lean) - lc.damping * p.lean_velocity) * ctx.dt;
@@ -185,32 +237,60 @@ pub fn speed_modifier(p: &mut PlayerState, input: &PlayerInput, cfg: &MovementCo
     m
 }
 
-/// Ground max speed this tick: `GroundSpeed * MaxSpeedModifier()`.
-fn max_speed(p: &mut PlayerState, input: &PlayerInput, cfg: &MovementConfig, sword_out: bool, dt: f32) -> f32 {
-    cfg.run_speed * speed_modifier(p, input, cfg, sword_out, dt)
-}
-
-/// UE3 `APawn::CalcVelocity` (LIKELY): braking when there is no acceleration,
-/// otherwise turn velocity toward the acceleration direction with friction.
-fn calc_velocity(vel: Vec3, accel: Vec3, max_speed: f32, friction: f32, dt: f32) -> Vec3 {
-    let mut v = Vec2::new(vel.x, vel.y);
-    let a = Vec2::new(accel.x, accel.y);
-    if a.length_squared() < 1e-6 {
-        let old = v;
-        v -= v * (2.0 * friction * dt).min(1.0);
-        if v.dot(old) <= 0.0 || v.length() < 1.0 {
-            v = Vec2::ZERO;
-        }
-    } else {
-        let dir = a.normalize();
-        let speed = v.length();
-        v -= (v - dir * speed) * (dt * friction).min(1.0);
-        v += a * dt;
-        if v.length() > max_speed {
-            v = v.normalize() * max_speed;
+/// Braking (`APawn::ApplyVelocityBraking`, 0x006A2AC0): in sub-steps of at most 0.03 s,
+/// `v -= 2 v dt friction`, summing each sub-step's velocity weighted by its share of the tick
+/// while it still points the old way; the result is that average, zeroed when it reversed or
+/// fell below 12.7 uu/s.
+pub fn apply_braking(vel: Vec3, dt: f32, friction: f32) -> Vec3 {
+    let old = vel;
+    let mut v = vel;
+    let mut sum = Vec3::ZERO;
+    let mut t = dt;
+    while t > 0.0 {
+        let s = t.min(BRAKE_STEP);
+        v -= v * 2.0 * s * friction;
+        t -= s;
+        if v.dot(old) > 0.0 {
+            sum += v * s / dt;
         }
     }
-    Vec3::new(v.x, v.y, vel.z)
+    if sum.dot(old) < 0.0 || sum.length_squared() < BRAKE_STOP_SPEED_SQ {
+        Vec3::ZERO
+    } else {
+        sum
+    }
+}
+
+/// `APawn::CalcVelocity` (0x006ACD50, no root motion): the acceleration (the controller's,
+/// `bForceMaxAccel` is false) is limited to `AccelRate * modifier` (`GetMaxAccel`, 0x006A2EE0);
+/// without acceleration and with `brake`, the velocity brakes; otherwise it turns toward the
+/// acceleration direction, `v -= (v - dir |v|) dt friction`; then
+/// `v = v (1 - fluid dt friction) + a dt`, plus `(1 - Buoyancy) g dt` when buoyant; the speed is
+/// capped at `max_speed * modifier`.
+#[allow(clippy::too_many_arguments)]
+pub fn calc_velocity(vel: Vec3, accel: Vec3, accel_dir: Vec3, dt: f32, max_speed: f32, friction: f32, fluid: bool, brake: bool, buoyant: Option<(f32, f32)>, modifier: f32, accel_rate: f32) -> (Vec3, Vec3) {
+    let max_accel = accel_rate * modifier;
+    let max_speed = max_speed * modifier;
+    let mut a = accel;
+    let mut v = vel;
+    if !brake || a != Vec3::ZERO {
+        if a.length_squared() > max_accel * max_accel {
+            a = a.normalize_or_zero() * max_accel;
+        }
+        let size = v.length();
+        v -= (v - accel_dir * size) * dt * friction;
+    } else {
+        v = apply_braking(v, dt, friction);
+    }
+    let f = if fluid { 1.0 } else { 0.0 };
+    v = v * (1.0 - f * dt * friction) + a * dt;
+    if let Some((buoyancy, gravity_z)) = buoyant {
+        v.z += (1.0 - buoyancy) * gravity_z * dt;
+    }
+    if v.length_squared() > max_speed * max_speed {
+        v = v.normalize_or_zero() * max_speed;
+    }
+    (v, a)
 }
 
 /// UE3 `PlayerController` `PlayerWalking.PlayerMove`: `Acceleration = AccelRate *
@@ -241,10 +321,11 @@ pub fn step_movement(
     if p.mode == MoveMode::Dead {
         return;
     }
+    let rat = p.kind == PawnKind::Rat;
 
     // `Dis_SneakOrSlide`: sneak toggle (keeps feet planted; standing up requires
     // headroom), or a slide when sprinting at `m_fMinSpeedToSlide` or faster.
-    if p.just_pressed(input, buttons::CROUCH) && p.mode == MoveMode::Walking && !p.slide.active {
+    if !rat && p.just_pressed(input, buttons::CROUCH) && p.mode == MoveMode::Walking && !p.slide.active {
         if p.sprinting && can_move && p.velocity.truncate().length() >= ctx.cfg.input.min_speed_to_slide {
             start_slide(p, sword_out, ctx);
         } else {
@@ -253,19 +334,29 @@ pub fn step_movement(
     }
 
     // Lean only while standing still on the ground (moving breaks the lean).
-    let lean_target = if p.mode == MoveMode::Walking && p.velocity.truncate().length() < 10.0 {
+    let lean_target = if !rat && p.mode == MoveMode::Walking && p.velocity.truncate().length() < 10.0 {
         (input.pressed(buttons::LEAN_RIGHT) as i32 - input.pressed(buttons::LEAN_LEFT) as i32) as f32
     } else {
         0.0
     };
     step_lean(p, lean_target, ctx);
 
-    let can_sprint = can_move && p.mode == MoveMode::Walking && p.sword.phase != crate::state::SwordPhase::Blocking;
+    let can_sprint = !rat && can_move && p.mode == MoveMode::Walking && p.sword.phase != crate::state::SwordPhase::Blocking;
     update_locomotion_flags(p, input, ctx.cfg, can_sprint);
+
+    // Entering deep water switches to swimming (`PhysicsVolumeChange`: `bWaterVolume`).
+    if matches!(p.mode, MoveMode::Walking | MoveMode::Falling) && !rat {
+        if let Some(w) = ctx.world.water_at(p.position) {
+            if !w.shallow {
+                start_swimming(p, events);
+            }
+        }
+    }
 
     match p.mode {
         MoveMode::Walking => walking(p, input, sword_out, can_move, ctx, events),
-        MoveMode::Falling => falling(p, input, can_move, ctx, events),
+        MoveMode::Falling => falling(p, input, can_move, ctx.dt, ctx, events),
+        MoveMode::Swimming => crate::swim::swimming(p, input, can_move, sword_out, ctx, events),
         MoveMode::Mantling => {
             if advance_traversal(p, ctx.dt) {
                 p.mode = MoveMode::Walking;
@@ -278,6 +369,25 @@ pub fn step_movement(
     if p.position.z < KILL_Z && p.alive {
         events.push(SimEvent::FellOutOfWorld { id: p.id });
     }
+}
+
+pub(crate) fn start_swimming(p: &mut PlayerState, events: &mut Vec<SimEvent>) {
+    if p.mode == MoveMode::Swimming {
+        return;
+    }
+    // `startSwimming` (0x006B6360): entering slowly from above dips: a downward speed below
+    // 203.2 becomes `-101.6 - 0.7 |v.xy|`.
+    if p.velocity.z > -203.2 && p.velocity.z < 0.0 {
+        p.velocity.z = -101.6 - p.velocity.truncate().length() * 0.7;
+    }
+    p.mode = MoveMode::Swimming;
+    p.slide.active = false;
+    p.jump.active = false;
+    p.fall_time = 0.0;
+    if p.crouched {
+        p.crouched = false;
+    }
+    events.push(SimEvent::Swim { id: p.id, entered: true });
 }
 
 /// Linear traversal used by mantle and Blink. Returns true when finished.
@@ -323,7 +433,7 @@ fn slide(p: &mut PlayerState, ctx: &MoveCtx) {
     }
     p.velocity.z = 0.0;
     let delta = Vec3::new(p.velocity.x, p.velocity.y, 0.0) * ctx.dt;
-    move_and_slide(p, delta, true, ctx);
+    walk_move(p, delta, ctx);
     let s = &mut p.slide;
     let cur = p.velocity.truncate();
     let start_dir = s.start_velocity.truncate().normalize_or_zero();
@@ -334,6 +444,12 @@ fn slide(p: &mut PlayerState, ctx: &MoveCtx) {
     }
 }
 
+fn box_fits(world: &dyn WorldQuery, b: &PawnBox) -> bool {
+    let mut contacts = Vec::new();
+    world.box_contacts(b, channel::PAWN, &mut contacts);
+    !contacts.iter().any(|c| c.depth > 0.5)
+}
+
 fn set_crouch(p: &mut PlayerState, crouch: bool, ctx: &MoveCtx) {
     let cfg = ctx.cfg;
     if crouch == p.crouched {
@@ -342,16 +458,146 @@ fn set_crouch(p: &mut PlayerState, crouch: bool, ctx: &MoveCtx) {
     let old_hh = half_height(p, cfg);
     let new_hh = if crouch { cfg.crouch_half_height } else { cfg.collision_half_height };
     let new_center = p.position + Vec3::Z * (new_hh - old_hh);
-    if !crouch {
-        let cap = Capsule { center: new_center, radius: cfg.collision_radius, half_height: new_hh };
-        let mut contacts = Vec::new();
-        ctx.world.capsule_contacts(&cap, channel::PAWN, &mut contacts);
-        if contacts.iter().any(|c| c.depth > 0.5) {
-            return; // no headroom
-        }
+    if !crouch && !box_fits(ctx.world, &PawnBox::new(new_center, radius(p, cfg), new_hh)) {
+        return; // no headroom
     }
     p.crouched = crouch;
     p.position = new_center;
+}
+
+/// One UE3 `MoveActor` of the pawn box: moves as far as it can along `delta`; returns the
+/// blocking hit (normal, time).
+fn move_actor(p: &mut PlayerState, delta: Vec3, ctx: &MoveCtx) -> Option<(Vec3, f32)> {
+    if delta.length_squared() < 1e-10 {
+        return None;
+    }
+    let b = pawn_box(p, ctx.cfg);
+    match ctx.world.sweep_box(&b, delta, channel::PAWN) {
+        None => {
+            p.position += delta;
+            None
+        }
+        Some(h) if h.start_penetrating => {
+            p.position = depenetrate(p, ctx);
+            Some((h.normal, 0.0))
+        }
+        Some(h) => {
+            p.position += delta * h.fraction;
+            Some((h.normal, h.fraction))
+        }
+    }
+}
+
+fn depenetrate(p: &PlayerState, ctx: &MoveCtx) -> Vec3 {
+    let mut b = pawn_box(p, ctx.cfg);
+    let mut contacts = Vec::new();
+    for _ in 0..6 {
+        contacts.clear();
+        ctx.world.box_contacts(&b, channel::PAWN, &mut contacts);
+        let Some(k) = contacts.iter().max_by(|a, b| a.depth.total_cmp(&b.depth)) else { break };
+        if k.depth < 0.05 {
+            break;
+        }
+        b.center += k.normal * (k.depth + 0.05);
+    }
+    b.center
+}
+
+/// `AActor::TwoWallAdjust`: in a corner of 90 degrees or less move along the crease, else slide
+/// along the new wall (zeroed when that turns against the desired direction).
+pub fn two_wall_adjust(desired: Vec3, delta: Vec3, n: Vec3, old_n: Vec3, time: f32) -> Vec3 {
+    if old_n.dot(n) <= 0.0 {
+        let dir = n.cross(old_n).normalize_or_zero();
+        let mut d = dir * (delta.dot(dir) * (1.0 - time));
+        if desired.dot(d) < 0.0 {
+            d = -d;
+        }
+        d
+    } else {
+        let mut d = (delta - n * delta.dot(n)) * (1.0 - time);
+        if d.dot(desired) <= 0.0 {
+            d = Vec3::ZERO;
+        } else if (n.dot(old_n) - 1.0).abs() < 1e-4 {
+            d += n * 0.1;
+        }
+        d
+    }
+}
+
+/// `APawn::stepUp` (0x006ADC10): a near-vertical barrier (normal Z below `MAXSTEPSIDEZ`) or a
+/// walkable slope is climbed by lifting `MaxStepHeight + MAXSTEPHEIGHTFUDGE`, moving, and
+/// dropping back; another near-vertical barrier with enough move left repeats the step;
+/// otherwise the move slides along the barrier treated as vertical (with the two-wall adjust).
+fn step_up(p: &mut PlayerState, desired: Vec3, delta: Vec3, hit: (Vec3, f32), ctx: &MoveCtx, depth: u32) {
+    let cfg = ctx.cfg;
+    let down = Vec3::Z * -(cfg.max_step_height + STEP_FUDGE);
+    let mut step_down = true;
+    let (mut n, mut t) = hit;
+    if n.z < MAX_STEP_SIDE_Z || n.z >= cfg.walkable_floor_z {
+        move_actor(p, -down, ctx);
+        match move_actor(p, delta, ctx) {
+            Some(h) => (n, t) = h,
+            None => t = 1.0,
+        }
+    } else if p.mode != MoveMode::Walking {
+        let dist = delta.length();
+        match move_actor(p, delta + Vec3::Z * (dist * n.z), ctx) {
+            Some(h) => (n, t) = h,
+            None => t = 1.0,
+        }
+        step_down = false;
+    }
+    if t < 1.0 {
+        if n.z.abs() < MAX_STEP_SIDE_Z && t * delta.length_squared() > MIN_STEP_SIZE_SQ && depth < 4 {
+            if step_down {
+                move_actor(p, down, ctx);
+            }
+            step_up(p, desired, delta * (1.0 - t), (n, t), ctx, depth + 1);
+            return;
+        }
+        let old_n = n;
+        let flat = Vec3::new(n.x, n.y, 0.0).normalize_or_zero();
+        let nd = (delta - flat * delta.dot(flat)) * (1.0 - t);
+        if nd.dot(delta) >= 0.0 {
+            if let Some((n2, t2)) = move_actor(p, nd, ctx) {
+                let adj = two_wall_adjust(desired, nd, n2, old_n, t2);
+                move_actor(p, adj, ctx);
+            }
+        }
+    }
+    if step_down {
+        move_actor(p, down, ctx);
+    }
+}
+
+/// The horizontal part of physWalking's move: the move, then stepUp on a barrier.
+fn walk_move(p: &mut PlayerState, delta: Vec3, ctx: &MoveCtx) {
+    if delta.abs().max_element() < 1e-4 {
+        return;
+    }
+    // Moving into a sloped floor counts as hitting it (physWalking: `Floor.Z < 0.98 &&
+    // (Delta | Floor) < 0`).
+    let hit = if p.floor_normal.z < FLAT_FLOOR_Z && delta.dot(p.floor_normal) < 0.0 {
+        Some((p.floor_normal, 0.0))
+    } else {
+        move_actor(p, delta, ctx)
+    };
+    if let Some((n, t)) = hit {
+        if t < 1.0 {
+            let desired = delta.normalize_or_zero();
+            step_up(p, desired, delta * (1.0 - t), (n, t), ctx, 0);
+        }
+    }
+}
+
+/// Floor under the pawn: a box sweep down `MaxStepHeight + MAXSTEPHEIGHTFUDGE`. Returns the
+/// distance to the floor and its normal (`face_up`, the most upward face the box rests on).
+fn find_floor(p: &PlayerState, ctx: &MoveCtx) -> Option<(f32, Vec3)> {
+    let probe = ctx.cfg.max_step_height + STEP_FUDGE;
+    let b = pawn_box(p, ctx.cfg);
+    let h = ctx.world.sweep_box(&b, Vec3::Z * -probe, channel::PAWN)?;
+    let n = if h.face_up.z > 0.0 { h.face_up } else { h.normal };
+    Some((if h.start_penetrating { 0.0 } else { probe * h.fraction }, n))
 }
 
 fn walking(
@@ -363,7 +609,7 @@ fn walking(
     events: &mut Vec<SimEvent>,
 ) {
     let cfg = ctx.cfg;
-    if can_move && p.just_pressed(input, buttons::JUMP) {
+    if can_move && p.just_pressed(input, buttons::JUMP) && p.kind != PawnKind::Rat {
         if try_mantle(p, input, ctx, events) {
             return;
         }
@@ -371,11 +617,14 @@ fn walking(
             set_crouch(p, false, ctx);
         }
         if !p.crouched {
+            // StatePlayerMasterJump enter (0x00A75EE0): `Velocity.Z = Attribute_JumpZ`
+            // (`JumpZCarryingCorpse` while carrying), physics Falling.
             p.velocity.z = cfg.jump_z;
             p.mode = MoveMode::Falling;
             p.fall_time = 0.0;
+            p.jump = crate::state::JumpState { active: true, held: 0.0, powered: false };
             events.push(SimEvent::Jumped { id: p.id });
-            falling(p, input, can_move, ctx, events);
+            falling(p, input, can_move, ctx.dt, ctx, events);
             return;
         }
     }
@@ -384,68 +633,201 @@ fn walking(
     if p.slide.active && p.slide.elapsed > cfg.slide_time * cfg.slide_percent_not_cancelable && input.forward == 0 && input.right == 0 {
         p.slide.active = false;
     }
+    let old = p.position;
     if p.slide.active {
         slide(p, ctx);
         // The speed modifier keeps tracking so the exit blends down from the slide.
         p.speed_mod = p.velocity.truncate().length() / cfg.run_speed;
     } else {
+        // physWalking: Velocity.Z = Acceleration.Z = 0; CalcVelocity(AccelDir, dt, GroundSpeed,
+        // PhysicsVolume.GroundFriction, 0, brake, 0).
         let accel = if can_move { input_accel(p, input, cfg) } else { Vec3::ZERO };
-        let vmax = max_speed(p, input, cfg, sword_out, ctx.dt);
-        p.velocity = calc_velocity(p.velocity, accel, vmax, cfg.ground_friction, ctx.dt);
+        let modifier = speed_modifier(p, input, cfg, sword_out, ctx.dt);
+        let mut v = p.velocity;
+        v.z = 0.0;
+        let (nv, _) = calc_velocity(v, accel, accel.normalize_or_zero(), ctx.dt, cfg.run_speed, cfg.ground_friction, false, true, None, modifier, cfg.accel_rate);
+        p.velocity = nv;
         p.velocity.z = 0.0;
-        let delta = Vec3::new(p.velocity.x, p.velocity.y, 0.0) * ctx.dt;
-        move_and_slide(p, delta, true, ctx);
+        let delta = p.velocity * ctx.dt;
+        walk_move(p, delta, ctx);
+    }
+    if p.mode != MoveMode::Walking {
+        return;
     }
 
-    // Stay glued to the floor within step height, otherwise start falling.
-    let cap = capsule(p, cfg);
-    let probe = cfg.max_step_height + 2.0;
-    match ctx.world.sweep_capsule(&cap, Vec3::Z * -probe, channel::PAWN) {
-        Some(h) if !h.start_penetrating && h.face_up.z >= cfg.walkable_floor_z => {
-            p.position.z -= probe * h.fraction;
-            p.floor_normal = h.face_up;
-        }
-        Some(h) if h.start_penetrating && h.face_up.z >= cfg.walkable_floor_z => {
-            p.floor_normal = h.face_up;
+    // Floor: keep between MINFLOORDIST and MAXFLOORDIST above a walkable floor, else fall.
+    match find_floor(p, ctx) {
+        Some((dist, n)) if n.z >= cfg.walkable_floor_z => {
+            if dist > MAX_FLOOR_DIST || dist < MIN_FLOOR_DIST {
+                move_actor(p, Vec3::Z * (FLOOR_DIST - dist), ctx);
+            }
+            p.floor_normal = n;
         }
         _ => {
+            // Off a ledge or onto a slope too steep: fall with the walking velocity.
+            p.velocity = (p.position - old) / ctx.dt;
+            p.velocity.z = 0.0;
             p.mode = MoveMode::Falling;
             p.fall_time = 0.0;
+            return;
         }
+    }
+    // The velocity is what the move achieved (horizontal).
+    if !p.slide.active {
+        p.velocity = (p.position - old) / ctx.dt;
+    }
+    p.velocity.z = 0.0;
+}
+
+/// `StatePlayerMasterJump` style 0 (`eDisJumpStyle_FixedNormalJump_FixedPowerJump`, tick
+/// 0x00A76110): while rising, the time the jump button has been held accumulates (reset when
+/// released); at the top of the jump (`Velocity.Z <= 1e-4`) a jump held for more than 0.05 s
+/// becomes a power jump when `Attribute_JumpZ_PowerJump` is positive (Agility):
+/// `Velocity.Z = JumpZ_PowerJump` (0x00A71370); otherwise the jump hands over to falling.
+fn jump_tick(p: &mut PlayerState, input: &PlayerInput, power_jump_z: f32, dt: f32, events: &mut Vec<SimEvent>) {
+    if !p.jump.active {
+        return;
+    }
+    if p.velocity.z <= 1e-4 {
+        if !p.jump.powered && p.jump.held > MAX_TIME_STEP && power_jump_z > 1e-4 {
+            p.velocity.z = power_jump_z;
+            p.jump.powered = true;
+            events.push(SimEvent::PowerJump { id: p.id });
+        } else {
+            p.jump.active = false;
+            return;
+        }
+    }
+    if !p.jump.powered {
+        p.jump.held = if input.pressed(buttons::JUMP) { p.jump.held + dt } else { 0.0 };
     }
 }
 
-fn falling(p: &mut PlayerState, input: &PlayerInput, can_move: bool, ctx: &MoveCtx, events: &mut Vec<SimEvent>) {
+/// `APawn::physFalling` (0x006BF0E0) with `bLimitFallAccel` (Engine `Default__Pawn`):
+/// - air control: `AirControl`, zeroed when the air-control move would run into something
+///   within the tick; the acceleration is limited to `AccelRate * AirControl` (plus
+///   `(10 - speed2d) / dt` below 10 uu/s); at or above `GroundSpeed` the horizontal speed may not
+///   grow (`MaxAirSpeed`), or with `AirControl <= 0.05` the acceleration is 1;
+/// - `v1 = NewFallVelocity(v0, a + g, dt)`, move `v1 dt`;
+/// - landing on a walkable surface; walls slide (`ComputeSlideVector`, two-wall adjust);
+/// - after the move, `v = 2 (moved / dt) - v0` when rising or still accelerating down, capped
+///   at the volume's terminal velocity.
+pub(crate) fn falling(p: &mut PlayerState, input: &PlayerInput, can_move: bool, dt: f32, ctx: &MoveCtx, events: &mut Vec<SimEvent>) {
     let cfg = ctx.cfg;
-    let dt = ctx.dt;
     p.fall_time += dt;
     // Leaving the ground ends a slide (the slide physics exits on a fall, 0x00A6F440).
     p.slide.active = false;
+    let power = if p.kind == PawnKind::Rat { 0.0 } else { cfg.power_jump_z };
+    jump_tick(p, input, power, dt, events);
 
     // Auto-mantle while airborne and pushing forward (Dishonored grabs ledges mid-jump).
-    if can_move && input.forward > 0 && -p.velocity.z < cfg.mantle.max_fall_speed_for_mantle {
+    if can_move && input.forward > 0 && -p.velocity.z < cfg.mantle.max_fall_speed_for_mantle && p.kind != PawnKind::Rat {
         if try_mantle(p, input, ctx, events) {
+            p.jump.active = false;
             return;
         }
     }
 
-    // Air control: a fraction of ground acceleration, never exceeding the larger of the
-    // current horizontal speed and run speed.
-    let old = p.velocity;
-    let accel = if can_move { input_accel(p, input, cfg) * cfg.air_control } else { Vec3::ZERO };
-    let mut vh = Vec2::new(old.x, old.y) + Vec2::new(accel.x, accel.y) * dt;
-    let cap_speed = Vec2::new(old.x, old.y).length().max(cfg.run_speed);
-    if vh.length() > cap_speed {
-        vh = vh.normalize() * cap_speed;
+    let mut accel = if can_move { input_accel(p, input, cfg) } else { Vec3::ZERO };
+    accel.z = 0.0;
+    let mut tick_air = cfg.air_control;
+    if tick_air > 0.05 {
+        let dir = Vec2::new(accel.x, accel.y).normalize_or_zero();
+        let test = (Vec2::new(p.velocity.x, p.velocity.y) + dir * cfg.accel_rate * tick_air) * dt;
+        if test != Vec2::ZERO {
+            let b = pawn_box(p, cfg);
+            if ctx.world.sweep_box(&b, Vec3::new(test.x, test.y, 0.0), channel::PAWN).is_some() {
+                tick_air = 0.0;
+            }
+        }
     }
-    let vz = (old.z + cfg.gravity_z * dt).max(-cfg.terminal_velocity);
-    p.velocity = Vec3::new(vh.x, vh.y, vz);
-    // Trapezoidal integration (exact apex for constant gravity).
-    let delta = (old + p.velocity) * 0.5 * dt;
-    let impact_speed = -p.velocity.z;
-    if let Some((_, normal)) = move_and_slide(p, delta, false, ctx) {
-        if normal.z >= cfg.walkable_floor_z && p.velocity.z <= 0.0 {
-            land(p, impact_speed, normal, events);
+    let speed2d = p.velocity.truncate().length();
+    let mut max_accel = cfg.accel_rate * tick_air;
+    let mut max_air_speed = 0.0;
+    if speed2d < 10.0 && tick_air > 0.0 {
+        max_accel += (10.0 - speed2d) / dt;
+    } else if speed2d >= cfg.run_speed {
+        if tick_air <= 0.05 {
+            max_accel = 1.0;
+        } else {
+            max_air_speed = speed2d;
+        }
+    }
+    if accel.length_squared() > max_accel * max_accel {
+        accel = accel.normalize_or_zero() * max_accel;
+    }
+
+    let mut remaining = dt;
+    let mut iterations = 0;
+    while remaining > 0.0 && iterations < 8 {
+        iterations += 1;
+        let tick = if remaining > MAX_TIME_STEP { (remaining * 0.5).min(MAX_TIME_STEP) } else { remaining };
+        remaining -= tick;
+        let old_loc = p.position;
+        let old_vel = p.velocity;
+        // NewFallVelocity (0x006A3860): v (1 - fluid dt) + a (1 - buoyancy) dt; out of water both are 0.
+        let mut v = old_vel + (accel + Vec3::Z * cfg.gravity_z) * tick;
+        if max_air_speed > 0.0 && v.truncate().length_squared() > max_air_speed * max_air_speed {
+            let xy = v.truncate().normalize_or_zero() * max_air_speed;
+            v.x = xy.x;
+            v.y = xy.y;
+        }
+        p.velocity = v;
+        let adjusted = v * tick;
+        let impact_speed = -v.z;
+        let mut hit_wall = false;
+        if let Some((n, t)) = move_actor(p, adjusted, ctx) {
+            if n.z >= cfg.walkable_floor_z {
+                // processLanded: the velocity is the measured one when enough of the tick moved.
+                if t > 0.1 && t * tick > 0.003 {
+                    p.velocity = (p.position - old_loc) / (tick * t);
+                }
+                let speed = -p.velocity.z;
+                land(p, speed, n, events);
+                return;
+            }
+            hit_wall = true;
+            // ComputeSlideVector (slot 290): slide, never rising faster than the original move.
+            let mut delta = (adjusted - n * adjusted.dot(n)) * (1.0 - t);
+            if delta.z > 0.0 {
+                delta.z = delta.z.min(adjusted.z * (1.0 - t));
+            }
+            if delta.dot(adjusted) >= 0.0 {
+                if let Some((n2, t2)) = move_actor(p, delta, ctx) {
+                    if n2.z >= cfg.walkable_floor_z {
+                        land(p, impact_speed.max(0.0), n2, events);
+                        return;
+                    }
+                    let desired = adjusted.normalize_or_zero();
+                    let adj = two_wall_adjust(desired, delta, n2, n, t2);
+                    let ditch = n.z > 0.0 && n2.z > 0.0 && adj.z == 0.0 && n2.dot(n) < 0.0;
+                    let third = move_actor(p, adj, ctx);
+                    if ditch || third.is_some_and(|(n3, _)| n3.z >= cfg.walkable_floor_z) {
+                        let nn = third.map_or(n2, |h| h.0);
+                        land(p, impact_speed.max(0.0), nn, events);
+                        return;
+                    }
+                }
+            }
+        }
+        // Entered deep water during the move: startSwimming.
+        if let Some(w) = ctx.world.water_at(p.position) {
+            if !w.shallow {
+                p.velocity = (p.position - old_loc) / tick;
+                start_swimming(p, events);
+                return;
+            }
+        }
+        // Velocity from the move; twice the average less the old velocity while rising or
+        // speeding down (after a wall the measured velocity is kept).
+        let measured = (p.position - old_loc) / tick;
+        p.velocity = measured;
+        if !hit_wall && (measured.z < old_vel.z || old_vel.z >= 0.0) {
+            p.velocity = measured * 2.0 - old_vel;
+        }
+        let terminal = cfg.terminal_velocity;
+        if p.velocity.length_squared() > terminal * terminal {
+            p.velocity = p.velocity.normalize_or_zero() * terminal;
         }
     }
 }
@@ -454,100 +836,9 @@ fn land(p: &mut PlayerState, impact_speed: f32, normal: Vec3, events: &mut Vec<S
     p.mode = MoveMode::Walking;
     p.velocity.z = 0.0;
     p.floor_normal = normal;
+    p.jump.active = false;
     events.push(SimEvent::Landed { id: p.id, speed: impact_speed, fall_time: p.fall_time });
     p.fall_time = 0.0;
-}
-
-/// Sweep-and-slide up to 4 iterations. Returns the last blocking (contact normal, face_up).
-fn move_and_slide(p: &mut PlayerState, delta: Vec3, walking: bool, ctx: &MoveCtx) -> Option<(Vec3, Vec3)> {
-    let cfg = ctx.cfg;
-    let mut remaining = delta;
-    let mut last_normal = None;
-    for _ in 0..4 {
-        if remaining.length_squared() < 1e-8 {
-            break;
-        }
-        let cap = capsule(p, cfg);
-        let Some(hit) = ctx.world.sweep_capsule(&cap, remaining, channel::PAWN) else {
-            p.position += remaining;
-            break;
-        };
-        if hit.start_penetrating {
-            p.position = depenetrate(p, ctx);
-            last_normal = Some((hit.normal, hit.face_up));
-            continue;
-        }
-        p.position += remaining * hit.fraction;
-        let left = remaining * (1.0 - hit.fraction);
-        let mut n = hit.normal;
-        last_normal = Some((n, hit.face_up));
-        if walking && n.z < cfg.walkable_floor_z {
-            if try_step_up(p, left, ctx) {
-                remaining = Vec3::ZERO;
-                continue;
-            }
-            // Walls are treated as vertical while walking so slides never climb.
-            n = Vec3::new(n.x, n.y, 0.0).normalize_or(n);
-        }
-        remaining = left - n * left.dot(n);
-        let vn = p.velocity.dot(n);
-        if vn < 0.0 {
-            p.velocity -= n * vn;
-        }
-    }
-    last_normal
-}
-
-fn depenetrate(p: &PlayerState, ctx: &MoveCtx) -> Vec3 {
-    let cap = capsule(p, ctx.cfg);
-    // CollisionWorld implements depenetration natively; other WorldQuery impls get a
-    // contact-based push.
-    let mut c = cap;
-    let mut contacts = Vec::new();
-    for _ in 0..6 {
-        contacts.clear();
-        ctx.world.capsule_contacts(&c, channel::PAWN, &mut contacts);
-        let Some(k) = contacts.iter().max_by(|a, b| a.depth.total_cmp(&b.depth)) else { break };
-        if k.depth < 0.05 {
-            break;
-        }
-        c.center += k.normal * (k.depth + 0.05);
-    }
-    c.center
-}
-
-/// UE3-style step up: lift by MaxStepHeight, move, drop back onto a walkable floor.
-fn try_step_up(p: &mut PlayerState, delta: Vec3, ctx: &MoveCtx) -> bool {
-    let cfg = ctx.cfg;
-    let horiz = Vec3::new(delta.x, delta.y, 0.0);
-    if horiz.length() < 0.01 {
-        return false;
-    }
-    let start = p.position;
-    let cap = capsule(p, cfg);
-    let up = Vec3::Z * cfg.max_step_height;
-    let up_frac = ctx.world.sweep_capsule(&cap, up, channel::PAWN).map_or(1.0, |h| h.fraction);
-    let lifted = start + up * up_frac;
-    let fwd = ctx.world.sweep_capsule(&cap.at(lifted), horiz, channel::PAWN);
-    let fwd_frac = fwd.map_or(1.0, |h| h.fraction);
-    if fwd_frac < 0.05 {
-        return false;
-    }
-    let moved = lifted + horiz * fwd_frac;
-    let down = Vec3::Z * -(cfg.max_step_height * up_frac + 2.0);
-    match ctx.world.sweep_capsule(&cap.at(moved), down, channel::PAWN) {
-        Some(h) if !h.start_penetrating && h.face_up.z >= cfg.walkable_floor_z => {
-            let landed = moved + down * h.fraction;
-            let start_feet = start.z - half_height(p, cfg);
-            // Cylinder semantics: the supporting point may not be higher than the step.
-            if landed.z - start.z > cfg.max_step_height + 0.5 || h.point.z - start_feet > cfg.max_step_height + 0.5 {
-                return false;
-            }
-            p.position = landed;
-            true
-        }
-        _ => false,
-    }
 }
 
 /// Ledge detection and mantle start for the player's own mantle (jump into a ledge, or
@@ -583,7 +874,7 @@ pub fn try_blink_mantle(p: &mut PlayerState, ctx: &MoveCtx, events: &mut Vec<Sim
 /// `m_MaxHorizontalAngleForEdgeFace` of the facing; the first clear trace above it marks
 /// the edge, whose top (slope within `m_MaxSlopeAngleForEdgeTop`) is found straight down.
 /// The finder's later states (destination valid, can stand, `m_FinalVerifyLocationGridSize`
-/// grid) are reduced to a capsule clearance test, standing then sneaking.
+/// grid) are reduced to a box clearance test, standing then sneaking.
 pub fn try_mantle_from(p: &mut PlayerState, fwd: Vec3, min_edge: f32, ctx: &MoveCtx, events: &mut Vec<SimEvent>) -> bool {
     let cfg = ctx.cfg;
     let m = &cfg.mantle;
@@ -632,16 +923,12 @@ pub fn try_mantle_from(p: &mut PlayerState, fwd: Vec3, min_edge: f32, ctx: &Move
     }
     // Standing clearance on top (crouched clearance is accepted too).
     let dest_xy = top.point + fwd * m.forward_move_amount;
-    let stand = Capsule { center: dest_xy + Vec3::Z * (cfg.collision_half_height + 1.0), radius: r, half_height: cfg.collision_half_height };
-    let mut contacts = Vec::new();
-    ctx.world.capsule_contacts(&stand, channel::PAWN, &mut contacts);
-    let (dest, crouch) = if contacts.iter().all(|c| c.depth < 0.5) {
+    let stand = PawnBox::new(dest_xy + Vec3::Z * (cfg.collision_half_height + FLOOR_DIST), r, cfg.collision_half_height);
+    let (dest, crouch) = if box_fits(ctx.world, &stand) {
         (stand.center, false)
     } else {
-        let low = Capsule { center: dest_xy + Vec3::Z * (cfg.crouch_half_height + 1.0), half_height: cfg.crouch_half_height, ..stand };
-        contacts.clear();
-        ctx.world.capsule_contacts(&low, channel::PAWN, &mut contacts);
-        if contacts.iter().any(|c| c.depth >= 0.5) {
+        let low = PawnBox::new(dest_xy + Vec3::Z * (cfg.crouch_half_height + FLOOR_DIST), r, cfg.crouch_half_height);
+        if !box_fits(ctx.world, &low) {
             return false;
         }
         (low.center, true)
@@ -654,6 +941,54 @@ pub fn try_mantle_from(p: &mut PlayerState, fwd: Vec3, min_edge: f32, ctx: &Move
     p.traversal = Traversal { from: p.position, to: dest, elapsed: 0.0, duration };
     p.mode = MoveMode::Mantling;
     p.velocity = Vec3::ZERO;
+    p.jump.active = false;
     events.push(SimEvent::Mantle { id: p.id, edge_height: edge_h });
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn braking_matches_the_substep_rule() {
+        // One 1/60 s sub-step at friction 8: v (1 - 2 x 8 / 60).
+        let v = apply_braking(Vec3::new(360.0, 0.0, 0.0), DT, 8.0);
+        assert!((v.x - 360.0 * (1.0 - 16.0 / 60.0)).abs() < 1e-3, "{v}");
+        // Below 12.7 uu/s it stops.
+        assert_eq!(apply_braking(Vec3::new(15.0, 0.0, 0.0), DT, 8.0), Vec3::ZERO);
+        // A 0.1 s tick brakes in 0.03 s sub-steps and returns their average.
+        let w = apply_braking(Vec3::new(400.0, 0.0, 0.0), 0.1, 8.0);
+        let mut x = 400.0f32;
+        let mut sum = 0.0;
+        for s in [0.03f32, 0.03, 0.03, 0.01] {
+            x -= x * 2.0 * s * 8.0;
+            sum += x * s / 0.1;
+        }
+        assert!((w.x - sum).abs() < 1e-2, "{} vs {sum}", w.x);
+    }
+
+    #[test]
+    fn calc_velocity_limits_acceleration_by_the_speed_modifier() {
+        // Running with the sword out (modifier 0.9): accel 2000 is limited to 1800 and the
+        // speed to 360.
+        let (v, a) = calc_velocity(Vec3::ZERO, Vec3::X * 2000.0, Vec3::X, DT, 400.0, 8.0, false, true, None, 0.9, 2000.0);
+        assert!((a.x - 1800.0).abs() < 1e-3);
+        assert!((v.x - 1800.0 * DT).abs() < 1e-3);
+        let mut v = Vec3::ZERO;
+        for _ in 0..120 {
+            v = calc_velocity(v, Vec3::X * 2000.0, Vec3::X, DT, 400.0, 8.0, false, true, None, 0.9, 2000.0).0;
+        }
+        assert!((v.x - 360.0).abs() < 1e-3, "{v}");
+        // Turning: a velocity across the acceleration is pulled toward it by dt * friction.
+        let (t, _) = calc_velocity(Vec3::Y * 300.0, Vec3::X * 2000.0, Vec3::X, DT, 400.0, 8.0, false, true, None, 1.0, 2000.0);
+        assert!((t.y - 300.0 * (1.0 - 8.0 * DT)).abs() < 1e-3, "{t}");
+    }
+
+    #[test]
+    fn two_wall_adjust_follows_the_crease() {
+        let d = two_wall_adjust(Vec3::new(1.0, 1.0, 0.0).normalize(), Vec3::new(10.0, 10.0, 0.0), -Vec3::X, -Vec3::Y, 0.0);
+        // Perpendicular walls: the crease is vertical; nothing horizontal remains.
+        assert!(d.truncate().length() < 1e-4, "{d}");
+    }
 }

@@ -122,7 +122,8 @@ pub fn effective_vitals<'a>(p: &PlayerState, cfg: &'a GameplayConfig) -> Cow<'a,
 pub fn effective_movement<'a>(p: &PlayerState, cfg: &'a GameplayConfig) -> Cow<'a, MovementConfig> {
     let carrying = p.carrying.is_some();
     let possessed = p.condition == Condition::Possessed;
-    if !carrying && !possessed && !any_modifiers(p) {
+    let rat = p.kind == PawnKind::Rat;
+    if !carrying && !possessed && !rat && p.rat_slow <= 0.0 && !any_modifiers(p) {
         return Cow::Borrowed(&cfg.movement);
     }
     let b = &cfg.movement;
@@ -136,15 +137,34 @@ pub fn effective_movement<'a>(p: &PlayerState, cfg: &'a GameplayConfig) -> Cow<'
     m.sword_unsheathed_speed_factor = a("Attribute_SwordUnsheathedSpeedFactor", b.sword_unsheathed_speed_factor);
     m.max_speed_before_falling_damage = a("Attribute_MaxSpeedBeforeFallingDamage", b.max_speed_before_falling_damage);
     m.max_speed_before_falling_death = a("Attribute_MaxSpeedBeforeFallingDeath", b.max_speed_before_falling_death);
+    // Agility's power jump and swim speed.
+    m.power_jump_z = a("Attribute_JumpZ_PowerJump", b.power_jump_z);
+    m.water.water_speed = a("Attribute_WaterSpeed", b.water.water_speed);
+    // A rat bite's slowdown: `Modifier_RatAttackSpeedModifier` adds -m_fPawnSlowdownPercent % of the
+    // base to Attribute_GroundSpeed and Attribute_GroundSpeedSprint (0x00C891E0).
+    if p.rat_slow > 0.0 && p.rat_slow_percent > 0.0 {
+        let k = 1.0 - p.rat_slow_percent / 100.0;
+        m.run_speed -= b.run_speed * (1.0 - k);
+        m.sprint_speed -= b.sprint_speed * (1.0 - k);
+    }
     if carrying {
         let inv = &cfg.items.inventory;
         m.run_speed = a("Attribute_GroundSpeedCarryingCorpse", inv.carry_ground_speed);
         m.jump_z = a("Attribute_JumpZCarryingCorpse", inv.carry_jump_z);
     }
+    if rat {
+        // Rat crowd agents move at `MaxSpeed` (`RatSwarm.CrowdAgent_SmallRat`: 350), any direction,
+        // with no sword factor and no jump.
+        crate::rats::rat_movement(&mut m);
+    }
     if possessed {
-        m.run_speed = cfg.items.possess.npc.ground_speed;
+        m.run_speed = if rat { cfg.items.possess.rat.ground_speed } else { cfg.items.possess.npc.ground_speed };
         // `m_bCanSprintWhilePossessed` is false for every possessable: sprint keeps the base speed.
         m.sprint_speed = m.run_speed;
+        if rat {
+            m.crouch_speed = m.run_speed;
+            m.walk_speed = m.run_speed;
+        }
     }
     Cow::Owned(m)
 }
@@ -286,7 +306,8 @@ pub fn step_time_bends(state: &mut WorldState, dt: f32, events: &mut Vec<SimEven
 
 /// Whether pawn `t` can be possessed by `p` now (`DisPossessableInterface` checks).
 pub fn can_possess(p: &PlayerState, t: &PlayerState, cfg: &GameplayConfig) -> bool {
-    let c = &cfg.items.possess.npc;
+    // Rats use `Twk_Possessable_Rat` (Possession level 1, 20 / 30 s), people `Twk_Possessable_BaseNPC`.
+    let c = possessable(t, cfg);
     let level = p.inv.power_levels[power::POSSESSION];
     if t.kind == PawnKind::Human || !t.alive || t.id == p.id || c.disallow || level < c.required_level {
         return false;
@@ -302,6 +323,63 @@ pub fn can_possess(p: &PlayerState, t: &PlayerState, cfg: &GameplayConfig) -> bo
         return false;
     }
     c.duration[(level as usize).clamp(1, 2) - 1] > 0.0
+}
+
+/// The possessable tweak of a host.
+pub fn possessable<'a>(t: &PlayerState, cfg: &'a GameplayConfig) -> &'a dishonored_ir::items::PossessableConfig {
+    if t.kind == PawnKind::Rat { &cfg.items.possess.rat } else { &cfg.items.possess.npc }
+}
+
+/// What a Possession cast takes over: a pawn, or one rat of a Devouring Swarm (the swarm's rats
+/// are crowd agents in the original; the sim spawns that rat as a pawn when it is possessed).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PossessTarget {
+    Pawn(PlayerId),
+    SwarmRat(u32),
+}
+
+/// Possession target including swarm rats (same cone and range as [`possess_target`]).
+pub fn possess_target_any(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: &GameplayConfig) -> Option<PossessTarget> {
+    if let Some(id) = possess_target(state, p, world, cfg) {
+        return Some(PossessTarget::Pawn(id));
+    }
+    let level = p.inv.power_levels[power::POSSESSION] as usize;
+    if level < cfg.items.possess.rat.required_level as usize {
+        return None;
+    }
+    let range = cfg.items.possess.range[level.clamp(1, 2) - 1];
+    let eye = eye_position(p, &cfg.movement);
+    let dir = view_vector(p.yaw, p.pitch);
+    let max_angle = 0.3 * 90.0_f32;
+    let mut best: Option<(u32, f32)> = None;
+    for s in &state.swarms {
+        if s.spawn_delay > 0.0 || s.rats == 0 {
+            continue;
+        }
+        let to = s.position - eye;
+        let d = to.length();
+        if d > range || d < 1.0 {
+            continue;
+        }
+        let ang = (to.dot(dir) / d).clamp(-1.0, 1.0).acos().to_degrees();
+        if ang > max_angle || world.raycast(eye, to, d, channel::MELEE).is_some_and(|h| h.distance < d - 20.0) {
+            continue;
+        }
+        let score = d / range + 10.0 * ang / max_angle;
+        if best.is_none_or(|(_, b)| score < b) {
+            best = Some((s.id, score));
+        }
+    }
+    best.map(|b| PossessTarget::SwarmRat(b.0))
+}
+
+/// Pawn id given to a rat taken out of a swarm.
+pub fn swarm_rat_id(state: &WorldState) -> PlayerId {
+    let mut id = 0x4000_0000 | state.next_entity_id;
+    while state.player(id).is_some() {
+        id = id.wrapping_add(1);
+    }
+    id
 }
 
 /// Possession target under the crosshair (targeting stage, `FUN_00bfcec0`): within the level's
@@ -378,7 +456,7 @@ pub fn step_possession(state: &mut WorldState, who: usize, ctx: &MoveCtx, cfg: &
             if pp.possess.timer <= 0.0 {
                 let level = (p.inv.power_levels[power::POSSESSION] as usize).clamp(1, 2);
                 let strength = attribute(&p, cfg, "Attribute_SpellStrength", 0.0);
-                let base = cfg.items.possess.npc.duration[level - 1];
+                let base = possessable(&host, cfg).duration[level - 1];
                 pp.possess.stage = PossessStage::Active;
                 pp.possess.timer = (strength + 1.0) * base;
                 pp.position = host.position;
@@ -462,11 +540,9 @@ pub fn is_hidden(p: &PlayerState) -> bool {
 // ---------------------------------------------------------------------------------------
 // Devouring Swarm
 
-/// Rat speed (uu/s). The crowd agents' speed comes from `RatSwarm.RatCrowdAgentList`, not
-/// decoded (SPECULATIVE, U-104).
-pub const RAT_SPEED: f32 = 350.0;
-/// Distance at which rats bite (SPECULATIVE, U-104).
-pub const RAT_BITE_RANGE: f32 = 100.0;
+/// Rat speed: `MaxSpeed` of `RatSwarm.CrowdAgent_SmallRat` (the archetype of
+/// `RatSwarm.RatCrowdAgentList`).
+pub const RAT_SPEED: f32 = crate::rats::RAT_SPEED;
 /// Limbs a corpse loses before nothing remains (SPECULATIVE, U-104).
 pub const EAT_LIMBS: f32 = 4.0;
 
@@ -530,7 +606,7 @@ pub fn step_swarms(state: &mut WorldState, dt_world: f32, cfg: &GameplayConfig, 
         // Target selection.
         let mut best: Option<(PlayerId, f32)> = None;
         for p in &state.players {
-            if p.id == s.owner || p.no_body || p.carried_by.is_some() || is_hidden(p) {
+            if p.id == s.owner || p.kind == PawnKind::Rat || p.no_body || p.carried_by.is_some() || is_hidden(p) {
                 continue;
             }
             let d = p.position.distance(s.position);
@@ -547,8 +623,12 @@ pub fn step_swarms(state: &mut WorldState, dt_world: f32, cfg: &GameplayConfig, 
             s.bite_timer = 0.0;
         }
         let Some((tid, d)) = best else { continue };
-        let tpos = state.player(tid).unwrap().position - Vec3::Z * crate::movement::half_height(state.player(tid).unwrap(), mv);
-        if d > RAT_BITE_RANGE {
+        let tp = *state.player(tid).unwrap();
+        let tpos = tp.position - Vec3::Z * crate::movement::half_height(&tp, mv);
+        // Rats bite within `m_fAttackDistance` (120, `Twk_Rat`); a player standing within 200,
+        // sneaking within 60 (`m_fStand/CrouchedRatSwarmAttackDistance`).
+        let reach = if tp.is_body() { crate::rats::RAT_ATTACK_DISTANCE } else { crate::rats::attack_distance(&tp) };
+        if d > reach {
             let step = (tpos - s.position).normalize_or_zero() * RAT_SPEED * dt_world;
             s.position += step;
             continue;
@@ -559,14 +639,19 @@ pub fn step_swarms(state: &mut WorldState, dt_world: f32, cfg: &GameplayConfig, 
             s.eat_time = 0.0;
             continue;
         }
+        // Attack group (0x00C891E0): after the initial delay (none on the player), every interval
+        // (accumulated) one bite of clamp(rats x per-bite, min, max) as an int, plus the slowdown.
         s.attack_time += dt_world;
-        if s.attack_time < l.initial_damage_delay {
+        if s.attack_time <= l.initial_damage_delay && t.kind != PawnKind::Human {
             continue;
         }
-        s.bite_timer -= dt_world;
-        if s.bite_timer <= 0.0 {
-            s.bite_timer += l.damage_interval;
-            let dmg = (s.rats as f32 * l.damage_per_bite).clamp(l.min_damage, l.max_damage);
+        s.bite_timer += dt_world;
+        let tweak = crate::rats::RatAttackTweak { damage_per_bite: l.damage_per_bite, min_damage: l.min_damage, max_damage: l.max_damage, interval: l.damage_interval, ..Default::default() };
+        while s.bite_timer > l.damage_interval && t.alive {
+            s.bite_timer -= l.damage_interval;
+            let dmg = crate::rats::group_damage(s.rats as usize, &tweak);
+            t.rat_slow = tweak.slowdown_duration;
+            t.rat_slow_percent = tweak.slowdown_percent;
             apply_damage(t, dmg, Some(s.owner), DamageCause::Rats, events, vitals);
             events.push(SimEvent::Sound { position: s.position, radius: 800.0, category: SoundCategory::BodyFall, source: s.owner });
         }
@@ -585,9 +670,14 @@ pub fn shadow_kill_applies(killer: &PlayerState, victim: &PlayerState, cause: Da
     if victim.kind == PawnKind::Human {
         return false;
     }
+    // 0x00A87B60: level 2 always; level 1 when the victim's awareness is below 1 (unaware, the AI's
+    // `ai_unaware` hook) or it was out (sleeping / knocked out); never for rat bites.
+    if matches!(cause, DamageCause::Rats | DamageCause::RatBite) {
+        return false;
+    }
     match killer.inv.power_levels[power::SHADOW_KILL] {
         0 => false,
-        1 => victim_was_unconscious || matches!(cause, DamageCause::Assassination | DamageCause::DropAssassination),
+        1 => victim_was_unconscious || victim.ai_unaware,
         _ => true,
     }
 }

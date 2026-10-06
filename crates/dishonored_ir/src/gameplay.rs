@@ -75,6 +75,56 @@ pub struct MovementConfig {
     /// driven by a spring (`m_LeanConstants`).
     #[serde(default)]
     pub lean: LeanConfig,
+    /// Swimming and breath (`StatePlayerMasterSwim`, `APawn::physSwimming`,
+    /// `DisTweaks_PlayerPawn.m_fApnea*`, `Attribute_Drowning*`).
+    #[serde(default)]
+    pub water: WaterMoveConfig,
+    /// `Attribute_JumpZ_PowerJump` before modifiers (0 for Corvo; Agility adds 1300): the
+    /// impulse of the power jump at the top of a held jump.
+    #[serde(default)]
+    pub power_jump_z: f32,
+}
+
+/// Swimming constants. Sources: `DefaultPlayerState.ini [StatePlayerMasterSwim]`,
+/// `Twk_Pawn_Corvo_Release` (`m_fApneaMaxDuration`, `m_fApneaRecoveryDuration`), the attribute
+/// tweak (`m_WaterSpeed`, `m_DrowningDamageAmount`, `m_DrowningDamageStep`) and
+/// `Default__DishonoredPawn` (`Buoyancy`, `OutofWaterZ`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WaterMoveConfig {
+    /// `Attribute_WaterSpeed` (Pawn.WaterSpeed).
+    pub water_speed: f32,
+    pub buoyancy: f32,
+    pub out_of_water_z: f32,
+    pub min_swim_accel: f32,
+    pub max_swim_accel: f32,
+    pub max_speed_no_stroke: f32,
+    pub stroke_time: f32,
+    pub surface_stroke_delay: f32,
+    pub constant_speed_at_surface: bool,
+    pub apnea_max: f32,
+    pub apnea_recovery: f32,
+    pub drowning_damage: f32,
+    pub drowning_step: f32,
+}
+
+impl Default for WaterMoveConfig {
+    fn default() -> Self {
+        Self {
+            water_speed: 600.0,
+            buoyancy: 1.0,
+            out_of_water_z: 533.0,
+            min_swim_accel: 500.0,
+            max_swim_accel: 4000.0,
+            max_speed_no_stroke: 350.0,
+            stroke_time: 0.3,
+            surface_stroke_delay: 2.0,
+            constant_speed_at_surface: true,
+            apnea_max: 30.0,
+            apnea_recovery: 5.0,
+            drowning_damage: 1.0,
+            drowning_step: 1.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -184,6 +234,29 @@ fn d_ledge_grab_min() -> f32 {
     155.0
 }
 
+/// Blood Thirsty's adrenaline (`Attribute_Adrenaline*` of the player's attribute tweak, the melee
+/// tweaks' `m_fAdrenalineMultOnHit` and `m_fAdrenalineAddedParryWin`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AdrenalineConfig {
+    pub max: f32,
+    pub burn_rate: f32,
+    pub cooldown: f32,
+    pub mult_taking_damage: f32,
+    /// `DisTweaks_MeleeAttackPlayer.m_fAdrenalineMultOnHit` (sword hits: damage x this).
+    pub mult_on_hit: f32,
+    /// The assassination / drop assassination tweaks' `m_fAdrenalineMultOnHit` (victim health x this).
+    pub mult_assassinate: f32,
+    pub mult_drop_assassinate: f32,
+    /// `DisTweaks_MeleeBlockPlayer.m_fAdrenalineAddedParryWin`.
+    pub parry_win: f32,
+}
+
+impl Default for AdrenalineConfig {
+    fn default() -> Self {
+        Self { max: 250.0, burn_rate: 1.0, cooldown: 10.0, mult_taking_damage: 0.0, mult_on_hit: 2.0, mult_assassinate: 1.25, mult_drop_assassinate: 1.5, parry_win: 20.0 }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VitalsConfig {
     pub health_max: f32,
@@ -257,6 +330,9 @@ pub struct GameplayConfig {
     /// Inventory, takedowns, powers and gadgets.
     #[serde(default)]
     pub items: crate::items::ItemsConfig,
+    /// Blood Thirsty's adrenaline gauge.
+    #[serde(default)]
+    pub adrenaline: AdrenalineConfig,
     /// field -> evidence (tweak object path / INI key / class default / UE3 stock).
     pub provenance: BTreeMap<String, String>,
 }
