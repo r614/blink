@@ -159,6 +159,34 @@ cargo test --release
 
 The retail regression tests skip themselves when no install is found.
 
+### Parallel agents / worktrees
+
+Several checkouts or `git worktree`s can build and test at once without rebuilding everything:
+
+```bash
+cargo install sccache --locked   # once
+source scripts/dev-env.sh        # PowerShell: . .\scripts\dev-env.ps1
+```
+
+- **sccache** (`RUSTC_WRAPPER=sccache`, `CARGO_INCREMENTAL=0`) caches compiled crates by content,
+  so a new worktree reuses most of the dependencies another checkout already built. Measured on a
+  fresh worktree's release build: 219 of 342 cacheable compiles hit (64%).
+  - Still compiled per worktree: the workspace's own crates, plus dependencies whose build-script
+    output depends on the target dir and everything that depends on them.
+  - Not cacheable at all: proc-macros, build scripts and the final link.
+  - `sccache --show-stats` shows the hit rate.
+- **One `target/` per worktree** (cargo's default). Separate target dirs mean no waiting on another
+  build's cargo lock, and no build linking another worktree's half-finished crates.
+  - Don't set `CARGO_TARGET_DIR` or per-checkout `RUSTFLAGS`: sccache hashes `CARGO_*` variables and
+    the compiler flags, so either one makes every crate miss. The env script unsets both.
+- **`DISHONORED_CACHE`** is one shared absolute directory (default
+  `%LOCALAPPDATA%\dishonored-rs\cache`) for the derived game data: collision BVHs, navmeshes,
+  gameplay config, NPC, travel, look and dialog caches. A new worktree reuses them instead of
+  re-extracting from the install. Files are versioned by name: bump a file's name when you change
+  its format.
+- Test runs that must stay quiet: `DISHONORED_MUTE=1` silences every sound the game and launcher
+  play; audio still decodes, so the audio checks keep working.
+
 ## Principles
 
 - Behavioral compatibility over approximation. Unknown original behavior is
