@@ -449,6 +449,51 @@ fn talking_pawns(view: &crate::session::SessionView) -> Vec<u32> {
         .collect()
 }
 
+/// Lines being spoken by pawns: (pawn, line id, blurb GUID, seconds into the line).
+fn speaking_lines(view: &crate::session::SessionView) -> Vec<(u32, u32, String, f32)> {
+    let Some(m) = view.matchv.mission.as_ref() else { return Vec::new() };
+    m.dialogue
+        .iter()
+        .filter(|l| l.remaining > 0.0)
+        .filter_map(|l| {
+            let pawn = m.npc_ids.iter().find(|x| Some(&x.0) == l.npc.as_ref())?.1;
+            Some((pawn, l.id, l.blurb.clone()?, l.duration - l.remaining))
+        })
+        .collect()
+}
+
+/// FaceFX bone offsets per speaking pawn this frame (ANIMATION.md §12): the speaker's head
+/// actor driven by the blurb's animation at the time since the line started.
+fn face_frames(bank: &mut crate::npc_anim::AnimBank, lib: &CharacterLibrary, view: &crate::session::SessionView, roots: &[(u32, usize)], now: f64) -> HashMap<u32, Vec<crate::facefx::FaceBone>> {
+    let lines = speaking_lines(view);
+    let live: std::collections::HashSet<u32> = lines.iter().map(|l| l.1).collect();
+    bank.facefx.retain_lines(&live);
+    let mut out = HashMap::new();
+    if lines.is_empty() {
+        return out;
+    }
+    let content = bank.content();
+    let map = view.matchv.map.clone();
+    let mut packages = if map.is_empty() { Vec::new() } else { dishonored_assets::map_packages(&content, &map) };
+    for p in ["L_Boyle_Int_Script", "L_Boyle_Ext_Script", "L_BoyleStreet_Ext_Script"] {
+        if !packages.iter().any(|x| x.eq_ignore_ascii_case(p)) {
+            packages.push(p.to_string());
+        }
+    }
+    bank.facefx.index(&content, &packages);
+    let base = dishonored_multiplayer::mission::APPEARANCE_BASE as usize;
+    for (pawn, line, blurb, elapsed) in lines {
+        let Some(&(_, model)) = roots.iter().find(|r| r.0 == pawn) else { continue };
+        let Some(anim) = bank.facefx.anim(&blurb) else { continue };
+        let mut pk: Vec<String> = model.checked_sub(base).and_then(|k| view.matchv.appearances.get(k)).map(|l| l.parts.iter().map(|p| p.0.clone()).collect()).unwrap_or_default();
+        pk.extend(packages.iter().cloned());
+        let Some(b) = bank.facefx.binding(&content, model, &lib.models[model].parts, &pk) else { continue };
+        let t = (now - bank.facefx.line_start(line, now, elapsed)) as f32;
+        out.insert(pawn, crate::facefx::face_bones(&b, &anim, t, &lib.models[model].parts));
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn animate_characters(
     bank: Option<ResMut<crate::npc_anim::AnimBank>>,
@@ -473,6 +518,8 @@ pub fn animate_characters(
     let all: Vec<&PlayerState> = view.others.iter().chain(view.me.iter()).collect();
     let hits = collect_hits(&events, &all);
     let talking = talking_pawns(&view);
+    let root_models: Vec<(u32, usize)> = roots.iter().map(|r| (r.2.0, r.1.archetype)).collect();
+    let faces = face_frames(&mut bank, &lib, &view, &root_models, time.elapsed_secs_f64());
     let dt = time.delta_secs().min(0.1);
     let mv = &session.content.sim.gameplay.movement;
     for (entity, root, body, children, root_gt) in &roots {
@@ -482,7 +529,17 @@ pub fn animate_characters(
         let armed = right_w.is_some() || left_w.is_some() || p.kind == dishonored_sim::state::PawnKind::Guard;
         let profile = pawn_profile(&mut bank, root.archetype, p, armed);
         let stance = view.matchv.npc_poses.iter().find(|x| x.0 == p.id).map(|x| x.1);
-        let input = crate::npc_anim::AnimInput { p, stance, armed, talking: talking.contains(&p.id), dt, hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), look_target: look_target(p, stance, talking.contains(&p.id), &all), floor: -mv.collision_half_height, gravity: mv.gravity_z, carrier_speed: p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).map(|c| c.velocity.truncate().length()).unwrap_or(0.0) };
+        // The level floor under a pawn-space point (pawn space: origin at the pawn, turned by its
+        // yaw), for the ragdoll's floor grid.
+        let (pos, yaw, hh) = (p.position, p.yaw.to_radians(), mv.collision_half_height);
+        let world = &session.content.collision;
+        let ground = move |x: f32, y: f32| -> f32 {
+            use dishonored_world::WorldQuery;
+            let (s, c) = yaw.sin_cos();
+            let w = pos + glam::Vec3::new(x * c - y * s, x * s + y * c, 0.0);
+            world.raycast(w + glam::Vec3::Z * 60.0, -glam::Vec3::Z, 400.0, dishonored_world::channel::PAWN).map(|h| h.point.z - pos.z).unwrap_or(-hh)
+        };
+        let input = crate::npc_anim::AnimInput { p, stance, armed, talking: talking.contains(&p.id), dt, hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), look_target: look_target(p, stance, talking.contains(&p.id), &all), face: faces.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), floor: -mv.collision_half_height, ground: Some(&ground), gravity: mv.gravity_z, carrier_speed: p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).map(|c| c.velocity.truncate().length()).unwrap_or(0.0) };
         let pose = match states.get_mut(entity) {
             Ok(mut st) => {
                 let before = chain_clips(&st);

@@ -18,6 +18,9 @@ pub enum MoveMode {
     Dead,
     /// `PHYS_Swimming`: the pawn's centre is in a (deep) water volume (`APawn::physSwimming`).
     Swimming,
+    /// `StatePlayerMasterClimb` / `PHYS_Ladder`: hanging on a `DisClimbable` chain
+    /// (`ADishonoredPlayerPawn::physLadder` 0x00AA82C0), see [`ClimbState`].
+    Climbing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
@@ -82,6 +85,10 @@ pub struct LeftHandState {
     pub bolts_reserve: u16,
     /// Current Blink destination while aiming (None = invalid target).
     pub blink_target: Option<Vec3>,
+    /// `DishonoredWeapon_Ranged.m_fDispersion` (+0x12C) of the held pistol or crossbow: the
+    /// radius of the shot's random offset, in pixels of a 720-line screen (U-247).
+    #[serde(default)]
+    pub dispersion: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
@@ -199,6 +206,13 @@ pub struct PlayerState {
     /// Swimming strokes, air and drowning.
     #[serde(default)]
     pub water: WaterState,
+    /// Pain-causing physics volumes the pawn touched last step (bit per volume index; entry
+    /// pain fires on a new bit).
+    #[serde(default)]
+    pub pain_volumes: u64,
+    /// Climbing a chain.
+    #[serde(default)]
+    pub climb: ClimbState,
     /// Blood Thirsty's adrenaline gauge (`DishonoredPlayerPawn` +0x91C / +0x920).
     #[serde(default)]
     pub adrenaline: AdrenalineState,
@@ -216,6 +230,11 @@ pub struct PlayerState {
     /// level 1 (0x00A87B60). False for players and when no AI sets it.
     #[serde(default)]
     pub ai_unaware: bool,
+    /// Hook written by the mission host each tick for NPC pawns: the locomotion component follows
+    /// a navmesh path, so the pawn walks on the navmesh (`movement::nav_walk_move`). False for
+    /// players and when no host sets it.
+    #[serde(default)]
+    pub nav_walk: bool,
     /// Helmet of an NPC (`m_PotentialNPCArmor`, `DisTweaks_Armor` protecting the head): absorbs
     /// headshots of the absorbed damage types until knocked off. Set by the mission/AI layer.
     #[serde(default)]
@@ -257,6 +276,29 @@ pub struct JumpState {
     pub held: f32,
     /// `m_JumpState == eDisJumpState_PowerJump`.
     pub powered: bool,
+}
+
+/// Climbing (`DishonoredPlayerPawn.m_pClimbable`, `m_bClimbingUp`, `m_bLettingGoOfClimbable`,
+/// `m_fClimbingSoundLastTime`; `StatePlayerMasterClimb.m_fStartTime`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct ClimbState {
+    /// `m_pClimbable`: index into `WorldQuery::climbables()`. Kept through a jump off the chain
+    /// until the jump ends, which keeps the chain from being grabbed again meanwhile.
+    pub on: Option<u16>,
+    /// Seconds since the climb began (`TimeSeconds - m_fStartTime`).
+    pub time: f32,
+    /// `!m_bClimbingUp` (the class default is true: looking up).
+    pub down: bool,
+    /// Seconds since the last climbing sound (`TimeSeconds - m_fClimbingSoundLastTime`).
+    pub since_sound: f32,
+    /// `m_bLettingGoOfClimbable`: let go with Use; touching a chain does not grab until the fall
+    /// ends (`StatePlayerMasterFalling` exit 0x00A63110 clears it).
+    pub letting_go: bool,
+    /// `StatePlayerMasterJump.m_bJumpingFromChain` (+0x54 bit 0): the jump started on a chain.
+    pub jumped: bool,
+    /// `DisClimbable.m_fNoCollisionDuration` of the chain this pawn left: it cannot be touched
+    /// or used again until this runs out.
+    pub no_touch: f32,
 }
 
 /// Swimming and breath (`DishonoredPlayerPawn.m_fAirCapacity`, `m_fDrowningDamageCountdown`,
@@ -408,6 +450,9 @@ pub struct SlideState {
     pub target_velocity: Vec3,
     /// Speed fell below the target: velocity is no longer driven by the ease.
     pub stop_interpolating: bool,
+    /// This slide has hit a pawn (the slide tick stops testing; LIKELY: the state flag at +0x70).
+    #[serde(default)]
+    pub hit: bool,
 }
 
 /// State of a Blink move: the original steps toward the target with collision instead of
@@ -470,11 +515,14 @@ impl PlayerState {
             action_lock: 0.0,
             jump: JumpState::default(),
             water: WaterState::default(),
+            pain_volumes: 0,
+            climb: ClimbState::default(),
             adrenaline: AdrenalineState::default(),
             dark: DarkVisionState::default(),
             rat_slow: 0.0,
             rat_slow_percent: 0.0,
             ai_unaware: false,
+            nav_walk: false,
             helmet: false,
             rat_attack: RatAttackState::default(),
             damage_reduction: 0.0,

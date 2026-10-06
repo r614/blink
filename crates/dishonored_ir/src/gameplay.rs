@@ -70,6 +70,23 @@ pub struct MovementConfig {
     /// passed (0x00A71450).
     #[serde(default = "d_slide_cancel")]
     pub slide_percent_not_cancelable: f32,
+    /// Slide impacts (0x00A79BF0 from the slide tick 0x00A7B220): a line trace of
+    /// `m_fSlideDamageTestDistance` along the velocity; the first pawn hit takes the
+    /// `m_SlideDamageInfo` damage of its class with momentum `velocity x m_fSlideImpactDamageVelRatio`.
+    #[serde(default = "d_slide_test")]
+    pub slide_damage_test_distance: f32,
+    #[serde(default = "d_slide_vel_ratio")]
+    pub slide_impact_damage_vel_ratio: f32,
+    /// `m_bSlideDamageIgnoresSleepers` (Corvo: true).
+    #[serde(default = "d_true_slide")]
+    pub slide_damage_ignores_sleepers: bool,
+    /// `m_SlideDamageInfo`: `DishonoredNPCPawn` 0, `DisGameCrowdAgentSkeletalRat` 0, `Actor` 5.
+    #[serde(default)]
+    pub slide_damage_npc: f32,
+    #[serde(default)]
+    pub slide_damage_rat: f32,
+    #[serde(default = "d_slide_other")]
+    pub slide_damage_other: f32,
     /// `DishonoredCamera_Lean` (DefaultCamera.ini): the eye swings about a pivot
     /// `lean_height_pct x 2 x CollisionHeight` below it, up to `lean_max_angle` degrees,
     /// driven by a spring (`m_LeanConstants`).
@@ -83,6 +100,50 @@ pub struct MovementConfig {
     /// impulse of the power jump at the top of a held jump.
     #[serde(default)]
     pub power_jump_z: f32,
+    /// Climbing `DisClimbable` chains (`StatePlayerMasterClimb`, `physLadder` 0x00AA82C0).
+    #[serde(default)]
+    pub climb: ClimbConfig,
+}
+
+/// Climbing constants. Sources: `Twk_Pawn_Corvo_Release` (`m_fClimbingSpeed`, `m_fJumpImpulse`,
+/// `m_fClimbingSound{Min,Max}Delay`), `Twk_Pawn_PlayerInput` (`m_fClimbReuseDelay`,
+/// `m_bClimbReuseDelayJump`), `DefaultPlayer.ini` (`m_ClimbingAimThreshold`) and the
+/// `DisTweaks_Climbable` class default (`m_fCollisionRestorationDelay`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClimbConfig {
+    /// `m_fClimbingSpeed`: x 16383.5 is the height offset of the climb target each tick.
+    pub speed: f32,
+    /// `m_fJumpImpulse`: the velocity along the facing given when leaving the chain.
+    pub jump_impulse: f32,
+    pub sound_min_delay: f32,
+    pub sound_max_delay: f32,
+    /// `m_fClimbReuseDelay`: no letting go (and, with `reuse_delay_jump`, no jumping off) this
+    /// soon after grabbing.
+    pub reuse_delay: f32,
+    pub reuse_delay_jump: bool,
+    /// `m_ClimbingAimThreshold` (rotator units of camera pitch).
+    pub aim_threshold: i32,
+    /// `DisTweaks_Climbable.m_fCollisionRestorationDelay`.
+    pub collision_restoration_delay: f32,
+    /// `DishonoredPlayerPawn.m_bCameraRelativeClimbing` (transient, default false; its setter
+    /// was not found, U-440).
+    pub camera_relative: bool,
+}
+
+impl Default for ClimbConfig {
+    fn default() -> Self {
+        Self {
+            speed: 0.0005,
+            jump_impulse: 525.0,
+            sound_min_delay: 0.3,
+            sound_max_delay: 1.8,
+            reuse_delay: 0.5,
+            reuse_delay_jump: true,
+            aim_threshold: 1000,
+            collision_restoration_delay: 0.3,
+            camera_relative: false,
+        }
+    }
 }
 
 /// Swimming constants. Sources: `DefaultPlayerState.ini [StatePlayerMasterSwim]`,
@@ -142,6 +203,18 @@ impl Default for LeanConfig {
     }
 }
 
+fn d_slide_test() -> f32 {
+    75.0
+}
+fn d_slide_vel_ratio() -> f32 {
+    0.15
+}
+fn d_true_slide() -> bool {
+    true
+}
+fn d_slide_other() -> f32 {
+    5.0
+}
 fn d_slide_time() -> f32 {
     1.1
 }

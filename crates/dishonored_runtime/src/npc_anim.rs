@@ -66,6 +66,8 @@ pub struct AnimBank {
     derived: HashMap<(usize, Vec<(String, String)>), usize>,
     /// `LocoBlender` tunables (shared by every pawn using `NPC_Human_at`).
     pub loco_node: LocoNodeParams,
+    /// FaceFX actors and per-blurb animations (lip sync).
+    pub facefx: crate::facefx::FaceFxBank,
 }
 
 /// Packages that cook the Boyle NPC AnimSets, locomotion configs and animation definitions.
@@ -144,7 +146,11 @@ impl AnimBank {
         let f = dishonored_assets::npc_anim::loco_node_floats(&content, &["m_fVelocityMaxBlendSpeed", "m_fVelocityMaxDif", "m_fVelocityMinBlendSpeedRatio", "m_fModifierBlendDuration"]);
         let d = LocoNodeParams::default();
         let loco_node = LocoNodeParams { rate: f[0].unwrap_or(d.rate), range: f[1].unwrap_or(d.range), min_ratio: f[2].unwrap_or(d.min_ratio), modifier_blend: f[3].unwrap_or(d.modifier_blend) };
-        AnimBank { content, sets: Vec::new(), set_index: HashMap::new(), clips: HashMap::new(), profiles: Vec::new(), profile_index: HashMap::new(), model_profile: HashMap::new(), bindings: HashMap::new(), masks: HashMap::new(), locator, loco_node, derived: HashMap::new() }
+        AnimBank { content, sets: Vec::new(), set_index: HashMap::new(), clips: HashMap::new(), profiles: Vec::new(), profile_index: HashMap::new(), model_profile: HashMap::new(), bindings: HashMap::new(), masks: HashMap::new(), locator, loco_node, derived: HashMap::new(), facefx: Default::default() }
+    }
+
+    pub fn content(&self) -> Arc<Content> {
+        self.content.clone()
     }
 
     fn located(&self, path: &str) -> Option<(String, String)> {
@@ -699,11 +705,16 @@ pub struct AnimInput<'a> {
     /// Floor height in pawn space (the model stands on it) and gravity (uu/s^2, negative), for
     /// the ragdoll.
     pub floor: f32,
+    /// Floor height (pawn space) under a pawn-space point, from the level collision; the
+    /// ragdoll samples it at the hand-over (None: the flat `floor`).
+    pub ground: Option<&'a dyn Fn(f32, f32) -> f32>,
     pub gravity: f32,
     /// Ground speed of the pawn carrying this body (0 when not carried).
     pub carrier_speed: f32,
     /// What the pawn looks at (world position), when anything.
     pub look_target: Option<Vec3>,
+    /// FaceFX bone offsets of the line the pawn speaks (ANIMATION.md §12).
+    pub face: &'a [crate::facefx::FaceBone],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1420,7 +1431,7 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
                 let p_prev = at(bank, t - crate::ragdoll::STEP);
                 let g0 = globals(&parts[0], &p_now[0]);
                 let g1 = globals(&parts[0], &p_prev[0]);
-                if let Some(mut rd) = crate::ragdoll::Ragdoll::new(&phys, &parts[0].bones, &g0, &g1, i.floor, i.gravity) {
+                if let Some(mut rd) = crate::ragdoll::Ragdoll::new(&phys, &parts[0].bones, &g0, &g1, i.ground.unwrap_or(&|_, _| i.floor), i.gravity) {
                     if st.settle {
                         rd.settle();
                     } else {
@@ -1565,6 +1576,15 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
         if let Some(sp) = bank.sample(lib, model, prof, &s.name, s.time, false) {
             overlay(&mut pose, &sp, s.weight, None, parts);
         }
+    }
+    // FaceFX (§12): the spoken line's bones, added after the AnimTree (UE3 `UpdateFaceFX`,
+    // 0x00725EA0, runs on the tree's output; additive blend mode).
+    for &(pi, bi, dp, dq) in i.face {
+        let Some(bone) = parts.get(pi).and_then(|p| p.bones.get(bi)) else { continue };
+        let Some(slot) = pose.get_mut(pi).and_then(|p| p.get_mut(bi)) else { continue };
+        let k = slot.unwrap_or(Key { q: bone.rotation, t: None });
+        let t = if dp.length_squared() > 1e-10 { Some(k.t.unwrap_or(bone.translation) + dp) } else { k.t };
+        *slot = Some(Key { q: (dq * k.q).normalize(), t });
     }
     pose
 }

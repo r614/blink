@@ -70,6 +70,8 @@ pub struct ImportStats {
     pub lightmap_atlases: usize,
     /// Pages after packing the atlases for batching.
     pub lightmap_pages: usize,
+    /// Lightmapped components with a distance-field shadow map of the dominant directional light.
+    pub shadow_map_components: usize,
     /// Distinct cross-package references that no indexed package defines.
     pub unresolved_paths: Vec<String>,
     /// MIC parent chains that end at an undefined import.
@@ -83,6 +85,16 @@ struct PendingLightmap {
     instance: usize,
     slot: usize,
     lm: LightMap2DRef,
+    /// The component's distance-field `ShadowMap2D`s (`bIsShadowFactorTexture` false).
+    shadows: Vec<ShadowMapRef>,
+}
+
+/// One `ShadowMap2D`: shadow map UV = UV1 x `CoordinateScale` + `CoordinateBias`.
+struct ShadowMapRef {
+    light_guid: [u32; 4],
+    texture: Key,
+    scale: [f32; 2],
+    bias: [f32; 2],
 }
 
 type Key = (usize, usize); // (package slot, export index)
@@ -211,7 +223,7 @@ fn rot_matrix(props: &[Property], name: &str) -> Mat4 {
 
 /// UE3 `Actor::LocalToWorld` = Scale(DrawScale*DrawScale3D) * Rot * Trans (row-vector),
 /// i.e. `T * R * S` for column vectors.
-fn actor_transform(props: &[Property]) -> Mat4 {
+pub(crate) fn actor_transform(props: &[Property]) -> Mat4 {
     let loc = vec3_or(props, "Location", Vec3::ZERO);
     let scale = float_or(props, "DrawScale", 1.0) * vec3_or(props, "DrawScale3D", Vec3::ONE);
     Mat4::from_translation(loc) * rot_matrix(props, "Rotation") * Mat4::from_scale(scale)
@@ -511,6 +523,12 @@ impl Importer<'_> {
         let hidden = bool_or(&props, "bHidden", false);
         let world = actor_transform(&props);
         let class = pkg.export_class(actor);
+        // `InterpActor` (defaults bCollideActors / bBlockActors true) blocks pawns where it is at
+        // run time: its colliding components become mover collision.
+        let mover = (class == "InterpActor" && bool_or(&props, "bCollideActors", true) && bool_or(&props, "bBlockActors", true)).then(|| dishonored_ir::MoverRef {
+            actor: format!("{}:{}", pkg.name, pkg.obj_name(ObjRef::Export(actor))),
+            actor_to_world: Mat4::from_translation(vec3_or(&props, "Location", Vec3::ZERO)) * rot_matrix(&props, "Rotation"),
+        });
         for &ci in comps {
             let before = self.map.instances.len();
             let src = format!("{} [{class}]", pkg.obj_path(ObjRef::Export(ci)));
@@ -518,6 +536,9 @@ impl Importer<'_> {
                 self.stats.errors.push(format!("{}: {e:#}", pkg.obj_path(ObjRef::Export(ci))));
             }
             for inst in &mut self.map.instances[before..] {
+                if inst.collides {
+                    inst.mover = mover.clone();
+                }
                 inst.collides = false;
             }
             self.stats.other_actor_components += self.map.instances.len() - before;
@@ -612,12 +633,13 @@ impl Importer<'_> {
         let collides = bool_or(&props, "CollideActors", true) && bool_or(&props, "BlockActors", true);
         if self.opts.load_textures && self.opts.load_lightmaps {
             match pkg.export_data(ci).and_then(|d| read_static_mesh_component_lods(d, native_offset)) {
-                Ok(lods) => match lods.into_iter().next().map(|l| l.lightmap) {
-                    Some(LightMapRef::Texture(lm)) => {
+                Ok(lods) => match lods.into_iter().next().map(|l| (l.lightmap, l.shadow_maps)) {
+                    Some((LightMapRef::Texture(lm), shadow_maps)) => {
                         self.stats.lightmaps_texture += 1;
-                        self.pending_lightmaps.push(PendingLightmap { instance: self.map.instances.len(), slot, lm });
+                        let shadows = shadow_maps.into_iter().filter_map(|s| self.distance_field_shadow_map(slot, s)).collect();
+                        self.pending_lightmaps.push(PendingLightmap { instance: self.map.instances.len(), slot, lm, shadows });
                     }
-                    Some(LightMapRef::Vertex { .. }) => self.stats.lightmaps_vertex += 1,
+                    Some((LightMapRef::Vertex { .. }, _)) => self.stats.lightmaps_vertex += 1,
                     _ => self.stats.lightmaps_none += 1,
                 },
                 Err(_) if is_spline => self.stats.lightmaps_none += 1,
@@ -635,6 +657,7 @@ impl Importer<'_> {
             collides,
             source,
             lightmap: None,
+            mover: None,
         });
         Ok(())
     }
@@ -654,6 +677,22 @@ impl Importer<'_> {
         }
         let mut keys: Vec<_> = groups.keys().copied().collect();
         keys.sort();
+        // Distance-field shadow maps of the dominant directional light, decoded once (PF_G8).
+        let dominant = self.dominant_directional_guids();
+        let mut shadow_textures: HashMap<Key, Option<(usize, usize, Vec<u8>)>> = HashMap::new();
+        for p in &pending {
+            for s in p.shadows.iter().filter(|s| dominant.contains(&s.light_guid)) {
+                if shadow_textures.contains_key(&s.texture) {
+                    continue;
+                }
+                let t = read_texture(self.content, &self.pkgs[s.texture.0], s.texture.1, 4096).ok().filter(|t| t.format == TextureFormat::R8);
+                if t.is_none() {
+                    self.stats.texture_failures += 1;
+                    self.stats.errors.push(format!("shadow map {:?}: not decoded as PF_G8", s.texture));
+                }
+                shadow_textures.insert(s.texture, t.map(|t| (t.width as usize, t.height as usize, t.mips[0].clone())));
+            }
+        }
         for (ka, kd) in keys {
             let decode = |s: &Self, k: Key| -> Result<(u32, u32, Vec<[u8; 3]>)> {
                 let pkg = &s.pkgs[k.0];
@@ -675,10 +714,17 @@ impl Importer<'_> {
             // 0 = empty, 1 = padding, 2 = inside a component's rect.
             let mut mask = vec![0u8; w * h];
             let members = &groups[&(ka, kd)];
+            // The dominant light's distance field resampled into this atlas's layout (255 where
+            // no member has one): atlas texel -> UV1 -> shadow map UV.
+            let member_shadow = |m: usize| {
+                pending[m].shadows.iter().filter(|s| dominant.contains(&s.light_guid)).find_map(|s| shadow_textures.get(&s.texture)?.as_ref().map(|t| (s, t)))
+            };
+            let mut shadow = if members.iter().any(|&m| member_shadow(m).is_some()) { vec![255u8; w * h] } else { Vec::new() };
             for pass in [2u8, 1u8] {
                 let pad = if pass == 2 { 0 } else { 1 };
                 for &m in members {
                     let lm = &pending[m].lm;
+                    let sm = member_shadow(m);
                     let rx0 = (lm.coordinate_bias[0] * w as f32).floor() as i64 - pad;
                     let ry0 = (lm.coordinate_bias[1] * h as f32).floor() as i64 - pad;
                     let rx1 = ((lm.coordinate_bias[0] + lm.coordinate_scale[0]) * w as f32).ceil() as i64 + pad;
@@ -694,18 +740,17 @@ impl Importer<'_> {
                             let dir = d.2[i].map(srgb_to_linear);
                             out[i] = [0, 1, 2].map(|k| avg[k] * lm.scales[0][k]);
                             out_dir[i] = [0, 1, 2].map(|k| dir[k] * lm.scales[1][k]);
+                            if let Some((s, t)) = sm {
+                                let uv = Vec2::new((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+                                let uv1 = (uv - Vec2::from(lm.coordinate_bias)) / Vec2::from(lm.coordinate_scale).max(Vec2::splat(1e-9));
+                                shadow[i] = crate::lightmap::sample_r8_bilinear(&t.2, t.0, t.1, uv1 * Vec2::from(s.scale) + Vec2::from(s.bias));
+                            }
                         }
                     }
                 }
             }
             let atlas = self.map.lightmaps.len();
-            self.map.lightmaps.push(LightmapAtlas {
-                source: self.pkgs[ka.0].obj_path(ObjRef::Export(ka.1)),
-                width: w as u32,
-                height: h as u32,
-                texels: out.into_iter().map(pack_rgb9e5).collect(),
-                directional: out_dir.into_iter().map(pack_rgb9e5).collect(),
-            });
+            self.stats.shadow_map_components += members.iter().filter(|&&m| member_shadow(m).is_some()).count();
             for &m in members {
                 let lm = &pending[m].lm;
                 let min = Vec2::from(lm.coordinate_bias);
@@ -713,8 +758,17 @@ impl Importer<'_> {
                     atlas,
                     uv_min: min,
                     uv_max: min + Vec2::from(lm.coordinate_scale),
+                    df_shadow: member_shadow(m).is_some(),
                 });
             }
+            self.map.lightmaps.push(LightmapAtlas {
+                source: self.pkgs[ka.0].obj_path(ObjRef::Export(ka.1)),
+                width: w as u32,
+                height: h as u32,
+                texels: out.into_iter().map(pack_rgb9e5).collect(),
+                directional: out_dir.into_iter().map(pack_rgb9e5).collect(),
+                shadow,
+            });
         }
         self.stats.lightmap_atlases = self.map.lightmaps.len();
         self.pack_lightmap_pages(4096);
@@ -725,6 +779,7 @@ impl Importer<'_> {
     /// lightmap image breaks Bevy's draw batching; 196 atlases cost ~4x frame time on Boyle Ext.
     fn pack_lightmap_pages(&mut self, page: u32) {
         let atlases = std::mem::take(&mut self.map.lightmaps);
+        let any_shadow = atlases.iter().any(|a| !a.shadow.is_empty());
         let mut order: Vec<usize> = (0..atlases.len()).collect();
         order.sort_by_key(|&i| (std::cmp::Reverse(atlases[i].height), std::cmp::Reverse(atlases[i].width)));
         // atlas -> (page, x, y)
@@ -746,6 +801,7 @@ impl Importer<'_> {
                     height: page,
                     texels: vec![0; (page * page) as usize],
                     directional: vec![0; (page * page) as usize],
+                    shadow: if any_shadow { vec![255; (page * page) as usize] } else { Vec::new() },
                 });
                 x = 0;
                 y = 0;
@@ -758,6 +814,9 @@ impl Importer<'_> {
                 pages[p].texels[dst..dst + w as usize].copy_from_slice(&a.texels[src..src + w as usize]);
                 if a.directional.len() == a.texels.len() {
                     pages[p].directional[dst..dst + w as usize].copy_from_slice(&a.directional[src..src + w as usize]);
+                }
+                if a.shadow.len() == a.texels.len() {
+                    pages[p].shadow[dst..dst + w as usize].copy_from_slice(&a.shadow[src..src + w as usize]);
                 }
             }
             place[i] = (p, x, y);
@@ -776,6 +835,47 @@ impl Importer<'_> {
             }
         }
         self.map.lightmaps = pages;
+    }
+
+    /// A component's `ShadowMap2D` (tagged properties `Texture`, `CoordinateScale`,
+    /// `CoordinateBias`, `LightGuid`, `bIsShadowFactorTexture`) when it holds a signed distance
+    /// field (`bIsShadowFactorTexture` false; `ShadowMapTexture2D`, PF_G8).
+    fn distance_field_shadow_map(&mut self, slot: usize, obj: i32) -> Option<ShadowMapRef> {
+        let k = self.resolve(slot, ObjRef::from_index(obj))?;
+        let pkg = self.pkgs[k.0].clone();
+        let h = pkg.read_object(k.1).ok()?;
+        let p = &h.properties;
+        if bool_or(p, "bIsShadowFactorTexture", false) {
+            return None;
+        }
+        let v2 = |n: &str| match find(p, n).map(|v| &v.value) {
+            Some(Value::Vector2D(v)) => Some(*v),
+            _ => None,
+        };
+        let light_guid = match find(p, "LightGuid").map(|v| &v.value) {
+            Some(Value::Guid(g)) => *g,
+            _ => return None,
+        };
+        let texture = self.resolve(k.0, ObjRef::from_index(find(p, "Texture")?.as_object()?))?;
+        Some(ShadowMapRef { light_guid, texture, scale: v2("CoordinateScale")?, bias: v2("CoordinateBias")? })
+    }
+
+    /// `LightGuid`s of the levels' `DominantDirectionalLightComponent`s.
+    fn dominant_directional_guids(&self) -> Vec<[u32; 4]> {
+        let mut out = Vec::new();
+        for pkg in &self.pkgs {
+            for i in 0..pkg.exports.len() {
+                if pkg.export_class(i) != "DominantDirectionalLightComponent" || pkg.obj_path(ObjRef::Export(i)).starts_with("Default__") {
+                    continue;
+                }
+                if let Ok(h) = pkg.read_object(i) {
+                    if let Some(Value::Guid(g)) = find(&h.properties, "LightGuid").map(|v| &v.value) {
+                        out.push(*g);
+                    }
+                }
+            }
+        }
+        out
     }
 
     fn resolve(&mut self, slot: usize, r: ObjRef) -> Option<Key> {
@@ -913,6 +1013,10 @@ impl Importer<'_> {
         // whose `*_Enable_*` switch is off is not in the original's shader even when the
         // instance (or a parent) still names a texture for it.
         let off = |s: &str| chain.switch(s) == Some(false);
+        // The glow materials' fog noise (`F_Fog_Texture`, e.g. `wall_lamp_Inst`'s `Cloud_64_d`)
+        // is only sampled with `F_Use_With_Fog`; with it off the texture is not a colour source.
+        let fog_tex = chain.textures.iter().chain(chain.default_textures.iter()).find(|(n, _)| n.eq_ignore_ascii_case("F_Fog_Texture")).map(|t| t.1);
+        let diffuse_key = diffuse_key.filter(|k| !(off("F_Use_With_Fog") && fog_tex == Some(*k)));
         let normal_key = normal_key.filter(|_| !off("N_Enable_NormalMap"));
         let spec_key = material_chain::slot(&chain, "s_", &["mask"]).filter(|_| !off("S_Enable_Specular"));
         let emissive_key = material_chain::slot(&chain, "e_", &["mask"]).filter(|_| !off("E_Enable_Emissive"));
@@ -997,6 +1101,19 @@ impl Importer<'_> {
                 chain.textures.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(",")
             ));
         }
+        let mut texture_params: Vec<(String, TextureId)> = [("diffuse", diffuse), ("normal", normal), ("specular", params.specular), ("emissive", params.emissive), ("opacity", params.opacity)]
+            .into_iter()
+            .filter_map(|(n, t)| Some((n.to_string(), t?)))
+            .collect();
+        // Distortion materials: the raw textures the distortion pass samples (U-360).
+        if chain.switch("Dist_Enable_Distortion") == Some(true) {
+            for n in ["Dist_Distortion", "O_Opacity", "UV_Distortion"] {
+                let key = chain.textures.iter().chain(chain.default_textures.iter()).find(|(k, _)| k.trim().eq_ignore_ascii_case(n)).map(|v| v.1);
+                if let Some(t) = key.and_then(|k| self.texture(k)) {
+                    texture_params.push((n.to_string(), t));
+                }
+            }
+        }
         let asset = MaterialAsset {
             source,
             diffuse,
@@ -1006,10 +1123,7 @@ impl Importer<'_> {
                 MaterialBlend::Masked => BlendHint::Masked,
                 _ => BlendHint::Translucent,
             },
-            texture_params: [("diffuse", diffuse), ("normal", normal), ("specular", params.specular), ("emissive", params.emissive), ("opacity", params.opacity)]
-                .into_iter()
-                .filter_map(|(n, t)| Some((n.to_string(), t?)))
-                .collect(),
+            texture_params,
             contact_type: chain.phys_material.and_then(|pm| self.contact_type(pm)),
         };
         self.map.materials.push(asset);

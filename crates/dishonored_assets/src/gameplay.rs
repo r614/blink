@@ -151,6 +151,12 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
         slide_time: l.f(&corvo, CORVO, "m_fSlideTime", "movement.slide_time")?,
         slide_deactivate_angle: l.f(&corvo, CORVO, "m_fSlideVelocityDeactivateAngle", "movement.slide_deactivate_angle")?,
         slide_percent_not_cancelable: l.f(&corvo, CORVO, "m_fSlidePercentNotCancelable", "movement.slide_percent_not_cancelable")?,
+        slide_damage_test_distance: l.f(&corvo, CORVO, "m_fSlideDamageTestDistance", "movement.slide_damage_test_distance")?,
+        slide_impact_damage_vel_ratio: l.f(&corvo, CORVO, "m_fSlideImpactDamageVelRatio", "movement.slide_impact_damage_vel_ratio")?,
+        slide_damage_ignores_sleepers: true,
+        slide_damage_npc: 0.0,
+        slide_damage_rat: 0.0,
+        slide_damage_other: 5.0,
         lean: {
             let cam = Ini::load_layered(&content.root, "Camera");
             let sec = "DishonoredGame.DishonoredCamera_Lean";
@@ -205,6 +211,23 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
             }
         },
         power_jump_z: l.attr(&attrs, a, "m_JumpZ_PowerJump", "movement.power_jump_z").unwrap_or(0.0),
+        climb: {
+            let d = ClimbConfig::default();
+            let player = Ini::load_layered(&content.root, "Player");
+            l.prov.insert("movement.climb.aim_threshold".into(), "DefaultPlayer.ini [DishonoredGame.DishonoredPlayerPawn] m_ClimbingAimThreshold".into());
+            let pi = l.obj(PLAYER_INPUT).ok();
+            ClimbConfig {
+                speed: l.f(&corvo, CORVO, "m_fClimbingSpeed", "movement.climb.speed").unwrap_or(d.speed),
+                jump_impulse: l.f(&corvo, CORVO, "m_fJumpImpulse", "movement.climb.jump_impulse").unwrap_or(d.jump_impulse),
+                sound_min_delay: l.f(&corvo, CORVO, "m_fClimbingSoundMinDelay", "movement.climb.sound_min_delay").unwrap_or(d.sound_min_delay),
+                sound_max_delay: l.f(&corvo, CORVO, "m_fClimbingSoundMaxDelay", "movement.climb.sound_max_delay").unwrap_or(d.sound_max_delay),
+                reuse_delay: pi.as_ref().and_then(|pi| l.f(pi, PLAYER_INPUT, "m_fClimbReuseDelay", "movement.climb.reuse_delay").ok()).unwrap_or(d.reuse_delay),
+                reuse_delay_jump: pi.as_ref().and_then(|pi| get(pi, "m_bClimbReuseDelayJump")).map_or(d.reuse_delay_jump, |v| matches!(v, TVal::B(true))),
+                aim_threshold: player.get("DishonoredGame.DishonoredPlayerPawn", "m_ClimbingAimThreshold").and_then(|v| v.trim().parse().ok()).unwrap_or(d.aim_threshold),
+                collision_restoration_delay: d.collision_restoration_delay,
+                camera_relative: d.camera_relative,
+            }
+        },
     };
 
     let vitals = VitalsConfig {
@@ -300,6 +323,9 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
             ("item", "Twk_Inv_PlayerSpecific.Twk_Inv_PistolCorvo"),
             ("fire", "Twk_Inv_PlayerSpecific.Twk_Inv_PistolCorvo.DisTweaks_InventoryItem_PlayerSpecific_0.DisTweaks_FirePistol_1"),
             ("projectile", "Twk_Projectiles.Twk_Proj_Bullet"),
+            // `DisTweaks_WeaponRanged.m_pAttributeTweaks`: Attribute_DispersionMax / Min /
+            // InterpolationSpeed (U-247).
+            ("disp", "Twk_Inv_PlayerSpecific.Twk_Inv_PistolCorvo.DisTweaks_WeaponRanged_Attributes_5"),
         ],
         "pistol",
     )?;
@@ -309,6 +335,7 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
             ("item", "Twk_Inv_PlayerSpecific.Twk_Inv_CrossbowCorvo"),
             ("fire", "Twk_Inv_PlayerSpecific.Twk_Inv_CrossbowCorvo.DisTweaks_InventoryItem_PlayerSpecific_1.DisTweaks_FireCrossbow_0"),
             ("projectile", "Twk_Projectiles.Twk_Proj_Arrow"),
+            ("disp", "Twk_Inv_PlayerSpecific.Twk_Inv_CrossbowCorvo.DisTweaks_WeaponRanged_Attributes_4"),
         ],
         "crossbow",
     )?;

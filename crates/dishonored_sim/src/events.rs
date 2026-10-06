@@ -122,6 +122,11 @@ pub enum SimEvent {
     Swim { id: PlayerId, entered: bool },
     /// Agility's power jump at the top of a held jump (0x00A71370).
     PowerJump { id: PlayerId },
+    /// Grabbed (`started`) or left a climbable chain: the chain's `DisSeqEvent_Climb` outputs
+    /// Start / Finish (0x00BCFAC0 from the climb state's enter and exit).
+    Climb { id: PlayerId, climbable: u16, started: bool },
+    /// A climbing step sound (`DisTweaks_Climbable.m_pClimbingSound`, its RTPC set to `volume`).
+    ClimbSound { id: PlayerId, climbable: u16, volume: f32 },
     // --- Blood Thirsty ---
     /// The adrenaline gauge filled (`m_bNeedAdrenalineEffect`).
     AdrenalineFull { id: PlayerId },

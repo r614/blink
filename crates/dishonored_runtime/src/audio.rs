@@ -729,6 +729,8 @@ pub fn drive(
             SimEvent::WindblastCast { id } => posts.push((cue("windblast"), subject_obj(id))),
             SimEvent::DarkVision { id, active } if Some(id) == me => posts.push((cue(if active { "dark_vision_on" } else { "dark_vision_off" }), subject_obj(id))),
             SimEvent::Jumped { id } => posts.push((cue("jump"), subject_obj(id))),
+            // `DisTweaks_Climbable.m_pClimbingSound` of both Boyle chains.
+            SimEvent::ClimbSound { id, .. } => posts.push(("Snd_P_Chain_Climbing".to_string(), subject_obj(id))),
             SimEvent::Mantle { id, edge_height } => {
                 let k = if edge_height < 80.0 { "mantle_low" } else if edge_height < 140.0 { "mantle_medium" } else { "mantle_high" };
                 posts.push((cue(k), subject_obj(id)));

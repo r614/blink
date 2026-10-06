@@ -174,6 +174,11 @@ pub struct LightmapAtlas {
     /// RGB9E5. Empty for atlases without directional data.
     #[serde(default)]
     pub directional: Vec<u32>,
+    /// Row-major signed distance field of the dominant directional light's shadow (the
+    /// components' `ShadowMap2D` PF_G8 textures resampled into this layout; 0.5 = shadow edge),
+    /// 255 where no component has one. Empty when no component of the atlas has one.
+    #[serde(default)]
+    pub shadow: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -182,6 +187,11 @@ pub struct InstanceLightmap {
     /// Lightmap UV = mix(uv_min, uv_max, mesh UV1) (UE3 CoordinateBias / Bias+Scale).
     pub uv_min: Vec2,
     pub uv_max: Vec2,
+    /// The component has a distance-field shadow map of the dominant directional light
+    /// (`LightmapAtlas::shadow`): the original shadows that light with it instead of a
+    /// dynamic shadow map.
+    #[serde(default)]
+    pub df_shadow: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -304,6 +314,20 @@ pub struct MeshInstance {
     /// Baked lighting for this component (LOD0), if any.
     #[serde(default)]
     pub lightmap: Option<InstanceLightmap>,
+    /// The component belongs to a mover (`InterpActor`) that blocks pawns: it collides where
+    /// the actor is at run time (Kismet matinees and attachments move it), not in the static
+    /// collision.
+    #[serde(default)]
+    pub mover: Option<MoverRef>,
+}
+
+/// The actor of a mover component.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MoverRef {
+    /// `<package>:<actor name>`, as the Kismet names actors (e.g. `L_BoyleStreet_Ext_Script:InterpActor_1`).
+    pub actor: String,
+    /// The actor's placed transform (location and rotation) when the map was imported.
+    pub actor_to_world: Mat4,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

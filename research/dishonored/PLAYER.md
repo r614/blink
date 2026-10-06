@@ -206,9 +206,80 @@ sprint strafe / back multipliers 0.5 / 0.4 (DefaultPlayer.ini `m_Powers`). CONFI
   `Attribute_DrowningDamageAmount` (1) every `Attribute_DrowningDamageStep` (1 s) directly, floored at
   `m_MinimumScriptedHealth`, death below 1. Health regeneration below the limit is not reset by it
   (U-242).
-- Climbing: `StatePlayerMasterClimb` attaches the player to a `DisClimbable` (rigid-body chains,
-  `m_fClimbingSpeed` 0.0005, jump off at `m_fJumpImpulse` 525, physics Ladder through the player's
-  `physLadder` 0x00AA82C0). Boyle has two chains; not ported (U-240).
+
+### Climbing (U-240 resolved)
+
+`DisClimbable` (class record 0x012F76B0, vtable 0x010E7A80; interactable interface vtable
+0x010EC418 at +0x2A0) is a `DishonoredKAsset`: a skeletal mesh driven by a physics asset.
+`StatePlayerMasterClimb` (record 0x01300048) hangs the player on it with physics Ladder (9), which
+the player pawn routes to its own `physLadder` (slot 282, 0x00AA82C0). Ported in
+`dishonored_sim::climb` as `MoveMode::Climbing`. CONFIRMED unless noted.
+
+- **Grab.** Three ways, all ending in the interactable's `Interact` (interface slot +0x60,
+  0x00A23130: the player pawn only; requests the climb state, then sets `m_pClimbable` +0xAA0):
+  Use on the focused chain (Use handler 0x00AD5BA0 -> 0x00A3DF60; prompt
+  `m_InteractText` "`GBA_Use` Grab"; visibility test slot +0x1C 0x00A1E6F0); touching the chain
+  (collision notify, vtable +0x290, 0x00A3FA70) while the pawn has no `m_pClimbable`, is not
+  `m_bLettingGoOfClimbable` (+0x8A0 bit 6) and its physics is neither Walking nor None (jumping,
+  falling, Blinking); and the Blink step's probe hitting a chain (0x00BECDF0). The sim takes the
+  Use target like a pickup's (interact distance, 30 deg cone, clear line; LIKELY) and the touch as
+  the pawn box overlapping the bodies' line thickened by their half width (5.05).
+- **Enter** (0x00A72B00): physics Ladder; the chain's collision off (0x00A1A170: `bCollideActors`
+  and the component's `CollideActors` cleared); `m_fStartTime`; the chain's `DisSeqEvent_Climb`
+  output Start (0x00BCFAC0; record 0x01300200, outputs Start / Finish). HUD contexts 12 / 13
+  (`DUI_Context_ClimbableDrop` / `_ClimbableJump`, slot +0x174 0x00A67830).
+- **`physLadder`** (0x00AA82C0): `Velocity = 0`. With a non-zero acceleration: step =
+  `m_fClimbingSpeed x 16383.5` (`DAT_0111870C`; 0.0005 -> 8.19 uu); `m_bClimbingUp` (+0x8A0 bit
+  17, default true) becomes `T' < pitch` with `T' = -m_ClimbingAimThreshold` while up, `+T`
+  while down (1000 rotator units, 5.5 deg; the pitch is the camera's
+  `CameraCache.POV.Rotation.Pitch`, camera +0x33C, through 0x00B515C0); the step is negated when
+  `m_bCameraRelativeClimbing` (+0x8A0 bit 16) and not climbing up, and again when the
+  acceleration's 2D direction is within `acos 0.9` of the facing or less (`dot <= 0.9`): forward
+  climbs up, back or sideways climbs down. Target height `z + step`, clamped to
+  `[Location.z - 2 x SkelComp.Bounds.SphereRadius, Location.z - CylinderComponent.CollisionHeight]`.
+  Without input the height stays (not clamped). Horizontally the target is the bone the
+  skeletal mesh component finds closest (`FindClosestBone`, 0x00713130, over every bone) to the
+  pawn's centre raised by `2/3 x CollisionHeight`, at its world location (`GetBoneLocation`
+  0x00732CD0), moved 30 uu back along the pawn's facing and 10 uu to its right (`yaw + 0x4000`).
+  The pawn goes `VInterpTo(Location, target, dt, 20)` (0x0041E860) with `MoveActor`; a blocked
+  move slides along the wall and then gets `TwoWallAdjust` (0x0065FC60). Climbing speed: 8.19 x 20
+  = 163.8 uu/s whenever `20 dt < 1` (frame-rate independent above 20 fps).
+- **Sound**: when the height changed (relative tolerance 1e-4), a step sound
+  (`m_pClimbingSound`, RTPC `m_pClimbingSoundVolumeParameter` = |step|) plays if more than
+  `min + (max - min) x |pitch| / 16383.5` s passed since the last (`m_fClimbingSoundMin/MaxDelay`
+  0.3 / 1.8 of `Twk_Pawn_Corvo_Release`). The sim emits `SimEvent::ClimbSound`.
+- **Leave.** Transition test (slot +0x138, 0x00A6E570): to Falling, and to Jump when
+  `m_bClimbReuseDelayJump` (true), only after `m_fClimbReuseDelay` (`Twk_Pawn_PlayerInput`: 0.5;
+  class default 0.3). Exit (0x00A6E2C0), whatever the next state: the chain's Finish output;
+  `Velocity = Rotation.Vector() x m_fJumpImpulse` (525; the pawn's rotation is taken as
+  yaw-only, LIKELY), doubled when a trace from the pawn 200 uu straight up (`DAT_00FB96C4`, flags
+  0x20DF) reports a hit (LIKELY reading of the trace result, U-443).
+  Into Jump: the Jump enter (0x00A75EE0) then sets `Velocity.Z = JumpZ` (800) and sets
+  `m_bJumpingFromChain` (+0x54 bit 0); the chain stays in `m_pClimbable` (no re-grab) until that jump state
+  ends (0x00A5FFA0), which starts the chain's collision restoration (`m_fNoCollisionDuration =
+  m_fCollisionRestorationDelay`, 0.3 s, counted down in the chain's tick 0x00A2BFD0) and clears
+  `m_pClimbable`. Use while climbing (0x00AD5BA0 -> 0x00AAA030) requests Falling and sets
+  `m_bLettingGoOfClimbable` (cleared again by the Falling state's exit, 0x00A63110: landing,
+  water, a mantle); the climb exit then restores the chain's collision at once and clears
+  `m_pClimbable` (unless 0x00B50C70 holds: one of the pawn's active power components, +0x788,
+  is of the class initialised next to the Blink code at 0x00BECD90 and reports itself active,
+  LIKELY "Blinking"; then the 0.3 s restoration). The same test lets a Blinking pawn grab by
+  touch even when its physics reads Walking. A chain switched to physics None
+  drops its climber the same way (vtable +0x218, 0x00A1E800).
+- **No end exits.** `physLadder` only clamps: the pawn stops at the bottom and at the top (head at
+  the anchor). Getting off at the top is a jump, whose airborne mantle finds the ledge.
+- **Chains** (`dishonored_assets::climbable`, cache `<map>.climb1.json`): the actor's
+  `Location`, its `KAssetSkelMeshComponent` mesh and physics asset. Both Boyle meshes are vertical:
+  `Climbable.chain_400` (L_Boyle_Int_Basement `DisClimbable_1` at (-3153, -420, -627); root bone
+  4.6 above, `chain_jnt_01..05` every 100 uu down; 5 box bodies, the root fixed) and
+  `Climbable.chain_1400` (L_Boyle_Ext_Env `DisClimbable_3` at (-2085, 580, 1884); 16 bones,
+  `chain_jnt_015` 1400 below). The bounds come from the physics bodies in the rest pose (box
+  elements through their bone-space `TM`): sphere radius 198.04 (Int) / 697.57 (Ext), so the
+  pawn's centre ranges over z -1023.1 .. -714.5 (Int) and 488.9 .. 1796.5 (Ext).
+- **Not modelled**: the chain's rigid-body swing (the sim keeps the rest pose, which is where an
+  undisturbed chain hangs; Windblast pushes chains by `m_fWindblastForceFactor` 10, swinging
+  sounds), Blink and other powers cast from the chain, the setter of
+  `m_bCameraRelativeClimbing` (U-440; no AND/OR write of its bit, dword or byte, exists).
 
 ### Blood Thirsty
 
@@ -247,8 +318,66 @@ pushes players; NPC pawns keep the velocity change.
 
 The magazine holds `1 + (int)Attribute_MagazineBonus` rounds, capped by the ammo held (0x00C20DB0);
 `Attribute_ReloadSpeed` divides the reload time (0x00C23620, LIKELY: the divided tweak time is the
-reload delay). `Attribute_FastReload` selects the fast reload animations, and the accuracy upgrades
-change the dispersion, which the sim does not model (U-247).
+reload delay). `Attribute_FastReload` selects the fast reload animations (not modelled, U-247).
+The accuracy upgrades change the dispersion (next section).
+
+### Ranged weapon dispersion (2026-10-06, U-247)
+
+CONFIRMED from the code unless marked.
+
+- **State.** `DishonoredWeapon_Ranged.m_fDispersion` (+0x12C; slot 91 0x00C1CAC0 returns it).
+  It is set to `Attribute_DispersionMax` on equip (slot 76, 0x00C2C1F0) and after every shot.
+  The projectile context's camera update (0x00C03A60) fires each queued shot through the item's
+  fire function (pistol 0x00C2A3E0), then calls the weapon's slot 109 (0x00C1CB80): set to max.
+  Slot 98 (0x00C312A0) also sets max when its third argument is set; when it is called is not
+  traced (U-421).
+- **Narrowing.** The weapon tick (slot 94, 0x00C1CB10) runs only while a round is loaded
+  (+0x124 > 0). It moves the value toward `Attribute_DispersionMin` at
+  `Attribute_DispersionInterpolationSpeed` per second (`FInterpConstantTo` 0x0041EBC0).
+- **Held at max.** The flags `DisTweaks_WeaponRanged.m_bMaxDispersionOnSprint` / `Jump` /
+  `Block` / `Melee` (+0x118 bits 0..3) hold it at max in those states. The falling state's tick
+  (0x00A79150) tests the Jump bit every tick. Corvo's pistol and crossbow set Sprint, Jump and
+  Block, not Melee.
+- **Values** (Normal column, `DisTweaks_WeaponRanged_Attributes` of `Twk_Inv_PistolCorvo` /
+  `Twk_Inv_CrossbowCorvo`):
+
+  | weapon | max | min | speed |
+  |---|---|---|---|
+  | pistol | 45 | 15 | 70 |
+  | crossbow | 30 | 0 | 70 |
+
+  Upgrades only apply to their own weapon (`DisTweaks_Upgrade.m_pHostItemType`):
+  `Pistol_Accuracy1` max -10 / min -10; `Pistol_Accuracy2` max -15 / min -3 / speed +20;
+  `Crossbow_Accuracy` max -10 / speed +40.
+- **The shot.** 0x00BFFBA0 draws `r = rand() x d / 32767` and `a = rand() x 2 pi / 32767 - pi`.
+  The radius is uniform, so shots gather toward the centre. The offset is `(r cos a, r sin a)`.
+  0x00AA2B10 scales it by `screen height / 720`, adds it to the aim point (the screen centre, or
+  the aim-assist point), and deprojects that point through the view (0x006C5180). The result is
+  the projectile direction. So **dispersion is a radius in pixels of a 720-line screen**. With the
+  default 75 degree horizontal FOV on 16:9, 45 px is 3.09 degrees and 15 px is 1.03 degrees.
+- **HUD.** 0x00B9FF30 sends `SetDispersion(d, p = d / max x 100)` to the crosshair when `d`
+  changed by at least 0.1. The movie's ActionScript 2 classes (`UI_HUD_SF` "HUD", decoded from
+  the DoInitAction bytecode) place each part absolutely, in stage pixels (1280 x 720, the same
+  unit as `d`):
+  - `Crosshair_Gun.SetDispersion`:
+    - `_parts_int_mc._rotation = -5 p / 100`, its parts 0..3 at (d, -d), (d, d), (-d, d), (-d, -d);
+    - `_parts_ext_mc._rotation = -20 p / 100`, `_alpha = 100 - 1.5 max(0, p - 50)`, its parts 0..3
+      at the same four corners.
+  - `Crosshair_Crossbow` (extends `Crosshair_Gun`):
+    - `_offset = -15 p / 100` (class default -15);
+    - `_parts_ext_mc._alpha = 100 - 1.5 max(0, p - 40)`;
+    - external parts: part0 `_y = -d - offset`, part1 `_x = d + offset`, part2 `_y = d + offset`,
+      part3 `_x = -d - offset`, part4 `_x = d + offset + 5`, part5 `_x = -d - offset - 5`;
+    - internal parts on the axes at distance `d`.
+- **Not found:** `DisTweaks_PlayerPawn.m_fMovementDispersionIncrease` and
+  `m_fCameraMovementDispersionIncrease` (+0x2AC / +0x2B0, both 0.5). An offset scan finds no
+  player code that reads them; the hits are other classes with the same offsets (U-422).
+- **Port** (`left_hand::update_dispersion`, `fire_direction`). The state is
+  `LeftHandState.dispersion`. Draws come from the pawn's random stream (two rolls per shot). The
+  view is a fixed reference, the default FOV on 16:9 (`DISPERSION_REF_*`): the original uses
+  the player's actual view, which the server does not know. "Jump" is the Falling move mode.
+  Sleep darts and incendiary bolts count as loaded while not reloading. The crosshair does not
+  spread yet (U-420).
 
 ### Falling damage (`TakeFallingDamage`, 0x00B4DCC0, vtable +0x528)
 
@@ -297,6 +426,18 @@ every `m_LineCheckStepSize` (12) of height; the face must be within
 step-up (`m_bLowMantleUseStepUp`). The sim implements the face rules, the 12 uu scan,
 the ledge-grab heights and the Blink mantle; the later finder states are reduced to a
 capsule clearance test and mantle durations are still guesses (U-019).
+
+### Physics volumes (zone velocity, pain)
+
+- Non-water `PhysicsVolume`s with a `ZoneVelocity` or `bPainCausing` are imported per map
+  (Boyle Ext: 24 fence volumes, 1 damage per second of `DisDamageType_SpringRazor` or `_Impact`,
+  zone velocity (40, 90, 25), (-40, -70, 25) or (0, 300, 300)). A pawn's volume is the highest
+  `Priority` one containing its centre.
+- Walking: `DesiredMove = Velocity + ZoneVelocity x 25 x dt` (Z dropped, `bVelocityAffectsWalking`
+  default true), moved by `DesiredMove x dt`. Falling: moved by `(Velocity + ZoneVelocity) x dt`.
+- Pain (Engine `PhysicsVolume` script): a `VolumeTimer` from level start pops every `PainInterval`
+  (default 1) and every damageable actor touching the volume takes
+  `int(DamagePerSec x PainInterval)` of the `DamageType`; `bEntryPain` (default true) hurts on entry.
 
 ## Blink (`DishonoredActivePowerComponent_Blink`)
 

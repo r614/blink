@@ -353,10 +353,25 @@ pub fn step_movement(
         }
     }
 
+    if !rat {
+        crate::climb::tick_off_chain(p, ctx);
+    }
     match p.mode {
         MoveMode::Walking => walking(p, input, sword_out, can_move, ctx, events),
-        MoveMode::Falling => falling(p, input, can_move, ctx.dt, ctx, events),
-        MoveMode::Swimming => crate::swim::swimming(p, input, can_move, sword_out, ctx, events),
+        MoveMode::Falling => {
+            falling(p, input, can_move, ctx.dt, ctx, events);
+            // A chain touched while airborne is grabbed (0x00A3FA70).
+            if !rat && p.mode == MoveMode::Falling {
+                crate::climb::try_touch_grab(p, ctx, events);
+            }
+        }
+        MoveMode::Climbing => crate::climb::climbing(p, input, can_move, ctx, events),
+        MoveMode::Swimming => {
+            crate::swim::swimming(p, input, can_move, sword_out, ctx, events);
+            if !rat && p.mode == MoveMode::Swimming {
+                crate::climb::try_touch_grab(p, ctx, events);
+            }
+        }
         MoveMode::Mantling => {
             if advance_traversal(p, ctx.dt) {
                 p.mode = MoveMode::Walking;
@@ -409,7 +424,7 @@ fn start_slide(p: &mut PlayerState, sword_out: bool, ctx: &MoveCtx) {
     let target = v0.normalize_or_zero() * cfg.crouch_speed * sword;
     set_crouch(p, true, ctx);
     p.sprinting = false;
-    p.slide = SlideState { active: true, elapsed: 0.0, start_velocity: v0, target_velocity: target, stop_interpolating: false };
+    p.slide = SlideState { active: true, elapsed: 0.0, start_velocity: v0, target_velocity: target, stop_interpolating: false, hit: false };
 }
 
 /// Slide physics (0x00A6F440): `v = v0 + (target - v0) * (1 - cos(pi * t / SlideTime)) / 2`
@@ -467,7 +482,7 @@ fn set_crouch(p: &mut PlayerState, crouch: bool, ctx: &MoveCtx) {
 
 /// One UE3 `MoveActor` of the pawn box: moves as far as it can along `delta`; returns the
 /// blocking hit (normal, time).
-fn move_actor(p: &mut PlayerState, delta: Vec3, ctx: &MoveCtx) -> Option<(Vec3, f32)> {
+pub(crate) fn move_actor(p: &mut PlayerState, delta: Vec3, ctx: &MoveCtx) -> Option<(Vec3, f32)> {
     if delta.length_squared() < 1e-10 {
         return None;
     }
@@ -570,6 +585,38 @@ fn step_up(p: &mut PlayerState, desired: Vec3, delta: Vec3, hit: (Vec3, f32), ct
     }
 }
 
+/// NPC navmesh walking (`DishonoredGameInfo.m_bNewNPCPhysWalking`, default true; the NPC pawn's
+/// physics 0x00B4E9F0 -> the locomotion component 0x00943D00 -> 0x00940D80, AI.md "Go-to
+/// completion"): while the locomotion component follows a navmesh path, the pawn is not moved by
+/// physWalking. The move `Velocity x dt` is kept when its end lies on the navmesh reached from
+/// the pawn's poly (0x0068F660); the height comes from the poly's plane, with the cylinder's
+/// bottom on it; world geometry is not swept. Otherwise the original falls back to its walking
+/// physics (0x0093FB00), here `walk_move`. Returns false for that fallback.
+/// APPROXIMATION: the poly is found by position within the step height instead of walking the
+/// poly edges from the current poly, and the original's actor box check (0x0064A6B0) is not
+/// made.
+fn nav_walk_move(p: &mut PlayerState, delta: Vec3, ctx: &MoveCtx) -> bool {
+    let Some(nav) = ctx.world.nav() else { return false };
+    if delta.truncate().length_squared() < 1e-8 {
+        // Not moving: the component leaves the pawn where it is (no physWalking either).
+        p.velocity = Vec3::ZERO;
+        return true;
+    }
+    let hh = half_height(p, ctx.cfg);
+    let step = ctx.cfg.max_step_height;
+    let foot = p.position - Vec3::Z * hh;
+    if nav.locate(foot, step, step).is_none() {
+        return false;
+    }
+    let dest = foot + Vec3::new(delta.x, delta.y, 0.0);
+    let Some(poly) = nav.locate(dest, step, step) else { return false };
+    let z = nav.poly_z(poly, dest.x, dest.y);
+    p.position = Vec3::new(dest.x, dest.y, z + hh);
+    p.velocity = Vec3::new(delta.x, delta.y, 0.0) / ctx.dt;
+    p.floor_normal = Vec3::Z;
+    true
+}
+
 /// The horizontal part of physWalking's move: the move, then stepUp on a barrier.
 fn walk_move(p: &mut PlayerState, delta: Vec3, ctx: &MoveCtx) {
     if delta.abs().max_element() < 1e-4 {
@@ -648,7 +695,16 @@ fn walking(
         let (nv, _) = calc_velocity(v, accel, accel.normalize_or_zero(), ctx.dt, cfg.run_speed, cfg.ground_friction, false, true, None, modifier, cfg.accel_rate);
         p.velocity = nv;
         p.velocity.z = 0.0;
-        let delta = p.velocity * ctx.dt;
+        // physWalking: DesiredMove = Velocity + ZoneVelocity x 25 x dt (`bVelocityAffectsWalking`),
+        // Z dropped; the move is DesiredMove x dt.
+        let mut desired = p.velocity;
+        if let Some(v) = dishonored_world::volume_at(ctx.world.physics_volumes(), p.position).filter(|v| v.velocity_affects_walking) {
+            desired += Vec3::new(v.zone_velocity.x, v.zone_velocity.y, 0.0) * 25.0 * ctx.dt;
+        }
+        let delta = desired * ctx.dt;
+        if p.nav_walk && nav_walk_move(p, delta, ctx) {
+            return;
+        }
         walk_move(p, delta, ctx);
     }
     if p.mode != MoveMode::Walking {
@@ -773,7 +829,9 @@ pub(crate) fn falling(p: &mut PlayerState, input: &PlayerInput, can_move: bool, 
             v.y = xy.y;
         }
         p.velocity = v;
-        let adjusted = v * tick;
+        // physFalling: the move is (Velocity + ZoneVelocity) x dt.
+        let zone = dishonored_world::volume_at(ctx.world.physics_volumes(), p.position).map(|z| z.zone_velocity).unwrap_or(Vec3::ZERO);
+        let adjusted = (v + zone) * tick;
         let impact_speed = -v.z;
         let mut hit_wall = false;
         if let Some((n, t)) = move_actor(p, adjusted, ctx) {
@@ -991,4 +1049,86 @@ mod tests {
         // Perpendicular walls: the crease is vertical; nothing horizontal remains.
         assert!(d.truncate().length() < 1e-4, "{d}");
     }
+}
+
+/// Slide impacts (`FUN_00a79bf0`, run by the slide tick 0x00A7B220 until the slide has hit
+/// something): a line trace of `m_fSlideDamageTestDistance` from the pawn along its velocity;
+/// the first pawn it meets (not immune, not asleep when `m_bSlideDamageIgnoresSleepers`) takes
+/// the `m_SlideDamageInfo` damage of its class (`DishonoredNPCPawn` 0, rats 0, other actors 5)
+/// with momentum `velocity x m_fSlideImpactDamageVelRatio`. NPC pawns take the momentum as a
+/// velocity change; the player pawn's damage path drops it (U-051).
+pub fn slide_impacts(state: &mut crate::state::WorldState, cfg: &MovementConfig, vitals: &dishonored_ir::gameplay::VitalsConfig, events: &mut Vec<SimEvent>) {
+    for i in 0..state.players.len() {
+        let p = state.players[i];
+        if !p.alive || !p.slide.active || p.slide.hit {
+            continue;
+        }
+        let dir = p.velocity.normalize_or_zero();
+        if dir == Vec3::ZERO {
+            continue;
+        }
+        let len = cfg.slide_damage_test_distance;
+        // Nearest pawn whose collision cylinder the segment enters.
+        let mut best: Option<(usize, f32)> = None;
+        for (j, v) in state.players.iter().enumerate() {
+            if j == i || !v.alive {
+                continue;
+            }
+            if cfg.slide_damage_ignores_sleepers && v.condition == crate::state::Condition::Unconscious {
+                continue;
+            }
+            let c = capsule(v, cfg);
+            let Some(t) = segment_cylinder(p.position, dir * len, c.center, c.radius, c.half_height) else { continue };
+            if best.is_none_or(|b| t < b.1) {
+                best = Some((j, t));
+            }
+        }
+        let Some((j, _)) = best else { continue };
+        state.players[i].slide.hit = true;
+        let amount = match state.players[j].kind {
+            PawnKind::Civilian | PawnKind::Guard => cfg.slide_damage_npc,
+            PawnKind::Rat => cfg.slide_damage_rat,
+            PawnKind::Human => cfg.slide_damage_other,
+        };
+        let v = &mut state.players[j];
+        if v.kind != PawnKind::Human {
+            v.velocity += p.velocity * cfg.slide_impact_damage_vel_ratio;
+        }
+        if amount > 0.0 {
+            crate::vitals::apply_damage(v, amount, Some(p.id), crate::events::DamageCause::Slide, events, vitals);
+        }
+    }
+}
+
+/// Entry parameter (0..1 along `d`) of the segment `o + t d` into a vertical cylinder.
+fn segment_cylinder(o: Vec3, d: Vec3, c: Vec3, r: f32, hh: f32) -> Option<f32> {
+    let (o2, d2) = (Vec2::new(o.x - c.x, o.y - c.y), Vec2::new(d.x, d.y));
+    let a = d2.length_squared();
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    if a < 1e-8 {
+        if o2.length_squared() > r * r {
+            return None;
+        }
+    } else {
+        let b = o2.dot(d2);
+        let k = b * b - a * (o2.length_squared() - r * r);
+        if k < 0.0 {
+            return None;
+        }
+        let s = k.sqrt();
+        t0 = t0.max((-b - s) / a);
+        t1 = t1.min((-b + s) / a);
+    }
+    // Height slab.
+    let (oz, dz) = (o.z - c.z, d.z);
+    if dz.abs() < 1e-8 {
+        if oz.abs() > hh {
+            return None;
+        }
+    } else {
+        let (za, zb) = ((-hh - oz) / dz, (hh - oz) / dz);
+        t0 = t0.max(za.min(zb));
+        t1 = t1.min(za.max(zb));
+    }
+    (t0 <= t1).then_some(t0)
 }

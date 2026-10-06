@@ -523,3 +523,36 @@ fn debug_trace() {
     }
     println!("{:?}", r.events);
 }
+
+/// Sprint, then slide (crouch) toward pawn 2 standing `ahead` uu in front of the slide start.
+fn slide_into(npc: Option<dishonored_sim::state::PawnKind>) -> (Run, f32, f32) {
+    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.0), 0.)]);
+    r.settle();
+    r.steps(90, &[(1, input(0., 127, buttons::SPRINT))]);
+    let at = r.p(1).position;
+    match npc {
+        Some(k) => dishonored_sim::spawn_npc(&mut r.state, 2, k, 0, at + Vec3::new(250., 0., 0.), 180.0, &r.cfg.clone()),
+        None => spawn_player(&mut r.state, 2, at + Vec3::new(250., 0., 0.), 180.0, &r.cfg.clone()),
+    }
+    let h0 = r.p(2).vitals.health;
+    r.step(&[(1, input(0., 127, buttons::SPRINT | buttons::CROUCH)), (2, input(180., 0, 0))]);
+    assert!(r.p(1).slide.active);
+    r.steps(80, &[(1, input(0., 127, buttons::SPRINT)), (2, input(180., 0, 0))]);
+    let h1 = r.p(2).vitals.health;
+    (r, h0, h1)
+}
+
+#[test]
+fn slide_impact_hurts_another_player_once() {
+    let (r, h0, h1) = slide_into(None);
+    let hits = r.events.iter().filter(|e| matches!(e, SimEvent::Damage { victim: 2, cause: dishonored_sim::events::DamageCause::Slide, .. })).count();
+    assert_eq!(hits, 1, "one impact per slide");
+    assert_eq!(h0 - h1, 5.0, "m_SlideDamageInfo: other actors take 5");
+}
+
+#[test]
+fn slide_impact_pushes_npcs_without_damage() {
+    let (r, h0, h1) = slide_into(Some(dishonored_sim::state::PawnKind::Guard));
+    assert_eq!(h0, h1, "DishonoredNPCPawn takes 0");
+    assert!(r.p(1).slide.hit, "the slide met the guard");
+}

@@ -169,7 +169,7 @@ fn routes(ctx: &Ctx, rep: &mut Report, setup: &dishonored_multiplayer::game::Gam
     let only = ctx.opt("--route");
     let want = |r: &str| only.as_deref().is_none_or(|o| o == r);
     type Route = fn(&mut Play, &dishonored_kismet::KismetDb) -> Result<Vec<(String, bool, String)>>;
-    let list: [(&str, &str, Route); 3] = [("brisby", "Original Kismet: nonlethal route (Lord Brisby)", nonlethal), ("white", "Original Kismet: Miss White's drink", miss_white), ("duel", "Original Kismet: Lord Shaw's duel", duel)];
+    let list: [(&str, &str, Route); 4] = [("brisby", "Original Kismet: nonlethal route (Lord Brisby)", nonlethal), ("white", "Original Kismet: Miss White's drink", miss_white), ("duel", "Original Kismet: Lord Shaw's duel", duel), ("barks", "AI barks", barks)];
     for (id, section, f) in list {
         if !want(id) {
             continue;
@@ -372,6 +372,12 @@ fn play(p: &mut Play, rep: &mut Report, db: &dishonored_kismet::KismetDb) -> Res
         started && ended && locked && p1.truncate().distance(p0.truncate()) > 3000.0 && p1.truncate().distance(shore.truncate()) < 800.0 && blurbs >= 3 && ((t1 - t0) - 29.8).abs() < 0.5,
         format!("played {:.2} s from {:.1} s; agent ({:.0}, {:.0}) -> 10 s ({:.0}, {:.0}) -> ({:.0}, {:.0}), {:.0} uu from the Shore point; held {locked}; {blurbs} blurbs", t1 - t0, t0, p0.x, p0.y, p10.x, p10.y, p1.x, p1.y, p1.truncate().distance(shore.truncate())),
     );
+    // Released at the detach key (29.64 s) where `Player_Attach` holds them, mid-boat beside
+    // the jetty: the boat (`InterpActor_1`, moved along by its `Boat_Attach` attachment) is
+    // mover collision, so the player stands in it instead of dropping into the water.
+    p.idle(2.0);
+    let me = *p.m().world.player(AGENT).unwrap();
+    rep.check(S, "after the intro the player stands in the boat where the matinee released them (the boat collides where it moved)", me.mode == dishonored_sim::state::MoveMode::Walking && (me.position.z - p1.z).abs() < 20.0 && me.position.truncate().distance(p1.truncate()) < 100.0, format!("released at ({:.0}, {:.0}, {:.0}); 2 s later ({:.0}, {:.0}, {:.0}) {:?}", p1.x, p1.y, p1.z, me.position.x, me.position.y, me.position.z, me.mode));
     let t12 = format!("{BA}.DishonoredTask_Custom_12");
     let ok = p.until(90.0, |m| m.state.task(&t12) == Some(TaskState::Active));
     let objs: Vec<String> = p.m().view.mission.as_ref().map(|v| v.objectives.iter().filter(|o| !o.hidden).map(|o| format!("\"{}\": {}", o.description, o.tasks.iter().filter(|t| !t.hidden && t.state == TaskState::Active).map(|t| format!("\"{}\"", t.description)).collect::<Vec<_>>().join(", "))).collect()).unwrap_or_default();
@@ -913,8 +919,18 @@ fn duel(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<Stage>> {
     }
     let counted: Vec<&str> = ["Go_to_Mark", "Duel_Explained", "Three", "Two", "One", "Turn_and_Fire"].into_iter().filter(|c| p.conv_started(c)).collect();
     let recent: Vec<String> = p.history().into_iter().rev().take(12).collect();
+    // Lord Shaw's walk to his mark (AIGoToActor_0 -> `enableshawtrig` -> "Shaw On Mark"), which
+    // the duel loop waits for (U-221).
+    let shaw_walk = {
+        let at = p.m().world.player(shaw).map(|x| x.position);
+        let b = p.m().crowd.brains.iter().find(|b| b.id == shaw).map(|b| format!("{:?} goal {:?}", b.state, b.goal));
+        // Who the duel's pawn variables hold and what each spawner spawned (go-to targets).
+        let vars: Vec<String> = ["Lord Shaw", "Shaw_Elite", "Shaw_Elite_Pistols", "Shaw On Mark"].iter().map(|n| format!("{n}={:?}", var(p.m(), "L_Boyle_Ext_Script", n))).collect();
+        let spawned: Vec<String> = ["DishonoredSpawner_45", "DishonoredSpawner_46", "DishonoredSpawner_11"].iter().map(|s| format!("{s}->{:?}", spawned_pawn(p, db, &format!("L_Boyle_Ext_Script:{s}")))).collect();
+        format!("Player On Mark {:?}; Shaw {shaw} at {at:?} brain {b:?}; vars {vars:?}; spawners {spawned:?}", var(p.m(), "L_Boyle_Ext_Script", "Player On Mark"))
+    };
     stage(&mut rows, "the pistol taken from the box (DisTrigger_2 Used): the player holds the elite pistol", picked && p.hist_has("player_took_the_pistol"), format!("pistol used {picked}"));
-    stage(&mut rows, "(open, U-221) on the mark: the countdown runs (Three, Two, One, Turn_and_Fire)", fire, format!("pistol used {picked}; conversations {counted:?}; {} at {:.1} s", recent.join(" | "), p.time()));
+    stage(&mut rows, "(open, U-221) on the mark: the countdown runs (Three, Two, One, Turn_and_Fire)", fire, format!("pistol used {picked}; conversations {counted:?}; {shaw_walk}; {} at {:.1} s", recent.join(" | "), p.time()));
     if !fire {
         return Ok(rows);
     }
@@ -1026,4 +1042,56 @@ fn dump(p: &Play) {
     }
     println!("presentation {:?}", k.st.presentation);
     let _ = (Obj::None, 0 as OpId, buttons::USE, Vec3::ZERO, kismet_host::PRESENTATION);
+}
+
+/// AI barks: an elite guard who notices the agent barks from his generic voice tree
+/// (`DisTweaks_NPCPawn.m_GenericDialogData`, `Dlg_EliteGuard.VoiceData.Voice_EliteGuard_A`).
+fn barks(p: &mut Play, _db: &dishonored_kismet::KismetDb) -> Result<Vec<Stage>> {
+    let mut rows = Vec::new();
+    p.idle(3.0);
+    let map = p.m().current_map.clone();
+    let guard = p.m().setup.original.iter().filter(|o| o.map.eq_ignore_ascii_case(&map) && o.tweak.contains("EliteGuard")).map(|o| o.spawn.id).find(|id| p.m().world.player(*id).is_some_and(|x| x.alive));
+    let Some(g) = guard else {
+        stage(&mut rows, "an elite guard is spawned on the map", false, "none".into());
+        return Ok(rows);
+    };
+    // The guards are neutral to a masked guest, so the AI has no reason to bark here: ask for
+    // each hook of his voice's trees the way the AI does (`MissionMatch::request_bark`).
+    let voice = p.m().setup.original.iter().find(|o| o.spawn.id == g).and_then(|o| p.m().setup.ai_levels.get(&o.map.to_ascii_lowercase()).and_then(|l| l.generic_trees.get(&o.tweak)).and_then(|v| v.first().cloned()));
+    let hooks: Vec<String> = {
+        let cdb = p.m().setup.conversations.as_ref().unwrap();
+        voice.as_ref().and_then(|v| cdb.voice_trees.get(v)).map(|ts| ts.iter().flat_map(|t| cdb.trees[*t as usize].hooks.iter()).filter_map(|h| match &cdb.node(*h).kind {
+            dishonored_conversation::model::NodeKind::Hook { hook, .. } => Some(hook.clone()),
+            _ => None,
+        }).collect()).unwrap_or_default()
+    };
+    let mut per_hook = Vec::new();
+    for h in &hooks {
+        let before = (p.m().state.ai_hooks_fired, p.m().state.ai_hook_rejections.clone());
+        p.mm().request_bark(g, h, Some(AGENT));
+        p.idle(2.0);
+        let r = if p.m().state.ai_hooks_fired > before.0 { "started".to_string() } else { p.m().state.ai_hook_rejections.iter().find(|(k, v)| before.1.get(*k) != Some(*v)).map(|(k, _)| k.clone()).unwrap_or_default() };
+        per_hook.push(format!("{h}={r}"));
+        if !generic_barks(p).is_empty() {
+            break;
+        }
+        if !generic_barks(p).is_empty() {
+            break;
+        }
+    }
+    let generic = generic_barks(p);
+    stage(&mut rows, "a guard's bark request is answered from the generic trees of his voice", p.m().state.ai_hooks_fired > 0 && !generic.is_empty(), format!("{} barks asked for, {} started; generic trees {generic:?}; voice {voice:?} ({} hooks) {per_hook:?}; rejected {:?} at {:.1} s", p.m().state.ai_hooks_requested, p.m().state.ai_hooks_fired, hooks.len(), p.m().state.ai_hook_rejections, p.time()));
+    Ok(rows)
+}
+
+/// Lines spoken so far from generic (per-voice, `Dlg_*`) trees: (tree path, text).
+fn generic_barks(p: &Play) -> std::collections::BTreeSet<String> {
+    let Some(cdb) = p.m().setup.conversations.as_ref() else { return Default::default() };
+    p.m().state.conv_log.iter().filter_map(|e| match e {
+        dishonored_conversation::runner::ConvEvent::Line { node, text, .. } => {
+            let t = &cdb.trees[cdb.nodes[*node as usize].tree as usize];
+            t.path.starts_with("Dlg_").then(|| format!("{}: {}", t.path.rsplit('.').next().unwrap_or(""), text.trim()))
+        }
+        _ => None,
+    }).collect()
 }

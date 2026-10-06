@@ -383,6 +383,12 @@ pub struct MissionMatch {
     /// [save] Pending autosaves and the saves taken this step.
     #[serde(default)]
     pub autosave: save::AutosaveState,
+    /// Mover collision placed where the movers are: (actor, delta) and, in the same order, the
+    /// placed collision (rebuilt when a mover moves).
+    #[serde(skip)]
+    mover_keys: Vec<(String, glam::Mat4)>,
+    #[serde(skip)]
+    mover_worlds: Vec<dishonored_world::CollisionWorld>,
 }
 
 impl MissionMatch {
@@ -427,6 +433,8 @@ impl MissionMatch {
             spawn_log: Vec::new(),
             pending_stealables: Vec::new(),
             autosave: Default::default(),
+            mover_keys: Vec::new(),
+            mover_worlds: Vec::new(),
         };
         // [kismet]
         m.kismet = m.setup.kismet.as_ref().map(|k| kismet_host::KismetRun::new(k, &m.setup));
@@ -832,6 +840,11 @@ impl MissionMatch {
                 }
             })
             .collect();
+        // Movers (`InterpActor`s) collide where the Kismet has moved them.
+        self.place_movers(world);
+        let placed = std::mem::take(&mut self.mover_worlds);
+        let layered = dishonored_world::Layered { base: world, layers: &placed };
+        let world: &dyn WorldQuery = if placed.is_empty() { world } else { &layered };
         // [kismet] Doors the original Kismet locked or unlocked change the AI's paths.
         let door_nav = self.kismet.as_mut().and_then(|k| k.door_nav(&self.current_map, world.nav()));
         let overlay = door_nav.as_deref().map(|nav| kismet_host::NavOverlay { inner: world, nav });
@@ -839,7 +852,16 @@ impl MissionMatch {
             Some(o) => o,
             None => world,
         };
-        all.extend(self.crowd.think(&self.world, &self.last_events, ai_world, dt));
+        let thought = self.crowd.think(&self.world, &self.last_events, ai_world, dt);
+        // NPCs walking a navmesh path move on the navmesh (`m_bNewNPCPhysWalking`,
+        // `movement::nav_walk_move`; research/dishonored/AI.md "Go-to completion").
+        for b in &self.crowd.brains {
+            let moving = thought.iter().any(|(id, i)| *id == b.id && (i.forward != 0 || i.right != 0));
+            if let Some(p) = self.world.player_mut(b.id) {
+                p.nav_walk = moving && !b.follow.path.is_empty();
+            }
+        }
+        all.extend(thought);
         self.crowd.write_awareness(&mut self.world);
         let out = step_world(&mut self.world, &all, world, cfg);
         let mut events = Vec::new();
@@ -987,14 +1009,7 @@ impl MissionMatch {
                         }
                     }
                 }
-                dishonored_ai::AiEvent::Bark { npc, hook, initiator } => {
-                    // Mission NPCs bark as their speaker actor, original NPCs as their spawner.
-                    let named = self.npc_by_id.get(npc).and_then(|n| self.setup.def.npcs.iter().find(|d| &d.id == n).map(|d| (n.clone(), d.speaker_actor().unwrap_or(n).to_string())));
-                    let named = named.or_else(|| self.setup.original.iter().find(|o| o.spawn.id == *npc).map(|o| (o.name.clone(), o.name.clone())));
-                    if let Some((name, actor)) = named {
-                        self.state.ai_hooks.push((name, actor, hook.clone(), *initiator));
-                    }
-                }
+                dishonored_ai::AiEvent::Bark { npc, hook, initiator } => self.request_bark(*npc, hook, *initiator),
                 dishonored_ai::AiEvent::AlarmEnded { .. } | dishonored_ai::AiEvent::RatEat { .. } => {}
             }
         }
@@ -1063,6 +1078,13 @@ impl MissionMatch {
         for d in self.setup.doors.iter().filter(|d| d.map.eq_ignore_ascii_case(&self.current_map)) {
             mv.usables.push(((d.position + Vec3::Z * 60.0).to_array(), d.prompt.clone()));
         }
+        // Climbable chains: their interactable text (`m_InteractText` "`GBA_Use` Grab") at every
+        // bone below the anchor; the sim grabs on Use (`dishonored_sim::climb`).
+        for c in world.climbables() {
+            for b in c.bones.iter().filter(|b| b.z <= c.anchor.z + 0.5) {
+                mv.usables.push((b.to_array(), "Grab".to_string()));
+            }
+        }
         mv.choices = self.choosing.iter().map(|(p, d)| (*p, self.setup.doors[*d].choices.clone())).collect();
         // A conversation choice joins the same list (one input path for both).
         if let Some(c) = &mv.choice {
@@ -1098,7 +1120,49 @@ impl MissionMatch {
         if let Some(k) = &mut self.kismet {
             self.last_events.append(&mut k.st.noises);
         }
+        self.mover_worlds = placed;
         out
+    }
+
+    /// [ai] A dialog hook an NPC fires (a bark, `FUN_00af00f0`): queued for the conversation
+    /// runner with the NPC's speaker and generic voice. Mission NPCs bark as their speaker
+    /// actor, original NPCs as their spawner; an original NPC's voice is one of its pawn tweak's
+    /// `m_GenericDialogData` (the original picks at random, 0x00C8D2C0; the port takes a
+    /// per-pawn index so a pawn keeps its voice).
+    pub fn request_bark(&mut self, npc: PlayerId, hook: &str, initiator: Option<PlayerId>) {
+        let named = self.npc_by_id.get(&npc).and_then(|n| self.setup.def.npcs.iter().find(|d| &d.id == n).map(|d| (n.clone(), d.speaker_actor().unwrap_or(n).to_string())));
+        let named = named.or_else(|| self.setup.original.iter().find(|o| o.spawn.id == npc).map(|o| (o.name.clone(), o.name.clone())));
+        let voice = self.setup.original.iter().find(|o| o.spawn.id == npc).and_then(|o| {
+            let list = self.setup.ai_levels.get(&o.map.to_ascii_lowercase())?.generic_trees.get(&o.tweak)?;
+            (!list.is_empty()).then(|| list[npc as usize % list.len()].clone())
+        });
+        if let Some((name, actor)) = named {
+            self.state.ai_hooks.push((name, actor, hook.to_string(), initiator, voice));
+        }
+    }
+
+    /// Place the map's movers where their actors are now (identity for movers the Kismet has
+    /// not moved), rebuilding only the ones that moved since the last step.
+    fn place_movers(&mut self, world: &dyn WorldQuery) {
+        let movers = world.movers();
+        if self.mover_keys.len() != movers.len() || self.mover_keys.iter().zip(movers).any(|(k, m)| k.0 != m.actor) {
+            self.mover_keys.clear();
+            self.mover_worlds.clear();
+        }
+        for (i, m) in movers.iter().enumerate() {
+            let delta = self.kismet.as_ref().and_then(|k| k.mover_delta(&m.actor, m.actor_to_world)).unwrap_or(glam::Mat4::IDENTITY);
+            match self.mover_keys.get(i) {
+                Some(k) if k.1.abs_diff_eq(delta, 1e-4) => {}
+                Some(_) => {
+                    self.mover_keys[i].1 = delta;
+                    self.mover_worlds[i] = m.placed(delta);
+                }
+                None => {
+                    self.mover_keys.push((m.actor.clone(), delta));
+                    self.mover_worlds.push(m.placed(delta));
+                }
+            }
+        }
     }
 
     /// What a player would interact with right now (nearest usable marker, talkable NPC or

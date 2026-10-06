@@ -24,6 +24,118 @@ pub fn reset_loadout(p: &mut PlayerState, t: &CombatTuning) {
     p.left.blink_target = None;
 }
 
+/// Reference view the dispersion offset is projected through: the default horizontal field of
+/// view (`DefaultCamera.ini` m_fDefaultFOV 75) on a 16:9 screen. The original deprojects
+/// through the player's actual view (0x00AA2B10), so a wider FOV or a narrower screen widens
+/// the cone; the sim fixes the reference so every peer resolves the same shot.
+pub const DISPERSION_REF_HFOV_DEG: f32 = 75.0;
+pub const DISPERSION_REF_ASPECT: f32 = 16.0 / 9.0;
+
+/// The held ranged weapon's dispersion attributes with its workshop upgrades applied
+/// (`Attribute_DispersionMax` / `Min` / `InterpolationSpeed`, globals 0x0145DEA8 / 0x0145DEB0 /
+/// 0x0145DEA0) and its `m_bMaxDispersionOn*` flags.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Dispersion {
+    pub max: f32,
+    pub min: f32,
+    pub speed: f32,
+    pub max_on: u8,
+}
+
+impl Dispersion {
+    /// None when the left hand holds no pistol or crossbow.
+    pub fn of(p: &PlayerState, cfg: &GameplayConfig, t: &CombatTuning) -> Option<Self> {
+        let (d, host): (_, fn(&str) -> bool) = if p.left.item == LeftHand::Pistol {
+            (&t.pistol_dispersion, |n| n.starts_with("Pistol"))
+        } else if p.left.item.is_crossbow() {
+            (&t.crossbow_dispersion, |n| n.starts_with("Crossbow"))
+        } else {
+            return None;
+        };
+        let a = |name: &str, base: f32| crate::powers::attribute_for(p, cfg, name, base, host);
+        Some(Dispersion {
+            max: a("Attribute_DispersionMax", d.max),
+            min: a("Attribute_DispersionMin", d.min),
+            speed: a("Attribute_DispersionInterpolationSpeed", d.speed),
+            max_on: d.max_on,
+        })
+    }
+}
+
+/// `FInterpConstantTo` (0x0041EBC0): move toward `target` by at most `speed * dt`.
+fn interp_constant_to(current: f32, target: f32, dt: f32, speed: f32) -> f32 {
+    let delta = target - current;
+    if delta * delta < 1e-8 {
+        return target;
+    }
+    let step = speed * dt;
+    current + delta.clamp(-step, step)
+}
+
+/// Per-tick dispersion of the held ranged weapon (U-247):
+/// - the `m_bMaxDispersionOn*` states hold it at the maximum: sprinting, in the air (the falling
+///   state's tick 0x00A79150 tests the Jump bit), blocking, a sword attack;
+/// - otherwise, while a round is loaded, it falls toward the minimum at the interpolation speed
+///   per second (weapon tick, slot 94 0x00C1CB10; nothing happens while empty or reloading).
+pub fn update_dispersion(p: &mut PlayerState, cfg: &GameplayConfig, t: &CombatTuning, dt: f32) {
+    use crate::state::SwordPhase;
+    use crate::tuning::DispersionTuning as D;
+    let Some(d) = Dispersion::of(p, cfg, t) else { return };
+    let held_max = (d.max_on & D::SPRINT != 0 && p.sprinting)
+        || (d.max_on & D::JUMP != 0 && p.mode == MoveMode::Falling)
+        || (d.max_on & D::BLOCK != 0 && p.sword.phase == SwordPhase::Blocking)
+        || (d.max_on & D::MELEE != 0 && matches!(p.sword.phase, SwordPhase::Startup | SwordPhase::Active | SwordPhase::Recovery));
+    if held_max {
+        p.left.dispersion = d.max;
+        return;
+    }
+    let loaded = match p.left.item {
+        LeftHand::Pistol => p.left.pistol_loaded > 0,
+        LeftHand::Crossbow => p.left.bolts_loaded > 0,
+        // Sleep darts and incendiary bolts load from the inventory: a round is in while the
+        // weapon is not reloading.
+        _ => p.left.phase != LeftPhase::Reloading,
+    };
+    if loaded {
+        p.left.dispersion = interp_constant_to(p.left.dispersion, d.min, dt, d.speed);
+    }
+}
+
+/// The random screen offset of one shot (0x00BFFBA0): radius `rand() * d / 32767` (uniform in
+/// the radius, so shots gather toward the centre), angle `rand() * 2 pi / 32767 - pi`, two
+/// draws of the pawn's random stream in that order. In pixels of a 720-line screen.
+pub fn dispersion_offset(p: &mut PlayerState, d: f32) -> (f32, f32) {
+    let r = p.roll() * d;
+    let a = p.roll() * std::f32::consts::TAU - std::f32::consts::PI;
+    (a.cos() * r, a.sin() * r)
+}
+
+/// The view direction through screen point centre + `off` (0x00AA2B10: the offset is scaled by
+/// `height / 720` and the point deprojected), for the reference view.
+pub fn offset_direction(yaw: f32, pitch: f32, off: (f32, f32)) -> Vec3 {
+    let f = view_vector(yaw, pitch);
+    let (sy, cy) = yaw.to_radians().sin_cos();
+    let right = Vec3::new(-sy, cy, 0.0);
+    let mut up = right.cross(f);
+    if up.z < 0.0 {
+        up = -up;
+    }
+    // Tangent per 720-line pixel: 2 tan(hfov / 2) / (720 x aspect).
+    let k = 2.0 * (DISPERSION_REF_HFOV_DEG.to_radians() * 0.5).tan() / (720.0 * DISPERSION_REF_ASPECT);
+    // Screen y grows downward.
+    (f + right * (off.0 * k) - up * (off.1 * k)).normalize()
+}
+
+/// Direction of a pistol or crossbow shot: the view through the dispersion offset; then the
+/// dispersion jumps to the maximum (the projectile context fires, then calls the weapon's
+/// slot 109 0x00C1CB80, 0x00C03A60).
+fn fire_direction(p: &mut PlayerState, cfg: &GameplayConfig, t: &CombatTuning) -> Vec3 {
+    let Some(d) = Dispersion::of(p, cfg, t) else { return view_vector(p.yaw, p.pitch) };
+    let off = dispersion_offset(p, p.left.dispersion.max(0.0));
+    p.left.dispersion = d.max;
+    offset_direction(p.yaw, p.pitch, off)
+}
+
 /// World-level effects a left-hand item asks for this tick (resolved by `step_world`, which
 /// can see the other pawns).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -72,7 +184,12 @@ pub fn update(
         p.left.blink_target = None;
         p.left.phase = if input.left_hand.is_crossbow() || input.left_hand == LeftHand::Pistol { LeftPhase::Equipping } else { LeftPhase::Idle };
         p.left.timer = 0.0;
+        // Equipping a ranged weapon starts at the widest dispersion (slot 76, 0x00C2C1F0).
+        if let Some(d) = Dispersion::of(p, cfg, t) {
+            p.left.dispersion = d.max;
+        }
     }
+    update_dispersion(p, cfg, t, dt);
     let prev_timer = p.left.timer;
     p.left.timer += dt;
     let crossed = |at: f32| prev_timer < at && p.left.timer >= at;
@@ -188,7 +305,8 @@ pub fn update(
                 LeftPhase::Idle if !busy && pressed && crate::inventory::ammo(p, ammo) > 0 => {
                     crate::inventory::remove_ammo(p, ammo, 1);
                     let eye = eye_position(p, ctx.cfg);
-                    spawn.push((kind, eye, view_vector(p.yaw, p.pitch) * speed));
+                    let dir = fire_direction(p, cfg, t);
+                    spawn.push((kind, eye, dir * speed));
                     p.left.phase = LeftPhase::Recovering;
                     p.left.timer = 0.0;
                     events.push(SimEvent::Sound { position: eye, radius: 500.0, category: SoundCategory::Crossbow, source: p.id });
@@ -262,7 +380,7 @@ pub fn update(
                     if pressed && loaded > 0 {
                         if bolt { p.left.bolts_loaded -= 1 } else { p.left.pistol_loaded -= 1 }
                         let eye = eye_position(p, ctx.cfg);
-                        let dir = view_vector(p.yaw, p.pitch);
+                        let dir = fire_direction(p, cfg, t);
                         let speed = if bolt { t.bolt_speed } else { t.bullet_speed };
                         spawn.push((if bolt { ProjectileKind::Bolt } else { ProjectileKind::Bullet }, eye, dir * speed));
                         p.left.phase = LeftPhase::Recovering;

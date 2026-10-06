@@ -54,6 +54,7 @@ fn make_db(convs: Vec<Conversation>, nodes: Vec<Node>, hooks: Vec<NodeId>) -> Ar
         trees: vec![Tree { package: "P".into(), path: "T".into(), oneshot: Some(0), hooks, conversations: (0..n).collect() }],
         conversations: convs,
         nodes,
+        voice_trees: Default::default(),
     })
 }
 

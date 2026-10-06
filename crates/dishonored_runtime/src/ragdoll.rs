@@ -2,7 +2,9 @@
 //! §8). The original hands a dying pawn to PhysX at `DishonoredNotify_Ragdoll`; here each
 //! physics body is a point mass at its bone, linked to its parent body by its
 //! `RB_ConstraintSetup` (rest length from the pose at the hand-over, swing cone from
-//! `Swing1/Swing2LimitAngle`), falling under gravity onto the floor under the corpse.
+//! `Swing1/Swing2LimitAngle`), falling under gravity onto the level floor around the corpse
+//! (a height grid sampled from the collision at the hand-over: stairs, slopes and ledges; walls
+//! are not collided, U-282).
 //!
 //! It runs at a fixed step from the pose sampled exactly at the notify time, so a corpse settles
 //! the same way on every run. The simulation's corpse position stays authoritative: the ragdoll
@@ -46,10 +48,46 @@ pub struct Ragdoll {
     top: usize,
     /// Start globals of part 0 (pawn space).
     g0: Vec<Mat4>,
-    floor: f32,
+    floor: FloorGrid,
     gravity: f32,
     elapsed: f32,
     acc: f32,
+}
+
+/// Floor heights (pawn space) on a square grid around the pawn's origin, sampled once.
+struct FloorGrid {
+    h: Vec<f32>,
+}
+
+const GRID_N: usize = 17;
+const GRID_CELL: f32 = 12.0;
+
+impl FloorGrid {
+    fn sample(floor_at: &dyn Fn(f32, f32) -> f32) -> FloorGrid {
+        let half = (GRID_N - 1) as f32 * 0.5 * GRID_CELL;
+        let mut h = Vec::with_capacity(GRID_N * GRID_N);
+        for j in 0..GRID_N {
+            for i in 0..GRID_N {
+                h.push(floor_at(i as f32 * GRID_CELL - half, j as f32 * GRID_CELL - half));
+            }
+        }
+        FloorGrid { h }
+    }
+
+    /// Bilinear height at (x, y), clamped to the grid's edge.
+    fn at(&self, x: f32, y: f32) -> f32 {
+        let half = (GRID_N - 1) as f32 * 0.5 * GRID_CELL;
+        let fx = ((x + half) / GRID_CELL).clamp(0.0, (GRID_N - 1) as f32);
+        let fy = ((y + half) / GRID_CELL).clamp(0.0, (GRID_N - 1) as f32);
+        let (i, j) = ((fx as usize).min(GRID_N - 2), (fy as usize).min(GRID_N - 2));
+        let (tx, ty) = (fx - i as f32, fy - j as f32);
+        let g = |a: usize, b: usize| self.h[b * GRID_N + a];
+        // a + (b - a) t: exact where the corners agree (a flat floor stays exactly flat).
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        let top = lerp(g(i, j), g(i + 1, j), tx);
+        let bot = lerp(g(i, j + 1), g(i + 1, j + 1), tx);
+        lerp(top, bot, ty)
+    }
 }
 
 fn arc(a: Vec3, b: Vec3) -> Quat {
@@ -77,8 +115,8 @@ fn frame(a1: Vec3, a2: Vec3, b1: Vec3, b2: Vec3) -> Quat {
 
 impl Ragdoll {
     /// Build from part 0's bones and the start / previous-step globals (pawn space). `floor` is
-    /// the floor height in pawn space, `gravity` uu/s^2 (negative, down).
-    pub fn new(asset: &PhysicsAssetData, part: &[BoneAsset], g0: &[Mat4], g_prev: &[Mat4], floor: f32, gravity: f32) -> Option<Ragdoll> {
+    /// the floor height under a pawn-space point, `gravity` uu/s^2 (negative, down).
+    pub fn new(asset: &PhysicsAssetData, part: &[BoneAsset], g0: &[Mat4], g_prev: &[Mat4], floor_at: &dyn Fn(f32, f32) -> f32, gravity: f32) -> Option<Ragdoll> {
         let find = |n: &str| part.iter().position(|b| b.name.eq_ignore_ascii_case(n));
         let mut bodies: Vec<Body> = Vec::new();
         for b in &asset.bodies {
@@ -144,7 +182,7 @@ impl Ragdoll {
                 k = p as usize;
             })
             .collect();
-        Some(Ragdoll { bodies, owner, top, g0: g0.to_vec(), floor, gravity, elapsed: 0.0, acc: 0.0 })
+        Some(Ragdoll { bodies, owner, top, g0: g0.to_vec(), floor: FloorGrid::sample(floor_at), gravity, elapsed: 0.0, acc: 0.0 })
     }
 
     /// Parents before children.
@@ -212,7 +250,7 @@ impl Ragdoll {
             }
             // Floor.
             for b in &mut self.bodies {
-                let min = self.floor + b.radius;
+                let min = self.floor.at(b.pos.x, b.pos.y) + b.radius;
                 if b.pos.z < min {
                     b.pos.z = min;
                     if b.prev.z < min {
@@ -320,7 +358,7 @@ mod tests {
         let part = &m.parts[0];
         let g0: Vec<Mat4> = dishonored_assets::characters::bind_globals(&part.bones).iter().map(|g| part.mesh_to_pawn * *g).collect();
         let a = dishonored_assets::npc_anim::load_physics_asset(&c, &("L_Boyle_Ext_Script".into(), "Npc_EliteGuard.Physics.Skm_EliteGuard_Physics".into())).unwrap();
-        let mut r = Ragdoll::new(&a, &part.bones, &g0, &g0, -hh, -980.0).unwrap();
+        let mut r = Ragdoll::new(&a, &part.bones, &g0, &g0, &|_, _| -hh, -980.0).unwrap();
         r.settle();
         for b in &r.bodies {
             assert!(b.pos.is_finite(), "{}", part.bones[b.bone].name);
@@ -340,6 +378,35 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn floor_grid_follows_a_step() {
+        // A 30 uu step at x = 0: bilinear between samples, clamped beyond the grid.
+        let g = FloorGrid::sample(&|x, _| if x < 0.0 { -97.0 } else { -67.0 });
+        assert_eq!(g.at(-50.0, 0.0), -97.0);
+        assert_eq!(g.at(50.0, 10.0), -67.0);
+        assert_eq!(g.at(500.0, -500.0), -67.0);
+        let mid = g.at(-6.0, 0.0);
+        assert!(mid > -97.0 && mid < -67.0, "{mid}");
+    }
+
+    /// The elite guard dropped over a 30 uu step lies on both levels (skipped without the install).
+    #[test]
+    fn elite_guard_settles_on_a_step() {
+        let Ok(c) = dishonored_assets::Content::locate() else { return };
+        let hh = 97.0;
+        let m = dishonored_assets::characters::load_character(&c, "elite_guard", hh, 16).unwrap();
+        let part = &m.parts[0];
+        let g0: Vec<Mat4> = dishonored_assets::characters::bind_globals(&part.bones).iter().map(|g| part.mesh_to_pawn * *g).collect();
+        let a = dishonored_assets::npc_anim::load_physics_asset(&c, &("L_Boyle_Ext_Script".into(), "Npc_EliteGuard.Physics.Skm_EliteGuard_Physics".into())).unwrap();
+        let floor = |x: f32, _y: f32| if x < 0.0 { -hh } else { -hh + 30.0 };
+        let mut r = Ragdoll::new(&a, &part.bones, &g0, &g0, &floor, -980.0).unwrap();
+        r.settle();
+        for b in &r.bodies {
+            let f = r.floor.at(b.pos.x, b.pos.y);
+            assert!(b.pos.z >= f + b.radius - 1.0, "{} at {} under the floor {f}", part.bones[b.bone].name, b.pos);
+        }
+    }
     #[test]
     fn frame_matches_two_axes() {
         let q = frame(Vec3::X, Vec3::Y, Vec3::Z, -Vec3::X);

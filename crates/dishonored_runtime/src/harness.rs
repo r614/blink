@@ -343,6 +343,7 @@ pub fn harness_frame(
     session: Res<Session>,
     settings: Option<Res<crate::settings::GameSettings>>,
     mut pause: Option<ResMut<crate::pause_menu::PauseMenu>>,
+    fx: Option<Res<crate::effects::Effects>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     shots.frames_since_last_shot += 1;
@@ -393,6 +394,11 @@ pub fn harness_frame(
                     let path = v.get("path").and_then(|p| p.as_str()).unwrap_or("shot.png");
                     shots.pending.push(PathBuf::from(path));
                     "{\"ok\":true,\"queued\":true}".into()
+                }
+                "effects" => {
+                    // Gameplay effects asked for lately (path, spawned) and the live particle count.
+                    let recent: Vec<serde_json::Value> = fx.as_ref().map(|f| f.recent.iter().map(|(p, ok)| serde_json::json!({"path": p, "spawned": ok})).collect()).unwrap_or_default();
+                    serde_json::json!({"recent": recent, "spawned_oneshots": fx.as_ref().map(|f| f.spawned_oneshots), "live_particles": fx.as_ref().map(|f| f.live_particles)}).to_string()
                 }
                 "pause" => {
                     if let Some(p) = pause.as_mut() {

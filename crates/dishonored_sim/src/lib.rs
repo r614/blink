@@ -8,6 +8,7 @@
 
 pub mod adrenaline;
 pub mod blink;
+pub mod climb;
 pub mod combat;
 pub mod events;
 pub mod gadgets;
@@ -22,6 +23,7 @@ pub mod swim;
 pub mod takedown;
 pub mod tuning;
 pub mod vitals;
+pub mod volumes;
 
 use dishonored_ir::gameplay::GameplayConfig;
 use dishonored_world::WorldQuery;
@@ -186,14 +188,22 @@ pub fn step_world(
         let choking = takedown::step_choke(state, i, &input, dt, g, &mut out.events);
         takedown::step_carry(state, i, &input, dt, world, g, &mut out.events);
         let p = state.players[i];
+        let mut used = false;
         if !choking && p.carrying.is_none() && p.just_pressed(&input, input::buttons::USE) && p.mode == MoveMode::Walking && p.action_lock <= 0.0 && p.sword.phase == state::SwordPhase::Idle {
+            used = true;
             if let Some(vi) = takedown::choke_target(state, &p, world, g, &cfg.tuning) {
                 takedown::start_choke(state, i, vi, g, &mut out.events);
             } else if !inventory::try_use_pickup(state, i, world, g, &mut out.events) {
                 if let Some(b) = takedown::body_in_view(state, &p, world, g) {
                     takedown::lift(state, p.id, b, &mut out.events);
+                } else {
+                    used = false;
                 }
             }
+        }
+        // Use on a climbable chain (its interactable, 0x00A23130), on foot or in the air.
+        if !used && !choking && p.just_pressed(&input, input::buttons::USE) && p.action_lock <= 0.0 {
+            climb::try_use_grab(&mut state.players[i], world, &mvc, g.items.inventory.interact_distance, inventory::INTERACT_COS, &mut out.events);
         }
         match input.action {
             input::actions::DRINK_HEALTH => {
@@ -298,6 +308,7 @@ pub fn step_world(
     // Health before the sword resolves (assassinations give adrenaline by the victim's health).
     let pre_health: Vec<(PlayerId, f32)> = state.players.iter().map(|p| (p.id, p.vitals.health)).collect();
     combat::resolve_sword_hits(state, world, mv, &cfg.gameplay.vitals, &cfg.tuning, &mut out.events);
+    movement::slide_impacts(state, mv, &cfg.gameplay.vitals, &mut out.events);
 
     for e in &out.events {
         if let SimEvent::WindblastCast { id } = e {
@@ -330,6 +341,8 @@ pub fn step_world(
     }
     powers::step_time_bends(state, DT, &mut out.events);
     inventory::update_carried(state, mv);
+
+    volumes::step_pain(state, world, cfg, &mut out.events);
 
     // Environmental damage from this tick's movement events.
     let env: Vec<SimEvent> = out.events.clone();
@@ -482,6 +495,14 @@ pub fn state_hash(state: &WorldState) -> u64 {
         }
         mix(p.helmet as u64 | (p.jump.powered as u64) << 1 | (p.ai_unaware as u64) << 2);
         mix(p.rng as u64);
+        // Climbing (only once a pawn has touched a chain, so earlier hashes are unchanged).
+        if p.climb != state::ClimbState::default() {
+            let c = &p.climb;
+            mix(c.on.map_or(u64::MAX, |i| i as u64) ^ (c.down as u64) << 32 ^ (c.letting_go as u64) << 33 ^ (c.jumped as u64) << 34);
+            for f in [c.time, c.since_sound, c.no_touch] {
+                mix(f.to_bits() as u64);
+            }
+        }
     }
     for pk in &state.pickups {
         mix(pk.id as u64 | (pk.active as u64) << 32);

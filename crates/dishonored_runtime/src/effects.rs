@@ -7,6 +7,7 @@
 
 use crate::coords;
 use crate::level::LevelOf;
+use crate::distortion::{DistortionFrame, DistortionMaterial};
 use crate::map_render::to_image;
 use crate::session::SessionView;
 use bevy::asset::RenderAssetUsages;
@@ -114,6 +115,18 @@ struct LevelFx {
     skipped: std::collections::HashSet<(usize, usize)>,
     /// Untextured (procedural) mesh emitters: mesh, colour x intensity, glow parameters.
     glow: HashMap<(usize, usize), (Handle<Mesh>, Vec4, Vec4)>,
+    /// Emitters with distortion materials, drawn again by the distortion pass.
+    distortion: HashMap<(usize, usize), DistortionSource>,
+}
+
+/// A distorting emitter: its decoded material, textures and (mesh emitters) the mesh's
+/// triangles in Dishonored mesh space.
+struct DistortionSource {
+    mat: DistortionMaterial,
+    texture: Handle<Image>,
+    opacity: Option<Handle<Image>>,
+    uv_distortion: Option<Handle<Image>>,
+    mesh: Option<Arc<(Vec<Vec3>, Vec<Vec2>, Vec<u32>)>>,
 }
 
 /// One particle of a mesh emitter.
@@ -144,6 +157,8 @@ pub struct Effects {
     active: String,
     rng: u64,
     pub spawned_oneshots: u64,
+    /// The last gameplay effects asked for: (system path, spawned) (harness `effects` command).
+    pub recent: Vec<(String, bool)>,
     pub live_particles: usize,
     /// Effects due later: (time, system, position, direction).
     delayed: Vec<(f32, String, Vec3, Vec3)>,
@@ -183,14 +198,22 @@ struct Particle {
 /// World ray query for particle collision: (from, to) -> (point, normal).
 type RayFn<'a> = &'a dyn Fn(Vec3, Vec3) -> Option<(Vec3, Vec3)>;
 
-#[derive(Default)]
 struct EmitterSim {
     time: f32,
     spawn_acc: f32,
     loops: i32,
     done: bool,
     particles: Vec<Particle>,
+    /// Emitter-time fraction of the last burst check; -1 before the first, so bursts at time
+    /// 0 fire on the first cycle too (they only fired from the second loop on, so one-shot
+    /// effects lost every time-0 burst, e.g. the muzzle shockwave).
     last_burst_t: f32,
+}
+
+impl Default for EmitterSim {
+    fn default() -> Self {
+        Self { time: 0.0, spawn_acc: 0.0, loops: 0, done: false, particles: Vec::new(), last_burst_t: -1.0 }
+    }
 }
 
 /// One particle system instance (placed or gameplay); children carry the sprite meshes.
@@ -322,8 +345,43 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
     let mut mesh_handles: HashMap<usize, Handle<Mesh>> = HashMap::new();
     let mut skipped = std::collections::HashSet::new();
     let mut glow = HashMap::new();
+    let mut distortion = HashMap::new();
     for (si, s) in map.particle_systems.iter().enumerate() {
         for (ei, e) in s.emitters.iter().enumerate() {
+            // Distortion materials (`Dist_Enable_Distortion`, e.g. the pistol muzzle's
+            // `WindWave_Disto_01_inst`) are drawn again by the distortion pass (distortion.rs);
+            // with `D_Disable_Diffuse` they draw nothing in the colour pass.
+            let mesh_id = e.mesh_id.filter(|m| *m < map.meshes.len());
+            let dmat = match mesh_id {
+                Some(mid) if !(e.mesh_override_material && e.material.is_some()) => map.meshes[mid].sections.first().and_then(|s| s.material),
+                _ => e.material,
+            };
+            let params = dmat.and_then(|m| map.material_params.get(m));
+            let tex_params = dmat.and_then(|m| map.materials.get(m)).map(|m| m.texture_params.as_slice()).unwrap_or(&[]);
+            if let Some(dm) = params.and_then(|p| DistortionMaterial::decode(p, tex_params)) {
+                let mut img = |t: dishonored_ir::TextureId| -> Option<Handle<Image>> {
+                    if let Some(h) = cache.get(&t) {
+                        return Some(h.clone());
+                    }
+                    let h = images.add(to_image(map.textures.get(t)?));
+                    cache.insert(t, h.clone());
+                    Some(h)
+                };
+                if let Some(texture) = img(dm.texture) {
+                    let opacity = dm.opacity.and_then(&mut img);
+                    let uv_distortion = dm.uv_distortion.and_then(|v| img(v.0));
+                    let mesh = mesh_id.map(|mid| {
+                        let m = &map.meshes[mid];
+                        let uv = if m.uv0.len() == m.positions.len() { m.uv0.clone() } else { vec![Vec2::ZERO; m.positions.len()] };
+                        Arc::new((m.positions.clone(), uv, m.indices.clone()))
+                    });
+                    distortion.insert((si, ei), DistortionSource { mat: dm.clone(), texture, opacity, uv_distortion, mesh });
+                }
+            }
+            if params.is_some_and(|p| p.switch("Dist_Enable_Distortion") == Some(true) && p.switch("D_Disable_Diffuse") == Some(true)) {
+                skipped.insert((si, ei));
+                continue;
+            }
             let Some(mid) = e.mesh_id.filter(|m| *m < map.meshes.len()) else {
                 if e.mesh.is_some() {
                     skipped.insert((si, ei));
@@ -345,7 +403,7 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
                 // terms that are not recoverable (rays mask, depth-biased alpha); 0.1 keeps the
                 // stacked cones from saturating.
                 let k = scalar("LightIntensity", 2.0) * 0.1;
-                glow.insert((si, ei), (mh, Vec4::new(c[0] * k, c[1] * k, c[2] * k, 1.0), Vec4::new(scalar("Fresnel_exponent", 5.0), scalar("StartOffset", 128.0) * coords::UU_TO_BEVY, scalar("SphereMask_Power", 2.0), scalar("Distance", 1.5) * map.meshes[mid].positions.iter().map(|p| p.length()).fold(0.0, f32::max))));
+                glow.insert((si, ei), (mh, Vec4::new(c[0] * k, c[1] * k, c[2] * k, 1.0), Vec4::new(scalar("Fresnel_exponent", scalar("G_GlowPower", 5.0)), scalar("StartOffset", 128.0) * coords::UU_TO_BEVY, scalar("SphereMask_Power", 2.0), scalar("Distance", 1.5) * map.meshes[mid].positions.iter().map(|p| p.length()).fold(0.0, f32::max))));
                 continue;
             }
             let mh = mesh_handles.entry(mid).or_insert_with(|| meshes.add(bevy_mesh(&map.meshes[mid]))).clone();
@@ -373,6 +431,7 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
         mesh_parts,
         skipped,
         glow,
+        distortion,
     });
     fx.levels.insert(name.to_string(), lf.clone());
     fx.active = name.to_string();
@@ -400,7 +459,12 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
         spawn_instance(commands, meshes, &lf, name, e.system, e.transform, false);
         n += 1;
     }
-    info!("effects: {name}: {} particle systems, {n} placed emitters", map.particle_systems.len());
+    info!("effects: {name}: {} particle systems, {n} placed emitters, {} distortion emitters", map.particle_systems.len(), lf.distortion.len());
+    if std::env::var_os("DISH_FX_LIST").is_some() {
+        for (&(si, ei), d) in &lf.distortion {
+            info!("fx distortion {} emitter {} {:?} mesh {}", lf.systems[si].source, lf.systems[si].emitters[ei].name, d.mat, d.mesh.is_some());
+        }
+    }
     n
 }
 
@@ -444,6 +508,10 @@ fn empty_mesh() -> Mesh {
 
 /// Spawn a gameplay effect by ParticleSystem path at a Dishonored position and direction.
 pub fn spawn_effect(commands: &mut Commands, meshes: &mut Assets<Mesh>, fx: &mut Effects, path: &str, at: Vec3, dir: Vec3) -> bool {
+    if fx.recent.len() >= 64 {
+        fx.recent.remove(0);
+    }
+    fx.recent.push((path.to_string(), false));
     let Some(lf) = fx.levels.get(&fx.active).cloned() else { return false };
     let Some(&si) = lf.by_path.get(&path.to_ascii_lowercase()) else {
         warn!("effects: {path} not decoded for {}", fx.active);
@@ -459,6 +527,9 @@ pub fn spawn_effect(commands: &mut Commands, meshes: &mut Assets<Mesh>, fx: &mut
     let level = fx.active.clone();
     spawn_instance(commands, meshes, &lf, &level, si, m, true);
     fx.spawned_oneshots += 1;
+    if let Some(r) = fx.recent.last_mut() {
+        r.1 = true;
+    }
     true
 }
 
@@ -766,9 +837,12 @@ fn simulate(
     mut q: Query<(Entity, &mut FxInstance, &InheritedVisibility)>,
     cams: Query<&GlobalTransform, With<Camera3d>>,
     session: Option<Res<crate::session::Session>>,
+    mut dframe: ResMut<DistortionFrame>,
 ) {
+    dframe.clear();
     let Some(cam) = cams.iter().next() else { return };
     let cam_pos_b = cam.translation();
+    let t_now = time.elapsed_secs_wrapped();
     let cam_uu = Vec3::new(cam_pos_b.x, cam_pos_b.z, cam_pos_b.y) / coords::UU_TO_BEVY;
     let (right, up) = (cam.right().as_vec3(), cam.up().as_vec3());
     let dt = time.delta_secs().min(0.1);
@@ -883,12 +957,39 @@ fn simulate(
             } else if let Some(mut m) = inst.meshes.get(i).and_then(|h| meshes.get_mut(h)) {
                 build_mesh(em, sim, &xf, right, up, cam_pos_b, &mut m);
             }
+            // The distortion pass draws the same particles with the distortion material.
+            if let Some(ds) = lf.distortion.get(&(inst.system, i)).filter(|_| !sim.particles.is_empty()) {
+                let imgs = (&ds.texture, ds.opacity.as_ref(), ds.uv_distortion.as_ref());
+                if let Some(mesh) = &ds.mesh {
+                    let (pos, uv, idx) = &**mesh;
+                    let tris = sim.particles.iter().take(64).flat_map(|p| {
+                        let (world, _, a) = mesh_particle(em, p, &xf);
+                        // The axis swap mirrors: reverse the winding (no culling, but keep it consistent).
+                        idx.chunks_exact(3).flat_map(move |t| [t[0], t[2], t[1]]).filter_map(move |k| {
+                            let k = k as usize;
+                            Some((coords::pos(world.transform_point3(*pos.get(k)?)), *uv.get(k)?, a))
+                        })
+                    });
+                    dframe.push(&ds.mat, imgs, tris, t_now, true);
+                } else if let Some(m) = inst.meshes.get(i).and_then(|h| meshes.get(h)) {
+                    use bevy::mesh::VertexAttributeValues as V;
+                    if let (Some(V::Float32x3(p)), Some(V::Float32x2(uv)), Some(V::Float32x4(c)), Some(idx)) =
+                        (m.attribute(Mesh::ATTRIBUTE_POSITION), m.attribute(Mesh::ATTRIBUTE_UV_0), m.attribute(Mesh::ATTRIBUTE_COLOR), m.indices())
+                    {
+                        let tris = idx.iter().filter_map(|k| Some((Vec3::from(*p.get(k)?), Vec2::from(*uv.get(k)?), c.get(k)?[3])));
+                        dframe.push(&ds.mat, imgs, tris, t_now, false);
+                    }
+                }
+            }
         }
         if inst.one_shot && inst.sims.iter().all(|s| (s.done || s.time > 10.0) && s.particles.is_empty()) {
             commands.entity(e).despawn();
         }
     }
     fx.live_particles = live;
+    if !dframe.batches.is_empty() && std::env::var_os("DISH_DISTORTION_DEBUG").is_some() {
+        info!("distortion frame: {} batches, {} floats", dframe.batches.len(), dframe.verts.len());
+    }
 }
 
 /// Gameplay effects from simulation events, with the systems and sockets the original's tweaks
@@ -1121,4 +1222,24 @@ fn strip_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_pos: V
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
     mesh.insert_indices(Indices::U32(idx));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn burst_at_time_zero_fires_on_the_first_cycle() {
+        // `Ps_PlayerPistol_StdMuzzle_01`'s shockwave: one burst of 1 at time 0, duration 0.5, one loop.
+        let em = ParticleEmitterAsset { duration: 0.5, loops: 1, bursts: vec![(1, 1, 0.0)], ..Default::default() };
+        let mut sim = EmitterSim::default();
+        let mut r = || 0.5;
+        step(&em, &mut sim, &Mat4::IDENTITY, 1.0 / 30.0, &mut r, None);
+        assert_eq!(sim.particles.len(), 1);
+        // Not again within the cycle.
+        for _ in 0..10 {
+            step(&em, &mut sim, &Mat4::IDENTITY, 1.0 / 30.0, &mut r, None);
+        }
+        assert_eq!(sim.particles.len(), 1);
+    }
 }
