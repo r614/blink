@@ -318,16 +318,40 @@ fn buses(rep: &mut Report, root: &Path, content: &dishonored_assets::Content) ->
     // Ducking: a dialogue voice lowers music, SFX and ambience, then they recover.
     let mut banks: Vec<&str> = dishonored_audio::cues::PLAYER_BANKS.to_vec();
     banks.extend(["Bank_Amb_LVL_Boyle_Estate", "Bank_Music_Boyle"]);
-    let mut e = engine(&banks, root)?;
     let ducker = init.buses.iter().find(|(_, b)| !b.ducks.is_empty()).map(|(id, _)| *id).unwrap_or(0);
-    let vo = e.events_on_bus(ducker).into_iter().find(|ev| {
-        let mut probe = engine(&banks, root).ok();
-        probe.as_mut().is_some_and(|p| {
-            p.post_event(*ev, 0);
-            p.render_seconds(0.3);
-            p.active_voices() > 0
-        })
-    });
+    // Dialogue lines live in the per-voice `Bk_<GUID>` packages: the first ones (sorted) with an
+    // event on the ducking bus.
+    let mut vo_banks: Vec<String> = dishonored_audio::library::pck_dirs(root)
+        .iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flat_map(|rd| rd.flatten())
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .filter(|n| n.starts_with("Bk_") && n.ends_with(".INT"))
+        .map(|n| n.trim_end_matches(".INT").to_string())
+        .collect();
+    vo_banks.sort();
+    let mut e = engine(&banks, root)?;
+    let mut vo = None;
+    for vb in vo_banks.iter().take(40) {
+        let mut b2: Vec<&str> = banks.clone();
+        b2.push(vb);
+        let Ok(mut probe) = engine(&b2, root) else { continue };
+        let found = probe.events_on_bus(ducker).into_iter().find(|ev| {
+            let mut p = engine(&b2, root).ok();
+            p.as_mut().is_some_and(|p| {
+                p.post_event(*ev, 0);
+                // A line long enough to reach the full duck (0.9 s fade).
+                p.render_seconds(1.5);
+                p.active_voices() > 0
+            })
+        });
+        if let Some(ev) = found {
+            probe.render_seconds(0.0);
+            e = probe;
+            vo = Some(ev);
+            break;
+        }
+    }
     let mut duck_row = String::from("no event on the ducking bus");
     let mut duck_ok = false;
     if let Some(ev) = vo {

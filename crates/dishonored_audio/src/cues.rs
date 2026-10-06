@@ -10,6 +10,7 @@ pub const PLAYER_BANKS: &[&str] = &[
     "Bank_Weapon",
     "Bank_Weapon_Sword_Corvo",
     "Bank_Power_Player",
+    "Bank_Power_Player_ShadowKill",
     "Bank_Impact",
     "Bank_Footsteps",
     "Bank_VO_Bark",
