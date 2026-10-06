@@ -23,7 +23,7 @@
     "back_mult_sprint": 0.55,
     "back_mult_sneak": 0.5,
     "sword_unsheathed_speed_factor": 0.9,
-    "walkable_floor_z": 0.7,
+    "walkable_floor_z": 0.64278764,
     "max_speed_before_falling_damage": 2250.0,
     "max_speed_before_falling_death": 2900.0,
     "mantle": {
@@ -63,7 +63,23 @@
       "max_angle_crouched": 15.0,
       "springiness": 80.0,
       "damping": 12.0
-    }
+    },
+    "water": {
+      "water_speed": 600.0,
+      "buoyancy": 1.0,
+      "out_of_water_z": 533.0,
+      "min_swim_accel": 500.0,
+      "max_swim_accel": 4000.0,
+      "max_speed_no_stroke": 350.0,
+      "stroke_time": 0.3,
+      "surface_stroke_delay": 2.0,
+      "constant_speed_at_surface": true,
+      "apnea_max": 30.0,
+      "apnea_recovery": 5.0,
+      "drowning_damage": 1.0,
+      "drowning_step": 1.0
+    },
+    "power_jump_z": 0.0
   },
   "vitals": {
     "health_max": 70.0,
@@ -3890,9 +3906,23 @@
       "bonus_swimming": -1.0,
       "zero_speed_sneaking": true,
       "light_darkest": 0.05,
-      "light_brightest": 1.0
+      "light_brightest": 1.0,
+      "ground_speed_sprint": 600.0
     },
     "group_distance": 1000.0,
+    "trigger_alarm": {
+      "chance_sighting_alone": 1.0,
+      "chance_sighting_in_group": 1.0,
+      "chance_found_corpse": 1.0,
+      "chance_witness_death": 1.0,
+      "chance_help": 0.0,
+      "fight_radius": 500.0,
+      "wait_before_ring": 0.25,
+      "companion_range": 2000.0,
+      "companion_must_match_squad": false,
+      "companion_must_be_ally": true
+    },
+    "visual_detection_ratio_near": 0.3,
     "provenance": {
       "ai.civilian_suspecting": "fallback value (not in the loaded packages: Twk_Attn_Noncombatant_Sus.Twk_Attn_Noncombatant_Sus)",
       "ai.civilian_talking_loudness": "BrainTweaks_Civilian.m_TalkingLoudness = EAINoiseLoudness2 -> m_LoudnessDistanceArray[9]",
@@ -4953,7 +4983,21 @@
       ]
     ]
   },
+  "adrenaline": {
+    "max": 250.0,
+    "burn_rate": 1.0,
+    "cooldown": 10.0,
+    "mult_taking_damage": 0.0,
+    "mult_on_hit": 2.0,
+    "mult_assassinate": 1.25,
+    "mult_drop_assassinate": 1.5,
+    "parry_win": 20.0
+  },
   "provenance": {
+    "adrenaline.burn_rate": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_AdrenalineBurnRate.m_fBaseValue2_Normal = 1",
+    "adrenaline.cooldown": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_AdrenalineCooldown.m_fBaseValue2_Normal = 10",
+    "adrenaline.max": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_AdrenalineMax.m_fBaseValue2_Normal = 250",
+    "adrenaline.mult_taking_damage": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_AdrenalineMultWhenTakingDamage.m_fBaseValue2_Normal = 0",
     "blink.close_collision_distance": "Twk_Powers.Blink.Twk_Blink :: m_fCloseCollisionDistance = 300",
     "blink.close_collision_offset_step": "Twk_Powers.Blink.Twk_Blink :: m_fCloseCollisionOffsetStep = 30",
     "blink.horiz_distance[0]": "Twk_Powers.Blink.Twk_Blink :: m_Levels.m_HorizDistance = 1100",
@@ -5109,13 +5153,14 @@
     "movement.crouch_half_height": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_fSneakHeight = 65",
     "movement.crouch_speed": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_GroundSpeedCrouch.m_fBaseValue2_Normal = 275",
     "movement.gravity_z": "DefaultGame.ini [Engine.WorldInfo] DefaultGravityZ = -1500",
-    "movement.ground_friction": "UE3 stock PhysicsVolume.GroundFriction = 8.0 (LIKELY)",
+    "movement.ground_friction": "Engine.upk Default__PhysicsVolume.GroundFriction = 8.0",
     "movement.jump_z": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_JumpZ.m_fBaseValue2_Normal = 800",
     "movement.lean": "DefaultCamera.ini [DishonoredGame.DishonoredCamera_Lean]",
     "movement.max_fall_speed": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_fMaxFallSpeed = 2100",
     "movement.max_speed_before_falling_damage": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_MaxSpeedBeforeFallingDamage.m_fBaseValue2_Normal = 2250",
     "movement.max_speed_before_falling_death": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_MaxSpeedBeforeFallingDeath.m_fBaseValue2_Normal = 2900",
     "movement.max_step_height": "Default__DishonoredPawn :: MaxStepHeight = 44",
+    "movement.power_jump_z": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_JumpZ_PowerJump.m_fBaseValue2_Normal = 0",
     "movement.run_speed": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_GroundSpeed.m_fBaseValue2_Normal = 400",
     "movement.slide_deactivate_angle": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_fSlideVelocityDeactivateAngle = 25",
     "movement.slide_percent_not_cancelable": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_fSlidePercentNotCancelable = 0.5",
@@ -5128,9 +5173,17 @@
     "movement.strafe_mult_sprint": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_GroundStrafeMultiplierSprint.m_fBaseValue2_Normal = 0.6",
     "movement.sword_sheathed_speed_factor": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_SwordSheathedSpeedFactor.m_fBaseValue2_Normal = 1",
     "movement.sword_unsheathed_speed_factor": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_SwordUnsheathedSpeedFactor.m_fBaseValue2_Normal = 0.9",
-    "movement.terminal_velocity": "UE3 stock PhysicsVolume.TerminalVelocity = 4000.0 (LIKELY)",
+    "movement.terminal_velocity": "Engine.upk Default__PhysicsVolume.TerminalVelocity = 4000.0",
     "movement.walk_speed": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_GroundSpeedWalk.m_fBaseValue2_Normal = 200",
-    "movement.walkable_floor_z": "UE3 stock Pawn.WalkableFloorZ = 0.7 (LIKELY)",
+    "movement.walkable_floor_z": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_fMaxWalkableFloorInDegrees = 50",
+    "movement.water.apnea_max": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_fApneaMaxDuration = 30",
+    "movement.water.apnea_recovery": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_fApneaRecoveryDuration = 5",
+    "movement.water.buoyancy": "Default__DishonoredPawn :: Buoyancy = 1",
+    "movement.water.drowning_damage": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_DrowningDamageAmount.m_fBaseValue2_Normal = 1",
+    "movement.water.drowning_step": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_DrowningDamageStep.m_fBaseValue2_Normal = 1",
+    "movement.water.out_of_water_z": "Default__DishonoredPawn :: OutofWaterZ = 533",
+    "movement.water.swim": "DefaultPlayerState.ini [DishonoredGame.StatePlayerMasterSwim]",
+    "movement.water.water_speed": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_WaterSpeed.m_fBaseValue2_Normal = 600",
     "pistol.values": "item=Twk_Inv_PlayerSpecific.Twk_Inv_PistolCorvo; fire=Twk_Inv_PlayerSpecific.Twk_Inv_PistolCorvo.DisTweaks_InventoryItem_PlayerSpecific_0.DisTweaks_FirePistol_1; projectile=Twk_Projectiles.Twk_Proj_Bullet",
     "sword.values": "item=Twk_Inv_PlayerSpecific.Twk_Inv_SwordCorvo",
     "vitals.health_max": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_HealthMax.m_fBaseValue2_Normal = 70",

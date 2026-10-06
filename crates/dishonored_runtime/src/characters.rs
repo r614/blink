@@ -231,7 +231,7 @@ pub fn spawn_weapons(commands: &mut Commands, root: Entity, weapons: &WeaponLibr
     for (wi, w) in weapons.weapons.iter().enumerate() {
         // Only what this kind can ever show (civilians carry nothing).
         let usable = match kind {
-            PawnKind::Civilian => false,
+            PawnKind::Civilian | PawnKind::Rat => false,
             PawnKind::Guard => w.kind == TpWeapon::GuardSword,
             PawnKind::Human => w.kind != TpWeapon::GuardSword,
         };
@@ -253,7 +253,7 @@ pub fn shown_weapons(p: &PlayerState, contracts: bool) -> (Option<TpWeapon>, Opt
     use dishonored_sim::input::LeftHand;
     use dishonored_sim::state::{LeftPhase, PawnKind};
     match p.kind {
-        PawnKind::Civilian => (None, None),
+        PawnKind::Civilian | PawnKind::Rat => (None, None),
         PawnKind::Guard => (Some(TpWeapon::GuardSword), None),
         PawnKind::Human => {
             let drawn_sword = !contracts || p.sword.phase != SwordPhase::Idle;
