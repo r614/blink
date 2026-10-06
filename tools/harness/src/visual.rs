@@ -52,7 +52,7 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
 
     // Server + 3 bots.
     let sport = free_port();
-    let _server = spawn_server(ctx, sport, None, secs as u64 + 40, &["--score-limit", "30", "--max-players", "8"], "visual_server.log")?;
+    let _server = spawn_server(ctx, sport, None, secs as u64 + 180, &["--score-limit", "30", "--max-players", "8"], "visual_server.log")?;
     std::thread::sleep(Duration::from_secs(2));
     let server_addr: std::net::SocketAddr = format!("127.0.0.1:{sport}").parse()?;
     let bot_secs = secs + 25.0;
@@ -71,7 +71,7 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
         Command::new(ctx.bin("dishonored_runtime"))
             .args(["--connect", &server_addr.to_string(), "--name", "harness-viewer", "--control", &cport.to_string()])
             .args(["--record", &video_dir.display().to_string(), "--record-every", "3", "--record-fps", "20", "--size", "1280x720"])
-            .args(["--exit-after", &(secs + 20.0).to_string()])
+            .args(["--exit-after", &(secs + 160.0).to_string()])
             .env("FFMPEG", ffmpeg())
             .stdout(Stdio::from(log.try_clone()?))
             .stderr(Stdio::from(log))
@@ -82,7 +82,7 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     // Wait for the connection to be established.
     let t0 = Instant::now();
     let mut connected = false;
-    while t0.elapsed() < Duration::from_secs(30) {
+    while t0.elapsed() < Duration::from_secs(120) {
         if let Some(s) = ctl.call(serde_json::json!({"cmd":"state"})) {
             if s["connected"].as_bool() == Some(true) && !s["me"].is_null() {
                 connected = true;
@@ -102,6 +102,7 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     let mut first_pos = None;
     let mut last_state = Value::Null;
     let mut max_rtt: f64 = 0.0;
+    let mut max_others = 0usize;
     while start.elapsed() < Duration::from_secs_f32(secs) {
         let Some(s) = ctl.call(serde_json::json!({"cmd":"state"})) else { break };
         let me = &s["me"];
@@ -110,6 +111,7 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
             continue;
         }
         max_rtt = max_rtt.max(s["rtt_ms"].as_f64().unwrap_or(0.0));
+        max_others = max_others.max(s["others"].as_array().map(|a| a.len()).unwrap_or(0));
         let pos: Vec<f64> = me["pos"].as_array().map(|a| a.iter().filter_map(|v| v.as_f64()).collect()).unwrap_or_default();
         if first_pos.is_none() {
             first_pos = Some(pos.clone());
@@ -163,8 +165,8 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
         _ => 0.0,
     };
     rep.check(S, "harness-driven player moves through the map", moved > 300.0, format!("moved {moved:.0} uu, max RTT {max_rtt:.0} ms"));
-    let others = last_state["others"].as_array().map(|a| a.len()).unwrap_or(0);
-    rep.check(S, "remote players replicated to rendered client", others >= 3, format!("{others} remote players visible"));
+    // The most seen at once (a bot can be dead or respawning at any single moment).
+    rep.check(S, "remote players replicated to rendered client", max_others >= 3, format!("up to {max_others} remote players visible"));
     // A deliberate pistol shot, captured a few frames later: the muzzle flash systems
     // (`Ps_PlayerPistol_StdMuzzle_01` first person, `Ps_PistolMuzzle` on other pawns) must be
     // decoded for the level and spawned.

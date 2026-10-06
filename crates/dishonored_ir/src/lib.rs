@@ -51,6 +51,9 @@ pub struct DishonoredMap {
     /// Placed emitters (`Emitter` actors).
     #[serde(default)]
     pub emitters: Vec<particles::EmitterInstance>,
+    /// Placed doors and usable objects drawn with a skeletal mesh.
+    #[serde(default)]
+    pub skeletal_props: Vec<SkeletalProp>,
 }
 
 /// UE3 `EBlendMode` of the base material.
@@ -92,12 +95,53 @@ pub struct MaterialParams {
     /// Static switch values of the compiled permutation (base defaults filled in), U-027.
     #[serde(default)]
     pub static_switches: Vec<(String, bool)>,
+    /// Static component masks of the compiled permutation that select one channel
+    /// (`C_Cubemap_Mask_Channel` = B -> 2), U-027.
+    #[serde(default)]
+    pub mask_channels: Vec<(String, u8)>,
 }
 
 impl MaterialParams {
     pub fn switch(&self, name: &str) -> Option<bool> {
         self.static_switches.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|v| v.1)
     }
+    pub fn mask_channel(&self, name: &str) -> Option<u8> {
+        self.mask_channels.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|v| v.1)
+    }
+}
+
+/// A placed actor drawn with its `SkeletalMeshComponent` (`DisDoor`, `DishonoredUsableObject`
+/// and its subclasses): doors, lockers, hatches, bins, sinks, alarm panels. The original moves
+/// them by animation (a door's open / close stage), so they are kept apart from the static
+/// geometry.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SkeletalProp {
+    /// `<package>:<actor name>`, as the Kismet names actors (`L_Boyle_Ext_Audio:DisDoor_4`).
+    pub actor: String,
+    pub class: String,
+    /// Package that defines the skeletal mesh, and the mesh's object path.
+    pub mesh: (String, String),
+    /// Actor x component transform (Dishonored world space).
+    pub transform: Mat4,
+    /// The actor's placed location and rotation only (the frame the Kismet moves).
+    pub actor_to_world: Mat4,
+    pub hidden: bool,
+    /// The component's `AnimSets`: (package, object path).
+    pub anim_sets: Vec<(String, String)>,
+    /// Door stage animations (`DisDoor` only).
+    pub door: Option<DoorAnims>,
+}
+
+/// A `DisDoor`'s placed state and the transition animation of each of its stages
+/// (`DisTweaks_Door.m_Door{Open,Close}{CW,CCW}.m_TransitionAnimName`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DoorAnims {
+    /// `m_InitialDoorState` (`EDisDoorState`: 0 closed, 1 opened CW, 2 opened CCW).
+    pub initial: u8,
+    pub open_cw: String,
+    pub open_ccw: String,
+    pub close_cw: String,
+    pub close_ccw: String,
 }
 
 /// Level-wide presentation settings.
