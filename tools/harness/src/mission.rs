@@ -113,7 +113,8 @@ fn play(maps: &MapContents, def: &MissionDef, max_secs: f32) -> Result<Run> {
                 if strike.as_ref().is_some_and(|h| h.position.distance(me.position) < 900.0) {
                     input.buttons |= buttons::WALK;
                 }
-                if me.position.distance(last_pos) < 0.5 {
+                // Horizontal progress only: a pawn bobbing against a step changes height every tick.
+                if me.position.truncate().distance(last_pos.truncate()) < 0.5 {
                     stuck += 1;
                 } else {
                     stuck = 0;

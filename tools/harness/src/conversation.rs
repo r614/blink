@@ -335,7 +335,8 @@ fn mission_run(maps: &MapContents, def: &MissionDef) -> Result<MissionRun> {
                     input.yaw = to.y.atan2(to.x).to_degrees();
                     input.forward = 127;
                     // Unstick: sidestep and hop, then replan (as in `harness mission`).
-                    if me.position.distance(last_pos) < 0.5 {
+                    // Horizontal progress only: a pawn bobbing against a step changes height every tick.
+                    if me.position.truncate().distance(last_pos.truncate()) < 0.5 {
                         stuck += 1;
                     } else {
                         stuck = 0;
