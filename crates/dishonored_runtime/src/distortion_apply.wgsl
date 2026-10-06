@@ -15,5 +15,10 @@ fn apply(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
         uv = in.uv;
     }
+#ifdef DISTORTION_DEBUG
+    let base = textureSampleLevel(scene_color, apply_sampler, in.uv, 0.0);
+    return vec4<f32>(base.rgb * 0.3 + vec3<f32>(a.x + a.z, a.y + a.w, 0.0) * 4.0, base.a);
+#else
     return textureSampleLevel(scene_color, apply_sampler, uv, 0.0);
+#endif
 }

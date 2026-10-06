@@ -160,6 +160,23 @@ pub fn decode_bc1(data: &[u8], width: u32, height: u32) -> Vec<[u8; 3]> {
     out
 }
 
+/// Bilinear sample of a single-channel `w` x `h` texture at `uv` (clamped to the edge, texel
+/// centres at (i + 0.5) / size), as the GPU filters the original `ShadowMapTexture2D`.
+pub fn sample_r8_bilinear(data: &[u8], w: usize, h: usize, uv: glam::Vec2) -> u8 {
+    if w == 0 || h == 0 || data.len() < w * h {
+        return 255;
+    }
+    let x = (uv.x * w as f32 - 0.5).clamp(0.0, (w - 1) as f32);
+    let y = (uv.y * h as f32 - 0.5).clamp(0.0, (h - 1) as f32);
+    let (x0, y0) = (x.floor() as usize, y.floor() as usize);
+    let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+    let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+    let t = |xx: usize, yy: usize| data[yy * w + xx] as f32;
+    let top = t(x0, y0) + (t(x1, y0) - t(x0, y0)) * fx;
+    let bottom = t(x0, y1) + (t(x1, y1) - t(x0, y1)) * fx;
+    (top + (bottom - top) * fy).round().clamp(0.0, 255.0) as u8
+}
+
 pub fn srgb_to_linear(c: u8) -> f32 {
     let c = c as f32 / 255.0;
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
@@ -242,6 +259,17 @@ mod tests {
         let b0 = LIGHTMAP_BASIS[0];
         let e = directional_irradiance([1.0; 3], [1.0, 0.0, 0.0], b0);
         assert!((e[0] - 1.0).abs() < 1e-5, "{e:?}");
+    }
+
+    #[test]
+    fn r8_bilinear_resample() {
+        // 2 x 1: 0 | 200. Texel centres sample exactly; the midpoint blends; outside clamps.
+        let d = [0u8, 200];
+        assert_eq!(sample_r8_bilinear(&d, 2, 1, glam::Vec2::new(0.25, 0.5)), 0);
+        assert_eq!(sample_r8_bilinear(&d, 2, 1, glam::Vec2::new(0.75, 0.5)), 200);
+        assert_eq!(sample_r8_bilinear(&d, 2, 1, glam::Vec2::new(0.5, 0.5)), 100);
+        assert_eq!(sample_r8_bilinear(&d, 2, 1, glam::Vec2::new(2.0, 0.5)), 200);
+        assert_eq!(sample_r8_bilinear(&[], 0, 0, glam::Vec2::ZERO), 255);
     }
 
     #[test]

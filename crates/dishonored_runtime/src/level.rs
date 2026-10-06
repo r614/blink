@@ -61,6 +61,7 @@ pub fn spawn_level(
     let pkgs = if opts.legacy { dishonored_assets::map_packages_by_prefix(&content, name) } else { map_packages(&content, name) };
     let iopts = ImportOptions { max_texture_size: opts.max_tex, other_actors: !opts.legacy, extra_particles: crate::effects::GAMEPLAY_PARTICLES.iter().map(|s| s.to_string()).collect(), ..Default::default() };
     let (map, stats) = import_level(&content, name, &pkgs, &iopts).expect("map import failed");
+    info!("lightmaps: {name}: {} texture lightmaps, {} pages, {} components with a dominant distance-field shadow map", stats.lightmaps_texture, stats.lightmap_pages, stats.shadow_map_components);
     spawn_imported(name, map, stats.instances, opts, features, commands, meshes, images, materials, baked, levels, fx)
 }
 

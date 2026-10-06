@@ -181,7 +181,11 @@ impl Plugin for DistortionPlugin {
     }
 }
 
-fn tag_game_camera(mut commands: Commands, q: Query<Entity, (With<crate::players::GameCamera>, Without<DistortionView>)>) {
+/// `--no-distortion` (render comparisons) leaves the pass out.
+fn tag_game_camera(mut commands: Commands, q: Query<Entity, (With<crate::players::GameCamera>, Without<DistortionView>)>, mut off: Local<Option<bool>>) {
+    if *off.get_or_insert_with(|| std::env::args().any(|a| a == "--no-distortion")) {
+        return;
+    }
     for e in &q {
         commands.entity(e).insert(DistortionView);
     }
@@ -271,6 +275,10 @@ impl SpecializedRenderPipeline for DistortionPipeline {
             shader_defs.push("MULTISAMPLED".into());
         }
         if let Some(format) = key.apply_format {
+            // `DISH_DISTORTION_DEBUG`: show the accumulated offsets over a dimmed scene.
+            if std::env::var_os("DISH_DISTORTION_DEBUG").is_some() {
+                shader_defs.push("DISTORTION_DEBUG".into());
+            }
             return RenderPipelineDescriptor {
                 label: Some("distortion apply".into()),
                 layout: vec![self.apply.clone()],
@@ -336,11 +344,19 @@ pub fn distortion_pass(
     mut textures: ResMut<TextureCache>,
     mut ctx: RenderContext,
 ) {
+    static FRAMES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let log = std::env::var_os("DISH_DISTORTION_DEBUG").is_some() && FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 30 == 0;
+    if log {
+        info!("distortion: {} batches, {} vertices", frame.batches.len(), frame.verts.len() / VERTEX_FLOATS);
+    }
     if frame.batches.is_empty() {
         return;
     }
     let (view_offset, target, depth, ids) = view.into_inner();
     let (Some(acc_rp), Some(apply_rp), Some(view_binding)) = (cache.get_render_pipeline(ids.accumulate), cache.get_render_pipeline(ids.apply), view_uniforms.uniforms.binding()) else {
+        if log {
+            info!("distortion: pipelines not ready");
+        }
         return;
     };
     let device = ctx.render_device().clone();

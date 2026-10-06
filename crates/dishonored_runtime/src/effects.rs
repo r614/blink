@@ -198,14 +198,22 @@ struct Particle {
 /// World ray query for particle collision: (from, to) -> (point, normal).
 type RayFn<'a> = &'a dyn Fn(Vec3, Vec3) -> Option<(Vec3, Vec3)>;
 
-#[derive(Default)]
 struct EmitterSim {
     time: f32,
     spawn_acc: f32,
     loops: i32,
     done: bool,
     particles: Vec<Particle>,
+    /// Emitter-time fraction of the last burst check; -1 before the first, so bursts at time
+    /// 0 fire on the first cycle too (they only fired from the second loop on, so one-shot
+    /// effects lost every time-0 burst, e.g. the muzzle shockwave).
     last_burst_t: f32,
+}
+
+impl Default for EmitterSim {
+    fn default() -> Self {
+        Self { time: 0.0, spawn_acc: 0.0, loops: 0, done: false, particles: Vec::new(), last_burst_t: -1.0 }
+    }
 }
 
 /// One particle system instance (placed or gameplay); children carry the sprite meshes.
@@ -979,6 +987,9 @@ fn simulate(
         }
     }
     fx.live_particles = live;
+    if !dframe.batches.is_empty() && std::env::var_os("DISH_DISTORTION_DEBUG").is_some() {
+        info!("distortion frame: {} batches, {} floats", dframe.batches.len(), dframe.verts.len());
+    }
 }
 
 /// Gameplay effects from simulation events, with the systems and sockets the original's tweaks
@@ -1211,4 +1222,24 @@ fn strip_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_pos: V
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
     mesh.insert_indices(Indices::U32(idx));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn burst_at_time_zero_fires_on_the_first_cycle() {
+        // `Ps_PlayerPistol_StdMuzzle_01`'s shockwave: one burst of 1 at time 0, duration 0.5, one loop.
+        let em = ParticleEmitterAsset { duration: 0.5, loops: 1, bursts: vec![(1, 1, 0.0)], ..Default::default() };
+        let mut sim = EmitterSim::default();
+        let mut r = || 0.5;
+        step(&em, &mut sim, &Mat4::IDENTITY, 1.0 / 30.0, &mut r, None);
+        assert_eq!(sim.particles.len(), 1);
+        // Not again within the cycle.
+        for _ in 0..10 {
+            step(&em, &mut sim, &Mat4::IDENTITY, 1.0 / 30.0, &mut r, None);
+        }
+        assert_eq!(sim.particles.len(), 1);
+    }
 }
