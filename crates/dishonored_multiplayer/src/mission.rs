@@ -852,7 +852,16 @@ impl MissionMatch {
             Some(o) => o,
             None => world,
         };
-        all.extend(self.crowd.think(&self.world, &self.last_events, ai_world, dt));
+        let thought = self.crowd.think(&self.world, &self.last_events, ai_world, dt);
+        // NPCs walking a navmesh path move on the navmesh (`m_bNewNPCPhysWalking`,
+        // `movement::nav_walk_move`; research/dishonored/AI.md "Go-to completion").
+        for b in &self.crowd.brains {
+            let moving = thought.iter().any(|(id, i)| *id == b.id && (i.forward != 0 || i.right != 0));
+            if let Some(p) = self.world.player_mut(b.id) {
+                p.nav_walk = moving && !b.follow.path.is_empty();
+            }
+        }
+        all.extend(thought);
         self.crowd.write_awareness(&mut self.world);
         let out = step_world(&mut self.world, &all, world, cfg);
         let mut events = Vec::new();
