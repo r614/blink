@@ -1502,6 +1502,32 @@ impl Engine {
         self.bus_duck = duck_sum;
     }
 
+    /// Output bus of a node: the first node up its chain that sets one, else the master bus.
+    pub fn output_bus(&self, node: u32) -> u32 {
+        self.chain_of(node).iter().filter_map(|n| self.base(*n)).map(|b| b.bus).find(|b| *b != 0).or(self.master_bus).unwrap_or(0)
+    }
+
+    /// Events of the loaded banks whose first played node routes to `bus` (or a child bus).
+    pub fn events_on_bus(&self, bus: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        for b in &self.lib.banks {
+            for (id, n) in &b.hier.nodes {
+                let Node::Event { actions } = n else { continue };
+                let target = actions.iter().find_map(|a| match self.lib.node(*a) {
+                    Some((_, Node::Action(x))) if x.is_play() => Some(x.target),
+                    _ => None,
+                });
+                if let Some(t) = target {
+                    if self.init.bus_chain(self.output_bus(t)).contains(&bus) {
+                        out.push(*id);
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
     /// Volume (dB) and pitch (cents) a voice gets from its bus chain.
     fn bus_offsets(&self, chain: &[u32]) -> (f32, f32) {
         chain.iter().filter_map(|b| self.bus_mix.get(b)).fold((0.0, 0.0), |a, m| (a.0 + m.0, a.1 + m.1))

@@ -607,6 +607,34 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Some("floattables") => {
+            // floattables [min len]: runs of 4-byte aligned floats in Dishonored.exe that are
+            // strictly monotonic within (0, 30000] (filter coefficient / cutoff tables).
+            let exe = std::fs::read(install().join("Binaries/Win32/Dishonored.exe"))?;
+            let min: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(40);
+            let f = |o: usize| f32::from_le_bytes(exe[o..o + 4].try_into().unwrap());
+            let mut o = 0;
+            while o + 8 <= exe.len() {
+                let mut n = 1;
+                let inc = f(o + 4) > f(o);
+                while o + (n + 1) * 4 <= exe.len() {
+                    let (a, b) = (f(o + (n - 1) * 4), f(o + n * 4));
+                    let ok = a.is_finite() && b.is_finite() && a > 0.0 && b > 0.0 && a <= 30000.0 && b <= 30000.0 && if inc { b > a } else { b < a };
+                    if !ok {
+                        break;
+                    }
+                    n += 1;
+                }
+                if n >= min {
+                    let vals: Vec<String> = (0..n).map(|k| format!("{:.4}", f(o + k * 4))).collect();
+                    println!("file offset {o:#x}: {n} floats: {}", vals.join(" "));
+                    o += n * 4;
+                } else {
+                    o += 4;
+                }
+            }
+            Ok(())
+        }
         Some("volumes") => {
             // volumes <Map_P>: DishonoredAudioVolumes (events, environments) and the volume at
             // each placed ambient emitter.

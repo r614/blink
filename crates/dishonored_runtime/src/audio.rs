@@ -29,6 +29,7 @@ use dishonored_audio::engine::{Category, Engine, GLOBAL_OBJ, ObjId};
 use dishonored_audio::library::{MediaKey, SoundLibrary};
 use dishonored_audio::music_manager::{MusicManager, MusicNpc, MusicTweaks};
 use dishonored_audio::Pcm;
+use dishonored_audio::volumes::{AudioVolume, volume_at};
 use dishonored_sim::events::{DamageCause, SimEvent};
 use dishonored_sim::state::{MoveMode, PawnKind, PlayerId, PlayerState};
 use dishonored_world::WorldQuery;
@@ -203,6 +204,7 @@ struct Loaded {
     contact: Option<ContactSystem>,
     notifies: HashMap<String, ClipNotifies>,
     tweaks: Option<MusicTweaks>,
+    volumes: Vec<AudioVolume>,
     report: String,
 }
 
@@ -215,6 +217,10 @@ pub struct GameAudio {
     emitters: Vec<Emitter>,
     contact: Option<ContactSystem>,
     notifies: HashMap<String, ClipNotifies>,
+    /// The map's `DishonoredAudioVolume`s (ambience states on entry, environments).
+    volumes: Vec<AudioVolume>,
+    /// Volume the listener is in (its event was posted on entry).
+    listener_volume: Option<usize>,
     pub music: Option<MusicManager>,
     stream_spawned: bool,
     /// Projectile id -> fired as a crossbow bolt.
@@ -283,11 +289,13 @@ fn load(map: &str) -> anyhow::Result<Loaded> {
         banks.extend(a.banks.iter().map(|s| s.to_string()));
     }
     let mut emitters = Vec::new();
+    let mut volumes = Vec::new();
     let mut event_bank: HashMap<String, String> = HashMap::new();
     let mut map_pkgs = Vec::new();
     for p in dishonored_assets::map_packages(&content, map) {
         let Ok(pkg) = content.package(&p) else { continue };
         event_bank.extend(dishonored_audio::emitters::ak_event_banks(&pkg));
+        volumes.extend(dishonored_audio::volumes::audio_volumes(&pkg));
         for (i, e) in dishonored_audio::emitters::ambient_emitters(&pkg).into_iter().enumerate() {
             let key = format!("{}:{}", pkg.name, e.actor.rsplit('.').next().unwrap_or(""));
             emitters.push(Emitter { obj: EMITTER_OBJ + ((map_pkgs.len() as u64) << 16) + i as u64, event: e.event, pos: e.position, key, auto_play: e.auto_play, kismet: None, playing: 0 });
@@ -360,17 +368,18 @@ fn load(map: &str) -> anyhow::Result<Loaded> {
         }
     }
     let report = format!(
-        "audio: {map}: {} banks, {resolved}/{} posted events resolve, {} emitters, contact system {}, {} clips with sound notifies, music tweaks {}, {} short sounds decoded ({secs:.0} s) in {:.1} s",
+        "audio: {map}: {} banks, {resolved}/{} posted events resolve, {} emitters, {} audio volumes, contact system {}, {} clips with sound notifies, music tweaks {}, {} short sounds decoded ({secs:.0} s) in {:.1} s",
         lib.banks.len(),
         events.len(),
         emitters.len(),
+        volumes.len(),
         contact.as_ref().map(|c| c.intersections.len()).unwrap_or(0),
         notifies.len(),
         tweaks.as_ref().map(|t| t.name.as_str()).unwrap_or("-"),
         predecoded.len(),
         t0.elapsed().as_secs_f32()
     );
-    Ok(Loaded { map: map.to_string(), lib, predecoded, emitters, contact, notifies, tweaks, report })
+    Ok(Loaded { map: map.to_string(), lib, predecoded, emitters, contact, notifies, tweaks, volumes, report })
 }
 
 fn finish_loading(mut commands: Commands, mut audio: ResMut<GameAudio>, mut streams: ResMut<Assets<EngineStream>>, session: Option<Res<Session>>) {
@@ -414,8 +423,12 @@ fn finish_loading(mut commands: Commands, mut audio: ResMut<GameAudio>, mut stre
         }
         // Level ambience: state events first, then the bed, the score and the emitters.
         if let Some(a) = cues::map_ambience(&l.map) {
+            // States no event of the map sets (U-161): only when nothing set them before
+            // (states persist across levels, so a return from the interior keeps its value).
             for (g, s) in a.states {
-                e.set_state(*g, *s);
+                if e.states.get(g).is_none_or(|v| *v == 0) {
+                    e.set_state(*g, *s);
+                }
             }
             for s in a.state_events {
                 e.post_event_name(s, GLOBAL_OBJ);
@@ -424,6 +437,10 @@ fn finish_loading(mut commands: Commands, mut audio: ResMut<GameAudio>, mut stre
             if let Some(m) = a.music {
                 e.post_event_name(m, GLOBAL_OBJ);
             }
+        }
+        // Environments of the placed emitters (static): the audio volume around each.
+        for em in &l.emitters {
+            e.set_object_environments(em.obj, &volume_envs(&l.volumes, em.pos));
         }
         for em in l.emitters.iter_mut().filter(|em| em.auto_play) {
             e.set_position(em.obj, em.pos);
@@ -435,6 +452,8 @@ fn finish_loading(mut commands: Commands, mut audio: ResMut<GameAudio>, mut stre
     audio.emitters = l.emitters;
     audio.contact = l.contact;
     audio.notifies = l.notifies;
+    audio.volumes = l.volumes;
+    audio.listener_volume = None;
     audio.known_players.clear();
     audio.engine = Some(engine.clone());
     if !audio.stream_spawned {
@@ -442,6 +461,12 @@ fn finish_loading(mut commands: Commands, mut audio: ResMut<GameAudio>, mut stre
         let h = streams.add(EngineStream(engine));
         commands.spawn((AudioPlayer(h), PlaybackSettings::LOOP));
     }
+}
+
+/// Environment of a game object: the shareset named by the `m_Environment` of the audio
+/// volume around it, at full control value (`SetGameObjectEnvironmentsValues`; LIKELY).
+fn volume_envs(vols: &[AudioVolume], p: [f32; 3]) -> Vec<(u32, f32)> {
+    volume_at(vols, p).and_then(|i| vols[i].environment.as_deref()).map(|n| vec![(dishonored_audio::fnv1_32(n), 1.0)]).unwrap_or_default()
 }
 
 fn attach_listener(mut commands: Commands, cams: Query<Entity, (With<crate::players::GameCamera>, Without<SpatialListener>)>) {
@@ -515,6 +540,7 @@ impl GameAudio {
         self.next_temp += 1;
         let o = TEMP_OBJ + self.next_temp;
         e.set_position(o, pos.to_array());
+        e.set_object_environments(o, &volume_envs(&self.volumes, pos.to_array()));
         self.temp.push((o, now + 15.0));
         o
     }
@@ -565,6 +591,23 @@ pub fn drive(
     if let Some(cam) = cams.iter().next() {
         let (pos, right) = to_uu(cam);
         e.set_listener(pos.to_array(), right.to_array());
+        // Entering an audio volume posts its event (ambience states such as
+        // `Set_State_Amb_LVL_Boyle_Int_Streets`) and sets its game parameters.
+        let at = volume_at(&audio.volumes, pos.to_array());
+        if at != audio.listener_volume {
+            audio.listener_volume = at;
+            if let Some(v) = at.map(|i| audio.volumes[i].clone()) {
+                if let Some(ev) = &v.event {
+                    if e.post_event_name(ev, GLOBAL_OBJ) != 0 {
+                        audio.posted += 1;
+                    }
+                }
+                for (name, value, _) in &v.rtpcs {
+                    e.set_rtpc(GLOBAL_OBJ, dishonored_audio::fnv1_32(name), *value);
+                }
+                debug!("audio: listener in {} ({:?}, {:?})", v.actor, v.event, v.environment);
+            }
+        }
     }
     // Pawns are game objects at their positions.
     let me = session.local_id();
@@ -573,8 +616,14 @@ pub fn drive(
     for p in &players {
         // Sounds come from the pawn's centre (the original posts on the pawn; notifies at bones).
         e.set_position(PLAYER_OBJ + p.id as u64, p.position.to_array());
+        let envs = volume_envs(&audio.volumes, p.position.to_array());
+        e.set_object_environments(PLAYER_OBJ + p.id as u64, &envs);
         seen.insert(p.id);
     }
+    // `TimeDilation` (bus pitch curves): the world's rate of time; under Bend Time every pawn
+    // but the caster runs at the world dilation.
+    let dilation = players.iter().map(|p| p.time_scale).fold(1.0f32, f32::min).clamp(0.0, 1.0);
+    e.set_rtpc(GLOBAL_OBJ, dishonored_audio::fnv1_32(dishonored_audio::bus::TIME_DILATION), dilation);
     let gone: Vec<PlayerId> = audio.known_players.difference(&seen).copied().collect();
     for id in gone {
         e.remove_object(PLAYER_OBJ + id as u64, 200.0);

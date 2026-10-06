@@ -283,8 +283,125 @@ fn notifies(rep: &mut Report, root: &Path, content: &dishonored_assets::Content)
     Ok(())
 }
 
+/// Init.bnk buses, ducking, game parameters, environments and effects.
+fn buses(rep: &mut Report, root: &Path, content: &dishonored_assets::Content) -> Result<()> {
+    use dishonored_audio::bus;
+    use dishonored_audio::fnv1_32;
+    let init = dishonored_audio::init::InitBank::load(root)?;
+    let master = init.master_bus().and_then(|m| init.buses.get(&m));
+    let param_buses = |name: &str| init.buses.values().filter(|b| b.rtpcs.iter().any(|r| r.rtpc_id == fnv1_32(name))).count();
+    let params: Vec<String> = [bus::GLOBAL_VOLUME, bus::MUSIC_VOLUME, bus::SFX_VOLUME, bus::VOICES_VOLUME, bus::TIME_DILATION].iter().map(|n| format!("{n} on {}", param_buses(n))).collect();
+    let ducks: usize = init.buses.values().map(|b| b.ducks.len()).sum();
+    rep.check(
+        SEC,
+        "Init.bnk bus hierarchy decodes exactly (master -4 dB, options game parameters, ducking)",
+        init.inexact == 0 && init.buses.len() >= 20 && master.is_some_and(|m| m.prop(0) == Some(-4.0)) && ducks == 3 && [bus::GLOBAL_VOLUME, bus::MUSIC_VOLUME, bus::SFX_VOLUME, bus::VOICES_VOLUME, bus::TIME_DILATION].iter().all(|n| param_buses(n) > 0),
+        format!("{} buses, {} effect sharesets, {} inexact; {ducks} duck rules; {}", init.buses.len(), init.fx.len(), init.inexact, params.join(", ")),
+    );
+    // Environments of the Boyle exterior volumes resolve to Init.bnk sharesets.
+    let mut vols = Vec::new();
+    for p in dishonored_assets::map_packages(content, "L_Boyle_Ext_P") {
+        if let Ok(pkg) = content.package(&p) {
+            vols.extend(dishonored_audio::volumes::audio_volumes(&pkg));
+        }
+    }
+    let envs: std::collections::BTreeSet<String> = vols.iter().filter_map(|v| v.environment.clone()).collect();
+    let unresolved: Vec<&String> = envs.iter().filter(|e| !init.fx.contains_key(&fnv1_32(e))).collect();
+    let reverbs = envs.iter().filter(|e| init.fx.get(&fnv1_32(e)).and_then(|f| dishonored_audio::mixer::Reverb::from_fx(f, RATE as f32)).is_some()).count();
+    rep.check(
+        SEC,
+        "Boyle Ext audio volumes: environments resolve to reverb sharesets, ambience state events",
+        vols.len() >= 40 && unresolved.is_empty() && reverbs == envs.len() && vols.iter().filter(|v| v.event.is_some()).count() >= 30,
+        format!("{} volumes ({} with an event), environments {envs:?}, unresolved {unresolved:?}", vols.len(), vols.iter().filter(|v| v.event.is_some()).count()),
+    );
+
+    // Ducking: a dialogue voice lowers music, SFX and ambience, then they recover.
+    let mut banks: Vec<&str> = dishonored_audio::cues::PLAYER_BANKS.to_vec();
+    banks.extend(["Bank_Amb_LVL_Boyle_Estate", "Bank_Music_Boyle"]);
+    let mut e = engine(&banks, root)?;
+    let ducker = init.buses.iter().find(|(_, b)| !b.ducks.is_empty()).map(|(id, _)| *id).unwrap_or(0);
+    let vo = e.events_on_bus(ducker).into_iter().find(|ev| {
+        let mut probe = engine(&banks, root).ok();
+        probe.as_mut().is_some_and(|p| {
+            p.post_event(*ev, 0);
+            p.render_seconds(0.3);
+            p.active_voices() > 0
+        })
+    });
+    let mut duck_row = String::from("no event on the ducking bus");
+    let mut duck_ok = false;
+    if let Some(ev) = vo {
+        e.post_event(ev, 0);
+        e.render_seconds(1.2);
+        let ducked: Vec<(u32, f32)> = e.bus_duck.iter().map(|(b, d)| (*b, *d)).collect();
+        // Let it end, then the 1.4 s fade-in.
+        let mut t = 1.2;
+        while e.active_voices() > 0 && t < 30.0 {
+            e.render_seconds(0.5);
+            t += 0.5;
+        }
+        e.render_seconds(1.6);
+        let after: f32 = e.bus_duck.values().copied().fold(0.0, f32::min);
+        duck_ok = ducked.len() == 3 && ducked.iter().all(|d| d.1 <= -6.9) && after > -0.01;
+        duck_row = format!("event {ev} on bus {ducker:#x}: after 1.2 s {:?} dB; ended after {t:.1} s, 1.6 s later {after:.2} dB", ducked.iter().map(|d| (format!("{:#x}", d.0), d.1)).collect::<Vec<_>>());
+    }
+    rep.check(SEC, "bus ducking: dialogue ducks music / SFX / ambience (-8 / -8 / -7 dB, 0.9 s) and recovers (1.4 s)", duck_ok, duck_row);
+
+    // TimeDilation drives the pitch of the music and SFX buses (Bend Time).
+    let mut e = engine(&banks, root)?;
+    e.set_rtpc(0, fnv1_32(bus::TIME_DILATION), 0.5);
+    e.render_seconds(0.05);
+    let pitched: Vec<String> = e.bus_mix.iter().filter(|(_, m)| m.1 != 0.0).map(|(b, m)| format!("{b:#x} {:.0} cents", m.1)).collect();
+    rep.check(SEC, "TimeDilation 0.5 pitches the music and SFX buses down an octave", pitched.len() == 2 && pitched.iter().all(|p| p.contains("-1200")), pitched.join(", "));
+
+    // Environment reverb: a footstep in the street volume leaves a tail; without it, silence.
+    let tail = |env: Option<&str>| -> Result<(f32, f32)> {
+        let mut e = engine(&banks, root)?;
+        e.set_listener([0.0; 3], [0.0, 1.0, 0.0]);
+        e.set_position(1, [200.0, 0.0, 0.0]);
+        if let Some(n) = env {
+            e.set_object_environments(1, &[(fnv1_32(n), 1.0)]);
+        }
+        e.post_event_name("FS_P_Stone_R", 1);
+        let mut out = e.render_seconds(0.6);
+        while e.active_voices() > 0 && out.len() < RATE as usize * 2 * 5 {
+            out.extend(e.render_seconds(0.1));
+        }
+        let dry_end = out.len();
+        out.extend(e.render_seconds(1.0));
+        let energy = |s: &[f32]| s.iter().map(|x| x * x).sum::<f32>();
+        Ok((energy(&out[..dry_end]), energy(&out[dry_end..])))
+    };
+    let (dry0, tail0) = tail(None)?;
+    let (dry1, tail1) = tail(Some("PC_streets_01"))?;
+    rep.check(
+        SEC,
+        "environment reverb (PC_streets_01 RoomVerb) adds a tail after a footstep",
+        dry0 > 0.0 && tail0 < 1e-9 && tail1 > dry1 * 1e-4,
+        format!("no environment: energy {dry0:.4} then {tail0:.2e}; PC_streets_01: {dry1:.4} then tail {tail1:.2e}"),
+    );
+
+    // Parametric EQ custom effects on sounds.
+    let lib = &e.lib;
+    let (mut eqs, mut ok) = (0, 0);
+    for b in &lib.banks {
+        for n in b.hier.nodes.values() {
+            if let Node::Fx(f) = n {
+                if f.plugin == dishonored_audio::mixer::ParamEq::PLUGIN {
+                    eqs += 1;
+                    ok += dishonored_audio::mixer::ParamEq::from_fx(f, RATE as f32).is_some() as usize;
+                }
+            }
+        }
+    }
+    rep.check(SEC, "Parametric EQ effects on the loaded sounds decode", eqs > 0 && ok == eqs, format!("{ok}/{eqs} in the player and Boyle banks"));
+    Ok(())
+}
+
 pub fn run(rep: &mut Report, root: &Path) -> Result<()> {
     let t0 = std::time::Instant::now();
+    let content0 = dishonored_assets::Content::locate()?;
+    buses(rep, root, &content0)?;
     hirc_exact(rep, root);
     loops(rep, root)?;
     avoid_repeat(rep, root)?;
