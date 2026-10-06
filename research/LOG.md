@@ -1174,3 +1174,10 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Change:** the presentation ragdoll (U-282) collides with the level's floor instead of a plane at the pawn's feet: at the hand-over a 17 x 17 grid (12 uu cells, pawn space, turned by the pawn's yaw) is sampled from the collision by down-raycasts, and each body is kept above the bilinear height under it. Walls are still not collided.
 - **Note:** the point-mass solver is sensitive to the last bits of the floor height (a flat floor through `a (1 - t) + b t` settled a different way than the exact constant); the grid interpolates as `a + (b - a) t`, exact where the samples agree.
 - **Tests:** `ragdoll::tests::floor_grid_follows_a_step`, `elite_guard_settles_on_a_step` (retail), `elite_guard_settles_on_the_floor` unchanged.
+
+## 2026-10-06: Generic per-voice barks (U-122)
+
+- **Method:** `class_layout` of `DisConversationComponent` (`m_pGenericDialogTree` +0x54, `m_GenericDialogData` +0x64, `m_pGenericDialogData_Cached` +0x7C); `OffsetScan` over the conversation code; decompile of 0x00C8D2C0; `obj_dump` of `Dlg_EliteGuard.VoiceData.Voice_EliteGuard_A`.
+- **Findings:** the component caches one voice of its tweak's list at random (`m_GenericDialogData[FUN_00401940(n)]`) and binds that voice's tree. The voice data names its tree in `m_pDialogTree` and per blurb list (`m_VoiceData[].m_pTree`); the trees are cooked into the level script packages (`Dlg_EliteGuard.DialogTree.Dlg_EliteGuard_Shared`, 78 hooks). Their hook graphs speak blurbs directly (random branch -> line) without a `DisConversation`.
+- **Port changes:** `ConversationDb::voice_trees` (dialog cache key versioned, `v2`), bark requests carry the pawn's voice (`MissionMatch::request_bark`), the runner counts lines spoken from the hook as content (before: every generic bark was "NoContent"). Bug fixed on the way: the AI level table is keyed by the lowercase map name.
+- **Harness:** `kismet --route barks` (an elite guard's hooks: "You look like you're up to no good." from `Dlg_EliteGuard_Shared`); `dishonored_conversation` test `generic_voice`.

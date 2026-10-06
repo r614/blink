@@ -477,7 +477,8 @@ pub fn load_mission_conversations(def: &dishonored_mission::MissionDef) -> Resul
 
 /// Dialog graphs of the given cooked packages (cached per package list).
 pub fn load_conversations(content: &Content, pkgs: &[String]) -> Result<dishonored_conversation::ConversationDb> {
-    let key = pkgs.iter().map(|p| p.to_ascii_lowercase()).collect::<Vec<_>>().join("+");
+    // The format version (2: `voice_trees`) is part of the key so new fields are filled in.
+    let key = format!("v2:{}", pkgs.iter().map(|p| p.to_ascii_lowercase()).collect::<Vec<_>>().join("+"));
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in key.bytes().chain(env!("CARGO_PKG_VERSION").bytes()) {
         h ^= b as u64;

@@ -432,10 +432,12 @@ impl Runner {
                 Some(o) => Target::Hook { oneshot: o, hook: h, output: req.output },
                 None => Target::TreeHook { tree, hook: h, output: req.output },
             };
-            let before = self.stats.started;
+            // Content: a conversation started, or lines spoken straight from the hook graph (the
+            // generic bark trees go hook -> random branch -> blurbs, no conversation node).
+            let before = (self.stats.started, self.stats.lines);
             let spec = StartSpec { target, initiator: req.initiator, bindings: vec![Some(req.npc.clone())], force: info.flags & hooks::FLAG_INTERRUPTS != 0 };
             if let Some(id) = self.start(spec, env) {
-                if self.stats.started > before {
+                if self.stats.started > before.0 || self.stats.lines > before.1 {
                     let unit = self.crand() as f32 / 32767.0;
                     self.hooks.fired(&req.npc, &req.hook, now, unit);
                     return Ok(id);

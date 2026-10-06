@@ -169,7 +169,7 @@ fn routes(ctx: &Ctx, rep: &mut Report, setup: &dishonored_multiplayer::game::Gam
     let only = ctx.opt("--route");
     let want = |r: &str| only.as_deref().is_none_or(|o| o == r);
     type Route = fn(&mut Play, &dishonored_kismet::KismetDb) -> Result<Vec<(String, bool, String)>>;
-    let list: [(&str, &str, Route); 3] = [("brisby", "Original Kismet: nonlethal route (Lord Brisby)", nonlethal), ("white", "Original Kismet: Miss White's drink", miss_white), ("duel", "Original Kismet: Lord Shaw's duel", duel)];
+    let list: [(&str, &str, Route); 4] = [("brisby", "Original Kismet: nonlethal route (Lord Brisby)", nonlethal), ("white", "Original Kismet: Miss White's drink", miss_white), ("duel", "Original Kismet: Lord Shaw's duel", duel), ("barks", "AI barks", barks)];
     for (id, section, f) in list {
         if !want(id) {
             continue;
@@ -1039,4 +1039,56 @@ fn dump(p: &Play) {
     }
     println!("presentation {:?}", k.st.presentation);
     let _ = (Obj::None, 0 as OpId, buttons::USE, Vec3::ZERO, kismet_host::PRESENTATION);
+}
+
+/// AI barks: an elite guard who notices the agent barks from his generic voice tree
+/// (`DisTweaks_NPCPawn.m_GenericDialogData`, `Dlg_EliteGuard.VoiceData.Voice_EliteGuard_A`).
+fn barks(p: &mut Play, _db: &dishonored_kismet::KismetDb) -> Result<Vec<Stage>> {
+    let mut rows = Vec::new();
+    p.idle(3.0);
+    let map = p.m().current_map.clone();
+    let guard = p.m().setup.original.iter().filter(|o| o.map.eq_ignore_ascii_case(&map) && o.tweak.contains("EliteGuard")).map(|o| o.spawn.id).find(|id| p.m().world.player(*id).is_some_and(|x| x.alive));
+    let Some(g) = guard else {
+        stage(&mut rows, "an elite guard is spawned on the map", false, "none".into());
+        return Ok(rows);
+    };
+    // The guards are neutral to a masked guest, so the AI has no reason to bark here: ask for
+    // each hook of his voice's trees the way the AI does (`MissionMatch::request_bark`).
+    let voice = p.m().setup.original.iter().find(|o| o.spawn.id == g).and_then(|o| p.m().setup.ai_levels.get(&o.map.to_ascii_lowercase()).and_then(|l| l.generic_trees.get(&o.tweak)).and_then(|v| v.first().cloned()));
+    let hooks: Vec<String> = {
+        let cdb = p.m().setup.conversations.as_ref().unwrap();
+        voice.as_ref().and_then(|v| cdb.voice_trees.get(v)).map(|ts| ts.iter().flat_map(|t| cdb.trees[*t as usize].hooks.iter()).filter_map(|h| match &cdb.node(*h).kind {
+            dishonored_conversation::model::NodeKind::Hook { hook, .. } => Some(hook.clone()),
+            _ => None,
+        }).collect()).unwrap_or_default()
+    };
+    let mut per_hook = Vec::new();
+    for h in &hooks {
+        let before = (p.m().state.ai_hooks_fired, p.m().state.ai_hook_rejections.clone());
+        p.mm().request_bark(g, h, Some(AGENT));
+        p.idle(2.0);
+        let r = if p.m().state.ai_hooks_fired > before.0 { "started".to_string() } else { p.m().state.ai_hook_rejections.iter().find(|(k, v)| before.1.get(*k) != Some(*v)).map(|(k, _)| k.clone()).unwrap_or_default() };
+        per_hook.push(format!("{h}={r}"));
+        if !generic_barks(p).is_empty() {
+            break;
+        }
+        if !generic_barks(p).is_empty() {
+            break;
+        }
+    }
+    let generic = generic_barks(p);
+    stage(&mut rows, "a guard's bark request is answered from the generic trees of his voice", p.m().state.ai_hooks_fired > 0 && !generic.is_empty(), format!("{} barks asked for, {} started; generic trees {generic:?}; voice {voice:?} ({} hooks) {per_hook:?}; rejected {:?} at {:.1} s", p.m().state.ai_hooks_requested, p.m().state.ai_hooks_fired, hooks.len(), p.m().state.ai_hook_rejections, p.time()));
+    Ok(rows)
+}
+
+/// Lines spoken so far from generic (per-voice, `Dlg_*`) trees: (tree path, text).
+fn generic_barks(p: &Play) -> std::collections::BTreeSet<String> {
+    let Some(cdb) = p.m().setup.conversations.as_ref() else { return Default::default() };
+    p.m().state.conv_log.iter().filter_map(|e| match e {
+        dishonored_conversation::runner::ConvEvent::Line { node, text, .. } => {
+            let t = &cdb.trees[cdb.nodes[*node as usize].tree as usize];
+            t.path.starts_with("Dlg_").then(|| format!("{}: {}", t.path.rsplit('.').next().unwrap_or(""), text.trim()))
+        }
+        _ => None,
+    }).collect()
 }

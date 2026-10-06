@@ -25,6 +25,10 @@ pub struct ConversationDb {
     pub trees: Vec<Tree>,
     pub conversations: Vec<Conversation>,
     pub nodes: Vec<Node>,
+    /// `DisDialogVoiceData` path -> the trees its blurb lists belong to (`m_VoiceData[].m_pTree`):
+    /// a pawn's generic (bark) trees come from its voice (`DisTweaks_NPCPawn.m_GenericDialogData`).
+    #[serde(default)]
+    pub voice_trees: std::collections::BTreeMap<String, Vec<u32>>,
 }
 
 /// `DisDialogOneShot`: a level actor binding speakers to a one-shot tree.

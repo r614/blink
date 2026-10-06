@@ -1000,14 +1000,7 @@ impl MissionMatch {
                         }
                     }
                 }
-                dishonored_ai::AiEvent::Bark { npc, hook, initiator } => {
-                    // Mission NPCs bark as their speaker actor, original NPCs as their spawner.
-                    let named = self.npc_by_id.get(npc).and_then(|n| self.setup.def.npcs.iter().find(|d| &d.id == n).map(|d| (n.clone(), d.speaker_actor().unwrap_or(n).to_string())));
-                    let named = named.or_else(|| self.setup.original.iter().find(|o| o.spawn.id == *npc).map(|o| (o.name.clone(), o.name.clone())));
-                    if let Some((name, actor)) = named {
-                        self.state.ai_hooks.push((name, actor, hook.clone(), *initiator));
-                    }
-                }
+                dishonored_ai::AiEvent::Bark { npc, hook, initiator } => self.request_bark(*npc, hook, *initiator),
                 dishonored_ai::AiEvent::AlarmEnded { .. } | dishonored_ai::AiEvent::RatEat { .. } => {}
             }
         }
@@ -1113,6 +1106,23 @@ impl MissionMatch {
         }
         self.mover_worlds = placed;
         out
+    }
+
+    /// [ai] A dialog hook an NPC fires (a bark, `FUN_00af00f0`): queued for the conversation
+    /// runner with the NPC's speaker and generic voice. Mission NPCs bark as their speaker
+    /// actor, original NPCs as their spawner; an original NPC's voice is one of its pawn tweak's
+    /// `m_GenericDialogData` (the original picks at random, 0x00C8D2C0; the port takes a
+    /// per-pawn index so a pawn keeps its voice).
+    pub fn request_bark(&mut self, npc: PlayerId, hook: &str, initiator: Option<PlayerId>) {
+        let named = self.npc_by_id.get(&npc).and_then(|n| self.setup.def.npcs.iter().find(|d| &d.id == n).map(|d| (n.clone(), d.speaker_actor().unwrap_or(n).to_string())));
+        let named = named.or_else(|| self.setup.original.iter().find(|o| o.spawn.id == npc).map(|o| (o.name.clone(), o.name.clone())));
+        let voice = self.setup.original.iter().find(|o| o.spawn.id == npc).and_then(|o| {
+            let list = self.setup.ai_levels.get(&o.map.to_ascii_lowercase())?.generic_trees.get(&o.tweak)?;
+            (!list.is_empty()).then(|| list[npc as usize % list.len()].clone())
+        });
+        if let Some((name, actor)) = named {
+            self.state.ai_hooks.push((name, actor, hook.to_string(), initiator, voice));
+        }
     }
 
     /// Place the map's movers where their actors are now (identity for movers the Kismet has

@@ -247,6 +247,32 @@ impl Loader {
         let node_base = self.db.nodes.len() as u32;
         let os_base = self.db.oneshots.len() as u32;
         let tree_id: HashMap<usize, u32> = trees.iter().enumerate().map(|(k, &e)| (e, tree_base + k as u32)).collect();
+        // Voice data -> its trees (generic bark trees of the pawns using that voice): its
+        // `m_pDialogTree` and the trees of its `m_VoiceData` blurb lists, matched by path (the
+        // reference may be an import of the tree's own package).
+        let tree_by_path: HashMap<String, u32> = trees.iter().map(|&e| (pkg.obj_path(ObjRef::Export(e)).to_ascii_lowercase(), tree_id[&e])).collect();
+        for &i in &voices {
+            let props = read(i);
+            let mut refs: Vec<i32> = find(&props, "m_pDialogTree").and_then(|p| p.as_object()).into_iter().collect();
+            for t in find(&props, "m_VoiceData").and_then(|p| p.array_structs(&pkg).ok()).unwrap_or_default() {
+                refs.extend(find(&t, "m_pTree").and_then(|p| p.as_object()));
+            }
+            let mut ids: Vec<u32> = Vec::new();
+            for r in refs {
+                let r = ObjRef::from_index(r);
+                if r == ObjRef::Null {
+                    continue;
+                }
+                if let Some(id) = tree_by_path.get(&pkg.obj_path(r).to_ascii_lowercase()) {
+                    if !ids.contains(id) {
+                        ids.push(*id);
+                    }
+                }
+            }
+            if !ids.is_empty() {
+                self.db.voice_trees.insert(pkg.obj_path(ObjRef::Export(i)), ids);
+            }
+        }
         let conv_id: HashMap<usize, u32> = convs.iter().enumerate().map(|(k, &e)| (e, conv_base + k as u32)).collect();
         let node_id: HashMap<usize, u32> = nodes.iter().enumerate().map(|(k, &e)| (e, node_base + k as u32)).collect();
         let os_id: HashMap<usize, u32> = oneshots.iter().enumerate().map(|(k, &e)| (e, os_base + k as u32)).collect();

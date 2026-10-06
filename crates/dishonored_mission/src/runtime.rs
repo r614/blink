@@ -346,10 +346,17 @@ pub struct MissionState {
     /// Distance tracker per (NPC, approach hook node), as `DisConv_Hook_Distance_InGameData`.
     approach_track: BTreeMap<(String, u32), dishonored_conversation::hooks::DistanceHook>,
     /// [ai] Dialog hooks the AI fired this step (barks): (NPC binding name, speaker actor,
-    /// `DDH_*` hook, initiator). Queued by the host, fired in `step`.
-    pub ai_hooks: Vec<(String, String, String, Option<u32>)>,
+    /// `DDH_*` hook, initiator, the pawn's generic voice data path if it has one). Queued by
+    /// the host, fired in `step`.
+    pub ai_hooks: Vec<(String, String, String, Option<u32>, Option<String>)>,
     /// [ai] Barks that started a conversation so far.
     pub ai_hooks_fired: u32,
+    /// [ai] Barks asked for so far (started or not).
+    #[serde(default)]
+    pub ai_hooks_requested: u32,
+    /// [ai] Why bark requests did not start (diagnostics).
+    #[serde(skip)]
+    pub ai_hook_rejections: BTreeMap<String, u32>,
     /// [kismet] Abstract items the players hold (`DisSeqAct_AddAbstractItem` /
     /// `RemoveAbstractItem`, by object name): the conversations' `DisConv_HasAbstractItem` checks.
     pub items: BTreeMap<String, i32>,
@@ -407,6 +414,8 @@ impl MissionState {
             approach_track: BTreeMap::new(),
             ai_hooks: Vec::new(),
             ai_hooks_fired: 0,
+            ai_hooks_requested: 0,
+            ai_hook_rejections: BTreeMap::new(),
             items: BTreeMap::new(),
         };
         s.refresh_view(&BTreeMap::new());
@@ -462,29 +471,36 @@ impl MissionState {
         }
     }
 
-    /// [ai] AI barks (`Runner::fire_hook`): the NPC's trees are the trees of the one-shots
-    /// whose first speaker is its actor (generic per-voice trees are not bound yet).
+    /// [ai] AI barks (`Runner::fire_hook`): the NPC's trees are the trees of the one-shots whose
+    /// first speaker is its actor, then the generic trees of its voice
+    /// (`m_pGenericDialogData_Cached`, 0x00C8D2C0).
     fn fire_ai_hooks(&mut self, queue: &mut VecDeque<Ev>) {
         let hooks = std::mem::take(&mut self.ai_hooks);
         let Some(r) = &self.conv else { return };
         let db = r.db.clone();
-        for (npc, actor, hook, initiator) in hooks {
-            let trees: Vec<u32> = db
+        for (npc, actor, hook, initiator, voice) in hooks {
+            self.ai_hooks_requested += 1;
+            let mut trees: Vec<u32> = db
                 .oneshots
                 .iter()
                 .filter(|o| o.speakers.first().and_then(|s| s.actor.as_deref()).is_some_and(|m| actor_matches(&actor, &o.package, m)))
                 .filter_map(|o| o.tree)
                 .collect();
+            if let Some(v) = voice.as_ref().and_then(|v| db.voice_trees.get(v)) {
+                trees.extend(v.iter().copied().filter(|t| !trees.contains(t)).collect::<Vec<_>>());
+            }
             if trees.is_empty() {
                 continue;
             }
             let req = dishonored_conversation::runner::HookRequest { npc, trees, hook, output: 0, initiator };
-            let mut ok = false;
+            let mut res = None;
             self.with_conv(queue, |runner, env| {
-                ok = runner.fire_hook(req, env).is_ok();
+                res = Some(runner.fire_hook(req, env));
             });
-            if ok {
-                self.ai_hooks_fired += 1;
+            match res {
+                Some(Ok(_)) => self.ai_hooks_fired += 1,
+                Some(Err(e)) => *self.ai_hook_rejections.entry(format!("{e:?}")).or_default() += 1,
+                None => {}
             }
         }
     }
