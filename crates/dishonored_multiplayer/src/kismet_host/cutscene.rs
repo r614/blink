@@ -74,7 +74,7 @@ impl SceneWorld for World<'_, '_> {
 }
 
 /// `SeqAct_Interp` started: bind the groups and hold their pawns.
-pub fn started(h: &mut H, cx: &mut Ctx) {
+pub(super) fn started(h: &mut H, cx: &mut Ctx) {
     let op = cx.op;
     let kdb = cx.k.db.clone();
     let Some(m) = matinee(cx.k, &kdb, op) else { return };
@@ -124,7 +124,7 @@ pub fn started(h: &mut H, cx: &mut Ctx) {
 
 /// A conversation's soiree asked for a matinee (`play_matinee_guid`): it continues when the
 /// matinee finishes, or at once when there is none.
-pub fn soiree(h: &mut H, instance: u32, op: Option<OpId>) {
+pub(super) fn soiree(h: &mut H, instance: u32, op: Option<OpId>) {
     match op {
         Some(op) => {
             h.st.soiree_conv.insert(op, instance);
@@ -138,7 +138,7 @@ pub fn soiree(h: &mut H, instance: u32, op: Option<OpId>) {
 }
 
 /// `SeqAct_Interp` finished: release its pawns (they stay where the matinee left them).
-pub fn finished(h: &mut H, op: OpId) {
+pub(super) fn finished(h: &mut H, op: OpId) {
     let Some(i) = h.st.cutscenes.iter().position(|c| c.op == op) else { return };
     let c = h.st.cutscenes.remove(i);
     if let (Some(inst), Some(r)) = (c.conv, h.m.state.conv.as_mut()) {
@@ -156,7 +156,7 @@ pub fn finished(h: &mut H, op: OpId) {
 }
 
 /// Apply the playing matinees to the world (after the Kismet tick).
-pub fn apply(k: &mut Kismet, h: &mut H) {
+pub(super) fn apply(k: &mut Kismet, h: &mut H) {
     let mut list = std::mem::take(&mut h.st.cutscenes);
     let now = k.time;
     for c in &mut list {
