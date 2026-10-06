@@ -437,11 +437,15 @@ pub fn animate_view_rig(
     mut wjoints: Query<(&WeaponJoint, &mut Transform), (Without<ViewRoot>, Without<ViewJoint>)>,
     mut wmeshes: Query<(&WeaponMesh, &mut Visibility), Without<ViewRoot>>,
     mut anim_sounds: Option<ResMut<crate::audio::AnimSounds>>,
+    cutscenes: Option<Res<crate::cutscene::Cutscenes>>,
 ) {
     let Some(rig) = rig else { return };
     let Ok((mut root_t, mut root_vis)) = roots.single_mut() else { return };
     let first_person = cams.iter().all(|c| !c.third_person && c.follow.is_none_or(|f| Some(f) == view.me.as_ref().map(|m| m.id)));
-    let Some(me) = view.me.as_ref().filter(|m| m.alive && first_person && m.mode != MoveMode::Blinking) else {
+    // [interp] A soiree's player group puts both hands' items away (`StatePlayerMasterSoiree`
+    // enter, 0x00a66ff0: both hands blended to 1 through 0x00aa1cf0).
+    let held = cutscenes.as_ref().is_some_and(|c| c.held);
+    let Some(me) = view.me.as_ref().filter(|m| m.alive && first_person && m.mode != MoveMode::Blinking && !held) else {
         *root_vis = Visibility::Hidden;
         return;
     };

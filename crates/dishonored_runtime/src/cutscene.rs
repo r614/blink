@@ -127,6 +127,8 @@ pub struct Cutscenes {
     /// Look limits of the local player's group (`DisInterpTrackAllowPlayerLook`): the yaw
     /// they are centred on (degrees) and (yaw min, yaw max, pitch min, pitch max).
     pub look: Option<(f32, [f32; 4])>,
+    /// The local player is held by a player group (the soiree state: hands put away).
+    pub held: bool,
 }
 
 const CUTSCENE_OBJ: u64 = 6 << 32;
@@ -382,6 +384,7 @@ pub fn drive(
     // The player group's full-body animation drives the first-person camera (U-203).
     cs.eye_offset = None;
     cs.look = None;
+    cs.held = view.me.as_ref().is_some_and(|me| list.iter().any(|c| c.players.contains(&me.id)));
     if let (Some(bank), Some(me)) = (bank.as_mut(), view.me.as_ref()) {
         for c in list.iter().filter(|c| c.players.contains(&me.id)) {
             let Some(m) = cs.matinee(c) else { continue };

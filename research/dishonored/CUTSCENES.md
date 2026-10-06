@@ -203,6 +203,14 @@ the view. `SC_boat` (`Ply_SC_Generic`, 2.67 s, a still pose stretched over the r
 `camera_jnt` sits 50 uu back, 11 uu right and 59 uu lower than in `Sword_Ready_Idle`, looking
 13 degrees right of the pawn's forward (`fp_probe`).
 
+The soiree state's enter (0x00a66ff0, reached through 0x00a696e0 / 0x00a74fa0) blends both
+hands' items to weight 1 (0x00aa1cf0 -> 0x00ac49a0 for hands 1 and 2; back to 0 at the exit,
+0x00a628f0), masks inputs (0x00ab1160 with 0x8002), saves and clears the collision flags with
+`m_bDisablePlayerCollision` (0x0058a4a0) and switches the pawn to `PHYS_Interpolating` (vfunc
++0x218 with 7). The port hides the first-person rig while the local player is held (LIKELY: the
+weight read as "put away"). `InterpGroupPlayer` also has `m_bPutPlayerInWorldDepthGroup`
+(+0x7c bit 3, applied at init through 0x00aa7c20) and `m_bDisplayInFirst` (bit 4).
+
 Port (LIKELY): while a player group holds the local player and plays full-body keys, the client
 samples them on `Ply_Player.Skm_Player` and moves the eye by the camera bone's offset from the
 standing idle pose, in the pawn's matinee frame (the boat socket). The view direction stays the
