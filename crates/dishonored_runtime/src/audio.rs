@@ -10,7 +10,8 @@
 //!   placed `AkAmbientSound` emitters, re-picked when a pick ends (APPROXIMATION of
 //!   Wwise container looping, whose v65 flags are not decoded yet).
 //!
-//! Flags: `--no-audio`, `--volume V` (linear master gain, default 1).
+//! Flags: `--no-audio`, `--volume V` (linear master gain, default 1); env `DISHONORED_MUTE`
+//! silences every sound of the process (test runs).
 
 use crate::coords;
 use crate::session::{Session, SessionView};
@@ -733,4 +734,14 @@ fn stats(mut audio: ResMut<GameAudio>, time: Res<Time>, voices: Query<(), With<V
     }
     audio.last_stats = now;
     info!("audio: {} sim events, {} posts, {} live voices", audio.events_seen, audio.posted, voices.iter().count());
+}
+
+/// Master volume for every sound of the process: silent when `DISHONORED_MUTE` is set (test runs
+/// that must not be heard; sounds still decode and play, so audio checks keep working).
+pub fn global_volume() -> GlobalVolume {
+    if std::env::var_os("DISHONORED_MUTE").is_some() {
+        GlobalVolume::new(bevy::audio::Volume::Linear(0.0))
+    } else {
+        GlobalVolume::default()
+    }
 }

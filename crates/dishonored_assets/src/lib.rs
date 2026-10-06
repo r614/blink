@@ -2,6 +2,7 @@
 
 pub mod characters;
 pub mod ai_config;
+pub mod ai_level;
 pub mod content;
 pub mod level;
 pub mod lightmap;

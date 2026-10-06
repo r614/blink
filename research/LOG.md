@@ -816,3 +816,53 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   looks (19 before: head material variations now split looks). `harness` travel 12/12, visual
   6/6, launcher 14/14, kismet 14/14, net 8/8, mission 7/7, conversation 17/17.
 - **Open:** U-140..U-147.
+## 2026-10-06: NPC factions, alarm bells, barks, perception details and route squads from the executable
+
+- **Question:** How do Dishonored's factions, forbidden zones, alarm bells, AI barks, light
+  and hearing work, and why did travel pursuers lose their target (U-055)?
+- **Method:** Ghidra (shared pool): `ClassDecomp` of the combat, alarm, faction, spawner,
+  visibility, noise and behaviour classes; `DecompRange` over the faction manager
+  (0x00c62800-0x00c64100) and `DisForbiddenZone` (0x00c95300-0x00c95800); `FuncDecomp` from
+  the native exec table (`natives.tsv`) and with `ref:` seeds (all callers of the bark function
+  0x00af00f0); `OffsetScan` with `class_layout` offsets (tweak fields of
+  `DisTweaks_AIBehavior_TriggerAlarm`, `DishonoredRoute`); the FName table for attribute names;
+  `tweaks` / `obj_dump` / `package_dump --exports` for the data.
+- **Findings** (addresses in `dishonored/AI.md`):
+  - Factions: relationship = individual first, then trespass (forbidden zones), then
+    `SetDisposition` overrides, then the from-faction's enemy then ally lists (same faction =
+    ally; not symmetric). Boyle: party guards `Neutral_Guard` do not list Corvo (the disguise),
+    street guards `Neutral_Guard_Street` and the default guards (alarm squads, pursuers) do;
+    upstairs forbidden zones on Int make the player an enemy of the party guards.
+  - Alarm bells: TriggerAlarm chances per cause (party tweak: 1.0, help 0), alone/group by
+    companions within 2000, fight instead within 500; ring after 0.25 s at 150 uu; after 2.5 s
+    the bell's 6000 uu alarm noise and its triggered spawners (far from the enemy first, capped);
+    rings while the enemy is hunted. `m_SpawnAtSuspicionLevel` is the spawned pawn's suspicion,
+    not a trigger.
+  - U-055: aware upon startup is MaxOutAttention -> a Psychic change to max with the proxy at
+    the player; the reported drop to Search was the harness agent dying.
+  - Light = light environment brightness ^(1/2.2) (scale global unknown); speed = speed /
+    `Attribute_GroundSpeedSprint` unclamped; target visibility = `Attribute_Visibility` with
+    three named modifiers; hearing = strict radius plus a trace outside audio cells, cell graph
+    between cells.
+  - Barks: 40+ call sites of 0x00af00f0 mapped to hooks and behaviours.
+  - Routes: squads, capacity, adoption range, active flag; neglected routes (30 s) preferred.
+- **Port changes:** `dishonored_ir::ai` (factions, zones, bells, probe lights, `AiLevel`, alarm
+  tweak, route fields); `dishonored_assets::ai_level` (cached `<map>.ailevel1.json`; routes
+  re-cached as `npcs6`); `dishonored_ai` (relationships via `Social`, faction per brain, forbidden
+  zones, `RingAlarm` behaviour and bell state, `AiEvent` barks and alarms, light probe, hearing
+  trace, deaf/blind/numb, route adoption, pistol start delay); mission host (`[ai]` marked):
+  factions for spawned NPCs, aware-on-startup, AlarmRaised from the bell, bell spawns, barks to
+  `MissionState::ai_hooks` -> `Runner::fire_hook`; Kismet host: `SetDisposition`,
+  `AISetSenses`.
+- **Harness (before -> after, same seeds):** contracts 3 min: pursuits 10 -> 16, guard-combat
+  ticks 16320 -> 10050, civilian flee 205525 -> 197366 ticks (68.0 % -> 65.3 % of civilian
+  time), NPC deaths 2 -> 1 (crowd guards now take their posts' factions, civilians the party
+  faction). Mission (Masked Host): detected 3 -> 3, alarms 1 -> 1 (now raised by a guard ringing
+  `DisAlarmBell_1`). travel 13/13 (new check: all 8 pursuers fight the player 0.33 s after
+  arrival), sim 12/12, conversation 17/17, kismet 14/14, net 8/8, contracts 16/16 (one run had
+  the timing-dependent "scoreboards agree" fail, rerun passed); determinism and replay hashes
+  stable.
+- **Confidence:** CONFIRMED for the relationship order, faction lists, zone semantics, alarm
+  sequence, aware-on-startup, speed normalisation and the hearing branch; LIKELY for the bark
+  attachment to port states and alarm decision details; SPECULATIVE for the light probe's
+  absolute scale (U-120..U-125).

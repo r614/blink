@@ -101,7 +101,18 @@ fn read_route(pkg: &ue3_package::Package, props: &[ue3_package::properties::Prop
             });
         }
     }
-    PatrolRoute { name, kind, capacity, points }
+    // `m_SupportedSquads`: array of `DisSquadProperty { m_SquadName }`.
+    let squads = find(props, "m_SupportedSquads")
+        .and_then(|p| p.array_structs(pkg).ok())
+        .map(|v| v.iter().filter_map(|e| match find(e, "m_SquadName").map(|x| &x.value) {
+            Some(Value::Name(n)) if n != "None" => Some(n.clone()),
+            _ => None,
+        }).collect())
+        .unwrap_or_default();
+    let f = |n: &str, d: f32| find(props, n).and_then(|p| p.as_float()).unwrap_or(d);
+    let active = !matches!(find(props, "m_bIsActive").map(|p| &p.value), Some(Value::Bool(false)));
+    let location = find(props, "Location").and_then(|p| p.as_vector()).map(Vec3::from).unwrap_or(Vec3::ZERO);
+    PatrolRoute { name, kind, capacity, points, squads, adoption_range: f("m_AdoptionRange", -1.0), neglect_threshold: f("m_NeglectThreshold", 30.0), active, location }
 }
 
 pub fn role_from_tweak(t: &str) -> NpcRole {

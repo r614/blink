@@ -80,7 +80,8 @@ pub fn npc_poses(brains: &[dishonored_ai::Brain]) -> Vec<(PlayerId, dishonored_i
             let s = match b.state {
                 B::Idle | B::Wander | B::WalkToPoint | B::GroupIdle => S::Relaxed,
                 B::Patrol | B::Alert => S::Patrol,
-                B::Investigate | B::Search => S::Search,
+                // Running to the alarm bell: the alert search stance (weapon drawn, running).
+                B::Investigate | B::Search | B::RingAlarm => S::Search,
                 B::Combat => S::Combat,
                 B::Flee => S::Panic,
                 B::Cower => S::Cower,

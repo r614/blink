@@ -34,6 +34,8 @@ pub struct CrowdSource<'a> {
     pub flee_points: &'a [Vec3],
     /// `DishonoredRoute` patrol routes.
     pub routes: &'a [dishonored_ir::ai::PatrolRoute],
+    /// [ai] The level's AI data and original spawners (crowd factions, zones, bells, lights).
+    pub ai: Option<(&'a dishonored_ir::ai::AiLevel, &'a [dishonored_ir::spawners::Spawner])>,
 }
 
 impl GameSetup {
@@ -43,6 +45,10 @@ impl GameSetup {
                 let mut c = Crowd::populate(cfg, src.points, src.guard_spawns, world);
                 c.set_flee_points(src.flee_points, world);
                 c.set_routes(src.routes, world);
+                if let Some((level, spawners)) = src.ai {
+                    c.set_level(level);
+                    c.assign_crowd_factions(spawners);
+                }
                 Some(c)
             }
             _ => None,

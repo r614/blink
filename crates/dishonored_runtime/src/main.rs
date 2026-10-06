@@ -184,6 +184,7 @@ fn main() {
         plugins = plugins.disable::<bevy::audio::AudioPlugin>();
     }
     app.add_plugins(plugins)
+    .insert_resource(audio::global_volume())
     .add_plugins(FrameTimeDiagnosticsPlugin::default())
     .add_plugins(MaterialPlugin::<map_render::BakedMaterial>::default())
     .add_plugins(bevy::diagnostic::EntityCountDiagnosticsPlugin::default())
