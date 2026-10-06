@@ -2702,17 +2702,15 @@ impl Brain {
         if self.firing { npc_moves::FIRE_PISTOL } else { self.attack }
     }
 
-    /// Is this NPC unaware of `who` (sleep darts put unaware NPCs to sleep at once,
-    /// `DishonoredDamageType.m_bInstantSleepForUnawareNPCs`)? Unaware: its attention toward
-    /// `who` is below Investigate and it is neither fighting nor hunting `who`.
-    pub fn unaware_of(&self, who: PlayerId) -> bool {
-        if self.target == Some(who) && matches!(self.state, BrainState::Combat | BrainState::RingAlarm) {
-            return false;
-        }
-        if matches!(self.state, BrainState::React) && matches!(self.next, Some(BrainState::Combat)) && self.target == Some(who) {
-            return false;
-        }
-        self.attn.iter().filter(|a| a.who == who).all(|a| a.level < DAL_INVESTIGATE)
+    /// Is this NPC "unaware" for a sleep dart (`DishonoredDamageType.m_bInstantSleepForUnawareNPCs`)?
+    /// The damage code (0x00b83680) skips `m_fTimeBeforeSleep` when the pawn's virtual
+    /// 0x6c0 (0x00b6e340) is false: that tests the brain's `EAIAwareness` (0x00b0c1e0, the
+    /// current behaviour's awareness) for `EAIAwareness_InCombat` (5). So every NPC that is not
+    /// fighting sleeps at once, whoever shot it (`_who` is kept for the call site). Ringing an
+    /// alarm counts as combat here (LIKELY: the TriggerAlarm behaviour's awareness was not read).
+    pub fn unaware_of(&self, _who: PlayerId) -> bool {
+        // The reaction delay is `EAIAwareness_Surprised` (0x00b0c1e0 returns 2): not combat yet.
+        !matches!(self.state, BrainState::Combat | BrainState::RingAlarm)
     }
 }
 
@@ -3299,5 +3297,59 @@ mod tests {
         b.transition_barks(BrainState::Search, None, &me, &ws, &[], &ai);
         let hooks: Vec<&str> = b.barks.iter().map(|x| x.0.as_str()).collect();
         assert_eq!(hooks, ["DDH_ATTENTION_NOTICE_BEGIN", "DDH_SEARCH_ADETECTION_DANGER", "DDH_SEARCH_FIND_ENEMY", "DDH_COMBAT_LOST", "DDH_SEARCH_GIVEUP_POSTCORPSE"]);
+    }
+
+    #[test]
+    fn sleep_darts_are_instant_unless_fighting() {
+        let mut b = Brain::new(NPC_ID_BASE, PawnKind::Guard, Vec3::ZERO, 1);
+        assert!(b.unaware_of(1));
+        b.state = BrainState::Search;
+        assert!(b.unaware_of(1), "suspicious is not in combat");
+        b.state = BrainState::React;
+        b.next = Some(BrainState::Combat);
+        assert!(b.unaware_of(1), "surprised is not in combat yet");
+        b.state = BrainState::Combat;
+        assert!(!b.unaware_of(1));
+    }
+
+    /// A guard in combat picks the attack by distance and exposes it as `npc_move`: the long
+    /// attack travels toward the target, the short one swings at once; a back step follows an
+    /// incoming attack (`m_IncomingAttacksBeforeBackStep` 1).
+    #[test]
+    fn combat_moves_follow_item_context_ranges() {
+        let ai = AiConfig::default();
+        let w = flat_world();
+        let setup = |dist: f32| {
+            let guard = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(0.0, 0.0, 90.0), 0.0);
+            let player = pawn(1, PawnKind::Human, Vec3::new(dist, 0.0, 90.0), 180.0);
+            let mut ws = WorldState::default();
+            ws.players = vec![guard.clone(), player];
+            let mut b = Brain::new(guard.id, PawnKind::Guard, guard.position, 1);
+            b.make_hostile(1);
+            b.alert_to(&ai, 1, Vec3::new(dist, 0.0, 90.0));
+            b.attn[0].sighted = true;
+            b.state = BrainState::Combat;
+            b.target = Some(1);
+            (guard, ws, b)
+        };
+        let mut inh = Vec::new();
+        let (g, ws, mut b) = setup(450.0);
+        let i = b.combat(&g, &ws, &w, None, &ai, &mut inh, 1.0 / 60.0);
+        assert_eq!(i.npc_move, npc_moves::ATTACK_LONG);
+        assert!(i.forward > 0 && i.buttons & buttons::PRIMARY == 0);
+        assert_eq!(b.attack, npc_moves::ATTACK_LONG);
+        let (g, ws, mut b) = setup(150.0);
+        let i = b.combat(&g, &ws, &w, None, &ai, &mut inh, 1.0 / 60.0);
+        assert_eq!(i.npc_move, npc_moves::ATTACK_SHORT);
+        assert!(i.buttons & buttons::PRIMARY != 0);
+        // Incoming attack: the player winds up facing the guard at close range.
+        let (g, mut ws, mut b) = setup(150.0);
+        b.flurry = 0;
+        b.stamina_timer = 10.0;
+        b.in_fight = true;
+        ws.players[1].sword.phase = SwordPhase::Startup;
+        let i = b.combat(&g, &ws, &w, None, &ai, &mut Vec::new(), 1.0 / 60.0);
+        assert_eq!(i.npc_move, npc_moves::BACK_STEP);
+        assert!(i.forward < 0);
     }
 }

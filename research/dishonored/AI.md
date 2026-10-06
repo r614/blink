@@ -305,7 +305,7 @@ killed by the pursuers, whose target was then gone.
   (`AiLevel::lights`, static ones included) summed as `Brightness x luminance x
   (1-(d/r)^2)^FalloffExponent` (spot cones, shadow traces for shadow casters, directional lights
   traced along their direction), then `^(1/2.2)`; server and client compute it from the same
-  cached data (U-121).
+  cached data (scale: "Light scale" below).
 - Speed (0x00ac33b0): `|Velocity.xy| / Attribute_GroundSpeedSprint` (600), not clamped.
 - Target visibility: `Attribute_Visibility` with `Modifier_VisComp_Base` (light and speed),
   `Modifier_StealthBonus` (stance) and `Modifier_ForcePlayerVisible` (+1) (FName globals
@@ -313,7 +313,8 @@ killed by the pursuers, whose target was then gone.
 - Hearing (0x00c5a760, 0x00bb50d0): radius = `m_LoudnessDistanceArray[loudness] x (1 -
   attenuation)`; a listener hears when strictly inside it and, if the listener or the noise is
   outside the audio cells, when a trace (flags 0x2286) from the listener to the noise is clear;
-  between two cells the noise follows the cell graph (not modelled, U-120).
+  between two cells the noise follows the precomputed portal paths ("Hearing through audio
+  cells" below).
 
 ## Barks (decoded 2026-10-06)
 
@@ -344,8 +345,129 @@ to a neglected one.
 Item-context class defaults (`DisTweaks_NPCAttack*`): Short max range 250, StepBack 100, Medium
 350, Long 450, jump attack 550-800 (`DDH_COMBAT_BIG_ATTACK`), allowed angle 45 deg, height
 difference 200. Elite guards: `m_GunUsageStart` 0-0.5 s, `m_GunUsageCooldown` 1-2 s
-(`TweaksBehavior_CombatEliteGuard`); the port waits the start delay before the single pistol
-shot. Long / jump attacks need NPC animations (U-124).
+(`TweaksBehavior_CombatEliteGuard`).
+
+## Combat moves (decoded 2026-10-07)
+
+The elite guard's real ranges are its sword's pawn-specific contexts
+(`Twk_Inv_EliteGuard.Twk_Inv_SwordEliteGuard.DisTweaks_InventoryItem_PawnSpecific_1.*`):
+
+| Context | min-max (uu) | height | pattern cooldown | inhibition |
+|---|---|---|---|---|
+| `NPCAttackShort` | 50-235 | 300 | 1-3 s | 2 |
+| `NPCAttackStepBack` | 0-170 | 100 | 0.5-2 s | 1 |
+| `NPCAttackMedium` | 235-375 | 300 | 3-5 s | 1 |
+| `NPCAttackLong` | 375-570 | 200 | 15-20 s | 0.8 |
+| `NPCJumpAttack` | 730-850 | 100 | 15-20 s | 3 |
+| `NPCBackStep` | to 500, 300 uu step | - | 0 | 8 |
+| `NPCSideStep` | to 400, 250 uu step | - | 0 | 6 |
+
+The pistol (`Twk_Inv_PistolEliteGuard...DisTweaks_NPCFireGun_1`): 250-3000 uu.
+`TweaksBehavior_CombatEliteGuard.DisTweaks_AISubProcess_ManageAttacks_0`: 2-3 attacks per
+flurry, stamina recovery 4-5 s, side step after a ranged threat aimed within 10 deg for 2-3 s
+(melee threat angle 30), back step after 1 incoming attack (forgiven after 5 s), primary usage
+weight 1, secondary (left arm, ranged aim) 3, block breaker `DisItemContext_NPCBash`.
+`DisTweaks_AISubState_FirePistol_1`: first shot 0.75-1.25 s, give up 0.3-1 s, point blank 80,
+chance of firing again 1.0.
+
+Code:
+- `DisAISubProcessManageAttacks` refresh (slot 78, 0x00b47880): when
+  `m_iFlurryAttacksRemaining` (+0x88) is below 1 the process only waits for
+  `m_fStaminaRecoveryTimer` (+0x84) to go below zero, then rolls a new flurry and timer;
+  otherwise it picks the block breaker (flag bit 0), else bit 1's attack (0x00b3deb0), else the
+  primary or the secondary attack line first by the usage weights (`rand(0, primary +
+  secondary) > primary` tries the secondary first). A chosen attack whose tweak drains stamina
+  (`m_bDrainsNPCStamina`, true for the NPC melee attacks) decrements the flurry. Activation
+  (slot 75, 0x00b3dc10) rolls the timers.
+- `DisBehaviorCombatEliteGuard` refresh (slot 96, 0x00b0e220): `m_fGunTimer` (+0x130) runs
+  down; with the target reachable for melee, `m_bWillingToStartShooting` = clear line, timer
+  below zero, the NPC's velocity below 0.0001 on every axis, distance in (min, max) of the gun
+  context (+0x144 / +0x148 virtuals); `m_bWillingToContinueShooting` = clear line and distance
+  below max. With the target unreachable (0x00ae50f0 false) both are clear line and distance
+  below max, no timer. Activation (slot 88, 0x00b0e130) sets the timer from `m_GunUsageStart`;
+  leaving the pistol (slot 122, 0x00b10f60) from `m_GunUsageCooldown`.
+- `DisAISubStateFirePistol` enter (slot 95, 0x00b32c50): give-up timer from
+  `m_TimeBeforeGivingUp`, the `DDH_COMBAT_RANGED_BEGIN` bark (64), state Relaxed, fire timer
+  from `m_TimeToFirstShot`; the four pistol states (Relaxed, Aiming, Recovering, Reloading;
+  0x00b37c10 / 0x00b46bf0 / 0x00b37e20 / 0x00b37ea0) were not decompiled.
+
+Port (`dishonored_ai::combat`, `Brain::combat`): contexts in pattern order, first one off its
+cooldown, not inhibited on the target and with the target in its range and height; the move
+kind goes out in `PlayerInput::npc_move` (`dishonored_sim::input::npc_moves`) and
+`Brain::attack_kind()`. Attacks beyond the sword's reach (200 uu) travel to the target at
+sprint speed for at most 1 s and swing on arrival (the root motion of the long and jump
+attacks; LIKELY), the jump attack also jumps; the step-back attack swings while backing off.
+Back step after the incoming-attack count, side step after the ranged-threat time, each with
+its group inhibition; dodges cover their distance at 600 uu/s. The flurry / stamina pacing
+follows 0x00b47880; the outer skirmish ring uses the pistol rules above (the "+0xb0 bit 1"
+gate of the reachable case is read as "not a melee attacker", LIKELY).
+
+## Hearing through audio cells (decoded 2026-10-07)
+
+Data (level audio package, e.g. `L_Boyle_Int_Audio`): `DishonoredAudioVolume` (convex brush,
+`m_AudioPropagationIndex`, `m_LinkedPortals`), `DishonoredAudioPortal` (`m_WidthDir` +0x248,
+`m_HeightDir` +0x254, `m_PlaneNormal` +0x260, `m_Corners` +0x26c, `m_fHalfWidth` +0x29c,
+`m_fHalfHeight` +0x2a0, `m_pCellA/B` +0x2b0/+0x2b4, `m_fOcclusion_HeardByAI` +0x2bc,
+propagation index +0x2c4) and the WorldInfo's `DisAudioPropagationInfo` (Boyle Int: 41 cells,
+55 portals, 2704 paths; `m_fDistCoeff` 0.1827, `m_fMaxAudibleDistance` 12000).
+
+`m_PathData` layout (0x00b92320 with the binary search 0x00b86d50): `m_NumPaths` sorted u32 keys,
+then as many u32 values, then the records. Key bytes (little endian): portal B index, cell B
+index, portal A index, cell A index, cell A being the one with the lower propagation index.
+Value: low byte = number of intermediate portals, upper 24 bits = byte offset of the record
+from the start of the data. Record: u16 length (times `m_fDistCoeff`), then one byte per
+intermediate portal (index into `m_Portals`). A path from a portal to itself is length 0.
+
+Hearing test 0x00bb50d0 (listener, its cell, noise, its cell, radius): outside the radius ->
+not heard; either end outside the cells -> trace (flags 0x2286); same cell -> heard; else
+0x00ba3700 tries every (listener cell portal, noise cell portal) pair: path lookup with the
+radius as limit; an end lying past its first/last portal on the portal's rectangle skips it
+(0x00b86e20); quick estimate (path length + each end's distance to its portal's closest
+point, 0x00b8be30) below the radius; then 0x00b9d5e0 string-pulls the path (points start at
+the midpoints of the closest portal points to both ends, up to 10 passes moving each point to
+where the neighbours' segment crosses its portal rectangle, 0x00b92670, until the squared
+movement is under max(400, n x d^2 x 0.0016)), and in query mode the noise is heard when
+`length / prod(1 - m_fOcclusion_HeardByAI)` (at least the straight distance) is below the
+radius. Port: `dishonored_ai::hearing`, data `AiLevel::audio` (`ai_level::read_audio_cells`).
+LIKELY details: the off-plane case of 0x00b92670 (clamped end point instead of the exact
+rectangle-edge closest point) and an additional point test (0x006b0330) in 0x00b86e20.
+
+## Light scale (decoded 2026-10-07, U-121)
+
+`DAT_01435230` is written once by a static initializer (0x00f67460): `2 * sqrt(pi)` (FSQRT of
+the double pi at 0x00fbeeb8, doubled). 0x004e1db0 multiplies the band-0 SH coefficient of the
+light environment by it, reduced to luminance with `FLinearColor::GetLuminance` weights 0.3,
+0.59, 0.11 (0x004da330) or the max channel. A light projected as `intensity x Y00(dir)`
+(Y00 = 1 / (2 sqrt(pi))) therefore contributes exactly its intensity, which is what the
+port's probe sums; the probe now uses the 0.3/0.59/0.11 luminance (it used Rec. 709) and adds
+the level's enabled sky lights as half of their upper plus lower brightness (LIKELY
+hemisphere normalization). Remaining gap: lights inside `StaticLightCollectionActor`s are not
+in the probe (their per-component transforms are native data).
+
+## Sleep darts (decoded 2026-10-07, U-105)
+
+The damage code 0x00b83680: a damage type with `m_bPutToSleep` (bit 11 of +0x58) and
+`m_bInstantSleepForUnawareNPCs` (bit 13) skips `m_fTimeBeforeSleep` when the pawn's virtual
+0x6c0 (`DishonoredNPCPawn`, 0x00b6e340) is false. That virtual returns brain awareness
+(0x00b0c1e0) == `EAIAwareness_InCombat` (5); 0x00b0c1e0 returns `Surprised` (2) during a
+reaction, `Choked` (7) for one controller class, else the current behaviour's awareness.
+Port: `Brain::unaware_of` / `Crowd::unaware_of` (true unless in Combat or ringing an alarm).
+
+## Rat swarms (2026-10-07)
+
+`DisRatSwarm` + `DisTweaks_RatSwarm` (`Twk_RatSwarm.Twk_RandomRatSwarm`: aggressive from 11
+rats, attack group 12, detection 500 (150 busy), escape 750, damage 0.4 per rat clamped 1-5
+every 0.5 s after 2 s, eat with 5 rats; `Twk_DevouringSwarm_Lvl1` (power level 1: 30 rats,
+30 s, 1500 uu): group 10, detection 700 (200 busy), damage 2-5). Port: `dishonored_ai::rats`
+(one swarm = one sim pawn, bites and meals as `RatEvent`s). The swarm tick itself was not
+located (the class's vtable dump only showed engine slots); the rules come from the tweak
+fields and the state enums (U-260).
+
+## Generic dialog voices (2026-10-07, U-122)
+
+`DisTweaks_NPCPawn.m_GenericDialogData` (+0x124) lists the pawn's generic
+`DisDialogVoiceData` (each with `m_pDialogTree` and `m_VoiceData[].m_pTree`); `AiLevel::generic_trees`
+records them per pawn tweak. Which entry a pawn uses and the runtime search are not decoded.
 
 ## Behaviours
 
@@ -380,8 +502,9 @@ or sword clashes by ear, they turn and look). Decoded from the raw `m_ScaryNoise
 
 ## Inferred or missing (see UNKNOWNS U-120..U-125)
 
-- Hearing through audio cells (U-120); the light scale and the SH light environment (U-121).
-- Barks on the NPCs' generic per-voice trees (U-122); the mapping of bark points onto this
-  port's simpler states (U-123).
-- Long / jump attacks, dodges, the pistol substates (U-124); alarm decision details (U-125).
+- Static-collection lights in the probe (U-121).
+- Barks on the NPCs' generic per-voice trees: which voice and the tree search (U-122); the
+  mapping of bark points onto this port's simpler states (U-123).
+- The pistol sub-state internals and the root motion of the attacks (U-124); alarm decision
+  details (U-125); the rat swarm tick (U-260).
 - Which test points the vision scheduler traces for NPC targets; distractions, watch points.
