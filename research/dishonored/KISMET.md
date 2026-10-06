@@ -130,7 +130,19 @@ Addresses are function entry points in the GOG build.
   check with `bPlayerOnly` and the retrigger delay ignored (the trigger count still applies),
   then activates "UnTouched", plus "Empty" when the list becomes empty.
 - `SeqEvent_LevelLoaded` outputs (slot 81): "Loaded and Visible", "Beginning of Level",
-  "Level Reset", "State Restored".
+  "Level Reset", "State Restored". Each output has its own engine call, and each call skips
+  events whose output has no links (so an unlinked output counts no trigger):
+  - "Loaded and Visible": `Sequence` slot 106 (0x00700120), recursively over nested
+    sequences; also called by `NotifyMatchStarted` when its third flag is set.
+  - "Beginning of Level": `NotifyMatchStarted` (slot 107, 0x007004b0, second flag; its first
+    flag activates every output of the level startup events).
+  - "State Restored": Dishonored's level-state restore (0x00a02760, recursive), called at the
+    end of loading a level's saved state (0x00a13070 <- 0x00a13db0, from the map-load hook
+    0x00a152f0 and the save-game load 0x00a162d0). It first sets the event's `TriggerCount`
+    to 0, so a one-shot event fires again.
+  - Whether "Loaded and Visible" / "Beginning of Level" also run for a restored level is not
+    settled (U-080); with the default one-shot trigger count they would be blocked by the
+    restored count anyway.
 
 ### Engine ops (CONFIRMED unless marked)
 
@@ -153,7 +165,8 @@ Addresses are function entry points in the GOG build.
 | `SeqAct_PrepareMapChange` | Requests the level load in Activated; its Update returns finished at once; then `SeqAct_Latent`'s DeActivated ("Finished"). |
 | `SeqAct_CommitMapChange` | Commits the prepared map change. |
 | `SeqAct_Latent` (Activated 0x006eb060, Update 0x006e5250, DeActivated 0x006da810) | Handlers on the targets register latent actors; finished when none remain; "Finished" or, when aborted, "Aborted". |
-| `SeqAct_CameraFade` | LIKELY (UE3 behaviour, latent with `bAutoActivateOutputLinks` false): "Out" at once, "Finished" after `FadeTime`. |
+| `SeqAct_CameraFade` (Activated 0x006e6960, Update 0x006e6de0) | Activated sets the time left to `FadeTime`, sends the fade (colour, alpha, time) to every target controller (all player controllers when there is no target), remembers them and fires "Out". Update subtracts the step's time (the first update runs in the activation step); at 0 or less it clears the fade on the remembered controllers unless `bPersistFade` with a non-zero target alpha, fires "Finished" and is done. |
+| `SeqAct_ActorFactory` (Activated 0x006dae60, Update 0x006daed0, slot 101 0x006f90f0) | One spawn per update while the delay is out: the next spawn point in order (shuffled with `rand() % (n - i) + i` swaps when `PointSelection` is random, reversed when it is 2); each spawn is written to "Spawned" and fires output 0; then `SpawnDelay` is armed; done when `SpawnCount` actors exist. DeActivated only clears a flag (no outputs). |
 
 ### `DeActivated` per class (vtable slot 94, CONFIRMED with `KismetSlots.java`)
 
@@ -188,7 +201,40 @@ the set of its parent's functions, and the shared empty function sits in other p
   output 0 when the player is busy or the UI failed.
 - `DisSeqAct_AIGoToActor` (Update 0x00b90530; Activated is empty): Start (re)starts the move
   and fires "Out"; Abort finishes; otherwise `SeqAct_Latent` update. Outputs Out, Success,
-  Failed, Interrupted (enum order).
+  Failed, Interrupted (enum order). DeActivated (0x00ba1ba0) only clears the latent list, so
+  Abort fires nothing. The results come from each pawn's `DisBehaviorGoTo` through the pawn
+  (0x00b4abb0: the pawn's current Kismet action at +0x398, then the action's slot 101,
+  0x00ba1eb0, which removes the pawn from the latent list and fires the result):
+  - Failed (2): the behaviour's path request fails (0x00ae8600);
+  - Success (1): the behaviour reached `DGTS_GoToCompleted` (arrived, then turned to the
+    destination with `m_bAlignRotation`; 0x00aedc00 sets finished + success);
+  - Interrupted (3): the behaviour ended without success for any other reason (0x00ae4d60).
+  Failed and Interrupted fire per pawn; Success fires only when it is the last pawn's report.
+- `DisSeqAct_NPCMarkForVanish` (Update 0x00b90f90, empty Activated / DeActivated): Mark and
+  Cancel go to the targets' handler (`OnNPCMarkForVanish`, 0x00b4acb0: Mark stores the action
+  and `m_fOffscreenTimeRequired` on the pawn at +0xc78/+0xc7c; Cancel clears it and removes
+  the pawn from the latent list without an output) and Mark fires "Out". The pawn's tick
+  (0x00b64480) counts the time down while the pawn is not seen and resets it while it is;
+  once it is below 0 and the vanish test passes (0x00b5f7d0 with `m_bRespectSearchAndCombat`
+  and `m_fRequiredDistance`), the pawn is destroyed (0.01 s life span) and reports
+  "Vanished" (0x00ba2190 with 1). The action finishes when no pawn is left.
+- `DisSeqAct_Door::Activated` (0x00b91d70): only the first input with an impulse counts
+  (Open CW, Open CCW, Close, Lock, Unlock); for each `DisDoor` target: open with the direction
+  (0x00a1a450), close (0x00a1a4b0), lock / unlock (door virtuals +0x3b8 / +0x3bc); then
+  `SequenceAction::Activated` (handlers) and the automatic outputs.
+- `DisSeqAct_ActivateUsable` (Activated 0x00b9aae0, Update 0x00b9ac90, `SeqAct_Latent`'s
+  DeActivated): goal stage = `m_TargetStageIndex`, or the next stage (wrapping) when it is -1;
+  an index out of range sets the abort flag; a usable already at the goal is skipped unless
+  `m_bForceAdvance`; usable targets are used toward the goal by `m_pUsingPawn` (else the
+  player); Update finishes once the usable's stage is the goal.
+- `DisSeqEvent_Used` (0x00a57640, a usable's transition end): every enabled `DisSeqEvent_Used`
+  of the usable is checked with the usable as originator, its using pawn (`m_pInstigator`) as
+  instigator and the reached stage as the only output index (`m_Stage` set to it): the stage
+  outputs come first, the special outputs (used while locked, hold-to-use, missing item)
+  after them.
+- `DisConv_KismetOutput` -> `DisSeqEvent_DialogOutputs` (0x00cb1080): events whose originator
+  is the one-shot (or whose tree is the conversation's) and whose output has the node's name;
+  the instigator is the pawn of the node's speaker index (else the WorldInfo).
 - `DisSeqAct_StartSpawn` (Activated 0x00b9bcc0, Update 0x00b90050): counts the spawners,
   requests the spawns, fires "Out"; each update fires "Spawned" per spawned pawn and "Failed"
   per failure, and "Finished" once nothing is pending.
@@ -201,6 +247,25 @@ the set of its parent's functions, and the shared empty function sits in other p
 - Many Dis actions keep `SequenceAction::Activated` (0x006eac90): it calls the targets' script
   handlers (`OnXxx`) - the behaviour is in the pawn/actor classes, not in the op.
 
+### Random numbers (CONFIRMED, U-082)
+
+- Every Kismet draw is the C runtime `rand()` imported from the CRT DLL: `SeqAct_RandomSwitch`
+  (0x006dc630: `rand() % valid`), `SeqVar_RandomFloat` (slot 96, 0x006ee230:
+  `Min + (Max - Min) * rand() * (1/32767)`, the float constant at 0x00fb9318),
+  `SeqAct_ActorFactory` (random spawn-point order). The MSVC generator is a per-thread linear
+  congruential one: `holdrand = holdrand * 214013 + 2531011`, result bits 16..30.
+- Seeding: `FEngineLoop::PreInit` (0x005fe910) calls `srand` with the low half of
+  `QueryPerformanceCounter`, or `srand(0)` with the `-FIXEDSEED` switch (also when a global
+  at 0x014129c4 is set); `appInit` (0x0048bf10) seeds with `time()` (or 0) earlier, and a
+  third site (0x005762c0) reseeds from the performance counter before a random pick unless
+  `-FIXEDSEED`.
+- The stream is shared: `rand` has 258 call sites in 181 functions (AI decisions, particles,
+  accessories, barks, sounds...), all on the game thread. Even with `-FIXEDSEED` the value a
+  Kismet switch draws depends on every call made before it since start-up (frame timing,
+  particle counts, menus), so the original's outcome for a given run cannot be reproduced.
+  The port runs the same generator (`runtime::CrtRand`) as a stream of its own seeded with
+  the match seed: the distribution, the `% n` bias and the float formula are the original's.
+
 ## 3. The port
 
 ### Interpreter (`dishonored_kismet::runtime`)
@@ -209,7 +274,7 @@ Per-sequence stacks, delayed activations and event replay queues as above; ops p
 in the engine's order; `ActivateCount`, input queues, latent ops, populate/publish of property
 links, `CheckActivate` / `ActivateEvent`, touch lists, remote events over the loaded levels,
 attached duplicates, the engine ops of the table, and the `DeActivated` table. Deterministic:
-`SeqAct_RandomSwitch` / `SeqVar_RandomFloat` use a xorshift seeded per match (the original uses
+`SeqAct_RandomSwitch` / `SeqVar_RandomFloat` use the CRT generator seeded per match (the original uses
 the C runtime `rand()`). Levels load and unload with their maps; a level's Kismet state is kept
 while the player is elsewhere, and a return visit fires "State Restored" instead of "Loaded and
 Visible" + "Beginning of Level" (LIKELY, U-080). Unsupported classes are logged once and

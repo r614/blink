@@ -343,7 +343,33 @@ pub fn load_kismet_setup(def: &dishonored_mission::MissionDef, ok: &dishonored_m
             }
         }
     }
-    Ok(dishonored_multiplayer::mission::kismet_host::KismetSetup { db, start_event: ok.start_event.clone(), seed: ok.seed, choices, prompts })
+    // `DisSeqAct_GivePickup.m_pPickup`: the pickup tweak's gift (abstract item, inventory item
+    // or stat change), resolved against the mission's packages.
+    let mut gives = std::collections::BTreeMap::new();
+    let tweak_pkgs: Vec<String> = groups.iter().flat_map(|g| g.1.clone()).collect();
+    if let Ok(tdb) = dishonored_assets::tweaks::TweakDb::load_with(&content, &tweak_pkgs) {
+        use dishonored_assets::tweaks::{TVal, get, get_f32};
+        for o in &db.ops {
+            if o.class != "DisSeqAct_GivePickup" {
+                continue;
+            }
+            let Some(dishonored_kismet::Obj::Path(t)) = o.props.get("m_pPickup").and_then(|v| v.as_obj()) else { continue };
+            let Some(tw) = tdb.try_resolve(t) else { continue };
+            let obj = |k: &str| match get(&tw, k) {
+                Some(TVal::Obj(o)) => Some(o.clone()),
+                _ => None,
+            };
+            let kind = if let Some(item) = obj("m_pAbstractItem") {
+                dishonored_ir::items::PickupKind::Abstract { item, quantity: get_f32(&tw, "m_Quantity").map(|v| v as i32).unwrap_or(1), note: false, key_item: false }
+            } else if let Some(item) = obj("m_pItem") {
+                dishonored_ir::items::PickupKind::Inventory { item }
+            } else {
+                dishonored_ir::items::PickupKind::Stat { health: get_f32(&tw, "m_HealthChange").unwrap_or(0.0) as i32, mana: get_f32(&tw, "m_ManaChange").unwrap_or(0.0) as i32, food: false, ammo: [(0, 0); 8] }
+            };
+            gives.insert(o.id, kind);
+        }
+    }
+    Ok(dishonored_multiplayer::mission::kismet_host::KismetSetup { db, start_event: ok.start_event.clone(), seed: ok.seed, choices, prompts, gives })
 }
 
 /// [kismet] Mission objectives from the original `DishonoredObjective`s (hidden until the

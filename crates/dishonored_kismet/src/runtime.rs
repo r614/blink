@@ -119,7 +119,7 @@ pub struct Kismet {
     /// Packages whose levels were loaded before (their state is restored on return).
     pub visited: Vec<bool>,
     pub time: f64,
-    rng: u64,
+    rng: CrtRand,
     /// Remote event name (lowercase) -> `SeqEvent_RemoteEvent` ops.
     remote: BTreeMap<String, Vec<OpId>>,
     /// Pawns of the players (`SeqVar_Player`).
@@ -175,11 +175,35 @@ pub fn deactivation(class: &str) -> DeAct {
     }
 }
 
-fn xorshift(s: &mut u64) -> u64 {
-    *s ^= *s << 13;
-    *s ^= *s >> 7;
-    *s ^= *s << 17;
-    *s
+/// The C runtime `rand()` the engine imports (MSVC: a per-thread linear congruential
+/// generator, `holdrand = holdrand * 214013 + 2531011`, returning bits 16..30, 0..=32767).
+/// `appRand()` is this call; `appFrand()` is `rand() * (1 / 32767)` (constant at 0x00fb9318).
+/// The engine seeds it once at start-up (`FEngineLoop::PreInit` 0x005fe910: `srand` with the
+/// low half of `QueryPerformanceCounter`, or `srand(0)` with `-FIXEDSEED`) and every system on
+/// the game thread draws from the same stream (258 call sites in 181 functions: AI, particles,
+/// accessories, barks, ...), so the original's outcome for a given seed depends on everything
+/// that ran before the draw. The port keeps the generator and gives the Kismet its own stream,
+/// seeded per match (research/dishonored/KISMET.md "Random numbers", U-082).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrtRand {
+    pub holdrand: u32,
+}
+
+impl CrtRand {
+    /// `srand(seed)`.
+    pub fn new(seed: u32) -> Self {
+        CrtRand { holdrand: seed }
+    }
+    /// `rand()`: 0..=32767.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> i32 {
+        self.holdrand = self.holdrand.wrapping_mul(214_013).wrapping_add(2_531_011);
+        ((self.holdrand >> 16) & 0x7fff) as i32
+    }
+    /// `appFrand()`: `rand()` times the float constant 1/32767 (0x38000100).
+    pub fn frand(&mut self) -> f32 {
+        self.next() as f32 * f32::from_bits(0x3800_0100)
+    }
 }
 
 impl Kismet {
@@ -220,7 +244,7 @@ impl Kismet {
             loaded: vec![false; np],
             visited: vec![false; np],
             time: 0.0,
-            rng: seed ^ 0x2545_F491_4F6C_DD1D | 1,
+            rng: CrtRand::new(seed as u32),
             remote,
             players: Vec::new(),
             spawned: BTreeMap::new(),
@@ -305,11 +329,13 @@ impl Kismet {
     }
 
     pub fn rand(&mut self, n: usize) -> usize {
-        if n == 0 { 0 } else { (xorshift(&mut self.rng) % n as u64) as usize }
+        // `rand() % n`, as `SeqAct_RandomSwitch` (0x006dc630) and `SeqAct_ActorFactory` do.
+        if n == 0 { 0 } else { (self.rng.next() % n as i32) as usize }
     }
 
+    /// `appFrand()` (`SeqVar_RandomFloat` slot 96, 0x006ee230: `Min + (Max - Min) * frand`).
     pub fn rand_unit(&mut self) -> f32 {
-        (xorshift(&mut self.rng) >> 40) as f32 / (1u64 << 24) as f32
+        self.rng.frand()
     }
 
     // ----- levels -----
@@ -331,9 +357,25 @@ impl Kismet {
         }
         self.note(format!("level loaded: {map}{}", if restored { " (state restored)" } else { "" }));
         let events: Vec<OpId> = (0..self.n_static() as OpId).filter(|&e| pk.contains(&self.db.ops[e as usize].package) && self.is_a(e, "SeqEvent_LevelLoaded")).collect();
+        // Each output is activated by its own engine call, and only for events whose output
+        // has links: "Loaded and Visible" by `Sequence` slot 106 (0x00700120), "Beginning of
+        // Level" by `NotifyMatchStarted` (slot 107, 0x007004b0); "State Restored" by the
+        // level state restore (0x00a02760, from 0x00a13070), which first resets the event's
+        // trigger count so it fires even when `MaxTriggerCount` was reached.
+        let linked = |k: &Self, e: OpId, i: usize| k.op(e).outputs.get(i).is_some_and(|o| !o.links.is_empty());
         for e in events {
-            let idx = if restored { vec![3] } else { vec![0, 1] };
-            self.check_activate(host, e, Obj::Path("WorldInfo".into()), Obj::None, false, Some(idx), false);
+            if restored {
+                if linked(self, e, 3) {
+                    self.ops[e as usize].trigger_count = 0;
+                    self.check_activate(host, e, Obj::Path("WorldInfo".into()), Obj::None, false, Some(vec![3]), false);
+                }
+                continue;
+            }
+            for i in [0, 1] {
+                if linked(self, e, i) {
+                    self.check_activate(host, e, Obj::Path("WorldInfo".into()), Obj::None, false, Some(vec![i]), false);
+                }
+            }
         }
     }
 
@@ -1615,7 +1657,7 @@ impl Kismet {
             }
         }
         mix(self.dups.len() as u64);
-        mix(self.rng);
+        mix(self.rng.holdrand as u64);
         h
     }
 }

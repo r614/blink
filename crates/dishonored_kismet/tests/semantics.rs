@@ -580,3 +580,45 @@ fn unsupported_ops_are_counted_and_continue_with_their_automatic_outputs() {
     assert!(k.log.iter().any(|l| l.contains("unsupported Kismet class DisSeqAct_SomethingNew")));
     assert_eq!(h.hits.len(), 1);
 }
+
+#[test]
+fn crt_rand_matches_the_msvc_generator() {
+    // MSVC `srand(1)` then `rand()`: the documented C runtime sequence.
+    let mut r = runtime::CrtRand::new(1);
+    let seq: Vec<i32> = (0..5).map(|_| r.next()).collect();
+    assert_eq!(seq, vec![41, 18467, 6334, 26500, 19169]);
+    // `srand(0)` (the engine's `-FIXEDSEED`).
+    let mut z = runtime::CrtRand::new(0);
+    assert_eq!(z.next(), 38);
+    // `appFrand()` = rand() / 32767 (float constant 0x38000100).
+    let mut f = runtime::CrtRand::new(1);
+    assert!((f.frand() - 41.0 / 32767.0).abs() < 1e-7);
+}
+
+#[test]
+fn level_loaded_fires_only_linked_outputs_and_state_restored_on_return() {
+    let mut b = B::new();
+    b.db.classes.push(("SeqEvent_LevelLoaded".into(), vec!["SeqEvent_LevelLoaded".into(), "SequenceEvent".into(), "SequenceOp".into()]));
+    let s = b.root(1);
+    let ev = b.add(1, "SeqEvent_LevelLoaded", Kind::Event, Some(s), &[], &["Loaded and Visible", "Beginning of Level", "Level Reset", "State Restored"], vec![("MaxTriggerCount", Value::Int(0))]);
+    let first = b.record(s);
+    let begin = b.record(s);
+    let restored = b.record(s);
+    b.link(ev, 0, first, 0);
+    b.link(ev, 1, begin, 0);
+    b.link(ev, 3, restored, 0);
+    let mut k = b.build(1);
+    let mut h = Rec::default();
+    k.load_map(&mut h, "Map");
+    tick(&mut k, &mut h, 2);
+    let mut got: Vec<OpId> = h.hits.iter().map(|x| x.1).collect();
+    got.sort();
+    assert_eq!(got, vec![first, begin]);
+    k.unload_map("Map");
+    h.hits.clear();
+    // A one-shot event: the restore resets the trigger count before activating output 3.
+    k.set_prop(ev, "MaxTriggerCount", Value::Int(1));
+    k.load_map(&mut h, "Map");
+    tick(&mut k, &mut h, 2);
+    assert_eq!(h.hits.iter().map(|x| x.1).collect::<Vec<_>>(), vec![restored]);
+}

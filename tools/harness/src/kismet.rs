@@ -123,6 +123,10 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
         dump(&p);
         return Ok(());
     }
+    if ctx.opt("--route").is_some_and(|r| r != "lethal") {
+        drop(p);
+        return routes(ctx, rep, &setup, &maps, &def, &db);
+    }
     play(&mut p, rep, &db)?;
     if ctx.args.iter().any(|a| a == "--dump") {
         dump(&p);
@@ -156,14 +160,38 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     }
     rep.check(S, "different seeds: the original switches pick different guilty sisters and dresses", guilty_seen.len() >= 2 && dress_sets.len() >= 2, format!("guilty sisters {guilty_seen:?}; {} distinct dress assignments over 6 seeds", dress_sets.len()));
     rep.table("Interior randomisation by seed", &["seed", "guilty", "dresses (pawn: body material)"], rows);
-    // [inventory] The nonlethal route on a fresh match.
-    let mut n = fresh(&setup, &maps, &def)?;
-    let stages = nonlethal(&mut n, &db)?;
-    if ctx.args.iter().any(|a| a == "--dump") {
-        dump(&n);
+    routes(ctx, rep, &setup, &maps, &def, &db)
+}
+
+/// The other routes through the original mission, each on a fresh match: every stage is a
+/// check (stage, passed, detail).
+fn routes(ctx: &Ctx, rep: &mut Report, setup: &dishonored_multiplayer::game::GameSetup, maps: &MapContents, def: &MissionDef, db: &dishonored_kismet::KismetDb) -> Result<()> {
+    let only = ctx.opt("--route");
+    let want = |r: &str| only.as_deref().is_none_or(|o| o == r);
+    type Route = fn(&mut Play, &dishonored_kismet::KismetDb) -> Result<Vec<(String, bool, String)>>;
+    let list: [(&str, &str, Route); 3] = [("brisby", "Original Kismet: nonlethal route (Lord Brisby)", nonlethal), ("white", "Original Kismet: Miss White's drink", miss_white), ("duel", "Original Kismet: Lord Shaw's duel", duel)];
+    for (id, section, f) in list {
+        if !want(id) {
+            continue;
+        }
+        let mut p = fresh(setup, maps, def)?;
+        let stages = f(&mut p, db)?;
+        for (stage, ok, detail) in stages {
+            rep.check(section, &stage, ok, detail);
+        }
+        coverage_line(&p, rep, section);
+        if ctx.args.iter().any(|a| a == "--dump") {
+            dump(&p);
+        }
     }
-    rep.table("Nonlethal route (Brisby): stages reached", &["stage", "detail"], stages.into_iter().map(|(a, b)| vec![a, b]).collect());
     Ok(())
+}
+
+/// One line of op coverage for a route: unsupported classes reached on it.
+fn coverage_line(p: &Play, rep: &mut Report, section: &str) {
+    let Some(k) = &p.m().kismet else { return };
+    let cov = &k.k.coverage;
+    rep.check(section, "no unsupported Kismet class on the route", cov.unhandled.is_empty(), format!("{} activations of {} distinct ops; unsupported {:?}; no port system {:?}", cov.activations.values().sum::<u32>(), cov.activations.len(), cov.unhandled, k.st.not_modelled));
 }
 
 fn fresh<'a>(setup: &dishonored_multiplayer::game::GameSetup, maps: &'a MapContents, def: &MissionDef) -> Result<Play<'a>> {
@@ -419,75 +447,181 @@ fn play(p: &mut Play, rep: &mut Report, db: &dishonored_kismet::KismetDb) -> Res
     Ok(())
 }
 
-/// [inventory] The nonlethal route (BOYLE_MISSION.md "Nonlethal path, Lord Brisby"): Brisby's
-/// quest, the guilty sister choked unconscious, carried to the cellar boat. Returns the stages
-/// reached (stage, detail) for the report.
-fn nonlethal(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<(String, String)>> {
-    let mut rows: Vec<(String, String)> = Vec::new();
-    let (guilty, _) = interior_setup(p, db)?;
-    rows.push(("interior".into(), format!("guilty {guilty} at {:.1} s", p.time())));
-    let sister = guilty.clone();
-    // The clue note identifies her.
-    let note = ["Red", "White", "Black"].iter().find_map(|c| match var(p.m(), "L_Boyle_Int_Script", &format!("{sister}{c}Note")) {
-        Some(dishonored_kismet::Value::Obj(Obj::Actor(a))) if p.m().kismet.as_ref().is_some_and(|k| k.st.actor_pos.contains_key(&a)) => Some(a),
-        _ => None,
-    });
-    if let Some(a) = note {
-        p.use_actor(a);
-        p.idle(1.0);
-    }
-    rows.push(("clue".into(), format!("note picked {}; dress task {:?}", note.is_some(), dress_tasks(p, &sister, TaskState::Active))));
-    // Brisby: his approach hook starts his quest conversation.
-    let bris_sp = actor(db, "L_Boyle_Int_Script:DishonoredSpawner_9")?;
-    let Some(bris) = p.m().kismet.as_ref().and_then(|k| k.k.spawned.get(&bris_sp).and_then(|v| v.first().copied())) else {
-        rows.push(("brisby".into(), "Brisby not spawned".into()));
-        return Ok(rows);
-    };
-    let near = |p: &mut Play, id: u32, d: f32| {
-        if let Some(pos) = p.m().world.player(id).map(|x| x.position) {
-            p.place_near(pos, d);
-        }
-    };
-    near(p, bris, 150.0);
-    let in_pos = p.until(90.0, |m| m.state.flag("Boyle_BrisbyInPosition"));
-    rows.push(("brisby quest start".into(), format!("Boyle_BrisbyInPosition {in_pos} at {:.1} s", p.time())));
-    // His use hook: the private talk, then the guilty sister's KO conversation.
-    let mut talked = false;
-    for _ in 0..3 {
-        near(p, bris, 120.0);
-        let list = kismet_host::usables(p.m());
-        if let Some(i) = list.iter().position(|u| matches!(&u.0, kismet_host::KUse::Talk { pawn, .. } if *pawn == bris)) {
-            kismet_host::use_usable(p.mm(), AGENT, i);
-            talked = true;
-        }
-        if p.until(60.0, |m| m.state.flag("Boyle_BrisbyTalked")) {
-            break;
-        }
-        // Conversation choices: take the first option.
-        if p.m().state.view.choice.is_some() {
-            p.choose(0);
-        }
-    }
-    let ko_task: Vec<String> = (2..=4).map(|n| format!("{BA}.DishonoredTask_Custom_{n}")).filter(|t| p.task(t) == TaskState::Active).collect();
-    rows.push(("brisby talk".into(), format!("talked {talked}; Boyle_BrisbyTalked {}; KO task {:?} at {:.1} s", p.m().state.flag("Boyle_BrisbyTalked"), ko_task.iter().map(|t| p.task_text(t)).collect::<Vec<_>>(), p.time())));
-    // Knock her out from behind and carry her.
-    let spawner = match sister.as_str() {
+/// One route stage: (stage, passed, detail).
+type Stage = (String, bool, String);
+
+fn stage(rows: &mut Vec<Stage>, name: &str, ok: bool, detail: String) -> bool {
+    rows.push((name.to_string(), ok, detail));
+    ok
+}
+
+/// Pawn spawned by an original spawner (`Package:Name`).
+fn spawned_pawn(p: &Play, db: &dishonored_kismet::KismetDb, spawner: &str) -> Option<u32> {
+    let a = db.find_actor(spawner)?;
+    p.m().kismet.as_ref().and_then(|k| k.k.spawned.get(&a).and_then(|v| v.first().copied()))
+}
+
+fn sister_spawner(sister: &str) -> &'static str {
+    match sister {
         "Esma" => "L_Boyle_Int_Script:DishonoredSpawner_2",
         "Lydia" => "L_Boyle_Int_Script:DishonoredSpawner_11",
         _ => "L_Boyle_Int_Script:DishonoredSpawner_4",
+    }
+}
+
+impl Play<'_> {
+    /// Stand next to a pawn, facing it.
+    fn near_pawn(&mut self, id: u32, d: f32) {
+        if let Some(pos) = self.m().world.player(id).map(|x| x.position) {
+            self.place_near(pos, d);
+        }
+    }
+
+    /// Answer any open conversation or scripted choice with its first option.
+    fn answer(&mut self) -> bool {
+        let conv = self.m().state.view.choice.as_ref().is_some_and(|c| c.player.is_none_or(|p| p == AGENT));
+        let scripted = self.m().kismet.as_ref().is_some_and(|k| k.choosing(AGENT));
+        if conv || scripted {
+            self.choose(0);
+            return true;
+        }
+        false
+    }
+
+    /// Use the talk usable of an original NPC (its one-shot's use hook).
+    fn talk_to(&mut self, id: u32) -> bool {
+        self.near_pawn(id, 110.0);
+        let list = kismet_host::usables(self.m());
+        let Some(i) = list.iter().position(|u| matches!(&u.0, kismet_host::KUse::Talk { pawn, .. } if *pawn == id)) else { return false };
+        kismet_host::use_usable(self.mm(), AGENT, i);
+        self.step(PlayerInput::default());
+        true
+    }
+
+    /// Run until `f` holds, answering choices on the way.
+    fn until_answering(&mut self, secs: f32, f: impl Fn(&MissionMatch) -> bool) -> bool {
+        for _ in 0..(secs * 60.0) as u32 {
+            if f(self.m()) {
+                return true;
+            }
+            if !self.answer() {
+                self.step(PlayerInput::default());
+            }
+        }
+        f(self.m())
+    }
+
+    fn hist_has(&self, s: &str) -> bool {
+        self.m().kismet.as_ref().is_some_and(|k| k.st.history.iter().any(|h| h.contains(s)))
+    }
+
+    fn conv_started(&self, label: &str) -> bool {
+        self.m().state.conv_log.iter().any(|e| matches!(e, dishonored_conversation::runner::ConvEvent::Started { label: l, .. } if l == label))
+    }
+}
+
+/// The guilty sister's clue note, picked up (her dress task shows).
+fn pick_clue(p: &mut Play, sister: &str) -> Option<u32> {
+    let note = ["Red", "White", "Black"].iter().find_map(|c| match var(p.m(), "L_Boyle_Int_Script", &format!("{sister}{c}Note")) {
+        Some(dishonored_kismet::Value::Obj(Obj::Actor(a))) if p.m().kismet.as_ref().is_some_and(|k| k.st.actor_pos.contains_key(&a)) => Some(a),
+        _ => None,
+    })?;
+    p.use_actor(note);
+    p.idle(1.0);
+    Some(note)
+}
+
+/// Out of the mansion and away on Samuel's boat (the lethal route's last steps): the ballroom
+/// door to the garden, the canal trigger, Samuel's `Lets_Go`, the level change out of Boyle.
+fn leave_boyle(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<(bool, String)> {
+    let door = actor(db, "L_Boyle_Int_P:DishonoredUsableObject_10")?;
+    p.idle(1.0);
+    p.use_actor(door);
+    p.idle(0.2);
+    p.choose(0);
+    if !p.until(5.0, |m| m.current_map().eq_ignore_ascii_case("L_Boyle_Ext_P")) {
+        return Ok((false, format!("still on {}", p.m().current_map())));
+    }
+    p.idle(2.0);
+    let tv = actor(db, "L_BoyleStreet_Ext_Script:TriggerVolume_23")?;
+    p.enter(tv);
+    p.until(5.0, |m| m.state.task(&format!("{BA}.DishonoredTask_Custom_10")) == Some(TaskState::Active));
+    for t in ["L_BoyleStreet_Ext_Script:DisTrigger_35", "L_BoyleStreet_Ext_Script:DisTrigger_0", "L_BoyleStreet_Ext_Script:DisTrigger_34"] {
+        let a = actor(db, t)?;
+        p.enter(a);
+        if p.until(30.0, |m| m.state.view.choice.is_some()) {
+            p.choose(0);
+        }
+        if p.until(60.0, |m| m.state.outcome().is_some()) {
+            break;
+        }
+    }
+    let outcome = p.m().state.outcome().cloned();
+    Ok((outcome.as_ref().is_some_and(|o| o.success), format!("outcome {outcome:?} at {:.1} s", p.time())))
+}
+
+/// The nonlethal route (BOYLE_MISSION.md "Nonlethal path, Lord Brisby"): Brisby's approach
+/// hook starts his quest, he walks to his private spot, his use hook gives the guilty
+/// sister's KO task, she is choked unconscious and carried to the cellar boat, Brisby takes
+/// her away (`Thanks`, the gate closes, `CompleteMercyPath`), and the mission ends on
+/// Samuel's boat.
+fn nonlethal(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<Stage>> {
+    let mut rows: Vec<Stage> = Vec::new();
+    let (guilty, _) = interior_setup(p, db)?;
+    let sister = guilty.clone();
+    let clue = pick_clue(p, &sister);
+    let dress = dress_tasks(p, &sister, TaskState::Active);
+    if !stage(&mut rows, "interior: the guilty sister is picked and her clue note shows her dress task", clue.is_some() && dress.len() == 1, format!("guilty {guilty}; dress task {:?} at {:.1} s", dress.iter().map(|t| p.task_text(t)).collect::<Vec<_>>(), p.time())) {
+        return Ok(rows);
+    }
+    // Brisby: his approach hook (close band) starts `Lord_Brisby_Quest_Start`; its output
+    // `Join_Brisby_in_Private` sends him to TargetPoint_120 (AIGoToActor), T26 shows.
+    let Some(bris) = spawned_pawn(p, db, "L_Boyle_Int_Script:DishonoredSpawner_9") else {
+        stage(&mut rows, "Brisby is spawned", false, "no pawn".into());
+        return Ok(rows);
     };
-    let sa = actor(db, spawner)?;
-    let Some(her) = p.m().kismet.as_ref().and_then(|k| k.k.spawned.get(&sa).and_then(|v| v.first().copied())) else {
-        rows.push(("knock-out".into(), "sister not spawned".into()));
+    p.near_pawn(bris, 150.0);
+    let started = p.until_answering(30.0, |m| m.state.conv_log.iter().any(|e| matches!(e, dishonored_conversation::runner::ConvEvent::Started { label, .. } if label == "Lord_Brisby_Quest_Start")));
+    let t26 = format!("{BA}.DishonoredTask_Custom_26");
+    let in_pos = p.until_answering(90.0, |m| m.state.flag("Boyle_BrisbyInPosition"));
+    let goto_ok = p.hist_has("Brisby") || in_pos;
+    if !stage(&mut rows, "Brisby's approach hook starts Lord_Brisby_Quest_Start; Join_Brisby_in_Private walks him to his spot (AIGoToActor Success): Boyle_BrisbyInPosition, T26", started && in_pos && goto_ok, format!("quest start {started}; in position {in_pos}; T26 {:?} at {:.1} s", p.task(&t26), p.time())) {
+        return Ok(rows);
+    }
+    // His use hook: `Brisby_Boyle_Invite`, then the guilty sister's KO conversation, whose
+    // soiree starts `GetBrisbyQuest` (Boyle_BrisbyTalked, the KO task for her).
+    let mut talked = false;
+    for _ in 0..4 {
+        talked |= p.talk_to(bris);
+        if p.until_answering(60.0, |m| m.state.flag("Boyle_BrisbyTalked")) {
+            break;
+        }
+    }
+    let ko_n = match sister.as_str() {
+        "Esma" => 2,
+        "Lydia" => 3,
+        _ => 4,
+    };
+    let ko_task = format!("{BA}.DishonoredTask_Custom_{ko_n}");
+    p.until(5.0, |m| m.state.task(&ko_task) == Some(TaskState::Active));
+    if !stage(&mut rows, "Brisby's use hook: Brisby_Boyle_Invite, then her KO conversation -> GetBrisbyQuest: Boyle_BrisbyTalked and her KO task", talked && p.m().state.flag("Boyle_BrisbyTalked") && p.task(&ko_task) == TaskState::Active, format!("talked {talked}; Boyle_BrisbyTalked {}; {ko_task} {:?} \"{}\" at {:.1} s", p.m().state.flag("Boyle_BrisbyTalked"), p.task(&ko_task), p.task_text(&ko_task), p.time())) {
+        return Ok(rows);
+    }
+    // Knock her out from behind (choke) and lift her.
+    let Some(her) = spawned_pawn(p, db, sister_spawner(&sister)) else {
+        stage(&mut rows, "the guilty sister is spawned", false, "no pawn".into());
         return Ok(rows);
     };
     let mut carrying = false;
-    for _ in 0..(30 * 60) {
+    for _ in 0..(40 * 60) {
         let Some(t) = p.m().world.player(her).cloned() else { break };
         let me = *p.m().world.player(AGENT).unwrap();
         if me.carrying == Some(her) {
             carrying = true;
             break;
+        }
+        if p.answer() {
+            continue;
         }
         if me.choke.phase == dishonored_sim::state::ChokePhase::None && t.condition == dishonored_sim::state::Condition::Normal {
             let back = Vec3::new(t.yaw.to_radians().cos(), t.yaw.to_radians().sin(), 0.0);
@@ -497,37 +631,158 @@ fn nonlethal(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<(Stri
             m.velocity = Vec3::ZERO;
             m.yaw = t.yaw;
         }
-        // Her approach hook can open a conversation choice, which freezes the agent: answer it.
-        if p.m().state.view.choice.as_ref().is_some_and(|c| c.player == Some(AGENT)) {
-            p.choose(0);
-            continue;
-        }
         let yaw = p.m().world.player(AGENT).unwrap().yaw;
         // Release once before the first press so the press is an edge.
         let b = if me.choke.phase == dishonored_sim::state::ChokePhase::None && me.prev_buttons & buttons::USE != 0 { 0 } else { buttons::USE };
         p.step(PlayerInput { yaw, pitch: 0.0, buttons: b, ..Default::default() });
     }
     let her_state = p.m().world.player(her).map(|t| (t.alive, t.condition));
-    let ko_target = p.m().state.view.target;
-    rows.push(("knock-out and carry".into(), format!("{sister} {her_state:?}; carrying {carrying}; task target {ko_target:?}; KO task {:?} at {:.1} s", ko_task.iter().map(|t| p.task(t)).collect::<Vec<_>>(), p.time())));
-    if !carrying {
+    let boat_target = p.m().kismet.as_ref().and_then(|k| k.st.targets.get(&ko_task).cloned());
+    let knocked = p.hist_has(&format!("knock-out of pawn {her}"));
+    if !stage(&mut rows, "she is choked unconscious (DisSeqEvent_KnockedOut retargets the KO task to the cellar boat) and carried", carrying && knocked && boat_target.is_some(), format!("{sister} {her_state:?}; carrying {carrying}; KO task target {boat_target:?} at {:.1} s", p.time())) {
         return Ok(rows);
     }
-    p.idle(2.0);
-    // The cellar boat: DisTrigger_23 (TestBoyleBody_Touch), then the boat volumes.
+    // Into the cellar: DisTrigger_23 tests the body (TestBoyleBody_Touch), the body goes on the
+    // boat (TriggerVolume_10, "Lady On Boat?"), Brisby thanks the player and the gate closes.
     let trig = actor(db, "L_Boyle_Int_Script:DisTrigger_23")?;
     p.enter(trig);
     p.idle(1.0);
-    let me = *p.m().world.player(AGENT).unwrap();
-    rows.push(("at the boat".into(), format!("agent {:.0},{:.0},{:.0}; body {:?}", me.position.x, me.position.y, me.position.z, p.m().world.player(her).map(|b| b.position))));
-    // Drop her in the boat.
-    let yaw = me.yaw;
-    p.step(PlayerInput { yaw, ..Default::default() });
-    p.step(PlayerInput { yaw, buttons: buttons::USE, ..Default::default() });
+    let boat = actor(db, "L_Boyle_Int_Script:TriggerVolume_10")?;
+    let boat_pos = Vec3::from(db.actors[boat as usize].location);
+    // Drop her on the boat.
+    {
+        let me = p.mm().world.player_mut(AGENT).unwrap();
+        me.position = boat_pos + Vec3::new(-60.0, 0.0, 40.0);
+        me.velocity = Vec3::ZERO;
+        me.yaw = 0.0;
+    }
+    p.step(PlayerInput::default());
+    p.step(PlayerInput { buttons: buttons::USE, ..Default::default() });
+    p.idle(1.0);
+    if let Some(b) = p.mm().world.player_mut(her) {
+        b.position = boat_pos + Vec3::Z * 20.0;
+        b.velocity = Vec3::ZERO;
+    }
+    let tv8 = actor(db, "L_Boyle_Int_Script:TriggerVolume_8")?;
+    p.enter(tv8);
+    let done = p.until_answering(150.0, |m| m.state.flag("BoyleMercyPathComplete"));
+    let t6 = format!("{BA}.DishonoredTask_Custom_6");
+    let thanks = p.conv_started("Thanks");
+    if !stage(&mut rows, "the cellar boat: TestBoyleBody_Touch, Thanks (its soiree closes the gate) -> CompleteMercyPath: BoyleMercyPathComplete, KO task completed, T6 escape", done && p.task(&ko_task) == TaskState::Completed && p.task(&t6) == TaskState::Active, format!("Thanks {thanks}; BoyleMercyPathComplete {done}; {ko_task} {:?}; T6 {:?}; SF_Global_PlyrMercyBoyle {} at {:.1} s", p.task(&ko_task), p.task(&t6), p.m().state.flag("SF_Global_PlyrMercyBoyle"), p.time())) {
+        return Ok(rows);
+    }
+    let (ended, detail) = leave_boyle(p, db)?;
+    stage(&mut rows, "the way out as on the lethal route: Samuel's boat ends the mission (nonlethal)", ended, detail);
+    Ok(rows)
+}
+
+/// Miss White's drink (BOYLE_MISSION.md section 3 "How the player learns the dress", 2): her
+/// `Hits_On_Player` conversation asks for a drink (T25), the drink comes from the party's
+/// drinks (`DisSeqAct_GivePickup` of the party drink), handing it over runs
+/// `MissWhiteRevealsColors`: she names Waverly's and Lydia's colours, `WhiteToldAllColors`,
+/// and the guilty sister's dress task shows.
+fn miss_white(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<Stage>> {
+    let mut rows: Vec<Stage> = Vec::new();
+    let (guilty, _) = interior_setup(p, db)?;
+    let Some(white) = spawned_pawn(p, db, "L_Boyle_Int_Script:DishonoredSpawner_20") else {
+        stage(&mut rows, "Miss White is spawned", false, "no pawn".into());
+        return Ok(rows);
+    };
+    let t25 = format!("{BA}.DishonoredTask_Custom_25");
+    // Approach her (her approach hooks), then talk (use hook): `Hits_On_Player`.
+    p.near_pawn(white, 200.0);
+    let mut asked = p.until_answering(20.0, |m| m.state.task(&format!("{BA}.DishonoredTask_Custom_25")) == Some(TaskState::Active));
+    for _ in 0..3 {
+        if asked {
+            break;
+        }
+        p.talk_to(white);
+        asked = p.until_answering(40.0, |m| m.state.task(&format!("{BA}.DishonoredTask_Custom_25")) == Some(TaskState::Active));
+    }
+    if !stage(&mut rows, "Miss White's Hits_On_Player conversation asks for a drink: Quest For the Drink -> T25 active", asked, format!("Hits_On_Player {}; T25 {:?} \"{}\" at {:.1} s", p.conv_started("Hits_On_Player"), p.task(&t25), p.task_text(&t25), p.time())) {
+        return Ok(rows);
+    }
+    // The drink: the Kismet usable that gives it (`Got Yourself a Drink` / the party drink).
+    let drink = "boylepartydrink_AbsItm";
+    let mut got = p.m().state.items.get(drink).copied().unwrap_or(0) > 0;
+    let mut used: Vec<String> = Vec::new();
+    if !got {
+        let target = p.m().kismet.as_ref().and_then(|k| k.st.targets.get(&t25).cloned());
+        let tpos = match &target {
+            Some(Obj::Actor(a)) => Some(Vec3::from(db.actors[*a as usize].location)),
+            _ => db.find_actor("L_Boyle_Int_Script:TargetPoint_108").map(|a| Vec3::from(db.actors[a as usize].location)),
+        };
+        let mut cands: Vec<(u32, f32)> = kismet_host::usables(p.m())
+            .into_iter()
+            .filter_map(|(u, pos, _)| match u {
+                kismet_host::KUse::Actor(a) | kismet_host::KUse::Pickup(a) => Some((a, tpos.map(|t| t.distance(pos)).unwrap_or(0.0))),
+                _ => None,
+            })
+            .collect();
+        cands.sort_by(|a, b| a.1.total_cmp(&b.1));
+        for (a, _) in cands.into_iter().take(6) {
+            used.push(db.actors[a as usize].name.clone());
+            p.use_actor(a);
+            p.until_answering(3.0, |m| m.state.items.get(drink).copied().unwrap_or(0) > 0);
+            if p.m().state.items.get(drink).copied().unwrap_or(0) > 0 {
+                got = true;
+                break;
+            }
+        }
+    }
+    if !stage(&mut rows, "the party drink: the drinks usable gives it (DisSeqAct_GivePickup BoylePartyDrink_twk)", got, format!("used {used:?}; items {:?} at {:.1} s", p.m().state.items, p.time())) {
+        return Ok(rows);
+    }
+    // Hand it over: talk to her again; `Takes_Drink`, then the colour conversations.
+    let mut told = false;
+    for _ in 0..3 {
+        p.talk_to(white);
+        if p.until_answering(90.0, |m| m.state.flag("WhiteToldAllColors")) {
+            told = true;
+            break;
+        }
+    }
+    let gone = p.m().state.items.get(drink).copied().unwrap_or(0) == 0;
+    let convs: Vec<&str> = ["Takes_Drink", "WaverlyRed", "WaverlyWhite", "WaverlyBlack", "LydiaRed", "LydiaWhite", "LydiaBlack"].into_iter().filter(|c| p.conv_started(c)).collect();
+    if !stage(&mut rows, "handing her the drink: Takes_Drink, RemoveAbstractItem, MissWhiteRevealsColors (Waverly's then Lydia's colour), WhiteToldAllColors, T25 completed", told && gone && p.task(&t25) == TaskState::Completed, format!("conversations {convs:?}; drink removed {gone}; WhiteToldAllColors {told}; T25 {:?} at {:.1} s", p.task(&t25), p.time())) {
+        return Ok(rows);
+    }
+    p.idle(3.0);
+    let dress = dress_tasks(p, &guilty, TaskState::Active);
+    stage(&mut rows, "her colours identify the guilty sister: her dress task shows (Set New Objective Based on Clues)", dress.len() == 1, format!("guilty {guilty}; dress task {:?}", dress.iter().map(|t| p.task_text(t)).collect::<Vec<_>>()));
+    Ok(rows)
+}
+
+/// Lord Shaw's duel (BOYLE_MISSION.md PN tasks): delivering Pendleton's note to Shaw in the
+/// garden starts the duel; Shaw is followed to the duel ground, both take their marks and the
+/// duel is fought.
+fn duel(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<Stage>> {
+    let mut rows: Vec<Stage> = Vec::new();
+    p.until(90.0, |m| m.state.task(&format!("{BA}.DishonoredTask_Custom_12")) == Some(TaskState::Active));
+    let pn0 = "PendeltonsNote.DishonoredTask_Custom_0".to_string();
+    let pn2 = "PendeltonsNote.DishonoredTask_Custom_2".to_string();
+    // The note from Pendleton (given in the previous mission).
+    *p.mm().state.items.entry("Pendleton_Shaw_Note".into()).or_insert(0) += 1;
+    stage(&mut rows, "Pendleton's note task (PN T0) is active", p.task(&pn0) == TaskState::Active, format!("PN T0 {:?} \"{}\"", p.task(&pn0), p.task_text(&pn0)));
+    let tv = actor(db, "L_Boyle_Ext_Script:TriggerVolume_14")?;
+    p.enter(tv);
     p.idle(2.0);
-    let done = p.until(120.0, |m| m.state.flag("BoyleMercyPathComplete"));
-    let hist: Vec<String> = p.history().into_iter().filter(|h| h.to_ascii_lowercase().contains("touch") || h.contains("knock") || h.contains("Mercy") || h.contains("Brisby")).rev().take(8).collect();
-    rows.push(("mercy path".into(), format!("BoyleMercyPathComplete {done}; KO task {:?}; recent: {}", ko_task.iter().map(|t| p.task(t)).collect::<Vec<_>>(), hist.join(" | "))));
+    let Some(shaw) = spawned_pawn(p, db, "L_Boyle_Ext_Script:DishonoredSpawner_45") else {
+        stage(&mut rows, "Lord Shaw is spawned", false, "no pawn".into());
+        return Ok(rows);
+    };
+    // Give him the note: walk up to him (his note trigger is attached to his head) and talk.
+    let mut read = false;
+    for _ in 0..4 {
+        p.near_pawn(shaw, 80.0);
+        p.step(PlayerInput::default());
+        p.talk_to(shaw);
+        if p.until_answering(30.0, |m| m.state.task(&"PendeltonsNote.DishonoredTask_Custom_2".to_string()) == Some(TaskState::Active) || m.state.task(&"PendeltonsNote.DishonoredTask_Custom_0".to_string()) == Some(TaskState::Completed)) {
+            read = true;
+            break;
+        }
+    }
+    stage(&mut rows, "the note delivered: Shaw reads it, PN T0 completes and PN T2 \"Follow Lord Shaw\" activates", read && p.task(&pn2) == TaskState::Active, format!("PN T0 {:?}; PN T2 {:?} at {:.1} s", p.task(&pn0), p.task(&pn2), p.time()));
     Ok(rows)
 }
 
@@ -550,6 +805,7 @@ fn coverage(p: &Play, rep: &mut Report, db: &dishonored_kismet::KismetDb) {
     rep.check(S, "coverage report", true, format!("{} op classes executed of {} op classes in the data; {} activations of {} distinct ops; {} host-handled / {} presentation / {} unsupported activations ({} unsupported classes)", executed.len(), total_classes, activations, cov.activations.len(), cov.total_handled(), k.st.presentation.values().sum::<u32>(), cov.total_unhandled(), cov.unhandled.len()));
     let mut rows: Vec<Vec<String>> = cov.handled.iter().map(|(c, n)| vec![c.clone(), n.to_string(), "run".into()]).collect();
     rows.extend(k.st.presentation.iter().map(|(c, n)| vec![c.clone(), n.to_string(), "presentation (no-op)".into()]));
+    rows.extend(k.st.not_modelled.iter().map(|(c, n)| vec![c.clone(), n.to_string(), "no port system (decoded, auto outputs)".into()]));
     rows.extend(cov.unhandled.iter().map(|(c, n)| vec![c.clone(), n.to_string(), "UNSUPPORTED (logged, auto outputs)".into()]));
     rows.sort_by(|a, b| b[1].parse::<u32>().unwrap_or(0).cmp(&a[1].parse::<u32>().unwrap_or(0)));
     rep.table("Kismet op classes activated", &["class", "activations", "handling"], rows);
