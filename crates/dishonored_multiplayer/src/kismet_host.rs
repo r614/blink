@@ -137,6 +137,9 @@ pub struct ViewTrack {
     pub rate: f32,
     pub freedom: (f32, f32),
     pub hold: bool,
+    /// The player's wanted view (input) on the first tracked tick: turning from it moves the
+    /// view inside the freedom.
+    pub want0: Option<(f32, f32)>,
 }
 
 impl ViewTrack {
@@ -150,7 +153,8 @@ impl ViewTrack {
         let lerp = |s: f32, e: f32| s + wrap180(e - s) * a;
         let base = (lerp(self.start.0, look.0), lerp(self.start.1, look.1));
         // The player's own turning since the start moves the view within the freedom.
-        let off = (wrap180(want.0 - self.start.0).clamp(-self.freedom.0, self.freedom.0), (want.1 - self.start.1).clamp(-self.freedom.1, self.freedom.1));
+        let w0 = self.want0.unwrap_or(want);
+        let off = (wrap180(want.0 - w0.0).clamp(-self.freedom.0, self.freedom.0), (want.1 - w0.1).clamp(-self.freedom.1, self.freedom.1));
         (base.0 + off.0, (base.1 + off.1).clamp(-89.0, 89.0))
     }
 }
@@ -736,7 +740,7 @@ impl Host for H<'_> {
                 let id = self.st.track_id;
                 for p in self.players() {
                     let Some(pl) = self.m.world.player(p) else { continue };
-                    let t = ViewTrack { id, pawn, point, start: (pl.yaw, pl.pitch), alpha: if blend > 1e-4 { 0.0 } else { 1.0 }, rate: if blend > 1e-4 { 1.0 / blend } else { 0.0 }, freedom, hold };
+                    let t = ViewTrack { id, pawn, point, start: (pl.yaw, pl.pitch), alpha: if blend > 1e-4 { 0.0 } else { 1.0 }, rate: if blend > 1e-4 { 1.0 / blend } else { 0.0 }, freedom, hold, want0: None };
                     self.st.tracking.insert(p, t);
                 }
                 cx.set_prop("m_TrackingID", Value::Int(id));
@@ -1981,6 +1985,7 @@ pub fn track_views(m: &mut MissionMatch, inputs: &mut [(PlayerId, dishonored_sim
             None => t.point,
         };
         t.alpha = (t.alpha + t.rate * dt).min(1.0);
+        t.want0.get_or_insert((i.yaw, i.pitch));
         let (yaw, pitch) = t.apply(me.position + Vec3::Z * 64.0, target, (i.yaw, i.pitch));
         i.yaw = yaw;
         i.pitch = pitch;
@@ -2190,7 +2195,7 @@ fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
             let d = k.trigger(h, "SeqEvent_Death", &origs, inst.clone(), None);
             let n = k.trigger(h, "DisSeqEvent_NPCIncapacitated", &origs, inst, Some(vec![0]));
             if !d.is_empty() || !n.is_empty() {
-                h.note(format!("death of pawn {victim}: {} death / {} incapacitated events", d.len(), n.len()));
+                h.note(format!("death of pawn {victim} (killer {killer:?}): {} death / {} incapacitated events", d.len(), n.len()));
             }
         }
     }
@@ -2506,7 +2511,7 @@ mod tests {
 
     #[test]
     fn view_tracking_blends_eased_and_keeps_the_freedom() {
-        let t = |alpha: f32| ViewTrack { id: 1, pawn: None, point: Vec3::new(0.0, 1000.0, 0.0), start: (0.0, 0.0), alpha, rate: 1.0 / 3.0, freedom: (20.0, 20.0), hold: false };
+        let t = |alpha: f32| ViewTrack { id: 1, pawn: None, point: Vec3::new(0.0, 1000.0, 0.0), start: (0.0, 0.0), alpha, rate: 1.0 / 3.0, freedom: (20.0, 20.0), hold: false, want0: Some((0.0, 0.0)) };
         let eye = Vec3::ZERO;
         // Target straight left (yaw 90): at the start the view is unchanged, halfway (eased) at
         // alpha 0.5, on target at 1.

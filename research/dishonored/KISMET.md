@@ -366,8 +366,29 @@ Each runs on a fresh match; every stage is a check.
   mark trigger TriggerVolume_2, and `Shaw_Elite_Pistols` (`_46`) to TargetPoint_55. When the
   elite arrives, `enableshawtrig` arms Shaw's touch (`SeqEvent_Touch_39`, "Shaw On Mark"). With
   the player on TriggerVolume_3 the loop plays `Go_to_Mark` and the countdown `Three` / `Two` /
-  `One`; "turn off mark trigger" completes PN T2. `Turn_and_Fire` and the shot are not reached:
-  after `One` Lord Shaw panics and flees (U-221).
+  `One`; "turn off mark trigger" completes PN T2.
+  - **The shot (2026-10-06).** With the player looking away (`SeqEvent_LOS_2` on
+    `Trigger_LOS_2` sets "Player Looking Away"), `CompareBool_21` starts `One` and, in the same
+    step, "Shaw Shoots": `DisSeqAct_AIShoot_0` makes Lord Shaw shoot at the player from `One`
+    on (`m_iMaxNumShots` 0 = forever, accuracy override 100 %): he turns early. `One`'s output
+    runs `SetIgnoreDeath_0` and "Go Time" (Duel_Started, "Licence To Kill", "OK To Fire", PN T2
+    completed). "Go Time" also links to the `Turn_and_Fire` input of `DisSeqAct_DialogInputs_6`,
+    but that input link is **disabled** (`bDisabled`): `Turn_and_Fire` never plays in the
+    original.
+  - **Outcome.** Shaw's `DisSeqEvent_NPCIncapacitated_0` (culprit: the player) with "Player
+    Failed Duel" false and `DeliveredNoteToShaw` set: "Player Won Duel", PN T1 shown and active,
+    `PistolDuelWon`, story flags `PistolWinHonor` and `boyle_pistol_win`, the seconds become
+    allies of Corvo and go to check the body. With "Player Failed Duel" set: `PistolWinMess`.
+  - **View tracking.** Touching the mark ("Mark Touched") toggles cinematic mode and
+    `DisSeqAct_PlayerTrackTarget_0` ("Start Tracking") turns the camera toward `Trigger_LOS_2`
+    over 3 s with 20 degrees of freedom; `_11` ("Stop Tracking") on "UnfreezeForDuel". Decoded
+    from the camera code (`kismet_host::ViewTrack`, 0x00b8f9c0 / 0x00aaf4c0 /
+    0x00ab4e60 / 0x00aa0f10 / 0x00aaf3a0 / 0x00aa0e60): without `m_bHoldUntilStopped` the
+    channel ends by itself once blended in.
+  - Port run (`kismet --route duel`, 8/8): the countdown at 93.4 / 96.4 / 98.4 s, Shaw shoots
+    from 98.4 s, the player kills him at 101.4 s, `PistolWinHonor` and PN T1 at 102.4 s (the
+    player survives with 2 health). Open: the pistol second (2008) is killed at 101.1 s by the
+    other second (2004) (U-480).
   - **Publishing array properties.** An op's array property (`Targets`) is written back to its
     variables element by element (`runtime::publish_values`, UE3 `PublishValue`). Several duel
     ops link `Targets` to all three of Shaw's variables. Until 2026-10-06 the whole array went
@@ -409,7 +430,8 @@ Clear / ClearAll per `EDisSetDispositionKismetInput`, decoded 0x00c79000) and
   resolved at load, `KismetSetup::gives`) go to `MissionState::items`, which the
   conversations' `DisConv_HasAbstractItem` reads.
 - AI: `AIDoSearch`, `AISetSuspicionLevel`, `AIClearAttention`, `AIPsychicAttention`,
-  `AIRingAlarm`, `AIShoot` (latent, shots counted from `SimEvent::Fired`), `AIDoFollow`,
+  `AIRingAlarm`, `AIShoot` (latent, shots counted from `SimEvent::Fired`; drives the brain's
+  Shoot behaviour, AI.md "Scripted shoot"), `PlayerTrackTarget` (forced view), `AIDoFollow`,
   `AIDoSimpleBehaviors`, `AIStartDistraction`, `AINoise` (radius from
   `m_LoudnessDistanceArray`), `SetIgnoreDeath`, `ForbiddenZoneOverride`, `AlarmBell`.
 - Other: `GameOver` (mission failure after `m_fDelay`), `AttachPickup`, `ModifyHealth`, chaos

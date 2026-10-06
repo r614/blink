@@ -368,7 +368,12 @@ CONFIRMED from the code unless marked.
     - `_parts_ext_mc._alpha = 100 - 1.5 max(0, p - 40)`;
     - external parts: part0 `_y = -d - offset`, part1 `_x = d + offset`, part2 `_y = d + offset`,
       part3 `_x = -d - offset`, part4 `_x = d + offset + 5`, part5 `_x = -d - offset - 5`;
-    - internal parts on the axes at distance `d`.
+    - internal parts (checked 2026-10-06 with `swf_dump --actions 781`): part0 `_y = -d`, part1
+      `_x = d`, `_y = -d`, part2 `_y = d`, part3 `_x = -d`, `_y = -d`. The crossbow's
+      `SetDispersion` does not call the gun's: no clip rotation.
+  - Coordinates the script does not set keep their authored value. `_rotation` replaces the
+    clip's rotation and keeps its scale: the gun's `_parts_int_mc` is authored at -45 degrees,
+    scale 0.586, alpha 0.2, and the first `SetDispersion` turns it to `-5 p / 100`.
 - **Not found:** `DisTweaks_PlayerPawn.m_fMovementDispersionIncrease` and
   `m_fCameraMovementDispersionIncrease` (+0x2AC / +0x2B0, both 0.5). An offset scan finds no
   player code that reads them; the hits are other classes with the same offsets (U-422).
@@ -376,8 +381,18 @@ CONFIRMED from the code unless marked.
   `LeftHandState.dispersion`. Draws come from the pawn's random stream (two rolls per shot). The
   view is a fixed reference, the default FOV on 16:9 (`DISPERSION_REF_*`): the original uses
   the player's actual view, which the server does not know. "Jump" is the Falling move mode.
-  Sleep darts and incendiary bolts count as loaded while not reloading. The crosshair does not
-  spread yet (U-420).
+  Sleep darts and incendiary bolts count as loaded while not reloading.
+- **Crosshair port** (`gfx_hud::cross_layout`, 2026-10-06, U-420): each quad of a part keeps its
+  corners relative to the part origin (from the clip and part matrices of the frame-0 display
+  lists); `SetDispersion(d, d / max x 100)` is applied when `d` moved by 0.1, with `max` from
+  `left_hand::Dispersion::of` (upgrades included). Positions, clip rotation and the external
+  clip's alpha follow the script above.
+- **Slot 98's callers** (U-421, 2026-10-06): `VCallers` for `CALL [reg+0x188]` over the whole
+  code finds six functions; none calls a ranged weapon with slot 98's three arguments
+  (0x00b71ca0 / ce0 / d20 use the global 0x0144721c, 0x00b73190 a 0-argument test on an item,
+  0x00c53260 an animation object, 0x00bfee00 a one-argument thunk with no references). The base
+  helper 0x00c12110 is only called by 0x00c312a0. LIKELY unused in retail; the port keeps the
+  confirmed order (shot, then max).
 
 ### Falling damage (`TakeFallingDamage`, 0x00B4DCC0, vtable +0x528)
 

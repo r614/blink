@@ -911,13 +911,27 @@ fn duel(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<Stage>> {
     // output sends "Go Time" (Duel_Started, "Licence To Kill"). "Go Time" also links to the
     // `Turn_and_Fire` input of `DisSeqAct_DialogInputs_6`, but that input is disabled in the
     // data (`bDisabled`), so the conversation never plays in the original either.
+    // On the mark the player is told to look away from Shaw: at `Trigger_LOS_2` (the
+    // "Player Looks Away Trigger" `SeqEvent_LOS_2`), where the forced view tracking
+    // (`DisSeqAct_PlayerTrackTarget_0`) also turns the camera.
     let mark = actor(db, "L_Boyle_Ext_Script:TriggerVolume_3")?;
+    let los = actor(db, "L_Boyle_Ext_Script:Trigger_LOS_2")?;
+    let los_at = Vec3::from(p.m().kismet.as_ref().unwrap().k.db.actors[los as usize].location);
+    let started = |m: &MissionMatch| matches!(var(m, "L_Boyle_Ext_Script", "Duel_Started"), Some(dishonored_kismet::Value::Bool(true)));
     let mut fire = false;
-    for _ in 0..90 {
+    'mark: for _ in 0..90 {
         p.enter(mark);
-        if p.until_answering(1.0, |m| matches!(var(m, "L_Boyle_Ext_Script", "Duel_Started"), Some(dishonored_kismet::Value::Bool(true)))) {
-            fire = true;
-            break;
+        for _ in 0..60 {
+            if started(p.m()) {
+                fire = true;
+                break 'mark;
+            }
+            if p.answer() {
+                continue;
+            }
+            let me = *p.m().world.player(AGENT).unwrap();
+            let to = los_at - (me.position + Vec3::Z * 64.0);
+            p.step(PlayerInput { yaw: to.y.atan2(to.x).to_degrees(), pitch: (to.z / to.truncate().length().max(1.0)).atan().to_degrees(), ..Default::default() });
         }
     }
     let counted: Vec<&str> = ["Go_to_Mark", "Duel_Explained", "Three", "Two", "One", "Turn_and_Fire"].into_iter().filter(|c| p.conv_started(c)).collect();
