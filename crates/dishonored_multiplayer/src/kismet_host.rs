@@ -302,6 +302,22 @@ impl KismetRun {
         KismetRun { k, st, setup: Arc::new(setup.clone()), nav_cache: None }
     }
 
+    /// Where a mover actor (`<package>:<name>`) is now relative to where the map placed it
+    /// (`placed`): its Kismet location and rotation (matinee moves, attachments, teleports) x
+    /// the inverse of the placed transform. None when the Kismet has not moved it.
+    pub fn mover_delta(&self, actor: &str, placed: glam::Mat4) -> Option<glam::Mat4> {
+        let a = self.k.db.find_actor(actor)?;
+        let pos = self.st.actor_pos.get(&a).copied();
+        let rot = self.st.actor_rot.get(&a).copied();
+        if pos.is_none() && rot.is_none() {
+            return None;
+        }
+        let act = &self.k.db.actors[a as usize];
+        let pos = pos.unwrap_or_else(|| Vec3::from(act.location));
+        let rot = rot.unwrap_or_else(|| glam::Quat::from_mat3(&dishonored_kismet::interp::rot_matrix_units(act.rotation)));
+        Some(glam::Mat4::from_rotation_translation(rot, pos) * placed.inverse())
+    }
+
     /// The navigation the AI should path on this step: the map's navmesh with the doors the
     /// Kismet locked or unlocked (`DisSeqAct_Door` Lock / Unlock) applied to their path-object
     /// edges (a locked `DisDoor` blocks its edges, as `m_bLocked` does at level start). None
@@ -369,6 +385,18 @@ impl dishonored_world::WorldQuery for NavOverlay<'_> {
     }
     fn nav(&self) -> Option<&dishonored_world::nav::NavWorld> {
         Some(self.nav)
+    }
+    fn box_contacts(&self, b: &dishonored_world::PawnBox, channels: u8, out: &mut Vec<dishonored_world::Contact>) {
+        self.inner.box_contacts(b, channels, out)
+    }
+    fn sweep_box(&self, b: &dishonored_world::PawnBox, delta: Vec3, channels: u8) -> Option<dishonored_world::SweepHit> {
+        self.inner.sweep_box(b, delta, channels)
+    }
+    fn water_at(&self, p: Vec3) -> Option<dishonored_world::WaterInfo> {
+        self.inner.water_at(p)
+    }
+    fn movers(&self) -> &[dishonored_world::MoverCollision] {
+        self.inner.movers()
     }
 }
 

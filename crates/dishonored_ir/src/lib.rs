@@ -304,6 +304,20 @@ pub struct MeshInstance {
     /// Baked lighting for this component (LOD0), if any.
     #[serde(default)]
     pub lightmap: Option<InstanceLightmap>,
+    /// The component belongs to a mover (`InterpActor`) that blocks pawns: it collides where
+    /// the actor is at run time (Kismet matinees and attachments move it), not in the static
+    /// collision.
+    #[serde(default)]
+    pub mover: Option<MoverRef>,
+}
+
+/// The actor of a mover component.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MoverRef {
+    /// `<package>:<actor name>`, as the Kismet names actors (e.g. `L_BoyleStreet_Ext_Script:InterpActor_1`).
+    pub actor: String,
+    /// The actor's placed transform (location and rotation) when the map was imported.
+    pub actor_to_world: Mat4,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

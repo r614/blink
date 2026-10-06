@@ -137,6 +137,8 @@ when blocking path objects are ignored and 90% with the level-start door/blocker
 
 ## Gaps
 
+- Movers: `InterpActor` components collide where the Kismet has moved them (`Layered` over the static
+  world); other movable actor classes (`KActor`, `DisDoor`, usables) still do not collide.
 - The obstacle mesh is decoded but unused (walls come from the collision world).
 - `npcmovementcollision_model` (NPC-only blockers) is not added to the NPC collision.
 - `bHasCrossLevelPaths`: Ext/Int pylons are separate maps here; cross-level edges between

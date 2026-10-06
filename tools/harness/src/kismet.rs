@@ -372,6 +372,12 @@ fn play(p: &mut Play, rep: &mut Report, db: &dishonored_kismet::KismetDb) -> Res
         started && ended && locked && p1.truncate().distance(p0.truncate()) > 3000.0 && p1.truncate().distance(shore.truncate()) < 800.0 && blurbs >= 3 && ((t1 - t0) - 29.8).abs() < 0.5,
         format!("played {:.2} s from {:.1} s; agent ({:.0}, {:.0}) -> 10 s ({:.0}, {:.0}) -> ({:.0}, {:.0}), {:.0} uu from the Shore point; held {locked}; {blurbs} blurbs", t1 - t0, t0, p0.x, p0.y, p10.x, p10.y, p1.x, p1.y, p1.truncate().distance(shore.truncate())),
     );
+    // Released at the detach key (29.64 s) where `Player_Attach` holds them, mid-boat beside
+    // the jetty: the boat (`InterpActor_1`, moved along by its `Boat_Attach` attachment) is
+    // mover collision, so the player stands in it instead of dropping into the water.
+    p.idle(2.0);
+    let me = *p.m().world.player(AGENT).unwrap();
+    rep.check(S, "after the intro the player stands in the boat where the matinee released them (the boat collides where it moved)", me.mode == dishonored_sim::state::MoveMode::Walking && (me.position.z - p1.z).abs() < 20.0 && me.position.truncate().distance(p1.truncate()) < 100.0, format!("released at ({:.0}, {:.0}, {:.0}); 2 s later ({:.0}, {:.0}, {:.0}) {:?}", p1.x, p1.y, p1.z, me.position.x, me.position.y, me.position.z, me.mode));
     let t12 = format!("{BA}.DishonoredTask_Custom_12");
     let ok = p.until(90.0, |m| m.state.task(&t12) == Some(TaskState::Active));
     let objs: Vec<String> = p.m().view.mission.as_ref().map(|v| v.objectives.iter().filter(|o| !o.hidden).map(|o| format!("\"{}\": {}", o.description, o.tasks.iter().filter(|t| !t.hidden && t.state == TaskState::Active).map(|t| format!("\"{}\"", t.description)).collect::<Vec<_>>().join(", "))).collect()).unwrap_or_default();

@@ -511,6 +511,12 @@ impl Importer<'_> {
         let hidden = bool_or(&props, "bHidden", false);
         let world = actor_transform(&props);
         let class = pkg.export_class(actor);
+        // `InterpActor` (defaults bCollideActors / bBlockActors true) blocks pawns where it is at
+        // run time: its colliding components become mover collision.
+        let mover = (class == "InterpActor" && bool_or(&props, "bCollideActors", true) && bool_or(&props, "bBlockActors", true)).then(|| dishonored_ir::MoverRef {
+            actor: format!("{}:{}", pkg.name, pkg.obj_name(ObjRef::Export(actor))),
+            actor_to_world: Mat4::from_translation(vec3_or(&props, "Location", Vec3::ZERO)) * rot_matrix(&props, "Rotation"),
+        });
         for &ci in comps {
             let before = self.map.instances.len();
             let src = format!("{} [{class}]", pkg.obj_path(ObjRef::Export(ci)));
@@ -518,6 +524,9 @@ impl Importer<'_> {
                 self.stats.errors.push(format!("{}: {e:#}", pkg.obj_path(ObjRef::Export(ci))));
             }
             for inst in &mut self.map.instances[before..] {
+                if inst.collides {
+                    inst.mover = mover.clone();
+                }
                 inst.collides = false;
             }
             self.stats.other_actor_components += self.map.instances.len() - before;
@@ -635,6 +644,7 @@ impl Importer<'_> {
             collides,
             source,
             lightmap: None,
+            mover: None,
         });
         Ok(())
     }

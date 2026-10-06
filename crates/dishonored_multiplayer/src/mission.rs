@@ -383,6 +383,12 @@ pub struct MissionMatch {
     /// [save] Pending autosaves and the saves taken this step.
     #[serde(default)]
     pub autosave: save::AutosaveState,
+    /// Mover collision placed where the movers are: (actor, delta) and, in the same order, the
+    /// placed collision (rebuilt when a mover moves).
+    #[serde(skip)]
+    mover_keys: Vec<(String, glam::Mat4)>,
+    #[serde(skip)]
+    mover_worlds: Vec<dishonored_world::CollisionWorld>,
 }
 
 impl MissionMatch {
@@ -427,6 +433,8 @@ impl MissionMatch {
             spawn_log: Vec::new(),
             pending_stealables: Vec::new(),
             autosave: Default::default(),
+            mover_keys: Vec::new(),
+            mover_worlds: Vec::new(),
         };
         // [kismet]
         m.kismet = m.setup.kismet.as_ref().map(|k| kismet_host::KismetRun::new(k, &m.setup));
@@ -832,6 +840,11 @@ impl MissionMatch {
                 }
             })
             .collect();
+        // Movers (`InterpActor`s) collide where the Kismet has moved them.
+        self.place_movers(world);
+        let placed = std::mem::take(&mut self.mover_worlds);
+        let layered = dishonored_world::Layered { base: world, layers: &placed };
+        let world: &dyn WorldQuery = if placed.is_empty() { world } else { &layered };
         // [kismet] Doors the original Kismet locked or unlocked change the AI's paths.
         let door_nav = self.kismet.as_mut().and_then(|k| k.door_nav(&self.current_map, world.nav()));
         let overlay = door_nav.as_deref().map(|nav| kismet_host::NavOverlay { inner: world, nav });
@@ -1098,7 +1111,32 @@ impl MissionMatch {
         if let Some(k) = &mut self.kismet {
             self.last_events.append(&mut k.st.noises);
         }
+        self.mover_worlds = placed;
         out
+    }
+
+    /// Place the map's movers where their actors are now (identity for movers the Kismet has
+    /// not moved), rebuilding only the ones that moved since the last step.
+    fn place_movers(&mut self, world: &dyn WorldQuery) {
+        let movers = world.movers();
+        if self.mover_keys.len() != movers.len() || self.mover_keys.iter().zip(movers).any(|(k, m)| k.0 != m.actor) {
+            self.mover_keys.clear();
+            self.mover_worlds.clear();
+        }
+        for (i, m) in movers.iter().enumerate() {
+            let delta = self.kismet.as_ref().and_then(|k| k.mover_delta(&m.actor, m.actor_to_world)).unwrap_or(glam::Mat4::IDENTITY);
+            match self.mover_keys.get(i) {
+                Some(k) if k.1.abs_diff_eq(delta, 1e-4) => {}
+                Some(_) => {
+                    self.mover_keys[i].1 = delta;
+                    self.mover_worlds[i] = m.placed(delta);
+                }
+                None => {
+                    self.mover_keys.push((m.actor.clone(), delta));
+                    self.mover_worlds.push(m.placed(delta));
+                }
+            }
+        }
     }
 
     /// What a player would interact with right now (nearest usable marker, talkable NPC or

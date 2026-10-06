@@ -181,6 +181,11 @@ pub trait WorldQuery {
     fn water_at(&self, _p: Vec3) -> Option<WaterInfo> {
         None
     }
+    /// Mover collision (`InterpActor`s) where the map placed it; the game places it where the
+    /// actors are at run time ([`Layered`]).
+    fn movers(&self) -> &[MoverCollision] {
+        &[]
+    }
 }
 
 /// Water lookup over a set of volumes (shared by the world implementations).
@@ -224,6 +229,35 @@ pub struct CollisionWorld {
     /// Water volumes of the map (attached after loading; not part of the collision cache).
     #[serde(skip)]
     pub water: Option<std::sync::Arc<Vec<WaterVolume>>>,
+    /// Mover collision (`InterpActor` components), not part of the static triangles.
+    #[serde(default)]
+    pub movers: Vec<MoverCollision>,
+}
+
+/// The colliding triangles of one mover actor, world space where the map placed it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MoverCollision {
+    /// `<package>:<actor name>`.
+    pub actor: String,
+    /// The actor's placed location and rotation.
+    pub actor_to_world: glam::Mat4,
+    pub tris: Vec<[Vec3; 3]>,
+}
+
+impl MoverCollision {
+    /// The mover's collision moved by `delta` (current actor transform x inverse placed one).
+    pub fn placed(&self, delta: glam::Mat4) -> CollisionWorld {
+        let tris = self
+            .tris
+            .iter()
+            .filter_map(|t| {
+                let (a, b, c) = (delta.transform_point3(t[0]), delta.transform_point3(t[1]), delta.transform_point3(t[2]));
+                let n = (b - a).cross(c - a);
+                (n.length_squared() >= 1e-10).then(|| Tri { a, b, c, n: n.normalize(), channels: channel::ALL, source: 0 })
+            })
+            .collect();
+        CollisionWorld::from_triangles(tris, vec![self.actor.clone()])
+    }
 }
 
 const SKIN: f32 = 0.05;
@@ -242,7 +276,7 @@ impl CollisionWorld {
             .collect();
         let total = bounds.iter().fold(Aabb::EMPTY, |acc, b| acc.union(b));
         let bvh = Bvh::build(&bounds);
-        CollisionWorld { tris, bvh, sources, bounds: Some(total), nav: None, water: None, tri_surface: Vec::new(), surfaces: Vec::new() }
+        CollisionWorld { tris, bvh, sources, bounds: Some(total), nav: None, water: None, tri_surface: Vec::new(), surfaces: Vec::new(), movers: Vec::new() }
     }
 
     /// Build from an imported map: every colliding instance (hidden blockers included).
@@ -316,6 +350,18 @@ impl CollisionWorld {
         let mut w = Self::from_triangles(tris, sources);
         w.tri_surface = tri_surface;
         w.surfaces = surfaces;
+        // Movers: their triangles where the map placed them, one entry per actor.
+        for inst in map.instances.iter().filter(|i| i.mover.is_some()) {
+            let m = inst.mover.as_ref().unwrap();
+            let t = instance_triangles(map, inst);
+            if t.is_empty() {
+                continue;
+            }
+            match w.movers.iter_mut().find(|x| x.actor == m.actor) {
+                Some(x) => x.tris.extend(t),
+                None => w.movers.push(MoverCollision { actor: m.actor.clone(), actor_to_world: m.actor_to_world, tris: t }),
+            }
+        }
         w
     }
 
@@ -372,6 +418,10 @@ impl WorldQuery for CollisionWorld {
 
     fn water_at(&self, p: Vec3) -> Option<WaterInfo> {
         self.water.as_deref().and_then(|w| water_lookup(w, p))
+    }
+
+    fn movers(&self) -> &[MoverCollision] {
+        &self.movers
     }
 
     fn box_contacts(&self, b: &PawnBox, channels: u8, out: &mut Vec<Contact>) {
@@ -549,6 +599,98 @@ impl WorldQuery for CollisionWorld {
     }
 }
 
+/// World-space collision triangles of one instance: the mesh's kDOP triangles of colliding
+/// sections (render triangles of colliding sections when the mesh has none), as
+/// [`CollisionWorld::from_map`] takes them.
+fn instance_triangles(map: &DishonoredMap, inst: &dishonored_ir::MeshInstance) -> Vec<[Vec3; 3]> {
+    let mesh = &map.meshes[inst.mesh];
+    let xf = inst.transform;
+    let mirrored = xf.determinant() < 0.0;
+    let mut out = Vec::new();
+    let mut push = |i0: u32, i1: u32, i2: u32| {
+        let (Some(a), Some(b), Some(c)) = (mesh.positions.get(i0 as usize), mesh.positions.get(i1 as usize), mesh.positions.get(i2 as usize)) else {
+            return;
+        };
+        let (a, b, c) = (xf.transform_point3(*a), xf.transform_point3(*b), xf.transform_point3(*c));
+        out.push(if mirrored { [a, c, b] } else { [a, b, c] });
+    };
+    if !mesh.collision_triangles.is_empty() {
+        for (i, t) in mesh.collision_triangles.iter().enumerate() {
+            let m = mesh.collision_materials.get(i).map(|m| *m as usize);
+            if m.and_then(|m| mesh.sections.get(m)).is_some_and(|s| !s.enable_collision) {
+                continue;
+            }
+            push(t[0], t[1], t[2]);
+        }
+    } else {
+        for s in mesh.sections.iter().filter(|s| s.enable_collision) {
+            let start = s.first_index as usize;
+            let end = (start + s.num_triangles as usize * 3).min(mesh.indices.len());
+            for t in mesh.indices[start..end].chunks_exact(3) {
+                push(t[0], t[1], t[2]);
+            }
+        }
+    }
+    out
+}
+
+/// A world with extra collision layered over it (movers placed where their actors are):
+/// queries answer for the nearest hit over all layers.
+pub struct Layered<'a> {
+    pub base: &'a dyn WorldQuery,
+    pub layers: &'a [CollisionWorld],
+}
+
+fn nearer(a: Option<SweepHit>, b: Option<SweepHit>) -> Option<SweepHit> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(if y.start_penetrating && !x.start_penetrating || !x.start_penetrating && y.fraction < x.fraction { y } else { x }),
+        (x, None) => x,
+        (None, y) => y,
+    }
+}
+
+impl WorldQuery for Layered<'_> {
+    fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32, channels: u8) -> Option<RayHit> {
+        let mut best = self.base.raycast(origin, dir, max_dist, channels);
+        for l in self.layers {
+            let reach = best.map(|h| h.distance).unwrap_or(max_dist);
+            if let Some(h) = l.raycast(origin, dir, reach, channels) {
+                if best.is_none_or(|b| h.distance < b.distance) {
+                    best = Some(h);
+                }
+            }
+        }
+        best
+    }
+    fn capsule_contacts(&self, cap: &Capsule, channels: u8, out: &mut Vec<Contact>) {
+        self.base.capsule_contacts(cap, channels, out);
+        for l in self.layers {
+            l.capsule_contacts(cap, channels, out);
+        }
+    }
+    fn sweep_capsule(&self, cap: &Capsule, delta: Vec3, channels: u8) -> Option<SweepHit> {
+        self.layers.iter().fold(self.base.sweep_capsule(cap, delta, channels), |acc, l| nearer(acc, l.sweep_capsule(cap, delta, channels)))
+    }
+    fn nav(&self) -> Option<&nav::NavWorld> {
+        self.base.nav()
+    }
+    fn box_contacts(&self, b: &PawnBox, channels: u8, out: &mut Vec<Contact>) {
+        self.base.box_contacts(b, channels, out);
+        for l in self.layers {
+            l.box_contacts(b, channels, out);
+        }
+    }
+    fn sweep_box(&self, b: &PawnBox, delta: Vec3, channels: u8) -> Option<SweepHit> {
+        self.layers.iter().fold(self.base.sweep_box(b, delta, channels), |acc, l| nearer(acc, l.sweep_box(b, delta, channels)))
+    }
+    fn water_at(&self, p: Vec3) -> Option<WaterInfo> {
+        self.base.water_at(p)
+    }
+    fn movers(&self) -> &[MoverCollision] {
+        self.base.movers()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,5 +836,8 @@ impl WorldQuery for MapSet {
     }
     fn water_at(&self, p: Vec3) -> Option<WaterInfo> {
         self.cur().water_at(p)
+    }
+    fn movers(&self) -> &[MoverCollision] {
+        self.cur().movers()
     }
 }
