@@ -61,7 +61,7 @@ pub const PRESENTATION: &[&str] = &[
     "SeqAct_ToggleCinematicMode",
     "SeqAct_ToggleHUD",
     "SeqAct_Log",
-    "SeqAct_AkStartAmbientSound",
+
     "SeqAct_SetMatInstScalarParam",
     "SeqAct_SetMaterial",
     "SeqAct_StreamInTextures",
@@ -136,6 +136,8 @@ pub struct HostState {
     pub dead: BTreeSet<PlayerId>,
     /// `SeqAct_CameraFade` time left per op.
     fades: BTreeMap<OpId, f32>,
+    /// `SeqAct_AkStartAmbientSound` Start (true) / Stop (false) per ambient sound actor.
+    pub ambient: BTreeMap<u32, bool>,
     /// Actors hidden by `SeqAct_ToggleHidden`.
     pub hidden: BTreeSet<u32>,
     /// `NPCMarkForVanish` in progress: op -> (pawns, seconds left).
@@ -697,6 +699,18 @@ impl Host for H<'_> {
                 self.st.choice = Some((cx.op, p, options, None));
                 HostResult::Latent
             }
+            "SeqAct_AkStartAmbientSound" => {
+                // Inputs Start (0) / Stop (1) on the `Targets` ambient sound actors; the
+                // client plays or stops their emitters (presentation).
+                *self.st.presentation.entry(class).or_insert(0) += 1;
+                let start = cx.input() != Some(1);
+                for t in cx.objects("Targets") {
+                    if let Obj::Actor(a) = t {
+                        self.st.ambient.insert(a, start);
+                    }
+                }
+                HostResult::Done
+            }
             "SeqAct_AkPostEvent" => {
                 let ev = obj_name(&cx.prop_obj("Event"));
                 if !ev.is_empty() {
@@ -1225,6 +1239,17 @@ fn commit_map_change(k: &mut Kismet, h: &mut H) {
 /// Kismet parts of the mission view: usables, the scripted choice, the HUD target.
 pub fn view(m: &MissionMatch, mv: &mut dishonored_mission::runtime::MissionView) {
     let Some(run) = &m.kismet else { return };
+    // Ambient sound actors started/stopped (AkStartAmbientSound) or toggled off (Toggle).
+    for (i, a) in run.k.db.actors.iter().enumerate() {
+        if !a.class.starts_with("AkAmbientSound") {
+            continue;
+        }
+        let i = i as u32;
+        let state = if run.st.off.contains(&i) { Some(false) } else { run.st.ambient.get(&i).copied() };
+        if let Some(on) = state {
+            mv.ambient.push((format!("{}:{}", a.package, a.name), on));
+        }
+    }
     for (_, p, prompt) in usables(m) {
         mv.usables.push(((p + Vec3::Z * 20.0).to_array(), prompt));
     }

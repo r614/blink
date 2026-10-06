@@ -4,12 +4,18 @@
 //! on disk by this crate.
 
 pub mod adpcm;
+pub mod anim_notify;
 pub mod bank;
+pub mod contact;
 pub mod cues;
 pub mod emitters;
+pub mod engine;
 pub mod index;
+pub mod init;
 pub mod hirc;
 pub mod library;
+pub mod music;
+pub mod music_manager;
 pub mod pck;
 pub mod vo;
 pub mod vorbis;

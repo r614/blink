@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use dishonored_audio::bank::Bank;
 use dishonored_audio::pck::Pck;
 use dishonored_audio::wem::Riff;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 fn install() -> PathBuf {
@@ -334,7 +334,7 @@ fn event(name: &str, banks: &str) -> Result<()> {
     for s in std::env::var("AK_STATES").unwrap_or_default().split(',').filter(|s| !s.is_empty()) {
         println!("  state event {s}: {}", lib.apply_state_event(s));
     }
-    if let Ok(t) = std::env::var("AK_NODE") { if let Some((_, n)) = lib.node(t.parse()?) { println!("  node {t}: {:?}", match n { dishonored_audio::hirc::Node::Container { kind, children, switch_groups, default_switch, group_id, .. } => format!("kind {kind} children {} groups {:x?} default {default_switch:x} group {group_id:x}", children.len(), switch_groups), _ => "other".into() }); } }
+    if let Ok(t) = std::env::var("AK_NODE") { if let Some((_, n)) = lib.node(t.parse()?) { println!("  node {t}: {n:#?}"); } }
     println!("  states {:x?}", lib.states.lock().unwrap());
     let cue = lib.resolve(name).context("event does not resolve to any sound")?;
     print_cue(&lib, &cue, 1);
@@ -351,6 +351,89 @@ fn event(name: &str, banks: &str) -> Result<()> {
         let out = format!("harness_out/audio/{name}_{i}.wav");
         std::fs::write(&out, p.to_wav())?;
         println!("  pick {i}: media {} {:.2}s peak {:.3} -> {out}", l.media.id, p.duration(), p.peak());
+    }
+    Ok(())
+}
+
+/// `hirc [kind]`: strict HIRC decode over every bank; per type exact / inexact counts and
+/// hex of the first failures (for layout research).
+fn hirc_survey(only: Option<u8>) -> Result<()> {
+    use dishonored_audio::hirc::decode_object;
+    let mut tally: BTreeMap<u8, (usize, usize)> = BTreeMap::new();
+    let mut shown: BTreeMap<u8, usize> = BTreeMap::new();
+    let mut stats: BTreeMap<String, usize> = BTreeMap::new();
+    for p in all_pcks() {
+        let Ok(pck) = Pck::open(&p) else { continue };
+        for be in &pck.banks {
+            let Ok(raw) = pck.read(be) else { continue };
+            let Ok(b) = dishonored_audio::bank::Bank::parse(&raw) else { continue };
+            for o in &b.hirc {
+                let (n, used) = decode_object(o);
+                let ok = n.is_some() && used == o.body.len() && std::env::var("AK_HEX").ok().and_then(|s| s.parse::<u8>().ok()) != Some(o.kind);
+                use dishonored_audio::hirc::Node;
+                if let Some(base) = n.as_ref().and_then(|n| n.base()) {
+                    for (id, v) in &base.props {
+                        *stats.entry(format!("prop {id} on kind {}{}", o.kind, if matches!(*id, 5 | 6 | 7 | 10 | 11) { format!(" = {v}") } else { String::new() })).or_default() += 1;
+                    }
+                    for (id, _, _) in &base.ranges {
+                        *stats.entry(format!("range {id} on kind {}", o.kind)).or_default() += 1;
+                    }
+                    for r in &base.rtpcs {
+                        *stats.entry(format!("rtpc param {} on kind {}", r.param, o.kind)).or_default() += 1;
+                    }
+                    if !base.states.is_empty() {
+                        *stats.entry(format!("state groups on kind {}", o.kind)).or_default() += 1;
+                    }
+                }
+                match &n {
+                    Some(Node::Action(a)) => {
+                        for (id, v) in &a.props {
+                            *stats.entry(format!("action 0x{:02x} prop {id}{}", a.action_type >> 8, if *v != 0.0 { " nonzero" } else { "" })).or_default() += 1;
+                        }
+                    }
+                    Some(Node::RanSeq { params: p, .. }) => {
+                        *stats.entry(format!("ranseq mode {} cont {} loop {} trans {} rmode {} avoid {}", p.mode, p.continuous as u8, p.loop_count, p.transition_mode, p.random_mode, p.avoid_repeat)).or_default() += 1;
+                    }
+                    Some(Node::MusicSwitch { rules, .. }) | Some(Node::MusicRanSeq { rules, .. }) => {
+                        if let Some(Node::MusicRanSeq { playlist, .. }) = &n {
+                            fn walk(i: &dishonored_audio::hirc::MusicPlaylistItem, s: &mut BTreeMap<String, usize>) {
+                                *s.entry(format!("music playlist rs {} loop {} children {}", i.rs_type, i.loop_count, i.children.len().min(3))).or_default() += 1;
+                                i.children.iter().for_each(|c| walk(c, s));
+                            }
+                            playlist.iter().for_each(|i| walk(i, &mut stats));
+                        }
+                        for r in rules {
+                            *stats.entry(format!("music rule sync {} srcfade {} dstfade {} trans {}", r.sync, r.src_fade.time_ms, r.dst_fade.time_ms, r.transition_segment.is_some())).or_default() += 1;
+                        }
+                    }
+                    _ => {}
+                }
+                let t = tally.entry(o.kind).or_default();
+                if ok {
+                    t.0 += 1
+                } else {
+                    t.1 += 1
+                }
+                if !ok && only.is_none_or(|k| k == o.kind) {
+                    let s = shown.entry(o.kind).or_default();
+                    if *s < 3 {
+                        *s += 1;
+                        println!("kind {} id {} in {}: used {used} of {} (parsed {})", o.kind, o.id, p.file_name().unwrap().to_string_lossy(), o.body.len(), n.is_some());
+                        for (i, ch) in o.body.chunks(32).enumerate() {
+                            println!("  {:04x}: {}", i * 32, ch.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" "));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if std::env::var("AK_STATS").is_ok() {
+        for (k, n) in &stats {
+            println!("{n:6} {k}");
+        }
+    }
+    for (k, (ok, bad)) in &tally {
+        println!("kind {k:2}: {ok} exact, {bad} inexact");
     }
     Ok(())
 }
@@ -385,6 +468,114 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("survey") => survey(),
+        Some("hirc") => hirc_survey(args.get(1).and_then(|s| s.parse().ok())),
+        Some("render") => {
+            // render <Bank,...> <seconds> [T:Event ...]: post events at times through the
+            // playback engine and write harness_out/audio/render.wav.
+            let mut lib = dishonored_audio::library::SoundLibrary::new(install())?;
+            for b in args.get(1).context("banks")?.split(',') {
+                lib.load_bank(b)?;
+            }
+            let secs: f32 = args.get(2).context("seconds")?.parse()?;
+            let mut eng = dishonored_audio::engine::Engine::new(std::sync::Arc::new(lib), 48000);
+            let mut cmds: Vec<(f32, String)> = args[3..].iter().filter_map(|a| a.split_once(':').map(|(t, e)| (t.parse().unwrap_or(0.0), e.to_string()))).collect();
+            cmds.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut out = Vec::new();
+            let mut t = 0.0f32;
+            let t0 = std::time::Instant::now();
+            for (at, ev) in cmds.iter().chain(std::iter::once(&(secs, String::new()))) {
+                if *at > t {
+                    out.extend(eng.render_seconds(at - t));
+                    t = *at;
+                }
+                if !ev.is_empty() {
+                    let p = match ev.split_once("=") {
+                        Some((g, s)) => {
+                            eng.set_state(g.parse().unwrap_or(0), s.parse().unwrap_or(0));
+                            0
+                        }
+                        None => eng.post_event_name(ev, 0),
+                    };
+                    println!("{t:7.2}s post {ev} -> playing {p}; voices {}", eng.active_voices());
+                }
+            }
+            let (loud, gap) = dishonored_audio::engine::silence_profile(&out, 48000, 1e-4);
+            println!("rendered {:.1}s in {:.1}s: {loud:.1}s audible, longest gap {gap:.2}s; stats {:?}", secs, t0.elapsed().as_secs_f32(), eng.stats);
+            for m in eng.music_history() {
+                println!("  music {:8.2}s segment {}", m.0 as f32 / 48000.0, m.1);
+            }
+            std::fs::create_dir_all("harness_out/audio")?;
+            let pcm = dishonored_audio::Pcm { channels: 2, sample_rate: 48000, samples: out, loop_range: None };
+            std::fs::write("harness_out/audio/render.wav", pcm.to_wav())?;
+            Ok(())
+        }
+        Some("setters") => {
+            // setters <group id>: events (named through harness_out/audio/ak_events.tsv from
+            // ak_survey) whose SetState/SetSwitch actions write a group.
+            let group: u32 = args.get(1).context("group")?.parse()?;
+            let names: HashMap<u32, String> = std::fs::read_to_string("harness_out/audio/ak_events.tsv")
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| {
+                    let f: Vec<&str> = l.split('\t').collect();
+                    Some((f.get(1)?.parse().ok()?, f[0].to_string()))
+                })
+                .collect();
+            use dishonored_audio::hirc::{Node, decode_object};
+            for p in all_pcks() {
+                let Ok(pck) = Pck::open(&p) else { continue };
+                for be in &pck.banks {
+                    let Ok(raw) = pck.read(be) else { continue };
+                    let Ok(b) = dishonored_audio::bank::Bank::parse(&raw) else { continue };
+                    let mut acts: HashMap<u32, (u32, u16)> = HashMap::new();
+                    for o in &b.hirc {
+                        if let (Some(Node::Action(a)), _) = decode_object(o) {
+                            if let Some((g, s)) = a.set_group {
+                                if g == group {
+                                    acts.insert(o.id, (s, a.action_type));
+                                }
+                            }
+                        }
+                    }
+                    for o in &b.hirc {
+                        if let (Some(Node::Event { actions }), _) = decode_object(o) {
+                            for a in actions {
+                                if let Some((s, t)) = acts.get(&a) {
+                                    println!("{} {} ({}) sets {} (type 0x{t:04x})", p.file_name().unwrap().to_string_lossy(), names.get(&o.id).map(String::as_str).unwrap_or("?"), o.id, s);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        Some("init") => {
+            let raw = std::fs::read(install().join("DishonoredGame/CookedPCConsole/Init.bnk"))?;
+            let b = Bank::parse(&raw)?;
+            let hex = |v: &[u8]| v.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ");
+            println!("STMG {} bytes: {}", b.stmg.len(), hex(&b.stmg[..b.stmg.len().min(256)]));
+            for o in &b.hirc {
+                println!("kind {} id {} ({} bytes): {}", o.kind, o.id, o.body.len(), hex(&o.body[..o.body.len().min(96)]));
+            }
+            match dishonored_audio::init::InitBank::parse(&b) {
+                Ok(i) => println!("{i:#?}"),
+                Err(e) => println!("init parse: {e:#}"),
+            }
+            Ok(())
+        }
+        Some("nodes") => {
+            // nodes <Bank> <kind> [max]: decoded objects of one HIRC type.
+            let mut lib = dishonored_audio::library::SoundLibrary::new(install())?;
+            lib.load_bank(args.get(1).context("bank")?)?;
+            let kind: u8 = args.get(2).context("kind")?.parse()?;
+            let max: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
+            let b = &lib.banks[0];
+            for o in b.bank.hirc.iter().filter(|o| o.kind == kind).take(max) {
+                println!("{} {:#?}", o.id, b.hier.nodes.get(&o.id));
+            }
+            Ok(())
+        }
         Some("emitters") => emitters(args.get(1).map(String::as_str).unwrap_or("L_Boyle_Ext_P")),
         Some("event") => event(args.get(1).context("event name")?, args.get(2).context("bank list")?),
         Some("decodeall") => decode_all(args.get(1).is_some_and(|a| a == "--streams")),

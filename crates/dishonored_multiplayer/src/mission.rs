@@ -1058,6 +1058,20 @@ impl MissionMatch {
         kismet_host::view(self, &mut mv); // [kismet] usables, scripted choice, task target
         self.view.mission = Some(mv);
         self.view.map = self.current_map.clone();
+        // Presentation: NPCs within music range (4500 uu, `m_fEnemyRangeForChase[1]`) of a human.
+        let humans: Vec<Vec3> = self.world.players.iter().filter(|p| self.humans.contains(&p.id) && p.alive).map(|p| p.position).collect();
+        self.view.ai = self
+            .crowd
+            .brains
+            .iter()
+            .filter_map(|b| {
+                let p = self.world.players.iter().find(|p| p.id == b.id && p.alive)?;
+                humans.iter().any(|h| h.distance(p.position) < 5000.0).then_some(())?;
+                let combat = b.state == BrainState::Combat && b.target.is_some_and(|t| self.humans.contains(&t));
+                let hostile = b.kind == PawnKind::Guard || b.hostile.iter().any(|h| self.humans.contains(h));
+                Some(crate::AiPresence { id: b.id, hostile, combat, suspicion: b.suspicion_level(), music_type: if b.kind == PawnKind::Guard { 4 } else { 0 } })
+            })
+            .collect();
         self.last_events = out.events.clone();
         out
     }

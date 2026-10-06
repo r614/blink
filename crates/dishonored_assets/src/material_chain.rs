@@ -27,6 +27,8 @@ pub struct MaterialChain {
     /// Texture wired directly into the base material's DiffuseColor / Normal inputs.
     pub diffuse_input: Option<Key>,
     pub normal_input: Option<Key>,
+    /// `PhysMaterial` of the first material in the chain that sets one (child wins).
+    pub phys_material: Option<Key>,
     /// Chain ended at an import nobody defines.
     pub broken_at: Option<String>,
 }
@@ -54,6 +56,11 @@ pub fn walk(pkgs: &[Arc<Package>], start: Key, resolve: &mut dyn FnMut(usize, Ob
         let class = pkg.export_class(cur.1);
         let Ok(hdr) = pkg.read_object(cur.1) else { break };
         let props = hdr.properties;
+        if out.phys_material.is_none() {
+            if let Some(pm) = find(&props, "PhysMaterial").and_then(|p| p.as_object()).filter(|o| *o != 0) {
+                out.phys_material = resolve(cur.0, ObjRef::from_index(pm));
+            }
+        }
         if class == "Material" {
             read_base_material(pkgs, cur, &props, resolve, &mut out);
             if cur == start {

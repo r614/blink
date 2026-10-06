@@ -116,7 +116,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     let sim = load_sim_config(&content).context("gameplay config")?;
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).ok();
-    let coll_path = dir.join(format!("{map}.collision.bin"));
+    let coll_path = dir.join(format!("{map}.collision2.bin"));
     let spawn_path = dir.join(format!("{map}.spawns.json"));
     let (collision, spawns) = match (CollisionWorld::load(&coll_path), std::fs::read_to_string(&spawn_path)) {
         (Ok(w), Ok(s)) => (w, serde_json::from_str::<Vec<Spawn>>(&s).unwrap_or_default()),

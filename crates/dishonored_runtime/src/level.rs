@@ -53,21 +53,22 @@ pub fn spawn_level(
     materials: &mut Assets<StandardMaterial>,
     baked: &mut Assets<BakedMaterial>,
     levels: &mut Levels,
+    fx: &mut crate::effects::Effects,
 ) -> DishonoredMap {
     let content = Content::locate().expect("Dishonored install not found (set DISHONORED_DIR)");
     // --legacy-geometry: the pre-fidelity package/actor coverage (prefix-matched sublevels,
     // StaticMeshActor + StaticMeshCollectionActor only), for before/after comparisons.
     let pkgs = if opts.legacy { dishonored_assets::map_packages_by_prefix(&content, name) } else { map_packages(&content, name) };
-    let iopts = ImportOptions { max_texture_size: opts.max_tex, other_actors: !opts.legacy, ..Default::default() };
+    let iopts = ImportOptions { max_texture_size: opts.max_tex, other_actors: !opts.legacy, extra_particles: crate::effects::GAMEPLAY_PARTICLES.iter().map(|s| s.to_string()).collect(), ..Default::default() };
     let (map, stats) = import_level(&content, name, &pkgs, &iopts).expect("map import failed");
-    spawn_imported(name, map, stats.instances, opts, features, commands, meshes, images, materials, baked, levels)
+    spawn_imported(name, map, stats.instances, opts, features, commands, meshes, images, materials, baked, levels, fx)
 }
 
 /// Import a level (worker-thread safe).
 fn import(name: &str, opts: &LevelOptions) -> Result<DishonoredMap, String> {
     let content = Content::locate().map_err(|e| e.to_string())?;
     let pkgs = if opts.legacy { dishonored_assets::map_packages_by_prefix(&content, name) } else { map_packages(&content, name) };
-    let iopts = ImportOptions { max_texture_size: opts.max_tex, other_actors: !opts.legacy, ..Default::default() };
+    let iopts = ImportOptions { max_texture_size: opts.max_tex, other_actors: !opts.legacy, extra_particles: crate::effects::GAMEPLAY_PARTICLES.iter().map(|s| s.to_string()).collect(), ..Default::default() };
     import_level(&content, name, &pkgs, &iopts).map(|r| r.0).map_err(|e| format!("{e:#}"))
 }
 
@@ -85,8 +86,10 @@ fn spawn_imported(
     materials: &mut Assets<StandardMaterial>,
     baked: &mut Assets<BakedMaterial>,
     levels: &mut Levels,
+    fx: &mut crate::effects::Effects,
 ) -> DishonoredMap {
     let spawned = map_render::spawn_map(&map, commands, meshes, images, materials, baked, opts.show_hidden, features);
+    crate::effects::spawn_level_effects(name, &map, commands, meshes, images, materials, fx);
     info!("{}: {} instances, {} meshes, {} textures, {} entities", name, instances, map.meshes.len(), map.textures.len(), spawned);
     let lights = lighting::spawn_lights(&map, commands, features);
     info!("{} map lights", lights);
@@ -143,6 +146,7 @@ pub fn follow_level(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut baked: ResMut<Assets<BakedMaterial>>,
     mut vis: Query<(&LevelOf, &mut Visibility)>,
+    mut fx: ResMut<crate::effects::Effects>,
     camera: Query<Entity, With<Camera3d>>,
 ) {
     let want = session.content.map_name.clone();
@@ -176,7 +180,7 @@ pub fn follow_level(
             }
             Some(Ok(map)) => {
                 let n = map.instances.len();
-                spawn_imported(&target, map, n, &opts.0, &features, &mut commands, &mut meshes, &mut images, &mut materials, &mut baked, &mut levels);
+                spawn_imported(&target, map, n, &opts.0, &features, &mut commands, &mut meshes, &mut images, &mut materials, &mut baked, &mut levels, &mut fx);
             }
             Some(Err(e)) => error!("importing {target}: {e}"),
         }
@@ -186,6 +190,7 @@ pub fn follow_level(
         *v = if l.0.eq_ignore_ascii_case(&target) { Visibility::Inherited } else { Visibility::Hidden };
     }
     levels.active = target.clone();
+    fx.set_active(&target);
     if let Ok(cam) = camera.single() {
         apply_look(&levels, &target, cam, &mut commands, &features);
     }

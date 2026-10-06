@@ -1,45 +1,46 @@
-//! Game audio, decoded from the install's Wwise banks at startup and driven by
-//! simulation events. Presentation only: nothing here feeds back into the sim.
+//! Game audio through the original Wwise data, played by `dishonored_audio::engine` (the
+//! bank semantics: containers, loops, transitions, states, RTPCs, attenuation curves) and its
+//! interactive music. Presentation only: nothing here feeds back into the simulation.
 //!
-//! - Banks are parsed and every sound the mapping can post is decoded on a worker
-//!   thread (`dishonored_audio`); playback starts once that finishes.
-//! - The local player's sounds are 2D; remote players, NPCs, impacts and placed
-//!   emitters are 3D: panning from bevy_audio's spatial sink (the listener is the game
-//!   camera) and distance attenuation from the original Wwise attenuation curves.
-//! - Ambience: the level bed and score (state events applied first) plus the map's
-//!   placed `AkAmbientSound` emitters, re-picked when a pick ends (APPROXIMATION of
-//!   Wwise container looping, whose v65 flags are not decoded yet).
+//! - Loading (worker thread): the player/combat banks, the map's ambience and music banks,
+//!   the banks of the map's placed `AkAmbientSound` emitters, the contact system (footsteps
+//!   and impacts by physical material), the AnimSet sound notifies, the map's music tweaks.
+//!   Short sounds are decoded up front; long media decode on the engine's worker threads.
+//! - Game objects: every pawn is a Wwise game object at its position; impacts get a
+//!   temporary object; placed emitters keep theirs; 2D sounds use the listener object.
+//!   The listener is the game camera.
+//! - Simulation events, footfalls (contact system, surface from the collision triangle's
+//!   physical material), AnimNotify_AkEvent / footfall notifies reported by the animation
+//!   code ([`AnimSounds`]), mission sounds (`MissionView::sounds`, posted by Kismet) and the
+//!   music manager (`dishonored_audio::music_manager`, driven by the replicated NPC awareness).
+//! - On travel the next map's banks load and its ambience replaces the old one.
 //!
 //! Flags: `--no-audio`, `--volume V` (linear master gain, default 1); env `DISHONORED_MUTE`
 //! silences every sound of the process (test runs).
 
 use crate::coords;
 use crate::session::{Session, SessionView};
-use bevy::audio::{
-    AddAudioSource, AudioPlayer, AudioSink, AudioSinkPlayback, Decodable, PlaybackMode, PlaybackSettings, SpatialAudioSink,
-    SpatialListener, SpatialScale, Volume,
-};
+use bevy::audio::{AddAudioSource, AudioPlayer, Decodable, PlaybackSettings, SpatialListener};
 use bevy::prelude::*;
+use dishonored_audio::anim_notify::{ClipNotifies, NotifyKind};
+use dishonored_audio::contact::ContactSystem;
 use dishonored_audio::cues::{self, Gait};
-use dishonored_audio::library::{Cue, Leaf, MediaKey, SoundLibrary};
+use dishonored_audio::engine::{Category, Engine, GLOBAL_OBJ, ObjId};
+use dishonored_audio::library::{MediaKey, SoundLibrary};
+use dishonored_audio::music_manager::{MusicManager, MusicNpc, MusicTweaks};
 use dishonored_audio::Pcm;
 use dishonored_sim::events::{DamageCause, SimEvent};
 use dishonored_sim::state::{MoveMode, PawnKind, PlayerId, PlayerState};
 use dishonored_world::WorldQuery;
-use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, Sender, channel};
-
-type AmbientPick = (usize, Vec<(Leaf, Arc<Pcm>)>);
+use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 
-/// rodio positions are scaled so every audible distance stays below 1 unit: rodio's
-/// own 1/d^2 gain then clamps to 1 and only its stereo panning remains. Distance
-/// attenuation is applied by [`update_voices`] from the Wwise curves.
-const SPATIAL_SCALE: f32 = 0.003;
-/// Fallback rolloff (uu) for 3D voices whose sound has no attenuation (2D in Wwise).
-const FALLBACK_RANGE: f32 = 2500.0;
-/// Placed emitters are only kept playing within this margin of their max distance.
-const EMITTER_MARGIN: f32 = 500.0;
+/// Output rate of the engine stream.
+const RATE: u32 = 48000;
+const PLAYER_OBJ: ObjId = 1 << 32;
+const EMITTER_OBJ: ObjId = 2 << 32;
+const TEMP_OBJ: ObjId = 3 << 32;
 
 #[derive(Resource, Clone, Copy)]
 pub struct AudioSettings {
@@ -62,14 +63,6 @@ impl AudioSettings {
     }
 }
 
-fn bus_gain(s: &AudioSettings, bus: u8) -> f32 {
-    match bus {
-        1 => s.music,
-        2 => s.voice,
-        _ => s.sfx,
-    }
-}
-
 /// Options -> Audio volumes (global, music, SFX, voices) onto the mixer.
 fn sync_volumes(gs: Option<Res<crate::settings::GameSettings>>, mut s: ResMut<AudioSettings>) {
     let Some(gs) = gs else { return };
@@ -83,7 +76,7 @@ fn sync_volumes(gs: Option<Res<crate::settings::GameSettings>>, mut s: ResMut<Au
     s.voice = a.voices / 100.0;
 }
 
-/// Decoded PCM as a bevy_audio source.
+/// Decoded PCM as a bevy_audio source (dialogue VO).
 #[derive(Asset, TypePath, Clone)]
 pub struct PcmClip(pub Arc<Pcm>);
 
@@ -123,64 +116,127 @@ impl Decodable for PcmClip {
     }
 }
 
-/// Continuous ambience slot (level bed, score, placed emitter).
-struct AmbientSlot {
-    /// The level score (music bus) rather than ambience (SFX bus).
-    music: bool,
-    cue: Cue,
-    /// Dishonored world position; `None` = 2D.
-    pos: Option<Vec3>,
-    gain_db: f32,
-    /// Farthest audible distance (emitters are culled beyond it).
-    range: f32,
-    next_try: f32,
+/// The engine's stereo output as an endless bevy_audio source.
+#[derive(Asset, TypePath, Clone)]
+pub struct EngineStream(pub Arc<Mutex<Engine>>);
+
+pub struct EngineDecoder {
+    engine: Arc<Mutex<Engine>>,
+    buf: Vec<f32>,
+    pos: usize,
+}
+
+impl Iterator for EngineDecoder {
+    type Item = bevy::audio::Sample;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.buf.len() {
+            if let Ok(mut e) = self.engine.lock() {
+                e.render(&mut self.buf);
+            } else {
+                self.buf.iter_mut().for_each(|s| *s = 0.0);
+            }
+            self.pos = 0;
+        }
+        let s = self.buf[self.pos];
+        self.pos += 1;
+        Some(s.clamp(-1.0, 1.0))
+    }
+}
+
+impl bevy::audio::Source for EngineDecoder {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+    fn channels(&self) -> bevy::audio::ChannelCount {
+        std::num::NonZero::new(2).unwrap()
+    }
+    fn sample_rate(&self) -> bevy::audio::SampleRate {
+        std::num::NonZero::new(RATE).unwrap()
+    }
+    fn total_duration(&self) -> Option<std::time::Duration> {
+        None
+    }
+}
+
+impl Decodable for EngineStream {
+    type Decoder = EngineDecoder;
+    fn decoder(&self) -> EngineDecoder {
+        EngineDecoder { engine: self.0.clone(), buf: vec![0.0; 1024 * 2], pos: usize::MAX }
+    }
+}
+
+/// Clip windows reported by the animation code: the audio side posts the clip's
+/// `AnimNotify_AkEvent`s and footfalls that fall inside (original timing, U-031).
+#[derive(Resource, Default)]
+pub struct AnimSounds {
+    pending: Vec<(PlayerId, String, f32, f32, bool)>,
+}
+
+impl AnimSounds {
+    /// A clip advanced from `from` to `to` (sequence seconds) on a pawn. Looping clips that
+    /// wrapped pass `looped` and their raw times.
+    pub fn advance(&mut self, player: PlayerId, clip: &str, from: f32, to: f32, looped: bool) {
+        if !clip.is_empty() && to != from {
+            self.pending.push((player, clip.to_string(), from, to, looped));
+        }
+    }
+}
+
+struct Emitter {
+    obj: ObjId,
+    event: String,
+    pos: [f32; 3],
+    /// "package:actor name" (matches `MissionView::ambient` from Kismet).
+    key: String,
+    auto_play: bool,
+    /// Last Kismet state applied.
+    kismet: Option<bool>,
+    /// Playing id while it plays.
+    playing: u32,
 }
 
 struct Loaded {
-    lib: Arc<SoundLibrary>,
-    cues: HashMap<String, Cue>,
-    ambience: Vec<AmbientSlot>,
+    map: String,
+    lib: SoundLibrary,
+    predecoded: Vec<(MediaKey, Arc<Pcm>)>,
+    emitters: Vec<Emitter>,
+    contact: Option<ContactSystem>,
+    notifies: HashMap<String, ClipNotifies>,
+    tweaks: Option<MusicTweaks>,
     report: String,
 }
 
 #[derive(Resource, Default)]
 pub struct GameAudio {
     rx: Option<Mutex<Receiver<anyhow::Result<Loaded>>>>,
-    lib: Option<Arc<SoundLibrary>>,
-    cues: HashMap<String, Cue>,
-    ambience: Vec<AmbientSlot>,
-    clips: HashMap<MediaKey, Handle<PcmClip>>,
-    rng: u64,
+    pub engine: Option<Arc<Mutex<Engine>>>,
+    map: String,
+    loading_map: Option<String>,
+    emitters: Vec<Emitter>,
+    contact: Option<ContactSystem>,
+    notifies: HashMap<String, ClipNotifies>,
+    pub music: Option<MusicManager>,
+    stream_spawned: bool,
     /// Projectile id -> fired as a crossbow bolt.
     projectiles: HashMap<u32, bool>,
     steps: HashMap<PlayerId, (Vec3, f32)>,
-    /// Ambience picks decoded on worker threads: (slot, leaves with PCM).
-    amb_tx: Option<Sender<AmbientPick>>,
-    amb_rx: Option<Mutex<Receiver<AmbientPick>>>,
-    pending: Vec<bool>,
-    posted: u64,
+    /// Last footfall per (player, foot) for the 0.25 s rule.
+    foot_time: HashMap<(PlayerId, i32), f32>,
+    /// Players whose animation reported notifies recently (sim fallbacks are skipped).
+    notify_driven: HashMap<PlayerId, f32>,
+    /// Last post of a notify event per pawn (first- and third-person rigs of the same pawn
+    /// may both report a clip).
+    notify_recent: HashMap<(PlayerId, String), f32>,
+    temp: Vec<(ObjId, f32)>,
+    next_temp: u64,
+    known_players: HashSet<PlayerId>,
+    mission_sound: u32,
+    pub posted: u64,
+    pub notify_posts: u64,
+    pub footfalls: u64,
     events_seen: u64,
     last_stats: f32,
 }
-
-#[derive(Clone, Copy)]
-enum Anchor {
-    Player(PlayerId),
-    Point(Vec3),
-}
-
-#[derive(Component)]
-pub struct Voice {
-    anchor: Option<Anchor>,
-    gain_db: f32,
-    attenuation: Option<u32>,
-    max_distance: Option<f32>,
-    /// Mixer bus for the settings volumes: 0 SFX, 1 music, 2 voices.
-    bus: u8,
-}
-
-#[derive(Component)]
-struct AmbientVoice(usize);
 
 pub struct GameAudioPlugin;
 
@@ -188,13 +244,14 @@ impl Plugin for GameAudioPlugin {
     fn build(&self, app: &mut App) {
         let settings = AudioSettings::from_args();
         app.insert_resource(settings);
+        app.init_resource::<AnimSounds>();
         if !settings.enabled {
             return;
         }
         app.add_audio_source::<PcmClip>()
+            .add_audio_source::<EngineStream>()
             .init_resource::<GameAudio>()
-            .add_systems(Startup, start_loading)
-            .add_systems(Update, (sync_volumes, finish_loading, attach_listener, play_sim_events, footsteps, ambience, update_voices, stats).chain());
+            .add_systems(Update, (sync_volumes, finish_loading, attach_listener, drive, stats).chain());
     }
 }
 
@@ -203,9 +260,9 @@ fn map_arg() -> String {
     a.iter().position(|x| x == "--map").and_then(|i| a.get(i + 1)).cloned().unwrap_or_else(|| dishonored_content::DEFAULT_MAP.to_string())
 }
 
-fn start_loading(mut audio: ResMut<GameAudio>) {
+fn start_load(audio: &mut GameAudio, map: String) {
     let (tx, rx) = channel();
-    let map = map_arg();
+    audio.loading_map = Some(map.clone());
     std::thread::Builder::new()
         .name("audio-load".into())
         .spawn(move || {
@@ -213,212 +270,206 @@ fn start_loading(mut audio: ResMut<GameAudio>) {
         })
         .ok();
     audio.rx = Some(Mutex::new(rx));
-    audio.rng = 0x9e37_79b9_7f4a_7c15;
 }
 
-/// Worker thread: banks, event resolution, map emitters, decoding.
+/// Worker thread: banks, emitters, contact system, notifies, music tweaks, short media.
 fn load(map: &str) -> anyhow::Result<Loaded> {
     let t0 = std::time::Instant::now();
     let content = dishonored_assets::Content::locate()?;
     let mut lib = SoundLibrary::new(&content.root)?;
-    for b in cues::PLAYER_BANKS {
-        if let Err(e) = lib.load_bank(b) {
-            warn!("audio: {b}: {e:#}");
-        }
-    }
+    let mut banks: Vec<String> = cues::PLAYER_BANKS.iter().map(|s| s.to_string()).collect();
     let amb = cues::map_ambience(map);
     if let Some(a) = &amb {
-        for b in a.banks {
-            if let Err(e) = lib.load_bank(b) {
-                warn!("audio: {b}: {e:#}");
-            }
-        }
+        banks.extend(a.banks.iter().map(|s| s.to_string()));
     }
-    // Placed emitters and the banks their events need.
     let mut emitters = Vec::new();
     let mut event_bank: HashMap<String, String> = HashMap::new();
+    let mut map_pkgs = Vec::new();
     for p in dishonored_assets::map_packages(&content, map) {
         let Ok(pkg) = content.package(&p) else { continue };
         event_bank.extend(dishonored_audio::emitters::ak_event_banks(&pkg));
-        emitters.extend(dishonored_audio::emitters::ambient_emitters(&pkg).into_iter().filter(|e| e.auto_play && dishonored_audio::emitters::is_ambience(&e.event)));
-    }
-    let mut ev_names: Vec<&String> = emitters.iter().map(|e| &e.event).collect();
-    ev_names.sort();
-    ev_names.dedup();
-    for ev in ev_names {
-        if let Some(b) = event_bank.get(ev) {
-            if let Err(e) = lib.load_bank(b) {
-                warn!("audio: {b}: {e:#}");
-            }
+        for (i, e) in dishonored_audio::emitters::ambient_emitters(&pkg).into_iter().enumerate() {
+            let key = format!("{}:{}", pkg.name, e.actor.rsplit('.').next().unwrap_or(""));
+            emitters.push(Emitter { obj: EMITTER_OBJ + ((map_pkgs.len() as u64) << 16) + i as u64, event: e.event, pos: e.position, key, auto_play: e.auto_play, kismet: None, playing: 0 });
         }
+        map_pkgs.push(pkg);
     }
-    if let Some(a) = &amb {
-        for s in a.state_events {
-            lib.apply_state_event(s);
-        }
-    }
-
-    let mut cues_map = HashMap::new();
-    let mut missing = Vec::new();
-    for ev in cues::all_player_events() {
-        match lib.resolve(&ev) {
-            Some(c) => {
-                cues_map.insert(ev, c);
-            }
-            None => missing.push(ev),
-        }
-    }
-    let mut ambience = Vec::new();
-    if let Some(a) = &amb {
-        if let Some(c) = lib.resolve(a.bed) {
-            ambience.push(AmbientSlot { music: false, cue: c, pos: None, gain_db: 0.0, range: f32::MAX, next_try: 0.0 });
-        }
-        if let Some(c) = a.music.and_then(|m| lib.resolve(m)) {
-            ambience.push(AmbientSlot { music: true, cue: c, pos: None, gain_db: -8.0, range: f32::MAX, next_try: 0.0 });
-        }
-    }
-    let mut placed = 0;
     for e in &emitters {
-        let Some(c) = lib.resolve(&e.event) else { continue };
-        let mut leaves = Vec::new();
-        c.leaves(&mut leaves);
-        let range = leaves.iter().filter_map(|l| l.max_distance).fold(0.0f32, f32::max);
-        let range = if range > 0.0 { range } else { FALLBACK_RANGE };
-        ambience.push(AmbientSlot { music: false, cue: c, pos: Some(Vec3::from(e.position)), gain_db: 0.0, range, next_try: 0.0 });
-        placed += 1;
+        if let Some(b) = event_bank.get(&e.event) {
+            banks.push(b.clone());
+        }
     }
-
-    // Decode everything that can be posted, so playback never decodes on the main thread.
-    let mut keys: Vec<MediaKey> = Vec::new();
-    for c in cues_map.values() {
-        let mut l = Vec::new();
-        c.leaves(&mut l);
-        keys.extend(l.iter().map(|l| l.media));
+    // Banks of the sounds Kismet posts (mission sounds), so they resolve when posted.
+    banks.extend(event_bank.values().cloned());
+    banks.sort();
+    banks.dedup();
+    for b in &banks {
+        if let Err(e) = lib.load_bank(b) {
+            debug!("audio: {b}: {e:#}");
+        }
+    }
+    // Contact system and notifies (DishonoredGame / DishonoredGameContent / Startup).
+    let game = content.package("DishonoredGame").ok();
+    let game_content = content.package("DishonoredGameContent").ok();
+    let contact = game.as_ref().and_then(|g| ContactSystem::load(g, &game_content.iter().map(|p| &**p).collect::<Vec<_>>()));
+    let mut notifies = HashMap::new();
+    if let Ok(startup) = content.package("Startup") {
+        notifies = dishonored_audio::anim_notify::read_package(&startup);
+    }
+    // NPC AnimSets are cooked into the level packages.
+    for p in &map_pkgs {
+        for (k, v) in dishonored_audio::anim_notify::read_package(p) {
+            notifies.entry(k).or_insert(v);
+        }
+    }
+    let tweaks = MusicTweaks::for_packages(game.as_deref(), &map_pkgs.iter().map(|p| &**p).collect::<Vec<_>>());
+    // Decode the short media every cue / contact sound may post.
+    let mut events: Vec<String> = cues::all_player_events();
+    if let Some(c) = &contact {
+        events.extend(c.intersections.iter().filter_map(|i| i.sound.as_ref().map(|s| s.event.clone())));
+    }
+    events.extend(notifies.values().flat_map(|c| c.notifies.iter()).filter_map(|n| match &n.kind {
+        NotifyKind::AkEvent { event, .. } => Some(event.clone()),
+        _ => None,
+    }));
+    events.sort();
+    events.dedup();
+    let mut keys = Vec::new();
+    let mut resolved = 0;
+    for ev in &events {
+        if let Some(c) = lib.resolve(ev) {
+            resolved += 1;
+            let mut l = Vec::new();
+            c.leaves(&mut l);
+            keys.extend(l.iter().filter(|l| !l.media.streamed).map(|l| l.media));
+        }
     }
     keys.sort_by_key(|k| (k.bank, k.id));
     keys.dedup();
-    let (mut ok, mut failed, mut secs) = (0, 0, 0.0f32);
-    for k in &keys {
-        match lib.decode(*k) {
-            Ok(p) => {
-                ok += 1;
-                secs += p.duration();
-            }
-            Err(e) => {
-                failed += 1;
-                warn!("audio: media {} undecodable: {e:#}", k.id);
-            }
+    let mut predecoded = Vec::new();
+    let mut secs = 0.0;
+    for k in keys {
+        // Only short one-shots up front (footsteps, impacts, whooshes); longer media decode
+        // on the engine workers when first played.
+        if lib.media_info(k).map(|i| i.0 as f32 / i.1.max(1) as f32).unwrap_or(9.0) > 2.0 {
+            continue;
+        }
+        if let Ok(p) = lib.decode_uncached(k) {
+            secs += p.duration();
+            predecoded.push((k, Arc::new(p)));
         }
     }
     let report = format!(
-        "audio: {} banks, {}/{} player events resolved, {} ambience slots ({placed} placed emitters), {ok} player sounds decoded ({:.0} s; ambience decodes on demand){} in {:.1} s",
+        "audio: {map}: {} banks, {resolved}/{} posted events resolve, {} emitters, contact system {}, {} clips with sound notifies, music tweaks {}, {} short sounds decoded ({secs:.0} s) in {:.1} s",
         lib.banks.len(),
-        cues_map.len(),
-        cues_map.len() + missing.len(),
-        ambience.len(),
-        secs,
-        if failed > 0 { format!(", {failed} failed") } else { String::new() },
+        events.len(),
+        emitters.len(),
+        contact.as_ref().map(|c| c.intersections.len()).unwrap_or(0),
+        notifies.len(),
+        tweaks.as_ref().map(|t| t.name.as_str()).unwrap_or("-"),
+        predecoded.len(),
         t0.elapsed().as_secs_f32()
     );
-    Ok(Loaded { lib: Arc::new(lib), cues: cues_map, ambience, report })
+    Ok(Loaded { map: map.to_string(), lib, predecoded, emitters, contact, notifies, tweaks, report })
 }
 
-fn finish_loading(mut audio: ResMut<GameAudio>) {
+fn finish_loading(mut commands: Commands, mut audio: ResMut<GameAudio>, mut streams: ResMut<Assets<EngineStream>>, session: Option<Res<Session>>) {
+    // (Re)load when the active map changes (level travel).
+    let want = session.as_ref().map(|s| s.content.map_name.clone()).unwrap_or_else(map_arg);
+    if audio.rx.is_none() && audio.loading_map.as_deref() != Some(want.as_str()) && audio.map != want {
+        start_load(&mut audio, want);
+    }
     let Some(rx) = &audio.rx else { return };
     let msg = rx.lock().unwrap().try_recv();
-    match msg {
-        Ok(Ok(l)) => {
-            info!("{}", l.report);
-            audio.lib = Some(l.lib);
-            audio.cues = l.cues;
-            audio.ambience = l.ambience;
-            audio.pending = vec![false; audio.ambience.len()];
-            let (tx, rx) = channel();
-            audio.amb_tx = Some(tx);
-            audio.amb_rx = Some(Mutex::new(rx));
-            audio.rx = None;
-        }
+    let mut l = match msg {
+        Ok(Ok(l)) => l,
         Ok(Err(e)) => {
             warn!("audio disabled: {e:#}");
             audio.rx = None;
+            return;
         }
-        Err(_) => {}
+        Err(_) => return,
+    };
+    audio.rx = None;
+    audio.loading_map = None;
+    info!("{}", l.report);
+    let lib = Arc::new(l.lib);
+    let engine = match audio.engine.clone() {
+        Some(e) => {
+            // Travel: the old map's sounds stop; states and game parameters persist (global
+            // in Wwise).
+            e.lock().unwrap().replace_library(lib.clone());
+            e
+        }
+        None => {
+            let mut e = Engine::new(lib.clone(), RATE);
+            e.spawn_decoders(2);
+            Arc::new(Mutex::new(e))
+        }
+    };
+    {
+        let mut e = engine.lock().unwrap();
+        for (k, p) in l.predecoded {
+            e.store.insert(k, p);
+        }
+        // Level ambience: state events first, then the bed, the score and the emitters.
+        if let Some(a) = cues::map_ambience(&l.map) {
+            for (g, s) in a.states {
+                e.set_state(*g, *s);
+            }
+            for s in a.state_events {
+                e.post_event_name(s, GLOBAL_OBJ);
+            }
+            e.post_event_name(a.bed, GLOBAL_OBJ);
+            if let Some(m) = a.music {
+                e.post_event_name(m, GLOBAL_OBJ);
+            }
+        }
+        for em in l.emitters.iter_mut().filter(|em| em.auto_play) {
+            e.set_position(em.obj, em.pos);
+            em.playing = e.post_event_name(&em.event, em.obj);
+        }
+    }
+    audio.music = l.tweaks.map(MusicManager::new);
+    audio.map = l.map;
+    audio.emitters = l.emitters;
+    audio.contact = l.contact;
+    audio.notifies = l.notifies;
+    audio.known_players.clear();
+    audio.engine = Some(engine.clone());
+    if !audio.stream_spawned {
+        audio.stream_spawned = true;
+        let h = streams.add(EngineStream(engine));
+        commands.spawn((AudioPlayer(h), PlaybackSettings::LOOP));
     }
 }
 
 fn attach_listener(mut commands: Commands, cams: Query<Entity, (With<crate::players::GameCamera>, Without<SpatialListener>)>) {
     for e in &cams {
-        // Ear gap ~ 20 cm in presentation units (1 uu = 2 cm).
+        // Ear gap ~ 20 cm in presentation units (1 uu = 2 cm); used by the dialogue voices.
         commands.entity(e).insert(SpatialListener::new(0.2));
     }
-}
-
-impl GameAudio {
-    fn rand(&mut self) -> f32 {
-        self.rng ^= self.rng << 13;
-        self.rng ^= self.rng >> 7;
-        self.rng ^= self.rng << 17;
-        (self.rng >> 40) as f32 / (1u64 << 24) as f32
-    }
-
-    fn clip(&mut self, assets: &mut Assets<PcmClip>, k: MediaKey) -> Option<Handle<PcmClip>> {
-        if let Some(h) = self.clips.get(&k) {
-            return Some(h.clone());
-        }
-        let pcm = self.lib.as_ref()?.decode(k).ok()?;
-        let h = assets.add(PcmClip(pcm));
-        self.clips.insert(k, h.clone());
-        Some(h)
-    }
-
-    /// Post an original event. `anchor: None` plays 2D (local player / UI).
-    fn post(&mut self, commands: &mut Commands, assets: &mut Assets<PcmClip>, event: &str, anchor: Option<Anchor>, at: Vec3, extra_db: f32) -> usize {
-        let Some(cue) = self.cues.get(event).cloned() else { return 0 };
-        let mut leaves = Vec::new();
-        let mut r = || self.rand();
-        cue.pick(&mut r, &mut leaves);
-        let n = leaves.len();
-        self.posted += 1;
-        debug!("post {event} ({n} voices, {})", if anchor.is_some() { "3D" } else { "2D" });
-        let bus = if event.contains("VO_") { 2 } else { 0 };
-        for l in leaves {
-            self.spawn_leaf(commands, assets, &l, anchor, at, extra_db, bus);
-        }
-        n
-    }
-
-    fn spawn_leaf(&mut self, commands: &mut Commands, assets: &mut Assets<PcmClip>, l: &Leaf, anchor: Option<Anchor>, at: Vec3, extra_db: f32, bus: u8) {
-        let Some(h) = self.clip(assets, l.media) else { return };
-        spawn_voice(commands, h, l, anchor, at, extra_db, None, bus);
-    }
-}
-
-fn db(v: f32) -> f32 {
-    10f32.powf(v / 20.0)
 }
 
 fn player<'a>(view: &'a SessionView, id: PlayerId) -> Option<&'a PlayerState> {
     view.me.iter().chain(view.others.iter()).find(|p| p.id == id)
 }
 
-/// Surface under a point, from the name of the colliding mesh (APPROXIMATION).
-fn surface_at(session: &Session, pos: Vec3) -> &'static str {
-    let world = &session.content.collision;
-    match world.raycast(pos + Vec3::Z * 10.0, -Vec3::Z, 300.0, dishonored_world::channel::ALL) {
-        Some(hit) => {
-            let tri = &world.tris[hit.tri as usize];
-            let name = world.sources.get(tri.source as usize).map(String::as_str).unwrap_or("");
-            let s = cues::surface_from_name(name);
-            trace!("surface {s} <- {name}");
-            s
-        }
-        None => "Stone",
-    }
+fn to_uu(t: &GlobalTransform) -> (Vec3, Vec3) {
+    let b = t.translation() / coords::UU_TO_BEVY;
+    let r = t.right();
+    (Vec3::new(b.x, b.z, b.y), Vec3::new(r.x, r.z, r.y))
 }
 
-/// Surface of the nearest collision triangle around an impact point (short probes
-/// along the six axes, since the hit normal is not part of the event).
-fn surface_near(session: &Session, p: Vec3) -> &'static str {
+/// Contact type of the surface below a point (the collision triangle's physical material).
+fn surface_below(session: &Session, pos: Vec3, depth: f32) -> Option<(String, f32)> {
+    let world = &session.content.collision;
+    let hit = world.raycast(pos, -Vec3::Z, depth, dishonored_world::channel::ALL)?;
+    Some((world.surface_of(hit.tri).unwrap_or("DisContactType_Environment").to_string(), hit.distance))
+}
+
+/// Contact type of the nearest surface around an impact point.
+fn surface_near(session: &Session, p: Vec3) -> String {
     let world = &session.content.collision;
     let mut best: Option<(f32, u32)> = None;
     for d in [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z] {
@@ -428,9 +479,7 @@ fn surface_near(session: &Session, p: Vec3) -> &'static str {
             }
         }
     }
-    let Some((_, tri)) = best else { return "Stone" };
-    let src = world.tris[tri as usize].source as usize;
-    cues::surface_from_name(world.sources.get(src).map(String::as_str).unwrap_or(""))
+    best.and_then(|b| world.surface_of(b.1)).unwrap_or("DisContactType_Environment").to_string()
 }
 
 /// Events the online client already played from its own prediction (skip the
@@ -442,52 +491,170 @@ pub fn predicted_locally(e: &SimEvent, me: Option<PlayerId>) -> bool {
     }
 }
 
-fn play_sim_events(
-    mut commands: Commands,
+/// Striker contact type of a pawn's footfall (`DisTweaks_Pawn_Body.m_pFootfallContactType`
+/// / `_Run`; the player's `_Player` variants by gait).
+fn footfall_striker(p: &PlayerState) -> &'static str {
+    let speed = p.velocity.truncate().length();
+    if p.kind == PawnKind::Human {
+        if p.crouched {
+            "DisContactType_Footfall_Sneak_Player"
+        } else if p.sprinting {
+            "DisContactType_Footfall_Sprint_Player"
+        } else {
+            "DisContactType_Footfall_Run_Player"
+        }
+    } else if speed > 300.0 {
+        "DisContactType_Footfall_Run"
+    } else {
+        "DisContactType_Footfall"
+    }
+}
+
+impl GameAudio {
+    fn temp_obj(&mut self, e: &mut Engine, pos: Vec3, now: f32) -> ObjId {
+        self.next_temp += 1;
+        let o = TEMP_OBJ + self.next_temp;
+        e.set_position(o, pos.to_array());
+        self.temp.push((o, now + 15.0));
+        o
+    }
+
+    /// Footfall contact under a pawn (original: trace from the foot / pawn down 1.5 x the
+    /// cylinder height, contact system striker x surface).
+    fn footfall(&mut self, e: &mut Engine, session: &Session, p: &PlayerState) -> bool {
+        let Some(contact) = &self.contact else { return false };
+        let Some((surface, _)) = surface_below(session, p.position, 87.5 * 1.5 + 10.0) else { return false };
+        let striker = footfall_striker(p);
+        let Some(snd) = contact.sound(striker, &surface) else { return false };
+        let obj = PLAYER_OBJ + p.id as u64;
+        let pid = e.post_event_name(&snd.event, obj);
+        let _ = snd.volume_scale(p.velocity.length());
+        self.footfalls += 1;
+        self.posted += 1;
+        pid != 0
+    }
+
+    fn post(&mut self, e: &mut Engine, event: &str, obj: ObjId) {
+        if !event.is_empty() && e.post_event_name(event, obj) != 0 {
+            self.posted += 1;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn drive(
     mut audio: ResMut<GameAudio>,
-    mut assets: ResMut<Assets<PcmClip>>,
+    settings: Res<AudioSettings>,
     mut view: ResMut<SessionView>,
     session: Res<Session>,
+    time: Res<Time>,
+    mut anim: ResMut<AnimSounds>,
+    cams: Query<&GlobalTransform, With<crate::players::GameCamera>>,
 ) {
     let events = std::mem::take(&mut view.audio_events);
     audio.events_seen += events.len() as u64;
-    if audio.lib.is_none() {
+    let Some(engine) = audio.engine.clone() else {
+        anim.pending.clear();
         return;
+    };
+    let mut e = engine.lock().unwrap();
+    let now = time.elapsed_secs();
+    let dt = time.delta_secs();
+    e.master = settings.volume;
+    e.category_gain = [settings.sfx, settings.music, settings.voice];
+    if let Some(cam) = cams.iter().next() {
+        let (pos, right) = to_uu(cam);
+        e.set_listener(pos.to_array(), right.to_array());
     }
+    // Pawns are game objects at their positions.
     let me = session.local_id();
-    let a = &mut *audio;
-    for e in events {
-        // (event, subject player) pairs; the subject decides 2D vs 3D and the position.
-        let mut posts: Vec<(String, Option<PlayerId>, Option<Vec3>, f32)> = Vec::new();
+    let players: Vec<PlayerState> = view.me.iter().chain(view.others.iter()).copied().collect();
+    let mut seen = HashSet::new();
+    for p in &players {
+        // Sounds come from the pawn's centre (the original posts on the pawn; notifies at bones).
+        e.set_position(PLAYER_OBJ + p.id as u64, p.position.to_array());
+        seen.insert(p.id);
+    }
+    let gone: Vec<PlayerId> = audio.known_players.difference(&seen).copied().collect();
+    for id in gone {
+        e.remove_object(PLAYER_OBJ + id as u64, 200.0);
+    }
+    audio.known_players = seen;
+    let temp_done: Vec<ObjId> = audio.temp.iter().filter(|t| t.1 < now).map(|t| t.0).collect();
+    for o in temp_done {
+        e.remove_object(o, 0.0);
+    }
+    audio.temp.retain(|t| t.1 >= now);
+    audio.notify_driven.retain(|_, t| now - *t < 2.0);
+    audio.notify_recent.retain(|_, t| now - *t < 1.0);
+
+    // Animation notifies.
+    for (pid, clip, from, to, looped) in std::mem::take(&mut anim.pending) {
+        let Some(c) = audio.notifies.get(&clip).cloned() else { continue };
+        let (from, to) = if looped && c.length > 0.0 { (from.rem_euclid(c.length), to.rem_euclid(c.length)) } else { (from, to) };
+        for n in c.window(from, to) {
+            audio.notify_driven.insert(pid, now);
+            match &n.kind {
+                NotifyKind::AkEvent { event, .. } => {
+                    let key = (pid, event.clone());
+                    if audio.notify_recent.get(&key).is_some_and(|t| now - *t < 0.05) {
+                        continue;
+                    }
+                    audio.notify_recent.insert(key, now);
+                    if e.post_event_name(event, PLAYER_OBJ + pid as u64) != 0 {
+                        audio.notify_posts += 1;
+                        audio.posted += 1;
+                    }
+                }
+                NotifyKind::Footfall { foot } => {
+                    let last = audio.foot_time.get(&(pid, *foot)).copied().unwrap_or(-1.0);
+                    if now - last >= 0.25 {
+                        audio.foot_time.insert((pid, *foot), now);
+                        if let Some(p) = players.iter().find(|p| p.id == pid) {
+                            audio.footfall(&mut e, &session, p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Simulation events.
+    for ev in events {
+        let subject_obj = |id: PlayerId| PLAYER_OBJ + id as u64;
         let cue = |k: &str| cues::cue_event(k).unwrap_or("").to_string();
-        match e {
-            SimEvent::SwordSwing { id } => posts.push((cue("sword_swing"), Some(id), None, 0.0)),
-            SimEvent::SwordBlocked { defender, .. } => posts.push((cue("sword_clash"), Some(defender), None, 0.0)),
+        let mut posts: Vec<(String, ObjId)> = Vec::new();
+        match ev {
+            SimEvent::SwordSwing { id } if !audio.notify_driven.contains_key(&id) => posts.push((cue("sword_swing"), subject_obj(id))),
+            SimEvent::SwordBlocked { defender, .. } => posts.push((cue("sword_clash"), subject_obj(defender))),
             SimEvent::SwordParried { defender, .. } => {
-                posts.push((cue("sword_clash"), Some(defender), None, 0.0));
-                posts.push((cue("sword_parry_whoosh"), Some(defender), None, 0.0));
+                posts.push((cue("sword_clash"), subject_obj(defender)));
+                posts.push((cue("sword_parry_whoosh"), subject_obj(defender)));
             }
             SimEvent::Fired { id, bolt, projectile } => {
-                a.projectiles.insert(projectile, bolt);
-                posts.push((cue(if bolt { "crossbow_fire" } else { "pistol_fire" }), Some(id), None, 0.0));
+                audio.projectiles.insert(projectile, bolt);
+                posts.push((cue(if bolt { "crossbow_fire" } else { "pistol_fire" }), subject_obj(id)));
             }
-            SimEvent::Reloaded { id } => posts.push((cue("pistol_reload"), Some(id), None, 0.0)),
-            SimEvent::BlinkStart { id, .. } => posts.push((cue("blink_start"), Some(id), None, 0.0)),
-            SimEvent::BlinkEnd { id } => posts.push((cue("blink_end"), Some(id), None, 0.0)),
-            SimEvent::BlinkFizzle { id } => posts.push((cue("power_empty"), Some(id), None, 0.0)),
-            SimEvent::WindblastCast { id } => posts.push((cue("windblast"), Some(id), None, 0.0)),
-            SimEvent::DarkVision { id, active } if Some(id) == me => {
-                posts.push((cue(if active { "dark_vision_on" } else { "dark_vision_off" }), Some(id), None, 0.0))
-            }
-            SimEvent::Jumped { id } => posts.push((cue("jump"), Some(id), None, 0.0)),
+            SimEvent::Reloaded { id } => posts.push((cue("pistol_reload"), subject_obj(id))),
+            SimEvent::BlinkStart { id, .. } => posts.push((cue("blink_start"), subject_obj(id))),
+            SimEvent::BlinkEnd { id } => posts.push((cue("blink_end"), subject_obj(id))),
+            SimEvent::BlinkFizzle { id } => posts.push((cue("power_empty"), subject_obj(id))),
+            SimEvent::WindblastCast { id } => posts.push((cue("windblast"), subject_obj(id))),
+            SimEvent::DarkVision { id, active } if Some(id) == me => posts.push((cue(if active { "dark_vision_on" } else { "dark_vision_off" }), subject_obj(id))),
+            SimEvent::Jumped { id } => posts.push((cue("jump"), subject_obj(id))),
             SimEvent::Mantle { id, edge_height } => {
                 let k = if edge_height < 80.0 { "mantle_low" } else if edge_height < 140.0 { "mantle_medium" } else { "mantle_high" };
-                posts.push((cue(k), Some(id), None, 0.0));
+                posts.push((cue(k), subject_obj(id)));
             }
             SimEvent::Landed { id, speed, .. } if speed > 250.0 => {
                 if let Some(p) = player(&view, id) {
-                    let s = surface_at(&session, p.position - Vec3::Z * 60.0);
-                    posts.push((cues::landing_event(s, speed > 900.0), Some(id), None, 0.0));
+                    // JumpLand contact: big above the hard landing speed, stealth when crouched.
+                    let striker = if speed > 900.0 { "DisContactType_JumpLand_Big" } else if p.crouched { "DisContactType_JumpLand_Stealth" } else { "DisContactType_JumpLand" };
+                    let surface = surface_below(&session, p.position, 200.0).map(|s| s.0).unwrap_or_else(|| "DisContactType_Environment".into());
+                    match audio.contact.as_ref().and_then(|c| c.sound(striker, &surface)) {
+                        Some(s) => posts.push((s.event, subject_obj(id))),
+                        None => posts.push((cues::landing_event("Stone", speed > 900.0), subject_obj(id))),
+                    }
                 }
             }
             SimEvent::Damage { victim, cause, amount, .. } => {
@@ -502,78 +669,49 @@ fn play_sim_events(
                     _ => None,
                 };
                 if let Some(k) = k {
-                    posts.push((cue(k), Some(victim), None, 0.0));
+                    posts.push((cue(k), subject_obj(victim)));
                 }
                 let human = player(&view, victim).is_none_or(|p| p.kind == PawnKind::Human);
                 let vo = if !human { "npc_pain" } else if amount >= 40.0 { "pain_big" } else { "pain_low" };
-                posts.push((cue(vo), Some(victim), None, 0.0));
+                posts.push((cue(vo), subject_obj(victim)));
             }
             SimEvent::Death { victim, .. } => {
-                posts.push((cue("death_vo"), Some(victim), None, 0.0));
-                posts.push((cue("body_fall"), Some(victim), None, -4.0));
+                posts.push((cue("death_vo"), subject_obj(victim)));
+                posts.push((cue("body_fall"), subject_obj(victim)));
             }
             SimEvent::ProjectileImpact { projectile, point, victim: None } => {
-                let bolt = a.projectiles.remove(&projectile).unwrap_or(false);
-                let s = surface_near(&session, point);
-                posts.push((cues::impact_event(bolt, s), None, Some(point), 0.0));
+                let bolt = audio.projectiles.remove(&projectile).unwrap_or(false);
+                let surface = surface_near(&session, point);
+                let striker = if bolt { "DisContactType_Arrow" } else { "DisContactType_Bullet" };
+                let obj = audio.temp_obj(&mut e, point, now);
+                match audio.contact.as_ref().and_then(|c| c.sound(striker, &surface)) {
+                    Some(s) => posts.push((s.event, obj)),
+                    None => posts.push((cues::impact_event(bolt, "Stone"), obj)),
+                }
             }
             SimEvent::ProjectileImpact { projectile, .. } => {
-                a.projectiles.remove(&projectile);
+                audio.projectiles.remove(&projectile);
             }
             _ => {}
         }
-        for (ev, subject, point, extra) in posts {
-            if ev.is_empty() {
-                continue;
-            }
-            let local = subject.is_some() && subject == me;
-            let (anchor, at) = match (subject, point) {
-                (_, Some(p)) => (Some(Anchor::Point(p)), p),
-                (Some(id), None) => (Some(Anchor::Player(id)), player(&view, id).map(|p| p.position).unwrap_or_default()),
-                (None, None) => (None, Vec3::ZERO),
-            };
-            let anchor = if local { None } else { anchor };
-            let ev = if a.cues.contains_key(&ev) { ev } else { fallback_event(&ev) };
-            a.post(&mut commands, &mut assets, &ev, anchor, at, extra);
+        for (ev, obj) in posts {
+            audio.post(&mut e, &ev, obj);
         }
     }
-}
 
-/// Surface-specific events that do not exist for every surface fall back to stone.
-fn fallback_event(ev: &str) -> String {
-    for s in cues::SURFACES {
-        if ev.contains(&format!("_{s}_")) || ev.ends_with(&format!("_{s}")) {
-            return ev.replacen(s, "Stone", 1);
-        }
-    }
-    ev.to_string()
-}
-
-/// Footsteps from movement (the sim emits no per-step events): one step per stride
-/// of horizontal travel on the ground.
-fn footsteps(
-    mut commands: Commands,
-    mut audio: ResMut<GameAudio>,
-    mut assets: ResMut<Assets<PcmClip>>,
-    view: Res<SessionView>,
-    session: Res<Session>,
-) {
-    if audio.lib.is_none() {
-        return;
-    }
-    let me = session.local_id();
-    let players: Vec<PlayerState> = view.me.iter().chain(view.others.iter()).copied().collect();
-    for p in players {
+    // Footfalls for pawns whose animation does not report notifies: one per stride.
+    for p in &players {
+        let driven = audio.notify_driven.contains_key(&p.id);
         let entry = audio.steps.entry(p.id).or_insert((p.position, 0.0));
         let delta = (p.position - entry.0).truncate().length();
         entry.0 = p.position;
-        if !p.alive || p.mode != MoveMode::Walking || delta > 200.0 {
+        if driven || !p.alive || p.mode != MoveMode::Walking || delta > 200.0 {
             entry.1 = 0.0;
             continue;
         }
         entry.1 += delta;
         let speed = p.velocity.truncate().length();
-        let gait = if p.crouched { Gait::Sneak } else if speed > 450.0 { Gait::Sprint } else { Gait::Run };
+        let gait = if p.crouched { Gait::Sneak } else if p.sprinting || speed > 450.0 { Gait::Sprint } else { Gait::Run };
         let stride = match gait {
             Gait::Sneak => 90.0,
             Gait::Run => 140.0,
@@ -583,157 +721,75 @@ fn footsteps(
             continue;
         }
         entry.1 -= stride;
-        let surface = surface_at(&session, p.position - Vec3::Z * 60.0);
-        let npc = p.kind != PawnKind::Human;
-        let mut ev = cues::footstep_event(surface, gait, npc);
-        if !audio.cues.contains_key(&ev) {
-            ev = cues::footstep_event("Stone", gait, npc);
-        }
-        let local = Some(p.id) == me;
-        let anchor = if local { None } else { Some(Anchor::Player(p.id)) };
-        audio.post(&mut commands, &mut assets, &ev, anchor, p.position, 0.0);
+        audio.footfall(&mut e, &session, p);
     }
-}
 
-fn listener_uu(cams: &Query<&GlobalTransform, With<SpatialListener>>) -> Option<Vec3> {
-    cams.iter().next().map(|t| {
-        let b = t.translation() / coords::UU_TO_BEVY;
-        Vec3::new(b.x, b.z, b.y)
-    })
-}
+    // Mission sounds (Kismet `SeqAct_AkPostEvent`, mission actions): 2D on the listener.
+    if let Some(mv) = view.matchv.mission.as_ref() {
+        let last = audio.mission_sound;
+        let new: Vec<(u32, String)> = mv.sounds.iter().filter(|s| s.0 > last).cloned().collect();
+        for (id, ev) in new {
+            audio.mission_sound = audio.mission_sound.max(id);
+            audio.post(&mut e, &ev, GLOBAL_OBJ);
+        }
+    }
 
-/// Keep ambience slots playing: re-pick when a pick ends; cull far emitters.
-fn ambience(
-    mut commands: Commands,
-    mut audio: ResMut<GameAudio>,
-    mut assets: ResMut<Assets<PcmClip>>,
-    time: Res<Time>,
-    live: Query<(Entity, &AmbientVoice)>,
-    cams: Query<&GlobalTransform, With<SpatialListener>>,
-) {
-    if audio.lib.is_none() || audio.ambience.is_empty() {
-        return;
-    }
-    let now = time.elapsed_secs();
-    let listener = listener_uu(&cams);
-    let mut alive = vec![false; audio.ambience.len()];
-    for (e, v) in &live {
-        let slot = &audio.ambience[v.0];
-        let far = match (slot.pos, listener) {
-            (Some(p), Some(l)) => p.distance(l) > slot.range + EMITTER_MARGIN * 2.0,
-            _ => false,
-        };
-        if far {
-            commands.entity(e).despawn();
-        } else {
-            alive[v.0] = true;
-        }
-    }
-    // Finished decodes: start the voices (handles are not cached, so the PCM is freed
-    // when the pick ends).
-    let done: Vec<AmbientPick> = audio.amb_rx.as_ref().map(|rx| rx.lock().unwrap().try_iter().collect()).unwrap_or_default();
-    for (i, items) in done {
-        audio.pending[i] = false;
-        // Commands apply at the end of the frame; do not re-pick before the voice exists.
-        audio.ambience[i].next_try = now + 0.5;
-        let (pos, gain, music) = (audio.ambience[i].pos, audio.ambience[i].gain_db, audio.ambience[i].music);
-        for (l, pcm) in items {
-            let h = assets.add(PcmClip(pcm));
-            spawn_voice(&mut commands, h, &l, pos.map(Anchor::Point), pos.unwrap_or_default(), gain, Some(i), if music { 1 } else { 0 });
-        }
-    }
-    let Some(lib) = audio.lib.clone() else { return };
-    let Some(tx) = audio.amb_tx.clone() else { return };
-    for i in 0..audio.ambience.len() {
-        if alive[i] || audio.pending[i] || now < audio.ambience[i].next_try {
-            continue;
-        }
-        let (pos, range) = (audio.ambience[i].pos, audio.ambience[i].range);
-        if let (Some(p), Some(l)) = (pos, listener) {
-            if p.distance(l) > range + EMITTER_MARGIN {
-                audio.ambience[i].next_try = now + 1.0;
+    // Ambient sound actors started, stopped or toggled by Kismet.
+    if let Some(mv) = view.matchv.mission.as_ref() {
+        for (key, on) in &mv.ambient {
+            let Some(i) = audio.emitters.iter().position(|em| em.key.eq_ignore_ascii_case(key)) else { continue };
+            if audio.emitters[i].kismet == Some(*on) {
                 continue;
             }
-        }
-        let cue = audio.ambience[i].cue.clone();
-        let mut leaves = Vec::new();
-        let mut r = || audio.rand();
-        cue.pick(&mut r, &mut leaves);
-        audio.pending[i] = true;
-        let (lib, tx) = (lib.clone(), tx.clone());
-        std::thread::spawn(move || {
-            let items: Vec<(Leaf, Arc<Pcm>)> = leaves.iter().filter_map(|l| Some((*l, Arc::new(lib.decode_uncached(l.media).ok()?)))).collect();
-            let _ = tx.send((i, items));
-        });
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_voice(commands: &mut Commands, h: Handle<PcmClip>, l: &Leaf, anchor: Option<Anchor>, at: Vec3, extra_db: f32, ambient: Option<usize>, bus: u8) {
-    let speed = 2f32.powf(l.pitch_cents / 1200.0).clamp(0.25, 4.0);
-    let settings = PlaybackSettings {
-        mode: PlaybackMode::Despawn,
-        // 3D voices start silent; update_voices sets the attenuated gain on the first frame.
-        volume: Volume::Linear(if anchor.is_none() { db(l.volume_db + extra_db) } else { 0.0 }),
-        speed,
-        spatial: anchor.is_some(),
-        spatial_scale: Some(SpatialScale::new(SPATIAL_SCALE)),
-        ..PlaybackSettings::ONCE
-    };
-    let mut e = commands.spawn((
-        AudioPlayer(h),
-        settings,
-        Transform::from_translation(coords::pos(at)),
-        Voice { anchor, gain_db: l.volume_db + extra_db, attenuation: l.attenuation, max_distance: l.max_distance, bus },
-    ));
-    if let Some(i) = ambient {
-        e.insert(AmbientVoice(i));
-    }
-}
-
-/// Follow anchors and apply distance attenuation + master volume.
-fn update_voices(
-    settings: Res<AudioSettings>,
-    audio: Res<GameAudio>,
-    view: Res<SessionView>,
-    cams: Query<&GlobalTransform, With<SpatialListener>>,
-    mut spatial: Query<(&Voice, &mut Transform, &mut SpatialAudioSink), Without<SpatialListener>>,
-    mut flat: Query<(&Voice, &mut AudioSink)>,
-) {
-    let Some(lib) = audio.lib.as_ref() else { return };
-    let listener = listener_uu(&cams);
-    for (v, mut tf, mut sink) in &mut spatial {
-        let pos = match v.anchor {
-            Some(Anchor::Player(id)) => player(&view, id).map(|p| p.position),
-            Some(Anchor::Point(p)) => Some(p),
-            None => None,
-        };
-        let Some(pos) = pos else { continue };
-        tf.translation = coords::pos(pos);
-        let d = listener.map(|l| l.distance(pos)).unwrap_or(0.0);
-        let att_db = match (v.attenuation, v.max_distance) {
-            (_, Some(m)) if d > m => -200.0,
-            (Some(a), _) => lib.attenuation_db(a, d),
-            _ => {
-                let t = (1.0 - d / FALLBACK_RANGE).max(0.0);
-                if t <= 0.0 { -200.0 } else { 40.0 * t.log10() }
+            audio.emitters[i].kismet = Some(*on);
+            let (obj, playing) = (audio.emitters[i].obj, audio.emitters[i].playing);
+            if *on && (playing == 0 || !e.is_playing(playing)) {
+                let ev = audio.emitters[i].event.clone();
+                e.set_position(obj, audio.emitters[i].pos);
+                audio.emitters[i].playing = e.post_event_name(&ev, obj);
+            } else if !*on && playing != 0 {
+                e.stop_playing(playing, 500.0);
+                audio.emitters[i].playing = 0;
             }
-        };
-        sink.set_volume(Volume::Linear(db(v.gain_db + att_db) * settings.volume * bus_gain(&settings, v.bus)));
+        }
     }
-    for (v, mut sink) in &mut flat {
-        sink.set_volume(Volume::Linear(db(v.gain_db) * settings.volume * bus_gain(&settings, v.bus)));
+    // Music manager from the replicated NPC awareness around the local player.
+    if let (Some(m), Some(me_p)) = (audio.music.as_mut(), view.me.as_ref()) {
+        let npcs: Vec<MusicNpc> = view
+            .matchv
+            .ai
+            .iter()
+            .filter_map(|a| {
+                let p = view.others.iter().find(|p| p.id == a.id)?;
+                Some(MusicNpc { pos: p.position.to_array(), alive: p.alive, hostile: a.hostile, combat: a.combat, music_type: a.music_type })
+            })
+            .collect();
+        for ev in m.tick(dt, me_p.position.to_array(), &npcs) {
+            if e.post_event_name(&ev, GLOBAL_OBJ) != 0 {
+                audio.posted += 1;
+            }
+            info!("music: {ev}");
+        }
     }
+    let _ = Category::Music;
 }
 
 /// Periodic one-line summary (events seen, posts, live voices) for logs and the harness.
-fn stats(mut audio: ResMut<GameAudio>, time: Res<Time>, voices: Query<(), With<Voice>>) {
+fn stats(mut audio: ResMut<GameAudio>, time: Res<Time>) {
     let now = time.elapsed_secs();
-    if audio.lib.is_none() || now - audio.last_stats < 10.0 {
+    if audio.engine.is_none() || now - audio.last_stats < 10.0 {
         return;
     }
     audio.last_stats = now;
-    info!("audio: {} sim events, {} posts, {} live voices", audio.events_seen, audio.posted, voices.iter().count());
+    let (voices, st) = {
+        let e = audio.engine.as_ref().unwrap().lock().unwrap();
+        (e.active_voices(), e.stats.clone())
+    };
+    let music = audio.music.as_ref().map(|m| format!("{:?}", m.state)).unwrap_or_default();
+    info!(
+        "audio: {} sim events, {} posts ({} notify, {} footfalls), {voices} live voices, {} music segments, {} music transitions, music state {music}",
+        audio.events_seen, audio.posted, audio.notify_posts, audio.footfalls, st.music_segments, st.music_transitions
+    );
 }
 
 /// Master volume for every sound of the process: silent when `DISHONORED_MUTE` is set (test runs

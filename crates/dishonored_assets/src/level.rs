@@ -26,6 +26,10 @@ pub struct ImportOptions {
     pub load_lightmaps: bool,
     /// Import StaticMesh/SplineMesh components of non-static actor classes.
     pub other_actors: bool,
+    /// Decode the ParticleSystems of placed `Emitter` actors (and `extra_particles`).
+    pub particles: bool,
+    /// Further ParticleSystem paths to decode (gameplay effects), resolved through the index.
+    pub extra_particles: Vec<String>,
 }
 
 impl Default for ImportOptions {
@@ -35,6 +39,8 @@ impl Default for ImportOptions {
             load_textures: true,
             load_lightmaps: true,
             other_actors: true,
+            particles: true,
+            extra_particles: Vec::new(),
         }
     }
 }
@@ -94,6 +100,8 @@ struct Importer<'a> {
     pending_lightmaps: Vec<PendingLightmap>,
     merged_ids: HashMap<(TextureId, TextureId, u32, u32), Option<TextureId>>,
     stats: ImportStats,
+    ps_ids: HashMap<Key, Option<usize>>,
+    class_defaults: HashMap<String, Vec<Property>>,
 }
 
 const RESOURCE_CLASSES: &[&str] = &[
@@ -102,6 +110,7 @@ const RESOURCE_CLASSES: &[&str] = &[
     "Material",
     "MaterialInstanceConstant",
     "TextureCube",
+    "ParticleSystem",
 ];
 
 /// Always-loaded packages whose resources level packages import without cooking a copy
@@ -153,9 +162,16 @@ pub fn import_level(
         pending_lightmaps: Vec::new(),
         merged_ids: HashMap::new(),
         stats: ImportStats::default(),
+        ps_ids: HashMap::new(),
+        class_defaults: HashMap::new(),
     };
     for slot in 0..level_slots {
         imp.import_actors(slot)?;
+    }
+    if opts.particles && opts.load_textures {
+        for p in &opts.extra_particles {
+            imp.particle_by_path(p);
+        }
     }
     if opts.load_textures && opts.load_lightmaps {
         imp.bake_lightmaps();
@@ -251,6 +267,7 @@ impl Importer<'_> {
                     }
                 }
                 "DisFog" if self.is_in_persistent_level(&pkg, i) => self.import_fog(slot, i),
+                "Emitter" if self.opts.particles && self.opts.load_textures && self.is_in_persistent_level(&pkg, i) => self.import_emitter(slot, i),
                 c if (c.ends_with("Light") || c.contains("LightToggleable") || c.contains("LightMovable")) && self.is_in_persistent_level(&pkg, i) => {
                     self.import_light(slot, i, c);
                 }
@@ -271,6 +288,48 @@ impl Importer<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Placed `Emitter`: its `ParticleSystemComponent`'s `Template` at the actor transform.
+    fn import_emitter(&mut self, slot: usize, actor: usize) {
+        let pkg = self.pkgs[slot].clone();
+        let Ok(h) = pkg.read_object(actor) else { return };
+        // Emitters attached to another actor (`Base`: pawns, movers) follow it; not placed.
+        if find(&h.properties, "Base").and_then(|p| p.as_object()).is_some_and(|o| o != 0) {
+            return;
+        }
+        let Some(ObjRef::Export(ci)) = find(&h.properties, "ParticleSystemComponent").and_then(|p| p.as_object()).map(ObjRef::from_index) else { return };
+        let Ok(ch) = pkg.read_object(ci) else { return };
+        let Some(t) = find(&ch.properties, "Template").and_then(|p| p.as_object()).filter(|o| *o != 0) else { return };
+        let Some(k) = self.resolve(slot, ObjRef::from_index(t)) else { return };
+        let Some(system) = self.particle_system(k) else { return };
+        let transform = actor_transform(&h.properties) * component_transform(&ch.properties);
+        self.map.emitters.push(dishonored_ir::particles::EmitterInstance {
+            system,
+            transform,
+            source: format!("{}:{}", pkg.name, pkg.obj_path(ObjRef::Export(actor))),
+            auto_activate: bool_or(&ch.properties, "bAutoActivate", true),
+        });
+    }
+
+    fn particle_system(&mut self, k: Key) -> Option<usize> {
+        if let Some(id) = self.ps_ids.get(&k) {
+            return *id;
+        }
+        self.ps_ids.insert(k, None);
+        let ps = crate::particles::decode(self, k);
+        let id = (!ps.emitters.is_empty()).then(|| {
+            self.map.particle_systems.push(ps);
+            self.map.particle_systems.len() - 1
+        });
+        self.ps_ids.insert(k, id);
+        id
+    }
+
+    /// Decode a ParticleSystem by object path (gameplay effects requested by the caller).
+    fn particle_by_path(&mut self, path: &str) -> Option<usize> {
+        let k = *self.index.get(&path.to_ascii_lowercase())?;
+        self.particle_system(k)
     }
 
     /// Arkane `DisFog` layer (defaults from `Engine.Default__DisFogComponent`: Opacity 0.8,
@@ -749,6 +808,7 @@ impl Importer<'_> {
                         .iter()
                         .map(|t| [t[0] as u32, t[1] as u32, t[2] as u32])
                         .collect(),
+                    collision_materials: raw.kdop_triangles.iter().map(|t| t[3]).collect(),
                     bounds_min: raw.bounds_origin - raw.bounds_extent,
                     bounds_max: raw.bounds_origin + raw.bounds_extent,
                     positions: raw.positions,
@@ -764,6 +824,31 @@ impl Importer<'_> {
         };
         self.mesh_ids.insert(k, id);
         id
+    }
+
+    /// `DisContactType_*` class of a `PhysicalMaterial`: its `PhysicalMaterialProperty`
+    /// (`DisContactPhysicalMaterial.m_pContactType`, default `DisContactType_Environment`),
+    /// else its `Parent`'s.
+    fn contact_type(&mut self, mut k: Key) -> Option<String> {
+        for _ in 0..8 {
+            let pkg = self.pkgs[k.0].clone();
+            let props = pkg.read_object(k.1).ok()?.properties;
+            if let Some(pp) = find(&props, "PhysicalMaterialProperty").and_then(|p| p.as_object()).filter(|o| *o != 0) {
+                let r = ObjRef::from_index(pp);
+                let ct = match self.resolve(k.0, r) {
+                    Some(pk) => {
+                        let ppkg = self.pkgs[pk.0].clone();
+                        let pprops = ppkg.read_object(pk.1).ok().map(|h| h.properties).unwrap_or_default();
+                        find(&pprops, "m_pContactType").and_then(|p| p.as_object()).filter(|o| *o != 0).map(|c| ppkg.obj_name(ObjRef::from_index(c)))
+                    }
+                    None => None,
+                };
+                return Some(ct.unwrap_or_else(|| "DisContactType_Environment".to_string()));
+            }
+            let parent = find(&props, "Parent").and_then(|p| p.as_object()).filter(|o| *o != 0)?;
+            k = self.resolve(k.0, ObjRef::from_index(parent))?;
+        }
+        None
     }
 
     fn material(&mut self, k: Key) -> Option<MaterialId> {
@@ -875,6 +960,7 @@ impl Importer<'_> {
                 .into_iter()
                 .filter_map(|(n, t)| Some((n.to_string(), t?)))
                 .collect(),
+            contact_type: chain.phys_material.and_then(|pm| self.contact_type(pm)),
         };
         self.map.materials.push(asset);
         let id = self.map.materials.len() - 1;
@@ -983,5 +1069,44 @@ impl Importer<'_> {
         };
         self.tex_ids.insert(k, id);
         id
+    }
+}
+
+impl crate::particles::ParticleCtx for Importer<'_> {
+    fn package(&self, slot: usize) -> Arc<Package> {
+        self.pkgs[slot].clone()
+    }
+    fn resolve_ref(&mut self, slot: usize, r: ObjRef) -> Option<Key> {
+        self.resolve(slot, r)
+    }
+    fn import_material(&mut self, k: Key) -> Option<MaterialId> {
+        self.material(k)
+    }
+    fn import_mesh(&mut self, k: Key) -> Option<usize> {
+        self.mesh(k)
+    }
+    fn class_default(&mut self, class: &str) -> Vec<Property> {
+        if let Some(p) = self.class_defaults.get(class) {
+            return p.clone();
+        }
+        let props = (|| {
+            let engine = self.content.package("Engine").ok()?;
+            let want = format!("Default__{class}");
+            let i = (0..engine.exports.len()).find(|&i| engine.obj_name(ObjRef::Export(i)) == want)?;
+            engine.read_object(i).ok().map(|h| h.properties)
+        })()
+        .unwrap_or_default();
+        self.class_defaults.insert(class.to_string(), props.clone());
+        props
+    }
+    fn material_blend(&self, id: MaterialId) -> dishonored_ir::particles::ParticleBlend {
+        use dishonored_ir::particles::ParticleBlend as B;
+        match self.map.material_params.get(id).map(|p| p.blend) {
+            Some(MaterialBlend::Additive) => B::Additive,
+            Some(MaterialBlend::Masked) => B::Masked,
+            Some(MaterialBlend::Opaque) => B::Opaque,
+            Some(MaterialBlend::Modulate) => B::Modulate,
+            _ => B::Translucent,
+        }
     }
 }

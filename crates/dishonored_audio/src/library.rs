@@ -92,10 +92,43 @@ pub struct SoundLibrary {
     /// HIRC object id -> bank index.
     objects: HashMap<u32, usize>,
     cache: Mutex<HashMap<MediaKey, Arc<Pcm>>>,
+    info_cache: Mutex<HashMap<MediaKey, (u64, u32, u16)>>,
     /// Global state/switch values (group id -> value), as set by SetState actions.
     pub states: Mutex<HashMap<u32, u32>>,
     /// Extension of the dialog banks to load (`INT` = english(us)).
     pub vo_language: String,
+}
+
+/// (frames, rate, channels) from a RIFF/WEM header (tolerates a truncated file).
+fn wem_header_info(b: &[u8]) -> Option<(u64, u32, u16)> {
+    let rd16 = |o: usize| b.get(o..o + 2).map(|s| u16::from_le_bytes([s[0], s[1]]));
+    let rd32 = |o: usize| b.get(o..o + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap()));
+    if b.get(0..4)? != b"RIFF" {
+        return None;
+    }
+    let mut o = 12;
+    let (mut codec, mut ch, mut rate, mut align, mut frames) = (0u16, 0u16, 0u32, 1u16, None);
+    while o + 8 <= b.len() {
+        let tag = &b[o..o + 4];
+        let size = rd32(o + 4)? as usize;
+        let body = o + 8;
+        if tag == b"fmt " {
+            codec = rd16(body)?;
+            ch = rd16(body + 2)?;
+            rate = rd32(body + 4)?;
+            align = rd16(body + 12)?;
+            if codec == crate::wem::CODEC_VORBIS {
+                frames = Some(rd32(body + 0x18)? as u64);
+            }
+        } else if tag == b"data" {
+            if codec == crate::wem::CODEC_PCM {
+                frames = Some(size as u64 / align.max(1) as u64);
+            }
+            break;
+        }
+        o = body + size + (size & 1);
+    }
+    Some((frames?, rate, ch))
 }
 
 pub fn pck_dirs(root: &Path) -> Vec<PathBuf> {
@@ -111,7 +144,7 @@ impl SoundLibrary {
     pub fn new(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         let codebooks = CodebookLibrary::from_install(&root)?;
-        Ok(Self { root, codebooks, banks: Vec::new(), objects: HashMap::new(), cache: Mutex::new(HashMap::new()), states: Mutex::new(HashMap::new()), vo_language: "INT".into() })
+        Ok(Self { root, codebooks, banks: Vec::new(), objects: HashMap::new(), cache: Mutex::new(HashMap::new()), info_cache: Mutex::new(HashMap::new()), states: Mutex::new(HashMap::new()), vo_language: "INT".into() })
     }
 
     pub fn find_pck(&self, name: &str) -> Option<PathBuf> {
@@ -231,11 +264,7 @@ impl SoundLibrary {
         let mut first = true;
         for _ in 0..32 {
             let Some((_, n)) = self.node(id) else { break };
-            let base = match n {
-                Node::Sound { base, .. } => base,
-                Node::Container { base: Some(b), .. } => b,
-                _ => break,
-            };
+            let Some(base) = n.base() else { break };
             vol += base.prop(hirc::PROP_VOLUME).unwrap_or(0.0);
             pitch += base.prop(hirc::PROP_PITCH).unwrap_or(0.0);
             if first {
@@ -257,7 +286,7 @@ impl SoundLibrary {
         (vol, pitch, looping, att)
     }
 
-    fn media_key(&self, bank: usize, s: &hirc::Source) -> Option<MediaKey> {
+    pub fn media_key(&self, bank: usize, s: &hirc::Source) -> Option<MediaKey> {
         let streamed = s.stream != StreamType::Embedded;
         let has = |b: &LoadedBank| {
             if streamed {
@@ -284,7 +313,7 @@ impl SoundLibrary {
                 let (max_distance, attenuation) = (att.map(|a| a.0), att.map(|a| a.1));
                 Some(Cue::Leaf(Leaf { media, volume_db, pitch_cents, looping, max_distance, attenuation }))
             }
-            Node::MusicTrack { sources } => {
+            Node::MusicTrack { sources, .. } => {
                 let v: Vec<(Cue, f32)> = sources
                     .iter()
                     .filter_map(|s| {
@@ -294,47 +323,46 @@ impl SoundLibrary {
                     .collect();
                 (!v.is_empty()).then_some(Cue::Random(v))
             }
-            Node::Container { kind, children, weights, switch_groups, default_switch, group_id, .. } => {
-                let sub = |ids: &[u32]| -> Vec<Cue> { ids.iter().filter_map(|c| self.resolve_node(*c, depth + 1, states)).collect() };
-                match *kind {
-                    hirc::HIRC_LAYER | hirc::HIRC_MUSIC_SEGMENT => {
-                        let v = sub(children);
-                        (!v.is_empty()).then_some(Cue::All(v))
-                    }
-                    hirc::HIRC_MUSIC_SWITCH if !switch_groups.is_empty() => {
-                        // Group ids are not decoded for music switches: match any active state value.
-                        let ids: Vec<u32> = switch_groups
-                            .iter()
-                            .filter(|g| states.values().any(|v| *v == g.0))
-                            .flat_map(|g| g.1.iter().copied())
-                            .collect();
-                        let ids = if ids.is_empty() { children.clone() } else { ids };
-                        let v = sub(&ids);
-                        (!v.is_empty()).then(|| Cue::Random(v.into_iter().map(|c| (c, 1.0)).collect()))
-                    }
-                    hirc::HIRC_SWITCH => {
-                        // Without game switch state: the default switch's group, else
-                        // the first non-empty group, else any child.
-                        let group = switch_groups
-                            .iter()
-                            .find(|g| Some(&g.0) == states.get(group_id) && !g.1.is_empty())
-                            .or_else(|| switch_groups.iter().find(|g| g.0 == *default_switch && !g.1.is_empty()))
-                            .or_else(|| switch_groups.iter().find(|g| !g.1.is_empty()));
-                        let ids = group.map(|g| g.1.clone()).unwrap_or_else(|| children.clone());
-                        let v = sub(&ids);
-                        (!v.is_empty()).then(|| Cue::Random(v.into_iter().map(|c| (c, 1.0)).collect()))
-                    }
-                    _ => {
-                        let v: Vec<(Cue, f32)> = children
-                            .iter()
-                            .filter_map(|c| {
-                                let w = weights.iter().find(|w| w.0 == *c).map(|w| w.1 as f32).unwrap_or(50000.0);
-                                Some((self.resolve_node(*c, depth + 1, states)?, w.max(1.0)))
-                            })
-                            .collect();
-                        (!v.is_empty()).then_some(Cue::Random(v))
-                    }
+            Node::Layer { children, .. } | Node::MusicSegment { music: hirc::MusicNode { children, .. }, .. } => {
+                let v: Vec<Cue> = children.iter().filter_map(|c| self.resolve_node(*c, depth + 1, states)).collect();
+                (!v.is_empty()).then_some(Cue::All(v))
+            }
+            Node::MusicSwitch { music, group, default_switch, assocs, .. } => {
+                let want = states.get(group).copied().unwrap_or(*default_switch);
+                let mut ids: Vec<u32> = assocs.iter().filter(|a| a.0 == want).map(|a| a.1).collect();
+                if ids.is_empty() {
+                    ids = music.children.clone();
                 }
+                let v: Vec<(Cue, f32)> = ids.iter().filter_map(|c| Some((self.resolve_node(*c, depth + 1, states)?, 1.0))).collect();
+                (!v.is_empty()).then_some(Cue::Random(v))
+            }
+            Node::MusicRanSeq { music, .. } => {
+                let v: Vec<(Cue, f32)> = music.children.iter().filter_map(|c| Some((self.resolve_node(*c, depth + 1, states)?, 1.0))).collect();
+                (!v.is_empty()).then_some(Cue::Random(v))
+            }
+            Node::Switch { group, default_switch, children, groups, .. } => {
+                let g = groups
+                    .iter()
+                    .find(|g| Some(&g.0) == states.get(group) && !g.1.is_empty())
+                    .or_else(|| groups.iter().find(|g| g.0 == *default_switch && !g.1.is_empty()))
+                    .or_else(|| groups.iter().find(|g| !g.1.is_empty()));
+                let ids = g.map(|g| g.1.clone()).unwrap_or_else(|| children.clone());
+                let v: Vec<(Cue, f32)> = ids.iter().filter_map(|c| Some((self.resolve_node(*c, depth + 1, states)?, 1.0))).collect();
+                (!v.is_empty()).then_some(Cue::Random(v))
+            }
+            Node::RanSeq { children, playlist, .. } => {
+                let v: Vec<(Cue, f32)> = children
+                    .iter()
+                    .filter_map(|c| {
+                        let w = playlist.iter().find(|w| w.0 == *c).map(|w| w.1 as f32).unwrap_or(50000.0);
+                        Some((self.resolve_node(*c, depth + 1, states)?, w.max(1.0)))
+                    })
+                    .collect();
+                (!v.is_empty()).then_some(Cue::Random(v))
+            }
+            Node::ActorMixer { children, .. } => {
+                let v: Vec<(Cue, f32)> = children.iter().filter_map(|c| Some((self.resolve_node(*c, depth + 1, states)?, 1.0))).collect();
+                (!v.is_empty()).then_some(Cue::Random(v))
             }
             _ => None,
         }
@@ -368,6 +396,24 @@ impl SoundLibrary {
         } else {
             b.bank.media_by_id(k.id).map(<[u8]>::to_vec).context("media not in bank")
         }
+    }
+
+    /// (frames, sample rate, channels) from the first bytes of the media only (cached), so
+    /// the playback engine can time sequences without reading a whole stream.
+    pub fn media_info(&self, k: MediaKey) -> Result<(u64, u32, u16)> {
+        if let Some(i) = self.info_cache.lock().unwrap().get(&k) {
+            return Ok(*i);
+        }
+        let b = &self.banks[k.bank];
+        let head = if k.streamed {
+            let e = b.pck.streams.iter().find(|e| e.id == k.id).context("stream not in package")?;
+            b.pck.read(&crate::pck::PckEntry { size: e.size.min(8192), ..*e })?
+        } else {
+            b.bank.media_by_id(k.id).context("media not in bank")?.to_vec()
+        };
+        let info = wem_header_info(&head).context("media header")?;
+        self.info_cache.lock().unwrap().insert(k, info);
+        Ok(info)
     }
 
     /// Length in seconds from the media header alone (Vorbis `vorb` sample count, PCM data

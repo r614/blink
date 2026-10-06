@@ -315,6 +315,11 @@ fn collect_hits(events: &[dishonored_sim::events::SimEvent], all: &[&PlayerState
     out
 }
 
+/// Clip and time of the full-body and upper-body chains (for the sound notifies).
+fn chain_clips(st: &crate::npc_anim::PawnAnim) -> Vec<(String, f32)> {
+    [st.full.as_ref(), st.upper.as_ref()].into_iter().flatten().filter_map(|c| c.steps.get(c.i).map(|s| (s.0.clone(), c.t))).collect()
+}
+
 /// Pawns speaking a conversation line right now (mission NPC ids resolved to pawns).
 fn talking_pawns(view: &crate::session::SessionView) -> Vec<u32> {
     let Some(m) = view.matchv.mission.as_ref() else { return Vec::new() };
@@ -339,6 +344,7 @@ pub fn animate_characters(
     mut joints: Query<(&Joint, &mut Transform), Without<TpWeaponJoint>>,
     mut wjoints: Query<(&TpWeaponJoint, &mut Transform), Without<Joint>>,
     mut wmeshes: Query<(&TpWeaponMesh, &mut Visibility)>,
+    mut anim_sounds: Option<ResMut<crate::audio::AnimSounds>>,
 ) {
     let events = std::mem::take(&mut view.anim_events);
     let (Some(lib), Some(mut bank)) = (lib, bank) else { return };
@@ -356,7 +362,19 @@ pub fn animate_characters(
         let stance = view.matchv.npc_poses.iter().find(|x| x.0 == p.id).map(|x| x.1);
         let input = crate::npc_anim::AnimInput { p, stance, armed, talking: talking.contains(&p.id), dt, hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]) };
         let pose = match states.get_mut(entity) {
-            Ok(mut st) => crate::npc_anim::animate(&mut bank, &lib, root.archetype, profile, &mut st, &input),
+            Ok(mut st) => {
+                let before = chain_clips(&st);
+                let pose = crate::npc_anim::animate(&mut bank, &lib, root.archetype, profile, &mut st, &input);
+                // Sound notifies (AnimNotify_AkEvent, footfalls) of the clip windows advanced.
+                if let Some(snd) = anim_sounds.as_mut() {
+                    for (clip, t1) in chain_clips(&st) {
+                        if let Some((_, t0)) = before.iter().find(|b| b.0 == clip) {
+                            snd.advance(p.id, &clip, *t0, t1, false);
+                        }
+                    }
+                }
+                pose
+            }
             Err(_) => {
                 let mut st = crate::npc_anim::PawnAnim::default();
                 let pose = crate::npc_anim::animate(&mut bank, &lib, root.archetype, profile, &mut st, &input);

@@ -1,0 +1,19 @@
+{"steps":[
+  {"wait_ticks": 120},
+  {"camera": {"pos": [1600, -934, 3850], "yaw": 180, "pitch": 0}},
+  {"wait_ticks": 120},
+  {"screenshot": "fx_01_chimney_smoke"},
+  {"camera": {"pos": [-5500, -3609, -1230], "yaw": 180, "pitch": -5}},
+  {"wait_ticks": 120},
+  {"screenshot": "fx_02_sewer_smoke"},
+  {"camera": {"pos": [-5500, -969, -280], "yaw": 180, "pitch": -5}},
+  {"wait_ticks": 90},
+  {"screenshot": "fx_03_street_lamp"},
+  {"camera": {"pos": [-2250, -1900, 260], "yaw": 210, "pitch": 0}},
+  {"wait_ticks": 90},
+  {"screenshot": "fx_04_small_lights"},
+  {"camera": {"pos": [-3650, -1137, -20], "yaw": 180, "pitch": -5}},
+  {"wait_ticks": 120},
+  {"screenshot": "fx_05_fireflies"},
+  {"quit": true}
+]}

@@ -165,6 +165,9 @@ pub struct MissionView {
     /// World position the HUD marker points at (active task target).
     pub target: Option<[f32; 3]>,
     pub sounds: Vec<(u32, String)>,
+    /// Kismet-controlled ambient sound actors ("package:actor name", playing).
+    #[serde(default)]
+    pub ambient: Vec<(String, bool)>,
     /// Usable markers: (position, prompt).
     #[serde(default)]
     pub usables: Vec<([f32; 3], String)>,
