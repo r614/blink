@@ -30,8 +30,10 @@ pub struct Recorder {
     pub max: usize,
     pub samples: Vec<Sample>,
     pub watch: Vec<(u32, u32)>,
+    /// Absolute (address, length) ranges, recorded after the pawn ranges.
+    pub watch_abs: Vec<(u32, u32)>,
 }
-pub static RECORDER: Mutex<Recorder> = Mutex::new(Recorder { enabled: false, max: 0, samples: Vec::new(), watch: Vec::new() });
+pub static RECORDER: Mutex<Recorder> = Mutex::new(Recorder { enabled: false, max: 0, samples: Vec::new(), watch: Vec::new(), watch_abs: Vec::new() });
 
 #[derive(Clone, Copy, Default)]
 pub struct Input {
@@ -98,6 +100,9 @@ unsafe extern "thiscall" fn process_event_detour(this: u32, func: u32, parms: u3
     }
     if INPUT_ACTIVE.load(Relaxed) != 0 {
         apply_input();
+    }
+    if crate::native::TRACE_ON.load(Relaxed) != 0 {
+        crate::native::trace_event(this, func, parms);
     }
     unsafe { process_event_original(this, func, parms, result) };
 }
@@ -166,6 +171,9 @@ pub fn frame() {
         for &(off, len) in &rec.watch {
             s.extra.extend(mem::read_bytes(pawn + off, len as usize).unwrap_or_else(|| vec![0; len as usize]));
         }
+    }
+    for &(addr, len) in &rec.watch_abs {
+        s.extra.extend(mem::read_bytes(addr, len as usize).unwrap_or_else(|| vec![0; len as usize]));
     }
     if let Some(wi) = mem::u32(pc + ACTOR_WORLDINFO) {
         s.time_seconds = mem::read::<f32>(wi + WI_TIME_SECONDS).unwrap_or(0.0);

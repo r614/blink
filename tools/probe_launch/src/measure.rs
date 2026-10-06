@@ -144,6 +144,13 @@ pub fn run(args: &[String]) -> Result<()> {
         "run" => run_sprint_slide(&mut c, &o),
         "sdf" => sdf(&mut c),
         "views" => views(&mut c, &o),
+        "gun" => crate::oracle::gun(&mut c, &crate::oracle::Opts { out: o.out.clone(), rest: args.to_vec() }),
+        "blink" => crate::oracle_powers::blink(&mut c, &crate::oracle::Opts { out: o.out.clone(), rest: args.to_vec() }),
+        "mana" => crate::oracle_powers::mana(&mut c, &crate::oracle::Opts { out: o.out.clone(), rest: args.to_vec() }),
+        "windblast" => crate::oracle_powers::windblast(&mut c, &crate::oracle::Opts { out: o.out.clone(), rest: args.to_vec() }),
+        "detect" => crate::oracle_stealth::detect(&mut c, &crate::oracle::Opts { out: o.out.clone(), rest: args.to_vec() }),
+        "vis" => crate::oracle_stealth::vis(&mut c, &crate::oracle::Opts { out: o.out.clone(), rest: args.to_vec() }),
+        "sword" => crate::oracle_combat::sword(&mut c, &crate::oracle::Opts { out: o.out.clone(), rest: args.to_vec() }),
         "trace" => {
             let n: u32 = o.rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(120);
             c.sample_start(100_000)?;

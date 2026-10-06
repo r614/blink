@@ -11,7 +11,7 @@
 //! payload. All integers are little endian. Addresses are 32-bit (the game is a 32-bit process).
 use std::io::{self, Read, Write};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const PIPE_PREFIX: &str = r"\\.\pipe\dishonored_probe_";
 /// Environment variable through which the launcher hands the session token to the DLL.
 pub const TOKEN_ENV: &str = "DISHONORED_PROBE_TOKEN";
@@ -58,6 +58,25 @@ pub mod op {
     /// str engine key name, u8 event (0 pressed, 1 released) -> u8 handled. Game thread,
     /// through `FViewportClient::InputKey`.
     pub const KEY: u8 = 17;
+    /// u32 size -> u32 address of a zeroed scratch block (never freed).
+    pub const ALLOC: u8 = 18;
+    /// u32 function, u32 this (0: ecx not set), u8 flags (bit0: store the x87 top), u32 n,
+    /// n * u32 stack arguments -> u32 eax, f32 st0. Game thread.
+    pub const NATIVE_CALL: u8 = 19;
+    /// u32 address, u8 prologue length, u8 stack args logged, u32 max records, u32 n derefs,
+    /// n * (u8 source: arg index, 0xFF ecx, 0xFE absolute; u32 pre (u32::MAX: no hop), u32
+    /// offset, u32 length) -> u32 hook id. An existing hook at the address is reconfigured and
+    /// cleared (max 0 disables it).
+    pub const HOOK_SET: u8 = 20;
+    /// u32 hook id -> u32 count, per record: f32 time, u32 ecx, u32 return address, u32 n,
+    /// n * u32 args, bytes (the derefs, concatenated).
+    pub const HOOK_FETCH: u8 = 21;
+    /// u32 max records (0: off), u32 parm bytes, u32 n, n * u32 UFunction addresses -> ().
+    pub const EVENT_TRACE: u8 = 22;
+    /// -> u32 count, per record: f32 time, u32 object, u32 function, bytes parms.
+    pub const EVENT_FETCH: u8 = 23;
+    /// Like WATCH, with absolute addresses (recorded after the pawn ranges).
+    pub const WATCH_ABS: u8 = 24;
 }
 
 /// One game tick of the local player's pawn, recorded in the `PlayerTick` event.
@@ -256,6 +275,56 @@ pub struct ShaderInfo {
     pub ctab: String,
 }
 
+/// A memory read logged by an entry hook: from stack argument `src` (0-based), `ecx`
+/// (`HookDeref::ECX`) or an absolute address (`HookDeref::ABS`, the address in `off`); with
+/// `pre != u32::MAX` a u32 pointer at `base + pre` is followed first.
+#[derive(Clone, Copy, Debug)]
+pub struct HookDeref {
+    pub src: u8,
+    pub pre: u32,
+    pub off: u32,
+    pub len: u32,
+}
+
+impl HookDeref {
+    pub const ECX: u8 = 0xff;
+    pub const ABS: u8 = 0xfe;
+    pub fn arg(i: u8, off: u32, len: u32) -> Self {
+        HookDeref { src: i, pre: u32::MAX, off, len }
+    }
+    pub fn ecx(off: u32, len: u32) -> Self {
+        HookDeref { src: Self::ECX, pre: u32::MAX, off, len }
+    }
+}
+
+/// One call seen by an entry hook.
+#[derive(Clone, Debug)]
+pub struct HookRecord {
+    pub time: f32,
+    pub ecx: u32,
+    pub ret: u32,
+    pub args: Vec<u32>,
+    pub data: Vec<u8>,
+}
+
+impl HookRecord {
+    pub fn f32_at(&self, off: usize) -> f32 {
+        self.data.get(off..off + 4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).unwrap_or(f32::NAN)
+    }
+    pub fn u32_at(&self, off: usize) -> u32 {
+        self.data.get(off..off + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).unwrap_or(0)
+    }
+}
+
+/// One traced ProcessEvent call.
+#[derive(Clone, Debug)]
+pub struct EventRecord {
+    pub time: f32,
+    pub object: u32,
+    pub func: u32,
+    pub parms: Vec<u8>,
+}
+
 /// Blocking client over the probe pipe.
 pub struct Client {
     pipe: std::fs::File,
@@ -389,6 +458,109 @@ impl Client {
             put_u32(&mut p, l);
         }
         self.request(op::WATCH, &p).map(|_| ())
+    }
+
+    /// Absolute memory ranges recorded with every sample (after the pawn ranges).
+    pub fn watch_abs(&mut self, ranges: &[(u32, u32)]) -> io::Result<()> {
+        let mut p = Vec::new();
+        put_u32(&mut p, ranges.len() as u32);
+        for &(a, l) in ranges {
+            put_u32(&mut p, a);
+            put_u32(&mut p, l);
+        }
+        self.request(op::WATCH_ABS, &p).map(|_| ())
+    }
+
+    /// A zeroed scratch block in the game process.
+    pub fn alloc(&mut self, size: u32) -> io::Result<u32> {
+        let mut p = Vec::new();
+        put_u32(&mut p, size);
+        let r = self.request(op::ALLOC, &p)?;
+        Reader::new(&r).u32()
+    }
+
+    /// An FString's UTF-16 data written into scratch memory: returns `(data, num, max)`.
+    pub fn fstring(&mut self, s: &str) -> io::Result<[u32; 3]> {
+        let w: Vec<u16> = s.encode_utf16().chain(Some(0)).collect();
+        let a = self.alloc((w.len() * 2) as u32)?;
+        let b: Vec<u8> = w.iter().flat_map(|c| c.to_le_bytes()).collect();
+        self.write(a, &b)?;
+        Ok([a, w.len() as u32, w.len() as u32])
+    }
+
+    /// Call a native function on the game thread: (eax, x87 top when `ret_float`).
+    pub fn native_call(&mut self, func: u32, this: u32, args: &[u32], ret_float: bool) -> io::Result<(u32, f32)> {
+        let mut p = Vec::new();
+        put_u32(&mut p, func);
+        put_u32(&mut p, this);
+        p.push(ret_float as u8);
+        put_u32(&mut p, args.len() as u32);
+        for &a in args {
+            put_u32(&mut p, a);
+        }
+        let r = self.request(op::NATIVE_CALL, &p)?;
+        let mut rd = Reader::new(&r);
+        Ok((rd.u32()?, rd.f32()?))
+    }
+
+    /// Install or reconfigure an entry logger (see `op::HOOK_SET`).
+    pub fn hook_set(&mut self, addr: u32, prologue_len: u8, nargs: u8, max: u32, derefs: &[HookDeref]) -> io::Result<u32> {
+        let mut p = Vec::new();
+        put_u32(&mut p, addr);
+        p.push(prologue_len);
+        p.push(nargs);
+        put_u32(&mut p, max);
+        put_u32(&mut p, derefs.len() as u32);
+        for d in derefs {
+            p.push(d.src);
+            put_u32(&mut p, d.pre);
+            put_u32(&mut p, d.off);
+            put_u32(&mut p, d.len);
+        }
+        let r = self.request(op::HOOK_SET, &p)?;
+        Reader::new(&r).u32()
+    }
+
+    pub fn hook_fetch(&mut self, id: u32) -> io::Result<Vec<HookRecord>> {
+        let mut p = Vec::new();
+        put_u32(&mut p, id);
+        let r = self.request(op::HOOK_FETCH, &p)?;
+        let mut rd = Reader::new(&r);
+        let n = rd.u32()?;
+        let mut out = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let time = rd.f32()?;
+            let ecx = rd.u32()?;
+            let ret = rd.u32()?;
+            let na = rd.u32()?;
+            let args = (0..na).map(|_| rd.u32()).collect::<io::Result<Vec<u32>>>()?;
+            let data = rd.bytes()?.to_vec();
+            out.push(HookRecord { time, ecx, ret, args, data });
+        }
+        Ok(out)
+    }
+
+    /// Trace ProcessEvent calls of the given UFunctions (empty or `max` 0: off).
+    pub fn event_trace(&mut self, funcs: &[u32], parm_len: u32, max: u32) -> io::Result<()> {
+        let mut p = Vec::new();
+        put_u32(&mut p, max);
+        put_u32(&mut p, parm_len);
+        put_u32(&mut p, funcs.len() as u32);
+        for &f in funcs {
+            put_u32(&mut p, f);
+        }
+        self.request(op::EVENT_TRACE, &p).map(|_| ())
+    }
+
+    pub fn event_fetch(&mut self) -> io::Result<Vec<EventRecord>> {
+        let r = self.request(op::EVENT_FETCH, &[])?;
+        let mut rd = Reader::new(&r);
+        let n = rd.u32()?;
+        let mut out = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            out.push(EventRecord { time: rd.f32()?, object: rd.u32()?, func: rd.u32()?, parms: rd.bytes()?.to_vec() });
+        }
+        Ok(out)
     }
 
     /// Hold PlayerInput axes (`aBaseY` forward, `aStrafe`, `aTurn`, `aLookUp`) for `frames`
