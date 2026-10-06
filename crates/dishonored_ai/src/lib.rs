@@ -184,6 +184,26 @@ pub struct Attn {
     pub danger: bool,
 }
 
+/// A scripted shoot (`OnAIShoot` 0x00b63d00 posts stimulus 0x5c with the target, "shoot
+/// forever" = `m_iMaxNumShots` < 1, the shot count and the accuracy override; the brain's
+/// `DisBehaviorShoot` takes it). The behaviour stands and turns to the target (Stand
+/// sub-state), then runs `DisAISubStateFirePistol` in its Kismet mode (+0xd4 bit 0x40, set up
+/// by 0x00b379e0): Relaxed waits `m_TimeToFirstShot` (0 in `AI_BehaviorTweaks_Shoot`), Aiming
+/// fires when the weapon is aimed, each shot counts down the shots left unless shooting
+/// forever (0x00b46bf0), Recovering / Reloading return to Relaxed. The behaviour ends when the
+/// count reaches 0 (slot 106 sets `m_bDone`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ShootOrder {
+    pub target: PlayerId,
+    /// None: shoot forever.
+    pub shots_left: Option<u32>,
+    /// Relaxed timer (`m_TimeToFirstShot` roll).
+    pub wait: f32,
+    /// `m_bOverrideAccuracy` / `m_fOverrideAccuracyPercentage` (carried; NPC accuracy is not
+    /// modelled).
+    pub accuracy: Option<f32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Brain {
     pub id: PlayerId,
@@ -204,6 +224,10 @@ pub struct Brain {
     /// Mission control: hold position when idle instead of wandering.
     #[serde(default)]
     pub stay: bool,
+    /// Kismet `DisSeqAct_AIShoot` order (`DisBehaviorShoot`, Comply slot): stand, face the
+    /// target and fire the pistol.
+    #[serde(default)]
+    pub shoot: Option<ShootOrder>,
     /// Mission control: run (not walk) to `goal` in `WalkToPoint`.
     #[serde(default)]
     pub run: bool,
@@ -1291,6 +1315,7 @@ impl Brain {
             last_pos: home,
             stuck: 0.0,
             stay: false,
+            shoot: None,
             run: false,
             follow: Follower::default(),
             attn: Vec::new(),
@@ -1831,6 +1856,24 @@ impl Brain {
         goal.truncate().distance(me.position.truncate()) < r
     }
 
+    /// The point a scripted go-to (`stay`, `WalkToPoint`) stops on: the end of the held
+    /// navmesh path. An actor destination always asks for an accurate stop (0x00ae4de0), and the
+    /// locomotion component's destination is the last point of the found path (0x00949890).
+    pub fn accurate_stop(&self) -> Option<Vec3> {
+        (self.state == BrainState::WalkToPoint && self.stay).then(|| self.follow.path.last().copied()).flatten()
+    }
+
+    /// Arrival of a walk: an accurate stop arrives within 0.1 uu of the path's end (0x00944390,
+    /// 0.01 squared); the pawn's last step lands on it (`PlayerState::nav_end`). Port fallbacks:
+    /// a pawn held by collision 60 uu from its goal for a second, a go-to without a navmesh
+    /// path, and the routine walks arrive within 60 uu.
+    fn arrived(&self, me: &PlayerState, goal: Vec3) -> bool {
+        match self.accurate_stop() {
+            Some(end) => Self::reached(me, end, 0.1) || (self.stuck > 1.0 && Self::reached(me, goal, 60.0)),
+            None => Self::reached(me, goal, 60.0),
+        }
+    }
+
     /// Enter `to` after the reaction delay.
     fn escalate(&mut self, ai: &AiConfig, to: BrainState) {
         if self.state == to || self.next == Some(to) {
@@ -2106,6 +2149,9 @@ impl Brain {
         let face = |p: Vec3| PlayerInput { yaw: yaw_to(me.position, p), left_hand: LeftHand::Empty, ..Default::default() };
         // Head tracking toward the strongest stimulus while standing.
         let look = self.attn.iter().filter(|a| a.level >= DAL_HEAD_TRACK).max_by(|a, b| a.value.total_cmp(&b.value)).map(|a| a.proxy);
+        if self.shoot.is_some() {
+            return self.kismet_shoot(me, ws, ai, dt);
+        }
         match self.state {
             BrainState::React => {
                 if self.timer >= 0.0 {
@@ -2142,7 +2188,7 @@ impl Brain {
                 look.map(face).unwrap_or(idle)
             }
             BrainState::Wander | BrainState::WalkToPoint => match self.goal {
-                Some(g) if !Self::reached(me, g, 60.0) && !(self.follow.failed && !self.stay) => {
+                Some(g) if !self.arrived(me, g) && !(self.follow.failed && !self.stay) => {
                     let run = self.run;
                     self.move_to(me, nav, g, run)
                 }
@@ -2647,6 +2693,45 @@ impl Brain {
             i.forward = -127;
         }
         i
+    }
+
+    /// `DisBehaviorShoot` (see `ShootOrder`): standing in place, facing the target, the pistol
+    /// out; a shot when the Relaxed wait is over, the weapon has been aimed for
+    /// `aim_time_before_shooting` (`StateNPCMasterAim`) and a round is chambered. The order
+    /// ends after its last shot or when the target is gone.
+    fn kismet_shoot(&mut self, me: &PlayerState, ws: &WorldState, ai: &AiConfig, dt: f32) -> PlayerInput {
+        let Some(o) = self.shoot.as_mut() else { return PlayerInput { yaw: me.yaw, ..Default::default() } };
+        let Some(t) = ws.player(o.target).filter(|p| p.alive) else {
+            self.shoot = None;
+            self.aim = 0.0;
+            return PlayerInput { yaw: me.yaw, left_hand: LeftHand::Empty, ..Default::default() };
+        };
+        let mut i = PlayerInput { yaw: yaw_to(me.position, t.position), left_hand: LeftHand::Pistol, npc_move: npc_moves::FIRE_PISTOL, ..Default::default() };
+        let aim = t.position + Vec3::Z * 40.0 - (me.position + Vec3::Z * EYE);
+        i.pitch = (aim.z / aim.truncate().length().max(1.0)).atan().to_degrees();
+        o.wait -= dt;
+        self.aim += dt;
+        let ready = me.left.item == LeftHand::Pistol && me.left.phase == dishonored_sim::state::LeftPhase::Idle && me.left.pistol_loaded > 0;
+        if o.wait <= 0.0 && self.aim >= ai.combat.aim_time_before_shooting && ready {
+            i.buttons |= buttons::SECONDARY;
+            self.aim = 0.0;
+            if let Some(n) = o.shots_left.as_mut() {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    self.shoot = None;
+                }
+            }
+        }
+        i
+    }
+
+    /// Mission control (`DisSeqAct_AIShoot` Start): shoot at `target`, `max_shots` < 1 meaning
+    /// forever. A running order is replaced.
+    pub fn order_shoot(&mut self, target: PlayerId, max_shots: i32, accuracy: Option<f32>) {
+        self.shoot = Some(ShootOrder { target, shots_left: if max_shots < 1 { None } else { Some(max_shots as u32) }, wait: 0.0, accuracy });
+        self.aim = 0.0;
+        self.follow.clear();
+        self.goal = None;
     }
 
     /// Leaving the pistol sub-state: `m_fGunTimer` = `m_GunUsageCooldown` (0x00b10f60).

@@ -601,6 +601,60 @@ CONFIRMED from the code unless marked.
     `m_ContentInventoryLoadout` is `Twk_Inv_SwordEliteGuard` + `Boyle_Twk.Twk_Inv_PistolShaw`, so
     in the original he is an armed elite. The port classes him by tweak name
     (`npcs::role_from_tweak`: "party" -> Civilian).
+  - Resolved (2026-10-06, U-221): see "Pawn roles from the tweak data" and "Scripted shoot"
+    below.
+- **Accurate stop in the port** (2026-10-06): a scripted go-to (`WalkToPoint` with `stay`)
+  arrives within 0.1 uu of the end of its held navmesh path (`Brain::accurate_stop` /
+  `arrived`). The mission host passes that end to the pawn (`PlayerState::nav_end`, host-only,
+  not serialised); the walking move does not pass it: the step that would reach it lands on it
+  and the velocity drops to zero. Port fallbacks: a pawn held 60 uu from its goal by collision
+  for a second also arrives; walks without a navmesh path and the routine walks (wander) keep
+  the 60 uu radius. Before: every go-to completed within 60 uu of the target actor.
+
+## Pawn roles from the tweak data (2026-10-06)
+
+The port's `NpcRole` (Guard / Civilian / Other) decides the brain kind (`PawnKind::Guard` fights,
+`Civilian` panics). It was guessed from the tweak's name. It now comes from the resolved pawn
+tweak (`npcs::role_from_tweak_data`, cache `npcs7`):
+- **Guard**: `m_FallbackChainCooked` (or the tweak's own `m_TweakNameCooked`) reaches
+  `Pwn_Guard_Base` or `Pwn_Overseer_Base`, or `m_ContentInventoryLoadout` holds a
+  `DisTweaks_WepSword` / `DisTweaks_WepPistol` outside the weeper family.
+- **Civilian**: the chain reaches `Pwn_Civ_Base` and not `Pwn_Weeper_Base`.
+- **Other**: weepers, tallboys (bow `DisTweaks_WepTallboyBow`, chain `Twk_Pawn_DefaultNPC` only).
+
+The brain tweaks agree: `Twk_Pawn_LordShaw` has `BrainTweaks_Guard_Elite_Party` (the elite
+behaviour list, with Shoot and Combat, no Panic) although its `m_pFactionTweak` is
+`Faction_Civilian_Default` (a `m_FallbackSkip` property). Boyle changes: Lord Shaw Civilian ->
+Guard; `Twk_Pawn_Outsider`, `Twk_Pawn_Boatman_StuckInBoat`, `Pwn_MiddleClass_MTall_1` Other ->
+Civilian (no behaviour change: only Guard is read). Factions still come from the tweak.
+
+## Scripted shoot (`DisSeqAct_AIShoot`, `DisBehaviorShoot`) (2026-10-06)
+
+- `OnAIShoot` (0x00b63d00): unless the pawn refuses Kismet (vfunc +0x498), Start replaces a
+  running shoot (the old op reports Interrupted, 0x00ba1fc0 with 3), then posts stimulus 0x5c
+  (0x00b18870) with the shot target (a pawn's controller when the target is a pawn), "forever"
+  = `m_iMaxNumShots < 1`, the count, the accuracy override bit and percentage. Abort posts
+  stimulus 9 and ends the behaviour. The target is not made an enemy.
+- `DisBehaviorShoot` (class record 0x01324fa8, slot `EAISlot_Comply`, tweak
+  `AI_BehaviorTweaks_Shoot` in the elite brain lists) takes the stimulus (slot 110, 0x00afae20:
+  target +0xa8, forever bit 2, count +0xac, override bit 3, percentage +0xb0), stands and asks
+  to face the target (Stand sub-state); once turned (slot 107, 0x00afaf10) it enters
+  `DisAISubStateFirePistol` with a Kismet parameter block (0x00b379e0). Done (slot 106,
+  0x00ae7770) when the sub-state exits.
+- `DisAISubStateFirePistol` states (slot 77, 0x00b47720): Relaxed 0x00b37c10, Aiming 0x00b46bf0,
+  Recovering 0x00b37e20, Reloading 0x00b37ea0. Flags +0xd4: bit 0 fired, bit 1 stop, bit 2 exit,
+  bit 3 keep firing, bit 4 forever, bit 6 Kismet mode; +0xd8 state, +0xdc / +0xd0 timers, +0xf4
+  shots left. In Kismet mode Relaxed waits `m_TimeToFirstShot` (+0xdc, rolled on enter), then
+  Aiming fires once aimed; each shot decrements the count unless forever (stop at < 1);
+  Recovering reloads when empty, else back to Relaxed with the weapon's refire delay (vfunc
+  +0x15c of the NPC fire item, not decoded).
+- `AI_BehaviorTweaks_Shoot.DisTweaks_AISubState_FirePistol_1` sets nothing: `m_TimeToFirstShot`,
+  `m_TimeBeforeGivingUp`, `m_fChanceOfFiringAgain` are 0.
+- Port: `Brain::order_shoot` / `ShootOrder` and `Brain::kismet_shoot`: stand, face the target,
+  pistol out, fire after `aim_time_before_shooting` (0.75 s, `StateNPCMasterAim`) with a round
+  chambered, count down unless forever; the order ends with the target or its last shot.
+  Not modelled: the accuracy override (NPC shot accuracy is the shared pistol dispersion), the
+  refire delay beyond the pistol's own recovery, the turn speed (NPCs turn at once).
 
 ## Behaviours
 

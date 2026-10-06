@@ -906,15 +906,32 @@ fn duel(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<Stage>> {
     p.until_answering(10.0, |m| kismet_host::usables(m).iter().any(|u| matches!(u.0, kismet_host::KUse::Actor(x) if x == gun)));
     let picked = p.use_actor(gun);
     p.until_answering(5.0, |_| false);
-    // Take the mark (TriggerVolume_3, the "On Mark Trigger"): the countdown
-    // (Three, Two, One) and Turn_and_Fire.
+    // Take the mark (TriggerVolume_3, the "On Mark Trigger"): the countdown (Three, Two, One).
+    // With the player looking away at "One", "Shaw Shoots" starts his `AIShoot` and "One"'s
+    // output sends "Go Time" (Duel_Started, "Licence To Kill"). "Go Time" also links to the
+    // `Turn_and_Fire` input of `DisSeqAct_DialogInputs_6`, but that input is disabled in the
+    // data (`bDisabled`), so the conversation never plays in the original either.
+    // On the mark the player is told to look away from Shaw: at `Trigger_LOS_2` (the
+    // "Player Looks Away Trigger" `SeqEvent_LOS_2`), where the forced view tracking
+    // (`DisSeqAct_PlayerTrackTarget_0`) also turns the camera.
     let mark = actor(db, "L_Boyle_Ext_Script:TriggerVolume_3")?;
+    let los = actor(db, "L_Boyle_Ext_Script:Trigger_LOS_2")?;
+    let los_at = Vec3::from(p.m().kismet.as_ref().unwrap().k.db.actors[los as usize].location);
+    let started = |m: &MissionMatch| matches!(var(m, "L_Boyle_Ext_Script", "Duel_Started"), Some(dishonored_kismet::Value::Bool(true)));
     let mut fire = false;
-    for _ in 0..90 {
+    'mark: for _ in 0..90 {
         p.enter(mark);
-        if p.until_answering(1.0, |m| m.state.conv_log.iter().any(|e| matches!(e, dishonored_conversation::runner::ConvEvent::Started { label, .. } if label == "Turn_and_Fire"))) {
-            fire = true;
-            break;
+        for _ in 0..60 {
+            if started(p.m()) {
+                fire = true;
+                break 'mark;
+            }
+            if p.answer() {
+                continue;
+            }
+            let me = *p.m().world.player(AGENT).unwrap();
+            let to = los_at - (me.position + Vec3::Z * 64.0);
+            p.step(PlayerInput { yaw: to.y.atan2(to.x).to_degrees(), pitch: (to.z / to.truncate().length().max(1.0)).atan().to_degrees(), ..Default::default() });
         }
     }
     let counted: Vec<&str> = ["Go_to_Mark", "Duel_Explained", "Three", "Two", "One", "Turn_and_Fire"].into_iter().filter(|c| p.conv_started(c)).collect();
@@ -930,7 +947,7 @@ fn duel(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<Stage>> {
         format!("Player On Mark {:?}; Shaw {shaw} at {at:?} brain {b:?}; vars {vars:?}; spawners {spawned:?}", var(p.m(), "L_Boyle_Ext_Script", "Player On Mark"))
     };
     stage(&mut rows, "the pistol taken from the box (DisTrigger_2 Used): the player holds the elite pistol", picked && p.hist_has("player_took_the_pistol"), format!("pistol used {picked}"));
-    stage(&mut rows, "(open, U-221) on the mark: the countdown runs (Three, Two, One, Turn_and_Fire)", fire, format!("pistol used {picked}; conversations {counted:?}; {shaw_walk}; {} at {:.1} s", recent.join(" | "), p.time()));
+    stage(&mut rows, "on the mark: the countdown runs (Three, Two, One) and \"Go Time\" starts the duel (Duel_Started; Turn_and_Fire's input is disabled in the data)", fire, format!("pistol used {picked}; conversations {counted:?}; {shaw_walk}; {} at {:.1} s", recent.join(" | "), p.time()));
     if !fire {
         return Ok(rows);
     }
@@ -953,9 +970,15 @@ fn duel(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<Stage>> {
         p.step(PlayerInput { yaw, pitch, left_hand: dishonored_sim::input::LeftHand::Pistol, buttons: if i % 40 == 20 { buttons::SECONDARY } else { 0 }, ..Default::default() });
     }
     p.idle(5.0);
-    let won = p.task(&pn2) == TaskState::Completed;
+    // Shaw dead by the player's hand after "Go Time" ("Player Failed Duel" false) with the note
+    // delivered: "Player Won Duel", PN T1 shown and active, story flag `PistolWinHonor`
+    // (`PistolWinMess` when the player failed the duel).
+    let honour = p.m().state.flag("PistolWinHonor");
+    let won = p.task(&pn2) == TaskState::Completed && honour && p.task("PendeltonsNote.DishonoredTask_Custom_1") == TaskState::Active;
     let recent: Vec<String> = p.history().into_iter().rev().take(10).collect();
-    stage(&mut rows, "(open, U-221) the duel fought: Lord Shaw shot after the signal (his death instigated by the player), PN T2 completed and the return-to-Pendleton task shows", dead && won, format!("Shaw dead {dead}; PN T2 {:?}; PN T1 {:?}; flags honor {} / dishonor {}; {} at {:.1} s", p.task(&pn2), p.task("PendeltonsNote.DishonoredTask_Custom_1"), p.m().state.flag("Boyle_WonDuelWithHonor"), p.m().state.flag("Boyle_WonDuelDishonorably"), recent.join(" | "), p.time()));
+    let me = p.m().world.player(AGENT).map(|x| (x.alive, x.vitals.health));
+    let shaw_shoot = p.m().crowd.brains.iter().find(|b| b.id == shaw).map(|b| format!("{:?} shoot {:?}", b.state, b.shoot));
+    stage(&mut rows, "the duel fought: Lord Shaw shoots from \"One\" (AIShoot), the player kills him after the signal: PN T2 completed, PN T1 active, PistolWinHonor", dead && won, format!("Shaw dead {dead}; PN T2 {:?}; PN T1 {:?}; flags PistolWinHonor {honour} / PistolWinMess {}; player (alive, health) {me:?}; Shaw {shaw_shoot:?}; {} at {:.1} s", p.task(&pn2), p.task("PendeltonsNote.DishonoredTask_Custom_1"), p.m().state.flag("PistolWinMess"), recent.join(" | "), p.time()));
     Ok(rows)
 }
 

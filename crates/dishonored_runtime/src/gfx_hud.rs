@@ -45,6 +45,114 @@ enum Group {
 pub struct HudQuad {
     group: Group,
     quad: Quad,
+    /// A part of the gun / crossbow crosshair that `SetDispersion` moves.
+    cross: Option<CrossPart>,
+}
+
+/// One quad of a crosshair part (`_parts_ext_mc` / `_parts_int_mc` . `partK`) with what the
+/// movie's `SetDispersion` script needs to move it: the part clip's authored matrix, the
+/// part's authored position and the quad's corners relative to the part origin (in the part
+/// clip's space, pixels).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CrossPart {
+    pub ext: bool,
+    pub index: u8,
+    /// Crosshair centre (stage pixels).
+    pub centre: Vec2,
+    /// Authored clip matrix (2x2 columns, translation in pixels).
+    pub clip: [f32; 6],
+    /// Authored part position in the clip (pixels).
+    pub part: Vec2,
+    pub local: [Vec2; 4],
+}
+
+/// The crosshair layout `SetDispersion(d, p)` gives a part (decoded from the `UI_HUD_SF` "HUD"
+/// ActionScript, classes `Crosshair_Gun` / `Crosshair_Crossbow`, PLAYER.md "Ranged weapon
+/// dispersion"): the quad's stage corners and the clip alpha factor (0..1).
+/// - Gun: `_parts_int_mc._rotation = -5 p / 100`, `_parts_ext_mc._rotation = -20 p / 100`,
+///   `_parts_ext_mc._alpha = 100 - 1.5 max(0, p - 50)`; in both clips parts 0..3 go to
+///   (d, -d), (d, d), (-d, d), (-d, -d).
+/// - Crossbow (no clip rotation): `offset = -15 p / 100`; ext alpha `100 - 1.5 max(0, p - 40)`;
+///   ext part0 `_y = -d - offset`, part1 `_x = d + offset`, part2 `_y = d + offset`, part3
+///   `_x = -d - offset`, part4 `_x = d + offset + 5`, part5 `_x = -d - offset - 5`; int part0
+///   `_y = -d`, part1 (`_x = d`, `_y = -d`), part2 `_y = d`, part3 (`_x = -d`, `_y = -d`).
+///   Coordinates the script does not set keep their authored value.
+pub fn cross_layout(cp: &CrossPart, crossbow: bool, d: f32, p: f32) -> ([Vec2; 4], f32) {
+    let mut pos = cp.part;
+    let [a, b, c, dd, tx, ty] = cp.clip;
+    // AS2 `_rotation` keeps the clip's scale and replaces its rotation (degrees, clockwise).
+    let lin = |rot_deg: Option<f32>| -> [f32; 4] {
+        match rot_deg {
+            None => [a, b, c, dd],
+            Some(r) => {
+                let (sx, sy) = ((a * a + b * b).sqrt(), (c * c + dd * dd).sqrt());
+                let (s, co) = r.to_radians().sin_cos();
+                [co * sx, s * sx, -s * sy, co * sy]
+            }
+        }
+    };
+    let (m, alpha) = if !crossbow {
+        let corner = [Vec2::new(d, -d), Vec2::new(d, d), Vec2::new(-d, d), Vec2::new(-d, -d)];
+        if let Some(c) = corner.get(cp.index as usize) {
+            pos = *c;
+        }
+        if cp.ext {
+            (lin(Some(-20.0 * p / 100.0)), (100.0 - 1.5 * (p - 50.0).max(0.0)) / 100.0)
+        } else {
+            (lin(Some(-5.0 * p / 100.0)), 1.0)
+        }
+    } else {
+        let off = -15.0 * p / 100.0;
+        if cp.ext {
+            match cp.index {
+                0 => pos.y = -d - off,
+                1 => pos.x = d + off,
+                2 => pos.y = d + off,
+                3 => pos.x = -d - off,
+                4 => pos.x = d + off + 5.0,
+                5 => pos.x = -d - off - 5.0,
+                _ => {}
+            }
+            (lin(None), (100.0 - 1.5 * (p - 40.0).max(0.0)) / 100.0)
+        } else {
+            match cp.index {
+                0 => pos.y = -d,
+                1 => pos = Vec2::new(d, -d),
+                2 => pos.y = d,
+                3 => pos = Vec2::new(-d, -d),
+                _ => {}
+            }
+            (lin(None), 1.0)
+        }
+    };
+    let corners = cp.local.map(|l| {
+        let v = pos + l;
+        cp.centre + Vec2::new(tx, ty) + Vec2::new(m[0] * v.x + m[2] * v.y, m[1] * v.x + m[3] * v.y)
+    });
+    (corners, alpha.clamp(0.0, 1.0))
+}
+
+/// The crosshair parts of an exported crosshair sprite: quad path -> (ext clip, part index,
+/// clip matrix, part position), from the sprite's frame-0 display lists.
+fn cross_parts(movie: &Movie, export: &str) -> HashMap<String, (bool, u8, Matrix, Vec2)> {
+    let mut out = HashMap::new();
+    let Some(sp) = movie.exports.get(export).and_then(|id| movie.sprites.get(id)) else { return out };
+    for clip in movie.display_list(sp, 0) {
+        let ext = match clip.name.as_deref() {
+            Some("_parts_ext_mc") => true,
+            Some("_parts_int_mc") => false,
+            _ => continue,
+        };
+        let cm = clip.matrix.unwrap_or_default();
+        let Some(csp) = clip.character.and_then(|c| movie.sprites.get(&c)) else { continue };
+        for part in movie.display_list(csp, 0) {
+            let Some(k) = part.name.as_deref().and_then(|n| n.strip_prefix("part")).and_then(|n| n.parse::<u8>().ok()) else { continue };
+            let pm = part.matrix.unwrap_or_default();
+            let path = format!("{export}/{}/part{k}", clip.name.as_deref().unwrap_or(""));
+            out.insert(path, (ext, k, cm, Vec2::new(pm.tx, pm.ty) / 20.0));
+        }
+    }
+    out
 }
 
 impl HudQuad {
@@ -141,11 +249,24 @@ pub fn setup_gfx_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) 
     }
     // Crosshairs: the placed dot plus the exported variants, all at screen centre.
     let centre = placed("_dot_mc").and_then(|p| p.matrix).unwrap_or(Matrix { tx: 640.0 * 20.0, ty: 360.0 * 20.0, ..Default::default() });
+    let mut cross: HashMap<usize, CrossPart> = HashMap::new();
     for (export, g) in [("crosshair_dot", Group::CrossDot), ("crosshair_gun", Group::CrossGun), ("crosshair_crossbow", Group::CrossCrossbow), ("crosshair_power", Group::CrossPower)] {
         if let Some(id) = movie.exports.get(export) {
             let mut qs = Vec::new();
             movie.flatten(*id, centre, ColorTransform::default(), export, &frame0, &mut qs);
-            pieces.extend(qs.into_iter().map(|q| (g, q)));
+            // The parts `SetDispersion` moves: their corners relative to the part origin.
+            let parts = cross_parts(&movie, export);
+            for q in qs {
+                if let Some((ext, index, cm, part)) = parts.get(&q.path) {
+                    let inv = centre.mul(cm).inverse();
+                    let local = q.dst.map(|(x, y)| {
+                        let (lx, ly) = inv.apply(x * 20.0, y * 20.0);
+                        Vec2::new(lx, ly) / 20.0 - *part
+                    });
+                    cross.insert(pieces.len(), CrossPart { ext: *ext, index: *index, centre: Vec2::new(centre.tx, centre.ty) / 20.0, clip: [cm.a, cm.b, cm.c, cm.d, cm.tx / 20.0, cm.ty / 20.0], part: *part, local });
+                }
+                pieces.push((g, q));
+            }
         }
     }
     // Objectives banner and target notification (top right) carry match information.
@@ -223,7 +344,7 @@ pub fn setup_gfx_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) 
         }
     }
     let root = commands.spawn((Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() }, GlobalZIndex(-1), Pickable::IGNORE)).id();
-    for (g, q) in pieces {
+    for (i, (g, q)) in pieces.into_iter().enumerate() {
         let Some(img) = tex.get(&q.texture) else { continue };
         let c = q.color;
         let color = Color::srgba(c.mul[0].clamp(0.0, 1.0), c.mul[1].clamp(0.0, 1.0), c.mul[2].clamp(0.0, 1.0), c.mul[3].clamp(0.0, 1.0));
@@ -231,7 +352,7 @@ pub fn setup_gfx_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) 
             ImageNode { image: img.clone(), rect: Some(Rect::new(q.src[0], q.src[1], q.src[2], q.src[3])), color, ..default() },
             Node { position_type: PositionType::Absolute, ..default() },
             UiTransform::default(),
-            HudQuad { group: g, quad: q },
+            HudQuad { group: g, quad: q, cross: cross.remove(&i) },
             ChildOf(root),
         ));
     }
@@ -292,6 +413,7 @@ pub fn update_gfx_hud(
     mut icon: Query<(&EquipIcon, &mut Node, &mut ImageNode, &mut Visibility), (Without<HudQuad>, Without<AmmoText>)>,
     mut ammo: Query<(&AmmoText, &mut Node, &mut Text, &mut TextFont), (Without<HudQuad>, Without<EquipIcon>)>,
     cams: Query<(&Camera, &GlobalTransform), With<crate::players::GameCamera>>,
+    mut sent_disp: Local<Option<(f32, f32)>>,
 ) {
     let Some(hud) = hud.filter(|h| h.loaded) else { return };
     let Some(window) = windows.iter().next() else { return };
@@ -316,6 +438,14 @@ pub fn update_gfx_hud(
         Some((v - off) / s)
     });
     let has_match = !view.matchv.mode.is_empty();
+    // Crosshair spread: `SetDispersion(d, d / max x 100)` (0x00B9FF30), sent when `d` moved by
+    // at least 0.1 since the last call.
+    let disp = me.and_then(|m| dishonored_sim::left_hand::Dispersion::of(m, &session.content.sim.gameplay, &session.content.sim.tuning).map(|d| (m.left.dispersion, d.max)));
+    if let Some((d, max)) = disp {
+        if sent_disp.is_none_or(|(s, _)| (s - d).abs() >= 0.1) {
+            *sent_disp = Some((d, if max > 0.0 { d / max * 100.0 } else { 0.0 }));
+        }
+    }
     for (hq, mut node, mut xf, mut img, mut vis) in &mut quads {
         let (show, frac) = match hq.group {
             Group::Static => (alive, None),
@@ -340,6 +470,14 @@ pub fn update_gfx_hud(
         };
         let dst = match (hq.group, marker) {
             (Group::Marker, Some(at)) => dst.map(|(x, y)| (x + at.x, y + at.y)),
+            _ => dst,
+        };
+        let dst = match (&hq.cross, *sent_disp) {
+            (Some(cp), Some((d, pct))) if matches!(hq.group, Group::CrossGun | Group::CrossCrossbow) => {
+                let (corners, alpha) = cross_layout(cp, hq.group == Group::CrossCrossbow, d, pct);
+                img.color.set_alpha(hq.quad.color.mul[3].clamp(0.0, 1.0) * alpha);
+                corners.map(|c| (c.x, c.y))
+            }
             _ => dst,
         };
         img.rect = Some(Rect::new(src[0], src[1], src[2], src[3]));
@@ -684,4 +822,46 @@ fn interaction_prompt(mv: &dishonored_mission::runtime::MissionView, view: &Sess
         }
     }
     best.map(|b| format!("F   {}", b.1)).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn part(ext: bool, index: u8, clip: [f32; 6]) -> CrossPart {
+        CrossPart { ext, index, centre: Vec2::new(640.0, 360.0), clip, part: Vec2::ZERO, local: [Vec2::ZERO, Vec2::X, Vec2::new(1.0, 1.0), Vec2::Y] }
+    }
+
+    #[test]
+    fn gun_parts_go_to_the_corners_and_the_clips_turn() {
+        let id = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        // p = 0: no rotation, part 1 at (d, d), full alpha.
+        let (c, a) = cross_layout(&part(true, 1, id), false, 15.0, 0.0);
+        assert!((c[0] - Vec2::new(655.0, 375.0)).length() < 1e-4 && (a - 1.0).abs() < 1e-6);
+        // p = 100: ext clip at -20 degrees (counter-clockwise on screen), alpha 100 - 75.
+        let (c, a) = cross_layout(&part(true, 0, id), false, 45.0, 100.0);
+        let r = (-20f32).to_radians();
+        let v = Vec2::new(45.0, -45.0);
+        let want = Vec2::new(640.0, 360.0) + Vec2::new(r.cos() * v.x - r.sin() * v.y, r.sin() * v.x + r.cos() * v.y);
+        assert!((c[0] - want).length() < 1e-3, "{:?} {want:?}", c[0]);
+        assert!((a - 0.25).abs() < 1e-6);
+        // The internal clip keeps its scale (0.5857) when its rotation is replaced.
+        let s = 0.414_154;
+        let (c, _) = cross_layout(&part(false, 1, [s, -s, s, s, 0.0, 0.0]), false, 10.0, 0.0);
+        let k = (2.0f32).sqrt() * s;
+        assert!((c[0] - Vec2::new(640.0 + 10.0 * k, 360.0 + 10.0 * k)).length() < 1e-3, "{:?}", c[0]);
+    }
+
+    #[test]
+    fn crossbow_parts_move_on_their_axes() {
+        let id = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let mut p = part(true, 1, id);
+        p.part = Vec2::new(3.0, 7.0);
+        // offset = -15 p / 100 = -7.5 at p = 50: part1 x = d + offset, y authored.
+        let (c, a) = cross_layout(&p, true, 20.0, 50.0);
+        assert!((c[0] - Vec2::new(640.0 + 12.5, 367.0)).length() < 1e-4);
+        assert!((a - 0.85).abs() < 1e-6);
+        let (c, _) = cross_layout(&part(false, 3, id), true, 20.0, 50.0);
+        assert!((c[0] - Vec2::new(620.0, 340.0)).length() < 1e-4);
+    }
 }
