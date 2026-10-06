@@ -145,6 +145,15 @@ fn read_zone(pkg: &Package, i: usize) -> Option<ForbiddenZone> {
     let p = &h.properties;
     let names = |n: &str| obj_list(pkg, p, n).into_iter().map(|o| pkg.obj_path(ObjRef::from_index(o))).filter(|s| !s.is_empty()).collect::<Vec<_>>();
     let enabled = !matches!(find(p, "m_bEnabled").map(|x| &x.value), Some(Value::Bool(false)));
+    let hulls = brush_world_hulls(pkg, p)?;
+    Some(ForbiddenZone { name: pkg.obj_name(ObjRef::Export(i)).to_string(), enabled, owning: names("m_OwningFactions"), forbidden: names("m_ForbiddenFactions"), hulls })
+}
+
+/// World-space convex hulls of a brush actor (volumes): the `BrushComponent`'s
+/// `BrushAggGeom.ConvexElems[].FacePlaneData` (actor-local planes) moved with the actor's
+/// location, rotation, `DrawScale3D * DrawScale` and `PrePivot`. Planes are `(n, d)`, inside when
+/// `n . p <= d` for every plane of one hull.
+pub fn brush_world_hulls(pkg: &Package, p: &[Property]) -> Option<Vec<Vec<[f32; 4]>>> {
     let loc = Vec3::from(find(p, "Location").and_then(|x| x.as_vector()).unwrap_or([0.0; 3]));
     let rot = find(p, "Rotation").and_then(|x| x.as_rotator()).unwrap_or([0; 3]);
     let ds = find(p, "DrawScale").and_then(|x| x.as_float()).unwrap_or(1.0);
@@ -176,7 +185,7 @@ fn read_zone(pkg: &Package, i: usize) -> Option<ForbiddenZone> {
             }
         }
     }
-    Some(ForbiddenZone { name: pkg.obj_name(ObjRef::Export(i)).to_string(), enabled, owning: names("m_OwningFactions"), forbidden: names("m_ForbiddenFactions"), hulls })
+    Some(hulls)
 }
 
 fn read_bell(pkg: &Package, i: usize, package: &str, db: &TweakDb, loudness: &[f32]) -> Option<AlarmBellDef> {

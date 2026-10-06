@@ -4,9 +4,15 @@
 //! `UStaticMesh` (falling back to render triangles for meshes without them), transformed
 //! by each colliding instance. Coordinates: Dishonored world space (Z-up, uu).
 //!
-//! Character shape: the original pawn uses a `CylinderComponent` (radius 31, half-height
-//! 87.5). This crate models it as a capsule of the same radius and half-height. The
-//! difference matters at ledge corners and is tracked as UNKNOWNS U-016.
+//! Character shape: the original pawn has a `CylinderComponent` (radius 35, half-height
+//! 87.5 for the player), but every world trace of its movement passes the cylinder's
+//! *extent* `(radius, radius, height)` (`GetCylinderExtent`, e.g. the air-control wall test
+//! of `APawn::physFalling` 0x006BF0E0), and extent traces against static-mesh kDOP trees and
+//! BSP are axis-aligned box tests in UE3. Pawn movement therefore uses [`PawnBox`] queries
+//! (U-016). The capsule queries remain for other shapes.
+//!
+//! Water: `DishonoredWaterVolume` brushes (convex hulls, [`WaterVolume`]) are attached after
+//! loading, like the navigation mesh, and answered by [`WorldQuery::water_at`].
 
 pub mod bvh;
 pub mod geom;
@@ -15,7 +21,7 @@ pub mod nav;
 use anyhow::Result;
 use bvh::Bvh;
 use dishonored_ir::DishonoredMap;
-use geom::{Aabb, closest_segment_triangle, ray_triangle};
+use geom::{Aabb, box_triangle, closest_point_triangle, closest_segment_triangle, ray_triangle};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +78,65 @@ impl Capsule {
     }
 }
 
+/// An axis-aligned box: what a UE3 pawn sweeps against world geometry (its cylinder's
+/// extent, `half = (radius, radius, height)`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PawnBox {
+    pub center: Vec3,
+    pub half: Vec3,
+}
+
+impl PawnBox {
+    pub fn new(center: Vec3, radius: f32, half_height: f32) -> Self {
+        PawnBox { center, half: Vec3::new(radius, radius, half_height) }
+    }
+    pub fn at(&self, center: Vec3) -> PawnBox {
+        PawnBox { center, ..*self }
+    }
+    pub fn aabb(&self) -> Aabb {
+        Aabb { min: self.center - self.half, max: self.center + self.half }
+    }
+    /// The capsule of the same radius and height (fallback for worlds without box queries).
+    pub fn capsule(&self) -> Capsule {
+        Capsule { center: self.center, radius: self.half.x.max(self.half.y), half_height: self.half.z }
+    }
+}
+
+/// One `DishonoredWaterVolume` (a `PhysicsVolume` with `bWaterVolume`): its brush's convex
+/// elements in world space as planes `(n, d)` with `n . p <= d` inside.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct WaterVolume {
+    pub name: String,
+    pub hulls: Vec<Vec<[f32; 4]>>,
+    pub min: Vec3,
+    pub max: Vec3,
+    /// `PhysicsVolume.FluidFriction` (2.4 for `DishonoredWaterVolume`).
+    pub fluid_friction: f32,
+    /// `PhysicsVolume.TerminalVelocity`.
+    pub terminal_velocity: f32,
+    /// `m_bShallowWater`.
+    pub shallow: bool,
+}
+
+impl WaterVolume {
+    pub fn contains(&self, p: Vec3) -> bool {
+        if p.cmplt(self.min).any() || p.cmpgt(self.max).any() {
+            return false;
+        }
+        self.hulls.iter().any(|h| h.iter().all(|pl| p.x * pl[0] + p.y * pl[1] + p.z * pl[2] <= pl[3] + 1e-3))
+    }
+}
+
+/// What [`WorldQuery::water_at`] reports for a point inside a water volume.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WaterInfo {
+    /// Top of the volume above the point (the water surface).
+    pub surface_z: f32,
+    pub fluid_friction: f32,
+    pub terminal_velocity: f32,
+    pub shallow: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Contact {
     /// Push-out direction (from surface toward the capsule).
@@ -103,6 +168,41 @@ pub trait WorldQuery {
     fn nav(&self) -> Option<&nav::NavWorld> {
         None
     }
+    /// Overlaps of an axis-aligned pawn box (worlds without box support answer for the capsule
+    /// of the same radius and height).
+    fn box_contacts(&self, b: &PawnBox, channels: u8, out: &mut Vec<Contact>) {
+        self.capsule_contacts(&b.capsule(), channels, out)
+    }
+    /// Sweep an axis-aligned pawn box (UE3 `MoveActor` with the pawn's extent).
+    fn sweep_box(&self, b: &PawnBox, delta: Vec3, channels: u8) -> Option<SweepHit> {
+        self.sweep_capsule(&b.capsule(), delta, channels)
+    }
+    /// The water volume containing `p`, if any.
+    fn water_at(&self, _p: Vec3) -> Option<WaterInfo> {
+        None
+    }
+}
+
+/// Water lookup over a set of volumes (shared by the world implementations).
+pub fn water_lookup(volumes: &[WaterVolume], p: Vec3) -> Option<WaterInfo> {
+    for v in volumes {
+        if !v.contains(p) {
+            continue;
+        }
+        let mut surface = v.max.z;
+        for h in &v.hulls {
+            if !h.iter().all(|pl| p.x * pl[0] + p.y * pl[1] + p.z * pl[2] <= pl[3] + 1e-3) {
+                continue;
+            }
+            for pl in h {
+                if pl[2] > 1e-3 {
+                    surface = surface.min((pl[3] - pl[0] * p.x - pl[1] * p.y) / pl[2]);
+                }
+            }
+        }
+        return Some(WaterInfo { surface_z: surface, fluid_friction: v.fluid_friction, terminal_velocity: v.terminal_velocity, shallow: v.shallow });
+    }
+    None
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -121,6 +221,9 @@ pub struct CollisionWorld {
     /// Original navigation (attached after loading; not part of the collision cache).
     #[serde(skip)]
     pub nav: Option<std::sync::Arc<nav::NavWorld>>,
+    /// Water volumes of the map (attached after loading; not part of the collision cache).
+    #[serde(skip)]
+    pub water: Option<std::sync::Arc<Vec<WaterVolume>>>,
 }
 
 const SKIN: f32 = 0.05;
@@ -139,7 +242,7 @@ impl CollisionWorld {
             .collect();
         let total = bounds.iter().fold(Aabb::EMPTY, |acc, b| acc.union(b));
         let bvh = Bvh::build(&bounds);
-        CollisionWorld { tris, bvh, sources, bounds: Some(total), nav: None, tri_surface: Vec::new(), surfaces: Vec::new() }
+        CollisionWorld { tris, bvh, sources, bounds: Some(total), nav: None, water: None, tri_surface: Vec::new(), surfaces: Vec::new() }
     }
 
     /// Build from an imported map: every colliding instance (hidden blockers included).
@@ -258,6 +361,80 @@ impl CollisionWorld {
 impl WorldQuery for CollisionWorld {
     fn nav(&self) -> Option<&nav::NavWorld> {
         self.nav.as_deref()
+    }
+
+    fn water_at(&self, p: Vec3) -> Option<WaterInfo> {
+        self.water.as_deref().and_then(|w| water_lookup(w, p))
+    }
+
+    fn box_contacts(&self, b: &PawnBox, channels: u8, out: &mut Vec<Contact>) {
+        self.bvh.query_aabb(&b.aabb().expand(SKIN), |i| {
+            let t = &self.tris[i as usize];
+            if t.channels & channels == 0 {
+                return;
+            }
+            if let Some((normal, depth)) = box_triangle(b.center, b.half, t.a, t.b, t.c, 0.0) {
+                if depth > 0.0 {
+                    let point = closest_point_triangle(b.center, t.a, t.b, t.c);
+                    out.push(Contact { normal, depth, point, tri: i });
+                }
+            }
+        });
+    }
+
+    fn sweep_box(&self, b: &PawnBox, delta: Vec3, channels: u8) -> Option<SweepHit> {
+        let mut contacts = Vec::new();
+        let overlapping = |bx: &PawnBox, contacts: &mut Vec<Contact>| -> bool {
+            contacts.clear();
+            self.box_contacts(bx, channels, contacts);
+            contacts.iter().any(|k| k.depth > SKIN)
+        };
+        if overlapping(b, &mut contacts) {
+            let k = contacts.iter().max_by(|a, c| a.depth.total_cmp(&c.depth)).copied().unwrap();
+            let face_up = self.face_up(&contacts);
+            return Some(SweepHit { fraction: 0.0, normal: k.normal, point: k.point, start_penetrating: true, face_up });
+        }
+        let len = delta.length();
+        if len < 1e-6 {
+            return None;
+        }
+        // Conservative sub-steps (half the smaller half extent) so thin geometry is not
+        // tunneled through, then bisection to the first overlap.
+        let step = (b.half.x.min(b.half.y).min(b.half.z) * 0.5).max(1.0);
+        let n = (len / step).ceil().max(1.0) as usize;
+        let mut lo = 0.0f32;
+        let mut hit_hi = None;
+        for k in 1..=n {
+            let t = k as f32 / n as f32;
+            if overlapping(&b.at(b.center + delta * t), &mut contacts) {
+                hit_hi = Some(t);
+                break;
+            }
+            lo = t;
+        }
+        let mut hi = hit_hi?;
+        for _ in 0..12 {
+            let mid = (lo + hi) * 0.5;
+            if overlapping(&b.at(b.center + delta * mid), &mut contacts) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        overlapping(&b.at(b.center + delta * hi), &mut contacts);
+        // Hit normal: the push-out of the deepest contact that opposes the move (a box sliding
+        // along a floor also touches it; the blocking surface is the one in the way).
+        let dir = delta / len;
+        let blocking = contacts
+            .iter()
+            .filter(|c| c.normal.dot(dir) < -1e-3)
+            .max_by(|a, c| (a.depth * -a.normal.dot(dir)).total_cmp(&(c.depth * -c.normal.dot(dir))))
+            .or_else(|| contacts.iter().max_by(|a, c| a.depth.total_cmp(&c.depth)))
+            .copied();
+        let (normal, point) = blocking.map_or((-dir, b.center + delta * hi), |c| (c.normal, c.point));
+        let back = (SKIN / len).min(lo);
+        let face_up = self.face_up(&contacts);
+        Some(SweepHit { fraction: (lo - back).max(0.0), normal, point, start_penetrating: false, face_up })
     }
 
     fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32, channels: u8) -> Option<RayHit> {
@@ -413,6 +590,41 @@ mod tests {
     }
 
     #[test]
+    fn box_rests_on_floor_and_stops_at_wall() {
+        let w = floor_and_wall();
+        let b = PawnBox::new(Vec3::new(0., 0., 200.), 35.0, 87.5);
+        let hit = w.sweep_box(&b, Vec3::new(0., 0., -300.), channel::ALL).unwrap();
+        let z = 200.0 - 300.0 * hit.fraction;
+        assert!((z - 87.5).abs() < 0.2, "rest z {z}");
+        assert!(hit.normal.z > 0.99 && hit.face_up.z > 0.99);
+        // Flat bottom: a box standing beside a ledge edge is still supported by it (a capsule
+        // would roll off): the floor ends at x = 1000, the box centre is 20 past it.
+        let edge = PawnBox::new(Vec3::new(1020., 0., 88.0), 35.0, 87.5);
+        assert!(w.sweep_box(&edge, Vec3::new(0., 0., -10.), channel::ALL).is_some());
+        let side = PawnBox::new(Vec3::new(0., 0., 100.), 35.0, 87.5);
+        let hit = w.sweep_box(&side, Vec3::new(1000., 0., 0.), channel::ALL).unwrap();
+        let x = 1000.0 * hit.fraction;
+        assert!((x - (500.0 - 35.0)).abs() < 0.2, "stop x {x}");
+        assert!(hit.normal.x < -0.99, "{:?}", hit.normal);
+    }
+
+    #[test]
+    fn water_volume_lookup() {
+        let v = WaterVolume {
+            name: "w".into(),
+            hulls: vec![vec![[0., 0., 1., 100.], [0., 0., -1., 0.], [1., 0., 0., 50.], [-1., 0., 0., 50.], [0., 1., 0., 50.], [0., -1., 0., 50.]]],
+            min: Vec3::new(-50., -50., 0.),
+            max: Vec3::new(50., 50., 100.),
+            fluid_friction: 2.4,
+            terminal_velocity: 4000.0,
+            shallow: false,
+        };
+        let i = water_lookup(std::slice::from_ref(&v), Vec3::new(0., 0., 40.)).unwrap();
+        assert_eq!(i.surface_z, 100.0);
+        assert!(water_lookup(std::slice::from_ref(&v), Vec3::new(0., 0., 140.)).is_none());
+    }
+
+    #[test]
     fn depenetrate_from_floor() {
         let w = floor_and_wall();
         let cap = Capsule { center: Vec3::new(0., 0., 80.0), radius: 31.0, half_height: 87.5 };
@@ -466,5 +678,14 @@ impl WorldQuery for MapSet {
     }
     fn nav(&self) -> Option<&nav::NavWorld> {
         self.cur().nav()
+    }
+    fn box_contacts(&self, b: &PawnBox, channels: u8, out: &mut Vec<Contact>) {
+        self.cur().box_contacts(b, channels, out)
+    }
+    fn sweep_box(&self, b: &PawnBox, delta: Vec3, channels: u8) -> Option<SweepHit> {
+        self.cur().sweep_box(b, delta, channels)
+    }
+    fn water_at(&self, p: Vec3) -> Option<WaterInfo> {
+        self.cur().water_at(p)
     }
 }
