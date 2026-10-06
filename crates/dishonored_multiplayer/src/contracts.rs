@@ -404,6 +404,7 @@ impl ContractsMatch {
         let mut all_inputs = inputs.to_vec();
         if let Some(crowd) = self.crowd.as_mut() {
             all_inputs.extend(crowd.think(&self.world, &self.last_events, world, dt));
+            crowd.write_awareness(&mut self.world);
         }
         let out = step_world(&mut self.world, &all_inputs, world, cfg);
         self.phase_timer += dt;

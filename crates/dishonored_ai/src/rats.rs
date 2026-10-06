@@ -1,9 +1,12 @@
 //! Rat swarm brains (`DisRatSwarm` with `DisTweaks_RatSwarm`): the swarms of the Boyle sewers
 //! and the Devouring Swarm power. See `research/dishonored/AI.md` ("Rat swarms").
 //!
-//! A swarm is driven as one pawn of the simulation (its rats move as a group, the original's
-//! `DisRatGroup`); the brain acts through `PlayerInput` like every NPC and reports bites and
-//! devoured corpses as [`RatEvent`]s for the simulation to apply.
+//! Every rat pawn of the simulation (`PawnKind::Rat`, spawned with
+//! `dishonored_sim::rats::spawn_rat`) gets a brain; `rats` is the number of living rats of its
+//! swarm, so the swarm-level rules below hold for each member. A brain acts through
+//! `PlayerInput` like every NPC: it runs to its target and holds `PRIMARY` within the bite reach,
+//! and the simulation's attack groups (`dishonored_sim::rats`, 0x00C891E0) apply the delay, the
+//! group damage and the slowdown. Devoured corpses are reported as [`RatEvent`]s.
 //!
 //! From the data (`DisTweaks_RatSwarm`) and the swarm/group state enums
 //! (`EDisRatSwarmState`, `EDisRatGroupState`): a swarm detects pawns within
@@ -45,9 +48,6 @@ pub enum SwarmState {
 /// What a swarm did this tick, for the simulation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RatEvent {
-    /// The attack group bites its target for `damage` health points (and slows it by
-    /// `m_fPawnSlowdownPercent` for `m_fPawnSlowdownDuration`).
-    Bite { swarm: PlayerId, target: PlayerId, damage: f32, slowdown_percent: f32, slowdown_duration: f32 },
     /// The swarm starts eating a corpse.
     EatStart { swarm: PlayerId, corpse: PlayerId },
     /// The corpse is eaten: no body remains.
@@ -67,10 +67,6 @@ pub struct RatSwarm {
     /// Devouring Swarm caster: never a target.
     pub owner: Option<PlayerId>,
     pub since_spawn: f32,
-    /// At the target: time attacking (`m_fAttackDuration`) and the bite interval counter
-    /// (`m_fDamageTimeIntervalCounter`).
-    pub attack_time: f32,
-    pub damage_timer: f32,
     /// Corpse being eaten and the eating clock.
     pub eating: Option<PlayerId>,
     pub eat_time: f32,
@@ -102,8 +98,6 @@ impl RatSwarm {
             target: None,
             owner,
             since_spawn: 0.0,
-            attack_time: 0.0,
-            damage_timer: 0.0,
             eating: None,
             eat_time: 0.0,
             eaten: Vec::new(),
@@ -118,12 +112,6 @@ impl RatSwarm {
 
     pub fn aggressive(&self) -> bool {
         self.cfg.swarm_type == 3 || self.rats as i32 >= self.cfg.initial_rat_count_to_be_aggressive
-    }
-
-    /// Damage of one bite interval: `m_fDamagePerBite` per rat of the group, clamped to
-    /// `[m_fMinDamage, m_fMaxDamage]`.
-    pub fn bite_damage(&self) -> f32 {
-        (self.cfg.damage_per_bite * self.rats as f32).clamp(self.cfg.min_damage, self.cfg.max_damage)
     }
 
     fn sees(me: Vec3, p: Vec3, world: &dyn WorldQuery) -> bool {
@@ -176,14 +164,12 @@ impl RatSwarm {
             let pick = ws
                 .players
                 .iter()
-                .filter(|p| p.alive && p.id != me.id && Some(p.id) != self.owner && (p.kind != dishonored_sim::state::PawnKind::Human || self.since_spawn >= c.player_detection_delay_after_spawn))
+                .filter(|p| p.alive && p.id != me.id && p.kind != dishonored_sim::state::PawnKind::Rat && Some(p.id) != self.owner && (p.kind != dishonored_sim::state::PawnKind::Human || self.since_spawn >= c.player_detection_delay_after_spawn))
                 .filter(|p| p.position.distance(me.position) <= radius && Self::sees(me.position, p.position, world))
                 .min_by(|a, b| a.position.distance(me.position).total_cmp(&b.position.distance(me.position)).then(a.id.cmp(&b.id)));
             if let Some(p) = pick {
                 self.target = Some(p.id);
                 self.eating = None;
-                self.attack_time = 0.0;
-                self.damage_timer = 0.0;
             }
         }
         // Attack.
@@ -192,20 +178,16 @@ impl RatSwarm {
             let d = t.position.distance(me.position);
             i.yaw = yaw(me.position, t.position);
             i.npc_move = npc_moves::RAT_ATTACK;
-            if d > c.destination_radius {
+            // Close in to the bite reach, then hold the attack: the simulation's attack groups
+            // (`dishonored_sim::rats`, 0x00C891E0) apply the initial delay, the group damage and
+            // the slowdown.
+            let reach = dishonored_sim::rats::attack_distance(t);
+            if d > reach * 0.8 {
                 i.forward = 127;
                 i.buttons |= buttons::SPRINT;
-                self.attack_time = 0.0;
-                self.damage_timer = 0.0;
-            } else {
-                self.attack_time += dt;
-                if self.attack_time >= c.initial_delay_before_dealing_damage {
-                    self.damage_timer += dt;
-                    if self.damage_timer >= c.damage_time_interval {
-                        self.damage_timer -= c.damage_time_interval;
-                        ev.push(RatEvent::Bite { swarm: self.id, target: t.id, damage: self.bite_damage(), slowdown_percent: c.pawn_slowdown_percent, slowdown_duration: c.pawn_slowdown_duration });
-                    }
-                }
+            }
+            if d <= reach {
+                i.buttons |= buttons::PRIMARY;
             }
             return (i, ev);
         }
@@ -305,10 +287,10 @@ mod tests {
     }
 
     #[test]
-    fn swarm_waits_detection_delay_then_bites_at_the_interval() {
+    fn swarm_waits_detection_delay_then_attacks_in_reach() {
         let w = world();
-        let me = pawn(5000, PawnKind::Civilian, Vec3::ZERO);
-        let player = pawn(1, PawnKind::Human, Vec3::new(100.0, 0.0, 0.0));
+        let me = pawn(5000, PawnKind::Rat, Vec3::ZERO);
+        let player = pawn(1, PawnKind::Human, Vec3::new(400.0, 0.0, 0.0));
         let mut ws = WorldState::default();
         ws.players = vec![me.clone(), player];
         let mut s = RatSwarm::new(me.id, RatSwarmConfig::default(), 20, None, 1);
@@ -318,15 +300,13 @@ mod tests {
             s.think(&me, &ws, &w, dt);
         }
         assert_eq!(s.target, None);
-        let mut bites = Vec::new();
-        for _ in 0..40 {
-            bites.extend(s.think(&me, &ws, &w, dt).1);
-        }
+        let (i, _) = s.think(&me, &ws, &w, dt);
         assert_eq!(s.target, Some(1));
-        // 4 s after detection: 1 s initial delay, then a bite every 0.5 s: 6 bites of
-        // clamp(0.2 * 20, 1, 10) = 4.
-        assert!((5..=7).contains(&bites.len()), "{}", bites.len());
-        assert!(matches!(bites[0], RatEvent::Bite { damage, .. } if (damage - 4.0).abs() < 1e-5));
+        // Out of reach (200 uu from a standing player): run at it, no attack yet.
+        assert!(i.forward > 0 && i.buttons & buttons::PRIMARY == 0 && i.npc_move == npc_moves::RAT_ATTACK);
+        ws.players[1].position = Vec3::new(150.0, 0.0, 0.0);
+        let (i, _) = s.think(&me, &ws, &w, dt);
+        assert!(i.buttons & buttons::PRIMARY != 0);
     }
 
     #[test]

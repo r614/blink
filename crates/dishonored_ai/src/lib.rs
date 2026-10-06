@@ -129,6 +129,9 @@ pub enum AiEvent {
     AlarmSpawn { bell: usize, enemy: Option<PlayerId>, enemy_pos: Option<Vec3> },
     /// No NPC hunts the alarm's enemy any more: the bell stops (`DisSeqEvent_AlarmEnded`).
     AlarmEnded { bell: usize },
+    /// A rat brain's meal ([`rats::RatEvent`]): it started eating a corpse, or ate it (no body
+    /// remains) when `devoured`.
+    RatEat { rat: PlayerId, corpse: PlayerId, devoured: bool },
 }
 
 /// Runtime state of a `DisAlarmBell`.
@@ -472,6 +475,12 @@ pub struct Crowd {
     /// Ambient (sky light) brightness added to the light probe.
     #[serde(default)]
     pub sky_light: f32,
+    /// Brains of the rat pawns (`PawnKind::Rat`) and the swarm each rat was spawned in
+    /// (`SimEvent::RatSpawned`).
+    #[serde(default)]
+    pub rat_brains: Vec<rats::RatSwarm>,
+    #[serde(default)]
+    pub rat_swarm: BTreeMap<PlayerId, Option<u32>>,
 }
 
 /// `DisGlobalManager` alarm cooldown (`DefaultLevel.ini m_fAlarmCooldown`, class default 10).
@@ -894,7 +903,62 @@ impl Crowd {
         self.ally_busted = new_busted;
         self.events = ai_events;
         self.tick_alarms(world_state, dt);
+        out.extend(self.think_rats(world_state, events, world, dt));
         out
+    }
+
+    /// The rat pawns' brains ([`rats::RatSwarm`]). A rat's swarm comes from its
+    /// `SimEvent::RatSpawned`; rats of a Devouring Swarm (`WorldState::swarms`) use that power's
+    /// swarm tweak and spare its caster, others the level swarm tweak. Possessed rats are driven
+    /// by their possessor.
+    fn think_rats(&mut self, ws: &WorldState, events: &[SimEvent], world: &dyn WorldQuery, dt: f32) -> Vec<(PlayerId, PlayerInput)> {
+        for e in events {
+            if let SimEvent::RatSpawned { rat, swarm } = e {
+                self.rat_swarm.insert(*rat, *swarm);
+                self.rat_brains.retain(|b| b.id != *rat);
+            }
+        }
+        let alive: Vec<&PlayerState> = ws.players.iter().filter(|p| p.kind == PawnKind::Rat && p.alive).collect();
+        self.rat_brains.retain(|b| alive.iter().any(|p| p.id == b.id));
+        self.rat_swarm.retain(|id, _| ws.player(*id).is_some());
+        let mut out = Vec::new();
+        for p in alive {
+            let possessed = ws.players.iter().any(|q| q.possess.host == Some(p.id) && matches!(q.possess.stage, dishonored_sim::state::PossessStage::PrePossess | dishonored_sim::state::PossessStage::Active));
+            if possessed {
+                continue;
+            }
+            let swarm = self.rat_swarm.get(&p.id).copied().flatten();
+            let power = swarm.and_then(|s| ws.swarms.iter().find(|x| x.id == s));
+            let count = match swarm {
+                Some(s) => ws.players.iter().filter(|q| q.kind == PawnKind::Rat && q.alive && self.rat_swarm.get(&q.id).copied().flatten() == Some(s)).count() as u32 + power.map_or(0, |x| x.rats as u32),
+                None => 1,
+            };
+            if !self.rat_brains.iter().any(|b| b.id == p.id) {
+                let cfg = if power.is_some() { self.ai.devouring_swarm.clone() } else { self.ai.rats.clone() };
+                self.rat_brains.push(rats::RatSwarm::new(p.id, cfg, count, power.map(|x| x.owner), p.id as u64 * 2654435761));
+            }
+            let Some(b) = self.rat_brains.iter_mut().find(|b| b.id == p.id) else { continue };
+            b.rats = count;
+            let (input, evs) = b.think(p, ws, world, dt);
+            for e in evs {
+                match e {
+                    rats::RatEvent::EatStart { swarm, corpse } => self.events.push(AiEvent::RatEat { rat: swarm, corpse, devoured: false }),
+                    rats::RatEvent::Devoured { swarm, corpse } => self.events.push(AiEvent::RatEat { rat: swarm, corpse, devoured: true }),
+                }
+            }
+            out.push((p.id, input));
+        }
+        out
+    }
+
+    /// Write `PlayerState::ai_unaware` for every NPC with a brain (sleep darts' instant sleep
+    /// and Shadow Kill level 1 read it): see [`Brain::unaware_of`].
+    pub fn write_awareness(&self, ws: &mut WorldState) {
+        for b in &self.brains {
+            if let Some(p) = ws.player_mut(b.id) {
+                p.ai_unaware = b.unaware_of(NOISE);
+            }
+        }
     }
 
     /// Alarm bells after the brains acted (`DisAlarmBell` tick 0x00a3d0c0): a ringing bell
@@ -3297,6 +3361,41 @@ mod tests {
         b.transition_barks(BrainState::Search, None, &me, &ws, &[], &ai);
         let hooks: Vec<&str> = b.barks.iter().map(|x| x.0.as_str()).collect();
         assert_eq!(hooks, ["DDH_ATTENTION_NOTICE_BEGIN", "DDH_SEARCH_ADETECTION_DANGER", "DDH_SEARCH_FIND_ENEMY", "DDH_COMBAT_LOST", "DDH_SEARCH_GIVEUP_POSTCORPSE"]);
+    }
+
+    /// Rat pawns of a swarm get brains: twelve rats (the random swarm's attack group) attack a
+    /// player in reach after the detection delay; a lone rat is not aggressive. NPC awareness is
+    /// written to the pawns.
+    #[test]
+    fn crowd_drives_rat_pawns_and_writes_awareness() {
+        let w = flat_world();
+        let mut c = Crowd::default();
+        let mut ws = WorldState::default();
+        let mut spawned = Vec::new();
+        for k in 0..12u32 {
+            ws.players.push(pawn(5000 + k, PawnKind::Rat, Vec3::new(0.0, k as f32 * 5.0, 12.0), 0.0));
+            spawned.push(SimEvent::RatSpawned { rat: 5000 + k, swarm: Some(9) });
+        }
+        ws.players.push(pawn(5100, PawnKind::Rat, Vec3::new(-3000.0, 0.0, 12.0), 0.0));
+        spawned.push(SimEvent::RatSpawned { rat: 5100, swarm: None });
+        ws.players.push(pawn(1, PawnKind::Human, Vec3::new(150.0, 0.0, 90.0), 180.0));
+        let guard = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(-2000.0, 0.0, 90.0), 0.0);
+        ws.players.push(guard.clone());
+        c.brains.push(Brain::new(NPC_ID_BASE, PawnKind::Guard, guard.position, 1));
+        let mut inputs = c.think(&ws, &spawned, &w, 0.1);
+        for _ in 0..25 {
+            inputs = c.think(&ws, &[], &w, 0.1);
+        }
+        let rat0 = inputs.iter().find(|x| x.0 == 5000).unwrap().1;
+        assert!(rat0.buttons & buttons::PRIMARY != 0, "the swarm rat attacks");
+        assert!(c.rat_brains.iter().find(|b| b.id == 5000).is_some_and(|b| b.rats == 12));
+        let lone = inputs.iter().find(|x| x.0 == 5100).unwrap().1;
+        assert_eq!(lone.buttons & buttons::PRIMARY, 0);
+        c.write_awareness(&mut ws);
+        assert!(ws.player(NPC_ID_BASE).unwrap().ai_unaware);
+        c.brains[0].state = BrainState::Combat;
+        c.write_awareness(&mut ws);
+        assert!(!ws.player(NPC_ID_BASE).unwrap().ai_unaware);
     }
 
     #[test]
