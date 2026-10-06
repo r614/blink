@@ -51,8 +51,10 @@ body}), `STID` (u32 type, u32 count, {u32 bank id, u8 len, chars}).
 
 HIRC type histogram over all banks: State 1,627, Sound 5,508, Action 4,805,
 Event 2,497, RanSeq 944, Switch 28, ActorMixer 706, Layer 353, MusicSegment 1,600,
-MusicTrack 1,125, MusicSwitch 21, MusicRanSeq 149, Attenuation 951, FxShareSet 4,
-FxCustom 628.
+MusicTrack 1,125, MusicSwitch 21, MusicRanSeq 149, Attenuation 951, FxShareSet (type 18) 4,
+FxCustom (type 19) 628. (Earlier revisions named types 16/17; v65 numbers the effects 18/19.
+The custom effects are 583 Parametric EQs, 40 Silence source plugins, 3 plugin 0x88 and 2
+plugin 0x82 blocks; 596 of the 644 node effect slots point at them.)
 
 Every object type is now decoded field by field and must end exactly at the end of its
 body: `audio_dump hirc` (and `harness audio`) decode all 20,946 objects of the 503 banks
@@ -135,8 +137,74 @@ with 0 inexact. Layouts (`dishonored_audio::hirc`):
 `Init.bnk` STMG (decoded exactly, `dishonored_audio::init`): f32 volume threshold, u16 max
 voices, u32 n state groups {u32 id, u32 default transition ms, u32 n {from, to, ms}}, u32 n
 switch groups {u32 id, u32 game parameter, u32 n {f32 value, u32 switch, u32 interpolation}},
-u32 n game parameters {u32 id, f32 default}. Bus objects (HIRC type 8) are not decoded
-(bus volumes and ducking are not applied, U-164).
+u32 n game parameters {u32 id, f32 default}.
+
+## Buses and environments (Init.bnk HIRC, U-164 resolved)
+
+Init.bnk HIRC: 27 buses (type 8), 13 state objects, 55 effect sharesets (type 18), and the
+ENVS section. All decode exactly (`audio_dump buses`, `harness audio`).
+
+- **Bus (type 8)**: u32 parent bus (0 = master), property bundle, u8 kill newest, u8 use
+  virtual, u16 max instances (playback limit), u8 max-instance override, u8 channel config
+  (0x3F, 5.1), four flag bytes (the second set on a music sub-bus, the fourth on the bus above
+  SFX / dialogue / ambience), u32 recovery time (ms), f32 maximum duck volume, u32 n ducks
+  {u32 target bus, f32 duck volume dB, i32 fade out ms, i32 fade in ms, u8 curve}, effects
+  (u8 n, [u8 bypass, {u8 index, u32 id, u8 shareset, u8 rendered}]; none in retail), one extra
+  byte when the fourth flag is set, RTPCs (as node RTPCs), states (as node states).
+- **Effect (types 18/19)**: u32 plugin id, u32 parameter size, parameters, u8 n media
+  {u32, u32}, RTPCs. RoomVerb 0x00760003 (186 bytes: decay, HF damping, diffusion, stereo
+  width, three tone filters {gain, freq, Q}, front / rear / centre / LFE levels, dry, ER and
+  reverb levels, u8 ER on, u32 ER pattern, reverb delay ms, ER front/back delay ms, room size,
+  density, room shape, u32 quality; the last names are LIKELY from their ranges), Matrix
+  Reverb 0x00730003 (29 bytes: decay, HF ratio, u32 delay lines, dry, wet...), Delay 0x006A0003,
+  Parametric EQ 0x00690003 (56 bytes: three bands {u32 type 0 LP 1 HP 2 BP 3 notch 4 low shelf
+  5 high shelf 6 peak, f32 gain, f32 freq, f32 Q, u8 on}, f32 output dB, u8 LFE).
+- **ENVS**: four curves {u8 enabled, u8 scaling, u16 n, points}: obstruction volume
+  (0 -> -28.1 dB), obstruction LPF (0 -> 50), occlusion volume (disabled), occlusion LPF
+  (0 -> 100). Obstruction / occlusion are not computed by the port.
+
+Game parameter and state names come from the executable's `UDishonoredAudioSystem` strings
+(`Global_Volume`, `Music_Volume`, `SFX_Volume`, `Voices_Volume`, `Ambient_Volume`,
+`Menu_Volume`, `TimeDilation`, `Scale_RTPC`, `Pause_All`, ...) and all hash to Init ids:
+
+| Bus | Parent | Role (from its parameters) |
+|---|---|---|
+| 0x26DF8722 | - | master, Volume -4 dB, `Global_Volume` (0..100 -> -96.3..0 dB) |
+| 0x2714B5AF | master | music: `Music_Volume`, `TimeDilation` pitch (1 -> 0, 0.5 -> -1200, 0.125 -> -3600, <= 0.0625 -> -4800 cents), states (-9 dB, -96.3 dB) |
+| 0x2AAC29B6 | master | game: children 0x28EB7999 and 0x2C0A01F0 (`SFX_Volume`, mute states) |
+| 0x28EB7999 | 0x2AAC29B6 | environmental (4th flag); `TimeDilation` pitch; states |
+| 0x266B2CC4 | 0x28EB7999 | SFX, `SFX_Volume`; 15 sub-buses with playback limits 1..50 |
+| 0x30B38306 | 0x28EB7999 | dialogue, `Voices_Volume`; ducks 0x266B2CC4 -8 dB, 0x2714B5AF -8 dB, 0x1C78546F -7 dB (fade out 899 ms, in 1,399 ms, recovery 0) |
+| 0x1C78546F | 0x28EB7999 | voices 2, `Voices_Volume`, states (+7 dB / LPF) |
+| 0x0D974689 | master | `SFX_Volume` |
+
+**Environments**: `DishonoredAudioVolume.m_Environment` names (Boyle Ext: `PC_streets_01`,
+`PC_Streets_02`, `Room_Small_Wood` (Matrix Reverb), `sewer`, `Hall_Stone_Wood`,
+`Plate_Small`, `Verb_Ext_Flooded`) hash to the Init sharesets. Wwise v65 predates aux sends:
+the game sets per-object environment values (the pre-2012 `SetGameObjectEnvironmentsValues`);
+voices on the environmental bus send to them. The port gives every game object the
+environment of the smallest audio volume around it at control value 1 (LIKELY) and sends the
+voices routed through 0x28EB7999 (scaled by the attenuation's wet curve when it has one); the
+reverb returns are mixed at the output. The RoomVerb's own dry level (0 dB on most presets) is
+ignored for these sends (LIKELY: environmental FX are wet-only paths).
+
+**Audio volumes** (`DishonoredAudioVolume`: `m_pSoundEvent`, `m_SoundParameters`,
+`m_Environment`, `InOutVolume.m_VolumeKind`): Boyle Ext has 45 (`audio_dump volumes`), all but
+three with `Set_State_Amb_LVL_Boyle_Ext_Streets` / `_Int_Streets` / `_Sewers` (ambience state
+group 0xC9B2E8ED). The port posts the event (and sets the RTPCs) when the listener enters a
+volume (smallest containing one).
+
+**Playback (`engine`)**: each voice's output bus is the first node up its chain that sets one;
+per block the bus volume = Volume property + state offsets + RTPC curves (global game
+parameters) + ducking, pitch likewise, summed up the bus chain into the voice gain and pitch.
+Bus playback limits kill the oldest (or refuse the newest) voice. Ducking follows the rules
+above (linear dB ramps; the curve byte is not applied). Parametric EQ custom effects are run
+per voice (effects of the nearest node that overrides its parent's, else the top node). The
+reverb is a feedback delay network with the shareset's parameters (APPROXIMATION of the
+proprietary RoomVerb algorithm); EQ is RBJ biquads.
+
+The options sliders still scale the port's category gains; how the menu maps its sliders onto
+the `*_Volume` parameters is not traced (U-300).
 
 ## Playback semantics (`dishonored_audio::engine`, `music`)
 
@@ -172,13 +240,17 @@ bevy_audio as one endless source.
   `Play_Music_Boyle` -> switch on 0xE268D01C (Explor / Suspens / Fight_1..4 / Fight_Rat /
   Escape_*) -> nested switch on the interior/exterior group 0x0956DE29 (0x21720269 interior,
   0x33692463 exterior), set by the ambience room events (`Set_State_Amb_LVL_Boyle_Int_*`
-  interior; Brothel's street events exterior). No Boyle event sets exterior: the runtime
-  sets it for Boyle Ext (U-161). Boyle rules: immediate, source fade 8 s with 8 s offset,
+  interior; Brothel's street events exterior). No Boyle Ext event sets it: the 45 audio volumes
+  post only ambience states (group 0xC9B2E8ED), and the music switch maps state none to no
+  child, so the original relies on a value set earlier (or natively; not found). The runtime sets
+  exterior on Boyle Ext only while the group is unset, so returning from the interior keeps the
+  interior value as Wwise would (U-161). Boyle rules: immediate, source fade 8 s with 8 s offset,
   destination fade 4 s.
 
 APPROXIMATIONS: the LPF value -> cutoff mapping (one-pole, 20 kHz at 0 to 20 Hz at 100;
-U-163), linear resampling, buses (U-164), FX (628 custom FX: reverb etc. not applied),
-stingers.
+U-163: no 101-entry cutoff or coefficient table exists in the image, `audio_dump floattables`;
+the runtime likely computes it), linear resampling, the reverb and EQ algorithms (parameters
+are the retail ones), duck curves, obstruction / occlusion, stingers.
 
 ## Music manager (`DisGlobalMusicManager`, decompiled)
 
@@ -202,8 +274,13 @@ intensity thresholds 0.1 / 2 / 5 / 100, contributions guard 1, elite 2, tallboy 
   `m_pStartChase[0]` (hostile within 2,000) or `[1]` (within 4,500), or ends the chase.
 - Exploration / Suspense / RatAttack entries post `m_pStartExploration` (tweak +0xcc) /
   `m_pStartSuspense` (+0xd0) / `m_pStartRatAttack` (+0xd4) through `FUN_006cd730`.
-- The writer of the intensity was not found (U-160): the port sums the tweak contributions
-  of the NPCs in combat with the player (guards 1). The host replicates per-NPC hostility,
+- Writer of the intensity and the rats flag (U-160): the manager's tick `FUN_00c5b610` stores
+  `FUN_00c5b4d0(tweaks)` into +0x44 and its second result into bit 0 of +0x48. `FUN_00c5b4d0`
+  sums `m_fCombatIntensityContribution[type]` over the types `FUN_00c5b190` collects and flags
+  any type 1 (`DCMIOT_Rat`). `FUN_00c5b190`: the NPCs from a native query on the player pawn
+  (vtable +0x700, arguments 2, 4; their `DisTweaks_NPCPawn.m_CombatIntensityType`, +0x2D2) and
+  the crowd rats whose target (+0x440, +0x20) is the player (rat tweak +0x13C). The port lists
+  the NPCs in combat with the player (the query filter is not decoded). The host replicates per-NPC hostility,
   combat and suspicion near the humans in `MatchView::ai`; the client runs the manager.
 
 ## Contact system: footsteps, landings, impacts
@@ -225,8 +302,17 @@ Env_Wood -> `FS_P_Wood_R`; Footfall_Run x Env_Gravel -> `FS_Guard_Gravel_R`.
   material or instance override -> physical material): `CollisionWorld::tri_surface`
   (cache `{map}.collision2.bin`). Boyle Ext: 678,066 of 751,965 triangles have one (stone
   274k, metal 240k, wood 116k, carpet 34k, dirt 14k...).
-- Lookup walks striker then struck class lineages (most derived first) and resolves each
-  sub-intersection kind separately (LIKELY, U-162).
+- Lookup (U-162 resolved): `FUN_00be61a0` takes the exact (striker, struck) entry
+  (`FUN_00be4a40`), else `FUN_00be4b10`: over striker depth i and struck depth j (class
+  `+0x44` parent links, stopping at the base contact class), the entry with the smallest i + j,
+  ties to the smaller striker depth. Unless the table is flattened (+0x38 bit 1), each
+  sub-intersection slot that is empty in that entry is looked up again the same way among
+  entries that have it; each found slot is triggered (vtable +0x124).
+- Sound slot (`DisContactSub_SoundCue` trigger 0x00BC6290): no event -> nothing; with
+  `m_bScaleWithSpeed`, no sound at or below `m_fMinSpeed`, else volume = speed / `m_fMaxSpeed`
+  clamped to [`m_fMinVolumeScale`, 1]. 0x00BA95C0 posts it on a temporary object at the
+  contact (skipped beyond the event's maximum attenuation distance) after setting a game
+  parameter `Scale_RTPC` (global id 0x014671E0, initialised by `FUN_00ba3120`) to that volume.
 
 ## AnimNotify sounds
 

@@ -58,10 +58,15 @@ Modules decoded (`dishonored_assets::particles`, IR `dishonored_ir::particles`):
 | Acceleration | Acceleration |
 | Location / LocationPrimitiveSphere / Cylinder | StartLocation; radius (surface only, positive axes, velocity) / radius, height |
 | SubImageIndex | SubImageIndex over life |
-| TypeDataMesh | Mesh (reported, not drawn) |
+| TypeDataMesh | Mesh, bOverrideMaterial (drawn per particle) |
+| VelocityOverLifetime | VelOverLife, Absolute |
+| Orbit | OffsetAmount, RotationAmount, RotationRateAmount (several modules sum) |
+| AttractorPoint / AttractorLine | Position, Range, Strength, StrengthByDistance, bAffectBaseVelocity, bUseWorldSpacePosition / EndPoint0, EndPoint1, Range, Strength |
+| Collision | DampingFactor, MaxCollisions, CollisionCompletionOption |
+| TypeDataTrail2 / TypeDataRibbon / TypeDataAnimTrail | strip in spawn order |
+| TypeDataBeam2, BeamTarget, BeamNoise | Distance, TextureTile; Target; NoiseRange, NoiseTessellation |
 
-Other module classes (Orbit, attractors, collision, VelocityOverLifetime, beams, trails) are
-listed per emitter as unsupported.
+Other module classes are listed per emitter as unsupported.
 
 ## Runtime (`crates/dishonored_runtime/src/effects.rs`)
 
@@ -69,36 +74,68 @@ listed per emitter as unsupported.
   (`ParticleSystemComponent.Template`, actor x component transform, `bAutoActivate`) plus the
   gameplay systems, with their materials through the same material/texture path as the map.
 - CPU simulation per emitter instance: emitter time with delay, duration and loops; spawn rate
-  x rate scale accumulated per frame; bursts at fractions of the duration (LIKELY); particle
-  start values from the distributions at emitter time; acceleration, velocity, rotation rate
-  per frame; colour / alpha / size over the particle's relative age; SubUV frame from
-  SubImageIndex; local or world space; warm-up (`WarmupTime`) run at spawn in 1/15 s steps.
-  Placed emitters simulate within 9,000 uu of the camera and only while their level is shown.
+  x rate scale accumulated per frame; bursts at fractions of the duration (`BurstList.Time` is
+  0..1 of the emitter duration, the UE3 convention; LIKELY); particle start values from the
+  distributions at emitter time; acceleration into the base velocity (UE3 `BaseVelocity`),
+  then per frame velocity over life (absolute or scaling), point and line attractors, drag;
+  collision against the level collision (reflection x damping, completion: kill, freeze, halt,
+  freeze translation / rotation); rotation rate; colour / alpha / size over the particle's
+  relative age; SubUV frame from SubImageIndex; orbit offsets added at render time (rotation
+  and rate in turns); local or world space; warm-up (`WarmupTime`) in 1/15 s steps. Placed
+  emitters simulate within 9,000 uu of the camera and only while their level is shown.
 - Drawing: one dynamic mesh per emitter, camera-facing quads (square or rectangle;
   velocity-aligned for PSA_Velocity; locked to an emitter axis or rotating about one with
   `ParticleModuleOrientationAxisLock`), vertex colour x texture, unlit, blend from the material
-  (additive, translucent, masked, modulate; additive is not fogged).
+  (additive, translucent, masked, modulate; additive is not fogged). Trail / ribbon emitters
+  draw their particles as one camera-facing strip; beams run from the emitter origin along X
+  by `Distance` (or to the beam target) with noise points.
 - Mesh emitters (`TypeDataMesh`, e.g. street-lamp cones): one entity per particle with the
   mesh scaled by the particle size and turned by `MeshRotation` / `MeshRotationRate`, colour
-  and alpha on a per-particle material copy. Meshes whose material is procedural (no texture:
-  `Volume_Light_PMAT`, `Glow_PMAT` sphere masks, fresnel, depth fades) are not drawn.
-- Material graphs are not evaluated (APPROXIMATION): the instance's `Color` vector tints and its
-  `LightIntensity` / `Opacity` / `Intensity` scalars scale; sprite materials without a texture
-  (procedural glows) get a radial falloff `(1 - r)^SphereMask_Power`.
-- Captures: `fixtures/scripts/effects_boyle.json` (inspect mode, five Boyle Ext viewpoints:
-  chimney smoke, sewer smoke, street lamp, small lights, fireflies) and
+  and alpha on a per-particle material copy.
+- Material graphs: cooked materials keep only their parameter expressions (the cooker strips
+  every other node; e.g. `Volume_Light_PMAT` keeps Fresnel_exponent 5, LightIntensity 2,
+  SphereMask_Power 2, Ray_Speed, Db_Depth_Biased_Alpha_Intensity 0.05, StartOffset 128,
+  Distance, Color, ColorAlert, the window_rays mask and three static switches), so the graph is
+  rebuilt from those names (APPROXIMATION): textured sprites tint by `Color` and scale by the
+  intensity / opacity scalars; untextured sprites get a radial falloff `(1 - r)^SphereMask_Power`;
+  untextured mesh emitters (volumetric light cones, glow spheres) use `GlowMaterial`
+  (`volume_glow.wgsl`): additive Color x LightIntensity x particle colour, faded toward the
+  silhouette by |N.V|^Fresnel_exponent, away from the particle by the sphere mask
+  (SphereMask_Power over Distance x mesh radius) and near the camera over StartOffset, scaled by
+  0.1 (U-305). Depth-biased alpha and the rays texture are not reproduced. Emissive mesh
+  materials (`E_Emissive_Color` with intensity > 1, e.g. the fireflies x25) are drawn additively
+  in their emissive colour.
+- Captures: `fixtures/scripts/effects_boyle.json` (inspect mode, Boyle Ext viewpoints: chimney
+  smoke, sewer smoke, street lamp, small lights, fireflies) and
   `fixtures/scripts/effects_gameplay.json` (offline: pistol, Windblast, Blink).
-- Gameplay effects from simulation events: sword sparks on block/parry, pistol muzzle blast,
-  blood on sword / pistol / bolt damage, Blink ground effect at the arrival, Windblast cone,
-  world impacts.
+
+## Gameplay effects (U-165 resolved)
+
+From the tweaks (`tweaks` tool):
+
+| Effect | Source | System, socket |
+|---|---|---|
+| Player pistol muzzle | `Twk_Inv_PistolCorvo` `DisTweaks_FirePistol` | `Vfx_Weapon.Effects.pistol.Ps_PlayerPistol_StdMuzzle_01` at `m_MuzzleSocketName` `Spitfire` |
+| Third-person pistol muzzle | pawn-specific `DisTweaks_NPCFireGun` | `Vfx_Weapon.Effects.Ps_PistolMuzzle` at `Spitfire` |
+| Blink | `Twk_Powers.Blink.Twk_Blink` | `m_pGroundPS` Blink_Ground_01, `m_pMantlePS` Blink_Mantle_01, `m_pLowFallPS` / `m_pHighFallPS` Blink_Fall_01 |
+| Windblast | `Twk_WindBlast` levels | `m_EffectTemplate` Windblast_lvl1 / Windblast_lvl2 (`m_HandEffectSocketName` LeftHandWpn on level 2, no hand template), underwater Windblast_UndWater_lvl1 |
+| Shadow Kill | `Twk_Pawn_DefaultNPC` | `m_ShadowKillFXs`: `Vfx_GamePlay.ShadowKill.ps_SK_Leg_Arms` on 10 bones (upper/lower legs and arms, spine_1, head), `m_fShadowKillDelay` 0.1 s, fiery material `Shadow_kill_inst` 2 s, sound `Snd_Power_Shadow_Kill` |
+| Impacts, blood | contact system particle slots | striker (Bullet / Arrow / Sword) x surface or body |
+
+The `Spitfire` socket is a `SkeletalMeshSocket` of the weapon mesh (third-person
+`Wpn_PlyGunElite`: bone Root_jnt, (5.25, 0.99, -46.47), pitch -90 deg: fires along the bone's -Z).
+The runtime computes it from the animated third-person pistol each frame
+(`EffectSockets::muzzle`); the first-person shot (no third-person pawn drawn) uses the eye
+offset. The Shadow Kill bones come from the animated corpse (`EffectSockets::bones`).
+Remaining approximations: the Windblast origin (pawn eye height along the view), the Blink
+arrival height (80 uu below the pawn centre), the underwater test (not wired), the fiery
+material.
 
 ## Approximations and open points
 
-- U-165: which object posts each gameplay effect and at which socket (the muzzle socket of
-  the pistol mesh, the Blink marker, the Windblast origin) is not traced; positions are
-  pawn-relative offsets.
-- Burst `Time` treated as a fraction of `EmitterDuration`; spawn-rate distributions are
-  sampled with the emitter time in seconds (UE3 `ParticleEmitterInstance::Tick` convention).
+- Burst `Time` as a fraction of `EmitterDuration`; spawn-rate distributions sampled with the
+  emitter time in seconds (UE3 `ParticleEmitterInstance::Tick` convention).
 - Rotation units: turns (x 2 pi), as UE3's Rotation/RotationRate modules.
 - Sprite size: `Size.x` is the full sprite width.
-- Mesh emitters, orbit, collision, light modules and particle lights are not rendered.
+- Light modules and particle lights are not rendered; collision uses the static level
+  collision only (no pawns).

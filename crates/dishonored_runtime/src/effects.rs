@@ -15,11 +15,75 @@ use bevy::prelude::*;
 use dishonored_ir::particles::{ParticleBlend, ParticleEmitterAsset, ParticleSystemAsset};
 use dishonored_ir::DishonoredMap;
 use dishonored_sim::events::{DamageCause, SimEvent};
+use dishonored_sim::state::{MoveMode, PlayerState};
+use dishonored_world::WorldQuery;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Muzzle flash of the player's first-person pistol (`Twk_Inv_PistolCorvo`'s
+/// `DisTweaks_FirePistol.m_pMuzzleFlashFX`, at the pistol's `Spitfire` socket).
+pub const PLAYER_MUZZLE: &str = "Vfx_Weapon.Effects.pistol.Ps_PlayerPistol_StdMuzzle_01";
+/// Muzzle flash of a pistol seen in third person (the pawn-specific `DisTweaks_NPCFireGun`).
+pub const PAWN_MUZZLE: &str = "Vfx_Weapon.Effects.Ps_PistolMuzzle";
+/// Shadow Kill ash (`Twk_Pawn_DefaultNPC.m_ShadowKillFXs`): one system per listed bone,
+/// `m_fShadowKillDelay` 0.1 s after the kill.
+pub const SHADOW_KILL_PS: &str = "Vfx_GamePlay.ShadowKill.ps_SK_Leg_Arms";
+pub const SHADOW_KILL_BONES: &[&str] = &[
+    "upper_leg_L_jnt",
+    "lower_leg_L_jnt",
+    "upper_leg_R_jnt",
+    "lower_leg_R_jnt",
+    "upper_arm_L_jnt",
+    "lower_arm_L_jnt",
+    "upper_arm_R_jnt",
+    "lower_arm_R_jnt",
+    "spine_1_jnt",
+    "head_jnt",
+];
+pub const SHADOW_KILL_DELAY: f32 = 0.1;
+
+/// Sockets of the animated pawns the gameplay effects attach to (written by the character
+/// animation each frame, Dishonored world space).
+#[derive(Resource, Default)]
+pub struct EffectSockets {
+    /// Pistol `Spitfire` socket: (position, firing direction).
+    pub muzzle: HashMap<u32, (Vec3, Vec3)>,
+    /// `SHADOW_KILL_BONES` positions.
+    pub bones: HashMap<u32, Vec<Vec3>>,
+}
+
+/// Procedural glow of untextured particle mesh materials (`volume_glow.wgsl`).
+#[derive(Asset, bevy::render::render_resource::AsBindGroup, Reflect, Debug, Clone)]
+pub struct GlowMaterial {
+    /// Linear colour x intensity (premultiplied by the particle colour and alpha).
+    #[uniform(0)]
+    pub color: Vec4,
+    /// x = Fresnel_exponent, y = StartOffset camera fade (Bevy units), z = SphereMask_Power,
+    /// w = Distance (sphere mask radius in mesh radii).
+    #[uniform(1)]
+    pub params: Vec4,
+    /// Sphere mask centre (Bevy world) and radius.
+    #[uniform(2)]
+    pub sphere: Vec4,
+}
+
+impl Material for GlowMaterial {
+    fn fragment_shader() -> bevy::shader::ShaderRef {
+        "embedded://dishonored_runtime/volume_glow.wgsl".into()
+    }
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Add
+    }
+}
+
 /// ParticleSystems the gameplay effects use (decoded with every level, from DishonoredGame).
 pub const GAMEPLAY_PARTICLES: &[&str] = &[
+    PLAYER_MUZZLE,
+    PAWN_MUZZLE,
+    SHADOW_KILL_PS,
+    "Vfx_GamePlay.Blink.Blink_Mantle_01",
+    "Vfx_GamePlay.Windblast.Windblast_lvl2",
+    "Vfx_GamePlay.Windblast.Windblast_UndWater_lvl1",
     "Vfx_PhysMat.pistol.Ps_Pistol_Blast",
     "Vfx_Weapon.Effects.Ps_SwordSparks_Parry",
     "Vfx_PhysMat.Blood.Pfx_PistolBlood_Blast",
@@ -48,6 +112,8 @@ struct LevelFx {
     mesh_parts: HashMap<(usize, usize), (Handle<Mesh>, Handle<StandardMaterial>)>,
     /// Emitters not drawn (untextured mesh emitters).
     skipped: std::collections::HashSet<(usize, usize)>,
+    /// Untextured (procedural) mesh emitters: mesh, colour x intensity, glow parameters.
+    glow: HashMap<(usize, usize), (Handle<Mesh>, Vec4, Vec4)>,
 }
 
 /// One particle of a mesh emitter.
@@ -65,6 +131,10 @@ fn bevy_mesh(m: &dishonored_ir::StaticMeshAsset) -> Mesh {
     // Handedness flips with the axis swap: reverse the winding.
     let idx: Vec<u32> = m.indices.chunks_exact(3).flat_map(|t| [t[0], t[2], t[1]]).collect();
     mesh.insert_indices(Indices::U32(idx));
+    if m.normals.len() != m.positions.len() {
+        // No imported normals: smooth ones from the triangles (the glow shading needs them).
+        mesh.compute_smooth_normals();
+    }
     mesh
 }
 
@@ -75,6 +145,10 @@ pub struct Effects {
     rng: u64,
     pub spawned_oneshots: u64,
     pub live_particles: usize,
+    /// Effects due later: (time, system, position, direction).
+    delayed: Vec<(f32, String, Vec3, Vec3)>,
+    /// Projectile id -> fired as a crossbow bolt (impact striker).
+    bolts: HashMap<u32, bool>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -92,7 +166,22 @@ struct Particle {
     /// Mesh particles: rotation (radians about X, Y, Z) and its rate.
     mrot: Vec3,
     mrot_rate: Vec3,
+    /// UE3 `BaseVelocity`: accelerations integrate into it; per-frame modules (velocity over
+    /// life, attractors) derive `vel` from it.
+    base_vel: Vec3,
+    /// Orbit (summed over the orbit modules): offset, rotation and rotation rate (radians).
+    orbit_off: Vec3,
+    orbit_rot: Vec3,
+    orbit_rate: Vec3,
+    /// Collisions so far, the maximum, and frozen / no-longer-colliding flags.
+    collisions: u32,
+    max_collisions: u32,
+    frozen: bool,
+    halted: bool,
 }
+
+/// World ray query for particle collision: (from, to) -> (point, normal).
+type RayFn<'a> = &'a dyn Fn(Vec3, Vec3) -> Option<(Vec3, Vec3)>;
 
 #[derive(Default)]
 struct EmitterSim {
@@ -115,6 +204,8 @@ pub struct FxInstance {
     meshes: Vec<Handle<Mesh>>,
     /// Mesh emitters: one entity per live particle.
     pools: Vec<Vec<(Entity, Handle<StandardMaterial>, LinearRgba)>>,
+    /// Glow mesh emitters: one entity and material per live particle.
+    glow_pools: Vec<Vec<(Entity, Handle<GlowMaterial>)>>,
     one_shot: bool,
     warmed: bool,
 }
@@ -123,7 +214,9 @@ pub struct EffectsPlugin;
 
 impl Plugin for EffectsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Effects>().add_systems(Update, (gameplay_effects.before(crate::audio::drive), simulate).chain());
+        bevy::asset::embedded_asset!(app, "volume_glow.wgsl");
+        app.add_plugins(MaterialPlugin::<GlowMaterial>::default());
+        app.init_resource::<Effects>().init_resource::<EffectSockets>().add_systems(Update, (gameplay_effects.before(crate::audio::drive), simulate).chain());
     }
 }
 
@@ -179,6 +272,13 @@ fn material_for(map: &DishonoredMap, em: &ParticleEmitterAsset, images: &mut Ass
         cache.insert(key, h.clone());
         Some(h)
     });
+    // Emissive bug / glow materials (`E_Emissive_Color`, alpha = intensity: fireflies x25):
+    // drawn additively with the emissive colour (unlit, so it reads as the glowing body).
+    let emissive = params.and_then(|p| p.vectors.iter().find(|v| v.0.eq_ignore_ascii_case("E_Emissive_Color")).map(|v| v.1)).filter(|e| e[3] > 1.0);
+    let (alpha_mode, tint, gain) = match emissive {
+        Some(e) => (AlphaMode::Add, [e[0], e[1], e[2], 1.0], e[3].min(4.0)),
+        None => (alpha_mode, tint, gain),
+    };
     let base_color = if alpha_mode == AlphaMode::Add {
         Color::linear_rgb(tint[0] * gain, tint[1] * gain, tint[2] * gain)
     } else {
@@ -221,6 +321,7 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
     let mut mesh_parts = HashMap::new();
     let mut mesh_handles: HashMap<usize, Handle<Mesh>> = HashMap::new();
     let mut skipped = std::collections::HashSet::new();
+    let mut glow = HashMap::new();
     for (si, s) in map.particle_systems.iter().enumerate() {
         for (ei, e) in s.emitters.iter().enumerate() {
             let Some(mid) = e.mesh_id.filter(|m| *m < map.meshes.len()) else {
@@ -229,12 +330,22 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
                 }
                 continue;
             };
-            // Volumetric glow meshes with procedural materials (sphere masks, fresnel, depth fade;
-            // no texture) cannot be approximated without their material graph: not drawn.
+            // Volumetric glow meshes with procedural materials (no texture; the cooked graph keeps
+            // only its parameters): the glow material rebuilt from those parameters.
             let eff = if e.mesh_override_material && e.material.is_some() { e.material } else { map.meshes[mid].sections.first().and_then(|s| s.material) };
             let textured = eff.and_then(|m| map.materials.get(m)).is_some_and(|m| m.diffuse.is_some() || !m.texture_params.is_empty());
             if !textured {
-                skipped.insert((si, ei));
+                let mh = mesh_handles.entry(mid).or_insert_with(|| meshes.add(bevy_mesh(&map.meshes[mid]))).clone();
+                let params = eff.and_then(|m| map.material_params.get(m));
+                let scalar = |n: &str, d: f32| params.and_then(|p| p.scalars.iter().find(|s| s.0.eq_ignore_ascii_case(n)).map(|s| s.1)).unwrap_or(d);
+                // Defaults: the parameter expressions of Volume_Light_PMAT (Color, LightIntensity 2,
+                // Fresnel_exponent 5, StartOffset 128).
+                let c = params.and_then(|p| p.vectors.iter().find(|v| v.0.eq_ignore_ascii_case("Color")).map(|v| v.1)).unwrap_or([1.0, 0.940601, 0.74453, 1.0]);
+                // Calibration (APPROXIMATION, U-305): the stripped graph scales LightIntensity by
+                // terms that are not recoverable (rays mask, depth-biased alpha); 0.1 keeps the
+                // stacked cones from saturating.
+                let k = scalar("LightIntensity", 2.0) * 0.1;
+                glow.insert((si, ei), (mh, Vec4::new(c[0] * k, c[1] * k, c[2] * k, 1.0), Vec4::new(scalar("Fresnel_exponent", 5.0), scalar("StartOffset", 128.0) * coords::UU_TO_BEVY, scalar("SphereMask_Power", 2.0), scalar("Distance", 1.5) * map.meshes[mid].positions.iter().map(|p| p.length()).fold(0.0, f32::max))));
                 continue;
             }
             let mh = mesh_handles.entry(mid).or_insert_with(|| meshes.add(bevy_mesh(&map.meshes[mid]))).clone();
@@ -261,6 +372,7 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
         materials,
         mesh_parts,
         skipped,
+        glow,
     });
     fx.levels.insert(name.to_string(), lf.clone());
     fx.active = name.to_string();
@@ -301,7 +413,7 @@ fn spawn_instance(commands: &mut Commands, meshes: &mut Assets<Mesh>, lf: &Level
     for (ei, _) in s.emitters.iter().enumerate() {
         let mesh = meshes.add(empty_mesh());
         handles.push(mesh.clone());
-        if lf.mesh_parts.contains_key(&(system, ei)) || lf.skipped.contains(&(system, ei)) {
+        if lf.mesh_parts.contains_key(&(system, ei)) || lf.skipped.contains(&(system, ei)) || lf.glow.contains_key(&(system, ei)) {
             continue;
         }
         let Some(mat) = lf.materials.get(&(system, ei)) else { continue };
@@ -314,6 +426,7 @@ fn spawn_instance(commands: &mut Commands, meshes: &mut Assets<Mesh>, lf: &Level
         sims: s.emitters.iter().map(|_| EmitterSim::default()).collect(),
         meshes: handles,
         pools: s.emitters.iter().map(|_| Vec::new()).collect(),
+        glow_pools: s.emitters.iter().map(|_| Vec::new()).collect(),
         one_shot,
         warmed: one_shot,
     });
@@ -389,9 +502,24 @@ fn spawn_particle(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, rn
     let size = d3(&em.size, et, r[0], [1.0; 3]);
     let color = d3(&em.color, et, r[1], [1.0; 3]);
     let alpha = em.alpha.as_ref().map(|d| d.eval1(et, r[1])).unwrap_or(1.0);
+    let (mut orbit_off, mut orbit_rot, mut orbit_rate) = (Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
+    for o in &em.orbit {
+        orbit_off += d3(&o.offset, et, r[1], [0.0; 3]);
+        orbit_rot += d3(&o.rotation, et, r[2], [0.0; 3]) * std::f32::consts::TAU;
+        orbit_rate += d3(&o.rotation_rate, et, r[3], [0.0; 3]) * std::f32::consts::TAU;
+    }
+    let max_collisions = em.collision.as_ref().map(|c| c.1.eval1(et, r[0]).max(0.0) as u32).unwrap_or(0);
     sim.particles.push(Particle {
         pos,
         vel,
+        base_vel: vel,
+        orbit_off,
+        orbit_rot,
+        orbit_rate,
+        collisions: 0,
+        max_collisions,
+        frozen: false,
+        halted: false,
         age: 0.0,
         life,
         size,
@@ -406,18 +534,90 @@ fn spawn_particle(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, rn
 }
 
 /// Advance one emitter by `dt`.
-fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32, rnd: &mut dyn FnMut() -> f32) {
+fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32, rnd: &mut dyn FnMut() -> f32, ray: Option<RayFn>) {
     // Particles.
     let accel = |p: &Particle| d3(&em.acceleration, p.age / p.life, p.r[3], [0.0; 3]);
+    // Emitter-space points to the particle space (world unless local space).
+    let to_space = |v: Vec3| if em.local_space { v } else { xf.transform_point3(v) };
+    let et = sim.time;
     for p in sim.particles.iter_mut() {
         p.age += dt;
+        let rel = (p.age / p.life).clamp(0.0, 1.0);
+        p.orbit_rot += p.orbit_rate * dt;
+        if p.frozen {
+            continue;
+        }
         let a = accel(p);
         let a = if em.local_space { a } else { xf.transform_vector3(a) };
-        p.vel += a * dt;
+        p.base_vel += a * dt;
         if let Some(d) = &em.drag {
-            p.vel *= (1.0 - d.eval1(p.age / p.life, p.r[2]) * dt).max(0.0);
+            p.base_vel *= (1.0 - d.eval1(rel, p.r[2]) * dt).max(0.0);
         }
-        p.pos += p.vel * dt;
+        let mut v = p.base_vel;
+        // Attractors pull toward a point / the nearest point of a line within their range
+        // (UE3 `ParticleModuleAttractorPoint` / `Line`), strength fading with distance.
+        let pull = |target: Vec3, range: f32, strength: f32, by_distance: bool, base: bool, p: &mut Particle, v: &mut Vec3| {
+            let d = target - p.pos;
+            let dist = d.length();
+            if dist < 1e-3 || (range > 0.0 && dist > range) {
+                return;
+            }
+            let s = if by_distance && range > 0.0 { strength * (1.0 - dist / range) } else { strength };
+            let dv = d / dist * s * dt;
+            if base {
+                p.base_vel += dv;
+            }
+            *v += dv;
+        };
+        if let Some(ap) = &em.attractor_point {
+            let pos = Vec3::from(ap.position.eval(et, p.r[0]));
+            let target = if ap.world_space && !em.local_space { pos } else { to_space(pos) };
+            pull(target, ap.range.eval1(et, p.r[1]), ap.strength.eval1(et, p.r[2]), ap.strength_by_distance, ap.affect_base_velocity, p, &mut v);
+        }
+        if let Some((a0, a1, range, strength)) = &em.attractor_line {
+            let (a0, a1) = (to_space(Vec3::from(*a0)), to_space(Vec3::from(*a1)));
+            let seg = a1 - a0;
+            let t = ((p.pos - a0).dot(seg) / seg.length_squared().max(1e-6)).clamp(0.0, 1.0);
+            pull(a0 + seg * t, range.eval1(t, p.r[1]), strength.eval1(t, p.r[2]), true, true, p, &mut v);
+        }
+        if let Some((d, absolute)) = &em.vel_over_life {
+            let s = Vec3::from(d.eval(rel, p.r[1]));
+            v = if *absolute { if em.local_space { s } else { xf.transform_vector3(s) } } else { v * s };
+        }
+        p.vel = v;
+        let next = p.pos + v * dt;
+        // Collision against the level geometry: reflect with the damping factor; past the
+        // maximum count, the completion option (kill, freeze, stop colliding...).
+        let mut moved = false;
+        if let (Some((damp, _, opt)), Some(ray)) = (&em.collision, ray) {
+            if !p.halted {
+                let (wf, wt) = if em.local_space { (xf.transform_point3(p.pos), xf.transform_point3(next)) } else { (p.pos, next) };
+                if let Some((pt, n)) = ray(wf, wt) {
+                    let n_s = if em.local_space { xf.inverse().transform_vector3(n).normalize_or_zero() } else { n };
+                    let refl = v - 2.0 * v.dot(n_s) * n_s;
+                    p.base_vel = refl * Vec3::from(damp.eval(rel, p.r[3]));
+                    let pt_s = if em.local_space { xf.inverse().transform_point3(pt) } else { pt };
+                    p.pos = pt_s + n_s * 0.5;
+                    moved = true;
+                    p.collisions += 1;
+                    if p.collisions >= p.max_collisions {
+                        match opt {
+                            0 => p.age = p.life,
+                            1 | 5 => p.frozen = true,
+                            2 => p.halted = true,
+                            3 => {
+                                p.base_vel = Vec3::ZERO;
+                                p.halted = true;
+                            }
+                            _ => p.rot_rate = 0.0,
+                        }
+                    }
+                }
+            }
+        }
+        if !moved {
+            p.pos = next;
+        }
         p.rot += p.rot_rate * dt;
         p.mrot += p.mrot_rate * dt;
     }
@@ -472,7 +672,7 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
     let mut nrm = Vec::with_capacity(n * 4);
     let mut idx = Vec::with_capacity(n * 6);
     let frames = (em.sub_h * em.sub_v).max(1);
-    for p in &sim.particles {
+    let look = |p: &Particle| -> (Vec3, f32, Vec3) {
         let rel = (p.age / p.life).clamp(0.0, 1.0);
         let mut size = p.size;
         if let Some(d) = &em.size_over_life {
@@ -485,7 +685,21 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
         }
         let color = em.color_over_life.as_ref().map(|d| Vec3::from(d.eval(rel, p.r[0]))).unwrap_or(p.color);
         let alpha = em.alpha_over_life.as_ref().map(|d| d.eval1(rel, p.r[0])).unwrap_or(p.alpha);
-        let world = if em.local_space { xf.transform_point3(p.pos) } else { p.pos };
+        (color, alpha, size)
+    };
+    // Orbit: an emitter-space offset turned by the orbit rotation, added at render time.
+    let world_of = |p: &Particle| -> Vec3 {
+        let orb = if p.orbit_off != Vec3::ZERO { Quat::from_euler(EulerRot::ZYX, p.orbit_rot.z, p.orbit_rot.y, p.orbit_rot.x) * p.orbit_off } else { Vec3::ZERO };
+        if em.local_space { xf.transform_point3(p.pos + orb) } else { p.pos + xf.transform_vector3(orb) }
+    };
+    if em.trail.is_some() || em.beam.is_some() {
+        strip_mesh(em, sim, xf, cam_pos, &look, &world_of, mesh);
+        return;
+    }
+    for p in &sim.particles {
+        let rel = (p.age / p.life).clamp(0.0, 1.0);
+        let (color, alpha, size) = look(p);
+        let world = world_of(p);
         let c = coords::pos(world);
         let (hw, hh) = (size.x * 0.5 * coords::UU_TO_BEVY, if em.screen_align == 1 { size.y } else { size.x } * 0.5 * coords::UU_TO_BEVY);
         let (s, co) = p.rot.sin_cos();
@@ -548,14 +762,27 @@ fn simulate(
     time: Res<Time>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
+    mut glow_mats: ResMut<Assets<GlowMaterial>>,
     mut q: Query<(Entity, &mut FxInstance, &InheritedVisibility)>,
     cams: Query<&GlobalTransform, With<Camera3d>>,
+    session: Option<Res<crate::session::Session>>,
 ) {
     let Some(cam) = cams.iter().next() else { return };
     let cam_pos_b = cam.translation();
     let cam_uu = Vec3::new(cam_pos_b.x, cam_pos_b.z, cam_pos_b.y) / coords::UU_TO_BEVY;
     let (right, up) = (cam.right().as_vec3(), cam.up().as_vec3());
     let dt = time.delta_secs().min(0.1);
+    let world = session.as_ref().map(|s| &s.content.collision);
+    let ray_closure = |a: Vec3, b: Vec3| -> Option<(Vec3, Vec3)> {
+        let w = world?;
+        let d = b - a;
+        let len = d.length();
+        if len < 1e-4 {
+            return None;
+        }
+        w.raycast(a, d / len, len, dishonored_world::channel::ALL).map(|h| (h.point, h.normal))
+    };
+    let ray_fn: RayFn = &ray_closure;
     let mut live = 0;
     for (e, mut inst, vis) in &mut q {
         if !vis.get() && !inst.one_shot {
@@ -574,14 +801,37 @@ fn simulate(
             let steps = (sys.warmup * 15.0).min(300.0) as usize;
             for _ in 0..steps {
                 for (em, sim) in sys.emitters.iter().zip(inst.sims.iter_mut()) {
-                    step(em, sim, &xf, 1.0 / 15.0, &mut rnd);
+                    step(em, sim, &xf, 1.0 / 15.0, &mut rnd, em.collision.as_ref().map(|_| ray_fn));
                 }
             }
         }
         for (i, (em, sim)) in sys.emitters.iter().zip(inst.sims.iter_mut()).enumerate() {
-            step(em, sim, &xf, dt, &mut rnd);
+            step(em, sim, &xf, dt, &mut rnd, em.collision.as_ref().map(|_| ray_fn));
             live += sim.particles.len();
-            if let Some((mh, mat)) = lf.mesh_parts.get(&(inst.system, i)) {
+            if let Some((mh, color, params)) = lf.glow.get(&(inst.system, i)) {
+                let pool = &mut inst.glow_pools[i];
+                let want = sim.particles.len().min(64);
+                while pool.len() < want {
+                    let gm = glow_mats.add(GlowMaterial { color: *color, params: *params, sphere: Vec4::ZERO });
+                    let id = commands.spawn((Mesh3d(mh.clone()), MeshMaterial3d(gm.clone()), Transform::IDENTITY, bevy::light::NotShadowCaster, FxMeshParticle, ChildOf(e))).id();
+                    pool.push((id, gm));
+                }
+                while pool.len() > want {
+                    if let Some((id, gm)) = pool.pop() {
+                        glow_mats.remove(&gm);
+                        commands.entity(id).despawn();
+                    }
+                }
+                for (k, p) in sim.particles.iter().take(want).enumerate() {
+                    let (world, c, a) = mesh_particle(em, p, &xf);
+                    commands.entity(pool[k].0).insert(Transform::from_matrix(coords::transform(world)));
+                    if let Some(mut m) = glow_mats.get_mut(&pool[k].1) {
+                        let (s, _, t) = world.to_scale_rotation_translation();
+                        m.sphere = coords::pos(t).extend(params.w * s.max_element() * coords::UU_TO_BEVY);
+                        m.color = Vec4::new(color.x * c.x * a, color.y * c.y * a, color.z * c.z * a, 1.0);
+                    }
+                }
+            } else if let Some((mh, mat)) = lf.mesh_parts.get(&(inst.system, i)) {
                 // Mesh particles: one entity each, scaled by the particle size and turned by
                 // its mesh rotation, its colour and alpha on its own material copy.
                 let pool = &mut inst.pools[i];
@@ -641,49 +891,234 @@ fn simulate(
     fx.live_particles = live;
 }
 
-/// Gameplay effects from simulation events (sparks, blood, muzzle blast, Blink, Windblast).
-fn gameplay_effects(mut commands: Commands, mut fx: ResMut<Effects>, mut meshes: ResMut<Assets<Mesh>>, view: Option<ResMut<SessionView>>, audio: Option<Res<crate::audio::GameAudio>>) {
+/// Gameplay effects from simulation events, with the systems and sockets the original's tweaks
+/// name (U-165): the pistol muzzle flash at the `Spitfire` socket (`m_MuzzleSocketName`;
+/// first-person `Ps_PlayerPistol_StdMuzzle_01`, third-person `Ps_PistolMuzzle`), Blink's
+/// `m_pGroundPS` / `m_pMantlePS` / `m_pLowFallPS` at the arrival, Windblast's per-level
+/// `m_EffectTemplate` along the view, Shadow Kill ash on the `m_ShadowKillFXs` bones, impacts and
+/// blood from the contact system's particle sub-intersections, sword sparks on blocks and parries.
+#[allow(clippy::too_many_arguments)]
+fn gameplay_effects(
+    mut commands: Commands,
+    mut fx: ResMut<Effects>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    view: Option<ResMut<SessionView>>,
+    audio: Option<Res<crate::audio::GameAudio>>,
+    sockets: Res<EffectSockets>,
+    session: Option<Res<crate::session::Session>>,
+    time: Res<Time>,
+) {
     let Some(mut view) = view else { return };
     let events = view.audio_events.clone();
     if audio.is_none() {
         // Without the audio plugin nobody else drains the presentation events.
         view.audio_events.clear();
     }
+    let now = time.elapsed_secs();
+    // Delayed effects (Shadow Kill ash) that are due.
+    let due: Vec<(f32, String, Vec3, Vec3)> = fx.delayed.iter().filter(|d| d.0 <= now).cloned().collect();
+    fx.delayed.retain(|d| d.0 > now);
+    for (_, path, at, dir) in due {
+        spawn_effect(&mut commands, &mut meshes, &mut fx, &path, at, dir);
+    }
 
+    let me = session.as_ref().and_then(|s| s.local_id());
     let find = |id: u32| view.me.iter().chain(view.others.iter()).find(|p| p.id == id).copied();
     let fwd = |yaw: f32| Vec3::new(yaw.to_radians().cos(), yaw.to_radians().sin(), 0.0);
+    let look = |p: &PlayerState| {
+        let (y, pi) = (p.yaw.to_radians(), p.pitch.to_radians());
+        Vec3::new(y.cos() * pi.cos(), y.sin() * pi.cos(), pi.sin())
+    };
+    let contact = audio.as_ref().and_then(|a| a.contact());
+    let surface = |p: Vec3| -> String {
+        let Some(s) = session.as_ref() else { return "DisContactType_Environment".into() };
+        let world = &s.content.collision;
+        let mut best: Option<(f32, u32)> = None;
+        for d in [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z] {
+            if let Some(hit) = world.raycast(p - d * 12.0, d, 36.0, dishonored_world::channel::ALL) {
+                if best.is_none_or(|b| hit.distance < b.0) {
+                    best = Some((hit.distance, hit.tri));
+                }
+            }
+        }
+        best.and_then(|b| world.surface_of(b.1)).unwrap_or("DisContactType_Environment").to_string()
+    };
+    let mantled: Vec<u32> = events.iter().filter_map(|e| if let SimEvent::Mantle { id, .. } = e { Some(*id) } else { None }).collect();
     for ev in events.iter() {
-        let (path, at, dir): (&str, Vec3, Vec3) = match ev {
+        let (path, at, dir): (String, Vec3, Vec3) = match ev {
             SimEvent::SwordBlocked { defender, .. } | SimEvent::SwordParried { defender, .. } => {
                 let Some(p) = find(*defender) else { continue };
-                ("Vfx_Weapon.Effects.Ps_SwordSparks_Parry", p.position + Vec3::Z * 40.0 + fwd(p.yaw) * 40.0, fwd(p.yaw))
+                ("Vfx_Weapon.Effects.Ps_SwordSparks_Parry".into(), p.position + Vec3::Z * 40.0 + fwd(p.yaw) * 40.0, fwd(p.yaw))
             }
-            SimEvent::Fired { id, bolt: false, .. } => {
+            SimEvent::Fired { id, bolt, projectile } => {
+                fx.bolts.insert(*projectile, *bolt);
+                if *bolt {
+                    continue;
+                }
                 let Some(p) = find(*id) else { continue };
-                ("Vfx_PhysMat.pistol.Ps_Pistol_Blast", p.position + Vec3::Z * 60.0 + fwd(p.yaw) * 50.0, fwd(p.yaw))
+                let path = if Some(*id) == me { PLAYER_MUZZLE } else { PAWN_MUZZLE };
+                // The animated pistol's socket; without one (first person), in front of the eye.
+                let (at, dir) = sockets.muzzle.get(id).copied().filter(|m| m.0.distance(p.position) < 200.0).unwrap_or((p.position + Vec3::Z * 60.0 + look(&p) * 50.0, look(&p)));
+                (path.into(), at, dir)
             }
             SimEvent::Damage { victim, cause, .. } => {
                 let Some(p) = find(*victim) else { continue };
-                let path = match cause {
-                    DamageCause::Pistol | DamageCause::PistolHeadshot => "Vfx_PhysMat.Blood.Pfx_PistolBlood_Blast",
-                    DamageCause::Sword | DamageCause::SwordCounter | DamageCause::Assassination | DamageCause::DropAssassination | DamageCause::Crossbow | DamageCause::CrossbowHeadshot => {
-                        "Vfx_PhysMat.Blood.Pfx_BloodSProjectile_Default"
-                    }
+                let striker = match cause {
+                    DamageCause::Pistol | DamageCause::PistolHeadshot => "DisContactType_Bullet",
+                    DamageCause::Crossbow | DamageCause::CrossbowHeadshot => "DisContactType_Arrow",
+                    DamageCause::Sword | DamageCause::SwordCounter | DamageCause::Assassination | DamageCause::DropAssassination => "DisContactType_Sword",
                     _ => continue,
                 };
+                let path = contact.and_then(|c| c.particle(striker, "DisContactType_Body")).unwrap_or_else(|| match cause {
+                    DamageCause::Pistol | DamageCause::PistolHeadshot => "Vfx_PhysMat.Blood.Pfx_PistolBlood_Blast".into(),
+                    _ => "Vfx_PhysMat.Blood.Pfx_BloodSProjectile_Default".into(),
+                });
                 (path, p.position + Vec3::Z * 50.0, -fwd(p.yaw))
             }
             SimEvent::BlinkEnd { id } => {
                 let Some(p) = find(*id) else { continue };
-                ("Vfx_GamePlay.Blink.Blink_Ground_01", p.position - Vec3::Z * 80.0, Vec3::Z)
+                let path = if mantled.contains(id) {
+                    "Vfx_GamePlay.Blink.Blink_Mantle_01"
+                } else if p.mode == MoveMode::Falling {
+                    "Vfx_GamePlay.Blink.Blink_Fall_01"
+                } else {
+                    "Vfx_GamePlay.Blink.Blink_Ground_01"
+                };
+                (path.into(), p.position - Vec3::Z * 80.0, Vec3::Z)
             }
             SimEvent::WindblastCast { id } => {
                 let Some(p) = find(*id) else { continue };
-                ("Vfx_GamePlay.Windblast.Windblast_lvl1", p.position + Vec3::Z * 60.0, fwd(p.yaw))
+                let lvl = p.inv.power_levels[dishonored_sim::state::power::WINDBLAST];
+                let path = if lvl >= 2 { "Vfx_GamePlay.Windblast.Windblast_lvl2" } else { "Vfx_GamePlay.Windblast.Windblast_lvl1" };
+                (path.into(), p.position + Vec3::Z * 60.0, look(&p))
             }
-            SimEvent::ProjectileImpact { point, victim: None, .. } => ("Vfx_PhysMat.pistol.Ps_PistolImpact_DirtPs_PistolImpact_Dirt", *point, Vec3::Z),
+            SimEvent::BodyRemoved { body, ash: true } => {
+                let pos = find(*body).map(|p| p.position).unwrap_or(Vec3::ZERO);
+                let pts = sockets.bones.get(body).cloned().filter(|v| !v.is_empty()).unwrap_or_else(|| vec![pos]);
+                for b in pts {
+                    fx.delayed.push((now + SHADOW_KILL_DELAY, SHADOW_KILL_PS.into(), b, Vec3::Z));
+                }
+                continue;
+            }
+            SimEvent::ProjectileImpact { projectile, point, victim: None } => {
+                let striker = if fx.bolts.remove(projectile).unwrap_or(false) { "DisContactType_Arrow" } else { "DisContactType_Bullet" };
+                let s = surface(*point);
+                let path = contact.and_then(|c| c.particle(striker, &s)).unwrap_or_else(|| "Vfx_PhysMat.pistol.Ps_PistolImpact_DirtPs_PistolImpact_Dirt".into());
+                (path, *point, Vec3::Z)
+            }
+            SimEvent::ProjectileImpact { projectile, .. } => {
+                fx.bolts.remove(projectile);
+                continue;
+            }
             _ => continue,
         };
-        spawn_effect(&mut commands, &mut meshes, &mut fx, path, at, dir);
+        spawn_effect(&mut commands, &mut meshes, &mut fx, &path, at, dir);
     }
+}
+
+/// World transform (Dishonored space), colour and alpha of a mesh-emitter particle: the mesh
+/// scaled by the particle size (and size over life), turned by its mesh rotation.
+fn mesh_particle(em: &ParticleEmitterAsset, p: &Particle, xf: &Mat4) -> (Mat4, Vec3, f32) {
+    let rel = (p.age / p.life).clamp(0.0, 1.0);
+    let mut size = p.size;
+    if let Some(d) = &em.size_over_life {
+        let m = d.eval(rel, p.r[1]);
+        for a in 0..3 {
+            if em.size_over_life_axes[a] {
+                size[a] *= m[a];
+            }
+        }
+    }
+    let rot = Mat4::from_rotation_z(p.mrot.z) * Mat4::from_rotation_y(p.mrot.y) * Mat4::from_rotation_x(p.mrot.x);
+    let world = if em.local_space {
+        *xf * Mat4::from_translation(p.pos) * rot * Mat4::from_scale(size)
+    } else {
+        let (_, r, _) = xf.to_scale_rotation_translation();
+        Mat4::from_translation(p.pos) * Mat4::from_quat(r) * rot * Mat4::from_scale(size)
+    };
+    let color = em.color_over_life.as_ref().map(|d| Vec3::from(d.eval(rel, p.r[0]))).unwrap_or(p.color);
+    let alpha = em.alpha_over_life.as_ref().map(|d| d.eval1(rel, p.r[0])).unwrap_or(p.alpha).clamp(0.0, 1.0);
+    (world, color, alpha)
+}
+
+/// Trail / ribbon and beam emitters as camera-facing strips (UE3 `TypeDataTrail2` /
+/// `TypeDataRibbon`: the emitter's particles in spawn order joined into one strip, width the
+/// particle size; `TypeDataBeam2`: each particle a beam from the emitter origin along its X
+/// axis by `Distance` or to the `BeamTarget` point, displaced by `BeamNoise`). The texture runs
+/// along the strip (U) once per segment set by the tiling.
+#[allow(clippy::type_complexity)]
+fn strip_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_pos: Vec3, look: &dyn Fn(&Particle) -> (Vec3, f32, Vec3), world_of: &dyn Fn(&Particle) -> Vec3, mesh: &mut Mesh) {
+    let mut pos: Vec<[f32; 3]> = Vec::new();
+    let mut uv: Vec<[f32; 2]> = Vec::new();
+    let mut col: Vec<[f32; 4]> = Vec::new();
+    let mut idx: Vec<u32> = Vec::new();
+    // One strip through `pts` (Bevy space) with per-point half widths and colours.
+    let mut strip = |pts: &[(Vec3, f32, [f32; 4])], tiling: f32| {
+        if pts.len() < 2 {
+            return;
+        }
+        let base = pos.len() as u32;
+        let total = pts.len() as f32 - 1.0;
+        for (k, (c, hw, colr)) in pts.iter().enumerate() {
+            let next = pts[(k + 1).min(pts.len() - 1)].0;
+            let prev = pts[k.saturating_sub(1)].0;
+            let along = (next - prev).normalize_or_zero();
+            let side = along.cross(cam_pos - *c).normalize_or_zero();
+            let u = k as f32 / total * tiling;
+            pos.push((*c - side * *hw).to_array());
+            pos.push((*c + side * *hw).to_array());
+            uv.push([u, 1.0]);
+            uv.push([u, 0.0]);
+            col.push(*colr);
+            col.push(*colr);
+        }
+        for k in 0..pts.len() as u32 - 1 {
+            let a = base + k * 2;
+            idx.extend_from_slice(&[a, a + 1, a + 3, a, a + 3, a + 2]);
+        }
+    };
+    let point = |p: &Particle| {
+        let (color, alpha, size) = look(p);
+        (coords::pos(world_of(p)), size.x * 0.5 * coords::UU_TO_BEVY, [color.x.max(0.0), color.y.max(0.0), color.z.max(0.0), alpha.clamp(0.0, 1.0)])
+    };
+    if let Some(t) = &em.trail {
+        let pts: Vec<(Vec3, f32, [f32; 4])> = sim.particles.iter().map(point).collect();
+        strip(&pts, t.tiling.max(1e-3));
+    } else if let Some(b) = &em.beam {
+        let origin = xf.w_axis.truncate();
+        for (i, p) in sim.particles.iter().enumerate() {
+            let (_, hw, colr) = point(p);
+            let end = match (&b.target, &b.distance) {
+                (Some(t), _) => xf.transform_point3(Vec3::from(t.eval(sim.time, p.r[0]))),
+                (None, Some(d)) => origin + xf.x_axis.truncate().normalize_or_zero() * d.eval1(sim.time, p.r[0]),
+                _ => origin + xf.x_axis.truncate().normalize_or_zero() * 100.0,
+            };
+            let n = b.noise.as_ref().map(|x| x.1.max(1)).unwrap_or(1) as usize;
+            let mut pts = Vec::with_capacity(n + 1);
+            for k in 0..=n {
+                let t = k as f32 / n as f32;
+                let mut w = origin.lerp(end, t);
+                if let (Some((range, _)), true) = (&b.noise, k > 0 && k < n) {
+                    // Deterministic per point and particle, re-rolled four times a second.
+                    let r = Vec3::from(range.eval(0.0, 0.5));
+                    let h = |s: u32| (((i as u32).wrapping_mul(73856093) ^ (k as u32).wrapping_mul(19349663) ^ s.wrapping_mul(83492791) ^ ((p.age * 4.0) as u32).wrapping_mul(2654435761)) % 1000) as f32 / 500.0 - 1.0;
+                    w += Vec3::new(r.x * h(1), r.y * h(2), r.z * h(3));
+                }
+                pts.push((coords::pos(w), hw, colr));
+            }
+            strip(&pts, b.tiling.max(1e-3));
+        }
+    }
+    if pos.is_empty() {
+        pos = vec![[0.0; 3]; 3];
+        uv = vec![[0.0; 2]; 3];
+        col = vec![[0.0; 4]; 3];
+        idx = vec![0, 1, 2];
+    }
+    let nrm = vec![[0.0f32, 1.0, 0.0]; pos.len()];
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, nrm);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
+    mesh.insert_indices(Indices::U32(idx));
 }

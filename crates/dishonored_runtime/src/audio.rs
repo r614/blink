@@ -29,6 +29,7 @@ use dishonored_audio::engine::{Category, Engine, GLOBAL_OBJ, ObjId};
 use dishonored_audio::library::{MediaKey, SoundLibrary};
 use dishonored_audio::music_manager::{MusicManager, MusicNpc, MusicTweaks};
 use dishonored_audio::Pcm;
+use dishonored_audio::volumes::{AudioVolume, volume_at};
 use dishonored_sim::events::{DamageCause, SimEvent};
 use dishonored_sim::state::{MoveMode, PawnKind, PlayerId, PlayerState};
 use dishonored_world::WorldQuery;
@@ -170,22 +171,28 @@ impl Decodable for EngineStream {
 #[derive(Resource, Default)]
 pub struct AnimSounds {
     pending: Vec<(PlayerId, String, f32, f32, bool)>,
-    feet: Vec<(PlayerId, i32)>,
+    /// Footfall notifies the locomotion reported directly (`DishonoredNotify_Footfall`).
+    footfalls: Vec<(PlayerId, i32)>,
 }
 
 impl AnimSounds {
-    /// A foot of a pawn's locomotion touched the ground (`ArkAnimNodeLocomotion`'s
-    /// `m_bFootOnGround` turning on; the NPC loops carry no footfall notifies).
-    pub fn foot_down(&mut self, player: PlayerId, foot: i32) {
-        self.feet.push((player, foot));
-    }
-
     /// A clip advanced from `from` to `to` (sequence seconds) on a pawn. Looping clips that
     /// wrapped pass `looped` and their raw times.
     pub fn advance(&mut self, player: PlayerId, clip: &str, from: f32, to: f32, looped: bool) {
         if !clip.is_empty() && to != from {
             self.pending.push((player, clip.to_string(), from, to, looped));
         }
+    }
+
+    /// A pawn's foot touched down (foot 0 left, 1 right): the third-person locomotion's planted
+    /// feet (`m_bFootOnGround`; NPC loops carry no `DishonoredNotify_Footfall`) or a footfall notify.
+    /// Pawns reporting footfalls get no stride-based fallback steps.
+    pub fn foot_down(&mut self, player: PlayerId, foot: i32) {
+        // Nobody drains them when audio is off.
+        if self.footfalls.len() > 256 {
+            self.footfalls.clear();
+        }
+        self.footfalls.push((player, foot));
     }
 }
 
@@ -210,6 +217,7 @@ struct Loaded {
     contact: Option<ContactSystem>,
     notifies: HashMap<String, ClipNotifies>,
     tweaks: Option<MusicTweaks>,
+    volumes: Vec<AudioVolume>,
     report: String,
 }
 
@@ -222,6 +230,10 @@ pub struct GameAudio {
     emitters: Vec<Emitter>,
     contact: Option<ContactSystem>,
     notifies: HashMap<String, ClipNotifies>,
+    /// The map's `DishonoredAudioVolume`s (ambience states on entry, environments).
+    volumes: Vec<AudioVolume>,
+    /// Volume the listener is in (its event was posted on entry).
+    listener_volume: Option<usize>,
     pub music: Option<MusicManager>,
     stream_spawned: bool,
     /// Projectile id -> fired as a crossbow bolt.
@@ -231,6 +243,8 @@ pub struct GameAudio {
     foot_time: HashMap<(PlayerId, i32), f32>,
     /// Players whose animation reported notifies recently (sim fallbacks are skipped).
     notify_driven: HashMap<PlayerId, f32>,
+    /// Pawns whose animation reported footfalls recently (no stride fallback).
+    footfall_driven: HashMap<PlayerId, f32>,
     /// Last post of a notify event per pawn (first- and third-person rigs of the same pawn
     /// may both report a clip).
     notify_recent: HashMap<(PlayerId, String), f32>,
@@ -290,11 +304,13 @@ fn load(map: &str) -> anyhow::Result<Loaded> {
         banks.extend(a.banks.iter().map(|s| s.to_string()));
     }
     let mut emitters = Vec::new();
+    let mut volumes = Vec::new();
     let mut event_bank: HashMap<String, String> = HashMap::new();
     let mut map_pkgs = Vec::new();
     for p in dishonored_assets::map_packages(&content, map) {
         let Ok(pkg) = content.package(&p) else { continue };
         event_bank.extend(dishonored_audio::emitters::ak_event_banks(&pkg));
+        volumes.extend(dishonored_audio::volumes::audio_volumes(&pkg));
         for (i, e) in dishonored_audio::emitters::ambient_emitters(&pkg).into_iter().enumerate() {
             let key = format!("{}:{}", pkg.name, e.actor.rsplit('.').next().unwrap_or(""));
             emitters.push(Emitter { obj: EMITTER_OBJ + ((map_pkgs.len() as u64) << 16) + i as u64, event: e.event, pos: e.position, key, auto_play: e.auto_play, kismet: None, playing: 0 });
@@ -367,17 +383,18 @@ fn load(map: &str) -> anyhow::Result<Loaded> {
         }
     }
     let report = format!(
-        "audio: {map}: {} banks, {resolved}/{} posted events resolve, {} emitters, contact system {}, {} clips with sound notifies, music tweaks {}, {} short sounds decoded ({secs:.0} s) in {:.1} s",
+        "audio: {map}: {} banks, {resolved}/{} posted events resolve, {} emitters, {} audio volumes, contact system {}, {} clips with sound notifies, music tweaks {}, {} short sounds decoded ({secs:.0} s) in {:.1} s",
         lib.banks.len(),
         events.len(),
         emitters.len(),
+        volumes.len(),
         contact.as_ref().map(|c| c.intersections.len()).unwrap_or(0),
         notifies.len(),
         tweaks.as_ref().map(|t| t.name.as_str()).unwrap_or("-"),
         predecoded.len(),
         t0.elapsed().as_secs_f32()
     );
-    Ok(Loaded { map: map.to_string(), lib, predecoded, emitters, contact, notifies, tweaks, report })
+    Ok(Loaded { map: map.to_string(), lib, predecoded, emitters, contact, notifies, tweaks, volumes, report })
 }
 
 fn finish_loading(mut commands: Commands, mut audio: ResMut<GameAudio>, mut streams: ResMut<Assets<EngineStream>>, session: Option<Res<Session>>) {
@@ -421,8 +438,12 @@ fn finish_loading(mut commands: Commands, mut audio: ResMut<GameAudio>, mut stre
         }
         // Level ambience: state events first, then the bed, the score and the emitters.
         if let Some(a) = cues::map_ambience(&l.map) {
+            // States no event of the map sets (U-161): only when nothing set them before
+            // (states persist across levels, so a return from the interior keeps its value).
             for (g, s) in a.states {
-                e.set_state(*g, *s);
+                if e.states.get(g).is_none_or(|v| *v == 0) {
+                    e.set_state(*g, *s);
+                }
             }
             for s in a.state_events {
                 e.post_event_name(s, GLOBAL_OBJ);
@@ -431,6 +452,10 @@ fn finish_loading(mut commands: Commands, mut audio: ResMut<GameAudio>, mut stre
             if let Some(m) = a.music {
                 e.post_event_name(m, GLOBAL_OBJ);
             }
+        }
+        // Environments of the placed emitters (static): the audio volume around each.
+        for em in &l.emitters {
+            e.set_object_environments(em.obj, &volume_envs(&l.volumes, em.pos));
         }
         for em in l.emitters.iter_mut().filter(|em| em.auto_play) {
             e.set_position(em.obj, em.pos);
@@ -442,6 +467,8 @@ fn finish_loading(mut commands: Commands, mut audio: ResMut<GameAudio>, mut stre
     audio.emitters = l.emitters;
     audio.contact = l.contact;
     audio.notifies = l.notifies;
+    audio.volumes = l.volumes;
+    audio.listener_volume = None;
     audio.known_players.clear();
     audio.engine = Some(engine.clone());
     if !audio.stream_spawned {
@@ -449,6 +476,12 @@ fn finish_loading(mut commands: Commands, mut audio: ResMut<GameAudio>, mut stre
         let h = streams.add(EngineStream(engine));
         commands.spawn((AudioPlayer(h), PlaybackSettings::LOOP));
     }
+}
+
+/// Environment of a game object: the shareset named by the `m_Environment` of the audio
+/// volume around it, at full control value (`SetGameObjectEnvironmentsValues`; LIKELY).
+fn volume_envs(vols: &[AudioVolume], p: [f32; 3]) -> Vec<(u32, f32)> {
+    volume_at(vols, p).and_then(|i| vols[i].environment.as_deref()).map(|n| vec![(dishonored_audio::fnv1_32(n), 1.0)]).unwrap_or_default()
 }
 
 fn attach_listener(mut commands: Commands, cams: Query<Entity, (With<crate::players::GameCamera>, Without<SpatialListener>)>) {
@@ -518,10 +551,16 @@ fn footfall_striker(p: &PlayerState) -> &'static str {
 }
 
 impl GameAudio {
+    /// The original contact system table (impact particles for the effects).
+    pub fn contact(&self) -> Option<&ContactSystem> {
+        self.contact.as_ref()
+    }
+
     fn temp_obj(&mut self, e: &mut Engine, pos: Vec3, now: f32) -> ObjId {
         self.next_temp += 1;
         let o = TEMP_OBJ + self.next_temp;
         e.set_position(o, pos.to_array());
+        e.set_object_environments(o, &volume_envs(&self.volumes, pos.to_array()));
         self.temp.push((o, now + 15.0));
         o
     }
@@ -533,9 +572,12 @@ impl GameAudio {
         let Some((surface, _)) = surface_below(session, p.position, 87.5 * 1.5 + 10.0) else { return false };
         let striker = footfall_striker(p);
         let Some(snd) = contact.sound(striker, &surface) else { return false };
+        // Speed scaling (0x00BC6290): silent at or below the minimum speed, else the
+        // `Scale_RTPC` game parameter on the sound's object.
+        let Some(scale) = snd.volume_scale(p.velocity.length()) else { return false };
         let obj = PLAYER_OBJ + p.id as u64;
+        e.set_rtpc(obj, dishonored_audio::fnv1_32("Scale_RTPC"), scale);
         let pid = e.post_event_name(&snd.event, obj);
-        let _ = snd.volume_scale(p.velocity.length());
         self.footfalls += 1;
         self.posted += 1;
         pid != 0
@@ -562,6 +604,7 @@ pub fn drive(
     audio.events_seen += events.len() as u64;
     let Some(engine) = audio.engine.clone() else {
         anim.pending.clear();
+        anim.footfalls.clear();
         return;
     };
     let mut e = engine.lock().unwrap();
@@ -572,6 +615,23 @@ pub fn drive(
     if let Some(cam) = cams.iter().next() {
         let (pos, right) = to_uu(cam);
         e.set_listener(pos.to_array(), right.to_array());
+        // Entering an audio volume posts its event (ambience states such as
+        // `Set_State_Amb_LVL_Boyle_Int_Streets`) and sets its game parameters.
+        let at = volume_at(&audio.volumes, pos.to_array());
+        if at != audio.listener_volume {
+            audio.listener_volume = at;
+            if let Some(v) = at.map(|i| audio.volumes[i].clone()) {
+                if let Some(ev) = &v.event {
+                    if e.post_event_name(ev, GLOBAL_OBJ) != 0 {
+                        audio.posted += 1;
+                    }
+                }
+                for (name, value, _) in &v.rtpcs {
+                    e.set_rtpc(GLOBAL_OBJ, dishonored_audio::fnv1_32(name), *value);
+                }
+                debug!("audio: listener in {} ({:?}, {:?})", v.actor, v.event, v.environment);
+            }
+        }
     }
     // Pawns are game objects at their positions.
     let me = session.local_id();
@@ -580,8 +640,14 @@ pub fn drive(
     for p in &players {
         // Sounds come from the pawn's centre (the original posts on the pawn; notifies at bones).
         e.set_position(PLAYER_OBJ + p.id as u64, p.position.to_array());
+        let envs = volume_envs(&audio.volumes, p.position.to_array());
+        e.set_object_environments(PLAYER_OBJ + p.id as u64, &envs);
         seen.insert(p.id);
     }
+    // `TimeDilation` (bus pitch curves): the world's rate of time; under Bend Time every pawn
+    // but the caster runs at the world dilation.
+    let dilation = players.iter().map(|p| p.time_scale).fold(1.0f32, f32::min).clamp(0.0, 1.0);
+    e.set_rtpc(GLOBAL_OBJ, dishonored_audio::fnv1_32(dishonored_audio::bus::TIME_DILATION), dilation);
     let gone: Vec<PlayerId> = audio.known_players.difference(&seen).copied().collect();
     for id in gone {
         e.remove_object(PLAYER_OBJ + id as u64, 200.0);
@@ -593,21 +659,10 @@ pub fn drive(
     }
     audio.temp.retain(|t| t.1 >= now);
     audio.notify_driven.retain(|_, t| now - *t < 2.0);
+    audio.footfall_driven.retain(|_, t| now - *t < 2.0);
     audio.notify_recent.retain(|_, t| now - *t < 1.0);
 
     // Animation notifies.
-    // Feet planted by the NPC locomotion (`m_bFootOnGround`): a footfall like the notify's,
-    // with the same 0.25 s rule per foot.
-    for (pid, foot) in std::mem::take(&mut anim.feet) {
-        audio.notify_driven.insert(pid, now);
-        let last = audio.foot_time.get(&(pid, foot)).copied().unwrap_or(-1.0);
-        if now - last >= 0.25 {
-            audio.foot_time.insert((pid, foot), now);
-            if let Some(p) = players.iter().find(|p| p.id == pid) {
-                audio.footfall(&mut e, &session, p);
-            }
-        }
-    }
     for (pid, clip, from, to, looped) in std::mem::take(&mut anim.pending) {
         let Some(c) = audio.notifies.get(&clip).cloned() else { continue };
         let (from, to) = if looped && c.length > 0.0 { (from.rem_euclid(c.length), to.rem_euclid(c.length)) } else { (from, to) };
@@ -626,6 +681,7 @@ pub fn drive(
                     }
                 }
                 NotifyKind::Footfall { foot } => {
+                    audio.footfall_driven.insert(pid, now);
                     let last = audio.foot_time.get(&(pid, *foot)).copied().unwrap_or(-1.0);
                     if now - last >= 0.25 {
                         audio.foot_time.insert((pid, *foot), now);
@@ -634,6 +690,18 @@ pub fn drive(
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // Footfall notifies reported directly by the third-person locomotion (0.25 s per foot).
+    for (pid, foot) in std::mem::take(&mut anim.footfalls) {
+        audio.footfall_driven.insert(pid, now);
+        let last = audio.foot_time.get(&(pid, foot)).copied().unwrap_or(-1.0);
+        if now - last >= 0.25 {
+            audio.foot_time.insert((pid, foot), now);
+            if let Some(p) = players.iter().find(|p| p.id == pid) {
+                audio.footfall(&mut e, &session, p);
             }
         }
     }
@@ -694,6 +762,8 @@ pub fn drive(
                 let vo = if !human { "npc_pain" } else if amount >= 40.0 { "pain_big" } else { "pain_low" };
                 posts.push((cue(vo), subject_obj(victim)));
             }
+            // Shadow Kill: `Twk_Pawn_DefaultNPC.m_pShadowKillSound` on the body.
+            SimEvent::BodyRemoved { body, ash: true } => posts.push((cue("shadow_kill"), subject_obj(body))),
             SimEvent::Death { victim, .. } => {
                 posts.push((cue("death_vo"), subject_obj(victim)));
                 posts.push((cue("body_fall"), subject_obj(victim)));
@@ -720,7 +790,7 @@ pub fn drive(
 
     // Footfalls for pawns whose animation does not report notifies: one per stride.
     for p in &players {
-        let driven = audio.notify_driven.contains_key(&p.id);
+        let driven = audio.footfall_driven.contains_key(&p.id);
         let entry = audio.steps.entry(p.id).or_insert((p.position, 0.0));
         let delta = (p.position - entry.0).truncate().length();
         entry.0 = p.position;

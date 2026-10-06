@@ -146,8 +146,72 @@ pub struct ParticleEmitterAsset {
     /// 7-9 rotate about X/Y/Z).
     #[serde(default)]
     pub axis_lock: u8,
+    /// `ParticleModuleVelocityOverLifetime`: VelOverLife over relative age, Absolute (replace the
+    /// velocity) or scale it.
+    #[serde(default)]
+    pub vel_over_life: Option<(Dist, bool)>,
+    /// `ParticleModuleOrbit` (chained by sum): offset, rotation and rotation rate (turns about
+    /// X/Y/Z), sampled at spawn (emitter time).
+    #[serde(default)]
+    pub orbit: Vec<Orbit>,
+    /// `ParticleModuleAttractorPoint`.
+    #[serde(default)]
+    pub attractor_point: Option<AttractorPoint>,
+    /// `ParticleModuleAttractorLine`: end points (emitter space), range, strength (over the
+    /// line-relative position).
+    #[serde(default)]
+    pub attractor_line: Option<([f32; 3], [f32; 3], Dist, Dist)>,
+    /// `ParticleModuleCollision`: damping factor (vector), max collisions, completion option
+    /// (0 kill, 1 freeze, 2 halt collisions, 3 freeze translation, 4 freeze rotation, 5 freeze
+    /// movement).
+    #[serde(default)]
+    pub collision: Option<(Dist, Dist, u8)>,
+    /// Trail / ribbon type data (`ParticleModuleTypeDataTrail2`, `ParticleModuleTypeDataRibbon`):
+    /// particles of the emitter are drawn as one strip in spawn order; texture tiling.
+    #[serde(default)]
+    pub trail: Option<TrailParams>,
+    /// Beam type data (`ParticleModuleTypeDataBeam2`): each particle is a beam from the emitter
+    /// origin along its X axis (or to the `ParticleModuleBeamTarget` point).
+    #[serde(default)]
+    pub beam: Option<BeamParams>,
     /// Module classes present but not simulated (for the import report).
     pub unsupported: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Orbit {
+    pub offset: Option<Dist>,
+    pub rotation: Option<Dist>,
+    pub rotation_rate: Option<Dist>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AttractorPoint {
+    pub position: Dist,
+    pub range: Dist,
+    pub strength: Dist,
+    pub strength_by_distance: bool,
+    pub affect_base_velocity: bool,
+    pub world_space: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TrailParams {
+    /// Texture repeats along the whole strip.
+    pub tiling: f32,
+    pub ribbon: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BeamParams {
+    /// Beam length along the emitter X axis (`Distance`, method distance).
+    pub distance: Option<Dist>,
+    /// `ParticleModuleBeamTarget.Target` (emitter space) when present.
+    pub target: Option<Dist>,
+    /// Texture tiling along the beam.
+    pub tiling: f32,
+    /// Noise displacement (`ParticleModuleBeamNoise.NoiseRange`) and point count.
+    pub noise: Option<(Dist, u32)>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -247,6 +247,29 @@ pub struct TpWeaponGpu {
     pub m2p: glam::Mat4,
     /// Socket of the character mesh the weapon attaches to.
     pub socket: &'static str,
+    /// The `Spitfire` socket of the weapon mesh (`DisTweaks_FirePistol.m_MuzzleSocketName`):
+    /// (bone, location in the bone).
+    pub muzzle: Option<(usize, glam::Vec3)>,
+}
+
+/// A `SkeletalMeshSocket` of a mesh: (bone name, relative location).
+fn mesh_socket(pkg: &ue3_package::Package, mesh_path: &str, socket: &str) -> Option<(String, glam::Vec3)> {
+    use ue3_package::properties::{Value, find};
+    let prefix = format!("{}.", mesh_path.to_ascii_lowercase());
+    (0..pkg.exports.len()).filter(|i| pkg.export_class(*i) == "SkeletalMeshSocket").find_map(|i| {
+        if !pkg.obj_path(ue3_package::ObjRef::Export(i)).to_ascii_lowercase().starts_with(&prefix) {
+            return None;
+        }
+        let h = pkg.read_object(i).ok()?;
+        let name = |n: &str| match find(&h.properties, n).map(|x| &x.value) {
+            Some(Value::Name(s)) => Some(s.clone()),
+            _ => None,
+        };
+        if !name("SocketName")?.eq_ignore_ascii_case(socket) {
+            return None;
+        }
+        Some((name("BoneName")?, glam::Vec3::from(find(&h.properties, "RelativeLocation").and_then(|x| x.as_vector()).unwrap_or([0.0; 3]))))
+    })
 }
 
 #[derive(Resource, Default)]
@@ -272,7 +295,8 @@ pub fn load_weapons(
                 let inv = part.mesh_to_pawn.inverse();
                 let to_socket = if *blade { glam::Mat4::from_rotation_z(std::f32::consts::PI) * inv } else { inv };
                 let sock = if *blade { "RightHandWpn" } else { "LeftHandWpn" };
-                lib.weapons.push(TpWeaponGpu { kind: *kind, socket_name: socket, to_socket, bind: bind_globals(&part.bones), m2p: part.mesh_to_pawn, socket: sock, gpu: upload(&w, &mut meshes, &mut images, &mut mats, &mut binds, &feat) });
+                let muzzle = content.package("Startup").ok().and_then(|pkg| mesh_socket(&pkg, path, "Spitfire")).and_then(|(bone, loc)| part.bones.iter().position(|b| b.name.eq_ignore_ascii_case(&bone)).map(|bi| (bi, loc)));
+                lib.weapons.push(TpWeaponGpu { kind: *kind, socket_name: socket, to_socket, bind: bind_globals(&part.bones), m2p: part.mesh_to_pawn, socket: sock, muzzle, gpu: upload(&w, &mut meshes, &mut images, &mut mats, &mut binds, &feat) });
             }
             Err(e) => warn!("weapon {path}: {e:#}"),
         }
@@ -434,13 +458,14 @@ pub fn animate_characters(
     weapons: Option<Res<WeaponLibrary>>,
     mut view: ResMut<crate::session::SessionView>,
     time: Res<Time>,
-    roots: Query<(Entity, &CharacterRoot, &crate::players::PlayerBody, &Children)>,
+    roots: Query<(Entity, &CharacterRoot, &crate::players::PlayerBody, &Children, &GlobalTransform)>,
     mut joints: Query<(&Joint, &mut Transform), (Without<TpWeaponJoint>, Without<AccessoryJoint>)>,
     mut wjoints: Query<(&TpWeaponJoint, &mut Transform), (Without<Joint>, Without<AccessoryJoint>)>,
     mut ajoints: Query<(&AccessoryJoint, &mut Transform), (Without<Joint>, Without<TpWeaponJoint>)>,
     mut wmeshes: Query<(&TpWeaponMesh, &mut Visibility)>,
     mut anim_sounds: Option<ResMut<crate::audio::AnimSounds>>,
     session: Res<crate::session::Session>,
+    mut sockets: Option<ResMut<crate::effects::EffectSockets>>,
 ) {
     let events = std::mem::take(&mut view.anim_events);
     let (Some(lib), Some(mut bank)) = (lib, bank) else { return };
@@ -450,7 +475,7 @@ pub fn animate_characters(
     let talking = talking_pawns(&view);
     let dt = time.delta_secs().min(0.1);
     let mv = &session.content.sim.gameplay.movement;
-    for (entity, root, body, children) in &roots {
+    for (entity, root, body, children, root_gt) in &roots {
         let Some(p) = all.iter().find(|p| p.id == body.0).copied() else { continue };
         let model = &lib.models[root.archetype];
         let (right_w, left_w) = shown_weapons(p, contracts);
@@ -503,6 +528,17 @@ pub fn animate_characters(
                 info!("anim {} mod={} vel={:.0},{:.0} full={} upper={} ragdoll={} root={:?} pelvis={:?}", p.id, st.modifier, st.vel.0, st.vel.1, slot(&st.full), slot(&st.upper), st.ragdoll.is_some(), pose[0].first().copied().flatten().map(|k| k.t), globals[0].get(1).map(|m| m.w_axis.truncate()));
             }
         }
+        // Bones the Shadow Kill ash attaches to (`m_ShadowKillFXs`), world space.
+        if let Some(s) = sockets.as_mut() {
+            let bones = &model.parts[0].bones;
+            let uu = |b: Vec3| Vec3::new(b.x, b.z, b.y) / crate::coords::UU_TO_BEVY;
+            let pts: Vec<Vec3> = crate::effects::SHADOW_KILL_BONES
+                .iter()
+                .filter_map(|n| bones.iter().position(|b| b.name.eq_ignore_ascii_case(n)))
+                .map(|bi| uu(root_gt.transform_point(to_bevy(globals[0][bi]).w_axis.truncate())))
+                .collect();
+            s.bones.insert(p.id, pts);
+        }
         for c in children.iter() {
             if let Ok((j, mut t)) = joints.get_mut(c) {
                 if let Some(m) = globals.get(j.part).and_then(|v| v.get(j.bone)) {
@@ -535,6 +571,20 @@ pub fn animate_characters(
                 }
                 let Some(sock) = body_bones.iter().position(|b| b.name.eq_ignore_ascii_case(w.socket_name)) else { continue };
                 *t = Transform::from_matrix(to_bevy(globals[0][sock] * w.to_socket * w.bind[wj.bone]));
+            }
+        }
+        // Muzzle socket of the shown pistol (world space, Dishonored units) for the muzzle flash.
+        if let (Some(s), Some(k)) = (sockets.as_mut(), left_w.filter(|k| *k == TpWeapon::Pistol)) {
+            if let Some((w, (bone, loc))) = weapons.weapons.iter().find(|w| w.kind == k).and_then(|w| w.muzzle.map(|m| (w, m))) {
+                if let Some(sock) = body_bones.iter().position(|b| b.name.eq_ignore_ascii_case(w.socket_name)) {
+                    let m = globals[0][sock] * w.to_socket * w.bind[bone];
+                    let local_b = to_bevy(m * glam::Mat4::from_translation(loc));
+                    let fwd_b = to_bevy(m * glam::Mat4::from_translation(loc + glam::Vec3::Z * -10.0));
+                    let pb = root_gt.transform_point(local_b.w_axis.truncate());
+                    let fb = root_gt.transform_point(fwd_b.w_axis.truncate());
+                    let uu = |b: Vec3| Vec3::new(b.x, b.z, b.y) / crate::coords::UU_TO_BEVY;
+                    s.muzzle.insert(p.id, (uu(pb), (uu(fb) - uu(pb)).normalize_or_zero()));
+                }
             }
         }
     }

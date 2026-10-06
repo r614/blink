@@ -10,6 +10,7 @@ pub const PLAYER_BANKS: &[&str] = &[
     "Bank_Weapon",
     "Bank_Weapon_Sword_Corvo",
     "Bank_Power_Player",
+    "Bank_Power_Player_ShadowKill",
     "Bank_Impact",
     "Bank_Footsteps",
     "Bank_VO_Bark",
@@ -20,6 +21,8 @@ pub const PLAYER_BANKS: &[&str] = &[
 /// Presentation cue -> original event. Keys are referenced by the runtime mapping.
 pub const SIM_CUES: &[(&str, &str)] = &[
     ("sword_swing", "Snd_Weapon_Sword_Whooshe_ak"),
+    // `Twk_Pawn_DefaultNPC.m_pShadowKillSound`.
+    ("shadow_kill", "Snd_Power_Shadow_Kill"),
     ("sword_parry_whoosh", "Snd_Weapon_Sword_whooshe_Parry_cue_ak"),
     ("sword_clash", "Snd_Imp_Sword_vs_Sword_ak"),
     ("sword_hit_body", "Snd_Imp_Sword_on_Body_cue_ak"),

@@ -564,6 +564,173 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Some("hash") => {
+            for n in &args[1..] {
+                let h = dishonored_audio::fnv1_32(n);
+                println!("{h:#010x} {h} {n}");
+            }
+            Ok(())
+        }
+        Some("buses") => {
+            // Decoded bus hierarchy, environments (effect sharesets) and ENVS curves of Init.bnk.
+            let i = dishonored_audio::init::InitBank::load(&install())?;
+            let names = dishonored_audio::bus::known_names();
+            let nm = |id: u32| names.get(&id).cloned().unwrap_or_else(|| format!("{id:#010x}"));
+            println!("{} buses, {} effects, {} state objects, {} inexact", i.buses.len(), i.fx.len(), i.state_props.len(), i.inexact);
+            let mut ids: Vec<u32> = i.buses.keys().copied().collect();
+            ids.sort_by_key(|b| (i.bus_chain(*b).len(), *b));
+            for id in ids {
+                let b = &i.buses[&id];
+                println!("bus {} parent {} props {:?} flags {:?} max {} recovery {} ms max duck {} dB", nm(id), nm(b.parent), b.props, b.flags, b.max_instances, b.recovery_ms, b.max_duck_db);
+                for d in &b.ducks {
+                    println!("    ducks {} by {} dB (out {} ms, in {} ms, curve {})", nm(d.bus), d.volume_db, d.fade_out_ms, d.fade_in_ms, d.curve);
+                }
+                for r in &b.rtpcs {
+                    println!("    rtpc {} -> param {} {:?}", nm(r.rtpc_id), r.param, r.points.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>());
+                }
+                for s in &b.states {
+                    let st: Vec<String> = s.states.iter().map(|(st, o)| format!("{} {:?}", nm(*st), i.state_props.get(o))).collect();
+                    println!("    states {}: {}", nm(s.group), st.join(", "));
+                }
+            }
+            let mut fx: Vec<(&u32, &dishonored_audio::hirc::Fx)> = i.fx.iter().collect();
+            fx.sort_by_key(|f| *f.0);
+            for (id, f) in fx {
+                let floats: Vec<String> = (0..f.params.len() / 4).map(|k| format!("{:.3}", f.f32_at(k * 4).unwrap_or(0.0))).collect();
+                println!("fx {} plugin {:#010x} {} bytes rtpcs {}: {}", nm(*id), f.plugin, f.params.len(), f.rtpcs.len(), floats.join(" "));
+                if let Some(r) = dishonored_audio::bus::RoomVerb::from_fx(f) {
+                    println!("    {r:?}");
+                }
+            }
+            for (k, c) in i.env_curves.iter().enumerate() {
+                println!("env curve {k}: enabled {} scaling {} {:?}", c.0, c.1, c.2.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>());
+            }
+            Ok(())
+        }
+        Some("psurvey") => {
+            // psurvey <pkg>...: particle module classes (counts) and their property names.
+            let content = dishonored_assets::Content::locate()?;
+            let mut counts: BTreeMap<String, (usize, std::collections::BTreeSet<String>)> = BTreeMap::new();
+            for p in &args[1..] {
+                let pkg = content.package(p)?;
+                for i in 0..pkg.exports.len() {
+                    let c = pkg.export_class(i);
+                    if !c.starts_with("ParticleModule") {
+                        continue;
+                    }
+                    let e = counts.entry(c).or_default();
+                    e.0 += 1;
+                    if let Ok(h) = pkg.read_object(i) {
+                        e.1.extend(h.properties.iter().map(|p| p.name.clone()));
+                    }
+                }
+            }
+            for (c, (n, props)) in counts {
+                println!("{n:5} {c}: {}", props.into_iter().collect::<Vec<_>>().join(" "));
+            }
+            Ok(())
+        }
+        Some("floattables") => {
+            // floattables [min len]: runs of 4-byte aligned floats in Dishonored.exe that are
+            // strictly monotonic within (0, 30000] (filter coefficient / cutoff tables).
+            let exe = std::fs::read(install().join("Binaries/Win32/Dishonored.exe"))?;
+            let min: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(40);
+            let f = |o: usize| f32::from_le_bytes(exe[o..o + 4].try_into().unwrap());
+            let mut o = 0;
+            while o + 8 <= exe.len() {
+                let mut n = 1;
+                let inc = f(o + 4) > f(o);
+                while o + (n + 1) * 4 <= exe.len() {
+                    let (a, b) = (f(o + (n - 1) * 4), f(o + n * 4));
+                    let ok = a.is_finite() && b.is_finite() && a > 1e-4 && b > 1e-4 && a <= 30000.0 && b <= 30000.0 && if inc { b > a } else { b < a };
+                    if !ok {
+                        break;
+                    }
+                    n += 1;
+                }
+                if n >= min && n <= 4 * min {
+                    let vals: Vec<String> = (0..n).map(|k| format!("{:.4}", f(o + k * 4))).collect();
+                    println!("file offset {o:#x}: {n} floats: {}", vals.join(" "));
+                    o += n * 4;
+                } else {
+                    o += 4;
+                }
+            }
+            Ok(())
+        }
+        Some("volumes") => {
+            // volumes <Map_P>: DishonoredAudioVolumes (events, environments) and the volume at
+            // each placed ambient emitter.
+            let map = args.get(1).map(String::as_str).unwrap_or("L_Boyle_Ext_P");
+            let content = dishonored_assets::Content::locate()?;
+            let init = dishonored_audio::init::InitBank::load(&install())?;
+            let mut vols = Vec::new();
+            let mut ems = Vec::new();
+            for p in dishonored_assets::map_packages(&content, map) {
+                let pkg = content.package(&p)?;
+                vols.extend(dishonored_audio::volumes::audio_volumes(&pkg));
+                ems.extend(dishonored_audio::emitters::ambient_emitters(&pkg));
+            }
+            for v in &vols {
+                let env_ok = v.environment.as_ref().map(|e| init.fx.contains_key(&dishonored_audio::fnv1_32(e)));
+                println!("{} event {:?} env {:?} (shareset {:?}) kind {} rtpcs {:?} hulls {} volume {:.3e}", v.actor, v.event, v.environment, env_ok, v.kind, v.rtpcs, v.hulls.len(), v.volume);
+            }
+            let mut inside = 0;
+            for e in &ems {
+                if let Some(i) = dishonored_audio::volumes::volume_at(&vols, e.position) {
+                    inside += 1;
+                    println!("  emitter {} at {:?}: {} ({:?})", e.event, e.position, vols[i].actor, vols[i].environment);
+                }
+            }
+            println!("{} volumes; {inside} of {} emitters inside one", vols.len(), ems.len());
+            Ok(())
+        }
+        Some("fxsurvey") => {
+            // HIRC types 18/19 in the game banks: plugin ids, exact decode, node references.
+            use dishonored_audio::hirc::{Node, decode_object};
+            let mut plugins: HashMap<(u8, u32), usize> = HashMap::new();
+            let (mut inexact, mut refs) = (0usize, 0usize);
+            let mut fx_ids = std::collections::HashSet::new();
+            let mut node_fx = Vec::new();
+            for p in all_pcks() {
+                let Ok(pck) = Pck::open(&p) else { continue };
+                for be in &pck.banks {
+                    let Ok(raw) = pck.read(be) else { continue };
+                    let Ok(b) = dishonored_audio::bank::Bank::parse(&raw) else { continue };
+                    for o in &b.hirc {
+                        let (n, used) = decode_object(o);
+                        match (o.kind, n) {
+                            (18 | 19, Some(Node::Fx(f))) => {
+                                let e = plugins.entry((o.kind, f.plugin)).or_default();
+                                if *e < 3 {
+                                    println!("type {} plugin {:#010x} id {} params {}: {}", o.kind, f.plugin, o.id, f.params.len(), f.params.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" "));
+                                }
+                                *e += 1;
+                                inexact += (used != o.body.len()) as usize;
+                                fx_ids.insert(o.id);
+                            }
+                            (18 | 19, _) => inexact += 1,
+                            (_, Some(n)) => {
+                                if let Some(base) = n.base() {
+                                    node_fx.extend(base.fx.iter().copied());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            for f in &node_fx {
+                refs += fx_ids.contains(f) as usize;
+            }
+            let mut v: Vec<_> = plugins.into_iter().collect();
+            v.sort();
+            for ((k, p), n) in v {
+                println!("type {k} plugin {p:#010x}: {n}");
+            }
+            println!("{inexact} inexact; {} node effect slots, {refs} resolve to a type 18/19 object", node_fx.len());
+            Ok(())
+        }
         Some("nodes") => {
             // nodes <Bank> <kind> [max]: decoded objects of one HIRC type.
             let mut lib = dishonored_audio::library::SoundLibrary::new(install())?;

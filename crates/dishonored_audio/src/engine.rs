@@ -21,7 +21,7 @@ use crate::init::InitBank;
 use crate::library::{MediaKey, SoundLibrary};
 use crate::music::MusicInst;
 use crate::wem::Pcm;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 
@@ -209,6 +209,12 @@ pub(crate) struct Voice {
     pub media_rate: u32,
     /// Consecutive inaudible frames.
     pub virt_frames: u64,
+    /// Output bus and its ancestors up to the master bus (Init.bnk).
+    pub bus_chain: Vec<u32>,
+    /// Routed through an environmental bus: sends to the object's environments.
+    pub env_send: bool,
+    /// Parametric EQ inserted on the sound (or the ancestor whose effects it inherits).
+    pub eq: Option<crate::mixer::ParamEq>,
 }
 
 /// Memory of a random/sequence container (per game object unless global).
@@ -316,11 +322,24 @@ pub struct Engine {
     pub log_posts: bool,
     /// Segment history of finished music instances.
     pub music_log: Vec<(u64, u32)>,
+    /// The master bus of Init.bnk.
+    pub master_bus: Option<u32>,
+    /// Per-bus volume (dB) and pitch (cents) this block: properties, states, RTPCs, ducking.
+    pub bus_mix: BTreeMap<u32, (f32, f32)>,
+    /// Ducking applied to each target bus this block (dB).
+    pub bus_duck: BTreeMap<u32, f32>,
+    /// Ducking state per ducking bus: (active, clock it went inactive, level per duck rule).
+    ducks: BTreeMap<u32, (bool, u64, Vec<f32>)>,
+    /// Game object environments (environment shareset id, control value 0..1).
+    obj_envs: HashMap<ObjId, Vec<(u32, f32)>>,
+    /// Live environment reverbs by shareset id.
+    reverbs: BTreeMap<u32, crate::mixer::Reverb>,
 }
 
 impl Engine {
     pub fn new(lib: Arc<SoundLibrary>, rate: u32) -> Self {
         let init = InitBank::load(&lib.root).unwrap_or_default();
+        let master_bus = init.master_bus();
         // Buses the music hierarchy routes to: everything on them is music for the options.
         let mut music_buses = HashSet::new();
         for b in &lib.banks {
@@ -365,6 +384,12 @@ impl Engine {
             post_log: Vec::new(),
             log_posts: false,
             music_log: Vec::new(),
+            master_bus,
+            bus_mix: BTreeMap::new(),
+            bus_duck: BTreeMap::new(),
+            ducks: BTreeMap::new(),
+            obj_envs: HashMap::new(),
+            reverbs: BTreeMap::new(),
         }
     }
 
@@ -378,6 +403,8 @@ impl Engine {
         self.deferred.clear();
         self.modifiers.clear();
         self.objs.clear();
+        self.obj_envs.clear();
+        self.reverbs.clear();
         self.store.map.lock().unwrap().clear();
         self.store.failed.lock().unwrap().clear();
         self.lib = lib;
@@ -460,6 +487,26 @@ impl Engine {
         self.stop_where(|v| v.obj == obj, fade_ms, 4);
         self.drivers.iter_mut().filter(|d| d.obj == obj).for_each(|d| d.stopped = true);
         self.objs.remove(&obj);
+        self.obj_envs.remove(&obj);
+    }
+
+    /// Environments of a game object (`SetGameObjectEnvironmentsValues`): (environment
+    /// shareset id, control value). Voices on environmental buses send to their reverbs.
+    pub fn set_object_environments(&mut self, obj: ObjId, envs: &[(u32, f32)]) {
+        if envs.is_empty() {
+            self.obj_envs.remove(&obj);
+        } else {
+            self.obj_envs.insert(obj, envs.to_vec());
+        }
+    }
+
+    pub fn object_environments(&self, obj: ObjId) -> &[(u32, f32)] {
+        self.obj_envs.get(&obj).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Environment reverbs currently running (shareset ids).
+    pub fn live_reverbs(&self) -> Vec<u32> {
+        self.reverbs.keys().copied().collect()
     }
 
     pub fn set_listener(&mut self, pos: [f32; 3], right: [f32; 3]) {
@@ -1087,6 +1134,34 @@ impl Engine {
                 break;
             }
         }
+        // Output bus: the first node up the chain that sets one (top-level nodes always do).
+        let out_bus = chain.iter().filter_map(|n| self.base(*n)).map(|b| b.bus).find(|b| *b != 0).or(self.master_bus).unwrap_or(0);
+        let bus_chain = self.init.bus_chain(out_bus);
+        // Bus playback limits (global over the bus and its children).
+        for b in &bus_chain {
+            let Some(bus) = self.init.buses.get(b) else { continue };
+            if bus.max_instances == 0 {
+                continue;
+            }
+            let alive: Vec<(u32, u64)> = self.voices.iter().filter(|v| !v.done && !v.stop_on_fade && v.bus_chain.contains(b)).map(|v| (v.id, v.start_at)).collect();
+            if alive.len() >= bus.max_instances as usize {
+                if bus.kill_newest {
+                    return None;
+                }
+                if let Some(oldest) = alive.iter().min_by_key(|a| a.1) {
+                    let id = oldest.0;
+                    self.stop_where(|v| v.id == id, 10.0, 4);
+                }
+            }
+        }
+        let env_send = bus_chain.iter().any(|b| self.init.buses.get(b).is_some_and(|x| x.environmental()));
+        // Effects: those of the nearest node that overrides its parent's (or the top node).
+        let bases: Vec<NodeBase> = chain.iter().filter_map(|n| self.base(*n)).collect();
+        let fx_owner = bases.iter().enumerate().find(|(i, b)| b.override_fx || *i + 1 == bases.len()).map(|x| x.1);
+        let eq = fx_owner.and_then(|b| b.fx.iter().find_map(|f| match self.lib.node(*f) {
+            Some((_, Node::Fx(fx))) => crate::mixer::ParamEq::from_fx(fx, self.rate as f32),
+            _ => None,
+        }));
         let (mut vol, mut pitch, mut lpf) = (0.0f32, 0.0f32, 0.0f32);
         let (mut att, mut is_3d, mut pan_lr, mut loops) = (None, false, 0.0f32, 1u32);
         let mut positioned = false;
@@ -1183,6 +1258,9 @@ impl Engine {
             media_frames,
             media_rate,
             virt_frames: 0,
+            bus_chain,
+            env_send,
+            eq,
         });
         self.stats.voices_started += 1;
         Some(id)
@@ -1250,27 +1328,31 @@ impl Engine {
     }
 
     /// Target stereo gains and LPF of a voice for the current listener.
-    fn spatial(&self, v: &Voice, base_db: f32) -> ([f32; 2], f32) {
+    fn spatial(&self, v: &Voice, base_db: f32) -> ([f32; 2], f32, f32) {
         let lin = db(base_db);
         if !v.is_3d {
             // 2D: balance from the Pan L/R property (-100..100).
             let p = (v.pan_lr / 100.0).clamp(-1.0, 1.0);
             let l = if p > 0.0 { 1.0 - p } else { 1.0 };
             let r = if p < 0.0 { 1.0 + p } else { 1.0 };
-            return ([lin * l, lin * r], 0.0);
+            return ([lin * l, lin * r], 0.0, 1.0);
         }
         let pos = self.objs.get(&v.obj).map(|o| o.pos).unwrap_or(self.listener.pos);
         let d = [pos[0] - self.listener.pos[0], pos[1] - self.listener.pos[1], pos[2] - self.listener.pos[2]];
         let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-        let (mut att_db, mut att_lpf, mut spread) = (0.0f32, 0.0f32, 0.0f32);
+        let (mut att_db, mut att_lpf, mut spread, mut wet) = (0.0f32, 0.0f32, 0.0f32, 1.0f32);
         if let Some(Node::Attenuation(a)) = v.att.and_then(|a| self.lib.node(a)).map(|n| n.1) {
             if dist > a.max_distance && a.max_distance > 0.0 {
-                return ([0.0; 2], 0.0);
+                return ([0.0; 2], 0.0, 0.0);
             }
             let curve = |i: i8| (i >= 0).then(|| a.curves.get(i as usize)).flatten().map(|c| eval_curve(&c.1, dist));
             att_db = curve(a.curve_use[0]).unwrap_or(0.0);
             att_lpf = curve(a.curve_use[2]).unwrap_or(0.0);
             spread = curve(a.curve_use[3]).unwrap_or(0.0) / 100.0;
+            // Environment sends follow the wet volume curve when the attenuation has one.
+            if let Some(w) = curve(a.curve_use[1]) {
+                wet = db(w - att_db);
+            }
         }
         let pan = if dist > 1e-3 {
             let r = self.listener.right;
@@ -1282,7 +1364,7 @@ impl Engine {
         let s = spread.clamp(0.0, 1.0);
         let c = std::f32::consts::FRAC_1_SQRT_2;
         let g = lin * db(att_db);
-        ([g * (th.cos() * (1.0 - s) + c * s), g * (th.sin() * (1.0 - s) + c * s)], att_lpf)
+        ([g * (th.cos() * (1.0 - s) + c * s), g * (th.sin() * (1.0 - s) + c * s)], att_lpf, wet)
     }
 
     /// Render interleaved stereo frames.
@@ -1339,6 +1421,7 @@ impl Engine {
             }
         }
         self.voices.retain(|v| !v.done);
+        self.update_buses(n);
         let live = self.voices.len();
         self.stats.max_voices = self.stats.max_voices.max(live);
         if self.clock % (self.rate as u64 * 5) < n {
@@ -1346,17 +1429,143 @@ impl Engine {
         }
     }
 
+    /// Bus volumes and pitches for this block: the bus's Volume / Pitch properties, its state
+    /// offsets, its RTPC curves (game parameters such as `Music_Volume` or `TimeDilation`) and
+    /// the ducking other buses apply to it. A ducking bus is active while any voice routed
+    /// through it (or its children) plays; each rule fades its target to the duck volume over
+    /// the fade-out time, and back over the fade-in time once the ducking bus has been silent
+    /// for its recovery time. The sum on a target is limited by its maximum duck volume.
+    fn update_buses(&mut self, n: u64) {
+        if self.init.buses.is_empty() {
+            return;
+        }
+        let mut active: HashSet<u32> = HashSet::new();
+        for v in &self.voices {
+            if v.started && !v.done && !v.paused && !v.stop_on_fade && v.gain[0] + v.gain[1] > 1e-6 {
+                active.extend(v.bus_chain.iter().copied());
+            }
+        }
+        let rate = self.rate as f32;
+        let clock = self.clock;
+        let mut duck_sum: BTreeMap<u32, f32> = BTreeMap::new();
+        let mut ids: Vec<u32> = self.init.buses.iter().filter(|(_, b)| !b.ducks.is_empty()).map(|(id, _)| *id).collect();
+        ids.sort_unstable();
+        for id in ids {
+            let bus = &self.init.buses[&id];
+            let on = active.contains(&id);
+            let st = self.ducks.entry(id).or_insert_with(|| (false, 0, vec![0.0; bus.ducks.len()]));
+            if st.0 && !on {
+                st.1 = clock;
+            }
+            st.0 = on;
+            let recovering = !on && (clock - st.1) as f32 <= bus.recovery_ms as f32 * rate / 1000.0;
+            for (k, d) in bus.ducks.iter().enumerate() {
+                let (target, ms) = if on || recovering { (d.volume_db, d.fade_out_ms) } else { (0.0, d.fade_in_ms) };
+                let step = d.volume_db.abs() * n as f32 / (ms.max(1) as f32 * rate / 1000.0);
+                let cur = &mut st.2[k];
+                *cur = if *cur > target { (*cur - step).max(target) } else { (*cur + step).min(target) };
+                *duck_sum.entry(d.bus).or_default() += *cur;
+            }
+        }
+        for (t, s) in duck_sum.iter_mut() {
+            if let Some(b) = self.init.buses.get(t) {
+                *s = s.max(b.max_duck_db);
+            }
+        }
+        let mut mix = BTreeMap::new();
+        for (id, b) in &self.init.buses {
+            let (mut vol, mut pitch) = (b.prop(hirc::PROP_VOLUME).unwrap_or(0.0), b.prop(hirc::PROP_PITCH).unwrap_or(0.0));
+            for sg in &b.states {
+                let Some(cur) = self.states.get(&sg.group) else { continue };
+                if let Some(props) = sg.states.iter().find(|s| s.0 == *cur).and_then(|(_, o)| self.init.state_props.get(o)) {
+                    for (pid, x) in props {
+                        match *pid {
+                            hirc::PROP_VOLUME => vol += x,
+                            hirc::PROP_PITCH => pitch += x,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            for r in &b.rtpcs {
+                let y = eval_curve(&r.points, self.rtpc_value(GLOBAL_OBJ, r.rtpc_id));
+                match r.param {
+                    0 => vol += y,
+                    2 => pitch += y,
+                    _ => {}
+                }
+            }
+            vol += duck_sum.get(id).copied().unwrap_or(0.0);
+            mix.insert(*id, (vol, pitch));
+        }
+        self.bus_mix = mix;
+        self.bus_duck = duck_sum;
+    }
+
+    /// Output bus of a node: the first node up its chain that sets one, else the master bus.
+    pub fn output_bus(&self, node: u32) -> u32 {
+        self.chain_of(node).iter().filter_map(|n| self.base(*n)).map(|b| b.bus).find(|b| *b != 0).or(self.master_bus).unwrap_or(0)
+    }
+
+    /// Events of the loaded banks whose first played node routes to `bus` (or a child bus).
+    pub fn events_on_bus(&self, bus: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        for b in &self.lib.banks {
+            for (id, n) in &b.hier.nodes {
+                let Node::Event { actions } = n else { continue };
+                let target = actions.iter().find_map(|a| match self.lib.node(*a) {
+                    Some((_, Node::Action(x))) if x.is_play() => Some(x.target),
+                    _ => None,
+                });
+                if let Some(t) = target {
+                    if self.init.bus_chain(self.output_bus(t)).contains(&bus) {
+                        out.push(*id);
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// Volume (dB) and pitch (cents) a voice gets from its bus chain.
+    fn bus_offsets(&self, chain: &[u32]) -> (f32, f32) {
+        chain.iter().filter_map(|b| self.bus_mix.get(b)).fold((0.0, 0.0), |a, m| (a.0 + m.0, a.1 + m.1))
+    }
+
     fn mix(&mut self, out: &mut [f32]) {
         let n = out.len() / 2;
         let clock = self.clock;
         let rate = self.rate as f32;
         let mut params: Vec<([f32; 2], f32, f32)> = Vec::with_capacity(self.voices.len());
+        // Environment sends: one stereo buffer per environment this block, and per voice the
+        // (buffer, control value x wet ratio) pairs it feeds.
+        let mut sends: Vec<(u32, Vec<f32>)> = Vec::new();
+        let mut voice_sends: Vec<Vec<(usize, f32)>> = Vec::with_capacity(self.voices.len());
         for v in &self.voices {
             let (dvol, dpitch, dlpf, muted) = self.dynamic(v);
-            let (g, att_lpf) = self.spatial(v, v.vol_db + dvol);
+            let (bvol, bpitch) = self.bus_offsets(&v.bus_chain);
+            let (g, att_lpf, wet) = self.spatial(v, v.vol_db + dvol + bvol);
             let cat = self.category_gain[v.cat as usize] * self.master;
             let g = if muted { [0.0; 2] } else { [g[0] * cat, g[1] * cat] };
-            params.push((g, v.pitch_cents + dpitch, (v.lpf + dlpf + att_lpf).clamp(0.0, 100.0)));
+            params.push((g, v.pitch_cents + dpitch + bpitch, (v.lpf + dlpf + att_lpf).clamp(0.0, 100.0)));
+            let mut vs = Vec::new();
+            if v.env_send && !v.done && !v.paused && g[0] + g[1] > 1e-7 {
+                for (env, ctl) in self.obj_envs.get(&v.obj).map(Vec::as_slice).unwrap_or(&[]) {
+                    if *ctl <= 0.0 || !self.init.fx.contains_key(env) {
+                        continue;
+                    }
+                    let k = match sends.iter().position(|s| s.0 == *env) {
+                        Some(k) => k,
+                        None => {
+                            sends.push((*env, vec![0.0; n * 2]));
+                            sends.len() - 1
+                        }
+                    };
+                    vs.push((k, ctl * wet));
+                }
+            }
+            voice_sends.push(vs);
         }
         let mut requests = Vec::new();
         for (vi, v) in self.voices.iter_mut().enumerate() {
@@ -1364,6 +1573,7 @@ impl Engine {
                 continue;
             }
             let (target, cents, lpf) = params[vi];
+            let vsend = &voice_sends[vi];
             let audible = target[0] + target[1] > 1e-7 || v.gain[0] + v.gain[1] > 1e-7;
             if !audible && v.is_3d && v.media_frames > 0.0 {
                 // Virtual voice (out of range): time advances without decoding or mixing,
@@ -1475,8 +1685,16 @@ impl Engine {
                     l = m;
                     r = m;
                 }
-                out[i * 2] += l * gl * fg;
-                out[i * 2 + 1] += r * gr * fg;
+                if let Some(eq) = v.eq.as_mut() {
+                    (l, r) = eq.process(l, r);
+                }
+                let (ol, or) = (l * gl * fg, r * gr * fg);
+                out[i * 2] += ol;
+                out[i * 2 + 1] += or;
+                for &(k, s) in vsend {
+                    sends[k].1[i * 2] += ol * s;
+                    sends[k].1[i * 2 + 1] += or * s;
+                }
                 v.pos += step;
             }
             v.gain = target;
@@ -1490,6 +1708,20 @@ impl Engine {
         for k in requests {
             self.request(k);
         }
+        // Environment reverbs: sends of this block, and the tails of the others.
+        let silent = vec![0.0f32; n * 2];
+        for (env, _) in &sends {
+            if !self.reverbs.contains_key(env) {
+                if let Some(r) = self.init.fx.get(env).and_then(|f| crate::mixer::Reverb::from_fx(f, rate)) {
+                    self.reverbs.insert(*env, r);
+                }
+            }
+        }
+        for (env, r) in self.reverbs.iter_mut() {
+            let input = sends.iter().find(|s| s.0 == *env).map(|s| s.1.as_slice()).unwrap_or(&silent);
+            r.process(input, out, rate);
+        }
+        self.reverbs.retain(|_, r| r.quiet < 1.0);
     }
 
     /// Segments started by the music instances (clock, segment id), oldest first.

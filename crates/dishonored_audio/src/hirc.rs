@@ -20,8 +20,11 @@ pub const HIRC_MUSIC_TRACK: u8 = 11;
 pub const HIRC_MUSIC_SWITCH: u8 = 12;
 pub const HIRC_MUSIC_RANSEQ: u8 = 13;
 pub const HIRC_ATTENUATION: u8 = 14;
-pub const HIRC_FX_SHARESET: u8 = 16;
-pub const HIRC_FX_CUSTOM: u8 = 17;
+/// Effect sharesets (Init.bnk: the environments, RoomVerb, Matrix Reverb, Delay...; 4 in the
+/// game banks).
+pub const HIRC_FX_SHARESET: u8 = 18;
+/// Custom effects inserted on nodes (628 in the game banks).
+pub const HIRC_FX_CUSTOM: u8 = 19;
 
 /// Property ids of the v65 property bundle (AkPropID).
 /// v65 has no bus-volume property, so the ids after LPF are one lower than in later
@@ -342,7 +345,79 @@ pub enum Node {
     Attenuation(Attenuation),
     /// Property offsets applied while a state is active (volume dB, LPF, pitch...).
     State { props: Vec<(u8, f32)> },
+    /// Mixing bus (Init.bnk).
+    Bus(Bus),
+    /// Effect: a shareset (Init.bnk, type 18) or a custom effect.
+    Fx(Fx),
     Other(u8),
+}
+
+/// One ducking rule of a bus: while the bus plays, `bus` is lowered by `volume_db`.
+#[derive(Debug, Clone, Default)]
+pub struct Duck {
+    pub bus: u32,
+    pub volume_db: f32,
+    /// Fade to the ducked level (ms) when the ducking bus starts.
+    pub fade_out_ms: i32,
+    /// Fade back (ms) after the ducking bus stopped and the target's recovery time passed.
+    pub fade_in_ms: i32,
+    pub curve: u8,
+}
+
+/// A v65 bus (HIRC type 8). Layout measured on Init.bnk (AUDIO_FORMAT.md "Buses"):
+/// u32 parent bus (0 = master), property bundle, u8 kill newest, u8 use virtual,
+/// u16 max instances, u8 max-instance override, u8 channel configuration (0x3F = 5.1), four flags (the second is set on a
+/// music sub-bus, the fourth on the bus above the SFX / dialogue / ambience buses), u32
+/// recovery time (ms), f32 maximum duck volume, ducks {u32 bus, f32 volume, i32 fade out,
+/// i32 fade in, u8 curve}, effects (u8 n [u8 bypass, {u8 index, u32 id, u8 shareset,
+/// u8 rendered}]), one extra byte when the fourth flag is set, RTPCs, states.
+#[derive(Debug, Clone, Default)]
+pub struct Bus {
+    pub parent: u32,
+    pub props: Vec<(u8, f32)>,
+    pub kill_newest: bool,
+    pub use_virtual: bool,
+    pub max_instances: u16,
+    pub channel_config: u8,
+    pub flags: [u8; 4],
+    pub env_extra: u8,
+    pub recovery_ms: u32,
+    pub max_duck_db: f32,
+    pub ducks: Vec<Duck>,
+    pub fx: Vec<u32>,
+    pub rtpcs: Vec<Rtpc>,
+    pub states: Vec<StateGroupRef>,
+}
+
+impl Bus {
+    pub fn prop(&self, id: u8) -> Option<f32> {
+        self.props.iter().find(|p| p.0 == id).map(|p| p.1)
+    }
+    /// Fourth flag: the bus receives the game-defined environmental effects (LIKELY: set only
+    /// on the bus above the SFX, dialogue and ambience buses, never under music).
+    pub fn environmental(&self) -> bool {
+        self.flags[3] != 0
+    }
+}
+
+/// An effect object: plugin id (company << 4 | type, id << 16), its parameter block, and RTPCs.
+#[derive(Debug, Clone, Default)]
+pub struct Fx {
+    pub plugin: u32,
+    pub params: Vec<u8>,
+    pub rtpcs: Vec<Rtpc>,
+}
+
+impl Fx {
+    pub const ROOMVERB: u32 = 0x0076_0003;
+    pub const MATRIX_REVERB: u32 = 0x0073_0003;
+    pub const DELAY: u32 = 0x006A_0003;
+    pub fn f32_at(&self, o: usize) -> Option<f32> {
+        Some(f32::from_le_bytes(self.params.get(o..o + 4)?.try_into().ok()?))
+    }
+    pub fn u32_at(&self, o: usize) -> Option<u32> {
+        Some(u32::from_le_bytes(self.params.get(o..o + 4)?.try_into().ok()?))
+    }
 }
 
 impl Node {
@@ -375,6 +450,8 @@ impl Node {
             Node::Action(_) => HIRC_ACTION,
             Node::Attenuation(_) => HIRC_ATTENUATION,
             Node::State { .. } => HIRC_STATE,
+            Node::Bus(_) => HIRC_BUS,
+            Node::Fx(_) => HIRC_FX_CUSTOM,
             Node::Other(k) => *k,
         }
     }
@@ -386,25 +463,25 @@ pub(crate) struct Cur<'a> {
 }
 
 impl<'a> Cur<'a> {
-    fn u8(&mut self) -> Option<u8> {
+    pub(crate) fn u8(&mut self) -> Option<u8> {
         let v = *self.b.get(self.o)?;
         self.o += 1;
         Some(v)
     }
-    fn u16(&mut self) -> Option<u16> {
+    pub(crate) fn u16(&mut self) -> Option<u16> {
         let v = u16::from_le_bytes(self.b.get(self.o..self.o + 2)?.try_into().ok()?);
         self.o += 2;
         Some(v)
     }
-    fn u32(&mut self) -> Option<u32> {
+    pub(crate) fn u32(&mut self) -> Option<u32> {
         let v = u32::from_le_bytes(self.b.get(self.o..self.o + 4)?.try_into().ok()?);
         self.o += 4;
         Some(v)
     }
-    fn i32(&mut self) -> Option<i32> {
+    pub(crate) fn i32(&mut self) -> Option<i32> {
         self.u32().map(|v| v as i32)
     }
-    fn f32(&mut self) -> Option<f32> {
+    pub(crate) fn f32(&mut self) -> Option<f32> {
         self.u32().map(f32::from_bits)
     }
     fn f64(&mut self) -> Option<f64> {
@@ -661,6 +738,74 @@ fn attenuation(c: &mut Cur) -> Option<Attenuation> {
     a.max_distance = dry.last().map(|p| p.0).unwrap_or(0.0);
     a.volume_curve = dry;
     Some(a)
+}
+
+fn state_groups(c: &mut Cur) -> Option<Vec<StateGroupRef>> {
+    let ng = c.u32()? as usize;
+    if ng > 1024 {
+        return None;
+    }
+    (0..ng)
+        .map(|_| {
+            let group = c.u32()?;
+            let sync_type = c.u8()?;
+            let ns = c.u16()? as usize;
+            let states = (0..ns).map(|_| Some((c.u32()?, c.u32()?))).collect::<Option<Vec<_>>>()?;
+            Some(StateGroupRef { group, sync_type, states })
+        })
+        .collect()
+}
+
+fn bus(c: &mut Cur) -> Option<Bus> {
+    let mut b = Bus { parent: c.u32()?, ..Default::default() };
+    b.props = prop_bundle(c)?;
+    b.kill_newest = c.u8()? != 0;
+    b.use_virtual = c.u8()? != 0;
+    b.max_instances = c.u16()?;
+    let _max_override = c.u8()?;
+    b.channel_config = c.u8()?;
+    for f in &mut b.flags {
+        *f = c.u8()?;
+    }
+    b.recovery_ms = c.u32()?;
+    b.max_duck_db = c.f32()?;
+    let nd = c.u32()? as usize;
+    if nd > 256 {
+        return None;
+    }
+    for _ in 0..nd {
+        b.ducks.push(Duck { bus: c.u32()?, volume_db: c.f32()?, fade_out_ms: c.i32()?, fade_in_ms: c.i32()?, curve: c.u8()? });
+    }
+    let nfx = c.u8()?;
+    if nfx > 0 {
+        let _bypass = c.u8()?;
+        for _ in 0..nfx {
+            let _index = c.u8()?;
+            b.fx.push(c.u32()?);
+            let _shareset = c.u8()?;
+            let _rendered = c.u8()?;
+        }
+    }
+    if b.flags[3] != 0 {
+        // One more byte on the flagged bus (always 0 in Init.bnk).
+        b.env_extra = c.u8()?;
+    }
+    b.rtpcs = rtpcs(c)?;
+    b.states = state_groups(c)?;
+    Some(b)
+}
+
+/// Effect object: u32 plugin, u32 size, parameter block, u8 n media {u32 index, u32 media},
+/// RTPCs.
+fn fx(c: &mut Cur) -> Option<Fx> {
+    let plugin = c.u32()?;
+    let size = c.u32()? as usize;
+    let params = c.b.get(c.o..c.o + size)?.to_vec();
+    c.o += size;
+    let nm = c.u8()? as usize;
+    c.o += nm * 8;
+    let rtpcs = rtpcs(c)?;
+    Some(Fx { plugin, params, rtpcs })
 }
 
 fn children(c: &mut Cur) -> Option<Vec<u32>> {
@@ -934,6 +1079,8 @@ pub fn decode_object(o: &HircObject) -> (Option<Node>, usize) {
             Some(Node::MusicRanSeq { music, rules, playlist: vec![root] })
         })(),
         HIRC_ATTENUATION => attenuation(&mut c).map(Node::Attenuation),
+        HIRC_BUS => bus(&mut c).map(Node::Bus),
+        HIRC_FX_SHARESET | HIRC_FX_CUSTOM => fx(&mut c).map(Node::Fx),
         HIRC_STATE => prop_bundle(&mut c).map(|props| Node::State { props }),
         k => {
             c.o = o.body.len();
