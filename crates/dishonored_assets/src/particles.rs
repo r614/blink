@@ -207,7 +207,71 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
                 em.alpha_over_life = dist(p, "AlphaOverLife", 1);
             }
             "ParticleModuleAcceleration" => em.acceleration = dist(p, "Acceleration", 3),
-            "ParticleModuleVelocityOverLifetime" => em.unsupported.push(mclass.clone()),
+            "ParticleModuleVelocityOverLifetime" => {
+                em.vel_over_life = dist(p, "VelOverLife", 3).map(|d| (d, bool_or(p, "Absolute", false)));
+            }
+            "ParticleModuleOrbit" => em.orbit.push(dishonored_ir::particles::Orbit {
+                offset: dist(p, "OffsetAmount", 3),
+                rotation: dist(p, "RotationAmount", 3),
+                rotation_rate: dist(p, "RotationRateAmount", 3),
+            }),
+            "ParticleModuleAttractorPoint" => {
+                em.attractor_point = Some(dishonored_ir::particles::AttractorPoint {
+                    position: dist(p, "Position", 3).unwrap_or_else(|| Dist::constant([0.0; 3], 3)),
+                    range: dist(p, "Range", 1).unwrap_or_else(|| Dist::constant([0.0; 3], 1)),
+                    strength: dist(p, "Strength", 1).unwrap_or_else(|| Dist::constant([0.0; 3], 1)),
+                    strength_by_distance: bool_or(p, "StrengthByDistance", true),
+                    affect_base_velocity: bool_or(p, "bAffectBaseVelocity", false),
+                    world_space: bool_or(p, "bUseWorldSpacePosition", false),
+                });
+            }
+            "ParticleModuleAttractorLine" => {
+                let v = |n: &str| find(p, n).and_then(|x| x.as_vector()).unwrap_or([0.0; 3]);
+                em.attractor_line = Some((
+                    v("EndPoint0"),
+                    v("EndPoint1"),
+                    dist(p, "Range", 1).unwrap_or_else(|| Dist::constant([0.0; 3], 1)),
+                    dist(p, "Strength", 1).unwrap_or_else(|| Dist::constant([0.0; 3], 1)),
+                ));
+            }
+            "ParticleModuleCollision" => {
+                let opt = match enum_of(p, "CollisionCompletionOption").as_deref() {
+                    Some("EPCC_Freeze") => 1,
+                    Some("EPCC_HaltCollisions") => 2,
+                    Some("EPCC_FreezeTranslation") => 3,
+                    Some("EPCC_FreezeRotation") => 4,
+                    Some("EPCC_FreezeMovement") => 5,
+                    _ => 0,
+                };
+                em.collision = Some((
+                    dist(p, "DampingFactor", 3).unwrap_or_else(|| Dist::constant([1.0; 3], 3)),
+                    dist(p, "MaxCollisions", 1).unwrap_or_else(|| Dist::constant([1.0; 3], 1)),
+                    opt,
+                ));
+            }
+            "ParticleModuleTypeDataTrail2" | "ParticleModuleTypeDataRibbon" | "ParticleModuleTypeDataAnimTrail" => {
+                em.trail = Some(dishonored_ir::particles::TrailParams {
+                    tiling: 1.0,
+                    ribbon: mclass != "ParticleModuleTypeDataTrail2",
+                });
+            }
+            "ParticleModuleTypeDataBeam2" => {
+                let b = em.beam.get_or_insert_with(Default::default);
+                b.distance = dist(p, "Distance", 1);
+                b.tiling = find(p, "TextureTile").and_then(|x| x.as_float()).or_else(|| match find(p, "TextureTile").map(|x| &x.value) {
+                    Some(Value::Int(i)) => Some(*i as f32),
+                    _ => None,
+                }).unwrap_or(1.0);
+            }
+            "ParticleModuleBeamTarget" => {
+                em.beam.get_or_insert_with(Default::default).target = dist(p, "Target", 3);
+            }
+            "ParticleModuleBeamNoise" => {
+                let pts = int_or(p, "NoiseTessellation", 1).max(1) as u32;
+                if let Some(r) = dist(p, "NoiseRange", 3) {
+                    em.beam.get_or_insert_with(Default::default).noise = Some((r, pts));
+                }
+            }
             "ParticleModuleLocation" => em.location = dist(p, "StartLocation", 3),
             "ParticleModuleLocationPrimitiveSphere" => {
                 em.sphere = Some((

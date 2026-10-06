@@ -607,6 +607,29 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Some("psurvey") => {
+            // psurvey <pkg>...: particle module classes (counts) and their property names.
+            let content = dishonored_assets::Content::locate()?;
+            let mut counts: BTreeMap<String, (usize, std::collections::BTreeSet<String>)> = BTreeMap::new();
+            for p in &args[1..] {
+                let pkg = content.package(p)?;
+                for i in 0..pkg.exports.len() {
+                    let c = pkg.export_class(i);
+                    if !c.starts_with("ParticleModule") {
+                        continue;
+                    }
+                    let e = counts.entry(c).or_default();
+                    e.0 += 1;
+                    if let Ok(h) = pkg.read_object(i) {
+                        e.1.extend(h.properties.iter().map(|p| p.name.clone()));
+                    }
+                }
+            }
+            for (c, (n, props)) in counts {
+                println!("{n:5} {c}: {}", props.into_iter().collect::<Vec<_>>().join(" "));
+            }
+            Ok(())
+        }
         Some("floattables") => {
             // floattables [min len]: runs of 4-byte aligned floats in Dishonored.exe that are
             // strictly monotonic within (0, 30000] (filter coefficient / cutoff tables).
@@ -619,13 +642,13 @@ fn main() -> Result<()> {
                 let inc = f(o + 4) > f(o);
                 while o + (n + 1) * 4 <= exe.len() {
                     let (a, b) = (f(o + (n - 1) * 4), f(o + n * 4));
-                    let ok = a.is_finite() && b.is_finite() && a > 0.0 && b > 0.0 && a <= 30000.0 && b <= 30000.0 && if inc { b > a } else { b < a };
+                    let ok = a.is_finite() && b.is_finite() && a > 1e-4 && b > 1e-4 && a <= 30000.0 && b <= 30000.0 && if inc { b > a } else { b < a };
                     if !ok {
                         break;
                     }
                     n += 1;
                 }
-                if n >= min {
+                if n >= min && n <= 4 * min {
                     let vals: Vec<String> = (0..n).map(|k| format!("{:.4}", f(o + k * 4))).collect();
                     println!("file offset {o:#x}: {n} floats: {}", vals.join(" "));
                     o += n * 4;

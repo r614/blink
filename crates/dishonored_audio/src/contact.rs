@@ -125,31 +125,38 @@ impl ContactSystem {
         v
     }
 
+    /// The original lookup (`FUN_00be61a0` -> `FUN_00be4b10`): the exact (striker, struck) pair
+    /// first; otherwise, over the striker lineage (depth i) and the struck lineage (depth j),
+    /// the pair with the smallest i + j that has the sub-intersection, ties going to the
+    /// shallower striker (the search walks striker depths in order and only replaces on a
+    /// strictly smaller sum). Each sub-intersection slot resolves separately this way when the
+    /// table is not flattened.
     fn resolve<T>(&self, striker: &str, struck: &str, f: impl Fn(&Intersection) -> Option<T>) -> Option<T> {
+        if let Some(x) = self.index.get(&(striker.to_string(), struck.to_string())).and_then(|i| f(&self.intersections[*i])) {
+            return Some(x);
+        }
         let ss = self.lineage(striker);
         let ts = self.lineage(struck);
-        for s in &ss {
-            for t in &ts {
-                if let Some(i) = self.index.get(&(s.clone(), t.clone())) {
-                    if let Some(x) = f(&self.intersections[*i]) {
-                        return Some(x);
-                    }
+        let mut best: Option<(usize, T)> = None;
+        for (i, s) in ss.iter().enumerate() {
+            for (j, t) in ts.iter().enumerate() {
+                if best.as_ref().is_some_and(|b| i + j >= b.0) {
+                    break;
+                }
+                if let Some(x) = self.index.get(&(s.clone(), t.clone())).and_then(|k| f(&self.intersections[*k])) {
+                    best = Some((i + j, x));
                 }
             }
         }
-        None
+        best.map(|b| b.1)
     }
 
     /// Sound of a contact (event + volume scaling).
+    /// The sound slot resolves like every slot (nearest pair with a `DisContactSub_SoundCue`);
+    /// a sound sub-intersection without an event plays nothing (0x00BC6290 returns when
+    /// `m_pSoundEvent` is null), so it silences the pairs below it.
     pub fn sound(&self, striker: &str, struck: &str) -> Option<ContactSound> {
-        let mut s = self.resolve(striker, struck, |i| i.sound.clone())?;
-        if let Some(v) = self.resolve(striker, struck, |i| i.sound_volume.clone().or(i.sound.clone())) {
-            s.scale_with_speed = v.scale_with_speed;
-            s.min_speed = v.min_speed;
-            s.max_speed = v.max_speed;
-            s.min_volume_scale = v.min_volume_scale;
-        }
-        Some(s)
+        self.resolve(striker, struck, |i| i.sound.clone().or_else(|| i.sound_volume.clone())).filter(|s| !s.event.is_empty())
     }
 
     pub fn particle(&self, striker: &str, struck: &str) -> Option<String> {
@@ -158,12 +165,17 @@ impl ContactSystem {
 }
 
 impl ContactSound {
-    /// Linear volume scale for an impact speed (`DisSoundContactScaled`).
-    pub fn volume_scale(&self, speed: f32) -> f32 {
+    /// Volume scale for a contact speed (0x00BC6290): 1 unless `m_bScaleWithSpeed`; then no
+    /// sound at or below `m_fMinSpeed`, else speed / `m_fMaxSpeed` clamped to
+    /// [`m_fMinVolumeScale`, 1]. Posted as the `Scale_RTPC` game parameter on the sound's object
+    /// (0x00BA95C0).
+    pub fn volume_scale(&self, speed: f32) -> Option<f32> {
         if !self.scale_with_speed {
-            return 1.0;
+            return Some(1.0);
         }
-        let t = ((speed - self.min_speed) / (self.max_speed - self.min_speed).max(1e-3)).clamp(0.0, 1.0);
-        self.min_volume_scale + (1.0 - self.min_volume_scale) * t
+        if speed <= self.min_speed {
+            return None;
+        }
+        Some((speed / self.max_speed.max(1e-3)).clamp(self.min_volume_scale, 1.0))
     }
 }

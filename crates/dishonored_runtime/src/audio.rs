@@ -171,6 +171,8 @@ impl Decodable for EngineStream {
 #[derive(Resource, Default)]
 pub struct AnimSounds {
     pending: Vec<(PlayerId, String, f32, f32, bool)>,
+    /// Footfall notifies the locomotion reported directly (`DishonoredNotify_Footfall`).
+    footfalls: Vec<(PlayerId, i32)>,
 }
 
 impl AnimSounds {
@@ -180,6 +182,16 @@ impl AnimSounds {
         if !clip.is_empty() && to != from {
             self.pending.push((player, clip.to_string(), from, to, looped));
         }
+    }
+
+    /// A `DishonoredNotify_Footfall` fired on a pawn (foot 0 left, 1 right) from the third-person
+    /// locomotion. Pawns reporting footfalls get no stride-based fallback steps.
+    pub fn footfall(&mut self, player: PlayerId, foot: i32) {
+        // Nobody drains them when audio is off.
+        if self.footfalls.len() > 256 {
+            self.footfalls.clear();
+        }
+        self.footfalls.push((player, foot));
     }
 }
 
@@ -230,6 +242,8 @@ pub struct GameAudio {
     foot_time: HashMap<(PlayerId, i32), f32>,
     /// Players whose animation reported notifies recently (sim fallbacks are skipped).
     notify_driven: HashMap<PlayerId, f32>,
+    /// Pawns whose animation reported footfalls recently (no stride fallback).
+    footfall_driven: HashMap<PlayerId, f32>,
     /// Last post of a notify event per pawn (first- and third-person rigs of the same pawn
     /// may both report a clip).
     notify_recent: HashMap<(PlayerId, String), f32>,
@@ -536,6 +550,11 @@ fn footfall_striker(p: &PlayerState) -> &'static str {
 }
 
 impl GameAudio {
+    /// The original contact system table (impact particles for the effects).
+    pub fn contact(&self) -> Option<&ContactSystem> {
+        self.contact.as_ref()
+    }
+
     fn temp_obj(&mut self, e: &mut Engine, pos: Vec3, now: f32) -> ObjId {
         self.next_temp += 1;
         let o = TEMP_OBJ + self.next_temp;
@@ -552,9 +571,12 @@ impl GameAudio {
         let Some((surface, _)) = surface_below(session, p.position, 87.5 * 1.5 + 10.0) else { return false };
         let striker = footfall_striker(p);
         let Some(snd) = contact.sound(striker, &surface) else { return false };
+        // Speed scaling (0x00BC6290): silent at or below the minimum speed, else the
+        // `Scale_RTPC` game parameter on the sound's object.
+        let Some(scale) = snd.volume_scale(p.velocity.length()) else { return false };
         let obj = PLAYER_OBJ + p.id as u64;
+        e.set_rtpc(obj, dishonored_audio::fnv1_32("Scale_RTPC"), scale);
         let pid = e.post_event_name(&snd.event, obj);
-        let _ = snd.volume_scale(p.velocity.length());
         self.footfalls += 1;
         self.posted += 1;
         pid != 0
@@ -581,6 +603,7 @@ pub fn drive(
     audio.events_seen += events.len() as u64;
     let Some(engine) = audio.engine.clone() else {
         anim.pending.clear();
+        anim.footfalls.clear();
         return;
     };
     let mut e = engine.lock().unwrap();
@@ -635,6 +658,7 @@ pub fn drive(
     }
     audio.temp.retain(|t| t.1 >= now);
     audio.notify_driven.retain(|_, t| now - *t < 2.0);
+    audio.footfall_driven.retain(|_, t| now - *t < 2.0);
     audio.notify_recent.retain(|_, t| now - *t < 1.0);
 
     // Animation notifies.
@@ -656,6 +680,7 @@ pub fn drive(
                     }
                 }
                 NotifyKind::Footfall { foot } => {
+                    audio.footfall_driven.insert(pid, now);
                     let last = audio.foot_time.get(&(pid, *foot)).copied().unwrap_or(-1.0);
                     if now - last >= 0.25 {
                         audio.foot_time.insert((pid, *foot), now);
@@ -664,6 +689,18 @@ pub fn drive(
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // Footfall notifies reported directly by the third-person locomotion (0.25 s per foot).
+    for (pid, foot) in std::mem::take(&mut anim.footfalls) {
+        audio.footfall_driven.insert(pid, now);
+        let last = audio.foot_time.get(&(pid, foot)).copied().unwrap_or(-1.0);
+        if now - last >= 0.25 {
+            audio.foot_time.insert((pid, foot), now);
+            if let Some(p) = players.iter().find(|p| p.id == pid) {
+                audio.footfall(&mut e, &session, p);
             }
         }
     }
@@ -724,6 +761,8 @@ pub fn drive(
                 let vo = if !human { "npc_pain" } else if amount >= 40.0 { "pain_big" } else { "pain_low" };
                 posts.push((cue(vo), subject_obj(victim)));
             }
+            // Shadow Kill: `Twk_Pawn_DefaultNPC.m_pShadowKillSound` on the body.
+            SimEvent::BodyRemoved { body, ash: true } => posts.push((cue("shadow_kill"), subject_obj(body))),
             SimEvent::Death { victim, .. } => {
                 posts.push((cue("death_vo"), subject_obj(victim)));
                 posts.push((cue("body_fall"), subject_obj(victim)));
@@ -750,7 +789,7 @@ pub fn drive(
 
     // Footfalls for pawns whose animation does not report notifies: one per stride.
     for p in &players {
-        let driven = audio.notify_driven.contains_key(&p.id);
+        let driven = audio.footfall_driven.contains_key(&p.id);
         let entry = audio.steps.entry(p.id).or_insert((p.position, 0.0));
         let delta = (p.position - entry.0).truncate().length();
         entry.0 = p.position;

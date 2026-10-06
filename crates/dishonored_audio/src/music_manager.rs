@@ -161,8 +161,11 @@ impl MusicManager {
         MusicManager { tweaks, ..Default::default() }
     }
 
-    /// Combat intensity: the contribution of every NPC fighting the player (U-160: the native
-    /// writer of `m_fCombatIntensity` was not found; this is the sum the tweak layout implies).
+    /// Combat intensity, as the native writer computes it (U-160, `FUN_00c5b610` ->
+    /// `FUN_00c5b4d0` -> `FUN_00c5b190`): the sum of `m_fCombatIntensityContribution[type]` over
+    /// the NPCs the player's pawn lists as engaging it (a native query with arguments 2, 4) and
+    /// the rats targeting it (`m_CombatIntensityType` of `DisTweaks_NPCPawn` +0x2D2 / of the rat
+    /// tweak +0x13C). The port lists the NPCs in combat with the player.
     pub fn compute_intensity(&self, npcs: &[MusicNpc]) -> f32 {
         npcs.iter().filter(|n| n.alive && n.combat).map(|n| self.tweaks.contribution.get(n.music_type as usize).copied().unwrap_or(0.0)).sum()
     }
@@ -239,6 +242,8 @@ impl MusicManager {
     pub fn tick(&mut self, dt: f32, player: [f32; 3], npcs: &[MusicNpc]) -> Vec<String> {
         let mut posts = Vec::new();
         self.intensity = self.compute_intensity(npcs);
+        // `m_bAttackedByRats`: set in the same pass when any listed attacker is a rat (type 1).
+        self.attacked_by_rats = npcs.iter().any(|n| n.alive && n.combat && n.music_type == 1);
         if !self.started {
             self.started = true;
             self.enter(MusicState::Exploration, &mut posts);
