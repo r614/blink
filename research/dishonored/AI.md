@@ -469,6 +469,57 @@ fields and the state enums (U-260).
 `DisDialogVoiceData` (each with `m_pDialogTree` and `m_VoiceData[].m_pTree`); `AiLevel::generic_trees`
 records them per pawn tweak. Which entry a pawn uses and the runtime search are not decoded.
 
+## Go-to completion: the locomotion request (2026-10-06, U-221)
+
+How `DisBehaviorGoTo_Base` (vtable 0x01129808, `DisBehaviorGoTo` 0x01129e98) and the native
+locomotion component (`DishonoredNPCPawn.m_pCpntLocomotion`; type name `ArkCpntType_Locomotion`
+from 0x0093dd50; constructor 0x00945ec0, vtable 0x010a55a0) decide that a pawn has arrived.
+CONFIRMED from the code unless marked.
+
+- **Issuing the move** (0x00ae4de0): the behaviour clears reached / finished, sets stage 0, then:
+  - for a destination actor (`m_pDestinationActor`, +0xa8), it calls MoveToActor (0x00cba540)
+    with end threshold -1, funnel 1.0, **accurate stop 1**, speed-from-look-at 0;
+  - for a location, it calls MoveToLocation (0x00cba670) with the behaviour's
+    `m_bAccurateStop` (bit 2 of +0xa4).
+  - From Kismet (0x00af04e0 / 0x00af0750), `DisSeqAct_AIGoToActor.m_bTrackMovingTarget`
+    (default true) keeps the actor as the destination. Otherwise the actor's location is used,
+    and `m_bAccurateStop` / `m_bExactRotation` come from the go-to tweak's flags (+0xa8 bits 1 /
+    2).
+  - So `AIGoToActor_0` (Lord Shaw to his mark, no overrides) asks for an accurate stop.
+- **The request** (`DisLocoRequest`, filled by 0x00ca7ea0): +0x44 `m_MaxSpeedIndex`, +0x48
+  `m_fEndLocationThreshold`, +0x4c funnel multiplier, +0x50 bits (accurate stop, speed from
+  look-at, follow), +0x54 / +0x58 follow angle / distance.
+- **Submission** (0x00ca9d80): the request goes into a component record (0x00945010 for an
+  actor, 0x009450c0 for a location). The record carries the type (0 actor, 1 location), the end
+  threshold (0x0093f160, only set when >= 0, clamped to a minimum), the funnel, and the accurate
+  flag at record +0x24.
+- **Destination** (path-found callback 0x00949890): the component's destination (+0xc4..+0xcc)
+  is the **last point of the found path**, not the actor's position.
+- **Arrival test** (0x00944390): squared XY distance from the pawn (+0x134) to that destination.
+  - If the request is **not** accurate and the current speed mode has stop animations
+    (component +0x250 bit 2, set by 0x00941b70 when the mode's `m_StopAnimProps` is not empty), the pawn
+    arrives inside `m_fUnaccuracyRadius` (config +0x9c; class default 120, kept by
+    `EliteGuardLocomotionConfig`). This holds while the locomotion state (+0x218) is 0 or 5 and
+    the speed is below `m_fVelocityToStopMoving` (20).
+  - Otherwise it arrives only within 0.1 uu (squared 0.01 at 0x010a5590).
+  - While moving inside the radius, with stop animations available and the heading within 0x1000
+    (22.5 degrees), state 10 plays the stop animation (0x00947300).
+- **Arrival event**: the component reports locomotion event 0x18. The behaviour's handler
+  (0x00ae5a00 -> 0x00ae4ea0) sets `m_bHasReachedDestination` when the event names it and
+  carries success. The stage step (0x00aedc00) then turns to the destination rotation
+  (0x00ae8590, face-to at -100 = default speed, stage 1), or finishes (stage 2 -> 3,
+  finished + success). Event 0x45 is the path request result (0x00ae8600: failure reports
+  Failed). Event 0x55 is the face-to done (stage 2).
+- **Return to the navmesh**: when the pawn is off the mesh as the path starts, and
+  `m_bDisableTeleportOnNavmesh` is off (+0x966 bit 0, copied each tick by 0x00b7cd10 into
+  component +0x1ac bit 0x40), the component takes the nearest navmesh point (raised by the
+  collision height) as a return target. It moves there over `distance /
+  m_fReturnToNavMeshSpeed` (0x0093ec80). Branch in 0x00949890, state 6.
+- **Consequence for the duel (U-221)**: Shaw's go-to is an accurate stop at the end of his path,
+  so the original pawn really reaches the path end; a radius does not complete it. The 84 uu gap
+  against the 4.4 uu lip remains a movement question (U-221). The port's go-to still completes
+  at 60 uu of the goal.
+
 ## Behaviours
 
 | Original | `BrainState` | Data used |
