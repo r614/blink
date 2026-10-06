@@ -515,10 +515,31 @@ CONFIRMED from the code unless marked.
   component +0x1ac bit 0x40), the component takes the nearest navmesh point (raised by the
   collision height) as a return target. It moves there over `distance /
   m_fReturnToNavMeshSpeed` (0x0093ec80). Branch in 0x00949890, state 6.
-- **Consequence for the duel (U-221)**: Shaw's go-to is an accurate stop at the end of his path,
-  so the original pawn really reaches the path end; a radius does not complete it. The 84 uu gap
-  against the 4.4 uu lip remains a movement question (U-221). The port's go-to still completes
-  at 60 uu of the goal.
+- **NPC navmesh walking** (`DishonoredGameInfo.m_bNewNPCPhysWalking`, +0x3d4 bit 4, default
+  true). The NPC pawn's physics (0x00b4e9f0) runs the locomotion component's move (0x00943d00)
+  instead of the default one (0x006bd150). This happens when the pawn has a component with an
+  active request, its vfunc +0x4a0 returns 0 (not traced), and the flag is set. 0x00943d00 then calls
+  0x00940d80 when:
+  - the pawn was not just teleported;
+  - component +0x1ac bit 0 is set (following a path: 0x0093ecf0 from the path callbacks; also
+    0x0093e060 / 0x0093e070 around the anim-driven sub-steps of 0x0062fed0);
+  - its `Base`'s collision component blocks rigid bodies;
+  - the pawn has a navmesh anchor poly.
+
+  0x00940d80 raises the cylinder by `MaxStepHeight` and adds `Velocity x dt`, then checks the
+  end point on the navmesh by walking polys from the anchor (0x0068f660). It takes the height
+  from the poly's plane, with the cylinder bottom on it, and sets `Location` directly.
+  `Velocity` becomes the achieved move. World geometry is not swept, so lips and kerbs below the
+  navmesh never block an NPC. When the end point is off the mesh, the component's own walking
+  physics runs instead (0x0093fb00).
+  - Port: `movement::nav_walk_move` for pawns flagged `nav_walk`. The mission host sets the
+    flag each tick for NPCs that move along a held navmesh path.
+  - APPROXIMATION: polys are found by position within the step height, not by walking edges;
+    the actor box check of 0x0064a6b0 is not made; the port uses the shared pawn cylinder.
+- **Consequence for the duel (U-221)**: the elite's go-to (`AIGoToActor_0`, target
+  `Shaw_Elite`) is an accurate stop at the end of his path. With navmesh walking, the 4.4 uu lip
+  that stopped him 84 uu short no longer blocks him. The port's go-to still completes at 60 uu of
+  the goal.
 
 ## Behaviours
 
