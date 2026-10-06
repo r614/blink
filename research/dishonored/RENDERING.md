@@ -41,6 +41,66 @@ so every material term below was read from the compiled shader of the matching p
   one dominant spot light. `--no-df-shadows` restores Bevy's shadows;
   `DISHONORED_LIGHTMAP_DEBUG=shadow` / `shadow_local` show (s, d, Bevy factor).
 
+## Doors and usable objects (`usable_props.rs`, `level_props.rs`)
+
+`DisDoor` and `DishonoredUsableObject` (subclasses `DisWaterSource`, `DisAlarmBell`,
+`DisAudioLogPlayer`, `DishonoredDynamicUsableObject`) are `DisSkeletalBreakable`s: their visible
+part is `SkeletalMeshComponent0`; the `StaticUsablePart` static mesh component is empty on Boyle.
+The level importer read only static mesh components, so none of them was drawn: the `street`
+viewpoint looked through the empty frame of the Garden-to-Ballroom transition door
+(`L_Boyle_Ext_P:DishonoredUsableObject_7`, `double_doors.DBdoor_big_rich_ext_metal_sk`). Boyle Ext
+has 8 `DisDoor`s (all in `L_Boyle_Ext_Audio`), 4 transition doors, 21 lockers, bins, hatches,
+sinks, alarm panels and bells, 47 in all.
+
+- Import: the actor x component transform, the mesh and the component's `AnimSets` (resolved to
+  the package exporting them), `bHidden` / `HiddenGame`; for doors `m_InitialDoorState` and the
+  `m_TransitionAnimName` of the tweak's four stages (`m_pDoorTweaks`, `DisTweaks_Door`
+  `m_DoorOpenCW` .. `m_DoorCloseCCW`, resolved through the tweak fallback chain).
+- Render: skinned like the cutscene props (`characters::upload`), at the placed transform times
+  the Kismet's delta for the actor (`MissionView::movers`).
+- Doors follow their `EDisDoorState` (0 closed, 1 opened CW, 2 opened CCW): the level's, or the
+  Kismet's (`DisSeqAct_Door`, `MissionView::doors`). A change plays the stage animation of the new
+  state (open CW / CCW) or of the direction it was open in (close CW / CCW); an open door rests on
+  its open animation's last frame, a closed door in the reference pose. Which stage belongs to
+  which state is read from the stage names (U-560); the double doors' tweak names the opposite
+  direction's animation (`m_DoorOpenCW` plays `Player_Open_Ccw`).
+- `--inspect` has no mission: every prop shows where and as the level placed it.
+
+Level actors the Kismet moves (matinees, `SeqAct_AttachToActor`, teleports) are replicated as
+`MissionView::movers` (actor, placed location, rigid delta = current x placed^-1, net protocol 6);
+`InterpActor` meshes outside a playing matinee follow them (`level_props::follow_movers`), so a
+mover stays where a matinee left it.
+
+## Translucent decals (`decals.rs`, `ark_translucent.wgsl`)
+
+Boyle's ground decals are static meshes a few units over the ground with translucent materials of
+`Materials_ref.main_materials.generic_translucent_PMAT` (no `DecalActor` on Boyle): the puddles
+`ext_boyle_ground_01.ext_boyle_puddles_decals_01` (`towerEmpress_ground.puddles_decals_01_inst`),
+street splotches, graffiti, confetti. Shader maps of the base (`shader_maps ... generic_translucent`,
+8 permutations; the puddles' is the one with `O_Opacity_Mask_Channel` = G, `C_Cubemap_Mask_Channel`
+= B; base pass 9353, light passes 9362 point / 9366 directional):
+
+- Only `FNoLightMapPolicy`, `FDirectionalLightLightMapPolicy` and `FSHLightLightMapPolicy` base
+  passes and `FNoStaticShadowingPolicy` light passes exist for `FLocalVertexFactory`: translucent
+  static meshes have no lightmap and are not shadowed.
+- diffuse = `D` [x `D_Diffuse_color.rgb x a` with `D_Enable_Diffuse_color`] + SceneReflection(R) x
+  `C_Cubemap_Mask[ch]` [x `C_Cubemap_color.rgb x a` with `C_Enable_Cubemap_Color`]; R reflects the
+  view about the normal-mapped normal; the reflection is part of the diffuse, so it is lit.
+- `F_Enable_Fresnel` (all Boyle maps have `F_Invert_Fresnel_result`): f = (1 - saturate(N.V))^
+  `F_Fresnel_falloff_exponent` (0 when 1 - N.V <= 1e-6); diffuse = lerp(diffuse, `F_Fresnel_Color.rgb
+  x a`, f); alpha = saturate(alpha + f).
+- base pass: diffuse x `AmbientColorAndSkyFactor` (+ `E` x `E_Emissive_Color.rgb x a`); each light
+  pass: diffuse x saturate(N.L) x `LightColorAndFalloffExponent` (the specular term is multiplied by
+  `SpecularOverrideParameter.xyz`, 0 in game).
+- alpha = clamp(`O_Opacity_mask[ch]`, `O_Minimum_Opacity`, `O_Maximum_Opacity`).
+
+The port draws them with an extended `StandardMaterial`: Bevy's direct lighting with reflectance,
+environment and ambient light removed, plus the base pass ambient (`decals::BASE_PASS_AMBIENT`,
+not measured: U-562), no lightmap, not a shadow receiver. Before, Bevy's environment specular
+(bright at the ground's grazing angles) and the placeholder ambient made the puddles pale patches.
+Static lights light non-lightmapped translucency dynamically in UE3; the port has only the
+dominant and toggleable lights (U-561).
+
 ## Sky dome (`sky.rs`, `sky.wgsl`)
 
 `Skies.Skies_PMAT` (unlit, base pass `TBasePassPixelShaderFNoLightMapPolicyNoSkyLightFALSEFALSE`):

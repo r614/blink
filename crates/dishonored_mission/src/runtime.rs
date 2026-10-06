@@ -219,6 +219,26 @@ pub struct MissionView {
     /// [interp] Matinees playing.
     #[serde(default)]
     pub cutscenes: Vec<CutsceneView>,
+    /// `DisDoor`s the Kismet opened or closed (`DisSeqAct_Door`): ("package:actor",
+    /// `EDisDoorState` 0 closed, 1 opened CW, 2 opened CCW). Other doors keep their level state.
+    #[serde(default)]
+    pub doors: Vec<(String, u8)>,
+    /// Level actors the Kismet moved (matinees, attachments, teleports), where they are now.
+    #[serde(default)]
+    pub movers: Vec<MoverView>,
+}
+
+/// A level actor (mover, door, usable) away from where the map placed it: the actor's current
+/// transform times the inverse of its placed one (Dishonored world space).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct MoverView {
+    /// "package:actor".
+    pub actor: String,
+    /// The actor's placed location (tells same-named actors of different sublevels apart).
+    pub placed: [f32; 3],
+    /// Delta translation and rotation (quaternion xyzw).
+    pub translation: [f32; 3],
+    pub rotation: [f32; 4],
 }
 
 #[derive(Debug, Clone, PartialEq)]

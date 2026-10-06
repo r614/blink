@@ -143,6 +143,7 @@ pub fn run(args: &[String]) -> Result<()> {
         "fall" => fall(&mut c, &o),
         "run" => run_sprint_slide(&mut c, &o),
         "sdf" => sdf(&mut c),
+        "psconst" => psconst(&mut c, &o),
         "views" => views(&mut c, &o),
         "trace" => {
             let n: u32 = o.rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(120);
@@ -346,6 +347,57 @@ fn sdf(c: &mut Client) -> Result<()> {
         }
     }
     println!("{drawn} of them drawn in the sampled frames; distinct constant sets:");
+    for (l, n) in seen {
+        println!("  x{n}: {l}");
+    }
+    Ok(())
+}
+
+/// `measure psconst <shader.bin | 0xHASH | ctab filter> [draws]`: the live pixel shader constants
+/// of every draw made with one shader (a shader blob carved by `shader_maps`, hashed like the
+/// probe does, or its hash), or with any shader whose constant table names contain the filter;
+/// every named constant of the table, distinct sets counted.
+fn psconst(c: &mut Client, o: &Opts) -> Result<()> {
+    let what = o.rest.get(1).context("psconst <shader.bin | 0xHASH | filter> [draws]")?;
+    let draws: u32 = o.rest.get(2).and_then(|s| s.parse().ok()).unwrap_or(400);
+    let (hash, filter) = if what.ends_with(".bin") {
+        // The probe hashes the bytecode up to its END token (comments skipped by length).
+        let code = std::fs::read(what)?;
+        let tok = |i: usize| code.get(i * 4..i * 4 + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+        let mut i = 1;
+        let mut len = code.len();
+        while let Some(t) = tok(i) {
+            if t == 0x0000_ffff {
+                len = (i + 1) * 4;
+                break;
+            }
+            i += if t & 0xffff == 0xfffe { 1 + ((t >> 16) & 0x7fff) as usize } else { 1 };
+        }
+        (dishonored_probe::fnv64(&code[..len]), String::new())
+    } else if let Some(h) = what.strip_prefix("0x") {
+        (u64::from_str_radix(h, 16)?, String::new())
+    } else {
+        (0, what.clone())
+    };
+    let shaders = c.shaders()?;
+    if hash != 0 {
+        println!("shader {hash:016x}: {}", if shaders.iter().any(|s| s.hash == hash) { "created by the game" } else { "not created (yet)" });
+    }
+    let got = c.ps_constants(hash, draws, &filter)?;
+    let mut seen = std::collections::BTreeMap::new();
+    for (_, h, regs) in &got {
+        let Some(s) = shaders.iter().find(|s| s.hash == *h) else { continue };
+        let mut line = format!("[{h:016x}] ");
+        for e in s.ctab.split(' ').filter(|e| e.contains("=c")) {
+            let name = e.split('=').next().unwrap_or("");
+            if let Some(r) = ctab_reg(&s.ctab, name) {
+                let v = regs[r];
+                let _ = write!(line, "{name}=({:.6}, {:.6}, {:.6}, {:.6}) ", v[0], v[1], v[2], v[3]);
+            }
+        }
+        *seen.entry(line).or_insert(0) += 1;
+    }
+    println!("{} draws; distinct constant sets:", got.len());
     for (l, n) in seen {
         println!("  x{n}: {l}");
     }
