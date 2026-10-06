@@ -7,8 +7,9 @@
 //!   S and W are authored reversed and play backwards). Directions blend by angle, speed modes
 //!   by ground speed against their authored speeds, and the play rate follows the ground speed;
 //! - actions (attacks, parries, hit reactions, deaths, panic, ambient idles) play the chains of
-//!   the tweak's `DisAnimDefinitions` class through a full-body slot, gestures through an
-//!   upper-body slot filtered from `spine_0_jnt` (`NPC_Human_at`).
+//!   the tweak's `DisAnimDefinitions` class through a full-body slot, upper-body actions through
+//!   an upper-body slot filtered from `spine_0_jnt` (`NPC_Human_at`);
+//! - matinee anim tracks (soiree gestures, distractions) play over the result.
 //!
 //! Nothing here feeds back into the simulation.
 
@@ -38,8 +39,6 @@ pub struct Profile {
     pub defs: Option<AnimDefs>,
     /// lowercase sequence -> set holding it (last set wins), cached.
     lookup: HashMap<String, Option<usize>>,
-    /// Talk gestures available (upper body), see `talk_gestures`.
-    pub gestures: Vec<String>,
     /// The pawn tweak's `PhysicsAsset` (ragdoll), when it decodes.
     pub physics: Option<Arc<PhysicsAssetData>>,
     /// The pawn tweak's `ArkComponentLookatConfig` (look-at grids, blinking).
@@ -222,24 +221,12 @@ impl AnimBank {
         pkgs.extend(SCRIPT_PACKAGES.iter().map(|s| s.to_string()));
         pkgs.dedup();
         let defs = if p.defs.is_empty() { None } else { dishonored_assets::npc_anim::load_anim_defs(&self.content, &pkgs, &p.defs).map_err(|e| warn!("animation definitions {}: {e:#}", p.defs)).ok() };
-        // Talk gestures: the full-arm `Gesture_*` loops of the profile's main gesture set.
-        let mut gestures: Vec<String> = Vec::new();
-        for &s in &sets {
-            let set = &self.sets[s];
-            let mut g: Vec<String> = set.seqs.values().map(|v| v.1.clone()).filter(|n| TALK_GESTURES.iter().any(|t| n.eq_ignore_ascii_case(t))).collect();
-            g.sort();
-            for x in g {
-                if !gestures.contains(&x) {
-                    gestures.push(x);
-                }
-            }
-        }
         let physics = p.physics.as_ref().and_then(|r| dishonored_assets::npc_anim::load_physics_asset(&self.content, r).map_err(|e| warn!("physics asset {}: {e:#}", r.1)).ok()).filter(|a| a.bodies.len() >= 2).map(Arc::new);
         // Configs cooked outside the searched packages (tallboy, musical overseer) fall back to the
         // default config.
         let default_lookat = ("DishonoredGame".to_string(), "DisLookatConfig.DefaultLookatConfig".to_string());
         let lookat = p.lookat.as_ref().and_then(|r| dishonored_assets::npc_anim::load_lookat_config(&self.content, r).ok()).or_else(|| p.lookat.as_ref().and_then(|_| dishonored_assets::npc_anim::load_lookat_config(&self.content, &default_lookat).ok())).map(Arc::new);
-        self.profiles.push(Profile { sets, loco, defs, lookup: HashMap::new(), gestures, physics, lookat });
+        self.profiles.push(Profile { sets, loco, defs, lookup: HashMap::new(), physics, lookat });
         self.profile_index.insert(p.clone(), self.profiles.len() - 1);
         self.profiles.len() - 1
     }
@@ -396,14 +383,6 @@ impl AnimBank {
     }
 }
 
-/// Upper-body `Gesture_*` sequences used while talking (full-arm gestures of the
-/// `*_Gestures_as` sets; APPROXIMATION: the original's conversation body gestures come from
-/// the dialogue's soiree matinees / FaceFX, not decoded, U-142).
-const TALK_GESTURES: &[&str] = &[
-    "Gesture_Calm", "Gesture_DualSwip", "Gesture_HandsFront", "Gesture_HandsFront1", "Gesture_HandsFront2", "Gesture_LeftSwip", "Gesture_RightSwip", "Gesture_OpenHand_Think", "Gesture_Point", "Gesture_Precis", "Gesture_Shrug", "Gesture_Show_Front",
-    "Gesture_Show_Left", "Gesture_Show_Right", "Gesture_Sweep", "Gesture_Think", "Gesture_Move", "Gesture_Refuse", "Gesture_ChinScratch",
-];
-
 /// One animated bone: local rotation and, for root-level bones, translation.
 #[derive(Clone, Copy, Debug)]
 pub struct Key {
@@ -529,7 +508,6 @@ pub struct PawnAnim {
     pub was_alive: bool,
     pub init: bool,
     pub ambient: f32,
-    pub gesture: f32,
     pub rng: u32,
     pub sword: Option<dishonored_sim::state::SwordPhase>,
     pub left: Option<dishonored_sim::state::LeftPhase>,
@@ -1335,21 +1313,13 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
             }
         }
     }
-    // Talking: upper-body gestures (APPROXIMATION, U-142).
-    if i.talking && p.alive && st.scripted.is_empty() /* [interp] the matinee drives the body */ {
-        st.gesture -= i.dt;
-        if st.upper.as_ref().is_none_or(|c| c.fading) && st.gesture <= 0.0 {
-            let g = &bank.profiles[profile].gestures;
-            if !g.is_empty() {
-                let n = g[((st.rand() * g.len() as f32) as usize).min(g.len() - 1)].clone();
-                let mut c = Chain::one(n, "talk");
-                c.blend_in = 0.3;
-                c.blend_out = 0.3;
-                st.upper = Some(c);
-            }
-            st.gesture = 0.5 + st.rand() * 1.5;
-        }
-    }
+    // Talking (U-142, resolved): the original has no body gestures for a spoken line. Blurbs
+    // (`DisConv_Blurb`) carry no animation, the blocking-dialog behaviour only turns the NPC to
+    // face (`DisBehaviorBlockingDialog`: face-to and body-stance requests), no
+    // `eDisNPCAnimations` entry is a talk or gesture chain, and the FaceFX actors drive face
+    // and head bones only (every Boyle actor's bone poses are on `head_jnt` and below). Body
+    // gestures come from soiree matinees, whose AI-group anim tracks (`Gesture`,
+    // `ScriptedSequence`, ...) play through `scripted` below.
     // Advance chains.
     if let Some(mut c) = st.full.take() {
         if step_chain(bank, profile, &mut c, &sustain, i.dt) {
@@ -1577,7 +1547,14 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
     // [interp] Matinee anim tracks (the `MatineeStackNode` slot channels), in track order.
     for s in st.scripted.clone() {
         let prof = bank.with_sets(profile, &s.sets);
-        if let Some(sp) = bank.sample(lib, model, prof, &s.name, s.time, false) {
+        if let Some(mut sp) = bank.sample(lib, model, prof, &s.name, s.time, false) {
+            if s.root_motion {
+                for part in sp.iter_mut() {
+                    if let Some(Some(k)) = part.first_mut() {
+                        k.t = None;
+                    }
+                }
+            }
             overlay(&mut pose, &sp, s.weight, None, parts);
         }
     }
@@ -1606,6 +1583,9 @@ pub struct Scripted {
     pub time: f32,
     pub weight: f32,
     pub sets: Vec<(String, String)>,
+    /// The key extracts root motion (`m_MatineeRootMotionMode`): the server moves the pawn by
+    /// the root bone's translation, so the mesh keeps the root at its bind translation.
+    pub root_motion: bool,
 }
 
 impl AnimBank {
@@ -1627,7 +1607,7 @@ impl AnimBank {
         let loco = self.profiles[profile].loco.clone();
         // The matinee's sets extend the pawn's profile; look-at and physics stay the pawn's.
         let (lookat, physics) = (self.profiles[profile].lookat.clone(), self.profiles[profile].physics.clone());
-        self.profiles.push(Profile { sets, loco, defs: None, lookup: HashMap::new(), gestures: Vec::new(), lookat, physics });
+        self.profiles.push(Profile { sets, loco, defs: None, lookup: HashMap::new(), lookat, physics });
         let id = self.profiles.len() - 1;
         self.derived.insert(key, id);
         id

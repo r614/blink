@@ -73,6 +73,31 @@ impl SceneWorld for World<'_, '_> {
     }
 }
 
+/// `RotOrigin` of the human NPC body meshes (e.g. `Skm_EliteGuard_Body`): (0, -16384, 16384),
+/// mesh +Z (the root bone's forward travel in the clips) becomes the pawn's +X. Root motion is
+/// extracted in mesh space and moves the actor through the component transform.
+const NPC_ROT_ORIGIN: [i32; 3] = [0, -16384, 16384];
+
+/// AnimSets a pawn's sequences are looked up in, most preferred first: its tweak's sets from
+/// the last (UE3 `FindAnimSequence` searches from the last set).
+fn pawn_sets(h: &H, p: PlayerId) -> Vec<(String, String)> {
+    let Some(a) = h.m.world.player(p).map(|x| x.archetype) else { return Vec::new() };
+    let Some(look) = a.checked_sub(crate::mission::APPEARANCE_BASE).and_then(|i| h.m.view.appearances.get(i as usize)) else { return Vec::new() };
+    look.anim.checked_sub(1).and_then(|i| h.m.view.anim_profiles.get(i as usize)).map(|pr| pr.sets.iter().rev().cloned().collect()).unwrap_or_default()
+}
+
+/// Root motion lookup order of a group's pawn: the group's `GroupAnimSets`, then the pawn's.
+fn root_sets(h: &H, g: &dishonored_kismet::interp::Group, p: PlayerId) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = g.anim_sets.iter().rev().cloned().collect();
+    v.extend(pawn_sets(h, p));
+    v
+}
+
+/// A mesh-space root translation of a pawn facing `yaw` (degrees) in the world.
+fn root_to_world(yaw: f32, d: Vec3) -> Vec3 {
+    dishonored_kismet::interp::rot_matrix_deg(0.0, yaw, 0.0) * (dishonored_kismet::interp::rot_matrix_units(NPC_ROT_ORIGIN) * d)
+}
+
 /// `SeqAct_Interp` started: bind the groups and hold their pawns.
 pub(super) fn started(h: &mut H, cx: &mut Ctx) {
     let op = cx.op;
@@ -144,6 +169,25 @@ pub(super) fn finished(h: &mut H, op: OpId) {
     if let (Some(inst), Some(r)) = (c.conv, h.m.state.conv.as_mut()) {
         r.matinee_done(inst);
     }
+    // `SnapToRootBoneLocationWhenFinished` (InterpGroupInstAI term, 0x00628460): the pawn moves
+    // to where the last pose left its root bone.
+    let kdb = h.db.clone();
+    if let Some(d) = kdb.ops.get(op as usize).and_then(|_| kdb.op(op).var_link("Data")).and_then(|l| l.vars.first()).and_then(|d| kdb.ops[*d as usize].interp.as_ref()).and_then(|i| i.matinee.as_deref()) {
+        for (gi, g) in d.groups.iter().enumerate() {
+            if !matches!(g.kind, GroupKind::Ai { snap_to_root: true, .. }) {
+                continue;
+            }
+            for b in c.scene.bound.get(gi).cloned().unwrap_or_default() {
+                let Bound::Pawn(p) = b else { continue };
+                let sets = root_sets(h, g, p);
+                let off = Scene::root_offset(d, gi, c.prev, &sets);
+                if let Some(pl) = h.m.world.player_mut(p) {
+                    let w = root_to_world(pl.yaw, off);
+                    pl.position += Vec3::new(w.x, w.y, 0.0);
+                }
+            }
+        }
+    }
     for (p, stay) in c.held {
         let pos = h.m.world.player(p).map(|x| x.position);
         if let Some(b) = h.m.crowd.brains.iter_mut().find(|b| b.id == p) {
@@ -184,6 +228,35 @@ pub(super) fn apply(k: &mut Kismet, h: &mut H) {
             ps.speaking = c.speaking.iter().map(|s| s.0.clone()).collect();
         }
         let out = c.scene.update(m, c.prev, pos, &World { h });
+        // Root motion (U-085 / U-202): AI pawns that no move track or attachment places walk
+        // with the root bone of keys that extract it (`MRMM_Translate` / `MRMM_Accel`), from
+        // wherever they stand (in game `InterpGroupInstAI` does not use its stage mark: only
+        // the editor preview places the preview pawn there). Walking physics keeps them on
+        // the floor: only the horizontal part moves the pawn.
+        for (gi, g) in m.groups.iter().enumerate() {
+            if !matches!(g.kind, GroupKind::Ai { .. }) {
+                continue;
+            }
+            for b in c.scene.bound.get(gi).cloned().unwrap_or_default() {
+                let Bound::Pawn(p) = b else { continue };
+                if c.players.contains(&p) || out.poses.iter().any(|x| x.0 == b) {
+                    continue;
+                }
+                let sets = root_sets(h, g, p);
+                let d = Scene::root_motion(m, gi, c.prev, pos, &sets);
+                if d.length_squared() < 1e-8 {
+                    continue;
+                }
+                if let Some(pl) = h.m.world.player_mut(p) {
+                    let w = root_to_world(pl.yaw, d);
+                    pl.position += Vec3::new(w.x, w.y, 0.0);
+                    let at = pl.position;
+                    if let Some(br) = h.m.crowd.brains.iter_mut().find(|br| br.id == p) {
+                        br.home = at;
+                    }
+                }
+            }
+        }
         c.prev = pos;
         for (b, x) in &out.poses {
             match *b {

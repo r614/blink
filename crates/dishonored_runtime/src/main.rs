@@ -315,7 +315,8 @@ fn main() {
             .add_systems(Update, (saves::hotkeys, saves::process).chain().after(pause_menu::handle))
             // [interp] cutscenes: before the characters are animated; the director camera after the follow camera
             .init_resource::<cutscene::Cutscenes>()
-            .add_systems(Update, (cutscene::drive.after(players::sync_players).before(characters::animate_characters), cutscene::props.after(cutscene::drive), cutscene::camera.after(players::camera_follow).before(viewmodel::animate_view_rig)))
+            .init_resource::<cutscene::PawnPoints>()
+            .add_systems(Update, (cutscene::drive.after(players::sync_players).before(characters::animate_characters), cutscene::props.after(cutscene::drive), cutscene::emitters.after(cutscene::drive), cutscene::camera.after(players::camera_follow).before(viewmodel::animate_view_rig), cutscene::look_limits.after(input_map::gather_input).before(players::camera_follow)))
             .add_systems(
                 Update,
                 (

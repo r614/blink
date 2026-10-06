@@ -511,6 +511,7 @@ pub fn animate_characters(
     mut anim_sounds: Option<ResMut<crate::audio::AnimSounds>>,
     session: Res<crate::session::Session>,
     mut sockets: Option<ResMut<crate::effects::EffectSockets>>,
+    mut pawn_points: Option<ResMut<crate::cutscene::PawnPoints>>,
 ) {
     let events = std::mem::take(&mut view.anim_events);
     let (Some(lib), Some(mut bank)) = (lib, bank) else { return };
@@ -601,6 +602,21 @@ pub fn animate_characters(
             if let Ok(st) = states.get(entity) {
                 let slot = |c: &Option<crate::npc_anim::Chain>| c.as_ref().map(|c| format!("{}:{}@{:.2}w{:.2}", c.key, c.steps[c.i].0, c.t, c.weight)).unwrap_or_default();
                 info!("anim {} mod={} vel={:.0},{:.0} full={} upper={} ragdoll={} root={:?} pelvis={:?}", p.id, st.modifier, st.vel.0, st.vel.1, slot(&st.full), slot(&st.upper), st.ragdoll.is_some(), pose[0].first().copied().flatten().map(|k| k.t), globals[0].get(1).map(|m| m.w_axis.truncate()));
+            }
+        }
+        // [interp] Bones and sockets matinee attachments hold objects on (a prop in the hand).
+        if let Some(pp) = pawn_points.as_mut() {
+            let wanted: Vec<String> = pp.wanted.iter().filter(|w| w.0 == p.id).map(|w| w.1.clone()).collect();
+            for name in wanted {
+                let local = model
+                    .parts
+                    .iter()
+                    .enumerate()
+                    .find_map(|(pi, part)| part.bones.iter().position(|b| b.name.eq_ignore_ascii_case(&name)).map(|bi| globals[pi][bi]))
+                    .or_else(|| lib.sockets.get(&root.archetype).and_then(|v| v.iter().find(|s| s.name.eq_ignore_ascii_case(&name))).map(|s| globals[s.part][s.bone] * s.local));
+                if let Some(l) = local {
+                    pp.points.insert((p.id, name), crate::cutscene::from_bevy(root_gt.to_matrix() * to_bevy(l)));
+                }
             }
         }
         // Bones the Shadow Kill ash attaches to (`m_ShadowKillFXs`), world space.

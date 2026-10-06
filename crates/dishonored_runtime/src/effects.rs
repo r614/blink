@@ -117,6 +117,9 @@ struct LevelFx {
     glow: HashMap<(usize, usize), (Handle<Mesh>, Vec4, Vec4)>,
     /// Emitters with distortion materials, drawn again by the distortion pass.
     distortion: HashMap<(usize, usize), DistortionSource>,
+    /// [interp] Placed emitters by "package:actor" (lowercase): (system, transform,
+    /// `bAutoActivate`), for matinee toggle tracks.
+    placed: HashMap<String, (usize, Mat4, bool)>,
 }
 
 /// A distorting emitter: its decoded material, textures and (mesh emitters) the mesh's
@@ -432,6 +435,14 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
         skipped,
         glow,
         distortion,
+        placed: map
+            .emitters
+            .iter()
+            .filter_map(|e| {
+                let (pkg, path) = e.source.split_once(':')?;
+                Some((format!("{pkg}:{}", path.rsplit('.').next()?).to_ascii_lowercase(), (e.system, e.transform, e.auto_activate)))
+            })
+            .collect(),
     });
     fx.levels.insert(name.to_string(), lf.clone());
     fx.active = name.to_string();
@@ -468,8 +479,46 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
     n
 }
 
-fn spawn_instance(commands: &mut Commands, meshes: &mut Assets<Mesh>, lf: &LevelFx, level: &str, system: usize, transform: Mat4, one_shot: bool) {
-    let Some(s) = lf.systems.get(system) else { return };
+/// [interp] A placed emitter played by a matinee's toggle track (`InterpTrackToggle`).
+#[derive(Component)]
+pub struct MatineeEmitter;
+
+impl FxInstance {
+    /// [interp] Move the emitter (Dishonored world transform).
+    pub fn set_transform(&mut self, m: Mat4) {
+        self.transform = m;
+    }
+    /// [interp] Stop spawning; the instance goes once its particles die (`DeactivateSystem`).
+    pub fn stop(&mut self) {
+        self.one_shot = true;
+        for s in &mut self.sims {
+            s.done = true;
+        }
+    }
+}
+
+/// [interp] A placed emitter of the loaded levels by "package:actor": (system's level, system,
+/// level transform, `bAutoActivate`). Emitters based on another actor are not imported (level
+/// import) and have none.
+pub fn placed_emitter(fx: &Effects, key: &str) -> Option<(String, usize, Mat4, bool)> {
+    let k = key.to_ascii_lowercase();
+    fx.levels.iter().find_map(|(name, lf)| lf.placed.get(&k).map(|p| (name.clone(), p.0, p.1, p.2)))
+}
+
+/// [interp] Start a placed emitter (`ETTA_On`), or fire it once (`ETTA_Trigger`, `one_shot`),
+/// at a Dishonored world transform. Returns the instance entity.
+pub fn start_placed_emitter(commands: &mut Commands, meshes: &mut Assets<Mesh>, fx: &mut Effects, key: &str, transform: Mat4, one_shot: bool) -> Option<Entity> {
+    let (level, system, _, _) = placed_emitter(fx, key)?;
+    let lf = fx.levels.get(&level)?.clone();
+    let e = spawn_instance(commands, meshes, &lf, &level, system, transform, one_shot)?;
+    if !one_shot {
+        commands.entity(e).insert(MatineeEmitter);
+    }
+    Some(e)
+}
+
+fn spawn_instance(commands: &mut Commands, meshes: &mut Assets<Mesh>, lf: &LevelFx, level: &str, system: usize, transform: Mat4, one_shot: bool) -> Option<Entity> {
+    let s = lf.systems.get(system)?;
     let mut handles = Vec::new();
     let root = commands
         .spawn((Transform::IDENTITY, Visibility::Inherited, LevelOf(level.to_string())))
@@ -494,6 +543,7 @@ fn spawn_instance(commands: &mut Commands, meshes: &mut Assets<Mesh>, lf: &Level
         one_shot,
         warmed: one_shot,
     });
+    Some(root)
 }
 
 fn empty_mesh() -> Mesh {
