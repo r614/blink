@@ -1,7 +1,8 @@
 //! In-game pause menu (Esc), drawn from the original `UI_PauseMenu.PauseMenu` movie
 //! (`UI_PauseMenu_SF`): the `bkgd_mc` blades/particles, the `pauseMenu_mc` panel (mask
 //! portrait, splatters, compass, `PAUSE` title on its tilted band) and `p_pauseMenu_item`
-//! entries: Resume (`t_ResumeGame`), Options (`t_Options`, the shared options screen) and
+//! entries: Resume (`t_ResumeGame`), Save Game / Load Game (`t_SaveGame`,
+//! `t_LoadGamePauseMenu`: the save list, see `crate::saves`), Options (`t_Options`, the shared options screen) and
 //! Back to Main Menu (`t_BackToMainMenu`), which returns to the launcher.
 //!
 //! An offline match is paused while the menu is open (the fixed tick does not run); an
@@ -24,9 +25,17 @@ pub struct PauseMenu {
     pub from_launcher: bool,
     /// Open on the next frame (harness control `pause`).
     pub request: bool,
+    /// Save / load list open (`saveGame_mc` / `loadGame_mc`): (saving, entries (id, text)).
+    list: Option<(bool, Vec<(String, String)>)>,
 }
 
-const ITEMS: &[(&str, &str, &str)] = &[("pause:resume", SEC_MENU, "t_ResumeGame"), ("pause:options", SEC_BASE, "t_Options"), ("pause:quit", SEC_MENU, "t_BackToMainMenu")];
+const ITEMS: &[(&str, &str, &str)] = &[
+    ("pause:resume", SEC_MENU, "t_ResumeGame"),
+    ("pause:save", SEC_MENU, "t_SaveGame"),
+    ("pause:load", SEC_MENU, "t_LoadGamePauseMenu"),
+    ("pause:options", SEC_BASE, "t_Options"),
+    ("pause:quit", SEC_MENU, "t_BackToMainMenu"),
+];
 
 pub fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let root = menu_art::spawn_layer(&mut commands, 50);
@@ -50,6 +59,7 @@ pub fn toggle(keys: Res<ButtonInput<KeyCode>>, mut p: ResMut<PauseMenu>, mut nav
         p.open = true;
         p.dirty = true;
         p.options = None;
+        p.list = None;
         nav.enabled = true;
         nav.settle = 1;
         nav.focus = None;
@@ -69,13 +79,23 @@ pub fn toggle(keys: Res<ButtonInput<KeyCode>>, mut p: ResMut<PauseMenu>, mut nav
 fn close(p: &mut PauseMenu, nav: &mut MenuNav, local: &mut crate::input_map::LocalInput) {
     p.open = false;
     p.options = None;
+    p.list = None;
     nav.enabled = false;
     nav.items.clear();
     local.enabled = true;
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn handle(mut p: ResMut<PauseMenu>, mut nav: ResMut<MenuNav>, mut gs: ResMut<GameSettings>, mut sounds: ResMut<MenuSounds>, mut local: ResMut<crate::input_map::LocalInput>, mut exit: MessageWriter<AppExit>) {
+pub fn handle(
+    mut p: ResMut<PauseMenu>,
+    mut nav: ResMut<MenuNav>,
+    mut gs: ResMut<GameSettings>,
+    mut sounds: ResMut<MenuSounds>,
+    mut local: ResMut<crate::input_map::LocalInput>,
+    mut exit: MessageWriter<AppExit>,
+    mut saves: Option<ResMut<crate::saves::Saves>>,
+    texts: Option<Res<MenuTexts>>,
+) {
     if !p.open {
         nav.events.clear();
         return;
@@ -90,8 +110,59 @@ pub fn handle(mut p: ResMut<PauseMenu>, mut nav: ResMut<MenuNav>, mut gs: ResMut
             }
             continue;
         }
+        // Save / load list: pick an entry (saving: a new manual slot or an existing save to
+        // overwrite; loading: any save, newest first). Back returns to the pause entries.
+        if let Some((saving, _)) = p.list.clone() {
+            match ev {
+                MenuEvent::Focus(_) => sounds.play("Move"),
+                MenuEvent::Back => {
+                    sounds.play("CloseScreen");
+                    p.list = None;
+                    nav.focus = Some(if saving { "pause:save" } else { "pause:load" }.into());
+                }
+                MenuEvent::Activate { id, .. } => {
+                    if let (Some(s), Some(rest)) = (saves.as_mut(), id.strip_prefix("save:")) {
+                        sounds.play("validation");
+                        if saving {
+                            let slot = rest.parse().unwrap_or(dishonored_save::slot::MANUAL0);
+                            s.save(slot);
+                        } else {
+                            s.load_file(std::path::PathBuf::from(rest));
+                        }
+                        close(&mut p, &mut nav, &mut local);
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
         match ev {
             MenuEvent::Focus(_) => sounds.play("Move"),
+            MenuEvent::Activate { ref id, .. } if id == "pause:save" || id == "pause:load" => {
+                let saving = id == "pause:save";
+                let (Some(s), Some(t)) = (saves.as_ref(), texts.as_ref()) else { continue };
+                sounds.play("validation");
+                let list = s.list();
+                let mut entries: Vec<(String, String)> = Vec::new();
+                if saving {
+                    // `t_CreateNewSave`, then the manual saves (quick / auto / mission slots are
+                    // never written from the menu: `Dis_Save` only accepts slots above 14).
+                    entries.push((format!("save:{}", s.new_manual_slot()), t.t(SEC_MENU, "t_CreateNewSave")));
+                    for (_, h) in list.iter().filter(|x| x.1.slot >= dishonored_save::slot::MANUAL0) {
+                        entries.push((format!("save:{}", h.slot), crate::saves::label(h, t)));
+                    }
+                } else {
+                    for (path, h) in &list {
+                        entries.push((format!("save:{}", path.display()), crate::saves::label(h, t)));
+                    }
+                    if entries.is_empty() {
+                        entries.push(("none".into(), t.t(SEC_BASE, "t_EmptyList")));
+                    }
+                }
+                entries.truncate(8);
+                p.list = Some((saving, entries));
+                nav.focus = None;
+            }
             MenuEvent::Back => {
                 sounds.play("CloseScreen");
                 close(&mut p, &mut nav, &mut local);
@@ -134,11 +205,15 @@ fn build(p: &PauseMenu, art: &MenuArt, t: &MenuTexts, gs: &GameSettings, nav: &M
     let Some(pm) = art.get("pause") else {
         return dl;
     };
-    build_pause(&mut dl, pm, t, nav.focus.as_deref().unwrap_or(""));
+    let (title, items): (String, Vec<(String, String)>) = match &p.list {
+        Some((saving, entries)) => (t.t(SEC_MENU, if *saving { "t_SaveGame" } else { "t_LoadGamePauseMenu" }), entries.clone()),
+        None => (t.t(SEC_MENU, "t_Pause"), ITEMS.iter().map(|(id, sec, key)| (id.to_string(), t.t(sec, key))).collect()),
+    };
+    build_pause(&mut dl, pm, &title, &items, nav.focus.as_deref().unwrap_or(""));
     dl
 }
 
-fn build_pause(dl: &mut DisplayList, art: &MovieArt, t: &MenuTexts, focus: &str) {
+fn build_pause(dl: &mut DisplayList, art: &MovieArt, title: &str, items: &[(String, String)], focus: &str) {
     if let Some((c, m)) = art.root_child("bkgd_mc") {
         dl.movie(art, c, m, &States::default(), 1.0);
     }
@@ -154,7 +229,7 @@ fn build_pause(dl: &mut DisplayList, art: &MovieArt, t: &MenuTexts, focus: &str)
         dl.movie(art, c, cm, &States::default(), 1.0);
         if pl.name.as_deref() == Some("_title_mc") {
             for f in DisplayList::fields(art, c, cm, &States::default()) {
-                dl.field_text(art, &f, &t.t(SEC_MENU, "t_Pause").to_uppercase(), None);
+                dl.field_text(art, &f, &title.to_uppercase(), None);
             }
         }
     }
@@ -167,11 +242,13 @@ fn build_pause(dl: &mut DisplayList, art: &MovieArt, t: &MenuTexts, focus: &str)
     }).unwrap_or((1.0, 0.0));
     let rot = dishonored_assets::swf::Matrix { a: dx, b: dy, c: -dy, d: dx, tx: 0.0, ty: 0.0 };
     let start = Vec2::new(area.min.x + area.width() * 0.25, area.min.y + area.height() * 0.3);
-    for (i, (id, sec, key)) in ITEMS.iter().enumerate() {
-        let off = Vec2::new(-dy, dx) * (i as f32 * 62.0);
+    // Five pause entries fit the band at 62 px; longer save lists close up.
+    let step = if items.len() > 5 { 62.0 * 5.0 / items.len() as f32 } else { 62.0 };
+    for (i, (id, text)) in items.iter().enumerate() {
+        let off = Vec2::new(-dy, dx) * (i as f32 * step);
         let at = start + off;
         let bm = dishonored_assets::swf::Matrix { tx: at.x * 20.0, ty: at.y * 20.0, ..rot };
-        menu_ui::movie_button_with(dl, art, "p_pauseMenu_item", bm, id, &t.t(sec, key).to_uppercase(), focus == *id, Vec2::new(380.0, 50.0), &[]);
+        menu_ui::movie_button_with(dl, art, "p_pauseMenu_item", bm, id, &text.to_uppercase(), focus == id.as_str(), Vec2::new(380.0, step.min(50.0)), &[]);
     }
 }
 

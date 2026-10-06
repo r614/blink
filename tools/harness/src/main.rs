@@ -17,6 +17,8 @@
 //! harness replay FILE         re-simulate a server replay and verify every state hash
 //! harness mission [--mission FILE]  plays a custom mission end to end (headless + dedicated server)
 //! harness travel              Ext -> Int -> Ext through the original doors; level state kept
+//! harness save                save mid-mission (original Boyle), load, continue: identical hashes;
+//!                             autosaves on map loads, original slots
 //! harness conversation        original Boyle conversations headless (subtitles, VO, choices,
 //!                             outputs, flags) + the conversation mission end to end
 //! harness launcher           the launcher end to end: screenshots of every screen, settings
@@ -36,6 +38,7 @@ mod fidelity;
 mod launcher;
 mod netsoak;
 mod report;
+mod save;
 mod scenarios;
 mod visual;
 
@@ -78,6 +81,7 @@ fn main() -> Result<()> {
         "travel" => travel::run(&ctx, &mut rep)?,
         "conversation" => conversation::run(&ctx, &mut rep)?,
         "kismet" => kismet::run(&ctx, &mut rep)?,
+        "save" => save::run(&ctx, &mut rep)?,
         "launcher" => launcher::run(&ctx, &mut rep)?,
         "replay" => {
             let file = args.get(1).expect("replay file");

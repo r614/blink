@@ -2439,12 +2439,14 @@ dependencies = [
 name = "dishonored_multiplayer"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "dishonored_ai",
  "dishonored_bots",
  "dishonored_conversation",
  "dishonored_ir",
  "dishonored_kismet",
  "dishonored_mission",
+ "dishonored_save",
  "dishonored_sim",
  "dishonored_world",
  "glam",
@@ -2480,6 +2482,7 @@ dependencies = [
  "dishonored_mission",
  "dishonored_multiplayer",
  "dishonored_net",
+ "dishonored_save",
  "dishonored_settings",
  "dishonored_sim",
  "dishonored_world",
@@ -2487,6 +2490,17 @@ dependencies = [
  "serde",
  "serde_json",
  "ue3_package",
+]
+
+[[package]]
+name = "dishonored_save"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "flate2",
+ "ron",
+ "serde",
 ]
 
 [[package]]
@@ -3132,6 +3146,7 @@ dependencies = [
  "dishonored_mission",
  "dishonored_multiplayer",
  "dishonored_net",
+ "dishonored_save",
  "dishonored_settings",
  "dishonored_sim",
  "dishonored_world",

@@ -17,6 +17,7 @@ dishonored_content.workspace = true
 dishonored_multiplayer.workspace = true
 dishonored_mission.workspace = true
 dishonored_settings.workspace = true
+dishonored_save.workspace = true
 dishonored_net.workspace = true
 dishonored_bots.workspace = true
 dishonored_audio = { path = "../dishonored_audio" }

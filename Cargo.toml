@@ -27,6 +27,7 @@ dishonored_mission = { path = "crates/dishonored_mission" }
 dishonored_conversation = { path = "crates/dishonored_conversation", default-features = false }
 dishonored_kismet = { path = "crates/dishonored_kismet", default-features = false }
 dishonored_settings = { path = "crates/dishonored_settings" }
+dishonored_save = { path = "crates/dishonored_save" }
 
 [profile.dev]
 opt-level = 1
