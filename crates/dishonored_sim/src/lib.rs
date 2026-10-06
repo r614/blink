@@ -111,7 +111,7 @@ pub fn step_world(
         let Some(h) = p.possess.host.and_then(|h| state.players.iter().position(|q| q.id == h)) else { continue };
         let pi = ins[i];
         let keep = input::buttons::JUMP | input::buttons::CROUCH | input::buttons::SPRINT | input::buttons::WALK;
-        ins[h] = PlayerInput { tick: pi.tick, forward: pi.forward, right: pi.right, yaw: pi.yaw, pitch: pi.pitch, buttons: pi.buttons & keep, left_hand: state.players[h].left.item, action: 0 };
+        ins[h] = PlayerInput { tick: pi.tick, forward: pi.forward, right: pi.right, yaw: pi.yaw, pitch: pi.pitch, buttons: pi.buttons & keep, left_hand: state.players[h].left.item, action: 0, npc_move: 0 };
     }
     // Bend Time: each pawn's rate this tick.
     for i in 0..state.players.len() {
