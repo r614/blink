@@ -41,6 +41,8 @@ mod bloom;
 mod atmosphere;
 mod audio;
 mod level;
+mod level_props;
+mod decals;
 mod loading_screen;
 mod lighting;
 mod map_render;
@@ -211,6 +213,7 @@ fn main() {
     .add_plugins(ark_post::ArkPostPlugin)
     .add_plugins(distortion::DistortionPlugin)
     .add_plugins(sky::SkyPlugin)
+    .add_plugins(decals::DecalPlugin)
     .add_plugins(bloom::BloomPlugin)
     .add_plugins(bevy::diagnostic::EntityCountDiagnosticsPlugin::default())
     .insert_resource(ClearColor(Color::srgb(0.08, 0.09, 0.12)))
@@ -221,7 +224,10 @@ fn main() {
     .init_resource::<atmosphere::FogLayers>()
     .add_systems(Startup, setup_world)
     .add_plugins(effects::EffectsPlugin)
-    .add_systems(Update, atmosphere::update_fog);
+    .add_systems(Update, atmosphere::update_fog)
+    // Doors and usable objects (skeletal meshes), posed for their state.
+    .init_resource::<level_props::LevelProps>()
+    .add_systems(Update, (level_props::spawn_props, level_props::pose_props).chain());
 
     if args.mode == Mode::Inspect {
         let mut runner = harness::ScriptRunner { out_dir: args.out.clone(), ..default() };
@@ -316,7 +322,7 @@ fn main() {
             // [interp] cutscenes: before the characters are animated; the director camera after the follow camera
             .init_resource::<cutscene::Cutscenes>()
             .init_resource::<cutscene::PawnPoints>()
-            .add_systems(Update, (cutscene::drive.after(players::sync_players).before(characters::animate_characters), cutscene::props.after(cutscene::drive), cutscene::emitters.after(cutscene::drive), cutscene::camera.after(players::camera_follow).before(viewmodel::animate_view_rig), cutscene::look_limits.after(input_map::gather_input).before(players::camera_follow)))
+            .add_systems(Update, (cutscene::drive.after(players::sync_players).before(characters::animate_characters), cutscene::props.after(cutscene::drive), cutscene::emitters.after(cutscene::drive), cutscene::camera.after(players::camera_follow).before(viewmodel::animate_view_rig), cutscene::look_limits.after(input_map::gather_input).before(players::camera_follow), level_props::follow_movers.after(cutscene::drive)))
             .add_systems(
                 Update,
                 (

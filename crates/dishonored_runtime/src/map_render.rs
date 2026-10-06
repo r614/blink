@@ -169,6 +169,17 @@ pub fn lightmap_image(l: &LightmapAtlas, plane: LightmapPlane) -> Image {
 /// rotation, and reflections apply to every material through Bevy's Fresnel term instead of
 /// Arkane's per-material `C_Cubemap_Mask`/`C_Cubemap_color`.
 pub fn environment_light(map: &DishonoredMap, images: &mut Assets<Image>) -> Option<bevy::light::GeneratedEnvironmentMapLight> {
+    Some(bevy::light::GeneratedEnvironmentMapLight {
+        environment_map: images.add(reflection_cube(map)?),
+        intensity: light_unit(),
+        rotation: Quat::IDENTITY,
+        affects_lightmapped_mesh_diffuse: false,
+    })
+}
+
+/// The level's reflection cubemap as a cube image (same face assignment as [`environment_light`]);
+/// also the `SceneReflectionTexture` of the translucent decals (`decals.rs`).
+pub fn reflection_cube(map: &DishonoredMap) -> Option<Image> {
     let faces = &map.environment.cubemap_faces;
     if faces.len() != 6 {
         return None;
@@ -197,12 +208,7 @@ pub fn environment_light(map: &DishonoredMap, images: &mut Assets<Image>) -> Opt
         dimension: Some(bevy::render::render_resource::TextureViewDimension::Cube),
         ..default()
     });
-    Some(bevy::light::GeneratedEnvironmentMapLight {
-        environment_map: images.add(img),
-        intensity: light_unit(),
-        rotation: Quat::IDENTITY,
-        affects_lightmapped_mesh_diffuse: false,
-    })
+    Some(img)
 }
 
 
@@ -416,6 +422,8 @@ pub fn spawn_map(
     // Bloom parts by material: (emissive texture, bloom colour, world-space triangles).
     let mut bloom_parts: std::collections::BTreeMap<usize, (usize, Vec3, Vec<f32>)> = std::collections::BTreeMap::new();
     let mut spawned = 0;
+    // The level's reflection cube for the translucent decals, built on first use.
+    let mut decal_scene: Option<Option<Handle<Image>>> = None;
     for (ii, inst) in map.instances.iter().enumerate() {
         if inst.hidden && !show_hidden {
             continue;
@@ -491,6 +499,13 @@ pub fn spawn_map(
                 let sky = mat_id.and_then(|m| Some((map.material_params.get(m)?, map.materials.get(m)?)));
                 if let Some(sm) = sky.and_then(|(p, ma)| crate::sky::SkyMaterial::new(p, &ma.texture_params, &image_handles)) {
                     e.insert(crate::sky::PendingSky(sm));
+                }
+            }
+            // Translucent decals (generic_translucent_PMAT): the material's own shading (decals.rs).
+            if translucent && features.materials && !inst.hidden {
+                let scene = decal_scene.get_or_insert_with(|| reflection_cube(map).map(|i| images.add(i))).clone();
+                if let Some(d) = mat_id.and_then(|m| crate::decals::PendingDecal::new(map.material_params.get(m)?, &map.materials[m].texture_params, &image_handles, scene)) {
+                    e.insert(d);
                 }
             }
             if let Some(m) = mover {

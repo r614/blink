@@ -118,6 +118,9 @@ struct Importer<'a> {
     class_defaults: HashMap<String, Vec<Property>>,
 }
 
+/// Single-channel static component masks kept in `MaterialParams::mask_channels`.
+const MASK_CHANNELS: &[&str] = &["C_Cubemap_Mask_Channel", "O_Opacity_Mask_Channel", "S_Specular_Mask_Channel", "E_Emissive_Channel", "F_Fresnel_Mask_Channel"];
+
 const RESOURCE_CLASSES: &[&str] = &[
     "StaticMesh",
     "Texture2D",
@@ -193,6 +196,10 @@ pub fn import_level(
     if level_slots > 0 {
         imp.import_environment(0);
     }
+    // Doors and usable objects: their skeletal mesh components (usable_props.rs).
+    if opts.other_actors {
+        imp.map.skeletal_props = crate::usable_props::read_props(content, packages);
+    }
     imp.stats.unresolved_paths.sort();
     imp.stats.unresolved_paths.dedup();
     imp.stats.material_chain_breaks.sort();
@@ -232,7 +239,7 @@ pub(crate) fn actor_transform(props: &[Property]) -> Mat4 {
 }
 
 /// Primitive component local transform (Translation, Rotation, Scale*Scale3D).
-fn component_transform(props: &[Property]) -> Mat4 {
+pub(crate) fn component_transform(props: &[Property]) -> Mat4 {
     let t = vec3_or(props, "Translation", Vec3::ZERO);
     let s = float_or(props, "Scale", 1.0) * vec3_or(props, "Scale3D", Vec3::ONE);
     Mat4::from_translation(t) * rot_matrix(props, "Rotation") * Mat4::from_scale(s)
@@ -1129,6 +1136,7 @@ impl Importer<'_> {
                 }
                 names.into_iter().filter_map(|n| chain.switch(&n).map(|v| (n, v))).collect()
             },
+            mask_channels: MASK_CHANNELS.iter().filter_map(|n| chain.mask_channel(n).map(|c| (n.to_string(), c as u8))).collect(),
         };
         if diffuse.is_none() {
             self.stats.materials_without_diffuse.push(format!(
@@ -1144,6 +1152,9 @@ impl Importer<'_> {
         // (Skies_PMAT): the textures its shader samples.
         let raw: &[&str] = if chain.switch("Dist_Enable_Distortion") == Some(true) {
             &["Dist_Distortion", "O_Opacity", "UV_Distortion"]
+        } else if blend == MaterialBlend::Translucent && chain.switch("C_Enable_CubemapMask") == Some(true) {
+            // Translucent decals (generic_translucent_PMAT): the scene reflection's mask.
+            &["C_Cubemap_Mask"]
         } else if sky {
             &["D_Diffuse", "C_Clouds_Texture", "C2_Clouds_2_Texture", "Storm"]
         } else {

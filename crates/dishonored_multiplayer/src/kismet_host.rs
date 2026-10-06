@@ -2452,6 +2452,45 @@ pub fn view(m: &MissionMatch, mv: &mut dishonored_mission::runtime::MissionView)
         mv.target = target;
     }
     mv.cutscenes = cutscene::view(run); // [interp]
+    let db = &run.k.db;
+    let on_map = |a: u32| {
+        let Some(map) = run.st.map.as_deref() else { return true };
+        let act = &db.actors[a as usize];
+        db.packages.iter().position(|p| p.eq_ignore_ascii_case(&act.package)).and_then(|p| db.map_of_package(p as u16)).is_none_or(|m| m.eq_ignore_ascii_case(map))
+    };
+    // Doors the Kismet opened or closed, for the renderer (level_props.rs).
+    for (&a, &(state, _)) in run.st.doors.iter().filter(|(a, _)| on_map(**a)) {
+        let act = &db.actors[a as usize];
+        mv.doors.push((format!("{}:{}", act.package, act.name), state));
+    }
+    // Level actors the Kismet moved, drawn where they are now.
+    let moved: BTreeSet<u32> = run.st.actor_pos.keys().chain(run.st.actor_rot.keys()).copied().collect();
+    for a in moved.into_iter().filter(|a| renders_moved(&db.actors[*a as usize].class) && on_map(*a)) {
+        let act = &db.actors[a as usize];
+        let placed = Vec3::from(act.location);
+        let placed_rot = glam::Quat::from_mat3(&dishonored_kismet::interp::rot_matrix_units(act.rotation));
+        let pos = run.st.actor_pos.get(&a).copied().unwrap_or(placed);
+        let rot = run.st.actor_rot.get(&a).copied().unwrap_or(placed_rot);
+        let (t, q) = mover_delta_parts(placed, placed_rot, pos, rot);
+        if t.length_squared() < 1e-6 && q.abs_diff_eq(glam::Quat::IDENTITY, 1e-6) {
+            continue;
+        }
+        mv.movers.push(dishonored_mission::runtime::MoverView { actor: format!("{}:{}", act.package, act.name), placed: placed.to_array(), translation: t.to_array(), rotation: q.to_array() });
+    }
+}
+
+/// Classes whose moved actors the renderer draws where the Kismet put them: movers (their static
+/// meshes), physics props, doors and usables (their skeletal meshes).
+fn renders_moved(class: &str) -> bool {
+    // The usables are `dishonored_assets::usable_props::is_usable_class`.
+    class.starts_with("InterpActor") || class.starts_with("KActor") || matches!(class, "DisDoor" | "DishonoredUsableObject" | "DishonoredDynamicUsableObject" | "DisWaterSource" | "DisAlarmBell" | "DisAudioLogPlayer")
+}
+
+/// The rigid delta taking an actor from its placed transform (`p0`, `q0`) to its current one
+/// (`p1`, `q1`): `current x placed^-1` as (translation, rotation).
+pub fn mover_delta_parts(p0: Vec3, q0: glam::Quat, p1: Vec3, q1: glam::Quat) -> (Vec3, glam::Quat) {
+    let q = (q1 * q0.inverse()).normalize();
+    (p1 - q * p0, q)
 }
 
 /// Events the mission runtime should not see in Kismet missions (consumed choices).
@@ -2508,6 +2547,21 @@ fn approach_hooks(h: &mut H) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The replicated mover delta takes the placed transform onto the current one.
+    #[test]
+    fn mover_delta_maps_placed_onto_current() {
+        let (p0, q0) = (Vec3::new(100.0, -50.0, 20.0), glam::Quat::from_rotation_z(0.3));
+        let (p1, q1) = (Vec3::new(140.0, 10.0, 25.0), glam::Quat::from_rotation_z(1.9));
+        let (t, q) = mover_delta_parts(p0, q0, p1, q1);
+        let delta = glam::Mat4::from_rotation_translation(q, t);
+        let now = delta * glam::Mat4::from_rotation_translation(q0, p0);
+        assert!(now.abs_diff_eq(glam::Mat4::from_rotation_translation(q1, p1), 1e-3));
+        // A point of the mesh moves with the actor.
+        let local = Vec3::new(10.0, 0.0, 0.0);
+        assert!((delta.transform_point3(p0 + q0 * local) - (p1 + q1 * local)).length() < 1e-3);
+        assert!(!renders_moved("TargetPoint") && renders_moved("InterpActor") && renders_moved("DisDoor"));
+    }
 
     #[test]
     fn view_tracking_blends_eased_and_keeps_the_freedom() {

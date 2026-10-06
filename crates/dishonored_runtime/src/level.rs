@@ -94,6 +94,7 @@ fn spawn_imported(
 ) -> DishonoredMap {
     let spawned = map_render::spawn_map(&map, commands, meshes, images, materials, baked, opts.show_hidden, features);
     crate::effects::spawn_level_effects(name, &map, commands, meshes, images, materials, fx);
+    crate::level_props::queue(name, &map, commands);
     info!("{}: {} instances, {} meshes, {} textures, {} entities", name, instances, map.meshes.len(), map.textures.len(), spawned);
     let lights = lighting::spawn_lights(&map, commands, features);
     info!("{} map lights", lights);

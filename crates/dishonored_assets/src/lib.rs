@@ -30,6 +30,7 @@ pub mod localization;
 pub mod travel;
 pub mod texture;
 pub mod tweaks;
+pub mod usable_props;
 pub mod util;
 pub mod water;
 pub mod climbable;

@@ -100,6 +100,8 @@ $P measure fall 800 900 1000 --out DIR
 $P measure run 0.4 0.6 at=-3400,-3150,-190 --yaw 270 --out DIR   # run, sprint, slide on a flat runway
 $P measure sdf                 # live constants of every drawn distance-field-shadow light shader
 $P measure views --out DIR     # the `harness fidelity` viewpoints, HUD hidden -> DIR/<name>.bmp
+$P measure psconst X [draws]   # live PS constants of a shader: X = a shader_maps blob (.bin),
+                               # 0xHASH, or a CTAB-name filter (every shader declaring it)
 $P kill                        # end the session's game (by pid)
 ```
 
