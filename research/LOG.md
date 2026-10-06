@@ -1177,4 +1177,9 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   `dishonored_content::load_climbables` (cache `<map>.climb1.json`); config
   `movement.climb` (cache `gameplay_config.v8.json`); `SimEvent::Climb` / `ClimbSound` (the
   runtime posts `Snd_P_Chain_Climbing`); the mission view lists the chains' bones as "Grab"
-  usables and the HUD shows "Jump off" while climbing.
+  usables and the HUD shows "Jump off" while climbing; net protocol 4. The state hash mixes the
+  climb state only once a pawn has touched a chain, so existing replay hashes are unchanged
+  (`harness sim`, debug build: 19/19, brawl hashes identical). Real-map test
+  (`dishonored_content` `climb_boyle_chains`): dropped beside either chain, the pawn grabs it
+  and climbs to z -722.0 (Int; the limit -714.5 is not reached because the beam the chain hangs
+  from blocks the pawn's top) and 1786.0 (Ext; limit 1796.5), and down to the lower limits.
