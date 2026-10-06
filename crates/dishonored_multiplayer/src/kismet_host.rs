@@ -401,6 +401,9 @@ impl dishonored_world::WorldQuery for NavOverlay<'_> {
     fn physics_volumes(&self) -> &[dishonored_world::PhysicsVolume] {
         self.inner.physics_volumes()
     }
+    fn climbables(&self) -> &[dishonored_world::Climbable] {
+        self.inner.climbables()
+    }
 }
 
 /// The Kismet's game side for one step.

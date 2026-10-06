@@ -13,6 +13,9 @@
 //!
 //! Water: `DishonoredWaterVolume` brushes (convex hulls, [`WaterVolume`]) are attached after
 //! loading, like the navigation mesh, and answered by [`WorldQuery::water_at`].
+//!
+//! Climbables: the `DisClimbable` chains of the map ([`Climbable`], their rest-pose bones) are
+//! attached the same way and listed by [`WorldQuery::climbables`].
 
 pub mod bvh;
 pub mod geom;
@@ -127,6 +130,45 @@ impl WaterVolume {
     }
 }
 
+/// One `DisClimbable` (a rigid-body chain `KAsset`) in its rest pose: the climbing player follows
+/// its closest bone (research/dishonored/PLAYER.md "Climbing").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Climbable {
+    pub name: String,
+    /// The actor's `Location` (the anchor: the chain hangs below it).
+    pub anchor: Vec3,
+    /// World positions of every bone of the skeletal mesh (`FindClosestBone` searches them all).
+    pub bones: Vec<Vec3>,
+    /// `SkeletalMeshComponent.Bounds.SphereRadius` (the physics asset's bodies, rest pose).
+    pub sphere_radius: f32,
+    /// Half-width of the chain's collision bodies (their box half extent across the chain).
+    pub body_half_width: f32,
+    /// World-space segment covered by the bodies (top, bottom), for touch and aim tests.
+    pub top: Vec3,
+    pub bottom: Vec3,
+}
+
+impl Climbable {
+    /// Index of the bone closest to `p` (the first on ties: the original compares with `<`).
+    pub fn closest_bone(&self, p: Vec3) -> Option<usize> {
+        let mut best: Option<(usize, f32)> = None;
+        for (i, b) in self.bones.iter().enumerate() {
+            let d = b.distance_squared(p);
+            if best.is_none_or(|(_, bd)| d < bd) {
+                best = Some((i, d));
+            }
+        }
+        best.map(|b| b.0)
+    }
+    /// Closest point of the body segment to `p`.
+    pub fn closest_point(&self, p: Vec3) -> Vec3 {
+        let ab = self.bottom - self.top;
+        let l2 = ab.length_squared();
+        let t = if l2 > 1e-6 { ((p - self.top).dot(ab) / l2).clamp(0.0, 1.0) } else { 0.0 };
+        self.top + ab * t
+    }
+}
+
 /// What [`WorldQuery::water_at`] reports for a point inside a water volume.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WaterInfo {
@@ -188,6 +230,10 @@ pub trait WorldQuery {
     }
     /// The map's non-water physics volumes (zone velocity, pain).
     fn physics_volumes(&self) -> &[PhysicsVolume] {
+        &[]
+    }
+    /// The map's climbable chains.
+    fn climbables(&self) -> &[Climbable] {
         &[]
     }
 }
@@ -286,6 +332,9 @@ pub struct CollisionWorld {
     /// Mover collision (`InterpActor` components), not part of the static triangles.
     #[serde(default)]
     pub movers: Vec<MoverCollision>,
+    /// `DisClimbable` chains of the map (attached after loading; not part of the collision cache).
+    #[serde(skip)]
+    pub climbables: Option<std::sync::Arc<Vec<Climbable>>>,
 }
 
 /// The colliding triangles of one mover actor, world space where the map placed it.
@@ -330,7 +379,7 @@ impl CollisionWorld {
             .collect();
         let total = bounds.iter().fold(Aabb::EMPTY, |acc, b| acc.union(b));
         let bvh = Bvh::build(&bounds);
-        CollisionWorld { tris, bvh, sources, bounds: Some(total), nav: None, water: None, volumes: None, tri_surface: Vec::new(), surfaces: Vec::new(), movers: Vec::new() }
+        CollisionWorld { tris, bvh, sources, bounds: Some(total), nav: None, water: None, volumes: None, climbables: None, tri_surface: Vec::new(), surfaces: Vec::new(), movers: Vec::new() }
     }
 
     /// Build from an imported map: every colliding instance (hidden blockers included).
@@ -480,6 +529,10 @@ impl WorldQuery for CollisionWorld {
 
     fn physics_volumes(&self) -> &[PhysicsVolume] {
         self.volumes.as_deref().map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    fn climbables(&self) -> &[Climbable] {
+        self.climbables.as_deref().map_or(&[], |c| c.as_slice())
     }
 
     fn box_contacts(&self, b: &PawnBox, channels: u8, out: &mut Vec<Contact>) {
@@ -903,5 +956,8 @@ impl WorldQuery for MapSet {
     }
     fn physics_volumes(&self) -> &[PhysicsVolume] {
         self.cur().physics_volumes()
+    }
+    fn climbables(&self) -> &[Climbable] {
+        self.cur().climbables()
     }
 }

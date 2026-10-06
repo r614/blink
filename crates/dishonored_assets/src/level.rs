@@ -223,7 +223,7 @@ fn rot_matrix(props: &[Property], name: &str) -> Mat4 {
 
 /// UE3 `Actor::LocalToWorld` = Scale(DrawScale*DrawScale3D) * Rot * Trans (row-vector),
 /// i.e. `T * R * S` for column vectors.
-fn actor_transform(props: &[Property]) -> Mat4 {
+pub(crate) fn actor_transform(props: &[Property]) -> Mat4 {
     let loc = vec3_or(props, "Location", Vec3::ZERO);
     let scale = float_or(props, "DrawScale", 1.0) * vec3_or(props, "DrawScale3D", Vec3::ONE);
     Mat4::from_translation(loc) * rot_matrix(props, "Rotation") * Mat4::from_scale(scale)

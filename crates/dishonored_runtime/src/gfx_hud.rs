@@ -652,6 +652,10 @@ fn interaction_prompt(mv: &dishonored_mission::runtime::MissionView, view: &Sess
     if mv.choices.iter().any(|c| c.0 == me.id) {
         return String::new();
     }
+    // On a chain: `DisTweaks_Climbable.m_StopClimbingInteractText` ("`GBA_Jump` jump off").
+    if me.mode == dishonored_sim::state::MoveMode::Climbing {
+        return "Space   Jump off".to_string();
+    }
     let eye = me.position + glam::Vec3::Z * 64.0;
     let fwd = dishonored_sim::movement::view_vector(yaw, pitch);
     let mut best: Option<(f32, String)> = None;
