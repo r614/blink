@@ -701,11 +701,26 @@ fn walking(
         if let Some(v) = dishonored_world::volume_at(ctx.world.physics_volumes(), p.position).filter(|v| v.velocity_affects_walking) {
             desired += Vec3::new(v.zone_velocity.x, v.zone_velocity.y, 0.0) * 25.0 * ctx.dt;
         }
-        let delta = desired * ctx.dt;
+        let mut delta = desired * ctx.dt;
+        // An accurate stop: the step that would reach the path's end lands on it.
+        let mut landed = false;
+        if let (true, Some(end)) = (p.nav_walk, p.nav_end) {
+            let to = (end - p.position).truncate();
+            if delta.truncate().length() >= to.length() {
+                delta = Vec3::new(to.x, to.y, 0.0);
+                landed = true;
+            }
+        }
         if p.nav_walk && nav_walk_move(p, delta, ctx) {
+            if landed {
+                p.velocity = Vec3::ZERO;
+            }
             return;
         }
         walk_move(p, delta, ctx);
+        if landed {
+            p.velocity = Vec3::ZERO;
+        }
     }
     if p.mode != MoveMode::Walking {
         return;

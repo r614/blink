@@ -115,6 +115,55 @@ fn read_route(pkg: &ue3_package::Package, props: &[ue3_package::properties::Prop
     PatrolRoute { name, kind, capacity, points, squads, adoption_range: f("m_AdoptionRange", -1.0), neglect_threshold: f("m_NeglectThreshold", 30.0), active, location }
 }
 
+/// Role of a pawn tweak from its data: the families in its fallback chain
+/// (`m_FallbackChainCooked`, nearest first, plus the tweak's own `m_TweakNameCooked`) and the
+/// weapons of its `m_ContentInventoryLoadout`.
+/// - Guard: the chain reaches the guard or overseer base pawns (`Pwn_Guard_Base`,
+///   `Pwn_Overseer_Base`), or the loadout carries a sword or a pistol (`DisTweaks_WepSword`,
+///   `DisTweaks_WepPistol`) outside the weeper family. Lord Shaw (`Twk_Pawn_LordShaw`, a "party"
+///   tweak with the civilian faction) falls back to `Pwn_EliteGuard_*` / `Pwn_Guard_Base` and
+///   carries a sword and `Twk_Inv_PistolShaw`: an armed elite.
+/// - Civilian: the chain reaches `Pwn_Civ_Base` outside the weeper family (`Pwn_Weeper_Base`).
+/// - Other: weepers, tallboys and pawns with no family.
+///
+/// `chain` holds the cooked fallback / tweak names, `weapons` the classes of the loadout's tweaks.
+pub fn role_from_chain(chain: &[String], weapons: &[String]) -> NpcRole {
+    let has = |base: &str| chain.iter().any(|n| n.to_ascii_lowercase().starts_with(base));
+    let weeper = has("pwn_weeper_base");
+    if has("pwn_guard_base") || has("pwn_overseer_base") || (!weeper && weapons.iter().any(|w| matches!(w.as_str(), "DisTweaks_WepSword" | "DisTweaks_WepPistol"))) {
+        NpcRole::Guard
+    } else if has("pwn_civ_base") && !weeper {
+        NpcRole::Civilian
+    } else {
+        NpcRole::Other
+    }
+}
+
+/// Role of a resolved pawn tweak (see `role_from_chain`); `None` when the tweak is not found.
+pub fn role_from_tweak_data(db: &crate::tweaks::TweakDb, tweak: &str) -> Option<NpcRole> {
+    use crate::tweaks::TVal;
+    let m = db.try_resolve(tweak)?;
+    let mut chain = Vec::new();
+    if let Some(TVal::Name(n)) = m.get("m_TweakNameCooked") {
+        chain.push(n.clone());
+    }
+    if let Some(TVal::List(fb)) = m.get("m_FallbackChainCooked") {
+        chain.extend(fb.iter().filter_map(|f| match f.get("m_FallbackName") {
+            Some(TVal::Name(n)) => Some(n.clone()),
+            _ => None,
+        }));
+    }
+    let weapons: Vec<String> = match m.get("m_ContentInventoryLoadout") {
+        Some(TVal::List(l)) => l.iter().filter_map(|e| match e.get("obj") {
+            Some(TVal::Obj(o)) => db.class_of(o),
+            _ => None,
+        }).collect(),
+        _ => Vec::new(),
+    };
+    Some(role_from_chain(&chain, &weapons))
+}
+
+/// Name-based role, used only when the pawn tweak cannot be resolved.
 pub fn role_from_tweak(t: &str) -> NpcRole {
     let l = t.to_ascii_lowercase();
     if l.contains("guard") || l.contains("overseer") || l.contains("watch") || l.contains("officer") {
@@ -129,6 +178,9 @@ pub fn role_from_tweak(t: &str) -> NpcRole {
 pub fn extract_npc_data(content: &Content, packages: &[String]) -> Result<NpcData> {
     let mut out = NpcData::default();
     let mut seen_pkgs = std::collections::BTreeSet::new();
+    // The level's pawn tweaks are cooked into its packages.
+    let db = crate::tweaks::TweakDb::load_with(content, packages).ok();
+    let mut roles: std::collections::HashMap<String, NpcRole> = Default::default();
     for name in packages {
         // Package lists can repeat a sublevel (streaming list + name prefix); read each once.
         if !content.has_package(name) || !seen_pkgs.insert(name.to_ascii_lowercase()) {
@@ -169,7 +221,8 @@ pub fn extract_npc_data(content: &Content, packages: &[String]) -> Result<NpcDat
                         _ => String::new(),
                     };
                     let spawner = spawner_props(&pkg, &h.properties);
-                    out.spawns.push(NpcSpawnPoint { position: pos, yaw, role: role_from_tweak(&tweak), tweak, source: format!("{name}:{}", pkg.obj_path(ObjRef::Export(i))), spawner });
+                    let role = *roles.entry(tweak.clone()).or_insert_with(|| db.as_ref().and_then(|d| role_from_tweak_data(d, &tweak)).unwrap_or_else(|| role_from_tweak(&tweak)));
+                    out.spawns.push(NpcSpawnPoint { position: pos, yaw, role, tweak, source: format!("{name}:{}", pkg.obj_path(ObjRef::Export(i))), spawner });
                 }
                 "DishonoredNavPoint" => out.points.push(AiPoint { position: pos, yaw, kind: PointKind::Nav }),
                 "TargetPoint" => out.points.push(AiPoint { position: pos, yaw, kind: PointKind::Target }),
@@ -215,4 +268,31 @@ fn spawner_props(pkg: &ue3_package::Package, props: &[ue3_package::properties::P
         }
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn roles_come_from_the_fallback_chain_and_loadout() {
+        // Lord Shaw: a "party" tweak with the civilian faction, but an elite guard by fallback.
+        let shaw = s(&["Twk_Pawn_Boyle_Party+++Twk_Pawn_LordShaw DisTweaks_NPCPawn", "Pwn_EliteGuard_MTall_2+++Pwn_EliteGuard_MTall_2 DisTweaks_NPCPawn", "Pwn_Guard_Base+++Pwn_Guard_MTBase DisTweaks_NPCPawn", "Twk_Pawn_DefaultNPC+++Twk_Pawn_DefaultNPC DisTweaks_NPCPawn"]);
+        assert_eq!(role_from_chain(&shaw, &s(&["DisTweaks_WepSword", "DisTweaks_WepPistol"])), NpcRole::Guard);
+        assert_eq!(role_from_tweak("Twk_Pawn_Boyle_Party.Twk_Pawn_LordShaw"), NpcRole::Civilian);
+        let guest = s(&["Pwn_Civ_Base+++Pwn_Civ_MTBase DisTweaks_NPCPawn", "Twk_Pawn_DefaultNPC+++Twk_Pawn_DefaultNPC DisTweaks_NPCPawn"]);
+        assert_eq!(role_from_chain(&guest, &[]), NpcRole::Civilian);
+        // An armed pawn with no guard family is a fighter; weepers stay apart.
+        assert_eq!(role_from_chain(&guest, &s(&["DisTweaks_WepSword"])), NpcRole::Guard);
+        let weeper = s(&["Pwn_Weeper_Base+++Pwn_Weeper_Base DisTweaks_NPCPawn", "Pwn_Civ_Base+++Pwn_Civ_Base DisTweaks_NPCPawn"]);
+        assert_eq!(role_from_chain(&weeper, &s(&["DisTweaks_WepSword"])), NpcRole::Other);
+        let tallboy = s(&["Twk_Pawn_DefaultNPC+++Twk_Pawn_DefaultNPC DisTweaks_NPCPawn"]);
+        assert_eq!(role_from_chain(&tallboy, &s(&["DisTweaks_WepTallboyBow"])), NpcRole::Other);
+        let overseer = s(&["Pwn_Overseer_Base+++Pwn_Overseer_MTBase DisTweaks_NPCPawn"]);
+        assert_eq!(role_from_chain(&overseer, &s(&["DisTweaks_WepMusicBox"])), NpcRole::Guard);
+    }
 }

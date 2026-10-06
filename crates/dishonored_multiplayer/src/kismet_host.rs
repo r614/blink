@@ -100,7 +100,6 @@ pub const NOT_MODELLED: &[&str] = &[
     "DisSeqAct_OverridePossess",
     "DisSeqAct_CancelPlayerActivePower",
     "DisSeqAct_EquipItemType",
-    "DisSeqAct_PlayerTrackTarget",
     "DisSeqAct_NPCTrackTarget",
     "DisSeqAct_LimitPawnMinHealth",
     "SeqAct_SetDamageInstigator",
@@ -115,6 +114,49 @@ pub enum KUse {
     Actor(u32),
     Pickup(u32),
     Talk { pawn: PlayerId, oneshot: String },
+}
+
+/// A forced view tracking (`DisSeqAct_PlayerTrackTarget` Start, camera code 0x00aaf4c0 /
+/// 0x00aa0cb0, per-tick 0x00ab4e60 / 0x00aa0f10 / 0x00aaf3a0). The camera keeps one channel
+/// for yaw and one for pitch (flags 0xC3 / 0xC7: both axes, override, eased); each turns from
+/// the view's angle at the start to the look-at angle of the target (its bone + offset, else
+/// its location) by `RLerp` (0x00bbb620) with alpha rising at `1 / m_fBlendTime` per second,
+/// eased `(1 - cos(alpha pi)) / 2` (flag 0x40). The player keeps `m_fRotationFreedomYaw` /
+/// `Pitch` degrees around it. When alpha reaches 1 the channel ends (0x00aa0e60) unless
+/// `m_bHoldUntilStopped` (flag 4); Stop (0x00aa0ec0) ends it by ID.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ViewTrack {
+    pub id: i32,
+    /// Tracked pawn (followed each tick), else a fixed point.
+    pub pawn: Option<PlayerId>,
+    pub point: Vec3,
+    /// View yaw / pitch (degrees) when the tracking started.
+    pub start: (f32, f32),
+    pub alpha: f32,
+    /// Alpha per second (`1 / m_fBlendTime`; 0 = already at 1).
+    pub rate: f32,
+    pub freedom: (f32, f32),
+    pub hold: bool,
+}
+
+impl ViewTrack {
+    /// The view the tracking imposes this tick, given the player's eye and wanted view
+    /// (degrees): the look-at angle blended from the start, plus the player's offset within the
+    /// freedom.
+    pub fn apply(&self, eye: Vec3, target: Vec3, want: (f32, f32)) -> (f32, f32) {
+        let d = target - eye;
+        let look = (d.y.atan2(d.x).to_degrees(), (d.z / d.truncate().length().max(1e-3)).atan().to_degrees());
+        let a = (1.0 - (self.alpha.clamp(0.0, 1.0) * std::f32::consts::PI).cos()) * 0.5;
+        let lerp = |s: f32, e: f32| s + wrap180(e - s) * a;
+        let base = (lerp(self.start.0, look.0), lerp(self.start.1, look.1));
+        // The player's own turning since the start moves the view within the freedom.
+        let off = (wrap180(want.0 - self.start.0).clamp(-self.freedom.0, self.freedom.0), (want.1 - self.start.1).clamp(-self.freedom.1, self.freedom.1));
+        (base.0 + off.0, (base.1 + off.1).clamp(-89.0, 89.0))
+    }
+}
+
+fn wrap180(a: f32) -> f32 {
+    (a + 180.0).rem_euclid(360.0) - 180.0
 }
 
 /// Host-side state.
@@ -205,6 +247,12 @@ pub struct HostState {
     shots: BTreeMap<PlayerId, u32>,
     /// `DisSeqAct_AIShoot` in progress: op -> (pawn, shot count at which it is done).
     shooting: BTreeMap<OpId, Vec<(PlayerId, u32)>>,
+    /// `DisSeqAct_PlayerTrackTarget`: forced view tracking per player.
+    #[serde(default)]
+    pub tracking: BTreeMap<PlayerId, ViewTrack>,
+    /// Last tracking ID handed out (0x00aaf4c0 counts from the camera's +0x60c).
+    #[serde(default)]
+    track_id: i32,
     /// `SeqEvent_LOS` events a player is looking at: (event, player).
     los: BTreeSet<(OpId, PlayerId)>,
     /// Chaos added by `DisSeqAct_AddDarkness`.
@@ -665,6 +713,37 @@ impl Host for H<'_> {
             return HostResult::Done;
         }
         match class.as_str() {
+            // `DisSeqAct_PlayerTrackTarget::Activated` (0x00b8f9c0): Start with a target asks the
+            // player camera to track it (0x00aaf4c0: flags 0xC3, 0xC7 with
+            // `m_bHoldUntilStopped`; the target's skeletal mesh and `m_TrackedBone` /
+            // `m_TrackedBoneOffset`, freedom pitch / yaw, `m_fBlendTime`) and keeps the returned
+            // ID in `m_TrackingID`; Stop ends the tracking with that ID (0x00aa0ec0).
+            "DisSeqAct_PlayerTrackTarget" => {
+                if cx.input() == Some(1) {
+                    let id = cx.prop_int("m_TrackingID");
+                    self.st.tracking.retain(|_, t| t.id != id);
+                    self.note(format!("view tracking {id} stopped"));
+                    return HostResult::Done;
+                }
+                let target = cx.objects("TrackedTarget").into_iter().next().or_else(|| Some(cx.prop_obj("m_pTrackedTarget")).filter(|o| !o.is_none()));
+                let Some(target) = target else { return HostResult::Done };
+                let Some(point) = self.pos_of(&target) else { return HostResult::Done };
+                let pawn = self.pawn_of(&target);
+                let blend = cx.prop_float("m_fBlendTime");
+                let freedom = (cx.prop_float("m_fRotationFreedomYaw"), cx.prop_float("m_fRotationFreedomPitch"));
+                let hold = cx.prop("m_bHoldUntilStopped").and_then(|v| v.as_bool()).unwrap_or(false);
+                self.st.track_id += 1;
+                let id = self.st.track_id;
+                for p in self.players() {
+                    let Some(pl) = self.m.world.player(p) else { continue };
+                    let t = ViewTrack { id, pawn, point, start: (pl.yaw, pl.pitch), alpha: if blend > 1e-4 { 0.0 } else { 1.0 }, rate: if blend > 1e-4 { 1.0 / blend } else { 0.0 }, freedom, hold };
+                    self.st.tracking.insert(p, t);
+                }
+                cx.set_prop("m_TrackingID", Value::Int(id));
+                cx.set_link("TrackingID", Value::Int(id));
+                self.note(format!("view tracking {id} of {} (blend {blend} s, freedom {freedom:?})", obj_name(&target)));
+                HostResult::Done
+            }
             // ----- story flags -----
             "DisSeqAct_SetStoryFlag" => {
                 let name = cx.prop_str("m_StoryFlagName");
@@ -1072,25 +1151,25 @@ impl Host for H<'_> {
             // Interrupted when the shoot behaviour ends otherwise. Abort stops it (no output).
             "DisSeqAct_AIShoot" => {
                 if cx.input() != Some(0) {
+                    // Abort (`OnAIShoot` with the abort flag): the shoot behaviour stops.
                     for (p, _) in self.st.shooting.remove(&cx.op).unwrap_or_default() {
                         if let Some(b) = self.m.crowd.brains.iter_mut().find(|b| b.id == p) {
-                            b.calm();
+                            b.shoot = None;
                         }
                     }
                     return HostResult::Done;
                 }
                 let target = cx.objects("ShotTarget").into_iter().next().or_else(|| Some(cx.prop_obj("m_pShotTarget")).filter(|o| !o.is_none())).and_then(|o| self.pawn_of(&o));
                 let max = cx.prop("m_iMaxNumShots").and_then(|v| v.as_int()).unwrap_or(-1);
+                let accuracy = cx.prop("m_bOverrideAccuracy").and_then(|v| v.as_bool()).unwrap_or(false).then(|| cx.prop_float("m_fOverrideAccuracyPercentage"));
                 cx.fire(0);
                 let Some(t) = target else { return HostResult::Done };
-                let at = self.m.world.player(t).map(|x| x.position).unwrap_or_default();
-                let ai = self.m.crowd.ai.clone();
                 let mut list = Vec::new();
                 for p in self.target_pawns(cx) {
                     let Some(b) = self.m.crowd.brains.iter_mut().find(|b| b.id == p) else { continue };
-                    b.alert_to(&ai, t, at);
-                    b.target = Some(t);
-                    b.state = BrainState::Combat;
+                    // The stimulus drives `DisBehaviorShoot`; the target is not made an enemy.
+                    b.order_shoot(t, max, accuracy);
+                    self.note(format!("pawn {p} shoots at {t}"));
                     let fired = self.st.shots.get(&p).copied().unwrap_or(0);
                     list.push((p, if max < 1 { u32::MAX } else { fired + max as u32 }));
                 }
@@ -1643,9 +1722,9 @@ impl Host for H<'_> {
                         last_ok = true;
                         continue;
                     }
-                    // The shoot behaviour ends with its pawn (death, knock-out) or when the pawn
-                    // calms down without its target.
-                    if !alive || b.is_none_or(|b| b.target.is_none() && b.state.is_routine()) {
+                    // The shoot behaviour ends with its pawn (death, knock-out) or without its
+                    // target.
+                    if !alive || b.is_none_or(|b| b.shoot.is_none()) {
                         last_ok = false;
                         cx.fire(3);
                         continue;
@@ -1881,6 +1960,32 @@ pub fn choice(m: &mut MissionMatch, player: PlayerId, index: usize) -> bool {
         }
         _ => false,
     }
+}
+
+/// Forced view tracking (`ViewTrack`) applied to the players' inputs before the world steps:
+/// the tracked view replaces the input's yaw / pitch, alpha advances, and a channel that
+/// reached 1 without `m_bHoldUntilStopped` ends (0x00aaf3a0 -> 0x00aa0e60).
+/// APPROXIMATION: a tracked pawn is aimed at 60 uu above its centre (no server-side bones for
+/// `m_TrackedBone`); the eye is 64 uu above the player's centre; the player's offset inside the
+/// freedom follows its input at once (the original interpolates it at 18, 0x00bbbb80).
+pub fn track_views(m: &mut MissionMatch, inputs: &mut [(PlayerId, dishonored_sim::input::PlayerInput)], dt: f32) {
+    let Some(run) = m.kismet.as_mut() else { return };
+    if run.st.tracking.is_empty() {
+        return;
+    }
+    for (id, i) in inputs.iter_mut() {
+        let Some(t) = run.st.tracking.get_mut(id) else { continue };
+        let Some(me) = m.world.player(*id) else { continue };
+        let target = match t.pawn {
+            Some(p) => m.world.player(p).map(|x| x.position + Vec3::Z * 60.0).unwrap_or(t.point),
+            None => t.point,
+        };
+        t.alpha = (t.alpha + t.rate * dt).min(1.0);
+        let (yaw, pitch) = t.apply(me.position + Vec3::Z * 64.0, target, (i.yaw, i.pitch));
+        i.yaw = yaw;
+        i.pitch = pitch;
+    }
+    run.st.tracking.retain(|_, t| t.hold || t.alpha < 1.0);
 }
 
 /// One step of the Kismet: feed gameplay events, tick, apply map changes.
@@ -2392,5 +2497,25 @@ fn approach_hooks(h: &mut H) {
     for reference in start {
         h.note(format!("approach {reference}"));
         h.act(vec![Action::Conversation(reference, Vec::new())]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_tracking_blends_eased_and_keeps_the_freedom() {
+        let t = |alpha: f32| ViewTrack { id: 1, pawn: None, point: Vec3::new(0.0, 1000.0, 0.0), start: (0.0, 0.0), alpha, rate: 1.0 / 3.0, freedom: (20.0, 20.0), hold: false };
+        let eye = Vec3::ZERO;
+        // Target straight left (yaw 90): at the start the view is unchanged, halfway (eased) at
+        // alpha 0.5, on target at 1.
+        assert!((t(0.0).apply(eye, Vec3::new(0.0, 1000.0, 0.0), (0.0, 0.0)).0).abs() < 1e-4);
+        assert!((t(0.5).apply(eye, Vec3::new(0.0, 1000.0, 0.0), (0.0, 0.0)).0 - 45.0).abs() < 1e-3);
+        let eased = t(0.25).apply(eye, Vec3::new(0.0, 1000.0, 0.0), (0.0, 0.0)).0;
+        assert!((eased - 90.0 * (1.0 - (0.25f32 * std::f32::consts::PI).cos()) * 0.5).abs() < 1e-3);
+        // The player turned 50 degrees right since the start: kept to 20 around the target.
+        let (y, _) = t(1.0).apply(eye, Vec3::new(0.0, 1000.0, 0.0), (-50.0, 0.0));
+        assert!((y - 70.0).abs() < 1e-3);
     }
 }

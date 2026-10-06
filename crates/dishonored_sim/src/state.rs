@@ -235,6 +235,12 @@ pub struct PlayerState {
     /// players and when no host sets it.
     #[serde(default)]
     pub nav_walk: bool,
+    /// Hook written by the mission host with `nav_walk`: the end of the path of an accurate
+    /// stop (a scripted go-to). The navmesh move does not pass it: the step that would reach it
+    /// lands on it and the pawn stops (arrival within 0.1 uu, 0x00944390). Host-only, never
+    /// sent or saved.
+    #[serde(skip)]
+    pub nav_end: Option<Vec3>,
     /// Helmet of an NPC (`m_PotentialNPCArmor`, `DisTweaks_Armor` protecting the head): absorbs
     /// headshots of the absorbed damage types until knocked off. Set by the mission/AI layer.
     #[serde(default)]
@@ -523,6 +529,7 @@ impl PlayerState {
             rat_slow_percent: 0.0,
             ai_unaware: false,
             nav_walk: false,
+            nav_end: None,
             helmet: false,
             rat_attack: RatAttackState::default(),
             damage_reduction: 0.0,

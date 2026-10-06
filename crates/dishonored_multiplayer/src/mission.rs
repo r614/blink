@@ -840,6 +840,7 @@ impl MissionMatch {
                 }
             })
             .collect();
+        kismet_host::track_views(self, &mut all, dt); // [kismet] DisSeqAct_PlayerTrackTarget
         // Movers (`InterpActor`s) collide where the Kismet has moved them.
         self.place_movers(world);
         let placed = std::mem::take(&mut self.mover_worlds);
@@ -859,6 +860,8 @@ impl MissionMatch {
             let moving = thought.iter().any(|(id, i)| *id == b.id && (i.forward != 0 || i.right != 0));
             if let Some(p) = self.world.player_mut(b.id) {
                 p.nav_walk = moving && !b.follow.path.is_empty();
+                // A scripted go-to stops on its path's end (accurate stop, 0.1 uu).
+                p.nav_end = b.accurate_stop();
             }
         }
         all.extend(thought);
