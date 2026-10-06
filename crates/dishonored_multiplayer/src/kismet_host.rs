@@ -249,7 +249,6 @@ fn usable_stages(k: &Kismet, a: u32) -> i32 {
 #[derive(Debug, Clone, Default)]
 struct GoTo {
     pawns: Vec<PlayerId>,
-    goal: Vec3,
     /// Destination rotation (`m_bAlignRotation`): the pawn turns to it on arrival.
     yaw: Option<f32>,
     /// The last pawn to report succeeded (Success fires only for the last report).
@@ -817,7 +816,7 @@ impl Host for H<'_> {
                 if started.is_empty() {
                     return HostResult::Done;
                 }
-                self.st.goto.insert(cx.op, GoTo { pawns: started, goal: g, yaw, last_ok: false });
+                self.st.goto.insert(cx.op, GoTo { pawns: started, yaw, last_ok: false });
                 HostResult::Latent
             }
             "DisSeqAct_AISetPatrol" => {
@@ -1693,12 +1692,14 @@ impl Host for H<'_> {
                         None => left.push(p),
                         Some(1) => {
                             gt.last_ok = true;
+                            self.note(format!("pawn {p} arrived ({})", cx.describe()));
                             if let (Some(y), Some(pl)) = (gt.yaw, self.m.world.player_mut(p)) {
                                 pl.yaw = y;
                             }
                         }
                         Some(r) => {
                             gt.last_ok = false;
+                            self.note(format!("pawn {p} go-to {} ({})", if r == 2 { "failed" } else { "interrupted" }, cx.describe()));
                             cx.fire(r);
                         }
                     }
@@ -2119,6 +2120,12 @@ fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
             dishonored_conversation::runner::ConvEvent::Output { instance, oneshot, name } => {
                 let pkg = h.st.conv_pkg.get(&instance).cloned().or_else(|| h.m.state.conv.as_ref().and_then(|r| r.instances.iter().find(|i| i.id == instance)).and_then(|i| i.oneshot).and_then(|o| h.m.setup.conversations.as_ref().map(|c| c.oneshots[o as usize].package.clone())));
                 let Some(os) = oneshot else { continue };
+                // A hook output outside any conversation (e.g. a use hook's Kismet output) has
+                // no instance package: the one-shot of that name in the loaded levels.
+                let pkg = pkg.or_else(|| {
+                    let cdb = h.m.setup.conversations.as_ref()?;
+                    cdb.oneshots.iter().filter(|o| o.name.eq_ignore_ascii_case(&os)).map(|o| o.package.clone()).find(|p| h.db.packages.iter().position(|x| x.eq_ignore_ascii_case(p)).is_some_and(|i| k.loaded.get(i).copied().unwrap_or(false)))
+                });
                 let reference = match &pkg {
                     Some(p) => format!("{p}:{os}"),
                     None => os.clone(),

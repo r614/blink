@@ -229,6 +229,12 @@ fn main() -> Result<()> {
                         incoming.entry(*t).or_default().push((o.id, format!("{} {i} -> in {ix}", l.name)));
                     }
                 }
+                // Ops that enable, disable or attach an event (`SeqAct_Toggle`, `AttachToEvent`).
+                for l in &o.events {
+                    for e in &l.events {
+                        incoming.entry(*e).or_default().push((o.id, format!("event link {}", l.name)));
+                    }
+                }
                 if o.class == "SeqAct_ActivateRemoteEvent" {
                     let n = o.props.str("EventName").to_ascii_lowercase();
                     for e in db.ops.iter().filter(|e| e.class == "SeqEvent_RemoteEvent" && e.props.str("EventName").to_ascii_lowercase() == n) {

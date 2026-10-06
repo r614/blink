@@ -299,7 +299,16 @@ impl Play<'_> {
 
     /// Move the agent into a trigger actor's shape.
     fn enter(&mut self, a: u32) {
-        let pos = {
+        let pos = self.shape_pos(a);
+        let me = self.mm().world.player_mut(AGENT).expect("agent");
+        me.position = pos;
+        me.velocity = Vec3::ZERO;
+    }
+
+    /// A point inside a trigger actor's touch shape (where it is now).
+    fn shape_pos(&self, a: u32) -> Vec3 {
+        let moved = self.m().kismet.as_ref().and_then(|k| k.st.actor_pos.get(&a).copied());
+        let base = {
             let k = &self.m().kismet.as_ref().unwrap().k;
             let act = &k.db.actors[a as usize];
             match &act.shape {
@@ -310,9 +319,10 @@ impl Play<'_> {
                 _ => Vec3::from(act.location),
             }
         };
-        let me = self.mm().world.player_mut(AGENT).expect("agent");
-        me.position = pos;
-        me.velocity = Vec3::ZERO;
+        match moved {
+            Some(m) => base - Vec3::from(self.m().kismet.as_ref().unwrap().k.db.actors[a as usize].location) + m,
+            None => base,
+        }
     }
 
     fn task(&self, path: &str) -> TaskState {
@@ -583,9 +593,18 @@ fn nonlethal(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<Stage
     p.near_pawn(bris, 150.0);
     let started = p.until_answering(30.0, |m| m.state.conv_log.iter().any(|e| matches!(e, dishonored_conversation::runner::ConvEvent::Started { label, .. } if label == "Lord_Brisby_Quest_Start")));
     let t26 = format!("{BA}.DishonoredTask_Custom_26");
-    let in_pos = p.until_answering(90.0, |m| m.state.flag("Boyle_BrisbyInPosition"));
-    let goto_ok = p.hist_has("Brisby") || in_pos;
-    if !stage(&mut rows, "Brisby's approach hook starts Lord_Brisby_Quest_Start; Join_Brisby_in_Private walks him to his spot (AIGoToActor Success): Boyle_BrisbyInPosition, T26", started && in_pos && goto_ok, format!("quest start {started}; in position {in_pos}; T26 {:?} at {:.1} s", p.task(&t26), p.time())) {
+    // He walks to TargetPoint_120 (AIGoToActor [8331]); its Success starts his route and his
+    // window matinee, whose Started output enables the window touch ([16688]); the player
+    // stepping into it sets Boyle_BrisbyInPosition.
+    let window_ev = db.find_export("L_Boyle_Int_Script", 16688);
+    let enabled = |m: &MissionMatch| window_ev.is_some_and(|e| m.kismet.as_ref().is_some_and(|k| k.k.ops[e as usize].enabled));
+    let arrived = p.until_answering(120.0, enabled);
+    if let Some(Obj::Actor(a)) = window_ev.and_then(|e| p.m().kismet.as_ref().and_then(|k| k.k.event_originator(e))) {
+        p.enter(a);
+    }
+    let in_pos = p.until_answering(10.0, |m| m.state.flag("Boyle_BrisbyInPosition"));
+    let goto: Vec<String> = p.history().into_iter().filter(|h| h.contains("arrived") || h.contains("go-to")).collect();
+    if !stage(&mut rows, "Brisby's approach hook starts Lord_Brisby_Quest_Start; Join_Brisby_in_Private walks him to his spot (AIGoToActor Success -> route, window matinee); the window touch sets Boyle_BrisbyInPosition; T26", started && arrived && in_pos, format!("quest start {started}; window trigger on {arrived}; in position {in_pos}; T26 {:?}; {} at {:.1} s", p.task(&t26), goto.join(" | "), p.time())) {
         return Ok(rows);
     }
     // His use hook: `Brisby_Boyle_Invite`, then the guilty sister's KO conversation, whose
@@ -642,30 +661,45 @@ fn nonlethal(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<Stage
     if !stage(&mut rows, "she is choked unconscious (DisSeqEvent_KnockedOut retargets the KO task to the cellar boat) and carried", carrying && knocked && boat_target.is_some(), format!("{sister} {her_state:?}; carrying {carrying}; KO task target {boat_target:?} at {:.1} s", p.time())) {
         return Ok(rows);
     }
-    // Into the cellar: DisTrigger_23 tests the body (TestBoyleBody_Touch), the body goes on the
-    // boat (TriggerVolume_10, "Lady On Boat?"), Brisby thanks the player and the gate closes.
-    let trig = actor(db, "L_Boyle_Int_Script:DisTrigger_23")?;
-    p.enter(trig);
-    p.idle(1.0);
-    let boat = actor(db, "L_Boyle_Int_Script:TriggerVolume_10")?;
-    let boat_pos = Vec3::from(db.actors[boat as usize].location);
-    // Drop her on the boat.
-    {
-        let me = p.mm().world.player_mut(AGENT).unwrap();
-        me.position = boat_pos + Vec3::new(-60.0, 0.0, 40.0);
-        me.velocity = Vec3::ZERO;
-        me.yaw = 0.0;
+    // Down to the cellar: the player-only touches by the boat ([16706] / [16703], armed by
+    // GetBrisbyQuest) compare the toucher with the player, close themselves, and through
+    // "BRISBY TELEPORTED" put Brisby at the boat ("reveal love nest" arms the body test).
+    let ev = |e: u32| db.find_export("L_Boyle_Int_Script", e);
+    let ev_actor = |p: &Play, e: u32| ev(e).and_then(|id| p.m().kismet.as_ref().and_then(|k| k.k.event_originator(id))).and_then(|o| if let Obj::Actor(a) = o { Some(a) } else { None });
+    let armed = |m: &MissionMatch, e: u32| ev(e).is_some_and(|id| m.kismet.as_ref().is_some_and(|k| k.k.ops[id as usize].enabled));
+    let brisby_armed = p.until_answering(120.0, |m| armed(m, 16706) || armed(m, 16703));
+    if let Some(a) = ev_actor(p, 16706) {
+        p.enter(a);
     }
-    p.step(PlayerInput::default());
-    p.step(PlayerInput { buttons: buttons::USE, ..Default::default() });
-    p.idle(1.0);
-    if let Some(b) = p.mm().world.player_mut(her) {
-        b.position = boat_pos + Vec3::Z * 20.0;
-        b.velocity = Vec3::ZERO;
-    }
-    let tv8 = actor(db, "L_Boyle_Int_Script:TriggerVolume_8")?;
-    p.enter(tv8);
+    let nest = p.until_answering(10.0, |m| armed(m, 16693));
+    let _ = bris;
+    // Into the cellar with her: the body test trigger (DisTrigger_23, [16693], the sisters'
+    // tweaks only), then her body on the boat ([16708] "Lady On Boat?") and the player on the
+    // boat ([16709]); Brisby's `Thanks` soiree closes the gate -> `CompleteMercyPath`.
+    let put = |p: &mut Play, id: u32, a: Option<u32>| {
+        if let Some(a) = a {
+            let at = p.shape_pos(a);
+            if let Some(b) = p.mm().world.player_mut(id) {
+                b.position = at;
+                b.velocity = Vec3::ZERO;
+            }
+        }
+    };
+    let test = ev_actor(p, 16693);
+    put(p, AGENT, test);
+    p.idle(0.5);
+    // Drop her.
+    let yaw = p.m().world.player(AGENT).unwrap().yaw;
+    p.step(PlayerInput { yaw, ..Default::default() });
+    p.step(PlayerInput { yaw, buttons: buttons::USE, ..Default::default() });
+    p.idle(0.5);
+    put(p, her, test);
+    p.idle(2.0);
+    put(p, her, ev_actor(p, 16708));
+    put(p, AGENT, ev_actor(p, 16709));
     let done = p.until_answering(150.0, |m| m.state.flag("BoyleMercyPathComplete"));
+    let recent: Vec<String> = p.history().into_iter().rev().take(12).collect();
+    rows.push(("(trace) cellar".into(), true, format!("Brisby's boat triggers armed {brisby_armed}; love nest {nest}; {}", recent.join(" | "))));
     let t6 = format!("{BA}.DishonoredTask_Custom_6");
     let thanks = p.conv_started("Thanks");
     if !stage(&mut rows, "the cellar boat: TestBoyleBody_Touch, Thanks (its soiree closes the gate) -> CompleteMercyPath: BoyleMercyPathComplete, KO task completed, T6 escape", done && p.task(&ko_task) == TaskState::Completed && p.task(&t6) == TaskState::Active, format!("Thanks {thanks}; BoyleMercyPathComplete {done}; {ko_task} {:?}; T6 {:?}; SF_Global_PlyrMercyBoyle {} at {:.1} s", p.task(&ko_task), p.task(&t6), p.m().state.flag("SF_Global_PlyrMercyBoyle"), p.time())) {
@@ -747,9 +781,14 @@ fn miss_white(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<Stag
     if !stage(&mut rows, "handing her the drink: Takes_Drink, RemoveAbstractItem, MissWhiteRevealsColors (Waverly's then Lydia's colour), WhiteToldAllColors, T25 completed", told && gone && p.task(&t25) == TaskState::Completed, format!("conversations {convs:?}; drink removed {gone}; WhiteToldAllColors {told}; T25 {:?} at {:.1} s", p.task(&t25), p.time())) {
         return Ok(rows);
     }
-    p.idle(3.0);
-    let dress = dress_tasks(p, &guilty, TaskState::Active);
-    stage(&mut rows, "her colours identify the guilty sister: her dress task shows (Set New Objective Based on Clues)", dress.len() == 1, format!("guilty {guilty}; dress task {:?}", dress.iter().map(|t| p.task_text(t)).collect::<Vec<_>>()));
+    // `End W Conversation` -> `Send Miss White On Her Way`: she walks to TargetPoint_100
+    // (AIGoToActor), then patrols; the Kismet records the three colours, WhiteOKtoPatrol, and
+    // completes "talk with guests" (T23). (Which sister is guilty still comes from a suspect:
+    // a note or Brisby's reveal, `Boyle_Suspect*`.)
+    let t23 = format!("{BA}.DishonoredTask_Custom_23");
+    let walked = p.until_answering(90.0, |m| m.state.flag("WhiteOKtoPatrol"));
+    let knows: Vec<&str> = ["Esmas", "Lydias", "Waverlys"].into_iter().filter(|s| matches!(var(p.m(), "L_Boyle_Int_Script", &format!("Player Knows {s} Color")), Some(dishonored_kismet::Value::Bool(true)))).collect();
+    stage(&mut rows, "Send Miss White On Her Way: she walks off (AIGoToActor Success -> patrol), the three colours are known, WhiteOKtoPatrol, T23 completed", walked && knows.len() == 3 && p.task(&t23) == TaskState::Completed, format!("WhiteOKtoPatrol {walked}; knows {knows:?}; T23 {:?}; guilty {guilty} at {:.1} s", p.task(&t23), p.time()));
     Ok(rows)
 }
 
@@ -758,12 +797,12 @@ fn miss_white(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<Stag
 /// duel is fought.
 fn duel(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<Stage>> {
     let mut rows: Vec<Stage> = Vec::new();
-    p.until(90.0, |m| m.state.task(&format!("{BA}.DishonoredTask_Custom_12")) == Some(TaskState::Active));
     let pn0 = "PendeltonsNote.DishonoredTask_Custom_0".to_string();
     let pn2 = "PendeltonsNote.DishonoredTask_Custom_2".to_string();
-    // The note from Pendleton (given in the previous mission).
+    let pn_active = p.until(90.0, |m| m.state.task("PendeltonsNote.DishonoredTask_Custom_0") == Some(TaskState::Active));
+    // The note from Pendleton (given in the previous mission, `Pendleton_Shaw_Note`).
     *p.mm().state.items.entry("Pendleton_Shaw_Note".into()).or_insert(0) += 1;
-    stage(&mut rows, "Pendleton's note task (PN T0) is active", p.task(&pn0) == TaskState::Active, format!("PN T0 {:?} \"{}\"", p.task(&pn0), p.task_text(&pn0)));
+    stage(&mut rows, "Pendleton's note task (PN T0) is active", pn_active, format!("PN T0 {:?} \"{}\" at {:.1} s", p.task(&pn0), p.task_text(&pn0), p.time()));
     let tv = actor(db, "L_Boyle_Ext_Script:TriggerVolume_14")?;
     p.enter(tv);
     p.idle(2.0);
@@ -771,18 +810,43 @@ fn duel(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<Stage>> {
         stage(&mut rows, "Lord Shaw is spawned", false, "no pawn".into());
         return Ok(rows);
     };
-    // Give him the note: walk up to him (his note trigger is attached to his head) and talk.
+    // Walk up to him: his radial approach hook starts `Begin_Duel_Conv` (Boyle_PlayerFoundShaw).
+    p.near_pawn(shaw, 200.0);
+    let found = p.until_answering(30.0, |m| m.state.flag("Boyle_PlayerFoundShaw"));
+    // Stand in front of him (DisTrigger_3 sets Player_Is_Front_LordShaw) and use him:
+    // `Player_Initiates_Choice`, hand over the note, `Player_Initiates` plays the
+    // `SoireeShawReadsNote` matinee; when it completes PN T0 is done and PN T2 starts.
+    let front = actor(db, "L_Boyle_Ext_Script:DisTrigger_3")?;
     let mut read = false;
-    for _ in 0..4 {
-        p.near_pawn(shaw, 80.0);
+    for _ in 0..3 {
+        p.enter(front);
         p.step(PlayerInput::default());
-        p.talk_to(shaw);
-        if p.until_answering(30.0, |m| m.state.task(&"PendeltonsNote.DishonoredTask_Custom_2".to_string()) == Some(TaskState::Active) || m.state.task(&"PendeltonsNote.DishonoredTask_Custom_0".to_string()) == Some(TaskState::Completed)) {
+        let list = kismet_host::usables(p.m());
+        if let Some(i) = list.iter().position(|u| matches!(&u.0, kismet_host::KUse::Talk { pawn, .. } if *pawn == shaw)) {
+            kismet_host::use_usable(p.mm(), AGENT, i);
+        }
+        if p.until_answering(60.0, |m| m.state.task("PendeltonsNote.DishonoredTask_Custom_2") == Some(TaskState::Active) || m.state.task("PendeltonsNote.DishonoredTask_Custom_0") == Some(TaskState::Completed)) {
             read = true;
             break;
         }
     }
-    stage(&mut rows, "the note delivered: Shaw reads it, PN T0 completes and PN T2 \"Follow Lord Shaw\" activates", read && p.task(&pn2) == TaskState::Active, format!("PN T0 {:?}; PN T2 {:?} at {:.1} s", p.task(&pn0), p.task(&pn2), p.time()));
+    stage(&mut rows, "the note delivered: Begin_Duel_Conv, then in front of him Player_Initiates_Choice / Player_Initiates (SoireeShawReadsNote): PN T0 completes and PN T2 \"Follow Lord Shaw\" activates", found && read && p.task(&pn2) == TaskState::Active, format!("PlayerFoundShaw {found}; Player_Initiates {}; PN T0 {:?}; PN T2 {:?} \"{}\" at {:.1} s", p.conv_started("Player_Initiates"), p.task(&pn0), p.task(&pn2), p.task_text(&pn2), p.time()));
+    if p.task(&pn2) != TaskState::Active {
+        return Ok(rows);
+    }
+    // Follow him to the duel ground (MoveShawToGarden), staying a few metres behind.
+    let mut explained = false;
+    for _ in 0..120 {
+        if let Some(pos) = p.m().world.player(shaw).map(|x| x.position) {
+            p.place_near(pos, 250.0);
+        }
+        if p.until_answering(1.0, |m| m.state.conv_log.iter().any(|e| matches!(e, dishonored_conversation::runner::ConvEvent::Started { label, .. } if label == "Duel_Explained" || label == "Go_to_Mark"))) {
+            explained = true;
+            break;
+        }
+    }
+    let recent: Vec<String> = p.history().into_iter().rev().take(15).collect();
+    stage(&mut rows, "following Lord Shaw to the duel ground: the elite explains the duel (Duel_Explained / Go_to_Mark)", explained, format!("{}; at {:.1} s", recent.join(" | "), p.time()));
     Ok(rows)
 }
 
