@@ -192,8 +192,11 @@ the set of its parent's functions, and the shared empty function sits in other p
 - `DisSeqAct_StartSpawn` (Activated 0x00b9bcc0, Update 0x00b90050): counts the spawners,
   requests the spawns, fires "Out"; each update fires "Spawned" per spawned pawn and "Failed"
   per failure, and "Finished" once nothing is pending.
-- `DisSeqAct_AutoSave` (Activated 0x00b8f240, Update 0x00b8f2e0): output 1 when saving is not
-  possible or done, 2 on failure, then "Finished" (0) from the latent DeActivated.
+- `DisSeqAct_AutoSave` (Activated 0x00b8f240, Update 0x00b8f2e0): output 1 ("Accepted") when
+  saving is not possible or the save was written, 2 ("Denied") when the pending autosave was
+  dropped, then "Finished" (0) from the latent DeActivated. The engine side (pending
+  autosave, mission-start saves, combat rule) is in `SAVES.md`; the port runs it in
+  `mission::save`.
 - `DisSeqAct_SetDisposition` (0x00b90a50): the input index (0..2) overrides `m_Disposition`,
   then the handlers.
 - `DisSeqAct_GotoPlayerTravelDestination`, `SetPlayerTravelDestination`, `SaveLevelState`:

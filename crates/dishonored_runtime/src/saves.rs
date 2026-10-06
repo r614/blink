@@ -151,7 +151,7 @@ pub fn load_into(session: &mut Session, file: &Path) -> anyhow::Result<SaveHeade
     let maps = session.maps.clone();
     let m = mission(session).ok_or_else(|| anyhow::anyhow!("loading needs an offline mission"))?;
     let (h, restored) = save::restore(&bytes, m.setup.clone())?;
-    **m = restored;
+    *m = restored;
     let map = m.current_map().to_string();
     if let Some(c) = maps.get(&map) {
         maps.set.set_active(&map);
