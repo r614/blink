@@ -76,7 +76,7 @@ fn path(audio: &AudioCells, ca: usize, pa: usize, cb: usize, pb: usize, limit: f
     let mut out = vec![pa];
     for k in 0..n {
         let m = *prop.data.get(off + 2 + k)? as usize;
-        out.push(*prop.portals.get(m)?);
+        out.push(*prop.portals.get(m).filter(|p| **p < audio.portals.len())?);
     }
     out.push(pb);
     Some((len, out))

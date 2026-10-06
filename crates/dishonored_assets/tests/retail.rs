@@ -90,4 +90,41 @@ fn ai_config_from_tweaks_and_ini() {
     assert_eq!(ai.panic, d.panic);
     assert_eq!(ai.combat, d.combat);
     assert!(ai.provenance.get("ai.vision").is_some_and(|s| s.contains("Twk_Vision_Default")));
+    // Rat swarms: the random swarm and Devouring Swarm level 1 tweaks.
+    assert_eq!((ai.rats.min_rat_count_per_attack_group, ai.rats.pawn_detection_radius, ai.rats.damage_per_bite), (12, 500.0, 0.4));
+    assert_eq!((ai.devouring_swarm.swarm_type, ai.devouring_swarm.min_rat_count_per_attack_group, ai.devouring_swarm.pawn_detection_radius), (3, 10, 700.0));
+}
+
+/// Boyle Int's audio cells: portals join the package's cells, the cells link back to their
+/// portals, the path table is sorted, and its size matches the propagation info.
+#[test]
+fn boyle_int_audio_cells() {
+    let Some(c) = content() else { return };
+    let pkgs = map_packages(&c, "L_Boyle_Int_P");
+    let lvl = dishonored_assets::ai_level::extract_ai_level(&c, &pkgs, &[], &[]).unwrap();
+    let a = &lvl.audio;
+    let prop = a.propagation.as_ref().expect("propagation info");
+    assert_eq!(prop.keys.len(), 2704);
+    assert!(prop.keys.windows(2).all(|w| w[0] < w[1]));
+    assert_eq!(prop.portals.len(), 55);
+    // Every path record lies inside the data and names known portals.
+    for &v in &prop.values {
+        let (off, n) = ((v >> 8) as usize, (v & 0xff) as usize);
+        assert!(off + 2 + n <= prop.data.len());
+        assert!(prop.data[off + 2..off + 2 + n].iter().all(|&k| (k as usize) < prop.portals.len() && prop.portals[k as usize] < a.portals.len()));
+    }
+    assert!(a.cells.len() >= 41 && a.portals.len() >= 55, "{} cells {} portals", a.cells.len(), a.portals.len());
+    let mut joined = 0;
+    for (i, p) in a.portals.iter().enumerate() {
+        let (Some(ca), Some(cb)) = (p.cell_a, p.cell_b) else { continue };
+        joined += 1;
+        assert!(a.cells[ca].portals.contains(&i) || a.cells[cb].portals.contains(&i), "{}", p.name);
+        assert!((p.normal.length() - 1.0).abs() < 1e-3 && p.half[0] > 0.0);
+        // Points a little to either side of a portal lie in its two cells.
+        let side = |q: Vec3| a.cells.iter().position(|c| c.contains(q));
+        let (f, b) = (side(p.origin + p.normal * 20.0), side(p.origin - p.normal * 20.0));
+        assert!(f.is_some() || b.is_some(), "{}", p.name);
+    }
+    assert!(joined >= 50, "{joined}");
+    assert!(lvl.sky_light > 0.0);
 }

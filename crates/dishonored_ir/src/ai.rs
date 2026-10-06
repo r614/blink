@@ -289,11 +289,13 @@ pub fn context_class_defaults(name: &str) -> (u8, f32, f32, f32) {
 /// their own rules ([`DodgeConfig`], [`PistolConfig`]).
 pub fn default_melee_contexts() -> Vec<MeleeContextConfig> {
     vec![
-        MeleeContextConfig::of_class("DisItemContext_NPCAttackShort", [1.0, 3.0], 2.0),
-        MeleeContextConfig::of_class("DisItemContext_NPCAttackStepBack", [0.5, 2.0], 1.0),
-        MeleeContextConfig::of_class("DisItemContext_NPCAttackMedium", [3.0, 5.0], 1.0),
-        MeleeContextConfig::of_class("DisItemContext_NPCAttackLong", [15.0, 20.0], 0.8),
-        MeleeContextConfig::of_class("DisItemContext_NPCJumpAttack", [15.0, 20.0], 3.0),
+        // Ranges of the elite sword's pawn-specific contexts
+        // (`Twk_Inv_SwordEliteGuard.DisTweaks_InventoryItem_PawnSpecific_1`).
+        MeleeContextConfig { min_range: 50.0, max_range: 235.0, max_height: 300.0, ..MeleeContextConfig::of_class("DisItemContext_NPCAttackShort", [1.0, 3.0], 2.0) },
+        MeleeContextConfig { min_range: 0.0, max_range: 170.0, max_height: 100.0, ..MeleeContextConfig::of_class("DisItemContext_NPCAttackStepBack", [0.5, 2.0], 1.0) },
+        MeleeContextConfig { min_range: 235.0, max_range: 375.0, max_height: 300.0, ..MeleeContextConfig::of_class("DisItemContext_NPCAttackMedium", [3.0, 5.0], 1.0) },
+        MeleeContextConfig { min_range: 375.0, max_range: 570.0, max_height: 200.0, ..MeleeContextConfig::of_class("DisItemContext_NPCAttackLong", [15.0, 20.0], 0.8) },
+        MeleeContextConfig { min_range: 730.0, max_range: 850.0, max_height: 100.0, ..MeleeContextConfig::of_class("DisItemContext_NPCJumpAttack", [15.0, 20.0], 3.0) },
     ]
 }
 
@@ -324,14 +326,14 @@ impl Default for DodgeConfig {
     fn default() -> Self {
         DodgeConfig {
             attacks_per_flurry: [2, 3],
-            stamina_recovery: [1.0, 2.0],
-            time_for_threat_side_step: [0.5, 1.0],
+            stamina_recovery: [4.0, 5.0],
+            time_for_threat_side_step: [2.0, 3.0],
             angle_melee_threat: 30.0,
             angle_ranged_threat: 10.0,
-            incoming_attacks_before_back_step: [2, 3],
-            forgive_incoming_attacks: 3.0,
-            side_step_distance: 150.0,
-            back_step_distance: 200.0,
+            incoming_attacks_before_back_step: [1, 1],
+            forgive_incoming_attacks: 5.0,
+            side_step_distance: 250.0,
+            back_step_distance: 300.0,
             side_step_inhibition: 6.0,
             back_step_inhibition: 8.0,
         }
@@ -355,7 +357,7 @@ pub struct PistolConfig {
 
 impl Default for PistolConfig {
     fn default() -> Self {
-        PistolConfig { time_to_first_shot: [0.75, 0.75], time_before_giving_up: [3.0, 5.0], point_blank_distance: 300.0, chance_fire_again: 0.0, min_range: 300.0, max_range: 1700.0 }
+        PistolConfig { time_to_first_shot: [0.75, 1.25], time_before_giving_up: [0.3, 1.0], point_blank_distance: 80.0, chance_fire_again: 1.0, min_range: 250.0, max_range: 3000.0 }
     }
 }
 

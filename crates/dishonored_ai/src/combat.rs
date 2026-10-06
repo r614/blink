@@ -68,15 +68,15 @@ mod tests {
         let cd = vec![0.0; c.len()];
         // Close: the short attack comes first in the pattern.
         assert_eq!(pick_context(&c, &cd, &[], 1, 90.0, 0.0), Some(0));
-        // 300 uu: beyond short (250), medium (350) fits.
+        // 300 uu: beyond short (235), medium (235-375) fits.
         assert_eq!(c[pick_context(&c, &cd, &[], 1, 300.0, 0.0).unwrap()].kind, npc_moves::ATTACK_MEDIUM);
-        // 420 uu: the long attack (450).
+        // 420 uu: the long attack (375-570).
         assert_eq!(c[pick_context(&c, &cd, &[], 1, 420.0, 0.0).unwrap()].kind, npc_moves::ATTACK_LONG);
-        // 600 uu: the jump attack (550-800), but not with a 150 uu height difference.
-        assert_eq!(c[pick_context(&c, &cd, &[], 1, 600.0, 0.0).unwrap()].kind, npc_moves::JUMP_ATTACK);
-        assert_eq!(pick_context(&c, &cd, &[], 1, 600.0, 150.0), None);
-        // 500 uu: between long and jump: nothing.
-        assert_eq!(pick_context(&c, &cd, &[], 1, 500.0, 0.0), None);
+        // 780 uu: the jump attack (730-850), but not with a 150 uu height difference.
+        assert_eq!(c[pick_context(&c, &cd, &[], 1, 780.0, 0.0).unwrap()].kind, npc_moves::JUMP_ATTACK);
+        assert_eq!(pick_context(&c, &cd, &[], 1, 780.0, 150.0), None);
+        // 650 uu: between long and jump: nothing.
+        assert_eq!(pick_context(&c, &cd, &[], 1, 650.0, 0.0), None);
         // Short on cooldown, step back next; short inhibited on this target only.
         let mut cd2 = cd.clone();
         cd2[0] = 1.0;
