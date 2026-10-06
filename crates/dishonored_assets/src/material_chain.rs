@@ -31,6 +31,36 @@ pub struct MaterialChain {
     pub phys_material: Option<Key>,
     /// Chain ended at an import nobody defines.
     pub broken_at: Option<String>,
+    /// Static permutation of the child-most instance that has one (the parameter set its
+    /// shaders were compiled with), U-027.
+    pub static_params: Option<StaticParameters>,
+    /// Defaults of the base material's static switch / component mask expressions.
+    pub switch_defaults: Vec<(String, bool)>,
+    pub mask_defaults: Vec<(String, [bool; 4])>,
+}
+
+impl MaterialChain {
+    /// Value of a static switch: the compiled permutation's, else the base default.
+    pub fn switch(&self, name: &str) -> Option<bool> {
+        self.static_params
+            .as_ref()
+            .and_then(|s| s.switches.iter().find(|(n, _, _)| n.eq_ignore_ascii_case(name)).map(|v| v.1))
+            .or_else(|| self.switch_defaults.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|v| v.1))
+    }
+
+    /// Channels selected by a static component mask parameter.
+    pub fn mask(&self, name: &str) -> Option<[bool; 4]> {
+        self.static_params
+            .as_ref()
+            .and_then(|s| s.masks.iter().find(|(n, _, _)| n.eq_ignore_ascii_case(name)).map(|v| v.1))
+            .or_else(|| self.mask_defaults.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|v| v.1))
+    }
+
+    /// The single channel a mask selects (None when it selects several or none).
+    pub fn mask_channel(&self, name: &str) -> Option<usize> {
+        let m = self.mask(name)?;
+        (m.iter().filter(|b| **b).count() == 1).then(|| m.iter().position(|b| *b).unwrap())
+    }
 }
 
 fn param_name(props: &[Property]) -> Option<String> {
@@ -59,6 +89,11 @@ pub fn walk(pkgs: &[Arc<Package>], start: Key, resolve: &mut dyn FnMut(usize, Ob
         if out.phys_material.is_none() {
             if let Some(pm) = find(&props, "PhysMaterial").and_then(|p| p.as_object()).filter(|o| *o != 0) {
                 out.phys_material = resolve(cur.0, ObjRef::from_index(pm));
+            }
+        }
+        if out.static_params.is_none() && matches!(find(&props, "bHasStaticPermutationResource").map(|p| &p.value), Some(Value::Bool(true))) {
+            if let Ok(data) = pkg.export_data(cur.1) {
+                out.static_params = read_static_parameters(pkg, data, hdr.native_offset, 0);
             }
         }
         if class == "Material" {
@@ -146,6 +181,20 @@ fn read_base_material(
             if let Some(name) = param_name(p) {
                 push_unique(&mut out.scalars, name, find(p, "DefaultValue").and_then(|v| v.as_float()).unwrap_or(0.0));
             }
+        } else if class == "MaterialExpressionStaticSwitchParameter" {
+            if let Some(name) = param_name(p) {
+                let v = matches!(find(p, "DefaultValue").map(|v| &v.value), Some(Value::Bool(true)));
+                if !out.switch_defaults.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) {
+                    out.switch_defaults.push((name, v));
+                }
+            }
+        } else if class == "MaterialExpressionStaticComponentMaskParameter" {
+            if let Some(name) = param_name(p) {
+                let c = |k: &str| matches!(find(p, k).map(|v| &v.value), Some(Value::Bool(true)));
+                if !out.mask_defaults.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) {
+                    out.mask_defaults.push((name, [c("DefaultR"), c("DefaultG"), c("DefaultB"), c("DefaultA")]));
+                }
+            }
         } else if class == "MaterialExpressionVectorParameter" {
             if let Some(name) = param_name(p) {
                 let v = match find(p, "DefaultValue").map(|v| &v.value) {
@@ -179,6 +228,106 @@ pub fn slot_in(list: &[(String, Key)], prefix: &str, exclude: &[&str]) -> Option
             l.starts_with(prefix) && !exclude.iter().any(|x| l.contains(x))
         })
         .map(|(_, k)| *k)
+}
+
+/// Static permutation parameters of a material instance (`FStaticParameterSet`, serialized
+/// after the instance's `FMaterialResource` in its native data when
+/// `bHasStaticPermutationResource` is set):
+/// ```text
+/// FGuid BaseMaterialId
+/// TArray<{ FName ParameterName; UBOOL Value; UBOOL bOverride; FGuid ExpressionGUID }>       switches (32 B)
+/// TArray<{ FName ParameterName; UBOOL R, G, B, A; UBOOL bOverride; FGuid ExpressionGUID }>  component masks (44 B)
+/// TArray<{ FName ParameterName; BYTE CompressionSettings; UBOOL bOverride; FGuid }>         normal parameters (29 B)
+/// TArray<{ FName ParameterName; INT WeightmapIndex; UBOOL bOverride; FGuid }>               terrain layer weights (32 B)
+/// ```
+/// (layout read from L_Boyle_Ext_Env `barbed_wire_01__low_INST`; the set ends the export.)
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct StaticParameters {
+    pub base_material_id: [u32; 4],
+    /// (name, value, overridden)
+    pub switches: Vec<(String, bool, bool)>,
+    /// (name, RGBA mask, overridden)
+    pub masks: Vec<(String, [bool; 4], bool)>,
+}
+
+fn u32_at(d: &[u8], p: usize) -> Option<u32> {
+    d.get(p..p + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// Find and decode the static parameter set in a MIC's native data. The `FMaterialResource`
+/// before it is not parsed: the set is located as the last offset where a switch array and a
+/// component mask array parse completely with valid names and 0/1 booleans, ending within
+/// `slack` bytes of the export end.
+pub fn read_static_parameters(pkg: &Package, data: &[u8], native_offset: usize, slack: usize) -> Option<StaticParameters> {
+    let name_ok = |p: usize| -> Option<String> {
+        let (i, n) = (u32_at(data, p)?, u32_at(data, p + 4)?);
+        if (i as usize) < pkg.names.len() && n < 64 {
+            Some(pkg.name(ue3_package::FName { index: i as i32, number: n as i32 }))
+        } else {
+            None
+        }
+    };
+    let b = |p: usize| -> Option<bool> {
+        match u32_at(data, p)? {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
+    };
+    let try_at = |start: usize| -> Option<(StaticParameters, usize)> {
+        let mut p = start;
+        let base = [u32_at(data, p)?, u32_at(data, p + 4)?, u32_at(data, p + 8)?, u32_at(data, p + 12)?];
+        p += 16;
+        let ns = u32_at(data, p)? as usize;
+        if ns > 128 {
+            return None;
+        }
+        p += 4;
+        let mut out = StaticParameters { base_material_id: base, ..Default::default() };
+        for _ in 0..ns {
+            let name = name_ok(p)?;
+            out.switches.push((name, b(p + 8)?, b(p + 12)?));
+            p += 32;
+        }
+        let nm = u32_at(data, p)? as usize;
+        if nm > 128 {
+            return None;
+        }
+        p += 4;
+        for _ in 0..nm {
+            let name = name_ok(p)?;
+            out.masks.push((name, [b(p + 8)?, b(p + 12)?, b(p + 16)?, b(p + 20)?], b(p + 24)?));
+            p += 44;
+        }
+        // Normal-map parameters: FName, BYTE CompressionSettings, UBOOL bOverride, FGuid (29 B).
+        let nn = u32_at(data, p)? as usize;
+        if nn > 128 {
+            return None;
+        }
+        p += 4;
+        for _ in 0..nn {
+            name_ok(p)?;
+            b(p + 9)?;
+            p += 29;
+        }
+        // Terrain layer weights: FName, INT WeightmapIndex, UBOOL bOverride, FGuid (32 B).
+        let nt = u32_at(data, p)? as usize;
+        if nt > 128 {
+            return None;
+        }
+        p += 4;
+        for _ in 0..nt {
+            name_ok(p)?;
+            b(p + 12)?;
+            p += 32;
+        }
+        if ns + nm + nn == 0 || base == [0; 4] {
+            return None;
+        }
+        Some((out, p))
+    };
+    let hi = data.len().saturating_sub(24);
+    (native_offset..hi).rev().find_map(|s| try_at(s).filter(|(_, end)| *end <= data.len() && data.len() - *end <= slack).map(|(o, _)| o))
 }
 
 /// Pick the texture for an Arkane slot prefix (`d_`, `n_`, `s_`, `e_`, `o_`, `dn_`).

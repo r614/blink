@@ -392,7 +392,7 @@ the level selects the exterior with `Set_State_Amb_LVL_Boyle_Ext_Streets` (state
 group 0xE268D01C (`Music_State_Boyle_Explor` = 0xCC5F53AA, also Suspens, Fight_1..4,
 Escape_*). The party music (`Snd_Music_Player_Boyle`, `_02`, attenuation 9,000 uu) is
 placed in `L_Boyle_Int_Script` at (-226, -2049, 469) and (2792, 3397, 665), i.e. in
-the interior map, which does not share a known offset with the exterior (U-006).
+the interior map, which shares the exterior's coordinate frame (U-006, resolved).
 
 ## Runtime use
 

@@ -89,6 +89,15 @@ pub struct MaterialParams {
     pub sky: bool,
     /// Path of the root `Material` of the chain, if reached.
     pub base_material: Option<String>,
+    /// Static switch values of the compiled permutation (base defaults filled in), U-027.
+    #[serde(default)]
+    pub static_switches: Vec<(String, bool)>,
+}
+
+impl MaterialParams {
+    pub fn switch(&self, name: &str) -> Option<bool> {
+        self.static_switches.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|v| v.1)
+    }
 }
 
 /// Level-wide presentation settings.
@@ -115,6 +124,30 @@ pub struct FogSettings {
     /// The layer spans world Z `origin .. origin + height` (`Origin`, `Height`).
     pub origin: f32,
     pub height: f32,
+    /// Scene depth (uu) beyond which this layer adds no fog (`NoFogPlane`).
+    #[serde(default)]
+    pub no_fog: f32,
+    /// Scales the ray's height-slab parameters (`HeightDensityFactor`, default 1).
+    #[serde(default)]
+    pub height_density: f32,
+    /// Sun layer (`bIsSun`): its fog is weighted by `max(cos(view, sun), 0)^SunPower`.
+    #[serde(default)]
+    pub is_sun: bool,
+    #[serde(default)]
+    pub sun_power: f32,
+    /// 128-entry fog curve over the normalised in-layer distance (`m_RawLut`, baked from
+    /// `FogLUT`); empty = linear ramp.
+    #[serde(default)]
+    pub lut: Vec<u8>,
+    /// `bCustomTransition` + `fCustomTransitionHeight` (opacity fades in over that distance
+    /// below the layer top, 0x0081C940); `bInteriorFog` and `m_IsExclusive` affect the layer
+    /// selection, which is not decoded (U-321).
+    #[serde(default)]
+    pub custom_transition: Option<f32>,
+    #[serde(default)]
+    pub interior: bool,
+    #[serde(default)]
+    pub exclusive: bool,
 }
 
 /// Arkane post-process configuration (`ArkPpConfig`), only the fields set on the level.
@@ -125,16 +158,22 @@ pub struct PostSettings {
     pub vectors: Vec<(String, [f32; 4])>,
 }
 
-/// Linear irradiance atlas baked from a pair of Dishonored lightmap textures
-/// (`NormalizedAverageColor_N` + `DirectionalMaxComponent_N`). Values are in UE3 lightmap
-/// units: final diffuse = albedo * irradiance.
+/// Dishonored's two-coefficient directional lightmap (`NormalizedAverageColor_N` +
+/// `DirectionalMaxComponent_N`), sRGB-decoded and multiplied by each component's coefficient
+/// scales, in the original atlas layout. The base pass reconstructs (research/LOG.md
+/// "Directional lightmaps"): diffuse = albedo * color * sum_i dir_i * saturate(N.B_i)^2 and
+/// specular = spec * color * sum_i dir_i * saturate(R.B_i)^16 over the tangent-space HL2 basis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LightmapAtlas {
     pub source: String,
     pub width: u32,
     pub height: u32,
-    /// Row-major texels packed as RGB9E5 (`Rgb9e5Ufloat`).
+    /// Row-major scaled average colour, packed as RGB9E5 (`Rgb9e5Ufloat`).
     pub texels: Vec<u32>,
+    /// Row-major scaled intensities along the three basis directions (R, G, B = B0, B1, B2),
+    /// RGB9E5. Empty for atlases without directional data.
+    #[serde(default)]
+    pub directional: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

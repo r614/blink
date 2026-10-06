@@ -192,17 +192,32 @@ pub fn unpack_rgb9e5(v: u32) -> [f32; 3] {
     [(v & 511) as f32 * s, ((v >> 9) & 511) as f32 * s, ((v >> 18) & 511) as f32 * s]
 }
 
-/// Reconstruct linear irradiance for a flat (geometric) normal from Dishonored's two
-/// lightmap coefficients. `avg` is the sRGB-decoded NormalizedAverageColor texel and `dir`
-/// the sRGB-decoded DirectionalMaxComponent texel (one intensity per tangent-space basis
-/// direction in R, G, B); each is multiplied by its per-lightmap scale.
-///
-/// APPROXIMATION: the original shader weights the three basis intensities by the
-/// per-pixel normal; for an unperturbed normal all three weights are equal, so the
-/// average is used. Normal-map interaction with the directional lightmap is lost.
+/// The lightmap basis in UE3 tangent space (X = dP/du, Y = dP/dv, Z = normal), as the
+/// constants of the original base pass pixel shaders (`TBasePassPixelShader
+/// FDirectionalLightMapTexturePolicy*` in `RefShaderCache-PC-D3D-SM3.upk`): the HL2 basis.
+pub const LIGHTMAP_BASIS: [[f32; 3]; 3] = [
+    [0.0, 0.816_496_6, 0.577_350_26],
+    [-0.707_106_77, -0.408_248_3, 0.577_350_26],
+    [0.707_106_77, -0.408_248_3, 0.577_350_26],
+];
+
+/// Diffuse lightmap irradiance for a tangent-space normal `n`, from the scaled average
+/// colour and the scaled basis intensities, exactly as the original base pass computes it:
+/// `color * sum_i dir_i * max(saturate(n . B_i)^2, 1e-6)`.
+pub fn directional_irradiance(color: [f32; 3], dir: [f32; 3], n: [f32; 3]) -> [f32; 3] {
+    let mut k = 0.0;
+    for (i, b) in LIGHTMAP_BASIS.iter().enumerate() {
+        let d = (n[0] * b[0] + n[1] * b[1] + n[2] * b[2]).clamp(0.0, 1.0);
+        k += dir[i] * (d * d).max(1e-6);
+    }
+    color.map(|c| c * k)
+}
+
+/// Irradiance for the unperturbed normal (0, 0, 1): every weight is 1/3.
 pub fn flat_irradiance(avg: [f32; 3], dir: [f32; 3], s_avg: [f32; 3], s_dir: [f32; 3]) -> [f32; 3] {
-    let intensity = (dir[0] * s_dir[0] + dir[1] * s_dir[1] + dir[2] * s_dir[2]) / 3.0;
-    [avg[0] * s_avg[0] * intensity, avg[1] * s_avg[1] * intensity, avg[2] * s_avg[2] * intensity]
+    let color = [0, 1, 2].map(|k| avg[k] * s_avg[k]);
+    let dir = [0, 1, 2].map(|k| dir[k] * s_dir[k]);
+    directional_irradiance(color, dir, [0.0, 0.0, 1.0])
 }
 
 #[cfg(test)]
@@ -217,6 +232,16 @@ mod tests {
                 assert!((r[k] - v[k]).abs() <= v[0].max(v[1]).max(v[2]) / 256.0 + 1e-6, "{v:?} -> {r:?}");
             }
         }
+    }
+
+    #[test]
+    fn flat_normal_weights_are_a_third() {
+        let e = flat_irradiance([1.0; 3], [0.3, 0.6, 0.9], [1.0; 3], [1.0; 3]);
+        assert!((e[0] - 0.6).abs() < 1e-5, "{e:?}");
+        // A normal along basis 0 sees only its intensity.
+        let b0 = LIGHTMAP_BASIS[0];
+        let e = directional_irradiance([1.0; 3], [1.0, 0.0, 0.0], b0);
+        assert!((e[0] - 1.0).abs() < 1e-5, "{e:?}");
     }
 
     #[test]

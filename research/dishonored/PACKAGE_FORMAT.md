@@ -14,7 +14,8 @@ exercised.
 |---|---|
 | Open + decompress + names/imports/exports, all 470 base-game `.upk` | 470/470 (CONFIRMED) |
 | Export table ends exactly at `DependsOffset` (strict check in reader) | every package (CONFIRMED) |
-| UObject header + tagged properties, all non-script exports in the base game | 1,260,662 ok / 1,079 failed before the template-name fix (0.09%), see below |
+| UObject header + tagged properties, all non-script exports in the base game | 1,261,741 ok / 0 failed (2026-10-06, components by class hierarchy; was 1,079 failed before the template-name fix), see below |
+| MIC `FStaticParameterSet` (switches 32 B, component masks 44 B, normal parameters 29 B, terrain weights 32 B; ends the export) | 764 / 764 (Boyle Ext Env, Int Env, DishonoredGame; CONFIRMED) |
 | Same, all 17 `L_Boyle*` packages | 74,408 / 0 failures (CONFIRMED) |
 | `UStaticMesh` LOD0 decode, Boyle Ext | 405 / 0 failures (STRONG) |
 | `UTexture2D` decode incl. TFC streaming, Boyle Ext | 471 ok (STRONG) |

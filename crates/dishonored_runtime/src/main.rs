@@ -17,7 +17,7 @@
 //!            --from-launcher (set by the launcher: window from the settings, Esc menu returns)
 //!   rendering (all on by default; for before/after comparisons):
 //!            --no-lightmaps --no-materials --no-fx --no-dynamic-lights --no-fog
-//!            --no-post --no-sky, or --baseline for all of them (diffuse-only renderer
+//!            --no-post --no-sky (and --lightmap-specular to enable the specular term), or --baseline for all of them (diffuse-only renderer
 //!            with the placeholder sun/ambient)
 //!   harness: --script FILE --out DIR --control PORT --record DIR --record-every N
 //!            --record-fps F --exit-after SECONDS --size WxH
@@ -33,6 +33,7 @@ mod effects;
 mod harness;
 mod hud;
 mod input_map;
+mod ark_post;
 mod atmosphere;
 mod audio;
 mod level;
@@ -203,6 +204,7 @@ fn main() {
     .insert_resource(audio::global_volume())
     .add_plugins(FrameTimeDiagnosticsPlugin::default())
     .add_plugins(MaterialPlugin::<map_render::BakedMaterial>::default())
+    .add_plugins(ark_post::ArkPostPlugin)
     .add_plugins(bevy::diagnostic::EntityCountDiagnosticsPlugin::default())
     .insert_resource(ClearColor(Color::srgb(0.08, 0.09, 0.12)))
     // Placeholder ambient; with real lights it only fills non-lightmapped meshes at night level.

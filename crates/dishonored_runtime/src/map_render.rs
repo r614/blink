@@ -33,6 +33,9 @@ pub struct RenderFeatures {
     pub sky: bool,
     /// Debug: white albedo so only lighting is visible (`--debug-lighting`).
     pub debug_lighting: bool,
+    /// View-dependent specular from the directional lightmap (the original base pass's
+    /// lightmap specular term).
+    pub lightmap_specular: bool,
 }
 
 impl RenderFeatures {
@@ -48,6 +51,10 @@ impl RenderFeatures {
             post: on("--no-post"),
             sky: on("--no-sky"),
             debug_lighting: has("--debug-lighting"),
+            // Off by default: the term is decoded exactly, but its runtime strength
+            // (`SpecularOverrideParameter`, U-320) is unknown and full strength blows flat roofs and
+            // gravel out to white. `--lightmap-specular` turns it on for comparison.
+            lightmap_specular: !base && has("--lightmap-specular"),
         }
     }
 }
@@ -103,8 +110,33 @@ pub fn light_unit() -> f32 {
     1.0 / bevy::camera::Exposure::default().exposure()
 }
 
-pub fn lightmap_image(l: &LightmapAtlas) -> Image {
-    let data: Vec<u8> = l.texels.iter().flat_map(|t| t.to_le_bytes()).collect();
+/// Which plane of a lightmap atlas to upload.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LightmapPlane {
+    /// Scaled average colour (the directional shader's `color`).
+    Color,
+    /// Scaled basis intensities (the directional shader's `dir`).
+    Directional,
+    /// Irradiance for the unperturbed normal, for Bevy's own per-entity lightmaps.
+    Flat,
+}
+
+pub fn lightmap_image(l: &LightmapAtlas, plane: LightmapPlane) -> Image {
+    use dishonored_assets::lightmap::{directional_irradiance, pack_rgb9e5, unpack_rgb9e5};
+    let texels: Vec<u32> = match plane {
+        LightmapPlane::Color => l.texels.clone(),
+        LightmapPlane::Directional if l.directional.len() == l.texels.len() => l.directional.clone(),
+        // Without directional data the colour plane is used with unit intensities.
+        LightmapPlane::Directional => vec![pack_rgb9e5([1.0; 3]); l.texels.len()],
+        LightmapPlane::Flat if l.directional.len() == l.texels.len() => l
+            .texels
+            .iter()
+            .zip(&l.directional)
+            .map(|(&c, &d)| if c == 0 { 0 } else { pack_rgb9e5(directional_irradiance(unpack_rgb9e5(c), unpack_rgb9e5(d), [0.0, 0.0, 1.0])) })
+            .collect(),
+        LightmapPlane::Flat => l.texels.clone(),
+    };
+    let data: Vec<u8> = texels.iter().flat_map(|t| t.to_le_bytes()).collect();
     let mut img = Image::new(
         Extent3d { width: l.width, height: l.height, depth_or_array_layers: 1 },
         TextureDimension::D2,
@@ -235,7 +267,8 @@ pub fn build_material(i: usize, m: &MaterialAsset, p: &MaterialParams, images: &
         mat.flip_normal_map_y = true;
     }
     if let Some(s) = p.specular {
-        let c = vector(p, "S_Specular_color").unwrap_or([1.0; 4]);
+        // The colour multiplies the specular map only when `S_Enable_Specular_color` is on.
+        let c = vector(p, "S_Specular_color").filter(|_| p.switch("S_Enable_Specular_color") != Some(false)).unwrap_or([1.0, 1.0, 1.0, 2.0]);
         mat.specular_tint_texture = Some(images[s].clone());
         mat.specular_tint = Color::linear_rgb(c[0], c[1], c[2]);
         mat.reflectance = (0.5 * c[3]).clamp(0.0, 1.0);
@@ -305,11 +338,17 @@ pub fn spawn_map(
             materials.add(build_material(i, m, p, &image_handles, features))
         })
         .collect();
-    let lightmap_handles: Vec<Handle<Image>> = if features.lightmaps {
-        map.lightmaps.iter().map(|l| images.add(lightmap_image(l))).collect()
+    let (lightmap_handles, directional_handles): (Vec<Handle<Image>>, Vec<Handle<Image>>) = if features.lightmaps {
+        map.lightmaps
+            .iter()
+            .map(|l| (images.add(lightmap_image(l, LightmapPlane::Color)), images.add(lightmap_image(l, LightmapPlane::Directional))))
+            .unzip()
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
+    // Flat-normal irradiance pages for geometry drawn with Bevy's own per-entity lightmaps
+    // (translucent and unmerged instances), built on first use.
+    let mut flat_handles: Vec<Option<Handle<Image>>> = vec![None; map.lightmaps.len()];
     let default_material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.6, 0.6, 0.6),
         cull_mode: None,
@@ -429,7 +468,7 @@ pub fn spawn_map(
             }
             if let Some(lm) = inst.lightmap.filter(|_| !is_sky && features.lightmaps && mesh.uv1.len() == mesh.positions.len()) {
                 e.insert(bevy::pbr::Lightmap {
-                    image: lightmap_handles[lm.atlas].clone(),
+                    image: flat_handles[lm.atlas].get_or_insert_with(|| images.add(lightmap_image(&map.lightmaps[lm.atlas], LightmapPlane::Flat))).clone(),
                     uv_rect: Rect::from_corners(lm.uv_min, lm.uv_max),
                     bicubic_sampling: false,
                 });
@@ -438,6 +477,18 @@ pub fn spawn_map(
         }
     }
     let n_batches = batches.len();
+    // Lightmap debugging (`DISHONORED_LIGHTMAP_DEBUG`): `nospec` drops the lightmap specular,
+    // `flat` ignores normal maps in the directional reconstruction.
+    let lm_debug = match std::env::var("DISHONORED_LIGHTMAP_DEBUG").as_deref() {
+        Ok("nospec") => 1.0,
+        Ok("flat") => 2.0,
+        Ok("lobe") => 3.0,
+        Ok("view") => 4.0,
+        Ok("normal") => 5.0,
+        Ok("diffuse") => 6.0,
+        Ok("dir") => 7.0,
+        _ => 0.0,
+    };
     let mut baked_cache: std::collections::HashMap<(u32, u32), Handle<BakedMaterial>> = std::collections::HashMap::new();
     // Build batch meshes (MikkTSpace tangents dominate) across all cores.
     let built: Vec<(BatchKey, Mesh)> = {
@@ -488,7 +539,19 @@ pub fn spawn_map(
                 let h = baked_cache.entry((key.material, atlas)).or_insert_with(|| {
                     let base = materials.get(&mat).cloned().unwrap_or_default();
                     let exposure = base.lightmap_exposure;
-                    baked.add(BakedMaterial { base, extension: BakedLightmap { params: Vec4::new(exposure, 0.0, 0.0, 0.0), lightmap: lightmap_handles[atlas as usize].clone() } })
+                    // Lightmap specular: colour = reflectance * 2 / a (see lightmap_ext.wgsl),
+                    // lobe exponent SP_Specular_Power + 1.
+                    let p = map.material_params.get(key.material as usize).filter(|p| features.materials && features.lightmap_specular && p.specular.is_some());
+                    let spec_scale = p.map(|_| 2.0 / (2.0 * base.reflectance).max(1e-3)).unwrap_or(0.0);
+                    let power = p.and_then(|p| scalar(p, "SP_Specular_Power")).unwrap_or(15.0).max(0.0) + 1.0;
+                    baked.add(BakedMaterial {
+                        base,
+                        extension: BakedLightmap {
+                            params: Vec4::new(exposure, if lm_debug == 1.0 { 0.0 } else { spec_scale }, power, lm_debug),
+                            lightmap: lightmap_handles[atlas as usize].clone(),
+                            directional: directional_handles[atlas as usize].clone(),
+                        },
+                    })
                 });
                 e.insert(MeshMaterial3d(h.clone()));
             }
@@ -575,6 +638,9 @@ pub struct BakedLightmap {
     #[texture(101)]
     #[sampler(102)]
     pub lightmap: Handle<Image>,
+    /// Basis intensities of the directional lightmap (same layout as `lightmap`).
+    #[texture(103)]
+    pub directional: Handle<Image>,
 }
 
 impl bevy::pbr::MaterialExtension for BakedLightmap {

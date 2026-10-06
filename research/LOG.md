@@ -1032,3 +1032,101 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Port changes:** `dishonored_audio::{bus, mixer, volumes}`, bus / effect decoding in `hirc` / `init`; the engine applies bus volumes, states, RTPCs, playback limits, ducking, per-object environment reverbs and Parametric EQ; the runtime imports the audio volumes (entry events, RTPCs, environments), sets `TimeDilation` from Bend Time and `Scale_RTPC` on contacts, consumes direct footfall notifies (`AnimSounds::footfall`) with the stride fallback only for pawns without footfalls, posts the Shadow Kill sound. Effects: original muzzle / Blink / Windblast / Shadow Kill systems at their sockets (`EffectSockets` from the animated pawns), impacts and blood from the contact system, orbit, point / line attractors, collision, velocity over life, trails / ribbons and beams, and a glow material for the untextured mesh emitters.
 - **Behaviour changes (before -> after):** every sound now goes through its bus chain (master -4 dB); dialogue ducks music and SFX by 8 dB; sounds in audio volumes get their environment's reverb tail; footstep volume scales with speed and steps at or below the contact minimum speed are silent; the pistol flash is the player's / pawn's own muzzle system at the gun's `Spitfire` socket instead of `Ps_Pistol_Blast` in front of the pawn; volumetric light cones and glow spheres are drawn.
 - **Unknowns:** U-160, U-162, U-164, U-165, U-304 resolved; U-161, U-163 updated; new U-300 (options -> volume parameters), U-301 (attacker query filter), U-302 (environment assignment), U-303 (DSP algorithms).
+
+## 2026-10-06: Level rendering from the original shaders (lightmaps, static switches, DisFog, ArkPp)
+
+- **Question:** What do the original's shaders and parameter setters compute for directional
+  lightmaps, material permutations, DisFog and the ArkPp post chain (U-026, U-027, U-028)?
+- **Method:** `tools/package_dump/src/bin/shader_dump.rs` carves the D3D9 SM3 blobs out of
+  `RefShaderCache-PC-D3D-SM3.upk` (39,747 shaders after LZO inflation; the package holds one
+  `ShaderCache` export of 112 MB) and `GlobalShaderCache-PC-D3D-SM3.bin` (263) and lists their
+  constant tables; `fxc /dumpbin` (Windows SDK) disassembles them. Parameter setters found in
+  Ghidra from the shader-type registrations (static initialisers pushing the type name, e.g.
+  `FDisFogPixelShader30Layer` at 0x010786F4, constructor 0x0081C8D0, pixel shader vtable
+  0x01079F7C). Engine.upk UnrealScript (`ArkPpSettings`, `DisFogComponent`) via UELib.
+- **Directional lightmaps (U-026):** `TBasePassPixelShaderFDirectionalLightMapTexturePolicy*`
+  samples `LightMapTextures[0]` (NormalizedAverageColor) x `LightMapScale[0]` = colour and
+  `LightMapTextures[1]` (DirectionalMaxComponent) x `LightMapScale[1]` = three intensities along
+  the HL2 basis B0 = (0, 0.8165, 0.5774), B1 = (-0.7071, -0.4082, 0.5774), B2 = (0.7071, -0.4082,
+  0.5774) in tangent space (constants in every such shader). With N the normalised material
+  normal (`tex * 2 - 1`) and R = 2N(N.V) - V:
+  diffuse = DiffuseColor x colour x sum_i dir_i x max(saturate(N.B_i)^2, 1e-6);
+  specular = SpecularColor x colour x sum_i dir_i x max(saturate(R.B_i), 1e-6)^(SpecularPower + 1)
+  (shader 15459: `pow(x, 1 + UniformPixelScalars_0)`; a material with constant power 15 folds it
+  into four squarings, shader 1063). For the flat normal every diffuse weight is 1/3, which is the
+  old flat average. `SpecularOverrideParameter` (`x * w + rgb`) and `DiffuseOverrideParameter`
+  wrap the material colours; their runtime values were not traced (U-320).
+- **Static permutations (U-027):** a MIC with `bHasStaticPermutationResource` ends its export with
+  `FStaticParameterSet`: BaseMaterialId, switches (FName, UBOOL value, UBOOL override, GUID: 32 B),
+  component masks (FName, UBOOL R/G/B/A, override, GUID: 44 B), normal parameters (FName, BYTE
+  compression, UBOOL override, GUID: 29 B), terrain layer weights (32 B). 400/400 (Boyle Ext Env),
+  228/228 (Int Env), 136/136 (DishonoredGame) decode with an exact end check. Boyle Ext Env: 312
+  instances with `S_Enable_Specular` on and 57 off, 332/43 normal maps, 31 emissive, 39 cubemap,
+  25 bloom; specular masks RGB 307, single channel 58; emissive single channel 9; opacity R 51, G 10,
+  B 6. The cooked `generic_PMAT` (349 of Boyle Ext's 514 materials) keeps only its parameter and
+  switch expressions; the math between them is stripped, so it is read from the compiled shaders
+  (e.g. 15459: specular colour = the masked specular channel alone when `S_Enable_Specular_color`
+  is off, cubemap x mask added to the diffuse colour).
+- **DisFog (U-028):** `FDisFogPixelShader<N><M>Layer` (N layers <= 4, M with a LUT) is a
+  full-screen pass over the scene colour (depth in its alpha). Per layer i, with D = surface -
+  camera and dz its height component: t = saturate((h - camZ) / dz x HeightDensityFactor) for the
+  layer bottom and top, in-slab length L = |t_top - t_bottom| x |D|, fog f_i = saturate((L - Near) /
+  (Far - Near)) (or the 128-entry LUT at that coordinate) x Opacity, zero where the scene depth
+  exceeds `NoFogPlane`. Layer 0, if `SunPower > 0.1`, is weighted by max(cos(D, sun), 0)^SunPower.
+  out = colour x prod(1 - f_i) + sum f_i C_i + bloom parts. The setter (0x0081C940) passes Min =
+  Origin - camZ, Max = Origin + Height - camZ, Near, 1 / (Far - Near), NoFogPlane, the density
+  factor, colours, opacity and the negated sun direction (w = SunPower for a sun layer); with the
+  custom-transition flag, opacity x= x / fCustomTransitionHeight when the layer top is x < T above
+  the camera (not clamped). Boyle Ext layer 0 uses its LUT (`m_RawLut`, 128 bytes).
+- **ArkPp (U-028):** `ArkPpConfig` struct defaults (Engine.upk): exposure 0, gamma 1, focus 1000,
+  in-focus radius 300, far blur 0, colour balance 0, opacity 1, desaturation 0, grain / brightness /
+  contrast 0, bloom on, tint white, threshold 0, scale 1. `FArkPpDofLutBlenderPS` bakes a 16^3 LUT
+  indexed by sqrt(colour) (so the scene clamps at 1): x 2^m_Exposure (`pow(2.0, m_Exposure)`,
+  setter 0x0090ED00), pre-desaturation (Rec.709 luma), CrMgYb colour balance (shadow / highlight
+  curves `(1.075 - 1 / (c x 15.9375 + 1)) x 0.392`, midtone parabola x 0.2616), opacity, overlay,
+  post-desaturation, `^(m_GammaAdjustment / display gamma)` (display gamma from the options, default
+  1 / 0.4545), brightness, contrast `tan((m_GimpContrast + 1) pi / 4)` about 0.5.
+  `FArkPpDofUber_*PS`: blend towards a blurred quarter-size copy by `saturate((depth - Focus) /
+  InFocusRadius) x FarBlurAmount` (0x00914D40), then the LUT and film grain `+- m_FilmGrainNoise /
+  255`. Bloom is material driven (`B_Enable_Bloom` bloom parts, `TBloomPartMesh*`), tinted by
+  `gBloomTint` and added after fog.
+- **Port:** lightmap atlases carry both planes (`LightmapAtlas::directional`); `lightmap_ext.wgsl`
+  reconstructs diffuse and specular per pixel (tangent frame dP/du, dP/dv from screen derivatives,
+  so the UE3 -> Bevy mirroring cannot flip it); static switches gate the S_/E_/N_/DN_ slots and pick
+  mask channels (`MaterialChain::switch` / `mask_channel`, `MaterialParams::static_switches`);
+  `ark_post.rs` + `ark_post.wgsl` run DisFog, far DOF, the LUT maths and grain as one pass on the
+  main depth buffer, with Bevy tonemapping, distance fog and bloom off. `--no-lightmap-specular`
+  and a fidelity config compare the lightmap specular term.
+- **Result:** `harness fidelity` before `scratchpad/k_out/fid_before/fidelity/full/*.png` (main) vs
+  after `scratchpad/k_out/fid_final/fidelity/*` (pairs per feature in its REPORT.md). Haze is much
+  weaker than the old linear fog (Boyle's street level is inside layer 0 only, ~2-10 % fog at
+  3-6 km of in-slab distance), the teal white-balance cast is gone, wet/glossy highlights appear
+  where the lightmap specular lines up with a basis direction (strongest on flat roofs seen at
+  about 35 deg, the basis elevation).
+- **Confidence:** CONFIRMED for the shader maths and the static parameter layout; LIKELY for the
+  parameter mapping where it came from the setters' field order (DisFog flag bits, sun layer);
+  open: runtime override parameters (U-320), DisFog layer selection and the negative transition
+  opacity (U-321), lightmap/texture sRGB sampling (U-322), bloom parts (U-323), dominant-light
+  distance-field shadows (U-324), DOF downsample and blur kernel (U-325).
+
+## 2026-10-06: Level data: Ext/Int frame, BSP, the last property-parse failures (U-006, U-007, U-014)
+
+- **U-006:** the travel player starts pair up at the same height on both sides of the mansion
+  wall, facing away from it: Ext `PlayerStart_1` (-2663, -1879, 98, yaw 180) / Int `PlayerStart_3`
+  (-2013, -1848, 113, yaw 0); Ext `PlayerStart_3` (1355, 1445, 93) / Int `PlayerStart_4` (1715, 1295,
+  113); Ext `PlayerStart_4` (-1775, -1940, 1113) / Int `PlayerStart_5` (-1385, -1895, 1113). No
+  static mesh is placed identically in both maps (81 shared meshes, nearest pair 271 uu apart), so
+  the maps do not duplicate geometry; together with the doors (BOYLE_MISSION.md) the frames are
+  the same (offset 0). STRONG.
+- **U-007:** `L_Boyle_Int_*` like Ext: every level `Model` belongs to the level or to volumes
+  (blocking, audio, nav bounds, triggers, water, stealth, hideout, tether, possession); no walkable
+  BSP in either map, so nothing to add to rendering or collision.
+- **U-014:** the 88 remaining failures over all 470 packages were class-default subobjects whose
+  component-ness the name rule got wrong: `DisActivePowerComponent_*`, `ArkComponentContainer`,
+  `RB_Handle`, `DisDLC*` powers are components without the `Component` suffix (TemplateOwnerClass,
+  TemplateName, NetIndex, then tags), while `DisTweaks_GrenadeComponent` and
+  `DisAnimStateComponent` are plain objects (NetIndex, then tags); plus Engine's
+  `Default__DominantDirectionalLightComponent` / `Default__DominantSpotLightComponent`, which have
+  no `DominantLightShadowMap` array. `is_component_class` now walks the super chain of classes the
+  package defines (imports: name rule plus Engine's `ApexComponentBase`, `ArkComponentContainer`,
+  `RB_Handle`, `RB_Spring`). `package_scan --props`: 1,261,653 ok / 88 failed -> 1,261,741 ok / 0.
