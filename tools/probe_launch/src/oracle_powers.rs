@@ -232,7 +232,17 @@ pub fn windblast(c: &mut Client, o: &Opts) -> Result<()> {
     c.watch(&[])?;
     c.watch_abs(&[])?;
     println!("NPC {npc:#x} at {:.0} uu (horizontal {:.0}), press at {t_press:.3}", ((nl[0] - me[0]).powi(2) + (nl[1] - me[1]).powi(2) + (nl[2] - me[2]).powi(2)).sqrt(), hdist(nl, me));
+    // The blast's origin and direction (m_vOrigin +0xA4, m_vDirection +0xB0), and per hit the
+    // distance from the origin to the hit location (stack args 2..4 of the damage path).
+    let origin = lab::read_vec(c, comp + 0xa4)?;
+    let dir = lab::read_vec(c, comp + 0xb0)?;
+    println!("blast origin ({:.1}, {:.1}, {:.1}) direction ({:.3}, {:.3}, {:.3})", origin[0], origin[1], origin[2], dir[0], dir[1], dir[2]);
     for r in &recs {
+        let hit = [f32::from_bits(r.args[2]), f32::from_bits(r.args[3]), f32::from_bits(r.args[4])];
+        let d3 = ((hit[0] - origin[0]).powi(2) + (hit[1] - origin[1]).powi(2) + (hit[2] - origin[2]).powi(2)).sqrt();
+        let pawn_loc = lab::read_vec(c, r.ecx + ACTOR_LOCATION).unwrap_or([f32::NAN; 3]);
+        let dp = ((pawn_loc[0] - origin[0]).powi(2) + (pawn_loc[1] - origin[1]).powi(2) + (pawn_loc[2] - origin[2]).powi(2)).sqrt();
+        println!("  hit location ({:.1}, {:.1}, {:.1}): {d3:.1} uu from the origin (horizontal {:.1}); pawn now {dp:.1}", hit[0], hit[1], hit[2], hdist(hit, origin));
         let dt = c.read_u32(r.args[6]).ok().and_then(|_| c.name_of(r.args[6]).ok()).unwrap_or_default();
         println!(
             "  damage {:.3} s after the press: pawn {:#x}{} amount {} momentum ({:.0}, {:.0}, {:.0}) |m| {:.0} health {} type {}",

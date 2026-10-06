@@ -20,6 +20,14 @@ fn i32le(b: &[u8], off: usize) -> i32 {
     b.get(off..off + 4).map(|w| i32::from_le_bytes(w.try_into().unwrap())).unwrap_or(0)
 }
 
+/// Face `target` (an NPC's location) from `me` (the player's): yaw, and the pitch from the eye
+/// (64 uu above the player's centre) to the NPC's chest (30 uu above its centre).
+pub fn aim_at(c: &mut Client, me: [f32; 3], target: [f32; 3]) -> Result<()> {
+    let h = hdist(me, target).max(1.0);
+    let pitch = ((target[2] + 30.0) - (me[2] + 64.0)).atan2(h).to_degrees();
+    set_view(c, pitch, (target[1] - me[1]).atan2(target[0] - me[0]).to_degrees())
+}
+
 pub fn damage_hook(c: &mut Client) -> Result<u32> {
     Ok(c.hook_set(FN_PAWN_DAMAGE.0, FN_PAWN_DAMAGE.1, 7, 10_000, &[HookDeref::arg(0, 0, 4), HookDeref::arg(5, 0, 12), HookDeref::ecx(PAWN_HEALTH, 4)])?)
 }
@@ -57,13 +65,22 @@ pub fn sword(c: &mut Client, o: &Opts) -> Result<()> {
     let at = [nl[0] + yaw.cos() * dist, nl[1] + yaw.sin() * dist, nl[2] + 20.0];
     place(c, at)?;
     let me = lab::read_vec(c, p + ACTOR_LOCATION)?;
-    set_view(c, 0.0, (nl[1] - me[1]).atan2(nl[0] - me[0]).to_degrees())?;
+    aim_at(c, me, nl)?;
     // Full health for both.
     let hm = lab::read_i32(c, p + 0x348)?;
     c.write(p + PAWN_HEALTH, &hm.to_le_bytes())?;
     c.wait_ticks(10)?;
     println!("NPC {npc:#x} health {}/{}, horizontal distance {:.0}", lab::read_i32(c, npc + PAWN_HEALTH)?, lab::read_i32(c, npc + 0x348)?, hdist(nl, lab::read_vec(c, p + ACTOR_LOCATION)?));
     let h = damage_hook(c)?;
+    // Script-side damage and death events (TakeDamage is a script event; the native damage
+    // path above is the player's).
+    let mut evf = Vec::new();
+    for f in ["DishonoredNPCPawn.TakeDamage", "DishonoredPawn.TakeDamage", "Pawn.TakeDamage", "Pawn.Died", "DishonoredPawn.Died", "DishonoredNPCPawn.Died", "Controller.NotifyTakeHit"] {
+        if let Some(a) = c.find(f, "Function")?.first() {
+            evf.push(*a);
+        }
+    }
+    c.event_trace(&evf, 52, 10_000)?;
     c.watch(&[])?;
     c.watch_abs(&[(npc + PAWN_HEALTH, 4), (npc + ACTOR_LOCATION, 12)])?;
     c.sample_start(1_000_000)?;
@@ -75,7 +92,7 @@ pub fn sword(c: &mut Client, o: &Opts) -> Result<()> {
         // Keep facing the NPC.
         let nl = lab::read_vec(c, npc + ACTOR_LOCATION)?;
         let me = lab::read_vec(c, p + ACTOR_LOCATION)?;
-        set_view(c, 0.0, (nl[1] - me[1]).atan2(nl[0] - me[0]).to_degrees())?;
+        aim_at(c, me, nl)?;
         let t = world_time(c)? - t0;
         let _ = writeln!(log, "press,{t:.3},swing {k} at {:.0} uu", hdist(nl, me));
         c.key("LeftMouseButton", true)?;
@@ -99,7 +116,7 @@ pub fn sword(c: &mut Client, o: &Opts) -> Result<()> {
         while world_time(c)? < until && real.elapsed().as_secs_f32() < defend * 20.0 + 10.0 {
             let nl = lab::read_vec(c, npc + ACTOR_LOCATION)?;
             let me = lab::read_vec(c, p + ACTOR_LOCATION)?;
-            set_view(c, 0.0, (nl[1] - me[1]).atan2(nl[0] - me[0]).to_degrees())?;
+            aim_at(c, me, nl)?;
             c.wait_ticks(2)?;
         }
         if block {
@@ -114,6 +131,36 @@ pub fn sword(c: &mut Client, o: &Opts) -> Result<()> {
     print!("{log}");
     let mut dmg = String::from("time,who,amount,health_before,mx,my,mz,instigator,type\n");
     print_damage(c, &recs, t0, p, npc, &mut dmg)?;
+    let evs = c.event_fetch()?;
+    c.event_trace(&[], 0, 0)?;
+    let mut ev = String::from("time,function,object,damage,instigator,hx,hy,hz,mx,my,mz,type\n");
+    for e in &evs {
+        let f = c.name_of(e.func)?.rsplit(' ').next().unwrap_or("").to_string();
+        let o_name = c.name_of(e.object)?.rsplit('.').next().unwrap_or("").to_string();
+        let b = &e.parms;
+        let line = if f.ends_with("TakeDamage") {
+            let inst = u32::from_le_bytes(b[4..8].try_into().unwrap());
+            let dt = u32::from_le_bytes(b[32..36].try_into().unwrap());
+            format!(
+                "{:.4},{f},{o_name},{},{},{:.0},{:.0},{:.0},{:.0},{:.0},{:.0},{}",
+                e.time - t0,
+                i32le(b, 0),
+                if inst == 0 { "-".into() } else { c.name_of(inst)?.rsplit('.').next().unwrap_or("").to_string() },
+                f32le(b, 8),
+                f32le(b, 12),
+                f32le(b, 16),
+                f32le(b, 20),
+                f32le(b, 24),
+                f32le(b, 28),
+                if dt == 0 { "-".into() } else { c.name_of(dt)?.rsplit('.').next().unwrap_or("").to_string() }
+            )
+        } else {
+            format!("{:.4},{f},{o_name},,,,,,,,,", e.time - t0)
+        };
+        println!("  event {line}");
+        let _ = writeln!(ev, "{line}");
+    }
+    o.save("sword_events.csv", &ev)?;
     let mut hl = String::from("time,npc_health,player_health\n");
     let mut last = (i32::MIN, i32::MIN);
     for x in &s {

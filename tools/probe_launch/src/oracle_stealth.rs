@@ -97,6 +97,14 @@ pub fn detect(c: &mut Client, o: &Opts) -> Result<()> {
             reset_attention(c, info)?;
             c.watch_abs(&[(info + ATTN_ACC, 16), (info + ATTN_LEVEL, 1), (info + ATTN_FLAGS, 4), (info + ATTN_LOS_DIST, 24), (vis + VIS_VALUES, 20), (npc + ACTOR_LOCATION, 12)])?;
             c.sample_start(1_000_000)?;
+            // --move strafe|sprint: strafe right (D, with LeftShift) while sampling.
+            let mv = o.rest.iter().position(|a| a == "--move").and_then(|i| o.rest.get(i + 1)).cloned().unwrap_or_default();
+            if mv == "strafe" || mv == "sprint" {
+                c.key("D", true)?;
+            }
+            if mv == "sprint" {
+                c.key("LeftShift", true)?;
+            }
             let t0 = world_time(c)?;
             let real = std::time::Instant::now();
             while world_time(c)? < t0 + secs {
@@ -106,6 +114,8 @@ pub fn detect(c: &mut Client, o: &Opts) -> Result<()> {
                 }
             }
             let s = c.sample_fetch()?;
+            c.key("D", false)?;
+            c.key("LeftShift", false)?;
             c.watch_abs(&[])?;
             if stance == "crouch" {
                 c.key("C", true)?;

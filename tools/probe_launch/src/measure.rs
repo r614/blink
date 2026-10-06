@@ -164,10 +164,20 @@ pub fn run(args: &[String]) -> Result<()> {
 
 /// Main menu -> Boyle exterior, in control of Corvo.
 fn boot(c: &mut Client) -> Result<()> {
-    wait_for(c, "the front-end map", Duration::from_secs(240), |s| s.get("map").is_some_and(|m| m == "DishonoredGameFull_P") && s.get("presents").and_then(|p| p.parse::<u32>().ok()).unwrap_or(0) > 200)?;
-    println!("front end up; opening L_Boyle_Ext_P");
-    c.console("open L_Boyle_Ext_P")?;
-    wait_for(c, "L_Boyle_Ext_P", Duration::from_secs(300), |s| s.get("map").is_some_and(|m| m == "L_Boyle_Ext_P"))?;
+    let st = status(c)?;
+    if st.get("map").is_some_and(|m| m == "L_Boyle_Ext_P") {
+        // Already in the level (e.g. after the player died): open it again and wait for the
+        // new pawn.
+        let old = st.get("pawn").cloned().unwrap_or_default();
+        println!("reopening L_Boyle_Ext_P");
+        c.console("open L_Boyle_Ext_P")?;
+        wait_for(c, "the reloaded level", Duration::from_secs(300), |s| s.get("map").is_some_and(|m| m == "L_Boyle_Ext_P") && s.get("pawn").is_some_and(|p| *p != old && p != "0x0"))?;
+    } else {
+        wait_for(c, "the front-end map", Duration::from_secs(240), |s| s.get("map").is_some_and(|m| m == "DishonoredGameFull_P") && s.get("presents").and_then(|p| p.parse::<u32>().ok()).unwrap_or(0) > 200)?;
+        println!("front end up; opening L_Boyle_Ext_P");
+        c.console("open L_Boyle_Ext_P")?;
+        wait_for(c, "L_Boyle_Ext_P", Duration::from_secs(300), |s| s.get("map").is_some_and(|m| m == "L_Boyle_Ext_P"))?;
+    }
     println!("level loaded; dismissing the briefing");
     // Skipping the start screen leaves LocalPlayer.ControllerId (+0x5C) at -1, and the
     // viewport client then routes no key to the player: claim controller 0 like the start

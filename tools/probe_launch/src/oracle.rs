@@ -80,12 +80,18 @@ fn i32le(b: &[u8], off: usize) -> i32 {
 pub fn player_item(c: &mut Client, class: &str) -> Result<u32> {
     let p = lab::pawn(c)?;
     let inv = c.read_u32(p + PAWN_INVENTORY)?;
+    // Prefer the equipped instance (`m_CurSocket` +0x59 = ItemSocket_Equipped): giving an
+    // item that is already held leaves a second, unequipped copy.
+    let mut first = None;
     for a in c.find("", class)? {
         if c.read_u32(a + 0x54).ok() == Some(inv) {
-            return Ok(a);
+            if c.read(a + 0x59, 1)?.first() == Some(&1) {
+                return Ok(a);
+            }
+            first.get_or_insert(a);
         }
     }
-    bail!("the player holds no {class}")
+    first.with_context(|| format!("the player holds no {class}"))
 }
 
 pub fn world_time(c: &mut Client) -> Result<f32> {
@@ -135,7 +141,10 @@ fn port_angle(r: f64) -> f64 {
 }
 
 pub fn gun(c: &mut Client, o: &Opts) -> Result<()> {
-    let pistol = player_item(c, "DishonoredWepPistol").context("give the pistol first: lab give Twk_Inv_PistolCorvo")?;
+    // --weapon crossbow: the crossbow (DisWepCrossbow, minimum dispersion 0) instead of the pistol.
+    let crossbow = o.rest.iter().position(|a| a == "--weapon").and_then(|i| o.rest.get(i + 1)).is_some_and(|w| w == "crossbow");
+    let (class, dmin) = if crossbow { ("DisWepCrossbow", 0.0f32) } else { ("DishonoredWepPistol", 15.0f32) };
+    let pistol = player_item(c, class).context("give the weapon first: lab give Twk_Inv_PistolCorvo / Twk_Inv_CrossbowCorvo")?;
     let pc = lab::pc(c)?;
     let cam = c.read_u32(pc + PC_CAMERA)?;
     let fov = c.read_f32(cam + CAMERA_POV_FOV)?;
@@ -177,7 +186,7 @@ pub fn gun(c: &mut Client, o: &Opts) -> Result<()> {
             let t = Instant::now();
             loop {
                 let b = c.read(pistol + RANGED_LOADED, 12)?;
-                if i32le(&b, 0) > 0 && (f32le(&b, 8) - 15.0).abs() < 0.01 {
+                if i32le(&b, 0) > 0 && (f32le(&b, 8) - dmin).abs() < 0.01 {
                     break;
                 }
                 if t.elapsed() > Duration::from_secs(8) {
@@ -292,7 +301,7 @@ pub fn gun(c: &mut Client, o: &Opts) -> Result<()> {
     o.save("gun_samples.csv", &scsv)?;
     for l in &loads {
         let after: Vec<_> = samples.iter().filter(|s| s.time_seconds >= l.time && s.extra.len() >= 8).collect();
-        let settled = after.iter().find(|s| (f32le(&s.extra, 4) - 15.0).abs() < 0.01).map(|s| s.time_seconds - l.time);
+        let settled = after.iter().find(|s| (f32le(&s.extra, 4) - dmin).abs() < 0.01).map(|s| s.time_seconds - l.time);
         // Slope while narrowing: the first two samples strictly between max and min.
         let mid: Vec<_> = after.iter().filter(|s| { let d = f32le(&s.extra, 4); d < 44.9 && d > 15.1 }).take(2).collect();
         let slope = if mid.len() == 2 { (f32le(&mid[0].extra, 4) - f32le(&mid[1].extra, 4)) / (mid[1].time_seconds - mid[0].time_seconds) } else { f32::NAN };

@@ -162,6 +162,44 @@ pub fn run(args: &[String]) -> Result<()> {
         "give" => give(&mut c, a(1), a(2) != "noequip"),
         "power" => power(&mut c, a(1), a(2).parse().unwrap_or(1)),
         "equip" => equip(&mut c, a(1), a(2).parse().unwrap_or(1)),
+        "setup" => {
+            // The measurement kit: tutorials off (`DisGlobalUIManager.m_bEnableTutorials` /
+            // `m_bEnableBaseTutorials`, +0x304 bits 3-4: a tutorial window pauses the world),
+            // the player kept alive (`DishonoredPawn.m_MinimumScriptedHealth` +0x594 = 1;
+            // damage is still applied and logged), pistol, sword, Blink and Windblast level 2,
+            // and the fixed time step (Hz, 0: off) given as the first argument.
+            for a in c.find("pGlobalUIManager", "DisGlobalUIManager")? {
+                if c.name_of(a)?.contains("PersistentLevel") {
+                    let v = c.read_u32(a + 0x304)? & !0x18;
+                    c.write(a + 0x304, &v.to_le_bytes())?;
+                }
+            }
+            let p = pawn(&mut c)?;
+            c.write(p + 0x594, &1i32.to_le_bytes())?;
+            give(&mut c, "Twk_Inv_PistolCorvo", true)?;
+            give(&mut c, "Twk_Inv_SwordCorvo", true)?;
+            power(&mut c, "Blink", 2)?;
+            power(&mut c, "Windblast", 2)?;
+            let hz: f64 = a(1).parse().unwrap_or(60.0);
+            if hz > 0.0 {
+                c.write(0x012696b0, &(1.0 / hz).to_le_bytes())?;
+                c.write(0x0141b27c, &1u32.to_le_bytes())?;
+            }
+            Ok(())
+        }
+        "fixedstep" => {
+            // GUseFixedTimeStep (0x0141B27C) and GFixedDeltaTime (0x012696B0, double): the
+            // engine's time update (0x009DDDF0) then advances every tick by the fixed step,
+            // as with -benchmark (which also drops the ini files and hangs at the menu).
+            let hz: f64 = a(1).parse().unwrap_or(0.0);
+            if hz > 0.0 {
+                c.write(0x012696b0, &(1.0 / hz).to_le_bytes())?;
+                c.write(0x0141b27c, &1u32.to_le_bytes())?;
+            } else {
+                c.write(0x0141b27c, &0u32.to_le_bytes())?;
+            }
+            Ok(())
+        }
         "cdo" => {
             println!("{:#010x}", cdo(&mut c, a(1))?);
             Ok(())
