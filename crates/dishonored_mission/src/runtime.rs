@@ -31,6 +31,10 @@ pub enum MissionEvent {
     TalkedBy { npc: String, player: u32 },
     /// A player picked option `index` (0-based) of the dialog choice shown to them.
     Choice { player: u32, index: usize },
+    /// A player took a pickup: actor name and the abstract item it gave (if any).
+    PickedUp { player: u32, pickup: String, item: Option<String> },
+    /// An NPC was knocked out (non-lethal). `npc` as in `NpcKilled`.
+    NpcKnockedOut { npc: Option<String>, by_player: bool, kind: NpcKind },
 }
 
 /// A line being spoken (replicated; the HUD shows the subtitle, clients play the VO).
@@ -103,6 +107,11 @@ pub struct MissionStats {
     pub player_deaths: u32,
     pub time: f32,
     pub total_npcs: u32,
+    /// NPCs knocked out by players (non-lethal; `clean_hands` stays true).
+    #[serde(default)]
+    pub knocked_out: u32,
+    #[serde(default)]
+    pub items_picked_up: u32,
 }
 
 impl MissionStats {
@@ -198,6 +207,8 @@ enum Ev {
     Arrived(String),
     ConvOutput { name: String, oneshot: Option<String> },
     ConvEnded { name: String, label: String },
+    PickedUp { pickup: String, item: Option<String> },
+    NpcKnockedOut(String),
 }
 
 /// The mission as seen by the conversation runner.
@@ -603,6 +614,19 @@ impl MissionState {
                     queue.push_back(Ev::Talk(npc.clone()));
                     self.talk_conversation(npc, Some(*player), &mut queue);
                 }
+                MissionEvent::PickedUp { pickup, item, .. } => {
+                    self.view.stats.items_picked_up += 1;
+                    queue.push_back(Ev::PickedUp { pickup: pickup.clone(), item: item.clone() });
+                }
+                MissionEvent::NpcKnockedOut { npc, by_player, .. } => {
+                    // Non-lethal: counts for the statistics, not for the kill-ratio chaos.
+                    if *by_player {
+                        self.view.stats.knocked_out += 1;
+                    }
+                    if let Some(n) = npc {
+                        queue.push_back(Ev::NpcKnockedOut(n.clone()));
+                    }
+                }
                 MissionEvent::Choice { player, index } => {
                     let (p, i) = (*player, *index);
                     self.with_conv(&mut queue, |r, env| {
@@ -725,6 +749,8 @@ impl MissionState {
             (Trigger::Remote(n), Ev::Remote(x)) => n == x,
             (Trigger::Use(m), Ev::Use(x)) => m == x,
             (Trigger::Talk(n), Ev::Talk(x)) => n == x,
+            (Trigger::PickedUp(w), Ev::PickedUp { pickup, item }) => w.eq_ignore_ascii_case(pickup) || item.as_deref().is_some_and(|i| w.eq_ignore_ascii_case(i) || w.eq_ignore_ascii_case(i.rsplit('.').next().unwrap_or(i))),
+            (Trigger::NpcKnockedOut(n), Ev::NpcKnockedOut(x)) => n == x,
             (Trigger::Arrived(m), Ev::Arrived(x)) => m.eq_ignore_ascii_case(x),
             (Trigger::ConversationOutput(want), Ev::ConvOutput { name, oneshot }) => match want.split_once('/') {
                 Some((os, n)) => n.eq_ignore_ascii_case(name) && oneshot.as_deref().is_some_and(|o| o.eq_ignore_ascii_case(os.rsplit(':').next().unwrap_or(os))),

@@ -236,6 +236,7 @@ impl<'w> GameServer<'w> {
                     players: self.game.world().players.clone(),
                     projectiles: self.game.world().projectiles.clone(),
                     windblasts: self.game.world().windblasts.clone(),
+                    extras: self.game.world().extras(),
                     matchv: matchv.clone(),
                     private: self.game.target_info(self.clients[i].id),
                     events: std::mem::take(&mut self.clients[i].pending_events),

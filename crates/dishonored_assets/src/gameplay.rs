@@ -149,6 +149,7 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
         crawl_half_height: l.f(&corvo, CORVO, "m_fCrouchHeight", "movement.crawl_half_height")?,
         slide_time: l.f(&corvo, CORVO, "m_fSlideTime", "movement.slide_time")?,
         slide_deactivate_angle: l.f(&corvo, CORVO, "m_fSlideVelocityDeactivateAngle", "movement.slide_deactivate_angle")?,
+        slide_percent_not_cancelable: l.f(&corvo, CORVO, "m_fSlidePercentNotCancelable", "movement.slide_percent_not_cancelable")?,
         lean: {
             let cam = Ini::load_layered(&content.root, "Camera");
             let sec = "DishonoredGame.DishonoredCamera_Lean";
@@ -292,7 +293,9 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
     let mut ai = crate::ai_config::load_ai_config(content, &[]);
     ai.player_visibility.ground_speed_sprint = movement.sprint_speed;
 
+    let items = crate::items_config::load_items_config(content, &db, &mut l.prov);
     Ok(GameplayConfig {
+        items,
         movement,
         vitals,
         blink,

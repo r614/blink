@@ -27,6 +27,8 @@ pub struct LocalInput {
     pub enabled: bool,
     /// A dialog choice is open for the local player: number keys pick options instead of powers.
     pub choice_open: bool,
+    /// One-shot item action (`dishonored_sim::input::actions`) latched until the next tick.
+    pub action: u8,
 }
 
 impl LocalInput {
@@ -37,8 +39,9 @@ impl LocalInput {
             self.left_hand = o.left_hand;
             return o;
         }
-        let i = PlayerInput { tick: 0, forward: self.forward, right: self.right, yaw: self.yaw, pitch: self.pitch, buttons: self.held | self.latched, left_hand: self.left_hand };
+        let i = PlayerInput { tick: 0, forward: self.forward, right: self.right, yaw: self.yaw, pitch: self.pitch, buttons: self.held | self.latched, left_hand: self.left_hand, action: self.action };
         self.latched = 0;
+        self.action = 0;
         i
     }
 }
@@ -108,6 +111,12 @@ pub fn gather_input(
     }
     local.latched |= held & !local.held;
     local.held = held;
+    // `Dis_ConsumeElixir` (GBA_HealthElixir / GBA_ManaElixir).
+    if bind.just_pressed("GBA_HealthElixir", &keys, &mouse, wheel) {
+        local.action = dishonored_sim::input::actions::DRINK_HEALTH;
+    } else if bind.just_pressed("GBA_ManaElixir", &keys, &mouse, wheel) {
+        local.action = dishonored_sim::input::actions::DRINK_MANA;
+    }
     if local.choice_open {
         for (k, b) in [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4].into_iter().zip(buttons::CHOICES) {
             if keys.just_pressed(k) {
@@ -122,6 +131,11 @@ pub fn gather_input(
         ("GBA_Shortcut_2", LeftHand::DarkVision),
         ("GBA_Shortcut_3", LeftHand::Pistol),
         ("GBA_Shortcut_4", LeftHand::Crossbow),
+        ("GBA_Shortcut_5", LeftHand::Possession),
+        ("GBA_Shortcut_6", LeftHand::BendTime),
+        ("GBA_Shortcut_7", LeftHand::DevouringSwarm),
+        ("GBA_Shortcut_8", LeftHand::Grenade),
+        ("GBA_Shortcut_9", LeftHand::SpringRazor),
     ] {
         if bind.just_pressed(action, &keys, &mouse, wheel) {
             local.left_hand = h;

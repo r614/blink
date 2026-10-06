@@ -226,7 +226,8 @@ impl NetClient {
         }
 
         // Rebase and replay unacknowledged inputs.
-        self.predicted = WorldState { tick: s.tick, players: s.players, projectiles: s.projectiles, next_projectile_id: 0, windblasts: s.windblasts };
+        self.predicted = WorldState { tick: s.tick, players: s.players, projectiles: s.projectiles, next_projectile_id: 0, windblasts: s.windblasts, ..Default::default() };
+        self.predicted.set_extras(s.extras);
         self.history.clear();
         let pending: Vec<PlayerInput> = self.pending.iter().copied().collect();
         for i in pending {

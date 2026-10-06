@@ -56,6 +56,7 @@
     },
     "slide_time": 1.1,
     "slide_deactivate_angle": 25.0,
+    "slide_percent_not_cancelable": 0.5,
     "lean": {
       "height_pct": 2.0,
       "max_angle": 15.0,
@@ -3331,20 +3332,37 @@
       "seeing_scalar_player": 1.0,
       "seeing_scalar_npc": 10.0,
       "distance_to_lose_sight": 300.0,
-      "distance_points": [
-        [
-          0.55,
-          0.0
-        ],
-        [
-          0.875,
-          0.8
-        ],
-        [
-          0.93,
-          2.0
+      "distance_tuning": {
+        "multiply": false,
+        "scalar": 3.0,
+        "bias": 0.0,
+        "exponent": 4.0,
+        "use_points": true,
+        "points": [
+          [
+            0.55,
+            0.0
+          ],
+          [
+            0.875,
+            0.8
+          ],
+          [
+            0.93,
+            2.0
+          ]
         ]
-      ]
+      },
+      "clamp_target_visibility": true,
+      "stopping_variance": [
+        0.025,
+        0.025,
+        0.025,
+        0.025
+      ],
+      "can_bust": 2061376,
+      "seeing_scalar_dead_npc": 10.0,
+      "min_range_unsighted_busted_proxy": 250.0
     },
     "guard_suspecting": {
       "leak_rate": 0.015,
@@ -3413,20 +3431,37 @@
       "seeing_scalar_player": 1.0,
       "seeing_scalar_npc": 10.0,
       "distance_to_lose_sight": 300.0,
-      "distance_points": [
-        [
-          0.55,
-          0.0
-        ],
-        [
-          0.875,
-          0.8
-        ],
-        [
-          0.93,
-          2.0
+      "distance_tuning": {
+        "multiply": false,
+        "scalar": 3.0,
+        "bias": 0.0,
+        "exponent": 4.0,
+        "use_points": true,
+        "points": [
+          [
+            0.55,
+            0.0
+          ],
+          [
+            0.875,
+            0.8
+          ],
+          [
+            0.93,
+            2.0
+          ]
         ]
-      ]
+      },
+      "clamp_target_visibility": true,
+      "stopping_variance": [
+        0.025,
+        0.025,
+        0.025,
+        0.025
+      ],
+      "can_bust": 2061376,
+      "seeing_scalar_dead_npc": 10.0,
+      "min_range_unsighted_busted_proxy": 250.0
     },
     "civilian_unsuspecting": {
       "leak_rate": 0.025,
@@ -3495,20 +3530,37 @@
       "seeing_scalar_player": 1.0,
       "seeing_scalar_npc": 10.0,
       "distance_to_lose_sight": 300.0,
-      "distance_points": [
-        [
-          0.55,
-          0.0
-        ],
-        [
-          0.875,
-          0.8
-        ],
-        [
-          0.93,
-          2.0
+      "distance_tuning": {
+        "multiply": false,
+        "scalar": 3.0,
+        "bias": 0.0,
+        "exponent": 4.0,
+        "use_points": true,
+        "points": [
+          [
+            0.55,
+            0.0
+          ],
+          [
+            0.875,
+            0.8
+          ],
+          [
+            0.93,
+            2.0
+          ]
         ]
-      ]
+      },
+      "clamp_target_visibility": true,
+      "stopping_variance": [
+        0.025,
+        0.025,
+        0.025,
+        0.025
+      ],
+      "can_bust": 2061376,
+      "seeing_scalar_dead_npc": 10.0,
+      "min_range_unsighted_busted_proxy": 250.0
     },
     "civilian_suspecting": {
       "leak_rate": 0.015,
@@ -3577,20 +3629,37 @@
       "seeing_scalar_player": 1.0,
       "seeing_scalar_npc": 10.0,
       "distance_to_lose_sight": 300.0,
-      "distance_points": [
-        [
-          0.55,
-          0.0
-        ],
-        [
-          0.875,
-          0.8
-        ],
-        [
-          0.93,
-          2.0
+      "distance_tuning": {
+        "multiply": false,
+        "scalar": 3.0,
+        "bias": 0.0,
+        "exponent": 4.0,
+        "use_points": true,
+        "points": [
+          [
+            0.55,
+            0.0
+          ],
+          [
+            0.875,
+            0.8
+          ],
+          [
+            0.93,
+            2.0
+          ]
         ]
-      ]
+      },
+      "clamp_target_visibility": true,
+      "stopping_variance": [
+        0.025,
+        0.025,
+        0.025,
+        0.025
+      ],
+      "can_bust": 2061376,
+      "seeing_scalar_dead_npc": 10.0,
+      "min_range_unsighted_busted_proxy": 250.0
     },
     "neutral": {
       "leak_rate": 2.0,
@@ -3659,20 +3728,37 @@
       "seeing_scalar_player": 1.0,
       "seeing_scalar_npc": 10.0,
       "distance_to_lose_sight": 300.0,
-      "distance_points": [
-        [
-          0.55,
-          0.0
-        ],
-        [
-          0.875,
-          0.8
-        ],
-        [
-          0.93,
-          2.0
+      "distance_tuning": {
+        "multiply": false,
+        "scalar": 3.0,
+        "bias": 0.0,
+        "exponent": 4.0,
+        "use_points": true,
+        "points": [
+          [
+            0.55,
+            0.0
+          ],
+          [
+            0.875,
+            0.8
+          ],
+          [
+            0.93,
+            2.0
+          ]
         ]
-      ]
+      },
+      "clamp_target_visibility": true,
+      "stopping_variance": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "can_bust": 2061376,
+      "seeing_scalar_dead_npc": 10.0,
+      "min_range_unsighted_busted_proxy": 250.0
     },
     "loudness_distances": [
       0.0,
@@ -3737,7 +3823,33 @@
         2.0
       ],
       "skirmish_inner": 2,
-      "skirmish_total": 3
+      "skirmish_total": 3,
+      "melee_contexts": [
+        {
+          "name": "DisItemContext_NPCAttackShort",
+          "cooldown": [
+            1.0,
+            3.0
+          ],
+          "inhibition": 2.0
+        },
+        {
+          "name": "DisItemContext_NPCAttackStepBack",
+          "cooldown": [
+            0.5,
+            2.0
+          ],
+          "inhibition": 1.0
+        },
+        {
+          "name": "DisItemContext_NPCAttackMedium",
+          "cooldown": [
+            3.0,
+            5.0
+          ],
+          "inhibition": 1.0
+        }
+      ]
     },
     "guard_attention_span": 3.0,
     "alarm_companion_range": 2000.0,
@@ -3747,6 +3859,40 @@
     "auto_glance_radius": 1000.0,
     "auto_look_radius": 400.0,
     "glance_time": 2.5,
+    "player_visibility": {
+      "light": {
+        "multiply": false,
+        "scalar": 0.1,
+        "bias": 0.0,
+        "exponent": 1.0,
+        "use_points": false,
+        "points": []
+      },
+      "speed": {
+        "multiply": false,
+        "scalar": 0.25,
+        "bias": 0.0,
+        "exponent": 1.0,
+        "use_points": false,
+        "points": [
+          [
+            0.0,
+            1.0
+          ]
+        ]
+      },
+      "bonus_autocrouching": -1.0,
+      "bonus_sneaking": 0.0,
+      "bonus_sliding": 0.0,
+      "bonus_standing": 0.0,
+      "bonus_walking": 0.0,
+      "bonus_sprinting": 0.0,
+      "bonus_swimming": -1.0,
+      "zero_speed_sneaking": true,
+      "light_darkest": 0.05,
+      "light_brightest": 1.0
+    },
+    "group_distance": 1000.0,
     "provenance": {
       "ai.civilian_suspecting": "fallback value (not in the loaded packages: Twk_Attn_Noncombatant_Sus.Twk_Attn_Noncombatant_Sus)",
       "ai.civilian_talking_loudness": "BrainTweaks_Civilian.m_TalkingLoudness = EAINoiseLoudness2 -> m_LoudnessDistanceArray[9]",
@@ -3755,16 +3901,1057 @@
       "ai.combat.skirmish": "DefaultAI.ini [DishonoredGame.DisGlobalCombatManager] m_InnerSkirmishCaps[1] / m_TotalSkirmishCaps[1] (Normal)",
       "ai.death_rattle_loudness": "Pwn_EliteGuard_*.m_DeathRattleLoudness = EAINoiseWhisper -> m_LoudnessDistanceArray[2]",
       "ai.glance": "DefaultNPC.ini [DishonoredGame.DishonoredNPCController]",
+      "ai.group_distance": "DefaultAI.ini [DishonoredGame.DishonoredGlobalAIManager] m_fGroupDistance",
       "ai.guard_suspecting": "Twk_Attn_Guard_Suspecting.Twk_Attn_Guard_Suspecting",
       "ai.guard_unsuspecting": "Twk_Attn_Guard_Unsuspecting.Twk_Attn_Guard_Unsuspecting",
       "ai.loudness_distances": "DefaultAI.ini [DishonoredGame.DisAINoiseManager] m_LoudnessDistanceArray",
       "ai.neutral": "Twk_Attn_Default_Neutral.Twk_Attn_Default_Neutral",
+      "ai.player_visibility": "Twk_PlayerVisibility.Twk_PlayerVisibility",
       "ai.reaction_delay": "DefaultAI.ini [DishonoredGame.DishonoredGlobalAIManager] m_ReactionDelay",
       "ai.search.cancel_investigate_wait": "AI_BehaviorTweaks_Search.TweaksBehavior_Search_Default",
       "ai.search.crumbs": "DefaultAI.ini [DishonoredGame.DishonoredSearchCrumbsComponent]",
       "ai.search.proximity": "TweaksBehavior_Search_Default.DisTweaks_AISubState_Investigate_0.m_fProximityThresholds",
       "ai.vision": "Twk_Vision_Default.Twk_Vision_Default"
     }
+  },
+  "items": {
+    "inventory": {
+      "ammo_capacity": [
+        10,
+        10,
+        10,
+        10,
+        10,
+        5,
+        5,
+        5
+      ],
+      "health_elixir_value": 40.0,
+      "mana_elixir_value": 50.0,
+      "max_health_elixirs": 10,
+      "max_mana_elixirs": 10,
+      "interact_distance": 200.0,
+      "choke_time": 1.5,
+      "choke_anim_time": 5.033,
+      "choke_hold_to_auto_carry": 0.2,
+      "assassinate_hold_to_auto_carry": 0.2,
+      "carry_ground_speed": 350.0,
+      "carry_jump_z": 800.0,
+      "throw_strength": 2000.0,
+      "crossbow_ranged_damage": 20.0,
+      "pistol_ranged_damage": 10.0,
+      "max_equipped_charms": 3,
+      "melee_ray_speed": [
+        400.0,
+        0.005,
+        1.5
+      ]
+    },
+    "possess": {
+      "mana_cost": 60.0,
+      "rune_costs": [
+        3,
+        5
+      ],
+      "range": [
+        1000.0,
+        2000.0
+      ],
+      "bend_time_extension": [
+        0.0,
+        4.0
+      ],
+      "cancel_cooldown": 1.0,
+      "magical_appearance_delay": 0.8,
+      "intro_duration": 1.1,
+      "warn_before_exit": 4.0,
+      "exit_fade": 0.8,
+      "npc": {
+        "duration": [
+          0.0,
+          15.0
+        ],
+        "required_level": 2,
+        "ground_speed": 300.0,
+        "awareness": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false
+        ],
+        "disallow": false
+      },
+      "rat": {
+        "duration": [
+          20.0,
+          30.0
+        ],
+        "required_level": 1,
+        "ground_speed": 300.0,
+        "awareness": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "disallow": false
+      }
+    },
+    "bend_time": {
+      "mana_cost": 60.0,
+      "rune_costs": [
+        2,
+        8
+      ],
+      "levels": [
+        {
+          "world_dilation": 0.15,
+          "player_dilation": 0.85,
+          "duration": 12.0,
+          "dilation_warmup": 0.15,
+          "dilation_cooldown": 0.25,
+          "projectile_early_wakeup": 0.25
+        },
+        {
+          "world_dilation": 0.0,
+          "player_dilation": 0.9,
+          "duration": 8.0,
+          "dilation_warmup": 0.15,
+          "dilation_cooldown": 0.25,
+          "projectile_early_wakeup": 0.25
+        }
+      ]
+    },
+    "swarm": {
+      "mana_cost": 40.0,
+      "rune_costs": [
+        3,
+        4
+      ],
+      "spawn_delay": 0.65,
+      "levels": [
+        {
+          "max_distance": 1500.0,
+          "duration": 30.0,
+          "rat_count": 30,
+          "detection_radius": 700.0,
+          "initial_damage_delay": 2.0,
+          "damage_interval": 0.5,
+          "damage_per_bite": 0.4,
+          "min_damage": 2.0,
+          "max_damage": 5.0,
+          "eat_startup": 1.5,
+          "eat_per_limb": 1.5,
+          "eat_delay_after_kill": 0.5
+        },
+        {
+          "max_distance": 1500.0,
+          "duration": 30.0,
+          "rat_count": 60,
+          "detection_radius": 700.0,
+          "initial_damage_delay": 2.0,
+          "damage_interval": 0.5,
+          "damage_per_bite": 0.4,
+          "min_damage": 2.0,
+          "max_damage": 5.0,
+          "eat_startup": 0.75,
+          "eat_per_limb": 0.75,
+          "eat_delay_after_kill": 0.0
+        }
+      ]
+    },
+    "shadow_kill": {
+      "delay": 0.0,
+      "fade_duration": 5.0,
+      "rune_costs": [
+        2,
+        4
+      ]
+    },
+    "gadgets": {
+      "springrazor": {
+        "arming_time": 0.5,
+        "detection_radius": 250.0,
+        "detection_height": 250.0,
+        "detonation_radius": 250.0,
+        "detonation_height": 250.0,
+        "trigger_reaction_time": 0.0,
+        "damage_reaction_time": 0.75,
+        "damage_delay": 0.35,
+        "max_damage_distance": 900.0,
+        "non_npc_damage": 5.0,
+        "immune_npc_damage": 50.0,
+        "impulse": 800.0,
+        "sensor_offset": 10.0
+      },
+      "grenade": {
+        "throw_speed": 2500.0,
+        "throw_angle": 5.0,
+        "gravity_mult": 1.0,
+        "fuse": 0.0,
+        "min_delay_after_hit": 0.5,
+        "bounciness": 0.3,
+        "floor_bounciness": 0.65,
+        "sticky": false,
+        "explosion": {
+          "radial_damage": 50.0,
+          "damage_radius": 600.0,
+          "full_damage_radius": 300.0,
+          "player_damage_radius": 600.0,
+          "player_full_damage_radius": 150.0,
+          "radial_momentum": 1500.0,
+          "extra_up_force": 500.0,
+          "attached_damage": 75.0
+        }
+      },
+      "sticky_grenade": {
+        "throw_speed": 2500.0,
+        "throw_angle": 5.0,
+        "gravity_mult": 1.0,
+        "fuse": 0.0,
+        "min_delay_after_hit": 0.5,
+        "bounciness": 0.3,
+        "floor_bounciness": 0.0,
+        "sticky": true,
+        "explosion": {
+          "radial_damage": 50.0,
+          "damage_radius": 600.0,
+          "full_damage_radius": 300.0,
+          "player_damage_radius": 600.0,
+          "player_full_damage_radius": 150.0,
+          "radial_momentum": 1500.0,
+          "extra_up_force": 500.0,
+          "attached_damage": 75.0
+        }
+      },
+      "bolt": {
+        "damage_mult": 1.0,
+        "speed_mult": 1.0,
+        "gravity_mult": 1.3,
+        "limb_damage_cap": 15.0,
+        "kill_on_headshot": true
+      },
+      "sleep_dart": {
+        "damage_mult": 1.25,
+        "speed_mult": 0.7,
+        "gravity_mult": 0.4,
+        "limb_damage_cap": 25.0,
+        "kill_on_headshot": false
+      },
+      "incendiary_bolt": {
+        "damage_mult": 2.5,
+        "speed_mult": 0.2,
+        "gravity_mult": 0.5,
+        "limb_damage_cap": 50.0,
+        "kill_on_headshot": false
+      },
+      "immolation_time": 0.5
+    },
+    "passive_powers": [
+      {
+        "name": "Vitality",
+        "levels": [
+          [
+            0,
+            []
+          ],
+          [
+            1,
+            [
+              {
+                "attribute": "Attribute_HealthMax",
+                "kind": "AddVal",
+                "value": 20.0
+              }
+            ]
+          ],
+          [
+            3,
+            [
+              {
+                "attribute": "Attribute_HealthMax",
+                "kind": "AddVal",
+                "value": 20.0
+              },
+              {
+                "attribute": "Attribute_HealthRegenLimit",
+                "kind": "AddVal",
+                "value": 20.0
+              },
+              {
+                "attribute": "Attribute_HealthRegenInitialDelay",
+                "kind": "SetVal",
+                "value": 5.0
+              }
+            ]
+          ]
+        ]
+      },
+      {
+        "name": "BloodThirsty",
+        "levels": [
+          [
+            0,
+            []
+          ],
+          [
+            2,
+            []
+          ],
+          [
+            3,
+            [
+              {
+                "attribute": "Attribute_AdrenalineMax",
+                "kind": "AddBasePercent",
+                "value": -20.0
+              }
+            ]
+          ]
+        ]
+      },
+      {
+        "name": "ShadowKill",
+        "levels": [
+          [
+            0,
+            []
+          ],
+          [
+            2,
+            []
+          ],
+          [
+            4,
+            []
+          ]
+        ]
+      },
+      {
+        "name": "Celerity",
+        "levels": [
+          [
+            0,
+            []
+          ],
+          [
+            2,
+            [
+              {
+                "attribute": "Attribute_JumpZ_PowerJump",
+                "kind": "AddVal",
+                "value": 1300.0
+              },
+              {
+                "attribute": "Attribute_PowerJumpFullStop_PROTOTYPE",
+                "kind": "SetVal",
+                "value": 1000.0
+              },
+              {
+                "attribute": "Attribute_FullStop_ExtraStopVel_PROTOTYPE",
+                "kind": "SetVal",
+                "value": 500.0
+              },
+              {
+                "attribute": "Attribute_HeldPowerJumpButtonTime_PROTOTYPE",
+                "kind": "SetVal",
+                "value": 0.4
+              },
+              {
+                "attribute": "Attribute_HeldPowerJumpAccel_PROTOTYPE",
+                "kind": "SetVal",
+                "value": 1800.0
+              },
+              {
+                "attribute": "Attribute_MaxSpeedBeforeFallingDamage",
+                "kind": "SetVal",
+                "value": 2550.0
+              },
+              {
+                "attribute": "Attribute_MaxSpeedBeforeFallingDeath",
+                "kind": "SetVal",
+                "value": 3500.0
+              }
+            ]
+          ],
+          [
+            3,
+            [
+              {
+                "attribute": "Attribute_JumpZ_PowerJump",
+                "kind": "AddVal",
+                "value": 1300.0
+              },
+              {
+                "attribute": "Attribute_PowerJumpFullStop_PROTOTYPE",
+                "kind": "AddVal",
+                "value": 1500.0
+              },
+              {
+                "attribute": "Attribute_FullStop_ExtraStopVel_PROTOTYPE",
+                "kind": "AddVal",
+                "value": 500.0
+              },
+              {
+                "attribute": "Attribute_HeldPowerJumpButtonTime_PROTOTYPE",
+                "kind": "SetVal",
+                "value": 0.4
+              },
+              {
+                "attribute": "Attribute_HeldPowerJumpAccel_PROTOTYPE",
+                "kind": "SetVal",
+                "value": 3000.0
+              },
+              {
+                "attribute": "Attribute_WaterSpeed",
+                "kind": "AddBasePercent",
+                "value": 10.0
+              },
+              {
+                "attribute": "Attribute_GroundSpeedSprint",
+                "kind": "AddBasePercent",
+                "value": 30.0
+              },
+              {
+                "attribute": "Attribute_LandAnimRate",
+                "kind": "AddBasePercent",
+                "value": 50.0
+              },
+              {
+                "attribute": "Attribute_MantleAnimRate",
+                "kind": "AddBasePercent",
+                "value": 50.0
+              },
+              {
+                "attribute": "Attribute_GroundStrafeMultiplierSprint",
+                "kind": "SetVal",
+                "value": 0.5
+              },
+              {
+                "attribute": "Attribute_GroundBackwardMultiplierSprint",
+                "kind": "SetVal",
+                "value": 0.4
+              },
+              {
+                "attribute": "Attribute_MaxSpeedBeforeFallingDamage",
+                "kind": "SetVal",
+                "value": 2550.0
+              },
+              {
+                "attribute": "Attribute_MaxSpeedBeforeFallingDeath",
+                "kind": "SetVal",
+                "value": 3500.0
+              }
+            ]
+          ]
+        ]
+      }
+    ],
+    "charms": [
+      {
+        "name": "Tough Skin",
+        "attribute": "Attribute_HealthMax",
+        "values": [
+          10.0
+        ]
+      },
+      {
+        "name": "Blood Ox Heart",
+        "attribute": "Attribute_ManaMax",
+        "values": [
+          20.0
+        ]
+      },
+      {
+        "name": "Healthy Appetite I",
+        "attribute": "Attribute_FoodHealBonus",
+        "values": [
+          10.0,
+          20.0
+        ]
+      },
+      {
+        "name": "Falling Star",
+        "attribute": "Attribute_DropAssassinationManaBonus",
+        "values": [
+          20.0
+        ]
+      },
+      {
+        "name": "Clockwork Malfunction",
+        "attribute": "Attribute_GrenadeExplosionDelay",
+        "values": [
+          1.0
+        ]
+      },
+      {
+        "name": "Unnerving Target I",
+        "attribute": "Attribute_ChanceNPCGunMiss",
+        "values": [
+          0.05,
+          0.1
+        ]
+      },
+      {
+        "name": "Robust I",
+        "attribute": "Attribute_HealthPotionPotencyBonus",
+        "values": [
+          0.125,
+          0.25
+        ]
+      },
+      {
+        "name": "Spirited I",
+        "attribute": "Attribute_ManaPotionPotencyBonus",
+        "values": [
+          0.1,
+          0.2
+        ]
+      },
+      {
+        "name": "Twist of Fortune I",
+        "attribute": "Attribute_PotionManaBonusChanceRatio",
+        "values": [
+          0.1,
+          0.2
+        ]
+      },
+      {
+        "name": "Rat Scent",
+        "attribute": "Attribute_RatsAttackRadiusReduction",
+        "values": [
+          1.0
+        ]
+      },
+      {
+        "name": "Spirit Water",
+        "attribute": "Attribute_WaterDrinkingManaBonus",
+        "values": [
+          20.0
+        ]
+      },
+      {
+        "name": "Plague Resistant",
+        "attribute": "Attribute_PlagueDamageReduction",
+        "values": [
+          1.0
+        ]
+      },
+      {
+        "name": "Plague Affinity",
+        "attribute": "Attribute_ManaGainOnPlagueDamage",
+        "values": [
+          5.0
+        ]
+      },
+      {
+        "name": "Vengeance",
+        "attribute": "Attribute_AdrenalineMultWhenTakingDamage",
+        "values": [
+          1.0
+        ]
+      },
+      {
+        "name": "Carrion Killer",
+        "attribute": "Attribute_AdrenalineOnRatKill",
+        "values": [
+          10.0
+        ]
+      },
+      {
+        "name": "Strong Arms",
+        "attribute": "Attribute_ChokeTime",
+        "values": [
+          -1.5
+        ]
+      },
+      {
+        "name": "Undertaker",
+        "attribute": "Attribute_GroundSpeedCarryingCorpse",
+        "values": [
+          38.0
+        ]
+      },
+      {
+        "name": "Swift Shadow",
+        "attribute": "Attribute_GroundSpeedCrouch",
+        "values": [
+          100.0
+        ]
+      },
+      {
+        "name": "Whirlwind I",
+        "attribute": "Attribute_MeleeSpeed",
+        "values": [
+          0.1,
+          0.2
+        ]
+      },
+      {
+        "name": "Throwing Hand",
+        "attribute": "Attribute_ThrowStrength",
+        "values": [
+          1000.0
+        ]
+      },
+      {
+        "name": "Acrobat",
+        "attribute": "Attribute_MantleAnimRate",
+        "values": [
+          0.2
+        ]
+      },
+      {
+        "name": "Sustained Rage",
+        "attribute": "Attribute_AdrenalineCooldown",
+        "values": [
+          10.0
+        ]
+      },
+      {
+        "name": "Welcoming Host",
+        "attribute": "Attribute_WhiteRatPossessDurationBonus",
+        "values": [
+          10.0
+        ]
+      },
+      {
+        "name": "Scavenger",
+        "attribute": "Attribute_StatPickupCapacityBonusChance",
+        "values": [
+          0.5
+        ]
+      },
+      {
+        "name": "Albinos",
+        "attribute": "Attribute_WhiteRatChanceBonus",
+        "values": [
+          0.15
+        ]
+      },
+      {
+        "name": "Spiritual Pool",
+        "attribute": "Attribute_ManaRegenInitialDelay",
+        "values": [
+          -1.5
+        ]
+      },
+      {
+        "name": "Reinforced Bolts",
+        "attribute": "Attribute_ArrowBreakingModifier",
+        "values": [
+          -0.5
+        ]
+      },
+      {
+        "name": "Fleet Fighter",
+        "attribute": "Attribute_SwordUnsheathedSpeedFactor",
+        "values": [
+          0.1
+        ]
+      },
+      {
+        "name": "Water of Life",
+        "attribute": "Attribute_WaterDrinkingHealthBonus",
+        "values": [
+          5.0
+        ]
+      }
+    ],
+    "active_rune_costs": [
+      [
+        "Blink",
+        [
+          1,
+          3
+        ]
+      ],
+      [
+        "WindBlast",
+        [
+          3,
+          4
+        ]
+      ],
+      [
+        "DarkVision",
+        [
+          1,
+          2
+        ]
+      ],
+      [
+        "Possess",
+        [
+          3,
+          5
+        ]
+      ],
+      [
+        "BendTime",
+        [
+          2,
+          8
+        ]
+      ],
+      [
+        "DevouringSwarm",
+        [
+          3,
+          4
+        ]
+      ]
+    ],
+    "upgrades": [
+      [
+        "AmmoPouch2",
+        [
+          [
+            "Attribute_BulletCapacity",
+            10.0
+          ]
+        ]
+      ],
+      [
+        "AmmoPouch4",
+        [
+          [
+            "Attribute_BulletCapacity",
+            10.0
+          ]
+        ]
+      ],
+      [
+        "Armor",
+        [
+          [
+            "Attribute_DamageReduction",
+            5.0
+          ]
+        ]
+      ],
+      [
+        "BoneCharms",
+        [
+          [
+            "Attribute_MaxActivatedBoneCharmCountBonus",
+            1.0
+          ]
+        ]
+      ],
+      [
+        "BoneCharms2",
+        [
+          [
+            "Attribute_MaxActivatedBoneCharmCountBonus",
+            2.0
+          ]
+        ]
+      ],
+      [
+        "Crossbow_Accuracy",
+        [
+          [
+            "Attribute_DispersionMin",
+            0.0
+          ],
+          [
+            "Attribute_ZoomStabilityBonus",
+            0.1
+          ],
+          [
+            "Attribute_DispersionInterpolationSpeed",
+            40.0
+          ],
+          [
+            "Attribute_DispersionMax",
+            -10.0
+          ],
+          [
+            "Attribute_RecoilReduction",
+            70.0
+          ]
+        ]
+      ],
+      [
+        "Crossbow_Range",
+        [
+          [
+            "Attribute_Range",
+            2.0
+          ]
+        ]
+      ],
+      [
+        "Crossbow_ReloadSpeed",
+        [
+          [
+            "Attribute_FastReload",
+            0.3
+          ]
+        ]
+      ],
+      [
+        "GrenadeBelt",
+        [
+          [
+            "Attribute_GrenadeCapacity",
+            4.0
+          ],
+          [
+            "Attribute_StickyGrenadeCapacity",
+            4.0
+          ]
+        ]
+      ],
+      [
+        "Gun_Explosive",
+        [
+          [
+            "Attribute_ExplosiveBulletUnlock",
+            1.0
+          ]
+        ]
+      ],
+      [
+        "InstantSleepArrow",
+        [
+          [
+            "Attribute_SleepDelayReduction",
+            1000.0
+          ]
+        ]
+      ],
+      [
+        "Mask",
+        []
+      ],
+      [
+        "Pistol",
+        []
+      ],
+      [
+        "PistolMagazine1",
+        [
+          [
+            "Attribute_MagazineBonus",
+            1.0
+          ]
+        ]
+      ],
+      [
+        "PistolMagazine2",
+        [
+          [
+            "Attribute_MagazineBonus",
+            2.0
+          ]
+        ]
+      ],
+      [
+        "PistolMagazine3",
+        [
+          [
+            "Attribute_MagazineBonus",
+            3.0
+          ]
+        ]
+      ],
+      [
+        "PistolReloadSpeed1",
+        [
+          [
+            "Attribute_ReloadSpeed",
+            2.0
+          ]
+        ]
+      ],
+      [
+        "PistolReloadSpeed2",
+        [
+          [
+            "Attribute_ReloadSpeed",
+            200.0
+          ],
+          [
+            "Attribute_FastReload",
+            1.0
+          ]
+        ]
+      ],
+      [
+        "Pistol_Accuracy1",
+        [
+          [
+            "Attribute_DispersionMax",
+            -10.0
+          ],
+          [
+            "Attribute_DispersionMin",
+            -10.0
+          ]
+        ]
+      ],
+      [
+        "Pistol_Accuracy2",
+        [
+          [
+            "Attribute_DispersionMin",
+            -3.0
+          ],
+          [
+            "Attribute_DispersionMax",
+            -15.0
+          ],
+          [
+            "Attribute_DispersionInterpolationSpeed",
+            20.0
+          ],
+          [
+            "Attribute_RecoilReduction",
+            200.0
+          ]
+        ]
+      ],
+      [
+        "QuiverCapacity2",
+        [
+          [
+            "Attribute_ArrowCapacity",
+            10.0
+          ]
+        ]
+      ],
+      [
+        "QuiverCapacity4",
+        [
+          [
+            "Attribute_ArrowCapacity",
+            10.0
+          ]
+        ]
+      ],
+      [
+        "SilentRunning",
+        [
+          [
+            "Attribute_SilentRunning",
+            1.0
+          ]
+        ]
+      ],
+      [
+        "SilentSprinting",
+        [
+          [
+            "Attribute_SilentSprinting",
+            1.0
+          ]
+        ]
+      ],
+      [
+        "SpringRazor",
+        [
+          [
+            "Attribute_SpringRazorRadiusBonus",
+            2.0
+          ]
+        ]
+      ],
+      [
+        "SpringRazorPouch",
+        [
+          [
+            "Attribute_SpringRazorCapacity",
+            4.0
+          ]
+        ]
+      ],
+      [
+        "Spyglass1",
+        [
+          [
+            "Attribute_ZoomLevel1",
+            1.0
+          ]
+        ]
+      ],
+      [
+        "Spyglass2",
+        [
+          [
+            "Attribute_SpyglassDistance",
+            10000.0
+          ],
+          [
+            "Attribute_ZoomLevel2",
+            10.0
+          ]
+        ]
+      ],
+      [
+        "StatueFish",
+        [
+          [
+            "Attribute_MaxActivatedBoneCharmCountBonus",
+            1.0
+          ]
+        ]
+      ],
+      [
+        "StatueRat",
+        [
+          [
+            "Attribute_MaxActivatedBoneCharmCountBonus",
+            1.0
+          ]
+        ]
+      ],
+      [
+        "StatueWhale",
+        [
+          [
+            "Attribute_MaxActivatedBoneCharmCountBonus",
+            1.0
+          ]
+        ]
+      ],
+      [
+        "StatueWolfhound",
+        [
+          [
+            "Attribute_MaxActivatedBoneCharmCountBonus",
+            1.0
+          ]
+        ]
+      ],
+      [
+        "StickyGrenade",
+        [
+          [
+            "Attribute_StickyGrenadeUnlock",
+            1.0
+          ]
+        ]
+      ],
+      [
+        "Sword",
+        [
+          [
+            "Attribute_VersusMiniGameBonus",
+            3.0
+          ]
+        ]
+      ]
+    ]
   },
   "provenance": {
     "blink.close_collision_distance": "Twk_Powers.Blink.Twk_Blink :: m_fCloseCollisionDistance = 300",
@@ -3794,6 +4981,108 @@
     "input.strafe_angle_back": "Twk_Pawn_DefaultPlayer.Twk_Pawn_PlayerInput :: m_fStrafeAngle_Back = 50",
     "input.strafe_angle_forward": "Twk_Pawn_DefaultPlayer.Twk_Pawn_PlayerInput :: m_fStrafeAngle_Forward = 10",
     "input.walk_threshold": "Twk_Pawn_DefaultPlayer.Twk_Pawn_PlayerInput :: m_fWalk_Trigger_Threshold = 0.95",
+    "items.active_rune_costs": "m_RuneCosts of each power tweak",
+    "items.bend_time.levels": "Twk_Powers.BendTime.Twk_BendTime :: m_Levels = [BendTimeLevel { world_dilation: 0.15, player_dilation: 0.85, duration: 12.0, dilation_warmup: 0.15, dilation_cooldown: 0.25, projectile_early_wakeup: 0.25 }, BendTimeLevel { world_dilation: 0.0, player_dilation: 0.9, duration: 8.0, dilation_warmup: 0.15, dilation_cooldown: 0.25, projectile_early_wakeup: 0.25 }]",
+    "items.bend_time.mana_cost": "Twk_Powers.BendTime.Twk_BendTime :: m_ManaCost = 60",
+    "items.charms": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pCharmListTweaks :: m_Charms (29 charms)",
+    "items.gadgets.bolt.damage_mult": "Twk_Projectiles.Twk_Proj_Arrow :: m_fDamageMultiplier = 1",
+    "items.gadgets.bolt.gravity_mult": "Twk_Projectiles.Twk_Proj_Arrow :: m_fGravityMultiplier = 1.3",
+    "items.gadgets.bolt.limb_damage_cap": "Twk_Projectiles.Twk_Proj_Arrow :: m_fLegsAndArmsDamageCap = 15",
+    "items.gadgets.bolt.speed_mult": "Twk_Projectiles.Twk_Proj_Arrow :: m_fSpeedMultiplier = 1",
+    "items.gadgets.grenade.explosion.attached_damage": "Twk_Proj_Grenade.Twk_Proj_Grenade.DisTweaks_GrenadeComponent_0.DisTweaks_Explosion_0 :: m_fAttachedDamage = 75",
+    "items.gadgets.grenade.explosion.damage_radius": "Twk_Proj_Grenade.Twk_Proj_Grenade.DisTweaks_GrenadeComponent_0.DisTweaks_Explosion_0 :: m_fDamageRadius = 600",
+    "items.gadgets.grenade.explosion.extra_up_force": "Twk_Proj_Grenade.Twk_Proj_Grenade.DisTweaks_GrenadeComponent_0.DisTweaks_Explosion_0 :: m_fExtraUpForce = 500",
+    "items.gadgets.grenade.explosion.full_damage_radius": "Twk_Proj_Grenade.Twk_Proj_Grenade.DisTweaks_GrenadeComponent_0.DisTweaks_Explosion_0 :: m_fFullDamageRadius = 300",
+    "items.gadgets.grenade.explosion.player_damage_radius": "Twk_Proj_Grenade.Twk_Proj_Grenade.DisTweaks_GrenadeComponent_0.DisTweaks_Explosion_0 :: m_fPlayerDamageRadius = 600",
+    "items.gadgets.grenade.explosion.player_full_damage_radius": "Twk_Proj_Grenade.Twk_Proj_Grenade.DisTweaks_GrenadeComponent_0.DisTweaks_Explosion_0 :: m_fPlayerFullDamageRadius = 150",
+    "items.gadgets.grenade.explosion.radial_damage": "Twk_Proj_Grenade.Twk_Proj_Grenade.DisTweaks_GrenadeComponent_0.DisTweaks_Explosion_0 :: m_RadialDamage.m_fBaseValue2_Normal = 50",
+    "items.gadgets.grenade.explosion.radial_momentum": "Twk_Proj_Grenade.Twk_Proj_Grenade.DisTweaks_GrenadeComponent_0.DisTweaks_Explosion_0 :: m_fRadialMomentum = 1500",
+    "items.gadgets.grenade.fuse": "Twk_Proj_Grenade.Twk_Proj_Grenade.DisTweaks_GrenadeComponent_0 :: m_fDetonationDelay absent, original default 0",
+    "items.gadgets.grenade.gravity_mult": "Twk_Proj_Grenade.Twk_Proj_Grenade :: m_fGravityMultiplier = 1",
+    "items.gadgets.grenade.min_delay_after_hit": "Twk_Proj_Grenade.Twk_Proj_Grenade.DisTweaks_GrenadeComponent_0 :: m_fMinDetonationDelayAfterHit = 0.5",
+    "items.gadgets.grenade.throw_angle": "Twk_Inv_GrenadeCorvo.Twk_Inv_GrenadeCorvo.DisTweaks_InventoryItem_PlayerSpecific_0.DisTweaks_ThrowGrenade_0 :: m_fThrowAngle = 5",
+    "items.gadgets.grenade.throw_speed": "Twk_Inv_GrenadeCorvo.Twk_Inv_GrenadeCorvo.DisTweaks_InventoryItem_PlayerSpecific_0.DisTweaks_ThrowGrenade_0 :: m_fThrowSpeed = 2500",
+    "items.gadgets.immolation_time": "Twk_Projectiles.Twk_Proj_Arrow_Flare :: m_fNPCImmolationTime = 0.5",
+    "items.gadgets.incendiary_bolt.damage_mult": "Twk_Projectiles.Twk_Proj_Arrow_Flare :: m_fDamageMultiplier = 2.5",
+    "items.gadgets.incendiary_bolt.gravity_mult": "Twk_Projectiles.Twk_Proj_Arrow_Flare :: m_fGravityMultiplier = 0.5",
+    "items.gadgets.incendiary_bolt.limb_damage_cap": "Twk_Projectiles.Twk_Proj_Arrow_Flare :: m_fLegsAndArmsDamageCap = 50",
+    "items.gadgets.incendiary_bolt.speed_mult": "Twk_Projectiles.Twk_Proj_Arrow_Flare :: m_fSpeedMultiplier = 0.2",
+    "items.gadgets.sleep_dart.damage_mult": "Twk_Projectiles.Twk_Proj_Arrow_Sleep :: m_fDamageMultiplier = 1.25",
+    "items.gadgets.sleep_dart.gravity_mult": "Twk_Projectiles.Twk_Proj_Arrow_Sleep :: m_fGravityMultiplier = 0.4",
+    "items.gadgets.sleep_dart.limb_damage_cap": "Twk_Projectiles.Twk_Proj_Arrow_Sleep :: m_fLegsAndArmsDamageCap = 25",
+    "items.gadgets.sleep_dart.speed_mult": "Twk_Projectiles.Twk_Proj_Arrow_Sleep :: m_fSpeedMultiplier = 0.7",
+    "items.gadgets.springrazor.arming_time": "Twk_Inv_SpringRazor.Twk_Inv_SpringRazorPlaced :: m_fArmingTime = 0.5",
+    "items.gadgets.springrazor.damage_delay": "Twk_Inv_SpringRazor.Twk_Inv_SpringRazorPlaced :: m_fDamageActorDelayTime = 0.35",
+    "items.gadgets.springrazor.damage_reaction_time": "Twk_Inv_SpringRazor.Twk_Inv_SpringRazorPlaced :: m_fDamageReactionTime = 0.75",
+    "items.gadgets.springrazor.detection_height": "Twk_Inv_SpringRazor.Twk_Inv_SpringRazorPlaced :: m_fDetectionCylinderHeight = 250",
+    "items.gadgets.springrazor.detection_radius": "Twk_Inv_SpringRazor.Twk_Inv_SpringRazorPlaced :: m_fDetectionCylinderRadius = 250",
+    "items.gadgets.springrazor.detonation_height": "Twk_Inv_SpringRazor.Twk_Inv_SpringRazorPlaced :: m_fDetonationCylinderHeight = 250",
+    "items.gadgets.springrazor.detonation_radius": "Twk_Inv_SpringRazor.Twk_Inv_SpringRazorPlaced :: m_fDetonationCylinderRadius = 250",
+    "items.gadgets.springrazor.immune_npc_damage": "Twk_Inv_SpringRazor.Twk_Inv_SpringRazorPlaced :: m_ImmuneNPCDamage = 50",
+    "items.gadgets.springrazor.impulse": "Twk_Inv_SpringRazor.Twk_Inv_SpringRazorPlaced :: m_fImpulseForce = 800",
+    "items.gadgets.springrazor.max_damage_distance": "Twk_Inv_SpringRazor.Twk_Inv_SpringRazorPlaced :: m_fMaxDamageDistance = 900",
+    "items.gadgets.springrazor.non_npc_damage": "Twk_Inv_SpringRazor.Twk_Inv_SpringRazorPlaced :: m_NonNPCDamage[1] = 5",
+    "items.gadgets.springrazor.sensor_offset": "Twk_Inv_SpringRazor.Twk_Inv_SpringRazorPlaced :: m_fSensorOffsetDistance = 10",
+    "items.gadgets.springrazor.trigger_reaction_time": "Twk_Inv_SpringRazor.Twk_Inv_SpringRazorPlaced :: m_fTriggerReactionTime = 0",
+    "items.gadgets.sticky_grenade.explosion.attached_damage": "Twk_Proj_StickyGrenade.Twk_Proj_StickyGrenade.DisTweaks_GrenadeComponent_1.DisTweaks_Explosion_1 :: m_fAttachedDamage = 75",
+    "items.gadgets.sticky_grenade.explosion.damage_radius": "Twk_Proj_StickyGrenade.Twk_Proj_StickyGrenade.DisTweaks_GrenadeComponent_1.DisTweaks_Explosion_1 :: m_fDamageRadius = 600",
+    "items.gadgets.sticky_grenade.explosion.extra_up_force": "Twk_Proj_StickyGrenade.Twk_Proj_StickyGrenade.DisTweaks_GrenadeComponent_1.DisTweaks_Explosion_1 :: m_fExtraUpForce = 500",
+    "items.gadgets.sticky_grenade.explosion.full_damage_radius": "Twk_Proj_StickyGrenade.Twk_Proj_StickyGrenade.DisTweaks_GrenadeComponent_1.DisTweaks_Explosion_1 :: m_fFullDamageRadius = 300",
+    "items.gadgets.sticky_grenade.explosion.player_damage_radius": "Twk_Proj_StickyGrenade.Twk_Proj_StickyGrenade.DisTweaks_GrenadeComponent_1.DisTweaks_Explosion_1 :: m_fPlayerDamageRadius = 600",
+    "items.gadgets.sticky_grenade.explosion.player_full_damage_radius": "Twk_Proj_StickyGrenade.Twk_Proj_StickyGrenade.DisTweaks_GrenadeComponent_1.DisTweaks_Explosion_1 :: m_fPlayerFullDamageRadius = 150",
+    "items.gadgets.sticky_grenade.explosion.radial_damage": "Twk_Proj_StickyGrenade.Twk_Proj_StickyGrenade.DisTweaks_GrenadeComponent_1.DisTweaks_Explosion_1 :: m_RadialDamage.m_fBaseValue2_Normal = 50",
+    "items.gadgets.sticky_grenade.explosion.radial_momentum": "Twk_Proj_StickyGrenade.Twk_Proj_StickyGrenade.DisTweaks_GrenadeComponent_1.DisTweaks_Explosion_1 :: m_fRadialMomentum = 1500",
+    "items.gadgets.sticky_grenade.fuse": "Twk_Proj_StickyGrenade.Twk_Proj_StickyGrenade.DisTweaks_GrenadeComponent_1 :: m_fDetonationDelay absent, original default 0",
+    "items.gadgets.sticky_grenade.gravity_mult": "Twk_Proj_StickyGrenade.Twk_Proj_StickyGrenade :: m_fGravityMultiplier = 1",
+    "items.gadgets.sticky_grenade.min_delay_after_hit": "Twk_Proj_StickyGrenade.Twk_Proj_StickyGrenade.DisTweaks_GrenadeComponent_1 :: m_fMinDetonationDelayAfterHit = 0.5",
+    "items.gadgets.sticky_grenade.throw_angle": "Twk_Inv_GrenadeCorvo.Twk_Inv_GrenadeCorvo.DisTweaks_InventoryItem_PlayerSpecific_0.DisTweaks_ThrowGrenade_0 :: m_fThrowAngle = 5",
+    "items.gadgets.sticky_grenade.throw_speed": "Twk_Inv_GrenadeCorvo.Twk_Inv_GrenadeCorvo.DisTweaks_InventoryItem_PlayerSpecific_0.DisTweaks_ThrowGrenade_0 :: m_fThrowSpeed = 2500",
+    "items.inventory.ammo_capacity[0]": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_BulletCapacity.m_fBaseValue2_Normal = 10",
+    "items.inventory.ammo_capacity[1]": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_ExplosiveBulletCapacity.m_fBaseValue2_Normal = 10",
+    "items.inventory.ammo_capacity[2]": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_ArrowCapacity.m_fBaseValue2_Normal = 10",
+    "items.inventory.ammo_capacity[3]": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_SleepArrowCapacity.m_fBaseValue2_Normal = 10",
+    "items.inventory.ammo_capacity[4]": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_FlareArrowCapacity.m_fBaseValue2_Normal = 10",
+    "items.inventory.ammo_capacity[5]": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_SpringRazorCapacity.m_fBaseValue2_Normal = 5",
+    "items.inventory.ammo_capacity[6]": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_GrenadeCapacity.m_fBaseValue2_Normal = 5",
+    "items.inventory.ammo_capacity[7]": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_StickyGrenadeCapacity.m_fBaseValue2_Normal = 5",
+    "items.inventory.assassinate_hold_to_auto_carry": "Twk_Pawn_DefaultPlayer.Twk_Pawn_PlayerInput :: m_fAssassinateHoldToAutoCorpseCarry = 0.2",
+    "items.inventory.carry_ground_speed": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_GroundSpeedCarryingCorpse.m_fBaseValue2_Normal = 350",
+    "items.inventory.carry_jump_z": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_JumpZCarryingCorpse.m_fBaseValue2_Normal = 800",
+    "items.inventory.choke_anim_time": "Startup.upk Ply_Sword_Choke_as Sword_Choke_Loop_Master length 5.033 s (anim state 0x5f mapping LIKELY, U-101)",
+    "items.inventory.choke_hold_to_auto_carry": "Twk_Pawn_DefaultPlayer.Twk_Pawn_PlayerInput :: m_fChokeHoldToAutoCarry = 0.2",
+    "items.inventory.choke_time": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_ChokeTime.m_fBaseValue2_Normal = 1.5",
+    "items.inventory.crossbow_ranged_damage": "Twk_Inv_PlayerSpecific.Twk_Inv_CrossbowCorvo.DisTweaks_InventoryItem_Attributes_21 :: m_RangedDamage.m_fBaseValue2_Normal = 20",
+    "items.inventory.health_elixir_value": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_nHealthElixirValue = 40",
+    "items.inventory.interact_distance": "Default__DisTweaks_InteractableInterface :: m_fMaxDistance = 200",
+    "items.inventory.mana_elixir_value": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_nManaElixirValue = 50",
+    "items.inventory.max_equipped_charms": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_MaxActivatedBoneCharmCount = 3",
+    "items.inventory.max_health_elixirs": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_nMaxHealthElixir = 10",
+    "items.inventory.max_mana_elixirs": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_nMaxManaElixir = 10",
+    "items.inventory.melee_ray_speed": "DefaultPlayer.ini [DishonoredGame.DishonoredPlayerPawn] = [400.0, 0.005, 1.5]",
+    "items.inventory.pistol_ranged_damage": "Twk_Inv_PlayerSpecific.Twk_Inv_PistolCorvo.DisTweaks_InventoryItem_Attributes_25 :: m_RangedDamage.m_fBaseValue2_Normal = 10",
+    "items.inventory.throw_strength": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_ThrowStrength.m_fBaseValue2_Normal = 2000",
+    "items.passive_powers": "DefaultPlayer.ini [DishonoredGame.DishonoredPowersComponent] m_Powers (4 powers)",
+    "items.possess.cancel_cooldown": "Twk_Powers_Possess.Twk_Powers_Possess :: m_fCancelCooldown = 1",
+    "items.possess.exit_fade": "Twk_Powers_Possess.Twk_Powers_Possess :: m_ExitFadeDuration = 0.8",
+    "items.possess.intro_duration": "Twk_Powers_Possess.Twk_Powers_Possess :: m_IntroDuration = 1.1",
+    "items.possess.magical_appearance_delay": "Twk_Powers_Possess.Twk_Powers_Possess :: m_fMagicalAppearanceDelay = 0.8",
+    "items.possess.mana_cost": "Twk_Powers_Possess.Twk_Powers_Possess :: m_ManaCost = 60",
+    "items.possess.npc.duration": "Twk_Possessable_BaseNPC.Twk_Possessable_BaseNPC :: m_Levels[].m_fPossessDuration = [0.0, 15.0]",
+    "items.possess.npc.ground_speed": "Twk_Possessable_BaseNPC.Twk_Possessable_BaseNPC :: m_fGroundSpeedWhilePossessed = 300",
+    "items.possess.npc.required_level": "Twk_Possessable_BaseNPC.Twk_Possessable_BaseNPC :: m_RequiredPossessPowerLevel = 2",
+    "items.possess.range[0]": "Twk_Powers_Possess.Twk_Powers_Possess :: m_Levels.m_fPossessRange = 1000",
+    "items.possess.range[1]": "Twk_Powers_Possess.Twk_Powers_Possess :: m_Levels[1].m_fPossessRange = 2000",
+    "items.possess.rat.duration": "Twk_Possessable_Rat.Twk_Possessable_Rat :: m_Levels[].m_fPossessDuration = [20.0, 30.0]",
+    "items.possess.rat.ground_speed": "Twk_Possessable_Rat.Twk_Possessable_Rat :: m_fGroundSpeedWhilePossessed = 300",
+    "items.possess.rat.required_level": "Twk_Possessable_Rat.Twk_Possessable_Rat :: m_RequiredPossessPowerLevel = 1",
+    "items.possess.warn_before_exit": "Twk_Powers_Possess.Twk_Powers_Possess :: m_WarnApparitionInSecondsBeforeForceExit = 4",
+    "items.shadow_kill.delay": "Default__DisTweaks_NPCPawn :: m_fShadowKillDelay absent, original default 0",
+    "items.shadow_kill.fade_duration": "Default__DisTweaks_NPCPawn :: m_fShadowKillFadeToBlackDuration = 5",
+    "items.swarm.levels[0]": "Twk_Powers_DevouringSwarm.Twk_DevouringSwarm m_Levels[0] + Twk_RatSwarm.Twk_DevouringSwarm_Lvl1",
+    "items.swarm.levels[1]": "Twk_Powers_DevouringSwarm.Twk_DevouringSwarm m_Levels[1] + Twk_RatSwarm.Twk_DevouringSwarm_Lvl2",
+    "items.swarm.mana_cost": "Twk_Powers_DevouringSwarm.Twk_DevouringSwarm :: m_ManaCost = 40",
+    "items.swarm.spawn_delay": "Twk_Powers_DevouringSwarm.Twk_DevouringSwarm :: m_fRatSwarmSpawnDelay = 0.65",
+    "items.upgrades": "DisTweaks_Upgrade objects (34) :: m_Attributes",
     "mantle.edge_search_dist": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pMantleTweaks :: m_MantleEdgeSearchDist = 50",
     "mantle.fall_speed_for_ledge_grab": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pMantleTweaks :: m_fFallSpeedForLedgeGrab = 1000",
     "mantle.forward_move_amount": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pMantleTweaks :: m_fMantleForwardMoveAmount = 20",
@@ -3829,6 +5118,7 @@
     "movement.max_step_height": "Default__DishonoredPawn :: MaxStepHeight = 44",
     "movement.run_speed": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_GroundSpeed.m_fBaseValue2_Normal = 400",
     "movement.slide_deactivate_angle": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_fSlideVelocityDeactivateAngle = 25",
+    "movement.slide_percent_not_cancelable": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_fSlidePercentNotCancelable = 0.5",
     "movement.slide_time": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_fSlideTime = 1.1",
     "movement.slow_walk_speed": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_GroundSpeedSlowWalk.m_fBaseValue2_Normal = 100",
     "movement.speed_blend_down_speed": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_fSpeedBlendDownSpeed = 8",

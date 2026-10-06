@@ -34,6 +34,33 @@ pub enum DamageCause {
     Windblast,
     Fall,
     World,
+    Grenade,
+    StickyGrenade,
+    SpringRazor,
+    /// Incendiary bolt fire (`DisDamageType_Arrow_Flare`, `m_bPutToFire`).
+    Fire,
+    /// Devouring Swarm rats.
+    Rats,
+    /// Possession ended inside geometry (`DisDamageType_UnpossessSquash`).
+    UnpossessSquash,
+}
+
+/// How a choke ended (`DisItemContext_Choke.eChokeState`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub enum ChokeOutcome {
+    /// Knocked out.
+    Win,
+    /// The choke button was released: the victim breaks free.
+    Lose,
+    /// The victim left the being-choked state (hurt, killed, moved away).
+    Cancel,
+}
+
+/// Why a pawn became unconscious.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub enum KnockoutCause {
+    Choke,
+    SleepDart,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -56,4 +83,30 @@ pub enum SimEvent {
     Death { victim: PlayerId, killer: Option<PlayerId>, cause: DamageCause },
     ProjectileImpact { projectile: u32, point: Vec3, victim: Option<PlayerId> },
     Sound { position: Vec3, radius: f32, category: SoundCategory, source: PlayerId },
+    // --- inventory ---
+    /// A pickup was taken (`DisSeqEvent_PickupPickedUp`); `name` is the level actor name.
+    PickedUp { id: PlayerId, pickup: u32 },
+    /// A pickup was stolen from the NPC carrying it.
+    Pickpocketed { id: PlayerId, victim: PlayerId, pickup: u32 },
+    ElixirUsed { id: PlayerId, mana: bool },
+    // --- takedowns (hooks for the AI: the victim is held / unconscious / free again) ---
+    ChokeStart { attacker: PlayerId, victim: PlayerId },
+    ChokeEnd { attacker: PlayerId, victim: PlayerId, outcome: ChokeOutcome },
+    /// Non-lethal: the victim stays down (`DisSeqEvent_KnockedOut`, `DisSeqEvent_PutToSleep`).
+    KnockedOut { victim: PlayerId, by: Option<PlayerId>, cause: KnockoutCause },
+    BodyLifted { carrier: PlayerId, body: PlayerId },
+    BodyDropped { carrier: PlayerId, body: PlayerId },
+    // --- powers ---
+    PossessStart { id: PlayerId, host: PlayerId },
+    PossessEnd { id: PlayerId, host: PlayerId },
+    BendTimeStart { id: PlayerId, level: u8 },
+    BendTimeEnd { id: PlayerId },
+    SwarmSummoned { id: PlayerId, swarm: u32, position: Vec3 },
+    /// Corpse eaten by a swarm or turned to ash (Shadow Kill): no body remains.
+    BodyRemoved { body: PlayerId, ash: bool },
+    // --- gadgets ---
+    TrapPlaced { id: PlayerId, trap: u32, position: Vec3 },
+    TrapTriggered { trap: u32 },
+    Explosion { owner: PlayerId, position: Vec3, sticky: bool },
+    Ignited { victim: PlayerId, by: PlayerId },
 }

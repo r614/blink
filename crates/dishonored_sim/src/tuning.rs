@@ -52,8 +52,33 @@ pub struct CombatTuning {
     // --- crossbow (CONFIRMED: Twk_Proj_Arrow gravity multiplier / stealth mult) ---
     pub bolt_gravity_mult: f32,
     pub bolt_stealth_mult: f32,
-    // (SPECULATIVE)
+    /// `(int)Attribute_RangedDamage` of the crossbow (20, through its fallback chain) times the
+    /// projectile's `m_fDamageMultiplier` (`DisProjectile` 0x00C4A310, fired by 0x00C257A0).
     pub bolt_damage: f32,
+    /// Sleep dart / incendiary bolt: damage (same formula), speed and gravity multipliers.
+    #[serde(default)]
+    pub sleep_dart_damage: f32,
+    #[serde(default)]
+    pub sleep_dart_speed: f32,
+    #[serde(default)]
+    pub sleep_dart_gravity_mult: f32,
+    #[serde(default)]
+    pub incendiary_damage: f32,
+    #[serde(default)]
+    pub incendiary_speed: f32,
+    #[serde(default)]
+    pub incendiary_gravity_mult: f32,
+    /// Melee reach scale from forward speed (0x00AB2050 / 0x00C0A060): factor
+    /// `1 + clamp((v . view - m_fMinSpeedRayScale) * m_fRaySpeedScale, 0, m_fRaySpeedScale_Max)`
+    /// blended by `m_fRayScalePercent` (DefaultPlayer.ini, `DisTweaks_MeleeAttackPlayer`).
+    #[serde(default)]
+    pub reach_min_speed: f32,
+    #[serde(default)]
+    pub reach_speed_scale: f32,
+    #[serde(default)]
+    pub reach_speed_scale_max: f32,
+    #[serde(default)]
+    pub reach_scale_percent: f32,
     pub bolt_speed: f32,
     /// `DisTweaks_Arrow.m_fLegsAndArmsDamageCap` (CONFIRMED data; limb hits are not
     /// modelled, the sim has head and body only).
@@ -130,7 +155,17 @@ impl CombatTuning {
 
             bolt_gravity_mult: v(cb, "projectile.m_fGravityMultiplier", 1.3),
             bolt_stealth_mult: v(cb, "projectile.m_fDamageMultiplier_Stealth", 2.0),
-            bolt_damage: 35.0,
+            bolt_damage: c.items.inventory.crossbow_ranged_damage.trunc() * c.items.gadgets.bolt.damage_mult,
+            sleep_dart_damage: c.items.inventory.crossbow_ranged_damage.trunc() * c.items.gadgets.sleep_dart.damage_mult,
+            sleep_dart_speed: v(cb, "fire.m_fArrowFireSpeed", 20000.0) * c.items.gadgets.sleep_dart.speed_mult,
+            sleep_dart_gravity_mult: c.items.gadgets.sleep_dart.gravity_mult,
+            incendiary_damage: c.items.inventory.crossbow_ranged_damage.trunc() * c.items.gadgets.incendiary_bolt.damage_mult,
+            incendiary_speed: v(cb, "fire.m_fArrowFireSpeed", 20000.0) * c.items.gadgets.incendiary_bolt.speed_mult,
+            incendiary_gravity_mult: c.items.gadgets.incendiary_bolt.gravity_mult,
+            reach_min_speed: c.items.inventory.melee_ray_speed[0],
+            reach_speed_scale: c.items.inventory.melee_ray_speed[1],
+            reach_speed_scale_max: c.items.inventory.melee_ray_speed[2],
+            reach_scale_percent: v(m, "attack.m_fRayScalePercent", 0.5),
             // DisTweaks_FireCrossbow.m_fArrowFireSpeed x DisTweaks_Projectile.m_fSpeedMultiplier.
             bolt_speed: v(cb, "fire.m_fArrowFireSpeed", 20000.0) * v(cb, "projectile.m_fSpeedMultiplier", 1.0),
             bolt_limb_damage_cap: v(cb, "projectile.m_fLegsAndArmsDamageCap", 15.0),

@@ -128,8 +128,11 @@ Enter (0x00A67FA0): start velocity = horizontal velocity; target = its direction
 `v = v0 + (target - v0) x (1 - cos(pi t / m_fSlideTime)) / 2` (`m_fSlideTime` 1.1 s) until
 the speed falls below the target speed; the slide ends when the velocity turns more than
 `m_fSlideVelocityDeactivateAngle` (25 deg) from the start direction or after
-`m_fSlideTime` (0x00A7B220), or on a fall. CONFIRMED except the stick-release cancel
-(`m_fSlidePercentNotCancelable`) and slide impact damage, not modelled.
+`m_fSlideTime` (0x00A7B220), or on a fall. CONFIRMED. Cancel (0x00A71450): a cancel request
+ends the slide once `m_fSlideTime x m_fSlidePercentNotCancelable` (1.1 x 0.5 = 0.55 s) has
+passed; the sim takes the request from releasing the stick (LIKELY: the caller was not
+traced). Slide impact damage (`m_SlideDamageInfo`: 0 to NPCs and rats, 5 to other actors,
+`m_fSlideImpactDamageVelRatio` 0.15) is not modelled.
 
 ### Lean (`StatePlayerMasterLeaning` 0x00A76590, `DishonoredCamera_Lean`)
 
@@ -226,9 +229,13 @@ distance 3000, speed 5000; `m_bUseDirectionalWindblast` true. Class defaults: wa
   block. A tap parry keeps the block up for those 0.3 s even if the button is released
   (0x00C2E470). Block cone: `m_fBlockAngle` 50 (vertical 30 up / 50 down). CONFIRMED
   (the anim-zone tracker itself is LIKELY).
-- Attack reach (0x00C0A060): `m_fMaxContextRange (210) x max(Attribute_Range, 1)`, scaled by
-  `m_fRayScalePercent` (0.5) against an unidentified factor (0x00AB2050), doubled in a
-  special state. The sim keeps 210.
+- Attack reach (0x00C0A060): `range = m_fMaxContextRange (210) x max(Attribute_Range, 1)`;
+  with `m_fRayScalePercent` (0.5) above 0 it becomes `range x ((f - 1) x percent + 1)`, where
+  the speed factor (0x00AB2050, for a pawn with a player camera) is
+  `f = 1 + clamp((velocity . facing - m_fMinSpeedRayScale) x m_fRaySpeedScale, 0,
+  m_fRaySpeedScale_Max)` (DefaultPlayer.ini 400, 0.005, 1.5). Sprinting forward at 540:
+  f = 1.7, reach 283.5. CONFIRMED. A further x`DAT_00fb930c` applies while timed state 1 of
+  0x00B4A0E0 is on (not identified, U-052); the sim uses the speed factor.
 - Damage ratios `m_fHealthRatio_NormalDamage` 0.2 / `_BigDamage` 0.7: data CONFIRMED;
   how player-vs-player hits map to them is our rule (the original has no PvP).
 
@@ -236,8 +243,11 @@ distance 3000, speed 5000; `m_bUseDirectionalWindblast` true. Class defaults: wa
 
 - Crossbow bolt speed: `DisTweaks_FireCrossbow.m_fArrowFireSpeed` (20000) x
   `DisTweaks_Projectile.m_fSpeedMultiplier` (1), gravity x1.3. CONFIRMED (data).
-- Arrow damage (`DisProjectile_Arrow`, 0x00C503D0): base damage from the projectile
-  (source not found, U-049); unaware targets hit in the head/torso regions take
+- Arrow damage (`DisProjectile_Arrow`, 0x00C503D0): base damage = the int the crossbow fires
+  the projectile with, `(int)Attribute_RangedDamage` of the item (20 through the fallback chain
+  of `Twk_Inv_CrossbowCorvo`'s attributes, 0x00C257A0), times the projectile's
+  `m_fDamageMultiplier` (0x00C4A310): bolt 20, sleep dart 25, incendiary 50 (U-049 resolved;
+  the sim used 35). Unaware targets hit in the head/torso regions take
   `m_fDamageMultiplier_Stealth` (2) with the stealth damage type, limb hits are capped at
   `m_fLegsAndArmsDamageCap` (15). Headshots kill (`m_bKillOnHeadshot`).
 
@@ -248,14 +258,23 @@ distance 3000, speed 5000; `m_bUseDirectionalWindblast` true. Class defaults: wa
 - Mana tick (0x00AA7A20): timer -= dt; if the pool is empty and mana is below the portion
   the pool becomes `portion - mana` (mana always refills to 20); pool clamped to the
   portion; when the pool is positive and the timer below zero, add `min(ManaRegenAmount,
-  pool)`, set (not add) the timer to `ManaRegenStepTime` (0.1). An active power of one class
-  suspends the regen (class not identified, U-050).
+  pool)`, set (not add) the timer to `ManaRegenStepTime` (0.1). The one active power class
+  that suspends the regen is `DisDLC06ActivePowerComponent_Transversal` (Daud's Blink, DLC;
+  StaticClass record 0x01398D30): no base-game power pauses it (U-050 resolved).
 - Health tick (0x00B57FD0): while health < `HealthRegenLimit` (10) the countdown runs; each
   time it reaches 0, `HealthRegenAmount` (1) is added and `HealthRegenRate` (0.03 s) added
   back to the countdown. Damage leaving health below the limit resets the countdown to
   `HealthRegenInitialDelay` (10 s) (0x00B5CCD0). Health and mana are integers.
 - Elixirs: `m_nHealthElixirValue` 40, `m_nManaElixirValue` 50, max 10 each (Corvo tweak);
-  consumption code not decoded (no elixirs in the multiplayer loadout).
+  drinking (0x00C04FC0) only below the maximum, `+(int)((1 + potency bonus) x value)`, capped.
+  See `INVENTORY.md`.
+
+## Inventory, takedowns, powers, gadgets
+
+Decoded in `INVENTORY.md`: inventory and pickups, choke (6.53 s to a knock-out, hold to keep
+choking), carrying bodies (350 uu/s), sleep darts, Possession, Bend Time (per-pawn time
+dilation), Devouring Swarm, Shadow Kill, passive powers, bone charms, runes, grenades, sticky
+grenades and Spring Razors.
 
 ## Differences fixed in `dishonored_sim` (before -> after)
 
@@ -279,10 +298,15 @@ distance 3000, speed 5000; `m_bUseDirectionalWindblast` true. Class defaults: wa
 | Mana regen | +1 every 0.1 s after 3 s up to spend + 20 | same pool, first step at 3 s, refill to 20 when below | 0x00AA7A20 |
 | Health regen | 1/s after 10 s | 1 per 0.03 s after 10 s, below 10 hp only | 0x00B57FD0 |
 | Fall damage | fractional | whole points, truncated | 0x00B4DCC0 |
+| Crossbow bolt damage | 35 (guess) | 20 = `(int)RangedDamage` x `m_fDamageMultiplier` | 0x00C257A0, 0x00C4A310 |
+| Sword reach | 210 | 210 x ((f - 1) x 0.5 + 1), f from forward speed (283.5 sprinting) | 0x00C0A060, 0x00AB2050 |
+| Slide | runs its full time | cancellable after 0.55 s | 0x00A71450 |
 | Damage | fractional | whole points (`TakeDamage(int)`) | |
 
 ## Not decoded / not modelled
 
-See `research/UNKNOWNS.md` U-048 to U-053: lean camera, arrow base damage, regen-blocking
-power, the mantle finder's later states and timings, pawn reaction to Windblast momentum,
-`physFalling` air control details, the melee reach scale factor, swimming and climbing.
+See `research/UNKNOWNS.md` U-048, U-051..U-053 and U-100..U-113: lean camera, the mantle
+finder's later states and timings, pawn reaction to Windblast momentum, `physFalling` air
+control details, the melee reach state multiplier, swimming and climbing (not decoded:
+`StatePlayerMasterSwim` `m_fMaxSwimAccel` 4000, `m_fStrokeTime` 0.3, `m_fMaxSpeedNoStroke` 350,
+apnea 30 s; climbing `m_fClimbingSpeed`), and the inventory/power open points.

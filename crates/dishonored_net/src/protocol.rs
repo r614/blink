@@ -14,7 +14,7 @@ use dishonored_sim::state::{PlayerId, PlayerState, ProjectileState, WindblastSta
 use serde::{Deserialize, Serialize};
 
 pub const MAGIC: u32 = 0x4449_5331; // "DIS1"
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAX_DATAGRAM: usize = 60_000;
 /// Inputs resent per packet.
 pub const INPUT_REDUNDANCY: usize = 8;
@@ -59,6 +59,8 @@ pub struct Snapshot {
     pub projectiles: Vec<ProjectileState>,
     /// Windblasts in flight (warmup and expanding front).
     pub windblasts: Vec<WindblastState>,
+    /// Pickups, held abstract items, Spring Razors, Bend Time and swarms.
+    pub extras: dishonored_sim::state::WorldExtras,
     pub matchv: MatchView,
     /// Private contract info for the receiving player only (Contracts mode).
     pub private: Option<dishonored_multiplayer::contracts::TargetInfo>,

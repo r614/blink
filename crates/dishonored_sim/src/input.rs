@@ -15,6 +15,7 @@ pub mod buttons {
     pub const BLOCK: u16 = 1 << 6;
     pub const LEAN_LEFT: u16 = 1 << 7;
     pub const LEAN_RIGHT: u16 = 1 << 8;
+    /// Use / interact (pick up, talk, choke: `m_bUseButton` / `m_bChokeButton`, carry, drop).
     pub const USE: u16 = 1 << 9;
     pub const RELOAD: u16 = 1 << 10;
     /// Pick option 1..4 of an open dialog choice (`DisSeqAct_DialogScriptedChoice`, conversations).
@@ -25,7 +26,16 @@ pub mod buttons {
     pub const CHOICES: [u16; 4] = [CHOICE_1, CHOICE_2, CHOICE_3, CHOICE_4];
 }
 
-/// Left-hand selection (Dishonored binds powers and gadgets to the left hand).
+/// One-shot item actions (`Dis_ConsumeElixir`, the quick-use keys), carried in
+/// [`PlayerInput::action`] on the tick they are pressed.
+pub mod actions {
+    pub const NONE: u8 = 0;
+    pub const DRINK_HEALTH: u8 = 1;
+    pub const DRINK_MANA: u8 = 2;
+}
+
+/// Left-hand selection (Dishonored binds powers and gadgets to the left hand; the
+/// quick-selection wheel, `eDisUISelectionType` / `EDisPowerWheelItem`, picks one).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, Hash)]
 #[repr(u8)]
 pub enum LeftHand {
@@ -36,6 +46,15 @@ pub enum LeftHand {
     Pistol = 3,
     Crossbow = 4,
     Empty = 5,
+    Possession = 6,
+    BendTime = 7,
+    DevouringSwarm = 8,
+    /// The crossbow loaded with sleep darts / incendiary bolts (`DPWI_SleepDart` / `DPWI_FlareBolt`).
+    SleepDart = 9,
+    IncendiaryBolt = 10,
+    Grenade = 11,
+    StickyGrenade = 12,
+    SpringRazor = 13,
 }
 
 impl LeftHand {
@@ -46,8 +65,20 @@ impl LeftHand {
             2 => Self::DarkVision,
             3 => Self::Pistol,
             4 => Self::Crossbow,
+            6 => Self::Possession,
+            7 => Self::BendTime,
+            8 => Self::DevouringSwarm,
+            9 => Self::SleepDart,
+            10 => Self::IncendiaryBolt,
+            11 => Self::Grenade,
+            12 => Self::StickyGrenade,
+            13 => Self::SpringRazor,
             _ => Self::Empty,
         }
+    }
+    /// The crossbow, whatever bolt it is loaded with.
+    pub fn is_crossbow(self) -> bool {
+        matches!(self, Self::Crossbow | Self::SleepDart | Self::IncendiaryBolt)
     }
 }
 
@@ -63,6 +94,9 @@ pub struct PlayerInput {
     pub pitch: f32,
     pub buttons: u16,
     pub left_hand: LeftHand,
+    /// [`actions`] pressed this tick.
+    #[serde(default)]
+    pub action: u8,
 }
 
 impl PlayerInput {
