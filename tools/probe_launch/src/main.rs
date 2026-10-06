@@ -151,18 +151,19 @@ fn main() -> Result<()> {
         }
         "measure" => measure::run(&args[1..])?,
         "key" => {
-            // key <vk> [down|up|tap]
-            let vk = parse_u32(args.get(1).context("vk")?)?;
+            // key <EngineKeyName> [down|up|tap]
+            let k = args.get(1).context("key name")?;
             let mut c = connect()?;
-            match args.get(2).map(String::as_str).unwrap_or("tap") {
-                "down" => c.key(vk, true)?,
-                "up" => c.key(vk, false)?,
+            let handled = match args.get(2).map(String::as_str).unwrap_or("tap") {
+                "down" => c.key(k, true)?,
+                "up" => c.key(k, false)?,
                 _ => {
-                    c.key(vk, true)?;
+                    let h = c.key(k, true)?;
                     c.wait_ticks(3)?;
-                    c.key(vk, false)?;
+                    c.key(k, false)? || h
                 }
-            }
+            };
+            println!("handled {handled}");
         }
         "axes" => {
             // axes <forward> <strafe> <turn> <lookup> <frames>

@@ -195,7 +195,7 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
             let pc = engine::local_pc();
             let pawn = mem::u32(pc + engine::CONTROLLER_PAWN).unwrap_or(0);
             let s = format!(
-                "process_event_calls={}\nticks={}\ngobjects={:#x}\ngnames={:#x}\nname_text_off={:#x}\ngame_thread={}\npresent_thread={}\ngengine={:#x}\nlocal_pc={:#x}\nlocal_pc_class={}\npawn={:#x}\npawn_class={}\nplayer_input={:#x}\nd3d_state={}\nd3d_devices={}\npresents={}\nmap={}\n",
+                "process_event_calls={}\nticks={}\ngobjects={:#x}\ngnames={:#x}\nname_text_off={:#x}\ngame_thread={}\npresent_thread={}\ngengine={:#x}\nlocal_pc={:#x}\nlocal_pc_class={}\npawn={:#x}\npawn_class={}\nplayer_input={:#x}\nd3d_state={}\nd3d_devices={}\npresents={}\niat_patched={}\nfake_focus={}\nmap={}\n",
                 hook::CALLS.load(Relaxed),
                 hook::TICKS.load(Relaxed),
                 engine::GOBJECTS.load(Relaxed),
@@ -212,6 +212,8 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
                 d3d::STATE.load(Relaxed),
                 d3d::DEVICES.load(Relaxed),
                 d3d::PRESENTS.load(Relaxed),
+                crate::iat::PATCHED.load(Relaxed),
+                crate::iat::FAKE_FOCUS.load(Relaxed),
                 // The level's package: WorldInfo's outermost object.
                 mem::u32(pc + engine::ACTOR_WORLDINFO)
                     .map(|mut o| {
@@ -310,9 +312,10 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
             hook::set_input(axes, frames);
         }
         op::KEY => {
-            let vk = io(rd.u32())?;
-            let down = io(rd.u8())? != 0;
-            input::post_key(vk, down)?;
+            let key = io(rd.str())?;
+            let event = io(rd.u8())? as u32;
+            let handled = input::input_key(&key, event)?;
+            out.push(handled as u8);
         }
         op::WAIT_TICKS => {
             let n = io(rd.u32())?;

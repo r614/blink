@@ -23,6 +23,8 @@ mod hook;
 #[cfg(all(windows, target_arch = "x86"))]
 mod input;
 #[cfg(all(windows, target_arch = "x86"))]
+mod iat;
+#[cfg(all(windows, target_arch = "x86"))]
 mod mem;
 #[cfg(all(windows, target_arch = "x86"))]
 mod server;
@@ -89,6 +91,7 @@ mod imp {
             return 0;
         }
         crate::d3d::install();
+        crate::iat::install();
         if !crate::server::start(token) {
             return 0;
         }

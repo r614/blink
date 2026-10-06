@@ -51,7 +51,8 @@ pub mod op {
     pub const WATCH: u8 = 15;
     /// u32 frames -> (). Blocks until that many frames (Presents) have run.
     pub const WAIT_TICKS: u8 = 16;
-    /// u32 virtual key, u8 down -> (). Posted to the game's viewport window.
+    /// str engine key name, u8 event (0 pressed, 1 released) -> u8 handled. Game thread,
+    /// through `FViewportClient::InputKey`.
     pub const KEY: u8 = 17;
 }
 
@@ -397,12 +398,13 @@ impl Client {
         self.request(op::INPUT_AXES, &p).map(|_| ())
     }
 
-    /// Post a key event (Windows virtual-key code) to the game window.
-    pub fn key(&mut self, vk: u32, down: bool) -> io::Result<()> {
+    /// Send a key event to the engine's input (`key` is an engine key name such as
+    /// `SpaceBar`, `W`, `LeftShift`, `C`, `Enter`). Returns whether a handler took it.
+    pub fn key(&mut self, key: &str, down: bool) -> io::Result<bool> {
         let mut p = Vec::new();
-        put_u32(&mut p, vk);
-        p.push(down as u8);
-        self.request(op::KEY, &p).map(|_| ())
+        put_str(&mut p, key);
+        p.push(if down { 0 } else { 1 });
+        Ok(self.request(op::KEY, &p)?.first() == Some(&1))
     }
 
     pub fn wait_ticks(&mut self, n: u32) -> io::Result<()> {
