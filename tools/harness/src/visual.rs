@@ -165,6 +165,23 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     rep.check(S, "harness-driven player moves through the map", moved > 300.0, format!("moved {moved:.0} uu, max RTT {max_rtt:.0} ms"));
     let others = last_state["others"].as_array().map(|a| a.len()).unwrap_or(0);
     rep.check(S, "remote players replicated to rendered client", others >= 3, format!("{others} remote players visible"));
+    // A deliberate pistol shot, captured a few frames later: the muzzle flash systems
+    // (`Ps_PlayerPistol_StdMuzzle_01` first person, `Ps_PistolMuzzle` on other pawns) must be
+    // decoded for the level and spawned.
+    let yaw = last_state["me"]["yaw"].as_f64().unwrap_or(0.0);
+    ctl.call(serde_json::json!({"cmd":"input","ticks":4,"input": {"yaw": yaw, "left_hand": "Pistol"}}));
+    std::thread::sleep(Duration::from_millis(400));
+    ctl.call(serde_json::json!({"cmd":"input","ticks":3,"input": {"yaw": yaw, "left_hand": "Pistol", "buttons": ["SECONDARY"]}}));
+    std::thread::sleep(Duration::from_millis(90));
+    let muzzle_shot = shots_dir.join("muzzle_flash.png");
+    ctl.call(serde_json::json!({"cmd":"screenshot","path": muzzle_shot.display().to_string()}));
+    std::thread::sleep(Duration::from_millis(400));
+    let fx = ctl.call(serde_json::json!({"cmd":"effects"})).unwrap_or(Value::Null);
+    let muzzles: Vec<(String, bool)> = fx["recent"].as_array().map(|a| a.iter().filter_map(|e| Some((e["path"].as_str()?.to_string(), e["spawned"].as_bool()?))).filter(|(p, _)| p.contains("Muzzle")).collect()).unwrap_or_default();
+    rep.check(S, "pistol shots spawn the original muzzle flash systems (first person and on other pawns)", !muzzles.is_empty() && muzzles.iter().all(|m| m.1), format!("{} muzzle effects (of {} recent, {} one-shots spawned): {:?}", muzzles.len(), fx["recent"].as_array().map(|a| a.len()).unwrap_or(0), fx["spawned_oneshots"], muzzles.iter().map(|m| format!("{} {}", m.0.rsplit('.').next().unwrap_or(""), if m.1 { "spawned" } else { "NOT DECODED" })).collect::<std::collections::BTreeSet<_>>()));
+    if muzzle_shot.exists() {
+        rep.artifact("muzzle flash screenshot", &muzzle_shot);
+    }
     let state_path = ctx.out.join("viewer_final_state.json");
     std::fs::write(&state_path, serde_json::to_string_pretty(&last_state)?)?;
     rep.artifact("viewer final state", &state_path);

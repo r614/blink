@@ -1153,3 +1153,11 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Port changes:** `dishonored_world::PhysicsVolume` (hulls, priority, zone velocity, pain), `WorldQuery::physics_volumes`, cache `physvol1`; sim: zone velocity in walking and falling, `volumes::step_pain` (timer pops and entry pain, per-pawn touching bits).
 - **Tests:** `dishonored_sim` player tests `pain_volume_hurts_on_entry_and_every_interval_and_pushes`, `outside_pain_volume_no_damage`.
 - **Confidence:** CONFIRMED for the volume data and the pain script; LIKELY for the timer on unscaled time (Bend Time slows the world, the port's timer does not slow with it).
+
+## 2026-10-06: Muzzle flash capture and distortion materials
+
+- **Question:** Do pistol shots show the original muzzle flash in the rendered client (last round could not capture it)?
+- **Method:** new runtime control command `effects` (the last gameplay effects asked for, spawned or not decoded); the visual suite fires the pistol, screenshots it and checks the effect log; `obj_dump` / `mic_static` of the muzzle system's emitters and materials.
+- **Findings:** the shot spawns `Ps_PlayerPistol_StdMuzzle_01` (the last round's capture ran a stale runtime: the harness starts the runtime and server from its own folder, and `.bin/` held binaries from 03:20; copy every binary when refreshing `.bin`). The screenshot showed a half-screen purple band: emitter `ParticleSpriteEmitter_20` uses `WindWave_Disto_01_inst` (parent `DefaultAdditive_PMAT`, `bHasDistortion`), whose static switches are `Dist_Enable_Distortion` on and `D_Disable_Diffuse` on; the port ignored the switch and drew its `D_Diffuse` (`Teleport_Ink_m`) additively.
+- **Port changes:** distortion-only emitters are skipped in the colour pass; the distortion pass itself is U-360.
+- **Harness:** visual 7/7 with the new check "pistol shots spawn the original muzzle flash systems"; screenshot `screens/muzzle_flash.png` (no band).

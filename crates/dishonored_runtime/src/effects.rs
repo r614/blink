@@ -144,6 +144,8 @@ pub struct Effects {
     active: String,
     rng: u64,
     pub spawned_oneshots: u64,
+    /// The last gameplay effects asked for: (system path, spawned) (harness `effects` command).
+    pub recent: Vec<(String, bool)>,
     pub live_particles: usize,
     /// Effects due later: (time, system, position, direction).
     delayed: Vec<(f32, String, Vec3, Vec3)>,
@@ -324,6 +326,14 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
     let mut glow = HashMap::new();
     for (si, s) in map.particle_systems.iter().enumerate() {
         for (ei, e) in s.emitters.iter().enumerate() {
+            // Distortion-only materials (`Dist_Enable_Distortion` with `D_Disable_Diffuse`, e.g.
+            // the pistol muzzle's `WindWave_Disto_01_inst`) draw nothing in the colour pass; UE3
+            // renders them in its distortion (refraction) pass, which the port does not have.
+            let params = e.material.and_then(|m| map.material_params.get(m));
+            if params.is_some_and(|p| p.switch("Dist_Enable_Distortion") == Some(true) && p.switch("D_Disable_Diffuse") == Some(true)) {
+                skipped.insert((si, ei));
+                continue;
+            }
             let Some(mid) = e.mesh_id.filter(|m| *m < map.meshes.len()) else {
                 if e.mesh.is_some() {
                     skipped.insert((si, ei));
@@ -444,6 +454,10 @@ fn empty_mesh() -> Mesh {
 
 /// Spawn a gameplay effect by ParticleSystem path at a Dishonored position and direction.
 pub fn spawn_effect(commands: &mut Commands, meshes: &mut Assets<Mesh>, fx: &mut Effects, path: &str, at: Vec3, dir: Vec3) -> bool {
+    if fx.recent.len() >= 64 {
+        fx.recent.remove(0);
+    }
+    fx.recent.push((path.to_string(), false));
     let Some(lf) = fx.levels.get(&fx.active).cloned() else { return false };
     let Some(&si) = lf.by_path.get(&path.to_ascii_lowercase()) else {
         warn!("effects: {path} not decoded for {}", fx.active);
@@ -459,6 +473,9 @@ pub fn spawn_effect(commands: &mut Commands, meshes: &mut Assets<Mesh>, fx: &mut
     let level = fx.active.clone();
     spawn_instance(commands, meshes, &lf, &level, si, m, true);
     fx.spawned_oneshots += 1;
+    if let Some(r) = fx.recent.last_mut() {
+        r.1 = true;
+    }
     true
 }
 
