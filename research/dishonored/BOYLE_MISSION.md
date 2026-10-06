@@ -579,7 +579,12 @@ not investigated (UNKNOWN). Approximate it with jaw or none.
      bullets, equips the pistol, sets `player_took_the_pistol` and starts conversation
      `Duel_Explained`.
   2. The countdown conversations are `Three`/`Two`/`One`/`Turn_and_Fire`.
-  3. "On mark" uses `TriggerVolume_3` and `Trigger_LOS_2`.
+  3. "On mark" uses `TriggerVolume_3` (player) and `Trigger_LOS_2`. Shaw's mark is
+     TriggerVolume_2 (`SeqEvent_Touch_39`, `ProximityTweaks` = Lord Shaw, armed by
+     `enableshawtrig` when the elite's `AIGoToActor_0` succeeds). The go-tos: `_0` `Shaw_Elite`
+     (`_11`) -> TargetPoint_5, `_1` `Lord Shaw` (`_45`) -> TargetPoint_9, `_2`
+     `Shaw_Elite_Pistols` (`_46`) -> TargetPoint_55. Port (2026-10-06): the countdown up to
+     `One` runs; Shaw then flees (U-221).
   4. Fail conditions: powers used, leaving `DisTrigger_29`, killing before the count.
   5. The outcome is set by flags `PistolWinHonor`/`PistolWinMess`/`PistolFailObj` and chapter
      notes `PistolDuelWon`/`PistolDuelCheat`.

@@ -1318,3 +1318,17 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 
   `cargo test -p dishonored_sim`: all pass.
 - **Confidence:** CONFIRMED for the formulas, the order and the data; the reference view is an APPROXIMATION of the player's real view.
+
+## 2026-10-06: Lord Shaw's duel reaches the countdown (U-221)
+
+- **Question:** Why do the duel's three go-tos all move Lord Shaw (pawn 2007), leaving him off his mark?
+- **Method:** `kismet find` on the Spawned events, the go-tos and their variables. `harness kismet --route duel`, extended to report the three variables and each spawner's pawn. Reading the interpreter's populate / publish.
+- **Findings:**
+  - The spawner -> pawn mapping and the Spawned events were right: `_45` -> 2007, `_11` -> 2004, `_46` -> 2008. Yet all three variables held 2007.
+  - Many duel ops (`AISetSuspicionLevel`, `AISetPatrol`, ...) link their `Targets` array to two or three of Shaw's variables. `Kismet::publish` (`PublishLinkedVariableValues`) wrote the whole array into each variable, and `write_var` keeps entry 0. So every variable became the first one, Lord Shaw. UE3's `USeqVar_Object::PublishValue` copies element i into variable i.
+  - Fixed: `runtime::publish_values`. When the counts differ (the port's populate skips empty object variables), nothing is written back.
+  - Run after the fix: the elites go to TargetPoint_5 / _55 and Shaw to TargetPoint_9. Shaw touches TriggerVolume_2 at 90.1 s ("Shaw On Mark"). `Stop_stand_there` and `Go_to_Mark` play (`Go_to_Mark` is refused once while `Stop_stand_there` plays: equal priority, the decoded rule; the loop retries), then `Three` (92.8 s), `Two`, `One` (97.8 s). "turn off mark trigger" completes PN T2.
+  - Next blocker: at 98.5 s Shaw is in `BrainState::Flee` and leaves his mark; `Turn_and_Fire` never plays. `Twk_Pawn_LordShaw` falls back to the elite guard pawns, with a sword and `Twk_Inv_PistolShaw` in `m_ContentInventoryLoadout`. The port classes him Civilian from the tweak name ("party").
+  - Navmesh walking (`movement::nav_walk_move`, decoded by the FaceFX agent, commit c05d9e1) is in this branch with a unit test.
+- **Harness:** `kismet --route duel` (debug build) 6/6. The open stage now reports the countdown up to `One` (before: only `Duel_Explained`).
+- **Confidence:** CONFIRMED for the publish semantics (UE3 engine behaviour) and the run; the panic's cause is SPECULATIVE.
