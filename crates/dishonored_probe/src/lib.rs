@@ -1,0 +1,466 @@
+//! Runtime probe of the original game: the wire protocol spoken over the probe's local named
+//! pipe, and a blocking client for it.
+//!
+//! The server side is `dishonored_probe_dll`, a 32-bit DLL that `probe_launch` injects into a
+//! `Dishonored.exe` it started itself. The pipe is named
+//! `\\.\pipe\dishonored_probe_<pid>_<token>`, is local-only, and only the current user may open
+//! it. See `research/dishonored/INSTRUMENTATION.md`.
+//!
+//! Framing: every message is `u32 length (LE)` followed by `length` bytes. A request body is
+//! `u8 op` + op payload; a response body is `u8 status` (0 ok, 1 error with a UTF-8 message) +
+//! payload. All integers are little endian. Addresses are 32-bit (the game is a 32-bit process).
+use std::io::{self, Read, Write};
+
+pub const PROTOCOL_VERSION: u32 = 1;
+pub const PIPE_PREFIX: &str = r"\\.\pipe\dishonored_probe_";
+/// Environment variable through which the launcher hands the session token to the DLL.
+pub const TOKEN_ENV: &str = "DISHONORED_PROBE_TOKEN";
+
+/// Request opcodes.
+pub mod op {
+    /// -> u32 protocol version, then UTF-8 build string.
+    pub const PING: u8 = 1;
+    /// u32 addr, u32 len -> bytes (error if unreadable).
+    pub const READ: u8 = 2;
+    /// u32 addr, bytes -> () (game thread not required; uses WriteProcessMemory on itself).
+    pub const WRITE: u8 = 3;
+    /// -> UTF-8 `key=value` lines (hook state, engine globals, player objects, counters).
+    pub const STATUS: u8 = 4;
+    /// str name, str class ("" = any) -> u32 count, u32 addrs (live objects, defaults excluded).
+    pub const FIND: u8 = 5;
+    /// str command -> str result. Runs `PlayerController.ConsoleCommand` on the game thread.
+    pub const CONSOLE: u8 = 6;
+    /// u32 max samples kept (0 = stop) -> (). Clears the per-tick sample buffer.
+    pub const SAMPLE_START: u8 = 7;
+    /// -> u32 count, count * Sample (and the buffer is emptied).
+    pub const SAMPLE_FETCH: u8 = 8;
+    /// u8 flags (bit0 hold), f32 forward, f32 strafe, f32 turn, f32 lookup, u32 frames
+    /// (0 = until changed) -> (). Written into the PlayerInput axes every tick.
+    pub const INPUT_AXES: u8 = 9;
+    /// -> u32 width, u32 height, u32 D3DFORMAT, u32 pitch, bytes. Back buffer at the next Present.
+    pub const CAPTURE: u8 = 10;
+    /// -> u32 count, per shader: u32 id, u64 fnv hash, u32 size, str CTAB names.
+    pub const SHADERS: u8 = 11;
+    /// u64 hash, u32 draws -> u32 count, per draw: u32 frame, 224 * [f32;4] PS constants.
+    pub const PS_CONSTANTS: u8 = 12;
+    /// u32 object, str function ("Class.Func" or "Func"), bytes parms -> bytes parms after call.
+    pub const CALL: u8 = 13;
+    /// u32 object -> str full name ("Class Outer.Name").
+    pub const NAME_OF: u8 = 14;
+    /// u32 count, count * (u32 offset, u32 len) -> (). Extra pawn bytes recorded per sample.
+    pub const WATCH: u8 = 15;
+    /// u32 frames -> (). Blocks until that many frames (Presents) have run.
+    pub const WAIT_TICKS: u8 = 16;
+    /// u32 virtual key, u8 down -> (). Posted to the game's viewport window.
+    pub const KEY: u8 = 17;
+}
+
+/// One game tick of the local player's pawn, recorded in the `PlayerTick` event.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Sample {
+    pub tick: u32,
+    pub delta: f32,
+    pub time_seconds: f32,
+    pub real_time_seconds: f32,
+    pub pawn: u32,
+    pub location: [f32; 3],
+    pub velocity: [f32; 3],
+    pub physics: u8,
+    pub health: i32,
+    /// Bytes of the `WATCH` ranges, concatenated.
+    pub extra: Vec<u8>,
+}
+
+impl Sample {
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        out.extend(self.tick.to_le_bytes());
+        out.extend(self.delta.to_le_bytes());
+        out.extend(self.time_seconds.to_le_bytes());
+        out.extend(self.real_time_seconds.to_le_bytes());
+        out.extend(self.pawn.to_le_bytes());
+        for v in self.location.iter().chain(self.velocity.iter()) {
+            out.extend(v.to_le_bytes());
+        }
+        out.push(self.physics);
+        out.extend(self.health.to_le_bytes());
+        put_bytes(out, &self.extra);
+    }
+
+    pub fn decode(r: &mut Reader) -> io::Result<Sample> {
+        let mut s = Sample { tick: r.u32()?, delta: r.f32()?, time_seconds: r.f32()?, real_time_seconds: r.f32()?, pawn: r.u32()?, ..Default::default() };
+        for i in 0..3 {
+            s.location[i] = r.f32()?;
+        }
+        for i in 0..3 {
+            s.velocity[i] = r.f32()?;
+        }
+        s.physics = r.u8()?;
+        s.health = r.u32()? as i32;
+        s.extra = r.bytes()?.to_vec();
+        Ok(s)
+    }
+}
+
+/// Unreal `EPhysics` values (Actor.uc).
+pub fn physics_name(p: u8) -> &'static str {
+    match p {
+        0 => "None",
+        1 => "Walking",
+        2 => "Falling",
+        3 => "Swimming",
+        4 => "Flying",
+        5 => "Rotating",
+        6 => "Projectile",
+        7 => "Interpolating",
+        8 => "Spider",
+        9 => "Ladder",
+        10 => "RigidBody",
+        11 => "SoftBody",
+        12 => "NavMeshWalking",
+        13 => "Unused",
+        14 => "Custom",
+        _ => "?",
+    }
+}
+
+pub fn put_u32(out: &mut Vec<u8>, v: u32) {
+    out.extend(v.to_le_bytes());
+}
+pub fn put_f32(out: &mut Vec<u8>, v: f32) {
+    out.extend(v.to_le_bytes());
+}
+pub fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
+    put_u32(out, b.len() as u32);
+    out.extend_from_slice(b);
+}
+pub fn put_str(out: &mut Vec<u8>, s: &str) {
+    put_bytes(out, s.as_bytes());
+}
+
+/// Cursor over a message payload.
+pub struct Reader<'a> {
+    pub data: &'a [u8],
+    pub pos: usize,
+}
+
+fn short() -> io::Error {
+    io::Error::new(io::ErrorKind::UnexpectedEof, "probe message too short")
+}
+
+impl<'a> Reader<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        Reader { data, pos: 0 }
+    }
+    pub fn take(&mut self, n: usize) -> io::Result<&'a [u8]> {
+        let s = self.data.get(self.pos..self.pos + n).ok_or_else(short)?;
+        self.pos += n;
+        Ok(s)
+    }
+    pub fn u8(&mut self) -> io::Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+    pub fn u32(&mut self) -> io::Result<u32> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    pub fn u64(&mut self) -> io::Result<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+    pub fn f32(&mut self) -> io::Result<f32> {
+        Ok(f32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    pub fn bytes(&mut self) -> io::Result<&'a [u8]> {
+        let n = self.u32()? as usize;
+        self.take(n)
+    }
+    pub fn str(&mut self) -> io::Result<String> {
+        Ok(String::from_utf8_lossy(self.bytes()?).into_owned())
+    }
+    pub fn rest(&mut self) -> &'a [u8] {
+        let s = &self.data[self.pos..];
+        self.pos = self.data.len();
+        s
+    }
+}
+
+/// Write one framed message.
+pub fn write_frame(w: &mut impl Write, body: &[u8]) -> io::Result<()> {
+    let mut buf = Vec::with_capacity(body.len() + 4);
+    put_u32(&mut buf, body.len() as u32);
+    buf.extend_from_slice(body);
+    w.write_all(&buf)?;
+    w.flush()
+}
+
+/// Read one framed message (at most 256 MiB).
+pub fn read_frame(r: &mut impl Read) -> io::Result<Vec<u8>> {
+    let mut len = [0u8; 4];
+    r.read_exact(&mut len)?;
+    let n = u32::from_le_bytes(len) as usize;
+    if n > 256 << 20 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "probe frame too large"));
+    }
+    let mut body = vec![0u8; n];
+    r.read_exact(&mut body)?;
+    Ok(body)
+}
+
+/// FNV-1a 64 of a shader's bytecode (the id the `SHADERS` / `PS_CONSTANTS` ops use).
+pub fn fnv64(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in data {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// A back-buffer capture.
+pub struct Capture {
+    pub width: u32,
+    pub height: u32,
+    pub format: u32,
+    pub pitch: u32,
+    pub data: Vec<u8>,
+}
+
+impl Capture {
+    /// Tightly packed RGBA8 (X8R8G8B8 / A8R8G8B8 back buffers; alpha forced to 255).
+    pub fn to_rgba(&self) -> Option<Vec<u8>> {
+        if self.format != 21 && self.format != 22 {
+            return None;
+        }
+        let mut out = Vec::with_capacity((self.width * self.height * 4) as usize);
+        for y in 0..self.height as usize {
+            let row = &self.data[y * self.pitch as usize..];
+            for x in 0..self.width as usize {
+                let p = &row[x * 4..x * 4 + 4];
+                out.extend_from_slice(&[p[2], p[1], p[0], 255]);
+            }
+        }
+        Some(out)
+    }
+}
+
+/// A created pixel shader seen by the D3D9 hook.
+#[derive(Clone, Debug)]
+pub struct ShaderInfo {
+    pub id: u32,
+    pub hash: u64,
+    pub size: u32,
+    /// CTAB entries as `name=c12x2` (register set, index, count).
+    pub ctab: String,
+}
+
+/// Blocking client over the probe pipe.
+pub struct Client {
+    pipe: std::fs::File,
+}
+
+impl Client {
+    /// Connect to a pipe by full name (`\\.\pipe\dishonored_probe_...`).
+    pub fn connect(name: &str) -> io::Result<Client> {
+        let pipe = std::fs::OpenOptions::new().read(true).write(true).open(name)?;
+        Ok(Client { pipe })
+    }
+
+    /// Connect, retrying while the game starts (the pipe appears once the DLL is initialised).
+    pub fn connect_wait(name: &str, timeout: std::time::Duration) -> io::Result<Client> {
+        let start = std::time::Instant::now();
+        loop {
+            match Client::connect(name) {
+                Ok(c) => return Ok(c),
+                Err(e) if start.elapsed() < timeout => {
+                    let _ = e;
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Send a raw request and return the response payload (errors carry the server's message).
+    pub fn request(&mut self, op: u8, payload: &[u8]) -> io::Result<Vec<u8>> {
+        let mut body = Vec::with_capacity(payload.len() + 1);
+        body.push(op);
+        body.extend_from_slice(payload);
+        write_frame(&mut self.pipe, &body)?;
+        let resp = read_frame(&mut self.pipe)?;
+        match resp.first() {
+            Some(0) => Ok(resp[1..].to_vec()),
+            Some(_) => Err(io::Error::other(String::from_utf8_lossy(&resp[1..]).into_owned())),
+            None => Err(short()),
+        }
+    }
+
+    pub fn ping(&mut self) -> io::Result<(u32, String)> {
+        let r = self.request(op::PING, &[])?;
+        let mut rd = Reader::new(&r);
+        Ok((rd.u32()?, rd.str()?))
+    }
+
+    pub fn read(&mut self, addr: u32, len: u32) -> io::Result<Vec<u8>> {
+        let mut p = Vec::new();
+        put_u32(&mut p, addr);
+        put_u32(&mut p, len);
+        self.request(op::READ, &p)
+    }
+
+    pub fn read_u32(&mut self, addr: u32) -> io::Result<u32> {
+        let b = self.read(addr, 4)?;
+        Ok(u32::from_le_bytes(b[..4].try_into().unwrap()))
+    }
+
+    pub fn read_f32(&mut self, addr: u32) -> io::Result<f32> {
+        Ok(f32::from_bits(self.read_u32(addr)?))
+    }
+
+    pub fn write(&mut self, addr: u32, data: &[u8]) -> io::Result<()> {
+        let mut p = Vec::new();
+        put_u32(&mut p, addr);
+        p.extend_from_slice(data);
+        self.request(op::WRITE, &p).map(|_| ())
+    }
+
+    pub fn status(&mut self) -> io::Result<String> {
+        Ok(String::from_utf8_lossy(&self.request(op::STATUS, &[])?).into_owned())
+    }
+
+    /// `key=value` from `status()`, parsed (hex values with `0x` are returned as text).
+    pub fn status_value(&mut self, key: &str) -> io::Result<Option<String>> {
+        let s = self.status()?;
+        Ok(s.lines().find_map(|l| l.strip_prefix(key).and_then(|r| r.strip_prefix('=')).map(str::to_string)))
+    }
+
+    pub fn find(&mut self, name: &str, class: &str) -> io::Result<Vec<u32>> {
+        let mut p = Vec::new();
+        put_str(&mut p, name);
+        put_str(&mut p, class);
+        let r = self.request(op::FIND, &p)?;
+        let mut rd = Reader::new(&r);
+        let n = rd.u32()?;
+        (0..n).map(|_| rd.u32()).collect()
+    }
+
+    pub fn name_of(&mut self, obj: u32) -> io::Result<String> {
+        let mut p = Vec::new();
+        put_u32(&mut p, obj);
+        let r = self.request(op::NAME_OF, &p)?;
+        Reader::new(&r).str()
+    }
+
+    pub fn console(&mut self, cmd: &str) -> io::Result<String> {
+        let mut p = Vec::new();
+        put_str(&mut p, cmd);
+        let r = self.request(op::CONSOLE, &p)?;
+        Reader::new(&r).str()
+    }
+
+    pub fn call(&mut self, obj: u32, func: &str, parms: &[u8]) -> io::Result<Vec<u8>> {
+        let mut p = Vec::new();
+        put_u32(&mut p, obj);
+        put_str(&mut p, func);
+        p.extend_from_slice(parms);
+        self.request(op::CALL, &p)
+    }
+
+    pub fn sample_start(&mut self, max: u32) -> io::Result<()> {
+        let mut p = Vec::new();
+        put_u32(&mut p, max);
+        self.request(op::SAMPLE_START, &p).map(|_| ())
+    }
+
+    pub fn sample_fetch(&mut self) -> io::Result<Vec<Sample>> {
+        let r = self.request(op::SAMPLE_FETCH, &[])?;
+        let mut rd = Reader::new(&r);
+        let n = rd.u32()?;
+        (0..n).map(|_| Sample::decode(&mut rd)).collect()
+    }
+
+    pub fn watch(&mut self, ranges: &[(u32, u32)]) -> io::Result<()> {
+        let mut p = Vec::new();
+        put_u32(&mut p, ranges.len() as u32);
+        for &(o, l) in ranges {
+            put_u32(&mut p, o);
+            put_u32(&mut p, l);
+        }
+        self.request(op::WATCH, &p).map(|_| ())
+    }
+
+    /// Hold PlayerInput axes (`aBaseY` forward, `aStrafe`, `aTurn`, `aLookUp`) for `frames`
+    /// ticks (0 = until the next call). All zero releases.
+    pub fn input_axes(&mut self, forward: f32, strafe: f32, turn: f32, lookup: f32, frames: u32) -> io::Result<()> {
+        let mut p = vec![1u8];
+        for v in [forward, strafe, turn, lookup] {
+            put_f32(&mut p, v);
+        }
+        put_u32(&mut p, frames);
+        self.request(op::INPUT_AXES, &p).map(|_| ())
+    }
+
+    /// Post a key event (Windows virtual-key code) to the game window.
+    pub fn key(&mut self, vk: u32, down: bool) -> io::Result<()> {
+        let mut p = Vec::new();
+        put_u32(&mut p, vk);
+        p.push(down as u8);
+        self.request(op::KEY, &p).map(|_| ())
+    }
+
+    pub fn wait_ticks(&mut self, n: u32) -> io::Result<()> {
+        let mut p = Vec::new();
+        put_u32(&mut p, n);
+        self.request(op::WAIT_TICKS, &p).map(|_| ())
+    }
+
+    pub fn capture(&mut self) -> io::Result<Capture> {
+        let r = self.request(op::CAPTURE, &[])?;
+        let mut rd = Reader::new(&r);
+        Ok(Capture { width: rd.u32()?, height: rd.u32()?, format: rd.u32()?, pitch: rd.u32()?, data: rd.rest().to_vec() })
+    }
+
+    pub fn shaders(&mut self) -> io::Result<Vec<ShaderInfo>> {
+        let r = self.request(op::SHADERS, &[])?;
+        let mut rd = Reader::new(&r);
+        let n = rd.u32()?;
+        (0..n).map(|_| Ok(ShaderInfo { id: rd.u32()?, hash: rd.u64()?, size: rd.u32()?, ctab: rd.str()? })).collect()
+    }
+
+    /// PS constant registers (224 float4) at the next `draws` draws made with shader `hash`.
+    pub fn ps_constants(&mut self, hash: u64, draws: u32) -> io::Result<Vec<(u32, Vec<[f32; 4]>)>> {
+        let mut p = Vec::new();
+        p.extend(hash.to_le_bytes());
+        put_u32(&mut p, draws);
+        let r = self.request(op::PS_CONSTANTS, &p)?;
+        let mut rd = Reader::new(&r);
+        let n = rd.u32()?;
+        let mut out = Vec::new();
+        for _ in 0..n {
+            let frame = rd.u32()?;
+            let mut regs = Vec::with_capacity(224);
+            for _ in 0..224 {
+                regs.push([rd.f32()?, rd.f32()?, rd.f32()?, rd.f32()?]);
+            }
+            out.push((frame, regs));
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sample_roundtrip() {
+        let s = Sample { tick: 7, delta: 0.016, time_seconds: 1.5, real_time_seconds: 2.0, pawn: 0x1234, location: [1.0, 2.0, 3.0], velocity: [4.0, 5.0, -6.0], physics: 2, health: 70, extra: vec![9, 8] };
+        let mut b = Vec::new();
+        s.encode(&mut b);
+        assert_eq!(Sample::decode(&mut Reader::new(&b)).unwrap(), s);
+    }
+
+    #[test]
+    fn frame_roundtrip() {
+        let mut b = Vec::new();
+        write_frame(&mut b, b"\x04hello").unwrap();
+        assert_eq!(read_frame(&mut &b[..]).unwrap(), b"\x04hello");
+    }
+}

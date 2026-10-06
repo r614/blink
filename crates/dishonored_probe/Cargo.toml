@@ -1,0 +1,8 @@
+[package]
+name = "dishonored_probe"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Wire protocol and client for the runtime probe of the original Dishonored.exe (local named pipe served by dishonored_probe_dll)"
+
+[dependencies]

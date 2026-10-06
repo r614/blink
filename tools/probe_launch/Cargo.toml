@@ -1,0 +1,20 @@
+[package]
+name = "probe_launch"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Start the original Dishonored.exe suspended, inject dishonored_probe_dll, and drive / measure it over the probe pipe (launch needs --target i686-pc-windows-msvc)"
+
+[dependencies]
+anyhow.workspace = true
+dishonored_probe = { path = "../../crates/dishonored_probe" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+] }

@@ -2470,6 +2470,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dishonored_probe"
+version = "0.1.0"
+
+[[package]]
+name = "dishonored_probe_dll"
+version = "0.1.0"
+dependencies = [
+ "dishonored_probe",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "dishonored_runtime"
 version = "0.1.0"
 dependencies = [
@@ -4585,6 +4597,15 @@ name = "presser"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
+
+[[package]]
+name = "probe_launch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dishonored_probe",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "proc-macro-crate"

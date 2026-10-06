@@ -1,0 +1,30 @@
+[package]
+name = "dishonored_probe_dll"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "32-bit DLL injected by probe_launch into a Dishonored.exe it started: ProcessEvent and D3D9 hooks, served over a current-user-only local named pipe (build with --target i686-pc-windows-msvc)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dishonored_probe = { path = "../dishonored_probe" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Environment",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_IO",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
