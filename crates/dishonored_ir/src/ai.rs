@@ -239,16 +239,207 @@ pub struct MeleeContextConfig {
     /// After any NPC uses it on a target, other NPCs may not use the same attack class on that
     /// target for this long (`m_NPCAttackHistory*` with `m_fInhibitionTime*`).
     pub inhibition: f32,
+    /// Move kind (`dishonored_sim::input::npc_moves`) of the context class.
+    #[serde(default)]
+    pub kind: u8,
+    /// Item-context range (`DisTweaks_ItemContext.m_fMinContextRange` / `m_fMaxContextRange`)
+    /// and `m_fMaxContextHeightDifference`, uu.
+    #[serde(default)]
+    pub min_range: f32,
+    #[serde(default = "big_range")]
+    pub max_range: f32,
+    #[serde(default = "context_height")]
+    pub max_height: f32,
 }
 
-/// Elite guard melee contexts (`TwkAttackPattern_BerserkerElite`, Short/StepBack/Medium; the
-/// jump and long attacks need animations the shared pawn does not have).
+fn big_range() -> f32 {
+    f32::MAX
+}
+fn context_height() -> f32 {
+    200.0
+}
+
+impl MeleeContextConfig {
+    /// A context of an attack pattern with its class-default range (`DisTweaks_NPCAttack*`).
+    pub fn of_class(name: &str, cooldown: [f32; 2], inhibition: f32) -> Self {
+        let (kind, min_range, max_range, max_height) = context_class_defaults(name);
+        MeleeContextConfig { name: name.into(), cooldown, inhibition, kind, min_range, max_range, max_height }
+    }
+}
+
+/// Move kind and class-default range of an NPC item context (`DisTweaks_NPCAttackShort` 250,
+/// `StepBack` 100, `Medium` 350, `Long` 450, `NPCJumpAttack` 550-800 with a 100 uu height
+/// limit; `DisTweaks_MeleeAttackNPCBase.m_fMaxContextHeightDifference` 200 otherwise).
+pub fn context_class_defaults(name: &str) -> (u8, f32, f32, f32) {
+    match name {
+        "DisItemContext_NPCAttackShort" => (1, 0.0, 250.0, 200.0),
+        "DisItemContext_NPCAttackStepBack" => (2, 0.0, 100.0, 200.0),
+        "DisItemContext_NPCAttackMedium" => (3, 0.0, 350.0, 200.0),
+        "DisItemContext_NPCAttackLong" => (4, 0.0, 450.0, 200.0),
+        "DisItemContext_NPCJumpAttack" => (5, 550.0, 800.0, 100.0),
+        "DisItemContext_NPCSideStep" => (6, 0.0, f32::MAX, 200.0),
+        "DisItemContext_NPCBackStep" => (7, 0.0, f32::MAX, 200.0),
+        "DisItemContext_NPCFireGun" => (8, 0.0, f32::MAX, 200.0),
+        _ => (0, 0.0, f32::MAX, 200.0),
+    }
+}
+
+/// Elite guard attack contexts (`TwkAttackPattern_BerserkerElite` overrides in tweak order,
+/// with `DisGlobalCombatManager.m_fInhibitionTime*`). The dodges and the gun are handled by
+/// their own rules ([`DodgeConfig`], [`PistolConfig`]).
 pub fn default_melee_contexts() -> Vec<MeleeContextConfig> {
     vec![
-        MeleeContextConfig { name: "DisItemContext_NPCAttackShort".into(), cooldown: [1.0, 3.0], inhibition: 2.0 },
-        MeleeContextConfig { name: "DisItemContext_NPCAttackStepBack".into(), cooldown: [0.5, 2.0], inhibition: 1.0 },
-        MeleeContextConfig { name: "DisItemContext_NPCAttackMedium".into(), cooldown: [3.0, 5.0], inhibition: 1.0 },
+        // Ranges of the elite sword's pawn-specific contexts
+        // (`Twk_Inv_SwordEliteGuard.DisTweaks_InventoryItem_PawnSpecific_1`).
+        MeleeContextConfig { min_range: 50.0, max_range: 235.0, max_height: 300.0, ..MeleeContextConfig::of_class("DisItemContext_NPCAttackShort", [1.0, 3.0], 2.0) },
+        MeleeContextConfig { min_range: 0.0, max_range: 170.0, max_height: 100.0, ..MeleeContextConfig::of_class("DisItemContext_NPCAttackStepBack", [0.5, 2.0], 1.0) },
+        MeleeContextConfig { min_range: 235.0, max_range: 375.0, max_height: 300.0, ..MeleeContextConfig::of_class("DisItemContext_NPCAttackMedium", [3.0, 5.0], 1.0) },
+        MeleeContextConfig { min_range: 375.0, max_range: 570.0, max_height: 200.0, ..MeleeContextConfig::of_class("DisItemContext_NPCAttackLong", [15.0, 20.0], 0.8) },
+        MeleeContextConfig { min_range: 730.0, max_range: 850.0, max_height: 100.0, ..MeleeContextConfig::of_class("DisItemContext_NPCJumpAttack", [15.0, 20.0], 3.0) },
     ]
+}
+
+/// Dodges and attack pacing (`DisTweaks_AISubProcess_ManageAttacks` of the elite combat
+/// behaviour, `DisTweaks_NPCSideStep` / `DisTweaks_NPCBackStep`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct DodgeConfig {
+    /// `m_AttacksPerFlurry`: stamina-draining attacks before a `m_StaminaRecoveryDuration`
+    /// pause (0x00b47880).
+    pub attacks_per_flurry: [i32; 2],
+    pub stamina_recovery: [f32; 2],
+    /// `m_TimeForThreatToCauseSideStep`, `m_fAngleOfPerceivedMeleeThreat` /
+    /// `m_fAngleOfPerceivedRangedThreat` (degrees).
+    pub time_for_threat_side_step: [f32; 2],
+    pub angle_melee_threat: f32,
+    pub angle_ranged_threat: f32,
+    /// `m_IncomingAttacksBeforeBackStep`, `m_fTimeToForgiveIncomingAttacks`.
+    pub incoming_attacks_before_back_step: [i32; 2],
+    pub forgive_incoming_attacks: f32,
+    pub side_step_distance: f32,
+    pub back_step_distance: f32,
+    /// `DisGlobalCombatManager.m_fInhibitionTimeSideStep` / `BackStep`.
+    pub side_step_inhibition: f32,
+    pub back_step_inhibition: f32,
+}
+
+impl Default for DodgeConfig {
+    fn default() -> Self {
+        DodgeConfig {
+            attacks_per_flurry: [2, 3],
+            stamina_recovery: [4.0, 5.0],
+            time_for_threat_side_step: [2.0, 3.0],
+            angle_melee_threat: 30.0,
+            angle_ranged_threat: 10.0,
+            incoming_attacks_before_back_step: [1, 1],
+            forgive_incoming_attacks: 5.0,
+            side_step_distance: 250.0,
+            back_step_distance: 300.0,
+            side_step_inhibition: 6.0,
+            back_step_inhibition: 8.0,
+        }
+    }
+}
+
+/// The elite guard's pistol (`DisTweaks_AISubState_FirePistol`, `DisItemContext_NPCFireGun`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PistolConfig {
+    /// `m_TimeToFirstShot` (the fire timer set on entering the sub-state, 0x00b32c50).
+    pub time_to_first_shot: [f32; 2],
+    /// `m_TimeBeforeGivingUp`.
+    pub time_before_giving_up: [f32; 2],
+    pub point_blank_distance: f32,
+    pub chance_fire_again: f32,
+    /// FireGun context range (`m_fMinContextRange` / `m_fMaxContextRange`): starting to shoot
+    /// needs the target within (min, max); continuing needs it within max (0x00b0e220).
+    pub min_range: f32,
+    pub max_range: f32,
+}
+
+impl Default for PistolConfig {
+    fn default() -> Self {
+        PistolConfig { time_to_first_shot: [0.75, 1.25], time_before_giving_up: [0.3, 1.0], point_blank_distance: 80.0, chance_fire_again: 1.0, min_range: 250.0, max_range: 3000.0 }
+    }
+}
+
+/// `DisTweaks_RatSwarm` (a swarm of rats, `DisRatSwarm`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct RatSwarmConfig {
+    /// `EDisRatSwarmType`: 0 ambient, 1 random, 2 scripted, 3 Devouring Swarm.
+    pub swarm_type: u8,
+    pub initial_rat_count_to_be_aggressive: i32,
+    pub pawn_detection_radius: f32,
+    pub pawn_detection_radius_when_busy: f32,
+    pub pawn_escape_radius: f32,
+    pub player_detection_delay_after_spawn: f32,
+    pub pawn_unreachable_delay: f32,
+    pub destination_radius: f32,
+    pub pawn_visibility_check_interval: f32,
+    pub idle_away_from_pawn_trigger_dist: f32,
+    pub idle_away_from_pawn_trigger_duration: f32,
+    pub idle_away_from_pawn_move_dist: f32,
+    pub idle_away_from_pawn_count: [i32; 2],
+    pub idle_roaming_radius: f32,
+    pub idle_roaming_max_pause: f32,
+    pub min_rat_count_per_attack_group: i32,
+    pub min_rat_count_for_new_attack_group: i32,
+    pub forced_attack_detection_radius: f32,
+    pub initial_delay_before_dealing_damage: f32,
+    pub damage_per_bite: f32,
+    pub min_damage: f32,
+    pub max_damage: f32,
+    pub damage_time_interval: f32,
+    pub pawn_slowdown_percent: f32,
+    pub pawn_slowdown_duration: f32,
+    pub eat_required_rat_count: i32,
+    pub eat_startup_duration: f32,
+    pub eat_startup_delay_after_kill: f32,
+    pub eat_per_limb_duration: f32,
+    pub never_flee_systemically: bool,
+    pub flee_attempt_distance: [f32; 2],
+    pub flee_retry_delay: f32,
+}
+
+impl Default for RatSwarmConfig {
+    /// `Default__DisTweaks_RatSwarm`.
+    fn default() -> Self {
+        RatSwarmConfig {
+            swarm_type: 0,
+            initial_rat_count_to_be_aggressive: 10,
+            pawn_detection_radius: 1000.0,
+            pawn_detection_radius_when_busy: 400.0,
+            pawn_escape_radius: 1500.0,
+            player_detection_delay_after_spawn: 2.0,
+            pawn_unreachable_delay: 3.0,
+            destination_radius: 150.0,
+            pawn_visibility_check_interval: 1.5,
+            idle_away_from_pawn_trigger_dist: 250.0,
+            idle_away_from_pawn_trigger_duration: 0.5,
+            idle_away_from_pawn_move_dist: 300.0,
+            idle_away_from_pawn_count: [3, 5],
+            idle_roaming_radius: 50.0,
+            idle_roaming_max_pause: 5.0,
+            min_rat_count_per_attack_group: 8,
+            min_rat_count_for_new_attack_group: 20,
+            forced_attack_detection_radius: 250.0,
+            initial_delay_before_dealing_damage: 1.0,
+            damage_per_bite: 0.2,
+            min_damage: 1.0,
+            max_damage: 10.0,
+            damage_time_interval: 0.5,
+            pawn_slowdown_percent: 40.0,
+            pawn_slowdown_duration: 1.0,
+            eat_required_rat_count: 5,
+            eat_startup_duration: 2.0,
+            eat_startup_delay_after_kill: 1.0,
+            eat_per_limb_duration: 1.85,
+            never_flee_systemically: false,
+            flee_attempt_distance: [1000.0, 5000.0],
+            flee_retry_delay: 3.0,
+        }
+    }
 }
 
 /// A `DishonoredRoute` (an engine `Route` of `DishonoredNavPoint`s) used by `DisBehaviorPatrol`.
@@ -367,6 +558,10 @@ pub struct CombatAiConfig {
     /// Melee attack contexts in pattern order with cooldowns and group inhibition.
     #[serde(default = "default_melee_contexts")]
     pub melee_contexts: Vec<MeleeContextConfig>,
+    #[serde(default)]
+    pub dodge: DodgeConfig,
+    #[serde(default)]
+    pub pistol: PistolConfig,
 }
 
 /// NPC perception and behaviour tuning.
@@ -413,6 +608,12 @@ pub struct AiConfig {
     /// of the vision range is a "near" detection (`DDH_SEARCH_NEAR_VDETECTION`).
     #[serde(default = "near_ratio")]
     pub visual_detection_ratio_near: f32,
+    /// The default rat swarm tweak (`DisTweaks_RatSwarm`; Devouring Swarm and the level swarms
+    /// use their own when loaded).
+    #[serde(default)]
+    pub rats: RatSwarmConfig,
+    #[serde(default)]
+    pub devouring_swarm: RatSwarmConfig,
     pub provenance: BTreeMap<String, String>,
 }
 
@@ -620,6 +821,80 @@ pub struct AiLevel {
     pub alarms: Vec<AlarmBellDef>,
     #[serde(default)]
     pub lights: Vec<ProbeLight>,
+    /// Sky lights of the level as an ambient brightness term for the light probe.
+    #[serde(default)]
+    pub sky_light: f32,
+    /// The level's audio cells and portals (AI hearing between cells).
+    #[serde(default)]
+    pub audio: AudioCells,
+    /// Pawn tweak path -> its generic dialog trees (`DisTweaks_NPCPawn.m_GenericDialogData`
+    /// voices' `m_pDialogTree`), for AI barks.
+    #[serde(default)]
+    pub generic_trees: BTreeMap<String, Vec<String>>,
+}
+
+/// A `DishonoredAudioVolume`: an audio cell.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AudioCell {
+    pub name: String,
+    /// `m_AudioPropagationIndex`.
+    pub index: u8,
+    /// Convex hulls (world planes `n.p <= d`, like [`ForbiddenZone`]).
+    pub hulls: Vec<Vec<[f32; 4]>>,
+    /// `m_LinkedPortals` (indices into [`AudioCells::portals`]).
+    pub portals: Vec<usize>,
+}
+
+impl AudioCell {
+    pub fn contains(&self, p: glam::Vec3) -> bool {
+        self.hulls.iter().any(|h| !h.is_empty() && h.iter().all(|pl| pl[0] * p.x + pl[1] * p.y + pl[2] * p.z <= pl[3] + 1e-3))
+    }
+}
+
+/// A `DishonoredAudioPortal` (`GenericPortal`): a rectangle between two cells.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AudioPortal {
+    pub name: String,
+    /// `m_AudioPropagationIndex`.
+    pub index: u8,
+    /// Centre, in-plane axes (unit), normal (unit) and half extents along the axes.
+    pub origin: glam::Vec3,
+    pub x_axis: glam::Vec3,
+    pub y_axis: glam::Vec3,
+    pub normal: glam::Vec3,
+    pub half: [f32; 2],
+    /// `m_pCellA` / `m_pCellB` (indices into [`AudioCells::cells`]).
+    pub cell_a: Option<usize>,
+    pub cell_b: Option<usize>,
+    /// `m_fOcclusion_HeardByAI`.
+    pub occlusion_ai: f32,
+}
+
+/// `DisAudioPropagationInfo`: precomputed portal paths between cells. `keys` are sorted
+/// (`portal_b | cell_b << 8 | portal_a << 16 | cell_a << 24` with propagation indices, cell A
+/// the lower one); `values[i]` is `(byte offset into data) << 8 | intermediate portal count`;
+/// at the offset: the path length as a u16 times `dist_coeff`, then the intermediate portals as
+/// indices into `portals` (`m_Portals`, which hold indices into [`AudioCells::portals`]).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AudioPropagation {
+    pub dist_coeff: f32,
+    pub max_audible_distance: f32,
+    pub keys: Vec<u32>,
+    pub values: Vec<u32>,
+    pub data: Vec<u8>,
+    pub portals: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AudioCells {
+    pub cells: Vec<AudioCell>,
+    pub portals: Vec<AudioPortal>,
+    #[serde(default)]
+    pub propagation: Option<AudioPropagation>,
 }
 
 fn inc(amount: f32, to_level: u8) -> AttentionIncrease {
@@ -752,6 +1027,8 @@ impl Default for AiConfig {
                 skirmish_inner: 2,
                 skirmish_total: 3,
                 melee_contexts: default_melee_contexts(),
+                dodge: DodgeConfig::default(),
+                pistol: PistolConfig::default(),
             },
             guard_attention_span: 3.0,
             alarm_companion_range: 2000.0,
@@ -765,6 +1042,8 @@ impl Default for AiConfig {
             group_distance: 1000.0,
             trigger_alarm: TriggerAlarmConfig::default(),
             visual_detection_ratio_near: 0.3,
+            rats: RatSwarmConfig::default(),
+            devouring_swarm: RatSwarmConfig { swarm_type: 3, ..RatSwarmConfig::default() },
             provenance: BTreeMap::new(),
         }
     }

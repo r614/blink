@@ -306,7 +306,7 @@ impl Package {
         if n.number == 0 {
             base.to_string()
         } else {
-            format!("{base}_{}", n.number - 1)
+            format!("{base}_{}", n.number.wrapping_sub(1))
         }
     }
 

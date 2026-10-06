@@ -45,12 +45,16 @@
 use dishonored_ir::ai::{AiConfig, AiLevel, AlarmBellDef, AttentionConfig, AttentionIncrease, DAL_BUSTED, DAL_HEAD_TRACK, DAL_INVESTIGATE, DAL_TURN_TO_FACE, FactionTable, ForbiddenZone, PatrolRoute, PlayerVisibilityConfig, ProbeLight, Relationship, VisionConfig, reason};
 use std::collections::BTreeMap;
 use dishonored_sim::events::{SimEvent, SoundCategory};
-use dishonored_sim::input::{LeftHand, PlayerInput, buttons};
+use dishonored_sim::input::{LeftHand, PlayerInput, buttons, npc_moves};
 use dishonored_sim::state::{PawnKind, PlayerId, PlayerState, SwordPhase, WorldState};
 use dishonored_world::nav::{Follower, NavWorld};
 use dishonored_world::{WorldQuery, channel};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
+
+pub mod combat;
+pub mod hearing;
+pub mod rats;
 
 pub const NPC_ID_BASE: PlayerId = 1000;
 /// Stimulus without a known identity (noises, corpses, help barks): attention toward a place.
@@ -71,6 +75,13 @@ const FORCED: u8 = 31;
 const P_NEUTRAL: usize = 0;
 const P_ENEMY_UNS: usize = 2;
 const P_ENEMY_SUS: usize = 3;
+/// Distance at which an attack swings rather than travels (the sword trace reaches 210 uu,
+/// `DisTweaks_MeleeAttack` of the shared pawn).
+const SWORD_REACH: f32 = 200.0;
+/// Longest an attack may travel toward its target before it is dropped (s).
+const ATTACK_WINDOW: f32 = 1.0;
+/// Speed at which the dodge animations cover their distance (uu/s; ground sprint speed).
+const DODGE_SPEED: f32 = 600.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrainState {
@@ -118,6 +129,9 @@ pub enum AiEvent {
     AlarmSpawn { bell: usize, enemy: Option<PlayerId>, enemy_pos: Option<Vec3> },
     /// No NPC hunts the alarm's enemy any more: the bell stops (`DisSeqEvent_AlarmEnded`).
     AlarmEnded { bell: usize },
+    /// A rat brain's meal ([`rats::RatEvent`]): it started eating a corpse, or ate it (no body
+    /// remains) when `devoured`.
+    RatEat { rat: PlayerId, corpse: PlayerId, devoured: bool },
 }
 
 /// Runtime state of a `DisAlarmBell`.
@@ -284,6 +298,43 @@ pub struct Brain {
     pub blind: bool,
     #[serde(default)]
     pub numb: bool,
+    /// Combat move in progress (`npc_moves`; 0 none), its time left, and the dodge direction.
+    #[serde(default)]
+    pub attack: u8,
+    #[serde(default)]
+    pub attack_timer: f32,
+    #[serde(default)]
+    pub dodge_dir: i8,
+    /// `DisAISubProcessManageAttacks`: `m_iFlurryAttacksRemaining`, `m_fStaminaRecoveryTimer`,
+    /// incoming attacks seen (`m_iIncomingAttacksBeforeBackStep` countdown) and their
+    /// forgiveness timer, time a ranged threat has been aimed at this NPC (`m_fSideStepTimer`).
+    #[serde(default)]
+    pub flurry: i32,
+    #[serde(default)]
+    pub stamina_timer: f32,
+    #[serde(default)]
+    pub incoming: i32,
+    #[serde(default)]
+    pub incoming_needed: i32,
+    #[serde(default)]
+    pub forgive_timer: f32,
+    #[serde(default)]
+    pub threat_timer: f32,
+    #[serde(default)]
+    pub threat_needed: f32,
+    /// The target's sword phase last tick (incoming attack edge).
+    #[serde(default)]
+    pub target_swinging: bool,
+    /// `DisAISubStateFirePistol`: in the sub-state, `m_fFireTimer`, `m_fGiveUpTimer`.
+    #[serde(default)]
+    pub firing: bool,
+    #[serde(default)]
+    pub fire_timer: f32,
+    #[serde(default)]
+    pub give_up: f32,
+    /// The combat behaviour has started (its timers are rolled once per fight).
+    #[serde(default)]
+    pub in_fight: bool,
 }
 
 /// What the brains of a crowd know about pawn relationships this tick.
@@ -418,6 +469,18 @@ pub struct Crowd {
     /// Events of the last `think` (barks, alarms).
     #[serde(default)]
     pub events: Vec<AiEvent>,
+    /// The level's audio cells (hearing between cells, [`hearing`]).
+    #[serde(default)]
+    pub audio: dishonored_ir::ai::AudioCells,
+    /// Ambient (sky light) brightness added to the light probe.
+    #[serde(default)]
+    pub sky_light: f32,
+    /// Brains of the rat pawns (`PawnKind::Rat`) and the swarm each rat was spawned in
+    /// (`SimEvent::RatSpawned`).
+    #[serde(default)]
+    pub rat_brains: Vec<rats::RatSwarm>,
+    #[serde(default)]
+    pub rat_swarm: BTreeMap<PlayerId, Option<u32>>,
 }
 
 /// `DisGlobalManager` alarm cooldown (`DefaultLevel.ini m_fAlarmCooldown`, class default 10).
@@ -631,6 +694,7 @@ pub struct Senses<'a> {
     social: &'a Social,
     /// Raw light value at each player.
     light: &'a BTreeMap<PlayerId, f32>,
+    audio: &'a dishonored_ir::ai::AudioCells,
 }
 
 /// Raw light value at `p` from the level's lights (the original reads the pawn's
@@ -639,7 +703,13 @@ pub struct Senses<'a> {
 /// `intensity * (1 - (d/r)^2)^falloff` (spot lights with their cone), counting a shadowing
 /// light only when nothing blocks the segment to `p`; then `^(1/2.2)`.
 pub fn light_at(lights: &[ProbeLight], p: Vec3, world: &dyn WorldQuery) -> f32 {
-    let mut sum = 0.0;
+    light_at_with(lights, 0.0, p, world)
+}
+
+/// [`light_at`] plus an ambient brightness (the level's sky lights, which the light environment
+/// adds as a hemisphere term).
+pub fn light_at_with(lights: &[ProbeLight], ambient: f32, p: Vec3, world: &dyn WorldQuery) -> f32 {
+    let mut sum = ambient;
     for l in lights {
         let v = match l.kind {
             2 => {
@@ -755,6 +825,12 @@ impl Crowd {
         Crowd { brains, layout, spawns, ..Default::default() }
     }
 
+    /// Sleep-dart hook (`m_bInstantSleepForUnawareNPCs`): is NPC `npc` unaware of `who`?
+    /// Pawns without a brain count as unaware.
+    pub fn unaware_of(&self, npc: PlayerId, who: PlayerId) -> bool {
+        self.brains.iter().find(|b| b.id == npc).is_none_or(|b| b.unaware_of(who))
+    }
+
     /// Flee destinations (`DisFleePointActor` positions).
     pub fn set_flee_points(&mut self, points: &[Vec3], world: &dyn WorldQuery) {
         self.layout.flee_points = points.iter().filter_map(|p| snap_floor(world, *p).or(Some(*p))).collect();
@@ -781,8 +857,8 @@ impl Crowd {
         let alarm_noise = std::mem::take(&mut self.alarm_noise);
         let social = self.social(world_state);
         // The light at each player (the original samples the pawn's light environment).
-        let light: BTreeMap<PlayerId, f32> = world_state.players.iter().filter(|p| p.kind == PawnKind::Human && p.alive).map(|p| (p.id, if self.lights.is_empty() { LIGHT_LEVEL } else { light_at(&self.lights, p.position, world) })).collect();
-        let senses = Senses { peers: &peers, barks: &barks, busted: &busted, alarm_noise: &alarm_noise, social: &social, light: &light };
+        let light: BTreeMap<PlayerId, f32> = world_state.players.iter().filter(|p| p.kind == PawnKind::Human && p.alive).map(|p| (p.id, if self.lights.is_empty() && self.sky_light <= 0.0 { LIGHT_LEVEL } else { light_at_with(&self.lights, self.sky_light, p.position, world) })).collect();
+        let senses = Senses { peers: &peers, barks: &barks, busted: &busted, alarm_noise: &alarm_noise, social: &social, light: &light, audio: &self.audio };
         let layout = &self.layout;
         let ai = &self.ai;
         let routes = &self.routes;
@@ -803,7 +879,11 @@ impl Crowd {
             let (was, was_next) = (b.state, b.next);
             b.perceive_with(me, world_state, events, &senses, world, ai, dt);
             let mut ctx = Ctx { layout, routes, users, neglect, inhibit, alarms: &mut *alarms, events: &mut ai_events, cooldown };
-            out.push((b.id, b.act(me, world_state, &mut ctx, world, ai, dt)));
+            let mut inp = b.act(me, world_state, &mut ctx, world, ai, dt);
+            if inp.npc_move == 0 {
+                inp.npc_move = b.attack_kind();
+            }
+            out.push((b.id, inp));
             b.transition_barks(was, was_next, me, world_state, &peers, ai);
             for (hook, initiator) in b.barks.drain(..) {
                 ai_events.push(AiEvent::Bark { npc: b.id, hook, initiator });
@@ -823,7 +903,62 @@ impl Crowd {
         self.ally_busted = new_busted;
         self.events = ai_events;
         self.tick_alarms(world_state, dt);
+        out.extend(self.think_rats(world_state, events, world, dt));
         out
+    }
+
+    /// The rat pawns' brains ([`rats::RatSwarm`]). A rat's swarm comes from its
+    /// `SimEvent::RatSpawned`; rats of a Devouring Swarm (`WorldState::swarms`) use that power's
+    /// swarm tweak and spare its caster, others the level swarm tweak. Possessed rats are driven
+    /// by their possessor.
+    fn think_rats(&mut self, ws: &WorldState, events: &[SimEvent], world: &dyn WorldQuery, dt: f32) -> Vec<(PlayerId, PlayerInput)> {
+        for e in events {
+            if let SimEvent::RatSpawned { rat, swarm } = e {
+                self.rat_swarm.insert(*rat, *swarm);
+                self.rat_brains.retain(|b| b.id != *rat);
+            }
+        }
+        let alive: Vec<&PlayerState> = ws.players.iter().filter(|p| p.kind == PawnKind::Rat && p.alive).collect();
+        self.rat_brains.retain(|b| alive.iter().any(|p| p.id == b.id));
+        self.rat_swarm.retain(|id, _| ws.player(*id).is_some());
+        let mut out = Vec::new();
+        for p in alive {
+            let possessed = ws.players.iter().any(|q| q.possess.host == Some(p.id) && matches!(q.possess.stage, dishonored_sim::state::PossessStage::PrePossess | dishonored_sim::state::PossessStage::Active));
+            if possessed {
+                continue;
+            }
+            let swarm = self.rat_swarm.get(&p.id).copied().flatten();
+            let power = swarm.and_then(|s| ws.swarms.iter().find(|x| x.id == s));
+            let count = match swarm {
+                Some(s) => ws.players.iter().filter(|q| q.kind == PawnKind::Rat && q.alive && self.rat_swarm.get(&q.id).copied().flatten() == Some(s)).count() as u32 + power.map_or(0, |x| x.rats as u32),
+                None => 1,
+            };
+            if !self.rat_brains.iter().any(|b| b.id == p.id) {
+                let cfg = if power.is_some() { self.ai.devouring_swarm.clone() } else { self.ai.rats.clone() };
+                self.rat_brains.push(rats::RatSwarm::new(p.id, cfg, count, power.map(|x| x.owner), p.id as u64 * 2654435761));
+            }
+            let Some(b) = self.rat_brains.iter_mut().find(|b| b.id == p.id) else { continue };
+            b.rats = count;
+            let (input, evs) = b.think(p, ws, world, dt);
+            for e in evs {
+                match e {
+                    rats::RatEvent::EatStart { swarm, corpse } => self.events.push(AiEvent::RatEat { rat: swarm, corpse, devoured: false }),
+                    rats::RatEvent::Devoured { swarm, corpse } => self.events.push(AiEvent::RatEat { rat: swarm, corpse, devoured: true }),
+                }
+            }
+            out.push((p.id, input));
+        }
+        out
+    }
+
+    /// Write `PlayerState::ai_unaware` for every NPC with a brain (sleep darts' instant sleep
+    /// and Shadow Kill level 1 read it): see [`Brain::unaware_of`].
+    pub fn write_awareness(&self, ws: &mut WorldState) {
+        for b in &self.brains {
+            if let Some(p) = ws.player_mut(b.id) {
+                p.ai_unaware = b.unaware_of(NOISE);
+            }
+        }
     }
 
     /// Alarm bells after the brains acted (`DisAlarmBell` tick 0x00a3d0c0): a ringing bell
@@ -899,6 +1034,8 @@ impl Crowd {
         self.zones = level.zones.clone();
         self.alarms = level.alarms.iter().map(|d| AlarmBell { def: d.clone(), ..Default::default() }).collect();
         self.lights = level.lights.clone();
+        self.audio = level.audio.clone();
+        self.sky_light = level.sky_light;
     }
 
     /// Faction of a spawned NPC: the spawner's `m_pFactionTweakOverride`, else its pawn
@@ -1186,6 +1323,21 @@ impl Brain {
             deaf: false,
             blind: false,
             numb: false,
+            attack: 0,
+            attack_timer: 0.0,
+            dodge_dir: 1,
+            flurry: 0,
+            stamina_timer: -1.0,
+            incoming: 0,
+            incoming_needed: 0,
+            forgive_timer: 0.0,
+            threat_timer: 0.0,
+            threat_needed: -1.0,
+            target_swinging: false,
+            firing: false,
+            fire_timer: 0.0,
+            give_up: 0.0,
+            in_fight: false,
         }
     }
 
@@ -1392,7 +1544,8 @@ impl Brain {
     ) {
         let social = Social::default();
         let light: BTreeMap<PlayerId, f32> = BTreeMap::new();
-        let senses = Senses { peers, barks, busted: ally_busted, alarm_noise: &[], social: &social, light: &light };
+        let audio = dishonored_ir::ai::AudioCells::default();
+        let senses = Senses { peers, barks, busted: ally_busted, alarm_noise: &[], social: &social, light: &light, audio: &audio };
         self.perceive_with(me, ws, events, &senses, world, ai, dt);
     }
 
@@ -1405,18 +1558,22 @@ impl Brain {
         // Enemies this tick: individual, trespass and faction relationships.
         self.enemies = ws.players.iter().filter(|p| p.id != self.id && p.alive && self.relation(p.id, senses.social) == Relationship::Enemy).map(|p| p.id).collect();
         let eye = me.position + Vec3::Z * EYE;
-        // Hearing (0x00bb50d0): strictly within the noise radius, then, for listeners and
-        // noises outside audio cells, a trace from the listener to the noise (blocked: not
-        // heard). Audio-cell propagation (portal paths) is not modelled.
+        // Hearing (0x00bb50d0, `hearing::heard`): strictly within the noise radius; between
+        // audio cells along the precomputed portal paths; for listeners and noises outside the
+        // cells, a trace from the listener to the noise (blocked: not heard).
         let deaf = self.deaf;
+        let audio = senses.audio;
+        let my_cell = if audio.cells.is_empty() { None } else { hearing::cell_of(audio, me.position) };
         let heard = |pos: Vec3, radius: f32| {
-            let d = pos.distance(me.position);
-            if deaf || d >= radius {
+            if deaf {
                 return false;
             }
-            let to = pos - eye;
-            let l = to.length();
-            l < 1.0 || !world.raycast(eye, to / l, l, channel::VISION).is_some_and(|h| h.distance < l - 40.0)
+            let nc = if audio.cells.is_empty() { None } else { hearing::cell_of(audio, pos) };
+            hearing::heard(audio, me.position, my_cell, pos, nc, radius, || {
+                let to = pos - eye;
+                let l = to.length();
+                l < 1.0 || !world.raycast(eye, to / l, l, channel::VISION).is_some_and(|h| h.distance < l - 40.0)
+            })
         };
         // Pain barks: attacked while on routine (`DDH_PATROL_ATTACKED_BY_ENEMY`, 0x00afc3e0),
         // otherwise the hit reaction's `DDH_COMBAT_OUCH_SMALL` (LIKELY).
@@ -1687,6 +1844,7 @@ impl Brain {
     }
 
     fn back_to_routine(&mut self) {
+        self.end_fight();
         if matches!(self.state, BrainState::Investigate | BrainState::Search) {
             self.searched = self.threat_pos;
         }
@@ -2269,76 +2427,233 @@ impl Brain {
         }
         let visible = sighted && Self::sees(me, &t, world, ai);
         let d = t.position.distance(me.position);
+        let dz = t.position.z - me.position.z;
         let reach = ai.combat.reachable_melee_range;
-        let mut i = PlayerInput { yaw: yaw_to(me.position, goal), left_hand: LeftHand::Empty, ..Default::default() };
-        if !self.melee_slot {
-            // Outer skirmish ring: keep distance; the guard's single bullet is used here
-            // (`TwkAttackPattern_RangedElite`, aim time from `StateNPCMasterAim`).
-            // `m_fGunTimer`: the first shot waits `m_GunUsageStart` into the fight
-            // (`DisBehaviorCombatEliteGuard`, LIKELY use of the tweak range).
-            if self.gun_timer < 0.0 {
-                let [lo, hi] = ai.combat.gun_usage_start;
-                self.gun_timer = lo + (hi - lo) * rng_next(&mut self.rng);
-            }
-            self.gun_timer = (self.gun_timer - dt).max(0.0);
-            if self.ammo > 0 && visible && d > 300.0 && d < ai.vision.outer_range && self.gun_timer <= 0.0 {
-                if self.aim == 0.0 {
-                    self.barks.push(("DDH_COMBAT_RANGED_BEGIN".into(), Some(t.id)));
-                }
-                i.left_hand = LeftHand::Pistol;
-                let aim = t.position + Vec3::Z * 40.0 - (me.position + Vec3::Z * EYE);
-                i.pitch = (aim.z / aim.truncate().length().max(1.0)).atan().to_degrees();
-                self.aim += dt;
-                let ready = me.left.item == LeftHand::Pistol && me.left.phase == dishonored_sim::state::LeftPhase::Idle && me.left.pistol_loaded > 0;
-                if self.aim >= ai.combat.aim_time_before_shooting && ready {
-                    i.buttons |= buttons::SECONDARY;
-                    self.ammo -= 1;
-                    self.aim = 0.0;
-                }
-                return i;
-            }
-            self.aim = 0.0;
-            if goal.distance(me.position) > 500.0 {
-                return self.move_to(me, nav, goal, true);
-            }
-            if d < 300.0 {
-                i.forward = -80;
-            }
-            return i;
-        }
-        if !sighted || d > reach {
-            let mut m = self.move_to(me, nav, goal, true);
-            if sighted && d < 400.0 {
-                m.yaw = yaw_to(me.position, goal);
-            }
-            return m;
-        }
-        // Melee: the first context of the attack pattern that is off its own cooldown
-        // (`m_ContextCooldown`) and not inhibited on this target by another NPC's recent use
-        // of the same attack class (`DisGlobalCombatManager.m_fInhibitionTime*`).
+        let face = yaw_to(me.position, goal);
+        let mut i = PlayerInput { yaw: face, left_hand: LeftHand::Empty, ..Default::default() };
         let ctxs = &ai.combat.melee_contexts;
+        let dg = &ai.combat.dodge;
         self.melee_cd.resize(ctxs.len(), 0.0);
         for c in self.melee_cd.iter_mut() {
             *c = (*c - dt).max(0.0);
         }
-        if me.sword.phase == SwordPhase::Idle {
-            let ready = (0..ctxs.len()).find(|&k| self.melee_cd[k] <= 0.0 && !inhibit.iter().any(|x| x.0 == t.id && x.1 as usize == k));
-            if let Some(k) = ready {
-                let [lo, hi] = ctxs[k].cooldown;
-                self.melee_cd[k] = lo + (hi - lo) * rng_next(&mut self.rng);
+        // `m_fGunTimer` (set from `m_GunUsageStart` when the behaviour starts, 0x00b0e130;
+        // `m_GunUsageCooldown` after the pistol sub-state, 0x00b10f60) runs down while fighting.
+        if !self.in_fight {
+            self.in_fight = true;
+            self.gun_timer = combat::roll(ai.combat.gun_usage_start, rng_next(&mut self.rng));
+            self.flurry = combat::roll_i(dg.attacks_per_flurry, rng_next(&mut self.rng));
+            self.stamina_timer = combat::roll(dg.stamina_recovery, rng_next(&mut self.rng));
+        }
+        self.gun_timer -= dt;
+        // Attack pacing (0x00b47880): a flurry of stamina-draining attacks, then a recovery
+        // pause before the next flurry.
+        if self.flurry < 1 && self.attack == 0 {
+            if self.stamina_timer < 0.0 {
+                self.flurry = combat::roll_i(dg.attacks_per_flurry, rng_next(&mut self.rng));
+                self.stamina_timer = combat::roll(dg.stamina_recovery, rng_next(&mut self.rng));
+            } else {
+                self.stamina_timer -= dt;
+            }
+        }
+        // Incoming melee attacks (back step after `m_IncomingAttacksBeforeBackStep` within
+        // `m_fTimeToForgiveIncomingAttacks`) and ranged threats aimed at this NPC (side step
+        // after `m_TimeForThreatToCauseSideStep`).
+        let swinging = matches!(t.sword.phase, SwordPhase::Startup);
+        let to_me = (me.position - t.position).truncate();
+        let aim_dir = glam::Vec2::new(t.yaw.to_radians().cos(), t.yaw.to_radians().sin());
+        let off_axis = aim_dir.angle_to(to_me.normalize_or(aim_dir)).abs().to_degrees();
+        if swinging && !self.target_swinging && off_axis <= dg.angle_melee_threat && d <= reach + 150.0 {
+            if self.incoming_needed <= 0 {
+                self.incoming_needed = combat::roll_i(dg.incoming_attacks_before_back_step, rng_next(&mut self.rng));
+            }
+            self.incoming += 1;
+            self.forgive_timer = dg.forgive_incoming_attacks;
+        }
+        self.target_swinging = swinging;
+        self.forgive_timer -= dt;
+        if self.forgive_timer <= 0.0 {
+            self.incoming = 0;
+        }
+        let aiming_at_me = t.left.phase == dishonored_sim::state::LeftPhase::Aiming && (t.left.item == LeftHand::Pistol || t.left.item.is_crossbow()) && off_axis <= dg.angle_ranged_threat;
+        if aiming_at_me && visible {
+            if self.threat_needed < 0.0 {
+                self.threat_needed = combat::roll(dg.time_for_threat_side_step, rng_next(&mut self.rng));
+            }
+            self.threat_timer += dt;
+        } else {
+            self.threat_timer = 0.0;
+            self.threat_needed = -1.0;
+        }
+        // A move in progress.
+        if self.attack != 0 {
+            self.attack_timer -= dt;
+            let kind = self.attack;
+            i.npc_move = kind;
+            match kind {
+                npc_moves::SIDE_STEP | npc_moves::BACK_STEP => {
+                    if self.attack_timer <= 0.0 {
+                        self.attack = 0;
+                    } else if kind == npc_moves::SIDE_STEP {
+                        i.right = 127 * self.dodge_dir;
+                    } else {
+                        i.forward = -127;
+                    }
+                    return i;
+                }
+                _ => {
+                    // The attack travels to the target (root motion of the long and jump
+                    // attacks), swinging once within the sword's reach.
+                    let close = d <= SWORD_REACH;
+                    if close && me.sword.phase == SwordPhase::Idle {
+                        i.buttons |= buttons::PRIMARY;
+                        if kind == npc_moves::ATTACK_STEP_BACK {
+                            i.forward = -127;
+                        }
+                        self.attack = 0;
+                        return i;
+                    }
+                    if self.attack_timer <= 0.0 || !sighted {
+                        self.attack = 0;
+                    } else if !close && combat::lunges(kind) {
+                        i.forward = 127;
+                        i.buttons |= buttons::SPRINT;
+                        if kind == npc_moves::JUMP_ATTACK && self.attack_timer > ATTACK_WINDOW - dt * 1.5 {
+                            i.buttons |= buttons::JUMP;
+                        }
+                    }
+                    return i;
+                }
+            }
+        }
+        // Dodges (`DisItemContext_NPCBackStep` / `_NPCSideStep`, with their group inhibition).
+        let dodge_ok = |k: u8| !inhibit.iter().any(|x| x.0 == t.id && x.1 == 200 + k);
+        if self.incoming_needed > 0 && self.incoming >= self.incoming_needed && dodge_ok(npc_moves::BACK_STEP) {
+            self.incoming = 0;
+            self.incoming_needed = 0;
+            inhibit.push((t.id, 200 + npc_moves::BACK_STEP, dg.back_step_inhibition));
+            return self.start_dodge(npc_moves::BACK_STEP, dg.back_step_distance, i);
+        }
+        if self.threat_needed >= 0.0 && self.threat_timer >= self.threat_needed && dodge_ok(npc_moves::SIDE_STEP) {
+            self.threat_timer = 0.0;
+            self.threat_needed = -1.0;
+            self.dodge_dir = if rng_next(&mut self.rng) < 0.5 { -1 } else { 1 };
+            inhibit.push((t.id, 200 + npc_moves::SIDE_STEP, dg.side_step_inhibition));
+            return self.start_dodge(npc_moves::SIDE_STEP, dg.side_step_distance, i);
+        }
+        // The pistol (`DisAISubStateFindShootingPosition` / `DisAISubStateFirePistol`).
+        let reachable = nav.is_none_or(|_| !self.follow.failed);
+        let still = me.velocity.x.abs() < 1e-4 && me.velocity.y.abs() < 1e-4 && me.velocity.z.abs() < 1e-4;
+        let (start, cont) = combat::pistol_willing(&ai.combat.pistol, d, visible, self.gun_timer, still, reachable, !self.melee_slot);
+        if self.ammo > 0 && (self.firing && cont || start) {
+            if !self.firing {
+                // Entering the sub-state (0x00b32c50): give-up and first-shot timers, the
+                // `DDH_COMBAT_RANGED_BEGIN` bark.
+                self.firing = true;
+                self.give_up = combat::roll(ai.combat.pistol.time_before_giving_up, rng_next(&mut self.rng));
+                self.fire_timer = combat::roll(ai.combat.pistol.time_to_first_shot, rng_next(&mut self.rng));
+                self.barks.push(("DDH_COMBAT_RANGED_BEGIN".into(), Some(t.id)));
+            }
+            self.give_up -= dt;
+            self.fire_timer -= dt;
+            i.left_hand = LeftHand::Pistol;
+            i.npc_move = npc_moves::FIRE_PISTOL;
+            let aim = t.position + Vec3::Z * 40.0 - (me.position + Vec3::Z * EYE);
+            i.pitch = (aim.z / aim.truncate().length().max(1.0)).atan().to_degrees();
+            self.aim += dt;
+            let ready = me.left.item == LeftHand::Pistol && me.left.phase == dishonored_sim::state::LeftPhase::Idle && me.left.pistol_loaded > 0;
+            if self.fire_timer <= 0.0 && self.aim >= ai.combat.aim_time_before_shooting && ready {
+                i.buttons |= buttons::SECONDARY;
+                self.ammo -= 1;
+                self.aim = 0.0;
+                if rng_next(&mut self.rng) >= ai.combat.pistol.chance_fire_again || self.ammo == 0 {
+                    self.stop_firing(ai);
+                } else {
+                    self.fire_timer = combat::roll(ai.combat.pistol.time_to_first_shot, rng_next(&mut self.rng));
+                }
+            } else if self.give_up <= 0.0 {
+                self.stop_firing(ai);
+            }
+            return i;
+        }
+        if self.firing {
+            self.stop_firing(ai);
+        }
+        self.aim = 0.0;
+        if !self.melee_slot {
+            // Outer skirmish ring: hold distance, stopping to shoot once the gun timer allows.
+            if goal.distance(me.position) > ai.combat.pistol.max_range.min(1500.0) {
+                return self.move_to(me, nav, goal, true);
+            }
+            if d < ai.combat.pistol.min_range {
+                i.forward = -80;
+            }
+            return i;
+        }
+        // Melee: the first context of the pattern that fits (`combat::pick_context`), while
+        // the flurry has attacks left.
+        if sighted && self.flurry > 0 && me.sword.phase == SwordPhase::Idle {
+            if let Some(k) = combat::pick_context(ctxs, &self.melee_cd, inhibit, t.id, d, dz) {
+                self.melee_cd[k] = combat::roll(ctxs[k].cooldown, rng_next(&mut self.rng));
                 if ctxs[k].inhibition > 0.0 {
                     inhibit.push((t.id, k as u8, ctxs[k].inhibition));
                 }
-                // `DisTweaks_MeleeAttackNPCBase.m_AttackBark`.
-                self.barks.push(("DDH_COMBAT_ATTACK".into(), Some(t.id)));
-                i.buttons |= buttons::PRIMARY;
+                self.flurry -= 1;
+                let kind = if ctxs[k].kind == 0 { npc_moves::ATTACK_SHORT } else { ctxs[k].kind };
+                // `DisTweaks_MeleeAttackNPCBase.m_AttackBark` (the jump attack's is
+                // `DDH_COMBAT_BIG_ATTACK`).
+                let bark = if kind == npc_moves::JUMP_ATTACK { "DDH_COMBAT_BIG_ATTACK" } else { "DDH_COMBAT_ATTACK" };
+                self.barks.push((bark.into(), Some(t.id)));
+                self.attack = kind;
+                self.attack_timer = ATTACK_WINDOW;
+                i.npc_move = kind;
+                if d <= SWORD_REACH {
+                    i.buttons |= buttons::PRIMARY;
+                    if kind == npc_moves::ATTACK_STEP_BACK {
+                        i.forward = -127;
+                    }
+                    self.attack = 0;
+                } else {
+                    i.forward = 127;
+                    i.buttons |= buttons::SPRINT;
+                    if kind == npc_moves::JUMP_ATTACK {
+                        i.buttons |= buttons::JUMP;
+                    }
+                }
                 return i;
             }
+        }
+        if !sighted || d > reach {
+            let mut m = self.move_to(me, nav, goal, true);
+            if sighted && d < 400.0 {
+                m.yaw = face;
+            }
+            return m;
         }
         if t.sword.phase == SwordPhase::Startup {
             i.buttons |= buttons::BLOCK;
         }
         i
+    }
+
+    fn start_dodge(&mut self, kind: u8, distance: f32, mut i: PlayerInput) -> PlayerInput {
+        self.attack = kind;
+        // Covered at sprint speed (the dodge animations' root motion).
+        self.attack_timer = distance / DODGE_SPEED;
+        i.npc_move = kind;
+        if kind == npc_moves::SIDE_STEP {
+            i.right = 127 * self.dodge_dir;
+        } else {
+            i.forward = -127;
+        }
+        i
+    }
+
+    /// Leaving the pistol sub-state: `m_fGunTimer` = `m_GunUsageCooldown` (0x00b10f60).
+    fn stop_firing(&mut self, ai: &AiConfig) {
+        self.firing = false;
+        self.aim = 0.0;
+        self.gun_timer = combat::roll(ai.combat.gun_usage_cooldown, rng_next(&mut self.rng));
     }
 
     /// The original's bark points (`FUN_00af00f0` callers) mapped onto this brain's
@@ -2423,6 +2738,7 @@ impl Brain {
     }
 
     fn go_search(&mut self, ai: &AiConfig) {
+        self.end_fight();
         self.gun_timer = -1.0;
         self.suspecting = true;
         self.target = None;
@@ -2431,6 +2747,34 @@ impl Brain {
         self.goal = None;
         self.timer = 0.0;
         self.follow.clear();
+    }
+
+    /// The combat behaviour ends: moves, dodges and the pistol sub-state stop.
+    fn end_fight(&mut self) {
+        self.in_fight = false;
+        self.attack = 0;
+        self.attack_timer = 0.0;
+        self.firing = false;
+        self.aim = 0.0;
+        self.incoming = 0;
+        self.threat_timer = 0.0;
+        self.threat_needed = -1.0;
+    }
+
+    /// Combat move in progress (`npc_moves`), for animation.
+    pub fn attack_kind(&self) -> combat::AttackKind {
+        if self.firing { npc_moves::FIRE_PISTOL } else { self.attack }
+    }
+
+    /// Is this NPC "unaware" for a sleep dart (`DishonoredDamageType.m_bInstantSleepForUnawareNPCs`)?
+    /// The damage code (0x00b83680) skips `m_fTimeBeforeSleep` when the pawn's virtual
+    /// 0x6c0 (0x00b6e340) is false: that tests the brain's `EAIAwareness` (0x00b0c1e0, the
+    /// current behaviour's awareness) for `EAIAwareness_InCombat` (5). So every NPC that is not
+    /// fighting sleeps at once, whoever shot it (`_who` is kept for the call site). Ringing an
+    /// alarm counts as combat here (LIKELY: the TriggerAlarm behaviour's awareness was not read).
+    pub fn unaware_of(&self, _who: PlayerId) -> bool {
+        // The reaction delay is `EAIAwareness_Surprised` (0x00b0c1e0 returns 2): not combat yet.
+        !matches!(self.state, BrainState::Combat | BrainState::RingAlarm)
     }
 }
 
@@ -3017,5 +3361,94 @@ mod tests {
         b.transition_barks(BrainState::Search, None, &me, &ws, &[], &ai);
         let hooks: Vec<&str> = b.barks.iter().map(|x| x.0.as_str()).collect();
         assert_eq!(hooks, ["DDH_ATTENTION_NOTICE_BEGIN", "DDH_SEARCH_ADETECTION_DANGER", "DDH_SEARCH_FIND_ENEMY", "DDH_COMBAT_LOST", "DDH_SEARCH_GIVEUP_POSTCORPSE"]);
+    }
+
+    /// Rat pawns of a swarm get brains: twelve rats (the random swarm's attack group) attack a
+    /// player in reach after the detection delay; a lone rat is not aggressive. NPC awareness is
+    /// written to the pawns.
+    #[test]
+    fn crowd_drives_rat_pawns_and_writes_awareness() {
+        let w = flat_world();
+        let mut c = Crowd::default();
+        let mut ws = WorldState::default();
+        let mut spawned = Vec::new();
+        for k in 0..12u32 {
+            ws.players.push(pawn(5000 + k, PawnKind::Rat, Vec3::new(0.0, k as f32 * 5.0, 12.0), 0.0));
+            spawned.push(SimEvent::RatSpawned { rat: 5000 + k, swarm: Some(9) });
+        }
+        ws.players.push(pawn(5100, PawnKind::Rat, Vec3::new(-3000.0, 0.0, 12.0), 0.0));
+        spawned.push(SimEvent::RatSpawned { rat: 5100, swarm: None });
+        ws.players.push(pawn(1, PawnKind::Human, Vec3::new(150.0, 0.0, 90.0), 180.0));
+        let guard = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(-2000.0, 0.0, 90.0), 0.0);
+        ws.players.push(guard.clone());
+        c.brains.push(Brain::new(NPC_ID_BASE, PawnKind::Guard, guard.position, 1));
+        let mut inputs = c.think(&ws, &spawned, &w, 0.1);
+        for _ in 0..25 {
+            inputs = c.think(&ws, &[], &w, 0.1);
+        }
+        let rat0 = inputs.iter().find(|x| x.0 == 5000).unwrap().1;
+        assert!(rat0.buttons & buttons::PRIMARY != 0, "the swarm rat attacks");
+        assert!(c.rat_brains.iter().find(|b| b.id == 5000).is_some_and(|b| b.rats == 12));
+        let lone = inputs.iter().find(|x| x.0 == 5100).unwrap().1;
+        assert_eq!(lone.buttons & buttons::PRIMARY, 0);
+        c.write_awareness(&mut ws);
+        assert!(ws.player(NPC_ID_BASE).unwrap().ai_unaware);
+        c.brains[0].state = BrainState::Combat;
+        c.write_awareness(&mut ws);
+        assert!(!ws.player(NPC_ID_BASE).unwrap().ai_unaware);
+    }
+
+    #[test]
+    fn sleep_darts_are_instant_unless_fighting() {
+        let mut b = Brain::new(NPC_ID_BASE, PawnKind::Guard, Vec3::ZERO, 1);
+        assert!(b.unaware_of(1));
+        b.state = BrainState::Search;
+        assert!(b.unaware_of(1), "suspicious is not in combat");
+        b.state = BrainState::React;
+        b.next = Some(BrainState::Combat);
+        assert!(b.unaware_of(1), "surprised is not in combat yet");
+        b.state = BrainState::Combat;
+        assert!(!b.unaware_of(1));
+    }
+
+    /// A guard in combat picks the attack by distance and exposes it as `npc_move`: the long
+    /// attack travels toward the target, the short one swings at once; a back step follows an
+    /// incoming attack (`m_IncomingAttacksBeforeBackStep` 1).
+    #[test]
+    fn combat_moves_follow_item_context_ranges() {
+        let ai = AiConfig::default();
+        let w = flat_world();
+        let setup = |dist: f32| {
+            let guard = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(0.0, 0.0, 90.0), 0.0);
+            let player = pawn(1, PawnKind::Human, Vec3::new(dist, 0.0, 90.0), 180.0);
+            let mut ws = WorldState::default();
+            ws.players = vec![guard.clone(), player];
+            let mut b = Brain::new(guard.id, PawnKind::Guard, guard.position, 1);
+            b.make_hostile(1);
+            b.alert_to(&ai, 1, Vec3::new(dist, 0.0, 90.0));
+            b.attn[0].sighted = true;
+            b.state = BrainState::Combat;
+            b.target = Some(1);
+            (guard, ws, b)
+        };
+        let mut inh = Vec::new();
+        let (g, ws, mut b) = setup(450.0);
+        let i = b.combat(&g, &ws, &w, None, &ai, &mut inh, 1.0 / 60.0);
+        assert_eq!(i.npc_move, npc_moves::ATTACK_LONG);
+        assert!(i.forward > 0 && i.buttons & buttons::PRIMARY == 0);
+        assert_eq!(b.attack, npc_moves::ATTACK_LONG);
+        let (g, ws, mut b) = setup(150.0);
+        let i = b.combat(&g, &ws, &w, None, &ai, &mut inh, 1.0 / 60.0);
+        assert_eq!(i.npc_move, npc_moves::ATTACK_SHORT);
+        assert!(i.buttons & buttons::PRIMARY != 0);
+        // Incoming attack: the player winds up facing the guard at close range.
+        let (g, mut ws, mut b) = setup(150.0);
+        b.flurry = 0;
+        b.stamina_timer = 10.0;
+        b.in_fight = true;
+        ws.players[1].sword.phase = SwordPhase::Startup;
+        let i = b.combat(&g, &ws, &w, None, &ai, &mut Vec::new(), 1.0 / 60.0);
+        assert_eq!(i.npc_move, npc_moves::BACK_STEP);
+        assert!(i.forward < 0);
     }
 }

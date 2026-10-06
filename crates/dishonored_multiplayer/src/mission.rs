@@ -840,6 +840,7 @@ impl MissionMatch {
             None => world,
         };
         all.extend(self.crowd.think(&self.world, &self.last_events, ai_world, dt));
+        self.crowd.write_awareness(&mut self.world);
         let out = step_world(&mut self.world, &all, world, cfg);
         let mut events = Vec::new();
         if let Some(m) = self.arrived.take() {
@@ -994,7 +995,7 @@ impl MissionMatch {
                         self.state.ai_hooks.push((name, actor, hook.clone(), *initiator));
                     }
                 }
-                dishonored_ai::AiEvent::AlarmEnded { .. } => {}
+                dishonored_ai::AiEvent::AlarmEnded { .. } | dishonored_ai::AiEvent::RatEat { .. } => {}
             }
         }
         // Respawns (if the mission allows them).

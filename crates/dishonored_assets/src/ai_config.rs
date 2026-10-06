@@ -5,7 +5,7 @@
 
 use crate::content::Content;
 use crate::ini::Ini;
-use crate::tweaks::{TMap, TVal, TweakDb, get_f32};
+use crate::tweaks::{TMap, TVal, TweakDb, get_f32, get_obj};
 use dishonored_ir::ai::{AiConfig, AttentionConfig, AttentionIncrease, MeleeContextConfig, VisTuning};
 
 /// Attention profiles: (field, tweak object). The civilian profiles are cooked into level
@@ -233,6 +233,97 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
         out.combat.gun_usage_start = rng("m_GunUsageStart", out.combat.gun_usage_start);
         out.combat.gun_usage_cooldown = rng("m_GunUsageCooldown", out.combat.gun_usage_cooldown);
         prov.insert("ai.combat.gun_usage".into(), "AI_BehaviorTweaks_EliteGuard.TweaksBehavior_CombatEliteGuard".into());
+        // Its sub-process / sub-state tweaks: ManageAttacks (pacing, dodges) and FirePistol.
+        let frng = |s: &TMap, k: &str, d: [f32; 2]| match s.get(k) {
+            Some(TVal::Struct(r)) => [get_f32(r, "m_fMinValue").unwrap_or(d[0]), get_f32(r, "m_fMaxValue").unwrap_or(d[1])],
+            _ => d,
+        };
+        let irng = |s: &TMap, k: &str, d: [i32; 2]| match s.get(k) {
+            Some(TVal::Struct(r)) => {
+                let g = |n: &str, d: i32| match r.get(n) {
+                    Some(TVal::I(v)) => *v,
+                    _ => d,
+                };
+                [g("m_MinValue", d[0]), g("m_MaxValue", d[1])]
+            }
+            _ => d,
+        };
+        let subs: Vec<String> = ["m_SubProcessTweaks", "m_SubStateTweaks"]
+            .iter()
+            .flat_map(|k| match m.get(*k) {
+                Some(TVal::List(l)) => l.iter().filter_map(|e| get_obj(e, "obj").map(str::to_string)).collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        for path in subs {
+            let Some(s) = db.try_resolve(&path) else { continue };
+            if s.contains_key("m_AttacksPerFlurry") || s.contains_key("m_IncomingAttacksBeforeBackStep") {
+                let d = &mut out.combat.dodge;
+                d.attacks_per_flurry = irng(&s, "m_AttacksPerFlurry", d.attacks_per_flurry);
+                d.stamina_recovery = frng(&s, "m_StaminaRecoveryDuration", d.stamina_recovery);
+                d.time_for_threat_side_step = frng(&s, "m_TimeForThreatToCauseSideStep", d.time_for_threat_side_step);
+                d.angle_melee_threat = get_f32(&s, "m_fAngleOfPerceivedMeleeThreat").unwrap_or(d.angle_melee_threat);
+                d.angle_ranged_threat = get_f32(&s, "m_fAngleOfPerceivedRangedThreat").unwrap_or(d.angle_ranged_threat);
+                d.incoming_attacks_before_back_step = irng(&s, "m_IncomingAttacksBeforeBackStep", d.incoming_attacks_before_back_step);
+                d.forgive_incoming_attacks = get_f32(&s, "m_fTimeToForgiveIncomingAttacks").unwrap_or(d.forgive_incoming_attacks);
+                prov.insert("ai.combat.dodge".into(), path.clone());
+            }
+            if s.contains_key("m_TimeToFirstShot") || s.contains_key("m_TimeBeforeGivingUp") {
+                let p = &mut out.combat.pistol;
+                p.time_to_first_shot = frng(&s, "m_TimeToFirstShot", p.time_to_first_shot);
+                p.time_before_giving_up = frng(&s, "m_TimeBeforeGivingUp", p.time_before_giving_up);
+                p.point_blank_distance = get_f32(&s, "m_fPointBlankDistance").unwrap_or(p.point_blank_distance);
+                p.chance_fire_again = get_f32(&s, "m_fChanceOfFiringAgain").unwrap_or(p.chance_fire_again);
+                prov.insert("ai.combat.pistol".into(), path.clone());
+            }
+        }
+    }
+    let ini_ai = Ini::load_layered(&content.root, "AI");
+    out.combat.dodge.side_step_inhibition = ini_ai.get_f32("DishonoredGame.DisGlobalCombatManager", "m_fInhibitionTimeSideStep").unwrap_or(out.combat.dodge.side_step_inhibition);
+    out.combat.dodge.back_step_inhibition = ini_ai.get_f32("DishonoredGame.DisGlobalCombatManager", "m_fInhibitionTimeBackStep").unwrap_or(out.combat.dodge.back_step_inhibition);
+    // The elite guard's item contexts: the pawn-specific contexts of its sword and pistol
+    // (`Twk_Inv_SwordEliteGuard` / `Twk_Inv_PistolEliteGuard`, `DisTweaks_InventoryItem_PawnSpecific`)
+    // give the ranges, the dodge distances and the gun's range.
+    let item_ctx = |item: &str, class: &str| db.paths_with_class(class).into_iter().find(|p| p.starts_with(item)).and_then(|p| db.try_resolve(&p).map(|m| (p, m)));
+    const SWORD: &str = "Twk_Inv_EliteGuard.Twk_Inv_SwordEliteGuard.";
+    const PISTOL: &str = "Twk_Inv_EliteGuard.Twk_Inv_PistolEliteGuard.";
+    if let Some((_, s)) = item_ctx(SWORD, "DisTweaks_NPCSideStep") {
+        out.combat.dodge.side_step_distance = get_f32(&s, "m_fSideStepDistance").unwrap_or(out.combat.dodge.side_step_distance);
+    }
+    if let Some((_, s)) = item_ctx(SWORD, "DisTweaks_NPCBackStep") {
+        out.combat.dodge.back_step_distance = get_f32(&s, "m_fBackStepDistance").unwrap_or(out.combat.dodge.back_step_distance);
+    }
+    if let Some((p, s)) = item_ctx(PISTOL, "DisTweaks_NPCFireGun") {
+        out.combat.pistol.min_range = get_f32(&s, "m_fMinContextRange").unwrap_or(out.combat.pistol.min_range);
+        out.combat.pistol.max_range = get_f32(&s, "m_fMaxContextRange").unwrap_or(out.combat.pistol.max_range);
+        prov.insert("ai.combat.pistol.range".into(), p);
+    }
+    for c in out.combat.melee_contexts.iter_mut() {
+        let class = c.name.replace("DisItemContext_", "DisTweaks_");
+        if let Some((_, s)) = item_ctx(SWORD, &class) {
+            c.min_range = get_f32(&s, "m_fMinContextRange").unwrap_or(c.min_range);
+            c.max_range = get_f32(&s, "m_fMaxContextRange").unwrap_or(c.max_range);
+            // A negative height difference is no limit.
+            c.max_height = get_f32(&s, "m_fMaxContextHeightDifference").map(|h| if h < 0.0 { f32::MAX } else { h }).unwrap_or(c.max_height);
+        }
+    }
+    prov.insert("ai.combat.melee_ranges".into(), format!("{SWORD}DisTweaks_InventoryItem_PawnSpecific_1.DisTweaks_NPC*"));
+    // Rat swarms: the default swarm tweak and the Devouring Swarm's.
+    if let Some(s) = beh("Default__DisTweaks_RatSwarm") {
+        out.rats = rat_swarm(&s, &out.rats);
+    }
+    if let Some(s) = beh("Twk_RatSwarm.Twk_RandomRatSwarm") {
+        out.rats = rat_swarm(&s, &out.rats);
+        prov.insert("ai.rats".into(), "Twk_RatSwarm.Twk_RandomRatSwarm".into());
+    }
+    if let Some(p) = beh("Twk_Powers_DevouringSwarm.Twk_DevouringSwarm").and_then(|m| match m.get("m_Levels") {
+        Some(TVal::Struct(l)) => get_obj(l, "m_pRatSwarmTweaks").map(str::to_string),
+        _ => None,
+    }) {
+        if let Some(s) = beh(&p) {
+            out.devouring_swarm = rat_swarm(&s, &out.devouring_swarm);
+            prov.insert("ai.devouring_swarm".into(), p);
+        }
     }
     if let Some(m) = beh("AI_BrainTweaks_Elite.BrainTweaks_Guard_Elite_Party").or_else(|| beh("AI_BrainTweaks_Guard.BrainTweaks_Guard")) {
         out.combat.reachable_melee_range = get_f32(&m, "m_fReachableMeleeRange").unwrap_or(out.combat.reachable_melee_range);
@@ -281,12 +372,15 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
                     "DisItemContext_NPCAttackShort" => "m_fInhibitionTimeShortAttack",
                     "DisItemContext_NPCAttackMedium" => "m_fInhibitionTimeMediumAttack",
                     "DisItemContext_NPCAttackStepBack" => "m_fInhibitionTimeStepBackAttack",
+                    "DisItemContext_NPCAttackLong" => "m_fInhibitionTimeLongAttack",
+                    "DisItemContext_NPCJumpAttack" => "m_fInhibitionTimeJumpAttack",
                     _ => return 0.0,
                 };
                 ai.get_f32("DishonoredGame.DisGlobalCombatManager", key).unwrap_or(0.0)
             };
             let mut ctx = Vec::new();
-            // Pattern order is the tweak's; the shared pawn only has the short sword swings.
+            // Pattern order is the tweak's; the melee attacks (the dodges and the gun have
+            // their own rules), with their item-context class ranges.
             for it in items {
                 let class = match it.get("m_pContextToOverride") {
                     Some(TVal::Obj(o)) => o.rsplit('.').next().unwrap_or(o).to_string(),
@@ -299,7 +393,7 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
                     Some(TVal::Struct(s)) => [get_f32(s, "m_fMinValue").unwrap_or(0.0), get_f32(s, "m_fMaxValue").unwrap_or(0.0)],
                     _ => [0.0, 0.0],
                 };
-                ctx.push(MeleeContextConfig { inhibition: inhibit(&class), name: class, cooldown: cd });
+                ctx.push(MeleeContextConfig::of_class(&class, cd, inhibit(&class)));
             }
             if !ctx.is_empty() {
                 out.combat.melee_contexts = ctx;
@@ -360,4 +454,55 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
     }
     out.provenance = prov;
     out
+}
+
+/// A `DisTweaks_RatSwarm` over defaults.
+fn rat_swarm(s: &TMap, d: &dishonored_ir::ai::RatSwarmConfig) -> dishonored_ir::ai::RatSwarmConfig {
+    let f = |k: &str, v: f32| get_f32(s, k).unwrap_or(v);
+    let i = |k: &str, v: i32| match s.get(k) {
+        Some(TVal::I(x)) => *x,
+        _ => v,
+    };
+    let swarm_type = match s.get("m_SwarmType") {
+        Some(TVal::Name(n)) => ["DRST_AmbientSwarm", "DRST_RandomSwarm", "DRST_ScriptedSwarm", "DRST_DevouringSwarm"].iter().position(|x| x == n).map(|p| p as u8).unwrap_or(d.swarm_type),
+        Some(TVal::I(v)) => *v as u8,
+        _ => d.swarm_type,
+    };
+    dishonored_ir::ai::RatSwarmConfig {
+        swarm_type,
+        initial_rat_count_to_be_aggressive: i("m_InitialRatCountToBeAggressive", d.initial_rat_count_to_be_aggressive),
+        pawn_detection_radius: f("m_fPawnDetectionRadius", d.pawn_detection_radius),
+        pawn_detection_radius_when_busy: f("m_fPawnDetectionRadiusWhenBusy", d.pawn_detection_radius_when_busy),
+        pawn_escape_radius: f("m_fPawnEscapeRadius", d.pawn_escape_radius),
+        player_detection_delay_after_spawn: f("m_fPlayerDetectionDelayAfterSpawn", d.player_detection_delay_after_spawn),
+        pawn_unreachable_delay: f("m_fPawnUnreachableDelay", d.pawn_unreachable_delay),
+        destination_radius: f("m_fDestinationRadius", d.destination_radius),
+        pawn_visibility_check_interval: f("m_fPawnVisibilityCheckInterval", d.pawn_visibility_check_interval),
+        idle_away_from_pawn_trigger_dist: f("m_fIdleAwayFromPawnTriggerDist", d.idle_away_from_pawn_trigger_dist),
+        idle_away_from_pawn_trigger_duration: f("m_fIdleAwayFromPawnTriggerDuration", d.idle_away_from_pawn_trigger_duration),
+        idle_away_from_pawn_move_dist: f("m_fIdleAwayFromPawnMoveDist", d.idle_away_from_pawn_move_dist),
+        idle_away_from_pawn_count: [i("m_IdleAwayFromPawnMinCount", d.idle_away_from_pawn_count[0]), i("m_IdleAwayFromPawnMaxCount", d.idle_away_from_pawn_count[1])],
+        idle_roaming_radius: f("m_fIdleRoamingRadius", d.idle_roaming_radius),
+        idle_roaming_max_pause: f("m_fIdleRoamingMaxPause", d.idle_roaming_max_pause),
+        min_rat_count_per_attack_group: i("m_MinRatCountPerAttackGroup", d.min_rat_count_per_attack_group),
+        min_rat_count_for_new_attack_group: i("m_MinRatCountForNewAttackGroup", d.min_rat_count_for_new_attack_group),
+        forced_attack_detection_radius: f("m_fForcedAttackDetectionRadius", d.forced_attack_detection_radius),
+        initial_delay_before_dealing_damage: f("m_fInitialDelayBeforeDealingDamage", d.initial_delay_before_dealing_damage),
+        damage_per_bite: f("m_fDamagePerBite", d.damage_per_bite),
+        min_damage: f("m_fMinDamage", d.min_damage),
+        max_damage: f("m_fMaxDamage", d.max_damage),
+        damage_time_interval: f("m_fDamageTimeInterval", d.damage_time_interval),
+        pawn_slowdown_percent: f("m_fPawnSlowdownPercent", d.pawn_slowdown_percent),
+        pawn_slowdown_duration: f("m_fPawnSlowdownDuration", d.pawn_slowdown_duration),
+        eat_required_rat_count: i("m_EatRequiredRatCount", d.eat_required_rat_count),
+        eat_startup_duration: f("m_fEatStartupDuration", d.eat_startup_duration),
+        eat_startup_delay_after_kill: f("m_fEatStartupDelayAfterKill", d.eat_startup_delay_after_kill),
+        eat_per_limb_duration: f("m_fEatPerLimbDuration", d.eat_per_limb_duration),
+        never_flee_systemically: match s.get("m_bNeverFleeSystemicaly") {
+            Some(TVal::B(b)) => *b,
+            _ => d.never_flee_systemically,
+        },
+        flee_attempt_distance: [f("m_fFleeAttemptMinDistance", d.flee_attempt_distance[0]), f("m_fFleeAttemptMaxDistance", d.flee_attempt_distance[1])],
+        flee_retry_delay: f("m_fFleeRetryDelay", d.flee_retry_delay),
+    }
 }

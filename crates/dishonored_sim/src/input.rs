@@ -97,6 +97,36 @@ pub struct PlayerInput {
     /// [`actions`] pressed this tick.
     #[serde(default)]
     pub action: u8,
+    /// NPC combat move the brain is performing this tick ([`npc_moves`]): which item context
+    /// (`DisItemContext_NPCAttack*`, dodges, pistol) drives the input, so presentation can pick
+    /// the matching animation. Always 0 for players.
+    #[serde(default)]
+    pub npc_move: u8,
+}
+
+/// NPC combat moves carried in [`PlayerInput::npc_move`] (`dishonored_ai::AttackKind`).
+pub mod npc_moves {
+    pub const NONE: u8 = 0;
+    /// `DisItemContext_NPCAttackShort` (`DisNPCAnim_AttackShort`).
+    pub const ATTACK_SHORT: u8 = 1;
+    /// `DisItemContext_NPCAttackStepBack`.
+    pub const ATTACK_STEP_BACK: u8 = 2;
+    /// `DisItemContext_NPCAttackMedium`.
+    pub const ATTACK_MEDIUM: u8 = 3;
+    /// `DisItemContext_NPCAttackLong` (`DisNPCAnim_AttackLong`).
+    pub const ATTACK_LONG: u8 = 4;
+    /// `DisItemContext_NPCJumpAttack` (`DisNPCAnim_JumpAttack`).
+    pub const JUMP_ATTACK: u8 = 5;
+    /// `DisItemContext_NPCSideStep` (dodge).
+    pub const SIDE_STEP: u8 = 6;
+    /// `DisItemContext_NPCBackStep` (dodge).
+    pub const BACK_STEP: u8 = 7;
+    /// `DisAISubStateFirePistol` aiming / firing (`DisItemContext_NPCFireGun`).
+    pub const FIRE_PISTOL: u8 = 8;
+    /// Rat swarm attacking (rat pawns).
+    pub const RAT_ATTACK: u8 = 9;
+    /// Rat swarm eating a corpse.
+    pub const RAT_EAT: u8 = 10;
 }
 
 impl PlayerInput {
