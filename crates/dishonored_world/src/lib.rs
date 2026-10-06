@@ -803,6 +803,9 @@ impl WorldQuery for Layered<'_> {
     fn physics_volumes(&self) -> &[PhysicsVolume] {
         self.base.physics_volumes()
     }
+    fn climbables(&self) -> &[Climbable] {
+        self.base.climbables()
+    }
 }
 
 #[cfg(test)]
