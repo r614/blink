@@ -219,6 +219,74 @@ pub struct Matinee {
     pub groups: Vec<Group>,
     /// `RuntimeMatineeData.m_ConversationNodeGUID` (a soiree's conversation node).
     pub conversation_node: Option<String>,
+    /// [interp] Animated attachment points of skeletal mesh actors, baked when the Kismet is
+    /// loaded (the server decodes no animation at run time). See [`BoneTrack`].
+    #[serde(default)]
+    pub bone_tracks: Vec<BoneTrack>,
+    /// [interp] Root bone tracks of the sequences AI groups play (root motion), baked at load.
+    #[serde(default)]
+    pub root_tracks: Vec<RootTrack>,
+}
+
+/// [interp] Where an attachment bone or socket of a skeletal mesh actor is as the group's anim
+/// tracks pose it (U-200): actor space, sampled over the matinee position at `rate` Hz. The
+/// pose is the client prop's (`cutscene::props`): the group's anim tracks in order, each
+/// blended over the previous with its channel weight, on the mesh's bind pose.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct BoneTrack {
+    pub group: String,
+    /// Kismet actor index of the skeletal mesh actor.
+    pub actor: u32,
+    /// Bone or socket name as the attachment key gives it.
+    pub bone: String,
+    pub rate: f32,
+    /// (position, rotation quaternion) per sample.
+    pub frames: Vec<([f32; 3], [f32; 4])>,
+}
+
+impl BoneTrack {
+    /// Linear between samples (slerp for the rotation), held past the ends.
+    pub fn at(&self, t: f32) -> Option<Xform> {
+        let n = self.frames.len();
+        if n == 0 {
+            return None;
+        }
+        let f = (t.max(0.0) * self.rate).min((n - 1) as f32);
+        let i = (f.floor() as usize).min(n - 1);
+        let j = (i + 1).min(n - 1);
+        let a = f - i as f32;
+        let (p0, q0) = (Vec3::from(self.frames[i].0), Quat::from_array(self.frames[i].1));
+        let (p1, q1) = (Vec3::from(self.frames[j].0), Quat::from_array(self.frames[j].1));
+        Some(Xform { pos: p0.lerp(p1, a), rot: Mat3::from_quat(q0.slerp(q1, a).normalize()) })
+    }
+}
+
+/// [interp] A sequence's root bone translation (Edge joint 0, mesh space) sampled over the
+/// sequence's own time at `rate` Hz, with its length and soiree markers (the stretched key
+/// evaluation needs them). One per (AnimSet, sequence): the pawn's sets decide which applies.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RootTrack {
+    /// AnimSet (package, object path).
+    pub set: (String, String),
+    pub seq: String,
+    pub info: SeqInfo,
+    pub rate: f32,
+    pub frames: Vec<[f32; 3]>,
+}
+
+impl RootTrack {
+    /// Root translation at sequence time `t` (clamped to the clip like the presentation's
+    /// `t.min(duration)`; linear between samples).
+    pub fn at(&self, t: f32) -> Vec3 {
+        let n = self.frames.len();
+        if n == 0 {
+            return Vec3::ZERO;
+        }
+        let f = (t.clamp(0.0, self.info.length) * self.rate).min((n - 1) as f32);
+        let i = (f.floor() as usize).min(n - 1);
+        let j = (i + 1).min(n - 1);
+        Vec3::from(self.frames[i]).lerp(Vec3::from(self.frames[j]), f - i as f32)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -287,6 +355,13 @@ pub struct AnimKey {
     pub soiree: [f32; 6],
     /// `InterpTrackStretchAnimKeyProperties.m_bDisableCollision`.
     pub disable_collision: bool,
+    /// `m_MatineeRootMotionMode` (`EMatRootMotionMode`: 0 disable, 1 translate, 2 accel).
+    #[serde(default)]
+    pub root_motion: u8,
+    /// `m_MeshTranslationMode` (`EMatMeshTranslationMode`: 0 no change, 1 disable
+    /// conservative, 2 disable reset).
+    #[serde(default)]
+    pub mesh_translation: u8,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -436,6 +511,19 @@ impl Matinee {
         })
     }
 
+    /// [interp] Baked pose of an attachment bone / socket of a group's skeletal mesh actor at
+    /// `t` (actor space), when the load baked one (the group animates the actor).
+    pub fn bone_at(&self, group: &str, actor: u32, bone: &str, t: f32) -> Option<Xform> {
+        self.bone_tracks.iter().find(|b| b.actor == actor && b.group.eq_ignore_ascii_case(group) && b.bone.eq_ignore_ascii_case(bone)).and_then(|b| b.at(t))
+    }
+
+    /// [interp] Root track of a sequence: the first of `sets` (in the given preference order)
+    /// that holds it, else any baked one.
+    pub fn root_track(&self, sets: &[(String, String)], seq: &str) -> Option<&RootTrack> {
+        let same = |r: &&RootTrack| r.seq.eq_ignore_ascii_case(seq);
+        sets.iter().find_map(|s| self.root_tracks.iter().filter(same).find(|r| r.set.0.eq_ignore_ascii_case(&s.0) && r.set.1.eq_ignore_ascii_case(&s.1))).or_else(|| self.root_tracks.iter().find(same))
+    }
+
     pub fn has_player_group(&self) -> bool {
         self.groups.iter().any(|g| matches!(g.kind, GroupKind::Player { .. }))
     }
@@ -482,7 +570,7 @@ impl TrackKind {
 
 /// What an AnimSequence contributes to anim key evaluation: its length and soiree markers
 /// (`AnimNotify_SoireeAccent/Apex/Loop/End/In/Out` notifies: time, marker index).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SeqInfo {
     pub length: f32,
     pub markers: Vec<(f32, u8)>,
@@ -852,8 +940,10 @@ impl Scene {
                 return if k.time > 0.0 { self.xform(m, gi, oi, k.time - 1e-4, world, depth + 1) } else { None };
             }
             let parent = self.xform(m, pi, 0, t, world, depth + 1).or_else(|| self.initial.get(pi).and_then(|v| v.first().copied().flatten()))?;
+            // The bone as the parent group's anim tracks pose it (U-200: `Boat_Jnt` rocks with
+            // `SC_boat_Idle`), else its reference pose.
             let bone = match self.bound.get(pi).and_then(|v| v.first()) {
-                Some(Bound::Actor(a)) if !k.bone.is_empty() => world.bone(*a, &k.bone).unwrap_or_default(),
+                Some(Bound::Actor(a)) if !k.bone.is_empty() => m.bone_at(&m.groups[pi].name, *a, &k.bone, t).or_else(|| world.bone(*a, &k.bone)).unwrap_or_default(),
                 _ => Xform::default(),
             };
             let rel = Xform { pos: if k.use_offset { Vec3::from(k.offset) } else { Vec3::ZERO }, rot: if k.use_rotation { rot_matrix_units(k.rotation) } else { Mat3::IDENTITY } };
@@ -916,6 +1006,79 @@ impl Scene {
             }
         }
         out
+    }
+
+    /// [interp] Root motion of group `gi` from `prev` to `t` (U-085 / U-202): the mesh-space
+    /// translation of the root bone over the step, summed over the group's anim tracks whose
+    /// active key has `m_MatineeRootMotionMode` set, times the track's channel weight. The
+    /// stretched-key track instance (0x00905c70) hands the key's mode to its group instance
+    /// (`m_CurrentRootMotionMode`, 0x00612e20); the group update (0x0062fed0) gives it to the
+    /// pawn (vfunc +0x30c, 0x00b4d440): translate -> the mesh's root motion moves the actor
+    /// (`RMM_Translate`, or the locomotion component's root motion when it has one), accel ->
+    /// `RMM_Accel`. A key change crossed in the step contributes the old key up to its end and
+    /// the new one from its start; loop wraps and backward steps contribute nothing. `sets`
+    /// order the AnimSets a sequence is looked up in (the group's, then the pawn's).
+    pub fn root_motion(m: &Matinee, gi: usize, prev: f32, t: f32, sets: &[(String, String)]) -> Vec3 {
+        if t <= prev {
+            return Vec3::ZERO;
+        }
+        let Some(g) = m.groups.get(gi) else { return Vec3::ZERO };
+        let info = |n: &str| m.root_track(sets, n).map(|r| r.info.clone());
+        let root = |n: &str, p: f32| m.root_track(sets, n).map(|r| r.at(p)).unwrap_or(Vec3::ZERO);
+        let mut d = Vec3::ZERO;
+        for tr in g.tracks.iter().filter(|t| !t.disabled) {
+            let TrackKind::Anim { keys, .. } = &tr.kind else { continue };
+            if keys.iter().all(|k| k.root_motion == 0) {
+                continue;
+            }
+            let (Some((s1, w)), Some((s0, _))) = (tr.anim(t, &info), tr.anim(prev, &info)) else { continue };
+            let mut part = Vec3::ZERO;
+            if s0.key == s1.key {
+                let k = &keys[s1.key];
+                if k.root_motion != 0 && t >= k.start && !(s1.looping && s1.position < s0.position) {
+                    part = root(&k.name, s1.position) - root(&k.name, s0.position);
+                }
+            } else {
+                let (k0, k1) = (&keys[s0.key], &keys[s1.key]);
+                if k0.root_motion != 0 && prev >= k0.start {
+                    // The old key alone, evaluated where the new one starts.
+                    let one = std::slice::from_ref(k0);
+                    let stretch = matches!(tr.kind, TrackKind::Anim { stretch: true, .. });
+                    let e = if stretch { stretch_at(one, k1.start, &info) } else { anim_at(one, k1.start, &info) };
+                    if let Some(e) = e {
+                        part += root(&k0.name, e.position) - root(&k0.name, s0.position);
+                    }
+                }
+                if k1.root_motion != 0 {
+                    if let Some((b, _)) = tr.anim(k1.start, &info) {
+                        part += root(&k1.name, s1.position) - root(&k1.name, b.position);
+                    }
+                }
+            }
+            d += part * w;
+        }
+        d
+    }
+
+    /// [interp] Mesh-space root bone translation of group `gi`'s pose at `t` (for
+    /// `SnapToRootBoneLocationWhenFinished`): tracks blended in order over the bind pose (the
+    /// NPC root's bind translation is zero); keys with root motion keep the root at the bind
+    /// translation (their translation moved the pawn instead).
+    pub fn root_offset(m: &Matinee, gi: usize, t: f32, sets: &[(String, String)]) -> Vec3 {
+        let Some(g) = m.groups.get(gi) else { return Vec3::ZERO };
+        let info = |n: &str| m.root_track(sets, n).map(|r| r.info.clone());
+        let mut acc = Vec3::ZERO;
+        for tr in g.tracks.iter().filter(|t| !t.disabled) {
+            let TrackKind::Anim { keys, .. } = &tr.kind else { continue };
+            let Some((s, w)) = tr.anim(t, &info) else { continue };
+            let k = &keys[s.key];
+            if t < k.start || w <= 1e-3 {
+                continue;
+            }
+            let r = if k.root_motion != 0 { Vec3::ZERO } else { m.root_track(sets, &k.name).map(|r| r.at(s.position)).unwrap_or(Vec3::ZERO) };
+            acc = acc.lerp(r, w.min(1.0));
+        }
+        acc
     }
 
     /// Groups whose objects are pawns under matinee control (AI groups and the player group).
@@ -1062,6 +1225,8 @@ mod load_impl {
                             reverse: b(k, "bReverse", false),
                             soiree,
                             disable_collision: b(&kp, "m_bDisableCollision", false),
+                            root_motion: enum_idx(&kp, "m_MatineeRootMotionMode", &["MRMM_Disable", "MRMM_Translate", "MRMM_Accel"], 0),
+                            mesh_translation: enum_idx(&kp, "m_MeshTranslationMode", &["EMMTM_NoChange", "EMMTM_DisableConservative", "EMMTM_DisableReset"], 0),
                         }
                     })
                     .collect();
@@ -1258,6 +1423,8 @@ mod load_impl {
                 _ => None,
             }).collect(),
             conversation_node: (!conv.is_empty()).then_some(conv),
+            bone_tracks: Vec::new(),
+            root_tracks: Vec::new(),
         })
     }
 
@@ -1501,6 +1668,73 @@ mod tests {
         let boat9 = scene.update(&m, 8.9, 9.0, &W).poses.iter().find(|p| p.0 == Bound::Actor(0)).unwrap().1.pos;
         assert!((boat9 - Vec3::new(1000.0, 90.0, 0.0)).length() < 1e-2);
         assert_eq!(scene.controlled_pawns(&m), vec![7]);
+    }
+
+    #[test]
+    fn attachment_follows_the_baked_bone() {
+        // The boat's "Seat" bone rises 0 -> 10 uu over 2 s (baked at 1 Hz): the attached pawn
+        // follows it instead of the reference pose.
+        let boat = Group {
+            name: "Boat".into(),
+            tracks: vec![Track { kind: TrackKind::Attachment { target: "P".into(), keys: vec![AttachKey { time: 0.0, bone: "Seat".into(), ..Default::default() }], detach_on_interrupt: false }, ..Default::default() }],
+            ..Default::default()
+        };
+        let p = Group { name: "P".into(), kind: GroupKind::Ai { stage_mark: String::new(), snap_to_root: false, lock_requests: true, can_interrupt: true, detached: false }, ..Default::default() };
+        let id = Quat::IDENTITY.to_array();
+        let bt = BoneTrack { group: "Boat".into(), actor: 0, bone: "Seat".into(), rate: 1.0, frames: vec![([0.0, 0.0, 0.0], id), ([0.0, 0.0, 5.0], id), ([0.0, 0.0, 10.0], id)] };
+        let m = Matinee { length: 2.0, groups: vec![boat, p], bone_tracks: vec![bt], ..Default::default() };
+        let scene = Scene::new(&m, vec![vec![Bound::Actor(0)], vec![Bound::Pawn(3)]], &W);
+        let at = |t: f32| scene.update(&m, t - 0.1, t, &W).poses.iter().find(|x| x.0 == Bound::Pawn(3)).unwrap().1.pos;
+        // Boat (1000, 0, 0) yaw 90; the bone's +Z stays +Z.
+        assert!((at(0.5) - Vec3::new(1000.0, 0.0, 2.5)).length() < 1e-3, "{:?}", at(0.5));
+        assert!((at(5.0) - Vec3::new(1000.0, 0.0, 10.0)).length() < 1e-3); // held past the end
+        // Another bone has no baked track: the reference pose (`SceneWorld::bone`).
+        assert!(m.bone_at("Boat", 0, "Other", 1.0).is_none());
+    }
+
+    #[test]
+    fn root_motion_of_stretched_keys() {
+        // "In" (1 s) carries the root 0 -> 60 uu along mesh +Z with root motion; "Loop" has none;
+        // "Out" (1 s) carries it back -60 with root motion.
+        let rt = |seq: &str, a: f32, b: f32| RootTrack { set: ("P".into(), "S".into()), seq: seq.into(), info: SeqInfo { length: 1.0, markers: vec![] }, rate: 10.0, frames: (0..=10).map(|i| [0.0, 0.0, a + (b - a) * i as f32 / 10.0]).collect() };
+        let mut k_in = key(0.0, "In");
+        k_in.root_motion = 1;
+        let k_loop = key(1.0, "Loop");
+        let mut k_out = key(3.0, "Out");
+        k_out.root_motion = 1;
+        let g = Group {
+            name: "AI".into(),
+            kind: GroupKind::Ai { stage_mark: String::new(), snap_to_root: true, lock_requests: true, can_interrupt: true, detached: false },
+            tracks: vec![Track { kind: TrackKind::Anim { slot: String::new(), keys: vec![k_in, k_loop, k_out], weight: CurveF::default(), stretch: true }, ..Default::default() }],
+            ..Default::default()
+        };
+        let m = Matinee { length: 5.0, groups: vec![g], root_tracks: vec![rt("In", 0.0, 60.0), rt("Loop", 30.0, 30.0), rt("Out", 0.0, -60.0)], ..Default::default() };
+        let sets = vec![("P".to_string(), "S".to_string())];
+        // Step by step over the whole matinee: +60 during In, nothing during Loop, -60 during Out.
+        let mut total = Vec3::ZERO;
+        let mut t = 0.0f32;
+        let mut after_in = Vec3::ZERO;
+        while t < 5.0 {
+            let n = (t + 1.0 / 30.0).min(5.0);
+            total += Scene::root_motion(&m, 0, t, n, &sets);
+            if (t..n).contains(&2.0) {
+                after_in = total;
+            }
+            t = n;
+        }
+        assert!((after_in.z - 60.0).abs() < 1e-3, "{after_in:?}");
+        assert!(total.length() < 1e-3, "{total:?}");
+        // A key change inside one step: the rest of In plus the start of Loop (none).
+        assert!((Scene::root_motion(&m, 0, 0.5, 1.5, &sets).z - 30.0).abs() < 1e-3);
+        // Backward steps (loop wraps) add nothing.
+        assert_eq!(Scene::root_motion(&m, 0, 0.8, 0.2, &sets), Vec3::ZERO);
+        // The final pose: Out's root is extracted, so it stays at the bind translation; during
+        // Loop (no root motion) the root shows the clip's 30 uu.
+        assert!(Scene::root_offset(&m, 0, 5.0, &sets).length() < 1e-4);
+        assert!((Scene::root_offset(&m, 0, 2.0, &sets).z - 30.0).abs() < 1e-4);
+        // Mesh +Z is the NPC's forward: (0, -16384, 16384) maps it to +X.
+        let r = rot_matrix_units([0, -16384, 16384]) * Vec3::Z;
+        assert!((r - Vec3::X).length() < 1e-5, "{r:?}");
     }
 
     #[test]

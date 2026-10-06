@@ -19,6 +19,9 @@ pub mod runtime;
 
 #[cfg(feature = "load")]
 pub mod load;
+/// [interp] Matinee animation baked at load for the server (attachment bones, root motion).
+#[cfg(feature = "load")]
+pub mod interp_bake;
 
 pub use host::{Host, HostResult, NullHost};
 pub use model::*;

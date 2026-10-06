@@ -109,6 +109,33 @@ fn main() -> Result<()> {
             let id = db.find_export(&args[1], args[2].parse()?).ok_or_else(|| anyhow::anyhow!("no such op"))?;
             print_op(&db, id);
         }
+        Some("matinees") => {
+            // [interp] matinees [MAP...]: every matinee's AI / player groups with the root motion
+            // and mesh translation modes of their anim keys.
+            let db = db_for(&content, &args[1..])?;
+            for o in &db.ops {
+                let Some(m) = o.interp.as_ref().and_then(|i| i.matinee.as_ref()) else { continue };
+                for g in &m.groups {
+                    let kind = match &g.kind {
+                        interp::GroupKind::Ai { stage_mark, .. } => format!("AI (mark {stage_mark})"),
+                        interp::GroupKind::Player { stage_mark, .. } => format!("player (mark {stage_mark})"),
+                        _ => "plain".into(),
+                    };
+                    let mut keys = Vec::new();
+                    let mut moves = false;
+                    for t in g.tracks.iter().filter(|t| !t.disabled) {
+                        match &t.kind {
+                            interp::TrackKind::Anim { keys: k, .. } => keys.extend(k.iter().filter(|k| k.root_motion != 0 || k.mesh_translation != 0).map(|k| format!("{}@{:.2} rm{} mt{}", k.name, k.start, k.root_motion, k.mesh_translation))),
+                            interp::TrackKind::Move { .. } | interp::TrackKind::Locomotion { .. } => moves = true,
+                            _ => {}
+                        }
+                    }
+                    if !keys.is_empty() {
+                        println!("{} [{}] \"{}\" {kind}{}: {} sets {:?}", m.package, m.export, g.name, if moves { " (move/loco track)" } else { "" }, keys.join(", "), g.anim_sets);
+                    }
+                }
+            }
+        }
         Some("matinee") => {
             // [interp] matinee PACKAGE EXPORT: a matinee's groups and tracks, with a sampled
             // timeline of its move tracks (export of a SeqAct_Interp or of its InterpData).
@@ -121,12 +148,29 @@ fn main() -> Result<()> {
                 println!("  group \"{}\" {:?} sets {:?}", g.name, g.kind, g.anim_sets);
                 for t in &g.tracks {
                     let detail = match &t.kind {
-                        interp::TrackKind::Anim { slot, keys, stretch, .. } => format!("slot {slot} stretch {stretch} keys {:?}", keys.iter().map(|k| (k.start, k.name.as_str())).collect::<Vec<_>>()),
+                        interp::TrackKind::Anim { slot, keys, stretch, .. } => format!("slot {slot} stretch {stretch} keys (start, seq, root motion, mesh translation, rate, offsets) {:?}", keys.iter().map(|k| (k.start, k.name.as_str(), k.root_motion, k.mesh_translation, k.rate, k.start_offset, k.end_offset)).collect::<Vec<_>>()),
                         interp::TrackKind::Move { frame, pos, .. } => format!("{frame:?} {} keys", pos.points.len()),
                         other => format!("{other:?}").chars().take(300).collect(),
                     };
                     println!("    {} \"{}\"{} {detail}", t.class, t.title, if t.disabled { " (disabled)" } else { "" });
                 }
+            }
+            // [interp] Baked animation (attachment bones in actor space, AI root tracks).
+            for b in &m.bone_tracks {
+                let (mut lo, mut hi) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
+                let mut ang: f32 = 0.0;
+                let q0 = b.frames.first().map(|f| glam::Quat::from_array(f.1)).unwrap_or_default();
+                for f in &b.frames {
+                    lo = lo.min(glam::Vec3::from(f.0));
+                    hi = hi.max(glam::Vec3::from(f.0));
+                    ang = ang.max(glam::Quat::from_array(f.1).angle_between(q0).to_degrees());
+                }
+                println!("  bone track \"{}\" actor {} {}: {} frames at {} Hz, position {lo:.1}..{hi:.1}, rotation range {ang:.2} deg", b.group, db.actors[b.actor as usize].name, b.bone, b.frames.len(), b.rate);
+            }
+            for r in &m.root_tracks {
+                let a = r.frames.first().copied().unwrap_or_default();
+                let z = r.frames.last().copied().unwrap_or_default();
+                println!("  root track {} ({}:{}) length {:.2} markers {:?}: root {:?} -> {:?}", r.seq, r.set.0, r.set.1, r.info.length, r.info.markers, a, z);
             }
             if let Some(op) = (db.op(id).class == "SeqAct_Interp").then_some(id) {
                 for g in &m.groups {
