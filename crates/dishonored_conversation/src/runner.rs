@@ -159,6 +159,8 @@ enum Wait {
     Running,
     Line { until: f64, next: Option<NodeId> },
     Choice,
+    /// [interp] A soiree waiting for its matinee (`done` set by the host).
+    Matinee { next: Option<NodeId>, done: bool },
     Done,
 }
 
@@ -261,6 +263,10 @@ pub struct Runner {
     pub hooks: HookClock,
     events: Vec<ConvEvent>,
     pub stats: RunnerStats,
+    /// [interp] The host plays soiree matinees itself (their dialog keys speak the blurbs at
+    /// the keyed times): a soiree waits for [`Runner::matinee_done`] instead of playing the
+    /// preview chain.
+    pub external_matinees: bool,
 }
 
 const MAX_NODES_PER_STEP: u32 = 512;
@@ -291,6 +297,7 @@ impl Runner {
             hooks: HookClock::default(),
             events: Vec::new(),
             stats: RunnerStats::default(),
+            external_matinees: false,
         }
     }
 
@@ -892,7 +899,7 @@ impl Runner {
                 self.events.push(ConvEvent::Output { instance: inst_id, oneshot: os, name: name.clone() });
                 Step::Out(0)
             }
-            NodeKind::Soiree { guid, matinee, .. } => {
+            NodeKind::Soiree { guid, matinee, preview_only } => {
                 if mode == Mode::Interrupt {
                     return Step::End(EndReason::Finished);
                 }
@@ -902,6 +909,11 @@ impl Runner {
                     return Step::Out(0);
                 }
                 self.events.push(ConvEvent::Soiree { instance: inst_id, guid: guid.clone(), matinee: matinee.clone() });
+                // [interp] The original plays the matinee and waits for it (output 0 after).
+                if self.external_matinees && !preview_only {
+                    self.instances[idx].wait = Wait::Matinee { next: out0, done: false };
+                    return Step::Wait;
+                }
                 // The preview chain (output 1) plays, then output 0. With
                 // `m_UsePreviewBlurbsOnly` this is the original; otherwise the original plays
                 // the matinee, whose dialog keys speak these blurbs (APPROXIMATION).
@@ -1048,9 +1060,51 @@ impl Runner {
                     self.run_flow(i, next, env, Mode::Normal);
                 }
             }
+            // [interp] The soiree's matinee finished.
+            if let Wait::Matinee { next, done: true } = self.instances[i].wait.clone() {
+                self.instances[i].wait = Wait::Running;
+                self.run_flow(i, next, env, Mode::Normal);
+            }
             i += 1;
         }
         self.gc();
+    }
+
+    /// [interp] The host finished playing (or could not find) the matinee of a soiree waiting
+    /// in `instance`: output 0 follows on the next update.
+    pub fn matinee_done(&mut self, instance: u32) {
+        for inst in self.instances.iter_mut().filter(|x| x.id == instance) {
+            if let Wait::Matinee { done, .. } = &mut inst.wait {
+                *done = true;
+            }
+        }
+    }
+
+    /// [interp] A matinee dialog key (`InterpTrackDialog`, `InterpTrackInstDialog` 0x00c73750)
+    /// speaks blurb `guid`: the blurb node of that GUID (in the instance's conversation first)
+    /// plays as a line on its own, like the original's `DisConv_Blurb` started by the track,
+    /// `offset` seconds in. Returns its length.
+    pub fn speak_blurb(&mut self, instance: Option<u32>, guid: &str, offset: f32) -> Option<f32> {
+        let db = self.db.clone();
+        let idx = instance.and_then(|id| self.instances.iter().position(|x| x.id == id));
+        let conv = idx.and_then(|i| self.instances[i].conversation);
+        let pick = |want_conv: Option<u32>| db.nodes.iter().position(|n| matches!(&n.kind, NodeKind::Line(l) if l.guid.eq_ignore_ascii_case(guid)) && (want_conv.is_none() || n.conversation == want_conv));
+        let ni = pick(conv).or_else(|| pick(None))?;
+        let node = &db.nodes[ni];
+        let NodeKind::Line(l) = &node.kind else { return None };
+        let speaker = match idx {
+            Some(i) => self.speaker_of(i, node),
+            None => Speaker { name: node.conversation.and_then(|c| db.conversations[c as usize].speaker_nicks.get(node.speaker.max(0) as usize).cloned().flatten()).unwrap_or_default().replace('_', " "), npc: None, player: false },
+        };
+        let dur = l.duration();
+        let line_id = self.next_id;
+        self.next_id += 1;
+        self.stats.lines += 1;
+        let subtitle = l.has_subtitle();
+        let inst_id = instance.unwrap_or(0);
+        self.events.push(ConvEvent::Line { instance: inst_id, line_id, node: ni as NodeId, speaker: speaker.clone(), text: l.text.clone(), vo: l.vo.clone(), duration: dur, subtitle });
+        self.detached.push(ActiveLine { id: line_id, node: ni as NodeId, speaker, text: l.text.clone(), vo: l.vo.clone(), started: self.time - offset.max(0.0) as f64, duration: dur, main: l.main_subtitle, subtitle });
+        Some(dur)
     }
 
     /// Player input on a waiting choice. Returns true when accepted.

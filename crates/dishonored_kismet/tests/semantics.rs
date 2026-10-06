@@ -445,7 +445,7 @@ fn latent_matinee_fires_event_keys_then_completed() {
     let s = b.root(0);
     let e = b.event(s, "SeqEvent_Console", vec![]);
     let data = b.add(0, "InterpData", Kind::Variable, Some(s), &[], &[], vec![]);
-    b.db.ops[data as usize].interp = Some(InterpInfo { length: 1.0, events: vec![(0.5, "Half".into(), true, true)] });
+    b.db.ops[data as usize].interp = Some(InterpInfo { length: 1.0, events: vec![(0.5, "Half".into(), true, true)], matinee: None });
     let m = b.add(0, "SeqAct_Interp", Kind::Action, Some(s), &["Play", "Reverse", "Stop", "Pause", "Change Dir"], &["Completed", "Reversed", "Interrupted", "Stopped", "Started", "OnSkipWhole", "Half"], vec![("PlayRate", Value::Float(1.0))]);
     b.var_link(m, "Data", vec![data], "");
     let rs: Vec<OpId> = (0..7).map(|_| b.record(s)).collect();

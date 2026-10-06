@@ -813,7 +813,7 @@ impl MissionMatch {
         let mut all: Vec<(PlayerId, PlayerInput)> = inputs
             .iter()
             .map(|(id, i)| {
-                if self.choosing.contains_key(id) || conv_chooser == Some(*id) || self.kismet.as_ref().is_some_and(|k| k.choosing(*id)) {
+                if self.choosing.contains_key(id) || conv_chooser == Some(*id) || self.kismet.as_ref().is_some_and(|k| k.choosing(*id) || k.locked(*id)) /* [interp] */ {
                     (*id, PlayerInput { tick: i.tick, yaw: i.yaw, pitch: i.pitch, left_hand: i.left_hand, ..Default::default() })
                 } else {
                     (*id, *i)

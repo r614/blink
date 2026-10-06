@@ -56,6 +56,8 @@ pub struct AnimBank {
     masks: HashMap<usize, Arc<Vec<Vec<f32>>>>,
     /// lowercase object path -> package (AnimSets, locomotion configs) for built-in profiles.
     locator: HashMap<String, String>,
+    /// [interp] (profile, extra AnimSets) -> profile with the matinee group's sets appended.
+    derived: HashMap<(usize, Vec<(String, String)>), usize>,
 }
 
 /// Packages that cook the Boyle NPC AnimSets, locomotion configs and animation definitions.
@@ -130,7 +132,7 @@ impl AnimBank {
                 }
             }
         }
-        AnimBank { content, sets: Vec::new(), set_index: HashMap::new(), clips: HashMap::new(), profiles: Vec::new(), profile_index: HashMap::new(), model_profile: HashMap::new(), bindings: HashMap::new(), masks: HashMap::new(), locator }
+        AnimBank { content, sets: Vec::new(), set_index: HashMap::new(), clips: HashMap::new(), profiles: Vec::new(), profile_index: HashMap::new(), model_profile: HashMap::new(), bindings: HashMap::new(), masks: HashMap::new(), locator, derived: HashMap::new() }
     }
 
     fn located(&self, path: &str) -> Option<(String, String)> {
@@ -462,6 +464,8 @@ pub struct PawnAnim {
     pub rng: u32,
     pub sword: Option<dishonored_sim::state::SwordPhase>,
     pub left: Option<dishonored_sim::state::LeftPhase>,
+    /// [interp] Matinee anim track samples on this pawn (set each frame by `cutscene.rs`).
+    pub scripted: Vec<Scripted>,
 }
 
 impl PawnAnim {
@@ -908,7 +912,7 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
         }
     }
     // Talking: upper-body gestures (APPROXIMATION, U-142).
-    if i.talking && p.alive {
+    if i.talking && p.alive && st.scripted.is_empty() /* [interp] the matinee drives the body */ {
         st.gesture -= i.dt;
         if st.upper.as_ref().is_none_or(|c| c.fading) && st.gesture <= 0.0 {
             let g = &bank.profiles[profile].gestures;
@@ -964,7 +968,93 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
             overlay(&mut pose, &up, c.weight, Some(&mask), parts);
         }
     }
+    // [interp] Matinee anim tracks (the `MatineeStackNode` slot channels), in track order.
+    for s in st.scripted.clone() {
+        let prof = bank.with_sets(profile, &s.sets);
+        if let Some(sp) = bank.sample(lib, model, prof, &s.name, s.time, false) {
+            overlay(&mut pose, &sp, s.weight, None, parts);
+        }
+    }
     pose
+}
+
+/// [interp] Blend a layer over a pose (`overlay`, for matinee props).
+pub fn blend_into(base: &mut Pose, over: &Pose, w: f32, parts: &[PartGpu]) {
+    overlay(base, over, w, None, parts);
+}
+
+/// [interp] One matinee anim track's sample on a pawn or prop: sequence, position (seconds),
+/// channel weight, and the group's AnimSets (`GroupAnimSets`, searched before the pawn's).
+#[derive(Clone, Debug, Default)]
+pub struct Scripted {
+    pub name: String,
+    pub time: f32,
+    pub weight: f32,
+    pub sets: Vec<(String, String)>,
+}
+
+impl AnimBank {
+    /// [interp] A profile with extra AnimSets appended (later sets win the name lookup).
+    pub fn with_sets(&mut self, profile: usize, extra: &[(String, String)]) -> usize {
+        if extra.is_empty() {
+            return profile;
+        }
+        let key = (profile, extra.to_vec());
+        if let Some(p) = self.derived.get(&key) {
+            return *p;
+        }
+        let mut sets = self.profiles[profile].sets.clone();
+        for s in extra {
+            if let Some(i) = self.set(s) {
+                sets.push(i);
+            }
+        }
+        let loco = self.profiles[profile].loco.clone();
+        self.profiles.push(Profile { sets, loco, defs: None, lookup: HashMap::new(), gestures: Vec::new() });
+        let id = self.profiles.len() - 1;
+        self.derived.insert(key, id);
+        id
+    }
+
+    /// [interp] A profile made of AnimSets only (matinee props such as Samuel's boat).
+    pub fn sets_profile(&mut self, sets: &[(String, String)]) -> usize {
+        self.profile(&AnimProfile { sets: sets.to_vec(), locomotion: None, defs: String::new(), ragdoll_on_death: false })
+    }
+
+    /// [interp] Sample a sequence on parts outside the character library (matinee props): the
+    /// set's tracks bound to the parts' bones by name, in the first part's bone order.
+    pub fn sample_parts(&mut self, parts: &[PartGpu], profile: usize, name: &str, t: f32) -> Option<Pose> {
+        let (set, clip) = self.clip(profile, name)?;
+        let mut tracks = self.sets[set].tracks.clone();
+        if let Some(r) = parts.first() {
+            tracks.sort_by_key(|n| r.bones.iter().position(|b| b.name.eq_ignore_ascii_case(n)).unwrap_or(usize::MAX));
+        }
+        Some(
+            parts
+                .iter()
+                .map(|p| {
+                    let mut v: Vec<Option<Key>> = vec![None; p.bones.len()];
+                    for (j, tn) in tracks.iter().enumerate() {
+                        if let Some(b) = p.bones.iter().position(|b| b.name.eq_ignore_ascii_case(tn)) {
+                            let (q, tr) = clip.sample(t.min(clip.duration), j);
+                            if let Some(q) = q {
+                                v[b] = Some(Key { q, t: tr });
+                            }
+                        }
+                    }
+                    v
+                })
+                .collect(),
+        )
+    }
+
+    /// [interp] Length and soiree markers of a sequence (stretched matinee keys).
+    pub fn seq_info(&mut self, profile: usize, name: &str) -> Option<dishonored_kismet::interp::SeqInfo> {
+        let set = self.holder(profile, name)?;
+        let (export, _) = self.sets[set].seqs.get(&name.to_ascii_lowercase()).cloned()?;
+        let pkg = self.content.package(&self.sets[set].pkg).ok()?;
+        dishonored_kismet::interp::seq_info(&pkg, export)
+    }
 }
 
 /// Pawn-space bone globals from a pose (rotation-only retargeting: bind translations keep each

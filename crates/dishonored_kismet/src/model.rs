@@ -201,6 +201,9 @@ pub struct InterpInfo {
     pub length: f32,
     /// (time, event name, fire when playing forwards, fire when playing backwards)
     pub events: Vec<(f32, String, bool, bool)>,
+    /// [interp] The whole matinee (groups and tracks), when it could be read.
+    #[serde(default)]
+    pub matinee: Option<Box<crate::interp::Matinee>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -266,6 +269,10 @@ pub struct Actor {
     pub shape: Option<Shape>,
     /// Scalar gameplay properties of the actor (`m_pAbstractItem`, `bHidden`, ...).
     pub props: Props,
+    /// [interp] Skeletal mesh actors: reference-pose bones in actor space (name, position,
+    /// rotation quaternion xyzw), for matinee attachments to a bone.
+    #[serde(default)]
+    pub bones: Vec<(String, [f32; 3], [f32; 4])>,
 }
 
 impl Actor {

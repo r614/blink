@@ -109,6 +109,43 @@ fn main() -> Result<()> {
             let id = db.find_export(&args[1], args[2].parse()?).ok_or_else(|| anyhow::anyhow!("no such op"))?;
             print_op(&db, id);
         }
+        Some("matinee") => {
+            // [interp] matinee PACKAGE EXPORT: a matinee's groups and tracks, with a sampled
+            // timeline of its move tracks (export of a SeqAct_Interp or of its InterpData).
+            let db = db_for(&content, &args[3..])?;
+            let id = db.find_export(&args[1], args[2].parse()?).ok_or_else(|| anyhow::anyhow!("no such op"))?;
+            let data = if db.op(id).class == "SeqAct_Interp" { db.op(id).var_link("Data").and_then(|l| l.vars.first().copied()).unwrap_or(id) } else { id };
+            let Some(m) = db.op(data).interp.as_ref().and_then(|i| i.matinee.as_ref()) else { anyhow::bail!("no matinee data") };
+            println!("{} [{}] {} length {:.3} conversation node {:?}", m.package, m.export, m.path, m.length, m.conversation_node);
+            for g in &m.groups {
+                println!("  group \"{}\" {:?} sets {:?}", g.name, g.kind, g.anim_sets);
+                for t in &g.tracks {
+                    let detail = match &t.kind {
+                        interp::TrackKind::Anim { slot, keys, stretch, .. } => format!("slot {slot} stretch {stretch} keys {:?}", keys.iter().map(|k| (k.start, k.name.as_str())).collect::<Vec<_>>()),
+                        interp::TrackKind::Move { frame, pos, .. } => format!("{frame:?} {} keys", pos.points.len()),
+                        other => format!("{other:?}").chars().take(300).collect(),
+                    };
+                    println!("    {} \"{}\"{} {detail}", t.class, t.title, if t.disabled { " (disabled)" } else { "" });
+                }
+            }
+            if let Some(op) = (db.op(id).class == "SeqAct_Interp").then_some(id) {
+                for g in &m.groups {
+                    let binds: Vec<String> = db.op(op).var_link(&g.name).map(|l| l.vars.iter().map(|v| format!("{:?}", db.op(*v).props.get("ObjValue"))).collect()).unwrap_or_default();
+                    for t in g.tracks.iter().filter(|t| matches!(t.kind, interp::TrackKind::Move { .. })) {
+                        let init = binds.first().and_then(|_| db.op(op).var_link(&g.name)).and_then(|l| l.vars.first()).and_then(|v| match db.op(*v).props.get("ObjValue") {
+                            Some(Value::Obj(Obj::Actor(a))) => Some(&db.actors[*a as usize]),
+                            _ => None,
+                        });
+                        let x0 = init.map(|a| interp::Xform::new(a.location, a.rotation)).unwrap_or_default();
+                        for i in 0..=10 {
+                            let t_ = m.length * i as f32 / 10.0;
+                            let x = t.kind.move_world(t_, &x0).unwrap();
+                            println!("    {} t={t_:6.2} pos ({:.0}, {:.0}, {:.0}) yaw {:.1}", g.name, x.pos.x, x.pos.y, x.pos.z, x.yaw_deg());
+                        }
+                    }
+                }
+            }
+        }
         Some("find") => {
             let db = db_for(&content, &args[2..])?;
             let q = args[1].to_ascii_lowercase();
