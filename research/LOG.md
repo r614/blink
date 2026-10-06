@@ -1427,3 +1427,28 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   - The soiree state's enter (0x00a66ff0) blends both hands' items to 1 (0x00aa1cf0, back to 0 at the exit 0x00a628f0); the client hides the first-person rig while the local player is held (LIKELY).
 - **Tests:** `cargo test -p dishonored_kismet` (new: `attachment_follows_the_baked_bone`, `root_motion_of_stretched_keys`); `harness kismet --route lethal` (debug build, muted): 16/16, Samuel's intro releases the player at (-8147, 3486, -1953) standing on the rocking hull 2 s later, same-seed Kismet state hash 0f8de0da42af5f90 twice.
 - **Confidence:** CONFIRMED for the group instance, root motion and attachment findings and the data; LIKELY for the camera offset and the root joint / mesh rotation conventions (U-543); APPROXIMATION for collision-free root motion (U-540) and server-side pawn-bone attachments (U-544).
+## 2026-10-06: Runtime probe of the original game; first measurements (U-011)
+
+- **Question:** Can the port's movement and lighting constants be measured on the running original instead of inferred from the decompiled code? In particular, is the halved jump apex (213 -> 107 uu) right?
+- **Method:** New tools (research/dishonored/INSTRUMENTATION.md):
+  - `probe_launch` starts `Dishonored.exe` suspended with a session token and injects `dishonored_probe_dll` (i686).
+  - The DLL detours `UObject::ProcessEvent` (0x00470640) and patches d3d9's `CreateDevice`, then the device's Present / draw / pixel-shader slots.
+  - It serves a current-user, local-only named pipe. `measure boot` loads Boyle Ext by console command; `measure jump|fall|run|sdf|views` drive Corvo by keys through `FViewportClient::InputKey` and sample the pawn every frame.
+- **Findings:**
+  - No ASLR (DllCharacteristics 0x8100), so the Ghidra addresses hold at runtime.
+  - `GObjObjects` 0x01423630, `GNames` 0x01435674, `GEngine` 0x0144721C (`DishonoredEngine_0`).
+  - There is no script `PlayerTick`. Rendering is threaded.
+  - The keyboard comes from deferred window messages that are processed only with focus; DirectInput is for the mouse (0x009CA1C0).
+  - Skipping the start screen leaves `LocalPlayer.ControllerId` at -1, and then no key reaches the player.
+  - `bPauseOnLossOfFocus` pauses the world (`WorldInfo.Paused`) while the window is in the background.
+  - `-nosound` crashes the game. The loading movie needs `-nomovie`.
+  - Jump: launch 800 uu/s; apex 106.45-106.67 uu over 4 jumps (parabola fit 106.66, gravity 3000 = 2 x 1500); airtime 0.533 s. **Confirms the halved apex** (107, not 213).
+  - Falling damage: an 800 uu drop does none and 868 uu does 1. Then 900: 3, 1000: 19, 1100: 32, 1200: 51, 1300: 58 of 70. This is consistent with damage above 2250 uu/s and `v ~ sqrt(4 g h)` (onset at about 844 uu), with a few points of frame-rate scatter (U-462).
+  - Run 400, sneak 275, sprint 600 uu/s (sword sheathed, factor 1.0).
+  - Slide: from 600 to 275 in 1.10 s on the cosine ease (434.7 uu/s at 0.555 s against 434.9 predicted), covering 483 uu (port 481); physics `PHYS_Custom`.
+  - Distance-field shadows: the dominant directional light uses `DistanceFieldParameters` = (-0.366667, 3.75, 2.0) (port: 4). Spot lights use 3.125 and 100. Bias is always -0.5 + 0.5 / scale (U-401, U-460, U-461).
+  - The light pass's `DiffuseOverrideParameter` / `SpecularOverrideParameter` are (0, 0, 0, 1).
+  - `measure views` captured all 8 `harness fidelity` viewpoints (camera within 0.5 uu, FOV 75, HUD hidden) as reference images (kept in scratch, not committed).
+- **Port:** No sim change. The measured movement matches the port. The SDF scale (3.75) is left to the presentation area (U-460).
+- **Tests:** `cargo test -p dishonored_probe` (frame and sample round trips). The measurements above were run on a live game session.
+- **Confidence:** CONFIRMED for the jump, run, sprint and slide numbers and the SDF constants (read from the game). LIKELY for the falling-damage onset (frame sampling).
