@@ -177,6 +177,13 @@ pub fn sample_r8_bilinear(data: &[u8], w: usize, h: usize, uv: glam::Vec2) -> u8
     (top + (bottom - top) * fy).round().clamp(0.0, 255.0) as u8
 }
 
+/// UE3's `FLinearColor(const FColor&)`: `(c / 255)^2.2` (its `PowOneOver255Table`), used
+/// for light and fog colours. Measured in the running game: the Boyle moon's `LightColor`
+/// (164, 209, 255) x `Brightness` 0.25 reaches the light pass as (0.0947, 0.1614, 0.25).
+pub fn color_to_linear(c: u8) -> f32 {
+    (c as f32 / 255.0).powf(2.2)
+}
+
 pub fn srgb_to_linear(c: u8) -> f32 {
     let c = c as f32 / 255.0;
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }

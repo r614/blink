@@ -47,6 +47,10 @@ impl Default for ImportOptions {
 
 #[derive(Debug, Default, Clone)]
 pub struct ImportStats {
+    /// Wall time of the import's stages, seconds (package loading, actors, lightmaps).
+    pub timings: Vec<(&'static str, f32)>,
+    /// The lightmap pages came from the on-disk cache (`ImportOptions::lightmap_cache`).
+    pub lightmaps_cached: bool,
     pub static_mesh_actors: usize,
     pub collection_components: usize,
     /// Instances from StaticMeshComponents of other actor classes (render-only).
@@ -138,6 +142,7 @@ pub fn import_level(
     packages: &[String],
     opts: &ImportOptions,
 ) -> Result<(DishonoredMap, ImportStats)> {
+    let t0 = std::time::Instant::now();
     let mut pkgs = Vec::new();
     for p in packages {
         pkgs.push(content.package(p).with_context(|| format!("loading {p}"))?);
@@ -179,6 +184,8 @@ pub fn import_level(
         ps_ids: HashMap::new(),
         class_defaults: HashMap::new(),
     };
+    imp.stats.timings.push(("packages", t0.elapsed().as_secs_f32()));
+    let t = std::time::Instant::now();
     for slot in 0..level_slots {
         imp.import_actors(slot)?;
     }
@@ -187,9 +194,12 @@ pub fn import_level(
             imp.particle_by_path(p);
         }
     }
+    imp.stats.timings.push(("actors", t.elapsed().as_secs_f32()));
+    let t = std::time::Instant::now();
     if opts.load_textures && opts.load_lightmaps {
         imp.bake_lightmaps();
     }
+    imp.stats.timings.push(("lightmaps", t.elapsed().as_secs_f32()));
     if level_slots > 0 {
         imp.import_environment(0);
     }
@@ -360,7 +370,7 @@ impl Importer<'_> {
             return;
         }
         let color = match find(c, "LightColor").map(|p| &p.value) {
-            Some(Value::Color(rgba)) => [0, 1, 2].map(|k| crate::lightmap::srgb_to_linear(rgba[k])),
+            Some(Value::Color(rgba)) => [0, 1, 2].map(|k| crate::lightmap::color_to_linear(rgba[k])),
             _ => [1.0; 3],
         };
         self.map.environment.fog.push(FogSettings {
@@ -442,7 +452,7 @@ pub fn read_light(pkg: &Package, actor: usize, class: &str) -> std::result::Resu
         let position = world.w_axis.truncate();
         let direction = world.x_axis.truncate().normalize_or(Vec3::NEG_Z);
         let color = match find(c, "LightColor").map(|p| &p.value) {
-            Some(Value::Color(rgba)) => [0, 1, 2].map(|k| crate::lightmap::srgb_to_linear(rgba[k])),
+            Some(Value::Color(rgba)) => [0, 1, 2].map(|k| crate::lightmap::color_to_linear(rgba[k])),
             _ => [1.0; 3],
         };
         let kind = if cclass.contains("Directional") {
@@ -1077,8 +1087,9 @@ impl Importer<'_> {
             None => (MaterialBlend::Opaque, false),
         };
         let sky = chain.base_material.as_deref().is_some_and(|b| b.starts_with("Skies.") || b.contains("Moon_PMAT") || b.contains("Sun_PMAT"));
-        // Sky shaders sample their own (default) textures, e.g. Moon_PMAT's moon disc.
-        let diffuse_key = diffuse_key.or_else(|| if sky { chain.textures.first().or(chain.default_textures.first()).map(|t| t.1) } else { None });
+        // Sky shaders sample their own textures, e.g. Moon_PMAT's moon disc (`Tex#0`, an
+        // unnamed expression texture).
+        let diffuse_key = diffuse_key.or_else(|| if sky { chain.expression_textures.first().copied().or(chain.textures.first().or(chain.default_textures.first()).map(|t| t.1)) } else { None });
         let mut diffuse = diffuse_key.and_then(|key| self.texture(key));
         let normal = normal_key.and_then(|key| self.texture(key));
         let opacity = opacity_key.and_then(|key| self.texture(key));
@@ -1145,7 +1156,7 @@ impl Importer<'_> {
         let raw: &[&str] = if chain.switch("Dist_Enable_Distortion") == Some(true) {
             &["Dist_Distortion", "O_Opacity", "UV_Distortion"]
         } else if sky {
-            &["D_Diffuse", "C_Clouds_Texture", "C2_Clouds_2_Texture", "Storm"]
+            &["D_Diffuse", "C_Clouds_Texture", "C2_Clouds_2_Texture", "Storm", "Cloud"]
         } else {
             &[]
         };
@@ -1154,6 +1165,14 @@ impl Importer<'_> {
                 let key = chain.textures.iter().chain(chain.default_textures.iter()).find(|(k, _)| k.trim().eq_ignore_ascii_case(n)).map(|v| v.1);
                 if let Some(t) = key.and_then(|k| self.texture(k)) {
                     texture_params.push((n.to_string(), t));
+                }
+            }
+            // The base material's unnamed textures (its shaders' `Tex#i`), as `Tex<i>`.
+            if sky {
+                for (i, k) in chain.expression_textures.iter().enumerate() {
+                    if let Some(t) = self.texture(*k) {
+                        texture_params.push((format!("Tex{i}"), t));
+                    }
                 }
             }
         }

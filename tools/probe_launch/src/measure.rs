@@ -144,6 +144,7 @@ pub fn run(args: &[String]) -> Result<()> {
         "run" => run_sprint_slide(&mut c, &o),
         "sdf" => sdf(&mut c),
         "views" => views(&mut c, &o),
+        "consts" => consts(&mut c, &o),
         "trace" => {
             let n: u32 = o.rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(120);
             c.sample_start(100_000)?;
@@ -311,6 +312,44 @@ fn fit_parabola(p: &[(f64, f64)]) -> Option<(f64, f64, f64)> {
 /// Register of a CTAB entry (`Name=c9x1` -> 9).
 fn ctab_reg(ctab: &str, name: &str) -> Option<usize> {
     ctab.split(' ').find_map(|e| e.strip_prefix(name).and_then(|r| r.strip_prefix("=c"))).and_then(|r| r.split('x').next()).and_then(|n| n.parse().ok())
+}
+
+/// `measure consts <ctab filter> <draws> [name...]`: the distinct values of the named constants
+/// (every float constant of the CTAB when no name is given) over the next `draws` draws made
+/// with a pixel shader whose CTAB contains the filter, with a count per distinct set.
+fn consts(c: &mut Client, o: &Opts) -> Result<()> {
+    let filter = o.rest.get(1).context("consts <ctab filter> <draws> [name...]")?.clone();
+    let draws: u32 = o.rest.get(2).and_then(|s| s.parse().ok()).unwrap_or(200);
+    let names: Vec<String> = o.rest.iter().skip(3).cloned().collect();
+    let shaders: Vec<_> = c.shaders()?.into_iter().filter(|s| s.ctab.contains(filter.as_str())).collect();
+    println!("{} pixel shaders match `{filter}`", shaders.len());
+    let got = c.ps_constants(0, draws, &filter)?;
+    let mut seen = std::collections::BTreeMap::new();
+    for (_, hash, regs) in &got {
+        let Some(s) = shaders.iter().find(|s| s.hash == *hash) else { continue };
+        let list: Vec<String> = if names.is_empty() {
+            s.ctab.split(' ').filter(|e| e.contains("=c")).filter_map(|e| e.split('=').next()).map(str::to_string).collect()
+        } else {
+            names.clone()
+        };
+        let mut line = format!("{:016x} ", hash);
+        for n in &list {
+            if let Some(r) = ctab_reg(&s.ctab, n) {
+                // Arrays span several registers (`name=c3x2`).
+                let count = s.ctab.split(' ').find_map(|e| e.strip_prefix(n.as_str()).and_then(|r| r.strip_prefix("=c"))).and_then(|r| r.split('x').nth(1)).and_then(|c| c.parse::<usize>().ok()).unwrap_or(1);
+                for k in 0..count.min(4) {
+                    let v = regs[r + k];
+                    let _ = write!(line, "{n}[{k}]=({:.6}, {:.6}, {:.6}, {:.6}) ", v[0], v[1], v[2], v[3]);
+                }
+            }
+        }
+        *seen.entry(line).or_insert(0) += 1;
+    }
+    println!("{} draws sampled; distinct constant sets:", got.len());
+    for (l, n) in seen {
+        println!("  x{n}: {l}");
+    }
+    Ok(())
 }
 
 /// Pixel shader constants of the dominant light's distance-field shadow pass, read at draw

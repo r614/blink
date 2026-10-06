@@ -175,7 +175,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     var out: FragmentOutput;
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
         out.color = apply_pbr_lighting(pbr_input);
-        out.color = vec4<f32>(out.color.rgb + lightmap_specular, out.color.a);
+        // In Bevy's light unit like the lightmap (x baked_params.x), so it takes the view
+        // exposure that apply_pbr_lighting gave the lightmap's diffuse term.
+        out.color = vec4<f32>(out.color.rgb + lightmap_specular * view_bindings::view.exposure, out.color.a);
 #ifdef VERTEX_UVS_B
         // Where the original shadows the dominant light with the component's distance field,
         // swap the cascade factor Bevy applied for the distance-field one.

@@ -54,10 +54,9 @@ impl RenderFeatures {
             post: on("--no-post"),
             sky: on("--no-sky"),
             debug_lighting: has("--debug-lighting"),
-            // Off by default: the term is decoded exactly, but its runtime strength
-            // (`SpecularOverrideParameter`, U-320) is unknown and full strength blows flat roofs and
-            // gravel out to white. `--lightmap-specular` turns it on for comparison.
-            lightmap_specular: !base && has("--lightmap-specular"),
+            // Full strength: the base pass's `SpecularOverrideParameter` is (0, 0, 0, 1) in the
+            // running game (measured, U-320). `--no-lightmap-specular` turns it off.
+            lightmap_specular: on("--no-lightmap-specular"),
             df_shadows: on("--no-df-shadows"),
         }
     }
@@ -293,7 +292,8 @@ pub fn build_material(i: usize, m: &MaterialAsset, p: &MaterialParams, images: &
         mat.double_sided = true;
         mat.normal_map_texture = None;
         if let Some(c) = vector(p, "Moon_Color").or(vector(p, "Color")) {
-            let k = c[3] * scalar(p, "SunIntensity").unwrap_or(1.0);
+            // Moon_Color.rgb x a; Sun_PMAT ignores Color.a and scales by SunIntensity (sky_disc.rs).
+            let k = if vector(p, "Moon_Color").is_some() { c[3] } else { scalar(p, "SunIntensity").unwrap_or(2.0) };
             mat.base_color = Color::linear_rgb(c[0] * k, c[1] * k, c[2] * k);
             mat.alpha_mode = AlphaMode::Add;
         } else {
@@ -491,6 +491,9 @@ pub fn spawn_map(
                 let sky = mat_id.and_then(|m| Some((map.material_params.get(m)?, map.materials.get(m)?)));
                 if let Some(sm) = sky.and_then(|(p, ma)| crate::sky::SkyMaterial::new(p, &ma.texture_params, &image_handles)) {
                     e.insert(crate::sky::PendingSky(sm));
+                } else if let Some(dm) = sky.and_then(|(p, ma)| crate::sky_disc::SkyDiscMaterial::new(p, &ma.texture_params, &image_handles)) {
+                    // Moon_PMAT / Sun_PMAT: their own shaders (sky_disc.rs).
+                    e.insert(crate::sky_disc::PendingSkyDisc(dm));
                 }
             }
             if let Some(m) = mover {

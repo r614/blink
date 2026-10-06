@@ -150,7 +150,9 @@ pub struct SkyPlugin;
 impl Plugin for SkyPlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "sky.wgsl");
+        bevy::asset::embedded_asset!(app, "sky_disc.wgsl");
         app.add_plugins(MaterialPlugin::<SkyMaterial>::default()).add_systems(Update, apply_pending_sky);
+        app.add_plugins(MaterialPlugin::<crate::sky_disc::SkyDiscMaterial>::default()).add_systems(Update, crate::sky_disc::apply_pending);
     }
 }
 

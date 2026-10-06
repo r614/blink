@@ -65,6 +65,11 @@ pub fn spawn_level(
         "lightmaps: {name}: {} texture lightmaps, {} pages, {} components with a dominant directional distance-field shadow map, {} with a dominant point / spot one",
         stats.lightmaps_texture, stats.lightmap_pages, stats.shadow_map_components, stats.local_shadow_map_components
     );
+    info!(
+        "import {name}: {} (lightmaps {})",
+        stats.timings.iter().map(|(k, s)| format!("{k} {s:.1} s")).collect::<Vec<_>>().join(", "),
+        if stats.lightmaps_cached { "from the cache" } else { "baked" }
+    );
     spawn_imported(name, map, stats.instances, opts, features, commands, meshes, images, materials, baked, levels, fx)
 }
 

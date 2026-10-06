@@ -17,7 +17,7 @@
 //!            --from-launcher (set by the launcher: window from the settings, Esc menu returns)
 //!   rendering (all on by default; for before/after comparisons):
 //!            --no-lightmaps --no-materials --no-fx --no-dynamic-lights --no-fog
-//!            --no-post --no-sky (and --lightmap-specular to enable the specular term), or --baseline for all of them (diffuse-only renderer
+//!            --no-post --no-sky --no-lightmap-specular, or --baseline for all of them (diffuse-only renderer
 //!            with the placeholder sun/ambient)
 //!   harness: --script FILE --out DIR --control PORT --record DIR --record-every N
 //!            --record-fps F --exit-after SECONDS --size WxH
@@ -37,6 +37,7 @@ mod input_map;
 mod ark_post;
 mod distortion;
 mod sky;
+mod sky_disc;
 mod bloom;
 mod atmosphere;
 mod audio;
@@ -211,6 +212,7 @@ fn main() {
     .add_plugins(ark_post::ArkPostPlugin)
     .add_plugins(distortion::DistortionPlugin)
     .add_plugins(sky::SkyPlugin)
+    .add_plugins(lighting::Ue3FalloffPlugin)
     .add_plugins(bloom::BloomPlugin)
     .add_plugins(bevy::diagnostic::EntityCountDiagnosticsPlugin::default())
     .insert_resource(ClearColor(Color::srgb(0.08, 0.09, 0.12)))
@@ -233,7 +235,9 @@ fn main() {
         app.insert_resource(runner)
             .init_resource::<harness::ShotQueue>()
             .init_resource::<harness::CameraRequest>()
-            .add_systems(Update, (harness::inspect_script, inspect_cam).chain());
+            // The free camera uses the game's horizontal FOV too (75 degrees, `DefaultCamera.ini`),
+            // so `--inspect` views and the fidelity captures frame like the original's.
+            .add_systems(Update, (harness::inspect_script, inspect_cam, viewmodel::apply_fov).chain());
     } else {
         // Every persistent map the session can travel between (the mission's maps, or --map).
         let names = match &args.mission {

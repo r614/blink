@@ -17,6 +17,9 @@ const DEV_STRETCH_RECT: usize = 34;
 const DEV_CREATE_OFFSCREEN_PLAIN: usize = 36;
 const DEV_DRAW_PRIMITIVE: usize = 81;
 const DEV_DRAW_INDEXED_PRIMITIVE: usize = 82;
+// UE3 draws its full-screen passes (post process, fog, LUT bakes) with the UP variants.
+const DEV_DRAW_PRIMITIVE_UP: usize = 83;
+const DEV_DRAW_INDEXED_PRIMITIVE_UP: usize = 84;
 const DEV_CREATE_PIXEL_SHADER: usize = 106;
 const DEV_SET_PIXEL_SHADER: usize = 107;
 const DEV_SET_PS_CONST_F: usize = 109;
@@ -114,10 +117,12 @@ unsafe extern "system" fn create_device_hook(this: u32, adapter: u32, ty: u32, h
 
 unsafe fn hook_device(dev: u32) {
     let vt = unsafe { *(dev as *const u32) };
-    let hooks: [(usize, u32); 6] = [
+    let hooks: [(usize, u32); 8] = [
         (DEV_PRESENT, present_hook as *const () as usize as u32),
         (DEV_DRAW_PRIMITIVE, draw_primitive_hook as *const () as usize as u32),
         (DEV_DRAW_INDEXED_PRIMITIVE, draw_indexed_hook as *const () as usize as u32),
+        (DEV_DRAW_PRIMITIVE_UP, draw_primitive_up_hook as *const () as usize as u32),
+        (DEV_DRAW_INDEXED_PRIMITIVE_UP, draw_indexed_up_hook as *const () as usize as u32),
         (DEV_CREATE_PIXEL_SHADER, create_ps_hook as *const () as usize as u32),
         (DEV_SET_PIXEL_SHADER, set_ps_hook as *const () as usize as u32),
         (DEV_SET_PS_CONST_F, set_ps_const_hook as *const () as usize as u32),
@@ -321,6 +326,19 @@ unsafe extern "system" fn draw_primitive_hook(dev: u32, ty: u32, start: u32, cou
     on_draw();
     let f: unsafe extern "system" fn(u32, u32, u32, u32) -> i32 = unsafe { std::mem::transmute(orig(DEV_DRAW_PRIMITIVE)) };
     unsafe { f(dev, ty, start, count) }
+}
+
+unsafe extern "system" fn draw_primitive_up_hook(dev: u32, ty: u32, count: u32, data: u32, stride: u32) -> i32 {
+    on_draw();
+    let f: unsafe extern "system" fn(u32, u32, u32, u32, u32) -> i32 = unsafe { std::mem::transmute(orig(DEV_DRAW_PRIMITIVE_UP)) };
+    unsafe { f(dev, ty, count, data, stride) }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "system" fn draw_indexed_up_hook(dev: u32, ty: u32, min: u32, num: u32, count: u32, idx: u32, fmt: u32, data: u32, stride: u32) -> i32 {
+    on_draw();
+    let f: unsafe extern "system" fn(u32, u32, u32, u32, u32, u32, u32, u32, u32) -> i32 = unsafe { std::mem::transmute(orig(DEV_DRAW_INDEXED_PRIMITIVE_UP)) };
+    unsafe { f(dev, ty, min, num, count, idx, fmt, data, stride) }
 }
 
 unsafe extern "system" fn draw_indexed_hook(dev: u32, ty: u32, base: i32, min: u32, num: u32, start: u32, count: u32) -> i32 {

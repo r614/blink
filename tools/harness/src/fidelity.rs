@@ -36,7 +36,7 @@ pub const CONFIGS: &[(&str, &[&str], &str)] = &[
     ("full", &[], "all features"),
     ("baseline", &["--baseline", "--legacy-geometry"], "pre-fidelity renderer: diffuse only, placeholder sun/ambient, old package/actor coverage"),
     ("no-lightmaps", &["--no-lightmaps"], "baked lighting off"),
-    ("lightmap-specular", &["--lightmap-specular"], "directional lightmap specular term on (off by default, U-320)"),
+    ("no-lightmap-specular", &["--no-lightmap-specular"], "directional lightmap specular term off (U-320)"),
     ("no-materials", &["--no-materials"], "diffuse-only materials, no cubemap"),
     ("no-fx", &["--no-fx"], "translucent FX cards hidden"),
     ("no-dynamic-lights", &["--no-dynamic-lights"], "level lights off (placeholder sun)"),

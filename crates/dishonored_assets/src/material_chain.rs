@@ -37,6 +37,10 @@ pub struct MaterialChain {
     /// Defaults of the base material's static switch / component mask expressions.
     pub switch_defaults: Vec<(String, bool)>,
     pub mask_defaults: Vec<(String, [bool; 4])>,
+    /// The base material's `FMaterial::UniformExpressionTextures` (the shaders' `Tex#i`), in
+    /// order; textures sampled without a parameter (e.g. `Moon_PMAT`'s moon disc) survive
+    /// cooking only here.
+    pub expression_textures: Vec<Key>,
 }
 
 impl MaterialChain {
@@ -218,6 +222,49 @@ fn read_base_material(
     };
     out.diffuse_input = wired("DiffuseColor", resolve);
     out.normal_input = wired("Normal", resolve);
+    if let (Ok(h), Ok(data)) = (pkg.read_object(mat.1), pkg.export_data(mat.1)) {
+        for r in uniform_expression_textures(data, h.native_offset).unwrap_or_default() {
+            if let Some(k) = resolve(mat.0, ObjRef::from_index(r)) {
+                out.expression_textures.push(k);
+            }
+        }
+    }
+}
+
+/// `FMaterial::UniformExpressionTextures` of a base `Material`. Its native data starts with
+/// the material resource:
+/// ```text
+/// TArray<FString> CompileErrors
+/// TMap<UMaterialExpression*, INT> TextureDependencyLengthMap   (8 B per pair)
+/// INT MaxTextureDependencyLength
+/// FGuid Id
+/// UINT NumUserTexCoords
+/// TArray<UTexture*> UniformExpressionTextures
+/// ```
+/// (layout read from L_Boyle_Ext_Env `Moon_PMAT`, whose two entries are the moon texture and
+/// the `Cloud` parameter's default). Returns the raw object references.
+pub fn uniform_expression_textures(data: &[u8], native_offset: usize) -> Option<Vec<i32>> {
+    let mut p = native_offset;
+    let n_err = u32_at(data, p)? as usize;
+    if n_err > 64 {
+        return None;
+    }
+    p += 4;
+    for _ in 0..n_err {
+        let len = u32_at(data, p)? as i32;
+        p += 4 + if len < 0 { len.unsigned_abs() as usize * 2 } else { len as usize };
+    }
+    let n_map = u32_at(data, p)? as usize;
+    if n_map > 256 {
+        return None;
+    }
+    p += 4 + n_map * 8 + 4 + 16 + 4;
+    let n = u32_at(data, p)? as usize;
+    if n > 64 {
+        return None;
+    }
+    p += 4;
+    (0..n).map(|i| u32_at(data, p + i * 4).map(|v| v as i32)).collect()
 }
 
 /// Like [`slot`] over an arbitrary parameter list (e.g. the base material defaults).
