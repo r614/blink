@@ -715,17 +715,18 @@ impl Builder<'_> {
         let ObjRef::Export(c) = ObjRef::from_index(find(props, "SkeletalMeshComponent")?.as_object()?) else { return None };
         let ch = pkg.read_object(c).ok()?;
         let mesh = ObjRef::from_index(find(&ch.properties, "SkeletalMesh")?.as_object()?);
-        let raw = match mesh {
-            ObjRef::Export(m) => dishonored_assets::skeletal_mesh::read_skeletal_mesh(pkg, m).ok()?,
+        let (mpkg, me) = match mesh {
+            ObjRef::Export(m) => (pkg.clone(), m),
             r @ ObjRef::Import(_) => {
                 let path = pkg.obj_path(r);
                 let top = path.split('.').next()?.to_string();
                 let other = self.content.package(&top).ok()?;
                 let m = (0..other.exports.len()).find(|&i| other.export_class(i) == "SkeletalMesh" && other.obj_path(ObjRef::Export(i)).eq_ignore_ascii_case(&path))?;
-                dishonored_assets::skeletal_mesh::read_skeletal_mesh(&other, m).ok()?
+                (other, m)
             }
             ObjRef::Null => return None,
         };
+        let raw = dishonored_assets::skeletal_mesh::read_skeletal_mesh(&mpkg, me).ok()?;
         let m2a = glam::Mat4::from_mat3(crate::interp::rot_matrix_units(raw.rot_origin)) * glam::Mat4::from_translation(raw.mesh_origin);
         let mut g: Vec<glam::Mat4> = Vec::with_capacity(raw.bones.len());
         for (i, b) in raw.bones.iter().enumerate() {
@@ -733,16 +734,28 @@ impl Builder<'_> {
             let m = if i == 0 || b.parent < 0 || b.parent as usize >= i { local } else { g[b.parent as usize] * local };
             g.push(m);
         }
-        Some(
-            raw.bones
-                .iter()
-                .zip(&g)
-                .map(|(b, m)| {
-                    let (_, q, t) = (m2a * *m).to_scale_rotation_translation();
-                    (b.name.clone(), t.to_array(), q.to_array())
-                })
-                .collect(),
-        )
+        let to_entry = |name: String, m: glam::Mat4| {
+            let (_, q, t) = (m2a * m).to_scale_rotation_translation();
+            (name, t.to_array(), q.to_array())
+        };
+        let mut out: Vec<(String, [f32; 3], [f32; 4])> = raw.bones.iter().zip(&g).map(|(b, m)| to_entry(b.name.clone(), *m)).collect();
+        // Sockets (`SkeletalMeshSocket`: bone, relative location / rotation): attachments name
+        // them like bones (`Player_Attach`, `Npc_attach` on Samuel's boat).
+        let mp = mpkg.read_object(me).ok()?.properties;
+        for s in find(&mp, "Sockets").and_then(|p| p.array_objects().ok()).unwrap_or_default() {
+            let ObjRef::Export(se) = ObjRef::from_index(s) else { continue };
+            let Ok(sh) = mpkg.read_object(se) else { continue };
+            let nm = |n: &str| match find(&sh.properties, n).map(|p| &p.value) {
+                Some(PV::Name(x)) => x.clone(),
+                _ => String::new(),
+            };
+            let Some(bi) = raw.bones.iter().position(|b| b.name.eq_ignore_ascii_case(&nm("BoneName"))) else { continue };
+            let loc = find(&sh.properties, "RelativeLocation").and_then(|p| p.as_vector()).unwrap_or([0.0; 3]);
+            let rot = find(&sh.properties, "RelativeRotation").and_then(|p| p.as_rotator()).unwrap_or([0; 3]);
+            let rel = glam::Mat4::from_translation(glam::Vec3::from(loc)) * glam::Mat4::from_mat3(crate::interp::rot_matrix_units(rot));
+            out.push(to_entry(nm("SocketName"), g[bi] * rel));
+        }
+        Some(out)
     }
 
     fn resolve_named(&mut self) {

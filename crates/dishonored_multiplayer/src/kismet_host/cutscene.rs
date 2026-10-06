@@ -20,7 +20,7 @@ use dishonored_sim::state::PlayerId;
 use glam::Vec3;
 
 /// A matinee being played.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Playing {
     pub op: OpId,
     pub scene: Scene,
@@ -192,8 +192,12 @@ pub(super) fn apply(k: &mut Kismet, h: &mut H) {
                     h.st.actor_rot.insert(a, x.quat());
                 }
                 Bound::Pawn(p) => {
+                    // AI pawns stand on their attach point (Samuel's `Npc_attach` is at deck
+                    // height); the player's cylinder centre is the point (`Player_Attach` sits
+                    // a half height above the deck). LIKELY, U-201.
+                    let lift = if c.players.contains(&p) { 0.0 } else { h.cfg.gameplay.movement.collision_half_height };
                     if let Some(pl) = h.m.world.player_mut(p) {
-                        pl.position = x.pos;
+                        pl.position = x.pos + Vec3::Z * lift;
                         pl.velocity = Vec3::ZERO;
                         // The players keep their own view direction.
                         if !c.players.contains(&p) {

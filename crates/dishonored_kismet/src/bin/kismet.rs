@@ -131,6 +131,14 @@ fn main() -> Result<()> {
             if let Some(op) = (db.op(id).class == "SeqAct_Interp").then_some(id) {
                 for g in &m.groups {
                     let binds: Vec<String> = db.op(op).var_link(&g.name).map(|l| l.vars.iter().map(|v| format!("{:?}", db.op(*v).props.get("ObjValue"))).collect()).unwrap_or_default();
+                    for v in db.op(op).var_link(&g.name).map(|l| l.vars.clone()).unwrap_or_default() {
+                        if let Some(Value::Obj(Obj::Actor(a))) = db.op(v).props.get("ObjValue") {
+                            let ac = &db.actors[*a as usize];
+                            if !ac.bones.is_empty() {
+                                println!("    {} bones of {}: {:?}", ac.bones.len(), ac.name, ac.bones);
+                            }
+                        }
+                    }
                     for t in g.tracks.iter().filter(|t| matches!(t.kind, interp::TrackKind::Move { .. })) {
                         let init = binds.first().and_then(|_| db.op(op).var_link(&g.name)).and_then(|l| l.vars.first()).and_then(|v| match db.op(*v).props.get("ObjValue") {
                             Some(Value::Obj(Obj::Actor(a))) => Some(&db.actors[*a as usize]),

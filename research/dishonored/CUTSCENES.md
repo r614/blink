@@ -81,7 +81,8 @@ Code:
   seconds in. `WaitForEndOfBlurb` (0x00c735c0): while the blurb plays, the position is held
   0.0001 s before the key's end.
 - `InterpTrackAttachment`: target group `m_TargetName`; the last key at or before t attaches
-  the target to the owning group's actor at `BoneName` with the relative offset / rotation, or
+  the target to the owning group's actor at `BoneName` (a bone or, in Boyle, a `SkeletalMeshSocket`:
+  bone + relative location / rotation) with the relative offset / rotation, or
   detaches it (it stays where it was).
 - Director: `InterpTrackDirector` cuts (last cut at or before t; none before the first cut: the
   player's view), `InterpTrackFade` (0 clear .. 1 black; `bPersistFade`), `InterpTrackSlomo`.
@@ -134,7 +135,7 @@ the loops (`FUN_006340f0`):
   holds the AI pawns (`stay`, idle, no goal), and links the conversation instance whose soiree
   asked for it.
 - Every step after the Kismet tick, `Scene::update` at the matinee position: move tracks and
-  attachment chains (to the reference-pose bones of the skeletal mesh actors, read at load
+  attachment chains (to the reference-pose bones and sockets of the skeletal mesh actors, read at load
   into `Actor::bones`) place level actors and pawns; the player group's players lose movement
   control (look stays) and are carried; locomotion keys walk AI pawns to their target groups
   (brain `WalkToPoint`), face-to keys turn them, visibility keys hide actors.

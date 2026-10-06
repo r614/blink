@@ -631,7 +631,8 @@ pub fn last_key<T>(keys: &[T], t: f32, time: impl Fn(&T) -> f32) -> Option<usize
 // Playback control (soiree loops, pauses, dialog waits)
 
 /// Per-matinee soiree control state (`InterpTrackInstSoireeControl`).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PlayState {
     /// (track, key) of the loop being played, and the loops done.
     pub current: Option<(usize, usize)>,
