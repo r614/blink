@@ -177,7 +177,10 @@ pub struct Node {
     pub name: String,
     pub min: f32,
     pub max: f32,
-    /// Input operation (0 = sum; every retail node).
+    /// The stored reciprocals of min and max (1 when the bound is 0), used by corrective links.
+    pub inv_min: f32,
+    pub inv_max: f32,
+    /// Input operation: 0 sum, 1 multiply, 2 max, 3 min (0 on every retail node).
     pub op: u32,
     pub inputs: Vec<Link>,
 }
@@ -224,7 +227,7 @@ pub fn read_actor(raw: &[u8]) -> Result<Actor> {
         let kind = c.u32()?;
         let name = name_at(n, c.u32()?).with_context(|| format!("node at {at:#x}"))?;
         // min, 1/min (1 when min is 0), max, 1/max.
-        let (min, _, max, _) = (c.f32()?, c.f32()?, c.f32()?, c.f32()?);
+        let (min, inv_min, max, inv_max) = (c.f32()?, c.f32()?, c.f32()?, c.f32()?);
         let op = c.u32()?;
         let ni = c.count(1024)?;
         let mut inputs = Vec::with_capacity(ni);
@@ -240,7 +243,7 @@ pub fn read_actor(raw: &[u8]) -> Result<Actor> {
             inputs.push(Link { node, func, params });
         }
         let _ = c.u32()?;
-        nodes.push(Node { kind, name, min, max, op, inputs });
+        nodes.push(Node { kind, name, min, max, inv_min, inv_max, op, inputs });
     }
     for b in &bones {
         for p in &b.poses {
@@ -255,8 +258,8 @@ pub fn read_actor(raw: &[u8]) -> Result<Actor> {
 /// which the executable registers the link function classes, each with its formula string
 /// (0x0120C5A4..0x0120C7F4): 0 null (deprecated), 1 linear `m x + b`, 2 quadratic `a x^2`,
 /// 3 cubic `a x^3`, 4 square root `a sqrt(x)`, 5 negate, 6 inverse `1 / x`, 7 one-clamp
-/// (1 when x <= 1, else 1 / x), 8 constant `c`, 9 corrective (correction factor; needs the
-/// corrected node, not modelled), 10 clamped linear `m x` (clampx, clampy, clampdir; the
+/// (1 when x <= 1, else 1 / x), 8 constant `c`, 9 corrective (correction factor; applied in `Actor::evaluate`,
+/// not here), 10 clamped linear `m x` (clampx, clampy, clampdir; the
 /// clamp rule is not decoded, not modelled). Only 1 and 2 occur in the retail actors.
 pub fn link_fn(func: u32, p: &[f32], x: f32) -> f32 {
     let a = |i: usize, d: f32| p.get(i).copied().unwrap_or(d);
@@ -290,18 +293,47 @@ impl Actor {
         self.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name))
     }
 
-    /// Node values for the given track contributions (by node index): each node is its track
-    /// value plus its inputs through their link functions (summed), clamped to its range.
+    /// Node values for the given track contributions (by node index), as the compiled face
+    /// graph update (0x00EFBB00) computes them in node order:
+    /// - the inputs combine through their link functions by the node's operation, starting
+    ///   from its identity (sum 0, multiply 1, max -FLT_MAX, min +FLT_MAX; 0 without inputs);
+    /// - corrective inputs (type 9) instead accumulate `c = min(1, c + factor x max(v x
+    ///   inv_max, -v x inv_min))` of their source node;
+    /// - the track (curve) value is added, the result is scaled by `1 - c` and clamped to
+    ///   [min, max]. (Registers set by game code are not used by the port.)
     pub fn evaluate(&self, track: &[f32]) -> Vec<f32> {
         let mut v = vec![0.0f32; self.nodes.len()];
         for (i, n) in self.nodes.iter().enumerate() {
-            let mut x = if n.op == 1 && !n.inputs.is_empty() { 1.0 } else { 0.0 };
+            let mut x = if n.inputs.is_empty() {
+                0.0
+            } else {
+                match n.op {
+                    1 => 1.0,
+                    2 => -f32::MAX,
+                    3 => f32::MAX,
+                    _ => 0.0,
+                }
+            };
+            let mut corr = 0.0f32;
             for l in &n.inputs {
-                let y = link_fn(l.func, &l.params, v[l.node as usize]);
-                if n.op == 1 { x *= y } else { x += y }
+                let src = &self.nodes[l.node as usize];
+                let sv = v[l.node as usize];
+                if l.func == 9 {
+                    let m = (sv * src.inv_max).max(-sv * src.inv_min);
+                    corr = (m * l.params.first().copied().unwrap_or(0.0) + corr).min(1.0);
+                    continue;
+                }
+                let y = link_fn(l.func, &l.params, sv);
+                x = match n.op {
+                    1 => x * y,
+                    2 => x.max(y),
+                    3 => x.min(y),
+                    _ => x + y,
+                };
             }
             x += track.get(i).copied().unwrap_or(0.0);
-            v[i] = if n.min <= n.max { x.clamp(n.min, n.max) } else { x };
+            x *= 1.0 - corr;
+            v[i] = x.min(n.max).max(n.min);
         }
         v
     }
@@ -467,16 +499,17 @@ impl Anim {
         if r.0 > r.1 { (0.0, 0.0) } else { r }
     }
 
-    /// Blend weight at `t`: ramps up over `blend_in` from the start and down over `blend_out`
-    /// to the end.
+    /// Whether the animation plays at `t` (1) or not (0). The actor instance's tick
+    /// (0x00EF5640) writes each curve's raw value into its node every frame (0x00F00B50: held
+    /// before the first and after the last key, Hermite or linear between) and stops the
+    /// animation once its time passes the end (the last key); `blend_in` / `blend_out` are not
+    /// read on this path.
     pub fn weight(&self, t: f32) -> f32 {
         let (s, e) = self.range();
-        if t < s || t > e {
+        if t < s.min(0.0) || t > e {
             return 0.0;
         }
-        let a = if self.blend_in > 1e-4 { ((t - s) / self.blend_in).min(1.0) } else { 1.0 };
-        let b = if self.blend_out > 1e-4 { ((e - t) / self.blend_out).min(1.0) } else { 1.0 };
-        a.min(b).max(0.0)
+        1.0
     }
 
     /// Track contributions per actor node at time `t` (curves without a node are ignored).

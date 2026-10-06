@@ -504,12 +504,25 @@ code). Runtime: `crates/dishonored_runtime/src/facefx.rs`, applied in `npc_anim:
   targets.
 
 **Evaluation** (`Actor::evaluate`, `bone_poses`, `Anim::tracks`):
-- A curve is the cubic Hermite through its keys with their slopes, held outside its keys.
-- The animation's weight ramps up over `blend_in` from its first key and down over `blend_out`
-  to its last. LIKELY: the FaceFX tick (0x00EF5640) was not decompiled.
-- Each node's value = its curve value x weight + the sum of its inputs through their link
-  functions, clamped to [min, max], in graph order. LIKELY: the graph evaluation was not
-  traced; this reproduces the authored ranges.
+- **Curves** (actor instance tick 0x00EF5640 -> 0x00F00B50): each frame every curve's raw value
+  is written into its node.
+  - Held before the first and after the last key.
+  - Interpolation 0 is the cubic Hermite with the keys' slopes scaled by the key gap
+    (0x00F01070); interpolation 1 is linear (0x00F01130).
+  - The animation stops once its time passes its end.
+  - `blend_in` / `blend_out` are not read on this path, so the port applies no ramp.
+  - The animation time is the instance clock minus the start and the audio offset.
+- **Face graph** (0x00EFBB00), in node order. Node types: 1 delta, 2 current time, others
+  combine.
+  - The inputs combine through their link functions by the node's operation: 0 sum, 1
+    multiply, 2 max, 3 min. The identities are 0, 1, -FLT_MAX and FLT_MAX (table 0x0120B91C),
+    or 0 without inputs.
+  - Corrective links (type 9) instead accumulate `c = min(1, c + factor x max(v / max, -v /
+    min))` of their source (the stored reciprocals).
+  - Then the curve value is added. Game-set registers (add / multiply / replace) come next; the
+    port has none.
+  - The result is scaled by `1 - c` and clamped to [min, max].
+  - CONFIRMED.
 - **Bone blending**: CONFIRMED from `USkeletalMeshComponent`'s FaceFX update (0x00725EA0). Its
   component fields are `FaceFXBlendMode` +0x38d, `FaceFXActorInstance` +0x390 and
   `m_fFaceFxTickTime` +0x398. The actor instance's master bones have a stride of 0x58, with the
