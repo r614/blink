@@ -22,6 +22,7 @@ pub mod swim;
 pub mod takedown;
 pub mod tuning;
 pub mod vitals;
+pub mod volumes;
 
 use dishonored_ir::gameplay::GameplayConfig;
 use dishonored_world::WorldQuery;
@@ -330,6 +331,8 @@ pub fn step_world(
     }
     powers::step_time_bends(state, DT, &mut out.events);
     inventory::update_carried(state, mv);
+
+    volumes::step_pain(state, world, cfg, &mut out.events);
 
     // Environmental damage from this tick's movement events.
     let env: Vec<SimEvent> = out.events.clone();

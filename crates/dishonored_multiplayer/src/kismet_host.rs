@@ -398,6 +398,9 @@ impl dishonored_world::WorldQuery for NavOverlay<'_> {
     fn movers(&self) -> &[dishonored_world::MoverCollision] {
         self.inner.movers()
     }
+    fn physics_volumes(&self) -> &[dishonored_world::PhysicsVolume] {
+        self.inner.physics_volumes()
+    }
 }
 
 /// The Kismet's game side for one step.

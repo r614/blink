@@ -298,6 +298,18 @@ step-up (`m_bLowMantleUseStepUp`). The sim implements the face rules, the 12 uu 
 the ledge-grab heights and the Blink mantle; the later finder states are reduced to a
 capsule clearance test and mantle durations are still guesses (U-019).
 
+### Physics volumes (zone velocity, pain)
+
+- Non-water `PhysicsVolume`s with a `ZoneVelocity` or `bPainCausing` are imported per map
+  (Boyle Ext: 24 fence volumes, 1 damage per second of `DisDamageType_SpringRazor` or `_Impact`,
+  zone velocity (40, 90, 25), (-40, -70, 25) or (0, 300, 300)). A pawn's volume is the highest
+  `Priority` one containing its centre.
+- Walking: `DesiredMove = Velocity + ZoneVelocity x 25 x dt` (Z dropped, `bVelocityAffectsWalking`
+  default true), moved by `DesiredMove x dt`. Falling: moved by `(Velocity + ZoneVelocity) x dt`.
+- Pain (Engine `PhysicsVolume` script): a `VolumeTimer` from level start pops every `PainInterval`
+  (default 1) and every damageable actor touching the volume takes
+  `int(DamagePerSec x PainInterval)` of the `DamageType`; `bEntryPain` (default true) hurts on entry.
+
 ## Blink (`DishonoredActivePowerComponent_Blink`)
 
 Levels: `Twk_Powers.Blink.Twk_Blink` level 2 = horizontal 1600, vertical 500, step 100,

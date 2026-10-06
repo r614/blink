@@ -96,6 +96,87 @@ pub fn extract_water(content: &Content, packages: &[String]) -> Result<Vec<Water
     Ok(out)
 }
 
+
+/// A non-water `PhysicsVolume` of the level (Engine `PhysicsVolume` defaults:
+/// `bVelocityAffectsWalking` and `bEntryPain` true, `PainInterval` 1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PhysicsVolumeDef {
+    pub name: String,
+    pub package: String,
+    pub hulls: Vec<Vec<[f32; 4]>>,
+    pub min: Vec3,
+    pub max: Vec3,
+    pub priority: i32,
+    pub zone_velocity: Vec3,
+    pub velocity_affects_walking: bool,
+    pub pain_causing: bool,
+    pub damage_per_sec: f32,
+    pub pain_interval: f32,
+    pub entry_pain: bool,
+    /// `DamageType` class name (`DisDamageType_SpringRazor`), empty for the default.
+    pub damage_type: String,
+}
+
+/// Read the `PhysicsVolume`s of `packages` that change movement or cause pain.
+pub fn extract_physics_volumes(content: &Content, packages: &[String]) -> Result<Vec<PhysicsVolumeDef>> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for name in packages.iter().filter(|p| content.has_package(p)) {
+        if !seen.insert(name.to_ascii_lowercase()) {
+            continue;
+        }
+        let pkg = content.package(name)?;
+        for i in 0..pkg.exports.len() {
+            if pkg.export_class(i) != "PhysicsVolume" || pkg.obj_name(ObjRef::from_index(pkg.exports[i].outer)) != "PersistentLevel" {
+                continue;
+            }
+            let Ok(h) = pkg.read_object(i) else { continue };
+            let p = &h.properties;
+            let float = |k: &str, d: f32| find(p, k).and_then(|x| x.as_float()).unwrap_or(d);
+            let flag = |k: &str, d: bool| match find(p, k).map(|x| &x.value) {
+                Some(Value::Bool(b)) => *b,
+                _ => d,
+            };
+            let zone = find(p, "ZoneVelocity").and_then(|x| x.as_vector()).map(Vec3::from).unwrap_or(Vec3::ZERO);
+            let pain = flag("bPainCausing", false);
+            if zone == Vec3::ZERO && !pain {
+                continue;
+            }
+            let Some(hulls) = crate::ai_level::brush_world_hulls(&pkg, p) else { continue };
+            let mut min = Vec3::splat(f32::INFINITY);
+            let mut max = Vec3::splat(f32::NEG_INFINITY);
+            for hull in &hulls {
+                if let Some((a, b)) = hull_bounds(hull) {
+                    min = min.min(a);
+                    max = max.max(b);
+                }
+            }
+            if hulls.is_empty() || min.x > max.x {
+                continue;
+            }
+            let damage_type = find(p, "DamageType").and_then(|x| x.as_object()).map(|o| pkg.obj_name(ObjRef::from_index(o)).to_string()).unwrap_or_default();
+            out.push(PhysicsVolumeDef {
+                name: pkg.obj_name(ObjRef::Export(i)).to_string(),
+                package: name.clone(),
+                hulls,
+                min,
+                max,
+                priority: match find(p, "Priority").map(|x| &x.value) {
+                    Some(Value::Int(n)) => *n,
+                    _ => 0,
+                },
+                zone_velocity: zone,
+                velocity_affects_walking: flag("bVelocityAffectsWalking", true),
+                pain_causing: pain,
+                damage_per_sec: float("DamagePerSec", 0.0),
+                pain_interval: float("PainInterval", 1.0),
+                entry_pain: flag("bEntryPain", true),
+                damage_type,
+            });
+        }
+    }
+    Ok(out)
+}
 #[cfg(test)]
 mod tests {
     use super::*;

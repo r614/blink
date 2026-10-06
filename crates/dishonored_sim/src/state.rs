@@ -199,6 +199,10 @@ pub struct PlayerState {
     /// Swimming strokes, air and drowning.
     #[serde(default)]
     pub water: WaterState,
+    /// Pain-causing physics volumes the pawn touched last step (bit per volume index; entry
+    /// pain fires on a new bit).
+    #[serde(default)]
+    pub pain_volumes: u64,
     /// Blood Thirsty's adrenaline gauge (`DishonoredPlayerPawn` +0x91C / +0x920).
     #[serde(default)]
     pub adrenaline: AdrenalineState,
@@ -470,6 +474,7 @@ impl PlayerState {
             action_lock: 0.0,
             jump: JumpState::default(),
             water: WaterState::default(),
+            pain_volumes: 0,
             adrenaline: AdrenalineState::default(),
             dark: DarkVisionState::default(),
             rat_slow: 0.0,

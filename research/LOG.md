@@ -1144,3 +1144,12 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Port changes:** `MeshInstance.mover` (InterpActor components: actor and placed transform); `CollisionWorld.movers` (cache `collision4`); `WorldQuery::movers`; `Layered` query (static world + placed movers, nearest hit); `MissionMatch` places movers each step from the Kismet's actor transforms (`KismetRun::mover_delta`), rebuilding only moved ones; the sim and the AI step on the layered world. Kismet untouch events are logged.
 - **Harness:** kismet 16/16 on the lethal route with the new check "after the intro the player stands in the boat" (before: swimming 2 s after release); routes: Miss White 6/6 (arrives), duel 6/6 (countdown still open, now reported with Shaw's walk).
 - **Confidence:** CONFIRMED for the socket, the attachment and the stepUp / processHitWall reading; the InterpActor collision defaults are UE3's (LIKELY that no Boyle InterpActor overrides them beyond the flags read).
+
+## 2026-10-06: Level physics volumes (zone velocity and pain)
+
+- **Question:** What do Boyle's 24 non-water `PhysicsVolume`s do (U-241)?
+- **Method:** `obj_dump` of the volumes (L_Boyle_Ext packages); UELib decompile of `Engine.PhysicsVolume` (`PostBeginPlay` spawns a `VolumeTimer`, `TimerPop`, `CausePainTo`, defaults); the zone-velocity terms of UE3 `physWalking` / `physFalling` as recorded in U-241.
+- **Findings:** fence volumes with `bPainCausing`, `DamagePerSec` 1, `DisDamageType_SpringRazor` (and `_Impact` on two), zone velocity (40, 90, 25) / (-40, -70, 25) / (0, 300, 300). Pain: every `PainInterval` (1) from level start, `TakeDamage(int(DamagePerSec x PainInterval))` to each touching damageable, non-static actor; entry pain by default.
+- **Port changes:** `dishonored_world::PhysicsVolume` (hulls, priority, zone velocity, pain), `WorldQuery::physics_volumes`, cache `physvol1`; sim: zone velocity in walking and falling, `volumes::step_pain` (timer pops and entry pain, per-pawn touching bits).
+- **Tests:** `dishonored_sim` player tests `pain_volume_hurts_on_entry_and_every_interval_and_pushes`, `outside_pain_volume_no_damage`.
+- **Confidence:** CONFIRMED for the volume data and the pain script; LIKELY for the timer on unscaled time (Bend Time slows the world, the port's timer does not slow with it).

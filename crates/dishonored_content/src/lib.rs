@@ -136,6 +136,40 @@ pub fn load_water(content: &Content, map: &str) -> Vec<dishonored_world::WaterVo
     w
 }
 
+/// The map's non-water physics volumes (zone velocity, pain), cached like the water volumes.
+pub fn load_physics_volumes(content: &Content, map: &str) -> Vec<dishonored_world::PhysicsVolume> {
+    let path = cache_dir().join(format!("{map}.physvol1.json"));
+    if let Some(v) = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Vec<dishonored_world::PhysicsVolume>>(&t).ok()) {
+        return v;
+    }
+    let mut pkgs = map_packages(content, map);
+    if map.starts_with("L_Boyle_Ext") {
+        pkgs.push("L_BoyleStreet_Ext_Script".into());
+    }
+    let defs = dishonored_assets::water::extract_physics_volumes(content, &pkgs).unwrap_or_else(|e| {
+        eprintln!("warning: physics volumes of {map}: {e:#}");
+        Vec::new()
+    });
+    let v: Vec<dishonored_world::PhysicsVolume> = defs
+        .into_iter()
+        .map(|d| dishonored_world::PhysicsVolume {
+            name: d.name,
+            hulls: d.hulls,
+            min: d.min,
+            max: d.max,
+            priority: d.priority,
+            zone_velocity: d.zone_velocity,
+            velocity_affects_walking: d.velocity_affects_walking,
+            pain: d.pain_causing.then_some(dishonored_world::VolumePain { damage_per_sec: d.damage_per_sec, interval: d.pain_interval, entry: d.entry_pain, damage_type: d.damage_type }),
+        })
+        .collect();
+    std::fs::create_dir_all(cache_dir()).ok();
+    if let Ok(t) = serde_json::to_string(&v) {
+        std::fs::write(&path, t).ok();
+    }
+    v
+}
+
 pub fn load_match(map: &str) -> Result<MatchContent> {
     let content = Content::locate()?;
     let sim = load_sim_config(&content).context("gameplay config")?;
@@ -164,6 +198,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         Err(e) => eprintln!("warning: no original navigation for {map}: {e:#}"),
     }
     collision.water = Some(std::sync::Arc::new(load_water(&content, map)));
+    collision.volumes = Some(std::sync::Arc::new(load_physics_volumes(&content, map)));
     let curated = load_spawns(map, None);
     let spawns = if curated.is_empty() { spawns } else { curated };
     let npc_path = dir.join(format!("{map}.npcs6.json"));
@@ -485,6 +520,9 @@ impl dishonored_world::WorldQuery for MatchContent {
     }
     fn movers(&self) -> &[dishonored_world::MoverCollision] {
         self.collision.movers()
+    }
+    fn physics_volumes(&self) -> &[dishonored_world::PhysicsVolume] {
+        self.collision.physics_volumes()
     }
 }
 

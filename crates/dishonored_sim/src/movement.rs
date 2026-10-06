@@ -648,7 +648,13 @@ fn walking(
         let (nv, _) = calc_velocity(v, accel, accel.normalize_or_zero(), ctx.dt, cfg.run_speed, cfg.ground_friction, false, true, None, modifier, cfg.accel_rate);
         p.velocity = nv;
         p.velocity.z = 0.0;
-        let delta = p.velocity * ctx.dt;
+        // physWalking: DesiredMove = Velocity + ZoneVelocity x 25 x dt (`bVelocityAffectsWalking`),
+        // Z dropped; the move is DesiredMove x dt.
+        let mut desired = p.velocity;
+        if let Some(v) = dishonored_world::volume_at(ctx.world.physics_volumes(), p.position).filter(|v| v.velocity_affects_walking) {
+            desired += Vec3::new(v.zone_velocity.x, v.zone_velocity.y, 0.0) * 25.0 * ctx.dt;
+        }
+        let delta = desired * ctx.dt;
         walk_move(p, delta, ctx);
     }
     if p.mode != MoveMode::Walking {
@@ -773,7 +779,9 @@ pub(crate) fn falling(p: &mut PlayerState, input: &PlayerInput, can_move: bool, 
             v.y = xy.y;
         }
         p.velocity = v;
-        let adjusted = v * tick;
+        // physFalling: the move is (Velocity + ZoneVelocity) x dt.
+        let zone = dishonored_world::volume_at(ctx.world.physics_volumes(), p.position).map(|z| z.zone_velocity).unwrap_or(Vec3::ZERO);
+        let adjusted = (v + zone) * tick;
         let impact_speed = -v.z;
         let mut hit_wall = false;
         if let Some((n, t)) = move_actor(p, adjusted, ctx) {

@@ -298,3 +298,47 @@ fn deterministic_with_water_rats_and_powers() {
     };
     assert_eq!(run(), run());
 }
+
+/// A pain volume over the floor around x in -1000..-600 like Boyle's fence volumes (zone
+/// velocity (40, 90, 25), 1 damage per second of `DisDamageType_SpringRazor`).
+fn pain_world() -> CollisionWorld {
+    let mut w = world();
+    let v = dishonored_world::PhysicsVolume {
+        name: "PhysicsVolume_55".into(),
+        hulls: vec![vec![[0., 0., 1., 300.], [0., 0., -1., 100.], [1., 0., 0., -600.], [-1., 0., 0., 1000.], [0., 1., 0., 200.], [0., -1., 0., 200.]]],
+        min: Vec3::new(-1000., -200., -100.),
+        max: Vec3::new(-600., 200., 300.),
+        priority: 0,
+        zone_velocity: Vec3::new(40., 90., 25.),
+        velocity_affects_walking: true,
+        pain: Some(dishonored_world::VolumePain { damage_per_sec: 1.0, interval: 1.0, entry: true, damage_type: "DisDamageType_SpringRazor".into() }),
+    };
+    w.volumes = Some(std::sync::Arc::new(vec![v]));
+    w
+}
+
+#[test]
+fn pain_volume_hurts_on_entry_and_every_interval_and_pushes() {
+    let mut r = Run::new(&[(1, Vec3::new(-800., 0., 100.), 0.0)]);
+    r.world = pain_world();
+    let h0 = r.p(1).vitals.health;
+    let start = r.p(1).position;
+    r.events.clear();
+    // Entry pain at once, then one per interval: 1 + 3 over three seconds.
+    r.steps((3.0 / dishonored_sim::movement::DT) as usize, &[]);
+    let hits = r.events.iter().filter(|e| matches!(e, SimEvent::Damage { victim: 1, cause: DamageCause::SpringRazor, amount, .. } if *amount == 1.0)).count();
+    assert!((3..=4).contains(&hits), "pain hits {hits}");
+    assert_eq!(r.p(1).vitals.health, h0 - hits as f32);
+    // Standing still, the zone velocity walks the pawn along +x/+y (25 x dt of it per step).
+    let moved = r.p(1).position - start;
+    assert!(moved.y > 20.0 && moved.x > 5.0, "pushed {moved:?}");
+}
+
+#[test]
+fn outside_pain_volume_no_damage() {
+    let mut r = Run::new(&[(1, Vec3::new(0., 0., 100.), 0.0)]);
+    r.world = pain_world();
+    let h0 = r.p(1).vitals.health;
+    r.steps(200, &[]);
+    assert_eq!(r.p(1).vitals.health, h0);
+}

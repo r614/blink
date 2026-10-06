@@ -186,8 +186,59 @@ pub trait WorldQuery {
     fn movers(&self) -> &[MoverCollision] {
         &[]
     }
+    /// The map's non-water physics volumes (zone velocity, pain).
+    fn physics_volumes(&self) -> &[PhysicsVolume] {
+        &[]
+    }
 }
 
+
+/// A level `PhysicsVolume` (not water): zone velocity and pain (Engine `PhysicsVolume`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PhysicsVolume {
+    pub name: String,
+    /// Planes `(nx, ny, nz, d)`, inside when `n . p <= d` for every plane of one hull.
+    pub hulls: Vec<Vec<[f32; 4]>>,
+    pub min: Vec3,
+    pub max: Vec3,
+    pub priority: i32,
+    pub zone_velocity: Vec3,
+    /// `bVelocityAffectsWalking` (default true).
+    pub velocity_affects_walking: bool,
+    /// `bPainCausing`: `DamagePerSec`, `PainInterval` (default 1), `bEntryPain` (default true)
+    /// and the `DamageType` class name.
+    pub pain: Option<VolumePain>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct VolumePain {
+    pub damage_per_sec: f32,
+    pub interval: f32,
+    pub entry: bool,
+    pub damage_type: String,
+}
+
+impl PhysicsVolume {
+    /// UE3 `Encompasses`: the point is inside one of the brush's hulls.
+    pub fn contains(&self, p: Vec3) -> bool {
+        p.cmpge(self.min).all() && p.cmple(self.max).all() && self.hulls.iter().any(|h| h.iter().all(|pl| p.x * pl[0] + p.y * pl[1] + p.z * pl[2] <= pl[3] + 1e-3))
+    }
+
+    /// The pawn's cylinder (centre, radius, half height) touches the brush: inside a hull grown
+    /// by the cylinder's box extent along each plane normal.
+    pub fn touches(&self, c: Vec3, radius: f32, half_height: f32) -> bool {
+        let e = Vec3::new(radius, radius, half_height);
+        if c.cmplt(self.min - e).any() || c.cmpgt(self.max + e).any() {
+            return false;
+        }
+        self.hulls.iter().any(|h| h.iter().all(|pl| c.x * pl[0] + c.y * pl[1] + c.z * pl[2] <= pl[3] + pl[0].abs() * e.x + pl[1].abs() * e.y + pl[2].abs() * e.z))
+    }
+}
+
+/// The physics volume of a point: the highest `Priority` one containing it (UE3 `SetZone`).
+pub fn volume_at(volumes: &[PhysicsVolume], p: Vec3) -> Option<&PhysicsVolume> {
+    volumes.iter().filter(|v| v.contains(p)).max_by_key(|v| v.priority)
+}
 /// Water lookup over a set of volumes (shared by the world implementations).
 pub fn water_lookup(volumes: &[WaterVolume], p: Vec3) -> Option<WaterInfo> {
     for v in volumes {
@@ -229,6 +280,9 @@ pub struct CollisionWorld {
     /// Water volumes of the map (attached after loading; not part of the collision cache).
     #[serde(skip)]
     pub water: Option<std::sync::Arc<Vec<WaterVolume>>>,
+    /// Physics volumes of the map (attached after loading; not part of the collision cache).
+    #[serde(skip)]
+    pub volumes: Option<std::sync::Arc<Vec<PhysicsVolume>>>,
     /// Mover collision (`InterpActor` components), not part of the static triangles.
     #[serde(default)]
     pub movers: Vec<MoverCollision>,
@@ -276,7 +330,7 @@ impl CollisionWorld {
             .collect();
         let total = bounds.iter().fold(Aabb::EMPTY, |acc, b| acc.union(b));
         let bvh = Bvh::build(&bounds);
-        CollisionWorld { tris, bvh, sources, bounds: Some(total), nav: None, water: None, tri_surface: Vec::new(), surfaces: Vec::new(), movers: Vec::new() }
+        CollisionWorld { tris, bvh, sources, bounds: Some(total), nav: None, water: None, volumes: None, tri_surface: Vec::new(), surfaces: Vec::new(), movers: Vec::new() }
     }
 
     /// Build from an imported map: every colliding instance (hidden blockers included).
@@ -422,6 +476,10 @@ impl WorldQuery for CollisionWorld {
 
     fn movers(&self) -> &[MoverCollision] {
         &self.movers
+    }
+
+    fn physics_volumes(&self) -> &[PhysicsVolume] {
+        self.volumes.as_deref().map(Vec::as_slice).unwrap_or(&[])
     }
 
     fn box_contacts(&self, b: &PawnBox, channels: u8, out: &mut Vec<Contact>) {
@@ -689,6 +747,9 @@ impl WorldQuery for Layered<'_> {
     fn movers(&self) -> &[MoverCollision] {
         self.base.movers()
     }
+    fn physics_volumes(&self) -> &[PhysicsVolume] {
+        self.base.physics_volumes()
+    }
 }
 
 #[cfg(test)]
@@ -839,5 +900,8 @@ impl WorldQuery for MapSet {
     }
     fn movers(&self) -> &[MoverCollision] {
         self.cur().movers()
+    }
+    fn physics_volumes(&self) -> &[PhysicsVolume] {
+        self.cur().physics_volumes()
     }
 }
