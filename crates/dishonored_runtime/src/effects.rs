@@ -704,7 +704,10 @@ fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32, rnd
     }
     let dur = em.duration.max(1e-3);
     let mut t = sim.time - em.delay;
-    if t >= dur * (sim.loops + 1) as f32 {
+    // Loops only advance for an emitter with a duration (UE3 tests `EmitterDuration > 0`): a
+    // zero-duration emitter bursts once, instead of re-firing its time-0 burst every frame
+    // (particles without a Lifetime module would pile up forever).
+    if em.duration > 1e-3 && t >= dur * (sim.loops + 1) as f32 {
         sim.loops += 1;
         sim.last_burst_t = -1.0;
         if em.loops > 0 && sim.loops >= em.loops {
