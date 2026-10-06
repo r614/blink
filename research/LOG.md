@@ -1190,3 +1190,15 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Port changes:** `dishonored_assets::facefx` (reader, curve / graph / bone evaluation); `DialogueLineView.blurb`; `runtime::facefx` (anim index over the map's packages, actor per model from its parts' `FaceFXAsset`, line start clock); `npc_anim::animate` applies the bone offsets after the face slot, before look-at.
 - **Tests:** `dishonored_assets` `facefx::hermite_and_links`, `facefx::boyle_facefx` (every Boyle actor and set decodes; servant graph wiring, jaw open about 20 degrees, a servant line opens the mouth; skipped without the install).
 - **Confidence:** CONFIRMED for the layout, the empty tracks and the actor / set links; LIKELY for the blending rules and for playback being tied to the blurb (U-380).
+
+## 2026-10-06: Go-to completion in the locomotion component (U-221)
+
+- **Question:** Shaw's `AIGoToActor_0` stops 84 uu short of `TargetPoint_5` against a 4.4 uu lip. Does the original end the go-to farther out (`DisLocoRequest.m_fEndLocationThreshold` -1, `m_bAccurateStop`)?
+- **Method:** Ghidra: `ClassDecomp2` on `DisBehaviorGoTo(_Base)`, `Decomp` on the go-to callbacks and the request setters (0x00cba540 / 0x00cba670 and callees), `StrUsers` on `ArkCpntType_Locomotion`, `F_FuncCallers` (0x0093dd50), `DecompRange` over the locomotion component (0x00930000-0x0094d000) and the go-to code (0x00ae4000-0x00af1800), `OffsetScan` for `m_bDisableTeleportOnNavmesh` (+0x966); `obj_dump` of the locomotion configs, the duel ops, `TargetPoint_5`, `TriggerVolume_2` and the garden meshes; new `nav_dump path`.
+- **Findings** (`dishonored/AI.md` "Go-to completion"):
+  - An actor destination always requests an accurate stop (0x00ae4de0 -> MoveToActor with accurate 1); `AIGoToActor_0` keeps the actor (`m_bTrackMovingTarget` default).
+  - The component's destination is the last point of the found path (0x00949890). Arrival (0x00944390): within 0.1 uu for accurate requests; within `m_fUnaccuracyRadius` (120) at speed below 20 only for non-accurate requests whose speed mode has stop animations. Event 0x18 then marks the behaviour reached (0x00ae4ea0).
+  - Off-mesh pawns return to the nearest navmesh point at `m_fReturnToNavMeshSpeed` unless `m_bDisableTeleportOnNavmesh` (0x00b7cd10, 0x0093ec80).
+  - The target lies on navmesh poly 594, and the garden mesh with the lip has no `BodySetup`. So the original must physically reach the target. The remaining question is NPC movement over the lip.
+- **Port changes:** none to the duel (no faithful rule found that ends it); documentation and `nav_dump path`.
+- **Confidence:** CONFIRMED for the request fields, the arrival test and the constants (0.01 squared at 0x010a5590, radius 120); LIKELY for the record layout linking `m_bAccurateStop` to record +0x24 (from the builder 0x0093ddd0 and the record copy in 0x00945010 / 0x009450c0).
