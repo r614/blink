@@ -302,6 +302,7 @@ pub fn default_melee_contexts() -> Vec<MeleeContextConfig> {
 /// Dodges and attack pacing (`DisTweaks_AISubProcess_ManageAttacks` of the elite combat
 /// behaviour, `DisTweaks_NPCSideStep` / `DisTweaks_NPCBackStep`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct DodgeConfig {
     /// `m_AttacksPerFlurry`: stamina-draining attacks before a `m_StaminaRecoveryDuration`
     /// pause (0x00b47880).
@@ -342,6 +343,7 @@ impl Default for DodgeConfig {
 
 /// The elite guard's pistol (`DisTweaks_AISubState_FirePistol`, `DisItemContext_NPCFireGun`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct PistolConfig {
     /// `m_TimeToFirstShot` (the fire timer set on entering the sub-state, 0x00b32c50).
     pub time_to_first_shot: [f32; 2],
@@ -363,6 +365,7 @@ impl Default for PistolConfig {
 
 /// `DisTweaks_RatSwarm` (a swarm of rats, `DisRatSwarm`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct RatSwarmConfig {
     /// `EDisRatSwarmType`: 0 ambient, 1 random, 2 scripted, 3 Devouring Swarm.
     pub swarm_type: u8,
@@ -832,6 +835,7 @@ pub struct AiLevel {
 
 /// A `DishonoredAudioVolume`: an audio cell.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct AudioCell {
     pub name: String,
     /// `m_AudioPropagationIndex`.
@@ -850,6 +854,7 @@ impl AudioCell {
 
 /// A `DishonoredAudioPortal` (`GenericPortal`): a rectangle between two cells.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct AudioPortal {
     pub name: String,
     /// `m_AudioPropagationIndex`.
@@ -873,6 +878,7 @@ pub struct AudioPortal {
 /// at the offset: the path length as a u16 times `dist_coeff`, then the intermediate portals as
 /// indices into `portals` (`m_Portals`, which hold indices into [`AudioCells::portals`]).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct AudioPropagation {
     pub dist_coeff: f32,
     pub max_audible_distance: f32,
@@ -883,6 +889,7 @@ pub struct AudioPropagation {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct AudioCells {
     pub cells: Vec<AudioCell>,
     pub portals: Vec<AudioPortal>,

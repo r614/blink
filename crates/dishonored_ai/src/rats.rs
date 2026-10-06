@@ -54,7 +54,8 @@ pub enum RatEvent {
     Devoured { swarm: PlayerId, corpse: PlayerId },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct RatSwarm {
     /// The swarm's pawn in the simulation.
     pub id: PlayerId,
