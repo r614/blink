@@ -62,7 +62,10 @@ The loco sequence nodes are in sync group `LocoGroup`; slots 1-4 have `Rate = -1
 So an NPC is: locomotion loops, overridden by full-body actions, with upper-body actions from
 `spine_0_jnt` up, additive hit reactions and look-at on top. The port reproduces the locomotion,
 full-body, upper-body, blink, face and look-at layers (§3-§4, §9); foot placement and the
-additive small hit reactions are not reproduced (U-280).
+additive small hit reactions are not reproduced (U-280). Matinee anim tracks (the
+`MatineeStackNode` channels) play over the result (`PawnAnim::scripted`); keys with
+`m_MatineeRootMotionMode` keep `root0_jnt` at its bind translation because their root
+translation moves the pawn on the server (CUTSCENES.md, U-085 / U-202).
 
 Node details read from the cooked tree:
 - `FaceFilter` has `m_bExcludeBranchBones`: the face slot drives the bones *below* `head_jnt`,
@@ -72,8 +75,20 @@ Node details read from the cooked tree:
   and stops the sequence; the timing comes from the pawn's `ArkComponentLookatConfig` (§9).
 - `DisSkelControl_FootPlacement` (both feet): `bOnlyEnableForUpAdjustment`, `FootOffset` 5,
   `m_fFootRadius` 15, `m_fMaxPredictDist` 150, `m_fFootZMoveSpeed` 200, effector on
-  `lower_leg_*_jnt`. It raises a foot onto ground found by traces (stairs, slopes); not ported:
-  the presentation has no world traces per foot (U-280).
+  `lower_leg_*_jnt`. It raises a foot onto ground found by traces (stairs, slopes); not ported
+  (U-280). Decode so far (vtable 0x0110eba0): the bone update (slot 79, 0x00a9b360) takes Arkane's
+  "new IK" (0x00a95190) when the control's +0x138 bit 25 is set, bit 0 clear, the AI level
+  object exists (0x00bbf0b0) and its +0x3d4 bit 5 is set (`DefaultAILocomotion.ini`:
+  `m_bDisableNewIK=FALSE`), else the UE3-style path (slot 89, 0x00a8a810: one trace along the
+  leg from above the animated foot, the adjustment clamped to the max up / down values, skipped
+  when negative with `bOnlyEnableForUpAdjustment`, a lock within `m_fLockMaxDistance`, the
+  two-bone limb solve and the foot oriented to the hit normal within the reject angle). The new
+  IK keeps the owner's location, mesh offset and yaw (+0x148.., +0x160.., +0x184), runs the
+  ground tests and their blend (0x00a83a80: in / out over +0x3a4 / +0x3a8 seconds into the
+  +0x358 weight), the prediction from the locomotion's foot data (0x00a92ee0) and the solve
+  (0x00a937e0, 800 lines) with the `GroundTestResults[6]` array and the flat / stairs / slope
+  shapes. The renderer can now trace the level (the ragdoll's floor uses
+  `CollisionWorld::raycast`), so the remaining work is decoding 0x00a92ee0 and 0x00a937e0.
 
 ## 3. Locomotion (`ArkComponentLocomotionConfig`, `ArkAnimNodeLocomotion`)
 
