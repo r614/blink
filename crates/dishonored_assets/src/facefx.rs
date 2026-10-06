@@ -613,6 +613,9 @@ mod tests {
         let ai = (0..pkg.exports.len()).find(|&i| pkg.obj_path(ue3_package::ObjRef::Export(i)).ends_with("Skm_ServantA_Head_FaceFX")).unwrap();
         let actor = read_actor(raw_archive(&pkg, ai).unwrap()).unwrap();
         assert_eq!(actor.bones.len(), 109);
+        // The head mesh names it.
+        let mi = (0..pkg.exports.len()).find(|&i| pkg.export_class(i) == "SkeletalMesh" && pkg.obj_path(ue3_package::ObjRef::Export(i)) == "Npc_Servants.Mesh.Skm_ServantA_Head").unwrap();
+        assert_eq!(mesh_actor(&pkg, mi).unwrap().unwrap().name, "Skm_ServantA_Head_FaceFX");
         assert_eq!(actor.nodes.len(), 99);
         let open = actor.node("open").unwrap();
         assert_eq!(actor.nodes[open].kind, NODE_BONE_POSE);

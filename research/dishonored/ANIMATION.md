@@ -260,7 +260,7 @@ Relaxed, Patrol, Search, Combat, Panic, Cower, Notice) and `MatchView::anim_prof
 | panic start | `Panic` | same, then `PanicEmpty` locomotion |
 | cower | `DisAISubStateCower` (0x00B12840): body stance `PanicRecover` (`Equipped` when armed), face the enemy | `PanicRecoverEmpty` modifier (`Empty_Idle_Panic_Recover`), `Sword` when armed |
 | noticing | `ReactToNoticing` | same |
-| talking | soiree matinees / FaceFX (not decoded) | upper-body `Gesture_*` loops from the profile's gesture set (APPROXIMATION, U-142) |
+| talking | the blurb's FaceFX animation on the head (§12); body gestures from soiree matinees | FaceFX lip sync and head motion (§12); body: upper-body `Gesture_*` loops from the profile's gesture set (APPROXIMATION, U-142) |
 | crouched armed player | no crouch locomotion in the NPC sets | `Sword_Cover_Loop` held |
 
 Directional steps (U-143): the step index is a direction enum's value. Groups of 4 follow
@@ -396,3 +396,120 @@ the blade direction and changes its roll (tests in `viewmodel.rs`). NPC skeleton
 sockets (elite guard `LeftHandWpn` pitch -16384, `HolsterWpn`, `Helmet`, `Mask`, ...);
 third-person weapons use the character mesh's socket the same way, falling back to the bone when
 a mesh has none.
+
+## 12. FaceFX (lip sync and facial animation)
+
+Reader: `crates/dishonored_assets/src/facefx.rs` (decoded from the data alone; no FaceFX SDK
+code). Runtime: `crates/dishonored_runtime/src/facefx.rs`, applied in `npc_anim::animate`. Tool:
+`facefx_dump <package> <export-substring> [-v]`.
+
+**Where the data is.**
+- Each head `SkeletalMesh` names its actor in the `FaceFXAsset` property, e.g.
+  `Npc_Servants.Mesh.Skm_ServantA_Head` -> `Skm_ServantA_Head_FaceFX`. The actors are cooked
+  into the level script packages (Boyle: elite guard heads 01 / 03, male and female aristocrat,
+  middle-class, servant A / B, Samuel, the Outsider).
+- Each `DisDialogVoiceData` (`m_pFaceFXAnimSet`) has a `FaceFXAnimSet` named after its GUID.
+  Its one animation group holds one animation per blurb. The animation is named by the blurb GUID
+  (`DisVoiceTextBlurb.m_GUID` = `DisConv_Blurb.m_iBlurbGUID`) and records its source WAV
+  (`Voices\English(US)\<package>\<voice data>\<GUID>.wav`).
+- Both classes hold no tagged properties. After `None`, they carry a byte-array count and then
+  one FaceFX archive.
+- The 44 `InterpTrackFaceFX` tracks in the Boyle matinees are empty when cooked: 12 bytes each,
+  with no `FaceFXSeqs` and no `FaceFXAnimSets`. A matinee's lip sync therefore comes from its
+  dialog keys' blurbs, the same as any other line (CONFIRMED by the data).
+
+**Archive layout** (little endian; CONFIRMED by decoding every Boyle archive to its last byte):
+- Header:
+  - `FACE`, version 1731, a zero word.
+  - Licensee and project strings (count-prefixed, NUL-terminated), the licensee version 1000,
+    and a u16 1.
+  - The class directory: count, then per class two words, the name, and a u16 version. Actors
+    list `FxBone, FxCompiledFaceGraph, FxObject, FxActor, FxMasterBoneList, FxNamedObject,
+    FxName, FxPhonemeMap, FxAnimGroup, FxLinkFnParameters`; anim sets list `FxObject, FxAnim,
+    FxAnimSet, FxNamedObject, FxName, FxAnimCurve, FxAnimGroup`.
+  - The name table: count, then strings without terminators. Everything after it refers to
+    names by index.
+- Actor:
+  - The actor name and a zero word.
+  - The **master bone list**: a count, then per bone (all 109 skeleton bones of the servant):
+    - name;
+    - reference position, rotation and scale;
+    - the inverse reference rotation;
+    - index, weight (1);
+    - its **bone pose links**: a count, then per link a node index, the bone name, a position
+      delta from the reference, an absolute bone-local rotation, and a scale delta.
+  - The **compiled face graph**: a count, then per node in evaluation order:
+    - kind (0 combiner, 4 bone pose);
+    - name;
+    - min, 1/min (1 when min is 0), max, 1/max;
+    - input operation (0 = sum everywhere);
+    - inputs: a count, then per input the source node index (always an earlier node), the link
+      function type, and a count-prefixed parameter list;
+    - a zero word.
+  - Then a name -> node hash table (not needed).
+- Anim set:
+  - Set name, a zero word, the actor name, the group name (the set name), and the animation
+    count.
+  - Per animation:
+    - name;
+    - curves: a count, then per curve the node name and its interpolation (0 = Hermite in every
+      retail curve);
+    - every key of the animation as (time, value, slope in, slope out);
+    - the key count of each curve;
+    - blend in and blend out (servant lines 0.16 / 0.22 s);
+    - two zero words;
+    - the source WAV path;
+    - -1.
+- Coordinates: FaceFX is right-handed. Against the head mesh's bind pose, positions have Y
+  negated, and rotations (stored w, x, y, z) have y negated. Example: servant `head_jnt`
+  reference (8.77, 0, 0) with rotation y -0.133, against the mesh's +0.133. CONFIRMED on
+  `head_jnt`, `eye_R_jnt` and `jaw_jnt`.
+
+**The servant actor (example).**
+- 99 nodes: 6 tongue / phoneme bone poses (`FV`, `tBack`, `tTeeth`, `tOut`, `ShCh`, `tRoof`),
+  the mouth targets `open`, `W`, `wide`, `PBM`, and FACS-style bone poses (`cheekRaiser`,
+  `sneerLeft`, `upperLipRaiser`, `jawClencher`, `pucker`, `browLowerer`, the lid poses ...).
+- Emotion combiners (`Joy`, `Fear`, `Anger`, `Sadness`, `Disgust`, `Surprise`) feed the bone
+  poses through linear links. Example: `open` = `Joy` x 0.05 + `Surprise` x 0.106 + `Fear` x
+  0.205 + its track.
+- Head and eyes: `Orientation_Head_Pitch` + `Emphasis_Head_Pitch` -> `Head_Pitch` (range +-10)
+  -> `Head_Rot_X` (x 0.1, range +-1). That splits into `Head_RotPos_X` / `Head_RotNeg_X` bone
+  poses on `head_jnt` (x +1 / -1, range 0..1). Yaw and roll follow the same pattern, and yaw
+  feeds roll through a type-2 link (-0.3).
+- The jaw's `open` pose turns `jaw_jnt` about 20 degrees.
+- Link functions in the Boyle actors: type 1 (`m x + b`) and type 2 (one parameter `a`; read as
+  FaceFX's quadratic `a x^2`, LIKELY). The reader also implements the rest of FaceFX's standard
+  list in its usual order (cubic, sqrt, negate, inverse, one-clamp, constant, clamped linear),
+  unused in the data.
+- Typical line: 19 curves (`open`, `W`, `ShCh`, `PBM`, `FV`, `wide`, `tBack`, `tRoof`, `tTeeth`,
+  the head orientation / emphasis and gaze curves, `Eyebrow_Raise`, `Blink`). Many are empty;
+  keys start slightly before 0 (-0.02 s).
+
+**Evaluation** (`Actor::evaluate`, `bone_deltas`, `Anim::tracks`):
+- A curve is the cubic Hermite through its keys with their slopes, held outside its keys.
+- The animation's weight ramps up over `blend_in` from its first key and down over `blend_out`
+  to its last.
+- Each node's value = its curve value x weight + the sum of its inputs through their link
+  functions, clamped to [min, max], in graph order.
+- Each bone with an active pose link:
+  - position = sum of weight x position delta;
+  - rotation = the product of each pose's delta from the reference
+    (`ref^-1 * pose`), each scaled by the node value (slerp from identity).
+
+  These blending rules are LIKELY: they reproduce the authored poses at weight 1. The original
+  FaceFX blending code was not traced (U-380).
+
+**Playback.**
+- The voice data, the blurb GUIDs and the conversation component's `m_pFaceFxPendingBlurb` /
+  `DisConvSpeakerInterface.m_pSkelMeshCompForFaceFX` tie each line to its speaker's head mesh
+  (LIKELY; the call path in the binary was not traced, U-380).
+- The port:
+  - `DialogueLineView.blurb` carries the line's GUID.
+  - Every speaking pawn whose look has a head with a FaceFX actor plays the blurb's animation.
+    Time 0 is the line start, which is when its VO starts.
+  - The offsets are applied after the face slot and before the look-at additive: rotation =
+    animated rotation x delta, position = animated (or bind) position + delta. Bones are bound
+    by name in every part.
+  - Masked party heads have no `FaceFXAsset`, so they do not lip sync.
+- How UE3 combines the FaceFX bones with the AnimTree's output (override with the bone weight,
+  or offset) was not traced (U-380). The offset keeps the body animation's head motion.
