@@ -72,6 +72,7 @@ pub fn read_loco_config(pkg: &Package, export: usize) -> Result<LocoConfig> {
             start_anims: anim_names(pkg, &m, "m_StartAnimProps"),
             stop_anims: anim_names(pkg, &m, "m_StopAnimProps"),
             turn_anims: anim_names(pkg, &m, "m_TurnAnimProps"),
+            foot_on_ground: f32_of(&m, "m_fFootOnGroundPct"),
         });
     }
     for t in structs(pkg, p, "m_Transitions") {
@@ -81,6 +82,7 @@ pub fn read_loco_config(pkg: &Package, export: usize) -> Result<LocoConfig> {
         };
         c.transitions.push((name_of(&t, "m_AnimName"), i("m_StartModifier"), i("m_EndModifier")));
     }
+    c.feet = structs(pkg, p, "m_Feet").iter().map(|f| f32_of(f, "m_fOnGroundPct")).collect();
     Ok(c)
 }
 
@@ -91,13 +93,18 @@ pub fn load_loco_config(content: &Content, r: &(String, String)) -> Result<LocoC
     let mut c = read_loco_config(&pkg, i)?;
     // Unset arrays come from the class default object (Engine): e.g. FemaleLocomotionConfig
     // keeps the default three speed names.
-    if c.speed_names.is_empty() {
+    if c.speed_names.is_empty() || c.feet.is_empty() {
         if let Ok(e) = content.package("Engine") {
             if let Some(d) = find_export(&e, "Default__ArkComponentLocomotionConfig") {
                 let h = e.read_object(d)?;
-                c.speed_names = names(&e, &h.properties, "m_SpeedNames");
-                if c.table.is_empty() {
-                    c.table = ints(&h.properties, "m_SpeedModes");
+                if c.speed_names.is_empty() {
+                    c.speed_names = names(&e, &h.properties, "m_SpeedNames");
+                    if c.table.is_empty() {
+                        c.table = ints(&h.properties, "m_SpeedModes");
+                    }
+                }
+                if c.feet.is_empty() {
+                    c.feet = structs(&e, &h.properties, "m_Feet").iter().map(|f| f32_of(f, "m_fOnGroundPct")).collect();
                 }
             }
         }

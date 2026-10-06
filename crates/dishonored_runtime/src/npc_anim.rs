@@ -227,7 +227,10 @@ impl AnimBank {
             }
         }
         let physics = p.physics.as_ref().and_then(|r| dishonored_assets::npc_anim::load_physics_asset(&self.content, r).map_err(|e| warn!("physics asset {}: {e:#}", r.1)).ok()).filter(|a| a.bodies.len() >= 2).map(Arc::new);
-        let lookat = p.lookat.as_ref().and_then(|r| dishonored_assets::npc_anim::load_lookat_config(&self.content, r).map_err(|e| warn!("look-at config {}: {e:#}", r.1)).ok()).map(Arc::new);
+        // Configs cooked outside the searched packages (tallboy, musical overseer) fall back to the
+        // default config.
+        let default_lookat = ("DishonoredGame".to_string(), "DisLookatConfig.DefaultLookatConfig".to_string());
+        let lookat = p.lookat.as_ref().and_then(|r| dishonored_assets::npc_anim::load_lookat_config(&self.content, r).ok()).or_else(|| p.lookat.as_ref().and_then(|_| dishonored_assets::npc_anim::load_lookat_config(&self.content, &default_lookat).ok())).map(Arc::new);
         self.profiles.push(Profile { sets, loco, defs, lookup: HashMap::new(), gestures, physics, lookat });
         self.profile_index.insert(p.clone(), self.profiles.len() - 1);
         self.profiles.len() - 1
@@ -542,6 +545,9 @@ pub struct PawnAnim {
     pub look: (f32, f32, f32),
     /// Ambient subprocess frequency range in use (min, max seconds).
     pub ambient_range: (f32, f32),
+    /// Feet planted (left, right), and those that touched down this frame.
+    pub feet: [bool; 2],
+    pub feet_down: [bool; 2],
 }
 
 impl PawnAnim {
@@ -816,6 +822,9 @@ struct LocoSample {
     name: String,
     reversed: bool,
     weight: f32,
+    /// The speed mode's `m_fFootOnGroundPct`, and whether the mode moves.
+    foot: f32,
+    moving: bool,
 }
 
 /// Sync-group master of a locomotion evaluation: (sequence, reversed, phase before, after).
@@ -824,7 +833,7 @@ pub type LocoMaster = (String, bool, f32, f32);
 /// Locomotion pose: speed modes of the modifier blended by speed, directions by angle.
 /// `vel` is the node's smoothed (angle from facing in degrees, speed).
 #[allow(clippy::too_many_arguments)]
-fn loco_pose(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profile: usize, modifier: &str, vel: (f32, f32), dt: f32, phase: &mut f32, advance: bool) -> Option<(Pose, Option<LocoMaster>)> {
+fn loco_pose(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profile: usize, modifier: &str, vel: (f32, f32), dt: f32, phase: &mut f32, advance: bool) -> Option<(Pose, Option<LocoMaster>, f32)> {
     let cfg = bank.profiles[profile].loco.clone()?;
     let mi = cfg.modifier(modifier)?;
     let (angle, speed) = vel;
@@ -882,11 +891,11 @@ fn loco_pose(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profile:
                 let w = mw * dw[d];
                 if w > 1e-3 {
                     // S and W are authored reversed: played with rate -1 (0x00910970).
-                    samples.push(LocoSample { name: m.move_anims[d].0.clone(), reversed: d < 2, weight: w });
+                    samples.push(LocoSample { name: m.move_anims[d].0.clone(), reversed: d < 2, weight: w, foot: m.foot_on_ground, moving: m.move_anims[0].1.abs() >= 0.1 });
                 }
             }
         } else if let Some(a) = m.move_anims.first() {
-            samples.push(LocoSample { name: a.0.clone(), reversed: false, weight: mw });
+            samples.push(LocoSample { name: a.0.clone(), reversed: false, weight: mw, foot: m.foot_on_ground, moving: a.1.abs() >= 0.1 });
         }
     }
     // Sync group (`LocoGroup`): the heaviest sequence is the master and fires the notifies;
@@ -918,7 +927,25 @@ fn loco_pose(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profile:
         }
     }
     let m = master.map(|(i, _)| (samples[i].name.clone(), samples[i].reversed, before, *phase));
-    Some((acc.finish(), m))
+    // Half-width of a foot's planted window (0x009114A0): the weighted `m_fFootOnGroundPct`
+    // of the moving modes (normalized when their weights sum below 1), halved.
+    let (fw, ws) = samples.iter().filter(|s| s.moving).fold((0.0, 0.0), |a, s| (a.0 + s.foot * s.weight, a.1 + s.weight));
+    let half = if ws > 0.0 && ws < 1.0 { fw / ws } else { fw } * 0.5;
+    Some((acc.finish(), m, half))
+}
+
+/// Feet planted at a sync phase (`m_bFootOnGround`, 0x009114A0): foot k is on the ground while
+/// the circular distance between the phase and its `m_fOnGroundPct` is within `half`.
+pub fn feet_on_ground(feet: &[f32], phase: f32, half: f32) -> [bool; 2] {
+    let mut out = [false; 2];
+    for (k, f) in feet.iter().take(2).enumerate() {
+        let mut d = (f - phase).abs();
+        if d > 0.5 {
+            d = 1.0 - d;
+        }
+        out[k] = half > 0.0 && d <= half;
+    }
+    out
 }
 
 /// Advance a chain; returns false when it is finished.
@@ -1304,11 +1331,17 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
     st.vel = if st.vel_init { smooth_velocity(st.vel, target, i.dt, &bank.loco_node) } else { target };
     st.vel_init = true;
     let mut phase = st.phase;
-    let (mut pose, master) = loco_pose(bank, lib, model, profile, &st.modifier.clone(), st.vel, i.dt, &mut phase, true).unwrap_or_else(|| (parts.iter().map(|p| vec![None; p.bones.len()]).collect(), None));
+    let (mut pose, master, half) = loco_pose(bank, lib, model, profile, &st.modifier.clone(), st.vel, i.dt, &mut phase, true).unwrap_or_else(|| (parts.iter().map(|p| vec![None; p.bones.len()]).collect(), None, 0.0));
     st.loco_master = master;
+    // Feet touching down this frame (footfalls of the NPC locomotion; its loops carry no
+    // footfall notifies).
+    let feet = bank.profiles[profile].loco.as_ref().map(|c| c.feet.clone()).unwrap_or_default();
+    let on = if p.alive && !p.incapacitated() && st.full.as_ref().is_none_or(|c| c.weight < 0.5) { feet_on_ground(&feet, phase, half) } else { [false; 2] };
+    st.feet_down = [on[0] && !st.feet[0], on[1] && !st.feet[1]];
+    st.feet = on;
     if let Some((pm, w)) = st.prev_modifier.take() {
         let mut ph = phase;
-        if let Some((prev, _)) = loco_pose(bank, lib, model, profile, &pm, st.vel, i.dt, &mut ph, false) {
+        if let Some((prev, _, _)) = loco_pose(bank, lib, model, profile, &pm, st.vel, i.dt, &mut ph, false) {
             let mut base = prev;
             overlay(&mut base, &pose, 1.0 - w, None, parts);
             pose = base;
@@ -1358,7 +1391,7 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
                 let p_prev = at(bank, t - crate::ragdoll::STEP);
                 let g0 = globals(&parts[0], &p_now[0]);
                 let g1 = globals(&parts[0], &p_prev[0]);
-                if let Some(mut rd) = crate::ragdoll::Ragdoll::new(&phys, &parts[0], &g0, &g1, i.floor, i.gravity) {
+                if let Some(mut rd) = crate::ragdoll::Ragdoll::new(&phys, &parts[0].bones, &g0, &g1, i.floor, i.gravity) {
                     if st.settle {
                         rd.settle();
                     } else {
@@ -1544,4 +1577,64 @@ pub fn globals(part: &PartGpu, pose: &[Option<Key>]) -> Vec<glam::Mat4> {
         }
     }
     dishonored_assets::characters::bind_globals(&bones).iter().map(|g| part.mesh_to_pawn * *g).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagonal_ratio() {
+        // Straight ahead and the snapped neighbourhood: no correction.
+        assert!((diagonal_factor(0.0) - 1.0).abs() < 1e-5);
+        assert!((diagonal_factor(1.0) - 1.0).abs() < 1e-5);
+        // Halfway between N and E: the chord is 1/sqrt(2) from the centre.
+        assert!((diagonal_factor(45.0) - std::f32::consts::SQRT_2).abs() < 1e-4);
+        assert!((diagonal_factor(-135.0) - std::f32::consts::SQRT_2).abs() < 1e-4);
+    }
+
+    #[test]
+    fn direction_weights_snap() {
+        let (w, both) = dir_weights(1.0);
+        assert!(!both && w[2] == 1.0);
+        let (w, both) = dir_weights(45.0);
+        assert!(both && (w[2] - 0.5).abs() < 1e-5 && (w[3] - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn velocity_smoothing_rate() {
+        let p = LocoNodeParams::default();
+        // 300 uu/s apart: full rate (2000 uu/s^2), 1/60 s moves 33.3 uu/s.
+        let v = smooth_velocity((0.0, 0.0), (0.0, 300.0), 1.0 / 60.0, &p);
+        assert!((v.1 - 2000.0 / 60.0).abs() < 1e-3);
+        // 50 apart: half the rate.
+        let v = smooth_velocity((0.0, 100.0), (0.0, 150.0), 1.0 / 60.0, &p);
+        assert!((v.1 - (100.0 + 1000.0 / 60.0)).abs() < 1e-3);
+        // Small gaps close at the minimum ratio, never overshooting.
+        let v = smooth_velocity((0.0, 100.0), (0.0, 101.0), 1.0, &p);
+        assert!((v.1 - 101.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn feet_windows() {
+        // Walk (m_fFootOnGroundPct 0.4): left foot planted within 0.2 of 0.44, right of 0.94.
+        let feet = [0.44, 0.94];
+        assert_eq!(feet_on_ground(&feet, 0.30, 0.2), [true, false]);
+        assert_eq!(feet_on_ground(&feet, 0.05, 0.2), [false, true]);
+        assert_eq!(feet_on_ground(&feet, 0.69, 0.2), [false, false]);
+        assert_eq!(feet_on_ground(&feet, 0.3, 0.0), [false, false]);
+    }
+
+    #[test]
+    fn hit_directions() {
+        assert_eq!(cardinal(10.0), 0);
+        assert_eq!(cardinal(-90.0), 1);
+        assert_eq!(cardinal(90.0), 2);
+        assert_eq!(cardinal(170.0), 3);
+        assert_eq!(eight_way(-45.0), 1);
+        assert_eq!(eight_way(45.0), 2);
+        assert_eq!(eight_way(-135.0), 6);
+        assert_eq!(eight_way(135.0), 7);
+        assert_eq!(eight_way(180.0), 5);
+    }
 }

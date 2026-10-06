@@ -133,7 +133,7 @@ pub fn sync_players(
                 *t = { let carrier = p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).filter(|_| root.is_some()); body_transform(carrier.copied().unwrap_or(p), mv, root.is_some()) };
                 if let Some(mesh) = mesh.as_mut() { mesh.0 = if p.crouched { assets.crouch_body.clone() } else { assets.body.clone() }; }
                 if let Some(mat) = mat.as_mut() { mat.0 = if p.alive { assets.materials[p.id as usize % assets.materials.len()].clone() } else { assets.dead.clone() }; }
-                let hide = (Some(p.id) == me_id || (p.carried_by.is_some() && p.carried_by == me_id)) && !third && cams.iter().all(|c| c.follow.is_none_or(|f| f == p.id));
+                let hide = Some(p.id) == me_id && !third && cams.iter().all(|c| c.follow.is_none_or(|f| f == p.id));
                 *vis = if hide || p.mode == MoveMode::Blinking { Visibility::Hidden } else { Visibility::Inherited };
             }
             None => { commands.entity(e).despawn(); }

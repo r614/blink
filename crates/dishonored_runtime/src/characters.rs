@@ -469,6 +469,12 @@ pub fn animate_characters(
                             snd.advance(p.id, &clip, *t0, t1, false);
                         }
                     }
+                    // Locomotion feet touching down (`m_bFootOnGround`).
+                    for (k, down) in st.feet_down.iter().enumerate() {
+                        if *down {
+                            snd.foot_down(p.id, k as i32);
+                        }
+                    }
                     // Locomotion: the sync group's master fires the notifies (footfalls).
                     // Reversed loops play from the end backwards.
                     if let Some((clip, rev, p0, p1)) = st.loco_master.clone() {
@@ -490,6 +496,13 @@ pub fn animate_characters(
             }
         };
         let globals: Vec<Vec<glam::Mat4>> = model.parts.iter().zip(&pose).map(|(part, pp)| crate::npc_anim::globals(part, pp)).collect();
+        // Diagnostics: DISH_ANIM_DEBUG=<pawn id> logs the pawn's slots and root.
+        if std::env::var("DISH_ANIM_DEBUG").ok().and_then(|v| v.parse::<u32>().ok()) == Some(p.id) {
+            if let Ok(st) = states.get(entity) {
+                let slot = |c: &Option<crate::npc_anim::Chain>| c.as_ref().map(|c| format!("{}:{}@{:.2}w{:.2}", c.key, c.steps[c.i].0, c.t, c.weight)).unwrap_or_default();
+                info!("anim {} mod={} vel={:.0},{:.0} full={} upper={} ragdoll={} root={:?} pelvis={:?}", p.id, st.modifier, st.vel.0, st.vel.1, slot(&st.full), slot(&st.upper), st.ragdoll.is_some(), pose[0].first().copied().flatten().map(|k| k.t), globals[0].get(1).map(|m| m.w_axis.truncate()));
+            }
+        }
         for c in children.iter() {
             if let Ok((j, mut t)) = joints.get_mut(c) {
                 if let Some(m) = globals.get(j.part).and_then(|v| v.get(j.bone)) {

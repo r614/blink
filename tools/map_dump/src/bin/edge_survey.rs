@@ -10,6 +10,7 @@ fn main() {
     let mut flags: BTreeMap<u16, usize> = BTreeMap::new();
     let (mut total, mut parsed, mut baked) = (0usize, 0usize, 0usize);
     let mut fail: BTreeMap<String, usize> = BTreeMap::new();
+    let mut fixed: Vec<f32> = Vec::new();
     let mut paths: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("upk"))).collect();
     paths.sort();
     for p in paths {
@@ -28,7 +29,24 @@ fn main() {
                     parsed += 1;
                     *flags.entry(c.header.flags).or_default() += 1;
                     match c.bake() {
-                        Ok(_) => baked += 1,
+                        Ok(b) => {
+                            baked += 1;
+                            // Fixed-format rotations: largest frame-to-frame turn of any joint.
+                            if c.header.flags & 1 == 0 {
+                                let mut worst = 0.0f32;
+                                for f in 1..b.num_frames {
+                                    for j in 0..b.rotations[f].len() {
+                                        if let (Some(a), Some(q)) = (b.rotations[f - 1][j], b.rotations[f][j]) {
+                                            worst = worst.max(a.angle_between(q).to_degrees());
+                                        }
+                                    }
+                                }
+                                fixed.push(worst);
+                                if fixed.len() <= 5 {
+                                    println!("fixed-format {} {}: {} frames, worst step {worst:.1} deg", p.display(), pkg.obj_path(ue3_package::ObjRef::Export(i)), b.num_frames);
+                                }
+                            }
+                        }
                         Err(e) => *fail.entry(format!("{e:#}").chars().take(60).collect()).or_default() += 1,
                     }
                 }
@@ -39,4 +57,8 @@ fn main() {
     println!("sequences {total}, parsed {parsed}, baked {baked}");
     println!("flags histogram {flags:?}");
     for (k, n) in fail { println!("fail x{n}: {k}"); }
+    fixed.sort_by(f32::total_cmp);
+    if !fixed.is_empty() {
+        println!("fixed-format clips {}: worst frame step median {:.1} deg, 95% {:.1}, max {:.1}; over 45 deg: {}", fixed.len(), fixed[fixed.len() / 2], fixed[fixed.len() * 95 / 100], fixed[fixed.len() - 1], fixed.iter().filter(|w| **w > 45.0).count());
+    }
 }

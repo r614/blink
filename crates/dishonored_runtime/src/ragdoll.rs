@@ -9,6 +9,7 @@
 //! only moves bones inside the pawn's frame.
 
 use crate::characters::PartGpu;
+use dishonored_ir::BoneAsset;
 use crate::npc_anim::{Key, Pose};
 use dishonored_ir::npc_anim::PhysicsAssetData;
 use glam::{Mat4, Quat, Vec3};
@@ -77,8 +78,8 @@ fn frame(a1: Vec3, a2: Vec3, b1: Vec3, b2: Vec3) -> Quat {
 impl Ragdoll {
     /// Build from part 0's bones and the start / previous-step globals (pawn space). `floor` is
     /// the floor height in pawn space, `gravity` uu/s^2 (negative, down).
-    pub fn new(asset: &PhysicsAssetData, part: &PartGpu, g0: &[Mat4], g_prev: &[Mat4], floor: f32, gravity: f32) -> Option<Ragdoll> {
-        let find = |n: &str| part.bones.iter().position(|b| b.name.eq_ignore_ascii_case(n));
+    pub fn new(asset: &PhysicsAssetData, part: &[BoneAsset], g0: &[Mat4], g_prev: &[Mat4], floor: f32, gravity: f32) -> Option<Ragdoll> {
+        let find = |n: &str| part.iter().position(|b| b.name.eq_ignore_ascii_case(n));
         let mut bodies: Vec<Body> = Vec::new();
         for b in &asset.bodies {
             let Some(bone) = find(&b.bone) else { continue };
@@ -92,17 +93,17 @@ impl Ragdoll {
         let body_of = |bodies: &[Body], bone: usize| bodies.iter().position(|b| b.bone == bone);
         // Parents: the constraint's second bone, else the nearest body up the skeleton.
         for i in 0..bodies.len() {
-            let name = &part.bones[bodies[i].bone].name;
+            let name = &part[bodies[i].bone].name;
             let c = asset.constraints.iter().find(|c| c.bone1.eq_ignore_ascii_case(name));
             let mut parent = c.and_then(|c| find(&c.bone2)).and_then(|b| body_of(&bodies, b));
             if parent.is_none() {
-                let mut k = part.bones[bodies[i].bone].parent;
-                while k >= 0 && (k as usize) < part.bones.len() {
+                let mut k = part[bodies[i].bone].parent;
+                while k >= 0 && (k as usize) < part.len() {
                     if let Some(p) = body_of(&bodies, k as usize) {
                         parent = Some(p);
                         break;
                     }
-                    let up = part.bones[k as usize].parent;
+                    let up = part[k as usize].parent;
                     if up == k {
                         break;
                     }
@@ -116,7 +117,7 @@ impl Ragdoll {
             if let (Some(p), Some(c)) = (parent, c) {
                 bodies[i].rest = (bodies[i].pos - bodies[p].pos).length();
                 if c.swing_limited {
-                    bodies[i].swing = c.swing1.max(c.swing2).max(1.0).to_radians();
+                    bodies[i].swing = c.swing1.max(c.swing2).max(5.0).to_radians();
                 }
             } else if let Some(p) = parent {
                 bodies[i].rest = (bodies[i].pos - bodies[p].pos).length();
@@ -131,13 +132,13 @@ impl Ragdoll {
             bodies[i].child2 = by_len.get(1).copied();
         }
         let top = (0..bodies.len()).find(|&i| bodies[i].parent.is_none())?;
-        let owner: Vec<Option<usize>> = (0..part.bones.len())
+        let owner: Vec<Option<usize>> = (0..part.len())
             .map(|mut k| loop {
                 if let Some(b) = body_of(&bodies, k) {
                     break Some(b);
                 }
-                let p = part.bones[k].parent;
-                if p < 0 || p as usize == k || p as usize >= part.bones.len() {
+                let p = part[k].parent;
+                if p < 0 || p as usize == k || p as usize >= part.len() {
                     break None;
                 }
                 k = p as usize;
@@ -200,8 +201,12 @@ impl Ragdoll {
                 if ang.is_finite() && ang > lim {
                     let axis = want.cross(cur).normalize_or_zero();
                     if axis != Vec3::ZERO {
+                        // Split the correction between child and parent so the joint pushes no
+                        // net momentum into the body.
                         let fixed = Quat::from_axis_angle(axis, lim) * want.normalize() * cur.length();
-                        self.bodies[i].pos = self.bodies[p].pos + fixed;
+                        let corr = (fixed - cur) * 0.5;
+                        self.bodies[i].pos += corr;
+                        self.bodies[p].pos -= corr;
                     }
                 }
             }
@@ -304,6 +309,36 @@ impl Ragdoll {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The elite guard's ragdoll, dropped from its bind pose, settles on the floor near where it
+    /// started (skipped without the install).
+    #[test]
+    fn elite_guard_settles_on_the_floor() {
+        let Ok(c) = dishonored_assets::Content::locate() else { return };
+        let hh = 97.0;
+        let m = dishonored_assets::characters::load_character(&c, "elite_guard", hh, 16).unwrap();
+        let part = &m.parts[0];
+        let g0: Vec<Mat4> = dishonored_assets::characters::bind_globals(&part.bones).iter().map(|g| part.mesh_to_pawn * *g).collect();
+        let a = dishonored_assets::npc_anim::load_physics_asset(&c, &("L_Boyle_Ext_Script".into(), "Npc_EliteGuard.Physics.Skm_EliteGuard_Physics".into())).unwrap();
+        let mut r = Ragdoll::new(&a, &part.bones, &g0, &g0, -hh, -980.0).unwrap();
+        r.settle();
+        for b in &r.bodies {
+            assert!(b.pos.is_finite(), "{}", part.bones[b.bone].name);
+            assert!(b.pos.truncate().length() < 250.0, "{} drifted to {}", part.bones[b.bone].name, b.pos);
+            assert!(b.pos.z >= -hh - 1.0 && b.pos.z < -hh + 200.0, "{} at {}", part.bones[b.bone].name, b.pos);
+        }
+        // Joint lengths held.
+        for b in &r.bodies {
+            if let Some(p) = b.parent {
+                let d = (b.pos - r.bodies[p].pos).length();
+                assert!((d - b.rest).abs() < 0.1 * b.rest.max(1.0) + 1.0, "{}: {d} vs {}", part.bones[b.bone].name, b.rest);
+            }
+        }
+        let g = r.globals();
+        for (k, m) in g.iter().enumerate() {
+            assert!(m.is_finite() && m.w_axis.truncate().length() < 300.0, "{} at {}", part.bones[k].name, m.w_axis);
+        }
+    }
 
     #[test]
     fn frame_matches_two_axes() {

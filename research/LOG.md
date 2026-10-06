@@ -901,3 +901,53 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Nonlethal Brisby route (`harness kismet` table, not a check yet):** knock-out and carrying work on the original pawns (the guilty sister choked unconscious in the ballroom and carried to the cellar boat trigger), but the route stops earlier: Brisby's `DisDialogOneShot_6` approach hook ends without starting `Lord_Brisby_Quest_Start` in the conversation runner, so `GetBrisbyQuest` never attaches the sister KO events and the boat trigger stays inactive. Needs the conversation-side hook conditions (owner: conversation/Kismet work).
 - **All suites on a clean per-agent build (`--cfg agent_a_build`):** sim 18/18, mission 7/7, travel 12/12, kismet 14/14, conversation 17/17, net 8/8, audio 53/53, contracts (3 min) 16/16, visual 6/6, launcher 14/14. (An earlier contracts failure, 2 contract kills, came from stale shared-cache artifacts.)
 - **Confidence:** CONFIRMED for the formulas and data read in code; LIKELY / SPECULATIVE items are U-100..U-113 (choke anim mapping, grenade fuse, choke range, swarm movement, unaware sleep, body throw, immolation, possession targeting, Bend Time warm-up, Shadow Kill level 1, pickup details, use target, PvP mapping).
+## 2026-10-06: Character presentation: locomotion node, ragdoll, accessories, bodies, look-at, first person, Edge fixed format
+
+- **Question:** What of `NPC_Human_at` and the character setup was still missing (U-140..U-147,
+  U-022..U-025), and how do knocked-out, choked and carried pawns look?
+- **Method:** Ghidra (`FuncDecomp` of the locomotion node steps from its TickAnim 0x0091B280,
+  the Edge fixed decoders 0x009D4D90 / 0x009D5390 / 0x009D6CA0 / 0x009D6D80 and the frame-set
+  dispatcher 0x009DADA0; `ClassDecomp` of the cower and strong-hit-react states; `StrUsers` for
+  the blink node); `class_layout` for the node and config fields; `obj_dump` of `NPC_Human_at`,
+  the Engine class defaults, `DisLookatConfig.DefaultLookatConfig`, the elite guard physics
+  asset and sockets; `tweaks` for pawn, armour and behaviour tweaks; `npc_anim_dump` for the
+  chains and player sets; the 0x00B7F8A0 decompile from the previous round for the accessories.
+- **Findings** (details in `dishonored/ANIMATION.md` §2-§11, `animation/EDGE_ANIM.md`):
+  - Locomotion node: polar velocity smoothing (2000 / 100 / 0.1 class defaults), diagonal ratio
+    `cos + sin` of the angle between loops, sync-group rate `len * speed / sum(w * speed * len)`
+    times the modifier's speed multiplier, modifier crossfade 0.5 s, transitions only below
+    `m_fVelocityToStopMoving`. Start / stop / turn sequences are requested by the locomotion
+    component, not the node.
+  - NPC walk loops have no footfall notifies; the node's `m_bFootOnGround` (feet at sync phases
+    0.44 / 0.94, planted for `m_fFootOnGroundPct` of the cycle) is the footstep source.
+  - Cower = body stance `PanicRecover` (idle loop `Empty_Idle_Panic_Recover`), no chain (U-141).
+  - Directional steps follow `ECardinalDirection` / `eDisDeathDirection` (U-143).
+  - Ambient idles are per behaviour: patrol / guard 30-60 s upper body, stationary search 2-6 s,
+    relaxed none (U-145).
+  - Accessories: roll, weighted pick, static mesh on socket (U-144); Boyle helmets come from
+    `m_PotentialNPCArmor` (`Stm_EliteHelmet` on `Helmet`).
+  - Physics assets: `RB_BodySetup` / `RB_ConstraintSetup` decoded (elite guard 18 bodies, 17
+    joints).
+  - Look-at modes and blink timing from `ArkComponentLookatConfig` (0.5-6 s, rate 1-2).
+  - Weapon sockets `RightHandWpn` / `LeftHandWpn` explain the first-person attach (U-025).
+  - Edge fixed format: 48-bit smallest-three quaternions, raw float vectors (U-022); partial
+    clips omit their last Edge joints (U-024).
+  - No player set has an elixir drinking sequence.
+- **Port changes:** `runtime/npc_anim.rs` (node smoothing, diagonal, rate, start / stop, feet,
+  choke / carry / knock-out states, cower stance, behaviour ambient idles, blink, face slot,
+  look-at grids, direction enums), new `runtime/ragdoll.rs` (presentation ragdoll, fixed steps),
+  `characters.rs` (accessories, model sockets for weapons and accessories, foot-down reports,
+  `DISH_ANIM_DEBUG`), `players.rs` (skinned bodies not tipped over, carried bodies at the
+  carrier), `viewmodel.rs` (choke, carry, powers, gadgets; socket attach), `audio.rs`
+  (`AnimSounds::foot_down`), assets (`read_physics_asset`, `load_lookat_config`,
+  `load_static_model`, `mesh_sockets`, armour and accessory resolution, Edge fixed format, face
+  names, feet). Cache: `<map>.appearance3.json`. `Look::accessories` added.
+- **Validation:** captures in `harness_out/I_cap/` (worktree): `bodies/`, `bodies2/`, `final/`
+  (a Helm1 elite guard choked from behind on Boyle Ext: In / Loop slave poses, Win, carried at
+  the carrier, dropped, the ragdoll at rest on the floor; first-person choke and carry), `crowd/`
+  (Contracts crowd walking). `edge_survey`: 113,232 / 113,232 sequences bake (410 more than
+  before), fixed-format worst frame step 5.8 degrees. Tests: `dishonored_assets/tests/anim_retail.rs`
+  (5), runtime unit tests (ragdoll settling, diagonal, smoothing, feet, directions, sockets).
+  Harness: visual 6/6, travel 13/13, launcher 14/14, audio 64/64, net 8/8 (replay bit-exact).
+- **Open:** U-280 (foot placement, turns, start / stop trigger, small additive hits), U-281
+  (look-at target), U-282 (ragdoll vs PhysX), U-143 thresholds, U-147 dead poses.

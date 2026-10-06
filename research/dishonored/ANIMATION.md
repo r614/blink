@@ -144,9 +144,18 @@ loops share one normalized phase advanced at the sync-group rate; modifier chang
 sequences play when the pawn's speed crosses `m_fVelocityToStartToMove` (60) upward or
 `m_fVelocityToStopMoving` downward (the stop foot from the loop phase), with the root
 translation discarded since the simulation moves the pawn (SPECULATIVE trigger, U-280). Turns
-in place are not played (the simulation turns the pawn; U-280). The sync-group master's clip
-window is reported to `AnimSounds`, so third-person footsteps come from the loops'
-`DishonoredNotify_Footfall` notifies instead of the per-stride fallback.
+in place are not played (the simulation turns the pawn; U-280).
+
+Footsteps: the NPC loops carry no `DishonoredNotify_Footfall` (e.g. `Empty_WalkN` has no
+notifies at all). The node instead keeps `m_bFootOnGround` per `m_Feet` entry (0x009114A0): a
+foot is planted while the circular distance between the group's sync position and the foot's
+`m_fOnGroundPct` (class defaults: left 0.44, right 0.94; Boyle configs keep them) is at most half
+the weighted `m_fFootOnGroundPct` of the moving speed modes (guard walk 0.4, run 0.2; normalized
+when their weights sum below 1). The port evaluates the same and reports each foot touching down
+to `AnimSounds::foot_down`, which plays a footfall like the notify path (0.25 s per foot), so
+third-person NPC steps no longer use the per-stride fallback (LIKELY: the consumer of
+`m_bFootOnGround` that posts the original's NPC footstep was not traced). The sync-group master's clip window
+is also reported, for loops that do have notifies (player rigs, other sets).
 
 ## 4. Animation definitions (`DisAnimDefinitions`)
 
@@ -355,7 +364,7 @@ Data (`DisNPCAnimDefinitions_*`, `Ply_Sword_Choke_as`, `Ply_Empty_CarryCorpse_as
 
 Port (third person, driven by `PlayerState::condition`, `carried_by` and the choke / knock-out /
 drop events): see the §6 table. Carried bodies are drawn at their carrier's root (the slave
-sequences are authored there) and hidden in the carrier's own first-person view. Skinned bodies
+sequences are authored there), also in the carrier's own first-person view, where the body hangs over the shoulder in front of the camera. Skinned bodies
 are no longer tipped over by the renderer (their sequences and ragdoll lay them down) and are
 placed on the standing cylinder's bottom whatever their collision height (this also fixes
 crouched pawns standing below the floor). Weapons are hidden on unconscious and carried pawns.

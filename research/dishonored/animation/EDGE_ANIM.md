@@ -102,8 +102,9 @@ specs of the following type start where the previous generic type's ended (CONFI
   animated path is read the same way (LIKELY: values match their bones' bind translations).
 
 Implementation: `EdgeClip::value_at` / `set_samples` / `const_rotations` / `const_translations`.
-The 410 clips with flags = 2 (fixed rotations) now bake; `tests/anim_retail.rs` checks every
-fixed-rotation clip of Startup for unit quaternions and smooth frame-to-frame motion.
+The 410 clips with flags = 2 (fixed rotations: the doors' `Doors_as` sets of the level audio
+packages) now bake: `edge_survey` bakes 113,232 of 113,232 parsed sequences, and the largest
+frame-to-frame joint turn of the fixed-format clips is 5.8 degrees (median 5.6), i.e. smooth.
 
 ## Sampling
 
@@ -127,8 +128,10 @@ received camera_jnt's translation. CONFIRMED. The earlier elite-guard validation
 plausible because locomotion plays rotations alone; that set is also reordered now.
 
 Some clips carry fewer joints than the set has tracks (e.g. `Powers_Sprint` 29 of 30,
-`Empty_AimAdd*` 67 of 69). Which tracks are dropped is open (U-024). Sampling past the clip's
-joint count returns nothing.
+`Empty_AimAdd*` 67 of 69). The omitted joints are the last ones in Edge order: the five partial
+player clips (`Powers_Sprint`, `Guns_Aims_*`, `ADD_Guns_Aim_UpRight`) drop `sleeve_L_jnt` (and
+`pinky_end_L_jnt`), joints those clips do not animate; no channel table references them (LIKELY,
+U-024). Sampling past the clip's joint count returns nothing, so they keep the pose below.
 
 ## Open items
 

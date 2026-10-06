@@ -110,6 +110,9 @@ pub struct SpeedMode {
     pub start_anims: Vec<String>,
     pub stop_anims: Vec<String>,
     pub turn_anims: Vec<String>,
+    /// `m_fFootOnGroundPct`: fraction of the cycle a foot stays planted (0 for idle modes).
+    #[serde(default)]
+    pub foot_on_ground: f32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -131,6 +134,10 @@ pub struct LocoConfig {
     pub stop_speed: f32,
     #[serde(default = "default_start_speed")]
     pub start_speed: f32,
+    /// `m_Feet[].m_fOnGroundPct`: sync phase at which each foot is planted (class default left
+    /// 0.44, right 0.94).
+    #[serde(default)]
+    pub feet: Vec<f32>,
 }
 
 fn default_stop_speed() -> f32 {
