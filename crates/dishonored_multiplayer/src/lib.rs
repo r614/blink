@@ -85,6 +85,9 @@ pub struct Look {
     /// renderer falls back to the elite-guard sets).
     #[serde(default)]
     pub anim: u16,
+    /// Hats and masks rolled for the pawn (`m_RandomAccessoryInfo`): (static mesh, socket).
+    #[serde(default)]
+    pub accessories: Vec<((String, String), String)>,
 }
 
 /// Presentation stance of every AI pawn, from its brain state (animation only: locomotion

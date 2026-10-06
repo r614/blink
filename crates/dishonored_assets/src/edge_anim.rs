@@ -154,6 +154,21 @@ pub fn recompose_quat(v: [f32; 3], slot: u32) -> Quat {
     Quat::from_xyzw(q[0], q[1], q[2], q[3])
 }
 
+/// Fixed-format rotation (rotation flag clear; 0x009D4D90 constants, 0x009D5390 animated):
+/// 48 bits, big-endian: 1 unused bit, three 15-bit components `v * (sqrt(2) / 32767) -
+/// 1/sqrt(2)` (constants at 0x010C1A20 and 0x0109CBAC), then the 2-bit slot of the rebuilt
+/// component (smallest three, like the generic path).
+pub fn read_fixed_quat(br: &mut BitReader) -> Quat {
+    let _pad = br.read(1);
+    let scale = f32::from_bits(0x3835_065d);
+    let bias = f32::from_bits(0xbf35_04f3);
+    let a = br.read(15) as f32 * scale + bias;
+    let b = br.read(15) as f32 * scale + bias;
+    let c = br.read(15) as f32 * scale + bias;
+    let slot = br.read(2);
+    recompose_quat([a, b, c], slot)
+}
+
 impl EdgeClip {
     pub fn parse(blob: &[u8]) -> Result<Self> {
         ensure!(blob.len() >= 0x60 && u32le(blob, 0) == TAG, "not an Edge animation (tag {:#x})", u32le(blob, 0));
@@ -219,7 +234,15 @@ impl EdgeClip {
 
     /// Constant rotation channels (generic path), as 0x009CD3A0 decodes them.
     pub fn const_rotations(&self) -> Vec<(u16, Quat)> {
-        if self.header.flags & 1 == 0 || self.header.const_r_data == 0 || self.specs.is_empty() {
+        if self.header.const_r_data == 0 {
+            return Vec::new();
+        }
+        if self.header.flags & 1 == 0 {
+            // Fixed format: 48 bits per channel, back to back (0x009D4D90).
+            let mut br = BitReader::new(&self.blob, self.header.const_r_data * 8);
+            return self.const_r_joints.iter().map(|&j| (j, read_fixed_quat(&mut br))).collect();
+        }
+        if self.specs.is_empty() {
             return Vec::new();
         }
         let spec = self.specs[0];
@@ -229,8 +252,12 @@ impl EdgeClip {
 
     /// Constant translation channels (generic path).
     pub fn const_translations(&self) -> Vec<(u16, Vec3)> {
-        if self.header.flags & 2 == 0 || self.header.const_t_data == 0 {
+        if self.header.const_t_data == 0 {
             return Vec::new();
+        }
+        if self.header.flags & 2 == 0 {
+            // Fixed format: three little-endian floats per channel (0x009D6CA0).
+            return self.const_t_joints.iter().enumerate().map(|(c, &j)| (j, Vec3::from_slice(&self.value_at(1, c, (self.header.const_t_data + 12 * c) * 8).0[..3]))).collect();
         }
         let idx = if self.header.flags & 1 != 0 { 1 + self.header.num_anim_r as usize } else { 0 };
         let Some(spec) = self.specs.get(idx).copied() else { return Vec::new() };
@@ -414,6 +441,69 @@ impl EdgeClip {
     }
 }
 
+impl EdgeClip {
+    /// Whether channel type `ty` (0 rotation, 1 translation) uses the generic bit packing.
+    fn generic(&self, ty: usize) -> bool {
+        self.header.flags & (1 << ty) != 0
+    }
+
+    /// One value of channel `c` of type `ty` at `pos` bits: a quaternion (x, y, z, w) for
+    /// rotations, (x, y, z, 0) for translations. Returns the value and its size in bits.
+    /// Fixed-format translations (0x009D6CA0 / 0x009D6D80) are three little-endian floats.
+    fn value_at(&self, ty: usize, c: usize, pos: usize) -> ([f32; 4], usize) {
+        let (spec0, _, _) = self.type_specs(ty);
+        if self.generic(ty) {
+            let spec = self.specs.get(spec0 + c).copied().unwrap_or(PackingSpec::new(0));
+            let mut br = BitReader::new(&self.blob, pos);
+            let v = read_value(&mut br, &spec);
+            let out = if ty == 0 { recompose_quat(v, spec.recompose).to_array() } else { [v[0], v[1], v[2], 0.0] };
+            (out, br.pos - pos)
+        } else if ty == 0 {
+            let mut br = BitReader::new(&self.blob, pos);
+            (read_fixed_quat(&mut br).to_array(), 48)
+        } else {
+            let o = pos / 8;
+            let f = |k: usize| self.blob.get(o + 4 * k..o + 4 * k + 4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(0.0);
+            ([f(0), f(1), f(2), 0.0], 96)
+        }
+    }
+
+    /// Every key of every channel of type `ty` in set `k` (start and closing frames included),
+    /// channel-major, for either channel format.
+    pub fn set_samples(&self, sets: &[FrameSetLayout], k: usize, ty: usize) -> Vec<Vec<(usize, [f32; 4])>> {
+        let (_, n, mask_off) = self.type_specs(ty);
+        let inner = self.inner_frames(sets, k);
+        let sec = self.sections(&sets[k], inner);
+        let mut out = vec![Vec::new(); n];
+        let mut pos = sec.intra[ty] * 8;
+        for (c, o) in out.iter_mut().enumerate() {
+            let (v, bits) = self.value_at(ty, c, pos);
+            o.push((0, v));
+            pos += bits;
+        }
+        let mut pos = sec.keys[ty] * 8;
+        for (c, o) in out.iter_mut().enumerate() {
+            for f in 0..inner {
+                if self.key_bit(&sec, inner, mask_off + c, f) {
+                    let (v, bits) = self.value_at(ty, c, pos);
+                    o.push((f + 1, v));
+                    pos += bits;
+                }
+            }
+        }
+        if sec.q_header != 0 && k + 1 < sets.len() {
+            let nsec = self.sections(&sets[k + 1], self.inner_frames(sets, k + 1));
+            let mut pos = nsec.intra[ty] * 8;
+            for (c, o) in out.iter_mut().enumerate() {
+                let (v, bits) = self.value_at(ty, c, pos);
+                o.push((inner + 1, v));
+                pos += bits;
+            }
+        }
+        out
+    }
+}
+
 /// A clip decoded to per-frame local joint transforms (`None` = joint not driven).
 #[derive(Debug, Clone)]
 pub struct BakedClip {
@@ -435,7 +525,6 @@ impl EdgeClip {
     /// translations; normalised lerp with hemisphere fix for rotations).
     pub fn bake(&self) -> Result<BakedClip> {
         let h = &self.header;
-        ensure!(h.flags & 3 == 3, "fixed-format (non bit-packed) channels not supported yet (flags {})", h.flags);
         let nj = h.num_joints as usize;
         let nf = h.num_frames as usize;
         let mut rot = vec![vec![None; nj]; nf];
@@ -459,15 +548,13 @@ impl EdgeClip {
             let start = sets[k].start_frame as usize;
             let inner = self.inner_frames(&sets, k);
             for ty in 0..2 {
-                let (spec0, _, _) = self.type_specs(ty);
                 let joints = if ty == 0 { &self.anim_r_joints } else { &self.anim_t_joints };
-                let keys = self.set_keys(&sets, k, ty, KeyOrder::ChannelMajor);
+                let keys = self.set_samples(&sets, k, ty);
                 for (c, ch) in keys.iter().enumerate() {
                     let j = joints[c] as usize;
                     if j >= nj {
                         continue;
                     }
-                    let slot = self.specs[spec0 + c].recompose;
                     // Last set has a single frame (its initial frame).
                     let last = if k + 1 < sets.len() { inner + 1 } else { 0 };
                     for lf in 0..=last {
@@ -479,14 +566,14 @@ impl EdgeClip {
                         let (a, b) = (ch[i.saturating_sub(1)], ch.get(i).copied().unwrap_or(ch[i.saturating_sub(1)]));
                         let t = if b.0 > a.0 { (lf - a.0) as f32 / (b.0 - a.0) as f32 } else { 0.0 };
                         if ty == 0 {
-                            let qa = recompose_quat(a.1, slot);
-                            let mut qb = recompose_quat(b.1, slot);
+                            let qa = Quat::from_array(a.1);
+                            let mut qb = Quat::from_array(b.1);
                             if qa.dot(qb) < 0.0 {
                                 qb = -qb;
                             }
                             rot[f][j] = Some(qa.lerp(qb, t).normalize());
                         } else {
-                            tr[f][j] = Some(Vec3::from(lerp3(a.1, b.1, t)));
+                            tr[f][j] = Some(Vec3::from(lerp3([a.1[0], a.1[1], a.1[2]], [b.1[0], b.1[1], b.1[2]], t)));
                         }
                     }
                 }

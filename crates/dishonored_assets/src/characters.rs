@@ -96,54 +96,7 @@ pub fn load_model_with(content: &Content, name: &str, parts: &[(&str, &str)], ov
                 }),
             };
             let material = match target {
-                Some(mi) => *mat_ids.entry((mpkg_name.clone(), mi)).or_insert_with(|| {
-                    let pkg = &mpkg;
-                    let res = resolve_material(pkg, ObjRef::Export(mi)).unwrap_or_default();
-                    // Full Arkane chain (instance -> parents in DishonoredGame/Startup) for the
-                    // specular/emissive slots, scalars and blend state, as for level materials.
-                    let (pkgs, chain) = character_chain(content, pkg, mi);
-                    let mut tex_key = |k: Option<(usize, usize)>| -> Option<usize> {
-                        let (slot, ti) = k?;
-                        let p = pkgs.get(slot)?.clone();
-                        *tex_ids.entry((p.name.clone(), ti)).or_insert_with(|| match read_texture(content, &p, ti, max_tex) {
-                            Ok(t) => {
-                                model.textures.push(t);
-                                Some(model.textures.len() - 1)
-                            }
-                            Err(_) => None,
-                        })
-                    };
-                    let local = |r: Option<ObjRef>| match r {
-                        Some(ObjRef::Export(ti)) => Some((0usize, ti)),
-                        _ => None,
-                    };
-                    let diffuse = tex_key(crate::material_chain::slot(&chain, "d_", &["mask"]).or(chain.diffuse_input)).or_else(|| tex_key(local(res.diffuse)));
-                    let normal = tex_key(crate::material_chain::slot(&chain, "n_", &[]).or(chain.normal_input)).or_else(|| tex_key(local(res.normal)));
-                    let specular = tex_key(crate::material_chain::slot(&chain, "s_", &["mask"]));
-                    let emissive = tex_key(crate::material_chain::slot(&chain, "e_", &["mask"]));
-                    let masked = res.masked || chain.blend_mode.as_deref() == Some("BLEND_Masked");
-                    let blend = match chain.blend_mode.as_deref() {
-                        Some("BLEND_Translucent") | Some("BLEND_AlphaComposite") => MaterialBlend::Translucent,
-                        Some("BLEND_Additive") => MaterialBlend::Additive,
-                        _ if masked => MaterialBlend::Masked,
-                        _ => MaterialBlend::Opaque,
-                    };
-                    model.material_params.push(MaterialParams {
-                        specular,
-                        emissive,
-                        blend,
-                        blend_known: chain.base_material.is_some(),
-                        two_sided: chain.two_sided.unwrap_or(false),
-                        unlit: chain.lighting_model.as_deref() == Some("MLM_Unlit"),
-                        opacity_clip: chain.opacity_clip.unwrap_or(0.3333),
-                        scalars: chain.scalars.clone(),
-                        vectors: chain.vectors.clone(),
-                        base_material: chain.base_material.clone(),
-                        ..Default::default()
-                    });
-                    model.materials.push(MaterialAsset { source: pkg.obj_path(ObjRef::Export(mi)), diffuse, normal, blend: if masked { BlendHint::Masked } else { BlendHint::Opaque }, texture_params: Vec::new(), contact_type: None });
-                    Some(model.materials.len() - 1)
-                }),
+                Some(mi) => *mat_ids.entry((mpkg_name.clone(), mi)).or_insert_with(|| push_material(content, &mpkg, mi, max_tex, &mut model, &mut tex_ids)),
                 _ => None,
             };
             sections.push(MeshSection { first_index: s.first_index, num_triangles: s.num_triangles, material, enable_collision: false });
@@ -177,6 +130,122 @@ pub fn load_model_with(content: &Content, name: &str, parts: &[(&str, &str)], ov
         p.mesh_to_pawn = lift * p.mesh_to_pawn;
     }
     Ok(model)
+}
+
+/// Resolve one character material (instance chain into DishonoredGame / Startup for the
+/// specular and emissive slots, scalars and blend state, as for level materials), adding it and
+/// its textures to `model`. Returns its index.
+fn push_material(content: &Content, pkg: &std::sync::Arc<ue3_package::Package>, mi: usize, max_tex: u32, model: &mut CharacterModel, tex_ids: &mut HashMap<(String, usize), Option<usize>>) -> Option<usize> {
+    let res = resolve_material(pkg, ObjRef::Export(mi)).unwrap_or_default();
+    let (pkgs, chain) = character_chain(content, pkg, mi);
+    let mut tex_key = |k: Option<(usize, usize)>| -> Option<usize> {
+        let (slot, ti) = k?;
+        let p = pkgs.get(slot)?.clone();
+        *tex_ids.entry((p.name.clone(), ti)).or_insert_with(|| match read_texture(content, &p, ti, max_tex) {
+            Ok(t) => {
+                model.textures.push(t);
+                Some(model.textures.len() - 1)
+            }
+            Err(_) => None,
+        })
+    };
+    let local = |r: Option<ObjRef>| match r {
+        Some(ObjRef::Export(ti)) => Some((0usize, ti)),
+        _ => None,
+    };
+    let diffuse = tex_key(crate::material_chain::slot(&chain, "d_", &["mask"]).or(chain.diffuse_input)).or_else(|| tex_key(local(res.diffuse)));
+    let normal = tex_key(crate::material_chain::slot(&chain, "n_", &[]).or(chain.normal_input)).or_else(|| tex_key(local(res.normal)));
+    let specular = tex_key(crate::material_chain::slot(&chain, "s_", &["mask"]));
+    let emissive = tex_key(crate::material_chain::slot(&chain, "e_", &["mask"]));
+    let masked = res.masked || chain.blend_mode.as_deref() == Some("BLEND_Masked");
+    let blend = match chain.blend_mode.as_deref() {
+        Some("BLEND_Translucent") | Some("BLEND_AlphaComposite") => MaterialBlend::Translucent,
+        Some("BLEND_Additive") => MaterialBlend::Additive,
+        _ if masked => MaterialBlend::Masked,
+        _ => MaterialBlend::Opaque,
+    };
+    model.material_params.push(MaterialParams {
+        specular,
+        emissive,
+        blend,
+        blend_known: chain.base_material.is_some(),
+        two_sided: chain.two_sided.unwrap_or(false),
+        unlit: chain.lighting_model.as_deref() == Some("MLM_Unlit"),
+        opacity_clip: chain.opacity_clip.unwrap_or(0.3333),
+        scalars: chain.scalars.clone(),
+        vectors: chain.vectors.clone(),
+        base_material: chain.base_material.clone(),
+        ..Default::default()
+    });
+    model.materials.push(MaterialAsset { source: pkg.obj_path(ObjRef::Export(mi)), diffuse, normal, blend: if masked { BlendHint::Masked } else { BlendHint::Opaque }, texture_params: Vec::new(), contact_type: None });
+    Some(model.materials.len() - 1)
+}
+
+/// A `StaticMesh` (accessories: hats, masks) as a one-bone model in its own mesh space, so it
+/// renders through the same skinned path as weapons and follows a socket.
+pub fn load_static_model(content: &Content, pkg_name: &str, path: &str, max_tex: u32) -> Result<CharacterModel> {
+    let pkg = content.package(pkg_name)?;
+    let idx = (0..pkg.exports.len())
+        .find(|&i| pkg.export_class(i) == "StaticMesh" && pkg.obj_path(ObjRef::Export(i)).eq_ignore_ascii_case(path))
+        .with_context(|| format!("{path} not in {pkg_name}"))?;
+    let raw = crate::static_mesh::read_static_mesh(&pkg, idx)?;
+    let mut model = CharacterModel { name: path.to_string(), parts: Vec::new(), materials: Vec::new(), material_params: Vec::new(), textures: Vec::new() };
+    let mut tex_ids = HashMap::new();
+    let mut mat_ids: HashMap<usize, Option<usize>> = HashMap::new();
+    let mut sections = Vec::new();
+    for s in &raw.sections {
+        let material = match ObjRef::from_index(s.material) {
+            ObjRef::Export(mi) => *mat_ids.entry(mi).or_insert_with(|| push_material(content, &pkg, mi, max_tex, &mut model, &mut tex_ids)),
+            _ => None,
+        };
+        sections.push(MeshSection { first_index: s.first_index, num_triangles: s.num_triangles, material, enable_collision: false });
+    }
+    let n = raw.positions.len();
+    model.parts.push(SkeletalMeshAsset {
+        source: path.to_string(),
+        positions: raw.positions,
+        normals: raw.normals,
+        uv0: raw.uvs.first().cloned().unwrap_or_else(|| vec![glam::Vec2::ZERO; n]),
+        joints: vec![[0; 4]; n],
+        weights: vec![[1.0, 0.0, 0.0, 0.0]; n],
+        indices: raw.indices.iter().map(|i| *i as u32).collect(),
+        sections,
+        bones: vec![BoneAsset { name: "root".into(), parent: -1, rotation: glam::Quat::IDENTITY, translation: Vec3::ZERO }],
+        mesh_to_pawn: Mat4::IDENTITY,
+    });
+    Ok(model)
+}
+
+/// A `SkeletalMeshSocket` of a skeletal mesh: bone, offset and rotation relative to the bone.
+#[derive(Debug, Clone)]
+pub struct MeshSocket {
+    pub name: String,
+    pub bone: String,
+    pub location: Vec3,
+    pub rotation: [i32; 3],
+}
+
+/// The `Sockets` of a skeletal mesh (package, object path).
+pub fn mesh_sockets(content: &Content, pkg_name: &str, path: &str) -> Result<Vec<MeshSocket>> {
+    use ue3_package::properties::{Value, find};
+    let pkg = content.package(pkg_name)?;
+    let idx = (0..pkg.exports.len())
+        .find(|&i| pkg.export_class(i) == "SkeletalMesh" && pkg.obj_path(ObjRef::Export(i)).eq_ignore_ascii_case(path))
+        .with_context(|| format!("{path} not in {pkg_name}"))?;
+    let h = pkg.read_object(idx)?;
+    let mut out = Vec::new();
+    for s in find(&h.properties, "Sockets").and_then(|p| p.array_objects().ok()).unwrap_or_default() {
+        let ObjRef::Export(e) = ObjRef::from_index(s) else { continue };
+        let Ok(sh) = pkg.read_object(e) else { continue };
+        let name = |n: &str| match find(&sh.properties, n).map(|p| &p.value) {
+            Some(Value::Name(s)) => s.clone(),
+            _ => String::new(),
+        };
+        let location = find(&sh.properties, "RelativeLocation").and_then(|p| p.as_vector()).map(Vec3::from).unwrap_or(Vec3::ZERO);
+        let rotation = find(&sh.properties, "RelativeRotation").and_then(|p| p.as_rotator()).unwrap_or([0; 3]);
+        out.push(MeshSocket { name: name("SocketName"), bone: name("BoneName"), location, rotation });
+    }
+    Ok(out)
 }
 
 /// Global (mesh-space) bind matrices from local bones (quaternions used as stored; this
@@ -291,7 +360,7 @@ pub fn resolve_appearances(content: &Content, level_packages: &[String], tweaks:
     for p in level_packages {
         let Ok(pkg) = content.package(p) else { continue };
         for i in 0..pkg.exports.len() {
-            if matches!(pkg.export_class(i).as_str(), "SkeletalMesh" | "AnimSet" | "ArkComponentLocomotionConfig") {
+            if matches!(pkg.export_class(i).as_str(), "SkeletalMesh" | "AnimSet" | "ArkComponentLocomotionConfig" | "PhysicsAsset" | "StaticMesh") {
                 meshes.entry(pkg.obj_path(ObjRef::Export(i)).to_ascii_lowercase()).or_insert_with(|| p.clone());
             }
         }
@@ -353,6 +422,76 @@ pub fn resolve_appearances(content: &Content, level_packages: &[String], tweaks:
             a.anim.defs = o.rsplit('.').next().unwrap_or("").to_string();
         }
         a.anim.ragdoll_on_death = matches!(m.get("m_bRagdollOnDeath"), Some(TVal::B(true)));
+        if let Some(TVal::Obj(o)) = m.get("m_pPhysicsAsset") {
+            a.anim.physics = locate(o);
+        }
+        // Look-at configs are cooked into DishonoredGame (`DisLookatConfig.*`).
+        if let Some(TVal::Obj(o)) = m.get("m_pComponentLookatConfig") {
+            a.anim.lookat = locate(o).or_else(|| Some(("DishonoredGame".to_string(), o.clone())));
+        }
+        // Accessories: `m_RandomAccessoryInfo[Hat, Mask]` with `m_HatMeshes` / `m_MaskMeshes`.
+        // A static array: element 0 under the plain name, element i under "name[i]".
+        let info: Vec<f32> = ["m_RandomAccessoryInfo", "m_RandomAccessoryInfo[1]"]
+            .iter()
+            .map(|k| match m.get(*k) {
+                Some(TVal::Struct(s)) => match s.get("m_fRandomChanceOfUse") {
+                    Some(TVal::F(f)) => *f,
+                    _ => 0.0,
+                },
+                _ => 0.0,
+            })
+            .collect();
+        for (i, list) in ["m_HatMeshes", "m_MaskMeshes"].iter().enumerate() {
+            let Some(TVal::List(l)) = m.get(*list) else { continue };
+            let meshes: Vec<dishonored_ir::spawners::AccessoryMesh> = l
+                .iter()
+                .filter_map(|e| {
+                    let Some(TVal::Obj(o)) = e.get("m_pMesh") else { return None };
+                    let socket = match e.get("m_SocketName") {
+                        Some(TVal::Name(n)) | Some(TVal::Str(n)) => n.clone(),
+                        _ => String::new(),
+                    };
+                    let chance = match e.get("m_fRandomChance") {
+                        Some(TVal::F(f)) => *f,
+                        _ => 0.0,
+                    };
+                    Some(dishonored_ir::spawners::AccessoryMesh { mesh: locate(o)?, socket, chance })
+                })
+                .collect();
+            if !meshes.is_empty() {
+                while a.accessories.len() <= i {
+                    a.accessories.push(Default::default());
+                }
+                a.accessories[i] = dishonored_ir::spawners::AccessorySlot { chance_of_use: info.get(i).copied().unwrap_or(0.0), meshes };
+            }
+        }
+        // Armour (`m_PotentialNPCArmor`: `m_fPercentChance`, `DisTweaks_Armor`): the armour's
+        // static mesh (its dropped-item movable tweak's `m_pStaticMesh`) on
+        // `m_EquippedSocketName` (elite guard helmets on the "Helmet" socket).
+        if let Some(TVal::List(armor)) = m.get("m_PotentialNPCArmor") {
+            for e in armor {
+                let chance = match e.get("m_fPercentChance") {
+                    Some(TVal::F(f)) => *f,
+                    _ => 0.0,
+                };
+                let Some(TVal::Obj(t)) = e.get("m_pArmor") else { continue };
+                let Some(at) = db.try_resolve(t) else { continue };
+                let socket = match at.get("m_EquippedSocketName") {
+                    Some(TVal::Name(n)) | Some(TVal::Str(n)) => n.clone(),
+                    _ => continue,
+                };
+                let mesh = match at.get("m_pDoppedItemTweaks") {
+                    Some(TVal::Obj(mt)) => db.try_resolve(mt).and_then(|mv| match mv.get("m_pStaticMesh") {
+                        Some(TVal::Obj(sm)) => locate(sm),
+                        _ => None,
+                    }),
+                    _ => None,
+                };
+                if let Some(mesh) = mesh {
+                    a.accessories.push(dishonored_ir::spawners::AccessorySlot { chance_of_use: chance, meshes: vec![dishonored_ir::spawners::AccessoryMesh { mesh, socket, chance: 1.0 }] });
+                }
+            }
+        }
         out.insert(t.clone(), a);
     }
     Ok(out)

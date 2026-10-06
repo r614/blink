@@ -40,6 +40,50 @@ pub struct CharacterLibrary {
     material_index: Option<HashMap<String, String>>,
     /// Entries of `MatchView::appearances` loaded so far (model `APPEARANCE_BASE + i`).
     pub looks: usize,
+    /// Per model: hats and masks on sockets (`DisPawnAccessoryMesh`, U-144).
+    pub accessories: HashMap<usize, Vec<Accessory>>,
+    /// Static meshes loaded for accessories, by (package, path).
+    accessory_meshes: HashMap<(String, String), Option<CharacterGpu>>,
+    /// Per model: its skeletal meshes' sockets (weapons, accessories).
+    pub sockets: HashMap<usize, Vec<ModelSocket>>,
+}
+
+/// A static mesh attached to a socket of a model's skeleton.
+#[derive(Clone)]
+pub struct Accessory {
+    pub gpu: CharacterGpu,
+    /// Part and bone of the socket.
+    pub part: usize,
+    pub bone: usize,
+    /// Socket transform relative to the bone (`RelativeLocation`, `RelativeRotation`).
+    pub local: glam::Mat4,
+}
+
+#[derive(Component)]
+pub struct AccessoryJoint(pub usize);
+
+/// A `SkeletalMeshSocket` of one of a model's parts, bound to the model's bone.
+#[derive(Clone, Debug)]
+pub struct ModelSocket {
+    pub name: String,
+    pub part: usize,
+    pub bone: usize,
+    /// Socket transform relative to the bone.
+    pub local: glam::Mat4,
+}
+
+/// The sockets of every part of a model (parts given as (package, skeletal mesh path)).
+fn model_sockets(content: &dishonored_assets::Content, parts: &[(String, String)], gpu: &CharacterGpu) -> Vec<ModelSocket> {
+    let mut out = Vec::new();
+    for (pi, (pkg, path)) in parts.iter().enumerate() {
+        let Some(part) = gpu.parts.get(pi) else { continue };
+        for s in dishonored_assets::characters::mesh_sockets(content, pkg, path).unwrap_or_default() {
+            let Some(bone) = part.bones.iter().position(|b| b.name.eq_ignore_ascii_case(&s.bone)) else { continue };
+            let local = glam::Mat4::from_translation(s.location) * dishonored_assets::util::rotator_matrix(s.rotation[0], s.rotation[1], s.rotation[2]);
+            out.push(ModelSocket { name: s.name, part: pi, bone, local });
+        }
+    }
+    out
 }
 
 /// C: Dishonored pawn space (Z-up, uu) -> Bevy (Y-up, scaled).
@@ -117,9 +161,15 @@ pub fn load_library(
     let mut lib = CharacterLibrary::default();
     let hh = session.content.sim.gameplay.movement.collision_half_height;
     let Ok(content) = dishonored_assets::Content::locate() else { return };
-    for (name, _) in ARCHETYPES {
+    for (name, parts) in ARCHETYPES {
         match load_character(&content, name, hh, 1024) {
-            Ok(m) => lib.models.push(upload(&m, &mut meshes, &mut images, &mut mats, &mut binds, &feat)),
+            Ok(m) => {
+                let gpu = upload(&m, &mut meshes, &mut images, &mut mats, &mut binds, &feat);
+                let owned: Vec<(String, String)> = parts.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+                let i = lib.models.len();
+                lib.sockets.insert(i, model_sockets(&content, &owned, &gpu));
+                lib.models.push(gpu);
+            }
             Err(e) => warn!("character {name}: {e:#}"),
         }
     }
@@ -159,6 +209,14 @@ pub fn spawn_character(commands: &mut Commands, root: Entity, lib: &CharacterLib
             ));
         }
     }
+    // Accessories: one joint each, placed on its socket every frame (`animate_characters`).
+    for (ai, acc) in lib.accessories.get(&(archetype % lib.models.len())).into_iter().flatten().enumerate() {
+        let Some(part) = acc.gpu.parts.first() else { continue };
+        let joint = commands.spawn((Transform::default(), AccessoryJoint(ai), ChildOf(root))).id();
+        for (mesh, mat) in &part.sections {
+            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), SkinnedMesh { inverse_bindposes: part.inverse_bindposes.clone(), joints: vec![joint] }, Transform::default(), bevy::camera::visibility::NoFrustumCulling, ChildOf(root)));
+        }
+    }
 }
 
 /// Third-person weapon models (shared by all characters; NPC skeletons have the same
@@ -185,6 +243,10 @@ pub struct TpWeaponGpu {
     /// Weapon mesh space -> socket space (U-025: blades leave the thumb side of the fist).
     pub to_socket: glam::Mat4,
     pub bind: Vec<glam::Mat4>,
+    /// Weapon mesh Origin / RotOrigin (applied after the socket, as the original attaches).
+    pub m2p: glam::Mat4,
+    /// Socket of the character mesh the weapon attaches to.
+    pub socket: &'static str,
 }
 
 #[derive(Resource, Default)]
@@ -209,7 +271,8 @@ pub fn load_weapons(
                 let part = &w.parts[0];
                 let inv = part.mesh_to_pawn.inverse();
                 let to_socket = if *blade { glam::Mat4::from_rotation_z(std::f32::consts::PI) * inv } else { inv };
-                lib.weapons.push(TpWeaponGpu { kind: *kind, socket_name: socket, to_socket, bind: bind_globals(&part.bones), gpu: upload(&w, &mut meshes, &mut images, &mut mats, &mut binds, &feat) });
+                let sock = if *blade { "RightHandWpn" } else { "LeftHandWpn" };
+                lib.weapons.push(TpWeaponGpu { kind: *kind, socket_name: socket, to_socket, bind: bind_globals(&part.bones), m2p: part.mesh_to_pawn, socket: sock, gpu: upload(&w, &mut meshes, &mut images, &mut mats, &mut binds, &feat) });
             }
             Err(e) => warn!("weapon {path}: {e:#}"),
         }
@@ -309,6 +372,17 @@ fn collect_hits(events: &[dishonored_sim::events::SimEvent], all: &[&PlayerState
             E::Death { victim, killer, .. } => out.entry(victim).or_default().push((H::Death, pos(killer, victim))),
             E::SwordSwing { id } => out.entry(id).or_default().push((H::Swing, glam::Vec3::ZERO)),
             E::SwordParried { attacker, defender } => out.entry(defender).or_default().push((H::Parried, pos(Some(attacker), defender))),
+            E::KnockedOut { victim, by, cause } if cause != dishonored_sim::events::KnockoutCause::Choke => out.entry(victim).or_default().push((H::KnockedOut, pos(by, victim))),
+            E::ChokeEnd { attacker, victim, outcome } => {
+                use dishonored_sim::events::ChokeOutcome as O;
+                let k = match outcome {
+                    O::Win => H::ChokeWin,
+                    O::Lose => H::ChokeLose,
+                    _ => H::ChokeCancel,
+                };
+                out.entry(victim).or_default().push((k, pos(Some(attacker), victim)));
+            }
+            E::BodyDropped { carrier, body } => out.entry(body).or_default().push((H::Dropped, pos(Some(carrier), body))),
             _ => {}
         }
     }
@@ -318,6 +392,26 @@ fn collect_hits(events: &[dishonored_sim::events::SimEvent], all: &[&PlayerState
 /// Clip and time of the full-body and upper-body chains (for the sound notifies).
 fn chain_clips(st: &crate::npc_anim::PawnAnim) -> Vec<(String, f32)> {
     [st.full.as_ref(), st.upper.as_ref()].into_iter().flatten().filter_map(|c| c.steps.get(c.i).map(|s| (s.0.clone(), c.t))).collect()
+}
+
+/// What an NPC looks at (APPROXIMATION, U-281: the original's look-at requests come from the
+/// AI's attention and conversations, which the host does not publish): the nearest living
+/// human player within 2000 uu while the pawn notices, searches, fights, panics or cowers, and
+/// within 600 uu while it talks.
+fn look_target(p: &PlayerState, stance: Option<dishonored_ir::npc_anim::NpcStance>, talking: bool, all: &[&PlayerState]) -> Option<glam::Vec3> {
+    use dishonored_ir::npc_anim::NpcStance as S;
+    use dishonored_sim::state::PawnKind;
+    if p.kind == PawnKind::Human || !p.alive || p.incapacitated() {
+        return None;
+    }
+    let alert = matches!(stance, Some(S::Notice | S::Search | S::Combat | S::Panic | S::Cower));
+    let range = if alert { 2000.0 } else if talking { 600.0 } else { return None };
+    all.iter()
+        .filter(|o| o.kind == PawnKind::Human && o.alive && o.id != p.id)
+        .map(|o| (o.position.distance(p.position), o))
+        .filter(|(d, _)| *d < range)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, o)| o.position + glam::Vec3::Z * 60.0)
 }
 
 /// Pawns speaking a conversation line right now (mission NPC ids resolved to pawns).
@@ -341,10 +435,12 @@ pub fn animate_characters(
     mut view: ResMut<crate::session::SessionView>,
     time: Res<Time>,
     roots: Query<(Entity, &CharacterRoot, &crate::players::PlayerBody, &Children)>,
-    mut joints: Query<(&Joint, &mut Transform), Without<TpWeaponJoint>>,
-    mut wjoints: Query<(&TpWeaponJoint, &mut Transform), Without<Joint>>,
+    mut joints: Query<(&Joint, &mut Transform), (Without<TpWeaponJoint>, Without<AccessoryJoint>)>,
+    mut wjoints: Query<(&TpWeaponJoint, &mut Transform), (Without<Joint>, Without<AccessoryJoint>)>,
+    mut ajoints: Query<(&AccessoryJoint, &mut Transform), (Without<Joint>, Without<TpWeaponJoint>)>,
     mut wmeshes: Query<(&TpWeaponMesh, &mut Visibility)>,
     mut anim_sounds: Option<ResMut<crate::audio::AnimSounds>>,
+    session: Res<crate::session::Session>,
 ) {
     let events = std::mem::take(&mut view.anim_events);
     let (Some(lib), Some(mut bank)) = (lib, bank) else { return };
@@ -353,6 +449,7 @@ pub fn animate_characters(
     let hits = collect_hits(&events, &all);
     let talking = talking_pawns(&view);
     let dt = time.delta_secs().min(0.1);
+    let mv = &session.content.sim.gameplay.movement;
     for (entity, root, body, children) in &roots {
         let Some(p) = all.iter().find(|p| p.id == body.0).copied() else { continue };
         let model = &lib.models[root.archetype];
@@ -360,7 +457,7 @@ pub fn animate_characters(
         let armed = right_w.is_some() || left_w.is_some() || p.kind == dishonored_sim::state::PawnKind::Guard;
         let profile = pawn_profile(&mut bank, root.archetype, p, armed);
         let stance = view.matchv.npc_poses.iter().find(|x| x.0 == p.id).map(|x| x.1);
-        let input = crate::npc_anim::AnimInput { p, stance, armed, talking: talking.contains(&p.id), dt, hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]) };
+        let input = crate::npc_anim::AnimInput { p, stance, armed, talking: talking.contains(&p.id), dt, hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), look_target: look_target(p, stance, talking.contains(&p.id), &all), floor: -mv.collision_half_height, gravity: mv.gravity_z, carrier_speed: p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).map(|c| c.velocity.truncate().length()).unwrap_or(0.0) };
         let pose = match states.get_mut(entity) {
             Ok(mut st) => {
                 let before = chain_clips(&st);
@@ -370,6 +467,16 @@ pub fn animate_characters(
                     for (clip, t1) in chain_clips(&st) {
                         if let Some((_, t0)) = before.iter().find(|b| b.0 == clip) {
                             snd.advance(p.id, &clip, *t0, t1, false);
+                        }
+                    }
+                    // Locomotion: the sync group's master fires the notifies (footfalls).
+                    // Reversed loops play from the end backwards.
+                    if let Some((clip, rev, p0, p1)) = st.loco_master.clone() {
+                        if let Some(d) = bank.duration(profile, &clip) {
+                            let full_body = st.full.as_ref().is_some_and(|c| c.weight > 0.5);
+                            if !full_body {
+                                if rev { snd.advance(p.id, &clip, d * (1.0 - p1), d * (1.0 - p0), true) } else { snd.advance(p.id, &clip, p0 * d, p1 * d, true) }
+                            }
                         }
                     }
                 }
@@ -389,17 +496,30 @@ pub fn animate_characters(
                     *t = Transform::from_matrix(to_bevy(*m));
                 }
             }
+            if let Ok((a, mut t)) = ajoints.get_mut(c) {
+                if let Some(acc) = lib.accessories.get(&root.archetype).and_then(|v| v.get(a.0)) {
+                    if let Some(m) = globals.get(acc.part).and_then(|v| v.get(acc.bone)) {
+                        *t = Transform::from_matrix(to_bevy(*m * acc.local));
+                    }
+                }
+            }
         }
         let Some(weapons) = weapons.as_ref() else { continue };
         let body_bones = &model.parts[0].bones;
         for c in children.iter() {
             if let Ok((wm, mut vis)) = wmeshes.get_mut(c) {
                 let k = weapons.weapons[wm.0].kind;
-                let show = p.alive && p.mode != MoveMode::Blinking && (Some(k) == right_w || Some(k) == left_w);
+                let show = p.alive && p.condition != dishonored_sim::state::Condition::Unconscious && p.carried_by.is_none() && p.mode != MoveMode::Blinking && (Some(k) == right_w || Some(k) == left_w);
                 *vis = if show { Visibility::Inherited } else { Visibility::Hidden };
             }
             if let Ok((wj, mut t)) = wjoints.get_mut(c) {
                 let w = &weapons.weapons[wj.weapon];
+                // The character mesh's weapon socket, then the weapon's Origin / RotOrigin (U-025);
+                // meshes without the socket keep the bone with the earlier visual offset.
+                if let Some(s) = lib.sockets.get(&root.archetype).and_then(|v| v.iter().find(|s| s.name.eq_ignore_ascii_case(w.socket))) {
+                    *t = Transform::from_matrix(to_bevy(globals[s.part][s.bone] * s.local * w.m2p * w.bind[wj.bone]));
+                    continue;
+                }
                 let Some(sock) = body_bones.iter().position(|b| b.name.eq_ignore_ascii_case(w.socket_name)) else { continue };
                 *t = Transform::from_matrix(to_bevy(globals[0][sock] * w.to_socket * w.bind[wj.bone]));
             }
@@ -476,6 +596,35 @@ pub fn load_appearances(
             None => *bank.model_profile.get(&1).unwrap_or(&0),
         };
         bank.model_profile.insert(lib.models.len(), profile);
+        // Accessories rolled for this look: the static mesh on the named socket of one of the
+        // look's skeletal meshes (body or head).
+        let sockets = model_sockets(&content, parts, &gpu);
+        let mut accs = Vec::new();
+        for ((pkg, path), socket) in &look.accessories {
+            let key = (pkg.clone(), path.clone());
+            if !lib.accessory_meshes.contains_key(&key) {
+                let g = match dishonored_assets::characters::load_static_model(&content, pkg, path, 512) {
+                    Ok(m) => Some(upload(&m, &mut meshes, &mut images, &mut mats, &mut binds, &feat)),
+                    Err(e) => {
+                        warn!("accessory {path}: {e:#}");
+                        None
+                    }
+                };
+                lib.accessory_meshes.insert(key.clone(), g);
+            }
+            let Some(agpu) = lib.accessory_meshes.get(&key).cloned().flatten() else { continue };
+            let found = sockets.iter().find(|s| s.name.eq_ignore_ascii_case(socket)).map(|s| (s.part, s.bone, s.local));
+            match found {
+                Some((part, bone, local)) => accs.push(Accessory { gpu: agpu, part, bone, local }),
+                None => warn!("accessory {path}: socket {socket} not found"),
+            }
+        }
+        if !accs.is_empty() {
+            let mi = lib.models.len();
+            lib.accessories.insert(mi, accs);
+        }
+        let mi = lib.models.len();
+        lib.sockets.insert(mi, sockets);
         lib.models.push(gpu);
         lib.looks += 1;
     }

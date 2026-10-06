@@ -64,9 +64,17 @@ pub fn setup_player_assets(mut commands: Commands, mut meshes: ResMut<Assets<Mes
     });
 }
 
-fn body_transform(p: &PlayerState, mv: &dishonored_ir::gameplay::MovementConfig) -> Transform {
+/// Transform of a pawn's body. Skinned characters stay upright (their death sequences and
+/// ragdoll lay them down); the capsule fallback is tipped over.
+fn body_transform(p: &PlayerState, mv: &dishonored_ir::gameplay::MovementConfig, skinned: bool) -> Transform {
     let mut t = Transform::from_translation(coords::pos(p.position));
-    if !p.alive {
+    if skinned {
+        // Bodies lying down keep the standing frame: the model's feet are on the standing
+        // cylinder's bottom whatever the collision height.
+        let hh = half_height(p, mv);
+        t.translation = coords::pos(p.position - glam::Vec3::Z * (hh - mv.collision_half_height));
+        t.rotation = Quat::from_rotation_y(-p.yaw.to_radians());
+    } else if !p.alive {
         // Lying on the ground.
         let hh = half_height(p, mv);
         t.translation = coords::pos(p.position - glam::Vec3::Z * (hh - mv.collision_radius));
@@ -122,10 +130,10 @@ pub fn sync_players(
             }
             Some(p) => {
                 seen.insert(p.id, true);
-                *t = body_transform(p, mv);
+                *t = { let carrier = p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).filter(|_| root.is_some()); body_transform(carrier.copied().unwrap_or(p), mv, root.is_some()) };
                 if let Some(mesh) = mesh.as_mut() { mesh.0 = if p.crouched { assets.crouch_body.clone() } else { assets.body.clone() }; }
                 if let Some(mat) = mat.as_mut() { mat.0 = if p.alive { assets.materials[p.id as usize % assets.materials.len()].clone() } else { assets.dead.clone() }; }
-                let hide = Some(p.id) == me_id && !third && cams.iter().all(|c| c.follow.is_none_or(|f| f == p.id));
+                let hide = (Some(p.id) == me_id || (p.carried_by.is_some() && p.carried_by == me_id)) && !third && cams.iter().all(|c| c.follow.is_none_or(|f| f == p.id));
                 *vis = if hide || p.mode == MoveMode::Blinking { Visibility::Hidden } else { Visibility::Inherited };
             }
             None => { commands.entity(e).despawn(); }
@@ -135,7 +143,7 @@ pub fn sync_players(
         match all.iter().find(|p| p.id == s.0) {
             Some(p) => {
                 let (off, rot) = sword_offset(p);
-                let base = body_transform(p, mv);
+                let base = body_transform(p, mv, false);
                 let eye = coords::pos(eye_position(p, mv));
                 let yaw_rot = Quat::from_rotation_y(-p.yaw.to_radians() - std::f32::consts::FRAC_PI_2);
                 t.translation = eye + yaw_rot * off - Vec3::Y * 0.3;
@@ -159,7 +167,7 @@ pub fn sync_players(
         match lib.as_ref().filter(|l| !l.models.is_empty()) {
             Some(lib) => {
                 // Dishonored character model (archetype by player id).
-                let root = commands.spawn((body_transform(p, mv), Visibility::Inherited, PlayerBody(p.id))).id();
+                let root = commands.spawn((body_transform(p, mv, true), Visibility::Inherited, PlayerBody(p.id))).id();
                 crate::characters::spawn_character(&mut commands, root, lib, p.archetype as usize);
                 if let Some(w) = weapons.as_ref() {
                     crate::characters::spawn_weapons(&mut commands, root, w, p.kind);
@@ -169,7 +177,7 @@ pub fn sync_players(
                 commands.spawn((
                     Mesh3d(assets.body.clone()),
                     MeshMaterial3d(assets.materials[p.id as usize % assets.materials.len()].clone()),
-                    body_transform(p, mv),
+                    body_transform(p, mv, false),
                     PlayerBody(p.id),
                 ));
                 commands.spawn((Mesh3d(assets.sword.clone()), MeshMaterial3d(assets.steel.clone()), Transform::default(), SwordVisual(p.id)));
