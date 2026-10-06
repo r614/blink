@@ -547,9 +547,20 @@ code). Runtime: `crates/dishonored_runtime/src/facefx.rs`, applied in `npc_anim:
   output, after every tree node, including the look-at additive and the matinee slots.
 
 **Playback.**
-- The voice data, the blurb GUIDs and the conversation component's `m_pFaceFxPendingBlurb` /
-  `DisConvSpeakerInterface.m_pSkelMeshCompForFaceFX` tie each line to its speaker's head mesh.
-  LIKELY: the call path from a playing blurb to the component was not traced (U-380).
+- CONFIRMED: the blurb start (0x00C9FBF0, the same function that adds the subtitle for a
+  playing ID) calls the inner `PlayFaceFXAnim` (0x00756EF0, also behind
+  `execPlayFaceFXAnim` 0x00757440). It passes:
+  - the speaker's FaceFX skeletal mesh component (`m_pSkelMeshCompForFaceFX`);
+  - the blurb's animation by name, in the group read from the voice data;
+  - the conversation component as the FaceFX audio handler (`m_pFaceFxAudioHandler` +0x39c);
+  - a start time: the value from 0x00757070 (an animation lookup, LIKELY its start time) plus
+    the blurb's start offset (non-zero for matinee dialog keys).
+
+  When the animation starts, the handler gets its callback (0x00CA0120) and posts the VO. So
+  the FaceFX animation drives the VO start, and the two stay in sync. When the anim cannot
+  play, the blurb takes the plain path.
+- No DishonoredGame script sets FaceFX registers (`SetFaceFXRegister` / `Ex` are only reached
+  from their natives, 0x0071A000 / 0x0071A120), so registers stay unused.
 - The port:
   - `DialogueLineView.blurb` carries the line's GUID.
   - Every speaking pawn whose look has a head with a FaceFX actor plays the blurb's animation.
