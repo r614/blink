@@ -365,13 +365,25 @@ mod launch {
         Ok((pid, pipe))
     }
 
+    /// End the session's game: only if that pid is still a `Dishonored.exe`, and wait for it
+    /// to exit (a new game refuses to start while the old one lives).
     pub fn kill(pid: u32) -> Result<()> {
+        use windows_sys::Win32::System::Threading::{PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW};
         unsafe {
-            let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            let h = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if h.is_null() {
                 bail!("process {pid} not found");
             }
+            let mut buf = [0u16; 520];
+            let mut n = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut n) != 0;
+            let name = String::from_utf16_lossy(&buf[..n as usize]);
+            if !ok || !name.rsplit('\\').next().is_some_and(|f| f.eq_ignore_ascii_case("Dishonored.exe")) {
+                CloseHandle(h);
+                bail!("process {pid} is not the session's Dishonored.exe ({name})");
+            }
             TerminateProcess(h, 0);
+            WaitForSingleObject(h, 30_000);
             CloseHandle(h);
         }
         Ok(())
