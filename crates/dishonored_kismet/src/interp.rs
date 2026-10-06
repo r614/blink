@@ -524,6 +524,57 @@ impl Matinee {
         sets.iter().find_map(|s| self.root_tracks.iter().filter(same).find(|r| r.set.0.eq_ignore_ascii_case(&s.0) && r.set.1.eq_ignore_ascii_case(&s.1))).or_else(|| self.root_tracks.iter().find(same))
     }
 
+    /// [interp] Shown state of group `gi`'s objects at `t` from its visibility tracks
+    /// (`EVisibilityTrackAction`: 0 hide, 1 show, 2 toggle; the keys up to `t` applied in order
+    /// to the state the object had, `shown`).
+    pub fn visible(&self, gi: usize, t: f32, shown: bool) -> bool {
+        let mut s = shown;
+        let Some(g) = self.groups.get(gi) else { return s };
+        for tr in g.tracks.iter().filter(|t| !t.disabled) {
+            if let TrackKind::Visibility { keys } = &tr.kind {
+                for (_, a) in keys.iter().filter(|k| k.0 <= t) {
+                    s = match a {
+                        0 => false,
+                        1 => true,
+                        2 => !s,
+                        _ => s,
+                    };
+                }
+            }
+        }
+        s
+    }
+
+    /// [interp] Emitter state of group `gi` at `t` from its toggle tracks (`ETrackToggleAction`:
+    /// 0 off, 1 on, 2 toggle; 3 trigger leaves the state and fires a burst instead), starting
+    /// from `active` (the component's `bAutoActivate`).
+    pub fn toggled_on(&self, gi: usize, t: f32, active: bool) -> bool {
+        let mut s = active;
+        let Some(g) = self.groups.get(gi) else { return s };
+        for tr in g.tracks.iter().filter(|t| !t.disabled) {
+            if let TrackKind::Toggle { keys } = &tr.kind {
+                for (_, a) in keys.iter().filter(|k| k.0 <= t) {
+                    s = match a {
+                        0 => false,
+                        1 => true,
+                        2 => !s,
+                        _ => s,
+                    };
+                }
+            }
+        }
+        s
+    }
+
+    /// [interp] Trigger keys (`ETTA_Trigger`) of group `gi` crossed from `prev` to `t`.
+    pub fn triggers(&self, gi: usize, prev: f32, t: f32) -> usize {
+        let Some(g) = self.groups.get(gi) else { return 0 };
+        g.tracks.iter().filter(|t| !t.disabled).map(|tr| match &tr.kind {
+            TrackKind::Toggle { keys } => keys.iter().filter(|k| k.1 == 3 && crossed(k.0, prev, t)).count(),
+            _ => 0,
+        }).sum()
+    }
+
     pub fn has_player_group(&self) -> bool {
         self.groups.iter().any(|g| matches!(g.kind, GroupKind::Player { .. }))
     }
@@ -904,7 +955,7 @@ impl Scene {
 
     /// The attachment of group `gi` at `t`: (parent group, key) of the last key at or before
     /// `t` on any attachment track targeting it.
-    fn attachment(m: &Matinee, gi: usize, t: f32) -> Option<(usize, &AttachKey)> {
+    pub fn attachment(m: &Matinee, gi: usize, t: f32) -> Option<(usize, &AttachKey)> {
         let name = &m.groups[gi].name;
         let mut best: Option<(usize, &AttachKey)> = None;
         for (pi, g) in m.groups.iter().enumerate() {

@@ -260,7 +260,7 @@ Relaxed, Patrol, Search, Combat, Panic, Cower, Notice) and `MatchView::anim_prof
 | panic start | `Panic` | same, then `PanicEmpty` locomotion |
 | cower | `DisAISubStateCower` (0x00B12840): body stance `PanicRecover` (`Equipped` when armed), face the enemy | `PanicRecoverEmpty` modifier (`Empty_Idle_Panic_Recover`), `Sword` when armed |
 | noticing | `ReactToNoticing` | same |
-| talking | the blurb's FaceFX animation on the head (§12); body gestures from soiree matinees | FaceFX lip sync and head motion (§12); body: upper-body `Gesture_*` loops from the profile's gesture set (APPROXIMATION, U-142) |
+| talking | the blurb's FaceFX animation on the face and head (§12); body gestures only from soiree matinees (U-142, resolved: blurbs carry no animation, `DisBehaviorBlockingDialog` only faces the listener, no `eDisNPCAnimations` chain is a gesture, and the FaceFX actors pose `head_jnt` and the face bones only) | FaceFX lip sync and head motion (§12); body: the soiree matinee's AI-group anim tracks (CUTSCENES.md) |
 | crouched armed player | no crouch locomotion in the NPC sets | `Sword_Cover_Loop` held |
 
 Directional steps (U-143): the step index is a direction enum's value. Groups of 4 follow

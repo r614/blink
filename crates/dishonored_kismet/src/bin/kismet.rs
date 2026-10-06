@@ -113,6 +113,17 @@ fn main() -> Result<()> {
             // [interp] matinees [MAP...]: every matinee's AI / player groups with the root motion
             // and mesh translation modes of their anim keys.
             let db = db_for(&content, &args[1..])?;
+            // Toggle / visibility tracks with the objects their groups bind (per SeqAct_Interp).
+            for o in db.ops.iter().filter(|o| o.class == "SeqAct_Interp") {
+                let Some(d) = o.var_link("Data").and_then(|l| l.vars.first()) else { continue };
+                let Some(m) = db.op(*d).interp.as_ref().and_then(|i| i.matinee.as_ref()) else { continue };
+                for g in &m.groups {
+                    for t in g.tracks.iter().filter(|t| matches!(t.kind, interp::TrackKind::Toggle { .. } | interp::TrackKind::Visibility { .. })) {
+                        let objs: Vec<String> = o.var_link(&g.name).map(|l| l.vars.iter().map(|v| var_short(&db, *v)).collect()).unwrap_or_default();
+                        println!("{} \"{}\" {}: {:?} -> {}", db.describe(o.id), g.name, t.class, t.kind, objs.join(", "));
+                    }
+                }
+            }
             for o in &db.ops {
                 let Some(m) = o.interp.as_ref().and_then(|i| i.matinee.as_ref()) else { continue };
                 for g in &m.groups {

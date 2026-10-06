@@ -30,7 +30,9 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
-    let lib = load_anim_set(&c, "Startup", &format!("{set}.{set}"), &[&seq])?;
+    // FP_PKG: package holding the set (default Startup), e.g. a level script package.
+    let set_pkg = std::env::var("FP_PKG").unwrap_or_else(|_| "Startup".into());
+    let lib = load_anim_set(&c, &set_pkg, &format!("{set}.{set}"), &[&seq])?;
     let clip = lib.clips.values().next().expect("clip");
     let mut hit = 0;
     // Edge joint order = the set's tracks sorted by skeleton bone index.

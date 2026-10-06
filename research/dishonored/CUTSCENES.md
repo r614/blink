@@ -112,6 +112,123 @@ the loops (`FUN_006340f0`):
   hands control to `StatePlayerMasterSoiree` (movement disabled; looking limited by
   `DisInterpTrackAllowPlayerLook`).
 
+### AI groups, root motion and the stage mark (U-085 / U-202, CONFIRMED unless marked)
+
+Field names from `class_layout` (`InterpGroupInst` +0x38 `Group`, +0x3c `GroupActor`, +0x52
+`m_CurrentRootMotionMode`, +0x6c `m_bHasAnimControlTrack` / `m_bShouldBackupTransform`;
+`InterpGroupInstAI` +0x7c `AIGroup`, +0x80 `StageMarkActor`, +0x88 `SavedPhysics`, +0x89
+`m_MeshTranslationMode`, +0x8c bits `bSavedNoEncroachCheck`, `bAlreadyTerminated`,
+`bDisableCollision`, `bHaveLocomotion`, `bHaveMoveTrack`).
+
+- Init (slot 76, 0x006304f0), in game (the guard `DAT_0141b21c` is the editor flag): the base
+  init (0x0061a2e0), `bHaveLocomotion` / `bHaveMoveTrack` from the tracks' class flags, then
+  0x0062bbc0 (the pawn registers the group instance, vfunc +0x4b4; AI requests named `Gesture`,
+  `Posture`, `Distraction` and `Face` are locked; the group's `GroupAnimSets` are added to the
+  mesh, vfunc +0x4f4) and 0x00628460(1): a group with a move track saves the pawn's physics
+  (+0x88) and switches it to `PHYS_Interpolating` (7); a group with anim tracks saves and sets
+  `bNoEncroachCheck`. **The stage mark is not used in game**: only the editor path of the update
+  (slot 81, 0x006305c0, when no actor is bound) spawns a preview pawn there. In game an AI group
+  plays wherever its pawn stands (soirees and distraction sequences walk the NPC to the mark
+  first, in Kismet / the behaviour).
+- Update (slot 81, 0x006305c0): clears the per-frame flags, the look-at work (0x009082c0: look-at
+  tracks to head / torso / eyes requests at the group's `LookatRequestsPriority`), the base track
+  update (0x0062fed0), then the pawn's collision (vfunc +0x508 with `bDisableCollision`) and mesh
+  translation mode (vfunc +0x314 with the highest `m_MeshTranslationMode` of the frame's keys).
+- Stretched-key track instance update (0x00905c70): on a key change it plays the key's sequence
+  on the pawn (vfunc +0x2fc, slot, name, start, ...); each frame it hands the group instance
+  the key's `m_bDisableCollision` (+0x148 setter), `m_MeshTranslationMode` (+0x150, max) and,
+  when the position advanced, `m_MatineeRootMotionMode` (0x00612e20 -> +0x52). Key properties
+  live at the key record's +0x34 (`InterpTrackStretchAnimKeyProperties`: +0x38 root motion
+  mode byte, +0x39 mesh translation mode byte, +0x3c bit 0 disable collision).
+- The base update (0x0062fed0) resets +0x52 before the tracks run, then gives it to the pawn
+  (vfunc +0x30c, `DishonoredNPCPawn` 0x00b4d440): 0 disable -> vfunc +0x758; 1 translate -> the
+  locomotion component's root motion when the pawn has one (vfunc +0x4d0, then 0x00946520 and
+  vfunc +0x324), else the mesh's root motion mode 0 (`RMM_Translate`) through vfunc +0x754;
+  2 accel -> `RMM_Accel` (3). A change away from translate ends it (vfunc +0x32c).
+- Mesh translation (0x00b4d520): no change -> clears the pawn's mesh offset flag; disable
+  conservative / reset -> vfunc +0x764(0 / 1). Presentation smoothing; not reproduced.
+- Term (slot 77, 0x0062bd40, then 0x00628460(0)): physics restored (a pawn back in walking
+  physics is lifted 10 uu, 0x006cc4d0), `bNoEncroachCheck` restored, and with
+  `SnapToRootBoneLocationWhenFinished` (+0x78 bit 0) the pawn moves to its mesh's root bone
+  (0x00718190) plus the cylinder height.
+
+Data (`kismet matinees`, Boyle): root motion is used by the distraction soirees
+(`DistractionSoiree.*`: `Empty_Distraction_Piss_In` / `_Out`, `_Railing_`, `_Scavenge01/03_`,
+`_PlayingPiano_`, `_TableCleaning_`, `_WashHands_` In and Out keys translate, their loops do not)
+and the campfire guard (`Sc_Campfire_In` / `_Out`). Every Boyle AI key has mesh translation mode
+1 (the Outsider's floats: 2). `Empty_Distraction_Piss_In`'s root (`root0_jnt`, mesh +Z, the
+NPC's forward) travels 0 -> 72 uu, `_Out` 0 -> -72: the guard steps up to the wall and back.
+
+Port:
+- `interp::Scene::root_motion` sums, over the group's anim tracks, the root bone translation of
+  keys with a root motion mode between two positions (the old key to its end and the new one
+  from its start when a key change is crossed; loop wraps and backward steps add nothing),
+  times the track weight. `Scene::root_offset` gives the final pose's root for the snap.
+- The server bakes the root bone tracks (Edge joint 0, 30 Hz) of every sequence AI groups play
+  when the Kismet loads (`interp_bake.rs`; the group's sets, then every AnimSet of the loaded
+  packages holding the name) and picks the pawn's sets at run time (`Look::anim` profile, last
+  set first). Root motion moves the pawn horizontally (mesh rotation `RotOrigin` (0, -16384,
+  16384): mesh +Z is the pawn's +X); walking physics keeps it on the floor. APPROXIMATION: the
+  move ignores collision (the original moves through physics).
+- Clients drop the root bone's translation of such keys (the mesh keeps the root at its bind
+  translation, as root motion extraction does).
+- Not reproduced: mesh translation modes, `bDisableCollision`, accel versus translate (both
+  move by the translation).
+
+### Attachments to animated bones (U-200, CONFIRMED)
+
+The attachment parent's bone is posed by its group's anim tracks: Samuel's boat
+(`SkeletalMeshActorMAT_0`, `SmallBoat`) rocks on `Boat_Jnt` with `SC_boat_Idle` (1.26 degrees),
+and the hull `InterpActor_1` is hard-attached to that bone in the level (`Base`
+`SkeletalMeshActorMAT_0`, `BaseBoneName` `Boat_Jnt`, `bHardAttach`), as are the matinee's
+attachments (`Npc_attach`, `Boat_Attach`, `Player_Attach` sockets on `Boat_Jnt`).
+
+Port: the Kismet load bakes, for every attachment bone or socket of a skeletal mesh actor whose
+group has anim tracks, its actor-space transform over the matinee at 30 Hz with the pose the
+presentation builds (tracks in order, each blended over the previous with its weight, Edge
+joints in the mesh's bone order). `Scene::xform` uses it before the reference pose. Samuel's
+sockets move by up to 5 uu (`Player_Attach` z 143.2..146.0 in actor space). The hull's mover
+collision follows the `Boat` group's pose, which now rocks with the bone like the original's
+hard attachment; the player released at 29.64 s stands on it.
+
+### The player group's camera (U-203)
+
+`InterpGroupInstPlayer` init (slot 76, 0x009027f0) saves the player's location and controller
+rotation (`m_StartPos` / `m_StartRot`) and calls the pawn's vfunc +0x4ac (`DishonoredPlayerPawn`
+0x00aab570): the soiree state is entered with flags from the group (+0x7c bit 2 -> 2, bit 5 and
+a camera test -> 0x20, ...). The first-person camera of the player is the mesh's camera bone
+(`DisTweaks_PlayerPawn_Camera.m_CameraBoneName`; `DishonoredNotify_CameraPitchTarget`
+defaults to `camera_jnt`), so a full-body sequence in the player group's `PlayerStack` moves
+the view. `SC_boat` (`Ply_SC_Generic`, 2.67 s, a still pose stretched over the ride) seats Corvo:
+`camera_jnt` sits 50 uu back, 11 uu right and 59 uu lower than in `Sword_Ready_Idle`, looking
+13 degrees right of the pawn's forward (`fp_probe`).
+
+Port (LIKELY): while a player group holds the local player and plays full-body keys, the client
+samples them on `Ply_Player.Skm_Player` and moves the eye by the camera bone's offset from the
+standing idle pose, in the pawn's matinee frame (the boat socket). The view direction stays the
+player's, clamped by the `DisInterpTrackAllowPlayerLook` key (yaw -170..170 around the frame's
+yaw plus the camera bone's yaw, pitch -15..60). Not reproduced: the view rocking with the
+boat, the blend to the stage mark, and the end transform (`m_StartPos`, snap flags).
+
+### Toggle and visibility tracks (U-208)
+
+Data (`kismet matinees`): the distraction soirees hide and show props in the NPC's hands
+(`Glass`, `Cigarette`, `Lighter`, `FeatherDuster`, `Book`, `Rag`, the Boyle letters and notes:
+`SkeletalMeshActor`s, attached by the AI group's attachment tracks to `RightHandWpn` /
+`LeftHandWpn`) and toggle emitters (`cigarette_smoke` on, off, on, off; `cigarette_puf`,
+`FX_Lighter_Sparks`, `PukeFX` triggers; `FX_Piss` on / off). Emitter class defaults set
+`bHardAttach`.
+
+Port: skeletal props start with the actor's `bHidden` and follow the visibility keys up to the
+position (hide, show, toggle); props and emitters attached to a pawn's bone or socket are placed
+on the pawn's animated bone (`PawnPoints`, filled by `characters::animate_characters` from the
+rendered pose) times the key's offset, and stay where they were when detached. Toggle keys start
+(on), stop (off: no new particles) or flip placed emitters of the level; trigger keys fire one
+burst. Not reproduced: emitters based on another actor are not imported by the level loader,
+e.g. `FX_SmallBoat`'s `Emitter_179` (`SmallBoat_WaterTrail_01`), whose hard attachment to the
+hull keeps the relative location (7660, 8816, 2116) it was given in the editor: as cooked, the
+wake would play about 11.7 km from the boat (U-541).
+
 ## 3. Samuel's intro on Boyle (CONFIRMED from data)
 
 `L_BoyleStreet_Ext_Script` `SeqAct_Interp_5` [13384] "Samuel Boat Intro", data
@@ -135,10 +252,13 @@ the loops (`FUN_006340f0`):
   holds the AI pawns (`stay`, idle, no goal), and links the conversation instance whose soiree
   asked for it.
 - Every step after the Kismet tick, `Scene::update` at the matinee position: move tracks and
-  attachment chains (to the reference-pose bones and sockets of the skeletal mesh actors, read at load
-  into `Actor::bones`) place level actors and pawns; the player group's players lose movement
-  control (look stays) and are carried; locomotion keys walk AI pawns to their target groups
-  (brain `WalkToPoint`), face-to keys turn them, visibility keys hide actors.
+  attachment chains (to the bones and sockets of the skeletal mesh actors as their group's anim
+  tracks pose them, baked at load into `Matinee::bone_tracks`, else the reference pose in
+  `Actor::bones`) place level actors and pawns; the player group's players lose movement
+  control (look stays) and are carried; AI pawns take the root motion of their keys
+  (`Matinee::root_tracks`); locomotion keys walk AI pawns to their target groups
+  (brain `WalkToPoint`), face-to keys turn them, visibility keys hide actors;
+  `SnapToRootBoneLocationWhenFinished` moves the pawn to its final root when the matinee ends.
 - Dialog keys speak their blurbs through the conversation runner (`speak_blurb`: the blurb node
   of that GUID plays as a line of its own); soirees in Kismet missions wait for their matinee
   (`external_matinees`) and continue (output 0) when it ends (`matinee_done`), instead of the
@@ -155,8 +275,12 @@ the loops (`FUN_006340f0`):
 - Skeletal mesh actors bound to groups are spawned as props while their matinee plays (loaded
   with the character pipeline) and posed by the group's anim tracks (`AnimBank::sample_parts`).
 - AI pawns get the anim tracks of their group as `PawnAnim::scripted` overlays (sequences
-  looked up in `GroupAnimSets` first); the talk-gesture stand-in (U-142) is off while a matinee
-  drives the body.
+  looked up in `GroupAnimSets` first; root-motion keys keep the root bone at its bind
+  translation). They are the only body gestures of a conversation (U-142).
+- Props follow visibility tracks and, when attached to a pawn's bone or socket, the pawn's
+  animated bone; toggle tracks start, stop and fire placed emitters.
+- The player group's full-body keys move the first-person eye; its look-limit keys clamp the
+  view.
 - AkEvent tracks post their events on the bound object (2D for the player group).
 - Director fade -> black overlay; director cuts -> the game camera at the camera group's actor.
 
