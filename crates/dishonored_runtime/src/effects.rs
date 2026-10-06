@@ -970,14 +970,14 @@ fn simulate(
                             Some((coords::pos(world.transform_point3(*pos.get(k)?)), *uv.get(k)?, a))
                         })
                     });
-                    dframe.push(&ds.mat, imgs, tris, t_now);
+                    dframe.push(&ds.mat, imgs, tris, t_now, true);
                 } else if let Some(m) = inst.meshes.get(i).and_then(|h| meshes.get(h)) {
                     use bevy::mesh::VertexAttributeValues as V;
                     if let (Some(V::Float32x3(p)), Some(V::Float32x2(uv)), Some(V::Float32x4(c)), Some(idx)) =
                         (m.attribute(Mesh::ATTRIBUTE_POSITION), m.attribute(Mesh::ATTRIBUTE_UV_0), m.attribute(Mesh::ATTRIBUTE_COLOR), m.indices())
                     {
                         let tris = idx.iter().filter_map(|k| Some((Vec3::from(*p.get(k)?), Vec2::from(*uv.get(k)?), c.get(k)?[3])));
-                        dframe.push(&ds.mat, imgs, tris, t_now);
+                        dframe.push(&ds.mat, imgs, tris, t_now, false);
                     }
                 }
             }

@@ -20,8 +20,9 @@ struct VertexIn {
     @location(1) uv: vec2<f32>,
     @location(2) dist_offset: vec2<f32>,
     @location(3) uv_dist_offset: vec2<f32>,
-    // (Dist_Distortion_Intensity x vertex alpha, opacity texture on, UV_Distortion_Intensity, 0)
-    @location(4) k: vec4<f32>,
+    @location(4) opacity_offset: vec2<f32>,
+    // (Dist_Distortion_Intensity x tweak alpha x vertex alpha, opacity texture on, UV_Distortion_Intensity, 0)
+    @location(5) k: vec4<f32>,
 }
 
 struct VertexOut {
@@ -29,7 +30,8 @@ struct VertexOut {
     @location(0) uv: vec2<f32>,
     @location(1) dist_offset: vec2<f32>,
     @location(2) uv_dist_offset: vec2<f32>,
-    @location(3) k: vec4<f32>,
+    @location(3) opacity_offset: vec2<f32>,
+    @location(4) k: vec4<f32>,
 }
 
 @vertex
@@ -39,6 +41,7 @@ fn vertex(v: VertexIn) -> VertexOut {
     o.uv = v.uv;
     o.dist_offset = v.dist_offset;
     o.uv_dist_offset = v.uv_dist_offset;
+    o.opacity_offset = v.opacity_offset;
     o.k = v.k;
     return o;
 }
@@ -55,15 +58,16 @@ fn scene_depth(uv: vec2<f32>) -> f32 {
 
 @fragment
 fn accumulate(in: VertexOut) -> @location(0) vec4<f32> {
-    // Material Distortion input (DefaultAdditive_PMAT family, e.g. RefShaderCache 36064):
-    // Dist_Distortion.r at the (UV-distorted, scrolled) uv x intensity x vertex alpha x O_Opacity.r.
+    // Material Distortion input (DefaultAdditive_PMAT family, e.g. RefShaderCache 36094 and its
+    // uniform expressions): Dist_Distortion.r at the (UV-distorted, panned) uv x intensity x
+    // tweak alpha x vertex alpha x O_Opacity.r at the scrolled uv.
     var uv = in.uv;
     if (in.k.z != 0.0) {
         uv = uv + textureSample(uv_dist_texture, material_sampler, in.uv + in.uv_dist_offset).rg * in.k.z;
     }
     var d = textureSample(dist_texture, material_sampler, uv + in.dist_offset).r * in.k.x;
     if (in.k.y > 0.5) {
-        d = d * textureSample(opacity_texture, material_sampler, in.uv).r;
+        d = d * textureSample(opacity_texture, material_sampler, in.uv + in.opacity_offset).r;
     }
     // The Distortion input is a scalar here, so both offset components are equal.
     let dd = vec2<f32>(d, d);

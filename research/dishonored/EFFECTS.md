@@ -157,10 +157,20 @@ Port: `distortion.rs` (`DistortionMaterial::decode`, the per-frame `DistortionFr
 distorting triangles built by `effects::simulate` from the same particles, sprite and mesh
 emitters) and `distortion.wgsl` / `distortion_apply.wgsl` in the Core3d `EarlyPostProcess`
 set, before the ArkPp pass. The offset target is RGBA16F; the apply pass saturates the sum at 1
-like the RGBA8 target. U-400: which compiled permutation belongs to which switch set (channel R
-vs B, two extra uniform multipliers, the `Dist_Distortion_Speed` / `UV_Distortion_Speed`
-pan directions) is not decoded; the port uses R, `Dist_Distortion_Intensity` alone, U/V
-scrolling on the distortion texture and no other pan.
+like the RGBA8 target.
+
+The material terms come from the shader maps' uniform expressions (`FUniformExpressionSet` in
+the RefShaderCache: per material, arrays of pixel vector and scalar expressions serialized as
+type FName + payload, `FMaterialUniformExpressionScalarParameter` = name, default;
+`FoldedMath` = A, B, op byte; `Constant` = FLinearColor + value type byte; `AppendVector` =
+A, B, component count; `Periodic` = frac; ...). For the mesh-emitter permutation matching
+shader 36094: `UniformPixelVector_1` = `D_DiffuseColorTweak`, `_2` = `MeshEmitterVertexColor`
+(the particle colour), `_3` = (frac(Time x `Dist_Distortion_Speed`), same) the distortion pan;
+scalars `U_Scrolling_Speed` x Time and `V_Scrolling_Speed` x Time scroll the `O_Opacity`
+sample; `Dist_Distortion_Intensity` multiplies the `Dist_Distortion` sample. So D =
+`O_Opacity.r`(scrolled) x `D_DiffuseColorTweak.a` x `MeshEmitterVertexColor.a` x vertex colour
+x `Dist_Distortion.r`(panned) x intensity, which the port evaluates (no static-mesh vertex
+colours are imported, so that factor is 1). U-400 keeps the per-permutation details open.
 
 ## Approximations and open points
 

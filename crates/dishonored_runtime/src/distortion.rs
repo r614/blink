@@ -47,20 +47,33 @@ use dishonored_ir::{MaterialParams, TextureId};
 const DEFAULT_INTENSITY: f32 = 1.0;
 
 /// The distortion terms of one material, decoded from its parameters and static switches.
+/// The uniform expressions of the `DefaultAdditive_PMAT` shader maps (RefShaderCache
+/// `FUniformExpressionSet`s, e.g. the mesh-emitter permutation of shader 36094) give:
+/// D = `O_Opacity.r`(uv + (U, V scrolling) x Time) x `D_DiffuseColorTweak.a` x
+/// `MeshEmitterVertexColor.a` x vertex colour x `Dist_Distortion.r`(uv + frac(Time x
+/// `Dist_Distortion_Speed`) on both axes) x `Dist_Distortion_Intensity`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DistortionMaterial {
     /// `Dist_Distortion`: the texture whose red channel is the distortion amount.
     pub texture: TextureId,
     /// `Dist_Distortion_Intensity` (instance value, else the base default 1).
     pub intensity: f32,
+    /// `Dist_Distortion_Speed` (base default 1): the distortion texture pans by
+    /// frac(Time x speed) along U and V.
+    pub pan_speed: f32,
     /// `O_Opacity` multiplies D unless `D_Disable_Opacity_Texture`.
     pub opacity: Option<TextureId>,
     /// `Enable_UV_Distortion`: the distortion texture is read at
-    /// `uv + UV_Distortion.rg x UV_Distortion_Intensity`.
-    pub uv_distortion: Option<(TextureId, f32)>,
-    /// `Enable_UV_Scrolling`: (`U_Scrolling_Speed`, `V_Scrolling_Speed`) per second.
+    /// `uv + UV_Distortion.rg x UV_Distortion_Intensity`, the UV-distortion texture panned by
+    /// frac(Time x `UV_Distortion_Speed`): (texture, intensity, speed).
+    pub uv_distortion: Option<(TextureId, f32, f32)>,
+    /// `Enable_UV_Scrolling`: (`U_Scrolling_Speed`, `V_Scrolling_Speed`) per second, scrolling
+    /// the opacity texture.
     pub scroll: [f32; 2],
-    /// `Enable_Vertex_Color` (on by default): D is scaled by the particle's colour alpha.
+    /// `D_DiffuseColorTweak.a` (base default 1).
+    pub tweak_alpha: f32,
+    /// `Enable_Vertex_Color` (on by default): D is scaled by the particle's colour alpha (mesh
+    /// emitters always, through `MeshEmitterVertexColor`).
     pub vertex_alpha: bool,
     /// `D_Disable_Diffuse`: the material draws nothing in the colour pass.
     pub distortion_only: bool,
@@ -79,9 +92,11 @@ impl DistortionMaterial {
         Some(Self {
             texture: tex("Dist_Distortion")?,
             intensity: scalar("Dist_Distortion_Intensity", DEFAULT_INTENSITY),
+            pan_speed: scalar("Dist_Distortion_Speed", 1.0),
             opacity: if on("D_Disable_Opacity_Texture") { None } else { tex("O_Opacity") },
-            uv_distortion: if on("Enable_UV_Distortion") { tex("UV_Distortion").map(|t| (t, scalar("UV_Distortion_Intensity", 1.0))) } else { None },
+            uv_distortion: if on("Enable_UV_Distortion") { tex("UV_Distortion").map(|t| (t, scalar("UV_Distortion_Intensity", 1.0), scalar("UV_Distortion_Speed", 1.0))) } else { None },
             scroll: if on("Enable_UV_Scrolling") { [scalar("U_Scrolling_Speed", 0.0), scalar("V_Scrolling_Speed", 0.0)] } else { [0.0; 2] },
+            tweak_alpha: p.vectors.iter().find(|(k, _)| k.eq_ignore_ascii_case("D_DiffuseColorTweak")).map(|v| v.1[3]).unwrap_or(1.0),
             vertex_alpha: p.switch("Enable_Vertex_Color") != Some(false),
             distortion_only: on("D_Disable_Diffuse"),
         })
@@ -111,8 +126,9 @@ impl DistortionMaterial {
 }
 
 /// Floats per vertex: position (Bevy world) 3, uv 2, distortion uv offset 2, UV-distortion uv
-/// offset 2, (intensity x vertex alpha, opacity on, UV-distortion intensity, 0) 4.
-pub const VERTEX_FLOATS: usize = 13;
+/// offset 2, opacity uv offset 2, (intensity x tweak alpha x vertex alpha, opacity on,
+/// UV-distortion intensity, 0) 4.
+pub const VERTEX_FLOATS: usize = 15;
 
 /// One draw of the accumulate pass (all triangles of one material).
 #[derive(Clone)]
@@ -139,17 +155,19 @@ impl DistortionFrame {
     }
 
     /// Append a triangle list for one material: positions in Bevy world space, their uvs and
-    /// vertex alphas. `time` drives the scrolling.
-    #[allow(clippy::too_many_arguments)]
-    pub fn push(&mut self, m: &DistortionMaterial, images: (&Handle<Image>, Option<&Handle<Image>>, Option<&Handle<Image>>), tris: impl Iterator<Item = (Vec3, Vec2, f32)>, time: f32) {
+    /// particle alphas (`mesh`: a mesh emitter, whose alpha always applies through
+    /// `MeshEmitterVertexColor`). `time` (seconds) drives the pans and the scrolling.
+    pub fn push(&mut self, m: &DistortionMaterial, images: (&Handle<Image>, Option<&Handle<Image>>, Option<&Handle<Image>>), tris: impl Iterator<Item = (Vec3, Vec2, f32)>, time: f32, mesh: bool) {
         let first = (self.verts.len() / VERTEX_FLOATS) as u32;
-        let scroll = Vec2::from(m.scroll) * time;
-        // Keep the scroll offset small (the textures repeat).
-        let scroll = scroll - scroll.floor();
-        let uvd = m.uv_distortion.map(|v| v.1).unwrap_or(0.0);
+        // The textures repeat: keep the offsets in [0, 1) (the original's `Periodic` is frac).
+        let frac = |v: Vec2| v - v.floor();
+        let scroll = frac(Vec2::from(m.scroll) * time);
+        let pan = frac(Vec2::splat(m.pan_speed * time));
+        let (uvd, uvd_pan) = m.uv_distortion.map(|v| (v.1, frac(Vec2::splat(v.2 * time)))).unwrap_or((0.0, Vec2::ZERO));
+        let opacity_on = if m.opacity.is_some() { 1.0 } else { 0.0 };
         for (p, uv, a) in tris {
-            let k = m.intensity * if m.vertex_alpha { a } else { 1.0 };
-            self.verts.extend_from_slice(&[p.x, p.y, p.z, uv.x, uv.y, scroll.x, scroll.y, 0.0, 0.0, k, if m.opacity.is_some() { 1.0 } else { 0.0 }, uvd, 0.0]);
+            let k = m.intensity * m.tweak_alpha * if m.vertex_alpha || mesh { a } else { 1.0 };
+            self.verts.extend_from_slice(&[p.x, p.y, p.z, uv.x, uv.y, pan.x, pan.y, uvd_pan.x, uvd_pan.y, scroll.x, scroll.y, k, opacity_on, uvd, 0.0]);
         }
         let count = (self.verts.len() / VERTEX_FLOATS) as u32 - first;
         if count == 0 {
@@ -302,7 +320,7 @@ impl SpecializedRenderPipeline for DistortionPipeline {
                 entry_point: Some("vertex".into()),
                 buffers: vec![VertexBufferLayout::from_vertex_formats(
                     VertexStepMode::Vertex,
-                    [VertexFormat::Float32x3, VertexFormat::Float32x2, VertexFormat::Float32x2, VertexFormat::Float32x2, VertexFormat::Float32x4],
+                    [VertexFormat::Float32x3, VertexFormat::Float32x2, VertexFormat::Float32x2, VertexFormat::Float32x2, VertexFormat::Float32x2, VertexFormat::Float32x4],
                 )],
             },
             fragment: Some(FragmentState {
@@ -447,7 +465,7 @@ mod tests {
         // instance's scalars first, then the base expression defaults.
         let p = params(
             &[("Dist_Enable_Distortion", true), ("D_Disable_Diffuse", true), ("D_Disable_Opacity_Texture", false), ("Enable_UV_Distortion", false), ("Enable_UV_Scrolling", true), ("Enable_Vertex_Color", true)],
-            &[("Dist_Distortion_Intensity", -100.0), ("UV_Distortion_Intensity", 0.1), ("U_Scrolling_Speed", 0.1), ("V_Scrolling_Speed", -0.5), ("Dist_Distortion_Intensity", 1.0)],
+            &[("Dist_Distortion_Intensity", -100.0), ("Dist_Distortion_Speed", 0.0), ("UV_Distortion_Intensity", 0.1), ("U_Scrolling_Speed", 0.1), ("V_Scrolling_Speed", -0.5), ("Dist_Distortion_Intensity", 1.0), ("Dist_Distortion_Speed", 1.0)],
         );
         let tex = vec![("D_Diffuse".to_string(), 1), ("Dist_Distortion".to_string(), 2), ("O_Opacity".to_string(), 3), ("UV_Distortion".to_string(), 4)];
         let m = DistortionMaterial::decode(&p, &tex).unwrap();
@@ -455,7 +473,7 @@ mod tests {
         assert_eq!(m.intensity, -100.0);
         assert_eq!(m.opacity, Some(3));
         assert_eq!(m.uv_distortion, None);
-        assert_eq!(m.scroll, [0.1, -0.5]);
+        assert_eq!((m.scroll, m.pan_speed, m.tweak_alpha), ([0.1, -0.5], 0.0, 1.0));
         assert!(m.vertex_alpha && m.distortion_only);
         // Switch off, or no distortion texture: no distortion.
         let off = params(&[("Dist_Enable_Distortion", false)], &[]);
@@ -464,10 +482,29 @@ mod tests {
         assert!(DistortionMaterial::decode(&on, &tex[..1]).is_none());
         // Base defaults: intensity 1, opacity on, vertex colour on, colour pass kept.
         let m = DistortionMaterial::decode(&on, &tex).unwrap();
-        assert_eq!((m.intensity, m.opacity, m.vertex_alpha, m.distortion_only, m.scroll), (1.0, Some(3), true, false, [0.0, 0.0]));
+        assert_eq!((m.intensity, m.pan_speed, m.opacity, m.vertex_alpha, m.distortion_only, m.scroll), (1.0, 1.0, Some(3), true, false, [0.0, 0.0]));
         let uvd = params(&[("Dist_Enable_Distortion", true), ("Enable_UV_Distortion", true), ("D_Disable_Opacity_Texture", true)], &[("UV_Distortion_Intensity", 0.1)]);
         let m = DistortionMaterial::decode(&uvd, &tex).unwrap();
-        assert_eq!((m.uv_distortion, m.opacity), (Some((4, 0.1)), None));
+        assert_eq!((m.uv_distortion, m.opacity), (Some((4, 0.1, 1.0)), None));
+    }
+
+    #[test]
+    fn push_lays_out_pans_and_alpha() {
+        let m = DistortionMaterial { texture: 2, intensity: -100.0, pan_speed: 0.25, opacity: Some(3), uv_distortion: None, scroll: [0.1, -0.5], tweak_alpha: 1.0, vertex_alpha: false, distortion_only: true };
+        let h = Handle::<Image>::default();
+        let mut f = DistortionFrame::default();
+        // Time 3 s: pan frac(0.75), scroll frac(0.3, -1.5) = (0.3, 0.5); a mesh emitter's alpha applies.
+        f.push(&m, (&h, Some(&h), None), [(Vec3::ONE, Vec2::new(0.5, 0.5), 0.5)].into_iter(), 3.0, true);
+        assert_eq!(f.batches.len(), 1);
+        let v = &f.verts;
+        assert_eq!(v.len(), VERTEX_FLOATS);
+        assert!((v[5] - 0.75).abs() < 1e-6 && (v[6] - 0.75).abs() < 1e-6);
+        assert!((v[9] - 0.3).abs() < 1e-5 && (v[10] - 0.5).abs() < 1e-5);
+        assert_eq!((v[11], v[12]), (-50.0, 1.0));
+        // A sprite without `Enable_Vertex_Color`: no alpha.
+        f.clear();
+        f.push(&m, (&h, None, None), [(Vec3::ONE, Vec2::ZERO, 0.5)].into_iter(), 0.0, false);
+        assert_eq!(f.verts[11], -100.0);
     }
 
     #[test]
