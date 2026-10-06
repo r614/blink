@@ -107,7 +107,7 @@ pub const NOT_MODELLED: &[&str] = &[
 
 /// A usable the Kismet offers (an actor with `DisSeqEvent_Used` or a pickup with
 /// `DisSeqEvent_PickupPickedUp`, or an original NPC whose one-shot has a use hook).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum KUse {
     Actor(u32),
     Pickup(u32),
@@ -115,7 +115,8 @@ pub enum KUse {
 }
 
 /// Host-side state.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HostState {
     pub started: bool,
     /// Distance trackers of original NPCs' approach hooks: (one-shot, hook node).
@@ -246,7 +247,8 @@ fn usable_stages(k: &Kismet, a: u32) -> i32 {
 }
 
 /// A `DisSeqAct_AIGoToActor` in progress: its latent pawns (each running a go-to).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct GoTo {
     pawns: Vec<PlayerId>,
     /// Destination rotation (`m_bAlignRotation`): the pawn turns to it on arrival.
@@ -1741,7 +1743,7 @@ pub fn usables(m: &MissionMatch) -> Vec<(KUse, Vec3, String)> {
     let db = &k.db;
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
-    for (cls, pick) in [("DisSeqEvent_Used", false), ("DisSeqEvent_PickupPickedUp", true)] {
+    for (cls, pick) in [("DisSeqEvent_Used", false), ("SeqEvent_Used", false), ("DisSeqEvent_PickupPickedUp", true)] {
         for e in k.events_for(cls, &[]) {
             if !k.ops[e as usize].enabled {
                 continue;
@@ -1904,6 +1906,8 @@ fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
                 h.st.usable_stage.insert(a, stage);
                 h.note(format!("used {} (stage {stage})", h.db.actors[a as usize].name));
                 used_stage(k, h, a, stage as usize, Obj::Pawn(p));
+                // The engine's `SeqEvent_Used` (a trigger's use event: output "Used").
+                k.trigger(h, "SeqEvent_Used", &[Obj::Actor(a)], Obj::Pawn(p), Some(vec![0]));
             }
             KUse::Pickup(a) => {
                 h.note(format!("picked up {}:{}", h.db.actors[a as usize].package, h.db.actors[a as usize].name));
