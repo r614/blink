@@ -224,7 +224,8 @@ pub fn tick_off_chain(p: &mut PlayerState, ctx: &MoveCtx) {
     if p.climb.no_touch > 0.0 {
         p.climb.no_touch = (p.climb.no_touch - ctx.dt).max(0.0);
     }
-    if p.climb.letting_go && matches!(p.mode, MoveMode::Walking | MoveMode::Swimming | MoveMode::Dead) {
+    // `StatePlayerMasterFalling` exit (0x00A63110) clears `m_bLettingGoOfClimbable`.
+    if p.climb.letting_go && !matches!(p.mode, MoveMode::Falling | MoveMode::Blinking) {
         p.climb.letting_go = false;
     }
 }

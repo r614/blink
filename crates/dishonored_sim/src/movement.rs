@@ -366,7 +366,12 @@ pub fn step_movement(
             }
         }
         MoveMode::Climbing => crate::climb::climbing(p, input, can_move, ctx, events),
-        MoveMode::Swimming => crate::swim::swimming(p, input, can_move, sword_out, ctx, events),
+        MoveMode::Swimming => {
+            crate::swim::swimming(p, input, can_move, sword_out, ctx, events);
+            if !rat && p.mode == MoveMode::Swimming {
+                crate::climb::try_touch_grab(p, ctx, events);
+            }
+        }
         MoveMode::Mantling => {
             if advance_traversal(p, ctx.dt) {
                 p.mode = MoveMode::Walking;

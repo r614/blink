@@ -1165,8 +1165,11 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   one dword early (rows at +4, the last 1.0 cut off); `dishonored_assets::climbable` reads it that
   way.
 - **Confidence:** CONFIRMED for the movement, limits, exits and data; LIKELY for the Use target
-  rule (the pickups' cone), the ceiling-trace reading (U-443), what clears the let-go flag
-  (U-441); the camera-relative flag's setter is unknown (U-440); chains are rest poses (U-442).
+  rule (the pickups' cone), the ceiling-trace reading (U-443); the camera-relative flag's setter
+  is unknown (U-440: no AND/OR write of +0x8A0 bit 16 or byte +0x8A2 bit 0); chains are rest poses
+  (U-442). `m_bLettingGoOfClimbable` is cleared only by `StatePlayerMasterFalling`'s exit
+  (0x00A63110, `FindFieldWrites` +0x8A0 / 0x40; U-441 resolved); the Jump state's +0x54 bit 0 is
+  `m_bJumpingFromChain`.
 - **Implementation consequence:** `MoveMode::Climbing`, `dishonored_sim::climb` (tests
   `crates/dishonored_sim/tests/climb.rs`: grab, up / down speeds and limits, camera-relative
   hysteresis, jump off with and without a ceiling, let go, touch grab, top exit over a ledge,

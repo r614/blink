@@ -278,9 +278,10 @@ pub struct ClimbState {
     pub down: bool,
     /// Seconds since the last climbing sound (`TimeSeconds - m_fClimbingSoundLastTime`).
     pub since_sound: f32,
-    /// `m_bLettingGoOfClimbable`: let go with Use; touching a chain does not grab until landed.
+    /// `m_bLettingGoOfClimbable`: let go with Use; touching a chain does not grab until the fall
+    /// ends (`StatePlayerMasterFalling` exit 0x00A63110 clears it).
     pub letting_go: bool,
-    /// The current jump started on a chain (`StatePlayerMasterJump` +0x54 bit 0).
+    /// `StatePlayerMasterJump.m_bJumpingFromChain` (+0x54 bit 0): the jump started on a chain.
     pub jumped: bool,
     /// `DisClimbable.m_fNoCollisionDuration` of the chain this pawn left: it cannot be touched
     /// or used again until this runs out.

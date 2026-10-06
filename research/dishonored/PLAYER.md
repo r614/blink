@@ -251,14 +251,16 @@ the player pawn routes to its own `physLadder` (slot 282, 0x00AA82C0). Ported in
 - **Leave.** Transition test (slot +0x138, 0x00A6E570): to Falling, and to Jump when
   `m_bClimbReuseDelayJump` (true), only after `m_fClimbReuseDelay` (`Twk_Pawn_PlayerInput`: 0.5;
   class default 0.3). Exit (0x00A6E2C0), whatever the next state: the chain's Finish output;
-  `Velocity = Rotation.Vector() x m_fJumpImpulse` (525), doubled when a trace from the pawn 200 uu
-  straight up (`DAT_00FB96C4`, flags 0x20DF) reports a hit (LIKELY reading of the trace result).
-  Into Jump: the Jump enter (0x00A75EE0) then sets `Velocity.Z = JumpZ` (800) and remembers the
-  chain (its +0x54 bit 0); the chain stays in `m_pClimbable` (no re-grab) until that jump state
+  `Velocity = Rotation.Vector() x m_fJumpImpulse` (525; the pawn's rotation is taken as
+  yaw-only, LIKELY), doubled when a trace from the pawn 200 uu straight up (`DAT_00FB96C4`, flags
+  0x20DF) reports a hit (LIKELY reading of the trace result, U-443).
+  Into Jump: the Jump enter (0x00A75EE0) then sets `Velocity.Z = JumpZ` (800) and sets
+  `m_bJumpingFromChain` (+0x54 bit 0); the chain stays in `m_pClimbable` (no re-grab) until that jump state
   ends (0x00A5FFA0), which starts the chain's collision restoration (`m_fNoCollisionDuration =
   m_fCollisionRestorationDelay`, 0.3 s, counted down in the chain's tick 0x00A2BFD0) and clears
   `m_pClimbable`. Use while climbing (0x00AD5BA0 -> 0x00AAA030) requests Falling and sets
-  `m_bLettingGoOfClimbable`; the exit then restores the chain's collision at once and clears
+  `m_bLettingGoOfClimbable` (cleared again by the Falling state's exit, 0x00A63110: landing,
+  water, a mantle); the climb exit then restores the chain's collision at once and clears
   `m_pClimbable` (unless 0x00B50C70 holds: one of the pawn's active power components, +0x788,
   is of the class initialised next to the Blink code at 0x00BECD90 and reports itself active,
   LIKELY "Blinking"; then the 0.3 s restoration). The same test lets a Blinking pawn grab by
@@ -277,8 +279,7 @@ the player pawn routes to its own `physLadder` (slot 282, 0x00AA82C0). Ported in
 - **Not modelled**: the chain's rigid-body swing (the sim keeps the rest pose, which is where an
   undisturbed chain hangs; Windblast pushes chains by `m_fWindblastForceFactor` 10, swinging
   sounds), Blink and other powers cast from the chain, the setter of
-  `m_bCameraRelativeClimbing` (U-440), what clears `m_bLettingGoOfClimbable` (the sim: landing or
-  swimming, U-441).
+  `m_bCameraRelativeClimbing` (U-440; no AND/OR write of its bit, dword or byte, exists).
 
 ### Blood Thirsty
 
