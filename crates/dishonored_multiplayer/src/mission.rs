@@ -1078,6 +1078,13 @@ impl MissionMatch {
         for d in self.setup.doors.iter().filter(|d| d.map.eq_ignore_ascii_case(&self.current_map)) {
             mv.usables.push(((d.position + Vec3::Z * 60.0).to_array(), d.prompt.clone()));
         }
+        // Climbable chains: their interactable text (`m_InteractText` "`GBA_Use` Grab") at every
+        // bone below the anchor; the sim grabs on Use (`dishonored_sim::climb`).
+        for c in world.climbables() {
+            for b in c.bones.iter().filter(|b| b.z <= c.anchor.z + 0.5) {
+                mv.usables.push((b.to_array(), "Grab".to_string()));
+            }
+        }
         mv.choices = self.choosing.iter().map(|(p, d)| (*p, self.setup.doors[*d].choices.clone())).collect();
         // A conversation choice joins the same list (one input path for both).
         if let Some(c) = &mv.choice {

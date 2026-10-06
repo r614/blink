@@ -83,6 +83,9 @@ pub struct DialogueLineView {
     /// `m_bMainSubtitle` (false for barks).
     pub main: bool,
     pub conversation: String,
+    /// The blurb's GUID (`m_iBlurbGUID`, 32 hex digits): names the speaker's FaceFX animation.
+    #[serde(default)]
+    pub blurb: Option<String>,
 }
 
 /// A player choice waiting for input.
@@ -1032,6 +1035,10 @@ impl MissionState {
                     remaining: (l.duration - elapsed).max(0.0),
                     main: l.main,
                     conversation,
+                    blurb: match &r.db.node(l.node).kind {
+                        dishonored_conversation::NodeKind::Line(x) => Some(x.guid.clone()),
+                        _ => None,
+                    },
                 }
             };
             for l in r.detached.iter().filter(|l| l.subtitle) {

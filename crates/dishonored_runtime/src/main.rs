@@ -27,6 +27,7 @@
 mod coords;
 mod characters;
 mod npc_anim;
+mod facefx;
 mod ragdoll;
 mod debug;
 mod effects;
@@ -34,6 +35,7 @@ mod harness;
 mod hud;
 mod input_map;
 mod ark_post;
+mod distortion;
 mod atmosphere;
 mod audio;
 mod level;
@@ -205,6 +207,7 @@ fn main() {
     .add_plugins(FrameTimeDiagnosticsPlugin::default())
     .add_plugins(MaterialPlugin::<map_render::BakedMaterial>::default())
     .add_plugins(ark_post::ArkPostPlugin)
+    .add_plugins(distortion::DistortionPlugin)
     .add_plugins(bevy::diagnostic::EntityCountDiagnosticsPlugin::default())
     .insert_resource(ClearColor(Color::srgb(0.08, 0.09, 0.12)))
     // Placeholder ambient; with real lights it only fills non-lightmapped meshes at night level.

@@ -17,7 +17,7 @@
 //! linear for Bevy's sRGB output, so `Tonemapping::None` must be used with it.
 
 use bevy::asset::{load_embedded_asset, AssetServer, Handle};
-use bevy::core_pipeline::schedule::Core3d;
+use bevy::core_pipeline::schedule::{Core3d, Core3dSystems};
 use bevy::core_pipeline::tonemapping::tonemapping;
 use bevy::core_pipeline::FullscreenShader;
 use bevy::prelude::*;
@@ -188,7 +188,7 @@ impl Plugin for ArkPostPlugin {
             .init_resource::<SpecializedRenderPipelines<ArkPostPipeline>>()
             .add_systems(RenderStartup, init_pipeline)
             .add_systems(Render, prepare_pipelines.in_set(RenderSystems::Prepare))
-            .add_systems(Core3d, ark_post_pass.before(tonemapping));
+            .add_systems(Core3d, ark_post_pass.in_set(Core3dSystems::PostProcess).before(tonemapping));
     }
 }
 

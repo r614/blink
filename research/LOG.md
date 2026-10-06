@@ -1181,3 +1181,121 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Findings:** the component caches one voice of its tweak's list at random (`m_GenericDialogData[FUN_00401940(n)]`) and binds that voice's tree. The voice data names its tree in `m_pDialogTree` and per blurb list (`m_VoiceData[].m_pTree`); the trees are cooked into the level script packages (`Dlg_EliteGuard.DialogTree.Dlg_EliteGuard_Shared`, 78 hooks). Their hook graphs speak blurbs directly (random branch -> line) without a `DisConversation`.
 - **Port changes:** `ConversationDb::voice_trees` (dialog cache key versioned, `v2`), bark requests carry the pawn's voice (`MissionMatch::request_bark`), the runner counts lines spoken from the hook as content (before: every generic bark was "NoContent"). Bug fixed on the way: the AI level table is keyed by the lowercase map name.
 - **Harness:** `kismet --route barks` (an elite guard's hooks: "You look like you're up to no good." from `Dlg_EliteGuard_Shared`); `dishonored_conversation` test `generic_voice`.
+
+## 2026-10-06: Distortion pass (U-360)
+
+- **Question:** What does UE3's distortion (heat-haze) pass compute for Dishonored's `Dist_Enable_Distortion` materials (pistol muzzle shockwave, Blink / Windblast waves)?
+- **Method:** `shader_dump` of `RefShaderCache-PC-D3D-SM3.upk` (filter `SceneColorTexture`, 1,770 pixel shaders) and `GlobalShaderCache-PC-D3D-SM3.bin` (filter `AccumulatedDistortion`), `fxc /dumpbin`; the accumulate shaders are the 133 whose output writes `oC0.zw` from a negated min. `obj_dump` / `mic_static` of `WindWave_Disto_01_inst` and `DefaultAdditive_PMAT` (parameter expressions, `bUsesDistortion`).
+- **Findings:**
+  - Accumulate (same tail in all 133): D = the material `Distortion` input; `dp2add D, D, -0.1; texkill` drops |D|^2 < 0.1; the scene colour is sampled at `uv + D x (1/255, -1/255)` and D is zeroed where `SceneColor.a x 256 - pixel depth < 0` (scene in front); E = D x 4 / 255 clamped to [-1, 1]; `oC0.xy = max(E, 0)`, `oC0.zw = max(-E, 0)` (additive into the offset target). So D is in 1/255 of the screen.
+  - Apply (global shader 237: `AccumulatedDistortionTexture` s1, `SceneColorTexture` s0, `SceneColorRect` c0): offset = (RG - BA) x (0.25, -0.25); the new coordinate is used only if it lies inside `SceneColorRect`, else the pixel's own.
+  - `DefaultAdditive_PMAT` family (e.g. 36064 / 36065, sprite and mesh vertex factories): D is a scalar (both components equal) = `Dist_Distortion` sample (R in most permutations, B in some) at the UV-distorted coordinate x uniform x vertex colour alpha (sprite `TEXCOORD1.w` / mesh `COLOR.w`) x `O_Opacity.r` at a panned coordinate x another uniform; `Enable_UV_Distortion` adds `UV_Distortion.rg x UV_Distortion_Intensity` to the coordinate.
+  - The uniforms come from each shader map's `FUniformExpressionSet`, serialized in the cache as arrays of (type FName, payload) expressions; the type names are FNames 512-528 of the cache's name table (`FMaterialUniformExpressionAbs` .. `VectorParameter`). A research script (`research/ghidra/uexpr_dump.ps1` (on the cache decompressed with `SHADER_DUMP_RAW`)) finds `ScalarParameter(Dist_Distortion_Intensity)` (41 shader maps) and parses the vector / scalar arrays before it. The mesh-emitter permutation that matches shader 36094: vectors `SelectionColor`, `D_DiffuseColorTweak` (c0), `MeshEmitterVertexColor` (c6), Append(frac(Time x `Dist_Distortion_Speed`) x 2) (c7); scalars Time, `U_Scrolling_Speed`, U x Time (c8.z), `V_Scrolling_Speed`, V x Time (c9.x), `Db_Depth_Biased_Alpha_Intensity`, the pan terms, `Dist_Distortion_Intensity` (c10.z); textures `O_Opacity`, `Dist_Distortion`. Hence D = `O_Opacity.r`(uv + scroll) x `D_DiffuseColorTweak.a` x `MeshEmitterVertexColor.a` x vertex colour x `Dist_Distortion.r`(uv + pan) x intensity (per-permutation details: U-400).
+  - `WindWave_Disto_01_inst`: intensity -100, `Assassins_Teleport_01`, opacity `Wind_Swirl_01`, scrolling (0.1, -0.5), vertex colour on; the decoded level set has 12 distortion emitters (muzzle shockwaves, Blink ground / mantle bodies, Windblast twists, Teleport vanish, water splash).
+  - Port bug found on the way: a particle burst at emitter time 0 never fired on the first cycle (`EmitterSim::last_burst_t` started at 0), so one-shot effects lost every time-0 burst (the muzzle shockwave had no particle at all). Fixed (starts at -1).
+- **Port changes:** `distortion.rs` (`DistortionMaterial::decode` from the static switches and parameters; `DistortionFrame` of distorting triangles rebuilt by `effects::simulate` from the same sprite / mesh particles; accumulate + apply passes in Core3d `EarlyPostProcess`, ArkPp now explicitly in `PostProcess`); `distortion.wgsl`, `distortion_apply.wgsl`; the import keeps the raw `Dist_Distortion` / `O_Opacity` / `UV_Distortion` textures of distortion materials (`MaterialAsset::texture_params`). `--no-distortion` and `DISH_DISTORTION_DEBUG` (offset view) for comparisons.
+- **Tests:** `distortion::tests::decodes_the_pistol_wind_wave`, `accumulate_and_apply_round_trip`; `effects::tests::burst_at_time_zero_fires_on_the_first_cycle`. Captures (scratch, `fixtures/scripts/effects_gameplay.json`): the shockwave and Windblast twist now displace the scene (debug view: offsets up to ~0.4 of the clamp near the muzzle).
+- **Confidence:** CONFIRMED for both shader tails and the encoding; LIKELY for the Arkane material terms (U-400).
+
+## 2026-10-06: Distance-field shadows of the dominant directional light (U-324)
+
+- **Question:** How does the original shadow the dominant directional light (the moon) on static geometry, and can the cooked `ShadowMap2D`s replace Bevy's cascades there?
+- **Method:** `obj_dump` of `ShadowMap2D` / `ShadowMapTexture2D` (L_Boyle_Ext_Env) and `DominantDirectionalLightComponent` (L_Boyle_Ext_Light, L_Boyle_Int_Light); `shader_dump` (filter `DistanceFieldParameters`, 3,676 shaders) + `fxc`; Engine `BaseLightmass.ini`; Ghidra: the shader type registration for `TLightPixelShaderFDirectionalLightPolicyFSignedDistanceFieldShadowTexturePolicy` (string 0x00FC7478, static initialiser at file offset 0xB6E7A9: constructor 0x004F6F70, type global 0x0144012C), its constructor 0x004F4480 (vtable 0x00FCE630) and `Serialize` 0x004F4520 (shadow policy parameters at +0x14C .. +0x164).
+- **Findings:**
+  - Every lightmapped component carries one `ShadowMap2D` per unbaked light: `Texture` (PF_G8 atlas, 1024 x 1024, `Lighting.tfc`), `CoordinateScale` / `CoordinateBias` on UV1, `LightGuid`, `bIsShadowFactorTexture` false = signed distance field. Boyle Ext: 462 of 3,503 lightmapped components have one for the dominant directional light (`LightGuid` (549869335, 1241035487, 3786277786, 3976827150)).
+  - The RefShaderCache has no base-pass permutation with the dominant light (`FDistanceFieldShadowedDynamicLight*` exist in the exe but were not cooked); the light is an additive pass, `TLightPixelShader<FDirectionalLightPolicy, FSignedDistanceFieldShadowTexturePolicy>` (e.g. shader 1445): s = saturate((d + P.x) x P.y), 0 below 1e-6, else s^P.z, with P = `DistanceFieldParameters`; the light term (N.L diffuse, specular) is multiplied by s.
+  - Lightmass stores d = 0.5 + distance / (2 x `MaxTransitionDistanceWorldSpace`), 50 uu in `BaseLightmass.ini` (`bAllowSignedDistanceFieldShadows=True`). The setter of P was not reached (U-401); the material's `DistanceFieldPenumbraScale` (default 1, render command `UpdateDistanceFieldPenumbraScaleCommand`) and `LightmassSettings.ShadowExponent` (default 2) are its inputs.
+  - `DominantLightShadowMap` (u16, 132 x 232) is a light-space depth map for the engine's CPU dominant-shadow queries, not a shader input (U-402). Dynamic receivers keep whole-scene dynamic shadows (`bAllowWholeSceneDominantShadows=True`), i.e. the Bevy cascades stay for them.
+- **Port changes:** import: `ShadowMapRef` per component, the dominant directional light's distance field resampled (bilinear, texel centres) into the lightmap atlas layout (`LightmapAtlas::shadow`, `InstanceLightmap::df_shadow`, `lightmap::sample_r8_bilinear`); render: lightmap batches split by `df`, `BakedLightmap` bindings 104 / 105, `lightmap_ext.wgsl` swaps the cascade factor of directional light 0 for the distance-field one (computing Bevy's own directional term and the cascade lookup again, so other lights keep their shadows). P = (-0.5 + 0.5/4, 4, 2) (`map_render::DF_SHADOW`). `--no-df-shadows` restores cascades; `DISHONORED_LIGHTMAP_DEBUG=shadow` shows (s, d, cascade). Also fixed: `map_render::to_image` built mipmapped images with `Image::new`, whose debug assert panicked in every debug build.
+- **Result:** Boyle Ext street / aerial captures (scratch `R_out/sh_df` vs `sh_casc`): 3 % of pixels change, mostly darker facades beyond the cascades' 200 m; near the player the two agree (garden view: 110 of 160,200 sampled pixels differ), which also confirms the field's polarity.
+- **Tests:** `lightmap::tests::r8_bilinear_resample`.
+- **Confidence:** CONFIRMED for the data layout and the shader form; LIKELY for the constants (U-401).
+## 2026-10-06: FaceFX lip sync (U-204)
+
+- **Question:** What do the 44 Boyle `InterpTrackFaceFX` tracks hold, where is the lip sync data, and how does it move the head?
+- **Method:** new `export_hex` tool on the cooked tracks, `FaceFXAnimSet` and `FaceFXAsset` exports; the archive layout read from the bytes (string tables, counts, record sizes checked against the next record), then a reader decoding every Boyle archive to its last byte (`facefx_dump`); `obj_dump` / `skel_dump` to tie actors to head meshes and to compare the reference pose with the mesh bind pose.
+- **Findings** (`dishonored/ANIMATION.md` §12): the cooked FaceFX tracks are empty (12 bytes each, 18 + 16 + 10). Lip sync is the voice data's `FaceFXAnimSet`: one animation per blurb GUID, Hermite curves on face graph nodes, blend 0.16 / 0.22 s. The head mesh's `FaceFXAsset` holds the master bone list (reference, inverse reference rotation, bone pose links with position delta and absolute rotation) and the compiled face graph (combiners and bone poses, linear and type-2 links; ranges with their reciprocals). FaceFX is right-handed: Y mirrored against the mesh.
+- **Port changes:** `dishonored_assets::facefx` (reader, curve / graph / bone evaluation); `DialogueLineView.blurb`; `runtime::facefx` (anim index over the map's packages, actor per model from its parts' `FaceFXAsset`, line start clock); `npc_anim::animate` applies the bone offsets after the face slot, before look-at.
+- **Tests:** `dishonored_assets` `facefx::hermite_and_links`, `facefx::boyle_facefx` (every Boyle actor and set decodes; servant graph wiring, jaw open about 20 degrees, a servant line opens the mouth; skipped without the install).
+- **Confidence:** CONFIRMED for the layout, the empty tracks and the actor / set links; LIKELY for the blending rules and for playback being tied to the blurb (U-380).
+
+## 2026-10-06: Go-to completion in the locomotion component (U-221)
+
+- **Question:** Shaw's `AIGoToActor_0` stops 84 uu short of `TargetPoint_5` against a 4.4 uu lip. Does the original end the go-to farther out (`DisLocoRequest.m_fEndLocationThreshold` -1, `m_bAccurateStop`)?
+- **Method:** Ghidra: `ClassDecomp2` on `DisBehaviorGoTo(_Base)`, `Decomp` on the go-to callbacks and the request setters (0x00cba540 / 0x00cba670 and callees), `StrUsers` on `ArkCpntType_Locomotion`, `F_FuncCallers` (0x0093dd50), `DecompRange` over the locomotion component (0x00930000-0x0094d000) and the go-to code (0x00ae4000-0x00af1800), `OffsetScan` for `m_bDisableTeleportOnNavmesh` (+0x966); `obj_dump` of the locomotion configs, the duel ops, `TargetPoint_5`, `TriggerVolume_2` and the garden meshes; new `nav_dump path`.
+- **Findings** (`dishonored/AI.md` "Go-to completion"):
+  - An actor destination always requests an accurate stop (0x00ae4de0 -> MoveToActor with accurate 1); `AIGoToActor_0` keeps the actor (`m_bTrackMovingTarget` default).
+  - The component's destination is the last point of the found path (0x00949890). Arrival (0x00944390): within 0.1 uu for accurate requests; within `m_fUnaccuracyRadius` (120) at speed below 20 only for non-accurate requests whose speed mode has stop animations. Event 0x18 then marks the behaviour reached (0x00ae4ea0).
+  - Off-mesh pawns return to the nearest navmesh point at `m_fReturnToNavMeshSpeed` unless `m_bDisableTeleportOnNavmesh` (0x00b7cd10, 0x0093ec80).
+  - The target lies on navmesh poly 594, and the garden mesh with the lip has no `BodySetup`. So the original must physically reach the target.
+  - NPC movement over the lip: NPCs walk on the navmesh. `DishonoredGameInfo.m_bNewNPCPhysWalking` (default true) sends the NPC pawn's physics (0x00b4e9f0) to the locomotion component (0x00943d00 -> 0x00940d80). That move adds `Velocity x dt` and takes the height from the navmesh plane. It sets `Location` directly, with no world sweep, whenever the end point is on the navmesh (0x0068f660). Lips below the step height never block an NPC.
+  - The duel's go-tos: `AIGoToActor_0` (`Shaw_Elite` -> `TargetPoint_5`), `AIGoToActor_1` (`Lord Shaw` -> `TargetPoint_9`, inside `TriggerVolume_2`, the "Shaw On Mark" trigger), `AIGoToActor_2` (`Shaw_Elite_Pistols` -> `TargetPoint_55`).
+- **Port changes:** `movement::nav_walk_move` with the `PlayerState::nav_walk` flag. The mission host sets the flag for NPCs that move along a held navmesh path. `nav_dump path`.
+- **Harness:** `kismet --route duel` (the one targeted debug run): 6/6 checks.
+  - Before: `AIGoToActor_0` never completed (stuck 84 uu short).
+  - Now: pawn 2007 arrives for `AIGoToActor_1` (79.2 s), then `_0` and `_2` (86.2 s). The loop sends `Go_to_Mark` / `Stop_stand_there` at 86-87 s.
+  - The countdown is still not reached. All three go-tos move the same pawn, so Lord Shaw is taken off `TargetPoint_9` / `TriggerVolume_2` to `TargetPoint_5`, and "Shaw On Mark" is never set (next lead, U-221).
+- **Confidence:** CONFIRMED for the request fields, the arrival test, the constants (0.01 squared at 0x010a5590, radius 120) and the navmesh-walking path and flag. LIKELY for the record layout linking `m_bAccurateStop` to record +0x24 (from the builder 0x0093ddd0 and the record copy in 0x00945010 / 0x009450c0). APPROXIMATION for the port's navmesh walk (poly by position, no actor box check).
+
+## 2026-10-06: FaceFX bone blending from the binary (U-380)
+
+- **Question:** How does the original blend FaceFX bone poses and combine them with the animation (U-380)?
+- **Method:** exe string scan (FaceFX RTTI, the link function formula strings, `SHOWFACEFXBONES`); Ghidra `StrUsers` (console command 0x006C75A0 -> flag 0x01448FD4), `Decomp` on its users, `OffsetScan` for `SkeletalMeshComponent.FaceFXActorInstance` (+0x390), `Decomp` of the 0x390 users; `prop_layout` / `obj_dump` for `FaceFXBlendMode` and its default.
+- **Findings** (`dishonored/ANIMATION.md` §12): 0x00725EA0 is the FaceFX update. Position = reference + sum of value x delta. Rotation = deltas `slerp(ref, pose, w) x ref^-1` multiplied onto the reference (true slerp when the dot is at most 0.55, else lerp), then normalized. Additive blend mode (the engine default, not overridden): position += FaceFX - mesh reference; rotation = (FaceFX x mesh reference^-1) x animated, after the whole AnimTree. Link function types follow the registration order of their classes; one-clamp is `1 if x <= 1 else 1 / x` (the reader had it wrong; unused in Boyle).
+- **Port changes:** `facefx::bone_poses` (replaces `bone_deltas`) with the original slerp; the runtime builds additive offsets against the bind pose and applies them after the AnimTree layers, pre-multiplied.
+- **Tests:** `dishonored_assets` facefx tests (slerp branches, one-clamp, jaw open about 20 degrees through the new blend).
+- **Confidence:** CONFIRMED for the blending and the combine; graph evaluation and blend in / out remain LIKELY.
+- **Follow-up (same day):** the face graph update (0x00EFBB00) and the tick's curve evaluation (0x00EF5640 -> 0x00F00B50, Hermite 0x00F01070, linear 0x00F01130) decoded. Curves are written raw (the port's blend in / out ramp removed). Node input operations are sum / multiply / max / min with the identities at 0x0120B91C; corrective links scale the node by `1 - c`; the clamp comes last. The reader keeps the stored 1/min and 1/max for corrective links.
+- **Follow-up 2:** the blurb start (0x00C9FBF0) plays the blurb's FaceFX anim through `PlayFaceFXAnim` (0x00756EF0) on the speaker's FaceFX component, with the conversation component as the audio handler; the VO is posted when the anim starts (0x00CA0120), so lip sync and VO start together (the port's line-start clock). FaceFX registers have no script callers.
+## 2026-10-06: Climbing on DisClimbable chains (U-240)
+
+- **Question:** How does `StatePlayerMasterClimb` move the player on a chain, how is it entered
+  and left, and where do the chain's bones come from?
+- **Evidence:** `ClassDecomp2` of `StatePlayerMasterClimb` (enter 0x00A72B00, exit 0x00A6E2C0,
+  transition test 0x00A6E570, HUD contexts 0x00A67830), `DisClimbable` (collision notify
+  0x00A3FA70, physics change 0x00A1E800, tick 0x00A2BFD0) and its interface vtables (`Interact`
+  0x00A23130, visibility 0x00A1E6F0); `Decomp` of `physLadder` 0x00AA82C0 with its callees
+  (`FindClosestBone` 0x00713130, `GetBoneLocation` 0x00732CD0, `VInterpTo` 0x0041E860,
+  `TwoWallAdjust` 0x0065FC60), the Use handler 0x00AD5BA0, let-go 0x00AAA030, the Jump state's
+  enter / exit 0x00A75EE0 / 0x00A5FFA0 (found by an `OffsetScan` for `m_pClimbable` +0xAA0);
+  `prop_layout` offsets (pawn +0x8A0 bits 6/16/17, +0xAA0, +0x1238 `m_ClimbingAimThreshold`;
+  camera +0x33C = `CameraCache.POV.Rotation.Pitch`; component +0xE4 = `Bounds.SphereRadius`);
+  class records 0x01300048 / 0x01300570 / 0x01300A98 / 0x01300200 for the climb, falling, jump
+  states and `DisSeqEvent_Climb`; the two chains' actors, meshes and physics assets (`obj_dump`,
+  `skel_dump`).
+- **Result:** see PLAYER.md "Climbing". In short: grab by Use, by touch while not walking, or by
+  Blinking into the chain; `physLadder` zeroes the velocity and, with any input, moves the height
+  target by `0.0005 x 16383.5 = 8.19` uu (up when the input is within `acos 0.9` of the facing,
+  down otherwise; `m_bCameraRelativeClimbing` reverses it when looking down past
+  `m_ClimbingAimThreshold` 1000), clamped to `[anchor.z - 2 x SphereRadius, anchor.z -
+  CollisionHeight]`, and follows the bone nearest 2/3 of the height above the centre, 30 uu
+  behind and 10 uu to the right, by `VInterpTo` at speed 20: 163.8 uu/s. Every exit sets
+  `Velocity = facing x 525` (x2 under something within 200 uu); jumping adds `JumpZ` 800 and keeps
+  the chain held until the jump ends, then its collision returns after 0.3 s; Use lets go
+  (`m_bLettingGoOfClimbable`). Both are refused for `m_fClimbReuseDelay` (0.5 s,
+  `Twk_Pawn_PlayerInput`) after the grab. No automatic exit at either end. Chains: Int
+  `DisClimbable_1` (-3153, -420, -627), `chain_400` (6 bones, sphere 198.04, centre range
+  -1023.1 .. -714.5); Ext `DisClimbable_3` (-2085, 580, 1884), `chain_1400` (16 bones, sphere
+  697.57, 488.9 .. 1796.5). No Boyle Kismet uses `DisSeqEvent_Climb`.
+- **Note:** the property reader returns a cooked `Matrix` (`KBoxElem.TM`) as 64 raw bytes starting
+  one dword early (rows at +4, the last 1.0 cut off); `dishonored_assets::climbable` reads it that
+  way.
+- **Confidence:** CONFIRMED for the movement, limits, exits and data; LIKELY for the Use target
+  rule (the pickups' cone), the ceiling-trace reading (U-443); the camera-relative flag's setter
+  is unknown (U-440: no AND/OR write of +0x8A0 bit 16 or byte +0x8A2 bit 0); chains are rest poses
+  (U-442). `m_bLettingGoOfClimbable` is cleared only by `StatePlayerMasterFalling`'s exit
+  (0x00A63110, `FindFieldWrites` +0x8A0 / 0x40; U-441 resolved); the Jump state's +0x54 bit 0 is
+  `m_bJumpingFromChain`.
+- **Implementation consequence:** `MoveMode::Climbing`, `dishonored_sim::climb` (tests
+  `crates/dishonored_sim/tests/climb.rs`: grab, up / down speeds and limits, camera-relative
+  hysteresis, jump off with and without a ceiling, let go, touch grab, top exit over a ledge,
+  determinism); `WorldQuery::climbables` with `CollisionWorld.climbables` loaded by
+  `dishonored_content::load_climbables` (cache `<map>.climb1.json`); config
+  `movement.climb` (cache `gameplay_config.v8.json`); `SimEvent::Climb` / `ClimbSound` (the
+  runtime posts `Snd_P_Chain_Climbing`); the mission view lists the chains' bones as "Grab"
+  usables and the HUD shows "Jump off" while climbing; net protocol 4. The state hash mixes the
+  climb state only once a pawn has touched a chain, so existing replay hashes are unchanged
+  (`harness sim`, debug build: 19/19, brawl hashes identical). Real-map test
+  (`dishonored_content` `climb_boyle_chains`): dropped beside either chain, the pawn grabs it
+  and climbs to z -722.0 (Int; the limit -714.5 is not reached because the beam the chain hangs
+  from blocks the pawn's top) and 1786.0 (Ext; limit 1796.5), and down to the lower limits.

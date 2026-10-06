@@ -83,6 +83,50 @@ pub struct MovementConfig {
     /// impulse of the power jump at the top of a held jump.
     #[serde(default)]
     pub power_jump_z: f32,
+    /// Climbing `DisClimbable` chains (`StatePlayerMasterClimb`, `physLadder` 0x00AA82C0).
+    #[serde(default)]
+    pub climb: ClimbConfig,
+}
+
+/// Climbing constants. Sources: `Twk_Pawn_Corvo_Release` (`m_fClimbingSpeed`, `m_fJumpImpulse`,
+/// `m_fClimbingSound{Min,Max}Delay`), `Twk_Pawn_PlayerInput` (`m_fClimbReuseDelay`,
+/// `m_bClimbReuseDelayJump`), `DefaultPlayer.ini` (`m_ClimbingAimThreshold`) and the
+/// `DisTweaks_Climbable` class default (`m_fCollisionRestorationDelay`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClimbConfig {
+    /// `m_fClimbingSpeed`: x 16383.5 is the height offset of the climb target each tick.
+    pub speed: f32,
+    /// `m_fJumpImpulse`: the velocity along the facing given when leaving the chain.
+    pub jump_impulse: f32,
+    pub sound_min_delay: f32,
+    pub sound_max_delay: f32,
+    /// `m_fClimbReuseDelay`: no letting go (and, with `reuse_delay_jump`, no jumping off) this
+    /// soon after grabbing.
+    pub reuse_delay: f32,
+    pub reuse_delay_jump: bool,
+    /// `m_ClimbingAimThreshold` (rotator units of camera pitch).
+    pub aim_threshold: i32,
+    /// `DisTweaks_Climbable.m_fCollisionRestorationDelay`.
+    pub collision_restoration_delay: f32,
+    /// `DishonoredPlayerPawn.m_bCameraRelativeClimbing` (transient, default false; its setter
+    /// was not found, U-440).
+    pub camera_relative: bool,
+}
+
+impl Default for ClimbConfig {
+    fn default() -> Self {
+        Self {
+            speed: 0.0005,
+            jump_impulse: 525.0,
+            sound_min_delay: 0.3,
+            sound_max_delay: 1.8,
+            reuse_delay: 0.5,
+            reuse_delay_jump: true,
+            aim_threshold: 1000,
+            collision_restoration_delay: 0.3,
+            camera_relative: false,
+        }
+    }
 }
 
 /// Swimming constants. Sources: `DefaultPlayerState.ini [StatePlayerMasterSwim]`,

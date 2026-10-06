@@ -14,7 +14,14 @@
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
     forward_io::{VertexOutput, FragmentOutput},
-    pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT,
+    pbr_types::{STANDARD_MATERIAL_FLAGS_UNLIT_BIT, PbrInput},
+    pbr_functions::{calculate_diffuse_color, calculate_F0_dielectric},
+    mesh_view_bindings as view_bindings,
+    mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
+    mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
+    lighting,
+    lighting::LAYER_BASE,
+    shadows,
 }
 
 // x = exposure (UE3 lightmap unit to Bevy), y = specular colour / Bevy reflectance (0 = no
@@ -23,6 +30,30 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var baked_lightmap: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var baked_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(103) var baked_directional: texture_2d<f32>;
+// Dominant directional light distance-field shadow (`FSignedDistanceFieldShadowTexturePolicy`,
+// RefShaderCache light pass, e.g. 1445): s = saturate((d + x) * y), 0 below 1e-6, else s^z.
+// baked_shadow_params = (on, bias, scale, exponent).
+@group(#{MATERIAL_BIND_GROUP}) @binding(104) var baked_shadow: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(105) var<uniform> baked_shadow_params: vec4<f32>;
+
+// The dominant directional light (index 0) as Bevy's PBR applies it, unshadowed.
+fn dominant_light(pbr_input: PbrInput) -> vec3<f32> {
+    let m = pbr_input.material;
+    var li: lighting::LightingInput;
+    li.layers[LAYER_BASE].NdotV = max(dot(pbr_input.N, pbr_input.V), 0.0001);
+    li.layers[LAYER_BASE].N = pbr_input.N;
+    li.layers[LAYER_BASE].R = reflect(-pbr_input.V, pbr_input.N);
+    li.layers[LAYER_BASE].perceptual_roughness = m.perceptual_roughness;
+    li.layers[LAYER_BASE].roughness = lighting::perceptualRoughnessToRoughness(m.perceptual_roughness);
+    li.P = pbr_input.world_position.xyz;
+    li.V = pbr_input.V;
+    li.diffuse_color = calculate_diffuse_color(m.base_color.rgb, m.metallic, m.specular_transmission, m.diffuse_transmission);
+    li.metallic = m.metallic;
+    li.F0_dielectric = calculate_F0_dielectric(m.reflectance);
+    li.F0_metallic = m.base_color.rgb;
+    li.F_ab = lighting::F_AB(m.perceptual_roughness, li.layers[LAYER_BASE].NdotV);
+    return lighting::directional_light(0u, &li, true);
+}
 
 const B0 = vec3<f32>(0.0, 0.81649661, 0.57735026);
 const B1 = vec3<f32>(-0.70710677, -0.40824830, 0.57735026);
@@ -74,9 +105,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // UE3 specular colour = S_ texture (masked channel) [* S_Specular_color.rgb]; Bevy's
     // reflectance holds 0.5 * a * colour * texture, so y = 2 / a (0 without specular).
     lightmap_specular = color * dot(dir, ws) * pbr_input.material.reflectance * baked_params.y;
-    if (baked_params.w >= 3.0) {
+    if (baked_params.w >= 3.0 && baked_params.w < 8.0) {
         // Debug views (DISHONORED_LIGHTMAP_DEBUG): 3 lobe weights, 4 tangent-space view
-        // vector, 5 tangent-space normal, 6 diffuse irradiance, 7 basis intensities.
+        // vector, 5 tangent-space normal, 6 diffuse irradiance, 7 basis intensities (8, the
+        // distance-field shadow, is drawn after the lighting).
         var dbg = ws;
         if (baked_params.w == 4.0) { dbg = v_ts * 0.5 + 0.5; }
         if (baked_params.w == 5.0) { dbg = n_ts * 0.5 + 0.5; }
@@ -91,6 +123,31 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
         out.color = apply_pbr_lighting(pbr_input);
         out.color = vec4<f32>(out.color.rgb + lightmap_specular, out.color.a);
+#ifdef VERTEX_UVS_B
+        // Where the original shadows the dominant light with the component's distance field,
+        // swap the cascade factor Bevy applied for the distance-field one.
+        if (baked_shadow_params.x > 0.0 && view_bindings::lights.n_directional_lights > 0u) {
+            let d = textureSampleLevel(baked_shadow, baked_sampler, in.uv_b, 0.0).r;
+            var s = saturate((d + baked_shadow_params.y) * baked_shadow_params.z);
+            s = select(0.0, pow(s, baked_shadow_params.w), s - 1e-6 >= 0.0);
+            var cascade = 1.0;
+            if ((pbr_input.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u
+                    && (view_bindings::lights.directional_lights[0].flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+                let view_z = dot(vec4<f32>(
+                    view_bindings::view.view_from_world[0].z,
+                    view_bindings::view.view_from_world[1].z,
+                    view_bindings::view.view_from_world[2].z,
+                    view_bindings::view.view_from_world[3].z
+                ), pbr_input.world_position);
+                cascade = shadows::fetch_directional_shadow(0u, pbr_input.world_position, pbr_input.world_normal, view_z, pbr_input.frag_coord.xy);
+            }
+            let light = dominant_light(pbr_input) * view_bindings::view.exposure;
+            out.color = vec4<f32>(max(out.color.rgb + (s - cascade) * light, vec3<f32>(0.0)), out.color.a);
+            if (baked_params.w == 8.0) {
+                out.color = vec4<f32>(s, d, cascade, 1.0);
+            }
+        }
+#endif
     } else {
         out.color = pbr_input.material.base_color;
     }

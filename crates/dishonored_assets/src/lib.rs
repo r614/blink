@@ -19,6 +19,7 @@ pub mod static_mesh;
 pub mod swf;
 pub mod swf_font;
 pub mod edge_anim;
+pub mod facefx;
 pub mod gameplay;
 pub mod items_config;
 pub mod pickups;
@@ -31,6 +32,7 @@ pub mod texture;
 pub mod tweaks;
 pub mod util;
 pub mod water;
+pub mod climbable;
 
 pub use content::Content;
 pub use level::{ImportOptions, ImportStats, import_level};

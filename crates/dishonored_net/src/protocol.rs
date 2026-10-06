@@ -14,7 +14,7 @@ use dishonored_sim::state::{PlayerId, PlayerState, ProjectileState, WindblastSta
 use serde::{Deserialize, Serialize};
 
 pub const MAGIC: u32 = 0x4449_5331; // "DIS1"
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5; // 4: PlayerState.climb, SimEvent::Climb / ClimbSound; 5: LeftHandState.dispersion
 pub const MAX_DATAGRAM: usize = 60_000;
 /// Inputs resent per packet.
 pub const INPUT_REDUNDANCY: usize = 8;

@@ -276,8 +276,17 @@ original layout, so Bevy's `Lightmap { uv_rect }` uses the UE3 bias/scale direct
 `Texture` (→ `ShadowMapTexture2D`, `PF_G8`, `SRGB=false`, `Lighting.tfc`),
 `CoordinateScale`, `CoordinateBias`, `LightGuid`, `bIsShadowFactorTexture` (false = signed
 distance field shadows). They hold precomputed shadowing for lights that are not baked into
-the lightmap (dominant/toggleable). Not used by the renderer yet; the dominant light uses
-Bevy's real-time shadow maps instead.
+the lightmap (dominant/toggleable). The `ShadowMapTexture2D`s are atlases like the lightmaps
+(1024 x 1024 on Boyle Ext, `ShadowmapFlags` 1, top mips in `Lighting.tfc`); shadow map UV =
+UV1 x `CoordinateScale` + `CoordinateBias`. The value is Lightmass's signed distance to the shadow
+edge, d = 0.5 + distance / (2 x `MaxTransitionDistanceWorldSpace`) (BaseLightmass.ini: 50 uu),
+0 = deep in shadow, 1 = lit. The shadow maps whose `LightGuid` is the level's
+`DominantDirectionalLightComponent.LightGuid` (Boyle Ext: (549869335, 1241035487, 3786277786,
+3976827150)) are resampled into the lightmap atlas layout (`LightmapAtlas::shadow`,
+`InstanceLightmap::df_shadow`) and shade the dominant light (LOG "Distance-field shadows").
+`TArray<WORD> DominantLightShadowMap` (before the tagged properties of dominant directional /
+spot light components) with `DominantLightShadowInfo` is a light-space depth map used by the
+engine's CPU dominant-shadow queries (U-402), not by the static-mesh shaders.
 
 ## Lights, fog, post, sky — CONFIRMED (data), see LOG for render mapping
 

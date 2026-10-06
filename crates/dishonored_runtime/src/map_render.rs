@@ -36,6 +36,9 @@ pub struct RenderFeatures {
     /// View-dependent specular from the directional lightmap (the original base pass's
     /// lightmap specular term).
     pub lightmap_specular: bool,
+    /// The dominant directional light's distance-field shadow maps on lightmapped static
+    /// geometry instead of Bevy's cascades (`--no-df-shadows` turns them off).
+    pub df_shadows: bool,
 }
 
 impl RenderFeatures {
@@ -55,6 +58,7 @@ impl RenderFeatures {
             // (`SpecularOverrideParameter`, U-320) is unknown and full strength blows flat roofs and
             // gravel out to white. `--lightmap-specular` turns it on for comparison.
             lightmap_specular: !base && has("--lightmap-specular"),
+            df_shadows: on("--no-df-shadows"),
         }
     }
 }
@@ -80,17 +84,19 @@ pub fn to_image(t: &TextureAsset) -> Image {
             *b = (*b as i8 as i16 + 128) as u8;
         }
     }
-    let mut img = Image::new(
+    // `Image::new` debug-asserts that the data is exactly mip 0, so the chain is set afterwards
+    // (debug builds panicked here on every mipmapped texture).
+    let mut img = Image::new_uninit(
         Extent3d {
             width: t.width,
             height: t.height,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        data,
         format,
         RenderAssetUsages::RENDER_WORLD,
     );
+    img.data = Some(data);
     img.texture_descriptor.mip_level_count = t.mips.len() as u32;
     img.sampler = bevy::image::ImageSampler::Descriptor(bevy::image::ImageSamplerDescriptor {
         address_mode_u: bevy::image::ImageAddressMode::Repeat,
@@ -346,6 +352,7 @@ pub fn spawn_map(
     } else {
         (Vec::new(), Vec::new())
     };
+    let shadow_handles: Vec<Handle<Image>> = if features.lightmaps { map.lightmaps.iter().map(|l| images.add(shadow_image(l))).collect() } else { Vec::new() };
     // Flat-normal irradiance pages for geometry drawn with Bevy's own per-entity lightmaps
     // (translucent and unmerged instances), built on first use.
     let mut flat_handles: Vec<Option<Handle<Image>>> = vec![None; map.lightmaps.len()];
@@ -438,6 +445,7 @@ pub fn spawn_map(
                     atlas: lm.map(|l| l.atlas as u32),
                     cell: ((t.x / BATCH_CELL).floor() as i32, (t.y / BATCH_CELL).floor() as i32),
                     uv1: has_uv1,
+                    df: lm.is_some_and(|l| l.df_shadow && features.df_shadows && !map.lightmaps[l.atlas].shadow.is_empty()),
                 };
                 let b = batches.entry(key).or_default();
                 b.append(mesh, si, coords::transform(inst.transform), lm.map(|l| (l.uv_min, l.uv_max)));
@@ -487,9 +495,10 @@ pub fn spawn_map(
         Ok("normal") => 5.0,
         Ok("diffuse") => 6.0,
         Ok("dir") => 7.0,
+        Ok("shadow") => 8.0,
         _ => 0.0,
     };
-    let mut baked_cache: std::collections::HashMap<(u32, u32), Handle<BakedMaterial>> = std::collections::HashMap::new();
+    let mut baked_cache: std::collections::HashMap<(u32, u32, bool), Handle<BakedMaterial>> = std::collections::HashMap::new();
     // Build batch meshes (MikkTSpace tangents dominate) across all cores.
     let built: Vec<(BatchKey, Mesh)> = {
         let jobs: Vec<(BatchKey, Batch)> = batches.into_iter().filter(|(_, b)| !b.indices.is_empty()).collect();
@@ -536,7 +545,7 @@ pub fn spawn_map(
             // Lightmap regions are already folded into UV1: one shared material per
             // (material, atlas page).
             Some(atlas) => {
-                let h = baked_cache.entry((key.material, atlas)).or_insert_with(|| {
+                let h = baked_cache.entry((key.material, atlas, key.df)).or_insert_with(|| {
                     let base = materials.get(&mat).cloned().unwrap_or_default();
                     let exposure = base.lightmap_exposure;
                     // Lightmap specular: colour = reflectance * 2 / a (see lightmap_ext.wgsl),
@@ -550,6 +559,8 @@ pub fn spawn_map(
                             params: Vec4::new(exposure, if lm_debug == 1.0 { 0.0 } else { spec_scale }, power, lm_debug),
                             lightmap: lightmap_handles[atlas as usize].clone(),
                             directional: directional_handles[atlas as usize].clone(),
+                            shadow: shadow_handles[atlas as usize].clone(),
+                            shadow_params: if key.df { Vec4::new(1.0, DF_SHADOW.0, DF_SHADOW.1, DF_SHADOW.2) } else { Vec4::ZERO },
                         },
                     })
                 });
@@ -575,6 +586,8 @@ const BATCH_CELL: f32 = 4096.0;
 struct BatchKey {
     material: u32,
     atlas: Option<u32>,
+    /// Distance-field shadowed by the dominant directional light.
+    df: bool,
     cell: (i32, i32),
     uv1: bool,
 }
@@ -641,6 +654,33 @@ pub struct BakedLightmap {
     /// Basis intensities of the directional lightmap (same layout as `lightmap`).
     #[texture(103)]
     pub directional: Handle<Image>,
+    /// Dominant directional light distance field (same layout; `LightmapAtlas::shadow`).
+    #[texture(104)]
+    pub shadow: Handle<Image>,
+    /// (on, bias, scale, exponent) of the distance-field shadow, see `DF_SHADOW`.
+    #[uniform(105)]
+    pub shadow_params: Vec4,
+}
+
+/// `DistanceFieldParameters` of the original's distance-field light shaders
+/// (`saturate((d + bias) * scale)^exponent`): the setter was not traced (U-402). The form keeps
+/// the half-shadow at the field's 0.5 edge (Lightmass stores d = 0.5 + distance / (2 x
+/// `MaxTransitionDistanceWorldSpace` 50 uu)); scale 4 gives a 25 uu penumbra; the exponent is
+/// `LightmassDirectionalLightSettings.ShadowExponent` (default 2).
+pub const DF_SHADOW: (f32, f32, f32) = (-0.5 + 0.5 / 4.0, 4.0, 2.0);
+
+/// The shadow plane of an atlas as a linear R8 image (white when it has none).
+pub fn shadow_image(l: &LightmapAtlas) -> Image {
+    let (w, h, data) = if l.shadow.len() == (l.width * l.height) as usize { (l.width, l.height, l.shadow.clone()) } else { (1, 1, vec![255]) };
+    let mut img = Image::new(Extent3d { width: w, height: h, depth_or_array_layers: 1 }, TextureDimension::D2, data, WgpuFormat::R8Unorm, RenderAssetUsages::RENDER_WORLD);
+    img.sampler = bevy::image::ImageSampler::Descriptor(bevy::image::ImageSamplerDescriptor {
+        address_mode_u: bevy::image::ImageAddressMode::ClampToEdge,
+        address_mode_v: bevy::image::ImageAddressMode::ClampToEdge,
+        mag_filter: bevy::image::ImageFilterMode::Linear,
+        min_filter: bevy::image::ImageFilterMode::Linear,
+        ..Default::default()
+    });
+    img
 }
 
 impl bevy::pbr::MaterialExtension for BakedLightmap {

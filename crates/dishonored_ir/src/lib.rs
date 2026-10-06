@@ -174,6 +174,11 @@ pub struct LightmapAtlas {
     /// RGB9E5. Empty for atlases without directional data.
     #[serde(default)]
     pub directional: Vec<u32>,
+    /// Row-major signed distance field of the dominant directional light's shadow (the
+    /// components' `ShadowMap2D` PF_G8 textures resampled into this layout; 0.5 = shadow edge),
+    /// 255 where no component has one. Empty when no component of the atlas has one.
+    #[serde(default)]
+    pub shadow: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -182,6 +187,11 @@ pub struct InstanceLightmap {
     /// Lightmap UV = mix(uv_min, uv_max, mesh UV1) (UE3 CoordinateBias / Bias+Scale).
     pub uv_min: Vec2,
     pub uv_max: Vec2,
+    /// The component has a distance-field shadow map of the dominant directional light
+    /// (`LightmapAtlas::shadow`): the original shadows that light with it instead of a
+    /// dynamic shadow map.
+    #[serde(default)]
+    pub df_shadow: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
