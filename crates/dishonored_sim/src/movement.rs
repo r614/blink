@@ -585,7 +585,6 @@ fn step_up(p: &mut PlayerState, desired: Vec3, delta: Vec3, hit: (Vec3, f32), ct
     }
 }
 
-/// The horizontal part of physWalking's move: the move, then stepUp on a barrier.
 /// NPC navmesh walking (`DishonoredGameInfo.m_bNewNPCPhysWalking`, default true; the NPC pawn's
 /// physics 0x00B4E9F0 -> the locomotion component 0x00943D00 -> 0x00940D80, AI.md "Go-to
 /// completion"): while the locomotion component follows a navmesh path, the pawn is not moved by
@@ -618,6 +617,7 @@ fn nav_walk_move(p: &mut PlayerState, delta: Vec3, ctx: &MoveCtx) -> bool {
     true
 }
 
+/// The horizontal part of physWalking's move: the move, then stepUp on a barrier.
 fn walk_move(p: &mut PlayerState, delta: Vec3, ctx: &MoveCtx) {
     if delta.abs().max_element() < 1e-4 {
         return;

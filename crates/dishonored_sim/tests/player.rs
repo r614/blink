@@ -297,6 +297,66 @@ fn dispersion_is_held_at_the_maximum_in_the_air_and_upgrades_apply_to_their_weap
     assert!(offset_direction(0.0, 0.0, (0.0, 10.0)).z < 0.0);
 }
 
+/// A floor at z = 0 with a wall across x = 200 (60 high: no step up), and a navmesh poly over
+/// x in [0, 400] at z = 0 under it.
+fn walled_world_with_nav() -> CollisionWorld {
+    use dishonored_ir::nav::{NavData, NavMesh, NavPoly, NavPylon};
+    let mut tris = Vec::new();
+    let mut quad = |a: Vec3, b: Vec3, c: Vec3, d: Vec3| {
+        for (x, y, z) in [(a, b, c), (a, c, d)] {
+            let n = (y - x).cross(z - x).normalize();
+            tris.push(Tri { a: x, b: y, c: z, n, channels: channel::ALL, source: 0 });
+        }
+    };
+    quad(Vec3::new(-2000., -2000., 0.), Vec3::new(2000., -2000., 0.), Vec3::new(2000., 2000., 0.), Vec3::new(-2000., 2000., 0.));
+    // Wall facing -X.
+    quad(Vec3::new(200., -500., 0.), Vec3::new(200., -500., 60.), Vec3::new(200., 500., 60.), Vec3::new(200., 500., 0.));
+    let mut w = CollisionWorld::from_triangles(tris, vec!["fixture".into()]);
+    let v = |x: f32, y: f32| Vec3::new(x, y, 0.0);
+    let mesh = NavMesh {
+        source: "test".into(),
+        version: (28, 28),
+        verts: vec![v(0., -200.), v(400., -200.), v(400., 200.), v(0., 200.)],
+        polys: vec![NavPoly { verts: vec![0, 1, 2, 3], edges: vec![], center: v(200., 0.), normal: Vec3::Z, min: v(0., -200.), max: v(400., 200.), height: 200.0 }],
+        edges: vec![],
+        min: v(0., -200.),
+        max: v(400., 200.),
+    };
+    let data = NavData { pylons: vec![NavPylon { name: "p".into(), package: "t".into(), object_ref: 1, mesh, ..Default::default() }], path_objects: Vec::new() };
+    w.nav = Some(std::sync::Arc::new(dishonored_world::nav::NavWorld::from_data(&data)));
+    w
+}
+
+#[test]
+fn npc_on_a_navmesh_path_walks_the_navmesh_and_ignores_world_geometry() {
+    let run = |nav_walk: bool| {
+        let cfg = cfg();
+        let mut state = WorldState::default();
+        spawn_npc(&mut state, 7, PawnKind::Civilian, 0, Vec3::new(100., 0., 100.), 0.0, &cfg);
+        let world = walled_world_with_nav();
+        let mut out = Vec::new();
+        for i in 0..180u32 {
+            state.player_mut(7).unwrap().nav_walk = nav_walk && i >= 30;
+            let tick = state.tick;
+            let forward = if i >= 30 { 1 } else { 0 };
+            step_world(&mut state, &[(7, PlayerInput { tick, yaw: 0.0, forward, ..Default::default() })], &world, &cfg);
+            out.push(state.player(7).unwrap().position);
+        }
+        out
+    };
+    let a = run(true);
+    let b = run(true);
+    assert_eq!(a, b, "deterministic");
+    let end = *a.last().unwrap();
+    // Through the wall line (the move rides the navmesh; past its end physWalking takes over).
+    assert!(end.x > 220.0, "{end}");
+    let on_nav = a.iter().find(|p| p.x > 220.0 && p.x < 400.0).expect("a step on the navmesh past the wall");
+    let hh = cfg().gameplay.movement.collision_half_height;
+    assert!(on_nav.z > 0.0 && on_nav.z <= hh + 1.0, "{on_nav}");
+    let blocked = *run(false).last().unwrap();
+    assert!(blocked.x < 200.0, "physWalking stops at the wall: {blocked}");
+}
+
 #[test]
 fn rats_bite_in_groups_and_slow_their_target() {
     let mut r = Run::new(&[(1, Vec3::new(0., 0., 92.), 0.)]);
