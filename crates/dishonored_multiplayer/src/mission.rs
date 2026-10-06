@@ -279,7 +279,7 @@ impl MissionSetup {
                         });
                         (k + 1) as u16
                     };
-                    let look = Look { parts: parts.clone(), materials: s.appearance.materials(id), anim };
+                    let look = Look { parts: parts.clone(), materials: s.appearance.materials(id), anim, accessories: s.appearance.accessories(id) };
                     let i = appearances.iter().position(|a| *a == look).unwrap_or_else(|| {
                         appearances.push(look);
                         appearances.len() - 1
@@ -585,7 +585,7 @@ impl MissionMatch {
                     materials.retain(|x| !(x.0 == p && x.1 == i));
                     materials.push((p, i, path));
                 }
-                let want = Look { parts: look.parts, materials, anim: look.anim };
+                let want = Look { parts: look.parts, materials, anim: look.anim, accessories: look.accessories };
                 let idx = match self.view.appearances.iter().position(|l| *l == want) {
                     Some(i) => i,
                     None => {

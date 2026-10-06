@@ -58,7 +58,8 @@ fn anim_names(pkg: &Package, props: &[Property], n: &str) -> Vec<String> {
 pub fn read_loco_config(pkg: &Package, export: usize) -> Result<LocoConfig> {
     let h = pkg.read_object(export)?;
     let p = &h.properties;
-    let mut c = LocoConfig { name: pkg.obj_path(ObjRef::Export(export)), speed_names: names(pkg, p, "m_SpeedNames"), table: ints(p, "m_SpeedModes"), ref_mesh: name_of(p, "m_SkeletalRefMeshName"), ..Default::default() };
+    let speed = |n: &str, d: f32| find(p, n).and_then(|x| x.as_float()).unwrap_or(d);
+    let mut c = LocoConfig { name: pkg.obj_path(ObjRef::Export(export)), speed_names: names(pkg, p, "m_SpeedNames"), table: ints(p, "m_SpeedModes"), ref_mesh: name_of(p, "m_SkeletalRefMeshName"), stop_speed: speed("m_fVelocityToStopMoving", 20.0), start_speed: speed("m_fVelocityToStartToMove", 60.0), ..Default::default() };
     for m in structs(pkg, p, "m_Modifiers") {
         c.modifiers.push(LocoModifier { name: name_of(&m, "m_ModifierName"), acceleration: f32_of(&m, "m_fAcceleration"), deceleration: f32_of(&m, "m_fDeceleration"), speed_multiplier: find(&m, "m_fSpeedMultiplier").and_then(|x| x.as_float()).unwrap_or(1.0) });
     }
@@ -71,6 +72,7 @@ pub fn read_loco_config(pkg: &Package, export: usize) -> Result<LocoConfig> {
             start_anims: anim_names(pkg, &m, "m_StartAnimProps"),
             stop_anims: anim_names(pkg, &m, "m_StopAnimProps"),
             turn_anims: anim_names(pkg, &m, "m_TurnAnimProps"),
+            foot_on_ground: f32_of(&m, "m_fFootOnGroundPct"),
         });
     }
     for t in structs(pkg, p, "m_Transitions") {
@@ -80,6 +82,7 @@ pub fn read_loco_config(pkg: &Package, export: usize) -> Result<LocoConfig> {
         };
         c.transitions.push((name_of(&t, "m_AnimName"), i("m_StartModifier"), i("m_EndModifier")));
     }
+    c.feet = structs(pkg, p, "m_Feet").iter().map(|f| f32_of(f, "m_fOnGroundPct")).collect();
     Ok(c)
 }
 
@@ -90,13 +93,18 @@ pub fn load_loco_config(content: &Content, r: &(String, String)) -> Result<LocoC
     let mut c = read_loco_config(&pkg, i)?;
     // Unset arrays come from the class default object (Engine): e.g. FemaleLocomotionConfig
     // keeps the default three speed names.
-    if c.speed_names.is_empty() {
+    if c.speed_names.is_empty() || c.feet.is_empty() {
         if let Ok(e) = content.package("Engine") {
             if let Some(d) = find_export(&e, "Default__ArkComponentLocomotionConfig") {
                 let h = e.read_object(d)?;
-                c.speed_names = names(&e, &h.properties, "m_SpeedNames");
-                if c.table.is_empty() {
-                    c.table = ints(&h.properties, "m_SpeedModes");
+                if c.speed_names.is_empty() {
+                    c.speed_names = names(&e, &h.properties, "m_SpeedNames");
+                    if c.table.is_empty() {
+                        c.table = ints(&h.properties, "m_SpeedModes");
+                    }
+                }
+                if c.feet.is_empty() {
+                    c.feet = structs(&e, &h.properties, "m_Feet").iter().map(|f| f32_of(f, "m_fOnGroundPct")).collect();
                 }
             }
         }
@@ -129,6 +137,7 @@ fn read_chains(pkg: &Package, props: &[Property]) -> Vec<AnimChain> {
                             blend_in: find(s, "m_fBlendInTime").and_then(|x| x.as_float()).unwrap_or(0.2),
                             rate_range: f32_of(s, "m_fPlayRateModifierRange"),
                             item_prefix: enum_index(s, "m_FirstItemPrefix", ITEM_PREFIX),
+                            face: Some(name_of(s, "m_FaceAnimName")).filter(|n| !n.is_empty() && n != "None").unwrap_or_default(),
                         })
                         .collect(),
                 })
@@ -185,6 +194,122 @@ pub fn anim_set_sequences(pkg: &Package, set: usize) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+/// Decode a `PhysicsAsset` (`BodySetup`: `RB_BodySetup` per bone with its `AggGeom` spheres,
+/// boxes and capsules; `ConstraintSetup`: `RB_ConstraintSetup` joints with swing / twist limits).
+pub fn read_physics_asset(pkg: &Package, export: usize) -> Result<PhysicsAssetData> {
+    let h = pkg.read_object(export)?;
+    let mut out = PhysicsAssetData { name: pkg.obj_path(ObjRef::Export(export)), ..Default::default() };
+    for b in find(&h.properties, "BodySetup").and_then(|p| p.array_objects().ok()).unwrap_or_default() {
+        let ObjRef::Export(e) = ObjRef::from_index(b) else { continue };
+        let Ok(bh) = pkg.read_object(e) else { continue };
+        let p = &bh.properties;
+        let mut body = PhysBody { bone: name_of(p, "BoneName"), fixed: bool_of(p, "bFixed"), ..Default::default() };
+        if let Some(Value::Struct(_, agg)) = find(p, "AggGeom").map(|x| &x.value) {
+            for s in structs(pkg, agg, "SphereElems") {
+                body.radius = body.radius.max(f32_of(&s, "Radius"));
+            }
+            for s in structs(pkg, agg, "SphylElems") {
+                let r = f32_of(&s, "Radius");
+                if r >= body.radius {
+                    body.radius = r;
+                    body.length = f32_of(&s, "Length");
+                    if let Some(c) = matrix_origin(find(&s, "TM").map(|x| &x.value)) {
+                        body.center = c;
+                    }
+                }
+            }
+            for s in structs(pkg, agg, "BoxElems") {
+                let half = [f32_of(&s, "X"), f32_of(&s, "Y"), f32_of(&s, "Z")].iter().fold(f32::MAX, |a, b| a.min(*b)) * 0.5;
+                if half.is_finite() && half > body.radius {
+                    body.radius = half;
+                }
+            }
+        }
+        if !body.bone.is_empty() && body.bone != "None" {
+            out.bodies.push(body);
+        }
+    }
+    for c in find(&h.properties, "ConstraintSetup").and_then(|p| p.array_objects().ok()).unwrap_or_default() {
+        let ObjRef::Export(e) = ObjRef::from_index(c) else { continue };
+        let Ok(ch) = pkg.read_object(e) else { continue };
+        let p = &ch.properties;
+        out.constraints.push(PhysConstraint {
+            bone1: name_of(p, "ConstraintBone1"),
+            bone2: name_of(p, "ConstraintBone2"),
+            swing_limited: bool_of(p, "bSwingLimited"),
+            twist_limited: bool_of(p, "bTwistLimited"),
+            swing1: f32_of(p, "Swing1LimitAngle"),
+            swing2: f32_of(p, "Swing2LimitAngle"),
+            twist: f32_of(p, "TwistLimitAngle"),
+        });
+    }
+    Ok(out)
+}
+
+/// Translation row of a cooked `Matrix` struct (`WPlane` row, or 64 raw bytes).
+fn matrix_origin(v: Option<&Value>) -> Option<[f32; 3]> {
+    match v? {
+        Value::Struct(_, rows) => match &find(rows, "WPlane")?.value {
+            Value::Struct(_, c) => Some([f32_of(c, "X"), f32_of(c, "Y"), f32_of(c, "Z")]),
+            _ => None,
+        },
+        Value::Raw(_, b) if b.len() >= 64 => Some([f32::from_le_bytes(b[48..52].try_into().ok()?), f32::from_le_bytes(b[52..56].try_into().ok()?), f32::from_le_bytes(b[56..60].try_into().ok()?)]),
+        _ => None,
+    }
+}
+
+/// Float properties of the NPC locomotion node: the class defaults (`Engine`,
+/// `Default__ArkAnimNodeLocomotion`) overridden by `NPC_Human_at`'s `LocoBlender` (Startup).
+pub fn loco_node_floats(content: &Content, names: &[&str]) -> Vec<Option<f32>> {
+    let mut out = vec![None; names.len()];
+    for (pkg, path) in [("Engine", "Default__ArkAnimNodeLocomotion"), ("Startup", "Npc_Common_at.NPC_Human_at.ArkAnimNodeLocomotion_0")] {
+        let Ok(p) = content.package(pkg) else { continue };
+        let Some(i) = find_export(&p, path) else { continue };
+        let Ok(h) = p.read_object(i) else { continue };
+        for (k, n) in names.iter().enumerate() {
+            if let Some(v) = find(&h.properties, n).and_then(|x| x.as_float()) {
+                out[k] = Some(v);
+            }
+        }
+    }
+    out
+}
+
+/// Decode an `ArkComponentLookatConfig` (look-at modes; blinking falls back to the class
+/// defaults of `Engine.Default__ArkComponentLookatConfig`).
+pub fn load_lookat_config(content: &Content, r: &(String, String)) -> Result<LookatConfig> {
+    let pkg = content.package(&r.0)?;
+    let i = find_export(&pkg, &r.1).with_context(|| format!("{} not in {}", r.1, r.0))?;
+    let h = pkg.read_object(i)?;
+    let defaults = content.package("Engine").ok().and_then(|e| find_export(&e, "Default__ArkComponentLookatConfig").and_then(|d| e.read_object(d).ok()).map(|h| h.properties)).unwrap_or_default();
+    let pick = |n: &str, d: f32| find(&h.properties, n).or_else(|| find(&defaults, n)).and_then(|x| x.as_float()).unwrap_or(d);
+    let blink = match find(&h.properties, "BlinkEnabled").or_else(|| find(&defaults, "BlinkEnabled")).map(|x| &x.value) {
+        Some(Value::Bool(b)) => *b,
+        _ => false,
+    };
+    const GRID: [&str; 9] = ["LU", "LC", "LD", "CU", "CC", "CD", "RU", "RC", "RD"];
+    let modes = structs(&pkg, &h.properties, "m_LookAtModes")
+        .iter()
+        .map(|m| LookatMode {
+            name: name_of(m, "ModeName"),
+            head_range: [f32_of(m, "m_HeadRightRange"), f32_of(m, "m_HeadLeftRange"), f32_of(m, "m_HeadUpRange"), f32_of(m, "m_HeadDownRange")],
+            torso_range: [f32_of(m, "m_TorsoRightRange"), f32_of(m, "m_TorsoLeftRange"), f32_of(m, "m_TorsoUpRange"), f32_of(m, "m_TorsoDownRange")],
+            head_horizontal_pct: f32_of(m, "m_HeadAndTorso_HorizontalPercentage"),
+            head_vertical_pct: f32_of(m, "m_HeadAndTorso_VerticalPercentage"),
+            head: GRID.iter().map(|g| name_of(m, &format!("Head_AnimName_{g}"))).map(|n| if n == "None" { String::new() } else { n }).collect(),
+            torso: GRID.iter().map(|g| name_of(m, &format!("Torso_AnimName_{g}"))).map(|n| if n == "None" { String::new() } else { n }).collect(),
+        })
+        .collect();
+    Ok(LookatConfig { modes, blink, blink_interval: [pick("MinDurationBetweenBlink", 0.5), pick("MaxDurationBetweenBlink", 6.0)], blink_rate: [pick("MinBlinkSpeed", 1.0), pick("MaxBlinkSpeed", 2.0)] })
+}
+
+/// Load a physics asset by (package, object path).
+pub fn load_physics_asset(content: &Content, r: &(String, String)) -> Result<PhysicsAssetData> {
+    let pkg = content.package(&r.0)?;
+    let i = find_export(&pkg, &r.1).with_context(|| format!("{} not in {}", r.1, r.0))?;
+    read_physics_asset(&pkg, i)
 }
 
 /// The skeletal mesh an AnimSet was authored on (`PreviewSkelMeshName`), when cooked.

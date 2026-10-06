@@ -43,6 +43,11 @@ const SETS: &[&str] = &[
     "Ply_Crossbow_as",
     "Ply_Guns_as",
     "Ply_Powers_as",
+    "Ply_Sword_Choke_as",
+    "Ply_Empty_CarryCorpse_as",
+    "Ply_Gadgets_as",
+    "Ply_Gadgets_Grenade_as",
+    "Ply_Gadgets_SpringRazor_as",
 ];
 
 const CLIPS: &[&str] = &[
@@ -53,6 +58,11 @@ const CLIPS: &[&str] = &[
     "Pistol_Fire", "Pistol_FastReload", "Crossbow_Fire", "Crossbow_RapidReload",
     "Guns_Idle", "Guns_Walk", "Guns_Sprint", "Guns_Ready_Equip",
     "Powers_Idle", "Powers_Walk", "Powers_Sprint", "Powers_Ready_Equip", "Powers_Cast_Blink_In", "Powers_Cast_Blink_Loop", "Powers_Cast_Blink_Out", "Powers_Cast_Windblast", "Powers_Switch",
+    "Powers_Cast_BendTime", "Powers_Cast_Swarm", "Powers_Cast_Possession_In", "Powers_Cast_Possession_Loop", "Powers_Cast_Possession_Out", "Powers_Cast_Possession_Cancel", "Powers_OutOfMana",
+    "Sword_Choke_In_Master", "Sword_Choke_Loop_Master", "Sword_Choke_Win_Master", "Sword_Choke_Lose_Master", "Sword_Choke_Cancel_Master", "Sword_Choke_CarryCorpse_Master",
+    "Empty_CarryCorpse_In_Master", "Empty_CarryCorpse_Idle_Master", "Empty_CarryCorpse_Walk_Master", "Empty_CarryCorpse_DropLow_Master",
+    "Gadgets_Idle", "Gadgets_Walk", "Gadgets_Sprint", "Gadgets_Ready_Equip", "Gadgets_Deploy", "Gadgets_Reload",
+    "Gadgets_Grenade_Cooking_In", "Gadgets_Grenade_Cooking_Idle", "Gadgets_Grenade_Deploy", "Gadgets_SpringRazor_Deploy",
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -75,6 +85,9 @@ struct WeaponGpu {
     /// Weapon bind globals in weapon mesh space.
     bind: Vec<glam::Mat4>,
     m2p: glam::Mat4,
+    /// The rig socket the weapon attaches to (`RightHandWpn` / `LeftHandWpn` of
+    /// `Skm_Player`): transform relative to its bone.
+    socket_rel: glam::Mat4,
 }
 
 #[derive(Resource)]
@@ -134,12 +147,15 @@ pub fn load_view_rig(
         }
     }
     let mut weapons = Vec::new();
+    let sockets = dishonored_assets::characters::mesh_sockets(&content, "Engine", "Ply_Player.Skm_Player").unwrap_or_default();
     for (wi, (held, path, socket)) in WEAPONS.iter().enumerate() {
         match load_model(&content, path, &[("Startup", path)], None, 1024) {
             Ok(w) => {
                 let Some(socket) = find(socket) else { continue };
                 let part = &w.parts[0];
-                weapons.push(WeaponGpu { held: *held, socket, bind: bind_globals(&part.bones), m2p: part.mesh_to_pawn, gpu: upload(&w, &mut meshes, &mut images, &mut mats, &mut binds, &feat) });
+                let sock_name = if *held == Held::Sword { "RightHandWpn" } else { "LeftHandWpn" };
+                let socket_rel = sockets.iter().find(|s| s.name.eq_ignore_ascii_case(sock_name)).map(|s| glam::Mat4::from_translation(s.location) * dishonored_assets::util::rotator_matrix(s.rotation[0], s.rotation[1], s.rotation[2])).unwrap_or(glam::Mat4::IDENTITY);
+                weapons.push(WeaponGpu { held: *held, socket, bind: bind_globals(&part.bones), m2p: part.mesh_to_pawn, socket_rel, gpu: upload(&w, &mut meshes, &mut images, &mut mats, &mut binds, &feat) });
                 let _ = wi;
             }
             Err(e) => warn!("weapon {path}: {e:#}"),
@@ -251,6 +267,35 @@ fn right_clip(p: &PlayerState, a: &mut ViewAnim) -> (String, &'static str, bool,
         ["Sword_Ready_AttackRight_A_Small", "Sword_Ready_AttackLeft_A_Small", "Sword_Ready_AttackRight_B_Small", "Sword_Ready_AttackLeft_B_Small"][a.swing as usize % 4]
     };
     let one = |k: &str, c: &'static str| (k.to_string(), c, false, 1.0);
+    // Choke (`Ply_Sword_Choke_as` masters, by `eChokeState`) and carrying a body
+    // (`Ply_Empty_CarryCorpse_as` masters): whole rig.
+    {
+        use dishonored_sim::state::ChokePhase as C;
+        let choke = match p.choke.phase {
+            C::In => Some(("choke_in", "Sword_Choke_In_Master", false)),
+            C::Loop => Some(("choke_loop", "Sword_Choke_Loop_Master", true)),
+            C::Win => Some(("choke_win", "Sword_Choke_Win_Master", false)),
+            C::Lose => Some(("choke_lose", "Sword_Choke_Lose_Master", false)),
+            C::Cancel => Some(("choke_cancel", "Sword_Choke_Cancel_Master", false)),
+            C::None => None,
+        };
+        if let Some((k, c, l)) = choke {
+            return (k.to_string(), c, l, 1.0);
+        }
+        if p.carrying.is_some() {
+            if p.carry_anim > 0.0 {
+                // Lifted straight from a won choke, or picked up from the ground.
+                let from_choke = a.right.key.starts_with("choke") || a.right.key == "carry_choke";
+                return if from_choke { one("carry_choke", "Sword_Choke_CarryCorpse_Master") } else { one("carry_in", "Empty_CarryCorpse_In_Master") };
+            }
+            let walking = p.mode == MoveMode::Walking && p.velocity.truncate().length() > 30.0;
+            return if walking { ("carry_walk".into(), "Empty_CarryCorpse_Walk_Master", true, (p.velocity.truncate().length() / 200.0).clamp(0.6, 1.4)) } else { ("carry_idle".into(), "Empty_CarryCorpse_Idle_Master", true, 1.0) };
+        }
+        // The low drop plays out over the action lock that follows it.
+        if p.action_lock > 0.0 && (a.right.key.starts_with("carry") || a.right.key == "carry_drop") {
+            return one("carry_drop", "Empty_CarryCorpse_DropLow_Master");
+        }
+    }
     match p.sword.phase {
         Startup | Active | Recovery => return (format!("swing{}", a.swing), swing_clip, false, 1.0),
         Blocking => return if p.sword.block_time < 0.5 { one("block_in", "Sword_Ready_ParryIdle_In") } else { ("block".into(), "Sword_Ready_ParryIdle", true, 1.0) },
@@ -285,24 +330,41 @@ fn right_clip(p: &PlayerState, a: &mut ViewAnim) -> (String, &'static str, bool,
 /// Left-hand (gun/power, left arm only) clip.
 fn left_clip(p: &PlayerState, a: &mut ViewAnim, tuning: &dishonored_sim::tuning::CombatTuning) -> Option<(String, &'static str, bool, f32)> {
     let item = p.left.item;
-    if item == LeftHand::Empty {
+    // Choking and carrying use both arms (whole-rig clips on the right layer).
+    if item == LeftHand::Empty || p.carrying.is_some() || p.choke.phase != dishonored_sim::state::ChokePhase::None || a.right.key == "carry_drop" {
         return None;
     }
+    let gadget = matches!(item, LeftHand::Grenade | LeftHand::StickyGrenade | LeftHand::SpringRazor);
     if p.left.phase != a.prev_left && p.left.phase != LeftPhase::Idle {
         a.left_action += 1;
     }
     a.prev_left = p.left.phase;
-    let gun = matches!(item, LeftHand::Pistol | LeftHand::Crossbow);
+    let gun = matches!(item, LeftHand::Pistol | LeftHand::Crossbow) || item.is_crossbow();
     let n = a.left_action;
     let one = |c: &'static str, rate: f32| Some((format!("{c}{n}"), c, false, rate));
+    // Possession: in while targeting, loop while possessing (`Ply_Powers_as`).
+    {
+        use dishonored_sim::state::PossessStage as S;
+        if item == LeftHand::Possession {
+            match p.possess.stage {
+                S::Targeting => return Some(if p.left.timer < 0.3 && !a.left.key.starts_with("poss_loop") { ("poss_in".into(), "Powers_Cast_Possession_In", false, 1.0) } else { ("poss_loop".into(), "Powers_Cast_Possession_Loop", true, 1.0) }),
+                S::PrePossess => return Some(("poss_out".into(), "Powers_Cast_Possession_Out", false, 1.0)),
+                _ => {}
+            }
+        }
+    }
     match p.left.phase {
-        LeftPhase::Equipping => return one(if gun { "Guns_Ready_Equip" } else { "Powers_Ready_Equip" }, 1.0),
+        LeftPhase::Equipping => return one(if gun { "Guns_Ready_Equip" } else if gadget { "Gadgets_Ready_Equip" } else { "Powers_Ready_Equip" }, 1.0),
         LeftPhase::Recovering => {
             return match item {
                 LeftHand::Pistol => one("Pistol_Fire", 1.0),
-                LeftHand::Crossbow => one("Crossbow_Fire", 1.0),
+                LeftHand::Crossbow | LeftHand::SleepDart | LeftHand::IncendiaryBolt => one("Crossbow_Fire", 1.0),
                 LeftHand::Blink => one("Powers_Cast_Blink_Out", 1.0),
                 LeftHand::Windblast => one("Powers_Cast_Windblast", 1.0),
+                LeftHand::BendTime => one("Powers_Cast_BendTime", 1.0),
+                LeftHand::DevouringSwarm => one("Powers_Cast_Swarm", 1.0),
+                LeftHand::Grenade | LeftHand::StickyGrenade => one("Gadgets_Grenade_Deploy", 1.0),
+                LeftHand::SpringRazor => one("Gadgets_SpringRazor_Deploy", 1.0),
                 _ => one("Powers_Switch", 1.0),
             };
         }
@@ -319,7 +381,13 @@ fn left_clip(p: &PlayerState, a: &mut ViewAnim, tuning: &dishonored_sim::tuning:
         _ => {}
     }
     let speed = p.velocity.truncate().length();
-    let (idle, walk, sprint) = if gun { ("Guns_Idle", "Guns_Walk", "Guns_Sprint") } else { ("Powers_Idle", "Powers_Walk", "Powers_Sprint") };
+    let (idle, walk, sprint) = if gun {
+        ("Guns_Idle", "Guns_Walk", "Guns_Sprint")
+    } else if gadget {
+        ("Gadgets_Idle", "Gadgets_Walk", "Gadgets_Sprint")
+    } else {
+        ("Powers_Idle", "Powers_Walk", "Powers_Sprint")
+    };
     Some(if p.mode == MoveMode::Walking && speed > 480.0 {
         (sprint.into(), sprint, true, 1.0)
     } else if p.mode == MoveMode::Walking && speed > 30.0 {
@@ -432,19 +500,24 @@ pub fn animate_view_rig(
             "B" => base * w.m2p * w.bind[wj.bone],
             "C" => base * w.m2p.inverse() * w.bind[wj.bone],
             "E" => base * glam::Mat4::from_rotation_x(std::f32::consts::PI) * w.m2p.inverse() * w.bind[wj.bone],
-            // Default: weapon mesh space -> socket through the inverse RotOrigin, turned half a
-            // turn about the socket Z so the blade leaves the thumb side of the fist.
-            _ if w.held == Held::Sword => base * glam::Mat4::from_rotation_z(std::f32::consts::PI) * w.m2p.inverse() * w.bind[wj.bone],
-            // Guns: inverse RotOrigin alone puts the barrel forward in the fire/idle poses.
-            _ => base * w.m2p.inverse() * w.bind[wj.bone],
+            // The earlier visual choice for the sword (U-025): Rz(180) * inverse RotOrigin.
+            "V" => base * glam::Mat4::from_rotation_z(std::f32::consts::PI) * w.m2p.inverse() * w.bind[wj.bone],
+            // The original attach: the rig socket (`RightHandWpn` yaw +90 / `LeftHandWpn`
+            // (0, -16384, 16384) on the hand attachment bones of `Skm_Player`), then the weapon
+            // mesh's own Origin / RotOrigin. For the guns this equals the inverse RotOrigin used
+            // before (the rotator is a 120-degree axis cycle); for the sword it keeps the blade
+            // direction and fixes its roll.
+            _ => base * w.socket_rel * w.m2p * w.bind[wj.bone],
         };
         *t = Transform::from_matrix(to_bevy(m));
     }
     for (wm, mut vis) in &mut wmeshes {
+        // Carrying a body sheathes the sword and lowers the left hand.
+        let carrying = me.carrying.is_some() || a.right.key == "carry_drop";
         let show = match rig.weapons[wm.0].held {
-            Held::Sword => true,
-            Held::Pistol => me.left.item == LeftHand::Pistol,
-            Held::Crossbow => me.left.item == LeftHand::Crossbow,
+            Held::Sword => !carrying,
+            Held::Pistol => me.left.item == LeftHand::Pistol && !carrying,
+            Held::Crossbow => me.left.item.is_crossbow() && !carrying,
         };
         *vis = if show { Visibility::Inherited } else { Visibility::Hidden };
     }
@@ -462,5 +535,37 @@ pub fn apply_fov(mut cams: Query<&mut Projection, With<Camera3d>>, settings: Opt
                 pp.fov = v;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dishonored_assets::util::rotator_matrix;
+    use glam::Mat4;
+
+    fn close(a: Mat4, b: Mat4) -> bool {
+        a.to_cols_array().iter().zip(b.to_cols_array()).all(|(x, y)| (x - y).abs() < 1e-4)
+    }
+
+    /// The weapons' RotOrigin (0, -16384, 16384) is a 120-degree axis cycle, so the original's
+    /// attach (socket `LeftHandWpn` = the same rotator, then RotOrigin) equals the inverse
+    /// RotOrigin the guns use.
+    #[test]
+    fn gun_socket_equals_inverse_rot_origin() {
+        let r = rotator_matrix(0, -16384, 16384);
+        assert!(close(r * r, r.inverse()));
+    }
+
+    /// The sword's `RightHandWpn` socket (yaw +90) then RotOrigin puts the blade (mesh +Z) where
+    /// the earlier visual choice Rz(180) * inverse(RotOrigin) did; the two differ by a roll
+    /// about the blade.
+    #[test]
+    fn sword_socket_attach() {
+        let r = rotator_matrix(0, -16384, 16384);
+        let s = rotator_matrix(0, 16384, 0);
+        let decoded = s * r;
+        let chosen = Mat4::from_rotation_z(std::f32::consts::PI) * r.inverse();
+        assert!((decoded.transform_vector3(glam::Vec3::Z) - chosen.transform_vector3(glam::Vec3::Z)).length() < 1e-4);
+        assert!(!close(decoded, chosen));
     }
 }

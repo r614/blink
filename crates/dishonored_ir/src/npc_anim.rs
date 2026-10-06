@@ -20,6 +20,72 @@ pub struct AnimProfile {
     pub defs: String,
     /// `m_bRagdollOnDeath`.
     pub ragdoll_on_death: bool,
+    /// `DisTweaks_Pawn.m_pPhysicsAsset` (the ragdoll's bodies and joints).
+    #[serde(default)]
+    pub physics: Option<(String, String)>,
+    /// `DisTweaks_NPCPawn.m_pComponentLookatConfig` (look-at modes, blinking).
+    #[serde(default)]
+    pub lookat: Option<(String, String)>,
+}
+
+/// One `ArkComponentLookatConfig.m_LookAtModes` entry: the additive head / torso grids for a
+/// stance and gait ("EmptyIdle", "SwordWalk", "SearchIdle", ...) and their angle ranges
+/// (degrees: right, left, up, down; left and down negative).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LookatMode {
+    pub name: String,
+    pub head_range: [f32; 4],
+    pub torso_range: [f32; 4],
+    pub head_horizontal_pct: f32,
+    pub head_vertical_pct: f32,
+    /// 3x3 grids in the order LU, LC, LD, CU, CC, CD, RU, RC, RD (empty name: none).
+    pub head: Vec<String>,
+    pub torso: Vec<String>,
+}
+
+/// `ArkComponentLookatConfig`: look-at modes and the blink timing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LookatConfig {
+    pub modes: Vec<LookatMode>,
+    pub blink: bool,
+    /// `MinDurationBetweenBlink` / `MaxDurationBetweenBlink` (s), `MinBlinkSpeed` /
+    /// `MaxBlinkSpeed` (play rate).
+    pub blink_interval: [f32; 2],
+    pub blink_rate: [f32; 2],
+}
+
+/// One rigid body of a `PhysicsAsset` (`RB_BodySetup`): the bone it drives and its collision
+/// shapes (`AggGeom`), reduced to what a presentation ragdoll needs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PhysBody {
+    pub bone: String,
+    /// Largest sphere / capsule radius of the body (uu).
+    pub radius: f32,
+    /// Capsule (`KSphylElem`) centre in bone space and its axis length, when the body has one.
+    pub center: [f32; 3],
+    pub length: f32,
+    /// `bFixed`.
+    pub fixed: bool,
+}
+
+/// One joint of a `PhysicsAsset` (`RB_ConstraintSetup`): `ConstraintBone1` is the child body's
+/// bone, `ConstraintBone2` the parent's; limits in degrees.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PhysConstraint {
+    pub bone1: String,
+    pub bone2: String,
+    pub swing_limited: bool,
+    pub twist_limited: bool,
+    pub swing1: f32,
+    pub swing2: f32,
+    pub twist: f32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PhysicsAssetData {
+    pub name: String,
+    pub bodies: Vec<PhysBody>,
+    pub constraints: Vec<PhysConstraint>,
 }
 
 /// `ArkComponentLocomotionConfig.m_Modifiers[i]`: a locomotion stance ("Empty", "Sword",
@@ -44,6 +110,9 @@ pub struct SpeedMode {
     pub start_anims: Vec<String>,
     pub stop_anims: Vec<String>,
     pub turn_anims: Vec<String>,
+    /// `m_fFootOnGroundPct`: fraction of the cycle a foot stays planted (0 for idle modes).
+    #[serde(default)]
+    pub foot_on_ground: f32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -60,6 +129,23 @@ pub struct LocoConfig {
     /// `m_SkeletalRefMeshName`: the skeleton the config's sequences were authored on.
     #[serde(default)]
     pub ref_mesh: String,
+    /// `m_fVelocityToStopMoving` / `m_fVelocityToStartToMove` (uu/s; class defaults 20 / 60).
+    #[serde(default = "default_stop_speed")]
+    pub stop_speed: f32,
+    #[serde(default = "default_start_speed")]
+    pub start_speed: f32,
+    /// `m_Feet[].m_fOnGroundPct`: sync phase at which each foot is planted (class default left
+    /// 0.44, right 0.94).
+    #[serde(default)]
+    pub feet: Vec<f32>,
+}
+
+fn default_stop_speed() -> f32 {
+    20.0
+}
+
+fn default_start_speed() -> f32 {
+    60.0
 }
 
 impl LocoConfig {
@@ -85,6 +171,9 @@ pub struct AnimStep {
     /// `m_FirstItemPrefix` (`eDisItemPrefix`: 0 none, 1 both, 2 primary, 3 secondary, ...):
     /// the sequence name is prefixed with the equipped item's prefix ("Sword_", "Empty_").
     pub item_prefix: u8,
+    /// `m_FaceAnimName`: sequence the `FaceSlot` plays with this step (full name, empty: none).
+    #[serde(default)]
+    pub face: String,
 }
 
 /// `DisAnimationGroup`: steps played in order (intro, loop, outro).
@@ -151,6 +240,7 @@ pub enum NpcAnim {
     Assassination = 76,
     AssassinationFast = 78,
     Fatality = 88,
+    Choke = 95,
     AimShoot = 96,
     AimReload = 97,
     AimIn = 98,

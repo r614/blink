@@ -170,9 +170,16 @@ impl Decodable for EngineStream {
 #[derive(Resource, Default)]
 pub struct AnimSounds {
     pending: Vec<(PlayerId, String, f32, f32, bool)>,
+    feet: Vec<(PlayerId, i32)>,
 }
 
 impl AnimSounds {
+    /// A foot of a pawn's locomotion touched the ground (`ArkAnimNodeLocomotion`'s
+    /// `m_bFootOnGround` turning on; the NPC loops carry no footfall notifies).
+    pub fn foot_down(&mut self, player: PlayerId, foot: i32) {
+        self.feet.push((player, foot));
+    }
+
     /// A clip advanced from `from` to `to` (sequence seconds) on a pawn. Looping clips that
     /// wrapped pass `looped` and their raw times.
     pub fn advance(&mut self, player: PlayerId, clip: &str, from: f32, to: f32, looped: bool) {
@@ -589,6 +596,18 @@ pub fn drive(
     audio.notify_recent.retain(|_, t| now - *t < 1.0);
 
     // Animation notifies.
+    // Feet planted by the NPC locomotion (`m_bFootOnGround`): a footfall like the notify's,
+    // with the same 0.25 s rule per foot.
+    for (pid, foot) in std::mem::take(&mut anim.feet) {
+        audio.notify_driven.insert(pid, now);
+        let last = audio.foot_time.get(&(pid, foot)).copied().unwrap_or(-1.0);
+        if now - last >= 0.25 {
+            audio.foot_time.insert((pid, foot), now);
+            if let Some(p) = players.iter().find(|p| p.id == pid) {
+                audio.footfall(&mut e, &session, p);
+            }
+        }
+    }
     for (pid, clip, from, to, looped) in std::mem::take(&mut anim.pending) {
         let Some(c) = audio.notifies.get(&clip).cloned() else { continue };
         let (from, to) = if looped && c.length > 0.0 { (from.rem_euclid(c.length), to.rem_euclid(c.length)) } else { (from, to) };

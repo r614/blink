@@ -65,6 +65,35 @@ pub struct Appearance {
     /// The pawn tweak's animation setup (AnimSets, locomotion config, animation definitions).
     #[serde(default)]
     pub anim: crate::npc_anim::AnimProfile,
+    /// `m_RandomAccessoryInfo[eDisAccessoryType]` with the matching mesh list (`m_HatMeshes`,
+    /// `m_MaskMeshes`).
+    #[serde(default)]
+    pub accessories: Vec<AccessorySlot>,
+}
+
+/// One accessory type of a pawn tweak: the chance the pawn wears one, and the options.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AccessorySlot {
+    /// `DisPawnAccessory.m_fRandomChanceOfUse`.
+    pub chance_of_use: f32,
+    pub meshes: Vec<AccessoryMesh>,
+}
+
+/// `DisPawnAccessoryMesh`: a static mesh on a socket of the pawn's skeletal mesh.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AccessoryMesh {
+    /// (package, object path) of the `StaticMesh`.
+    pub mesh: (String, String),
+    pub socket: String,
+    pub chance: f32,
+}
+
+/// Deterministic stand-in for `rand() / 32768` (one value per pawn and roll).
+fn roll(seed: u32, k: u32) -> f32 {
+    let h = seed.wrapping_mul(0x9E37_79B1) ^ k.wrapping_mul(0x85EB_CA77).wrapping_add(0x2545_F491);
+    let h = (h ^ (h >> 15)).wrapping_mul(0x2C1B_3C6D);
+    let h = h ^ (h >> 12);
+    (h >> 8) as f32 / (1u32 << 24) as f32
 }
 
 impl Appearance {
@@ -76,6 +105,31 @@ impl Appearance {
             v.push(self.heads[h].0.clone());
         }
         v
+    }
+
+    /// Accessories for one pawn (0x00B7F8A0): for each accessory type, one roll against
+    /// `m_fRandomChanceOfUse`, then a pick weighted by `m_fRandomChance` (0x00B764B0, the same
+    /// running-sum rule as the heads). Returns (static mesh, socket).
+    pub fn accessories(&self, seed: u32) -> Vec<((String, String), String)> {
+        let mut out = Vec::new();
+        for (i, slot) in self.accessories.iter().enumerate() {
+            if slot.meshes.is_empty() || roll(seed, 200 + i as u32) >= slot.chance_of_use {
+                continue;
+            }
+            let total: f32 = slot.meshes.iter().map(|m| m.chance.max(0.0)).sum();
+            let mut x = roll(seed, 300 + i as u32) * total;
+            let mut pick = slot.meshes.len() - 1;
+            for (k, m) in slot.meshes.iter().enumerate() {
+                if x < m.chance.max(0.0) {
+                    pick = k;
+                    break;
+                }
+                x -= m.chance.max(0.0);
+            }
+            let m = &slot.meshes[pick];
+            out.push((m.mesh.clone(), m.socket.clone()));
+        }
+        out
     }
 
     /// The head option picked for `seed` (weighted by `m_fRandomChance`, 0x00B76390).

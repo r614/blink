@@ -17,8 +17,8 @@ Implementation: `crates/dishonored_assets/src/edge_anim.rs`. Tools: `exe_probe` 
 | `0x009DADA0` | frame-set decompressor (dispatch per channel type) | called from the clip stage; reads header `+0x16..+0x26`, `+0x40..+0x50` |
 | `0x009CD3A0` | constant-channel decoder (generic bit-packing) | fully reproduced |
 | `0x009CE380` | animated-channel decoder (generic) | args established; semantics matched empirically (below) |
-| `0x009D4D90` / `0x009D5390` | fixed-format rotation path (flag bit 0 clear) | not yet needed |
-| `0x009D6CA0` / `0x009D6D80` | fixed-format vec3 path (flag bit 1/2 clear) | not yet needed |
+| `0x009D4D90` / `0x009D5390` | fixed-format rotation path (flag bit 0 clear): constants / animated | reproduced (see "Fixed format") |
+| `0x009D6CA0` / `0x009D6D80` | fixed-format vec3 path (flag bit 1/2 clear): constants / animated | reproduced |
 | `0x009DB640` | pose blend (joint stride 0x30 = rot/trans/scale) | call sites at `0x009DC936..` |
 | `0x00EC3D14` | memcpy (DMA emulation) | |
 
@@ -84,6 +84,28 @@ tested**. The end of the keys lands exactly on the next set's offset (7840/7840,
 3504/3504). Channel-major order gives smooth trajectories (mean 1.3–7° per key) while
 frame-major gives noise (49–91°).
 
+## Fixed format (flag bit clear)
+
+The frame-set decompressor `0x009DADA0` picks, per channel type, the generic decoders
+(`0x009CD3A0` / `0x009CE380`) when the type's flag bit is set and the fixed ones otherwise. A
+fixed type has no packing specs: the spec cursor only advances past generic types, so the
+specs of the following type start where the previous generic type's ended (CONFIRMED,
+`local_44` in `0x009DADA0`). Section layout (initial frame, key mask, keys) is the same.
+
+- Rotations (`0x009D4D90` constants, groups of 8; `0x009D5390` animated, key offsets by mask
+  popcount): 48 bits per quaternion, big-endian: one unused bit, three 15-bit components
+  `v * 4.31597e-05 - 0.707107` (`sqrt(2)/32767` at `0x010C1A20`, `-1/sqrt(2)` at `0x0109CBAC`),
+  then the 2-bit slot of the rebuilt component (same smallest-three rule as the generic path).
+  CONFIRMED.
+- Vectors (`0x009D6CA0` constants, groups of 4; `0x009D6D80` animated): three little-endian
+  floats (12 bytes), copied without a byte swap, w = 1. CONFIRMED for the constants; the
+  animated path is read the same way (LIKELY: values match their bones' bind translations).
+
+Implementation: `EdgeClip::value_at` / `set_samples` / `const_rotations` / `const_translations`.
+The 410 clips with flags = 2 (fixed rotations: the doors' `Doors_as` sets of the level audio
+packages) now bake: `edge_survey` bakes 113,232 of 113,232 parsed sequences, and the largest
+frame-to-frame joint turn of the fixed-format clips is 5.8 degrees (median 5.6), i.e. smooth.
+
 ## Sampling
 
 Frames without a stored key are linearly interpolated between the surrounding keys
@@ -106,12 +128,15 @@ received camera_jnt's translation. CONFIRMED. The earlier elite-guard validation
 plausible because locomotion plays rotations alone; that set is also reordered now.
 
 Some clips carry fewer joints than the set has tracks (e.g. `Powers_Sprint` 29 of 30,
-`Empty_AimAdd*` 67 of 69). Which tracks are dropped is open (U-024). Sampling past the clip's
-joint count returns nothing.
+`Empty_AimAdd*` 67 of 69). The omitted joints are the last ones in Edge order: the five partial
+player clips (`Powers_Sprint`, `Guns_Aims_*`, `ADD_Guns_Aim_UpRight`) drop `sleeve_L_jnt` (and
+`pinky_end_L_jnt`), joints those clips do not animate; no channel table references them (LIKELY,
+U-024). Sampling past the clip's joint count returns nothing, so they keep the pose below.
 
 ## Open items
 
-- Fixed-format paths (flag bits clear): not implemented. Coverage from `edge_survey` is in LOG.md.
 - Header `+0x14`, `+0x54`, `+0x58` and DMA/info second u16 fields are unknown.
-- Root translation / root motion handling (currently rotation-only retargeting).
+- Root motion: NPC sequences keep the root and pelvis translations (falls, kneels, carried
+  bodies); start / stop sequences, which the original drives with root motion along the path,
+  have the root translation discarded because the simulation moves the pawn (ANIMATION.md §3).
 - Exact interpolation (slerp polynomial) vs nlerp: small fidelity difference.
