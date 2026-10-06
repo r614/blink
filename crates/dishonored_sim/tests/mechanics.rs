@@ -87,6 +87,8 @@ fn input(yaw: f32, forward: i8, buttons: u16) -> PlayerInput {
 }
 
 const STAND_Z: f32 = 87.5;
+/// physWalking keeps the pawn `FLOOR_DIST` (2.7305) above the floor (MINFLOORDIST..MAXFLOORDIST).
+const HOVER: f32 = dishonored_sim::movement::FLOOR_DIST;
 
 #[test]
 fn spawn_settles_on_floor() {
@@ -94,12 +96,13 @@ fn spawn_settles_on_floor() {
     r.settle();
     let p = r.p(1);
     assert_eq!(p.mode, MoveMode::Walking);
-    assert!((p.position.z - STAND_Z).abs() < 1.0, "z {}", p.position.z);
+    assert!((p.position.z - STAND_Z - HOVER).abs() < 0.4, "z {}", p.position.z);
 }
 
 #[test]
 fn reference_jump_apex_matches_jumpz_and_gravity() {
-    // Reference: apex = JumpZ^2 / (2 * |GravityZ|) = 800^2 / 3000 = 213.33 uu.
+    // physFalling moves by v0 + g dt and keeps 2 x average - v0, so the velocity changes by
+    // 2 g dt per tick: apex = JumpZ^2 / (4 |GravityZ|) = 800^2 / 6000 = 106.7 uu.
     let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.0), 0.)]);
     r.settle();
     let z0 = r.p(1).position.z;
@@ -109,15 +112,15 @@ fn reference_jump_apex_matches_jumpz_and_gravity() {
         r.step(&[(1, input(0., 0, 0))]);
         apex = apex.max(r.p(1).position.z);
     }
-    let expected = 800.0f32.powi(2) / (2.0 * 1500.0);
+    let expected = 800.0f32.powi(2) / (4.0 * 1500.0);
     assert!((apex - z0 - expected).abs() < 2.0, "apex {} expected {}", apex - z0, expected);
-    // Airtime reference: 2 * JumpZ / g = 1.0667 s.
+    // Airtime: JumpZ / g = 0.533 s (twice the acceleration).
     let landed = r.events.iter().rev().find_map(|e| match e {
         SimEvent::Landed { fall_time, .. } => Some(*fall_time),
         _ => None,
     });
     let t = landed.expect("landed");
-    assert!((t - 2.0 * 800.0 / 1500.0).abs() < 0.05, "airtime {t}");
+    assert!((t - 800.0 / 1500.0).abs() < 0.05, "airtime {t}");
 }
 
 #[test]
@@ -231,7 +234,7 @@ fn crouch_lowers_capsule_and_speed() {
     r.steps(60, &[(1, input(0., 127, 0))]);
     let v = r.p(1).velocity.truncate().length();
     assert!((v - 275.0 * 0.9).abs() < 1.0, "crouch {v}");
-    assert!((r.p(1).position.z - 65.0).abs() < 1.5, "crouch z {}", r.p(1).position.z);
+    assert!((r.p(1).position.z - 65.0 - HOVER).abs() < 1.0, "crouch z {}", r.p(1).position.z);
 }
 
 #[test]
@@ -277,13 +280,13 @@ fn mantle_onto_ledge() {
 
 #[test]
 fn fall_damage_and_death_thresholds() {
-    // Drop from 1400 uu: impact speed ~ sqrt(2*1500*1400) = 2049 < 2250 -> no damage.
-    // Drop from 2400 uu: ~2683 -> damaging but not lethal threshold 2900... (health 70).
-    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., 1400. + STAND_Z), 0.), (2, Vec3::new(500., 0., 2400. + STAND_Z), 0.), (3, Vec3::new(1000., 0., 4000. + STAND_Z), 0.)]);
+    // With twice the gravity per tick the impact speed after a drop h is ~sqrt(4 g h):
+    // 700 uu -> 2049 < 2250 (no damage); 1100 uu -> 2569 (damage); 2000 uu -> 3464 > 2900 (death).
+    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., 700. + STAND_Z), 0.), (2, Vec3::new(500., 0., 1100. + STAND_Z), 0.), (3, Vec3::new(1000., 0., 2000. + STAND_Z), 0.)]);
     r.steps(180, &[]);
     assert_eq!(r.p(1).vitals.health, 70.0);
     assert!(r.p(2).vitals.health < 70.0 && r.p(2).alive, "p2 health {}", r.p(2).vitals.health);
-    assert!(!r.p(3).alive, "p3 should die (impact capped at MaxFallSpeed 2100?)");
+    assert!(!r.p(3).alive, "p3 should die");
 }
 
 #[test]
@@ -373,7 +376,9 @@ fn pistol_damage_close_and_far() {
 
 #[test]
 fn windblast_pushes_and_damages() {
-    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.), (2, Vec3::new(400., 0., STAND_Z + 1.), 180.)]);
+    // A player (2) straight ahead and an NPC (3) slightly to the side.
+    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.), (2, Vec3::new(400., 0., STAND_Z + 1.), 180.), (3, Vec3::new(400., 200., STAND_Z + 1.), 180.)]);
+    r.state.player_mut(3).unwrap().kind = dishonored_sim::state::PawnKind::Guard;
     r.settle();
     let wb = |b| PlayerInput { yaw: 0.0, buttons: b, left_hand: LeftHand::Windblast, ..Default::default() };
     r.step(&[(1, wb(buttons::SECONDARY)), (2, input(180., 0, 0))]);
@@ -381,9 +386,13 @@ fn windblast_pushes_and_damages() {
     assert_eq!(r.p(2).mode, MoveMode::Walking);
     assert_eq!(r.p(1).vitals.mana, 50.0);
     r.steps(12, &[(1, wb(0)), (2, input(180., 0, 0))]);
+    // The NPC is thrown; the player's damage path clears the momentum (0x00B5CCD0, U-051).
+    let n = r.p(3);
+    assert_eq!(n.mode, MoveMode::Falling);
+    assert!(n.velocity.x > 500.0, "npc push vx {}", n.velocity.x);
     let v = r.p(2);
-    assert_eq!(v.mode, MoveMode::Falling);
-    assert!(v.velocity.x > 1000.0, "push vx {}", v.velocity.x);
+    assert_eq!(v.mode, MoveMode::Walking);
+    assert!(v.velocity.x.abs() < 1.0, "player not pushed: vx {}", v.velocity.x);
     // Damage = round(30 x factor), factor = (1 - d/3000)^2 straight ahead (d ~ 400).
     let d = 400.0f32 - 0.0;
     let k = (1.0 - d / 3000.0).powi(2);

@@ -24,3 +24,4 @@ dishonored_audio = { path = "../../crates/dishonored_audio" }
 dishonored_assets.workspace = true
 dishonored_conversation = { workspace = true, features = ["load"] }
 dishonored_kismet.workspace = true
+dishonored_save.workspace = true

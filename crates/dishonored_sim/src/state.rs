@@ -16,6 +16,8 @@ pub enum MoveMode {
     /// Blink travel in progress.
     Blinking,
     Dead,
+    /// `PHYS_Swimming`: the pawn's centre is in a (deep) water volume (`APawn::physSwimming`).
+    Swimming,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
@@ -106,6 +108,10 @@ pub enum PawnKind {
     /// AI-driven pawn (crowd civilian or guard). Mechanically identical to players.
     Civilian,
     Guard,
+    /// A rat (`DisGameCrowdAgentSkeletalRat`): small, no sword or left hand, bites; possessable
+    /// with Possession level 1 (`Twk_Possessable_Rat`). Driven by a brain (`dishonored_ai`) or
+    /// by its possessor. See [`crate::rats`].
+    Rat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -187,10 +193,106 @@ pub struct PlayerState {
     /// Action animation lock (power cast, gadget throw, drink): seconds left.
     #[serde(default)]
     pub action_lock: f32,
+    /// `StatePlayerMasterJump`: held time and power jump (Agility).
+    #[serde(default)]
+    pub jump: JumpState,
+    /// Swimming strokes, air and drowning.
+    #[serde(default)]
+    pub water: WaterState,
+    /// Blood Thirsty's adrenaline gauge (`DishonoredPlayerPawn` +0x91C / +0x920).
+    #[serde(default)]
+    pub adrenaline: AdrenalineState,
+    /// Dark Vision timers (`DisActivePowerComponent_DarkVision`).
+    #[serde(default)]
+    pub dark: DarkVisionState,
+    /// Seconds left of a rat bite slowdown (`m_fPawnSlowdownDuration`, `Modifier_RatAttackSpeedModifier`)
+    /// and its percent.
+    #[serde(default)]
+    pub rat_slow: f32,
+    #[serde(default)]
+    pub rat_slow_percent: f32,
+    /// Hook written by the AI each tick for NPC pawns: true while this NPC is unaware of any
+    /// threat (no attention). Read by sleep darts (`m_bInstantSleepForUnawareNPCs`) and Shadow Kill
+    /// level 1 (0x00A87B60). False for players and when no AI sets it.
+    #[serde(default)]
+    pub ai_unaware: bool,
+    /// Helmet of an NPC (`m_PotentialNPCArmor`, `DisTweaks_Armor` protecting the head): absorbs
+    /// headshots of the absorbed damage types until knocked off. Set by the mission/AI layer.
+    #[serde(default)]
+    pub helmet: bool,
+    /// Rats attacking this pawn (attack group timers of 0x00C891E0).
+    #[serde(default)]
+    pub rat_attack: RatAttackState,
+    /// `Attribute_DamageReduction` of a player this tick (Armor upgrade): subtracted from damage of
+    /// types with `m_bApplyDamageReduction`, never below 1 (0x00AB0A30).
+    #[serde(default)]
+    pub damage_reduction: f32,
+    /// `Attribute_ChanceUseNoManaForSpell` this tick: a power's mana spend is skipped when a roll is
+    /// below it (0x00AA93E0).
+    #[serde(default)]
+    pub free_spell_chance: f32,
+    /// This pawn's deterministic random stream (xorshift32; the original uses the C runtime `rand()`).
+    #[serde(default)]
+    pub rng: u32,
+}
+
+/// The attack group on a pawn: seconds under attack (`m_fInitialDelayBeforeDealingDamage`) and
+/// the damage interval accumulator.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct RatAttackState {
+    pub time: f32,
+    pub acc: f32,
 }
 
 fn one() -> f32 {
     1.0
+}
+
+/// `StatePlayerMasterJump` (0x00A75EE0 enter, 0x00A76110 tick for jump style 0).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct JumpState {
+    /// In the jump state (rising from a jump; the state hands over to falling at the apex).
+    pub active: bool,
+    /// `m_fHeldButtonTime`: seconds the jump button has been held since the jump.
+    pub held: f32,
+    /// `m_JumpState == eDisJumpState_PowerJump`.
+    pub powered: bool,
+}
+
+/// Swimming and breath (`DishonoredPlayerPawn.m_fAirCapacity`, `m_fDrowningDamageCountdown`,
+/// `StatePlayerMasterSwim.m_fCurStrokeTime`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct WaterState {
+    /// Air used (seconds below `m_fMaxAirCapacity`); 0 = full lungs.
+    pub air_used: f32,
+    pub drown_timer: f32,
+    /// `m_bUnderWater`: the eye is inside a water volume.
+    pub under: bool,
+    /// Seconds of the current swim stroke left (`m_fCurStrokeTime`).
+    pub stroke: f32,
+    /// Countdown to the next stroke (`m_fSurfaceSwimDelayBetweenStrokes`).
+    pub stroke_delay: f32,
+}
+
+/// Blood Thirsty: `+0x91C` adrenaline, `+0x920` seconds since the last gain, `m_bNeedAdrenalineEffect`
+/// (the gauge is full).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct AdrenalineState {
+    pub value: f32,
+    pub idle: f32,
+    pub full: bool,
+}
+
+/// `DisActivePowerComponent_DarkVision`: `m_fFadeInTimeRemaining`, `m_fTimeRemaining`,
+/// `m_fFadeOutTimeRemaining`, `m_fCooldownTimer`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct DarkVisionState {
+    pub fade_in: f32,
+    pub remaining: f32,
+    pub fade_out: f32,
+    pub cooldown: f32,
+    /// Level used (1 or 2) for the reveal distance.
+    pub level: u8,
 }
 
 /// Power and charm progression indices (`DishonoredPowersComponent`): level 0 = not owned.
@@ -366,6 +468,18 @@ impl PlayerState {
             time_scale: 1.0,
             no_body: false,
             action_lock: 0.0,
+            jump: JumpState::default(),
+            water: WaterState::default(),
+            adrenaline: AdrenalineState::default(),
+            dark: DarkVisionState::default(),
+            rat_slow: 0.0,
+            rat_slow_percent: 0.0,
+            ai_unaware: false,
+            helmet: false,
+            rat_attack: RatAttackState::default(),
+            damage_reduction: 0.0,
+            free_spell_chance: 0.0,
+            rng: id.wrapping_mul(0x9E37_79B9) | 1,
         }
     }
 
@@ -378,6 +492,16 @@ impl PlayerState {
     /// A body on the ground: dead or unconscious, not carried (can be picked up).
     pub fn is_body(&self) -> bool {
         (!self.alive || self.condition == Condition::Unconscious) && self.carried_by.is_none() && !self.no_body
+    }
+
+    /// Next roll in [0, 1) of this pawn's random stream (the original's `rand() / 32768`).
+    pub fn roll(&mut self) -> f32 {
+        let mut x = if self.rng == 0 { 0x2545_F491 } else { self.rng };
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng = x;
+        (x >> 8) as f32 / (1u32 << 24) as f32
     }
 
     pub fn just_pressed(&self, input: &PlayerInput, b: u16) -> bool {

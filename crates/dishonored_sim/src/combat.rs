@@ -199,6 +199,14 @@ pub fn resolve_sword_hits(
             events.push(SimEvent::Sound { position: victim.position, radius: 600.0, category: SoundCategory::SwordBlock, source: attacker.id });
             continue;
         }
+        // Blood Thirsty: with a full gauge the attack on an NPC is a finisher (0x00C10EF0).
+        if attacker.adrenaline.full && victim.kind != crate::state::PawnKind::Human {
+            crate::adrenaline::spend(&mut state.players[ai], events);
+            let v = &mut state.players[vi];
+            events.push(SimEvent::Sound { position: v.position, radius: 600.0, category: SoundCategory::SwordImpact, source: attacker.id });
+            kill(v, Some(attacker.id), DamageCause::Adrenaline, events);
+            continue;
+        }
         let (ratio, cause) = if victim.sword.phase == SwordPhase::Staggered {
             (t.big_damage_ratio, DamageCause::SwordCounter)
         } else {

@@ -30,6 +30,7 @@ pub mod travel;
 pub mod texture;
 pub mod tweaks;
 pub mod util;
+pub mod water;
 
 pub use content::Content;
 pub use level::{ImportOptions, ImportStats, import_level};

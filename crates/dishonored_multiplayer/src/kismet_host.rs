@@ -41,7 +41,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// Everything needed to run a mission's original Kismet (stored in replays).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct KismetSetup {
     pub db: KismetDb,
     /// Global remote event that starts the mission (`ChangeLvl_fromHub_toBoyle`).
@@ -81,7 +81,7 @@ pub const PRESENTATION: &[&str] = &[
 
 /// A usable the Kismet offers (an actor with `DisSeqEvent_Used` or a pickup with
 /// `DisSeqEvent_PickupPickedUp`, or an original NPC whose one-shot has a use hook).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum KUse {
     Actor(u32),
     Pickup(u32),
@@ -89,7 +89,7 @@ pub enum KUse {
 }
 
 /// Host-side state.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostState {
     pub started: bool,
     /// Distance trackers of original NPCs' approach hooks: (one-shot, hook node).
@@ -146,9 +146,12 @@ pub struct HostState {
     vanish: BTreeMap<OpId, (Vec<PlayerId>, f32)>,
 }
 
+/// Saved with the mission (`save.rs`); the setup is re-attached on load.
+#[derive(Serialize, Deserialize)]
 pub struct KismetRun {
     pub k: Kismet,
     pub st: HostState,
+    #[serde(skip)]
     pub setup: Arc<KismetSetup>,
 }
 
@@ -720,7 +723,11 @@ impl Host for H<'_> {
                 }
                 HostResult::Done
             }
-            "DisSeqAct_AutoSave" => HostResult::Latent,
+            "DisSeqAct_AutoSave" => {
+                // [save] The engine's pending autosave / mission-start save (save.rs).
+                super::save::activated(self.m, cx.op, cx.prop_bool("m_bMissionStart"), cx.prop_int("m_MissionNumber"), cx.prop_bool("m_bEvenInCombat"), cx.prop_bool("m_bSkipAutosaveDelay"));
+                HostResult::Latent
+            }
             "SeqAct_CameraFade" => {
                 // Not drawn; its timing is kept: "Out" now, "Finished" after FadeTime.
                 *self.st.presentation.entry(class).or_insert(0) += 1;
@@ -836,8 +843,12 @@ impl Host for H<'_> {
                 }
             }
             "DisSeqAct_AutoSave" => {
-                // Saving is not available: the original's "saves disabled" path (output 1).
-                cx.fire(1);
+                // [save] "Accepted" (1) once the save is written, "Denied" (2) when dropped.
+                match super::save::update(self.m, cx.op) {
+                    Some(true) => cx.fire(1),
+                    Some(false) => cx.fire(2),
+                    None => return false,
+                };
                 true
             }
             "DisSeqAct_StartSpawn" => {

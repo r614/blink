@@ -26,6 +26,9 @@ use glam::Vec3;
 // [kismet] Original Kismet host (kismet_host.rs), a child module so it can drive the match.
 #[path = "kismet_host.rs"]
 pub mod kismet_host;
+// [save] Saved games and autosaves (save.rs), a child module so it can save the match.
+#[path = "save.rs"]
+pub mod save;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -95,7 +98,7 @@ pub struct MapInput<'a> {
 }
 
 /// Everything needed to rebuild the mission deterministically (stored in replays).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MissionSetup {
     pub def: MissionDef,
     /// Resolved markers: id -> (position, radius), and the map each marker is on.
@@ -315,7 +318,7 @@ impl MissionSetup {
 }
 
 /// What a map keeps while players are elsewhere (`DisSeqAct_SaveLevelState`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct LevelState {
     npcs: Vec<PlayerState>,
     pickups: Vec<dishonored_sim::state::PickupState>,
@@ -336,11 +339,16 @@ pub enum Interaction {
     Kismet(usize),
 }
 
+/// The whole match state serializes for saved games (`save.rs`) except the setup, which the
+/// loader rebuilds from the mission and re-attaches. New fields need serde
+/// (`#[serde(default)]` keeps older saves loading).
+#[derive(Serialize, Deserialize)]
 pub struct MissionMatch {
     pub world: WorldState,
     pub view: MatchView,
     pub state: MissionState,
     pub crowd: Crowd,
+    #[serde(skip)]
     pub setup: MissionSetup,
     pub last_events: Vec<SimEvent>,
     /// Active persistent map.
@@ -372,6 +380,9 @@ pub struct MissionMatch {
     spawn_log: Vec<usize>,
     /// Pickups carried by spawners whose pawn has not spawned yet: (pickup id, spawner name).
     pending_stealables: Vec<(u32, String)>,
+    /// [save] Pending autosaves and the saves taken this step.
+    #[serde(default)]
+    pub autosave: save::AutosaveState,
 }
 
 impl MissionMatch {
@@ -415,6 +426,7 @@ impl MissionMatch {
             kismet: None,
             spawn_log: Vec::new(),
             pending_stealables: Vec::new(),
+            autosave: Default::default(),
         };
         // [kismet]
         m.kismet = m.setup.kismet.as_ref().map(|k| kismet_host::KismetRun::new(k, &m.setup));
@@ -1026,6 +1038,7 @@ impl MissionMatch {
                 self.apply(c, cfg);
             }
             kismet_host::step(self, &out.events, dt, cfg); // [kismet]
+            save::tick(self, dt); // [save] autosaves
             if self.state.outcome().is_some() && self.view.phase != MatchPhase::Ended {
                 self.view.phase = MatchPhase::Ended;
             }

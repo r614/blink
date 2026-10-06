@@ -186,6 +186,12 @@ fn sky_lights(pkg: &Package) -> f32 {
 /// actor-local planes) in world space (location, rotation, `DrawScale3D * DrawScale`,
 /// `PrePivot`).
 fn brush_hulls(pkg: &Package, p: &[Property]) -> Vec<Vec<[f32; 4]>> {
+    brush_world_hulls(pkg, p).unwrap_or_default()
+}
+
+/// World-space convex hulls of a brush actor (volumes); `None` without a readable
+/// `BrushComponent`. Planes are `(n, d)`, inside when `n . p <= d` for every plane of one hull.
+pub fn brush_world_hulls(pkg: &Package, p: &[Property]) -> Option<Vec<Vec<[f32; 4]>>> {
     let loc = Vec3::from(find(p, "Location").and_then(|x| x.as_vector()).unwrap_or([0.0; 3]));
     let rot = find(p, "Rotation").and_then(|x| x.as_rotator()).unwrap_or([0; 3]);
     let ds = find(p, "DrawScale").and_then(|x| x.as_float()).unwrap_or(1.0);
@@ -193,8 +199,9 @@ fn brush_hulls(pkg: &Package, p: &[Property]) -> Vec<Vec<[f32; 4]>> {
     let pivot = Vec3::from(find(p, "PrePivot").and_then(|x| x.as_vector()).unwrap_or([0.0; 3]));
     let r = Mat3::from_mat4(crate::util::rotator_matrix(rot[0], rot[1], rot[2]));
     let mut hulls = Vec::new();
-    let Some(ObjRef::Export(ci)) = find(p, "BrushComponent").and_then(|x| x.as_object()).map(ObjRef::from_index) else { return hulls };
-    let Ok(ch) = pkg.read_object(ci) else { return hulls };
+    let comp = find(p, "BrushComponent").and_then(|x| x.as_object()).map(ObjRef::from_index)?;
+    let ObjRef::Export(ci) = comp else { return None };
+    let ch = pkg.read_object(ci).ok()?;
     if let Some(Value::Struct(_, geom)) = find(&ch.properties, "BrushAggGeom").map(|x| &x.value) {
         if let Some(elems) = find(geom, "ConvexElems").and_then(|x| x.array_structs(pkg).ok()) {
             for e in elems {
@@ -216,7 +223,7 @@ fn brush_hulls(pkg: &Package, p: &[Property]) -> Vec<Vec<[f32; 4]>> {
             }
         }
     }
-    hulls
+    Some(hulls)
 }
 
 /// The audio cells of a package that holds a `DisAudioPropagationInfo` (its WorldInfo's):

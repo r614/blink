@@ -45,6 +45,8 @@ pub enum Page {
     Missions,
     Multiplayer,
     Options,
+    /// The save list (`UI_LoadGame.LoadGame`, `t_LoadGame`).
+    Load,
 }
 
 impl Page {
@@ -53,6 +55,7 @@ impl Page {
             Page::Main => "main",
             Page::Play => "play",
             Page::Missions => "missions",
+            Page::Load => "load",
             Page::Multiplayer => "multiplayer",
             Page::Options => "options",
         }
@@ -141,6 +144,14 @@ pub struct Launcher {
     root: Option<Entity>,
     minimized: bool,
     pub maps: Vec<String>,
+    /// Saved games, newest first (refreshed on the main and load pages).
+    pub saves: Vec<(PathBuf, dishonored_save::SaveHeader)>,
+    pub save_sel: usize,
+}
+
+/// The game's saves folder: `SaveData` next to the settings file the launcher hands the game.
+fn saves_dir(gs: &GameSettings) -> PathBuf {
+    gs.path.parent().map(|p| p.join("SaveData")).unwrap_or_else(dishonored_save::saves_dir)
 }
 
 const PLAY_MODES: &[(&str, &str)] = &[
@@ -214,6 +225,8 @@ impl Launcher {
             root: None,
             minimized: false,
             maps,
+            saves: Vec::new(),
+            save_sel: 0,
         }
     }
 
@@ -516,7 +529,8 @@ fn build(l: &Launcher, art: &MenuArt, t: &MenuTexts, gs: &GameSettings, nav: &Me
         }
     }
     match l.page {
-        Page::Main => build_main(&mut dl, main, t, focus),
+        Page::Main => build_main(&mut dl, main, t, focus, !l.saves.is_empty()),
+        Page::Load => build_load(&mut dl, art.get("options"), l, t, focus),
         Page::Play => build_play(&mut dl, main, art.get("options"), l, t, focus),
         Page::Missions => build_missions(&mut dl, main, art.get("options"), l, t, focus),
         Page::Multiplayer => {
@@ -534,17 +548,29 @@ fn build(l: &Launcher, art: &MenuArt, t: &MenuTexts, gs: &GameSettings, nav: &Me
     dl
 }
 
-fn main_entries(t: &MenuTexts) -> Vec<(&'static str, String)> {
-    vec![
+fn main_entries(t: &MenuTexts, has_saves: bool) -> Vec<(&'static str, String)> {
+    let mut v = Vec::new();
+    // The original's Continue (`t_ContinueGame`: the last save, `OnLoadLastSaveClicked`) and
+    // Load (`t_LoadGame`), shown when saves exist.
+    if has_saves {
+        v.push(("main:continue", t.t(SEC_MAIN, "t_ContinueGame").to_uppercase()));
+    }
+    v.extend([
         ("main:play", "PLAY".into()),
         ("main:missions", t.t(SEC_MAIN, "t_Missions").to_uppercase()),
+    ]);
+    if has_saves {
+        v.push(("main:load", t.t(SEC_MENU, "t_LoadGame").to_uppercase()));
+    }
+    v.extend([
         ("main:multiplayer", "MULTIPLAYER".into()),
         ("main:options", t.t(SEC_BASE, "t_Options").to_uppercase()),
         ("main:quit", t.t(SEC_MENU, "t_QuitGame").to_uppercase()),
-    ]
+    ]);
+    v
 }
 
-fn build_main(dl: &mut DisplayList, art: &MovieArt, t: &MenuTexts, focus: &str) {
+fn build_main(dl: &mut DisplayList, art: &MovieArt, t: &MenuTexts, focus: &str, has_saves: bool) {
     let Some((mm, m)) = art.root_child("mainMenu_mc") else { return };
     let sp = art.sprite(mm).cloned().unwrap_or_default();
     // Everything of mainMenu_mc but the DLC button (console store entry).
@@ -560,7 +586,7 @@ fn build_main(dl: &mut DisplayList, art: &MovieArt, t: &MenuTexts, focus: &str) 
     let Some((menu, mmx)) = art.child(mm, "_menu_mc") else { return };
     let band_m = m.mul(&mmx);
     let band = art.child(menu, "_bkgd_mc").and_then(|(b, bm)| art.bounds(b, band_m.mul(&bm), &States::default()));
-    let entries = main_entries(t);
+    let entries = main_entries(t, has_saves);
     // Band-local layout: buttons spread over the visible part of the band.
     let (x0, x1) = match band {
         Some(r) => (r.min.x.max(40.0) + 60.0, r.max.x.min(1240.0) - 60.0),
@@ -645,6 +671,29 @@ fn build_missions(dl: &mut DisplayList, art: &MovieArt, opts: Option<&MovieArt>,
     if opts.is_some() {
         dl.text(format!("Enter   {}", t.t(SEC_BASE, "t_Select")), Rect::new(110.0, 660.0, 500.0, 690.0), 22.0, FontKind::Normal, TEXT, Justify::Left);
         dl.item("missions:launch", Rect::new(110.0, 660.0, 400.0, 690.0), false);
+    }
+    back_hint(dl, t);
+}
+
+/// The save list (`t_LoadGame`): newest first, the original's prefixes and date format.
+fn build_load(dl: &mut DisplayList, opts: Option<&MovieArt>, l: &Launcher, t: &MenuTexts, focus: &str) {
+    if let Some(o) = opts {
+        crate::menu_options::backdrop(dl, o);
+    }
+    dl.text(t.t(SEC_MENU, "t_LoadGame").to_uppercase(), Rect::new(110.0, 50.0, 700.0, 100.0), 44.0, FontKind::Title, TEXT, Justify::Left);
+    if l.saves.is_empty() {
+        dl.text(t.t(SEC_BASE, "t_EmptyList"), Rect::new(0.0, 330.0, 1280.0, 370.0), 26.0, FontKind::Normal, TEXT, Justify::Center);
+        back_hint(dl, t);
+        return;
+    }
+    if let Some(o) = opts {
+        let n = l.saves.len().min(9);
+        let first = l.save_sel.saturating_sub(8).min(l.saves.len() - n);
+        for (vi, i) in (first..first + n).enumerate() {
+            let (_, h) = &l.saves[i];
+            let id = format!("load:item:{i}");
+            generic_line(dl, o, 170.0 + vi as f32 * GENERIC_LINE_H, &id, &crate::saves::label(h, t), &h.title, LineWidget::Button, focus == id || l.save_sel == i);
+        }
     }
     back_hint(dl, t);
 }
@@ -784,6 +833,10 @@ fn rebuild(
     }
     *last = key;
     l.dirty = false;
+    if l.page == Page::Main && !l.game_running() {
+        // Continue / Load appear once a save exists (headers only).
+        l.saves = dishonored_save::list(&saves_dir(&gs));
+    }
     let dl = build(&l, &art, &t, &gs, &nav, bgs);
     nav.set_items(dl.items.clone());
     menu_art::spawn_list(&mut commands, root, &dl, fonts.as_deref());
@@ -932,6 +985,31 @@ fn activate(l: &mut Launcher, gs: &mut GameSettings, nav: &mut MenuNav, id: &str
     match id {
         "main:play" => goto(l, nav, Page::Play, sounds),
         "main:missions" => goto(l, nav, Page::Missions, sounds),
+        "main:load" => {
+            l.saves = dishonored_save::list(&saves_dir(gs));
+            l.save_sel = 0;
+            goto(l, nav, Page::Load, sounds)
+        }
+        "main:continue" => {
+            // `OnLoadLastSaveClicked`: the newest save.
+            l.saves = dishonored_save::list(&saves_dir(gs));
+            if let Some((p, _)) = l.saves.first().cloned() {
+                sounds.play("validation");
+                l.launch(vec!["--load".into(), p.display().to_string(), "--name".into(), gs.s.multiplayer.name.clone()], gs, window);
+            }
+        }
+        x if x.starts_with("load:item:") => {
+            let i: usize = x.rsplit(':').next().and_then(|i| i.parse().ok()).unwrap_or(0);
+            if i == l.save_sel {
+                if let Some((p, _)) = l.saves.get(i).cloned() {
+                    sounds.play("validation");
+                    l.launch(vec!["--load".into(), p.display().to_string(), "--name".into(), gs.s.multiplayer.name.clone()], gs, window);
+                }
+            } else {
+                l.save_sel = i;
+                sounds.play("change");
+            }
+        }
         "main:multiplayer" => goto(l, nav, Page::Multiplayer, sounds),
         "main:options" => {
             goto(l, nav, Page::Options, sounds);

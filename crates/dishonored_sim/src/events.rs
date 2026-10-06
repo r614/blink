@@ -43,6 +43,14 @@ pub enum DamageCause {
     Rats,
     /// Possession ended inside geometry (`DisDamageType_UnpossessSquash`).
     UnpossessSquash,
+    /// Out of air under water (`DmgType_Drowning` path of 0x00ABB1E0).
+    Drowning,
+    /// A rat's bite (`DishonoredDamageType_Bite`).
+    RatBite,
+    /// Blood Thirsty's adrenaline kill (`DisDamageType_ImpactHit_Adrenaline`).
+    Adrenaline,
+    /// Hit by a sliding pawn (`DisDamageType_Slide`, `m_SlideDamageInfo`).
+    Slide,
 }
 
 /// How a choke ended (`DisItemContext_Choke.eChokeState`).
@@ -109,4 +117,19 @@ pub enum SimEvent {
     TrapTriggered { trap: u32 },
     Explosion { owner: PlayerId, position: Vec3, sticky: bool },
     Ignited { victim: PlayerId, by: PlayerId },
+    // --- movement ---
+    /// Entered (`entered`) or left a deep water volume (physics Swimming).
+    Swim { id: PlayerId, entered: bool },
+    /// Agility's power jump at the top of a held jump (0x00A71370).
+    PowerJump { id: PlayerId },
+    // --- Blood Thirsty ---
+    /// The adrenaline gauge filled (`m_bNeedAdrenalineEffect`).
+    AdrenalineFull { id: PlayerId },
+    /// An adrenaline attack was released (the next sword attack with a full gauge).
+    AdrenalineAttack { id: PlayerId },
+    // --- rats (hooks for `dishonored_ai`) ---
+    /// A rat pawn was spawned (by a swarm, a spawner or a mission).
+    RatSpawned { rat: PlayerId, swarm: Option<u32> },
+    /// A rat bit a pawn.
+    RatBite { rat: PlayerId, victim: PlayerId },
 }

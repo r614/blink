@@ -240,8 +240,10 @@ pub struct HookRequest {
     pub initiator: Option<u32>,
 }
 
-#[derive(Debug, Clone)]
+/// Serializes for saved games without its database (the loader re-attaches it).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Runner {
+    #[serde(skip)]
     pub db: Arc<ConversationDb>,
     pub time: f64,
     rng: u64,

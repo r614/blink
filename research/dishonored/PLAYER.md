@@ -104,14 +104,151 @@ Resulting speeds with the sword out: run 360, strafe 252, back 288, sprint 540 (
 
 - Acceleration is UE3 `PlayerWalking.PlayerMove`: `AccelRate x Normal(aForward X + aStrafe Y)`
   (no native override found; stick deflection only selects the walk speed). LIKELY.
-- `CalcVelocity` / `physWalking` / `physFalling` are the engine's (no Dishonored override in
-  the pawn vtables). `GroundFriction` 8 and `TerminalVelocity` are stock values: LIKELY.
 - `AirControl` is copied from `DisTweaks_PlayerPawn.m_fAirControl` (0.2) by 0x00AA7910.
 - Jump (StatePlayerMasterJump enter, 0x00A75EE0): `Velocity.Z = Attribute_JumpZ` (or
   `JumpZCarryingCorpse`), plus the base's upward velocity when standing on a mover; physics
-  Falling. Power-jump styles are for Agility (not in multiplayer).
+  Falling. Agility's power jump: see below.
 - Falling state (0x00A759F0 / 0x00A75B80): bookkeeping only. `m_fFall_Stun_Vel` 2200
   (DefaultPlayerState.ini) stuns on landing (not modelled).
+
+### Engine physics (U-053 resolved)
+
+The pawn physics are the engine's `APawn` functions (Pawn vtable 0x00FFC4D8; no Dishonored
+override except `setPhysics` slot 134 and `physLadder` slot 282 on the player). Located by the
+fields they touch (`research/ghidra/G_OffsetGroups.java`) and decompiled. CONFIRMED unless noted.
+
+- **Physics dispatch** (`startNewPhysics`, slot 283, 0x006A24A0): Walking slot 141, Falling 140,
+  Swimming slot 280, Flying 279, Ladder 282, Custom 143 (the player's goes to the current state).
+- **Constants.** This build's engine constants are UE3's times 1.27: `MAXSTEPHEIGHTFUDGE` 2.54,
+  `MINFLOORDIST` 2.413, `MAXFLOORDIST` 3.048, target floor distance 2.7305, `MAXSTEPSIDEZ`
+  0.1016, `MINSTEPSIZESQUARED` 232.2576 (=144 x 1.27^2), braking stop speed 12.7 (161.29
+  squared), swim bob -101.6 / -203.2 (UE3 -80 / -160).
+- **Defaults.** `Engine.upk Default__PhysicsVolume`: `GroundFriction` 8, `TerminalVelocity` 4000,
+  `FluidFriction` 0.3 (2.4 for `DishonoredWaterVolume`). `Default__Pawn`: `bLimitFallAccel` true,
+  `WalkableFloorZ` 0.5, but the attribute update (0x00B56880) overwrites `WalkableFloorZ` with
+  `cos(DisTweaks_Pawn.m_fMaxWalkableFloorInDegrees)` (50 deg: 0.643, the sim used 0.7) and sets
+  `Pawn.CrouchHeight` from `m_fCrouchHeight` (33) and `MaxFallSpeed` from `m_fMaxFallSpeed`.
+- **`CalcVelocity`** (slot 326, 0x006ACD50; args AccelDir, dt, MaxSpeed, Friction, bFluid, bBrake,
+  bBuoyant): `modifier = MaxSpeedModifier()`; with `bForceMaxAccel` false the controller's
+  acceleration is kept but limited to `GetMaxAccel(modifier) = AccelRate x modifier`
+  (0x006A2EE0), so the effective acceleration is 2000 x min(1, modifier) (running with the sword
+  1800, walking 900, sprinting 2000; the sim used 2000 everywhere). Without acceleration and with
+  `bBrake`: braking (0x006A2AC0) in sub-steps of at most 0.03 s, `v -= 2 v dt Friction`, the
+  result being the time-weighted average of the sub-steps while they point the old way, zeroed
+  below 12.7 uu/s or when reversed (the sim stopped below 1 uu/s). Otherwise
+  `v -= (v - AccelDir |v|) dt Friction` (no clamp of `dt Friction`). Then
+  `v = v (1 - bFluid dt Friction) + a dt`, plus `(1 - Buoyancy) g dt` when buoyant, and
+  `|v| <= MaxSpeed x modifier`.
+- **`physWalking`** (slot 141, 0x006BD150): `Velocity.Z = Acceleration.Z = 0`;
+  `CalcVelocity(AccelDir, dt, GroundSpeed, PhysicsVolume.GroundFriction, 0, 1, 0)`; sub-steps of at
+  most 0.05 s; a move into a floor sloped below 0.98 counts as hitting it; a blocked move calls
+  `stepUp`; then the floor is traced `MaxStepHeight + 2.54` down with the pawn's extent: on a
+  walkable floor the pawn is moved back to 2.7305 above it when outside 2.413..3.048, else it
+  falls; the velocity becomes the achieved horizontal displacement over `dt`.
+- **`stepUp`** (slot 148, 0x006ADC10): a barrier with normal Z below 0.1016 or walkable is
+  climbed by moving up `MaxStepHeight + 2.54`, along, and down again; a further near-vertical
+  barrier with more than 232.26 uu^2 x time of move left repeats it; otherwise the move slides
+  along the barrier flattened to vertical, with `TwoWallAdjust` on a second wall. Mid slopes are
+  only slid up when not walking.
+- **`physFalling`** (slot 140, 0x006BF0E0): the air-control move is test-swept with the extent
+  (a hit zeroes air control this tick); with `bLimitFallAccel` the acceleration is limited to
+  `AccelRate x AirControl` (+`(10 - speed2d)/dt` below 10 uu/s); at or above `GroundSpeed` the
+  horizontal speed may not grow (`MaxAirSpeed`), or with `AirControl <= 0.05` the acceleration is
+  1. Each sub-step: `v1 = NewFallVelocity(v0, a + g, dt) = v0 (1 - fluid dt) + (a + g)(1 - buoyancy)
+  dt` (0x006A3860), move `v1 dt`; landing on a walkable normal (the velocity becomes the measured
+  one when more than 10 % of the tick moved); walls slide (`ComputeSlideVector`, slot 290, never
+  rising faster than the move) with the two-wall and ditch tests; finally
+  `v = 2 (moved / dt) - v0` when rising or speeding down, capped at the terminal velocity. The
+  velocity therefore gains `2 a dt` per tick: gravity -1500 and air control act twice as hard as
+  their values. A JumpZ 800 jump rises 106.7 uu in 0.27 s (the sim rose 213 uu); the impact speed
+  after a drop `h` is about `sqrt(4 g h)`, so falling damage starts at 844 uu and kills at 1402 uu.
+- **Collision shape (U-016 resolved).** Every world trace of the pawn passes the cylinder's
+  extent `(radius, radius, CollisionHeight)` (e.g. the air-control test above), and UE3 extent
+  traces against kDOP trees and BSP are axis-aligned box checks. The sim sweeps an axis-aligned
+  box (`dishonored_world::PawnBox`, separating-axis box/triangle test) instead of a capsule.
+- **Crouch height (U-017 resolved).** The save/restore of the stealth state (0x00AD3950) lifts the
+  pawn by `CylinderHeight - m_fSneakHeight` when it was sneaking and by `CylinderHeight -
+  CrouchHeight` (and calls `Crouch`) when crouched: sneaking uses `m_fSneakHeight` (65), the
+  crawl (`bIsCrouched`, `Pawn::Crouch` 0x006A88E0) `m_fCrouchHeight` (33). The sim already did.
+
+### Agility (`Celerity`)
+
+`StatePlayerMasterJump` with `m_JumpStyle = FixedNormalJump_FixedPowerJump` (DefaultPlayerState.ini),
+tick 0x00A76110: while rising, `m_fHeldButtonTime` counts the time the jump button is held (reset
+when released); at the top of the jump (`Velocity.Z <= 1e-4`) a hold of more than 0.05 s with
+`Attribute_JumpZ_PowerJump > 1e-4` (0x00A60060) sets `Velocity.Z = Attribute_JumpZ_PowerJump`
+(0x00A71370) once; otherwise the jump hands over to falling. Corvo's base is 0; Celerity level 1
+adds 1300 and sets the falling damage speeds to 2550 / 3500; level 2 adds sprint +30 %, swim +10 %,
+sprint strafe / back multipliers 0.5 / 0.4 (DefaultPlayer.ini `m_Powers`). CONFIRMED.
+
+### Swimming
+
+- Water volumes: `DishonoredWaterVolume` (`bWaterVolume`, `FluidFriction` 2.4, `m_bShallowWater`)
+  brushes, extracted per map (`dishonored_assets::water`, cache `<map>.water1.json`): Boyle Ext has
+  three (L_Boyle_Ext_Env), Boyle Int one (L_Boyle_Int_Basement). A pawn whose centre enters a deep
+  one swims.
+- `startSwimming` (0x006B6360): entering slowly from above (downward below 203.2) dips to
+  `-101.6 - 0.7 |v.xy|`.
+- `physSwimming` (slot 280, 0x006B7820): `GetNetBuoyancy` (0x006A41F0) scales `Buoyancy` (1.0) and
+  `FluidFriction` by the submerged share of the cylinder; rising faster than 127 is scaled by
+  `NetBuoyancy / Buoyancy`; `CalcVelocity(dir, dt, WaterSpeed, FluidFriction / 2, 1, 0, 1)` (with
+  Buoyancy 1 there is no gravity in water); leaving the volume switches to falling and a slow
+  rise (0..160) becomes `0.4 |v.xy| + 40`.
+- `StatePlayerMasterSwim`: the swim acceleration (0x00A60690) is `m_fMaxSwimAccel` (4000) during a
+  stroke, else `m_fMinSwimAccel` (500) below `m_fMaxSpeedNoStroke` (350), else 0 (limited to
+  `AccelRate x modifier` by `CalcVelocity`). At the surface (`m_pActiveWaterVolume` empty) a stroke
+  is due every `m_fSurfaceSwimDelayBetweenStrokes` (2 s) but `m_bConstantSpeedAtSurface` suppresses
+  it (0x00A76710). Underwater strokes come from the swim animation (`DisNotify_SwimStroke`), not
+  decoded (U-243). `Attribute_WaterSpeed` 600.
+- Breath (0x00AD7BE0): while `m_bUnderWater` the air (`m_fApneaMaxDuration` 30 x
+  (1 + `Attribute_BreathCapacityIncrease`), 0x00ACF570) runs down; otherwise it refills at
+  `max / m_fApneaRecoveryDuration` (5 s) per second. Without air (0x00ABB1E0) health loses
+  `Attribute_DrowningDamageAmount` (1) every `Attribute_DrowningDamageStep` (1 s) directly, floored at
+  `m_MinimumScriptedHealth`, death below 1. Health regeneration below the limit is not reset by it
+  (U-242).
+- Climbing: `StatePlayerMasterClimb` attaches the player to a `DisClimbable` (rigid-body chains,
+  `m_fClimbingSpeed` 0.0005, jump off at `m_fJumpImpulse` 525, physics Ladder through the player's
+  `physLadder` 0x00AA82C0). Boyle has two chains; not ported (U-240).
+
+### Blood Thirsty
+
+Decoded in `dishonored_sim::adrenaline` (0x00AAC510 gain, 0x00AB2120 burn, 0x00AA21E0 full test,
+0x00C10EF0 finisher test): the gauge (max `Attribute_AdrenalineMax` 250, level 2 -20 %) fills from
+sword hits (damage x `m_fAdrenalineMultOnHit` 2.0), assassinations (victim health x 1.25, drop
+x 1.5), won parries (+`m_fAdrenalineAddedParryWin` 20), damage taken (x 0) and rat kills; after
+`Attribute_AdrenalineCooldown` (10 s) without a gain it burns at 1/s; full, the next melee attack
+on an NPC is a finisher (kill, gauge spent). Players are not finished (U-245).
+
+### Dark Vision
+
+`DisActivePowerComponent_DarkVision` (vtable 0x01168870): use (0x00BE89E0) starts it (0x00BF82A0)
+with the mana: fade-in `m_EyeLidClosingDuration` (0.05), duration `m_fDuration x (1 + SpellStrength)`
+(30), fade-out `m_PowerFadeOutDuration` (0.2), cooldown `m_fCooldownTimer` (1 s); using it again
+after the cooldown zeroes fade-in and duration (the fade-out plays); the tick (0x00BFBC90) spends
+the step on fade-in, duration, fade-out in turn. One-time cost (20), no drain. It shows the souls
+of pawns within `m_fDistance` (2000) at both levels (rats included); the sim reveals those pawns.
+
+### Armour
+
+The player's TakeDamage (0x00AB0A30): damage types with `m_bApplyDamageReduction` (default true;
+false for bites, electricity, plague, whiskey fire, music, energy) lose `(int)Attribute_DamageReduction`
+(the Armor upgrade, 5), never below 1; `m_bPushWithoutDamage` types deal 0. NPC helmets
+(`Twk_Inv_EliteHelmet`, head region) are knocked off by sword fast hits, bolts and bullets on the
+head and by Windblast and flare bolts anywhere; what they absorb is in the base tweak (U-246).
+
+### Windblast on players (U-051 resolved)
+
+The blast (0x00BE9770) hands its momentum to `TakeDamage`; the pawn damage path (0x00B5CCD0) passes
+it to the hit reaction handlers (the player's: camera / state reactions, 0x00AAC730, 0x00AB2420,
+0x00AB26E0, none moves the pawn) and then clears it. NPCs are thrown (ragdoll). The sim no longer
+pushes players; NPC pawns keep the velocity change.
+
+### Pistol upgrades
+
+The magazine holds `1 + (int)Attribute_MagazineBonus` rounds, capped by the ammo held (0x00C20DB0);
+`Attribute_ReloadSpeed` divides the reload time (0x00C23620, LIKELY: the divided tweak time is the
+reload delay). `Attribute_FastReload` selects the fast reload animations, and the accuracy upgrades
+change the dispersion, which the sim does not model (U-247).
 
 ### Falling damage (`TakeFallingDamage`, 0x00B4DCC0, vtable +0x528)
 
@@ -216,8 +353,7 @@ distance 3000, speed 5000; `m_bUseDirectionalWindblast` true. Class defaults: wa
   0x00BEDC90): impulse `dir x force`; its z is raised to `(1 - min(d / range, 1)) x
   extraUp` (added to a downward z); then (0x00BE9770) damage `round(damage x k)` with the
   windblast damage type and momentum `(impulse.xy x k, 0.15 x |impulse| x k)`.
-- The sim applies that momentum as a velocity change on players (the original only
-  blasts NPCs, which go ragdoll): LIKELY.
+- NPCs are thrown by that momentum; players are not (see "Windblast on players").
 
 ## Melee
 
@@ -234,8 +370,9 @@ distance 3000, speed 5000; `m_bUseDirectionalWindblast` true. Class defaults: wa
   the speed factor (0x00AB2050, for a pawn with a player camera) is
   `f = 1 + clamp((velocity . facing - m_fMinSpeedRayScale) x m_fRaySpeedScale, 0,
   m_fRaySpeedScale_Max)` (DefaultPlayer.ini 400, 0.005, 1.5). Sprinting forward at 540:
-  f = 1.7, reach 283.5. CONFIRMED. A further x`DAT_00fb930c` applies while timed state 1 of
-  0x00B4A0E0 is on (not identified, U-052); the sim uses the speed factor.
+  f = 1.7, reach 283.5. CONFIRMED. A further x2 (`DAT_00fb930c` = 2.0) applies while timed
+  state 1 of 0x00B4A0E0 is on (its setters not identified; the finisher test 0x00C10EF0 reads
+  state 0 of the same table, U-052); the sim uses the speed factor.
 - Damage ratios `m_fHealthRatio_NormalDamage` 0.2 / `_BigDamage` 0.7: data CONFIRMED;
   how player-vs-player hits map to them is our rule (the original has no PvP).
 
@@ -305,8 +442,9 @@ grenades and Spring Razors.
 
 ## Not decoded / not modelled
 
-See `research/UNKNOWNS.md` U-048, U-051..U-053 and U-100..U-113: lean camera, the mantle
-finder's later states and timings, pawn reaction to Windblast momentum, `physFalling` air
-control details, the melee reach state multiplier, swimming and climbing (not decoded:
-`StatePlayerMasterSwim` `m_fMaxSwimAccel` 4000, `m_fStrokeTime` 0.3, `m_fMaxSpeedNoStroke` 350,
-apnea 30 s; climbing `m_fClimbingSpeed`), and the inventory/power open points.
+See `research/UNKNOWNS.md` U-048, U-052, U-100..U-113 and U-240..U-251: lean camera collision,
+the mantle finder's later states and timings, the melee reach state multiplier's trigger,
+climbing on `DisClimbable` chains, level `PhysicsVolume`s (zone velocity, pain), underwater stroke
+timing, drowning against regeneration, the finisher on players, helmet absorption, weapon
+dispersion and fast reloads, slide impact damage, the random bone charms, and the
+inventory/power open points.

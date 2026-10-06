@@ -347,7 +347,7 @@ Item-context class defaults (`DisTweaks_NPCAttack*`): Short max range 250, StepB
 difference 200. Elite guards: `m_GunUsageStart` 0-0.5 s, `m_GunUsageCooldown` 1-2 s
 (`TweaksBehavior_CombatEliteGuard`).
 
-## Combat moves (decoded 2026-10-07)
+## Combat moves (decoded 2026-10-06)
 
 The elite guard's real ranges are its sword's pawn-specific contexts
 (`Twk_Inv_EliteGuard.Twk_Inv_SwordEliteGuard.DisTweaks_InventoryItem_PawnSpecific_1.*`):
@@ -402,7 +402,7 @@ its group inhibition; dodges cover their distance at 600 uu/s. The flurry / stam
 follows 0x00b47880; the outer skirmish ring uses the pistol rules above (the "+0xb0 bit 1"
 gate of the reachable case is read as "not a melee attacker", LIKELY).
 
-## Hearing through audio cells (decoded 2026-10-07)
+## Hearing through audio cells (decoded 2026-10-06)
 
 Data (level audio package, e.g. `L_Boyle_Int_Audio`): `DishonoredAudioVolume` (convex brush,
 `m_AudioPropagationIndex`, `m_LinkedPortals`), `DishonoredAudioPortal` (`m_WidthDir` +0x248,
@@ -432,7 +432,7 @@ radius. Port: `dishonored_ai::hearing`, data `AiLevel::audio` (`ai_level::read_a
 LIKELY details: the off-plane case of 0x00b92670 (clamped end point instead of the exact
 rectangle-edge closest point) and an additional point test (0x006b0330) in 0x00b86e20.
 
-## Light scale (decoded 2026-10-07, U-121)
+## Light scale (decoded 2026-10-06, U-121)
 
 `DAT_01435230` is written once by a static initializer (0x00f67460): `2 * sqrt(pi)` (FSQRT of
 the double pi at 0x00fbeeb8, doubled). 0x004e1db0 multiplies the band-0 SH coefficient of the
@@ -444,7 +444,7 @@ the level's enabled sky lights as half of their upper plus lower brightness (LIK
 hemisphere normalization). Remaining gap: lights inside `StaticLightCollectionActor`s are not
 in the probe (their per-component transforms are native data).
 
-## Sleep darts (decoded 2026-10-07, U-105)
+## Sleep darts (decoded 2026-10-06, U-105)
 
 The damage code 0x00b83680: a damage type with `m_bPutToSleep` (bit 11 of +0x58) and
 `m_bInstantSleepForUnawareNPCs` (bit 13) skips `m_fTimeBeforeSleep` when the pawn's virtual
@@ -453,7 +453,7 @@ The damage code 0x00b83680: a damage type with `m_bPutToSleep` (bit 11 of +0x58)
 reaction, `Choked` (7) for one controller class, else the current behaviour's awareness.
 Port: `Brain::unaware_of` / `Crowd::unaware_of` (true unless in Combat or ringing an alarm).
 
-## Rat swarms (2026-10-07)
+## Rat swarms (2026-10-06)
 
 `DisRatSwarm` + `DisTweaks_RatSwarm` (`Twk_RatSwarm.Twk_RandomRatSwarm`: aggressive from 11
 rats, attack group 12, detection 500 (150 busy), escape 750, damage 0.4 per rat clamped 1-5
@@ -463,7 +463,7 @@ every 0.5 s after 2 s, eat with 5 rats; `Twk_DevouringSwarm_Lvl1` (power level 1
 located (the class's vtable dump only showed engine slots); the rules come from the tweak
 fields and the state enums (U-260).
 
-## Generic dialog voices (2026-10-07, U-122)
+## Generic dialog voices (2026-10-06, U-122)
 
 `DisTweaks_NPCPawn.m_GenericDialogData` (+0x124) lists the pawn's generic
 `DisDialogVoiceData` (each with `m_pDialogTree` and `m_VoiceData[].m_pTree`); `AiLevel::generic_trees`

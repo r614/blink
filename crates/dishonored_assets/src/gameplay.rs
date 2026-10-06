@@ -96,9 +96,10 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
         format!("DefaultGame.ini [Engine.WorldInfo] DefaultGravityZ = {gravity_z}"),
     );
     // UE3 stock values not overridden anywhere we have found (LIKELY; see UNKNOWNS).
-    l.prov.insert("movement.ground_friction".into(), "UE3 stock PhysicsVolume.GroundFriction = 8.0 (LIKELY)".into());
-    l.prov.insert("movement.terminal_velocity".into(), "UE3 stock PhysicsVolume.TerminalVelocity = 4000.0 (LIKELY)".into());
-    l.prov.insert("movement.walkable_floor_z".into(), "UE3 stock Pawn.WalkableFloorZ = 0.7 (LIKELY)".into());
+    l.prov.insert("movement.ground_friction".into(), "Engine.upk Default__PhysicsVolume.GroundFriction = 8.0".into());
+    l.prov.insert("movement.terminal_velocity".into(), "Engine.upk Default__PhysicsVolume.TerminalVelocity = 4000.0".into());
+    // The attribute update (0x00B56880) sets Pawn.WalkableFloorZ to cos(m_fMaxWalkableFloorInDegrees).
+    let walk_deg = l.f(&corvo, CORVO, "m_fMaxWalkableFloorInDegrees", "movement.walkable_floor_z")?;
 
     let a = &attrs_path;
     let movement = MovementConfig {
@@ -125,7 +126,7 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
         back_mult_sprint: l.attr(&attrs, a, "m_GroundBackwardMultiplierSprint", "movement.back_mult_sprint")?,
         back_mult_sneak: l.attr(&attrs, a, "m_GroundBackwardMultiplierSneak", "movement.back_mult_sneak")?,
         sword_unsheathed_speed_factor: l.attr(&attrs, a, "m_SwordUnsheathedSpeedFactor", "movement.sword_unsheathed_speed_factor")?,
-        walkable_floor_z: 0.7,
+        walkable_floor_z: walk_deg.to_radians().cos(),
         max_speed_before_falling_damage: l.attr(&attrs, a, "m_MaxSpeedBeforeFallingDamage", "movement.max_speed_before_falling_damage")?,
         max_speed_before_falling_death: l.attr(&attrs, a, "m_MaxSpeedBeforeFallingDeath", "movement.max_speed_before_falling_death")?,
         mantle: MantleConfig {
@@ -181,6 +182,29 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
                 min_speed_to_slide: l.f(&pi, ip, "m_fMinSpeedToSlide", "input.min_speed_to_slide")?,
             }
         },
+        water: {
+            let d = WaterMoveConfig::default();
+            let state = Ini::load_layered(&content.root, "PlayerState");
+            let sec = "DishonoredGame.StatePlayerMasterSwim";
+            let sf = |k: &str, v: f32| state.get_f32(sec, k).unwrap_or(v);
+            l.prov.insert("movement.water.swim".into(), format!("DefaultPlayerState.ini [{sec}]"));
+            WaterMoveConfig {
+                water_speed: l.attr(&attrs, a, "m_WaterSpeed", "movement.water.water_speed").unwrap_or(d.water_speed),
+                buoyancy: l.f(&pawn, "Default__DishonoredPawn", "Buoyancy", "movement.water.buoyancy").unwrap_or(d.buoyancy),
+                out_of_water_z: l.f(&pawn, "Default__DishonoredPawn", "OutofWaterZ", "movement.water.out_of_water_z").unwrap_or(d.out_of_water_z),
+                min_swim_accel: sf("m_fMinSwimAccel", d.min_swim_accel),
+                max_swim_accel: sf("m_fMaxSwimAccel", d.max_swim_accel),
+                max_speed_no_stroke: sf("m_fMaxSpeedNoStroke", d.max_speed_no_stroke),
+                stroke_time: sf("m_fStrokeTime", d.stroke_time),
+                surface_stroke_delay: sf("m_fSurfaceSwimDelayBetweenStrokes", d.surface_stroke_delay),
+                constant_speed_at_surface: state.get(sec, "m_bConstantSpeedAtSurface").map_or(d.constant_speed_at_surface, |v| v.eq_ignore_ascii_case("true")),
+                apnea_max: l.f(&corvo, CORVO, "m_fApneaMaxDuration", "movement.water.apnea_max").unwrap_or(d.apnea_max),
+                apnea_recovery: l.f(&corvo, CORVO, "m_fApneaRecoveryDuration", "movement.water.apnea_recovery").unwrap_or(d.apnea_recovery),
+                drowning_damage: l.attr(&attrs, a, "m_DrowningDamageAmount", "movement.water.drowning_damage").unwrap_or(d.drowning_damage),
+                drowning_step: l.attr(&attrs, a, "m_DrowningDamageStep", "movement.water.drowning_step").unwrap_or(d.drowning_step),
+            }
+        },
+        power_jump_z: l.attr(&attrs, a, "m_JumpZ_PowerJump", "movement.power_jump_z").unwrap_or(0.0),
     };
 
     let vitals = VitalsConfig {
@@ -294,7 +318,22 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
     ai.player_visibility.ground_speed_sprint = movement.sprint_speed;
 
     let items = crate::items_config::load_items_config(content, &db, &mut l.prov);
+    let adrenaline = {
+        let d = AdrenalineConfig::default();
+        let mv = |k: &str, v: f32| melee.values.get(k).copied().unwrap_or(v);
+        AdrenalineConfig {
+            max: l.attr(&attrs, a, "m_AdrenalineMax", "adrenaline.max").unwrap_or(d.max),
+            burn_rate: l.attr(&attrs, a, "m_AdrenalineBurnRate", "adrenaline.burn_rate").unwrap_or(d.burn_rate),
+            cooldown: l.attr(&attrs, a, "m_AdrenalineCooldown", "adrenaline.cooldown").unwrap_or(d.cooldown),
+            mult_taking_damage: l.attr(&attrs, a, "m_AdrenalineMultWhenTakingDamage", "adrenaline.mult_taking_damage").unwrap_or(d.mult_taking_damage),
+            mult_on_hit: mv("attack.m_fAdrenalineMultOnHit", d.mult_on_hit),
+            mult_assassinate: mv("assassinate.m_fAdrenalineMultOnHit", d.mult_assassinate),
+            mult_drop_assassinate: mv("drop_assassinate.m_fAdrenalineMultOnHit", d.mult_drop_assassinate),
+            parry_win: mv("block.m_fAdrenalineAddedParryWin", d.parry_win),
+        }
+    };
     Ok(GameplayConfig {
+        adrenaline,
         items,
         movement,
         vitals,
