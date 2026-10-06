@@ -1299,3 +1299,10 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   (`dishonored_content` `climb_boyle_chains`): dropped beside either chain, the pawn grabs it
   and climbs to z -722.0 (Int; the limit -714.5 is not reached because the beam the chain hangs
   from blocks the pawn's top) and 1786.0 (Ext; limit 1796.5), and down to the lower limits.
+
+## 2026-10-06: Slide impacts (U-248)
+
+- **Method:** `class_layout` of `DisTweaks_PlayerPawn` (slide fields +0x23C..+0x250), `OffsetScan`, decompiles of 0x00A79BF0 and its caller 0x00A7B220; Corvo's tweak values.
+- **Findings:** each slide tick, until bit 0 of the state's +0x70 is set, a line trace of 75 uu along the velocity; the first actor hit (not immune, not asleep) takes its class's `m_SlideDamageInfo` damage (`DishonoredNPCPawn` 0, rats 0, `Actor` 5) with momentum velocity x 0.15 (`m_fSlideImpactDamageVelRatio`), damage type `DisDamageType_Slide`; the loop breaks after that actor. Who sets the flag is not traced (LIKELY: the hit, so one impact per slide).
+- **Port:** `MovementConfig.slide_*` (cache `gameplay_config.v10`), `SlideState.hit`, `movement::slide_impacts` (segment vs pawn cylinders). In multiplayer a slide into another player costs 5 health; NPCs are shoved, not hurt.
+- **Tests:** `mechanics::slide_impact_hurts_another_player_once`, `slide_impact_pushes_npcs_without_damage`.

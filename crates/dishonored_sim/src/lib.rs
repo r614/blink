@@ -308,6 +308,7 @@ pub fn step_world(
     // Health before the sword resolves (assassinations give adrenaline by the victim's health).
     let pre_health: Vec<(PlayerId, f32)> = state.players.iter().map(|p| (p.id, p.vitals.health)).collect();
     combat::resolve_sword_hits(state, world, mv, &cfg.gameplay.vitals, &cfg.tuning, &mut out.events);
+    movement::slide_impacts(state, mv, &cfg.gameplay.vitals, &mut out.events);
 
     for e in &out.events {
         if let SimEvent::WindblastCast { id } = e {

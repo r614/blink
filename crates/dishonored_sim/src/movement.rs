@@ -424,7 +424,7 @@ fn start_slide(p: &mut PlayerState, sword_out: bool, ctx: &MoveCtx) {
     let target = v0.normalize_or_zero() * cfg.crouch_speed * sword;
     set_crouch(p, true, ctx);
     p.sprinting = false;
-    p.slide = SlideState { active: true, elapsed: 0.0, start_velocity: v0, target_velocity: target, stop_interpolating: false };
+    p.slide = SlideState { active: true, elapsed: 0.0, start_velocity: v0, target_velocity: target, stop_interpolating: false, hit: false };
 }
 
 /// Slide physics (0x00A6F440): `v = v0 + (target - v0) * (1 - cos(pi * t / SlideTime)) / 2`
@@ -1049,4 +1049,86 @@ mod tests {
         // Perpendicular walls: the crease is vertical; nothing horizontal remains.
         assert!(d.truncate().length() < 1e-4, "{d}");
     }
+}
+
+/// Slide impacts (`FUN_00a79bf0`, run by the slide tick 0x00A7B220 until the slide has hit
+/// something): a line trace of `m_fSlideDamageTestDistance` from the pawn along its velocity;
+/// the first pawn it meets (not immune, not asleep when `m_bSlideDamageIgnoresSleepers`) takes
+/// the `m_SlideDamageInfo` damage of its class (`DishonoredNPCPawn` 0, rats 0, other actors 5)
+/// with momentum `velocity x m_fSlideImpactDamageVelRatio`. NPC pawns take the momentum as a
+/// velocity change; the player pawn's damage path drops it (U-051).
+pub fn slide_impacts(state: &mut crate::state::WorldState, cfg: &MovementConfig, vitals: &dishonored_ir::gameplay::VitalsConfig, events: &mut Vec<SimEvent>) {
+    for i in 0..state.players.len() {
+        let p = state.players[i];
+        if !p.alive || !p.slide.active || p.slide.hit {
+            continue;
+        }
+        let dir = p.velocity.normalize_or_zero();
+        if dir == Vec3::ZERO {
+            continue;
+        }
+        let len = cfg.slide_damage_test_distance;
+        // Nearest pawn whose collision cylinder the segment enters.
+        let mut best: Option<(usize, f32)> = None;
+        for (j, v) in state.players.iter().enumerate() {
+            if j == i || !v.alive {
+                continue;
+            }
+            if cfg.slide_damage_ignores_sleepers && v.condition == crate::state::Condition::Unconscious {
+                continue;
+            }
+            let c = capsule(v, cfg);
+            let Some(t) = segment_cylinder(p.position, dir * len, c.center, c.radius, c.half_height) else { continue };
+            if best.is_none_or(|b| t < b.1) {
+                best = Some((j, t));
+            }
+        }
+        let Some((j, _)) = best else { continue };
+        state.players[i].slide.hit = true;
+        let amount = match state.players[j].kind {
+            PawnKind::Civilian | PawnKind::Guard => cfg.slide_damage_npc,
+            PawnKind::Rat => cfg.slide_damage_rat,
+            PawnKind::Human => cfg.slide_damage_other,
+        };
+        let v = &mut state.players[j];
+        if v.kind != PawnKind::Human {
+            v.velocity += p.velocity * cfg.slide_impact_damage_vel_ratio;
+        }
+        if amount > 0.0 {
+            crate::vitals::apply_damage(v, amount, Some(p.id), crate::events::DamageCause::Slide, events, vitals);
+        }
+    }
+}
+
+/// Entry parameter (0..1 along `d`) of the segment `o + t d` into a vertical cylinder.
+fn segment_cylinder(o: Vec3, d: Vec3, c: Vec3, r: f32, hh: f32) -> Option<f32> {
+    let (o2, d2) = (Vec2::new(o.x - c.x, o.y - c.y), Vec2::new(d.x, d.y));
+    let a = d2.length_squared();
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    if a < 1e-8 {
+        if o2.length_squared() > r * r {
+            return None;
+        }
+    } else {
+        let b = o2.dot(d2);
+        let k = b * b - a * (o2.length_squared() - r * r);
+        if k < 0.0 {
+            return None;
+        }
+        let s = k.sqrt();
+        t0 = t0.max((-b - s) / a);
+        t1 = t1.min((-b + s) / a);
+    }
+    // Height slab.
+    let (oz, dz) = (o.z - c.z, d.z);
+    if dz.abs() < 1e-8 {
+        if oz.abs() > hh {
+            return None;
+        }
+    } else {
+        let (za, zb) = ((-hh - oz) / dz, (hh - oz) / dz);
+        t0 = t0.max(za.min(zb));
+        t1 = t1.min(za.max(zb));
+    }
+    (t0 <= t1).then_some(t0)
 }

@@ -151,6 +151,12 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
         slide_time: l.f(&corvo, CORVO, "m_fSlideTime", "movement.slide_time")?,
         slide_deactivate_angle: l.f(&corvo, CORVO, "m_fSlideVelocityDeactivateAngle", "movement.slide_deactivate_angle")?,
         slide_percent_not_cancelable: l.f(&corvo, CORVO, "m_fSlidePercentNotCancelable", "movement.slide_percent_not_cancelable")?,
+        slide_damage_test_distance: l.f(&corvo, CORVO, "m_fSlideDamageTestDistance", "movement.slide_damage_test_distance")?,
+        slide_impact_damage_vel_ratio: l.f(&corvo, CORVO, "m_fSlideImpactDamageVelRatio", "movement.slide_impact_damage_vel_ratio")?,
+        slide_damage_ignores_sleepers: true,
+        slide_damage_npc: 0.0,
+        slide_damage_rat: 0.0,
+        slide_damage_other: 5.0,
         lean: {
             let cam = Ini::load_layered(&content.root, "Camera");
             let sec = "DishonoredGame.DishonoredCamera_Lean";

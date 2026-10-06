@@ -70,6 +70,23 @@ pub struct MovementConfig {
     /// passed (0x00A71450).
     #[serde(default = "d_slide_cancel")]
     pub slide_percent_not_cancelable: f32,
+    /// Slide impacts (0x00A79BF0 from the slide tick 0x00A7B220): a line trace of
+    /// `m_fSlideDamageTestDistance` along the velocity; the first pawn hit takes the
+    /// `m_SlideDamageInfo` damage of its class with momentum `velocity x m_fSlideImpactDamageVelRatio`.
+    #[serde(default = "d_slide_test")]
+    pub slide_damage_test_distance: f32,
+    #[serde(default = "d_slide_vel_ratio")]
+    pub slide_impact_damage_vel_ratio: f32,
+    /// `m_bSlideDamageIgnoresSleepers` (Corvo: true).
+    #[serde(default = "d_true_slide")]
+    pub slide_damage_ignores_sleepers: bool,
+    /// `m_SlideDamageInfo`: `DishonoredNPCPawn` 0, `DisGameCrowdAgentSkeletalRat` 0, `Actor` 5.
+    #[serde(default)]
+    pub slide_damage_npc: f32,
+    #[serde(default)]
+    pub slide_damage_rat: f32,
+    #[serde(default = "d_slide_other")]
+    pub slide_damage_other: f32,
     /// `DishonoredCamera_Lean` (DefaultCamera.ini): the eye swings about a pivot
     /// `lean_height_pct x 2 x CollisionHeight` below it, up to `lean_max_angle` degrees,
     /// driven by a spring (`m_LeanConstants`).
@@ -186,6 +203,18 @@ impl Default for LeanConfig {
     }
 }
 
+fn d_slide_test() -> f32 {
+    75.0
+}
+fn d_slide_vel_ratio() -> f32 {
+    0.15
+}
+fn d_true_slide() -> bool {
+    true
+}
+fn d_slide_other() -> f32 {
+    5.0
+}
 fn d_slide_time() -> f32 {
     1.1
 }

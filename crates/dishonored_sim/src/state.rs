@@ -446,6 +446,9 @@ pub struct SlideState {
     pub target_velocity: Vec3,
     /// Speed fell below the target: velocity is no longer driven by the ease.
     pub stop_interpolating: bool,
+    /// This slide has hit a pawn (the slide tick stops testing; LIKELY: the state flag at +0x70).
+    #[serde(default)]
+    pub hit: bool,
 }
 
 /// State of a Blink move: the original steps toward the target with collision instead of
