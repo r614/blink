@@ -1299,3 +1299,22 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   (`dishonored_content` `climb_boyle_chains`): dropped beside either chain, the pawn grabs it
   and climbs to z -722.0 (Int; the limit -714.5 is not reached because the beam the chain hangs
   from blocks the pawn's top) and 1786.0 (Ext; limit 1796.5), and down to the lower limits.
+
+## 2026-10-06: Ranged weapon dispersion: the shot's screen offset (U-247)
+
+- **Question:** How does `DishonoredWeapon_Ranged.m_fDispersion` turn into a projectile direction, and in what unit?
+- **Method:** Ghidra on the player's fire path: `ClassDecomp` of `DisItemContext_ProjectileAttack`, `_FirePistol` and `_FireCrossbow`; `Decomp` of the pistol fire (slot 108, 0x00C2A3E0), the aim helpers 0x00C14640 / 0x00AA2B10 and the offset generator 0x00BFFBA0; `OffsetScan` for the weapon's +0x11C / +0x12C and the pawn tweak's +0x2AC / +0x2B0; `VCallers` / `G_Callers` for slot 98; `tweaks` for the cooked attributes and upgrades; `prop_layout` for the `m_bMaxDispersionOn*` bits.
+- **Findings:**
+  - The projectile context fires queued shots on its camera update (slot 103, 0x00C03A60): for each, the item's fire function, then the weapon's slot 109 (dispersion = max). A shot uses the dispersion it had, then it blooms.
+  - The pistol fire takes the aim point (screen centre, or the aim-assist point from 0x00C14460) and draws an offset (0x00BFFBA0: radius `rand() x d / 32767`, angle `rand() x 2 pi / 32767 - pi`, `d` = slot 91 = `m_fDispersion`). It deprojects aim point + offset x `height / 720` through the view (0x00AA2B10 -> 0x006C5180). The unit is pixels of a 720-line screen: 45 px is 3.09 degrees at the default 75 degree FOV on 16:9.
+  - `m_bMaxDispersionOnSprint / Jump / Block / Melee` are bits 0..3 of the ranged tweak's +0x118; the falling state's tick (0x00A79150) tests bit 1. Corvo's pistol and crossbow set Sprint, Jump and Block.
+  - Values: pistol 45 / 15 / 70 (max / min / speed), crossbow 30 / 0 / 70. Accuracy upgrades apply to their host weapon only (`m_pHostItemType`).
+  - No player code reads `m_fMovementDispersionIncrease` / `m_fCameraMovementDispersionIncrease` (U-422). The crosshair's `SetDispersion` script is not decoded (U-420). Slot 98's caller is not found (U-421).
+- **Port:** `LeftHandState.dispersion`. `left_hand::update_dispersion`: equip and shot set max; the held states keep max; `FInterpConstantTo` toward min while loaded. `dispersion_offset` takes two rolls of the pawn's stream. `offset_direction` uses a fixed reference view (75 degree FOV, 16:9). `fire_direction` serves the pistol, crossbow, sleep darts and incendiary bolts. `CombatTuning.pistol_dispersion` / `crossbow_dispersion` come from the `disp.*` weapon values (cache `gameplay_config.v9.json`). `powers::attribute_for` filters upgrades by host. Net protocol 5 (`LeftHandState` grew).
+- **Tests:** `crates/dishonored_sim/tests/player.rs`:
+  - narrowing to 15 in 0.43 s, a shot inside the 15 px cone, then 45; no narrowing while empty;
+  - held at max falling and sprinting; upgrades per weapon;
+  - offsets inside the radius; 45 px = 3.09 degrees; screen axes.
+
+  `cargo test -p dishonored_sim`: all pass.
+- **Confidence:** CONFIRMED for the formulas, the order and the data; the reference view is an APPROXIMATION of the player's real view.
