@@ -131,7 +131,41 @@ Remaining approximations: the Windblast origin (pawn eye height along the view),
 arrival height (80 uu below the pawn centre), the underwater test (not wired), the fiery
 material.
 
+## Distortion (U-360 resolved, U-400 open)
+
+Materials with `bUsesDistortion` (`DefaultAdditive_PMAT` and the other particle bases; the
+instances switch it on with `Dist_Enable_Distortion`, and `D_Disable_Diffuse` leaves only the
+distortion, e.g. the pistol muzzle's `Vfx_GamePlay.Windblast.WindWave_Disto_01_inst`:
+`Dist_Distortion` = `Assassins_Teleport_01`, `Dist_Distortion_Intensity` -100, `O_Opacity` =
+`Wind_Swirl_01`, UV scrolling (0.1, -0.5), vertex colour on) are drawn a second time after
+translucency, as UE3 does:
+
+1. Accumulate (the material's distortion pixel shader; 133 such shaders in
+   `RefShaderCache-PC-D3D-SM3.upk`, all with the same tail, e.g. 36064/36065 for the
+   `DefaultAdditive_PMAT` family with the sprite and mesh vertex factories): D = the material's
+   `Distortion` input in 1/255 screen units. For the Arkane bases it is a scalar (both offset
+   components equal): `Dist_Distortion.r` (at the UV-distorted / scrolled coordinate) x a uniform
+   (the intensity) x vertex colour alpha x `O_Opacity.r`. Pixels with |D|^2 < 0.1 are discarded;
+   the scene depth (scene colour alpha x 256 in the original) at `uv + (Dx, -Dy) / 255` is
+   compared with the pixel's depth and D is zeroed when the scene is in front; then
+   E = clamp(4 D / 255, -1, 1) is added into an RGBA8 target, max(E, 0) in RG and max(-E, 0) in BA.
+2. Apply (global cache shader 237, `AccumulatedDistortionTexture`, `SceneColorTexture`,
+   `SceneColorRect`): the scene colour at `uv + (RG - BA) x (0.25, -0.25)`, or at `uv` when that
+   coordinate leaves `SceneColorRect`.
+
+Port: `distortion.rs` (`DistortionMaterial::decode`, the per-frame `DistortionFrame` of
+distorting triangles built by `effects::simulate` from the same particles, sprite and mesh
+emitters) and `distortion.wgsl` / `distortion_apply.wgsl` in the Core3d `EarlyPostProcess`
+set, before the ArkPp pass. The offset target is RGBA16F; the apply pass saturates the sum at 1
+like the RGBA8 target. U-400: which compiled permutation belongs to which switch set (channel R
+vs B, two extra uniform multipliers, the `Dist_Distortion_Speed` / `UV_Distortion_Speed`
+pan directions) is not decoded; the port uses R, `Dist_Distortion_Intensity` alone, U/V
+scrolling on the distortion texture and no other pan.
+
 ## Approximations and open points
+
+- Bursts at emitter time 0 fire on the first cycle (until 2026-10-06 they only fired from the
+  second loop on, so one-shot effects lost their time-0 bursts, e.g. the muzzle shockwave).
 
 - Burst `Time` as a fraction of `EmitterDuration`; spawn-rate distributions sampled with the
   emitter time in seconds (UE3 `ParticleEmitterInstance::Tick` convention).
