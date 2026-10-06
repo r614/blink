@@ -832,7 +832,14 @@ impl MissionMatch {
                 }
             })
             .collect();
-        all.extend(self.crowd.think(&self.world, &self.last_events, world, dt));
+        // [kismet] Doors the original Kismet locked or unlocked change the AI's paths.
+        let door_nav = self.kismet.as_mut().and_then(|k| k.door_nav(&self.current_map, world.nav()));
+        let overlay = door_nav.as_deref().map(|nav| kismet_host::NavOverlay { inner: world, nav });
+        let ai_world: &dyn WorldQuery = match &overlay {
+            Some(o) => o,
+            None => world,
+        };
+        all.extend(self.crowd.think(&self.world, &self.last_events, ai_world, dt));
         let out = step_world(&mut self.world, &all, world, cfg);
         let mut events = Vec::new();
         if let Some(m) = self.arrived.take() {
@@ -1086,6 +1093,10 @@ impl MissionMatch {
             })
             .collect();
         self.last_events = out.events.clone();
+        // [kismet] AI noises made by the Kismet (`DisSeqAct_AINoise`) are heard next step.
+        if let Some(k) = &mut self.kismet {
+            self.last_events.append(&mut k.st.noises);
+        }
         out
     }
 

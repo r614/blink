@@ -251,6 +251,15 @@ struct Env<'a> {
     suspicion: &'a BTreeMap<String, u8>,
     npc_pos: &'a BTreeMap<String, Vec3>,
     players: &'a [(u32, Vec3, bool)],
+    items: &'a BTreeMap<String, i32>,
+}
+
+impl Env<'_> {
+    /// Count of an abstract item by object path or name (`Package.Name` -> `Name`).
+    fn abstract_count(&self, item: &str) -> i32 {
+        let short = item.rsplit(['.', ':']).next().unwrap_or(item);
+        self.items.iter().filter(|(k, _)| k.eq_ignore_ascii_case(short)).map(|(_, v)| *v).sum()
+    }
 }
 
 impl ConvEnv for Env<'_> {
@@ -267,6 +276,12 @@ impl ConvEnv for Env<'_> {
     }
     fn suspicion(&self, npc: Option<&str>) -> u8 {
         npc.and_then(|n| self.suspicion.get(n).copied()).unwrap_or(0)
+    }
+    fn has_item(&self, _player: Option<u32>, item: &str, _equipped: bool) -> bool {
+        item.contains("Sword") || self.abstract_count(item) > 0
+    }
+    fn item_count(&self, _player: Option<u32>, item: &str) -> i32 {
+        self.abstract_count(item) + item.contains("Sword") as i32
     }
     fn distance(&self, player: Option<u32>, npc: Option<&str>) -> Option<f32> {
         let np = self.npc_pos.get(npc?)?;
@@ -335,6 +350,9 @@ pub struct MissionState {
     pub ai_hooks: Vec<(String, String, String, Option<u32>)>,
     /// [ai] Barks that started a conversation so far.
     pub ai_hooks_fired: u32,
+    /// [kismet] Abstract items the players hold (`DisSeqAct_AddAbstractItem` /
+    /// `RemoveAbstractItem`, by object name): the conversations' `DisConv_HasAbstractItem` checks.
+    pub items: BTreeMap<String, i32>,
 }
 
 impl MissionState {
@@ -389,6 +407,7 @@ impl MissionState {
             approach_track: BTreeMap::new(),
             ai_hooks: Vec::new(),
             ai_hooks_fired: 0,
+            items: BTreeMap::new(),
         };
         s.refresh_view(&BTreeMap::new());
         s
@@ -516,7 +535,7 @@ impl MissionState {
     /// queue (Kismet-style cascade within the step).
     fn with_conv(&mut self, queue: &mut VecDeque<Ev>, f: impl FnOnce(&mut Runner, &mut dyn ConvEnv)) {
         let Some(runner) = self.conv.as_mut() else { return };
-        let mut env = Env { flags: &mut self.flags, changed: Vec::new(), alive: &self.npc_alive, suspicion: &self.npc_suspicion, npc_pos: &self.last_npc_pos, players: &self.last_players };
+        let mut env = Env { flags: &mut self.flags, changed: Vec::new(), alive: &self.npc_alive, suspicion: &self.npc_suspicion, npc_pos: &self.last_npc_pos, players: &self.last_players, items: &self.items };
         f(runner, &mut env);
         let changed = env.changed;
         let events = runner.take_events();
