@@ -310,13 +310,19 @@ the interior map, which does not share a known offset with the exterior (U-006).
 
 ## Runtime use
 
-`crates/dishonored_runtime/src/audio.rs`: banks load and every postable sound is
-decoded on a worker thread at startup; `SimEvent`s map to the events above
-(`dishonored_audio::cues`); local player 2D, others 3D (bevy_audio spatial panning,
-listener = game camera) with the Wwise dry-volume attenuation curve per sound;
-footsteps generated from movement with the surface guessed from the colliding mesh
-name; ambience = level bed + score + placed emitters. `harness audio` verifies decode
-sanity per codec class and that every mapped cue resolves to decodable sound.
+`crates/dishonored_runtime/src/audio.rs`: a worker thread loads the player/combat banks, the
+map's ambience, music and emitter banks (and the banks of Kismet-posted events), the contact
+system, the AnimSet sound notifies and the map's music tweaks, and decodes the short one-shots;
+the `dishonored_audio::engine` renders everything (one endless bevy_audio source, 48 kHz).
+Pawns, placed emitters and impacts are Wwise game objects at their positions; the listener is
+the game camera. Sounds come from: AnimNotify_AkEvent / footfall notifies reported by the
+animation code (`AnimSounds::advance`), footfall contacts (stride fallback for pawns without
+notifies), simulation events (`dishonored_audio::cues`), Kismet (`MissionView::sounds`, and
+`MissionView::ambient` starting, stopping or toggling placed ambient sound actors), and the
+music manager on `MatchView::ai`. Level travel loads the next map's banks; states persist.
+`harness audio` checks decode sanity per codec class, every mapped cue, the exact HIRC decode,
+container loops and crossfades, avoid-repeat, music transitions, the music manager on the
+Boyle tweaks, footstep surfaces from the collision import and the notify sounds.
 
 Dialog VO: the per-voice `Bk_<GUID>.<LANG>` AKPK files (BOYLE_MISSION.md section 4) load
 through `SoundLibrary::load_bank` (a `Bk_` name falls back to `<name>.INT`), and

@@ -33,13 +33,17 @@ system".
 
 Distributions are cooked: the `Distribution` object is stripped and the struct keeps the
 baked lookup table (`FRawDistributionFloat/Vector`): `Op` (1 none, 2 random, 3 extreme),
-`LookupTableNumElements`, `LookupTableChunkSize`, `LookupTable` = [time scale, start time,
-entries...], each entry `chunk` floats (value, or min then max for the random ops), and the
-duplicated `LookupTableTimeScale` / `StartTime` properties. Sampling: index = (t - start) x
-scale, linear between neighbouring entries, random ops lerp min..max with the particle's
-random number (extreme picks one end). Example `ChimeySmoke_01`: lifetime random over 2 entries
-(6 floats), start size vector random (14 floats), colour over life 2 entries of 3, alpha over
-life 21 entries with time scale 20, size-over-life 20 entries.
+`LookupTableNumElements` (values per sample: 1, or 2 = min and max), `LookupTableChunkSize`
+(floats per sample), `LookupTable` = [min, max, samples...], `LookupTableTimeScale`,
+`LookupTableStartTime`. Tagged properties are deltas against the module's class default, so
+omitted fields come from `Engine.Default__ParticleModule<X>` (e.g. `StartRotation` defaults to
+Op 2, 2 elements, chunk 2; `AlphaOverLife` to Op 1, 1, 1). Sampling: index = (t - start) x time
+scale (0 = constant), linear between neighbouring samples; random ops lerp min..max with the
+particle's random number (extreme picks one end). Example `ChimeySmoke_01`: spawn rate 1.3/s,
+lifetime 6..7 s, start size 300..600, velocity (-25..25, -25..25, 20..55), colour over life
+~0.1 grey, alpha over life 21 samples at time scale 20 (0 -> 0.69 -> 0), size over life 20
+samples. Emitters without a Lifetime module keep their particles forever (light glows: one
+burst particle).
 
 Modules decoded (`dishonored_assets::particles`, IR `dishonored_ir::particles`):
 
@@ -71,8 +75,19 @@ listed per emitter as unsupported.
   SubImageIndex; local or world space; warm-up (`WarmupTime`) run at spawn in 1/15 s steps.
   Placed emitters simulate within 9,000 uu of the camera and only while their level is shown.
 - Drawing: one dynamic mesh per emitter, camera-facing quads (square or rectangle;
-  velocity-aligned for PSA_Velocity), vertex colour x texture, unlit, blend from the material
-  (additive, translucent, masked, modulate).
+  velocity-aligned for PSA_Velocity; locked to an emitter axis or rotating about one with
+  `ParticleModuleOrientationAxisLock`), vertex colour x texture, unlit, blend from the material
+  (additive, translucent, masked, modulate; additive is not fogged).
+- Mesh emitters (`TypeDataMesh`, e.g. street-lamp cones): one entity per particle with the
+  mesh scaled by the particle size and turned by `MeshRotation` / `MeshRotationRate`, colour
+  and alpha on a per-particle material copy. Meshes whose material is procedural (no texture:
+  `Volume_Light_PMAT`, `Glow_PMAT` sphere masks, fresnel, depth fades) are not drawn.
+- Material graphs are not evaluated (APPROXIMATION): the instance's `Color` vector tints and its
+  `LightIntensity` / `Opacity` / `Intensity` scalars scale; sprite materials without a texture
+  (procedural glows) get a radial falloff `(1 - r)^SphereMask_Power`.
+- Captures: `fixtures/scripts/effects_boyle.json` (inspect mode, five Boyle Ext viewpoints:
+  chimney smoke, sewer smoke, street lamp, small lights, fireflies) and
+  `fixtures/scripts/effects_gameplay.json` (offline: pistol, Windblast, Blink).
 - Gameplay effects from simulation events: sword sparks on block/parry, pistol muzzle blast,
   blood on sword / pistol / bolt damage, Blink ground effect at the arrival, Windblast cone,
   world impacts.
