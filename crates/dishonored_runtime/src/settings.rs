@@ -244,11 +244,21 @@ pub fn apply_window(settings: Res<GameSettings>, mut last: Local<Option<(bool, b
 
 /// Display gamma (2.2 neutral) as the colour-grading exponent of every 3D camera, and
 /// anti-aliasing on/off as MSAA.
-pub fn apply_camera(settings: Res<GameSettings>, mut cams: Query<(&mut bevy::render::view::ColorGrading, Option<&mut Msaa>)>) {
+pub fn apply_camera(
+    settings: Res<GameSettings>,
+    mut cams: Query<(&mut bevy::render::view::ColorGrading, Option<&mut Msaa>, Option<&mut crate::ark_post::ArkPostSource>)>,
+) {
     let n = (2.2 / settings.s.graphics.gamma.max(0.1)).clamp(0.2, 5.0);
     let msaa = if settings.s.graphics.anti_aliasing == 0 { Msaa::Off } else { Msaa::Sample4 };
-    for (mut cg, m) in &mut cams {
-        if (cg.midtones.gamma - n).abs() > 1e-4 {
+    for (mut cg, m, ark) in &mut cams {
+        // With the ArkPp pass the setting is the original's display gamma (the LUT exponent is
+        // m_GammaAdjustment / display gamma, 0x0090ED00); otherwise Bevy's grading gamma.
+        if let Some(mut ark) = ark {
+            let g = settings.s.graphics.gamma.max(0.1);
+            if (ark.display_gamma - g).abs() > 1e-4 {
+                ark.display_gamma = g;
+            }
+        } else if (cg.midtones.gamma - n).abs() > 1e-4 {
             cg.shadows.gamma = n;
             cg.midtones.gamma = n;
             cg.highlights.gamma = n;

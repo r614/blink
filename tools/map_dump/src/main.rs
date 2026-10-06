@@ -124,9 +124,10 @@ fn main() -> Result<()> {
     let mut lum: Vec<f32> = m
         .lightmaps
         .iter()
-        .flat_map(|a| a.texels.iter().filter(|&&t| t != 0))
-        .map(|&t| {
-            let c = dishonored_assets::lightmap::unpack_rgb9e5(t);
+        .flat_map(|a| a.texels.iter().zip(a.directional.iter()).filter(|(t, _)| **t != 0))
+        .map(|(&t, &d)| {
+            use dishonored_assets::lightmap::{directional_irradiance, unpack_rgb9e5};
+            let c = directional_irradiance(unpack_rgb9e5(t), unpack_rgb9e5(d), [0.0, 0.0, 1.0]);
             0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
         })
         .collect();

@@ -140,10 +140,41 @@ impl Package {
     /// Whether an export's class derives from `Component`. The class hierarchy lives in
     /// other packages, so this uses the naming convention every UE3 component class follows.
     pub fn is_component_class(&self, export: usize) -> bool {
-        let c = self.export_class(export);
         // UDistributionFloat/Vector derive from UComponent (observed: TemplateOwnerClass
         // prefix on DistributionFloatUniform in L_BoyleStreet_Ext_Script).
-        c.ends_with("Component") || c == "Component" || c.starts_with("Distribution")
+        // Engine.upk components whose names lack the suffix (their super chains reach
+        // `Component`; listed because other packages only see them as imports).
+        const ENGINE_COMPONENTS: &[&str] = &["ApexComponentBase", "ArkComponentContainer", "RB_Handle", "RB_Spring"];
+        let by_name = |c: &str| c.ends_with("Component") || c == "Component" || c.starts_with("Distribution") || ENGINE_COMPONENTS.contains(&c);
+        // Classes defined in this package: walk their super chain, so components whose name
+        // does not end in "Component" (`DisActivePowerComponent_Blink`, `ArkComponentContainer`,
+        // `RB_Handle`) and plain objects whose name does (`DisTweaks_GrenadeComponent`,
+        // `DisAnimStateComponent`) are told apart (DishonoredGame CDO subobjects, U-014).
+        let mut cur = ObjRef::from_index(self.exports[export].class);
+        for _ in 0..64 {
+            match cur {
+                ObjRef::Export(ci) => {
+                    let name = self.obj_name(cur);
+                    if name == "Component" || name == "ActorComponent" || name.starts_with("Distribution") && name != "Distribution" {
+                        return true;
+                    }
+                    if name == "Object" {
+                        return false;
+                    }
+                    let sup = ObjRef::from_index(self.exports[ci].super_);
+                    if sup == ObjRef::Null {
+                        return by_name(&name);
+                    }
+                    cur = sup;
+                }
+                ObjRef::Import(_) => {
+                    let name = self.obj_name(cur);
+                    return name != "Object" && by_name(&name);
+                }
+                ObjRef::Null => return false,
+            }
+        }
+        by_name(&self.export_class(export))
     }
 
     /// Components owned by a class default object (directly or via a Class) are
@@ -188,7 +219,9 @@ impl Package {
         let class = self.export_class(export);
         // DominantPointLightComponent has no shadow map: its data starts with
         // TemplateOwnerClass = 0 and the first tag at offset 8 (L_Boyle_Ext_Light export 7).
-        if class == "DominantDirectionalLightComponent" || class == "DominantSpotLightComponent" {
+        // Not on their class default objects (Engine `Default__DominantDirectionalLightComponent`
+        // starts with the TemplateOwnerClass dword and the first tag at offset 4).
+        if (class == "DominantDirectionalLightComponent" || class == "DominantSpotLightComponent") && flags & RF_CLASS_DEFAULT_OBJECT == 0 {
             // Dominant light components serialize `TArray<WORD> DominantLightShadowMap`
             // before everything else (observed in L_Boyle_Ext_Light exports 5 and 10).
             let n = r.count(2)?;

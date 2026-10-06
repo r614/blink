@@ -2,7 +2,7 @@
 //! level packages into a normalized [`DishonoredMap`].
 
 use crate::content::Content;
-use crate::lightmap::{LightMap2DRef, LightMapRef, decode_bc1, flat_irradiance, pack_rgb9e5, read_static_mesh_component_lods, srgb_to_linear};
+use crate::lightmap::{LightMap2DRef, LightMapRef, decode_bc1, pack_rgb9e5, read_static_mesh_component_lods, srgb_to_linear};
 use crate::material_chain;
 use crate::spline_mesh;
 use crate::texture::decode_rgba8;
@@ -357,6 +357,21 @@ impl Importer<'_> {
             far: float_or(c, "FarPlane", 10000.0),
             origin: float_or(c, "Origin", 0.0),
             height: float_or(c, "Height", 20.0),
+            no_fog: float_or(c, "NoFogPlane", 400000.0),
+            height_density: float_or(c, "HeightDensityFactor", 1.0),
+            is_sun: bool_or(c, "bIsSun", false),
+            sun_power: float_or(c, "SunPower", 16.0),
+            lut: match find(c, "m_RawLut").map(|p| &p.value) {
+                Some(Value::Array(bytes)) if bytes.len() >= 4 => {
+                    // TArray<BYTE>: count, then the bytes.
+                    let n = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+                    bytes.get(4..4 + n).map(|b| b.to_vec()).unwrap_or_default()
+                }
+                _ => Vec::new(),
+            },
+            custom_transition: bool_or(c, "bCustomTransition", false).then(|| float_or(c, "fCustomTransitionHeight", 250.0)),
+            interior: bool_or(c, "bInteriorFog", false),
+            exclusive: bool_or(c, "m_IsExclusive", false),
         });
     }
 
@@ -656,6 +671,7 @@ impl Importer<'_> {
             };
             let (w, h) = (a.0 as usize, a.1 as usize);
             let mut out = vec![[0f32; 3]; w * h];
+            let mut out_dir = vec![[0f32; 3]; w * h];
             // 0 = empty, 1 = padding, 2 = inside a component's rect.
             let mut mask = vec![0u8; w * h];
             let members = &groups[&(ka, kd)];
@@ -676,7 +692,8 @@ impl Importer<'_> {
                             mask[i] = pass;
                             let avg = a.2[i].map(srgb_to_linear);
                             let dir = d.2[i].map(srgb_to_linear);
-                            out[i] = flat_irradiance(avg, dir, lm.scales[0], lm.scales[1]);
+                            out[i] = [0, 1, 2].map(|k| avg[k] * lm.scales[0][k]);
+                            out_dir[i] = [0, 1, 2].map(|k| dir[k] * lm.scales[1][k]);
                         }
                     }
                 }
@@ -687,6 +704,7 @@ impl Importer<'_> {
                 width: w as u32,
                 height: h as u32,
                 texels: out.into_iter().map(pack_rgb9e5).collect(),
+                directional: out_dir.into_iter().map(pack_rgb9e5).collect(),
             });
             for &m in members {
                 let lm = &pending[m].lm;
@@ -722,7 +740,13 @@ impl Importer<'_> {
                 shelf_h = 0;
             }
             if pages.is_empty() || y + h > page {
-                pages.push(LightmapAtlas { source: format!("lightmap page {}", pages.len()), width: page, height: page, texels: vec![0; (page * page) as usize] });
+                pages.push(LightmapAtlas {
+                    source: format!("lightmap page {}", pages.len()),
+                    width: page,
+                    height: page,
+                    texels: vec![0; (page * page) as usize],
+                    directional: vec![0; (page * page) as usize],
+                });
                 x = 0;
                 y = 0;
                 shelf_h = 0;
@@ -732,6 +756,9 @@ impl Importer<'_> {
                 let src = (row * a.width) as usize;
                 let dst = ((y + row) * page + x) as usize;
                 pages[p].texels[dst..dst + w as usize].copy_from_slice(&a.texels[src..src + w as usize]);
+                if a.directional.len() == a.texels.len() {
+                    pages[p].directional[dst..dst + w as usize].copy_from_slice(&a.directional[src..src + w as usize]);
+                }
             }
             place[i] = (p, x, y);
             x += w;
@@ -882,10 +909,15 @@ impl Importer<'_> {
             .or(chain.normal_input)
             .or_else(|| named(&["normal"], &["n2_", "dn_", "detail", "variation", "wave"]))
             .or_else(|| material_chain::slot_in(&chain.default_textures, "n_", &[]));
-        let spec_key = material_chain::slot(&chain, "s_", &["mask"]);
-        let emissive_key = material_chain::slot(&chain, "e_", &["mask"]);
+        // Static switches of the compiled permutation (U-027) gate the Arkane slots: a slot
+        // whose `*_Enable_*` switch is off is not in the original's shader even when the
+        // instance (or a parent) still names a texture for it.
+        let off = |s: &str| chain.switch(s) == Some(false);
+        let normal_key = normal_key.filter(|_| !off("N_Enable_NormalMap"));
+        let spec_key = material_chain::slot(&chain, "s_", &["mask"]).filter(|_| !off("S_Enable_Specular"));
+        let emissive_key = material_chain::slot(&chain, "e_", &["mask"]).filter(|_| !off("E_Enable_Emissive"));
         let opacity_key = material_chain::slot(&chain, "o_", &[]).or_else(|| named(&["opacity", "alpha"], &[]));
-        let detail_key = material_chain::slot(&chain, "dn_", &["mask"]);
+        let detail_key = material_chain::slot(&chain, "dn_", &["mask"]).filter(|_| !off("DN_Use_detailNormal"));
         let source = pkg.obj_path(ObjRef::Export(k.1));
         let lname = source.to_ascii_lowercase();
         let fx_card = ["fog", "smoke", "lightray", "light_ray", "godray", "mist"]
@@ -915,22 +947,29 @@ impl Importer<'_> {
             if let Some(o) = opacity {
                 let sc = |n: &str, d: f32| chain.scalars.iter().find(|(k, _)| k.trim().eq_ignore_ascii_case(n)).map(|v| v.1).unwrap_or(d);
                 let (lo, hi) = if blend == MaterialBlend::Masked { (0.0, 1.0) } else { (sc("O_Minimum_Opacity", 0.0), sc("O_Maximum_Opacity", 1.0)) };
-                diffuse = self.merged_opacity(diffuse, o, lo, hi).or(diffuse);
+                let ch = chain.mask_channel("O_Opacity_Mask_Channel").unwrap_or(0);
+                diffuse = self.merged_opacity(diffuse, o, ch, lo, hi).or(diffuse);
             }
         }
-        // Channel-packed masks: when the emissive slot reuses the opacity texture, opacity
-        // lives in R and the emissive mask (lit windows on vista cards) in G.
-        let emissive = match emissive_key {
-            Some(e) if Some(e) == opacity_key => self.texture(e).and_then(|t| self.channel_texture(t, 1)),
-            Some(e) => self.texture(e),
-            None => None,
+        // Channel-packed masks: the static component masks name the channel (U-027). Without
+        // one, an emissive slot that reuses the opacity texture reads G (vista cards: opacity
+        // in R, lit windows in G).
+        let emissive = match (emissive_key, chain.mask_channel("E_Emissive_Channel")) {
+            (Some(e), Some(ch)) => self.texture(e).and_then(|t| self.channel_texture(t, ch)),
+            (Some(e), None) if Some(e) == opacity_key => self.texture(e).and_then(|t| self.channel_texture(t, 1)),
+            (Some(e), _) => self.texture(e),
+            (None, _) => None,
+        };
+        let specular = match (spec_key.and_then(|key| self.texture(key)), chain.mask_channel("S_Specular_Mask_Channel")) {
+            (Some(t), Some(ch)) => self.channel_texture(t, ch),
+            (t, _) => t,
         };
         let params = MaterialParams {
-            specular: spec_key.and_then(|key| self.texture(key)),
+            specular,
             emissive,
             opacity,
             detail_normal: detail_key.and_then(|key| self.texture(key)),
-            uses_cubemap: chain.textures.iter().any(|(n, _)| n.to_ascii_lowercase().starts_with("c_cubemap_texture")),
+            uses_cubemap: chain.switch("C_Enable_Cubemap").unwrap_or_else(|| chain.textures.iter().any(|(n, _)| n.to_ascii_lowercase().starts_with("c_cubemap_texture"))),
             blend,
             blend_known,
             two_sided: chain.two_sided.unwrap_or(false),
@@ -940,6 +979,17 @@ impl Importer<'_> {
             vectors: chain.vectors.clone(),
             sky,
             base_material: chain.base_material.clone(),
+            static_switches: {
+                let mut names: Vec<String> = chain.switch_defaults.iter().map(|(n, _)| n.clone()).collect();
+                if let Some(s) = &chain.static_params {
+                    for (n, _, _) in &s.switches {
+                        if !names.iter().any(|m| m.eq_ignore_ascii_case(n)) {
+                            names.push(n.clone());
+                        }
+                    }
+                }
+                names.into_iter().filter_map(|n| chain.switch(&n).map(|v| (n, v))).collect()
+            },
         };
         if diffuse.is_none() {
             self.stats.materials_without_diffuse.push(format!(
@@ -999,8 +1049,9 @@ impl Importer<'_> {
     /// Diffuse (or white) with the opacity mask's red channel remapped to `[lo, hi]` as
     /// alpha (RGBA8, full mip chain), so masked/translucent materials alpha-test or blend
     /// with the original mask (`O_Minimum_Opacity` / `O_Maximum_Opacity`).
-    fn merged_opacity(&mut self, d: Option<TextureId>, o: TextureId, lo: f32, hi: f32) -> Option<TextureId> {
-        let key = (d.unwrap_or(usize::MAX), o, lo.to_bits(), hi.to_bits());
+    fn merged_opacity(&mut self, d: Option<TextureId>, o: TextureId, ch: usize, lo: f32, hi: f32) -> Option<TextureId> {
+        // The channel is folded into the key's last field (channel 0 keeps the plain key).
+        let key = (d.unwrap_or(usize::MAX), o, lo.to_bits(), hi.to_bits() ^ ((ch as u32) << 29));
         if let Some(id) = self.merged_ids.get(&key) {
             return *id;
         }
@@ -1026,7 +1077,7 @@ impl Importer<'_> {
                 for x in 0..w {
                     let sx = (x as u64 * ow as u64 / w as u64) as usize;
                     let sy = (y as u64 * oh as u64 / h as u64) as usize;
-                    let a = opx[sy * ow as usize + sx][0] as f32 / 255.0;
+                    let a = opx[sy * ow as usize + sx][ch.min(3)] as f32 / 255.0;
                     px[(y * w + x) as usize][3] = ((lo + (hi - lo) * a).clamp(0.0, 1.0) * 255.0).round() as u8;
                 }
             }
