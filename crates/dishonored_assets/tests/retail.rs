@@ -50,8 +50,11 @@ fn boyle_ext_import() {
     let (map, stats) = import_level(&c, "L_Boyle_Ext_P", &pkgs, &opts).unwrap();
     assert_eq!(stats.mesh_failures, 0);
     // Includes 33 spline-deformed mesh copies and meshes resolved through DishonoredGame.upk.
-    assert_eq!(map.meshes.len(), 511);
-    assert_eq!(map.instances.len(), 3754);
+    // ... plus 18 skeletal meshes drawn in their reference pose (40 placed doors, usable
+    // objects, sinks, alarm bells and the climbable chain).
+    assert_eq!(map.meshes.len(), 531);
+    assert_eq!(map.instances.len(), 3794);
+    assert_eq!(stats.skeletal_props, 40);
     assert_eq!(map.spawn_candidates.len(), 5);
 }
 

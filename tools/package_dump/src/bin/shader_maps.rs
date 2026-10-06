@@ -280,6 +280,20 @@ fn main() -> Result<()> {
                 for (i, v) in tex.iter().enumerate() {
                     let _ = writeln!(report, "  Texture2D_{i} = {v}");
                 }
+                // Then cube textures, and the vertex shader's vectors and scalars
+                // (`UniformVertexVector_n` / `UniformVertexScalars_n`, world position offsets).
+                let cube = e.array().unwrap_or_default();
+                for (i, v) in cube.iter().enumerate() {
+                    let _ = writeln!(report, "  TextureCube_{i} = {v}");
+                }
+                let vv = e.array().unwrap_or_default();
+                let vs = e.array().unwrap_or_default();
+                for (i, v) in vv.iter().enumerate() {
+                    let _ = writeln!(report, "  UniformVertexVector_{i} = {v}");
+                }
+                for (i, v) in vs.iter().enumerate() {
+                    let _ = writeln!(report, "  UniformVertexScalars_{}.{} = {v}", i / 4, ['x', 'y', 'z', 'w'][i % 4]);
+                }
                 break;
             }
         }

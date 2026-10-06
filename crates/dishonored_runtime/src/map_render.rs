@@ -259,9 +259,9 @@ pub fn build_material(i: usize, m: &MaterialAsset, p: &MaterialParams, images: &
     }
     mat.unlit = p.unlit;
     if let Some(c) = vector(p, "D_Diffuse_color").or(vector(p, "D_DiffuseColorTweak")) {
-        let a = if p.unlit && p.blend != MaterialBlend::Opaque { c[3].clamp(0.0, 1.0) } else { 1.0 };
+        let (k, a) = diffuse_color_terms(p, c[3]);
         if !f.debug_lighting {
-            mat.base_color = Color::linear_rgba(c[0], c[1], c[2], a);
+            mat.base_color = Color::linear_rgba(c[0] * k, c[1] * k, c[2] * k, a);
         }
     }
     if let Some(t) = scalar(p, "D_Diffuse_Tilling").filter(|t| *t > 0.0 && (*t - 1.0).abs() > 1e-3) {
@@ -314,6 +314,30 @@ pub fn build_material(i: usize, m: &MaterialAsset, p: &MaterialParams, images: &
         mat.emissive = LinearRgba::rgb(c[0] * c[3], c[1] * c[3], c[2] * c[3]);
     }
     mat
+}
+
+/// How the alpha `w` of `D_Diffuse_color` enters the diffuse colour: (rgb multiplier, alpha).
+///
+/// The compiled base-pass pixel shaders of every base material that exposes `D_Diffuse_color`
+/// (`generic_PMAT`, `generic_masked_PMAT`, `generic_masked_SingleSided_PMAT`,
+/// `generic_translucent_PMAT`, `generic_translucent_2sided_PMAT`, `vertexAnim_PMAT`,
+/// `vertexAnim_2Sided_PMAT`, `spline_PMAT`, `bugs_PMAT`, `water_slide_PMAT`, `DefaultMesh_PMAT`,
+/// `DefaultMesh_2_Sided_PMAT`, `Default_Simple_Translucent_PMAT`, `Skies_PMAT`) compute
+/// `D_Diffuse_color.rgb x D_Diffuse_color.w` (`mul r.xyz, cN, cN.w`): the alpha is an intensity.
+/// Only `FogSheet_PMAT` reads the whole vector (`mov r0, cN`); it and undecoded unlit translucent
+/// bases keep the alpha as opacity.
+pub fn diffuse_color_terms(p: &MaterialParams, w: f32) -> (f32, f32) {
+    let base = p.base_material.as_deref().unwrap_or("");
+    let decoded = ["generic_", "vertexAnim_", "spline_PMAT", "bugs_PMAT", "water_slide_PMAT", "DefaultMesh_", "Default_Simple_Translucent_PMAT"]
+        .iter()
+        .any(|b| base.rsplit('.').next().unwrap_or(base).starts_with(b));
+    if decoded {
+        (w.max(0.0), 1.0)
+    } else if p.unlit && p.blend != MaterialBlend::Opaque {
+        (1.0, w.clamp(0.0, 1.0))
+    } else {
+        (1.0, 1.0)
+    }
 }
 
 /// Deterministic pastel colour for untextured materials so surfaces stay readable.
