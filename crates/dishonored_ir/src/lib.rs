@@ -139,8 +139,9 @@ pub struct FogSettings {
     /// `FogLUT`); empty = linear ramp.
     #[serde(default)]
     pub lut: Vec<u8>,
-    /// Flags whose CPU-side effect is not decoded (U-321): `bCustomTransition` +
-    /// `fCustomTransitionHeight`, `bInteriorFog`, `m_IsExclusive`.
+    /// `bCustomTransition` + `fCustomTransitionHeight` (opacity fades in over that distance
+    /// below the layer top, 0x0081C940); `bInteriorFog` and `m_IsExclusive` affect the layer
+    /// selection, which is not decoded (U-321).
     #[serde(default)]
     pub custom_transition: Option<f32>,
     #[serde(default)]
