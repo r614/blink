@@ -231,6 +231,10 @@ pub enum NpcAnim {
     AttackLong = 39,
     AttackMedium = 40,
     AttackShort = 41,
+    AttackStepBack = 42,
+    JumpAttack = 50,
+    Dodge = 64,
+    SideStep = 65,
     ParryAwaitingImpact = 61,
     Parry = 62,
     ParryVersus = 63,
@@ -244,6 +248,7 @@ pub enum NpcAnim {
     AimShoot = 96,
     AimReload = 97,
     AimIn = 98,
+    JumpBack = 112,
 }
 
 /// Names of `eDisNPCAnimations` (DishonoredGame `DisAnimDefinitions`), for tools and docs.

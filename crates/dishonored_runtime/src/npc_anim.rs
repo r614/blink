@@ -512,6 +512,8 @@ impl Chain {
 
 #[derive(Component, Default)]
 pub struct PawnAnim {
+    /// The AI combat move last seen in the pawn's input (`PlayerInput::npc_move`).
+    pub last_move: u8,
     pub phase: f32,
     pub modifier: String,
     pub prev_modifier: Option<(String, f32)>,
@@ -1016,6 +1018,29 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
     }
     let r = st.rand();
     let p = i.p;
+    // Combat moves the AI chose (`PlayerInput::npc_move`, replicated in the pawn's last input):
+    // the move's `eDisNPCAnimations` chain starts when the move changes. Short attacks play
+    // through the swing below; side steps take the front step of their directional group.
+    let mv = p.last_input.npc_move;
+    if mv != st.last_move {
+        st.last_move = mv;
+        use dishonored_sim::input::npc_moves as m;
+        let anim = match mv {
+            m::ATTACK_STEP_BACK => Some(NpcAnim::AttackStepBack),
+            m::ATTACK_MEDIUM => Some(NpcAnim::AttackMedium),
+            m::ATTACK_LONG => Some(NpcAnim::AttackLong),
+            m::JUMP_ATTACK => Some(NpcAnim::JumpAttack),
+            m::SIDE_STEP => Some(NpcAnim::SideStep),
+            m::BACK_STEP => Some(NpcAnim::JumpBack),
+            m::FIRE_PISTOL => Some(NpcAnim::AimShoot),
+            _ => None,
+        };
+        let dead = st.full.as_ref().is_some_and(|f| f.hold && f.key == "dead");
+        if let Some(c) = anim.filter(|_| p.alive && !dead).and_then(|a| bank.chain(profile, a, None, 0.0, true, r, "move")) {
+            let w = st.full.as_ref().map_or(0.0, |f| f.weight);
+            st.full = Some(Chain { weight: w * 0.5, ..c });
+        }
+    }
     // Event-driven actions.
     for (kind, from) in i.hits {
         let q = hit_angle(p, *from);
