@@ -1,0 +1,20 @@
+{"steps":[
+  {"wait_ticks":200},
+  {"teleport":{"pos":[-2862.0,-2335.0,-22.0],"yaw":164.6,"pitch":-10.0}},
+  {"view":{"third_person":true,"follow":2004,"orbit":-70,"distance":4.0,"height":1.6}},
+  {"ticks":10,"input":{"yaw":164.6,"pitch":-10.0}},
+  {"screenshot":"e0_guard_before"},
+  {"ticks":3,"input":{"yaw":164.6,"pitch":-10.0,"buttons":["ATTACK"]}},
+  {"ticks":9,"input":{"yaw":164.6,"pitch":-10.0}},
+  {"screenshot":"e1_guard_dies_0_2s"},
+  {"ticks":18,"input":{"yaw":164.6,"pitch":-10.0}},
+  {"screenshot":"e2_guard_dies_0_5s"},
+  {"ticks":30,"input":{"yaw":164.6,"pitch":-10.0}},
+  {"screenshot":"e3_guard_dies_1_0s"},
+  {"ticks":30,"input":{"yaw":164.6,"pitch":-10.0}},
+  {"screenshot":"e4_guard_dies_1_5s"},
+  {"teleport":{"pos":[-2500.0,-2700.0,-22.0],"yaw":164.6,"pitch":-10.0}},
+  {"ticks":90,"input":{"yaw":164.6,"pitch":-10.0}},
+  {"screenshot":"e5_guard_corpse_3s"},
+  {"quit":true}
+]}

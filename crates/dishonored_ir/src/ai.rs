@@ -199,6 +199,14 @@ pub struct PlayerVisibilityConfig {
     /// `Twk_GlobalPlayerVisSettings.m_fLightValue{Darkest,Brightest}Val`.
     pub light_darkest: f32,
     pub light_brightest: f32,
+    /// The player's `Attribute_GroundSpeedSprint`: the speed value is the horizontal speed
+    /// divided by it, unclamped (0x00ac33b0).
+    #[serde(default = "ground_speed_sprint")]
+    pub ground_speed_sprint: f32,
+}
+
+fn ground_speed_sprint() -> f32 {
+    600.0
 }
 
 impl Default for PlayerVisibilityConfig {
@@ -216,6 +224,7 @@ impl Default for PlayerVisibilityConfig {
             zero_speed_sneaking: true,
             light_darkest: 0.05,
             light_brightest: 1.0,
+            ground_speed_sprint: 600.0,
         }
     }
 }
@@ -243,7 +252,7 @@ pub fn default_melee_contexts() -> Vec<MeleeContextConfig> {
 }
 
 /// A `DishonoredRoute` (an engine `Route` of `DishonoredNavPoint`s) used by `DisBehaviorPatrol`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PatrolRoute {
     pub name: String,
     /// `ERouteType`: 0 Linear (once, then adopt another route), 1 Loop (back and forth),
@@ -252,6 +261,46 @@ pub struct PatrolRoute {
     /// `m_Capacity` (-1 = unlimited).
     pub capacity: i32,
     pub points: Vec<RoutePoint>,
+    /// `m_SupportedSquads`: when set, only pawns of these squads may adopt the route.
+    #[serde(default)]
+    pub squads: Vec<String>,
+    /// `m_AdoptionRange` (negative: any distance).
+    #[serde(default = "minus_one")]
+    pub adoption_range: f32,
+    /// `m_NeglectThreshold`: a route nobody walked for longer is preferred.
+    #[serde(default = "thirty")]
+    pub neglect_threshold: f32,
+    /// `m_bIsActive`.
+    #[serde(default = "yes")]
+    pub active: bool,
+    /// The route actor's location (adoption range origin).
+    #[serde(default)]
+    pub location: glam::Vec3,
+}
+
+fn minus_one() -> f32 {
+    -1.0
+}
+fn thirty() -> f32 {
+    30.0
+}
+
+impl Default for PatrolRoute {
+    fn default() -> Self {
+        PatrolRoute { name: String::new(), kind: 2, capacity: -1, points: Vec::new(), squads: Vec::new(), adoption_range: -1.0, neglect_threshold: 30.0, active: true, location: glam::Vec3::ZERO }
+    }
+}
+
+impl PatrolRoute {
+    /// `DishonoredRoute` adoption check (0x00a4bc70): active, has points, the pawn's squad is
+    /// supported, capacity left, and the pawn within `m_AdoptionRange`.
+    pub fn adoptable(&self, users: i32, squad: &str, pos: glam::Vec3) -> bool {
+        self.active
+            && !self.points.is_empty()
+            && (self.squads.is_empty() || self.squads.iter().any(|s| s.eq_ignore_ascii_case(squad)))
+            && (self.capacity < 0 || users < self.capacity)
+            && (self.adoption_range < 0.0 || pos.distance(self.location) < self.adoption_range)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -357,11 +406,220 @@ pub struct AiConfig {
     /// stimuli such as `EAIStimID_AllyBusted`.
     #[serde(default = "group_distance")]
     pub group_distance: f32,
+    /// `TweaksBehavior_TriggerAlarm_Party` (`DisTweaks_AIBehavior_TriggerAlarm`).
+    #[serde(default)]
+    pub trigger_alarm: TriggerAlarmConfig,
+    /// `DisTweaks_AIBrain.m_fVisualDetectionRatioNear`: a sighting closer than this fraction
+    /// of the vision range is a "near" detection (`DDH_SEARCH_NEAR_VDETECTION`).
+    #[serde(default = "near_ratio")]
+    pub visual_detection_ratio_near: f32,
     pub provenance: BTreeMap<String, String>,
 }
 
 fn group_distance() -> f32 {
     1000.0
+}
+fn near_ratio() -> f32 {
+    0.3
+}
+
+/// `DisTweaks_AIBehavior_TriggerAlarm`: when a guard goes to ring an alarm bell. The chance is
+/// picked by what made the guard aware (sighting alone / in a group, found corpse, witnessed
+/// death, help request); a guard is "alone" when no other pawn within `companion_range` is an
+/// ally (`m_bCompanionMustBeAlly`) of the same squad (`m_bCompanionMustMatchSquad`)
+/// (0x00af5fe0). An enemy within `fight_radius` is fought instead (0x00af6bd0).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TriggerAlarmConfig {
+    pub chance_sighting_alone: f32,
+    pub chance_sighting_in_group: f32,
+    pub chance_found_corpse: f32,
+    pub chance_witness_death: f32,
+    pub chance_help: f32,
+    pub fight_radius: f32,
+    pub wait_before_ring: f32,
+    pub companion_range: f32,
+    pub companion_must_match_squad: bool,
+    pub companion_must_be_ally: bool,
+}
+
+impl Default for TriggerAlarmConfig {
+    /// `TweaksBehavior_TriggerAlarm_Party` values; the help chance keeps the class default 0.
+    fn default() -> Self {
+        TriggerAlarmConfig {
+            chance_sighting_alone: 1.0,
+            chance_sighting_in_group: 1.0,
+            chance_found_corpse: 1.0,
+            chance_witness_death: 1.0,
+            chance_help: 0.0,
+            fight_radius: 500.0,
+            wait_before_ring: 0.25,
+            companion_range: 2000.0,
+            companion_must_match_squad: false,
+            companion_must_be_ally: true,
+        }
+    }
+}
+
+/// `ERelationship` (DisGlobalEnums).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Relationship {
+    Neutral,
+    Ally,
+    Enemy,
+}
+
+/// A `DisTweaks_Faction`: the factions it treats as allies and enemies, and the tweaks it
+/// falls back to (a faction "is" every faction on its fallback chain).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Faction {
+    pub name: String,
+    pub allies: Vec<String>,
+    pub enemies: Vec<String>,
+    #[serde(default)]
+    pub parents: Vec<String>,
+}
+
+/// The factions of a level (global `DisFaction_Defaults` plus the level-cooked ones such as
+/// `Boyle_Factions`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct FactionTable {
+    pub factions: Vec<Faction>,
+}
+
+impl FactionTable {
+    pub fn index(&self, name: &str) -> Option<u16> {
+        self.factions.iter().position(|f| f.name.eq_ignore_ascii_case(name)).map(|i| i as u16)
+    }
+
+    /// Index of `name`, adding an empty faction when it is unknown (a faction referenced by a
+    /// spawner but not loaded relates to nothing but itself).
+    pub fn intern(&mut self, name: &str) -> u16 {
+        match self.index(name) {
+            Some(i) => i,
+            None => {
+                self.factions.push(Faction { name: name.to_string(), ..Default::default() });
+                (self.factions.len() - 1) as u16
+            }
+        }
+    }
+
+    /// `a` is `b` or falls back to it (0x00c6f360: compares, then walks the fallback chain).
+    pub fn isa(&self, a: u16, b: u16) -> bool {
+        if a == b {
+            return true;
+        }
+        let Some(fb) = self.factions.get(b as usize) else { return false };
+        let mut seen = 0;
+        let mut cur = a;
+        while seen < 16 {
+            let Some(fa) = self.factions.get(cur as usize) else { return false };
+            let Some(p) = fa.parents.first().and_then(|p| self.index(p)) else { return false };
+            if p == b || self.factions[p as usize].name.eq_ignore_ascii_case(&fb.name) {
+                return true;
+            }
+            cur = p;
+            seen += 1;
+        }
+        false
+    }
+
+    fn isa_name(&self, a: u16, b: &str) -> bool {
+        self.index(b).is_some_and(|b| self.isa(a, b))
+    }
+
+    /// Relationship of faction `a` toward faction `b` (0x00c4ceb0, mapped by 0x00c5fd00): the
+    /// same faction (either way along the fallback chain) is an ally; otherwise `a`'s
+    /// `m_EnemyFactions` are checked before its `m_AlliedFactions`; anything else is neutral.
+    /// Only `a`'s lists count: relationships are not symmetric.
+    pub fn relation(&self, a: u16, b: u16) -> Relationship {
+        if self.isa(b, a) || self.isa(a, b) {
+            return Relationship::Ally;
+        }
+        let Some(fa) = self.factions.get(a as usize) else { return Relationship::Neutral };
+        if fa.enemies.iter().any(|e| self.isa_name(b, e)) {
+            return Relationship::Enemy;
+        }
+        if fa.allies.iter().any(|e| self.isa_name(b, e)) {
+            return Relationship::Ally;
+        }
+        Relationship::Neutral
+    }
+}
+
+/// A `DisForbiddenZone`: pawns of a forbidden faction inside it are trespassers, and the
+/// owning factions treat trespassers as enemies (0x00c953f0 registers the trespasser for each
+/// owning faction; 0x00c5fc20 makes them enemies of those factions).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ForbiddenZone {
+    pub name: String,
+    /// `m_bEnabled` (toggleable volume; Kismet can switch it).
+    pub enabled: bool,
+    pub owning: Vec<String>,
+    pub forbidden: Vec<String>,
+    /// World-space convex hulls of the brush, as planes (nx, ny, nz, d): inside when
+    /// `n . p <= d` for every plane of one hull.
+    pub hulls: Vec<Vec<[f32; 4]>>,
+}
+
+impl ForbiddenZone {
+    pub fn contains(&self, p: glam::Vec3) -> bool {
+        self.hulls.iter().any(|h| !h.is_empty() && h.iter().all(|pl| pl[0] * p.x + pl[1] * p.y + pl[2] * p.z <= pl[3] + 1e-3))
+    }
+}
+
+/// A `DisAlarmBell` with its `DisTweaks_AlarmBell`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AlarmBellDef {
+    pub name: String,
+    pub package: String,
+    pub position: glam::Vec3,
+    /// `m_AlarmLoudness` as a radius (`m_LoudnessDistanceArray`).
+    pub loudness: f32,
+    /// `m_fNPCGoToAlarmCloseness`: guards farther than this do not go to ring it.
+    pub go_closeness: f32,
+    /// `m_fNPCUseCloseness`: distance at which a guard rings it.
+    pub use_closeness: f32,
+    pub time_between_uses: f32,
+    /// `m_fSpawnerMinDistFromPlayer`: triggered spawners at least this far from the enemy are
+    /// preferred (all are used when none is).
+    pub spawner_min_dist: f32,
+    /// `m_MaxSpawnedPawnsPerRing` (or the bell's `m_MaxSpawnedPawnsPerRingOverride`).
+    pub max_spawns: i32,
+    /// `m_fAlarmRingDelayBeforeAINoise`.
+    pub ring_delay: f32,
+    /// `m_TriggeredSpawners` (spawner actor names).
+    pub spawners: Vec<String>,
+}
+
+/// A light for the AI light probe (the original samples the pawn's light environment).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ProbeLight {
+    /// 0 point, 1 spot, 2 directional.
+    pub kind: u8,
+    pub position: glam::Vec3,
+    pub direction: glam::Vec3,
+    /// Brightness times the colour's luminance.
+    pub intensity: f32,
+    pub radius: f32,
+    pub falloff_exponent: f32,
+    /// Spot cone half angles (degrees).
+    pub inner_cone: f32,
+    pub outer_cone: f32,
+    pub casts_shadows: bool,
+}
+
+/// Per-map AI data from the level packages (cached by the content loader).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AiLevel {
+    pub factions: FactionTable,
+    /// Pawn tweak path -> its `m_pFactionTweak`.
+    pub tweak_factions: BTreeMap<String, String>,
+    /// The player pawn tweak's faction (`Faction_Corvo_Default`).
+    pub player_faction: String,
+    pub zones: Vec<ForbiddenZone>,
+    pub alarms: Vec<AlarmBellDef>,
+    #[serde(default)]
+    pub lights: Vec<ProbeLight>,
 }
 
 fn inc(amount: f32, to_level: u8) -> AttentionIncrease {
@@ -505,6 +763,8 @@ impl Default for AiConfig {
             glance_time: 2.5,
             player_visibility: PlayerVisibilityConfig::default(),
             group_distance: 1000.0,
+            trigger_alarm: TriggerAlarmConfig::default(),
+            visual_detection_ratio_near: 0.3,
             provenance: BTreeMap::new(),
         }
     }

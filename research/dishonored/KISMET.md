@@ -273,3 +273,9 @@ nonlethal Brisby route (knock-out, carrying a body to the boat), Lord Shaw's due
 ## 4. Open points
 
 See `research/UNKNOWNS.md` U-080..U-087.
+
+Update 2026-10-06 (AI): `DisSeqAct_SetDisposition` (faction targets through
+`Crowd::set_disposition`, pawn targets through `Crowd::set_pawn_disposition`; inputs Set /
+Clear / ClearAll per `EDisSetDispositionKismetInput`, decoded 0x00c79000) and
+`DisSeqAct_AISetSenses` (brain `deaf` / `blind` / `numb`) are now handled by the host
+(`[ai]` hooks in `kismet_host.rs`); see `dishonored/AI.md` "Factions".

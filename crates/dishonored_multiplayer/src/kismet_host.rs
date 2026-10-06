@@ -577,16 +577,55 @@ impl Host for H<'_> {
                 }
                 HostResult::Done
             }
+            // [ai] `DisTweaks_Faction::OnSetDisposition` (0x00c79000) / `ADishonoredPawn::
+            // OnSetDisposition`: inputs Set / Clear / ClearAll (`EDisSetDispositionKismetInput`);
+            // the targets (factions or pawns) take `m_Disposition` toward `m_Recipients`
+            // (factions or pawns), and back with `m_bReciprocate`.
             "DisSeqAct_SetDisposition" => {
-                let disp = match cx.input() {
-                    Some(0) => "Relationship_Hostile".to_string(),
-                    Some(1) => "Relationship_Neutral".to_string(),
-                    Some(2) => "Relationship_Friendly".to_string(),
-                    _ => cx.prop_str("m_Disposition"),
+                let input = cx.input().unwrap_or(0).min(2) as u8;
+                let rel = match cx.prop_str("m_Disposition").as_str() {
+                    "Relationship_Ally" => dishonored_ir::ai::Relationship::Ally,
+                    "Relationship_Neutral" => dishonored_ir::ai::Relationship::Neutral,
+                    _ => dishonored_ir::ai::Relationship::Enemy,
                 };
-                let _ = disp;
-                // Faction-wide dispositions (Target = a faction tweak) are not modelled.
-                HostResult::Unhandled
+                let reciprocate = cx.prop("m_bReciprocate").and_then(|v| v.as_bool()).unwrap_or(true);
+                let recip_objs: Vec<Obj> = cx.prop("m_Recipients").map(|v| v.as_array().iter().filter_map(|x| x.as_obj().cloned()).collect()).unwrap_or_default();
+                let mut recipients = Vec::new();
+                for o in &recip_objs {
+                    match o {
+                        Obj::Path(p) => recipients.push(dishonored_ai::Recipient::Faction(self.m.crowd.factions.intern(p))),
+                        other => {
+                            if let Some(p) = self.pawn_of(other) {
+                                recipients.push(dishonored_ai::Recipient::Pawn(p));
+                            }
+                        }
+                    }
+                }
+                for t in cx.objects("Target") {
+                    match &t {
+                        Obj::Path(f) => self.m.crowd.set_disposition(f, input, rel, &recipients, reciprocate),
+                        other => {
+                            let Some(p) = self.pawn_of(other) else { continue };
+                            self.m.crowd.set_pawn_disposition(p, input, rel, &recipients);
+                        }
+                    }
+                }
+                self.note(format!("disposition {:?} input {input} to {} recipients", rel, recipients.len()));
+                HostResult::Done
+            }
+            // [ai] Deaf / blind / numb NPCs (`m_bDeaf`, `m_bBlind`, `m_bNumb`).
+            "DisSeqAct_AISetSenses" => {
+                let (deaf, blind, numb) = (cx.prop_bool("m_bDeaf"), cx.prop_bool("m_bBlind"), cx.prop_bool("m_bNumb"));
+                for o in cx.objects("Target") {
+                    if let Some(p) = self.pawn_of(&o) {
+                        if let Some(b) = self.m.crowd.brains.iter_mut().find(|b| b.id == p) {
+                            b.deaf = deaf;
+                            b.blind = blind;
+                            b.numb = numb;
+                        }
+                    }
+                }
+                HostResult::Done
             }
             "DisSeqAct_NPCSetMaterials" => {
                 let clear = cx.input() == Some(1);

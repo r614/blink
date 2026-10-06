@@ -290,6 +290,11 @@ pub struct MissionState {
     approach: Vec<(String, u32, u32, [f32; 3])>,
     /// Distance tracker per (NPC, approach hook node), as `DisConv_Hook_Distance_InGameData`.
     approach_track: BTreeMap<(String, u32), dishonored_conversation::hooks::DistanceHook>,
+    /// [ai] Dialog hooks the AI fired this step (barks): (NPC binding name, speaker actor,
+    /// `DDH_*` hook, initiator). Queued by the host, fired in `step`.
+    pub ai_hooks: Vec<(String, String, String, Option<u32>)>,
+    /// [ai] Barks that started a conversation so far.
+    pub ai_hooks_fired: u32,
 }
 
 impl MissionState {
@@ -342,6 +347,8 @@ impl MissionState {
             last_npc_pos: BTreeMap::new(),
             approach: Vec::new(),
             approach_track: BTreeMap::new(),
+            ai_hooks: Vec::new(),
+            ai_hooks_fired: 0,
         };
         s.refresh_view(&BTreeMap::new());
         s
@@ -393,6 +400,33 @@ impl MissionState {
             self.with_conv(queue, move |runner, env| {
                 runner.start(spec, env);
             });
+        }
+    }
+
+    /// [ai] AI barks (`Runner::fire_hook`): the NPC's trees are the trees of the one-shots
+    /// whose first speaker is its actor (generic per-voice trees are not bound yet).
+    fn fire_ai_hooks(&mut self, queue: &mut VecDeque<Ev>) {
+        let hooks = std::mem::take(&mut self.ai_hooks);
+        let Some(r) = &self.conv else { return };
+        let db = r.db.clone();
+        for (npc, actor, hook, initiator) in hooks {
+            let trees: Vec<u32> = db
+                .oneshots
+                .iter()
+                .filter(|o| o.speakers.first().and_then(|s| s.actor.as_deref()).is_some_and(|m| actor_matches(&actor, &o.package, m)))
+                .filter_map(|o| o.tree)
+                .collect();
+            if trees.is_empty() {
+                continue;
+            }
+            let req = dishonored_conversation::runner::HookRequest { npc, trees, hook, output: 0, initiator };
+            let mut ok = false;
+            self.with_conv(queue, |runner, env| {
+                ok = runner.fire_hook(req, env).is_ok();
+            });
+            if ok {
+                self.ai_hooks_fired += 1;
+            }
         }
     }
 
@@ -584,6 +618,7 @@ impl MissionState {
         let dt = input.dt;
         self.with_conv(&mut queue, |r, env| r.update(dt, env));
         self.approach_hooks(&mut queue);
+        self.fire_ai_hooks(&mut queue);
         // Delayed actions that are due run before rules (they were scheduled earlier).
         let due: Vec<Vec<Action>> = {
             let t = self.time;

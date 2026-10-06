@@ -56,6 +56,12 @@ pub struct MatchView {
     /// path) resolved by the host from the pawn tweaks.
     #[serde(default)]
     pub appearances: Vec<Look>,
+    /// Animation setups referenced by `Look::anim` (sent with the look table).
+    #[serde(default)]
+    pub anim_profiles: Vec<dishonored_ir::npc_anim::AnimProfile>,
+    /// AI pawns' presentation stance (brain state), every snapshot.
+    #[serde(default)]
+    pub npc_poses: Vec<(PlayerId, dishonored_ir::npc_anim::NpcStance)>,
     /// Active persistent map (changes on level travel; clients reload the renderer).
     #[serde(default)]
     pub map: String,
@@ -75,4 +81,31 @@ pub struct Look {
     pub parts: Vec<(String, String)>,
     #[serde(default)]
     pub materials: Vec<(u8, u32, String)>,
+    /// Animation setup of the pawn tweak: `MatchView::anim_profiles[anim - 1]` (0: none, the
+    /// renderer falls back to the elite-guard sets).
+    #[serde(default)]
+    pub anim: u16,
+}
+
+/// Presentation stance of every AI pawn, from its brain state (animation only: locomotion
+/// modifier, panic, cower, combat stance). See `dishonored_ir::npc_anim::NpcStance`.
+pub fn npc_poses(brains: &[dishonored_ai::Brain]) -> Vec<(PlayerId, dishonored_ir::npc_anim::NpcStance)> {
+    use dishonored_ai::BrainState as B;
+    use dishonored_ir::npc_anim::NpcStance as S;
+    brains
+        .iter()
+        .map(|b| {
+            let s = match b.state {
+                B::Idle | B::Wander | B::WalkToPoint | B::GroupIdle => S::Relaxed,
+                B::Patrol | B::Alert => S::Patrol,
+                // Running to the alarm bell: the alert search stance (weapon drawn, running).
+                B::Investigate | B::Search | B::RingAlarm => S::Search,
+                B::Combat => S::Combat,
+                B::Flee => S::Panic,
+                B::Cower => S::Cower,
+                B::React | B::Notice => S::Notice,
+            };
+            (b.id, s)
+        })
+        .collect()
 }

@@ -226,6 +226,7 @@ impl<'w> GameServer<'w> {
             let mut matchv = self.game.view().clone();
             if self.snapshot_seq % 60 != 1 {
                 matchv.appearances.clear();
+                matchv.anim_profiles.clear();
             }
             for i in 0..self.clients.len() {
                 let snap = Snapshot {

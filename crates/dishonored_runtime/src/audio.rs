@@ -15,7 +15,8 @@
 //!   music manager (`dishonored_audio::music_manager`, driven by the replicated NPC awareness).
 //! - On travel the next map's banks load and its ambience replaces the old one.
 //!
-//! Flags: `--no-audio`, `--volume V` (linear master gain, default 1).
+//! Flags: `--no-audio`, `--volume V` (linear master gain, default 1); env `DISHONORED_MUTE`
+//! silences every sound of the process (test runs).
 
 use crate::coords;
 use crate::session::{Session, SessionView};
@@ -789,4 +790,14 @@ fn stats(mut audio: ResMut<GameAudio>, time: Res<Time>) {
         "audio: {} sim events, {} posts ({} notify, {} footfalls), {voices} live voices, {} music segments, {} music transitions, music state {music}",
         audio.events_seen, audio.posted, audio.notify_posts, audio.footfalls, st.music_segments, st.music_transitions
     );
+}
+
+/// Master volume for every sound of the process: silent when `DISHONORED_MUTE` is set (test runs
+/// that must not be heard; sounds still decode and play, so audio checks keep working).
+pub fn global_volume() -> GlobalVolume {
+    if std::env::var_os("DISHONORED_MUTE").is_some() {
+        GlobalVolume::new(bevy::audio::Volume::Linear(0.0))
+    } else {
+        GlobalVolume::default()
+    }
 }

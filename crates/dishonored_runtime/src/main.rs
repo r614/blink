@@ -23,6 +23,7 @@
 
 mod coords;
 mod characters;
+mod npc_anim;
 mod debug;
 mod effects;
 mod harness;
@@ -184,6 +185,7 @@ fn main() {
         plugins = plugins.disable::<bevy::audio::AudioPlugin>();
     }
     app.add_plugins(plugins)
+    .insert_resource(audio::global_volume())
     .add_plugins(FrameTimeDiagnosticsPlugin::default())
     .add_plugins(MaterialPlugin::<map_render::BakedMaterial>::default())
     .add_plugins(bevy::diagnostic::EntityCountDiagnosticsPlugin::default())
@@ -268,6 +270,7 @@ fn main() {
             .insert_resource(recorder)
             .init_resource::<harness::ShotQueue>()
             .init_resource::<harness::ControlOverride>()
+            .init_resource::<harness::ViewRequest>()
             .init_resource::<loading_screen::LoadingScreen>()
             .init_resource::<debug::DebugToggles>()
             .init_gizmo_group::<debug::XRayGizmos>()

@@ -59,6 +59,8 @@ struct Travelled {
     detail: String,
     /// Options the door asked (from the match view), if any.
     asked: Vec<String>,
+    /// Brains (id, state, target) a third of a second after arriving.
+    snap: Vec<(u32, dishonored_ai::BrainState, Option<u32>)>,
 }
 
 /// Stand at a door, press use, answer its confirmation with option `answer` (1 = go), then let
@@ -75,6 +77,7 @@ fn use_door(g: &mut Game, maps: &MapContents, door: &TravelDoor, answer: usize, 
     let mut z_after = 0.0;
     let mut pos = Vec3::ZERO;
     let mut asked = Vec::new();
+    let mut snap = Vec::new();
     for i in 0..90 {
         *tick += 1;
         let b = match i {
@@ -94,10 +97,15 @@ fn use_door(g: &mut Game, maps: &MapContents, door: &TravelDoor, answer: usize, 
         if i == 11 {
             pos = g.world().player(AGENT).map(|p| p.position).unwrap_or_default();
         }
+        if i == 30 {
+            if let Game::Mission(m) = &*g {
+                snap = m.crowd.brains.iter().map(|b| (b.id, b.state, b.target)).collect();
+            }
+        }
         z_after = g.world().player(AGENT).map(|p| p.position.z).unwrap_or_default();
     }
     let map = g.current_map().unwrap_or_default().to_string();
-    Ok(Travelled { map, pos, z_after, detail: format!("from ({:.0},{:.0},{:.0}) yaw {yaw:.0} pitch {pitch:.0}", spot.x, spot.y, spot.z), asked })
+    Ok(Travelled { map, pos, z_after, detail: format!("from ({:.0},{:.0},{:.0}) yaw {yaw:.0} pitch {pitch:.0}", spot.x, spot.y, spot.z), asked, snap })
 }
 
 pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
@@ -209,5 +217,10 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
         _ => Vec::new(),
     };
     rep.check(S, "pursued through the door: the arrival tag's DisTravelSpawner guards follow, suspecting and hunting", t.map.eq_ignore_ascii_case(INT) && present.len() == ids.len() && !ids.is_empty() && hunting == ids.len(), format!("guard #{hunter} hunting on Ext; on {}: {}/{} pursuers present, {hunting} hunting; brains {states:?}", t.map, present.len(), ids.len()));
+    // Shortly after arriving (0.33 s) every pursuer fights the player: `m_bAwareOfPlayerUponStartup`
+    // is a Psychic max-attention change with the proxy at the player (0x00b3f6a0), U-055.
+    let after: Vec<_> = t.snap.iter().filter(|s| ids.contains(&s.0)).collect();
+    let fighting = after.iter().filter(|s| matches!(s.1, dishonored_ai::BrainState::Combat | dishonored_ai::BrainState::React | dishonored_ai::BrainState::RingAlarm) && s.2.is_none_or(|x| x == AGENT)).count();
+    rep.check(S, "pursuers target the player on arrival (Combat, aware upon startup)", !after.is_empty() && fighting == ids.len(), format!("{fighting}/{} pursuers fighting the player 0.33 s after arrival: {after:?}", ids.len()));
     Ok(())
 }

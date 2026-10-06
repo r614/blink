@@ -33,11 +33,17 @@
 //!   guard entering Combat) is an `AllyBusted` group stimulus for civilians within
 //!   `m_fGroupDistance`.
 //!
-//! What is inferred (LIKELY/SPECULATIVE in `research/UNKNOWNS.md`): the light level (the
-//! simulation has no light probe: `LIGHT_LEVEL`), the speed normalisation of the player's
-//! visibility, squad restrictions of routes, and alarm bells.
+//! - **Factions** (`DisTweaks_Faction`, forbidden zones, `SetDisposition`): relationships per
+//!   tick (`Social`); **alarm bells** (`DisBehaviorTriggerAlarm`, `DisAlarmBell`); **barks**
+//!   (`AiEvent::Bark` at the original's dialog-hook points); the light probe (`light_at`) and
+//!   hearing occlusion.
+//!
+//! What is inferred (LIKELY/SPECULATIVE in `research/UNKNOWNS.md` U-120..U-125): the light
+//! probe's scale, hearing through audio cells, the bark attachment to this port's states, and
+//! the alarm decision details.
 
-use dishonored_ir::ai::{AiConfig, AttentionConfig, AttentionIncrease, DAL_BUSTED, DAL_HEAD_TRACK, DAL_INVESTIGATE, DAL_TURN_TO_FACE, PatrolRoute, PlayerVisibilityConfig, VisionConfig, reason};
+use dishonored_ir::ai::{AiConfig, AiLevel, AlarmBellDef, AttentionConfig, AttentionIncrease, DAL_BUSTED, DAL_HEAD_TRACK, DAL_INVESTIGATE, DAL_TURN_TO_FACE, FactionTable, ForbiddenZone, PatrolRoute, PlayerVisibilityConfig, ProbeLight, Relationship, VisionConfig, reason};
+use std::collections::BTreeMap;
 use dishonored_sim::events::{SimEvent, SoundCategory};
 use dishonored_sim::input::{LeftHand, PlayerInput, buttons};
 use dishonored_sim::state::{PawnKind, PlayerId, PlayerState, SwordPhase, WorldState};
@@ -54,12 +60,9 @@ const MAX_SAFE_DROP: f32 = 160.0;
 /// Eye height above the pawn centre (the `camera_jnt` bone sits near the top of the
 /// 87.5 uu half-height cylinder).
 const EYE: f32 = 70.0;
-/// Raw light value at the player (SPECULATIVE: no light probe in the simulation; fully lit,
-/// which the Boyle party is).
+/// Raw light value at the player when the level has no probe lights (fully lit, which the
+/// Boyle party is). With lights, [`light_at`] computes it.
 pub const LIGHT_LEVEL: f32 = 1.0;
-/// Speed giving the speed value 1 in the player's visibility (SPECULATIVE normalisation of
-/// `DishonoredVisibilityComponent.m_fCurrentSpeedValue`: the sprint speed).
-const VIS_SPEED_REF: f32 = 600.0;
 /// Panic triggered by a behaviour rule rather than an attention reason (the original's
 /// `DisAIBrainProcessPanic` starts the behaviour directly; here it is modelled as Busted
 /// attention toward the place, which no reason gate may block).
@@ -97,6 +100,40 @@ pub enum BrainState {
     Search,
     /// Panicked civilian with the enemy too close to run (`DisAISubStateCower`).
     Cower,
+    /// Going to an alarm bell and ringing it (`DisBehaviorTriggerAlarm`).
+    RingAlarm,
+}
+
+/// What a crowd reports to its host after a tick.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum AiEvent {
+    /// The original fires this dialog hook (`eDisDialogHook` name) on the NPC at this
+    /// transition (`DisAIBehavior` bark points, `FUN_00af00f0` callers). `initiator` is the
+    /// stimulus' pawn when there is one (a player, or an ally for group variants).
+    Bark { npc: PlayerId, hook: String, initiator: Option<PlayerId> },
+    /// A guard rang an alarm bell (index into `Crowd::alarms`): the alarm is raised.
+    AlarmRang { bell: usize, name: String, ringer: PlayerId, enemy: Option<PlayerId> },
+    /// `m_fAlarmRingDelayBeforeAINoise` after the ring: the bell's AI noise goes out and its
+    /// triggered spawners are asked to spawn ([`alarm_spawn_choice`]), aware of `enemy`.
+    AlarmSpawn { bell: usize, enemy: Option<PlayerId>, enemy_pos: Option<Vec3> },
+    /// No NPC hunts the alarm's enemy any more: the bell stops (`DisSeqEvent_AlarmEnded`).
+    AlarmEnded { bell: usize },
+}
+
+/// Runtime state of a `DisAlarmBell`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AlarmBell {
+    pub def: AlarmBellDef,
+    /// `m_bAlarmIsRinging`.
+    pub ringing: bool,
+    /// Seconds until the AI noise and the spawns (`m_fDelayBeforeAINoise`); <= 0 once done.
+    pub noise_timer: f32,
+    pub noise_done: bool,
+    /// `m_fCooldownTimer` (`m_fTimeInBetweenUses`) after it stops.
+    pub cooldown: f32,
+    /// The guard on his way to ring it (`m_pNPCOnHisWayToRing`) and the alarm's enemy.
+    pub ringer: Option<PlayerId>,
+    pub enemy: Option<PlayerId>,
 }
 
 impl BrainState {
@@ -126,6 +163,11 @@ pub struct Attn {
     /// `m_fLastLOSDistance`: normalized distance in the cone that saw the target.
     #[serde(default)]
     pub los_norm: f32,
+    /// Reason of the last increase (`reason::*`) and whether a danger noise was heard.
+    #[serde(default)]
+    pub why: u8,
+    #[serde(default)]
+    pub danger: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -199,6 +241,91 @@ pub struct Brain {
     /// Time left standing at a guard point (`m_fGuardTimer`); negative = forever.
     #[serde(default)]
     pub guard_timer: f32,
+    /// The pawn's faction (index into `Crowd::factions`): the spawner's
+    /// `m_pFactionTweakOverride`, else the pawn tweak's `m_pFactionTweak`. `None`: only the
+    /// individual `hostile` list makes enemies.
+    #[serde(default)]
+    pub faction: Option<u16>,
+    /// The spawner's `m_Squad` (route `m_SupportedSquads`, alarm companions).
+    #[serde(default)]
+    pub squad: String,
+    /// Pawns this NPC treats as enemies this tick (individual, trespass and faction
+    /// relationships; recomputed in `perceive`).
+    #[serde(default)]
+    pub enemies: Vec<PlayerId>,
+    /// Reason (`reason::*`) of the stimulus that started the current investigation (barks).
+    #[serde(default)]
+    pub cause: u8,
+    /// The stimulus was a danger noise (`EAINoiseContext_Danger` and above).
+    #[serde(default)]
+    pub cause_danger: bool,
+    /// Bell (index into `Crowd::alarms`) this guard goes to ring, and its wait timer.
+    #[serde(default)]
+    pub bell: Option<usize>,
+    #[serde(default)]
+    pub ring_wait: f32,
+    /// Enemy the alarm is about.
+    #[serde(default)]
+    pub alarm_enemy: Option<PlayerId>,
+    /// Barks decided this tick (drained into `Crowd::events`).
+    #[serde(default)]
+    pub barks: Vec<(String, Option<PlayerId>)>,
+    /// Time left before the first pistol shot is allowed (`m_GunUsageStart`, `m_fGunTimer`).
+    #[serde(default)]
+    pub gun_timer: f32,
+    /// Factions this pawn individually treats as enemies (a reciprocated
+    /// `DisSeqAct_SetDisposition` on the pawn).
+    #[serde(default)]
+    pub hostile_faction: Vec<u16>,
+    /// `DisSeqAct_AISetSenses`: no hearing, no vision, no touch.
+    #[serde(default)]
+    pub deaf: bool,
+    #[serde(default)]
+    pub blind: bool,
+    #[serde(default)]
+    pub numb: bool,
+}
+
+/// What the brains of a crowd know about pawn relationships this tick.
+#[derive(Debug, Clone, Default)]
+pub struct Social {
+    pub factions: Option<FactionTable>,
+    /// Faction of every pawn that has one (players: the player faction).
+    pub pawn_faction: BTreeMap<PlayerId, u16>,
+    /// (trespassing pawn, owning faction of the forbidden zone it is in).
+    pub trespass: Vec<(PlayerId, u16)>,
+    /// `DisSeqAct_SetDisposition` overrides: (from faction, recipient, relationship).
+    pub overrides: Vec<(u16, Recipient, Relationship)>,
+}
+
+/// A `DisSeqAct_SetDisposition` recipient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Recipient {
+    Faction(u16),
+    Pawn(PlayerId),
+}
+
+impl Social {
+    /// Relationship of faction `from` toward pawn `to` (0x00c63070): a trespasser in a zone
+    /// owned by `from` is an enemy (0x00c5fc20); then the disposition overrides for the pawn,
+    /// then for its faction (0x00c5fca0); then the faction lists (0x00c5fd00).
+    pub fn faction_relation(&self, from: u16, to: PlayerId) -> Relationship {
+        let Some(t) = self.factions.as_ref() else { return Relationship::Neutral };
+        if self.trespass.iter().any(|&(p, f)| p == to && t.isa(from, f)) {
+            return Relationship::Enemy;
+        }
+        let theirs = self.pawn_faction.get(&to).copied();
+        if let Some(r) = self.overrides.iter().rev().find(|o| t.isa(from, o.0) && o.1 == Recipient::Pawn(to)).map(|o| o.2) {
+            return r;
+        }
+        if let Some(tf) = theirs {
+            if let Some(r) = self.overrides.iter().rev().find(|o| t.isa(from, o.0) && matches!(o.1, Recipient::Faction(f) if t.isa(tf, f))).map(|o| o.2) {
+                return r;
+            }
+            return t.relation(from, tf);
+        }
+        Relationship::Neutral
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -259,7 +386,42 @@ pub struct Crowd {
     pub routes: Vec<PatrolRoute>,
     #[serde(default)]
     pub route_users: Vec<i32>,
+    /// `DishonoredRoute.m_NeglectTimer` per route: seconds without an adopter.
+    #[serde(default)]
+    pub route_neglect: Vec<f32>,
+    /// The level's factions and each pawn's faction (players default to `player_faction`).
+    #[serde(default)]
+    pub factions: FactionTable,
+    #[serde(default)]
+    pub pawn_faction: BTreeMap<PlayerId, u16>,
+    #[serde(default)]
+    pub player_faction: Option<u16>,
+    /// Pawn tweak -> faction name (`m_pFactionTweak`), for spawned NPCs.
+    #[serde(default)]
+    pub tweak_factions: BTreeMap<String, String>,
+    #[serde(default)]
+    pub zones: Vec<ForbiddenZone>,
+    /// `DisSeqAct_SetDisposition` overrides in application order.
+    #[serde(default)]
+    pub overrides: Vec<(u16, Recipient, Relationship)>,
+    #[serde(default)]
+    pub alarms: Vec<AlarmBell>,
+    /// `DisAlarmGlobalManager.m_fAlarmCooldownTimer` (`m_fAlarmCooldown` after an alarm ends).
+    #[serde(default)]
+    pub alarm_cooldown: f32,
+    /// Alarm AI noises from last tick: (bell position, radius).
+    #[serde(default)]
+    pub alarm_noise: Vec<(Vec3, f32)>,
+    /// Lights the light probe samples (empty: `LIGHT_LEVEL`).
+    #[serde(default)]
+    pub lights: Vec<ProbeLight>,
+    /// Events of the last `think` (barks, alarms).
+    #[serde(default)]
+    pub events: Vec<AiEvent>,
 }
+
+/// `DisGlobalManager` alarm cooldown (`DefaultLevel.ini m_fAlarmCooldown`, class default 10).
+pub const ALARM_COOLDOWN: f32 = 10.0;
 
 fn rng_next(s: &mut u64) -> f32 {
     *s ^= *s << 13;
@@ -452,7 +614,83 @@ struct Ctx<'a> {
     layout: &'a CrowdLayout,
     routes: &'a [PatrolRoute],
     users: &'a mut Vec<i32>,
+    neglect: &'a [f32],
     inhibit: &'a mut Vec<(PlayerId, u8, f32)>,
+    alarms: &'a mut [AlarmBell],
+    events: &'a mut Vec<AiEvent>,
+    /// Global alarm cooldown left.
+    cooldown: f32,
+}
+
+/// What a brain perceives this tick besides the world state.
+pub struct Senses<'a> {
+    peers: &'a [Peer],
+    barks: &'a [(Vec3, f32)],
+    busted: &'a [(PlayerId, PawnKind, Vec3, Vec3)],
+    alarm_noise: &'a [(Vec3, f32)],
+    social: &'a Social,
+    /// Raw light value at each player.
+    light: &'a BTreeMap<PlayerId, f32>,
+}
+
+/// Raw light value at `p` from the level's lights (the original reads the pawn's
+/// `DynamicLightEnvironment`: its static and dynamic spherical-harmonic light, reduced to a
+/// brightness and raised to 1/2.2, 0x004e1db0). Deterministic stand-in: the sum over lights of
+/// `intensity * (1 - (d/r)^2)^falloff` (spot lights with their cone), counting a shadowing
+/// light only when nothing blocks the segment to `p`; then `^(1/2.2)`.
+pub fn light_at(lights: &[ProbeLight], p: Vec3, world: &dyn WorldQuery) -> f32 {
+    let mut sum = 0.0;
+    for l in lights {
+        let v = match l.kind {
+            2 => {
+                let dir = l.direction.normalize_or(Vec3::NEG_Z);
+                if l.casts_shadows && world.raycast(p + Vec3::Z * 20.0, -dir, 50000.0, channel::VISION).is_some() {
+                    0.0
+                } else {
+                    l.intensity
+                }
+            }
+            _ => {
+                let d = p.distance(l.position);
+                if d >= l.radius || l.radius <= 0.0 {
+                    continue;
+                }
+                let mut a = (1.0 - (d / l.radius).powi(2)).max(0.0).powf(l.falloff_exponent.max(0.0));
+                if l.kind == 1 {
+                    let c = (p - l.position).normalize_or_zero().dot(l.direction.normalize_or(Vec3::NEG_Z));
+                    let (ci, co) = (l.inner_cone.to_radians().cos(), l.outer_cone.to_radians().cos());
+                    a *= if ci - co > 1e-4 { ((c - co) / (ci - co)).clamp(0.0, 1.0) } else if c >= co { 1.0 } else { 0.0 };
+                }
+                if a <= 0.0 {
+                    continue;
+                }
+                if l.casts_shadows {
+                    let to = p - l.position;
+                    let dd = to.length();
+                    if dd > 1.0 && world.raycast(l.position, to / dd, dd - 30.0, channel::VISION).is_some() {
+                        continue;
+                    }
+                }
+                l.intensity * a
+            }
+        };
+        sum += v;
+    }
+    if sum > 1e-4 { sum.powf(1.0 / 2.2) } else { 0.0 }
+}
+
+/// Which of a bell's triggered spawners spawn (0x00a36dd0): those at least
+/// `m_fSpawnerMinDistFromPlayer` from the enemy, or all when none is; at most
+/// `m_MaxSpawnedPawnsPerRing` (negative: no limit). `spawners`: (name, position).
+pub fn alarm_spawn_choice(def: &AlarmBellDef, spawners: &[(String, Vec3)], enemy_pos: Option<Vec3>) -> Vec<String> {
+    let listed: Vec<&(String, Vec3)> = def.spawners.iter().filter_map(|n| spawners.iter().find(|s| s.0.eq_ignore_ascii_case(n))).collect();
+    let far: Vec<&(String, Vec3)> = match enemy_pos {
+        Some(e) => listed.iter().copied().filter(|s| s.1.distance(e) > def.spawner_min_dist).collect(),
+        None => listed.clone(),
+    };
+    let pick = if far.is_empty() { listed } else { far };
+    let n = if def.max_spawns < 0 { pick.len() } else { (def.max_spawns as usize).min(pick.len()) };
+    pick.into_iter().take(n).map(|s| s.0.clone()).collect()
 }
 
 /// What the brains see of each other this tick.
@@ -534,12 +772,27 @@ impl Crowd {
             i.2 -= dt;
         }
         self.inhibit.retain(|i| i.2 > 0.0);
+        self.events.clear();
+        // Route neglect timers (`m_NeglectTimer`: grows while nobody walks the route).
+        self.route_neglect.resize(self.routes.len(), 0.0);
+        for (t, u) in self.route_neglect.iter_mut().zip(self.route_users.iter()) {
+            *t = if *u > 0 { 0.0 } else { *t + dt };
+        }
+        let alarm_noise = std::mem::take(&mut self.alarm_noise);
+        let social = self.social(world_state);
+        // The light at each player (the original samples the pawn's light environment).
+        let light: BTreeMap<PlayerId, f32> = world_state.players.iter().filter(|p| p.kind == PawnKind::Human && p.alive).map(|p| (p.id, if self.lights.is_empty() { LIGHT_LEVEL } else { light_at(&self.lights, p.position, world) })).collect();
+        let senses = Senses { peers: &peers, barks: &barks, busted: &busted, alarm_noise: &alarm_noise, social: &social, light: &light };
         let layout = &self.layout;
         let ai = &self.ai;
         let routes = &self.routes;
         let users = &mut self.route_users;
+        let neglect = &self.route_neglect;
         let inhibit = &mut self.inhibit;
+        let alarms = &mut self.alarms;
         let mut out = Vec::with_capacity(self.brains.len());
+        let mut ai_events = Vec::new();
+        let cooldown = self.alarm_cooldown;
         for b in self.brains.iter_mut() {
             let Some(me) = world_state.player(b.id) else {
                 continue;
@@ -547,10 +800,14 @@ impl Crowd {
             if !me.alive {
                 continue;
             }
-            b.perceive(me, world_state, events, &peers, &barks, &busted, world, ai, dt);
-            let was = b.state;
-            let mut ctx = Ctx { layout, routes, users, inhibit };
+            let (was, was_next) = (b.state, b.next);
+            b.perceive_with(me, world_state, events, &senses, world, ai, dt);
+            let mut ctx = Ctx { layout, routes, users, neglect, inhibit, alarms: &mut *alarms, events: &mut ai_events, cooldown };
             out.push((b.id, b.act(me, world_state, &mut ctx, world, ai, dt)));
+            b.transition_barks(was, was_next, me, world_state, &peers, ai);
+            for (hook, initiator) in b.barks.drain(..) {
+                ai_events.push(AiEvent::Bark { npc: b.id, hook, initiator });
+            }
             let panicked = |s: BrainState| matches!(s, BrainState::Flee | BrainState::Cower);
             if b.kind != PawnKind::Guard && panicked(b.state) && !panicked(was) {
                 // `DisAISubStateFlee.bDoBarkForHelp`: call for help at talking loudness.
@@ -564,7 +821,209 @@ impl Crowd {
         }
         self.barks = new_barks;
         self.ally_busted = new_busted;
+        self.events = ai_events;
+        self.tick_alarms(world_state, dt);
         out
+    }
+
+    /// Alarm bells after the brains acted (`DisAlarmBell` tick 0x00a3d0c0): a ringing bell
+    /// sends its AI noise and asks its spawners after `m_fAlarmRingDelayBeforeAINoise`
+    /// (0x00a36dd0); it stops once no NPC hunts its enemy (0x00a37410), and the global
+    /// cooldown starts when no bell rings.
+    fn tick_alarms(&mut self, ws: &WorldState, dt: f32) {
+        self.alarm_cooldown = (self.alarm_cooldown - dt).max(0.0);
+        for i in 0..self.alarms.len() {
+            let a = &mut self.alarms[i];
+            a.cooldown = (a.cooldown - dt).max(0.0);
+            if !a.ringing {
+                continue;
+            }
+            if !a.noise_done {
+                a.noise_timer -= dt;
+                if a.noise_timer <= 0.0 {
+                    a.noise_done = true;
+                    self.alarm_noise.push((a.def.position, a.def.loudness));
+                    let enemy_pos = a.enemy.and_then(|e| ws.player(e)).map(|p| p.position);
+                    self.events.push(AiEvent::AlarmSpawn { bell: i, enemy: a.enemy, enemy_pos });
+                }
+                continue;
+            }
+            let hunted = a.enemy.is_some_and(|e| ws.player(e).is_some_and(|p| p.alive) && self.brains.iter().any(|b| b.target == Some(e) || b.attn.iter().any(|x| x.who == e && x.level >= DAL_BUSTED)));
+            if !hunted {
+                let a = &mut self.alarms[i];
+                a.ringing = false;
+                a.ringer = None;
+                a.cooldown = a.def.time_between_uses;
+                self.events.push(AiEvent::AlarmEnded { bell: i });
+                if !self.alarms.iter().any(|x| x.ringing) {
+                    self.alarm_cooldown = ALARM_COOLDOWN;
+                }
+            }
+        }
+    }
+
+    /// Relationship data of this tick: every pawn's faction and the trespassers of enabled
+    /// forbidden zones (0x00c953f0: a pawn of a forbidden faction inside the zone trespasses
+    /// against each owning faction).
+    pub fn social(&self, ws: &WorldState) -> Social {
+        let mut pawn_faction = BTreeMap::new();
+        for p in &ws.players {
+            let f = self.pawn_faction.get(&p.id).copied().or_else(|| self.brains.iter().find(|b| b.id == p.id).and_then(|b| b.faction)).or(if p.kind == PawnKind::Human { self.player_faction } else { None });
+            if let Some(f) = f {
+                pawn_faction.insert(p.id, f);
+            }
+        }
+        let mut trespass = Vec::new();
+        for z in self.zones.iter().filter(|z| z.enabled) {
+            let forbidden: Vec<u16> = z.forbidden.iter().filter_map(|n| self.factions.index(n)).collect();
+            let owners: Vec<u16> = z.owning.iter().filter_map(|n| self.factions.index(n)).collect();
+            for p in ws.players.iter().filter(|p| p.alive) {
+                let Some(&f) = pawn_faction.get(&p.id) else { continue };
+                if forbidden.iter().any(|&x| self.factions.isa(f, x)) && z.contains(p.position) {
+                    for &o in &owners {
+                        if !trespass.contains(&(p.id, o)) {
+                            trespass.push((p.id, o));
+                        }
+                    }
+                }
+            }
+        }
+        Social { factions: Some(self.factions.clone()), pawn_faction, trespass, overrides: self.overrides.clone() }
+    }
+
+    /// Install the level's AI data (factions, forbidden zones, alarm bells, probe lights).
+    pub fn set_level(&mut self, level: &AiLevel) {
+        self.factions = level.factions.clone();
+        self.player_faction = Some(self.factions.intern(&level.player_faction));
+        self.tweak_factions = level.tweak_factions.clone();
+        self.zones = level.zones.clone();
+        self.alarms = level.alarms.iter().map(|d| AlarmBell { def: d.clone(), ..Default::default() }).collect();
+        self.lights = level.lights.clone();
+    }
+
+    /// Faction of a spawned NPC: the spawner's `m_pFactionTweakOverride`, else its pawn
+    /// tweak's `m_pFactionTweak` (`DisSpawnerInfo`).
+    pub fn spawner_faction(&mut self, override_faction: &str, tweak: &str) -> Option<u16> {
+        let name = if !override_faction.is_empty() { Some(override_faction.to_string()) } else { self.tweak_factions.get(tweak).cloned() };
+        name.map(|n| self.factions.intern(&n))
+    }
+
+    /// Give the crowd's own guards and civilians the factions of the original spawners they
+    /// stand in for: a guard takes the faction of the guard spawner at its post; civilians take
+    /// the most common civilian spawner faction.
+    pub fn assign_crowd_factions(&mut self, spawners: &[dishonored_ir::spawners::Spawner]) {
+        let mut civ: BTreeMap<String, usize> = BTreeMap::new();
+        // Civilian pawn tweaks only (weepers and other non-guards are not crowd civilians).
+        let civilian = |t: &str| {
+            let l = t.to_ascii_lowercase();
+            ["aristo", "party", "civ", "guest", "servant", "maid", "noble"].iter().any(|k| l.contains(k)) && !l.contains("guard") && !l.contains("overseer") && !l.contains("weep")
+        };
+        for s in spawners.iter().filter(|s| !s.guard && s.props.on_begin_play && !s.props.spawn_dead && civilian(&s.tweak)) {
+            let n = if s.props.faction.is_empty() { self.tweak_factions.get(&s.tweak).cloned().unwrap_or_default() } else { s.props.faction.clone() };
+            if !n.is_empty() {
+                *civ.entry(n).or_default() += 1;
+            }
+        }
+        let civ_faction = civ.iter().max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0))).map(|(n, _)| n.clone()).unwrap_or_else(|| "DisFaction_Defaults.Faction_Civilian_Default".into());
+        let civ_idx = self.factions.intern(&civ_faction);
+        let guards: Vec<(Vec3, String, String)> = spawners.iter().filter(|s| s.guard).map(|s| (s.position, s.props.faction.clone(), s.tweak.clone())).collect();
+        for i in 0..self.brains.len() {
+            if self.brains[i].faction.is_some() {
+                continue;
+            }
+            let f = if self.brains[i].kind == PawnKind::Guard {
+                let home = self.brains[i].home;
+                let near = guards.iter().filter(|g| g.0.truncate().distance(home.truncate()) < 300.0).min_by(|a, b| a.0.distance(home).total_cmp(&b.0.distance(home)));
+                match near {
+                    Some((_, o, t)) => self.spawner_faction(&o.clone(), &t.clone()),
+                    None => Some(self.factions.intern("DisFaction_Defaults.Faction_Guard_Default")),
+                }
+            } else {
+                Some(civ_idx)
+            };
+            self.brains[i].faction = f;
+        }
+    }
+
+    /// `DisSeqAct_SetDisposition` on a pawn (`ADishonoredPawn::OnSetDisposition`): its own
+    /// relationships toward pawns or factions (only Enemy changes what this port's brains do).
+    pub fn set_pawn_disposition(&mut self, pawn: PlayerId, input: u8, rel: Relationship, recipients: &[Recipient]) {
+        let Some(b) = self.brains.iter_mut().find(|b| b.id == pawn) else { return };
+        if input == 2 {
+            b.hostile.clear();
+            b.hostile_faction.clear();
+            return;
+        }
+        for &r in recipients {
+            match r {
+                Recipient::Pawn(p) => {
+                    b.hostile.retain(|x| *x != p);
+                    if input == 0 && rel == Relationship::Enemy {
+                        b.make_hostile(p);
+                    }
+                }
+                Recipient::Faction(f) => {
+                    b.hostile_faction.retain(|x| *x != f);
+                    if input == 0 && rel == Relationship::Enemy {
+                        b.hostile_faction.push(f);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `DisSeqAct_SetDisposition` (`DisTweaks_Faction::OnSetDisposition`, 0x00c79000): Set
+    /// records `faction -> recipient` (and back, with `m_bReciprocate`), Clear removes them,
+    /// ClearAll removes every override of the faction.
+    pub fn set_disposition(&mut self, faction: &str, input: u8, rel: Relationship, recipients: &[Recipient], reciprocate: bool) {
+        let f = self.factions.intern(faction);
+        match input {
+            0 => {
+                for &r in recipients {
+                    self.overrides.retain(|o| !(o.0 == f && o.1 == r));
+                    self.overrides.push((f, r, rel));
+                    if reciprocate {
+                        match r {
+                            Recipient::Faction(g) => {
+                                self.overrides.retain(|o| !(o.0 == g && o.1 == Recipient::Faction(f)));
+                                self.overrides.push((g, Recipient::Faction(f), rel));
+                            }
+                            Recipient::Pawn(p) => {
+                                // The pawn's own relationship toward the faction (0x00b04430).
+                                if let Some(b) = self.brains.iter_mut().find(|b| b.id == p) {
+                                    if rel == Relationship::Enemy {
+                                        b.hostile_faction.retain(|x| *x != f);
+                                        b.hostile_faction.push(f);
+                                    } else {
+                                        b.hostile_faction.retain(|x| *x != f);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            1 => {
+                for &r in recipients {
+                    self.overrides.retain(|o| !(o.0 == f && o.1 == r));
+                    if reciprocate {
+                        if let Recipient::Faction(g) = r {
+                            self.overrides.retain(|o| !(o.0 == g && o.1 == Recipient::Faction(f)));
+                        }
+                    }
+                }
+            }
+            _ => {
+                self.overrides.retain(|o| o.0 != f);
+                if reciprocate {
+                    for &r in recipients {
+                        if let Recipient::Faction(g) = r {
+                            self.overrides.retain(|o| !(o.0 == g && o.1 == Recipient::Faction(f)));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The level's `DishonoredRoute`s: every guard adopts one (`DisPatrolManager`, 0x00c41590:
@@ -588,7 +1047,7 @@ impl Crowd {
         for b in self.brains.iter_mut().filter(|b| b.kind == PawnKind::Guard) {
             b.patrol = None;
             let pos = b.home;
-            if b.adopt_route(routes, users, pos, None) {
+            if b.adopt_route(routes, users, &[], pos, None) {
                 b.state = BrainState::Patrol;
             }
         }
@@ -641,7 +1100,7 @@ impl Crowd {
         for s in &due {
             if let Some(b) = self.brains.iter_mut().find(|b| b.id == s.id) {
                 // The route stays adopted (its point index restarts where it was).
-                *b = Brain { route: b.route.clone(), patrol: b.patrol, route_i: b.route_i, ..Brain::new(s.id, s.kind, s.position, b.rng) };
+                *b = Brain { route: b.route.clone(), patrol: b.patrol, route_i: b.route_i, faction: b.faction, squad: b.squad.clone(), ..Brain::new(s.id, s.kind, s.position, b.rng) };
                 if b.kind == PawnKind::Guard {
                     b.state = if b.has_patrol() { BrainState::Patrol } else { BrainState::Alert };
                 }
@@ -713,6 +1172,46 @@ impl Brain {
             patrol: None,
             patrol_dir: 1,
             guard_timer: 0.0,
+            faction: None,
+            squad: String::new(),
+            enemies: Vec::new(),
+            cause: 0,
+            cause_danger: false,
+            bell: None,
+            ring_wait: 0.0,
+            alarm_enemy: None,
+            barks: Vec::new(),
+            gun_timer: -1.0,
+            hostile_faction: Vec::new(),
+            deaf: false,
+            blind: false,
+            numb: false,
+        }
+    }
+
+    /// `m_bAwareOfPlayerUponStartup` (spawner post-spawn 0x00a590e0): the brain gets the
+    /// `EAIStimID_MaxOutAttention` stimulus for the player (0x00b23be0), whose handler
+    /// (0x00b3f6a0) adds a `DACRT_Psychic` change to `DALFI_MaxAttention` with the proxy at
+    /// the player's location.
+    pub fn aware_of(&mut self, ai: &AiConfig, target: PlayerId, at: Vec3) {
+        self.bump(ai, target, AttentionIncrease { amount: 0.0, to_level: 5 }, at, true, reason::PSYCHIC);
+    }
+
+    /// Relationship toward a pawn (0x00c62f20 -> 0x00b043d0): the pawn's individual
+    /// relationships first (the `hostile` list: witnessed violence, attacks, mission
+    /// dispositions; factions it was set hostile to), then its faction's (`Social`).
+    pub fn relation(&self, who: PlayerId, soc: &Social) -> Relationship {
+        if who == NOISE || self.hostile.contains(&who) {
+            return Relationship::Enemy;
+        }
+        if let (Some(t), Some(&f)) = (soc.factions.as_ref(), soc.pawn_faction.get(&who)) {
+            if self.hostile_faction.iter().any(|&h| t.isa(f, h)) {
+                return Relationship::Enemy;
+            }
+        }
+        match self.faction {
+            Some(mine) => soc.faction_relation(mine, who),
+            None => Relationship::Neutral,
         }
     }
 
@@ -727,11 +1226,19 @@ impl Brain {
         r
     }
 
+    /// Make `id` an individual enemy (and an enemy this tick).
+    pub fn make_hostile(&mut self, id: PlayerId) {
+        if !self.hostile.contains(&id) {
+            self.hostile.push(id);
+        }
+        if !self.enemies.contains(&id) {
+            self.enemies.push(id);
+        }
+    }
+
     /// Mission control: treat `target` as an enemy at full attention.
     pub fn alert_to(&mut self, ai: &AiConfig, target: PlayerId, at: Vec3) {
-        if !self.hostile.contains(&target) {
-            self.hostile.push(target);
-        }
+        self.make_hostile(target);
         self.bump(ai, target, AttentionIncrease { amount: 0.0, to_level: 5 }, at, true, reason::ATTACKED_BY);
         self.suspecting = true;
     }
@@ -769,7 +1276,7 @@ impl Brain {
 
     /// Profile slot of a target: neutral pawns, or enemies/places while (un)suspecting.
     fn profile_slot(&self, who: PlayerId) -> usize {
-        if who != NOISE && !self.hostile.contains(&who) {
+        if who != NOISE && !self.enemies.contains(&who) {
             P_NEUTRAL
         } else if self.suspecting {
             P_ENEMY_SUS
@@ -800,7 +1307,7 @@ impl Brain {
         if let Some(i) = self.attn.iter().position(|a| a.who == who) {
             return &mut self.attn[i];
         }
-        self.attn.push(Attn { who, value: 0.0, level: 0, proxy, fresh: false, urgent: false, sighted: false, los_norm: 0.0 });
+        self.attn.push(Attn { who, value: 0.0, level: 0, proxy, fresh: false, urgent: false, sighted: false, los_norm: 0.0, why: 0, danger: false });
         self.attn.last_mut().unwrap()
     }
 
@@ -814,6 +1321,8 @@ impl Brain {
         let e = self.entry(who, proxy);
         e.change(&prof, &stop, inc.amount, inc.to_level, why, false);
         e.proxy = proxy;
+        e.why = why;
+        e.danger = false;
         e.fresh = true;
         e.urgent |= urgent;
     }
@@ -856,15 +1365,18 @@ impl Brain {
 
     /// The target's `Attribute_Visibility`: built from light, speed and stance for players,
     /// the attribute base (0) for NPCs.
-    fn visibility(ai: &AiConfig, other: &PlayerState) -> f32 {
+    /// The speed value is the horizontal speed over `Attribute_GroundSpeedSprint`, unclamped
+    /// (0x00ac33b0); `light` is the raw light value at the player.
+    fn visibility(ai: &AiConfig, other: &PlayerState, light: f32) -> f32 {
         if other.kind != PawnKind::Human {
             return 0.0;
         }
-        let speed01 = (other.velocity.truncate().length() / VIS_SPEED_REF).clamp(0.0, 1.0);
+        let speed01 = other.velocity.truncate().length() / ai.player_visibility.ground_speed_sprint.max(1.0);
         let sprinting = other.last_input.buttons & buttons::SPRINT != 0;
-        player_visibility(&ai.player_visibility, LIGHT_LEVEL, speed01, other.crouched, sprinting)
+        player_visibility(&ai.player_visibility, light, speed01, other.crouched, sprinting)
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn perceive(
         &mut self,
@@ -878,23 +1390,75 @@ impl Brain {
         ai: &AiConfig,
         dt: f32,
     ) {
+        let social = Social::default();
+        let light: BTreeMap<PlayerId, f32> = BTreeMap::new();
+        let senses = Senses { peers, barks, busted: ally_busted, alarm_noise: &[], social: &social, light: &light };
+        self.perceive_with(me, ws, events, &senses, world, ai, dt);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn perceive_with(&mut self, me: &PlayerState, ws: &WorldState, events: &[SimEvent], senses: &Senses, world: &dyn WorldQuery, ai: &AiConfig, dt: f32) {
+        let (peers, barks, ally_busted) = (senses.peers, senses.barks, senses.busted);
         for a in self.attn.iter_mut() {
             a.fresh = false;
+        }
+        // Enemies this tick: individual, trespass and faction relationships.
+        self.enemies = ws.players.iter().filter(|p| p.id != self.id && p.alive && self.relation(p.id, senses.social) == Relationship::Enemy).map(|p| p.id).collect();
+        let eye = me.position + Vec3::Z * EYE;
+        // Hearing (0x00bb50d0): strictly within the noise radius, then, for listeners and
+        // noises outside audio cells, a trace from the listener to the noise (blocked: not
+        // heard). Audio-cell propagation (portal paths) is not modelled.
+        let deaf = self.deaf;
+        let heard = |pos: Vec3, radius: f32| {
+            let d = pos.distance(me.position);
+            if deaf || d >= radius {
+                return false;
+            }
+            let to = pos - eye;
+            let l = to.length();
+            l < 1.0 || !world.raycast(eye, to / l, l, channel::VISION).is_some_and(|h| h.distance < l - 40.0)
+        };
+        // Pain barks: attacked while on routine (`DDH_PATROL_ATTACKED_BY_ENEMY`, 0x00afc3e0),
+        // otherwise the hit reaction's `DDH_COMBAT_OUCH_SMALL` (LIKELY).
+        for e in events {
+            if let SimEvent::Damage { victim, attacker, .. } = e {
+                if *victim == self.id {
+                    let h = if self.state.is_routine() { "DDH_PATROL_ATTACKED_BY_ENEMY" } else { "DDH_COMBAT_OUCH_SMALL" };
+                    self.barks.push((h.into(), *attacker));
+                }
+            }
+        }
+        // The alarm bell's AI noise (`EAINoiseContext_AlarmBell`): guards investigate
+        // (`m_IncreaseForAlarmSound`, reason Alarm); for civilians it is a scary noise.
+        for &(p, r) in senses.alarm_noise {
+            if heard(p, r) {
+                let inc = self.profile(ai, NOISE).alarm_sound;
+                self.bump(ai, NOISE, inc, p, true, reason::ALARM);
+                if self.kind != PawnKind::Guard {
+                    self.panic_from(ai, p);
+                }
+            }
         }
         // Sounds (gameplay sound events, never raw audio) -> attention toward the place
         // (`DACRT_Heard`).
         for e in events {
             if let SimEvent::Sound { position, radius, category, source } = e {
-                if *source == self.id || position.distance(me.position) > *radius {
+                if *source == self.id || !heard(*position, *radius) {
                     continue;
                 }
                 let prof = self.profile(ai, NOISE);
-                let (inc, urgent) = match noise_context(*category) {
+                let ctx = noise_context(*category);
+                let (inc, urgent) = match ctx {
                     Noise::Danger => (prof.danger_sound, true),
                     Noise::Threatening => (prof.threatening_sound, false),
                     Noise::Anomaly => (prof.anomaly_sound, false),
                 };
                 self.bump(ai, NOISE, inc, *position, urgent, reason::HEARD);
+                if ctx == Noise::Danger {
+                    if let Some(a) = self.attn.iter_mut().find(|a| a.who == NOISE) {
+                        a.danger = true;
+                    }
+                }
             }
         }
         // Help barks from fleeing civilians (`EAIStimID_Help`, `DACRT_HeardHelpRequest`). For
@@ -929,13 +1493,12 @@ impl Brain {
         }
         for e in events {
             match e {
-                // Only players become enemies this way: NPCs of one faction do not turn on each other
-                // over friendly fire (factions are not modelled yet, see AI.md).
+                // Being hurt by a player is a reaction response (`m_Response_HurtByPlayerNeutral` /
+                // `_HurtByPlayerAlly`, `ResponseCategory_Hostile`): the player becomes an individual
+                // enemy. An NPC attacker changes no relationship; factions decide (0x00c62f20).
                 SimEvent::Damage { victim, attacker: Some(a), .. } if *victim == self.id && *a != self.id && ws.player(*a).is_some_and(|p| p.kind == PawnKind::Human) => {
                     let at = ws.player(*a).map(|p| p.position).unwrap_or(me.position);
-                    if !self.hostile.contains(a) {
-                        self.hostile.push(*a);
-                    }
+                    self.make_hostile(*a);
                     let inc = self.profile(ai, *a).attacked_by;
                     self.bump(ai, *a, inc, at, true, reason::ATTACKED_BY);
                 }
@@ -945,9 +1508,7 @@ impl Brain {
                     };
                     if Self::sees(me, v, world, ai) || Self::sees(me, kp, world, ai) {
                         // Witnessed murder: the killer becomes an enemy at full attention.
-                        if !self.hostile.contains(k) {
-                            self.hostile.push(*k);
-                        }
+                        self.make_hostile(*k);
                         let inc = self.profile(ai, *k).attacked_enemy;
                         self.bump(ai, *k, inc, kp.position, true, reason::ATTACKED_ENEMY);
                         self.threat_pos = Some(kp.position);
@@ -974,7 +1535,7 @@ impl Brain {
                 // A corpse is discovered once its seen value is non-zero (dead-NPC scalar).
                 if p.kind != PawnKind::Human && !self.corpses_seen.contains(&p.id) {
                     let prof = self.profile(ai, NOISE);
-                    let seen = Self::look(me, p, world, ai).is_some_and(|n| seen_rate(prof, prof.seeing_scalar_dead_npc, n, 0.0) > 0.0);
+                    let seen = !self.blind && Self::look(me, p, world, ai).is_some_and(|n| seen_rate(prof, prof.seeing_scalar_dead_npc, n, 0.0) > 0.0);
                     if seen {
                         self.corpses_seen.push(p.id);
                         let inc = prof.discovered_corpse;
@@ -988,24 +1549,25 @@ impl Brain {
                 }
                 continue;
             }
-            if p.kind != PawnKind::Human {
+            // Players always; NPCs only when they are enemies (`_ToLiveNPC` scalar).
+            if p.kind != PawnKind::Human && !self.enemies.contains(&p.id) {
                 continue;
             }
-            let seen = Self::look(me, p, world, ai);
-            if seen.is_some() && criminal(p) && !self.hostile.contains(&p.id) {
+            let seen = if self.blind { None } else { Self::look(me, p, world, ai) };
+            if seen.is_some() && p.kind == PawnKind::Human && criminal(p) && !self.enemies.contains(&p.id) {
                 // Seen attacking: hostile at once (`m_Response_*`, `DACRT_AttackedEnemy`).
-                self.hostile.push(p.id);
+                self.make_hostile(p.id);
                 let inc = self.profile(ai, p.id).attacked_enemy;
                 self.bump(ai, p.id, inc, p.position, true, reason::ATTACKED_ENEMY);
                 self.threat_pos = Some(p.position);
                 continue;
             }
-            let hostile = self.hostile.contains(&p.id);
+            let hostile = self.enemies.contains(&p.id);
             let prof = self.profile(ai, p.id).clone();
             let stop = self.stops(ai, p.id);
-            let vis = Self::visibility(ai, p);
+            let vis = Self::visibility(ai, p, senses.light.get(&p.id).copied().unwrap_or(LIGHT_LEVEL));
             let near = (p.position - me.position).truncate().length() <= prof.distance_to_lose_sight && (p.position.z - me.position.z).abs() <= prof.distance_to_lose_sight;
-            let touching = p.position.distance(me.position) < 80.0;
+            let touching = !self.numb && p.position.distance(me.position) < 80.0;
             if seen.is_none() && !touching && !self.attn.iter().any(|a| a.who == p.id) {
                 continue;
             }
@@ -1021,9 +1583,11 @@ impl Brain {
                 None => e.sighted = false,
             }
             if e.sighted {
-                let rate = seen_rate(&prof, prof.seeing_scalar_player, e.los_norm, vis);
+                let scalar = if p.kind == PawnKind::Human { prof.seeing_scalar_player } else { prof.seeing_scalar_npc };
+                let rate = seen_rate(&prof, scalar, e.los_norm, vis);
                 if rate > 0.0 {
                     e.change(&prof, &stop, rate * dt, 0, reason::SEEN, false);
+                    e.why = reason::SEEN;
                     e.proxy = p.position;
                     e.fresh = true;
                 }
@@ -1049,9 +1613,7 @@ impl Brain {
                         continue;
                     }
                     let tp = ws.player(t).map(|p| p.position).unwrap_or(pp.position);
-                    if !self.hostile.contains(&t) {
-                        self.hostile.push(t);
-                    }
+                    self.make_hostile(t);
                     let inc = self.profile(ai, t).ally_combat_target;
                     self.bump(ai, t, inc, tp, true, reason::SEE_ALLY_COMBAT);
                 }
@@ -1094,7 +1656,7 @@ impl Brain {
         self.attn
             .iter()
             .map(|a| {
-                let lvl = if a.who != NOISE && !self.hostile.contains(&a.who) { a.level.min(DAL_HEAD_TRACK) } else { a.level };
+                let lvl = if a.who != NOISE && !self.enemies.contains(&a.who) { a.level.min(DAL_HEAD_TRACK) } else { a.level };
                 (a.who, lvl, a.proxy, a.urgent, a.value)
             })
             .max_by(|a, b| a.1.cmp(&b.1).then(a.4.total_cmp(&b.4)).then(b.0.cmp(&a.0)))
@@ -1129,6 +1691,7 @@ impl Brain {
             self.searched = self.threat_pos;
         }
         self.next = None;
+        self.alarm_enemy = None;
         self.target = None;
         self.timer = 0.0;
         self.goal = None;
@@ -1141,22 +1704,30 @@ impl Brain {
         self.patrol.is_some() || self.route.len() >= 2
     }
 
-    /// Adopt the nearest route with free capacity (0x00c41590), other than `exclude`; start
-    /// at its point nearest to `pos`.
-    fn adopt_route(&mut self, routes: &[PatrolRoute], users: &mut [i32], pos: Vec3, exclude: Option<usize>) -> bool {
+    /// Adopt a route (0x00c41590): among the adoptable routes other than `exclude`
+    /// (0x00a4bc70: active, squad, capacity, adoption range) the nearest neglected one
+    /// (`m_NeglectTimer > m_NeglectThreshold`, 0x00a43860) wins; otherwise the nearest one,
+    /// but only for a pawn without a route (or leaving its route). Starts at the point
+    /// nearest to `pos`.
+    fn adopt_route(&mut self, routes: &[PatrolRoute], users: &mut [i32], neglect: &[f32], pos: Vec3, exclude: Option<usize>) -> bool {
         let mut best: Option<(f32, usize, usize)> = None;
+        let mut best_neglected: Option<(f32, usize, usize)> = None;
         for (ri, r) in routes.iter().enumerate() {
-            if Some(ri) == exclude || (r.capacity >= 0 && users[ri] >= r.capacity) {
+            if Some(ri) == exclude || !r.adoptable(users[ri], &self.squad, pos) {
                 continue;
             }
+            let neglected = neglect.get(ri).is_some_and(|t| *t > r.neglect_threshold);
             for (pi, p) in r.points.iter().enumerate() {
                 let d = p.position.distance_squared(pos);
-                if best.is_none_or(|b| d < b.0) {
-                    best = Some((d, ri, pi));
+                let slot = if neglected { &mut best_neglected } else { &mut best };
+                if slot.is_none_or(|b| d < b.0) {
+                    *slot = Some((d, ri, pi));
                 }
             }
         }
-        let Some((_, ri, pi)) = best else {
+        let leaving = exclude.is_some() && exclude == self.patrol;
+        let pick = best_neglected.or(if self.patrol.is_none() || leaving { best } else { None });
+        let Some((_, ri, pi)) = pick else {
             return false;
         };
         if let Some(old) = self.patrol {
@@ -1172,7 +1743,7 @@ impl Brain {
 
     /// Next point of the adopted route (`Route.ResolveRouteIndex`): Circle wraps, Loop turns
     /// back at the ends, Linear ends the route (another one is adopted).
-    fn advance_route(&mut self, routes: &[PatrolRoute], users: &mut [i32], pos: Vec3) {
+    fn advance_route(&mut self, routes: &[PatrolRoute], users: &mut [i32], neglect: &[f32], pos: Vec3) {
         let Some(ri) = self.patrol else { return };
         let n = routes[ri].points.len();
         let next = self.route_i as i64 + self.patrol_dir as i64;
@@ -1186,7 +1757,7 @@ impl Brain {
             }
             _ => {
                 if next >= n as i64 || next < 0 {
-                    if !self.adopt_route(routes, users, pos, Some(ri)) {
+                    if !self.adopt_route(routes, users, neglect, pos, Some(ri)) {
                         self.route_i = 0;
                     }
                 } else {
@@ -1201,6 +1772,7 @@ impl Brain {
     #[allow(clippy::too_many_arguments)]
     fn act(&mut self, me: &PlayerState, ws: &WorldState, ctx: &mut Ctx, world: &dyn WorldQuery, ai: &AiConfig, dt: f32) -> PlayerInput {
         self.select(ws, ai);
+        self.consider_alarm(me, ws, ctx, ai);
         let mut i = self.act_inner(me, ws, ctx, world, ai, dt);
         let off_mesh = world.nav().is_none() || self.follow.failed;
         if off_mesh && i.forward > 0 && me.mode == dishonored_sim::state::MoveMode::Walking {
@@ -1216,7 +1788,7 @@ impl Brain {
                     self.state = if self.spot.is_some() { BrainState::GroupIdle } else { BrainState::Idle };
                     self.timer = 0.0;
                 } else if self.state == BrainState::Patrol && self.patrol.is_some() {
-                    self.advance_route(ctx.routes, ctx.users, me.position);
+                    self.advance_route(ctx.routes, ctx.users, ctx.neglect, me.position);
                 } else if self.state == BrainState::Patrol && !self.route.is_empty() {
                     self.route_i = (self.route_i + 1) % self.route.len();
                 }
@@ -1225,9 +1797,59 @@ impl Brain {
         i
     }
 
+    /// `DisBehaviorTriggerAlarm` (first in the guard behaviour list): a guard that is about to
+    /// fight an enemy (sighting), or found a corpse / witnessed a death, goes to ring the
+    /// nearest ready bell within `m_fNPCGoToAlarmCloseness` with the tweak's chance, unless the
+    /// enemy is within `m_fFightRadius` (0x00af6bd0). The bell keeps one pending ringer, the
+    /// one nearest to it (0x00a1e140).
+    fn consider_alarm(&mut self, me: &PlayerState, ws: &WorldState, ctx: &mut Ctx, ai: &AiConfig) {
+        if self.kind != PawnKind::Guard || self.bell.is_some() || ctx.cooldown > 0.0 || ctx.alarms.is_empty() {
+            return;
+        }
+        let ta = &ai.trigger_alarm;
+        let (chance, enemy) = match (self.state, self.next) {
+            (BrainState::React, Some(BrainState::Combat)) if self.alarm_enemy.is_none() => {
+                // "Alone": no other guard within the companion range (0x00af5fe0).
+                let alone = !ws.players.iter().any(|p| p.id != self.id && p.alive && p.kind == PawnKind::Guard && p.position.distance(me.position) <= ta.companion_range);
+                (if alone { ta.chance_sighting_alone } else { ta.chance_sighting_in_group }, self.target)
+            }
+            (BrainState::React, Some(BrainState::Investigate)) if self.alarm_enemy.is_none() && matches!(self.cause, reason::FOUND_CORPSE | reason::HEARD_DEATH | reason::SAW_DEATH) => {
+                (if self.cause == reason::FOUND_CORPSE { ta.chance_found_corpse } else { ta.chance_witness_death }, None)
+            }
+            (BrainState::React, Some(BrainState::Investigate)) if self.alarm_enemy.is_none() && self.cause == reason::HEARD_HELP_REQUEST => (ta.chance_help, None),
+            _ => return,
+        };
+        // Decided once per stimulus.
+        self.alarm_enemy = Some(enemy.unwrap_or(NOISE));
+        if chance <= 0.0 || rng_next(&mut self.rng) >= chance {
+            return;
+        }
+        if let Some(e) = enemy.and_then(|e| ws.player(e)) {
+            if e.position.distance(me.position) <= ta.fight_radius {
+                return;
+            }
+        }
+        let d2 = |a: &AlarmBell| a.def.position.distance(me.position);
+        let pick = ctx.alarms.iter().enumerate().filter(|(_, a)| !a.ringing && a.cooldown <= 0.0 && d2(a) <= a.def.go_closeness).min_by(|a, b| d2(a.1).total_cmp(&d2(b.1)).then(a.0.cmp(&b.0)));
+        let Some((bi, bell)) = pick else { return };
+        if let Some(r) = bell.ringer.filter(|r| *r != self.id) {
+            if ws.player(r).is_some_and(|p| p.alive && p.position.distance(bell.def.position) <= d2(bell)) {
+                return;
+            }
+        }
+        ctx.alarms[bi].ringer = Some(self.id);
+        ctx.alarms[bi].enemy = enemy;
+        self.bell = Some(bi);
+        self.ring_wait = 0.0;
+        self.next = Some(BrainState::RingAlarm);
+    }
+
     /// Choose the behaviour from the attention state (the brain's behaviour priorities:
     /// Combat / Panic > Search / Investigate > Notice > routine).
     fn select(&mut self, ws: &WorldState, ai: &AiConfig) {
+        if self.state == BrainState::RingAlarm || self.next == Some(BrainState::RingAlarm) {
+            return;
+        }
         // Combat lasts while the target is Busted (`EAIStimID_CombatToSearch` otherwise):
         // unseen, its attention leaks below the Busted stop or the proxy proves stale.
         if self.state == BrainState::Combat
@@ -1244,7 +1866,7 @@ impl Brain {
             return;
         };
         let guard = self.kind == PawnKind::Guard;
-        let hostile_alive = who != NOISE && self.hostile.contains(&who) && ws.player(who).is_some_and(|p| p.alive);
+        let hostile_alive = who != NOISE && self.enemies.contains(&who) && ws.player(who).is_some_and(|p| p.alive);
         match level {
             DAL_BUSTED if guard && hostile_alive => {
                 self.suspecting = true;
@@ -1279,6 +1901,10 @@ impl Brain {
                     _ => {
                         self.threat_pos = Some(proxy);
                         self.run = urgent;
+                        if let Some(a) = self.attn.iter().find(|a| a.who == who) {
+                            self.cause = a.why;
+                            self.cause_danger = a.danger;
+                        }
                         self.escalate(ai, BrainState::Investigate);
                     }
                 }
@@ -1395,7 +2021,7 @@ impl Brain {
                     if self.guard_timer > 0.0 {
                         self.guard_timer = (self.guard_timer - dt).max(0.0);
                         if self.guard_timer == 0.0 {
-                            self.advance_route(ctx.routes, ctx.users, me.position);
+                            self.advance_route(ctx.routes, ctx.users, ctx.neglect, me.position);
                         }
                     }
                     return look.map(face).unwrap_or(idle);
@@ -1408,7 +2034,7 @@ impl Brain {
                     } else if p.guard_duration > 0.0 {
                         self.guard_timer = p.guard_duration;
                     } else {
-                        self.advance_route(ctx.routes, ctx.users, me.position);
+                        self.advance_route(ctx.routes, ctx.users, ctx.neglect, me.position);
                     }
                     return look.map(face).unwrap_or(idle);
                 }
@@ -1498,7 +2124,7 @@ impl Brain {
             }
             BrainState::Flee => {
                 let from = self.threat_pos.unwrap_or(me.position);
-                let enemy_close = self.hostile.iter().filter_map(|h| ws.player(*h)).any(|p| p.alive && p.position.distance(me.position) < ai.panic.cower_distance);
+                let enemy_close = self.enemies.iter().filter_map(|h| ws.player(*h)).any(|p| p.alive && p.position.distance(me.position) < ai.panic.cower_distance);
                 if enemy_close {
                     self.state = BrainState::Cower;
                     self.timer = 0.0;
@@ -1530,7 +2156,7 @@ impl Brain {
             }
             BrainState::Cower => {
                 let from = self.threat_pos.unwrap_or(me.position);
-                let enemy_close = self.hostile.iter().filter_map(|h| ws.player(*h)).any(|p| p.alive && p.position.distance(me.position) < ai.panic.cower_distance * 1.5);
+                let enemy_close = self.enemies.iter().filter_map(|h| ws.player(*h)).any(|p| p.alive && p.position.distance(me.position) < ai.panic.cower_distance * 1.5);
                 if !enemy_close && self.timer > 1.0 {
                     self.state = BrainState::Flee;
                     self.timer = ai.panic.free_flight_time;
@@ -1541,6 +2167,51 @@ impl Brain {
                 i
             }
             BrainState::Combat => self.combat(me, ws, world, nav, ai, ctx.inhibit, dt),
+            BrainState::RingAlarm => {
+                // `DisBehaviorTriggerAlarm`: TakePosition to the bell (running), stand
+                // `m_fWaitTimeBeforeRing` within `m_fNPCUseCloseness`, ring (GenericAction).
+                let Some(bi) = self.bell.filter(|&b| b < ctx.alarms.len()) else {
+                    self.bell = None;
+                    self.back_to_routine();
+                    return idle;
+                };
+                let enemy = ctx.alarms[bi].enemy.and_then(|e| ws.player(e)).filter(|p| p.alive).map(|p| (p.id, p.position));
+                let taken = ctx.alarms[bi].ringing || ctx.alarms[bi].ringer.is_some_and(|r| r != self.id);
+                let close = enemy.is_some_and(|(_, p)| p.distance(me.position) <= ai.trigger_alarm.fight_radius);
+                let pos = ctx.alarms[bi].def.position;
+                let finish = |b: &mut Brain| {
+                    b.bell = None;
+                    b.timer = 0.0;
+                    b.follow.clear();
+                    match enemy {
+                        Some((e, _)) if b.attn.iter().any(|a| a.who == e && a.level >= DAL_BUSTED) => {
+                            b.target = Some(e);
+                            b.state = BrainState::Combat;
+                        }
+                        _ => b.go_search(ai),
+                    }
+                };
+                if taken || close || self.follow.failed {
+                    if ctx.alarms[bi].ringer == Some(self.id) && !ctx.alarms[bi].ringing {
+                        ctx.alarms[bi].ringer = None;
+                    }
+                    finish(self);
+                    return idle;
+                }
+                if Self::reached(me, pos, ctx.alarms[bi].def.use_closeness.max(60.0)) {
+                    self.ring_wait += dt;
+                    if self.ring_wait >= ai.trigger_alarm.wait_before_ring {
+                        let a = &mut ctx.alarms[bi];
+                        a.ringing = true;
+                        a.noise_done = false;
+                        a.noise_timer = a.def.ring_delay;
+                        ctx.events.push(AiEvent::AlarmRang { bell: bi, name: a.def.name.clone(), ringer: self.id, enemy: a.enemy });
+                        finish(self);
+                    }
+                    return face(pos);
+                }
+                self.move_to(me, nav, pos, true)
+            }
         }
     }
 
@@ -1603,7 +2274,17 @@ impl Brain {
         if !self.melee_slot {
             // Outer skirmish ring: keep distance; the guard's single bullet is used here
             // (`TwkAttackPattern_RangedElite`, aim time from `StateNPCMasterAim`).
-            if self.ammo > 0 && visible && d > 300.0 && d < ai.vision.outer_range {
+            // `m_fGunTimer`: the first shot waits `m_GunUsageStart` into the fight
+            // (`DisBehaviorCombatEliteGuard`, LIKELY use of the tweak range).
+            if self.gun_timer < 0.0 {
+                let [lo, hi] = ai.combat.gun_usage_start;
+                self.gun_timer = lo + (hi - lo) * rng_next(&mut self.rng);
+            }
+            self.gun_timer = (self.gun_timer - dt).max(0.0);
+            if self.ammo > 0 && visible && d > 300.0 && d < ai.vision.outer_range && self.gun_timer <= 0.0 {
+                if self.aim == 0.0 {
+                    self.barks.push(("DDH_COMBAT_RANGED_BEGIN".into(), Some(t.id)));
+                }
                 i.left_hand = LeftHand::Pistol;
                 let aim = t.position + Vec3::Z * 40.0 - (me.position + Vec3::Z * EYE);
                 i.pitch = (aim.z / aim.truncate().length().max(1.0)).atan().to_degrees();
@@ -1648,6 +2329,8 @@ impl Brain {
                 if ctxs[k].inhibition > 0.0 {
                     inhibit.push((t.id, k as u8, ctxs[k].inhibition));
                 }
+                // `DisTweaks_MeleeAttackNPCBase.m_AttackBark`.
+                self.barks.push(("DDH_COMBAT_ATTACK".into(), Some(t.id)));
                 i.buttons |= buttons::PRIMARY;
                 return i;
             }
@@ -1658,7 +2341,89 @@ impl Brain {
         i
     }
 
+    /// The original's bark points (`FUN_00af00f0` callers) mapped onto this brain's
+    /// transitions: Notice begin/end (`DisBehaviorNotice`), search start by cause (vision near
+    /// / far by `m_fVisualDetectionRatioNear`, hearing / danger, corpse, witnessed death, from
+    /// an ally, alarm), search end (rat / post-corpse / stop hunting, alone or group), search
+    /// finding the enemy, combat start (threat, group threat, offscreen) and loss (lost /
+    /// group), panic start, begging when cowering, fleeing, going to ring an alarm.
+    fn transition_barks(&mut self, was: BrainState, was_next: Option<BrainState>, me: &PlayerState, ws: &WorldState, peers: &[Peer], ai: &AiConfig) {
+        let now = self.state;
+        if now == was {
+            return;
+        }
+        let _ = was_next;
+        let target_of = |b: &Brain| b.target.or_else(|| b.attn.iter().filter(|a| a.who != NOISE).max_by(|x, y| x.value.total_cmp(&y.value)).map(|a| a.who));
+        let tgt = target_of(self);
+        // Another guard on the same target (group variants name it as the initiator).
+        let ally = |state: BrainState| tgt.and_then(|t| peers.iter().find(|p| p.id != self.id && p.kind == PawnKind::Guard && p.state == state && p.target == Some(t)).map(|p| p.id));
+        let mut bark = |h: &str, i: Option<PlayerId>| self.barks.push((h.to_string(), i));
+        match (was, now) {
+            (_, BrainState::Notice) => bark("DDH_ATTENTION_NOTICE_BEGIN", tgt),
+            (BrainState::Notice, s) if s.is_routine() => bark("DDH_ATTENTION_NOTICE_END", tgt),
+            (_, BrainState::RingAlarm) => bark("DDH_ALARM_GO_TO_RING_ALARM", self.alarm_enemy.filter(|e| *e != NOISE)),
+            (_, BrainState::Investigate) if self.kind != PawnKind::Guard => {
+                bark(if self.cause == reason::ALARM { "DDH_ALARM_HEAR_AND_RESPOND" } else { "DDH_ATTENTION_INVESTIGATE" }, tgt)
+            }
+            (_, BrainState::Investigate) => {
+                let h = match self.cause {
+                    reason::SEEN => {
+                        let near = self.attn.iter().find(|a| Some(a.who) == tgt).is_some_and(|a| a.los_norm <= ai.visual_detection_ratio_near);
+                        if near { "DDH_SEARCH_NEAR_VDETECTION" } else { "DDH_SEARCH_FAR_VDETECTION" }
+                    }
+                    reason::HEARD if self.cause_danger => "DDH_SEARCH_ADETECTION_DANGER",
+                    reason::HEARD => "DDH_SEARCH_ADETECTION",
+                    reason::FOUND_CORPSE => "DDH_SEARCH_DETECT_CORPSE",
+                    reason::HEARD_DEATH | reason::SAW_DEATH => "DDH_SEARCH_WITNESS_DEATH",
+                    reason::HEARD_HELP_REQUEST => "DDH_SEARCH_ADETECTION_FROM_ALLY",
+                    reason::SEE_ALLY_COMBAT | reason::SEE_ALLY_PANIC | reason::SEE_ALLY_SEARCH => "DDH_SEARCH_VDETECTION_FROM_ALLY",
+                    reason::ALARM => "DDH_ALARM_HEAR_AND_RESPOND",
+                    _ => "DDH_SEARCH_ADETECTION",
+                };
+                bark(h, tgt.filter(|t| *t != NOISE));
+            }
+            (_, BrainState::Search) if was != BrainState::Combat && was != BrainState::React => bark("DDH_SEARCH", None),
+            (BrainState::React, BrainState::Search) => bark("DDH_SEARCH", None),
+            (BrainState::Combat, BrainState::Search) => match ally(BrainState::Combat) {
+                Some(a) => bark("DDH_COMBAT_LOST_GROUP", Some(a)),
+                None => bark("DDH_COMBAT_LOST", None),
+            },
+            (BrainState::Search, s) if s.is_routine() => {
+                let hunting = self.cause == reason::SEEN || self.cause == reason::ATTACKED_BY || self.cause == reason::ATTACKED_ENEMY;
+                if hunting {
+                    match ally(BrainState::Search) {
+                        Some(a) => bark("DDH_SEARCH_STOPHUNTING_GROUP", Some(a)),
+                        None => bark("DDH_SEARCH_STOPHUNTING", None),
+                    }
+                } else if self.cause == reason::FOUND_CORPSE {
+                    bark("DDH_SEARCH_GIVEUP_POSTCORPSE", None);
+                } else {
+                    bark("DDH_SEARCH_MUSTHAVEBEENARAT", None);
+                }
+            }
+            (BrainState::Search | BrainState::Investigate, BrainState::Combat) => bark("DDH_SEARCH_FIND_ENEMY", tgt),
+            (_, BrainState::Combat) => {
+                // Combat barks sub-process (0x00b41f70): offscreen while the enemy is not
+                // seen, else threat, or group threat when an ally already fights it.
+                let seen = self.attn.iter().find(|a| Some(a.who) == tgt).is_some_and(|a| a.sighted);
+                if !seen {
+                    bark("DDH_COMBAT_THREAT_OFFSCREEN", tgt);
+                } else if let Some(a) = ally(BrainState::Combat) {
+                    bark("DDH_COMBAT_THREAT_GROUP", Some(a));
+                } else {
+                    bark("DDH_COMBAT_THREAT", tgt);
+                }
+            }
+            (_, BrainState::Flee) if !matches!(was, BrainState::Cower) => bark("DDH_PANIC_START", tgt),
+            (BrainState::Cower, BrainState::Flee) => bark("DDH_FLEEING", tgt),
+            (_, BrainState::Cower) => bark("DDH_COMBAT_BEGGING", tgt),
+            _ => {}
+        }
+        let _ = (me, ws);
+    }
+
     fn go_search(&mut self, ai: &AiConfig) {
+        self.gun_timer = -1.0;
         self.suspecting = true;
         self.target = None;
         self.state = BrainState::Search;
@@ -1784,7 +2549,7 @@ mod tests {
     fn increase_floors_at_threshold_and_reason_gates_busted() {
         let p = AttentionConfig::guard_unsuspecting();
         let stop = p.stop;
-        let mut a = Attn { who: NOISE, value: 0.0, level: 0, proxy: Vec3::ZERO, fresh: false, urgent: false, sighted: false, los_norm: 0.0 };
+        let mut a = Attn { who: NOISE, value: 0.0, level: 0, proxy: Vec3::ZERO, fresh: false, urgent: false, sighted: false, los_norm: 0.0, why: 0, danger: false };
         // Danger sound: +0.4, then at least the Investigate start (0.6).
         a.change(&p, &stop, 0.4, DAL_INVESTIGATE, reason::HEARD, false);
         assert!(close(a.value, 0.6) && a.level == DAL_INVESTIGATE);
@@ -1810,7 +2575,7 @@ mod tests {
         let ai = AiConfig::default();
         for seed in 1..50u64 {
             let mut b = Brain::new(NPC_ID_BASE, PawnKind::Guard, Vec3::ZERO, seed);
-            b.hostile.push(1);
+            b.make_hostile(1);
             let s = b.stops(&ai, 1);
             for i in 0..4 {
                 assert!((s[i] - ai.guard_unsuspecting.stop[i]).abs() <= 0.025 + 1e-6);
@@ -1944,6 +2709,7 @@ mod tests {
             kind,
             capacity: 1,
             points: (0..n).map(|i| RoutePoint { position: Vec3::new(x0 + i as f32 * 500.0, 0.0, 90.0), guard_duration: 0.0, guard_forever: false }).collect(),
+            ..Default::default()
         }
     }
 
@@ -1953,26 +2719,303 @@ mod tests {
         let mut users = vec![0; 3];
         let mut a = Brain::new(NPC_ID_BASE, PawnKind::Guard, Vec3::ZERO, 1);
         let mut b = Brain::new(NPC_ID_BASE + 1, PawnKind::Guard, Vec3::ZERO, 2);
-        assert!(a.adopt_route(&routes, &mut users, Vec3::new(900.0, 0.0, 90.0), None));
+        assert!(a.adopt_route(&routes, &mut users, &[], Vec3::new(900.0, 0.0, 90.0), None));
         assert_eq!((a.patrol, a.route_i), (Some(0), 2));
         // Capacity 1: the second guard takes the next nearest route.
-        assert!(b.adopt_route(&routes, &mut users, Vec3::new(900.0, 0.0, 90.0), None));
+        assert!(b.adopt_route(&routes, &mut users, &[], Vec3::new(900.0, 0.0, 90.0), None));
         assert_eq!(b.patrol, Some(1));
         // Circle wraps.
-        a.advance_route(&routes, &mut users, Vec3::ZERO);
+        a.advance_route(&routes, &mut users, &[], Vec3::ZERO);
         assert_eq!(a.route_i, 0);
         // Loop turns back at the end.
         b.route_i = 2;
-        b.advance_route(&routes, &mut users, Vec3::ZERO);
+        b.advance_route(&routes, &mut users, &[], Vec3::ZERO);
         assert_eq!(b.route_i, 1);
         // Linear: at the end another free route is adopted.
         let mut c = Brain::new(NPC_ID_BASE + 2, PawnKind::Guard, Vec3::ZERO, 3);
-        assert!(c.adopt_route(&routes, &mut users, Vec3::new(10500.0, 0.0, 90.0), None));
+        assert!(c.adopt_route(&routes, &mut users, &[], Vec3::new(10500.0, 0.0, 90.0), None));
         assert_eq!(c.patrol, Some(2));
         users[0] = 0;
-        c.advance_route(&routes, &mut users, Vec3::new(10500.0, 0.0, 90.0));
-        c.advance_route(&routes, &mut users, Vec3::new(10500.0, 0.0, 90.0));
+        c.advance_route(&routes, &mut users, &[], Vec3::new(10500.0, 0.0, 90.0));
+        c.advance_route(&routes, &mut users, &[], Vec3::new(10500.0, 0.0, 90.0));
         assert_eq!(c.patrol, Some(0));
         assert_eq!(users, vec![1, 1, 0]);
+    }
+
+    use dishonored_ir::ai::{Faction, ForbiddenZone};
+
+    /// The Boyle party factions (`Boyle_Factions`, `DisFaction_Defaults`, as read from the install).
+    fn boyle_level() -> AiLevel {
+        let f = |n: &str, a: &[&str], e: &[&str]| Faction { name: n.into(), allies: a.iter().map(|s| s.to_string()).collect(), enemies: e.iter().map(|s| s.to_string()).collect(), parents: Vec::new() };
+        let mut t = FactionTable::default();
+        t.factions = vec![
+            f("Boyle_Factions.Neutral_Guard", &["DisFaction_Defaults.Faction_Guard_Default", "DisFaction_Defaults.Faction_Civilian_Default", "Boyle_Factions.Neutral_Civilian"], &["DisFaction_Defaults.Faction_Weepers_Default"]),
+            f("Boyle_Factions.Neutral_Civilian", &["DisFaction_Defaults.Faction_Guard_Default", "DisFaction_Defaults.Faction_Civilian_Default", "Boyle_Factions.Neutral_Guard"], &["DisFaction_Defaults.Faction_Weepers_Default"]),
+            f("Boyle_Factions.Neutral_Guard_Street", &[], &["DisFaction_Defaults.Faction_Weepers_Default", "DisFaction_Defaults.Faction_Corvo_Default"]),
+            f("DisFaction_Defaults.Faction_Guard_Default", &[], &["DisFaction_Defaults.Faction_Corvo_Default", "DisFaction_Defaults.Faction_Weepers_Default"]),
+            f("DisFaction_Defaults.Faction_Corvo_Default", &[], &["DisFaction_Defaults.Faction_Guard_Default"]),
+            f("DisFaction_Defaults.Faction_Civilian_Default", &[], &[]),
+            f("DisFaction_Defaults.Faction_Weepers_Default", &[], &["DisFaction_Defaults.Faction_Civilian_Default", "DisFaction_Defaults.Faction_Corvo_Default", "DisFaction_Defaults.Faction_Guard_Default", "Boyle_Factions.Neutral_Guard"]),
+        ];
+        // Upstairs: a 1000 uu box owned by the party guards, forbidden to the player.
+        let bx = vec![[1.0, 0.0, 0.0, 1000.0], [-1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 1000.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 1000.0], [0.0, 0.0, -1.0, 0.0]];
+        let zone = ForbiddenZone { name: "DisForbiddenZone_1".into(), enabled: true, owning: vec!["Boyle_Factions.Neutral_Guard".into()], forbidden: vec!["DisFaction_Defaults.Faction_Corvo_Default".into()], hulls: vec![bx] };
+        AiLevel { factions: t, player_faction: "DisFaction_Defaults.Faction_Corvo_Default".into(), zones: vec![zone], ..Default::default() }
+    }
+
+    #[test]
+    fn faction_relations_follow_the_from_factions_lists() {
+        let l = boyle_level();
+        let t = &l.factions;
+        let i = |n: &str| t.index(n).unwrap();
+        let (ng, nc, street, guard, corvo, civ, weep) = (i("Boyle_Factions.Neutral_Guard"), i("Boyle_Factions.Neutral_Civilian"), i("Boyle_Factions.Neutral_Guard_Street"), i("DisFaction_Defaults.Faction_Guard_Default"), i("DisFaction_Defaults.Faction_Corvo_Default"), i("DisFaction_Defaults.Faction_Civilian_Default"), i("DisFaction_Defaults.Faction_Weepers_Default"));
+        // Disguised at the party: the party guards do not list Corvo, so he is neutral to them.
+        assert_eq!(t.relation(ng, corvo), Relationship::Neutral);
+        // Street guards and the default (alarm squad / pursuer) guards are his enemies.
+        assert_eq!(t.relation(street, corvo), Relationship::Enemy);
+        assert_eq!(t.relation(guard, corvo), Relationship::Enemy);
+        // Same faction: ally; listed allies: ally; not symmetric (civilians list no one).
+        assert_eq!(t.relation(ng, ng), Relationship::Ally);
+        assert_eq!(t.relation(ng, nc), Relationship::Ally);
+        assert_eq!(t.relation(civ, weep), Relationship::Neutral);
+        assert_eq!(t.relation(weep, civ), Relationship::Enemy);
+        // Enemies are checked before allies.
+        assert_eq!(t.relation(ng, weep), Relationship::Enemy);
+    }
+
+    #[test]
+    fn trespassers_and_dispositions_override_factions() {
+        let mut c = Crowd::default();
+        c.set_level(&boyle_level());
+        let ng = c.factions.index("Boyle_Factions.Neutral_Guard").unwrap();
+        let mut ws = WorldState::default();
+        ws.players = vec![pawn(1, PawnKind::Human, Vec3::new(-500.0, 500.0, 90.0), 0.0), pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::ZERO, 0.0)];
+        let mut b = Brain::new(NPC_ID_BASE, PawnKind::Guard, Vec3::ZERO, 1);
+        b.faction = Some(ng);
+        c.brains.push(b);
+        let soc = c.social(&ws);
+        assert_eq!(c.brains[0].relation(1, &soc), Relationship::Neutral);
+        // Upstairs (inside the forbidden zone owned by the party guards): an enemy.
+        ws.players[0].position = Vec3::new(500.0, 500.0, 90.0);
+        let soc = c.social(&ws);
+        assert_eq!(soc.trespass, vec![(1, ng)]);
+        assert_eq!(c.brains[0].relation(1, &soc), Relationship::Enemy);
+        // A disabled zone does nothing.
+        c.zones[0].enabled = false;
+        assert_eq!(c.brains[0].relation(1, &c.social(&ws)), Relationship::Neutral);
+        // `DisSeqAct_SetDisposition` faction -> player faction (Set), then Clear.
+        let corvo = c.player_faction.unwrap();
+        c.set_disposition("Boyle_Factions.Neutral_Guard", 0, Relationship::Enemy, &[Recipient::Faction(corvo)], true);
+        assert_eq!(c.brains[0].relation(1, &c.social(&ws)), Relationship::Enemy);
+        c.set_disposition("Boyle_Factions.Neutral_Guard", 1, Relationship::Enemy, &[Recipient::Faction(corvo)], true);
+        assert_eq!(c.brains[0].relation(1, &c.social(&ws)), Relationship::Neutral);
+        // Individual relationships come first.
+        c.brains[0].make_hostile(1);
+        assert_eq!(c.brains[0].relation(1, &c.social(&ws)), Relationship::Enemy);
+    }
+
+    #[test]
+    fn friendly_fire_between_npcs_changes_no_relationship() {
+        let ai = AiConfig::default();
+        let w = flat_world();
+        let mut c = Crowd { ai: ai.clone(), ..Default::default() };
+        c.set_level(&boyle_level());
+        let ng = c.factions.index("Boyle_Factions.Neutral_Guard").unwrap();
+        let a = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(0.0, 0.0, 90.0), 0.0);
+        let b = pawn(NPC_ID_BASE + 1, PawnKind::Guard, Vec3::new(100.0, 0.0, 90.0), 180.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![a.clone(), b.clone()];
+        for (id, p) in [(a.id, a.position), (b.id, b.position)] {
+            let mut br = Brain::new(id, PawnKind::Guard, p, id as u64);
+            br.faction = Some(ng);
+            c.brains.push(br);
+        }
+        let hit = SimEvent::Damage { victim: a.id, attacker: Some(b.id), amount: 10.0, cause: dishonored_sim::events::DamageCause::Sword };
+        for _ in 0..30 {
+            c.think(&ws, std::slice::from_ref(&hit), &w, 1.0 / 60.0);
+        }
+        assert!(c.brains[0].enemies.is_empty() && c.brains[0].state != BrainState::Combat);
+        // The pain bark fires.
+        assert!(c.events.is_empty() || c.events.iter().all(|e| !matches!(e, AiEvent::AlarmRang { .. })));
+    }
+
+    #[test]
+    fn zone_hull_test() {
+        let l = boyle_level();
+        assert!(l.zones[0].contains(Vec3::new(10.0, 10.0, 10.0)));
+        assert!(!l.zones[0].contains(Vec3::new(-10.0, 10.0, 10.0)));
+        assert!(!l.zones[0].contains(Vec3::new(10.0, 10.0, 1010.0)));
+    }
+
+    #[test]
+    fn alarm_spawns_prefer_far_spawners_up_to_the_cap() {
+        let def = AlarmBellDef { spawners: vec!["S1".into(), "S2".into(), "S3".into()], spawner_min_dist: 1500.0, max_spawns: 2, ..Default::default() };
+        let sp = vec![("S1".to_string(), Vec3::new(100.0, 0.0, 0.0)), ("S2".to_string(), Vec3::new(3000.0, 0.0, 0.0)), ("S3".to_string(), Vec3::new(4000.0, 0.0, 0.0))];
+        assert_eq!(alarm_spawn_choice(&def, &sp, Some(Vec3::ZERO)), vec!["S2".to_string(), "S3".to_string()]);
+        // None far enough: all (capped).
+        let def2 = AlarmBellDef { spawner_min_dist: 3000.0, ..def.clone() };
+        assert_eq!(alarm_spawn_choice(&def2, &sp, Some(Vec3::new(2000.0, 0.0, 0.0))), vec!["S1".to_string(), "S2".to_string()]);
+    }
+
+    #[test]
+    fn guard_rings_the_bell_then_it_sounds_and_spawns() {
+        let ai = AiConfig::default();
+        let w = flat_world();
+        let mut c = Crowd { ai: ai.clone(), ..Default::default() };
+        let mut level = boyle_level();
+        level.alarms = vec![AlarmBellDef { name: "DisAlarmBell_0".into(), position: Vec3::new(-1500.0, 0.0, 90.0), loudness: 6000.0, go_closeness: 5000.0, use_closeness: 150.0, ring_delay: 2.5, max_spawns: 6, spawners: vec!["S".into()], ..Default::default() }];
+        c.set_level(&level);
+        let guard_f = c.factions.index("DisFaction_Defaults.Faction_Guard_Default").unwrap();
+        let g = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(0.0, 0.0, 90.0), 0.0);
+        let p = pawn(1, PawnKind::Human, Vec3::new(1200.0, 0.0, 90.0), 180.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![g.clone(), p.clone()];
+        let mut b = Brain::new(g.id, PawnKind::Guard, g.position, 4);
+        b.faction = Some(guard_f);
+        c.brains.push(b);
+        let mut rang = false;
+        let mut spawned = false;
+        let mut barks = Vec::new();
+        for _ in 0..(60 * 20) {
+            let inputs = c.think(&ws, &[], &w, 1.0 / 60.0);
+            // Move the guard as its input says (sprint speed along its yaw), no physics.
+            if let Some((_, i)) = inputs.iter().find(|x| x.0 == g.id) {
+                let gp = &mut ws.players[0];
+                gp.yaw = i.yaw;
+                if i.forward > 0 {
+                    gp.position += Vec3::new(i.yaw.to_radians().cos(), i.yaw.to_radians().sin(), 0.0) * 600.0 / 60.0;
+                }
+            }
+            for e in &c.events {
+                match e {
+                    AiEvent::AlarmRang { ringer, .. } => {
+                        assert_eq!(*ringer, g.id);
+                        rang = true;
+                    }
+                    AiEvent::AlarmSpawn { enemy, .. } => {
+                        assert!(rang && *enemy == Some(1));
+                        spawned = true;
+                    }
+                    AiEvent::Bark { hook, .. } => barks.push(hook.clone()),
+                    _ => {}
+                }
+            }
+            if spawned {
+                break;
+            }
+        }
+        assert!(rang && spawned, "rang {rang} spawned {spawned} state {:?}", c.brains[0].state);
+        assert!(barks.iter().any(|h| h == "DDH_ALARM_GO_TO_RING_ALARM"), "{barks:?}");
+        // The bell's noise reaches the guard next tick as an alarm stimulus (it hunts the
+        // enemy already); the bell rings while the enemy is hunted.
+        assert!(c.alarms[0].ringing);
+    }
+
+    #[test]
+    fn hearing_needs_a_clear_line_without_audio_cells() {
+        let ai = AiConfig::default();
+        use dishonored_world::Tri;
+        // Floor plus a wall at x = 250 between the guard and the noise.
+        let s = 20000.0;
+        let t = |a: Vec3, b: Vec3, c: Vec3, n: Vec3| Tri { a, b, c, n, channels: channel::ALL, source: 0 };
+        let (a, b, cc, d) = (Vec3::new(-s, -s, 0.0), Vec3::new(s, -s, 0.0), Vec3::new(s, s, 0.0), Vec3::new(-s, s, 0.0));
+        let (w1, w2, w3, w4) = (Vec3::new(250.0, -500.0, -10.0), Vec3::new(250.0, 500.0, -10.0), Vec3::new(250.0, 500.0, 500.0), Vec3::new(250.0, -500.0, 500.0));
+        let w = CollisionWorld::from_triangles(vec![t(a, b, cc, Vec3::Z), t(a, cc, d, Vec3::Z), t(w1, w2, w3, -Vec3::X), t(w1, w3, w4, -Vec3::X)], vec!["floor".into()]);
+        let guard = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(0.0, 0.0, 90.0), 0.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![guard.clone()];
+        let mut b = Brain::new(guard.id, PawnKind::Guard, guard.position, 1);
+        let behind = SimEvent::Sound { position: Vec3::new(500.0, 0.0, 90.0), radius: 1500.0, category: SoundCategory::Pistol, source: 7 };
+        b.perceive(&guard, &ws, std::slice::from_ref(&behind), &[], &[], &[], &w, &ai, 1.0 / 60.0);
+        assert!(b.focus().is_none());
+        let open = SimEvent::Sound { position: Vec3::new(-500.0, 0.0, 90.0), radius: 1500.0, category: SoundCategory::Pistol, source: 7 };
+        b.perceive(&guard, &ws, std::slice::from_ref(&open), &[], &[], &[], &w, &ai, 1.0 / 60.0);
+        assert_eq!(b.focus().map(|f| f.1), Some(DAL_INVESTIGATE));
+        // Exactly at the radius: not heard (strict).
+        let mut c2 = Brain::new(guard.id, PawnKind::Guard, guard.position, 1);
+        let edge = SimEvent::Sound { position: Vec3::new(-1500.0, 0.0, 90.0), radius: 1500.0, category: SoundCategory::Pistol, source: 7 };
+        c2.perceive(&guard, &ws, std::slice::from_ref(&edge), &[], &[], &[], &w, &ai, 1.0 / 60.0);
+        assert!(c2.focus().is_none());
+    }
+
+    #[test]
+    fn aware_on_startup_is_psychic_max_attention() {
+        let ai = AiConfig::default();
+        let mut b = Brain::new(NPC_ID_BASE, PawnKind::Guard, Vec3::ZERO, 1);
+        b.make_hostile(1);
+        b.aware_of(&ai, 1, Vec3::new(100.0, 0.0, 0.0));
+        let a = b.attn.iter().find(|a| a.who == 1).unwrap();
+        assert!(close(a.value, 1.0) && a.level == DAL_BUSTED && a.why == reason::PSYCHIC);
+        assert_eq!(a.proxy, Vec3::new(100.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn speed_value_is_unclamped_over_ground_speed_sprint() {
+        let ai = AiConfig::default();
+        let mut p = pawn(1, PawnKind::Human, Vec3::ZERO, 0.0);
+        p.velocity = Vec3::new(900.0, 0.0, 0.0);
+        // 900 / 600 = 1.5 -> 0.25 * 1.5 + light 0.1.
+        assert!(close(Brain::visibility(&ai, &p, 1.0), 0.475));
+    }
+
+    #[test]
+    fn light_probe_attenuates_and_shadows() {
+        let w = flat_world();
+        let l = ProbeLight { kind: 0, position: Vec3::new(0.0, 0.0, 300.0), intensity: 1.0, radius: 1000.0, falloff_exponent: 2.0, casts_shadows: true, ..Default::default() };
+        let near = light_at(std::slice::from_ref(&l), Vec3::new(0.0, 0.0, 90.0), &w);
+        let far = light_at(std::slice::from_ref(&l), Vec3::new(2000.0, 0.0, 90.0), &w);
+        // d = 210: (1 - 0.0441)^2 = 0.9137 -> ^(1/2.2).
+        assert!((near - 0.9137f32.powf(1.0 / 2.2)).abs() < 1e-3, "{near}");
+        assert_eq!(far, 0.0);
+        // Below the floor: shadowed.
+        assert_eq!(light_at(std::slice::from_ref(&l), Vec3::new(0.0, 0.0, -100.0), &w), 0.0);
+    }
+
+    #[test]
+    fn neglected_routes_win_and_squads_restrict() {
+        let mut routes = vec![route(2, 2, 0.0), route(2, 2, 3000.0)];
+        routes[0].squads = vec!["Court_Guard".into()];
+        let mut users = vec![0, 0];
+        let mut a = Brain::new(NPC_ID_BASE, PawnKind::Guard, Vec3::ZERO, 1);
+        // Not of the squad: the near route is refused.
+        assert!(a.adopt_route(&routes, &mut users, &[], Vec3::ZERO, None));
+        assert_eq!(a.patrol, Some(1));
+        let mut b = Brain::new(NPC_ID_BASE + 1, PawnKind::Guard, Vec3::ZERO, 2);
+        b.squad = "Court_Guard".into();
+        routes[0].capacity = 2;
+        routes[1].capacity = 2;
+        assert!(b.adopt_route(&routes, &mut users, &[], Vec3::ZERO, None));
+        assert_eq!(b.patrol, Some(0));
+        // A guard with a route only moves to a neglected one.
+        let mut users2 = vec![0, 0];
+        let mut c = Brain::new(NPC_ID_BASE + 2, PawnKind::Guard, Vec3::ZERO, 3);
+        c.squad = "Court_Guard".into();
+        assert!(c.adopt_route(&routes, &mut users2, &[0.0, 0.0], Vec3::ZERO, None));
+        assert!(!c.adopt_route(&routes, &mut users2, &[0.0, 0.0], Vec3::ZERO, None));
+        assert!(c.adopt_route(&routes, &mut users2, &[0.0, 31.0], Vec3::ZERO, None));
+        assert_eq!(c.patrol, Some(1));
+    }
+
+    #[test]
+    fn transitions_bark_the_original_hooks() {
+        let ai = AiConfig::default();
+        let mut b = Brain::new(NPC_ID_BASE, PawnKind::Guard, Vec3::ZERO, 1);
+        let me = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::ZERO, 0.0);
+        let ws = WorldState::default();
+        b.state = BrainState::Notice;
+        b.transition_barks(BrainState::Patrol, None, &me, &ws, &[], &ai);
+        b.state = BrainState::Investigate;
+        b.cause = reason::HEARD;
+        b.cause_danger = true;
+        b.transition_barks(BrainState::React, None, &me, &ws, &[], &ai);
+        b.state = BrainState::Combat;
+        b.transition_barks(BrainState::Search, None, &me, &ws, &[], &ai);
+        b.state = BrainState::Search;
+        b.transition_barks(BrainState::Combat, None, &me, &ws, &[], &ai);
+        b.cause = reason::FOUND_CORPSE;
+        b.state = BrainState::Patrol;
+        b.transition_barks(BrainState::Search, None, &me, &ws, &[], &ai);
+        let hooks: Vec<&str> = b.barks.iter().map(|x| x.0.as_str()).collect();
+        assert_eq!(hooks, ["DDH_ATTENTION_NOTICE_BEGIN", "DDH_SEARCH_ADETECTION_DANGER", "DDH_SEARCH_FIND_ENEMY", "DDH_COMBAT_LOST", "DDH_SEARCH_GIVEUP_POSTCORPSE"]);
     }
 }

@@ -288,6 +288,10 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
         "crossbow",
     )?;
 
+    // The player visibility's speed value divides by `Attribute_GroundSpeedSprint` (0x00ac33b0).
+    let mut ai = crate::ai_config::load_ai_config(content, &[]);
+    ai.player_visibility.ground_speed_sprint = movement.sprint_speed;
+
     Ok(GameplayConfig {
         movement,
         vitals,
@@ -298,7 +302,7 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
         pistol,
         crossbow,
         melee,
-        ai: crate::ai_config::load_ai_config(content, &[]),
+        ai,
         provenance: l.prov,
     })
 }
