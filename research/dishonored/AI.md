@@ -459,9 +459,61 @@ Port: `Brain::unaware_of` / `Crowd::unaware_of` (true unless in Combat or ringin
 rats, attack group 12, detection 500 (150 busy), escape 750, damage 0.4 per rat clamped 1-5
 every 0.5 s after 2 s, eat with 5 rats; `Twk_DevouringSwarm_Lvl1` (power level 1: 30 rats,
 30 s, 1500 uu): group 10, detection 700 (200 busy), damage 2-5). Port: `dishonored_ai::rats`
-(one brain per `PawnKind::Rat` pawn, its swarm from `SimEvent::RatSpawned`; it runs at its target and holds `PRIMARY` in bite reach, the sim's attack groups deal the damage; meals as `AiEvent::RatEat`). The swarm tick itself was not
-located (the class's vtable dump only showed engine slots); the rules come from the tweak
-fields and the state enums (U-260).
+(one brain per `PawnKind::Rat` pawn, its swarm from `SimEvent::RatSpawned`; it runs at its target and holds `PRIMARY` in bite reach, the sim's attack groups deal the damage; meals as `AiEvent::RatEat`).
+
+### The swarm tick (2026-10-06, U-260, U-261)
+
+Found through the state table rather than the vtable (the class's own vtable dump shows engine
+slots only). CONFIRMED from the code unless marked.
+
+- **State machine** (0x00C65380): a static table at 0x01471B30 (filled at 0x00F8F12A) holds, per
+  `EDisRatSwarmState`, four functions: condition, enter, exit, update. Each tick the swarm takes
+  the first state, in enum order, whose condition returns true, else `DRSS_None` (5). On a change
+  it runs the old state's exit and the new state's enter, then the current state's update.
+  - Hidden: condition from the table's first entry (not decoded), enter 0x00C76CD0, exit 0x00C6DBB0.
+  - Flee: condition 0x00C72900, true when the swarm's `m_fDuration` has run out, its fleeing flag
+    is set, or it has too few rats for its counts (any, when it spawned fewer than
+    `m_InitialRatCountToBeAggressive`; else `m_MinRatCountPerAttackGroup`), none hidden and no
+    `m_bNeverFleeSystemicaly` (the count's meaning, 0x00C6CB80, LIKELY); update 0x00C7A880.
+  - Attack: condition 0x00C87EA0, update 0x00C89EE0 (below).
+  - Move: condition 0x00C654C0 (a custom behaviour with `DRCB_ReachTarget` and a target); update
+    0x00C771B0.
+  - Idle: condition 0x00C6DC60 (any living rats, unless a custom behaviour forbids it); update
+    0x00C76DF0 (idle attraction, roaming, moving away from a lingering pawn after
+    `m_fIdleAwayFromPawnTriggerDuration`, `m_IdleAwayFromPawnMinCount..MaxCount` times).
+- **Spawn** (0x00C7C360): state None, `m_FramesUntilDetection = m_PawnDetectionCheckFrameInterval +
+  rand() x m_PawnDetectionCheckFrameRandomness / 32768`, the idle-away count rolled in
+  `[Min, Max]`.
+- **Attack condition** (0x00C87EA0): a forced custom-behaviour target gets a group first; every
+  detected target that is valid (0x00C879E0: players only after `m_fPlayerDetectionDelayAfterSpawn`),
+  not yet a group's target and reachable gets a new group (0x00C7A390). Then each chasing,
+  attacking or eating group is dropped (0x00C76810) when its target is invalid, unreachable
+  (`m_fCannotReachDuration` >= `m_fPawnUnreachableDelay` or flagged, with a cannot-reach ratio >=
+  0.3), the group has fewer rats than it needs, or a chased target is beyond `m_fPawnEscapeRadius`.
+  An attacking group whose target became a corpse turns to eating (0x00C72810(4)) when it has
+  `m_EatRequiredRatCount` rats and the corpse is not consumed, else it is dropped. True while a
+  group remains.
+- **Attack update** (0x00C89EE0), per group: the destination circles the target
+  (`m_fAroundTargetRotationRadius / Speed`, `m_fFromTargetMoveFactorSpeed`); each rat moves to
+  it, and rats at the target join the group's in-reach list (attacking, or eating for a corpse).
+  No rat in reach: state Chasing, the damage interval counter restarts. A living target: state
+  Attacking, `m_fAttackDuration += dt`, then the bite rule (0x00C891E0). A corpse: state Eating;
+  coming from Attacking, `m_fEatStageDuration -= m_fEatStartupDelayAfterKill`; then the eat loop.
+- **Eat loop** (0x00C6D760): runs only with `m_EatRequiredRatCount` rats in reach;
+  `m_fEatStageDuration += dt`. A dead target (health < 1, 0x009E9FE0): until its mesh is the eaten
+  one (rat-target slot 18), at `m_fEatStartupDuration - m_fEatFXToMeshChangeDelay` the
+  `m_pToEatenMeshFX` plays at each limb and at `m_fEatStartupDuration` the mesh swaps (slot 19) and
+  the clock restarts; afterwards every `m_fEatPerLimbDuration` the next limb (slot 20, 0x00B79830:
+  the NPC's `DisSeveredLimbInfo.m_SeveredLimbInfo`, from a random index in circular order, skipping
+  severed ones, the `m_ChestBoneBreakName` limb last) is severed as eaten and the clock restarts;
+  when none is left the next interval plays `m_pConsumeEatenMeshFX` and sets
+  `eDisEatenState_CorpseConsumed` (slot 22). A target that is not dead is consumed after
+  `GetLimbCount (slot 21: the limb info's count, 1 without) x m_fEatPerLimbDuration` (U-502).
+  `SLInfo_Default` and `SLInfo_Elite` list 6 limbs, so a corpse takes `startup + 7 x per limb`.
+- Port: `dishonored_sim::rats::{CORPSE_LIMBS, eat_duration, eat_clock_start}`; the Devouring
+  Swarm aggregate (`powers::step_swarms`) follows the Attack condition / update order;
+  `dishonored_ai::rats` uses the same eating time. Open: rat lights, the guards'
+  `CombatRatSwarm`, the Hidden condition and the Flee / Move updates in detail.
 
 ## Generic dialog voices (2026-10-06, U-122)
 
