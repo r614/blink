@@ -143,6 +143,7 @@ pub fn run(args: &[String]) -> Result<()> {
         "jump" => jump(&mut c, &o),
         "fall" => fall(&mut c, &o),
         "run" => run_sprint_slide(&mut c, &o),
+        "sdf" => sdf(&mut c),
         "trace" => {
             let n: u32 = o.rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(120);
             c.sample_start(100_000)?;
@@ -161,29 +162,104 @@ fn boot(c: &mut Client) -> Result<()> {
     c.console("open L_Boyle_Ext_P")?;
     wait_for(c, "L_Boyle_Ext_P", Duration::from_secs(300), |s| s.get("map").is_some_and(|m| m == "L_Boyle_Ext_P"))?;
     println!("level loaded; dismissing the briefing");
+    // Skipping the start screen leaves LocalPlayer.ControllerId (+0x5C) at -1, and the
+    // viewport client then routes no key to the player: claim controller 0 like the start
+    // screen's "press any key" does.
+    let st = status(c)?;
+    let engine = hex(st.get("gengine").map(String::as_str).unwrap_or("0"));
+    let players = c.read_u32(engine + 0x480)?;
+    let lp = c.read_u32(players)?;
+    c.write(lp + 0x5c, &0i32.to_le_bytes())?;
     // The briefing waits for any key; then the pawn walks normally.
     let t0 = Instant::now();
     loop {
         tap(c, VK_RETURN, 3)?;
-        c.wait_ticks(30)?;
-        c.sample_start(10)?;
-        let s = samples(c, 5)?;
-        if let Some(last) = s.last() {
-            if last.physics == 1 && last.time_seconds > 0.0 {
-                // Advancing game time while walking: in control.
-                let t1 = last.time_seconds;
-                c.sample_start(10)?;
-                let s2 = samples(c, 30)?;
-                if s2.last().is_some_and(|x| x.time_seconds > t1 + 0.1) {
-                    println!("in control at {:?}", last.location);
-                    return Ok(());
-                }
+        c.wait_ticks(60)?;
+        // In control when holding W moves the pawn.
+        c.sample_start(1000)?;
+        c.key(VK_W, true)?;
+        c.wait_ticks(20)?;
+        c.key(VK_W, false)?;
+        let s = samples(c, 10)?;
+        if let (Some(a), Some(b)) = (s.first(), s.last()) {
+            let d = ((b.location[0] - a.location[0]).powi(2) + (b.location[1] - a.location[1]).powi(2)).sqrt();
+            if d > 20.0 {
+                println!("in control at {:?} (moved {d:.1} uu)", b.location);
+                return Ok(());
             }
         }
         if t0.elapsed() > Duration::from_secs(120) {
             bail!("still not in control");
         }
     }
+}
+
+/// Least squares `y = a + b x + c x^2`.
+fn fit_parabola(p: &[(f64, f64)]) -> Option<(f64, f64, f64)> {
+    if p.len() < 4 {
+        return None;
+    }
+    let mut s = [0.0f64; 5];
+    let mut t = [0.0f64; 3];
+    for &(x, y) in p {
+        let mut xp = 1.0;
+        for k in 0..5 {
+            s[k] += xp;
+            if k < 3 {
+                t[k] += xp * y;
+            }
+            xp *= x;
+        }
+    }
+    let m = [[s[0], s[1], s[2]], [s[1], s[2], s[3]], [s[2], s[3], s[4]]];
+    let det = |m: [[f64; 3]; 3]| m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    let d = det(m);
+    if d.abs() < 1e-12 {
+        return None;
+    }
+    let col = |k: usize| {
+        let mut mm = m;
+        for r in 0..3 {
+            mm[r][k] = t[r];
+        }
+        det(mm) / d
+    };
+    Some((col(0), col(1), col(2)))
+}
+
+/// Register of a CTAB entry (`Name=c9x1` -> 9).
+fn ctab_reg(ctab: &str, name: &str) -> Option<usize> {
+    ctab.split(' ').find_map(|e| e.strip_prefix(name).and_then(|r| r.strip_prefix("=c"))).and_then(|r| r.split('x').next()).and_then(|n| n.parse().ok())
+}
+
+/// Pixel shader constants of the dominant light's distance-field shadow pass, read at draw
+/// time from every created pixel shader that declares `DistanceFieldParameters`.
+fn sdf(c: &mut Client) -> Result<()> {
+    let shaders: Vec<_> = c.shaders()?.into_iter().filter(|s| s.ctab.contains("DistanceFieldParameters")).collect();
+    println!("{} pixel shaders declare DistanceFieldParameters", shaders.len());
+    let names = ["DistanceFieldParameters", "LightColorAndFalloffExponent", "DiffuseOverrideParameter", "SpecularOverrideParameter", "ScreenPositionScaleBias"];
+    let mut seen = std::collections::BTreeMap::new();
+    let got = c.ps_constants(0, 400, "DistanceFieldParameters")?;
+    let drawn: std::collections::BTreeSet<u64> = got.iter().map(|g| g.1).collect();
+    let drawn = drawn.len();
+    for (_, hash, regs) in &got {
+        let Some(s) = shaders.iter().find(|s| s.hash == *hash) else { continue };
+        {
+            let mut line = String::new();
+            for n in names {
+                if let Some(r) = ctab_reg(&s.ctab, n) {
+                    let v = regs[r];
+                    let _ = write!(line, "{n}=({:.6}, {:.6}, {:.6}, {:.6}) ", v[0], v[1], v[2], v[3]);
+                }
+            }
+            *seen.entry(line).or_insert(0) += 1;
+        }
+    }
+    println!("{drawn} of them drawn in the sampled frames; distinct constant sets:");
+    for (l, n) in seen {
+        println!("  x{n}: {l}");
+    }
+    Ok(())
 }
 
 fn floor_z(s: &[Sample]) -> f32 {
@@ -211,6 +287,14 @@ fn jump(c: &mut Client, o: &Opts) -> Result<()> {
         let land = s.iter().skip(i0).position(|x| x.physics != 2).map(|i| i + i0);
         let air = land.map(|i| s[i].time_seconds - t_off);
         let land_vz = land.map(|i| s[i - 1].velocity[2]);
+        // Least-squares parabola through the airborne samples: z = a + b t + c t^2.
+        let air_s: Vec<(f64, f64)> = s[i0..land.unwrap_or(s.len())].iter().map(|x| ((x.time_seconds - t_off) as f64, x.location[2] as f64)).collect();
+        if let Some((a, b, cc)) = fit_parabola(&air_s) {
+            let g = -2.0 * cc;
+            let disc = b * b - 4.0 * cc * (a - z0 as f64);
+            let t_land = if disc >= 0.0 { (-b - disc.sqrt()) / (2.0 * cc) } else { f64::NAN };
+            println!("|   | fit: launch vz {:.1}, gravity {:.1}, apex {:.2} at {:.3} s, back to z0 at {:.3} s |", b, g, a - z0 as f64 + b * b / (2.0 * g), b / g, t_land);
+        }
         println!(
             "| {k} | {:.2} | {:.2} | {:.3} | {} | {:.1} | {} |",
             z0,
@@ -240,13 +324,13 @@ fn fall(c: &mut Client, o: &Opts) -> Result<()> {
         c.sample_start(10)?;
         let s0 = samples(c, 3)?;
         let start = s0.last().context("no sample")?.location;
-        // Actor.SetLocation(vector) on the game thread: moves the pawn properly (collision).
-        let mut parms = Vec::new();
-        for v in [start[0], start[1], start[2] + h] {
-            parms.extend(v.to_le_bytes());
-        }
-        c.call(p, "Actor.SetLocation", &parms)?;
+        // Actor.SetLocation refuses the player pawn (returns false) and SetPhysics(PHYS_Falling)
+        // is ignored, so Location.Z is written and a one-frame step forward lets
+        // physWalking find no floor and start the fall itself.
         c.sample_start(100_000)?;
+        c.write(p + 0xcc, &(start[2] + h).to_le_bytes())?;
+        c.wait_ticks(2)?;
+        tap(c, VK_W, 1)?;
         let s = samples(c, 240)?;
         save(o, &format!("fall{k}_{h}"), &s)?;
         let top = s.first().map(|x| x.location[2]).unwrap_or(0.0);
@@ -276,30 +360,46 @@ fn run_sprint_slide(c: &mut Client, o: &Opts) -> Result<()> {
     if let Some(y) = o.yaw {
         set_yaw(c, y)?;
     }
+    if let Some(at) = o.rest.iter().find_map(|a| a.strip_prefix("at=")) {
+        // at=X,Y,Z: put the pawn there first (Location written directly; it settles onto
+        // the floor below within a few frames).
+        let v: Vec<f32> = at.split(',').filter_map(|s| s.parse().ok()).collect();
+        if v.len() == 3 {
+            let p = pawn(c)?;
+            let mut b = Vec::new();
+            for x in &v {
+                b.extend(x.to_le_bytes());
+            }
+            c.write(p + 0xc4, &b)?;
+            tap(c, VK_W, 1)?;
+            c.wait_ticks(60)?;
+        }
+    }
     c.wait_ticks(20)?;
     // Run.
+    // Frame counts assume ~30 fps; the analysis uses the game time of each sample.
+    let fr = |secs: f32| (secs * 30.0) as u32;
+    let run_s: f32 = o.rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(1.5);
+    let sprint_s: f32 = o.rest.get(2).and_then(|s| s.parse().ok()).unwrap_or(2.0);
     c.sample_start(100_000)?;
     c.key(VK_W, true)?;
-    let run = samples(c, 120)?;
+    let run = samples(c, fr(run_s))?;
     save(o, "run", &run)?;
     // Sprint (W held).
     c.sample_start(100_000)?;
     c.key(VK_SHIFT_L, true)?;
-    let sprint = samples(c, 150)?;
+    let sprint = samples(c, fr(sprint_s))?;
     save(o, "sprint", &sprint)?;
     // Slide: sneak while sprinting, W and Shift kept down.
     c.sample_start(100_000)?;
     c.wait_ticks(1)?;
-    tap(c, VK_C, 3)?;
-    let slide = samples(c, 150)?;
+    tap(c, VK_C, 2)?;
+    let slide = samples(c, fr(1.8))?;
     c.key(VK_SHIFT_L, false)?;
     c.key(VK_W, false)?;
     save(o, "slide", &slide)?;
-    let plateau = |s: &[Sample]| {
-        let n = s.len();
-        let tail = &s[n.saturating_sub(30)..];
-        tail.iter().map(speed2d).sum::<f32>() / tail.len().max(1) as f32
-    };
+    // The speed is clamped at the stance's maximum: the plateau is the top speed reached.
+    let plateau = |s: &[Sample]| s.iter().map(speed2d).fold(0.0f32, f32::max);
     let t_to = |s: &[Sample], v: f32| s.iter().find(|x| speed2d(x) >= v).map(|x| x.time_seconds - s[0].time_seconds);
     let rv = plateau(&run);
     let sv = plateau(&sprint);

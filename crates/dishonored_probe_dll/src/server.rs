@@ -51,28 +51,58 @@ unsafe fn current_user_sd() -> Option<PSECURITY_DESCRIPTOR> {
     }
 }
 
-pub fn start(token: &str) -> bool {
-    let name = format!("{}{}_{}", dishonored_probe::PIPE_PREFIX, unsafe { GetCurrentProcessId() }, token);
-    let Some(sd) = (unsafe { current_user_sd() }) else { return false };
-    let sa = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd, bInheritHandle: 0 };
+/// Up to this many clients at once (one thread each).
+const MAX_CLIENTS: u32 = 4;
+
+struct Sd(PSECURITY_DESCRIPTOR);
+unsafe impl Send for Sd {}
+
+fn create_instance(name: &[u16], sd: &Sd, first: bool) -> Option<Pipe> {
+    let sa = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd.0, bInheritHandle: 0 };
     let h = unsafe {
         CreateNamedPipeW(
-            wide(&name).as_ptr(),
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            name.as_ptr(),
+            PIPE_ACCESS_DUPLEX | if first { FILE_FLAG_FIRST_PIPE_INSTANCE } else { 0 },
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-            1,
+            MAX_CLIENTS,
             1 << 20,
             1 << 20,
             0,
             &sa,
         )
     };
-    unsafe { LocalFree(sd) };
-    if h == INVALID_HANDLE_VALUE {
+    (h != INVALID_HANDLE_VALUE).then_some(Pipe(h))
+}
+
+pub fn start(token: &str) -> bool {
+    let name = wide(&format!("{}{}_{}", dishonored_probe::PIPE_PREFIX, unsafe { GetCurrentProcessId() }, token));
+    let Some(sd) = (unsafe { current_user_sd() }) else { return false };
+    let sd = Sd(sd);
+    // The first instance is created here so a name clash fails the init.
+    let Some(first) = create_instance(&name, &sd, true) else {
+        unsafe { LocalFree(sd.0) };
         return false;
-    }
-    let pipe = Pipe(h);
-    std::thread::spawn(move || serve(pipe));
+    };
+    std::thread::spawn(move || {
+        let mut next = Some(first);
+        loop {
+            let pipe = match next.take().or_else(|| create_instance(&name, &sd, false)) {
+                Some(p) => p,
+                None => {
+                    // All instances busy: wait for one to free up.
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    continue;
+                }
+            };
+            let ok = unsafe { ConnectNamedPipe(pipe.0, std::ptr::null_mut()) };
+            // ERROR_PIPE_CONNECTED (535): a client connected between create and connect.
+            if ok == 0 && unsafe { windows_sys::Win32::Foundation::GetLastError() } != 535 {
+                unsafe { CloseHandle(pipe.0) };
+                continue;
+            }
+            std::thread::spawn(move || serve(pipe));
+        }
+    });
     true
 }
 
@@ -102,15 +132,10 @@ fn write_all(h: HANDLE, buf: &[u8]) -> bool {
     true
 }
 
+/// Serve one connected client until it disconnects, then close the instance.
 fn serve(pipe: Pipe) {
     let h = pipe.0;
-    loop {
-        let ok = unsafe { ConnectNamedPipe(h, std::ptr::null_mut()) };
-        // ERROR_PIPE_CONNECTED (535) means a client connected between create and connect.
-        if ok == 0 && unsafe { windows_sys::Win32::Foundation::GetLastError() } != 535 {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            continue;
-        }
+    {
         loop {
             let mut len = [0u8; 4];
             if !read_exact(h, &mut len) {
@@ -144,7 +169,10 @@ fn serve(pipe: Pipe) {
             }
             unsafe { FlushFileBuffers(h) };
         }
-        unsafe { DisconnectNamedPipe(h) };
+        unsafe {
+            DisconnectNamedPipe(h);
+            CloseHandle(h);
+        }
     }
 }
 
@@ -352,10 +380,12 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
         op::PS_CONSTANTS => {
             let hash = io(rd.u64())?;
             let draws = io(rd.u32())?;
+            let filter = if rd.pos < rd.data.len() { io(rd.str())? } else { String::new() };
             {
                 let mut g = d3d::PS.lock().map_err(|_| "poisoned")?;
                 let ps = g.as_mut().ok_or("d3d hooks not installed")?;
                 ps.want_hash = hash;
+                ps.want_filter = filter;
                 ps.want_draws = draws;
                 ps.got.clear();
             }
@@ -368,8 +398,9 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
                     ps.want_draws = 0;
                     let got = std::mem::take(&mut ps.got);
                     put_u32(&mut out, got.len() as u32);
-                    for (frame, regs) in got {
+                    for (frame, hash, regs) in got {
                         put_u32(&mut out, frame);
+                        out.extend(hash.to_le_bytes());
                         for r in regs {
                             for v in r {
                                 out.extend(v.to_le_bytes());

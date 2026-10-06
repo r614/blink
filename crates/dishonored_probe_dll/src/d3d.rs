@@ -44,7 +44,8 @@ pub struct PsState {
     pub regs: Vec<[f32; 4]>,
     pub want_hash: u64,
     pub want_draws: u32,
-    pub got: Vec<(u32, Vec<[f32; 4]>)>,
+    pub want_filter: String,
+    pub got: Vec<(u32, u64, Vec<[f32; 4]>)>,
 }
 pub static PS: Mutex<Option<PsState>> = Mutex::new(None);
 
@@ -93,7 +94,7 @@ pub fn install() {
         let release: unsafe extern "system" fn(u32) -> u32 = std::mem::transmute(vfn(d3d, UNK_RELEASE) as usize);
         release(d3d);
         if let Ok(mut ps) = PS.lock() {
-            *ps = Some(PsState { shaders: HashMap::new(), current: 0, regs: vec![[0.0; 4]; 224], want_hash: 0, want_draws: 0, got: Vec::new() });
+            *ps = Some(PsState { shaders: HashMap::new(), current: 0, regs: vec![[0.0; 4]; 224], want_hash: 0, want_draws: 0, want_filter: String::new(), got: Vec::new() });
         }
     }
 }
@@ -309,10 +310,13 @@ fn on_draw() {
     if let Ok(mut g) = PS.lock() {
         if let Some(ps) = g.as_mut() {
             if ps.want_draws > 0 {
-                let cur = ps.shaders.get(&ps.current).map(|s| s.hash);
-                if cur == Some(ps.want_hash) {
+                let hit = ps.shaders.get(&ps.current).and_then(|s| {
+                    let ok = if ps.want_hash != 0 { s.hash == ps.want_hash } else { !ps.want_filter.is_empty() && s.ctab.contains(ps.want_filter.as_str()) };
+                    ok.then_some(s.hash)
+                });
+                if let Some(h) = hit {
                     let regs = ps.regs.clone();
-                    ps.got.push((PRESENTS.load(Relaxed), regs));
+                    ps.got.push((PRESENTS.load(Relaxed), h, regs));
                     ps.want_draws -= 1;
                 }
             }

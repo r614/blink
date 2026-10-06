@@ -15,6 +15,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const PIPE_PREFIX: &str = r"\\.\pipe\dishonored_probe_";
 /// Environment variable through which the launcher hands the session token to the DLL.
 pub const TOKEN_ENV: &str = "DISHONORED_PROBE_TOKEN";
+/// "0" turns off the DLL's focus faking (on by default: the engine pauses the world when its
+/// window loses the focus, `bPauseOnLossOfFocus`).
+pub const FAKE_FOCUS_ENV: &str = "DISHONORED_PROBE_FAKE_FOCUS";
 
 /// Request opcodes.
 pub mod op {
@@ -41,7 +44,8 @@ pub mod op {
     pub const CAPTURE: u8 = 10;
     /// -> u32 count, per shader: u32 id, u64 fnv hash, u32 size, str CTAB names.
     pub const SHADERS: u8 = 11;
-    /// u64 hash, u32 draws -> u32 count, per draw: u32 frame, 224 * [f32;4] PS constants.
+    /// u64 hash (0: match by filter), u32 draws, str CTAB filter -> u32 count, per draw:
+    /// u32 frame, u64 shader hash, 224 * [f32;4] PS constants.
     pub const PS_CONSTANTS: u8 = 12;
     /// u32 object, str function ("Class.Func" or "Func"), bytes parms -> bytes parms after call.
     pub const CALL: u8 = 13;
@@ -426,22 +430,26 @@ impl Client {
         (0..n).map(|_| Ok(ShaderInfo { id: rd.u32()?, hash: rd.u64()?, size: rd.u32()?, ctab: rd.str()? })).collect()
     }
 
-    /// PS constant registers (224 float4) at the next `draws` draws made with shader `hash`.
-    pub fn ps_constants(&mut self, hash: u64, draws: u32) -> io::Result<Vec<(u32, Vec<[f32; 4]>)>> {
+    /// PS constant registers (224 float4) at the next `draws` draws (within 5 s) made with
+    /// shader `hash`, or, with `hash` 0, with any shader whose CTAB names contain `filter`.
+    /// Returns (frame, shader hash, registers) per draw.
+    pub fn ps_constants(&mut self, hash: u64, draws: u32, filter: &str) -> io::Result<Vec<(u32, u64, Vec<[f32; 4]>)>> {
         let mut p = Vec::new();
         p.extend(hash.to_le_bytes());
         put_u32(&mut p, draws);
+        put_str(&mut p, filter);
         let r = self.request(op::PS_CONSTANTS, &p)?;
         let mut rd = Reader::new(&r);
         let n = rd.u32()?;
         let mut out = Vec::new();
         for _ in 0..n {
             let frame = rd.u32()?;
+            let h = rd.u64()?;
             let mut regs = Vec::with_capacity(224);
             for _ in 0..224 {
                 regs.push([rd.f32()?, rd.f32()?, rd.f32()?, rd.f32()?]);
             }
-            out.push((frame, regs));
+            out.push((frame, h, regs));
         }
         Ok(out)
     }

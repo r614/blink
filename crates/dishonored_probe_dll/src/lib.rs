@@ -92,6 +92,12 @@ mod imp {
         }
         crate::d3d::install();
         crate::iat::install();
+        // Focus faking (the engine pauses on focus loss): on unless the launcher says "0".
+        let mut buf = [0u16; 8];
+        let name = wide(dishonored_probe::FAKE_FOCUS_ENV);
+        let n = unsafe { GetEnvironmentVariableW(name.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) } as usize;
+        let off = n > 0 && n < buf.len() && buf[0] == b'0' as u16;
+        crate::iat::FAKE_FOCUS.store(!off as u32, std::sync::atomic::Ordering::Relaxed);
         if !crate::server::start(token) {
             return 0;
         }

@@ -20,6 +20,7 @@ use std::path::PathBuf;
 
 mod measure;
 
+#[cfg_attr(not(all(windows, target_arch = "x86")), allow(dead_code))]
 const GAME_DIR: &str = r"C:\Program Files\GOG Galaxy\Games\Dishonored\Binaries\Win32";
 
 fn session_file() -> PathBuf {
@@ -102,7 +103,9 @@ fn main() -> Result<()> {
                 None => std::env::current_exe()?.with_file_name("dishonored_probe_dll.dll"),
             };
             if game_args.is_empty() {
-                game_args = ["-windowed", "-resx=1280", "-resy=720", "-nostartupmovies"].iter().map(|s| s.to_string()).collect();
+                // -nomovie: no Bink startup / loading movies (the loading movie of a level
+                // otherwise waits for a key the engine only reads from a focused window).
+                game_args = ["-windowed", "-resx=1280", "-resy=720", "-nostartupmovies", "-nomovie"].iter().map(|s| s.to_string()).collect();
             }
             let (pid, pipe) = launch::launch(&dll, &game_args)?;
             std::fs::write(session_file(), format!("{pid}\n{pipe}\n"))?;
@@ -169,6 +172,63 @@ fn main() -> Result<()> {
             // axes <forward> <strafe> <turn> <lookup> <frames>
             let f = |i: usize| args.get(i).and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
             connect()?.input_axes(f(1), f(2), f(3), f(4), f(5) as u32)?;
+        }
+        "peek" => {
+            // peek <pc|pawn|engine|input|ADDR> [+OFF | * ]... LEN   (`*` dereferences)
+            let mut c = connect()?;
+            let st = c.status()?;
+            let get = |k: &str| st.lines().find_map(|l| l.strip_prefix(&format!("{k}="))).and_then(|v| parse_u32(v).ok()).unwrap_or(0);
+            let base = args.get(1).context("base")?;
+            let mut a = match base.as_str() {
+                "pc" => get("local_pc"),
+                "pawn" => get("pawn"),
+                "engine" => get("gengine"),
+                "input" => get("player_input"),
+                s => parse_u32(s)?,
+            };
+            let n = args.len();
+            for t in &args[2..n - 1] {
+                if t == "*" {
+                    a = c.read_u32(a)?;
+                } else if let Some(o) = t.strip_prefix('+') {
+                    a = a.wrapping_add(parse_u32(o)?);
+                }
+            }
+            let len = parse_u32(&args[n - 1])?;
+            let b = c.read(a, len)?;
+            println!("{a:#010x}");
+            for (i, ch) in b.chunks(16).enumerate() {
+                let hex: Vec<String> = ch.iter().map(|x| format!("{x:02x}")).collect();
+                let f: Vec<String> = ch.chunks(4).filter(|w| w.len() == 4).map(|w| format!("{:.3}", f32::from_le_bytes(w.try_into().unwrap()))).collect();
+                println!("+{:04x} {}  | {}", i * 16, hex.join(" "), f.join(" "));
+            }
+        }
+        "call" => {
+            // call <pc|pawn|ADDR> <Class.Function> [f:1.5 | i:3 | x:hex]...  (parms in order)
+            let mut c = connect()?;
+            let st = c.status()?;
+            let get = |k: &str| st.lines().find_map(|l| l.strip_prefix(&format!("{k}="))).and_then(|v| parse_u32(v).ok()).unwrap_or(0);
+            let obj = match args.get(1).context("object")?.as_str() {
+                "pc" => get("local_pc"),
+                "pawn" => get("pawn"),
+                s => parse_u32(s)?,
+            };
+            let mut parms = Vec::new();
+            for a in &args[3..] {
+                if let Some(v) = a.strip_prefix("f:") {
+                    parms.extend(v.parse::<f32>()?.to_le_bytes());
+                } else if let Some(v) = a.strip_prefix("i:") {
+                    parms.extend(v.parse::<i32>()?.to_le_bytes());
+                } else if let Some(h) = a.strip_prefix("x:") {
+                    for i in 0..h.len() / 2 {
+                        parms.push(u8::from_str_radix(&h[i * 2..i * 2 + 2], 16)?);
+                    }
+                }
+            }
+            let n = parms.len().max(16);
+            let r = c.call(obj, args.get(2).context("function")?, &parms)?;
+            let hex: Vec<String> = r[..n.min(r.len()) + 16].iter().map(|x| format!("{x:02x}")).collect();
+            println!("{}", hex.join(" "));
         }
         "write" => {
             // write <addr> <hex bytes>
