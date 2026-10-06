@@ -17,7 +17,9 @@
     pbr_types::{STANDARD_MATERIAL_FLAGS_UNLIT_BIT, PbrInput},
     pbr_functions::{calculate_diffuse_color, calculate_F0_dielectric},
     mesh_view_bindings as view_bindings,
+    mesh_view_types,
     mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
+    clustered_forward as clustering,
     mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
     lighting,
     lighting::LAYER_BASE,
@@ -35,9 +37,54 @@
 // baked_shadow_params = (on, bias, scale, exponent).
 @group(#{MATERIAL_BIND_GROUP}) @binding(104) var baked_shadow: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var<uniform> baked_shadow_params: vec4<f32>;
+// The same for the batch's dominant point / spot light (U-403): its field, and its Bevy world
+// position (w = its distance-field scale, 0 when the batch has none).
+@group(#{MATERIAL_BIND_GROUP}) @binding(106) var baked_shadow_local: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(107) var<uniform> baked_local_light: vec4<f32>;
 
-// The dominant directional light (index 0) as Bevy's PBR applies it, unshadowed.
-fn dominant_light(pbr_input: PbrInput) -> vec3<f32> {
+// saturate((d + bias) * scale)^exponent, 0 below 1e-6.
+fn distance_field_shadow(d: f32, bias: f32, scale: f32, exponent: f32) -> f32 {
+    let s = saturate((d + bias) * scale);
+    return select(0.0, pow(s, exponent), s - 1e-6 >= 0.0);
+}
+
+// The batch's dominant point / spot light as Bevy's clustered forward pass applies it, found in
+// the fragment's cluster by its position: (unshadowed light, Bevy's shadow factor).
+fn dominant_local_light(pbr_input: PbrInput) -> vec4<f32> {
+    let view_z = dot(vec4<f32>(
+        view_bindings::view.view_from_world[0].z,
+        view_bindings::view.view_from_world[1].z,
+        view_bindings::view.view_from_world[2].z,
+        view_bindings::view.view_from_world[3].z
+    ), pbr_input.world_position);
+    let cluster_index = clustering::view_fragment_cluster_index(pbr_input.frag_coord.xy, view_z, pbr_input.is_orthographic);
+    let ranges = clustering::unpack_clusterable_object_index_ranges(cluster_index);
+    var li = lighting_input(pbr_input);
+    let receiver = (pbr_input.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u;
+    for (var i: u32 = ranges.first_point_light_index_offset; i < ranges.first_reflection_probe_index_offset; i = i + 1u) {
+        let id = clustering::get_clusterable_object_id(i);
+        let light = view_bindings::clustered_lights.data[id];
+        if (distance(light.position_radius.xyz, baked_local_light.xyz) > 0.01) {
+            continue;
+        }
+        let shadowed = receiver && (light.flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u;
+        if (i < ranges.first_spot_light_index_offset) {
+            var shadow = 1.0;
+            if (shadowed) {
+                shadow = shadows::fetch_point_shadow(id, pbr_input.world_position, pbr_input.world_normal, pbr_input.frag_coord.xy);
+            }
+            return vec4<f32>(lighting::point_light(id, &li, true, true), shadow);
+        }
+        var shadow = 1.0;
+        if (shadowed) {
+            shadow = shadows::fetch_spot_shadow(id, pbr_input.world_position, pbr_input.world_normal, light.shadow_map_near_z, pbr_input.frag_coord.xy);
+        }
+        return vec4<f32>(lighting::spot_light(id, &li, true), shadow);
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+fn lighting_input(pbr_input: PbrInput) -> lighting::LightingInput {
     let m = pbr_input.material;
     var li: lighting::LightingInput;
     li.layers[LAYER_BASE].NdotV = max(dot(pbr_input.N, pbr_input.V), 0.0001);
@@ -52,6 +99,12 @@ fn dominant_light(pbr_input: PbrInput) -> vec3<f32> {
     li.F0_dielectric = calculate_F0_dielectric(m.reflectance);
     li.F0_metallic = m.base_color.rgb;
     li.F_ab = lighting::F_AB(m.perceptual_roughness, li.layers[LAYER_BASE].NdotV);
+    return li;
+}
+
+// The dominant directional light (index 0) as Bevy's PBR applies it, unshadowed.
+fn dominant_light(pbr_input: PbrInput) -> vec3<f32> {
+    var li = lighting_input(pbr_input);
     return lighting::directional_light(0u, &li, true);
 }
 
@@ -128,8 +181,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         // swap the cascade factor Bevy applied for the distance-field one.
         if (baked_shadow_params.x > 0.0 && view_bindings::lights.n_directional_lights > 0u) {
             let d = textureSampleLevel(baked_shadow, baked_sampler, in.uv_b, 0.0).r;
-            var s = saturate((d + baked_shadow_params.y) * baked_shadow_params.z);
-            s = select(0.0, pow(s, baked_shadow_params.w), s - 1e-6 >= 0.0);
+            let s = distance_field_shadow(d, baked_shadow_params.y, baked_shadow_params.z, baked_shadow_params.w);
             var cascade = 1.0;
             if ((pbr_input.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u
                     && (view_bindings::lights.directional_lights[0].flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
@@ -145,6 +197,19 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
             out.color = vec4<f32>(max(out.color.rgb + (s - cascade) * light, vec3<f32>(0.0)), out.color.a);
             if (baked_params.w == 8.0) {
                 out.color = vec4<f32>(s, d, cascade, 1.0);
+            }
+        }
+        // The batch's dominant point / spot light: the same swap of Bevy's shadow factor (1 for
+        // the unshadowed point lights) for the component's distance field (U-403).
+        if (baked_local_light.w > 0.0) {
+            let d = textureSampleLevel(baked_shadow_local, baked_sampler, in.uv_b, 0.0).r;
+            // Measured: bias -0.5 + 0.5 / scale, exponent 2 (U-461).
+            let scale = baked_local_light.w;
+            let s = distance_field_shadow(d, -0.5 + 0.5 / scale, scale, 2.0);
+            let l = dominant_local_light(pbr_input);
+            out.color = vec4<f32>(max(out.color.rgb + (s - l.w) * l.xyz * view_bindings::view.exposure, vec3<f32>(0.0)), out.color.a);
+            if (baked_params.w == 9.0) {
+                out.color = vec4<f32>(s, d, l.w, 1.0);
             }
         }
 #endif

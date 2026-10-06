@@ -179,6 +179,10 @@ pub struct LightmapAtlas {
     /// 255 where no component has one. Empty when no component of the atlas has one.
     #[serde(default)]
     pub shadow: Vec<u8>,
+    /// The same for the dominant point / spot light of each component
+    /// (`InstanceLightmap::df_light`), 255 where none. Empty when no component has one.
+    #[serde(default)]
+    pub shadow_local: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -192,6 +196,10 @@ pub struct InstanceLightmap {
     /// dynamic shadow map.
     #[serde(default)]
     pub df_shadow: bool,
+    /// Index (in `DishonoredMap::lights`) of the dominant point / spot light whose distance-field
+    /// shadow map this component has (`LightmapAtlas::shadow_local`).
+    #[serde(default)]
+    pub df_light: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -360,6 +368,9 @@ pub struct Light {
     pub dominant: bool,
     #[serde(default)]
     pub casts_shadows: bool,
+    /// The component's `LightGuid` (what `ShadowMap2D::LightGuid` refers to).
+    #[serde(default)]
+    pub guid: [u32; 4],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

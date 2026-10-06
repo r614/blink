@@ -72,6 +72,8 @@ pub struct ImportStats {
     pub lightmap_pages: usize,
     /// Lightmapped components with a distance-field shadow map of the dominant directional light.
     pub shadow_map_components: usize,
+    /// ... and with one of a dominant point / spot light (U-403).
+    pub local_shadow_map_components: usize,
     /// Distinct cross-package references that no indexed package defines.
     pub unresolved_paths: Vec<String>,
     /// MIC parent chains that end at an undefined import.
@@ -461,6 +463,10 @@ pub fn read_light(pkg: &Package, actor: usize, class: &str) -> std::result::Resu
             falloff_exponent: float_or(c, "FalloffExponent", 2.0),
             dominant: class.starts_with("Dominant"),
             casts_shadows: bool_or(c, "CastShadows", true) && bool_or(c, "CastDynamicShadows", true),
+            guid: match find(c, "LightGuid").map(|v| &v.value) {
+                Some(Value::Guid(g)) => *g,
+                _ => [0; 4],
+            },
         }))
     }
 }
@@ -679,9 +685,18 @@ impl Importer<'_> {
         keys.sort();
         // Distance-field shadow maps of the dominant directional light, decoded once (PF_G8).
         let dominant = self.dominant_directional_guids();
+        // ... and of the dominant point / spot lights (U-403): light GUID -> index in map.lights.
+        let local: Vec<([u32; 4], usize)> = self
+            .map
+            .lights
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.dominant && !matches!(l.kind, dishonored_ir::LightKind::Directional) && l.guid != [0; 4])
+            .map(|(i, l)| (l.guid, i))
+            .collect();
         let mut shadow_textures: HashMap<Key, Option<(usize, usize, Vec<u8>)>> = HashMap::new();
         for p in &pending {
-            for s in p.shadows.iter().filter(|s| dominant.contains(&s.light_guid)) {
+            for s in p.shadows.iter().filter(|s| dominant.contains(&s.light_guid) || local.iter().any(|l| l.0 == s.light_guid)) {
                 if shadow_textures.contains_key(&s.texture) {
                     continue;
                 }
@@ -720,11 +735,20 @@ impl Importer<'_> {
                 pending[m].shadows.iter().filter(|s| dominant.contains(&s.light_guid)).find_map(|s| shadow_textures.get(&s.texture)?.as_ref().map(|t| (s, t)))
             };
             let mut shadow = if members.iter().any(|&m| member_shadow(m).is_some()) { vec![255u8; w * h] } else { Vec::new() };
+            // The component's first dominant point / spot light field (light index, map, texture).
+            let member_local = |m: usize| {
+                pending[m].shadows.iter().find_map(|s| {
+                    let li = local.iter().find(|l| l.0 == s.light_guid)?.1;
+                    shadow_textures.get(&s.texture)?.as_ref().map(|t| (li, s, t))
+                })
+            };
+            let mut shadow_local = if members.iter().any(|&m| member_local(m).is_some()) { vec![255u8; w * h] } else { Vec::new() };
             for pass in [2u8, 1u8] {
                 let pad = if pass == 2 { 0 } else { 1 };
                 for &m in members {
                     let lm = &pending[m].lm;
                     let sm = member_shadow(m);
+                    let sl = member_local(m);
                     let rx0 = (lm.coordinate_bias[0] * w as f32).floor() as i64 - pad;
                     let ry0 = (lm.coordinate_bias[1] * h as f32).floor() as i64 - pad;
                     let rx1 = ((lm.coordinate_bias[0] + lm.coordinate_scale[0]) * w as f32).ceil() as i64 + pad;
@@ -740,10 +764,13 @@ impl Importer<'_> {
                             let dir = d.2[i].map(srgb_to_linear);
                             out[i] = [0, 1, 2].map(|k| avg[k] * lm.scales[0][k]);
                             out_dir[i] = [0, 1, 2].map(|k| dir[k] * lm.scales[1][k]);
+                            let uv = Vec2::new((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+                            let uv1 = (uv - Vec2::from(lm.coordinate_bias)) / Vec2::from(lm.coordinate_scale).max(Vec2::splat(1e-9));
                             if let Some((s, t)) = sm {
-                                let uv = Vec2::new((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
-                                let uv1 = (uv - Vec2::from(lm.coordinate_bias)) / Vec2::from(lm.coordinate_scale).max(Vec2::splat(1e-9));
                                 shadow[i] = crate::lightmap::sample_r8_bilinear(&t.2, t.0, t.1, uv1 * Vec2::from(s.scale) + Vec2::from(s.bias));
+                            }
+                            if let Some((_, s, t)) = sl {
+                                shadow_local[i] = crate::lightmap::sample_r8_bilinear(&t.2, t.0, t.1, uv1 * Vec2::from(s.scale) + Vec2::from(s.bias));
                             }
                         }
                     }
@@ -751,6 +778,7 @@ impl Importer<'_> {
             }
             let atlas = self.map.lightmaps.len();
             self.stats.shadow_map_components += members.iter().filter(|&&m| member_shadow(m).is_some()).count();
+            self.stats.local_shadow_map_components += members.iter().filter(|&&m| member_local(m).is_some()).count();
             for &m in members {
                 let lm = &pending[m].lm;
                 let min = Vec2::from(lm.coordinate_bias);
@@ -759,6 +787,7 @@ impl Importer<'_> {
                     uv_min: min,
                     uv_max: min + Vec2::from(lm.coordinate_scale),
                     df_shadow: member_shadow(m).is_some(),
+                    df_light: member_local(m).map(|l| l.0),
                 });
             }
             self.map.lightmaps.push(LightmapAtlas {
@@ -768,6 +797,7 @@ impl Importer<'_> {
                 texels: out.into_iter().map(pack_rgb9e5).collect(),
                 directional: out_dir.into_iter().map(pack_rgb9e5).collect(),
                 shadow,
+                shadow_local,
             });
         }
         self.stats.lightmap_atlases = self.map.lightmaps.len();
@@ -780,6 +810,7 @@ impl Importer<'_> {
     fn pack_lightmap_pages(&mut self, page: u32) {
         let atlases = std::mem::take(&mut self.map.lightmaps);
         let any_shadow = atlases.iter().any(|a| !a.shadow.is_empty());
+        let any_local = atlases.iter().any(|a| !a.shadow_local.is_empty());
         let mut order: Vec<usize> = (0..atlases.len()).collect();
         order.sort_by_key(|&i| (std::cmp::Reverse(atlases[i].height), std::cmp::Reverse(atlases[i].width)));
         // atlas -> (page, x, y)
@@ -802,6 +833,7 @@ impl Importer<'_> {
                     texels: vec![0; (page * page) as usize],
                     directional: vec![0; (page * page) as usize],
                     shadow: if any_shadow { vec![255; (page * page) as usize] } else { Vec::new() },
+                    shadow_local: if any_local { vec![255; (page * page) as usize] } else { Vec::new() },
                 });
                 x = 0;
                 y = 0;
@@ -817,6 +849,9 @@ impl Importer<'_> {
                 }
                 if a.shadow.len() == a.texels.len() {
                     pages[p].shadow[dst..dst + w as usize].copy_from_slice(&a.shadow[src..src + w as usize]);
+                }
+                if a.shadow_local.len() == a.texels.len() {
+                    pages[p].shadow_local[dst..dst + w as usize].copy_from_slice(&a.shadow_local[src..src + w as usize]);
                 }
             }
             place[i] = (p, x, y);
@@ -1105,9 +1140,17 @@ impl Importer<'_> {
             .into_iter()
             .filter_map(|(n, t)| Some((n.to_string(), t?)))
             .collect();
-        // Distortion materials: the raw textures the distortion pass samples (U-360).
-        if chain.switch("Dist_Enable_Distortion") == Some(true) {
-            for n in ["Dist_Distortion", "O_Opacity", "UV_Distortion"] {
+        // Distortion materials: the raw textures the distortion pass samples (U-360); sky domes
+        // (Skies_PMAT): the textures its shader samples.
+        let raw: &[&str] = if chain.switch("Dist_Enable_Distortion") == Some(true) {
+            &["Dist_Distortion", "O_Opacity", "UV_Distortion"]
+        } else if sky {
+            &["D_Diffuse", "C_Clouds_Texture", "C2_Clouds_2_Texture", "Storm"]
+        } else {
+            &[]
+        };
+        {
+            for &n in raw {
                 let key = chain.textures.iter().chain(chain.default_textures.iter()).find(|(k, _)| k.trim().eq_ignore_ascii_case(n)).map(|v| v.1);
                 if let Some(t) = key.and_then(|k| self.texture(k)) {
                     texture_params.push((n.to_string(), t));

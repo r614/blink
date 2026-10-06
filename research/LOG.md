@@ -1338,3 +1338,60 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   - Navmesh walking (`movement::nav_walk_move`, decoded by the FaceFX agent, commit c05d9e1) is in this branch with a unit test.
 - **Harness:** `kismet --route duel` (debug build) 6/6. The open stage now reports the countdown up to `One` (before: only `Duel_Explained`).
 - **Confidence:** CONFIRMED for the publish semantics (UE3 engine behaviour) and the run; the panic's cause is SPECULATIVE.
+
+## 2026-10-06: Bloom parts, DOF downsample, sky dome, local distance-field shadows, ragdoll walls (U-323, U-325, U-403, U-282)
+
+- **Question:** What do the original's bloom, far-DOF source and sky dome compute, can the
+  dominant point / spot lights use their distance-field shadow maps like the moon, and can the
+  presentation ragdoll stop at walls?
+- **Method:** `shader_dump` of `GlobalShaderCache-PC-D3D-SM3.bin` (every shader is preceded by its
+  type string: 52 - 55 `FKuwa*`, 56 - 63 ArkPp DOF, 64 - 71 ArkPp blurs, 82 - 87 bloom); new
+  `tools/package_dump/src/bin/shader_maps.rs`, which walks the RefShaderCache's material shader
+  maps (friendly name, static parameter set, `(type, GUID)` entries resolved to shader numbers,
+  uniform expressions; layout in RENDERING.md); `fxc /dumpbin`; Ghidra `StrUsers` on the shader type
+  strings and `Decomp` of their users (0x009251A0, 0x0091FE50, 0x0090DE60, 0x00922210,
+  0x0090EAB0, 0x00924F00); `obj_dump` / `mic_static` of the Boyle sky MICs and dominant lights.
+- **Bloom (U-323):** 0x009251A0 draws the primitives with bloom relevance with their
+  `TBloomPartMeshPixelShader` into a scene-size target (LogLuv RGBA8: the 64 bloom shaders all end
+  in the LogLuv encode, matrix 0.2209 / 0.3390 / 0.4184 ...), then at quarter size
+  `FBloomDownSamplePixelShader` (four taps at +-1/4 of a quarter pixel, decoded, averaged, x
+  `gBloomTint.rgb` + `gBloomTint.w`, max 0) with `gBloomTint` = (m_Tint.rgb x m_Scale, -m_Threshold
+  x m_Scale) of `ArkPpBloomParameters` (0x0090DE60 reads +0x6C..+0x80 of the settings), then
+  "ArkGaussian" (0x0091FE50): `TBloomBlurPixelShader` once along X and once along Y (taps 0,
+  +-1.3973, +-3.3973 texels, weights 0.2416, 0.2643, 0.1149). The result is added after the fog
+  by the DisFog shaders' `sBloomParts` (or `FBloomComposePixelShader` = scene + bloom). Bloom-part
+  colour of the generic bases (shader maps of `generic_PMAT` / `generic_masked_SingleSided_PMAT`
+  with `B_Enable_Bloom`): `E_Emissive` (masked) [x `E_Emissive_Color.rgb x a` with
+  `E_Enable_Emissive_color`] x `B_Bloom_Intensity` + `SelectionColor`; without `E_Enable_Emissive`
+  `0 x B_Bloom_Intensity`; maps without bloom use one shader that outputs `SelectionColor` (0).
+  Boyle Ext: m_Scale 0.4, m_Tint (1, 0.953, 0.723).
+- **DOF source (U-325):** 0x00922210 runs `FArkPpDofDownsamplePS` twice (full -> half -> quarter);
+  the pixel shader is a single bilinear tap at uv + `gResolutionParams.xy` (= 1 / size, 0x0090EAB0),
+  the corner of a 2x2 block; the uber shader samples the quarter copy at the pixel's own uv. The
+  box-blur pixel shader (68) is a stub writing magenta.
+- **Sky dome:** the Boyle Ext sky (`Boyle_2_inst`: storm, clouds, clouds 2, gradient, UV channel 2)
+  and Boyle Int sky (`Boyle_01_inst`: clouds, UV channel 2) shader maps decode to the formula in
+  RENDERING.md (cloud layers rotated by `Speed x Time x 0.1`, gradient over `|v + clouds.r x
+  distortion|^power` or `D_Diffuse` on UV1, cloud lerps, `^sky_contrast`, + storm). The old
+  approximation was texture x (D_Diffuse_color + mean gradient).
+- **Local distance-field shadows (U-403):** Boyle Ext has `DominantPointLight_1` (radius 900) and
+  `DominantSpotLight_0/2`, Boyle Int `DominantSpotLight_0`; their `LightGuid`s match components'
+  `ShadowMap2D`s like the moon's.
+- **Port:** `bloom.rs` / `bloom.wgsl` (parts collected per material at level spawn as world-space
+  triangles, depth-tested against the scene depth into RGBA16F; downsample, blur; `--no-bloom`);
+  `ark_post` split into DisFog (+ bloom), two 2x2 downsamples and the uber pass
+  (`ark_downsample.wgsl`); `sky.rs` / `sky.wgsl` (`SkyMaterial` swapped in for Skies_PMAT domes;
+  the import keeps their four textures); import of `Light::guid`, `LightmapAtlas::shadow_local`,
+  `InstanceLightmap::df_light`; lightmap batches split by local light, `lightmap_ext.wgsl` finds the
+  light in the fragment's cluster and swaps Bevy's shadow factor for the field
+  (`DISHONORED_LIGHTMAP_DEBUG=shadow_local`); ragdoll walls: the steep (|n.z| < 0.7) collision
+  triangles within 128 uu of the corpse are copied into pawn space at the hand-over and each body
+  is pushed out of them as a sphere (two-sided, losing its velocity into the wall).
+- **Tests:** `bloom::tests::bloom_colour_follows_the_switches`, `sky::tests::*`,
+  `ark_post::tests::*`, `ragdoll::tests::chain_falls_against_a_wall` (without the wall the chain
+  crosses the plane; with it every body stays a radius in front; two runs bit-identical),
+  `ragdoll::tests::walls_keep_only_steep_triangles_and_push_out`.
+- **Confidence:** CONFIRMED for the shader maths and the setters read; LIKELY for the bloom parts'
+  depth state and target filtering (assumed depth-tested, 4x4 box), which local lights use the measured
+  DF scale 3.125 vs 100 (U-461; the moon now uses the measured 3.75, U-401). Open: U-520 (sky terms not used by Boyle), U-521 (other bloom bases), U-522 (Kuwahara
+  node).

@@ -42,6 +42,7 @@ pub const CONFIGS: &[(&str, &[&str], &str)] = &[
     ("no-dynamic-lights", &["--no-dynamic-lights"], "level lights off (placeholder sun)"),
     ("no-fog", &["--no-fog"], "DisFog off"),
     ("no-post", &["--no-post"], "ArkPp post stack off"),
+    ("no-bloom", &["--no-bloom"], "material bloom parts off"),
     ("no-sky", &["--no-sky"], "sky treated as ordinary geometry"),
     ("legacy-geometry", &["--legacy-geometry"], "prefix-matched sublevels, static mesh actors only"),
 ];

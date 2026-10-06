@@ -446,6 +446,8 @@ pub fn run() -> AppExit {
     }))
     .add_plugins(MaterialPlugin::<crate::map_render::BakedMaterial>::default())
     .add_plugins(crate::ark_post::ArkPostPlugin)
+    .add_plugins(crate::sky::SkyPlugin)
+    .add_plugins(crate::bloom::BloomPlugin)
     .add_plugins(MenuAudioPlugin { register_source: true, music: true })
     .insert_resource(crate::audio::global_volume())
     .insert_resource(ClearColor(Color::srgb(0.05, 0.055, 0.06)))

@@ -3,8 +3,9 @@
 //! physics body is a point mass at its bone, linked to its parent body by its
 //! `RB_ConstraintSetup` (rest length from the pose at the hand-over, swing cone from
 //! `Swing1/Swing2LimitAngle`), falling under gravity onto the level floor around the corpse
-//! (a height grid sampled from the collision at the hand-over: stairs, slopes and ledges; walls
-//! are not collided, U-282).
+//! (a height grid sampled from the collision at the hand-over: stairs, slopes and ledges) and
+//! kept out of the level's walls (the steep collision triangles around the corpse, copied into
+//! pawn space at the hand-over; each body is a sphere of its physics radius, U-282).
 //!
 //! It runs at a fixed step from the pose sampled exactly at the notify time, so a corpse settles
 //! the same way on every run. The simulation's corpse position stays authoritative: the ragdoll
@@ -49,6 +50,7 @@ pub struct Ragdoll {
     /// Start globals of part 0 (pawn space).
     g0: Vec<Mat4>,
     floor: FloorGrid,
+    walls: Vec<WallTri>,
     gravity: f32,
     elapsed: f32,
     acc: f32,
@@ -90,6 +92,82 @@ impl FloorGrid {
     }
 }
 
+/// Collision triangles steeper than this (|normal.z|) are walls; flatter ones are floor (the
+/// grid) or ceiling.
+pub const WALL_MAX_NZ: f32 = 0.7;
+/// Horizontal reach (uu, from the pawn's origin) of the walls copied at the hand-over: the floor
+/// grid's half width plus the largest body radius.
+pub const WALL_REACH: f32 = (GRID_N - 1) as f32 * 0.5 * GRID_CELL + 32.0;
+
+/// One wall triangle in pawn space (`n`: unit face normal, the side bodies stay on).
+#[derive(Clone, Copy, Debug)]
+struct WallTri {
+    a: Vec3,
+    b: Vec3,
+    c: Vec3,
+    n: Vec3,
+}
+
+impl WallTri {
+    fn new(t: [Vec3; 3]) -> Option<WallTri> {
+        let n = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
+        (n != Vec3::ZERO && n.z.abs() < WALL_MAX_NZ).then_some(WallTri { a: t[0], b: t[1], c: t[2], n })
+    }
+
+    /// Closest point of the triangle to `p` (Ericson, Real-Time Collision Detection 5.1.5).
+    fn closest(&self, p: Vec3) -> Vec3 {
+        let (a, b, c) = (self.a, self.b, self.c);
+        let (ab, ac, ap) = (b - a, c - a, p - a);
+        let (d1, d2) = (ab.dot(ap), ac.dot(ap));
+        if d1 <= 0.0 && d2 <= 0.0 {
+            return a;
+        }
+        let bp = p - b;
+        let (d3, d4) = (ab.dot(bp), ac.dot(bp));
+        if d3 >= 0.0 && d4 <= d3 {
+            return b;
+        }
+        let vc = d1 * d4 - d3 * d2;
+        if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+            return a + ab * (d1 / (d1 - d3));
+        }
+        let cp = p - c;
+        let (d5, d6) = (ab.dot(cp), ac.dot(cp));
+        if d6 >= 0.0 && d5 <= d6 {
+            return c;
+        }
+        let vb = d5 * d2 - d1 * d6;
+        if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+            return a + ac * (d2 / (d2 - d6));
+        }
+        let va = d3 * d6 - d5 * d4;
+        if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+            return b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
+        }
+        let denom = 1.0 / (va + vb + vc);
+        a + ab * (vb * denom) + ac * (vc * denom)
+    }
+
+    /// Push-out of a sphere at `p` (direction, depth) when it overlaps the triangle, away from
+    /// the face on the side the centre is on (the level's collision is queried two-sided, like
+    /// the line checks).
+    fn push(&self, p: Vec3, radius: f32) -> Option<(Vec3, f32)> {
+        let sd = (p - self.a).dot(self.n);
+        if sd.abs() >= radius {
+            return None;
+        }
+        let d = p - self.closest(p);
+        let dist = d.length();
+        if dist >= radius {
+            return None;
+        }
+        if dist < 1e-4 {
+            return Some((if sd < 0.0 { -self.n } else { self.n }, radius - dist));
+        }
+        Some((d / dist, radius - dist))
+    }
+}
+
 fn arc(a: Vec3, b: Vec3) -> Quat {
     let (a, b) = (a.normalize_or_zero(), b.normalize_or_zero());
     if a == Vec3::ZERO || b == Vec3::ZERO {
@@ -115,8 +193,9 @@ fn frame(a1: Vec3, a2: Vec3, b1: Vec3, b2: Vec3) -> Quat {
 
 impl Ragdoll {
     /// Build from part 0's bones and the start / previous-step globals (pawn space). `floor` is
-    /// the floor height under a pawn-space point, `gravity` uu/s^2 (negative, down).
-    pub fn new(asset: &PhysicsAssetData, part: &[BoneAsset], g0: &[Mat4], g_prev: &[Mat4], floor_at: &dyn Fn(f32, f32) -> f32, gravity: f32) -> Option<Ragdoll> {
+    /// the floor height under a pawn-space point, `walls` the level's collision triangles around
+    /// the pawn (pawn space; only the steep ones are kept), `gravity` uu/s^2 (negative, down).
+    pub fn new(asset: &PhysicsAssetData, part: &[BoneAsset], g0: &[Mat4], g_prev: &[Mat4], floor_at: &dyn Fn(f32, f32) -> f32, walls: &[[Vec3; 3]], gravity: f32) -> Option<Ragdoll> {
         let find = |n: &str| part.iter().position(|b| b.name.eq_ignore_ascii_case(n));
         let mut bodies: Vec<Body> = Vec::new();
         for b in &asset.bodies {
@@ -182,7 +261,8 @@ impl Ragdoll {
                 k = p as usize;
             })
             .collect();
-        Some(Ragdoll { bodies, owner, top, g0: g0.to_vec(), floor: FloorGrid::sample(floor_at), gravity, elapsed: 0.0, acc: 0.0 })
+        let walls = walls.iter().filter_map(|t| WallTri::new(*t)).collect();
+        Some(Ragdoll { bodies, owner, top, g0: g0.to_vec(), floor: FloorGrid::sample(floor_at), walls, gravity, elapsed: 0.0, acc: 0.0 })
     }
 
     /// Parents before children.
@@ -245,6 +325,18 @@ impl Ragdoll {
                         let corr = (fixed - cur) * 0.5;
                         self.bodies[i].pos += corr;
                         self.bodies[p].pos -= corr;
+                    }
+                }
+            }
+            // Walls: out of every overlapping triangle, losing the velocity into it.
+            for b in &mut self.bodies {
+                for w in &self.walls {
+                    if let Some((dir, depth)) = w.push(b.pos, b.radius) {
+                        b.pos += dir * depth;
+                        let vn = (b.pos - b.prev).dot(dir);
+                        if vn < 0.0 {
+                            b.prev += dir * vn;
+                        }
                     }
                 }
             }
@@ -358,7 +450,7 @@ mod tests {
         let part = &m.parts[0];
         let g0: Vec<Mat4> = dishonored_assets::characters::bind_globals(&part.bones).iter().map(|g| part.mesh_to_pawn * *g).collect();
         let a = dishonored_assets::npc_anim::load_physics_asset(&c, &("L_Boyle_Ext_Script".into(), "Npc_EliteGuard.Physics.Skm_EliteGuard_Physics".into())).unwrap();
-        let mut r = Ragdoll::new(&a, &part.bones, &g0, &g0, &|_, _| -hh, -980.0).unwrap();
+        let mut r = Ragdoll::new(&a, &part.bones, &g0, &g0, &|_, _| -hh, &[], -980.0).unwrap();
         r.settle();
         for b in &r.bodies {
             assert!(b.pos.is_finite(), "{}", part.bones[b.bone].name);
@@ -400,13 +492,80 @@ mod tests {
         let g0: Vec<Mat4> = dishonored_assets::characters::bind_globals(&part.bones).iter().map(|g| part.mesh_to_pawn * *g).collect();
         let a = dishonored_assets::npc_anim::load_physics_asset(&c, &("L_Boyle_Ext_Script".into(), "Npc_EliteGuard.Physics.Skm_EliteGuard_Physics".into())).unwrap();
         let floor = |x: f32, _y: f32| if x < 0.0 { -hh } else { -hh + 30.0 };
-        let mut r = Ragdoll::new(&a, &part.bones, &g0, &g0, &floor, -980.0).unwrap();
+        let mut r = Ragdoll::new(&a, &part.bones, &g0, &g0, &floor, &[], -980.0).unwrap();
         r.settle();
         for b in &r.bodies {
             let f = r.floor.at(b.pos.x, b.pos.y);
             assert!(b.pos.z >= f + b.radius - 1.0, "{} at {} under the floor {f}", part.bones[b.bone].name, b.pos);
         }
     }
+    /// A three-body chain (root, spine, head) as a physics asset and its bind globals.
+    fn chain() -> (PhysicsAssetData, Vec<BoneAsset>, Vec<Mat4>) {
+        let bone = |name: &str, parent: i32, t: Vec3| BoneAsset { name: name.into(), parent, rotation: Quat::IDENTITY, translation: t };
+        let part = vec![bone("root", -1, Vec3::ZERO), bone("spine", 0, Vec3::new(0.0, 0.0, 30.0)), bone("head", 1, Vec3::new(0.0, 0.0, 30.0))];
+        let g0 = vec![Mat4::from_translation(Vec3::ZERO), Mat4::from_translation(Vec3::new(0.0, 0.0, 30.0)), Mat4::from_translation(Vec3::new(0.0, 0.0, 60.0))];
+        let body = |b: &str| dishonored_ir::npc_anim::PhysBody { bone: b.into(), radius: 8.0, ..Default::default() };
+        let joint = |a: &str, b: &str| dishonored_ir::npc_anim::PhysConstraint { bone1: a.into(), bone2: b.into(), swing_limited: true, swing1: 45.0, swing2: 45.0, ..Default::default() };
+        let asset = PhysicsAssetData { name: "chain".into(), bodies: vec![body("root"), body("spine"), body("head")], constraints: vec![joint("spine", "root"), joint("head", "spine")] };
+        (asset, part, g0)
+    }
+
+    /// A wall 20 uu in front of the pawn (+X), facing it, as two triangles.
+    fn wall_at_x(x: f32) -> Vec<[Vec3; 3]> {
+        let (lo, hi) = (Vec3::new(x, -200.0, -100.0), Vec3::new(x, 200.0, 300.0));
+        vec![
+            [lo, Vec3::new(x, lo.y, hi.z), hi],
+            [lo, hi, Vec3::new(x, hi.y, lo.z)],
+        ]
+    }
+
+    /// The chain, toppling towards a wall, stops at it (every body at least its radius in front
+    /// of the plane); without the wall it falls through that plane. Two runs settle bit-identically.
+    #[test]
+    fn chain_falls_against_a_wall() {
+        let (asset, part, g0) = chain();
+        // Moving +X at 600 uu/s at the hand-over (previous step 10 uu behind).
+        let g_prev: Vec<Mat4> = g0.iter().map(|g| Mat4::from_translation(Vec3::new(-10.0, 0.0, 0.0)) * *g).collect();
+        let floor = |_: f32, _: f32| -8.0;
+        let walls = wall_at_x(20.0);
+        let run = |walls: &[[Vec3; 3]]| {
+            let mut r = Ragdoll::new(&asset, &part, &g0, &g_prev, &floor, walls, -980.0).unwrap();
+            r.settle();
+            r.bodies.iter().map(|b| b.pos).collect::<Vec<Vec3>>()
+        };
+        let free = run(&[]);
+        assert!(free.iter().any(|p| p.x > 20.0), "without the wall the chain should cross x = 20: {free:?}");
+        let a = run(&walls);
+        for p in &a {
+            assert!(p.is_finite());
+            assert!(p.x <= 20.0 - 8.0 + 0.5, "body through the wall: {p}");
+            assert!(p.z >= -8.0 + 8.0 - 0.5, "body under the floor: {p}");
+        }
+        let b = run(&walls);
+        assert_eq!(a.iter().map(|p| p.to_array().map(f32::to_bits)).collect::<Vec<_>>(), b.iter().map(|p| p.to_array().map(f32::to_bits)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn walls_keep_only_steep_triangles_and_push_out() {
+        // A floor triangle is not a wall.
+        assert!(WallTri::new([Vec3::ZERO, Vec3::X, Vec3::Y]).is_none());
+        let w = WallTri::new(wall_at_x(20.0)[0]).unwrap();
+        // Facing the pawn (-X).
+        assert!((w.n.x + 1.0).abs() < 1e-6);
+        // A sphere straddling the face is pushed to touch it from the front.
+        let p = Vec3::new(20.0 + w.n.x * 3.0, 0.0, 200.0);
+        let (dir, depth) = w.push(p, 8.0).unwrap();
+        assert!((dir - w.n).length() < 1e-5 && (depth - 5.0).abs() < 1e-4, "{dir} {depth}");
+        // From behind: pushed back out behind (two-sided).
+        let (dir, depth) = w.push(Vec3::new(20.0 - w.n.x * 3.0, 0.0, 200.0), 8.0).unwrap();
+        assert!((dir + w.n).length() < 1e-5 && (depth - 5.0).abs() < 1e-4, "{dir} {depth}");
+        // Beyond the radius on either side: nothing.
+        assert!(w.push(Vec3::new(20.0 + w.n.x * 9.0, 0.0, 200.0), 8.0).is_none());
+        assert!(w.push(Vec3::new(20.0 - w.n.x * 9.0, 0.0, 200.0), 8.0).is_none());
+        // Past the triangle's edge: no push.
+        assert!(w.push(Vec3::new(20.0 + w.n.x * 3.0, 500.0, 200.0), 8.0).is_none());
+    }
+
     #[test]
     fn frame_matches_two_axes() {
         let q = frame(Vec3::X, Vec3::Y, Vec3::Z, -Vec3::X);

@@ -26,7 +26,6 @@ fn f32_at(d: &[u8], p: usize) -> f32 {
 }
 
 struct Shader {
-    n: usize,
     code_at: usize,
     len: usize,
 }
@@ -62,7 +61,7 @@ fn scan_shaders(d: &[u8], names: &[String]) -> (Vec<Shader>, HashMap<[u8; 16], (
                 break;
             }
         }
-        out.push(Shader { n, code_at: p, len });
+        out.push(Shader { code_at: p, len });
         n += 1;
         p += len;
     }

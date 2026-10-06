@@ -352,7 +352,8 @@ pub fn spawn_map(
     } else {
         (Vec::new(), Vec::new())
     };
-    let shadow_handles: Vec<Handle<Image>> = if features.lightmaps { map.lightmaps.iter().map(|l| images.add(shadow_image(l))).collect() } else { Vec::new() };
+    let shadow_handles: Vec<Handle<Image>> = if features.lightmaps { map.lightmaps.iter().map(|l| images.add(shadow_image(&l.shadow, l))).collect() } else { Vec::new() };
+    let shadow_local_handles: Vec<Handle<Image>> = if features.lightmaps { map.lightmaps.iter().map(|l| images.add(shadow_image(&l.shadow_local, l))).collect() } else { Vec::new() };
     // Flat-normal irradiance pages for geometry drawn with Bevy's own per-entity lightmaps
     // (translucent and unmerged instances), built on first use.
     let mut flat_handles: Vec<Option<Handle<Image>>> = vec![None; map.lightmaps.len()];
@@ -412,6 +413,8 @@ pub fn spawn_map(
 
     let merge = std::env::var_os("DISHONORED_NO_MERGE").is_none();
     let mut batches: std::collections::HashMap<BatchKey, Batch> = std::collections::HashMap::new();
+    // Bloom parts by material: (emissive texture, bloom colour, world-space triangles).
+    let mut bloom_parts: std::collections::BTreeMap<usize, (usize, Vec3, Vec<f32>)> = std::collections::BTreeMap::new();
     let mut spawned = 0;
     for (ii, inst) in map.instances.iter().enumerate() {
         if inst.hidden && !show_hidden {
@@ -431,6 +434,15 @@ pub fn spawn_map(
                 info!("sky instance {} section {si}: centre ({:.0},{:.0},{:.0}) radius {:.0} uu", mesh.source, c.x, c.y, c.z, r);
             }
             let translucent = mat_id.is_some_and(|m| map.materials[m].blend == BlendHint::Translucent);
+            // Bloom parts (bloom.rs): the section again, in world space, for its material's
+            // bloom colour.
+            if !inst.hidden && features.materials && features.post {
+                let bloom = mat_id.and_then(|m| Some((m, map.material_params.get(m)?))).and_then(|(m, p)| Some((m, p.emissive?, crate::bloom::bloom_color(p)?)));
+                if let Some((m, tex, colour)) = bloom {
+                    let entry = bloom_parts.entry(m).or_insert_with(|| (tex, colour, Vec::new()));
+                    append_world_triangles(&mut entry.2, mesh, si, coords::transform(inst.transform));
+                }
+            }
             // Static opaque/masked geometry is merged into world-space batches (one draw per
             // material, lightmap page and cell instead of one per instance section); sorted
             // translucent, sky and debug geometry stays per instance.
@@ -446,6 +458,9 @@ pub fn spawn_map(
                     cell: ((t.x / BATCH_CELL).floor() as i32, (t.y / BATCH_CELL).floor() as i32),
                     uv1: has_uv1,
                     df: lm.is_some_and(|l| l.df_shadow && features.df_shadows && !map.lightmaps[l.atlas].shadow.is_empty()),
+                    df_light: lm
+                        .and_then(|l| l.df_light.filter(|_| features.df_shadows && !map.lightmaps[l.atlas].shadow_local.is_empty()))
+                        .map(|i| i as u32),
                 };
                 let b = batches.entry(key).or_default();
                 b.append(mesh, si, coords::transform(inst.transform), lm.map(|l| (l.uv_min, l.uv_max)));
@@ -471,6 +486,13 @@ pub fn spawn_map(
             if is_sky || translucent {
                 e.insert(bevy::light::NotShadowCaster);
             }
+            // Skies_PMAT domes: the material's own shader (sky.rs) replaces the approximation.
+            if is_sky && features.materials && !inst.hidden {
+                let sky = mat_id.and_then(|m| Some((map.material_params.get(m)?, map.materials.get(m)?)));
+                if let Some(sm) = sky.and_then(|(p, ma)| crate::sky::SkyMaterial::new(p, &ma.texture_params, &image_handles)) {
+                    e.insert(crate::sky::PendingSky(sm));
+                }
+            }
             if let Some(m) = mover {
                 e.insert(m); // [interp]
             }
@@ -484,6 +506,14 @@ pub fn spawn_map(
             spawned += 1;
         }
     }
+    if !bloom_parts.is_empty() {
+        info!("bloom parts: {} materials, {} triangles", bloom_parts.len(), bloom_parts.values().map(|b| b.2.len() / (3 * crate::bloom::VERTEX_FLOATS)).sum::<usize>());
+        let batches = bloom_parts
+            .into_values()
+            .map(|(tex, color, verts)| crate::bloom::BloomBatch { verts: std::sync::Arc::new(verts), texture: image_handles[tex].clone(), color })
+            .collect();
+        commands.spawn((crate::bloom::BloomParts { batches }, Transform::IDENTITY, Visibility::default(), MapGeometry { instance: usize::MAX }));
+    }
     let n_batches = batches.len();
     // Lightmap debugging (`DISHONORED_LIGHTMAP_DEBUG`): `nospec` drops the lightmap specular,
     // `flat` ignores normal maps in the directional reconstruction.
@@ -496,9 +526,10 @@ pub fn spawn_map(
         Ok("diffuse") => 6.0,
         Ok("dir") => 7.0,
         Ok("shadow") => 8.0,
+        Ok("shadow_local") => 9.0,
         _ => 0.0,
     };
-    let mut baked_cache: std::collections::HashMap<(u32, u32, bool), Handle<BakedMaterial>> = std::collections::HashMap::new();
+    let mut baked_cache: std::collections::HashMap<(u32, u32, bool, Option<u32>), Handle<BakedMaterial>> = std::collections::HashMap::new();
     // Build batch meshes (MikkTSpace tangents dominate) across all cores.
     let built: Vec<(BatchKey, Mesh)> = {
         let jobs: Vec<(BatchKey, Batch)> = batches.into_iter().filter(|(_, b)| !b.indices.is_empty()).collect();
@@ -545,7 +576,7 @@ pub fn spawn_map(
             // Lightmap regions are already folded into UV1: one shared material per
             // (material, atlas page).
             Some(atlas) => {
-                let h = baked_cache.entry((key.material, atlas, key.df)).or_insert_with(|| {
+                let h = baked_cache.entry((key.material, atlas, key.df, key.df_light)).or_insert_with(|| {
                     let base = materials.get(&mat).cloned().unwrap_or_default();
                     let exposure = base.lightmap_exposure;
                     // Lightmap specular: colour = reflectance * 2 / a (see lightmap_ext.wgsl),
@@ -560,7 +591,13 @@ pub fn spawn_map(
                             lightmap: lightmap_handles[atlas as usize].clone(),
                             directional: directional_handles[atlas as usize].clone(),
                             shadow: shadow_handles[atlas as usize].clone(),
-                            shadow_params: if key.df { Vec4::new(1.0, DF_SHADOW.0, DF_SHADOW.1, DF_SHADOW.2) } else { Vec4::ZERO },
+                            shadow_params: Vec4::new(if key.df { 1.0 } else { 0.0 }, DF_SHADOW.0, DF_SHADOW.1, DF_SHADOW.2),
+                            shadow_local: shadow_local_handles[atlas as usize].clone(),
+                            local_light: key
+                                .df_light
+                                .and_then(|i| map.lights.get(i as usize))
+                                .map(|l| coords::pos(l.position).extend(DF_SHADOW_LOCAL_SCALE))
+                                .unwrap_or(Vec4::ZERO),
                         },
                     })
                 });
@@ -588,6 +625,9 @@ struct BatchKey {
     atlas: Option<u32>,
     /// Distance-field shadowed by the dominant directional light.
     df: bool,
+    /// The dominant point / spot light (index in `DishonoredMap::lights`) whose distance field
+    /// shadows the batch (U-403).
+    df_light: Option<u32>,
     cell: (i32, i32),
     uv1: bool,
 }
@@ -640,6 +680,21 @@ impl Batch {
     }
 }
 
+/// Append one section of a static mesh as world-space (Bevy) triangles: position, UV0 per vertex
+/// (`bloom::VERTEX_FLOATS`).
+fn append_world_triangles(out: &mut Vec<f32>, mesh: &dishonored_ir::StaticMeshAsset, section: usize, m: Mat4) {
+    let s = &mesh.sections[section];
+    let start = s.first_index as usize;
+    let end = (start + s.num_triangles as usize * 3).min(mesh.indices.len());
+    for &vi in &mesh.indices[start..end] {
+        let v = vi as usize;
+        let Some(p) = mesh.positions.get(v) else { continue };
+        let p = m.transform_point3(coords::pos(*p));
+        let uv = mesh.uv0.get(v).copied().unwrap_or(Vec2::ZERO);
+        out.extend_from_slice(&[p.x, p.y, p.z, uv.x, uv.y]);
+    }
+}
+
 /// Baked lightmap as a material extension (see `lightmap_ext.wgsl`): one bind group per
 /// material instead of Bevy's per-entity lightmap slots, which cost ~4 ms/frame of
 /// `prepare_mesh_bind_groups` on Boyle and prevented batching.
@@ -660,18 +715,27 @@ pub struct BakedLightmap {
     /// (on, bias, scale, exponent) of the distance-field shadow, see `DF_SHADOW`.
     #[uniform(105)]
     pub shadow_params: Vec4,
+    /// The batch's dominant point / spot light distance field (`LightmapAtlas::shadow_local`).
+    #[texture(106)]
+    pub shadow_local: Handle<Image>,
+    /// That light's Bevy world position; w = its distance-field scale (0: the batch has none).
+    #[uniform(107)]
+    pub local_light: Vec4,
 }
 
 /// `DistanceFieldParameters` of the original's distance-field light shaders
-/// (`saturate((d + bias) * scale)^exponent`): the setter was not traced (U-402). The form keeps
-/// the half-shadow at the field's 0.5 edge (Lightmass stores d = 0.5 + distance / (2 x
-/// `MaxTransitionDistanceWorldSpace` 50 uu)); scale 4 gives a 25 uu penumbra; the exponent is
-/// `LightmassDirectionalLightSettings.ShadowExponent` (default 2).
-pub const DF_SHADOW: (f32, f32, f32) = (-0.5 + 0.5 / 4.0, 4.0, 2.0);
+/// (`saturate((d + bias) * scale)^exponent`), measured in the running game for Boyle Ext's moon
+/// (engine hook, research/dishonored/INSTRUMENTATION.md; U-401, U-460): (-0.36667, 3.75, 2.0).
+/// The bias is always -0.5 + 0.5 / scale: a ramp of width 1 / scale about the field's 0.5 edge
+/// (Lightmass stores d = 0.5 + distance / (2 x `MaxTransitionDistanceWorldSpace` 50 uu)).
+pub const DF_SHADOW: (f32, f32, f32) = (-0.5 + 0.5 / 3.75, 3.75, 2.0);
+/// Scale measured for the bluish (dominant) spot lights' distance-field shadows; warm spot lights
+/// drew with 100 (which light gets which is U-461). Same bias rule, exponent 2.
+pub const DF_SHADOW_LOCAL_SCALE: f32 = 3.125;
 
 /// The shadow plane of an atlas as a linear R8 image (white when it has none).
-pub fn shadow_image(l: &LightmapAtlas) -> Image {
-    let (w, h, data) = if l.shadow.len() == (l.width * l.height) as usize { (l.width, l.height, l.shadow.clone()) } else { (1, 1, vec![255]) };
+pub fn shadow_image(plane: &[u8], l: &LightmapAtlas) -> Image {
+    let (w, h, data) = if plane.len() == (l.width * l.height) as usize { (l.width, l.height, plane.to_vec()) } else { (1, 1, vec![255]) };
     let mut img = Image::new(Extent3d { width: w, height: h, depth_or_array_layers: 1 }, TextureDimension::D2, data, WgpuFormat::R8Unorm, RenderAssetUsages::RENDER_WORLD);
     img.sampler = bevy::image::ImageSampler::Descriptor(bevy::image::ImageSamplerDescriptor {
         address_mode_u: bevy::image::ImageAddressMode::ClampToEdge,
