@@ -44,6 +44,28 @@ struct LevelFx {
     by_path: HashMap<String, usize>,
     /// (system, emitter) -> material handle.
     materials: HashMap<(usize, usize), Handle<StandardMaterial>>,
+    /// Mesh emitters: (system, emitter) -> (mesh, material).
+    mesh_parts: HashMap<(usize, usize), (Handle<Mesh>, Handle<StandardMaterial>)>,
+    /// Emitters not drawn (untextured mesh emitters).
+    skipped: std::collections::HashSet<(usize, usize)>,
+}
+
+/// One particle of a mesh emitter.
+#[derive(Component)]
+struct FxMeshParticle;
+
+/// A static mesh (Dishonored mesh space) as a Bevy mesh in converted space.
+fn bevy_mesh(m: &dishonored_ir::StaticMeshAsset) -> Mesh {
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, m.positions.iter().map(|p| coords::pos(*p).to_array()).collect::<Vec<_>>());
+    let normals: Vec<[f32; 3]> = if m.normals.len() == m.positions.len() { m.normals.iter().map(|n| coords::dir(*n).to_array()).collect() } else { vec![[0.0, 1.0, 0.0]; m.positions.len()] };
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    let uv: Vec<[f32; 2]> = if m.uv0.len() == m.positions.len() { m.uv0.iter().map(|u| u.to_array()).collect() } else { vec![[0.0; 2]; m.positions.len()] };
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
+    // Handedness flips with the axis swap: reverse the winding.
+    let idx: Vec<u32> = m.indices.chunks_exact(3).flat_map(|t| [t[0], t[2], t[1]]).collect();
+    mesh.insert_indices(Indices::U32(idx));
+    mesh
 }
 
 #[derive(Resource, Default)]
@@ -67,6 +89,9 @@ struct Particle {
     color: Vec3,
     alpha: f32,
     r: [f32; 4],
+    /// Mesh particles: rotation (radians about X, Y, Z) and its rate.
+    mrot: Vec3,
+    mrot_rate: Vec3,
 }
 
 #[derive(Default)]
@@ -88,6 +113,8 @@ pub struct FxInstance {
     transform: Mat4,
     sims: Vec<EmitterSim>,
     meshes: Vec<Handle<Mesh>>,
+    /// Mesh emitters: one entity per live particle.
+    pools: Vec<Vec<(Entity, Handle<StandardMaterial>, LinearRgba)>>,
     one_shot: bool,
     warmed: bool,
 }
@@ -134,7 +161,51 @@ fn material_for(map: &DishonoredMap, em: &ParticleEmitterAsset, images: &mut Ass
         ParticleBlend::Opaque => AlphaMode::Opaque,
         ParticleBlend::Translucent => AlphaMode::Blend,
     };
-    mats.add(StandardMaterial { base_color_texture: image, unlit: true, alpha_mode, cull_mode: None, double_sided: true, fog_enabled: true, ..default() })
+    // The material graphs are not evaluated (APPROXIMATION, EFFECTS.md): the instance's
+    // `Color` vector tints, its intensity/opacity scalars scale, and procedural glow materials
+    // (sphere masks, no texture) get a radial falloff.
+    let params = em.material.and_then(|m| map.material_params.get(m));
+    let tint = params.and_then(|p| p.vectors.iter().find(|v| v.0.eq_ignore_ascii_case("Color")).map(|v| v.1)).unwrap_or([1.0; 4]);
+    let gain: f32 = params
+        .map(|p| p.scalars.iter().filter(|s| ["LightIntensity", "Opacity", "Intensity", "EmissiveIntensity", "Emissive_Intensity"].iter().any(|n| s.0.eq_ignore_ascii_case(n))).map(|s| s.1).product())
+        .unwrap_or(1.0);
+    let image = image.or_else(|| {
+        let power = params.and_then(|p| p.scalars.iter().find(|s| s.0.eq_ignore_ascii_case("SphereMask_Power")).map(|s| s.1)).unwrap_or(2.0);
+        let key = usize::MAX - (power * 100.0) as usize;
+        if let Some(h) = cache.get(&key) {
+            return Some(h.clone());
+        }
+        let h = images.add(radial_falloff(power));
+        cache.insert(key, h.clone());
+        Some(h)
+    });
+    let base_color = if alpha_mode == AlphaMode::Add {
+        Color::linear_rgb(tint[0] * gain, tint[1] * gain, tint[2] * gain)
+    } else {
+        Color::linear_rgba(tint[0], tint[1], tint[2], gain.clamp(0.0, 1.0))
+    };
+    mats.add(StandardMaterial { base_color, base_color_texture: image, unlit: true, alpha_mode, cull_mode: None, double_sided: true, fog_enabled: alpha_mode != AlphaMode::Add, ..default() })
+}
+
+/// A white disc fading to transparent at its edge (`(1 - r)^power`), for procedural glows.
+fn radial_falloff(power: f32) -> Image {
+    let n = 64usize;
+    let mut data = Vec::with_capacity(n * n * 4);
+    for y in 0..n {
+        for x in 0..n {
+            let (u, v) = ((x as f32 + 0.5) / n as f32 * 2.0 - 1.0, (y as f32 + 0.5) / n as f32 * 2.0 - 1.0);
+            let a = (1.0 - (u * u + v * v).sqrt()).clamp(0.0, 1.0).powf(power.max(0.1));
+            let b = (a * 255.0) as u8;
+            data.extend_from_slice(&[255, 255, 255, b]);
+        }
+    }
+    Image::new(
+        bevy::render::render_resource::Extent3d { width: n as u32, height: n as u32, depth_or_array_layers: 1 },
+        bevy::render::render_resource::TextureDimension::D2,
+        data,
+        bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    )
 }
 
 /// Register a level's particle systems and spawn its placed emitters (called on level spawn).
@@ -146,14 +217,64 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
             materials.insert((si, ei), material_for(map, e, images, &mut cache, mats));
         }
     }
+    // Mesh emitters: the mesh with its own (first section) material unless overridden.
+    let mut mesh_parts = HashMap::new();
+    let mut mesh_handles: HashMap<usize, Handle<Mesh>> = HashMap::new();
+    let mut skipped = std::collections::HashSet::new();
+    for (si, s) in map.particle_systems.iter().enumerate() {
+        for (ei, e) in s.emitters.iter().enumerate() {
+            let Some(mid) = e.mesh_id.filter(|m| *m < map.meshes.len()) else {
+                if e.mesh.is_some() {
+                    skipped.insert((si, ei));
+                }
+                continue;
+            };
+            // Volumetric glow meshes with procedural materials (sphere masks, fresnel, depth fade;
+            // no texture) cannot be approximated without their material graph: not drawn.
+            let eff = if e.mesh_override_material && e.material.is_some() { e.material } else { map.meshes[mid].sections.first().and_then(|s| s.material) };
+            let textured = eff.and_then(|m| map.materials.get(m)).is_some_and(|m| m.diffuse.is_some() || !m.texture_params.is_empty());
+            if !textured {
+                skipped.insert((si, ei));
+                continue;
+            }
+            let mh = mesh_handles.entry(mid).or_insert_with(|| meshes.add(bevy_mesh(&map.meshes[mid]))).clone();
+            let mat = if e.mesh_override_material && e.material.is_some() {
+                materials[&(si, ei)].clone()
+            } else {
+                let mut e2 = e.clone();
+                e2.material = map.meshes[mid].sections.first().and_then(|s| s.material);
+                e2.blend = match e2.material.and_then(|m| map.material_params.get(m)).map(|p| p.blend) {
+                    Some(dishonored_ir::MaterialBlend::Additive) => ParticleBlend::Additive,
+                    Some(dishonored_ir::MaterialBlend::Opaque) => ParticleBlend::Opaque,
+                    Some(dishonored_ir::MaterialBlend::Masked) => ParticleBlend::Masked,
+                    Some(dishonored_ir::MaterialBlend::Modulate) => ParticleBlend::Modulate,
+                    _ => ParticleBlend::Translucent,
+                };
+                material_for(map, &e2, images, &mut cache, mats)
+            };
+            mesh_parts.insert((si, ei), (mh, mat));
+        }
+    }
     let lf = Arc::new(LevelFx {
         by_path: map.particle_systems.iter().enumerate().map(|(i, s)| (s.source.to_ascii_lowercase(), i)).collect(),
         systems: map.particle_systems.clone(),
         materials,
+        mesh_parts,
+        skipped,
     });
     fx.levels.insert(name.to_string(), lf.clone());
     fx.active = name.to_string();
     let mut n = 0;
+    if let Ok(want) = std::env::var("DISH_FX_DUMP") {
+        for s in map.particle_systems.iter().filter(|s| s.source.to_ascii_lowercase().contains(&want.to_ascii_lowercase())) {
+            info!("fx system {s:?}");
+            for e in &s.emitters {
+                if let Some(m) = e.material {
+                    info!("fx material {} {:?} {:?}", e.name, map.materials.get(m).map(|x| (&x.source, x.diffuse, &x.texture_params)), map.material_params.get(m).map(|p| (&p.scalars, &p.vectors, p.blend, &p.base_material)));
+                }
+            }
+        }
+    }
     if std::env::var_os("DISH_FX_LIST").is_some() {
         for e in &map.emitters {
             let s = &map.particle_systems[e.system];
@@ -161,7 +282,9 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
             info!("fx emitter {} {} at {:.0} ({} emitters, unsupported {:?})", e.source, s.source, e.position(), s.emitters.len(), unsupported);
         }
     }
-    for e in map.emitters.iter().filter(|e| e.auto_activate) {
+    // `--no-fx` (render comparisons) also leaves the particle effects out.
+    let off = std::env::args().any(|a| a == "--no-fx") || std::env::var_os("DISH_NO_PARTICLES").is_some();
+    for e in map.emitters.iter().filter(|e| e.auto_activate && !off) {
         spawn_instance(commands, meshes, &lf, name, e.system, e.transform, false);
         n += 1;
     }
@@ -178,6 +301,9 @@ fn spawn_instance(commands: &mut Commands, meshes: &mut Assets<Mesh>, lf: &Level
     for (ei, _) in s.emitters.iter().enumerate() {
         let mesh = meshes.add(empty_mesh());
         handles.push(mesh.clone());
+        if lf.mesh_parts.contains_key(&(system, ei)) || lf.skipped.contains(&(system, ei)) {
+            continue;
+        }
         let Some(mat) = lf.materials.get(&(system, ei)) else { continue };
         commands.spawn((Mesh3d(mesh), MeshMaterial3d(mat.clone()), Transform::IDENTITY, bevy::light::NotShadowCaster, bevy::camera::visibility::NoFrustumCulling, ChildOf(root)));
     }
@@ -187,6 +313,7 @@ fn spawn_instance(commands: &mut Commands, meshes: &mut Assets<Mesh>, lf: &Level
         transform,
         sims: s.emitters.iter().map(|_| EmitterSim::default()).collect(),
         meshes: handles,
+        pools: s.emitters.iter().map(|_| Vec::new()).collect(),
         one_shot,
         warmed: one_shot,
     });
@@ -194,18 +321,22 @@ fn spawn_instance(commands: &mut Commands, meshes: &mut Assets<Mesh>, lf: &Level
 
 fn empty_mesh() -> Mesh {
     let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
-    m.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
-    m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, Vec::<[f32; 3]>::new());
-    m.insert_attribute(Mesh::ATTRIBUTE_UV_0, Vec::<[f32; 2]>::new());
-    m.insert_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new());
-    m.insert_indices(Indices::U32(Vec::new()));
+    m.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; 3]);
+    m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32; 3]; 3]);
+    m.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32; 2]; 3]);
+    m.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.0f32; 4]; 3]);
+    m.insert_indices(Indices::U32(vec![0, 1, 2]));
     m
 }
 
 /// Spawn a gameplay effect by ParticleSystem path at a Dishonored position and direction.
 pub fn spawn_effect(commands: &mut Commands, meshes: &mut Assets<Mesh>, fx: &mut Effects, path: &str, at: Vec3, dir: Vec3) -> bool {
     let Some(lf) = fx.levels.get(&fx.active).cloned() else { return false };
-    let Some(&si) = lf.by_path.get(&path.to_ascii_lowercase()) else { return false };
+    let Some(&si) = lf.by_path.get(&path.to_ascii_lowercase()) else {
+        warn!("effects: {path} not decoded for {}", fx.active);
+        return false;
+    };
+    info!("effects: {path} at {at:.0}");
     // Emitter X axis along the direction (UE3 effects are authored facing +X).
     let x = if dir.length_squared() > 1e-6 { dir.normalize() } else { Vec3::X };
     let z = if x.z.abs() > 0.99 { Vec3::X } else { Vec3::Z };
@@ -228,7 +359,8 @@ fn spawn_particle(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, rn
     }
     let et = sim.time;
     let r = [rnd(), rnd(), rnd(), rnd()];
-    let life = em.lifetime.as_ref().map(|d| d.eval1(et, r[0])).unwrap_or(1.0).max(0.01);
+    // No lifetime module (or 0): the particle lives until the emitter is destroyed (UE3).
+    let life = em.lifetime.as_ref().map(|d| d.eval1(et, r[0])).filter(|l| *l > 0.0).unwrap_or(f32::INFINITY);
     let mut local = d3(&em.location, et, r[1], [0.0; 3]);
     let mut vel = d3(&em.velocity, et, r[2], [0.0; 3]);
     if let Some((radius, pos_axes, surface, velocity)) = &em.sphere {
@@ -268,6 +400,8 @@ fn spawn_particle(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, rn
         color,
         alpha,
         r,
+        mrot: d3(&em.mesh_rotation, et, r[2], [0.0; 3]) * std::f32::consts::TAU,
+        mrot_rate: d3(&em.mesh_rotation_rate, et, r[3], [0.0; 3]) * std::f32::consts::TAU,
     });
 }
 
@@ -285,6 +419,7 @@ fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32, rnd
         }
         p.pos += p.vel * dt;
         p.rot += p.rot_rate * dt;
+        p.mrot += p.mrot_rate * dt;
     }
     sim.particles.retain(|p| p.age < p.life);
     if sim.done {
@@ -329,7 +464,7 @@ fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32, rnd
 }
 
 /// Write the sprite quads of one emitter into its mesh (Bevy space, facing the camera).
-fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right: Vec3, cam_up: Vec3, mesh: &mut Mesh) {
+fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right: Vec3, cam_up: Vec3, cam_pos: Vec3, mesh: &mut Mesh) {
     let n = sim.particles.len();
     let mut pos = Vec::with_capacity(n * 4);
     let mut uv = Vec::with_capacity(n * 4);
@@ -354,7 +489,19 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
         let c = coords::pos(world);
         let (hw, hh) = (size.x * 0.5 * coords::UU_TO_BEVY, if em.screen_align == 1 { size.y } else { size.x } * 0.5 * coords::UU_TO_BEVY);
         let (s, co) = p.rot.sin_cos();
-        let (rx, ry) = (cam_right * co + cam_up * s, cam_up * co - cam_right * s);
+        // Plane of the sprite: camera facing, or locked to an emitter axis (OrientationAxisLock).
+        let axis = |v: glam::Vec4| coords::dir(v.truncate()).normalize_or_zero();
+        let (br, bu) = match em.axis_lock {
+            1 | 4 => (axis(xf.y_axis), axis(xf.z_axis)),
+            2 | 5 => (axis(xf.x_axis), axis(xf.z_axis)),
+            3 | 6 => (axis(xf.x_axis), axis(xf.y_axis)),
+            7..=9 => {
+                let up = axis([xf.x_axis, xf.y_axis, xf.z_axis][(em.axis_lock - 7) as usize]);
+                (up.cross(cam_pos - c).normalize_or_zero(), up)
+            }
+            _ => (cam_right, cam_up),
+        };
+        let (rx, ry) = (br * co + bu * s, bu * co - br * s);
         let (rx, ry) = if em.screen_align == 2 && p.vel.length_squared() > 1e-3 {
             // Velocity aligned: the sprite's up axis follows the velocity.
             let v = coords::dir(p.vel).normalize();
@@ -380,6 +527,14 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
         }
         idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
+    if pos.is_empty() {
+        // Never upload an empty vertex buffer: one degenerate, transparent triangle.
+        pos = vec![[0.0; 3]; 3];
+        nrm = vec![[0.0, 1.0, 0.0]; 3];
+        uv = vec![[0.0; 2]; 3];
+        col = vec![[0.0; 4]; 3];
+        idx = vec![0, 1, 2];
+    }
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, nrm);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
@@ -392,6 +547,7 @@ fn simulate(
     mut fx: ResMut<Effects>,
     time: Res<Time>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
     mut q: Query<(Entity, &mut FxInstance, &InheritedVisibility)>,
     cams: Query<&GlobalTransform, With<Camera3d>>,
 ) {
@@ -425,8 +581,57 @@ fn simulate(
         for (i, (em, sim)) in sys.emitters.iter().zip(inst.sims.iter_mut()).enumerate() {
             step(em, sim, &xf, dt, &mut rnd);
             live += sim.particles.len();
-            if let Some(mut m) = inst.meshes.get(i).and_then(|h| meshes.get_mut(h)) {
-                build_mesh(em, sim, &xf, right, up, &mut m);
+            if let Some((mh, mat)) = lf.mesh_parts.get(&(inst.system, i)) {
+                // Mesh particles: one entity each, scaled by the particle size and turned by
+                // its mesh rotation, its colour and alpha on its own material copy.
+                let pool = &mut inst.pools[i];
+                let want = sim.particles.len().min(64);
+                while pool.len() < want {
+                    let base = mats.get(mat).cloned().unwrap_or_default();
+                    let tintc = base.base_color.to_linear();
+                    let pm = mats.add(base);
+                    let id = commands.spawn((Mesh3d(mh.clone()), MeshMaterial3d(pm.clone()), Transform::IDENTITY, bevy::light::NotShadowCaster, FxMeshParticle, ChildOf(e))).id();
+                    pool.push((id, pm, tintc));
+                }
+                while pool.len() > want {
+                    if let Some((id, pm, _)) = pool.pop() {
+                        mats.remove(&pm);
+                        commands.entity(id).despawn();
+                    }
+                }
+                for (k, p) in sim.particles.iter().take(want).enumerate() {
+                    let rel = (p.age / p.life).clamp(0.0, 1.0);
+                    let mut size = p.size;
+                    if let Some(d) = &em.size_over_life {
+                        let m = d.eval(rel, p.r[1]);
+                        for a in 0..3 {
+                            if em.size_over_life_axes[a] {
+                                size[a] *= m[a];
+                            }
+                        }
+                    }
+                    let rot = Mat4::from_rotation_z(p.mrot.z) * Mat4::from_rotation_y(p.mrot.y) * Mat4::from_rotation_x(p.mrot.x);
+                    let local = Mat4::from_translation(p.pos) * rot * Mat4::from_scale(size);
+                    let world = if em.local_space {
+                        xf * local
+                    } else {
+                        let (_, r, _) = xf.to_scale_rotation_translation();
+                        Mat4::from_translation(p.pos) * Mat4::from_quat(r) * rot * Mat4::from_scale(size)
+                    };
+                    commands.entity(pool[k].0).insert(Transform::from_matrix(coords::transform(world)));
+                    // Particle colour and alpha drive the material (ParticleColor in the material).
+                    let color = em.color_over_life.as_ref().map(|d| Vec3::from(d.eval(rel, p.r[0]))).unwrap_or(p.color);
+                    let alpha = em.alpha_over_life.as_ref().map(|d| d.eval1(rel, p.r[0])).unwrap_or(p.alpha).clamp(0.0, 1.0);
+                    if let Some(mut m) = mats.get_mut(&pool[k].1) {
+                        m.base_color = if em.blend == ParticleBlend::Additive || m.alpha_mode == AlphaMode::Add {
+                            Color::linear_rgb(color.x * alpha * pool[k].2.red, color.y * alpha * pool[k].2.green, color.z * alpha * pool[k].2.blue)
+                        } else {
+                            Color::linear_rgba(color.x * pool[k].2.red, color.y * pool[k].2.green, color.z * pool[k].2.blue, alpha * pool[k].2.alpha)
+                        };
+                    }
+                }
+            } else if let Some(mut m) = inst.meshes.get(i).and_then(|h| meshes.get_mut(h)) {
+                build_mesh(em, sim, &xf, right, up, cam_pos_b, &mut m);
             }
         }
         if inst.one_shot && inst.sims.iter().all(|s| (s.done || s.time > 10.0) && s.particles.is_empty()) {

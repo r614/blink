@@ -1,0 +1,16 @@
+{"steps":[
+  {"wait_ticks": 90},
+  {"ticks": 90, "input": {"yaw": 180, "pitch": -5, "left_hand": "Pistol"}},
+  {"ticks": 3, "input": {"yaw": 180, "pitch": -5, "buttons": ["SECONDARY"], "left_hand": "Pistol"}},
+  {"ticks": 2, "input": {"yaw": 180, "pitch": -5, "left_hand": "Pistol"}},
+  {"screenshot": "fxg_01_pistol"},
+  {"ticks": 40, "input": {"yaw": 180, "pitch": -5, "left_hand": "Windblast"}},
+  {"ticks": 3, "input": {"yaw": 180, "pitch": -5, "buttons": ["SECONDARY"], "left_hand": "Windblast"}},
+  {"ticks": 8, "input": {"yaw": 180, "pitch": -5, "left_hand": "Windblast"}},
+  {"screenshot": "fxg_02_windblast"},
+  {"ticks": 20, "input": {"yaw": 180, "pitch": -8, "buttons": ["SECONDARY"], "left_hand": "Blink"}},
+  {"ticks": 25, "input": {"yaw": 180, "pitch": -8, "left_hand": "Blink"}},
+  {"ticks": 4, "input": {"yaw": 0, "pitch": -40, "left_hand": "Blink"}},
+  {"screenshot": "fxg_03_blink_arrival"},
+  {"quit": true}
+]}

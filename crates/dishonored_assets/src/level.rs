@@ -101,6 +101,7 @@ struct Importer<'a> {
     merged_ids: HashMap<(TextureId, TextureId, u32, u32), Option<TextureId>>,
     stats: ImportStats,
     ps_ids: HashMap<Key, Option<usize>>,
+    class_defaults: HashMap<String, Vec<Property>>,
 }
 
 const RESOURCE_CLASSES: &[&str] = &[
@@ -162,6 +163,7 @@ pub fn import_level(
         merged_ids: HashMap::new(),
         stats: ImportStats::default(),
         ps_ids: HashMap::new(),
+        class_defaults: HashMap::new(),
     };
     for slot in 0..level_slots {
         imp.import_actors(slot)?;
@@ -292,6 +294,10 @@ impl Importer<'_> {
     fn import_emitter(&mut self, slot: usize, actor: usize) {
         let pkg = self.pkgs[slot].clone();
         let Ok(h) = pkg.read_object(actor) else { return };
+        // Emitters attached to another actor (`Base`: pawns, movers) follow it; not placed.
+        if find(&h.properties, "Base").and_then(|p| p.as_object()).is_some_and(|o| o != 0) {
+            return;
+        }
         let Some(ObjRef::Export(ci)) = find(&h.properties, "ParticleSystemComponent").and_then(|p| p.as_object()).map(ObjRef::from_index) else { return };
         let Ok(ch) = pkg.read_object(ci) else { return };
         let Some(t) = find(&ch.properties, "Template").and_then(|p| p.as_object()).filter(|o| *o != 0) else { return };
@@ -1061,6 +1067,23 @@ impl crate::particles::ParticleCtx for Importer<'_> {
     }
     fn import_material(&mut self, k: Key) -> Option<MaterialId> {
         self.material(k)
+    }
+    fn import_mesh(&mut self, k: Key) -> Option<usize> {
+        self.mesh(k)
+    }
+    fn class_default(&mut self, class: &str) -> Vec<Property> {
+        if let Some(p) = self.class_defaults.get(class) {
+            return p.clone();
+        }
+        let props = (|| {
+            let engine = self.content.package("Engine").ok()?;
+            let want = format!("Default__{class}");
+            let i = (0..engine.exports.len()).find(|&i| engine.obj_name(ObjRef::Export(i)) == want)?;
+            engine.read_object(i).ok().map(|h| h.properties)
+        })()
+        .unwrap_or_default();
+        self.class_defaults.insert(class.to_string(), props.clone());
+        props
     }
     fn material_blend(&self, id: MaterialId) -> dishonored_ir::particles::ParticleBlend {
         use dishonored_ir::particles::ParticleBlend as B;

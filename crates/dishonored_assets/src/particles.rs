@@ -15,6 +15,9 @@ pub trait ParticleCtx {
     fn resolve_ref(&mut self, slot: usize, r: ObjRef) -> Option<Key>;
     fn import_material(&mut self, k: Key) -> Option<MaterialId>;
     fn material_blend(&self, id: MaterialId) -> ParticleBlend;
+    fn import_mesh(&mut self, k: Key) -> Option<usize>;
+    /// Properties of `Default__<class>` (Engine), for fields the cooked objects omit.
+    fn class_default(&mut self, class: &str) -> Vec<Property>;
 }
 
 fn floats(p: &Property) -> Vec<f32> {
@@ -24,23 +27,42 @@ fn floats(p: &Property) -> Vec<f32> {
     }
 }
 
-/// A `RawDistributionFloat/Vector` struct property.
+thread_local! {
+    /// Class defaults of the module being decoded (fields the cooked struct omits).
+    static DEFAULTS: std::cell::RefCell<Vec<Property>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A `RawDistributionFloat/Vector` struct property; omitted fields come from the module's
+/// class default object.
 fn dist(props: &[Property], name: &str, dims: u8) -> Option<Dist> {
     let p = find(props, name)?;
     let Value::Struct(_, s) = &p.value else { return None };
+    let def: Vec<Property> = DEFAULTS.with(|d| match find(&d.borrow(), name).map(|p| &p.value) {
+        Some(Value::Struct(_, v)) => v.clone(),
+        _ => Vec::new(),
+    });
+    let get = |n: &str| find(s, n).or_else(|| find(&def, n)).map(|p| p.value.clone());
+    let byte = |n: &str, d: u8| match get(n) {
+        Some(Value::Byte(b)) => b,
+        Some(Value::Int(i)) => i as u8,
+        _ => d,
+    };
+    let float = |n: &str| match get(n) {
+        Some(Value::Float(f)) => f,
+        _ => 0.0,
+    };
     let table = find(s, "LookupTable").map(floats).unwrap_or_default();
-    if table.len() < 2 + dims as usize {
+    let op = byte("Op", 1);
+    let elems = byte("LookupTableNumElements", 1).max(1);
+    let chunk = byte("LookupTableChunkSize", elems * dims).max(1) as usize;
+    if table.len() < 2 + chunk {
         return None;
     }
-    let op = match find(s, "Op").map(|p| &p.value) {
-        Some(Value::Byte(b)) => *b,
-        _ => 1,
-    };
-    let d = Dist { table, dims, ranged: matches!(op, 2 | 3), extreme: op == 3 };
-    // A ranged table must hold whole (min, max) chunks; otherwise treat it as plain values.
-    if d.ranged && (d.table.len() - 2) % (dims as usize * 2) != 0 {
-        return Some(Dist { ranged: false, extreme: false, ..d });
-    }
+    let samples = table[2..].to_vec();
+    let ranged = elems >= 2 && matches!(op, 2 | 3);
+    let d = Dist { table: samples, dims: (chunk / elems as usize).clamp(1, 3) as u8, ranged, extreme: op == 3, time_scale: float("LookupTableTimeScale"), start_time: float("LookupTableStartTime") };
+    // A vector table read as a float (or the reverse) keeps its stored dimension.
+    let _ = dims;
     Some(d)
 }
 
@@ -128,6 +150,8 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
         let mclass = mpkg.export_class(mk.1);
         let Ok(mh) = mpkg.read_object(mk.1) else { continue };
         let p = &mh.properties;
+        let defaults = ctx.class_default(&mclass);
+        DEFAULTS.with(|d| *d.borrow_mut() = defaults);
         if !bool_or(p, "bEnabled", true) {
             continue;
         }
@@ -202,8 +226,37 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
             }
             "ParticleModuleSubImageIndex" => em.sub_image = dist(p, "SubImageIndex", 1),
             "ParticleModuleTypeDataMesh" => {
-                em.mesh = find(p, "Mesh").and_then(|x| x.as_object()).filter(|o| *o != 0).map(|o| mpkg.obj_path(ObjRef::from_index(o)));
-                em.unsupported.push(mclass.clone());
+                if let Some(o) = find(p, "Mesh").and_then(|x| x.as_object()).filter(|o| *o != 0) {
+                    em.mesh = Some(mpkg.obj_path(ObjRef::from_index(o)));
+                    em.mesh_id = ctx.resolve_ref(mk.0, ObjRef::from_index(o)).and_then(|k| ctx.import_mesh(k));
+                }
+                em.mesh_override_material = bool_or(p, "bOverrideMaterial", false);
+            }
+            "ParticleModuleOrientationAxisLock" => {
+                em.axis_lock = match enum_of(p, "LockAxisFlags").as_deref() {
+                    Some("EPAL_X") => 1,
+                    Some("EPAL_Y") => 2,
+                    Some("EPAL_Z") => 3,
+                    Some("EPAL_NEGATIVE_X") => 4,
+                    Some("EPAL_NEGATIVE_Y") => 5,
+                    Some("EPAL_NEGATIVE_Z") => 6,
+                    Some("EPAL_ROTATE_X") => 7,
+                    Some("EPAL_ROTATE_Y") => 8,
+                    Some("EPAL_ROTATE_Z") => 9,
+                    _ => 0,
+                };
+            }
+            "ParticleModuleMeshRotation" => em.mesh_rotation = dist(p, "StartRotation", 3),
+            "ParticleModuleMeshRotationRate" => em.mesh_rotation_rate = dist(p, "StartRotationRate", 3),
+            "ParticleModuleMeshMaterial" => {
+                // First material of `MeshMaterials` replaces the mesh's own.
+                if let Some(o) = find(p, "MeshMaterials").and_then(|x| x.array_objects().ok()).and_then(|v| v.first().copied()).filter(|o| *o != 0) {
+                    if let Some(k2) = ctx.resolve_ref(mk.0, ObjRef::from_index(o)) {
+                        em.material = ctx.import_material(k2);
+                        em.blend = em.material.map(|m| ctx.material_blend(m)).unwrap_or_default();
+                        em.mesh_override_material = true;
+                    }
+                }
             }
             c => em.unsupported.push(c.to_string()),
         }

@@ -7,51 +7,55 @@ use crate::MaterialId;
 use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
 
-/// A cooked `FRawDistributionFloat/Vector`: `table[0]` time scale, `table[1]` start time, then
-/// `n` entries of `chunk` floats (value, or min then max for the random/extreme ops).
+
+/// A cooked `FRawDistributionFloat/Vector`. The cooked `LookupTable` is
+/// [min, max, samples...]; each sample is `LookupTableChunkSize` floats made of
+/// `LookupTableNumElements` values (1, or 2 = min then max for the random / extreme ops) of
+/// `dims` components. Sample index = (t - start time) x time scale, linear between samples
+/// (time scale 0 = constant). Fields absent from the cooked struct take the module class
+/// default (`Default__ParticleModuleX` in Engine).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Dist {
+    /// Samples only (the min/max header removed).
     pub table: Vec<f32>,
     /// 1 (float) or 3 (vector).
     pub dims: u8,
-    /// `RDO_Random` / `RDO_Extreme`: entries hold (min, max).
+    /// `RDO_Random` / `RDO_Extreme`: samples hold (min, max).
     pub ranged: bool,
     pub extreme: bool,
+    pub time_scale: f32,
+    pub start_time: f32,
 }
 
 impl Dist {
     pub fn constant(v: [f32; 3], dims: u8) -> Self {
-        let mut table = vec![0.0, 0.0];
-        table.extend_from_slice(&v[..dims as usize]);
-        Dist { table, dims, ranged: false, extreme: false }
+        Dist { table: v[..dims as usize].to_vec(), dims, ..Default::default() }
     }
 
     fn chunk(&self) -> usize {
         self.dims as usize * if self.ranged { 2 } else { 1 }
     }
 
-    pub fn entries(&self) -> usize {
-        self.table.len().saturating_sub(2) / self.chunk().max(1)
+    pub fn samples(&self) -> usize {
+        self.table.len() / self.chunk().max(1)
     }
 
     /// Value at `t` (curve time: particle relative age, or emitter time) for a per-particle
     /// random number `r` in [0, 1).
     pub fn eval(&self, t: f32, r: f32) -> [f32; 3] {
-        let n = self.entries();
+        let n = self.samples();
         if n == 0 {
             return [0.0; 3];
         }
         let c = self.chunk();
-        let scale = self.table[0];
-        let start = self.table[1];
-        let x = ((t - start) * scale).max(0.0);
+        let x = ((t - self.start_time) * self.time_scale).max(0.0);
         let i = (x.floor() as usize).min(n - 1);
         let j = (i + 1).min(n - 1);
         let a = if i == j { 0.0 } else { x - i as f32 };
         let d = self.dims as usize;
         let mut out = [0.0; 3];
         for k in 0..d {
-            let at = |e: usize, off: usize| self.table[2 + e * c + off];
+            let at = |e: usize, off: usize| self.table[e * c + off];
             let v = if self.ranged {
                 let lo = at(i, k) + (at(j, k) - at(i, k)) * a;
                 let hi = at(i, d + k) + (at(j, d + k) - at(i, d + k)) * a;
@@ -127,6 +131,21 @@ pub struct ParticleEmitterAsset {
     pub sub_image: Option<Dist>,
     /// Mesh emitter (`ParticleModuleTypeDataMesh`).
     pub mesh: Option<String>,
+    /// The mesh in the map's mesh table (mesh emitters).
+    #[serde(default)]
+    pub mesh_id: Option<usize>,
+    /// Draw mesh particles with the emitter material (`bOverrideMaterial` / MeshMaterial).
+    #[serde(default)]
+    pub mesh_override_material: bool,
+    /// `ParticleModuleMeshRotation` / `MeshRotationRate` (turns about X, Y, Z).
+    #[serde(default)]
+    pub mesh_rotation: Option<Dist>,
+    #[serde(default)]
+    pub mesh_rotation_rate: Option<Dist>,
+    /// `ParticleModuleOrientationAxisLock` (`EParticleAxisLock`: 0 none, 1-3 X/Y/Z, 4-6 -X/-Y/-Z,
+    /// 7-9 rotate about X/Y/Z).
+    #[serde(default)]
+    pub axis_lock: u8,
     /// Module classes present but not simulated (for the import report).
     pub unsupported: Vec<String>,
 }
