@@ -18,6 +18,9 @@ pub enum MoveMode {
     Dead,
     /// `PHYS_Swimming`: the pawn's centre is in a (deep) water volume (`APawn::physSwimming`).
     Swimming,
+    /// `StatePlayerMasterClimb` / `PHYS_Ladder`: hanging on a `DisClimbable` chain
+    /// (`ADishonoredPlayerPawn::physLadder` 0x00AA82C0), see [`ClimbState`].
+    Climbing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
@@ -199,6 +202,9 @@ pub struct PlayerState {
     /// Swimming strokes, air and drowning.
     #[serde(default)]
     pub water: WaterState,
+    /// Climbing a chain.
+    #[serde(default)]
+    pub climb: ClimbState,
     /// Blood Thirsty's adrenaline gauge (`DishonoredPlayerPawn` +0x91C / +0x920).
     #[serde(default)]
     pub adrenaline: AdrenalineState,
@@ -257,6 +263,28 @@ pub struct JumpState {
     pub held: f32,
     /// `m_JumpState == eDisJumpState_PowerJump`.
     pub powered: bool,
+}
+
+/// Climbing (`DishonoredPlayerPawn.m_pClimbable`, `m_bClimbingUp`, `m_bLettingGoOfClimbable`,
+/// `m_fClimbingSoundLastTime`; `StatePlayerMasterClimb.m_fStartTime`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct ClimbState {
+    /// `m_pClimbable`: index into `WorldQuery::climbables()`. Kept through a jump off the chain
+    /// until the jump ends, which keeps the chain from being grabbed again meanwhile.
+    pub on: Option<u16>,
+    /// Seconds since the climb began (`TimeSeconds - m_fStartTime`).
+    pub time: f32,
+    /// `!m_bClimbingUp` (the class default is true: looking up).
+    pub down: bool,
+    /// Seconds since the last climbing sound (`TimeSeconds - m_fClimbingSoundLastTime`).
+    pub since_sound: f32,
+    /// `m_bLettingGoOfClimbable`: let go with Use; touching a chain does not grab until landed.
+    pub letting_go: bool,
+    /// The current jump started on a chain (`StatePlayerMasterJump` +0x54 bit 0).
+    pub jumped: bool,
+    /// `DisClimbable.m_fNoCollisionDuration` of the chain this pawn left: it cannot be touched
+    /// or used again until this runs out.
+    pub no_touch: f32,
 }
 
 /// Swimming and breath (`DishonoredPlayerPawn.m_fAirCapacity`, `m_fDrowningDamageCountdown`,
@@ -470,6 +498,7 @@ impl PlayerState {
             action_lock: 0.0,
             jump: JumpState::default(),
             water: WaterState::default(),
+            climb: ClimbState::default(),
             adrenaline: AdrenalineState::default(),
             dark: DarkVisionState::default(),
             rat_slow: 0.0,

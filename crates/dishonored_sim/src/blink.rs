@@ -164,7 +164,13 @@ pub fn update(
     events: &mut Vec<SimEvent>,
 ) {
     if p.mode == MoveMode::Blinking {
-        if travel(p, ctx, cfg) {
+        let done = travel(p, ctx, cfg);
+        // The Blink step's probe grabs a chain it meets (0x00BECDF0); the climb takes over.
+        if crate::climb::try_touch_grab(p, ctx, events) {
+            events.push(SimEvent::BlinkEnd { id: p.id });
+            return;
+        }
+        if done {
             // Blink end (0x00BFAB80): restore the velocity and physics from before.
             p.mode = MoveMode::Falling;
             p.velocity = p.blink.origin_velocity;

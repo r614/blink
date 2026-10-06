@@ -206,9 +206,79 @@ sprint strafe / back multipliers 0.5 / 0.4 (DefaultPlayer.ini `m_Powers`). CONFI
   `Attribute_DrowningDamageAmount` (1) every `Attribute_DrowningDamageStep` (1 s) directly, floored at
   `m_MinimumScriptedHealth`, death below 1. Health regeneration below the limit is not reset by it
   (U-242).
-- Climbing: `StatePlayerMasterClimb` attaches the player to a `DisClimbable` (rigid-body chains,
-  `m_fClimbingSpeed` 0.0005, jump off at `m_fJumpImpulse` 525, physics Ladder through the player's
-  `physLadder` 0x00AA82C0). Boyle has two chains; not ported (U-240).
+
+### Climbing (U-240 resolved)
+
+`DisClimbable` (class record 0x012F76B0, vtable 0x010E7A80; interactable interface vtable
+0x010EC418 at +0x2A0) is a `DishonoredKAsset`: a skeletal mesh driven by a physics asset.
+`StatePlayerMasterClimb` (record 0x01300048) hangs the player on it with physics Ladder (9), which
+the player pawn routes to its own `physLadder` (slot 282, 0x00AA82C0). Ported in
+`dishonored_sim::climb` as `MoveMode::Climbing`. CONFIRMED unless noted.
+
+- **Grab.** Three ways, all ending in the interactable's `Interact` (interface slot +0x60,
+  0x00A23130: the player pawn only; requests the climb state, then sets `m_pClimbable` +0xAA0):
+  Use on the focused chain (Use handler 0x00AD5BA0 -> 0x00A3DF60; prompt
+  `m_InteractText` "`GBA_Use` Grab"; visibility test slot +0x1C 0x00A1E6F0); touching the chain
+  (collision notify, vtable +0x290, 0x00A3FA70) while the pawn has no `m_pClimbable`, is not
+  `m_bLettingGoOfClimbable` (+0x8A0 bit 6) and its physics is neither Walking nor None (jumping,
+  falling, Blinking); and the Blink step's probe hitting a chain (0x00BECDF0). The sim takes the
+  Use target like a pickup's (interact distance, 30 deg cone, clear line; LIKELY) and the touch as
+  the pawn box overlapping the bodies' line thickened by their half width (5.05).
+- **Enter** (0x00A72B00): physics Ladder; the chain's collision off (0x00A1A170: `bCollideActors`
+  and the component's `CollideActors` cleared); `m_fStartTime`; the chain's `DisSeqEvent_Climb`
+  output Start (0x00BCFAC0; record 0x01300200, outputs Start / Finish). HUD contexts 12 / 13
+  (`DUI_Context_ClimbableDrop` / `_ClimbableJump`, slot +0x174 0x00A67830).
+- **`physLadder`** (0x00AA82C0): `Velocity = 0`. With a non-zero acceleration: step =
+  `m_fClimbingSpeed x 16383.5` (`DAT_0111870C`; 0.0005 -> 8.19 uu); `m_bClimbingUp` (+0x8A0 bit
+  17, default true) becomes `T' < pitch` with `T' = -m_ClimbingAimThreshold` while up, `+T`
+  while down (1000 rotator units, 5.5 deg; the pitch is the camera's
+  `CameraCache.POV.Rotation.Pitch`, camera +0x33C, through 0x00B515C0); the step is negated when
+  `m_bCameraRelativeClimbing` (+0x8A0 bit 16) and not climbing up, and again when the
+  acceleration's 2D direction is within `acos 0.9` of the facing or less (`dot <= 0.9`): forward
+  climbs up, back or sideways climbs down. Target height `z + step`, clamped to
+  `[Location.z - 2 x SkelComp.Bounds.SphereRadius, Location.z - CylinderComponent.CollisionHeight]`.
+  Without input the height stays (not clamped). Horizontally the target is the bone the
+  skeletal mesh component finds closest (`FindClosestBone`, 0x00713130, over every bone) to the
+  pawn's centre raised by `2/3 x CollisionHeight`, at its world location (`GetBoneLocation`
+  0x00732CD0), moved 30 uu back along the pawn's facing and 10 uu to its right (`yaw + 0x4000`).
+  The pawn goes `VInterpTo(Location, target, dt, 20)` (0x0041E860) with `MoveActor`; a blocked
+  move slides along the wall and then gets `TwoWallAdjust` (0x0065FC60). Climbing speed: 8.19 x 20
+  = 163.8 uu/s whenever `20 dt < 1` (frame-rate independent above 20 fps).
+- **Sound**: when the height changed (relative tolerance 1e-4), a step sound
+  (`m_pClimbingSound`, RTPC `m_pClimbingSoundVolumeParameter` = |step|) plays if more than
+  `min + (max - min) x |pitch| / 16383.5` s passed since the last (`m_fClimbingSoundMin/MaxDelay`
+  0.3 / 1.8 of `Twk_Pawn_Corvo_Release`). The sim emits `SimEvent::ClimbSound`.
+- **Leave.** Transition test (slot +0x138, 0x00A6E570): to Falling, and to Jump when
+  `m_bClimbReuseDelayJump` (true), only after `m_fClimbReuseDelay` (`Twk_Pawn_PlayerInput`: 0.5;
+  class default 0.3). Exit (0x00A6E2C0), whatever the next state: the chain's Finish output;
+  `Velocity = Rotation.Vector() x m_fJumpImpulse` (525), doubled when a trace from the pawn 200 uu
+  straight up (`DAT_00FB96C4`, flags 0x20DF) reports a hit (LIKELY reading of the trace result).
+  Into Jump: the Jump enter (0x00A75EE0) then sets `Velocity.Z = JumpZ` (800) and remembers the
+  chain (its +0x54 bit 0); the chain stays in `m_pClimbable` (no re-grab) until that jump state
+  ends (0x00A5FFA0), which starts the chain's collision restoration (`m_fNoCollisionDuration =
+  m_fCollisionRestorationDelay`, 0.3 s, counted down in the chain's tick 0x00A2BFD0) and clears
+  `m_pClimbable`. Use while climbing (0x00AD5BA0 -> 0x00AAA030) requests Falling and sets
+  `m_bLettingGoOfClimbable`; the exit then restores the chain's collision at once and clears
+  `m_pClimbable` (unless 0x00B50C70 holds: one of the pawn's active power components, +0x788,
+  is of the class initialised next to the Blink code at 0x00BECD90 and reports itself active,
+  LIKELY "Blinking"; then the 0.3 s restoration). The same test lets a Blinking pawn grab by
+  touch even when its physics reads Walking. A chain switched to physics None
+  drops its climber the same way (vtable +0x218, 0x00A1E800).
+- **No end exits.** `physLadder` only clamps: the pawn stops at the bottom and at the top (head at
+  the anchor). Getting off at the top is a jump, whose airborne mantle finds the ledge.
+- **Chains** (`dishonored_assets::climbable`, cache `<map>.climb1.json`): the actor's
+  `Location`, its `KAssetSkelMeshComponent` mesh and physics asset. Both Boyle meshes are vertical:
+  `Climbable.chain_400` (L_Boyle_Int_Basement `DisClimbable_1` at (-3153, -420, -627); root bone
+  4.6 above, `chain_jnt_01..05` every 100 uu down; 5 box bodies, the root fixed) and
+  `Climbable.chain_1400` (L_Boyle_Ext_Env `DisClimbable_3` at (-2085, 580, 1884); 16 bones,
+  `chain_jnt_015` 1400 below). The bounds come from the physics bodies in the rest pose (box
+  elements through their bone-space `TM`): sphere radius 198.04 (Int) / 697.57 (Ext), so the
+  pawn's centre ranges over z -1023.1 .. -714.5 (Int) and 488.9 .. 1796.5 (Ext).
+- **Not modelled**: the chain's rigid-body swing (the sim keeps the rest pose, which is where an
+  undisturbed chain hangs; Windblast pushes chains by `m_fWindblastForceFactor` 10, swinging
+  sounds), Blink and other powers cast from the chain, the setter of
+  `m_bCameraRelativeClimbing` (U-440), what clears `m_bLettingGoOfClimbable` (the sim: landing or
+  swimming, U-441).
 
 ### Blood Thirsty
 

@@ -82,7 +82,7 @@ fn load_spawns(map: &str, m: Option<&DishonoredMap>) -> Vec<Spawn> {
 }
 
 pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
-    let path = cache_dir().join("gameplay_config.v7.json");
+    let path = cache_dir().join("gameplay_config.v8.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);
@@ -136,6 +136,27 @@ pub fn load_water(content: &Content, map: &str) -> Vec<dishonored_world::WaterVo
     w
 }
 
+/// The map's `DisClimbable` chains, cached as `cache/<map>.climb1.json`.
+pub fn load_climbables(content: &Content, map: &str) -> Vec<dishonored_world::Climbable> {
+    let path = cache_dir().join(format!("{map}.climb1.json"));
+    if let Some(c) = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Vec<dishonored_world::Climbable>>(&t).ok()) {
+        return c;
+    }
+    let defs = dishonored_assets::climbable::extract_climbables(content, &map_packages(content, map)).unwrap_or_else(|e| {
+        eprintln!("warning: climbables of {map}: {e:#}");
+        Vec::new()
+    });
+    let c: Vec<dishonored_world::Climbable> = defs
+        .into_iter()
+        .map(|d| dishonored_world::Climbable { name: d.name, anchor: d.anchor, bones: d.bones, sphere_radius: d.sphere_radius, body_half_width: d.body_half_width, top: d.top, bottom: d.bottom })
+        .collect();
+    std::fs::create_dir_all(cache_dir()).ok();
+    if let Ok(t) = serde_json::to_string(&c) {
+        std::fs::write(&path, t).ok();
+    }
+    c
+}
+
 pub fn load_match(map: &str) -> Result<MatchContent> {
     let content = Content::locate()?;
     let sim = load_sim_config(&content).context("gameplay config")?;
@@ -164,6 +185,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         Err(e) => eprintln!("warning: no original navigation for {map}: {e:#}"),
     }
     collision.water = Some(std::sync::Arc::new(load_water(&content, map)));
+    collision.climbables = Some(std::sync::Arc::new(load_climbables(&content, map)));
     let curated = load_spawns(map, None);
     let spawns = if curated.is_empty() { spawns } else { curated };
     let npc_path = dir.join(format!("{map}.npcs6.json"));
@@ -482,6 +504,9 @@ impl dishonored_world::WorldQuery for MatchContent {
     }
     fn water_at(&self, p: Vec3) -> Option<dishonored_world::WaterInfo> {
         self.collision.water_at(p)
+    }
+    fn climbables(&self) -> &[dishonored_world::Climbable] {
+        self.collision.climbables()
     }
 }
 

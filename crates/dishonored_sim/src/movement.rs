@@ -353,9 +353,19 @@ pub fn step_movement(
         }
     }
 
+    if !rat {
+        crate::climb::tick_off_chain(p, ctx);
+    }
     match p.mode {
         MoveMode::Walking => walking(p, input, sword_out, can_move, ctx, events),
-        MoveMode::Falling => falling(p, input, can_move, ctx.dt, ctx, events),
+        MoveMode::Falling => {
+            falling(p, input, can_move, ctx.dt, ctx, events);
+            // A chain touched while airborne is grabbed (0x00A3FA70).
+            if !rat && p.mode == MoveMode::Falling {
+                crate::climb::try_touch_grab(p, ctx, events);
+            }
+        }
+        MoveMode::Climbing => crate::climb::climbing(p, input, can_move, ctx, events),
         MoveMode::Swimming => crate::swim::swimming(p, input, can_move, sword_out, ctx, events),
         MoveMode::Mantling => {
             if advance_traversal(p, ctx.dt) {
@@ -467,7 +477,7 @@ fn set_crouch(p: &mut PlayerState, crouch: bool, ctx: &MoveCtx) {
 
 /// One UE3 `MoveActor` of the pawn box: moves as far as it can along `delta`; returns the
 /// blocking hit (normal, time).
-fn move_actor(p: &mut PlayerState, delta: Vec3, ctx: &MoveCtx) -> Option<(Vec3, f32)> {
+pub(crate) fn move_actor(p: &mut PlayerState, delta: Vec3, ctx: &MoveCtx) -> Option<(Vec3, f32)> {
     if delta.length_squared() < 1e-10 {
         return None;
     }
