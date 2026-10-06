@@ -6,6 +6,7 @@
 //! The same code runs on the dedicated server, in client prediction, in replays and in
 //! the test harness. Nothing here depends on Bevy.
 
+pub mod adrenaline;
 pub mod blink;
 pub mod combat;
 pub mod events;
@@ -15,7 +16,9 @@ pub mod inventory;
 pub mod left_hand;
 pub mod movement;
 pub mod powers;
+pub mod rats;
 pub mod state;
+pub mod swim;
 pub mod takedown;
 pub mod tuning;
 pub mod vitals;
@@ -113,10 +116,16 @@ pub fn step_world(
         let keep = input::buttons::JUMP | input::buttons::CROUCH | input::buttons::SPRINT | input::buttons::WALK;
         ins[h] = PlayerInput { tick: pi.tick, forward: pi.forward, right: pi.right, yaw: pi.yaw, pitch: pi.pitch, buttons: pi.buttons & keep, left_hand: state.players[h].left.item, action: 0 };
     }
-    // Bend Time: each pawn's rate this tick.
+    // Bend Time: each pawn's rate this tick; the player's armour (`Attribute_DamageReduction`,
+    // the Armor upgrade, applied by the player's TakeDamage 0x00AB0A30).
     for i in 0..state.players.len() {
         let id = state.players[i].id;
         state.players[i].time_scale = powers::pawn_time_scale(state, id, g);
+        let p = &state.players[i];
+        let reduction = if p.kind == state::PawnKind::Human { powers::attribute(p, g, "Attribute_DamageReduction", 0.0).trunc() } else { 0.0 };
+        let free_chance = powers::attribute(p, g, "Attribute_ChanceUseNoManaForSpell", 0.0);
+        state.players[i].damage_reduction = reduction;
+        state.players[i].free_spell_chance = free_chance;
     }
 
     for i in 0..state.players.len() {
@@ -157,6 +166,15 @@ pub fn step_world(
             left_hand::update(p, &input, &ctx, g, &cfg.tuning, &mut local, &mut acts, false, &mut out.events);
             actions.extend(acts.into_iter().map(|a| (i, a)));
             vitals::tick(p, &powers::effective_vitals(&p0, g), dt);
+            p.prev_buttons = input.buttons;
+            p.last_input = input;
+            continue;
+        }
+        if p0.kind == state::PawnKind::Rat {
+            // Rat pawns only move (their attacks resolve after every pawn moved).
+            let p = &mut state.players[i];
+            movement::step_movement(p, &input, false, p.action_lock <= 0.0, &ctx, &mut out.events);
+            p.rat_slow = (p.rat_slow - dt).max(0.0);
             p.prev_buttons = input.buttons;
             p.last_input = input;
             continue;
@@ -205,10 +223,20 @@ pub fn step_world(
         actions.extend(acts.into_iter().map(|a| (i, a)));
         spawns.extend(local.into_iter().map(|(k, pos, vel)| (p.id, k, pos, vel)));
         vitals::tick(p, &powers::effective_vitals(&p0, g), dt);
+        left_hand::tick_dark_vision(p, dt, &mut out.events);
+        adrenaline::tick(p, g, dt);
+        let breath = powers::attribute(&p0, g, "Attribute_BreathCapacityIncrease", 0.0);
+        swim::step_breath(p, world, &mvc, breath, 0.0, dt, &mut out.events);
+        p.rat_slow = (p.rat_slow - dt).max(0.0);
         p.action_lock = (p.action_lock - dt).max(0.0);
         p.prev_buttons = input.buttons;
         p.last_input = input;
         takedown::step_afflictions(state, i, dt, g, &mut out.events);
+    }
+    // Rat attack groups.
+    let rat_dt = DT * powers::world_time_scale(state, g, false);
+    if rat_dt > 0.0 && state.players.iter().any(|p| p.kind == state::PawnKind::Rat) {
+        rats::step_rat_attacks(state, &ins, rat_dt, &g.vitals, &rats::RatAttackTweak::default(), &mut out.events);
     }
 
     // World effects asked for by left hands.
@@ -223,8 +251,24 @@ pub fn step_world(
             left_hand::LeftAction::PlaceTrap => gadgets::place_trap(state, id, world, g, &mut out.events),
             left_hand::LeftAction::PossessRelease => {
                 let p = state.players[i];
-                if let Some(host) = powers::possess_target(state, &p, world, g) {
+                if let Some(target) = powers::possess_target_any(state, &p, world, g) {
                     if vitals::spend_mana(&mut state.players[i], g.items.possess.mana_cost, &g.vitals) {
+                        let host = match target {
+                            powers::PossessTarget::Pawn(h) => h,
+                            powers::PossessTarget::SwarmRat(sid) => {
+                                // One rat leaves the swarm as a pawn to be possessed.
+                                let rid = powers::swarm_rat_id(state);
+                                let (pos, yaw) = match state.swarms.iter_mut().find(|s| s.id == sid) {
+                                    Some(s) => {
+                                        s.rats = s.rats.saturating_sub(1);
+                                        (s.position + Vec3::Z * movement::RAT_HALF_HEIGHT, p.yaw)
+                                    }
+                                    None => (p.position, p.yaw),
+                                };
+                                rats::spawn_rat(state, rid, pos, yaw, Some(sid), cfg, &mut out.events);
+                                rid
+                            }
+                        };
                         powers::begin_possession(state, id, host, g);
                     }
                 }
@@ -251,6 +295,8 @@ pub fn step_world(
         out.events.push(SimEvent::Fired { id: owner, bolt: kind.is_bolt(), projectile: id });
     }
 
+    // Health before the sword resolves (assassinations give adrenaline by the victim's health).
+    let pre_health: Vec<(PlayerId, f32)> = state.players.iter().map(|p| (p.id, p.vitals.health)).collect();
     combat::resolve_sword_hits(state, world, mv, &cfg.gameplay.vitals, &cfg.tuning, &mut out.events);
 
     for e in &out.events {
@@ -298,15 +344,57 @@ pub fn step_world(
                 // `ADishonoredPawn::TakeFallingDamage` (0x00B4DCC0, DishonoredPawn vtable +0x528):
                 // damage = (int)(HealthMax * clamp((v - dmg) / (death - dmg), 0, 1)) for
                 // an impact speed v above Attribute_MaxSpeedBeforeFallingDamage.
-                let dmg = fall_damage(speed, mv, cfg.gameplay.vitals.health_max);
+                // The thresholds are attributes (Agility raises them, 0x00B56880).
+                let Some(p0) = state.player(id).copied() else { continue };
+                let pm = powers::effective_movement(&p0, g);
+                let dmg = fall_damage(speed, &pm, powers::health_max(&p0, g));
                 if dmg > 0.0 {
                     if let Some(p) = state.player_mut(id) {
                         vitals::apply_damage(p, dmg, None, DamageCause::Fall, &mut out.events, &cfg.gameplay.vitals);
                     }
                 }
             }
+            SimEvent::Damage { victim, attacker, amount, cause } => {
+                let ad = &g.adrenaline;
+                if let Some(a) = attacker.filter(|a| *a != victim) {
+                    let gain = match cause {
+                        DamageCause::Sword | DamageCause::SwordCounter => amount * ad.mult_on_hit,
+                        _ => 0.0,
+                    };
+                    if gain > 0.0 {
+                        if let Some(p) = state.player_mut(a) {
+                            adrenaline::gain(p, gain, g, &mut out.events);
+                        }
+                    }
+                }
+                // Damage taken (`m_bCanGiveAdrenaline`, every base damage type).
+                if ad.mult_taking_damage > 0.0 {
+                    if let Some(p) = state.player_mut(victim) {
+                        let m = powers::attribute(p, g, "Attribute_AdrenalineMultWhenTakingDamage", ad.mult_taking_damage);
+                        adrenaline::gain(p, amount * m, g, &mut out.events);
+                    }
+                }
+            }
+            SimEvent::SwordParried { defender, .. } => {
+                if let Some(p) = state.player_mut(defender) {
+                    adrenaline::gain(p, g.adrenaline.parry_win, g, &mut out.events);
+                }
+            }
             SimEvent::Death { victim, killer: Some(k), cause } => {
                 let (Some(kp), Some(vp)) = (state.player(k).copied(), state.player(victim).copied()) else { continue };
+                // Adrenaline from assassinations (victim health x the tweak's multiplier) and rat kills.
+                let health = pre_health.iter().find(|h| h.0 == victim).map_or(0.0, |h| h.1);
+                let gain = match cause {
+                    DamageCause::Assassination => health * g.adrenaline.mult_assassinate,
+                    DamageCause::DropAssassination => health * g.adrenaline.mult_drop_assassinate,
+                    _ if vp.kind == state::PawnKind::Rat => powers::attribute(&kp, g, "Attribute_AdrenalineOnRatKill", 0.0),
+                    _ => 0.0,
+                };
+                if gain > 0.0 && k != victim {
+                    if let Some(p) = state.player_mut(k) {
+                        adrenaline::gain(p, gain, g, &mut out.events);
+                    }
+                }
                 // Shadow Kill (0x00A87B60): the corpse burns to ash.
                 if powers::shadow_kill_applies(&kp, &vp, cause, vp.condition == state::Condition::Unconscious) {
                     if let Some(v) = state.player_mut(victim) {
@@ -388,6 +476,12 @@ pub fn state_hash(state: &WorldState) -> u64 {
         }
         mix(p.inv.elixirs[0] as u64 | (p.inv.elixirs[1] as u64) << 8);
         mix(p.inv.coins as u64);
+        mix(p.kind as u64);
+        for f in [p.water.air_used, p.water.stroke, p.adrenaline.value, p.dark.remaining, p.rat_slow, p.jump.held] {
+            mix(f.to_bits() as u64);
+        }
+        mix(p.helmet as u64 | (p.jump.powered as u64) << 1 | (p.ai_unaware as u64) << 2);
+        mix(p.rng as u64);
     }
     for pk in &state.pickups {
         mix(pk.id as u64 | (pk.active as u64) << 32);

@@ -218,22 +218,21 @@ pub fn update(
             }
         }
         LeftHand::DarkVision => {
-            if pressed && !busy {
-                if p.vitals.dark_vision_remaining > 0.0 {
-                    p.vitals.dark_vision_remaining = 0.0;
-                    events.push(SimEvent::DarkVision { id: p.id, active: false });
-                } else if spend_mana(p, t.dark_vision_cost, &cfg.vitals) {
-                    p.vitals.dark_vision_remaining = t.dark_vision_duration;
-                    events.push(SimEvent::DarkVision { id: p.id, active: true });
-                }
+            if pressed && !busy && level(power::DARK_VISION) > 0 {
+                use_dark_vision(p, cfg, t, events);
             }
         }
         LeftHand::Pistol | LeftHand::Crossbow => {
             let bolt = p.left.item == LeftHand::Crossbow;
+            // Pistol upgrades: the magazine holds 1 + (int)Attribute_MagazineBonus rounds (0x00C20DB0,
+            // capped by the ammo held) and the reload time is divided by Attribute_ReloadSpeed when
+            // set (0x00C23620).
+            let mag = if bolt { 1 } else { 1 + crate::powers::attribute(p, cfg, "Attribute_MagazineBonus", 0.0).max(0.0) as u8 };
+            let reload_speed = if bolt { 0.0 } else { crate::powers::attribute(p, cfg, "Attribute_ReloadSpeed", 0.0) };
             let (equip, reload, recovery) = if bolt {
                 (t.crossbow_equip, t.crossbow_reload, 0.2)
             } else {
-                (t.pistol_equip, t.pistol_reload, t.pistol_fire_recovery)
+                (t.pistol_equip, if reload_speed != 0.0 { t.pistol_reload / reload_speed } else { t.pistol_reload }, t.pistol_fire_recovery)
             };
             match p.left.phase {
                 LeftPhase::Equipping if p.left.timer >= equip => p.left.phase = LeftPhase::Idle,
@@ -249,9 +248,10 @@ pub fn update(
                     } else {
                         (&mut p.left.pistol_loaded, &mut p.left.pistol_reserve)
                     };
-                    if *reserve > 0 && *loaded == 0 {
-                        *reserve -= 1;
-                        *loaded = 1;
+                    if *reserve > 0 && *loaded < mag {
+                        let n = (mag - *loaded).min((*reserve).min(255) as u8);
+                        *reserve -= n as u16;
+                        *loaded += n;
                         events.push(SimEvent::Reloaded { id: p.id });
                     }
                     p.left.phase = LeftPhase::Idle;
@@ -269,7 +269,7 @@ pub fn update(
                         p.left.timer = 0.0;
                         let (radius, cat) = if bolt { (500.0, SoundCategory::Crossbow) } else { (4000.0, SoundCategory::Pistol) };
                         events.push(SimEvent::Sound { position: eye, radius, category: cat, source: p.id });
-                    } else if loaded == 0 && reserve > 0 && (pressed || input.pressed(buttons::RELOAD)) {
+                    } else if reserve > 0 && ((loaded == 0 && pressed) || (loaded < mag && input.pressed(buttons::RELOAD))) {
                         p.left.phase = LeftPhase::Reloading;
                         p.left.timer = 0.0;
                     }
@@ -279,6 +279,67 @@ pub fn update(
         }
         LeftHand::Empty => {}
     }
+}
+
+/// Dark Vision is in effect (`DisActivePowerComponent_DarkVision` slot +0x160: any of the fade-in,
+/// effect and fade-out timers running).
+pub fn dark_vision_active(p: &PlayerState) -> bool {
+    p.dark.fade_in > 0.0 || p.dark.remaining > 0.0 || p.dark.fade_out > 0.0
+}
+
+/// Using Dark Vision (slot +0x168, 0x00BE89E0): while it is active and its
+/// `m_fCooldownTimer` has run out, the effect ends (fade-in and duration zeroed, the fade-out
+/// plays); otherwise, with the mana, it starts (0x00BF82A0): fade-in
+/// `m_EyeLidClosingDuration`, duration `m_fDuration x (1 + Attribute_SpellStrength)`, fade-out
+/// `m_PowerFadeOutDuration`, cooldown `m_fCooldownTimer`. There is no drain: the cost is paid once.
+pub fn use_dark_vision(p: &mut PlayerState, cfg: &GameplayConfig, t: &CombatTuning, events: &mut Vec<SimEvent>) {
+    if dark_vision_active(p) {
+        if p.dark.cooldown < 0.0 {
+            p.dark.fade_in = 0.0;
+            p.dark.remaining = 0.0;
+            events.push(SimEvent::DarkVision { id: p.id, active: false });
+        }
+        return;
+    }
+    if !spend_mana(p, t.dark_vision_cost, &cfg.vitals) {
+        return;
+    }
+    let strength = crate::powers::attribute(p, cfg, "Attribute_SpellStrength", 0.0);
+    p.dark.level = p.inv.power_levels[power::DARK_VISION].clamp(1, 2);
+    p.dark.fade_in = t.dark_vision_fade_in;
+    p.dark.remaining = t.dark_vision_duration * (1.0 + strength);
+    p.dark.fade_out = t.dark_vision_fade_out;
+    p.dark.cooldown = t.dark_vision_cooldown;
+    p.vitals.dark_vision_remaining = p.dark.fade_in + p.dark.remaining + p.dark.fade_out;
+    events.push(SimEvent::DarkVision { id: p.id, active: true });
+}
+
+/// Dark Vision tick (slot +0x13C, 0x00BFBC90): the cooldown runs down; the step is spent on the
+/// fade-in first, the rest on the duration, then on the fade-out.
+pub fn tick_dark_vision(p: &mut PlayerState, dt: f32, events: &mut Vec<SimEvent>) {
+    p.dark.cooldown -= dt;
+    if !dark_vision_active(p) {
+        p.vitals.dark_vision_remaining = 0.0;
+        return;
+    }
+    let mut left = dt;
+    if p.dark.fade_in > 0.0 {
+        let used = left.min(p.dark.fade_in);
+        p.dark.fade_in -= used;
+        left -= used;
+    }
+    if left > 0.0 && p.dark.remaining > 0.0 {
+        let used = left.min(p.dark.remaining);
+        p.dark.remaining -= used;
+        left -= used;
+        if p.dark.remaining <= 0.0 {
+            events.push(SimEvent::DarkVision { id: p.id, active: false });
+        }
+    }
+    if left > 0.0 && p.dark.fade_in <= 0.0 && p.dark.remaining <= 0.0 && p.dark.fade_out > 0.0 {
+        p.dark.fade_out = (p.dark.fade_out - left).max(0.0);
+    }
+    p.vitals.dark_vision_remaining = p.dark.fade_in + p.dark.remaining + p.dark.fade_out;
 }
 
 /// Items whose use plays an uninterruptible cast/throw (no item switch until it ends).
@@ -401,11 +462,18 @@ pub fn step_windblasts(
             if k <= 0.0 {
                 continue;
             }
-            v.velocity += windblast_momentum(wb.direction, t.windblast_force, t.windblast_up_force, d, range, k);
-            if matches!(v.mode, MoveMode::Walking) {
-                v.mode = MoveMode::Falling;
-                v.fall_time = 0.0;
+            // The momentum goes to TakeDamage (0x00BE9770). NPCs are thrown (ragdoll); the player
+            // pawn's damage path (0x00B5CCD0) hands it only to the hit reactions and clears it,
+            // so players are not pushed (U-051).
+            if v.kind != PawnKind::Human {
+                v.velocity += windblast_momentum(wb.direction, t.windblast_force, t.windblast_up_force, d, range, k);
+                if matches!(v.mode, MoveMode::Walking) {
+                    v.mode = MoveMode::Falling;
+                    v.fall_time = 0.0;
+                }
             }
+            // `Twk_Inv_EliteHelmet`: Windblast knocks a helmet off whatever it hits.
+            v.helmet = false;
             if v.sword.phase == crate::state::SwordPhase::Blocking {
                 v.sword.phase = crate::state::SwordPhase::Idle;
             }
@@ -478,10 +546,17 @@ pub fn step_projectiles(
                 if pr.kind == ProjectileKind::SleepDart {
                     events.push(SimEvent::ProjectileImpact { projectile: pr.id, point, victim: Some(v.id) });
                     if v.kind != PawnKind::Human && v.condition == crate::state::Condition::Normal && v.sleep_timer <= 0.0 {
-                        v.sleep_timer = sleep_delay(pr.owner).max(1e-3);
+                        // `m_bInstantSleepForUnawareNPCs`: an NPC the AI reports unaware sleeps at once.
+                        v.sleep_timer = if v.ai_unaware { 1e-3 } else { sleep_delay(pr.owner).max(1e-3) };
                         v.condition_by = Some(pr.owner);
                     }
                     continue;
+                }
+                // `Twk_Inv_EliteHelmet.m_DamageTypesThatKnockOff`: bullets and bolts on the head,
+                // flare bolts anywhere. (What the helmet absorbs is in the base tweak, not decoded:
+                // the hit itself is applied unchanged, U-246.)
+                if v.helmet && (pr.kind == ProjectileKind::IncendiaryBolt || head) {
+                    v.helmet = false;
                 }
                 if pr.kind == ProjectileKind::IncendiaryBolt {
                     events.push(SimEvent::ProjectileImpact { projectile: pr.id, point, victim: Some(v.id) });
@@ -535,17 +610,18 @@ pub fn make_projectile(id: u32, owner: u32, kind: ProjectileKind, pos: Vec3, vel
     ProjectileState { id, kind, owner, position: pos, velocity: vel, age: 0.0, damage, gravity_mult, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO }
 }
 
-/// Players revealed to `viewer` by Dark Vision (within range; occlusion ignored, as in
-/// the original's x-ray presentation).
+/// Pawns revealed to `viewer` by Dark Vision: the "souls" of living pawns within `m_fDistance`
+/// while the power is in effect (occlusion ignored, as in the original's x-ray presentation;
+/// `Twk_Rat` leaves `m_bOnlyVisibleAtLevel2` false, so rats show at both levels).
 pub fn dark_vision_reveals(state: &WorldState, viewer: u32, t: &CombatTuning) -> Vec<u32> {
     let Some(v) = state.player(viewer) else { return Vec::new() };
-    if v.vitals.dark_vision_remaining <= 0.0 {
+    if !dark_vision_active(v) {
         return Vec::new();
     }
     state
         .players
         .iter()
-        .filter(|o| o.id != viewer && o.alive && o.position.distance(v.position) <= t.dark_vision_distance)
+        .filter(|o| o.id != viewer && o.alive && !crate::powers::is_hidden(o) && o.position.distance(v.position) <= t.dark_vision_distance)
         .map(|o| o.id)
         .collect()
 }

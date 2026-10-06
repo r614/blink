@@ -63,8 +63,21 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
         apex = apex.max(st.player(1).unwrap().position.z);
     }
     let mv = &mc.sim.gameplay.movement;
-    let expected = mv.jump_z * mv.jump_z / (2.0 * -mv.gravity_z);
-    rep.check(S, "jump apex = JumpZ^2/2g", (apex - z0 - expected).abs() < 3.0, format!("{:.1} uu (reference {expected:.1})", apex - z0));
+    // physFalling gains twice the acceleration per tick (0x006BF0E0): apex JumpZ^2 / 4g.
+    let expected = mv.jump_z * mv.jump_z / (4.0 * -mv.gravity_z);
+    rep.check(S, "jump apex = JumpZ^2/4g (physFalling)", (apex - z0 - expected).abs() < 3.0, format!("{:.1} uu (reference {expected:.1})", apex - z0));
+    // Water: the map's DishonoredWaterVolumes; a pawn dropped into the deepest one swims.
+    let water = mc.collision.water.as_deref().cloned().unwrap_or_default();
+    let swim = water.iter().max_by(|a, b| (a.max.z - a.min.z).total_cmp(&(b.max.z - b.min.z))).map(|w| {
+        let mut st = WorldState::default();
+        let c = (w.min + w.max) * 0.5;
+        spawn_player(&mut st, 1, glam::Vec3::new(c.x, c.y, w.max.z + 150.0), 0.0, &mc.sim);
+        for _ in 0..180 {
+            step_world(&mut st, &[(1, PlayerInput::default())], &mc.collision, &mc.sim);
+        }
+        st.player(1).unwrap().mode
+    });
+    rep.check(S, "water volumes extracted, a dropped pawn swims", !water.is_empty() && swim == Some(dishonored_sim::state::MoveMode::Swimming), format!("{} volumes, mode {swim:?}", water.len()));
 
     // 4. Blink from each spawn: valid target, mana cost, ends standing.
     let mut blinks_ok = 0;

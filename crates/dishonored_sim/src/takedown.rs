@@ -122,6 +122,7 @@ pub fn knock_out(v: &mut PlayerState, by: Option<PlayerId>, cause: KnockoutCause
     v.sword.phase = crate::state::SwordPhase::Idle;
     v.left.phase = crate::state::LeftPhase::Idle;
     v.vitals.dark_vision_remaining = 0.0;
+    v.dark = Default::default();
     events.push(SimEvent::KnockedOut { victim: v.id, by, cause });
 }
 

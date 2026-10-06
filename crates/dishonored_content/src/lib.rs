@@ -82,7 +82,7 @@ fn load_spawns(map: &str, m: Option<&DishonoredMap>) -> Vec<Spawn> {
 }
 
 pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
-    let path = cache_dir().join("gameplay_config.v5.json");
+    let path = cache_dir().join("gameplay_config.v6.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);
@@ -109,6 +109,31 @@ pub fn load_nav(content: &Content, map: &str) -> Result<NavWorld> {
     std::fs::create_dir_all(cache_dir()).ok();
     w.save(&path).ok();
     Ok(w)
+}
+
+/// The map's `DishonoredWaterVolume`s, cached as `cache/<map>.water1.json`.
+pub fn load_water(content: &Content, map: &str) -> Vec<dishonored_world::WaterVolume> {
+    let path = cache_dir().join(format!("{map}.water1.json"));
+    if let Some(w) = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Vec<dishonored_world::WaterVolume>>(&t).ok()) {
+        return w;
+    }
+    let mut pkgs = map_packages(content, map);
+    if map.starts_with("L_Boyle_Ext") {
+        pkgs.push("L_BoyleStreet_Ext_Script".into());
+    }
+    let defs = dishonored_assets::water::extract_water(content, &pkgs).unwrap_or_else(|e| {
+        eprintln!("warning: water volumes of {map}: {e:#}");
+        Vec::new()
+    });
+    let w: Vec<dishonored_world::WaterVolume> = defs
+        .into_iter()
+        .map(|d| dishonored_world::WaterVolume { name: d.name, hulls: d.hulls, min: d.min, max: d.max, fluid_friction: d.fluid_friction, terminal_velocity: d.terminal_velocity, shallow: d.shallow })
+        .collect();
+    std::fs::create_dir_all(cache_dir()).ok();
+    if let Ok(t) = serde_json::to_string(&w) {
+        std::fs::write(&path, t).ok();
+    }
+    w
 }
 
 pub fn load_match(map: &str) -> Result<MatchContent> {
@@ -138,6 +163,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         Ok(nav) => collision.nav = Some(std::sync::Arc::new(nav)),
         Err(e) => eprintln!("warning: no original navigation for {map}: {e:#}"),
     }
+    collision.water = Some(std::sync::Arc::new(load_water(&content, map)));
     let curated = load_spawns(map, None);
     let spawns = if curated.is_empty() { spawns } else { curated };
     let npc_path = dir.join(format!("{map}.npcs6.json"));
@@ -421,6 +447,15 @@ impl dishonored_world::WorldQuery for MatchContent {
     }
     fn nav(&self) -> Option<&dishonored_world::nav::NavWorld> {
         self.collision.nav.as_deref()
+    }
+    fn box_contacts(&self, b: &dishonored_world::PawnBox, channels: u8, out: &mut Vec<dishonored_world::Contact>) {
+        self.collision.box_contacts(b, channels, out)
+    }
+    fn sweep_box(&self, b: &dishonored_world::PawnBox, delta: Vec3, channels: u8) -> Option<dishonored_world::SweepHit> {
+        self.collision.sweep_box(b, delta, channels)
+    }
+    fn water_at(&self, p: Vec3) -> Option<dishonored_world::WaterInfo> {
+        self.collision.water_at(p)
     }
 }
 

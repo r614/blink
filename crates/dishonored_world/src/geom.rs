@@ -169,9 +169,72 @@ pub fn closest_segment_triangle(p0: Vec3, p1: Vec3, a: Vec3, b: Vec3, c: Vec3) -
     best
 }
 
+/// Overlap of an axis-aligned box (`center`, half extents `half`) with triangle `abc` by the
+/// separating axis test (box axes, triangle normal, the nine edge cross products). Returns the
+/// minimal push-out (direction away from the triangle, depth) when they overlap by more than
+/// `-slack`. Face axes win ties against edge axes so a box resting on a floor reports the floor
+/// normal.
+pub fn box_triangle(center: Vec3, half: Vec3, a: Vec3, b: Vec3, c: Vec3, slack: f32) -> Option<(Vec3, f32)> {
+    let v = [a - center, b - center, c - center];
+    let e = [v[1] - v[0], v[2] - v[1], v[0] - v[2]];
+    let n = e[0].cross(e[1]);
+    let mut best: Option<(Vec3, f32)> = None;
+    let mut test = |axis: Vec3, bias: f32| -> bool {
+        let len = axis.length();
+        if len < 1e-6 {
+            return true;
+        }
+        let ax = axis / len;
+        let p = [v[0].dot(ax), v[1].dot(ax), v[2].dot(ax)];
+        let pmin = p[0].min(p[1]).min(p[2]);
+        let pmax = p[0].max(p[1]).max(p[2]);
+        let r = half.x * ax.x.abs() + half.y * ax.y.abs() + half.z * ax.z.abs();
+        if pmin > r + slack || pmax < -r - slack {
+            return false;
+        }
+        // Moving the box by `up` along +ax clears the triangle's far side; by `down` along -ax
+        // its near side.
+        let up = pmax + r;
+        let down = r - pmin;
+        let (push, depth) = if up <= down { (ax, up) } else { (-ax, down) };
+        if best.is_none_or(|(_, d)| depth + bias < d) {
+            best = Some((push, depth));
+        }
+        true
+    };
+    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+        if !test(axis, 0.0) {
+            return None;
+        }
+    }
+    if !test(n, 0.0) {
+        return None;
+    }
+    for ei in [Vec3::X, Vec3::Y, Vec3::Z] {
+        for ej in e {
+            if !test(ei.cross(ej), 1e-3) {
+                return None;
+            }
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn box_triangle_floor_and_miss() {
+        let (a, b, c) = (Vec3::new(-100., -100., 0.), Vec3::new(100., -100., 0.), Vec3::new(0., 100., 0.));
+        // Box sunk 2 uu into the floor: push straight up by 2.
+        let (n, d) = box_triangle(Vec3::new(0., 0., 85.5), Vec3::new(35., 35., 87.5), a, b, c, 0.0).unwrap();
+        assert!((n - Vec3::Z).length() < 1e-5, "{n}");
+        assert!((d - 2.0).abs() < 1e-4, "{d}");
+        assert!(box_triangle(Vec3::new(0., 0., 90.0), Vec3::new(35., 35., 87.5), a, b, c, 0.0).is_none());
+        // Beside the triangle (outside its edge by more than the half width): no overlap.
+        assert!(box_triangle(Vec3::new(0., 200., 50.0), Vec3::new(35., 35., 87.5), a, b, c, 0.0).is_none());
+    }
+
     #[test]
     fn segment_triangle_cases() {
         let (a, b, c) = (Vec3::new(-10., -10., 0.), Vec3::new(10., -10., 0.), Vec3::new(0., 10., 0.));
