@@ -33,6 +33,22 @@ fn main() -> Result<()> {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let c = Content::locate()?;
     match a.first().map(|s| s.as_str()) {
+        // `nav_dump path <L_..._P> x y z x y z`: the poly under each end, the goal's closest
+        // navmesh point and the funnelled path (the port's NavWorld).
+        Some("path") => {
+            let map = a.get(1).cloned().unwrap_or("L_Boyle_Ext_P".into());
+            let v: Vec<f32> = a[2..8].iter().map(|s| s.parse().unwrap()).collect();
+            let (s, g) = (glam::Vec3::new(v[0], v[1], v[2]), glam::Vec3::new(v[3], v[4], v[5]));
+            let nav = load_nav_data(&c, &map_packages(&c, &map))?;
+            let w = dishonored_world::nav::NavWorld::from_data(&nav);
+            println!("start poly {:?} closest {:?}", w.locate(s, 60.0, 260.0), w.closest_point(s, 200.0));
+            println!("goal poly {:?} closest {:?}", w.locate(g, 60.0, 260.0), w.closest_point(g, 300.0));
+            let p = w.find_path(s, g, &dishonored_world::nav::PathOpts::default());
+            println!("path {p:.1?}");
+            if let Some(last) = p.as_ref().and_then(|p| p.last()) {
+                println!("path end {:.1} uu (XY) from the goal", last.truncate().distance(g.truncate()));
+            }
+        }
         Some("survey") => {
             let mut names: Vec<String> = std::fs::read_dir(&c.cooked)?
                 .filter_map(|e| e.ok())

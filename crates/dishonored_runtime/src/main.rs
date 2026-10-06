@@ -27,6 +27,7 @@
 mod coords;
 mod characters;
 mod npc_anim;
+mod facefx;
 mod ragdoll;
 mod debug;
 mod effects;

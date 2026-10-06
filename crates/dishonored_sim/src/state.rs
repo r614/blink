@@ -220,6 +220,11 @@ pub struct PlayerState {
     /// level 1 (0x00A87B60). False for players and when no AI sets it.
     #[serde(default)]
     pub ai_unaware: bool,
+    /// Hook written by the mission host each tick for NPC pawns: the locomotion component follows
+    /// a navmesh path, so the pawn walks on the navmesh (`movement::nav_walk_move`). False for
+    /// players and when no host sets it.
+    #[serde(default)]
+    pub nav_walk: bool,
     /// Helmet of an NPC (`m_PotentialNPCArmor`, `DisTweaks_Armor` protecting the head): absorbs
     /// headshots of the absorbed damage types until knocked off. Set by the mission/AI layer.
     #[serde(default)]
@@ -480,6 +485,7 @@ impl PlayerState {
             rat_slow: 0.0,
             rat_slow_percent: 0.0,
             ai_unaware: false,
+            nav_walk: false,
             helmet: false,
             rat_attack: RatAttackState::default(),
             damage_reduction: 0.0,
