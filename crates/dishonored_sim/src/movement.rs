@@ -571,6 +571,38 @@ fn step_up(p: &mut PlayerState, desired: Vec3, delta: Vec3, hit: (Vec3, f32), ct
 }
 
 /// The horizontal part of physWalking's move: the move, then stepUp on a barrier.
+/// NPC navmesh walking (`DishonoredGameInfo.m_bNewNPCPhysWalking`, default true; the NPC pawn's
+/// physics 0x00B4E9F0 -> the locomotion component 0x00943D00 -> 0x00940D80, AI.md "Go-to
+/// completion"): while the locomotion component follows a navmesh path, the pawn is not moved by
+/// physWalking. The move `Velocity x dt` is kept when its end lies on the navmesh reached from
+/// the pawn's poly (0x0068F660); the height comes from the poly's plane, with the cylinder's
+/// bottom on it; world geometry is not swept. Otherwise the original falls back to its walking
+/// physics (0x0093FB00), here `walk_move`. Returns false for that fallback.
+/// APPROXIMATION: the poly is found by position within the step height instead of walking the
+/// poly edges from the current poly, and the original's actor box check (0x0064A6B0) is not
+/// made.
+fn nav_walk_move(p: &mut PlayerState, delta: Vec3, ctx: &MoveCtx) -> bool {
+    let Some(nav) = ctx.world.nav() else { return false };
+    if delta.truncate().length_squared() < 1e-8 {
+        // Not moving: the component leaves the pawn where it is (no physWalking either).
+        p.velocity = Vec3::ZERO;
+        return true;
+    }
+    let hh = half_height(p, ctx.cfg);
+    let step = ctx.cfg.max_step_height;
+    let foot = p.position - Vec3::Z * hh;
+    if nav.locate(foot, step, step).is_none() {
+        return false;
+    }
+    let dest = foot + Vec3::new(delta.x, delta.y, 0.0);
+    let Some(poly) = nav.locate(dest, step, step) else { return false };
+    let z = nav.poly_z(poly, dest.x, dest.y);
+    p.position = Vec3::new(dest.x, dest.y, z + hh);
+    p.velocity = Vec3::new(delta.x, delta.y, 0.0) / ctx.dt;
+    p.floor_normal = Vec3::Z;
+    true
+}
+
 fn walk_move(p: &mut PlayerState, delta: Vec3, ctx: &MoveCtx) {
     if delta.abs().max_element() < 1e-4 {
         return;
@@ -655,6 +687,9 @@ fn walking(
             desired += Vec3::new(v.zone_velocity.x, v.zone_velocity.y, 0.0) * 25.0 * ctx.dt;
         }
         let delta = desired * ctx.dt;
+        if p.nav_walk && nav_walk_move(p, delta, ctx) {
+            return;
+        }
         walk_move(p, delta, ctx);
     }
     if p.mode != MoveMode::Walking {
