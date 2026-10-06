@@ -598,7 +598,7 @@ fn crt_rand_matches_the_msvc_generator() {
 #[test]
 fn level_loaded_fires_only_linked_outputs_and_state_restored_on_return() {
     let mut b = B::new();
-    b.db.classes.push(("SeqEvent_LevelLoaded".into(), vec!["SeqEvent_LevelLoaded".into(), "SequenceEvent".into(), "SequenceOp".into()]));
+    b.db.classes.insert("SeqEvent_LevelLoaded".into(), vec!["SeqEvent_LevelLoaded".into(), "SequenceEvent".into(), "SequenceOp".into()]);
     let s = b.root(1);
     let ev = b.add(1, "SeqEvent_LevelLoaded", Kind::Event, Some(s), &[], &["Loaded and Visible", "Beginning of Level", "Level Reset", "State Restored"], vec![("MaxTriggerCount", Value::Int(0))]);
     let first = b.record(s);

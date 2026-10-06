@@ -322,25 +322,81 @@ The original mission runs from its first event to its last:
    `BoyleCanal_PlayerIsReadyTogo` -> `ChangeLvl_fromBoyle_toHub` -> global PrepareMapChange
    `L_Pub_Morning_P` -> CommitMapChange: the mission ends.
 
+
 The agent is placed next to what it uses (it does not path across the maps). It ends the
 mission at 58.7 s of play (seed 1; the matinee and conversation timings are the original's).
-Coverage on that run: 78 op classes executed of the 153 op classes in the data (the rest are
-on paths the run does not take: nonlethal route, duel, alarms, ...), 885 activations of 771
-distinct ops, 43 presentation-only activations, 14 activations of 6 unsupported classes
-(`DisSeqAct_AISetSenses`, `DisSeqAct_Door`, `SeqAct_AttachToActor`, faction
-`DisSeqAct_SetDisposition`, `DisSeqAct_ActivateUsable`, `SeqAct_ActorFactory`). The same seed
-gives the same Kismet state hash; over seeds 1-6 all three sisters come out guilty. The full
-activation tables are in the harness report.
+Coverage on that run: 78 op classes executed of the 153 op classes in the data, 893
+activations of 764 distinct ops, 53 presentation-only activations, no unsupported class. The
+same seed gives the same Kismet state hash; over seeds 1-6 all three sisters come out guilty.
+The full activation tables are in the harness report.
 
-Not exercised headless yet: Miss White's drink (the other way to learn the dress), the
-nonlethal Brisby route (knock-out, carrying a body to the boat), Lord Shaw's duel.
+### The other routes (`harness kismet`, `--route brisby|white|duel`)
+
+Each runs on a fresh match; every stage is a check.
+
+- **Nonlethal (Lord Brisby), end to end.** Brisby's approach hook starts
+  `Lord_Brisby_Quest_Start`; `Join_Brisby_in_Private` -> AIGoToActor [8331] (Success) -> his
+  route and window matinee, whose Started output arms the window touch; the player stepping in
+  sets `Boyle_BrisbyInPosition`. His use hook plays `Brisby_Boyle_Invite`, then the guilty
+  sister's KO conversation (its soiree starts `GetBrisbyQuest`: `Boyle_BrisbyTalked`, her KO
+  task). She is choked unconscious (`DisSeqEvent_KnockedOut` retargets the task to the cellar
+  boat) and carried down; the player-only touches by the boat put Brisby there ("BRISBY
+  TELEPORTED" -> "reveal love nest"); the body test (`DisTrigger_23`, sisters' tweaks only),
+  her body on the boat and the player on the boat play `Thanks`; its soiree closes the gate ->
+  `CompleteMercyPath` (BoyleMercyPathComplete, SF_Global_PlyrMercyBoyle, chaos -20, T6). The
+  way out as on the lethal route ends the mission at 136.9 s.
+- **Miss White's drink.** `Hits_On_Player` -> "Quest For the Drink" (T25); the drinks usable
+  (`DisWaterSource_7`) runs `DisSeqAct_GivePickup` of the party drink; her use hook's Kismet
+  output `HasDrinkLogicCheck` -> `Takes_Drink`, `RemoveAbstractItem`, T25 completed;
+  `MissWhiteRevealsColors` plays Waverly's then Lydia's colour; `End W Conversation` marks the
+  three colours known and sends her away (AIGoToActor to TargetPoint_100). Which sister is
+  guilty still needs a suspect (`Boyle_Suspect*`: her note or Brisby's reveal), as in the
+  original. Her walk does not arrive headless (U-220).
+- **Lord Shaw's duel (part of `L_Boyle_Ext_Script`, "Pistols in the Yard").** His radial
+  approach hook plays `Begin_Duel_Conv` (Boyle_PlayerFoundShaw); standing in front of him
+  (DisTrigger_3) and using him plays `Player_Initiates_Choice` / `Player_Initiates` with
+  Pendleton's note (`SoireeShawReadsNote`): PN T0 completed, PN T2 "Follow Lord Shaw". He walks
+  to the duel ground, the elite offers the weapons (`Choose_Weapon` -> `PlayerTakesGun` ->
+  "Player Pistol Setup" moves and enables the box's use trigger), and the player takes the
+  pistol (`Duel_Explained`). The countdown on the mark and the shot are not reached yet
+  (U-221; reported as open stages).
 
 ## 4. Open points
 
-See `research/UNKNOWNS.md` U-080..U-087.
+See `research/UNKNOWNS.md` U-080..U-087 and U-220..U-224.
 
 Update 2026-10-06 (AI): `DisSeqAct_SetDisposition` (faction targets through
 `Crowd::set_disposition`, pawn targets through `Crowd::set_pawn_disposition`; inputs Set /
 Clear / ClearAll per `EDisSetDispositionKismetInput`, decoded 0x00c79000) and
 `DisSeqAct_AISetSenses` (brain `deaf` / `blind` / `numb`) are now handled by the host
 (`[ai]` hooks in `kismet_host.rs`); see `dishonored/AI.md` "Factions".
+
+### Host additions (2026-10-06)
+
+- Doors: `DisSeqAct_Door` keeps each door's state and lock; a lock change rebuilds the AI's
+  navigation with the door's path-object edges blocked or opened (`KismetRun::door_nav`,
+  `NavOverlay`); state changes fire `DisSeqEvent_Door` Opened / Closed (at once: the door's
+  swing time is not modelled, U-222).
+- Usables have stages: a use moves to the next stage and fires the `DisSeqEvent_Used` output
+  of that stage (0x00a57640); `DisSeqAct_ActivateUsable` moves to its goal (no transition
+  time, U-223). The engine's `SeqEvent_Used` (triggers) is a usable too.
+- `SeqAct_AttachToActor`: attached level actors follow their base (touch shapes move; a pawn
+  does not touch what is attached to it). `SeqAct_ActorFactory`: decoded spawning of the
+  factory's movable ambient sounds (presentation).
+- `SeqEvent_Touch` toucher filter (0x006da210): `ClassProximityTypes`, `ProximityTweaks`
+  (the sisters' boat test), ignored classes. `SeqEvent_LOS`: looking at the originator within
+  `TriggerDistance` and `ScreenCenterDistance` (U-224). `SeqEvent_TakeDamage`: accumulated
+  hits from `SimEvent::Damage` with the attacker as instigator.
+- Abstract items: `AddAbstractItem` / `RemoveAbstractItem` (`m_pItemToAdd` /
+  `m_pItemToRemove`, quantities), abstract pickups and `DisSeqAct_GivePickup` (its tweak
+  resolved at load, `KismetSetup::gives`) go to `MissionState::items`, which the
+  conversations' `DisConv_HasAbstractItem` reads.
+- AI: `AIDoSearch`, `AISetSuspicionLevel`, `AIClearAttention`, `AIPsychicAttention`,
+  `AIRingAlarm`, `AIShoot` (latent, shots counted from `SimEvent::Fired`), `AIDoFollow`,
+  `AIDoSimpleBehaviors`, `AIStartDistraction`, `AINoise` (radius from
+  `m_LoudnessDistanceArray`), `SetIgnoreDeath`, `ForbiddenZoneOverride`, `AlarmBell`.
+- Other: `GameOver` (mission failure after `m_fDelay`), `AttachPickup`, `ModifyHealth`, chaos
+  (`AddDarkness`). `kismet_host::NOT_MODELLED` lists the 14 decoded classes whose systems the
+  port lacks; they are counted apart from unsupported classes.
+- A hook output outside a conversation (a use hook's Kismet output) finds its one-shot by name
+  in the loaded levels.
