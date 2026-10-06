@@ -1161,3 +1161,10 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Findings:** the shot spawns `Ps_PlayerPistol_StdMuzzle_01` (the last round's capture ran a stale runtime: the harness starts the runtime and server from its own folder, and `.bin/` held binaries from 03:20; copy every binary when refreshing `.bin`). The screenshot showed a half-screen purple band: emitter `ParticleSpriteEmitter_20` uses `WindWave_Disto_01_inst` (parent `DefaultAdditive_PMAT`, `bHasDistortion`), whose static switches are `Dist_Enable_Distortion` on and `D_Disable_Diffuse` on; the port ignored the switch and drew its `D_Diffuse` (`Teleport_Ink_m`) additively.
 - **Port changes:** distortion-only emitters are skipped in the colour pass; the distortion pass itself is U-360.
 - **Harness:** visual 7/7 with the new check "pistol shots spawn the original muzzle flash systems"; screenshot `screens/muzzle_flash.png` (no band).
+
+## 2026-10-06: Lamp glow planes drawn as boxes (fog texture switch)
+
+- **Question:** What is the translucent green box at the Boyle Ext spawn (visual capture `smoke/01_spawn.png`)?
+- **Method:** new `map_dump --near X Y R` (instances and placed emitters around a point, with material blend modes and decoded size / colour / alpha); `obj_dump` / `mic_static` of `Boyle_FX.Lights.Light_small_Yellow_01` and `Vfx_Lights.Materials.wall_lamp_Inst`.
+- **Findings:** the box is the lamp glow emitter at (-2662, -2126, 237): a mesh emitter (`light_plane`, size 20, colour (0.996, 0.946, 0.727), alpha 0.12, additive) with `wall_lamp_Inst` (`G_GlowPower` 8, `D_Distance_Fade_Factor` 1024, switches `F_Use_With_Fog` off, `D_Enable_Distance_Fade` on). The port took the instance's `F_Fog_Texture` (`Cloud_64_d`) as its colour texture; with `F_Use_With_Fog` off the original never samples it.
+- **Port changes:** the fog texture is not a colour source while `F_Use_With_Fog` is off, so the emitter takes the procedural glow path; `G_GlowPower` feeds the glow falloff exponent when the material has no `Fresnel_exponent`. APPROXIMATION: the glow graph is stripped in the cooked data (U-305); the distance fade is not applied.

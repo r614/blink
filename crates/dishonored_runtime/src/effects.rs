@@ -355,7 +355,7 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
                 // terms that are not recoverable (rays mask, depth-biased alpha); 0.1 keeps the
                 // stacked cones from saturating.
                 let k = scalar("LightIntensity", 2.0) * 0.1;
-                glow.insert((si, ei), (mh, Vec4::new(c[0] * k, c[1] * k, c[2] * k, 1.0), Vec4::new(scalar("Fresnel_exponent", 5.0), scalar("StartOffset", 128.0) * coords::UU_TO_BEVY, scalar("SphereMask_Power", 2.0), scalar("Distance", 1.5) * map.meshes[mid].positions.iter().map(|p| p.length()).fold(0.0, f32::max))));
+                glow.insert((si, ei), (mh, Vec4::new(c[0] * k, c[1] * k, c[2] * k, 1.0), Vec4::new(scalar("Fresnel_exponent", scalar("G_GlowPower", 5.0)), scalar("StartOffset", 128.0) * coords::UU_TO_BEVY, scalar("SphereMask_Power", 2.0), scalar("Distance", 1.5) * map.meshes[mid].positions.iter().map(|p| p.length()).fold(0.0, f32::max))));
                 continue;
             }
             let mh = mesh_handles.entry(mid).or_insert_with(|| meshes.add(bevy_mesh(&map.meshes[mid]))).clone();

@@ -923,6 +923,10 @@ impl Importer<'_> {
         // whose `*_Enable_*` switch is off is not in the original's shader even when the
         // instance (or a parent) still names a texture for it.
         let off = |s: &str| chain.switch(s) == Some(false);
+        // The glow materials' fog noise (`F_Fog_Texture`, e.g. `wall_lamp_Inst`'s `Cloud_64_d`)
+        // is only sampled with `F_Use_With_Fog`; with it off the texture is not a colour source.
+        let fog_tex = chain.textures.iter().chain(chain.default_textures.iter()).find(|(n, _)| n.eq_ignore_ascii_case("F_Fog_Texture")).map(|t| t.1);
+        let diffuse_key = diffuse_key.filter(|k| !(off("F_Use_With_Fog") && fog_tex == Some(*k)));
         let normal_key = normal_key.filter(|_| !off("N_Enable_NormalMap"));
         let spec_key = material_chain::slot(&chain, "s_", &["mask"]).filter(|_| !off("S_Enable_Specular"));
         let emissive_key = material_chain::slot(&chain, "e_", &["mask"]).filter(|_| !off("E_Enable_Emissive"));

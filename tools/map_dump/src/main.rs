@@ -72,6 +72,33 @@ fn main() -> Result<()> {
             println!("{} mesh={} hidden={} m={:?}", i.source, m.meshes[i.mesh].source, i.hidden, i.transform.to_cols_array_2d());
         }
     }
+    // `--near X Y R`: visible instances whose world bounds come within R of (X, Y), with their
+    // materials' blend modes (finding what a capture shows at a place).
+    if let Some(n) = args.iter().position(|a| a == "--near") {
+        let (x, y, r): (f32, f32, f32) = (args[n + 1].parse()?, args[n + 2].parse()?, args[n + 3].parse()?);
+        for i in m.instances.iter().filter(|i| !i.hidden) {
+            let mesh = &m.meshes[i.mesh];
+            let (a, b) = (i.transform.transform_point3(mesh.bounds_min), i.transform.transform_point3(mesh.bounds_max));
+            let (lo, hi) = (a.min(b), a.max(b));
+            let d = glam::Vec2::new((x - x.clamp(lo.x, hi.x)).abs(), (y - y.clamp(lo.y, hi.y)).abs()).length();
+            if d > r {
+                continue;
+            }
+            let mats: Vec<String> = mesh.sections.iter().enumerate().map(|(si, s)| {
+                let mid = i.materials.get(si).copied().flatten().or(s.material);
+                mid.map(|k| format!("{} {:?} {:?}", m.materials[k].source.rsplit('.').next().unwrap_or(""), m.materials[k].blend, m.material_params.get(k).map(|p| p.blend))).unwrap_or_default()
+            }).collect();
+            println!("{:.0} uu: {} [{}] bounds {:.0}..{:.0} collides {} mats {mats:?}", d, mesh.source, i.source, lo, hi, i.collides);
+        }
+        for e in &m.emitters {
+            let p = e.transform.w_axis.truncate();
+            let d = glam::Vec2::new(p.x - x, p.y - y).length();
+            if d <= r {
+                let s = &m.particle_systems[e.system];
+                println!("{d:.0} uu: emitter {} at {p:.0} xf {:?} emitters {:?}", s.source, e.transform.to_scale_rotation_translation().0, s.emitters.iter().map(|em| (em.mesh.clone(), em.blend, em.material.map(|k| m.materials[k].source.rsplit('.').next().unwrap_or("").to_string()), format!("size {:?} color {:?} alpha {:?}", em.size, em.color, em.alpha))).collect::<Vec<_>>());
+            }
+        }
+    }
     let fmts: BTreeMap<String, usize> = m.textures.iter().fold(BTreeMap::new(), |mut acc, t| {
         *acc.entry(format!("{:?} srgb={}", t.format, t.srgb)).or_default() += 1;
         acc
