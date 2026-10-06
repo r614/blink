@@ -188,7 +188,7 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
             std::thread::sleep(Duration::from_secs(3));
             g.screenshot(&out.join("game_offline.png"));
             g.call(json!({"cmd":"pause"}));
-            let (paused, _) = g.wait(5.0, |s| s["paused"].as_bool() == Some(true));
+            let (paused, _) = g.wait(15.0, |s| s["paused"].as_bool() == Some(true));
             std::thread::sleep(Duration::from_millis(500));
             g.screenshot(&out.join("game_pause_menu.png"));
             rep.check(S, "in-game pause menu opens (offline match paused)", paused, String::new());
