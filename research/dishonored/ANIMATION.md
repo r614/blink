@@ -494,7 +494,9 @@ code). Runtime: `crates/dishonored_runtime/src/facefx.rs`, applied in `npc_anim:
   | 9 | corrective | correction factor; needs the corrected node |
   | 10 | clamped linear | `m x` (clampx / clampy / clampdir) |
 
-  The Boyle actors only use types 1 and 2. Types 9 and 10 are not modelled because their
+  The Boyle actors only use types 1 and 2, and so do the actors of six other maps sampled with
+  `facefx_dump` (Prison, Streets1, Tower, ArtDealer, Bridge 1a, Brothel; all decode, node
+  kinds 0 and 4 only). Types 9 and 10 are not modelled because their
   clamp / correction rules were not decoded.
 - Typical line: 19 curves (`open`, `W`, `ShCh`, `PBM`, `FV`, `wide`, `tBack`, `tRoof`, `tTeeth`,
   the head orientation / emphasis and gaze curves, `Eyebrow_Raise`, `Blink`). Many are empty;
