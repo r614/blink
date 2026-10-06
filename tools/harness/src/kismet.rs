@@ -913,8 +913,15 @@ fn duel(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<Stage>> {
     }
     let counted: Vec<&str> = ["Go_to_Mark", "Duel_Explained", "Three", "Two", "One", "Turn_and_Fire"].into_iter().filter(|c| p.conv_started(c)).collect();
     let recent: Vec<String> = p.history().into_iter().rev().take(12).collect();
+    // Lord Shaw's walk to his mark (AIGoToActor_0 -> `enableshawtrig` -> "Shaw On Mark"), which
+    // the duel loop waits for (U-221).
+    let shaw_walk = {
+        let at = p.m().world.player(shaw).map(|x| x.position);
+        let b = p.m().crowd.brains.iter().find(|b| b.id == shaw).map(|b| format!("{:?} goal {:?}", b.state, b.goal));
+        format!("Player On Mark {:?}; Shaw at {at:?} brain {b:?}", var(p.m(), "L_Boyle_Ext_Script", "Player On Mark"))
+    };
     stage(&mut rows, "the pistol taken from the box (DisTrigger_2 Used): the player holds the elite pistol", picked && p.hist_has("player_took_the_pistol"), format!("pistol used {picked}"));
-    stage(&mut rows, "(open, U-221) on the mark: the countdown runs (Three, Two, One, Turn_and_Fire)", fire, format!("pistol used {picked}; conversations {counted:?}; {} at {:.1} s", recent.join(" | "), p.time()));
+    stage(&mut rows, "(open, U-221) on the mark: the countdown runs (Three, Two, One, Turn_and_Fire)", fire, format!("pistol used {picked}; conversations {counted:?}; {shaw_walk}; {} at {:.1} s", recent.join(" | "), p.time()));
     if !fire {
         return Ok(rows);
     }

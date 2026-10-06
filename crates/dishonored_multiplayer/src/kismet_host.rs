@@ -2100,7 +2100,9 @@ fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
         }
         for o in &before {
             if !inside.contains(o) {
-                k.touch(h, e, o.clone(), false);
+                if k.touch(h, e, o.clone(), false) {
+                    h.note(format!("untouched {}:{} by {o:?}", actor.package, actor.name));
+                }
             }
         }
     }

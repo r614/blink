@@ -293,7 +293,14 @@ impl CollisionWorld {
             };
             if !mesh.collision_triangles.is_empty() {
                 for (i, t) in mesh.collision_triangles.iter().enumerate() {
-                    let s = mesh.collision_materials.get(i).and_then(|m| section_surface.get(*m as usize)).copied().unwrap_or(0);
+                    // The kDOP tree keeps every triangle; UE3's static mesh collision provider
+                    // skips those of sections without `EnableCollision` at query time
+                    // (`FStaticMeshCollisionDataProvider::ShouldCheckMaterial`).
+                    let m = mesh.collision_materials.get(i).map(|m| *m as usize);
+                    if m.and_then(|m| mesh.sections.get(m)).is_some_and(|s| !s.enable_collision) {
+                        continue;
+                    }
+                    let s = m.and_then(|m| section_surface.get(m)).copied().unwrap_or(0);
                     push(t[0], t[1], t[2], s);
                 }
             } else {
