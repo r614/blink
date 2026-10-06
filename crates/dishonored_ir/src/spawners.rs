@@ -77,6 +77,11 @@ pub struct AccessorySlot {
     /// `DisPawnAccessory.m_fRandomChanceOfUse`.
     pub chance_of_use: f32,
     pub meshes: Vec<AccessoryMesh>,
+    /// An `m_PotentialNPCArmor` head armour that hits can knock off (`DisTweaks_Armor` with
+    /// `m_ProtectedBodyRegion` DHR_HEAD and a `m_DamageTypesThatKnockOff` list); its
+    /// `m_fPercentChance` is `chance_of_use`.
+    #[serde(default)]
+    pub helmet: bool,
 }
 
 /// `DisPawnAccessoryMesh`: a static mesh on a socket of the pawn's skeletal mesh.
@@ -130,6 +135,12 @@ impl Appearance {
             out.push((m.mesh.clone(), m.socket.clone()));
         }
         out
+    }
+
+    /// Whether the pawn for `seed` wears a helmet: an armour slot whose chance roll passes (the
+    /// same roll [`Self::accessories`] makes for its mesh).
+    pub fn helmet(&self, seed: u32) -> bool {
+        self.accessories.iter().enumerate().any(|(i, slot)| slot.helmet && roll(seed, 200 + i as u32) < slot.chance_of_use)
     }
 
     /// The head option picked for `seed` (weighted by `m_fRandomChance`, 0x00B76390).
@@ -186,6 +197,26 @@ impl Appearance {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helmet_follows_the_armour_roll() {
+        let slot = |chance: f32, helmet: bool| AccessorySlot { chance_of_use: chance, meshes: Vec::new(), helmet };
+        let always = Appearance { accessories: vec![slot(0.0, false), slot(1.0, true)], ..Default::default() };
+        assert!((0..50).all(|s| always.helmet(s)));
+        let never = Appearance { accessories: vec![slot(1.0, false), slot(0.0, true)], ..Default::default() };
+        assert!((0..50).all(|s| !never.helmet(s)));
+        // A half chance (city guards' m_fPercentChance 0.5) gives some of each.
+        let half = Appearance { accessories: vec![slot(0.5, true)], ..Default::default() };
+        let worn = (0..200).filter(|s| half.helmet(*s)).count();
+        assert!(worn > 50 && worn < 150, "{worn}");
+        // Mesh-less armour slots add no accessory mesh.
+        assert!(always.accessories(3).is_empty());
     }
 }
 

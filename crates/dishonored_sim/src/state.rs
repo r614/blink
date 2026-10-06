@@ -235,8 +235,11 @@ pub struct PlayerState {
     /// players and when no host sets it.
     #[serde(default)]
     pub nav_walk: bool,
-    /// Helmet of an NPC (`m_PotentialNPCArmor`, `DisTweaks_Armor` protecting the head): absorbs
-    /// headshots of the absorbed damage types until knocked off. Set by the mission/AI layer.
+    /// Helmet of an NPC (`m_PotentialNPCArmor`, `DisTweaks_Armor` protecting the head), until hits
+    /// knock it off. The armour damage filter (0x00B78610) zeroes hits of `m_DamageTypesToAbsorb`
+    /// types on the protected region and side, but the shipped helmets (elite, city, thug) absorb
+    /// nothing: they leave that list to `Twk_Inv_HelmetBase`, which no cooked package contains.
+    /// Set by the mission layer from the spawner's armour roll.
     #[serde(default)]
     pub helmet: bool,
     /// Rats attacking this pawn (attack group timers of 0x00C891E0).

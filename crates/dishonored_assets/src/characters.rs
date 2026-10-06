@@ -462,7 +462,7 @@ pub fn resolve_appearances(content: &Content, level_packages: &[String], tweaks:
                 while a.accessories.len() <= i {
                     a.accessories.push(Default::default());
                 }
-                a.accessories[i] = dishonored_ir::spawners::AccessorySlot { chance_of_use: info.get(i).copied().unwrap_or(0.0), meshes };
+                a.accessories[i] = dishonored_ir::spawners::AccessorySlot { chance_of_use: info.get(i).copied().unwrap_or(0.0), meshes, helmet: false };
             }
         }
         // Armour (`m_PotentialNPCArmor`: `m_fPercentChance`, `DisTweaks_Armor`): the armour's
@@ -487,8 +487,12 @@ pub fn resolve_appearances(content: &Content, level_packages: &[String], tweaks:
                     }),
                     _ => None,
                 };
-                if let Some(mesh) = mesh {
-                    a.accessories.push(dishonored_ir::spawners::AccessorySlot { chance_of_use: chance, meshes: vec![dishonored_ir::spawners::AccessoryMesh { mesh, socket, chance: 1.0 }] });
+                // A head armour that hits can knock off (`m_ProtectedBodyRegion` DHR_HEAD with a
+                // `m_DamageTypesThatKnockOff` list): the simulation's `PlayerState::helmet`.
+                let helmet = matches!(at.get("m_ProtectedBodyRegion"), Some(TVal::Name(r)) if r == "DHR_HEAD") && matches!(at.get("m_DamageTypesThatKnockOff"), Some(TVal::List(l)) if !l.is_empty());
+                let meshes = mesh.map(|mesh| vec![dishonored_ir::spawners::AccessoryMesh { mesh, socket, chance: 1.0 }]).unwrap_or_default();
+                if !meshes.is_empty() || helmet {
+                    a.accessories.push(dishonored_ir::spawners::AccessorySlot { chance_of_use: chance, meshes, helmet });
                 }
             }
         }

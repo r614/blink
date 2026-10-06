@@ -190,6 +190,8 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
             eat_startup: r("m_fEatStartupDuration", dl.eat_startup),
             eat_per_limb: r("m_fEatPerLimbDuration", dl.eat_per_limb),
             eat_delay_after_kill: r("m_fEatStartupDelayAfterKill", dl.eat_delay_after_kill),
+            escape_radius: r("m_fPawnEscapeRadius", dl.escape_radius),
+            eat_required_rats: get_f32(&rm, "m_EatRequiredRatCount").map(|v| v as u16).unwrap_or(dl.eat_required_rats),
         };
         l.prov.insert(format!("items.swarm.levels[{i}]"), format!("{sp} m_Levels[{i}] + {rat_path}"));
     }

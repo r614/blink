@@ -76,6 +76,28 @@ pub fn tick(p: &mut PlayerState, cfg: &VitalsConfig, dt: f32) {
     }
 }
 
+/// `DisTweaks_Armor.m_ProtectedSide` (`eDisArmorProtectionDirection`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArmorSide {
+    All,
+    Front,
+    Back,
+}
+
+/// Whether an NPC armour piece absorbs a hit (the damage filter 0x00B78610, run for each
+/// `m_PotentialNPCArmor` piece the pawn still wears): the hit region must be
+/// `m_ProtectedBodyRegion`, the side must match (`facing_dot_dir` = the pawn's facing . the hit's
+/// direction: Front covers hits travelling against the facing, < 0; Back the others), and the
+/// damage type must be in `m_DamageTypesToAbsorb` (`type_listed`); the damage then becomes 0.
+pub fn armor_absorbs(region_match: bool, side: ArmorSide, facing_dot_dir: f32, type_listed: bool) -> bool {
+    let side_ok = match side {
+        ArmorSide::All => true,
+        ArmorSide::Front => facing_dot_dir < 0.0,
+        ArmorSide::Back => facing_dot_dir >= 0.0,
+    };
+    region_match && side_ok && type_listed
+}
+
 /// Apply damage; emits Damage and (if lethal) Death. Returns true if the victim died.
 /// Damage is whole points (`TakeDamage(int Damage, ...)`): callers round as the original
 /// does; this truncates what remains.

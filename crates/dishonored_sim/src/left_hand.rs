@@ -136,6 +136,39 @@ fn fire_direction(p: &mut PlayerState, cfg: &GameplayConfig, t: &CombatTuning) -
     offset_direction(p.yaw, p.pitch, off)
 }
 
+/// The held gun's reload for this pawn: `Attribute_FastReload` and `Attribute_ReloadSpeed` of the
+/// weapon (an upgrade modifies its host item only: Pistol Reload 2 gives the pistol 1.0, the
+/// Crossbow Reload upgrade gives the crossbow 0.3), and when the magazine loads / the reload ends.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GunReload {
+    pub fast: f32,
+    pub load: f32,
+    pub end: f32,
+}
+
+/// [`GunReload`] of the left-hand item (crossbow ammo types share the crossbow's).
+pub fn gun_reload(p: &PlayerState, cfg: &GameplayConfig, t: &CombatTuning) -> GunReload {
+    let bolt = p.left.item.is_crossbow();
+    let (stages, host): (_, fn(&str) -> bool) = if bolt { (&t.crossbow_reload_stages, |n| n.starts_with("Crossbow")) } else { (&t.pistol_reload_stages, |n| n.starts_with("Pistol")) };
+    let fast = crate::powers::attribute_for(p, cfg, "Attribute_FastReload", 0.0, host);
+    let speed = crate::powers::attribute_for(p, cfg, "Attribute_ReloadSpeed", 0.0, host);
+    let (load, end) = stages.stages(speed, fast);
+    GunReload { fast, load, end }
+}
+
+/// Load the magazine from the reserve (0x00C28C50: `min(1 + MagazineBonus, held)` rounds in).
+/// Returns whether a round moved.
+fn load_magazine(p: &mut PlayerState, bolt: bool, mag: u8) -> bool {
+    let (loaded, reserve) = if bolt { (&mut p.left.bolts_loaded, &mut p.left.bolts_reserve) } else { (&mut p.left.pistol_loaded, &mut p.left.pistol_reserve) };
+    if *reserve > 0 && *loaded < mag {
+        let n = (mag - *loaded).min((*reserve).min(255) as u8);
+        *reserve -= n as u16;
+        *loaded += n;
+        return true;
+    }
+    false
+}
+
 /// World-level effects a left-hand item asks for this tick (resolved by `step_world`, which
 /// can see the other pawns).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -292,13 +325,23 @@ pub fn update(
             } else {
                 (AmmoType::IncendiaryBolt, ProjectileKind::IncendiaryBolt, t.incendiary_speed)
             };
+            let g = gun_reload(p, cfg, t);
+            let left = crate::inventory::ammo(p, ammo);
             match p.left.phase {
                 LeftPhase::Equipping if p.left.timer >= t.crossbow_equip => p.left.phase = LeftPhase::Idle,
-                LeftPhase::Recovering if p.left.timer >= 0.2 => {
-                    p.left.phase = if crate::inventory::ammo(p, ammo) > 0 { LeftPhase::Reloading } else { LeftPhase::Idle };
+                // With Attribute_FastReload the shot that leaves a round plays the fast fire action,
+                // which loads the next round when it ends (no reload stage).
+                LeftPhase::Recovering if g.fast > 0.0 && left > 0 => {
+                    if p.left.timer >= t.crossbow_fast_fire {
+                        p.left.phase = LeftPhase::Idle;
+                        events.push(SimEvent::Reloaded { id: p.id });
+                    }
+                }
+                LeftPhase::Recovering if p.left.timer >= t.crossbow_fire_recovery => {
+                    p.left.phase = if left > 0 { LeftPhase::Reloading } else { LeftPhase::Idle };
                     p.left.timer = 0.0;
                 }
-                LeftPhase::Reloading if p.left.timer >= t.crossbow_reload => {
+                LeftPhase::Reloading if p.left.timer >= g.end => {
                     p.left.phase = LeftPhase::Idle;
                     events.push(SimEvent::Reloaded { id: p.id });
                 }
@@ -346,33 +389,38 @@ pub fn update(
             // capped by the ammo held) and the reload time is divided by Attribute_ReloadSpeed when
             // set (0x00C23620).
             let mag = if bolt { 1 } else { 1 + crate::powers::attribute(p, cfg, "Attribute_MagazineBonus", 0.0).max(0.0) as u8 };
-            let reload_speed = if bolt { 0.0 } else { crate::powers::attribute(p, cfg, "Attribute_ReloadSpeed", 0.0) };
-            let (equip, reload, recovery) = if bolt {
-                (t.crossbow_equip, t.crossbow_reload, 0.2)
-            } else {
-                (t.pistol_equip, if reload_speed != 0.0 { t.pistol_reload / reload_speed } else { t.pistol_reload }, t.pistol_fire_recovery)
-            };
+            let g = gun_reload(p, cfg, t);
+            let (equip, recovery) = if bolt { (t.crossbow_equip, t.crossbow_fire_recovery) } else { (t.pistol_equip, t.pistol_fire_recovery) };
+            let reserve_now = if bolt { p.left.bolts_reserve } else { p.left.pistol_reserve };
+            // Crossbow with Attribute_FastReload: a shot that leaves a bolt plays the fast fire
+            // action and loads the bolt at its end (0x00C2E570 / 0x00C2E730).
+            let fast_fire = bolt && g.fast > 0.0 && reserve_now > 0;
+            let now = p.left.timer;
             match p.left.phase {
-                LeftPhase::Equipping if p.left.timer >= equip => p.left.phase = LeftPhase::Idle,
-                LeftPhase::Recovering if p.left.timer >= recovery => {
-                    // Auto-reload after firing when reserve ammo exists (LIKELY).
-                    let (loaded, reserve) = if bolt { (p.left.bolts_loaded, p.left.bolts_reserve) } else { (p.left.pistol_loaded, p.left.pistol_reserve) };
-                    p.left.phase = if loaded == 0 && reserve > 0 { LeftPhase::Reloading } else { LeftPhase::Idle };
+                LeftPhase::Equipping if now >= equip => p.left.phase = LeftPhase::Idle,
+                LeftPhase::Recovering if fast_fire => {
+                    if now >= t.crossbow_fast_fire {
+                        if load_magazine(p, bolt, mag) {
+                            events.push(SimEvent::Reloaded { id: p.id });
+                        }
+                        p.left.phase = LeftPhase::Idle;
+                    }
+                }
+                LeftPhase::Recovering if now >= recovery => {
+                    // The fire action's end requests a reload when the weapon is empty and ammo
+                    // is held (pistol 0x00C2EA00, crossbow 0x00C2E730).
+                    let loaded = if bolt { p.left.bolts_loaded } else { p.left.pistol_loaded };
+                    p.left.phase = if loaded == 0 && reserve_now > 0 { LeftPhase::Reloading } else { LeftPhase::Idle };
                     p.left.timer = 0.0;
                 }
-                LeftPhase::Reloading if p.left.timer >= reload => {
-                    let (loaded, reserve) = if bolt {
-                        (&mut p.left.bolts_loaded, &mut p.left.bolts_reserve)
-                    } else {
-                        (&mut p.left.pistol_loaded, &mut p.left.pistol_reserve)
-                    };
-                    if *reserve > 0 && *loaded < mag {
-                        let n = (mag - *loaded).min((*reserve).min(255) as u8);
-                        *reserve -= n as u16;
-                        *loaded += n;
+                LeftPhase::Reloading => {
+                    // The timed stage's end loads the magazine; the ReloadOut action follows.
+                    if prev_timer < g.load && now >= g.load && load_magazine(p, bolt, mag) {
                         events.push(SimEvent::Reloaded { id: p.id });
                     }
-                    p.left.phase = LeftPhase::Idle;
+                    if now >= g.end {
+                        p.left.phase = LeftPhase::Idle;
+                    }
                 }
                 LeftPhase::Idle if !busy => {
                     let loaded = if bolt { p.left.bolts_loaded } else { p.left.pistol_loaded };
@@ -671,8 +719,8 @@ pub fn step_projectiles(
                     continue;
                 }
                 // `Twk_Inv_EliteHelmet.m_DamageTypesThatKnockOff`: bullets and bolts on the head,
-                // flare bolts anywhere. (What the helmet absorbs is in the base tweak, not decoded:
-                // the hit itself is applied unchanged, U-246.)
+                // flare bolts anywhere. The hit itself is applied unchanged: the shipped helmets'
+                // `m_DamageTypesToAbsorb` is empty (U-246).
                 if v.helmet && (pr.kind == ProjectileKind::IncendiaryBolt || head) {
                     v.helmet = false;
                 }

@@ -221,6 +221,19 @@ pub struct SwarmLevel {
     pub eat_startup: f32,
     pub eat_per_limb: f32,
     pub eat_delay_after_kill: f32,
+    /// `m_fPawnEscapeRadius`: an attack group drops a target farther than this (750).
+    #[serde(default = "swarm_escape_radius")]
+    pub escape_radius: f32,
+    /// `m_EatRequiredRatCount`: rats in reach needed for the eating clock to run (5).
+    #[serde(default = "swarm_eat_required")]
+    pub eat_required_rats: u16,
+}
+
+fn swarm_escape_radius() -> f32 {
+    750.0
+}
+fn swarm_eat_required() -> u16 {
+    5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -247,6 +260,8 @@ impl Default for SwarmConfig {
             eat_startup: 1.5,
             eat_per_limb: 1.5,
             eat_delay_after_kill: 0.5,
+            escape_radius: 750.0,
+            eat_required_rats: 5,
         };
         Self { mana_cost: 40.0, rune_costs: [3, 4], spawn_delay: 0.65, levels: [l(30), l(60)] }
     }
