@@ -1130,3 +1130,48 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   no `DominantLightShadowMap` array. `is_component_class` now walks the super chain of classes the
   package defines (imports: name rule plus Engine's `ApexComponentBase`, `ArkComponentContainer`,
   `RB_Handle`, `RB_Spring`). `package_scan --props`: 1,261,653 ok / 88 failed -> 1,261,741 ok / 0.
+
+## 2026-10-06: Climbing on DisClimbable chains (U-240)
+
+- **Question:** How does `StatePlayerMasterClimb` move the player on a chain, how is it entered
+  and left, and where do the chain's bones come from?
+- **Evidence:** `ClassDecomp2` of `StatePlayerMasterClimb` (enter 0x00A72B00, exit 0x00A6E2C0,
+  transition test 0x00A6E570, HUD contexts 0x00A67830), `DisClimbable` (collision notify
+  0x00A3FA70, physics change 0x00A1E800, tick 0x00A2BFD0) and its interface vtables (`Interact`
+  0x00A23130, visibility 0x00A1E6F0); `Decomp` of `physLadder` 0x00AA82C0 with its callees
+  (`FindClosestBone` 0x00713130, `GetBoneLocation` 0x00732CD0, `VInterpTo` 0x0041E860,
+  `TwoWallAdjust` 0x0065FC60), the Use handler 0x00AD5BA0, let-go 0x00AAA030, the Jump state's
+  enter / exit 0x00A75EE0 / 0x00A5FFA0 (found by an `OffsetScan` for `m_pClimbable` +0xAA0);
+  `prop_layout` offsets (pawn +0x8A0 bits 6/16/17, +0xAA0, +0x1238 `m_ClimbingAimThreshold`;
+  camera +0x33C = `CameraCache.POV.Rotation.Pitch`; component +0xE4 = `Bounds.SphereRadius`);
+  class records 0x01300048 / 0x01300570 / 0x01300A98 / 0x01300200 for the climb, falling, jump
+  states and `DisSeqEvent_Climb`; the two chains' actors, meshes and physics assets (`obj_dump`,
+  `skel_dump`).
+- **Result:** see PLAYER.md "Climbing". In short: grab by Use, by touch while not walking, or by
+  Blinking into the chain; `physLadder` zeroes the velocity and, with any input, moves the height
+  target by `0.0005 x 16383.5 = 8.19` uu (up when the input is within `acos 0.9` of the facing,
+  down otherwise; `m_bCameraRelativeClimbing` reverses it when looking down past
+  `m_ClimbingAimThreshold` 1000), clamped to `[anchor.z - 2 x SphereRadius, anchor.z -
+  CollisionHeight]`, and follows the bone nearest 2/3 of the height above the centre, 30 uu
+  behind and 10 uu to the right, by `VInterpTo` at speed 20: 163.8 uu/s. Every exit sets
+  `Velocity = facing x 525` (x2 under something within 200 uu); jumping adds `JumpZ` 800 and keeps
+  the chain held until the jump ends, then its collision returns after 0.3 s; Use lets go
+  (`m_bLettingGoOfClimbable`). Both are refused for `m_fClimbReuseDelay` (0.5 s,
+  `Twk_Pawn_PlayerInput`) after the grab. No automatic exit at either end. Chains: Int
+  `DisClimbable_1` (-3153, -420, -627), `chain_400` (6 bones, sphere 198.04, centre range
+  -1023.1 .. -714.5); Ext `DisClimbable_3` (-2085, 580, 1884), `chain_1400` (16 bones, sphere
+  697.57, 488.9 .. 1796.5). No Boyle Kismet uses `DisSeqEvent_Climb`.
+- **Note:** the property reader returns a cooked `Matrix` (`KBoxElem.TM`) as 64 raw bytes starting
+  one dword early (rows at +4, the last 1.0 cut off); `dishonored_assets::climbable` reads it that
+  way.
+- **Confidence:** CONFIRMED for the movement, limits, exits and data; LIKELY for the Use target
+  rule (the pickups' cone), the ceiling-trace reading (U-443), what clears the let-go flag
+  (U-441); the camera-relative flag's setter is unknown (U-440); chains are rest poses (U-442).
+- **Implementation consequence:** `MoveMode::Climbing`, `dishonored_sim::climb` (tests
+  `crates/dishonored_sim/tests/climb.rs`: grab, up / down speeds and limits, camera-relative
+  hysteresis, jump off with and without a ceiling, let go, touch grab, top exit over a ledge,
+  determinism); `WorldQuery::climbables` with `CollisionWorld.climbables` loaded by
+  `dishonored_content::load_climbables` (cache `<map>.climb1.json`); config
+  `movement.climb` (cache `gameplay_config.v8.json`); `SimEvent::Climb` / `ClimbSound` (the
+  runtime posts `Snd_P_Chain_Climbing`); the mission view lists the chains' bones as "Grab"
+  usables and the HUD shows "Jump off" while climbing.
