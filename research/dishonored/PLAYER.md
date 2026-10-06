@@ -355,8 +355,20 @@ CONFIRMED from the code unless marked.
   the aim-assist point), and deprojects that point through the view (0x006C5180). The result is
   the projectile direction. So **dispersion is a radius in pixels of a 720-line screen**. With the
   default 75 degree horizontal FOV on 16:9, 45 px is 3.09 degrees and 15 px is 1.03 degrees.
-- **HUD.** 0x00B9FF30 sends `SetDispersion(d, d / max x 100)` to the crosshair when `d` changed
-  by at least 0.1.
+- **HUD.** 0x00B9FF30 sends `SetDispersion(d, p = d / max x 100)` to the crosshair when `d`
+  changed by at least 0.1. The movie's ActionScript 2 classes (`UI_HUD_SF` "HUD", decoded from
+  the DoInitAction bytecode) place each part absolutely, in stage pixels (1280 x 720, the same
+  unit as `d`):
+  - `Crosshair_Gun.SetDispersion`:
+    - `_parts_int_mc._rotation = -5 p / 100`, its parts 0..3 at (d, -d), (d, d), (-d, d), (-d, -d);
+    - `_parts_ext_mc._rotation = -20 p / 100`, `_alpha = 100 - 1.5 max(0, p - 50)`, its parts 0..3
+      at the same four corners.
+  - `Crosshair_Crossbow` (extends `Crosshair_Gun`):
+    - `_offset = -15 p / 100` (class default -15);
+    - `_parts_ext_mc._alpha = 100 - 1.5 max(0, p - 40)`;
+    - external parts: part0 `_y = -d - offset`, part1 `_x = d + offset`, part2 `_y = d + offset`,
+      part3 `_x = -d - offset`, part4 `_x = d + offset + 5`, part5 `_x = -d - offset - 5`;
+    - internal parts on the axes at distance `d`.
 - **Not found:** `DisTweaks_PlayerPawn.m_fMovementDispersionIncrease` and
   `m_fCameraMovementDispersionIncrease` (+0x2AC / +0x2B0, both 0.5). An offset scan finds no
   player code that reads them; the hits are other classes with the same offsets (U-422).
