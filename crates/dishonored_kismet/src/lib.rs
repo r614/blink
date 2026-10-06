@@ -12,6 +12,8 @@
 //!   travel, conversations, sounds...) behind a trait, implemented by the mission runtime.
 
 pub mod host;
+/// [interp] Matinee data and evaluation.
+pub mod interp;
 pub mod model;
 pub mod runtime;
 

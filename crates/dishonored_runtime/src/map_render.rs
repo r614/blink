@@ -388,7 +388,9 @@ pub fn spawn_map(
             // Static opaque/masked geometry is merged into world-space batches (one draw per
             // material, lightmap page and cell instead of one per instance section); sorted
             // translucent, sky and debug geometry stays per instance.
-            if merge && !inst.hidden && !is_sky && !translucent {
+            // [interp] Matinee-driven actors (InterpActor) stay separate so cutscenes can move them.
+            let mover = crate::cutscene::mover_of(&inst.source, inst.transform);
+            if merge && !inst.hidden && !is_sky && !translucent && mover.is_none() {
                 let has_uv1 = mesh.uv1.len() == mesh.positions.len();
                 let lm = inst.lightmap.filter(|_| features.lightmaps && has_uv1);
                 let t = inst.transform.w_axis;
@@ -421,6 +423,9 @@ pub fn spawn_map(
             ));
             if is_sky || translucent {
                 e.insert(bevy::light::NotShadowCaster);
+            }
+            if let Some(m) = mover {
+                e.insert(m); // [interp]
             }
             if let Some(lm) = inst.lightmap.filter(|_| !is_sky && features.lightmaps && mesh.uv1.len() == mesh.positions.len()) {
                 e.insert(bevy::pbr::Lightmap {

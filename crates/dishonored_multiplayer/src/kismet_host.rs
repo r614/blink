@@ -26,6 +26,9 @@
 //! Anything not supported is logged once per class by the interpreter and counted.
 
 use super::{Interaction, MissionMatch};
+/// [interp] Matinees played on the server (gameplay side of cutscenes).
+#[path = "kismet_host/cutscene.rs"]
+pub mod cutscene;
 use dishonored_ai::BrainState;
 use dishonored_kismet::host::Matinee;
 use dishonored_kismet::runtime::Ctx;
@@ -144,6 +147,15 @@ pub struct HostState {
     pub hidden: BTreeSet<u32>,
     /// `NPCMarkForVanish` in progress: op -> (pawns, seconds left).
     vanish: BTreeMap<OpId, (Vec<PlayerId>, f32)>,
+    /// [interp] Matinees playing with their bound groups.
+    #[serde(default)]
+    pub cutscenes: Vec<cutscene::Playing>,
+    /// [interp] Level actors rotated by matinees.
+    #[serde(default)]
+    pub actor_rot: BTreeMap<u32, glam::Quat>,
+    /// [interp] Matinee op -> conversation instance whose soiree asked for it.
+    #[serde(default)]
+    pub soiree_conv: BTreeMap<OpId, u32>,
 }
 
 /// Saved with the mission (`save.rs`); the setup is re-attached on load.
@@ -180,6 +192,11 @@ impl KismetRun {
     /// `StatePlayerMasterInScriptedChoice`).
     pub fn choosing(&self, p: PlayerId) -> bool {
         self.st.choice.as_ref().is_some_and(|c| c.1 == p && c.3.is_none())
+    }
+
+    /// [interp] A player is held by a matinee's player group (no movement control).
+    pub fn locked(&self, p: PlayerId) -> bool {
+        cutscene::locked(self, p)
     }
 
     pub fn actor_pos(&self, a: u32) -> Vec3 {
@@ -359,12 +376,14 @@ impl Host for H<'_> {
             Matinee::Started { length, .. } => {
                 let now = cx.k.time;
                 self.st.matinees.push((cx.op, length, now, None));
+                cutscene::started(self, cx); // [interp]
             }
             Matinee::Finished { .. } => {
                 let now = cx.k.time;
                 if let Some(m) = self.st.matinees.iter_mut().rev().find(|m| m.0 == cx.op && m.3.is_none()) {
                     m.3 = Some(now);
                 }
+                cutscene::finished(self, cx.op); // [interp]
             }
             Matinee::Event(_) => {}
         }
@@ -1043,9 +1062,14 @@ pub fn step(m: &mut MissionMatch, sim_events: &[SimEvent], dt: f32, cfg: &SimCon
             }
         }
         if h.st.started {
+            // [interp] Soirees wait for the matinees the host plays.
+            if let Some(r) = h.m.state.conv.as_mut() {
+                r.external_matinees = true;
+            }
             feed(k, &mut h, sim_events);
             approach_hooks(&mut h);
             k.tick(&mut h, dt);
+            cutscene::apply(k, &mut h); // [interp]
             h.drain_spawns(k);
             commit_map_change(k, &mut h);
         }
@@ -1208,10 +1232,12 @@ fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
                 }
                 h.note(format!("dialog output {reference}/{name} -> {fired} Kismet event(s)"));
             }
-            dishonored_conversation::runner::ConvEvent::Soiree { guid, .. } => {
-                if let Some(op) = k.play_matinee_guid(&guid) {
+            dishonored_conversation::runner::ConvEvent::Soiree { instance, guid, .. } => {
+                let op = k.play_matinee_guid(&guid);
+                if let Some(op) = op {
                     h.note(format!("soiree plays matinee {}", h.db.describe(op)));
                 }
+                cutscene::soiree(h, instance, op); // [interp]
             }
             _ => {}
         }
@@ -1306,6 +1332,7 @@ pub fn view(m: &MissionMatch, mv: &mut dishonored_mission::runtime::MissionView)
     if target.is_some() {
         mv.target = target;
     }
+    mv.cutscenes = cutscene::view(run); // [interp]
 }
 
 /// Events the mission runtime should not see in Kismet missions (consumed choices).

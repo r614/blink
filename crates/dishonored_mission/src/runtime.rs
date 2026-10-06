@@ -37,6 +37,32 @@ pub enum MissionEvent {
     NpcKnockedOut { npc: Option<String>, by_player: bool, kind: NpcKind },
 }
 
+/// [interp] A matinee playing (replicated: the client's cutscene presentation evaluates the
+/// same data at `position`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct CutsceneView {
+    /// Package and export of the matinee data (`MatineeData` / `InterpData`).
+    pub package: String,
+    pub export: u32,
+    pub position: f32,
+    pub length: f32,
+    /// Bound objects per group name.
+    pub groups: Vec<(String, Vec<CutsceneBound>)>,
+    /// Players under matinee control (player group).
+    pub players: Vec<u32>,
+}
+
+/// [interp] A group binding in a [`CutsceneView`]: a pawn, or a level actor (package, name,
+/// class) with its transform when the matinee started and now (location, rotation
+/// quaternion xyzw), so clients find and move its meshes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct CutsceneBound {
+    pub pawn: Option<u32>,
+    pub actor: Option<(String, String, String)>,
+    pub initial: ([f32; 3], [f32; 4]),
+    pub current: Option<([f32; 3], [f32; 4])>,
+}
+
 /// A line being spoken (replicated; the HUD shows the subtitle, clients play the VO).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct DialogueLineView {
@@ -187,6 +213,9 @@ pub struct MissionView {
     /// Player choice waiting for input.
     #[serde(default)]
     pub choice: Option<DialogueChoiceView>,
+    /// [interp] Matinees playing.
+    #[serde(default)]
+    pub cutscenes: Vec<CutsceneView>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

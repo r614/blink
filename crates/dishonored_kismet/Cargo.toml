@@ -16,6 +16,8 @@ required-features = ["load"]
 
 [dependencies]
 serde.workspace = true
+# [interp] matinee transforms
+glam = { workspace = true, features = ["serde"] }
 ue3_package = { workspace = true, optional = true }
 dishonored_assets = { workspace = true, optional = true }
 dishonored_conversation = { workspace = true, optional = true, features = ["load"] }

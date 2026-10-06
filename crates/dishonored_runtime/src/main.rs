@@ -54,6 +54,8 @@ mod launcher_bg;
 mod pause_menu;
 mod hud_settings;
 mod saves;
+/// [interp] Cutscene (matinee) presentation.
+mod cutscene;
 
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::input::mouse::AccumulatedMouseMotion;
@@ -301,6 +303,9 @@ fn main() {
             .add_systems(FixedUpdate, (harness::script_fixed, session::fixed_tick, saves::write_autosaves).chain().run_if(pause_menu::sim_running))
             .insert_resource(saves::Saves::new(args.mission_path.clone()))
             .add_systems(Update, (saves::hotkeys, saves::process).chain().after(pause_menu::handle))
+            // [interp] cutscenes: before the characters are animated; the director camera after the follow camera
+            .init_resource::<cutscene::Cutscenes>()
+            .add_systems(Update, (cutscene::drive.after(players::sync_players).before(characters::animate_characters), cutscene::props.after(cutscene::drive), cutscene::camera.after(players::camera_follow).before(viewmodel::animate_view_rig)))
             .add_systems(
                 Update,
                 (

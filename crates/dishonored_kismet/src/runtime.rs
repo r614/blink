@@ -143,6 +143,10 @@ pub struct Kismet {
     /// Requested event class (lowercase) -> static events of that class or a subclass.
     #[serde(skip)]
     event_index: std::sync::Mutex<BTreeMap<String, Vec<OpId>>>,
+    /// [interp] Soiree control state of playing matinees (loops, pauses, broken pins, blurbs
+    /// the host reports as speaking).
+    #[serde(default)]
+    pub interp_play: BTreeMap<OpId, crate::interp::PlayState>,
 }
 
 /// The view an op has of the interpreter while it runs (host ops get one).
@@ -236,6 +240,7 @@ impl Kismet {
             level_roots: Vec::new(),
             event_index: Default::default(),
             touched: BTreeMap::new(),
+            interp_play: BTreeMap::new(),
         };
         for g in k.db.global.clone() {
             k.loaded[g as usize] = true;
@@ -1438,6 +1443,7 @@ impl Kismet {
             return;
         }
         self.fire_name(op, "Started");
+        self.interp_play.insert(op, crate::interp::PlayState::default()); // [interp]
         self.ops[op as usize].flags &= !Self::STOP_REQ;
         if self.has_impulse(op, 0) {
             self.interp_play(op);
@@ -1467,6 +1473,14 @@ impl Kismet {
     /// `SeqAct_Interp::Update` (decoded): inputs, then one step of playback; finished once it
     /// is no longer playing.
     fn interp_update(&mut self, host: &mut dyn Host, op: OpId, dt: f32) -> bool {
+        // [interp] `SCT_<pin>` inputs break the soiree control keys of that pin.
+        for i in 5..self.db.ops[op as usize].inputs.len() {
+            if self.has_impulse(op, i) {
+                if let Some(pin) = self.db.ops[op as usize].inputs[i].name.strip_prefix("SCT_") {
+                    self.interp_play.entry(op).or_default().break_pin(pin);
+                }
+            }
+        }
         let f = self.ops[op as usize].flags;
         if f & Self::PLAYING != 0 && self.has_impulse(op, 3) {
             self.ops[op as usize].flags ^= Self::PAUSED;
@@ -1489,7 +1503,9 @@ impl Kismet {
             return false;
         }
         // Step.
-        let Some(info) = self.interp_data(op).cloned() else {
+        // [interp] Borrow the data from the shared database (it now holds the whole matinee).
+        let db = self.db.clone();
+        let Some(info) = self.link_vars(op, "Data").into_iter().next().and_then(|d| db.ops[d as usize].interp.as_ref()) else {
             self.ops[op as usize].flags &= !Self::PLAYING;
             return false;
         };
@@ -1501,6 +1517,18 @@ impl Kismet {
         let mut new = if reverse { old - rate * dt as f64 } else { old + rate * dt as f64 };
         let mut stop = false;
         let mut events: Vec<String> = Vec::new();
+        // [interp] Soiree control (loops until their pin breaks, pauses, dialog waits): the
+        // position may hold or jump back; keys are not fired across a jump.
+        if !reverse {
+            if let Some(m) = info.matinee.as_deref() {
+                let st = self.interp_play.entry(op).or_default().step(m, old as f32, new as f32);
+                if st.jumped {
+                    self.ops[op as usize].t = st.pos as f64;
+                    return false;
+                }
+                new = st.pos as f64;
+            }
+        }
         let cross = |from: f64, to: f64, events: &mut Vec<String>| {
             for (t, name, fwd, back) in &info.events {
                 let t = *t as f64;

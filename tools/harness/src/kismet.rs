@@ -305,6 +305,25 @@ fn play(p: &mut Play, rep: &mut Report, db: &dishonored_kismet::KismetDb) -> Res
     let start = p.m().setup.tagged_starts.iter().find(|t| t.1 == "PlayerStart_SamuelDropOff").map(|t| t.2).unwrap_or_default();
     let at = p.m().world.player(AGENT).map(|x| x.position).unwrap_or_default();
     rep.check(S, "mission starts through the global Kismet: ChangeLvl_fromHub_toBoyle -> PrepareMapChange L_Boyle_Ext_P -> PlayerStart_SamuelDropOff -> CommitMapChange", ok && at.truncate().distance(start.truncate()) < 200.0, format!("{}; agent {:.0} uu from PlayerStart_SamuelDropOff", p.history().iter().take(4).cloned().collect::<Vec<_>>().join("; "), at.truncate().distance(start.truncate())));
+    // [interp] Samuel's intro matinee plays: the player is held in the boat, the boat carries
+    // them to the shore, Samuel's dialog keys speak their blurbs, the conversation waits.
+    let samuel = db.find_export("L_BoyleStreet_Ext_Script", 13384);
+    let playing = move |m: &MissionMatch| m.kismet.as_ref().is_some_and(|k| k.st.cutscenes.iter().any(|c| Some(c.op) == samuel));
+    let started = p.until(60.0, playing);
+    let (t0, p0) = (p.time(), p.m().world.player(AGENT).map(|x| x.position).unwrap_or_default());
+    p.idle(10.0);
+    let locked = p.m().kismet.as_ref().is_some_and(|k| k.locked(AGENT));
+    let p10 = p.m().world.player(AGENT).map(|x| x.position).unwrap_or_default();
+    let ended = p.until(40.0, move |m| !playing(m));
+    let (t1, p1) = (p.time(), p.m().world.player(AGENT).map(|x| x.position).unwrap_or_default());
+    let shore = Vec3::from(db.actors[actor(db, "L_BoyleStreet_Ext_Script:TargetPoint_6")? as usize].location);
+    let blurbs = p.history().iter().filter(|h| h.contains("dialog key") && !h.contains("not found")).count();
+    rep.check(
+        S,
+        "Samuel's intro matinee (29.8 s): the player is held in the boat and carried to the shore, Samuel's three dialog keys speak",
+        started && ended && locked && p1.truncate().distance(p0.truncate()) > 3000.0 && p1.truncate().distance(shore.truncate()) < 800.0 && blurbs >= 3 && ((t1 - t0) - 29.8).abs() < 0.5,
+        format!("played {:.2} s from {:.1} s; agent ({:.0}, {:.0}) -> 10 s ({:.0}, {:.0}) -> ({:.0}, {:.0}), {:.0} uu from the Shore point; held {locked}; {blurbs} blurbs", t1 - t0, t0, p0.x, p0.y, p10.x, p10.y, p1.x, p1.y, p1.truncate().distance(shore.truncate())),
+    );
     let t12 = format!("{BA}.DishonoredTask_Custom_12");
     let ok = p.until(90.0, |m| m.state.task(&t12) == Some(TaskState::Active));
     let objs: Vec<String> = p.m().view.mission.as_ref().map(|v| v.objectives.iter().filter(|o| !o.hidden).map(|o| format!("\"{}\": {}", o.description, o.tasks.iter().filter(|t| !t.hidden && t.state == TaskState::Active).map(|t| format!("\"{}\"", t.description)).collect::<Vec<_>>().join(", "))).collect()).unwrap_or_default();

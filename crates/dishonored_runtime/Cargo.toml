@@ -21,6 +21,8 @@ dishonored_save.workspace = true
 dishonored_net.workspace = true
 dishonored_bots.workspace = true
 dishonored_audio = { path = "../dishonored_audio" }
+# [interp] matinee data for cutscenes
+dishonored_kismet = { workspace = true, features = ["load"] }
 glam.workspace = true
 serde.workspace = true
 serde_json.workspace = true
