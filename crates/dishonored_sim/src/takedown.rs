@@ -259,7 +259,7 @@ pub fn lift(state: &mut WorldState, carrier: PlayerId, body: PlayerId, events: &
 }
 
 /// Release a carried body in front of the carrier (`ReleaseCorpse`), with `velocity` (zero
-/// for a drop, the throw for a throw), and let it fall to the floor.
+/// for every drop of the original), and let it fall to the floor.
 pub fn release(state: &mut WorldState, carrier: PlayerId, velocity: Vec3, world: &dyn WorldQuery, cfg: &GameplayConfig, events: &mut Vec<SimEvent>) {
     let Some(c) = state.player(carrier).copied() else { return };
     let Some(bid) = c.carrying else { return };
@@ -313,8 +313,8 @@ pub fn step_body(b: &mut PlayerState, world: &dyn WorldQuery, cfg: &GameplayConf
     }
 }
 
-/// Carrier side each tick: the body follows the carrier (on its shoulder); dropping on Use,
-/// throwing on attack (`Attribute_ThrowStrength`), dropping when the carrier is hurt badly
+/// Carrier side each tick: the body follows the carrier (on its shoulder); dropping on Use or
+/// attack, dropping when the carrier is hurt badly
 /// enough to fall (dead, choked, unconscious).
 pub fn step_carry(state: &mut WorldState, ci: usize, input: &PlayerInput, dt: f32, world: &dyn WorldQuery, cfg: &GameplayConfig, events: &mut Vec<SimEvent>) {
     let c = state.players[ci];
@@ -325,16 +325,13 @@ pub fn step_carry(state: &mut WorldState, ci: usize, input: &PlayerInput, dt: f3
     }
     state.players[ci].carry_anim = (c.carry_anim - dt).max(0.0);
     let ready = c.carry_anim <= 0.0;
-    if ready && c.just_pressed(input, buttons::USE) {
-        // Low drop: the body leaves the shoulder at `ReleaseCorpse` (0.5 s).
+    // Low drop: the body leaves the shoulder at `ReleaseCorpse` (0.5 s). The corpse-carry state
+    // has no throw: leaving it (0x00A69A50) releases the body without an impulse, and
+    // `Attribute_ThrowStrength` is only read by the carried-object release (0x00C45340, U-106).
+    // Attack leaving the state drops the body the same way (LIKELY).
+    if ready && (c.just_pressed(input, buttons::USE) || c.just_pressed(input, buttons::PRIMARY)) {
         state.players[ci].action_lock = DROP_END;
         release(state, c.id, Vec3::ZERO, world, cfg, events);
-        return;
-    }
-    if ready && c.just_pressed(input, buttons::PRIMARY) {
-        let strength = crate::powers::attribute(&c, cfg, "Attribute_ThrowStrength", cfg.items.inventory.throw_strength);
-        let v = view_vector(c.yaw, c.pitch) * strength * THROW_SPEED_SCALE;
-        release(state, c.id, v, world, cfg, events);
         return;
     }
     let shoulder = c.position + Vec3::Z * (crate::movement::half_height(&c, &cfg.movement) * 0.5);
@@ -344,10 +341,6 @@ pub fn step_carry(state: &mut WorldState, ci: usize, input: &PlayerInput, dt: f3
         b.yaw = c.yaw;
     }
 }
-
-/// `Attribute_ThrowStrength` is an impulse for physics objects; a body is thrown at this
-/// fraction of it as a speed (SPECULATIVE, U-106: the original ragdolls the body).
-pub const THROW_SPEED_SCALE: f32 = 0.25;
 
 /// Sleep timers and burning for one pawn. Returns true when the pawn died of fire.
 pub fn step_afflictions(state: &mut WorldState, vi: usize, dt: f32, cfg: &GameplayConfig, events: &mut Vec<SimEvent>) {

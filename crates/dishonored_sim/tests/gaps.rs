@@ -324,3 +324,21 @@ fn charm_rolls_are_deterministic() {
     };
     assert_eq!(run(), run());
 }
+
+#[test]
+fn attack_drops_a_carried_body_without_throwing_it() {
+    use dishonored_sim::state::Condition;
+    let mut r = Run::new(&[(Vec3::new(60.0, 0.0, Z), 0.0)]);
+    r.pm(100).condition = Condition::Unconscious;
+    let look = |b| PlayerInput { pitch: -40.0, buttons: b, ..Default::default() };
+    r.step(&[(1, look(buttons::USE))]);
+    r.step(&[(1, look(0))]);
+    assert_eq!(r.p(1).carrying, Some(100));
+    r.steps(90, &[(1, PlayerInput::default())]);
+    r.step(&[(1, PlayerInput { pitch: 20.0, buttons: buttons::PRIMARY, ..Default::default() })]);
+    assert_eq!(r.p(1).carrying, None);
+    // Released in front of the carrier with no impulse (no ThrowStrength throw).
+    assert_eq!(r.p(100).velocity.truncate().length(), 0.0);
+    r.steps(120, &[(1, PlayerInput::default())]);
+    assert!(r.p(100).position.truncate().distance(r.p(1).position.truncate()) < 120.0);
+}
