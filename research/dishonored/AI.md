@@ -459,7 +459,7 @@ Port: `Brain::unaware_of` / `Crowd::unaware_of` (true unless in Combat or ringin
 rats, attack group 12, detection 500 (150 busy), escape 750, damage 0.4 per rat clamped 1-5
 every 0.5 s after 2 s, eat with 5 rats; `Twk_DevouringSwarm_Lvl1` (power level 1: 30 rats,
 30 s, 1500 uu): group 10, detection 700 (200 busy), damage 2-5). Port: `dishonored_ai::rats`
-(one swarm = one sim pawn, bites and meals as `RatEvent`s). The swarm tick itself was not
+(one brain per `PawnKind::Rat` pawn, its swarm from `SimEvent::RatSpawned`; it runs at its target and holds `PRIMARY` in bite reach, the sim's attack groups deal the damage; meals as `AiEvent::RatEat`). The swarm tick itself was not
 located (the class's vtable dump only showed engine slots); the rules come from the tweak
 fields and the state enums (U-260).
 
