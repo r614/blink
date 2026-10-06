@@ -458,11 +458,16 @@ impl ConversationDb {
                     }
                 }
             }
-            // Hook enum (`DDH_PLAYER_USED`...).
+            // Hook enum (`DDH_PLAYER_USED`...), optionally with an output: `DDH_PLAYER_APPROACHES#1`
+            // (distance hooks: 0 close, 1 medium, 2 far).
+            let (what_hook, output) = match what.rsplit_once('#') {
+                Some((h, n)) if n.parse::<usize>().is_ok() => (h, n.parse::<usize>().unwrap()),
+                _ => (what, 0),
+            };
             for h in &tree.hooks {
                 if let NodeKind::Hook { hook, .. } = &self.node(*h).kind {
-                    if hook.eq_ignore_ascii_case(what) {
-                        return Ok(Target::Hook { oneshot: o, hook: *h, output: 0 });
+                    if hook.eq_ignore_ascii_case(what_hook) {
+                        return Ok(Target::Hook { oneshot: o, hook: *h, output });
                     }
                 }
             }

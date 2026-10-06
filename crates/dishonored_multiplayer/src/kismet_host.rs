@@ -92,6 +92,8 @@ pub enum KUse {
 #[derive(Debug, Clone, Default)]
 pub struct HostState {
     pub started: bool,
+    /// Distance trackers of original NPCs' approach hooks: (one-shot, hook node).
+    approach: BTreeMap<(u32, u32), dishonored_conversation::hooks::DistanceHook>,
     /// Map whose levels the Kismet has loaded.
     pub map: Option<String>,
     /// `SetPlayerTravelDestination`: tag and the map it was set on.
@@ -1031,6 +1033,7 @@ pub fn step(m: &mut MissionMatch, sim_events: &[SimEvent], dt: f32, cfg: &SimCon
         }
         if h.st.started {
             feed(k, &mut h, sim_events);
+            approach_hooks(&mut h);
             k.tick(&mut h, dt);
             h.drain_spawns(k);
             commit_map_change(k, &mut h);
@@ -1306,4 +1309,41 @@ pub fn filter_events(m: &mut MissionMatch, events: &mut Vec<MissionEvent>) {
 #[allow(dead_code)]
 fn is_npc(k: PawnKind) -> bool {
     k != PawnKind::Human
+}
+
+/// Original NPCs' approach hooks (`DDH_PLAYER_APPROACHES` / `_RADIAL` of the one-shot whose me
+/// speaker is the NPC's spawner): the nearest player entering a distance band starts the hook's
+/// output for that band, with the original's band-edge rules
+/// (`dishonored_conversation::hooks::DistanceHook`). Mirrors the use-hook binding in [`usables`].
+/// E.g. Brisby's `Lord_Brisby_Quest_Start` (close band, 250 uu) on Boyle Int.
+fn approach_hooks(h: &mut H) {
+    let Some(cdb) = h.m.setup.conversations.clone() else { return };
+    let players: Vec<Vec3> = h.m.humans.iter().filter_map(|p| h.m.world.player(*p)).filter(|p| p.alive).map(|p| p.position).collect();
+    if players.is_empty() {
+        return;
+    }
+    let mut start = Vec::new();
+    for (oi, o) in cdb.oneshots.iter().enumerate() {
+        let Some(me) = o.speakers.first().and_then(|s| s.actor.clone()) else { continue };
+        let Some(t) = o.tree else { continue };
+        let Some(idx) = h.st.spawner.iter().find(|(a, _)| h.db.actors[**a as usize].name.eq_ignore_ascii_case(&me) && h.db.actors[**a as usize].package.eq_ignore_ascii_case(&o.package)).map(|x| *x.1) else { continue };
+        let id = h.m.setup.original[idx].spawn.id;
+        let Some(np) = h.m.world.player(id).filter(|p| p.alive).map(|p| p.position) else { continue };
+        let dist = players.iter().map(|p| p.distance(np)).fold(f32::MAX, f32::min);
+        for hk in &cdb.trees[t as usize].hooks {
+            let node = cdb.node(*hk);
+            let dishonored_conversation::NodeKind::Hook { hook, distances: Some(d), .. } = &node.kind else { continue };
+            if hook != "DDH_PLAYER_APPROACHES" && hook != "DDH_PLAYER_APPROACHES_RADIAL" {
+                continue;
+            }
+            let linked = [0, 1, 2].map(|i| node.outputs.get(i).copied().flatten().is_some());
+            if let Some(band) = h.st.approach.entry((oi as u32, *hk)).or_default().update(dist, *d, linked) {
+                start.push(format!("{}:{}/{hook}#{band}", o.package, o.name));
+            }
+        }
+    }
+    for reference in start {
+        h.note(format!("approach {reference}"));
+        h.act(vec![Action::Conversation(reference, Vec::new())]);
+    }
 }
