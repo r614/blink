@@ -1511,15 +1511,6 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
             }
         }
     }
-    // FaceFX (§12): the spoken line's bone poses, as offsets from the reference on the
-    // animated face and head bones (before the look-at additive).
-    for &(pi, bi, dp, dq) in i.face {
-        let Some(bone) = parts.get(pi).and_then(|p| p.bones.get(bi)) else { continue };
-        let Some(slot) = pose.get_mut(pi).and_then(|p| p.get_mut(bi)) else { continue };
-        let k = slot.unwrap_or(Key { q: bone.rotation, t: None });
-        let t = if dp.length_squared() > 1e-10 { Some(k.t.unwrap_or(bone.translation) + dp) } else { k.t };
-        *slot = Some(Key { q: (k.q * dq).normalize(), t });
-    }
     // `LookatBlender`: additive head and torso grids of the look-at mode for the stance and
     // gait, weighted by the target's angles against the mode's ranges.
     let want = match (i.look_target, lookat.as_ref()) {
@@ -1585,6 +1576,15 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
         if let Some(sp) = bank.sample(lib, model, prof, &s.name, s.time, false) {
             overlay(&mut pose, &sp, s.weight, None, parts);
         }
+    }
+    // FaceFX (§12): the spoken line's bones, added after the AnimTree (UE3 `UpdateFaceFX`,
+    // 0x00725EA0, runs on the tree's output; additive blend mode).
+    for &(pi, bi, dp, dq) in i.face {
+        let Some(bone) = parts.get(pi).and_then(|p| p.bones.get(bi)) else { continue };
+        let Some(slot) = pose.get_mut(pi).and_then(|p| p.get_mut(bi)) else { continue };
+        let k = slot.unwrap_or(Key { q: bone.rotation, t: None });
+        let t = if dp.length_squared() > 1e-10 { Some(k.t.unwrap_or(bone.translation) + dp) } else { k.t };
+        *slot = Some(Key { q: (dq * k.q).normalize(), t });
     }
     pose
 }

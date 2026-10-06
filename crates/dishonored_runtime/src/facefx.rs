@@ -114,18 +114,23 @@ impl FaceFxBank {
     }
 }
 
-/// The bone offsets of `anim` at time `t` on a bound actor.
-pub fn face_bones(b: &Binding, anim: &Anim, t: f32) -> Vec<FaceBone> {
+/// The bone offsets of `anim` at time `t` on a bound actor, for the additive FaceFX blend
+/// (`SkeletalMeshComponent.FaceFXBlendMode` = `FXBM_Additive`, the engine default; Dishonored
+/// does not override it). 0x00725EA0: position += FaceFX position - mesh reference position;
+/// rotation = (FaceFX rotation x mesh reference rotation^-1) x animated rotation.
+pub fn face_bones(b: &Binding, anim: &Anim, t: f32, parts: &[crate::characters::PartGpu]) -> Vec<FaceBone> {
     let tracks = anim.tracks(&b.actor, t);
     if tracks.iter().all(|v| *v == 0.0) {
         return Vec::new();
     }
     let values = b.actor.evaluate(&tracks);
     let mut out = Vec::new();
-    for (bi, dp, dq) in b.actor.bone_deltas(&values) {
-        let q = Quat::from_xyzw(dq[0], dq[1], dq[2], dq[3]).normalize();
+    for (bi, pos, rot) in b.actor.bone_poses(&values) {
+        let q = Quat::from_xyzw(rot[0], rot[1], rot[2], rot[3]).normalize();
         for &(part, bone) in &b.bones[bi] {
-            out.push((part, bone, Vec3::from(dp), q));
+            let Some(bind) = parts.get(part).and_then(|p| p.bones.get(bone)) else { continue };
+            let dq = (q * bind.rotation.inverse()).normalize();
+            out.push((part, bone, Vec3::from(pos) - bind.translation, dq));
         }
     }
     out

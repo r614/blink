@@ -489,7 +489,7 @@ fn face_frames(bank: &mut crate::npc_anim::AnimBank, lib: &CharacterLibrary, vie
         pk.extend(packages.iter().cloned());
         let Some(b) = bank.facefx.binding(&content, model, &lib.models[model].parts, &pk) else { continue };
         let t = (now - bank.facefx.line_start(line, now, elapsed)) as f32;
-        out.insert(pawn, crate::facefx::face_bones(&b, &anim, t));
+        out.insert(pawn, crate::facefx::face_bones(&b, &anim, t, &lib.models[model].parts));
     }
     out
 }

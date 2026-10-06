@@ -1208,3 +1208,12 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   - Now: pawn 2007 arrives for `AIGoToActor_1` (79.2 s), then `_0` and `_2` (86.2 s). The loop sends `Go_to_Mark` / `Stop_stand_there` at 86-87 s.
   - The countdown is still not reached. All three go-tos move the same pawn, so Lord Shaw is taken off `TargetPoint_9` / `TriggerVolume_2` to `TargetPoint_5`, and "Shaw On Mark" is never set (next lead, U-221).
 - **Confidence:** CONFIRMED for the request fields, the arrival test, the constants (0.01 squared at 0x010a5590, radius 120) and the navmesh-walking path and flag. LIKELY for the record layout linking `m_bAccurateStop` to record +0x24 (from the builder 0x0093ddd0 and the record copy in 0x00945010 / 0x009450c0). APPROXIMATION for the port's navmesh walk (poly by position, no actor box check).
+
+## 2026-10-06: FaceFX bone blending from the binary (U-380)
+
+- **Question:** How does the original blend FaceFX bone poses and combine them with the animation (U-380)?
+- **Method:** exe string scan (FaceFX RTTI, the link function formula strings, `SHOWFACEFXBONES`); Ghidra `StrUsers` (console command 0x006C75A0 -> flag 0x01448FD4), `Decomp` on its users, `OffsetScan` for `SkeletalMeshComponent.FaceFXActorInstance` (+0x390), `Decomp` of the 0x390 users; `prop_layout` / `obj_dump` for `FaceFXBlendMode` and its default.
+- **Findings** (`dishonored/ANIMATION.md` §12): 0x00725EA0 is the FaceFX update. Position = reference + sum of value x delta. Rotation = deltas `slerp(ref, pose, w) x ref^-1` multiplied onto the reference (true slerp when the dot is at most 0.55, else lerp), then normalized. Additive blend mode (the engine default, not overridden): position += FaceFX - mesh reference; rotation = (FaceFX x mesh reference^-1) x animated, after the whole AnimTree. Link function types follow the registration order of their classes; one-clamp is `1 if x <= 1 else 1 / x` (the reader had it wrong; unused in Boyle).
+- **Port changes:** `facefx::bone_poses` (replaces `bone_deltas`) with the original slerp; the runtime builds additive offsets against the bind pose and applies them after the AnimTree layers, pre-multiplied.
+- **Tests:** `dishonored_assets` facefx tests (slerp branches, one-clamp, jaw open about 20 degrees through the new blend).
+- **Confidence:** CONFIRMED for the blending and the combine; graph evaluation and blend in / out remain LIKELY.

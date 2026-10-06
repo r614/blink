@@ -251,10 +251,13 @@ pub fn read_actor(raw: &[u8]) -> Result<Actor> {
     Ok(Actor { name, bones, nodes })
 }
 
-/// FaceFX link function `func` with `params` applied to `x`. Types: 1 linear (m, b),
-/// 2 quadratic (a), 3 cubic (a), 4 square root (a), 5 negate, 6 inverse, 7 one-clamp,
-/// 8 constant (c), 10 clamped linear (x0, y0, x1, y1). The numbering follows FaceFX's
-/// standard function list; only 1 and 2 occur in the retail actors.
+/// FaceFX link function `func` with `params` applied to `x`. The numbering is the order in
+/// which the executable registers the link function classes, each with its formula string
+/// (0x0120C5A4..0x0120C7F4): 0 null (deprecated), 1 linear `m x + b`, 2 quadratic `a x^2`,
+/// 3 cubic `a x^3`, 4 square root `a sqrt(x)`, 5 negate, 6 inverse `1 / x`, 7 one-clamp
+/// (1 when x <= 1, else 1 / x), 8 constant `c`, 9 corrective (correction factor; needs the
+/// corrected node, not modelled), 10 clamped linear `m x` (clampx, clampy, clampdir; the
+/// clamp rule is not decoded, not modelled). Only 1 and 2 occur in the retail actors.
 pub fn link_fn(func: u32, p: &[f32], x: f32) -> f32 {
     let a = |i: usize, d: f32| p.get(i).copied().unwrap_or(d);
     match func {
@@ -270,17 +273,14 @@ pub fn link_fn(func: u32, p: &[f32], x: f32) -> f32 {
                 0.0
             }
         }
-        7 => 1.0 - x.clamp(0.0, 1.0),
-        8 => a(0, 0.0),
-        10 => {
-            let (x0, y0, x1, y1) = (a(0, 0.0), a(1, 0.0), a(2, 1.0), a(3, 1.0));
-            if (x1 - x0).abs() < 1e-6 {
-                y0
+        7 => {
+            if x <= 1.0 {
+                1.0
             } else {
-                let t = ((x - x0) / (x1 - x0)).clamp(0.0, 1.0);
-                y0 + (y1 - y0) * t
+                1.0 / x
             }
         }
+        8 => a(0, 0.0),
         _ => 0.0,
     }
 }
@@ -306,33 +306,67 @@ impl Actor {
         v
     }
 
-    /// Bone-local offsets from the reference for the node values: per moved bone, the
-    /// position delta and the rotation delta (reference^-1 * blended rotation, x y z w).
-    /// Positions add their weighted deltas; rotations compose each pose's delta from the
-    /// reference, scaled by its weight (slerp from identity).
-    pub fn bone_deltas(&self, values: &[f32]) -> Vec<(usize, [f32; 3], [f32; 4])> {
+    /// The blended FaceFX transform of every bone with a pose link (bone-local position and
+    /// rotation, x y z w), as `USkeletalMeshComponent`'s FaceFX update (0x00725EA0) computes
+    /// it from the master bone list:
+    /// - position = reference + sum of node value x position delta;
+    /// - rotation: starting from the reference, each pose whose node value `w` is not ~0
+    ///   (|w| > 1.19e-7) contributes `S = slerp(reference, pose, w)` (sign of the pose flipped
+    ///   into the reference's hemisphere; a true slerp when their dot is at most 0.55, a plain
+    ///   lerp above), composed as the delta `S x reference^-1` onto the accumulated rotation;
+    ///   the result is normalized.
+    ///
+    /// In this module's mirrored space (`read_quat`) the product order reverses, so the
+    /// delta composes on the right as `reference^-1 x S`.
+    pub fn bone_poses(&self, values: &[f32]) -> Vec<(usize, [f32; 3], [f32; 4])> {
         let mut out = Vec::new();
         for (bi, b) in self.bones.iter().enumerate() {
-            let mut pos = [0.0f32; 3];
-            let mut rot = [0.0f32, 0.0, 0.0, 1.0];
+            let r = b.reference.rot;
+            let mut pos = b.reference.pos;
+            let mut rot = r;
             let mut any = false;
             for p in &b.poses {
-                let w = values.get(p.node as usize).copied().unwrap_or(0.0) * b.weight;
-                if w.abs() < 1e-5 {
+                let w = values.get(p.node as usize).copied().unwrap_or(0.0);
+                if w.abs() < 1.192_092_9e-7 {
                     continue;
                 }
                 any = true;
                 for k in 0..3 {
                     pos[k] += p.xf.pos[k] * w;
                 }
-                let d = quat_mul(quat_conj(b.reference.rot), p.xf.rot);
-                rot = quat_mul(rot, quat_pow(d, w));
+                let s = facefx_slerp(r, p.xf.rot, w);
+                rot = quat_mul(rot, quat_mul(quat_conj(r), s));
             }
             if any {
+                let n = (rot[0] * rot[0] + rot[1] * rot[1] + rot[2] * rot[2] + rot[3] * rot[3]).sqrt();
+                let rot = if n > 1.192_092_9e-7 { rot.map(|c| c / n) } else { [0.0, 0.0, 0.0, 1.0] };
                 out.push((bi, pos, rot));
             }
         }
         out
+    }
+}
+
+/// The FaceFX bone slerp of 0x00725EA0: `b` is flipped when `a - b` is shorter than `a + b`
+/// would be after the flip, then a true slerp when the dot is at most 0.55, else a linear
+/// blend (not normalized).
+fn facefx_slerp(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    let sum: f32 = (0..4).map(|k| (a[k] + b[k]) * (a[k] + b[k])).sum();
+    let diff: f32 = (0..4).map(|k| (a[k] - b[k]) * (a[k] - b[k])).sum();
+    // The original flips the source when |a + b| < |a - b|; flipping the target is the same
+    // rotation for the blend.
+    let b = if sum < diff { b.map(|c| -c) } else { b };
+    let dot: f32 = (0..4).map(|k| a[k] * b[k]).sum();
+    if dot <= 0.55 {
+        let th = dot.clamp(-1.0, 1.0).acos();
+        let s = th.sin();
+        if s.abs() < 1e-6 {
+            return a;
+        }
+        let (ka, kb) = (((1.0 - t) * th).sin() / s, (t * th).sin() / s);
+        [0, 1, 2, 3].map(|k| a[k] * ka + b[k] * kb)
+    } else {
+        [0, 1, 2, 3].map(|k| a[k] * (1.0 - t) + b[k] * t)
     }
 }
 
@@ -351,17 +385,6 @@ fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     ]
 }
 
-/// `q` scaled to `w` of its rotation (slerp from identity; `w` may exceed 1 or be negative).
-fn quat_pow(q: [f32; 4], w: f32) -> [f32; 4] {
-    let q = if q[3] < 0.0 { [-q[0], -q[1], -q[2], -q[3]] } else { q };
-    let s = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt();
-    if s < 1e-7 {
-        return [0.0, 0.0, 0.0, 1.0];
-    }
-    let half = s.atan2(q[3]) * w;
-    let k = half.sin() / s;
-    [q[0] * k, q[1] * k, q[2] * k, half.cos()]
-}
 
 // ---------------------------------------------------------------------------------------------
 // Anim set
@@ -575,8 +598,12 @@ mod tests {
         assert_eq!(c.eval(2.0), 1.0);
         assert!((link_fn(1, &[0.1, 0.0], 5.0) - 0.5).abs() < 1e-6);
         assert!((link_fn(2, &[-0.3], 0.5) + 0.075).abs() < 1e-6);
-        let q = quat_pow([0.0, 0.0, (0.5f32).sin(), (0.5f32).cos()], 0.5);
-        assert!((q[2] - (0.25f32).sin()).abs() < 1e-5);
+        // A wide blend (dot <= 0.55) is a true slerp: half of a 2.4 rad turn; a narrow one lerps.
+        let q = facefx_slerp([0.0, 0.0, 0.0, 1.0], [0.0, 0.0, (1.2f32).sin(), (1.2f32).cos()], 0.5);
+        assert!((q[2] - (0.6f32).sin()).abs() < 1e-5);
+        let l = facefx_slerp([0.0, 0.0, 0.0, 1.0], [0.0, 0.0, (0.4f32).sin(), (0.4f32).cos()], 0.5);
+        assert!((l[2] - 0.5 * (0.4f32).sin()).abs() < 1e-6);
+        assert!((link_fn(7, &[], 0.5) - 1.0).abs() < 1e-6 && (link_fn(7, &[], 4.0) - 0.25).abs() < 1e-6);
     }
 
     /// Every Boyle FaceFX actor and anim set decodes completely; the servant's face graph and
@@ -628,8 +655,9 @@ mod tests {
         let mut track = vec![0.0; actor.nodes.len()];
         track[open] = 1.0;
         let v = actor.evaluate(&track);
-        let d = actor.bone_deltas(&v);
-        let (_, _, r) = d.iter().find(|x| actor.bones[x.0].name == "jaw_jnt").unwrap();
+        let d = actor.bone_poses(&v);
+        let (bi, _, r) = d.iter().find(|x| actor.bones[x.0].name == "jaw_jnt").unwrap();
+        let r = quat_mul(quat_conj(actor.bones[*bi].reference.rot), *r);
         let ang = 2.0 * r[3].abs().min(1.0).acos().to_degrees();
         assert!((ang - 20.0).abs() < 2.0, "{ang}");
         // Graph: Surprise drives W through a 0.377 linear link.
