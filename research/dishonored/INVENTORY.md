@@ -13,7 +13,7 @@ as elsewhere: CONFIRMED, LIKELY, SPECULATIVE. Movement, Blink, Windblast, parry 
 
 `dishonored_assets::items_config` reads everything into `GameplayConfig::items`
 (`dishonored_ir::items`), with each value's source in the provenance; the cache file is
-`gameplay_config.v5.json`.
+`gameplay_config.v6.json`.
 
 | What | Source | Values (Normal difficulty) |
 |---|---|---|
@@ -140,7 +140,7 @@ an NPC carries (pickpocketing). Boyle Ext (with the street script) has 68: 54 ab
   0x00A61770) and cannot sprint (`m_bCanSprintWhilePossessed` false).
 - The sim: hold to target (U-108 for the scoring), release to pay and travel in over
   `m_IntroDuration`; the possessor's input drives the host; the possessor steps out behind the
-  host; rats are not simulated.
+  host; rat pawns are possessed the same way (see "Rats").
 
 ### Bend Time (`DishonoredActivePowerComponent_BendTime`)
 
@@ -158,13 +158,35 @@ an NPC carries (pickpocketing). Boyle Ext (with the street script) has 68: 54 ab
 ### Devouring Swarm, Shadow Kill
 
 - Swarm: summoned along the view up to `m_fMaxDistance`, `m_fRatSwarmSpawnDelay` later; rats go
-  for the nearest pawn but the summoner within the detection radius, bite after the initial
-  delay every damage interval, eat bodies (`m_fEatStartupDelayAfterKill`, `m_fEatStartupDuration`,
-  `m_fEatPerLimbDuration`). Rat speed, bite range and the damage combination are SPECULATIVE
-  (U-104).
-- Shadow Kill 0x00A87B60: level 2 always, level 1 only when the victim was unaware; the corpse
-  burns to ash (`DisSeqAct_BodyShadowKill`, `m_fShadowKillFadeToBlackDuration` 5). The sim
-  uses stealth kills (assassinations, sleepers) for level 1 (U-110).
+  for the nearest pawn but the summoner within the detection radius, eat bodies
+  (`m_fEatStartupDelayAfterKill`, `m_fEatStartupDuration`, `m_fEatPerLimbDuration`; 4 limbs per
+  body remains SPECULATIVE).
+- Rats (U-104 resolved except eating): the crowd agent archetype `RatSwarm.CrowdAgent_SmallRat`
+  (`DisGameCrowdAgentSkeletalRat`) has `MaxSpeed` 350, `Health` 1, tweak `Twk_RatSwarm.Twk_Rat`
+  (`m_fAttackDistance` 120). The attack group update (0x00C891E0): once the group has been on its
+  target for `m_fInitialDelayBeforeDealingDamage` (no delay when the target is the player), every
+  `m_fDamageTimeInterval` (accumulated) a random rat of the group bites for
+  `(int)clamp(count x m_fDamagePerBite, m_fMinDamage, m_fMaxDamage)` with `DishonoredDamageType_Bite`
+  and the target gets `Modifier_RatAttackSpeedModifier` (`-m_fPawnSlowdownPercent` % of the base
+  `Attribute_GroundSpeed` / `GroundSpeedSprint` for `m_fPawnSlowdownDuration`: 40 % / 1 s in the
+  class defaults); a target pawn stomping rats removes them from the group. Rats attack the player
+  within `m_fStandUpRatSwarmAttackDistance` 200, sneaking `m_fCrouchedRatSwarmAttackDistance` 60
+  (`Twk_Pawn_Corvo_Release`). `Attribute_RatsAttackRadiusReduction` (a charm) divides a query radius
+  (0x00C87B20).
+- The sim: the Devouring Swarm stays one aggregate (decoded damage, slowdown, reach, player rule);
+  individual rats are `PawnKind::Rat` pawns (`dishonored_sim::rats`): small box (15 x 10), 350 uu/s,
+  no sword, left hand or jump, health 1, driven by a brain or a possessor; a rat attacks while its
+  input holds attack and a pawn is in reach in front of it, and the attacks on one pawn form a group
+  with the rule above (`DisTweaks_RatSwarm` class-default values). Hooks for `dishonored_ai`:
+  `rats::spawn_rat`, `SimEvent::RatSpawned` / `RatBite`, `PlayerState::rat_attack`.
+- Rat possession (Possession level 1, `Twk_Possessable_Rat`, 20 / 30 s): rat pawns are possessable;
+  aiming at a Devouring Swarm possesses one of its rats, which leaves the swarm as a rat pawn.
+- Shadow Kill 0x00A87B60: level 2 always; level 1 when the victim's awareness is below 1 or it was
+  out (the parameters of the call; never for bites); the corpse burns to ash
+  (`DisSeqAct_BodyShadowKill`, `m_fShadowKillFadeToBlackDuration` 5). The sim reads the AI's
+  `PlayerState::ai_unaware` hook (U-110 resolved, needs `dishonored_ai` to write it).
+- Sleep darts: `m_bInstantSleepForUnawareNPCs`: an NPC whose `ai_unaware` hook is set sleeps at once
+  (U-105 resolved on the sim side).
 
 ### Passive powers and bone charms
 
