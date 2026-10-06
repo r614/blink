@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 /// A whole mission file.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct MissionDef {
     pub title: String,
     /// Map the mission plays on (persistent level name, e.g. `L_Boyle_Ext_P`).

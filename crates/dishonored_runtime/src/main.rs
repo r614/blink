@@ -9,6 +9,9 @@
 //!     --connect HOST:PORT    join a dedicated server
 //!     --browse MASTER        list servers from a control plane and join the best one
 //!     --inspect              free camera, no gameplay (--pos x,y,z --yaw --pitch)
+//!     --mission FILE         a custom mission; --load SAVE continues a saved game (F5 / F9
+//!                            quicksave / quickload; saves in --saves DIR, default SaveData
+//!                            next to the settings file)
 //!   options: --name NAME --show-hidden --max-tex N --lat MS --loss P
 //!            --settings FILE (default %APPDATA%/dishonored-rs/settings.ron) --fullscreen
 //!            --from-launcher (set by the launcher: window from the settings, Esc menu returns)
@@ -50,6 +53,7 @@ mod launcher;
 mod launcher_bg;
 mod pause_menu;
 mod hud_settings;
+mod saves;
 
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::input::mouse::AccumulatedMouseMotion;
@@ -71,6 +75,10 @@ struct Args {
     contracts: bool,
     /// `--mission FILE`: play a custom mission (RON, see missions/README.md).
     mission: Option<dishonored_mission::MissionDef>,
+    /// The mission file (saves record it).
+    mission_path: Option<String>,
+    /// `--load FILE`: continue from a saved game (its mission unless `--mission` is given).
+    load: Option<PathBuf>,
     pos: Option<Vec3>,
     yaw: Option<f32>,
     pitch: f32,
@@ -113,10 +121,14 @@ fn parse_args() -> Args {
     let size = get("--size")
         .and_then(|s| s.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))))
         .unwrap_or((1600, 900));
-    let mission = get("--mission").map(|p| dishonored_mission::MissionDef::load(std::path::Path::new(&p)).unwrap_or_else(|e| panic!("mission {p}: {e:#}")));
+    let load = get("--load").map(PathBuf::from);
+    let mission_path = get("--mission").or_else(|| load.as_ref().map(|l| saves::header_of(l).unwrap_or_else(|e| panic!("save {}: {e:#}", l.display())).mission));
+    let mission = mission_path.as_ref().map(|p| dishonored_mission::MissionDef::load(std::path::Path::new(p)).unwrap_or_else(|e| panic!("mission {p}: {e:#}")));
     Args {
         map: get("--map").or_else(|| mission.as_ref().map(|m| m.map.clone())).unwrap_or_else(|| dishonored_content::DEFAULT_MAP.into()),
         mission,
+        mission_path,
+        load,
         mode,
         name: get("--name").unwrap_or_else(|| "player".into()),
         bots: get("--bots").and_then(|s| s.parse().ok()).unwrap_or(3),
@@ -218,7 +230,16 @@ fn main() {
         };
         let content = Arc::new(dishonored_content::MapContents::load(&names).expect("loading match content from the install"));
         let session = match &args.mode {
-            Mode::Offline => session::Session::offline(content.clone(), args.bots, args.spectate, args.contracts, args.mission.clone()),
+            Mode::Offline => {
+                let mut s = session::Session::offline(content.clone(), args.bots, args.spectate, args.contracts, args.mission.clone());
+                if let Some(l) = &args.load {
+                    match saves::load_into(&mut s, l) {
+                        Ok(h) => info!("loaded {} (slot {}, {})", l.display(), h.slot, h.map),
+                        Err(e) => error!("loading {}: {e:#}", l.display()),
+                    }
+                }
+                s
+            }
             Mode::Connect(addr) => session::Session::online(content, connect(addr, &args)),
             Mode::Browse(master) => {
                 let servers = dishonored_net::control_plane::list_servers(master).expect("listing servers");
@@ -277,7 +298,9 @@ fn main() {
             .add_systems(Startup, (players::setup_player_assets, hud::setup_hud, debug::setup_gizmos, (characters::load_library, characters::load_animations).chain(), characters::load_weapons, viewmodel::load_view_rig, gfx_hud::setup_gfx_hud, gfx_hud::load_game_fonts))
             .init_resource::<hud::DebugHud>()
             .init_resource::<viewmodel::ViewAnim>()
-            .add_systems(FixedUpdate, (harness::script_fixed, session::fixed_tick).chain().run_if(pause_menu::sim_running))
+            .add_systems(FixedUpdate, (harness::script_fixed, session::fixed_tick, saves::write_autosaves).chain().run_if(pause_menu::sim_running))
+            .insert_resource(saves::Saves::new(args.mission_path.clone()))
+            .add_systems(Update, (saves::hotkeys, saves::process).chain().after(pause_menu::handle))
             .add_systems(
                 Update,
                 (

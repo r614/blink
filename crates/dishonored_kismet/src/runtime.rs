@@ -109,7 +109,11 @@ impl Coverage {
     }
 }
 
+/// The runtime state serializes (saved games); the database and the event-class cache are not
+/// saved: the loader re-attaches the mission's database.
+#[derive(Serialize, Deserialize)]
 pub struct Kismet {
+    #[serde(skip)]
     pub db: Arc<KismetDb>,
     pub ops: Vec<OpRt>,
     pub dups: Vec<Dup>,
@@ -137,6 +141,7 @@ pub struct Kismet {
     /// Touch events: pawns touching (engine `TouchedList`).
     pub touched: BTreeMap<OpId, Vec<Obj>>,
     /// Requested event class (lowercase) -> static events of that class or a subclass.
+    #[serde(skip)]
     event_index: std::sync::Mutex<BTreeMap<String, Vec<OpId>>>,
 }
 

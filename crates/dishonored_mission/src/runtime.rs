@@ -258,7 +258,7 @@ fn conv_name_matches(want: &str, name: &str, label: &str) -> bool {
     want.eq_ignore_ascii_case(name) || (!label.is_empty() && want.eq_ignore_ascii_case(label)) || name.to_ascii_lowercase().ends_with(&format!(":{}", want.to_ascii_lowercase()))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissionState {
     pub def: MissionDef,
     /// Resolved marker positions and radii.
