@@ -66,6 +66,8 @@ pub struct AnimBank {
     derived: HashMap<(usize, Vec<(String, String)>), usize>,
     /// `LocoBlender` tunables (shared by every pawn using `NPC_Human_at`).
     pub loco_node: LocoNodeParams,
+    /// FaceFX actors and per-blurb animations (lip sync).
+    pub facefx: crate::facefx::FaceFxBank,
 }
 
 /// Packages that cook the Boyle NPC AnimSets, locomotion configs and animation definitions.
@@ -144,7 +146,11 @@ impl AnimBank {
         let f = dishonored_assets::npc_anim::loco_node_floats(&content, &["m_fVelocityMaxBlendSpeed", "m_fVelocityMaxDif", "m_fVelocityMinBlendSpeedRatio", "m_fModifierBlendDuration"]);
         let d = LocoNodeParams::default();
         let loco_node = LocoNodeParams { rate: f[0].unwrap_or(d.rate), range: f[1].unwrap_or(d.range), min_ratio: f[2].unwrap_or(d.min_ratio), modifier_blend: f[3].unwrap_or(d.modifier_blend) };
-        AnimBank { content, sets: Vec::new(), set_index: HashMap::new(), clips: HashMap::new(), profiles: Vec::new(), profile_index: HashMap::new(), model_profile: HashMap::new(), bindings: HashMap::new(), masks: HashMap::new(), locator, loco_node, derived: HashMap::new() }
+        AnimBank { content, sets: Vec::new(), set_index: HashMap::new(), clips: HashMap::new(), profiles: Vec::new(), profile_index: HashMap::new(), model_profile: HashMap::new(), bindings: HashMap::new(), masks: HashMap::new(), locator, loco_node, derived: HashMap::new(), facefx: Default::default() }
+    }
+
+    pub fn content(&self) -> Arc<Content> {
+        self.content.clone()
     }
 
     fn located(&self, path: &str) -> Option<(String, String)> {
@@ -707,6 +713,8 @@ pub struct AnimInput<'a> {
     pub carrier_speed: f32,
     /// What the pawn looks at (world position), when anything.
     pub look_target: Option<Vec3>,
+    /// FaceFX bone offsets of the line the pawn speaks (ANIMATION.md §12).
+    pub face: &'a [crate::facefx::FaceBone],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1502,6 +1510,15 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
                 overlay(&mut pose, &fp, c.weight, Some(&mask), parts);
             }
         }
+    }
+    // FaceFX (§12): the spoken line's bone poses, as offsets from the reference on the
+    // animated face and head bones (before the look-at additive).
+    for &(pi, bi, dp, dq) in i.face {
+        let Some(bone) = parts.get(pi).and_then(|p| p.bones.get(bi)) else { continue };
+        let Some(slot) = pose.get_mut(pi).and_then(|p| p.get_mut(bi)) else { continue };
+        let k = slot.unwrap_or(Key { q: bone.rotation, t: None });
+        let t = if dp.length_squared() > 1e-10 { Some(k.t.unwrap_or(bone.translation) + dp) } else { k.t };
+        *slot = Some(Key { q: (k.q * dq).normalize(), t });
     }
     // `LookatBlender`: additive head and torso grids of the look-at mode for the stance and
     // gait, weighted by the target's angles against the mode's ranges.
