@@ -49,8 +49,8 @@ part is `SkeletalMeshComponent0`; the `StaticUsablePart` static mesh component i
 The level importer read only static mesh components, so none of them was drawn: the `street`
 viewpoint looked through the empty frame of the Garden-to-Ballroom transition door
 (`L_Boyle_Ext_P:DishonoredUsableObject_7`, `double_doors.DBdoor_big_rich_ext_metal_sk`). Boyle Ext
-has 8 `DisDoor`s (all in `L_Boyle_Ext_Audio`), 4 transition doors, 21 lockers, bins, hatches,
-sinks, alarm panels and bells, 47 in all.
+has 8 `DisDoor`s (all in `L_Boyle_Ext_Audio`), 4 transition doors, and lockers, bins, hatches,
+sinks, a chest, alarm panels and bells: 39 props on 19 skeletal meshes.
 
 - Import: the actor x component transform, the mesh and the component's `AnimSets` (resolved to
   the package exporting them), `bHidden` / `HiddenGame`; for doors `m_InitialDoorState` and the

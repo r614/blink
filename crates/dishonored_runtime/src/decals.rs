@@ -116,7 +116,7 @@ impl PendingDecal {
         let params = DecalUniform::decode(p, crate::map_render::light_unit())?;
         let missing: Vec<&str> = UNDECODED.iter().copied().filter(|s| p.switch(s) == Some(true)).collect();
         if !missing.is_empty() {
-            warn!("translucent decal: switches not decoded (U-563): {}", missing.join(", "));
+            debug!("translucent decal: switches not decoded (U-563): {}", missing.join(", "));
         }
         let mask = textures.iter().find(|(k, _)| k.eq_ignore_ascii_case("C_Cubemap_Mask")).and_then(|t| images.get(t.1)).cloned();
         let mut params = params;
