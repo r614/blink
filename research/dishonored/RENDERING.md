@@ -95,8 +95,9 @@ street splotches, graffiti, confetti. Shader maps of the base (`shader_maps ... 
 - alpha = clamp(`O_Opacity_mask[ch]`, `O_Minimum_Opacity`, `O_Maximum_Opacity`).
 
 The port draws them with an extended `StandardMaterial`: Bevy's direct lighting with reflectance,
-environment and ambient light removed, plus the base pass ambient (`decals::BASE_PASS_AMBIENT`,
-not measured: U-562), no lightmap, not a shadow receiver. Before, Bevy's environment specular
+environment and ambient light removed, plus the base pass ambient (`decals::BASE_PASS_AMBIENT`:
+`AmbientColorAndSkyFactor` reads (0, 0, 0, 1) in every base pass drawn on Boyle Ext, measured with
+`probe_launch measure psconst`, U-562), no lightmap, not a shadow receiver. Before, Bevy's environment specular
 (bright at the ground's grazing angles) and the placeholder ambient made the puddles pale patches.
 Static lights light non-lightmapped translucency dynamically in UE3; the port has only the
 dominant and toggleable lights (U-561).

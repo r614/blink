@@ -20,8 +20,9 @@ use dishonored_ir::{MaterialParams, TextureId};
 pub const GENERIC_TRANSLUCENT_PMAT: &str = "Materials_ref.main_materials.generic_translucent_PMAT";
 
 /// `AmbientColorAndSkyFactor.rgb` of the translucent base pass (`TBasePassPixelShader
-/// FNoLightMapPolicyNoSkyLight`): not measured yet (U-562); 0 leaves the decals lit by the light
-/// passes only.
+/// FNoLightMapPolicyNoSkyLight`): measured in the running game on Boyle Ext as (0, 0, 0, 1) in
+/// every base pass drawn (`probe_launch measure psconst AmbientColorAndSkyFactor`, U-562), so the
+/// decals are lit by the light passes only.
 pub const BASE_PASS_AMBIENT: [f32; 3] = [0.0, 0.0, 0.0];
 
 /// Switches of generic_translucent_PMAT whose terms are not decoded (no Boyle shader map has
