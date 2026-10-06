@@ -233,6 +233,71 @@ fn pistol_magazine_upgrade_loads_more_rounds() {
 }
 
 #[test]
+fn pistol_dispersion_narrows_while_aiming_and_blooms_after_a_shot() {
+    use dishonored_sim::left_hand::{DISPERSION_REF_ASPECT, DISPERSION_REF_HFOV_DEG};
+    let mut r = Run::new(&[(1, Vec3::new(0., 0., 92.), 0.)]);
+    let gun = |b| PlayerInput { buttons: b, left_hand: LeftHand::Pistol, ..Default::default() };
+    // Equipping starts at Attribute_DispersionMax (45).
+    r.steps(1, &[(1, gun(0))]);
+    assert!((r.p(1).left.dispersion - 45.0).abs() < 70.0 / 60.0 + 1e-3, "{}", r.p(1).left.dispersion);
+    // With a round loaded it falls to the minimum (15) at 70 per second: 30 / 70 = 0.43 s.
+    r.steps(20, &[(1, gun(0))]);
+    let d = r.p(1).left.dispersion;
+    assert!(d > 15.0 && d < 45.0, "{d}");
+    r.steps(30, &[(1, gun(0))]);
+    assert_eq!(r.p(1).left.dispersion, 15.0);
+    // A shot leaves inside the minimum cone, then the dispersion is at the maximum.
+    r.steps(1, &[(1, gun(buttons::SECONDARY))]);
+    let pr = r.state.projectiles.iter().find(|p| p.owner == 1).expect("a bullet");
+    let k = 2.0 * (DISPERSION_REF_HFOV_DEG.to_radians() * 0.5).tan() / (720.0 * DISPERSION_REF_ASPECT);
+    let off = pr.velocity.normalize().angle_between(Vec3::X);
+    assert!(off <= (15.0 * k).atan() + 1e-4, "{off}");
+    assert_eq!(r.p(1).left.dispersion, 45.0);
+    // Empty (reloading): no narrowing.
+    r.steps(10, &[(1, gun(0))]);
+    assert_eq!(r.p(1).left.dispersion, 45.0);
+}
+
+#[test]
+fn dispersion_is_held_at_the_maximum_in_the_air_and_upgrades_apply_to_their_weapon_only() {
+    use dishonored_sim::left_hand::{Dispersion, dispersion_offset, offset_direction, update_dispersion};
+    use dishonored_sim::tuning::CombatTuning;
+    let mut r = Run::new(&[(1, Vec3::new(0., 0., 92.), 0.)]);
+    // Twk_Upgrade_Pistol_Accuracy1 (host DishonoredWepPistol) and Crossbow_Accuracy, as cooked.
+    r.cfg.gameplay.items.upgrades.push(("Pistol_Accuracy1".into(), vec![("Attribute_DispersionMax".into(), -10.0), ("Attribute_DispersionMin".into(), -10.0)]));
+    r.cfg.gameplay.items.upgrades.push(("Crossbow_Accuracy".into(), vec![("Attribute_DispersionMax".into(), -10.0), ("Attribute_DispersionInterpolationSpeed".into(), 40.0)]));
+    let g = r.cfg.gameplay.clone();
+    let t = CombatTuning::from_config(&g);
+    let p = r.pm(1);
+    assert!(powers::give_upgrade(p, "Pistol_Accuracy1", &g));
+    p.left.item = LeftHand::Pistol;
+    assert_eq!(Dispersion::of(p, &g, &t).map(|d| (d.max, d.min, d.speed)), Some((35.0, 5.0, 70.0)));
+    p.left.item = LeftHand::Crossbow;
+    assert_eq!(Dispersion::of(p, &g, &t).map(|d| (d.max, d.min, d.speed)), Some((30.0, 0.0, 70.0)));
+    p.left.item = LeftHand::Pistol;
+    // Falling (m_bMaxDispersionOnJump) and sprinting hold it at the maximum.
+    p.left.dispersion = 5.0;
+    p.mode = MoveMode::Falling;
+    update_dispersion(p, &g, &t, 1.0 / 60.0);
+    assert_eq!(p.left.dispersion, 35.0);
+    p.mode = MoveMode::Walking;
+    p.sprinting = true;
+    p.left.dispersion = 5.0;
+    update_dispersion(p, &g, &t, 1.0 / 60.0);
+    assert_eq!(p.left.dispersion, 35.0);
+    // Offsets stay inside the radius; the cone of 45 px is about 3.1 degrees.
+    for _ in 0..200 {
+        let (x, y) = dispersion_offset(p, 45.0);
+        assert!((x * x + y * y).sqrt() <= 45.0 + 1e-3);
+    }
+    let edge = offset_direction(0.0, 0.0, (45.0, 0.0)).angle_between(Vec3::X).to_degrees();
+    assert!((edge - 3.09).abs() < 0.05, "{edge}");
+    // Positive x is to the right of the view (+Y at yaw 0), positive y downward.
+    assert!(offset_direction(0.0, 0.0, (10.0, 0.0)).y > 0.0);
+    assert!(offset_direction(0.0, 0.0, (0.0, 10.0)).z < 0.0);
+}
+
+#[test]
 fn rats_bite_in_groups_and_slow_their_target() {
     let mut r = Run::new(&[(1, Vec3::new(0., 0., 92.), 0.)]);
     let cfg = r.cfg.clone();

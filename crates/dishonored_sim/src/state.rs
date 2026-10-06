@@ -82,6 +82,10 @@ pub struct LeftHandState {
     pub bolts_reserve: u16,
     /// Current Blink destination while aiming (None = invalid target).
     pub blink_target: Option<Vec3>,
+    /// `DishonoredWeapon_Ranged.m_fDispersion` (+0x12C) of the held pistol or crossbow: the
+    /// radius of the shot's random offset, in pixels of a 720-line screen (U-247).
+    #[serde(default)]
+    pub dispersion: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]

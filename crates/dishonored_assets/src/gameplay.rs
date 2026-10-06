@@ -300,6 +300,9 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
             ("item", "Twk_Inv_PlayerSpecific.Twk_Inv_PistolCorvo"),
             ("fire", "Twk_Inv_PlayerSpecific.Twk_Inv_PistolCorvo.DisTweaks_InventoryItem_PlayerSpecific_0.DisTweaks_FirePistol_1"),
             ("projectile", "Twk_Projectiles.Twk_Proj_Bullet"),
+            // `DisTweaks_WeaponRanged.m_pAttributeTweaks`: Attribute_DispersionMax / Min /
+            // InterpolationSpeed (U-247).
+            ("disp", "Twk_Inv_PlayerSpecific.Twk_Inv_PistolCorvo.DisTweaks_WeaponRanged_Attributes_5"),
         ],
         "pistol",
     )?;
@@ -309,6 +312,7 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
             ("item", "Twk_Inv_PlayerSpecific.Twk_Inv_CrossbowCorvo"),
             ("fire", "Twk_Inv_PlayerSpecific.Twk_Inv_CrossbowCorvo.DisTweaks_InventoryItem_PlayerSpecific_1.DisTweaks_FireCrossbow_0"),
             ("projectile", "Twk_Projectiles.Twk_Proj_Arrow"),
+            ("disp", "Twk_Inv_PlayerSpecific.Twk_Inv_CrossbowCorvo.DisTweaks_WeaponRanged_Attributes_4"),
         ],
         "crossbow",
     )?;

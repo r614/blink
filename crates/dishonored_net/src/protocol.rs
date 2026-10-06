@@ -14,7 +14,7 @@ use dishonored_sim::state::{PlayerId, PlayerState, ProjectileState, WindblastSta
 use serde::{Deserialize, Serialize};
 
 pub const MAGIC: u32 = 0x4449_5331; // "DIS1"
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const MAX_DATAGRAM: usize = 60_000;
 /// Inputs resent per packet.
 pub const INPUT_REDUNDANCY: usize = 8;
