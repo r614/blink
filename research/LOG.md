@@ -1168,3 +1168,9 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Method:** new `map_dump --near X Y R` (instances and placed emitters around a point, with material blend modes and decoded size / colour / alpha); `obj_dump` / `mic_static` of `Boyle_FX.Lights.Light_small_Yellow_01` and `Vfx_Lights.Materials.wall_lamp_Inst`.
 - **Findings:** the box is the lamp glow emitter at (-2662, -2126, 237): a mesh emitter (`light_plane`, size 20, colour (0.996, 0.946, 0.727), alpha 0.12, additive) with `wall_lamp_Inst` (`G_GlowPower` 8, `D_Distance_Fade_Factor` 1024, switches `F_Use_With_Fog` off, `D_Enable_Distance_Fade` on). The port took the instance's `F_Fog_Texture` (`Cloud_64_d`) as its colour texture; with `F_Use_With_Fog` off the original never samples it.
 - **Port changes:** the fog texture is not a colour source while `F_Use_With_Fog` is off, so the emitter takes the procedural glow path; `G_GlowPower` feeds the glow falloff exponent when the material has no `Fresnel_exponent`. APPROXIMATION: the glow graph is stripped in the cooked data (U-305); the distance fade is not applied.
+
+## 2026-10-06: Ragdoll on the level floor
+
+- **Change:** the presentation ragdoll (U-282) collides with the level's floor instead of a plane at the pawn's feet: at the hand-over a 17 x 17 grid (12 uu cells, pawn space, turned by the pawn's yaw) is sampled from the collision by down-raycasts, and each body is kept above the bilinear height under it. Walls are still not collided.
+- **Note:** the point-mass solver is sensitive to the last bits of the floor height (a flat floor through `a (1 - t) + b t` settled a different way than the exact constant); the grid interpolates as `a + (b - a) t`, exact where the samples agree.
+- **Tests:** `ragdoll::tests::floor_grid_follows_a_step`, `elite_guard_settles_on_a_step` (retail), `elite_guard_settles_on_the_floor` unchanged.

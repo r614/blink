@@ -482,7 +482,17 @@ pub fn animate_characters(
         let armed = right_w.is_some() || left_w.is_some() || p.kind == dishonored_sim::state::PawnKind::Guard;
         let profile = pawn_profile(&mut bank, root.archetype, p, armed);
         let stance = view.matchv.npc_poses.iter().find(|x| x.0 == p.id).map(|x| x.1);
-        let input = crate::npc_anim::AnimInput { p, stance, armed, talking: talking.contains(&p.id), dt, hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), look_target: look_target(p, stance, talking.contains(&p.id), &all), floor: -mv.collision_half_height, gravity: mv.gravity_z, carrier_speed: p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).map(|c| c.velocity.truncate().length()).unwrap_or(0.0) };
+        // The level floor under a pawn-space point (pawn space: origin at the pawn, turned by its
+        // yaw), for the ragdoll's floor grid.
+        let (pos, yaw, hh) = (p.position, p.yaw.to_radians(), mv.collision_half_height);
+        let world = &session.content.collision;
+        let ground = move |x: f32, y: f32| -> f32 {
+            use dishonored_world::WorldQuery;
+            let (s, c) = yaw.sin_cos();
+            let w = pos + glam::Vec3::new(x * c - y * s, x * s + y * c, 0.0);
+            world.raycast(w + glam::Vec3::Z * 60.0, -glam::Vec3::Z, 400.0, dishonored_world::channel::PAWN).map(|h| h.point.z - pos.z).unwrap_or(-hh)
+        };
+        let input = crate::npc_anim::AnimInput { p, stance, armed, talking: talking.contains(&p.id), dt, hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), look_target: look_target(p, stance, talking.contains(&p.id), &all), floor: -mv.collision_half_height, ground: Some(&ground), gravity: mv.gravity_z, carrier_speed: p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).map(|c| c.velocity.truncate().length()).unwrap_or(0.0) };
         let pose = match states.get_mut(entity) {
             Ok(mut st) => {
                 let before = chain_clips(&st);
