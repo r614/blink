@@ -5,10 +5,12 @@
 //!   `RemoveAmmo` (0x00C05260) fails when fewer than `n` are left;
 //! - elixirs: the pickup is refused at `m_nMax*Elixir` (0x00A22160), counts are clamped to
 //!   `[0, max]` (0x00C04E10); drinking (0x00C04FC0) only works when health (mana) is below its
-//!   maximum and adds `(int)((1 + Attribute_*PotionPotencyBonus) * m_n*ElixirValue)`, capped;
+//!   maximum and adds `(int)((1 + Attribute_*PotionPotencyBonus) * m_n*ElixirValue)`, capped,
+//!   then Twist of Fortune may refill mana ([`twist_of_fortune`]);
 //! - stat pickups (food, ammo): each ammo amount is rolled once from `m_AmmoRanges`
-//!   (`rand() % (max - min + 1) + min`, 0x00C3D4E0) and taking it moves what fits
-//!   (0x00C05440); health/mana changes scale with the potion potency attributes (0x00A367A0);
+//!   (`rand() % (max - min + 1) + min`, 0x00C3D4E0) and taking it moves what fits, Scavenger
+//!   adding a round ([`scavenger_amount`], 0x00C05440); health/mana changes scale with the potion
+//!   potency attributes, food adds `Attribute_FoodHealBonus` (0x00A367A0);
 //!   a stat pickup can be taken while one of its ammo types is not full or it heals/restores
 //!   mana (0x00A36980);
 //! - abstract items (`DisAbstractItemPickup`): `m_Quantity` of `m_pAbstractItem` (coins, runes,
