@@ -98,12 +98,11 @@ pub fn discover() -> bool {
         if d >= 0x10000 && (10_000..4_000_000).contains(&n) {
             if objs == 0 && looks_like_gobjects(a) {
                 objs = a;
-            } else if names == 0 {
-                if let Some(o) = looks_like_gnames(a) {
+            } else if names == 0
+                && let Some(o) = looks_like_gnames(a) {
                     names = a;
                     off = o;
                 }
-            }
         }
         i += 4;
     }
@@ -226,11 +225,10 @@ pub fn find(name: &str, class: &str) -> Vec<u32> {
             continue;
         }
         let Some(n) = mem::read::<[u32; 2]>(o + OBJ_NAME) else { continue };
-        if let Some(ni) = ni {
-            if n[0] != ni {
+        if let Some(ni) = ni
+            && n[0] != ni {
                 continue;
             }
-        }
         if let Some(ci) = ci {
             let Some(c) = mem::u32(o + OBJ_CLASS) else { continue };
             if mem::u32(c + OBJ_NAME) != Some(ci) {

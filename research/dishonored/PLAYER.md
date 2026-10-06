@@ -162,6 +162,10 @@ fields they touch (`research/ghidra/G_OffsetGroups.java`) and decompiled. CONFIR
   velocity therefore gains `2 a dt` per tick: gravity -1500 and air control act twice as hard as
   their values. A JumpZ 800 jump rises 106.7 uu in 0.27 s (the sim rose 213 uu); the impact speed
   after a drop `h` is about `sqrt(4 g h)`, so falling damage starts at 844 uu and kills at 1402 uu.
+  Measured on the running original (INSTRUMENTATION.md):
+  - apex 106.5-106.7 uu, in-flight gravity 3000 uu/s^2, airtime 0.533 s;
+  - an 800 uu drop does no damage and 868 uu does 1 point;
+  - run 400, sprint 600 uu/s; the slide eases 600 -> 275 in 1.10 s over 483 uu.
 - **Collision shape (U-016 resolved).** Every world trace of the pawn passes the cylinder's
   extent `(radius, radius, CollisionHeight)` (e.g. the air-control test above), and UE3 extent
   traces against kDOP trees and BSP are axis-aligned box checks. The sim sweeps an axis-aligned

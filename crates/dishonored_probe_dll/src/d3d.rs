@@ -123,11 +123,10 @@ unsafe fn hook_device(dev: u32) {
         (DEV_SET_PS_CONST_F, set_ps_const_hook as *const () as usize as u32),
     ];
     for (slot, f) in hooks {
-        if let Some(old) = unsafe { mem::patch_vtable(vt, slot, f) } {
-            if old != f {
+        if let Some(old) = unsafe { mem::patch_vtable(vt, slot, f) }
+            && old != f {
                 ORIG[slot].store(old, Relaxed);
             }
-        }
     }
     STATE.store(20, Relaxed);
 }
@@ -266,31 +265,29 @@ unsafe extern "system" fn create_ps_hook(dev: u32, func: *const u32, out: *mut u
         if len > 0 {
             let code = unsafe { std::slice::from_raw_parts(func as *const u8, len) };
             let shader = unsafe { *out };
-            if let Ok(mut g) = PS.lock() {
-                if let Some(ps) = g.as_mut() {
+            if let Ok(mut g) = PS.lock()
+                && let Some(ps) = g.as_mut() {
                     let id = ps.shaders.len() as u32;
                     ps.shaders.insert(shader, Shader { id, hash: dishonored_probe::fnv64(code), size: len as u32, ctab: ctab_names(code) });
                 }
-            }
         }
     }
     hr
 }
 
 unsafe extern "system" fn set_ps_hook(dev: u32, shader: u32) -> i32 {
-    if let Ok(mut g) = PS.lock() {
-        if let Some(ps) = g.as_mut() {
+    if let Ok(mut g) = PS.lock()
+        && let Some(ps) = g.as_mut() {
             ps.current = shader;
         }
-    }
     let f: unsafe extern "system" fn(u32, u32) -> i32 = unsafe { std::mem::transmute(orig(DEV_SET_PIXEL_SHADER)) };
     unsafe { f(dev, shader) }
 }
 
 unsafe extern "system" fn set_ps_const_hook(dev: u32, start: u32, data: *const f32, count: u32) -> i32 {
-    if !data.is_null() {
-        if let Ok(mut g) = PS.lock() {
-            if let Some(ps) = g.as_mut() {
+    if !data.is_null()
+        && let Ok(mut g) = PS.lock()
+            && let Some(ps) = g.as_mut() {
                 for i in 0..count {
                     let r = (start + i) as usize;
                     if r < ps.regs.len() {
@@ -300,16 +297,14 @@ unsafe extern "system" fn set_ps_const_hook(dev: u32, start: u32, data: *const f
                     }
                 }
             }
-        }
-    }
     let f: unsafe extern "system" fn(u32, u32, *const f32, u32) -> i32 = unsafe { std::mem::transmute(orig(DEV_SET_PS_CONST_F)) };
     unsafe { f(dev, start, data, count) }
 }
 
 fn on_draw() {
-    if let Ok(mut g) = PS.lock() {
-        if let Some(ps) = g.as_mut() {
-            if ps.want_draws > 0 {
+    if let Ok(mut g) = PS.lock()
+        && let Some(ps) = g.as_mut()
+            && ps.want_draws > 0 {
                 let hit = ps.shaders.get(&ps.current).and_then(|s| {
                     let ok = if ps.want_hash != 0 { s.hash == ps.want_hash } else { !ps.want_filter.is_empty() && s.ctab.contains(ps.want_filter.as_str()) };
                     ok.then_some(s.hash)
@@ -320,8 +315,6 @@ fn on_draw() {
                     ps.want_draws -= 1;
                 }
             }
-        }
-    }
 }
 
 unsafe extern "system" fn draw_primitive_hook(dev: u32, ty: u32, start: u32, count: u32) -> i32 {

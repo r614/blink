@@ -119,13 +119,12 @@ fn run_jobs() {
 fn apply_input() {
     let pc = engine::local_pc();
     let Some(pi) = mem::u32(pc + PC_PLAYER_INPUT) else { return };
-    if let Ok(inp) = INPUT.lock() {
-        if inp.active {
+    if let Ok(inp) = INPUT.lock()
+        && inp.active {
             for (k, off) in AXES.iter().enumerate() {
                 mem::write_bytes(pi + off, &inp.axes[k].to_le_bytes());
             }
         }
-    }
 }
 
 pub fn set_input(axes: [f32; 4], frames: u32) {
@@ -141,15 +140,14 @@ pub fn set_input(axes: [f32; 4], frames: u32) {
 pub fn frame() {
     PRESENT_THREAD.store(unsafe { GetCurrentThreadId() }, Relaxed);
     let tick = TICKS.fetch_add(1, Relaxed) + 1;
-    if let Ok(mut inp) = INPUT.lock() {
-        if inp.active && inp.frames > 0 {
+    if let Ok(mut inp) = INPUT.lock()
+        && inp.active && inp.frames > 0 {
             inp.frames -= 1;
             if inp.frames == 0 {
                 inp.active = false;
                 INPUT_ACTIVE.store(0, Relaxed);
             }
         }
-    }
     let Ok(mut rec) = RECORDER.lock() else { return };
     if !rec.enabled || rec.samples.len() >= rec.max {
         return;

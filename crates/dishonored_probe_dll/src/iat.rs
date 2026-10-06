@@ -51,15 +51,14 @@ unsafe extern "system" fn set_cursor_pos(x: i32, y: i32) -> i32 {
 /// While focus is faked the game sees the cursor where it last tried to put it (no mouse
 /// look from the user's real cursor).
 unsafe extern "system" fn get_cursor_pos(out: *mut i32) -> i32 {
-    if FAKE_FOCUS.load(Relaxed) != 0 && !out.is_null() {
-        if let Some((x, y)) = CURSOR.lock().ok().and_then(|c| *c) {
+    if FAKE_FOCUS.load(Relaxed) != 0 && !out.is_null()
+        && let Some((x, y)) = CURSOR.lock().ok().and_then(|c| *c) {
             unsafe {
                 *out = x;
                 *out.add(1) = y;
             }
             return 1;
         }
-    }
     let f: unsafe extern "system" fn(*mut i32) -> i32 = unsafe { std::mem::transmute(ORIG[6].load(Relaxed) as usize) };
     unsafe { f(out) }
 }
@@ -97,14 +96,13 @@ pub fn install() {
                     let name = cstr(IMAGE_BASE + thunk + 2);
                     if let Some(k) = wanted.iter().position(|(n, _)| *n == name) {
                         let slot = IMAGE_BASE + iat + 4 * i;
-                        if let Some(old) = mem::u32(slot) {
-                            if old != wanted[k].1 {
+                        if let Some(old) = mem::u32(slot)
+                            && old != wanted[k].1 {
                                 ORIG[k].store(old, Relaxed);
                                 if unsafe { mem::patch(slot, &wanted[k].1.to_le_bytes()) } {
                                     PATCHED.fetch_add(1, Relaxed);
                                 }
                             }
-                        }
                     }
                 }
                 i += 1;

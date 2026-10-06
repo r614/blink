@@ -62,11 +62,10 @@ fn hex(s: &str) -> u32 {
 fn wait_for(c: &mut Client, what: &str, timeout: Duration, mut pred: impl FnMut(&std::collections::HashMap<String, String>) -> bool) -> Result<()> {
     let t0 = Instant::now();
     loop {
-        if let Ok(s) = status(c) {
-            if pred(&s) {
+        if let Ok(s) = status(c)
+            && pred(&s) {
                 return Ok(());
             }
-        }
         if t0.elapsed() > timeout {
             bail!("timed out waiting for {what}");
         }
@@ -144,6 +143,7 @@ pub fn run(args: &[String]) -> Result<()> {
         "fall" => fall(&mut c, &o),
         "run" => run_sprint_slide(&mut c, &o),
         "sdf" => sdf(&mut c),
+        "views" => views(&mut c, &o),
         "trace" => {
             let n: u32 = o.rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(120);
             c.sample_start(100_000)?;
@@ -192,6 +192,87 @@ fn boot(c: &mut Client) -> Result<()> {
             bail!("still not in control");
         }
     }
+}
+
+/// The `harness fidelity` viewpoints (tools/harness/src/fidelity.rs): name, eye position,
+/// yaw, pitch (degrees, Unreal axes).
+const VIEWPOINTS: &[(&str, [f32; 3], f32, f32)] = &[
+    ("aerial", [-6000.0, -6000.0, 6000.0], 45.0, -35.0),
+    ("street", [-2663.0, -1879.0, 170.0], 0.0, 5.0),
+    ("garden", [-3805.0, -1879.0, -70.0], 180.0, -8.0),
+    ("spawn1", [-2663.0, -1879.0, 162.0], 180.0, 0.0),
+    ("mansion", [1355.0, 1445.0, 157.0], 180.0, 0.0),
+    ("sewer", [-921.0, 1160.0, -1771.0], 180.0, 0.0),
+    ("moon", [-3805.0, -1879.0, -70.0], -76.0, 29.0),
+    ("skyline", [-2663.0, -1879.0, 400.0], 90.0, 12.0),
+];
+
+/// Fixed-viewpoint captures: the pawn is frozen (PHYS_None) where its camera lands on the
+/// viewpoint, the controller rotation is set, and the back buffer is saved as
+/// `<out>/<name>.bmp`. The camera position actually reached is read back from
+/// `PlayerCamera.CameraCache.POV` (Camera +0x32C: time, location, rotation, FOV).
+fn views(c: &mut Client, o: &Opts) -> Result<()> {
+    let out = o.out.clone().context("--out DIR")?;
+    std::fs::create_dir_all(&out)?;
+    let only: Vec<&String> = o.rest[1..].iter().collect();
+    let _ = c.console("ShowHUD");
+    for (name, eye, yaw, pitch) in VIEWPOINTS {
+        if !only.is_empty() && !only.iter().any(|n| n.as_str() == *name) {
+            continue;
+        }
+        let st = status(c)?;
+        let pc = hex(st.get("local_pc").map(String::as_str).unwrap_or("0"));
+        let p = pawn(c)?;
+        let cam = c.read_u32(pc + 0x384)?;
+        let rot = |c: &mut Client| -> Result<()> {
+            let r = [(pitch / 360.0 * 65536.0) as i32 & 0xffff, (yaw / 360.0 * 65536.0) as i32 & 0xffff, 0];
+            let mut b = Vec::new();
+            for v in r {
+                b.extend(v.to_le_bytes());
+            }
+            c.write(pc + ACTOR_ROTATION, &b)?;
+            Ok(())
+        };
+        let mut target = *eye;
+        target[2] -= 64.0;
+        let mut pov = [0.0f32; 3];
+        for _ in 0..3 {
+            let mut b = Vec::new();
+            for v in target {
+                b.extend(v.to_le_bytes());
+            }
+            c.write(p + 0xc4, &b)?;
+            c.write(p + 0x1b4, &[0u8; 12])?;
+            c.write(p + 0x104, &[0u8])?;
+            rot(c)?;
+            c.wait_ticks(20)?;
+            let b = c.read(cam + 0x32c + 4, 12)?;
+            for k in 0..3 {
+                pov[k] = f32::from_le_bytes(b[k * 4..k * 4 + 4].try_into()?);
+            }
+            for k in 0..3 {
+                target[k] += eye[k] - pov[k];
+            }
+        }
+        let mut b = Vec::new();
+        for v in target {
+            b.extend(v.to_le_bytes());
+        }
+        c.write(p + 0xc4, &b)?;
+        c.write(p + 0x104, &[0u8])?;
+        rot(c)?;
+        c.wait_ticks(30)?;
+        let b = c.read(cam + 0x32c + 4, 12)?;
+        for k in 0..3 {
+            pov[k] = f32::from_le_bytes(b[k * 4..k * 4 + 4].try_into()?);
+        }
+        let cap = c.capture()?;
+        crate::write_bmp(&out.join(format!("{name}.bmp")), &cap)?;
+        let fov = c.read_f32(cam + 0x32c + 0x1c)?;
+        println!("{name}: camera at ({:.1}, {:.1}, {:.1}) for ({}, {}, {}), yaw {yaw} pitch {pitch}, FOV {fov:.1}", pov[0], pov[1], pov[2], eye[0], eye[1], eye[2]);
+    }
+    let _ = c.console("ShowHUD");
+    Ok(())
 }
 
 /// Least squares `y = a + b x + c x^2`.
@@ -245,7 +326,16 @@ fn sdf(c: &mut Client) -> Result<()> {
     for (_, hash, regs) in &got {
         let Some(s) = shaders.iter().find(|s| s.hash == *hash) else { continue };
         {
-            let mut line = String::new();
+            // Light policy from the constant table: spot lights bind SpotAngles, point and
+            // spot lights LightPositionAndInvRadius; the directional policy neither.
+            let kind = if s.ctab.contains("SpotAngles") {
+                "spot"
+            } else if s.ctab.contains("LightPositionAndInvRadius") {
+                "point"
+            } else {
+                "directional"
+            };
+            let mut line = format!("[{kind}] ");
             for n in names {
                 if let Some(r) = ctab_reg(&s.ctab, n) {
                     let v = regs[r];
@@ -281,7 +371,7 @@ fn jump(c: &mut Client, o: &Opts) -> Result<()> {
             println!("| {k} | no jump (physics stayed {}) |", physics_name(s.last().map(|x| x.physics).unwrap_or(0)));
             continue;
         };
-        let z0 = s[..i0].iter().map(|x| x.location[2]).last().unwrap_or(f32::NAN);
+        let z0 = s[..i0].iter().map(|x| x.location[2]).next_back().unwrap_or(f32::NAN);
         let t_off = s[i0 - 1].time_seconds;
         let (ia, apex) = s.iter().enumerate().skip(i0).map(|(i, x)| (i, x.location[2])).fold((i0, f32::MIN), |a, b| if b.1 > a.1 { b } else { a });
         let land = s.iter().skip(i0).position(|x| x.physics != 2).map(|i| i + i0);

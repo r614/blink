@@ -41,7 +41,10 @@ crates/
   dishonored_ai      NPC brains on Arkane's attention model and AI tweaks
                      (research/dishonored/AI.md)
   dishonored_settings player settings modelled on ArkProfileSettings (options, defaults, bindings)
+  dishonored_probe   wire protocol + client of the runtime probe of the original game
+  dishonored_probe_dll 32-bit DLL the probe injects (research/dishonored/INSTRUMENTATION.md)
 tools/
+  probe_launch       start the original game with the probe (32-bit build) and measure it
   package_dump       inspect a package: names / imports / exports / properties / hex
                      (package_scan: sweep a whole directory)
   map_dump           run the full map import and report statistics
