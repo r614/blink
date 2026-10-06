@@ -6,6 +6,7 @@
 pub mod adpcm;
 pub mod anim_notify;
 pub mod bank;
+pub mod bus;
 pub mod contact;
 pub mod cues;
 pub mod emitters;
@@ -14,10 +15,12 @@ pub mod index;
 pub mod init;
 pub mod hirc;
 pub mod library;
+pub mod mixer;
 pub mod music;
 pub mod music_manager;
 pub mod pck;
 pub mod vo;
+pub mod volumes;
 pub mod vorbis;
 pub mod wem;
 
