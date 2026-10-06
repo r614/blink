@@ -186,7 +186,7 @@ impl AnimSounds {
 
     /// A `DishonoredNotify_Footfall` fired on a pawn (foot 0 left, 1 right) from the third-person
     /// locomotion. Pawns reporting footfalls get no stride-based fallback steps.
-    pub fn footfall(&mut self, player: PlayerId, foot: i32) {
+    pub fn foot_down(&mut self, player: PlayerId, foot: i32) {
         // Nobody drains them when audio is off.
         if self.footfalls.len() > 256 {
             self.footfalls.clear();

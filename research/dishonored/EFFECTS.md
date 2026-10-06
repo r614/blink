@@ -100,8 +100,11 @@ Other module classes are listed per emitter as unsupported.
   intensity / opacity scalars; untextured sprites get a radial falloff `(1 - r)^SphereMask_Power`;
   untextured mesh emitters (volumetric light cones, glow spheres) use `GlowMaterial`
   (`volume_glow.wgsl`): additive Color x LightIntensity x particle colour, faded toward the
-  silhouette by |N.V|^Fresnel_exponent and near the camera over StartOffset. Depth-biased alpha
-  and the rays texture are not reproduced.
+  silhouette by |N.V|^Fresnel_exponent, away from the particle by the sphere mask
+  (SphereMask_Power over Distance x mesh radius) and near the camera over StartOffset, scaled by
+  0.1 (U-305). Depth-biased alpha and the rays texture are not reproduced. Emissive mesh
+  materials (`E_Emissive_Color` with intensity > 1, e.g. the fireflies x25) are drawn additively
+  in their emissive colour.
 - Captures: `fixtures/scripts/effects_boyle.json` (inspect mode, Boyle Ext viewpoints: chimney
   smoke, sewer smoke, street lamp, small lights, fireflies) and
   `fixtures/scripts/effects_gameplay.json` (offline: pistol, Windblast, Blink).

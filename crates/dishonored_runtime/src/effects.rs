@@ -58,9 +58,13 @@ pub struct GlowMaterial {
     /// Linear colour x intensity (premultiplied by the particle colour and alpha).
     #[uniform(0)]
     pub color: Vec4,
-    /// x = Fresnel_exponent, y = StartOffset camera fade (Bevy units).
+    /// x = Fresnel_exponent, y = StartOffset camera fade (Bevy units), z = SphereMask_Power,
+    /// w = Distance (sphere mask radius in mesh radii).
     #[uniform(1)]
     pub params: Vec4,
+    /// Sphere mask centre (Bevy world) and radius.
+    #[uniform(2)]
+    pub sphere: Vec4,
 }
 
 impl Material for GlowMaterial {
@@ -127,6 +131,10 @@ fn bevy_mesh(m: &dishonored_ir::StaticMeshAsset) -> Mesh {
     // Handedness flips with the axis swap: reverse the winding.
     let idx: Vec<u32> = m.indices.chunks_exact(3).flat_map(|t| [t[0], t[2], t[1]]).collect();
     mesh.insert_indices(Indices::U32(idx));
+    if m.normals.len() != m.positions.len() {
+        // No imported normals: smooth ones from the triangles (the glow shading needs them).
+        mesh.compute_smooth_normals();
+    }
     mesh
 }
 
@@ -264,6 +272,13 @@ fn material_for(map: &DishonoredMap, em: &ParticleEmitterAsset, images: &mut Ass
         cache.insert(key, h.clone());
         Some(h)
     });
+    // Emissive bug / glow materials (`E_Emissive_Color`, alpha = intensity: fireflies x25):
+    // drawn additively with the emissive colour (unlit, so it reads as the glowing body).
+    let emissive = params.and_then(|p| p.vectors.iter().find(|v| v.0.eq_ignore_ascii_case("E_Emissive_Color")).map(|v| v.1)).filter(|e| e[3] > 1.0);
+    let (alpha_mode, tint, gain) = match emissive {
+        Some(e) => (AlphaMode::Add, [e[0], e[1], e[2], 1.0], e[3].min(4.0)),
+        None => (alpha_mode, tint, gain),
+    };
     let base_color = if alpha_mode == AlphaMode::Add {
         Color::linear_rgb(tint[0] * gain, tint[1] * gain, tint[2] * gain)
     } else {
@@ -326,8 +341,11 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
                 // Defaults: the parameter expressions of Volume_Light_PMAT (Color, LightIntensity 2,
                 // Fresnel_exponent 5, StartOffset 128).
                 let c = params.and_then(|p| p.vectors.iter().find(|v| v.0.eq_ignore_ascii_case("Color")).map(|v| v.1)).unwrap_or([1.0, 0.940601, 0.74453, 1.0]);
-                let k = scalar("LightIntensity", 2.0);
-                glow.insert((si, ei), (mh, Vec4::new(c[0] * k, c[1] * k, c[2] * k, 1.0), Vec4::new(scalar("Fresnel_exponent", 5.0), scalar("StartOffset", 128.0) * coords::UU_TO_BEVY, 0.0, 0.0)));
+                // Calibration (APPROXIMATION, U-305): the stripped graph scales LightIntensity by
+                // terms that are not recoverable (rays mask, depth-biased alpha); 0.1 keeps the
+                // stacked cones from saturating.
+                let k = scalar("LightIntensity", 2.0) * 0.1;
+                glow.insert((si, ei), (mh, Vec4::new(c[0] * k, c[1] * k, c[2] * k, 1.0), Vec4::new(scalar("Fresnel_exponent", 5.0), scalar("StartOffset", 128.0) * coords::UU_TO_BEVY, scalar("SphereMask_Power", 2.0), scalar("Distance", 1.5) * map.meshes[mid].positions.iter().map(|p| p.length()).fold(0.0, f32::max))));
                 continue;
             }
             let mh = mesh_handles.entry(mid).or_insert_with(|| meshes.add(bevy_mesh(&map.meshes[mid]))).clone();
@@ -794,7 +812,7 @@ fn simulate(
                 let pool = &mut inst.glow_pools[i];
                 let want = sim.particles.len().min(64);
                 while pool.len() < want {
-                    let gm = glow_mats.add(GlowMaterial { color: *color, params: *params });
+                    let gm = glow_mats.add(GlowMaterial { color: *color, params: *params, sphere: Vec4::ZERO });
                     let id = commands.spawn((Mesh3d(mh.clone()), MeshMaterial3d(gm.clone()), Transform::IDENTITY, bevy::light::NotShadowCaster, FxMeshParticle, ChildOf(e))).id();
                     pool.push((id, gm));
                 }
@@ -808,6 +826,8 @@ fn simulate(
                     let (world, c, a) = mesh_particle(em, p, &xf);
                     commands.entity(pool[k].0).insert(Transform::from_matrix(coords::transform(world)));
                     if let Some(mut m) = glow_mats.get_mut(&pool[k].1) {
+                        let (s, _, t) = world.to_scale_rotation_translation();
+                        m.sphere = coords::pos(t).extend(params.w * s.max_element() * coords::UU_TO_BEVY);
                         m.color = Vec4::new(color.x * c.x * a, color.y * c.y * a, color.z * c.z * a, 1.0);
                     }
                 }
