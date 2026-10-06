@@ -5,8 +5,11 @@
 //! 1. `FDisFogPixelShader<N><M>Layer`: up to four height-bounded fog layers applied to the
 //!    scene colour by depth (per layer: in-slab ray length, `NearPlane` / `FarPlane` ramp or
 //!    the 128-entry LUT, `Opacity`, cut at `NoFogPlane`; layer 0 weighted by the sun lobe).
+//!    The blurred bloom parts (`bloom.rs`) are added after the fog, as `sBloomParts`.
 //! 2. `FArkPpDofUber_*PS` far blur: `saturate((depth - FocusDistance) / InFocusRadius) *
-//!    FarBlurAmount` towards a blurred copy.
+//!    FarBlurAmount` towards a quarter-size copy of the fogged scene, made by two
+//!    `FArkPpDofDownsamplePS` passes (each one bilinear tap at the corner of a 2x2 block, 0x00922210)
+//!    and sampled bilinearly at the pixel's uv (global shaders 60 - 63).
 //! 3. `FArkPpDofLutBlenderPS` colour LUT, evaluated per pixel instead of through the 16^3 LUT:
 //!    clamp to 1, `x 2^m_Exposure`, pre-desaturation, shadow / midtone / highlight colour
 //!    balance (CrMgYb), opacity, overlay, post-desaturation, `^(m_GammaAdjustment /
@@ -24,9 +27,10 @@ use bevy::prelude::*;
 use bevy::render::extract_component::{ComponentUniforms, DynamicUniformIndex, ExtractComponent, ExtractComponentPlugin, UniformComponentPlugin};
 use bevy::render::render_resource::binding_types::{sampler, texture_2d, texture_depth_2d, texture_depth_2d_multisampled, uniform_buffer};
 use bevy::render::render_resource::{
-    BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, CachedRenderPipelineId, ColorTargetState, ColorWrites, FilterMode, FragmentState,
+    BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, CachedRenderPipelineId, ColorTargetState, ColorWrites, Extent3d, FilterMode, FragmentState,
     Operations, PipelineCache, RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
-    ShaderStages, ShaderType, SpecializedRenderPipeline, SpecializedRenderPipelines, TextureFormat, TextureSampleType, TextureUsages,
+    ShaderStages, ShaderType, SpecializedRenderPipeline, SpecializedRenderPipelines, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
+    TextureUsages,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
 use bevy::render::view::{ExtractedView, Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms};
@@ -65,8 +69,11 @@ pub struct ArkPost {
     pub dof: Vec4,
     /// (2 g / 255, -g / 255, frame seed, 0) with g = m_FilmGrainNoise.
     pub grain: Vec4,
-    /// (Bevy metres per uu, fog layer count, colour pipeline on, 0).
+    /// (Bevy metres per uu, fog layer count, colour pipeline on, bloom on).
     pub misc: Vec4,
+    /// `gBloomTint` of the bloom downsample (0x0090DE60): (m_Tint.rgb x m_Scale,
+    /// -m_Threshold x m_Scale).
+    pub bloom: Vec4,
 }
 
 /// Inputs kept on the camera so the uniform can be rebuilt (display gamma setting).
@@ -123,7 +130,18 @@ impl ArkPostSource {
                 let g = v("m_FilmGrainNoise", 0.0);
                 Vec4::new(2.0 * g / 255.0, -g / 255.0, 0.0, 0.0)
             },
-            misc: Vec4::new(crate::coords::UU_TO_BEVY, 0.0, if self.post_on { 1.0 } else { 0.0 }, 0.0),
+            misc: Vec4::new(
+                crate::coords::UU_TO_BEVY,
+                0.0,
+                if self.post_on { 1.0 } else { 0.0 },
+                if self.post_on && v("m_PpBloomParameters.m_bEnable", 1.0) > 0.5 { 1.0 } else { 0.0 },
+            ),
+            bloom: {
+                // ArkPpBloomParameters defaults: tint white, threshold 0, scale 1.
+                let t = post_vector(p, "m_PpBloomParameters.m_Tint").unwrap_or([1.0; 4]);
+                let s = v("m_PpBloomParameters.m_Scale", 1.0);
+                Vec4::new(t[0] * s, t[1] * s, t[2] * s, -v("m_PpBloomParameters.m_Threshold", 0.0) * s)
+            },
         };
         if self.fog_on {
             // The sun layer goes first (only layer 0 gets the sun lobe in the shader).
@@ -180,12 +198,14 @@ pub struct ArkPostPlugin;
 impl Plugin for ArkPostPlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "ark_post.wgsl");
+        bevy::asset::embedded_asset!(app, "ark_downsample.wgsl");
         app.add_plugins((ExtractComponentPlugin::<ArkPost>::default(), UniformComponentPlugin::<ArkPost>::default()))
             .add_systems(PostUpdate, update_ark_post)
             .add_systems(Update, configure_depth_usage);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else { return };
         render_app
             .init_resource::<SpecializedRenderPipelines<ArkPostPipeline>>()
+            .init_resource::<crate::bloom::BloomResult>()
             .add_systems(RenderStartup, init_pipeline)
             .add_systems(Render, prepare_pipelines.in_set(RenderSystems::Prepare))
             .add_systems(Core3d, ark_post_pass.in_set(Core3dSystems::PostProcess).before(tonemapping));
@@ -202,23 +222,44 @@ fn configure_depth_usage(mut q: Query<&mut Camera3d, With<ArkPost>>) {
     }
 }
 
+/// Format of the DOF's half and quarter size copies.
+const LOW_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+
 #[derive(Resource)]
 pub struct ArkPostPipeline {
     layout_single: BindGroupLayoutDescriptor,
     layout_multi: BindGroupLayoutDescriptor,
+    layout_down: BindGroupLayoutDescriptor,
     sampler: Sampler,
     fullscreen: FullscreenShader,
     shader: Handle<Shader>,
+    down_shader: Handle<Shader>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArkPass {
+    /// DisFog + bloom parts.
+    Fog,
+    /// The DOF's 2x2 box downsample.
+    Down,
+    /// Far DOF, colour LUT, grain.
+    Uber,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ArkPostKey {
     format: TextureFormat,
     multisampled: bool,
+    pass: ArkPass,
 }
 
 #[derive(Component)]
-pub struct ArkPostPipelineId(CachedRenderPipelineId, bool);
+pub struct ArkPostPipelineId {
+    fog: CachedRenderPipelineId,
+    down: CachedRenderPipelineId,
+    uber: CachedRenderPipelineId,
+    multisampled: bool,
+}
 
 fn layout(multisampled: bool) -> BindGroupLayoutDescriptor {
     BindGroupLayoutDescriptor::new(
@@ -231,6 +272,7 @@ fn layout(multisampled: bool) -> BindGroupLayoutDescriptor {
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
                 uniform_buffer::<ArkPost>(true),
+                texture_2d(TextureSampleType::Float { filterable: true }),
             ),
         ),
     )
@@ -240,9 +282,14 @@ fn init_pipeline(mut commands: Commands, device: Res<RenderDevice>, fullscreen: 
     commands.insert_resource(ArkPostPipeline {
         layout_single: layout(false),
         layout_multi: layout(true),
+        layout_down: BindGroupLayoutDescriptor::new(
+            "ark downsample layout",
+            &BindGroupLayoutEntries::sequential(ShaderStages::FRAGMENT, (texture_2d(TextureSampleType::Float { filterable: true }),)),
+        ),
         sampler: device.create_sampler(&SamplerDescriptor { mag_filter: FilterMode::Linear, min_filter: FilterMode::Linear, ..default() }),
         fullscreen: fullscreen.clone(),
         shader: load_embedded_asset!(assets.as_ref(), "ark_post.wgsl"),
+        down_shader: load_embedded_asset!(assets.as_ref(), "ark_downsample.wgsl"),
     });
 }
 
@@ -253,15 +300,20 @@ impl SpecializedRenderPipeline for ArkPostPipeline {
         if key.multisampled {
             shader_defs.push("MULTISAMPLED".into());
         }
+        let (label, layout, shader, entry) = match key.pass {
+            ArkPass::Fog => ("ark fog", if key.multisampled { self.layout_multi.clone() } else { self.layout_single.clone() }, self.shader.clone(), "fog"),
+            ArkPass::Uber => ("ark uber", if key.multisampled { self.layout_multi.clone() } else { self.layout_single.clone() }, self.shader.clone(), "fragment"),
+            ArkPass::Down => ("ark dof downsample", self.layout_down.clone(), self.down_shader.clone(), "downsample"),
+        };
         RenderPipelineDescriptor {
-            label: Some("ark post".into()),
-            layout: vec![if key.multisampled { self.layout_multi.clone() } else { self.layout_single.clone() }],
+            label: Some(label.into()),
+            layout: vec![layout],
             vertex: self.fullscreen.to_vertex_state(),
             fragment: Some(FragmentState {
-                shader: self.shader.clone(),
+                shader,
                 shader_defs,
+                entry_point: Some(entry.into()),
                 targets: vec![Some(ColorTargetState { format: key.format, blend: None, write_mask: ColorWrites::ALL })],
-                ..default()
             }),
             ..default()
         }
@@ -278,41 +330,93 @@ fn prepare_pipelines(
     let Some(pipeline) = pipeline else { return };
     for (e, view, msaa) in &views {
         let multisampled = *msaa != Msaa::Off;
-        let id = pipelines.specialize(&cache, &pipeline, ArkPostKey { format: view.target_format, multisampled });
-        commands.entity(e).insert(ArkPostPipelineId(id, multisampled));
+        let mut id = |format, pass| pipelines.specialize(&cache, &pipeline, ArkPostKey { format, multisampled, pass });
+        let ids = ArkPostPipelineId { fog: id(view.target_format, ArkPass::Fog), down: id(LOW_FORMAT, ArkPass::Down), uber: id(view.target_format, ArkPass::Uber), multisampled };
+        commands.entity(e).insert(ids);
     }
 }
 
-fn ark_post_pass(
-    view: ViewQuery<(&ViewUniformOffset, &ViewTarget, &ViewDepthTexture, &ArkPostPipelineId, &DynamicUniformIndex<ArkPost>)>,
-    cache: Res<PipelineCache>,
-    pipeline: Res<ArkPostPipeline>,
-    view_uniforms: Res<ViewUniforms>,
-    uniforms: Res<ComponentUniforms<ArkPost>>,
-    mut ctx: RenderContext,
-) {
-    let (view_offset, target, depth, id, index) = view.into_inner();
-    let (Some(rp), Some(view_binding), Some(uniform_binding)) = (cache.get_render_pipeline(id.0), view_uniforms.uniforms.binding(), uniforms.binding()) else {
-        return;
-    };
-    let post = target.post_process_write();
-    let layout = if id.1 { &pipeline.layout_multi } else { &pipeline.layout_single };
-    let bind_group = ctx.render_device().create_bind_group(
-        Some("ark post bind group"),
-        &cache.get_bind_group_layout(layout),
-        &BindGroupEntries::sequential((view_binding, depth.view(), post.source, &pipeline.sampler, uniform_binding)),
-    );
+fn fullscreen_pass(ctx: &mut RenderContext, label: &str, rp: &bevy::render::render_resource::RenderPipeline, group: &bevy::render::render_resource::BindGroup, offsets: &[u32], dst: &bevy::render::render_resource::TextureView) {
     let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
-        label: Some("ark post"),
-        color_attachments: &[Some(RenderPassColorAttachment { view: post.destination, depth_slice: None, resolve_target: None, ops: Operations::default() })],
+        label: Some(label),
+        color_attachments: &[Some(RenderPassColorAttachment { view: dst, depth_slice: None, resolve_target: None, ops: Operations::default() })],
         depth_stencil_attachment: None,
         timestamp_writes: None,
         occlusion_query_set: None,
         multiview_mask: None,
     });
     pass.set_render_pipeline(rp);
-    pass.set_bind_group(0, &bind_group, &[view_offset.offset, index.index()]);
+    pass.set_bind_group(0, group, offsets);
     pass.draw(0..3, 0..1);
+}
+
+/// DisFog (+ bloom), the DOF's two downsamples, then the uber pass.
+#[allow(clippy::too_many_arguments)]
+pub fn ark_post_pass(
+    view: ViewQuery<(&ViewUniformOffset, &ViewTarget, &ViewDepthTexture, &ArkPostPipelineId, &DynamicUniformIndex<ArkPost>, &ArkPost)>,
+    cache: Res<PipelineCache>,
+    pipeline: Res<ArkPostPipeline>,
+    view_uniforms: Res<ViewUniforms>,
+    uniforms: Res<ComponentUniforms<ArkPost>>,
+    bloom: Res<crate::bloom::BloomResult>,
+    zero: Res<bevy::render::texture::FallbackImageZero>,
+    mut textures: ResMut<bevy::render::texture::TextureCache>,
+    mut ctx: RenderContext,
+) {
+    let (view_offset, target, depth, id, index, ark) = view.into_inner();
+    let (Some(fog_rp), Some(down_rp), Some(uber_rp), Some(view_binding), Some(uniform_binding)) =
+        (cache.get_render_pipeline(id.fog), cache.get_render_pipeline(id.down), cache.get_render_pipeline(id.uber), view_uniforms.uniforms.binding(), uniforms.binding())
+    else {
+        return;
+    };
+    let device = ctx.render_device().clone();
+    let layout = cache.get_bind_group_layout(if id.multisampled { &pipeline.layout_multi } else { &pipeline.layout_single });
+    let offsets = [view_offset.offset, index.index()];
+    // 1. DisFog and the bloom parts.
+    let bloom_view = bloom.view.clone().unwrap_or_else(|| zero.texture_view.clone());
+    let post = target.post_process_write();
+    let group = device.create_bind_group(
+        Some("ark fog bind group"),
+        &layout,
+        &BindGroupEntries::sequential((view_binding.clone(), depth.view(), post.source, &pipeline.sampler, uniform_binding.clone(), &bloom_view)),
+    );
+    fullscreen_pass(&mut ctx, "ark fog", fog_rp, &group, &offsets, post.destination);
+    let fogged = post.destination.clone();
+    // 2. The DOF's quarter-size copy of the fogged scene (only when it is used).
+    let size = target.main_texture().size();
+    let mut low = zero.texture_view.clone();
+    if ark.misc.z > 0.5 && ark.dof.z > 0.0 {
+        let mut src = fogged;
+        let (mut w, mut h) = (size.width, size.height);
+        for label in ["ark dof half", "ark dof quarter"] {
+            (w, h) = (w.div_ceil(2).max(1), h.div_ceil(2).max(1));
+            let t = textures.get(
+                &device,
+                TextureDescriptor {
+                    label: Some(label),
+                    size: Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: TextureDimension::D2,
+                    format: LOW_FORMAT,
+                    usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+            );
+            let g = device.create_bind_group(Some(label), &cache.get_bind_group_layout(&pipeline.layout_down), &BindGroupEntries::sequential((&src,)));
+            fullscreen_pass(&mut ctx, label, down_rp, &g, &[], &t.default_view);
+            src = t.default_view.clone();
+        }
+        low = src;
+    }
+    // 3. Far DOF, colour LUT and grain.
+    let post = target.post_process_write();
+    let group = device.create_bind_group(
+        Some("ark uber bind group"),
+        &layout,
+        &BindGroupEntries::sequential((view_binding, depth.view(), post.source, &pipeline.sampler, uniform_binding, &low)),
+    );
+    fullscreen_pass(&mut ctx, "ark uber", uber_rp, &group, &offsets, post.destination);
 }
 
 #[cfg(test)]

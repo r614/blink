@@ -1,5 +1,6 @@
-// Arkane full-screen passes (see ark_post.rs): DisFog layers, ArkPp far DOF, the colour LUT
-// maths and film grain, in the original's order.
+// Arkane full-screen passes (see ark_post.rs), in the original's order: `fog` (DisFog layers,
+// then the blurred bloom parts added), and after the DOF downsample (ark_downsample.wgsl)
+// `fragment` (ArkPp far DOF towards the quarter-size copy, the colour LUT maths, film grain).
 
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
 #import bevy_render::view::View
@@ -25,6 +26,8 @@ struct ArkPost {
     dof: vec4<f32>,
     grain: vec4<f32>,
     misc: vec4<f32>,
+    // gBloomTint: (m_Tint.rgb x m_Scale, -m_Threshold x m_Scale); used by the bloom downsample.
+    bloom: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> view: View;
@@ -36,6 +39,8 @@ struct ArkPost {
 @group(0) @binding(2) var source: texture_2d<f32>;
 @group(0) @binding(3) var source_sampler: sampler;
 @group(0) @binding(4) var<uniform> ark: ArkPost;
+// `fog`: the blurred bloom parts (quarter size); `fragment`: the DOF's quarter-size copy.
+@group(0) @binding(5) var aux: texture_2d<f32>;
 
 const LUMA = vec3<f32>(0.2126, 0.7152, 0.0722);
 
@@ -141,41 +146,66 @@ fn depth_at(p: vec2<i32>) -> f32 {
 #endif
 }
 
-@fragment
-fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
-    let size = vec2<f32>(textureDimensions(source));
-    let pix = vec2<i32>(in.position.xy);
-    let src = textureSampleLevel(source, source_sampler, in.uv, 0.0);
+struct SceneDepth {
+    // Scene depth along the view axis (uu); 1e30 for the cleared background.
+    depth_uu: f32,
+    // Camera -> surface (uu, Bevy axes).
+    offset_uu: vec3<f32>,
+    hit: bool,
+}
+
+fn scene_depth(uv: vec2<f32>, pix: vec2<i32>) -> SceneDepth {
+    var s: SceneDepth;
+    s.depth_uu = 1e30;
+    s.offset_uu = vec3<f32>(0.0);
+    s.hit = false;
     let raw = depth_at(pix);
     // Reverse-Z: 0 is the far plane / cleared background (no geometry, no fog).
-    var fog: Fog;
-    fog.transmittance = 1.0;
-    fog.inscatter = vec3<f32>(0.0);
-    var depth_uu = 1e30;
     if (raw > 0.0) {
-        let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0, raw, 1.0);
+        let ndc = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, raw, 1.0);
         let wp = view.world_from_clip * ndc;
         let world = wp.xyz / wp.w;
         let vp = view.view_from_world * vec4<f32>(world, 1.0);
-        depth_uu = -vp.z / ark.misc.x;
-        fog = dis_fog((world - view.world_position) / ark.misc.x, depth_uu);
+        s.depth_uu = -vp.z / ark.misc.x;
+        s.offset_uu = (world - view.world_position) / ark.misc.x;
+        s.hit = true;
     }
-    var colour = src.rgb * fog.transmittance + fog.inscatter;
+    return s;
+}
+
+// FDisFogPixelShader: the fogged scene plus the blurred bloom parts (`sBloomParts`, added after
+// the fog: `colour x prod(1 - f_i) + sum f_i C_i + bloom`).
+@fragment
+fn fog(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+    let pix = vec2<i32>(in.position.xy);
+    let src = textureSampleLevel(source, source_sampler, in.uv, 0.0);
+    let d = scene_depth(in.uv, pix);
+    var f: Fog;
+    f.transmittance = 1.0;
+    f.inscatter = vec3<f32>(0.0);
+    if (d.hit) {
+        f = dis_fog(d.offset_uu, d.depth_uu);
+    }
+    let bloom = textureSampleLevel(aux, source_sampler, in.uv, 0.0).rgb;
+    return vec4<f32>(src.rgb * f.transmittance + f.inscatter + bloom, src.a);
+}
+
+@fragment
+fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+    let pix = vec2<i32>(in.position.xy);
+    let src = textureSampleLevel(source, source_sampler, in.uv, 0.0);
+    var colour = src.rgb;
     if (ark.misc.z < 0.5) {
         return vec4<f32>(colour, src.a);
     }
-    // ArkPp far blur: blend towards a box-blurred copy (the original blurs a quarter-size
-    // downsample; here a 4x4 box at 2-pixel spacing of the source, fogged like the centre).
-    let blur = clamp((depth_uu - ark.dof.x) * ark.dof.y, 0.0, 1.0) * ark.dof.z;
+    // FArkPpDofUber_*PS far blur: towards the quarter-size copy of the fogged scene (two 2x2
+    // box downsamples, FArkPpDofDownsamplePS), sampled bilinearly at the pixel's own uv, by
+    // saturate((depth - FocusDistance) / InFocusRadius) x FarBlurAmount.
+    let d = scene_depth(in.uv, pix);
+    let blur = clamp((d.depth_uu - ark.dof.x) * ark.dof.y, 0.0, 1.0) * ark.dof.z;
     if (blur > 0.0) {
-        var acc = vec3<f32>(0.0);
-        for (var y = -1.5; y < 2.0; y = y + 1.0) {
-            for (var x = -1.5; x < 2.0; x = x + 1.0) {
-                acc = acc + textureSampleLevel(source, source_sampler, in.uv + vec2<f32>(x, y) * 2.0 / size, 0.0).rgb;
-            }
-        }
-        let blurred = (acc / 16.0) * fog.transmittance + fog.inscatter;
-        colour = mix(colour, blurred, blur);
+        let low = textureSampleLevel(aux, source_sampler, in.uv, 0.0).rgb;
+        colour = mix(colour, low, blur);
     }
     var display = colour_lut(colour);
     // Film grain: a per-pixel, per-frame hash in [0, 1) scaled to +- grain / 255.

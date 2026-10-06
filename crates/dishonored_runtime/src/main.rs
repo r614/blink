@@ -36,6 +36,8 @@ mod hud;
 mod input_map;
 mod ark_post;
 mod distortion;
+mod sky;
+mod bloom;
 mod atmosphere;
 mod audio;
 mod level;
@@ -208,6 +210,8 @@ fn main() {
     .add_plugins(MaterialPlugin::<map_render::BakedMaterial>::default())
     .add_plugins(ark_post::ArkPostPlugin)
     .add_plugins(distortion::DistortionPlugin)
+    .add_plugins(sky::SkyPlugin)
+    .add_plugins(bloom::BloomPlugin)
     .add_plugins(bevy::diagnostic::EntityCountDiagnosticsPlugin::default())
     .insert_resource(ClearColor(Color::srgb(0.08, 0.09, 0.12)))
     // Placeholder ambient; with real lights it only fills non-lightmapped meshes at night level.

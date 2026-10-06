@@ -708,6 +708,9 @@ pub struct AnimInput<'a> {
     /// Floor height (pawn space) under a pawn-space point, from the level collision; the
     /// ragdoll samples it at the hand-over (None: the flat `floor`).
     pub ground: Option<&'a dyn Fn(f32, f32) -> f32>,
+    /// The level's collision triangles around the pawn (pawn space), asked for at the ragdoll
+    /// hand-over (None: no walls).
+    pub walls: Option<&'a dyn Fn() -> Vec<[Vec3; 3]>>,
     pub gravity: f32,
     /// Ground speed of the pawn carrying this body (0 when not carried).
     pub carrier_speed: f32,
@@ -1431,7 +1434,8 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
                 let p_prev = at(bank, t - crate::ragdoll::STEP);
                 let g0 = globals(&parts[0], &p_now[0]);
                 let g1 = globals(&parts[0], &p_prev[0]);
-                if let Some(mut rd) = crate::ragdoll::Ragdoll::new(&phys, &parts[0].bones, &g0, &g1, i.ground.unwrap_or(&|_, _| i.floor), i.gravity) {
+                let walls = i.walls.map(|w| w()).unwrap_or_default();
+                if let Some(mut rd) = crate::ragdoll::Ragdoll::new(&phys, &parts[0].bones, &g0, &g1, i.ground.unwrap_or(&|_, _| i.floor), &walls, i.gravity) {
                     if st.settle {
                         rd.settle();
                     } else {

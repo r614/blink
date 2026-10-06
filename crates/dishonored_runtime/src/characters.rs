@@ -539,7 +539,25 @@ pub fn animate_characters(
             let w = pos + glam::Vec3::new(x * c - y * s, x * s + y * c, 0.0);
             world.raycast(w + glam::Vec3::Z * 60.0, -glam::Vec3::Z, 400.0, dishonored_world::channel::PAWN).map(|h| h.point.z - pos.z).unwrap_or(-hh)
         };
-        let input = crate::npc_anim::AnimInput { p, stance, armed, talking: talking.contains(&p.id), dt, hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), look_target: look_target(p, stance, talking.contains(&p.id), &all), face: faces.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), floor: -mv.collision_half_height, ground: Some(&ground), gravity: mv.gravity_z, carrier_speed: p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).map(|c| c.velocity.truncate().length()).unwrap_or(0.0) };
+        // The collision triangles around the pawn in pawn space, for the ragdoll's walls.
+        let walls = move || -> Vec<[glam::Vec3; 3]> {
+            let r = crate::ragdoll::WALL_REACH;
+            let q = dishonored_world::geom::Aabb { min: pos - glam::Vec3::new(r, r, hh + 64.0), max: pos + glam::Vec3::new(r, r, 200.0) };
+            let (s, c) = (-yaw).sin_cos();
+            let to_pawn = |v: glam::Vec3| {
+                let d = v - pos;
+                glam::Vec3::new(d.x * c - d.y * s, d.x * s + d.y * c, d.z)
+            };
+            let mut ids = Vec::new();
+            world.bvh.query_aabb(&q, |i| ids.push(i));
+            ids.sort_unstable();
+            ids.into_iter()
+                .map(|i| &world.tris[i as usize])
+                .filter(|t| t.channels & dishonored_world::channel::PAWN != 0)
+                .map(|t| [to_pawn(t.a), to_pawn(t.b), to_pawn(t.c)])
+                .collect()
+        };
+        let input = crate::npc_anim::AnimInput { p, stance, armed, talking: talking.contains(&p.id), dt, hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), look_target: look_target(p, stance, talking.contains(&p.id), &all), face: faces.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), floor: -mv.collision_half_height, ground: Some(&ground), walls: Some(&walls), gravity: mv.gravity_z, carrier_speed: p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).map(|c| c.velocity.truncate().length()).unwrap_or(0.0) };
         let pose = match states.get_mut(entity) {
             Ok(mut st) => {
                 let before = chain_clips(&st);

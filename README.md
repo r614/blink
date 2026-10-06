@@ -140,10 +140,10 @@ See `research/dishonored/AUDIO_FORMAT.md`.
 Controls: hold RMB (or Tab to lock the cursor) to look; WASD to move; Q/E down/up;
 Shift fast; Alt slow. Options: `--pos x,y,z` and `--yaw`/`--pitch` (Dishonored units),
 `--show-hidden` (blockers/invisible collision), per-feature render switches for
-comparisons (`--no-lightmaps --no-materials --no-fx --no-dynamic-lights --no-fog --no-post --no-df-shadows --no-distortion
+comparisons (`--no-lightmaps --no-materials --no-fx --no-dynamic-lights --no-fog --no-post --no-df-shadows --no-distortion --no-bloom
 --no-sky --legacy-geometry`, or `--baseline`), `--debug-lighting` (white albedo),
 `--max-tex N`. `harness fidelity` renders fixed Boyle Ext viewpoints with each feature
-on/off and writes before/after pairs to `harness_out/<run>/REPORT.md`.
+on/off and writes before/after pairs to `harness_out/<run>/REPORT.md`. How the level shading follows the original's shaders: `research/dishonored/RENDERING.md`.
 
 ```bash
 cargo run --release -p package_dump -- "<install>/DishonoredGame/CookedPCConsole/L_Boyle_Ext_Env.upk" --exports
