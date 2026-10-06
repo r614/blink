@@ -305,7 +305,19 @@ The player's TakeDamage (0x00AB0A30): damage types with `m_bApplyDamageReduction
 false for bites, electricity, plague, whiskey fire, music, energy) lose `(int)Attribute_DamageReduction`
 (the Armor upgrade, 5), never below 1; `m_bPushWithoutDamage` types deal 0. NPC helmets
 (`Twk_Inv_EliteHelmet`, head region) are knocked off by sword fast hits, bolts and bullets on the
-head and by Windblast and flare bolts anywhere; what they absorb is in the base tweak (U-246).
+head and by Windblast and flare bolts anywhere.
+
+NPC armour damage filter (0x00B78610, 2026-10-06, U-246): for each `m_PotentialNPCArmor` piece
+the pawn still wears (the per-pawn array at +0xA8C), a hit is absorbed (damage 0) when the hit
+region is the piece's `m_ProtectedBodyRegion`, the side matches `m_ProtectedSide` (Front: the
+pawn's facing . the hit direction < 0; Back: >= 0; All) and the damage type is in
+`m_DamageTypesToAbsorb` (0x00C40590 type test). The shipped helmets (elite, city, thug hat) leave
+that list to `Twk_Inv_HelmetBase`, which no cooked package contains (base game and DLC searched),
+so they absorb nothing: helmets only fall off. Only the Boyle Int musical overseer's mask
+(projectiles on the head from the front) and music box (everything on the torso from the front)
+absorb hits (not modelled, U-500). The mission layer rolls each spawner's armour
+(`m_fPercentChance`, the accessory roll) and sets `PlayerState::helmet`; `vitals::armor_absorbs`
+holds the filter rule.
 
 ### Windblast on players (U-051 resolved)
 
@@ -316,10 +328,38 @@ pushes players; NPC pawns keep the velocity change.
 
 ### Pistol upgrades
 
-The magazine holds `1 + (int)Attribute_MagazineBonus` rounds, capped by the ammo held (0x00C20DB0);
-`Attribute_ReloadSpeed` divides the reload time (0x00C23620, LIKELY: the divided tweak time is the
-reload delay). `Attribute_FastReload` selects the fast reload animations (not modelled, U-247).
+The magazine holds `1 + (int)Attribute_MagazineBonus` rounds, capped by the ammo held (0x00C20DB0).
 The accuracy upgrades change the dispersion (next section).
+
+### Reloading (2026-10-06, U-247, U-251)
+
+`DisItemContext_ReloadGunPlayer` (vtable 0x01173030; tweak `DisTweaks_ReloadGunPlayer`: +0xB0
+`m_ReloadGunAction_In`, +0xDC `_Out`, +0x108 `m_ReloadFast`, +0x134 `m_fReloadTime`; context +0xB0
+`m_ReloadStage`, +0xB4 `m_fReloadTimeRemaining`):
+
+- Start / continue (slot 101, 0x00C2AA80): without `Attribute_FastReload` (FName 0x0145DF10) the
+  ReloadIn action plays (stage ReloadIn); when it ends the timed stage starts with
+  `m_fReloadTimeRemaining = m_fReloadTime / Attribute_ReloadSpeed` (0x00C23620; undivided when the
+  attribute is 0). With the attribute > 0 and an `m_ReloadFast` action, that action plays and the
+  timer is the attribute's value itself (stage Reloading).
+- Tick (slot 77, 0x00C2AC00): when the timer runs out the magazine loads (0x00C28C50:
+  `min(1 + MagazineBonus, held)`); without the fast reload the ReloadOut action follows and the
+  context ends with it (slot 104, 0x00C236A0), with it the context ends at once.
+- Upgrades act on their host weapon: Pistol Reload 1 `Attribute_ReloadSpeed` 2; Pistol Reload 2
+  adds `ReloadSpeed` 200 and `Attribute_FastReload` 1.0 (and the `CorvoGun_ReloadSpeed_as` set);
+  the crossbow's Reload Speed upgrade `Attribute_FastReload` 0.3.
+- Timings (AnimStateExit / play rate): pistol In 0.426, `m_fReloadTime` 0.75, Out 0.302 (normal
+  reload 1.478 s, the fast one 1.0 s, `Pistol_FastReload` 0.8 s); crossbow In 0.225 / 1.3, 1.0
+  (class default, U-501), Out 0.169 / 1.3 (1.303 s; fast 0.3 s with `Crossbow_RapidReload`).
+- Crossbow shot (0x00C2E570): with the fast reload, an ammo type other than 0xC and at least two
+  of it held, `m_FireReloadFast` (`Crossbow_Fire_FastReload`, exit 0.625 s at rate 1.5) plays
+  instead of `m_FireCrossbowAction`; its end loads the next bolt (0x00C2E730 -> 0x00C28C50), so no
+  reload follows. A normal shot's end requests a reload when the weapon is empty and ammo is held
+  (crossbow 0x00C2E730, pistol 0x00C2EA00), with or without the upgrade.
+- Starting a reload leaves the spyglass zoom unless the crossbow has the fast reload
+  (slot 110: 0x00C1CCF0 crossbow, 0x00C35AC0 pistol); the sim has no zoom.
+- The sim: `tuning::ReloadTiming` (stages), `left_hand::gun_reload` (per-weapon attributes); the
+  crossbow fire recovery is the Crossbow_Fire exit 0.398 s (was 0.2).
 
 ### Ranged weapon dispersion (2026-10-06, U-247)
 
@@ -586,6 +626,6 @@ grenades and Spring Razors.
 See `research/UNKNOWNS.md` U-048, U-052, U-100..U-113 and U-240..U-251: lean camera collision,
 the mantle finder's later states and timings, the melee reach state multiplier's trigger,
 climbing on `DisClimbable` chains, level `PhysicsVolume`s (zone velocity, pain), underwater stroke
-timing, drowning against regeneration, the finisher on players, helmet absorption, weapon
-dispersion and fast reloads, slide impact damage, the random bone charms, and the
-inventory/power open points.
+timing, drowning against regeneration, the finisher on players, slide impact damage, and the
+inventory/power open points; U-500..U-504 (overseer armour, the crossbow reload time, rats eating
+the living, the swarm as one group, attack while carrying).

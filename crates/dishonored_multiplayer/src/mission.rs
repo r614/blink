@@ -53,6 +53,9 @@ pub struct OriginalNpc {
     /// Mesh parts (package, object path) of this pawn's look: body + its picked head.
     #[serde(default)]
     pub parts: Vec<(String, String)>,
+    /// Wears a helmet (`m_PotentialNPCArmor` head armour, rolled per pawn): `PlayerState::helmet`.
+    #[serde(default)]
+    pub helmet: bool,
 }
 
 /// A named original actor of a level: (package, name, position, yaw).
@@ -289,7 +292,7 @@ impl MissionSetup {
                     }
                 }
                 let p = snap_floor(m.world, s.position).unwrap_or(s.position);
-                original.push(OriginalNpc { map: m.name.clone(), name: s.name.clone(), spawn: NpcSpawn { id, kind, archetype, position: p, yaw: s.yaw }, tweak: s.tweak.clone(), props: s.props.clone(), parts });
+                original.push(OriginalNpc { map: m.name.clone(), name: s.name.clone(), spawn: NpcSpawn { id, kind, archetype, position: p, yaw: s.yaw }, tweak: s.tweak.clone(), props: s.props.clone(), parts, helmet: s.appearance.helmet(id) });
             }
         }
         let mut doors = Vec::new();
@@ -522,6 +525,9 @@ impl MissionMatch {
         let s = o.spawn;
         let arch = self.look_override.get(&s.id).copied().unwrap_or(s.archetype);
         spawn_npc(&mut self.world, s.id, s.kind, arch, s.position, s.yaw, cfg);
+        if let Some(p) = self.world.player_mut(s.id) {
+            p.helmet = o.helmet;
+        }
         if o.props.spawn_dead || o.props.knocked_out {
             if let Some(p) = self.world.player_mut(s.id) {
                 // `m_bTreatAsKnockedOut`: unconscious (non-lethal, can be carried), not dead.

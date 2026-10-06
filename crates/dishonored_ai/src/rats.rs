@@ -22,7 +22,10 @@
 //! `m_fIdleAwayFromPawnMoveDist` away from a pawn that stays within
 //! `m_fIdleAwayFromPawnTriggerDist` for `m_fIdleAwayFromPawnTriggerDuration`; a swarm too small
 //! to attack flees `m_fFleeAttemptMinDistance`-`MaxDistance` unless `m_bNeverFleeSystemicaly`.
-//! The order of these checks inside the native swarm tick is not decoded (U-260).
+//! The native swarm tick (0x00C65380) runs the first of Hidden, Flee, Attack, Move, Idle whose
+//! condition holds (exit / enter on a change), then that state's update; the Attack state keeps
+//! or drops its groups' targets, then chases, bites (0x00C891E0) or eats (0x00C6D760) per group
+//! (research/dishonored/AI.md "Rat swarms", U-260).
 
 use dishonored_ir::ai::RatSwarmConfig;
 use dishonored_sim::input::{LeftHand, PlayerInput, buttons, npc_moves};
@@ -31,8 +34,9 @@ use dishonored_world::{WorldQuery, channel};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
-/// Limbs eaten from a corpse (`DisSeveredLimbInfo`: two arms, two legs, head; LIKELY).
-pub const LIMBS: u32 = 5;
+/// Limbs eaten from a corpse (`DisSeveredLimbInfo` of the NPC: both lower legs and arms, the neck
+/// and the chest; U-261).
+pub const LIMBS: u32 = dishonored_sim::rats::CORPSE_LIMBS;
 
 /// `EDisRatSwarmState`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -210,7 +214,9 @@ impl RatSwarm {
             if before < start && self.eat_time >= start {
                 ev.push(RatEvent::EatStart { swarm: self.id, corpse: cid });
             }
-            if self.eat_time >= start + c.eat_startup_duration + c.eat_per_limb_duration * LIMBS as f32 {
+            // The eating clock starts at -m_fEatStartupDelayAfterKill for a target the swarm was
+            // attacking; then the startup, one interval per limb and a last one (0x00C6D760).
+            if self.eat_time >= start + dishonored_sim::rats::eat_duration(true, LIMBS, c.eat_startup_duration, c.eat_per_limb_duration) {
                 ev.push(RatEvent::Devoured { swarm: self.id, corpse: cid });
                 self.eaten.push(cid);
                 self.eating = None;

@@ -57,6 +57,36 @@ impl Default for RatAttackTweak {
     }
 }
 
+/// Limbs rats eat off a corpse: the NPC's `DisSeveredLimbInfo.m_SeveredLimbInfo` entries not yet
+/// severed. Every NPC tweak of the base game uses `SLInfo_Default` or `SLInfo_Elite` (one uses
+/// `SLInfo_wolfhoundeaten`): six entries each (both lower legs, both lower arms, the neck, the
+/// chest bone). The NPC pawn's rat-target slot 20 (0x00B79830) returns them from a random start in
+/// circular order, the chest (`m_ChestBoneBreakName`) last.
+pub const CORPSE_LIMBS: u32 = 6;
+
+/// Seconds a group needs to eat a target (0x00C6D760), counted by its eating clock
+/// (`m_fEatStageDuration`, running only while at least `m_EatRequiredRatCount` rats are in reach):
+/// a dead pawn first takes `m_fEatStartupDuration` (then its mesh turns to the eaten one and the
+/// clock restarts), then one limb per `m_fEatPerLimbDuration` (the clock restarts after each),
+/// and when no limb is left one more interval consumes it (`eDisEatenState_CorpseConsumed`). A
+/// target that is not dead (health at or above 1, e.g. knocked out; LIKELY that the tested
+/// object is the target) is consumed after `limbs x m_fEatPerLimbDuration` in one go (the NPC
+/// pawn's rat-target `GetLimbCount`, 0x00B79960, returns its `m_SeveredLimbInfo` count, 1 without
+/// limb info).
+pub fn eat_duration(dead: bool, limbs: u32, startup: f32, per_limb: f32) -> f32 {
+    if dead {
+        startup + (limbs + 1) as f32 * per_limb
+    } else {
+        limbs as f32 * per_limb
+    }
+}
+
+/// Where the eating clock starts (0x00C89EE0): a group that was attacking its target when it
+/// died starts at `-m_fEatStartupDelayAfterKill`; a group that finds a corpse starts at 0.
+pub fn eat_clock_start(was_attacking: bool, delay_after_kill: f32) -> f32 {
+    if was_attacking { -delay_after_kill } else { 0.0 }
+}
+
 /// Group damage per interval (0x00C891E0): `clamp(count x per_bite, min, max)`, whole points.
 pub fn group_damage(count: usize, t: &RatAttackTweak) -> f32 {
     let d = count as f32 * t.damage_per_bite;

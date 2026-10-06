@@ -5,6 +5,62 @@
 use dishonored_ir::gameplay::GameplayConfig;
 use serde::{Deserialize, Serialize};
 
+/// The player's gun reload (`DisItemContext_ReloadGunPlayer`, start 0x00C2AA80, tick
+/// 0x00C2AC00): the `m_ReloadGunAction_In` action (stage ReloadIn), then the timed stage
+/// (`m_fReloadTimeRemaining = m_fReloadTime / Attribute_ReloadSpeed`, 0x00C23620, undivided when
+/// the attribute is 0), whose end loads the magazine (0x00C28C50), then `m_ReloadGunAction_Out`
+/// (stage ReloadOut); the context ends with that action. With `Attribute_FastReload` > 0 (and a
+/// `m_ReloadFast` action) the context plays `m_ReloadFast` instead and its timed stage lasts the
+/// attribute's value; the magazine loads when it runs out and the context ends at once (no
+/// ReloadOut). Durations are the actions' `DishonoredNotify_AnimStateExit` times over their
+/// `m_fPlayRateOverride`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+pub struct ReloadTiming {
+    pub reload_in: f32,
+    /// `m_fReloadTime`.
+    pub time: f32,
+    pub reload_out: f32,
+}
+
+impl ReloadTiming {
+    /// Pistol_Reload_In exit 0.426, `m_fReloadTime` 0.75 (`Twk_Inv_PistolCorvo`), Pistol_Reload_Out
+    /// exit 0.302.
+    pub const PISTOL: ReloadTiming = ReloadTiming { reload_in: 0.426, time: 0.75, reload_out: 0.302 };
+    /// Crossbow_Reload_In exit 0.225 and Crossbow_Reload_Out exit 0.169 at play rate 1.3,
+    /// `m_fReloadTime` 1.0 (the class default: `Twk_Inv_CrossbowCorvo` and its cooked fallbacks
+    /// leave it).
+    pub const CROSSBOW: ReloadTiming = ReloadTiming { reload_in: 0.225 / 1.3, time: 1.0, reload_out: 0.169 / 1.3 };
+
+    /// (seconds into the reload when the magazine loads, seconds when the reload ends) for the
+    /// weapon's `Attribute_ReloadSpeed` and `Attribute_FastReload`.
+    pub fn stages(&self, reload_speed: f32, fast_reload: f32) -> (f32, f32) {
+        if fast_reload > 0.0 {
+            return (fast_reload, fast_reload);
+        }
+        let timed = if reload_speed != 0.0 { self.time / reload_speed } else { self.time };
+        let load = self.reload_in + timed;
+        (load, load + self.reload_out)
+    }
+
+    /// Length of a normal reload.
+    pub fn total(&self, reload_speed: f32) -> f32 {
+        self.stages(reload_speed, 0.0).1
+    }
+}
+
+fn pistol_stages() -> ReloadTiming {
+    ReloadTiming::PISTOL
+}
+fn crossbow_stages() -> ReloadTiming {
+    ReloadTiming::CROSSBOW
+}
+fn crossbow_fire_recovery() -> f32 {
+    0.398
+}
+fn crossbow_fast_fire() -> f32 {
+    0.625 / 1.5
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CombatTuning {
     // --- sword (CONFIRMED geometry from DisTweaks_MeleeAttackPlayer / Assassinate) ---
@@ -47,7 +103,13 @@ pub struct CombatTuning {
     // pistol timings (LIKELY: Ply_Pistol_as / Ply_Guns_as / CorvoGun_Mag_as notifies)
     pub pistol_equip: f32,
     pub pistol_fire_recovery: f32,
+    /// Whole normal reload: `ReloadIn` + `m_fReloadTime` + `ReloadOut` (see [`ReloadTiming`]).
     pub pistol_reload: f32,
+    /// `DisItemContext_ReloadGunPlayer` stages of the pistol (`Twk_Inv_PistolCorvo`'s
+    /// `DisTweaks_ReloadGunPlayer`): the `ReloadIn` action (Pistol_Reload_In exit), the timed
+    /// stage `m_fReloadTime` (divided by `Attribute_ReloadSpeed`), the `ReloadOut` action.
+    #[serde(default = "pistol_stages")]
+    pub pistol_reload_stages: ReloadTiming,
 
     // --- crossbow (CONFIRMED: Twk_Proj_Arrow gravity multiplier / stealth mult) ---
     pub bolt_gravity_mult: f32,
@@ -85,7 +147,19 @@ pub struct CombatTuning {
     pub bolt_limb_damage_cap: f32,
     pub crossbow_reserve: u16,
     pub crossbow_equip: f32,
+    /// Whole normal reload (see `crossbow_reload_stages`).
     pub crossbow_reload: f32,
+    /// The crossbow's reload stages (`Twk_Inv_CrossbowCorvo`: In / Out at play rate 1.3).
+    #[serde(default = "crossbow_stages")]
+    pub crossbow_reload_stages: ReloadTiming,
+    /// `FireCrossbow` action (Crossbow_Fire `DishonoredNotify_AnimStateExit`).
+    #[serde(default = "crossbow_fire_recovery")]
+    pub crossbow_fire_recovery: f32,
+    /// `m_FireReloadFast` (`FireReloadFastCrossbow`: Crossbow_Fire_FastReload exit 0.625 s at
+    /// `m_fPlayRateOverride` 1.5): with `Attribute_FastReload`, a shot that leaves a bolt to load
+    /// plays this action and loads it at the end, with no reload stage (0x00C2E570, 0x00C2E730).
+    #[serde(default = "crossbow_fast_fire")]
+    pub crossbow_fast_fire: f32,
 
     // --- Windblast (CONFIRMED: Twk_WindBlast level 2) ---
     pub windblast_cost: f32,
@@ -192,11 +266,11 @@ impl CombatTuning {
             bullet_close_range: v(pb, "projectile.m_fCloseRange", 400.0),
             bullet_close_mult: v(pb, "projectile.m_fDamageMultiplier_CloseRange", 1.5),
             pistol_reserve: 10,
-            // Guns_Ready_Equip AnimStateExit 0.43; Pistol_Fire exit 0.30;
-            // reload = Reload_In 0.433 + CorvoGun_Mag 0to1 0.433 + Reload_Out 0.333.
+            // Guns_Ready_Equip AnimStateExit 0.43; Pistol_Fire exit 0.30.
             pistol_equip: 0.43,
             pistol_fire_recovery: 0.3,
-            pistol_reload: 1.2,
+            pistol_reload: ReloadTiming::PISTOL.total(0.0),
+            pistol_reload_stages: ReloadTiming::PISTOL,
 
             bolt_gravity_mult: v(cb, "projectile.m_fGravityMultiplier", 1.3),
             bolt_stealth_mult: v(cb, "projectile.m_fDamageMultiplier_Stealth", 2.0),
@@ -215,10 +289,12 @@ impl CombatTuning {
             bolt_speed: v(cb, "fire.m_fArrowFireSpeed", 20000.0) * v(cb, "projectile.m_fSpeedMultiplier", 1.0),
             bolt_limb_damage_cap: v(cb, "projectile.m_fLegsAndArmsDamageCap", 15.0),
             crossbow_reserve: 10,
-            // Guns_Ready_Equip exit 0.43; reload = Reload_In 0.233 + RapidReload 0.4 +
-            // Reload_Out 0.333 (Ply_Crossbow_as / Crossbows_as).
+            // Guns_Ready_Equip exit 0.43; Crossbow_Fire exit 0.398 (Ply_Crossbow_as).
             crossbow_equip: 0.43,
-            crossbow_reload: 0.97,
+            crossbow_reload: ReloadTiming::CROSSBOW.total(0.0),
+            crossbow_reload_stages: ReloadTiming::CROSSBOW,
+            crossbow_fire_recovery: 0.398,
+            crossbow_fast_fire: 0.625 / 1.5,
 
             windblast_cost: c.windblast.mana_cost,
             windblast_angle: v(wb, "m_Levels[1].m_Angle", v(wb, "m_Levels.m_Angle", 135.0)),

@@ -82,7 +82,7 @@ fn load_spawns(map: &str, m: Option<&DishonoredMap>) -> Vec<Spawn> {
 }
 
 pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
-    let path = cache_dir().join("gameplay_config.v11.json");
+    let path = cache_dir().join("gameplay_config.v12u.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);
@@ -251,7 +251,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     };
     let flee_points = markers.iter().filter(|m| m.class == "DisFleePointActor").map(|m| m.position).collect();
     // Each spawner's look from its pawn tweak (body + head options), resolved once per map.
-    let look_path = dir.join(format!("{map}.appearance3.json"));
+    let look_path = dir.join(format!("{map}.appearance4.json"));
     let looks: std::collections::HashMap<String, dishonored_ir::spawners::Appearance> = match std::fs::read_to_string(&look_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(l) => l,
         None => {

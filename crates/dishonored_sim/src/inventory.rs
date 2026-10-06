@@ -5,10 +5,12 @@
 //!   `RemoveAmmo` (0x00C05260) fails when fewer than `n` are left;
 //! - elixirs: the pickup is refused at `m_nMax*Elixir` (0x00A22160), counts are clamped to
 //!   `[0, max]` (0x00C04E10); drinking (0x00C04FC0) only works when health (mana) is below its
-//!   maximum and adds `(int)((1 + Attribute_*PotionPotencyBonus) * m_n*ElixirValue)`, capped;
+//!   maximum and adds `(int)((1 + Attribute_*PotionPotencyBonus) * m_n*ElixirValue)`, capped,
+//!   then Twist of Fortune may refill mana ([`twist_of_fortune`]);
 //! - stat pickups (food, ammo): each ammo amount is rolled once from `m_AmmoRanges`
-//!   (`rand() % (max - min + 1) + min`, 0x00C3D4E0) and taking it moves what fits
-//!   (0x00C05440); health/mana changes scale with the potion potency attributes (0x00A367A0);
+//!   (`rand() % (max - min + 1) + min`, 0x00C3D4E0) and taking it moves what fits, Scavenger
+//!   adding a round ([`scavenger_amount`], 0x00C05440); health/mana changes scale with the potion
+//!   potency attributes, food adds `Attribute_FoodHealBonus` (0x00A367A0);
 //!   a stat pickup can be taken while one of its ammo types is not full or it heals/restores
 //!   mana (0x00A36980);
 //! - abstract items (`DisAbstractItemPickup`): `m_Quantity` of `m_pAbstractItem` (coins, runes,
@@ -109,9 +111,44 @@ pub fn drink(p: &mut PlayerState, k: ElixirType, cfg: &GameplayConfig, events: &
             p.vitals.mana_regen_cap = (p.vitals.mana + p.vitals.mana_regen_pool).min(max);
         }
     }
+    twist_of_fortune(p, cfg);
     p.inv.elixirs[k as usize] -= 1;
     events.push(SimEvent::ElixirUsed { id: p.id, mana: k == ElixirType::Mana });
     true
+}
+
+/// `DisTweaks_PlayerPawn.m_fRatioPotionChanceSuccess` (class default 1.0; Corvo's tweak keeps it).
+pub const RATIO_POTION_CHANCE_SUCCESS: f32 = 1.0;
+
+/// Twist of Fortune (`Attribute_PotionManaBonusChanceRatio`, a bone charm: 0.1 / 0.2), the tail
+/// of the elixir drink (0x00C04FC0) after either elixir: when a roll is below the attribute,
+/// mana gains `(int)(ManaMax x (m_fRatioPotionChanceSuccess + 1))`, capped (a full refill). The
+/// original draws `rand()` on every drink; the pawn's own stream is drawn only while the charm
+/// is worn. Returns whether it triggered.
+pub fn twist_of_fortune(p: &mut PlayerState, cfg: &GameplayConfig) -> bool {
+    let chance = attribute(p, cfg, "Attribute_PotionManaBonusChanceRatio", 0.0);
+    if chance <= 0.0 || p.roll() >= chance {
+        return false;
+    }
+    let max = crate::powers::mana_max(p, cfg);
+    let add = (max * (RATIO_POTION_CHANCE_SUCCESS + 1.0)).trunc();
+    p.vitals.mana = (p.vitals.mana + add).min(max);
+    p.vitals.mana_regen_cap = (p.vitals.mana + p.vitals.mana_regen_pool).min(max);
+    true
+}
+
+/// Scavenger (`Attribute_StatPickupCapacityBonusChance`, a bone charm: 0.5), in the stat
+/// pickup's ammo take (0x00C05440): an ammo slot holding more than one round offers one more
+/// when a roll is below the attribute (one draw per such slot, in slot order; the pawn's stream
+/// is drawn only while the charm is worn).
+pub fn scavenger_amount(p: &mut PlayerState, cfg: &GameplayConfig, n: u16) -> u16 {
+    if n > 1 {
+        let chance = attribute(p, cfg, "Attribute_StatPickupCapacityBonusChance", 0.0);
+        if chance > 0.0 && p.roll() < chance {
+            return n + 1;
+        }
+    }
+    n
 }
 
 /// Deterministic stand-in for the original's `rand()` roll of an ammo range: the same pickup
@@ -179,11 +216,19 @@ pub fn take(state: &mut WorldState, pi: usize, who: usize, cfg: &GameplayConfig,
     let mut used_up = true;
     match &pk.kind {
         PickupKind::Elixir(k) => add_elixirs(&mut state.players[who], *k, 1, cfg),
-        PickupKind::Stat { health, mana, .. } => {
+        PickupKind::Stat { health, mana, food, .. } => {
             let p = &mut state.players[who];
             if *health > 0 {
                 let f = (attribute(p, cfg, "Attribute_HealthPotionPotencyBonus", 0.0) + 1.0) * *health as f32;
                 p.vitals.health = (p.vitals.health + f.trunc()).min(crate::powers::health_max(p, cfg));
+            }
+            // Food (`m_Type` eStatPickupType_Food) also heals `(int)Attribute_FoodHealBonus` when
+            // that is positive (a bone charm), capped (0x00A367A0).
+            if *food {
+                let bonus = attribute(p, cfg, "Attribute_FoodHealBonus", 0.0).trunc();
+                if bonus > 0.0 {
+                    p.vitals.health = (p.vitals.health + bonus).min(crate::powers::health_max(p, cfg));
+                }
             }
             if *mana > 0 {
                 let f = (attribute(p, cfg, "Attribute_ManaPotionPotencyBonus", 0.0) + 1.0) * *mana as f32;
@@ -193,9 +238,12 @@ pub fn take(state: &mut WorldState, pi: usize, who: usize, cfg: &GameplayConfig,
             for t in AmmoType::ALL {
                 let n = state.pickups[pi].ammo_left[t as usize];
                 if n > 0 {
-                    let added = add_ammo(&mut state.players[who], t, n, cfg);
-                    state.pickups[pi].ammo_left[t as usize] -= added;
-                    left += n - added;
+                    let offered = scavenger_amount(&mut state.players[who], cfg, n);
+                    let added = add_ammo(&mut state.players[who], t, offered, cfg);
+                    // The original subtracts what was added (a Scavenger extra can leave -1).
+                    let rest = n.saturating_sub(added);
+                    state.pickups[pi].ammo_left[t as usize] = rest;
+                    left += rest;
                 }
             }
             // Ammo that did not fit stays in the pickup (food is always consumed).

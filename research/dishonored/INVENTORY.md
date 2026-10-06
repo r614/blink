@@ -100,9 +100,13 @@ an NPC carries (pickpocketing). Boyle Ext (with the street script) has 68: 54 ab
   (350) for `GroundSpeed` and the jump uses `Attribute_JumpZCarryingCorpse` (0x00A75EE0,
   0x00A60010). `Attribute_GroundSpeedBonusWhileCarrying` scales the carry state's speed
   (0x00AA2EC0). CONFIRMED.
-- The sim: Use lifts the body under the crosshair (dead or unconscious), Use drops it in
-  front, attack throws it (speed = `ThrowStrength` x 0.25, U-106); only Blink is usable while
-  carrying; the sword is sheathed.
+- No throw (U-106 resolved): `StatePlayerCarryCorpseIdle` (vtable 0x01104658) only drops the body
+  (`EDisCorpseDropType` Low / High / NoMove / ForceCenter / FetalPose); leaving the state (slot 76,
+  0x00A69A50) releases the corpse without an impulse. `Attribute_ThrowStrength` (FName 0x0145E1B8)
+  is read only by the carried-object release 0x00C45340 (physics props thrown along the view at
+  that strength).
+- The sim: Use lifts the body under the crosshair (dead or unconscious), Use or attack drops it in
+  front (attack: U-504); only Blink is usable while carrying; the sword is sheathed.
 
 ### Sleep darts and knocked-out NPCs
 
@@ -159,9 +163,12 @@ an NPC carries (pickpocketing). Boyle Ext (with the street script) has 68: 54 ab
 ### Devouring Swarm, Shadow Kill
 
 - Swarm: summoned along the view up to `m_fMaxDistance`, `m_fRatSwarmSpawnDelay` later; rats go
-  for the nearest pawn but the summoner within the detection radius, eat bodies
-  (`m_fEatStartupDelayAfterKill`, `m_fEatStartupDuration`, `m_fEatPerLimbDuration`; 4 limbs per
-  body remains SPECULATIVE).
+  for the nearest pawn but the summoner within the detection radius and keep it until it leaves
+  `m_fPawnEscapeRadius` (750); they eat bodies with `m_EatRequiredRatCount` (5) rats in reach:
+  startup `m_fEatStartupDuration`, then one limb per `m_fEatPerLimbDuration` (6 for the NPCs'
+  `SLInfo_Default` / `SLInfo_Elite`) and one more interval, the clock starting at
+  `-m_fEatStartupDelayAfterKill` when they killed the target (U-261, AI.md "Rat swarms"). Level 1:
+  1.5 + 7 x 1.5 = 12 s (+0.5 after a kill); level 2: 0.75 + 7 x 0.75 = 6 s.
 - Rats (U-104 resolved except eating): the crowd agent archetype `RatSwarm.CrowdAgent_SmallRat`
   (`DisGameCrowdAgentSkeletalRat`) has `MaxSpeed` 350, `Health` 1, tweak `Twk_RatSwarm.Twk_Rat`
   (`m_fAttackDistance` 120). The attack group update (0x00C891E0): once the group has been on its
@@ -174,7 +181,10 @@ an NPC carries (pickpocketing). Boyle Ext (with the street script) has 68: 54 ab
   within `m_fStandUpRatSwarmAttackDistance` 200, sneaking `m_fCrouchedRatSwarmAttackDistance` 60
   (`Twk_Pawn_Corvo_Release`). `Attribute_RatsAttackRadiusReduction` (a charm) divides a query radius
   (0x00C87B20).
-- The sim: the Devouring Swarm stays one aggregate (decoded damage, slowdown, reach, player rule);
+- The sim: the Devouring Swarm stays one aggregate attack group (U-503) run in the original's
+  Attack-state order (`powers::step_swarms`: keep or drop the target, detect, then chase, bite or
+  eat; the damage interval counter restarts while no rat is in reach) with the decoded damage,
+  slowdown, reach and player rule;
   individual rats are `PawnKind::Rat` pawns (`dishonored_sim::rats`): small box (15 x 10), 350 uu/s,
   no sword, left hand or jump, health 1, driven by a brain or a possessor; a rat attacks while its
   input holds attack and a pawn is in reach in front of it, and the attacks on one pawn form a group
@@ -195,9 +205,20 @@ an NPC carries (pickpocketing). Boyle Ext (with the street script) has 68: 54 ab
   applies the current level's list (U-100).
 - Charms add their value to their attribute; the sim applies the ones that act on simulated
   attributes (health/mana maxima, regen, potion potency, choke time, carry/sneak/sprint speeds,
-  sword speed factor, falling damage, throw strength, Falling Star's drop-assassination bonus
-  0x00ABBD10). Not yet applied: Clockwork Malfunction (grenade delay), the Spring Razor radius
-  bonus, the random ones (Twist of Fortune, Scavenger) and the rat/plague/water charms.
+  sword speed factor, falling damage, Falling Star's drop-assassination bonus 0x00ABBD10, the
+  food heal bonus). Not yet applied: Clockwork Malfunction (grenade delay), the Spring Razor
+  radius bonus and the rat/plague/water charms; throw strength only acts on carried props.
+- Random charms (U-249 resolved), with the pawn's own deterministic stream for `rand() / 32768`
+  (drawn only while the charm is worn):
+  - Twist of Fortune (`Attribute_PotionManaBonusChanceRatio` 0.1 / 0.2): after drinking either
+    elixir (0x00C04FC0 tail), a roll below the attribute adds `(int)(ManaMax x
+    (m_fRatioPotionChanceSuccess + 1))` mana, capped: a full refill (`m_fRatioPotionChanceSuccess`
+    1.0, `DisTweaks_PlayerPawn` +0x288).
+  - Scavenger (`Attribute_StatPickupCapacityBonusChance` 0.5): taking a stat pickup (0x00C05440),
+    each ammo slot holding more than one round offers one more when a roll is below the
+    attribute; what fits is added and subtracted from the pickup.
+  - Food (`DisTweaks_StatPickup.m_Type` eStatPickupType_Food, +0x174): `(int)Attribute_FoodHealBonus`
+    more health when positive (0x00A367A0).
 - Rune purchase: `m_RuneCosts` / `m_RuneCost` of the next level.
 
 ## Gadgets
