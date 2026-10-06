@@ -1306,3 +1306,35 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Findings:** each slide tick, until bit 0 of the state's +0x70 is set, a line trace of 75 uu along the velocity; the first actor hit (not immune, not asleep) takes its class's `m_SlideDamageInfo` damage (`DishonoredNPCPawn` 0, rats 0, `Actor` 5) with momentum velocity x 0.15 (`m_fSlideImpactDamageVelRatio`), damage type `DisDamageType_Slide`; the loop breaks after that actor. Who sets the flag is not traced (LIKELY: the hit, so one impact per slide).
 - **Port:** `MovementConfig.slide_*` (cache `gameplay_config.v10`), `SlideState.hit`, `movement::slide_impacts` (segment vs pawn cylinders). In multiplayer a slide into another player costs 5 health; NPCs are shoved, not hurt.
 - **Tests:** `mechanics::slide_impact_hurts_another_player_once`, `slide_impact_pushes_npcs_without_damage`.
+## 2026-10-06: Ranged weapon dispersion: the shot's screen offset (U-247)
+
+- **Question:** How does `DishonoredWeapon_Ranged.m_fDispersion` turn into a projectile direction, and in what unit?
+- **Method:** Ghidra on the player's fire path: `ClassDecomp` of `DisItemContext_ProjectileAttack`, `_FirePistol` and `_FireCrossbow`; `Decomp` of the pistol fire (slot 108, 0x00C2A3E0), the aim helpers 0x00C14640 / 0x00AA2B10 and the offset generator 0x00BFFBA0; `OffsetScan` for the weapon's +0x11C / +0x12C and the pawn tweak's +0x2AC / +0x2B0; `VCallers` / `G_Callers` for slot 98; `tweaks` for the cooked attributes and upgrades; `prop_layout` for the `m_bMaxDispersionOn*` bits.
+- **Findings:**
+  - The projectile context fires queued shots on its camera update (slot 103, 0x00C03A60): for each, the item's fire function, then the weapon's slot 109 (dispersion = max). A shot uses the dispersion it had, then it blooms.
+  - The pistol fire takes the aim point (screen centre, or the aim-assist point from 0x00C14460) and draws an offset (0x00BFFBA0: radius `rand() x d / 32767`, angle `rand() x 2 pi / 32767 - pi`, `d` = slot 91 = `m_fDispersion`). It deprojects aim point + offset x `height / 720` through the view (0x00AA2B10 -> 0x006C5180). The unit is pixels of a 720-line screen: 45 px is 3.09 degrees at the default 75 degree FOV on 16:9.
+  - `m_bMaxDispersionOnSprint / Jump / Block / Melee` are bits 0..3 of the ranged tweak's +0x118; the falling state's tick (0x00A79150) tests bit 1. Corvo's pistol and crossbow set Sprint, Jump and Block.
+  - Values: pistol 45 / 15 / 70 (max / min / speed), crossbow 30 / 0 / 70. Accuracy upgrades apply to their host weapon only (`m_pHostItemType`).
+  - No player code reads `m_fMovementDispersionIncrease` / `m_fCameraMovementDispersionIncrease` (U-422). The crosshair's `SetDispersion` script is not decoded (U-420). Slot 98's caller is not found (U-421).
+- **Port:** `LeftHandState.dispersion`. `left_hand::update_dispersion`: equip and shot set max; the held states keep max; `FInterpConstantTo` toward min while loaded. `dispersion_offset` takes two rolls of the pawn's stream. `offset_direction` uses a fixed reference view (75 degree FOV, 16:9). `fire_direction` serves the pistol, crossbow, sleep darts and incendiary bolts. `CombatTuning.pistol_dispersion` / `crossbow_dispersion` come from the `disp.*` weapon values (cache `gameplay_config.v9.json`). `powers::attribute_for` filters upgrades by host. Net protocol 5 (`LeftHandState` grew).
+- **Tests:** `crates/dishonored_sim/tests/player.rs`:
+  - narrowing to 15 in 0.43 s, a shot inside the 15 px cone, then 45; no narrowing while empty;
+  - held at max falling and sprinting; upgrades per weapon;
+  - offsets inside the radius; 45 px = 3.09 degrees; screen axes.
+
+  `cargo test -p dishonored_sim`: all pass.
+- **Confidence:** CONFIRMED for the formulas, the order and the data; the reference view is an APPROXIMATION of the player's real view.
+
+## 2026-10-06: Lord Shaw's duel reaches the countdown (U-221)
+
+- **Question:** Why do the duel's three go-tos all move Lord Shaw (pawn 2007), leaving him off his mark?
+- **Method:** `kismet find` on the Spawned events, the go-tos and their variables. `harness kismet --route duel`, extended to report the three variables and each spawner's pawn. Reading the interpreter's populate / publish.
+- **Findings:**
+  - The spawner -> pawn mapping and the Spawned events were right: `_45` -> 2007, `_11` -> 2004, `_46` -> 2008. Yet all three variables held 2007.
+  - Many duel ops (`AISetSuspicionLevel`, `AISetPatrol`, ...) link their `Targets` array to two or three of Shaw's variables. `Kismet::publish` (`PublishLinkedVariableValues`) wrote the whole array into each variable, and `write_var` keeps entry 0. So every variable became the first one, Lord Shaw. UE3's `USeqVar_Object::PublishValue` copies element i into variable i.
+  - Fixed: `runtime::publish_values`. When the counts differ (the port's populate skips empty object variables), nothing is written back.
+  - Run after the fix: the elites go to TargetPoint_5 / _55 and Shaw to TargetPoint_9. Shaw touches TriggerVolume_2 at 90.1 s ("Shaw On Mark"). `Stop_stand_there` and `Go_to_Mark` play (`Go_to_Mark` is refused once while `Stop_stand_there` plays: equal priority, the decoded rule; the loop retries), then `Three` (92.8 s), `Two`, `One` (97.8 s). "turn off mark trigger" completes PN T2.
+  - Next blocker: at 98.5 s Shaw is in `BrainState::Flee` and leaves his mark; `Turn_and_Fire` never plays. `Twk_Pawn_LordShaw` falls back to the elite guard pawns, with a sword and `Twk_Inv_PistolShaw` in `m_ContentInventoryLoadout`. The port classes him Civilian from the tweak name ("party").
+  - Navmesh walking (`movement::nav_walk_move`, decoded by the FaceFX agent, commit c05d9e1) is in this branch with a unit test.
+- **Harness:** `kismet --route duel` (debug build) 6/6. The open stage now reports the countdown up to `One` (before: only `Duel_Explained`).
+- **Confidence:** CONFIRMED for the publish semantics (UE3 engine behaviour) and the run; the panic's cause is SPECULATIVE.

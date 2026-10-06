@@ -318,8 +318,66 @@ pushes players; NPC pawns keep the velocity change.
 
 The magazine holds `1 + (int)Attribute_MagazineBonus` rounds, capped by the ammo held (0x00C20DB0);
 `Attribute_ReloadSpeed` divides the reload time (0x00C23620, LIKELY: the divided tweak time is the
-reload delay). `Attribute_FastReload` selects the fast reload animations, and the accuracy upgrades
-change the dispersion, which the sim does not model (U-247).
+reload delay). `Attribute_FastReload` selects the fast reload animations (not modelled, U-247).
+The accuracy upgrades change the dispersion (next section).
+
+### Ranged weapon dispersion (2026-10-06, U-247)
+
+CONFIRMED from the code unless marked.
+
+- **State.** `DishonoredWeapon_Ranged.m_fDispersion` (+0x12C; slot 91 0x00C1CAC0 returns it).
+  It is set to `Attribute_DispersionMax` on equip (slot 76, 0x00C2C1F0) and after every shot.
+  The projectile context's camera update (0x00C03A60) fires each queued shot through the item's
+  fire function (pistol 0x00C2A3E0), then calls the weapon's slot 109 (0x00C1CB80): set to max.
+  Slot 98 (0x00C312A0) also sets max when its third argument is set; when it is called is not
+  traced (U-421).
+- **Narrowing.** The weapon tick (slot 94, 0x00C1CB10) runs only while a round is loaded
+  (+0x124 > 0). It moves the value toward `Attribute_DispersionMin` at
+  `Attribute_DispersionInterpolationSpeed` per second (`FInterpConstantTo` 0x0041EBC0).
+- **Held at max.** The flags `DisTweaks_WeaponRanged.m_bMaxDispersionOnSprint` / `Jump` /
+  `Block` / `Melee` (+0x118 bits 0..3) hold it at max in those states. The falling state's tick
+  (0x00A79150) tests the Jump bit every tick. Corvo's pistol and crossbow set Sprint, Jump and
+  Block, not Melee.
+- **Values** (Normal column, `DisTweaks_WeaponRanged_Attributes` of `Twk_Inv_PistolCorvo` /
+  `Twk_Inv_CrossbowCorvo`):
+
+  | weapon | max | min | speed |
+  |---|---|---|---|
+  | pistol | 45 | 15 | 70 |
+  | crossbow | 30 | 0 | 70 |
+
+  Upgrades only apply to their own weapon (`DisTweaks_Upgrade.m_pHostItemType`):
+  `Pistol_Accuracy1` max -10 / min -10; `Pistol_Accuracy2` max -15 / min -3 / speed +20;
+  `Crossbow_Accuracy` max -10 / speed +40.
+- **The shot.** 0x00BFFBA0 draws `r = rand() x d / 32767` and `a = rand() x 2 pi / 32767 - pi`.
+  The radius is uniform, so shots gather toward the centre. The offset is `(r cos a, r sin a)`.
+  0x00AA2B10 scales it by `screen height / 720`, adds it to the aim point (the screen centre, or
+  the aim-assist point), and deprojects that point through the view (0x006C5180). The result is
+  the projectile direction. So **dispersion is a radius in pixels of a 720-line screen**. With the
+  default 75 degree horizontal FOV on 16:9, 45 px is 3.09 degrees and 15 px is 1.03 degrees.
+- **HUD.** 0x00B9FF30 sends `SetDispersion(d, p = d / max x 100)` to the crosshair when `d`
+  changed by at least 0.1. The movie's ActionScript 2 classes (`UI_HUD_SF` "HUD", decoded from
+  the DoInitAction bytecode) place each part absolutely, in stage pixels (1280 x 720, the same
+  unit as `d`):
+  - `Crosshair_Gun.SetDispersion`:
+    - `_parts_int_mc._rotation = -5 p / 100`, its parts 0..3 at (d, -d), (d, d), (-d, d), (-d, -d);
+    - `_parts_ext_mc._rotation = -20 p / 100`, `_alpha = 100 - 1.5 max(0, p - 50)`, its parts 0..3
+      at the same four corners.
+  - `Crosshair_Crossbow` (extends `Crosshair_Gun`):
+    - `_offset = -15 p / 100` (class default -15);
+    - `_parts_ext_mc._alpha = 100 - 1.5 max(0, p - 40)`;
+    - external parts: part0 `_y = -d - offset`, part1 `_x = d + offset`, part2 `_y = d + offset`,
+      part3 `_x = -d - offset`, part4 `_x = d + offset + 5`, part5 `_x = -d - offset - 5`;
+    - internal parts on the axes at distance `d`.
+- **Not found:** `DisTweaks_PlayerPawn.m_fMovementDispersionIncrease` and
+  `m_fCameraMovementDispersionIncrease` (+0x2AC / +0x2B0, both 0.5). An offset scan finds no
+  player code that reads them; the hits are other classes with the same offsets (U-422).
+- **Port** (`left_hand::update_dispersion`, `fire_direction`). The state is
+  `LeftHandState.dispersion`. Draws come from the pawn's random stream (two rolls per shot). The
+  view is a fixed reference, the default FOV on 16:9 (`DISPERSION_REF_*`): the original uses
+  the player's actual view, which the server does not know. "Jump" is the Falling move mode.
+  Sleep darts and incendiary bolts count as loaded while not reloading. The crosshair does not
+  spread yet (U-420).
 
 ### Falling damage (`TakeFallingDamage`, 0x00B4DCC0, vtable +0x528)
 

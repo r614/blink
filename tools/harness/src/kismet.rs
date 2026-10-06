@@ -924,7 +924,10 @@ fn duel(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<Stage>> {
     let shaw_walk = {
         let at = p.m().world.player(shaw).map(|x| x.position);
         let b = p.m().crowd.brains.iter().find(|b| b.id == shaw).map(|b| format!("{:?} goal {:?}", b.state, b.goal));
-        format!("Player On Mark {:?}; Shaw at {at:?} brain {b:?}", var(p.m(), "L_Boyle_Ext_Script", "Player On Mark"))
+        // Who the duel's pawn variables hold and what each spawner spawned (go-to targets).
+        let vars: Vec<String> = ["Lord Shaw", "Shaw_Elite", "Shaw_Elite_Pistols", "Shaw On Mark"].iter().map(|n| format!("{n}={:?}", var(p.m(), "L_Boyle_Ext_Script", n))).collect();
+        let spawned: Vec<String> = ["DishonoredSpawner_45", "DishonoredSpawner_46", "DishonoredSpawner_11"].iter().map(|s| format!("{s}->{:?}", spawned_pawn(p, db, &format!("L_Boyle_Ext_Script:{s}")))).collect();
+        format!("Player On Mark {:?}; Shaw {shaw} at {at:?} brain {b:?}; vars {vars:?}; spawners {spawned:?}", var(p.m(), "L_Boyle_Ext_Script", "Player On Mark"))
     };
     stage(&mut rows, "the pistol taken from the box (DisTrigger_2 Used): the player holds the elite pistol", picked && p.hist_has("player_took_the_pistol"), format!("pistol used {picked}"));
     stage(&mut rows, "(open, U-221) on the mark: the countdown runs (Three, Two, One, Turn_and_Fire)", fire, format!("pistol used {picked}; conversations {counted:?}; {shaw_walk}; {} at {:.1} s", recent.join(" | "), p.time()));

@@ -540,6 +540,15 @@ CONFIRMED from the code unless marked.
   `Shaw_Elite`) is an accurate stop at the end of his path. With navmesh walking, the 4.4 uu lip
   that stopped him 84 uu short no longer blocks him. The port's go-to still completes at 60 uu of
   the goal.
+  - Correction (2026-10-06): the pawn stopped short was Lord Shaw, not the elite. A Kismet
+    publish bug had written Lord Shaw into `Shaw_Elite` and `Shaw_Elite_Pistols` (KISMET.md
+    "Publishing array properties"). With that fixed, each go-to moves its own pawn. Shaw reaches
+    his mark and the countdown runs.
+  - **Next lead.** After `One`, Shaw (`PawnKind::Civilian` in the port) panics and flees.
+    `Twk_Pawn_LordShaw` falls back to `Pwn_EliteGuard_MTall_2` / `Pwn_EliteGuard_Base`. Its
+    `m_ContentInventoryLoadout` is `Twk_Inv_SwordEliteGuard` + `Boyle_Twk.Twk_Inv_PistolShaw`, so
+    in the original he is an armed elite. The port classes him by tweak name
+    (`npcs::role_from_tweak`: "party" -> Civilian).
 
 ## Behaviours
 

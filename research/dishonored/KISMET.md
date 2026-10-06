@@ -361,8 +361,22 @@ Each runs on a fresh match; every stage is a check.
   Pendleton's note (`SoireeShawReadsNote`): PN T0 completed, PN T2 "Follow Lord Shaw". He walks
   to the duel ground, the elite offers the weapons (`Choose_Weapon` -> `PlayerTakesGun` ->
   "Player Pistol Setup" moves and enables the box's use trigger), and the player takes the
-  pistol (`Duel_Explained`). The countdown on the mark and the shot are not reached yet
-  (U-221; reported as open stages).
+  pistol (`Duel_Explained`). The go-tos `AIGoToActor_0` / `_1` / `_2` send `Shaw_Elite`
+  (`DishonoredSpawner_11`) to TargetPoint_5, `Lord Shaw` (`_45`) to TargetPoint_9 inside his
+  mark trigger TriggerVolume_2, and `Shaw_Elite_Pistols` (`_46`) to TargetPoint_55. When the
+  elite arrives, `enableshawtrig` arms Shaw's touch (`SeqEvent_Touch_39`, "Shaw On Mark"). With
+  the player on TriggerVolume_3 the loop plays `Go_to_Mark` and the countdown `Three` / `Two` /
+  `One`; "turn off mark trigger" completes PN T2. `Turn_and_Fire` and the shot are not reached:
+  after `One` Lord Shaw panics and flees (U-221).
+  - **Publishing array properties.** An op's array property (`Targets`) is written back to its
+    variables element by element (`runtime::publish_values`, UE3 `PublishValue`). Several duel
+    ops link `Targets` to all three of Shaw's variables. Until 2026-10-06 the whole array went
+    into each variable, so all three held Lord Shaw: he walked to the elite's mark and never
+    touched his own.
+  - **Conversation refusals.** `Go_to_Mark` (High) is refused while `Stop_stand_there` (High)
+    plays. That is the decoded rule: only a strictly higher priority interrupts
+    (CONVERSATIONS.md section 2). The duel loop asks again on its next pass, and it plays one
+    second later.
 
 ## 4. Open points
 

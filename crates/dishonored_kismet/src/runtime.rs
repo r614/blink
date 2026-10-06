@@ -743,7 +743,8 @@ impl Kismet {
         }
     }
 
-    /// Copy properties back to their linked variables (engine `PublishLinkedVariableValues`).
+    /// Copy properties back to their linked variables (engine `PublishLinkedVariableValues`;
+    /// what each variable gets: [`publish_values`]).
     fn publish(&mut self, op: OpId) {
         let links = self.op(op).vars.clone();
         for l in links {
@@ -751,8 +752,17 @@ impl Kismet {
                 continue;
             }
             let Some(v) = self.prop(op, &l.property) else { continue };
-            for var in &l.vars {
-                self.write_var(*var, &v);
+            // An array property goes back element by element: entry i into the i-th linked
+            // variable (UE3 `USeqVar_Object::PublishValue` copies `min(array, vars)` entries in
+            // order). Writing the whole array into every variable gave each one entry 0: an op
+            // with `Targets` linked to "Lord Shaw", "Shaw_Elite" and "Shaw_Elite_Pistols" made
+            // all three Lord Shaw (U-221). `populate` skips empty object variables, so when the
+            // counts differ the entries cannot be matched to their variables and nothing is
+            // written back.
+            for (var, val) in l.vars.iter().zip(publish_values(&v, l.vars.len())) {
+                if let Some(val) = val {
+                    self.write_var(*var, &val);
+                }
             }
         }
     }
@@ -1776,5 +1786,43 @@ impl Ctx<'_> {
     /// Abort flag of a latent action (fires output 1 "Aborted" when it finishes).
     pub fn set_aborted(&mut self) {
         self.k.ops[self.op as usize].flags |= 1;
+    }
+}
+
+/// What `PublishLinkedVariableValues` writes into each of a link's `n_vars` variables from
+/// the op's property value `v` (None = left alone). A single variable gets the value. An array
+/// property goes back element by element: entry i into the i-th variable (UE3
+/// `USeqVar_Object::PublishValue` copies `min(array, vars)` entries in order). Writing the whole
+/// array into every variable gave each one entry 0, so an op with `Targets` linked to "Lord
+/// Shaw", "Shaw_Elite" and "Shaw_Elite_Pistols" made all three Lord Shaw (U-221). `populate`
+/// skips empty object variables, so when the counts differ the entries cannot be matched to
+/// their variables and nothing is written back.
+pub fn publish_values(v: &Value, n_vars: usize) -> Vec<Option<Value>> {
+    match v {
+        Value::Array(items) if n_vars > 1 => {
+            if items.len() == n_vars {
+                items.iter().cloned().map(Some).collect()
+            } else {
+                vec![None; n_vars]
+            }
+        }
+        _ => vec![Some(v.clone()); n_vars],
+    }
+}
+
+#[cfg(test)]
+mod publish_tests {
+    use super::*;
+
+    #[test]
+    fn array_property_goes_back_element_by_element() {
+        let a = Value::Array(vec![Value::Obj(Obj::Pawn(7)), Value::Obj(Obj::Pawn(4)), Value::Obj(Obj::Pawn(8))]);
+        assert_eq!(publish_values(&a, 3), vec![Some(Value::Obj(Obj::Pawn(7))), Some(Value::Obj(Obj::Pawn(4))), Some(Value::Obj(Obj::Pawn(8)))]);
+        // An empty variable was skipped when populating: no way to match, nothing written.
+        let short = Value::Array(vec![Value::Obj(Obj::Pawn(7)), Value::Obj(Obj::Pawn(8))]);
+        assert_eq!(publish_values(&short, 3), vec![None, None, None]);
+        // One variable takes the whole value (as before).
+        assert_eq!(publish_values(&a, 1), vec![Some(a.clone())]);
+        assert_eq!(publish_values(&Value::Bool(true), 2), vec![Some(Value::Bool(true)), Some(Value::Bool(true))]);
     }
 }

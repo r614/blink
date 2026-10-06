@@ -33,6 +33,13 @@ use std::borrow::Cow;
 /// passive power applied in order (`AddVal` adds, `SetVal` replaces, `AddBasePercent` adds
 /// `base * v / 100`), then the value of every equipped bone charm on that attribute added.
 pub fn attribute(p: &PlayerState, cfg: &GameplayConfig, name: &str, base: f32) -> f32 {
+    attribute_for(p, cfg, name, base, |_| true)
+}
+
+/// [`attribute`] counting only the workshop upgrades `host` accepts (by upgrade name): an
+/// upgrade modifies the attributes of its `m_pHostItemType` only (e.g. `Pistol_Accuracy1` ->
+/// `DishonoredWepPistol`, `Crossbow_Accuracy` -> the crossbow).
+pub fn attribute_for(p: &PlayerState, cfg: &GameplayConfig, name: &str, base: f32, host: impl Fn(&str) -> bool) -> f32 {
     let items = &cfg.items;
     let mut v = base;
     for pp in &items.passive_powers {
@@ -52,8 +59,8 @@ pub fn attribute(p: &PlayerState, cfg: &GameplayConfig, name: &str, base: f32) -
         }
     }
     if p.inv.upgrades != 0 {
-        for (i, (_, attrs)) in items.upgrades.iter().enumerate().take(32) {
-            if p.inv.upgrades & (1 << i) != 0 {
+        for (i, (un, attrs)) in items.upgrades.iter().enumerate().take(32) {
+            if p.inv.upgrades & (1 << i) != 0 && host(un) {
                 v += attrs.iter().filter(|(n, _)| n == name).map(|(_, x)| *x).sum::<f32>();
             }
         }

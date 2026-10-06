@@ -113,6 +113,42 @@ pub struct CombatTuning {
     pub dark_vision_fade_out: f32,
     #[serde(default)]
     pub dark_vision_cooldown: f32,
+
+    // --- ranged dispersion (U-247; `DisTweaks_WeaponRanged_Attributes` of Corvo's weapons,
+    // CONFIRMED data) ---
+    #[serde(default)]
+    pub pistol_dispersion: DispersionTuning,
+    #[serde(default)]
+    pub crossbow_dispersion: DispersionTuning,
+}
+
+/// A ranged weapon's dispersion: `Attribute_DispersionMax` / `Min` /
+/// `InterpolationSpeed` base values (before the workshop upgrades) and the
+/// `DisTweaks_WeaponRanged.m_bMaxDispersionOn*` flags (bit 0 sprint, 1 jump, 2 block, 3 melee,
+/// the tweak's own bit order at +0x118).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+pub struct DispersionTuning {
+    pub max: f32,
+    pub min: f32,
+    pub speed: f32,
+    pub max_on: u8,
+}
+
+impl DispersionTuning {
+    pub const SPRINT: u8 = 1;
+    pub const JUMP: u8 = 2;
+    pub const BLOCK: u8 = 4;
+    pub const MELEE: u8 = 8;
+
+    fn from_values(w: &std::collections::BTreeMap<String, f32>, max: f32, min: f32, speed: f32) -> Self {
+        let flag = |k: &str, bit: u8, d: bool| if v(w, &format!("item.m_bMaxDispersionOn{k}"), if d { 1.0 } else { 0.0 }) != 0.0 { bit } else { 0 };
+        DispersionTuning {
+            max: v(w, "disp.m_DispersionMax.m_fBaseValue2_Normal", max),
+            min: v(w, "disp.m_DispersionMin.m_fBaseValue2_Normal", min),
+            speed: v(w, "disp.m_DispersionInterpolationSpeed.m_fBaseValue2_Normal", speed),
+            max_on: flag("Sprint", Self::SPRINT, true) | flag("Jump", Self::JUMP, true) | flag("Block", Self::BLOCK, true) | flag("Melee", Self::MELEE, false),
+        }
+    }
 }
 
 fn v(map: &std::collections::BTreeMap<String, f32>, key: &str, default: f32) -> f32 {
@@ -200,6 +236,10 @@ impl CombatTuning {
             dark_vision_fade_in: v(dv, "m_Levels[1].m_PpPerLevelParameters.m_EyeLidClosingDuration", 0.5),
             dark_vision_fade_out: v(dv, "m_Levels[1].m_PpPerLevelParameters.m_PowerFadeOutDuration", 2.0),
             dark_vision_cooldown: v(dv, "m_fCooldownTimer", 1.0),
+
+            // Corvo's pistol 45 / 15 / 70, crossbow 30 / 0 / 70 (Normal difficulty column).
+            pistol_dispersion: DispersionTuning::from_values(pb, 45.0, 15.0, 70.0),
+            crossbow_dispersion: DispersionTuning::from_values(cb, 30.0, 0.0, 70.0),
         }
     }
 }
