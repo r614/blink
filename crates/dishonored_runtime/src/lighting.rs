@@ -61,6 +61,11 @@ impl Plugin for Ue3FalloffPlugin {
                 let patched = patch_source(&src);
                 info!("pbr_lighting.wgsl: embedded source patched: {}", patched.is_some());
                 reg.insert_asset(std::path::PathBuf::from(path), path, patched.unwrap_or(src).into_bytes());
+                // bevy_pbr started loading the original bytes when it was built; load again so
+                // the patched source arrives before the first frame's pipelines are compiled.
+                if let Some(server) = app.world().get_resource::<AssetServer>() {
+                    server.reload("embedded://bevy_pbr/render/pbr_lighting.wgsl");
+                }
             }
             Some((_, None)) => info!("pbr_lighting.wgsl: not in the embedded registry"),
             None => info!("no embedded asset registry"),

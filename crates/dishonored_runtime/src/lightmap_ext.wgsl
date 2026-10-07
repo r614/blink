@@ -42,6 +42,16 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var baked_shadow_local: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(107) var<uniform> baked_local_light: vec4<f32>;
 
+// generic_PMAT's diffuse variation (map_render.rs `D2Variation`): base colour =
+// lerp(D_Diffuse_color x D, D2(uv0 x tiling), mask(uv).channel x power), not saturated.
+// d2_params = (on, power, tiling, mask on the lightmap UV); d2_rect = (uv_min, 1 / size).
+@group(#{MATERIAL_BIND_GROUP}) @binding(108) var<uniform> d2_params: vec4<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(109) var<uniform> d2_rect: vec4<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(110) var<uniform> d2_channel: vec4<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(111) var d2_diffuse: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(112) var d2_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(113) var d2_mask: texture_2d<f32>;
+
 // saturate((d + bias) * scale)^exponent, 0 below 1e-6.
 fn distance_field_shadow(d: f32, bias: f32, scale: f32, exponent: f32) -> f32 {
     let s = saturate((d + bias) * scale);
@@ -120,6 +130,20 @@ fn basis_weights(n: vec3<f32>) -> vec3<f32> {
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
+#ifdef VERTEX_UVS_A
+    if (d2_params.x > 0.5) {
+        var muv = in.uv;
+#ifdef VERTEX_UVS_B
+        if (d2_params.w > 0.5) {
+            muv = (in.uv_b - d2_rect.xy) * d2_rect.zw;
+        }
+#endif
+        let m = dot(textureSample(d2_mask, d2_sampler, muv), d2_channel) * d2_params.y;
+        let v = textureSample(d2_diffuse, d2_sampler, in.uv * d2_params.z).rgb;
+        let b = pbr_input.material.base_color;
+        pbr_input.material.base_color = vec4<f32>(b.rgb + (v - b.rgb) * m, b.a);
+    }
+#endif
     var lightmap_specular = vec3<f32>(0.0);
 #ifdef VERTEX_UVS_B
     // Mip 0 only: lightmap atlases bleed across charts when mipmapped.

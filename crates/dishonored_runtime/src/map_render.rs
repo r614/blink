@@ -443,6 +443,8 @@ pub fn spawn_map(
 
     let merge = std::env::var_os("DISHONORED_NO_MERGE").is_none();
     let mut batches: std::collections::HashMap<BatchKey, Batch> = std::collections::HashMap::new();
+    // Lightmap rects of the instances batched alone for their diffuse variation mask.
+    let mut d2_rects: std::collections::HashMap<u32, (Vec2, Vec2)> = std::collections::HashMap::new();
     // Bloom parts by material: (emissive texture, bloom colour, world-space triangles).
     let mut bloom_parts: std::collections::BTreeMap<usize, (usize, Vec3, Vec<f32>)> = std::collections::BTreeMap::new();
     let mut spawned = 0;
@@ -493,6 +495,15 @@ pub fn spawn_map(
                     df_light: lm
                         .and_then(|l| l.df_light.filter(|_| features.df_shadows && !map.lightmaps[l.atlas].shadow_local.is_empty()))
                         .map(|i| i as u32),
+                    d2_inst: lm
+                        .filter(|_| features.materials)
+                        .and_then(|l| {
+                            let m = mat_id?;
+                            d2_variation(&map.materials[m], map.material_params.get(m)?).filter(|d| d.lightmap_uv).map(|_| {
+                                d2_rects.insert(ii as u32, (l.uv_min, l.uv_max));
+                                ii as u32
+                            })
+                        }),
                 };
                 let b = batches.entry(key).or_default();
                 b.append(mesh, si, coords::transform(inst.transform), lm.map(|l| (l.uv_min, l.uv_max)));
@@ -571,7 +582,7 @@ pub fn spawn_map(
         Ok("shadow_local") => 9.0,
         _ => 0.0,
     };
-    let mut baked_cache: std::collections::HashMap<(u32, u32, bool, Option<u32>), Handle<BakedMaterial>> = std::collections::HashMap::new();
+    let mut baked_cache: std::collections::HashMap<(u32, u32, bool, Option<u32>, Option<u32>), Handle<BakedMaterial>> = std::collections::HashMap::new();
     // Build batch meshes (MikkTSpace tangents dominate) across all cores.
     let built: Vec<(BatchKey, Mesh)> = {
         let jobs: Vec<(BatchKey, Batch)> = batches.into_iter().filter(|(_, b)| !b.indices.is_empty()).collect();
@@ -618,8 +629,13 @@ pub fn spawn_map(
             // Lightmap regions are already folded into UV1: one shared material per
             // (material, atlas page).
             Some(atlas) => {
-                let h = baked_cache.entry((key.material, atlas, key.df, key.df_light)).or_insert_with(|| {
+                let h = baked_cache.entry((key.material, atlas, key.df, key.df_light, key.d2_inst)).or_insert_with(|| {
                     let base = materials.get(&mat).cloned().unwrap_or_default();
+                    // Diffuse variation (generic_PMAT D2_): texture, mask and their parameters.
+                    let d2 = (key.material != u32::MAX && features.materials && !features.debug_lighting)
+                        .then(|| d2_variation(&map.materials[key.material as usize], map.material_params.get(key.material as usize)?))
+                        .flatten();
+                    let rect = key.d2_inst.and_then(|i| d2_rects.get(&i)).map(|(a, b)| Vec4::new(a.x, a.y, 1.0 / (b.x - a.x).max(1e-9), 1.0 / (b.y - a.y).max(1e-9))).unwrap_or(Vec4::new(0.0, 0.0, 1.0, 1.0));
                     let exposure = base.lightmap_exposure;
                     // Lightmap specular: colour = reflectance * 2 / a (see lightmap_ext.wgsl),
                     // lobe exponent SP_Specular_Power + 1.
@@ -640,6 +656,11 @@ pub fn spawn_map(
                                 .and_then(|i| map.lights.get(i as usize))
                                 .map(|l| coords::pos(l.position).extend(DF_SHADOW_LOCAL_SCALE))
                                 .unwrap_or(Vec4::ZERO),
+                            d2_params: d2.as_ref().map(|d| Vec4::new(1.0, d.power, d.tiling, if d.lightmap_uv { 1.0 } else { 0.0 })).unwrap_or(Vec4::ZERO),
+                            d2_rect: rect,
+                            d2_channel: d2.as_ref().map(|d| Vec4::from_array(std::array::from_fn(|k| if k == d.channel as usize { 1.0 } else { 0.0 }))).unwrap_or(Vec4::ZERO),
+                            d2_diffuse: d2.as_ref().map(|d| image_handles[d.diffuse].clone()),
+                            d2_mask: d2.as_ref().map(|d| image_handles[d.mask].clone()),
                         },
                     })
                 });
@@ -672,6 +693,45 @@ struct BatchKey {
     df_light: Option<u32>,
     cell: (i32, i32),
     uv1: bool,
+    /// The instance, for materials whose diffuse variation mask is read through the
+    /// component's own lightmap UVs (`D2Variation::lightmap_uv`).
+    d2_inst: Option<u32>,
+}
+
+/// generic_PMAT's diffuse variation (`D2_Enable_Diffuse_Variation`), decoded from the base pass
+/// shaders (e.g. 15243 with the mask on UV0, 28053 with `D2_Use_UV_coordinate_Index_1`):
+/// `diffuse = lerp(D_Diffuse_color.rgb x a x D, D2(UV0 x D2_Diffuse_variation_Tilling),
+/// D2_Diffuse_variation_mask(uv).channel x D2_Variation_Mask_Power)`, not saturated; the mask's
+/// channel is the static mask `D2_Diffuse_Variation_mask_channel`. Variants with
+/// `D2_Enable_Multiply_for_variation`, `D2_Enable_Diffuse_variation_color` or
+/// `D2_Use_UV_coordinate_Index_2` are not decoded (U-583).
+struct D2Variation {
+    diffuse: usize,
+    mask: usize,
+    power: f32,
+    tiling: f32,
+    /// Mask on texture coordinate 1, the meshes' lightmap channel (`LightMapCoordinateIndex` 1).
+    lightmap_uv: bool,
+    channel: u8,
+}
+
+fn d2_variation(m: &MaterialAsset, p: &MaterialParams) -> Option<D2Variation> {
+    if p.switch("D2_Enable_Diffuse_Variation") != Some(true)
+        || p.switch("D2_Enable_Multiply_for_variation") == Some(true)
+        || p.switch("D2_Enable_Diffuse_variation_color") == Some(true)
+        || p.switch("D2_Use_UV_coordinate_Index_2") == Some(true)
+    {
+        return None;
+    }
+    let tex = |n: &str| m.texture_params.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map(|t| t.1);
+    Some(D2Variation {
+        diffuse: tex("D2_diffuse_variation_texture")?,
+        mask: tex("D2_Diffuse_variation_mask")?,
+        power: scalar(p, "D2_Variation_Mask_Power").unwrap_or(1.0),
+        tiling: scalar(p, "D2_Diffuse_variation_Tilling").unwrap_or(1.0),
+        lightmap_uv: p.switch("D2_Use_UV_coordinate_Index_1") == Some(true),
+        channel: p.mask_channel("D2_Diffuse_Variation_mask_channel").unwrap_or(0),
+    })
 }
 
 #[derive(Default)]
@@ -763,6 +823,20 @@ pub struct BakedLightmap {
     /// That light's Bevy world position; w = its distance-field scale (0: the batch has none).
     #[uniform(107)]
     pub local_light: Vec4,
+    /// Diffuse variation (`D2Variation`): (on, mask power, tiling, mask on the lightmap UV).
+    #[uniform(108)]
+    pub d2_params: Vec4,
+    /// The component's lightmap rect: (uv_min, 1 / size), mapping atlas UV back to its UV1.
+    #[uniform(109)]
+    pub d2_rect: Vec4,
+    /// One-hot mask channel.
+    #[uniform(110)]
+    pub d2_channel: Vec4,
+    #[texture(111)]
+    #[sampler(112)]
+    pub d2_diffuse: Option<Handle<Image>>,
+    #[texture(113)]
+    pub d2_mask: Option<Handle<Image>>,
 }
 
 /// `DistanceFieldParameters` of the original's distance-field light shaders

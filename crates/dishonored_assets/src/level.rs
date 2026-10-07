@@ -131,7 +131,7 @@ struct Importer<'a> {
 }
 
 /// Single-channel static component masks kept in `MaterialParams::mask_channels`.
-const MASK_CHANNELS: &[&str] = &["C_Cubemap_Mask_Channel", "O_Opacity_Mask_Channel", "S_Specular_Mask_Channel", "E_Emissive_Channel", "F_Fresnel_Mask_Channel"];
+const MASK_CHANNELS: &[&str] = &["C_Cubemap_Mask_Channel", "O_Opacity_Mask_Channel", "S_Specular_Mask_Channel", "E_Emissive_Channel", "F_Fresnel_Mask_Channel", "D2_Diffuse_Variation_mask_channel"];
 
 const RESOURCE_CLASSES: &[&str] = &[
     "StaticMesh",
@@ -1260,6 +1260,15 @@ impl Importer<'_> {
                 let key = chain.textures.iter().chain(chain.default_textures.iter()).find(|(k, _)| k.trim().eq_ignore_ascii_case(n)).map(|v| v.1);
                 if let Some(t) = key.and_then(|k| self.texture(k)) {
                     texture_params.push((n.to_string(), t));
+                }
+            }
+            // generic_PMAT's diffuse variation (`D2_Enable_Diffuse_Variation`): its texture and mask.
+            if !sky && chain.switch("D2_Enable_Diffuse_Variation") == Some(true) {
+                for n in ["D2_diffuse_variation_texture", "D2_Diffuse_variation_mask"] {
+                    let key = chain.textures.iter().chain(chain.default_textures.iter()).find(|(k, _)| k.trim().eq_ignore_ascii_case(n)).map(|v| v.1);
+                    if let Some(t) = key.and_then(|k| self.texture(k)) {
+                        texture_params.push((n.to_string(), t));
+                    }
                 }
             }
             // The base material's unnamed textures (its shaders' `Tex#i`), as `Tex<i>`.
