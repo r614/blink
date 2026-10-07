@@ -225,3 +225,49 @@ pub fn trace_event(this: u32, func: u32, parms: u32) {
     let parms = if t.parm_len > 0 { mem::read_bytes(parms, t.parm_len as usize).unwrap_or_default() } else { Vec::new() };
     t.records.push(EventRecord { time: world_time(), this, func, parms });
 }
+
+/// `GWorld` (the `UWorld*` global) and `UWorld::SingleLineCheck` (thiscall: `FCheckResult& Hit,
+/// AActor* Source, const FVector& End, const FVector& Start, DWORD TraceFlags, const FVector&
+/// Extent, ULightComponent* Light`; returns true when nothing was hit; `ret 0x1C`).
+const GWORLD: u32 = 0x0144_9888;
+const SINGLE_LINE_CHECK: u32 = 0x0064_E7A0;
+
+/// Run collision checks with the engine's own `SingleLineCheck` on the game thread.
+/// `FCheckResult` (0x4C bytes): Actor +0x4, Location +0x8, Normal +0x14, Time +0x20,
+/// Item +0x24, Component +0x30.
+pub fn line_checks(q: Vec<dishonored_probe::LineQuery>) -> Result<Vec<dishonored_probe::LineResult>, String> {
+    hook::on_game_thread(move || run_line_checks(&q), 60_000)?
+}
+
+#[cfg(target_arch = "x86")]
+fn run_line_checks(q: &[dishonored_probe::LineQuery]) -> Result<Vec<dishonored_probe::LineResult>, String> {
+    type Slc = unsafe extern "thiscall" fn(u32, *mut u8, u32, *const f32, *const f32, u32, *const f32, u32) -> u32;
+    let world = mem::u32(GWORLD).unwrap_or(0);
+    if world == 0 {
+        return Err("no GWorld".into());
+    }
+    let f: Slc = unsafe { std::mem::transmute(SINGLE_LINE_CHECK as usize) };
+    let mut out = Vec::with_capacity(q.len());
+    for x in q {
+        let mut hit = [0u8; 0x60];
+        hit[0x20..0x24].copy_from_slice(&1.0f32.to_le_bytes());
+        hit[0x24..0x28].copy_from_slice(&(-1i32).to_le_bytes());
+        let none = unsafe { f(world, hit.as_mut_ptr(), x.source, x.end.as_ptr(), x.start.as_ptr(), x.flags, x.extent.as_ptr(), 0) } & 0xff != 0;
+        let fl = |o: usize| f32::from_le_bytes([hit[o], hit[o + 1], hit[o + 2], hit[o + 3]]);
+        let u = |o: usize| u32::from_le_bytes([hit[o], hit[o + 1], hit[o + 2], hit[o + 3]]);
+        out.push(dishonored_probe::LineResult {
+            hit: !none,
+            time: fl(0x20),
+            location: [fl(0x8), fl(0xC), fl(0x10)],
+            normal: [fl(0x14), fl(0x18), fl(0x1C)],
+            actor: u(0x4),
+            component: u(0x30),
+        });
+    }
+    Ok(out)
+}
+
+#[cfg(not(target_arch = "x86"))]
+fn run_line_checks(_q: &[dishonored_probe::LineQuery]) -> Result<Vec<dishonored_probe::LineResult>, String> {
+    Err("line checks need the 32-bit game process".into())
+}

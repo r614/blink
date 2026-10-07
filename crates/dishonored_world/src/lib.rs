@@ -28,14 +28,92 @@ use geom::{Aabb, box_triangle, closest_point_triangle, closest_segment_triangle,
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
-/// Gameplay trace channels, mirroring Dishonored's `DisPrimTraceMask`.
+/// Trace channels, mirroring Dishonored's `DisPrimTraceMask` (research/dishonored/COLLISION.md):
+/// a check of one trace type is blocked only by primitives with that type's bit.
 pub mod channel {
+    /// The player's movement (`m_bTraceForMove_Player`).
     pub const PAWN: u8 = 1 << 0;
     pub const CROSSHAIR: u8 = 1 << 1;
     pub const PROJECTILE: u8 = 1 << 2;
     pub const MELEE: u8 = 1 << 3;
     pub const VISION: u8 = 1 << 4;
-    pub const ALL: u8 = 0x1F;
+    /// Other pawns' movement (`m_bTraceForMove_NonPlayerPawn`).
+    pub const NPC: u8 = 1 << 5;
+    /// Movement of actors that are not pawns (`m_bTraceForMove_NonPawn`).
+    pub const NON_PAWN: u8 = 1 << 6;
+    pub const ALL: u8 = 0x7F;
+
+    /// The channels of a `DisPrimTraceMask` (bit 0 move non-pawn, 1 move NPC, 2 move player,
+    /// 3 crosshair, 4 projectile, 5 melee, 6 vision).
+    pub fn from_trace_mask(m: u8) -> u8 {
+        let mut c = 0;
+        for (bit, ch) in [(0, NON_PAWN), (1, NPC), (2, PAWN), (3, CROSSHAIR), (4, PROJECTILE), (5, MELEE), (6, VISION)] {
+            if m & (1 << bit) != 0 {
+                c |= ch;
+            }
+        }
+        c
+    }
+}
+
+/// Which checks a triangle answers: `UStaticMeshComponent::LineCheck` uses a mesh's simplified
+/// collision for zero-extent checks when `UseSimpleLineCollision` and for extent checks when
+/// `UseSimpleBoxCollision`, its kDOP triangles otherwise.
+pub mod shape {
+    /// Zero-extent checks (lines: `raycast`).
+    pub const LINE: u8 = 1 << 0;
+    /// Extent checks (boxes and capsules).
+    pub const EXTENT: u8 = 1 << 1;
+    /// Checks that ask for complex collision (`TRACE_ComplexCollision`, 0x20000): the kDOP
+    /// triangles whatever the mesh's flags.
+    pub const COMPLEX: u8 = 1 << 2;
+    pub const BOTH: u8 = LINE | EXTENT;
+    pub const ALL: u8 = LINE | EXTENT | COMPLEX;
+
+    /// The gameplay checks that ask for complex collision in the original: the pistol shot
+    /// (flags 0x020A28DF), the crosshair (0x01022097) and the vision line of sight (0x08023086),
+    /// measured with the engine hook (research/dishonored/COLLISION.md "Trace flags").
+    pub const COMPLEX_CHANNELS: u8 = super::channel::CROSSHAIR | super::channel::PROJECTILE | super::channel::VISION;
+
+    /// The shape bit a line check on `channels` needs.
+    pub fn line_for(channels: u8) -> u8 {
+        if channels & COMPLEX_CHANNELS != 0 { COMPLEX } else { LINE }
+    }
+
+    /// The shape bit an extent check on `channels` needs.
+    pub fn extent_for(channels: u8) -> u8 {
+        if channels & COMPLEX_CHANNELS != 0 { COMPLEX } else { EXTENT }
+    }
+}
+
+/// How the original backs a hit off along a check that is not `TRACE_Accurate`
+/// (`UStaticMeshComponent::LineCheck` 0x007717D0): what a triangle came from.
+pub mod hit_kind {
+    /// kDOP (per-polygon) triangles: 4 uu (at most a tenth of the check).
+    pub const COMPLEX: u8 = 0;
+    /// Simplified collision (`AggGeom`): 1 uu (at most a tenth of the check).
+    pub const SIMPLE: u8 = 1;
+    /// Brushes and physics-asset bodies (not measured, U-653).
+    pub const OTHER: u8 = 2;
+
+    /// The fraction the original reports for a hit at fraction `t` of a check of length `len`.
+    pub fn engine_time(kind: u8, t: f32, len: f32) -> f32 {
+        if len <= 0.0 {
+            return t;
+        }
+        let back = match kind {
+            COMPLEX => {
+                let a = 0.1 / len;
+                if a > 0.1 { a } else { (4.0 / len).min(0.1) }
+            }
+            SIMPLE => {
+                let a = 0.1 / len;
+                if a > 0.1 { a } else { (1.0 / len).min(0.1) }
+            }
+            _ => 0.0,
+        };
+        (t - back).clamp(0.0, 1.0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -199,6 +277,8 @@ pub struct SweepHit {
     /// Most upward-facing triangle face normal among the contacts. Used for walkability
     /// so a rounded capsule bottom behaves like UE3's flat-bottomed cylinder on edges.
     pub face_up: Vec3,
+    /// The blocking triangle (of the world that answered; `u32::MAX` when unknown).
+    pub tri: u32,
 }
 
 /// The query surface the simulation is written against.
@@ -320,6 +400,13 @@ pub struct CollisionWorld {
     /// Contact type class names of the physical materials (`surfaces[0]` is empty).
     #[serde(default)]
     pub surfaces: Vec<String>,
+    /// Per triangle (parallel to `tris`, empty: every triangle answers every check): the
+    /// checks it answers ([`shape`] bits).
+    #[serde(default)]
+    pub tri_shape: Vec<u8>,
+    /// Per triangle (parallel to `tris`): what it came from ([`hit_kind`]).
+    #[serde(default)]
+    pub tri_kind: Vec<u8>,
     /// Original navigation (attached after loading; not part of the collision cache).
     #[serde(skip)]
     pub nav: Option<std::sync::Arc<nav::NavWorld>>,
@@ -345,21 +432,45 @@ pub struct MoverCollision {
     /// The actor's placed location and rotation.
     pub actor_to_world: glam::Mat4,
     pub tris: Vec<[Vec3; 3]>,
+    /// Per triangle: channels, [`shape`] bits and [`hit_kind`] (empty: every channel and check).
+    #[serde(default)]
+    pub info: Vec<TriInfo>,
+}
+
+/// What one collision triangle answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriInfo {
+    pub channels: u8,
+    pub shape: u8,
+    pub kind: u8,
+}
+
+impl Default for TriInfo {
+    fn default() -> Self {
+        TriInfo { channels: channel::ALL, shape: shape::ALL, kind: hit_kind::COMPLEX }
+    }
 }
 
 impl MoverCollision {
     /// The mover's collision moved by `delta` (current actor transform x inverse placed one).
     pub fn placed(&self, delta: glam::Mat4) -> CollisionWorld {
-        let tris = self
-            .tris
-            .iter()
-            .filter_map(|t| {
-                let (a, b, c) = (delta.transform_point3(t[0]), delta.transform_point3(t[1]), delta.transform_point3(t[2]));
-                let n = (b - a).cross(c - a);
-                (n.length_squared() >= 1e-10).then(|| Tri { a, b, c, n: n.normalize(), channels: channel::ALL, source: 0 })
-            })
-            .collect();
-        CollisionWorld::from_triangles(tris, vec![self.actor.clone()])
+        let mut tris = Vec::new();
+        let (mut shapes, mut kinds) = (Vec::new(), Vec::new());
+        for (i, t) in self.tris.iter().enumerate() {
+            let (a, b, c) = (delta.transform_point3(t[0]), delta.transform_point3(t[1]), delta.transform_point3(t[2]));
+            let n = (b - a).cross(c - a);
+            if n.length_squared() < 1e-10 {
+                continue;
+            }
+            let info = self.info.get(i).copied().unwrap_or_default();
+            tris.push(Tri { a, b, c, n: n.normalize(), channels: info.channels, source: 0 });
+            shapes.push(info.shape);
+            kinds.push(info.kind);
+        }
+        let mut w = CollisionWorld::from_triangles(tris, vec![self.actor.clone()]);
+        w.tri_shape = shapes;
+        w.tri_kind = kinds;
+        w
     }
 }
 
@@ -441,8 +552,10 @@ impl CollisionWorld {
         if extra.iter().all(|e| e.2.is_empty()) {
             return self;
         }
-        let CollisionWorld { mut tris, mut sources, mut tri_surface, surfaces, nav, water, volumes, movers, climbables, .. } = self;
+        let CollisionWorld { mut tris, mut sources, mut tri_surface, surfaces, mut tri_shape, mut tri_kind, nav, water, volumes, movers, climbables, .. } = self;
         tri_surface.resize(tris.len(), 0);
+        tri_shape.resize(tris.len(), shape::ALL);
+        tri_kind.resize(tris.len(), hit_kind::COMPLEX);
         for (source, channels, extra) in extra {
             let src = sources.len() as u32;
             sources.push(source.clone());
@@ -453,10 +566,14 @@ impl CollisionWorld {
                 }
                 tris.push(Tri { a: t[0], b: t[1], c: t[2], n: n.normalize(), channels: *channels, source: src });
                 tri_surface.push(0);
+                tri_shape.push(shape::ALL);
+                tri_kind.push(hit_kind::OTHER);
             }
         }
         let mut w = CollisionWorld::from_triangles(tris, sources);
         w.tri_surface = tri_surface;
+        w.tri_shape = tri_shape;
+        w.tri_kind = tri_kind;
         w.surfaces = surfaces;
         w.nav = nav;
         w.water = water;
@@ -481,7 +598,17 @@ impl CollisionWorld {
             .collect();
         let total = bounds.iter().fold(Aabb::EMPTY, |acc, b| acc.union(b));
         let bvh = Bvh::build(&bounds);
-        CollisionWorld { tris, bvh, sources, bounds: Some(total), nav: None, water: None, volumes: None, climbables: None, tri_surface: Vec::new(), surfaces: Vec::new(), movers: Vec::new() }
+        CollisionWorld { tris, bvh, sources, bounds: Some(total), nav: None, water: None, volumes: None, climbables: None, tri_surface: Vec::new(), surfaces: Vec::new(), tri_shape: Vec::new(), tri_kind: Vec::new(), movers: Vec::new() }
+    }
+
+    /// The checks a triangle answers ([`shape`] bits).
+    pub fn shape_of(&self, tri: u32) -> u8 {
+        self.tri_shape.get(tri as usize).copied().unwrap_or(shape::ALL)
+    }
+
+    /// What a triangle came from ([`hit_kind`]).
+    pub fn kind_of(&self, tri: u32) -> u8 {
+        self.tri_kind.get(tri as usize).copied().unwrap_or(hit_kind::COMPLEX)
     }
 
     /// Build from an imported map: every colliding instance (hidden blockers included).
@@ -500,6 +627,7 @@ impl CollisionWorld {
                 }
             }
         };
+        let (mut tri_shape, mut tri_kind) = (Vec::new(), Vec::new());
         for inst in map.instances.iter().filter(|i| i.collides) {
             let mesh = &map.meshes[inst.mesh];
             let src = sources.len() as u32;
@@ -511,50 +639,22 @@ impl CollisionWorld {
                     surface_id(m.and_then(|m| map.materials.get(m)).and_then(|m| m.contact_type.as_ref()))
                 })
                 .collect();
-            let xf = inst.transform;
-            let mirrored = xf.determinant() < 0.0;
-            let mut push = |i0: u32, i1: u32, i2: u32, surface: u16| {
-                let (Some(a), Some(b), Some(c)) = (
-                    mesh.positions.get(i0 as usize),
-                    mesh.positions.get(i1 as usize),
-                    mesh.positions.get(i2 as usize),
-                ) else {
-                    return;
-                };
-                let (a, b, c) = (xf.transform_point3(*a), xf.transform_point3(*b), xf.transform_point3(*c));
-                let (b, c) = if mirrored { (c, b) } else { (b, c) };
-                let n = (b - a).cross(c - a);
+            for (t, sec, info) in instance_triangles(map, inst) {
+                let n = (t[1] - t[0]).cross(t[2] - t[0]);
                 if n.length_squared() < 1e-10 {
-                    return;
+                    continue;
                 }
-                tris.push(Tri { a, b, c, n: n.normalize(), channels: channel::ALL, source: src });
-                tri_surface.push(surface);
-            };
-            if !mesh.collision_triangles.is_empty() {
-                for (i, t) in mesh.collision_triangles.iter().enumerate() {
-                    // The kDOP tree keeps every triangle; UE3's static mesh collision provider
-                    // skips those of sections without `EnableCollision` at query time
-                    // (`FStaticMeshCollisionDataProvider::ShouldCheckMaterial`).
-                    let m = mesh.collision_materials.get(i).map(|m| *m as usize);
-                    if m.and_then(|m| mesh.sections.get(m)).is_some_and(|s| !s.enable_collision) {
-                        continue;
-                    }
-                    let s = m.and_then(|m| section_surface.get(m)).copied().unwrap_or(0);
-                    push(t[0], t[1], t[2], s);
-                }
-            } else {
-                for (si, s) in mesh.sections.iter().enumerate().filter(|s| s.1.enable_collision) {
-                    let start = s.first_index as usize;
-                    let end = (start + s.num_triangles as usize * 3).min(mesh.indices.len());
-                    for t in mesh.indices[start..end].chunks_exact(3) {
-                        push(t[0], t[1], t[2], section_surface[si]);
-                    }
-                }
+                tris.push(Tri { a: t[0], b: t[1], c: t[2], n: n.normalize(), channels: info.channels, source: src });
+                tri_surface.push(sec.and_then(|s| section_surface.get(s).copied()).unwrap_or(section_surface.first().copied().unwrap_or(0)));
+                tri_shape.push(info.shape);
+                tri_kind.push(info.kind);
             }
         }
         let mut w = Self::from_triangles(tris, sources);
         w.tri_surface = tri_surface;
         w.surfaces = surfaces;
+        w.tri_shape = tri_shape;
+        w.tri_kind = tri_kind;
         // Movers: their triangles where the map placed them, one entry per actor.
         for inst in map.instances.iter().filter(|i| i.mover.is_some()) {
             let m = inst.mover.as_ref().unwrap();
@@ -562,9 +662,16 @@ impl CollisionWorld {
             if t.is_empty() {
                 continue;
             }
-            match w.movers.iter_mut().find(|x| x.actor == m.actor) {
-                Some(x) => x.tris.extend(t),
-                None => w.movers.push(MoverCollision { actor: m.actor.clone(), actor_to_world: m.actor_to_world, tris: t }),
+            let x = match w.movers.iter().position(|x| x.actor == m.actor) {
+                Some(i) => &mut w.movers[i],
+                None => {
+                    w.movers.push(MoverCollision { actor: m.actor.clone(), actor_to_world: m.actor_to_world, tris: Vec::new(), info: Vec::new() });
+                    w.movers.last_mut().unwrap()
+                }
+            };
+            for (tri, _, info) in t {
+                x.tris.push(tri);
+                x.info.push(info);
             }
         }
         w
@@ -640,7 +747,7 @@ impl WorldQuery for CollisionWorld {
     fn box_contacts(&self, b: &PawnBox, channels: u8, out: &mut Vec<Contact>) {
         self.bvh.query_aabb(&b.aabb().expand(SKIN), |i| {
             let t = &self.tris[i as usize];
-            if t.channels & channels == 0 {
+            if t.channels & channels == 0 || self.shape_of(i) & shape::extent_for(channels) == 0 {
                 return;
             }
             if let Some((normal, depth)) = box_triangle(b.center, b.half, t.a, t.b, t.c, 0.0) {
@@ -662,7 +769,7 @@ impl WorldQuery for CollisionWorld {
         if overlapping(b, &mut contacts) {
             let k = contacts.iter().max_by(|a, c| a.depth.total_cmp(&c.depth)).copied().unwrap();
             let face_up = self.face_up(&contacts);
-            return Some(SweepHit { fraction: 0.0, normal: k.normal, point: k.point, start_penetrating: true, face_up });
+            return Some(SweepHit { fraction: 0.0, normal: k.normal, point: k.point, start_penetrating: true, face_up, tri: k.tri });
         }
         let len = delta.length();
         if len < 1e-6 {
@@ -704,7 +811,7 @@ impl WorldQuery for CollisionWorld {
         let (normal, point) = blocking.map_or((-dir, b.center + delta * hi), |c| (c.normal, c.point));
         let back = (SKIN / len).min(lo);
         let face_up = self.face_up(&contacts);
-        Some(SweepHit { fraction: (lo - back).max(0.0), normal, point, start_penetrating: false, face_up })
+        Some(SweepHit { fraction: (lo - back).max(0.0), normal, point, start_penetrating: false, face_up, tri: blocking.map_or(u32::MAX, |c| c.tri) })
     }
 
     fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32, channels: u8) -> Option<RayHit> {
@@ -715,7 +822,7 @@ impl WorldQuery for CollisionWorld {
         let mut best: Option<RayHit> = None;
         self.bvh.query_ray(origin, d, max_dist, |i, max_t| {
             let t = &self.tris[i as usize];
-            if t.channels & channels == 0 {
+            if t.channels & channels == 0 || self.shape_of(i) & shape::line_for(channels) == 0 {
                 return max_t;
             }
             if let Some(dist) = ray_triangle(origin, d, t.a, t.b, t.c) {
@@ -735,7 +842,7 @@ impl WorldQuery for CollisionWorld {
         let r = cap.radius;
         self.bvh.query_aabb(&cap.aabb().expand(SKIN), |i| {
             let t = &self.tris[i as usize];
-            if t.channels & channels == 0 {
+            if t.channels & channels == 0 || self.shape_of(i) & shape::extent_for(channels) == 0 {
                 return;
             }
             let (s, q) = closest_segment_triangle(p0, p1, t.a, t.b, t.c);
@@ -764,7 +871,7 @@ impl WorldQuery for CollisionWorld {
         if overlapping(cap, &mut contacts) {
             let k = contacts.iter().max_by(|a, b| a.depth.total_cmp(&b.depth)).copied().unwrap();
             let face_up = self.face_up(&contacts);
-            return Some(SweepHit { fraction: 0.0, normal: k.normal, point: k.point, start_penetrating: true, face_up });
+            return Some(SweepHit { fraction: 0.0, normal: k.normal, point: k.point, start_penetrating: true, face_up, tri: k.tri });
         }
         let len = delta.length();
         if len < 1e-6 {
@@ -808,39 +915,61 @@ impl WorldQuery for CollisionWorld {
         // Back off by the skin so the next query starts clear.
         let back = (SKIN / len).min(lo);
         let face_up = self.face_up(&contacts);
-        Some(SweepHit { fraction: (lo - back).max(0.0), normal, point, start_penetrating: false, face_up })
+        Some(SweepHit { fraction: (lo - back).max(0.0), normal, point, start_penetrating: false, face_up, tri: contacts.iter().max_by(|a, c| a.depth.total_cmp(&c.depth)).map_or(u32::MAX, |c| c.tri) })
     }
 }
 
 /// World-space collision triangles of one instance: the mesh's kDOP triangles of colliding
 /// sections (render triangles of colliding sections when the mesh has none), as
 /// [`CollisionWorld::from_map`] takes them.
-fn instance_triangles(map: &DishonoredMap, inst: &dishonored_ir::MeshInstance) -> Vec<[Vec3; 3]> {
+/// The instance's triangles with their section (kDOP and render triangles) and what they answer:
+/// the channels of its trace types; the simplified collision for the checks its mesh's
+/// `UseSimple*Collision` flags give it, the kDOP triangles for the others (a mesh that wants its
+/// simplified collision but has none answers those checks with nothing).
+fn instance_triangles(map: &DishonoredMap, inst: &dishonored_ir::MeshInstance) -> Vec<([Vec3; 3], Option<usize>, TriInfo)> {
     let mesh = &map.meshes[inst.mesh];
     let xf = inst.transform;
     let mirrored = xf.determinant() < 0.0;
+    let channels = channel::from_trace_mask(inst.trace_mask);
+    let simple = (if mesh.simple_line { shape::LINE } else { 0 }) | (if mesh.simple_box { shape::EXTENT } else { 0 });
+    let complex = shape::BOTH & !simple;
     let mut out = Vec::new();
-    let mut push = |i0: u32, i1: u32, i2: u32| {
+    if let Some(agg) = &mesh.simple_collision {
+        if simple != 0 {
+            let info = TriInfo { channels, shape: simple, kind: hit_kind::SIMPLE };
+            for t in agg {
+                let (a, b, c) = (xf.transform_point3(t[0]), xf.transform_point3(t[1]), xf.transform_point3(t[2]));
+                out.push((if mirrored { [a, c, b] } else { [a, b, c] }, None, info));
+            }
+        }
+    }
+    // The kDOP triangles answer the checks the simplified collision does not, and every check
+    // that asks for complex collision.
+    let info = TriInfo { channels, shape: complex | shape::COMPLEX, kind: hit_kind::COMPLEX };
+    let mut push = |i0: u32, i1: u32, i2: u32, sec: usize| {
         let (Some(a), Some(b), Some(c)) = (mesh.positions.get(i0 as usize), mesh.positions.get(i1 as usize), mesh.positions.get(i2 as usize)) else {
             return;
         };
         let (a, b, c) = (xf.transform_point3(*a), xf.transform_point3(*b), xf.transform_point3(*c));
-        out.push(if mirrored { [a, c, b] } else { [a, b, c] });
+        out.push((if mirrored { [a, c, b] } else { [a, b, c] }, Some(sec), info));
     };
     if !mesh.collision_triangles.is_empty() {
         for (i, t) in mesh.collision_triangles.iter().enumerate() {
+            // The kDOP tree keeps every triangle; UE3's static mesh collision provider skips
+            // those of sections without `EnableCollision` at query time
+            // (`FStaticMeshCollisionDataProvider::ShouldCheckMaterial`).
             let m = mesh.collision_materials.get(i).map(|m| *m as usize);
             if m.and_then(|m| mesh.sections.get(m)).is_some_and(|s| !s.enable_collision) {
                 continue;
             }
-            push(t[0], t[1], t[2]);
+            push(t[0], t[1], t[2], m.unwrap_or(0));
         }
     } else {
-        for s in mesh.sections.iter().filter(|s| s.enable_collision) {
+        for (si, s) in mesh.sections.iter().enumerate().filter(|s| s.1.enable_collision) {
             let start = s.first_index as usize;
             let end = (start + s.num_triangles as usize * 3).min(mesh.indices.len());
             for t in mesh.indices[start..end].chunks_exact(3) {
-                push(t[0], t[1], t[2]);
+                push(t[0], t[1], t[2], si);
             }
         }
     }

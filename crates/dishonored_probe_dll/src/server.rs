@@ -464,6 +464,18 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
             }
             put_u32(&mut out, a);
         }
+        op::LINE_CHECKS => {
+            let n = io(rd.u32())?;
+            if n > 4096 {
+                return Err("too many line checks".into());
+            }
+            let q = (0..n).map(|_| io(dishonored_probe::LineQuery::decode(&mut rd))).collect::<Result<Vec<_>, String>>()?;
+            let r = native::line_checks(q)?;
+            put_u32(&mut out, r.len() as u32);
+            for x in &r {
+                x.encode(&mut out);
+            }
+        }
         op::NATIVE_CALL => {
             let (func, this) = (io(rd.u32())?, io(rd.u32())?);
             let flags = io(rd.u8())?;

@@ -27,11 +27,14 @@
 //! harness launcher           the launcher end to end: screenshots of every screen, settings
 //!                             persisted and picked up by a launched game, pause menu, host +
 //!                             browse + join a local server through the launcher
-//! harness all                 sim, net, visual, contracts, audio; writes harness_out/<run>/REPORT.md
+//! harness collision [--map M]  the port's collision against the stored results of the original's
+//!                             own collision checks (`gen` / `check` build them with probe_launch)
+//! harness all               sim, net, visual, contracts, audio; writes harness_out/<run>/REPORT.md
 //! ```
 
 mod audio;
 mod audio_playback;
+mod collision;
 mod contracts;
 mod conversation;
 mod kismet;
@@ -81,6 +84,7 @@ fn main() -> Result<()> {
         "contracts" => contracts::run(&ctx, &mut rep)?,
         "fidelity" => fidelity::run(&ctx, &mut rep)?,
         "ffa" => ffa::run(&ctx, &mut rep)?,
+        "collision" => collision::run(&ctx, &mut rep)?,
         "audio" => audio::run(&ctx, &mut rep)?,
         "mission" => mission::run(&ctx, &mut rep)?,
         "travel" => travel::run(&ctx, &mut rep)?,

@@ -198,11 +198,20 @@ pub fn load_climbables(content: &Content, map: &str) -> Vec<dishonored_world::Cl
 pub fn add_level_blockers(w: CollisionWorld, content: &Content, map: &str) -> CollisionWorld {
     let pkgs = map_packages(content, map);
     let mut extra = Vec::new();
+    // Each volume's trace types (`BrushComponent.m_CollisionTraceTypes`: the `Volume` class
+    // default is the three movement types, so pawns and movers are blocked, gameplay traces
+    // pass; research/dishonored/COLLISION.md).
+    let sources = dishonored_assets::collision_audit::collision_sources(content, &pkgs);
     match dishonored_assets::water::extract_blocking_volumes(content, &pkgs) {
         Ok(v) => {
             for b in v {
                 let tris: Vec<[Vec3; 3]> = b.hulls.iter().flat_map(|h| dishonored_world::hull_triangles(h)).collect();
-                extra.push((format!("{}:{}", b.package, b.name), dishonored_world::channel::PAWN, tris));
+                let src = sources.iter().find(|s| s.package == b.package && s.actor == b.name && s.component_class == "BrushComponent");
+                if src.is_some_and(|s| !s.active()) {
+                    continue;
+                }
+                let mask = src.map_or(dishonored_assets::collision_audit::mask::MOVE, |s| s.trace_mask);
+                extra.push((format!("{}:{}", b.package, b.name), dishonored_world::channel::from_trace_mask(mask), tris));
             }
         }
         Err(e) => eprintln!("warning: blocking volumes of {map}: {e:#}"),
@@ -247,7 +256,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     let sim = load_sim_config(&content).context("gameplay config")?;
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).ok();
-    let coll_path = dir.join(format!("{map}.collision5.bin"));
+    let coll_path = dir.join(format!("{map}.collision6.bin"));
     let spawn_path = dir.join(format!("{map}.spawns.json"));
     let (collision, spawns) = match (CollisionWorld::load(&coll_path), std::fs::read_to_string(&spawn_path)) {
         (Ok(w), Ok(s)) => (w, serde_json::from_str::<Vec<Spawn>>(&s).unwrap_or_default()),

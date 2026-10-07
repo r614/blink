@@ -128,6 +128,8 @@ struct Importer<'a> {
     class_defaults: HashMap<String, Vec<Property>>,
     /// [foliage-survey] Skeletal meshes imported as static scenery.
     skel_meshes: HashMap<Key, Option<SkeletalProp>>,
+    /// Effective (archetype-resolved) properties for the collision flags.
+    resolver: crate::collision_audit::PropResolver<'a>,
 }
 
 /// Single-channel static component masks kept in `MaterialParams::mask_channels`.
@@ -204,6 +206,7 @@ pub fn import_level(
         ps_ids: HashMap::new(),
         class_defaults: HashMap::new(),
         skel_meshes: HashMap::new(),
+        resolver: crate::collision_audit::PropResolver::new(content),
     };
     imp.stats.timings.push(("packages", t0.elapsed().as_secs_f32()));
     let t = std::time::Instant::now();
@@ -289,6 +292,24 @@ pub(crate) fn component_transform(props: &[Property]) -> Mat4 {
     let s = float_or(props, "Scale", 1.0) * vec3_or(props, "Scale3D", Vec3::ONE);
     Mat4::from_translation(t) * rot_matrix(props, "Rotation") * Mat4::from_scale(s)
 }
+
+/// Actor classes whose blocking static mesh components collide where the map places them
+/// (research/dishonored/COLLISION.md, source table): `StaticMeshActor` subclasses that are world
+/// geometry, and the Boyle actors that block pawns without being world geometry.
+const STATIC_BLOCKER_CLASSES: &[&str] = &[
+    "DisStaticMeshActor",
+    "DisStaticCollisionActor",
+    "DishonoredMovable",
+    "DishonoredBreakableNavBlock",
+    "KActor",
+    "DisAlarmBell",
+    "DisSpeaker_PA",
+    "DisWaterSource",
+    "DisWhaleOilBattery",
+    "DishonoredUsableObject",
+    "DishonoredDynamicUsableObject",
+    "DisDoor",
+];
 
 impl Importer<'_> {
     fn is_in_persistent_level(&self, pkg: &Package, i: usize) -> bool {
@@ -581,12 +602,17 @@ impl Importer<'_> {
         let hidden = bool_or(&props, "bHidden", false);
         let world = actor_transform(&props);
         let class = pkg.export_class(actor);
-        // `InterpActor` (defaults bCollideActors / bBlockActors true) blocks pawns where it is at
-        // run time: its colliding components become mover collision.
-        let mover = (class == "InterpActor" && bool_or(&props, "bCollideActors", true) && bool_or(&props, "bBlockActors", true)).then(|| dishonored_ir::MoverRef {
+        // An `InterpActor` blocks pawns where it is at run time: its colliding components
+        // (effective flags, `component_collision`) become mover collision.
+        let mover = (class == "InterpActor").then(|| dishonored_ir::MoverRef {
             actor: format!("{}:{}", pkg.name, pkg.obj_name(ObjRef::Export(actor))),
             actor_to_world: Mat4::from_translation(vec3_or(&props, "Location", Vec3::ZERO)) * rot_matrix(&props, "Rotation"),
         });
+        // Other blocking actors with static mesh components (physics props, breakable planks,
+        // the static parts of usable objects, ...) collide where they are placed: the state the
+        // map starts in (they can move or break later in the original, U-650). Pickups do not
+        // block (`bBlockActors` false).
+        let static_blocker = mover.is_none() && STATIC_BLOCKER_CLASSES.contains(&class.as_str());
         for &ci in comps {
             let before = self.map.instances.len();
             let src = format!("{} [{class}]", pkg.obj_path(ObjRef::Export(ci)));
@@ -594,10 +620,10 @@ impl Importer<'_> {
                 self.stats.errors.push(format!("{}: {e:#}", pkg.obj_path(ObjRef::Export(ci))));
             }
             for inst in &mut self.map.instances[before..] {
-                if inst.collides {
+                if inst.collides && !static_blocker {
                     inst.mover = mover.clone();
+                    inst.collides = false;
                 }
-                inst.collides = false;
             }
             self.stats.other_actor_components += self.map.instances.len() - before;
         }
@@ -661,10 +687,13 @@ impl Importer<'_> {
         let hdr = pkg.read_object(ci)?;
         let native_offset = hdr.native_offset;
         let props = hdr.properties;
-        let Some(mesh_ref) = find(&props, "StaticMesh").and_then(|p| p.as_object()) else {
-            return Ok(());
+        let key = match find(&props, "StaticMesh").and_then(|p| p.as_object()) {
+            Some(mesh_ref) => self.resolve(slot, ObjRef::from_index(mesh_ref)),
+            // The mesh of the component's archetype (`DisStaticCollisionActor`'s class default
+            // `Collision_model`), when a map package carries it.
+            None => self.resolver.inherited_object_path(&pkg, ci, "StaticMesh").and_then(|p| self.index.get(&p.to_ascii_lowercase()).copied()),
         };
-        let Some(mut mesh) = self.resolve(slot, ObjRef::from_index(mesh_ref)).and_then(|k| self.mesh(k)) else {
+        let Some(mut mesh) = key.and_then(|k| self.mesh(k)) else {
             return Ok(());
         };
         let is_spline = pkg.export_class(ci) == "SplineMeshComponent";
@@ -688,7 +717,7 @@ impl Importer<'_> {
             }
         }
         let hidden = actor_hidden || bool_or(&props, "HiddenGame", false);
-        let collides = bool_or(&props, "CollideActors", true) && bool_or(&props, "BlockActors", true);
+        let (collides, trace_mask) = self.component_collision(&pkg, ci);
         if self.opts.load_textures && self.opts.load_lightmaps {
             match pkg.export_data(ci).and_then(|d| read_static_mesh_component_lods(d, native_offset)) {
                 Ok(lods) => match lods.into_iter().next().map(|l| (l.lightmap, l.shadow_maps)) {
@@ -716,8 +745,38 @@ impl Importer<'_> {
             source,
             lightmap: None,
             mover: None,
+            trace_mask,
         });
         Ok(())
+    }
+
+    /// Whether a placed component blocks the player's checks at all, and its trace types
+    /// (research/dishonored/COLLISION.md): it collides (`CollideActors` and its actor's
+    /// `bCollideActors`, archetypes resolved) and either its actor is world geometry
+    /// (`ShouldTrace` accepts every level-geometry check) or both block (`IsBlockedBy`:
+    /// the actor's `bBlockActors` and the component's `BlockActors`).
+    fn component_collision(&mut self, pkg: &Arc<Package>, ci: usize) -> (bool, u8) {
+        use crate::collision_audit::{flag, trace_mask};
+        let cp = self.resolver.effective(pkg, ci);
+        let ap = match ObjRef::from_index(pkg.exports[ci].outer) {
+            ObjRef::Export(a) => Some(self.resolver.effective(pkg, a)),
+            _ => None,
+        };
+        let collide = flag(&cp, "CollideActors") && ap.as_ref().is_none_or(|a| flag(a, "bCollideActors"));
+        let world = ap.as_ref().is_some_and(|a| flag(a, "bWorldGeometry"));
+        let block = flag(&cp, "BlockActors") && ap.as_ref().is_some_and(|a| flag(a, "bBlockActors"));
+        let mut mask = trace_mask(&cp);
+        // The vision line of sight (flags 0x08023086) checks level geometry and movers only
+        // (no `TRACE_Others`): an actor that is neither (a physics prop, a usable object's
+        // static part) does not block it whatever its trace types.
+        let class = match ObjRef::from_index(pkg.exports[ci].outer) {
+            ObjRef::Export(a) => pkg.export_class(a),
+            _ => String::new(),
+        };
+        if !world && !matches!(class.as_str(), "InterpActor" | "DisDoor") {
+            mask &= !crate::collision_audit::mask::VISION;
+        }
+        (collide && (world || block), mask)
     }
 
     /// Decode every referenced lightmap texture pair once and bake each component's
@@ -1067,6 +1126,7 @@ impl Importer<'_> {
                     .and_then(|h| find(&h.properties, "LightMapCoordinateIndex").and_then(|p| p.as_float()))
                     .map(|v| v as usize)
                     .unwrap_or(0);
+                let (simple_line, simple_box) = pkg.read_object(k.1).map(|h| crate::simple_collision::simple_flags(&h.properties)).unwrap_or((true, true));
                 let asset = StaticMeshAsset {
                     source: pkg.obj_path(ObjRef::Export(k.1)),
                     normals: raw.normals,
@@ -1083,6 +1143,12 @@ impl Importer<'_> {
                         .map(|t| [t[0] as u32, t[1] as u32, t[2] as u32])
                         .collect(),
                     collision_materials: raw.kdop_triangles.iter().map(|t| t[3]).collect(),
+                    simple_line,
+                    simple_box,
+                    simple_collision: match ObjRef::from_index(raw.body_setup) {
+                        ObjRef::Export(b) => Some(crate::simple_collision::agg_geom_triangles(&pkg, b)),
+                        _ => None,
+                    },
                     bounds_min: raw.bounds_origin - raw.bounds_extent,
                     bounds_max: raw.bounds_origin + raw.bounds_extent,
                     positions: raw.positions,
@@ -1514,6 +1580,7 @@ impl Importer<'_> {
             source: format!("{} [{class}]", pkg.obj_path(ObjRef::Export(ci))),
             lightmap: None,
             mover: None,
+            trace_mask: dishonored_ir::all_trace_types(),
         });
         self.stats.skeletal_props += 1;
         Ok(())
@@ -1555,6 +1622,9 @@ impl Importer<'_> {
                 .collect(),
             collision_triangles: Vec::new(),
             collision_materials: Vec::new(),
+            simple_line: false,
+            simple_box: false,
+            simple_collision: None,
             bounds_min: lo,
             bounds_max: hi,
             positions: raw.positions,

@@ -25,6 +25,7 @@ mod oracle_powers;
 mod oracle_stealth;
 mod oracle_combat;
 mod oracle_misc;
+mod oracle_collision;
 
 #[cfg_attr(not(all(windows, target_arch = "x86")), allow(dead_code))]
 const GAME_DIR: &str = r"C:\Program Files\GOG Galaxy\Games\Dishonored\Binaries\Win32";
@@ -193,6 +194,7 @@ fn main() -> Result<()> {
         }
         "measure" => measure::run(&args[1..])?,
         "lab" => lab::run(&args[1..])?,
+        "collide" => oracle_collision::run(&args[1..])?,
         "key" => {
             // key <EngineKeyName> [down|up|tap]
             let k = args.get(1).context("key name")?;

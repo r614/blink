@@ -11,7 +11,7 @@
 //! payload. All integers are little endian. Addresses are 32-bit (the game is a 32-bit process).
 use std::io::{self, Read, Write};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const PIPE_PREFIX: &str = r"\\.\pipe\dishonored_probe_";
 /// Environment variable through which the launcher hands the session token to the DLL.
 pub const TOKEN_ENV: &str = "DISHONORED_PROBE_TOKEN";
@@ -83,6 +83,72 @@ pub mod op {
     /// u32 frames -> u32 count, per shader: u64 hash, u32 draws, u32 primitives, counted over
     /// the next `frames` Presents.
     pub const DRAW_CENSUS: u8 = 26;
+    /// u32 n, n * LineQuery -> u32 n, n * LineResult. Runs the engine's own collision check
+    /// (`UWorld::SingleLineCheck`, 0x0064E7A0, on `GWorld`) for each query on the game thread.
+    pub const LINE_CHECKS: u8 = 27;
+}
+
+/// One `UWorld::SingleLineCheck` (research/dishonored/COLLISION.md): from `start` to `end`,
+/// a box of half size `extent` (zero: a line), UE3 trace flags (plus Dishonored's trace type
+/// bits), and the source actor (0: none; it is ignored by the check and picks the movement
+/// trace type).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LineQuery {
+    pub start: [f32; 3],
+    pub end: [f32; 3],
+    pub extent: [f32; 3],
+    pub flags: u32,
+    pub source: u32,
+}
+
+/// What the check returned: `hit` false when nothing blocks; else the fraction of the way,
+/// the location (the box centre for extent checks), the normal, the actor and component hit.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LineResult {
+    pub hit: bool,
+    pub time: f32,
+    pub location: [f32; 3],
+    pub normal: [f32; 3],
+    pub actor: u32,
+    pub component: u32,
+}
+
+impl LineQuery {
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        for v in self.start.iter().chain(&self.end).chain(&self.extent) {
+            put_f32(out, *v);
+        }
+        put_u32(out, self.flags);
+        put_u32(out, self.source);
+    }
+    pub fn decode(r: &mut Reader) -> io::Result<Self> {
+        let mut v = [0f32; 9];
+        for x in v.iter_mut() {
+            *x = r.f32()?;
+        }
+        Ok(LineQuery { start: [v[0], v[1], v[2]], end: [v[3], v[4], v[5]], extent: [v[6], v[7], v[8]], flags: r.u32()?, source: r.u32()? })
+    }
+}
+
+impl LineResult {
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        out.push(self.hit as u8);
+        put_f32(out, self.time);
+        for v in self.location.iter().chain(&self.normal) {
+            put_f32(out, *v);
+        }
+        put_u32(out, self.actor);
+        put_u32(out, self.component);
+    }
+    pub fn decode(r: &mut Reader) -> io::Result<Self> {
+        let hit = r.u8()? != 0;
+        let time = r.f32()?;
+        let mut v = [0f32; 6];
+        for x in v.iter_mut() {
+            *x = r.f32()?;
+        }
+        Ok(LineResult { hit, time, location: [v[0], v[1], v[2]], normal: [v[3], v[4], v[5]], actor: r.u32()?, component: r.u32()? })
+    }
 }
 
 /// One game tick of the local player's pawn, recorded in the `PlayerTick` event.
@@ -542,6 +608,25 @@ impl Client {
             let args = (0..na).map(|_| rd.u32()).collect::<io::Result<Vec<u32>>>()?;
             let data = rd.bytes()?.to_vec();
             out.push(HookRecord { time, ecx, ret, args, data });
+        }
+        Ok(out)
+    }
+
+    /// Run engine collision checks (`LINE_CHECKS`), at most 4096 per request.
+    pub fn line_checks(&mut self, q: &[LineQuery]) -> io::Result<Vec<LineResult>> {
+        let mut out = Vec::with_capacity(q.len());
+        for chunk in q.chunks(4096) {
+            let mut p = Vec::new();
+            put_u32(&mut p, chunk.len() as u32);
+            for x in chunk {
+                x.encode(&mut p);
+            }
+            let r = self.request(op::LINE_CHECKS, &p)?;
+            let mut rd = Reader::new(&r);
+            let n = rd.u32()?;
+            for _ in 0..n {
+                out.push(LineResult::decode(&mut rd)?);
+            }
         }
         Ok(out)
     }

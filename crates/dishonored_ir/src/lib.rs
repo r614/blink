@@ -284,6 +284,16 @@ pub struct StaticMeshAsset {
     /// Material (section) index of each collision triangle (kDOP `MaterialIndex`).
     #[serde(default)]
     pub collision_materials: Vec<u16>,
+    /// `UseSimpleLineCollision` / `UseSimpleBoxCollision`: zero-extent / extent checks use the
+    /// simplified collision instead of the kDOP triangles (and nothing without a body setup).
+    #[serde(default)]
+    pub simple_line: bool,
+    #[serde(default)]
+    pub simple_box: bool,
+    /// The body setup's simplified collision (`AggGeom` elements) as mesh-space triangles;
+    /// `None` without a body setup.
+    #[serde(default)]
+    pub simple_collision: Option<Vec<[Vec3; 3]>>,
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
 }
@@ -391,6 +401,14 @@ pub struct MeshInstance {
     /// collision.
     #[serde(default)]
     pub mover: Option<MoverRef>,
+    /// The component's `m_CollisionTraceTypes` (`DisPrimTraceMask` bits: 0 move non-pawn,
+    /// 1 move NPC, 2 move player, 3 crosshair, 4 projectile, 5 melee, 6 vision).
+    #[serde(default = "all_trace_types")]
+    pub trace_mask: u8,
+}
+
+pub fn all_trace_types() -> u8 {
+    0x7F
 }
 
 /// The actor of a mover component.
