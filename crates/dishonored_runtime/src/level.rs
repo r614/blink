@@ -59,7 +59,7 @@ pub fn spawn_level(
     // --legacy-geometry: the pre-fidelity package/actor coverage (prefix-matched sublevels,
     // StaticMeshActor + StaticMeshCollectionActor only), for before/after comparisons.
     let pkgs = if opts.legacy { dishonored_assets::map_packages_by_prefix(&content, name) } else { map_packages(&content, name) };
-    let iopts = ImportOptions { max_texture_size: opts.max_tex, other_actors: !opts.legacy, extra_particles: crate::effects::GAMEPLAY_PARTICLES.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+    let iopts = import_options(name, opts);
     let (map, stats) = import_level(&content, name, &pkgs, &iopts).expect("map import failed");
     info!(
         "lightmaps: {name}: {} texture lightmaps, {} pages, {} components with a dominant directional distance-field shadow map, {} with a dominant point / spot one",
@@ -73,11 +73,20 @@ pub fn spawn_level(
     spawn_imported(name, map, stats.instances, opts, features, commands, meshes, images, materials, baked, levels, fx)
 }
 
+/// The importer's options. Baked lightmap pages are cached under DISHONORED_CACHE
+/// (`<map>.lightmaps1.bin`; `DISHONORED_NO_LIGHTMAP_CACHE` bakes every time).
+fn import_options(name: &str, opts: &LevelOptions) -> ImportOptions {
+    let lightmap_cache = std::env::var_os("DISHONORED_NO_LIGHTMAP_CACHE")
+        .is_none()
+        .then(|| dishonored_content::cache_dir().join(format!("{name}{}.lightmaps1.bin", if opts.legacy { ".legacy" } else { "" })));
+    ImportOptions { max_texture_size: opts.max_tex, other_actors: !opts.legacy, extra_particles: crate::effects::GAMEPLAY_PARTICLES.iter().map(|s| s.to_string()).collect(), lightmap_cache, ..Default::default() }
+}
+
 /// Import a level (worker-thread safe).
 fn import(name: &str, opts: &LevelOptions) -> Result<DishonoredMap, String> {
     let content = Content::locate().map_err(|e| e.to_string())?;
     let pkgs = if opts.legacy { dishonored_assets::map_packages_by_prefix(&content, name) } else { map_packages(&content, name) };
-    let iopts = ImportOptions { max_texture_size: opts.max_tex, other_actors: !opts.legacy, extra_particles: crate::effects::GAMEPLAY_PARTICLES.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+    let iopts = import_options(name, opts);
     import_level(&content, name, &pkgs, &iopts).map(|r| r.0).map_err(|e| format!("{e:#}"))
 }
 

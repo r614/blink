@@ -6,6 +6,7 @@ pub mod ai_level;
 pub mod content;
 pub mod level;
 pub mod lightmap;
+pub mod lightmap_cache;
 pub mod loc;
 pub mod material;
 pub mod navigation;

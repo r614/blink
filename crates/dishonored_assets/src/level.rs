@@ -30,6 +30,8 @@ pub struct ImportOptions {
     pub particles: bool,
     /// Further ParticleSystem paths to decode (gameplay effects), resolved through the index.
     pub extra_particles: Vec<String>,
+    /// File caching the baked lightmap pages (lightmap_cache.rs); None bakes every time.
+    pub lightmap_cache: Option<std::path::PathBuf>,
 }
 
 impl Default for ImportOptions {
@@ -41,6 +43,7 @@ impl Default for ImportOptions {
             other_actors: true,
             particles: true,
             extra_particles: Vec::new(),
+            lightmap_cache: None,
         }
     }
 }
@@ -711,6 +714,51 @@ impl Importer<'_> {
             .filter(|(_, l)| l.dominant && !matches!(l.kind, dishonored_ir::LightKind::Directional) && l.guid != [0; 4])
             .map(|(i, l)| (l.guid, i))
             .collect();
+        // The on-disk cache (lightmap_cache.rs): same inputs, same pages.
+        let sig = {
+            let mut s = crate::lightmap_cache::Signature::default();
+            s.u64(crate::lightmap_cache::FORMAT as u64);
+            for p in &self.pkgs {
+                s.str(&p.name);
+                s.u64(p.exports.len() as u64);
+                s.u64(p.names.len() as u64);
+            }
+            for g in dominant.iter().chain(local.iter().map(|l| &l.0)) {
+                g.iter().for_each(|x| s.u64(*x as u64));
+            }
+            local.iter().for_each(|l| s.u64(l.1 as u64));
+            for p in &pending {
+                s.u64(p.instance as u64);
+                for t in &p.lm.textures[..2] {
+                    let k = self.resolve(p.slot, ObjRef::from_index(*t));
+                    s.u64(k.map(|k| ((k.0 as u64) << 32) | k.1 as u64).unwrap_or(u64::MAX));
+                }
+                p.lm.scales[..2].iter().flatten().chain(p.lm.coordinate_scale.iter()).chain(p.lm.coordinate_bias.iter()).for_each(|v| s.f32(*v));
+                for sm in &p.shadows {
+                    sm.light_guid.iter().for_each(|x| s.u64(*x as u64));
+                    s.u64(((sm.texture.0 as u64) << 32) | sm.texture.1 as u64);
+                    sm.scale.iter().chain(sm.bias.iter()).for_each(|v| s.f32(*v));
+                }
+            }
+            s
+        };
+        if let Some(b) = self.opts.lightmap_cache.as_deref().and_then(|p| crate::lightmap_cache::load(p, sig)) {
+            for (i, l) in b.assignments {
+                if let Some(inst) = self.map.instances.get_mut(i) {
+                    inst.lightmap = Some(l);
+                }
+            }
+            self.map.lightmaps = b.pages;
+            self.stats.lightmap_atlases = b.atlases;
+            self.stats.lightmap_pages = self.map.lightmaps.len();
+            self.stats.shadow_map_components = b.shadow_map_components;
+            self.stats.local_shadow_map_components = b.local_shadow_map_components;
+            self.stats.texture_failures += b.texture_failures;
+            self.stats.errors.extend(b.errors);
+            self.stats.lightmaps_cached = true;
+            return;
+        }
+        let (failures0, errors0) = (self.stats.texture_failures, self.stats.errors.len());
         let mut shadow_textures: HashMap<Key, Option<(usize, usize, Vec<u8>)>> = HashMap::new();
         for p in &pending {
             for s in p.shadows.iter().filter(|s| dominant.contains(&s.light_guid) || local.iter().any(|l| l.0 == s.light_guid)) {
@@ -820,6 +868,21 @@ impl Importer<'_> {
         self.stats.lightmap_atlases = self.map.lightmaps.len();
         self.pack_lightmap_pages(4096);
         self.stats.lightmap_pages = self.map.lightmaps.len();
+        if let Some(path) = self.opts.lightmap_cache.as_deref() {
+            let b = crate::lightmap_cache::Baked {
+                pages: std::mem::take(&mut self.map.lightmaps),
+                assignments: pending.iter().filter_map(|p| Some((p.instance, self.map.instances[p.instance].lightmap?))).collect(),
+                atlases: self.stats.lightmap_atlases,
+                shadow_map_components: self.stats.shadow_map_components,
+                local_shadow_map_components: self.stats.local_shadow_map_components,
+                texture_failures: self.stats.texture_failures - failures0,
+                errors: self.stats.errors[errors0..].to_vec(),
+            };
+            if let Err(e) = crate::lightmap_cache::save(path, sig, &b) {
+                self.stats.errors.push(format!("lightmap cache {}: {e}", path.display()));
+            }
+            self.map.lightmaps = b.pages;
+        }
     }
 
     /// Shelf-pack the baked atlases (each kept intact) into a few large pages. Every distinct
