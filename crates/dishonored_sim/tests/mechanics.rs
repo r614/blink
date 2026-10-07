@@ -290,6 +290,21 @@ fn fall_damage_and_death_thresholds() {
 }
 
 #[test]
+fn fall_damage_matches_the_original_at_60_hz() {
+    // Reference (engine hook, 2026-10-06, the original at a fixed 1/60 s step, the landing speed
+    // read at `TakeFallingDamage` 0x00B4DCC0): drops of 1000 / 1200 / 1300 uu land at
+    // 2401 / 2675 / 2775 uu/s and take 16 / 45 / 56 of 70.
+    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., 1000. + STAND_Z), 0.), (2, Vec3::new(500., 0., 1200. + STAND_Z), 0.), (3, Vec3::new(1000., 0., 1300. + STAND_Z), 0.)]);
+    r.steps(120, &[]);
+    // The original's drops started from a written height plus one step forward, so the landing
+    // tick can differ by one: within 2 points (the port takes 18 at 1000 uu).
+    let got: Vec<f32> = (1..=3).map(|i| 70.0 - r.p(i).vitals.health).collect();
+    for (g, want) in got.iter().zip([16.0, 45.0, 56.0]) {
+        assert!((g - want).abs() <= 2.0, "fall damage {got:?}, original [16, 45, 56]");
+    }
+}
+
+#[test]
 fn blink_to_platform_costs_mana_and_refunds() {
     // Platform 900 uu ahead, 200 uu high; aim at its top edge.
     let mut r = Run::new(floor_world(|t| boxy(t, Vec3::new(900., -300., 0.), Vec3::new(1500., 300., 200.))), &[(1, Vec3::new(0., 0., STAND_Z + 1.0), 0.)]);
@@ -409,11 +424,17 @@ fn windblast_factor_and_momentum_rules() {
     assert!((k - (1.0 - 50.0 / 3000.0f32).powi(2)).abs() < 1e-5);
     // Outside the 67.5 deg half-angle (in the horizontal plane): nothing.
     assert_eq!(windblast_factor(Vec3::X, Vec3::new(100., 300., 0.), Vec3::ZERO, 3000.0, cos_half), 0.0);
-    // Level aim at 300 uu: z = 0.15 x |(2700, 0, up)| x k, up = (1 - 0.1) x 1600.
+    // Level aim at 300 uu: the momentum is the impulse times k, z = (1 - 0.1) x 1600.
     let m = windblast_momentum(Vec3::X, 2700.0, 1600.0, 300.0, 3000.0, 1.0);
     assert!((m.x - 2700.0).abs() < 1e-2);
-    let up = 0.9 * 1600.0;
-    assert!((m.z - 0.15 * (2700.0f32 * 2700.0 + up * up).sqrt()).abs() < 1e-2, "{m}");
+    assert!((m.z - 0.9 * 1600.0).abs() < 1e-2, "{m}");
+    // The original (engine hook, 2026-10-06): a guard 182.8 uu from the blast origin, level
+    // aim (0.995, -0.096, -0.002): 26 damage and momentum (2362, -227, 1317).
+    let dir = Vec3::new(0.995, -0.096, -0.002).normalize();
+    let k = (1.0 - 182.8 / 3000.0f32).powi(2);
+    let m = windblast_momentum(dir, 2700.0, 1600.0, 182.8, 3000.0, k);
+    assert!((m.x - 2362.0).abs() < 15.0 && (m.y + 227.0).abs() < 5.0 && (m.z - 1317.0).abs() < 15.0, "{m}");
+    assert_eq!((30.0 * k + 0.5).floor(), 26.0);
 }
 
 #[test]

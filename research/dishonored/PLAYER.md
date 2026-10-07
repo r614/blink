@@ -552,7 +552,9 @@ distance 3000, speed 5000; `m_bUseDirectionalWindblast` true. Class defaults: wa
 - Hit (0x00BF6AF0 when the front passes the target's bounds centre, with a sight check
   0x00BEDC90): impulse `dir x force`; its z is raised to `(1 - min(d / range, 1)) x
   extraUp` (added to a downward z); then (0x00BE9770) damage `round(damage x k)` with the
-  windblast damage type and momentum `(impulse.xy x k, 0.15 x |impulse| x k)`.
+  windblast damage type and momentum `impulse x k` (MEASURED 2026-10-06 with the engine hook: a
+  guard 182.8 uu ahead, level aim, took 26 and momentum (2362, -227, 1317); an earlier reading
+  of the z as `0.15 x |impulse| x k` was wrong).
 - NPCs are thrown by that momentum; players are not (see "Windblast on players").
 
 ## Melee

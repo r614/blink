@@ -4,6 +4,44 @@ use dishonored_sim::input::PlayerInput;
 use dishonored_sim::state::{MoveMode, WorldState};
 use dishonored_sim::{spawn_player, step_world};
 
+/// The AI light probe against the original (U-121): the raw light value of the player's
+/// `DishonoredVisibilityComponent` (`m_fCurrentLightValue`) read with the engine hook at
+/// these pawn locations on Boyle Ext, standing and crouched (2026-10-06,
+/// research/dishonored/HOOK_TRIAGE.md). Printed for comparison; the range check is loose
+/// because the port's probe sums light actors instead of the pawn's light environment.
+#[test]
+fn light_probe_against_the_original() {
+    if dishonored_assets::Content::locate().is_err() {
+        return;
+    }
+    let mc = load_match(DEFAULT_MAP).unwrap();
+    let lvl = &mc.ai_level;
+    let pts: [([f32; 3], f32); 14] = [
+        ([-3017.3, -2406.6, -15.8], 0.3126),
+        ([-3162.5, -2539.2, -15.8], 0.2091),
+        ([-3231.7, -2722.4, -15.8], 0.1897),
+        ([-3296.5, -2881.8, -28.2], 0.1933),
+        ([-3373.4, -3094.3, -215.8], 0.1714),
+        ([-3480.6, -3335.6, -216.0], 0.1972),
+        ([-3623.1, -3688.8, -216.3], 0.1918),
+        ([-3087.7, -2366.2, -38.3], 0.3100),
+        ([-3161.3, -2548.0, -38.3], 0.2592),
+        ([-3234.2, -2727.9, -38.3], 0.1880),
+        ([-3304.4, -2901.4, -64.2], 0.1881),
+        ([-3375.0, -3077.5, -238.3], 0.1678),
+        ([-3487.7, -3354.2, -238.5], 0.1981),
+        ([-3614.3, -3667.0, -238.8], 0.1944),
+    ];
+    let mut worst: f32 = 0.0;
+    for (p, orig) in pts {
+        let v = dishonored_ai::light_at_with(&lvl.lights, lvl.sky_light, glam::Vec3::from(p), &mc.collision);
+        println!("({:.0}, {:.0}, {:.0}): port {v:.4} original {orig:.4} ratio {:.2}", p[0], p[1], p[2], v / orig);
+        worst = worst.max((v - orig).abs());
+    }
+    println!("largest difference {worst:.4}");
+    assert!(worst < 1.0);
+}
+
 #[test]
 fn spawn_and_walk_on_boyle() {
     if dishonored_assets::Content::locate().is_err() {

@@ -18,7 +18,12 @@ use anyhow::{Context, Result, bail};
 use dishonored_probe::Client;
 use std::path::PathBuf;
 
+mod lab;
 mod measure;
+mod oracle;
+mod oracle_powers;
+mod oracle_stealth;
+mod oracle_combat;
 
 #[cfg_attr(not(all(windows, target_arch = "x86")), allow(dead_code))]
 const GAME_DIR: &str = r"C:\Program Files\GOG Galaxy\Games\Dishonored\Binaries\Win32";
@@ -153,6 +158,7 @@ fn main() -> Result<()> {
             println!("{}x{} format {} -> {}", cap.width, cap.height, cap.format, out.display());
         }
         "measure" => measure::run(&args[1..])?,
+        "lab" => lab::run(&args[1..])?,
         "key" => {
             // key <EngineKeyName> [down|up|tap]
             let k = args.get(1).context("key name")?;

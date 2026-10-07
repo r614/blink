@@ -301,7 +301,13 @@ killed by the pursuers, whose target was then gone.
   environment (0x004e1db0: static + dynamic SH coefficients summed, reduced to a brightness,
   times a runtime scale `DAT_01435230`, raised to 1/2.2 (constant 0.454545) above 0.0001, else
   0; -1 without an environment, clamped to 0), normalized between `Twk_GlobalPlayerVisSettings`
-  darkest / brightest (0x00bc9040). Port (`light_at`): the level's light actors
+  darkest / brightest (0x00bc9040). The settings object comes from 0x00BD0120 / 0x00BC8E60: the
+  player pawn's stealth-volume or scripted settings (+0x978 / +0x974) if any, else the map's
+  `DishonoredMapInfo.m_pMapPlayerVisSettings`, else the global tweak. Boyle Ext names
+  `Boyle_Twk.Pvs_BoyleExterior` (0.2 / 0.5), measured on the original with the engine hook
+  2026-10-06 (`light01 = (raw - 0.2) / 0.3`) and used by the port (`AiLevel::player_light_range`).
+  The measured seen value matched `DistanceTuning(1 - norm) + 0.1 light01 + 0.25 speed` in 13
+  cases (HOOK_TRIAGE.md). Port (`light_at`): the level's light actors
   (`AiLevel::lights`, static ones included) summed as `Brightness x luminance x
   (1-(d/r)^2)^FalloffExponent` (spot cones, shadow traces for shadow casters, directional lights
   traced along their direction), then `^(1/2.2)`; server and client compute it from the same

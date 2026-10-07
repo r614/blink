@@ -1,6 +1,6 @@
 //! The probe's named-pipe server: one client at a time, local clients only, DACL granting
 //! GENERIC_ALL to the current user and nobody else.
-use crate::{d3d, engine, hook, input, mem};
+use crate::{d3d, engine, hook, input, mem, native};
 use dishonored_probe::{Reader, op, put_str, put_u32};
 use std::sync::atomic::Ordering::Relaxed;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, LocalFree};
@@ -409,6 +409,84 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
                     }
                     break;
                 }
+            }
+        }
+        op::WATCH_ABS => {
+            let n = io(rd.u32())?;
+            let mut w = Vec::new();
+            for _ in 0..n {
+                w.push((io(rd.u32())?, io(rd.u32())?));
+            }
+            hook::RECORDER.lock().map_err(|_| "poisoned")?.watch_abs = w;
+        }
+        op::ALLOC => {
+            let n = io(rd.u32())?;
+            let a = native::alloc(n);
+            if a == 0 {
+                return Err("alloc failed".into());
+            }
+            put_u32(&mut out, a);
+        }
+        op::NATIVE_CALL => {
+            let (func, this) = (io(rd.u32())?, io(rd.u32())?);
+            let flags = io(rd.u8())?;
+            let n = io(rd.u32())?;
+            if n > 32 {
+                return Err("too many arguments".into());
+            }
+            let args = (0..n).map(|_| io(rd.u32())).collect::<Result<Vec<u32>, String>>()?;
+            let r = native::native_call(func, this, args, flags & 1 != 0)?;
+            put_u32(&mut out, r.eax);
+            out.extend(r.st0.to_le_bytes());
+        }
+        op::HOOK_SET => {
+            let addr = io(rd.u32())?;
+            let (plen, nargs) = (io(rd.u8())?, io(rd.u8())?);
+            let max = io(rd.u32())?;
+            let n = io(rd.u32())?;
+            let mut derefs = Vec::new();
+            for _ in 0..n {
+                let src = match io(rd.u8())? {
+                    0xff => native::DerefSrc::Ecx,
+                    0xfe => native::DerefSrc::Abs,
+                    i => native::DerefSrc::Arg(i),
+                };
+                derefs.push(native::Deref { src, pre: io(rd.u32())?, off: io(rd.u32())?, len: io(rd.u32())?.min(4096) });
+            }
+            put_u32(&mut out, native::hook_set(addr, plen, nargs.min(16), derefs, max)?);
+        }
+        op::HOOK_FETCH => {
+            let recs = native::hook_fetch(io(rd.u32())?)?;
+            put_u32(&mut out, recs.len() as u32);
+            for r in recs {
+                out.extend(r.time.to_le_bytes());
+                put_u32(&mut out, r.ecx);
+                put_u32(&mut out, r.ret);
+                put_u32(&mut out, r.args.len() as u32);
+                for a in r.args {
+                    put_u32(&mut out, a);
+                }
+                dishonored_probe::put_bytes(&mut out, &r.data);
+            }
+        }
+        op::EVENT_TRACE => {
+            let (max, parm_len, n) = (io(rd.u32())?, io(rd.u32())?, io(rd.u32())?);
+            let funcs = (0..n).map(|_| io(rd.u32())).collect::<Result<Vec<u32>, String>>()?;
+            let mut t = native::TRACE.lock().map_err(|_| "poisoned")?;
+            t.funcs = funcs;
+            t.parm_len = parm_len.min(1024);
+            t.max = max as usize;
+            t.records.clear();
+            native::TRACE_ON.store((max > 0 && !t.funcs.is_empty()) as u32, Relaxed);
+        }
+        op::EVENT_FETCH => {
+            let recs = std::mem::take(&mut native::TRACE.lock().map_err(|_| "poisoned")?.records);
+            put_u32(&mut out, recs.len() as u32);
+            for r in recs {
+                out.extend(r.time.to_le_bytes());
+                put_u32(&mut out, r.this);
+                put_u32(&mut out, r.func);
+                dishonored_probe::put_bytes(&mut out, &r.parms);
             }
         }
         _ => return Err(format!("unknown op {opc}")),

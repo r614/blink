@@ -131,3 +131,14 @@ fn boyle_int_audio_cells() {
     assert!(joined >= 50, "{joined}");
     assert!(lvl.sky_light > 0.0);
 }
+
+/// Boyle Ext names its own player light range (`DishonoredMapInfo.m_pMapPlayerVisSettings` =
+/// `Boyle_Twk.Pvs_BoyleExterior`), measured on the original as the normalization of the
+/// visibility component's light (0.2 / 0.5).
+#[test]
+fn boyle_ext_player_light_range() {
+    let Some(c) = content() else { return };
+    let pkgs = map_packages(&c, "L_Boyle_Ext_P");
+    let lvl = dishonored_assets::ai_level::extract_ai_level(&c, &pkgs, &[], &[]).unwrap();
+    assert_eq!(lvl.player_light_range, Some([0.2, 0.5]));
+}

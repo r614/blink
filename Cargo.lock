@@ -2372,6 +2372,7 @@ name = "dishonored_content"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dishonored_ai",
  "dishonored_assets",
  "dishonored_audio",
  "dishonored_conversation",

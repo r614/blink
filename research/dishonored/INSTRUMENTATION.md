@@ -157,12 +157,72 @@ Converted to PNG with the viewpoint's name, the captures are the `--reference DI
 `harness fidelity` (SSIM per viewpoint). The 2026-10-06 set is in the session scratch
 (`U_hook/views`). Recapture it with the command above; never commit it.
 
+## Native instruments (protocol 2, 2026-10-06)
+
+| Op | Use |
+|---|---|
+| `ALLOC` | zeroed scratch memory in the game (FString data, fake parameters) |
+| `NATIVE_CALL` | call a native function on the game thread (thiscall / stdcall / cdecl; `esp` restored from `ebp`; optional x87 result) |
+| `HOOK_SET` / `HOOK_FETCH` | entry logger on a native function: the first whole instructions (5-16 bytes, no relative branches: check the bytes with `read` first) move into a stub that records the world time, `ecx`, the return address, N stack arguments and chosen memory reads (`a<i>:off:len`, `c:off:len`, `m:addr:len`, with an optional pointer hop `a<i>*pre:off:len`) |
+| `EVENT_TRACE` / `EVENT_FETCH` | ProcessEvent calls of chosen UFunctions with the first parameter bytes |
+| `WATCH_ABS` | absolute memory ranges recorded with every sample (after the pawn ranges) |
+
+`FIND` also returns class default objects when the name starts with `Default__`.
+
+### Setting up a scenario (`probe_launch lab ...`)
+
+- `lab setup [HZ]`: tutorials off (`DisGlobalUIManager` +0x304 bits 3-4; a tutorial window pauses
+  the world), the player kept alive (`DishonoredPawn.m_MinimumScriptedHealth` +0x594 = 1; damage
+  is still logged), pistol, sword, Blink 2, Windblast 2, and the fixed time step (default 60).
+- `lab give <Tweak>` / `lab power <Name> <level>`: the Kismet handlers `OnAddInventoryItem` /
+  `OnAddPower`, called with the action's class default object (`m_pItemToAdd` +0xF8,
+  `m_PowerName` +0xF8 FString in scratch memory, `m_PowerLevel` +0x104). Power levels are
+  1-based (`m_CurrentLevel` 1 = `m_Levels[0]`).
+- `lab equip <ItemClass> <1|2>`: `Dis_EquipItemByType` (1 right hand, 2 left hand).
+- `lab fixedstep <HZ|0>`: `GUseFixedTimeStep` (0x0141B27C) and `GFixedDeltaTime` (0x012696B0,
+  double) in the time update 0x009DDDF0. Every tick then advances the world by exactly 1/HZ, so
+  timings are exact to a tick (real time runs slower). `-benchmark` sets the same flag but
+  also drops the ini files and hangs at the front end.
+- `lab npcs [radius]`, `lab hook ...`, `lab hookfetch`, `lab ncall`, `lab trace`, `lab tracefetch`.
+- `measure boot` reopens the level when it is already loaded (after the player died).
+
+Dead ends: the `DishonoredCheatManager` natives are stubs in retail (their vtable entries are
+the empty 0x00459D10 / 0x005CB0C0), even after creating the manager (`CheatClass` +0x460,
+`AddCheats`). In PowerShell an empty `""` argument is dropped: run `find "" Class` from bash.
+
+### Oracle measurements (`probe_launch measure ...`)
+
+| Command | What it reads |
+|---|---|
+| `gun [--shots N \| --rapid S] [--weapon crossbow]` | offset of every shot (0x00AA2B10: offset in 720-line pixels, aim point, `m_fDispersion` +0x12C), the traced pistol shot (0x00BE1560 called from 0x00C2A3E0) against `CameraCache.POV`, the reload timeline (0x00C2AA80, 0x00C23620, 0x00C28C50, 0x00C236A0) |
+| `blink [at=X,Y,Z] [--yaw] [--pitch] [--mana]` | target (`m_TargetPoint` +0x60), the flight, mana (+0xA60) and its regeneration |
+| `mana [--from M]` | regeneration from a written value |
+| `windblast npc=ADDR [--dist D]` | the damage path 0x00B5CCD0 (damage, hit location, momentum, damage type) and the blast origin / direction (+0xA4 / +0xB0) |
+| `sword npc=ADDR [--swings N] [--defend S] [--block]` | presses vs every damage-path call and health |
+| `detect npc=ADDR [--dists ...] [--stances stand,crouch] [--move strafe\|sprint]` | the NPC's `PlayerAttnInfo` (`DisAttentionInfo_Complex`: accumulator +0x8C, level +0xAC, flags +0x510, LOS norm and vision debug values +0x514..+0x528) and the player's `DishonoredVisibilityComponent` (+0x68..+0x78) |
+| `vis at=X,Y,Z ...` | the visibility component's light and speed values at points |
+
+Results and their comparison with the port: `research/dishonored/HOOK_TRIAGE.md`.
+
+## Release-time regression baseline
+
+Run in a fresh session: `launch`, `measure boot`, `lab setup 60`, then the four scenarios. The
+expected values were measured on 2026-10-06 (fixed 1/60 s step); a port change that touches
+these mechanics should reproduce them (HOOK_TRIAGE.md has the port's side).
+
+| Scenario | Command | Expected (original) |
+|---|---|---|
+| Movement | `measure run 0.4 0.6 at=-3400,-3150,-190 --yaw 270`, `measure jump 2` | run plateau 360, sprint 540 uu/s with the sword drawn (400 / 600 sheathed); jump launch 800, apex 106.67 uu |
+| Sword fight | `lab equip DisWepMelee 1`, `lab npcs` (the doorman `Pwn_EliteGuard_MTall_2_Doorman` near (-1611, -4599, -682)), `measure sword npc=ADDR --swings 1` | one hit of 10 on 50 (`DisDamageType_FastHit_Right`), 0.30-0.35 s after the press |
+| Stealth detection | `measure detect npc=<party guard Pwn_EliteGuard_MTall_1_Party near (-3010, -2195)> --dists 200,600,800,1300 --stances stand` | LOS norm = d / 3500 (inner cone); value per second = `DistanceTuning(1 - norm) + 0.1 x (raw - 0.2) / 0.3`: e.g. 600 uu: norm 0.164, 0.703 /s; 1300 uu: 0.358, 0.226 /s |
+| Weapon spread | `lab equip DishonoredWepPistol 2`, `measure gun --shots 60` | r / d mean 0.5 +- 0.04, variance 0.083 +- 0.015, KS below the 5 % critical value; trace minus port angle below 0.1 deg; reload start / timed stage / load 0.283 / 0.716 / 1.483 s after the shot |
+
+Always end with `probe_launch kill`.
+
 ## Not done yet
 
-- **Per-tick samples.** Samples are per rendered frame (from `Present`). A game-thread tick hook
-  would give per-tick samples; candidates are `UGameEngine::Tick` or the player's
-  `startNewPhysics` (slot 283, 0x006A24A0).
-- **Exact landing speed.** The impact speed is the last airborne frame's `Velocity.Z`, which is
-  below the landing speed. Hooking `TakeFallingDamage` (0x00B4DCC0) would give the exact speed
-  (U-462).
+- **Per-tick samples.** Samples are per rendered frame (from `Present`); with the fixed time step
+  each frame is one tick of known length, which covers most needs.
 - **No mouse look.** Turning is done by writing `Controller.Rotation`.
+- **Hooks are entry-only.** Return values and out parameters need a later function's entry
+  (e.g. the pistol's trace instead of the direction written by 0x00AA2B10).
