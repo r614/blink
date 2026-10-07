@@ -515,7 +515,7 @@ fn build(l: &Launcher, art: &MenuArt, t: &MenuTexts, gs: &GameSettings, nav: &Me
     let focus = nav.focus.as_deref().unwrap_or("");
     let Some(main) = art.get("main") else {
         // No install: plain text menu so the launcher still works.
-        dl.text("dishonored-rs: Dishonored install not found (set DISHONORED_DIR)", Rect::new(100.0, 100.0, 1200.0, 140.0), 24.0, FontKind::Normal, TEXT, Justify::Left);
+        dl.text("Blink: Dishonored install not found (set DISHONORED_DIR)", Rect::new(100.0, 100.0, 1200.0, 140.0), 24.0, FontKind::Normal, TEXT, Justify::Left);
         return dl;
     };
     if l.game_running() {

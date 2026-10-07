@@ -1,4 +1,4 @@
-# Build environment for dishonored-rs checkouts and git worktrees (PowerShell).
+# Build environment for Blink checkouts and git worktrees (PowerShell).
 #   . .\scripts\dev-env.ps1
 # See scripts/dev-env.sh: sccache shares compiled dependencies between checkouts and worktrees,
 # each worktree keeps its own target/, and DISHONORED_CACHE is one shared directory of derived

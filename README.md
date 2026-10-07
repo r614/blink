@@ -1,6 +1,6 @@
-# dishonored-rs
+# Blink
 
-A standalone Rust/Bevy runtime that rebuilds the gameplay kernel of *Dishonored*
+Blink is a standalone Rust/Bevy runtime that rebuilds the gameplay kernel of *Dishonored*
 (2012) with high behavioral fidelity, using content from a legitimately owned local
 install of **Dishonored: Definitive Edition (GOG)**. The runtime does not run or
 modify `Dishonored.exe`. An optional research tool (`probe_launch`) can start your own
@@ -218,7 +218,7 @@ source scripts/dev-env.sh        # PowerShell: . .\scripts\dev-env.ps1
 
 ## License
 
-Copyright (C) 2026 dishonored-rs contributors.
+Copyright (C) 2026 Blink contributors.
 
 This program is free software: you can redistribute it and/or modify it under the terms of the
 GNU General Public License as published by the Free Software Foundation, either version 3 of the

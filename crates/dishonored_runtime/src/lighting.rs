@@ -109,7 +109,7 @@ const UE3_DIRECTIONAL_TERMS: &str = "    color = (diffuse + specular_light) * de
 const BEVY_ATTENUATION: &str = "let rangeAttenuation = getDistanceAttenuation(distance_square, (*light).color_inverse_square_range.w);";
 const UE3_ATTENUATION: &str = "let rangeAttenuation = ue3_attenuation(distance_square, (*light).color_inverse_square_range.w, (*light).position_radius.w);";
 const UE3_FN: &str = "
-// dishonored-rs: UE3's point / spot light falloff, max(1 - d^2 / R^2, 0)^E (0 below 1e-6), with
+// blink: UE3's point / spot light falloff, max(1 - d^2 / R^2, 0)^E (0 below 1e-6), with
 // E carried in the light radius as (E + 1) / 1000; radius 0 keeps Bevy's attenuation.
 fn ue3_attenuation(distance_square: f32, inverse_range_squared: f32, radius: f32) -> f32 {
     if (radius <= 0.0) {
@@ -120,7 +120,7 @@ fn ue3_attenuation(distance_square: f32, inverse_range_squared: f32, radius: f32
     return select(0.0, pow(x, e), x - 1e-6 >= 0.0);
 }
 
-// dishonored-rs: the shading of UE3's light passes (TLightPixelShader, e.g. 15166 / 34985):
+// blink: the shading of UE3's light passes (TLightPixelShader, e.g. 15166 / 34985):
 // saturate(N.L) x diffuse + S x pow(saturate(R.L), SP) x (SP + 8) / (8 pi), each lobe 0 below
 // 1e-6, times LightColor x falloff (no N.L on the specular). The light colour here carries
 // pi x Brightness x U (lighting.rs), hence the 1 / pi. Material terms as map_render's

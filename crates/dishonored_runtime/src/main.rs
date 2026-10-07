@@ -197,7 +197,7 @@ fn main() {
     let mut app = App::new();
     let mut plugins = DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
-            title: format!("dishonored-rs - {}", args.map),
+            title: format!("Blink - {}", args.map),
             resolution: size.into(),
             mode,
             present_mode: present,

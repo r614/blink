@@ -417,7 +417,7 @@ fn build_headers(r: &Riff, vi: &VorbInfo, setup_in: &[u8], lib: &CodebookLibrary
     let mut cm = BitWriter::default();
     cm.write(3, 8);
     cm.write_bytes(b"vorbis");
-    let vendor = b"dishonored-rs wwise rebuild";
+    let vendor = b"blink wwise rebuild";
     cm.write(vendor.len() as u32, 32);
     cm.write_bytes(vendor);
     cm.write(0, 32);

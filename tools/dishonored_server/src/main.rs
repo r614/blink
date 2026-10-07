@@ -28,7 +28,7 @@ fn main() -> Result<()> {
     let mission = get("--mission").map(|p| dishonored_mission::MissionDef::load(std::path::Path::new(&p))).transpose()?;
     let map = get("--map").or_else(|| mission.as_ref().map(|m| m.map.clone())).unwrap_or_else(|| dishonored_content::DEFAULT_MAP.to_string());
     let port: u16 = get("--port").and_then(|s| s.parse().ok()).unwrap_or(27015);
-    let name = get("--name").unwrap_or_else(|| "dishonored-rs server".into());
+    let name = get("--name").unwrap_or_else(|| "Blink server".into());
     let mut rules = FfaRules::default();
     if let Some(v) = get("--max-players").and_then(|s| s.parse().ok()) { rules.max_players = v; }
     if let Some(v) = get("--score-limit").and_then(|s| s.parse().ok()) { rules.score_limit = v; }

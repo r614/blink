@@ -1,4 +1,4 @@
-# Build environment for dishonored-rs checkouts and git worktrees (bash / Git Bash).
+# Build environment for Blink checkouts and git worktrees (bash / Git Bash).
 #   source scripts/dev-env.sh
 # - sccache as the rustc wrapper (when installed) shares compiled dependencies between all
 #   checkouts and worktrees; each worktree keeps its own `target/` so builds never wait on another

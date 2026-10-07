@@ -517,7 +517,7 @@ pub struct HostSettings {
 impl Default for HostSettings {
     fn default() -> Self {
         Self {
-            name: "dishonored-rs server".into(),
+            name: "Blink server".into(),
             map: "L_Boyle_Ext_P".into(),
             mode: "ffa".into(),
             mission: String::new(),
