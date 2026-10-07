@@ -135,8 +135,9 @@ const RESOURCE_CLASSES: &[&str] = &[
 
 /// [foliage-survey] Actor classes whose placed `SkeletalMeshComponent` is static scenery until
 /// gameplay moves it: drawn in the mesh's reference pose (doors closed, lids shut, chains hanging).
-/// Not included: `DisFish` (swimming crowd agents) and `SkeletalMeshActor*` (matinee props, drawn
-/// by the cutscene player); see UNKNOWNS U-571.
+/// Plain `SkeletalMeshActor`s join them unless Kismet references them. Not included: `DisFish`
+/// (swimming crowd agents) and `SkeletalMeshActorMAT` (matinee props, drawn by the cutscene
+/// player); see UNKNOWNS U-571.
 const SKELETAL_PROP_CLASSES: &[&str] = &["DisDoor", "DishonoredUsableObject", "DisWaterSource", "DisAlarmBell", "DisClimbable"];
 
 /// Always-loaded packages whose resources level packages import without cooking a copy
@@ -1346,13 +1347,24 @@ impl Importer<'_> {
     /// loaders do); the reference pose's skinned vertices are the stored positions.
     fn import_skeletal_props(&mut self, slot: usize) {
         let pkg = self.pkgs[slot].clone();
+        // `SkeletalMeshActor`s that Kismet names (matinee props, items attached to pawns) are the
+        // cutscene player's; the others (Boyle's sewer gate and bridge) are scenery.
+        let mut scripted: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for i in 0..pkg.exports.len() {
+            if pkg.export_class(i) == "SeqVar_Object" {
+                if let Some(ObjRef::Export(o)) = pkg.read_object(i).ok().and_then(|h| find(&h.properties, "ObjValue").and_then(|p| p.as_object())).map(ObjRef::from_index) {
+                    scripted.insert(o);
+                }
+            }
+        }
         for ci in 0..pkg.exports.len() {
             if pkg.export_class(ci) != "SkeletalMeshComponent" {
                 continue;
             }
             let ObjRef::Export(actor) = ObjRef::from_index(pkg.exports[ci].outer) else { continue };
             let class = pkg.export_class(actor);
-            if !SKELETAL_PROP_CLASSES.contains(&class.as_str()) || !self.is_in_persistent_level(&pkg, actor) {
+            let scenery = SKELETAL_PROP_CLASSES.contains(&class.as_str()) || (class == "SkeletalMeshActor" && !scripted.contains(&actor));
+            if !scenery || !self.is_in_persistent_level(&pkg, actor) {
                 continue;
             }
             if let Err(e) = self.import_skeletal_component(slot, actor, ci, &class) {

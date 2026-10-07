@@ -218,8 +218,8 @@ fn vector(p: &MaterialParams, name: &str) -> Option<[f32; 4]> {
 /// Approximations (documented in research/LOG.md, "Full materials"):
 /// - UE3 Phong `SP_Specular_Power` n -> GGX via alpha = sqrt(2 / (n + 2)).
 /// - `S_` map -> specular tint texture, `S_Specular_color` rgb * a -> tint * reflectance.
-/// - Colour vectors use Arkane's rgb * a intensity convention for emissive/specular; the
-///   alpha of `D_Diffuse_color` is ignored (its meaning is unknown).
+/// - Colour vectors use Arkane's rgb * a intensity convention for emissive/specular, and for
+///   `D_Diffuse_color` as decoded from the base-pass shaders (`diffuse_color_terms`).
 /// - Detail normals (`DN_`) and per-slot tiling other than `D_Diffuse_Tilling` are ignored
 ///   (Bevy has a single UV transform per material).
 pub fn build_material(i: usize, m: &MaterialAsset, p: &MaterialParams, images: &[Handle<Image>], f: &RenderFeatures) -> StandardMaterial {

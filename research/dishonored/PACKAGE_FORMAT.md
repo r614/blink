@@ -210,6 +210,19 @@ Light,Nav,Script}` and `L_BoyleStreet_Ext_Script` (all `LevelStreamingAlwaysLoad
   StartScale: Vector2D, EndPos, EndTangent, EndScale}` in component space, `SplineXDir`,
   `bSmoothInterpRollScale`; the mesh's X extent is mapped onto the Hermite segment.
 - BSP: level `Model`s on Boyle Ext are empty (156–192 bytes); `BrushComponent`s belong to volumes.
+- Foliage: there is no `InstancedFoliageActor`, `InstancedStaticMeshComponent`, SpeedTree or
+  terrain anywhere in Boyle Ext's eight packages. Hedges, shrubs, flowers, grass, ivy and the yew
+  trees are ordinary `StaticMeshCollectionActor` components (`boyle_shrubs_01.*`,
+  `city_grass_01.*`, `ivy_01.*`, `yew_tree_01.*`), lightmapped like the rest, with
+  `CollideActors` false (no collision) and no cull distance (one component in the Env package
+  has `MaxDrawDistance`). Their materials derive from `vertexAnim_PMAT` (world position offset, see
+  RENDERING.md) or `generic_masked_PMAT`.
+- `SkeletalMeshComponent`s on placed actors (outer = the actor): `DisDoor` (8), `DishonoredUsableObject`
+  (25: lockers, trash bins, hatches, chests, double doors, Wall of Light panels), `DisWaterSource`
+  (4 sinks), `DisAlarmBell` (2), `DisClimbable` (1, component `KAssetSkelMeshComponent`), `DisFish`
+  (19), `SkeletalMeshActor` / `SkeletalMeshActorMAT` (matinee and hand props, plus the sewer gate
+  and the bridge, which no Kismet variable names). Placement: actor x component x
+  `Rot(RotOrigin) x Translate(Origin)` of the mesh.
 
 ### Materials across packages — CONFIRMED
 MIC `Parent` references are frequently imports that the same level package also exports
