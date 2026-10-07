@@ -1,0 +1,23 @@
+// Run, then sprint, along the Boyle exterior runway (`probe_launch measure run 0.4 0.6
+// at=-3400,-3150,-190 --yaw 270`). Reference: INSTRUMENTATION.md "Release-time regression
+// baseline" (2026-10-06): plateaus 360 / 540 uu/s with the sword drawn (the port's pawn always
+// has it drawn unless carrying).
+(
+    name: "movement/run_sprint",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Settle, run forward 1.5 s, then sprint 0.75 s (the runway ends about 1050 uu south); speed plateaus.",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true))),
+    tick_hz: 60,
+    ticks: 165,
+    input: [
+        (tick: 30, action: Move(forward: 127, right: 0)),
+        (tick: 120, hold: 44, action: Press(Sprint)),
+    ],
+    checkpoints: [
+        (name: "run plateau", expect: [(metric: At("pawn.speed2d", 115), value: 360, tol: 1, source: "INSTRUMENTATION.md regression baseline: run plateau 360 uu/s, sword drawn")]),
+        (name: "sprint plateau", expect: [(metric: At("pawn.speed2d", 160), value: 540, tol: 1, source: "INSTRUMENTATION.md regression baseline: sprint 540 uu/s, sword drawn")]),
+    ],
+    record: [Pawn],
+    tolerances: [("pawn.", 0.5)],
+)

@@ -1,0 +1,15 @@
+// Cause book of the differential oracle (research/dishonored/ORACLE.md "Definition of done").
+// Each rule classifies the work items whose id matches `matches` (`*` = any characters).
+// Classified items stay in the work list with their cause; only unclassified ones block
+// "done". Add a rule only with the evidence that establishes the cause.
+(
+    rules: [
+        (
+            id: "collision-line-backoff",
+            matches: "collision:*:systematic: line *",
+            kind: PortMissing,
+            cause: "the engine's back-off of non-accurate line checks (the hit is reported short of the surface) is not on main's dishonored_world",
+            evidence: "measured by the collision audit (worktree-agent-a6973c5492dcb391d, hit_kind::engine_time); constant 4.00 uu offset over every vision line on both Boyle maps",
+        ),
+    ],
+)

@@ -1,0 +1,19 @@
+// A standing jump on the Boyle exterior runway used by `probe_launch measure run`.
+// Reference: research/dishonored/INSTRUMENTATION.md, first measurements (2026-10-06):
+// launch speed 800 uu/s, apex 106.67 uu (parabola fit), fixed 1/60 s step.
+(
+    name: "movement/jump_standing",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Settle for half a second, then one jump press; launch speed and apex height.",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true))),
+    tick_hz: 60,
+    ticks: 90,
+    input: [(tick: 30, action: Press(Jump))],
+    checkpoints: [
+        (name: "launch", expect: [(metric: Max("pawn.vz"), value: 800, tol: 1, source: "INSTRUMENTATION.md 2026-10-06: Velocity.Z on the first airborne frame")]),
+        (name: "apex", expect: [(metric: RiseFrom("pawn.z", 30), value: 106.67, tol: 1, source: "INSTRUMENTATION.md 2026-10-06: parabola fit over 4 jumps")]),
+    ],
+    record: [Pawn, SimEvents],
+    tolerances: [("pawn.", 0.5)],
+)

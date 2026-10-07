@@ -1,0 +1,30 @@
+[package]
+name = "oracle"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Differential oracle CLI: coverage scan, cached original answers vs the headless port, scorecard and work list"
+
+[features]
+# `import` lets the tool build the port's derived data itself (map import through
+# dishonored_content); `scenarios` links the simulation (dishonored_sim) for the scenario
+# runner. Without them the tool links only dishonored_world and reads the port snapshot, which
+# keeps the collision fix / re-check loop under ten seconds:
+#   cargo build -p oracle --no-default-features
+#   cargo build -p oracle --no-default-features --features scenarios
+default = ["import", "scenarios"]
+import = ["dep:dishonored_content", "scenarios"]
+scenarios = ["dep:dishonored_sim"]
+
+[dependencies]
+anyhow.workspace = true
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bincode = { version = "2", features = ["serde"] }
+rayon = "1"
+dishonored_oracle.workspace = true
+dishonored_world.workspace = true
+dishonored_ir.workspace = true
+dishonored_sim = { workspace = true, optional = true }
+dishonored_content = { workspace = true, optional = true }
