@@ -15,7 +15,8 @@
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
     forward_io::{VertexOutput, FragmentOutput},
     pbr_types::{STANDARD_MATERIAL_FLAGS_UNLIT_BIT, PbrInput},
-    pbr_functions::{calculate_diffuse_color, calculate_F0_dielectric},
+    pbr_functions::{calculate_diffuse_color, calculate_F0_dielectric, calculate_tbn_mikktspace, apply_normal_mapping},
+    pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT,
     mesh_view_bindings as view_bindings,
     mesh_view_types,
     mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
@@ -51,6 +52,14 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(111) var d2_diffuse: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(112) var d2_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(113) var d2_mask: texture_2d<f32>;
+// The same mask lerps the normal map to N2 (tangent space, normalised after the lerp) and the
+// specular texture to S2 (28116): v2_params = (N2 on, N2 tiling, S2 on, S2 tiling);
+// s2_channel = one-hot channel with w = 1, or 0 for RGB.
+@group(#{MATERIAL_BIND_GROUP}) @binding(114) var<uniform> v2_params: vec4<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(115) var<uniform> s2_channel: vec4<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(116) var v2_normal: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(117) var v2_n2: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(118) var v2_s2: texture_2d<f32>;
 
 // saturate((d + bias) * scale)^exponent, 0 below 1e-6.
 fn distance_field_shadow(d: f32, bias: f32, scale: f32, exponent: f32) -> f32 {
@@ -130,6 +139,7 @@ fn basis_weights(n: vec3<f32>) -> vec3<f32> {
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
+    var d2_m = 0.0;
 #ifdef VERTEX_UVS_A
     if (d2_params.x > 0.5) {
         var muv = in.uv;
@@ -139,9 +149,20 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         }
 #endif
         let m = dot(textureSample(d2_mask, d2_sampler, muv), d2_channel) * d2_params.y;
+        d2_m = m;
         let v = textureSample(d2_diffuse, d2_sampler, in.uv * d2_params.z).rgb;
         let b = pbr_input.material.base_color;
         pbr_input.material.base_color = vec4<f32>(b.rgb + (v - b.rgb) * m, b.a);
+#ifdef VERTEX_TANGENTS
+        if (v2_params.x > 0.5) {
+            // lerp(N, N2, m) in tangent space, mapped like Bevy maps the base normal map.
+            let nb = textureSample(v2_normal, d2_sampler, in.uv).rgb;
+            let nv = textureSample(v2_n2, d2_sampler, in.uv * v2_params.y).rgb;
+            let tbn = calculate_tbn_mikktspace(pbr_input.world_normal, in.world_tangent);
+            let double_sided = (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
+            pbr_input.N = apply_normal_mapping(pbr_input.material.flags, tbn, double_sided, is_front, mix(nb, nv, m));
+        }
+#endif
     }
 #endif
     var lightmap_specular = vec3<f32>(0.0);
@@ -181,7 +202,15 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let ws = pow(max(basis_weights(r), vec3<f32>(1e-6)), vec3<f32>(baked_params.z));
     // UE3 specular colour = S_ texture (masked channel) [* S_Specular_color.rgb]; Bevy's
     // reflectance holds 0.5 * a * colour * texture, so y = 2 / a (0 without specular).
-    lightmap_specular = color * dot(dir, ws) * pbr_input.material.reflectance * baked_params.y;
+    var spec_color = pbr_input.material.reflectance * baked_params.y;
+#ifdef VERTEX_UVS_A
+    if (v2_params.z > 0.5) {
+        let t2 = textureSample(v2_s2, d2_sampler, in.uv * v2_params.w);
+        let s2 = select(t2.rgb, vec3<f32>(dot(t2.rgb, s2_channel.xyz)), s2_channel.w > 0.5);
+        spec_color = spec_color + (s2 - spec_color) * d2_m;
+    }
+#endif
+    lightmap_specular = color * dot(dir, ws) * spec_color;
     if (baked_params.w >= 3.0 && baked_params.w < 8.0) {
         // Debug views (DISHONORED_LIGHTMAP_DEBUG): 3 lobe weights, 4 tangent-space view
         // vector, 5 tangent-space normal, 6 diffuse irradiance, 7 basis intensities (8, the
