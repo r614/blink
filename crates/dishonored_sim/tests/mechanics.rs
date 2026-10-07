@@ -362,6 +362,35 @@ fn sword_hit_block_parry() {
     assert!(staggered);
 }
 
+/// U-590: the original (engine hook, fixed 1/60 s step) lands the hit on a guard 110 uu
+/// ahead 0.300-0.350 s after the press: the damage zone is the last `m_fDamageZoneMaxTime`
+/// (0.05 s) of the clip's `DishonoredNotify_AttackZone` (0.138 + 0.207 for
+/// `Sword_Ready_AttackRight_A_Small`, so 0.295-0.345 s), not its start.
+#[test]
+fn sword_hit_lands_in_the_damage_zone() {
+    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.), (2, Vec3::new(110., 0., STAND_Z + 1.), 180.)]);
+    r.settle();
+    let hit_tick = |r: &mut Run| {
+        r.step(&[(1, input(0., 0, buttons::PRIMARY)), (2, input(180., 0, 0))]);
+        let h0 = r.p(2).vitals.health;
+        for k in 1..=60u32 {
+            r.step(&[(1, input(0., 0, 0)), (2, input(180., 0, 0))]);
+            if r.p(2).vitals.health < h0 {
+                return k;
+            }
+        }
+        panic!("no hit");
+    };
+    // First swing: Right_A, damage zone 0.295 s -> the first 60 Hz tick past it (0.300 s).
+    assert_eq!(hit_tick(&mut r), 18);
+    r.steps(60, &[(1, input(0., 0, 0)), (2, input(180., 0, 0))]);
+    // Second swing: Left_A, 0.158 + 0.186 - 0.05 = 0.294 s -> 0.300 s.
+    assert_eq!(hit_tick(&mut r), 18);
+    r.steps(60, &[(1, input(0., 0, 0)), (2, input(180., 0, 0))]);
+    // Third: Right_B, 0.104 + 0.187 - 0.05 = 0.241 s -> 0.250 s.
+    assert_eq!(hit_tick(&mut r), 15);
+}
+
 #[test]
 fn back_assassination_kills() {
     // Attacker directly behind the victim, both facing +X.

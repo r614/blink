@@ -253,19 +253,16 @@ pub struct ViewAnim {
     prev_locals: Vec<(Quat, Vec3)>,
 }
 
+/// Attack clips in `SwordState::swing_clip` order.
+const SWING_CLIPS: [&str; 5] = ["Sword_Ready_AttackRight_A_Small", "Sword_Ready_AttackLeft_A_Small", "Sword_Ready_AttackRight_B_Small", "Sword_Ready_AttackLeft_B_Small", "Sword_Sneak_Attack_Small"];
+
 /// Right-hand (sword, full-body) clip for a player state: (key, clip, looped, rate).
 fn right_clip(p: &PlayerState, a: &mut ViewAnim) -> (String, &'static str, bool, f32) {
     use SwordPhase::*;
-    let attacking = matches!(p.sword.phase, Startup | Active | Recovery);
-    if attacking && !matches!(a.prev_sword, Startup | Active | Recovery) {
-        a.swing += 1;
-    }
+    // The simulation picks the clip (its damage zone times the hit, `SwingTiming`).
+    a.swing = p.sword.swings as u32;
     a.prev_sword = p.sword.phase;
-    let swing_clip = if p.crouched {
-        "Sword_Sneak_Attack_Small"
-    } else {
-        ["Sword_Ready_AttackRight_A_Small", "Sword_Ready_AttackLeft_A_Small", "Sword_Ready_AttackRight_B_Small", "Sword_Ready_AttackLeft_B_Small"][a.swing as usize % 4]
-    };
+    let swing_clip = SWING_CLIPS[(p.sword.swing_clip as usize).min(4)];
     let one = |k: &str, c: &'static str| (k.to_string(), c, false, 1.0);
     // Choke (`Ply_Sword_Choke_as` masters, by `eChokeState`) and carrying a body
     // (`Ply_Empty_CarryCorpse_as` masters): whole rig.

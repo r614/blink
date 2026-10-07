@@ -139,7 +139,7 @@ Sessions: the first two at the engine's variable step (20-35 fps), the third at 
 | Windblast cost | 50 | 50 | same |
 | Windblast hit at 182.8 uu, level aim | 26 damage, momentum (2362, -227, 1317) | 26, (2369, -229, 407) | **differs**: z is `(1 - d/r) x ExtraUp x k`; **fixed** |
 | Sword hit on a guard | 10 of 50 per hit (`DisDamageType_FastHit_Right`, momentum ~(500, 0, -230)) | 0.2 x 70 = 14 (NPCs have the player's 70 by rule) | same formula (0.2 x the victim's HealthMax); the NPC health is the port's RULE (U-113) |
-| Sword press -> damage (60 Hz) | 0.300-0.350 s (target 110 uu ahead) | 0.13 s (AttackZone start) | **differs**: new U-590 |
+| Sword press -> damage (60 Hz) | 0.300-0.350 s (target 110 uu ahead) | 0.300 s (Right_A / Left_A damage zone: the last `m_fDamageZoneMaxTime` of the attack zone) | was 0.13 s; **fixed** (U-590) |
 | Guard sword damage to the player | `DisDamageType_NPCSlash` 15 (8 on some first hits) | player sword rule | recorded |
 | Detection: LOS norm | `d / 3500` in the inner cone, `d / 1700` in the outer one (d from the eye) | same | same |
 | Detection: seen value | `DistanceTuning(1 - norm) + 0.1 x light01 + 0.25 x speed/600`, stance bonus 0 when crouched, clamped to [0, 1]; the rate equals it (scalar 1.0); 13 cases within 0.006 | same | **same** |

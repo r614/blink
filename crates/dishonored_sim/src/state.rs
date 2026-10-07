@@ -55,6 +55,13 @@ pub struct SwordState {
     pub block_time: f32,
     /// Already applied damage during this swing.
     pub hit_done: bool,
+    /// Swings started so far (wrapping) and the clip of the current one: 0-3 cycle
+    /// `Sword_Ready_Attack{Right_A,Left_A,Right_B,Left_B}_Small`, 4 is
+    /// `Sword_Sneak_Attack_Small` (crouched). The cycle order is the port's (U-601).
+    #[serde(default)]
+    pub swings: u8,
+    #[serde(default)]
+    pub swing_clip: u8,
     pub assassination_target: Option<PlayerId>,
     /// `m_fForceBlockTimeForPerfectParry`: block held (and parries suppressed) after a
     /// tap parry.

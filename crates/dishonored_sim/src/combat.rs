@@ -1,7 +1,9 @@
 //! Sword combat (M9): swing phases, block, parry, back and drop assassinations.
 //!
 //! Hit geometry (range 210, sweep width 60, assassinate range 275, health-ratio damage)
-//! is CONFIRMED tweak data. Phase timings are SPECULATIVE (see `CombatTuning`).
+//! is CONFIRMED tweak data. The player's swing phases come from its attack clips' notifies (the hit
+//! lands in the damage zone at the end of the attack zone, U-590); stagger and recoil are
+//! SPECULATIVE (see `CombatTuning`).
 //! Simulation owns timing; animation only presents it.
 
 use crate::events::{DamageCause, SimEvent, SoundCategory};
@@ -16,6 +18,7 @@ use glam::Vec3;
 
 /// Advance the attacker-side state machine and collect swing requests.
 pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, dt: f32, events: &mut Vec<SimEvent>) {
+    let (swing_startup, swing_active, swing_recovery) = swing_phases(p, t);
     let s = &mut p.sword;
     s.timer += dt;
     match s.phase {
@@ -31,6 +34,8 @@ pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, 
                 s.phase = SwordPhase::Startup;
                 s.timer = 0.0;
                 s.hit_done = false;
+                s.swing_clip = if p.crouched { 4 } else { s.swings % 4 };
+                s.swings = s.swings.wrapping_add(1);
                 events.push(SimEvent::SwordSwing { id: p.id });
                 events.push(SimEvent::Sound { position: p.position, radius: 300.0, category: SoundCategory::SwordSwing, source: p.id });
             }
@@ -44,15 +49,15 @@ pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, 
                 s.force_block = 0.0;
             }
         }
-        SwordPhase::Startup if s.timer >= t.swing_startup => {
+        SwordPhase::Startup if s.timer >= swing_startup => {
             s.phase = SwordPhase::Active;
             s.timer = 0.0;
         }
-        SwordPhase::Active if s.timer >= t.swing_active => {
+        SwordPhase::Active if s.timer >= swing_active => {
             s.phase = SwordPhase::Recovery;
             s.timer = 0.0;
         }
-        SwordPhase::Recovery if s.timer >= t.swing_recovery => {
+        SwordPhase::Recovery if s.timer >= swing_recovery => {
             s.phase = SwordPhase::Idle;
             s.timer = 0.0;
         }
@@ -66,6 +71,16 @@ pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, 
             s.assassination_target = None;
         }
         _ => {}
+    }
+}
+
+/// Phase lengths of the current swing. The player's come from its attack clip: the hit is
+/// only possible in the damage zone at the end of the clip's attack zone (U-590, see
+/// [`crate::tuning::SwingTiming`]). AI pawns keep the uniform port values (U-600).
+pub fn swing_phases(p: &PlayerState, t: &CombatTuning) -> (f32, f32, f32) {
+    match p.kind {
+        crate::state::PawnKind::Human => t.player_swings[(p.sword.swing_clip as usize).min(4)].phases(),
+        _ => (t.swing_startup, t.swing_active, t.swing_recovery),
     }
 }
 

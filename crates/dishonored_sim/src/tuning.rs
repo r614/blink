@@ -61,6 +61,52 @@ fn crossbow_fast_fire() -> f32 {
     0.625 / 1.5
 }
 
+/// One player attack clip's `DishonoredNotify_AttackZone` and the end of its attack state.
+///
+/// The notify's tick handler (0x00A8E760) opens the versus zone and then the damage zone
+/// when the clip time crosses `end - m_fDamageZoneMaxTime - m_fVersusZoneMaxTime` and
+/// `end - m_fDamageZoneMaxTime` (each clamped to the notify start). Entering the damage
+/// zone (melee context slot 115, 0x00C13140) sets `m_bDamageIsPosssible` and clears
+/// `m_AlreadyHitActors`; the context tick (0x00C13640) sweeps for victims every tick while
+/// that flag and the attack zone hold (0x00BFF7B0), until the notify ends (0x00A8E710).
+/// The hit can therefore only land in the last `m_fDamageZoneMaxTime` of the attack zone.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct SwingTiming {
+    /// Notify start and duration (seconds into the clip).
+    pub zone_start: f32,
+    pub zone_duration: f32,
+    pub damage_zone_max: f32,
+    /// `DishonoredNotify_AttackInterruptable` (`AnimStateExit` when the clip has none).
+    pub end: f32,
+}
+
+impl SwingTiming {
+    /// `Ply_Sword_Attack_as` (Startup.upk) in `SwordState::swing_clip` order:
+    /// `Sword_Ready_AttackRight_A_Small`, `AttackLeft_A_Small`, `AttackRight_B_Small`,
+    /// `AttackLeft_B_Small`, `Sword_Sneak_Attack_Small` (no interruptable notify: its
+    /// `AnimStateExit`).
+    pub const PLAYER: [SwingTiming; 5] = [
+        SwingTiming { zone_start: 0.138, zone_duration: 0.207, damage_zone_max: 0.05, end: 0.632 },
+        SwingTiming { zone_start: 0.158, zone_duration: 0.186, damage_zone_max: 0.05, end: 0.579 },
+        SwingTiming { zone_start: 0.104, zone_duration: 0.187, damage_zone_max: 0.05, end: 0.566 },
+        SwingTiming { zone_start: 0.122, zone_duration: 0.243, damage_zone_max: 0.05, end: 0.594 },
+        SwingTiming { zone_start: 0.086, zone_duration: 0.258, damage_zone_max: 0.05, end: 0.779 },
+    ];
+
+    /// Clip time at which the damage zone opens.
+    pub fn damage_start(&self) -> f32 {
+        self.zone_start + (self.zone_duration - self.damage_zone_max).max(0.0)
+    }
+
+    /// (startup, active, recovery) phase lengths: press to the damage zone, the damage
+    /// zone, then the rest of the attack state.
+    pub fn phases(&self) -> (f32, f32, f32) {
+        let start = self.damage_start();
+        let zone_end = self.zone_start + self.zone_duration;
+        (start, zone_end - start, (self.end - zone_end).max(0.0))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CombatTuning {
     // --- sword (CONFIRMED geometry from DisTweaks_MeleeAttackPlayer / Assassinate) ---
@@ -73,9 +119,13 @@ pub struct CombatTuning {
     pub big_damage_ratio: f32,
     // --- sword timings (LIKELY: Ply_Sword_Attack_as / Ply_Sword_Versus_as notifies;
     // stagger and recoil still SPECULATIVE) ---
+    /// Uniform swing phases of AI-driven pawns (guards, civilians): a port approximation,
+    /// their own clips are not timed in the simulation (U-600).
     pub swing_startup: f32,
     pub swing_active: f32,
     pub swing_recovery: f32,
+    /// The player's attack clips, indexed by `SwordState::swing_clip`.
+    pub player_swings: [SwingTiming; 5],
     pub parry_window: f32,
     /// `DisTweaks_MeleeBlockPlayer.m_fTapForPerfectParryWindow`: a block started this
     /// recently always parries (CONFIRMED, 0x00C22B60).
@@ -247,6 +297,7 @@ impl CombatTuning {
             swing_startup: 0.13,
             swing_active: 0.21,
             swing_recovery: 0.26,
+            player_swings: SwingTiming::PLAYER,
             // DisNotify_BlockParryZone on Sword_Block_*: t=0.001, duration 0.430.
             parry_window: 0.43,
             parry_tap_window: v(m, "block.m_fTapForPerfectParryWindow", 0.2),
