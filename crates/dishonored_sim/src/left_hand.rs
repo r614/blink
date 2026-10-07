@@ -547,7 +547,11 @@ pub fn windblast_factor(dir: Vec3, center: Vec3, origin: Vec3, range: f32, cos_h
 /// Velocity given to a pawn hit by the blast (0x00BF6AF0 then 0x00BE9770): the impulse is
 /// `direction * m_Force` with its z raised to the extra up force
 /// `(1 - min(d / range, 1)) * m_ExtraUpForce` (added when the aim points down), and the
-/// momentum handed to `TakeDamage` is `(impulse.xy * k, 0.15 * |impulse| * k)` with `k` the
+/// momentum handed to `TakeDamage` is `impulse * k` with `k` the blast factor. MEASURED
+/// 2026-10-06 (engine hook, level aim, the damage path's momentum argument): a hit at 183 uu
+/// with k = 0.879 received (2362, -227, 1317) = (2700 dir.xy k, 0.939 x 1600 x k); an earlier
+/// decode read the z as `0.15 x |impulse| x k` (407 here). Applying the momentum as a velocity
+/// change is an inference (the original only ever blasts NPCs, which ragdoll).|impulse| * k)` with `k` the
 /// blast factor. Applying the momentum as a velocity change is an inference (the original
 /// only ever blasts NPCs, which ragdoll).
 pub fn windblast_momentum(dir: Vec3, force: f32, up_force: f32, d: f32, range: f32, k: f32) -> Vec3 {
@@ -556,8 +560,7 @@ pub fn windblast_momentum(dir: Vec3, force: f32, up_force: f32, d: f32, range: f
     if up > imp.z {
         imp.z += (up - imp.z).min(up);
     }
-    let mag = imp.length();
-    Vec3::new(imp.x * k, imp.y * k, 0.15 * mag * k)
+    imp * k
 }
 
 /// Start Windblasts cast this tick (after the warmup) and advance blast fronts.
