@@ -48,6 +48,13 @@ pub fn spend_mana(p: &mut PlayerState, cost: f32, cfg: &VitalsConfig) -> bool {
 }
 
 pub fn tick(p: &mut PlayerState, cfg: &VitalsConfig, dt: f32) {
+    tick_with(p, cfg, dt, true);
+}
+
+/// [`tick`], with the health regeneration held when `health_regen` is false: on the original
+/// a drowning player (under water, out of air) regenerates nothing and its regen countdown
+/// stays put (engine hook, U-242), while under water with air left it regenerates as on land.
+pub fn tick_with(p: &mut PlayerState, cfg: &VitalsConfig, dt: f32, health_regen: bool) {
     if !p.alive {
         return;
     }
@@ -67,7 +74,7 @@ pub fn tick(p: &mut PlayerState, cfg: &VitalsConfig, dt: f32) {
     }
     v.mana_regen_cap = (v.mana + v.mana_regen_pool).min(cfg.mana_max);
     // Health.
-    if cfg.health_regen_amount > 0.0 && v.health < cfg.health_regen_limit {
+    if health_regen && cfg.health_regen_amount > 0.0 && v.health < cfg.health_regen_limit {
         v.health_regen_timer -= dt;
         while v.health_regen_timer <= 0.0 && v.health < cfg.health_regen_limit {
             v.health = (v.health + cfg.health_regen_amount).min(cfg.health_regen_limit);

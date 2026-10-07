@@ -232,10 +232,12 @@ pub fn step_world(
         left_hand::update(p, &input, &ctx, g, &cfg.tuning, &mut local, &mut acts, bend_active, &mut out.events);
         actions.extend(acts.into_iter().map(|a| (i, a)));
         spawns.extend(local.into_iter().map(|(k, pos, vel)| (p.id, k, pos, vel)));
-        vitals::tick(p, &powers::effective_vitals(&p0, g), dt);
+        let breath = powers::attribute(&p0, g, "Attribute_BreathCapacityIncrease", 0.0);
+        let air_max = swim::air_capacity(&mvc.water, breath);
+        let drowning = p0.water.under && air_max > 0.0 && p0.water.air_used >= air_max - 1e-6;
+        vitals::tick_with(p, &powers::effective_vitals(&p0, g), dt, !drowning);
         left_hand::tick_dark_vision(p, dt, &mut out.events);
         adrenaline::tick(p, g, dt);
-        let breath = powers::attribute(&p0, g, "Attribute_BreathCapacityIncrease", 0.0);
         swim::step_breath(p, world, &mvc, breath, 0.0, dt, &mut out.events);
         p.rat_slow = (p.rat_slow - dt).max(0.0);
         p.action_lock = (p.action_lock - dt).max(0.0);

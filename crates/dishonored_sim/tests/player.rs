@@ -122,6 +122,43 @@ fn breath_runs_out_under_water_and_refills_out_of_it() {
     assert_eq!(r.p(1).vitals.health, h - r.cfg.gameplay.movement.water.drowning_damage, "next point only after the step");
 }
 
+/// U-242, measured on the original (engine hook, fixed 1/60 s step, Corvo held under the
+/// river): out of air, health falls one point every 61 ticks from 10 to 0 and the player dies;
+/// the health regeneration below `HealthRegenLimit` (which restores 5 -> 10 at once on land or
+/// under water with air left) does not run while drowning.
+#[test]
+fn drowning_stops_health_regeneration() {
+    let mut r = Run::new(&[(1, Vec3::new(4000., 0., -250.), 0.)]);
+    let max = r.cfg.gameplay.movement.water.apnea_max;
+    let dive = PlayerInput { pitch: -60.0, forward: 0, buttons: buttons::CROUCH, ..Default::default() };
+    r.steps(60, &[(1, dive)]);
+    assert!(r.p(1).water.under);
+    // Under water with air left: regeneration as on land.
+    r.pm(1).vitals.health = 5.0;
+    r.pm(1).vitals.health_regen_timer = 0.0;
+    r.steps(30, &[(1, dive)]);
+    assert_eq!(r.p(1).vitals.health, 10.0);
+    // Out of air: one point per step, no regeneration, death at 0.
+    r.pm(1).water.air_used = max;
+    let mut drops = Vec::new();
+    let mut last = r.p(1).vitals.health;
+    for k in 0..800 {
+        r.steps(1, &[(1, dive)]);
+        if r.p(1).vitals.health != last {
+            assert!(r.p(1).vitals.health < last, "health rose at tick {k}");
+            drops.push(k);
+            last = r.p(1).vitals.health;
+        }
+        if !r.p(1).alive {
+            break;
+        }
+    }
+    assert!(!r.p(1).alive, "drowned");
+    assert_eq!(drops.len(), 10);
+    let gaps: Vec<i32> = drops.windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(gaps.iter().all(|&g| (60..=61).contains(&g)), "{gaps:?}");
+}
+
 #[test]
 fn agility_power_jump_at_the_top_of_a_held_jump() {
     let mut r = Run::new(&[(1, Vec3::new(0., 0., 92.), 0.)]);
