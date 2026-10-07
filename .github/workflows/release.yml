@@ -1,0 +1,57 @@
+name: Release
+
+# Pushing a version tag (v0.1.0, v0.2.0-alpha.1, ...) builds the Windows release and publishes it
+# as a GitHub pre-release. Running the workflow by hand builds and tests without publishing; the
+# zip is kept as a workflow artifact.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      CARGO_TERM_COLOR: always
+      DISHONORED_MUTE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # No game files on the runner: the tests that need a Dishonored install skip themselves.
+      - name: Test
+        run: cargo test --workspace --release
+
+      - name: Build
+        run: cargo build --release -p dishonored_runtime -p dishonored_server -p dishonored_master
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0, 7))" }
+          $name = "Blink-$version-windows-x64"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item target/release/dishonored_runtime.exe, target/release/dishonored_server.exe, target/release/dishonored_master.exe $name
+          Copy-Item -Recurse missions $name
+          Copy-Item README.md, LICENSE $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          "ZIP=$name.zip" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP }}
+          path: ${{ env.ZIP }}
+
+      - name: Publish
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ZIP }}
+          prerelease: true
+          generate_release_notes: true

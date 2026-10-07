@@ -25,6 +25,7 @@
 //! ```
 
 mod coords;
+mod game_dir;
 mod characters;
 mod npc_anim;
 mod facefx;
@@ -182,6 +183,7 @@ struct FreeCam {
 }
 
 fn main() {
+    game_dir::ensure();
     // No game-mode argument (or `--launcher`): the launcher (main menu, options, server creator).
     if launcher::wanted() {
         if let AppExit::Error(c) = launcher::run() {

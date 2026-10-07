@@ -14,3 +14,5 @@ dishonored_mission.workspace = true
 dishonored_net.workspace = true
 dishonored_sim.workspace = true
 glam.workspace = true
+dishonored_assets.workspace = true
+dishonored_settings.workspace = true

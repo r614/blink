@@ -574,6 +574,28 @@ pub fn settings_path() -> PathBuf {
     config_dir().join("dishonored-rs").join("settings.ron")
 }
 
+/// Where the Dishonored install folder chosen on first launch is kept (next to the default
+/// settings file; one line, the folder path).
+pub fn game_dir_file() -> PathBuf {
+    config_dir().join("dishonored-rs").join("game_dir.txt")
+}
+
+/// The install folder chosen on first launch, if one was saved.
+pub fn saved_game_dir() -> Option<PathBuf> {
+    let t = std::fs::read_to_string(game_dir_file()).ok()?;
+    let t = t.trim();
+    (!t.is_empty()).then(|| PathBuf::from(t))
+}
+
+pub fn save_game_dir(dir: &Path) -> Result<()> {
+    let f = game_dir_file();
+    if let Some(p) = f.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    std::fs::write(&f, format!("{}\n", dir.display()))?;
+    Ok(())
+}
+
 fn config_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("APPDATA") {
         return PathBuf::from(p);
