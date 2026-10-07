@@ -2,8 +2,9 @@
 
 A standalone Rust/Bevy runtime that rebuilds the gameplay kernel of *Dishonored*
 (2012) with high behavioral fidelity, using content from a legitimately owned local
-install of **Dishonored: Definitive Edition (GOG)**. It does not run, inject into or
-modify `Dishonored.exe`.
+install of **Dishonored: Definitive Edition (GOG)**. The runtime does not run or
+modify `Dishonored.exe`. An optional research tool (`probe_launch`) can start your own
+local copy with a measurement DLL, so that the port can be compared against the original.
 
 The end goal is **Contracts**, a social-stealth multiplayer mode: every player has
 one target and one pursuer, and the loop is observe → identify → stalk → approach →
@@ -12,17 +13,25 @@ assassinate → escape.
 No retail assets are included in this repository. All content is read at runtime
 from your install.
 
+> **Not affiliated with Arkane Studios, Bethesda Softworks or ZeniMax Media.**
+> *Dishonored* is a trademark of ZeniMax Media Inc. This is an unofficial fan project; you
+> need your own copy of the game to use it. See [Legal](#legal).
+
 ## Status
 
-| Milestone | State |
+Playable on Lady Boyle's Last Party (`L_Boyle_*`): offline against bots, custom missions,
+and Contracts / FFA over a dedicated server.
+
+| Area | State |
 |---|---|
-| M0 install/repo reconnaissance | done: `research/dishonored/GAME_FILES.md` |
-| M1 UE3 package parsing | done: 470/470 packages, 1.26M objects |
-| M2 normalized IR | done: `dishonored_ir` |
-| M3 target map | done: Lady Boyle's Last Party (`research/dishonored/maps/TARGET_MAP.md`) |
-| M4 render map | **done: Boyle estate renders in Bevy** |
-| M5 collision | next (kDOP collision triangles already extracted) |
+| UE3 packages, IR, map import | done: 470/470 packages; meshes, materials, lightmaps, decals, props |
+| Rendering | the original's shaders reproduced (`research/dishonored/RENDERING.md`) |
+| Collision, movers, physics volumes, navigation | done |
+| Player movement, combat, powers, weapons | measured against the original (`research/dishonored/HOOK_TRIAGE.md`) |
+| AI, Kismet, conversations, barks, audio, HUD | done for the target map |
 | Launcher | main menu, missions, server browser / creator, every original option (`research/dishonored/MENUS.md`) |
+
+Open questions are tracked in `research/UNKNOWNS.md`.
 
 ## Layout
 
@@ -162,7 +171,7 @@ cargo test --release
 
 The retail regression tests skip themselves when no install is found.
 
-### Parallel agents / worktrees
+### Parallel builds / worktrees
 
 Several checkouts or `git worktree`s can build and test at once without rebuilding everything:
 
@@ -196,3 +205,23 @@ source scripts/dev-env.sh        # PowerShell: . .\scripts\dev-env.ps1
   measured, not invented (`research/UNKNOWNS.md`, `research/LOG.md`).
 - Gameplay simulation lives in portable, fixed-step Rust. Bevy is presentation.
 - Binary-level findings are tagged with the `Dishonored.exe` SHA-256 they apply to.
+
+## Legal
+
+- This project is not affiliated with, endorsed by or sponsored by Arkane Studios, Bethesda
+  Softworks or ZeniMax Media. *Dishonored* and related names are trademarks of ZeniMax Media Inc.,
+  used here only to identify the game this project is compatible with.
+- The repository contains no game assets, extracted content or original code. The runtime reads
+  data from a copy of the game you own, at runtime, and writes derived caches only to your machine.
+- It does not circumvent copy protection. The research tools only read the game's files and,
+  optionally, measure your own running copy.
+
+## License
+
+Copyright (C) 2026 dishonored-rs contributors.
+
+This program is free software: you can redistribute it and/or modify it under the terms of the
+GNU General Public License as published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version. See [`LICENSE`](LICENSE).
+
+The license covers this project's code and documentation only, not the game or its content.

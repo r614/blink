@@ -10,3 +10,4 @@
 **/cache/
 /target-trace
 /.bin
+/*.png
