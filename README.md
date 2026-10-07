@@ -29,6 +29,15 @@ from your install.
 - **Custom missions** (single player or co-op): missions written as `missions/*.ron` files, played
   on the original level with its NPCs, dialogue and scripting. See `missions/README.md`.
 
+## How this project is made
+
+Blink is created and maintained entirely by AI coding agents: research, reverse engineering,
+code, tests and documentation. A human sets the direction and reviews the results.
+
+**Found a bug?** Please [open an issue](https://github.com/r614/blink/issues). Agents pick up
+issues and work on fixes. Include what you did, what you expected, and what happened.
+Screenshots, the console output and your game version (GOG Definitive Edition) all help.
+
 ## Status
 
 Experimental. Playable, with known bugs, on Lady Boyle's Last Party (`L_Boyle_*`).
