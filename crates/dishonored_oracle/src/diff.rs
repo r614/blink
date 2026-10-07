@@ -81,6 +81,10 @@ pub struct Disagreement {
     pub port: String,
     pub orig_time: f32,
     pub port_time: Option<f32>,
+    /// Both hit: the offset key (`<line|box> <port kind> <trace>`) and the original's hit
+    /// minus the port's along the check, uu.
+    #[serde(default)]
+    pub offset: Option<(String, f32)>,
 }
 
 /// Disagreements grouped by the object responsible: the original's hit object, or the port's
@@ -108,6 +112,27 @@ pub struct CollisionDiff {
     pub offsets: BTreeMap<String, Vec<f32>>,
     pub disagreements: Vec<Disagreement>,
     pub clusters: Vec<Cluster>,
+    /// Offset keys whose hits differ by a constant (median, uu): a rule-level difference (an
+    /// engine back-off, a skin) rather than a per-object one.
+    #[serde(default)]
+    pub systematic: BTreeMap<String, f32>,
+}
+
+/// A key is systematic when it has at least 20 offsets, a median of at least 1 uu, and 60 %
+/// of its offsets within 0.5 uu of the median.
+pub fn systematic_offsets(offsets: &BTreeMap<String, Vec<f32>>) -> BTreeMap<String, f32> {
+    let mut out = BTreeMap::new();
+    for (k, v) in offsets {
+        if v.len() < 20 {
+            continue;
+        }
+        let (_, med, _) = quantiles(v);
+        let near = v.iter().filter(|x| (**x - med).abs() <= 0.5).count();
+        if med.abs() >= 1.0 && near as f32 >= 0.6 * v.len() as f32 {
+            out.insert(k.clone(), med);
+        }
+    }
+    out
 }
 
 impl CollisionDiff {
@@ -133,11 +158,14 @@ pub fn compare_collision(set: &CollisionSet, port: &PortAnswers) -> CollisionDif
             continue;
         }
         let p = port.hits.get(i).copied().flatten();
+        let mut offset = None;
         if let (true, Some(h)) = (o.hit, p) {
             let off = (o.time - h.time) * q.length();
+            let key = format!("{} {} {}", if q.is_box() { "box" } else { "line" }, h.kind, q.trace());
             if off.abs() < 20.0 && o.time > 0.0 && h.time > 0.0 {
-                d.offsets.entry(format!("{} {} {}", if q.is_box() { "box" } else { "line" }, h.kind, q.trace())).or_default().push(off);
+                d.offsets.entry(key.clone()).or_default().push(off);
             }
+            offset = Some((key, off));
         }
         let ok = agrees(q, &o, p.as_ref());
         d.total += 1;
@@ -162,17 +190,28 @@ pub fn compare_collision(set: &CollisionSet, port: &PortAnswers) -> CollisionDif
             port: p.map(|h| port.name(&h).to_string()).unwrap_or_else(|| "-".into()),
             orig_time: o.time,
             port_time: p.map(|h| h.time),
+            offset,
         });
     }
-    d.clusters = cluster(&d.disagreements);
+    d.systematic = systematic_offsets(&d.offsets);
+    d.clusters = cluster(&d.disagreements, &d.systematic);
     d
 }
 
-/// Group disagreements by the responsible object, largest first.
-pub fn cluster(ds: &[Disagreement]) -> Vec<Cluster> {
+/// Group disagreements by the responsible object (the original's hit component, or the
+/// port's source when the original hit nothing), largest first. Disagreements explained by a
+/// systematic offset go to one cluster per offset key.
+pub fn cluster(ds: &[Disagreement], systematic: &BTreeMap<String, f32>) -> Vec<Cluster> {
     let mut m: BTreeMap<String, Cluster> = BTreeMap::new();
     for x in ds {
-        let (object, other) = if x.original != "-" { (x.original.clone(), x.port.clone()) } else { (format!("port:{}", x.port), "-".to_string()) };
+        let sys = x.offset.as_ref().and_then(|(k, off)| systematic.get(k).filter(|med| (off - **med).abs() <= 0.5).map(|med| format!("systematic: {k} checks hit {:.2} uu {} in the original", med.abs(), if *med < 0.0 { "earlier" } else { "later" })));
+        let (object, other) = if let Some(s) = sys {
+            (s, x.original.clone())
+        } else if x.original != "-" {
+            (format!("{}.{}", x.original, x.component), x.port.clone())
+        } else {
+            (format!("port:{}", x.port), "-".to_string())
+        };
         let c = m.entry(object.clone()).or_insert_with(|| Cluster { object, by_direction: BTreeMap::new(), counterparts: BTreeMap::new(), ids: Vec::new() });
         *c.by_direction.entry(x.direction.text().to_string()).or_default() += 1;
         *c.counterparts.entry(other).or_default() += 1;
@@ -213,7 +252,16 @@ pub fn collision_work_items(map: &str, set: &CollisionSet, d: &CollisionDiff, ex
         let mut evidence = vec![
             format!("{n} of {} compared queries on {map} disagree because of this object ({:.3} % of the map's checks).", d.total, 100.0 * n as f64 / d.total.max(1) as f64),
             format!("by direction: {}", c.by_direction.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", ")),
-            format!("other side: {}", c.counterparts.iter().map(|(k, v)| format!("`{k}` {v}")).collect::<Vec<_>>().join(", ")),
+            {
+                let mut cp: Vec<(&String, &u32)> = c.counterparts.iter().collect();
+                cp.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+                let more = cp.len().saturating_sub(10);
+                format!(
+                    "other side (top 10): {}{}",
+                    cp.iter().take(10).map(|(k, v)| format!("`{k}` {v}")).collect::<Vec<_>>().join(", "),
+                    if more > 0 { format!(" and {more} more") } else { String::new() }
+                )
+            },
         ];
         let mut ex = String::from("| query | kind | start | end | extent | original | port |\n|---|---|---|---|---|---|---|\n");
         for &id in c.ids.iter().take(examples) {
@@ -242,7 +290,9 @@ pub fn collision_work_items(map: &str, set: &CollisionSet, d: &CollisionDiff, ex
             }
             s
         };
-        let title = if c.object.starts_with("port:") {
+        let title = if let Some(s) = c.object.strip_prefix("systematic: ") {
+            format!("Collision rule: {s}")
+        } else if c.object.starts_with("port:") {
             format!("Collision: port blocks where the original does not ({})", c.object.trim_start_matches("port:"))
         } else {
             format!("Collision: `{}` answers differently", c.object)
@@ -472,7 +522,7 @@ mod tests {
         assert_eq!((d.total, d.agree, d.excluded), (5, 1, 1));
         assert_eq!(d.by_tag["grid:P"], (2, 1));
         assert_eq!(d.disagreements.len(), 4);
-        assert_eq!(d.clusters[0].object, "L_E:Wall_1");
+        assert_eq!(d.clusters[0].object, "L_E:Wall_1.C0");
         assert_eq!(d.clusters[0].ids, vec![1, 3]);
         assert!(d.clusters.iter().any(|c| c.object == "port:lamp" && c.by_direction["original misses, port hits"] == 1));
         let items = collision_work_items("L_T", &s, &d, 5);

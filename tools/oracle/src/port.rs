@@ -191,7 +191,17 @@ pub fn collision_answers(w: &CollisionWorld, movers: &[CollisionWorld], set: &Co
                 let (s, e) = (Vec3::from(q.start), Vec3::from(q.end));
                 let d = e - s;
                 let len = d.length();
-                h.source = w.raycast(s, d / len, len * (h.time + 0.05).min(1.0) + q.extent[0] * 2.0, trace_channel(&q.tag)).and_then(|r| w.tris.get(r.tri as usize)).map(|t| t.source).unwrap_or(u32::MAX);
+                // The triangles the box touches just past the hit position.
+                let at = s + d * h.time + d / len * 1.0;
+                let mut contacts = Vec::new();
+                w.box_contacts(&PawnBox { center: at, half: Vec3::from(q.extent) + Vec3::splat(0.5) }, trace_channel(&q.tag), &mut contacts);
+                h.source = contacts
+                    .iter()
+                    .max_by(|a, b| a.depth.total_cmp(&b.depth))
+                    .and_then(|c| w.tris.get(c.tri as usize))
+                    .map(|t| t.source)
+                    .or_else(|| w.raycast(s, d / len, len * (h.time + 0.05).min(1.0) + q.extent[0] * 2.0, trace_channel(&q.tag)).and_then(|r| w.tris.get(r.tri as usize)).map(|t| t.source))
+                    .unwrap_or(u32::MAX);
             }
             Some(h)
         })

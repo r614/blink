@@ -17,6 +17,7 @@
 
 mod querygen;
 mod port;
+#[cfg(feature = "scenarios")]
 mod runner;
 
 use anyhow::{Context, Result, bail};
@@ -25,7 +26,9 @@ use dishonored_oracle::coverage::{self, scan, source::PortRegistry};
 use dishonored_oracle::diff;
 use dishonored_oracle::query::{self, CollisionSet};
 use dishonored_oracle::report::{self, Scorecard, Table, WorkItem};
+#[cfg(feature = "scenarios")]
 use dishonored_oracle::scenario::{self, Scenario};
+#[cfg(feature = "scenarios")]
 use dishonored_oracle::trace::Trace;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -45,6 +48,7 @@ impl Args {
         self.0.iter().any(|a| a == f)
     }
     /// Positional arguments after the subcommand (not options or their values).
+    #[cfg_attr(not(feature = "scenarios"), allow(dead_code))]
     fn free(&self, skip: usize) -> Vec<String> {
         let mut out = Vec::new();
         let mut i = skip;
@@ -303,8 +307,17 @@ fn cmd_snapshot(a: &Args) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "scenarios")]
 fn sim_config(json: &str) -> Result<dishonored_sim::SimConfig> {
     dishonored_sim::SimConfig::from_json(json).map_err(|e| anyhow::anyhow!("gameplay config: {e}"))
+}
+
+/// The player's collision cylinder (radius, half height) from the gameplay config JSON.
+fn pawn_extent(json: &str) -> Result<(f32, f32)> {
+    let v: serde_json::Value = serde_json::from_str(json)?;
+    let mv = &v["movement"];
+    let f = |k: &str| mv[k].as_f64().map(|x| x as f32).with_context(|| format!("gameplay config: movement.{k}"));
+    Ok((f("collision_radius")?, f("collision_half_height")?))
 }
 
 fn cmd_gen(a: &Args) -> Result<()> {
@@ -314,9 +327,8 @@ fn cmd_gen(a: &Args) -> Result<()> {
     let map = a.opt("--map").context("--map")?;
     let out = a.opt("--out").context("--out")?;
     let (w, json) = port::snapshot(&cache::root(), &map, false)?.world();
-    let cfg = sim_config(&json)?;
     let nav = w.nav.as_ref().context("map without navigation mesh")?;
-    let q = querygen::generate(nav, (cfg.gameplay.movement.collision_radius, cfg.gameplay.movement.collision_half_height));
+    let q = querygen::generate(nav, pawn_extent(&json)?);
     std::fs::write(&out, query::queries_text(&map, &q))?;
     println!("{} queries ({}) -> {out}; hash {:016x}", q.len(), querygen::GENERATOR, query::query_set_hash(querygen::GENERATOR, &q));
     Ok(())
@@ -421,10 +433,17 @@ fn cmd_collision(a: &Args) -> Result<CollisionRun> {
 
 // ----- scenarios -----
 
+#[cfg_attr(not(feature = "scenarios"), allow(dead_code))]
 fn scenario_dir(a: &Args) -> PathBuf {
     a.opt("--dir").map(PathBuf::from).unwrap_or_else(|| repo_root().join("fixtures").join("oracle").join("scenarios"))
 }
 
+#[cfg(not(feature = "scenarios"))]
+fn cmd_scenario(_a: &Args) -> Result<(Scorecard, Vec<WorkItem>)> {
+    bail!("this build has no scenario runner: build with the `scenarios` feature")
+}
+
+#[cfg(feature = "scenarios")]
 fn cmd_scenario(a: &Args) -> Result<(Scorecard, Vec<WorkItem>)> {
     let t_all = Instant::now();
     let root = cache::root();
