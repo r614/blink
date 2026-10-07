@@ -1,0 +1,18 @@
+[package]
+name = "dishonored_oracle"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Differential oracle: cached original-game answers, scenario specs, diffs, scorecards and the package coverage scan"
+
+# Deliberately small: no Bevy, no runtime, no game-system crates. The CLI (`tools/oracle`) adds
+# the port's library crates on top.
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ue3_package.workspace = true
+bincode = { version = "2", features = ["serde"] }
+ron = "0.12"
+rayon = "1"
+sha2 = "0.10"

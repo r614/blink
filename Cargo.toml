@@ -28,6 +28,7 @@ dishonored_conversation = { path = "crates/dishonored_conversation", default-fea
 dishonored_kismet = { path = "crates/dishonored_kismet", default-features = false }
 dishonored_settings = { path = "crates/dishonored_settings" }
 dishonored_save = { path = "crates/dishonored_save" }
+dishonored_oracle = { path = "crates/dishonored_oracle" }
 
 [profile.dev]
 opt-level = 1
