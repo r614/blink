@@ -615,8 +615,8 @@ impl Importer<'_> {
         // Other blocking actors with static mesh components (physics props, breakable planks,
         // the static parts of usable objects, ...) collide where they are placed: the state the
         // map starts in (they can move or break later in the original, U-650). Pickups do not
-        // block (`bBlockActors` false).
-        let static_blocker = mover.is_none() && STATIC_BLOCKER_CLASSES.contains(&class.as_str());
+        // block (`bBlockActors` false) and answer the vision and crosshair checks only.
+        let static_blocker = mover.is_none() && (STATIC_BLOCKER_CLASSES.contains(&class.as_str()) || crate::collision_audit::is_kactor(&class));
         let rigid = static_blocker && self.simulated_kactor(&pkg, actor, &class);
         for &ci in comps {
             let before = self.map.instances.len();
@@ -766,11 +766,21 @@ impl Importer<'_> {
     /// `Physics`, archetypes resolved) unless its tweak fixes it in place (`m_bFixed` of its
     /// `DisTweaks_StaticBreakable` / `DisTweaks_Movable`: `PHYS_None`, e.g. Boyle's piano).
     fn simulated_kactor(&mut self, pkg: &Arc<Package>, actor: usize, class: &str) -> bool {
-        if !matches!(class, "KActor" | "DishonoredMovable" | "DishonoredBreakableNavBlock" | "DisSpeaker_PA" | "DisWhaleOilBattery" | "DishonoredBreakable") {
+        if !crate::collision_audit::is_kactor(class) {
             return false;
         }
         let ap = self.resolver.effective(pkg, actor);
         if !matches!(find(&ap, "Physics").map(|p| &p.value), Some(Value::Enum(e)) if e == "PHYS_RigidBody") {
+            return false;
+        }
+        // A whale oil battery placed in a receptacle (its `m_pBattery`) starts attached to it,
+        // held in place: measured, Boyle's basement battery stops the movement and pistol checks.
+        if class == "DisWhaleOilBattery"
+            && (0..pkg.exports.len()).any(|r| {
+                pkg.export_class(r) == "DisWhaleOilReceptacle"
+                    && pkg.read_object(r).is_ok_and(|h| find(&h.properties, "m_pBattery").and_then(|p| p.as_object()) == Some(actor as i32 + 1))
+            })
+        {
             return false;
         }
         let tweak = ["m_pMovableTweaks", "m_pBreakableTweaks"].iter().find_map(|n| self.resolver.inherited_object_path(pkg, actor, n));
@@ -816,38 +826,44 @@ impl Importer<'_> {
         // KActors (physics props, breakables) answer like movers (`TRACE_Movers`), so the vision
         // check sees them; other actors that are not world geometry only answer checks with
         // `TRACE_Others`, which the vision check has not.
-        let kactor = matches!(class.as_str(), "KActor" | "DishonoredMovable" | "DishonoredBreakableNavBlock" | "DisSpeaker_PA" | "DisWhaleOilBattery" | "DishonoredBreakable");
+        let kactor = crate::collision_audit::is_kactor(&class);
         // A usable object (`DisSkeletalBreakable::ShouldTrace`, 0x00A28580) answers the vision
         // check as level geometry when its tweak says `m_bShouldTraceAsWorldGeometry` and it is
-        // not transparent for vision (Boyle's lockers and bins).
+        // not transparent for vision (Boyle's lockers and bins); a door (`DisDoor::ShouldTrace`,
+        // 0x00A2C760) unless transparent (the sewer grate doors).
         let usable_seen = !world
             && crate::usable_props::is_usable_class(&class)
-            && class != "DisDoor"
             && match (ObjRef::from_index(pkg.exports[ci].outer), ap.as_ref()) {
-                (ObjRef::Export(a), Some(ap)) => self.breakable_seen_by_vision(pkg, a, ap),
+                (ObjRef::Export(a), Some(ap)) => self.breakable_seen_by_vision(pkg, a, ap, class == "DisDoor"),
                 _ => false,
             };
-        if !world && !kactor && !usable_seen && !matches!(class.as_str(), "InterpActor" | "DisDoor") {
+        if !world && !kactor && !usable_seen && class != "InterpActor" {
             mask &= !m::VISION;
+        }
+        // A KActor that does not block (pickups: `bBlockActors` false) still answers the checks
+        // without `TRACE_Blocking` (`AKActor::ShouldTrace`): measured, the vision line stops on
+        // Boyle's paintings, hemlock and urn pickups.
+        if kactor && collide && !block {
+            return (true, mask & (m::VISION | m::CROSSHAIR));
         }
         (collide && (world || block), mask)
     }
 
     /// Whether a `DisSkeletalBreakable`'s vision answer is that of level geometry: its tweak's
-    /// `m_bShouldTraceAsWorldGeometry`, unless transparent for vision (the actor's
+    /// `m_bShouldTraceAsWorldGeometry` (a door: always), unless transparent for vision (the actor's
     /// `m_bTransparentForVisionChecks` when it sets `m_bOverrideDefaultVisionTransparency`, else
     /// the tweak's).
-    fn breakable_seen_by_vision(&mut self, pkg: &Arc<Package>, actor: usize, ap: &[ue3_package::properties::Property]) -> bool {
+    fn breakable_seen_by_vision(&mut self, pkg: &Arc<Package>, actor: usize, ap: &[ue3_package::properties::Property], door: bool) -> bool {
         use crate::collision_audit::flag;
-        let Some(tweak) = ["m_pUsableObjTweaks", "m_pBreakableTweaks"].iter().find_map(|n| self.resolver.inherited_object_path(pkg, actor, n)) else { return false };
+        let Some(tweak) = ["m_pUsableObjTweaks", "m_pBreakableTweaks", "m_pDoorTweaks"].iter().find_map(|n| self.resolver.inherited_object_path(pkg, actor, n)) else { return door };
         if self.tweaks.is_none() {
             let names: Vec<String> = self.pkgs.iter().map(|p| p.name.clone()).collect();
             self.tweaks = Some(crate::tweaks::TweakDb::load_with(self.content, &names).ok());
         }
-        let Some(t) = self.tweaks.as_ref().and_then(|t| t.as_ref()).and_then(|t| t.try_resolve(&tweak)) else { return false };
+        let Some(t) = self.tweaks.as_ref().and_then(|t| t.as_ref()).and_then(|t| t.try_resolve(&tweak)) else { return door };
         let tflag = |n: &str| matches!(t.get(n), Some(crate::tweaks::TVal::B(true)));
         let transparent = if flag(ap, "m_bOverrideDefaultVisionTransparency") { flag(ap, "m_bTransparentForVisionChecks") } else { tflag("m_bTransparentForVisionChecks") };
-        !transparent && tflag("m_bShouldTraceAsWorldGeometry")
+        !transparent && (door || tflag("m_bShouldTraceAsWorldGeometry"))
     }
 
     /// Decode every referenced lightmap texture pair once and bake each component's

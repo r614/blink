@@ -176,6 +176,42 @@ impl<'c> PropResolver<'c> {
     }
 }
 
+/// `KActor` and its Dishonored subclasses (physics props, breakables, pickups, batteries).
+/// `AKActor::ShouldTrace` (0x00782D60) accepts a check with `TRACE_Movers`; without
+/// `TRACE_Blocking` (the vision line, 0x08023086) whatever the actor's blocking flags, with it
+/// only when the source is blocked by the actor (`IsBlockedBy`).
+pub const KACTOR_CLASSES: &[&str] = &[
+    "KActor",
+    "KActorSpawnable",
+    "DishonoredKActor",
+    "DishonoredBreakable",
+    "DishonoredBreakableNavBlock",
+    "DishonoredMovable",
+    "DisSpeaker_PA",
+    "DisWhaleOilBattery",
+    "DisDLC05WhaleOilBattery",
+    "DisDLC05_Movable",
+    "DisDLC07GravehoundSkull",
+    "DisNPCAttachment",
+    "DisRiverKrustBodyPart",
+    "DisPickup_Base",
+    "DisAbstractItemPickup",
+    "DisAbstractItemPickupNote",
+    "DisAbstractItemPickupAudioLog",
+    "DisElixirHealth",
+    "DisElixirMana",
+    "DisGenericPickup",
+    "DisKey_Base",
+    "DisStatPickup",
+    "DishonoredInventoryPickup",
+    "DisWhaleBoneCharm",
+    "DisDLC07WhaleBoneCharmCracked",
+];
+
+pub fn is_kactor(class: &str) -> bool {
+    KACTOR_CLASSES.contains(&class)
+}
+
 pub fn flag(props: &[Property], name: &str) -> bool {
     matches!(find(props, name).map(|p| &p.value), Some(Value::Bool(true)))
 }
@@ -225,7 +261,7 @@ pub struct CollisionSource {
     pub own_block: Option<bool>,
     pub own_actor_collide: Option<bool>,
     pub own_actor_block: Option<bool>,
-    /// The actor's usable-object or breakable tweak (`m_pUsableObjTweaks`, `m_pBreakableTweaks`),
+    /// The actor's usable-object, breakable or door tweak (`m_pUsableObjTweaks`, `m_pBreakableTweaks`, `m_pDoorTweaks`),
     /// an object path, set or inherited.
     pub tweak: Option<String>,
 }
@@ -271,7 +307,7 @@ pub fn collision_sources(content: &Content, packages: &[String]) -> Vec<Collisio
             }
             let mut seen = std::collections::BTreeSet::new();
             let loc = Vec3::from(find(&ap, "Location").and_then(|p| p.as_vector()).unwrap_or([0.0; 3]));
-            let tweak = ["m_pUsableObjTweaks", "m_pBreakableTweaks"].iter().find_map(|n| r.inherited_object_path(&pkg, i, n));
+            let tweak = ["m_pUsableObjTweaks", "m_pBreakableTweaks", "m_pDoorTweaks"].iter().find_map(|n| r.inherited_object_path(&pkg, i, n));
             let mut extra: Vec<String> = ["bCollideOnlyWithNPCMovement", "m_bRejectPlayerMantle", "m_bTransparentForVisionChecks", "m_bOverrideDefaultVisionTransparency", "bCollideWorld"]
                 .iter()
                 .filter(|n| flag(&ap, n))
