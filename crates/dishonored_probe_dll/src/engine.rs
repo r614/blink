@@ -241,7 +241,7 @@ pub fn find(name: &str, class: &str) -> Vec<u32> {
                 continue;
             }
         }
-        if is_default(o) {
+        if is_default(o) && !name.starts_with("Default__") {
             continue;
         }
         out.push(o);

@@ -831,6 +831,12 @@ pub struct AiLevel {
     /// voices' `m_pDialogTree`), for AI barks.
     #[serde(default)]
     pub generic_trees: BTreeMap<String, Vec<String>>,
+    /// The map's player light normalization (`DishonoredMapInfo.m_pMapPlayerVisSettings`:
+    /// `m_fLightValueDarkestVal`, `m_fLightValueBrightestVal`), which replaces the global
+    /// `Twk_GlobalPlayerVisSettings` (0x00BC8E60; Boyle Ext: `Boyle_Twk.Pvs_BoyleExterior`
+    /// 0.2 / 0.5, measured on the original).
+    #[serde(default)]
+    pub player_light_range: Option<[f32; 2]>,
 }
 
 /// A `DishonoredAudioVolume`: an audio cell.

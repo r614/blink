@@ -27,6 +27,8 @@ mod iat;
 #[cfg(all(windows, target_arch = "x86"))]
 mod mem;
 #[cfg(all(windows, target_arch = "x86"))]
+mod native;
+#[cfg(all(windows, target_arch = "x86"))]
 mod server;
 
 #[cfg(all(windows, target_arch = "x86"))]
