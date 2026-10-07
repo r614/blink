@@ -499,6 +499,10 @@ pub struct Crowd {
     /// Ambient (sky light) brightness added to the light probe.
     #[serde(default)]
     pub sky_light: f32,
+    /// The global player light normalization (`Twk_GlobalPlayerVisSettings`), kept while a
+    /// level's own range (`AiLevel::player_light_range`) is installed in `ai`.
+    #[serde(default)]
+    pub global_light_range: Option<[f32; 2]>,
     /// Brains of the rat pawns (`PawnKind::Rat`) and the swarm each rat was spawned in
     /// (`SimEvent::RatSpawned`).
     #[serde(default)]
@@ -1060,6 +1064,12 @@ impl Crowd {
         self.lights = level.lights.clone();
         self.audio = level.audio.clone();
         self.sky_light = level.sky_light;
+        // The map's player light normalization replaces the global one (0x00BC8E60).
+        let pv = &mut self.ai.player_visibility;
+        let global = *self.global_light_range.get_or_insert([pv.light_darkest, pv.light_brightest]);
+        let [dark, bright] = level.player_light_range.unwrap_or(global);
+        pv.light_darkest = dark;
+        pv.light_brightest = bright;
     }
 
     /// Faction of a spawned NPC: the spawner's `m_pFactionTweakOverride`, else its pawn
@@ -2959,6 +2969,28 @@ mod tests {
         // at 200 uu where the curve gives 2.
         assert_eq!(seen_rate(&p, 1.0, 800.0 / 3500.0, -1.0), 0.0);
         assert!(close(seen_rate(&p, 1.0, 200.0 / 3500.0, -1.0), 1.0));
+    }
+
+    #[test]
+    fn seen_value_matches_the_original_on_boyle_ext() {
+        // Engine hook, 2026-10-06 (research/dishonored/HOOK_TRIAGE.md): a party guard's
+        // `PlayerAttnInfo` debug values with the player still in front of it. The level's
+        // light range (`Pvs_BoyleExterior` 0.2 / 0.5) normalizes the raw light.
+        let mut crowd = Crowd::default();
+        let level = AiLevel { player_light_range: Some([0.2, 0.5]), ..Default::default() };
+        crowd.set_level(&level);
+        let pv = &crowd.ai.player_visibility;
+        assert_eq!((pv.light_darkest, pv.light_brightest), (0.2, 0.5));
+        let prof = AttentionConfig::guard_unsuspecting();
+        // (raw light, LOS norm, speed / 600, the original's unclamped value)
+        for (light, norm, speed, want) in [(0.3126, 0.145, 0.0, 0.788), (0.1897, 0.164, 0.0, 0.703), (0.1933, 0.214, 0.0, 0.582), (0.1972, 0.358, 0.0, 0.226), (0.191, 0.1402, 0.4228, 0.869)] {
+            let vis = player_visibility(pv, light, speed, false, speed > 0.0);
+            let v = prof.distance_tuning.apply(1.0 - norm, vis);
+            assert!((v - want).abs() < 0.006, "light {light} norm {norm}: {v} vs {want}");
+        }
+        // Another level without a range gets the global one back.
+        crowd.set_level(&AiLevel::default());
+        assert_eq!(crowd.ai.player_visibility.light_darkest, PlayerVisibilityConfig::default().light_darkest);
     }
 
     #[test]

@@ -274,7 +274,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         pkgs
     };
     // AI level data: factions, forbidden zones, alarm bells, probe lights (dishonored_ai).
-    let ai_path = dir.join(format!("{map}.ailevel2.json"));
+    let ai_path = dir.join(format!("{map}.ailevel3u.json"));
     let ai_level: dishonored_ir::ai::AiLevel = match std::fs::read_to_string(&ai_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(a) => a,
         None => {

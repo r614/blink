@@ -108,6 +108,9 @@ pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String
             }
         }
         out.sky_light += sky_lights(&pkg);
+        if out.player_light_range.is_none() {
+            out.player_light_range = map_player_light_range(&pkg, &db);
+        }
         for i in 0..pkg.exports.len() {
             if pkg.obj_name(ObjRef::from_index(pkg.exports[i].outer)) != "PersistentLevel" {
                 continue;
@@ -138,6 +141,30 @@ pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String
     }
     out.factions = table;
     Ok(out)
+}
+
+/// The level's own player light normalization: the persistent level's `DishonoredMapInfo`
+/// (`WorldInfo.MyMapInfo`) names a `DisTweaks_PlayerVisSettings` in `m_pMapPlayerVisSettings`;
+/// the visibility component uses its darkest / brightest values instead of the global ones
+/// (0x00BD0120 -> 0x00BC8E60, then 0x00BC9040 normalizes). Sublevels' map infos carry none.
+fn map_player_light_range(pkg: &Package, db: &TweakDb) -> Option<[f32; 2]> {
+    for i in 0..pkg.exports.len() {
+        if pkg.export_class(i) != "DishonoredMapInfo" {
+            continue;
+        }
+        let Ok(h) = pkg.read_object(i) else { continue };
+        let Some(r) = find(&h.properties, "m_pMapPlayerVisSettings").and_then(|p| p.as_object()) else { continue };
+        let r = ObjRef::from_index(r);
+        if r == ObjRef::Null {
+            continue;
+        }
+        let path = pkg.obj_path(r);
+        let m = db.try_resolve(&path)?;
+        let dark = get_f32(&m, "m_fLightValueDarkestVal")?;
+        let bright = get_f32(&m, "m_fLightValueBrightestVal")?;
+        return Some([dark, bright]);
+    }
+    None
 }
 
 fn probe_light(l: &Light) -> ProbeLight {
