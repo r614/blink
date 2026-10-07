@@ -24,9 +24,6 @@ impl Opts {
     pub fn num<T: std::str::FromStr>(&self, flag: &str, default: T) -> T {
         self.rest.iter().position(|a| a == flag).and_then(|i| self.rest.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(default)
     }
-    pub fn has(&self, flag: &str) -> bool {
-        self.rest.iter().any(|a| a == flag)
-    }
     pub fn save(&self, name: &str, text: &str) -> Result<()> {
         if let Some(d) = &self.out {
             std::fs::create_dir_all(d)?;
