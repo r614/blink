@@ -20,7 +20,9 @@ pub const LOCAL_ID: PlayerId = 1;
 pub enum SessionKind {
     /// `spectator`: when set, the local slot is also driven by a bot (watch mode).
     Offline { game: Game, bots: Vec<Bot>, spectator: Option<Bot> },
-    Online { client: NetClient },
+    /// `autopilot`: when set, a test bot drives the local player from what this client sees
+    /// (`--autopilot`), so several rendered clients can play each other unattended.
+    Online { client: NetClient, autopilot: Option<Bot> },
 }
 
 #[derive(Resource)]
@@ -96,15 +98,16 @@ impl Session {
         Self { kind: SessionKind::Offline { game, bots: bot_list, spectator }, content, maps, last_input: PlayerInput::default() }
     }
 
-    pub fn online(maps: Arc<MapContents>, client: NetClient) -> Self {
+    pub fn online(maps: Arc<MapContents>, client: NetClient, autopilot: Option<(BotStyle, u64)>) -> Self {
         let content = maps.maps[0].clone();
-        Self { kind: SessionKind::Online { client }, content, maps, last_input: PlayerInput::default() }
+        let autopilot = autopilot.map(|(style, seed)| Bot::new(0, style, seed));
+        Self { kind: SessionKind::Online { client, autopilot }, content, maps, last_input: PlayerInput::default() }
     }
 
     pub fn local_id(&self) -> Option<PlayerId> {
         match &self.kind {
             SessionKind::Offline { .. } => Some(LOCAL_ID),
-            SessionKind::Online { client } => client.player_id,
+            SessionKind::Online { client, .. } => client.player_id,
         }
     }
 }
@@ -171,8 +174,25 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
             view.respawn_in = game.respawn_time_left(LOCAL_ID);
             follow_map(&session.maps, &mut session.content, game.current_map());
         }
-        SessionKind::Online { client } => {
+        SessionKind::Online { client, autopilot } => {
             client.poll(world, sim);
+            let input = match (autopilot.as_mut(), client.me().copied()) {
+                (Some(b), Some(me)) if client.state == ConnState::Connected => {
+                    b.id = me.id;
+                    let mut seen = client.remote_players(6.0);
+                    seen.push(me);
+                    let i = match client.target_info.as_ref() {
+                        Some(t) => b.think_contract(&me, &seen, world, t.target),
+                        None => b.think(&me, &seen, world),
+                    };
+                    // The view looks where the bot aims (camera, HUD and prompts read the local look).
+                    local.yaw = i.yaw;
+                    local.pitch = i.pitch;
+                    i
+                }
+                _ => input,
+            };
+            session.last_input = input;
             client.send_input(input, world, sim);
             if client.state == ConnState::Connected {
                 view.audio_events.extend(client.local_events.iter().copied());

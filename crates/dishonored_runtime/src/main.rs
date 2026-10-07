@@ -6,7 +6,7 @@
 //!                                     missions, multiplayer browser / server creator, options
 //! dishonored_runtime [--map L_Boyle_Ext_P]
 //!     (default)              offline FFA vs --bots N (default 3); --spectate to watch bots
-//!     --connect HOST:PORT    join a dedicated server
+//!     --connect HOST:PORT    join a dedicated server (--autopilot [duelist|gunner|wanderer]: a test bot plays)
 //!     --browse MASTER        list servers from a control plane and join the best one
 //!     --inspect              free camera, no gameplay (--pos x,y,z --yaw --pitch)
 //!     --mission FILE         a custom mission; --load SAVE continues a saved game (F5 / F9
@@ -84,6 +84,8 @@ struct Args {
     name: String,
     bots: usize,
     spectate: bool,
+    /// `--autopilot [duelist|gunner|wanderer]` (online only): a test bot drives the local player.
+    autopilot: Option<dishonored_bots::BotStyle>,
     contracts: bool,
     /// `--mission FILE`: play a custom mission (RON, see missions/README.md).
     mission: Option<dishonored_mission::MissionDef>,
@@ -145,6 +147,11 @@ fn parse_args() -> Args {
         name: get("--name").unwrap_or_else(|| "player".into()),
         bots: get("--bots").and_then(|s| s.parse().ok()).unwrap_or(3),
         spectate: has("--spectate"),
+        autopilot: has("--autopilot").then(|| match get("--autopilot").as_deref() {
+            Some("gunner") => dishonored_bots::BotStyle::Gunner,
+            Some("wanderer") => dishonored_bots::BotStyle::Wanderer,
+            _ => dishonored_bots::BotStyle::Duelist,
+        }),
         contracts: get("--mode").as_deref() == Some("contracts"),
         pos: get("--pos").and_then(|s| {
             let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
@@ -264,7 +271,7 @@ fn main() {
                 }
                 s
             }
-            Mode::Connect(addr) => session::Session::online(content, connect(addr, &args)),
+            Mode::Connect(addr) => session::Session::online(content, connect(addr, &args), autopilot_of(&args)),
             Mode::Browse(master) => {
                 let servers = dishonored_net::control_plane::list_servers(master).expect("listing servers");
                 let best = servers
@@ -276,7 +283,7 @@ fn main() {
                     .min_by(|a, b| a.1.total_cmp(&b.1))
                     .expect("no reachable servers");
                 info!("joining {} ({:.0} ms)", best.0, best.1);
-                session::Session::online(content, connect(&best.0, &args))
+                session::Session::online(content, connect(&best.0, &args), autopilot_of(&args))
             }
             Mode::Inspect => unreachable!(),
         };
@@ -485,4 +492,10 @@ fn profile_report(diag: Res<bevy::diagnostic::DiagnosticsStore>, time: Res<Time>
     cpu.sort_by(|a, b| b.1.total_cmp(&a.1));
     let fmt = |v: &[(String, f64)]| v.iter().take(8).map(|(p, t)| format!("{}={t:.2}ms", p.trim_start_matches("render/").trim_end_matches("/elapsed_gpu").trim_end_matches("/elapsed_cpu"))).collect::<Vec<_>>().join(" ");
     info!("PROFILE {head}\n  GPU: {}\n  CPU: {}", fmt(&gpu), fmt(&cpu));
+}
+
+/// The `--autopilot` bot for an online session, seeded from the player name so clients differ.
+fn autopilot_of(args: &Args) -> Option<(dishonored_bots::BotStyle, u64)> {
+    let seed = args.name.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+    args.autopilot.map(|s| (s, seed))
 }
