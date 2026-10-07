@@ -1048,22 +1048,22 @@ impl Importer<'_> {
                         enable_collision: s.enable_collision,
                     });
                 }
+                // Lightmap UVs: the set named by `LightMapCoordinateIndex` (serialized when
+                // non-zero, e.g. 1 on air_duct_10; absent means the UE3 default 0).
+                let lmi = pkg
+                    .read_object(k.1)
+                    .ok()
+                    .and_then(|h| find(&h.properties, "LightMapCoordinateIndex").and_then(|p| p.as_float()))
+                    .map(|v| v as usize)
+                    .unwrap_or(0);
                 let asset = StaticMeshAsset {
                     source: pkg.obj_path(ObjRef::Export(k.1)),
                     normals: raw.normals,
                     tangents: raw.tangent_x,
                     uv0: raw.uvs.first().cloned().unwrap_or_else(|| vec![Vec2::ZERO; raw.positions.len()]),
-                    // Lightmap UVs: the set named by `LightMapCoordinateIndex` (serialized when
-                    // non-zero, e.g. 1 on air_duct_10; absent means the UE3 default 0).
-                    uv1: {
-                        let lmi = pkg
-                            .read_object(k.1)
-                            .ok()
-                            .and_then(|h| find(&h.properties, "LightMapCoordinateIndex").and_then(|p| p.as_float()))
-                            .map(|v| v as usize)
-                            .unwrap_or(0);
-                        raw.uvs.get(lmi).or(raw.uvs.get(1)).cloned().unwrap_or_default()
-                    },
+                    uv1: raw.uvs.get(lmi).or(raw.uvs.get(1)).cloned().unwrap_or_default(),
+                    // Sky domes sample their `Storm` texture at texture coordinate 1 (U-580).
+                    uv_set1: if lmi != 1 { raw.uvs.get(1).cloned().unwrap_or_default() } else { Vec::new() },
                     indices: raw.indices.iter().map(|&i| i as u32).collect(),
                     sections,
                     collision_triangles: raw
@@ -1535,6 +1535,7 @@ impl Importer<'_> {
             tangents: raw.tangents,
             uv0: if raw.uvs.len() == n { raw.uvs } else { vec![Vec2::ZERO; n] },
             uv1: Vec::new(),
+            uv_set1: Vec::new(),
             indices: raw.indices,
             sections: slots
                 .iter()

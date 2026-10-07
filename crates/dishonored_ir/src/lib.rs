@@ -256,6 +256,10 @@ pub struct StaticMeshAsset {
     pub uv0: Vec<Vec2>,
     /// Lightmap UVs (the set selected by `LightMapCoordinateIndex`).
     pub uv1: Vec<Vec2>,
+    /// The mesh's texture coordinate 1 (what the material shaders read as `TEXCOORD1`) when
+    /// it differs from `uv1`, i.e. when `LightMapCoordinateIndex` is not 1; empty otherwise.
+    #[serde(default)]
+    pub uv_set1: Vec<Vec2>,
     pub indices: Vec<u32>,
     pub sections: Vec<MeshSection>,
     /// Collision triangles from the mesh's kDOP tree (indices into `positions`) with the

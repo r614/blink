@@ -56,6 +56,12 @@ fn boyle_ext_import() {
     assert_eq!(map.instances.len(), 3757);
     assert_eq!(stats.skeletal_props, 3);
     assert_eq!(map.spawn_candidates.len(), 5);
+    // U-580: the sky dome (no LightMapCoordinateIndex, so its lightmap set is 0) keeps its
+    // texture coordinate 1, where `Boyle_2_inst` samples the `Storm` texture (the glow and the
+    // lit clouds around the moon).
+    let dome = map.meshes.iter().find(|m| m.source.ends_with("SkyDome_Multi_UV")).expect("sky dome");
+    assert_eq!(dome.uv_set1.len(), dome.positions.len());
+    assert!(dome.uv_set1.iter().zip(&dome.uv0).any(|(a, b)| a.distance(*b) > 0.01));
 }
 
 #[test]

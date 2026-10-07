@@ -223,7 +223,7 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
             let pc = engine::local_pc();
             let pawn = mem::u32(pc + engine::CONTROLLER_PAWN).unwrap_or(0);
             let s = format!(
-                "process_event_calls={}\nticks={}\ngobjects={:#x}\ngnames={:#x}\nname_text_off={:#x}\ngame_thread={}\npresent_thread={}\ngengine={:#x}\nlocal_pc={:#x}\nlocal_pc_class={}\npawn={:#x}\npawn_class={}\nplayer_input={:#x}\nd3d_state={}\nd3d_devices={}\npresents={}\niat_patched={}\nfake_focus={}\nmap={}\n",
+                "process_event_calls={}\nticks={}\ngobjects={:#x}\ngnames={:#x}\nname_text_off={:#x}\ngame_thread={}\npresent_thread={}\ngengine={:#x}\nlocal_pc={:#x}\nlocal_pc_class={}\npawn={:#x}\npawn_class={}\nplayer_input={:#x}\nd3d_state={}\nd3d_devices={}\npresents={}\nps_sets={}\nps_sets_known={}\ndraws={}\niat_patched={}\nfake_focus={}\nmap={}\n",
                 hook::CALLS.load(Relaxed),
                 hook::TICKS.load(Relaxed),
                 engine::GOBJECTS.load(Relaxed),
@@ -240,6 +240,9 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
                 d3d::STATE.load(Relaxed),
                 d3d::DEVICES.load(Relaxed),
                 d3d::PRESENTS.load(Relaxed),
+                d3d::PS_SETS.load(Relaxed),
+                d3d::PS_SETS_KNOWN.load(Relaxed),
+                d3d::DRAWS.load(Relaxed),
                 crate::iat::PATCHED.load(Relaxed),
                 crate::iat::FAKE_FOCUS.load(Relaxed),
                 // The level's package: WorldInfo's outermost object.
@@ -354,6 +357,40 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
                     return Err("timed out waiting for ticks".into());
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        op::DRAW_SKIP => {
+            let n = io(rd.u32())?;
+            let mut v = Vec::new();
+            for _ in 0..n.min(4096) {
+                v.push(io(rd.u64())?);
+            }
+            let mut g = d3d::PS.lock().map_err(|_| "poisoned")?;
+            g.as_mut().ok_or("d3d hooks not installed")?.skip = v;
+        }
+        op::DRAW_CENSUS => {
+            let frames = io(rd.u32())?.clamp(1, 600);
+            {
+                let mut g = d3d::PS.lock().map_err(|_| "poisoned")?;
+                let ps = g.as_mut().ok_or("d3d hooks not installed")?;
+                ps.census.clear();
+                ps.census_on = true;
+            }
+            let start = d3d::PRESENTS.load(Relaxed);
+            let t0 = std::time::Instant::now();
+            while d3d::PRESENTS.load(Relaxed).wrapping_sub(start) < frames && t0.elapsed().as_secs() < 60 {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            let mut g = d3d::PS.lock().map_err(|_| "poisoned")?;
+            let ps = g.as_mut().ok_or("d3d hooks not installed")?;
+            ps.census_on = false;
+            let mut v: Vec<(u64, (u32, u32))> = ps.census.drain().collect();
+            v.sort_by_key(|e| std::cmp::Reverse(e.1.0));
+            put_u32(&mut out, v.len() as u32);
+            for (h, (d, p)) in v {
+                out.extend(h.to_le_bytes());
+                put_u32(&mut out, d);
+                put_u32(&mut out, p);
             }
         }
         op::CAPTURE => {

@@ -118,7 +118,18 @@ The dynamic lights' specular is still Bevy's GGX; the original's is a normalised
 - `Vfx_Materials.Material.Sun_PMAT` (additive, unlit; 1668): `m = max(1 - 2 |uv - 0.5|, 0)`,
   `m^SphereMask_Power x SunIntensity x Color.rgb` (the colour's alpha is unused; defaults
   2, 2, (1, 0.94, 0.74)). No Boyle mesh uses it.
-- Not rendered: the bright, cloud-lit glow around the original's moon (U-580).
+- The bright, cloud-lit glow around the moon (U-580, resolved 2026-10-06 with the engine
+  hook) is the sky dome's `Enable_Storm` term: `Boyle_2_inst`'s `Storm` texture
+  (`Skies02.BOYLE.Sky_Boyle02_d`, a painted sky with the moonlit clouds) x `Storm_Color` x 1.5,
+  sampled at the dome's texture coordinate 1, which does not rotate with the cloud layers.
+  Evidence on the `moon` view: the per-shader skip captures (`probe_launch census` /
+  `skip`) show the dome (PS `309cfebf79696f7c` = shader map 6052, `Skies_PMAT` with storm,
+  clouds, clouds 2, gradient and UV channel 2) carries it, the moon (34984) does not, nor bloom
+  or fog; `SetScalarParameterValue(Storm_Intensity, 0)` on the live `Boyle_2_inst` removes the
+  glow and leaves the port's look; 90 s later (the clouds turned 77 degrees) the glow stays put.
+  The port sampled `Storm` at the mesh's lightmap set, which for the dome (no
+  `LightMapCoordinateIndex`) is texture coordinate 0; it now passes the real texture
+  coordinate 1 (`StaticMeshAsset::uv_set1`) to sky domes.
 
 ## Doors and usable objects (`usable_props.rs`, `level_props.rs`)
 
@@ -280,5 +291,21 @@ cooked values unchanged (focus 5500, far blur 0.2, CrMgYb shadows (0, 0.03, 0.04
 x 0.4), so the port builds its uniform from the right data. The LUT bake (57) and uber (59 / 61)
 disassemble as the port computes them (LUT coordinate `sqrt(c)`, squared in the bake, exposure
 after the clamp). These passes are drawn with `DrawPrimitiveUP`, which the probe now hooks
-(slots 83 / 84), so their live constants can be read with `probe_launch measure consts
-gExposure_GammaAdjust 5` (not run yet: the display gamma that reaches the LUT is U-582).
+(slots 83 / 84).
+
+Live constants of the post chain (2026-10-06, Boyle Ext, default options, `measure consts`):
+
+| Shader | Constant | Value | Port |
+|---|---|---|---|
+| LUT bake (1906, every frame) | `gExposure_GammaAdjust_PreDesaturation_PostDesaturation` | (1.231144, 0.431818, 0, 0) = (2^0.3, 0.95 / 2.2, 0, 0) | same (display gamma 2.2) |
+| | `gBrightness_Contrast` | (0, 1.081794) = (0, tan(1.05 pi / 4)) | same |
+| | `gCBShad_Cr_Mg_Yb_Opacity` / `gCBMid` / `gCBHigh` / `gOverlay` | (0, 0.03, 0.04, 1) / (0, 0.3, 0.4) / 0 / 0 | same |
+| Uber (1903) | `gBlurParams` | (5500, 1/300, 0.2, 1) | same |
+| | `gFilmGrainParams` | (0.023529, -0.011765) = (6 / 255, -3 / 255) | same (grain 3) |
+| Bloom downsample (1887) | `gBloomTint` | (0.4, 0.381041, 0.289130, 0) | `m_Tint x m_Scale`, threshold 0 |
+| UE3 gamma correction (1875) | `InverseGamma`, `ColorScale`, `OverlayColor` | 1 / 2.2, 1, 0 | not drawn |
+
+The UE3 gamma-correction pass (1875) runs every frame but does not reach the screen: skipping
+its draws (probe `skip`) leaves the frame unchanged, while skipping the uber shader (1903) leaves
+it black, so the uber pass writes the displayed image and its LUT output is the display value,
+as the port treats it (U-582 resolved).

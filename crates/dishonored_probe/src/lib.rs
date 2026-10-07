@@ -11,7 +11,7 @@
 //! payload. All integers are little endian. Addresses are 32-bit (the game is a 32-bit process).
 use std::io::{self, Read, Write};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const PIPE_PREFIX: &str = r"\\.\pipe\dishonored_probe_";
 /// Environment variable through which the launcher hands the session token to the DLL.
 pub const TOKEN_ENV: &str = "DISHONORED_PROBE_TOKEN";
@@ -77,6 +77,12 @@ pub mod op {
     pub const EVENT_FETCH: u8 = 23;
     /// Like WATCH, with absolute addresses (recorded after the pawn ranges).
     pub const WATCH_ABS: u8 = 24;
+    /// u32 n, n * u64 pixel shader hashes -> (). Draws made with these shaders are skipped
+    /// (rendering only; n = 0 restores every draw).
+    pub const DRAW_SKIP: u8 = 25;
+    /// u32 frames -> u32 count, per shader: u64 hash, u32 draws, u32 primitives, counted over
+    /// the next `frames` Presents.
+    pub const DRAW_CENSUS: u8 = 26;
 }
 
 /// One game tick of the local player's pawn, recorded in the `PlayerTick` event.
@@ -600,6 +606,27 @@ impl Client {
         let mut rd = Reader::new(&r);
         let n = rd.u32()?;
         (0..n).map(|_| Ok(ShaderInfo { id: rd.u32()?, hash: rd.u64()?, size: rd.u32()?, ctab: rd.str()? })).collect()
+    }
+
+    /// Skip every draw made with these pixel shaders (empty: draw everything again).
+    pub fn draw_skip(&mut self, hashes: &[u64]) -> io::Result<()> {
+        let mut p = Vec::new();
+        put_u32(&mut p, hashes.len() as u32);
+        for h in hashes {
+            p.extend(h.to_le_bytes());
+        }
+        self.request(op::DRAW_SKIP, &p)?;
+        Ok(())
+    }
+
+    /// Draws and primitives per pixel shader over the next `frames` frames.
+    pub fn draw_census(&mut self, frames: u32) -> io::Result<Vec<(u64, u32, u32)>> {
+        let mut p = Vec::new();
+        put_u32(&mut p, frames);
+        let r = self.request(op::DRAW_CENSUS, &p)?;
+        let mut rd = Reader::new(&r);
+        let n = rd.u32()?;
+        (0..n).map(|_| Ok((rd.u64()?, rd.u32()?, rd.u32()?))).collect()
     }
 
     /// PS constant registers (224 float4) at the next `draws` draws (within 5 s) made with

@@ -33,6 +33,10 @@ static ORIG_CREATE_DEVICE: AtomicU32 = AtomicU32::new(0);
 pub static DEVICES: AtomicU32 = AtomicU32::new(0);
 pub static PRESENTS: AtomicU32 = AtomicU32::new(0);
 pub static STATE: AtomicU32 = AtomicU32::new(0);
+/// Diagnostics: SetPixelShader calls, of them with a shader the hook saw created, and draws.
+pub static PS_SETS: AtomicU32 = AtomicU32::new(0);
+pub static PS_SETS_KNOWN: AtomicU32 = AtomicU32::new(0);
+pub static DRAWS: AtomicU32 = AtomicU32::new(0);
 
 pub struct Shader {
     pub id: u32,
@@ -49,6 +53,11 @@ pub struct PsState {
     pub want_draws: u32,
     pub want_filter: String,
     pub got: Vec<(u32, u64, Vec<[f32; 4]>)>,
+    /// Shader hashes whose draws are skipped (`DRAW_SKIP`).
+    pub skip: Vec<u64>,
+    /// Per-shader (draws, primitives) while `census` is on (`DRAW_CENSUS`).
+    pub census_on: bool,
+    pub census: HashMap<u64, (u32, u32)>,
 }
 pub static PS: Mutex<Option<PsState>> = Mutex::new(None);
 
@@ -97,7 +106,7 @@ pub fn install() {
         let release: unsafe extern "system" fn(u32) -> u32 = std::mem::transmute(vfn(d3d, UNK_RELEASE) as usize);
         release(d3d);
         if let Ok(mut ps) = PS.lock() {
-            *ps = Some(PsState { shaders: HashMap::new(), current: 0, regs: vec![[0.0; 4]; 224], want_hash: 0, want_draws: 0, want_filter: String::new(), got: Vec::new() });
+            *ps = Some(PsState { shaders: HashMap::new(), current: 0, regs: vec![[0.0; 4]; 224], want_hash: 0, want_draws: 0, want_filter: String::new(), got: Vec::new(), skip: Vec::new(), census_on: false, census: HashMap::new() });
         }
     }
 }
@@ -281,9 +290,13 @@ unsafe extern "system" fn create_ps_hook(dev: u32, func: *const u32, out: *mut u
 }
 
 unsafe extern "system" fn set_ps_hook(dev: u32, shader: u32) -> i32 {
+    PS_SETS.fetch_add(1, Relaxed);
     if let Ok(mut g) = PS.lock()
         && let Some(ps) = g.as_mut() {
             ps.current = shader;
+            if ps.shaders.contains_key(&shader) {
+                PS_SETS_KNOWN.fetch_add(1, Relaxed);
+            }
         }
     let f: unsafe extern "system" fn(u32, u32) -> i32 = unsafe { std::mem::transmute(orig(DEV_SET_PIXEL_SHADER)) };
     unsafe { f(dev, shader) }
@@ -306,43 +319,60 @@ unsafe extern "system" fn set_ps_const_hook(dev: u32, start: u32, data: *const f
     unsafe { f(dev, start, data, count) }
 }
 
-fn on_draw() {
-    if let Ok(mut g) = PS.lock()
-        && let Some(ps) = g.as_mut()
-            && ps.want_draws > 0 {
-                let hit = ps.shaders.get(&ps.current).and_then(|s| {
-                    let ok = if ps.want_hash != 0 { s.hash == ps.want_hash } else { !ps.want_filter.is_empty() && s.ctab.contains(ps.want_filter.as_str()) };
-                    ok.then_some(s.hash)
-                });
-                if let Some(h) = hit {
-                    let regs = ps.regs.clone();
-                    ps.got.push((PRESENTS.load(Relaxed), h, regs));
-                    ps.want_draws -= 1;
-                }
-            }
+/// Records the draw (constants, census); true when the draw must be skipped.
+fn on_draw(prims: u32) -> bool {
+    DRAWS.fetch_add(1, Relaxed);
+    let Ok(mut g) = PS.lock() else { return false };
+    let Some(ps) = g.as_mut() else { return false };
+    let hash = ps.shaders.get(&ps.current).map(|s| s.hash).unwrap_or(0);
+    if ps.census_on {
+        let e = ps.census.entry(hash).or_insert((0, 0));
+        e.0 += 1;
+        e.1 += prims;
+    }
+    if ps.want_draws > 0 {
+        let hit = ps.shaders.get(&ps.current).and_then(|s| {
+            let ok = if ps.want_hash != 0 { s.hash == ps.want_hash } else { !ps.want_filter.is_empty() && s.ctab.contains(ps.want_filter.as_str()) };
+            ok.then_some(s.hash)
+        });
+        if let Some(h) = hit {
+            let regs = ps.regs.clone();
+            ps.got.push((PRESENTS.load(Relaxed), h, regs));
+            ps.want_draws -= 1;
+        }
+    }
+    hash != 0 && ps.skip.contains(&hash)
 }
 
 unsafe extern "system" fn draw_primitive_hook(dev: u32, ty: u32, start: u32, count: u32) -> i32 {
-    on_draw();
+    if on_draw(count) {
+        return 0;
+    }
     let f: unsafe extern "system" fn(u32, u32, u32, u32) -> i32 = unsafe { std::mem::transmute(orig(DEV_DRAW_PRIMITIVE)) };
     unsafe { f(dev, ty, start, count) }
 }
 
 unsafe extern "system" fn draw_primitive_up_hook(dev: u32, ty: u32, count: u32, data: u32, stride: u32) -> i32 {
-    on_draw();
+    if on_draw(count) {
+        return 0;
+    }
     let f: unsafe extern "system" fn(u32, u32, u32, u32, u32) -> i32 = unsafe { std::mem::transmute(orig(DEV_DRAW_PRIMITIVE_UP)) };
     unsafe { f(dev, ty, count, data, stride) }
 }
 
 #[allow(clippy::too_many_arguments)]
 unsafe extern "system" fn draw_indexed_up_hook(dev: u32, ty: u32, min: u32, num: u32, count: u32, idx: u32, fmt: u32, data: u32, stride: u32) -> i32 {
-    on_draw();
+    if on_draw(count) {
+        return 0;
+    }
     let f: unsafe extern "system" fn(u32, u32, u32, u32, u32, u32, u32, u32, u32) -> i32 = unsafe { std::mem::transmute(orig(DEV_DRAW_INDEXED_PRIMITIVE_UP)) };
     unsafe { f(dev, ty, min, num, count, idx, fmt, data, stride) }
 }
 
 unsafe extern "system" fn draw_indexed_hook(dev: u32, ty: u32, base: i32, min: u32, num: u32, start: u32, count: u32) -> i32 {
-    on_draw();
+    if on_draw(count) {
+        return 0;
+    }
     let f: unsafe extern "system" fn(u32, u32, i32, u32, u32, u32, u32) -> i32 = unsafe { std::mem::transmute(orig(DEV_DRAW_INDEXED_PRIMITIVE)) };
     unsafe { f(dev, ty, base, min, num, start, count) }
 }

@@ -24,6 +24,7 @@ mod oracle;
 mod oracle_powers;
 mod oracle_stealth;
 mod oracle_combat;
+mod oracle_misc;
 
 #[cfg_attr(not(all(windows, target_arch = "x86")), allow(dead_code))]
 const GAME_DIR: &str = r"C:\Program Files\GOG Galaxy\Games\Dishonored\Binaries\Win32";
@@ -150,6 +151,39 @@ fn main() -> Result<()> {
                     println!("{} {:016x} {} {}", s.id, s.hash, s.size, s.ctab);
                 }
             }
+        }
+        "fnv" => {
+            // fnv <file>...: the probe's shader hash (FNV-1a 64) of shader blobs, e.g. the
+            // `shader_maps` output, to match live shaders from `shaders` / `census`.
+            for f in &args[1..] {
+                println!("{:016x} {f}", dishonored_probe::fnv64(&std::fs::read(f)?));
+            }
+        }
+        "census" => {
+            // census [frames]: pixel shaders drawn over the next frames, with draw counts.
+            let frames = args.get(1).map(|s| parse_u32(s)).transpose()?.unwrap_or(1);
+            let mut c = connect()?;
+            let shaders: std::collections::HashMap<u64, (u32, String)> = c.shaders()?.into_iter().map(|s| (s.hash, (s.id, s.ctab))).collect();
+            for (h, d, p) in c.draw_census(frames)? {
+                let (id, ctab) = shaders.get(&h).cloned().unwrap_or((u32::MAX, String::new()));
+                println!("{id} {h:016x} draws {d} prims {p} {ctab}");
+            }
+        }
+        "skip" => {
+            // skip [0xHASH | CTAB-filter]...: skip draws with these pixel shaders; no argument
+            // restores every draw.
+            let mut c = connect()?;
+            let shaders = c.shaders()?;
+            let mut hashes = Vec::new();
+            for a in &args[1..] {
+                if let Some(h) = a.strip_prefix("0x") {
+                    hashes.push(u64::from_str_radix(h, 16)?);
+                } else {
+                    hashes.extend(shaders.iter().filter(|s| s.ctab.contains(a.as_str())).map(|s| s.hash));
+                }
+            }
+            c.draw_skip(&hashes)?;
+            println!("skipping {} shaders", hashes.len());
         }
         "capture" => {
             let out = PathBuf::from(args.get(1).context("out.bmp")?);

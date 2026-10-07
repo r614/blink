@@ -445,6 +445,12 @@ mod tests {
         assert!((u.exposure_gamma_desat.x - 2f32.powf(0.3)).abs() < 1e-6);
         assert!((u.exposure_gamma_desat.y - 0.95 / 2.2).abs() < 1e-6);
         assert!((u.brightness_contrast.y - (1.05 * std::f32::consts::FRAC_PI_4).tan()).abs() < 1e-5);
+        // Live constants of the LUT bake (PS 1906) on Boyle Ext with the default options
+        // (engine hook, U-582): exposure 1.231144, gamma 0.431818, contrast 1.081794.
+        assert!((u.exposure_gamma_desat.x - 1.231144).abs() < 1e-5);
+        assert!((u.exposure_gamma_desat.y - 0.431818).abs() < 1e-5);
+        assert!((u.brightness_contrast.y - 1.081794).abs() < 1e-5);
+        assert_eq!(u.cb_shadows_opacity.w, 1.0);
     }
 
     #[test]

@@ -534,6 +534,16 @@ pub fn spawn_map(
                 let sky = mat_id.and_then(|m| Some((map.material_params.get(m)?, map.materials.get(m)?)));
                 if let Some(sm) = sky.and_then(|(p, ma)| crate::sky::SkyMaterial::new(p, &ma.texture_params, &image_handles)) {
                     e.insert(crate::sky::PendingSky(sm));
+                    // The dome's `Storm` texture is read at texture coordinate 1, which is not
+                    // the lightmap set on unlit domes (U-580).
+                    let m = &map.meshes[inst.mesh];
+                    if m.uv_set1.len() == m.positions.len() {
+                        let h = section_mesh(inst.mesh, si, meshes);
+                        if let Some(mut sky_mesh) = meshes.get(&h).cloned() {
+                            sky_mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, m.uv_set1.iter().map(|u| u.to_array()).collect::<Vec<[f32; 2]>>());
+                            e.insert(Mesh3d(meshes.add(sky_mesh)));
+                        }
+                    }
                 } else if let Some(dm) = sky.and_then(|(p, ma)| crate::sky_disc::SkyDiscMaterial::new(p, &ma.texture_params, &image_handles)) {
                     // Moon_PMAT / Sun_PMAT: their own shaders (sky_disc.rs).
                     e.insert(crate::sky_disc::PendingSkyDisc(dm));
