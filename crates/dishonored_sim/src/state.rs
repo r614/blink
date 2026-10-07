@@ -155,6 +155,9 @@ pub struct PlayerState {
     pub fall_time: f32,
     pub lean: f32,
     pub lean_velocity: f32,
+    /// `m_fCurMaxLeanSoften` (+0xA0): extra lean angle (degrees) grown while leaning at the limit.
+    #[serde(default)]
+    pub lean_soften: f32,
     /// Ground-speed modifier of the previous tick (`DishonoredPawn.m_fLastSpeedModifier`):
     /// drops are blended down at `speed_blend_down_speed`, rises are instant.
     pub speed_mod: f32,
@@ -509,6 +512,7 @@ impl PlayerState {
             fall_time: 0.0,
             lean: 0.0,
             lean_velocity: 0.0,
+            lean_soften: 0.0,
             speed_mod: 1.0,
             sprinting: false,
             strafing: false,

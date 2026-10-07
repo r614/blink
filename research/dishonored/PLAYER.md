@@ -467,9 +467,14 @@ left/right/forward direction. The camera influence (activation 0x00AC5420, updat
 12) at `m_fCurLeanHeight = m_fLeanHeightPct (2.0) x CollisionHeight x 2` (350 uu
 standing, from `GetBoundingCylinder`) from a pivot that far below it, re-projecting the
 point onto that sphere each step, with the angle limited by `m_fMaxLeanAngle` (15;
-crouched 15). At full lean the eye moves 90.6 uu sideways and 11.9 uu down (sneaking:
-67 / 8.9). The sim swings the eye that way, with the spring acting on the normalized
-angle (LIKELY: the original springs the head point itself, U-048).
+crouched 15). While the head is held at that limit, the limit itself grows by up to
+`m_fMaxLeanSoftenAngle` (5) at `m_fMaxLeanSoftenSpeed` (5 / s, exponential approach; it decays
+at the same rate otherwise), so a held lean ends at 20 degrees: the eye moves 119.7 uu
+sideways and 21.4 uu down, and the camera rolls `m_fCameraTiltPercent` (0.5) x the angle, 10
+degrees (measured with the engine hook, 2026-10-06; 15 degrees is reached 0.2 s after the
+press). The sim swings the eye that way with the soften and the roll, with the spring acting
+on the normalized angle (its onset is slower: 10.7 degrees at 0.2 s; the original springs the
+head point itself, U-048).
 
 ### Mantle
 
@@ -626,7 +631,7 @@ grenades and Spring Razors.
 | Speed drops | instant | blended at 8/s | 0x00B56C40 |
 | Accel with analog stick | scaled by deflection | normalized | UE3 PlayerMove |
 | Slide | none | sprint + sneak, 1.1 s cosine ease to sneak speed | `StatePlayerMasterSlide` |
-| Lean | 40 uu sideways, linear 0.2 s | swing about a pivot 350 uu below the eye, 15 deg max (90.6 uu, 11.9 down), spring 80/12 | `DishonoredCamera_Lean` |
+| Lean | 40 uu sideways, linear 0.2 s | swing about a pivot 350 uu below the eye, 15 deg + 5 deg soften (119.7 uu, 21.4 down, roll 10), spring 80/12 | `DishonoredCamera_Lean` |
 | Blink range | sphere sweep, distance clamped per axis | envelope above, box sweep, close-obstacle offsets, crawl-box back-off, ground lift | 0x00BF5520 |
 | Blink travel | 9000 uu/s linear, velocity zeroed | 100 uu per tick, stops on reach/behind view, velocity and physics restored, Blink mantle | 0x00BFC160, 0x00BFAB80 |
 | Blink cancel | invalid target only | target within 100.5 uu cancels (no mana) | 0x00BFC990 |

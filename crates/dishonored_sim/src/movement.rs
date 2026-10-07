@@ -94,12 +94,24 @@ pub fn eye_position(p: &PlayerState, cfg: &MovementConfig) -> Vec3 {
 /// `DishonoredCamera_Lean` (0x00AC5420 / 0x00AC5950): the eye is a spring point kept at
 /// `m_fCurLeanHeight = m_fLeanHeightPct x CollisionHeight x 2` from a pivot that far below
 /// it, so a lean of angle `a` moves it `L sin a` sideways and `L (1 - cos a)` down, `a`
-/// limited to `m_fMaxLeanAngle`. `p.lean` is the angle as a fraction of the maximum.
+/// limited to `m_fMaxLeanAngle` plus the soften angle. `p.lean` is the angle as a fraction of
+/// that maximum.
 pub fn lean_offset(p: &PlayerState, cfg: &MovementConfig) -> Vec3 {
     let l = cfg.lean.height_pct * half_height(p, cfg) * 2.0;
-    let max = if p.crouched { cfg.lean.max_angle_crouched } else { cfg.lean.max_angle };
-    let a = (p.lean * max).to_radians();
+    let a = lean_angle(p, cfg).to_radians();
     right_vector(p.yaw) * (l * a.sin()) - Vec3::Z * (l * (1.0 - a.cos()))
+}
+
+/// Lean angle in degrees: `p.lean` x (the stance's `m_fMaxLeanAngle` + the soften angle).
+pub fn lean_angle(p: &PlayerState, cfg: &MovementConfig) -> f32 {
+    let max = if p.crouched { cfg.lean.max_angle_crouched } else { cfg.lean.max_angle };
+    p.lean * (max + p.lean_soften)
+}
+
+/// Camera roll of the lean in degrees (`m_fCameraTiltPercent` x the lean angle; positive
+/// rolls the view to the right, as the original's `CameraCache.POV` roll for a right lean).
+pub fn lean_roll(p: &PlayerState, cfg: &MovementConfig) -> f32 {
+    lean_angle(p, cfg) * cfg.lean.camera_tilt_percent
 }
 
 /// Lean spring (`m_LeanConstants`, integrator 0x00AC0A00: semi-implicit Euler,
@@ -107,7 +119,17 @@ pub fn lean_offset(p: &PlayerState, cfg: &MovementConfig) -> Vec3 {
 fn step_lean(p: &mut PlayerState, target: f32, ctx: &MoveCtx) {
     let lc = &ctx.cfg.lean;
     p.lean_velocity += (lc.springiness * (target - p.lean) - lc.damping * p.lean_velocity) * ctx.dt;
-    p.lean = (p.lean + p.lean_velocity * ctx.dt).clamp(-1.0, 1.0);
+    let pushed = p.lean + p.lean_velocity * ctx.dt;
+    p.lean = pushed.clamp(-1.0, 1.0);
+    // Soften (0x00AC5540): while the head is held at the limit the allowed angle grows toward
+    // `m_fMaxLeanSoftenAngle` at `m_fMaxLeanSoftenSpeed`, otherwise it decays at that rate
+    // (measured on the original: 15 -> 20 degrees, about 5 / s, U-048).
+    let s = lc.soften_speed * ctx.dt;
+    if target != 0.0 && pushed.abs() >= 1.0 {
+        p.lean_soften = (p.lean_soften + (lc.soften_angle - p.lean_soften) * s).min(lc.soften_angle);
+    } else {
+        p.lean_soften = (p.lean_soften - p.lean_soften * s).max(0.0);
+    }
     if target == 0.0 && p.lean.abs() < 1e-3 && p.lean_velocity.abs() < 1e-2 {
         p.lean = 0.0;
         p.lean_velocity = 0.0;

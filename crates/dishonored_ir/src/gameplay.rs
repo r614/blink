@@ -195,11 +195,30 @@ pub struct LeanConfig {
     pub max_angle_crouched: f32,
     pub springiness: f32,
     pub damping: f32,
+    /// `m_fMaxLeanSoftenAngle` / `m_fMaxLeanSoftenSpeed`: extra angle allowed while the lean
+    /// pushes at the limit (0x00AC5540).
+    #[serde(default = "d_soften_angle")]
+    pub soften_angle: f32,
+    #[serde(default = "d_soften_speed")]
+    pub soften_speed: f32,
+    /// `m_fCameraTiltPercent`: camera roll as a fraction of the lean angle.
+    #[serde(default = "d_tilt")]
+    pub camera_tilt_percent: f32,
+}
+
+fn d_soften_angle() -> f32 {
+    5.0
+}
+fn d_soften_speed() -> f32 {
+    5.0
+}
+fn d_tilt() -> f32 {
+    0.5
 }
 
 impl Default for LeanConfig {
     fn default() -> Self {
-        Self { height_pct: 2.0, max_angle: 15.0, max_angle_crouched: 15.0, springiness: 80.0, damping: 12.0 }
+        Self { height_pct: 2.0, max_angle: 15.0, max_angle_crouched: 15.0, springiness: 80.0, damping: 12.0, soften_angle: 5.0, soften_speed: 5.0, camera_tilt_percent: 0.5 }
     }
 }
 

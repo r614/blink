@@ -82,7 +82,7 @@ fn load_spawns(map: &str, m: Option<&DishonoredMap>) -> Vec<Spawn> {
 }
 
 pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
-    let path = cache_dir().join("gameplay_config.v12u.json");
+    let path = cache_dir().join("gameplay_config.v12w.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);

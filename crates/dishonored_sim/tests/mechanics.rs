@@ -204,12 +204,29 @@ fn lean_swings_the_eye_about_the_pivot() {
     let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.0), 0.)]);
     r.settle();
     let eye0 = dishonored_sim::movement::eye_position(r.p(1), &r.cfg.gameplay.movement);
-    r.steps(60, &[(1, input(0., 0, buttons::LEAN_RIGHT))]);
-    let eye = dishonored_sim::movement::eye_position(r.p(1), &r.cfg.gameplay.movement);
-    // Pivot 2.0 x 87.5 x 2 = 350 uu below the eye, 15 deg: 90.6 uu right, 11.9 down.
+    let mv = r.cfg.gameplay.movement.clone();
+    // Measured on the original (engine hook, 60 Hz, E held): the camera swings about a pivot
+    // 350 uu below the eye (2.0 x 87.5 x 2), past 15 degrees after 0.2 s (14.2) and on to
+    // 20 (15 + the 5 degree soften, at about 5 / s): 119.7 uu right, 21.4 down, roll 10 (U-048).
+    let mut at = Vec::new();
+    for k in 1..=120 {
+        r.step(&[(1, input(0., 0, buttons::LEAN_RIGHT))]);
+        if [30, 60, 120].contains(&k) {
+            at.push(dishonored_sim::movement::lean_angle(r.p(1), &mv).abs());
+        }
+    }
+    let eye = dishonored_sim::movement::eye_position(r.p(1), &mv);
     let d = eye - eye0;
-    assert!((d.y + 350.0 * 15f32.to_radians().sin()).abs() < 2.0 || (d.y - 350.0 * 15f32.to_radians().sin()).abs() < 2.0, "lean {d}");
-    assert!((d.z + 350.0 * (1.0 - 15f32.to_radians().cos())).abs() < 1.0, "lean drop {d}");
+    assert!((d.y.abs() - 350.0 * 20f32.to_radians().sin()).abs() < 2.0, "lean {d}");
+    assert!((d.z + 350.0 * (1.0 - 20f32.to_radians().cos())).abs() < 1.0, "lean drop {d}");
+    assert!((dishonored_sim::movement::lean_roll(r.p(1), &mv).abs() - 10.0).abs() < 0.1);
+    // Original at 0.5 / 1 / 2 s: 18.9, 19.9, 20.0 degrees. (Its onset is faster: 14.2 at 0.2 s
+    // against the port's 10.7; the head-point spring towards the lean request is not
+    // reproduced, U-048.)
+    let orig = [18.94, 19.91, 20.0];
+    for (a, o) in at.iter().zip(orig) {
+        assert!((a - o).abs() < 1.5, "angles {at:?} vs {orig:?}");
+    }
 }
 
 #[test]

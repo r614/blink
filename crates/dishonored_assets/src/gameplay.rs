@@ -173,6 +173,9 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
                 max_angle_crouched: cam.get_f32(sec, "m_fMaxLeanAngle_Crouched").unwrap_or(d.max_angle_crouched),
                 springiness: field("m_Springiness").unwrap_or(d.springiness),
                 damping: field("m_Damping").unwrap_or(d.damping),
+                soften_angle: cam.get_f32(sec, "m_fMaxLeanSoftenAngle").unwrap_or(d.soften_angle),
+                soften_speed: cam.get_f32(sec, "m_fMaxLeanSoftenSpeed").unwrap_or(d.soften_speed),
+                camera_tilt_percent: cam.get_f32(sec, "m_fCameraTiltPercent").unwrap_or(d.camera_tilt_percent),
             }
         },
         input: {

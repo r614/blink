@@ -241,6 +241,10 @@ pub fn camera_follow(
         let ofwd = Quat::from_rotation_y(orbit.to_radians()) * fwd;
         let pos = if cam.third_person { eye - ofwd * dist + Vec3::Y * height } else { eye };
         *t = Transform::from_translation(pos).looking_to(if cam.third_person { ofwd } else { fwd }, Vec3::Y);
+        if !cam.third_person {
+            // Lean tilt (`m_fCameraTiltPercent`): a right lean rolls the view clockwise.
+            t.rotate_local_z(-dishonored_sim::movement::lean_roll(me, mv).to_radians());
+        }
         if cam.third_person && aim_at_body {
             // Script view: frame the followed pawn's body.
             t.look_at(eye - Vec3::Y * 0.7, Vec3::Y);
