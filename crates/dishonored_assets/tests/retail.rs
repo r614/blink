@@ -52,8 +52,10 @@ fn boyle_ext_import() {
     // Includes 33 spline-deformed mesh copies and meshes resolved through DishonoredGame.upk.
     // ... plus 20 skeletal meshes drawn in their reference pose (42 placed doors, usable
     // objects, sinks, alarm bells, the climbable chain, the sewer gate and the bridge).
-    assert_eq!(map.meshes.len(), 514);
-    assert_eq!(map.instances.len(), 3757);
+    assert_eq!(map.meshes.len(), 519);
+    // Components whose static mesh comes from their archetype (collision audit): 5 meshes and
+    // 70 instances more.
+    assert_eq!(map.instances.len(), 3827);
     assert_eq!(stats.skeletal_props, 3);
     assert_eq!(map.spawn_candidates.len(), 5);
     // U-580: the sky dome (no LightMapCoordinateIndex, so its lightmap set is 0) keeps its

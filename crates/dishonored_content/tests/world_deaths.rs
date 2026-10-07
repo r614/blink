@@ -55,7 +55,10 @@ fn playerstarts_stand_on_their_blocking_volumes() {
     for (start, volume) in [(Vec3::new(-2663.0, -1879.0, 98.0), "BlockingVolume_5"), (Vec3::new(-921.0, 1160.0, -1835.0), "BlockingVolume_2")] {
         let h = w.raycast(start, -Vec3::Z, 400.0, channel::PAWN).expect("floor under the start");
         let src = &w.sources[w.tris[h.tri as usize].source as usize];
-        assert!(src.ends_with(volume), "{start}: {src}");
+        // The volume's top, or a floor in the same place (the river grate's sewer floor at
+        // z -1935 coincides with `BlockingVolume_2`'s top).
+        let top = w.tris.iter().filter(|t| w.sources[t.source as usize].ends_with(volume)).map(|t| t.a.z.max(t.b.z).max(t.c.z)).fold(f32::MIN, f32::max);
+        assert!(src.ends_with(volume) || (h.point.z - top).abs() < 1.0, "{start}: {src} at {}, volume top {top}", h.point.z);
         let mut st = WorldState::default();
         spawn_player(&mut st, 1, start, 0.0, &mc.sim);
         for _ in 0..120 {
