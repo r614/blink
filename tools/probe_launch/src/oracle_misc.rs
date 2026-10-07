@@ -19,6 +19,49 @@ fn status_hex(c: &mut Client, key: &str) -> Result<u32> {
     Ok(u32::from_str_radix(v.trim_start_matches("0x"), 16)?)
 }
 
+/// measure bendtime [--level L] [--frames N] [--out DIR]
+///     Casts Bend Time (`lab power BendTime L` first) and samples every frame the world's
+///     `TimeDilation` (WorldInfo +0x384), the pawn's `CustomTimeDilation` (+0x100), the real
+///     and game clocks, and the component's active flags / start time (+0x90 / +0x94).
+pub fn bendtime(c: &mut Client, o: &Opts) -> Result<()> {
+    let comp = crate::oracle_powers::select_power(c, "DishonoredActivePowerComponent_BendTime")?;
+    let pawn = status_hex(c, "pawn")?;
+    let pc = status_hex(c, "local_pc")?;
+    let wi = c.read_u32(pc + 0x160)?;
+    let mana: i32 = 100;
+    c.write(pawn + 0xa60, &mana.to_le_bytes())?;
+    c.watch_abs(&[(wi + 0x384, 4), (pawn + 0x100, 4), (wi + 0x38c, 16), (comp + 0x90, 8)])?;
+    c.sample_start(1_000_000)?;
+    c.wait_ticks(5)?;
+    c.key("RightMouseButton", true)?;
+    c.wait_ticks(3)?;
+    c.key("RightMouseButton", false)?;
+    c.wait_ticks(o.num("--frames", 900))?;
+    let s = c.sample_fetch()?;
+    c.watch_abs(&[])?;
+    let mut csv = String::from("tick,delta,world_dilation,pawn_dilation,time,real,audio,bend,flags,start\n");
+    let f = |b: &[u8], i: usize| f32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+    for x in &s {
+        let e = &x.extra;
+        if e.len() < 32 {
+            continue;
+        }
+        let _ = writeln!(csv, "{},{:.5},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{:.4}", x.tick, x.delta, f(e, 0), f(e, 4), f(e, 8), f(e, 12), f(e, 16), f(e, 20), u32::from_le_bytes(e[24..28].try_into().unwrap()), f(e, 28));
+    }
+    o.save("bendtime.csv", &csv)?;
+    // Print the changes of the dilations.
+    let mut last = (0.0f32, 0.0f32, u32::MAX);
+    for line in csv.lines().skip(1) {
+        let v: Vec<&str> = line.split(',').collect();
+        let key = (v[2].parse().unwrap_or(0.0), v[3].parse().unwrap_or(0.0), v[8].parse().unwrap_or(0));
+        if key != last {
+            println!("{line}");
+            last = key;
+        }
+    }
+    Ok(())
+}
+
 fn ticks(c: &mut Client) -> Result<u32> {
     let s = c.status()?;
     Ok(s.lines().find_map(|l| l.strip_prefix("ticks=")).context("ticks")?.parse()?)
