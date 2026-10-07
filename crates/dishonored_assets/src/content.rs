@@ -10,6 +10,19 @@ use ue3_package::Package;
 
 pub const DEFAULT_GOG_DIR: &str = r"C:\Program Files\GOG Galaxy\Games\Dishonored";
 
+/// The install root at or above `path` (the folder holding `DishonoredGame/CookedPCConsole`), so
+/// picking the install folder or any folder inside it works.
+pub fn install_root(path: &Path) -> Option<PathBuf> {
+    path.ancestors().find(|a| a.join("DishonoredGame").join("CookedPCConsole").is_dir()).map(Path::to_path_buf)
+}
+
+/// The install to use: `DISHONORED_DIR` if it is one, else `saved` (the folder chosen on first
+/// launch), else the default GOG path. `None` when none of them is an install.
+pub fn find_install(saved: Option<&Path>) -> Option<PathBuf> {
+    let env = std::env::var_os("DISHONORED_DIR").map(PathBuf::from);
+    env.iter().map(PathBuf::as_path).chain(saved).chain([Path::new(DEFAULT_GOG_DIR)]).find_map(install_root)
+}
+
 /// Read-only view of a Dishonored installation.
 pub struct Content {
     pub root: PathBuf,
@@ -76,5 +89,23 @@ impl Content {
         f.read_exact(&mut buf)
             .with_context(|| format!("reading {len} bytes at {offset:#x} from {name}.tfc"))?;
         Ok(buf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_root_accepts_the_install_or_a_folder_inside_it() {
+        let root = std::env::temp_dir().join(format!("blink_install_root_{}", std::process::id()));
+        let cooked = root.join("DishonoredGame").join("CookedPCConsole");
+        std::fs::create_dir_all(&cooked).unwrap();
+        std::fs::create_dir_all(root.join("Binaries").join("Win32")).unwrap();
+        assert_eq!(install_root(&root).as_deref(), Some(root.as_path()));
+        assert_eq!(install_root(&cooked).as_deref(), Some(root.as_path()));
+        assert_eq!(install_root(&root.join("Binaries").join("Win32")).as_deref(), Some(root.as_path()));
+        assert_eq!(install_root(&std::env::temp_dir().join("blink_not_an_install")), None);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

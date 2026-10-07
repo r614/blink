@@ -4,11 +4,12 @@
 //! dishonored_server [--map L_Boyle_Ext_P] [--port 27015] [--name "My Server"] [--mode contracts | --mission FILE.ron]
 //!                   [--max-players 8] [--score-limit 20] [--time-limit 600]
 //!                   [--master host:27900] [--snapshot-hz 60] [--replay-dir replays]
-//!                   [--duration SECONDS]
+//!                   [--duration SECONDS] [--game-dir DIR]
 //! ```
 //! Requires a local Dishonored install (collision and tuning are read from it; nothing
-//! retail is shipped with the server). Without `--master` the server is still reachable
-//! by direct address; with it, it heartbeats the control plane every 5 s.
+//! retail is shipped with the server): `--game-dir`, else `DISHONORED_DIR`, else the folder the
+//! game saved on first launch, else the default GOG path. Without `--master` the server is still
+//! reachable by direct address; with it, it heartbeats the control plane every 5 s.
 use anyhow::Result;
 use dishonored_content::load_match;
 use dishonored_multiplayer::contracts::ContractsRules;
@@ -24,6 +25,15 @@ use std::time::{Duration, Instant};
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let get = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1)).cloned();
+    let root = match get("--game-dir") {
+        Some(d) => dishonored_assets::content::install_root(std::path::Path::new(&d)),
+        None => dishonored_assets::content::find_install(dishonored_settings::saved_game_dir().as_deref()),
+    };
+    let Some(root) = root else {
+        anyhow::bail!("no Dishonored install found: pass --game-dir DIR (the folder holding DishonoredGame\\CookedPCConsole) or set DISHONORED_DIR");
+    };
+    // SAFETY: still single-threaded here; every content loader reads DISHONORED_DIR.
+    unsafe { std::env::set_var("DISHONORED_DIR", &root) };
     // `--mission FILE`: host a custom mission (co-op); the map comes from the mission.
     let mission = get("--mission").map(|p| dishonored_mission::MissionDef::load(std::path::Path::new(&p))).transpose()?;
     let map = get("--map").or_else(|| mission.as_ref().map(|m| m.map.clone())).unwrap_or_else(|| dishonored_content::DEFAULT_MAP.to_string());

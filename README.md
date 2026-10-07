@@ -53,36 +53,6 @@ Experimental. Playable, with known bugs, on Lady Boyle's Last Party (`L_Boyle_*`
 
 Open questions are tracked in `research/UNKNOWNS.md`.
 
-## Layout
-
-```
-crates/
-  ue3_package        minimal UE3 v801/licensee-30 reader (summary, LZO chunks, tables, properties)
-  dishonored_ir      engine-agnostic map representation (Dishonored world space: Z-up, Unreal units)
-  dishonored_assets  Dishonored decoders: StaticMesh, Texture2D (+ .tfc streaming), materials, levels
-  dishonored_runtime Bevy presentation: renders an imported map with a free camera
-  dishonored_audio   Wwise AKPK/soundbank/WEM readers, Wwise Vorbis decoding, event resolution,
-                     dialog VO banks (Bk_<GUID>.INT)
-  dishonored_conversation  original dialog graphs (DisConversation) read at runtime +
-                     deterministic conversation runner (subtitles, VO, choices, story flags)
-  dishonored_world   collision world (BVH) and pathfinding on the original navigation mesh
-                     (`L_*_Nav` pylons; research/dishonored/NAVIGATION.md)
-  dishonored_ai      NPC brains on Arkane's attention model and AI tweaks
-                     (research/dishonored/AI.md)
-  dishonored_settings player settings modelled on ArkProfileSettings (options, defaults, bindings)
-  dishonored_probe   wire protocol + client of the runtime probe of the original game
-  dishonored_probe_dll 32-bit DLL the probe injects (research/dishonored/INSTRUMENTATION.md)
-tools/
-  probe_launch       start the original game with the probe (32-bit build) and measure it
-  package_dump       inspect a package: names / imports / exports / properties / hex
-                     (package_scan: sweep a whole directory)
-  map_dump           run the full map import and report statistics
-                     (nav_dump: navmesh survey/islands/OBJ; tweaks: resolve a tweak object)
-  audio_dump         Wwise packages/banks: survey, list, resolve an event, decode to WAV
-                     under harness_out/ (`audio_dump event Snd_Power_P_Blink_Start Bank_Power_Player`)
-research/            evidence log, unknowns register, format notes, prior art
-```
-
 ## Platforms
 
 | Platform | State |
@@ -94,12 +64,23 @@ research/            evidence log, unknowns register, format notes, prior art
 The renderer (Bevy / wgpu) and the game code are cross-platform. The only Windows-only parts are the
 optional research tools (`probe_launch`, `dishonored_probe_dll`). Linux and macOS support is planned.
 
-## Building and running (Windows)
+## Download (Windows)
+
+Pre-built Windows releases are on the [Releases page](https://github.com/r614/blink/releases).
+Unzip, then run `dishonored_runtime.exe`. Keep the files together: the launcher starts
+`dishonored_server.exe` and `dishonored_master.exe` from the same folder, and reads `missions/`.
+
+You need Dishonored: Definitive Edition from GOG installed. Blink looks for it in the default GOG
+folder (`C:\Program Files\GOG Galaxy\Games\Dishonored`). If it's somewhere else, the first launch
+asks you to pick the folder and remembers it in `%APPDATA%\dishonored-rs\game_dir.txt`; delete that
+file to choose again. `--game-dir DIR` or the `DISHONORED_DIR` environment variable override it,
+and the dedicated server takes `--game-dir` too.
+
+## Building from source (Windows)
 
 Requirements:
 
-- Dishonored: Definitive Edition from GOG, installed. The default path is
-  `C:\Program Files\GOG Galaxy\Games\Dishonored`; set `DISHONORED_DIR` if yours is elsewhere.
+- Dishonored: Definitive Edition from GOG, installed (found as described above).
 - Rust (stable, edition 2024) from [rustup.rs](https://rustup.rs), with the MSVC toolchain
   (Visual Studio Build Tools, "Desktop development with C++").
 - A GPU with DirectX 12 or Vulkan support.
@@ -253,6 +234,36 @@ source scripts/dev-env.sh        # PowerShell: . .\scripts\dev-env.ps1
   its format.
 - Test runs that must stay quiet: `DISHONORED_MUTE=1` silences every sound the game and launcher
   play; audio still decodes, so the audio checks keep working.
+
+## Layout
+
+```
+crates/
+  ue3_package        minimal UE3 v801/licensee-30 reader (summary, LZO chunks, tables, properties)
+  dishonored_ir      engine-agnostic map representation (Dishonored world space: Z-up, Unreal units)
+  dishonored_assets  Dishonored decoders: StaticMesh, Texture2D (+ .tfc streaming), materials, levels
+  dishonored_runtime Bevy presentation: renders an imported map with a free camera
+  dishonored_audio   Wwise AKPK/soundbank/WEM readers, Wwise Vorbis decoding, event resolution,
+                     dialog VO banks (Bk_<GUID>.INT)
+  dishonored_conversation  original dialog graphs (DisConversation) read at runtime +
+                     deterministic conversation runner (subtitles, VO, choices, story flags)
+  dishonored_world   collision world (BVH) and pathfinding on the original navigation mesh
+                     (`L_*_Nav` pylons; research/dishonored/NAVIGATION.md)
+  dishonored_ai      NPC brains on Arkane's attention model and AI tweaks
+                     (research/dishonored/AI.md)
+  dishonored_settings player settings modelled on ArkProfileSettings (options, defaults, bindings)
+  dishonored_probe   wire protocol + client of the runtime probe of the original game
+  dishonored_probe_dll 32-bit DLL the probe injects (research/dishonored/INSTRUMENTATION.md)
+tools/
+  probe_launch       start the original game with the probe (32-bit build) and measure it
+  package_dump       inspect a package: names / imports / exports / properties / hex
+                     (package_scan: sweep a whole directory)
+  map_dump           run the full map import and report statistics
+                     (nav_dump: navmesh survey/islands/OBJ; tweaks: resolve a tweak object)
+  audio_dump         Wwise packages/banks: survey, list, resolve an event, decode to WAV
+                     under harness_out/ (`audio_dump event Snd_Power_P_Blink_Start Bank_Power_Player`)
+research/            evidence log, unknowns register, format notes, prior art
+```
 
 ## Principles
 
