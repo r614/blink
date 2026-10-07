@@ -521,7 +521,7 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
 }
 
 /// The agreement each map reached (COLLISION.md); a lower rate is a regression.
-const MIN_AGREEMENT: &[(&str, f64)] = &[("L_Boyle_Ext_P", 0.0), ("L_Boyle_Int_P", 0.0)];
+const MIN_AGREEMENT: &[(&str, f64)] = &[("L_Boyle_Ext_P", 0.9993), ("L_Boyle_Int_P", 0.9989)];
 
 fn report(rep: &mut Report, map: &str, st: &Stats, _q: &[Query]) {
     let rows = st
