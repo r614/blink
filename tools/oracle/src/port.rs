@@ -6,7 +6,7 @@ use anyhow::{Context, Result, ensure};
 use dishonored_oracle::diff::{PortAnswers, PortHit};
 use dishonored_oracle::query::CollisionSet;
 use dishonored_world::nav::NavWorld;
-use dishonored_world::{CollisionWorld, PawnBox, WorldQuery, channel};
+use dishonored_world::{CollisionWorld, channel};
 use glam::{Mat4, Vec3};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const SNAP_MAGIC: &[u8; 8] = b"BLKPSNAP";
-/// Bump when [`PortSnapshot`] changes. A `dishonored_world` serde change also invalidates
+/// Bump when [`PortSnapshot`] or the port's collision import changes (2: the collision audit). A `dishonored_world` serde change also invalidates
 /// snapshots: decoding fails and the tool asks for `oracle snapshot`.
-const SNAP_VERSION: u32 = 1;
+const SNAP_VERSION: u32 = 2;
 
 /// The port's view of a map, as `dishonored_content::load_match` builds it for the game.
 #[derive(Serialize, Deserialize)]
@@ -131,13 +131,20 @@ pub fn trace_channel(tag: &str) -> u8 {
     }
 }
 
-/// The port's movers where the map places them (main has no per-door state posing yet; the
-/// collision branch adds it, see ORACLE.md).
-pub fn movers(w: &CollisionWorld) -> Vec<CollisionWorld> {
-    w.movers.iter().map(|m| m.placed(Mat4::IDENTITY)).collect()
+/// The port's movers posed as when the set was answered: doors in the recorded states (else
+/// their initial state), other movers where the map places them.
+pub fn movers(w: &CollisionWorld, doors: &[(String, u8)]) -> Vec<CollisionWorld> {
+    w.movers
+        .iter()
+        .map(|m| {
+            let state = doors.iter().find(|d| d.0.eq_ignore_ascii_case(&m.actor)).map_or(m.initial, |d| d.1);
+            m.placed_in(state, Mat4::IDENTITY)
+        })
+        .collect()
 }
 
-/// Run every query (or `ids`) of a set against the port, in parallel.
+/// Run every query (or `ids`) of a set against the port, in parallel, with the original's
+/// semantics (`dishonored_world::engine_check`: back-off per hit kind, movers posed).
 pub fn collision_answers(w: &CollisionWorld, movers: &[CollisionWorld], set: &CollisionSet, ids: Option<&[u32]>) -> PortAnswers {
     let mut names: Vec<String> = w.sources.clone();
     let mover_base = names.len() as u32;
@@ -151,62 +158,12 @@ pub fn collision_answers(w: &CollisionWorld, movers: &[CollisionWorld], set: &Co
             if !wanted(i) {
                 return None;
             }
-            let (s, e, ext) = (Vec3::from(q.start), Vec3::from(q.end), Vec3::from(q.extent));
-            let d = e - s;
-            let len = d.length();
-            if len < 1e-3 {
-                return None;
-            }
-            let ch = trace_channel(&q.tag);
-            let one = |c: &CollisionWorld| -> Option<(f32, u32)> {
-                if ext == Vec3::ZERO {
-                    c.raycast(s, d / len, len, ch).map(|h| (h.distance / len, h.tri))
-                } else {
-                    c.sweep_box(&PawnBox { center: s, half: ext }, d, ch).map(|h| (h.fraction, u32::MAX))
-                }
-            };
-            let mut best: Option<PortHit> = None;
-            if let Some((t, tri)) = one(w) {
-                let src = w.tris.get(tri as usize).map(|x| x.source).unwrap_or(u32::MAX);
-                best = Some(PortHit { time: t, source: src, kind: 0 });
-            }
-            for (k, m) in movers.iter().enumerate() {
-                if let Some((t, _)) = one(m) {
-                    if best.is_none_or(|b| t < b.time) {
-                        best = Some(PortHit { time: t, source: mover_base + k as u32, kind: 0 });
-                    }
-                }
-            }
-            best
+            let h = dishonored_world::engine_check(w, movers, Vec3::from(q.start), Vec3::from(q.end), Vec3::from(q.extent), trace_channel(&q.tag), q.flags)?;
+            let source = if h.world == 0 { w.tris.get(h.tri as usize).map_or(u32::MAX, |t| t.source) } else { mover_base + (h.world - 1) as u32 };
+            Some(PortHit { time: h.time, source, kind: h.kind })
         })
         .collect();
-    // Box sweeps do not report the triangle: name their source with a line along the sweep.
-    let hits = hits
-        .into_iter()
-        .enumerate()
-        .map(|(i, h)| {
-            let mut h = h?;
-            if h.source == u32::MAX {
-                let q = &set.queries[i];
-                let (s, e) = (Vec3::from(q.start), Vec3::from(q.end));
-                let d = e - s;
-                let len = d.length();
-                // The triangles the box touches just past the hit position.
-                let at = s + d * h.time + d / len * 1.0;
-                let mut contacts = Vec::new();
-                w.box_contacts(&PawnBox { center: at, half: Vec3::from(q.extent) + Vec3::splat(0.5) }, trace_channel(&q.tag), &mut contacts);
-                h.source = contacts
-                    .iter()
-                    .max_by(|a, b| a.depth.total_cmp(&b.depth))
-                    .and_then(|c| w.tris.get(c.tri as usize))
-                    .map(|t| t.source)
-                    .or_else(|| w.raycast(s, d / len, len * (h.time + 0.05).min(1.0) + q.extent[0] * 2.0, trace_channel(&q.tag)).and_then(|r| w.tris.get(r.tri as usize)).map(|t| t.source))
-                    .unwrap_or(u32::MAX);
-            }
-            Some(h)
-        })
-        .collect();
-    names.push("(box sweep: source unknown)".into());
+    names.push("(source unknown)".into());
     let unknown = (names.len() - 1) as u32;
     let mut out = PortAnswers { hits, names };
     for h in out.hits.iter_mut().flatten() {

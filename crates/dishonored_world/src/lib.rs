@@ -537,6 +537,52 @@ impl MoverCollision {
 
 const SKIN: f32 = 0.05;
 
+/// A check's first hit as the original reports it ([`engine_check`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EngineHit {
+    /// Fraction of the way, the engine's back-off applied.
+    pub time: f32,
+    /// [`hit_kind`] of the hit triangle.
+    pub kind: u8,
+    /// 0: the static world, k + 1: `movers[k]`.
+    pub world: usize,
+    /// The hit triangle in that world.
+    pub tri: u32,
+}
+
+/// One `UWorld::SingleLineCheck` of the original against the port's world and its posed movers
+/// (research/dishonored/COLLISION.md): a line (`extent` zero) or a box swept from `start` to
+/// `end`, on `channels`. The nearest hit wins; a line's time is backed off by the hit kind unless
+/// the flags ask for `TRACE_Accurate` (0x80000); box sweeps report the back-off themselves.
+pub fn engine_check(w: &CollisionWorld, movers: &[CollisionWorld], start: Vec3, end: Vec3, extent: Vec3, channels: u8, flags: u32) -> Option<EngineHit> {
+    let d = end - start;
+    let len = d.length();
+    if len < 1e-3 {
+        return None;
+    }
+    let one = |c: &CollisionWorld| -> Option<(f32, u32)> {
+        if extent == Vec3::ZERO {
+            c.raycast(start, d / len, len, channels).map(|h| (h.distance / len, h.tri))
+        } else {
+            c.sweep_box(&PawnBox { center: start, half: extent }, d, channels).map(|h| (h.fraction, h.tri))
+        }
+    };
+    let mut best: Option<(f32, usize, u32)> = None;
+    for (k, c) in std::iter::once(w).chain(movers).enumerate() {
+        if let Some((t, tri)) = one(c) {
+            if best.is_none_or(|b| t < b.0) {
+                best = Some((t, k, tri));
+            }
+        }
+    }
+    let (t, k, tri) = best?;
+    let c = if k == 0 { w } else { &movers[k - 1] };
+    let kind = if (tri as usize) < c.tris.len() { c.kind_of(tri) } else { hit_kind::OTHER };
+    let accurate = flags & 0x8_0000 != 0;
+    let time = if accurate || extent != Vec3::ZERO { t } else { hit_kind::engine_time(kind, t, len) };
+    Some(EngineHit { time, kind, world: k, tri })
+}
+
 /// The faces of a convex hull given as planes `(nx, ny, nz, d)` (inside when `n . p <= d`), as
 /// triangles wound so their normals point out (UE3 brush volumes, `KConvexElem` face planes).
 pub fn hull_triangles(planes: &[[f32; 4]]) -> Vec<[Vec3; 3]> {

@@ -384,7 +384,7 @@ fn cmd_densify(a: &Args) -> Result<()> {
     let (_, path) = cached_sets(&exe).into_iter().find(|(k, _)| k.subject.eq_ignore_ascii_case(&map)).context("no cached collision set for the map")?;
     let (_, set): Stored = cache::decode(&std::fs::read(path)?)?.1;
     let (w, _) = port::snapshot(&root, &map, false)?.world();
-    let port = port::collision_answers(&w, &port::movers(&w), &set, None);
+    let port = port::collision_answers(&w, &port::movers(&w, &set.doors), &set, None);
     let d = diff::compare_collision(&set, &port);
     let ids: Vec<u32> = d.disagreements.iter().map(|x| x.id).collect();
     let q = dishonored_oracle::sampling::densify(&set.queries, &ids, per, radius, seed);
@@ -497,7 +497,7 @@ fn cmd_collision(a: &Args) -> Result<CollisionRun> {
         let t_oracle = t.elapsed().as_secs_f64();
         let t = Instant::now();
         let (w, _) = port::snapshot(&root, map, a.flag("--rebuild"))?.world();
-        let mv = port::movers(&w);
+        let mv = port::movers(&w, &set.doors);
         let t_load = t.elapsed().as_secs_f64() + t_oracle;
         let t = Instant::now();
         let mut set = set;
@@ -687,7 +687,7 @@ fn cmd_bench(a: &Args) -> Result<()> {
             let exe = exe_sha(a, &root)?;
             let (_, path) = cached_sets(&exe).into_iter().find(|(k, _)| k.subject.eq_ignore_ascii_case(&map)).context("no cached collision set for the map")?;
             let (_, set): Stored = cache::decode(&std::fs::read(path)?)?.1;
-            let mv = port::movers(&w);
+            let mv = port::movers(&w, &set.doors);
             let par = Instant::now();
             let _ = port::collision_answers(&w, &mv, &set, None);
             let par = par.elapsed().as_secs_f64();

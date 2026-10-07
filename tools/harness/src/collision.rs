@@ -19,7 +19,7 @@ use crate::Ctx;
 use crate::report::Report;
 use anyhow::{Context, Result, bail};
 use dishonored_content::{MatchContent, load_match};
-use dishonored_world::{CollisionWorld, PawnBox, WorldQuery, channel, hit_kind};
+use dishonored_world::{CollisionWorld, WorldQuery, channel};
 use glam::Vec3;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -235,34 +235,10 @@ pub fn port_check(w: &CollisionWorld, q: &Query) -> Option<f32> {
 /// report (its back-off from the surface applied when the check is not `TRACE_Accurate`), the
 /// kind of the hit triangle and its source.
 pub fn port_hit(w: &CollisionWorld, movers: &[CollisionWorld], q: &Query) -> Option<(f32, u8, String)> {
-    let d = q.end - q.start;
-    let len = d.length();
-    if len < 1e-3 {
-        return None;
-    }
-    let one = |c: &CollisionWorld| -> Option<(f32, u32)> {
-        if q.extent == Vec3::ZERO {
-            c.raycast(q.start, d / len, len, q.chan.channel()).map(|h| (h.distance / len, h.tri))
-        } else {
-            let b = PawnBox { center: q.start, half: q.extent };
-            c.sweep_box(&b, d, q.chan.channel()).map(|h| (h.fraction, h.tri))
-        }
-    };
-    let mut best: Option<(f32, u8, String)> = None;
-    for c in std::iter::once(w).chain(movers) {
-        if let Some((t, tri)) = one(c) {
-            if best.as_ref().is_none_or(|b| t < b.0) {
-                let (kind, src) = match c.tris.get(tri as usize) {
-                    Some(x) => (c.kind_of(tri), c.sources.get(x.source as usize).cloned().unwrap_or_default()),
-                    None => (hit_kind::OTHER, String::new()),
-                };
-                best = Some((t, kind, src));
-            }
-        }
-    }
-    let accurate = q.chan.flags() & 0x8_0000 != 0;
-    // Box sweeps already report the engine's back-off; lines are exact.
-    best.map(|(t, k, s)| (if accurate || q.extent != Vec3::ZERO { t } else { hit_kind::engine_time(k, t, len) }, k, s))
+    let h = dishonored_world::engine_check(w, movers, q.start, q.end, q.extent, q.chan.channel(), q.chan.flags())?;
+    let c = if h.world == 0 { w } else { &movers[h.world - 1] };
+    let src = c.tris.get(h.tri as usize).and_then(|x| c.sources.get(x.source as usize)).cloned().unwrap_or_default();
+    Some((h.time, h.kind, src))
 }
 
 /// One oracle answer: hit, fraction, and (from a probe run only) the hit component's name.

@@ -268,10 +268,15 @@ Main (be0a3da), captures of 2026-10-07 (exe `70da9613...`): Boyle Ext 44328 / 77
 vision line hits 4.00 uu earlier in the original (6237 + 5534 queries; classified
 `PortMissing`: the non-accurate line back-off is on the collision branch, not main), then
 per-component clusters such as port shadow-caster boxes (`L_Boyle_Int_box_shadow`) blocking
-where the original does not. The collision branch reports 98.5-99.9 % per kind on the same
-captures; when it merges, `port::collision_answers` should take its `hit_kind::engine_time` and
-per-door posing (`placed_in`), and `oracle collision` becomes the shared library behind
-`harness collision`.
+where the original does not.
+
+After the collision audit (COLLISION.md) `port::collision_answers` and `harness collision` both
+answer through `dishonored_world::engine_check` (the line back-off per hit kind, movers and
+doors posed in the capture's recorded states; snapshot version 2). With the audit's port and the
+exterior's new capture: Boyle Ext 76784 / 76826 (99.95 %), Boyle Int 44748 / 44798 (99.89 %);
+`harness collision` on its stored fixtures (fractions rounded to 1e-4) gives 99.94 % and 99.90 %.
+`harness collision` still keeps its own comparison and cause classification; moving them onto
+`dishonored_oracle::diff` is open.
 
 ## Speed
 
