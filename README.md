@@ -83,14 +83,49 @@ tools/
 research/            evidence log, unknowns register, format notes, prior art
 ```
 
-## Usage
+## Platforms
 
-Requires a GOG install of Dishonored: Definitive Edition. The default path is
-`C:\Program Files\GOG Galaxy\Games\Dishonored`; override it with `DISHONORED_DIR`.
+| Platform | State |
+|---|---|
+| Windows 10/11 (x64) | supported and tested |
+| Linux | not supported yet: never built or run; game files are looked up with case-sensitive names |
+| macOS | not supported yet: never built or run; same file-name issue as Linux |
+
+The renderer (Bevy / wgpu) and the game code are cross-platform. The only Windows-only parts are the
+optional research tools (`probe_launch`, `dishonored_probe_dll`). Linux and macOS support is planned.
+
+## Building and running (Windows)
+
+Requirements:
+
+- Dishonored: Definitive Edition from GOG, installed. The default path is
+  `C:\Program Files\GOG Galaxy\Games\Dishonored`; set `DISHONORED_DIR` if yours is elsewhere.
+- Rust (stable, edition 2024) from [rustup.rs](https://rustup.rs), with the MSVC toolchain
+  (Visual Studio Build Tools, "Desktop development with C++").
+- A GPU with DirectX 12 or Vulkan support.
+- Optional: `ffmpeg` on `PATH`, for gameplay video capture.
+
+```bash
+git clone https://github.com/r614/blink.git
+```
+
+```bash
+cd blink
+```
+
+```bash
+cargo run --release -p dishonored_runtime
+```
+
+The first launch reads the game files and builds caches in `cache/` inside the checkout (set
+`DISHONORED_CACHE` to put them elsewhere). That takes a while, and later launches are faster.
+Without arguments the launcher opens. To go straight into a map:
 
 ```bash
 cargo run --release -p dishonored_runtime -- --map L_Boyle_Ext_P
 ```
+
+## Usage
 
 ### Launcher
 
