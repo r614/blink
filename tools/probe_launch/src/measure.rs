@@ -152,6 +152,7 @@ pub fn run(args: &[String]) -> Result<()> {
         "windblast" => crate::oracle_powers::windblast(&mut c, &crate::oracle::Opts { out: o.out.clone(), rest: args.to_vec() }),
         "detect" => crate::oracle_stealth::detect(&mut c, &crate::oracle::Opts { out: o.out.clone(), rest: args.to_vec() }),
         "vis" => crate::oracle_stealth::vis(&mut c, &crate::oracle::Opts { out: o.out.clone(), rest: args.to_vec() }),
+        "grenade" => crate::oracle_misc::grenade(&mut c, &crate::oracle::Opts { out: o.out.clone(), rest: args.to_vec() }),
         "bendtime" => crate::oracle_misc::bendtime(&mut c, &crate::oracle::Opts { out: o.out.clone(), rest: args.to_vec() }),
         "lean" => crate::oracle_misc::lean(&mut c, &crate::oracle::Opts { out: o.out.clone(), rest: args.to_vec() }),
         "sword" => crate::oracle_combat::sword(&mut c, &crate::oracle::Opts { out: o.out.clone(), rest: args.to_vec() }),

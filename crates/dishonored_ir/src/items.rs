@@ -366,7 +366,7 @@ pub struct GrenadeConfig {
     /// Degrees the throw is raised above the aim.
     pub throw_angle: f32,
     pub gravity_mult: f32,
-    /// `m_fDetonationDelay` (time fuse once armed; 0 in the cooked tweaks).
+    /// `m_fDetonationDelay` (time fuse once armed; 3.0 in the cooked tweaks).
     pub fuse: f32,
     /// `m_fMinDetonationDelayAfterHit`.
     pub min_delay_after_hit: f32,
@@ -378,7 +378,7 @@ pub struct GrenadeConfig {
 
 impl Default for GrenadeConfig {
     fn default() -> Self {
-        Self { throw_speed: 2500.0, throw_angle: 5.0, gravity_mult: 1.0, fuse: 0.0, min_delay_after_hit: 0.5, bounciness: 0.3, floor_bounciness: 0.65, sticky: false, explosion: ExplosionConfig::default() }
+        Self { throw_speed: 2500.0, throw_angle: 5.0, gravity_mult: 1.0, fuse: 3.0, min_delay_after_hit: 0.5, bounciness: 0.3, floor_bounciness: 0.65, sticky: false, explosion: ExplosionConfig::default() }
     }
 }
 

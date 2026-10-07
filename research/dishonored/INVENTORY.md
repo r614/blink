@@ -229,10 +229,14 @@ an NPC carries (pickpocketing). Boyle Ext (with the street script) has 68: 54 ab
   (U-049 resolved: was 35 in the sim).
 - Incendiary bolts (`DisDamageType_Arrow_Flare`): `m_bCannotKillNPC`, `m_bPutToFire`; the NPC is
   immolated after `m_fNPCImmolationTime` (0.5 s) and burns to death in the sim (U-107).
-- Grenades (`DisGrenadeComponent`): armed by the first impact (+0x64 bit 1); the fuse
-  (`m_fDetonationDelay` + `Attribute_GrenadeExplosionDelay` for the player, 0x00C58210) cannot run
-  below `m_fMinDetonationDelayAfterHit` before exploding (0x00C5A2A0); the cooked fuse is 0, so a
-  grenade explodes 0.5 s after it first hits something (LIKELY, U-102). Explosion: radial
+- Grenades (`DisGrenadeComponent`): the fuse (`m_fDetonationDelay` +
+  `Attribute_GrenadeExplosionDelay` for the player, 0x00C58210) cannot run below
+  `m_fMinDetonationDelayAfterHit` before exploding (0x00C5A2A0). The cooked fuse is 3.0 (the
+  property parser had read the tweak as a component and lost its first property). Measured with
+  the engine hook: a thrown plain grenade is armed (+0x64 bit 1) from its first tick and
+  explodes 3.0 s after the throw, bounces or not; `m_fMinTimeToDetonationAfterHit` (+0xB4) stayed
+  0 through its ground bounces (U-102). Sticky grenades are still armed by their first impact in
+  the sim (not measured, U-602). Explosion: radial
   damage with a line check and linear falloff between the full and the outer radius (players
   use the player radii); a sticky grenade adds `m_fAttachedDamage` to the pawn it sticks to;
   explosions set off Spring Razors.

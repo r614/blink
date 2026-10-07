@@ -300,24 +300,27 @@ fn spring_razor_cuts_down_an_npc_but_ignores_players() {
 }
 
 #[test]
-fn grenade_explodes_half_a_second_after_impact() {
+/// U-102, measured on the original (engine hook, 60 Hz): a thrown grenade is armed from its
+/// first tick and `m_fTimeToDetonation` counts 3.0 s down to the explosion, bounces or not.
+fn grenade_explodes_three_seconds_after_the_throw() {
     let mut r = Run::new(&[(Vec3::new(500.0, 0.0, Z), 180.0)]);
     r.pm(1).inv.ammo[AmmoType::Grenade as usize] = 1;
     let throw = |b| PlayerInput { pitch: -10.0, buttons: b, left_hand: LeftHand::Grenade, ..Default::default() };
     r.step(&[(1, throw(buttons::SECONDARY))]);
-    let mut impact = None;
+    let mut thrown = None;
     let mut boom = None;
     for t in 0..400 {
         r.step(&[(1, throw(0))]);
-        if impact.is_none() && r.state.projectiles.iter().any(|p| p.armed) {
-            impact = Some(t);
+        if thrown.is_none() && !r.state.projectiles.is_empty() {
+            assert!(r.state.projectiles.iter().all(|p| p.armed), "armed when thrown");
+            thrown = Some(t);
         }
         if boom.is_none() && r.events.iter().any(|e| matches!(e, SimEvent::Explosion { .. })) {
             boom = Some(t);
         }
     }
-    let (i, b) = (impact.expect("armed on impact"), boom.expect("exploded"));
-    assert!((29..=31).contains(&(b - i)), "0.5 s after impact: {} ticks", b - i);
+    let (i, b) = (thrown.expect("thrown"), boom.expect("exploded"));
+    assert!((179..=181).contains(&(b - i)), "3.0 s after the throw: {} ticks", b - i);
     assert!(r.events.iter().any(|e| matches!(e, SimEvent::Damage { victim: 100, cause: DamageCause::Grenade, .. })));
 }
 

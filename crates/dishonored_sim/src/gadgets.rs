@@ -1,9 +1,11 @@
 //! Grenades, sticky grenades and Spring Razors, decoded from `Dishonored.exe`
 //! (research/dishonored/PLAYER.md "Gadgets"):
 //!
-//! - grenades (`DisGrenadeComponent`, tick 0x00C5A2A0, delay 0x00C58210): armed by the first
-//!   impact; the time to detonation (`m_fDetonationDelay` + `Attribute_GrenadeExplosionDelay`
-//!   for the player's grenades, 0 in the cooked tweaks) cannot run below
+//! - grenades (`DisGrenadeComponent`, tick 0x00C5A2A0, delay 0x00C58210): a plain grenade is
+//!   armed when thrown (measured with the engine hook: `m_bArmed` from its first tick, the
+//!   timer counts 3.0 s down to the explosion whatever it hits, U-102); a sticky grenade by its
+//!   first impact (not measured); the time to detonation (`m_fDetonationDelay` 3.0 +
+//!   `Attribute_GrenadeExplosionDelay` for the player's grenades) cannot run below
 //!   `m_fMinDetonationDelayAfterHit` (0.5 s) before it explodes; the timer runs at the
 //!   grenade's own time dilation (Bend Time freezes it). Thrown at `m_fThrowSpeed`, raised by
 //!   `m_fThrowAngle` (`DisTweaks_ThrowGrenade`), leaving the hand at `DishonoredNotify_FireProjectile`
@@ -122,6 +124,9 @@ pub fn step_grenades(state: &mut WorldState, world: &dyn WorldQuery, cfg: &Gamep
         }
         let g = grenade_cfg(cfg, pr.kind).clone();
         pr.age += dt;
+        if pr.kind == ProjectileKind::Grenade {
+            arm(&mut pr, &g);
+        }
         if let Some(t) = pr.stuck_to {
             match state.player(t) {
                 Some(p) => pr.position = p.position + pr.stuck_offset,

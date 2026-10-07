@@ -240,7 +240,7 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
             throw_speed: l.f(&throw, throw_p, "m_fThrowSpeed", &format!("{pre}.throw_speed"), d.throw_speed),
             throw_angle: l.f(&throw, throw_p, "m_fThrowAngle", &format!("{pre}.throw_angle"), d.throw_angle),
             gravity_mult: l.f(&pm, proj, "m_fGravityMultiplier", &format!("{pre}.gravity_mult"), d.gravity_mult),
-            // Class default 0: the cooked tweak does not set it (see U-102).
+            // 3.0 in the cooked tweaks (read since the tweak parser fix, U-102).
             fuse: l.f(&cm, comp, "m_fDetonationDelay", &format!("{pre}.fuse"), 0.0),
             min_delay_after_hit: l.f(&cm, comp, "m_fMinDetonationDelayAfterHit", &format!("{pre}.min_delay_after_hit"), d.min_delay_after_hit),
             bounciness: get_f32(&pm, "m_fBounciness").unwrap_or(d.bounciness),

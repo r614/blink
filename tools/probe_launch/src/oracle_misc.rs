@@ -62,6 +62,59 @@ pub fn bendtime(c: &mut Client, o: &Opts) -> Result<()> {
     Ok(())
 }
 
+/// measure grenade [--pitch DEG] [--hold FRAMES] [--frames N] [--out DIR]
+///     Throws a grenade (`lab give Twk_Inv_GrenadeCorvo` and `lab equip DisWepGrenade 2`
+///     first) and samples the new `DisProjectile_Grenade` every frame: location, velocity,
+///     physics, `bDeleteMe`, and its `DisGrenadeComponent` (`m_bArmed` / `m_bExploded` +0x64,
+///     `m_fTimeToDetonation` +0xB0, `m_fMinTimeToDetonationAfterHit` +0xB4).
+pub fn grenade(c: &mut Client, o: &Opts) -> Result<()> {
+    let pc = status_hex(c, "local_pc")?;
+    let pitch: f32 = o.num("--pitch", -10.0);
+    let r = [(pitch / 360.0 * 65536.0) as i32 & 0xffff];
+    c.write(pc + ACTOR_ROTATION, &r[0].to_le_bytes())?;
+    let before = c.find("", "DisProjectile_Grenade")?;
+    c.key("RightMouseButton", true)?;
+    c.wait_ticks(o.num("--hold", 20))?;
+    c.key("RightMouseButton", false)?;
+    let mut proj = None;
+    for _ in 0..120 {
+        c.wait_ticks(1)?;
+        if let Some(p) = c.find("", "DisProjectile_Grenade")?.into_iter().find(|a| !before.contains(a)) {
+            proj = Some(p);
+            break;
+        }
+    }
+    let proj = proj.context("no grenade thrown")?;
+    let comp = c.read_u32(proj + 0x2e0)?;
+    let t0 = ticks(c)?;
+    c.watch_abs(&[(proj + ACTOR_LOCATION, 12), (proj + ACTOR_VELOCITY, 12), (proj + ACTOR_PHYSICS, 4), (proj + 0x120, 4), (comp + 0x64, 4), (comp + 0xb0, 8)])?;
+    c.sample_start(1_000_000)?;
+    c.wait_ticks(o.num("--frames", 400))?;
+    let s = c.sample_fetch()?;
+    c.watch_abs(&[])?;
+    println!("grenade {proj:#x} component {comp:#x}, found at tick {t0}");
+    let f = |b: &[u8], i: usize| f32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+    let u = |b: &[u8], i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+    let mut csv = String::from("tick,time,x,y,z,vx,vy,vz,physics,actor_flags,comp_flags,to_detonation,min_after_hit\n");
+    let mut last = String::new();
+    for x in &s {
+        let e = &x.extra;
+        if e.len() < 44 {
+            continue;
+        }
+        let line = format!("{},{:.4},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:#x},{:#x},{:.4},{:.4}", x.tick, x.time_seconds, f(e, 0), f(e, 4), f(e, 8), f(e, 12), f(e, 16), f(e, 20), e[24], u(e, 28), u(e, 32), f(e, 36), f(e, 40));
+        let key = format!("{},{:#x},{:#x},{:.3}", e[24], u(e, 28), u(e, 32), f(e, 40));
+        if key != last {
+            println!("{line}");
+            last = key;
+        }
+        csv.push_str(&line);
+        csv.push('\n');
+    }
+    o.save("grenade.csv", &csv)?;
+    Ok(())
+}
+
 fn ticks(c: &mut Client) -> Result<u32> {
     let s = c.status()?;
     Ok(s.lines().find_map(|l| l.strip_prefix("ticks=")).context("ticks")?.parse()?)

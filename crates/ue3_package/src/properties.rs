@@ -145,7 +145,11 @@ impl Package {
         // Engine.upk components whose names lack the suffix (their super chains reach
         // `Component`; listed because other packages only see them as imports).
         const ENGINE_COMPONENTS: &[&str] = &["ApexComponentBase", "ArkComponentContainer", "RB_Handle", "RB_Spring"];
-        let by_name = |c: &str| c.ends_with("Component") || c == "Component" || c.starts_with("Distribution") || ENGINE_COMPONENTS.contains(&c);
+        // Tweak classes named like components but derived from `DisTweaksBase` (an Object): seen
+        // only as imports outside DishonoredGame.upk, so the suffix alone misreads them (their
+        // first property was taken for a TemplateOwnerClass, e.g. `m_fDetonationDelay`, U-102).
+        const NOT_COMPONENTS: &[&str] = &["DisTweaks_GrenadeComponent", "DisDLC06Tweaks_GrenadeComponent"];
+        let by_name = |c: &str| !NOT_COMPONENTS.contains(&c) && (c.ends_with("Component") || c == "Component" || c.starts_with("Distribution") || ENGINE_COMPONENTS.contains(&c));
         // Classes defined in this package: walk their super chain, so components whose name
         // does not end in "Component" (`DisActivePowerComponent_Blink`, `ArkComponentContainer`,
         // `RB_Handle`) and plain objects whose name does (`DisTweaks_GrenadeComponent`,
