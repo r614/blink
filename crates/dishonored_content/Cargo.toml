@@ -19,3 +19,6 @@ dishonored_sim.workspace = true
 dishonored_conversation = { workspace = true, features = ["load"] }
 dishonored_audio = { path = "../dishonored_audio" }
 dishonored_kismet = { workspace = true, features = ["load"] }
+
+[dev-dependencies]
+dishonored_ai.workspace = true
