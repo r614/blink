@@ -261,7 +261,8 @@ pub fn port_hit(w: &CollisionWorld, movers: &[CollisionWorld], q: &Query) -> Opt
         }
     }
     let accurate = q.chan.flags() & 0x8_0000 != 0;
-    best.map(|(t, k, s)| (if accurate { t } else { hit_kind::engine_time(k, t, len) }, k, s))
+    // Box sweeps already report the engine's back-off; lines are exact.
+    best.map(|(t, k, s)| (if accurate || q.extent != Vec3::ZERO { t } else { hit_kind::engine_time(k, t, len) }, k, s))
 }
 
 /// One oracle answer: hit, fraction, and (from a probe run only) the hit component's name.
@@ -344,14 +345,25 @@ pub struct Stats {
     pub by_kind: BTreeMap<(Kind, Chan), (usize, usize)>,
     /// Disagreements: (query id, oracle, port).
     pub diffs: Vec<(usize, Oracle, Option<f32>)>,
+    /// Where both hit within 20 uu: the original's hit minus the port's along the check (uu), by
+    /// (extent check, port hit kind, trace type).
+    pub offsets: BTreeMap<(bool, u8, Chan), Vec<f32>>,
 }
 
 pub fn compare(mc: &MatchContent, queries: &[Query], oracle: &BTreeMap<usize, Oracle>) -> Stats {
     let movers = start_world(mc);
-    let mut st = Stats { total: 0, agree: 0, by_kind: BTreeMap::new(), diffs: Vec::new() };
+    let mut st = Stats { total: 0, agree: 0, by_kind: BTreeMap::new(), diffs: Vec::new(), offsets: BTreeMap::new() };
     for (id, o) in oracle {
         let Some(q) = queries.get(*id) else { continue };
-        let p = port_hit(&mc.collision, &movers, q).map(|h| h.0);
+        let hit = port_hit(&mc.collision, &movers, q);
+        if let (true, Some(h)) = (o.hit, &hit) {
+            let len = (q.end - q.start).length();
+            let off = (o.time - h.0) * len;
+            if off.abs() < 20.0 && o.time > 0.0 && h.0 > 0.0 {
+                st.offsets.entry((q.extent != Vec3::ZERO, h.1, q.chan)).or_default().push(off);
+            }
+        }
+        let p = hit.map(|h| h.0);
         let ok = agrees(q, o, p);
         st.total += 1;
         let e = st.by_kind.entry((q.kind, q.chan)).or_default();
@@ -465,6 +477,15 @@ fn report(rep: &mut Report, map: &str, st: &Stats, _q: &[Query]) {
         .map(|((k, c), (n, a))| vec![k.tag().to_string(), c.tag().to_string(), n.to_string(), a.to_string(), pct(*a, *n)])
         .collect();
     rep.table(&format!("{map}: agreement per query kind"), &["kind", "trace", "queries", "agree", "rate"], rows);
+    let mut rows = Vec::new();
+    for ((ext, kind, chan), v) in &st.offsets {
+        let mut v = v.clone();
+        v.sort_by(|a, b| a.total_cmp(b));
+        let q = |f: f32| v[((v.len() - 1) as f32 * f) as usize];
+        rows.push(vec![if *ext { "box" } else { "line" }.to_string(), kind.to_string(), chan.tag().to_string(), v.len().to_string(), format!("{:.2}", q(0.1)), format!("{:.2}", q(0.5)), format!("{:.2}", q(0.9))]);
+    }
+    println!("{map}: hit offsets (orig - port, uu): {rows:?}");
+    rep.table(&format!("{map}: original hit minus port hit along the check, uu (both hit within 20 uu)"), &["check", "port kind", "trace", "n", "p10", "median", "p90"], rows);
     println!("{map}: {} / {} agree ({})", st.agree, st.total, pct(st.agree, st.total));
 }
 

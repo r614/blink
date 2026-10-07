@@ -46,7 +46,7 @@ fn main() -> Result<()> {
             );
             *groups.entry(k).or_default() += 1;
         }
-        for (k, n) in &groups {
+        for (k, n) in groups.iter().filter(|_| list.is_none()) {
             println!("{n:>6}  {k}");
         }
         if let Some(cl) = &list {

@@ -191,13 +191,16 @@ pub fn load_climbables(content: &Content, map: &str) -> Vec<dishonored_world::Cl
     c
 }
 
-/// Collision the static meshes do not carry (research/dishonored/PLAYER.md "Level collision"):
-/// the level's `BlockingVolume`s (pawn movement only: invisible brushes; Boyle's garden and
-/// river-grate PlayerStarts stand on two of them) and the physics bodies of its level transition
-/// doors (closed for good: using one loads the other map).
+/// Collision the static meshes do not carry (research/dishonored/COLLISION.md): the level's
+/// `BlockingVolume`s (movement only: invisible brushes; Boyle's garden and river-grate
+/// PlayerStarts stand on two of them), the physics bodies of its skeletal props that block
+/// (usable objects, water sources, alarm bells and the level transition doors, which are closed
+/// for good: using one loads the other map) at their reference pose, and its `DisDoor`s as
+/// movers with a pose per door state (they open and close with the Kismet).
 pub fn add_level_blockers(w: CollisionWorld, content: &Content, map: &str) -> CollisionWorld {
     let pkgs = map_packages(content, map);
-    let mut extra = Vec::new();
+    let mut extra: Vec<(String, u8, u8, Vec<Vec<[Vec3; 3]>>)> = Vec::new();
+    let mut w = w;
     // Each volume's trace types (`BrushComponent.m_CollisionTraceTypes`: the `Volume` class
     // default is the three movement types, so pawns and movers are blocked, gameplay traces
     // pass; research/dishonored/COLLISION.md).
@@ -205,23 +208,62 @@ pub fn add_level_blockers(w: CollisionWorld, content: &Content, map: &str) -> Co
     match dishonored_assets::water::extract_blocking_volumes(content, &pkgs) {
         Ok(v) => {
             for b in v {
-                let tris: Vec<[Vec3; 3]> = b.hulls.iter().flat_map(|h| dishonored_world::hull_triangles(h)).collect();
+                let tris: Vec<Vec<[Vec3; 3]>> = b.hulls.iter().map(|h| dishonored_world::hull_triangles(h)).collect();
                 let src = sources.iter().find(|s| s.package == b.package && s.actor == b.name && s.component_class == "BrushComponent");
                 if src.is_some_and(|s| !s.active()) {
                     continue;
                 }
                 let mask = src.map_or(dishonored_assets::collision_audit::mask::MOVE, |s| s.trace_mask);
-                extra.push((format!("{}:{}", b.package, b.name), dishonored_world::channel::from_trace_mask(mask), tris));
+                extra.push((format!("{}:{}", b.package, b.name), dishonored_world::channel::from_trace_mask(mask), dishonored_world::hit_kind::OTHER, tris));
             }
         }
         Err(e) => eprintln!("warning: blocking volumes of {map}: {e:#}"),
     }
-    let doors: Vec<String> = dishonored_assets::travel::extract_travel(content, &pkgs).unwrap_or_default().into_iter().map(|t| format!("{}:{}", t.door_package, t.door)).collect();
-    for d in dishonored_assets::prop_collision::extract_prop_bodies(content, &pkgs, &doors) {
-        let tris: Vec<[Vec3; 3]> = d.boxes.iter().flat_map(|m| dishonored_world::box_triangles(*m)).collect();
-        extra.push((d.actor, dishonored_world::channel::ALL, tris));
+    // Skeletal props whose physics asset blocks: the component collides and both the actor and
+    // the component block (`IsBlockedBy`; none is world geometry).
+    use dishonored_assets::collision_audit::mask;
+    let travel: Vec<String> = dishonored_assets::travel::extract_travel(content, &pkgs).unwrap_or_default().into_iter().map(|t| format!("{}:{}", t.door_package, t.door)).collect();
+    let props = dishonored_assets::usable_props::read_props(content, &pkgs);
+    // Every blocking skeletal component but the climbable chains (their bodies swing with
+    // physics and turn off while climbed; not modelled, U-654).
+    for src in sources.iter().filter(|s| s.component_class == "SkeletalMeshComponent" && s.active() && s.block && s.actor_block && s.class != "DisClimbable") {
+        let actor = format!("{}:{}", src.package, src.actor);
+        let prop = props.iter().find(|p| p.actor.eq_ignore_ascii_case(&actor));
+        let is_door = src.class == "DisDoor" && prop.is_some_and(|p| p.door.is_some()) && !travel.iter().any(|t| t.eq_ignore_ascii_case(&actor));
+        // The vision line of sight (no `TRACE_Others`) checks movers, which doors are, and
+        // level geometry only (research/dishonored/COLLISION.md "ShouldTrace").
+        let m = if is_door { src.trace_mask } else { src.trace_mask & !mask::VISION };
+        let channels = dishonored_world::channel::from_trace_mask(m);
+        let info = dishonored_world::TriInfo { channels, shape: dishonored_world::shape::ALL, kind: dishonored_world::hit_kind::OTHER, elem: u32::MAX };
+        if let (true, Some(prop)) = (is_door, prop) {
+            match dishonored_assets::prop_collision::door_states(content, &pkgs, prop) {
+                Ok(states) => {
+                    let closed = states.iter().find(|s| s.0 == 0).map(|s| s.1.clone()).unwrap_or_default();
+                    let mut tris = Vec::new();
+                    let mut infos = Vec::new();
+                    for (ei, e) in closed.iter().enumerate() {
+                        tris.extend_from_slice(e);
+                        infos.extend(std::iter::repeat_n(dishonored_world::TriInfo { elem: ei as u32, ..info }, e.len()));
+                    }
+                    w.movers.push(dishonored_world::MoverCollision {
+                        actor: prop.actor.clone(),
+                        actor_to_world: prop.actor_to_world,
+                        tris,
+                        info: infos,
+                        poses: states.into_iter().filter(|s| s.0 != 0).collect(),
+                        initial: prop.door.as_ref().map_or(0, |d| d.initial),
+                    });
+                }
+                Err(e) => eprintln!("warning: door collision of {}: {e:#}", prop.actor),
+            }
+            continue;
+        }
+        match dishonored_assets::prop_collision::read_prop_bodies(content, &pkgs, &actor, &Default::default()) {
+            Ok(b) => extra.push((b.actor, channels, dishonored_world::hit_kind::OTHER, b.tris)),
+            Err(e) => eprintln!("warning: collision of {actor}: {e:#}"),
+        }
     }
-    w.with_extra(&extra)
+    w.with_extra_kinds(&extra)
 }
 
 /// Spawn points for free-for-all (the port's mode; the original has none): the map's spawns
@@ -256,7 +298,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     let sim = load_sim_config(&content).context("gameplay config")?;
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).ok();
-    let coll_path = dir.join(format!("{map}.collision6.bin"));
+    let coll_path = dir.join(format!("{map}.collision10.bin"));
     let spawn_path = dir.join(format!("{map}.spawns.json"));
     let (collision, spawns) = match (CollisionWorld::load(&coll_path), std::fs::read_to_string(&spawn_path)) {
         (Ok(w), Ok(s)) => (w, serde_json::from_str::<Vec<Spawn>>(&s).unwrap_or_default()),

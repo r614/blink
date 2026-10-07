@@ -43,12 +43,14 @@ pub struct FfaMatch {
     /// Players waiting to respawn: (id, seconds left).
     respawn_queue: Vec<(PlayerId, f32)>,
     spawn_cursor: usize,
+    /// Movers and doors as the map starts them.
+    start: dishonored_world::StartLayers,
 }
 
 impl FfaMatch {
     pub fn new(rules: FfaRules, spawns: Vec<SpawnPoint>) -> Self {
         let view = MatchView { mode: "ffa".into(), phase: MatchPhase::Warmup, time_left: rules.time_limit, score_limit: rules.score_limit, ..Default::default() };
-        Self { rules, world: WorldState::default(), view, spawns, phase_timer: 0.0, respawn_queue: Vec::new(), spawn_cursor: 0 }
+        Self { rules, world: WorldState::default(), view, spawns, phase_timer: 0.0, respawn_queue: Vec::new(), spawn_cursor: 0, start: Default::default() }
     }
 
     pub fn is_full(&self) -> bool {
@@ -110,7 +112,18 @@ impl FfaMatch {
     }
 
     /// Advance the match one tick: simulation, then rules.
+    /// One simulation step. The level's Kismet does not run in this mode: its movers collide
+    /// where the map places them and its doors as they start ([`dishonored_world::StartLayers`]).
     pub fn step(&mut self, inputs: &[(PlayerId, PlayerInput)], world: &dyn WorldQuery, cfg: &SimConfig) -> StepOutput {
+        self.start.update(world);
+        let layers = std::mem::take(&mut self.start.layers);
+        let layered = dishonored_world::Layered { base: world, layers: &layers };
+        let out = self.step_in(inputs, if layers.is_empty() { world } else { &layered }, cfg);
+        self.start.layers = layers;
+        out
+    }
+
+    fn step_in(&mut self, inputs: &[(PlayerId, PlayerInput)], world: &dyn WorldQuery, cfg: &SimConfig) -> StepOutput {
         let dt = dishonored_sim::movement::DT;
         let out = step_world(&mut self.world, inputs, world, cfg);
         self.phase_timer += dt;

@@ -389,7 +389,7 @@ pub struct MissionMatch {
     /// Mover collision placed where the movers are: (actor, delta) and, in the same order, the
     /// placed collision (rebuilt when a mover moves).
     #[serde(skip)]
-    mover_keys: Vec<(String, glam::Mat4)>,
+    mover_keys: Vec<(String, glam::Mat4, u8)>,
     #[serde(skip)]
     mover_worlds: Vec<dishonored_world::CollisionWorld>,
 }
@@ -1151,7 +1151,8 @@ impl MissionMatch {
     }
 
     /// Place the map's movers where their actors are now (identity for movers the Kismet has
-    /// not moved), rebuilding only the ones that moved since the last step.
+    /// not moved) and pose its doors for their state (the Kismet's, else `m_InitialDoorState`),
+    /// rebuilding only the ones that changed since the last step.
     fn place_movers(&mut self, world: &dyn WorldQuery) {
         let movers = world.movers();
         if self.mover_keys.len() != movers.len() || self.mover_keys.iter().zip(movers).any(|(k, m)| k.0 != m.actor) {
@@ -1160,15 +1161,17 @@ impl MissionMatch {
         }
         for (i, m) in movers.iter().enumerate() {
             let delta = self.kismet.as_ref().and_then(|k| k.mover_delta(&m.actor, m.actor_to_world)).unwrap_or(glam::Mat4::IDENTITY);
+            let state = if m.is_door() { self.kismet.as_ref().and_then(|k| k.door_state(&m.actor)).unwrap_or(m.initial) } else { 0 };
             match self.mover_keys.get(i) {
-                Some(k) if k.1.abs_diff_eq(delta, 1e-4) => {}
+                Some(k) if k.1.abs_diff_eq(delta, 1e-4) && k.2 == state => {}
                 Some(_) => {
                     self.mover_keys[i].1 = delta;
-                    self.mover_worlds[i] = m.placed(delta);
+                    self.mover_keys[i].2 = state;
+                    self.mover_worlds[i] = m.placed_in(state, delta);
                 }
                 None => {
-                    self.mover_keys.push((m.actor.clone(), delta));
-                    self.mover_worlds.push(m.placed(delta));
+                    self.mover_keys.push((m.actor.clone(), delta, state));
+                    self.mover_worlds.push(m.placed_in(state, delta));
                 }
             }
         }

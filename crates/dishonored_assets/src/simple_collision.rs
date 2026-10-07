@@ -61,45 +61,69 @@ fn unit_sphere() -> Vec<[Vec3; 3]> {
     f
 }
 
-/// The simplified collision of a body setup export as mesh-space triangles.
-pub fn agg_geom_triangles(pkg: &Package, body: usize) -> Vec<[Vec3; 3]> {
+/// The simplified collision of a body setup export: its elements as mesh-space triangles.
+pub fn agg_geom_triangles(pkg: &Package, body: usize) -> Vec<Vec<[Vec3; 3]>> {
     let Ok(h) = pkg.read_object(body) else { return Vec::new() };
     let Some(Value::Struct(_, agg)) = find(&h.properties, "AggGeom").map(|p| &p.value) else { return Vec::new() };
+    agg_triangles(pkg, agg)
+}
+
+/// The elements of a `KAggregateGeom` (its struct members), each as triangles in its own space
+/// wound with their normals out of the (convex) element.
+pub fn agg_triangles(pkg: &Package, agg: &[Property]) -> Vec<Vec<[Vec3; 3]>> {
     let elems = |n: &str| find(agg, n).and_then(|x| x.array_structs(pkg).ok()).unwrap_or_default();
     let mut out = Vec::new();
+    // Wind one element's triangles outward (away from its centroid) and add it.
+    let mut add = |tris: Vec<[Vec3; 3]>| {
+        if tris.is_empty() {
+            return;
+        }
+        let c = tris.iter().flatten().fold(Vec3::ZERO, |a, p| a + *p) / (tris.len() * 3) as f32;
+        out.push(
+            tris.into_iter()
+                .map(|[a, b, d]| {
+                    let n = (b - a).cross(d - a);
+                    if n.dot(a - c) >= 0.0 { [a, b, d] } else { [a, d, b] }
+                })
+                .collect(),
+        );
+    };
     for e in elems("ConvexElems") {
         let verts = find(&e, "VertexData").map(raw_vec3s).unwrap_or_default();
         let tris = find(&e, "FaceTriData").map(raw_i32s).unwrap_or_default();
+        let mut el = Vec::new();
         for t in tris.chunks_exact(3) {
             let v = |i: i32| verts.get(i as usize).copied();
             if let (Some(a), Some(b), Some(c)) = (v(t[0]), v(t[1]), v(t[2])) {
-                out.push([a, b, c]);
+                el.push([a, b, c]);
             }
         }
+        add(el);
     }
     for e in elems("BoxElems") {
         let half = Vec3::new(f32_of(&e, "X"), f32_of(&e, "Y"), f32_of(&e, "Z")) * 0.5;
-        out.extend(dishonored_world_box(matrix(find(&e, "TM").map(|x| &x.value)) * Mat4::from_scale(half)));
+        add(dishonored_world_box(matrix(find(&e, "TM").map(|x| &x.value)) * Mat4::from_scale(half)));
     }
     let sphere = unit_sphere();
     for e in elems("SphereElems") {
         let m = matrix(find(&e, "TM").map(|x| &x.value)) * Mat4::from_scale(Vec3::splat(f32_of(&e, "Radius")));
-        out.extend(sphere.iter().map(|t| t.map(|p| m.transform_point3(p))));
+        add(sphere.iter().map(|t| t.map(|p| m.transform_point3(p))).collect());
     }
     for e in elems("SphylElems") {
         // A capsule along Z: the sphere's halves pushed apart by half the length.
         let (r, l) = (f32_of(&e, "Radius"), f32_of(&e, "Length"));
         let m = matrix(find(&e, "TM").map(|x| &x.value));
         let push = |p: Vec3| p * r + Vec3::Z * (l * 0.5) * p.z.signum();
-        out.extend(sphere.iter().map(|t| t.map(|p| m.transform_point3(push(p)))));
+        let mut el: Vec<[Vec3; 3]> = sphere.iter().map(|t| t.map(|p| m.transform_point3(push(p)))).collect();
         // The cylinder between the caps.
         let ring: Vec<Vec3> = (0..16).map(|k| { let a = k as f32 / 16.0 * std::f32::consts::TAU; Vec3::new(a.cos() * r, a.sin() * r, 0.0) }).collect();
         for k in 0..16 {
             let (a, b) = (ring[k], ring[(k + 1) % 16]);
             let (lo, hi) = (Vec3::Z * (-l * 0.5), Vec3::Z * (l * 0.5));
-            out.push([m.transform_point3(a + lo), m.transform_point3(b + lo), m.transform_point3(b + hi)]);
-            out.push([m.transform_point3(a + lo), m.transform_point3(b + hi), m.transform_point3(a + hi)]);
+            el.push([m.transform_point3(a + lo), m.transform_point3(b + lo), m.transform_point3(b + hi)]);
+            el.push([m.transform_point3(a + lo), m.transform_point3(b + hi), m.transform_point3(a + hi)]);
         }
+        add(el);
     }
     out
 }
@@ -141,6 +165,7 @@ mod tests {
         let raw = crate::static_mesh::read_static_mesh(&pkg, i).unwrap();
         let ue3_package::ObjRef::Export(b) = ue3_package::ObjRef::from_index(raw.body_setup) else { panic!("no body setup") };
         let t = agg_geom_triangles(&pkg, b);
-        assert_eq!(t.len(), 9 * 12 + (4 + 12 + 12 + 12 + 12 + 16), "{}", t.len());
+        assert_eq!(t.len(), 9 + 6, "elements");
+        assert_eq!(t.iter().map(Vec::len).sum::<usize>(), 9 * 12 + (4 + 12 + 12 + 12 + 12 + 16));
     }
 }

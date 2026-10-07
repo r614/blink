@@ -296,7 +296,7 @@ pub fn collision_sources(content: &Content, packages: &[String]) -> Vec<Collisio
                             .and_then(|p| p.as_object())
                             .filter(|o| *o != 0)
                             .map(|o| pkg.obj_path(ObjRef::from_index(o)))
-                            .or_else(|| find(&cp, k).map(|_| "<inherited>".to_string()))
+                            .or_else(|| find(&cp, k).map(|_| format!("<inherited {}>", r.inherited_object_path(&pkg, ci, k).unwrap_or_default())))
                     })
                     .unwrap_or_else(|| if cclass == "BrushComponent" { "<brush>".into() } else { String::new() });
                 let own_bool = |props: &[Property], n: &str| match find(props, n).map(|p| &p.value) {
@@ -376,8 +376,17 @@ mod tests {
         let bv: Vec<_> = s.iter().filter(|x| x.class == "BlockingVolume").collect();
         assert_eq!(bv.len(), 8);
         assert!(bv.iter().all(|x| x.trace_mask == mask::MOVE && x.collide && x.block && x.world_geometry && x.actor_collide), "{bv:?}");
-        let sma: Vec<_> = s.iter().filter(|x| x.class == "StaticMeshActor").collect();
-        assert!(sma.len() > 1000, "{}", sma.len());
-        assert!(sma.iter().filter(|x| x.trace_mask == mask::ALL && x.collide && x.actor_collide && x.world_geometry).count() * 10 > sma.len() * 8);
+        // The collection components that collide: on every trace type, gameplay traces only (the
+        // player walks through them) and movement only (hidden collision proxies).
+        let smc: Vec<_> = s.iter().filter(|x| x.class == "StaticMeshCollectionActor" && x.active() && x.world_geometry).collect();
+        let count = |m: u8| smc.iter().filter(|x| x.trace_mask == m).count();
+        assert_eq!(count(mask::ALL), 1669);
+        assert_eq!(count(mask::GAMEPLAY), 497);
+        assert_eq!(count(mask::MOVE), 148);
+        // `DisStaticCollisionActor_15` collides with NPC movement only.
+        let dsca: Vec<_> = s.iter().filter(|x| x.class == "DisStaticCollisionActor").collect();
+        assert_eq!(dsca.len(), 1);
+        assert_eq!(dsca[0].trace_mask, mask::MOVE_NPC);
+        assert!(dsca[0].extra.iter().any(|e| e == "bCollideOnlyWithNPCMovement"));
     }
 }

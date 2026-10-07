@@ -189,6 +189,8 @@ pub struct ContractsMatch {
     phase_timer: f32,
     respawn_queue: Vec<(PlayerId, f32)>,
     rng: u64,
+    /// Movers and doors as the map starts them.
+    start: dishonored_world::StartLayers,
 }
 
 fn rng_next(s: &mut u64) -> f32 {
@@ -215,7 +217,7 @@ fn sees(world: &dyn WorldQuery, a: &PlayerState, b: &PlayerState, range: f32, fo
 impl ContractsMatch {
     pub fn new(rules: ContractsRules, spawns: Vec<(Vec3, f32)>, crowd: Option<Crowd>, cfg: &SimConfig) -> Self {
         let view = MatchView { mode: "contracts".into(), phase: MatchPhase::Warmup, time_left: rules.time_limit, score_limit: 0, ..Default::default() };
-        let mut m = Self { rules, world: WorldState::default(), view, spawns, contracts: Vec::new(), crowd, last_events: Vec::new(), phase_timer: 0.0, respawn_queue: Vec::new(), rng: 0xC0FF_EE11 };
+        let mut m = Self { rules, world: WorldState::default(), view, spawns, contracts: Vec::new(), crowd, last_events: Vec::new(), phase_timer: 0.0, respawn_queue: Vec::new(), rng: 0xC0FF_EE11, start: Default::default() };
         if let Some(c) = m.crowd.as_mut() {
             // Original AI tuning (perception, thresholds, search, panic) from the install.
             c.ai = cfg.gameplay.ai.clone();
@@ -399,7 +401,18 @@ impl ContractsMatch {
         e
     }
 
+    /// One simulation step. The level's Kismet does not run in this mode: its movers collide
+    /// where the map places them and its doors as they start ([`dishonored_world::StartLayers`]).
     pub fn step(&mut self, inputs: &[(PlayerId, PlayerInput)], world: &dyn WorldQuery, cfg: &SimConfig) -> StepOutput {
+        self.start.update(world);
+        let layers = std::mem::take(&mut self.start.layers);
+        let layered = dishonored_world::Layered { base: world, layers: &layers };
+        let out = self.step_in(inputs, if layers.is_empty() { world } else { &layered }, cfg);
+        self.start.layers = layers;
+        out
+    }
+
+    fn step_in(&mut self, inputs: &[(PlayerId, PlayerInput)], world: &dyn WorldQuery, cfg: &SimConfig) -> StepOutput {
         let dt = dishonored_sim::movement::DT;
         let mut all_inputs = inputs.to_vec();
         if let Some(crowd) = self.crowd.as_mut() {

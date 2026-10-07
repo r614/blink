@@ -354,6 +354,13 @@ impl KismetRun {
         KismetRun { k, st, setup: Arc::new(setup.clone()), nav_cache: None }
     }
 
+    /// The state the Kismet set a door (`<package>:<name>`) to (`EDisDoorState`: 0 closed,
+    /// 1 opened clockwise, 2 opened counter-clockwise); None when the Kismet has not set it.
+    pub fn door_state(&self, actor: &str) -> Option<u8> {
+        let a = self.k.db.find_actor(actor)?;
+        self.st.doors.get(&a).map(|s| s.0)
+    }
+
     /// Where a mover actor (`<package>:<name>`) is now relative to where the map placed it
     /// (`placed`): its Kismet location and rotation (matinee moves, attachments, teleports) x
     /// the inverse of the placed transform. None when the Kismet has not moved it.

@@ -20,6 +20,7 @@
 pub mod bvh;
 pub mod geom;
 pub mod nav;
+pub mod sat;
 
 use anyhow::Result;
 use bvh::Bvh;
@@ -407,6 +408,15 @@ pub struct CollisionWorld {
     /// Per triangle (parallel to `tris`): what it came from ([`hit_kind`]).
     #[serde(default)]
     pub tri_kind: Vec<u8>,
+    /// Per triangle (parallel to `tris`, empty: none): the convex element it belongs to
+    /// (`u32::MAX`: a lone per-polygon triangle). Elements are contiguous runs of triangles.
+    #[serde(default)]
+    pub tri_elem: Vec<u32>,
+    /// The convex elements (simplified collision, brush hulls, physics bodies).
+    #[serde(default)]
+    pub elems: Vec<Elem>,
+    #[serde(default)]
+    pub elem_bvh: Bvh,
     /// Original navigation (attached after loading; not part of the collision cache).
     #[serde(skip)]
     pub nav: Option<std::sync::Arc<nav::NavWorld>>,
@@ -435,6 +445,13 @@ pub struct MoverCollision {
     /// Per triangle: channels, [`shape`] bits and [`hit_kind`] (empty: every channel and check).
     #[serde(default)]
     pub info: Vec<TriInfo>,
+    /// A door's other rest poses: (`EDisDoorState`, its bodies' elements), answering like its
+    /// first triangle; `tris` is the closed pose.
+    #[serde(default)]
+    pub poses: Vec<(u8, Vec<Vec<[Vec3; 3]>>)>,
+    /// The state the map starts the door in (`m_InitialDoorState`).
+    #[serde(default)]
+    pub initial: u8,
 }
 
 /// What one collision triangle answers.
@@ -443,33 +460,77 @@ pub struct TriInfo {
     pub channels: u8,
     pub shape: u8,
     pub kind: u8,
+    /// Its convex element (an index local to the instance or mover; `u32::MAX`: none).
+    #[serde(default = "no_elem")]
+    pub elem: u32,
+}
+
+fn no_elem() -> u32 {
+    u32::MAX
 }
 
 impl Default for TriInfo {
     fn default() -> Self {
-        TriInfo { channels: channel::ALL, shape: shape::ALL, kind: hit_kind::COMPLEX }
+        TriInfo { channels: channel::ALL, shape: shape::ALL, kind: hit_kind::COMPLEX, elem: u32::MAX }
     }
 }
 
+/// A convex element: `count` triangles from `first`, wound outward, and their bounds.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct Elem {
+    pub first: u32,
+    pub count: u32,
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
 impl MoverCollision {
-    /// The mover's collision moved by `delta` (current actor transform x inverse placed one).
+    /// The mover's collision moved by `delta` (current actor transform x inverse placed one), a
+    /// door in the state the map starts it in.
     pub fn placed(&self, delta: glam::Mat4) -> CollisionWorld {
+        self.placed_in(self.initial, delta)
+    }
+
+    /// Whether this is a door (it has poses per state).
+    pub fn is_door(&self) -> bool {
+        !self.poses.is_empty()
+    }
+
+    /// The collision in door state `state` (the closed pose for a state without a pose), moved
+    /// by `delta`.
+    pub fn placed_in(&self, state: u8, delta: glam::Mat4) -> CollisionWorld {
+        // The triangles of the pose with their info (a pose's elements answer like the first
+        // triangle of the closed pose).
+        let mut src: Vec<([Vec3; 3], TriInfo)> = Vec::new();
+        match self.poses.iter().find(|p| p.0 == state && state != 0) {
+            Some(p) => {
+                let base = self.info.first().copied().unwrap_or_default();
+                for (ei, e) in p.1.iter().enumerate() {
+                    src.extend(e.iter().map(|t| (*t, TriInfo { elem: ei as u32, ..base })));
+                }
+            }
+            None => src.extend(self.tris.iter().enumerate().map(|(i, t)| (*t, self.info.get(i).copied().unwrap_or_default()))),
+        }
+        let mirrored = delta.determinant() < 0.0;
         let mut tris = Vec::new();
-        let (mut shapes, mut kinds) = (Vec::new(), Vec::new());
-        for (i, t) in self.tris.iter().enumerate() {
+        let (mut shapes, mut kinds, mut elems) = (Vec::new(), Vec::new(), Vec::new());
+        for (t, info) in src {
             let (a, b, c) = (delta.transform_point3(t[0]), delta.transform_point3(t[1]), delta.transform_point3(t[2]));
+            let (b, c) = if mirrored { (c, b) } else { (b, c) };
             let n = (b - a).cross(c - a);
             if n.length_squared() < 1e-10 {
                 continue;
             }
-            let info = self.info.get(i).copied().unwrap_or_default();
             tris.push(Tri { a, b, c, n: n.normalize(), channels: info.channels, source: 0 });
             shapes.push(info.shape);
             kinds.push(info.kind);
+            elems.push(info.elem);
         }
         let mut w = CollisionWorld::from_triangles(tris, vec![self.actor.clone()]);
         w.tri_shape = shapes;
         w.tri_kind = kinds;
+        w.tri_elem = elems;
+        w.index_elements();
         w
     }
 }
@@ -549,31 +610,47 @@ impl CollisionWorld {
     /// This world plus extra blockers `(source, channels, triangles)`; the bounding volume
     /// hierarchy is rebuilt once.
     pub fn with_extra(self, extra: &[(String, u8, Vec<[Vec3; 3]>)]) -> Self {
-        if extra.iter().all(|e| e.2.is_empty()) {
+        let extra: Vec<(String, u8, u8, Vec<Vec<[Vec3; 3]>>)> = extra.iter().map(|e| (e.0.clone(), e.1, hit_kind::OTHER, vec![e.2.clone()])).collect();
+        self.with_extra_kinds(&extra)
+    }
+
+    /// [`Self::with_extra`] with each blocker's [`hit_kind`] and convex elements:
+    /// `(source, channels, kind, elements)` (each element a closed convex hull wound outward).
+    pub fn with_extra_kinds(self, extra: &[(String, u8, u8, Vec<Vec<[Vec3; 3]>>)]) -> Self {
+        if extra.iter().all(|e| e.3.iter().all(Vec::is_empty)) {
             return self;
         }
-        let CollisionWorld { mut tris, mut sources, mut tri_surface, surfaces, mut tri_shape, mut tri_kind, nav, water, volumes, movers, climbables, .. } = self;
+        let CollisionWorld { mut tris, mut sources, mut tri_surface, surfaces, mut tri_shape, mut tri_kind, mut tri_elem, nav, water, volumes, movers, climbables, .. } = self;
         tri_surface.resize(tris.len(), 0);
         tri_shape.resize(tris.len(), shape::ALL);
         tri_kind.resize(tris.len(), hit_kind::COMPLEX);
-        for (source, channels, extra) in extra {
+        tri_elem.resize(tris.len(), u32::MAX);
+        // Element ids only need to differ from their neighbours' (`index_elements`).
+        let mut next = tri_elem.iter().filter(|e| **e != u32::MAX).max().map_or(0, |m| m + 1);
+        for (source, channels, kind, elems) in extra {
             let src = sources.len() as u32;
             sources.push(source.clone());
-            for t in extra {
-                let n = (t[1] - t[0]).cross(t[2] - t[0]);
-                if n.length_squared() < 1e-10 {
-                    continue;
+            for e in elems {
+                for t in e {
+                    let n = (t[1] - t[0]).cross(t[2] - t[0]);
+                    if n.length_squared() < 1e-10 {
+                        continue;
+                    }
+                    tris.push(Tri { a: t[0], b: t[1], c: t[2], n: n.normalize(), channels: *channels, source: src });
+                    tri_surface.push(0);
+                    tri_shape.push(shape::ALL);
+                    tri_kind.push(*kind);
+                    tri_elem.push(next);
                 }
-                tris.push(Tri { a: t[0], b: t[1], c: t[2], n: n.normalize(), channels: *channels, source: src });
-                tri_surface.push(0);
-                tri_shape.push(shape::ALL);
-                tri_kind.push(hit_kind::OTHER);
+                next += 1;
             }
         }
         let mut w = CollisionWorld::from_triangles(tris, sources);
         w.tri_surface = tri_surface;
         w.tri_shape = tri_shape;
         w.tri_kind = tri_kind;
+        w.tri_elem = tri_elem;
+        w.index_elements();
         w.surfaces = surfaces;
         w.nav = nav;
         w.water = water;
@@ -598,7 +675,65 @@ impl CollisionWorld {
             .collect();
         let total = bounds.iter().fold(Aabb::EMPTY, |acc, b| acc.union(b));
         let bvh = Bvh::build(&bounds);
-        CollisionWorld { tris, bvh, sources, bounds: Some(total), nav: None, water: None, volumes: None, climbables: None, tri_surface: Vec::new(), surfaces: Vec::new(), tri_shape: Vec::new(), tri_kind: Vec::new(), movers: Vec::new() }
+        CollisionWorld { tris, bvh, sources, bounds: Some(total), nav: None, water: None, volumes: None, climbables: None, tri_surface: Vec::new(), surfaces: Vec::new(), tri_shape: Vec::new(), tri_kind: Vec::new(), tri_elem: Vec::new(), elems: Vec::new(), elem_bvh: Bvh::default(), movers: Vec::new() }
+    }
+
+    /// Build the element table from `tri_elem` (runs of equal ids; consecutive elements must
+    /// have different ids) and renumber `tri_elem` to it.
+    pub fn index_elements(&mut self) {
+        self.elems.clear();
+        let mut i = 0usize;
+        while i < self.tri_elem.len().min(self.tris.len()) {
+            let id = self.tri_elem[i];
+            if id == u32::MAX {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            while i < self.tri_elem.len() && self.tri_elem[i] == id {
+                let t = &self.tris[i];
+                lo = lo.min(t.a).min(t.b).min(t.c);
+                hi = hi.max(t.a).max(t.b).max(t.c);
+                i += 1;
+            }
+            let e = self.elems.len() as u32;
+            for k in start..i {
+                self.tri_elem[k] = e;
+            }
+            self.elems.push(Elem { first: start as u32, count: (i - start) as u32, min: lo, max: hi });
+        }
+        let bounds: Vec<Aabb> = self.elems.iter().map(|e| Aabb { min: e.min, max: e.max }).collect();
+        self.elem_bvh = Bvh::build(&bounds);
+    }
+
+    /// An element answering `channels` and the check shape `want` that contains `p`.
+    pub fn element_at(&self, p: Vec3, channels: u8, want: u8) -> Option<u32> {
+        if self.elems.is_empty() {
+            return None;
+        }
+        let mut found = None;
+        self.elem_bvh.query_aabb(&Aabb { min: p, max: p }, |e| {
+            if found.is_some() {
+                return;
+            }
+            let el = &self.elems[e as usize];
+            if self.tris[el.first as usize].channels & channels == 0 || self.shape_of(el.first) & want == 0 {
+                return;
+            }
+            if (el.first..el.first + el.count).all(|i| {
+                let t = &self.tris[i as usize];
+                t.n.dot(p - t.a) <= 1e-3
+            }) {
+                found = Some(e);
+            }
+        });
+        found
+    }
+
+    /// The element of a triangle, if it belongs to one.
+    pub fn elem_of(&self, tri: u32) -> Option<u32> {
+        self.tri_elem.get(tri as usize).copied().filter(|e| *e != u32::MAX)
     }
 
     /// The checks a triangle answers ([`shape`] bits).
@@ -627,7 +762,9 @@ impl CollisionWorld {
                 }
             }
         };
-        let (mut tri_shape, mut tri_kind) = (Vec::new(), Vec::new());
+        let (mut tri_shape, mut tri_kind, mut tri_elem) = (Vec::new(), Vec::new(), Vec::new());
+        // Element ids: per instance local ids made distinct from the neighbours'.
+        let mut elem_base = 0u32;
         for inst in map.instances.iter().filter(|i| i.collides) {
             let mesh = &map.meshes[inst.mesh];
             let src = sources.len() as u32;
@@ -639,6 +776,7 @@ impl CollisionWorld {
                     surface_id(m.and_then(|m| map.materials.get(m)).and_then(|m| m.contact_type.as_ref()))
                 })
                 .collect();
+            let mut used = 0u32;
             for (t, sec, info) in instance_triangles(map, inst) {
                 let n = (t[1] - t[0]).cross(t[2] - t[0]);
                 if n.length_squared() < 1e-10 {
@@ -648,13 +786,17 @@ impl CollisionWorld {
                 tri_surface.push(sec.and_then(|s| section_surface.get(s).copied()).unwrap_or(section_surface.first().copied().unwrap_or(0)));
                 tri_shape.push(info.shape);
                 tri_kind.push(info.kind);
+                tri_elem.push(if info.elem == u32::MAX { u32::MAX } else { used = used.max(info.elem + 1); elem_base + info.elem });
             }
+            elem_base += used;
         }
         let mut w = Self::from_triangles(tris, sources);
         w.tri_surface = tri_surface;
         w.surfaces = surfaces;
         w.tri_shape = tri_shape;
         w.tri_kind = tri_kind;
+        w.tri_elem = tri_elem;
+        w.index_elements();
         // Movers: their triangles where the map placed them, one entry per actor.
         for inst in map.instances.iter().filter(|i| i.mover.is_some()) {
             let m = inst.mover.as_ref().unwrap();
@@ -665,11 +807,15 @@ impl CollisionWorld {
             let x = match w.movers.iter().position(|x| x.actor == m.actor) {
                 Some(i) => &mut w.movers[i],
                 None => {
-                    w.movers.push(MoverCollision { actor: m.actor.clone(), actor_to_world: m.actor_to_world, tris: Vec::new(), info: Vec::new() });
+                    w.movers.push(MoverCollision { actor: m.actor.clone(), actor_to_world: m.actor_to_world, tris: Vec::new(), info: Vec::new(), poses: Vec::new(), initial: 0 });
                     w.movers.last_mut().unwrap()
                 }
             };
-            for (tri, _, info) in t {
+            let base = x.info.iter().filter(|i| i.elem != u32::MAX).map(|i| i.elem + 1).max().unwrap_or(0);
+            for (tri, _, mut info) in t {
+                if info.elem != u32::MAX {
+                    info.elem += base;
+                }
                 x.tris.push(tri);
                 x.info.push(info);
             }
@@ -759,59 +905,67 @@ impl WorldQuery for CollisionWorld {
         });
     }
 
+    /// The original's extent check ([`sat`]): every per-polygon triangle and convex element in
+    /// the way, swept by separating axes; the earliest entry wins, backed off along the move as
+    /// the engine reports it ([`hit_kind::engine_time`]). Without a move it reports an overlap.
     fn sweep_box(&self, b: &PawnBox, delta: Vec3, channels: u8) -> Option<SweepHit> {
         let mut contacts = Vec::new();
-        let overlapping = |bx: &PawnBox, contacts: &mut Vec<Contact>| -> bool {
-            contacts.clear();
-            self.box_contacts(bx, channels, contacts);
-            contacts.iter().any(|k| k.depth > SKIN)
-        };
-        if overlapping(b, &mut contacts) {
-            let k = contacts.iter().max_by(|a, c| a.depth.total_cmp(&c.depth)).copied().unwrap();
+        let len = delta.length();
+        if len < 1e-6 {
+            self.box_contacts(b, channels, &mut contacts);
+            let k = contacts.iter().filter(|k| k.depth > SKIN).max_by(|a, c| a.depth.total_cmp(&c.depth)).copied()?;
             let face_up = self.face_up(&contacts);
             return Some(SweepHit { fraction: 0.0, normal: k.normal, point: k.point, start_penetrating: true, face_up, tri: k.tri });
         }
-        let len = delta.length();
-        if len < 1e-6 {
-            return None;
-        }
-        // Conservative sub-steps (half the smaller half extent) so thin geometry is not
-        // tunneled through, then bisection to the first overlap.
-        let step = (b.half.x.min(b.half.y).min(b.half.z) * 0.5).max(1.0);
-        let n = (len / step).ceil().max(1.0) as usize;
-        let mut lo = 0.0f32;
-        let mut hit_hi = None;
-        for k in 1..=n {
-            let t = k as f32 / n as f32;
-            if overlapping(&b.at(b.center + delta * t), &mut contacts) {
-                hit_hi = Some(t);
-                break;
-            }
-            lo = t;
-        }
-        let mut hi = hit_hi?;
-        for _ in 0..12 {
-            let mid = (lo + hi) * 0.5;
-            if overlapping(&b.at(b.center + delta * mid), &mut contacts) {
-                hi = mid;
-            } else {
-                lo = mid;
-            }
-        }
-        overlapping(&b.at(b.center + delta * hi), &mut contacts);
-        // Hit normal: the push-out of the deepest contact that opposes the move (a box sliding
-        // along a floor also touches it; the blocking surface is the one in the way).
         let dir = delta / len;
-        let blocking = contacts
-            .iter()
-            .filter(|c| c.normal.dot(dir) < -1e-3)
-            .max_by(|a, c| (a.depth * -a.normal.dot(dir)).total_cmp(&(c.depth * -c.normal.dot(dir))))
-            .or_else(|| contacts.iter().max_by(|a, c| a.depth.total_cmp(&c.depth)))
-            .copied();
-        let (normal, point) = blocking.map_or((-dir, b.center + delta * hi), |c| (c.normal, c.point));
-        let back = (SKIN / len).min(lo);
+        let want = shape::extent_for(channels);
+        let swept = b.aabb().union(&b.at(b.center + delta).aabb()).expand(1.0);
+        // Best: (fraction, normal, triangle, start penetrating).
+        let mut best: Option<(f32, Vec3, u32, bool)> = None;
+        let mut done: Vec<u32> = Vec::new();
+        let mut elem_tris: Vec<[Vec3; 3]> = Vec::new();
+        self.bvh.query_aabb(&swept, |i| {
+            let t = &self.tris[i as usize];
+            if t.channels & channels == 0 || self.shape_of(i) & want == 0 {
+                return;
+            }
+            let r = match self.elem_of(i) {
+                Some(e) => {
+                    if done.contains(&e) {
+                        return;
+                    }
+                    done.push(e);
+                    let el = self.elems[e as usize];
+                    elem_tris.clear();
+                    elem_tris.extend((el.first..el.first + el.count).map(|k| {
+                        let x = &self.tris[k as usize];
+                        [x.a, x.b, x.c]
+                    }));
+                    sat::box_convex(b.center, b.half, delta, &elem_tris)
+                }
+                None => sat::box_triangle(b.center, b.half, delta, t.a, t.b, t.c),
+            };
+            let cand = match r {
+                Some(sat::SatHit::At(f, n)) => (f, n.normalize_or(-dir), false),
+                Some(sat::SatHit::Start) => (0.0, -dir, true),
+                None => return,
+            };
+            if best.is_none_or(|x| cand.0 < x.0) {
+                best = Some((cand.0, cand.1, i, cand.2));
+            }
+        });
+        let (f, normal, tri, start) = best?;
+        // Contacts just past the hit (or where it starts): the faces it rests on, for walking.
+        let at = b.at(b.center + delta * f + dir * if start { 0.0 } else { 0.1 });
+        self.box_contacts(&at, channels, &mut contacts);
         let face_up = self.face_up(&contacts);
-        Some(SweepHit { fraction: (lo - back).max(0.0), normal, point, start_penetrating: false, face_up, tri: blocking.map_or(u32::MAX, |c| c.tri) })
+        let t = &self.tris[tri as usize];
+        let point = closest_point_triangle(at.center, t.a, t.b, t.c);
+        let fraction = match self.kind_of(tri) {
+            hit_kind::OTHER => (f - SKIN / len).max(0.0),
+            k => hit_kind::engine_time(k, f, len),
+        };
+        Some(SweepHit { fraction, normal, point, start_penetrating: start, face_up, tri })
     }
 
     fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32, channels: u8) -> Option<RayHit> {
@@ -834,6 +988,13 @@ impl WorldQuery for CollisionWorld {
             }
             max_t
         });
+        // A line that starts inside a convex element (simplified collision, a brush hull, a
+        // physics body) hits it where it starts, as the original's convex and box element checks
+        // report (time 0).
+        if let Some(e) = self.element_at(origin, channels, shape::line_for(channels)) {
+            let t = self.elems[e as usize].first;
+            return Some(RayHit { distance: 0.0, point: origin, normal: -d, tri: t });
+        }
         best
     }
 
@@ -919,13 +1080,12 @@ impl WorldQuery for CollisionWorld {
     }
 }
 
-/// World-space collision triangles of one instance: the mesh's kDOP triangles of colliding
-/// sections (render triangles of colliding sections when the mesh has none), as
-/// [`CollisionWorld::from_map`] takes them.
-/// The instance's triangles with their section (kDOP and render triangles) and what they answer:
-/// the channels of its trace types; the simplified collision for the checks its mesh's
-/// `UseSimple*Collision` flags give it, the kDOP triangles for the others (a mesh that wants its
-/// simplified collision but has none answers those checks with nothing).
+/// The instance's world-space triangles with their section (kDOP and render triangles) and what
+/// they answer: the channels of its trace types; the simplified collision (one element per
+/// `AggGeom` element) for the checks its mesh's `UseSimple*Collision` flags give it, the kDOP
+/// triangles (render triangles of colliding sections when the mesh has none) for the others
+/// and for checks that ask for complex collision (a mesh that wants its simplified collision but
+/// has none answers those checks with nothing).
 fn instance_triangles(map: &DishonoredMap, inst: &dishonored_ir::MeshInstance) -> Vec<([Vec3; 3], Option<usize>, TriInfo)> {
     let mesh = &map.meshes[inst.mesh];
     let xf = inst.transform;
@@ -936,16 +1096,18 @@ fn instance_triangles(map: &DishonoredMap, inst: &dishonored_ir::MeshInstance) -
     let mut out = Vec::new();
     if let Some(agg) = &mesh.simple_collision {
         if simple != 0 {
-            let info = TriInfo { channels, shape: simple, kind: hit_kind::SIMPLE };
-            for t in agg {
-                let (a, b, c) = (xf.transform_point3(t[0]), xf.transform_point3(t[1]), xf.transform_point3(t[2]));
-                out.push((if mirrored { [a, c, b] } else { [a, b, c] }, None, info));
+            for (ei, e) in agg.iter().enumerate() {
+                let info = TriInfo { channels, shape: simple, kind: hit_kind::SIMPLE, elem: ei as u32 };
+                for t in e {
+                    let (a, b, c) = (xf.transform_point3(t[0]), xf.transform_point3(t[1]), xf.transform_point3(t[2]));
+                    out.push((if mirrored { [a, c, b] } else { [a, b, c] }, None, info));
+                }
             }
         }
     }
     // The kDOP triangles answer the checks the simplified collision does not, and every check
     // that asks for complex collision.
-    let info = TriInfo { channels, shape: complex | shape::COMPLEX, kind: hit_kind::COMPLEX };
+    let info = TriInfo { channels, shape: complex | shape::COMPLEX, kind: hit_kind::COMPLEX, elem: u32::MAX };
     let mut push = |i0: u32, i1: u32, i2: u32, sec: usize| {
         let (Some(a), Some(b), Some(c)) = (mesh.positions.get(i0 as usize), mesh.positions.get(i1 as usize), mesh.positions.get(i2 as usize)) else {
             return;
@@ -974,6 +1136,26 @@ fn instance_triangles(map: &DishonoredMap, inst: &dishonored_ir::MeshInstance) -
         }
     }
     out
+}
+
+/// The movers of a world where the map places them and its doors in their initial state: the
+/// collision of game modes that do not run the level's Kismet (free-for-all, Contracts).
+/// Rebuilt when the world's mover list changes.
+#[derive(Default)]
+pub struct StartLayers {
+    key: (usize, usize),
+    pub layers: Vec<CollisionWorld>,
+}
+
+impl StartLayers {
+    pub fn update(&mut self, world: &dyn WorldQuery) {
+        let m = world.movers();
+        let key = (m.as_ptr() as usize, m.len());
+        if key != self.key {
+            self.layers = m.iter().map(|x| x.placed(glam::Mat4::IDENTITY)).collect();
+            self.key = key;
+        }
+    }
 }
 
 /// A world with extra collision layered over it (movers placed where their actors are):
@@ -1128,9 +1310,10 @@ mod tests {
     fn box_rests_on_floor_and_stops_at_wall() {
         let w = floor_and_wall();
         let b = PawnBox::new(Vec3::new(0., 0., 200.), 35.0, 87.5);
+        // Per-polygon (kDOP) triangles: the engine reports the hit 4 uu back along the move.
         let hit = w.sweep_box(&b, Vec3::new(0., 0., -300.), channel::ALL).unwrap();
         let z = 200.0 - 300.0 * hit.fraction;
-        assert!((z - 87.5).abs() < 0.2, "rest z {z}");
+        assert!((z - 91.5).abs() < 0.2, "rest z {z}");
         assert!(hit.normal.z > 0.99 && hit.face_up.z > 0.99);
         // Flat bottom: a box standing beside a ledge edge is still supported by it (a capsule
         // would roll off): the floor ends at x = 1000, the box centre is 20 past it.
@@ -1139,7 +1322,7 @@ mod tests {
         let side = PawnBox::new(Vec3::new(0., 0., 100.), 35.0, 87.5);
         let hit = w.sweep_box(&side, Vec3::new(1000., 0., 0.), channel::ALL).unwrap();
         let x = 1000.0 * hit.fraction;
-        assert!((x - (500.0 - 35.0)).abs() < 0.2, "stop x {x}");
+        assert!((x - (500.0 - 35.0 - 4.0)).abs() < 0.2, "stop x {x}");
         assert!(hit.normal.x < -0.99, "{:?}", hit.normal);
     }
 

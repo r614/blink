@@ -293,7 +293,7 @@ pub struct StaticMeshAsset {
     /// The body setup's simplified collision (`AggGeom` elements) as mesh-space triangles;
     /// `None` without a body setup.
     #[serde(default)]
-    pub simple_collision: Option<Vec<[Vec3; 3]>>,
+    pub simple_collision: Option<Vec<Vec<[Vec3; 3]>>>,
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
 }
