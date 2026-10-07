@@ -100,6 +100,7 @@ pub fn spawn_props(
     mut images: ResMut<Assets<Image>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut binds: ResMut<Assets<SkinnedMeshInverseBindposes>>,
+    mut prop_mats: ResMut<Assets<crate::prop_light::PropMaterial>>,
 ) {
     for (e, p) in &pending {
         commands.entity(e).despawn();
@@ -138,8 +139,21 @@ pub fn spawn_props(
                 .id();
             for (pi, part) in gpu.parts.iter().enumerate() {
                 let js: Vec<Entity> = part.bind.iter().enumerate().map(|(bi, bm)| commands.spawn((Transform::from_matrix(*bm), Joint { part: pi, bone: bi }, ChildOf(root))).id()).collect();
-                for (mesh, mat) in &part.sections {
-                    commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), SkinnedMesh { inverse_bindposes: part.inverse_bindposes.clone(), joints: js.clone() }, Transform::default(), ChildOf(root)));
+                for (si, (mesh, mat)) in part.sections.iter().enumerate() {
+                    let skin = SkinnedMesh { inverse_bindposes: part.inverse_bindposes.clone(), joints: js.clone() };
+                    // The original's light environment (prop_light.rs) when it was computed.
+                    let env = prop.light_env.filter(|_| feat.materials && feat.dynamic_lights && !feat.debug_lighting);
+                    match (env, mats.get(mat)) {
+                        (Some(env), Some(base)) => {
+                            let p = part.section_materials.get(si).copied().flatten().and_then(|m| gpu.material_params.get(m));
+                            let ext = crate::prop_light::prop_light(&env, p, &gpu.textures, crate::map_render::light_unit());
+                            let h = prop_mats.add(crate::prop_light::PropMaterial { base: base.clone(), extension: ext });
+                            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(h), skin, Transform::default(), ChildOf(root)));
+                        }
+                        _ => {
+                            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), skin, Transform::default(), ChildOf(root)));
+                        }
+                    }
                 }
             }
             spawned += 1;

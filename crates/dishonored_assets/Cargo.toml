@@ -11,6 +11,7 @@ glam = { workspace = true, features = ["serde"] }
 serde.workspace = true
 ue3_package.workspace = true
 dishonored_ir.workspace = true
+dishonored_world.workspace = true
 
 [dev-dependencies]
 glam = { workspace = true, features = ["serde"] }

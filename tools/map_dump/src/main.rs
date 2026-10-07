@@ -121,6 +121,13 @@ fn main() -> Result<()> {
             }
         }
     }
+    // `--props`: doors and usable objects with their light environments.
+    if args.iter().any(|a| a == "--props") {
+        for p in &m.skeletal_props {
+            let t = p.transform.w_axis;
+            println!("prop {} {} at ({:.0}, {:.0}, {:.0}) light env {:?}", p.actor, p.mesh.1, t.x, t.y, t.z, p.light_env);
+        }
+    }
     // `--mesh SUBSTR`: vertex / triangle counts, bounds and UV ranges of matching meshes.
     if let Some(n) = args.iter().position(|a| a == "--mesh") {
         for mesh in m.meshes.iter().filter(|x| x.source.contains(&args[n + 1])) {

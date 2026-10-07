@@ -20,6 +20,8 @@ pub struct PartGpu {
     /// Skeletal mesh object path.
     pub source: String,
     pub sections: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
+    /// Index into `CharacterGpu::material_params` of each section's material.
+    pub section_materials: Vec<Option<usize>>,
     pub inverse_bindposes: Handle<SkinnedMeshInverseBindposes>,
     /// Bind-pose joint transforms in Bevy space relative to the body root.
     pub bind: Vec<Mat4>,
@@ -31,6 +33,10 @@ pub struct PartGpu {
 pub struct CharacterGpu {
     pub name: String,
     pub parts: Vec<PartGpu>,
+    /// The model's textures and Arkane material parameters (`CharacterModel`), for materials
+    /// built on top of the uploaded ones (the level props' light environments).
+    pub textures: Vec<Handle<Image>>,
+    pub material_params: Vec<dishonored_ir::MaterialParams>,
 }
 
 #[derive(Resource, Default)]
@@ -127,6 +133,7 @@ pub fn upload(model: &CharacterModel, meshes: &mut Assets<Mesh>, images: &mut As
         let inverse: Vec<Mat4> = bind.iter().map(|b| b.inverse()).collect();
         let ib = binds.add(SkinnedMeshInverseBindposes::from(inverse));
         let mut sections = Vec::new();
+        let mut section_materials = Vec::new();
         for s in &p.sections {
             let start = s.first_index as usize;
             let end = (start + s.num_triangles as usize * 3).min(p.indices.len());
@@ -142,10 +149,11 @@ pub fn upload(model: &CharacterModel, meshes: &mut Assets<Mesh>, images: &mut As
             }
             let mat = s.material.map(|m| materials[m].clone()).unwrap_or_else(|| fallback.clone());
             sections.push((meshes.add(mesh), mat));
+            section_materials.push(s.material);
         }
-        parts.push(PartGpu { source: p.source.clone(), sections, inverse_bindposes: ib, bind, bones: p.bones.clone(), mesh_to_pawn: m2p });
+        parts.push(PartGpu { source: p.source.clone(), sections, section_materials, inverse_bindposes: ib, bind, bones: p.bones.clone(), mesh_to_pawn: m2p });
     }
-    CharacterGpu { name: model.name.clone(), parts }
+    CharacterGpu { name: model.name.clone(), parts, textures: tex, material_params: model.material_params.clone() }
 }
 
 pub fn load_library(
