@@ -491,6 +491,7 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
             let st = compare(&mc, &q, &res);
             report(rep, map, &st, &q);
             clusters(ctx, map, &st, &q, &mc, &res.doors);
+            cause_table(ctx, rep, map, &st, &q, &mc, &res.doors);
             if ctx.args.iter().any(|a| a == "--store") {
                 let p = write_fixture(map, &q, &res)?;
                 println!("stored {}", p.display());
@@ -511,6 +512,7 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
         };
         let st = compare(&mc, &q, &oracle);
         report(rep, map, &st, &q);
+        cause_table(ctx, rep, map, &st, &q, &mc, &oracle.doors);
         let min = MIN_AGREEMENT.iter().find(|m| m.0 == map).map(|m| m.1).unwrap_or(0.99);
         let rate = st.agree as f64 / st.total.max(1) as f64;
         rep.check(S, &format!("{map}: agreement with the original"), rate >= min, format!("{} of {} ({}), at least {:.2} %", st.agree, st.total, pct(st.agree, st.total), min * 100.0));
@@ -538,6 +540,95 @@ fn report(rep: &mut Report, map: &str, st: &Stats, _q: &[Query]) {
     println!("{map}: hit offsets (orig - port, uu): {rows:?}");
     rep.table(&format!("{map}: original hit minus port hit along the check, uu (both hit within 20 uu)"), &["check", "port kind", "trace", "n", "p10", "median", "p90"], rows);
     println!("{map}: {} / {} agree ({})", st.agree, st.total, pct(st.agree, st.total));
+}
+
+/// Actor classes whose state at run time can differ from the map's start (physics props,
+/// pickups, rats, doors, movers): a disagreement on one of them is a dynamic-state difference.
+const DYNAMIC: &[&str] = &[
+    "DisGameCrowdAgent",
+    "KActor",
+    "DishonoredMovable",
+    "DishonoredBreakable",
+    "DisWhaleOilBattery",
+    "DisPickup",
+    "DisAbstractItemPickup",
+    "DisStatPickup",
+    "DisKey_Base",
+    "DisElixir",
+    "DisDoor",
+    "InterpActor",
+    "Pawn",
+    "DisClimbable",
+];
+
+/// Why a query disagrees (COLLISION.md "Remaining disagreements").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Cause {
+    /// The sample starts inside geometry (either side reports time 0).
+    Inside,
+    /// The port agrees once the sample moves by 0.1 uu: a triangle edge or vertex (floating point).
+    Edge,
+    /// Both hit within the spread of the engine's back-offs (2 to 4.5 uu): two coincident
+    /// surfaces of different collision kinds.
+    Coincident,
+    /// The hit actor's state can differ at run time (physics prop, pickup, rat, door, mover).
+    Dynamic,
+    Unknown,
+}
+
+impl Cause {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Cause::Inside => "sample inside geometry",
+            Cause::Edge => "triangle edge or vertex (floating point)",
+            Cause::Coincident => "coincident surfaces, different back-off",
+            Cause::Dynamic => "dynamic state (physics prop, pickup, rat, door, mover)",
+            Cause::Unknown => "unknown",
+        }
+    }
+}
+
+/// Classify one disagreement.
+pub fn classify(mc: &MatchContent, movers: &[CollisionWorld], q: &Query, o: &Oracle, port: Option<f32>) -> Cause {
+    if (o.hit && o.time <= 1e-4) || port.is_some_and(|t| t <= 1e-4) {
+        return Cause::Inside;
+    }
+    let port_src = port_hit(&mc.collision, movers, q).map(|h| h.2).unwrap_or_default();
+    let dynamic = |s: &str| DYNAMIC.iter().any(|c| s.contains(c));
+    if dynamic(&o.what) || dynamic(&port_src) {
+        return Cause::Dynamic;
+    }
+    for d in [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z] {
+        let mut x = *q;
+        x.start += d * 0.1;
+        x.end += d * 0.1;
+        if agrees(&x, o, port_hit(&mc.collision, movers, &x).map(|h| h.0)) {
+            return Cause::Edge;
+        }
+    }
+    if let (true, Some(t)) = (o.hit, port) {
+        let off = ((t - o.time) * (q.end - q.start).length()).abs();
+        if off <= 4.5 {
+            return Cause::Coincident;
+        }
+    }
+    Cause::Unknown
+}
+
+/// Count the disagreements per cause (report table) and write their ids per cause.
+fn cause_table(ctx: &Ctx, rep: &mut Report, map: &str, st: &Stats, q: &[Query], mc: &MatchContent, doors: &[(String, u8)]) {
+    let movers = start_world(mc, doors);
+    let mut by: BTreeMap<Cause, Vec<String>> = BTreeMap::new();
+    for (id, o, p) in &st.diffs {
+        by.entry(classify(mc, &movers, &q[*id], o, *p)).or_default().push(q[*id].name(*id));
+    }
+    let rows = by.iter().map(|(c, v)| vec![c.tag().to_string(), v.len().to_string()]).collect();
+    rep.table(&format!("{map}: disagreements by cause"), &["cause", "queries"], rows);
+    let mut s = String::new();
+    for (c, v) in &by {
+        let _ = writeln!(s, "# {} ({})\n{}", c.tag(), v.len(), v.join(" "));
+    }
+    std::fs::write(ctx.out.join(format!("{map}_causes.txt")), s).ok();
 }
 
 /// Group the disagreements by what the original hit and what the port hit, with examples.
