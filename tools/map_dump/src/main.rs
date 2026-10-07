@@ -88,7 +88,29 @@ fn main() -> Result<()> {
                 let mid = i.materials.get(si).copied().flatten().or(s.material);
                 mid.map(|k| format!("{} {:?} {:?}", m.materials[k].source.rsplit('.').next().unwrap_or(""), m.materials[k].blend, m.material_params.get(k).map(|p| p.blend))).unwrap_or_default()
             }).collect();
-            println!("{:.0} uu: {} [{}] bounds {:.0}..{:.0} collides {} mats {mats:?}", d, mesh.source, i.source, lo, hi, i.collides);
+            // Mean flat irradiance luminance at the mesh's UV1 vertices (lit texels only).
+            let lm = i
+                .lightmap
+                .map(|l| {
+                    use dishonored_assets::lightmap::{directional_irradiance, unpack_rgb9e5};
+                    let a = &m.lightmaps[l.atlas];
+                    let (mut sum, mut n, mut zero) = (0.0f32, 0usize, 0usize);
+                    for u in &mesh.uv1 {
+                        let uv = l.uv_min + *u * (l.uv_max - l.uv_min);
+                        let (x, y) = (((uv.x * a.width as f32) as u32).min(a.width - 1), ((uv.y * a.height as f32) as u32).min(a.height - 1));
+                        let k = (y * a.width + x) as usize;
+                        if a.texels[k] == 0 {
+                            zero += 1;
+                            continue;
+                        }
+                        let c = directional_irradiance(unpack_rgb9e5(a.texels[k]), a.directional.get(k).map(|d| unpack_rgb9e5(*d)).unwrap_or([1.0; 3]), [0.0, 0.0, 1.0]);
+                        sum += 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+                        n += 1;
+                    }
+                    format!("atlas {} uv {:.3}..{:.3} lum {:.3} ({n} lit, {zero} empty)", l.atlas, l.uv_min, l.uv_max, sum / n.max(1) as f32)
+                })
+                .unwrap_or_else(|| "none".into());
+            println!("{:.0} uu: {} [{}] bounds {:.0}..{:.0} collides {} lightmap {lm} uv1 {} mats {mats:?}", d, mesh.source, i.source, lo, hi, i.collides, mesh.uv1.len() == mesh.positions.len());
         }
         for e in &m.emitters {
             let p = e.transform.w_axis.truncate();
@@ -97,6 +119,27 @@ fn main() -> Result<()> {
                 let s = &m.particle_systems[e.system];
                 println!("{d:.0} uu: emitter {} at {p:.0} xf {:?} emitters {:?}", s.source, e.transform.to_scale_rotation_translation().0, s.emitters.iter().map(|em| (em.mesh.clone(), em.blend, em.material.map(|k| m.materials[k].source.rsplit('.').next().unwrap_or("").to_string()), format!("size {:?} color {:?} alpha {:?}", em.size, em.color, em.alpha))).collect::<Vec<_>>());
             }
+        }
+    }
+    // `--mesh SUBSTR`: vertex / triangle counts, bounds and UV ranges of matching meshes.
+    if let Some(n) = args.iter().position(|a| a == "--mesh") {
+        for mesh in m.meshes.iter().filter(|x| x.source.contains(&args[n + 1])) {
+            let uv = |v: &[glam::Vec2]| v.iter().fold((glam::Vec2::splat(f32::MAX), glam::Vec2::splat(f32::MIN)), |(a, b), u| (a.min(*u), b.max(*u)));
+            let pb = mesh.positions.iter().fold((glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN)), |(a, b), p| (a.min(*p), b.max(*p)));
+            let up = mesh.normals.iter().filter(|n| n.z.abs() > 0.7).count();
+            println!(
+                "mesh {} verts {} tris {} bounds {:.0}..{:.0} positions {:.0}..{:.0} normals |z|>0.7 {up} uv0 {:?} uv1 {:?} sections {:?}",
+                mesh.source,
+                mesh.positions.len(),
+                mesh.indices.len() / 3,
+                mesh.bounds_min,
+                mesh.bounds_max,
+                pb.0,
+                pb.1,
+                uv(&mesh.uv0),
+                uv(&mesh.uv1),
+                mesh.sections.iter().map(|s| (s.first_index, s.num_triangles, s.material)).collect::<Vec<_>>()
+            );
         }
     }
     let fmts: BTreeMap<String, usize> = m.textures.iter().fold(BTreeMap::new(), |mut acc, t| {

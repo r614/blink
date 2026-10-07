@@ -20,8 +20,9 @@ downsample, sky dome, local distance-field shadows").
   shader record is `type FName, GUID, SHA (20 B), skip offset, ..., code`; a shader map is
   `0x321, ?, skip offset`, entries `(type FName, GUID, type FName)` (mesh shader maps introduced by
   their vertex factory name), the friendly name `FString`, the `FStaticParameterSet`, then the
-  uniform expression arrays (pixel vectors, pixel scalars, 2D textures). Match a MIC to its map
-  with its static switch values (`mic_static`).
+  uniform expression arrays (pixel vectors, pixel scalars, 2D textures, then cube textures, vertex
+  vectors and vertex scalars: `UniformVertexScalars_n`, the world position offset inputs). Match
+  a MIC to its map with its static switch values (`mic_static`).
 
 The cooked materials keep only their parameter and switch expressions; the graphs are stripped,
 so every material term below was read from the compiled shader of the matching permutation.
@@ -101,6 +102,43 @@ environment and ambient light removed, plus the base pass ambient (`decals::BASE
 (bright at the ground's grazing angles) and the placeholder ambient made the puddles pale patches.
 Static lights light non-lightmapped translucency dynamically in UE3; the port has only the
 dominant and toggleable lights (U-561).
+## Diffuse colour (`map_render::diffuse_color_terms`)
+
+Every base material that exposes `D_Diffuse_color` multiplies its colour by its alpha in the
+base-pass pixel shader (`mul r.xyz, cN, cN.w`): `generic_PMAT`, `generic_masked_PMAT`,
+`generic_masked_SingleSided_PMAT`, `generic_translucent_PMAT`, `generic_translucent_2sided_PMAT`,
+`vertexAnim_PMAT`, `vertexAnim_2Sided_PMAT`, `spline_PMAT`, `bugs_PMAT`, `water_slide_PMAT`,
+`DefaultMesh_PMAT`, `DefaultMesh_2_Sided_PMAT`, `Default_Simple_Translucent_PMAT`, `Skies_PMAT`
+(one directional-lightmap or unlit base pass of each, e.g. shaders 11429, 38250, 3315, 1734).
+Only `FogSheet_PMAT` reads the whole vector (`mov r0, cN`). So diffuse = texture x rgb x a: the
+Boyle shrubs use a = 1.5, grass and flowers 2. The port multiplies for those bases; fog sheets and
+undecoded unlit translucent bases keep the alpha as opacity.
+
+## Foliage (`vertexAnim_PMAT`)
+
+Boyle Ext's hedges, shrubs and flowers are lightmapped `StaticMeshCollectionActor` components (no
+foliage actors, see PACKAGE_FORMAT.md), drawn by the ordinary static path: masked (clip
+`O_Opacity_mask.r - 0.3333`, `texkill`), single-sided except `*_2_sided_inst`
+(`generic_masked_PMAT`), no collision (`CollideActors` false). The directional-lightmap pixel
+shader of `vertexAnim_PMAT` without a normal map (1743) uses the flat-normal diffuse (`dir . 1/3`)
+and a specular lobe on the reflected view vector with power 16 (`SpecularOverrideParameter`).
+
+Wind (the permutation without `Va_Enable_Complex_vertex_anim` / `Va_Enable_Rotation_About_Axis`,
+vertex shaders 7327 / 7358): with z the vertex's world height, every world axis gets
+
+    offset = Va_Radius_spreading x sin(2 pi x frac(z x Va_Distorsion_strenght + Time x Va_Vertex_Anim_Speed + 0.5) - pi)
+
+(`UniformVertexScalars_0` = (`Va_Distorsion_strenght`, `Va_Vertex_Anim_Speed`, Time, Time x speed),
+`_1.x` = `Va_Radius_spreading`). On Boyle the amplitude is at most 1 uu (shrubs: strength 1,
+speed 0.2, radius 1; flowers: 0.002, 0.2, 0.5). The port does not draw it (U-570).
+
+## Skeletal scenery
+
+Placed `SkeletalMeshComponent`s of doors, usable objects (lockers, bins, hatches, chests, Wall of
+Light panels), sinks, alarm bells, the climbable chain and the Kismet-free `SkeletalMeshActor`s
+(sewer gate, bridge) are imported as render-only static instances in their reference pose (42 on
+Boyle Ext). They have no lightmaps (the original lights them through a
+`DynamicLightEnvironmentComponent`), so the port lights them with its dynamic lights only (U-571).
 
 ## Sky dome (`sky.rs`, `sky.wgsl`)
 
