@@ -817,10 +817,37 @@ impl Importer<'_> {
         // check sees them; other actors that are not world geometry only answer checks with
         // `TRACE_Others`, which the vision check has not.
         let kactor = matches!(class.as_str(), "KActor" | "DishonoredMovable" | "DishonoredBreakableNavBlock" | "DisSpeaker_PA" | "DisWhaleOilBattery" | "DishonoredBreakable");
-        if !world && !kactor && !matches!(class.as_str(), "InterpActor" | "DisDoor") {
+        // A usable object (`DisSkeletalBreakable::ShouldTrace`, 0x00A28580) answers the vision
+        // check as level geometry when its tweak says `m_bShouldTraceAsWorldGeometry` and it is
+        // not transparent for vision (Boyle's lockers and bins).
+        let usable_seen = !world
+            && crate::usable_props::is_usable_class(&class)
+            && class != "DisDoor"
+            && match (ObjRef::from_index(pkg.exports[ci].outer), ap.as_ref()) {
+                (ObjRef::Export(a), Some(ap)) => self.breakable_seen_by_vision(pkg, a, ap),
+                _ => false,
+            };
+        if !world && !kactor && !usable_seen && !matches!(class.as_str(), "InterpActor" | "DisDoor") {
             mask &= !m::VISION;
         }
         (collide && (world || block), mask)
+    }
+
+    /// Whether a `DisSkeletalBreakable`'s vision answer is that of level geometry: its tweak's
+    /// `m_bShouldTraceAsWorldGeometry`, unless transparent for vision (the actor's
+    /// `m_bTransparentForVisionChecks` when it sets `m_bOverrideDefaultVisionTransparency`, else
+    /// the tweak's).
+    fn breakable_seen_by_vision(&mut self, pkg: &Arc<Package>, actor: usize, ap: &[ue3_package::properties::Property]) -> bool {
+        use crate::collision_audit::flag;
+        let Some(tweak) = ["m_pUsableObjTweaks", "m_pBreakableTweaks"].iter().find_map(|n| self.resolver.inherited_object_path(pkg, actor, n)) else { return false };
+        if self.tweaks.is_none() {
+            let names: Vec<String> = self.pkgs.iter().map(|p| p.name.clone()).collect();
+            self.tweaks = Some(crate::tweaks::TweakDb::load_with(self.content, &names).ok());
+        }
+        let Some(t) = self.tweaks.as_ref().and_then(|t| t.as_ref()).and_then(|t| t.try_resolve(&tweak)) else { return false };
+        let tflag = |n: &str| matches!(t.get(n), Some(crate::tweaks::TVal::B(true)));
+        let transparent = if flag(ap, "m_bOverrideDefaultVisionTransparency") { flag(ap, "m_bTransparentForVisionChecks") } else { tflag("m_bTransparentForVisionChecks") };
+        !transparent && tflag("m_bShouldTraceAsWorldGeometry")
     }
 
     /// Decode every referenced lightmap texture pair once and bake each component's
