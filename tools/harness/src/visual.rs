@@ -100,6 +100,8 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     let mut shot_i = 0;
     let mut last_shot = Instant::now() - Duration::from_secs(10);
     let mut first_pos = None;
+    let mut prev_pos: Option<Vec<f64>> = None;
+    let mut travelled = 0.0f64;
     let mut last_state = Value::Null;
     let mut max_rtt: f64 = 0.0;
     let mut max_others = 0usize;
@@ -116,6 +118,16 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
         if first_pos.is_none() {
             first_pos = Some(pos.clone());
         }
+        // Distance walked (respawns, more than 300 uu between samples 0.1 s apart, left out):
+        // the bots hunt, so the player fights near where it started and its net displacement
+        // says little.
+        if let (Some(p), true) = (&prev_pos, pos.len() == 3) {
+            let step: f64 = ((p[0] - pos[0]).powi(2) + (p[1] - pos[1]).powi(2)).sqrt();
+            if step < 300.0 {
+                travelled += step;
+            }
+        }
+        prev_pos = (pos.len() == 3).then(|| pos.clone());
         let nearest = s["others"].as_array().and_then(|o| {
             o.iter()
                 .filter(|p| p["alive"].as_bool() == Some(true))
@@ -164,7 +176,7 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
         }
         _ => 0.0,
     };
-    rep.check(S, "harness-driven player moves through the map", moved > 300.0, format!("moved {moved:.0} uu, max RTT {max_rtt:.0} ms"));
+    rep.check(S, "harness-driven player moves through the map", travelled > 300.0, format!("walked {travelled:.0} uu (net {moved:.0} uu), max RTT {max_rtt:.0} ms"));
     // The most seen at once (a bot can be dead or respawning at any single moment).
     rep.check(S, "remote players replicated to rendered client", max_others >= 3, format!("up to {max_others} remote players visible"));
     // A deliberate pistol shot, captured a few frames later: the muzzle flash systems
@@ -227,7 +239,8 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     let smoke = ctx.out.join("smoke");
     let script = std::path::Path::new("fixtures/scripts/smoke_offline.json");
     let st = Command::new(ctx.bin("dishonored_runtime"))
-        .args(["--bots", "3", "--script", &script.display().to_string(), "--out", &smoke.display().to_string(), "--size", "1280x720"])
+        // No bots: they hunt now, and the scripted player stands still at the start.
+        .args(["--bots", "0", "--script", &script.display().to_string(), "--out", &smoke.display().to_string(), "--size", "1280x720"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()?;

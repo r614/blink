@@ -424,7 +424,7 @@ impl Bot {
             self.stuck_ticks = 0;
             self.wander_yaw = self.rand() * 360.0;
             self.blink_hold = 20;
-            self.follow.force_replan();
+            self.route.force_replan();
         }
         let Some(t) = target.and_then(|id| others.iter().find(|o| o.id == id && o.alive)) else {
             // No contract yet: stroll like a civilian.
@@ -437,13 +437,14 @@ impl Bot {
             if unstick {
                 input.buttons |= buttons::JUMP;
             }
+            self.keep_safe(me, world, &mut input, false);
             return input;
         };
         // Aim for a point behind the target (back assassination).
         let behind = t.position - Vec3::new(t.yaw.to_radians().cos(), t.yaw.to_radians().sin(), 0.0) * 90.0;
         let dist = (t.position - me.position).truncate().length();
         // Path on the original navmesh when far; straight in when close or off the mesh.
-        let goal = if dist > 250.0 { self.follow.steer(world.nav(), me.position, behind) } else { behind };
+        let goal = if dist > 250.0 { self.route.steer(world, me.position, behind) } else { behind };
         let to = goal - me.position;
         input.yaw = to.y.atan2(to.x).to_degrees();
         if self.blink_hold > 0 {
@@ -467,6 +468,7 @@ impl Bot {
                 input.buttons |= buttons::PRIMARY;
             }
         }
+        self.keep_safe(me, world, &mut input, false);
         input
     }
 }
