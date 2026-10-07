@@ -1,0 +1,103 @@
+name: Bug report
+description: Something crashes, looks wrong, or behaves differently from the original game.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Issues are picked up and worked on by agents, so the more concrete the
+        details, the faster a fix. Please don't attach game files or anything extracted from the game.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw. Include the exact error message if there was one.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What should have happened, for example what the original game does in the same spot.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Where you were on the map and what you did, step by step.
+      placeholder: |
+        1. Start a free for all against 3 bots
+        2. Go to the garden behind the mansion
+        3. Blink onto the hedge
+        4. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Game mode
+      options:
+        - Free for all (offline against bots)
+        - Free for all (multiplayer)
+        - Contracts (offline against bots)
+        - Contracts (multiplayer)
+        - Custom mission (single player)
+        - Custom mission (co-op)
+        - Launcher / menus
+        - Map viewer (--inspect)
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often does it happen?
+      options:
+        - Every time
+        - Sometimes
+        - Once
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: How you started the game
+      description: The launcher, or the exact command line.
+      placeholder: dishonored_runtime --bots 3 --mode contracts
+  - type: input
+    id: version
+    attributes:
+      label: Blink version
+      description: The commit hash (`git rev-parse --short HEAD`) or release you built from.
+      placeholder: 6f6c952
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: OS, GPU and driver version.
+      placeholder: Windows 11, RTX 3070, driver 572.16
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Console output
+      description: The terminal output from the run, especially any lines with ERROR or panic.
+      render: text
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshots or video
+      description: Drag files in here. A side-by-side with the original game is especially useful for visual bugs.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I'm using my own copy of Dishonored (GOG Definitive Edition).
+          required: true
+        - label: I searched the existing issues and this isn't a duplicate.
+          required: true
