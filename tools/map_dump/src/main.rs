@@ -121,6 +121,15 @@ fn main() -> Result<()> {
             }
         }
     }
+    // `--unlit`: visible instances without a lightmap (how the original lights them depends on
+    // their owner: a light environment, or the lights' dynamic passes).
+    if args.iter().any(|a| a == "--unlit") {
+        for i in m.instances.iter().filter(|i| !i.hidden && i.lightmap.is_none()) {
+            let mesh = &m.meshes[i.mesh];
+            let blends: Vec<String> = mesh.sections.iter().enumerate().map(|(si, s)| i.materials.get(si).copied().flatten().or(s.material).map(|k| format!("{}:{:?}", m.materials[k].source.rsplit('.').next().unwrap_or(""), m.material_params.get(k).map(|p| p.blend))).unwrap_or_default()).collect();
+            println!("unlit {} [{}] {:?}", mesh.source, i.source, blends);
+        }
+    }
     // `--props`: doors and usable objects with their light environments.
     if args.iter().any(|a| a == "--props") {
         for p in &m.skeletal_props {

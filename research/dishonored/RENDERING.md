@@ -22,7 +22,16 @@ downsample, sky dome, local distance-field shadows").
   their vertex factory name), the friendly name `FString`, the `FStaticParameterSet`, then the
   uniform expression arrays (pixel vectors, pixel scalars, 2D textures, then cube textures, vertex
   vectors and vertex scalars: `UniformVertexScalars_n`, the world position offset inputs). Match
-  a MIC to its map with its static switch values (`mic_static`).
+  a MIC to its map with its static switch values (`mic_static`). A mesh shader map writes its
+  vertex factory's name *after* its shaders (`FMeshMaterialShaderMap::Serialize`), so each
+  entry is labelled by the next vertex factory name: the first list is `FLocalVertexFactory`'s
+  (static meshes: every light-map policy), the second `FGPUSkinVertexFactory`'s (no texture
+  light maps). Until 2026-10-07 the tool labelled each list with the previous name, so the
+  skinned list was read as the static one (U-561).
+- `level_volume <package>` finds a level's precomputed light volume (see "Light environments").
+- `map_dump --props` prints the doors' and usable objects' light environments
+  (`DISHONORED_LIGHT_ENV_DEBUG=<actor>` lists the composited lights); `--unlit` lists the
+  visible instances without a lightmap.
 
 The cooked materials keep only their parameter and switch expressions; the graphs are stripped,
 so every material term below was read from the compiled shader of the matching permutation.
@@ -30,6 +39,15 @@ so every material term below was read from the compiled shader of the matching p
 ## Static geometry (`map_render.rs`, `lightmap_ext.wgsl`)
 
 - Directional lightmaps (HL2 basis, diffuse and lightmap specular): see LOG.
+- The merged batches carry their lightmap in the material (`BakedLightmap`), not as Bevy
+  `Lightmap` components, so Bevy's pipeline does not define `LIGHTMAP` for them:
+  `apply_pbr_lighting` neither adds `pbr_input.lightmap_light` nor drops the ambient and the
+  environment cube's diffuse. Until 2026-10-07 the static level was therefore lit by Bevy's
+  placeholder ambient, the environment diffuse and the dynamic lights (only the lightmap specular,
+  added outside, came from the lightmaps): the ground was about 4x too dark under the lamps
+  (U-584). `lightmap_ext.wgsl` now zeroes `diffuse_occlusion` (no ambient or environment
+  diffuse, as the base pass has none: `AmbientColorAndSkyFactor` = 0) and adds
+  `lightmap_light x diffuse_color x exposure` itself.
 - Distance-field shadows: each lightmapped component has a `ShadowMap2D` (PF_G8 signed distance
   field on UV1) per unbaked light. Those of the dominant directional light, and of the dominant
   point / spot light of each component (`LightGuid` matched with the level's
@@ -68,8 +86,13 @@ saturated; the channel is the static mask `D2_Diffuse_Variation_mask_channel`). 
 lightmap channel (`LightMapCoordinateIndex` 1, e.g. Boyle's `ext_boyle_ground_garden_03` with
 the per-mesh mask `ext_boyle_ground_garden_m`): the port batches such components alone and maps
 the atlas UV back with their lightmap rect. The garden gravel was near-black without it (the
-dirt variation is not tinted by `D_Diffuse_color`). Not rendered: the normal and specular
-variations (`N2_`, `S2_`, lerped by the same mask) and the `Multiply` / `variation_color` /
+dirt variation is not tinted by `D_Diffuse_color`). The same mask value `m` drives the normal
+and specular variations (base pass 28116 of `gravel_02_garden_inst`):
+`n = normalize(lerp(N(UV0), N2(UV0 x N2_NormalMap_variation_Tilling), m))` with
+`N2_Enable_NormalMap_Variation` (the port lerps the raw texels and maps them through Bevy's
+tangent frame, then derives the lightmap's tangent-space normal from it as before), and the
+lightmap specular colour `lerp(S, S2(UV0 x S2_Specular_variation_Tilling)[S2 mask], m)` with
+`S2_Enable_Specular_Variation`. Not rendered: the `Multiply` / `variation_color` /
 `UV_coordinate_Index_2` permutations (U-583).
 
 ## Point and spot light falloff (`lighting.rs`)
@@ -87,8 +110,13 @@ Boyle's lights use exponents 2 to 6. The old R/4 match was ~3x too dim at half t
 `LightColor` (an `FColor`) is linearised as `(c / 255)^2.2` (UE3's `FLinearColor(FColor)`):
 measured, the moon's (164, 209, 255) x 0.25 reaches the light pass as (0.0947, 0.1614, 0.25);
 the sRGB curve gave 0.371 instead of 0.379 for the red. Fog colours use the same conversion.
-The dynamic lights' specular is still Bevy's GGX; the original's is a normalised Phong
-`pow(R.L, SP) x (SP + 8) / (8 pi)` (U-581).
+The shading of the light pass (generic_PMAT, e.g. 15166) is
+`(saturate(N.L) x diffuse + S x pow(saturate(R.L), SP) x (SP + 8) / (8 pi)) x LightColor x falloff`
+(each lobe 0 below 1e-6; R = reflect(-V, N); no N.L on the specular; no Burley term): the same
+rewrite replaces Bevy's BRDF for these lights and every directional light (`ue3_light`, U-581).
+The material terms travel in Bevy's: S = 2 x reflectance (`build_material` sets reflectance 0.5
+and the specular texture x colour as the tint; 0 without `S_Enable_Specular`), SP from the
+perceptual roughness `(2 / (SP + 2))^(1/4)`.
 
 ## Camera
 
@@ -144,6 +172,63 @@ sinks, a chest, alarm panels and bells: 39 props on 19 skeletal meshes.
   which state is read from the stage names (U-560); the double doors' tweak names the opposite
   direction's animation (`m_DoorOpenCW` plays `Player_Open_Ccw`).
 - `--inspect` has no mission: every prop shows where and as the level placed it.
+- Lit by their light environment (next section), not by Bevy's ambient and environment light
+  (whose Fresnel reflection of the cube made the bluish band on the street door's seam).
+
+## Light environments (`dishonored_assets::light_env`, `prop_light.rs`)
+
+The doors and usable objects carry a `DynamicLightEnvironmentComponent` (class defaults:
+`bSynthesizeDirectionalLight`, no `bSynthesizeSHLight`, `bUseBooleanEnvironmentShadowing`,
+`NumVolumeVisibilitySamples` 1, `BouncedLightingFactor` 1, `AmbientGlow` 0; the doors set
+`bDynamic` false). Decoded from `FDynamicLightEnvironmentState` (state 0x640 bytes, constructor
+0x00504FD0; full update 0x005034D0: owner 0x004FEB30, dominant light 0x00500510, static environment
+0x00501B70, dynamic environment 0x00503140, light list 0x004F85C0):
+
+- SH: 9 coefficients per channel (padded to 12). `SHBasisFunction` (0x00450860) is the real SH
+  with the Condon-Shortley phase, normalisation constants at 0x0126B100 (0.282095, 0.488603 x 3,
+  0.182091, 0.364183, 0.630783, 0.364183, 0.182091). Static initialisers (0x00F67460 ..):
+  `AmbientFunction` = (1 / (2 sqrt(pi)), 0, ...), `UpperSkyFunction` = (1 / sqrt(pi), 0,
+  sqrt(3 / pi) / 2), `LowerSkyFunction` the same with -sqrt(3 / pi) / 2, and 2 sqrt(pi) (the
+  doubles are widened floats).
+- Static environment: for each enabled static light (the world's static light list; dominant
+  lights only with `bForceCompositeAllLights`) whose channels overlap the owner component's,
+  with `CompositeDynamic` read as `Dynamic` and `Dynamic` cleared (0x004DB950), that reaches the
+  bounds (`AffectsBounds`: point sphere test 0x00530330, spot cone test 0x005499E0) and is visible
+  (0x004FF270: with `CastShadows` and `CastStaticShadows`, one line check from the bounds sphere
+  point facing the light to the light; visibility 0 skips it): `+= Y(L) x GetDirectIntensity`
+  (0x004FF710). `GetDirectIntensity` = `Brightness x FLinearColor(LightColor)` (0x0050D700) x
+  `max(1 - d^2/R^2, 0)^FalloffExponent` for points (0x005306F0) x the spot cone
+  `saturate((cos - cos outer) / (cos inner - cos outer))^2` (0x00549EE0; inner clamped to
+  [0, 89] deg, outer to [inner + 0.001 rad, 1.554343 rad]); directional lights from `-axis`, sky
+  lights from straight up (`GetPosition` (0, 0, 1, 0), 0x00547370). The bounce
+  (`LightEnv_BouncedLightBrightness`, 0 by default) adds `Y(-L)` into the second environment.
+  Static lights keep CompositeDynamic from `Default__LightComponent` (the `PointLight` /
+  `SpotLight` templates only clear Dynamic): they light props although they are not in the
+  props' `Dynamic` channel.
+- Precomputed light volume: a trace down from the bounds origin finds the floor's level; its
+  `PrecomputedLightVolume` (ULevel +0x2B0; serialized near the end of the `Level` export:
+  `bInitialized`, bounds `FBox`, a dword, then 33-byte samples, then 28 bytes) is interpolated
+  at the origin (0x0053DFA0): samples with d < radius, weight `(1 - d / radius) / radius`, each
+  sample's SH (0x00529710) = `Y(indirect dir) x IndirectRadiance + Y(environment dir) x
+  EnvironmentRadiance + AmbientFunction x AmbientRadiance` (directions as (theta, phi) bytes,
+  theta = b / 255 pi, phi = b / 255 2 pi - pi, tables 0x01278980 / 0x01279180; radiances RGBE
+  `FColor`s, 0x00403270 = `ldexp(1/255, e - 128)`; with `bIsCharacterLightEnvironment` the
+  WorldInfo's character brightness / contrast scales apply, 1 otherwise); the sum normalised by
+  the total weight is added. Boyle: `L_Boyle_Ext_P` 332 grid samples (radius 3464),
+  `L_Boyle_Ext_Env` 16425 surface samples (radius 283), `L_BoyleStreet_Ext_Script` 172.
+- Light list (0x004F85C0): a directional light along `(-L3, -L1, L2)` of the luminance SH
+  (0.3, 0.59, 0.11), coloured by the projection `max(T.Y / Y.Y, 0)` (0x004E1300) and subtracted
+  (0x004E1480); then the upper and the lower sky light, the projections of the remainder on the
+  sky functions, each subtracted in turn (0x004E16E0): `SkyLightComponent` Brightness /
+  LightColor and LowerBrightness / LowerColor (+0x100 / +0x104, +0x1A8 / +0x1AC).
+- Drawn (skinned base pass `FDirectionalLightLightMapPolicy` with the sky light, generic_PMAT
+  15153): `(saturate(N.L) x diffuse + S x pow(saturate(R.L), SP) x (SP + 8) / (8 pi)) x
+  LightColor + diffuse x (UpperSky x ((1 + N.Z) / 2)^2 + LowerSky x ((1 - N.Z) / 2)^2)`. The
+  dominant and toggleable lights add their light passes (Bevy lights).
+
+Example: the street door (`DishonoredUsableObject_7`) gets one lamp (`PointLight_183_LC`) and the
+Env level's volume: directional (0.36, 0.33, 0.26) from (-0.96, 0.06, -0.28), upper sky
+(0.126, 0.113, 0.077). Approximations: U-620.
 
 Level actors the Kismet moves (matinees, `SeqAct_AttachToActor`, teleports) are replicated as
 `MissionView::movers` (actor, placed location, rigid delta = current x placed^-1, net protocol 6);
@@ -157,11 +242,16 @@ Boyle's ground decals are static meshes a few units over the ground with translu
 `ext_boyle_ground_01.ext_boyle_puddles_decals_01` (`towerEmpress_ground.puddles_decals_01_inst`),
 street splotches, graffiti, confetti. Shader maps of the base (`shader_maps ... generic_translucent`,
 8 permutations; the puddles' is the one with `O_Opacity_Mask_Channel` = G, `C_Cubemap_Mask_Channel`
-= B; base pass 9353, light passes 9362 point / 9366 directional):
+= B; base pass with the directional lightmap 9347, without lightmap 9353, light passes 9362 point
+/ 9366 directional):
 
-- Only `FNoLightMapPolicy`, `FDirectionalLightLightMapPolicy` and `FSHLightLightMapPolicy` base
-  passes and `FNoStaticShadowingPolicy` light passes exist for `FLocalVertexFactory`: translucent
-  static meshes have no lightmap and are not shadowed.
+- `FLocalVertexFactory` has every light-map policy (the earlier reading took the skinned vertex
+  factory's list for it, see "Tools"): a lightmapped decal (the Boyle ones all are) draws its
+  base pass with its own directional lightmap, like the opaque base pass's diffuse:
+  `diffuse x LightMap[0] x sum_i LightMap[1]_i x max(saturate(n.B_i)^2, 1e-6)` with n the normal
+  map's tangent-space normal; the lightmap specular is multiplied by `SpecularOverrideParameter.xyz`
+  (0). The dominant / toggleable lights add light passes (the distance-field shadow variants
+  exist too).
 - diffuse = `D` [x `D_Diffuse_color.rgb x a` with `D_Enable_Diffuse_color`] + SceneReflection(R) x
   `C_Cubemap_Mask[ch]` [x `C_Cubemap_color.rgb x a` with `C_Enable_Cubemap_Color`]; R reflects the
   view about the normal-mapped normal; the reflection is part of the diffuse, so it is lit.
@@ -174,12 +264,14 @@ street splotches, graffiti, confetti. Shader maps of the base (`shader_maps ... 
 - alpha = clamp(`O_Opacity_mask[ch]`, `O_Minimum_Opacity`, `O_Maximum_Opacity`).
 
 The port draws them with an extended `StandardMaterial`: Bevy's direct lighting with reflectance,
-environment and ambient light removed, plus the base pass ambient (`decals::BASE_PASS_AMBIENT`:
+environment and ambient light removed, plus the component's directional lightmap (the atlas
+planes and its rect, one material per lightmap region; tangent frame from the UV derivatives as
+in `lightmap_ext.wgsl`) and the base pass ambient (`decals::BASE_PASS_AMBIENT`:
 `AmbientColorAndSkyFactor` reads (0, 0, 0, 1) in every base pass drawn on Boyle Ext, measured with
-`probe_launch measure psconst`, U-562), no lightmap, not a shadow receiver. Before, Bevy's environment specular
-(bright at the ground's grazing angles) and the placeholder ambient made the puddles pale patches.
-Static lights light non-lightmapped translucency dynamically in UE3; the port has only the
-dominant and toggleable lights (U-561).
+`probe_launch measure psconst`, U-562); not a Bevy shadow receiver: the dominant directional light
+takes the component's distance field. Before, Bevy's environment specular (bright at the ground's
+grazing angles) and the placeholder ambient made the puddles pale patches, and then, without the
+lightmap, nearly black ones over every path.
 ## Diffuse colour (`map_render::diffuse_color_terms`)
 
 Every base material that exposes `D_Diffuse_color` multiplies its colour by its alpha in the
@@ -217,6 +309,13 @@ Light panels), sinks, alarm bells, the climbable chain and the Kismet-free `Skel
 (sewer gate, bridge) are imported as render-only static instances in their reference pose (42 on
 Boyle Ext). They have no lightmaps (the original lights them through a
 `DynamicLightEnvironmentComponent`), so the port lights them with its dynamic lights only (U-571).
+Since the usable props moved to `usable_props` (animated, lit by their light environment, see
+"Light environments"), only the climbable chain and the unscripted `SkeletalMeshActor`s remain
+here.
+
+`O_Enable_full_opacity` (the Boyle balloons, `balloons_01_vertexAnim_inst`): the masked base
+compiles without its opacity mask (no `texkill` in 1815 / 1831), so such materials draw opaque;
+the port had clipped the balloons' panels into see-through holes.
 
 ## Sky dome (`sky.rs`, `sky.wgsl`)
 
