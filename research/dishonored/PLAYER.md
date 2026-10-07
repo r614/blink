@@ -517,7 +517,7 @@ tests `crates/dishonored_content/tests/world_deaths.rs`.
   two are the `Base` of PlayerStarts (`PlayerStart_Garden` stands on `BlockingVolume_5`,
   `PlayerStart_RiverGrate` on `BlockingVolume_2`). Their convex elements (`BrushAggGeom`, the same
   planes as the physics volumes) become pawn-movement triangles; vision and projectile traces
-  pass (U-640). The two `DynamicBlockingVolume`s are placed with `bCollideActors` false.
+  pass (measured with the hook, COLLISION.md). The two `DynamicBlockingVolume`s are placed with `bCollideActors` false.
   The port had none of them.
 - Level transition doors (`DishonoredUsableObject` with an `LTD_*` tweak; the four doors from
   Boyle Ext into the interior map): `bCollideActors`, `bBlockActors`, and the
@@ -528,11 +528,11 @@ tests `crates/dishonored_content/tests/world_deaths.rs`.
   one loads the other map, so the door is closed for good: its bodies at the reference pose are
   static collision. The front door (`DishonoredUsableObject_6`, `LTD_Courtyard_to_Foyer`) fills a
   304 uu doorway in the courtyard wall; without it a pawn walked through onto a strip of floor
-  that ends at x 1711 and fell 2000 uu into the sea. Other usables and `DisDoor`s still have no
-  collision (U-641).
+  that ends at x 1711 and fell 2000 uu into the sea. Other usables and `DisDoor`s collide since
+  the collision audit (COLLISION.md "Sources").
 - `DisStaticCollisionActor_15` (`L_Boyle_Ext_Nav`) has no component properties of its own; its
   package carries the `Collision_NPC_generic_set` archetype (`bCollideOnlyWithNPCMovement`) and
-  the `npcmovementcollision_model` mesh: NPC-only collision, not modelled (U-643).
+  the `npcmovementcollision_model` mesh: NPC movement only (measured), kept on the NPC channel.
 - `WorldInfo.KillZ` is -20000 on `L_Boyle_Ext_P`. Falling below it calls `Pawn.FellOutOfWorld`
   (`TakeDamage(1000, None, ..., KillZDamageType)`, `bCausedByWorld`): the sim's
   `SimEvent::FellOutOfWorld`, a death with cause `World`. The sea (`DishonoredWaterVolume_0`, one
