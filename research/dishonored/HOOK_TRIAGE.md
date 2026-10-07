@@ -9,7 +9,7 @@ can settle it in a live session or whether it needs reverse engineering first.
 - **R**: needs reverse engineering (the answer is a code path, not a value), or a human test.
 - **Done** marks the rows measured this round; the results are in the second table.
 
-Counts: 95 rows: **31 M** (7 measured this round, U-340 observed, 23 planned), **64 R**.
+Counts: 95 rows: **31 M** (12 measured: 7 in the first hook round, 5 in the second; U-340 observed, 18 planned), **64 R**.
 
 ## Triage
 
@@ -28,7 +28,7 @@ Counts: 95 rows: **31 M** (7 measured this round, U-340 observed, 23 planned), *
 | U-039 | LIKELY | M | play Samuel's intro and watch which blurbs post (event trace on the conversation component), planned |
 | U-046 | OPEN | R | serialization field |
 | U-047 | OPEN | R | spawner code |
-| U-048 | LIKELY | M | lean: sample `PlayerCamera.CameraCache.POV` while holding Q / E, compare the head path, planned |
+| U-048 | MEASURED | M **Done** | lean: `CameraCache.POV` while holding Q / E (`measure lean`): 20 degrees (15 + 5 soften), roll 10; fixed |
 | U-052 | LIKELY | R | writers of timed state 1 |
 | U-054 | LIKELY | R | slide cancel request source |
 | U-080 | LIKELY | R | level-load events on return visits (needs travel, code) |
@@ -43,7 +43,7 @@ Counts: 95 rows: **31 M** (7 measured this round, U-340 observed, 23 planned), *
 | U-143 | LIKELY | R | chain-step picker |
 | U-145 | LIKELY | M | ambient idle frequency: sample an idle guard's anim slot over minutes, planned |
 | U-147 | OPEN | R | spawner data (no Boyle user) |
-| U-121 | LIKELY | M **Done** | light value at the player: `DishonoredVisibilityComponent` +0x68..+0x78 at 14 points |
+| U-121 | LIKELY | M **Done** | light value at the player: `DishonoredVisibilityComponent` +0x68..+0x78 at 14 points; the collection lights at full brightness overshoot 35x (RE of the light environment needed) |
 | U-201 | LIKELY | R | attach helper code |
 | U-203 | LIKELY | R | soiree camera |
 | U-205 | APPROXIMATION | R | port RNG choice |
@@ -55,11 +55,11 @@ Counts: 95 rows: **31 M** (7 measured this round, U-340 observed, 23 planned), *
 | U-125 | LIKELY | R | alarm callbacks |
 | U-100 | LIKELY | M **Done** | Vitality levels: `Pawn.HealthMax` +0x348 after `OnAddPower` 1 then 2 |
 | U-101 | LIKELY | M | choke time: hook the choke context end, planned |
-| U-102 | LIKELY | M | grenade fuse: give a grenade, hook the explosion, planned |
+| U-102 | MEASURED | M **Done** | grenade fuse: hook on the component tick 0x00C5A2A0: armed at the throw, 3.0 s; fixed |
 | U-103 | LIKELY | R | choke availability test |
 | U-107 | LIKELY | M | incendiary bolt: hook the NPC damage path after a hit (damage per tick, type), planned |
 | U-108 | LIKELY | R | possession scoring code |
-| U-109 | LIKELY | M | Bend Time warm-up: sample `WorldInfo.TimeDilation` / the pawn's `CustomTimeDilation` after casting, planned |
+| U-109 | MEASURED | M **Done** | Bend Time: `WorldInfo.TimeDilation`, `CustomTimeDilation`, `BendTimeSeconds` (`measure bendtime`): as the port |
 | U-111 | LIKELY | R | pickup code |
 | U-112 | LIKELY | R | use-target search |
 | U-320 | OPEN | M | base-pass override constants via `ps_constants` (graphics agents) |
@@ -85,9 +85,9 @@ Counts: 95 rows: **31 M** (7 measured this round, U-340 observed, 23 planned), *
 | U-521 | OPEN | R | bloom parts |
 | U-522 | OPEN | R | Kuwahara users |
 | U-380 | OPEN | R | FaceFX |
-| U-242 | LIKELY | M | drowning: hold the pawn under water, sample health, planned |
+| U-242 | MEASURED | M **Done** | drowning: pawn held under the river: 1 per 61 ticks, no regeneration while drowning; fixed |
 | U-243 | SPECULATIVE | R | swim notifies (data) |
-| U-244 | LIKELY | M | under-water flag: sample +0x8A0 bit 11 while lowering the eye through a water surface, planned |
+| U-244 | MEASURED | M **Done** | under-water flag: +0x8A0 bit 11 flips with the camera at the volume top (2 uu steps); as the port |
 | U-245 | LIKELY | R | finisher reset |
 | U-421 | LIKELY | M **Done** | slot 98: shot dispersion vs the order shot-then-max (`measure gun`) |
 | U-422 | OPEN | M **Done** | movement / camera dispersion increase: dispersion while strafing and turning |
@@ -154,5 +154,24 @@ Sessions: the first two at the engine's variable step (20-35 fps), the third at 
 
 ## Not settled this round
 
-The planned M rows above (23) need their own scenarios; most are presentation or mission
+The planned M rows above (18) need their own scenarios; most are presentation or mission
 details. The R rows need decompilation first.
+
+## Second round (2026-10-06, Boyle Ext, fixed 1/60 s step)
+
+New probe tools: `census [frames]` (draws and primitives per pixel shader), `skip <0xHASH |
+CTAB filter>...` (drop those shaders' draws, rendering only), `fnv <files>` (the probe's shader
+hash of `shader_maps` blobs), `measure lean | bendtime | grenade`.
+
+| Quantity | Original | Port before | Verdict |
+|---|---|---|---|
+| Sword: when the hit can land (U-590) | the last `m_fDamageZoneMaxTime` of the clip's `DishonoredNotify_AttackZone` (0x00A8E760 / 0x00C13140 / 0x00C13640) | the zone start | **fixed**: 0.300 s for Right_A / Left_A at 60 Hz |
+| ArkPp LUT bake constants (U-582) | exposure 1.231144, gamma 0.431818 (0.95 / 2.2), contrast 1.081794 | same | **same** |
+| UE3 gamma pass (PS 1875, `InverseGamma` 1/2.2) | drawn, but skipping it changes nothing; the uber pass writes the screen | not drawn | same result |
+| Moon glow (U-580) | the sky dome's `Storm` texture at texture coordinate 1 (skip / `Storm_Intensity` 0 removes it) | sampled at the lightmap set (0) | **fixed** |
+| Lean (U-048) | 20 degrees held (15 + 5 soften at about 5 / s), 119.7 uu sideways, 21.4 down, roll 10; 14.2 degrees at 0.2 s | 15 degrees, no roll | **fixed** (the onset is still slower: 10.7 at 0.2 s) |
+| Drowning (U-242) | air 30 s, then 1 point per 61 ticks to death; no regeneration while drowning (regeneration works under water with air) | regeneration held health at 10 | **fixed** |
+| Under-water flag (U-244) | set while the camera is below the volume top (-2071.02 set, -2068.27 clear) | eye in the volume | **same** |
+| Bend Time level 1 (U-109) | `TimeDilation` 1 -> 0.85 over 0.15 s, back over 0.25 s from 11.76 s, ends at 12.01 s (real); `BendTimeSeconds` at 0.15 x real | same | **same** |
+| Grenade fuse (U-102) | armed at the throw, 3.0 s to the explosion whatever it hits | armed by the first impact, 0.5 s (the cooked delay misread as 0) | **fixed** (parser and arming) |
+| Light probe with the collection lights (U-121) | 0.17-0.31 | 0.225-1.31 with the 358 collection lights at full brightness | experiment not kept; needs the light environment's static-light rule |

@@ -203,8 +203,25 @@ the empty 0x00459D10 / 0x005CB0C0), even after creating the manager (`CheatClass
 | `sword npc=ADDR [--swings N] [--defend S] [--block]` | presses vs every damage-path call and health |
 | `detect npc=ADDR [--dists ...] [--stances stand,crouch] [--move strafe\|sprint]` | the NPC's `PlayerAttnInfo` (`DisAttentionInfo_Complex`: accumulator +0x8C, level +0xAC, flags +0x510, LOS norm and vision debug values +0x514..+0x528) and the player's `DishonoredVisibilityComponent` (+0x68..+0x78) |
 | `vis at=X,Y,Z ...` | the visibility component's light and speed values at points |
+| `lean [at=X,Y,Z] [--yaw] [--hold N]` | Q then E held: `CameraCache.POV` location and rotation per frame (side / down / roll) |
+| `bendtime [--frames N]` | casts Bend Time: `WorldInfo.TimeDilation` (+0x384), `BendTimeSeconds` (+0x398), the clocks, the pawn's `CustomTimeDilation`, the component's flags / start |
+| `grenade [--pitch] [--hold]` | throws a grenade and samples the new `DisProjectile_Grenade` (the component tick 0x00C5A2A0 hooked with `c:0x64:4 c:0xB0:8` gives the fuse exactly) |
 
 Results and their comparison with the port: `research/dishonored/HOOK_TRIAGE.md`.
+
+### Draw attribution (protocol 3)
+
+| Op / command | Use |
+|---|---|
+| `DRAW_CENSUS` / `census [frames]` | pixel shaders drawn over the next frames, with draw and primitive counts and CTAB names |
+| `DRAW_SKIP` / `skip [0xHASH \| CTAB filter]...` | drop every draw made with those shaders (rendering only; no argument restores them) |
+| `fnv <file>...` | the probe's FNV-1a 64 hash of shader blobs (e.g. `shader_maps` output), to name a live shader's material |
+
+A capture per drawn shader with that shader skipped, compared over a screen region, tells which
+draws make a feature (the `moon` glow: the sky dome, U-580). Status also reports `ps_sets`,
+`ps_sets_known` and `draws`: in one session no `SetPixelShader` call matched a created shader
+(every draw counted under hash 0, `measure consts` sampled nothing); a relaunch fixed it, so
+check `ps_sets_known` before relying on shader filters.
 
 ## Release-time regression baseline
 
