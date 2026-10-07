@@ -225,6 +225,9 @@ pub struct CollisionSource {
     pub own_block: Option<bool>,
     pub own_actor_collide: Option<bool>,
     pub own_actor_block: Option<bool>,
+    /// The actor's usable-object or breakable tweak (`m_pUsableObjTweaks`, `m_pBreakableTweaks`),
+    /// an object path, set or inherited.
+    pub tweak: Option<String>,
 }
 
 impl CollisionSource {
@@ -268,11 +271,15 @@ pub fn collision_sources(content: &Content, packages: &[String]) -> Vec<Collisio
             }
             let mut seen = std::collections::BTreeSet::new();
             let loc = Vec3::from(find(&ap, "Location").and_then(|p| p.as_vector()).unwrap_or([0.0; 3]));
-            let extra: Vec<String> = ["bCollideOnlyWithNPCMovement", "m_bRejectPlayerMantle", "m_bTransparentForVisionChecks", "m_bOverrideDefaultVisionTransparency"]
+            let tweak = ["m_pUsableObjTweaks", "m_pBreakableTweaks"].iter().find_map(|n| r.inherited_object_path(&pkg, i, n));
+            let mut extra: Vec<String> = ["bCollideOnlyWithNPCMovement", "m_bRejectPlayerMantle", "m_bTransparentForVisionChecks", "m_bOverrideDefaultVisionTransparency", "bCollideWorld"]
                 .iter()
                 .filter(|n| flag(&ap, n))
                 .map(|n| n.to_string())
                 .collect();
+            if let Some(Value::Enum(ph)) | Some(Value::Name(ph)) = find(&ap, "Physics").map(|p| &p.value) {
+                extra.push(ph.clone());
+            }
             for c in comps {
                 // Components of the placed actor are exports of the same package; references to
                 // class default components (never instanced in a level) are skipped.
@@ -332,6 +339,7 @@ pub fn collision_sources(content: &Content, packages: &[String]) -> Vec<Collisio
                     own_block: own_bool(&cown, "BlockActors"),
                     own_actor_collide: own_bool(&own, "bCollideActors"),
                     own_actor_block: own_bool(&own, "bBlockActors"),
+                    tweak: tweak.clone(),
                 });
             }
         }

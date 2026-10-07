@@ -59,6 +59,15 @@ pub fn run(args: &[String]) -> Result<()> {
     };
     let mut out = std::fs::File::create(output)?;
     writeln!(out, "# id hit time lx ly lz nx ny nz actor component")?;
+    // The doors' states when the checks ran (`DisDoor.m_DoorState`, +0x311): the port poses its
+    // doors the same way for the comparison.
+    for d in c.find("", "DisDoor")? {
+        let name = c.name_of(d)?;
+        let Some(path) = name.split_whitespace().last() else { continue };
+        let (pkg, actor) = (path.split('.').next().unwrap_or(""), path.rsplit('.').next().unwrap_or(""));
+        let state = c.read(d + 0x311, 1)?.first().copied().unwrap_or(0);
+        writeln!(out, "# door {pkg}:{actor} {state}")?;
+    }
     for (id, x) in ids.iter().zip(&r) {
         let (a, k) = if x.hit { (name(&mut c, x.actor), name(&mut c, x.component)) } else { ("-".into(), "-".into()) };
         writeln!(

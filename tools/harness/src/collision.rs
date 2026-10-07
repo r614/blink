@@ -40,9 +40,9 @@ pub enum Chan {
 impl Chan {
     pub fn flags(self) -> u32 {
         match self {
-            // The player pawn's own movement checks (`MoveActor`), pawns left out so the
-            // living NPCs of the original do not count.
-            Chan::Player => MOVE_FLAGS & !TRACE_PAWNS,
+            // The player pawn's own movement checks (`MoveActor`, pawns included: some actors answer
+            // them differently); the checks that hit a living pawn are left out of the comparison.
+            Chan::Player => MOVE_FLAGS,
             Chan::Projectile => PISTOL_FLAGS & !TRACE_PAWNS,
             Chan::Vision => VISION_FLAGS & !TRACE_PAWNS,
         }
@@ -273,18 +273,42 @@ pub struct Oracle {
     pub what: String,
 }
 
-fn read_results(path: &PathBuf) -> Result<BTreeMap<usize, Oracle>> {
-    let mut out = BTreeMap::new();
+/// The oracle's answers and the door states (`<package>:<actor>`, `EDisDoorState`) when they
+/// were recorded.
+#[derive(Clone, Debug, Default)]
+pub struct OracleSet {
+    pub results: BTreeMap<usize, Oracle>,
+    pub doors: Vec<(String, u8)>,
+}
+
+/// `# door <package>:<actor> <state>` lines.
+fn parse_door(line: &str) -> Option<(String, u8)> {
+    let mut f = line.strip_prefix("# door ")?.split_whitespace();
+    Some((f.next()?.to_string(), f.next()?.parse().ok()?))
+}
+
+fn read_results(path: &PathBuf) -> Result<OracleSet> {
+    let mut set = OracleSet::default();
+    let out = &mut set.results;
     for line in std::fs::read_to_string(path)?.lines() {
+        if let Some(d) = parse_door(line) {
+            set.doors.push(d);
+            continue;
+        }
         if line.starts_with('#') || line.trim().is_empty() {
             continue;
         }
         let f: Vec<&str> = line.split_whitespace().collect();
         let id: usize = f[0].split(':').next().unwrap_or("").parse()?;
         let what = if f.len() > 10 { format!("{} {}", f[9], f[10]) } else { String::new() };
+        // A check that hit a living pawn (the player's movement checks include pawns) says
+        // nothing about the level: left out.
+        if what.split('/').next().is_some_and(|class| class.contains("Pawn")) {
+            continue;
+        }
         out.insert(id, Oracle { hit: f[1] == "1", time: f[2].parse()?, what });
     }
-    Ok(out)
+    Ok(set)
 }
 
 fn fixture_path(map: &str) -> PathBuf {
@@ -292,11 +316,16 @@ fn fixture_path(map: &str) -> PathBuf {
 }
 
 /// Stored oracle: `id hash hit time`.
-fn read_fixture(map: &str, queries: &[Query]) -> Result<BTreeMap<usize, Oracle>> {
+fn read_fixture(map: &str, queries: &[Query]) -> Result<OracleSet> {
     let p = fixture_path(map);
     let text = std::fs::read_to_string(&p).with_context(|| format!("{}", p.display()))?;
-    let mut out = BTreeMap::new();
+    let mut set = OracleSet::default();
+    let out = &mut set.results;
     for line in text.lines() {
+        if let Some(d) = parse_door(line) {
+            set.doors.push(d);
+            continue;
+        }
         if line.starts_with('#') || line.trim().is_empty() {
             continue;
         }
@@ -309,23 +338,34 @@ fn read_fixture(map: &str, queries: &[Query]) -> Result<BTreeMap<usize, Oracle>>
         }
         out.insert(id, Oracle { hit: f[2] == "1", time: f[3].parse()?, what: String::new() });
     }
-    Ok(out)
+    Ok(set)
 }
 
-fn write_fixture(map: &str, queries: &[Query], oracle: &BTreeMap<usize, Oracle>) -> Result<PathBuf> {
+fn write_fixture(map: &str, queries: &[Query], oracle: &OracleSet) -> Result<PathBuf> {
     let p = fixture_path(map);
     std::fs::create_dir_all(p.parent().unwrap())?;
     let mut s = format!("# {map}: oracle results of `harness collision gen` queries (UWorld::SingleLineCheck in the original)\n# id coord_hash hit fraction\n");
-    for (id, o) in oracle {
+    for (d, st) in &oracle.doors {
+        let _ = writeln!(s, "# door {d} {st}");
+    }
+    for (id, o) in &oracle.results {
         let _ = writeln!(s, "{id} {:08x} {} {:.4}", queries[*id].hash(), o.hit as u8, o.time);
     }
     std::fs::write(&p, s)?;
     Ok(p)
 }
 
-/// The port's world as the map starts: static collision plus the movers where they are placed.
-fn start_world(mc: &MatchContent) -> Vec<dishonored_world::CollisionWorld> {
-    mc.collision.movers.iter().map(|m| m.placed(glam::Mat4::IDENTITY)).collect()
+/// The port's world when the oracle ran: static collision, the movers where the map places them
+/// and the doors in the recorded states (else their initial state).
+fn start_world(mc: &MatchContent, doors: &[(String, u8)]) -> Vec<dishonored_world::CollisionWorld> {
+    mc.collision
+        .movers
+        .iter()
+        .map(|m| {
+            let state = doors.iter().find(|d| d.0.eq_ignore_ascii_case(&m.actor)).map_or(m.initial, |d| d.1);
+            m.placed_in(state, glam::Mat4::IDENTITY)
+        })
+        .collect()
 }
 
 /// Agreement of one query: equal hit flags, and both hits within `tol` uu along the way.
@@ -350,8 +390,9 @@ pub struct Stats {
     pub offsets: BTreeMap<(bool, u8, Chan), Vec<f32>>,
 }
 
-pub fn compare(mc: &MatchContent, queries: &[Query], oracle: &BTreeMap<usize, Oracle>) -> Stats {
-    let movers = start_world(mc);
+pub fn compare(mc: &MatchContent, queries: &[Query], set: &OracleSet) -> Stats {
+    let oracle = &set.results;
+    let movers = start_world(mc, &set.doors);
     let mut st = Stats { total: 0, agree: 0, by_kind: BTreeMap::new(), diffs: Vec::new(), offsets: BTreeMap::new() };
     for (id, o) in oracle {
         let Some(q) = queries.get(*id) else { continue };
@@ -439,7 +480,7 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
             let res = read_results(&PathBuf::from(ctx.opt("--results").context("--results FILE")?))?;
             let st = compare(&mc, &q, &res);
             report(rep, map, &st, &q);
-            clusters(ctx, map, &st, &q, &mc);
+            clusters(ctx, map, &st, &q, &mc, &res.doors);
             if ctx.args.iter().any(|a| a == "--store") {
                 let p = write_fixture(map, &q, &res)?;
                 println!("stored {}", p.display());
@@ -490,8 +531,8 @@ fn report(rep: &mut Report, map: &str, st: &Stats, _q: &[Query]) {
 }
 
 /// Group the disagreements by what the original hit and what the port hit, with examples.
-fn clusters(ctx: &Ctx, map: &str, st: &Stats, q: &[Query], mc: &MatchContent) {
-    let movers = start_world(mc);
+fn clusters(ctx: &Ctx, map: &str, st: &Stats, q: &[Query], mc: &MatchContent, doors: &[(String, u8)]) {
+    let movers = start_world(mc, doors);
     let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (id, o, p) in &st.diffs {
         let x = &q[*id];

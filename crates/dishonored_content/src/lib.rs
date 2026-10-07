@@ -224,15 +224,23 @@ pub fn add_level_blockers(w: CollisionWorld, content: &Content, map: &str) -> Co
     use dishonored_assets::collision_audit::mask;
     let travel: Vec<String> = dishonored_assets::travel::extract_travel(content, &pkgs).unwrap_or_default().into_iter().map(|t| format!("{}:{}", t.door_package, t.door)).collect();
     let props = dishonored_assets::usable_props::read_props(content, &pkgs);
+    let tweaks = dishonored_assets::tweaks::TweakDb::load_with(content, &pkgs).ok();
     // Every blocking skeletal component but the climbable chains (their bodies swing with
     // physics and turn off while climbed; not modelled, U-654).
     for src in sources.iter().filter(|s| s.component_class == "SkeletalMeshComponent" && s.active() && s.block && s.actor_block && s.class != "DisClimbable") {
         let actor = format!("{}:{}", src.package, src.actor);
         let prop = props.iter().find(|p| p.actor.eq_ignore_ascii_case(&actor));
         let is_door = src.class == "DisDoor" && prop.is_some_and(|p| p.door.is_some()) && !travel.iter().any(|t| t.eq_ignore_ascii_case(&actor));
-        // The vision line of sight (no `TRACE_Others`) checks movers, which doors are, and
-        // level geometry only (research/dishonored/COLLISION.md "ShouldTrace").
-        let m = if is_door { src.trace_mask } else { src.trace_mask & !mask::VISION };
+        // The vision line of sight (`TRACE_Movers` and level geometry, no `TRACE_Others`) sees
+        // doors (movers) and the props whose tweak says `m_bShouldTraceAsWorldGeometry`, unless
+        // they are transparent for vision (the actor's override, else the tweak's flag;
+        // `DisSkeletalBreakable::ShouldTrace` 0x00A28580, `DisDoor` 0x00A2C760).
+        let tw = src.tweak.as_ref().and_then(|p| tweaks.as_ref()?.try_resolve(p));
+        let tflag = |n: &str| tw.as_ref().is_some_and(|t| matches!(t.get(n), Some(dishonored_assets::tweaks::TVal::B(true))));
+        let has = |n: &str| src.extra.iter().any(|e| e == n);
+        let transparent = if has("m_bOverrideDefaultVisionTransparency") { has("m_bTransparentForVisionChecks") } else { tflag("m_bTransparentForVisionChecks") };
+        let seen = !transparent && (is_door || src.world_geometry || tflag("m_bShouldTraceAsWorldGeometry"));
+        let m = if seen { src.trace_mask } else { src.trace_mask & !mask::VISION };
         let channels = dishonored_world::channel::from_trace_mask(m);
         let info = dishonored_world::TriInfo { channels, shape: dishonored_world::shape::ALL, kind: dishonored_world::hit_kind::OTHER, elem: u32::MAX };
         if let (true, Some(prop)) = (is_door, prop) {
@@ -298,7 +306,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     let sim = load_sim_config(&content).context("gameplay config")?;
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).ok();
-    let coll_path = dir.join(format!("{map}.collision10.bin"));
+    let coll_path = dir.join(format!("{map}.collision12.bin"));
     let spawn_path = dir.join(format!("{map}.spawns.json"));
     let (collision, spawns) = match (CollisionWorld::load(&coll_path), std::fs::read_to_string(&spawn_path)) {
         (Ok(w), Ok(s)) => (w, serde_json::from_str::<Vec<Spawn>>(&s).unwrap_or_default()),

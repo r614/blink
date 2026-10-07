@@ -130,6 +130,8 @@ struct Importer<'a> {
     skel_meshes: HashMap<Key, Option<SkeletalProp>>,
     /// Effective (archetype-resolved) properties for the collision flags.
     resolver: crate::collision_audit::PropResolver<'a>,
+    /// Tweaks of the map, loaded when a physics prop needs its `m_bFixed`.
+    tweaks: Option<Option<crate::tweaks::TweakDb>>,
 }
 
 /// Single-channel static component masks kept in `MaterialParams::mask_channels`.
@@ -207,6 +209,7 @@ pub fn import_level(
         class_defaults: HashMap::new(),
         skel_meshes: HashMap::new(),
         resolver: crate::collision_audit::PropResolver::new(content),
+        tweaks: None,
     };
     imp.stats.timings.push(("packages", t0.elapsed().as_secs_f32()));
     let t = std::time::Instant::now();
@@ -309,6 +312,7 @@ const STATIC_BLOCKER_CLASSES: &[&str] = &[
     "DishonoredUsableObject",
     "DishonoredDynamicUsableObject",
     "DisDoor",
+    "DisWallOfLight",
 ];
 
 impl Importer<'_> {
@@ -613,6 +617,7 @@ impl Importer<'_> {
         // map starts in (they can move or break later in the original, U-650). Pickups do not
         // block (`bBlockActors` false).
         let static_blocker = mover.is_none() && STATIC_BLOCKER_CLASSES.contains(&class.as_str());
+        let rigid = static_blocker && self.simulated_kactor(&pkg, actor, &class);
         for &ci in comps {
             let before = self.map.instances.len();
             let src = format!("{} [{class}]", pkg.obj_path(ObjRef::Export(ci)));
@@ -623,6 +628,13 @@ impl Importer<'_> {
                 if inst.collides && !static_blocker {
                     inst.mover = mover.clone();
                     inst.collides = false;
+                }
+                // A simulated physics prop (`PHYS_RigidBody`) fails `IsBlockedBy`, so only the
+                // checks without `TRACE_Blocking` (the vision line and the crosshair) meet it;
+                // measured: movement and pistol checks pass through Boyle's buckets and ropes,
+                // the vision check stops on them.
+                if rigid {
+                    inst.trace_mask &= crate::collision_audit::mask::VISION | crate::collision_audit::mask::CROSSHAIR;
                 }
             }
             self.stats.other_actor_components += self.map.instances.len() - before;
@@ -750,6 +762,27 @@ impl Importer<'_> {
         Ok(())
     }
 
+    /// A KActor-family prop the physics simulates at run time: `PHYS_RigidBody` (the actor's
+    /// `Physics`, archetypes resolved) unless its tweak fixes it in place (`m_bFixed` of its
+    /// `DisTweaks_StaticBreakable` / `DisTweaks_Movable`: `PHYS_None`, e.g. Boyle's piano).
+    fn simulated_kactor(&mut self, pkg: &Arc<Package>, actor: usize, class: &str) -> bool {
+        if !matches!(class, "KActor" | "DishonoredMovable" | "DishonoredBreakableNavBlock" | "DisSpeaker_PA" | "DisWhaleOilBattery" | "DishonoredBreakable") {
+            return false;
+        }
+        let ap = self.resolver.effective(pkg, actor);
+        if !matches!(find(&ap, "Physics").map(|p| &p.value), Some(Value::Enum(e)) if e == "PHYS_RigidBody") {
+            return false;
+        }
+        let tweak = ["m_pMovableTweaks", "m_pBreakableTweaks"].iter().find_map(|n| self.resolver.inherited_object_path(pkg, actor, n));
+        let Some(tweak) = tweak else { return true };
+        if self.tweaks.is_none() {
+            let names: Vec<String> = self.pkgs.iter().map(|p| p.name.clone()).collect();
+            self.tweaks = Some(crate::tweaks::TweakDb::load_with(self.content, &names).ok());
+        }
+        let fixed = self.tweaks.as_ref().and_then(|t| t.as_ref()).and_then(|t| t.try_resolve(&tweak)).is_some_and(|t| matches!(t.get("m_bFixed"), Some(crate::tweaks::TVal::B(true))));
+        !fixed
+    }
+
     /// Whether a placed component blocks the player's checks at all, and its trace types
     /// (research/dishonored/COLLISION.md): it collides (`CollideActors` and its actor's
     /// `bCollideActors`, archetypes resolved) and either its actor is world geometry
@@ -773,8 +806,19 @@ impl Importer<'_> {
             ObjRef::Export(a) => pkg.export_class(a),
             _ => String::new(),
         };
-        if !world && !matches!(class.as_str(), "InterpActor" | "DisDoor") {
-            mask &= !crate::collision_audit::mask::VISION;
+        use crate::collision_audit::mask as m;
+        // A Wall of Light (`DisWallOfLight::ShouldTrace`, 0x00A21B30) stops the player's
+        // projectile and melee checks while it is powered, whatever its blocking flags; the
+        // player walks into it (and is killed by its own logic).
+        if class == "DisWallOfLight" {
+            return (collide, mask & (m::PROJECTILE | m::MELEE));
+        }
+        // KActors (physics props, breakables) answer like movers (`TRACE_Movers`), so the vision
+        // check sees them; other actors that are not world geometry only answer checks with
+        // `TRACE_Others`, which the vision check has not.
+        let kactor = matches!(class.as_str(), "KActor" | "DishonoredMovable" | "DishonoredBreakableNavBlock" | "DisSpeaker_PA" | "DisWhaleOilBattery" | "DishonoredBreakable");
+        if !world && !kactor && !matches!(class.as_str(), "InterpActor" | "DisDoor") {
+            mask &= !m::VISION;
         }
         (collide && (world || block), mask)
     }
