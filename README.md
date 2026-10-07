@@ -1,5 +1,12 @@
 # Blink
 
+> [!WARNING]
+> **Highly experimental.** Blink is an early, in-progress research project, not a finished
+> game. Expect bugs, crashes, missing features, visual differences from the original, and
+> breaking changes between versions, including save files, settings and network
+> compatibility. Only one map (Lady Boyle's Last Party) is supported. Please report issues,
+> but don't expect stability yet.
+
 Blink is a standalone Rust/Bevy runtime that rebuilds the gameplay kernel of *Dishonored*
 (2012) with high behavioral fidelity, using content from a legitimately owned local
 install of **Dishonored: Definitive Edition (GOG)**. The runtime does not run or
@@ -19,7 +26,7 @@ from your install.
 
 ## Status
 
-Playable on Lady Boyle's Last Party (`L_Boyle_*`): offline against bots, custom missions,
+Experimental. Playable, with known bugs, on Lady Boyle's Last Party (`L_Boyle_*`): offline against bots, custom missions,
 and Contracts / FFA over a dedicated server.
 
 | Area | State |
