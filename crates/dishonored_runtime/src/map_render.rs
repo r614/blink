@@ -221,8 +221,9 @@ fn vector(p: &MaterialParams, name: &str) -> Option<[f32; 4]> {
 /// Map a Dishonored material (Arkane slot convention) onto Bevy's StandardMaterial.
 ///
 /// Approximations (documented in research/LOG.md, "Full materials"):
-/// - UE3 Phong `SP_Specular_Power` n -> GGX via alpha = sqrt(2 / (n + 2)).
-/// - `S_` map -> specular tint texture, `S_Specular_color` rgb * a -> tint * reflectance.
+/// - UE3 Phong `SP_Specular_Power` n stored as perceptual roughness (2 / (n + 2))^(1/4), read back by
+///   the patched light passes (`lighting::ue3_light`); Bevy GGX only for its environment light.
+/// - `S_` map -> specular tint texture, `S_Specular_color` rgb -> tint, reflectance 0.5: S = 2 x reflectance.
 /// - Colour vectors use Arkane's rgb * a intensity convention for emissive/specular, and for
 ///   `D_Diffuse_color` as decoded from the base-pass shaders (`diffuse_color_terms`).
 /// - Detail normals (`DN_`) and per-slot tiling other than `D_Diffuse_Tilling` are ignored
@@ -282,11 +283,14 @@ pub fn build_material(i: usize, m: &MaterialAsset, p: &MaterialParams, images: &
         let c = vector(p, "S_Specular_color").filter(|_| p.switch("S_Enable_Specular_color") != Some(false)).unwrap_or([1.0, 1.0, 1.0, 2.0]);
         mat.specular_tint_texture = Some(images[s].clone());
         mat.specular_tint = Color::linear_rgb(c[0], c[1], c[2]);
-        mat.reflectance = (0.5 * c[3]).clamp(0.0, 1.0);
+        // The UE3 specular colour S = texture x tint is 2 x Bevy's reflectance (the patched light
+        // passes, lighting.rs `ue3_light`, and the lightmap specular read it back that way).
+        mat.reflectance = 0.5;
         let n = scalar(p, "SP_Specular_Power").unwrap_or(20.0).max(1.0);
         mat.perceptual_roughness = (2.0 / (n + 2.0)).sqrt().sqrt().clamp(0.089, 1.0);
     } else {
-        mat.reflectance = 0.1;
+        // No specular term without `S_Enable_Specular`.
+        mat.reflectance = 0.0;
     }
     if p.sky && f.sky {
         // Sky dome, moon and sun: unlit, unfogged (UE3 skies sit beyond the fog's reach),
@@ -652,7 +656,7 @@ pub fn spawn_map(
                         .flatten();
                     let rect = key.d2_inst.and_then(|i| d2_rects.get(&i)).map(|(a, b)| Vec4::new(a.x, a.y, 1.0 / (b.x - a.x).max(1e-9), 1.0 / (b.y - a.y).max(1e-9))).unwrap_or(Vec4::new(0.0, 0.0, 1.0, 1.0));
                     let exposure = base.lightmap_exposure;
-                    // Lightmap specular: colour = reflectance * 2 / a (see lightmap_ext.wgsl),
+                    // Lightmap specular: colour = reflectance * 2 (see lightmap_ext.wgsl),
                     // lobe exponent SP_Specular_Power + 1.
                     let p = map.material_params.get(key.material as usize).filter(|p| features.materials && features.lightmap_specular && p.specular.is_some());
                     let spec_scale = p.map(|_| 2.0 / (2.0 * base.reflectance).max(1e-3)).unwrap_or(0.0);

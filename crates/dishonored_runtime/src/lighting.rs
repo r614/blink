@@ -75,11 +75,36 @@ impl Plugin for Ue3FalloffPlugin {
 }
 
 fn patch_source(src: &str) -> Option<String> {
-    if src.contains("fn ue3_attenuation") {
+    if src.contains("fn ue3_attenuation") || !src.contains(BEVY_ATTENUATION) {
         return None;
     }
-    src.contains(BEVY_ATTENUATION).then(|| format!("{}{UE3_FN}", src.replace(BEVY_ATTENUATION, UE3_ATTENUATION)))
+    let mut out = src.replace(BEVY_ATTENUATION, UE3_ATTENUATION);
+    // The light pass's shading (U-581) for the UE3 point / spot lights and every directional light.
+    let mut shading = 0;
+    for (from, to) in [(BEVY_POINT_TERMS, UE3_POINT_TERMS), (BEVY_DIRECTIONAL_TERMS, UE3_DIRECTIONAL_TERMS)] {
+        if out.contains(from) {
+            out = out.replace(from, to);
+            shading += 1;
+        }
+    }
+    if shading != 2 {
+        warn!("pbr_lighting.wgsl: {shading} of 2 light shading sites found; Bevy's BRDF kept where missing");
+    }
+    Some(format!("{out}{UE3_FN}"))
 }
+
+const BEVY_POINT_TERMS: &str = "    color_times_NdotL = diffuse * derived_input.NdotL + specular_light * specular_derived_input.NdotL;
+#endif  // STANDARD_MATERIAL_CLEARCOAT";
+const UE3_POINT_TERMS: &str = "    color_times_NdotL = diffuse * derived_input.NdotL + specular_light * specular_derived_input.NdotL;
+#endif  // STANDARD_MATERIAL_CLEARCOAT
+    if ((*light).position_radius.w > 0.0) {
+        color_times_NdotL = ue3_light(input, N, V, L, enable_diffuse);
+    }";
+const BEVY_DIRECTIONAL_TERMS: &str = "    color = (diffuse + specular_light) * derived_input.NdotL;
+#endif  // STANDARD_MATERIAL_CLEARCOAT";
+const UE3_DIRECTIONAL_TERMS: &str = "    color = (diffuse + specular_light) * derived_input.NdotL;
+#endif  // STANDARD_MATERIAL_CLEARCOAT
+    color = ue3_light(input, N, V, L, enable_diffuse);";
 
 const BEVY_ATTENUATION: &str = "let rangeAttenuation = getDistanceAttenuation(distance_square, (*light).color_inverse_square_range.w);";
 const UE3_ATTENUATION: &str = "let rangeAttenuation = ue3_attenuation(distance_square, (*light).color_inverse_square_range.w, (*light).position_radius.w);";
@@ -93,6 +118,29 @@ fn ue3_attenuation(distance_square: f32, inverse_range_squared: f32, radius: f32
     let e = radius * 1000.0 - 1.0;
     let x = max(1.0 - distance_square * inverse_range_squared, 0.0);
     return select(0.0, pow(x, e), x - 1e-6 >= 0.0);
+}
+
+// dishonored-rs: the shading of UE3's light passes (TLightPixelShader, e.g. 15166 / 34985):
+// saturate(N.L) x diffuse + S x pow(saturate(R.L), SP) x (SP + 8) / (8 pi), each lobe 0 below
+// 1e-6, times LightColor x falloff (no N.L on the specular). The light colour here carries
+// pi x Brightness x U (lighting.rs), hence the 1 / pi. Material terms as map_render's
+// build_material sets them: S = 2 x reflectance (= sqrt(F0 / 0.16)), SP from the roughness
+// (perceptual roughness^2 = sqrt(2 / (SP + 2))).
+fn ue3_light(input: ptr<function, LightingInput>, N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, enable_diffuse: bool) -> vec3<f32> {
+    let ndotl = saturate(dot(N, L));
+    let rdotl = saturate(dot(reflect(-V, N), L));
+    let a = (*input).layers[LAYER_BASE].roughness;
+    let sp = max(2.0 / max(a * a, 1e-8) - 2.0, 0.0);
+    let s = 2.0 * sqrt(max((*input).F0_dielectric, vec3<f32>(0.0)) / 0.16);
+    var d = vec3<f32>(0.0);
+    if (enable_diffuse && ndotl - 1e-6 >= 0.0) {
+        d = (*input).diffuse_color * ndotl;
+    }
+    var spec = vec3<f32>(0.0);
+    if (rdotl - 1e-6 >= 0.0) {
+        spec = s * pow(rdotl, sp) * (sp + 8.0) * 0.0397887342;
+    }
+    return (d + spec) / PI;
 }
 ";
 

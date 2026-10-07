@@ -201,7 +201,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // a constant SP 15 folds into four squarings).
     let ws = pow(max(basis_weights(r), vec3<f32>(1e-6)), vec3<f32>(baked_params.z));
     // UE3 specular colour = S_ texture (masked channel) [* S_Specular_color.rgb]; Bevy's
-    // reflectance holds 0.5 * a * colour * texture, so y = 2 / a (0 without specular).
+    // reflectance holds 0.5 * colour * texture, so y = 2 (0 without specular).
     var spec_color = pbr_input.material.reflectance * baked_params.y;
 #ifdef VERTEX_UVS_A
     if (v2_params.z > 0.5) {
