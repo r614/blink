@@ -195,6 +195,33 @@ fn main() -> Result<()> {
         "measure" => measure::run(&args[1..])?,
         "lab" => lab::run(&args[1..])?,
         "collide" => oracle_collision::run(&args[1..])?,
+        "place" => {
+            // place X Y Z [YAW_DEG]: write the pawn's Location (and Controller yaw), step forward
+            // one frame so physWalking looks for a floor, then let it settle for a second.
+            let f = |i: usize| -> Result<f32> { Ok(args.get(i).context("place X Y Z [YAW]")?.parse()?) };
+            let (x, y, z) = (f(1)?, f(2)?, f(3)?);
+            let mut c = connect()?;
+            let st = c.status()?;
+            let get = |k: &str| st.lines().find_map(|l| l.strip_prefix(&format!("{k}="))).and_then(|v| parse_u32(v).ok()).unwrap_or(0);
+            let (pawn, pc) = (get("pawn"), get("local_pc"));
+            if let Ok(yaw) = f(4) {
+                // Controller.Rotation (Actor +0xD0): pitch, yaw, roll in 65536 units.
+                let u = (yaw / 360.0 * 65536.0).round() as i32;
+                c.write(pc + 0xd4, &u.to_le_bytes())?;
+            }
+            let mut b = Vec::new();
+            for v in [x, y, z] {
+                b.extend(v.to_le_bytes());
+            }
+            c.write(pawn + 0xc4, &b)?;
+            c.key("W", true)?;
+            c.wait_ticks(1)?;
+            c.key("W", false)?;
+            c.wait_ticks(60)?;
+            let r = c.read(pawn + 0xc4, 12)?;
+            let v: Vec<f32> = r.chunks(4).map(|w| f32::from_le_bytes(w.try_into().unwrap())).collect();
+            println!("at {:.3} {:.3} {:.3}", v[0], v[1], v[2]);
+        }
         "key" => {
             // key <EngineKeyName> [down|up|tap]
             let k = args.get(1).context("key name")?;

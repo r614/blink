@@ -87,8 +87,13 @@ fn input(yaw: f32, forward: i8, buttons: u16) -> PlayerInput {
 }
 
 const STAND_Z: f32 = 87.5;
-/// physWalking keeps the pawn `FLOOR_DIST` (2.7305) above the floor (MINFLOORDIST..MAXFLOORDIST).
-const HOVER: f32 = dishonored_sim::movement::FLOOR_DIST;
+/// physWalking keeps the floor check's distance at `FLOOR_DIST` (2.7305, between MINFLOORDIST and
+/// MAXFLOORDIST), and that distance comes from the engine's backed-off hit time: on a per-polygon
+/// (kDOP) floor like this fixture's it is 4 uu less than the real gap. Measured in the original
+/// with the engine hook (research/dishonored/COLLISION.md "Movement and the back-off"): a
+/// standing, crouched or Blink-landed player's box rests 6.73 uu above a kDOP floor, and 3.73 uu
+/// above a simplified-collision one after a mantle.
+const HOVER: f32 = dishonored_sim::movement::FLOOR_DIST + 4.0;
 
 #[test]
 fn spawn_settles_on_floor() {
@@ -97,6 +102,19 @@ fn spawn_settles_on_floor() {
     let p = r.p(1);
     assert_eq!(p.mode, MoveMode::Walking);
     assert!((p.position.z - STAND_Z - HOVER).abs() < 0.4, "z {}", p.position.z);
+}
+
+#[test]
+fn walking_hover_follows_the_floor_back_off() {
+    // The same floor as simplified collision (`AggGeom`, 1 uu back-off): the original rests the
+    // box 3.73 uu above it (engine hook, the mantle ledge of COLLISION.md "Movement and the
+    // back-off"), not 6.73 as on per-polygon floors.
+    let mut w = floor_world(|_| {});
+    w.tri_kind = vec![dishonored_world::hit_kind::SIMPLE; w.tris.len()];
+    let mut r = Run::new(w, &[(1, Vec3::new(0., 0., 300.), 0.)]);
+    r.settle();
+    let z = r.p(1).position.z;
+    assert!((z - STAND_Z - dishonored_sim::movement::FLOOR_DIST - 1.0).abs() < 0.4, "z {z}");
 }
 
 #[test]
@@ -291,7 +309,7 @@ fn mantle_onto_ledge() {
     r.steps(90, &[(1, input(0., 127, 0))]);
     assert!(r.events.iter().any(|e| matches!(e, SimEvent::Mantle { .. })), "no mantle");
     let p = r.p(1);
-    assert!((p.position.z - (150.0 + STAND_Z)).abs() < 3.0, "on ledge z {}", p.position.z);
+    assert!((p.position.z - (150.0 + STAND_Z + HOVER)).abs() < 3.0, "on ledge z {}", p.position.z);
     assert_eq!(p.mode, MoveMode::Walking);
 }
 
@@ -334,7 +352,7 @@ fn blink_to_platform_costs_mana_and_refunds() {
     let p = r.p(1);
     assert!(r.events.iter().any(|e| matches!(e, SimEvent::BlinkStart { .. })));
     assert!(p.position.x > 850.0, "blinked x {}", p.position.x);
-    assert!((p.position.z - (200.0 + STAND_Z)).abs() < 5.0, "on platform z {}", p.position.z);
+    assert!((p.position.z - (200.0 + STAND_Z + HOVER)).abs() < 5.0, "on platform z {}", p.position.z);
     assert_eq!(p.vitals.mana, 80.0);
     // Regen: 3 s delay + 20 points at 10/s.
     r.steps(60 * 6, &[(1, blink(0))]);

@@ -5,8 +5,11 @@
 //! research/dishonored/PLAYER.md "Engine physics".
 //!
 //! - The pawn sweeps an axis-aligned box `(radius, radius, half height)` against the world
-//!   (UE3 extent traces, U-016), and walks hovering between `MIN_FLOOR_DIST` and
-//!   `MAX_FLOOR_DIST` above the floor.
+//!   (UE3 extent traces, U-016), and walks keeping the floor check's distance between
+//!   `MIN_FLOOR_DIST` and `MAX_FLOOR_DIST`. Sweeps report the engine's backed-off hit time
+//!   (`hit_kind::engine_time`), as `MoveActor` and physWalking's floor check see it, so the box
+//!   rests `FLOOR_DIST` + 4 uu above a per-polygon floor and + 1 uu above simplified collision
+//!   (measured with the engine hook, research/dishonored/COLLISION.md "Movement and the back-off").
 //! - The engine constants are UE3's scaled by 1.27 in this build (MAXSTEPHEIGHTFUDGE 2.54,
 //!   MINFLOORDIST 2.413, MAXFLOORDIST 3.048, MAXSTEPSIDEZ 0.1016, MINSTEPSIZESQUARED 232.26,
 //!   braking stop speed 12.7).

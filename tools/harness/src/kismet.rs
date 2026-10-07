@@ -18,6 +18,7 @@ use dishonored_multiplayer::game::Game;
 use dishonored_multiplayer::mission::MissionMatch;
 use dishonored_multiplayer::mission::kismet_host;
 use dishonored_sim::input::{PlayerInput, buttons};
+use dishonored_world::WorldQuery as _;
 use glam::Vec3;
 
 const S: &str = "Original Kismet";
@@ -285,11 +286,49 @@ impl Play<'_> {
         me.pitch = (to.z / to.truncate().length().max(1.0)).atan().to_degrees();
     }
 
+    /// Stand where a player would use a Kismet usable from: on a floor no higher than the usable
+    /// (not on top of the object or the table it stands on), the pawn's box clear of the
+    /// geometry, the usable within the use reach of the eye (`MissionMatch::interaction`: 220).
+    /// False when no such spot is found within 170 uu.
+    fn place_to_use(&mut self, pos: Vec3) -> bool {
+        let map = self.m().current_map().to_string();
+        let Some(w) = self.maps.get(&map).map(|m| m.collision.clone()) else { return false };
+        let mut spot = None;
+        'search: for dist in [90.0f32, 130.0, 170.0] {
+            for i in 0..12 {
+                let a = i as f32 * std::f32::consts::TAU / 12.0;
+                let c = pos + Vec3::new(a.cos() * dist, a.sin() * dist, 0.0);
+                let Some(f) = dishonored_ai::snap_floor(&w, c + Vec3::Z * 40.0) else { continue };
+                // `snap_floor` puts the centre 90 above the floor.
+                if f.z - 90.0 > pos.z + 10.0 || (f + Vec3::Z * 64.0).distance(pos) > 210.0 {
+                    continue;
+                }
+                let mut contacts = Vec::new();
+                w.box_contacts(&dishonored_world::PawnBox::new(f + Vec3::Z * 5.0, 35.0, 87.5), dishonored_world::channel::PAWN, &mut contacts);
+                if contacts.iter().any(|k| k.depth > 0.5) {
+                    continue;
+                }
+                spot = Some(f);
+                break 'search;
+            }
+        }
+        let Some(best) = spot else { return false };
+        let me = self.mm().world.player_mut(AGENT).expect("agent");
+        me.position = best;
+        me.velocity = Vec3::ZERO;
+        let to = pos - (best + Vec3::Z * 64.0);
+        me.yaw = to.y.atan2(to.x).to_degrees();
+        me.pitch = (to.z / to.truncate().length().max(1.0)).atan().to_degrees();
+        true
+    }
+
     /// Stand in front of a Kismet usable and press use once.
     fn use_actor(&mut self, a: u32) -> bool {
         let list = kismet_host::usables(self.m());
         let Some((_, pos, _)) = list.iter().find(|u| matches!(u.0, kismet_host::KUse::Actor(x) | kismet_host::KUse::Pickup(x) if x == a)).cloned() else { return false };
-        self.place_near(pos, 90.0);
+        if !self.place_to_use(pos) {
+            self.place_near(pos, 90.0);
+        }
         let (yaw, pitch) = {
             let me = self.m().world.player(AGENT).unwrap();
             (me.yaw, me.pitch)

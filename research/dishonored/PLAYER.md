@@ -144,7 +144,10 @@ fields they touch (`research/ghidra/G_OffsetGroups.java`) and decompiled. CONFIR
   most 0.05 s; a move into a floor sloped below 0.98 counts as hitting it; a blocked move calls
   `stepUp`; then the floor is traced `MaxStepHeight + 2.54` down with the pawn's extent: on a
   walkable floor the pawn is moved back to 2.7305 above it when outside 2.413..3.048, else it
-  falls; the velocity becomes the achieved horizontal displacement over `dt`.
+  falls; the velocity becomes the achieved horizontal displacement over `dt`. These distances are
+  the engine's backed-off hit times, so the box really rests 6.73 uu above per-polygon floors and
+  3.73 uu above simplified collision (measured with the hook, COLLISION.md "Movement and the
+  back-off").
 - **`stepUp`** (slot 148, 0x006ADC10): a barrier with normal Z below 0.1016 or walkable is
   climbed by moving up `MaxStepHeight + 2.54`, along, and down again; a further near-vertical
   barrier with more than 232.26 uu^2 x time of move left repeats it; otherwise the move slides

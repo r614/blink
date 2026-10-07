@@ -115,6 +115,8 @@ Helpers:
 - `call <pc|pawn|addr> <Class.Func> [f:|i:|x:]...` runs ProcessEvent with raw parameters.
 - `shaders [filter]` lists pixel shaders and `capture <out.bmp>` saves the back buffer.
 - `measure trace N` prints N per-frame samples as CSV.
+- `place X Y Z [YAW]` writes the pawn's `Location` (and the controller's yaw), steps forward one
+  frame so physWalking looks for a floor, and prints where it settled a second later.
 
 The harness can use `dishonored_probe::Client::connect(pipe)` directly. The pipe name is the
 second line of the session file.

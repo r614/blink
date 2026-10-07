@@ -95,6 +95,35 @@ actor). A component is checked when it collides (0x00529E90), its bit is set and
   0.6428 (cos 50 deg, `DisTweaks_Pawn.m_fMaxWalkableFloorInDegrees`). The port reads the same
   values (`movement.max_step_height` 44, `walkable_floor_z` 0.64278764).
 
+## Movement and the back-off
+
+The pawn's movement consumes the same backed-off times (CONFIRMED, engine hook, 2026-10-07, Boyle
+exterior, fixed 1/60 s step). physWalking's floor check (0x006BD150) is a `MultiLineCheck`
+(0x0064A860) with flags 0x20DF and the pawn's extent, `MaxStepHeight + 2.54` = 46.54 uu down; it
+keeps the nearest hit and computes the floor distance as `Time x 46.54`, which it holds between
+2.413 and 3.048 (moving to 2.7305). That time is backed off by the hit kind, so the real gap
+under the box is larger. Measured by reading the pawn's `Location` and running the floor check
+under it with and without `TRACE_Accurate` (0x80000):
+
+| Spot | Floor | Location.Z | Box check, not accurate | Box check, accurate (real gap) |
+|---|---|---|---|---|
+| Runway (-3400, -3160), standing | kDOP (`ext_boyle_ground_garden_01`), z -310.0 | -215.770 | 2.730 | 6.730 |
+| Same, crouched (`CollisionHeight` 65) | same | -238.270 | 2.730 | 6.730 |
+| After a Blink along the runway | same, z -310.28 | -216.047 | 2.731 | 6.731 |
+| After a mantle onto a 119 uu ledge (-2370, -3500) | simplified collision (`Env_Blockout.collisions.Collision_model`), z 10.0 | 101.231 | 2.731 | 3.731 |
+
+So a walking pawn rests 2.7305 + 4 = 6.73 uu above per-polygon floors and 2.7305 + 1 = 3.73 uu
+above simplified collision. The port's movement sweeps use the engine time
+(`CollisionWorld::sweep_box` applies `hit_kind::engine_time`) and give the same numbers at both
+spots (`harness collision probe`: 0.05866 and 0.05868, as the original). Horizontal moves of a
+tick (a few uu) are backed off by a tenth of their length (the `0.1` clamp for checks under
+40 uu), so a pawn pressing into a wall closes in on it geometrically: the pawn that walked into
+the ledge above stopped 0.04 uu from its face.
+
+`dishonored_sim`'s mechanics tests use a per-polygon fixture floor, so their standing height is
+`STAND_Z + FLOOR_DIST + 4` (the tests assumed `+ FLOOR_DIST` before the audit; the hook
+measurement settled it).
+
 ## Sources
 
 Active colliding components per class (`collision_audit L_Boyle_Ext_P L_Boyle_Int_P`, effective

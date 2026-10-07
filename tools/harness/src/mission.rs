@@ -69,6 +69,9 @@ fn play(maps: &MapContents, def: &MissionDef, max_secs: f32) -> Result<Run> {
     let mut last_pos = Vec3::ZERO;
     let mut stuck = 0u32;
     let mut sidestep = 0u32;
+    // Sidesteps alternate sides: the navmesh path can hug a post the pawn's box cannot pass on
+    // one side (the funnel corners are not offset by the pawn's radius).
+    let mut side_sign = 1.0f32;
     for tick in 0..(max_secs * 60.0) as usize {
         let Game::Mission(m) = &g else { anyhow::bail!("not a mission game") };
         let host_id = m.setup.npcs.iter().find(|(n, _)| n == "host").map(|(_, s)| s.id);
@@ -122,17 +125,23 @@ fn play(maps: &MapContents, def: &MissionDef, max_secs: f32) -> Result<Run> {
                 if stuck > 40 {
                     stuck = 0;
                     sidestep = 25;
+                    side_sign = -side_sign;
                     follow.force_replan();
                 }
                 if sidestep > 0 {
                     sidestep -= 1;
-                    input.yaw += 90.0;
+                    input.yaw += 90.0 * side_sign;
                     if sidestep == 24 {
                         input.buttons |= buttons::JUMP;
                     }
                 }
             }
             last_pos = me.position;
+        }
+        // MISSION_AGENT_DEBUG: the agent's state every 2 s (position, host, stuck counters, path).
+        if tick % 120 == 0 && std::env::var_os("MISSION_AGENT_DEBUG").is_some() {
+            let me = m.world.player(AGENT).map(|p| (p.position, p.alive, p.mode));
+            eprintln!("t {:.0} agent {me:?} host {:?} know {know} stuck {stuck} side {sidestep} yaw {:.0} path {:.0?}", tick as f32 / 60.0, host.as_ref().map(|h| h.position), input.yaw, follow.path.iter().take(4).collect::<Vec<_>>());
         }
         let out = g.step(&[(AGENT, input)], &maps.set, &mc.sim);
         for e in &out.events {
