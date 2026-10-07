@@ -216,12 +216,56 @@ pub enum Record {
     SimEvents,
 }
 
-/// A level-data sweep instead of a scripted run.
+/// How a sweep picks its queries (several can be combined).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Sampling {
+    /// The navmesh grid / foot-waist-head / link sweeps of `harness collision`.
+    Navmesh,
+    /// Every collision primitive from every approach direction (`reach` uu each side).
+    PrimitiveDirected { reach: f32 },
+    /// After a first pass: `per` queries within `radius` uu of each disagreement, `rounds`
+    /// times (each round around the previous round's disagreements).
+    Densify { rounds: u32, per: u32, radius: f32 },
+}
+
+/// Which trace profiles the queries run with.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Profiles {
+    /// Every trace call site of the exe (from the Ghidra index, phase 3).
+    Enumerated,
+    /// A listed subset.
+    Listed(Vec<crate::query::TraceProfile>),
+}
+
+/// A world state to answer the queries in (one cache entry per state).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldStateSpec {
+    pub name: String,
+    /// Actor settings (`<package>:<actor>` -> state); empty: the map's initial state.
+    #[serde(default)]
+    pub settings: Vec<crate::query::StateSetting>,
+    /// Or every toggleable actor of a class in each of its states (`DisDoor`): expanded by the
+    /// runner into one state per (actor, state).
+    #[serde(default)]
+    pub each_state_of: Option<String>,
+}
+
+/// A level-data sweep instead of a scripted run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Sweep {
     pub probe: Probe,
     /// Query generator and version (`harness-collision-v1`).
     pub generator: String,
+    #[serde(default)]
+    pub sampling: Vec<Sampling>,
+    #[serde(default)]
+    pub profiles: Option<Profiles>,
+    /// States to re-run the targeted queries in (empty: the initial state only).
+    #[serde(default)]
+    pub states: Vec<WorldStateSpec>,
+    /// Run a structural diff of the system's objects first (the primary proof).
+    #[serde(default)]
+    pub structure: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -401,5 +445,17 @@ mod tests {
         assert!(Scenario::parse(r#"(name: "x", system: Movement, map: "M", ticks: 5, input: [(tick: 7, action: Press(Jump))])"#).is_err());
         let sweep = Scenario::parse(r#"(name: "sweep/x", system: MapSweep, map: "M", sweep: Some((probe: Collision, generator: "g")))"#).unwrap();
         assert_eq!(sweep.sweep.unwrap().probe, Probe::Collision);
+        let full = Scenario::parse(
+            r#"(name: "sweep/full", system: MapSweep, map: "M", sweep: Some((probe: Collision, generator: "g", structure: true,
+                sampling: [Navmesh, PrimitiveDirected(reach: 64), Densify(rounds: 2, per: 8, radius: 16)],
+                profiles: Some(Listed([(name: "vision", tag: "V", flags: 0x8023086, extent: (0, 0, 0))])),
+                states: [(name: "initial"), (name: "doors", each_state_of: Some("DisDoor")),
+                         (name: "gate open", settings: [(actor: "L_X:DisDoor_3", state: "2")])])))"#,
+        )
+        .unwrap();
+        let sw = full.sweep.unwrap();
+        assert_eq!(sw.sampling.len(), 3);
+        assert_eq!(sw.states[2].settings[0].state, "2");
+        assert!(matches!(sw.profiles, Some(Profiles::Listed(ref v)) if v[0].flags == 0x0802_3086));
     }
 }

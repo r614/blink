@@ -1,0 +1,18 @@
+// The collision sweep of the Boyle exterior: structural diff first, then the navmesh and
+// primitive-directed queries with every trace profile of the exe, in the initial state and with
+// every door in each of its states, densified twice around the disagreements.
+// Today (phase 1) `oracle collision` runs the cached navmesh capture; the rest of this spec is
+// executed once the hook side exists (ORACLE.md, phase 2/3).
+(
+    name: "sweep/boyle_ext_collision",
+    system: MapSweep,
+    map: "L_Boyle_Ext_P",
+    sweep: Some((
+        probe: Collision,
+        generator: "harness-collision-v1",
+        structure: true,
+        sampling: [Navmesh, PrimitiveDirected(reach: 64), Densify(rounds: 2, per: 8, radius: 16)],
+        profiles: Some(Enumerated),
+        states: [(name: "initial"), (name: "doors", each_state_of: Some("DisDoor"))],
+    )),
+)

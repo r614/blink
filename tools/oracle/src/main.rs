@@ -6,7 +6,10 @@
 //!                         [--generator G] [--capture-seconds S]
 //! oracle snapshot --map M...                 build the port snapshot (needs the `import` feature)
 //! oracle collision [--map M]... [--ids 1,2,3] [--out DIR] [--examples N]
-//! oracle gen collision --map M --out Q.txt   query batch for `probe_launch collide`
+//! oracle gen collision --map M --out Q.txt [--sampling navmesh,prim] [--reach R]
+//!                                            query batch for `probe_launch collide`
+//! oracle densify collision --map M --out Q.txt [--per N] [--radius R]   queries around disagreements
+//! oracle structure --map M                   port collision structure (vs a cached reflection dump)
 //! oracle scenario [NAME...] [--dir DIR] [--out DIR]
 //! oracle sweep [--out DIR] [--no-coverage]   every cached map and scenario -> scorecard + work list
 //! oracle bench import|queries --map M        measure the port's costs
@@ -71,6 +74,17 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
+/// Classify the residuals with the cause book (`fixtures/oracle/causes.ron`), add the
+/// residual table (definition of done) and write the scorecard, work list and dossiers.
+fn write_report(dir: &Path, card: &mut Scorecard, items: &mut [WorkItem], limit: usize) -> Result<()> {
+    let book = dishonored_oracle::residual::CauseBook::load(&repo_root().join("fixtures").join("oracle").join("causes.ron"))?;
+    book.classify(items);
+    let summary = dishonored_oracle::residual::ResidualSummary::of(items);
+    card.tables.insert(0, summary.table());
+    report::write_all(dir, card, items, limit)?;
+    Ok(())
+}
+
 fn out_dir(a: &Args, cmd: &str) -> PathBuf {
     a.opt("--out").map(PathBuf::from).unwrap_or_else(|| repo_root().join("harness_out").join("oracle").join(cmd))
 }
@@ -92,12 +106,14 @@ fn main() -> Result<()> {
         "snapshot" => cmd_snapshot(&a),
         "collision" => cmd_collision(&a).map(|_| ()),
         "gen" => cmd_gen(&a),
+        "densify" => cmd_densify(&a),
+        "structure" => cmd_structure(&a),
         "scenario" => cmd_scenario(&a).map(|_| ()),
         "sweep" => cmd_sweep(&a),
         "bench" => cmd_bench(&a),
         "cache" => cmd_cache(&a),
         _ => {
-            eprintln!("{}", include_str!("main.rs").lines().skip(2).take(13).map(|l| l.trim_start_matches("//! ")).collect::<Vec<_>>().join("\n"));
+            eprintln!("{}", include_str!("main.rs").lines().skip(2).take(16).map(|l| l.trim_start_matches("//! ")).collect::<Vec<_>>().join("\n"));
             bail!("unknown command `{cmd}`")
         }
     }
@@ -253,10 +269,10 @@ fn coverage_card(run: &coverage::CoverageRun) -> Scorecard {
 
 fn cmd_coverage(a: &Args) -> Result<()> {
     let t0 = Instant::now();
-    let (run, items) = run_coverage(a)?;
-    let card = coverage_card(&run);
+    let (run, mut items) = run_coverage(a)?;
+    let mut card = coverage_card(&run);
     let dir = out_dir(a, "coverage");
-    report::write_all(&dir, &card, &items, 200)?;
+    write_report(&dir, &mut card, &mut items, 200)?;
     std::fs::write(dir.join("coverage.json"), serde_json::to_string_pretty(&CoverageOut { run: run.clone() })?)?;
     println!("{:<34} {:>18} {:>18} {:>20} {:>8}", "map", "actors", "Kismet ops", "props read", "overall");
     for m in run.maps.iter().chain(std::iter::once(&run.all)) {
@@ -327,10 +343,106 @@ fn cmd_gen(a: &Args) -> Result<()> {
     let map = a.opt("--map").context("--map")?;
     let out = a.opt("--out").context("--out")?;
     let (w, json) = port::snapshot(&cache::root(), &map, false)?.world();
-    let nav = w.nav.as_ref().context("map without navigation mesh")?;
-    let q = querygen::generate(nav, pawn_extent(&json)?);
+    let pawn = pawn_extent(&json)?;
+    let sampling = a.opt("--sampling").unwrap_or_else(|| "navmesh".into());
+    let mut q = Vec::new();
+    let mut generator = Vec::new();
+    for s in sampling.split(',') {
+        match s {
+            "navmesh" => {
+                let nav = w.nav.as_ref().context("map without navigation mesh")?;
+                q.extend(querygen::generate(nav, pawn));
+                generator.push(querygen::GENERATOR.to_string());
+            }
+            "prim" => {
+                // Aimed at the port's primitives until the hook's structural dump lists the
+                // original's (phase 2): every collision source, every measured profile.
+                let reach: f32 = a.opt("--reach").and_then(|s| s.parse().ok()).unwrap_or(64.0);
+                let prims = querygen::port_primitives(&w);
+                q.extend(dishonored_oracle::sampling::primitive_directed(&prims, &querygen::measured_profiles(pawn), reach));
+                generator.push(format!("{}-v1(reach {reach})", querygen::PRIM_GENERATOR));
+            }
+            other => bail!("unknown sampling `{other}` (navmesh, prim)"),
+        }
+    }
+    let generator = generator.join("+");
     std::fs::write(&out, query::queries_text(&map, &q))?;
-    println!("{} queries ({}) -> {out}; hash {:016x}", q.len(), querygen::GENERATOR, query::query_set_hash(querygen::GENERATOR, &q));
+    println!("{} queries ({generator}) -> {out}; hash {:016x}; import the capture with --generator \"{generator}\"", q.len(), query::query_set_hash(&generator, &q));
+    Ok(())
+}
+
+/// `oracle densify collision --map M --out FILE [--per N] [--radius R] [--seed S]`: queries
+/// around every disagreement of the cached set (adaptive densification, next capture).
+fn cmd_densify(a: &Args) -> Result<()> {
+    let root = cache::root();
+    let map = a.opt("--map").context("--map")?;
+    let out = a.opt("--out").context("--out")?;
+    let per = a.opt("--per").and_then(|s| s.parse().ok()).unwrap_or(8);
+    let radius = a.opt("--radius").and_then(|s| s.parse().ok()).unwrap_or(16.0);
+    let seed = a.opt("--seed").and_then(|s| s.parse().ok()).unwrap_or(1);
+    let exe = exe_sha(a, &root)?;
+    let (_, path) = cached_sets(&exe).into_iter().find(|(k, _)| k.subject.eq_ignore_ascii_case(&map)).context("no cached collision set for the map")?;
+    let (_, set): Stored = cache::decode(&std::fs::read(path)?)?.1;
+    let (w, _) = port::snapshot(&root, &map, false)?.world();
+    let port = port::collision_answers(&w, &port::movers(&w), &set, None);
+    let d = diff::compare_collision(&set, &port);
+    let ids: Vec<u32> = d.disagreements.iter().map(|x| x.id).collect();
+    let q = dishonored_oracle::sampling::densify(&set.queries, &ids, per, radius, seed);
+    let generator = format!("densify-v1({}, per {per}, radius {radius}, seed {seed})", set.generator);
+    std::fs::write(&out, query::queries_text(&map, &q))?;
+    println!("{} queries around {} disagreements -> {out}; import with --generator \"{generator}\"", q.len(), ids.len());
+    Ok(())
+}
+
+/// `oracle structure --map M`: the port's collision structure (per collision source: trace
+/// channels, triangle count, bounds) against the original's reflection dump when one is
+/// cached (`Probe::State`, phase 2); without it the port side is written and the diff is
+/// reported as pending.
+fn cmd_structure(a: &Args) -> Result<()> {
+    use dishonored_oracle::structure::{FieldValue, ObjectRecord, StructureDump};
+    let root = cache::root();
+    let map = a.opt("--map").context("--map")?;
+    let (w, _) = port::snapshot(&root, &map, false)?.world();
+    let mut port = StructureDump { system: "collision".into(), side: "port".into(), ..Default::default() };
+    let mut acc: Vec<(u8, u64, [f32; 3], [f32; 3])> = vec![(0, 0, [f32::MAX; 3], [f32::MIN; 3]); w.sources.len()];
+    for t in &w.tris {
+        let Some(e) = acc.get_mut(t.source as usize) else { continue };
+        e.0 |= t.channels;
+        e.1 += 1;
+        for p in [t.a, t.b, t.c] {
+            for k in 0..3 {
+                e.2[k] = e.2[k].min(p[k]);
+                e.3[k] = e.3[k].max(p[k]);
+            }
+        }
+    }
+    for (name, (ch, n, lo, hi)) in w.sources.iter().zip(&acc) {
+        if *n == 0 {
+            continue;
+        }
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert("PortChannels".into(), FieldValue::Int(*ch as i64));
+        fields.insert("PortTriangles".into(), FieldValue::Int(*n as i64));
+        fields.insert("BoundsMin".into(), FieldValue::Floats(lo.iter().map(|x| *x as f64).collect()));
+        fields.insert("BoundsMax".into(), FieldValue::Floats(hi.iter().map(|x| *x as f64).collect()));
+        port.objects.insert(name.clone(), ObjectRecord { class: "CollisionSource".into(), fields });
+    }
+    let dir = out_dir(a, "structure");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join(format!("{map}.port.json")), serde_json::to_string(&port)?)?;
+    let exe = exe_sha(a, &root)?;
+    let orig = cache::list(&root, Some(&exe)).into_iter().find(|(k, _)| k.probe == Probe::State && k.subject.eq_ignore_ascii_case(&map));
+    match orig {
+        None => println!("{map}: port structure of {} collision sources -> {}; no original reflection dump cached yet (phase 2): structural diff pending", port.objects.len(), dir.display()),
+        Some((_, p)) => {
+            let (_, (_, o)): (OracleKey, (Provenance, StructureDump)) = cache::decode(&std::fs::read(p)?)?;
+            let d = dishonored_oracle::structure::diff(&o, &port, &|_| 0.01);
+            let mut items = dishonored_oracle::structure::work_items(&map, &o, &d, 10);
+            let mut card = Scorecard { title: format!("Structure: {map}"), tables: vec![dishonored_oracle::structure::table(&map, &d)], ..Default::default() };
+            write_report(&dir, &mut card, &mut items, 100)?;
+            println!("{map}: {} of {} fields equal; report {}", d.fields_equal, d.fields_compared, dir.display());
+        }
+    }
     Ok(())
 }
 
@@ -425,7 +537,7 @@ fn cmd_collision(a: &Args) -> Result<CollisionRun> {
     items.sort_by(|x, y| y.impact.total_cmp(&x.impact).then(x.id.cmp(&y.id)));
     if a.0.first().map(String::as_str) == Some("collision") {
         let dir = out_dir(a, "collision");
-        report::write_all(&dir, &card, &items, 100)?;
+        write_report(&dir, &mut card, &mut items, 100)?;
         println!("{} work items; report: {} ({:.2} s)", items.len(), dir.join("SCORECARD.md").display(), t_all.elapsed().as_secs_f64());
     }
     Ok(CollisionRun { card, items })
@@ -510,7 +622,7 @@ fn cmd_scenario(a: &Args) -> Result<(Scorecard, Vec<WorkItem>)> {
     card.summary.push(("total time".into(), format!("{:.2} s", t_all.elapsed().as_secs_f64())));
     if a.0.first().map(String::as_str) == Some("scenario") {
         let dir = out_dir(a, "scenario");
-        report::write_all(&dir, &card, &items, 100)?;
+        write_report(&dir, &mut card, &mut items, 100)?;
         print!("{}", card.tables[0].markdown());
         print!("{}", card.tables[1].markdown());
         println!("report: {} ({:.2} s)", dir.join("SCORECARD.md").display(), t_all.elapsed().as_secs_f64());
@@ -555,7 +667,7 @@ fn cmd_sweep(a: &Args) -> Result<()> {
     items.sort_by(|x, y| y.impact.total_cmp(&x.impact).then(x.id.cmp(&y.id)));
     card.summary.push(("timings".into(), format!("{} (total {:.2} s)", timings.join(", "), t0.elapsed().as_secs_f64())));
     let dir = out_dir(a, "sweep");
-    report::write_all(&dir, &card, &items, 300)?;
+    write_report(&dir, &mut card, &mut items, 300)?;
     println!("{} work items; {}; report: {}", items.len(), card.summary.last().map(|x| x.1.clone()).unwrap_or_default(), dir.join("SCORECARD.md").display());
     Ok(())
 }

@@ -28,6 +28,10 @@ pub struct WorkItem {
     pub repro: Vec<String>,
     /// Where in the port the fix most likely goes.
     pub code: Vec<String>,
+    /// The residual's classified cause (from the cause book, [`crate::residual`]); `None`:
+    /// unclassified, so the probe is not done.
+    #[serde(default)]
+    pub cause: Option<crate::residual::Cause>,
 }
 
 /// A titled table.
@@ -105,6 +109,12 @@ pub fn dossier_markdown(rank: usize, w: &WorkItem) -> String {
     let mut s = format!("# {rank}. {}\n\n- id: `{}`\n- probe: {}\n- system: {}\n- count: {}\n- impact: {:.2}\n", w.title, w.id, w.probe, w.system, w.count, w.impact);
     if !w.maps.is_empty() {
         let _ = writeln!(s, "- maps: {}", w.maps.join(", "));
+    }
+    match &w.cause {
+        Some(c) => {
+            let _ = writeln!(s, "- cause: **{:?}**: {} (rule `{}`{})", c.kind, c.text, c.rule, if c.evidence.is_empty() { String::new() } else { format!("; {}", c.evidence) });
+        }
+        None => s.push_str("- cause: **unclassified** (classify it in fixtures/oracle/causes.ron once explained)\n"),
     }
     s.push_str("\n## Evidence\n\n");
     for e in &w.evidence {

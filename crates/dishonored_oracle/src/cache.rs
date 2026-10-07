@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const MAGIC: [u8; 8] = *b"BLKORACL";
-pub const FORMAT_VERSION: u16 = 1;
+pub const FORMAT_VERSION: u16 = 2;
 const HEADER: usize = 8 + 2 + 2 + 4 + 8 + 8;
 
 /// What kind of answers a file holds.

@@ -314,6 +314,7 @@ pub fn collision_work_items(map: &str, set: &CollisionSet, d: &CollisionDiff, ex
                 "crates/dishonored_world/src/lib.rs (raycast, sweep_box)".into(),
                 "crates/dishonored_assets/src/level.rs, prop_collision.rs (which objects collide, on which channels)".into(),
             ],
+            cause: None,
         });
     }
     out
@@ -475,6 +476,7 @@ pub fn scenario_work_items(s: &Scenario, checks: &[CheckResult], diff: Option<&T
             evidence: vec![format!("reference: {}", c.source), format!("scenario: {}", s.description)],
             repro: vec![format!("oracle scenario {}", s.name)],
             code: vec![format!("the {system} code of dishonored_sim / dishonored_ai")],
+            cause: None,
         });
     }
     if let Some(Divergence { tick, kind }) = diff.and_then(|d| d.first.as_ref()) {
@@ -489,6 +491,7 @@ pub fn scenario_work_items(s: &Scenario, checks: &[CheckResult], diff: Option<&T
             evidence: vec![format!("{kind:?}")],
             repro: vec![format!("oracle scenario {} --trace", s.name)],
             code: Vec::new(),
+            cause: None,
         });
     }
     out

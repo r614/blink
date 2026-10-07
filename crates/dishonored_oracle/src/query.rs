@@ -23,6 +23,38 @@ pub struct CollisionQuery {
     pub extent: [f32; 3],
     /// UE3 / Dishonored trace flags.
     pub flags: u32,
+    /// What the query was aimed at: a primitive (`prim:<object>`), the neighbourhood of an
+    /// earlier disagreement (`near:<query id>`), or nothing for spatial sampling.
+    #[serde(default)]
+    pub target: Option<String>,
+}
+
+/// One way the game traces: the flags and extent of a trace call site. The full list is
+/// enumerated from the exe's trace call sites (phase 3, the Ghidra index); until then the
+/// profiles measured with the hook are listed with `call_site: None`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraceProfile {
+    /// `Move_Player`, `pistol`, `vision`...
+    pub name: String,
+    /// Trace tag used in query tags (`P`, `J`, `V`...).
+    pub tag: String,
+    pub flags: u32,
+    pub extent: [f32; 3],
+    /// Address of the trace call in `Dishonored.exe`.
+    #[serde(default)]
+    pub call_site: Option<u32>,
+    /// Where the profile comes from (measurement, index).
+    #[serde(default)]
+    pub source: String,
+}
+
+/// One setting of a toggleable thing (door, mover, collision toggle, Kismet-driven state).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateSetting {
+    /// `<package>:<actor>`.
+    pub actor: String,
+    /// The state (`EDisDoorState` number, `on` / `off`, a matinee position...).
+    pub state: String,
 }
 
 impl CollisionQuery {
@@ -79,6 +111,15 @@ pub struct CollisionSet {
     pub names: Vec<String>,
     /// `DisDoor` states when the checks ran: (`<package>:<actor>`, `EDisDoorState`).
     pub doors: Vec<(String, u8)>,
+    /// The world state the set was answered in (`initial`, or a state sweep's name), with the
+    /// settings that define it. Each state of a sweep is its own set (and cache entry).
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub state_settings: Vec<StateSetting>,
+    /// The trace profiles the queries were expanded over.
+    #[serde(default)]
+    pub profiles: Vec<TraceProfile>,
 }
 
 /// Hash of a query set (order, tags, coordinates to 0.01 uu, flags): the cache key's
@@ -94,8 +135,16 @@ pub fn query_set_hash(generator: &str, queries: &[CollisionQuery]) -> u64 {
 }
 
 impl CollisionSet {
+    /// The cache key's query hash: the queries and the world state they were answered in.
     pub fn query_hash(&self) -> u64 {
-        query_set_hash(&self.generator, &self.queries)
+        let mut h = query_set_hash(&self.generator, &self.queries);
+        if !self.state.is_empty() && self.state != "initial" {
+            h = fnv64_more(h, self.state.as_bytes());
+            for s in &self.state_settings {
+                h = fnv64_more(fnv64_more(h, s.actor.as_bytes()), s.state.as_bytes());
+            }
+        }
+        h
     }
     pub fn name(&self, i: u32) -> &str {
         if i == NO_NAME { "-" } else { self.names.get(i as usize).map(String::as_str).unwrap_or("?") }
@@ -128,7 +177,7 @@ pub fn actor_key(name: &str) -> String {
 /// `id sx sy sz ex ey ez hx hy hz flags` where `id` is `<n>[:<kind>:<trace>]`; output lines:
 /// `id hit time lx ly lz nx ny nz actor component`, and `# door <pkg>:<actor> <state>` comments.
 pub fn parse_probe_text(generator: &str, queries_txt: &str, results_txt: &str) -> Result<CollisionSet> {
-    let mut set = CollisionSet { generator: generator.into(), ..Default::default() };
+    let mut set = CollisionSet { generator: generator.into(), state: "initial".into(), ..Default::default() };
     let mut ids: HashMap<String, usize> = HashMap::new();
     for (ln, line) in queries_txt.lines().enumerate() {
         let line = line.trim();
@@ -144,7 +193,7 @@ pub fn parse_probe_text(generator: &str, queries_txt: &str, results_txt: &str) -
         let tag = f[0].split_once(':').map(|x| x.1).unwrap_or("").to_string();
         let flags = parse_u32(f[10])?;
         ids.insert(num.to_string(), set.queries.len());
-        set.queries.push(CollisionQuery { tag, start: [v[0], v[1], v[2]], end: [v[3], v[4], v[5]], extent: [v[6], v[7], v[8]], flags });
+        set.queries.push(CollisionQuery { tag, start: [v[0], v[1], v[2]], end: [v[3], v[4], v[5]], extent: [v[6], v[7], v[8]], flags, target: f.get(11).map(|s| s.to_string()) });
     }
     set.answers = vec![None; set.queries.len()];
     let mut name_ids: HashMap<String, u32> = HashMap::new();
@@ -160,7 +209,8 @@ pub fn parse_probe_text(generator: &str, queries_txt: &str, results_txt: &str) -
     for (ln, line) in results_txt.lines().enumerate() {
         if let Some(rest) = line.strip_prefix("# door ") {
             let mut f = rest.split_whitespace();
-            if let (Some(a), Some(s)) = (f.next(), f.next().and_then(|s| s.parse().ok())) {
+            if let (Some(a), Some(s)) = (f.next(), f.next().and_then(|s| s.parse::<u8>().ok())) {
+                set.state_settings.push(StateSetting { actor: a.to_string(), state: s.to_string() });
                 set.doors.push((a.to_string(), s));
             }
             continue;
@@ -198,8 +248,9 @@ pub fn queries_text(map: &str, queries: &[CollisionQuery]) -> String {
     for (i, x) in queries.iter().enumerate() {
         let _ = writeln!(
             s,
-            "{i}:{} {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} {:#x}",
-            x.tag, x.start[0], x.start[1], x.start[2], x.end[0], x.end[1], x.end[2], x.extent[0], x.extent[1], x.extent[2], x.flags
+            "{i}:{} {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} {:#x}{}",
+            x.tag, x.start[0], x.start[1], x.start[2], x.end[0], x.end[1], x.end[2], x.extent[0], x.extent[1], x.extent[2], x.flags,
+            x.target.as_ref().map(|t| format!(" {}", t.replace(char::is_whitespace, "_"))).unwrap_or_default()
         );
     }
     s
@@ -243,7 +294,7 @@ mod tests {
     #[test]
     fn coord_hash_matches_harness_rule() {
         // (0,0,0)->(0,0,0) ext 0: nine zero i64s.
-        let q = CollisionQuery { tag: String::new(), start: [0.0; 3], end: [0.0; 3], extent: [0.0; 3], flags: 0 };
+        let q = CollisionQuery { tag: String::new(), start: [0.0; 3], end: [0.0; 3], extent: [0.0; 3], flags: 0, target: None };
         let mut h: u32 = 0x811c_9dc5;
         for _ in 0..9 * 8 {
             h ^= 0;

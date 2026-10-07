@@ -514,6 +514,7 @@ pub fn work_items(maps: &[MapCoverage], examples: &HashMap<String, Vec<String>>,
             evidence,
             repro: vec![format!("oracle coverage --map {}", per.first().map(|x| x.0.as_str()).unwrap_or(""))],
             code: vec![code.into()],
+            cause: None,
         });
     }
     out.sort_by(|a, b| b.impact.total_cmp(&a.impact).then(a.id.cmp(&b.id)));

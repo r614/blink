@@ -4,7 +4,9 @@
 //! pawn-box sweeps along links and out of every polygon), so captures made with either tool
 //! share query ids.
 
-use dishonored_oracle::query::CollisionQuery;
+use dishonored_oracle::query::{CollisionQuery, TraceProfile};
+use dishonored_oracle::sampling::Primitive;
+use dishonored_world::CollisionWorld;
 use dishonored_world::nav::NavWorld;
 use glam::Vec3;
 
@@ -26,7 +28,44 @@ fn flags(trace: &str) -> u32 {
 }
 
 fn q(kind: &str, trace: &str, start: Vec3, end: Vec3, extent: Vec3) -> CollisionQuery {
-    CollisionQuery { tag: format!("{kind}:{trace}"), start: start.to_array(), end: end.to_array(), extent: extent.to_array(), flags: flags(trace) }
+    CollisionQuery { tag: format!("{kind}:{trace}"), start: start.to_array(), end: end.to_array(), extent: extent.to_array(), flags: flags(trace), target: None }
+}
+
+/// Generator id of the primitive-directed queries.
+pub const PRIM_GENERATOR: &str = "primitive-directed";
+
+/// The trace profiles measured with the hook so far (COLLISION notes of the collision audit):
+/// the player's movement as a line and as its box, the pistol shot and a line of sight. The
+/// exe's full list comes from its trace call sites (phase 3).
+pub fn measured_profiles(pawn: (f32, f32)) -> Vec<TraceProfile> {
+    let p = |name: &str, tag: &str, flags: u32, extent: [f32; 3]| TraceProfile { name: name.into(), tag: tag.into(), flags, extent, call_site: None, source: "hook measurement 2026-10-07".into() };
+    vec![
+        p("player move (line)", "P", MOVE_FLAGS, [0.0; 3]),
+        p("player move (box)", "PB", MOVE_FLAGS, [pawn.0, pawn.0, pawn.1]),
+        p("pistol shot", "J", PISTOL_FLAGS & !TRACE_PAWNS, [0.0; 3]),
+        p("line of sight", "V", VISION_FLAGS & !TRACE_PAWNS, [0.0; 3]),
+    ]
+}
+
+/// One primitive per port collision source: the centroid and normal of its largest triangle.
+pub fn port_primitives(w: &CollisionWorld) -> Vec<Primitive> {
+    let mut best: Vec<Option<(f32, usize)>> = vec![None; w.sources.len()];
+    for (i, t) in w.tris.iter().enumerate() {
+        let area = (t.b - t.a).cross(t.c - t.a).length();
+        if let Some(b) = best.get_mut(t.source as usize) {
+            if b.is_none_or(|x| area > x.0) {
+                *b = Some((area, i));
+            }
+        }
+    }
+    best.iter()
+        .enumerate()
+        .filter_map(|(s, b)| {
+            let t = &w.tris[(*b)?.1];
+            let c = (t.a + t.b + t.c) / 3.0;
+            Some(Primitive { name: w.sources[s].clone(), point: c.to_array(), normal: t.n.to_array() })
+        })
+        .collect()
 }
 
 /// The query batch of a map (deterministic). `pawn`: the player's (radius, half height).
