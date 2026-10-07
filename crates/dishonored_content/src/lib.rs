@@ -266,7 +266,13 @@ pub fn add_level_blockers(w: CollisionWorld, content: &Content, map: &str) -> Co
             }
             continue;
         }
-        match dishonored_assets::prop_collision::read_prop_bodies(content, &pkgs, &actor, &Default::default()) {
+        // A usable object rests on the first frame of its first stage (a bin's lid closed; its
+        // reference pose has it open).
+        let bodies = match prop {
+            Some(prop) => dishonored_assets::prop_collision::usable_start_bodies(content, &pkgs, prop, tw.as_ref()),
+            None => dishonored_assets::prop_collision::read_prop_bodies(content, &pkgs, &actor, &Default::default()),
+        };
+        match bodies {
             Ok(b) => extra.push((b.actor, channels, dishonored_world::hit_kind::OTHER, b.tris)),
             Err(e) => eprintln!("warning: collision of {actor}: {e:#}"),
         }
@@ -306,7 +312,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     let sim = load_sim_config(&content).context("gameplay config")?;
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).ok();
-    let coll_path = dir.join(format!("{map}.collision12.bin"));
+    let coll_path = dir.join(format!("{map}.collision13.bin"));
     let spawn_path = dir.join(format!("{map}.spawns.json"));
     let (collision, spawns) = match (CollisionWorld::load(&coll_path), std::fs::read_to_string(&spawn_path)) {
         (Ok(w), Ok(s)) => (w, serde_json::from_str::<Vec<Spawn>>(&s).unwrap_or_default()),

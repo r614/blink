@@ -131,6 +131,11 @@ pub fn read_prop_bodies(content: &Content, packages: &[String], actor: &str, pos
 /// The local bone pose of the last frame of `anim` from a prop's AnimSets (Edge joints bound to
 /// the set's tracks in the mesh's bone order, as the runtime poses doors).
 pub fn last_frame_pose(content: &Content, anim_sets: &[(String, String)], bone_order: &[String], anim: &str) -> Option<BonePose> {
+    frame_pose(content, anim_sets, bone_order, anim, true)
+}
+
+/// The local bone pose of the first (`last` false) or last frame of `anim`.
+pub fn frame_pose(content: &Content, anim_sets: &[(String, String)], bone_order: &[String], anim: &str, last: bool) -> Option<BonePose> {
     for (pkg, set) in anim_sets.iter().rev() {
         let Ok(mut lib) = crate::characters::load_anim_set(content, pkg, set, &[anim]) else { continue };
         let Some(clip) = lib.clips.values().next().cloned() else { continue };
@@ -138,10 +143,10 @@ pub fn last_frame_pose(content: &Content, anim_sets: &[(String, String)], bone_o
         lib.tracks.sort_by_key(idx);
         let mut pose = BonePose::new();
         // The last frame (sampling at the duration would wrap to the first one).
-        let last = clip.num_frames.checked_sub(1)?;
+        let frame = if last { clip.num_frames.checked_sub(1)? } else { 0 };
         for (j, tn) in lib.tracks.iter().enumerate() {
-            let q = clip.rotations.get(last).and_then(|f| f.get(j)).copied().flatten();
-            let t = clip.translations.get(last).and_then(|f| f.get(j)).copied().flatten();
+            let q = clip.rotations.get(frame).and_then(|f| f.get(j)).copied().flatten();
+            let t = clip.translations.get(frame).and_then(|f| f.get(j)).copied().flatten();
             if let Some(q) = q {
                 pose.insert(tn.to_ascii_lowercase(), (q, t));
             }
@@ -149,6 +154,28 @@ pub fn last_frame_pose(content: &Content, anim_sets: &[(String, String)], bone_o
         return Some(pose);
     }
     None
+}
+
+/// The bodies of a usable object (not a door) as the map starts: posed by the first frame of its
+/// first stage's transition animation (`m_Stages[0].m_TransitionAnimName` of its usable-object
+/// tweak), else at the reference pose.
+pub fn usable_start_bodies(content: &Content, packages: &[String], prop: &dishonored_ir::SkeletalProp, tweak: Option<&crate::tweaks::TMap>) -> Result<PropBodies> {
+    let anim = tweak.and_then(|t| match t.get("m_Stages") {
+        Some(crate::tweaks::TVal::List(l)) => match l.first().and_then(|s| s.get("m_TransitionAnimName")) {
+            Some(crate::tweaks::TVal::Name(n)) if n != "None" => Some(n.clone()),
+            _ => None,
+        },
+        _ => None,
+    });
+    let mut pose = BonePose::new();
+    if let Some(anim) = anim {
+        let (mpkg, mi) = export_of(content, &prop.mesh).context("usable mesh")?;
+        let order: Vec<String> = read_skeletal_mesh(&mpkg, mi)?.bones.iter().map(|b| b.name.clone()).collect();
+        if let Some(p) = frame_pose(content, &prop.anim_sets, &order, &anim, false) {
+            pose = p;
+        }
+    }
+    read_prop_bodies(content, packages, &prop.actor, &pose)
 }
 
 /// A door's bodies in every state it can rest in: (`EDisDoorState`, triangles); 0 closed (the
