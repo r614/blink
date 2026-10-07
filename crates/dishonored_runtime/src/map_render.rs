@@ -221,8 +221,9 @@ fn vector(p: &MaterialParams, name: &str) -> Option<[f32; 4]> {
 /// Map a Dishonored material (Arkane slot convention) onto Bevy's StandardMaterial.
 ///
 /// Approximations (documented in research/LOG.md, "Full materials"):
-/// - UE3 Phong `SP_Specular_Power` n -> GGX via alpha = sqrt(2 / (n + 2)).
-/// - `S_` map -> specular tint texture, `S_Specular_color` rgb * a -> tint * reflectance.
+/// - UE3 Phong `SP_Specular_Power` n stored as perceptual roughness (2 / (n + 2))^(1/4), read back by
+///   the patched light passes (`lighting::ue3_light`); Bevy GGX only for its environment light.
+/// - `S_` map -> specular tint texture, `S_Specular_color` rgb -> tint, reflectance 0.5: S = 2 x reflectance.
 /// - Colour vectors use Arkane's rgb * a intensity convention for emissive/specular, and for
 ///   `D_Diffuse_color` as decoded from the base-pass shaders (`diffuse_color_terms`).
 /// - Detail normals (`DN_`) and per-slot tiling other than `D_Diffuse_Tilling` are ignored
@@ -251,6 +252,9 @@ pub fn build_material(i: usize, m: &MaterialAsset, p: &MaterialParams, images: &
     }
     mat.alpha_mode = match p.blend {
         MaterialBlend::Opaque => AlphaMode::Opaque,
+        // `O_Enable_full_opacity` compiles the masked base without its opacity mask (no texkill:
+        // vertexAnim_PMAT base passes 1815 / 1831 of the Boyle balloons): nothing is clipped.
+        MaterialBlend::Masked if p.switch("O_Enable_full_opacity") == Some(true) => AlphaMode::Opaque,
         MaterialBlend::Masked => AlphaMode::Mask(p.opacity_clip.clamp(0.01, 0.99)),
         MaterialBlend::Translucent => AlphaMode::Blend,
         MaterialBlend::Additive => AlphaMode::Add,
@@ -282,11 +286,14 @@ pub fn build_material(i: usize, m: &MaterialAsset, p: &MaterialParams, images: &
         let c = vector(p, "S_Specular_color").filter(|_| p.switch("S_Enable_Specular_color") != Some(false)).unwrap_or([1.0, 1.0, 1.0, 2.0]);
         mat.specular_tint_texture = Some(images[s].clone());
         mat.specular_tint = Color::linear_rgb(c[0], c[1], c[2]);
-        mat.reflectance = (0.5 * c[3]).clamp(0.0, 1.0);
+        // The UE3 specular colour S = texture x tint is 2 x Bevy's reflectance (the patched light
+        // passes, lighting.rs `ue3_light`, and the lightmap specular read it back that way).
+        mat.reflectance = 0.5;
         let n = scalar(p, "SP_Specular_Power").unwrap_or(20.0).max(1.0);
         mat.perceptual_roughness = (2.0 / (n + 2.0)).sqrt().sqrt().clamp(0.089, 1.0);
     } else {
-        mat.reflectance = 0.1;
+        // No specular term without `S_Enable_Specular`.
+        mat.reflectance = 0.0;
     }
     if p.sky && f.sky {
         // Sky dome, moon and sun: unlit, unfogged (UE3 skies sit beyond the fog's reach),
@@ -552,7 +559,22 @@ pub fn spawn_map(
             // Translucent decals (generic_translucent_PMAT): the material's own shading (decals.rs).
             if translucent && features.materials && !inst.hidden {
                 let scene = decal_scene.get_or_insert_with(|| reflection_cube(map).map(|i| images.add(i))).clone();
-                if let Some(d) = mat_id.and_then(|m| crate::decals::PendingDecal::new(map.material_params.get(m)?, &map.materials[m].texture_params, &image_handles, scene)) {
+                // The component's directional lightmap (the base pass of a lightmapped
+                // translucent static mesh is `FDirectionalLightMapTexturePolicy`, decals.rs).
+                let lightmap = inst.lightmap.filter(|_| features.lightmaps && !features.debug_lighting && mesh.uv1.len() == mesh.positions.len()).map(|l| {
+                    let df = l.df_shadow && features.df_shadows && !map.lightmaps[l.atlas].shadow.is_empty();
+                    crate::decals::DecalLightmapRef {
+                        color: lightmap_handles[l.atlas].clone(),
+                        directional: directional_handles[l.atlas].clone(),
+                        shadow: df.then(|| shadow_handles[l.atlas].clone()),
+                        uniform: crate::decals::DecalLightmap {
+                            params: Vec4::new(light_unit(), 1.0, if df { 1.0 } else { 0.0 }, 0.0),
+                            rect: Vec4::new(l.uv_min.x, l.uv_min.y, l.uv_max.x - l.uv_min.x, l.uv_max.y - l.uv_min.y),
+                            df: Vec4::new(DF_SHADOW.0, DF_SHADOW.1, DF_SHADOW.2, 0.0),
+                        },
+                    }
+                });
+                if let Some(d) = mat_id.and_then(|m| crate::decals::PendingDecal::new(map.material_params.get(m)?, &map.materials[m].texture_params, &image_handles, scene, lightmap)) {
                     e.insert(d);
                 }
             }
@@ -647,7 +669,7 @@ pub fn spawn_map(
                         .flatten();
                     let rect = key.d2_inst.and_then(|i| d2_rects.get(&i)).map(|(a, b)| Vec4::new(a.x, a.y, 1.0 / (b.x - a.x).max(1e-9), 1.0 / (b.y - a.y).max(1e-9))).unwrap_or(Vec4::new(0.0, 0.0, 1.0, 1.0));
                     let exposure = base.lightmap_exposure;
-                    // Lightmap specular: colour = reflectance * 2 / a (see lightmap_ext.wgsl),
+                    // Lightmap specular: colour = reflectance * 2 (see lightmap_ext.wgsl),
                     // lobe exponent SP_Specular_Power + 1.
                     let p = map.material_params.get(key.material as usize).filter(|p| features.materials && features.lightmap_specular && p.specular.is_some());
                     let spec_scale = p.map(|_| 2.0 / (2.0 * base.reflectance).max(1e-3)).unwrap_or(0.0);
@@ -671,6 +693,25 @@ pub fn spawn_map(
                             d2_channel: d2.as_ref().map(|d| Vec4::from_array(std::array::from_fn(|k| if k == d.channel as usize { 1.0 } else { 0.0 }))).unwrap_or(Vec4::ZERO),
                             d2_diffuse: d2.as_ref().map(|d| image_handles[d.diffuse].clone()),
                             d2_mask: d2.as_ref().map(|d| image_handles[d.mask].clone()),
+                            v2_params: d2
+                                .as_ref()
+                                .map(|d| {
+                                    let (n_on, n_t) = d.n2.map(|n| (1.0, n.2)).unwrap_or((0.0, 1.0));
+                                    // The specular variation feeds the lightmap specular only when it is drawn.
+                                    let (s_on, s_t) = d.s2.filter(|_| spec_scale > 0.0).map(|s| (1.0, s.1)).unwrap_or((0.0, 1.0));
+                                    Vec4::new(n_on, n_t, s_on, s_t)
+                                })
+                                .unwrap_or(Vec4::ZERO),
+                            s2_channel: d2
+                                .as_ref()
+                                .and_then(|d| d.s2)
+                                .and_then(|s| s.2)
+                                .filter(|c| *c < 4)
+                                .map(|c| Vec4::from_array(std::array::from_fn(|k| if k == c as usize || k == 3 { 1.0 } else { 0.0 })))
+                                .unwrap_or(Vec4::ZERO),
+                            v2_normal: d2.as_ref().and_then(|d| d.n2).map(|n| image_handles[n.0].clone()),
+                            n2: d2.as_ref().and_then(|d| d.n2).map(|n| image_handles[n.1].clone()),
+                            s2: d2.as_ref().and_then(|d| d.s2).map(|s| image_handles[s.0].clone()),
                         },
                     })
                 });
@@ -712,8 +753,13 @@ struct BatchKey {
 /// shaders (e.g. 15243 with the mask on UV0, 28053 with `D2_Use_UV_coordinate_Index_1`):
 /// `diffuse = lerp(D_Diffuse_color.rgb x a x D, D2(UV0 x D2_Diffuse_variation_Tilling),
 /// D2_Diffuse_variation_mask(uv).channel x D2_Variation_Mask_Power)`, not saturated; the mask's
-/// channel is the static mask `D2_Diffuse_Variation_mask_channel`. Variants with
-/// `D2_Enable_Multiply_for_variation`, `D2_Enable_Diffuse_variation_color` or
+/// channel is the static mask `D2_Diffuse_Variation_mask_channel`. The same mask value lerps the
+/// normal map to `N2_NormalMap_variation_texture` (UV0 x `N2_NormalMap_variation_Tilling`,
+/// normalised after the lerp) with `N2_Enable_NormalMap_Variation`, and the specular texture to
+/// `S2_specular_variation_texture` (UV0 x `S2_Specular_variation_Tilling`, the static mask
+/// `S2_Specular_variation_Mask_Channel`) with `S2_Enable_Specular_Variation` (28116, the gravel
+/// `ext_boyle_ground_01.gravel_02_garden_inst`). Variants with `D2_Enable_Multiply_for_variation`,
+/// `D2_Enable_Diffuse_variation_color`, `S2_Enable_Specular_variation_color` or
 /// `D2_Use_UV_coordinate_Index_2` are not decoded (U-583).
 struct D2Variation {
     diffuse: usize,
@@ -723,6 +769,10 @@ struct D2Variation {
     /// Mask on texture coordinate 1, the meshes' lightmap channel (`LightMapCoordinateIndex` 1).
     lightmap_uv: bool,
     channel: u8,
+    /// The base normal map and the normal variation (texture, tiling).
+    n2: Option<(usize, usize, f32)>,
+    /// The specular variation (texture, tiling, single mask channel or RGB).
+    s2: Option<(usize, f32, Option<u8>)>,
 }
 
 fn d2_variation(m: &MaterialAsset, p: &MaterialParams) -> Option<D2Variation> {
@@ -741,6 +791,12 @@ fn d2_variation(m: &MaterialAsset, p: &MaterialParams) -> Option<D2Variation> {
         tiling: scalar(p, "D2_Diffuse_variation_Tilling").unwrap_or(1.0),
         lightmap_uv: p.switch("D2_Use_UV_coordinate_Index_1") == Some(true),
         channel: p.mask_channel("D2_Diffuse_Variation_mask_channel").unwrap_or(0),
+        n2: (p.switch("N2_Enable_NormalMap_Variation") == Some(true) && p.switch("N_Enable_NormalMap") != Some(false))
+            .then(|| Some((m.normal.or(tex("N_NormalMap_texture"))?, tex("N2_NormalMap_variation_texture")?, scalar(p, "N2_NormalMap_variation_Tilling").unwrap_or(1.0))))
+            .flatten(),
+        s2: (p.switch("S2_Enable_Specular_Variation") == Some(true) && p.switch("S2_Enable_Specular_variation_color") != Some(true) && p.specular.is_some())
+            .then(|| Some((tex("S2_specular_variation_texture")?, scalar(p, "S2_Specular_variation_Tilling").unwrap_or(1.0), p.mask_channel("S2_Specular_variation_Mask_Channel"))))
+            .flatten(),
     })
 }
 
@@ -847,6 +903,19 @@ pub struct BakedLightmap {
     pub d2_diffuse: Option<Handle<Image>>,
     #[texture(113)]
     pub d2_mask: Option<Handle<Image>>,
+    /// Normal and specular variations: (N2 on, N2 tiling, S2 on, S2 tiling).
+    #[uniform(114)]
+    pub v2_params: Vec4,
+    /// One-hot S2 mask channel; w = 1 when a single channel is used (else RGB).
+    #[uniform(115)]
+    pub s2_channel: Vec4,
+    /// The base normal map (lerped with N2 in tangent space).
+    #[texture(116)]
+    pub v2_normal: Option<Handle<Image>>,
+    #[texture(117)]
+    pub n2: Option<Handle<Image>>,
+    #[texture(118)]
+    pub s2: Option<Handle<Image>>,
 }
 
 /// `DistanceFieldParameters` of the original's distance-field light shaders

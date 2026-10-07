@@ -130,6 +130,22 @@ pub struct SkeletalProp {
     pub anim_sets: Vec<(String, String)>,
     /// Door stage animations (`DisDoor` only).
     pub door: Option<DoorAnims>,
+    /// The lighting the original's `DynamicLightEnvironmentComponent` gives the prop
+    /// (`dishonored_assets::light_env`); `None` when it could not be computed.
+    #[serde(default)]
+    pub light_env: Option<LightEnvironment>,
+}
+
+/// A light environment's synthesized lights (`FDynamicLightEnvironmentState`): one directional
+/// light and an upper / lower sky light, in UE3 linear light units (colour x brightness), drawn by
+/// the base pass `TBasePassPixelShader<FDirectionalLightLightMapPolicy, SkyLight>`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct LightEnvironment {
+    /// Unit direction towards the synthesized directional light (Dishonored world space).
+    pub direction: Vec3,
+    pub color: [f32; 3],
+    pub upper_sky: [f32; 3],
+    pub lower_sky: [f32; 3],
 }
 
 /// A `DisDoor`'s placed state and the transition animation of each of its stages

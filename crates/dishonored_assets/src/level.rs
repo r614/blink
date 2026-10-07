@@ -131,7 +131,7 @@ struct Importer<'a> {
 }
 
 /// Single-channel static component masks kept in `MaterialParams::mask_channels`.
-const MASK_CHANNELS: &[&str] = &["C_Cubemap_Mask_Channel", "O_Opacity_Mask_Channel", "S_Specular_Mask_Channel", "E_Emissive_Channel", "F_Fresnel_Mask_Channel", "D2_Diffuse_Variation_mask_channel"];
+const MASK_CHANNELS: &[&str] = &["C_Cubemap_Mask_Channel", "O_Opacity_Mask_Channel", "S_Specular_Mask_Channel", "E_Emissive_Channel", "F_Fresnel_Mask_Channel", "D2_Diffuse_Variation_mask_channel", "S2_Specular_variation_Mask_Channel"];
 
 const RESOURCE_CLASSES: &[&str] = &[
     "StaticMesh",
@@ -207,13 +207,17 @@ pub fn import_level(
     };
     imp.stats.timings.push(("packages", t0.elapsed().as_secs_f32()));
     let t = std::time::Instant::now();
+    // The level (slot) of every instance, for the light environments' floor check.
+    let mut instance_level: Vec<usize> = Vec::new();
     for slot in 0..level_slots {
         imp.import_actors(slot)?;
+        instance_level.resize(imp.map.instances.len(), slot);
     }
     // [foliage-survey] After every static component, so existing instance indices are unchanged.
     if opts.other_actors {
         for slot in 0..level_slots {
             imp.import_skeletal_props(slot);
+            instance_level.resize(imp.map.instances.len(), slot);
         }
     }
     if opts.particles && opts.load_textures {
@@ -232,7 +236,14 @@ pub fn import_level(
     }
     // Doors and usable objects: their skeletal mesh components (usable_props.rs).
     if opts.other_actors {
-        imp.map.skeletal_props = crate::usable_props::read_props(content, packages);
+        let t = std::time::Instant::now();
+        let (props, channels): (Vec<_>, Vec<_>) = crate::usable_props::read_props_with_channels(content, packages).into_iter().unzip();
+        imp.map.skeletal_props = props;
+        // Their light environments: the levels' static lights and precomputed light volumes.
+        let volumes: Vec<Option<Vec<crate::light_env::VolumeSample>>> = imp.pkgs[..level_slots].iter().map(|p| crate::light_env::read_light_volume(p)).collect();
+        let lights: Vec<crate::light_env::EnvLight> = imp.pkgs[..level_slots].iter().flat_map(|p| crate::light_env::read_static_lights(p)).collect();
+        crate::light_env::light_props(content, &mut imp.map, &instance_level, &volumes, &lights, &channels);
+        imp.stats.timings.push(("light environments", t.elapsed().as_secs_f32()));
     }
     imp.stats.unresolved_paths.sort();
     imp.stats.unresolved_paths.dedup();

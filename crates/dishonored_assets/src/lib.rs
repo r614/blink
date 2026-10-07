@@ -5,6 +5,7 @@ pub mod ai_config;
 pub mod ai_level;
 pub mod content;
 pub mod level;
+pub mod light_env;
 pub mod lightmap;
 pub mod lightmap_cache;
 pub mod loc;

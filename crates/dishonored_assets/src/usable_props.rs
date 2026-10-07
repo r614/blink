@@ -79,6 +79,12 @@ fn stage_anim(t: &crate::tweaks::TMap, stage: &str) -> String {
 
 /// Read the doors and usable objects of `packages` (persistent level and sublevels).
 pub fn read_props(content: &Content, packages: &[String]) -> Vec<SkeletalProp> {
+    read_props_with_channels(content, packages).into_iter().map(|p| p.0).collect()
+}
+
+/// [`read_props`] with each skeletal mesh component's `LightingChannels` bits (the owner channels
+/// of its light environment; `PrimitiveComponent` default bInitialized + Dynamic).
+pub fn read_props_with_channels(content: &Content, packages: &[String]) -> Vec<(SkeletalProp, u32)> {
     let tweaks = TweakDb::load_with(content, packages).ok();
     let mut out = Vec::new();
     for name in packages.iter().filter(|p| content.has_package(p)) {
@@ -121,7 +127,8 @@ pub fn read_props(content: &Content, packages: &[String]) -> Vec<SkeletalProp> {
                     close_ccw: stage_anim(&t, "m_DoorCloseCCW"),
                 }
             });
-            out.push(SkeletalProp {
+            let channels = crate::light_env::channel_bits(&c, 1 | 1 << 3);
+            out.push((SkeletalProp {
                 actor: format!("{}:{}", pkg.name, pkg.obj_name(ObjRef::Export(i))),
                 class,
                 mesh,
@@ -130,7 +137,8 @@ pub fn read_props(content: &Content, packages: &[String]) -> Vec<SkeletalProp> {
                 hidden: bool_or(&props, "bHidden", false) || bool_or(&c, "HiddenGame", false),
                 anim_sets,
                 door,
-            });
+                light_env: None,
+            }, channels));
         }
     }
     out

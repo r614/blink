@@ -121,6 +121,22 @@ fn main() -> Result<()> {
             }
         }
     }
+    // `--unlit`: visible instances without a lightmap (how the original lights them depends on
+    // their owner: a light environment, or the lights' dynamic passes).
+    if args.iter().any(|a| a == "--unlit") {
+        for i in m.instances.iter().filter(|i| !i.hidden && i.lightmap.is_none()) {
+            let mesh = &m.meshes[i.mesh];
+            let blends: Vec<String> = mesh.sections.iter().enumerate().map(|(si, s)| i.materials.get(si).copied().flatten().or(s.material).map(|k| format!("{}:{:?}", m.materials[k].source.rsplit('.').next().unwrap_or(""), m.material_params.get(k).map(|p| p.blend))).unwrap_or_default()).collect();
+            println!("unlit {} [{}] {:?}", mesh.source, i.source, blends);
+        }
+    }
+    // `--props`: doors and usable objects with their light environments.
+    if args.iter().any(|a| a == "--props") {
+        for p in &m.skeletal_props {
+            let t = p.transform.w_axis;
+            println!("prop {} {} at ({:.0}, {:.0}, {:.0}) light env {:?}", p.actor, p.mesh.1, t.x, t.y, t.z, p.light_env);
+        }
+    }
     // `--mesh SUBSTR`: vertex / triangle counts, bounds and UV ranges of matching meshes.
     if let Some(n) = args.iter().position(|a| a == "--mesh") {
         for mesh in m.meshes.iter().filter(|x| x.source.contains(&args[n + 1])) {

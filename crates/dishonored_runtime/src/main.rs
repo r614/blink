@@ -44,6 +44,7 @@ mod audio;
 mod level;
 mod level_props;
 mod decals;
+mod prop_light;
 mod loading_screen;
 mod lighting;
 mod map_render;
@@ -216,6 +217,7 @@ fn main() {
     .add_plugins(sky::SkyPlugin)
     .add_plugins(lighting::Ue3FalloffPlugin)
     .add_plugins(decals::DecalPlugin)
+    .add_plugins(prop_light::PropLightPlugin)
     .add_plugins(bloom::BloomPlugin)
     .add_plugins(bevy::diagnostic::EntityCountDiagnosticsPlugin::default())
     .insert_resource(ClearColor(Color::srgb(0.08, 0.09, 0.12)))
