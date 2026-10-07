@@ -193,7 +193,9 @@ fn main() -> Result<()> {
         }
         // Entries up to the friendly name.
         let mut entries: Vec<(String, String, Option<usize>)> = Vec::new();
-        let mut vf = String::from("-");
+        // A mesh shader map writes its vertex factory FName after its shader entries
+        // (`FMeshMaterialShaderMap::Serialize`): entries are labelled by the next VF name.
+        let mut pending = 0usize;
         let mut q = p + 12;
         let mut fname: Option<(String, usize)> = None;
         while q + 24 < skip {
@@ -208,11 +210,14 @@ fn main() -> Result<()> {
             }
             if let Some(n) = name(q) {
                 if n.contains("VertexFactory") {
-                    vf = n.clone();
+                    for e in &mut entries[pending..] {
+                        e.0 = n.clone();
+                    }
+                    pending = entries.len();
                 } else if n.contains("Shader") {
                     let mut g = [0u8; 16];
                     g.copy_from_slice(&d[q + 8..q + 24]);
-                    entries.push((vf.clone(), n.clone(), by_guid.get(&g).map(|x| x.0)));
+                    entries.push(("-".to_string(), n.clone(), by_guid.get(&g).map(|x| x.0)));
                     // (type, GUID, type again)
                     q += 32;
                     continue;

@@ -198,7 +198,19 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 #endif
     var out: FragmentOutput;
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
+#ifdef VERTEX_UVS_B
+        // These batches carry their lightmap in the material, not as Bevy `Lightmap`s, so Bevy's
+        // pipeline does not define LIGHTMAP: `apply_pbr_lighting` would neither add
+        // `lightmap_light` nor drop its ambient and environment diffuse. The original's base pass
+        // has no ambient (AmbientColorAndSkyFactor = 0, U-562) and no diffuse but the lightmap's.
+        pbr_input.diffuse_occlusion = vec3<f32>(0.0);
+#endif
         out.color = apply_pbr_lighting(pbr_input);
+#ifdef VERTEX_UVS_B
+        let m = pbr_input.material;
+        let diffuse_color = calculate_diffuse_color(m.base_color.rgb, m.metallic, m.specular_transmission, m.diffuse_transmission);
+        out.color = vec4<f32>(out.color.rgb + pbr_input.lightmap_light * diffuse_color * view_bindings::view.exposure, out.color.a);
+#endif
         // In Bevy's light unit like the lightmap (x baked_params.x), so it takes the view
         // exposure that apply_pbr_lighting gave the lightmap's diffuse term.
         out.color = vec4<f32>(out.color.rgb + lightmap_specular * view_bindings::view.exposure, out.color.a);

@@ -542,7 +542,22 @@ pub fn spawn_map(
             // Translucent decals (generic_translucent_PMAT): the material's own shading (decals.rs).
             if translucent && features.materials && !inst.hidden {
                 let scene = decal_scene.get_or_insert_with(|| reflection_cube(map).map(|i| images.add(i))).clone();
-                if let Some(d) = mat_id.and_then(|m| crate::decals::PendingDecal::new(map.material_params.get(m)?, &map.materials[m].texture_params, &image_handles, scene)) {
+                // The component's directional lightmap (the base pass of a lightmapped
+                // translucent static mesh is `FDirectionalLightMapTexturePolicy`, decals.rs).
+                let lightmap = inst.lightmap.filter(|_| features.lightmaps && !features.debug_lighting && mesh.uv1.len() == mesh.positions.len()).map(|l| {
+                    let df = l.df_shadow && features.df_shadows && !map.lightmaps[l.atlas].shadow.is_empty();
+                    crate::decals::DecalLightmapRef {
+                        color: lightmap_handles[l.atlas].clone(),
+                        directional: directional_handles[l.atlas].clone(),
+                        shadow: df.then(|| shadow_handles[l.atlas].clone()),
+                        uniform: crate::decals::DecalLightmap {
+                            params: Vec4::new(light_unit(), 1.0, if df { 1.0 } else { 0.0 }, 0.0),
+                            rect: Vec4::new(l.uv_min.x, l.uv_min.y, l.uv_max.x - l.uv_min.x, l.uv_max.y - l.uv_min.y),
+                            df: Vec4::new(DF_SHADOW.0, DF_SHADOW.1, DF_SHADOW.2, 0.0),
+                        },
+                    }
+                });
+                if let Some(d) = mat_id.and_then(|m| crate::decals::PendingDecal::new(map.material_params.get(m)?, &map.materials[m].texture_params, &image_handles, scene, lightmap)) {
                     e.insert(d);
                 }
             }

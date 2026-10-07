@@ -6,10 +6,19 @@
 //! no `DecalActor`s on Boyle) with a translucent material: `ext_boyle_puddles_decals_01` with
 //! `towerEmpress_ground.puddles_decals_01_inst`. Drawn as Bevy's lit `StandardMaterial`, they took
 //! Bevy's environment specular (Fresnel-bright at the grazing angles of the ground) and the
-//! placeholder ambient, and showed as pale patches. The original's base pass has no lightmap and
-//! no specular for them: the diffuse texture plus the scene reflection masked by the cubemap
-//! mask's channel, lit by the base pass ambient and the light passes' `N.L`, blended over the
-//! ground by the opacity mask's channel clamped to `O_Minimum_Opacity` .. `O_Maximum_Opacity`.
+//! placeholder ambient, and showed as pale patches. The original's base pass for a lightmapped
+//! static mesh (`TBasePassPixelShader<FDirectionalLightMapTexturePolicy>`, 9347 for the puddles)
+//! lights the diffuse texture plus the scene reflection masked by the cubemap mask's channel with
+//! the component's directional lightmap, exactly like the opaque base pass's diffuse term; its
+//! lightmap specular is multiplied by `SpecularOverrideParameter.xyz` (0 in game), so there is
+//! none. The dominant / toggleable lights add their light passes' `N.L` (and the dominant
+//! directional light its distance-field shadow). The result is blended over the ground by the
+//! opacity mask's channel clamped to `O_Minimum_Opacity` .. `O_Maximum_Opacity`.
+//!
+//! An earlier reading of the shader maps took the skinned vertex factory's shader list for the
+//! static one (a mesh shader map names its vertex factory after its shaders), concluded that
+//! translucent static meshes had no lightmap and drew the decals with the dynamic lights only:
+//! nearly black puddles darkened every gravel path (U-561, U-584).
 
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
@@ -19,10 +28,10 @@ use dishonored_ir::{MaterialParams, TextureId};
 /// The base material this module renders.
 pub const GENERIC_TRANSLUCENT_PMAT: &str = "Materials_ref.main_materials.generic_translucent_PMAT";
 
-/// `AmbientColorAndSkyFactor.rgb` of the translucent base pass (`TBasePassPixelShader
-/// FNoLightMapPolicyNoSkyLight`): measured in the running game on Boyle Ext as (0, 0, 0, 1) in
-/// every base pass drawn (`probe_launch measure psconst AmbientColorAndSkyFactor`, U-562), so the
-/// decals are lit by the light passes only.
+/// `AmbientColorAndSkyFactor.rgb` of the translucent base pass: measured in the running game on
+/// Boyle Ext as (0, 0, 0, 1) in every base pass drawn (`probe_launch measure psconst
+/// AmbientColorAndSkyFactor`, U-562), so the decals are lit by their lightmap and the light
+/// passes only.
 pub const BASE_PASS_AMBIENT: [f32; 3] = [0.0, 0.0, 0.0];
 
 /// Switches of generic_translucent_PMAT whose terms are not decoded (no Boyle shader map has
@@ -84,6 +93,27 @@ impl DecalUniform {
     }
 }
 
+/// The component's directional lightmap for the decal base pass (`lightmap_ext.wgsl`'s planes).
+#[derive(Clone, Copy, Debug, Default, PartialEq, ShaderType)]
+pub struct DecalLightmap {
+    /// x: exposure (UE3 lightmap unit to Bevy), y: 1 = lightmapped, z: 1 = the dominant
+    /// directional light is shadowed by the component's distance field, w: unused.
+    pub params: Vec4,
+    /// The component's region of the atlas: (uv_min, uv_max - uv_min); UV1 is mesh-local.
+    pub rect: Vec4,
+    /// Distance-field shadow (bias, scale, exponent, 0), see `map_render::DF_SHADOW`.
+    pub df: Vec4,
+}
+
+/// One instance's lightmap: atlas planes and its rect.
+#[derive(Clone, Debug)]
+pub struct DecalLightmapRef {
+    pub color: Handle<Image>,
+    pub directional: Handle<Image>,
+    pub shadow: Option<Handle<Image>>,
+    pub uniform: DecalLightmap,
+}
+
 #[derive(Asset, AsBindGroup, TypePath, Clone, Debug)]
 pub struct ArkTranslucent {
     #[uniform(100)]
@@ -94,6 +124,15 @@ pub struct ArkTranslucent {
     #[texture(103, dimension = "cube")]
     #[sampler(104)]
     pub scene: Option<Handle<Image>>,
+    #[uniform(105)]
+    pub lightmap_params: DecalLightmap,
+    #[texture(106)]
+    #[sampler(107)]
+    pub lightmap: Option<Handle<Image>>,
+    #[texture(108)]
+    pub directional: Option<Handle<Image>>,
+    #[texture(109)]
+    pub shadow: Option<Handle<Image>>,
 }
 
 impl MaterialExtension for ArkTranslucent {
@@ -113,7 +152,9 @@ pub struct PendingDecal {
 }
 
 impl PendingDecal {
-    pub fn new(p: &MaterialParams, textures: &[(String, TextureId)], images: &[Handle<Image>], scene: Option<Handle<Image>>) -> Option<PendingDecal> {
+    /// The decal of a translucent section; `lightmap` is the instance's (None: lit by the
+    /// dynamic lights only, e.g. with `--no-lightmaps`).
+    pub fn new(p: &MaterialParams, textures: &[(String, TextureId)], images: &[Handle<Image>], scene: Option<Handle<Image>>, lightmap: Option<DecalLightmapRef>) -> Option<PendingDecal> {
         let params = DecalUniform::decode(p, crate::map_render::light_unit())?;
         let missing: Vec<&str> = UNDECODED.iter().copied().filter(|s| p.switch(s) == Some(true)).collect();
         if !missing.is_empty() {
@@ -127,7 +168,11 @@ impl PendingDecal {
         if scene.is_none() {
             params.ambient.w = 0.0;
         }
-        Some(PendingDecal { ext: ArkTranslucent { params, mask, scene }, diffuse_color: DecalUniform::diffuse_color(p) })
+        let (lightmap_params, lm, dir, shadow) = match lightmap {
+            Some(l) => (l.uniform, Some(l.color), Some(l.directional), l.shadow),
+            None => (DecalLightmap::default(), None, None, None),
+        };
+        Some(PendingDecal { ext: ArkTranslucent { params, mask, scene, lightmap_params, lightmap: lm, directional: dir, shadow }, diffuse_color: DecalUniform::diffuse_color(p) })
     }
 }
 
@@ -145,12 +190,14 @@ fn apply_pending_decals(
     q: Query<(Entity, &PendingDecal, &MeshMaterial3d<StandardMaterial>)>,
     std_mats: Res<Assets<StandardMaterial>>,
     mut mats: ResMut<Assets<DecalMaterial>>,
-    mut cache: Local<std::collections::HashMap<AssetId<StandardMaterial>, Handle<DecalMaterial>>>,
+    mut cache: Local<std::collections::HashMap<(AssetId<StandardMaterial>, Option<AssetId<Image>>, [u32; 4]), Handle<DecalMaterial>>>,
 ) {
     for (e, p, m) in &q {
         let Some(base) = std_mats.get(&m.0) else { continue };
+        // One material per lightmap region (the section meshes are shared, UV1 is mesh-local).
+        let rect = p.ext.lightmap_params.rect.to_array().map(f32::to_bits);
         let h = cache
-            .entry(m.0.id())
+            .entry((m.0.id(), p.ext.lightmap.as_ref().map(|h| h.id()), rect))
             .or_insert_with(|| {
                 let mut base = base.clone();
                 let a = base.base_color.alpha();
@@ -161,7 +208,8 @@ fn apply_pending_decals(
                 mats.add(DecalMaterial { base, extension: p.ext.clone() })
             })
             .clone();
-        // No lightmap and no shadows for translucency (FNoLightMapPolicy, FNoStaticShadowingPolicy).
+        // The lightmap is the material's own (directional, `ark_translucent.wgsl`), not Bevy's;
+        // the dominant light's shadow is the distance field, not Bevy's shadow maps.
         commands
             .entity(e)
             .remove::<(PendingDecal, MeshMaterial3d<StandardMaterial>, bevy::pbr::Lightmap)>()
