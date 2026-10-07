@@ -252,6 +252,9 @@ pub fn build_material(i: usize, m: &MaterialAsset, p: &MaterialParams, images: &
     }
     mat.alpha_mode = match p.blend {
         MaterialBlend::Opaque => AlphaMode::Opaque,
+        // `O_Enable_full_opacity` compiles the masked base without its opacity mask (no texkill:
+        // vertexAnim_PMAT base passes 1815 / 1831 of the Boyle balloons): nothing is clipped.
+        MaterialBlend::Masked if p.switch("O_Enable_full_opacity") == Some(true) => AlphaMode::Opaque,
         MaterialBlend::Masked => AlphaMode::Mask(p.opacity_clip.clamp(0.01, 0.99)),
         MaterialBlend::Translucent => AlphaMode::Blend,
         MaterialBlend::Additive => AlphaMode::Add,
