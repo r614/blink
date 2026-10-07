@@ -176,7 +176,30 @@ fn items(mc: &MatchContent, rep: &mut Report) {
     // 1. Pick up the map's first placed health elixir (walk up to it), then drink it.
     let mut st = setup(&[]);
     let mut ev = Vec::new();
-    let placed: Vec<_> = mc.pickups.iter().filter(|p| matches!(p.kind, PickupKind::Elixir(ElixirType::Health))).cloned().collect();
+    // Boyle Ext's health elixirs lie in closed lockers (whose walls and doors collide) or on a
+    // shelf inside its simplified collision: one with a clear line out to some side, else the
+    // first one laid on the floor ahead of the start.
+    let open = |p: &dishonored_ir::items::PlacedPickup| {
+        use dishonored_world::WorldQuery;
+        let from = p.position + Vec3::Z * 10.0;
+        (0..8).any(|k| mc.collision.raycast(from, fwd(k as f32 * 45.0), 80.0, dishonored_world::channel::MELEE).is_none())
+    };
+    let elixirs: Vec<_> = mc.pickups.iter().filter(|p| matches!(p.kind, PickupKind::Elixir(ElixirType::Health))).cloned().collect();
+    let placed: Vec<_> = match elixirs.iter().find(|p| open(p)) {
+        Some(p) => vec![p.clone()],
+        None => elixirs
+            .first()
+            .and_then(|p| {
+                use dishonored_world::WorldQuery;
+                let at = s0.position + fwd(s0.yaw) * 120.0 + Vec3::Z * 100.0;
+                let h = mc.collision.raycast(at, -Vec3::Z, 400.0, dishonored_world::channel::PAWN)?;
+                let mut p = p.clone();
+                p.position = h.point + Vec3::Z * 5.0;
+                Some(p)
+            })
+            .into_iter()
+            .collect(),
+    };
     let ok_pick = if let Some(pp) = placed.first() {
         dishonored_sim::inventory::spawn_pickups(&mut st, std::slice::from_ref(pp), 1, &|_| None);
         // Stand 80 uu from it on its floor (first free side of eight) and look at it.
