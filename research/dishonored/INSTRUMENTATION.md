@@ -59,7 +59,8 @@ instead of inferring behaviour from the decompiled code. It has three parts:
   in the D3D9 `Present` hook, once per rendered frame, and timed with `WorldInfo.TimeSeconds`.
 - **D3D9.** A throwaway `Direct3DCreate9` gives d3d9's shared `IDirect3D9` vtable. Its
   `CreateDevice` (slot 16) is patched, and the device the game creates gets these slots patched:
-  Present (17), DrawPrimitive (81), DrawIndexedPrimitive (82), CreatePixelShader (106),
+  Present (17), DrawPrimitive (81), DrawIndexedPrimitive (82), DrawPrimitiveUP (83) and
+  DrawIndexedPrimitiveUP (84) (UE3's full-screen passes: post, fog, the ArkPp LUT), CreatePixelShader (106),
   SetPixelShader (107) and SetPixelShaderConstantF (109).
   - Pixel shaders are identified by an FNV-1a 64 hash of their bytecode and their CTAB names.
   - The constant registers are mirrored, so a draw with a chosen shader yields its live
@@ -100,6 +101,7 @@ $P measure fall 800 900 1000 --out DIR
 $P measure run 0.4 0.6 at=-3400,-3150,-190 --yaw 270 --out DIR   # run, sprint, slide on a flat runway
 $P measure sdf                 # live constants of every drawn distance-field-shadow light shader
 $P measure views --out DIR     # the `harness fidelity` viewpoints, HUD hidden -> DIR/<name>.bmp
+$P measure consts <ctab filter> <draws> [name...]   # distinct live values of pixel shader constants (arrays in full)
 $P measure psconst X [draws]   # live PS constants of a shader: X = a shader_maps blob (.bin),
                                # 0xHASH, or a CTAB-name filter (every shader declaring it)
 $P kill                        # end the session's game (by pid)

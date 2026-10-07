@@ -41,6 +41,84 @@ so every material term below was read from the compiled shader of the matching p
   `BatchKey::df_light`). Boyle Ext has one dominant point and two dominant spot lights, Boyle Int
   one dominant spot light. `--no-df-shadows` restores Bevy's shadows;
   `DISHONORED_LIGHTMAP_DEBUG=shadow` / `shadow_local` show (s, d, Bevy factor).
+- Lightmap specular is on at full strength: the base pass's `SpecularOverrideParameter` and
+  `DiffuseOverrideParameter` are (0, 0, 0, 1) in the running game (U-320). The term is in the
+  lightmap's Bevy light unit, so it takes the view exposure like the lightmap's diffuse term
+  (without it, it was ~1000 times too bright, which is why it had been turned off).
+  `--no-lightmap-specular` turns it off.
+- Lightmap textures are sampled as sRGB: `LightMapTexture2D` has no script defaults and its
+  constructor (0x00657DC0, vtable 0x010305A0) sets no `SRGB`, so the `Texture` default
+  `SRGB = true` applies (U-322). The live `LightMapScale[0..1]` constants equal the cooked
+  scales (w = 1).
+- The bake (decoded lightmap pairs, distance-field resampling, page packing) is cached under
+  `DISHONORED_CACHE` as `<map>.lightmaps1.bin` (`dishonored_assets::lightmap_cache`; a
+  signature of the bake's inputs, bump `FORMAT` when the bake changes;
+  `DISHONORED_NO_LIGHTMAP_CACHE` bakes every time). Boyle Ext: 2.1 s baked, 0.2 s cached
+  (168 MB file); the other import stages log their times too (`import <map>: packages, actors,
+  lightmaps`).
+
+## Diffuse variation (`D2Variation`, `lightmap_ext.wgsl`)
+
+generic_PMAT with `D2_Enable_Diffuse_Variation` (base pass 15243 with the mask on UV0, 28053
+with `D2_Use_UV_coordinate_Index_1`):
+`diffuse = lerp(D_Diffuse_color x D, D2(UV0 x D2_Diffuse_variation_Tilling),
+D2_Diffuse_variation_mask(uv).ch x D2_Variation_Mask_Power)` (a multiply, not a power; not
+saturated; the channel is the static mask `D2_Diffuse_Variation_mask_channel`). With
+`D2_Use_UV_coordinate_Index_1` the mask is read through texture coordinate 1, the meshes'
+lightmap channel (`LightMapCoordinateIndex` 1, e.g. Boyle's `ext_boyle_ground_garden_03` with
+the per-mesh mask `ext_boyle_ground_garden_m`): the port batches such components alone and maps
+the atlas UV back with their lightmap rect. The garden gravel was near-black without it (the
+dirt variation is not tinted by `D_Diffuse_color`). Not rendered: the normal and specular
+variations (`N2_`, `S2_`, lerped by the same mask) and the `Multiply` / `variation_color` /
+`UV_coordinate_Index_2` permutations (U-583).
+
+## Point and spot light falloff (`lighting.rs`)
+
+The light pass (`TLightPixelShader<FPointLightPolicy / FSpotLightPolicy>`, e.g. 34985 / 34987
+with vertex shader 16): the vertex shader passes `(LightPosition - P) x InvRadius`, the pixel
+shader computes `x = max(1 - |v|^2, 0)`, `x^LightColorAndFalloffExponent.w` (0 below 1e-6), times
+N.L, `LightColor` (= colour x brightness) and, for spots,
+`saturate((cos - cos outer) / (cos inner - cos outer))^2` (the same form as Bevy's cone). There is
+no inverse square and no 1/pi. The port patches `bevy_pbr`'s `pbr_lighting.wgsl` (embedded
+source rewritten and reloaded before the first frame, `lighting::Ue3FalloffPlugin`) so a point or
+spot light with a non-zero `radius` uses that falloff, the exponent travelling in the radius as
+`(E + 1) / 1000`; `intensity = 4 pi^2 x Brightness x U` cancels Bevy's `1/4pi` and Lambert `1/pi`.
+Boyle's lights use exponents 2 to 6. The old R/4 match was ~3x too dim at half the radius.
+`LightColor` (an `FColor`) is linearised as `(c / 255)^2.2` (UE3's `FLinearColor(FColor)`):
+measured, the moon's (164, 209, 255) x 0.25 reaches the light pass as (0.0947, 0.1614, 0.25);
+the sRGB curve gave 0.371 instead of 0.379 for the red. Fog colours use the same conversion.
+The dynamic lights' specular is still Bevy's GGX; the original's is a normalised Phong
+`pow(R.L, SP) x (SP + 8) / (8 pi)` (U-581).
+
+## Camera
+
+- The FOV (`DefaultCamera.ini` `m_fDefaultFOV` 75, the options' `PSI_GraphicsPC_FOV`) is
+  horizontal, used as is at 16:9 (UE3's `FPerspectiveMatrix`; Dishonored's `LocalPlayer` has no
+  `AspectRatioAxisConstraint`). The capture probe reads 75 from `CameraCache.POV.FOV`, and the
+  port's renders at a horizontal 75 degrees match the reference captures' framing at every
+  viewpoint. The game camera already applied it (`viewmodel::apply_fov`); the `--inspect` free
+  camera (fidelity captures) kept Bevy's 75 degrees *vertical* (107 horizontal), so every pair
+  looked wider. It now runs `apply_fov` too.
+- Placement: both the probe (`measure views`, which moves the pawn until
+  `CameraCache.POV.Location` is on the viewpoint) and the port's `camera` steps put the eye on
+  the viewpoint; the pawn location is 64 uu lower for the probe's first guess only.
+
+## Moon and sun (`sky_disc.rs`, `sky_disc.wgsl`)
+
+- `Vfx_Materials.main_materials.Moon_PMAT` (translucent, lit model but no diffuse input; its
+  base pass 34984): emissive `Tex#0.r x Moon_Color.rgb x a`, opacity
+  `saturate(Cloud((u x 0.15 + Cloud_Speed x Time, v)).r) x Tex#0.g`. `Tex#0` is not a
+  parameter, so it survives cooking only in the material's `FMaterial::UniformExpressionTextures`
+  (native data after the tags: compile errors, texture dependency map, max dependency length,
+  GUID, user texcoord count, then the texture array; `material_chain::uniform_expression_textures`):
+  `Vfx_Materials.Textures.Moon`, red everywhere and the disc and halo in green, so the disc covers
+  about 0.4 of the mesh's UV square. Boyle's `Moon_Boyle_INST`: `Cloud` = `MoonClouds`,
+  `Cloud_Speed` -0.015, `Moon_Color` (0.95, 0.95, 1) x 2. The port drew the `Cloud` texture
+  additively over the whole `Stm_SunDome` mesh, a disc about 2.4 times too wide.
+- `Vfx_Materials.Material.Sun_PMAT` (additive, unlit; 1668): `m = max(1 - 2 |uv - 0.5|, 0)`,
+  `m^SphereMask_Power x SunIntensity x Color.rgb` (the colour's alpha is unused; defaults
+  2, 2, (1, 0.94, 0.74)). No Boyle mesh uses it.
+- Not rendered: the bright, cloud-lit glow around the original's moon (U-580).
 
 ## Doors and usable objects (`usable_props.rs`, `level_props.rs`)
 
@@ -158,7 +236,7 @@ The vertex shader passes UV1 swizzled (`o1.zw = uv1.yx`). Decoded from the shade
 Ext's `Boyle_2_inst` and Boyle Int's `Boyle_01_inst`; with `H_Enable_Horizon` the contrast result
 is saturated and a horizon colour is blended by an unnamed noise texture (`Tex#1`), not rendered
 (U-520, with `TP_Enable_Top_Texture`, the storm / gradient masks and `G_Grandiant_UV2`).
-Moon and sun materials keep the old approximation.
+Moon and sun: see "Moon and sun" above.
 
 ## Bloom parts (`bloom.rs`, `bloom.wgsl`)
 
@@ -194,3 +272,13 @@ the far blur blends to that copy sampled bilinearly at the pixel's uv
 55: the mean of the least-variance quadrant of a 3x3 / 5x5 window) belong to the
 `UArkPpNodeKuwa` post node and are not used by the DOF path (whether a level's post chain uses
 the node is U-522).
+
+Checked against the running game (2026-10-06): `LocalPlayer.m_CurrentArkPpSettings` (+0x124,
+132 bytes; `m_LevelArkPpSettings` at +0xA0 holds the struct defaults) carries Boyle Ext's
+cooked values unchanged (focus 5500, far blur 0.2, CrMgYb shadows (0, 0.03, 0.04) / midtones
+(0, 0.3, 0.4), exposure 0.3, gamma 0.95, grain 3, contrast 0.05, bloom tint (1, 0.953, 0.723)
+x 0.4), so the port builds its uniform from the right data. The LUT bake (57) and uber (59 / 61)
+disassemble as the port computes them (LUT coordinate `sqrt(c)`, squared in the bake, exposure
+after the clamp). These passes are drawn with `DrawPrimitiveUP`, which the probe now hooks
+(slots 83 / 84), so their live constants can be read with `probe_launch measure consts
+gExposure_GammaAdjust 5` (not run yet: the display gamma that reaches the LUT is U-582).
