@@ -191,18 +191,69 @@ pub fn load_climbables(content: &Content, map: &str) -> Vec<dishonored_world::Cl
     c
 }
 
+/// Collision the static meshes do not carry (research/dishonored/PLAYER.md "Level collision"):
+/// the level's `BlockingVolume`s (pawn movement only: invisible brushes; Boyle's garden and
+/// river-grate PlayerStarts stand on two of them) and the physics bodies of its level transition
+/// doors (closed for good: using one loads the other map).
+pub fn add_level_blockers(w: CollisionWorld, content: &Content, map: &str) -> CollisionWorld {
+    let pkgs = map_packages(content, map);
+    let mut extra = Vec::new();
+    match dishonored_assets::water::extract_blocking_volumes(content, &pkgs) {
+        Ok(v) => {
+            for b in v {
+                let tris: Vec<[Vec3; 3]> = b.hulls.iter().flat_map(|h| dishonored_world::hull_triangles(h)).collect();
+                extra.push((format!("{}:{}", b.package, b.name), dishonored_world::channel::PAWN, tris));
+            }
+        }
+        Err(e) => eprintln!("warning: blocking volumes of {map}: {e:#}"),
+    }
+    let doors: Vec<String> = dishonored_assets::travel::extract_travel(content, &pkgs).unwrap_or_default().into_iter().map(|t| format!("{}:{}", t.door_package, t.door)).collect();
+    for d in dishonored_assets::prop_collision::extract_prop_bodies(content, &pkgs, &doors) {
+        let tris: Vec<[Vec3; 3]> = d.boxes.iter().flat_map(|m| dishonored_world::box_triangles(*m)).collect();
+        extra.push((d.actor, dishonored_world::channel::ALL, tris));
+    }
+    w.with_extra(&extra)
+}
+
+/// Spawn points for free-for-all (the port's mode; the original has none): the map's spawns
+/// that stand on the original navigation mesh, in the largest group a pawn can walk between.
+/// Boyle Ext keeps the garden and front-door starts of the estate grounds and drops the
+/// scripted Samuel drop-off start (off the navmesh, in the canal under the visual water, outside
+/// the water volume) and the roof patio and river grate starts (navmesh islands of their own,
+/// left only by drops into the sea or Blink).
+pub fn ffa_spawns(mc: &MatchContent) -> Vec<dishonored_multiplayer::ffa::SpawnPoint> {
+    use dishonored_world::WorldQuery;
+    let all: Vec<dishonored_multiplayer::ffa::SpawnPoint> = mc.spawns.iter().map(|s| dishonored_multiplayer::ffa::SpawnPoint { position: s.position, yaw: s.yaw }).collect();
+    let Some(nav) = mc.collision.nav() else { return all };
+    let on: Vec<usize> = (0..all.len()).filter(|&i| nav.locate(all[i].position, 60.0, 260.0).is_some()).collect();
+    let mut best: Vec<usize> = Vec::new();
+    for &i in &on {
+        let group: Vec<usize> = on.iter().copied().filter(|&j| j == i || nav.find_path(all[i].position, all[j].position, &Default::default()).is_some()).collect();
+        if group.len() > best.len() {
+            best = group;
+        }
+    }
+    if best.len() >= 2 {
+        best.into_iter().map(|i| all[i]).collect()
+    } else if on.len() >= 2 {
+        on.into_iter().map(|i| all[i]).collect()
+    } else {
+        all
+    }
+}
+
 pub fn load_match(map: &str) -> Result<MatchContent> {
     let content = Content::locate()?;
     let sim = load_sim_config(&content).context("gameplay config")?;
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).ok();
-    let coll_path = dir.join(format!("{map}.collision4.bin"));
+    let coll_path = dir.join(format!("{map}.collision5.bin"));
     let spawn_path = dir.join(format!("{map}.spawns.json"));
     let (collision, spawns) = match (CollisionWorld::load(&coll_path), std::fs::read_to_string(&spawn_path)) {
         (Ok(w), Ok(s)) => (w, serde_json::from_str::<Vec<Spawn>>(&s).unwrap_or_default()),
         _ => {
             let m = import_geometry(&content, map)?;
-            let w = CollisionWorld::from_map(&m);
+            let w = add_level_blockers(CollisionWorld::from_map(&m), &content, map);
             w.save(&coll_path).ok();
             let s: Vec<Spawn> = m
                 .spawn_candidates

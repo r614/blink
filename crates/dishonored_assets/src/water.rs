@@ -177,9 +177,80 @@ pub fn extract_physics_volumes(content: &Content, packages: &[String]) -> Result
     }
     Ok(out)
 }
+/// A `BlockingVolume` of the level: an invisible brush that blocks pawns (Engine
+/// `BlockingVolume`: `bWorldGeometry`, `bBlockActors`, its `BrushComponent` `BlockActors`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct BlockingVolumeDef {
+    pub name: String,
+    pub package: String,
+    /// Planes `(nx, ny, nz, d)`, inside when `n . p <= d` for every plane of one hull.
+    pub hulls: Vec<Vec<[f32; 4]>>,
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
+/// Read the colliding `BlockingVolume`s of `packages`. `DynamicBlockingVolume`s count only
+/// while they collide (`bCollideActors`; Boyle Ext places its two with it off); a volume with
+/// `bBlockActors` cleared does not block.
+pub fn extract_blocking_volumes(content: &Content, packages: &[String]) -> Result<Vec<BlockingVolumeDef>> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for name in packages.iter().filter(|p| content.has_package(p)) {
+        if !seen.insert(name.to_ascii_lowercase()) {
+            continue;
+        }
+        let pkg = content.package(name)?;
+        for i in 0..pkg.exports.len() {
+            let class = pkg.export_class(i);
+            if !matches!(class.as_str(), "BlockingVolume" | "DynamicBlockingVolume") || pkg.obj_name(ObjRef::from_index(pkg.exports[i].outer)) != "PersistentLevel" {
+                continue;
+            }
+            let Ok(h) = pkg.read_object(i) else { continue };
+            let p = &h.properties;
+            let flag = |k: &str, d: bool| match find(p, k).map(|x| &x.value) {
+                Some(Value::Bool(b)) => *b,
+                _ => d,
+            };
+            if !flag("bCollideActors", true) || !flag("bBlockActors", true) {
+                continue;
+            }
+            let Some(hulls) = crate::ai_level::brush_world_hulls(&pkg, p) else { continue };
+            let mut min = Vec3::splat(f32::INFINITY);
+            let mut max = Vec3::splat(f32::NEG_INFINITY);
+            for hull in &hulls {
+                if let Some((a, b)) = hull_bounds(hull) {
+                    min = min.min(a);
+                    max = max.max(b);
+                }
+            }
+            if hulls.is_empty() || min.x > max.x {
+                continue;
+            }
+            out.push(BlockingVolumeDef { name: pkg.obj_name(ObjRef::Export(i)).to_string(), package: name.clone(), hulls, min, max });
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Boyle Ext's blocking volumes, read from the retail install when present: eight
+    /// `BlockingVolume`s; the two `DynamicBlockingVolume`s are placed with collision off.
+    #[test]
+    fn boyle_ext_blocking_volumes() {
+        let Ok(c) = Content::locate() else { return };
+        if !c.has_package("L_Boyle_Ext_P") {
+            return;
+        }
+        let v = extract_blocking_volumes(&c, &["L_Boyle_Ext_P".into()]).unwrap();
+        for b in &v {
+            eprintln!("{} {} hulls {:.0?}..{:.0?}", b.name, b.hulls.len(), b.min, b.max);
+        }
+        assert_eq!(v.len(), 8);
+        assert!(v.iter().all(|b| b.name.starts_with("BlockingVolume_")));
+    }
 
     #[test]
     fn box_hull_bounds() {

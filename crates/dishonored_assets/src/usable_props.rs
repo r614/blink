@@ -51,7 +51,7 @@ fn bool_or(props: &[Property], name: &str, d: bool) -> bool {
 
 /// The package that defines the object `r` of `pkg`: `pkg` for an export, else the first of
 /// `packages` exporting an object of the same path (cooked levels carry their own copies).
-fn defining_package(content: &Content, pkg: &Package, r: ObjRef, packages: &[String]) -> Option<(String, String)> {
+pub(crate) fn defining_package(content: &Content, pkg: &Package, r: ObjRef, packages: &[String]) -> Option<(String, String)> {
     let path = pkg.obj_path(r);
     match r {
         ObjRef::Export(_) => Some((pkg.name.clone(), path)),

@@ -48,6 +48,10 @@ pub struct BotResult {
     pub metrics: NetMetrics,
     pub connected: bool,
     pub kills_seen: usize,
+    /// Deaths with another player as the killer.
+    pub player_kills_seen: usize,
+    /// Deaths with no killer or the victim as killer (world, falls, drowning, suicide).
+    pub env_deaths_seen: usize,
     pub final_scores: Vec<(String, i32)>,
     pub matches_ended: u32,
 }
@@ -62,13 +66,19 @@ pub fn run_bot(server: std::net::SocketAddr, idx: usize, profile: (f32, f32), se
     let end = Instant::now() + Duration::from_secs_f32(secs);
     let mut next = Instant::now();
     let mut kills_seen = 0;
+    let (mut player_kills_seen, mut env_deaths_seen) = (0, 0);
     let mut matches_ended = 0;
     let mut last_phase = None;
     while Instant::now() < end {
         client.poll(&mc.collision, &mc.sim);
         for (_, e) in client.events.drain(..) {
-            if matches!(e, SimEvent::Death { .. }) {
+            if let SimEvent::Death { victim, killer, .. } = e {
                 kills_seen += 1;
+                if killer.is_some_and(|k| k != victim) {
+                    player_kills_seen += 1;
+                } else {
+                    env_deaths_seen += 1;
+                }
             }
         }
         if last_phase != Some(client.matchv.phase) {
@@ -95,6 +105,8 @@ pub fn run_bot(server: std::net::SocketAddr, idx: usize, profile: (f32, f32), se
         final_scores: client.matchv.scores.iter().map(|s| (s.name.clone(), s.score)).collect(),
         metrics: client.metrics,
         kills_seen,
+        player_kills_seen,
+        env_deaths_seen,
         matches_ended,
     }
 }
@@ -163,12 +175,18 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
             m.corrections_over_10uu.to_string(),
             format!("{:.1}", m.correction_max),
             r.kills_seen.to_string(),
+            r.player_kills_seen.to_string(),
         ]);
     }
-    rep.table("Per-client network metrics", &["profile (rtt/loss)", "measured RTT", "snapshots", "snapshot interval ms", "mean pred err (uu)", "max pred err", "corrections >10uu", "max correction", "deaths seen"], rows);
+    rep.table("Per-client network metrics", &["profile (rtt/loss)", "measured RTT", "snapshots", "snapshot interval ms", "mean pred err (uu)", "max pred err", "corrections >10uu", "max correction", "deaths seen", "player kills seen"], rows);
     rep.check(S, "prediction error within latency-scaled bounds", err_ok, "mean error <= 4 uu + 0.1 uu per ms RTT");
     let deaths = results.iter().map(|r| r.kills_seen).max().unwrap_or(0);
     rep.check(S, "server-authoritative deaths replicated to clients", deaths > 0, format!("{deaths} deaths observed"));
+    // The bots hunt each other over the network: deaths must include kills by players, not
+    // only falls out of the world.
+    let best = results.iter().max_by_key(|r| r.kills_seen);
+    let (kills, env) = best.map_or((0, 0), |r| (r.player_kills_seen, r.env_deaths_seen));
+    rep.check(S, "networked bots kill each other (player kills, not only world deaths)", kills >= 3 && env * 4 <= kills, format!("{kills} player kills, {env} self / world deaths seen by one client in {secs:.0} s"));
     let ended = results.iter().map(|r| r.matches_ended).max().unwrap_or(0);
     rep.check(S, "FFA completes end to end (score/time limit -> winner)", ended >= 1, format!("{ended} match(es) ended during soak"));
     // Scoreboards agree across clients (replicated match state).

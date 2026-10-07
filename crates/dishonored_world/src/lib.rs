@@ -365,6 +365,108 @@ impl MoverCollision {
 
 const SKIN: f32 = 0.05;
 
+/// The faces of a convex hull given as planes `(nx, ny, nz, d)` (inside when `n . p <= d`), as
+/// triangles wound so their normals point out (UE3 brush volumes, `KConvexElem` face planes).
+pub fn hull_triangles(planes: &[[f32; 4]]) -> Vec<[Vec3; 3]> {
+    use glam::DVec3;
+    let mut out = Vec::new();
+    for (i, pl) in planes.iter().enumerate() {
+        let n = DVec3::new(pl[0] as f64, pl[1] as f64, pl[2] as f64);
+        let len = n.length();
+        if len < 1e-6 {
+            continue;
+        }
+        let (n, d) = (n / len, pl[3] as f64 / len);
+        // A large square on the plane (f64), clipped by every other plane.
+        let u = if n.z.abs() < 0.9 { n.cross(DVec3::Z).normalize() } else { n.cross(DVec3::X).normalize() };
+        let v = n.cross(u);
+        let c = n * d;
+        const R: f64 = 1.0e7;
+        let mut poly = vec![c + (u + v) * R, c + (v - u) * R, c - (u + v) * R, c + (u - v) * R];
+        for (j, q) in planes.iter().enumerate() {
+            if j == i || poly.is_empty() {
+                continue;
+            }
+            let qn = DVec3::new(q[0] as f64, q[1] as f64, q[2] as f64);
+            let ql = qn.length().max(1e-12);
+            let dist = |p: DVec3| (qn.dot(p) - q[3] as f64) / ql;
+            let mut next = Vec::with_capacity(poly.len() + 1);
+            for k in 0..poly.len() {
+                let (a, b) = (poly[k], poly[(k + 1) % poly.len()]);
+                let (da, db) = (dist(a), dist(b));
+                if da <= 0.0 {
+                    next.push(a);
+                }
+                if (da < 0.0) != (db < 0.0) && (da - db).abs() > 1e-9 {
+                    next.push(a + (b - a) * (da / (da - db)));
+                }
+            }
+            poly = next;
+        }
+        if poly.len() < 3 {
+            continue;
+        }
+        for k in 1..poly.len() - 1 {
+            let (a, b, c) = (poly[0], poly[k], poly[k + 1]);
+            let tn = (b - a).cross(c - a);
+            if tn.length_squared() < 1e-6 {
+                continue;
+            }
+            let (a, b, c) = (a.as_vec3(), b.as_vec3(), c.as_vec3());
+            out.push(if tn.dot(n) >= 0.0 { [a, b, c] } else { [a, c, b] });
+        }
+    }
+    out
+}
+
+/// The twelve triangles of a box: the unit cube `[-1, 1]^3` under `m` (half extents in its
+/// scale), normals out.
+pub fn box_triangles(m: glam::Mat4) -> Vec<[Vec3; 3]> {
+    let planes: Vec<[f32; 4]> = [Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z]
+        .iter()
+        .map(|&a| {
+            // Plane of the face through m(a), normal m^-T a.
+            let p = m.transform_point3(a);
+            let n = m.inverse().transpose().transform_vector3(a).normalize();
+            [n.x, n.y, n.z, n.dot(p)]
+        })
+        .collect();
+    hull_triangles(&planes)
+}
+
+impl CollisionWorld {
+    /// This world plus extra blockers `(source, channels, triangles)`; the bounding volume
+    /// hierarchy is rebuilt once.
+    pub fn with_extra(self, extra: &[(String, u8, Vec<[Vec3; 3]>)]) -> Self {
+        if extra.iter().all(|e| e.2.is_empty()) {
+            return self;
+        }
+        let CollisionWorld { mut tris, mut sources, mut tri_surface, surfaces, nav, water, volumes, movers, climbables, .. } = self;
+        tri_surface.resize(tris.len(), 0);
+        for (source, channels, extra) in extra {
+            let src = sources.len() as u32;
+            sources.push(source.clone());
+            for t in extra {
+                let n = (t[1] - t[0]).cross(t[2] - t[0]);
+                if n.length_squared() < 1e-10 {
+                    continue;
+                }
+                tris.push(Tri { a: t[0], b: t[1], c: t[2], n: n.normalize(), channels: *channels, source: src });
+                tri_surface.push(0);
+            }
+        }
+        let mut w = CollisionWorld::from_triangles(tris, sources);
+        w.tri_surface = tri_surface;
+        w.surfaces = surfaces;
+        w.nav = nav;
+        w.water = water;
+        w.volumes = volumes;
+        w.movers = movers;
+        w.climbables = climbables;
+        w
+    }
+}
+
 impl CollisionWorld {
     pub fn from_triangles(tris: Vec<Tri>, sources: Vec<String>) -> Self {
         let bounds: Vec<Aabb> = tris
@@ -825,6 +927,44 @@ mod tests {
         // Wall at x=500 facing -X.
         quad(&mut tris, Vec3::new(500., -1000., 0.), Vec3::new(500., -1000., 500.), Vec3::new(500., 1000., 500.), Vec3::new(500., 1000., 0.));
         CollisionWorld::from_triangles(tris, vec!["test".into()])
+    }
+
+    #[test]
+    fn hull_faces_close_a_box() {
+        // x in [0, 100], y in [-50, 50], z in [0, 20].
+        let planes = [[1., 0., 0., 100.], [-1., 0., 0., 0.], [0., 1., 0., 50.], [0., -1., 0., 50.], [0., 0., 1., 20.], [0., 0., -1., 0.]];
+        let t = hull_triangles(&planes);
+        assert_eq!(t.len(), 12);
+        let centre = Vec3::new(50.0, 0.0, 10.0);
+        for f in &t {
+            let n = (f[1] - f[0]).cross(f[2] - f[0]);
+            assert!(n.dot(f[0] - centre) > 0.0, "inward face {f:?}");
+            for p in f {
+                assert!(p.x > -0.01 && p.x < 100.01 && p.y.abs() < 50.01 && p.z > -0.01 && p.z < 20.01, "{p:?}");
+            }
+        }
+        // A rotated, scaled box gives the same twelve faces.
+        let m = glam::Mat4::from_scale_rotation_translation(Vec3::new(10.0, 20.0, 30.0), glam::Quat::from_rotation_z(0.7), Vec3::new(5.0, 6.0, 7.0));
+        let b = box_triangles(m);
+        assert_eq!(b.len(), 12);
+        let area: f32 = b.iter().map(|f| (f[1] - f[0]).cross(f[2] - f[0]).length() * 0.5).sum();
+        assert!((area - 2.0 * 4.0 * (10.0 * 20.0 + 20.0 * 30.0 + 10.0 * 30.0)).abs() < 1.0, "{area}");
+    }
+
+    #[test]
+    fn blockers_added_to_a_world_stop_pawns_only() {
+        let w = floor_and_wall();
+        let n = w.tris.len();
+        // A wall of a blocking volume at x = -300, pawn channel only.
+        let blocker = box_triangles(glam::Mat4::from_scale_rotation_translation(Vec3::new(10.0, 500.0, 300.0), glam::Quat::IDENTITY, Vec3::new(-300.0, 0.0, 300.0)));
+        let w = w.with_extra(&[("BlockingVolume_0".to_string(), channel::PAWN, blocker)]);
+        assert_eq!(w.tris.len(), n + 12);
+        assert_eq!(w.sources.last().map(String::as_str), Some("BlockingVolume_0"));
+        let b = PawnBox::new(Vec3::new(0.0, 0.0, 100.0), 30.0, 90.0);
+        let h = w.sweep_box(&b, Vec3::new(-600.0, 0.0, 0.0), channel::PAWN).expect("blocked");
+        assert!(h.fraction > 0.4 && h.fraction < 0.5, "{}", h.fraction);
+        // Traces (vision, projectiles) pass through.
+        assert!(w.raycast(Vec3::new(0.0, 0.0, 100.0), -Vec3::X, 600.0, channel::VISION | channel::PROJECTILE).is_none());
     }
 
     #[test]

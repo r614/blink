@@ -9,6 +9,9 @@
 //! harness visual [--seconds 20]
 //!                             server + bots + one rendered client recording MP4 and
 //!                             a scripted offline smoke run with screenshots
+//! harness ffa [--players 3] [--minutes 5]
+//!                             headless FFA of test bots on the real map: player kills per
+//!                             match, every death with its place and cause
 //! harness fidelity [--configs a,b] [--reference DIR]
 //!                             fixed Boyle Ext viewpoints with each visual feature on/off;
 //!                             before/after pairs + optional SSIM vs original captures
@@ -35,6 +38,7 @@ mod kismet;
 mod mission;
 mod travel;
 mod fidelity;
+mod ffa;
 mod launcher;
 mod netsoak;
 mod report;
@@ -76,6 +80,7 @@ fn main() -> Result<()> {
         "visual" => visual::run(&ctx, &mut rep)?,
         "contracts" => contracts::run(&ctx, &mut rep)?,
         "fidelity" => fidelity::run(&ctx, &mut rep)?,
+        "ffa" => ffa::run(&ctx, &mut rep)?,
         "audio" => audio::run(&ctx, &mut rep)?,
         "mission" => mission::run(&ctx, &mut rep)?,
         "travel" => travel::run(&ctx, &mut rep)?,

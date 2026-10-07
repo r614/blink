@@ -105,7 +105,7 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
 
     // 5. Bot brawl: 6 bots, 3 simulated minutes, FFA rules; telemetry trace recorded.
     let brawl = |record: bool| -> (u64, FfaMatch, usize) {
-        let spawns: Vec<SpawnPoint> = mc.spawns.iter().map(|s| SpawnPoint { position: s.position, yaw: s.yaw }).collect();
+        let spawns: Vec<SpawnPoint> = dishonored_content::ffa_spawns(&mc);
         let mut m = FfaMatch::new(FfaRules { warmup_time: 0.5, time_limit: 170.0, score_limit: 50, ..Default::default() }, spawns);
         let mut bots: Vec<Bot> = (0..6).map(|i| Bot::new(i + 1, if i % 2 == 0 { BotStyle::Duelist } else { BotStyle::Gunner }, 77 + i as u64)).collect();
         for b in &bots {

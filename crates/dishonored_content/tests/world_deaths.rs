@@ -1,0 +1,78 @@
+//! Where pawns could leave Boyle Ext's playable space, against the original level data (skips
+//! without the install). See research/dishonored/PLAYER.md "Level collision".
+use dishonored_content::{DEFAULT_MAP, load_match};
+use dishonored_sim::state::{MoveMode, WorldState};
+use dishonored_sim::{spawn_player, step_world};
+use dishonored_world::{WorldQuery, channel};
+use glam::Vec3;
+
+/// The level transition doors are closed for good: Boyle's front door (`DishonoredUsableObject_6`,
+/// courtyard to foyer) fills the doorway the courtyard wall leaves open. Without its bodies a
+/// pawn walked through onto a ledge and fell into the sea.
+#[test]
+fn boyle_front_door_blocks_the_doorway() {
+    if dishonored_assets::Content::locate().is_err() {
+        return;
+    }
+    let mc = load_match(DEFAULT_MAP).unwrap();
+    let w = &mc.collision;
+    for y in [1350.0, 1431.0, 1500.0] {
+        let o = Vec3::new(1300.0, y, 80.0);
+        let h = w.raycast(o, Vec3::X, 2000.0, channel::PAWN).expect("doorway blocked");
+        let src = &w.sources[w.tris[h.tri as usize].source as usize];
+        assert!(src.ends_with("DishonoredUsableObject_6"), "{src} at {}", o.x + h.distance);
+        assert!((o.x + h.distance - 1510.0).abs() < 20.0, "{}", o.x + h.distance);
+    }
+    // A pawn pushing east from the front-door PlayerStart stays in the courtyard.
+    let mut st = WorldState::default();
+    spawn_player(&mut st, 1, Vec3::new(1355.0, 1445.0, 98.0), 0.0, &mc.sim);
+    let input = dishonored_sim::input::PlayerInput { forward: 127, yaw: 0.0, ..Default::default() };
+    for _ in 0..300 {
+        step_world(&mut st, &[(1, input)], w, &mc.sim);
+    }
+    let p = st.player(1).unwrap();
+    assert!(p.position.x < 1500.0 && p.position.z > 0.0 && p.mode == MoveMode::Walking, "{:?} {:?}", p.position, p.mode);
+}
+
+/// Two PlayerStarts stand on `BlockingVolume`s (their `Base`): the garden start on
+/// `BlockingVolume_5` and the river grate start on `BlockingVolume_2`. A pawn spawned there
+/// stands instead of falling through.
+#[test]
+fn playerstarts_stand_on_their_blocking_volumes() {
+    if dishonored_assets::Content::locate().is_err() {
+        return;
+    }
+    let mc = load_match(DEFAULT_MAP).unwrap();
+    let w = &mc.collision;
+    assert_eq!(w.sources.iter().filter(|s| s.contains(":BlockingVolume_")).count(), 8);
+    for (start, volume) in [(Vec3::new(-2663.0, -1879.0, 98.0), "BlockingVolume_5"), (Vec3::new(-921.0, 1160.0, -1835.0), "BlockingVolume_2")] {
+        let h = w.raycast(start, -Vec3::Z, 400.0, channel::PAWN).expect("floor under the start");
+        let src = &w.sources[w.tris[h.tri as usize].source as usize];
+        assert!(src.ends_with(volume), "{start}: {src}");
+        let mut st = WorldState::default();
+        spawn_player(&mut st, 1, start, 0.0, &mc.sim);
+        for _ in 0..120 {
+            step_world(&mut st, &[], w, &mc.sim);
+        }
+        let p = st.player(1).unwrap();
+        assert!((p.position.z - start.z).abs() < 30.0 && p.mode == MoveMode::Walking, "{start}: {:?} {:?}", p.position, p.mode);
+    }
+}
+
+/// Free-for-all spawns: of Boyle Ext's five PlayerStarts, the scripted Samuel drop-off is off
+/// the navmesh (in the canal under the visual water, outside the sea's water volume: a pawn
+/// left there walks off the canal floor to `KillZ`), and the roof patio and river grate starts
+/// stand on navmesh islands of their own. The garden and front-door starts share the estate
+/// grounds.
+#[test]
+fn ffa_spawns_are_the_estate_starts() {
+    if dishonored_assets::Content::locate().is_err() {
+        return;
+    }
+    let mc = load_match(DEFAULT_MAP).unwrap();
+    assert_eq!(mc.spawns.len(), 5);
+    let s = dishonored_content::ffa_spawns(&mc);
+    let mut xy: Vec<(i32, i32)> = s.iter().map(|p| (p.position.x.round() as i32, p.position.y.round() as i32)).collect();
+    xy.sort();
+    assert_eq!(xy, vec![(-2663, -1879), (1355, 1445)]);
+}

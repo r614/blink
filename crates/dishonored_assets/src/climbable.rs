@@ -48,7 +48,7 @@ fn f32_of(props: &[Property], n: &str) -> f32 {
 /// struct over as 64 raw bytes starting 4 bytes early (a zero dword, then rows X, Y, Z and the
 /// W row without its final 1.0): the identity of a fixed root body reads
 /// `0, 1,0,0,0, 0,1,0,0, 0,0,1,0, x,y,z`.
-fn matrix(v: Option<&Value>) -> Mat4 {
+pub(crate) fn matrix(v: Option<&Value>) -> Mat4 {
     match v {
         Some(Value::Raw(_, b)) if b.len() >= 64 => {
             let f = |i: usize| f32::from_le_bytes(b[4 + i * 4..8 + i * 4].try_into().unwrap());

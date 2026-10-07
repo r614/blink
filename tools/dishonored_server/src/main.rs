@@ -56,7 +56,7 @@ fn main() -> Result<()> {
     let mc = maps.get(&map).cloned().unwrap_or_else(|| maps.maps[0].clone());
     maps.set.set_active(&mc.map_name);
     println!("loaded {map}: {} collision tris, {} spawns in {:.1?}", mc.collision.tris.len(), mc.spawns.len(), t.elapsed());
-    let spawns: Vec<SpawnPoint> = mc.spawns.iter().map(|s| SpawnPoint { position: s.position, yaw: s.yaw }).collect();
+    let spawns: Vec<SpawnPoint> = dishonored_content::ffa_spawns(&mc);
     let setup = if let Some(def) = mission {
         dishonored_content::mission_setup(&maps, def).map_err(|e| anyhow::anyhow!("mission: {e}"))?
     } else if get("--mode").as_deref() == Some("contracts") {
