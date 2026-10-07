@@ -1487,3 +1487,50 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Tests:** `usable_props::tests` (door states, classes), `level_props::tests` (stage per transition, rest pose, mover matching), `decals::tests` (puddle decode, colour / Fresnel switches), `kismet_host::tests::mover_delta_maps_placed_onto_current`; `cargo test -p dishonored_assets -p dishonored_multiplayer -p dishonored_mission -p dishonored_net --lib` and `-p dishonored_runtime` pass.
 - **Harness:** `fidelity --configs full` (debug), SSIM against the original captures, before (the main-branch renders in the session's `caps/port2`) -> after: aerial 0.358 -> 0.361, street 0.611 -> 0.730 (the door), garden 0.293 -> 0.294, spawn1 0.299 -> 0.302, mansion 0.352 -> 0.360, sewer 0.640 -> 0.638, moon 0.376 -> 0.376, skyline 0.473 -> 0.487.
 - **Confidence:** CONFIRMED for the skipped components, the prop list and the decal shader maths (read from the shaders); LIKELY for the state-to-stage mapping (U-560) and the zero ambient (U-562: the puddle shader itself was not drawn in the sample). APPROXIMATION: static lights do not light translucency in the port (U-561), so the confetti by the mansion lamps is darker than in the original.
+
+## 2026-10-06: Foliage, the diffuse colour's alpha, skeletal scenery (U-570 - U-573)
+
+- **Question:** Why are the hedges along the mansion steps and the garden fence missing in the
+  `mansion` / `garden` / `moon` pairs, and what other visible geometry does the importer skip?
+- **Method:** export class counts of all eight Boyle Ext packages (`package_dump --exports`);
+  `map_dump --survey`, `--near` (now with each instance's lightmap luminance), `--mesh` (new:
+  vertex / triangle counts, bounds, UV ranges); `obj_dump` of the shrub components and of every
+  placed `SkeletalMeshComponent`; `mic_static` of `boyle_shrubs_01_inst`; `shader_maps` (now
+  printing the vertex uniform expressions) and `fxc /dumpbin` of `vertexAnim_PMAT`'s base pass
+  (PS 1743, VS 7327 / 7358) and of one base pass per base material exposing `D_Diffuse_color`;
+  close-up renders of the hedges (normal and `--debug-lighting`).
+- **Findings:**
+  - No foliage-specific storage: no `InstancedFoliageActor`, `InstancedStaticMeshComponent`,
+    SpeedTree, terrain or `FoliageFactory` in any package. The hedges (`square_shrubs_02/03`,
+    `boyle_shrub_01/02`), cone shrubs, flowers, grass, ivy and yews are `StaticMeshCollectionActor`
+    components: 197 shrub / flower and 192 grass instances, all imported and lightmapped, with
+    `CollideActors` false, no cull distance, none hidden. The importer drops none of them.
+  - They were drawn, but as dark low mounds: (1) the base pass multiplies `D_Diffuse_color.rgb` by
+    its alpha (`mul r.xyz, cN, cN.w`) in all 14 base materials that expose it (`FogSheet_PMAT`
+    alone reads the vector whole); the port ignored the alpha (shrubs 1.5, grass and flowers 2);
+    (2) the port's viewpoints see the scene smaller than the reference captures (U-572).
+  - `vertexAnim_PMAT` wind (simple permutation): world += `Va_Radius_spreading x sin(2 pi frac(z x
+    Va_Distorsion_strenght + Time x Va_Vertex_Anim_Speed + 0.5) - pi)` on every axis, at most 1 uu
+    on Boyle (U-570). Its pixel shader clips at `O_Opacity_mask.r - 0.3333` (as the port).
+  - Skipped visible geometry: placed `SkeletalMeshComponent`s. Of those, 42 are scenery
+    (8 `DisDoor`, 25 `DishonoredUsableObject`, 4 `DisWaterSource`, 2 `DisAlarmBell`, the
+    `DisClimbable` chain, and the two `SkeletalMeshActor`s no Kismet variable names: the sewer gate
+    and the bridge); 19 `DisFish`; the rest matinee / hand props (`SkeletalMeshActor[MAT]`). The
+    `street` viewpoint looks straight at `DishonoredUsableObject_7`'s double door, which the port
+    did not draw. BSP: the level `Model`s have no components. Everything else with a primitive
+    (static meshes of every owner class, spline meshes, emitters) was already imported; hidden
+    instances are only the 115 `Collision_model` blockers, blockout planes / cubes and one sheet.
+- **Port changes:** `map_render::diffuse_color_terms` (rgb x a for the decoded bases);
+  `level.rs` `import_skeletal_props` (reference-pose, render-only instances after every static
+  component, so existing instance indices are unchanged; `ImportStats::skeletal_props`);
+  `shader_maps` prints cube textures and vertex vectors / scalars; `map_dump --mesh` and lightmap
+  stats in `--near`.
+- **Tests:** `dishonored_assets` (retail `boyle_ext_import`: 533 meshes, 3796 instances,
+  42 skeletal props). `harness fidelity --configs full` (debug), SSIM before -> after: aerial
+  0.3614 -> 0.3513, street 0.6176 -> 0.6708, garden 0.2957 -> 0.3010, spawn1 0.3019 -> 0.3078,
+  mansion 0.3525 -> 0.3490, sewer 0.6380 -> 0.6381, moon 0.3727 -> 0.3755, skyline 0.4705 -> 0.4842.
+- **Confidence:** CONFIRMED for the storage, the counts, the diffuse alpha and the wind formula;
+  LIKELY for the viewpoint explanation (U-572); APPROXIMATION for the skeletal scenery's lighting
+  and pose (U-571). Open: U-570 (wind not drawn, complex permutations), U-573 (base-pass ambient).
+
+- Merge reconcile (foliage survey × usable props): static reference-pose skeletal instancing is limited to `DisClimbable` and unscripted `SkeletalMeshActor`s; doors, usables, water sources and alarm bells come only from `usable_props` (animated). Boyle Ext: 514 meshes, 3757 instances, 3 static skeletal props.

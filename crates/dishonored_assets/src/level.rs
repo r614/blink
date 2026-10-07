@@ -60,6 +60,9 @@ pub struct ImportStats {
     pub other_actor_components: usize,
     /// SplineMeshComponents baked into deformed mesh copies.
     pub spline_meshes: usize,
+    /// [foliage-survey] Placed SkeletalMeshComponents (doors, usable objects, sinks, alarm bells,
+    /// climbable chains) imported as render-only instances in their reference pose.
+    pub skeletal_props: usize,
     /// Static light actors skipped because their light is baked into the lightmaps.
     pub static_lights_skipped: usize,
     pub instances: usize,
@@ -123,6 +126,8 @@ struct Importer<'a> {
     stats: ImportStats,
     ps_ids: HashMap<Key, Option<usize>>,
     class_defaults: HashMap<String, Vec<Property>>,
+    /// [foliage-survey] Skeletal meshes imported as static scenery.
+    skel_meshes: HashMap<Key, Option<SkeletalProp>>,
 }
 
 /// Single-channel static component masks kept in `MaterialParams::mask_channels`.
@@ -135,7 +140,16 @@ const RESOURCE_CLASSES: &[&str] = &[
     "MaterialInstanceConstant",
     "TextureCube",
     "ParticleSystem",
+    "SkeletalMesh",
 ];
+
+/// [foliage-survey] Actor classes whose placed `SkeletalMeshComponent` is static scenery until
+/// gameplay moves it: drawn in the mesh's reference pose (doors closed, lids shut, chains hanging).
+/// Plain `SkeletalMeshActor`s join them unless Kismet references them. Not included: `DisFish`
+/// (swimming crowd agents) and `SkeletalMeshActorMAT` (matinee props, drawn by the cutscene
+/// player); see UNKNOWNS U-571. Usable actors (doors, sinks, alarm bells) are drawn animated from
+/// `DishonoredMap::skeletal_props` (`usable_props`), so they are not instanced here.
+const SKELETAL_PROP_CLASSES: &[&str] = &["DisClimbable"];
 
 /// Always-loaded packages whose resources level packages import without cooking a copy
 /// (U-005: every unresolved Boyle Ext import was found in one of these).
@@ -189,11 +203,18 @@ pub fn import_level(
         stats: ImportStats::default(),
         ps_ids: HashMap::new(),
         class_defaults: HashMap::new(),
+        skel_meshes: HashMap::new(),
     };
     imp.stats.timings.push(("packages", t0.elapsed().as_secs_f32()));
     let t = std::time::Instant::now();
     for slot in 0..level_slots {
         imp.import_actors(slot)?;
+    }
+    // [foliage-survey] After every static component, so existing instance indices are unchanged.
+    if opts.other_actors {
+        for slot in 0..level_slots {
+            imp.import_skeletal_props(slot);
+        }
     }
     if opts.particles && opts.load_textures {
         for p in &opts.extra_particles {
@@ -1411,3 +1432,118 @@ impl crate::particles::ParticleCtx for Importer<'_> {
         }
     }
 }
+
+// [foliage-survey] Placed skeletal scenery (see `SKELETAL_PROP_CLASSES`).
+impl Importer<'_> {
+    /// Every placed `SkeletalMeshComponent` of a `SKELETAL_PROP_CLASSES` actor in `slot`, as a
+    /// render-only instance of its mesh in the reference pose. UE3 places a skeletal mesh at
+    /// `actor x component x Rot(RotOrigin) x Translate(Origin)` (as the character and climbable
+    /// loaders do); the reference pose's skinned vertices are the stored positions.
+    fn import_skeletal_props(&mut self, slot: usize) {
+        let pkg = self.pkgs[slot].clone();
+        // `SkeletalMeshActor`s that Kismet names (matinee props, items attached to pawns) are the
+        // cutscene player's; the others (Boyle's sewer gate and bridge) are scenery.
+        let mut scripted: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for i in 0..pkg.exports.len() {
+            if pkg.export_class(i) == "SeqVar_Object" {
+                if let Some(ObjRef::Export(o)) = pkg.read_object(i).ok().and_then(|h| find(&h.properties, "ObjValue").and_then(|p| p.as_object())).map(ObjRef::from_index) {
+                    scripted.insert(o);
+                }
+            }
+        }
+        for ci in 0..pkg.exports.len() {
+            if pkg.export_class(ci) != "SkeletalMeshComponent" {
+                continue;
+            }
+            let ObjRef::Export(actor) = ObjRef::from_index(pkg.exports[ci].outer) else { continue };
+            let class = pkg.export_class(actor);
+            let scenery = SKELETAL_PROP_CLASSES.contains(&class.as_str()) || (class == "SkeletalMeshActor" && !scripted.contains(&actor));
+            if !scenery || !self.is_in_persistent_level(&pkg, actor) {
+                continue;
+            }
+            if let Err(e) = self.import_skeletal_component(slot, actor, ci, &class) {
+                self.stats.errors.push(format!("{}: {e:#}", pkg.obj_path(ObjRef::Export(ci))));
+            }
+        }
+    }
+
+    fn import_skeletal_component(&mut self, slot: usize, actor: usize, ci: usize, class: &str) -> Result<()> {
+        let pkg = self.pkgs[slot].clone();
+        let props = pkg.read_object(actor)?.properties;
+        let cprops = pkg.read_object(ci)?.properties;
+        let Some(mesh_ref) = find(&cprops, "SkeletalMesh").and_then(|p| p.as_object()).filter(|o| *o != 0) else { return Ok(()) };
+        let Some(k) = self.resolve(slot, ObjRef::from_index(mesh_ref)) else { return Ok(()) };
+        let Some((mesh, mesh_to_component, mesh_materials, slots)) = self.skeletal_mesh(k) else { return Ok(()) };
+        let overrides = find(&cprops, "Materials").and_then(|p| p.array_objects().ok()).unwrap_or_default();
+        let mut by_slot: Vec<Option<MaterialId>> = Vec::new();
+        for (i, m) in mesh_materials.iter().enumerate() {
+            by_slot.push(match overrides.get(i).copied().filter(|o| *o != 0) {
+                Some(o) => self.resolve(slot, ObjRef::from_index(o)).and_then(|mk| self.material(mk)),
+                None => *m,
+            });
+        }
+        // Instance materials are per section; sections name their mesh material slot.
+        let materials = slots.iter().map(|&s| by_slot.get(s).copied().flatten()).collect();
+        let hidden = bool_or(&props, "bHidden", false) || bool_or(&cprops, "HiddenGame", false);
+        self.map.instances.push(MeshInstance {
+            mesh,
+            transform: actor_transform(&props) * component_transform(&cprops) * mesh_to_component,
+            materials,
+            hidden,
+            collides: false,
+            source: format!("{} [{class}]", pkg.obj_path(ObjRef::Export(ci))),
+            lightmap: None,
+            mover: None,
+        });
+        self.stats.skeletal_props += 1;
+        Ok(())
+    }
+
+    /// LOD0 of a skeletal mesh as a static mesh asset: (mesh, mesh to component, material per
+    /// mesh slot, mesh slot per section).
+    fn skeletal_mesh(&mut self, k: Key) -> Option<SkeletalProp> {
+        if let Some(v) = self.skel_meshes.get(&k) {
+            return v.clone();
+        }
+        self.skel_meshes.insert(k, None);
+        let pkg = self.pkgs[k.0].clone();
+        let raw = match crate::skeletal_mesh::read_skeletal_mesh(&pkg, k.1) {
+            Ok(r) => r,
+            Err(e) => {
+                self.stats.mesh_failures += 1;
+                self.stats.errors.push(format!("{e:#}"));
+                return None;
+            }
+        };
+        let mesh_to_component = rotator_matrix(raw.rot_origin[0], raw.rot_origin[1], raw.rot_origin[2]) * Mat4::from_translation(raw.mesh_origin);
+        let mesh_materials: Vec<Option<MaterialId>> = raw.materials.iter().map(|&m| self.resolve(k.0, ObjRef::from_index(m)).and_then(|mk| self.material(mk))).collect();
+        let (lo, hi) = raw.positions.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(a, b), p| (a.min(*p), b.max(*p)));
+        let slots: Vec<usize> = raw.sections.iter().map(|s| s.material_index.max(0) as usize).collect();
+        let n = raw.positions.len();
+        let asset = StaticMeshAsset {
+            source: pkg.obj_path(ObjRef::Export(k.1)),
+            normals: raw.normals,
+            tangents: raw.tangents,
+            uv0: if raw.uvs.len() == n { raw.uvs } else { vec![Vec2::ZERO; n] },
+            uv1: Vec::new(),
+            indices: raw.indices,
+            sections: slots
+                .iter()
+                .zip(&raw.sections)
+                .map(|(&s, sec)| MeshSection { first_index: sec.first_index, num_triangles: sec.num_triangles, material: mesh_materials.get(s).copied().flatten(), enable_collision: false })
+                .collect(),
+            collision_triangles: Vec::new(),
+            collision_materials: Vec::new(),
+            bounds_min: lo,
+            bounds_max: hi,
+            positions: raw.positions,
+        };
+        self.map.meshes.push(asset);
+        let v = Some((self.map.meshes.len() - 1, mesh_to_component, mesh_materials, slots));
+        self.skel_meshes.insert(k, v.clone());
+        v
+    }
+}
+
+/// (mesh, mesh to component, material per mesh slot, mesh slot per section).
+type SkeletalProp = (MeshId, Mat4, Vec<Option<MaterialId>>, Vec<usize>);
