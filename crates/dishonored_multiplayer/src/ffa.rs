@@ -129,15 +129,18 @@ impl FfaMatch {
                         if let Some(s) = self.view.scores.iter_mut().find(|s| s.id == *victim) {
                             s.deaths += 1;
                         }
-                        // A kill scores for the killer. A suicide or a world death (KillZ, a
-                        // fall, drowning, a pain volume) changes no score: Dishonored's engine
-                        // has no `GameInfo.ScoreKill` (stock UE3's "-1 for a suicide or a world
-                        // death" was removed with `PlayerReplicationInfo`; its `GameInfo.Killed`
-                        // only broadcasts and discards inventory), research/dishonored/multiplayer/FFA.md.
-                        if let Some(k) = killer.filter(|k| k != victim) {
-                            if let Some(s) = self.view.scores.iter_mut().find(|s| s.id == k) {
-                                s.kills += 1;
-                                s.score += 1;
+                        match killer {
+                            Some(k) if k != victim => {
+                                if let Some(s) = self.view.scores.iter_mut().find(|s| s.id == *k) {
+                                    s.kills += 1;
+                                    s.score += 1;
+                                }
+                            }
+                            _ => {
+                                // Suicide / world death costs a point.
+                                if let Some(s) = self.view.scores.iter_mut().find(|s| s.id == *victim) {
+                                    s.score -= 1;
+                                }
                             }
                         }
                     }

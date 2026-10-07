@@ -2,43 +2,13 @@
 
 Code: `crates/dishonored_multiplayer/src/ffa.rs` (rules), `dishonored_content::ffa_spawns`
 (spawn points), `crates/dishonored_bots` (test bots). Tests:
-`crates/dishonored_multiplayer/tests/ffa.rs`, `crates/dishonored_bots/tests/hunt.rs`,
+`crates/dishonored_bots/tests/hunt.rs`,
 `crates/dishonored_content/tests/world_deaths.rs`; harness: `harness ffa` (headless) and
 `harness net` (dedicated server and bot clients over UDP).
 
 Dishonored is single-player: free-for-all is the port's mode for validating the simulation,
 prediction and replication. The mechanics underneath are the original's (`dishonored_sim`); the
-mode's rules are design, kept as close to the engine's own as the data allows.
-
-## Scoring: kills score, world deaths and suicides cost nothing
-
-A kill gives the killer one point. A death without a killer, or with the victim as killer
-(`KillZ`, a fall, drowning, a pain volume, the pawn's own grenade), counts as a death and changes
-no score.
-
-Evidence (2026-10-07, Engine.upk and DishonoredGame.upk decompiled with `uc_decompile.ps1`,
-`package_dump --names`, `class_layout`, strings of `Dishonored.exe`):
-
-- Stock UE3 scores in `GameInfo.ScoreKill`: a suicide or a death with no killer takes a point
-  from the victim, a kill gives the killer one, then `CheckScore`. Dishonored's shipped
-  `Engine.GameInfo` has neither function (nor `ModifyScoreKill`); `GoalScore` and `MaxLives`
-  remain as unused config fields.
-- `GameInfo.Killed` only calls the empty `BroadcastDeathMessage` (for a player), `DiscardInventory`
-  and `NotifyKilled`. `DishonoredGameInfo` adds no scoring (`PreventDeath` and its native half
-  only).
-- There is no `PlayerReplicationInfo` class in the cooked packages (`class_layout Engine
-  PlayerReplicationInfo`: not found), so there is no `Score`, `Deaths` or `Kills` field to keep.
-  `GameReplicationInfo` keeps `GoalScore` and `Winner`, set by nothing.
-- `Mutator.ScoreKill` survives as a pass-through to the next mutator; no script calls it, and
-  the executable holds no `ScoreKill` name.
-- `Pawn.SetKillInstigator` (Engine script) would credit a death by a `bCausedByWorld` damage type
-  (`KillZDamageType`, `DmgType_Fell`) to `LastHitBy`, and `Pawn.Landed` clears `LastHitBy`. The
-  native damage path does not call it by name (no `SetKillInstigator` string in
-  `Dishonored.exe`, while `FellOutOfWorld`, `PreventDeath`, `NotifyKilled` and
-  `OutsideWorldBounds` are there), so the port does not credit pushed falls (U-642).
-
-The port used to take a point for a world death (stock UE3's rule, which Dishonored removed); a
-5-minute playtest showed a player at -3.
+mode's rules (a kill +1, a suicide or a world death -1) are port design.
 
 ## Spawn points
 
