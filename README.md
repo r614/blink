@@ -13,10 +13,6 @@ install of **Dishonored: Definitive Edition (GOG)**. The runtime does not run or
 modify `Dishonored.exe`. An optional research tool (`probe_launch`) can start your own
 local copy with a measurement DLL, so that the port can be compared against the original.
 
-The end goal is **Contracts**, a social-stealth multiplayer mode: every player has
-one target and one pursuer, and the loop is observe → identify → stalk → approach →
-assassinate → escape.
-
 No retail assets are included in this repository. All content is read at runtime
 from your install.
 
@@ -24,10 +20,18 @@ from your install.
 > *Dishonored* is a trademark of ZeniMax Media Inc. This is an unofficial fan project; you
 > need your own copy of the game to use it. See [Legal](#legal).
 
+## Game modes
+
+- **Free for all** (offline against bots, or multiplayer): everyone fights everyone, using the
+  original's sword, pistol, crossbow and powers.
+- **Contracts** (multiplayer, or offline against bots): social stealth in a crowd of NPCs. Each player is assigned a target
+  and is someone else's target. Find yours, get close without being spotted, and take them out.
+- **Custom missions** (single player or co-op): missions written as `missions/*.ron` files, played
+  on the original level with its NPCs, dialogue and scripting. See `missions/README.md`.
+
 ## Status
 
-Experimental. Playable, with known bugs, on Lady Boyle's Last Party (`L_Boyle_*`): offline against bots, custom missions,
-and Contracts / FFA over a dedicated server.
+Experimental. Playable, with known bugs, on Lady Boyle's Last Party (`L_Boyle_*`).
 
 | Area | State |
 |---|---|
