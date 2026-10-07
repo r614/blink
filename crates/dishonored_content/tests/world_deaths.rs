@@ -16,6 +16,13 @@ fn boyle_front_door_blocks_the_doorway() {
     }
     let mc = load_match(DEFAULT_MAP).unwrap();
     let w = &mc.collision;
+    // All four transition doors to the interior (balcony, courtyard, garden, sewer) collide.
+    for d in ["DishonoredUsableObject_5", "DishonoredUsableObject_6", "DishonoredUsableObject_7", "DishonoredUsableObject_8"] {
+        let src = w.sources.iter().position(|s| s.ends_with(&format!(":{d}"))).unwrap_or_else(|| panic!("{d} has no collision"));
+        let n = w.tris.iter().filter(|t| t.source as usize == src).count();
+        println!("{d}: {n} triangles");
+        assert!(n >= 12 && n % 12 == 0, "{d}: {n}");
+    }
     for y in [1350.0, 1431.0, 1500.0] {
         let o = Vec3::new(1300.0, y, 80.0);
         let h = w.raycast(o, Vec3::X, 2000.0, channel::PAWN).expect("doorway blocked");

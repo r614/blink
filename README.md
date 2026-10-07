@@ -134,6 +134,10 @@ cargo run --release -p dishonored_master -- --bind 0.0.0.0:27900
 ```
 
 Join with `--connect HOST:27015`, or `--browse MASTER` to pick from the list.
+`--autopilot duelist|gunner|wanderer` lets a test bot play the joined client (it hunts the
+other players along the original navmesh). Free-for-all rules, spawn points and the bots:
+`research/dishonored/multiplayer/FFA.md`; `harness ffa` plays a headless match and lists every
+death with its place and cause.
 
 In game (the original PC layout): WASD move, mouse look, Space jump, C sneak, Shift sprint,
 LMB sword, RMB left hand (hold to aim Blink), Left Ctrl block, F use / talk, Q/E lean, R reload,

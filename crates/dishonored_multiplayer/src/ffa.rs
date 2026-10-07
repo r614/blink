@@ -133,7 +133,7 @@ impl FfaMatch {
                         // fall, drowning, a pain volume) changes no score: Dishonored's engine
                         // has no `GameInfo.ScoreKill` (stock UE3's "-1 for a suicide or a world
                         // death" was removed with `PlayerReplicationInfo`; its `GameInfo.Killed`
-                        // only broadcasts and discards inventory), research/dishonored/MULTIPLAYER.md.
+                        // only broadcasts and discards inventory), research/dishonored/multiplayer/FFA.md.
                         if let Some(k) = killer.filter(|k| k != victim) {
                             if let Some(s) = self.view.scores.iter_mut().find(|s| s.id == k) {
                                 s.kills += 1;

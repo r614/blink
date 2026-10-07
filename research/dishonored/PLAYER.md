@@ -503,6 +503,49 @@ capsule clearance test and mantle durations are still guesses (U-019).
   (default 1) and every damageable actor touching the volume takes
   `int(DamagePerSec x PainInterval)` of the `DamageType`; `bEntryPain` (default true) hurts on entry.
 
+### Level collision and the kill plane (2026-10-07)
+
+What stops a pawn on Boyle Ext, and what kills it when nothing does. Code:
+`dishonored_content::add_level_blockers`, `dishonored_assets::{water::extract_blocking_volumes,
+prop_collision}`, `dishonored_world::{hull_triangles, box_triangles, CollisionWorld::with_extra}`;
+tests `crates/dishonored_content/tests/world_deaths.rs`.
+
+- Static meshes: every colliding `StaticMeshComponent` of `StaticMeshActor`s and
+  `StaticMeshCollectionActor`s, hidden blockers included. The level `Model`s are empty (U-007).
+- `BlockingVolume` (Engine: `bWorldGeometry`, `bBlockActors`, its `BrushComponent` `BlockActors`,
+  `RBChannel` `RBCC_BlockingVolume`): invisible brushes. Boyle Ext has eight in `L_Boyle_Ext_P`;
+  two are the `Base` of PlayerStarts (`PlayerStart_Garden` stands on `BlockingVolume_5`,
+  `PlayerStart_RiverGrate` on `BlockingVolume_2`). Their convex elements (`BrushAggGeom`, the same
+  planes as the physics volumes) become pawn-movement triangles; vision and projectile traces
+  pass (U-640). The two `DynamicBlockingVolume`s are placed with `bCollideActors` false.
+  The port had none of them.
+- Level transition doors (`DishonoredUsableObject` with an `LTD_*` tweak; the four doors from
+  Boyle Ext into the interior map): `bCollideActors`, `bBlockActors`, and the
+  `SkeletalMeshComponent` (`CollisionComponent`) `BlockActors` with every gameplay trace type by
+  class default, so the pawn collides with its physics asset: one `RB_BodySetup` per bone with
+  `KAggregateGeom` elements, each placed by its `TM` relative to the bone. Boyle's four doors use
+  boxes only (`DBdoor_big_rich_ext_metal_PA`: one 153 x 505 x 15.6 box on each hinge bone). Using
+  one loads the other map, so the door is closed for good: its bodies at the reference pose are
+  static collision. The front door (`DishonoredUsableObject_6`, `LTD_Courtyard_to_Foyer`) fills a
+  304 uu doorway in the courtyard wall; without it a pawn walked through onto a strip of floor
+  that ends at x 1711 and fell 2000 uu into the sea. Other usables and `DisDoor`s still have no
+  collision (U-641).
+- `DisStaticCollisionActor_15` (`L_Boyle_Ext_Nav`) has no component properties of its own; its
+  package carries the `Collision_NPC_generic_set` archetype (`bCollideOnlyWithNPCMovement`) and
+  the `npcmovementcollision_model` mesh: NPC-only collision, not modelled (U-643).
+- `WorldInfo.KillZ` is -20000 on `L_Boyle_Ext_P`. Falling below it calls `Pawn.FellOutOfWorld`
+  (`TakeDamage(1000, None, ..., KillZDamageType)`, `bCausedByWorld`): the sim's
+  `SimEvent::FellOutOfWorld`, a death with cause `World`. The sea (`DishonoredWaterVolume_0`, one
+  convex element: a prism from z -4391 to -2071 over the quadrilateral (-14733, 12506),
+  (1924, 5965), (3870, -11510), (-9240, -11510)) has no floor under its eastern half and nothing
+  past its edges: a swimmer who leaves it through a side falls to `KillZ`. That is the original's
+  data (no collision, no other water volume there), so it is kept; the test bots stay out of the
+  water instead.
+- The canal north of the sea's edge (x -11700..-8000, y 10850..13700) lies under the visual water
+  plane (`boyle_ext_water`, z -2075) but outside the water volume: a pawn walks on its floor
+  (z -2320) and falls to `KillZ` off its end. Only the scripted `PlayerStart_SamuelDropOff`
+  (off the navmesh) is there.
+
 ## Blink (`DishonoredActivePowerComponent_Blink`)
 
 Levels: `Twk_Powers.Blink.Twk_Blink` level 2 = horizontal 1600, vertical 500, step 100,
