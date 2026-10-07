@@ -471,6 +471,16 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
                     println!("{chan:?}: {:?} src {:?}", port_check(c, &q), port_source(&mc, &[], &q));
                 }
             }
+            // The convex elements around the start (debugging the start-inside rule).
+            let c = &mc.collision;
+            for (ei, el) in c.elems.iter().enumerate() {
+                let (lo, hi) = (s - ext - Vec3::splat(1.0), s + ext + Vec3::splat(1.0));
+                if el.min.cmple(hi).all() && el.max.cmpge(lo).all() {
+                    let t = &c.tris[el.first as usize];
+                    let srcs: std::collections::BTreeSet<u32> = (el.first..el.first + el.count).map(|k| c.tris[k as usize].source).collect();
+                    println!("elem {ei}: {} tris ch {:#x} shape {:#x} {:.0?}..{:.0?} sources {:?}", el.count, t.channels, c.shape_of(el.first), el.min, el.max, srcs.iter().map(|&k| c.sources[k as usize].as_str()).collect::<Vec<_>>());
+                }
+            }
             return Ok(());
         }
         "check" => {
@@ -558,6 +568,12 @@ fn clusters(ctx: &Ctx, map: &str, st: &Stats, q: &[Query], mc: &MatchContent, do
     }
     let path = ctx.out.join(format!("{map}_clusters.txt"));
     std::fs::write(&path, &s).ok();
+    // Every disagreement: `id original port` (to compare runs).
+    let mut all = String::new();
+    for (id, o, p) in &st.diffs {
+        let _ = writeln!(all, "{} {} {:.4} {}", q[*id].name(*id), o.hit as u8, o.time, p.map_or("-".to_string(), |t| format!("{t:.4}")));
+    }
+    std::fs::write(ctx.out.join(format!("{map}_diffs.txt")), all).ok();
     println!("{}", s.lines().take(80).collect::<Vec<_>>().join("\n"));
     println!("clusters: {}", path.display());
 }

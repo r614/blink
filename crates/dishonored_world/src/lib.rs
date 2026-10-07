@@ -922,29 +922,7 @@ impl WorldQuery for CollisionWorld {
         let swept = b.aabb().union(&b.at(b.center + delta).aabb()).expand(1.0);
         // Best: (fraction, normal, triangle, start penetrating).
         let mut best: Option<(f32, Vec3, u32, bool)> = None;
-        let mut done: Vec<u32> = Vec::new();
-        let mut elem_tris: Vec<[Vec3; 3]> = Vec::new();
-        self.bvh.query_aabb(&swept, |i| {
-            let t = &self.tris[i as usize];
-            if t.channels & channels == 0 || self.shape_of(i) & want == 0 {
-                return;
-            }
-            let r = match self.elem_of(i) {
-                Some(e) => {
-                    if done.contains(&e) {
-                        return;
-                    }
-                    done.push(e);
-                    let el = self.elems[e as usize];
-                    elem_tris.clear();
-                    elem_tris.extend((el.first..el.first + el.count).map(|k| {
-                        let x = &self.tris[k as usize];
-                        [x.a, x.b, x.c]
-                    }));
-                    sat::box_convex(b.center, b.half, delta, &elem_tris)
-                }
-                None => sat::box_triangle(b.center, b.half, delta, t.a, t.b, t.c),
-            };
+        let mut consider = |r: Option<sat::SatHit>, i: u32| {
             let cand = match r {
                 Some(sat::SatHit::At(f, n)) => (f, n.normalize_or(-dir), false),
                 Some(sat::SatHit::Start) => (0.0, -dir, true),
@@ -953,10 +931,42 @@ impl WorldQuery for CollisionWorld {
             if best.is_none_or(|x| cand.0 < x.0) {
                 best = Some((cand.0, cand.1, i, cand.2));
             }
+        };
+        // Loose triangles (per-polygon collision) whose leaves overlap the swept box.
+        self.bvh.query_aabb(&swept, |i| {
+            let t = &self.tris[i as usize];
+            if t.channels & channels == 0 || self.shape_of(i) & want == 0 || self.elem_of(i).is_some() {
+                return;
+            }
+            consider(sat::box_triangle(b.center, b.half, delta, t.a, t.b, t.c), i);
         });
-        let (f, normal, tri, start) = best?;
+        // Convex elements by their own bounds: a box inside a large element overlaps none of its
+        // faces' leaves.
+        let mut elem_tris: Vec<[Vec3; 3]> = Vec::new();
+        self.elem_bvh.query_aabb(&swept, |e| {
+            let el = self.elems[e as usize];
+            if !(Aabb { min: el.min, max: el.max }).overlaps(&swept) {
+                return;
+            }
+            let t = &self.tris[el.first as usize];
+            if t.channels & channels == 0 || self.shape_of(el.first) & want == 0 {
+                return;
+            }
+            elem_tris.clear();
+            elem_tris.extend((el.first..el.first + el.count).map(|k| {
+                let x = &self.tris[k as usize];
+                [x.a, x.b, x.c]
+            }));
+            consider(sat::box_convex(b.center, b.half, delta, &elem_tris), el.first);
+        });
+        let (f, normal, mut tri, start) = best?;
         // Contacts just past the hit (or where it starts): the faces it rests on, for walking.
         let at = b.at(b.center + delta * f + dir * if start { 0.0 } else { 0.1 });
+        // An element's hit face: the one facing the hit normal best.
+        if let Some(e) = self.elem_of(tri) {
+            let el = self.elems[e as usize];
+            tri = (el.first..el.first + el.count).max_by(|&x, &y| self.tris[x as usize].n.dot(normal).total_cmp(&self.tris[y as usize].n.dot(normal))).unwrap_or(tri);
+        }
         self.box_contacts(&at, channels, &mut contacts);
         let face_up = self.face_up(&contacts);
         let t = &self.tris[tri as usize];
