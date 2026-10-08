@@ -279,6 +279,17 @@ pub struct AnimLibrary {
     pub clips: HashMap<String, crate::edge_anim::BakedClip>,
 }
 
+/// Object path of the `AnimSet` export of a package whose own name (the last path component)
+/// is `name`, for sets whose outer is not known (the weapons' sets).
+pub fn anim_set_path(content: &Content, pkg_name: &str, name: &str) -> Result<String> {
+    let pkg = content.package(pkg_name)?;
+    (0..pkg.exports.len())
+        .filter(|&i| pkg.export_class(i) == "AnimSet")
+        .map(|i| pkg.obj_path(ObjRef::Export(i)))
+        .find(|p| p.rsplit('.').next().is_some_and(|n| n.eq_ignore_ascii_case(name)))
+        .with_context(|| format!("AnimSet {name} not in {pkg_name}"))
+}
+
 /// Load and bake the named sequences of an AnimSet.
 pub fn load_anim_set(content: &Content, pkg_name: &str, set_path: &str, wanted: &[&str]) -> Result<AnimLibrary> {
     use ue3_package::properties::{Value, find};
