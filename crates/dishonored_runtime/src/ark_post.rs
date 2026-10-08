@@ -74,6 +74,11 @@ pub struct ArkPost {
     /// `gBloomTint` of the bloom downsample (0x0090DE60): (m_Tint.rgb x m_Scale,
     /// -m_Threshold x m_Scale).
     pub bloom: Vec4,
+    /// Bend Time's vector field (`power_pp.rs`): (vBendTimeOpacity = the post-effect intensity,
+    /// vBendTimeVectorScales.x, 0, 0); 0 intensity = off.
+    pub power_vectors: Vec4,
+    /// The field's two noise pans (`Periodic(Time x (0.2, -0.1))`, `Periodic(Time x (-0.15, 0.3))`).
+    pub power_pans: Vec4,
 }
 
 /// Inputs kept on the camera so the uniform can be rebuilt (display gamma setting).
@@ -88,6 +93,9 @@ pub struct ArkPostSource {
     /// overriding the level's, blended in by `power_weight` (0..1).
     pub power_post: Option<PostSettings>,
     pub power_weight: f32,
+    /// Bend Time's post effect (`power_pp.rs`): intensity 0..1 and the dilated material time.
+    pub bend: f32,
+    pub bend_time: f32,
 }
 
 fn post_value(p: Option<&PostSettings>, key: &str) -> Option<f32> {
@@ -104,6 +112,12 @@ impl ArkPostSource {
     /// `cam_z` is the camera's world Z in uu (custom transitions depend on it).
     pub fn uniform(&self, cam_z: f32) -> ArkPost {
         let mut u = self.level_uniform(cam_z);
+        if self.bend > 0.0 {
+            let t = self.bend_time;
+            let fr = |x: f32| x - x.floor();
+            u.power_vectors = Vec4::new(self.bend, crate::power_pp::BEND_VECTOR_SCALE, 0.0, 0.0);
+            u.power_pans = Vec4::new(fr(t * 0.2), fr(t * -0.1), fr(t * -0.15), fr(t * 0.3));
+        }
         // A power's grade: the LUT terms of the overridden settings, blended by its weight
         // (the colour pipeline is on while it shows).
         if let (Some(over), true) = (&self.power_post, self.power_weight > 0.0) {
@@ -171,6 +185,8 @@ impl ArkPostSource {
                 let s = v("m_PpBloomParameters.m_Scale", 1.0);
                 Vec4::new(t[0] * s, t[1] * s, t[2] * s, -v("m_PpBloomParameters.m_Threshold", 0.0) * s)
             },
+            power_vectors: Vec4::ZERO,
+            power_pans: Vec4::ZERO,
         };
         if self.fog_on {
             // The sun layer goes first (only layer 0 gets the sun lobe in the shader).
@@ -260,6 +276,8 @@ pub struct ArkPostPipeline {
     layout_multi: BindGroupLayoutDescriptor,
     layout_down: BindGroupLayoutDescriptor,
     sampler: Sampler,
+    /// Wrapping sampler of the Bend Time noise (its pans run past 1).
+    repeat_sampler: Sampler,
     fullscreen: FullscreenShader,
     shader: Handle<Shader>,
     down_shader: Handle<Shader>,
@@ -302,6 +320,10 @@ fn layout(multisampled: bool) -> BindGroupLayoutDescriptor {
                 sampler(SamplerBindingType::Filtering),
                 uniform_buffer::<ArkPost>(true),
                 texture_2d(TextureSampleType::Float { filterable: true }),
+                // Bend Time's field textures (`water2` noise, wrapping; `fxt_eyelid_gradient` mask).
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                sampler(SamplerBindingType::Filtering),
             ),
         ),
     )
@@ -316,6 +338,13 @@ fn init_pipeline(mut commands: Commands, device: Res<RenderDevice>, fullscreen: 
             &BindGroupLayoutEntries::sequential(ShaderStages::FRAGMENT, (texture_2d(TextureSampleType::Float { filterable: true }),)),
         ),
         sampler: device.create_sampler(&SamplerDescriptor { mag_filter: FilterMode::Linear, min_filter: FilterMode::Linear, ..default() }),
+        repeat_sampler: device.create_sampler(&SamplerDescriptor {
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            address_mode_u: bevy::render::render_resource::AddressMode::Repeat,
+            address_mode_v: bevy::render::render_resource::AddressMode::Repeat,
+            ..default()
+        }),
         fullscreen: fullscreen.clone(),
         shader: load_embedded_asset!(assets.as_ref(), "ark_post.wgsl"),
         down_shader: load_embedded_asset!(assets.as_ref(), "ark_downsample.wgsl"),
@@ -390,8 +419,14 @@ pub fn ark_post_pass(
     bloom: Res<crate::bloom::BloomResult>,
     zero: Res<bevy::render::texture::FallbackImageZero>,
     mut textures: ResMut<bevy::render::texture::TextureCache>,
+    gpu_images: Res<bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>>,
+    power_images: Option<Res<crate::power_pp::PowerPpImages>>,
     mut ctx: RenderContext,
 ) {
+    // Bend Time's field textures (black until loaded: no field).
+    let image_view = |h: Option<&Handle<Image>>| h.and_then(|h| gpu_images.get(h)).map(|g| g.texture_view.clone()).unwrap_or_else(|| zero.texture_view.clone());
+    let noise_view = image_view(power_images.as_ref().and_then(|p| p.noise.as_ref()));
+    let mask_view = image_view(power_images.as_ref().and_then(|p| p.mask.as_ref()));
     let (view_offset, target, depth, id, index, ark) = view.into_inner();
     let (Some(fog_rp), Some(down_rp), Some(uber_rp), Some(view_binding), Some(uniform_binding)) =
         (cache.get_render_pipeline(id.fog), cache.get_render_pipeline(id.down), cache.get_render_pipeline(id.uber), view_uniforms.uniforms.binding(), uniforms.binding())
@@ -407,7 +442,7 @@ pub fn ark_post_pass(
     let group = device.create_bind_group(
         Some("ark fog bind group"),
         &layout,
-        &BindGroupEntries::sequential((view_binding.clone(), depth.view(), post.source, &pipeline.sampler, uniform_binding.clone(), &bloom_view)),
+        &BindGroupEntries::sequential((view_binding.clone(), depth.view(), post.source, &pipeline.sampler, uniform_binding.clone(), &bloom_view, &noise_view, &mask_view, &pipeline.repeat_sampler)),
     );
     fullscreen_pass(&mut ctx, "ark fog", fog_rp, &group, &offsets, post.destination);
     let fogged = post.destination.clone();
@@ -443,7 +478,7 @@ pub fn ark_post_pass(
     let group = device.create_bind_group(
         Some("ark uber bind group"),
         &layout,
-        &BindGroupEntries::sequential((view_binding, depth.view(), post.source, &pipeline.sampler, uniform_binding, &low)),
+        &BindGroupEntries::sequential((view_binding, depth.view(), post.source, &pipeline.sampler, uniform_binding, &low, &noise_view, &mask_view, &pipeline.repeat_sampler)),
     );
     fullscreen_pass(&mut ctx, "ark uber", uber_rp, &group, &offsets, post.destination);
 }

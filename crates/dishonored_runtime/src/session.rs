@@ -44,6 +44,8 @@ pub struct SessionView {
     pub projectiles: Vec<ProjectileState>,
     /// Placed Spring Razors (their world model).
     pub traps: Vec<dishonored_sim::state::TrapState>,
+    /// Active Bend Time casts (the screen effect follows the local caster's).
+    pub time_bends: Vec<dishonored_sim::state::TimeBendState>,
     pub matchv: MatchView,
     pub tick: u64,
     pub connected: bool,
@@ -173,6 +175,7 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
             view.others = w.players.iter().filter(|p| p.id != LOCAL_ID).copied().collect();
             view.projectiles = w.projectiles.clone();
             view.traps = w.traps.clone();
+            view.time_bends = w.time_bends.clone();
             view.tick = w.tick;
             view.dark_vision_reveals = dishonored_sim::left_hand::dark_vision_reveals(w, LOCAL_ID, &sim.tuning);
             view.matchv = game.view().clone();
@@ -221,6 +224,7 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
             view.others = client.remote_players(6.0);
             view.projectiles = client.predicted.projectiles.clone();
             view.traps = client.predicted.traps.clone();
+            view.time_bends = client.predicted.time_bends.clone();
             view.matchv = client.matchv.clone();
             view.tick = client.metrics.server_tick;
             view.connected = client.state == ConnState::Connected;
