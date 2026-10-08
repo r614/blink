@@ -84,6 +84,18 @@ pub struct ArkPost {
     pub dv_lid_color: Vec4,
     /// Blink's lens field (`power_pp::BlinkLens`): (x distortion, y blur, on, 0).
     pub blink_lens: Vec4,
+    /// Possession's field (`power_pp::PossessPp`, `PPG_PossessionVectors`): (R, G, on, material Time).
+    pub possess: Vec4,
+    /// Light shaft (the level's first `bRenderLightShafts` light, `ark_post.wgsl` `shaft_*`):
+    /// (Bevy world position of `GetPosition`, on).
+    pub shaft_pos: Vec4,
+    /// `LightShaftParameters`: (1 / OcclusionDepthRange, BloomScale, 1.5 - OcclusionMaskDarkness / 2,
+    /// OcclusionMaskDarkness).
+    pub shaft_params: Vec4,
+    /// `BloomTintAndThreshold`: (linear tint, BloomThreshold).
+    pub shaft_bloom: Vec4,
+    /// (BloomScreenBlendThreshold, shaft target width, height, 0).
+    pub shaft_misc: Vec4,
 }
 
 /// Inputs kept on the camera so the uniform can be rebuilt (display gamma setting).
@@ -91,6 +103,9 @@ pub struct ArkPost {
 pub struct ArkPostSource {
     pub fog: Vec<FogSettings>,
     pub post: Option<PostSettings>,
+    /// The level's `bRenderLightShafts` lights, and the video setting `PSI_GraphicsPC_LightShaftEnable`.
+    pub shafts: Vec<dishonored_ir::LightShaft>,
+    pub shafts_on: bool,
     pub fog_on: bool,
     pub post_on: bool,
     pub display_gamma: f32,
@@ -98,6 +113,13 @@ pub struct ArkPostSource {
     /// overriding the level's, blended in by `power_weight` (0..1).
     pub power_post: Option<PostSettings>,
     pub power_weight: f32,
+    /// The Kismet's grade (`DisSeqAct_UberPostProcess`, `MissionView::post_fx`): the same kind of
+    /// override layer, stacked after the power's.
+    pub kismet_post: Option<PostSettings>,
+    pub kismet_weight: f32,
+    /// The menus' background blur (`Epp_UberUI`, the `UI_Blur` tweak), stacked last.
+    pub ui_post: Option<PostSettings>,
+    pub ui_weight: f32,
     /// Bend Time's post effect (`power_pp.rs`): intensity 0..1 and the dilated material time.
     pub bend: f32,
     pub bend_time: f32,
@@ -105,6 +127,8 @@ pub struct ArkPostSource {
     pub eyelid: Option<f32>,
     /// Blink's lens field drive (x, y); zero = off.
     pub blink_lens: Vec2,
+    /// Possession's R / G (post manager `m_PossessionParams`); zero = off.
+    pub possess: Vec2,
 }
 
 fn post_value(p: Option<&PostSettings>, key: &str) -> Option<f32> {
@@ -130,29 +154,49 @@ impl ArkPostSource {
         if self.blink_lens != Vec2::ZERO {
             u.blink_lens = Vec4::new(self.blink_lens.x, self.blink_lens.y, 1.0, 0.0);
         }
+        if self.possess != Vec2::ZERO {
+            u.possess = Vec4::new(self.possess.x, self.possess.y, 1.0, self.bend_time);
+        }
         if let Some(a) = self.eyelid {
             u.dv_eyelid = Vec4::new(1.0, a, 0.0, 0.0);
             let c = crate::power_pp::EYELID_COLOR;
             u.dv_lid_color = Vec4::new(c[0], c[1], c[2], 1.0);
         }
-        // A power's grade: the LUT terms of the overridden settings, blended by its weight
-        // (the colour pipeline is on while it shows).
-        if let (Some(over), true) = (&self.power_post, self.power_weight > 0.0) {
-            let src = ArkPostSource { post: Some(crate::dark_vision::merged(self.post.as_ref(), over)), post_on: true, power_post: None, power_weight: 0.0, ..self.clone() };
+        // The weighted grades, in the order the original stacks them: a power's (Dark Vision's
+        // `m_StaticUberAdjustement`) then the Kismet's (`DisSeqAct_UberPostProcess`, the post
+        // manager's Kismet slot): the LUT terms of the overridden settings, blended by the
+        // grade's weight (the colour pipeline is on while it shows).
+        let mut graded = self.post_on;
+        for (over, weight) in [(&self.power_post, self.power_weight), (&self.kismet_post, self.kismet_weight), (&self.ui_post, self.ui_weight)] {
+            let (Some(over), true) = (over, weight > 0.0) else { continue };
+            let src = ArkPostSource {
+                post: Some(crate::dark_vision::merged(self.post.as_ref(), over)),
+                post_on: true,
+                power_post: None,
+                power_weight: 0.0,
+                kismet_post: None,
+                kismet_weight: 0.0,
+                ui_post: None,
+                ui_weight: 0.0,
+                ..self.clone()
+            };
             let g = src.level_uniform(cam_z);
-            let w = self.power_weight.clamp(0.0, 1.0);
-            let lerp = |a: Vec4, b: Vec4| if self.post_on { a.lerp(b, w) } else { b };
+            let w = weight.clamp(0.0, 1.0);
+            let lerp = |a: Vec4, b: Vec4| if graded { a.lerp(b, w) } else { b };
             u.cb_shadows_opacity = lerp(u.cb_shadows_opacity, g.cb_shadows_opacity);
             u.cb_midtones = lerp(u.cb_midtones, g.cb_midtones);
             u.cb_highlights = lerp(u.cb_highlights, g.cb_highlights);
             u.exposure_gamma_desat = lerp(u.exposure_gamma_desat, g.exposure_gamma_desat);
             u.brightness_contrast = lerp(u.brightness_contrast, g.brightness_contrast);
             u.grain = lerp(u.grain, g.grain);
-            if !self.post_on {
-                // Level post off (`--no-post`): only the power's grade runs, faded by its weight
-                // through the LUT opacity.
+            u.dof = lerp(u.dof, g.dof);
+            if !graded {
+                // Level post off (`--no-post`): only the grade runs, faded by its weight through
+                // the LUT opacity (and the far blur amount).
                 u.misc.z = 1.0;
                 u.cb_shadows_opacity.w *= w;
+                u.dof.z *= w;
+                graded = true;
             }
         }
         u
@@ -207,7 +251,20 @@ impl ArkPostSource {
             dv_eyelid: Vec4::ZERO,
             dv_lid_color: Vec4::ZERO,
             blink_lens: Vec4::ZERO,
+            possess: Vec4::ZERO,
+            shaft_pos: Vec4::ZERO,
+            shaft_params: Vec4::ZERO,
+            shaft_bloom: Vec4::ZERO,
+            shaft_misc: Vec4::ZERO,
         };
+        // UE3 light shafts (`FSceneRenderer` light shaft pass 0x00837480): the first light with
+        // `bRenderLightShafts`; the per-light constants are 0x00820300's.
+        if let (true, Some(l)) = (self.shafts_on, self.shafts.first()) {
+            u.shaft_pos = crate::coords::pos(l.position).extend(1.0);
+            u.shaft_params = Vec4::new(1.0 / l.occlusion_depth_range.max(1e-3), l.bloom_scale, 1.5 - l.occlusion_mask_darkness * 0.5, l.occlusion_mask_darkness);
+            u.shaft_bloom = Vec4::new(l.bloom_tint[0], l.bloom_tint[1], l.bloom_tint[2], l.bloom_threshold);
+            u.shaft_misc = Vec4::new(l.bloom_screen_blend_threshold, 0.0, 0.0, 0.0);
+        }
         if self.fog_on {
             // The sun layer goes first (only layer 0 gets the sun lobe in the shader).
             let mut layers: Vec<&FogSettings> = self.fog.iter().collect();
@@ -254,6 +311,10 @@ pub fn update_ark_post(mut q: Query<(&ArkPostSource, &mut ArkPost, &GlobalTransf
     for (src, mut u, tf) in &mut q {
         let mut n = src.uniform(tf.translation().y / crate::coords::UU_TO_BEVY);
         n.grain.z = (*frame % 1024) as f32;
+        // The light must be in front of the camera (0x00837480 tests the view's plane).
+        if n.shaft_pos.w > 0.5 && (n.shaft_pos.truncate() - tf.translation()).dot(*tf.forward()) <= 0.0 {
+            n.shaft_pos.w = 0.0;
+        }
         *u = n;
     }
 }
@@ -311,7 +372,19 @@ pub enum ArkPass {
     Down,
     /// Far DOF, colour LUT, grain.
     Uber,
+    /// Light shafts: the occlusion / bloom downsample (global shader 158), the radial blur (157)
+    /// and the apply (155).
+    ShaftDown,
+    ShaftBlur,
+    ShaftApply,
 }
+
+/// Format of the light shaft targets: their downsample stores the bloom as x 0.25 and the mask in
+/// alpha (the apply multiplies by 4), which fits an 8-bit target.
+const SHAFT_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
+/// The shaft targets are the scene divided by this (`DAT_0144e320`; keep in step with
+/// `SHAFT_FACTOR` in `ark_post.wgsl`).
+const SHAFT_FACTOR: u32 = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ArkPostKey {
@@ -325,6 +398,9 @@ pub struct ArkPostPipelineId {
     fog: CachedRenderPipelineId,
     down: CachedRenderPipelineId,
     uber: CachedRenderPipelineId,
+    shaft_down: CachedRenderPipelineId,
+    shaft_blur: CachedRenderPipelineId,
+    shaft_apply: CachedRenderPipelineId,
     multisampled: bool,
 }
 
@@ -344,6 +420,8 @@ fn layout(multisampled: bool) -> BindGroupLayoutDescriptor {
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
+                // Possession's field noise (`PPG_PossessionVectors` `Texture2D_0`).
+                texture_2d(TextureSampleType::Float { filterable: true }),
             ),
         ),
     )
@@ -382,6 +460,9 @@ impl SpecializedRenderPipeline for ArkPostPipeline {
             ArkPass::Fog => ("ark fog", if key.multisampled { self.layout_multi.clone() } else { self.layout_single.clone() }, self.shader.clone(), "fog"),
             ArkPass::Uber => ("ark uber", if key.multisampled { self.layout_multi.clone() } else { self.layout_single.clone() }, self.shader.clone(), "fragment"),
             ArkPass::Down => ("ark dof downsample", self.layout_down.clone(), self.down_shader.clone(), "downsample"),
+            ArkPass::ShaftDown => ("ark shaft down", if key.multisampled { self.layout_multi.clone() } else { self.layout_single.clone() }, self.shader.clone(), "shaft_down"),
+            ArkPass::ShaftBlur => ("ark shaft blur", if key.multisampled { self.layout_multi.clone() } else { self.layout_single.clone() }, self.shader.clone(), "shaft_blur"),
+            ArkPass::ShaftApply => ("ark shaft apply", if key.multisampled { self.layout_multi.clone() } else { self.layout_single.clone() }, self.shader.clone(), "shaft_apply"),
         };
         RenderPipelineDescriptor {
             label: Some(label.into()),
@@ -409,7 +490,15 @@ fn prepare_pipelines(
     for (e, view, msaa) in &views {
         let multisampled = *msaa != Msaa::Off;
         let mut id = |format, pass| pipelines.specialize(&cache, &pipeline, ArkPostKey { format, multisampled, pass });
-        let ids = ArkPostPipelineId { fog: id(view.target_format, ArkPass::Fog), down: id(LOW_FORMAT, ArkPass::Down), uber: id(view.target_format, ArkPass::Uber), multisampled };
+        let ids = ArkPostPipelineId {
+            fog: id(view.target_format, ArkPass::Fog),
+            down: id(LOW_FORMAT, ArkPass::Down),
+            uber: id(view.target_format, ArkPass::Uber),
+            shaft_down: id(SHAFT_FORMAT, ArkPass::ShaftDown),
+            shaft_blur: id(SHAFT_FORMAT, ArkPass::ShaftBlur),
+            shaft_apply: id(view.target_format, ArkPass::ShaftApply),
+            multisampled,
+        };
         commands.entity(e).insert(ids);
     }
 }
@@ -447,6 +536,7 @@ pub fn ark_post_pass(
     let image_view = |h: Option<&Handle<Image>>| h.and_then(|h| gpu_images.get(h)).map(|g| g.texture_view.clone()).unwrap_or_else(|| zero.texture_view.clone());
     let noise_view = image_view(power_images.as_ref().and_then(|p| p.noise.as_ref()));
     let mask_view = image_view(power_images.as_ref().and_then(|p| p.mask.as_ref()));
+    let possess_view = image_view(power_images.as_ref().and_then(|p| p.possession.as_ref()));
     let (view_offset, target, depth, id, index, ark) = view.into_inner();
     let (Some(fog_rp), Some(down_rp), Some(uber_rp), Some(view_binding), Some(uniform_binding)) =
         (cache.get_render_pipeline(id.fog), cache.get_render_pipeline(id.down), cache.get_render_pipeline(id.uber), view_uniforms.uniforms.binding(), uniforms.binding())
@@ -456,13 +546,51 @@ pub fn ark_post_pass(
     let device = ctx.render_device().clone();
     let layout = cache.get_bind_group_layout(if id.multisampled { &pipeline.layout_multi } else { &pipeline.layout_single });
     let offsets = [view_offset.offset, index.index()];
+    // 0. Light shafts (0x00837480): downsample the scene into the occlusion mask / bloom target,
+    // radial blur it towards the light, apply it to the scene.
+    if ark.shaft_pos.w > 0.5 {
+        if let (Some(down_rp), Some(blur_rp), Some(apply_rp)) = (cache.get_render_pipeline(id.shaft_down), cache.get_render_pipeline(id.shaft_blur), cache.get_render_pipeline(id.shaft_apply)) {
+            let size = target.main_texture().size();
+            let (w, h) = ((size.width / SHAFT_FACTOR).max(1), (size.height / SHAFT_FACTOR).max(1));
+            let mut make = |label: &'static str| {
+                textures.get(
+                    &device,
+                    TextureDescriptor {
+                        label: Some(label),
+                        size: Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: TextureDimension::D2,
+                        format: SHAFT_FORMAT,
+                        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    },
+                )
+            };
+            let (a, b) = (make("ark shaft a"), make("ark shaft b"));
+            let post = target.post_process_write();
+            let bind = |label: &str, src: &bevy::render::render_resource::TextureView, aux: &bevy::render::render_resource::TextureView| {
+                device.create_bind_group(
+                    Some(label),
+                    &layout,
+                    &BindGroupEntries::sequential((view_binding.clone(), depth.view(), src, &pipeline.sampler, uniform_binding.clone(), aux, &noise_view, &mask_view, &pipeline.repeat_sampler, &possess_view)),
+                )
+            };
+            let g = bind("ark shaft down", post.source, &zero.texture_view);
+            fullscreen_pass(&mut ctx, "ark shaft down", down_rp, &g, &offsets, &a.default_view);
+            let g = bind("ark shaft blur", &a.default_view, &zero.texture_view);
+            fullscreen_pass(&mut ctx, "ark shaft blur", blur_rp, &g, &offsets, &b.default_view);
+            let g = bind("ark shaft apply", post.source, &b.default_view);
+            fullscreen_pass(&mut ctx, "ark shaft apply", apply_rp, &g, &offsets, post.destination);
+        }
+    }
     // 1. DisFog and the bloom parts.
     let bloom_view = bloom.view.clone().unwrap_or_else(|| zero.texture_view.clone());
     let post = target.post_process_write();
     let group = device.create_bind_group(
         Some("ark fog bind group"),
         &layout,
-        &BindGroupEntries::sequential((view_binding.clone(), depth.view(), post.source, &pipeline.sampler, uniform_binding.clone(), &bloom_view, &noise_view, &mask_view, &pipeline.repeat_sampler)),
+        &BindGroupEntries::sequential((view_binding.clone(), depth.view(), post.source, &pipeline.sampler, uniform_binding.clone(), &bloom_view, &noise_view, &mask_view, &pipeline.repeat_sampler, &possess_view)),
     );
     fullscreen_pass(&mut ctx, "ark fog", fog_rp, &group, &offsets, post.destination);
     let fogged = post.destination.clone();
@@ -498,7 +626,7 @@ pub fn ark_post_pass(
     let group = device.create_bind_group(
         Some("ark uber bind group"),
         &layout,
-        &BindGroupEntries::sequential((view_binding, depth.view(), post.source, &pipeline.sampler, uniform_binding, &low, &noise_view, &mask_view, &pipeline.repeat_sampler)),
+        &BindGroupEntries::sequential((view_binding, depth.view(), post.source, &pipeline.sampler, uniform_binding, &low, &noise_view, &mask_view, &pipeline.repeat_sampler, &possess_view)),
     );
     fullscreen_pass(&mut ctx, "ark uber", uber_rp, &group, &offsets, post.destination);
 }

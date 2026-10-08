@@ -203,6 +203,15 @@ pub struct Outcome {
     pub text: String,
 }
 
+/// A Kismet screen grade: the ArkPp settings the action overrides (by `m_*` name, as the
+/// level's post settings carry them) blended in by `weight` (0..1).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PostFxView {
+    pub values: Vec<(String, f32)>,
+    pub vectors: Vec<(String, [f32; 3])>,
+    pub weight: f32,
+}
+
 /// Replicated to clients (inside the match view) and drawn by the HUD.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct MissionView {
@@ -256,6 +265,9 @@ pub struct MissionView {
     /// [interp] Matinees playing.
     #[serde(default)]
     pub cutscenes: Vec<CutsceneView>,
+    /// The Kismet screen grade (`DisSeqAct_UberPostProcess`) while it shows.
+    #[serde(default)]
+    pub post_fx: Option<PostFxView>,
     /// `DisDoor`s the Kismet opened or closed (`DisSeqAct_Door`): ("package:actor",
     /// `EDisDoorState` 0 closed, 1 opened CW, 2 opened CCW). Other doors keep their level state.
     #[serde(default)]

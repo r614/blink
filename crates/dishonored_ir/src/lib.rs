@@ -258,6 +258,28 @@ pub struct Environment {
     /// Arkane `DisFog` layers (Dishonored has no HeightFog/ExponentialHeightFog actors).
     pub fog: Vec<FogSettings>,
     pub post: Option<PostSettings>,
+    /// Lights with `bRenderLightShafts` (UE3 light shafts: occlusion mask, radial blur, bloom).
+    #[serde(default)]
+    pub light_shafts: Vec<LightShaft>,
+}
+
+/// A directional light whose `LightComponent` has `bRenderLightShafts` (the retail shaft lights
+/// are all `DirectionalLightComponent`s, most with no direct light of their own).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LightShaft {
+    pub source: String,
+    /// `GetPosition()`: `-direction x TraceDistance`, a far world point towards the light, uu.
+    pub position: Vec3,
+    /// `OcclusionDepthRange`, `BloomScale`, `BloomThreshold`, `BloomScreenBlendThreshold`.
+    pub occlusion_depth_range: f32,
+    pub bloom_scale: f32,
+    pub bloom_threshold: f32,
+    pub bloom_screen_blend_threshold: f32,
+    /// `BloomTint` as a linear colour.
+    pub bloom_tint: [f32; 3],
+    /// `RadialBlurPercent`, `OcclusionMaskDarkness`.
+    pub radial_blur_percent: f32,
+    pub occlusion_mask_darkness: f32,
 }
 
 /// One `DisFog` actor's `DisFogComponent`.

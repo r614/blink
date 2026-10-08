@@ -114,6 +114,84 @@ impl BlinkLens {
 pub struct PowerPpImages {
     pub noise: Option<Handle<Image>>,
     pub mask: Option<Handle<Image>>,
+    /// `PPG_PossessionVectors`' `Texture2D_0` (its `UniformExpressionTextures`).
+    pub possession: Option<Handle<Image>>,
+}
+
+/// Possession's screen field (`PPG_PossessionVectors`, captured shader 0x9312eee076ac74a4,
+/// `UniformPixelVector_1.xy` = the post manager's possession R / G, `effects/possession_post_timeline.json`):
+/// from the Active stage (1.45 s after the cast) R rises 0.18 / s to 0.2 and G 0.54 / s to 0.6, and
+/// held there; when the possession ends they rise again, R 0.667 / s to 1.2 and G 0.833 / s to 1.5.
+pub const POSSESS_RATE_HOLD: Vec2 = Vec2::new(0.18, 0.54);
+pub const POSSESS_HOLD: Vec2 = Vec2::new(0.2, 0.6);
+pub const POSSESS_RATE_END: Vec2 = Vec2::new(0.666_7, 0.833_3);
+pub const POSSESS_END: Vec2 = Vec2::new(1.2, 1.5);
+
+/// Possession's R / G between frames.
+#[derive(Default)]
+pub struct PossessPp {
+    pub value: Vec2,
+}
+
+impl PossessPp {
+    pub fn step(&mut self, stage: dishonored_sim::state::PossessStage, dt: f32) -> Vec2 {
+        use dishonored_sim::state::PossessStage as S;
+        let (rate, cap) = match stage {
+            S::Active => (POSSESS_RATE_HOLD, POSSESS_HOLD),
+            // Only after a possession that ran (the field is on).
+            S::Cooldown if self.value != Vec2::ZERO => (POSSESS_RATE_END, POSSESS_END),
+            _ => {
+                self.value = Vec2::ZERO;
+                return self.value;
+            }
+        };
+        self.value = (self.value + rate * dt).min(cap).max(self.value.min(cap));
+        self.value
+    }
+}
+
+/// The arms' `Use_Power` (`PlayerArms_Tatoo_inst`, EFFECTS.md "Arm glow"; `effects/arm_glow_timeline.json`):
+/// 1 from the tick after a cast, held for the power's glow duration, then down linearly over 1 s
+/// of world time.
+pub const GLOW_FALL: f32 = 1.0;
+/// Glow hold per power: Blink, Dark Vision 1.0 s, Possession 1.7 s, Bend Time 1.08 s.
+pub const GLOW_HOLD_BLINK: f32 = 1.0;
+pub const GLOW_HOLD_DARK_VISION: f32 = 1.0;
+pub const GLOW_HOLD_POSSESSION: f32 = 1.7;
+pub const GLOW_HOLD_BEND_TIME: f32 = 1.08;
+
+#[derive(Resource, Default)]
+pub struct ArmGlow {
+    /// Current `Use_Power`.
+    pub value: f32,
+    hold: f32,
+    prev: [bool; 4],
+}
+
+impl ArmGlow {
+    /// `casts`: the four powers' "active" flags this frame (Blink, Dark Vision, Possession, Bend
+    /// Time); a rising edge is a cast.
+    pub fn step(&mut self, active: [bool; 4], dt_world: f32) -> f32 {
+        const HOLD: [f32; 4] = [GLOW_HOLD_BLINK, GLOW_HOLD_DARK_VISION, GLOW_HOLD_POSSESSION, GLOW_HOLD_BEND_TIME];
+        for i in 0..4 {
+            if active[i] && !self.prev[i] {
+                self.value = 1.0;
+                self.hold = HOLD[i];
+            }
+        }
+        self.prev = active;
+        if self.hold > 0.0 {
+            self.hold -= dt_world;
+            if self.hold < 0.0 {
+                // The remainder of the step already falls.
+                self.value = (1.0 + self.hold / GLOW_FALL).max(0.0);
+                self.hold = 0.0;
+            }
+        } else if self.value > 0.0 {
+            self.value = (self.value - dt_world / GLOW_FALL).max(0.0);
+        }
+        self.value
+    }
 }
 
 pub struct PowerPpPlugin;
@@ -121,6 +199,7 @@ pub struct PowerPpPlugin;
 impl Plugin for PowerPpPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PowerPpImages>()
+            .init_resource::<ArmGlow>()
             .add_plugins(ExtractResourcePlugin::<PowerPpImages>::default())
             .add_systems(Startup, load_images)
             .add_systems(Update, drive);
@@ -137,6 +216,24 @@ fn load_images(mut pp: ResMut<PowerPpImages>, mut images: ResMut<Assets<Image>>)
     };
     pp.noise = load("AltScreen_Effects.PostProcessTextures.water2");
     pp.mask = load("AltScreen_Effects.PostProcessTextures.fxt_eyelid_gradient");
+    pp.possession = (|| {
+        let mi = (0..pkg.exports.len()).find(|&i| pkg.export_class(i) == "Material" && pkg.obj_path(ObjRef::Export(i)).ends_with("PostProcessMaterial.PPG_PossessionVectors"))?;
+        let h = pkg.read_object(mi).ok()?;
+        let data = pkg.export_data(mi).ok()?;
+        let r = *dishonored_assets::material_chain::uniform_expression_textures(data, h.native_offset)?.first()?;
+        let idx = match ObjRef::from_index(r) {
+            ObjRef::Export(e) => Some(e),
+            other => {
+                let name = pkg.obj_name(other);
+                (0..pkg.exports.len()).find(|&i| pkg.export_class(i) == "Texture2D" && pkg.obj_name(ObjRef::Export(i)).eq_ignore_ascii_case(&name))
+            }
+        }?;
+        let t = dishonored_assets::texture::read_texture(&content, &pkg, idx, 512).ok()?;
+        Some(images.add(crate::map_render::to_image(&t)))
+    })();
+    if pp.possession.is_none() {
+        warn!("Possession field: PPG_PossessionVectors noise texture not found");
+    }
     if pp.noise.is_none() || pp.mask.is_none() {
         warn!("power post effects: Bend Time field textures missing (noise {}, mask {})", pp.noise.is_some(), pp.mask.is_some());
     }
@@ -150,8 +247,70 @@ pub fn bend_intensity(elapsed: f32, duration: f32) -> f32 {
     up.min(down)
 }
 
-fn drive(view: Option<Res<SessionView>>, time: Res<Time>, mut lens: Local<BlinkLens>, mut q: Query<&mut ArkPostSource>) {
+/// The Kismet's screen grade (`MissionView::post_fx`) as the ArkPp override layer.
+fn kismet_layer(fx: &dishonored_mission::runtime::PostFxView) -> dishonored_ir::PostSettings {
+    dishonored_ir::PostSettings {
+        source: "DisSeqAct_UberPostProcess.m_Parameters".into(),
+        values: fx.values.clone(),
+        vectors: fx.vectors.iter().map(|(k, v)| (k.clone(), [v[0], v[1], v[2], 0.0])).collect(),
+    }
+}
+
+/// The menus' background blur: `AltScreen_Effects.PostProcessChain.UI_Blur`
+/// (`DisTweaks_PostProcess`), which the UI manager hands to the post manager's `Epp_UberUI` slot
+/// (0x00c47070 -> 0x00be7ee0) while a menu movie asks for it: far blur 0.9 at focus 0 / radius 0
+/// (everything), post-desaturation 0.5, opacity 1, pre-desaturation 0 (the colour balance tones
+/// and the HDR group are not overridden), weight 1, fade 0.2 s in and out.
+pub const UI_BLUR_FADE: f32 = 0.2;
+
+fn ui_blur_layer() -> dishonored_ir::PostSettings {
+    dishonored_ir::PostSettings {
+        source: "UI_Blur.m_Parameters".into(),
+        values: vec![
+            ("m_FocusDistance".into(), 0.0),
+            ("m_InFocusRadius".into(), 0.0),
+            ("m_FarBlurAmount".into(), 0.9),
+            ("m_Opacity".into(), 1.0),
+            ("m_PreDesaturation".into(), 0.0),
+            ("m_PostDesaturation".into(), 0.5),
+        ],
+        vectors: Vec::new(),
+    }
+}
+
+/// The UI slot's state machine (the same `FUN_00bef9b0` as the Kismet slot).
+fn ui_slot() -> dishonored_multiplayer::mission::kismet_host::post::KismetPost {
+    dishonored_multiplayer::mission::kismet_host::post::KismetPost { fade_in: UI_BLUR_FADE, fade_out: UI_BLUR_FADE, weight_max: 1.0, ..Default::default() }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn drive(
+    view: Option<Res<SessionView>>,
+    time: Res<Time>,
+    pause: Option<Res<crate::pause_menu::PauseMenu>>,
+    mut lens: Local<BlinkLens>,
+    mut ui: Local<Option<dishonored_multiplayer::mission::kismet_host::post::KismetPost>>,
+    mut kismet: Local<Option<dishonored_mission::runtime::PostFxView>>,
+    mut poss: Local<PossessPp>,
+    mut glow: ResMut<ArmGlow>,
+    mut q: Query<&mut ArkPostSource>,
+) {
+    let slot = ui.get_or_insert_with(ui_slot);
+    slot.required = pause.is_some_and(|p| p.open);
+    slot.step(time.delta_secs());
+    let ui_weight = if slot.state != 0 { slot.weight } else { 0.0 };
     let me = view.as_ref().and_then(|v| v.me.as_ref());
+    let fx = view.as_ref().and_then(|v| v.matchv.mission.as_ref()).and_then(|m| m.post_fx.as_ref());
+    let kismet_weight = fx.map(|f| f.weight).unwrap_or(0.0);
+    let same = match (fx, kismet.as_ref()) {
+        (Some(a), Some(b)) => a.values == b.values && a.vectors == b.vectors,
+        (None, None) => true,
+        _ => false,
+    };
+    let layer = (!same).then(|| fx.map(kismet_layer));
+    if !same {
+        *kismet = fx.cloned();
+    }
     // Dark Vision's eyelid pass runs while the power is on, its `Alpha` the power's fade (the
     // capture: 0 -> 1 over `m_PowerFadeInDuration`, then 1, then the fade-out remaining /
     // `m_PowerFadeOutDuration`, one frame late).
@@ -165,7 +324,36 @@ fn drive(view: Option<Res<SessionView>>, time: Res<Time>, mut lens: Local<BlinkL
         _ => 0.0,
     };
     let rate = me.map(|m| m.time_scale).unwrap_or(1.0);
+    let possess = poss.step(me.map(|m| m.possess.stage).unwrap_or_default(), time.delta_secs() * rate);
+    // The arms' glow follows the four measured powers' casts.
+    let bending = match (view.as_ref(), me) {
+        (Some(v), Some(m)) => v.time_bends.iter().any(|b| b.caster == m.id),
+        _ => false,
+    };
+    use dishonored_sim::state::PossessStage as Ps;
+    let casts = [
+        me.is_some_and(|m| m.mode == dishonored_sim::state::MoveMode::Blinking),
+        me.is_some_and(|m| m.vitals.dark_vision_remaining > 0.0),
+        me.is_some_and(|m| matches!(m.possess.stage, Ps::PrePossess | Ps::Active)),
+        bending,
+    ];
+    glow.step(casts, time.delta_secs() * rate);
     for mut src in &mut q {
+        if src.possess != possess {
+            src.possess = possess;
+        }
+        if layer.is_some() || (src.kismet_post.is_none() && fx.is_some()) {
+            src.kismet_post = fx.map(kismet_layer);
+        }
+        if src.kismet_weight != kismet_weight {
+            src.kismet_weight = kismet_weight;
+        }
+        if src.ui_post.is_none() {
+            src.ui_post = Some(ui_blur_layer());
+        }
+        if src.ui_weight != ui_weight {
+            src.ui_weight = ui_weight;
+        }
         let t = src.bend_time + time.delta_secs() * rate;
         src.bend_time = if t > 1.0e4 { t - 1.0e4 } else { t };
         if src.bend != bend {

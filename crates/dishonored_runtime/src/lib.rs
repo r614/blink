@@ -498,6 +498,7 @@ pub fn main() {
             .init_resource::<viewmodel::ViewAnim>()
             .init_resource::<viewmodel::BodyFrames>()
             // Choked / carried bodies in their master's frame (the first-person rig's for the local player).
+            .add_systems(Update, viewmodel::arm_glow_apply.after(power_pp::drive))
             .add_systems(Update, viewmodel::place_held_bodies.after(players::sync_players).after(viewmodel::animate_view_rig).after(cutscene::drive).before(characters::animate_characters))
             .add_systems(FixedUpdate, (harness::script_fixed, session::fixed_tick, saves::write_autosaves).chain().run_if(pause_menu::sim_running))
             .insert_resource(saves::Saves::new(args.mission_path.clone()))
