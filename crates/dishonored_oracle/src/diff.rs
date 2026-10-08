@@ -382,12 +382,20 @@ pub fn first_divergence(orig: &Trace, port: &Trace, tol: &dyn Fn(&str) -> f64) -
             }
         }
     }
-    // Events must match in order and tick (both sides run a fixed step).
+    // Events must match in order and tick (both sides run a fixed step). Only the kinds both
+    // sides record are compared (the original's `ProcessEvent` / `Spawn` records have no port
+    // counterpart until the port emits them); the others are listed like one-sided channels.
     let key = |e: &TraceEvent| (e.tick, e.kind.clone(), e.object.clone(), e.name.clone());
+    let kinds = |t: &Trace| t.events.iter().map(|e| e.kind.clone()).collect::<std::collections::BTreeSet<String>>();
+    let (ko, kp) = (kinds(orig), kinds(port));
+    d.only_original.extend(ko.difference(&kp).map(|k| format!("events:{k}")));
+    d.only_port.extend(kp.difference(&ko).map(|k| format!("events:{k}")));
+    let oe: Vec<&TraceEvent> = orig.events.iter().filter(|e| kp.contains(&e.kind)).collect();
+    let pe: Vec<&TraceEvent> = port.events.iter().filter(|e| ko.contains(&e.kind)).collect();
     let mut ev_div = None;
-    let n = orig.events.len().max(port.events.len());
+    let n = oe.len().max(pe.len());
     for k in 0..n {
-        let (a, b) = (orig.events.get(k), port.events.get(k));
+        let (a, b) = (oe.get(k).copied(), pe.get(k).copied());
         let same = match (a, b) {
             (Some(x), Some(y)) => key(x) == key(y),
             _ => false,

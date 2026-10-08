@@ -4908,7 +4908,9 @@ name = "probe_launch"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dishonored_oracle",
  "dishonored_probe",
+ "serde_json",
  "windows-sys 0.61.2",
 ]
 
