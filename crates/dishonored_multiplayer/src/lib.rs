@@ -42,6 +42,22 @@ pub struct AiPresence {
     pub music_type: u8,
 }
 
+/// One NPC's attention toward a human player, for the HUD's awareness markers
+/// (`DisGFxMoviePlayerHUD::m_AwarenessMarkers`, research/dishonored/HUD.md): the level of the
+/// brain's attention entry for that player (`EDisAttentionLevel`, 1 HeadTrack .. 4 Busted).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
+pub struct AwarenessMark {
+    pub id: PlayerId,
+    /// The human the attention is toward.
+    pub who: PlayerId,
+    pub level: u8,
+    /// `EAIAwareness` of the pawn (`PlayerState::ai_awareness`), tested against
+    /// `m_AllowedAIAwareness`.
+    pub awareness: u8,
+    /// Where the NPC believes the player is (the attention proxy), Dishonored units.
+    pub proxy: [f32; 3],
+}
+
 /// What clients see of the match (replicated in snapshots).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct MatchView {
@@ -76,6 +92,10 @@ pub struct MatchView {
     /// manager, `DisGlobalMusicManager`). Host-filled; empty outside missions.
     #[serde(default)]
     pub ai: Vec<AiPresence>,
+    /// NPC attention toward the human players (awareness markers). Host-filled; empty outside
+    /// missions.
+    #[serde(default)]
+    pub marks: Vec<AwarenessMark>,
     /// AI pawns' look-at aims (the vision head's cursor split into the head and torso grids),
     /// every snapshot: the animation turns the visible head the way the AI looks.
     #[serde(default)]

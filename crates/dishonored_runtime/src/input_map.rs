@@ -32,20 +32,20 @@ pub struct LocalInput {
     /// The quick-access wheel is open (`hud_wheel.rs`): it takes the mouse
     /// (`m_bCaptureAnalogInput`) and the number keys; the player stands still.
     pub wheel_open: bool,
-    /// The keyboard shortcuts (`GBA_Shortcut_0..9`) as the wheel's dock assigns them; None
-    /// uses the default list below.
-    pub shortcuts: Option<[Option<LeftHand>; 10]>,
 }
 
 impl LocalInput {
     pub fn take_tick_input(&mut self) -> PlayerInput {
-        if let Some(o) = self.override_input {
+        // The open wheel slows the world (`buttons::WHEEL`, `dishonored_sim::powers::set_wheel_layer`).
+        let wheel = if self.wheel_open { dishonored_sim::input::buttons::WHEEL } else { 0 };
+        if let Some(mut o) = self.override_input {
             self.yaw = o.yaw;
             self.pitch = o.pitch;
             self.left_hand = o.left_hand;
+            o.buttons |= wheel;
             return o;
         }
-        let i = PlayerInput { tick: 0, forward: self.forward, right: self.right, yaw: self.yaw, pitch: self.pitch, buttons: self.held | self.latched, left_hand: self.left_hand, action: self.action, npc_move: 0, npc_speed: 0.0 };
+        let i = PlayerInput { tick: 0, forward: self.forward, right: self.right, yaw: self.yaw, pitch: self.pitch, buttons: self.held | self.latched | wheel, left_hand: self.left_hand, action: self.action, npc_move: 0, npc_speed: 0.0 };
         self.latched = 0;
         self.action = 0;
         i
@@ -133,29 +133,8 @@ pub fn gather_input(
         }
         return;
     }
-    if wheel_open {
-        return;
-    }
-    let defaults = [
-        LeftHand::Blink,
-        LeftHand::Windblast,
-        LeftHand::DarkVision,
-        LeftHand::Pistol,
-        LeftHand::Crossbow,
-        LeftHand::Possession,
-        LeftHand::BendTime,
-        LeftHand::DevouringSwarm,
-        LeftHand::Grenade,
-        LeftHand::SpringRazor,
-    ];
-    let table = local.shortcuts.unwrap_or(defaults.map(Some));
-    for (i, h) in table.into_iter().enumerate() {
-        if let Some(h) = h
-            && bind.just_pressed(&format!("GBA_Shortcut_{i}"), &keys, &mouse, wheel)
-        {
-            local.left_hand = h;
-        }
-    }
+    // The number keys and the mouse wheel select items through the shortcut dock
+    // (`hud_wheel.rs`): it equips the slot's item when the key is released.
 }
 
 fn is_mouse(b: &crate::settings::Bindings, action: &str) -> bool {
