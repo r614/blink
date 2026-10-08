@@ -541,8 +541,8 @@ pub fn handle(
                     if i != p.sel {
                         let lk_old = locked(ITEMS[p.sel].0, saves.as_deref());
                         let lk_new = locked(ITEMS[i].0, saves.as_deref());
-                        let a = &mut p.anim;
                         let ko = format!("pm/item/{}", p.sel);
+                        let a = &mut p.anim;
                         a.now(now, &ko, Act::To(P::new().scale(100.0).x(0.0).alpha(100.0), 0.25, Ease::StrongOut));
                         a.now(now, &ko, Act::Play(if lk_old { "out_lock" } else { "out" }.into()));
                         let kn = format!("pm/item/{i}");
