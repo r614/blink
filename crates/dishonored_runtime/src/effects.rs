@@ -1414,7 +1414,7 @@ fn attached_effects(mut commands: Commands, mut fx: ResMut<Effects>, mut meshes:
         want.push(((0, p.id), path, facing(p.position, p.velocity)));
     }
     if view.me.as_ref().is_some_and(|me| me.vitals.dark_vision_remaining > 0.0) {
-        for o in view.others.iter().filter(|o| o.alive && view.dark_vision_reveals.contains(&o.id) && o.kind == dishonored_sim::state::PawnKind::Human) {
+        for o in view.others.iter().filter(|o| o.alive && view.dark_vision_reveals.contains(&o.id) && matches!(o.kind, dishonored_sim::state::PawnKind::Guard | dishonored_sim::state::PawnKind::Civilian)) {
             let dir = Vec3::new(o.yaw.to_radians().cos(), o.yaw.to_radians().sin(), 0.0);
             want.push(((1, o.id), DV_CONE_PS, facing(o.position + Vec3::Z * 60.0, dir)));
         }

@@ -196,6 +196,25 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     if muzzle_shot.exists() {
         rep.artifact("muzzle flash screenshot", &muzzle_shot);
     }
+    // Blink's targeting indicator (`Twk_Blink` m_pGroundPS / m_pLowFallPS) shows while aiming
+    // and is gone after the release; nothing of it stays behind.
+    ctl.call(serde_json::json!({"cmd":"input","ticks":45,"input": {"yaw": yaw, "pitch": -10.0, "left_hand": "Blink", "buttons": ["SECONDARY"]}}));
+    std::thread::sleep(Duration::from_millis(600));
+    let aiming = ctl.call(serde_json::json!({"cmd":"effects"})).unwrap_or(Value::Null);
+    let blink_shot = shots_dir.join("blink_indicator.png");
+    ctl.call(serde_json::json!({"cmd":"screenshot","path": blink_shot.display().to_string()}));
+    ctl.call(serde_json::json!({"cmd":"input","ticks":30,"input": {"yaw": yaw, "pitch": -10.0, "left_hand": "Blink"}}));
+    std::thread::sleep(Duration::from_millis(1500));
+    let after = ctl.call(serde_json::json!({"cmd":"effects"})).unwrap_or(Value::Null);
+    rep.check(
+        S,
+        "Blink indicator follows the aim and is gone after the blink",
+        aiming["blink_indicator"].is_string() && after["blink_indicator"].is_null(),
+        format!("while aiming {}, after {}, live one-shots {}", aiming["blink_indicator"], after["blink_indicator"], after["live_oneshots"]),
+    );
+    if blink_shot.exists() {
+        rep.artifact("Blink indicator screenshot", &blink_shot);
+    }
     let state_path = ctx.out.join("viewer_final_state.json");
     std::fs::write(&state_path, serde_json::to_string_pretty(&last_state)?)?;
     rep.artifact("viewer final state", &state_path);
