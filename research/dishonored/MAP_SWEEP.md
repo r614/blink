@@ -196,3 +196,52 @@ The hook's map switch has only been exercised for Boyle; a failed `session open`
 - Maps whose Kismet drives much of what is on screen: Flooded_FRefinery (933 activations, 47 matinee binds in 10 s), OutsiderDream (cutscene movement), Prison (DraggedIN), Tower (NewGameEmpress start).
 - Near-empty geometry: Out_HighChaos_emilyDead 3838 tris, Out_HighChaos_EmilyAlive 26684, DishonoredGameFull 12 (global map, expected), Out_P 110 k.
 - Entry-redirected maps (Pub x5, Isl_High, LightH_Low, Out x3) will look right only if loaded directly; the rendered pass should load them by map name.
+
+### Original-side collision capture: results (2026-10-08)
+
+One hooked session, `probe_launch queue run` over the 42 blocks (`session open`, `collide`, `maps/<name>`): 125 / 126 lines ok in 1263 s. Agreement from `oracle collision --map M` (answered queries that agree; clusters = disagreement clusters). Switch = the `open` line (load s / control s). `DishonoredGameFull_P`: the `open` returns but the session stays on the previous level (the front-end map is not entered by the console `open`), so its collide line fails; its smoke scenario ran on the level it was on.
+
+| map | open | switch s | load / control s | collide | queries | doors | agree (rate), clusters | smoke scenario |
+|---|---|---|---|---|---|---|---|---|
+| DishonoredGameFull_P | ok | 12.3 | 0.3 / 12.0 | failed |  |  |  | maps/DishonoredGameFull ok |
+| L_ArtDealer_P | ok | 2.7 | 0.8 / 1.9 | ok | 31884 | 5 | 31695 / 31698 (99.99 %), 3 clusters | maps/ArtDealer ok |
+| L_Boyle_Ext_P | ok | 7.6 | 0.8 / 6.8 | ok | 77283 | 8 | 76800 / 76842 (99.95 %), 18 clusters | maps/Boyle_Ext ok |
+| L_Boyle_Int_P | ok | 4.9 | 1.0 / 3.8 | ok | 45475 | 18 | 44680 / 44872 (99.57 %), 35 clusters | maps/Boyle_Int ok |
+| L_Bridge_Part1a_P | ok | 8.1 | 0.5 / 7.5 | ok | 44562 | 4 | 44379 / 44562 (99.59 %), 49 clusters | maps/Bridge_Part1a ok |
+| L_Bridge_Part1b_P | ok | 6.7 | 0.5 / 6.1 | ok | 94507 | 11 | 93523 / 94364 (99.11 %), 144 clusters | maps/Bridge_Part1b ok |
+| L_Bridge_Part1c_P | ok | 3.3 | 0.5 / 2.7 | ok | 50312 | 2 | 50005 / 50172 (99.67 %), 39 clusters | maps/Bridge_Part1c ok |
+| L_Bridge_Part2_P | ok | 7.8 | 0.5 / 7.2 | ok | 80330 | 11 | 79749 / 80070 (99.60 %), 83 clusters | maps/Bridge_Part2 ok |
+| L_Brothel_P | ok | 5.9 | 1.3 / 4.6 | ok | 94807 | 26 | 93957 / 94142 (99.80 %), 26 clusters | maps/Brothel ok |
+| L_Distillery2_P | ok | 6.5 | 0.8 / 5.6 | ok | 44293 | 6 | 43884 / 44000 (99.74 %), 20 clusters | maps/Distillery2 ok |
+| L_Distillery_P | ok | 5.5 | 0.8 / 4.7 | ok | 48568 | 6 | 47996 / 48127 (99.73 %), 19 clusters | maps/Distillery ok |
+| L_Flooded_FAssassins_P | ok | 5.7 | 0.3 / 5.4 | ok | 71454 | 5 | 70767 / 71093 (99.54 %), 118 clusters | maps/Flooded_FAssassins ok |
+| L_Flooded_FGate_P | ok | 7.4 | 0.8 / 6.5 | ok | 164952 | 17 | 163909 / 164426 (99.69 %), 60 clusters | maps/Flooded_FGate ok |
+| L_Flooded_FIntro_P | ok | 4.6 | 0.5 / 4.0 | ok | 1143 | 0 | 1131 / 1131 (100.00 %), 0 clusters | maps/Flooded_FIntro ok |
+| L_Flooded_FRefinery_P | ok | 4.0 | 0.5 / 3.5 | ok | 28872 | 2 | 28563 / 28632 (99.76 %), 19 clusters | maps/Flooded_FRefinery ok |
+| L_Flooded_FStreets_P | ok | 9.0 | 0.5 / 8.4 | ok | 56281 | 0 | 55726 / 55907 (99.68 %), 49 clusters | maps/Flooded_FStreets ok |
+| L_Galvani1_P | ok | 3.6 | 0.5 / 3.0 | ok | 30090 | 16 | 29732 / 29876 (99.52 %), 11 clusters | maps/Galvani1 ok |
+| L_Galvani2_P | ok | 2.9 | 0.3 / 2.6 | ok | 30090 | 16 | 29295 / 29923 (97.90 %), 33 clusters | maps/Galvani2 ok |
+| L_Isl_HighChaos_P | ok | 6.1 | 0.5 / 5.5 | ok | 108145 | 8 | 107854 / 108145 (99.73 %), 106 clusters | maps/Isl_HighChaos ok |
+| L_Isl_LowChaos_P | ok | 3.8 | 1.0 / 2.7 | ok | 104256 | 8 | 103948 / 104256 (99.70 %), 111 clusters | maps/Isl_LowChaos ok |
+| L_LightH_HighChaos_P | ok | 2.7 | 1.0 / 1.7 | ok | 16875 | 5 | 16598 / 16875 (98.36 %), 49 clusters | maps/LightH_HighChaos ok |
+| L_LightH_LowChaos_P | ok | 4.0 | 0.5 / 3.4 | ok | 16875 | 5 | 16612 / 16875 (98.44 %), 51 clusters | maps/LightH_LowChaos ok |
+| L_Out_HighChaos_EmilyAlive_P | ok | 4.8 | 0.5 / 4.2 | ok | 111 | 0 | 111 / 111 (100.00 %), 0 clusters | maps/Out_HighChaos_EmilyAlive ok |
+| L_Out_HighChaos_emilyDead_P | ok | 3.7 | 0.5 / 3.1 | ok | 120 | 0 | 120 / 120 (100.00 %), 0 clusters | maps/Out_HighChaos_emilyDead ok |
+| L_Out_P | ok | 1.6 | 0.5 / 1.0 | ok | 868 | 0 | 496 / 868 (57.14 %), 8 clusters | maps/Out ok |
+| L_OutsiderDream_P | ok | 4.0 | 0.5 / 3.4 | ok | 779 | 1 | 779 / 779 (100.00 %), 0 clusters | maps/OutsiderDream ok |
+| L_Ovrsr_Back_P | ok | 8.1 | 0.8 / 7.2 | ok | 45616 | 6 | 45173 / 45349 (99.61 %), 27 clusters | maps/Ovrsr_Back ok |
+| L_Ovrsr_Kennel_P | ok | 5.5 | 1.1 / 4.4 | ok | 15045 | 7 | 14801 / 14819 (99.88 %), 3 clusters | maps/Ovrsr_Kennel ok |
+| L_Ovrsr_P | ok | 11.8 | 0.8 / 10.9 | ok | 88043 | 19 | 86306 / 87608 (98.51 %), 120 clusters | maps/Ovrsr ok |
+| L_Prison_P | ok | 5.2 | 1.0 / 4.1 | ok | 59984 | 13 | 59461 / 59984 (99.13 %), 92 clusters | maps/Prison ok |
+| L_PrsnSewer_P | ok | 7.6 | 0.8 / 6.8 | ok | 47437 | 7 | 47331 / 47437 (99.78 %), 21 clusters | maps/PrsnSewer ok |
+| L_Pub_Assault_P | ok | 6.6 | 0.5 / 6.0 | ok | 59278 | 18 | 58160 / 58800 (98.91 %), 54 clusters | maps/Pub_Assault ok |
+| L_Pub_Day_P | ok | 4.7 | 1.1 / 3.6 | ok | 68055 | 22 | 67513 / 68055 (99.20 %), 81 clusters | maps/Pub_Day ok |
+| L_Pub_Dusk_P | ok | 5.1 | 0.8 / 4.3 | ok | 68746 | 22 | 68376 / 68746 (99.46 %), 101 clusters | maps/Pub_Dusk ok |
+| L_Pub_Morning_P | ok | 4.0 | 0.8 / 3.1 | ok | 68027 | 21 | 67661 / 68027 (99.46 %), 95 clusters | maps/Pub_Morning ok |
+| L_Pub_Night_P | ok | 6.8 | 0.5 / 6.2 | ok | 68055 | 21 | 67768 / 68055 (99.58 %), 76 clusters | maps/Pub_Night ok |
+| L_Streets1_P | ok | 6.6 | 1.0 / 5.6 | ok | 92279 | 3 | 91679 / 91796 (99.87 %), 49 clusters | maps/Streets1 ok |
+| L_Streets2_P | ok | 4.9 | 1.0 / 3.8 | ok | 100818 | 1 | 99878 / 100153 (99.73 %), 36 clusters | maps/Streets2 ok |
+| L_Streetsewer_P | ok | 5.4 | 0.8 / 4.6 | ok | 82177 | 3 | 81681 / 81752 (99.91 %), 39 clusters | maps/Streetsewer ok |
+| L_Tower_P | ok | 5.6 | 0.8 / 4.7 | ok | 52929 | 0 | 51824 / 52422 (98.86 %), 57 clusters | maps/Tower ok |
+| L_TowerRtrn_Int_P | ok | 5.7 | 0.5 / 5.2 | ok | 80622 | 32 | 79846 / 80038 (99.76 %), 48 clusters | maps/TowerRtrn_Int ok |
+| L_TowerRtrn_Yard_P | ok | 5.6 | 0.8 / 4.8 | ok | 78093 | 8 | 77576 / 77840 (99.66 %), 65 clusters | maps/TowerRtrn_Yard ok |
