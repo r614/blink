@@ -328,6 +328,10 @@ pub struct PlayerState {
     /// Set by the mission layer from the spawner's armour roll.
     #[serde(default)]
     pub helmet: bool,
+    /// Carries the plague (`DisTweaks_NPCPawn.m_bHasPlague`, the weepers): coughs a plague cloud
+    /// and is immune to other carriers' clouds (0x00c75180). Set by the mission layer.
+    #[serde(default)]
+    pub plague: bool,
     /// Rats attacking this pawn (attack group timers of 0x00C891E0).
     #[serde(default)]
     pub rat_attack: RatAttackState,
@@ -697,6 +701,7 @@ impl PlayerState {
             nav_walk: false,
             nav_end: None,
             helmet: false,
+            plague: false,
             rat_attack: RatAttackState::default(),
             damage_reduction: 0.0,
             free_spell_chance: 0.0,
@@ -755,6 +760,9 @@ pub enum ProjectileKind {
     Grenade,
     /// `DisProjectile_StickyGrenade`: sticks to what it hits.
     StickyGrenade,
+    /// A Tallboy's explosive arrow (`TallboyExplosiveArrow_twk`, class
+    /// `DisProjectile_Arrow_Explosive`): explodes at its first impact (`TallboyArrowExplosion_Twk`).
+    TallboyArrow,
 }
 
 impl ProjectileKind {

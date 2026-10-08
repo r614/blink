@@ -98,6 +98,8 @@ fn projectile_key(k: ProjectileKind) -> &'static str {
         ProjectileKind::IncendiaryBolt => "flare",
         ProjectileKind::Grenade => "grenade",
         ProjectileKind::StickyGrenade => "sticky",
+        // The Tallboy arrow (`Wpn_TallBoyBow.Wpn_TB_Arrow`) is not in the model set: the flare bolt.
+        ProjectileKind::TallboyArrow => "flare",
     }
 }
 

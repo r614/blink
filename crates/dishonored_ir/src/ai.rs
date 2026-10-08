@@ -6,6 +6,46 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// The NPC class a pawn's brain tweak makes it, read from the behaviour in its brain's
+/// Combat slot (`m_BehaviorTweak[i]` whose `m_DesignatedSlot` is `EAISlot_Combat`, its
+/// `m_pSpawnedObjectClass`). Pawns whose brain has no combat behaviour are civilians.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum NpcClass {
+    /// No combat behaviour (`BrainTweaks_Civilian`): panic.
+    #[default]
+    Civilian,
+    /// `DisBehaviorCombatEliteGuard` / `DisBehaviorCombatCityGuard` and the other sword
+    /// fighters the port plays with the elite guard's combat.
+    EliteGuard,
+    /// `DisBehaviorMusicalCombat` (the music-box Overseer).
+    MusicalOverseer,
+    /// `DisBehaviorTallBoyCombat`.
+    Tallboy,
+    /// `DisBehaviorCombatWolfhound`.
+    Wolfhound,
+    /// The weepers' combat behaviour.
+    Weeper,
+}
+
+impl NpcClass {
+    /// The class of a combat behaviour class name (`None`: not a combat behaviour).
+    pub fn from_combat_behavior(class: &str) -> NpcClass {
+        match class {
+            "DisBehaviorMusicalCombat" => NpcClass::MusicalOverseer,
+            "DisBehaviorTallBoyCombat" => NpcClass::Tallboy,
+            "DisBehaviorCombatWolfhound" => NpcClass::Wolfhound,
+            c if c.to_ascii_lowercase().contains("weep") => NpcClass::Weeper,
+            "" => NpcClass::Civilian,
+            _ => NpcClass::EliteGuard,
+        }
+    }
+
+    /// Has a combat behaviour (spawned as a fighter, never panics).
+    pub fn fights(self) -> bool {
+        self != NpcClass::Civilian
+    }
+}
+
 /// Attention levels (`EDisAttentionLevel`).
 pub const DAL_UNAWARE: u8 = 0;
 pub const DAL_HEAD_TRACK: u8 = 1;
@@ -214,6 +254,15 @@ pub struct PlayerVisibilityConfig {
     /// divided by it, unclamped (0x00ac33b0).
     #[serde(default = "ground_speed_sprint")]
     pub ground_speed_sprint: f32,
+    /// The player's collision cylinder: radius, half height standing and sneaking. The stealth
+    /// light environment's bounds are the cylinder's (0x00B50720 copies them every tick):
+    /// sphere radius `|(r, r, h)|` (`UCylinderComponent::UpdateBounds`).
+    #[serde(default = "cylinder")]
+    pub cylinder: [f32; 3],
+}
+
+fn cylinder() -> [f32; 3] {
+    [35.0, 87.5, 65.0]
 }
 
 fn ground_speed_sprint() -> f32 {
@@ -237,6 +286,7 @@ impl Default for PlayerVisibilityConfig {
             light_darkest: 0.05,
             light_brightest: 1.0,
             ground_speed_sprint: 600.0,
+            cylinder: cylinder(),
         }
     }
 }
@@ -564,6 +614,14 @@ pub struct VisionConfig {
     pub outer_range: f32,
     pub outer_up: f32,
     pub outer_down: f32,
+    /// `m_fVision_BoneNullzone_Deg`: a head axis this close to the pawn's rotation is the
+    /// pawn's rotation (0x00C676A0).
+    #[serde(default = "nullzone")]
+    pub bone_nullzone_deg: f32,
+}
+
+fn nullzone() -> f32 {
+    5.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -675,6 +733,236 @@ pub struct CombatAiConfig {
     /// 150, weepers 30, aristocrats 10-11 are other archetypes).
     #[serde(default = "d_guard_health_max")]
     pub guard_health_max: f32,
+}
+
+/// Move codes of the special NPC classes' item contexts (`PlayerInput::npc_move`, after the
+/// elite guard's in `dishonored_sim::input::npc_moves`).
+pub mod special_moves {
+    /// Wolfhound bite (`DisItemContext_NPCAttackMedium` of `Twk_Inv_WolfhoundBite`).
+    pub const WH_BITE: u8 = 20;
+    /// `DisItemContext_WHJumpAttack` (knockdown).
+    pub const WH_JUMP_ATTACK: u8 = 21;
+    /// `DisItemContext_WHArmAttack` (sync grab; not ported).
+    pub const WH_ARM_ATTACK: u8 = 22;
+    /// Tallboy leg stomp (`DisItemContext_AttackNPCTallboyMelee`).
+    pub const TALLBOY_STOMP: u8 = 23;
+    /// Tallboy bow (`DisItemContext_NPCFireBow`): aiming, the shot on the Secondary press.
+    pub const TALLBOY_FIRE_BOW: u8 = 24;
+    /// Music-box Overseer bash (`DisItemContext_NPCBash` of the music box).
+    pub const OVERSEER_BASH: u8 = 25;
+    /// Music-box Overseer playing the combat tune (`DisItemContext_NPCTune_Combat`).
+    pub const OVERSEER_TUNE: u8 = 26;
+    /// Weeper arm grab (`DisItemContext_WeeperGrab`).
+    pub const WEEPER_GRAB: u8 = 27;
+    /// Weeper coughing the plague cloud (`DishonoredNotify_StartPlague`).
+    pub const WEEPER_COUGH: u8 = 28;
+}
+
+/// An attack item context of a special NPC class (`DisTweaks_ItemContext` of its weapon's
+/// pawn-specific tweaks): range, height limit, facing angle, cooldown, the combat manager's group
+/// inhibition and the damage of one hit (`ceil(m_fAttackDamageMultiplier x Attribute_MeleeDamage)`
+/// of the weapon, Normal).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SpecialAttack {
+    /// Item context class (`DisItemContext_WHJumpAttack`).
+    pub name: String,
+    /// Move code carried in `PlayerInput::npc_move` (`dishonored_sim::input::npc_moves`).
+    pub kind: u8,
+    pub min_range: f32,
+    pub max_range: f32,
+    /// `m_fIdealContextRange` (the attack pattern's ideal range, the shooting position's distance).
+    pub ideal_range: f32,
+    /// `m_fMaxContextHeightDifference` (no limit: `f32::MAX`).
+    pub max_height: f32,
+    /// `m_fAllowedAngle` (degrees off the pawn's facing).
+    pub angle: f32,
+    pub cooldown: [f32; 2],
+    pub inhibition: f32,
+    pub damage: f32,
+    /// `m_MainAttack.m_bUnblockable`.
+    pub unblockable: bool,
+}
+
+/// `DisTweaks_AISubProcess_ManageAttacks` of a special class's combat behaviour.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ManageAttacksConfig {
+    pub attacks_per_flurry: [i32; 2],
+    pub stamina_recovery: [f32; 2],
+    pub aggression_regen_rate: f32,
+    pub aggression_delta_per_damage: f32,
+    pub cooldown_factor_at_min_aggression: f32,
+}
+
+impl Default for ManageAttacksConfig {
+    fn default() -> Self {
+        ManageAttacksConfig { attacks_per_flurry: [2, 3], stamina_recovery: [3.0, 4.0], aggression_regen_rate: 0.1, aggression_delta_per_damage: -0.5, cooldown_factor_at_min_aggression: 1.0 }
+    }
+}
+
+/// The special NPC classes' combat tuning (research/dishonored/systems/ai.md F6), read from
+/// their pawn, brain, behaviour and weapon tweaks (`dishonored_assets::ai_config`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SpecialNpcConfig {
+    pub wolfhound: WolfhoundConfig,
+    pub weeper: WeeperConfig,
+    pub tallboy: TallboyConfig,
+    pub overseer: MusicalOverseerConfig,
+}
+
+impl SpecialNpcConfig {
+    /// `Attribute_HealthMax` (Normal) of a class's pawn tweak; `None`: the kind's default.
+    pub fn health_max(&self, c: NpcClass) -> Option<f32> {
+        let h = match c {
+            NpcClass::Wolfhound => self.wolfhound.health_max,
+            NpcClass::Weeper => self.weeper.health_max,
+            NpcClass::Tallboy => self.tallboy.health_max,
+            NpcClass::MusicalOverseer => self.overseer.health_max,
+            _ => 0.0,
+        };
+        (h > 0.0).then_some(h)
+    }
+
+    /// The special attack with a move code (any class).
+    pub fn attack(&self, kind: u8) -> Option<&SpecialAttack> {
+        self.wolfhound.attacks.iter().chain(self.tallboy.attacks.iter()).chain(self.overseer.attacks.iter()).find(|a| a.kind == kind)
+    }
+}
+
+/// `DisBehaviorCombatWolfhound` (`AI_Tweak_Behavior_WolfhoundCombat`) and the hound's bite
+/// (`Twk_Inv_Wolfhound.Twk_Inv_WolfhoundBite`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct WolfhoundConfig {
+    pub health_max: f32,
+    /// The bite's contexts in tweak order (AttackMedium, Left90, Right90, WHJumpAttack, WHArmAttack).
+    pub attacks: Vec<SpecialAttack>,
+    pub manage: ManageAttacksConfig,
+    /// `m_fWalkDistance` of the engage sub-state: within it the hound walks (WalkAttack).
+    pub walk_distance: f32,
+    /// The hound's attention profiles (`Twk_Attn_Wolfhound_*`).
+    pub unsuspecting: Option<AttentionConfig>,
+    pub suspecting: Option<AttentionConfig>,
+}
+
+/// `DisBehaviorWeep` (`TweakBehaviors_Weep_Default`), the arm grab and the plague cloud of the
+/// weeper pawn tweaks.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct WeeperConfig {
+    pub health_max: f32,
+    /// `m_fHomeRadius`, `m_LostTimer`.
+    pub home_radius: f32,
+    pub lost_timer: [f32; 2],
+    /// `m_fCoughingCooldown`.
+    pub coughing_cooldown: [f32; 2],
+    /// `m_SimultaneousRunnerAllowed`, `m_fTimeBeforeRunning`.
+    pub runners_allowed: u32,
+    pub time_before_running: f32,
+    /// `m_StandStillWeeping` after a grab.
+    pub stand_still: [f32; 2],
+    /// TakePosition arrival threshold of the follow sub-state.
+    pub follow_threshold: f32,
+    /// `DisTweaks_WeeperGrab`: range, feet height difference, angle, length, group inhibition.
+    pub grab_range: f32,
+    pub grab_height: f32,
+    pub grab_angle: f32,
+    pub grab_duration: f32,
+    pub grab_inhibition: f32,
+    /// Plague cloud of the pawn tweak: `m_fPlagueRadius`, `m_fPlagueDmgAngle`,
+    /// `m_iPlagueDmgPerTick`, `m_fPlagueDmgePeriod`, `m_fPlagueDmgLength`.
+    pub plague_radius: f32,
+    pub plague_angle: f32,
+    pub plague_damage: f32,
+    pub plague_period: f32,
+    pub plague_length: [f32; 2],
+}
+
+impl Default for WeeperConfig {
+    /// `Pwn_WeeperMiddle_MTall_1` / `TweakBehaviors_Weep_Default` / `DisTweaks_WeeperGrab_2` values.
+    fn default() -> Self {
+        WeeperConfig {
+            health_max: 30.0,
+            home_radius: 1500.0,
+            lost_timer: [1.0, 3.0],
+            coughing_cooldown: [2.0, 5.0],
+            runners_allowed: 3,
+            time_before_running: 0.0,
+            stand_still: [2.0, 5.0],
+            follow_threshold: 110.0,
+            grab_range: 400.0,
+            grab_height: 50.0,
+            grab_angle: 90.0,
+            grab_duration: 1.33,
+            grab_inhibition: 20.0,
+            plague_radius: 350.0,
+            plague_angle: 90.0,
+            plague_damage: 4.0,
+            plague_period: 0.5,
+            plague_length: [2.0, 3.0],
+        }
+    }
+}
+
+/// `DisBehaviorTallBoyCombat` (`AI_BehaviorTweaks_TallBoy_Combat`) and its bow.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct TallboyConfig {
+    pub health_max: f32,
+    /// Melee contexts (the leg stomp).
+    pub attacks: Vec<SpecialAttack>,
+    pub manage: ManageAttacksConfig,
+    /// `DisTweaks_NPCFireBow`: ranges, angle, cooldown, projectile speed.
+    pub bow: SpecialAttack,
+    pub arrow_speed: f32,
+    pub arrow_gravity_mult: f32,
+    /// `m_fAlliesHoldFireRadius`: an ally within it around the target denies the shot (0x00bf7550).
+    pub allies_hold_fire_radius: f32,
+    /// `StateNPCMasterTallboyAim`: the shot needs the aim yaw within `m_fAimAlignYawDegrees` of the
+    /// target for `m_fAimAlignTimeBeforeShooting` (0x00a87700, 0x00a7cd80).
+    pub aim_align_deg: f32,
+    pub aim_time: f32,
+    /// `Attribute_MaxAccuracy` / `Attribute_MinAccuracy` (Normal) of the pawn: the hit chance
+    /// runs from the first at the bow's min range to the second at its max range (0x00b732e0).
+    pub accuracy: [f32; 2],
+    /// `m_fCheatAngleDeviation`: a miss aims within this angle of the line to the target.
+    pub miss_angle: f32,
+    /// `GravityZ` of the world (the ballistic solve, 0x00c3f2a0).
+    pub gravity_z: f32,
+    /// The arrow's explosion (`TallboyArrowExplosion_Twk`).
+    pub explosion: crate::items::ExplosionConfig,
+    /// FindShootingPosition: avoidance radius, give-up time without progress.
+    pub fsp_avoidance: f32,
+    pub fsp_give_up: f32,
+}
+
+/// `DisBehaviorMusicalCombat` and the music box (`Twk_Weapon_MusicBox_Default`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct MusicalOverseerConfig {
+    pub health_max: f32,
+    /// The bash (`DisTweaks_NPCBash`).
+    pub attacks: Vec<SpecialAttack>,
+    /// The combat tune (`DisTweaks_NPCTune_Combat`): range, angle, cooldown.
+    pub tune: SpecialAttack,
+    /// `m_fMusicEffectPeriod` of its `DisTweaks_Tune`, `m_iMusicEffectDamage`.
+    pub tune_period: f32,
+    pub tune_damage: f32,
+    /// `m_fStopWhenNotSeeingTimer`, `m_fStopWhenOutOfRangeTimer`.
+    pub stop_not_seeing: f32,
+    pub stop_out_of_range: f32,
+    /// `m_fRepulseForceRange` (uu/s per second, at the far and near end of the range).
+    pub repulse: [f32; 2],
+    /// `DisTweaks_Tune_Protection.m_fMusicEffectRadius_InhibitPowers`: within it a pawn cannot use
+    /// powers while either tune plays (0x00bd7390).
+    pub inhibit_powers_radius: f32,
+    /// `m_fIdealContextRange` of the protection tune: the distance MaintainDistance closes to.
+    pub ideal_distance: f32,
+    /// The player's `Attribute_MusicDamageReduction` (Normal, `Twk_Pawn_Corvo_Release`): Musical
+    /// damage is `round(dmg x (1 - reduction))` (0x00b5ccd0).
+    pub player_music_reduction: f32,
 }
 
 /// `EAINoiseContext` (DisGlobalEnums, in enum order).
@@ -908,12 +1196,81 @@ pub struct AiConfig {
     /// stance modifiers NPC moves use. Empty: NPCs move at the player's speeds.
     #[serde(default)]
     pub locomotion: Vec<crate::npc_anim::LocoConfig>,
+    /// The vision bone (`camera_jnt`) baked from each archetype's idle and walk loops, indexed
+    /// like the visual archetypes (`PlayerState::archetype`).
+    #[serde(default)]
+    pub head_poses: Vec<HeadPose>,
+    /// The look-at config the head model reads (`DisTweaks_NPCPawn.m_pComponentLookatConfig`,
+    /// `DisLookatConfig.DefaultLookatConfig`).
+    #[serde(default)]
+    pub lookat: crate::npc_anim::LookatConfig,
+    /// `DisTweaks_PawnAttention.m_fHeadTrackTorsoRatio` of the guard / civilian attention
+    /// tweaks: the torso weight of the HeadTrack look-at request (0x00B25890).
+    #[serde(default)]
+    pub head_track_torso_ratio: f32,
+    /// The player's `BaseEyeHeight` and collision half height: a look-at request follows the
+    /// player's eyes view point (0x00952BD0), the same offset below the cylinder top.
+    #[serde(default)]
+    pub player_eye: [f32; 2],
     /// `DisTweaks_AISubProcess_AmbientBarks.m_fBarkInhibitionDuration` of the Patrol / Guard
     /// behaviours (`TweaksBehavior_Patrol_Default`): the silence after the behaviour starts
     /// before the ambient `DDH_PATROL_MISC` barks (0x00b47020).
     #[serde(default = "bark_inhibition")]
     pub ambient_bark_inhibition: f32,
+    /// The special NPC classes (tallboys, hounds, weepers, music-box Overseers).
+    #[serde(default)]
+    pub special: SpecialNpcConfig,
     pub provenance: BTreeMap<String, String>,
+}
+
+/// One locomotion loop of a head bake: `camera_jnt` per frame in the pawn's frame (x forward,
+/// z up, origin the pawn's Location): `[px, py, pz, fx, fy, fz]`, position then the bone's X
+/// axis.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct HeadLoop {
+    /// Stance modifier of the locomotion config (`Empty`, `Sword`, ...).
+    pub modifier: String,
+    /// Speed index (0 idle, 1 walk).
+    pub speed: u8,
+    pub sequence: String,
+    pub duration: f32,
+    pub sample_rate: f32,
+    pub samples: Vec<[f32; 6]>,
+}
+
+impl HeadLoop {
+    /// The bone at loop time `t` (wrapped), linearly between frames.
+    pub fn at(&self, t: f32) -> Option<[f32; 6]> {
+        let n = self.samples.len();
+        if n == 0 {
+            return None;
+        }
+        if n == 1 || self.duration <= 0.0 {
+            return Some(self.samples[0]);
+        }
+        let f = (t.rem_euclid(self.duration) * self.sample_rate).max(0.0);
+        let i = (f.floor() as usize).min(n - 1);
+        let j = (i + 1).min(n - 1);
+        let w = f - i as f32;
+        let (a, b) = (self.samples[i], self.samples[j]);
+        Some(std::array::from_fn(|k| a[k] + (b[k] - a[k]) * w))
+    }
+}
+
+/// The vision bone of one visual archetype.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct HeadPose {
+    pub archetype: String,
+    pub mesh: String,
+    pub loops: Vec<HeadLoop>,
+}
+
+impl HeadPose {
+    /// The loop for a stance modifier and speed index (the first modifier's when the stance
+    /// has none).
+    pub fn find(&self, modifier: &str, speed: u8) -> Option<&HeadLoop> {
+        self.loops.iter().find(|l| l.speed == speed && l.modifier.eq_ignore_ascii_case(modifier)).or_else(|| self.loops.iter().find(|l| l.speed == speed))
+    }
 }
 
 fn bark_inhibition() -> f32 {
@@ -1102,7 +1459,7 @@ pub struct AlarmBellDef {
 /// A light for the AI light probe (the original samples the pawn's light environment).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ProbeLight {
-    /// 0 point, 1 spot, 2 directional.
+    /// 0 point, 1 spot, 2 directional, 3 sky (lit from straight up).
     pub kind: u8,
     pub position: glam::Vec3,
     pub direction: glam::Vec3,
@@ -1147,6 +1504,186 @@ pub struct AiLevel {
     /// The level's `DisStealthVolume`s.
     #[serde(default)]
     pub stealth_volumes: Vec<StealthVolume>,
+    /// Pawn tweak path -> the class name of its brain's Combat-slot behaviour
+    /// (`m_pBrainTweak` -> `m_BehaviorTweak[i].m_Difficulty[1]` with `m_DesignatedSlot`
+    /// `EAISlot_Combat` -> `m_pSpawnedObjectClass`); absent: no combat behaviour.
+    #[serde(default)]
+    pub tweak_combat: BTreeMap<String, String>,
+    /// The lights the player's stealth light environment composites (`m_LightProbe` channel,
+    /// every light list: static, dominant, toggleable, movable), with `casts_shadows` meaning
+    /// `CastShadows && CastStaticShadows` (the visibility line check).
+    #[serde(default)]
+    pub stealth_lights: Vec<ProbeLight>,
+    /// The levels' precomputed light volumes, reduced to what the stealth light reads.
+    #[serde(default)]
+    pub light_volumes: Vec<LightVolume>,
+}
+
+impl AiLevel {
+    /// The NPC class of a pawn tweak (see [`NpcClass`]); `None` when the tweak's brain was not
+    /// resolved.
+    pub fn npc_class(&self, tweak: &str) -> Option<NpcClass> {
+        self.tweak_combat.get(tweak).map(|c| NpcClass::from_combat_behavior(c))
+    }
+}
+
+impl ProbeLight {
+    /// `ULightComponent::GetPosition`: (position, 1) for point and spot lights, (-axis, 0) for
+    /// directional lights, (0, 0, 1, 0) for sky lights.
+    pub fn position4(&self) -> (glam::Vec3, f32) {
+        match self.kind {
+            0 | 1 => (self.position, 1.0),
+            2 => (-self.direction, 0.0),
+            _ => (glam::Vec3::Z, 0.0),
+        }
+    }
+
+    /// Spot cone half-angles in radians as 0x00549EE0 clamps them (inner to [0, 89] deg, outer to
+    /// [inner + 0.001 rad, 1.554343 rad]).
+    fn cone(&self) -> (f32, f32) {
+        let d2r = 0.017_453_292_f32;
+        let inner = self.inner_cone.clamp(0.0, 89.0);
+        let lo = inner * d2r + 0.001;
+        let o = self.outer_cone * d2r;
+        (inner * d2r, if o < lo { lo } else { o.min(1.554_343) })
+    }
+
+    /// `AffectsBounds` for a bounds sphere (points 0x00530330: distance <= radius + sphere; spots
+    /// the cone test of 0x005499E0; directional and sky lights always).
+    pub fn affects(&self, origin: glam::Vec3, sphere: f32) -> bool {
+        match self.kind {
+            0 => (origin - self.position).length() <= self.radius + sphere,
+            1 => {
+                if (origin - self.position).length() > self.radius + sphere {
+                    return false;
+                }
+                let (_, outer) = self.cone();
+                let (sin_o, cos_o) = outer.sin_cos();
+                let apex = self.position - self.direction * (sphere / sin_o);
+                let v = origin - apex;
+                let a = self.direction.dot(v);
+                if !(a > 0.0 && v.length_squared() * cos_o * cos_o <= a * a) {
+                    return false;
+                }
+                let u = origin - self.position;
+                let b = -self.direction.dot(u);
+                b <= 0.0 || b * b < u.length_squared() * sin_o * sin_o || u.length_squared() <= sphere * sphere
+            }
+            _ => true,
+        }
+    }
+
+    /// `GetDirectIntensity` at `p` as a luminance: `intensity x max(1 - d^2/R^2, 0)^FalloffExponent`
+    /// for points (0x005306F0), times `saturate((cos - cos outer) / (cos inner - cos outer))^2`
+    /// for spots (0x00549EE0), the plain intensity for directional and sky lights.
+    pub fn intensity_at(&self, p: glam::Vec3) -> f32 {
+        let radial = || (1.0 - (p - self.position).length_squared() / (self.radius * self.radius)).max(0.0).powf(self.falloff_exponent);
+        let k = match self.kind {
+            0 => radial(),
+            1 => {
+                let (inner, outer) = self.cone();
+                let (cos_o, cos_i) = (outer.cos(), inner.cos());
+                let l = (p - self.position).normalize_or_zero();
+                let s = ((self.direction.dot(l) - cos_o) / (cos_i - cos_o)).clamp(0.0, 1.0);
+                s * s * radial()
+            }
+            _ => 1.0,
+        };
+        self.intensity * k
+    }
+}
+
+/// `DAT_01435230` = 2 sqrt(pi) (static initializer 0x00F67460), the band-0 scale of the light
+/// value (0x004E1DB0).
+pub const LIGHT_BAND0_SCALE: f32 = 3.544_907_7;
+/// `SHBasisFunction`'s band-0 constant (0x0126B100).
+pub const SH_Y00: f32 = 0.282_095;
+
+/// The visibility sample points of a light environment with `n` samples (0x004FEB30): `n - 1`
+/// points in [-1, 1)^3 from the LCG `x = x * 0x0BB38435 + 0x3619636B` (seed 0, three draws per
+/// point: z, y, then x, each `2 frac(1.mantissa) - 1`), then the centre (0, 0, 0).
+pub fn visibility_sample_points(n: usize) -> Vec<glam::Vec3> {
+    let mut out = Vec::with_capacity(n);
+    let mut x: u32 = 0;
+    let unit = |v: u32| {
+        let f = f32::from_bits(v & 0x7f_ffff | 0x3f80_0000);
+        (f - f.trunc()) * 2.0 - 1.0
+    };
+    for _ in 1..n.max(1) {
+        let a = x.wrapping_mul(0x0bb3_8435).wrapping_add(0x3619_636b);
+        let b = a.wrapping_mul(0x0bb3_8435).wrapping_add(0x3619_636b);
+        x = b.wrapping_mul(0x0bb3_8435).wrapping_add(0x3619_636b);
+        out.push(glam::Vec3::new(unit(x), unit(b), unit(a)));
+    }
+    out.push(glam::Vec3::ZERO);
+    out
+}
+
+/// One light's line check for the light environment's visibility (0x004FF270): from the
+/// visibility sample `k` placed on the bounds (the sphere point facing the light plus
+/// `extent x sample`, `bUseBooleanEnvironmentShadowing`) to the light's position (point and
+/// spot lights), or one unit along the light direction (directional and sky lights:
+/// `GetPosition` has w = 0, so the end is `start + (-axis)`).
+pub fn visibility_segment(l: &ProbeLight, origin: glam::Vec3, sphere: f32, extent: glam::Vec3, sample: glam::Vec3) -> (glam::Vec3, glam::Vec3) {
+    let (pos, w) = l.position4();
+    let to_light = (pos - origin * w).normalize_or_zero();
+    let start = origin + to_light * sphere + extent * sample;
+    let end = if w > 0.0 { pos } else { start + pos };
+    (start, end)
+}
+
+/// The stealth light value at a cylinder's bounds (`DishonoredVisibilityComponent` tick
+/// 0x00AD51E0 on `m_pStealthLightingDLE`, full update 0x005034D0 every tick, value 0x004E1DB0):
+/// every light that reaches the bounds sphere adds `Y00 x intensity x visibility` (`visibility`
+/// gives the light's visible fraction, 1 for lights without `CastShadows && CastStaticShadows`),
+/// the floor level's light volume adds its interpolated band 0; the luminance of the band-0 sum
+/// times 2 sqrt(pi), raised to 1/2.2 above 1e-4, else 0.
+pub fn stealth_light_value(lights: &[ProbeLight], volume: Option<&LightVolume>, origin: glam::Vec3, sphere: f32, mut visibility: impl FnMut(usize, &ProbeLight) -> f32) -> f32 {
+    let mut band0 = 0.0f32;
+    for (i, l) in lights.iter().enumerate() {
+        if !l.affects(origin, sphere) {
+            continue;
+        }
+        let v = if l.casts_shadows { visibility(i, l) } else { 1.0 };
+        if v <= 0.0 {
+            continue;
+        }
+        band0 += SH_Y00 * l.intensity_at(origin) * v;
+    }
+    if let Some(v) = volume {
+        band0 += v.band0_at(origin);
+    }
+    let x = band0 * LIGHT_BAND0_SCALE;
+    if x > 1e-4 { x.powf(0.454_545) } else { 0.0 }
+}
+/// A level's `PrecomputedLightVolume` as the stealth light reads it: per sample (x, y, z,
+/// radius, band-0 luminance of its SH: `Y00 x lum(IndirectRadiance + EnvironmentRadiance +
+/// AmbientRadiance)`, 0x00529710 / 0x004DA330).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LightVolume {
+    /// The level package the volume belongs to (the floor's level selects it).
+    pub package: String,
+    pub samples: Vec<[f32; 5]>,
+}
+
+impl LightVolume {
+    /// The interpolated band-0 luminance at `p` (0x0053DFA0: samples within their radius,
+    /// weight `(1 - d / R) / R`, the sum over the total weight; 0 when the weight is at most 1e-4).
+    pub fn band0_at(&self, p: glam::Vec3) -> f32 {
+        let (mut sum, mut total) = (0.0f32, 0.0f32);
+        for s in &self.samples {
+            let d2 = (glam::Vec3::new(s[0], s[1], s[2]) - p).length_squared();
+            if d2 >= s[3] * s[3] {
+                continue;
+            }
+            let inv = 1.0 / s[3];
+            let w = (1.0 - inv * d2.sqrt()) * inv;
+            sum += s[4] * w;
+            total += w;
+        }
+        if total > 1e-4 { sum / total } else { 0.0 }
+    }
 }
 
 /// A `DisStealthVolume`: while the player touches it, the visibility component normalizes the
@@ -1357,7 +1894,7 @@ impl Default for AiConfig {
     /// `dishonored_assets::gameplay` reloads them from the install.
     fn default() -> Self {
         AiConfig {
-            vision: VisionConfig { inner_fov_deg: 45.0, inner_range: 3500.0, inner_up: 0.25, inner_down: 0.7, outer_fov_deg: 160.0, outer_range: 1700.0, outer_up: 0.1, outer_down: 0.7 },
+            vision: VisionConfig { inner_fov_deg: 45.0, inner_range: 3500.0, inner_up: 0.25, inner_down: 0.7, outer_fov_deg: 160.0, outer_range: 1700.0, outer_up: 0.1, outer_down: 0.7, bone_nullzone_deg: 5.0 },
             guard_unsuspecting: AttentionConfig::guard_unsuspecting(),
             guard_suspecting: AttentionConfig::guard_suspecting(),
             civilian_unsuspecting: AttentionConfig::guard_unsuspecting(),
@@ -1423,7 +1960,12 @@ impl Default for AiConfig {
             magic_reaction_delay: [0.2, 0.3],
             anim_magic_lost_target: 0.0,
             locomotion: Vec::new(),
+            head_poses: Vec::new(),
+            lookat: crate::npc_anim::LookatConfig::default(),
+            head_track_torso_ratio: 0.0,
+            player_eye: [0.0, 0.0],
             ambient_bark_inhibition: bark_inhibition(),
+            special: SpecialNpcConfig::default(),
             provenance: BTreeMap::new(),
         }
     }

@@ -22,7 +22,7 @@ pub struct NavAgent {
 }
 
 /// Bumped when the derived data below changes shape.
-const DERIVED_VERSION: u32 = 2; // 2: brushes collide as the original's Cube_100 (simple box collision)
+const DERIVED_VERSION: u32 = 3; // 2: brushes collide as the original's Cube_100 (simple box collision); 3: stealth light environment (Boyle's light range, layout lights as stealth lights)
 
 /// The layout file of a map, when the map is a layout (`maps/<name>.ron`, lower case): next to the
 /// working directory, the executable, or the repository root of a `target/<profile>` build;
@@ -387,8 +387,14 @@ fn derive(content: &Content, sim: &SimConfig, layout: &MapLayout) -> Result<(Col
     ai_level.zones.clear();
     ai_level.alarms.clear();
     ai_level.audio = Default::default();
-    ai_level.player_light_range = None;
+    // The original's Playground is built inside L_Boyle_Ext_P (at +20000 z, ORACLE.md "Layout
+    // maps in the original"), so its visibility component normalizes with Boyle's map range.
+    ai_level.player_light_range = dishonored_assets::ai_level::map_light_range(content, "L_Boyle_Ext_P");
     ai_level.lights = map.lights.iter().map(dishonored_assets::ai_level::probe_light).collect();
+    // The stealth light environment: the layout's lights (built as `PointLight`s, in the
+    // `m_LightProbe` channel by that template), no light volume (the layout has none).
+    ai_level.stealth_lights = ai_level.lights.clone();
+    ai_level.light_volumes.clear();
     ai_level.sky_light = layout.sky_light;
     Ok((collision, Derived { water, volumes, climbables, pickups, usables, ai_level }))
 }

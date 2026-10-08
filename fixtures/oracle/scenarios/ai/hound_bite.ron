@@ -1,0 +1,29 @@
+// A wolfhound (`Twk_Pawn_WolfHound.Pwn_WolfHound_0`, tweaks cooked with the Overseer kennels)
+// alerted on a motionless player 700 uu away on the Playground. DisBehaviorCombatWolfhound
+// (ai.md F6): it runs (RunNormal 990 uu/s) to the medium bite's ideal range, walks within 300 uu,
+// and bites (`DisItemContext_NPCAttackMedium` 200-375 uu, cooldown 0.5-2 s, flurries of 2-3 then
+// 3-4 s) for ceil(1.0 x 15) = 15 (`Twk_Inv_WolfhoundBite` MeleeDamage, Normal); the jump attack
+// (550-800 uu, 30 s inhibition) knocks down for `m_DamageOnKnockDown[1]` 10.
+// No port map has hounds: the original side needs a map with the kennel packages.
+(
+    name: "ai/hound_bite",
+    system: Ai,
+    map: "Playground",
+    description: "A wolfhound chases and bites a motionless player for 20 s.",
+    setup: (
+        player: Some((position: (-1000, -2600, 96), yaw: 90, health: Some(5000))),
+        npcs: [(id: Some("hound"), tweak: Some("Twk_Pawn_WolfHound.Pwn_WolfHound_0"), position: Some((-1000, -1900, 92)), yaw: -90, state: Some("Alerted"))],
+        settle: 30,
+    ),
+    ticks: 1200,
+    input: [],
+    checkpoints: [
+        (name: "fights", expect: [(metric: TimeAt("npc.hound.state", 9), value: 1, tol: 0, cmp: AtMost, source: "Alerted starts DisBehaviorCombatWolfhound", status: Static)]),
+        (name: "jump attack first", expect: [(metric: EventValue("Sim:Damage@player", "amount"), value: 10, tol: 0.01, source: "at 550-800 uu the jump attack (DisTweaks_WHJumpAttack_0, angle 15) comes first; its knockdown deals m_DamageOnKnockDown[1] 10 (the synced grab loop that follows is not ported)", status: Static)]),
+        (name: "bites", expect: [(metric: Count("Sim:Damage@player[amount=15.0]"), value: 2, tol: 0, cmp: AtLeast, source: "pNPCAttackMedium: ceil(1.0 x MeleeDamage 15) per bite, cooldown 0.5-2 s, flurries of 2-3 then 3-4 s stamina", status: Static)]),
+        (name: "run speed", expect: [(metric: Max("npc.hound.speed2d"), value: 990, tol: 40, source: "WolfHoundLocomotionConfig (Startup) RunNormal 990 uu/s: TransitSpeedToLocomotionSpeed[2] = 3", status: Static)]),
+        (name: "first bite", expect: [(metric: FirstAt("Sim:Damage@player"), value: 0, tol: 0, source: "the original's time to the first bite", status: Unmeasured)]),
+    ],
+    record: [Pawn, Vitals, Npc("hound"), SimEvents],
+    capture: Some("scenario hound_bite needs a map whose packages cook the wolfhound (L_Ovrsr_*); not capturable on the Playground"),
+)

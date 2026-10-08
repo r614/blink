@@ -524,6 +524,12 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
     // The player visibility's speed value divides by `Attribute_GroundSpeedSprint` (0x00ac33b0).
     let mut ai = crate::ai_config::load_ai_config(content, &[]);
     ai.player_visibility.ground_speed_sprint = movement.sprint_speed;
+    // The Tallboy's ballistic solve uses the world's GravityZ (0x00c3f2a0).
+    ai.special.tallboy.gravity_z = movement.gravity_z;
+    // The stealth light environment's bounds are the collision cylinder's.
+    ai.player_visibility.cylinder = [movement.collision_radius, movement.collision_half_height, movement.crouch_half_height];
+    // A look-at request follows the player's eyes (`GetActorEyesViewPoint`).
+    ai.player_eye = [movement.base_eye_height, movement.collision_half_height];
 
     let items = crate::items_config::load_items_config(content, &db, &mut l.prov, &ai.loudness_distances);
     // `DisTweaks_FirePistol.m_AINoiseLoudnessWhenFiring` (an `EAINoiseLoudness`; the class

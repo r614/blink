@@ -253,7 +253,8 @@ weepers (`DisBehaviorWeep`, arm grab inhibition 20 s). Port: guard role -> elite
 pistol round for every sworded or armed pawn including Overseers (`role_from_chain`); tallboys, weepers
 and hounds have role Other and no combat brain (`npcs::role_from_tweak_data`); rats have their own
 brains (`dishonored_ai::rats`). Overseer music-box combat, tallboy bows and grenade throwers are not
-modelled.
+modelled. (Superseded by the F6 port pass, section 12: the class now follows the brain's Combat-slot
+behaviour; grenade-throwing Overseers remain open.)
 
 ## 5. Civilians and fear
 
@@ -308,7 +309,7 @@ alert) is UNVERIFIED.
 | aggression-scaled cooldown | 0x00b3deb0, 0x00b3e070 | none | port missing (F5) |
 | block breaker, stalemate | tweak, 0x00b47880 | none | port missing |
 | pistol willingness, give-up | AI.md | `combat::pistol_willing` | match (unit-tested) |
-| overseer / tallboy / hound combat | classes above | none or elite-guard melee | port missing (F6) |
+| overseer / tallboy / hound / weeper combat | classes above | `dishonored_ai::special`, `dishonored_sim::special_npcs` | core rules ported (F6, section 12) |
 | unconscious body discovery | unknown | none | UNVERIFIED (F7) |
 | magic response | `DisBehaviorMagicResponse` | none | port missing (F8) |
 
@@ -449,8 +450,9 @@ guard list; head tracking stays the port's `look`), the behaviours not listed ab
   resolved) and the formation distance with the stalemate timer (0x00b3e120: the desired distance
   interpolates the shortest / longest formation attacks' ranges by aggression; after
   `m_fStalemateAllowanceTime` without an action it closes in).
-- **F6 open.** Overseer musical combat, tallboys, weepers and hounds need their own behaviours and
-  item contexts (bows, tunes, grenades); not attempted.
+- **F6 ported (core rules), see section 12.** Music-box Overseers, Tallboys, wolfhounds and
+  weepers run their own Combat-slot behaviours; the sim applies the tune, the plague cloud and
+  the Tallboy arrow. Grenade-throwing Overseers (`DisBehaviorOverseerCombat`) are not covered.
 - **F7 open** (needs the original).
 - **F8 ported.** WitnessMagic per 0x00b23e50 with the modes of the power callers of 0x00bf9fb0
   (Windblast / Swarm / slowing Bend Time end 0; Blink end / possession end / stopping Bend Time end
@@ -488,3 +490,31 @@ guard list; head tracking stays the port's `look`), the behaviours not listed ab
 - Tooling note: the runner places a spawner NPC without an explicit faction as
   `Faction_Guard_Default`; spawner 46 is `Neutral_Guard` on the original, so `ai/boyle_hear_shot`
   and the stealth scenarios compare a hostile port guard with a neutral original one.
+
+## 12. Special NPC classes (F6 port pass, 2026-10-08)
+
+**Class selection (CONFIRMED, data).** A pawn's class is the behaviour in its brain's Combat slot:
+`m_pBrainTweak` -> `m_BehaviorTweak[i].m_Difficulty[1]` with `m_DesignatedSlot` `EAISlot_Combat` ->
+`m_pSpawnedObjectClass` (`dishonored_assets::ai_level::combat_behavior_class`, `AiLevel::tweak_combat`,
+`NpcClass`). `DisBehaviorMusicalCombat` -> MusicalOverseer, `DisBehaviorTallBoyCombat` -> Tallboy,
+`DisBehaviorCombatWolfhound` -> Wolfhound, `DisBehaviorWeep` -> Weeper, other combat classes ->
+the elite guard's combat, none -> civilian. A pawn with a combat behaviour spawns as a fighter
+(`PawnKind::Guard`; tallboys and weepers were civilians before and panicked). The brains of these
+classes have no TriggerAlarm and no Panic (their behaviour lists, CONFIRMED by absence), so the
+alarm is gated to the elite class. Tuning: `AiConfig::special` (`dishonored_assets::ai_config`,
+packages `SPECIAL_NPC_PACKAGES`: the Boyle scripts plus the Overseer kennel scripts for the hound).
+
+| class | behaviour list differences | combat core rule (ported) | attacks and numbers | senses, movement | not ported |
+|---|---|---|---|---|---|
+| Music-box Overseer (`Twk_Brain_OverSeerMusical_Default`) | no TriggerAlarm, no pistol; MusicalCombat in slot Combat | MaintainDistance closes at Jog to the protection tune's `m_fIdealContextRange` 1000 and never backs away (0x00b2e600); each refresh the bash first (0x00b13990), else the combat tune on a seen target in range (0x00b13920); the tune plays standing and stops after `m_fStopWhenNotSeeingTimer` 5 s unseen or `m_fStopWhenOutOfRangeTimer` 1 s out of range/cone (0x00c2b680), then `m_ContextCooldown` 2-5 s | tune: 150-2000 uu, 45 degrees, clear trace (0x00c6bfc0); every `m_fMusicEffectPeriod` 0.3 s `0.3 x m_iMusicEffectDamage 90` Musical damage less `Attribute_MusicDamageReduction` (Corvo Normal 0.93): 2 per tick (0x00c66ef0, 0x00b5ccd0); repulse `lerp(1000, 3000, 1 - d/2000)` uu/s per second (0x00c75270, L: `this` inferred); powers inhibited within the protection tune's `m_fMusicEffectRadius_InhibitPowers` 1500 while a tune plays (0x00bd7390); bash `NPCBash` 150 uu, 45 degrees, cooldown 5, unblockable, 10 damage (music box MeleeDamage x 1.0, L); health 40 | EliteGuardLocomotionConfig, `MusicBox` modifier (x1.0) | the protection tune itself (who starts it: the weapon's slot 95, L) and its 1 s `m_fPowersInhibitedUntil` stamp and power cancel (0x00ab0ea0); glass breaking; the tune's danger AI sound; sub-state 3's context is LIKELY the combat tune (the trigger walk 0x00c18230 not proven) |
+| Tallboy (`BrainTweaks_TallBoy`) | Search_Tallboy, Patrol/Idle/GoHome Tallboy, TallboyShoot (Kismet, Comply) | FindShootingPosition until the bow can fire (0x00b475e0): the point at the bow's ideal range 1200 on the line from the target, on the navmesh, with a clear line, at walk, given up after 3 s without progress; ManageAttacks takes the bow before the stomp (slot order, 0x00b470d0) | bow `NPCFireBow_1`: 400-4500 uu, 40 degrees, cooldown 1-3 s x aggression scale, allies of the Tallboy within 750 of the target hold fire (0x00bf7550); the shot after the aim is aligned within 20 degrees for 0.25 s (`StateNPCMasterTallboyAim`, NPC ini); hit chance `lerp(MaxAccuracy 1.0, MinAccuracy 0.1)` over the bow's range (0x00b732e0), a hit aims at the ground 300 uu under the target with the velocity lead, the pitch solves the arc (2000 uu/s, gravity x0.5), a miss turns up to `m_fCheatAngleDeviation` 30 off; the arrow (`ProjectileKind::TallboyArrow`) explodes at its first impact 10 uu off the hit (0x00c550d0): `TallboyArrowExplosion_Twk` 40 within 100, 0 at 500, momentum 1500 + 500 up; stomp 0-500 uu, 45 degrees, cooldown 1-3, unblockable, 15 (Normal); health 150 | TallBoyLocomotionConfig walk loop only (213 uu/s; transit speeds all map to walk) | vision `Twk_Vision_Tallboy_Default` (inner 55 / 4500, outer 170 / 2200; brains share one vision config in the port); the searchlight; the stilts (legs immune, `Phm_Tallboy_Legs`, 0x00b83d60) and the rider's height (the port's pawn is human-sized: the arrow leaves at a human eye); the danger sphere 2000; FindShootingPosition's candidate polygons and sort |
+| Wolfhound (`BrainTweaks_WolfHound`, `Pwn_WolfHound_0`) | Notice_Wolfhound, Search_Wolfhound, EnemyUnreachable_Wolfhound, RatChomp; no alarm, panic, react, magic response | MeleeChase / Engage: run (RunNormal 990, `TransitSpeedToLocomotionSpeed[2]` = 3) to the medium bite's ideal range 200, walk within `m_fWalkDistance` 300, back to the ideal range when inside the bite's minimum; unreachable target: hold (CombatLongDistance, 0x00b13a80) | bite `NPCAttackMedium` 200-375 uu, 50 degrees, cooldown 0.5-2, 15 (bite MeleeDamage 15 x 1.0); jump attack 550-800 uu, 15 degrees, cooldown 20-30, inhibition 30 (DefaultAI.ini), knockdown `m_DamageOnKnockDown[1]` 10, unblockable; ManageAttacks flurry 2-3, stamina 3-4 s, aggression regen 0.07; attention `Twk_Attn_Wolfhound_*` (lower thresholds, leak 0.025); health 20 | WolfHoundLocomotionConfig (Startup) | the arm attack and the jump's grab loop (sync attacks: 5 / 10 damage per 0.5 s until the player escapes; the sim has no sync-attack lock), the 90-degree turn bites, the bark context and long-range repositioning, vision outer FOV 180, the pack processes (`DisAIBrainProcessWolfhound` count, Houndmaster summon) |
+| Weeper (`BrainTweaks_Weeper`) | DisBehaviorWeep in slot Combat, Search_Weeper, GoHome_Weeper; no alarm, no panic, no sword | Weep variation (chances Weep 1.0): follow at walk, run once fewer than `m_iSimultaneousRunnerAllowed` 3 weepers run (0x00afbe30, after `m_TimeBeforeRunning` 0) and grab (`DisTweaks_WeeperGrab_2`: 0-400 uu, feet height 50, 90 degrees, 20 s group inhibition); after the grab weep standing `m_fStandStillWeeping` 2-5 s, resume beyond 220 uu (0x00aff9e0); give up when the target stays beyond `m_fHomeRadius` 1500 of home for `m_LostTimer` 1-3 s (0x00af6bd0) | cough every `m_fCoughingCooldown` 2-5 s: a plague cloud of `m_fPlagueDmgLength` 2-3 s ticking every `m_fPlagueDmgePeriod` 0.5 s: `m_iPlagueDmgPerTick` 4 to every pawn within 350 uu in the front half-space with a clear trace, plague carriers excluded (0x00c86ea0, `PlayerState::plague`); health 30 | WeepTall / WeepFemale configs (walk 83, run 541) | the grab's hold on the player (a 5-press minigame, no damage) and the cough animation (the cloud starts at the cooldown's end, L: anim 0x4b's notify not mapped); the home anchor is the spawn point (L); `Attribute_PlagueDamageReduction` |
+
+Scenarios (port side; original captures queued in `capture_queue.txt`): `ai/boyle_tallboy_bow`
+(first arrow at 0.23 s, each explosion 40 to the player at its feet), `ai/boyle_weeper_plague`
+(4 per plague tick, first at 2.5 s), `ai/boyle_overseer_tune` (2 Musical damage per 0.3 s, Blink
+inhibited at 1270 uu), `ai/hound_bite` (Playground: jump attack 10, bites 15, run 990 uu/s; not
+capturable on the port's maps). Unit tests: `special::tests` (tune lifecycle, plague ticks, the
+ballistic pitch), `special_npcs::tests` (tune damage, push and inhibition; plague spares carriers
+and the back).
