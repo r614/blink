@@ -601,10 +601,6 @@ pub struct BoltConfig {
     pub stealth_mult: f32,
 }
 
-fn d_one() -> f32 {
-    1.0
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GadgetConfig {
     pub springrazor: SpringRazorConfig,

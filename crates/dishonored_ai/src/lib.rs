@@ -3252,7 +3252,9 @@ impl Brain {
     pub fn awareness(&self) -> u8 {
         use dishonored_sim::state::awareness as a;
         match self.state {
-            BrainState::React => a::SURPRISED,
+            // MagicResponse (slot Awe): LIKELY Surprised; the behaviour's awareness getter (vtable
+            // +0x188 via 0x00AE4AE0) did not resolve cleanly in the index (U-862 notes).
+            BrainState::React | BrainState::Awe => a::SURPRISED,
             BrainState::Combat | BrainState::RingAlarm => a::IN_COMBAT,
             BrainState::Flee | BrainState::Cower => a::FEARFUL,
             BrainState::Notice | BrainState::Investigate | BrainState::Search => a::SUSPICIOUS,
