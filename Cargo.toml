@@ -2,7 +2,7 @@
 resolver = "3"
 members = ["crates/*", "tools/*"]
 # Ghidra scripts of the oracle's static index (Java, not a crate).
-exclude = ["tools/ghidra_index"]
+exclude = ["tools/ghidra_index", "vendor"]
 
 [workspace.package]
 edition = "2024"
@@ -64,3 +64,7 @@ codegen-units = 16
 inherits = "release"
 codegen-units = 256
 incremental = true
+
+# bevy_render 0.19.1 with a persistent wgpu pipeline cache (vendor/bevy_render, [blink patch]).
+[patch.crates-io]
+bevy_render = { path = "vendor/bevy_render" }
