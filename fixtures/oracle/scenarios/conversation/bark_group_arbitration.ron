@@ -1,3 +1,9 @@
+// MOVED from the Playground to Boyle Ext (round 8): the original Playground has no navmesh, so the
+// guards never walked to the shot there. Placement: the quiet flat navmesh diagonal of the south-west
+// yard (floor z -1317, direction 112.5 deg; `oracle navlines`), the shooter at (-8155, -9576) and the
+// six guards 500 .. 3000 uu ahead in steps of 500 (the longest clean line is 3450 uu: the row was 600 ..
+// 3600 in steps of 600 on the Playground, so the guards are renamed g500 .. g3000 and the row is 600 uu shorter;
+// the Quiet audio split at 2000 uu still falls between g1500 and g2000).
 // Bark arbitration by fire group and distance (conversation.md findings 4-9). Six hostile guards
 // stand in a row down the Playground stealth lane at 600 .. 3600 uu from the player, all facing
 // away. One pistol shot (Danger noise) is heard by every guard; the near ones also see the player,
@@ -14,28 +20,28 @@
 (
     name: "conversation/bark_group_arbitration",
     system: Conversation,
-    map: "Playground",
-    description: "Six guards react to one shot at 600..3600 uu: which barks play, in what order, how many at once.",
+    map: "L_Boyle_Ext_P",
+    description: "Six guards react to one shot at 500..3000 uu: which barks play, in what order, how many at once.",
     setup: (
-        player: Some((position: (-5600, 7000, 96), yaw: 0, pitch: 60)),
+        player: Some((position: (-8155, -9576, -1221), yaw: 112.5, pitch: 60, snap_to_floor: true)),
         items: ["Bullet:5"],
         left_hand: Some("Pistol"),
         npcs: [
-            (id: Some("g600"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-5000, 7000, 92)), yaw: 0, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default")),
-            (id: Some("g1200"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-4400, 7000, 92)), yaw: 0, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default")),
-            (id: Some("g1800"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-3800, 7000, 92)), yaw: 0, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default")),
-            (id: Some("g2400"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-3200, 7000, 92)), yaw: 0, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default")),
-            (id: Some("g3000"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-2600, 7000, 92)), yaw: 0, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default")),
-            (id: Some("g3600"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-2000, 7000, 92)), yaw: 0, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default")),
+            (id: Some("g500"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-8346.3, -9114.1, -1217)), yaw: 112.5, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default")),
+            (id: Some("g1000"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-8537.7, -8652.1, -1217)), yaw: 112.5, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default")),
+            (id: Some("g1500"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-8729.0, -8190.2, -1217)), yaw: 112.5, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default")),
+            (id: Some("g2000"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-8920.4, -7728.2, -1217)), yaw: 112.5, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default")),
+            (id: Some("g2500"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-9111.7, -7266.3, -1217)), yaw: 112.5, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default")),
+            (id: Some("g3000"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-9303.0, -6804.4, -1217)), yaw: 112.5, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default")),
         ],
         settle: 120,
     ),
     ticks: 360,
     input: [(tick: 5, action: Press(Secondary))],
     checkpoints: [
-        (name: "all six investigate", expect: [(metric: TimeAt("npc.g600.state", 7), value: 15, tol: 0, cmp: AtMost, source: "ai/investigate_noise: a Danger noise in hearing range sends a guard to investigate", status: Unverified)]),
+        (name: "all six investigate", expect: [(metric: TimeAt("npc.g500.state", 7), value: 15, tol: 0, cmp: AtMost, source: "ai/investigate_noise: a Danger noise in hearing range sends a guard to investigate", status: Unverified)]),
         (name: "barks posted in the first 3 s after the shot", expect: [(metric: Count("Sound:*Play_*"), value: 0, tol: 0, source: "DisConvGlobalMan tick 0x00ca5b20: fire group Agitated allows 1 playing (DisTweaks_ConvSettings m_FireGroupConfig); the first bark locks the group for m_fMinTimeBetweenFiring 2.5 s after it ends", status: Unmeasured)]),
     ],
-    record: [Pawn, Npc("g600"), Npc("g1800"), Npc("g3600"), SimEvents, Sounds],
+    record: [Pawn, Npc("g500"), Npc("g1500"), Npc("g3000"), SimEvents, Sounds],
     capture: Some("shot with six hostile guards in a row: per-guard brain state, and every AkEvent post (ProcessEvent filter AkComponent / Class:DisConversationComponent) with tick and object; then session read of each guard's DisConversationComponent m_DialogHookInfo_InGame[25]"),
 )

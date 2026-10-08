@@ -5,16 +5,20 @@
 // (about 1.5 s) as a visible attack; the original's reaction list has no gunshot response
 // (`DisTweaks_AIBrain_Reaction`: HurtByPlayer, DestroyWoB, Breakable_Broke, PlayerThreats
 // (Harmless), WoL_ZapObject, Carry*Corpse, WitnessPickpocket).
+//
+// MOVED from the Playground to Boyle Ext (round 8): without a navmesh the original guard could not
+// walk to the noise. Placement: the quiet flat navmesh corridor x = -8958, y -8871 .. -6671
+// (floor z -1318), the same 800 uu geometry rotated to +y (yaw 90). No checkpoint changes.
 (
     name: "ai/shot_in_view_of_neutral",
     system: Ai,
-    map: "Playground",
+    map: "L_Boyle_Ext_P",
     description: "A neutral guard that turns around to the shot and sees the shooter recovering.",
     setup: (
-        player: Some((position: (-5600, 0, 96), yaw: 0, pitch: 60)),
+        player: Some((position: (-8958, -8650, -1222), yaw: 90, pitch: 60, snap_to_floor: true)),
         items: ["Bullet:5"],
         left_hand: Some("Pistol"),
-        npcs: [(id: Some("guard"), position: Some((-4800, 0, 92)), yaw: 0, state: Some("Idle"), faction: Some("None"))],
+        npcs: [(id: Some("guard"), position: Some((-8958, -7850, -1218)), yaw: 90, state: Some("Idle"), faction: Some("None"))],
         settle: 120,
     ),
     ticks: 600,

@@ -1,21 +1,30 @@
-// A guard patrolling two points 2000 uu apart in the Playground's stealth lane (no player in
-// view): DisBehaviorPatrol walks the route.
+// A guard patrolling two points 1600 uu apart, unobserved: DisBehaviorPatrol walks the route.
+//
+// MOVED from the Playground to Boyle Ext (`L_Boyle_Ext_P`, 2026-10-08, round 8). The original's
+// Playground hangs at +20000 z in Boyle with no navigation mesh, so a placed guard never moves
+// there (it holds its first route point in DisAISubStateTakeActorPosition); on Boyle's navmesh the
+// same setup walks (145 uu/s). Placement: the quiet flat navmesh corridor x = -8958, y -8871 ..
+// -6671 (floor z -1318; `oracle navlines --map L_Boyle_Ext_P`: no NPC spawn, route or live pawn
+// within 1200 uu). The route runs along +y instead of +x, so the far point is measured on y; the
+// route is 1600 uu instead of 2000 (the corridor is 2200 long). The player stands on the upper
+// courtyard (-3201.5, -2763.3) far away so the guard is never perceived.
 (
     name: "ai/patrol",
     system: Ai,
-    map: "Playground",
-    description: "A patrolling guard reaches the far end of its route.",
+    map: "L_Boyle_Ext_P",
+    description: "A patrolling guard reaches the far end of its route (Boyle navmesh).",
     setup: (
-        player: Some((position: (0, -5500, 92), yaw: 90)),
-        npcs: [(id: Some("guard"), position: Some((-1000, 7100, 92)), state: Some("Patrol"), route: [(-1000, 7100, 92), (1000, 7100, 92)])],
+        player: Some((position: (-3201.5, -2763.3, 20), yaw: 71.37, snap_to_floor: true)),
+        npcs: [(id: Some("guard"), position: Some((-8958, -8700, -1218)), yaw: 90, state: Some("Patrol"), route: [(-8958, -8700, -1218), (-8958, -7100, -1218)])],
+        settle: 1,
     ),
     ticks: 1800,
     input: [],
     checkpoints: [
         (name: "patrol state", expect: [(metric: TimeAt("npc.guard.state", 6), value: 1, tol: 0, cmp: AtMost, source: "a patrolling spawn starts in DisBehaviorPatrol", status: Static)]),
-        (name: "reaches the far point", expect: [(metric: Max("npc.guard.x"), value: 900, tol: 0, cmp: AtLeast, source: "DisBehaviorPatrol walks to each route point", status: Static)]),
-        (name: "walk speed", expect: [(metric: Max("npc.guard.speed2d"), value: 145.24, tol: 5, source: "EliteGuardLocomotionConfig SwordPatrolWalk forward loop Sword_Patrol_WalkN authored 145.24 uu/s (the port walks at the player walk speed); speed = loop speed is LIKELY, not measured", status: Unmeasured)]),
+        (name: "reaches the far point", expect: [(metric: Max("npc.guard.y"), value: -7200, tol: 0, cmp: AtLeast, source: "DisBehaviorPatrol walks to each route point (far point y -7100; was x 900 of 1000 on the Playground)", status: Static)]),
+        (name: "walk speed", expect: [(metric: Max("npc.guard.speed2d"), value: 145.24, tol: 5, source: "EliteGuardLocomotionConfig SwordPatrolWalk forward loop Sword_Patrol_WalkN authored 145.24 uu/s (the port walks at the player walk speed); speed = loop speed is LIKELY, not measured; on Boyle's navmesh the original walks at 145 uu/s", status: Unmeasured)]),
     ],
-    record: [Npc("guard")],
+    record: [Pawn, Npc("guard")],
     capture: Some("lab npcs: sample a patrolling Boyle guard's Location and behaviour per tick"),
 )

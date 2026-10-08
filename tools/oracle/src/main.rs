@@ -35,6 +35,7 @@ use dishonored_oracle::coverage::{self, scan, source::PortRegistry};
 use dishonored_oracle::diff;
 use dishonored_oracle::query::{self, CollisionSet};
 use dishonored_oracle::report::{self, Scorecard, Table, WorkItem};
+use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -110,6 +111,8 @@ fn main() -> Result<()> {
         "collision" => cmd_collision(&a).map(|_| ()),
         "gen" => cmd_gen(&a),
         "densify" => cmd_densify(&a),
+        "navspots" => cmd_navspots(&a),
+        "navlines" => cmd_navlines(&a),
         "structure" => cmd_structure(&a),
         "scenario" => cmd_scenario(&a).map(|_| ()),
         "sweep" => cmd_sweep(&a),
@@ -371,6 +374,217 @@ fn cmd_gen(a: &Args) -> Result<()> {
     std::fs::write(&out, query::queries_text(&map, &q))?;
     println!("{} queries ({generator}) -> {out}; hash {:016x}; import the capture with --generator \"{generator}\"", q.len(), query::query_set_hash(&generator, &q));
     Ok(())
+}
+
+/// `oracle navspots --map M [--clear D] [--min-size S] [--near x,y --radius R] [--limit N]`:
+/// quiet navmesh spots for NPC-movement scenarios. Walkable polygons (flat, at least S uu across,
+/// default 250) whose centre is at least D uu (default 1500, same floor: |dz| < 250) from every
+/// NPC spawn, route point and nav point of the map's NPC cache, sorted by clearance. Prints
+/// `x y z clearance poly_size nearest_spawn_source`.
+fn cmd_navspots(a: &Args) -> Result<()> {
+    let map = a.opt("--map").context("--map")?;
+    let clear: f32 = a.opt("--clear").and_then(|s| s.parse().ok()).unwrap_or(1500.0);
+    let min_size: f32 = a.opt("--min-size").and_then(|s| s.parse().ok()).unwrap_or(250.0);
+    let limit: usize = a.opt("--limit").and_then(|s| s.parse().ok()).unwrap_or(60);
+    let near: Option<(f32, f32)> = a.opt("--near").and_then(|s| {
+        let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        (v.len() >= 2).then(|| (v[0], v[1]))
+    });
+    let radius: f32 = a.opt("--radius").and_then(|s| s.parse().ok()).unwrap_or(3000.0);
+    let (w, _) = port::snapshot(&cache::root(), &map, false)?.world();
+    let nav = w.nav.as_ref().context("map without navigation mesh")?;
+    let mut npcs: Vec<([f32; 3], String)> = Vec::new();
+    for ver in (1..=9).rev() {
+        let p = cache::root().parent().unwrap_or(Path::new(".")).join(format!("{map}.npcs{ver}.json"));
+        if let Ok(t) = std::fs::read_to_string(&p) {
+            let v: serde_json::Value = serde_json::from_str(&t)?;
+            let pos = |x: &serde_json::Value| -> Option<[f32; 3]> {
+                let a = x.as_array()?;
+                Some([a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32, a.get(2)?.as_f64()? as f32])
+            };
+            for s in v["spawns"].as_array().into_iter().flatten() {
+                if let Some(p) = pos(&s["position"]) {
+                    npcs.push((p, s["source"].as_str().unwrap_or("spawn").rsplit('.').next().unwrap_or("").to_string()));
+                }
+            }
+            for r in v["routes"].as_array().into_iter().flatten() {
+                let n = r["name"].as_str().unwrap_or("route").rsplit(':').next().unwrap_or("").to_string();
+                for p in r["points"].as_array().into_iter().flatten() {
+                    if let Some(p) = pos(&p["position"]) {
+                        npcs.push((p, n.clone()));
+                    }
+                }
+            }
+            for p in v["points"].as_array().into_iter().flatten() {
+                if let Some(q) = pos(&p["position"]) {
+                    npcs.push((q, "navpoint".into()));
+                }
+            }
+            eprintln!("navspots: {} NPC reference points from {}", npcs.len(), p.display());
+            break;
+        }
+    }
+    let mut out: Vec<(f32, [f32; 3], f32, String)> = Vec::new();
+    for p in &nav.polys {
+        let size = (p.max.x - p.min.x).min(p.max.y - p.min.y);
+        if size < min_size || p.normal.z < 0.95 {
+            continue;
+        }
+        if let Some((nx, ny)) = near {
+            if ((p.center.x - nx).powi(2) + (p.center.y - ny).powi(2)).sqrt() > radius {
+                continue;
+            }
+        }
+        let mut best = (f32::MAX, String::new());
+        for (q, s) in &npcs {
+            if (q[2] - p.center.z).abs() > 250.0 {
+                continue;
+            }
+            let d = ((q[0] - p.center.x).powi(2) + (q[1] - p.center.y).powi(2)).sqrt();
+            if d < best.0 {
+                best = (d, s.clone());
+            }
+        }
+        if best.0 >= clear {
+            out.push((best.0, [p.center.x, p.center.y, p.center.z], size, best.1));
+        }
+    }
+    out.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (d, c, s, n) in out.iter().take(limit) {
+        println!("{:.0} {:.0} {:.0} clear {:.0} size {:.0} nearest {}", c[0], c[1], c[2], d, s, n);
+    }
+    eprintln!("navspots: {} polygons qualify of {}", out.len(), nav.polys.len());
+    Ok(())
+}
+
+/// `oracle navlines --map M [--min-len L] [--clear D] [--near x,y --radius R] [--limit N]`:
+/// long straight walkable lines on a map's navmesh with no NPC near them, for scenarios that
+/// need a corridor (patrol routes, a shooter far behind a guard, a row of guards). From every
+/// polygon centre, 16 directions are marched in 50 uu steps while the mesh stays under the line
+/// (floor within 40 uu of the previous step), both ways; a line qualifies at L uu (default
+/// 2000) when its closest NPC spawn / route / nav point (same floor, XY distance to the segment)
+/// is at least D uu (default 800). Prints `x0 y0 z0 -> x1 y1 z1 len clear`.
+fn cmd_navlines(a: &Args) -> Result<()> {
+    let map = a.opt("--map").context("--map")?;
+    let min_len: f32 = a.opt("--min-len").and_then(|s| s.parse().ok()).unwrap_or(2000.0);
+    let clear: f32 = a.opt("--clear").and_then(|s| s.parse().ok()).unwrap_or(800.0);
+    let limit: usize = a.opt("--limit").and_then(|s| s.parse().ok()).unwrap_or(40);
+    let near: Option<(f32, f32)> = a.opt("--near").and_then(|s| {
+        let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        (v.len() >= 2).then(|| (v[0], v[1]))
+    });
+    let radius: f32 = a.opt("--radius").and_then(|s| s.parse().ok()).unwrap_or(3000.0);
+    let (w, _) = port::snapshot(&cache::root(), &map, false)?.world();
+    let nav = w.nav.as_ref().context("map without navigation mesh")?;
+    let npcs = npc_refs(&map);
+    let step = 50.0f32;
+    let flat: f32 = a.opt("--flat").and_then(|s| s.parse().ok()).unwrap_or(80.0);
+    let march = |p: Vec3, dir: Vec3| -> (Vec3, f32) {
+        // Returns the last on-mesh point along `dir` and the length.
+        let mut cur = p;
+        let mut n = 0;
+        loop {
+            let next = cur + dir * step;
+            match nav.locate(Vec3::new(next.x, next.y, cur.z), 40.0, 40.0) {
+                Some(i) => {
+                    let z = nav.poly_z(i, next.x, next.y);
+                    if (z - cur.z).abs() > 40.0 {
+                        break;
+                    }
+                    cur = Vec3::new(next.x, next.y, z);
+                    n += 1;
+                }
+                None => break,
+            }
+            if n > 400 {
+                break;
+            }
+        }
+        (cur, n as f32 * step)
+    };
+    let mut found: Vec<(f32, f32, Vec3, Vec3)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for p in &nav.polys {
+        if p.normal.z < 0.95 {
+            continue;
+        }
+        if let Some((nx, ny)) = near {
+            if ((p.center.x - nx).powi(2) + (p.center.y - ny).powi(2)).sqrt() > radius {
+                continue;
+            }
+        }
+        for k in 0..16 {
+            let ang = k as f32 * std::f32::consts::TAU / 16.0;
+            let dir = Vec3::new(ang.cos(), ang.sin(), 0.0);
+            let (b, lb) = march(p.center, dir);
+            let (a0, la) = march(p.center, -dir);
+            let len = la + lb;
+            if len < min_len || (b.z - a0.z).abs() > flat {
+                continue;
+            }
+            let key = ((a0.x / 400.0).round() as i32, (a0.y / 400.0).round() as i32, (b.x / 400.0).round() as i32, (b.y / 400.0).round() as i32);
+            if !seen.insert(key) {
+                continue;
+            }
+            // Clearance: distance of every NPC reference (same floor) to the segment.
+            let (s, e) = (a0.truncate(), b.truncate());
+            let d = e - s;
+            let mut best = f32::MAX;
+            for (q, _) in &npcs {
+                if (q[2] - a0.z).abs() > 250.0 {
+                    continue;
+                }
+                let qp = glam::Vec2::new(q[0], q[1]);
+                let t = if d.length_squared() > 0.0 { ((qp - s).dot(d) / d.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+                best = best.min((s + d * t - qp).length());
+            }
+            if best >= clear {
+                found.push((len, best, a0, b));
+            }
+        }
+    }
+    found.sort_by(|x, y| y.1.min(2000.0).total_cmp(&x.1.min(2000.0)).then(y.0.total_cmp(&x.0)));
+    for (len, c, s, e) in found.iter().take(limit) {
+        println!("({:.0}, {:.0}, {:.0}) -> ({:.0}, {:.0}, {:.0})  len {:.0}  clear {:.0}", s.x, s.y, s.z, e.x, e.y, e.z, len, c);
+    }
+    eprintln!("navlines: {} lines qualify", found.len());
+    Ok(())
+}
+
+/// The NPC reference points of a map's newest NPC cache (spawns, route points, nav points).
+fn npc_refs(map: &str) -> Vec<([f32; 3], String)> {
+    let mut npcs: Vec<([f32; 3], String)> = Vec::new();
+    for ver in (1..=9).rev() {
+        let p = cache::root().parent().unwrap_or(Path::new(".")).join(format!("{map}.npcs{ver}.json"));
+        if let Ok(t) = std::fs::read_to_string(&p) {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else { continue };
+            let pos = |x: &serde_json::Value| -> Option<[f32; 3]> {
+                let a = x.as_array()?;
+                Some([a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32, a.get(2)?.as_f64()? as f32])
+            };
+            for s in v["spawns"].as_array().into_iter().flatten() {
+                if let Some(p) = pos(&s["position"]) {
+                    npcs.push((p, s["source"].as_str().unwrap_or("spawn").rsplit('.').next().unwrap_or("").to_string()));
+                }
+            }
+            for r in v["routes"].as_array().into_iter().flatten() {
+                let n = r["name"].as_str().unwrap_or("route").rsplit(':').next().unwrap_or("").to_string();
+                for p in r["points"].as_array().into_iter().flatten() {
+                    if let Some(p) = pos(&p["position"]) {
+                        npcs.push((p, n.clone()));
+                    }
+                }
+            }
+            for p in v["points"].as_array().into_iter().flatten() {
+                if let Some(q) = pos(&p["position"]) {
+                    npcs.push((q, "navpoint".into()));
+                }
+            }
+            eprintln!("NPC reference points: {} from {}", npcs.len(), p.display());
+            break;
+        }
+    }
+    npcs
 }
 
 /// `oracle densify collision --map M --out FILE [--per N] [--radius R] [--seed S]`: queries

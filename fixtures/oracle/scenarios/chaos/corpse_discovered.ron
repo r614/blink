@@ -1,26 +1,35 @@
+// Round 8: `sword_drawn: true` added. A fresh level leaves the right hand empty on the original, so the press
+// at tick 5 only drew the sword and the earlier capture never swung (the dummy kept 50 health); with the
+// sword given and its draw run out first, the press attacks. The port starts with the sword in hand.
 // NumCorpsesDiscovered (research/dishonored/systems/world.md 2.1): an NPC's corpse reaction
 // reports a discovery (0x00B40740 -> 0x00A98950), which raises the stat only the first time a
 // given corpse is discovered (a set of discovered corpses is checked). Deed 8 (m_Deeds[8]:
 // NumCorpsesDiscovered, m_Threshold 5, m_Value 6) needs five, so one corpse adds no score.
 // The guard (factionless, in the Playground's patrol lane) walks away from the body when the kill
 // happens behind it, so it does not witness it, and finds the corpse by sight on its way back.
+//
+// MOVED from the Playground to Boyle Ext (round 8): the original Playground has no navmesh, so the
+// guard stood still on its first route point and never found the body. Placement: the quiet flat
+// navmesh corridor x = -8958, y -8871 .. -6671 (floor z -1318), the geometry rotated from +x to +y
+// (player and guard yaw 90); the guard walks 1600 uu out (route end y -6730) instead of 2000 and back.
+// The player is teleported away at tick 150 to the upper courtyard (-3201.5, -2763.3), 7000 uu off.
 (
     name: "chaos/corpse_discovered",
     system: Chaos,
-    map: "Playground",
+    map: "L_Boyle_Ext_P",
     description: "Kill a civilian out of a patrolling guard's sight; the guard walks up and finds the body: one corpse discovered, once, no chaos yet.",
     setup: (
-        player: Some((position: (-1420, 7100, 96), yaw: 0, pitch: 0)),
+        player: Some((sword_drawn: true, position: (-8958, -8750, -1222), yaw: 90, pitch: 0, snap_to_floor: true)),
         npcs: [
-            (id: Some("civ"), kind: Some("Civilian"), position: Some((-1300, 7100, 92)), yaw: 0, state: Some("Passive")),
-            (id: Some("guard"), position: Some((-1000, 7100, 92)), yaw: 0, state: Some("Patrol"), faction: Some("None"), route: [(1000, 7100, 92), (-1000, 7100, 92)]),
+            (id: Some("civ"), kind: Some("Civilian"), position: Some((-8958, -8630, -1218)), yaw: 90, state: Some("Passive")),
+            (id: Some("guard"), position: Some((-8958, -8330, -1218)), yaw: 90, state: Some("Patrol"), faction: Some("None"), route: [(-8958, -6730, -1218), (-8958, -8330, -1218)]),
         ],
         settle: 5,
     ),
     ticks: 1500,
     input: [
         (tick: 5, action: Press(Primary)),
-        (tick: 150, action: Console("teleport 0 -5500 92 90")),
+        (tick: 150, action: Console("teleport -3201.5 -2763.3 20 71.37")),
     ],
     checkpoints: [
         (name: "killed", expect: [(metric: Count("Sim:Death@civ"), value: 1, tol: 0, source: "setup: back assassination", status: Static)]),
