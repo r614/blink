@@ -106,8 +106,8 @@ impl Material for SoulMaterial {
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
         // Seen through walls: no depth test, no depth write, both faces.
         if let Some(ds) = descriptor.depth_stencil.as_mut() {
-            ds.depth_compare = CompareFunction::Always;
-            ds.depth_write_enabled = false;
+            ds.depth_compare = Some(CompareFunction::Always);
+            ds.depth_write_enabled = Some(false);
         }
         descriptor.primitive.cull_mode = None;
         Ok(())

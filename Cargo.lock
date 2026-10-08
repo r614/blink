@@ -2509,6 +2509,7 @@ name = "dishonored_audio"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dishonored_assets",
  "lewton",
  "ue3_package",
 ]
