@@ -22,7 +22,7 @@ use dishonored_oracle::scenario::{Button, Scenario};
 use dishonored_oracle::trace::{Trace, TraceEvent};
 use dishonored_sim::input::{LeftHand, PlayerInput, actions, buttons};
 use dishonored_sim::state::{PlayerId, power};
-use dishonored_world::{WorldQuery, channel};
+use dishonored_world::channel;
 use glam::Vec3;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;

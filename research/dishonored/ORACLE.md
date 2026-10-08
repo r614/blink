@@ -739,7 +739,7 @@ lifetime), `EffectEnd`, `EffectMissing` (the runtime asks for a system it did no
 `AtMost`; reference status `Measured` (hook), `Static` (tweaks or decompiled code),
 `Unverified` (measured but not known to be sampled like the port: reported, not judged, listed
 as a capture request) and `Unmeasured` (the port's value is reported as a capture request);
-`capture` (how to take the original's side). `spec_hash` now covers only the run-defining
+`capture` (how to take the original's side); `relative` (channel prefixes judged as displacement from frame 0 against the original's trace). `spec_hash` now covers only the run-defining
 fields (map, setup, step, ticks, input, record, sweep), so correcting a reference keeps the
 captured traces.
 
@@ -786,6 +786,85 @@ the runner snaps with the engine's line check and keeps a placed NPC's yaw. Stil
 `criminal()` rule, U-862), `combat/crossbow_reload` (fire action two ticks long, U-868),
 `combat/sword_hit_dummy` damage (U-113, KnownDifference), `movement/lean` angle onset / limit /
 soften (lean height smoothing, U-867).
+**Trace alignment and comparison (`diff::compare_traces`, 2026-10-08).** Checked against both
+sides' code:
+- Hook: `script.rs` samples at boundary k before applying the actions of k. `GAME_TICK`
+  equals the base tick at boundary 0 and goes up at each boundary.
+  - A `ProcessEvent` / Kismet record raised during the world tick after boundary k carries
+    `GAME_TICK - base + 1 = k + 1`.
+  - A spawn found by the scan at boundary k + 1 carries `k + 1`.
+- Port: `runner.rs` pushes frame 0 after the settle ticks. The input of timeline tick t,
+  console commands included, goes into the `Game::step` that produces frame t + 1, and that
+  step's events carry t + 1.
+- The two conventions are the same, so there is no off-by-one: frame k is the end of tick k,
+  frame 0 is after setup and settle, and the input at boundary k acts in tick k + 1. Frames are
+  matched by tick number. A tick the original has and the port lacks is reported in the
+  `frames` group.
+
+How channels are compared:
+- **Matching names.** A shared channel is matched by name. Where the two sides record the same
+  quantity under different names, `diff::port_name` maps one to the other. The only such case
+  is `npc.<n>.player_attn.value` (the original's attention accumulator), which is the port's
+  `npc.<n>.attn`.
+- **Not compared.** Some channels are not the same quantity on both sides, so they are listed
+  as one-sided and not judged:
+  - the original's `camera.*` (`CameraCache.POV`) against the port's eye point `cam.*`;
+  - `pawn.physics` against `pawn.mode`, whose enums differ;
+  - the attention levels.
+- **Absolute, relative or steady offset.** Each channel is judged one of three ways:
+  - absolute, by default;
+  - relative, when the spec lists its prefix in `relative`: judged on the displacement from the
+    baseline frame (the first frame both sides sampled);
+  - steady offset, for a continuous channel (not bool / enum / count) whose sides differ by a
+    steady amount beyond the tolerance. The steady amount is the median of original minus port.
+    The channel is judged after removing it. That catches cases like the pawn hovering 3.73 uu
+    above the floor on the original and 6.73 on the port: `movement/jump_standing` reports
+    `pawn.z` with an offset of -1.797, diverging on ticks 0-6 while the port falls onto its
+    floor and on ticks 64-90, and agreeing in between, through the launch.
+- **Verdicts.** Each channel gets one of three:
+  - `Agree`;
+  - `Offset`: only the offset, reported once with its value;
+  - `Diverge`: the first tick with both raw values, the spans of diverging ticks (up to 8) and
+    the worst difference.
+
+  Each channel also counts the ticks within its tolerance. Angles are wrapped to +-180.
+- **Groups.** Channels are grouped: `pawn position`, `pawn velocity`, `pawn state`, `vitals`,
+  `camera`, `left hand`, `npc`, `behaviour`, `world`. Every event kind both sides record is its
+  own group (`events:<kind>`), compared in order on (tick, object, name).
+- **Report.** Each group reports its own first divergence. The scenario's `first_divergence`
+  is the earliest of them; offset-only channels never count as divergences.
+  - `results.json` has `trace_compare` per scenario: counts, groups, one-sided channels and
+    per-channel detail.
+  - The scorecard adds "Agreement with the original's traces per channel group" (printed by
+    `oracle scenario`) and "Trace comparison per channel group" (per scenario).
+  - The original's trace is written beside the port's: `traces/<system>__<name>.original.json`.
+
+First results over the 90 scenarios with an original trace (2026-10-08, main at 7e1afcc;
+the last column counts channel-ticks within tolerance after removing offsets):
+
+| group | channels | agree / offset / diverge | channel-ticks within tolerance |
+|---|---|---|---|
+| pawn state | 90 | 87 / 0 / 3 | 98.7 % |
+| pawn velocity | 360 | 236 / 0 / 124 | 94.5 % |
+| pawn position | 270 | 125 / 28 / 117 | 86.7 % |
+| vitals | 42 | 27 / 0 / 15 | 87.4 % |
+| npc | 296 | 44 / 47 / 205 | 46.4 % |
+| behaviour | 38 | 9 / 0 / 29 | 43.0 % |
+
+What these results show about the comparison itself:
+- **No shared event kinds yet.** The original's traces record `ProcessEvent`, `Spawn` and
+  `NpcBehavior`; the port records `Sim`, `Projectile`, `Effect` and the others. So events are
+  not compared yet.
+- **NPC and behaviour channels use the default tolerance of 1e-3**, because the specs set
+  tolerances only for `pawn.`. The original's placed NPCs drift 0.1-1.7 uu in their first
+  tick (`combat/pistol_damage_range`, `combat/spring_razor_radius`), which then counts as a
+  divergence. Specs that record NPCs need an `npc.` tolerance.
+- **Fall traces do not fall.** In the cached original traces of `movement/fall_h700`, `fall_h1000`,
+  `fall_h1200` and `fall_h1350`, the pawn never falls: z stays at its start height for the whole run (`fall_stun` and `fall_1200` do fall). Those specs have no
+  `settle`, so the capture never set `PHYS_Falling`, and a walking pawn does not look for its
+  floor until it moves. Those traces are not valid captures; their `pawn.vz` divergence at
+  tick 1 (port -50, original 0) belongs to the capture, not to the port.
+
 **Usage for agents.** `oracle scenario --system powers` (or `--all`, or names, `combat/*`),
 then read `harness_out/oracle/scenario/results.json`: `totals`, `by_system` (pass, fail,
 unmeasured, error), and per scenario `status`, `first_divergence` (`against`: `original` when
@@ -793,8 +872,8 @@ a captured trace exists, else the first failing checkpoint, with its tick), `che
 port `actual`, `expected`, `cmp`, `status`, `reference`, `source`), `notes` and `trace_file`
 (the full trace JSON: `channels`, `frames`, `events`). `capture_requests.json` lists every
 unmeasured / unverified check with the port's value and the `capture` recipe for the hook.
-Build with `cargo build --release -p oracle` into the shared target and copy the binary away
-(other worktrees build `oracle` into the same directory).
+Build with `cargo build --release -p oracle` into this agent's own target directory
+(`target-agents-oracle`); a target shared across worktrees can link another branch's crates.
 
 ## First port findings from the scenario runner
 
