@@ -427,8 +427,13 @@ Frame time is measured, not guessed. Every change here must leave the frames as 
 - `--features trace` (`cargo build --release -p dishonored_runtime --features trace`) writes
   Bevy's per-system and per-render-pass spans to `trace-*.json` (Chrome trace) in the working
   directory. Summing it by span name gives each system's CPU cost per frame.
-- `DISHONORED_ENV_EVERY_FRAME=1` restores the per-frame environment-map filtering, for
-  comparisons.
+  `perl scripts/trace_sum.pl trace-*.json [skip_s] [top_n]` sums it.
+- `DISHONORED_PERF_BASELINE=1` redoes the per-frame work removed below (environment map,
+  particle meshes, HUD writes), for before / after timings with one build;
+  `DISHONORED_ENV_EVERY_FRAME=1` restores only the environment-map filtering.
+- Scripts: `fixtures/scripts/perf_views.json` (the 8 fidelity viewpoints, 300 frames each,
+  one `PROFILE` line per viewpoint) and `fixtures/scripts/perf_ffa_walk.json` (offline match:
+  10 s settle, then 32 s of walking and turning).
 
 ### Per-frame work removed (output unchanged)
 

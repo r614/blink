@@ -552,7 +552,7 @@ pub fn update_gfx_hud(
 /// Move / resize an absolutely placed node when its box changed.
 pub fn place(node: &mut Mut<Node>, left: Val, top: Val, width: Option<Val>, height: Option<Val>) {
     let n: &Node = &**node;
-    if n.left == left && n.top == top && width.is_none_or(|w| n.width == w) && height.is_none_or(|h| n.height == h) {
+    if !crate::profile::perf_baseline() && n.left == left && n.top == top && width.is_none_or(|w| n.width == w) && height.is_none_or(|h| n.height == h) {
         return;
     }
     node.left = left;
@@ -567,7 +567,7 @@ pub fn place(node: &mut Mut<Node>, left: Val, top: Val, width: Option<Val>, heig
 
 /// Set a text's string when it changed.
 pub fn set_text(text: &mut Mut<Text>, s: String) {
-    if text.0 != s {
+    if text.0 != s || crate::profile::perf_baseline() {
         text.0 = s;
     }
 }
@@ -575,7 +575,7 @@ pub fn set_text(text: &mut Mut<Text>, s: String) {
 /// Set a font size (pixels) when it changed.
 pub fn set_font_size(font: &mut Mut<TextFont>, px: f32) {
     let size = FontSize::Px(px);
-    if font.font_size != size {
+    if font.font_size != size || crate::profile::perf_baseline() {
         font.font_size = size;
     }
 }

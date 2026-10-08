@@ -11,6 +11,14 @@ use bevy::diagnostic::DiagnosticsStore;
 use bevy::prelude::*;
 use std::collections::HashMap;
 
+/// `DISHONORED_PERF_BASELINE=1`: redo the per-frame work the performance pass removed (the
+/// environment map filtered every frame, every particle sprite mesh rebuilt every frame, HUD
+/// nodes and texts written every frame), for before / after timings with one build.
+pub fn perf_baseline() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("DISHONORED_PERF_BASELINE").is_some())
+}
+
 #[derive(Resource, Default)]
 pub struct Profile {
     /// Frame times (ms) since the last report.

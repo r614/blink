@@ -1,0 +1,12 @@
+{"steps":[
+  {"wait_ticks": 300}, {"screenshot": "warmup"},
+  {"camera":{"pos":[-6000,-6000,6000],"yaw":45,"pitch":-35}}, {"wait_ticks": 300}, {"screenshot": "aerial"},
+  {"camera":{"pos":[-2663,-1879,170],"yaw":0,"pitch":5}}, {"wait_ticks": 300}, {"screenshot": "street"},
+  {"camera":{"pos":[-3805,-1879,-70],"yaw":180,"pitch":-8}}, {"wait_ticks": 300}, {"screenshot": "garden"},
+  {"camera":{"pos":[-2663,-1879,162],"yaw":180,"pitch":0}}, {"wait_ticks": 300}, {"screenshot": "spawn1"},
+  {"camera":{"pos":[1355,1445,157],"yaw":180,"pitch":0}}, {"wait_ticks": 300}, {"screenshot": "mansion"},
+  {"camera":{"pos":[-921,1160,-1771],"yaw":180,"pitch":0}}, {"wait_ticks": 300}, {"screenshot": "sewer"},
+  {"camera":{"pos":[-3805,-1879,-70],"yaw":-76,"pitch":29}}, {"wait_ticks": 300}, {"screenshot": "moon"},
+  {"camera":{"pos":[-2663,-1879,400],"yaw":90,"pitch":12}}, {"wait_ticks": 300}, {"screenshot": "skyline"},
+  {"quit": true}
+]}

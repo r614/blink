@@ -25,7 +25,7 @@ pub struct EnvMapOncePlugin;
 
 impl Plugin for EnvMapOncePlugin {
     fn build(&self, app: &mut App) {
-        if std::env::var_os("DISHONORED_ENV_EVERY_FRAME").is_some() {
+        if std::env::var_os("DISHONORED_ENV_EVERY_FRAME").is_some() || crate::profile::perf_baseline() {
             return;
         }
         let shared = Filtered::default();

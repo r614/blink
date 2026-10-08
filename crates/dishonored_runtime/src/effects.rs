@@ -1070,6 +1070,12 @@ fn simulate(
                         };
                     }
                 }
+            } else if crate::profile::perf_baseline() {
+                // Before / after timings: the old per-frame rebuild of every sprite mesh.
+                if let Some(mut m) = inst.meshes.get(i).and_then(|h| meshes.get_mut(h)) {
+                    build_mesh(em, sim, &xf, right, up, cam_pos_b, &mut m);
+                    sim.mesh_empty = sim.particles.is_empty();
+                }
             } else if sprite_mesh_used(&lf, inst.system, i) {
                 // Rebuilding a mesh re-uploads it: skip emitters that draw nothing (no sprite
                 // entity and no distortion copy), meshes that stay empty and, emptied once,
