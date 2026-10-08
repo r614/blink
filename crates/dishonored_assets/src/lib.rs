@@ -36,6 +36,7 @@ pub mod tweaks;
 pub mod usable_props;
 pub mod util;
 pub mod water;
+pub mod world_actors;
 pub mod climbable;
 pub mod collision_audit;
 pub mod prop_collision;

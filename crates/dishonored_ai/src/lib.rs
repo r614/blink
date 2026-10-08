@@ -55,6 +55,7 @@ use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
 pub mod combat;
+pub mod distraction;
 pub mod hearing;
 pub mod rats;
 pub mod slots;
@@ -142,6 +143,9 @@ pub enum AiEvent {
     /// A rat brain's meal ([`rats::RatEvent`]): it started eating a corpse, or ate it (no body
     /// remains) when `devoured`.
     RatEat { rat: PlayerId, corpse: PlayerId, devoured: bool },
+    /// `FireDistracted` (0x00b79b80): the distractor's `DisSeqEvent_Distracted` output
+    /// ([`distraction::output`]) with the pawn as instigator.
+    Distracted { distractor: usize, pawn: PlayerId, output: u8 },
     /// An NPC saw a corpse it had not seen before (the corpse reaction, 0x00B40740, which
     /// reports the discovery 0x00A98950: the game counts `NumCorpsesDiscovered` the first time a
     /// given corpse is discovered by anyone).
@@ -413,6 +417,21 @@ pub struct Brain {
     /// The combat behaviour has started (its timers are rolled once per fight).
     #[serde(default)]
     pub in_fight: bool,
+    /// The pawn tweak and its fallback chain (the distractors' pawn tweak filters).
+    #[serde(default)]
+    pub lineage: Vec<String>,
+    /// `DishonoredNPCPawn.m_pDistraction`: the distractor this pawn is going to (index into
+    /// `Crowd::distractors`).
+    #[serde(default)]
+    pub distraction: Option<usize>,
+    /// `m_fDistractionCooldownTime_Countdown` and the pawn tweak's `m_fDistractionCooldownTime`.
+    #[serde(default)]
+    pub distraction_countdown: f32,
+    #[serde(default)]
+    pub distraction_cooldown_time: f32,
+    /// `DisAISubProcessDistractions`: the distractor looked at and the look time left.
+    #[serde(default)]
+    pub look_distraction: Option<(usize, f32)>,
 }
 
 fn idle_state() -> BrainState {
@@ -574,6 +593,12 @@ pub struct Crowd {
     /// Bend Time casters whose bend stops time (for the witness mode of its end).
     #[serde(default)]
     pub bend_stop: BTreeMap<PlayerId, bool>,
+    /// The level's `DisNPCDistractor`s ([`distraction`]).
+    #[serde(default)]
+    pub distractors: Vec<distraction::Distractor>,
+    /// Pawn tweak -> `m_fDistractionCooldownTime`, for spawned NPCs.
+    #[serde(default)]
+    pub tweak_distraction_cooldown: BTreeMap<String, f32>,
 }
 
 /// `DisGlobalManager` alarm cooldown (`DefaultLevel.ini m_fAlarmCooldown`, class default 10).
@@ -822,6 +847,8 @@ struct Ctx<'a> {
     events: &'a mut Vec<AiEvent>,
     /// Global alarm cooldown left.
     cooldown: f32,
+    /// The level's distractors.
+    distractors: &'a mut [distraction::Distractor],
 }
 
 /// What a brain perceives this tick besides the world state.
@@ -1058,6 +1085,8 @@ impl Crowd {
             })
             .collect();
         let magic = magic_modes(events, world_state, &mut self.bend_stop);
+        // [distraction] The distraction manager and the distractors tick before the brains.
+        let mut distracted = self.tick_distractions(world_state, world, dt);
         let senses = Senses { peers: &peers, barks: &barks, busted: &busted, alarm_noise: &alarm_noise, social: &social, light: &light, audio: &self.audio, magic: &magic };
         let layout = &self.layout;
         let ai = &self.ai;
@@ -1066,8 +1095,10 @@ impl Crowd {
         let neglect = &self.route_neglect;
         let inhibit = &mut self.inhibit;
         let alarms = &mut self.alarms;
+        let distractors = &mut self.distractors;
         let mut out = Vec::with_capacity(self.brains.len());
         let mut ai_events = Vec::new();
+        ai_events.append(&mut distracted);
         let cooldown = self.alarm_cooldown;
         for b in self.brains.iter_mut() {
             let Some(me) = world_state.player(b.id) else {
@@ -1079,7 +1110,7 @@ impl Crowd {
             let was = b.state;
             b.sync_external();
             b.perceive_with(me, world_state, events, &senses, world, ai, dt);
-            let mut ctx = Ctx { layout, routes, users, neglect, inhibit, alarms: &mut *alarms, events: &mut ai_events, cooldown };
+            let mut ctx = Ctx { layout, routes, users, neglect, inhibit, alarms: &mut *alarms, events: &mut ai_events, cooldown, distractors: &mut *distractors };
             let mut inp = b.act(me, world_state, &mut ctx, world, ai, dt);
             if inp.npc_move == 0 {
                 inp.npc_move = b.attack_kind();
@@ -1263,6 +1294,8 @@ impl Crowd {
         pv.light_darkest = dark;
         pv.light_brightest = bright;
         self.stealth_volumes = level.stealth_volumes.clone();
+        self.set_distractors(&level.distractors);
+        self.tweak_distraction_cooldown = level.tweak_distraction_cooldown.clone();
     }
 
     /// Faction of a spawned NPC: the spawner's `m_pFactionTweakOverride`, else its pawn
@@ -1580,6 +1613,11 @@ impl Brain {
             fire_timer: 0.0,
             give_up: 0.0,
             in_fight: false,
+            lineage: Vec::new(),
+            distraction: None,
+            distraction_countdown: 0.0,
+            distraction_cooldown_time: 0.0,
+            look_distraction: None,
         }
     }
 
@@ -2221,7 +2259,9 @@ impl Brain {
     /// navmesh path. An actor destination always asks for an accurate stop (0x00ae4de0), and the
     /// locomotion component's destination is the last point of the found path (0x00949890).
     pub fn accurate_stop(&self) -> Option<Vec3> {
-        (self.state == BrainState::WalkToPoint && self.stay).then(|| self.follow.path.last().copied()).flatten()
+        // `DisBehaviorInteract`'s go-to asks for an exact placement (0x00ae9480).
+        let interact = self.current_slot() == slot::DISTRACTION && matches!(self.behavior(slot::DISTRACTION), Some(Behavior::Distraction(s)) if s.phase == distraction::AnimState::GoingTo);
+        ((self.state == BrainState::WalkToPoint && self.stay) || interact).then(|| self.follow.path.last().copied()).flatten()
     }
 
     /// Arrival of a walk: an accurate stop arrives within 0.1 uu of the path's end (0x00944390,
@@ -2428,10 +2468,13 @@ impl Brain {
         if let Some(Some(Behavior::Search(s))) = self.slots.get_mut(slot::SEARCH as usize) {
             s.anim_cooldown -= dt;
         }
+        // [distraction] A distraction that a higher behaviour put aside is given up.
+        self.drop_distraction(ctx);
         let cur = self.current_slot();
         if cur != slot::IDLE {
             self.state = self.project();
             return match cur {
+                slot::DISTRACTION => self.act_distraction(me, nav, ctx, ai, dt),
                 // `DisBehaviorNotice`: turn to face the stimulus.
                 slot::NOTICE => {
                     let p = self.att_target.and_then(|w| self.attn.iter().find(|a| a.who == w)).map(|a| a.proxy).or(self.threat_pos).or(look);
@@ -3892,6 +3935,44 @@ mod tests {
             c.think(&ws, &[], &w, 1.0 / 60.0);
         }
         assert!(!c.brains[0].enemies.contains(&player.id) && c.brains[0].state != BrainState::Combat);
+    }
+
+    /// A patrolling guard in range of a soiree distractor with a sure animate chance walks to it,
+    /// fires Start on arrival and End when the soiree is over; the cooldown keeps it from
+    /// starting again, and the guard is back on patrol.
+    #[test]
+    fn patrolling_guard_takes_a_soiree_distraction() {
+        use dishonored_ir::ai::{DistractionChances, DistractorDef};
+        use dishonored_ir::npc_anim::{LocoConfig, LocoModifier};
+        let mut ai = AiConfig::default();
+        let names = ["Empty", "SearchEmpty", "PanicEmpty", "PanicRecoverEmpty", "EmptyPatrol", "Sword", "SearchSword", "PanicSword", "PanicRecoverSword", "Aim", "SwordPatrol"];
+        ai.locomotion = vec![LocoConfig { name: "DisLocomotionConfig.EliteGuardLocomotionConfig".into(), modifiers: names.iter().map(|n| LocoModifier { name: n.to_string(), speed_multiplier: 1.0, ..Default::default() }).collect(), ..Default::default() }];
+        let w = flat_world();
+        let mut c = Crowd { ai: ai.clone(), ..Default::default() };
+        let def = DistractorDef { name: "DisNPCDistractor_0".into(), position: Vec3::new(20.0, 0.0, 90.0), enabled: true, soiree: true, range: 1000.0, cooldown: 45.0, pulse: -1.0, chances_lvl1: DistractionChances { look: 0.0, animate: 1.0 }, soiree_length: 1.0, ..Default::default() };
+        let mut level = AiLevel::default();
+        level.distractors = vec![def];
+        c.set_level(&level);
+        let g = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(0.0, 0.0, 90.0), 0.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![g.clone()];
+        let mut b = Brain::new(g.id, PawnKind::Guard, g.position, 3);
+        b.route = vec![Vec3::new(0.0, 0.0, 90.0), Vec3::new(0.0, 2000.0, 90.0)];
+        b.state = BrainState::Patrol;
+        b.shown = BrainState::Patrol;
+        b.distraction_cooldown_time = 30.0;
+        c.brains.push(b);
+        let mut events = Vec::new();
+        for _ in 0..120 {
+            c.think(&ws, &[], &w, 1.0 / 60.0);
+            events.extend(c.events.iter().filter(|e| matches!(e, AiEvent::Distracted { .. })).cloned());
+        }
+        assert_eq!(events, vec![AiEvent::Distracted { distractor: 0, pawn: g.id, output: 0 }, AiEvent::Distracted { distractor: 0, pawn: g.id, output: 1 }]);
+        assert!(c.distractors[0].linked_anim.is_none() && c.distractors[0].linked_goto.is_none());
+        assert!(c.distractors[0].cooldown_timer > 40.0, "the End output reset the cooldown");
+        assert!(c.brains[0].distraction_countdown <= 0.0, "a soiree's end does not set the pawn's countdown");
+        assert_eq!(c.brains[0].current_slot(), slot::IDLE);
+        assert_eq!(c.brains[0].state, BrainState::Patrol);
     }
 
     #[test]

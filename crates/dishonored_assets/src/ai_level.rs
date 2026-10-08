@@ -96,6 +96,17 @@ pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String
             }
         }
     }
+    // Each pawn tweak's distraction cooldown (`m_fDistractionCooldownTime`, 0x00b7da20 /
+    // 0x00b84810 copy it to the pawn's countdown).
+    for t in tweaks {
+        if out.tweak_distraction_cooldown.contains_key(t) {
+            continue;
+        }
+        if let Some(v) = db.try_resolve(t).and_then(|m| get_f32(&m, "m_fDistractionCooldownTime")) {
+            out.tweak_distraction_cooldown.insert(t.clone(), v);
+        }
+    }
+    let mut resolver = crate::collision_audit::PropResolver::new(content);
     let mut seen = std::collections::BTreeSet::new();
     for name in &pkgs {
         if !seen.insert(name.to_ascii_lowercase()) {
@@ -133,6 +144,11 @@ pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String
                 "DisStealthVolume" => {
                     if let Some(v) = read_stealth_volume(&pkg, i, &db) {
                         out.stealth_volumes.push(v);
+                    }
+                }
+                "DisNPCDistractor" => {
+                    if let Some(d) = read_distractor(&pkg, i, name, &mut resolver) {
+                        out.distractors.push(d);
                     }
                 }
                 c if c.ends_with("Light") || c.contains("LightToggleable") || c.contains("LightMovable") => {
@@ -362,6 +378,123 @@ fn read_stealth_volume(pkg: &Package, i: usize, db: &TweakDb) -> Option<dishonor
         Some([get_f32(&m, "m_fLightValueDarkestVal")?, get_f32(&m, "m_fLightValueBrightestVal")?])
     });
     Some(dishonored_ir::ai::StealthVolume { name: pkg.obj_name(ObjRef::Export(i)).to_string(), priority, light_range, hulls: brush_hulls(pkg, p) })
+}
+
+/// `eDistractionType` names in enum order.
+const DISTRACTION_TYPES: [&str; 13] = [
+    "DistractionType_Servant_DustMid",
+    "DistractionType_Lord_FirePlace",
+    "DistractionType_Guard_ArmCrossed",
+    "DistractionType_Guard_LookAround",
+    "DistractionType_Guard_LookArt",
+    "DistractionType_Guard_Peeing",
+    "DistractionType_Guard_Piano",
+    "DistractionType_Guard_Railing",
+    "DistractionType_Guard_ScratchBelly",
+    "DistractionType_Guard_WarmHands",
+    "DistractionType_Guard_LookUnderTable",
+    "DistractionType_Guard_LookWindow",
+    "DistractionType_Generic_Scavenge",
+];
+
+/// A cooked `RawDistributionFloat` struct (its archetype's fields merged in): the lookup table
+/// is [min, max, samples...] (`dishonored_ir::particles::Dist`).
+pub fn raw_dist_float(s: &[Property]) -> Option<dishonored_ir::particles::Dist> {
+    let byte = |n: &str, d: u8| match find(s, n).map(|p| &p.value) {
+        Some(Value::Byte(b)) => *b,
+        Some(Value::Int(i)) => *i as u8,
+        _ => d,
+    };
+    let float = |n: &str| find(s, n).and_then(|p| p.as_float()).unwrap_or(0.0);
+    let table: Vec<f32> = match find(s, "LookupTable").and_then(|p| p.array_raw()) {
+        Some((_, b)) => b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect(),
+        None => Vec::new(),
+    };
+    let op = byte("Op", 1);
+    let elems = byte("LookupTableNumElements", 1).max(1);
+    let chunk = byte("LookupTableChunkSize", elems).max(1) as usize;
+    if table.len() < 2 + chunk {
+        return None;
+    }
+    Some(dishonored_ir::particles::Dist { table: table[2..].to_vec(), dims: (chunk / elems as usize).clamp(1, 3) as u8, ranged: elems >= 2 && matches!(op, 2 | 3), extreme: op == 3, time_scale: float("LookupTableTimeScale"), start_time: float("LookupTableStartTime") })
+}
+
+/// A `DisNPCDistractor` and its `DisNPCDistractionComponent` (`m_pDistraction`): the
+/// component's own properties over its archetype (`Default__DisNPCDistractor.DistractionComp`)
+/// and the class defaults (`Default__DisNPCDistractionComponent`: enabled, LOS required, range
+/// 1000, cooldown 45, no pulse). Object references (tweaks, routes, the soiree matinee) are the
+/// component's own: the defaults set none.
+fn read_distractor(pkg: &std::sync::Arc<Package>, i: usize, package: &str, resolver: &mut crate::collision_audit::PropResolver) -> Option<dishonored_ir::ai::DistractorDef> {
+    use dishonored_ir::ai::{DistractionChances, DistractorDef};
+    let h = pkg.read_object(i).ok()?;
+    let p = &h.properties;
+    let ObjRef::Export(ci) = find(p, "m_pDistraction").and_then(|x| x.as_object()).map(ObjRef::from_index)? else { return None };
+    let eff = resolver.effective(pkg, ci);
+    let own = pkg.read_object(ci).map(|h| h.properties).unwrap_or_default();
+    let b = |n: &str, d: bool| match find(&eff, n).map(|x| &x.value) {
+        Some(Value::Bool(v)) => *v,
+        _ => d,
+    };
+    let f = |n: &str| find(&eff, n).and_then(|x| x.as_float());
+    let chances = |n: &str| match find(&eff, n).map(|x| &x.value) {
+        Some(Value::Struct(_, s)) => DistractionChances { look: find(s, "m_fChanceToLook").and_then(|x| x.as_float()).unwrap_or(0.0), animate: find(s, "m_fChanceToAnimate").and_then(|x| x.as_float()).unwrap_or(0.0) },
+        _ => DistractionChances::default(),
+    };
+    let paths = |n: &str| obj_list(pkg, &own, n).into_iter().map(|o| pkg.obj_path(ObjRef::from_index(o))).filter(|s| !s.is_empty() && s != "None").collect::<Vec<_>>();
+    let names = |n: &str| obj_list(pkg, &own, n).into_iter().map(|o| pkg.obj_name(ObjRef::from_index(o)).to_string()).filter(|s| !s.is_empty() && s != "None").collect::<Vec<_>>();
+    let kind = match find(&eff, "m_NPCDistractionType").map(|x| &x.value) {
+        Some(Value::Enum(e)) => DISTRACTION_TYPES.iter().position(|t| t == e).unwrap_or(0) as u8,
+        Some(Value::Byte(v)) => *v,
+        _ => 0,
+    };
+    let time = match find(&eff, "m_DistractionTime").map(|x| &x.value) {
+        Some(Value::Struct(_, s)) => raw_dist_float(s).unwrap_or_default(),
+        _ => Default::default(),
+    };
+    let soiree_matinee = find(&own, "m_pDistractionMatineeData").and_then(|x| x.as_object()).filter(|o| *o != 0).map(|o| pkg.obj_path(ObjRef::from_index(o))).unwrap_or_default();
+    let rot = find(p, "Rotation").and_then(|x| x.as_rotator()).unwrap_or([0; 3]);
+    Some(DistractorDef {
+        name: pkg.obj_name(ObjRef::Export(i)).to_string(),
+        package: package.to_string(),
+        position: Vec3::from(find(p, "Location").and_then(|x| x.as_vector()).unwrap_or([0.0; 3])),
+        yaw: rot[1] as f32 * 360.0 / 65536.0,
+        enabled: b("m_bDistractionEnabled", true),
+        require_los: b("m_bRequireLOS", true),
+        lower_alertness: b("m_bLowerAIAlertness", true),
+        soiree: b("m_bUseSoireeInsteadAnim", false),
+        range: f("m_fDistractionRange").unwrap_or(1000.0),
+        cooldown: f("m_fCooldownTime").unwrap_or(45.0),
+        pulse: f("m_fDistractionPulseTime").unwrap_or(-1.0),
+        time,
+        chances_lvl1: chances("m_SuspicionLvl1_Chances"),
+        chances_lvl234: chances("m_SuspicionLvl234_Chances"),
+        distractable: paths("m_DistractablePawnTweaks"),
+        non_distractable: paths("m_NonDistractablePawnTweaks"),
+        routes: names("m_AllowedRoutes"),
+        kind,
+        soiree_matinee,
+        soiree_length: 0.0,
+        soiree_keys: Vec::new(),
+        soiree_loops: match find(&own, "m_lDistractionSoireeLoops") {
+            Some(p) => p
+                .array_structs(pkg)
+                .unwrap_or_default()
+                .iter()
+                .map(|s| {
+                    let int = |n: &str| match find(s, n).map(|x| &x.value) {
+                        Some(Value::Int(v)) => *v,
+                        _ => 0,
+                    };
+                    let name = match find(s, "m_SoireeLoopName").map(|x| &x.value) {
+                        Some(Value::Name(n)) => n.clone(),
+                        _ => String::new(),
+                    };
+                    (name, int("m_iLoopMin"), int("m_iLoopMax"))
+                })
+                .collect(),
+            None => Vec::new(),
+        },
+    })
 }
 
 fn read_bell(pkg: &Package, i: usize, package: &str, db: &TweakDb, loudness: &[f32]) -> Option<AlarmBellDef> {

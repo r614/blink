@@ -153,6 +153,9 @@ pub enum Behavior {
     Magic(MagicState),
     /// `DisBehaviorPanic` (slot Escape, `Panicked`): flee, or cower with the enemy close.
     Panic { cower: bool },
+    /// `DisBehaviorInteract` for an animated distraction (slot Distraction, the distractor's
+    /// animate message 0x1b): walk to the distractor, then its soiree or animation.
+    Distraction(crate::distraction::DistractionState),
 }
 
 impl Behavior {
@@ -166,6 +169,7 @@ impl Behavior {
             Behavior::TriggerAlarm => slot::ALERT,
             Behavior::Magic(_) => slot::AWE,
             Behavior::Panic { .. } => slot::ESCAPE,
+            Behavior::Distraction(_) => slot::DISTRACTION,
         }
     }
 }
@@ -241,6 +245,14 @@ impl Brain {
                     BrainState::Cower
                 } else {
                     BrainState::Flee
+                }
+            }
+            // The interact behaviour walks (going to the distractor) or stands.
+            Some(Behavior::Distraction(s)) => {
+                if s.phase == crate::distraction::AnimState::GoingTo {
+                    BrainState::WalkToPoint
+                } else {
+                    BrainState::Idle
                 }
             }
         }

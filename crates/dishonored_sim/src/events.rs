@@ -30,6 +30,8 @@ pub enum SoundCategory {
     Rats,
     /// A Kismet `DisSeqAct_AINoise`.
     Scripted,
+    /// A breakable reaching a break step (the step's `m_AINoiseLoudness`).
+    Breakable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]

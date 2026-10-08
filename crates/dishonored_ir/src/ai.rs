@@ -1147,6 +1147,75 @@ pub struct AiLevel {
     /// The level's `DisStealthVolume`s.
     #[serde(default)]
     pub stealth_volumes: Vec<StealthVolume>,
+    /// The level's `DisNPCDistractor`s (their `DisNPCDistractionComponent`).
+    #[serde(default)]
+    pub distractors: Vec<DistractorDef>,
+    /// Pawn tweak path -> its `m_fDistractionCooldownTime` (the pawn's distraction cooldown).
+    #[serde(default)]
+    pub tweak_distraction_cooldown: BTreeMap<String, f32>,
+}
+
+/// `DisNPCDistractionComponent.DistractionChances` (`m_fChanceToLook`, `m_fChanceToAnimate`).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct DistractionChances {
+    pub look: f32,
+    pub animate: f32,
+}
+
+/// A placed `DisNPCDistractor` and the settings of its `DisNPCDistractionComponent` (archetype
+/// and class defaults applied).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct DistractorDef {
+    pub name: String,
+    pub package: String,
+    pub position: glam::Vec3,
+    /// The actor's yaw (degrees): the go-to rotation of an animated distraction.
+    pub yaw: f32,
+    /// `m_bDistractionEnabled`, `m_bRequireLOS`, `m_bLowerAIAlertness`, `m_bUseSoireeInsteadAnim`.
+    pub enabled: bool,
+    pub require_los: bool,
+    pub lower_alertness: bool,
+    pub soiree: bool,
+    /// `m_fDistractionRange`, `m_fCooldownTime`, `m_fDistractionPulseTime` (< 0: no pulse).
+    pub range: f32,
+    pub cooldown: f32,
+    pub pulse: f32,
+    /// `m_DistractionTime` (cooked lookup table): the look-at duration and the animation loop.
+    pub time: crate::particles::Dist,
+    /// `m_SuspicionLvl1_Chances` / `m_SuspicionLvl234_Chances`.
+    pub chances_lvl1: DistractionChances,
+    pub chances_lvl234: DistractionChances,
+    /// `m_DistractablePawnTweaks` / `m_NonDistractablePawnTweaks` (tweak paths) and
+    /// `m_AllowedRoutes` (route actor names).
+    pub distractable: Vec<String>,
+    pub non_distractable: Vec<String>,
+    pub routes: Vec<String>,
+    /// `m_NPCDistractionType` (`eDistractionType` index).
+    pub kind: u8,
+    /// `m_pDistractionMatineeData` (soiree matinee path).
+    pub soiree_matinee: String,
+    /// The soiree matinee's `InterpLength` and its soiree control keys (0 / empty when it
+    /// could not be read).
+    pub soiree_length: f32,
+    pub soiree_keys: Vec<SoireeKeyDef>,
+    /// `m_lDistractionSoireeLoops`: (`m_SoireeLoopName`, `m_iLoopMin`, `m_iLoopMax`), the loop
+    /// counts set on the soiree's pins when it starts (0x00b79cf0).
+    pub soiree_loops: Vec<(String, i32, i32)>,
+}
+
+/// An `InterpTrackSoireeControl` key of a soiree matinee (the loop / pause sections that
+/// decide how long it plays).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SoireeKeyDef {
+    pub pin: String,
+    pub start: f32,
+    pub length: f32,
+    /// `m_LoopCount` (0: until broken).
+    pub loops: i32,
+    /// A pause key (holds until broken).
+    pub pause: bool,
 }
 
 /// A `DisStealthVolume`: while the player touches it, the visibility component normalizes the
