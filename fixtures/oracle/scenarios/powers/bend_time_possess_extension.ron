@@ -1,0 +1,31 @@
+// Possessing during Bend Time extends it (decoded, port missing). The possession start (0x00BFB6C0,
+// run when the intro ends) calls 0x00BFA120 with `DisPossessLevel.m_fBendTimeExtension` (level 1: 0,
+// level 2: 4 s): while the caster's Bend Time is running and not yet in its final blend-out, its
+// maximum duration grows by that amount. A level 2 Bend Time of 8 s then lasts 12 s. The port reads
+// `bend_time_extension` and never uses it. (Bend Time costs 60 and Possession 60 of 100 mana: the scenario refills\n// with the `mana` console hook before the second cast.)
+(
+    name: "powers/bend_time_possess_extension",
+    system: Powers,
+    map: "L_Boyle_Ext_P",
+    description: "Cast Bend Time level 2, then possess a guard while it runs: Bend Time lasts 12 s instead of 8.",
+    setup: (
+        player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true)),
+        powers: [("BendTime", 2), ("Possess", 2)],
+        left_hand: Some("BendTime"),
+        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), position: Some((-3400, -3450, -217.5)), yaw: 90, state: Some("Idle"), faction: Some("None"))],
+        settle: 30,
+    ),
+    ticks: 1100,
+    input: [
+        (tick: 5, action: Press(Secondary)),
+        (tick: 100, action: Console("mana 100")),
+        (tick: 101, action: Hand("Possession")),
+        (tick: 110, hold: 20, action: Press(Secondary)),
+    ],
+    checkpoints: [
+        (name: "possessed during the bend", expect: [(metric: Count("Sim:PossessStart"), value: 1, tol: 0, source: "the guard is in range 300 uu; world time is stopped but the caster runs at 0.9", status: Static)]),
+        (name: "extended", expect: [(metric: Between("Sim:BendTimeStart", "Sim:BendTimeEnd"), value: 12.0, tol: 0.15, source: "decompiled 0x00BFB6C0 -> 0x00BFA120: m_fMaxDuration += Twk_Powers_Possess m_Levels[1].m_fBendTimeExtension 4", status: Static)]),
+    ],
+    record: [Pawn, Vitals, Powers, Npc("guard"), SimEvents],
+    capture: Some("lab power BendTime 2; lab power Possess 2; cast Bend Time, then Possession on the guard; read DishonoredActivePowerComponent_BendTime m_fMaxDuration (+0x98) before and after the possession starts"),
+)

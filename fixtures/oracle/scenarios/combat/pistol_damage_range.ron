@@ -1,0 +1,54 @@
+// Pistol body damage against distance (research/dishonored/systems/ranged.md, "Pistol damage").
+// DisBullet damage (0x00C29820): (int)Attribute_RangedDamage (pistol 10) + the tweak's m_fDamage (20),
+// x m_fDamageMultiplier_Headshot (3) on the head region, x m_fDamageMultiplier_Stealth (1.0, any
+// awareness but InCombat), x m_fDamageMultiplier_CloseRange (1.5) when the distance from the bullet's
+// SPAWN point (the eye + m_fBulletSpawnDistance 150 along the view) is below m_fCloseRange (400), x
+// m_fDamageMultiplier_LongRange (1.0) beyond m_fLongRange (1500), x m_fPostPiercingDamageRatio (0.5)
+// once the bullet has pierced a pawn. One torso shot (aim z 112, guard centre 92) at each of five
+// eye distances, one guard each on its own bearing; the port body shot is 20 (x 1.5 within 400 of the EYE).
+// Final health = start health - damage, so the sides compare through the damage.
+(
+    name: "combat/pistol_damage_range",
+    system: Combat,
+    map: "Playground",
+    description: "Six torso shots at 120 / 250 / 500 / 600 / 1200 / 1700 uu: the close-range band is measured from the bullet spawn, not the eye.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0, pitch: 0)),
+        items: ["Bullet:50"],
+        left_hand: Some("Pistol"),
+        npcs: [
+        (id: Some("g0"), position: Some((-5383.494, -125, 92)), yaw: 150, state: Some("Passive")),
+        (id: Some("g1"), position: Some((-5117.037, -129.41, 92)), yaw: 165, state: Some("Passive")),
+        (id: Some("g2"), position: Some((-5000, 0, 92)), yaw: 180, state: Some("Passive")),
+        (id: Some("g3"), position: Some((-4411.678, 167.008, 92)), yaw: 188, state: Some("Passive")),
+        (id: Some("g4"), position: Some((-3909.313, -177.698, 92)), yaw: 174, state: Some("Passive")),
+        (id: Some("g5"), position: Some((-5487.237, 41.042, 92)), yaw: 200, state: Some("Passive"))
+        ],
+        settle: 60,
+    ),
+    ticks: 970,
+    input: [
+        (tick: 7, action: Look(yaw: -30, pitch: -15.43)),
+        (tick: 10, action: Press(Secondary)),
+        (tick: 157, action: Look(yaw: -15, pitch: -7.857)),
+        (tick: 160, action: Press(Secondary)),
+        (tick: 307, action: Look(yaw: 0, pitch: -6.56)),
+        (tick: 310, action: Press(Secondary)),
+        (tick: 457, action: Look(yaw: 8, pitch: -3.291)),
+        (tick: 460, action: Press(Secondary)),
+        (tick: 607, action: Look(yaw: -6, pitch: -2.324)),
+        (tick: 610, action: Press(Secondary)),
+        (tick: 757, action: Look(yaw: 20, pitch: -29.899)),
+        (tick: 760, action: Press(Secondary)),
+    ],
+    checkpoints: [
+        (name: "g0 eye distance 250", expect: [(metric: DropFrom("npc.g0.health", 5), value: 45, tol: 0, source: "decompiled 0x00C29820 predicts a damage of 45 = (10 + 20) x 1.5: 100 uu from the bullet spawn (the eye + 150). The checked value is the health lost after tick 5 (the guard's start health differs between sides): capture needed", status: Unmeasured)]),
+        (name: "g1 eye distance 500", expect: [(metric: DropFrom("npc.g1.health", 5), value: 45, tol: 0, source: "decompiled 0x00C29820 predicts a damage of 45: 350 uu from the spawn is below 400 although 504 from the eye; the port measures from the eye, so it gives its base 20 with no close factor. The checked value is the health lost after tick 5 (the guard's start health differs between sides): capture needed", status: Unmeasured)]),
+        (name: "g2 eye distance 600", expect: [(metric: DropFrom("npc.g2.health", 5), value: 30, tol: 0, source: "decompiled 0x00C29820 predicts a damage of 30: 450 from the spawn, no range factor. The checked value is the health lost after tick 5 (the guard's start health differs between sides): capture needed", status: Unmeasured)]),
+        (name: "g3 eye distance 1200", expect: [(metric: DropFrom("npc.g3.health", 5), value: 30, tol: 0, source: "decompiled 0x00C29820 predicts a damage of 30: no range factor. The checked value is the health lost after tick 5 (the guard's start health differs between sides): capture needed", status: Unmeasured)]),
+        (name: "g4 eye distance 1700", expect: [(metric: DropFrom("npc.g4.health", 5), value: 30, tol: 0, source: "decompiled 0x00C29820 predicts a damage of 30: 1550 from the spawn is beyond 1500, factor m_fDamageMultiplier_LongRange 1.0. The checked value is the health lost after tick 5 (the guard's start health differs between sides): capture needed", status: Unmeasured)]),
+        (name: "g5 eye distance 120", expect: [(metric: DropFrom("npc.g5.health", 5), value: 45, tol: 0, source: "decompiled 0x00C29820 predicts a damage of either 0 (the bullet spawns 150 uu ahead of the eye, past a guard 120 away: whether the first sweep covers the gap is open) or 45. The checked value is the health lost after tick 5 (the guard's start health differs between sides): capture needed", status: Unmeasured)]),
+    ],
+    record: [Pawn, Powers, Projectiles, Npc("g0"), Npc("g1"), Npc("g2"), Npc("g3"), Npc("g4"), Npc("g5"), SimEvents],
+    capture: Some("lab equip DishonoredWepPistol 2; per shot: read the guard's health before / after (npc.<id>.health); the same guards, bearings and pitches"),
+)

@@ -207,7 +207,7 @@ pub fn update(
                     step_timer: 0.0,
                     steps: 0,
                 };
-                p.traversal = crate::state::Traversal { from, to, elapsed: 0.0, duration: 0.0, edge_height: 0.0, anim: None, rate: 0.0 };
+                p.traversal = crate::state::Traversal { from, to, elapsed: 0.0, duration: 0.0, edge_height: 0.0, anim: None, rate: 0.0, step_ups: p.traversal.step_ups };
                 p.mode = MoveMode::Blinking;
                 p.velocity = Vec3::ZERO;
                 events.push(SimEvent::BlinkStart { id: p.id, from, to });

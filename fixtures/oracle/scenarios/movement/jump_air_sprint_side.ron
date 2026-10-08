@@ -1,0 +1,24 @@
+// A sprinting jump (540 uu/s, above GroundSpeed 400) and a strafe press in the air: MaxAirSpeed
+// clamps the velocity after gravity to the speed at the start of the tick, so the stick can turn the
+// velocity; the later v = 2 measured - v0 lets a turn exceed the cap a little (port: 542.0 against 540).
+(
+    name: "movement/jump_air_sprint_side",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Sprint, jump, then hold D in the air: the horizontal speed cap and the turn.",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 110,
+    input: [
+        (tick: 20, action: Move(forward: 127, right: 0)),
+        (tick: 22, hold: 60, action: Press(Sprint)),
+        (tick: 55, action: Press(Jump)),
+        (tick: 60, action: Move(forward: 0, right: 127)),
+    ],
+    checkpoints: [
+        (name: "air speed", expect: [(metric: Max("pawn.speed2d"), value: 540, tol: 0, cmp: AtLeast, status: Unmeasured, source: "no reference: the cap clamps v1 to the speed at the start of the tick, but v = 2 measured - v0 can exceed it by a turn (the port gives 542.0); the original may do the same")]),
+    ],
+    record: [Pawn, SimEvents],
+    tolerances: [("pawn.", 0.5)],
+    capture: Some("lab setup 60; lab equip DisWepMelee 1; tick script: W from 20, LeftShift 22-82, Jump tap at 55, D (W released) from 60; Pawn channels"),
+)

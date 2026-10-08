@@ -1,0 +1,21 @@
+// Found by scanning: from (-2650, -2700) facing +Y the pawn runs, jumps at tick 40 and, still rising /
+// falling with forward held, mantles an edge 97.6 uu high at tick 69 in the port. The original's
+// airborne mantle request needs m_bJumpButton down every tick (0x00ADBD00): with a one-tick tap
+// the button is up by then, so the original should NOT mantle here (PORT BUG MV-2); the _hold twin
+// keeps Jump down and should mantle in both.
+(
+    name: "movement/mantle_air_98_tap",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Run at a 98 uu edge, tap Jump: does the airborne mantle need the button held.",
+    setup: (player: Some((position: (-2650, -2700, -9.8), yaw: 90, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 100,
+    input: [(tick: 20, action: Move(forward: 127, right: 0)), (tick: 40, action: Press(Jump))],
+    checkpoints: [
+        (name: "mantle", expect: [(metric: Count("Sim:Mantle"), value: 0, tol: 0, status: Unmeasured, source: "no reference: capture request (the original's finder decides)")]),
+    ],
+    record: [Pawn, SimEvents],
+    tolerances: [("pawn.", 0.5)],
+    capture: Some("lab setup 60; place at (-2650, -2700, -9.8) no snap, yaw 90; tick script: (tick: 20, action: Move(forward: 127, right: 0)), (tick: 40, action: Press(Jump)); Pawn channels; session read pawn m_pMantleEdgeFinder.m_CurrentMantleSpot"),
+)

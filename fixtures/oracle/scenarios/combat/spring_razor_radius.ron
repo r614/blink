@@ -1,0 +1,38 @@
+// Spring Razor trigger and blast radius (DisGadget_SpringRazorPlaced: arming 0.5 s, detection cylinder 250 x 250,
+// trigger reaction 0, damage actor delay 0.35 s, detonation cylinder 250 x 250, immune NPCs 50, others 5).
+// A razor is placed on the floor under the player (looking straight down: the placement is then the same on both sides); five passive guards stand around that point at
+// 120 / 200 / 240 / 262 / 310 uu. All inside the cylinder die 0.35 s after the first detection (0.5 s after the arming).
+// The port keeps the cylinders as point tests on the pawn centre and +-half the half height.
+(
+    name: "combat/spring_razor_radius",
+    system: Combat,
+    map: "Playground",
+    description: "A Spring Razor with guards at 120 to 310 uu: arming, trigger time, which guards are cut down.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0, pitch: -89)),
+        items: ["SpringRazor:2"],
+        left_hand: Some("SpringRazor"),
+        npcs: [
+        (id: Some("r0"), position: Some((-5480, 0, 92)), yaw: 180, state: Some("Passive")),
+        (id: Some("r1"), position: Some((-5538.197, 190.211, 92)), yaw: 252, state: Some("Passive")),
+        (id: Some("r2"), position: Some((-5794.164, 141.068, 92)), yaw: 324, state: Some("Passive")),
+        (id: Some("r3"), position: Some((-5811.962, -154, 92)), yaw: 396, state: Some("Passive")),
+        (id: Some("r4"), position: Some((-5504.205, -294.828, 92)), yaw: 468, state: Some("Passive"))
+        ],
+        settle: 30,
+    ),
+    ticks: 300,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "placed", expect: [(metric: Count("Sim:TrapPlaced"), value: 1, tol: 0, source: "a press with a razor places it", status: Static)]),
+        (name: "placement delay", expect: [(metric: FirstAt("Sim:TrapPlaced"), value: 0.2, tol: 0.034, source: "INVENTORY.md: DisNotify_PlaceSpringRazor at 0.200 s of Gadgets_SpringRazor_Deploy (tick 5 press: +0.083 s)", status: Unverified)]),
+        (name: "trigger after placement", expect: [(metric: Between("Sim:TrapPlaced", "Sim:TrapTriggered"), value: 0.5, tol: 0.05, source: "m_fArmingTime 0.5 then the first detection (trigger reaction 0)", status: Unmeasured)]),
+        (name: "r0 at 120 uu from the razor (inside the 250 cylinders)", expect: [(metric: Final("npc.r0.alive"), value: 0, tol: 0, source: "decompiled 0x00C2D650 / 0x00C36350 (cylinders m_fDetectionCylinderRadius / m_fDetonationCylinderRadius 250, height 250): NPCs with a sample point inside and a clear line to the sensor are cut down. The pawn's own sample points (bones) decide the 240 / 262 band: capture needed", status: Unmeasured)]),
+        (name: "r1 at 200 uu from the razor (inside the 250 cylinders)", expect: [(metric: Final("npc.r1.alive"), value: 0, tol: 0, source: "decompiled 0x00C2D650 / 0x00C36350 (cylinders m_fDetectionCylinderRadius / m_fDetonationCylinderRadius 250, height 250): NPCs with a sample point inside and a clear line to the sensor are cut down. The pawn's own sample points (bones) decide the 240 / 262 band: capture needed", status: Unmeasured)]),
+        (name: "r2 at 240 uu from the razor (inside the 250 cylinders)", expect: [(metric: Final("npc.r2.alive"), value: 0, tol: 0, source: "decompiled 0x00C2D650 / 0x00C36350 (cylinders m_fDetectionCylinderRadius / m_fDetonationCylinderRadius 250, height 250): NPCs with a sample point inside and a clear line to the sensor are cut down. The pawn's own sample points (bones) decide the 240 / 262 band: capture needed", status: Unmeasured)]),
+        (name: "r3 at 262 uu from the razor (outside the 250 cylinders)", expect: [(metric: Final("npc.r3.alive"), value: 1, tol: 0, source: "decompiled 0x00C2D650 / 0x00C36350 (cylinders m_fDetectionCylinderRadius / m_fDetonationCylinderRadius 250, height 250): NPCs with a sample point inside and a clear line to the sensor are cut down. The pawn's own sample points (bones) decide the 240 / 262 band: capture needed", status: Unmeasured)]),
+        (name: "r4 at 310 uu from the razor (outside the 250 cylinders)", expect: [(metric: Final("npc.r4.alive"), value: 1, tol: 0, source: "decompiled 0x00C2D650 / 0x00C36350 (cylinders m_fDetectionCylinderRadius / m_fDetonationCylinderRadius 250, height 250): NPCs with a sample point inside and a clear line to the sensor are cut down. The pawn's own sample points (bones) decide the 240 / 262 band: capture needed", status: Unmeasured)]),
+    ],
+    record: [Pawn, Powers, Npc("r0"), Npc("r1"), Npc("r2"), Npc("r3"), Npc("r4"), SimEvents],
+    capture: Some("lab give springrazor; place at pitch -89 (straight down); DisGadget_SpringRazorPlaced timers (0x00C39C10) and the guards' alive flags"),
+)

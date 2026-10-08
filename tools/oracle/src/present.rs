@@ -208,7 +208,9 @@ impl Presenter {
         let scene = FxScene { players, me: Some(self.local), muzzle: &muzzle, bones: &bones, contact: self.contact.as_deref(), world: Some(&content.collision), now: self.now };
         for r in self.fx.requests(events, &scene) {
             match r {
-                FxRequest::Effect { path, at, dir } => {
+                // A hand cast is the same effect; headless there is no rig, so it plays at the
+                // fallback placement (the runtime's own fallback without a hand socket).
+                FxRequest::Effect { path, at, dir } | FxRequest::HandCast { path, at, dir } => {
                     let who = nearest(players, at);
                     self.start(&path, facing(at, dir), None, who, &mut out);
                 }

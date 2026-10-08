@@ -1,0 +1,42 @@
+// Explosion damage against distance (DisExplosion, DisTweaks_Explosion of Twk_Proj_StickyGrenade, same
+// numbers as the grenade): per victim 0x00A02E90 takes the distance from the blast to the pawn
+// (non-player radii m_fFullDamageRadius 300 / m_fDamageRadius 600, the player's 150 / 600), then
+// 0x009FEAA0: damage = Attribute_RadialDamage 50 x (1 - (d - full) / (outer - full)) clamped to 0..50,
+// rounded; a MultiLineCheck (flags 0x080A2096) from the blast to the pawn must reach it (0x00A02B60).
+// A sticky grenade thrown 30 degrees down sticks where it lands (nominal x -5231) and blows 3.0 s
+// later; six passive guards stand on a ring of different radii around that point, away from the thrower.
+// The port: linear falloff between the radii and a ray to the pawn (gadgets::explosion_damage).
+(
+    name: "combat/grenade_explosion_falloff",
+    system: Combat,
+    map: "Playground",
+    description: "A sticky grenade on the floor and six guards at 100 to 650 uu: the radial damage curve and the line check.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0, pitch: -30)),
+        items: ["StickyGrenade:3"],
+        left_hand: Some("StickyGrenade"),
+        npcs: [
+        (id: Some("e0"), position: Some((-4941.746, -344.72, 92)), yaw: 130, state: Some("Passive")),
+        (id: Some("e1"), position: Some((-4641.9, -274.702, 92)), yaw: 155, state: Some("Passive")),
+        (id: Some("e2"), position: Some((-5131, 0, 92)), yaw: 180, state: Some("Passive")),
+        (id: Some("e3"), position: Some((-4913.792, 147.916, 92)), yaw: 205, state: Some("Passive")),
+        (id: Some("e4"), position: Some((-5070.303, 191.511, 92)), yaw: 230, state: Some("Passive")),
+        (id: Some("e5"), position: Some((-5088.65, 531.259, 92)), yaw: 255, state: Some("Passive"))
+        ],
+        settle: 30,
+    ),
+    ticks: 330,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "fuse after the impact", expect: [(metric: Count("Sim:Explosion"), value: 1, tol: 0, source: "a sticky grenade explodes once", status: Static)]),
+        (name: "launch speed", expect: [(metric: EventValue("Projectile:StickyGrenade", "speed"), value: 2500, tol: 1, source: "Twk_Inv_GrenadeCorvo m_fThrowSpeed 2500 (the sticky item shares the throw)", status: Unverified)]),
+        (name: "e0 at 450 uu from the nominal impact", expect: [(metric: DropFrom("npc.e0.health", 3), value: 24, tol: 0, source: "decompiled 0x009FEAA0 / 0x00A02E90: damage 50 x (1 - (d - 300) / 300) clamped to 0..50 for d = 457 from the blast (the guard centre is 82 above the floor): about 24. The checked value is the health lost after tick 3; the real impact point comes from the trace: capture needed", status: Unmeasured)]),
+        (name: "e1 at 650 uu from the nominal impact", expect: [(metric: DropFrom("npc.e1.health", 3), value: 0, tol: 0, source: "decompiled 0x009FEAA0 / 0x00A02E90: damage 50 x (1 - (d - 300) / 300) clamped to 0..50 for d = 655 from the blast (the guard centre is 82 above the floor): about 0. The checked value is the health lost after tick 3; the real impact point comes from the trace: capture needed", status: Unmeasured)]),
+        (name: "e2 at 100 uu from the nominal impact", expect: [(metric: DropFrom("npc.e2.health", 3), value: 50, tol: 0, source: "decompiled 0x009FEAA0 / 0x00A02E90: damage 50 x (1 - (d - 300) / 300) clamped to 0..50 for d = 129 from the blast (the guard centre is 82 above the floor): about 50. The checked value is the health lost after tick 3; the real impact point comes from the trace: capture needed", status: Unmeasured)]),
+        (name: "e3 at 350 uu from the nominal impact", expect: [(metric: DropFrom("npc.e3.health", 3), value: 40, tol: 0, source: "decompiled 0x009FEAA0 / 0x00A02E90: damage 50 x (1 - (d - 300) / 300) clamped to 0..50 for d = 359 from the blast (the guard centre is 82 above the floor): about 40. The checked value is the health lost after tick 3; the real impact point comes from the trace: capture needed", status: Unmeasured)]),
+        (name: "e4 at 250 uu from the nominal impact", expect: [(metric: DropFrom("npc.e4.health", 3), value: 50, tol: 0, source: "decompiled 0x009FEAA0 / 0x00A02E90: damage 50 x (1 - (d - 300) / 300) clamped to 0..50 for d = 263 from the blast (the guard centre is 82 above the floor): about 50. The checked value is the health lost after tick 3; the real impact point comes from the trace: capture needed", status: Unmeasured)]),
+        (name: "e5 at 550 uu from the nominal impact", expect: [(metric: DropFrom("npc.e5.health", 3), value: 7, tol: 0, source: "decompiled 0x009FEAA0 / 0x00A02E90: damage 50 x (1 - (d - 300) / 300) clamped to 0..50 for d = 556 from the blast (the guard centre is 82 above the floor): about 7. The checked value is the health lost after tick 3; the real impact point comes from the trace: capture needed", status: Unmeasured)]),
+    ],
+    record: [Pawn, Powers, Projectiles, Npc("e0"), Npc("e1"), Npc("e2"), Npc("e3"), Npc("e4"), Npc("e5"), SimEvents],
+    capture: Some("lab give stickygrenade; throw at pitch -30; the grenade's Location at the blast (component tick 0x00C5A2A0); the guards' health before / after"),
+)

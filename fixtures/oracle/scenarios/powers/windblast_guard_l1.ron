@@ -1,0 +1,28 @@
+// Windblast level 1 on a guard 182.8 uu ahead on the Boyle runway (the position of the measured level-2
+// case, HOOK_TRIAGE.md 2026-10-06: 26 damage). The tweak's level 1 values (Twk_WindBlast `m_Levels`
+// element 0; `m_CurrentLevel` 1 selects element 0, 0x00BF7090 reads the level block at
+// tweak + 0x11C + 0x40 x m_CurrentLevel): force 1800, extra up force 1000, damage 20, angle 135,
+// distance 3000, speed 5000. Blast factor k = 0.879 (d3 = 187.2 from the eye, aligned): damage
+// round(20 k) = 18 against level 2's round(30 k) = 26. The port reads only `m_Levels[1]` (level 2)
+// for every caster, so it deals 26 here.
+(
+    name: "powers/windblast_guard_l1",
+    system: Powers,
+    map: "L_Boyle_Ext_P",
+    description: "Windblast level 1 at an idle guard 182.8 uu ahead: damage round(20 k) = 18 (level 2 would deal 26).",
+    setup: (
+        player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true)),
+        powers: [("WindBlast", 1)],
+        left_hand: Some("Windblast"),
+        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), position: Some((-3400, -3332.8, -217.5)), yaw: 90, state: Some("Idle"), faction: Some("None"))],
+        settle: 30,
+    ),
+    ticks: 300,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "damage", expect: [(metric: EventValue("Sim:Damage@guard[cause=Windblast]", "amount"), value: 18, tol: 1, source: "Twk_WindBlast m_Levels[0].m_Damage 20 x blast factor 0.879 (0x00BE8570, 0x00BE9770: round(damage x k)); level 2 measured 26 = 30 x 0.879", status: Static)]),
+        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 50, tol: 0.5, source: "Twk_WindBlast m_ManaCost 50 (measured at level 2)", status: Static)]),
+    ],
+    record: [Pawn, Vitals, Powers, Npc("guard"), SimEvents],
+    capture: Some("lab setup 60; lab power WindBlast 1; place -3400 -3150 -190 270; move the party guard to 182.8 uu ahead; record the guard's damage-path calls (amount, momentum)"),
+)

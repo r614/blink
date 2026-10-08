@@ -1,0 +1,24 @@
+// Lean on the Boyle runway (U-048, HOOK_TRIAGE.md 2026-10-06, 60 Hz, CameraCache.POV): 20 degrees
+// held (15 + 5 soften), roll 10, 14.2 degrees 0.2 s after the press, 119.7 uu sideways and 21.4 down.
+// The original's lean state sets the head spring point's VELOCITY to m_fLeanSpeed (1000 uu/s)
+// every tick the key is held (0x00A76590 -> 0x00AC0950; DishonoredCamera_Lean 0x00AC5950: the
+// spring k 80 / c 12 pulls the head back to the rest point, which stays at 0), not a spring target
+// at the maximum angle; the head is then projected onto the sphere of radius 350 around a pivot
+// 350 below and its angle limited to 15 (+ soften). Q 20-80, E 140-200, release timers after.
+(
+    name: "movement/lean_boyle",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Hold lean left 1 s, release, hold lean right 1 s, release: angle, roll and the onset per tick.",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 260,
+    input: [(tick: 20, hold: 60, action: Press(LeanLeft)), (tick: 140, hold: 60, action: Press(LeanRight))],
+    checkpoints: [
+        (name: "held angle", expect: [(metric: Abs(At("cam.lean_deg", 78)), value: 20, tol: 0.3, source: "HOOK_TRIAGE.md (U-048): 20 degrees held (15 + 5 soften)")]),
+        (name: "roll", expect: [(metric: Abs(At("cam.roll", 78)), value: 10, tol: 0.3, source: "HOOK_TRIAGE.md (U-048): roll 10 (m_fCameraTiltPercent 0.5)")]),
+        (name: "onset", expect: [(metric: Abs(At("cam.lean_deg", 32)), value: 14.2, tol: 0.7, source: "HOOK_TRIAGE.md (U-048): 14.2 degrees 12 ticks after the press (the port's spring gives 10.7)")]),
+    ],
+    record: [Pawn, Camera],
+    capture: Some("lab setup 60; measure lean (CameraCache.POV per tick), hold Q 20-80 and E 140-200"),
+)

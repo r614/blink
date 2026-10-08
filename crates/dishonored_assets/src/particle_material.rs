@@ -293,6 +293,14 @@ pub const GAMEPLAY_PARTICLES: &[&str] = &[
     "Vfx_Weapon.Effects.Trails.Ps_Pistol_StdTracer_01",
     "Vfx_Weapon.Effects.Trails.StdBolt_Trail",
     "Vfx_Weapon.Effects.Ps_CrossBowMuzzle",
+    // The left hand's Mark of the Outsider: `AnimNotify_PlayParticleEffect` on the `Tattoo`
+    // socket of `Ply_Powers_as` casts, switch and out of mana.
+    "Vfx_GamePlay.Powers.Ps_Tattoo_Glow_01",
+    "Vfx_GamePlay.Powers.Ps_Tattoo_Glow_02",
+    "Vfx_GamePlay.Powers.Ps_Tattoo_Glow_03",
+    "Vfx_GamePlay.Powers.Ps_Tattoo_Glow_04",
+    "Vfx_GamePlay.Powers.Ps_Tattoo_Glow_WB",
+    "Vfx_GamePlay.Powers.Ps_Mana_Empty",
     // The rest of the contact table (footfalls, landings, slides, thrown objects, creatures).
     "Vfx_PhysMat.Dirt.Ps_JumpLand_Big_DirtGravel",
     "Vfx_PhysMat.Dirt.Pfx_Thrown_Rocks",

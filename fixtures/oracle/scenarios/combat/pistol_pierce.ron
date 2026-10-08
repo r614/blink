@@ -1,0 +1,32 @@
+// A bullet pierces the first pawn it hits (DisBullet 0x00C3A660: while m_pPiercedActor is empty,
+// rand() / 32767 <= m_fPiercingChance 1.0 keeps it flying), and the next pawn takes the damage
+// x m_fPostPiercingDamageRatio 0.5 (0x00C29820), then it stops. Three guards on one line at 700 / 850 /
+// 1000 uu, aim through the torso of the first: original 30 / 15 / 0, the port stops at the first.
+(
+    name: "combat/pistol_pierce",
+    system: Combat,
+    map: "Playground",
+    description: "One pistol shot through three guards in line: pierce chance 1.0, second pawn at half damage, third untouched.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0, pitch: -5.63)),
+        items: ["Bullet:10"],
+        left_hand: Some("Pistol"),
+        npcs: [
+        (id: Some("p0"), position: Some((-4900, 0, 92)), yaw: 180, state: Some("Passive")),
+        (id: Some("p1"), position: Some((-4750, 0, 92)), yaw: 180, state: Some("Passive")),
+        (id: Some("p2"), position: Some((-4600, 0, 92)), yaw: 180, state: Some("Passive"))
+        ],
+        settle: 150,
+    ),
+    ticks: 120,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "first guard hit", expect: [(metric: Count("Sim:Damage@p0"), value: 1, tol: 0, source: "a settled shot at 700 uu hits", status: Static)]),
+        (name: "second guard hit (pierced)", expect: [(metric: Count("Sim:Damage@p1"), value: 1, tol: 0, source: "decompiled 0x00C3A660: piercing chance 1.0, the bullet continues through the first pawn", status: Static)]),
+        (name: "third guard not hit", expect: [(metric: Count("Sim:Damage@p2"), value: 0, tol: 0, source: "decompiled 0x00C3A660: once m_pPiercedActor is set the next pawn stops the bullet", status: Static)]),
+        (name: "first guard damage", expect: [(metric: DropFrom("npc.p0.health", 3), value: 30, tol: 0, source: "(10 + 20) at 550 uu from the spawn: no range factor (0x00C29820)", status: Unmeasured)]),
+        (name: "second guard damage", expect: [(metric: DropFrom("npc.p1.health", 3), value: 15, tol: 0, source: "30 x m_fPostPiercingDamageRatio 0.5 (0x00C29820): capture needed", status: Unmeasured)]),
+    ],
+    record: [Pawn, Powers, Projectiles, Npc("p0"), Npc("p1"), Npc("p2"), SimEvents],
+    capture: Some("lab equip DishonoredWepPistol 2; one shot through three guards on one line; health of each before / after"),
+)

@@ -1,0 +1,18 @@
+// Twin of mantle_air_98_tap with the Jump button held 40 ticks (the button stays down during the
+// flight, so the original's per-tick request can fire when the finder has a valid spot).
+(
+    name: "movement/mantle_air_98_hold",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "The same run and jump with Jump held for 40 ticks.",
+    setup: (player: Some((position: (-2650, -2700, -9.8), yaw: 90, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 100,
+    input: [(tick: 20, action: Move(forward: 127, right: 0)), (tick: 40, hold: 40, action: Press(Jump))],
+    checkpoints: [
+        (name: "mantle", expect: [(metric: Count("Sim:Mantle"), value: 0, tol: 0, status: Unmeasured, source: "no reference: capture request (the original's finder decides)")]),
+    ],
+    record: [Pawn, SimEvents],
+    tolerances: [("pawn.", 0.5)],
+    capture: Some("lab setup 60; place at (-2650, -2700, -9.8) no snap, yaw 90; tick script: (tick: 20, action: Move(forward: 127, right: 0)), (tick: 40, hold: 40, action: Press(Jump)); Pawn channels; session read pawn m_pMantleEdgeFinder.m_CurrentMantleSpot"),
+)

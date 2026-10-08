@@ -1,0 +1,24 @@
+// Fall into the Boyle sea (DishonoredWaterVolume_0, surface z -2071.02, PLAYER.md) from 220 uu above,
+// float, swim up and swim forward. Tests: where on the pawn the water entry is judged (the tick
+// pawn.mode becomes Swimming, and pawn.z there), the entry momentum, that deep water has no gravity
+// (Buoyancy 1.0: nothing pulls a swimmer back up), the swim-up (Jump) and forward (WaterSpeed 600)
+// accelerations. The pawn is centred on the sea (quad (-14733, 12506) (1924, 5965) (3870, -11510)
+// (-9240, -11510)).
+(
+    name: "movement/swim_entry",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Drop into the sea, drift 2 s, hold Jump for 1 s, then swim forward: entry height, drift and speeds.",
+    setup: (player: Some((position: (-4500, 4000, -1850), yaw: 0, pitch: 0, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 330,
+    input: [(tick: 150, hold: 60, action: Press(Jump)), (tick: 230, action: Move(forward: 127, right: 0))],
+    checkpoints: [
+        (name: "swimming", expect: [(metric: TimeAt("pawn.mode", 5), value: 1, tol: 0, cmp: AtMost, status: Static, source: "a pawn in a deep water volume swims (PHYS_Swimming)")]),
+        (name: "lowest point", expect: [(metric: Min("pawn.z"), value: 0, tol: 0, status: Unmeasured, source: "no reference: how deep the entry momentum carries the pawn")]),
+        (name: "swim speed", expect: [(metric: Max("pawn.speed2d"), value: 0, tol: 0, status: Unmeasured, source: "no reference: forward swim speed (Attribute_WaterSpeed 600, accelerations 500 / 4000)")]),
+    ],
+    record: [Pawn, SimEvents],
+    tolerances: [("pawn.", 0.5)],
+    capture: Some("lab setup 60; place at (-4500, 4000, -1850) no snap; tick script: Jump 150-210, W from 230; Pawn channels"),
+)

@@ -1,0 +1,32 @@
+// Blink slows the world (decoded, not measured). On release 0x00BFC990 calls the time-dilation layer
+// helper 0x009FA0D0 for layer 1 with target 0.01 (clamped up to 0.05), caster rate 1.0, blend time
+// `PowerAttributes_Blink.m_fBendTimeDownTime` (0.9 s at both levels); at the end or cancel
+// (0x00BE7380, from 0x00BFAB80) it blends layer 1 back to 1.0 over `m_fBendTimeUpTime` (2.5 s), starting
+// from wherever the layer is. Bend Time uses layer 0 of the same helper (0x00BFBE60). The port has no
+// Blink slow-down: NPCs run at 1.0 throughout.
+// Derived values: release at tick 15, the move takes 16 ticks (0.267 s): the layer has fallen
+// 0.95 x 0.267 / 0.9 = 0.282, so the world rate bottoms at 0.718 when the move ends, then rises
+// linearly to 1.0 over 2.5 s.
+(
+    name: "powers/blink_world_slow",
+    system: Powers,
+    map: "L_Boyle_Ext_P",
+    description: "Blink level 2 south with an idle guard beside the runway: the guard's time scale dips to about 0.72 and returns to 1.0 2.5 s after the move.",
+    setup: (
+        player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true)),
+        powers: [("Blink", 2)],
+        left_hand: Some("Blink"),
+        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), position: Some((-3100, -3150, -217.5)), yaw: 180, state: Some("Idle"), faction: Some("None"))],
+        settle: 30,
+    ),
+    ticks: 420,
+    input: [(tick: 5, hold: 10, action: Press(Secondary))],
+    checkpoints: [
+        (name: "world slows", expect: [(metric: Min("npc.guard.time_scale"), value: 0.718, tol: 0.03, source: "decompiled 0x00BFC990 / 0x009FA0D0: layer 1 falls from 1.0 toward 0.05 over m_fBendTimeDownTime 0.9 s; 16 ticks of travel", status: Unmeasured)]),
+        (name: "world dilation channel", expect: [(metric: Min("power.world_dilation"), value: 0.718, tol: 0.03, source: "same layer", status: Unmeasured)]),
+        (name: "caster unaffected", expect: [(metric: Min("power.time_scale"), value: 1.0, tol: 0.001, source: "the Blink call passes caster rate 1.0 (param_4)", status: Unmeasured)]),
+        (name: "restored", expect: [(metric: At("npc.guard.time_scale", 400), value: 1.0, tol: 0.001, source: "m_fBendTimeUpTime 2.5 s after the move ended (about tick 31 + 150)", status: Unmeasured)]),
+    ],
+    record: [Pawn, Vitals, Powers, Npc("guard"), SimEvents],
+    capture: Some("as the Bend Time probe (measure bendtime): read WorldInfo.TimeDilation, the guard's CustomTimeDilation and BendTimeSeconds each tick during a level-aim Blink from the runway"),
+)

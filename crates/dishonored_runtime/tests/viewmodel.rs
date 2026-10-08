@@ -70,3 +70,55 @@ fn sword_socket_attach() {
     assert!((decoded.transform_vector3(glam::Vec3::Z) - chosen.transform_vector3(glam::Vec3::Z)).length() < 1e-4);
     assert!(!close(decoded, chosen));
 }
+
+/// `AnimNodeBlendDirectional`: the cooked snapshot (DirAngle 0.959408) weighs forward 0.3892219
+/// and right 0.6107781.
+#[test]
+fn directional_weights_match_the_cooked_snapshot() {
+    let w = dishonored_runtime::viewmodel::directional_weights(0.959408);
+    assert!((w[0] - 0.3892219).abs() < 1e-5 && (w[3] - 0.6107781).abs() < 1e-5 && w[1] == 0.0 && w[2] == 0.0, "{w:?}");
+    let b = dishonored_runtime::viewmodel::directional_weights(std::f32::consts::PI - 1e-4);
+    assert!(b[1] > 0.99, "{b:?}");
+}
+
+#[test]
+fn notify_windows_wrap_for_loops() {
+    use dishonored_runtime::viewmodel::crossed;
+    assert!(crossed(0.0, 0.0, 0.016, 1.0, false));
+    assert!(!crossed(0.5, 0.0, 0.4, 1.0, false));
+    assert!(crossed(0.05, 0.98, 1.06, 1.0, true));
+    assert!(!crossed(0.5, 0.98, 1.06, 1.0, true));
+}
+
+/// `ArkAnimNodeRat` (0x00913ED0) with `Default__ArkAnimNodeRat`'s moves 55 / 98 / 302 uu/s.
+#[test]
+fn rat_move_blend() {
+    use dishonored_runtime::world_models::rat_move;
+    let len = |_: &str| 1.0;
+    // Between WalkN (98) and RunN (302): weights by speed.
+    let (p, _) = rat_move(200.0, 0.0, 0.0, &len);
+    assert_eq!(p.len(), 2);
+    assert_eq!((p[0].0, p[1].0), ("WalkN", "RunN"));
+    assert!((p[1].1 - (200.0 - 98.0) / 204.0).abs() < 1e-5);
+    // Above RunN alone, the rate capped at 1.5: one second at 600 uu/s moves the phase 0.5.
+    let (p, pct) = rat_move(600.0, 0.0, 1.0, &len);
+    assert_eq!(p.len(), 1);
+    assert!((pct - 0.5).abs() < 1e-5, "{pct}");
+    // Below WalkSlowN alone, slowed: 27.5 uu/s plays it at half rate.
+    let (p, pct) = rat_move(27.5, 0.0, 1.0, &len);
+    assert_eq!(p[0].0, "WalkSlowN");
+    assert!((pct - 0.5).abs() < 1e-5);
+}
+/// `AnimNodeSequenceBlendByAim`: centred aim weighs only the centre; full right weighs only the
+/// right centre; halfway up-right splits four ways.
+#[test]
+fn aim_grid_weights() {
+    use dishonored_runtime::viewmodel::aim_weights;
+    let c = aim_weights(0.0, 0.0);
+    assert_eq!(c[4], 1.0);
+    let r = aim_weights(1.0, 0.0);
+    assert_eq!(r[7], 1.0);
+    let ur = aim_weights(0.5, 0.5);
+    assert!((ur[4] - 0.25).abs() < 1e-6 && (ur[6] - 0.25).abs() < 1e-6 && (ur[3] - 0.25).abs() < 1e-6 && (ur[7] - 0.25).abs() < 1e-6);
+    assert!((ur.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+}

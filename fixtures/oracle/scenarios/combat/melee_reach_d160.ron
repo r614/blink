@@ -1,0 +1,24 @@
+// Sword reach, one point of the sweep over distance (160 / 230 / 260 / 300 uu between the pawns'
+// centres, straight ahead, victim facing the attacker so no assassination). Rule (research/dishonored/systems/melee.md):
+// the swing context's m_fMaxContextRange is 210 x max(Attribute_Range, 1); the sweep (m_fSweepingAttackSize 60)
+// reaches the first body. The port tests a 210 uu segment from the eye against the victim's axis with a
+// 30 uu tolerance on top of the 35 uu radius, i.e. centres up to about 275 uu apart.
+// Expected hit below is the design reading (centre distance <= reach + collision radius = 245): UNMEASURED.
+(
+    name: "combat/melee_reach_d160",
+    system: Combat,
+    map: "Playground",
+    description: "One swing at a passive guard 160 uu straight ahead: does it connect.",
+    setup: (
+        player: Some((position: (-5300, 0, 96), yaw: 180, pitch: -5)),
+        npcs: [(id: Some("dummy"), position: Some((-5460, 0, 92)), yaw: 0, state: Some("Passive"))],
+        settle: 30,
+    ),
+    ticks: 120,
+    input: [(tick: 5, action: Press(Primary))],
+    checkpoints: [
+        (name: "connects", expect: [(metric: Count("Sim:Damage@dummy"), value: 1, tol: 0, source: "reach 210 from the eye + body radius 35 (melee.md); the port reaches about 275", status: Unmeasured)]),
+    ],
+    record: [Pawn, Npc("dummy"), SimEvents],
+    capture: Some("measure sword npc=<placed guard> --swings 1 at distance 160 (lab place); record the damage-path call or none"),
+)
