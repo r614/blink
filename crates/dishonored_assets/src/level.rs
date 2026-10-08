@@ -359,6 +359,7 @@ impl Importer<'_> {
 
     fn import_actors(&mut self, slot: usize) -> Result<()> {
         let pkg = self.pkgs[slot].clone();
+        self.map.environment.light_shafts.extend(read_light_shafts(&pkg));
         // Placed StaticMeshComponents owned by other actor classes (InterpActor, KActor,
         // DishonoredMovable, DisDoor, pickups, usable objects...): outer -> components.
         let mut owned: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -521,6 +522,90 @@ impl Importer<'_> {
             Err(e) => self.stats.errors.push(e),
         }
     }
+}
+
+/// The world matrices of a `StaticLightCollectionActor`'s components, by component export index.
+/// The actor's native data is its `LightComponents` array (count, then object references) and,
+/// as the last `count x 64` bytes, one native `FMatrix` (rows X Y Z W, translation in row 3) per
+/// component, in array order.
+fn collection_matrices(pkg: &Package, actor: usize) -> HashMap<usize, glam::Mat4> {
+    let mut out = HashMap::new();
+    let Ok(data) = pkg.export_data(actor) else { return out };
+    let u32_at = |p: usize| data.get(p..p + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let comps: Vec<usize> = (0..pkg.exports.len()).filter(|&c| pkg.exports[c].outer == actor as i32 + 1 && pkg.export_class(c).ends_with("LightComponent")).collect();
+    if comps.is_empty() {
+        return out;
+    }
+    // The array: a count `n` followed by n object references that are all exports of the actor
+    // (a positive index).
+    let n_max = data.len() / 68;
+    for o in (0..data.len().saturating_sub(8)).step_by(4) {
+        let Some(n) = u32_at(o).map(|v| v as usize) else { break };
+        if n < comps.len() || n > n_max || o + 4 + n * 4 + n * 64 > data.len() {
+            continue;
+        }
+        let refs: Vec<u32> = (0..n).filter_map(|k| u32_at(o + 4 + k * 4)).collect();
+        if refs.len() != n || !refs.iter().all(|&r| r > 0 && (r as usize) <= pkg.exports.len()) || !comps.iter().all(|&c| refs.contains(&(c as u32 + 1))) {
+            continue;
+        }
+        let base = data.len() - n * 64;
+        for (k, r) in refs.iter().enumerate() {
+            let f: Vec<f32> = (0..16).map(|j| f32::from_bits(u32_at(base + k * 64 + j * 4).unwrap_or(0))).collect();
+            out.insert(*r as usize - 1, fmatrix_rows([[f[0], f[1], f[2], f[3]], [f[4], f[5], f[6], f[7]], [f[8], f[9], f[10], f[11]], [f[12], f[13], f[14], f[15]]]));
+        }
+        break;
+    }
+    out
+}
+
+/// The light components of `pkg` with `bRenderLightShafts` (UE3 light shafts; the retail ones are
+/// `DirectionalLightComponent`s, many in a `StaticLightCollectionActor` with no direct light). The
+/// light's position is `ULightComponent::GetPosition` (0x004e0440): `-direction x TraceDistance`
+/// (default 100000).
+pub fn read_light_shafts(pkg: &Package) -> Vec<dishonored_ir::LightShaft> {
+    let mut out = Vec::new();
+    let mut collections: HashMap<usize, HashMap<usize, glam::Mat4>> = HashMap::new();
+    for ci in 0..pkg.exports.len() {
+        if pkg.export_class(ci) != "DirectionalLightComponent" {
+            continue;
+        }
+        let ObjRef::Export(ai) = ObjRef::from_index(pkg.exports[ci].outer) else { continue };
+        if pkg.obj_name(ObjRef::from_index(pkg.exports[ai].outer)) != "PersistentLevel" {
+            continue;
+        }
+        let Ok(ch) = pkg.read_object(ci) else { continue };
+        let c = &ch.properties;
+        if !bool_or(c, "bRenderLightShafts", false) || !bool_or(c, "bEnabled", true) {
+            continue;
+        }
+        let world = match find(c, "CachedParentToWorld").map(|p| &p.value) {
+            Some(Value::Raw(_, b)) if b.len() == 64 => {
+                let f: Vec<f32> = b.chunks_exact(4).map(|x| f32::from_le_bytes([x[0], x[1], x[2], x[3]])).collect();
+                let row = |i: usize| [f[4 * i + 1], f[4 * i + 2], f[4 * i + 3], f[4 * i]];
+                fmatrix_rows([row(0), row(1), row(2), row(3)])
+            }
+            _ if pkg.export_class(ai) == "StaticLightCollectionActor" => collections.entry(ai).or_insert_with(|| collection_matrices(pkg, ai)).get(&ci).copied().unwrap_or(glam::Mat4::IDENTITY),
+            _ => pkg.read_object(ai).map(|h| actor_transform(&h.properties)).unwrap_or(glam::Mat4::IDENTITY),
+        } * component_transform(c);
+        let direction = world.x_axis.truncate().normalize_or(Vec3::NEG_Z);
+        let tint = match find(c, "BloomTint").map(|p| &p.value) {
+            Some(Value::Color(rgba)) => [0, 1, 2].map(|k| crate::lightmap::color_to_linear(rgba[k])),
+            _ => [1.0; 3],
+        };
+        out.push(dishonored_ir::LightShaft {
+            source: format!("{}:{}", pkg.name, pkg.obj_path(ObjRef::Export(ci))),
+            position: -direction * float_or(c, "TraceDistance", 100000.0),
+            // `Default__LightComponent`.
+            occlusion_depth_range: float_or(c, "OcclusionDepthRange", 20000.0),
+            bloom_scale: float_or(c, "BloomScale", 2.0),
+            bloom_threshold: float_or(c, "BloomThreshold", 0.0),
+            bloom_screen_blend_threshold: float_or(c, "BloomScreenBlendThreshold", 1.0),
+            bloom_tint: if find(c, "BloomTint").is_some() { tint } else { [1.0; 3] },
+            radial_blur_percent: float_or(c, "RadialBlurPercent", 100.0),
+            occlusion_mask_darkness: float_or(c, "OcclusionMaskDarkness", 0.3),
+        });
+    }
+    out
 }
 
 /// A placed light actor of `pkg` (`PointLight`, `SpotLightToggleable`, `DominantDirectionalLight`,
