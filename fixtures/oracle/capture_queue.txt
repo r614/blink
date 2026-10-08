@@ -124,22 +124,23 @@ session dump class=DisDarknessManager
 session read object=Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release path=m_DarknessLevels
 session read object=Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release path=m_Deeds
 # Score clamp and level mapping (sequence, in this order; dump the manager and print the level after each):
+# (retail has no adddarkness / debugdarkness console commands: `session darkness` runs the engine's add 0x00C41B50 and reads the score and level)
 # expected score 0 (clamp), then 11 (level 0), 12 (level 1), 47 (1), 48 (2), 389 (9), 390 (10)
-session console command=adddarkness -50
+session darkness add=-50
 session dump class=DisDarknessManager
-session console command=debugdarkness
-session console command=adddarkness 11
-session console command=debugdarkness
-session console command=adddarkness 1
-session console command=debugdarkness
-session console command=adddarkness 35
-session console command=debugdarkness
-session console command=adddarkness 1
-session console command=debugdarkness
-session console command=adddarkness 341
-session console command=debugdarkness
-session console command=adddarkness 1
-session console command=debugdarkness
+session darkness
+session darkness add=11
+session darkness
+session darkness add=1
+session darkness
+session darkness add=35
+session darkness
+session darkness add=1
+session darkness
+session darkness add=341
+session darkness
+session darkness add=1
+session darkness
 # U-W7: coin cap (give a very large count, read it back)
 session find class=DishonoredInventory
 # Door states and lock flags as placed (Boyle Ext sublevel L_Boyle_Ext_Audio has 8 DisDoor, 4 locked with keys)
@@ -148,15 +149,17 @@ session dump class=DisDoor filter=m_bLocked limit=40
 session dump class=DisDoor filter=m_MatchingKeys limit=40
 # Door Use (sequence): DisDoor_21 (unlocked wood) at (-3215, 2710, 203), yaw -5.6 deg; stand ~100 uu from the hinge side, look at it
 # (adjust the placement with the door's collision centre from the dump above)
-session place location=-3215,2610,292 yaw=84 snap=true
+# (placement from the door's collision centre (-3207.7, 2784.8, 322.7), the panel thin along X: 100 uu on -X, facing +X)
+session place location=-3307.7,2784.8,300 yaw=0 pitch=-8 snap=true
 session step n=0
 session read object=DisDoor_21 path=m_DoorState
-session key key=F event=tap
+session key key=F event=tap ticks=3
 session step n=90
 session read object=DisDoor_21 path=m_DoorState
 # Locked key door DisDoor_2 at (-2023, 2315, 453) without the key: Use must not open it (state stays 0)
-session place location=-2023,2215,542 yaw=90 snap=true
-session key key=F event=tap
+# (collision centre (-2022.2, 2240, 573), thin along X: 100 uu on -X, facing +X)
+session place location=-2122.2,2240,560 yaw=0 pitch=-8 snap=true
+session key key=F event=tap ticks=3
 session step n=90
 session read object=DisDoor_2 path=m_DoorState
 session read object=DisDoor_2 path=m_bLocked

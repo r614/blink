@@ -25,6 +25,7 @@ use dishonored_probe::Client;
 use std::path::PathBuf;
 
 mod capture;
+mod hookev;
 mod lab;
 mod measure;
 mod playground;

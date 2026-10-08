@@ -203,6 +203,51 @@ fn npc_pawn(s: &mut Session, name: &str) -> Result<u32> {
     bail!("{name}: neither a pawn nor a spawner with a live pawn")
 }
 
+/// The player power component class of a left-hand name.
+fn power_component(h: &str) -> Option<&'static str> {
+    Some(match h {
+        "Blink" => "DishonoredActivePowerComponent_Blink",
+        "Windblast" | "WindBlast" => "DishonoredActivePowerComponent_WindBlast",
+        "DarkVision" => "DisActivePowerComponent_DarkVision",
+        "Possession" | "Possess" => "DishonoredActivePowerComponent_Possess",
+        "BendTime" => "DishonoredActivePowerComponent_BendTime",
+        "DevouringSwarm" => "DishonoredActivePowerComponent_DevouringSwarm",
+        _ => return None,
+    })
+}
+
+/// (weapon class, eDisAmmoType, index in the weapon's ammo list) of an ammo selection.
+fn ammo_select(h: &str) -> Option<(&'static str, u8, u32)> {
+    Some(match h {
+        "Crossbow" => ("DisWepCrossbow", 2, 0),
+        "SleepDart" => ("DisWepCrossbow", 3, 1),
+        "IncendiaryBolt" => ("DisWepCrossbow", 4, 2),
+        "Grenade" => ("DisWepGrenade", 6, 0),
+        "StickyGrenade" => ("DisWepGrenade", 7, 1),
+        "Pistol" => ("DishonoredWepPistol", 0, 0),
+        _ => return None,
+    })
+}
+
+/// eDisAmmoType index of a port ammo name.
+fn ammo_index(name: &str) -> Option<usize> {
+    Some(match name {
+        "Bullet" => 0,
+        "BulletExplosive" => 1,
+        "Bolt" => 2,
+        "SleepDart" => 3,
+        "IncendiaryBolt" => 4,
+        "SpringRazor" => 5,
+        "Grenade" => 6,
+        "StickyGrenade" => 7,
+        _ => return None,
+    })
+}
+
+fn pawn_now(s: &mut Session) -> Result<u32> {
+    crate::lab::pawn(&mut s.c)
+}
+
 /// Offset of a property in an object's class (or its supers).
 fn field_off(s: &mut Session, obj: u32, name: &str) -> Result<u32> {
     let cls = s.r.class_of(&mut s.c, obj)?;
@@ -356,7 +401,31 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
             "Bolt" => &["Twk_Inv_CrossbowCorvo"],
             "Grenade" => &["Twk_Inv_GrenadeCorvo"],
             "SpringRazor" => &["Twk_Inv_SpringRazorCorvo"],
+            "SleepDart" | "IncendiaryBolt" => &["Twk_Inv_CrossbowCorvo"],
+            "StickyGrenade" => &["Twk_Inv_GrenadeCorvo"],
+            "BulletExplosive" => &["Twk_Inv_PistolCorvo"],
             "Reset" => &[],
+            "HealthElixir" | "ManaElixir" => {
+                // DishonoredInventory.m_ElixirCounts[0 health, 1 mana].
+                let k = if name == "HealthElixir" { 0 } else { 1 };
+                let n = it.split_once(':').and_then(|x| x.1.parse::<i64>().ok()).unwrap_or(1);
+                let pw = pawn_now(s)?;
+                let pl = s.r.place(&mut s.c, pw, &format!("m_pInventory.m_ElixirCounts[{k}]"))?;
+                s.r.write_place(&mut s.c, &pl, &json!(n))?;
+                &[]
+            }
+            "Upgrade" => {
+                // DishonoredPlayerPawn.OnGiveUpgrade with DisSeqAct_GiveUpgrade's default
+                // (m_pUpgrade = Twk_Upgrades.Twk_Upgrade_<name>).
+                let up = it.split_once(':').map(|x| x.1).unwrap_or("");
+                let tw = s.r.object(&mut s.c, &format!("Twk_Upgrade_{up}"), None)?;
+                let act = s.r.object(&mut s.c, "Default__DisSeqAct_GiveUpgrade", None)?;
+                let pl = s.r.place(&mut s.c, act, "m_pUpgrade")?;
+                s.c.write(pl.addr, &tw.to_le_bytes())?;
+                let pw = pawn_now(s)?;
+                s.r.call(&mut s.c, pw, "DishonoredPlayerPawn.OnGiveUpgrade", &json!([crate::reflect::hex(act)]))?;
+                &[]
+            }
             _ => {
                 gap(format!("item {it} has no mapping to an original tweak"), &mut warnings)?;
                 &[]
@@ -367,6 +436,16 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
         }
         for t in tweaks {
             crate::lab::give(&mut s.c, t, true)?;
+        }
+        // The count: the inventory's m_AmmoInfo[eDisAmmoType] (`:<n>`, default the capacity).
+        if let Some(k) = ammo_index(name) {
+            let path = format!("m_pInventory.m_AmmoInfo[{k}]");
+            let pw = pawn_now(s)?;
+            let pl = s.r.place(&mut s.c, pw, &path)?;
+            let cur = s.r.read_place(&mut s.c, &pl)?;
+            let cap = cur["m_AmmoCapacity"].as_i64().unwrap_or(0);
+            let n = it.split_once(':').and_then(|x| x.1.parse::<i64>().ok()).unwrap_or(cap);
+            s.r.write_place(&mut s.c, &pl, &json!({"m_AmmoCount": n}))?;
         }
     }
     for (cls, hand) in &spec.setup.equip {
@@ -386,9 +465,18 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     let mut used: Vec<u32> = Vec::new();
     for (k, n) in spec.setup.npcs.iter().enumerate() {
         let id = n.id.clone().or_else(|| n.spawner.clone()).unwrap_or_else(|| format!("npc{k}"));
-        let pawn = match &n.spawner {
-            Some(name) => npc_pawn(s, name)?,
-            None => {
+        // A pawn tweak: the host level's live NPC with that tweak, when there is one.
+        let by_tweak = match &n.tweak {
+            Some(tw) => {
+                let short = tw.rsplit('.').next().unwrap_or(tw).to_string();
+                crate::lab::npcs(&mut s.c)?.into_iter().find(|c| c.health > 0 && !used.contains(&c.addr) && (c.tweak == *tw || c.tweak.ends_with(&format!(".{short}")))).map(|c| c.addr)
+            }
+            None => None,
+        };
+        let pawn = match (&n.spawner, by_tweak) {
+            (_, Some(p)) => p,
+            (Some(name), None) => npc_pawn(s, name)?,
+            (None, None) => {
                 let guard = n.kind.as_deref().unwrap_or("Guard").eq_ignore_ascii_case("Guard");
                 let cand = crate::lab::npcs(&mut s.c)?.into_iter().find(|c| c.health > 0 && !used.contains(&c.addr) && c.tweak.contains("Guard") == guard && !c.tweak.contains("Tallboy") && !c.tweak.contains("Boatman") && !c.tweak.contains("LordShaw"));
                 match cand {
@@ -401,7 +489,7 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
             }
         };
         used.push(pawn);
-        if n.tweak.is_some() {
+        if n.tweak.is_some() && by_tweak.is_none() {
             gap(format!("NPC {id}: tweak {:?} not applied (the host level's pawn keeps its own)", n.tweak), &mut warnings)?;
         }
         if !n.route.is_empty() {
@@ -460,6 +548,22 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
             crate::lab::give(&mut s.c, "Twk_Inv_SwordCorvo", true)?;
         }
         s.place((glam::Vec3::from(ps.position) + off).to_array(), Some(ps.yaw), Some(ps.pitch), ps.snap_to_floor)?;
+        // An airborne start (no floor within the cylinder's half height + 10 below the
+        // centre): the pawn starts PHYS_Falling with zero velocity, as the port's runner does;
+        // a walking pawn left in the air would hover there.
+        let airborne = {
+            let at = glam::Vec3::from(ps.position) + off;
+            let pawn = crate::lab::pawn(&mut s.c)?;
+            let h = s.read_value("pawn", "CylinderComponent.CollisionHeight")?.as_f64().unwrap_or(87.5) as f32;
+            let q = dishonored_probe::LineQuery { start: at.to_array(), end: (at - glam::Vec3::Z * (h + 10.0)).to_array(), extent: [0.0; 3], flags: crate::session::TRACE_WORLD, source: pawn };
+            !s.c.line_checks(&[q])?.first().is_some_and(|r| r.hit)
+        };
+        if airborne && spec.setup.settle == 0 {
+            let pawn = crate::lab::pawn(&mut s.c)?;
+            let pl = s.r.place(&mut s.c, pawn, "Physics")?;
+            s.r.write_place(&mut s.c, &pl, &json!("PHYS_Falling"))?;
+            warnings.push("airborne start: PHYS_Falling set at frame 0".into());
+        }
         if spec.setup.settle > 0 {
             // A walking pawn does not look for its floor until it moves: start the settle
             // falling (PHYS_Falling written directly; `SetPhysics` is ignored for the player)
@@ -479,15 +583,8 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     }
     // The left hand at the start: a power (DisItemPowers on its component) or a weapon.
     if let Some(h) = &spec.setup.left_hand {
-        let power = match h.as_str() {
-            "Blink" => Some("DishonoredActivePowerComponent_Blink"),
-            "Windblast" | "WindBlast" => Some("DishonoredActivePowerComponent_WindBlast"),
-            "DarkVision" => Some("DisActivePowerComponent_DarkVision"),
-            "Possession" | "Possess" => Some("DishonoredActivePowerComponent_Possess"),
-            "BendTime" => Some("DishonoredActivePowerComponent_BendTime"),
-            "DevouringSwarm" => Some("DishonoredActivePowerComponent_DevouringSwarm"),
-            _ => None,
-        };
+        let power = power_component(h);
+
         let weapon = match h.as_str() {
             "Pistol" => Some(("Twk_Inv_PistolCorvo", "DishonoredWepPistol")),
             "Crossbow" | "SleepDart" | "IncendiaryBolt" => Some(("Twk_Inv_CrossbowCorvo", "DisWepCrossbow")),
@@ -500,13 +597,52 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
         } else if let Some((tw, cls)) = weapon {
             crate::lab::give(&mut s.c, tw, true)?;
             crate::lab::equip(&mut s.c, cls, 2)?;
+            if let Some((cls, e, i)) = ammo_select(h) {
+                s.c.step(20, 60_000)?;
+                let w = crate::oracle::player_item(&mut s.c, cls)?;
+                s.c.write(w + 0x118, &[e])?;
+                s.c.write(w + 0x120, &i.to_le_bytes())?;
+            }
         } else {
             gap(format!("left hand {h}"), &mut warnings)?;
         }
     }
+    // Mid-run hand switches between powers: a write of DisItemPowers.m_pCurrentActivePower
+    // (the power wheel's selection) at that tick; weapons and drinks are not scripted yet.
+    let mut hand_writes: Vec<(u32, u32, u32)> = Vec::new();
+    let mut drink_keys: Vec<(u32, &'static str)> = Vec::new();
     for st in &spec.input {
-        if matches!(st.action, Action::Hand(_) | Action::Drink(_)) {
-            gap(format!("input {:?} at tick {} (hand switches and drinks are not scripted on the original yet)", st.action, st.tick), &mut warnings)?;
+        match &st.action {
+            Action::Hand(h) => match power_component(h) {
+                Some(comp_class) => {
+                    let comp = crate::oracle_powers::power_comp(&mut s.c, comp_class)?;
+                    let item = match crate::oracle::player_item(&mut s.c, "DisItemPowers") {
+                        Ok(i) => i,
+                        Err(_) => {
+                            crate::lab::equip(&mut s.c, "DisItemPowers", 2)?;
+                            s.c.step(20, 60_000)?;
+                            crate::oracle::player_item(&mut s.c, "DisItemPowers")?
+                        }
+                    };
+                    hand_writes.push((st.tick, item + crate::oracle_powers::ITEM_POWERS_CURRENT, comp));
+                }
+                None => match ammo_select(h).map(|(cls, e, i)| (crate::oracle::player_item(&mut s.c, cls), e, i)) {
+                    // An ammo switch of the held weapon (m_CurAmmoType +0x118 / m_iCurAmmoType
+                    // +0x120); the loaded round is not swapped (the next reload takes the type).
+                    Some((Ok(w), e, i)) => {
+                        hand_writes.push((st.tick, w + 0x118, e as u32 | 0xffff_ff00));
+                        hand_writes.push((st.tick, w + 0x120, i));
+                        warnings.push(format!("Hand({h}) at tick {}: ammo type written; the loaded round is kept", st.tick));
+                    }
+                    _ => gap(format!("input Hand({h}) at tick {} (weapon switches are not scripted on the original yet)", st.tick), &mut warnings)?,
+                },
+            },
+            // Drinks: the elixir keys (DefaultInput m_PCBindings: R GBA_HealthElixir, T GBA_ManaElixir).
+            Action::Drink(x) => {
+                let k = if x.contains("Mana") { "T" } else { "R" };
+                drink_keys.push((st.tick, k));
+            }
+            _ => {}
         }
     }
     // `settle`: ticks run before tick 0 (the pawn lands and equips).
@@ -649,6 +785,21 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
             actions.push((st.tick, ScriptAction::Console(c.clone())));
         }
     }
+    for (t, k) in &drink_keys {
+        actions.push((*t, ScriptAction::Key(k.to_string(), true)));
+        actions.push((*t + 2, ScriptAction::Key(k.to_string(), false)));
+    }
+    for (t, addr, v) in &hand_writes {
+        // 0xFFFFFF00 | byte: a one-byte write.
+        let bytes = if v & 0xffff_ff00 == 0xffff_ff00 { vec![*v as u8] } else { v.to_le_bytes().to_vec() };
+        actions.push((*t, ScriptAction::Write(*addr, bytes)));
+    }
+    let hw = crate::hookev::Want {
+        sounds: want(&Record::Sounds),
+        effects: want(&Record::Effects),
+        noises: want(&Record::Sounds) || spec.record.iter().any(|r| matches!(r, Record::Npc(_))),
+    };
+    let hooks = if hw.any() { Some(crate::hookev::install(s, hw)?) } else { None };
     let t_run = Instant::now();
     let (base, frames, errors) = s.c.run_script(spec.ticks, &read_paths, &actions, 3_600_000)?;
     let run_s = t_run.elapsed().as_secs_f64();
@@ -675,6 +826,11 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     }
     let raw_events = if tracing { s.c.event_fetch()? } else { Vec::new() };
     let raw_spawns = if spawns { s.c.spawn_fetch()? } else { Vec::new() };
+    if let Some(h) = hooks {
+        let ti = trace.channel("world.time").context("no world.time channel")?;
+        let times: Vec<f64> = trace.frames.iter().map(|f| f.values[ti]).collect();
+        trace.events.extend(crate::hookev::collect(s, h, &times)?);
+    }
     // world.dt: the game time each tick advanced (1 / tick_hz under the fixed step).
     if let Some(ti) = trace.channel("world.time") {
         trace.channels.push(dishonored_oracle::trace::Channel { name: "world.dt".into(), unit: "s".into() });
@@ -852,6 +1008,9 @@ pub fn run_reads(s: &mut Session, a: &Value) -> Result<Value> {
     // "damage": true logs every call of the pawn damage path (0x00B5CCD0, oracle.rs).
     let damage = a.get("damage").and_then(Value::as_bool).unwrap_or(false);
     let dh = if damage { Some(crate::oracle_combat::damage_hook(&mut s.c)?) } else { None };
+    let flag = |k: &str| a.get(k).and_then(Value::as_bool).unwrap_or(false);
+    let hw = crate::hookev::Want { sounds: flag("sounds"), effects: flag("effects"), noises: flag("noises") };
+    let hooks = if hw.any() { Some(crate::hookev::install(s, hw)?) } else { None };
     let paths: Vec<ReadPath> = ch.list.iter().filter_map(|c| c.path.clone()).collect();
     let (base, frames, errors) = s.c.run_script(ticks, &paths, &actions, 3_600_000)?;
     let damage_recs = match dh {
@@ -875,6 +1034,12 @@ pub fn run_reads(s: &mut Session, a: &Value) -> Result<Value> {
         out_frames.push(Value::Array(v));
     }
     let mut out = json!({"base_tick": base, "channels": ch.list.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), "frames": out_frames, "errors": errors});
+    if let Some(h) = hooks {
+        let ti = ch.list.iter().position(|c| c.name == "world.time").unwrap();
+        let times: Vec<f64> = frames.iter().map(|row| row[ti].as_ref().map(|b| value(Kind::F32, b)).unwrap_or(f64::NAN)).collect();
+        let evs = crate::hookev::collect(s, h, &times)?;
+        out["hook_events"] = serde_json::to_value(&evs)?;
+    }
     if damage {
         // The frame whose world time first reaches the call's time is the tick it happened in.
         let ti = ch.list.iter().position(|c| c.name == "world.time").unwrap();
