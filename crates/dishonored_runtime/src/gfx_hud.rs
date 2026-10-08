@@ -26,7 +26,7 @@
 
 use crate::gfx_stage::{Draw, Event, Fonts, ImageRef, MovieData, SlotImage, SlotText, Stage, StageTextures, StageView};
 use crate::hud_popups::{PopupContent, PopupQueue};
-use crate::hud_widgets::{AwarenessMarker, HudFxWidgets, HudWidgets, MarkerInput, MarkerPlace, ObjState, TargetTexts, TaskLine, awareness};
+use crate::hud_widgets::{AwarenessMarker, HudFxWidgets, HudWidgets, MarkerInput, MarkerPlace, ObjState, TW_IMG_CHARM, TW_IMG_RUNE, TargetTexts, TaskLine, TutorialWindow, awareness};
 use crate::session::{Session, SessionView};
 use bevy::prelude::*;
 use bevy::text::{LetterSpacing, LineHeight};
@@ -45,6 +45,8 @@ pub const GAME_MESSAGE_DURATION: f32 = 5.0;
 pub const TARGET_NOTIFICATION_DURATION: f32 = 5.0;
 pub const LOCATION_DISCOVERY_DURATION: f32 = 5.0;
 pub const CROSSHAIR_INTERPOLATION_SPEED: f32 = 4.5;
+/// `m_fTutorialDuration`.
+pub const TUTORIAL_DURATION: f32 = 10.0;
 
 /// The HUD movie on its stage.
 pub struct HudMovie {
@@ -77,6 +79,9 @@ pub struct HudTexts {
     pub rune: (String, String),
     pub elixirs: [String; 2],
     pub charm: String,
+    /// The tutorial window's texts by picture: `m_PressKeyToReadChapterNoteMessage` (1, note),
+    /// `m_PressKeyToBuyPowers` (2, rune), `m_PressKeyToEquipBoneCharms` (3, bone charm).
+    pub tutorial_windows: [String; 4],
     /// `m_EquipmentIcons[EDisPowerWheelItem]` (DefaultUI.ini `[DishonoredGame.DisGlobalUIManager]`).
     pub equipment_icons: HashMap<u8, String>,
     /// Key display names (Settings.int `[Keys]`).
@@ -121,8 +126,20 @@ struct Native {
     ticked_once: bool,
     equipment: Option<(u8, bool, bool, i32, i32)>,
     crosshair_pos: Option<Vec2>,
-    marker: Option<crate::gfx_stage::Id>,
+    /// `m_TaskMarkers`: the marker clips and whether each is the optional symbol.
+    task_markers: Vec<(crate::gfx_stage::Id, bool)>,
     inv: Option<dishonored_sim::state::Inventory>,
+    /// The mission's tutorial line / window last shown (view ids) and the time left on the line.
+    tutorial_seen: u32,
+    tutorial_left: f32,
+    tw_seen: u32,
+    /// Tutorial windows waiting (picture, text), the seconds the one up has been (0 when none) and
+    /// the first-time hints given (bit 0 a rune, bit 1 a bone charm).
+    tw_queue: Vec<(u8, String)>,
+    tw_timer: f32,
+    hints: u8,
+    /// Task markers the harness placed (`{"hud": {"kind": "task_markers"}}`).
+    test_markers: Vec<(glam::Vec3, bool, String)>,
     game_msg_seen: u32,
     location_seen: u32,
     last_mission: Option<(String, u32)>,
@@ -182,6 +199,12 @@ fn load_texts(content: &dishonored_assets::Content) -> HudTexts {
     t.rune = (g("AbstractItems.Rune_AbsItm DisAbstractItem", "m_ItemName", "Rune"), g("AbstractItems.Rune_AbsItm DisAbstractItem", "m_PluralItemName", "Runes"));
     t.elixirs = [g("DisUISelectionType", "Health", "Health"), g("DisUISelectionType", "Mana", "Mana")];
     t.charm = g("DisUISelectionType", "BoneCharm", "Bone Charm");
+    t.tutorial_windows = [
+        String::new(),
+        g(tw, "m_PressKeyToReadChapterNoteMessage", "Mission Clues updated<br />Press `GBA_Journal` to read"),
+        g(tw, "m_PressKeyToBuyPowers", "New Rune added<br />Press `GBA_Journal` to acquire Powers"),
+        g(tw, "m_PressKeyToEquipBoneCharms", "New Bone Charm added<br />Press `GBA_Journal` to equip"),
+    ];
     for ((sec, k), v) in &loc.entries {
         if sec == "Keys" {
             t.keys.insert(k.clone(), v.clone());
@@ -371,6 +394,87 @@ pub fn marker_projection(cam: &GlobalTransform, window: Vec2, tan_h: f32, world_
     (centre + d * (half.x / d.x.abs().max(1e-4)).min(half.y / d.y.abs().max(1e-4)), true, dist)
 }
 
+/// `m_fMarkerFocusDistance` (Twk_GFxMoviePlayerHUD): the marker nearest the middle of the stage,
+/// within this many stage pixels, is focused and shows its description (`m_bCanFocus`).
+pub const MARKER_FOCUS_DISTANCE: f32 = 225.0;
+
+/// The task markers (`m_TaskMarkers`, 0x00BAD550 builds them from the player's active task
+/// targets; the settings are `m_TaskMarkerSettings` / `m_OptionalTaskMarkerSettings`):
+/// `m_fWorldOffsetZ` 10 above the target, scale 90 % at 10000 uu growing to 150 % at 500 uu,
+/// alpha 100 from 1000 uu down to 0 at the target. The tweak sets no `m_bKeepBBInMarkerArea`, so
+/// a marker outside the marker area (or behind the camera) is simply hidden. The description
+/// (`_description_mc`) is shown on the focused marker: the target's `m_TargetName` and, with
+/// `m_TaskMarkerSpecificSettings.m_bShowDistance`, its distance in metres (100 uu).
+fn update_task_markers(st: &mut Stage, n: &mut Native, layer: Option<crate::gfx_stage::Id>, wanted: &[(glam::Vec3, bool, String)], cam: Option<&GlobalTransform>, window: Option<Vec2>, tan_h: f32) {
+    use crate::gfx_stage::Prop;
+    let (Some(layer), Some(cam), Some(win)) = (layer, cam, window) else {
+        for (id, _) in n.task_markers.drain(..) {
+            if st.alive(id) {
+                st.remove(id);
+            }
+        }
+        return;
+    };
+    while n.task_markers.len() > wanted.len() {
+        if let Some((id, _)) = n.task_markers.pop() {
+            if st.alive(id) {
+                st.remove(id);
+            }
+        }
+    }
+    let centre = crate::gfx_stage::STAGE * 0.5;
+    let mut placed: Vec<Option<(Vec2, f32)>> = Vec::new();
+    for (i, (pos, optional, _)) in wanted.iter().enumerate() {
+        if let Some(&(id, opt)) = n.task_markers.get(i)
+            && (opt != *optional || !st.alive(id))
+        {
+            if st.alive(id) {
+                st.remove(id);
+            }
+            n.task_markers.truncate(i);
+        }
+        if n.task_markers.len() <= i {
+            let d = st.next_depth(layer);
+            let Some(mk) = st.attach(layer, if *optional { "objectiveMarker_secondary" } else { "objectiveMarker_primary" }, &format!("taskMarker{i}"), d) else { break };
+            if let Some(desc) = st.child(mk, "_description_mc") {
+                st.set_visible(desc, false);
+            }
+            n.task_markers.push((mk, *optional));
+        }
+        // m_fWorldOffsetZ 10.
+        let (sp, off, dist) = marker_projection(cam, win, tan_h, *pos + glam::Vec3::Z * 10.0);
+        placed.push((!off).then_some((sp, dist)));
+    }
+    // The focused marker: nearest the middle, within m_fMarkerFocusDistance.
+    let focused = placed.iter().enumerate().filter_map(|(i, p)| p.map(|(sp, _)| (i, (sp - centre).length()))).filter(|(_, d)| *d < MARKER_FOCUS_DISTANCE).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| i);
+    let var = |d: f32, d0: f32, d1: f32, v0: f32, v1: f32| v0 + ((d - d0) / (d1 - d0)).clamp(0.0, 1.0) * (v1 - v0);
+    for (i, &(mk, _)) in n.task_markers.iter().enumerate() {
+        let Some(Some((sp, dist))) = placed.get(i).copied() else {
+            st.set_visible(mk, false);
+            continue;
+        };
+        // m_ScaleVariation (10000 uu -> 90 %, 500 uu -> 150 %), m_AlphaVariation (1000 uu -> 100,
+        // 0 -> 0).
+        let scale = var(dist, 10000.0, 500.0, 90.0, 150.0);
+        let alpha = var(dist, 1000.0, 0.0, 100.0, 0.0);
+        st.set(mk, Prop::X, sp.x);
+        st.set(mk, Prop::Y, sp.y);
+        st.set(mk, Prop::XScale, scale);
+        st.set(mk, Prop::YScale, scale);
+        st.set(mk, Prop::Alpha, alpha);
+        st.set_visible(mk, true);
+        if let Some(desc) = st.child(mk, "_description_mc") {
+            let on = focused == Some(i);
+            st.set_visible(desc, on);
+            if on && let Some(t) = st.child(desc, "txt") {
+                let name = &wanted[i].2;
+                let metres = (dist / 100.0).round() as i32;
+                st.set_text(t, &if name.is_empty() { format!("{metres} m") } else { format!("{name} ({metres} m)") });
+            }
+        }
+    }
+}
+
 /// The awareness marker manager (`FUN_00BAD960`) and the markers' update: one marker per NPC
 /// with a displayable attention level toward the player.
 #[allow(clippy::too_many_arguments)]
@@ -506,6 +610,12 @@ pub fn update_gfx_hud(
         n.inv = None;
         n.game_msg_seen = mission.and_then(|mv| mv.messages.last().map(|x| x.0)).unwrap_or(0);
         n.location_seen = mission.and_then(|mv| mv.location.as_ref().map(|x| x.0)).unwrap_or(0);
+        n.tutorial_seen = mission.and_then(|mv| mv.tutorial.as_ref().map(|x| x.0)).unwrap_or(0);
+        n.tw_seen = mission.and_then(|mv| mv.tutorial_window.as_ref().map(|x| x.0)).unwrap_or(0);
+        n.tw_queue.clear();
+        n.tw_timer = 0.0;
+        n.tutorial_left = 0.0;
+        n.hints = 0;
         hud.popups = PopupQueue::default();
     }
 
@@ -515,9 +625,10 @@ pub fn update_gfx_hud(
     if let (Some(p), Some(g)) = (me, w.gauges.as_mut()) {
         let max = dishonored_sim::powers::health_max(p, cfg).max(1.0) as i32;
         let health = p.vitals.health.max(0.0) as i32;
-        // Bit 0: a bone charm raises the maximum; bit 1: Vitality (0x00B9F6E0).
+        // Bit 0: the attribute carries a "Whale Bone Charm Attribute_HealthMax" modifier; bit 1:
+        // a "Vitality 1 (0)" / "Vitality 2 (0)" one (0x00B9F6E0, `FUN_00C7E1C0`; U-887).
         let large = p.inv.power_levels[dishonored_sim::state::power::VITALITY] > 0;
-        let small = !large && max as f32 > cfg.vitals.health_max + 0.5;
+        let small = dishonored_sim::powers::charm_modifies(p, cfg, "Attribute_HealthMax");
         let flags = small as u8 | (large as u8) << 1;
         let hv = (health, 0, max, flags);
         if n.health != Some(hv) {
@@ -531,7 +642,7 @@ pub fn update_gfx_hud(
         let regen = (p.vitals.mana_regen_cap - p.vitals.mana).max(0.0) as i32;
         let has_powers = p.inv.power_levels.iter().take(6).any(|l| *l > 0);
         let available = p.possess.host.is_none();
-        let upg = mmax as f32 > cfg.vitals.mana_max + 0.5;
+        let upg = dishonored_sim::powers::charm_modifies(p, cfg, "Attribute_ManaMax");
         let mflags = has_powers as u8 | (available as u8) << 1 | (upg as u8) << 2;
         let mv = (mana, regen, mmax, mflags);
         if n.mana != Some(mv) {
@@ -642,54 +753,29 @@ pub fn update_gfx_hud(
     let shown = alive && !cutscene && style > 0;
     w.crosshairs.place(st, [pos.x, pos.y], shown && show_dot, shown && aspect.is_some(), opacity);
 
-    // --- task marker (`m_TaskMarkerSettings`: objectiveMarker_primary in markers_mc) ---
-    let marker_at = mission.filter(|mv| mv.outcome.is_none()).and_then(|mv| mv.target).filter(|_| hs.objective_markers && alive && !cutscene);
-    let placed = match (marker_at, window, me) {
-        (Some(t), Some(win), Some(p)) => cams.iter().next().and_then(|(cam, gt)| {
-            // m_fWorldOffsetZ 10.
-            let world = glam::Vec3::from(t) + glam::Vec3::Z * 10.0;
-            let v = cam.world_to_viewport(gt, crate::coords::pos(Vec3::new(world.x, world.y, world.z))).ok()?;
-            let (s, off) = crate::gfx_stage::stage_xform(win);
-            let sp = (v - off) / s;
-            // Kept inside the marker area (m_fMarkerAreaRatio_PC 0.9 of the screen).
-            let half = crate::gfx_stage::STAGE * 0.5 * 0.9;
-            let c = crate::gfx_stage::STAGE * 0.5;
-            let sp = c + (sp - c).clamp(-half, half);
-            Some((sp, world.distance(p.position + glam::Vec3::Z * 64.0)))
-        }),
-        _ => None,
-    };
-    let markers_mc = st.child(st.root, "markers_mc");
-    match (placed, markers_mc) {
-        (Some((sp, dist)), Some(layer)) => {
-            if n.marker.is_none_or(|m| !st.alive(m)) {
-                let d = st.next_depth(layer);
-                n.marker = st.attach(layer, "objectiveMarker_primary", "taskMarker0", d);
-                if let Some(desc) = n.marker.and_then(|m| st.child(m, "_description_mc")) {
-                    st.set_visible(desc, false);
+    // --- task markers (`m_TaskMarkers`, `m_TaskMarkerSettings`: objectiveMarker_primary / _secondary
+    // in markers_mc, one per visible active task with a target) ---
+    {
+        let wanted: Vec<(glam::Vec3, bool, String)> = if !n.test_markers.is_empty() && alive {
+            n.test_markers.clone()
+        } else {
+            mission
+            .filter(|mv| mv.outcome.is_none() && hs.objective_markers && alive && !cutscene)
+            .map(|mv| {
+                if mv.task_markers.is_empty() {
+                    mv.target.map(|t| vec![(glam::Vec3::from(t), false, String::new())]).unwrap_or_default()
+                } else {
+                    mv.task_markers.iter().map(|m| (glam::Vec3::from(m.pos), m.optional, m.name.clone())).collect()
                 }
-            }
-            if let Some(mk) = n.marker {
-                // m_ScaleVariation (10000 uu -> 90 %, 500 uu -> 150 %) and m_AlphaVariation
-                // (1000 uu -> 100, 0 uu -> 0).
-                let var = |d: f32, d0: f32, d1: f32, v0: f32, v1: f32| v0 + ((d - d0) / (d1 - d0)).clamp(0.0, 1.0) * (v1 - v0);
-                let scale = var(dist, 10000.0, 500.0, 90.0, 150.0);
-                let alpha = var(dist, 1000.0, 0.0, 100.0, 0.0);
-                st.set(mk, crate::gfx_stage::Prop::X, sp.x);
-                st.set(mk, crate::gfx_stage::Prop::Y, sp.y);
-                st.set(mk, crate::gfx_stage::Prop::XScale, scale);
-                st.set(mk, crate::gfx_stage::Prop::YScale, scale);
-                st.set(mk, crate::gfx_stage::Prop::Alpha, alpha);
-                st.set_visible(mk, true);
-            }
-        }
-        _ => {
-            if let Some(mk) = n.marker.take() {
-                st.remove(mk);
-            }
-        }
+            })
+            .unwrap_or_default()
+        };
+        let hfov = settings.as_ref().map(|s| s.s.graphics.fov).unwrap_or(crate::viewmodel::HORIZONTAL_FOV_DEG);
+        let tan_h = (hfov.to_radians() * 0.5).tan();
+        let layer = st.child(st.root, "markers_mc");
+        let cam = cams.iter().next().map(|(_, gt)| gt);
+        update_task_markers(st, n, layer, &wanted, cam, window, tan_h);
     }
-
     // --- awareness markers (m_AwarenessMarkers, 0x00BAD960) ---
     {
         let hfov = settings.as_ref().map(|s| s.s.graphics.fov).unwrap_or(crate::viewmodel::HORIZONTAL_FOV_DEG);
@@ -716,10 +802,12 @@ pub fn update_gfx_hud(
     let show_interactions = hs.interactions;
     let lines = focus.as_ref().filter(|_| show_interactions && alive && !cutscene).map(|f| convert_key_tags(&f.text, bindings.as_deref(), &hud.texts.keys));
     if let Some(iw) = w.interaction_window.as_mut() {
-        iw.set_interactions(st, "", lines.as_deref());
+        iw.set_interactions(st, focus.as_ref().map(|f| f.name.as_str()).unwrap_or(""), lines.as_deref());
     }
+    // The crosshair's info line over someone asleep (`m_CrosshairFocusText`).
+    let sleeper = me.filter(|_| alive && !cutscene).and_then(|p| crate::hud_popups::focused_sleeper(&view, p, local.yaw, local.pitch)).map(|_| crate::hud_popups::ASLEEP_CROSSHAIR_TEXT);
     if let Some(ci) = w.crosshair_info.as_mut() {
-        ci.set_text(st, None);
+        ci.set_text(st, sleeper);
     }
 
     // --- game messages (DisSeqAct_ShowHUDMessage) ---
@@ -746,6 +834,63 @@ pub fn update_gfx_hud(
         }
     }
 
+    // --- tutorial line (DisSeqAct_SetTutorialMessage, 0x00BAE4A0: `m_fTutorialDuration` 10 s
+    // unless the op gives one) and window (0x00BAD2F0 -> `SetTutorialWindow`, kept up
+    // `m_fTutorialWindowDuration` 10 s, one after the other) ---
+    {
+        let tutorials_on = hs.tutorial_notifications;
+        if let Some(mv) = mission {
+            if let Some((id, text, secs)) = &mv.tutorial {
+                if *id > n.tutorial_seen {
+                    n.tutorial_seen = *id;
+                    if tutorials_on && let Some(tm) = w.tutorial.as_mut() {
+                        tm.set_message(st, Some(&convert_key_tags(text, bindings.as_deref(), &hud.texts.keys)));
+                        n.tutorial_left = if *secs > 0.0 { *secs } else { TUTORIAL_DURATION };
+                    }
+                }
+            }
+            if let Some((id, picture, text)) = &mv.tutorial_window {
+                if *id > n.tw_seen {
+                    n.tw_seen = *id;
+                    let text = if text.is_empty() { hud.texts.tutorial_windows.get(*picture as usize).cloned().unwrap_or_default() } else { text.clone() };
+                    n.tw_queue.push((*picture, text));
+                }
+            }
+        }
+        if n.tutorial_left > 0.0 && !paused {
+            n.tutorial_left -= dt;
+            if n.tutorial_left <= 0.0 {
+                if let Some(tm) = w.tutorial.as_mut() {
+                    tm.set_message(st, None);
+                }
+            }
+        }
+        if !tutorials_on {
+            n.tw_queue.clear();
+        }
+        if let Some(tw) = w.tutorial_window.as_mut() {
+            if tw.opened {
+                if !paused {
+                    n.tw_timer += dt;
+                }
+                if n.tw_timer >= TutorialWindow::DURATION {
+                    tw.close(st);
+                    // (the next one waits for the slide out)
+                    n.tw_timer = -0.5;
+                }
+            } else if n.tw_timer < 0.0 {
+                n.tw_timer = (n.tw_timer + dt).min(0.0);
+                if n.tw_timer == 0.0 {
+                    n.tw_timer = 0.0;
+                }
+            } else if !n.tw_queue.is_empty() && !paused && alive {
+                let (picture, text) = n.tw_queue.remove(0);
+                tw.set_tutorial_window(st, &mut w.sounds, &convert_key_tags(&text, bindings.as_deref(), &hud.texts.keys), picture);
+                n.tw_timer = 0.0;
+            }
+        }
+    }
+
     // --- cinematic stripes ---
     if let Some(s) = w.stripes.as_mut() {
         s.set(st, cutscene, true);
@@ -755,6 +900,16 @@ pub fn update_gfx_hud(
     if let Some(p) = me {
         let show_log = hs.pickup_log;
         if let Some(prev) = n.inv.clone() {
+            // The first rune / bone charm gets its tutorial window (`m_PressKeyToBuyPowers` /
+            // `m_PressKeyToEquipBoneCharms`, `m_NumRunesPickedUp` / `m_bHasNewBoneCharm`).
+            if p.inv.runes > prev.runes && n.hints & 1 == 0 {
+                n.hints |= 1;
+                n.tw_queue.push((TW_IMG_RUNE, hud.texts.tutorial_windows[TW_IMG_RUNE as usize].clone()));
+            }
+            if p.inv.charms_owned & !prev.charms_owned != 0 && n.hints & 2 == 0 {
+                n.hints |= 2;
+                n.tw_queue.push((TW_IMG_CHARM, hud.texts.tutorial_windows[TW_IMG_CHARM as usize].clone()));
+            }
             let items = crate::hud_popups::pickup_items(&prev, &p.inv, &hud.texts);
             if show_log {
                 if let Some(log) = w.pickup_log.as_mut() {
@@ -774,7 +929,30 @@ pub fn update_gfx_hud(
         hud.popups.observe(mv);
     }
     for t in std::mem::take(&mut hud.tests) {
-        crate::hud_popups::apply_test(t, &mut hud.popups, w, st, &hud.texts, &mut img);
+        match t {
+            crate::hud_popups::HudTest::Tutorial { text, seconds } => {
+                if let Some(tm) = w.tutorial.as_mut() {
+                    tm.set_message(st, Some(&convert_key_tags(&text, bindings.as_deref(), &hud.texts.keys)));
+                    n.tutorial_left = seconds.unwrap_or(TUTORIAL_DURATION);
+                }
+            }
+            crate::hud_popups::HudTest::TutorialWindow { image, text } => {
+                let text = text.unwrap_or_else(|| hud.texts.tutorial_windows.get(image as usize).cloned().unwrap_or_default());
+                n.tw_queue.push((image, text));
+            }
+            crate::hud_popups::HudTest::TaskMarkers { markers } => {
+                // Metres ahead of / beside the player along the view (yaw).
+                n.test_markers = match me {
+                    Some(p) => {
+                        let f = dishonored_sim::movement::view_vector(local.yaw, 0.0);
+                        let (fx, fy) = (f.x, f.y);
+                        markers.into_iter().map(|(ahead, side, up, optional, name)| (p.position + glam::Vec3::new(fx * ahead * 100.0 + fy * side * 100.0, fy * ahead * 100.0 - fx * side * 100.0, up * 100.0), optional, name)).collect()
+                    }
+                    None => Vec::new(),
+                };
+            }
+            t => crate::hud_popups::apply_test(t, &mut hud.popups, w, st, &hud.texts, &mut img),
+        }
     }
     let obj_open = w.objectives.as_ref().is_some_and(|o| o.opened);
     let tgt_open = w.target.as_ref().is_some_and(|o| o.opened);

@@ -1541,6 +1541,180 @@ impl TutorialMessage {
 }
 
 // =============================================================================================
+// TutorialWindow (hud_tutoWin_, `tutorialWindow_mc`)
+// =============================================================================================
+
+const W_TUTOWIN: u16 = 16;
+const TW_OPEN_IMAGE: u16 = 1;
+const TW_ON_OPENED: u16 = 2;
+const TW_ANIM: u16 = 3;
+const TW_ANIM_LOOP: u16 = 4;
+const TW_ON_CLOSED: u16 = 5;
+
+/// The window's pictures (`_img_mc` frames `tutorialImg + 1`): a gear (tutorial note), a note
+/// (mission clues), a rune, a bone charm.
+pub const TW_IMG_GEAR: u8 = 0;
+pub const TW_IMG_NOTE: u8 = 1;
+pub const TW_IMG_RUNE: u8 = 2;
+pub const TW_IMG_CHARM: u8 = 3;
+
+/// `TutorialWindow` (class sprite 812): `SetTutorialWindow(text, image)` opens it (from the left
+/// at 250 %, 0.2 s `Back.easeOut`; the picture and strokes settle 150 ms later), then its parts
+/// drift to and fro (`Anim` 5 s / `AnimLoop` 4.25 s, each re-armed 0.5 s before it ends) until
+/// `Close()` (0.4 s). The native side keeps it up `m_fTutorialWindowDuration` (10 s) and
+/// calls `OnClosed` once it is gone.
+pub struct TutorialWindow {
+    pub mc: Id,
+    inner: Option<Id>,
+    bkgd: Option<Id>,
+    img: Option<Id>,
+    txt_mc: Option<Id>,
+    txt: Option<Id>,
+    black: Option<Id>,
+    white: Option<Id>,
+    /// `_bkgd_mc.props`, `_img_mc.props`, `_txt_mc.props`, `_blackStroke_mc.props`,
+    /// `_whiteStroke_mc.props` (saved by the constructor).
+    props: [Props; 5],
+    itvl_anim: Option<u32>,
+    itvl_open: Option<u32>,
+    itvl_closed: Option<u32>,
+    pub opened: bool,
+    /// Seconds up (the native side's `m_fTutorialWindowDuration` countdown).
+    pub shown_for: f32,
+}
+
+impl TutorialWindow {
+    pub const DURATION_ANIM: f32 = 5.0;
+    pub const DURATION_ANIM_LOOP: f32 = 4.25;
+    /// `m_fTutorialWindowDuration` (class default of `DisTweaks_GFxMoviePlayerHUD`).
+    pub const DURATION: f32 = 10.0;
+
+    pub fn new(st: &mut Stage, mc: Id) -> Self {
+        let inner = st.child(mc, "_mc");
+        let part = |st: &Stage, n: &str| inner.and_then(|i| st.child(i, n));
+        let (bkgd, img, txt_mc, black, white) = (part(st, "_bkgd_mc"), part(st, "_img_mc"), part(st, "_txt_mc"), part(st, "_blackStroke_mc"), part(st, "_whiteStroke_mc"));
+        let save = |st: &Stage, id: Option<Id>| id.map(|i| Props::save(st, i)).unwrap_or_default();
+        let props = [save(st, bkgd), save(st, img), save(st, txt_mc), save(st, black), save(st, white)];
+        let txt = txt_mc.and_then(|t| st.child(t, "txt"));
+        st.set_visible(mc, false);
+        Self { mc, inner, bkgd, img, txt_mc, txt, black, white, props, itvl_anim: None, itvl_open: None, itvl_closed: None, opened: false, shown_for: 0.0 }
+    }
+
+    /// `SetTutorialWindow(tutorialText, tutorialImg)`.
+    pub fn set_tutorial_window(&mut self, st: &mut Stage, snd: &mut SoundQueue, text: &str, img: u8) {
+        if let Some(t) = self.txt {
+            st.set_html(t, text);
+        }
+        goto_stop(st, self.img, &(img as u32 + 1).to_string());
+        self.open(st, snd);
+    }
+
+    fn open(&mut self, st: &mut Stage, snd: &mut SoundQueue) {
+        clear(st, &mut self.itvl_anim);
+        clear(st, &mut self.itvl_open);
+        clear(st, &mut self.itvl_closed);
+        self.clear_tweens(st, false);
+        st.set_visible(self.mc, true);
+        self.opened = true;
+        self.shown_for = 0.0;
+        snd.0.push("H_windowNotification");
+        tween_end(st, self.inner, false);
+        set(st, self.inner, Prop::Alpha, 0.0);
+        set(st, self.inner, Prop::X, -250.0);
+        set(st, self.inner, Prop::XScale, 250.0);
+        set(st, self.inner, Prop::YScale, 250.0);
+        tween(st, self.inner, 0.2, &[(Prop::X, 0.0), (Prop::Alpha, 100.0), (Prop::XScale, 100.0), (Prop::YScale, 100.0)], Ease::BackOut, None);
+        tween_end(st, self.txt_mc, false);
+        set(st, self.txt_mc, Prop::Alpha, 0.0);
+        tween_end(st, self.img, false);
+        set(st, self.img, Prop::Alpha, 0.0);
+        set(st, self.img, Prop::X, self.props[1].x);
+        tween_end(st, self.black, false);
+        set(st, self.black, Prop::Alpha, 0.0);
+        tween_end(st, self.white, false);
+        set(st, self.white, Prop::Alpha, 0.0);
+        interval(st, &mut self.itvl_open, 150.0, key(W_TUTOWIN, TW_OPEN_IMAGE, 0));
+        goto_play(st, self.inner, "open");
+    }
+
+    fn open_image(&mut self, st: &mut Stage) {
+        clear(st, &mut self.itvl_open);
+        set(st, self.img, Prop::YScale, 200.0);
+        set(st, self.img, Prop::XScale, 200.0);
+        tween(st, self.img, 0.2, &[(Prop::Alpha, 100.0), (Prop::XScale, 100.0), (Prop::YScale, 100.0)], Ease::StrongOut, None);
+        set(st, self.black, Prop::YScale, 200.0);
+        set(st, self.black, Prop::XScale, 200.0);
+        tween_props(st, self.black, 0.2, &self.props[3], Ease::BackOut);
+        set(st, self.white, Prop::Rotation, -15.0);
+        set(st, self.white, Prop::YScale, 200.0);
+        set(st, self.white, Prop::XScale, 200.0);
+        tween_props(st, self.white, 0.3, &self.props[4], Ease::StrongInOut);
+        set(st, self.txt_mc, Prop::YScale, 150.0);
+        set(st, self.txt_mc, Prop::XScale, 150.0);
+        tween_props(st, self.txt_mc, 0.2, &self.props[2], Ease::StrongInOut);
+        interval(st, &mut self.itvl_open, 0.3 * 1000.0, key(W_TUTOWIN, TW_ON_OPENED, 0));
+    }
+
+    fn anim(&mut self, st: &mut Stage) {
+        clear(st, &mut self.itvl_anim);
+        self.clear_tweens(st, false);
+        let d = Self::DURATION_ANIM;
+        let (b, i, t, w) = (self.props[0], self.props[1], self.props[2], self.props[4]);
+        tween(st, self.bkgd, d, &[(Prop::X, b.x - 10.0), (Prop::XScale, 102.0), (Prop::YScale, 102.0), (Prop::Alpha, 90.0)], Ease::StrongOut, None);
+        tween(st, self.img, d, &[(Prop::X, i.x + 10.0), (Prop::Rotation, 2.0)], Ease::StrongOut, None);
+        tween(st, self.txt_mc, d, &[(Prop::X, t.x - 10.0)], Ease::StrongOut, None);
+        tween(st, self.white, d, &[(Prop::X, w.x - 7.0), (Prop::Rotation, -5.0)], Ease::StrongOut, None);
+        interval(st, &mut self.itvl_anim, d * 1000.0 - 500.0, key(W_TUTOWIN, TW_ANIM_LOOP, 0));
+    }
+
+    fn anim_loop(&mut self, st: &mut Stage) {
+        clear(st, &mut self.itvl_anim);
+        self.clear_tweens(st, false);
+        let d = Self::DURATION_ANIM_LOOP;
+        for (id, p) in [(self.bkgd, 0), (self.img, 1), (self.txt_mc, 2), (self.white, 4)] {
+            tween_props(st, id, d, &self.props[p], Ease::StrongOut);
+        }
+        interval(st, &mut self.itvl_anim, d * 1000.0 - 500.0, key(W_TUTOWIN, TW_ANIM, 0));
+    }
+
+    fn clear_tweens(&mut self, st: &mut Stage, jump: bool) {
+        for id in [self.inner, self.txt_mc, self.img, self.black, self.white] {
+            tween_end(st, id, jump);
+        }
+    }
+
+    /// `Close()`; `OnClosed` (hidden) follows once the 0.4 s slide is over.
+    pub fn close(&mut self, st: &mut Stage) {
+        clear(st, &mut self.itvl_open);
+        clear(st, &mut self.itvl_anim);
+        self.clear_tweens(st, false);
+        self.opened = false;
+        tween(st, self.inner, 0.4, &[(Prop::X, -30.0), (Prop::Alpha, 0.0)], Ease::StrongOut, None);
+        tween(st, self.img, 0.2, &[(Prop::XScale, 120.0), (Prop::YScale, 120.0)], Ease::StrongOut, None);
+        tween(st, self.white, 0.25, &[(Prop::Alpha, 0.0), (Prop::XScale, 130.0), (Prop::YScale, 130.0)], Ease::StrongOut, None);
+        tween(st, self.black, 0.2, &[(Prop::Alpha, 0.0), (Prop::XScale, 120.0), (Prop::YScale, 120.0)], Ease::StrongOut, None);
+        interval(st, &mut self.itvl_closed, 450.0, key(W_TUTOWIN, TW_ON_CLOSED, 0));
+    }
+
+    fn on_event(&mut self, st: &mut Stage, code: u16) {
+        match code {
+            TW_OPEN_IMAGE => self.open_image(st),
+            TW_ON_OPENED => {
+                clear(st, &mut self.itvl_open);
+                self.anim(st);
+            }
+            TW_ANIM => self.anim(st),
+            TW_ANIM_LOOP => self.anim_loop(st),
+            TW_ON_CLOSED => {
+                clear(st, &mut self.itvl_closed);
+                st.set_visible(self.mc, false);
+            }
+            _ => {}
+        }
+    }
+}
+
+// =============================================================================================
 // InteractionsMessage (hud_gameMessage / hud_interactionTxt / hud_runesTxt)
 // =============================================================================================
 
@@ -2982,6 +3156,7 @@ pub struct HudWidgets {
     pub choice: Option<PlayerChoice>,
     pub state_icon: Option<PlayerStatesIcons>,
     pub tutorial: Option<TutorialMessage>,
+    pub tutorial_window: Option<TutorialWindow>,
     pub stripes: Option<BlackStripes>,
     pub location: Option<Location>,
     pub crosshairs: Crosshairs,
@@ -3005,16 +3180,17 @@ impl HudWidgets {
         let choice = c(st, "playerChoice_mc").map(|m| PlayerChoice::new(st, m));
         let state_icon = c(st, "playerStatesIcon_mc").map(|m| PlayerStatesIcons::new(st, m));
         let tutorial = c(st, "tutorialMsg_mc").map(|m| TutorialMessage::new(st, m));
+        let tutorial_window = c(st, "tutorialWindow_mc").map(|m| TutorialWindow::new(st, m));
         let stripes = c(st, "blackStripes_mc").map(|m| BlackStripes::new(st, m));
         let location = c(st, "location_mc").map(|m| Location::new(st, m));
         // Widgets the port does not drive yet start hidden, as their classes do.
-        for n in ["tutorialWindow_mc", "oxygenGauge_mc", "interactions_ic_mc", "interactions_icQTE_mc", "skipCutScene_mc", "interactionGauge_mc", "grenadeCooking_mc"] {
+        for n in ["oxygenGauge_mc", "interactions_ic_mc", "interactions_icQTE_mc", "skipCutScene_mc", "interactionGauge_mc", "grenadeCooking_mc"] {
             if let Some(m) = c(st, n) {
                 st.set_visible(m, false);
             }
         }
         let crosshairs = Crosshairs::new(st);
-        Self { objectives, target, pickup_log, gauges, crosshair_info, game_msg, interactions, interaction_window, subtitles, choice, state_icon, tutorial, stripes, location, crosshairs, sounds: SoundQueue::default() }
+        Self { objectives, target, pickup_log, gauges, crosshair_info, game_msg, interactions, interaction_window, subtitles, choice, state_icon, tutorial, tutorial_window, stripes, location, crosshairs, sounds: SoundQueue::default() }
     }
 
     /// Route a stage event to its widget.
@@ -3074,6 +3250,11 @@ impl HudWidgets {
             }
             W_TUTO => {
                 if let Some(o) = self.tutorial.as_mut() {
+                    o.on_event(st, code)
+                }
+            }
+            W_TUTOWIN => {
+                if let Some(o) = self.tutorial_window.as_mut() {
                     o.on_event(st, code)
                 }
             }

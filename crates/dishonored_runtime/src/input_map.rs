@@ -32,9 +32,6 @@ pub struct LocalInput {
     /// The quick-access wheel is open (`hud_wheel.rs`): it takes the mouse
     /// (`m_bCaptureAnalogInput`) and the number keys; the player stands still.
     pub wheel_open: bool,
-    /// The keyboard shortcuts (`GBA_Shortcut_0..9`) as the wheel's dock assigns them; None
-    /// uses the default list below.
-    pub shortcuts: Option<[Option<LeftHand>; 10]>,
 }
 
 impl LocalInput {
@@ -136,29 +133,8 @@ pub fn gather_input(
         }
         return;
     }
-    if wheel_open {
-        return;
-    }
-    let defaults = [
-        LeftHand::Blink,
-        LeftHand::Windblast,
-        LeftHand::DarkVision,
-        LeftHand::Pistol,
-        LeftHand::Crossbow,
-        LeftHand::Possession,
-        LeftHand::BendTime,
-        LeftHand::DevouringSwarm,
-        LeftHand::Grenade,
-        LeftHand::SpringRazor,
-    ];
-    let table = local.shortcuts.unwrap_or(defaults.map(Some));
-    for (i, h) in table.into_iter().enumerate() {
-        if let Some(h) = h
-            && bind.just_pressed(&format!("GBA_Shortcut_{i}"), &keys, &mouse, wheel)
-        {
-            local.left_hand = h;
-        }
-    }
+    // The number keys and the mouse wheel select items through the shortcut dock
+    // (`hud_wheel.rs`): it equips the slot's item when the key is released.
 }
 
 fn is_mouse(b: &crate::settings::Bindings, action: &str) -> bool {

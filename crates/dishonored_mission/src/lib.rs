@@ -396,6 +396,11 @@ pub enum Action {
     Notify(String, String),
     /// `DisSeqAct_ShowLocationDiscovery`: the location name (the HUD's `Location` widget).
     Location(String),
+    /// `DisSeqAct_SetTutorialMessage`: the tutorial line (text, seconds up).
+    Tutorial(String, f32),
+    /// A tutorial window (`TutorialWindow.SetTutorialWindow(text, image)`): image 0 gear, 1 note,
+    /// 2 rune, 3 bone charm. Mission clues (a chapter log item) raise one.
+    TutorialWindow(u8, String),
     /// `DisSeqAct_StartSpawn` / despawn.
     Spawn(String),
     Despawn(String),

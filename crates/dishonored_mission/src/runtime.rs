@@ -190,6 +190,16 @@ pub struct TaskView {
     pub hidden: bool,
 }
 
+/// One task marker (`DisSeqAct_UpdateTaskTarget`): where it stands, whether the task is optional
+/// (`m_OptionalTaskMarkerSettings`' secondary symbol) and the description it shows
+/// (`m_TargetName`, the marker's `_description_mc`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TaskMarkerView {
+    pub pos: [f32; 3],
+    pub optional: bool,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ObjectiveView {
     pub description: String,
@@ -225,6 +235,15 @@ pub struct MissionView {
     /// Latest location discovery (id, name): `DisSeqAct_ShowLocationDiscovery`.
     #[serde(default)]
     pub location: Option<(u32, String)>,
+    /// Latest tutorial line (id, text, seconds): `DisSeqAct_SetTutorialMessage`.
+    #[serde(default)]
+    pub tutorial: Option<(u32, String, f32)>,
+    /// Latest tutorial window (id, picture, text): a mission clue.
+    #[serde(default)]
+    pub tutorial_window: Option<(u32, u8, String)>,
+    /// Every visible active task with a target (`m_TaskMarkers`): the HUD's task markers.
+    #[serde(default)]
+    pub task_markers: Vec<TaskMarkerView>,
     pub outcome: Option<Outcome>,
     pub stats: MissionStats,
     /// Chaos "High" on the mission-stats screen: the chaos level reached the stats op's
@@ -252,6 +271,10 @@ pub struct MissionView {
     /// Talkable mission NPCs: (npc id, prompt).
     #[serde(default)]
     pub talkers: Vec<(String, String)>,
+    /// Display names of the mission NPCs that have one (npc id, name): the interaction window's
+    /// title over a talker.
+    #[serde(default)]
+    pub npc_names: Vec<(String, String)>,
     /// Mission NPC id -> pawn id (set by the host), so clients can find talkers.
     #[serde(default)]
     pub npc_ids: Vec<(String, u32)>,
@@ -1100,6 +1123,14 @@ impl MissionState {
                     let id = self.id();
                     self.view.location = Some((id, l.clone()));
                 }
+                Action::Tutorial(t, secs) => {
+                    let id = self.id();
+                    self.view.tutorial = Some((id, t.clone(), *secs));
+                }
+                Action::TutorialWindow(img, t) => {
+                    let id = self.id();
+                    self.view.tutorial_window = Some((id, *img, t.clone()));
+                }
                 Action::Spawn(n) => {
                     if self.npc_alive.insert(n.clone()) {
                         out.push(Command::Spawn(n.clone()));
@@ -1192,6 +1223,7 @@ impl MissionState {
         let on_map = |m: &String| self.current_map.is_empty() || self.marker_map.get(m).is_none_or(|mm| mm.eq_ignore_ascii_case(&self.current_map));
         self.view.usables = self.usable.iter().filter(|(m, _)| on_map(m)).filter_map(|(m, p)| self.markers.get(m).map(|x| (x.0.to_array(), p.clone()))).collect();
         self.view.talkers = self.talk.iter().filter(|(n, _)| self.npc_alive.contains(*n)).map(|(n, p)| (n.clone(), p.clone())).collect();
+        self.view.npc_names = self.def.npcs.iter().filter_map(|n| n.name.clone().map(|name| (n.id.clone(), name))).collect();
         self.view.dialogue.clear();
         self.view.choice = None;
         if let Some(r) = &self.conv {
@@ -1245,6 +1277,7 @@ impl MissionState {
         }
         // Marker: first visible active task with a target (required tasks first).
         let mut best: Option<(bool, [f32; 3])> = None;
+        self.view.task_markers.clear();
         for (oi, o) in self.def.objectives.iter().enumerate() {
             if self.obj_hidden[oi] {
                 continue;
@@ -1263,6 +1296,12 @@ impl MissionState {
                     if best.is_none_or(|b| required && !b.0) {
                         best = Some((required, p.to_array()));
                     }
+                    // The marker's description is the target's name (`m_TargetName`).
+                    let name = match &t.target {
+                        Some(TargetRef::Npc(n)) => self.def.npcs.iter().find(|x| &x.id == n).and_then(|x| x.name.clone()).unwrap_or_default(),
+                        _ => String::new(),
+                    };
+                    self.view.task_markers.push(TaskMarkerView { pos: p.to_array(), optional: t.optional, name });
                 }
             }
         }

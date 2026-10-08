@@ -76,6 +76,26 @@ pub fn attribute_for(p: &PlayerState, cfg: &GameplayConfig, name: &str, base: f3
     v
 }
 
+/// Whether an equipped bone charm modifies the attribute: the HUD's "small upgrade" gauge bits
+/// ask the attribute for a modifier named "Whale Bone Charm <attribute>" (0x00B9F6E0 with
+/// `Attribute_HealthMax` / `Attribute_ManaMax`, `FUN_00C7E1C0` on the modifier list).
+pub fn charm_modifies(p: &PlayerState, cfg: &GameplayConfig, name: &str) -> bool {
+    p.inv.charms_equipped != 0 && (0..charm_slots(cfg)).any(|slot| p.inv.charms_equipped & (1u64 << slot) != 0 && charm(cfg, slot).is_some_and(|c| c.attribute == name))
+}
+
+/// Whether an ammo type is unlocked for the wheel (`FUN_00C1C9D0`, asked by the content builder
+/// 0x00BD5530 for each ammo type of a weapon): explosive bullets need a non-zero
+/// `Attribute_ExplosiveBulletUnlock`, sticky grenades `Attribute_StickyGrenadeUnlock`; every
+/// other type is always listed.
+pub fn ammo_unlocked(p: &PlayerState, cfg: &GameplayConfig, t: dishonored_ir::items::AmmoType) -> bool {
+    use dishonored_ir::items::AmmoType;
+    match t {
+        AmmoType::BulletExplosive => attribute(p, cfg, "Attribute_ExplosiveBulletUnlock", 0.0) != 0.0,
+        AmmoType::StickyGrenade => attribute(p, cfg, "Attribute_StickyGrenadeUnlock", 0.0) != 0.0,
+        _ => true,
+    }
+}
+
 /// Charm slots: `m_Charms` then `m_ScriptedCharms` (at most 64, the inventory's bit width).
 pub fn charm_slots(cfg: &GameplayConfig) -> usize {
     (cfg.items.charms.len() + cfg.items.scripted_charms.len()).min(64)
