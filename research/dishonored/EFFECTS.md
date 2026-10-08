@@ -102,7 +102,7 @@ Other module classes are listed per emitter as unsupported.
   (`volume_glow.wgsl`): additive Color x LightIntensity x particle colour, faded toward the
   silhouette by |N.V|^Fresnel_exponent, away from the particle by the sphere mask
   (SphereMask_Power over Distance x mesh radius) and near the camera over StartOffset, scaled by
-  0.1 (U-305). Depth-biased alpha and the rays texture are not reproduced. Since 2026-10-08 mesh
+  0.1 (U-305). The rays texture is not reproduced (depth-biased alpha is: `FxMaterial`). Since 2026-10-08 mesh
   emitters on `Volume_Light_PMAT` use the material decoded from its shaders instead
   (`volume_light.rs`, RENDERING.md "Light beams"; the particle colour is its
   `MeshEmitterVertexColor`); `GlowMaterial` remains for the other untextured bases. Emissive mesh
@@ -220,8 +220,9 @@ World models (`world_models.rs`, from the tweaks): grenade `Grenade.Grenade`, st
 
 Windblast: `WindBlast_Swirls_02_inst` (DefaultAdditive, `D_Disable_Diffuse`, opacity
 `WindBlast_Swirls_01_m`.r) through the recipe, the wave mesh `WindBlast_Wave_02` with
-`WindWave_Disto_02_inst` in the distortion pass. Not reproduced: depth-biased alpha
-(`Db_Enable_Depth_Biased_Alpha`, soft particles), which needs the scene depth. Trails and Dark Vision's cones follow their object
+`WindWave_Disto_02_inst` in the distortion pass. Depth-biased alpha
+(`Db_Enable_Depth_Biased_Alpha`, soft particles) fades them by the scene depth (`particle_soft.wgsl`,
+systems/render_depth.md). Trails and Dark Vision's cones follow their object
 (`effects::attached_effects`); a trail whose projectile is gone fades out.
 Remaining approximations: the Windblast origin (pawn eye height along the view), the
 underwater test (not wired), the fiery material, cast effects at the eye instead of the hand

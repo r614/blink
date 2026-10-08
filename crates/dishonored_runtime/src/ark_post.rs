@@ -105,6 +105,9 @@ pub struct ArkPostSource {
     pub eyelid: Option<f32>,
     /// Blink's lens field drive (x, y); zero = off.
     pub blink_lens: Vec2,
+    /// A scene capture's own fog / post (reflect.rs: bEnableFog, bEnablePostProcess): the bloom
+    /// parts belong to the game view and are not added.
+    pub capture: bool,
 }
 
 fn post_value(p: Option<&PostSettings>, key: &str) -> Option<f32> {
@@ -194,7 +197,7 @@ impl ArkPostSource {
                 crate::coords::UU_TO_BEVY,
                 0.0,
                 if self.post_on { 1.0 } else { 0.0 },
-                if self.post_on && v("m_PpBloomParameters.m_bEnable", 1.0) > 0.5 { 1.0 } else { 0.0 },
+                if self.post_on && !self.capture && v("m_PpBloomParameters.m_bEnable", 1.0) > 0.5 { 1.0 } else { 0.0 },
             ),
             bloom: {
                 // ArkPpBloomParameters defaults: tint white, threshold 0, scale 1.

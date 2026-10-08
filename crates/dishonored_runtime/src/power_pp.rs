@@ -150,7 +150,7 @@ pub fn bend_intensity(elapsed: f32, duration: f32) -> f32 {
     up.min(down)
 }
 
-fn drive(view: Option<Res<SessionView>>, time: Res<Time>, mut lens: Local<BlinkLens>, mut q: Query<&mut ArkPostSource>) {
+fn drive(view: Option<Res<SessionView>>, time: Res<Time>, mut lens: Local<BlinkLens>, mut q: Query<&mut ArkPostSource, Without<crate::reflect::ReflectCamera>>) {
     let me = view.as_ref().and_then(|v| v.me.as_ref());
     // Dark Vision's eyelid pass runs while the power is on, its `Alpha` the power's fade (the
     // capture: 0 -> 1 over `m_PowerFadeInDuration`, then 1, then the fade-out remaining /

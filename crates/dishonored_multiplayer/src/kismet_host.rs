@@ -232,6 +232,11 @@ pub struct HostState {
     pub ambient: BTreeMap<u32, bool>,
     /// Actors hidden by `SeqAct_ToggleHidden`.
     pub hidden: BTreeSet<u32>,
+    /// `SeqAct_Toggle` on scene capture actors (`SceneCaptureActor.OnToggle` sets the component's
+    /// `bEnabled`: input 0 on, 1 off, 2 flips it): actor -> (last explicit On / Off, whether an odd
+    /// number of Toggles followed it). The level's own `bEnabled` is the renderer's.
+    #[serde(default)]
+    pub capture_toggles: BTreeMap<u32, (Option<bool>, bool)>,
     /// `NPCMarkForVanish` in progress: op -> (pawns, seconds left).
     vanish: BTreeMap<OpId, Vec<(PlayerId, f32)>>,
     /// [interp] Matinees playing with their bound groups.
@@ -864,9 +869,19 @@ impl Host for H<'_> {
         }
     }
 
-    fn toggle_actors(&mut self, _cx: &mut Ctx, targets: &[Obj], mode: u8) {
+    fn toggle_actors(&mut self, cx: &mut Ctx, targets: &[Obj], mode: u8) {
         for t in targets {
             let Obj::Actor(a) = t else { continue };
+            // [render] `SceneCaptureActor.OnToggle`: the capture component's `bEnabled` (reflect.rs).
+            if cx.k.db.actors.get(*a as usize).is_some_and(|x| x.class.starts_with("SceneCapture")) {
+                let e = self.st.capture_toggles.entry(*a).or_insert((None, false));
+                match mode {
+                    0 => *e = (Some(true), false),
+                    1 => *e = (Some(false), false),
+                    _ => e.1 = !e.1,
+                }
+                continue;
+            }
             // [distraction] `DisNPCDistractor.OnToggle` (0x00a4c350): the component's
             // `m_bDistractionEnabled`.
             if let Some(i) = self.distractor_of(t) {
@@ -3176,6 +3191,12 @@ pub fn view(m: &MissionMatch, mv: &mut dishonored_mission::runtime::MissionView)
         let state = if run.st.off.contains(&i) { Some(false) } else { run.st.ambient.get(&i).copied() };
         if let Some(on) = state {
             mv.ambient.push((format!("{}:{}", a.package, a.name), on));
+        }
+    }
+    // Scene capture actors toggled by Kismet (`SceneCaptureActor.OnToggle`).
+    for (&i, &(set, flipped)) in &run.st.capture_toggles {
+        if let Some(a) = run.k.db.actors.get(i as usize) {
+            mv.captures.push((format!("{}:{}", a.package, a.name), set, flipped));
         }
     }
     for (_, p, prompt) in usables(m) {

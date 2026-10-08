@@ -1,4 +1,4 @@
-﻿//! Level import: StaticMeshActors and StaticMeshCollectionActors from a set of
+//! Level import: StaticMeshActors and StaticMeshCollectionActors from a set of
 //! level packages into a normalized [`DishonoredMap`].
 
 use crate::content::Content;
@@ -406,6 +406,9 @@ impl Importer<'_> {
             if class == "SceneCaptureReflectActor" && self.is_in_persistent_level(&pkg, i) {
                 self.import_reflect_capture(slot, i);
             }
+            if class == "SceneCapture2DActor" && self.is_in_persistent_level(&pkg, i) {
+                self.import_scene_capture_2d(slot, i);
+            }
             match class.as_str() {
                 "StaticMeshActor" if self.is_in_persistent_level(&pkg, i) => {
                     if let Err(e) = self.import_static_mesh_actor(slot, i) {
@@ -485,6 +488,58 @@ impl Importer<'_> {
             post_process: bool_or(cp, "bEnablePostProcess", false),
             skip_if_unseen: bool_or(cp, "bSkipUpdateIfTextureUsersOccluded", true),
             max_update_dist: float_or(cp, "MaxUpdateDist", 0.0),
+            scene2d: None,
+        });
+    }
+
+    /// A placed SceneCapture2DActor: its render target and fixed view. Defaults are the class's
+    /// (SceneCapture2DComponent: FieldOfView 80, NearPlane 20, FarPlane 500; SceneCaptureComponent:
+    /// Enabled true, no fog, no post-process, SkipUpdateIfTextureUsersOccluded false).
+    fn import_scene_capture_2d(&mut self, slot: usize, actor: usize) {
+        let pkg = self.pkgs[slot].clone();
+        let Ok(h) = pkg.read_object(actor) else { return };
+        let Some(ObjRef::Export(ci)) = find(&h.properties, "SceneCapture").and_then(|p| p.as_object()).map(ObjRef::from_index) else { return };
+        let Ok(ch) = pkg.read_object(ci) else { return };
+        let cp = &ch.properties;
+        let Some(t) = find(cp, "TextureTarget").and_then(|p| p.as_object()).filter(|o| *o != 0) else { return };
+        let Some(tk) = self.resolve(slot, ObjRef::from_index(t)) else { return };
+        let tpkg = self.pkgs[tk.0].clone();
+        let tp = tpkg.read_object(tk.1).map(|h| h.properties).unwrap_or_default();
+        let resolution_type = match find(&tp, "m_ResolutionType").map(|p| &p.value) {
+            Some(Value::Enum(e)) => match e.as_str() {
+                "TRT_FULLSIZE" => 1,
+                "TRT_HALFSIZE" => 2,
+                "TRT_QUARTERSIZE" => 3,
+                _ => 0,
+            },
+            _ => 0,
+        };
+        let int = |n: &str| match find(&tp, n).map(|p| &p.value) {
+            Some(Value::Int(v)) => (*v).max(0) as u32,
+            _ => 0,
+        };
+        let rot = rot_matrix(&h.properties, "Rotation");
+        self.map.reflect_captures.push(dishonored_ir::ReflectCapture {
+            source: format!("{}:{}", pkg.name, pkg.obj_path(ObjRef::Export(actor))),
+            target: tpkg.obj_path(ObjRef::Export(tk.1)),
+            resolution_type,
+            size: [int("SizeX"), int("SizeY")],
+            channels: 0,
+            frame_rate: float_or(cp, "FrameRate", 1000.0),
+            enabled: bool_or(cp, "bEnabled", true),
+            fog: bool_or(cp, "bEnableFog", false),
+            post_process: bool_or(cp, "bEnablePostProcess", false),
+            skip_if_unseen: bool_or(cp, "bSkipUpdateIfTextureUsersOccluded", false),
+            max_update_dist: float_or(cp, "MaxUpdateDist", 0.0),
+            scene2d: Some(dishonored_ir::SceneCamera {
+                location: vec3_or(&h.properties, "Location", Vec3::ZERO),
+                forward: rot.transform_vector3(Vec3::X).normalize_or(Vec3::X),
+                up: rot.transform_vector3(Vec3::Z).normalize_or(Vec3::Z),
+                fov: float_or(cp, "FieldOfView", 80.0),
+                near: float_or(cp, "NearPlane", 20.0),
+                far: float_or(cp, "FarPlane", 500.0),
+            }),
+            ..Default::default()
         });
     }
 
