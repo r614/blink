@@ -124,6 +124,31 @@ pub fn sequence_play_length(content: &Content, package: &str, set_path: &str, se
     None
 }
 
+/// Play time (s) of the first notify of class `notify_class` in an `AnimSequence` of an
+/// `AnimSet`: the notify's `Time / RateScale`.
+pub fn sequence_notify_time(content: &Content, package: &str, set_path: &str, sequence: &str, notify_class: &str) -> Option<f32> {
+    let pkg = content.package(package).ok()?;
+    let set = find_export(&pkg, set_path)?;
+    let h = pkg.read_object(set).ok()?;
+    for s in find(&h.properties, "Sequences")?.array_objects().ok()? {
+        let ObjRef::Export(e) = ObjRef::from_index(s) else { continue };
+        let Ok(sh) = pkg.read_object(e) else { continue };
+        if !name_of(&sh.properties, "SequenceName").eq_ignore_ascii_case(sequence) {
+            continue;
+        }
+        let rate = find(&sh.properties, "RateScale").and_then(|p| p.as_float()).unwrap_or(1.0);
+        for ev in find(&sh.properties, "Notifies")?.array_structs(&pkg).ok()? {
+            let Some(ObjRef::Export(ni)) = find(&ev, "Notify").and_then(|p| p.as_object()).map(ObjRef::from_index) else { continue };
+            if pkg.export_class(ni) == notify_class {
+                let t = find(&ev, "Time").and_then(|p| p.as_float())?;
+                return Some(if rate > 0.0 { t / rate } else { t });
+            }
+        }
+        return None;
+    }
+    None
+}
+
 /// Load a locomotion config by (package, object path).
 pub fn load_loco_config(content: &Content, r: &(String, String)) -> Result<LocoConfig> {
     let pkg = content.package(&r.0)?;
@@ -286,16 +311,11 @@ pub fn read_physics_asset(pkg: &Package, export: usize) -> Result<PhysicsAssetDa
     Ok(out)
 }
 
-/// Translation row of a cooked `Matrix` struct (`WPlane` row, or 64 raw bytes).
+/// Translation row of a cooked `Matrix` struct (`WPlane` row, or 64 raw bytes). The raw bytes
+/// hold each plane as (W, X, Y, Z) (`matrix_rows`), so the W plane's x, y, z are floats 13..15
+/// (Skm_EliteGuard_Physics `spine_3_jnt`: the capsule centre (7.25, 0, 0)).
 fn matrix_origin(v: Option<&Value>) -> Option<[f32; 3]> {
-    match v? {
-        Value::Struct(_, rows) => match &find(rows, "WPlane")?.value {
-            Value::Struct(_, c) => Some([f32_of(c, "X"), f32_of(c, "Y"), f32_of(c, "Z")]),
-            _ => None,
-        },
-        Value::Raw(_, b) if b.len() >= 64 => Some([f32::from_le_bytes(b[48..52].try_into().ok()?), f32::from_le_bytes(b[52..56].try_into().ok()?), f32::from_le_bytes(b[56..60].try_into().ok()?)]),
-        _ => None,
-    }
+    matrix_rows(v).map(|r| r[3])
 }
 
 /// Float properties of the NPC locomotion node: the class defaults (`Engine`,

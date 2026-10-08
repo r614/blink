@@ -640,8 +640,10 @@ fn windblast_level_2_wall_hit_damages_the_thrown_npc() {
             }
         };
         quad(Vec3::new(-5000., -5000., 0.), Vec3::new(5000., -5000., 0.), Vec3::new(5000., 5000., 0.), Vec3::new(-5000., 5000., 0.));
-        // A wall facing -x at x = 700.
-        quad(Vec3::new(700., -5000., 0.), Vec3::new(700., -5000., 2000.), Vec3::new(700., 5000., 2000.), Vec3::new(700., 5000., 0.));
+        // A wall facing -x at x = 1000: met after the throw's Flying phase (about 500 uu at
+        // level 2), by the ragdoll (the falling move); a pawn in PHYS_Flying slides along a wall
+        // without the rigid-body collision.
+        quad(Vec3::new(1000., -5000., 0.), Vec3::new(1000., -5000., 2000.), Vec3::new(1000., 5000., 2000.), Vec3::new(1000., 5000., 0.));
         CollisionWorld::from_triangles(tris, vec!["fixture".into()])
     };
     for level in [1u8, 2] {

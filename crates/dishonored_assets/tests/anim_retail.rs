@@ -57,6 +57,11 @@ fn elite_guard_physics_asset() {
     // The pelvis body is a box: its radius is half its smallest side.
     let root = a.bodies.iter().find(|b| b.bone == "Root_jnt").unwrap();
     assert!((root.radius - 19.0355 / 2.0).abs() < 1e-3);
+    // The capsule centre is the element TM's W plane, floats 13..15 of the cooked (W, X, Y, Z)
+    // planes (physics.md P-9): `spine_3_jnt`'s capsule sits 7.25 along the bone.
+    let spine3 = a.bodies.iter().find(|b| b.bone == "spine_3_jnt").unwrap();
+    assert!((spine3.radius - 14.7513).abs() < 1e-3 && (spine3.length - 16.9967).abs() < 1e-3, "{spine3:?}");
+    assert!((spine3.center[0] - 7.25).abs() < 1e-3 && spine3.center[1].abs() < 1e-3 && spine3.center[2].abs() < 1e-3, "{:?}", spine3.center);
 }
 
 /// Clips whose rotations use the fixed 48-bit format (flag bit 0 clear) bake to unit

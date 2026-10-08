@@ -462,6 +462,53 @@ fn d_blink_cooldown() -> Vec<f32> {
     vec![1.0, 1.0]
 }
 
+/// A thrown NPC (`StateNPCMasterThrown`, research/dishonored/systems/physics.md):
+/// - `effective_mass`: `Twk_Component_HitReactionThrow_NPC.m_ComponentConfig.m_fEffectiveMassForThrowing`
+///   (0x00BEB6E0: the throw velocity is `momentum / effective_mass`, 2 without the tweak);
+/// - the reaction thresholds of the same config (data only: their consumer is not decoded);
+/// - `min_momentum_*`: the state's class defaults `m_fMinMomentum2DMagnitude` / `m_fMinMomentumZ`
+///   and their `...WhenStunned` pair (0x00BE8710 on entry 0x00A86B90);
+/// - `fluid_friction`: `Default__PhysicsVolume.FluidFriction` (the flight is `PHYS_Flying`, whose
+///   `CalcVelocity` takes half of it, fluid);
+/// - `windblast_ragdoll_notify`: the `DishonoredNotify_Ragdoll` time (sequence seconds over
+///   `RateScale`) of `Npc_EliteGuard_Generic_as` `Generic_WindBlast_Front` / `_Left` / `_Right` /
+///   `_Back`, indexed by `m_ThrowDirection`: the notify ragdolls the pawn (0x00B6FBB0, event 5),
+///   which ends the flight (the throw state's callback 0x00A7CBA0).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ThrowConfig {
+    pub effective_mass: f32,
+    pub strong_hit_react_threshold: f32,
+    pub anim_ragdoll_threshold: f32,
+    pub full_ragdoll_threshold: f32,
+    pub ragdoll_move_end_threshold: f32,
+    pub min_momentum_2d: f32,
+    pub min_momentum_z: f32,
+    pub min_momentum_2d_stunned: f32,
+    pub min_momentum_z_stunned: f32,
+    pub fluid_friction: f32,
+    pub windblast_ragdoll_notify: [f32; 4],
+}
+
+// Serde defaults for configs cached before the field was loaded: the loaded values.
+impl Default for ThrowConfig {
+    fn default() -> Self {
+        Self {
+            effective_mass: 2.0,
+            strong_hit_react_threshold: 500.0,
+            anim_ragdoll_threshold: 1000.0,
+            full_ragdoll_threshold: 3800.0,
+            ragdoll_move_end_threshold: 10.0,
+            min_momentum_2d: 800.0,
+            min_momentum_z: 0.0,
+            min_momentum_2d_stunned: 3000.0,
+            min_momentum_z_stunned: 1500.0,
+            fluid_friction: 0.3,
+            windblast_ragdoll_notify: [0.455, 0.39, 0.4483, 0.4179],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct PowerConfig {
     pub mana_cost: f32,
@@ -494,6 +541,9 @@ pub struct GameplayConfig {
     /// Blood Thirsty's adrenaline gauge.
     #[serde(default)]
     pub adrenaline: AdrenalineConfig,
+    /// The NPC throw (`StateNPCMasterThrown`, `Twk_Component_HitReactionThrow_NPC`).
+    #[serde(default)]
+    pub throw: ThrowConfig,
     /// field -> evidence (tweak object path / INI key / class default / UE3 stock).
     pub provenance: BTreeMap<String, String>,
 }

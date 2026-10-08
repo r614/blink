@@ -18,7 +18,7 @@
     checkpoints: [
         (name: "damage", expect: [(metric: EventValue("Sim:Damage@dummy[cause=Windblast]", "amount"), value: 26, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: 26 damage at 182.8 uu, level aim")]),
         (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 50, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: Windblast costs 50")]),
-        (name: "knock-back", expect: [(metric: Max("npc.dummy.speed2d"), value: 2373, tol: 50, source: "momentum (2362, -227, 1317) measured at the damage path; the pawn's horizontal speed after it is not measured", status: Unmeasured)]),
+        (name: "knock-back", expect: [(metric: Max("npc.dummy.speed2d"), value: 1186, tol: 50, source: "momentum (2362, -227, 1317) measured at the damage path; the thrown NPC leaves with momentum / m_fEffectiveMassForThrowing 2 (0x00BEB6E0): 1186 horizontally; a Passive dummy goes straight to the ragdoll (ORACLE.md, peak 1005 uu/s measured on the pelvis), the pawn's own speed is not measured", status: Unmeasured)]),
         (name: "blast effect", expect: [
             (metric: Count("Effect:Vfx_GamePlay.Windblast.Windblast_lvl2"), value: 1, tol: 0, source: "tweaks: Twk_Powers.Windblast.Twk_WindBlast level 2 m_EffectTemplate", status: Static),
             (metric: Unended("Vfx_GamePlay.Windblast.*"), value: 0, tol: 0, source: "UE3 one-shot gameplay ParticleSystemComponent: destroyed when its emitters finish", status: Static),

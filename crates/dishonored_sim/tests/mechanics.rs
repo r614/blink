@@ -626,13 +626,18 @@ fn windblast_pushes_and_damages() {
     r.settle();
     let wb = |b| PlayerInput { yaw: 0.0, buttons: b, left_hand: LeftHand::Windblast, ..Default::default() };
     r.step(&[(1, wb(buttons::SECONDARY)), (2, input(180., 0, 0))]);
-    // Nothing yet: 0.1 s warmup, then the front travels at 5000 uu/s.
+    // Nothing yet: the blast starts at the cast animation's DisNotify_WindBlast (0.27 s), then
+    // the front travels at 5000 uu/s.
     assert_eq!(r.p(2).mode, MoveMode::Walking);
     assert_eq!(r.p(1).vitals.mana, 50.0);
     r.steps(12, &[(1, wb(0)), (2, input(180., 0, 0))]);
-    // The NPC is thrown; the player's damage path clears the momentum (0x00B5CCD0, U-051).
+    assert_eq!(r.p(3).mode, MoveMode::Walking, "not before the notify");
+    r.steps(12, &[(1, wb(0)), (2, input(180., 0, 0))]);
+    // The NPC is thrown (Flying, velocity = momentum / 2); the player's damage path clears the
+    // momentum (0x00B5CCD0, U-051).
     let n = r.p(3);
     assert_eq!(n.mode, MoveMode::Falling);
+    assert!(n.thrown.active);
     assert!(n.velocity.x > 500.0, "npc push vx {}", n.velocity.x);
     let v = r.p(2);
     assert_eq!(v.mode, MoveMode::Walking);
@@ -642,6 +647,57 @@ fn windblast_pushes_and_damages() {
     let k = (1.0 - d / 3000.0).powi(2);
     let expect = 70.0 - (30.0 * k + 0.5).floor();
     assert!((v.vitals.health - expect).abs() <= 1.0, "health {} expected ~{expect}", v.vitals.health);
+}
+
+/// The throw of an NPC (research/dishonored/systems/physics.md P-1..P-3): the momentum clamp
+/// (0x00BE8710), velocity = momentum / `m_fEffectiveMassForThrowing` (0x00BEB6E0), the Flying
+/// phase's drag (`FluidFriction / 2` twice per tick: 0.99500 / tick on the original trace) and
+/// gravity, and the hand-over to the ragdoll at `Generic_WindBlast_Front`'s ragdoll notify
+/// (0.455 s: the 28th animation update, counting the hit's tick).
+#[test]
+fn thrown_npc_flies_then_ragdolls() {
+    use dishonored_sim::movement::{DT, clamp_throw_momentum, start_throw, throw_direction};
+    assert_eq!(clamp_throw_momentum(Vec3::new(100., 0., -5.), 800., 0.), Vec3::new(800., 0., 0.));
+    assert_eq!(clamp_throw_momentum(Vec3::new(1000., 0., 10.), 800., 0.), Vec3::new(1000., 0., 10.));
+    assert_eq!(clamp_throw_momentum(Vec3::new(0., 0., 10.), 800., 0.), Vec3::new(0., 0., 10.));
+    // Facing the blaster (pushed away from it): the front throw; turned away: the back throw.
+    assert_eq!(throw_direction(180.0, Vec3::X), 0);
+    assert_eq!(throw_direction(0.0, Vec3::X), 3);
+
+    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.), (3, Vec3::new(400., 0., STAND_Z + 1.), 180.)]);
+    r.state.player_mut(3).unwrap().kind = dishonored_sim::state::PawnKind::Guard;
+    r.settle();
+    let th = r.cfg.gameplay.throw.clone();
+    assert_eq!(th.effective_mass, 2.0);
+    let m = Vec3::new(1582., 0., 825.);
+    start_throw(r.state.player_mut(3).unwrap(), m, &th, DT);
+    let n = r.p(3);
+    assert_eq!(n.velocity, m / 2.0);
+    assert!(n.thrown.active && n.mode == MoveMode::Falling);
+    assert_eq!(n.thrown.ragdoll_at, th.windblast_ragdoll_notify[0]);
+    let idle = [(3, input(180., 0, 0))];
+    let mut xs = vec![r.p(3).position.x];
+    let mut zs = vec![r.p(3).position.z];
+    let mut flying_ticks = 0;
+    for _ in 0..40 {
+        r.step(&idle);
+        xs.push(r.p(3).position.x);
+        zs.push(r.p(3).position.z);
+        if r.p(3).thrown.active {
+            flying_ticks += 1;
+        }
+    }
+    // The first step: 791 x (1 - 0.15 dt)^2, no gravity in it.
+    let f = (1.0 - 0.5 * th.fluid_friction * DT).powi(2);
+    assert!(((xs[1] - xs[0]) / DT - 791.0 * f).abs() < 0.05, "{}", (xs[1] - xs[0]) / DT);
+    assert!(((zs[1] - zs[0]) / DT - 412.5 * f).abs() < 0.05, "{}", (zs[1] - zs[0]) / DT);
+    // Then the horizontal step decays by f per tick.
+    for i in 1..20 {
+        let ratio = (xs[i + 1] - xs[i]) / (xs[i] - xs[i - 1]);
+        assert!((ratio - f).abs() < 1e-4, "tick {i}: {ratio}");
+    }
+    // Ragdoll after 27 more updates (28 x dt >= 0.455).
+    assert_eq!(flying_ticks, 26, "the 27th step ends the flight");
 }
 
 #[test]

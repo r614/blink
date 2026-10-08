@@ -309,6 +309,10 @@ fn mantles(rep: &mut Report, mc: &MatchContent) {
         let z0 = s.p().position.z;
         let mut top = f32::MIN;
         let mut jumped = false;
+        // Standing on the ledge at some point: walking with the feet at its height. (The run goes
+        // on with the stick forward, so a pawn that stepped onto a short ledge walks off its far
+        // end before the 180 ticks are over: the final height says nothing.)
+        let mut stood = false;
         for _ in 0..180 {
             let at_wall = s.p().position.y > -3500.0 - 35.0 - 30.0;
             // Jump is held from the face on: the airborne mantle request needs the button down
@@ -317,9 +321,10 @@ fn mantles(rep: &mut Report, mc: &MatchContent) {
             let b = if jumped { buttons::JUMP } else { 0 };
             s.step(PlayerInput { buttons: b, ..fwd(90.0) });
             top = top.max(s.p().position.z);
+            stood |= s.p().mode == MoveMode::Walking && s.p().position.z - z0 > h - 5.0;
         }
         let mantled = s.events.iter().any(|(_, e)| matches!(e, SimEvent::Mantle { .. }));
-        let on_top = s.p().position.z - z0 > h - 5.0;
+        let on_top = stood;
         rows.push(vec![format!("{h}"), format!("{:.1}", top - z0), mantled.to_string(), on_top.to_string()]);
         if (h <= 330.0 && !on_top) || (h >= 360.0 && on_top) {
             ok = false;

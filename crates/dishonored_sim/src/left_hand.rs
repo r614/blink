@@ -594,10 +594,10 @@ fn is_cast(item: LeftHand) -> bool {
     matches!(item, LeftHand::BendTime | LeftHand::DevouringSwarm | LeftHand::Grenade | LeftHand::StickyGrenade | LeftHand::SpringRazor)
 }
 
-/// Windblast warmup before the blast starts (`m_fWarmupTime` default, 0.1 s) and cooldown
-/// after the front reached its range (`m_fCooldownTime`, 1.0 s): class defaults of
-/// `DishonoredActivePowerComponent_WindBlast`.
-pub const WINDBLAST_WARMUP: f32 = 0.1;
+/// Windblast cooldown after the front reached its range (`m_fCooldownTime`, 1.0 s): class
+/// default of `DishonoredActivePowerComponent_WindBlast`. Its `m_fWarmupTime` (0.1 s) is not
+/// when the blast starts: the fire mode waits for the cast animation's notify
+/// (`CombatTuning::windblast_start_delay`).
 pub const WINDBLAST_COOLDOWN: f32 = 1.0;
 
 /// The caster's Windblast level index (`m_CurrentLevel - 1`, 0x00BF6780 / 0x00BF7090 read
@@ -609,10 +609,10 @@ pub fn windblast_params(p: &PlayerState, cfg: &GameplayConfig, t: &CombatTuning)
     (level, (strength + 1.0) * t.windblast_distance[level as usize])
 }
 
-/// Seconds from the cast until Windblast can be cast again (warmup, front travel, cooldown).
+/// Seconds from the cast until Windblast can be cast again (start delay, front travel, cooldown).
 pub fn windblast_lockout(p: &PlayerState, cfg: &GameplayConfig, t: &CombatTuning) -> f32 {
     let (level, range) = windblast_params(p, cfg, t);
-    WINDBLAST_WARMUP + range / t.windblast_speed[level as usize].max(1.0) + WINDBLAST_COOLDOWN
+    t.windblast_start_delay + range / t.windblast_speed[level as usize].max(1.0) + WINDBLAST_COOLDOWN
 }
 
 /// Strength of the blast on a target (0x00BE8570): zero outside the cone (tested in the
@@ -641,8 +641,8 @@ pub fn windblast_factor(dir: Vec3, center: Vec3, origin: Vec3, range: f32, cos_h
 /// momentum handed to `TakeDamage` is `impulse * k` with `k` the blast factor. MEASURED
 /// 2026-10-06 (engine hook, level aim, the damage path's momentum argument): a hit at 183 uu
 /// with k = 0.879 received (2362, -227, 1317) = (2700 dir.xy k, 0.939 x 1600 x k); an earlier
-/// decode read the z as `0.15 x |impulse| x k` (407 here). Applying the momentum as a velocity
-/// change is an inference (the original only ever blasts NPCs, which ragdoll).
+/// decode read the z as `0.15 x |impulse| x k` (407 here). An NPC is thrown with it
+/// (`movement::start_throw`: velocity = momentum / `m_fEffectiveMassForThrowing`).
 pub fn windblast_momentum(dir: Vec3, force: f32, up_force: f32, d: f32, range: f32, k: f32) -> Vec3 {
     let mut imp = dir * force;
     let up = (1.0 - (d / range).min(1.0)) * up_force;
@@ -658,6 +658,7 @@ pub fn step_windblasts(
     world: &dyn WorldQuery,
     mv: &MovementConfig,
     vitals: &dishonored_ir::gameplay::VitalsConfig,
+    th: &dishonored_ir::gameplay::ThrowConfig,
     t: &CombatTuning,
     dt: f32,
     events: &mut Vec<SimEvent>,
@@ -725,11 +726,10 @@ pub fn step_windblasts(
             // pawn's damage path (0x00B5CCD0) hands it only to the hit reactions and clears it,
             // so players are not pushed (U-051).
             if v.kind != PawnKind::Human {
-                v.velocity += windblast_momentum(wb.direction, t.windblast_force[lv], t.windblast_up_force[lv], d, range, k);
-                if matches!(v.mode, MoveMode::Walking) {
-                    v.mode = MoveMode::Falling;
-                    v.fall_time = 0.0;
-                }
+                // The throw (`StateNPCMasterThrown`): velocity = clamped momentum / effective
+                // mass, then the Flying phase (physics.md P-1..P-3).
+                let m = windblast_momentum(wb.direction, t.windblast_force[lv], t.windblast_up_force[lv], d, range, k);
+                crate::movement::start_throw(v, m, th, dt);
                 // Last hit by this caster's Windblast (instigator and damage type, read by the
                 // NPC wall collision 0x00B529C0).
                 v.windblasted_by = Some(wb.caster);

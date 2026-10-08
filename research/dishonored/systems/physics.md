@@ -50,8 +50,10 @@ The state tick (0x00A98DD0) adds the gravity of the physics volume to `Velocity.
 (`Velocity.z += gravity * dt`, 0x006A1710), so the flight is a ballistic arc with the Flying
 physics' fluid drag. Measured on the cached original trace (L1, momentum (1582, 825) =
 k 0.879 x (1800, 939)): physics 4 on the damage tick, first step 13.1 uu per tick along the aim
-(786 uu/s = 1582 / 2 less the first tick of drag), decaying 0.55 %/tick (a drag of
-`FluidFriction 0.3 x dt`), z rises 6.8 uu on the first tick and the arc peaks 55.9 uu above the
+(786 uu/s = 1582 / 2 less the first tick of drag), decaying by 0.99500 per tick (25-tick
+ratio 0.88239: `CalcVelocity` 0x006ACD50 with friction `FluidFriction / 2` = 0.15, fluid, no
+braking, applies `v (1 - 0.15 dt)` twice: 0.995006; port note 2026-10-08), z rises 6.8 uu on
+the first tick (no gravity in the first step: the state adds it after the move) and the arc peaks 55.9 uu above the
 start (`(825 / 2)^2 / (2 x 1500) = 56.6`: gravity about 1500 uu/s^2 on this map).
 
 Port: `left_hand::step_windblasts` adds the whole `windblast_momentum` to `velocity` and sets
@@ -212,6 +214,57 @@ is nil: `PhysBody.center` and `.length` are written by `read_physics_asset` but 
 | P-9 | **port bug (latent)** | `matrix_origin` off by one float (section 5) | read floats 13..15 |
 | P-10 | **decoded, not ported** | Breakable damage rule (3.5) | implement in the breakable actor (world.md section 4) |
 | P-11 | **oracle limitation** | No per-body or velocity channel for NPCs in the original trace; ragdolls fall through the Playground (U-806) | ragdoll scenarios must use real maps (Boyle); a capture with body velocities (P-5) |
+
+## 6a. Port status (2026-10-08)
+
+Decoded during the port (static index, re-read):
+
+- **The end of the Flying phase (P-2).** The throw state's enter (vslot +0x124, 0x00A9FAA0)
+  registers the callback 0x00A7CBA0 for pawn event 5; the callback sets `m_bRagdoll` and
+  `m_bImpulseNextFrame` (the next tick applies the ragdoll impulse from the current Velocity).
+  Event 5 is fired by the NPC pawn's ragdoll start (vslot +0x580, 0x00B6FBB0), which
+  `DishonoredNotify_Ragdoll` calls (0x00A8CFE0). The Windblast throw plays
+  `Npc_EliteGuard_Generic_as` `Generic_WindBlast_{Front, Left, Right, Back}` (action 7 with
+  `m_bWindblast`), whose ragdoll notifies are at 0.4550 / 0.3900 / 0.4483 / 0.4179 s. The L1
+  trace: hit at tick 25, physics 10 at tick 52 = the 28th animation update (28 / 60 >= 0.455 >
+  27 / 60). CONFIRMED. Which of 1 / 2 is Left / Right (`ECardinalDirection` not in the index:
+  the throw start turns the pawn by +90 / -90 for 1 / 2) is LIKELY.
+- **The cast delay (P-8).** `DisNotify_WindBlast` (0x00A96AE0 -> 0x00C44E10) starts the blast
+  (0x00BF9570, origin and direction) directly; the power's warmup (0.1 s) only leads to the fire
+  mode 0x00BF9720, which waits while the cast action plays. The notify is at 0.27 s in
+  `Ply_Powers_as` `Powers_Cast_Windblast`. CONFIRMED.
+- **The reaction class (P-4).** The damage path 0x00B5CCD0 gets its reaction from 0x00B57E60 ->
+  pawn vslot +0x6C8 (0x00B57F00): the damage type's `m_ExpectedHitReaction` when set (Windblast
+  leaves it 0), else 4 or 3 by a flag of the pawn's tweak (+0x100 -> +0x90 bit 1); 4 calls vslot
+  +0x694 (the NPC hit react, 0x00B733F0). No read of the 500 / 1000 / 3800 thresholds was found
+  in the decompile (a scan for `+0x118` pointer reads at config offsets 0x90..0x9C finds none).
+  Not ported.
+- **The rest position (P-6).** The L1 trace weakens the pelvis model: after the impacts the
+  guard's Location sits at z -210.00 for ticks 79..84 and settles at -210.18 (standing capsule
+  centre -210.09), i.e. at the capsule-centre height, not at a lying pelvis. The +89 uu jump at
+  the switch is not explained. The sim's bodies already rest at the capsule-centre height. Not
+  ported.
+
+| id | status | where |
+|---|---|---|
+| P-1 | **ported** | `movement::start_throw` (velocity = clamped momentum / `ThrowConfig::effective_mass`), called by `left_hand::step_windblasts` instead of adding the momentum |
+| P-2 | **ported** | `movement::flying` (`MoveMode::Falling` with `PlayerState.thrown` active): `CalcVelocity` friction `FluidFriction / 2`, fluid, `AirSpeed` cap, sliding move, gravity after the move; ends at the direction's ragdoll notify (`movement::throw_direction`), then the falling move stands for the ragdoll |
+| P-3 | **ported** (the stunned pair loaded, unused: the sim has no stun) | `movement::clamp_throw_momentum` |
+| P-4 | left open | consumer not found (above); thresholds loaded as data only |
+| P-5 | left open | needs the capture |
+| P-6 | left open | evidence against the offset model (above) |
+| P-7 | left open | the ragdoll-impact damage rule is not in 0x00B529C0 / 0x0078F7D0 nor in script; capture P-8 of the queue |
+| P-8 | **ported** | `CombatTuning::windblast_start_delay` (the cast notify, loaded) replaces the 0.1 s warmup in `step_world` and `windblast_lockout` |
+| P-9 | **ported** | `npc_anim::matrix_origin` = `matrix_rows(..)[3]`; test `anim_retail::elite_guard_physics_asset` (spine_3 capsule centre (7.25, 0, 0)) |
+| P-10 | left open | no breakables in the sim |
+
+Scenarios (`oracle scenario --system physics --system powers`): before 25 pass / 1 fail
+(`windblast_throw_l1_flight` apex 109.8); after 26 pass / 0 fail. `windblast_throw_l1_flight`
+now also judges the damage time (port tick 24, original 25) and the flight drift over ticks
+26..36. `powers/windblast_fan_l2`'s front timing became 0.27 + 0.4 s. Side effect: the guard of
+`powers/windblast_guard_l1` now lands about 700 uu out instead of 1100 and, as the sim's NPC
+gets up on landing (no ragdoll rest, section 3.7), comes back and hits the player at tick 122;
+the original rests until tick 117.
 
 ## 7. Recommendation: what the sim must model
 
