@@ -1,5 +1,6 @@
 // Run at the 330 uu ledge and jump at the face: mantled (`m_MantleMaxEdgeHeight` 230 above the
-// feet, tweaks; the jump raises the feet by up to 106.7).
+// feet, tweaks; the jump raises the feet by up to 106.7). Jump is held through the jump: in the air
+// the mantle is requested only while the Jump button is down (0x00ADBD00, movement.md MV-2).
 (
     name: "movement/mantle_330",
     system: Movement,
@@ -7,7 +8,7 @@
     description: "Run north at the 330 ledge, jump at its face: a mantle onto the top.",
     setup: (player: Some((position: (1600, -3900, 92), yaw: 90)), settle: 20),
     ticks: 180,
-    input: [(tick: 1, action: Move(forward: 127, right: 0)), (tick: 56, hold: 2, action: Press(Jump))],
+    input: [(tick: 1, action: Move(forward: 127, right: 0)), (tick: 56, hold: 60, action: Press(Jump))],
     checkpoints: [
         (name: "mantle", expect: [(metric: Count("Sim:Mantle"), value: 1, tol: 0, cmp: AtLeast, source: "tweaks: m_MantleMaxEdgeHeight 230 above the feet; feet up to 106.7 at the apex", status: Static)]),
         (name: "on top", expect: [(metric: RiseFrom("pawn.z", 0), value: 325, tol: 0, cmp: AtLeast, source: "a mantle ends standing on the ledge", status: Static)]),
