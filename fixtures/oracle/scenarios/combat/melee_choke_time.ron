@@ -1,0 +1,23 @@
+// Choke duration. Original (INVENTORY.md, LIKELY U-101): Attribute_ChokeTime 1.5 s + the loop animation
+// length 5.033 s = 6.533 s of held button to a knock-out (bone charm Strong Arms -1.5). The port
+// uses the same sum (takedown.rs start_choke); the button and the range are the port's mapping
+// (Use, back cone 165 uu; the original's DisTweaks_Choke sets no range), so this scenario is a timing
+// check once the choke starts, not an eligibility one.
+(
+    name: "combat/melee_choke_time",
+    system: Combat,
+    map: "Playground",
+    description: "Hold the choke button behind an unaware guard until the knock-out.",
+    setup: (
+        player: Some((position: (-5300, 0, 96), yaw: 180)),
+        npcs: [(id: Some("dummy"), position: Some((-5400, 0, 92)), yaw: 180, state: Some("Passive"))],
+        settle: 30,
+    ),
+    ticks: 600,
+    input: [(tick: 5, hold: 560, action: Press(Use))],
+    checkpoints: [
+        (name: "choke duration", expect: [(metric: Between("Sim:ChokeStart", "Sim:KnockedOut@dummy"), value: 6.533, tol: 0.1, source: "ChokeTime 1.5 + Sword_Choke_Loop 5.033 (INVENTORY.md, LIKELY)", status: Unmeasured)]),
+    ],
+    record: [Pawn, Npc("dummy"), SimEvents],
+    capture: Some("choke an unaware guard (lab npcs, hold the choke key) and time m_fRequiredTime / the Win transition of StatePlayerMasterChoke"),
+)
