@@ -3,6 +3,7 @@
 
 use bevy::prelude::*;
 use dishonored_runtime::prop_light::*;
+use dishonored_ir::LightEnvironment;
 
 #[test]
 fn uniform_from_the_environment() {

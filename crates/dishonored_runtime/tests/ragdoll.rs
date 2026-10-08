@@ -3,6 +3,8 @@
 
 use bevy::prelude::*;
 use dishonored_runtime::ragdoll::*;
+use dishonored_ir::BoneAsset;
+use dishonored_ir::npc_anim::PhysicsAssetData;
 
 /// The elite guard's ragdoll, dropped from its bind pose, settles on the floor near where it
 /// started (skipped without the install).

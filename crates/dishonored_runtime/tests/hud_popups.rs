@@ -1,7 +1,6 @@
 //! Tests of `dishonored_runtime::hud_popups` (integration tests, so they link the normal library build
 //! instead of recompiling the whole crate in test mode).
 
-use bevy::prelude::*;
 use dishonored_runtime::hud_popups::*;
 
 fn game() -> Triggers {

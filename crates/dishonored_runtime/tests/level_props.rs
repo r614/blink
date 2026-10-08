@@ -3,6 +3,8 @@
 
 use bevy::prelude::*;
 use dishonored_runtime::level_props::*;
+use dishonored_ir::DoorAnims;
+use dishonored_mission::runtime::MoverView;
 
 fn door() -> DoorAnims {
     // DBDoors_big_rich_ext_metal_twk: the stages name the opposite direction's animation.

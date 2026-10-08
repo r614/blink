@@ -3,6 +3,7 @@
 
 use bevy::prelude::*;
 use dishonored_runtime::effects::*;
+use dishonored_ir::particles::ParticleEmitterAsset;
 
 #[test]
 fn burst_at_time_zero_fires_on_the_first_cycle() {

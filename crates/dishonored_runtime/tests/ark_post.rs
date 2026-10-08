@@ -3,6 +3,7 @@
 
 use bevy::prelude::*;
 use dishonored_runtime::ark_post::*;
+use dishonored_ir::{FogSettings, PostSettings};
 
 #[test]
 fn struct_defaults_and_boyle_values() {

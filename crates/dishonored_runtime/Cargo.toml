@@ -10,6 +10,18 @@ description = "Bevy presentation runtime: renders imported Dishonored maps"
 # see research/dishonored/RENDERING.md "Performance".
 trace = ["bevy/trace_chrome"]
 
+# The crate is a library plus a thin binary; its tests live in tests/ and link the normal
+# library build, so the library and binary have no test builds of their own (no second compile
+# of this large crate on `cargo test`).
+[lib]
+test = false
+doctest = false
+
+[[bin]]
+name = "dishonored_runtime"
+path = "src/main.rs"
+test = false
+
 [dependencies]
 anyhow.workspace = true
 bevy = { version = "0.19", features = ["pbr_specular_textures"] }

@@ -566,7 +566,7 @@ fn hit_angle(victim: &dishonored_sim::state::PlayerState, from: Vec3) -> f32 {
 }
 
 /// `ECardinalDirection` (Forward, Left, Right, Back) of an angle: 90-degree sectors.
-fn cardinal(angle: f32) -> usize {
+pub fn cardinal(angle: f32) -> usize {
     let a = angle.abs();
     if a <= 45.0 {
         0
@@ -581,7 +581,7 @@ fn cardinal(angle: f32) -> usize {
 
 /// `eDis8WayDirection` / `eDisDeathDirection` (Forward, Forward_Left, Forward_Right, Left,
 /// Right, Back, Back_Left, Back_Right): 45-degree sectors.
-fn eight_way(angle: f32) -> usize {
+pub fn eight_way(angle: f32) -> usize {
     let a = angle.abs();
     let left = angle < 0.0;
     if a <= 22.5 {
@@ -745,7 +745,7 @@ fn modifier_for(i: &AnimInput, cfg: &LocoConfig) -> String {
 /// to facing (0 = forward, +90 = right): anim `k` covers 180 + 90k degrees. Like 0x009331D0,
 /// a neighbour within 0.98 takes the whole weight. Returns the weights and whether both
 /// neighbours are in use (the diagonal correction needs two).
-fn dir_weights(angle_deg: f32) -> ([f32; 4], bool) {
+pub fn dir_weights(angle_deg: f32) -> ([f32; 4], bool) {
     let a = (angle_deg - 180.0).rem_euclid(360.0) / 90.0;
     let k0 = a.floor() as usize % 4;
     let f = a - a.floor();

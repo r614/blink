@@ -3,6 +3,7 @@
 
 use bevy::prelude::*;
 use dishonored_runtime::distortion::*;
+use dishonored_ir::MaterialParams;
 
 fn params(switches: &[(&str, bool)], scalars: &[(&str, f32)]) -> MaterialParams {
     MaterialParams {

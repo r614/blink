@@ -27,45 +27,45 @@ const FRICTION: f32 = 0.6;
 /// A ragdoll stops after this long (PhysX puts resting bodies to sleep).
 const MAX_TIME: f32 = 4.0;
 
-struct Body {
-    bone: usize,
-    parent: Option<usize>,
+pub struct Body {
+    pub bone: usize,
+    pub parent: Option<usize>,
     /// Child body used to orient this one, and a second one (for a frame) when it has several.
-    child: Option<usize>,
-    child2: Option<usize>,
-    pos: Vec3,
-    prev: Vec3,
-    radius: f32,
-    rest: f32,
-    swing: f32,
+    pub child: Option<usize>,
+    pub child2: Option<usize>,
+    pub pos: Vec3,
+    pub prev: Vec3,
+    pub radius: f32,
+    pub rest: f32,
+    pub swing: f32,
     /// Start pose: global (pawn space) transform of the bone.
-    g0: Mat4,
+    pub g0: Mat4,
 }
 
 pub struct Ragdoll {
-    bodies: Vec<Body>,
+    pub bodies: Vec<Body>,
     /// Per bone of part 0: nearest body at or above it (None: above the top body).
-    owner: Vec<Option<usize>>,
-    top: usize,
+    pub owner: Vec<Option<usize>>,
+    pub top: usize,
     /// Start globals of part 0 (pawn space).
-    g0: Vec<Mat4>,
-    floor: FloorGrid,
-    walls: Vec<WallTri>,
-    gravity: f32,
-    elapsed: f32,
-    acc: f32,
+    pub g0: Vec<Mat4>,
+    pub floor: FloorGrid,
+    pub walls: Vec<WallTri>,
+    pub gravity: f32,
+    pub elapsed: f32,
+    pub acc: f32,
 }
 
 /// Floor heights (pawn space) on a square grid around the pawn's origin, sampled once.
-struct FloorGrid {
-    h: Vec<f32>,
+pub struct FloorGrid {
+    pub h: Vec<f32>,
 }
 
 const GRID_N: usize = 17;
 const GRID_CELL: f32 = 12.0;
 
 impl FloorGrid {
-    fn sample(floor_at: &dyn Fn(f32, f32) -> f32) -> FloorGrid {
+    pub fn sample(floor_at: &dyn Fn(f32, f32) -> f32) -> FloorGrid {
         let half = (GRID_N - 1) as f32 * 0.5 * GRID_CELL;
         let mut h = Vec::with_capacity(GRID_N * GRID_N);
         for j in 0..GRID_N {
@@ -77,7 +77,7 @@ impl FloorGrid {
     }
 
     /// Bilinear height at (x, y), clamped to the grid's edge.
-    fn at(&self, x: f32, y: f32) -> f32 {
+    pub fn at(&self, x: f32, y: f32) -> f32 {
         let half = (GRID_N - 1) as f32 * 0.5 * GRID_CELL;
         let fx = ((x + half) / GRID_CELL).clamp(0.0, (GRID_N - 1) as f32);
         let fy = ((y + half) / GRID_CELL).clamp(0.0, (GRID_N - 1) as f32);
@@ -101,21 +101,21 @@ pub const WALL_REACH: f32 = (GRID_N - 1) as f32 * 0.5 * GRID_CELL + 32.0;
 
 /// One wall triangle in pawn space (`n`: unit face normal, the side bodies stay on).
 #[derive(Clone, Copy, Debug)]
-struct WallTri {
-    a: Vec3,
-    b: Vec3,
-    c: Vec3,
-    n: Vec3,
+pub struct WallTri {
+    pub a: Vec3,
+    pub b: Vec3,
+    pub c: Vec3,
+    pub n: Vec3,
 }
 
 impl WallTri {
-    fn new(t: [Vec3; 3]) -> Option<WallTri> {
+    pub fn new(t: [Vec3; 3]) -> Option<WallTri> {
         let n = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
         (n != Vec3::ZERO && n.z.abs() < WALL_MAX_NZ).then_some(WallTri { a: t[0], b: t[1], c: t[2], n })
     }
 
     /// Closest point of the triangle to `p` (Ericson, Real-Time Collision Detection 5.1.5).
-    fn closest(&self, p: Vec3) -> Vec3 {
+    pub fn closest(&self, p: Vec3) -> Vec3 {
         let (a, b, c) = (self.a, self.b, self.c);
         let (ab, ac, ap) = (b - a, c - a, p - a);
         let (d1, d2) = (ab.dot(ap), ac.dot(ap));
@@ -151,7 +151,7 @@ impl WallTri {
     /// Push-out of a sphere at `p` (direction, depth) when it overlaps the triangle, away from
     /// the face on the side the centre is on (the level's collision is queried two-sided, like
     /// the line checks).
-    fn push(&self, p: Vec3, radius: f32) -> Option<(Vec3, f32)> {
+    pub fn push(&self, p: Vec3, radius: f32) -> Option<(Vec3, f32)> {
         let sd = (p - self.a).dot(self.n);
         if sd.abs() >= radius {
             return None;
@@ -178,7 +178,7 @@ fn arc(a: Vec3, b: Vec3) -> Quat {
 
 /// Rotation taking the frame (a1, a2) to (b1, b2): primary axes match exactly, the secondary
 /// as close as possible.
-fn frame(a1: Vec3, a2: Vec3, b1: Vec3, b2: Vec3) -> Quat {
+pub fn frame(a1: Vec3, a2: Vec3, b1: Vec3, b2: Vec3) -> Quat {
     let q1 = arc(a1, b1);
     let a2r = q1 * a2;
     let n = b1.normalize_or_zero();
@@ -266,7 +266,7 @@ impl Ragdoll {
     }
 
     /// Parents before children.
-    fn order(&self) -> Vec<usize> {
+    pub fn order(&self) -> Vec<usize> {
         let depth = |mut i: usize| {
             let mut d = 0;
             while let Some(p) = self.bodies[i].parent {
@@ -283,7 +283,7 @@ impl Ragdoll {
         o
     }
 
-    fn step(&mut self) {
+    pub fn step(&mut self) {
         let g = Vec3::Z * self.gravity * STEP * STEP;
         for b in &mut self.bodies {
             let v = (b.pos - b.prev) * DAMPING;
@@ -378,7 +378,7 @@ impl Ragdoll {
     }
 
     /// Current pawn-space globals of part 0's bones.
-    fn globals(&self) -> Vec<Mat4> {
+    pub fn globals(&self) -> Vec<Mat4> {
         let n = self.bodies.len();
         let mut rot: Vec<Option<Quat>> = vec![None; n];
         for &i in &self.order() {

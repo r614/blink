@@ -170,50 +170,50 @@ pub struct Effects {
 }
 
 #[derive(Clone, Copy, Default)]
-struct Particle {
-    pos: Vec3,
-    vel: Vec3,
-    age: f32,
-    life: f32,
-    size: Vec3,
-    rot: f32,
-    rot_rate: f32,
-    color: Vec3,
-    alpha: f32,
-    r: [f32; 4],
+pub struct Particle {
+    pub pos: Vec3,
+    pub vel: Vec3,
+    pub age: f32,
+    pub life: f32,
+    pub size: Vec3,
+    pub rot: f32,
+    pub rot_rate: f32,
+    pub color: Vec3,
+    pub alpha: f32,
+    pub r: [f32; 4],
     /// Mesh particles: rotation (radians about X, Y, Z) and its rate.
-    mrot: Vec3,
-    mrot_rate: Vec3,
+    pub mrot: Vec3,
+    pub mrot_rate: Vec3,
     /// UE3 `BaseVelocity`: accelerations integrate into it; per-frame modules (velocity over
     /// life, attractors) derive `vel` from it.
-    base_vel: Vec3,
+    pub base_vel: Vec3,
     /// Orbit (summed over the orbit modules): offset, rotation and rotation rate (radians).
-    orbit_off: Vec3,
-    orbit_rot: Vec3,
-    orbit_rate: Vec3,
+    pub orbit_off: Vec3,
+    pub orbit_rot: Vec3,
+    pub orbit_rate: Vec3,
     /// Collisions so far, the maximum, and frozen / no-longer-colliding flags.
-    collisions: u32,
-    max_collisions: u32,
-    frozen: bool,
-    halted: bool,
+    pub collisions: u32,
+    pub max_collisions: u32,
+    pub frozen: bool,
+    pub halted: bool,
 }
 
 /// World ray query for particle collision: (from, to) -> (point, normal).
 type RayFn<'a> = &'a dyn Fn(Vec3, Vec3) -> Option<(Vec3, Vec3)>;
 
-struct EmitterSim {
-    time: f32,
-    spawn_acc: f32,
-    loops: i32,
-    done: bool,
-    particles: Vec<Particle>,
+pub struct EmitterSim {
+    pub time: f32,
+    pub spawn_acc: f32,
+    pub loops: i32,
+    pub done: bool,
+    pub particles: Vec<Particle>,
     /// Emitter-time fraction of the last burst check; -1 before the first, so bursts at time
     /// 0 fire on the first cycle too (they only fired from the second loop on, so one-shot
     /// effects lost every time-0 burst, e.g. the muzzle shockwave).
-    last_burst_t: f32,
+    pub last_burst_t: f32,
     /// The emitter's sprite mesh holds no particles (the placeholder triangle): it is not
     /// rebuilt (and re-uploaded) again until particles exist.
-    mesh_empty: bool,
+    pub mesh_empty: bool,
 }
 
 impl Default for EmitterSim {
@@ -689,7 +689,7 @@ fn spawn_particle(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, rn
 }
 
 /// Advance one emitter by `dt`.
-fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32, rnd: &mut dyn FnMut() -> f32, ray: Option<RayFn>) {
+pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32, rnd: &mut dyn FnMut() -> f32, ray: Option<RayFn>) {
     // Particles.
     let accel = |p: &Particle| d3(&em.acceleration, p.age / p.life, p.r[3], [0.0; 3]);
     // Emitter-space points to the particle space (world unless local space).
@@ -959,7 +959,6 @@ fn simulate(
     session: Option<Res<crate::session::Session>>,
     mut dframe: ResMut<DistortionFrame>,
 ) {
-    use bevy::camera::CameraProjection;
     use bevy::camera::primitives::Sphere;
     dframe.clear();
     let Some((cam, cam_tf, cam_proj, cam_parent)) = cams.iter().next() else { return };

@@ -134,7 +134,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Resource, Clone)]
-struct Args {
+pub struct Args {
     map: String,
     mode: Mode,
     name: String,
@@ -168,7 +168,7 @@ struct Args {
 }
 
 #[derive(Clone, PartialEq)]
-enum Mode {
+pub enum Mode {
     Offline,
     Connect(String),
     Browse(String),

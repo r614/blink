@@ -1,7 +1,6 @@
 //! Tests of `dishonored_runtime::npc_anim` (integration tests, so they link the normal library build
 //! instead of recompiling the whole crate in test mode).
 
-use bevy::prelude::*;
 use dishonored_runtime::npc_anim::*;
 
 #[test]

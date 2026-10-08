@@ -3,6 +3,7 @@
 
 use bevy::prelude::*;
 use dishonored_runtime::decals::*;
+use dishonored_ir::MaterialParams;
 
 fn params(switches: &[(&str, bool)], masks: &[(&str, u8)], vectors: &[(&str, [f32; 4])]) -> MaterialParams {
     MaterialParams {

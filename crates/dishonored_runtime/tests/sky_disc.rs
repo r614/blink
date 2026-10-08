@@ -3,6 +3,7 @@
 
 use bevy::prelude::*;
 use dishonored_runtime::sky_disc::*;
+use dishonored_ir::MaterialParams;
 
 fn params(base: &str, scalars: &[(&str, f32)], vectors: &[(&str, [f32; 4])]) -> MaterialParams {
     MaterialParams {
