@@ -1,0 +1,18 @@
+// Map sweep smoke scenario (research/dishonored/MAP_SWEEP.md). Measured values are not asserted
+// (Unmeasured): the run is judged from its trace (panics, pawns below the spawn, Kismet notes).
+(
+    name: "maps/TowerRtrn_Yard",
+    system: Kismet,
+    map: "L_TowerRtrn_Yard_P",
+    description: "Smoke run: the populated level at the player's default spawn with the original Kismet started by the remote event ChangeLvl_fromHub_toTowerReturnYard (the map's entry event in the global sequence); no input, 10 s.",
+    setup: (kismet: true, kismet_start: Some("ChangeLvl_fromHub_toTowerReturnYard"), original_npcs: true, seed: 1),
+    ticks: 600,
+    input: [],
+    checkpoints: [
+        (name: "smoke", expect: [
+            (metric: Count("Kismet:*"), value: 0, tol: 0, source: "Kismet activations in the first 10 s on the original", status: Unmeasured),
+            (metric: Min("pawn.z"), value: 0, tol: 0, source: "lowest pawn height in the first 10 s on the original", status: Unmeasured),
+        ]),
+    ],
+    record: [Pawn, Kismet, SimEvents],
+)
