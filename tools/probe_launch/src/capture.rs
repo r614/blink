@@ -405,6 +405,15 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
             "StickyGrenade" => &["Twk_Inv_GrenadeCorvo"],
             "BulletExplosive" => &["Twk_Inv_PistolCorvo"],
             "Reset" => &[],
+            "AllPowers" => {
+                // The port's AllPowers: every power at level 2 (OnAddPower per power).
+                for p in ["Blink", "WindBlast", "DarkVision", "Possess", "BendTime", "DevouringSwarm", "Vitality", "BloodThirsty", "ShadowKill", "Celerity"] {
+                    if let Err(e) = crate::lab::power(&mut s.c, p, 2) {
+                        warnings.push(format!("AllPowers: {p}: {e:#}"));
+                    }
+                }
+                &[]
+            }
             "HealthElixir" | "ManaElixir" => {
                 // DishonoredInventory.m_ElixirCounts[0 health, 1 mana].
                 let k = if name == "HealthElixir" { 0 } else { 1 };
@@ -463,6 +472,7 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     // keeps its own AI; other states, factions, routes and tweaks are not applied yet (U-802).
     let mut placed: HashMap<String, u32> = HashMap::new();
     let mut used: Vec<u32> = Vec::new();
+    let mut used_routes: Vec<u32> = Vec::new();
     for (k, n) in spec.setup.npcs.iter().enumerate() {
         let id = n.id.clone().or_else(|| n.spawner.clone()).unwrap_or_else(|| format!("npc{k}"));
         // NPCs placed by position are spawned fresh from a spawner (a copy of the named one, or
@@ -477,7 +487,17 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
                 Some(name) => Some(s.r.object(&mut s.c, name, None)?),
                 None => None,
             };
-            match s.spawn_npc_from(template, n.tweak.as_deref(), n.faction.as_deref(), guard, at, n.yaw) {
+            // A patrol route: a host route taken over and laid on the points (before the
+            // spawn, so the patroller adopts it at once).
+            let patrol = !n.route.is_empty();
+            if patrol {
+                let pts: Vec<glam::Vec3> = n.route.iter().map(|p| glam::Vec3::from(*p) + off).collect();
+                // The port's two-point routes walk back and forth: PingPong (1).
+                if let Err(e) = s.setup_route(&pts, 1, &mut used_routes) {
+                    gap(format!("NPC {id}: patrol route ({e:#})"), &mut warnings)?;
+                }
+            }
+            match s.spawn_npc_opts(template, n.tweak.as_deref(), n.faction.as_deref(), guard, at, n.yaw, patrol) {
                 Ok((p, staged)) => {
                     if staged {
                         warnings.push(format!("NPC {id}: the spawn was blocked at its position; spawned 600 uu above and moved there"));
@@ -498,8 +518,8 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
                 }
             }
         };
-        used.push(pawn);        if !n.route.is_empty() {
-            gap(format!("NPC {id}: patrol route not applied"), &mut warnings)?;
+        used.push(pawn);        if !n.route.is_empty() && !fresh {
+            gap(format!("NPC {id}: patrol route without a position (not applied)"), &mut warnings)?;
         }
         if let Some(fac) = n.faction.as_ref().filter(|_| !fresh) {
             // DishonoredNPCPawn.m_pCurFactionTweak: a faction tweak by name, or none.
@@ -522,6 +542,8 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
 
         match n.state.as_deref() {
             None | Some("Idle") => {}
+            // Patrol: the spawner's patrol start with the route above.
+            Some("Patrol") if fresh && !n.route.is_empty() => {}
             Some("Passive") => {
                 let co = field_off(s, pawn, "Controller")?;
                 let ctrl = s.c.read_u32(pawn + co)?;
@@ -543,7 +565,20 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     let p = spec.setup.player.clone().unwrap_or_default();
     if let Some(ps) = &spec.setup.player {
         if ps.sword_drawn {
-            crate::lab::give(&mut s.c, "Twk_Inv_SwordCorvo", true)?;
+            // Corvo already holds his sword in the right hand: giving it again re-equips it,
+            // and the draw blocks attacks for about 1.1 s (a press at tick 5 after settle 30
+            // was ignored; from 36 on it acts). Give it only when it is not the equipped one.
+            let held = crate::oracle::player_item(&mut s.c, "DishonoredWepSword").ok().and_then(|w| s.c.read(w + 0x59, 1).ok()).is_some_and(|b| b.first() == Some(&1));
+            if held {
+                warnings.push("sword_drawn: the sword is already equipped (not given again)".into());
+            } else {
+                // `sword_drawn` means drawn at tick 0 (the port's start): the draw is run out
+                // here, before the placement and the settle.
+                crate::lab::give(&mut s.c, "Twk_Inv_SwordCorvo", true)?;
+                s.c.lockstep(true, 30_000)?;
+                s.c.step(75, 120_000)?;
+                warnings.push("sword_drawn: sword given and equipped, 75 ticks run for its draw before the setup".into());
+            }
         }
         s.place((glam::Vec3::from(ps.position) + off).to_array(), Some(ps.yaw), Some(ps.pitch), ps.snap_to_floor)?;
         // An airborne start (no floor within the cylinder's half height + 10 below the
@@ -731,7 +766,26 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     // ---- run ----
     let mut trace = Trace::new(&spec.name, "original", spec.tick_hz, &ch.list.iter().map(|c| (c.name.as_str(), c.unit.as_str())).collect::<Vec<_>>());
     let paths: Vec<(usize, ReadPath)> = ch.list.iter().enumerate().filter_map(|(i, c)| c.path.clone().map(|p| (i, p))).collect();
-    let read_paths: Vec<ReadPath> = paths.iter().map(|x| x.1.clone()).collect();
+    let mut read_paths: Vec<ReadPath> = paths.iter().map(|x| x.1.clone()).collect();
+    // Skeletal animation (`Bones` / `AnimState`): extra reads after the channels', decoded
+    // into a sidecar file next to the trace.
+    let mut anim_recs = Vec::new();
+    for r in &spec.record {
+        let (who, bones, filter) = match r {
+            Record::Bones(w, f) => (w, true, f.clone()),
+            Record::AnimState(w) => (w, false, Vec::new()),
+            _ => continue,
+        };
+        let subject = match placed.get(who) {
+            Some(p) => Ok(*p),
+            None if who == "player" => crate::lab::pawn(&mut s.c),
+            None => npc_pawn(s, who).or_else(|_| s.r.object(&mut s.c, who, None)),
+        };
+        match subject.and_then(|o| s.skel_component(o)).and_then(|comp| s.anim_rec(who, comp, bones, &filter, &mut read_paths)) {
+            Ok(rec) => anim_recs.push(rec),
+            Err(e) => warnings.push(format!("{who}: no animation record ({e:#})")),
+        }
+    }
     let to_values = |row: &[Option<Vec<u8>>]| -> Vec<f64> {
         let mut v = vec![f64::NAN; ch.list.len()];
         for ((i, _), b) in paths.iter().zip(row) {
@@ -807,6 +861,13 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     }
     for (k, row) in frames.iter().enumerate() {
         trace.push(k as u32, to_values(row));
+    }
+    let mut anim_out = Vec::new();
+    for rec in &anim_recs {
+        match rec.decode(s, &frames, off.to_array()) {
+            Ok(v) => anim_out.push(v),
+            Err(e) => warnings.push(format!("{}: animation decode ({e:#})", rec.label)),
+        }
     }
     // Back to the layout's coordinates.
     if off != glam::Vec3::ZERO {
@@ -936,10 +997,19 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
         capture_seconds: t_all.elapsed().as_secs_f64(),
     };
     let path = cache::store(&cache::root(), &key, &(prov, trace.clone()))?;
+    let anim_path = if anim_out.is_empty() {
+        None
+    } else {
+        let name = path.file_name().map(|n| n.to_string_lossy().replace("trace-", "anim-").replace(".orc", ".json")).unwrap_or_else(|| "anim.json".into());
+        let p = path.with_file_name(name);
+        std::fs::write(&p, serde_json::to_string(&json!({"scenario": spec.name, "spec_hash": format!("{:016x}", spec.spec_hash()), "meshes": anim_out}))?)?;
+        Some(p.display().to_string())
+    };
     let summary = json!({
         "scenario": spec.name,
         "spec_hash": format!("{:016x}", spec.spec_hash()),
         "cache": path.display().to_string(),
+        "anim": anim_path,
         "frames": trace.frames.len(),
         "channels": trace.channels.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
         "events": trace.events.len(),

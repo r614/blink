@@ -760,8 +760,9 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
         }
         op::SHADER_DUMP => {
             let since = io(rd.u32())?;
+            let max = rd.u32().unwrap_or(u32::MAX) as usize;
             let v = d3d::SHADER_CODE.lock().map_err(|_| "poisoned")?;
-            let sel: Vec<&d3d::StoredShader> = v.iter().filter(|s| s.id >= since).collect();
+            let sel: Vec<&d3d::StoredShader> = v.iter().filter(|s| s.id >= since).take(max).collect();
             put_u32(&mut out, sel.len() as u32);
             for s in sel {
                 put_u32(&mut out, s.id);

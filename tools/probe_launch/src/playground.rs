@@ -338,6 +338,13 @@ impl Session {
     }
 
     pub fn spawn_npc_from(&mut self, from: Option<u32>, tweak: Option<&str>, faction: Option<&str>, guard: bool, at: Vec3, yaw: f32) -> Result<(u32, bool)> {
+        self.spawn_npc_opts(from, tweak, faction, guard, at, yaw, false)
+    }
+
+    /// `patrol`: the spawner's `m_bPatrolUponStartup` (the pawn starts in its patrol behaviour
+    /// and adopts the nearest route).
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_npc_opts(&mut self, from: Option<u32>, tweak: Option<&str>, faction: Option<&str>, guard: bool, at: Vec3, yaw: f32, patrol: bool) -> Result<(u32, bool)> {
         let spawners = if from.is_some() { Vec::new() } else { self.c.find("", "DishonoredSpawner")? };
         let mut template = from;
         let mut tweak_obj = None;
@@ -379,7 +386,7 @@ impl Session {
             let pl = self.r.place(&mut self.c, sp, "m_pFactionTweakOverride")?;
             self.c.write(pl.addr, &fo.to_le_bytes())?;
         }
-        for (k, v) in [("m_bCanSpawnWhenVisible", json!(true)), ("m_bCanSpawnWhenPlayerNear", json!(true)), ("m_bPatrolUponStartup", json!(false)), ("m_bSpawnOnBeginPlay", json!(false))] {
+        for (k, v) in [("m_bCanSpawnWhenVisible", json!(true)), ("m_bCanSpawnWhenPlayerNear", json!(true)), ("m_bPatrolUponStartup", json!(patrol)), ("m_bSpawnOnBeginPlay", json!(false))] {
             let pl = self.r.place(&mut self.c, sp, k)?;
             self.r.write_place(&mut self.c, &pl, &v)?;
         }
@@ -412,6 +419,54 @@ impl Session {
         let r = self.start_spawn(sp, act, at);
         let _ = self.c.write(pl.addr, &saved);
         r
+    }
+
+    /// A patrol route through `points` for a scenario NPC (U-802): a host `DishonoredRoute`
+    /// with at least as many points is taken over: its `DishonoredNavPoint`s are moved to the
+    /// points (static actors: Location written, components updated), their guard settings
+    /// cleared, its list cut to the points, `RouteType` set (0 Linear, 1 PingPong, 2 Circle),
+    /// any squad, unlimited capacity and range, active, no adopters. The patrol manager
+    /// (0x00C41590) gives a starting patroller the nearest adoptable route: this one, at the
+    /// scenario's place. Returns the route.
+    pub fn setup_route(&mut self, points: &[Vec3], route_type: u8, used: &mut Vec<u32>) -> Result<u32> {
+        let mut best = None;
+        for r in self.c.find("", "DishonoredRoute")? {
+            if used.contains(&r) {
+                continue;
+            }
+            let pl = self.r.place(&mut self.c, r, "RouteList")?;
+            let n = self.c.read_u32(pl.addr + 4)?;
+            if n as usize >= points.len() && best.is_none_or(|(_, bn)| n < bn) {
+                best = Some((r, n));
+            }
+        }
+        let (route, _) = best.context("no host route with enough points")?;
+        used.push(route);
+        let pl = self.r.place(&mut self.c, route, "RouteList")?;
+        let data = self.c.read_u32(pl.addr)?;
+        for (i, p) in points.iter().enumerate() {
+            let nav = self.c.read_u32(data + 20 * i as u32)?;
+            anyhow::ensure!(nav != 0, "route point {i} has no actor");
+            crate::lab::move_actor_r(&mut self.c, &mut self.r, nav, p.to_array())?;
+            for (k, v) in [("m_fGuardDuration", json!(0.0)), ("m_bGuardForever", json!(false))] {
+                if let Ok(pl) = self.r.place(&mut self.c, nav, k) {
+                    self.r.write_place(&mut self.c, &pl, &v)?;
+                }
+            }
+            if let Ok(pl) = self.r.place(&mut self.c, nav, "m_WatchPoints") {
+                self.c.write(pl.addr + 4, &0u32.to_le_bytes())?;
+            }
+        }
+        self.c.write(pl.addr + 4, &(points.len() as u32).to_le_bytes())?;
+        let sq = self.r.place(&mut self.c, route, "m_SupportedSquads")?;
+        self.c.write(sq.addr + 4, &0u32.to_le_bytes())?;
+        let pl = self.r.place(&mut self.c, route, "RouteType")?;
+        self.c.write(pl.addr, &[route_type])?;
+        for (k, v) in [("m_Capacity", json!(-1)), ("m_AdoptionRange", json!(-1.0)), ("m_bIsActive", json!(true)), ("m_NumNPCAdopters", json!(0)), ("m_NeglectTimer", json!(0.0))] {
+            let pl = self.r.place(&mut self.c, route, k)?;
+            self.r.write_place(&mut self.c, &pl, &v)?;
+        }
+        Ok(route)
     }
 
     /// Zero the class default StartSpawn's counters (see `spawn_npc_from`).

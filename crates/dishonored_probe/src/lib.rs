@@ -950,8 +950,14 @@ impl Client {
 
     /// Shaders created by the game from id `since` on (bytecode included).
     pub fn shader_dump(&mut self, since: u32) -> io::Result<Vec<ShaderCode>> {
+        self.shader_dump_max(since, u32::MAX)
+    }
+
+    /// At most `max` shaders from id `since` on (the store grows with every map loaded).
+    pub fn shader_dump_max(&mut self, since: u32, max: u32) -> io::Result<Vec<ShaderCode>> {
         let mut p = Vec::new();
         put_u32(&mut p, since);
+        put_u32(&mut p, max);
         let r = self.request(op::SHADER_DUMP, &p)?;
         let mut rd = Reader::new(&r);
         let n = rd.u32()?;
