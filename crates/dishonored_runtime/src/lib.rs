@@ -79,6 +79,12 @@ pub mod decals;
 #[doc(hidden)]
 pub mod water;
 #[doc(hidden)]
+pub mod volume_light;
+#[doc(hidden)]
+pub mod spillway;
+#[doc(hidden)]
+pub mod water_foam;
+#[doc(hidden)]
 pub mod prop_light;
 #[doc(hidden)]
 pub mod loading_screen;
@@ -313,6 +319,9 @@ pub fn main() {
     .add_plugins(lighting::Ue3FalloffPlugin)
     .add_plugins(decals::DecalPlugin)
     .add_plugins(water::WaterPlugin)
+    .add_plugins(volume_light::VolumeLightPlugin)
+    .add_plugins(spillway::SpillwayPlugin)
+    .add_plugins(water_foam::WaterFoamPlugin)
     .add_plugins(prop_light::PropLightPlugin)
     .add_plugins(bloom::BloomPlugin)
     .add_plugins(env_map::EnvMapOncePlugin)

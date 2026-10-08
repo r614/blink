@@ -18,9 +18,19 @@
 //!   (Storm_Intensity + Storm_Min_Intensity)`.
 //!
 //! Shader maps used: Boyle Ext `Boyle_2_inst` (storm, clouds, clouds 2, gradient, UV channel 2)
-//! and Boyle Int `Boyle_01_inst` (clouds, UV channel 2). Not decoded (U-520): `H_Enable_Horizon`
-//! (its noise is an unnamed material texture), `TP_Enable_Top_Texture`, `Enable_Storm_Mask`,
-//! `Enable_GRadiant_Top`, `G_Grandiant_UV2`, and the variants without `Use_UV_Channel_2`.
+//! and Boyle Int `Boyle_01_inst` (clouds, UV channel 2).
+//!
+//! - `H_Enable_Horizon` (6044, 6059: L_Out_P's `Outsider_sky_inst`, and most other levels' skies):
+//!   `h = saturate((Tex#1((2 UV1.x, 0.25 UV1.y) + frac(H_Horizon_Speed t (0.01, 0.025))).r x
+//!   H_Horizon_UV_Distortion + UV1.y + H_HorizonOffset) x UV1.y x 0.5 + H_HorizonOffset)`; the
+//!   contrast result is saturated, then lerped to `Horizon_Color.rgb x a` by
+//!   `h^H_HorizonExponent x H_HorizonIntensity` (0 below 1e-6). `Tex#1` is the base's unnamed noise.
+//! - `Storm_mask`: a single channel of `Storm` times `Storm_Color.rgb` (R in 6059), RGB otherwise.
+//! - Without `Use_UV_Channel_2` only `D_Diffuse` moves to UV0, at `(-UV0.x, UV0.y)` with no
+//!   `U_Offset` (6044 against 6046); the storm and the horizon keep UV1 (6059 is shared by both).
+//!
+//! Not decoded (U-520): `TP_Enable_Top_Texture`, `Enable_Storm_Mask`, `Enable_GRadiant_Top`,
+//! `G_Grandiant_UV2`.
 
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
@@ -30,7 +40,7 @@ use dishonored_ir::{MaterialParams, TextureId};
 pub const SKIES_PMAT: &str = "Skies.Skies_PMAT";
 
 /// Switches whose terms are not decoded (the material renders without them).
-pub const UNDECODED: [&str; 5] = ["H_Enable_Horizon", "TP_Enable_Top_Texture", "Enable_Storm_Mask", "Enable_GRadiant_Top", "G_Grandiant_UV2"];
+pub const UNDECODED: [&str; 4] = ["TP_Enable_Top_Texture", "Enable_Storm_Mask", "Enable_GRadiant_Top", "G_Grandiant_UV2"];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, ShaderType)]
 pub struct SkyUniform {
@@ -44,6 +54,10 @@ pub struct SkyUniform {
     pub speeds: Vec4,
     pub misc: Vec4,
     pub misc2: Vec4,
+    /// rgb: Horizon_Color.rgb x a; w: 1 = H_Enable_Horizon.
+    pub horizon: Vec4,
+    /// (H_Horizon_Speed, H_Horizon_UV_Distortion, H_HorizonOffset, H_HorizonExponent).
+    pub horizon2: Vec4,
 }
 
 /// Parameter defaults of Skies_PMAT (its shader maps' uniform expressions).
@@ -57,6 +71,10 @@ fn scalar_default(name: &str) -> f32 {
         "C2_Clouds_2_Visibility" => 3.0,
         "sky_contrast" => 1.0,
         "Storm_Intensity" => 1.0,
+        "H_Horizon_Speed" => 2.0,
+        "H_Horizon_UV_Distortion" => 0.5,
+        "H_HorizonExponent" => 5.0,
+        "H_HorizonIntensity" => 1.0,
         _ => 0.0,
     }
 }
@@ -64,6 +82,7 @@ fn scalar_default(name: &str) -> f32 {
 fn vector_default(name: &str) -> [f32; 4] {
     match name {
         "D_Diffuse_color" | "Storm_Color" => [1.0, 1.0, 1.0, 1.0],
+        "Horizon_Color" => [0.0, 0.0, 0.0, 1.0],
         "C_Clouds_Color" => [0.0, 0.0, 0.0, 1.0],
         "C2_Clouds_2_Color" => [1.0, 1.0, 1.0, 0.5],
         "G_Gradiant_Top" => [0.0, 1.0, 0.091_391_56, 1.0],
@@ -95,7 +114,10 @@ impl SkyUniform {
             speeds: Vec4::new(s("C_Clouds_Speed"), s("C2_Clouds_2_Speed"), s("Cloud_Distortion"), s("G_Gradiant_Power")),
             misc: Vec4::new(s("C_Clouds_Visibility"), s("C2_Clouds_2_Visibility"), s("sky_contrast"), s("U_Offset")),
             // Use_UV_Channel_2 defaults to on in Skies_PMAT.
-            misc2: Vec4::new(s("Storm_Offset"), if p.switch("Use_UV_Channel_2") == Some(false) { 0.0 } else { 1.0 }, 0.0, 0.0),
+            // z: H_HorizonIntensity; w: the Storm_mask channel (-1: RGB).
+            misc2: Vec4::new(s("Storm_Offset"), if p.switch("Use_UV_Channel_2") == Some(false) { 0.0 } else { 1.0 }, s("H_HorizonIntensity"), p.mask_channel("Storm_mask").map(|c| c.min(3) as f32).unwrap_or(-1.0)),
+            horizon: { let h = v("Horizon_Color"); Vec4::new(h[0] * h[3], h[1] * h[3], h[2] * h[3], on("H_Enable_Horizon")) },
+            horizon2: Vec4::new(s("H_Horizon_Speed"), s("H_Horizon_UV_Distortion"), s("H_HorizonOffset"), s("H_HorizonExponent")),
         })
     }
 }
@@ -117,6 +139,9 @@ pub struct SkyMaterial {
     pub clouds2: Option<Handle<Image>>,
     #[texture(6)]
     pub storm: Option<Handle<Image>>,
+    /// The horizon's noise, the base material's unnamed texture `Tex#1` (H_Enable_Horizon).
+    #[texture(7)]
+    pub noise: Option<Handle<Image>>,
 }
 
 impl SkyMaterial {
@@ -128,9 +153,12 @@ impl SkyMaterial {
             warn!("sky material: switches not decoded (U-520): {}", missing.join(", "));
         }
         let tex = |n: &str| textures.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).and_then(|t| images.get(t.1)).cloned();
-        let (diffuse, clouds, clouds2, storm) = (tex("D_Diffuse"), tex("C_Clouds_Texture"), tex("C2_Clouds_2_Texture"), tex("Storm"));
+        let (diffuse, clouds, clouds2, storm, noise) = (tex("D_Diffuse"), tex("C_Clouds_Texture"), tex("C2_Clouds_2_Texture"), tex("Storm"), tex("Tex1"));
         let any = [&clouds, &diffuse, &clouds2, &storm].into_iter().flatten().next().cloned();
-        Some(SkyMaterial { params, any, diffuse, clouds, clouds2, storm })
+        if params.horizon.w > 0.0 && noise.is_none() {
+            warn!("sky material: H_Enable_Horizon without its noise texture (Tex#1); the noise reads white");
+        }
+        Some(SkyMaterial { params, any, diffuse, clouds, clouds2, storm, noise })
     }
 }
 
