@@ -610,11 +610,16 @@ public class BlinkIndex extends GhidraScript {
                 resolve(def.getInput(0), a, depth, f, seen);
                 resolve(def.getInput(1), b, depth, f, seen);
                 if (a.dynamic || b.dynamic || a.consts.size() * b.consts.size() > 64) {
+                    // A run-time operand: no complete value; keep the constant bits an OR adds.
                     out.dynamic = true;
-                    out.consts.addAll(a.consts);
-                    out.consts.addAll(b.consts);
+                    if (def.getOpcode() == PcodeOp.INT_OR) {
+                        Val k = a.dynamic ? b : a;
+                        if (!k.dynamic) for (long x : k.consts) out.note += "or 0x" + Long.toHexString(x) + ";";
+                    }
+                    out.note += a.note + b.note;
                     return;
                 }
+                out.note += a.note + b.note;
                 for (long x : a.consts)
                     for (long y : b.consts) {
                         long r = def.getOpcode() == PcodeOp.INT_OR ? (x | y) : def.getOpcode() == PcodeOp.INT_AND ? (x & y) : (x ^ y);

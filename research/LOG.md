@@ -1694,3 +1694,16 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Port:** `dishonored_sim::blink` (the level per pawn; new test `blink_range_follows_the_power_level`), `maps/playground.ron`, `missions/playground.ron`, `fixtures/playground/scenarios`, `tools/harness/src/playground.rs`, PLAYGROUND.md, U-763.
 - **Results:** with the old binary on the new layout, steps, mantle and both doors pass (26 / 31). The Blink, pool and locker fixes need the next build.
 - **Confidence:** CONFIRMED (code read) for the Blink level bug; LIKELY for the step and mantle limits and the launch sampling (U-763).
+
+## 2026-10-08: Oracle phase 3, the static index
+
+- **Question:** Can the original's code be queried statically, per system, cheaply enough for the porting agents: which native implements a behaviour, what the script does, where every trace call site is and with which flags?
+- **Method:** a Ghidra headless pass (`tools/ghidra_index/scripts/BlinkIndex.java`) over the analysed GOG exe writes the native lookup tables, class records and vtables, every call, string reference and trace call site (flags resolved through the decompiler's p-code), and every function's decompiled C; an UnrealScript bytecode decompiler in `dishonored_oracle::index::uscript` decompiles every script class of the install; `oracle index build` joins both into a per-exe-hash index and `oracle index ...` queries it (ORACLE.md "Static index").
+- **Findings:**
+  - Native classes register a record holding a pointer to their UTF-16 name one character past the `A` / `U` prefix, then the InternalConstructor; 2760 script classes have one with a vtable.
+  - All 2560 exec natives sit in 335 `FNativeFunctionLookup` tables; `GNatives` is not statically initialised (U-830).
+  - UClass exports carry no tagged properties (`UObject::Serialize` skips them for classes), unlike functions, states and structs.
+  - UE3 v801 bytecode: object references are 4 bytes in the file and 8 in memory, jump offsets in memory bytes; a `foreach` ends on `IteratorNext`, `IteratorPop`, and its `break` jumps to the pop.
+  - 219 trace call sites, 72 distinct constant flag values; `APawn::physWalking` (0x006BD150) is `Pawn` vtable slot 141 (+0x234) and its floor check passes 0x20DF with the pawn's extent; `DisDoor`'s `ShouldTrace` is vtable +0x1C4 (0x00A2C760) and `m_DoorState` is at +0x311, as COLLISION.md measured.
+- **Results:** 3004 classes, 4772 functions (2200 script, 169 KiB), 0 decompile failures; 73960 exe functions, 258262 calls, 49922 string references, 73682 functions decompiled to C (1 failure); queries 90-110 ms per process. `oracle index build` 493 s end to end (385 s of it the decompiler), about 100 s without the C, 6-9 s from existing tables.
+- **Confidence:** CONFIRMED for the decompiler's byte-exact parse (both sizes match on every function) and the layout and vtable spot checks; LIKELY for trace flags resolved through parameters (U-831).

@@ -247,7 +247,7 @@ fn build(a: &Args) -> Result<()> {
         if tables_dir != dir {
             let src = tables_dir.join("decomp.c");
             let dst = dir.join("decomp.c");
-            if src != dst {
+            if src != dst && src.exists() {
                 if a.flag("--keep-tables") || std::fs::rename(&src, &dst).is_err() {
                     std::fs::copy(&src, &dst)?;
                 }
@@ -340,6 +340,12 @@ fn resolve_fn(ix: &Index, s: &str) -> Result<u32> {
         }
     }
     let cands: Vec<String> = ix.execs.iter().filter(|e| e.0.to_ascii_lowercase().contains(&l)).map(|e| format!("{} {}", hx(e.1), e.0)).chain(ix.functions.iter().filter(|f| f.source != "DEFAULT" && f.name.to_ascii_lowercase().contains(&l)).map(|f| format!("{} {}", hx(f.addr), f.name))).take(30).collect();
+    let mut seen = std::collections::HashSet::new();
+    let cands: Vec<String> = cands.into_iter().filter(|c| seen.insert(c[..8].to_string())).collect();
+    let exact: Vec<&String> = cands.iter().filter(|c| c.to_ascii_lowercase().ends_with(&l)).collect();
+    if exact.len() == 1 {
+        return parse_addr(&exact[0][..8]).context("candidate");
+    }
     if cands.len() == 1 {
         return parse_addr(&cands[0][..8]).context("candidate");
     }
