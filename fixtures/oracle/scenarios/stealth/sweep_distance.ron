@@ -1,0 +1,84 @@
+(
+    name: "stealth/sweep_distance",
+    system: Stealth,
+    map: "L_Boyle_Ext_P",
+    description: "Sweep: the player stands still on the guard facing axis at 11 distances (200-2000 uu; the inner cone reaches 3500, the outer 1700; the floor drops about 200 uu at 800-1000, so the player is 270 uu below the eye beyond that): LOS norm and attention gain at each. One capture checks DistanceTuning(1 - norm) + visibility over the whole range, and the inner/outer cone switch below eye height at close range.",
+    setup: (
+        player: Some((position: (-3201.5, -2763.3, 20), yaw: 71.37, snap_to_floor: true)),
+        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), yaw: 251.37, state: Some("Idle"))],
+        settle: 1,
+    ),
+    ticks: 68,
+    input: [
+        (tick: 1, action: Console("calm guard")),
+        (tick: 1, action: Console("teleport -3073.76 -2384.23 -14.8 71.37")),
+        (tick: 7, action: Console("calm guard")),
+        (tick: 7, action: Console("teleport -3105.71 -2478.99 -14.8 71.37")),
+        (tick: 13, action: Console("calm guard")),
+        (tick: 13, action: Console("teleport -3137.66 -2573.75 -14.8 71.37")),
+        (tick: 19, action: Console("calm guard")),
+        (tick: 19, action: Console("teleport -3169.6 -2668.51 -14.8 71.37")),
+        (tick: 25, action: Console("calm guard")),
+        (tick: 25, action: Console("teleport -3201.55 -2763.27 -21.5 71.37")),
+        (tick: 31, action: Console("calm guard")),
+        (tick: 31, action: Console("teleport -3265.44 -2952.79 -51.8 71.37")),
+        (tick: 37, action: Console("calm guard")),
+        (tick: 37, action: Console("teleport -3329.33 -3142.31 -214.8 71.37")),
+        (tick: 43, action: Console("calm guard")),
+        (tick: 43, action: Console("teleport -3425.17 -3426.59 -215 71.37")),
+        (tick: 49, action: Console("calm guard")),
+        (tick: 49, action: Console("teleport -3513.02 -3687.18 -215.2 71.37")),
+        (tick: 55, action: Console("calm guard")),
+        (tick: 55, action: Console("teleport -3552.95 -3805.63 -215.1 71.37")),
+        (tick: 61, action: Console("calm guard")),
+        (tick: 61, action: Console("teleport -3648.78 -4089.91 -214.8 71.37")),
+    ],
+    checkpoints: [
+        (name: "d=200", expect: [
+            (metric: At("npc.guard.los", 4), value: 0, tol: 0, source: "capture: the guard's m_fLastLOSDistance (LOS norm = distance from the vision origin to the target point over the cone range)", status: Unmeasured),
+            (metric: Delta("npc.guard.attn", 3, 6), value: 0, tol: 0, source: "capture: attention gained between the two ticks (seen value x dt; 3 ticks)", status: Unmeasured),
+        ]),
+        (name: "d=300", expect: [
+            (metric: At("npc.guard.los", 10), value: 0, tol: 0, source: "capture: the guard's m_fLastLOSDistance (LOS norm = distance from the vision origin to the target point over the cone range)", status: Unmeasured),
+            (metric: Delta("npc.guard.attn", 9, 12), value: 0, tol: 0, source: "capture: attention gained between the two ticks (seen value x dt; 3 ticks)", status: Unmeasured),
+        ]),
+        (name: "d=400", expect: [
+            (metric: At("npc.guard.los", 16), value: 0, tol: 0, source: "capture: the guard's m_fLastLOSDistance (LOS norm = distance from the vision origin to the target point over the cone range)", status: Unmeasured),
+            (metric: Delta("npc.guard.attn", 15, 18), value: 0, tol: 0, source: "capture: attention gained between the two ticks (seen value x dt; 3 ticks)", status: Unmeasured),
+        ]),
+        (name: "d=500", expect: [
+            (metric: At("npc.guard.los", 22), value: 0, tol: 0, source: "capture: the guard's m_fLastLOSDistance (LOS norm = distance from the vision origin to the target point over the cone range)", status: Unmeasured),
+            (metric: Delta("npc.guard.attn", 21, 24), value: 0, tol: 0, source: "capture: attention gained between the two ticks (seen value x dt; 3 ticks)", status: Unmeasured),
+        ]),
+        (name: "d=600", expect: [
+            (metric: At("npc.guard.los", 28), value: 0, tol: 0, source: "capture: the guard's m_fLastLOSDistance (LOS norm = distance from the vision origin to the target point over the cone range)", status: Unmeasured),
+            (metric: Delta("npc.guard.attn", 27, 30), value: 0, tol: 0, source: "capture: attention gained between the two ticks (seen value x dt; 3 ticks)", status: Unmeasured),
+        ]),
+        (name: "d=800", expect: [
+            (metric: At("npc.guard.los", 34), value: 0, tol: 0, source: "capture: the guard's m_fLastLOSDistance (LOS norm = distance from the vision origin to the target point over the cone range)", status: Unmeasured),
+            (metric: Delta("npc.guard.attn", 33, 36), value: 0, tol: 0, source: "capture: attention gained between the two ticks (seen value x dt; 3 ticks)", status: Unmeasured),
+        ]),
+        (name: "d=1000", expect: [
+            (metric: At("npc.guard.los", 40), value: 0, tol: 0, source: "capture: the guard's m_fLastLOSDistance (LOS norm = distance from the vision origin to the target point over the cone range)", status: Unmeasured),
+            (metric: Delta("npc.guard.attn", 39, 42), value: 0, tol: 0, source: "capture: attention gained between the two ticks (seen value x dt; 3 ticks)", status: Unmeasured),
+        ]),
+        (name: "d=1300", expect: [
+            (metric: At("npc.guard.los", 46), value: 0, tol: 0, source: "capture: the guard's m_fLastLOSDistance (LOS norm = distance from the vision origin to the target point over the cone range)", status: Unmeasured),
+            (metric: Delta("npc.guard.attn", 45, 48), value: 0, tol: 0, source: "capture: attention gained between the two ticks (seen value x dt; 3 ticks)", status: Unmeasured),
+        ]),
+        (name: "d=1575", expect: [
+            (metric: At("npc.guard.los", 52), value: 0, tol: 0, source: "capture: the guard's m_fLastLOSDistance (LOS norm = distance from the vision origin to the target point over the cone range)", status: Unmeasured),
+            (metric: Delta("npc.guard.attn", 51, 54), value: 0, tol: 0, source: "capture: attention gained between the two ticks (seen value x dt; 3 ticks)", status: Unmeasured),
+        ]),
+        (name: "d=1700", expect: [
+            (metric: At("npc.guard.los", 58), value: 0, tol: 0, source: "capture: the guard's m_fLastLOSDistance (LOS norm = distance from the vision origin to the target point over the cone range)", status: Unmeasured),
+            (metric: Delta("npc.guard.attn", 57, 60), value: 0, tol: 0, source: "capture: attention gained between the two ticks (seen value x dt; 3 ticks)", status: Unmeasured),
+        ]),
+        (name: "d=2000", expect: [
+            (metric: At("npc.guard.los", 64), value: 0, tol: 0, source: "capture: the guard's m_fLastLOSDistance (LOS norm = distance from the vision origin to the target point over the cone range)", status: Unmeasured),
+            (metric: Delta("npc.guard.attn", 63, 66), value: 0, tol: 0, source: "capture: attention gained between the two ticks (seen value x dt; 3 ticks)", status: Unmeasured),
+        ]),
+    ],
+    record: [Pawn, Npc("guard")],
+    capture: Some("scenario with the player placed per segment by the session place op (player 4 uu above the floor, facing the guard) and the guard's attention reset (PlayerAttnInfo m_AttentionAccumulator value and level to 0) at each segment start; record per tick the guard Location / Rotation and the vision bone camera_jnt location, the player Location, and the guard's PlayerAttnInfo m_fLastLOSDistance, m_AttentionAccumulator value, m_CurrentAttentionLevel, m_bIsSighted, m_fDebug_FinalVisLevel_Unclamped"),
+)
