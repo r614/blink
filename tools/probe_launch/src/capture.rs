@@ -490,7 +490,9 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
         };
         used.push(pawn);
         if n.tweak.is_some() && by_tweak.is_none() {
-            gap(format!("NPC {id}: tweak {:?} not applied (the host level's pawn keeps its own)", n.tweak), &mut warnings)?;
+            // Every live NPC with that tweak is taken (several placements of one tweak): a pawn
+            // of the kind stands in, recorded as a warning.
+            warnings.push(format!("NPC {id}: no free live pawn with tweak {:?}; a pawn of the kind stands in", n.tweak));
         }
         if !n.route.is_empty() {
             gap(format!("NPC {id}: patrol route not applied"), &mut warnings)?;
