@@ -216,3 +216,15 @@ stealth/detect_600
 # at each DishonoredNotify_Footfall of the locomotion loop at RateScale 1. Needed: the tick of each footfall contact (trace 0x00b66a80) while
 # running at 400 / 360 uu/s and sprinting at 600 / 540, to decode the loop's play rate.
 stealth/hear_footfalls
+
+# --- kismet (research/dishonored/systems/kismet.md) ---
+kismet/boyle_start
+kismet/boyle_intro_20s
+# F-3: field names and idle values of the Kismet time ratio and the two clocks
+session reload
+session setup
+session read object=worldinfo path=TimeDilation
+session read object=worldinfo path=TimeSeconds
+session read object=worldinfo path=BendTimeSeconds
+session read object=worldinfo path=Game.m_fCurrentWorldTimeDilation
+session read object=worldinfo path=Game.m_fCurrentPlayerTimeDilation
