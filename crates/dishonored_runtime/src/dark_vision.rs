@@ -171,7 +171,7 @@ impl Plugin for DarkVisionPlugin {
 
 /// `DarkVision_PMAT`'s `FMaterial::UniformExpressionTextures` from DishonoredGame.
 fn load_textures(images: &mut Assets<Image>) -> (Option<Handle<Image>>, Option<Handle<Image>>) {
-    let load = || -> Option<Vec<Handle<Image>>> {
+    let mut load = || -> Option<Vec<Handle<Image>>> {
         let content = dishonored_assets::Content::locate().ok()?;
         let pkg = content.package("DishonoredGame").ok()?;
         let mi = (0..pkg.exports.len()).find(|&i| pkg.export_class(i) == "Material" && pkg.obj_path(ObjRef::Export(i)).ends_with("SAVED.DarkVision_PMAT"))?;
