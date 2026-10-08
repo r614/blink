@@ -423,3 +423,21 @@ Ported from the decompiled light-environment update, on the same decoding as the
 * Both references may be off: the Playground lights the hook built may not be the layout's, and the Boyle reading may be stale (section 10).
 * Capture requested: at a properly placed Boyle point, the stealth DLE state's SH (+0x450 / +0x480 / +0x4B0 static, +0x4E0 / +0x510 / +0x540 dynamic, band 0) and its per-light contributions, to separate the volume from the lights.
 * Until then `stealth/light_probe_lane` keeps failing on raw light.
+
+### 12. Vision from the head (F4 / F5), decoded 2026-10-08
+
+**The eye and the axis.** The vision component's per-tick eye update (`ArkComponentVisionNPC` vtable slot 17, 0x00C676A0, called from the vision tick 0x00C788E0 before the cone cache 0x00C67410; Ghidra had no function there, read from the disassembly):
+* It finds `m_Vision_BoneName` (`camera_jnt`) on the pawn's mesh (`FUN_00731ce0`) and takes the bone's world matrix (0x00718630). The eye is the bone's position. The axis is the bone's forward, except when the angle between the bone's forward and the pawn's rotation is at most `m_fVision_BoneNullzone_Deg` (5). Then the axis is the pawn's rotation at the bone position.
+* Without the bone (no mesh, bone missing), the eye is the pawn's Location and the axis its Rotation.
+* The eye is pulled back along the axis by `m_fVision_BonePullback` (0 in every shipped `DisTweaks_Vision`: the class default; `Twk_Vision_Default` and `_InConvo` leave it).
+* With a brain focus point (0x00B01060 -> 0x00B504F0 -> 0x00B4C920), the axis is turned toward it by at most `m_fVision_AngleLeeway_Deg`. That is also 0 in the shipped tweaks, so there is no turn, unless the component flag at +0x190 asks for the full angle; that flag's setter was not found.
+* Port consequence: the vision axis is the animated head bone. A guard's cone follows its head as the animation poses it: the idle pose, the look-at additive grids, the turns.
+
+**The head turn.** It is animation: `ArkAnimNodeLookAt` blends the look-at mode's additive head / torso grids (`ArkComponentLookatConfig`, already decoded for the runtime in `dishonored_assets::npc_anim::load_lookat_config`). Its aim is a `DynInterpFVector2D` cursor: current, min, max, speed, max speed, target, `m_fMaxStrength`, `m_fFriction`, `m_fDampingDistance`, `m_fSpeedFactor`. The look-at component (`ArkCpntType_Lookat`, vtable 0x010A6694, constructor 0x00955D60 with the cursor defaults: yaw limits +-pi, pitch +-pi/2, 100, 7, 0.5, 50, 3 ...) computes the look target per mode in 0x00953FB0 (point, actor, rotation, ...). The cursor integration itself was not located; the runtime's look-at eases at a guessed rate (U-281).
+
+**Not ported, and why.** The headless AI has no animated skeleton. A faithful eye needs `camera_jnt`'s pose relative to the pawn per tick: the idle pose plus the look-at additive. The port keeps the eye at centre + 70 on the body yaw, so `stealth/detect_600` / `detect_1300` stay failing. Next steps:
+1. Capture `camera_jnt`'s location and forward relative to the pawn per tick in detect_600 (queued). This gives the idle head offset and the measured head-turn curve directly.
+2. Either evaluate the guard's idle and look-at additive in the AI (the runtime's `npc_anim` sampling, moved where the AI can call it), or decode the cursor integration and drive a head-yaw model from the lookat config's head ranges.
+3. Apply the decoded rule above (null zone 5 deg, pullback 0, leeway 0) to that head pose.
+
+The body turn (TurnToFace at attention level 2 and the behaviours) belongs to the AI port's slot model and is unchanged.
