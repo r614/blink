@@ -18,4 +18,4 @@ pub mod load;
 pub mod vo;
 
 pub use model::{ConversationDb, NodeId, NodeKind, Target};
-pub use runner::{ConvEnv, ConvEvent, EndReason, HookRequest, Runner, StartSpec};
+pub use runner::{ConvEnv, ConvEvent, EndReason, HookFacts, HookRequest, HookStage, Runner, StartSpec};

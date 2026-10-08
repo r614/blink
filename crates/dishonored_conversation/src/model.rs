@@ -29,6 +29,9 @@ pub struct ConversationDb {
     /// a pawn's generic (bark) trees come from its voice (`DisTweaks_NPCPawn.m_GenericDialogData`).
     #[serde(default)]
     pub voice_trees: std::collections::BTreeMap<String, Vec<u32>>,
+    /// `DisTweaks_ConvSettings` (bark queue, caps, distances, ducking).
+    #[serde(default)]
+    pub settings: crate::hooks::ConvSettings,
 }
 
 /// `DisDialogOneShot`: a level actor binding speakers to a one-shot tree.
@@ -64,6 +67,58 @@ pub struct Tree {
     /// Hook nodes (`m_DialogHooks`, non-empty entries).
     pub hooks: Vec<NodeId>,
     pub conversations: Vec<u32>,
+    /// `DisDialogTree.m_pFallbackTree` (+0x148): tried when this tree lacks the hook or its walk
+    /// ends in `DisConv_TryFallbackTree`.
+    #[serde(default)]
+    pub fallback: Option<u32>,
+}
+
+/// The class of a hook node: what its output selection (virtual +0x158) reads.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub enum HookClass {
+    /// `DisConv_DialogHook`: output 0.
+    #[default]
+    Base,
+    /// `DisConv_Hook_SuspicionLevel` (0x00cac8b0): the owner's AI suspicion level.
+    SuspicionLevel,
+    /// `DisConv_Hook_DeathMode` (0x00ca9070): 0 dead, 1 knocked out.
+    DeathMode,
+    /// `DisConv_Hook_Notice` (0x00cac450): 0 visual, 1 aural anomaly, 2 aural danger.
+    Notice,
+    /// `DisConv_Hook_Investigate` (0x00ca9170): the walk state's sub-state byte.
+    Investigate,
+    /// `DisConv_Hook_SuspicionDist` (`m_fRadius`).
+    SuspicionDist { radius: f32 },
+    /// `DisConv_Hook_Distance` (bands in `NodeKind::Hook::distances`).
+    Distance,
+    /// `DisConv_Hook_PlayerLoiter` (`m_fLoiterRadius`, `m_fLoiterTime_Min/Max`).
+    PlayerLoiter { radius: f32, min: f32, max: f32 },
+    /// `DisConv_Hook_PlayerLookAt` (`m_fLookAtRadius`, `m_LookAtTargets[]`: actor, angle, time).
+    PlayerLookAt { radius: f32, targets: Vec<(String, f32, f32)> },
+    /// `DisConv_Hook_KismetActivated` / `_PlayAudioLog` (0x00ca9200): the output is named by the
+    /// request (Kismet hook name).
+    KismetActivated,
+    /// Selectors not decoded (`SplitByTypeAndActor` family, `Distraction`, `WitnessedMagic`,
+    /// `Heart*`): output 0 (class name kept).
+    Other(String),
+}
+
+impl HookClass {
+    pub fn from_class(class: &str) -> Self {
+        match class {
+            "DisConv_DialogHook" => HookClass::Base,
+            "DisConv_Hook_SuspicionLevel" => HookClass::SuspicionLevel,
+            "DisConv_Hook_DeathMode" => HookClass::DeathMode,
+            "DisConv_Hook_Notice" => HookClass::Notice,
+            "DisConv_Hook_Investigate" => HookClass::Investigate,
+            "DisConv_Hook_SuspicionDist" => HookClass::SuspicionDist { radius: 500.0 },
+            "DisConv_Hook_Distance" => HookClass::Distance,
+            "DisConv_Hook_PlayerLoiter" => HookClass::PlayerLoiter { radius: 600.0, min: 5.0, max: 7.0 },
+            "DisConv_Hook_PlayerLookAt" => HookClass::PlayerLookAt { radius: 300.0, targets: Vec::new() },
+            "DisConv_Hook_KismetActivated" | "DisConv_Hook_PlayAudioLog" => HookClass::KismetActivated,
+            other => HookClass::Other(other.to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -333,7 +388,16 @@ pub enum NodeKind {
     ConversationRef { conversation: Option<u32> },
     /// Tree hook: `m_HookEnum` (`DDH_*`), `m_iHookIndex`, Kismet names for
     /// `DisConv_Hook_KismetActivated` (output i = name i).
-    Hook { hook: String, index: i32, names: Vec<String>, priority: Option<Priority>, distances: Option<[f32; 3]> },
+    Hook {
+        hook: String,
+        index: i32,
+        names: Vec<String>,
+        priority: Option<Priority>,
+        distances: Option<[f32; 3]>,
+        /// The node class (output selection, R5).
+        #[serde(default)]
+        class: HookClass,
+    },
     /// `DisConv_CheckSpeakerSuspicionLevel`: the output is the speaker's suspicion level.
     CheckSuspicion,
     /// `DisConv_IsPossessed`: 0 = not possessed, 1 = possessed, 2 = possessed by the player's
