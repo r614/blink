@@ -1,0 +1,22 @@
+// Front assassination of an unaware guard. The original's assassinate move sets have Front / Left / Right
+// variants and m_fAllowedAngleFromTargetDir 360; whether an unaware pawn can be killed from the front
+// depends on the awareness table and the direction constraints (UNMEASURED). The port never assassinates
+// from the front (a normal swing: damage).
+(
+    name: "combat/melee_assassinate_front",
+    system: Combat,
+    map: "Playground",
+    description: "Swing at an unaware guard 120 uu ahead that faces the player.",
+    setup: (
+        player: Some((position: (-5300, 0, 96), yaw: 180, pitch: 0)),
+        npcs: [(id: Some("dummy"), position: Some((-5420, 0, 92)), yaw: 0, state: Some("Passive"))],
+        settle: 30,
+    ),
+    ticks: 180,
+    input: [(tick: 5, action: Press(Primary))],
+    checkpoints: [
+        (name: "assassinated", expect: [(metric: Count("Sim:Death@dummy[cause=Assassination]"), value: 0, tol: 0, source: "port: front is a normal hit; original unknown", status: Unmeasured)]),
+    ],
+    record: [Pawn, Npc("dummy"), SimEvents],
+    capture: Some("as melee_assassinate_back, from the front"),
+)

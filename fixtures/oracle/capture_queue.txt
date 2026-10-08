@@ -22,3 +22,25 @@ session read object=pawn path=Health
 session power name=Vitality level=2
 session step n=2
 session read object=pawn path=Health
+# melee (systems/melee.md)
+combat/sword_hit_dummy
+combat/guard_attack
+combat/block
+combat/melee_reach_d160
+combat/melee_reach_d230
+combat/melee_reach_d260
+combat/melee_reach_d300
+combat/melee_lateral_60
+combat/melee_lateral_90
+combat/melee_guard_offscreen
+combat/melee_assassinate_back_d120
+combat/melee_assassinate_back_d220
+combat/melee_assassinate_back_d300
+combat/melee_assassinate_front
+combat/melee_drop_assassinate_h250
+combat/melee_drop_assassinate_h450
+combat/melee_choke_time
+session read object=pawn path=m_fOffscreenMeleeDamageReduction
+session dump class=DisTweaks_Assassinate filter=Awareness limit=3
+session dump class=DisTweaks_DropAssassinate filter=m_f limit=3
+session dump class=DisTweaks_MeleeAttackPlayer filter=m_f limit=3

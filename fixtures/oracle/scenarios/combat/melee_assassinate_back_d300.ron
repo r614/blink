@@ -1,0 +1,24 @@
+// Back assassination, one point of the sweep over distance (300 uu behind an unaware guard, both
+// facing -x). Original (melee.md): DisItemContext_Assassinate, m_fMaxContextRange 275, target must be an
+// NPC whose awareness is one of the m_AssassinateOnAwareness states (0, 2, 3, 6), not running unless
+// m_bCanAssassinateRunners; any direction (Front / Back / Left / Right move sets). The port allows only the back
+// cone (+-60 deg), 165 uu (0.6 x 275), view within 45 deg. A Passive (no AI) dummy has an unknown original
+// awareness, so the expected value is UNMEASURED.
+(
+    name: "combat/melee_assassinate_back_d300",
+    system: Combat,
+    map: "Playground",
+    description: "Swing at an unaware guard 300 uu ahead of the player, both facing the same way.",
+    setup: (
+        player: Some((position: (-5300, 0, 96), yaw: 180, pitch: 0)),
+        npcs: [(id: Some("dummy"), position: Some((-5600, 0, 92)), yaw: 180, state: Some("Passive"))],
+        settle: 30,
+    ),
+    ticks: 180,
+    input: [(tick: 5, action: Press(Primary))],
+    checkpoints: [
+        (name: "assassinated", expect: [(metric: Count("Sim:Death@dummy[cause=Assassination]"), value: 0, tol: 0, source: "context range 275 (original design reading); port 165", status: Unmeasured)]),
+    ],
+    record: [Pawn, Npc("dummy"), SimEvents],
+    capture: Some("lab npcs; place the player 300 uu behind an unaware guard (idle, not passive); press attack; record the context chosen (DisItemContext_Assassinate vs MeleeAttackPlayer) and the target's awareness value"),
+)
