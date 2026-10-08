@@ -29,7 +29,7 @@ jobs:
         run: cargo test --workspace --release
 
       - name: Build
-        run: cargo build --release -p dishonored_runtime -p dishonored_server -p dishonored_master
+        run: cargo build --profile dist -p dishonored_runtime -p dishonored_server -p dishonored_master
 
       - name: Package
         shell: pwsh
@@ -37,7 +37,7 @@ jobs:
           $version = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0, 7))" }
           $name = "Blink-$version-windows-x64"
           New-Item -ItemType Directory $name | Out-Null
-          Copy-Item target/release/dishonored_runtime.exe, target/release/dishonored_server.exe, target/release/dishonored_master.exe $name
+          Copy-Item target/dist/dishonored_runtime.exe, target/dist/dishonored_server.exe, target/dist/dishonored_master.exe $name
           Copy-Item -Recurse missions $name
           Copy-Item README.md, LICENSE $name
           Compress-Archive -Path $name -DestinationPath "$name.zip"

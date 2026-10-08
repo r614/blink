@@ -1,0 +1,17 @@
+// Save and load in the middle of a run (the game's own `save::encode` / `save::restore`), then
+// keep running: the loaded match is the saved one.
+(
+    name: "saveload/roundtrip",
+    system: SaveLoad,
+    map: "Playground",
+    description: "Run forward with a passive guard nearby, save and load at 1 s, run on: the state survives and the run continues.",
+    setup: (player: Some((position: (0, -5300, 92), yaw: 90)), npcs: [(id: Some("dummy"), position: Some((300, -5000, 92)), state: Some("Passive"))], settle: 20),
+    ticks: 180,
+    input: [(tick: 1, action: Move(forward: 127, right: 0)), (tick: 60, action: Console("saveload"))],
+    checkpoints: [
+        (name: "same state", expect: [(metric: Count("Console:saveload[same_state=true]"), value: 1, tol: 0, source: "a load restores exactly the saved match", status: Static)]),
+        (name: "save allowed", expect: [(metric: Count("Console:saveload[allowed=true]"), value: 1, tol: 0, source: "saving is allowed while running in the open", status: Static)]),
+        (name: "keeps running", expect: [(metric: At("pawn.speed2d", 90), value: 360, tol: 1, source: "INSTRUMENTATION.md: run plateau 360 with the sword drawn (the loaded pawn runs on)")]),
+    ],
+    record: [Pawn, Npc("dummy")],
+)

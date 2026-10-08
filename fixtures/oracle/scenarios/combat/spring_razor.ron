@@ -1,0 +1,25 @@
+// A Spring Razor placed at the feet of a passive guard. Presentation (tweaks):
+// `Twk_Inv_SpringRazorPlaced.m_pDetonationEffect` = `Vfx_Weapon.Effects.SpringRazor.Ps_SpringRazor`.
+(
+    name: "combat/spring_razor",
+    system: Combat,
+    map: "Playground",
+    description: "Place a Spring Razor in front of a passive guard: placement, trigger, damage and the detonation effect.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0, pitch: -35)),
+        items: ["SpringRazor:2"],
+        left_hand: Some("SpringRazor"),
+        npcs: [(id: Some("dummy"), position: Some((-5470, 0, 92)), yaw: 180, state: Some("Passive"))],
+        settle: 30,
+    ),
+    ticks: 600,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "placed", expect: [(metric: Count("Sim:TrapPlaced"), value: 1, tol: 0, source: "a press with a razor places it", status: Static)]),
+        (name: "triggered", expect: [(metric: Count("Sim:TrapTriggered"), value: 1, tol: 0, source: "an armed razor with a pawn in reach triggers", status: Unmeasured)]),
+        (name: "damage", expect: [(metric: EventSum("Sim:Damage@dummy[cause=SpringRazor]", "amount"), value: 0, tol: 0, source: "Spring Razor damage", status: Unmeasured)]),
+        (name: "effects", expect: [(metric: Count("Effect:Vfx_Weapon.Effects.SpringRazor.Ps_SpringRazor"), value: 1, tol: 0, source: "tweaks: Twk_Inv_SpringRazorPlaced.m_pDetonationEffect", status: Static)]),
+    ],
+    record: [Pawn, Powers, Npc("dummy"), SimEvents, Effects, Sounds],
+    capture: Some("lab give SpringRazor; place it by a guard; trace DisGadget_SpringRazorPlaced timers and the damage path"),
+)

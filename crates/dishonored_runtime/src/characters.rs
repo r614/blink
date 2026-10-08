@@ -526,7 +526,7 @@ pub fn animate_characters(
     weapons: Option<Res<WeaponLibrary>>,
     mut view: ResMut<crate::session::SessionView>,
     // (Grouped: a system takes at most 16 parameters.)
-    (time, mut face_packages, anim_debug): (Res<Time>, Local<Option<(String, Vec<String>)>>, Local<AnimDebug>),
+    (time, mut face_packages, anim_debug, body_frames): (Res<Time>, Local<Option<(String, Vec<String>)>>, Local<AnimDebug>, Option<Res<crate::viewmodel::BodyFrames>>),
     roots: Query<(Entity, &CharacterRoot, &crate::players::PlayerBody, &Children, &GlobalTransform)>,
     mut joints: Query<(&Joint, &mut Transform), (Without<TpWeaponJoint>, Without<AccessoryJoint>)>,
     mut wjoints: Query<(&TpWeaponJoint, &mut Transform), (Without<Joint>, Without<AccessoryJoint>)>,
@@ -556,7 +556,12 @@ pub fn animate_characters(
         let stance = view.matchv.npc_poses.iter().find(|x| x.0 == p.id).map(|x| x.1);
         // The level floor under a pawn-space point (pawn space: origin at the pawn, turned by its
         // yaw), for the ragdoll's floor grid.
-        let (pos, yaw, hh) = (p.position, p.yaw.to_radians(), mv.collision_half_height);
+        // A body left in its choker's or carrier's frame is drawn at that anchor
+        // (`viewmodel::BodyFrames`): its ragdoll samples the level there.
+        let (pos, yaw, hh) = match body_frames.as_ref().and_then(|f| f.anchors.get(&p.id)) {
+            Some(a) => (a.pos, a.yaw.to_radians(), mv.collision_half_height),
+            None => (p.position, p.yaw.to_radians(), mv.collision_half_height),
+        };
         let world = &session.content.collision;
         let ground = move |x: f32, y: f32| -> f32 {
             use dishonored_world::WorldQuery;

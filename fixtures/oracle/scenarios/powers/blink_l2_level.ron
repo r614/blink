@@ -1,0 +1,35 @@
+// Blink level 2, level aim, on the Playground's Blink lane (targets east). Mechanics measured
+// in HOOK_TRIAGE.md (2026-10-06, Boyle Ext, fixed 1/60 s): range 1600 uu from the eye
+// horizontally, ending 5-19 uu short (< 25); 16 steps of 100 uu, one per tick (0.267 s); cost
+// 20 mana; the refund of the 20 points starts 3.00 s after the spend, one point every 7 ticks.
+// Presentation (tweaks, `Twk_Powers.Blink.Twk_Blink`): the arrival plays `m_pGroundPS`,
+// `m_pMantlePS` or `m_pLowFallPS` / `m_pHighFallPS`, one-shot systems that end.
+(
+    name: "powers/blink_l2_level",
+    system: Powers,
+    map: "Playground",
+    description: "Aim Blink level 2 at eye level for 10 ticks, release; distance, travel time, mana and its refund; one arrival effect spawned and ended; the cast sounds.",
+    setup: (player: Some((position: (-5600, 0, 96), yaw: 0)), powers: [("Blink", 2)], left_hand: Some("Blink"), settle: 30),
+    ticks: 900,
+    input: [(tick: 1, hold: 10, action: Press(Secondary))],
+    checkpoints: [
+        (name: "range", expect: [(metric: Delta("pawn.x", 0, 60), value: 1587.5, tol: 12.5, source: "HOOK_TRIAGE.md 2026-10-06: level 2 range 1600 uu from the eye, ends 5-19 uu short")]),
+        (name: "travel", expect: [(metric: Between("Sim:BlinkStart", "Sim:BlinkEnd"), value: 0.267, tol: 0.017, source: "HOOK_TRIAGE.md 2026-10-06: 16 steps of 100 uu, one per tick at 60 Hz")]),
+        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 20, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: Blink costs 20")]),
+        (name: "no refund before 3 s", expect: [(metric: At("pawn.mana", 185), value: 80, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: the refund starts 3.00 s after the spend (tick 11 + 180)")]),
+        (name: "refunded", expect: [(metric: At("pawn.mana", 340), value: 100, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: 20 points back, one every 7 ticks")]),
+        (name: "arrival effect", expect: [
+            (metric: Count("Effect:Vfx_GamePlay.Blink.*"), value: 1, tol: 0, source: "tweaks: Twk_Blink m_pGroundPS / m_pMantlePS / m_pLowFallPS / m_pHighFallPS, one per arrival", status: Static),
+            (metric: Unended("Vfx_GamePlay.Blink.*"), value: 0, tol: 0, source: "UE3 one-shot gameplay ParticleSystemComponent: destroyed when its emitters finish (no Blink effect stays in the world)", status: Static),
+            (metric: Lifetime("Vfx_GamePlay.Blink.*"), value: 0, tol: 0, source: "lifetime of the arrival effect on the original", status: Unmeasured),
+            (metric: Count("Effect:Vfx_GamePlay.Blink.Blink_Fall_01"), value: 0, tol: 0, source: "which arrival system the original plays for a level-aim Blink that ends above the floor", status: Unmeasured),
+            (metric: Count("EffectMissing:*"), value: 0, tol: 0, source: "every system the tweaks name exists in DishonoredGame", status: Static),
+        ]),
+        (name: "sounds", expect: [
+            (metric: Count("Sound:(no cue)"), value: 0, tol: 0, source: "each Blink event the presentation handles has a cue", status: Static),
+            (metric: Count("Sound:*@player"), value: 2, tol: 0, source: "AkEvent posts of a Blink on the original (start, arrival, landing)", status: Unmeasured),
+        ]),
+    ],
+    record: [Pawn, Vitals, Powers, SimEvents, Effects, Sounds],
+    capture: Some("lab setup 60; lab power Blink 2; place -3400 -3150 -190 270 (Boyle runway); measure blink --pitch 0; event trace of ParticleSystemComponent activations and AkEvent posts for 15 s"),
+)

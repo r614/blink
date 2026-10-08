@@ -129,8 +129,8 @@ macro_rules! soul_material {
                 _key: bevy::pbr::MaterialPipelineKey<Self>,
             ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
                 if let Some(ds) = descriptor.depth_stencil.as_mut() {
-                    ds.depth_compare = $compare;
-                    ds.depth_write_enabled = false;
+                    ds.depth_compare = Some($compare);
+                    ds.depth_write_enabled = Some(false);
                 }
                 Ok(())
             }

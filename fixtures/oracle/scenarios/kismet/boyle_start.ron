@@ -1,0 +1,17 @@
+// The original Kismet of Boyle Ext started like the original level change into it
+// (`ChangeLvl_fromHub_toBoyle`, missions/boyle_original.ron): its ops run.
+(
+    name: "kismet/boyle_start",
+    system: Kismet,
+    map: "L_Boyle_Ext_P",
+    description: "Start Boyle Ext's original Kismet and the populated level; record the activations for 5 s.",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true)), kismet: true, kismet_start: Some("ChangeLvl_fromHub_toBoyle"), original_npcs: true, seed: 1),
+    ticks: 300,
+    input: [],
+    checkpoints: [
+        (name: "runs", expect: [(metric: Count("Kismet:*"), value: 1, tol: 0, cmp: AtLeast, source: "the level-change remote event starts the level's sequences", status: Static)]),
+        (name: "activations", expect: [(metric: Count("Kismet:*"), value: 0, tol: 0, source: "Kismet activations in the first 5 s on the original", status: Unmeasured)]),
+    ],
+    record: [Pawn, Kismet, SimEvents],
+    capture: Some("ProcessEvent trace of SequenceOp activations for 5 s after ChangeLvl_fromHub_toBoyle"),
+)

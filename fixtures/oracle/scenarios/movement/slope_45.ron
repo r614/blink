@@ -1,0 +1,13 @@
+// Running up a 45 degree slope, 400 long: walkable (`WalkableFloorZ` 0.6428 = cos 50, read live,
+// COLLISION.md).
+(
+    name: "movement/slope_45",
+    system: Movement,
+    map: "Playground",
+    description: "Run north up the 45 degree slope: the pawn reaches the top (rise 400 tan 45).",
+    setup: (player: Some((position: (-2400, -3900, 92), yaw: 90)), settle: 20),
+    ticks: 180,
+    input: [(tick: 1, action: Move(forward: 127, right: 0))],
+    checkpoints: [(name: "reached the top", expect: [(metric: RiseFrom("pawn.z", 0), value: 360, tol: 0, cmp: AtLeast, source: "COLLISION.md: WalkableFloorZ 0.6428 live (floors up to 50 degrees walkable)", status: Static)])],
+    record: [Pawn],
+)

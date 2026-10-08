@@ -1,0 +1,23 @@
+// The Playground's stealth lane: a guard 900 uu from a player standing in the lit west half
+// (PLAYGROUND.md). The light term of the seen value (0.1 x light01, HOOK_TRIAGE.md) makes the lit
+// case faster than `stealth/light_vs_dark_dark`; the port's light probe lacks the local lights
+// (U-121), so the times themselves are unmeasured.
+(
+    name: "stealth/light_vs_dark",
+    system: Stealth,
+    map: "Playground",
+    description: "Lit lane: a guard 900 uu away facing the player; time to notice and to combat.",
+    setup: (
+        player: Some((position: (-3500, 7000, 92), yaw: 180)),
+        npcs: [(id: Some("guard"), position: Some((-4400, 7000, 92)), yaw: 0, state: Some("Idle"))],
+        settle: 1,
+    ),
+    ticks: 1200,
+    input: [],
+    checkpoints: [
+        (name: "notices", expect: [(metric: TimeToReach("npc.guard.attn_level", 1), value: 0, tol: 0, source: "time to notice in the lit lane", status: Unmeasured)]),
+        (name: "combat", expect: [(metric: TimeAt("npc.guard.state", 9), value: 20, tol: 0, cmp: AtMost, source: "a guard facing an enemy standing in the open 900 uu away engages", status: Static)]),
+    ],
+    record: [Pawn, Npc("guard"), SimEvents],
+    capture: Some("not an original map: use stealth/detect_* on Boyle"),
+)

@@ -1,0 +1,16 @@
+// Drink a health elixir at 30 health.
+(
+    name: "inventory/drink_health",
+    system: Inventory,
+    map: "Playground",
+    description: "At 30 health with two health elixirs, drink one: one used, health restored.",
+    setup: (player: Some((position: (0, -5300, 92), yaw: 90, health: Some(30))), items: ["HealthElixir:2"], settle: 5),
+    ticks: 180,
+    input: [(tick: 5, action: Drink("HealthElixir"))],
+    checkpoints: [
+        (name: "used", expect: [(metric: Delta("inv.elixir_health", 0, 179), value: -1, tol: 0, source: "Dis_ConsumeElixir uses one", status: Static)]),
+        (name: "health", expect: [(metric: Final("pawn.health"), value: 0, tol: 0, source: "health after a health elixir from 30", status: Unmeasured)]),
+    ],
+    record: [Pawn, Vitals, Powers, SimEvents],
+    capture: Some("set Health 30, consume a health elixir, read Health"),
+)

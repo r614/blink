@@ -574,7 +574,10 @@ pub fn spawn_map(
                         },
                     }
                 });
-                if let Some(d) = mat_id.and_then(|m| crate::decals::PendingDecal::new(map.material_params.get(m)?, &map.materials[m].texture_params, &image_handles, scene, lightmap)) {
+                // Water (river_main_PMAT): its own shading (water.rs).
+                if let Some(w) = mat_id.and_then(|m| crate::water::PendingWater::new(map.material_params.get(m)?, &map.materials[m].texture_params, &image_handles, scene.clone(), lightmap.clone())) {
+                    e.insert(w);
+                } else if let Some(d) = mat_id.and_then(|m| crate::decals::PendingDecal::new(map.material_params.get(m)?, &map.materials[m].texture_params, &image_handles, scene, lightmap)) {
                     e.insert(d);
                 }
             }

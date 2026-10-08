@@ -1,0 +1,14 @@
+// Walking into a 50 uu step (Playground steps station): climbed. The original's `MaxStepHeight`
+// is 44 (read live, COLLISION.md); `stepUp` rises MaxStepHeight + 2.54 from 6.73 above the floor
+// (decoded, PLAYGROUND.md), so steps up to about 53 are walked up.
+(
+    name: "movement/step_50",
+    system: Movement,
+    map: "Playground",
+    description: "Walk north into the 50 uu step: the pawn ends on top.",
+    setup: (player: Some((position: (-4600, -3900, 92), yaw: 90)), settle: 20),
+    ticks: 110,
+    input: [(tick: 1, action: Move(forward: 127, right: 0))],
+    checkpoints: [(name: "climbed", expect: [(metric: RiseFrom("pawn.z", 0), value: 47, tol: 0, cmp: AtLeast, source: "COLLISION.md: MaxStepHeight 44 live; stepUp rule (PLAYGROUND.md): up to 53.3", status: Static)])],
+    record: [Pawn],
+)

@@ -1,0 +1,30 @@
+// Dark Vision level 2 with a patrolling guard in view. Presentation (tweaks): the guard's
+// vision cone (`Twk_Pawn_DefaultNPC.m_VisionConePatrolTemplate` = `Ps_DVision_VCone_Blue_01`,
+// combat `PS_DVision_VCone_Red_01`) shows while Dark Vision is on; noises show
+// `Twk_DarkVision.m_AINoiseVisualEffect` (`Ps_DVision_Sounds_Base01`).
+(
+    name: "powers/dark_vision",
+    system: Powers,
+    map: "Playground",
+    description: "Cast Dark Vision level 2 facing a guard 800 uu away; the activation, its duration and cost, and the vision cone effect.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0)),
+        powers: [("DarkVision", 2)],
+        left_hand: Some("DarkVision"),
+        npcs: [(id: Some("guard"), position: Some((-4800, 0, 92)), yaw: 0, state: Some("Idle"), faction: Some("None"))],
+        settle: 30,
+    ),
+    ticks: 600,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "activation", expect: [(metric: Count("Sim:DarkVision[active=true]"), value: 1, tol: 0, source: "the power activates on a press with mana (Twk_DarkVision)", status: Static)]),
+        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 0, tol: 0, source: "Dark Vision mana cost on the original", status: Unmeasured)]),
+        (name: "duration", expect: [(metric: Max("power.dark_vision"), value: 0, tol: 0, source: "Dark Vision duration (m_fDuration) as read live", status: Unmeasured)]),
+        (name: "vision cone", expect: [
+            (metric: Count("Effect:Vfx_GamePlay.DarkVision.*"), value: 1, tol: 0, cmp: AtLeast, source: "tweaks: Twk_Pawn_DefaultNPC.m_VisionConePatrolTemplate Ps_DVision_VCone_Blue_01 shown on guards while Dark Vision is on", status: Static),
+        ]),
+        (name: "sounds", expect: [(metric: Count("Sound:*@player"), value: 1, tol: 0, cmp: AtLeast, source: "Dark Vision on/off AkEvents", status: Unmeasured)]),
+    ],
+    record: [Pawn, Vitals, Powers, Npc("guard"), SimEvents, Effects, Sounds],
+    capture: Some("lab power DarkVision 2; cast near a party guard; event trace of ParticleSystemComponent activations; read DisActivePowerComponent_DarkVision timers"),
+)

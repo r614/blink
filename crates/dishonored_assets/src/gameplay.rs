@@ -72,6 +72,55 @@ pub fn flatten(m: &TMap) -> BTreeMap<String, f32> {
     out
 }
 
+/// The player's mantle sequences, low / medium / high (`Ply_Sword_Locomotion_as`, the
+/// `Sword_` item prefix of the `Mantle` state's tree `Ply_Player_Mantle_at`): the root bone's
+/// translation per frame taken to pawn space through `Ply_Player.Skm_Player`'s mesh transform,
+/// and each node's `m_fMantleTravelDistanceZ`.
+fn mantle_anims(content: &Content, prov: &mut BTreeMap<String, String>) -> Result<Vec<MantleAnim>> {
+    use ue3_package::properties::{Value, find};
+    const SET: &str = "Ply_Sword_Locomotion_as.Ply_Sword_Locomotion_as";
+    const NAMES: [&str; 3] = ["Sword_Ready_MantleLow", "Sword_Ready_MantleMedium", "Sword_Ready_MantleHigh"];
+    let rig = crate::characters::load_model(content, "mantle_rig", &[("Engine", "Ply_Player.Skm_Player")], None, 16)?;
+    let part = rig.parts.first().context("Skm_Player has no part")?;
+    let pkg = content.package("Startup")?;
+    let mut travel: BTreeMap<String, f32> = BTreeMap::new();
+    for i in 0..pkg.exports.len() {
+        if pkg.export_class(i) != "DishonoredAnimNodeSeqMantle" {
+            continue;
+        }
+        let h = pkg.read_object(i)?;
+        let Some(Value::Name(name)) = find(&h.properties, "AnimSeqName").map(|p| &p.value) else { continue };
+        if let Some(z) = find(&h.properties, "m_fMantleTravelDistanceZ").and_then(|p| p.as_float()) {
+            travel.insert(name.clone(), z);
+        }
+    }
+    let mut lib = crate::characters::load_anim_set(content, "Startup", SET, &NAMES)?;
+    lib.edge_order(&part.bones);
+    let root_name = &part.bones.first().context("no bones")?.name;
+    let root = lib.tracks.iter().position(|t| t.eq_ignore_ascii_case(root_name)).context("no root track")?;
+    let mut out = Vec::new();
+    for n in NAMES {
+        let clip = lib.clips.get(n).with_context(|| format!("{n} not decoded"))?;
+        let at = |f: &Vec<Option<glam::Vec3>>| f.get(root).copied().flatten();
+        let t0 = clip.translations.first().and_then(at).unwrap_or(glam::Vec3::ZERO);
+        let mut last = t0;
+        let pts: Vec<[f32; 2]> = clip
+            .translations
+            .iter()
+            .map(|f| {
+                let t = at(f).unwrap_or(last);
+                last = t;
+                let d = part.mesh_to_pawn.transform_vector3(t - t0);
+                [d.x, d.z]
+            })
+            .collect();
+        let travel_z = *travel.get(n).with_context(|| format!("no DishonoredAnimNodeSeqMantle plays {n}"))?;
+        prov.insert(format!("mantle.anims.{n}"), format!("Startup {SET} {n}: {} frames at {} Hz, {} s, root end {:?}, Ply_Player_Mantle_at m_fMantleTravelDistanceZ = {travel_z}", pts.len(), clip.sample_rate, clip.duration, pts.last()));
+        out.push(MantleAnim { sequence: n.to_string(), travel_z, sample_rate: clip.sample_rate, duration: clip.duration, root: pts });
+    }
+    Ok(out)
+}
+
 pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
     let db = TweakDb::load(content)?;
     let mut l = Loader { db: &db, prov: BTreeMap::new() };
@@ -143,6 +192,22 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
             max_vertical_angle_edge_face: l.f(&mantle, &mantle_path, "m_MaxVerticalAngleForEdgeFace", "mantle.max_vertical_angle_edge_face")?,
             max_horizontal_angle_edge_face: l.f(&mantle, &mantle_path, "m_MaxHorizontalAngleForEdgeFace", "mantle.max_horizontal_angle_edge_face")?,
             ledge_grab_min_edge_height: l.f(&mantle, &mantle_path, "m_fLedgeGrabMantleMinEdgeHeight", "mantle.ledge_grab_min_edge_height")?,
+            low_use_step_up: {
+                let v = matches!(get(&mantle, "m_bLowMantleUseStepUp"), Some(TVal::B(true)));
+                l.prov.insert("mantle.low_use_step_up".into(), format!("{mantle_path} :: m_bLowMantleUseStepUp = {v}"));
+                v
+            },
+            anims: mantle_anims(content, &mut l.prov)?,
+            anim_rate: match get_f32(&attrs, &format!("m_MantleAnimRate.{DIFFICULTY_FIELD}")) {
+                Some(v) => {
+                    l.prov.insert("mantle.anim_rate".into(), format!("{a} :: m_MantleAnimRate.{DIFFICULTY_FIELD} = {v}"));
+                    v
+                }
+                None => {
+                    l.prov.insert("mantle.anim_rate".into(), "DisAttribute default 1 (m_MantleAnimRate not in the resolved tweak)".into());
+                    1.0
+                }
+            },
         },
         slow_walk_speed: l.attr(&attrs, a, "m_GroundSpeedSlowWalk", "movement.slow_walk_speed")?,
         sword_sheathed_speed_factor: l.attr(&attrs, a, "m_SwordSheathedSpeedFactor", "movement.sword_sheathed_speed_factor")?,

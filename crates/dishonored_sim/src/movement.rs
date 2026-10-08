@@ -398,7 +398,7 @@ pub fn step_movement(
             }
         }
         MoveMode::Mantling => {
-            if advance_traversal(p, ctx.dt) {
+            if advance_traversal(p, ctx.cfg, ctx.dt) {
                 p.mode = MoveMode::Walking;
                 p.velocity = Vec3::ZERO;
             }
@@ -430,37 +430,35 @@ pub(crate) fn start_swimming(p: &mut PlayerState, events: &mut Vec<SimEvent>) {
     events.push(SimEvent::Swim { id: p.id, entered: true });
 }
 
-/// The mantle's move: up the face to the destination's height, then over the edge onto it (the
-/// original's mantle animations pull up, then step forward; their root motion and timings are
-/// not decoded, U-019). Time is shared out by the length of the two legs. A straight line from
-/// the foot of the face to the top cut through the ledge's corner, and the camera went through
-/// the wall on the way up (high ledges: the eye crossed the face below the top).
+/// The mantle's move (`StatePlayerMasterMantle`, `RMM_Translate`): the pawn is placed at the
+/// finder's location and the mantle sequence's root motion moves it from there, its forward
+/// part as authored and its vertical part scaled by the mantle height over the sequence's
+/// `m_fMantleTravelDistanceZ` (`DishonoredAnimNodeSeqMantle`, 0x00A8F9B0: the transform
+/// handed to the root motion is the component rotation with scale (1, 1, height / travel)),
+/// played at `Attribute_MantleAnimRate`. The state's tick (0x00A6C590) does not move the pawn
+/// itself; its intro (0x00A636C0, a linear slide over the previous action's time to go) only
+/// runs after another action state (0x00A6EC20), not from walking or falling.
 /// Returns true when finished.
-pub fn advance_traversal(p: &mut PlayerState, dt: f32) -> bool {
+pub fn advance_traversal(p: &mut PlayerState, cfg: &MovementConfig, dt: f32) -> bool {
     let t = &mut p.traversal;
     t.elapsed += dt;
     let a = if t.duration <= 0.0 { 1.0 } else { (t.elapsed / t.duration).min(1.0) };
-    p.position = mantle_path(t.from, t.to, a);
+    p.position = match t.anim.and_then(|i| cfg.mantle.anims.get(i as usize)) {
+        Some(anim) => mantle_root_position(t.from, t.to, anim, t.elapsed * if t.rate > 0.0 { t.rate } else { 1.0 }),
+        None => t.from.lerp(t.to, a),
+    };
     a >= 1.0
 }
 
-/// Point at fraction `a` (0..1) of the mantle's two-leg path from `from` to `to`.
-pub fn mantle_path(from: Vec3, to: Vec3, a: f32) -> Vec3 {
-    let up = (to.z - from.z).max(0.0);
-    let across = (to - from).truncate().length();
-    let total = up + across;
-    if total <= 1e-3 || up <= 1e-3 {
-        return from.lerp(to, a);
-    }
-    let corner = Vec3::new(from.x, from.y, to.z);
-    let split = up / total;
-    if a <= split {
-        from.lerp(corner, a / split)
-    } else {
-        corner.lerp(to, (a - split) / (1.0 - split))
-    }
+/// Position `seq_time` seconds into a mantle sequence started at `from` (the finder's location)
+/// whose root motion ends at `to`: forward along the horizontal direction to `to` by the root's
+/// forward offset, up by the root's vertical offset times (`to.z - from.z`) / `travel_z`.
+pub fn mantle_root_position(from: Vec3, to: Vec3, anim: &dishonored_ir::gameplay::MantleAnim, seq_time: f32) -> Vec3 {
+    let [fwd, up] = anim.root_at(seq_time);
+    let dir = (to - from).truncate().normalize_or_zero();
+    let scale = if anim.travel_z.abs() > 1e-3 { (to.z - from.z) / anim.travel_z } else { 1.0 };
+    from + Vec3::new(dir.x, dir.y, 0.0) * fwd + Vec3::Z * (up * scale)
 }
-
 /// Slide start (`StatePlayerMasterSlide` enter, 0x00A67FA0): the slide eases the
 /// horizontal velocity from its value at the start to the same direction at
 /// `Attribute_GroundSpeedCrouch` (times the sword factor) over `m_fSlideTime`, sneaking.
@@ -1041,47 +1039,124 @@ pub fn try_mantle_from(p: &mut PlayerState, fwd: Vec3, min_edge: f32, ctx: &Move
     if edge_h < min_edge || edge_h > m.max_edge_height {
         return false;
     }
-    // Standing clearance on top (crouched clearance is accepted too).
-    let dest_xy = top.point + fwd * m.forward_move_amount;
-    let stand = PawnBox::new(dest_xy + Vec3::Z * (cfg.collision_half_height + FLOOR_DIST), r, cfg.collision_half_height);
-    let (dest, crouch) = if box_fits(ctx.world, &stand) {
-        (stand.center, false)
+    // The finder's location: the pawn against the face at its own height. (The finder's result
+    // location is not decoded, U-019; the step-up and the mantle sequences start from it.)
+    let fwd_h = Vec3::new(fwd.x, fwd.y, 0.0).normalize_or_zero();
+    let anchor = Vec3::new(base.x, base.y, p.position.z) + fwd_h * (wall_dist - r).max(0.0);
+    // The finder's classes (0x00AD78D0): low up to `m_LowMantleMaxEdgeHeight`, medium up to
+    // `m_MediumMantleMaxEdgeHeight`, else high; a low edge is a step-up when
+    // `m_bLowMantleUseStepUp` and no crouch is needed.
+    let kind = if edge_h <= m.low_max_edge_height {
+        0
+    } else if edge_h <= m.medium_max_edge_height {
+        1
     } else {
-        let low = PawnBox::new(dest_xy + Vec3::Z * (cfg.crouch_half_height + FLOOR_DIST), r, cfg.crouch_half_height);
-        if !box_fits(ctx.world, &low) {
-            return false;
-        }
-        (low.center, true)
+        2
+    };
+    let anim = m.anims.get(kind);
+    let step_up_allowed = m.low_use_step_up && kind == 0;
+    // How far past the finder's location the move ends: `m_fMantleForwardMoveAmount` for the
+    // step-up, the sequence's own forward root motion for a mantle.
+    let over = |step_up: bool| if step_up { m.forward_move_amount } else { anim.and_then(|a| a.root.last()).map(|e| e[0]).unwrap_or(m.forward_move_amount) };
+    let fits = |hh: f32, step_up: bool| {
+        let c = anchor + fwd_h * over(step_up);
+        let b = PawnBox::new(Vec3::new(c.x, c.y, top.point.z + hh + FLOOR_DIST), r, hh);
+        box_fits(ctx.world, &b).then_some(b.center)
+    };
+    // Standing on top, else sneaking (`m_bCrouchRequired`).
+    let (dest, crouch, step_up) = if let Some(c) = fits(cfg.collision_half_height, step_up_allowed) {
+        (c, false, step_up_allowed)
+    } else if let Some(c) = fits(cfg.crouch_half_height, false) {
+        (c, true, false)
+    } else {
+        return false;
     };
     if crouch && !p.crouched {
         p.crouched = true;
     }
-    // Duration grows with edge height; anim-driven in the original (U-019).
-    let duration = if edge_h <= m.low_max_edge_height { 0.35 } else if edge_h <= m.medium_max_edge_height { 0.55 } else { 0.75 };
-    p.traversal = Traversal { from: p.position, to: dest, elapsed: 0.0, duration };
-    p.mode = MoveMode::Mantling;
     p.velocity = Vec3::ZERO;
     p.jump.active = false;
     events.push(SimEvent::Mantle { id: p.id, edge_height: edge_h });
+    if step_up {
+        // 0x00AD35E0: moved to the finder's location, up by the height, then forward by
+        // `m_fMantleForwardMoveAmount`, at once (the camera is smoothed by `StepUpMantle`,
+        // `ADD_Head_Mantle_Low`, over `m_fLowMantleStepUpBlendTime`).
+        p.position = dest;
+        p.mode = MoveMode::Walking;
+        return true;
+    }
+    // The mantle state sets the pawn at its intro target at once (0x00A6EC20, no intro after
+    // walking or falling), then the sequence's root motion carries it to `dest`; the height
+    // (`m_fCurrentMantleHeight`) is the rise that lands it there.
+    let rate = m.anim_rate.max(0.01);
+    let (anim_i, duration) = match anim {
+        Some(a) => (Some(kind as u8), a.duration / rate),
+        None => (None, 0.0),
+    };
+    p.position = anchor;
+    p.traversal = Traversal { from: anchor, to: dest, elapsed: 0.0, duration, edge_height: edge_h, anim: anim_i, rate };
+    p.mode = MoveMode::Mantling;
     true
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn mantle_rises_before_it_goes_over() {
-        let (from, to) = (Vec3::new(0.0, 0.0, 0.0), Vec3::new(100.0, 0.0, 200.0));
-        // Two thirds of the time up the face, then across.
-        let mid = mantle_path(from, to, 0.5);
-        assert!(mid.x.abs() < 1e-4 && (mid.z - 150.0).abs() < 1e-3, "{mid}");
-        let late = mantle_path(from, to, 5.0 / 6.0);
-        assert!((late.z - 200.0).abs() < 1e-3 && (late.x - 50.0).abs() < 1e-3, "{late}");
-        assert_eq!(mantle_path(from, to, 1.0), to);
-        assert_eq!(mantle_path(from, to, 0.0), from);
+    /// `Sword_Ready_MantleHigh` root bone (forward, up) per frame, decoded from Startup
+    /// `Ply_Sword_Locomotion_as` (Edge, 31 frames at 29.03 Hz; `anim_root`, rounded to 1 uu).
+    const HIGH_ROOT: [[f32; 2]; 31] = [
+        [0.0, 0.0], [0.0, 0.0], [0.0, 2.0], [0.0, 3.0], [0.0, 6.0], [0.0, 9.0], [0.0, 12.0], [0.0, 16.0], [0.0, 19.0], [0.0, 23.0], [0.0, 27.0],
+        [0.0, 29.0], [1.0, 32.0], [2.0, 37.0], [3.0, 43.0], [5.0, 50.0], [7.0, 58.0], [9.0, 65.0], [11.0, 71.0], [14.0, 77.0], [16.0, 80.0],
+        [19.0, 82.0], [22.0, 83.0], [25.0, 83.0], [27.0, 82.0], [30.0, 80.0], [33.0, 79.0], [35.0, 78.0], [38.0, 79.0], [40.0, 80.0], [40.0, 80.0],
+    ];
+
+    fn high() -> dishonored_ir::gameplay::MantleAnim {
+        dishonored_ir::gameplay::MantleAnim { sequence: "Sword_Ready_MantleHigh".into(), travel_z: 80.0, sample_rate: 29.032259, duration: 1.0333333, root: HIGH_ROOT.to_vec() }
     }
 
+    /// The sim's mantle path follows the decoded root-motion curve frame by frame: forward as
+    /// authored, the rise scaled by height / `m_fMantleTravelDistanceZ` (0x00A8F9B0).
+    #[test]
+    fn mantle_path_is_the_sequence_root_motion() {
+        let a = high();
+        let from = Vec3::new(100.0, 50.0, 10.0);
+        // A 200 uu rise straight along +Y, ending 40 uu on (the sequence's forward travel).
+        let to = from + Vec3::new(0.0, 40.0, 200.0);
+        let k = 200.0 / 80.0;
+        for (f, r) in HIGH_ROOT.iter().enumerate() {
+            let p = mantle_root_position(from, to, &a, f as f32 / a.sample_rate);
+            let want = from + Vec3::new(0.0, r[0], r[1] * k);
+            assert!((p - want).length() < 1e-3, "frame {f}: {p} vs {want}");
+        }
+        assert!((mantle_root_position(from, to, &a, a.duration) - to).length() < 1e-3);
+        // Between frames: linear.
+        let mid = mantle_root_position(from, to, &a, 15.5 / a.sample_rate);
+        assert!((mid.z - (from.z + 54.0 * k)).abs() < 1e-3, "{mid}");
+    }
+
+    /// `advance_traversal` plays the sequence at `Attribute_MantleAnimRate` and ends on `to`.
+    #[test]
+    fn mantle_traversal_runs_the_sequence() {
+        let cfg = crate::SimConfig::from_json(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/config/gameplay_config.json")).unwrap()).unwrap();
+        let mut mv = cfg.gameplay.movement.clone();
+        mv.mantle.anims = vec![high(), high(), high()];
+        mv.mantle.anim_rate = 1.5;
+        let mut p = PlayerState::new(1, Vec3::ZERO, 0.0);
+        let (from, to) = (Vec3::ZERO, Vec3::new(40.0, 0.0, 160.0));
+        p.traversal = Traversal { from, to, elapsed: 0.0, duration: high().duration / 1.5, edge_height: 160.0, anim: Some(2), rate: 1.5 };
+        let mut ticks = 0;
+        while !advance_traversal(&mut p, &mv, 1.0 / 60.0) {
+            ticks += 1;
+            // 14 ticks in: 0.35 s of the sequence at rate 1.5.
+            if ticks == 14 {
+                let want = mantle_root_position(from, to, &high(), 14.0 / 60.0 * 1.5);
+                assert!((p.position - want).length() < 1e-3);
+            }
+            assert!(ticks < 60);
+        }
+        assert!((p.position - to).length() < 1e-3, "{}", p.position);
+        assert_eq!(ticks, (high().duration / 1.5 * 60.0).ceil() as i32 - 1);
+    }
     #[test]
     fn braking_matches_the_substep_rule() {
         // One 1/60 s sub-step at friction 8: v (1 - 2 x 8 / 60).
