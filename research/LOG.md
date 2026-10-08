@@ -1865,3 +1865,11 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Implementation consequence:** gameplay config cache key `v13r`; `ProjectileState` gains
   `spawn` / `pierced` (protocol bump needed). Open: muzzle-socket bolt spawn, throw origin at
   the hand, aim assist, bolt recovery / pinning, the bullet blast (F13), grenade impact damage 6.
+
+## 2026-10-08: Power screen effects from the captured shaders; launch-tick trails
+
+- **Question:** What do Bend Time, Blink, Dark Vision and Possession draw on screen, from the shaders the hook captured in the running game; and how should a bolt that hits within its launch tick show its trail?
+- **Method:** `fxc /dumpbin` of the captured blobs (`oracle/shaders/70da96138fe2171c`), their recorded constants and the post manager channels (`effects/*.json`); `obj_dump` / `export_hex` of `AltScreen_Effects.PostProcessMaterial.*` (parameters, `UniformExpressionTextures` from the native data) and the chain `Test_PPG`.
+- **Findings:** EFFECTS.md "Power screen effects": the Bend Time field and its two blur passes (fully decoded with constants), Blink's use of the Bend Time blur, the Dark Vision eyelid pass; Blink's lens field disassembled without constants; no Possession screen pass captured. A trail whose projectile dies at once: started and deactivated in the same tick (the trail component is deactivated with the projectile).
+- **Port:** `power_pp.rs` (intensity curves, textures), `ark_post.rs` / `.wgsl` (field, blur, eyelid pass, new bindings), `SessionView.time_bends`; `SimEvent::Fired` now carries kind, origin and velocity; `FxRequest::EndedTrail`, `StopAtOnce`; oracle presenter mirrors it; `Flare_Bolt_Trail` for incendiary bolts.
+- **Confidence:** CONFIRMED for the shader terms and the Bend Time constants; LIKELY for the eyelid Alpha curve; curve-fit (from the capture) for Blink's blur intensity.
