@@ -304,7 +304,7 @@ pub fn step_body(b: &mut PlayerState, world: &dyn WorldQuery, cfg: &GameplayConf
     if let Some(h) = world.raycast(b.position, probe, probe.length(), channel::PAWN) {
         let back = if delta.z < 0.0 { hh } else { mv.collision_radius };
         b.position += delta.normalize_or_zero() * (h.distance - back).max(0.0);
-        crate::noise::emit(events, &cfg.ai.noise.corpse, h.point, SoundCategory::BodyFall, b.id, b.velocity.length());
+        crate::noise::emit(events, crate::noise::body_noise(b, cfg), h.point, SoundCategory::BodyFall, b.id, b.velocity.length());
         b.velocity = Vec3::ZERO;
     } else {
         b.position += delta;

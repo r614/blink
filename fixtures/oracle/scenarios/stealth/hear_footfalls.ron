@@ -12,13 +12,15 @@
     input: [
         (tick: 1, action: Console("calm guard")),
         (tick: 1, action: Console("teleport -3584.89 -3900.39 -221.8 71.37")),
-        (tick: 1, action: Press(Crouch)),
-        (tick: 1, action: Move(forward: 127, right: 0)),
+        // Sneak once landed (the teleport drops the player 3 ticks; a crouch press in the air is not a sneak).
+        (tick: 6, action: Press(Crouch)),
+        (tick: 8, action: Move(forward: 127, right: 0)),
         (tick: 328, action: Move(forward: 0, right: 0)),
-        (tick: 328, action: Press(Crouch)),
         (tick: 331, action: Console("calm guard")),
         (tick: 331, action: Console("teleport -3584.89 -3900.39 -221.8 71.37")),
-        (tick: 331, action: Move(forward: 127, right: 0)),
+        // Stand up once landed at the start (standing needs headroom).
+        (tick: 336, action: Press(Crouch)),
+        (tick: 338, action: Move(forward: 127, right: 0)),
         (tick: 658, action: Move(forward: 0, right: 0)),
         (tick: 661, action: Console("calm guard")),
         (tick: 661, action: Console("teleport -3584.89 -3900.39 -221.8 71.37")),

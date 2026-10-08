@@ -662,13 +662,20 @@ pub struct NoiseTable {
     /// `StatePlayerMasterFalling.m_fFall_Stun_Vel` (DefaultPlayerState.ini): a landing faster
     /// than this is the stun landing.
     pub fall_stun_speed: f32,
+    /// `StatePlayerMasterFalling.m_fAnimateFallTime` (DefaultPlayerState.ini): a fall that did not
+    /// come from a jump and lasted at most this long lands with no landing contact (0x00A5FF10).
+    #[serde(default = "animate_fall_time")]
+    pub animate_fall_time: f32,
     /// `Sword` -> `Body` (a hit) and `Sword` -> `Weapon` (a clash / block).
     pub sword_body: AiNoise,
     pub sword_weapon: AiNoise,
     /// `Bullet` -> `Environment` (the pistol bullet's impact).
     pub bullet_impact: AiNoise,
-    /// `Corpse` -> `Environment` (a body hitting the floor).
+    /// `Corpse` -> `Environment` (a dead body touching the world) and `SleepingBody` ->
+    /// `Environment` (an unconscious one). The sub's `m_fMinSpeed` 200 is inert: it only gates
+    /// speed-scaled subs (`m_bScaleWithSpeed` false here), so every such contact makes the noise.
     pub corpse: AiNoise,
+    pub sleeping_body: AiNoise,
     /// `DisTweaks_FirePistol.m_AINoiseLoudnessWhenFiring`, context Danger, at the shooter
     /// (0x00C2A3E0). The crossbow's fire tweak has no AI noise: firing a bolt is silent.
     pub pistol_fire: AiNoise,
@@ -677,6 +684,10 @@ pub struct NoiseTable {
     pub walk_clip: FootfallClip,
     pub run_clip: FootfallClip,
     pub sprint_clip: FootfallClip,
+}
+
+fn animate_fall_time() -> f32 {
+    0.25
 }
 
 /// A looping locomotion clip's length and its footfall notify times (seconds).
@@ -693,20 +704,22 @@ impl Default for NoiseTable {
         NoiseTable {
             footfall_run: AiNoise::new(600.0, Footfall, 0.0),
             footfall_sprint: AiNoise::new(1200.0, Anomaly, 0.0),
-            footfall_sneak: AiNoise::SILENT,
-            footfall_silent: AiNoise::SILENT,
+            footfall_sneak: AiNoise::new(0.0, Footfall, 0.0),
+            footfall_silent: AiNoise::new(0.0, Footfall, 0.0),
             land: AiNoise::new(400.0, Anomaly, 0.0),
-            land_stealth: AiNoise::SILENT,
+            land_stealth: AiNoise::new(0.0, Footfall, 0.0),
             land_big: AiNoise::new(800.0, Anomaly, 0.0),
             fall_stun_speed: 2200.0,
+            animate_fall_time: 0.25,
             sword_body: AiNoise::new(800.0, Threatening, 0.0),
             sword_weapon: AiNoise::new(800.0, Threatening, 0.0),
             bullet_impact: AiNoise::new(3000.0, Danger, 0.0),
-            corpse: AiNoise::new(300.0, Anomaly, 200.0),
+            corpse: AiNoise::new(300.0, Anomaly, 0.0),
+            sleeping_body: AiNoise::new(300.0, Anomaly, 0.0),
             pistol_fire: AiNoise::new(6000.0, Danger, 0.0),
-            walk_clip: FootfallClip { length: 2.0, footfalls: vec![1.0, 1.915] },
-            run_clip: FootfallClip { length: 0.967, footfalls: vec![0.467, 0.933] },
-            sprint_clip: FootfallClip { length: 0.567, footfalls: vec![0.267, 0.533] },
+            walk_clip: FootfallClip { length: 2.0, footfalls: vec![1.0000004, 1.9150001] },
+            run_clip: FootfallClip { length: 0.96666664, footfalls: vec![0.466667, 0.933333] },
+            sprint_clip: FootfallClip { length: 0.56666666, footfalls: vec![0.266667, 0.533333] },
         }
     }
 }

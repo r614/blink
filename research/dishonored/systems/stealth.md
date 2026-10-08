@@ -218,7 +218,7 @@ same on every surface.
 | `Arrow_Flare` -> Body | Whisper (300) | Anomaly | |
 | `SpringRazor` -> Environment | Loudness2 (1500) | Threatening | |
 | `Grenade` -> Environment | 25m (2500) | Threatening | |
-| `Corpse` -> Environment | Whisper (300) | Anomaly | only above impact speed 200 |
+| `Corpse` -> Environment | Whisper (300) | Anomaly | `m_fMinSpeed` 200 is inert (not speed-scaled; 0x00BD6C20 gates only scaled subs) |
 | `BreakingBones` -> Environment | 8m (800) | Threatening | above speed 200 |
 | `BreakingBones_Player` -> Environment | 4m (400) | Anomaly | |
 | `Env_Glass` -> Environment | Loudness1 (500) | Anomaly | scaled by `Attribute_BreakingGlassSoundAttenuation` |
@@ -333,3 +333,60 @@ corpse as found when its seen value is non-zero with the dead-NPC scalar 10; the
 `DACRT_FoundCorpse`, mechanism not decoded), group alarms and the alarm bell (decoded in AI.md, unit
 tested in the port, no scenario), `DisTweaks_AIBrain_Reaction` responses, the suspicion level switch
 (Unsuspecting to Suspecting profile).
+
+## 9. Port status (2026-10-08, stealth port)
+
+Decoded in this pass (re-read with the static index):
+
+* **Footfall -> attention (F2, decoded).** The brain's noise message (0x00B43E10 -> 0x00B439A0) runs the
+  attention process's handler 0x00B40B70 on the `DisAINoiseParameters` (context at +0x19). Its switch:
+  Anomaly (1) and Footfall (2) -> `m_IncreaseForAnomalySound` (+0x130); Threatening (3) and WolZap (9) ->
+  `m_IncreaseForThreateningSound` (+0x128); Danger (4), RatSwarm (7), WatchTowerAttack (14) ->
+  `m_IncreaseForDangerSound` (+0x120); DeathRattle (11) -> `m_IncreaseForDeathRattleSound` (+0x188). For
+  Footfall the stimulus position is raised by (noise maker's target point z - its floor z), i.e. from the
+  floor contact to the walker. Help (5), AlarmBell (6), AllySearchRequest (10) go through the controller
+  path 0x00C58560's own cases; AmbientWhiteNoise, ImpendingExplosion, AllyNotice, FlareCombustion raise no
+  attention in 0x00B40B70. Enum order confirmed with `enum_dump` (DisGlobalEnums.EAINoiseContext).
+* **Footfall striker (F1).** `DishonoredPlayerPawn` vslot 398 (0x00AAB7D0): not sprinting (or crouch flags):
+  sneaking -> `Footfall_Sneak_Player`; `Attribute_SilentRunning` -> `Footfall_Run_Player_Silent`; else the
+  body tweak's `Footfall_Run_Player`. Sprinting: `Attribute_SilentSprinting` -> silent, else
+  `Footfall_Sprint_Player`. Footfalls are made by `DishonoredNotify_Footfall` (0x00A8D5F0 -> 0x00B66ED0, one
+  per foot per 0.25 s) -> 0x00B66A80 (trace under the foot, contact at |Velocity|). The player's
+  `Ply_Sword_Locomotion_as` loops carry them: Walk 2.0 s (1.0, 1.915), Run 0.967 s (0.467, 0.933), Sprint
+  0.567 s (0.267, 0.533).
+* **Landing striker (F1).** 0x00AB53A0: a landing faster than `m_fFall_Stun_Vel` (2200, DefaultPlayerState.ini)
+  on world geometry is the stun landing (class `DAT_0146f0c4`, read as `JumpLand_Big` by its meaning; the class
+  getters' static order would put it last, so this is LIKELY); otherwise `JumpLand_Stealth` when
+  `StatePlayerMasterFalling.m_bIsStealthFall` (set at the fall state's entry from `m_bSneakModeToggled`,
+  0x00A759F0), else `JumpLand`.
+* **Contact noise gate (F3).** 0x00BD6C20: `m_fMinSpeed` gates only speed-scaled subs; none of the AINoise
+  subs read here is speed-scaled, so the corpse's 200 is inert. The volume scale only gates (<= 1e-4); the
+  radius is `array[loudness] x (1 - attenuation)`. Kismet `DisSeqAct_AINoise.m_eNoiseContext`
+  (`EDisAINoiseLimitedContext`) maps Anomaly/Threatening/Danger/AlarmBell to 1/3/4/6 (0x00B863C0).
+* **Visibility states (F7).** 0x00AD1590: swim state 2 (head under, `m_pActiveWaterVolume` set) ->
+  `m_fVisLevelBonus_Swimming` (-1), 1 (surface) -> `_SwimmingOnSurface` (0); then slide
+  (`StatePlayerMasterSlide`), then `Pawn.bIsCrouched` (the engine crouch = crawl) -> `_Autocrouching` (-1), then
+  sneaking (`m_bSneakModeToggled` and not crouched, or the sneak-to-stand delay) -> `_Sneaking`, then speed
+  < 1e-4 -> `_Standing`, then `m_bSprinting` ? `_Sprinting` : `_Walking`. Speed forced to 0 while sneaking or
+  crouched, not while swimming.
+* **Stealth volumes (F8).** 0x00BD0120: the player's current stealth volume (+0x978) with `m_pVisSettings`, else
+  scripted settings (+0x974), else the map's / global (0x00BC8E60). Touch/untouch (vslots 115/116) go to the
+  player's handler; the global list is ordered by `m_StealthVolumePriority` (0x00C8C280 inserts before the first
+  lower priority), so the head is the highest priority. 43 volumes in 10 `*_Stealth` packages (none in Boyle).
+  Hideouts (`DisHideoutVolume`, `DisHideoutComponent`, `DisAIBrainProcessHideoutWatcher`) are a separate
+  system: not decoded.
+* **Head (F4 / F5), new evidence.** The original detect_600 trace (ORACLE.md 2026-10-08): first sighting through
+  the outer cone (600 / 1700), the inner cone once the head turns (591 / 3500). The vision axis is the head, and
+  the head turns before the body. Not ported: the idle `camera_jnt` orientation is an animation pose and the
+  head look-at (`m_fHeadTrackTorsoRatio`) was not decoded.
+
+| id | status | what changed |
+|---|---|---|
+| F1 | ported | `dishonored_sim::noise::step_footfalls` (player footfalls from the locomotion loops' notifies; open: the loop's play rate is taken as its `RateScale` 1, the tree's speed scaling was not decoded), `noise::landing` (JumpLand / Stealth / Big), `noise::track_fall` (`PlayerState::stealth_fall`). Mantle: no AI noise found, none emitted. |
+| F2 | ported (decoded) | `dishonored_ai::noise_increase` per 0x00B40B70; footfall stimulus at the walker's height. |
+| F3 | ported | `AiConfig::noise` (`NoiseTable`) loaded from the contact system (`dishonored_audio::contact::ContactSystem::ai_noise`) and `m_AINoiseLoudnessWhenFiring`; pistol 6000 Danger at the shooter, bullet impact 3000 Danger (`Bullet` -> `Environment`), crossbow / darts silent on firing, sword swing silent, `Sword` -> `Body` / `Weapon` 800 Threatening, bodies `Corpse` / `SleepingBody` 300 Anomaly when they fall (death, knock-out, drop, landing in `step_body`). `SimEvent::Sound` carries the `NoiseContext`. Not decoded, kept as port values with a context: Windblast 1500 Danger, Blink 400 Anomaly, grenade explosion 4000 Danger, razor detonation 1500 Danger, rat bites 800 RatSwarm. The choke-start and assassination "body fall" noises and the grenade-throw noise (no original source) were removed. Open: grenade bounce (2500) and arrow impacts (sleep dart 1500, flare 300) need the projectiles' contacts (ranged port). |
+| F4 | open, evidence | see above; capture of `camera_jnt` per tick queued. `stealth/detect_600` now holds the measured values (fails on the port until the head is modelled). |
+| F5 | open, evidence | head-only turning confirmed by the trace; the body-yaw turning is in the AI behaviours (AI port). |
+| F6 | open | `vslot 0` of the vision-target record not decoded. |
+| F7 | ported (swim, surface, slide); auto-crouch open | `dishonored_ai::player_visibility` / `vis_state`; the sim has no engine crouch (crawl), so `autocrouch` is always false (movement port). |
+| F8 | ported (stealth volumes); hideouts open | `AiLevel::stealth_volumes` (`ai_level::read_stealth_volume`), `dishonored_ir::ai::stealth_light_range`, `Crowd::stealth_volumes`, light normalized per player position (`light01`, 0x00BC9040: 0.5 for an empty range). |

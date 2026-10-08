@@ -372,13 +372,13 @@ pub fn step_world(
                     vitals::kill(p, None, DamageCause::World, &mut out.events);
                 }
             }
-            SimEvent::Landed { id, speed, .. } => {
+            SimEvent::Landed { id, speed, fall_time } => {
                 // `ADishonoredPawn::TakeFallingDamage` (0x00B4DCC0, DishonoredPawn vtable +0x528):
                 // damage = (int)(HealthMax * clamp((v - dmg) / (death - dmg), 0, 1)) for
                 // an impact speed v above Attribute_MaxSpeedBeforeFallingDamage.
                 // The thresholds are attributes (Agility raises them, 0x00B56880).
                 let Some(p0) = state.player(id).copied() else { continue };
-                noise::landing(&p0, speed, g, &mut out.events);
+                noise::landing(&p0, speed, fall_time, g, &mut out.events);
                 let pm = powers::effective_movement(&p0, g);
                 let dmg = fall_damage(speed, &pm, powers::health_max(&p0, g));
                 if dmg > 0.0 {
@@ -452,6 +452,18 @@ pub fn step_world(
             _ => {}
         }
     }
+
+    // Bodies that fell this step touch the floor (their contact's AI noise).
+    let fell: Vec<PlayerId> = out
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            SimEvent::Death { victim, .. } | SimEvent::KnockedOut { victim, .. } => Some(*victim),
+            SimEvent::BodyDropped { body, .. } => Some(*body),
+            _ => None,
+        })
+        .collect();
+    noise::body_falls(state, &fell, g, &mut out.events);
 
     state.tick += 1;
     out

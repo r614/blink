@@ -479,7 +479,7 @@ fn noise_table(content: &Content, db: &TweakDb, out: &mut AiConfig, prov: &mut s
     let t = &mut out.noise;
     match &cs {
         Some(cs) => {
-            const ENV: &str = "DisContactType_Environment";
+            const ENV: &str = "Environment";
             let mut set = |field: &str, slot: &mut AiNoise, striker: &str, struck: &str| {
                 let s = format!("DisContactType_{striker}");
                 let k = format!("DisContactType_{struck}");
@@ -512,6 +512,7 @@ fn noise_table(content: &Content, db: &TweakDb, out: &mut AiConfig, prov: &mut s
             set("sword_weapon", &mut t.sword_weapon, "Sword", "Weapon");
             set("bullet_impact", &mut t.bullet_impact, "Bullet", ENV);
             set("corpse", &mut t.corpse, "Corpse", ENV);
+            set("sleeping_body", &mut t.sleeping_body, "SleepingBody", ENV);
         }
         None => {
             prov.insert("ai.noise".into(), "defaults (Dis_ContactSystem not loaded)".into());
@@ -535,6 +536,10 @@ fn noise_table(content: &Content, db: &TweakDb, out: &mut AiConfig, prov: &mut s
     if let Some(v) = state.get_f32("DishonoredGame.StatePlayerMasterFalling", "m_fFall_Stun_Vel") {
         t.fall_stun_speed = v;
         prov.insert("ai.noise.fall_stun_speed".into(), "DefaultPlayerState.ini [DishonoredGame.StatePlayerMasterFalling] m_fFall_Stun_Vel".into());
+    }
+    if let Some(v) = state.get_f32("DishonoredGame.StatePlayerMasterFalling", "m_fAnimateFallTime") {
+        t.animate_fall_time = v;
+        prov.insert("ai.noise.animate_fall_time".into(), "DefaultPlayerState.ini [DishonoredGame.StatePlayerMasterFalling] m_fAnimateFallTime".into());
     }
     if let Ok(pkg) = content.package("Startup") {
         if let Some(set) = (0..pkg.exports.len()).find(|&i| pkg.obj_path(ue3_package::ObjRef::Export(i)).eq_ignore_ascii_case(LOCOMOTION_SET)) {

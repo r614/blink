@@ -307,6 +307,9 @@ pub struct PlayerState {
     /// began (0x00A759F0); the landing is then `JumpLand_Stealth`.
     #[serde(default)]
     pub stealth_fall: bool,
+    /// `StatePlayerMasterFalling.m_bCameFromJump`: the fall state was entered from the jump.
+    #[serde(default)]
+    pub fall_from_jump: bool,
 }
 
 /// The attack group on a pawn: seconds under attack (`m_fInitialDelayBeforeDealingDamage`) and
@@ -590,6 +593,7 @@ impl PlayerState {
             sword_sheathed: false,
             footfall_phase: 0.0,
             stealth_fall: false,
+            fall_from_jump: false,
         }
     }
 

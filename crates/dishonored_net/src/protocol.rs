@@ -14,7 +14,7 @@ use dishonored_sim::state::{PlayerId, PlayerState, ProjectileState, WindblastSta
 use serde::{Deserialize, Serialize};
 
 pub const MAGIC: u32 = 0x4449_5331; // "DIS1"
-pub const PROTOCOL_VERSION: u32 = 9; // 4: PlayerState.climb, SimEvent::Climb / ClimbSound; 5: LeftHandState.dispersion; 6: MissionView.doors / movers; 7: SwordState.swings / swing_clip; 8: Look.tweak (NPC names); 9: PlayerState.sword_sheathed / lean_velocity_z
+pub const PROTOCOL_VERSION: u32 = 10; // 4: PlayerState.climb, SimEvent::Climb / ClimbSound; 5: LeftHandState.dispersion; 6: MissionView.doors / movers; 7: SwordState.swings / swing_clip; 8: Look.tweak (NPC names); 9: PlayerState.sword_sheathed / lean_velocity_z; 10: SimEvent::Sound.context, new SoundCategory variants, PlayerState.footfall_phase / stealth_fall / fall_from_jump
 pub const MAX_DATAGRAM: usize = 60_000;
 /// Inputs resent per packet.
 pub const INPUT_REDUNDANCY: usize = 8;

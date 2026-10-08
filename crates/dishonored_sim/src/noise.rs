@@ -94,12 +94,17 @@ pub fn step_footfalls(p: &mut PlayerState, cfg: &GameplayConfig, dt: f32, events
 
 /// The landing contact of the player (0x00AB53A0): faster than `m_fFall_Stun_Vel` it is the
 /// stun landing (`JumpLand_Big`), else `JumpLand_Stealth` for a fall begun sneaking
-/// (`m_bIsStealthFall`) or `JumpLand`; the contact is under the pawn at its velocity.
-pub fn landing(p: &PlayerState, impact_speed: f32, cfg: &GameplayConfig, events: &mut Vec<SimEvent>) {
+/// (`m_bIsStealthFall`) or `JumpLand`; the contact is under the pawn at its velocity. A short fall
+/// (not from a jump, `m_fAnimateFallTime` or less) makes none.
+pub fn landing(p: &PlayerState, impact_speed: f32, fall_time: f32, cfg: &GameplayConfig, events: &mut Vec<SimEvent>) {
     if p.kind != PawnKind::Human {
         return;
     }
     let t = &cfg.ai.noise;
+    // 0x00A5FF10: a fall that did not follow a jump and lasted at most m_fAnimateFallTime`n    // makes no landing (no animation, no contact).
+    if !p.fall_from_jump && fall_time <= t.animate_fall_time {
+        return;
+    }
     let n = if impact_speed > t.fall_stun_speed {
         t.land_big
     } else if p.stealth_fall {
@@ -112,11 +117,38 @@ pub fn landing(p: &PlayerState, impact_speed: f32, cfg: &GameplayConfig, events:
     emit(events, &n, feet, SoundCategory::Land, p.id, speed);
 }
 
+/// The contact noise of a body: `Corpse` for the dead, `SleepingBody` for the unconscious.
+pub fn body_noise<'a>(b: &PlayerState, cfg: &'a GameplayConfig) -> &'a AiNoise {
+    if b.alive { &cfg.ai.noise.sleeping_body } else { &cfg.ai.noise.corpse }
+}
+
+/// Bodies that fell this step (a death, a knock-out, a drop from the shoulder): the ragdoll
+/// touching the floor is a `Corpse` / `SleepingBody` contact, whose AI noise has no speed gate
+/// (stealth.md F3). The sim has no ragdoll, so the contact is made once, at the body's feet, the
+/// step it falls. Rats and bodies turned to ash make none.
+pub fn body_falls(state: &crate::state::WorldState, fell: &[PlayerId], cfg: &GameplayConfig, events: &mut Vec<SimEvent>) {
+    for id in fell {
+        let Some(b) = state.player(*id) else { continue };
+        if b.kind == PawnKind::Rat || b.no_body || b.carried_by.is_some() {
+            continue;
+        }
+        let feet = b.position - Vec3::Z * half_height(b, &cfg.movement);
+        emit(events, body_noise(b, cfg), feet, SoundCategory::BodyFall, b.id, 0.0);
+    }
+}
+
 /// Track the fall state's entry (`StatePlayerMasterFalling` enter, 0x00A759F0): falling and no
 /// longer in the jump state; `m_bIsStealthFall` is whether the pawn sneaks at that moment.
+/// While still in the jump state the landing is the plain one with no fall-time gate (the
+/// landing reads the falling state only, 0x00AB53A0): that is kept as all_from_jump without
+/// stealth_fall. m_bCameFromJump is set when the fall state follows the jump.
 pub fn track_fall(before: &PlayerState, p: &mut PlayerState) {
     let falling = |q: &PlayerState| q.mode == MoveMode::Falling && !q.jump.active;
-    if falling(p) && !falling(before) {
+    if p.mode == MoveMode::Falling && p.jump.active {
+        p.fall_from_jump = true;
+        p.stealth_fall = false;
+    } else if falling(p) && !falling(before) {
+        p.fall_from_jump = before.mode == MoveMode::Falling && before.jump.active;
         p.stealth_fall = p.crouched;
     }
 }
@@ -167,10 +199,12 @@ mod tests {
         let c = cfg();
         let mut p = PlayerState::new(1, Vec3::ZERO, 0.0);
         let mut ev = Vec::new();
-        landing(&p, 500.0, &c, &mut ev);
+        // A step down (0.1 s, not from a jump): no landing.
+        landing(&p, 150.0, 0.1, &c, &mut ev);
+        landing(&p, 500.0, 0.5, &c, &mut ev);
         p.stealth_fall = true;
-        landing(&p, 500.0, &c, &mut ev);
-        landing(&p, c.ai.noise.fall_stun_speed + 1.0, &c, &mut ev);
+        landing(&p, 500.0, 0.5, &c, &mut ev);
+        landing(&p, c.ai.noise.fall_stun_speed + 1.0, 2.0, &c, &mut ev);
         assert_eq!(sounds(&ev), vec![(400.0, NoiseContext::Anomaly), (800.0, NoiseContext::Anomaly)]);
     }
 }
