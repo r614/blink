@@ -6,6 +6,9 @@ queue the original-side collision capture. The rendered side is listed at the en
 
 ## Summary
 
+The bullets, table and ranking below are the first sweep's; the current state per map (entries, unsupported ops, collision,
+free roam) is in "State after the blocker pass".
+
 - **Load: 42 / 42 maps load** through `dishonored_content::load_match` (`oracle snapshot --map M`), exit 0, no panic. Cold 2-15 s (the
   importer builds the collision, nav, NPC and AI caches), warm about 1.1-2.3 s per process (about 0.2 s of that is `load_match`, the rest
   is the process start and the `.snap` write). Total 35.6 M collision triangles over the 42 maps (largest: TowerRtrn_Int 1.81 M,
@@ -18,6 +21,152 @@ queue the original-side collision capture. The rendered side is listed at the en
   (the event leaves for a sibling map), 1 map stalls (Flooded_FIntro), 1 is the global map.
 - Only Boyle Ext / Int have an original-side collision comparison. For the other 40 the query sets are generated and the capture is queued.
 - Not measured here: NPC positions (the scenarios place no named NPCs, so NPC fall-through is not covered), render, audio, AI behaviour.
+
+## State after the blocker pass (2026-10-08, maps porter)
+
+Re-run of the 42 smokes (`oracle scenario --system maps`, own build) and of the 42 cold loads after the fixes below.
+
+- **Entry: 41 / 41 maps now reach their own entry** (the global map has none). Flooded_FIntro commits at `PlayerStart_FloodedIntroStart`
+  (447 activations, was 33). The 10 redirected maps start through the right handler: the Pub maps were never story-flag
+  redirects, the sweep had picked another chapter's entry event; Isl_HighChaos needs the chaos level, LightH_LowChaos and the
+  three Out maps their handlers' flags (each scenario's description quotes the decoded branch).
+- **Unsupported ops are visible**: each run's trace now lists, once per class, as `KismetNote`s (name `unsupported` / `not`):
+  every event class of a loaded level that the port never activates (with the level's instance count), every op class the
+  host does not support, and every op class run as a no-op (`PRESENTATION`, `NOT_MODELLED`). The per-map lists are in the
+  table below.
+- **Mover collision: 0 warnings** on the 42 cold loads (was 79: 48 DisRiverKrust, 24 DishonoredUsableObject, 5 DisWatchTower,
+  2 DisAudioLogPlayer). Collision cache key `collision17`.
+- **Spline actors**: already imported (cooked `SplineMeshComponent`s, deformed by `spline_mesh.rs`); they do not collide, as on
+  the original. Now counted by name (`ImportStats::spline_loft_actors`), so the coverage work list stops listing them.
+- **Free roam**: `dishonored_content::freeroam_def` and `harness freeroam` (below): 19 interior / exterior pairs, both ways,
+  58 / 58 checks.
+
+### Fixes
+
+| blocker | cause (decoded) | fix |
+|---|---|---|
+| Flooded_FIntro entry stall | `fromHub_toFloodedDistrict` continues from `DisSeqAct_BackupAndClearInventory`'s output 1 "Finished (After Unequip)"; the op was unsupported, so only its latent "Out" fired. `Activated` 0x00ba91d0 fires "Out", asks each target to unequip hand slots 1 and 2 when they are not empty (0x00b4e070, 0x00b51790), else backs up / clears the inventory (0x00ba8980) and fires output 1; `Update` 0x00baf050 waits for empty hands | host op: "Out" and output 1 in `Activated` (the port has no hand-slot unequip, so the empty-hands path). NOT PORTED: the unequip and the inventory backup / clear (0x00ba8980) |
+| ops skipped silently | the interpreter logged unsupported classes only in its own log; event classes never fired showed nothing; the host's no-op lists counted silently | `Kismet::notices` (drained into the host history), `Host::fires_event` + `kismet_host::FED_EVENTS` checked when a level loads, first activation of a no-op class noted |
+| DisRiverKrust / DisWatchTower no collision | their skeletal component is a native member (`m_pSkeletalMeshCpnt`, `m_pTowerMeshCpnt`); only `CollisionComponent` names it among the serialized properties; the component carries `SkeletalMesh` + `PhysicsAsset` | `prop_collision::read_component_bodies`: the collision source's own component (else `SkeletalMeshComponent`, else a skeletal `CollisionComponent`), physics asset bodies at the reference pose |
+| DishonoredUsableObject / DisAudioLogPlayer "mesh not found" | their `SkeletalMeshComponent0` has no mesh on the component nor its archetype: nothing to collide with in the original either; the visible / colliding part is the static `StaticUsablePart`, which the level importer already imports | mesh-less skeletal sources skipped |
+| SetMatInstScalarParam (220) | 0x006d1d90: `MatInst.SetScalarParameterValue(ParamName, ScalarValue)`, or with `m_pMaterialOwnerPawn` on that pawn mesh's material `m_iMaterialIndex` | host records the values (`HostState::mat_scalars` / `pawn_mat_scalars`); the renderer does not read them yet |
+| ToggleCinematicMode (184) | `PlayerController.OnToggleCinematicMode` -> `SetCinematicMode` (script) -> native 0x00aaf150: move / look input ignored while on, HUD / player hidden, the pawn's action permissions swapped (disable 0x7faf, enable 0x6010) | `HostState::cinematic`, `kismet_host::cinematic_inputs` (movement, view, buttons); the per-bit meaning of 0x7faf is not decoded (every button refused); HUD / hide not in the view |
+| SetMaterial (109) | `OnSetMaterial` of `DynamicSMActor` / `SkeletalMeshActor` / `Pawn`: `SetMaterial(MaterialIndex, NewMaterial)` | recorded per actor / pawn (`HostState::materials`); not drawn yet |
+| AIGuard (93) | `OnAIGuard` 0x00b63a80: guard stimulus on `m_pHomeActor` with `m_fGuardAwarenessRadius` (Start), ends it (Stop) | brain walks to the home actor and holds; the awareness radius is not modelled |
+| IsSentinel (92) | 0x00b8f070: output 0 when `WorldInfo.Game.MyAutoTestManager` exists, else 1 | output 1 (no automated-test mode) |
+| CompareBoolExtended (74) | 0x00b9b3e0: AND / OR over "Bool"; all -> 0, some -> 2, none -> 1 | ported |
+
+Left open (decoded where each is fired could not be found in this pass, or no system in the port): `DisSeqEvent_PatrolPointReached`,
+`Possessed`, `MovablePickedUp`, `Combat`, `BehaviorStarted`, `TaskStateChanged` (no direct reference to their classes in the static
+index), `SetRatSwarmCustomBehavior`, `NPCTrackTarget`, `SetAudioOcclusion`, `SetDamageInstigator` (no such systems), `SetTutorialMessage`
+(presentation). Not mine: `DisSeqEvent_Distracted` / `DisNPCDistractor`, the whale-oil batteries, `BreakableBroken`.
+
+### Per map (run of 2026-10-08)
+
+act = `Activated` script events in 10 s (the first sweep counted another way), ops = distinct ops activated, spawned = pawns spawned by
+the Kismet. Events: class (without its `DisSeqEvent_` / `SeqEvent_` prefix) and the level's instance count. Ops: (p) presentation no-op,
+(n) no such system in the port, (u) unsupported; a class is listed on the map where its first activation fell.
+
+| map | entry commit (tag) | act / ops / spawned | drop uu | events never activated (classes: instances in the level) | ops run as no-ops or unsupported |
+|---|---|---|---|---|---|
+| ArtDealer | L_ArtDealer_P () | 56 / 55 / 4 | 2 | Distracted:23, Lock:2, MovablePickedUp:1, Possessed:4, RigidBodyCollision:1 |  |
+| Boyle_Ext | L_Boyle_Ext_P (PlayerStart_SamuelDropOff) | 184 / 164 / 21 | 5 | BehaviorStarted:11, BreakableBroken:1, Combat:1, Corpse:1, Distracted:7, FleepointReached:1, Investigate:1, Possessed:9, PowerUsed:2, ParticleEvent:1 | DisSeqAct_SetCurrentChapter(p), SeqAct_StreamInTextures(p) |
+| Boyle_Int | L_Boyle_Int_P () | 253 / 232 / 30 | 2 | BehaviorStarted:24, BreakableBroken:43, Combat:1, Distracted:58, KeyHoleUsed:2, MovablePickedUp:8, PatrolPointReached:20, Possessed:13, PowerUsed:1, Windblasted:1, DisSeqEvt_Choke:1, ParticleEvent:1, RigidBodyCollision:8 |  |
+| Bridge_Part1a | L_Bridge_Part1a_P (PlayerStart_SamuelDropOff) | 64 / 63 / 0 | 0 | BreakableBroken:4, Distracted:15, MovablePickedUp:2, Possessed:3, TaskActivated:1, WhaleOilReceptacle:3, RigidBodyCollision:2 | DisSeqAct_SetCurrentChapter(p), SeqAct_StreamInTextures(p), ArkSeqAct_ChangePylonConnection(u) |
+| Bridge_Part1b | L_Bridge_Part1b_P (PlayerStart_BridgePart1b) | 107 / 101 / 3 | 5 | BreakableBroken:1, Combat:1, Distracted:23, Lock:2, MovablePickedUp:1, PatrolPointReached:1, PlayerCombat:1, Possessed:3, TaskStateChanged:2, WhaleOilReceptacle:6, RigidBodyCollision:1 | ArkSeqAct_ChangePylonConnection(u) |
+| Bridge_Part1c | L_Bridge_Part1c_P (PlayerStart_BridgePart1c) | 89 / 69 / 4 | 2 | BreakableBroken:2, Distracted:7, Possessed:1, PowerUsed:1, WhaleOilReceptacle:1, Destroyed:1 |  |
+| Bridge_Part2 | L_Bridge_Part2_P (PlayerStart_BridgePart2) | 111 / 98 / 5 | 2 | BehaviorStarted:1, BreakableBroken:6, Corpse:2, Distracted:34, KeyHoleUsed:1, Lock:2, MovablePickedUp:2, PatrolPointReached:2, PlayerCombat:2, PlayerHeard:2, Possessed:7, TaskActivated:1, TaskStateChanged:5, WhaleOilBattery:1, WhaleOilReceptacle:8, DisSeqEvt_Choke:1 | DisSeqCond_CompareTweaks(u) |
+| Brothel | L_Brothel_P () | 235 / 179 / 21 | 2 | BehaviorStarted:1, BreakableBroken:2, Combat:3, Corpse:2, Distracted:71, KeyHoleUsed:3, Lock:1, MovablePickedUp:6, PatrolPointReached:1, Possessed:18, Windblasted:2, Destroyed:1, RigidBodyCollision:6 | DisSeqAct_LimitPawnMinHealth(n), DisSeqAct_OverridePossess(n), DisSeqAct_Highlight(u) |
+| DishonoredGameFull | (global map, no entry) | 0 / 0 / 0 | 2 |  |  |
+| Distillery | L_Distillery_P (PlayerStart_DistilleryMainEntrance) | 99 / 90 / 13 | 5 | Distracted:34, PatrolPointReached:5, PawnSighted:1, PlayerCombat:1, PowerUsed:1, Tripwire:2, WhaleOilReceptacle:1 | DisSeqAct_NPCTrackTarget(n), DisSeqAct_SetRainEmitter(u), DisSeqAct_SpawnCameraLensEffect(u), DisSeqCond_IsPlayerInCombat(u) |
+| Distillery2 | L_Distillery2_P (PlayerStart_DistilleryMainEntrance) | 92 / 89 / 4 | 5 | BehaviorStarted:1, Combat:26, Distracted:36, Possessed:1, WhaleOilReceptacle:1 | SeqAct_StreamInTextures(p), DisSeqCond_IsObjectiveComplete(u) |
+| Flooded_FAssassins | L_Flooded_FAssassins_P (PlayerStart_FAssassinsStart) | 130 / 120 / 17 | 5 | Assassinated:1, AttackedByRats:1, Distracted:70, Investigate:1, PatrolPointReached:4, PlayerHolsterWeapon:1, Possessed:1, PowerUsed:6, TaskStateChanged:5 | DisSeqAct_SetCurrentChapter(p), DisSeqAct_ApplyPlayerLoadout(n), DisSeqAct_ToggleTutorial(p), DisSeqAct_LimitPawnMinHealth(n), DisSeqAct_Highlight(u), DisSeqAct_OverrideAwarenessDisplay(u), SeqAct_ModifyObjectList(u) |
+| Flooded_FGate | L_Flooded_FGate_P (PlayerStart_StreetSewerEntrance) | 123 / 111 / 10 | 5 | BehaviorStarted:32, BreakableBroken:3, Combat:7, Distracted:67, Investigate:1, KeyHoleUsed:2, Lock:1, ObjectiveCompleted:1, PatrolPointReached:14, Possessed:9, TaskStateChanged:8, WhaleOilBattery:1, WhaleOilReceptacle:4, Destroyed:1, ParticleEvent:1 | DisSeqAct_SetCurrentChapter(p), DisSeqAct_ApplyPlayerLoadout(n), DisSeqAct_ToggleTutorial(p), DisSeqAct_EvalAchievement(p), DisSeqAct_AISetBrainFlags(u) |
+| Flooded_FIntro | L_Flooded_FIntro_P (PlayerStart_FloodedIntroStart) | 447 / 55 / 2 | 2 | MovablePickedUp:2, WhaleOilBattery:2, WhaleOilReceptacle:2 | DisSeqAct_SetCurrentChapter(p), SeqAct_StreamInTextures(p) |
+| Flooded_FRefinery | L_Flooded_FRefinery_P (PlayerStart_FRefineryAR) | 472 / 80 / 0 | 3 | BreakableBroken:6, Combat:3, Distracted:13, MovablePickedUp:2, Possessed:3, PowerUsed:1, TaskStateChanged:2, WhaleOilBattery:2, WhaleOilReceptacle:4 | DisSeqAct_SetCurrentChapter(p), DisSeqAct_ApplyPlayerLoadout(n), DisSeqAct_ToggleTutorial(p), DisSeqAct_Highlight(u) |
+| Flooded_FStreets | L_Flooded_FStreets_P (PlayerStart_FStreetsStart) | 69 / 64 / 2 | 2 | BreakableBroken:11, Combat:7, Distracted:51, Lock:2, PlayerInventoryChanged:1, Possessed:2, PowerUsed:1, TaskStateChanged:2 | DisSeqAct_SetCurrentChapter(p), DisSeqAct_ApplyPlayerLoadout(n), DisSeqAct_ToggleTutorial(p), DisSeqAct_Highlight(u), SeqAct_ModifyObjectList(u) |
+| Galvani1 | L_Galvani1_P () | 56 / 55 / 5 | 5 | BreakableBroken:1, Distracted:40, KeyHoleUsed:1, Lock:1, MovablePickedUp:2, PatrolPointReached:4, PlayerCombat:1, PowerUsed:1, RigidBodyCollision:2 | DisSeqCond_IsPlayerInCombat(u) |
+| Galvani2 | L_Galvani2_P () | 101 / 95 / 4 | 5 | BreakableBroken:1, Distracted:47, KeyHoleUsed:1, Lock:1, MovablePickedUp:2, PatrolPointReached:3, PlayerCombat:1, Possessed:4, PowerUsed:1, RigidBodyCollision:2 | DisSeqCond_HasObjective(u), DisSeqCond_IsPlayerInCombat(u) |
+| Isl_HighChaos | L_Isl_HighChaos_P (PlayerStart_Beach) | 144 / 137 / 1 | 2 | Assassinated:1, AttackedByRats:1, Combat:1, Distracted:76, PatrolPointReached:1, PawnSighted:2, Possessed:8, PowerUsed:1, TaskStateChanged:9, WatchTower:3, WhaleOilReceptacle:5, Windblasted:1, ParticleEvent:8 | SeqAct_StreamInTextures(p), DisSeqAct_OverridePossess(n), DisSeqAct_SetRainEmitter(u), DisSeqAct_SpawnCameraLensEffect(u), SeqAct_ModifyObjectList(u), DisSeqAct_SetPlayerVisSettings(u), SeqAct_AndGate(u), DisSeqAct_SetCurrentChapter(p) |
+| Isl_LowChaos | L_Isl_LowChaos_P (PlayerStart_Beach) | 118 / 117 / 2 | 2 | Distracted:76, PatrolPointReached:1, PawnSighted:2, Possessed:6, TaskStateChanged:7, WatchTower:3, WhaleOilReceptacle:6 | SeqAct_StreamInTextures(p), DisSeqAct_OverridePossess(n), SeqAct_ModifyObjectList(u), DisSeqAct_SetPlayerVisSettings(u), SeqAct_AndGate(u), DisSeqAct_SetCurrentChapter(p) |
+| LightH_HighChaos | L_LightH_HighChaos_P (PlayerStart_elevator) | 153 / 145 / 4 | 0 | Assassinated:2, Combat:1, Distracted:4, Possessed:1, PowerUsed:1, RatPossess:1, TaskStateChanged:5, WhaleOilReceptacle:2, Windblasted:1, DisSeqEvt_Choke:1, ParticleEvent:2 | DisSeqAct_SetRainEmitter(u), DisSeqAct_SpawnCameraLensEffect(u), DisSeqAct_SetPlayerVisSettings(u), DisSeqAct_AISetBrainFlags(u), DisSeqAct_OverrideAwarenessDisplay(u) |
+| LightH_LowChaos | L_LightH_LowChaos_P (PlayerStart_elevator) | 105 / 105 / 4 | 0 | Combat:5, Distracted:8, Lock:2, Possessed:6, PowerUsed:1, TaskStateChanged:4, WhaleOilReceptacle:2 | DisSeqAct_SetPlayerVisSettings(u), DisSeqAct_OverrideAwarenessDisplay(u) |
+| Out | L_Out_P (PlayerStart_Outro) | 62 / 61 / 1 | 8 |  | DisSeqAct_EvalAchievement(p), DisSeqAct_SetCurrentChapter(p), SeqAct_StreamInTextures(p), SeqAct_MultiLevelStreaming(u), DisSeqAct_BendTime(n) |
+| Out_HighChaos_EmilyAlive | L_Out_HighChaos_EmilyAlive_P (PlayerStart_Outro) | 42 / 42 / 1 | 8 |  | DisSeqAct_EvalAchievement(p), DisSeqAct_SetCurrentChapter(p), SeqAct_StreamInTextures(p), DisSeqAct_BendTime(n) |
+| Out_HighChaos_emilyDead | L_Out_HighChaos_emilyDead_P (PlayerStart_Outro) | 44 / 44 / 1 | 8 |  | DisSeqAct_EvalAchievement(p), DisSeqAct_SetCurrentChapter(p), SeqAct_StreamInTextures(p), DisSeqAct_BendTime(n) |
+| OutsiderDream | L_OutsiderDream_P (PlayerStart_DreamBegin) | 87 / 70 / 0 | 79 | JournalViewed:1, KeyHoleUsed:1, MovablePickedUp:1, PlayerManaThreshold:1, PowerEquipped:2, PowerUsed:1, ParticleEvent:1, RigidBodyCollision:1 | DisSeqAct_SetCurrentChapter(p), DisSeqAct_LimitPawnMinHealth(n), DisSeqAct_ToggleHUDElement(p), DisSeqAct_EquipItemType(n), DisSeqAct_OutsiderConfig(n), SeqAct_StreamInTextures(p), DisSeqAct_SpawnCameraLensEffect(u) |
+| Ovrsr | L_Ovrsr_P (PlayerStart_SquareEntrance) | 196 / 184 / 15 | 0 | BehaviorStarted:3, BreakableBroken:5, Combat:5, Corpse:4, Distracted:88, KeyHoleUsed:3, Lock:1, MovablePickedUp:1, PlayerCombat:2, PlayerCrouch:1, Possessed:20, TaskStateChanged:1, AnimNotify:1, RigidBodyCollision:1 | DisSeqAct_SetCurrentChapter(p), DisSeqAct_LimitPawnMinHealth(n), DisSeqAct_OverridePossess(n), DisSeqAct_SetRainEmitter(u), DisSeqAct_SpawnCameraLensEffect(u), DisSeqAct_RemoveInventoryItem(u), DisSeqAct_ModifyAmmo(u), DisSeqCond_HasObjective(u) |
+| Ovrsr_Back | L_Ovrsr_Back_P (PlayerStart_AlleyEntrance) | 162 / 149 / 15 | 5 | BreakableBroken:9, Distracted:54, KeyHoleUsed:2, Lock:1, MovablePickedUp:1, PawnSighted:1, Possessed:6, Tripwire:1, AnimNotify:1, HitWall:1, RigidBodyCollision:1 | DisSeqAct_LimitPawnMinHealth(n), DisSeqAct_SetRainEmitter(u), DisSeqAct_SpawnCameraLensEffect(u), DisSeqAct_AISetBrainFlags(u) |
+| Ovrsr_Kennel | L_Ovrsr_Kennel_P (PlayerStart_KennelSewer) | 83 / 82 / 4 | 5 | BreakableBroken:1, Combat:2, Distracted:15, PawnSighted:1, PlayerCombat:1, PlayerHeard:1 | DisSeqAct_LimitPawnMinHealth(n), DisSeqAct_SetAudioOcclusion(u) |
+| Prison | L_Prison_P (PlayerStart_DraggedIN) | 105 / 104 / 0 | 84 | BreakableBroken:2, Combat:8, Distracted:9, Interact:4, KeyHoleUsed:3, ObjectiveCompleted:2, PlayerCombat:3, PlayerCrouch:1, TaskStateChanged:7, DisSeqEvt_Choke:1, ParticleEvent:11 | DisSeqAct_GetPlayerStat(p), DisSeqAct_SetCurrentChapter(p), SeqAct_StreamInTextures(p), DisSeqAct_TogglePowerWheel(p), DisSeqAct_ToggleHUDElement(p), DisSeqAct_ModifyAmmo(u), DisSeqAct_AdrenalineToggle(u), DisSeqAct_RemoveInventoryItem(u), DisSeqAct_SetTutorialMessage(p) |
+| PrsnSewer | L_PrsnSewer_P (PlayerStart_SewerStart) | 49 / 49 / 3 | 2 | BreakableBroken:3, Climb:1, Corpse:3, Distracted:19, MovablePickedUp:1, PatrolPointReached:2, Tripwire:4, Destroyed:3, ParticleEvent:1, RigidBodyCollision:2 | DisSeqAct_SetCurrentChapter(p), DisSeqAct_EquipItemType(n), DisSeqAct_ToggleHUDElement(p), DisSeqAct_AdrenalineToggle(u) |
+| Pub_Assault | L_Pub_Assault_P (PlayerStart_HoundPitsFromFlooded) | 205 / 171 / 20 | 3 | AttackedByRats:2, BehaviorStarted:4, BreakableBroken:3, Distracted:16, Investigate:2, KeyHoleUsed:5, Lock:2, MovablePickedUp:1, PatrolPointReached:11, Possessed:8, TaskStateChanged:19, WhaleOilBattery:1, WhaleOilReceptacle:4 | DisSeqAct_SetCurrentChapter(p), DisSeqAct_ApplyPlayerLoadout(n), DisSeqAct_ToggleTutorial(p), SeqAct_StreamInTextures(p), DisSeqAct_Highlight(u), SeqAct_GetDistance(u), DisSeqAct_SetAudioOcclusion(u) |
+| Pub_Day | L_Pub_Day_P (PlayerStart_HubDefault) | 244 / 230 / 21 | 0 | BreakableBroken:3, Combat:1, Distracted:47, KeyHoleUsed:6, MovableDropped:1, MovablePickedUp:4, PatrolPointReached:16, TaskStateChanged:1, WhaleOilBattery:6, WhaleOilReceptacle:2, Windblasted:1, Destroyed:1 | DisSeqAct_SetCurrentChapter(p), SeqAct_StreamInTextures(p), DisSeqAct_ToggleHUDElement(p), DisSeqAct_LimitPawnMinHealth(n), DisSeqAct_OverridePossess(n), DisSeqAct_EquipItemType(n) |
+| Pub_Dusk | L_Pub_Dusk_P (PlayerStart_HubDefault) | 295 / 272 / 26 | 0 | BreakableBroken:2, Distracted:64, MovablePickedUp:2, PatrolPointReached:22, Possessed:11, WhaleOilBattery:5, WhaleOilReceptacle:1, Destroyed:1 | DisSeqAct_ToggleHUDElement(p), DisSeqAct_TogglePowerWheel(p), SeqAct_ToggleHUD(p), DisSeqAct_ToggleJournal(p), DisSeqAct_SetCurrentChapter(p), DisSeqAct_ToggleTutorial(p), DisSeqAct_EquipItemType(n), SeqAct_StreamInTextures(p), DisSeqAct_RemoveInventoryItem(u), DisSeqAct_Highlight(u), SeqAct_CastToFloat(u), DisSeqCond_IsDLCUnlocked(u), DisSeqAct_NPCTrackTarget(n) |
+| Pub_Morning | L_Pub_Morning_P (PlayerStart_HubDefault) | 194 / 189 / 14 | 5 | BreakableBroken:2, Distracted:36, KeyHoleUsed:5, Lock:2, MovablePickedUp:2, PatrolPointReached:1, WhaleOilBattery:5, WhaleOilReceptacle:1, Destroyed:4 | DisSeqAct_ToggleHUDElement(p), DisSeqAct_TogglePowerWheel(p), SeqAct_ToggleHUD(p), DisSeqAct_ToggleJournal(p), DisSeqAct_SetCurrentChapter(p), SeqAct_StreamInTextures(p), DisSeqAct_EquipItemType(n), DisSeqAct_SetAudioOcclusion(u), DisSeqCond_IsDLCUnlocked(u) |
+| Pub_Night | L_Pub_Night_P (PlayerStart_HubDefault) | 138 / 138 / 2 | 3 | BreakableBroken:2, Distracted:6, KeyHoleUsed:1, MovablePickedUp:2, WhaleOilBattery:5, WhaleOilReceptacle:1, Windblasted:1, Destroyed:1 | DisSeqAct_ToggleHUDElement(p), DisSeqAct_TogglePowerWheel(p), SeqAct_ToggleHUD(p), DisSeqAct_ToggleJournal(p), DisSeqAct_SetCurrentChapter(p), SeqAct_StreamInTextures(p), DisSeqAct_EquipItemType(n), DisSeqCond_IsDLCUnlocked(u), DisSeqAct_NPCTrackTarget(n), DisSeqAct_LimitPawnMinHealth(n) |
+| Streets1 | L_Streets1_P (PlayerStart_DockArrival) | 985 / 221 / 26 | 0 | BreakableBroken:5, Combat:1, Corpse:1, Distracted:46, FleepointReached:4, KeyHoleUsed:2, Lock:1, MovablePickedUp:1, PatrolPointReached:21, PlayerCombat:1, Possessed:3, PowerUsed:1, WhaleOilReceptacle:6, DisSeqEvt_Choke:1, Destroyed:3, RigidBodyCollision:1 | DisSeqAct_ToggleAchievementEval(p), DisSeqAct_GetPlayerStat(p), DisSeqAct_EquipItemType(n), DisSeqAct_SetCurrentChapter(p), SeqAct_StreamInTextures(p), DisSeqAct_OutsiderConfig(n), DisSeqAct_BendTime(n), DisSeqAct_SetRainEmitter(u), DisSeqAct_SpawnCameraLensEffect(u), DisSeqAct_FireProjectile(u), DisSeqAct_SetRatSwarmCustomBehavior(n) |
+| Streets2 | L_Streets2_P (PlayerStart_DockArrival) | 252 / 199 / 18 | 2 | BreakableBroken:4, Combat:5, Distracted:85, Lock:4, MovablePickedUp:1, PatrolPointReached:9, PlayerCombat:3, Possessed:2, PowerUsed:1, WallOfLight:1, WatchTower:2, WhaleOilBattery:3, WhaleOilReceptacle:2, Windblasted:1, RigidBodyCollision:1 | DisSeqAct_EquipItemType(n), DisSeqAct_SetCurrentChapter(p), SeqAct_StreamInTextures(p), DisSeqAct_AISetBrainFlags(u) |
+| Streetsewer | L_Streetsewer_P (PlayerStart_HoundPitsFromFlooded) | 169 / 144 / 11 | 5 | AttackedByRats:1, BreakableBroken:5, Corpse:1, Distracted:19, Lock:1, MovablePickedUp:1, PatrolPointReached:12, Possessed:2, PowerUsed:1, TeleportSpell:1, Windblasted:1, DisSeqEvt_Choke:1, Destroyed:2, RigidBodyCollision:1 | DisSeqAct_SetCurrentChapter(p), SeqAct_ModifyObjectList(u), DisSeqAct_NPCDoTeleportSpell(u), DisSeqAct_OverridePossess(n), DisSeqAct_LimitPawnMinHealth(n), DisSeqAct_SetAudioOcclusion(u) |
+| Tower | l_tower_p (PlayerStart_NewGameEmpress) | 159 / 153 / 23 | 2 | BehaviorStarted:3, Combat:10, Distracted:4, PlayerCrouch:2, TaskStateChanged:2 | DisSeqAct_SetCurrentChapter(p), SeqAct_StreamInTextures(p), DisSeqAct_ToggleJournal(p), DisSeqAct_ToggleHUDElement(p), DisSeqAct_ToggleChoke(u), DisSeqAct_RemoveInventoryItem(u), SeqAct_CastToFloat(u), DisSeqCond_CompareTweaks(u), DisSeqAct_TogglePowerWheel(p) |
+| TowerRtrn_Int | L_TowerRtrn_Int_P () | 115 / 113 / 20 | 2 | BehaviorStarted:2, BreakableBroken:1, Corpse:1, Distracted:86, MovablePickedUp:7, PatrolPointReached:4, PawnSighted:2, WhaleOilReceptacle:2, RigidBodyCollision:7 | DisSeqAct_ActivateRatSpawner(n), DisSeqAct_ApplyPlayerLoadout(n), DisSeqAct_LimitPawnMinHealth(n), DisSeqCond_IsObjectiveComplete(u), DisSeqAct_RBConstraint(u) |
+| TowerRtrn_Yard | L_TowerRtrn_Yard_P (PlayerStart_SamuelDropOff) | 79 / 79 / 10 | 2 | BehaviorStarted:1, BreakableBroken:4, Corpse:1, Distracted:33, Possessed:3, WatchTower:1, WhaleOilReceptacle:2 | SeqAct_StreamInTextures(p), DisSeqAct_ActivateRatSpawner(n) |
+
+Events never activated, by the number of maps (from the runs): Distracted 36, BreakableBroken 27, Possessed 26, MovablePickedUp 23,
+WhaleOilReceptacle 22, PatrolPointReached 20, Combat 18, Lock 16, PowerUsed 16, TaskStateChanged 15, RigidBodyCollision 15, KeyHoleUsed 15,
+BehaviorStarted 11, WhaleOilBattery 10, Destroyed 10, PlayerCombat 10, Corpse 9, ParticleEvent 8, Windblasted 8, PawnSighted 6, Choke 6, then
+19 classes on 1-4 maps. Unsupported ops met (maps): DisSeqAct_SpawnCameraLensEffect 7, SetRainEmitter 6, Highlight 6, SeqAct_ModifyObjectList 5,
+AISetBrainFlags 4, SetAudioOcclusion 4, SetPlayerVisSettings 4, RemoveInventoryItem 4, IsPlayerInCombat 3, IsDLCUnlocked 3,
+OverrideAwarenessDisplay 3, then 13 classes on 1-2 maps (CastToFloat, AndGate, IsObjectiveComplete, HasObjective, ModifyAmmo,
+ArkSeqAct_ChangePylonConnection, CompareTweaks, FireProjectile, ToggleChoke, RBConstraint, MultiLevelStreaming, NPCDoTeleportSpell, GetDistance).
+
+### Collision against the original (the hook's captures, port rebuilt with this branch)
+
+`oracle collision --map M --rebuild` (snapshots rebuilt in a scratch oracle root) on the 19 maps with river krusts, watch towers or the
+mesh-less usables: agreement unchanged within a few queries (e.g. Streetsewer 99.91 %, FRefinery 99.76 %, Streets2 99.73 %, FStreets
+99.66 % (-9 queries)). The krust bodies now answer where the original's do, within a few percent of the check length (the original poses
+the creature by its idle animation, the port at the reference pose: Streetsewer `DisRiverKrust_30` 6 checks, port 0.3-1.3 % farther; FStreets
+10 checks where a reference-pose body reaches past the animated one). The watch towers' own disagreements are on their static base
+(`StaticMeshComponent0`, imported with the level's components: Streets2 113 + 88 checks), not on the skeletal tower (1 check each).
+
+Coordinator follow-ups (top clusters, not fixed here):
+
+- **L_Out_P 57.14 % (496 / 868)**: structural. 364 of the 372 disagreements are "port blocks where the original does not" on
+  `modular_rocks` meshes of `L_Out_EnvLabPiero` (`StaticMeshActor_19610`, collection components 24, 25, 72). L_Out_P has ten story
+  variant sublevels (`L_Out_EnvSamAlive / SamDead / CallistaCurnow / CallistaAlive / CallistaDead / LabEmpty / LabSokolov / LabPiero /
+  LabPieroAndSokolov`) that its Kismet streams in by story state (`SeqAct_MultiLevelStreaming`, unsupported in the port); the port's
+  importer loads every `WorldInfo.StreamingLevels` package (`dishonored_assets::map_packages`), the original only the streamed ones (none
+  of the Lab variants at the capture). Fix: per-sublevel collision layers toggled by the Kismet's streaming ops (and `LevelStreaming`
+  initial state), the same mechanism the other Kismet-streamed variants (Pub, Isl...) will need.
+- **Ovrsr 98.51 %**: top 3 clusters (161 + 151 + 135) are `L_Ovrsr_Script:StaticMeshActor_2223` (`Env_Blockout.Cube_100`, scale 9.5 x 10
+  x 0.5): the port blocks, the original misses; its `StaticMeshComponent` was cooked into the persistent `StaticMeshCollectionActor`
+  (`StaticMeshActor_SMC_2223`), not referenced by any Kismet. **Tower 98.86 %**: the same pattern, `L_Tower_Script:StaticMeshActor_2`
+  (`platform_small_01`, `bHidden`, 202 + 70 checks where the port hits nearer). Both look like the script-package blockers whose cooked
+  component the original does not collide with; to decode (component / actor flags of the cooked collection entry).
+- **Galvani2 97.90 %**: `DisDoor_4` / `DisDoor_20` (120 / 96, both directions: door state or pose at the capture) and
+  `L_Galvani1_Scripts:InterpActor_3` (92). **LightH High / Low 98.4 %**: `InterpActor_4` / `_5` (41 + 38, port blocks: matinee movers at
+  another position on the original) and `DisDoor_1` (55).
+- DishonoredGameFull_P: not opened on the original (the console `open` stays on the previous level); no comparison.
+
+### Free roam between a level's maps
+
+`dishonored_content::freeroam_def(map, seed)` builds the session a free-roam launcher runs: the map, the other maps of its campaign level
+(`level_group`), their original spawners, the original Kismet started by the map's campaign entry (`entry_event`: a global `ChangeLvl_*`
+handler that prepares only this map, the mission's own entry preferred), `SF_Global_RealGameStarted` set (a game started from the menu; the
+level doors test it before their `ChangeLvl_*`). The level's maps come from the travel data: `dishonored_assets::travel::map_exits` lists the
+`ChangeLvl_*` events a map's gameplay events reach (not the developers' console skips) with every destination their global handler can
+prepare and whether it crosses a mission boundary (`DisSeqAct_MissionStatsTracking` / `ShowMissionStats`); two maps belong together when
+each can reach the other without a boundary. A level change out of the level (the boat) ends the session as it ends a mission.
+
+`harness freeroam` (58 / 58): for each pair, a session on one map, then the agent uses the door (or enters the trigger) whose Kismet leads
+to the other map's `ChangeLvl_*`, answering the confirmation with "go"; checked both ways: the other map, the tagged `PlayerStart` of the
+travel (0 uu on every arrival), not falling, the inventory kept (coins carried across). Pairs (7 levels):
+Boyle Ext / Int; Bridge 1a / 1b, 1b / 1c, 1c / 2; Flooded FAssassins / FStreets, FAssassins / FGate, FRefinery / FStreets, FGate / Streetsewer;
+Prison / PrsnSewer; TowerRtrn Int / Yard; Streets1 / Distillery, Galvani1, Ovrsr; Ovrsr / Ovrsr_Back, Ovrsr_Kennel;
+Streets2 / ArtDealer, Galvani2, Distillery2, Brothel. Notes: FStreets -> FAssassins is locked by the level's own state at that point (the
+gate's `DisSeqAct_Lock`, "used while locked"), as in the original; on a first visit some destinations start their own intro (Streets1 /
+Streets2 dock arrival, FStreets, TowerRtrn Yard: a matinee holding the player or cinematic mode) and the player is moved by it after
+arriving; the free-roam session starts on maps the campaign enters later, so these first-visit intros play.
 
 ## Method
 
@@ -101,11 +250,11 @@ Counts are from the load sweep, the smoke traces and `oracle coverage` (all 42 m
 
 | # | cause | count | maps | effect observed here |
 |---|---|---|---|---|
-| 1 | Kismet ops the port does not implement (22 classes with 70+ instances, list below) | 3995 instances in the 22 listed classes alone; per map 6-29 % of op instances unimplemented (OutsiderDream 29 %) | 42 | not visible in the smoke (activations run; the missing ops are skipped silently, no note is logged): conversation / possession / distraction / pickup events never fire, so levels will not react to the player. Unverified how many sequences stall |
+| 1 | Kismet ops the port does not implement (22 classes with 70+ instances, list below) | 3995 instances in the 22 listed classes alone; per map 6-29 % of op instances unimplemented (OutsiderDream 29 %) | 42 | now listed per run as KismetNotes (see the per-map table); before: not visible in the smoke: conversation / possession / distraction / pickup events never fire, so levels will not react to the player. Unverified how many sequences stall |
 | 2 | Placed actors not imported: DisNPCDistractor 1401, DisSplineLoftActor 664, PathTargetPoint 350, DisFish 249, SplineLoftActor 170, DishonoredNote 165, DisHideoutAccessPoint 140 | 3139 | 37 / 18 / 28 / 23 / 14 / 24 / 12 (see below) | NPC distraction props, splines (rails, wires), AI path targets, fish, hideout access are absent |
-| 3 | Entry not routed to the map (story state) | 10 maps | Isl_High, LightH_Low, Out x3, Pub x5 | the level starts without its own travel start / chapter flags; smoke covers the level's own sequences only |
-| 4 | Movers with no collision (mesh or skeletal mesh missing): DisRiverKrust 63 actors, DishonoredUsableObject 24, DisWatchTower 5, DisAudioLogPlayer 2 | 94 actors | 20 of the 39 maps with a cold run (`DisRiverKrust` 8 maps, `UsableObject` 12, `WatchTower` 4, `AudioLogPlayer` 1) | those objects have no collision at all in the port (usables such as levers and doors' props; river krust and watch towers are not solid). Worst: Streetsewer 18, Flooded_FRefinery 16, Flooded_FStreets 14 |
-| 5 | Flooded_FIntro entry stalls after PrepareMapChange | 1 | Flooded_FIntro | no travel start, level Kismet mostly idle (33 activations) |
+| 3 | Entry not routed to the map (story state). FIXED: right entry events / flags / chaos in the scenarios | 10 maps | Isl_High, LightH_Low, Out x3, Pub x5 | the level starts without its own travel start / chapter flags; smoke covers the level's own sequences only |
+| 4 | FIXED (0 warnings). Movers with no collision (mesh or skeletal mesh missing): DisRiverKrust 63 actors, DishonoredUsableObject 24, DisWatchTower 5, DisAudioLogPlayer 2 | 94 actors | 20 of the 39 maps with a cold run (`DisRiverKrust` 8 maps, `UsableObject` 12, `WatchTower` 4, `AudioLogPlayer` 1) | those objects have no collision at all in the port (usables such as levers and doors' props; river krust and watch towers are not solid). Worst: Streetsewer 18, Flooded_FRefinery 16, Flooded_FStreets 14 |
+| 5 | FIXED (DisSeqAct_BackupAndClearInventory). Flooded_FIntro entry stalls after PrepareMapChange | 1 | Flooded_FIntro | no travel start, level Kismet mostly idle (33 activations) |
 | 6 | Navmesh essentially absent: Flooded_FIntro 8 polys (11 spawners), OutsiderDream 6, Out 15 / 1 / 1; DishonoredGameFull no pylons | 6 maps | FIntro, Dream, Out x3, Full | no AI path on those maps; plausible for the Out and Dream maps (one spawner each), suspicious for FIntro (11 spawners) |
 | 7 | Not covered by this sweep | - | all | NPC fall-through, collision correctness (only Boyle compared with the original), AI, render |
 

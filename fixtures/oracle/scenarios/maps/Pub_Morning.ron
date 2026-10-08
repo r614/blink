@@ -4,8 +4,8 @@
     name: "maps/Pub_Morning",
     system: Kismet,
     map: "L_Pub_Morning_P",
-    description: "Smoke run: the populated level at the player's default spawn with the original Kismet started by the remote event ChangeLvl_fromStreets2_toHub (the map's entry event in the global sequence); no input, 10 s.",
-    setup: (kismet: true, kismet_start: Some("ChangeLvl_fromStreets2_toHub"), original_npcs: true, seed: 1),
+    description: "Smoke run: the populated level at the player's default spawn with the original Kismet started by the remote event ChangeLvl_fromBoyle_toHub (the map's entry event in the global sequence: fromBoyle_toHub, input Arrived (PrepareMapChange_2 L_Pub_Morning_P)); no input, 10 s.",
+    setup: (kismet: true, kismet_start: Some("ChangeLvl_fromBoyle_toHub"), original_npcs: true, seed: 1),
     ticks: 600,
     input: [],
     checkpoints: [

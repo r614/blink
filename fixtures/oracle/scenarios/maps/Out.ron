@@ -4,8 +4,8 @@
     name: "maps/Out",
     system: Kismet,
     map: "L_Out_P",
-    description: "Smoke run: the populated level at the player's default spawn with the original Kismet started by the remote event ChangeLvl_toEpilogue (the map's entry event in the global sequence); no input, 10 s.",
-    setup: (kismet: true, kismet_start: Some("ChangeLvl_toEpilogue"), original_npcs: true, seed: 1),
+    description: "Smoke run: the populated level at the player's default spawn with the original Kismet started by the remote event ChangeLvl_fromLighthouse_toEpilogue (the map's entry event in the global sequence: EndGame_Achievements -> fromLighthouse_toEpilogue input In: CheckStoryFlag_49 Boyle_TalkedwithOutsider (both outputs lead on), CheckStoryFlag_2 SF_85AF2F6F4448BE014FCA78BCEDED2E03 (low chaos) True, then the kill flags (SF_0BA41473480F702D4E64F29F2744E566, SF_Global_PlyrKilledCallista, SF_3D3A9D2C4152BEB523D2DE82E7B09A08, SF_Global_PlyrKilledPiero, SF_Global_PlyrKilledSokolov) False -> PrepareMapChange_0 L_Out_P); no input, 10 s.",
+    setup: (kismet: true, kismet_start: Some("ChangeLvl_fromLighthouse_toEpilogue"), original_npcs: true, seed: 1, story_flags: [("SF_85AF2F6F4448BE014FCA78BCEDED2E03", true)]),
     ticks: 600,
     input: [],
     checkpoints: [
