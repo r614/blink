@@ -46,3 +46,27 @@ fn premultiplies_the_colour_parameters() {
     assert_eq!(d.clouds2_color.truncate(), Vec3::splat(0.5));
     assert_eq!(d.misc.x, 3.0);
 }
+
+/// L_Out_P's `Skies.Outsider.Outsider_sky_inst` (6059): the horizon terms, Storm_mask R.
+#[test]
+fn decodes_the_outsider_horizon() {
+    let mut p = params(
+        &[("Enable_Storm", true), ("H_Enable_Horizon", true), ("C_Enable_Clouds", true), ("G_Use_Gradiant_Sky", true), ("Use_UV_Channel_2", false), ("C2_Enable_Clouds_2", true)],
+        &[("H_HorizonIntensity", 10.0), ("H_HorizonExponent", 3.0), ("H_Horizon_UV_Distortion", 4.0), ("H_Horizon_Speed", 1.0), ("H_HorizonOffset", 0.1)],
+        &[("Horizon_Color", [0.5326087, 0.83247864, 1.0, 0.15])],
+    );
+    p.mask_channels = vec![("Storm_mask".into(), 0)];
+    let u = SkyUniform::decode(&p).unwrap();
+    assert_eq!(u.horizon.w, 1.0);
+    assert!((u.horizon.truncate() - Vec3::new(0.5326087, 0.83247864, 1.0) * 0.15).length() < 1e-6);
+    assert_eq!(u.horizon2, Vec4::new(1.0, 4.0, 0.1, 3.0));
+    assert_eq!(u.misc2.z, 10.0);
+    assert_eq!(u.misc2.w, 0.0);
+    assert_eq!(u.misc2.y, 0.0);
+    // Defaults: speed 2, distortion 0.5, exponent 5, intensity 1; RGB storm.
+    let d = SkyUniform::decode(&params(&[], &[], &[])).unwrap();
+    assert_eq!(d.horizon2, Vec4::new(2.0, 0.5, 0.0, 5.0));
+    assert_eq!(d.misc2.z, 1.0);
+    assert_eq!(d.misc2.w, -1.0);
+    assert_eq!(d.horizon.w, 0.0);
+}

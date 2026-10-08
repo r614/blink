@@ -303,6 +303,10 @@ pub struct StaticMeshAsset {
     /// it differs from `uv1`, i.e. when `LightMapCoordinateIndex` is not 1; empty otherwise.
     #[serde(default)]
     pub uv_set1: Vec<Vec2>,
+    /// The mesh's vertex colours (R, G, B, A bytes; the shaders read them as byte / 255), one per
+    /// position; empty when the mesh has none.
+    #[serde(default)]
+    pub colors: Vec<[u8; 4]>,
     pub indices: Vec<u32>,
     pub sections: Vec<MeshSection>,
     /// Collision triangles from the mesh's kDOP tree (indices into `positions`) with the

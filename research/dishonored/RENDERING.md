@@ -336,6 +336,100 @@ Missing inputs (U-764):
 - The lightmap's diffuse weight is the flat-normal basis weight (1/3 per vector). The shader
   reads `c26.w`, whose value is not measured.
 
+## Light beams (Volume_Light_PMAT; `volume_light.rs`, `volume_light.wgsl`)
+
+The window shafts (`Hub_FX.Light.Day_window_light_inst` on `Hub_FX.Light.Hub_Medium_Window`, 26 in
+L_Pub_Day_P), lamp cones (`Vfx_Lights.Materials.*Lamp_Light_INST`), the Art Dealer's and the Prison
+sewer's window beams and L_Out_P's god rays (`Outro_FX.Materials.MyFuckingGodRays_01_inst`) are
+static meshes (and mesh emitters) on `Vfx_Materials.main_materials.Volume_Light_PMAT`: unlit,
+additive, no diffuse texture. The port drew them as unlit additive StandardMaterials in the untextured
+fallback colour at full strength: solid pale cones (Pub bar, Art Dealer hall) and a pink screen at
+L_Out_P's start.
+
+Shader maps (`shader_maps ... Volume_Light_PMAT`), FLocalVertexFactory base passes (vertex shader 30;
+3 with `Use_Vertex_Color`): 6627 (no switch), 6629 (`Disable_CameraFade`), 6631 (`Use_Vertex_Color`),
+6633 (`Use_Vertex_Color` + `Use_rays`; `Rays_Channel` R and G share it, it reads `.r`); the particle
+vertex factory's 6626 / 6628 / 6630 / 6632 compute the same. With `M` = `MeshEmitterVertexColor`
+((1, 1, 1, 1) on static meshes, the particle colour on mesh emitters), `V` the mesh's vertex colour:
+
+- `F = |N.V|^Fresnel_exponent` (the tangent-space camera vector's z, VS 30 `o3`; 0 below 1e-6);
+- mask: without `Use_Vertex_Color` the UV sphere mask `max(1 - 2 |uv0 - 0.5|, 0)^SphereMask_Power`
+  (0 below 1e-6); with it `V.r`, times with `Use_rays` `Rays(uv0 + (frac(0.5 Ray_Speed t), 0)).r +
+  Rays(uv0 x (-1.5, 1) + (frac(0.25 Ray_Speed t), 0)).r` (`LightRays_Mask_R`);
+- depth-biased alpha `saturate((scene depth - pixel depth) x k)`, `k = 1 / ((1 -
+  Db_Depth_Biased_Alpha_Intensity) x 50)` (1000 when that is below 0.001);
+- camera fade `saturate((pixel depth - StartOffset) x 0.0005 / Distance)` (none with
+  `Disable_CameraFade`): the Pub's shafts (StartOffset 512, Distance 3.5) reach full strength
+  7.5 k uu from the camera;
+- `rgb = lerp(Color, ColorAlert, Alert) x LightIntensity x M.rgb x mask x F x M.a x Db x Cf x M.a`,
+  alpha 0 (Color's alpha is unused; `M.a` enters twice).
+
+The window meshes carry vertex colours (34 on `Hub_Medium_Window`: white at the window, black at
+the beam's end); `static_mesh.rs` now keeps the colour stream (`StaticMeshAsset::colors`, R, G, B, A
+bytes, read as byte / 255 as the vertex factory's `D3DCOLOR`). The particle path's procedural
+`GlowMaterial` (U-305) stays for the other untextured mesh bases (`Glow_PMAT`); Volume_Light mesh
+emitters use the decoded material. Without a depth prepass the scene behind is taken as far
+(`Db = 1`, U-931).
+
+## Water sheets (water_spillway_translu_PMAT; `spillway.rs`, `spillway.wgsl`)
+
+The falling water of the Prison sewer (`Prison_FX.Effects.Water_sewer_light_INST`: the white slab at
+L_PrsnSewer_P's start), the Pub's spillways (`Hub_FX.Materials.water_spillway_inst`) and the outro's
+whisky (`Outro_FX.Materials.Bitch_Wisky_INST`): unlit, BLEND_Translucent, no diffuse texture. Every
+instance found has `Va_Enable_Rotation_About_Axis` + `Vc_Use_Vertex_Color` +
+`Va_Enable_Complex_vertex_anim` (map 0x60c2373): base passes 1584 (with `PrecomputedFog`) / 1585;
+`River` maps use 1595 / 1596. The vertex-colour and wind switches only change the vertex shader.
+
+- `n = 2 Normal(SpillWay_Tilling (u, 2 v) + (0, frac(-0.7 SpillWay_Distortion_Speed t))) - 1`;
+- `s = SpillWay_Texture(uv0 + SpillWay_Distortion n.xy)`;
+- the reflection: the tangent-space camera vector reflected about `normalize(n)`, multiplied by the
+  instance's `LocalToWorldMatrix` (the shader treats the tangent-space vector as a local one), into
+  `C_Cubemap_texture` (a material cube; the importer keeps its faces as `C_Cubemap_texture.0..5`),
+  times `C_Cubemap_color.rgb x a`;
+- droplets `d = Tex#2(0.5 u + 0.25, 10 v + frac(-3 SpillWay_Droplets_Speed t)).b x
+  SpillWay_Droplets_Intensity`, mask `m = Tex#3(uv0).b` (the base's unnamed expression textures);
+- `rgb = c x (saturate(s.r ((1 - m) d + s.r)) + C_Cube_Map_Min_Value) x D_DiffuseColorTweak.rgb x a`;
+- `a = saturate(s.g (d + m)) x SpillWay_Translucency` (River: `saturate(s.g) x Translucency`).
+
+Not drawn: the vertex animation (U-570), the distortion pass, the vertex fog of 1584 (which of the
+two variants the game binds is U-933).
+
+## Island sea (water_Foam_MAT; `water_foam.rs`, `water_foam.wgsl`)
+
+`island_water_near.Water_Island_{LC,HC}_{near,far}_Inst` (L_Isl_*) on
+`Lighthouse_FX.Materials.water_Foam_MAT`: unlit, translucent, no diffuse texture (drawn as a pink /
+pale fallback-colour plane before). Low chaos: `Enable_Foam` (37073 G / 37074 R mask), high chaos:
+`Enable_Foam` + `Enable_Rain` (37075 / 37076). From the pixel's world position `P` (TEXCOORD5 plus
+`CameraWorldPos`) and the bounds origin `O` (`ObjectWorldPositionAndRadius`):
+
+- `ang = 2 pi frac(((P.yx - O.yx) x 0.01 + 6 t) x 0.1 + 0.5) - pi`, `wavy = (sin ang.x, cos ang.y)`;
+- `n = 2 Waves((3 W1 u, W1 v) + Wavy_UV wavy + frac(Ws t (-0.13, -0.075))).xy - 1 + 2 Waves((3.3 W2 u,
+  1.1 W2 v) + Wavy_UV wavy + frac(Ws t (0.075, -0.13))).xy - 1`;
+- rain: `(Rain(A).r |sin| + Rain(B).g |cos|) x Rain_Normal_Intensity x saturate(1 - depth / 4096)` added
+  to both components, `sin / cos(2 pi Rain_Speed t)`, A = `(sgn(sin) 3 Rt u - 0.5, 3 Rt v - 0.5)` turned
+  by `2 pi frac(sgn(sin) x 15.915494 + 0.5) - pi` then + 0.5, B = `(sgn(cos) (3 Rt v + 2.5), 3 Rt u)`;
+- `R` = `C_Realtime_reflection_Texture` (a planar reflection render target) at the screen position +
+  `W_Distorsion_intensity n + Wavy_Cube wavy`, times `CubeMap_intensity`;
+- `rgb = (1 - m) R + Water_color.rgb x a + F_Foam_Texture(F_Foam_Tilling uv0 + F_Foam_Distortion (2
+  F_Foam_Distortion((FDT u, 0.5 FDT v) + (0, frac(FDS t))).xy - 1) + Wavy_UV wavy + (0, frac(FS t))).r x
+  Foam_Brightness.rgb x a x m`, `m = F_Foam_Mask[F_Foam_Mask_Chanel]`;
+- `a = saturate((scene depth - pixel depth) / Opacity_Depth) x Translucency`.
+
+Missing inputs: the planar reflection (the level's reflection cube stands in, as for the river,
+U-764) and the depth prepass (`a = Translucency`, U-931).
+
+## Doors' emissive placeholder (skeletal prop materials)
+
+L_TowerRtrn_Int_P's start faces `L_TowerRtrn_Int_Audio:DisDoor_2` (`Doors.door_small_poor_int_wood_sk`,
+tweak `doors_twk.door_small_poor_int_wood_twk`, whose `m_UnbrokenMeshInfo.m_pMesh` is the same mesh:
+no mesh swap is involved). Its material `Doors.doors_poor_interior_01_inst` keeps
+`E_Emissive_texture = obsolete_door_d`, an editor placeholder reading "I'M OBSOLETE / REPLACE ME BY
+DISTWEAKS_DOOR 'DOORS_TWK.DOOR_SMALL_WOOD_01_TWK'", with `E_Enable_Emissive` false: the compiled
+permutation never samples it. The level importer already gated the Arkane slots by their
+`*_Enable_*` switches; the skeletal-prop / character material path (`characters::push_material`)
+did not, so the text glowed on every such door. It now drops the normal, specular and emissive slots
+whose switches are off.
+
 ## Diffuse colour (`map_render::diffuse_color_terms`)
 
 Every base material that exposes `D_Diffuse_color` multiplies its colour by its alpha in the
@@ -396,9 +490,20 @@ the port had clipped the balloons' panels into see-through holes.
   Storm_Min_Intensity)`.
 
 The vertex shader passes UV1 swizzled (`o1.zw = uv1.yx`). Decoded from the shader maps of Boyle
-Ext's `Boyle_2_inst` and Boyle Int's `Boyle_01_inst`; with `H_Enable_Horizon` the contrast result
-is saturated and a horizon colour is blended by an unnamed noise texture (`Tex#1`), not rendered
-(U-520, with `TP_Enable_Top_Texture`, the storm / gradient masks and `G_Grandiant_UV2`).
+Ext's `Boyle_2_inst` and Boyle Int's `Boyle_01_inst`. `H_Enable_Horizon` (2026-10-08, 6044 / 6059:
+L_Out_P's `Skies.Outsider.Outsider_sky_inst` and most other levels' skies): the contrast result is
+saturated (`exp_sat`), then lerped to `Horizon_Color.rgb x a` by `h^H_HorizonExponent x
+H_HorizonIntensity` (0 below 1e-6), `h = saturate((Tex#1((2 UV1.x, 0.25 UV1.y) + frac(H_Horizon_Speed
+t (0.01, 0.025))).r x H_Horizon_UV_Distortion + UV1.y + H_HorizonOffset) x UV1.y x 0.5 +
+H_HorizonOffset)`; then the storm is added. `Storm_mask` with one channel multiplies that channel by
+`Storm_Color.rgb` (R in 6059). `Use_UV_Channel_2` only moves `D_Diffuse` (6046 against 6044: without
+it `D_Diffuse` is read at `(-UV0.x, UV0.y)` with no `U_Offset`); the storm and horizon read UV1 in
+both (6059 serves the Outsider sky without the switch and other skies with it), so the port no
+longer replaces UV1 by UV0 for them. `shader_maps` omits some scalar parameters from its listing
+(6052's `UniformPixelScalars_2.z` = `Cloud_Distortion`, 6059's `_6.w` = `H_Horizon_UV_Distortion`,
+both named in sibling maps). Not rendered (U-520): `TP_Enable_Top_Texture`, `Enable_Storm_Mask`,
+`Enable_GRadiant_Top`, `G_Grandiant_UV2`; the other permutations (6040 .. 6085) are assumed to
+share the verified terms (U-934).
 Moon and sun: see "Moon and sun" above.
 
 ## Bloom parts (`bloom.rs`, `bloom.wgsl`)

@@ -224,3 +224,16 @@ fn gameplay_particle_sprites_have_an_opacity() {
     }
     assert!(bad.is_empty(), "particle sprites without an opacity:\n{}", bad.join("\n"));
 }
+
+/// The Pub's window beam mesh keeps its vertex colours (Volume_Light_PMAT's `Use_Vertex_Color`
+/// reads the red channel): 34 colours, white at the window, black at the beam's far end.
+#[test]
+fn window_beam_vertex_colours() {
+    let Some(c) = content() else { return };
+    let p = c.package("L_Pub_Day_FX").unwrap();
+    let Some(i) = (0..p.exports.len()).find(|&i| p.export_class(i) == "StaticMesh" && p.obj_path(ue3_package::ObjRef::Export(i)) == "Hub_FX.Light.Hub_Medium_Window") else { return };
+    let m = read_static_mesh(&p, i).unwrap();
+    assert_eq!(m.colors.len(), m.positions.len());
+    assert_eq!(m.colors.len(), 34);
+    assert!(m.colors.iter().any(|c| c[0] == 255) && m.colors.iter().any(|c| c[0] == 0));
+}
