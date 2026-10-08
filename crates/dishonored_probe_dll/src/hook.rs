@@ -94,10 +94,7 @@ static LAST_TIME: Mutex<f32> = Mutex::new(0.0);
 unsafe extern "thiscall" fn process_event_detour(this: u32, func: u32, parms: u32, result: u32) {
     CALLS.fetch_add(1, Relaxed);
     GAME_THREAD.store(unsafe { GetCurrentThreadId() }, Relaxed);
-    if JOBS_PENDING.load(Relaxed) != 0 && IN_JOB.swap(1, Relaxed) == 0 {
-        run_jobs();
-        IN_JOB.store(0, Relaxed);
-    }
+    run_pending_jobs();
     if INPUT_ACTIVE.load(Relaxed) != 0 {
         apply_input();
     }
@@ -105,6 +102,14 @@ unsafe extern "thiscall" fn process_event_detour(this: u32, func: u32, parms: u3
         crate::native::trace_event(this, func, parms);
     }
     unsafe { process_event_original(this, func, parms, result) };
+}
+
+/// Run the queued game-thread jobs (game thread only; not re-entered from a job).
+pub fn run_pending_jobs() {
+    if JOBS_PENDING.load(Relaxed) != 0 && IN_JOB.swap(1, Relaxed) == 0 {
+        run_jobs();
+        IN_JOB.store(0, Relaxed);
+    }
 }
 
 fn run_jobs() {
@@ -143,7 +148,9 @@ pub fn set_input(axes: [f32; 4], frames: u32) {
 
 /// Once per frame, from the D3D9 `Present` hook (after the frame's world tick).
 pub fn frame() {
-    PRESENT_THREAD.store(unsafe { GetCurrentThreadId() }, Relaxed);
+    if crate::tick::INSTALLED.load(Relaxed) == 0 {
+        PRESENT_THREAD.store(unsafe { GetCurrentThreadId() }, Relaxed);
+    }
     let tick = TICKS.fetch_add(1, Relaxed) + 1;
     if let Ok(mut inp) = INPUT.lock()
         && inp.active && inp.frames > 0 {
@@ -189,12 +196,26 @@ pub fn frame() {
 /// Run `f` on the game thread (at its next ProcessEvent) and wait for its result.
 pub fn on_game_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static, timeout_ms: u64) -> Result<T, String> {
     let (tx, rx) = mpsc::channel();
+    // A job whose caller gave up is dropped, never run late (a stale key press or write).
+    let state = std::sync::Arc::new(AtomicU32::new(0)); // 0 queued, 1 running, 2 abandoned
+    let st = state.clone();
     {
         let mut q = JOBS.lock().map_err(|_| "job queue poisoned")?;
         q.push_back(Box::new(move || {
-            let _ = tx.send(f());
+            if st.compare_exchange(0, 1, Relaxed, Relaxed).is_ok() {
+                let _ = tx.send(f());
+            }
         }));
         JOBS_PENDING.store(q.len() as u32, Relaxed);
     }
-    rx.recv_timeout(std::time::Duration::from_millis(timeout_ms)).map_err(|_| "game thread did not run the job".to_string())
+    match rx.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
+        Ok(v) => Ok(v),
+        Err(_) => {
+            if state.compare_exchange(0, 2, Relaxed, Relaxed).is_ok() {
+                return Err("game thread busy: the job was not run (cancelled)".to_string());
+            }
+            // Started just now: wait for it to finish.
+            rx.recv().map_err(|_| "game thread job failed".to_string())
+        }
+    }
 }

@@ -14,12 +14,19 @@
 //! probe_launch measure <jump|fall|sprint|slide|all> [--out DIR]
 //! probe_launch kill
 //!     Ends the game process of the current session.
+//! probe_launch session start [--map M] [--hz 60] | stop | repl | <op> ['<json>' | key=value...]
+//!     The persistent hooked session and its JSON ops (session.rs, ORACLE.md).
+//! probe_launch scenario <NAME | file.ron>... [--no-reload] [--partial] [--channel ..] [--json OUT]
+//!     Per-tick trace of a scenario spec into the oracle cache (capture.rs).
 use anyhow::{Context, Result, bail};
 use dishonored_probe::Client;
 use std::path::PathBuf;
 
+mod capture;
 mod lab;
 mod measure;
+mod reflect;
+mod session;
 mod oracle;
 mod oracle_powers;
 mod oracle_stealth;
@@ -46,6 +53,36 @@ fn session() -> Result<(u32, String)> {
 pub fn connect() -> Result<Client> {
     let (_, pipe) = session()?;
     Ok(Client::connect_wait(&pipe, std::time::Duration::from_secs(10))?)
+}
+
+/// Start the game with the probe (one instance per session file) and connect: (pid, pipe,
+/// protocol, build).
+pub fn launch_session(dll: Option<PathBuf>, mut game_args: Vec<String>) -> Result<(u32, String, u32, String)> {
+    let dll = match dll {
+        Some(d) => d,
+        None => std::env::current_exe()?.with_file_name("dishonored_probe_dll.dll"),
+    };
+    if game_args.is_empty() {
+        // -nomovie: no Bink startup / loading movies (the loading movie of a level otherwise
+        // waits for a key the engine only reads from a focused window).
+        game_args = ["-windowed", "-resx=1280", "-resy=720", "-nostartupmovies", "-nomovie"].iter().map(|s| s.to_string()).collect();
+    }
+    let (pid, pipe) = launch::launch(&dll, &game_args)?;
+    std::fs::write(session_file(), format!("{pid}\n{pipe}\n"))?;
+    let mut c = Client::connect_wait(&pipe, std::time::Duration::from_secs(30))?;
+    let (v, b) = c.ping()?;
+    if v != dishonored_probe::PROTOCOL_VERSION {
+        bail!("probe DLL protocol {v}, launcher {}", dishonored_probe::PROTOCOL_VERSION);
+    }
+    Ok((pid, pipe, v, b))
+}
+
+/// End the session's game (by pid) and forget the session.
+pub fn kill_session() -> Result<()> {
+    let (pid, _) = session()?;
+    let r = launch::kill(pid);
+    let _ = std::fs::remove_file(session_file());
+    r
 }
 
 fn parse_u32(s: &str) -> Result<u32> {
@@ -84,6 +121,15 @@ pub fn write_bmp(path: &std::path::Path, cap: &dishonored_probe::Capture) -> Res
 }
 
 fn main() -> Result<()> {
+    // The oracle cache the captures go into: the same default as scripts/dev-env (the shared
+    // data cache), so `oracle` finds them whatever shell ran the capture.
+    if std::env::var_os("DISHONORED_CACHE").is_none()
+        && std::env::var_os("DISHONORED_ORACLE_CACHE").is_none()
+        && let Some(l) = std::env::var_os("LOCALAPPDATA")
+    {
+        // Single-threaded here, before anything reads the environment.
+        unsafe { std::env::set_var("DISHONORED_CACHE", PathBuf::from(l).join("dishonored-rs").join("cache")) };
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("");
     match cmd {
@@ -105,27 +151,13 @@ fn main() -> Result<()> {
                 }
                 i += 1;
             }
-            let dll = match dll {
-                Some(d) => d,
-                None => std::env::current_exe()?.with_file_name("dishonored_probe_dll.dll"),
-            };
-            if game_args.is_empty() {
-                // -nomovie: no Bink startup / loading movies (the loading movie of a level
-                // otherwise waits for a key the engine only reads from a focused window).
-                game_args = ["-windowed", "-resx=1280", "-resy=720", "-nostartupmovies", "-nomovie"].iter().map(|s| s.to_string()).collect();
-            }
-            let (pid, pipe) = launch::launch(&dll, &game_args)?;
-            std::fs::write(session_file(), format!("{pid}\n{pipe}\n"))?;
+            let (pid, pipe, v, b) = launch_session(dll, game_args)?;
             println!("pid {pid}\npipe {pipe}");
-            let mut c = Client::connect_wait(&pipe, std::time::Duration::from_secs(30))?;
-            let (v, b) = c.ping()?;
             println!("probe protocol {v} ({b})");
         }
-        "kill" => {
-            let (pid, _) = session()?;
-            launch::kill(pid)?;
-            let _ = std::fs::remove_file(session_file());
-        }
+        "kill" => kill_session()?,
+        "session" => session::run(&args[1..])?,
+        "scenario" => capture::run(&args[1..])?,
         "ping" => println!("{:?}", connect()?.ping()?),
         "status" => print!("{}", connect()?.status()?),
         "console" => println!("{}", connect()?.console(args.get(1).context("command")?)?),

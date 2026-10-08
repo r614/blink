@@ -112,10 +112,13 @@ pub fn sync_players(
     weapons: Option<Res<crate::characters::WeaponLibrary>>,
     mut swords: Query<(Entity, &SwordVisual, &mut Transform, &mut Visibility), Without<PlayerBody>>,
     cams: Query<&GameCamera>,
+    world_models: Option<Res<crate::world_models::WorldModels>>,
 ) {
     let mv = &session.content.sim.gameplay.movement;
     let third = cams.iter().any(|c| c.third_person);
-    let mut all: Vec<&PlayerState> = view.others.iter().collect();
+    // Rats are drawn by their own model (`world_models`) once it is loaded.
+    let rats_elsewhere = world_models.as_ref().is_some_and(|w| w.draws_rats());
+    let mut all: Vec<&PlayerState> = view.others.iter().filter(|p| !(rats_elsewhere && p.kind == dishonored_sim::state::PawnKind::Rat)).collect();
     if let Some(me) = view.me.as_ref() {
         all.push(me);
     }
@@ -186,11 +189,12 @@ pub fn sync_players(
     }
 }
 
-pub fn sync_projectiles(mut commands: Commands, view: Res<SessionView>, assets: Res<PlayerAssets>, existing: Query<Entity, With<ProjectileVisual>>) {
+pub fn sync_projectiles(mut commands: Commands, view: Res<SessionView>, assets: Res<PlayerAssets>, existing: Query<Entity, With<ProjectileVisual>>, world_models: Option<Res<crate::world_models::WorldModels>>) {
     for e in &existing {
         commands.entity(e).despawn();
     }
-    for p in &view.projectiles {
+    // Kinds with their original model (`world_models`) are drawn there.
+    for p in view.projectiles.iter().filter(|p| !world_models.as_ref().is_some_and(|w| w.draws(p.kind))) {
         commands.spawn((Mesh3d(assets.projectile.clone()), MeshMaterial3d(assets.tracer.clone()), Transform::from_translation(coords::pos(p.position)), ProjectileVisual));
     }
 }

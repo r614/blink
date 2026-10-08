@@ -150,6 +150,14 @@ pub fn name_str(index: u32) -> Option<String> {
 
 /// FName index of a string (case-insensitive like FName).
 pub fn name_index(s: &str) -> Option<u32> {
+    if GNAMES.load(Relaxed) != 0 {
+        return crate::reflect::name_index(s);
+    }
+    name_index_scan(s)
+}
+
+#[allow(dead_code)]
+fn name_index_scan(s: &str) -> Option<u32> {
     let names = GNAMES.load(Relaxed);
     let (data, num, _) = tarray(names)?;
     let ptrs = mem::read_bytes(data, 4 * num as usize)?;
@@ -207,6 +215,89 @@ fn is_default(obj: u32) -> bool {
 /// Live objects (class defaults excluded) named `name` (any if empty) of class `class` (any if
 /// empty). `name` may be `Outer.Name`.
 pub fn find(name: &str, class: &str) -> Vec<u32> {
+    let (outer, base) = match name.rsplit_once('.') {
+        Some((o, n)) => (Some(o.to_string()), n.to_string()),
+        None => (None, name.to_string()),
+    };
+    // FName candidates: the whole text (number 0), and `Base_N` as (Base, N + 1).
+    let mut want: Vec<(u32, u32)> = Vec::new();
+    if !base.is_empty() {
+        if let Some(i) = name_index(&base) {
+            want.push((i, 0));
+        }
+        if let Some((b, n)) = base.rsplit_once('_') {
+            let canonical = !n.is_empty() && n.len() < 9 && n.bytes().all(|c| c.is_ascii_digit()) && (n == "0" || !n.starts_with('0'));
+            if canonical
+                && let (Ok(k), Some(i)) = (n.parse::<u32>(), name_index(b)) {
+                    want.push((i, k + 1));
+                }
+        }
+        if want.is_empty() {
+            return Vec::new();
+        }
+    }
+    let ci = if class.is_empty() { None } else { name_index(class) };
+    if !class.is_empty() && ci.is_none() {
+        return Vec::new();
+    }
+    let defaults = base.starts_with("Default__");
+    let w = want.clone();
+    let fast = crate::hook::on_game_thread(
+        move || {
+            let g = GOBJECTS.load(Relaxed);
+            let Some((data, num, _)) = tarray(g) else { return Vec::new() };
+            let objs: &[u32] = unsafe { std::slice::from_raw_parts(data as *const u32, num as usize) };
+            let mut out = Vec::new();
+            for &o in objs {
+                if o == 0 {
+                    continue;
+                }
+                unsafe {
+                    let n = *((o + OBJ_NAME) as *const [u32; 2]);
+                    if !w.is_empty() && !w.iter().any(|x| x.0 == n[0] && x.1 == n[1]) {
+                        continue;
+                    }
+                    if let Some(ci) = ci {
+                        let c = *((o + OBJ_CLASS) as *const u32);
+                        if c == 0 || *((c + OBJ_NAME) as *const u32) != ci {
+                            continue;
+                        }
+                    }
+                }
+                out.push(o);
+                if out.len() >= 65536 {
+                    break;
+                }
+            }
+            out
+        },
+        5_000,
+    );
+    let Ok(cands) = fast else { return find_slow(name, class) };
+    let mut out = Vec::new();
+    for o in cands {
+        if let Some(outer) = &outer {
+            // `Outer.Name`: the immediate outer's name, or any outer's path suffix.
+            let full = full_name(o).unwrap_or_default();
+            let path = full.split_once(' ').map(|x| x.1).unwrap_or("");
+            let ok = mem::u32(o + OBJ_OUTER).and_then(obj_name).is_some_and(|on| on.eq_ignore_ascii_case(outer)) || path.to_ascii_lowercase().ends_with(&format!("{}.{}", outer, base).to_ascii_lowercase());
+            if !ok {
+                continue;
+            }
+        }
+        if is_default(o) && !defaults {
+            continue;
+        }
+        out.push(o);
+        if out.len() >= 4096 {
+            break;
+        }
+    }
+    out
+}
+
+/// `find` by reading every object through ReadProcessMemory (no game thread needed).
+fn find_slow(name: &str, class: &str) -> Vec<u32> {
     let (outer, name) = match name.rsplit_once('.') {
         Some((o, n)) => (Some(o.to_string()), n.to_string()),
         None => (None, name.to_string()),

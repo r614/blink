@@ -34,7 +34,7 @@ use bevy::prelude::*;
 use dishonored_assets::characters::{anim_set_path, bind_globals, load_anim_set, load_model};
 use dishonored_assets::edge_anim::BakedClip;
 use dishonored_ir::BoneAsset;
-use dishonored_ir::gameplay::{GameplayConfig, MovementConfig};
+use dishonored_ir::gameplay::GameplayConfig;
 use dishonored_sim::input::LeftHand;
 use dishonored_sim::state::{ChokePhase, LeftPhase, MoveMode, PlayerState, PossessStage, SwordPhase};
 use dishonored_sim::tuning::CombatTuning;
@@ -96,6 +96,8 @@ const SETS: &[&str] = &[
     "Ply_Gadgets_as",
     "Ply_Gadgets_Grenade_as",
     "Ply_Gadgets_SpringRazor_as",
+    "Ply_Head_Locomotion_as",
+    "Ply_Empty_Locomotion_as",
 ];
 
 /// Sequences the states below name (item prefix applied).
@@ -106,6 +108,7 @@ const CLIPS: &[&str] = &[
     "Sword_Ready_MantleLow", "Sword_Ready_MantleMedium", "Sword_Ready_MantleHigh", "Sword_Sneak_MantleLow", "Sword_Sneak_MantleMedium", "Sword_Sneak_MantleHigh",
     "Sword_Stun_In", "Sword_Stun_Loop", "Sword_Ready_Assassination_Back_Master", "Sword_Ready_Assassination_Generic",
     "Sword_Choke_In_Master", "Sword_Choke_Loop_Master", "Sword_Choke_Win_Master", "Sword_Choke_Lose_Master", "Sword_Choke_Cancel_Master", "Sword_Choke_CarryCorpse_Master",
+    "Head_Rope_Climb", "Empty_SwimIdle", "Empty_SwimN",
     "Empty_CarryCorpse_In_Master", "Empty_CarryCorpse_Idle_Master", "Empty_CarryCorpse_Walk_Master", "Empty_CarryCorpse_DropLow_Master",
     // Upper body.
     "Sword_Ready_AttackRight_A_Small", "Sword_Ready_AttackLeft_A_Small", "Sword_Ready_AttackRight_B_Small", "Sword_Ready_AttackLeft_B_Small", "Sword_Sneak_Attack_Small",
@@ -129,14 +132,23 @@ enum Held {
     Sword,
     Pistol,
     Crossbow,
+    /// Grenades and sticky grenades (`Grenade.Grenade`, `Grenade_at`).
+    Grenade,
+    SpringRazor,
 }
 
-/// (held, mesh, attach bone, the mesh's own AnimSets, prefixes its sequences may carry).
-const WEAPONS: &[(Held, &str, &str, &[&str], &[&str])] = &[
-    (Held::Sword, "Wpn_PlySwords.Wpn_PlySword01", "handAttachment_R_jnt", &["PlySword_Anim_as"], &["Sword"]),
-    (Held::Pistol, "Wpn_PlyGuns.Wpn_PlyGunElite", "handAttachment_L_jnt", &["CorvoGun_as"], &["Pistol", "CorvoGun", "Gun"]),
-    (Held::Crossbow, "Crossbows.crossbow_01", "handAttachment_L_jnt", &["Crossbow_as", "Crossbows_as"], &["Crossbow"]),
+/// (held, mesh, attach bone, the mesh's own AnimSets).
+const WEAPONS: &[(Held, &str, &str, &[&str])] = &[
+    (Held::Sword, "Wpn_PlySwords.Wpn_PlySword01", "handAttachment_R_jnt", &["PlySword_Anim_as"]),
+    (Held::Pistol, "Wpn_PlyGuns.Wpn_PlyGunElite", "handAttachment_L_jnt", &["CorvoGun_as"]),
+    (Held::Crossbow, "Crossbows.crossbow_01", "handAttachment_L_jnt", &["Crossbow_as"]),
+    (Held::Grenade, "Grenade.Grenade", "handAttachment_L_jnt", &["Grenade_as"]),
+    (Held::SpringRazor, "SpringRazor.SpringRazor", "handAttachment_L_jnt", &["SpringRazor_as"]),
 ];
+
+/// The bolt on the crossbow's `Bolt_Socket` per ammunition (`Crossbows.bolt_01`, `Bolt_Sleep`,
+/// `Bolt_Flare`).
+const BOLTS: &[(LeftHand, &str)] = &[(LeftHand::Crossbow, "Crossbows.bolt_01"), (LeftHand::SleepDart, "Crossbows.Bolt_Sleep"), (LeftHand::IncendiaryBolt, "Crossbows.Bolt_Flare")];
 
 /// Local bone transforms (rotation, translation).
 pub type Pose = Vec<(Quat, Vec3)>;
@@ -216,7 +228,19 @@ struct WeaponGpu {
     /// `Skm_Player`): transform relative to its bone.
     socket_rel: glam::Mat4,
     lib: ClipLib,
-    prefixes: &'static [&'static str],
+}
+
+/// A bolt mesh shown loaded on the crossbow.
+struct BoltGpu {
+    ammo: LeftHand,
+    gpu: CharacterGpu,
+    bind: Vec<glam::Mat4>,
+    m2p: glam::Mat4,
+    /// The crossbow (index in ViewRig::weapons), the bone of its Bolt_Socket and the socket
+    /// transform relative to that bone.
+    weapon: usize,
+    bone: usize,
+    socket_rel: glam::Mat4,
 }
 
 #[derive(Resource)]
@@ -227,6 +251,7 @@ pub struct ViewRig {
     bind_pose: Pose,
     m2p: glam::Mat4,
     weapons: Vec<WeaponGpu>,
+    bolts: Vec<BoltGpu>,
     lib: ClipLib,
     upper_body: Vec<bool>,
     left_arm: Vec<bool>,
@@ -244,6 +269,13 @@ pub struct WeaponJoint {
 }
 #[derive(Component)]
 pub struct WeaponMesh(usize);
+#[derive(Component)]
+pub struct BoltJoint {
+    bolt: usize,
+    bone: usize,
+}
+#[derive(Component)]
+pub struct BoltMesh(usize);
 
 /// Parent of each bone (`None` for a root), read as `bind_globals` reads `BoneAsset::parent`.
 pub fn parents(bones: &[BoneAsset]) -> Vec<Option<usize>> {
@@ -341,7 +373,7 @@ pub fn load_view_rig(
     let left_arm = branch_mask(&bones, LEFT_ARM_BRANCHES);
     let mut weapons = Vec::new();
     let sockets = dishonored_assets::characters::mesh_sockets(&content, "Engine", "Ply_Player.Skm_Player").unwrap_or_default();
-    for (held, path, socket, sets, prefixes) in WEAPONS {
+    for (held, path, socket, sets) in WEAPONS {
         match load_model(&content, path, &[("Startup", path)], None, 1024) {
             Ok(w) => {
                 let Some(socket) = find(socket) else { continue };
@@ -371,11 +403,32 @@ pub fn load_view_rig(
                     m2p: part.mesh_to_pawn,
                     socket_rel,
                     lib,
-                    prefixes: *prefixes,
                     gpu: upload(&w, &mut meshes, &mut images, &mut mats, &mut binds, &feat),
                 });
             }
             Err(e) => warn!("weapon {path}: {e:#}"),
+        }
+    }
+    // Bolts on the crossbow's `Bolt_Socket` (`m_ArrowSocketName`).
+    let mut bolts = Vec::new();
+    if let Some(cw) = weapons.iter().position(|w| w.held == Held::Crossbow) {
+        let cb_sockets = dishonored_assets::characters::mesh_sockets(&content, "Startup", "Crossbows.crossbow_01").unwrap_or_default();
+        let sock = cb_sockets.iter().find(|s| s.name.eq_ignore_ascii_case("Bolt_Socket"));
+        let bone = sock.and_then(|s| weapons[cw].bones.iter().position(|b| b.name.eq_ignore_ascii_case(&s.bone)));
+        match (sock, bone) {
+            (Some(s), Some(bone)) => {
+                let socket_rel = glam::Mat4::from_translation(s.location) * dishonored_assets::util::rotator_matrix(s.rotation[0], s.rotation[1], s.rotation[2]);
+                for (ammo, path) in BOLTS {
+                    match load_model(&content, path, &[("Startup", path)], None, 512) {
+                        Ok(m) => {
+                            let part = &m.parts[0];
+                            bolts.push(BoltGpu { ammo: *ammo, bind: bind_globals(&part.bones), m2p: part.mesh_to_pawn, weapon: cw, bone, socket_rel, gpu: upload(&m, &mut meshes, &mut images, &mut mats, &mut binds, &feat) });
+                        }
+                        Err(e) => warn!("bolt {path}: {e:#}"),
+                    }
+                }
+            }
+            _ => warn!("first-person rig: crossbow_01 has no Bolt_Socket"),
         }
     }
     let set_paths: Vec<String> = SETS.iter().map(|s| format!("{s}.{s}")).collect();
@@ -387,7 +440,7 @@ pub fn load_view_rig(
     info!("first-person rig: {} bones, {} weapons, {} clips", bones.len(), weapons.len(), lib.clips.len());
     let arms_gpu = upload(&arms, &mut meshes, &mut images, &mut mats, &mut binds, &feat);
     let bind_pose = bones.iter().map(|b| (b.rotation, b.translation)).collect();
-    commands.insert_resource(ViewRig { arms: arms_gpu, parents: parents(&bones), bones, bind_pose, m2p, weapons, lib, upper_body, left_arm, cam_bone });
+    commands.insert_resource(ViewRig { arms: arms_gpu, parents: parents(&bones), bones, bind_pose, m2p, weapons, bolts, lib, upper_body, left_arm, cam_bone });
 }
 
 /// The rig, parented to the game camera and drawn in the main view (see `VIEW_SCALE`).
@@ -417,6 +470,14 @@ pub fn spawn_view_rig(
         let joints: Vec<Entity> = wp.bind.iter().enumerate().map(|(i, b)| commands.spawn((Transform::from_matrix(*b), WeaponJoint { weapon: wi, bone: i }, ChildOf(root))).id()).collect();
         for (mesh, mat) in &wp.sections {
             commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), SkinnedMesh { inverse_bindposes: wp.inverse_bindposes.clone(), joints: joints.clone() }, Transform::default(), NoFrustumCulling, bevy::light::NotShadowCaster, ChildOf(wroot)));
+        }
+    }
+    for (bi, b) in rig.bolts.iter().enumerate() {
+        let bp = &b.gpu.parts[0];
+        let broot = commands.spawn((Transform::default(), Visibility::Hidden, BoltMesh(bi), ChildOf(root))).id();
+        let joints: Vec<Entity> = bp.bind.iter().enumerate().map(|(i, m)| commands.spawn((Transform::from_matrix(*m), BoltJoint { bolt: bi, bone: i }, ChildOf(root))).id()).collect();
+        for (mesh, mat) in &bp.sections {
+            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), SkinnedMesh { inverse_bindposes: bp.inverse_bindposes.clone(), joints: joints.clone() }, Transform::default(), NoFrustumCulling, bevy::light::NotShadowCaster, ChildOf(broot)));
         }
     }
 }
@@ -569,6 +630,9 @@ pub struct ViewAnim {
     left_action: u32,
     prev: Option<Prev>,
     weapons: Vec<WeaponAnim>,
+    /// The rig's pawn space (the master root of synced sequences) relative to the game camera,
+    /// unscaled, while the rig is shown.
+    master_local: Option<Mat4>,
 }
 
 /// Attack clips in `SwordState::swing_clip` order (`Attack_Seq` of the melee states
@@ -683,7 +747,8 @@ fn pick<'a>(lib: &ClipLib, candidates: &[&'a str]) -> Option<&'a str> {
 
 /// Full-body state (`FullBodyStatePicker`) and whether it blocks the upper-body and left-arm
 /// pickers (`m_bBlocksChildren`).
-fn full_body(p: &PlayerState, a: &ViewAnim, lib: &ClipLib, mv: &MovementConfig) -> (Play, bool) {
+fn full_body(p: &PlayerState, a: &ViewAnim, lib: &ClipLib, gameplay: &GameplayConfig) -> (Play, bool) {
+    let mv = &gameplay.movement;
     // Choke (`Ply_Sword_Choke_as` masters, by `eChokeState`) and carrying a body
     // (`Ply_Empty_CarryCorpse_as` masters): whole rig.
     let choke = match p.choke.phase {
@@ -731,13 +796,16 @@ fn full_body(p: &PlayerState, a: &ViewAnim, lib: &ClipLib, mv: &MovementConfig) 
         }
         _ => {}
     }
-    // `Mantle` (`DishonoredAnimNodeSeqMantle` per type: travel Z 20 low, 50 medium, 80 high;
-    // sneaking variants), stretched over the simulation's traversal.
+    // `Mantle` (`Ply_Player_Mantle_at`): `DishonoredAnimNodeBlendByMantleType` picks low /
+    // medium / high from the edge height against `m_LowMantleMaxEdgeHeight` (120) and
+    // `m_MediumMantleMaxEdgeHeight` (170) of `pMantleTweaks` (the finder's own classes);
+    // `DisAnimNodeBlendByPlayerSneak` / `...MantleCrouchRequired` take the sneaking sequences.
+    // Stretched over the simulation's traversal.
     if p.mode == MoveMode::Mantling {
-        let dz = p.traversal.to.z - p.traversal.from.z;
-        let h = if dz < 35.0 {
+        let e = p.traversal.edge_height;
+        let h = if e <= mv.mantle.low_max_edge_height {
             "Low"
-        } else if dz < 65.0 {
+        } else if e <= mv.mantle.medium_max_edge_height {
             "Medium"
         } else {
             "High"
@@ -748,6 +816,21 @@ fn full_body(p: &PlayerState, a: &ViewAnim, lib: &ClipLib, mv: &MovementConfig) 
             let len = lib.length(&clip);
             let rate = if p.traversal.duration > 0.0 { (len / p.traversal.duration).clamp(0.5, 2.0) } else { 1.0 };
             return (Play { key: format!("mantle_{h}"), clip, looped: false, rate, blend: BLEND_MANTLE, notifies: true }, true);
+        }
+    }
+    // `Climb` (`Ply_Player_Climb_at`, blocks children, no item prefix): a speed blend between
+    // an empty child (the reference pose) and `Head_Rope_Climb` while moving on the chain.
+    if p.mode == MoveMode::Climbing {
+        if p.velocity.length() > 5.0 && lib.has("Head_Rope_Climb") {
+            return (looping("climb:move", "Head_Rope_Climb", 1.0, BLEND_NAV), true);
+        }
+        return (Play { key: "climb:ref".into(), clip: String::new(), looped: true, rate: 1.0, blend: BLEND_NAV, notifies: false }, true);
+    }
+    // `Nav_Swim` (blocks children, no item prefix): the swimming sequences of the empty-handed
+    // locomotion set (`Empty_SwimIdle`, `Empty_SwimN`; LIKELY, the tree was not dumped).
+    if p.mode == MoveMode::Swimming {
+        if let Some(c) = pick(lib, &[if speed > 20.0 { "Empty_SwimN" } else { "Empty_SwimIdle" }, "Empty_SwimIdle"]) {
+            return (looping(format!("swim:{c}"), c, 1.0, BLEND_NAV), true);
         }
     }
     // Navigation: the air child (`CustomAirIdle`, looping), else `WalkingSpeedBlend`.
@@ -899,40 +982,37 @@ fn sync_group(key: &str) -> Option<&'static str> {
     }
 }
 
-/// The weapon mesh's clip for what its hand plays: the hand's sequence name, or the same
-/// action under the weapon's prefixes, else the weapon's idle.
+/// The weapon mesh's own sequence for what its hand plays. The weapons' sets hold
+/// (Startup): `CorvoGun_as` Equip / FastReload / Fire_Accuracy_1 / Fire_Hammer / Idle;
+/// `Crossbow_as` Equip / Fire / Fire_FastReload / Idle / OutOfAmmo_Idle / RapidReload /
+/// Reload_In / Spyglass_Fire; `PlySword_Anim_as` the sword's equips, unequips, FirstAttack and
+/// `Sword_Ready_Idle`; `Grenade_as` and `SpringRazor_as` only their Idle (`Grenade_at`,
+/// `SpringRazor_at` play nothing else). The weapons' trees pick through weapon action tweaks
+/// that were not dumped; the pairing below is by name (LIKELY).
 fn weapon_clip(w: &WeaponGpu, driver: &Layer, p: &PlayerState) -> Option<String> {
-    if driver.weight <= 0.0 || driver.clip.is_empty() {
-        return None;
-    }
-    let arm = driver.clip.as_str();
-    if w.held == Held::Sword {
-        return w.lib.has(arm).then(|| arm.to_string());
-    }
-    let stem = arm.split_once('_').map(|(_, s)| s).unwrap_or(arm);
-    let bare = stem.strip_prefix("Ready_").unwrap_or(stem);
-    let mut cands: Vec<String> = vec![arm.to_string()];
-    for pre in w.prefixes {
-        cands.push(format!("{pre}_{stem}"));
-        cands.push(format!("{pre}_{bare}"));
-    }
-    cands.push(stem.to_string());
-    cands.push(bare.to_string());
-    let empty = match w.held {
-        Held::Crossbow => p.left.bolts_loaded == 0,
-        Held::Pistol => p.left.pistol_loaded == 0,
-        Held::Sword => false,
-    };
-    for pre in w.prefixes {
-        if empty {
-            cands.push(format!("{pre}_OutOfAmmo_Idle"));
+    let arm = if driver.weight > 0.0 { driver.clip.as_str() } else { "" };
+    let pick = |names: &[&str]| names.iter().find(|n| w.lib.has(n)).map(|n| n.to_string());
+    match w.held {
+        Held::Sword => pick(&[arm, "Sword_Ready_Idle"]),
+        Held::Pistol => match arm {
+            "Pistol_Fire" => pick(&["CorvoGun_Fire_Hammer", "CorvoGun_Idle"]),
+            "Pistol_Fire_Accurate" | "Pistol_FireAccuracy1" => pick(&["CorvoGun_Fire_Accuracy_1", "CorvoGun_Idle"]),
+            "Pistol_FastReload" => pick(&["CorvoGun_FastReload", "CorvoGun_Idle"]),
+            "Guns_Ready_Equip" => pick(&["CorvoGun_Equip", "CorvoGun_Idle"]),
+            _ => pick(&["CorvoGun_Idle"]),
+        },
+        Held::Crossbow => {
+            let idle = if p.left.bolts_loaded == 0 && p.left.item == LeftHand::Crossbow { "Crossbow_OutOfAmmo_Idle" } else { "Crossbow_Idle" };
+            match arm {
+                "Guns_Ready_Equip" => pick(&["Crossbow_Equip", idle]),
+                "Crossbow_Fire" | "Crossbow_Fire_FastReload" | "Crossbow_RapidReload" | "Crossbow_Reload_In" => pick(&[arm, idle]),
+                _ => pick(&[idle, "Crossbow_Idle"]),
+            }
         }
-        cands.push(format!("{pre}_Idle"));
+        Held::Grenade => pick(&["Grenade_Idle"]),
+        Held::SpringRazor => pick(&["SpringRazor_Idle"]),
     }
-    cands.push("Idle".into());
-    cands.into_iter().find(|c| w.lib.has(c))
 }
-
 pub fn animate_view_rig(
     rig: Option<Res<ViewRig>>,
     mut anim: ResMut<ViewAnim>,
@@ -944,6 +1024,8 @@ pub fn animate_view_rig(
     mut joints: Query<(&ViewJoint, &mut Transform), (Without<ViewRoot>, Without<WeaponJoint>)>,
     mut wjoints: Query<(&WeaponJoint, &mut Transform), (Without<ViewRoot>, Without<ViewJoint>)>,
     mut wmeshes: Query<(&WeaponMesh, &mut Visibility), Without<ViewRoot>>,
+    mut bjoints: Query<(&BoltJoint, &mut Transform), (Without<ViewRoot>, Without<ViewJoint>, Without<WeaponJoint>)>,
+    mut bmeshes: Query<(&BoltMesh, &mut Visibility), (Without<ViewRoot>, Without<WeaponMesh>)>,
     mut anim_sounds: Option<ResMut<crate::audio::AnimSounds>>,
     cutscenes: Option<Res<crate::cutscene::Cutscenes>>,
 ) {
@@ -958,6 +1040,7 @@ pub fn animate_view_rig(
         if let Some(m) = view.me.as_ref() {
             anim.prev = Some(Prev::of(m));
         }
+        anim.master_local = None;
         *root_vis = Visibility::Hidden;
         return;
     };
@@ -970,7 +1053,7 @@ pub fn animate_view_rig(
 
     // Pick each layer's state.
     transitions(me, a, lib);
-    let (fb_play, blocks) = full_body(me, a, lib, &gameplay.movement);
+    let (fb_play, blocks) = full_body(me, a, lib, gameplay);
     a.fb.set(&fb_play);
     a.fb.weight = 1.0;
     if blocks {
@@ -1034,7 +1117,7 @@ pub fn animate_view_rig(
         let driver = match w.held {
             Held::Sword if a.ub.weight > 0.5 => &a.ub,
             Held::Sword => &a.fb,
-            Held::Pistol | Held::Crossbow => &a.la,
+            Held::Pistol | Held::Crossbow | Held::Grenade | Held::SpringRazor => &a.la,
         };
         let clip = weapon_clip(w, driver, me);
         let mut pose = w.bind_pose.clone();
@@ -1078,7 +1161,9 @@ pub fn animate_view_rig(
     let v = glam::Mat4::from_cols(-cam.z_axis, cam.y_axis, cam.x_axis, cam.w_axis);
     // Pawn canonical (X fwd, Y right, Z up) in Bevy-converted space -> camera local.
     let a_rot = Mat4::from_quat(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
-    *root_t = Transform::from_matrix(Mat4::from_scale(Vec3::splat(VIEW_SCALE)) * a_rot * to_bevy(v).inverse());
+    let master_local = a_rot * to_bevy(v).inverse();
+    a.master_local = Some(master_local);
+    *root_t = Transform::from_matrix(Mat4::from_scale(Vec3::splat(VIEW_SCALE)) * master_local);
     for (j, mut t) in &mut joints {
         *t = Transform::from_matrix(to_bevy(rig.m2p * globals[j.0]));
     }
@@ -1103,6 +1188,24 @@ pub fn animate_view_rig(
         };
         *t = Transform::from_matrix(to_bevy(m));
     }
+    // The loaded bolt rides the crossbow's `Bolt_Socket` (it leaves at the shot and is out
+    // during the reload).
+    for (bj, mut t) in &mut bjoints {
+        let b = &rig.bolts[bj.bolt];
+        let w = &rig.weapons[b.weapon];
+        let wb = wglobals.get(b.weapon).and_then(|g| g.get(b.bone)).copied().unwrap_or(w.bind[b.bone]);
+        let socket = rig.m2p * globals[w.socket] * w.socket_rel * w.m2p * wb * b.socket_rel;
+        *t = Transform::from_matrix(to_bevy(socket * b.m2p * b.bind[bj.bone]));
+    }
+    for (bm, mut vis) in &mut bmeshes {
+        let b = &rig.bolts[bm.0];
+        let loaded = match b.ammo {
+            LeftHand::Crossbow => me.left.bolts_loaded > 0,
+            _ => true,
+        };
+        let show = me.left.item == b.ammo && loaded && !matches!(me.left.phase, LeftPhase::Recovering | LeftPhase::Reloading) && me.carrying.is_none();
+        *vis = if show { Visibility::Inherited } else { Visibility::Hidden };
+    }
     for (wm, mut vis) in &mut wmeshes {
         // Carrying a body sheathes the sword and lowers the left hand.
         let carrying = me.carrying.is_some() || a.fb.key == "carry_drop";
@@ -1110,8 +1213,126 @@ pub fn animate_view_rig(
             Held::Sword => !carrying,
             Held::Pistol => me.left.item == LeftHand::Pistol && !carrying,
             Held::Crossbow => me.left.item.is_crossbow() && !carrying,
+            Held::Grenade => matches!(me.left.item, LeftHand::Grenade | LeftHand::StickyGrenade) && !carrying,
+            Held::SpringRazor => me.left.item == LeftHand::SpringRazor && !carrying,
         };
         *vis = if show { Visibility::Inherited } else { Visibility::Hidden };
+    }
+}
+
+/// A body left where its choke or carry ended (Dishonored-space root position and yaw), kept
+/// until the simulation moves it.
+#[derive(Clone, Copy, Debug)]
+pub struct BodyAnchor {
+    pub pos: glam::Vec3,
+    pub yaw: f32,
+    sim_pos: glam::Vec3,
+}
+
+/// Bodies drawn in another pawn's frame. Synced sequences (`Generic_Choke_*_Slave`,
+/// `Corpses_CarryCorpse_*_Slave`) are authored at the master's root, so a choked or carried
+/// body is drawn there: for the local first-person master, the rig's own pawn space (whose
+/// `camera_jnt` is the view, so the carried body hangs where the master sequence puts it,
+/// over the shoulder), else the master's body root. A body released from a choke or a carry
+/// stays in that frame (its anchor) while its slave sequence ends and its ragdoll falls.
+#[derive(Resource, Default)]
+pub struct BodyFrames {
+    pub anchors: HashMap<dishonored_sim::state::PlayerId, BodyAnchor>,
+    /// The (level) frame each held body had last frame.
+    held: HashMap<dishonored_sim::state::PlayerId, Transform>,
+}
+
+/// Yaw-only version of a frame (pawn +X is the Bevy +X column; Y up).
+fn level_frame(m: Mat4) -> Transform {
+    let f = m.x_axis.truncate();
+    let yaw = f.z.atan2(f.x);
+    Transform { translation: m.w_axis.truncate(), rotation: Quat::from_rotation_y(-yaw), scale: Vec3::ONE }
+}
+
+fn anchor_of(t: &Transform, sim_pos: glam::Vec3) -> BodyAnchor {
+    let p = t.translation / crate::coords::UU_TO_BEVY;
+    let f = t.rotation * Vec3::X;
+    BodyAnchor { pos: glam::Vec3::new(p.x, p.z, p.y), yaw: f.z.atan2(f.x).to_degrees(), sim_pos }
+}
+
+fn anchor_transform(a: &BodyAnchor) -> Transform {
+    Transform { translation: crate::coords::pos(a.pos), rotation: Quat::from_rotation_y(-a.yaw.to_radians()), scale: Vec3::ONE }
+}
+
+/// Place choked, carried and just-released bodies in their master's frame (after
+/// `players::sync_players`, before the characters are animated).
+pub fn place_held_bodies(
+    anim: Res<ViewAnim>,
+    view: Res<SessionView>,
+    mut frames: ResMut<BodyFrames>,
+    cams: Query<&Transform, (With<GameCamera>, Without<crate::players::PlayerBody>)>,
+    mut bodies: Query<(&crate::players::PlayerBody, &mut Transform), (With<crate::characters::CharacterRoot>, Without<GameCamera>)>,
+) {
+    use dishonored_sim::state::Condition;
+    let all: Vec<&PlayerState> = view.others.iter().chain(view.me.iter()).collect();
+    let me = view.me.as_ref().map(|m| m.id);
+    // The local master's frames: as drawn (following the view) and level.
+    let fp = cams.iter().next().zip(anim.master_local).map(|(cam, ml)| {
+        let level_cam = {
+            let f = cam.rotation * Vec3::NEG_Z;
+            let yaw = (-f.x).atan2(-f.z);
+            Mat4::from_rotation_translation(Quat::from_rotation_y(yaw), cam.translation)
+        };
+        (Transform::from_matrix(cam.to_matrix() * ml), level_frame(level_cam * ml))
+    });
+    let roots: HashMap<u32, Transform> = bodies.iter().map(|(b, t)| (b.0, *t)).collect();
+    // (shown, level) frame of a master.
+    let frame_of = |id: u32| -> Option<(Transform, Transform)> {
+        if Some(id) == me {
+            if let Some(f) = fp {
+                return Some(f);
+            }
+        }
+        roots.get(&id).map(|t| (*t, *t))
+    };
+    let mut live: HashMap<u32, Transform> = HashMap::new();
+    for p in &all {
+        let held = if let Some(c) = p.carried_by {
+            frame_of(c)
+        } else {
+            // In a choke, or playing its Win / Lose slave while the master is in that state.
+            let choker = p.condition_by.and_then(|c| all.iter().find(|q| q.id == c));
+            let in_choke = choker.is_some_and(|c| {
+                p.condition == Condition::BeingChoked || (c.choke.target == Some(p.id) && matches!(c.choke.phase, ChokePhase::Win | ChokePhase::Lose))
+            });
+            if in_choke { choker.and_then(|c| frame_of(c.id)).map(|(_, level)| (level, level)) } else { None }
+        };
+        if let Some((shown, level)) = held {
+            live.insert(p.id, shown);
+            frames.held.insert(p.id, level);
+            frames.anchors.remove(&p.id);
+            continue;
+        }
+        let down = !p.alive || p.condition == Condition::Unconscious;
+        if let Some(level) = frames.held.remove(&p.id) {
+            if down {
+                frames.anchors.insert(p.id, anchor_of(&level, p.position));
+            }
+        }
+        if !down {
+            frames.anchors.remove(&p.id);
+            continue;
+        }
+        if let Some(a) = frames.anchors.get(&p.id).copied() {
+            // The simulation moved the body (lifted elsewhere, pushed): drop the anchor.
+            if (p.position - a.sim_pos).truncate().length() > 8.0 {
+                frames.anchors.remove(&p.id);
+            } else {
+                live.insert(p.id, anchor_transform(&a));
+            }
+        }
+    }
+    frames.held.retain(|id, _| all.iter().any(|p| p.id == *id));
+    frames.anchors.retain(|id, _| all.iter().any(|p| p.id == *id));
+    for (b, mut t) in &mut bodies {
+        if let Some(x) = live.get(&b.0) {
+            *t = *x;
+        }
     }
 }
 

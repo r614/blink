@@ -11,7 +11,7 @@
 //! payload. All integers are little endian. Addresses are 32-bit (the game is a 32-bit process).
 use std::io::{self, Read, Write};
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 pub const PIPE_PREFIX: &str = r"\\.\pipe\dishonored_probe_";
 /// Environment variable through which the launcher hands the session token to the DLL.
 pub const TOKEN_ENV: &str = "DISHONORED_PROBE_TOKEN";
@@ -86,6 +86,98 @@ pub mod op {
     /// u32 n, n * LineQuery -> u32 n, n * LineResult. Runs the engine's own collision check
     /// (`UWorld::SingleLineCheck`, 0x0064E7A0, on `GWorld`) for each query on the game thread.
     pub const LINE_CHECKS: u8 = 27;
+    /// -> u32 world tick, u8 tick hook installed, u8 lockstep, u8 parked, u32 presents.
+    pub const TICK: u8 = 28;
+    /// u8 on (1) / off (0), u32 timeout ms -> u32 world tick (on: the tick it parked at).
+    pub const LOCKSTEP: u8 = 29;
+    /// u32 n, u32 timeout ms -> u32 world tick. Lockstep: release n ticks and park again;
+    /// otherwise wait until n world ticks have run.
+    pub const STEP: u8 = 30;
+    /// u32 n, n * (u32 base, u8 k >= 1, k * u32 offsets, u32 len) -> n * (u8 ok, len bytes).
+    /// Each read follows a pointer chain: every offset but the last is added and dereferenced.
+    pub const READS: u8 = 31;
+    /// u32 struct -> u32 super, u32 size, str name, str class, u32 n, n * FieldInfo.
+    pub const FIELDS: u8 = 32;
+    /// u32 enum -> u32 n, n * str.
+    pub const ENUM_NAMES: u8 = 33;
+    /// u32 max, u32 parm bytes, u32 n, n * str function filters (substrings of `Outer.Name`),
+    /// u32 m, m * str class names (is-a), u32 k, k * u32 function addresses -> u32 functions.
+    pub const EVENT_FILTER: u8 = 34;
+    /// u32 max (0: off) -> (). Records objects that appear with a `Level` outer.
+    pub const SPAWN_WATCH: u8 = 35;
+    /// -> u32 n, n * (u32 tick, u32 object, u32 class).
+    pub const SPAWN_FETCH: u8 = 36;
+    /// u32 object, u32 function, bytes parms -> bytes parms after the call (ProcessEvent through
+    /// the object's vtable, game thread).
+    pub const CALL_FUNC: u8 = 37;
+    /// u32 n, n * u32 objects -> n * str full name ("Class Outer.Name").
+    pub const NAMES_OF: u8 = 38;
+    /// str name -> u32 FName index, u32 number (`Base_N` -> (Base, N + 1) when only the base
+    /// exists). Error when the name is unknown.
+    pub const NAME_INDEX: u8 = 39;
+    /// Start a tick script (the game must be parked in lockstep): u32 ticks, u32 n,
+    /// n * read (as `READS`), u32 m, m * (u32 tick, u8 kind, payload: 0 key = str key, u8
+    /// event; 1 write = u32 addr, bytes; 2 console = str) -> ().
+    pub const SCRIPT_START: u8 = 40;
+    /// u32 timeout ms -> u32 base tick, bytes frames (ticks + 1 of: u32 k, per read u8 ok +
+    /// len bytes), str errors. Waits until the script is done and the game parked again.
+    pub const SCRIPT_WAIT: u8 = 41;
+}
+
+/// One action of a tick script.
+#[derive(Clone, Debug)]
+pub enum ScriptAction {
+    /// Engine key name, pressed (true) or released.
+    Key(String, bool),
+    Write(u32, Vec<u8>),
+    Console(String),
+}
+
+/// One field of a struct's own `Children` chain (`FIELDS`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FieldInfo {
+    pub addr: u32,
+    pub name: String,
+    /// `FloatProperty`, `StructProperty`, `Function`, `Enum`, ...
+    pub class: String,
+    pub offset: u32,
+    /// Property element size; for a function, its native index.
+    pub element_size: u32,
+    /// Property array dimension; for a function, its parameter count.
+    pub array_dim: u32,
+    pub flags: u64,
+    /// Struct / PropertyClass / Enum / Inner property / BitMask; function flags.
+    pub aux: u32,
+    /// ClassProperty MetaClass; for a function `ParmsSize | ReturnValueOffset << 16`.
+    pub aux2: u32,
+}
+
+/// The `FIELDS` answer.
+#[derive(Clone, Debug, Default)]
+pub struct StructInfo {
+    pub addr: u32,
+    pub super_struct: u32,
+    pub size: u32,
+    pub name: String,
+    pub class: String,
+    pub fields: Vec<FieldInfo>,
+}
+
+/// A pointer-chain read (`READS`): start at `base`, add each offset, dereference after every
+/// offset but the last, then read `len` bytes.
+#[derive(Clone, Debug)]
+pub struct ReadPath {
+    pub base: u32,
+    pub offsets: Vec<u32>,
+    pub len: u32,
+}
+
+/// A spawned object seen by the spawn watch.
+#[derive(Clone, Debug)]
+pub struct SpawnRecord {
+    pub tick: u32,
+    pub object: u32,
+    pub class: u32,
 }
 
 /// One `UWorld::SingleLineCheck` (research/dishonored/COLLISION.md): from `start` to `end`,
@@ -392,6 +484,8 @@ impl HookRecord {
 #[derive(Clone, Debug)]
 pub struct EventRecord {
     pub time: f32,
+    /// World tick of the call (the DLL's tick-boundary counter).
+    pub tick: u32,
     pub object: u32,
     pub func: u32,
     pub parms: Vec<u8>,
@@ -649,9 +743,216 @@ impl Client {
         let n = rd.u32()?;
         let mut out = Vec::with_capacity(n as usize);
         for _ in 0..n {
-            out.push(EventRecord { time: rd.f32()?, object: rd.u32()?, func: rd.u32()?, parms: rd.bytes()?.to_vec() });
+            out.push(EventRecord { time: rd.f32()?, tick: rd.u32()?, object: rd.u32()?, func: rd.u32()?, parms: rd.bytes()?.to_vec() });
         }
         Ok(out)
+    }
+
+    /// Trace ProcessEvent calls by function-name substrings (`Outer.Name`), by the object's
+    /// class (is-a, exact class names) and by function address. Returns the number of
+    /// functions selected by name and address. `max` 0 turns the trace off.
+    pub fn event_filter(&mut self, funcs: &[String], classes: &[String], addrs: &[u32], parm_len: u32, max: u32) -> io::Result<u32> {
+        let mut p = Vec::new();
+        put_u32(&mut p, max);
+        put_u32(&mut p, parm_len);
+        put_u32(&mut p, funcs.len() as u32);
+        for f in funcs {
+            put_str(&mut p, f);
+        }
+        put_u32(&mut p, classes.len() as u32);
+        for c in classes {
+            put_str(&mut p, c);
+        }
+        put_u32(&mut p, addrs.len() as u32);
+        for a in addrs {
+            put_u32(&mut p, *a);
+        }
+        Reader::new(&self.request(op::EVENT_FILTER, &p)?).u32()
+    }
+
+    /// (world tick, tick hook installed, lockstep, parked, presents).
+    pub fn tick(&mut self) -> io::Result<(u32, bool, bool, bool, u32)> {
+        let r = self.request(op::TICK, &[])?;
+        let mut rd = Reader::new(&r);
+        Ok((rd.u32()?, rd.u8()? != 0, rd.u8()? != 0, rd.u8()? != 0, rd.u32()?))
+    }
+
+    /// Lockstep on (park the game thread at the next tick boundary) or off. Returns the tick.
+    pub fn lockstep(&mut self, on: bool, timeout_ms: u32) -> io::Result<u32> {
+        let mut p = vec![on as u8];
+        put_u32(&mut p, timeout_ms);
+        Reader::new(&self.request(op::LOCKSTEP, &p)?).u32()
+    }
+
+    /// Run `n` world ticks (lockstep: release and park again). Returns the tick.
+    pub fn step(&mut self, n: u32, timeout_ms: u32) -> io::Result<u32> {
+        let mut p = Vec::new();
+        put_u32(&mut p, n);
+        put_u32(&mut p, timeout_ms);
+        Reader::new(&self.request(op::STEP, &p)?).u32()
+    }
+
+    /// Pointer-chain reads in one request; `None` where unreadable.
+    pub fn reads(&mut self, paths: &[ReadPath]) -> io::Result<Vec<Option<Vec<u8>>>> {
+        let mut p = Vec::new();
+        put_u32(&mut p, paths.len() as u32);
+        for x in paths {
+            put_u32(&mut p, x.base);
+            p.push(x.offsets.len().max(1) as u8);
+            if x.offsets.is_empty() {
+                put_u32(&mut p, 0);
+            }
+            for o in &x.offsets {
+                put_u32(&mut p, *o);
+            }
+            put_u32(&mut p, x.len);
+        }
+        let r = self.request(op::READS, &p)?;
+        let mut rd = Reader::new(&r);
+        let mut out = Vec::with_capacity(paths.len());
+        for x in paths {
+            let ok = rd.u8()? != 0;
+            let b = rd.take(x.len as usize)?;
+            out.push(ok.then(|| b.to_vec()));
+        }
+        Ok(out)
+    }
+
+    /// The own fields of a struct, class or function, with its super and size.
+    pub fn fields(&mut self, st: u32) -> io::Result<StructInfo> {
+        let mut p = Vec::new();
+        put_u32(&mut p, st);
+        let r = self.request(op::FIELDS, &p)?;
+        let mut rd = Reader::new(&r);
+        let mut s = StructInfo { addr: st, super_struct: rd.u32()?, size: rd.u32()?, name: rd.str()?, class: rd.str()?, fields: Vec::new() };
+        let n = rd.u32()?;
+        for _ in 0..n {
+            s.fields.push(FieldInfo {
+                addr: rd.u32()?,
+                name: rd.str()?,
+                class: rd.str()?,
+                offset: rd.u32()?,
+                element_size: rd.u32()?,
+                array_dim: rd.u32()?,
+                flags: rd.u64()?,
+                aux: rd.u32()?,
+                aux2: rd.u32()?,
+            });
+        }
+        Ok(s)
+    }
+
+    pub fn enum_names(&mut self, e: u32) -> io::Result<Vec<String>> {
+        let mut p = Vec::new();
+        put_u32(&mut p, e);
+        let r = self.request(op::ENUM_NAMES, &p)?;
+        let mut rd = Reader::new(&r);
+        let n = rd.u32()?;
+        (0..n).map(|_| rd.str()).collect()
+    }
+
+    pub fn spawn_watch(&mut self, max: u32) -> io::Result<()> {
+        let mut p = Vec::new();
+        put_u32(&mut p, max);
+        self.request(op::SPAWN_WATCH, &p).map(|_| ())
+    }
+
+    pub fn spawn_fetch(&mut self) -> io::Result<Vec<SpawnRecord>> {
+        let r = self.request(op::SPAWN_FETCH, &[])?;
+        let mut rd = Reader::new(&r);
+        let n = rd.u32()?;
+        (0..n).map(|_| Ok(SpawnRecord { tick: rd.u32()?, object: rd.u32()?, class: rd.u32()? })).collect()
+    }
+
+    /// ProcessEvent of a function object on an object with a parameter block (at least the
+    /// function's ParmsSize); returns the block after the call.
+    pub fn call_func(&mut self, obj: u32, func: u32, parms: &[u8]) -> io::Result<Vec<u8>> {
+        let mut p = Vec::new();
+        put_u32(&mut p, obj);
+        put_u32(&mut p, func);
+        p.extend_from_slice(parms);
+        self.request(op::CALL_FUNC, &p)
+    }
+
+    /// Run a tick script (module `op::SCRIPT_START`) and return (base tick, frames: per tick
+    /// k = 0..=ticks the reads, `None` where unreadable, errors).
+    pub fn run_script(&mut self, ticks: u32, reads: &[ReadPath], actions: &[(u32, ScriptAction)], timeout_ms: u32) -> io::Result<(u32, Vec<Vec<Option<Vec<u8>>>>, String)> {
+        let mut p = Vec::new();
+        put_u32(&mut p, ticks);
+        put_u32(&mut p, reads.len() as u32);
+        for x in reads {
+            put_u32(&mut p, x.base);
+            p.push(x.offsets.len().max(1) as u8);
+            if x.offsets.is_empty() {
+                put_u32(&mut p, 0);
+            }
+            for o in &x.offsets {
+                put_u32(&mut p, *o);
+            }
+            put_u32(&mut p, x.len);
+        }
+        put_u32(&mut p, actions.len() as u32);
+        for (t, a) in actions {
+            put_u32(&mut p, *t);
+            match a {
+                ScriptAction::Key(k, down) => {
+                    p.push(0);
+                    put_str(&mut p, k);
+                    p.push(if *down { 0 } else { 1 });
+                }
+                ScriptAction::Write(addr, b) => {
+                    p.push(1);
+                    put_u32(&mut p, *addr);
+                    put_bytes(&mut p, b);
+                }
+                ScriptAction::Console(c) => {
+                    p.push(2);
+                    put_str(&mut p, c);
+                }
+            }
+        }
+        self.request(op::SCRIPT_START, &p)?;
+        let mut w = Vec::new();
+        put_u32(&mut w, timeout_ms);
+        let r = self.request(op::SCRIPT_WAIT, &w)?;
+        let mut rd = Reader::new(&r);
+        let base = rd.u32()?;
+        let frames_b = rd.bytes()?;
+        let errors = rd.str()?;
+        let mut fr = Reader::new(frames_b);
+        let mut frames = Vec::new();
+        while fr.pos < frames_b.len() {
+            let _k = fr.u32()?;
+            let mut row = Vec::with_capacity(reads.len());
+            for x in reads {
+                let ok = fr.u8()? != 0;
+                let b = fr.take(x.len as usize)?;
+                row.push(ok.then(|| b.to_vec()));
+            }
+            frames.push(row);
+        }
+        Ok((base, frames, errors))
+    }
+
+    /// FName (index, number) of a name.
+    pub fn name_index(&mut self, name: &str) -> io::Result<(u32, u32)> {
+        let mut p = Vec::new();
+        put_str(&mut p, name);
+        let r = self.request(op::NAME_INDEX, &p)?;
+        let mut rd = Reader::new(&r);
+        Ok((rd.u32()?, rd.u32()?))
+    }
+
+    /// Full names of many objects in one request.
+    pub fn names_of(&mut self, objs: &[u32]) -> io::Result<Vec<String>> {
+        let mut p = Vec::new();
+        put_u32(&mut p, objs.len() as u32);
+        for o in objs {
+            put_u32(&mut p, *o);
+        }
+        let r = self.request(op::NAMES_OF, &p)?;
+        let mut rd = Reader::new(&r);
+        objs.iter().map(|_| rd.str()).collect()
     }
 
     /// Hold PlayerInput axes (`aBaseY` forward, `aStrafe`, `aTurn`, `aLookUp`) for `frames`

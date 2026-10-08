@@ -7,7 +7,10 @@ description = "Start the original Dishonored.exe suspended, inject dishonored_pr
 
 [dependencies]
 anyhow.workspace = true
+serde_json.workspace = true
 dishonored_probe = { path = "../../crates/dishonored_probe" }
+# Scenario specs, traces and the oracle cache the captures are written into.
+dishonored_oracle.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
