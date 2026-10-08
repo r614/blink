@@ -699,8 +699,13 @@ impl MissionMatch {
         let s = o.spawn;
         let arch = self.look_override.get(&s.id).copied().unwrap_or(s.archetype);
         spawn_npc(&mut self.world, s.id, s.kind, arch, s.position, s.yaw, cfg);
+        // [ai] The pawn tweak's own `Attribute_HealthMax` (civilians: aristocrats 11, ...).
+        let tweak_health = self.crowd.tweak_health_max.get(&o.tweak).copied();
         if let Some(p) = self.world.player_mut(s.id) {
             p.helmet = o.helmet;
+            if let Some(h) = tweak_health.filter(|_| s.kind == PawnKind::Civilian) {
+                p.vitals.health = h;
+            }
             if let Some(c) = o.class {
                 // [ai] The special classes' `Attribute_HealthMax` (tallboys 150, weepers 30,
                 // music-box Overseers 40) and the weepers' plague (`m_bHasPlague`).
@@ -859,6 +864,11 @@ impl MissionMatch {
         // A passive NPC (a training dummy) has no brain: it stands and takes hits.
         if def.passive {
             self.crowd.brains.retain(|x| x.id != s.id);
+            // A pawn without a brain reads as `EAIAwareness` 0, Unaware (0x00B5E250: no brain
+            // -> 0), which the assassination table allows (0x00C09060).
+            if let Some(p) = self.world.player_mut(s.id) {
+                p.ai_awareness = dishonored_sim::state::awareness::UNAWARE;
+            }
             return;
         }
         let mut b = Brain::new(s.id, s.kind, s.position, 0x5EED ^ s.id as u64);
@@ -932,7 +942,7 @@ impl MissionMatch {
                     self.world.players.extend(ls.npcs);
                     self.world.pickups = ls.pickups;
                     let routes = self.setup.routes.get(&self.current_map.to_ascii_lowercase()).cloned().unwrap_or_default();
-                    self.crowd = Crowd { brains: ls.brains, layout: ls.layout, spawns: ls.spawns, ai: self.crowd.ai.clone(), routes, factions: ls.level.factions, player_faction: ls.level.player_faction, tweak_factions: ls.level.tweak_factions, zones: ls.level.zones, overrides: ls.level.overrides, alarms: ls.level.alarms, lights: ls.level.lights, distractors: ls.level.distractors, tweak_distraction_cooldown: ls.level.tweak_distraction_cooldown, ..Default::default() };
+                    self.crowd = Crowd { brains: ls.brains, layout: ls.layout, spawns: ls.spawns, ai: self.crowd.ai.clone(), routes, factions: ls.level.factions, player_faction: ls.level.player_faction, tweak_factions: ls.level.tweak_factions, zones: ls.level.zones, overrides: ls.level.overrides, alarms: ls.level.alarms, lights: ls.level.lights, distractors: ls.level.distractors, tweak_distraction_cooldown: ls.level.tweak_distraction_cooldown, tweak_health_max: ls.level.tweak_health_max, ..Default::default() };
                 }
                 None => self.populate_fresh(cfg),
             }

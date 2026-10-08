@@ -3,8 +3,8 @@
 // (m_fMaxContextRange 275, m_fRayScalePercent 1.25 of the speed factor; no speed bonus standing), on any side
 // (m_fAllowedAngleFromTargetDir 360; the side picks the Front / Left / Right / Back move set, 0x00BBA970), when
 // m_AssassinateOnAwareness allows its EAIAwareness (Unaware, Surprised, Suspicious, Begging; 0x00C09060) and it
-// is not running (0x00C090D0). The dummy is an idle guard with a brain and no faction (Unaware): a Passive
-// pawn has no AI and the port treats it as aware. The expected value follows the decoded rule (UNMEASURED).
+// is not running (0x00C090D0). The dummy is an idle guard with a brain and no faction (Unaware); a Passive
+// pawn (no brain) reads as Unaware too (0x00B5E250). The expected value follows the decoded rule (UNMEASURED).
 (
     name: "combat/melee_assassinate_back_d120",
     system: Combat,

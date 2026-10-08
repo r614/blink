@@ -127,6 +127,16 @@ pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String
             out.tweak_distraction_cooldown.insert(t.clone(), v);
         }
     }
+    // Each pawn tweak's `Attribute_HealthMax` (Normal), the spawned pawn's health.
+    for t in tweaks {
+        if out.tweak_health_max.contains_key(t) {
+            continue;
+        }
+        let a = db.try_resolve(t).and_then(|m| get_obj(&m, "m_pAttributeTweaks[1]").map(str::to_string)).and_then(|p| db.try_resolve(&p));
+        if let Some(v) = a.and_then(|a| get_f32(&a, "m_HealthMax.m_fBaseValue2_Normal")) {
+            out.tweak_health_max.insert(t.clone(), v);
+        }
+    }
     let mut resolver = crate::collision_audit::PropResolver::new(content);
     // The class of each pawn tweak's Combat-slot behaviour (its NPC class).
     for t in tweaks {

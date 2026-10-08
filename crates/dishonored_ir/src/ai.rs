@@ -1200,6 +1200,11 @@ pub struct AiConfig {
     /// like the visual archetypes (`PlayerState::archetype`).
     #[serde(default)]
     pub head_poses: Vec<HeadPose>,
+    /// `Attribute_HealthMax` (Normal) of each built-in visual archetype's pawn tweak
+    /// (`characters::ARCHETYPE_TWEAKS`: party aristocrats 11, the party guard 50, the female
+    /// aristocrat 12), indexed like `PlayerState::archetype`; empty when not loaded.
+    #[serde(default)]
+    pub archetype_health_max: Vec<f32>,
     /// The look-at config the head model reads (`DisTweaks_NPCPawn.m_pComponentLookatConfig`,
     /// `DisLookatConfig.DefaultLookatConfig`).
     #[serde(default)]
@@ -1523,6 +1528,9 @@ pub struct AiLevel {
     /// Pawn tweak path -> its `m_fDistractionCooldownTime` (the pawn's distraction cooldown).
     #[serde(default)]
     pub tweak_distraction_cooldown: BTreeMap<String, f32>,
+    /// Pawn tweak path -> its `Attribute_HealthMax` (Normal, `m_pAttributeTweaks[1]`).
+    #[serde(default)]
+    pub tweak_health_max: BTreeMap<String, f32>,
 }
 
 impl AiLevel {
@@ -2031,6 +2039,7 @@ impl Default for AiConfig {
             anim_magic_lost_target: 0.0,
             locomotion: Vec::new(),
             head_poses: Vec::new(),
+            archetype_health_max: Vec::new(),
             lookat: crate::npc_anim::LookatConfig::default(),
             head_track_torso_ratio: 0.0,
             player_eye: [0.0, 0.0],

@@ -510,6 +510,19 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
         Some(v) => format!("{GUARD_UNS} :: m_fHeadTrackTorsoRatio = {v}"),
         None => "DisTweaks_PawnAttention class default 0 (no shipped attention tweak sets m_fHeadTrackTorsoRatio)".into(),
     });
+    // The built-in archetypes' `Attribute_HealthMax` (their party pawn tweaks are cooked into the
+    // Boyle script packages).
+    {
+        use crate::characters::ARCHETYPE_TWEAKS;
+        let pkgs: Vec<String> = SPECIAL_NPC_PACKAGES.iter().filter(|p| content.has_package(p)).map(|s| s.to_string()).collect();
+        if let Ok(pdb) = TweakDb::load_with(content, &pkgs) {
+            let hs: Vec<Option<f32>> = ARCHETYPE_TWEAKS.iter().map(|t| pawn_health(&pdb, t)).collect();
+            if hs.iter().all(Option::is_some) {
+                out.archetype_health_max = hs.into_iter().flatten().collect();
+                prov.insert("ai.archetype_health_max".into(), format!("{ARCHETYPE_TWEAKS:?} :: m_pAttributeTweaks[1].m_HealthMax (Normal) = {:?}", out.archetype_health_max));
+            }
+        }
+    }
     {
         use crate::characters::{ARCHETYPES, ARCHETYPE_TWEAKS, ARISTO_SETS, FEMALE_LOCO, FEMALE_SETS, GUARD_LOCO, GUARD_SETS};
         const DEFAULT_NPC_BODY: &str = "Twk_Pawn_DefaultNPC.Twk_Pawn_DefaultNPC.DisTweaks_NPCPawn_Body_0";

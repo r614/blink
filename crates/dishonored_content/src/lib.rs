@@ -97,8 +97,9 @@ pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
     // v15x-physics: GameplayConfig.throw, windblast `cast.notify_time` (physics port).
     // v17: physics throw rest / get-up fields on top of v16.
     // v19: special NPC classes (ai.md F6) and AI head poses / look-at (stealth F4 / F5).
+    // v21: the built-in archetypes' HealthMax (ai.archetype_health_max).
     // v20: the explosions' `m_pRadialDamageType` (breakables' immune / instant-break lists).
-    let path = cache_dir().join("gameplay_config.v20.json");
+    let path = cache_dir().join("gameplay_config.v21.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);
@@ -426,7 +427,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     };
     // AI level data: factions, forbidden zones, alarm bells, probe lights, distractors
     // (dishonored_ai).
-    let ai_path = dir.join(format!("{map}.ailevel6.json"));
+    let ai_path = dir.join(format!("{map}.ailevel7.json"));
     let ai_level: dishonored_ir::ai::AiLevel = match std::fs::read_to_string(&ai_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(a) => a,
         None => {

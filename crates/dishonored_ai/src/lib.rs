@@ -626,6 +626,9 @@ pub struct Crowd {
     /// Pawn tweak -> `m_fDistractionCooldownTime`, for spawned NPCs.
     #[serde(default)]
     pub tweak_distraction_cooldown: BTreeMap<String, f32>,
+    /// Pawn tweak -> `Attribute_HealthMax` (Normal), for spawned NPCs.
+    #[serde(default)]
+    pub tweak_health_max: BTreeMap<String, f32>,
 }
 
 /// `DisGlobalManager` alarm cooldown (`DefaultLevel.ini m_fAlarmCooldown`, class default 10).
@@ -1377,6 +1380,7 @@ impl Crowd {
         self.stealth_volumes = level.stealth_volumes.clone();
         self.set_distractors(&level.distractors);
         self.tweak_distraction_cooldown = level.tweak_distraction_cooldown.clone();
+        self.tweak_health_max = level.tweak_health_max.clone();
         self.stealth_lights = level.stealth_lights.clone();
         self.light_volumes = level.light_volumes.clone();
     }
