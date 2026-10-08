@@ -766,7 +766,7 @@ pub fn load_kismet_setup(def: &dishonored_mission::MissionDef, ok: &dishonored_m
             gives.insert(o.id, kind);
         }
     }
-    Ok(dishonored_multiplayer::mission::kismet_host::KismetSetup { db, start_event: ok.start_event.clone(), seed: ok.seed, choices, prompts, gives })
+    Ok(dishonored_multiplayer::mission::kismet_host::KismetSetup { db, start_event: ok.start_event.clone(), seed: ok.seed, choices, prompts, gives, ..Default::default() })
 }
 
 /// [kismet] Mission objectives from the original `DishonoredObjective`s (hidden until the

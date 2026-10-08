@@ -63,6 +63,10 @@ pub struct KismetSetup {
     /// pickup kind.
     #[serde(default)]
     pub gives: BTreeMap<OpId, dishonored_ir::items::PickupKind>,
+    /// `eDisDLC_*` names of the DLC the player owns (`DisSeqCond_IsDLCUnlocked`); none unless the
+    /// setup lists them.
+    #[serde(default)]
+    pub dlc_unlocked: std::collections::BTreeSet<String>,
 }
 
 /// Classes that only present something (camera, HUD, tutorials, saves, statistics, ambient
@@ -330,6 +334,34 @@ pub struct HostState {
     /// [streaming] Sublevels unloaded since they were last in the world (they come back fresh).
     #[serde(default)]
     pub unloaded: BTreeSet<String>,
+    /// `DisSeqAct_AddKey` / `RemoveKey`: the key ring of each player (names, in the order they
+    /// were added; the ring adds without checking for duplicates). Nothing in the port reads the
+    /// ring yet (keyholes and locked doors use the level's own flags).
+    #[serde(default)]
+    pub keys: BTreeMap<PlayerId, Vec<String>>,
+    /// `DisSeqAct_AdrenalineToggle`: `m_bAdrenalineEnabled` as the Kismet last set it, per player
+    /// (players it never touched keep the game's value). Recorded only: the port's adrenaline
+    /// does not read it.
+    #[serde(default)]
+    pub adrenaline: BTreeMap<PlayerId, bool>,
+    /// `DisSeqAct_ToggleChoke`: the choke action's bit (0x20000 of `m_InputEnableMask[7]`) as the
+    /// Kismet last set it, per player. Recorded only: the port's choke takedown does not read it.
+    #[serde(default)]
+    pub choke: BTreeMap<PlayerId, bool>,
+    /// `DisSeqAct_AISetBrainFlags`: the `EDisAIBrainFlags` (without the enum prefix, e.g.
+    /// `Combat_NoPrimaryAttacks`) set on each NPC pawn. Recorded only: the port's brains do not
+    /// read them yet.
+    #[serde(default)]
+    pub brain_flags: BTreeMap<PlayerId, BTreeSet<String>>,
+    /// `DisSeqAct_SetAudioOcclusion` on `DishonoredAudioPortal` actors: actor -> (occlusion for the
+    /// AI, occlusion for the player), each only once the Kismet set it. The port has no audio
+    /// portals to apply them to.
+    #[serde(default)]
+    pub audio_occlusion: BTreeMap<u32, (Option<f32>, Option<f32>)>,
+    /// `SeqAct_SetVelocity` on level actors: the velocity the Kismet gave (pawns take it at once).
+    /// Recorded only: the port has no rigid bodies to move.
+    #[serde(default)]
+    pub velocity: BTreeMap<u32, Vec3>,
     /// The post manager's Kismet slot (`DisSeqAct_UberPostProcess`, `post.rs`).
     #[serde(default)]
     pub post: post::KismetPost,
@@ -756,6 +788,21 @@ impl H<'_> {
         }
         let act = &self.db.actors[a as usize];
         !act.class.contains("Door") && act.props.get("m_bLocked").and_then(|v| v.as_bool()).unwrap_or(false)
+    }
+
+    /// Mean position of the actors among `objs` (the origin when none has one).
+    fn mean_pos(&self, objs: &[Obj]) -> Vec3 {
+        let ps: Vec<Vec3> = objs.iter().filter_map(|o| self.pos_of(o)).collect();
+        if ps.is_empty() { Vec3::ZERO } else { ps.iter().sum::<Vec3>() / ps.len() as f32 }
+    }
+
+    /// The player pawns a `DisSeqAct_PlayerAction` acts on: those of its "Target" link, or the
+    /// first player when nothing is linked (0x00b8e090). Other pawns have no player handler.
+    fn player_targets(&self, cx: &Ctx) -> Vec<PlayerId> {
+        if cx.link_vars("Target").is_empty() {
+            return self.players().into_iter().take(1).collect();
+        }
+        cx.objects("Target").iter().filter_map(|o| self.pawn_of(o)).filter(|p| self.m.humans.contains(p)).collect()
     }
 
     fn players_obj(&self) -> Obj {
@@ -2290,7 +2337,259 @@ impl Host for H<'_> {
                 self.st.vanish.insert(cx.op, v);
                 HostResult::Latent
             }
-            "SeqAct_WaitForLevelsVisible" => {
+            // `SeqAct_GetDistance::Activated` (0x006fb9f0): the distance in unreal units between
+            // the mean position of the actors of "A" and of "B" (a controller counts as its
+            // pawn), written to `Distance`, only when both links hold something. A side with
+            // objects but no actor stands at the origin.
+            "SeqAct_GetDistance" => {
+                let (a, b) = (cx.objects("A"), cx.objects("B"));
+                if !a.is_empty() && !b.is_empty() {
+                    let d = self.mean_pos(&a).distance(self.mean_pos(&b));
+                    cx.set_prop("Distance", Value::Float(d));
+                }
+                HostResult::Done
+            }
+            // `SeqCond_IsAlive::Activated` (0x006fad70): output 0 ("True") when one of the "Players"
+            // objects is a pawn (or a controller's pawn) that is not dead, else output 1. Other
+            // actors do not count.
+            "SeqCond_IsAlive" => {
+                let alive = cx.objects("Players").iter().filter_map(|o| self.pawn_of(o)).any(|p| self.m.world.player(p).is_some_and(|x| x.alive));
+                cx.fire(if alive { 0 } else { 1 });
+                HostResult::Done
+            }
+            // `DisSeqCond_IsPlayerInCombat::Activated` (0x00b8efc0): output 0 ("In Combat") when
+            // `DishonoredPlayerPawn.m_bIsInCombat` (0x00aa2350: bit 3 of +0x8a0) is set, else
+            // output 1. What writes the flag is not decoded; the port answers with the
+            // autosave's combat test (a guard fighting a player, U-340: `MissionMatch::engaged`).
+            "DisSeqCond_IsPlayerInCombat" => {
+                cx.fire(if self.m.engaged.is_empty() { 1 } else { 0 });
+                HostResult::Done
+            }
+            // `DisSeqCond_IsDLCUnlocked::Activated` (0x00b8ee30): output 1 ("Locked") when the
+            // DLC manager reports status 1 for `m_DLCType` (the enum's first value when the op
+            // leaves it out), else output 0 ("Unlocked"). The port has no DLC manager: the DLC
+            // the setup lists (`KismetSetup::dlc_unlocked`) are unlocked, all others locked.
+            "DisSeqCond_IsDLCUnlocked" => {
+                let t = cx.prop_str("m_DLCType");
+                let unlocked = self.setup.dlc_unlocked.contains(if t.is_empty() { "eDisDLC_01" } else { t.as_str() });
+                cx.fire(if unlocked { 0 } else { 1 });
+                HostResult::Done
+            }
+            // `Actor.OnSetVelocity` (script; `Controller.OnSetVelocity` hands a pawn's to it):
+            // `Velocity = Normal(VelocityDir) * Mag` with `Mag = VelocityMag`, or `VSize(VelocityDir)`
+            // when that is not positive, turned by the actor's rotation with
+            // `bVelocityRelativeToActorRotation` (its yaw here).
+            "SeqAct_SetVelocity" => {
+                let dir = match cx.prop("VelocityDir") {
+                    Some(Value::Vector(v)) => Vec3::from(v),
+                    _ => Vec3::ZERO,
+                };
+                let mag = cx.prop_float("VelocityMag");
+                let mag = if mag <= 0.0 { dir.length() } else { mag };
+                let v = dir.normalize_or_zero() * mag;
+                let relative = cx.prop_bool("bVelocityRelativeToActorRotation");
+                for t in cx.objects("Target") {
+                    let yaw = match (&t, self.pawn_of(&t)) {
+                        (_, Some(p)) => self.m.world.player(p).map(|x| x.yaw).unwrap_or(0.0),
+                        (Obj::Actor(a), None) => self.db.actors[*a as usize].yaw_deg(),
+                        _ => 0.0,
+                    };
+                    let v = if relative { glam::Quat::from_rotation_z(yaw.to_radians()) * v } else { v };
+                    if let Some(p) = self.pawn_of(&t) {
+                        if let Some(pl) = self.m.world.player_mut(p) {
+                            pl.velocity = v;
+                        }
+                    } else if let Obj::Actor(a) = t {
+                        self.st.velocity.insert(a, v);
+                    }
+                }
+                HostResult::Done
+            }
+            // `SeqAct_SetLocation::Activated` (0x006fb0b0) on the "Target" actor: a vector on the
+            // "Location" link (else `LocationValue` when `bSetLocation`) is its new location; a
+            // vector on the "Rotation" link (Euler degrees: roll, pitch, yaw; else `RotationValue`
+            // when `bSetRotation`) its new rotation. Pawns take the location and the yaw; the
+            // rotation of a level actor is not applied (the port only turns actors with matinees).
+            "SeqAct_SetLocation" => {
+                let Some(target) = Some(cx.prop_obj("Target")).filter(|t| !t.is_none()) else { return HostResult::Done };
+                let loc = cx.vectors("Location").first().copied().or_else(|| match (cx.prop_bool("bSetLocation"), cx.prop("LocationValue")) {
+                    (true, Some(Value::Vector(v))) => Some(v),
+                    _ => None,
+                });
+                let yaw = cx.vectors("Rotation").first().map(|e| e[2]).or_else(|| match (cx.prop_bool("bSetRotation"), cx.prop("RotationValue")) {
+                    (true, Some(Value::Rotator(r))) => Some(r[1] as f32 * 360.0 / 65536.0),
+                    _ => None,
+                });
+                match (loc, self.pawn_of(&target)) {
+                    (Some(l), _) => self.teleport(&target, Vec3::from(l), yaw),
+                    (None, Some(p)) => {
+                        if let (Some(y), Some(pl)) = (yaw, self.m.world.player_mut(p)) {
+                            pl.yaw = y;
+                        }
+                    }
+                    _ => {}
+                }
+                HostResult::Done
+            }
+            // `SeqAct_GetLocationAndRotation::Activated` (0x006fbf70): "Location" and "Rotation
+            // Vector" (the rotation as Euler degrees: roll, pitch, yaw) of the first "Target" actor,
+            // zero for none. The socket / bone branch (`SocketOrBoneName`) is not taken: the port
+            // keeps no bone transforms of live actors. A pawn's rotation is its yaw.
+            "SeqAct_GetLocationAndRotation" => {
+                let (mut loc, mut rot) = ([0.0f32; 3], [0.0f32; 3]);
+                if let Some(t) = cx.objects("Target").first() {
+                    if let Some(p) = self.pos_of(t) {
+                        loc = p.to_array();
+                    }
+                    rot = match (t, self.pawn_of(t)) {
+                        (_, Some(p)) => [0.0, 0.0, self.m.world.player(p).map(|x| x.yaw).unwrap_or(0.0)],
+                        (Obj::Actor(a), None) => {
+                            let r = self.db.actors[*a as usize].rotation;
+                            [r[2] as f32 * 360.0 / 65536.0, r[0] as f32 * 360.0 / 65536.0, r[1] as f32 * 360.0 / 65536.0]
+                        }
+                        _ => [0.0; 3],
+                    };
+                }
+                cx.set_prop("Location", Value::Vector(loc));
+                cx.set_prop("RotationVector", Value::Vector(rot));
+                HostResult::Done
+            }
+            // `DishonoredPlayerPawn.OnAddPower` / `OnRemovePower` (0x00aa38a0 / 0x00aa3920) ->
+            // `SetPowerLevel(name, level, 0)` (0x00ace270) on the pawn's powers component: the
+            // level index clamped to the power's levels, -1 removing the power (the port's level 0).
+            // Player pawns only; no "Target" means the player.
+            "DisSeqAct_AddPower" | "DisSeqAct_RemovePower" => {
+                let add = class == "DisSeqAct_AddPower";
+                let name = cx.prop_str("m_PowerName");
+                let level = if add { cx.prop_int("m_PowerLevel").clamp(0, 4) as u8 } else { 0 };
+                let Some(idx) = dishonored_sim::state::power::NAMES.iter().position(|n| n.eq_ignore_ascii_case(&name)) else {
+                    self.note(format!("power {name}: not one of the port's powers"));
+                    return HostResult::Done;
+                };
+                for p in self.player_targets(cx) {
+                    if let Some(pl) = self.m.world.player_mut(p) {
+                        dishonored_sim::powers::set_power_level(pl, idx, level, &self.cfg.gameplay);
+                    }
+                    self.note(format!("power {name} of pawn {p}: level {level}"));
+                }
+                HostResult::Done
+            }
+            // `DishonoredPawn.OnModifyAmmo` (0x00b51cc0): for each `m_Ammo` entry, `m_AmmoOp` Add
+            // (`AddAmmo` 0x00c052e0: what fits under the capacity), Set (0x00c05380: the amount,
+            // at most the capacity) or Remove (`RemoveAmmo` 0x00c05260: all or nothing) on the
+            // target pawns' ammo of `m_AmmoType`.
+            "DisSeqAct_ModifyAmmo" => {
+                let op = cx.prop_str("m_AmmoOp");
+                let entries: Vec<(dishonored_ir::items::AmmoType, i32)> = cx
+                    .prop("m_Ammo")
+                    .map(|v| {
+                        v.as_array()
+                            .iter()
+                            .filter_map(|e| {
+                                let t = dishonored_ir::items::AmmoType::from_name(e.field("m_AmmoType")?.as_str()?)?;
+                                Some((t, e.field("m_AmmoAmount").and_then(|x| x.as_int()).unwrap_or(0)))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let pawns = self.target_pawns(cx);
+                for p in pawns {
+                    let Some(pl) = self.m.world.player_mut(p) else { continue };
+                    for (t, n) in &entries {
+                        let n = (*n).clamp(0, u16::MAX as i32) as u16;
+                        match op.as_str() {
+                            "eDisAmmoOp_SetAmmo" => {
+                                let v = n.min(dishonored_sim::inventory::capacity(pl, *t, &self.cfg.gameplay));
+                                match t {
+                                    dishonored_ir::items::AmmoType::Bullet => pl.left.pistol_reserve = v.saturating_sub(pl.left.pistol_loaded as u16),
+                                    dishonored_ir::items::AmmoType::Bolt => pl.left.bolts_reserve = v.saturating_sub(pl.left.bolts_loaded as u16),
+                                    _ => pl.inv.ammo[*t as usize] = v,
+                                }
+                            }
+                            "eDisAmmoOp_RemoveAmmo" => {
+                                dishonored_sim::inventory::remove_ammo(pl, *t, n);
+                            }
+                            _ => {
+                                dishonored_sim::inventory::add_ammo(pl, *t, n, &self.cfg.gameplay);
+                            }
+                        }
+                    }
+                }
+                HostResult::Done
+            }
+            // `DishonoredPlayerPawn.OnAddKey` / `OnRemoveKey` (0x00aa1530 / 0x00aa1560): the key ring
+            // gets an entry for `m_Name` (0x00ac9230; no duplicate check) / loses the first entry of
+            // that name (0x00adbed0).
+            "DisSeqAct_AddKey" | "DisSeqAct_RemoveKey" => {
+                let name = cx.prop_str("m_Name");
+                let add = class == "DisSeqAct_AddKey";
+                for p in self.player_targets(cx) {
+                    let ring = self.st.keys.entry(p).or_default();
+                    if add {
+                        ring.push(name.clone());
+                    } else if let Some(i) = ring.iter().position(|k| *k == name) {
+                        ring.remove(i);
+                    }
+                }
+                HostResult::Done
+            }
+            // `DishonoredPlayerPawn.OnAdrenalineToggle` (0x00aaa100): Enable sets
+            // `m_bAdrenalineEnabled`, Disable clears it, Toggle flips it. `OnToggleChoke`
+            // (0x00ab1bd0) does the same to the choke action's bit of the controller's
+            // `m_InputEnableMask[7]` (0x20000). The state starts enabled.
+            "DisSeqAct_AdrenalineToggle" | "DisSeqAct_ToggleChoke" => {
+                let Some(input) = cx.input().filter(|i| *i < 3) else { return HostResult::Done };
+                for p in self.player_targets(cx) {
+                    let map = if class == "DisSeqAct_AdrenalineToggle" { &mut self.st.adrenaline } else { &mut self.st.choke };
+                    let now = match input {
+                        0 => true,
+                        1 => false,
+                        _ => !map.get(&p).copied().unwrap_or(true),
+                    };
+                    map.insert(p, now);
+                }
+                HostResult::Done
+            }
+            // `DishonoredNPCController.OnAISetBrainFlags` (0x009f5130 -> 0x00b90690): for each of
+            // `m_FlagsToModify` on the target NPCs' brains, input 0 sets it, input 1 clears it,
+            // input 2 flips it; "Value Changed" fires with the automatic outputs.
+            "DisSeqAct_AISetBrainFlags" => {
+                let Some(input) = cx.input().filter(|i| *i < 3) else { return HostResult::Done };
+                let flags: Vec<String> = cx.prop("m_FlagsToModify").map(|v| v.as_array().iter().filter_map(|x| x.as_str().map(|s| s.trim_start_matches("EDisAIBrainFlags_").to_string())).collect()).unwrap_or_default();
+                for p in self.target_pawns(cx) {
+                    let set = self.st.brain_flags.entry(p).or_default();
+                    for f in &flags {
+                        let on = match input {
+                            0 => true,
+                            1 => false,
+                            _ => !set.contains(f),
+                        };
+                        if on {
+                            set.insert(f.clone());
+                        } else {
+                            set.remove(f);
+                        }
+                    }
+                }
+                HostResult::Done
+            }            // `DisSeqAct_SetAudioOcclusion::Activated` (0x00ba1780): on each target that is a
+            // `DishonoredAudioPortal`, the occlusion for the AI (+0x2bc) when `m_bSetHeardByAI` or a
+            // variable is on the "Occlusion For AI" link, and for the player (+0x2c0) likewise,
+            // each clamped to [0, 1].
+            "DisSeqAct_SetAudioOcclusion" => {
+                let ai = (cx.prop_bool("m_bSetHeardByAI") || !cx.link_vars("Occlusion For AI").is_empty()).then(|| cx.prop_float("m_fOcclusion_HeardByAI").clamp(0.0, 1.0));
+                let player = (cx.prop_bool("m_bSetHeardByPlayer") || !cx.link_vars("Occlusion For Player").is_empty()).then(|| cx.prop_float("m_fOcclusion_HeardByPlayer").clamp(0.0, 1.0));
+                for t in cx.objects("Target") {
+                    let Obj::Actor(a) = t else { continue };
+                    if !self.db.is_a(&self.db.actors[a as usize].class, "DishonoredAudioPortal") {
+                        continue;
+                    }
+                    let e = self.st.audio_occlusion.entry(a).or_default();
+                    e.0 = ai.or(e.0);
+                    e.1 = player.or(e.1);
+                }
+                HostResult::Done
+            }            "SeqAct_WaitForLevelsVisible" => {
                 // Every level of a map is loaded and visible with it.
                 HostResult::Done
             }
@@ -3386,5 +3685,393 @@ mod tests {
         // The player turned 50 degrees right since the start: kept to 20 around the target.
         let (y, _) = t(1.0).apply(eye, Vec3::new(0.0, 1000.0, 0.0), (-50.0, 0.0));
         assert!((y - 70.0).abs() < 1e-3);
+    }
+
+    // ----- host ops on hand-built graphs (no retail data) -----
+
+    use dishonored_kismet::testkit::GraphBuilder;
+    use dishonored_sim::state::power;
+
+    fn sim_cfg() -> SimConfig {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/config/gameplay_config.json");
+        SimConfig::from_json(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// A match with one human (pawn 1) running the hand-built graph: its "Start" remote event
+    /// fires, then `ticks` steps of 0.1 s of the interpreter (the game world is not stepped, so
+    /// positions stay where the test put them).
+    struct Rig {
+        m: MissionMatch,
+        run: KismetRun,
+        cfg: SimConfig,
+    }
+
+    impl Rig {
+        fn new(g: GraphBuilder, tweak: impl FnOnce(&mut KismetSetup)) -> Rig {
+            let cfg = sim_cfg();
+            let mut ks = KismetSetup { db: g.db, start_event: "Start".into(), seed: 1, ..Default::default() };
+            tweak(&mut ks);
+            let setup = super::super::MissionSetup { kismet: Some(ks), starts: vec![(Vec3::ZERO, 0.0)], start_map: "T".into(), ..Default::default() };
+            let mut m = MissionMatch::new(setup, &cfg);
+            m.add_player(1, "p", 0, &cfg);
+            let run = m.kismet.take().unwrap();
+            Rig { m, run, cfg }
+        }
+
+        fn play(&mut self, ticks: u32) {
+            let setup = self.run.setup.clone();
+            let db = self.run.k.db.clone();
+            let KismetRun { k, st, .. } = &mut self.run;
+            let mut h = H { m: &mut self.m, st, setup, cfg: &self.cfg, db };
+            k.players = h.m.humans.clone();
+            if !h.st.started {
+                h.st.started = true;
+                let inst = h.players_obj();
+                assert!(k.remote_event(&mut h, "Start", inst) > 0, "the Start event has a listener");
+            }
+            for _ in 0..ticks {
+                k.tick(&mut h, 0.1);
+            }
+        }
+
+        fn ran(&self, op: OpId) -> u32 {
+            self.run.k.coverage.activations.get(&op).copied().unwrap_or(0)
+        }
+
+        fn pawn(&mut self) -> &mut dishonored_sim::state::PlayerState {
+            self.m.world.player_mut(1).unwrap()
+        }
+    }
+
+    /// `Start` -> op (input 0), the player on a `bAllPlayers` variable linked as "Target".
+    fn start_op(g: &mut GraphBuilder, class: &str) -> (OpId, OpId) {
+        let e = g.remote_event("Start");
+        let op = g.op(class);
+        g.inputs(op, &["In"]);
+        g.outputs(op, &["Out"]);
+        g.link(e, 0, op, 0);
+        let me = g.var("SeqVar_Player");
+        g.set(me, "bAllPlayers", Value::Bool(true));
+        g.vars(op, "Target", "Targets", &[me]);
+        (e, op)
+    }
+
+    #[test]
+    fn get_distance_is_between_the_mean_positions() {
+        let mut g = GraphBuilder::new();
+        let e = g.remote_event("Start");
+        let op = g.op("SeqAct_GetDistance");
+        g.inputs(op, &["In"]);
+        g.outputs(op, &["Out"]);
+        g.link(e, 0, op, 0);
+        let me = g.var("SeqVar_Player");
+        g.set(me, "bAllPlayers", Value::Bool(true));
+        let (a1, a2) = (g.actor("Trigger", "A1", [300.0, 400.0, 0.0], 0), g.actor("Trigger", "A2", [300.0, 0.0, 0.0], 0));
+        let (o1, o2) = (g.var("SeqVar_Object"), g.var("SeqVar_Object"));
+        g.set(o1, "ObjValue", Value::Obj(Obj::Actor(a1)));
+        g.set(o2, "ObjValue", Value::Obj(Obj::Actor(a2)));
+        let dist = g.var("SeqVar_Float");
+        g.vars(op, "A", "", &[me]);
+        g.vars(op, "B", "", &[o1, o2]);
+        g.vars(op, "Distance", "Distance", &[dist]);
+        let mut r = Rig::new(g, |_| {});
+        r.pawn().position = Vec3::ZERO;
+        r.play(2);
+        // The mean of (300, 400, 0) and (300, 0, 0) is (300, 200, 0): sqrt(300^2 + 200^2).
+        let d = r.run.k.prop_float(dist, "FloatValue");
+        assert!((d - 360.555).abs() < 0.01, "distance {d}");
+        // Nothing on a side: the distance is left alone.
+        r.run.k.set_prop(o1, "ObjValue", Value::Obj(Obj::None));
+        r.run.k.set_prop(o2, "ObjValue", Value::Obj(Obj::None));
+        r.run.k.set_prop(dist, "FloatValue", Value::Float(7.0));
+        r.run.k.activate_input(op, 0);
+        r.play(1);
+        assert_eq!(r.run.k.prop_float(dist, "FloatValue"), 7.0);
+    }
+
+    #[test]
+    fn is_alive_follows_the_pawn() {
+        for alive in [true, false] {
+            let mut g = GraphBuilder::new();
+            let e = g.remote_event("Start");
+            let c = g.cond("SeqCond_IsAlive");
+            g.inputs(c, &["In"]);
+            g.outputs(c, &["True", "False"]);
+            g.set(c, "bAutoActivateOutputLinks", Value::Bool(false));
+            g.link(e, 0, c, 0);
+            let me = g.var("SeqVar_Player");
+            g.set(me, "bAllPlayers", Value::Bool(true));
+            g.vars(c, "Players", "", &[me]);
+            let (yes, no) = (g.sink(), g.sink());
+            g.link(c, 0, yes, 0);
+            g.link(c, 1, no, 0);
+            let mut r = Rig::new(g, |_| {});
+            r.pawn().alive = alive;
+            r.play(2);
+            assert_eq!((r.ran(yes), r.ran(no)), if alive { (1, 0) } else { (0, 1) });
+        }
+    }
+
+    #[test]
+    fn player_in_combat_is_the_engaged_test() {
+        for engaged in [false, true] {
+            let mut g = GraphBuilder::new();
+            let e = g.remote_event("Start");
+            let c = g.cond("DisSeqCond_IsPlayerInCombat");
+            g.inputs(c, &["In"]);
+            g.outputs(c, &["In Combat", "Not In Combat"]);
+            g.set(c, "bAutoActivateOutputLinks", Value::Bool(false));
+            g.link(e, 0, c, 0);
+            let (yes, no) = (g.sink(), g.sink());
+            g.link(c, 0, yes, 0);
+            g.link(c, 1, no, 0);
+            let mut r = Rig::new(g, |_| {});
+            if engaged {
+                r.m.engaged.insert(2);
+            }
+            r.play(2);
+            assert_eq!((r.ran(yes), r.ran(no)), if engaged { (1, 0) } else { (0, 1) });
+        }
+    }
+
+    #[test]
+    fn dlc_is_unlocked_only_when_the_setup_lists_it() {
+        for (ty, listed, unlocked) in [("eDisDLC_04", true, true), ("eDisDLC_04", false, false), ("", true, false)] {
+            let mut g = GraphBuilder::new();
+            let e = g.remote_event("Start");
+            let c = g.cond("DisSeqCond_IsDLCUnlocked");
+            g.inputs(c, &["In"]);
+            g.outputs(c, &["Unlocked", "Locked"]);
+            g.set(c, "bAutoActivateOutputLinks", Value::Bool(false));
+            if !ty.is_empty() {
+                g.set(c, "m_DLCType", Value::Enum(ty.into()));
+            }
+            g.link(e, 0, c, 0);
+            let (yes, no) = (g.sink(), g.sink());
+            g.link(c, 0, yes, 0);
+            g.link(c, 1, no, 0);
+            let mut r = Rig::new(g, |k| {
+                if listed {
+                    k.dlc_unlocked.insert("eDisDLC_04".into());
+                }
+            });
+            r.play(2);
+            // An op without `m_DLCType` asks about the enum's first value (eDisDLC_01).
+            assert_eq!((r.ran(yes), r.ran(no)), if unlocked { (1, 0) } else { (0, 1) }, "{ty} listed {listed}");
+        }
+    }
+
+    #[test]
+    fn add_and_remove_power_set_the_power_level() {
+        let mut g = GraphBuilder::new();
+        let (_, add) = start_op(&mut g, "DisSeqAct_AddPower");
+        g.set(add, "m_PowerName", Value::Str("Possess".into()));
+        g.set(add, "m_PowerLevel", Value::Int(1));
+        let rem = g.op("DisSeqAct_RemovePower");
+        g.inputs(rem, &["In"]);
+        g.outputs(rem, &["Out"]);
+        g.set(rem, "m_PowerName", Value::Str("Blink".into()));
+        g.link(add, 0, rem, 0);
+        let mut r = Rig::new(g, |_| {});
+        assert_eq!(r.pawn().inv.power_levels[power::POSSESSION], 0, "starts without Possession");
+        assert!(r.pawn().inv.power_levels[power::BLINK] > 0, "starts with Blink");
+        r.play(3);
+        assert_eq!(r.pawn().inv.power_levels[power::POSSESSION], 1);
+        assert_eq!(r.pawn().inv.power_levels[power::BLINK], 0);
+    }
+
+    #[test]
+    fn modify_ammo_adds_sets_and_removes() {
+        use dishonored_ir::items::AmmoType;
+        let entry = |t: &str, n: i32| Value::Struct(String::new(), vec![("m_AmmoType".into(), Value::Enum(t.into())), ("m_AmmoAmount".into(), Value::Int(n))]);
+        let mut g = GraphBuilder::new();
+        let (_, add) = start_op(&mut g, "DisSeqAct_ModifyAmmo");
+        g.set(add, "m_Ammo", Value::Array(vec![entry("eDisAmmoType_Grenade", 2)]));
+        let set = g.op("DisSeqAct_ModifyAmmo");
+        g.inputs(set, &["In"]);
+        g.outputs(set, &["Out"]);
+        g.set(set, "m_AmmoOp", Value::Enum("eDisAmmoOp_SetAmmo".into()));
+        g.set(set, "m_Ammo", Value::Array(vec![entry("eDisAmmoType_SpringRazor", 1)]));
+        let me = g.var("SeqVar_Player");
+        g.set(me, "bAllPlayers", Value::Bool(true));
+        g.vars(set, "Target", "Targets", &[me]);
+        g.link(add, 0, set, 0);
+        let rem = g.op("DisSeqAct_ModifyAmmo");
+        g.inputs(rem, &["In"]);
+        g.outputs(rem, &["Out"]);
+        g.set(rem, "m_AmmoOp", Value::Enum("eDisAmmoOp_RemoveAmmo".into()));
+        g.set(rem, "m_Ammo", Value::Array(vec![entry("eDisAmmoType_Grenade", 1), entry("eDisAmmoType_StickyGrenade", 5)]));
+        g.vars(rem, "Target", "Targets", &[me]);
+        g.link(set, 0, rem, 0);
+        let mut r = Rig::new(g, |_| {});
+        r.pawn().inv.ammo[AmmoType::StickyGrenade as usize] = 3;
+        r.pawn().inv.ammo[AmmoType::SpringRazor as usize] = 0;
+        let cap_razor = dishonored_sim::inventory::capacity(r.pawn(), AmmoType::SpringRazor, &sim_cfg().gameplay);
+        r.play(4);
+        // Add: 2 grenades (when the capacity allows), Remove 1 of them; Set: the razors to 1
+        // (at most their capacity); Remove 5 sticky grenades of 3: all or nothing, so still 3.
+        let gren = r.pawn().inv.ammo[AmmoType::Grenade as usize];
+        let cap_gren = dishonored_sim::inventory::capacity(r.pawn(), AmmoType::Grenade, &sim_cfg().gameplay);
+        assert_eq!(gren, 2.min(cap_gren).saturating_sub(1));
+        assert_eq!(r.pawn().inv.ammo[AmmoType::SpringRazor as usize], 1.min(cap_razor));
+        assert_eq!(r.pawn().inv.ammo[AmmoType::StickyGrenade as usize], 3);
+    }
+
+    #[test]
+    fn keys_join_the_ring_and_leave_by_name() {
+        let mut g = GraphBuilder::new();
+        let (_, a) = start_op(&mut g, "DisSeqAct_AddKey");
+        g.set(a, "m_Name", Value::Str("Sewer Key".into()));
+        let b = g.op("DisSeqAct_AddKey");
+        g.inputs(b, &["In"]);
+        g.outputs(b, &["Out"]);
+        g.set(b, "m_Name", Value::Str("Sewer Key".into()));
+        g.link(a, 0, b, 0);
+        let c = g.op("DisSeqAct_AddKey");
+        g.inputs(c, &["In"]);
+        g.outputs(c, &["Out"]);
+        g.set(c, "m_Name", Value::Str("Gate Key".into()));
+        g.link(b, 0, c, 0);
+        let rem = g.op("DisSeqAct_RemoveKey");
+        g.inputs(rem, &["In"]);
+        g.outputs(rem, &["Out"]);
+        g.set(rem, "m_Name", Value::Str("Sewer Key".into()));
+        g.link(c, 0, rem, 0);
+        let mut r = Rig::new(g, |_| {});
+        r.play(5);
+        // Two entries of the same name (no duplicate check), one removed.
+        assert_eq!(r.run.st.keys.get(&1).cloned().unwrap_or_default(), vec!["Sewer Key".to_string(), "Gate Key".to_string()]);
+    }
+
+    #[test]
+    fn adrenaline_and_choke_switches_enable_disable_toggle() {
+        for class in ["DisSeqAct_AdrenalineToggle", "DisSeqAct_ToggleChoke"] {
+            let mut g = GraphBuilder::new();
+            let e = g.remote_event("Start");
+            let op = g.op(class);
+            g.inputs(op, &["Enable", "Disable", "Toggle"]);
+            g.outputs(op, &["Out"]);
+            g.link(e, 0, op, 1);
+            let mut r = Rig::new(g, |_| {});
+            let read = |r: &Rig| if class == "DisSeqAct_AdrenalineToggle" { r.run.st.adrenaline.get(&1).copied() } else { r.run.st.choke.get(&1).copied() };
+            assert_eq!(read(&r), None);
+            r.play(2);
+            assert_eq!(read(&r), Some(false), "Disable");
+            r.run.k.activate_input(op, 2);
+            r.play(1);
+            assert_eq!(read(&r), Some(true), "Toggle");
+            r.run.k.activate_input(op, 2);
+            r.play(1);
+            assert_eq!(read(&r), Some(false), "Toggle again");
+            r.run.k.activate_input(op, 0);
+            r.play(1);
+            assert_eq!(read(&r), Some(true), "Enable");
+        }
+    }
+
+    #[test]
+    fn brain_flags_enable_disable_toggle_per_flag() {
+        let mut g = GraphBuilder::new();
+        let e = g.remote_event("Start");
+        let op = g.op("DisSeqAct_AISetBrainFlags");
+        g.inputs(op, &["Enable", "Disable", "Toggle"]);
+        g.outputs(op, &["Value Changed"]);
+        g.set(op, "m_FlagsToModify", Value::Array(vec![Value::Name("EDisAIBrainFlags_Combat_NoPrimaryAttacks".into()), Value::Name("EDisAIBrainFlags_Combat_NoRangedAttacks".into())]));
+        g.link(e, 0, op, 0);
+        let me = g.var("SeqVar_Player");
+        g.set(me, "bAllPlayers", Value::Bool(true));
+        g.vars(op, "Target", "Targets", &[me]);
+        let out = g.sink();
+        g.link(op, 0, out, 0);
+        let mut r = Rig::new(g, |_| {});
+        r.play(2);
+        let flags = |r: &Rig| r.run.st.brain_flags.get(&1).cloned().unwrap_or_default().into_iter().collect::<Vec<_>>();
+        assert_eq!(flags(&r), vec!["Combat_NoPrimaryAttacks".to_string(), "Combat_NoRangedAttacks".to_string()]);
+        assert_eq!(r.ran(out), 1, "Value Changed");
+        r.run.k.activate_input(op, 2);
+        r.play(1);
+        assert!(flags(&r).is_empty(), "toggled off");
+        r.run.k.activate_input(op, 2);
+        r.play(1);
+        assert_eq!(flags(&r).len(), 2);
+        r.run.k.activate_input(op, 1);
+        r.play(1);
+        assert!(flags(&r).is_empty(), "disabled");
+    }
+    #[test]
+    fn audio_occlusion_is_clamped_and_only_for_portals() {
+        let mut g = GraphBuilder::new();
+        let e = g.remote_event("Start");
+        let op = g.op("DisSeqAct_SetAudioOcclusion");
+        g.inputs(op, &["In"]);
+        g.outputs(op, &["Out"]);
+        g.link(e, 0, op, 0);
+        let portal = g.actor("DishonoredAudioPortal", "Portal", [0.0; 3], 0);
+        let other = g.actor("Trigger", "Trig", [0.0; 3], 0);
+        let (v1, v2) = (g.var("SeqVar_Object"), g.var("SeqVar_Object"));
+        g.set(v1, "ObjValue", Value::Obj(Obj::Actor(portal)));
+        g.set(v2, "ObjValue", Value::Obj(Obj::Actor(other)));
+        g.vars(op, "Target", "Targets", &[v1, v2]);
+        g.set(op, "m_bSetHeardByAI", Value::Bool(true));
+        g.set(op, "m_fOcclusion_HeardByAI", Value::Float(1.5));
+        g.set(op, "m_fOcclusion_HeardByPlayer", Value::Float(0.2));
+        let mut r = Rig::new(g, |_| {});
+        r.play(2);
+        // The AI value is clamped to 1; the player value is not set (neither flag nor variable).
+        assert_eq!(r.run.st.audio_occlusion.get(&portal), Some(&(Some(1.0), None)));
+        assert!(!r.run.st.audio_occlusion.contains_key(&other));
+    }
+
+    #[test]
+    fn set_velocity_scales_to_the_magnitude_and_turns_with_the_actor() {
+        for (mag, relative, want) in [(500.0, false, Vec3::new(500.0, 0.0, 0.0)), (0.0, false, Vec3::new(300.0, 0.0, 400.0)), (500.0, true, Vec3::new(0.0, 500.0, 0.0))] {
+            let mut g = GraphBuilder::new();
+            let (_, op) = start_op(&mut g, "SeqAct_SetVelocity");
+            g.set(op, "VelocityDir", Value::Vector(if mag > 0.0 { [3.0, 0.0, 0.0] } else { [300.0, 0.0, 400.0] }));
+            g.set(op, "VelocityMag", Value::Float(mag));
+            g.set(op, "bVelocityRelativeToActorRotation", Value::Bool(relative));
+            let mut r = Rig::new(g, |_| {});
+            r.pawn().yaw = 90.0;
+            r.play(2);
+            let v = r.pawn().velocity;
+            assert!((v - want).length() < 0.01, "mag {mag} relative {relative}: {v:?}");
+        }
+    }
+
+    #[test]
+    fn location_round_trips_through_vector_variables() {
+        let mut g = GraphBuilder::new();
+        let e = g.remote_event("Start");
+        let get = g.op("SeqAct_GetLocationAndRotation");
+        g.inputs(get, &["In"]);
+        g.outputs(get, &["Out"]);
+        g.link(e, 0, get, 0);
+        let (loc, rot) = (g.var("SeqVar_Vector"), g.var("SeqVar_Vector"));
+        g.vars(get, "Location", "Location", &[loc]);
+        g.vars(get, "Rotation Vector", "RotationVector", &[rot]);
+        let a = g.actor("Trigger", "Moved", [10.0, 20.0, 30.0], 16384);
+        let who = g.var("SeqVar_Object");
+        g.set(who, "ObjValue", Value::Obj(Obj::Actor(a)));
+        g.vars(get, "Target", "Targets", &[who]);
+        // Then the player is put at the read location and yaw.
+        let set = g.op("SeqAct_SetLocation");
+        g.inputs(set, &["In"]);
+        g.outputs(set, &["Out"]);
+        g.set(set, "bSetLocation", Value::Bool(true));
+        g.set(set, "bSetRotation", Value::Bool(true));
+        g.vars(set, "Location", "", &[loc]);
+        g.vars(set, "Rotation", "", &[rot]);
+        let me = g.var("SeqVar_Player");
+        g.set(me, "bAllPlayers", Value::Bool(true));
+        g.vars(set, "Target", "Target", &[me]);
+        g.link(get, 0, set, 0);
+        let mut r = Rig::new(g, |_| {});
+        r.play(3);
+        assert_eq!(r.run.k.var_value(loc), Value::Vector([10.0, 20.0, 30.0]));
+        // Euler degrees (roll, pitch, yaw): the actor's yaw 16384 of 65536 is 90 degrees.
+        assert_eq!(r.run.k.var_value(rot), Value::Vector([0.0, 0.0, 90.0]));
+        let p = r.pawn().clone();
+        assert!((p.position.x - 10.0).abs() < 1e-3 && (p.position.y - 20.0).abs() < 1e-3, "{:?}", p.position);
+        assert!((p.yaw - 90.0).abs() < 1e-3);
     }
 }
