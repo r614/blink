@@ -76,6 +76,14 @@ pub struct AttentionConfig {
     /// NPC is this close to the proxy while the target is farther from it.
     #[serde(default = "min_range_unsighted")]
     pub min_range_unsighted_busted_proxy: f32,
+    /// `m_IncreaseForMagic` (+0x180): the change a magic witness that is not Busted on the caster
+    /// gets toward it (reason Magic, 0x00b41190).
+    #[serde(default = "magic_increase")]
+    pub magic: AttentionIncrease,
+}
+
+fn magic_increase() -> AttentionIncrease {
+    AttentionIncrease { amount: 0.1, to_level: 1 }
 }
 
 fn yes() -> bool {
@@ -342,11 +350,28 @@ pub struct DodgeConfig {
     /// `DisGlobalCombatManager.m_fInhibitionTimeSideStep` / `BackStep`.
     pub side_step_inhibition: f32,
     pub back_step_inhibition: f32,
+    /// `m_fAggressionDeltaPerDamage`: added to `m_fAggression` (clamped to [0, 1]) by the
+    /// `EAIStimID_AttackedByEnemy` handler (0x00b3e070).
+    pub aggression_delta_per_damage: f32,
+    /// `m_fAggressionRegenRate` per second (0x00b39e50, every tick of the process).
+    pub aggression_regen_rate: f32,
+    /// `m_fCooldownFactorAtMinAggression`: a chosen attack's cooldown is scaled by
+    /// `(1 - aggression) * factor + 1` (0x00b3deb0).
+    pub cooldown_factor_at_min_aggression: f32,
+    /// `m_fStalemateAllowanceTime`, `m_fBlockedAttackSensitivity` (kept for the formation and
+    /// block-breaker rules, which are not ported).
+    pub stalemate_allowance: f32,
+    pub blocked_attack_sensitivity: f32,
 }
 
 impl Default for DodgeConfig {
     fn default() -> Self {
         DodgeConfig {
+            aggression_delta_per_damage: -0.5,
+            aggression_regen_rate: 0.1,
+            cooldown_factor_at_min_aggression: 1.0,
+            stalemate_allowance: 3.0,
+            blocked_attack_sensitivity: 7.0,
             attacks_per_flurry: [2, 3],
             stamina_recovery: [4.0, 5.0],
             time_for_threat_side_step: [2.0, 3.0],
@@ -554,6 +579,56 @@ pub struct SearchConfig {
     pub reached_broadcast_range: f32,
     /// `TwkBehavior_StationarySearch_Default` duration (civilians).
     pub stationary_duration: [f32; 2],
+    /// `m_fInvestigateStareAtUnreachableRadius` / `m_fInvestigateStareAtUnreachableMaxTime_s`
+    /// (`DisBehaviorSearch` StareAtUnreachable, 0x00af4bd0 / 0x00af4c40 / 0x00af4440).
+    #[serde(default = "stare_radius")]
+    pub stare_radius: f32,
+    #[serde(default = "stare_time")]
+    pub stare_max_time: f32,
+    /// `m_fSearchAnimCooldown`: set when the search animation (GenericAction) ends (0x00af4ab0).
+    #[serde(default = "anim_cooldown")]
+    pub anim_cooldown: f32,
+    /// `DisTweaks_AISubState_Investigate`: `m_PathingFailRetryCount`,
+    /// `m_fPathingFailDistanceScale`, `m_fPathingFailPointerSearchRange_Horiz/Up/Down`
+    /// (the PathingFail handler 0x00b33850).
+    #[serde(default = "one_u32")]
+    pub pathing_fail_retries: u32,
+    #[serde(default = "one_f32")]
+    pub pathing_fail_scale: f32,
+    #[serde(default = "pathing_fail_range")]
+    pub pathing_fail_range: [f32; 3],
+    /// `DisTweaks_AISubState_TrackTarget.m_fProximityThreshold` (a wander step is reached).
+    #[serde(default = "track_proximity")]
+    pub track_proximity: f32,
+    /// Lengths (s) of the search GenericAction animation groups of the elite guard
+    /// (`DisNPCAnimDefinitions_EliteGuard` SearchLostTarget / CorpseCheck with the sword prefix);
+    /// 0 when the animation sets were not loaded.
+    #[serde(default)]
+    pub anim_lost_target: f32,
+    #[serde(default)]
+    pub anim_corpse_check: f32,
+}
+
+fn stare_radius() -> f32 {
+    500.0
+}
+fn stare_time() -> f32 {
+    5.0
+}
+fn anim_cooldown() -> f32 {
+    10.0
+}
+fn one_u32() -> u32 {
+    1
+}
+fn one_f32() -> f32 {
+    1.0
+}
+fn pathing_fail_range() -> [f32; 3] {
+    [500.0, 25.0, 500.0]
+}
+fn track_proximity() -> f32 {
+    150.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -659,7 +734,23 @@ pub struct AiConfig {
     pub rats: RatSwarmConfig,
     #[serde(default)]
     pub devouring_swarm: RatSwarmConfig,
+    /// `DishonoredGlobalAIManager.m_MagicReactionDelay`: the delay of `EAIStimID_WitnessMagic`
+    /// (its stimulus class's delay getter 0x00b016e0 -> 0x00c47840).
+    #[serde(default = "magic_delay")]
+    pub magic_reaction_delay: [f32; 2],
+    /// Length (s) of the elite guard's MagicLostTarget animation (`Sword_Magic_OutOfSight`),
+    /// the GenericAction of `DisBehaviorMagicResponse` when the caster disappeared; 0 unloaded.
+    #[serde(default)]
+    pub anim_magic_lost_target: f32,
+    /// NPC locomotion configs (`ArkComponentLocomotionConfig`): the authored loop speeds and
+    /// stance modifiers NPC moves use. Empty: NPCs move at the player's speeds.
+    #[serde(default)]
+    pub locomotion: Vec<crate::npc_anim::LocoConfig>,
     pub provenance: BTreeMap<String, String>,
+}
+
+fn magic_delay() -> [f32; 2] {
+    [0.2, 0.3]
 }
 
 fn group_distance() -> f32 {
@@ -983,6 +1074,7 @@ impl AttentionConfig {
             can_bust: guard_can_bust(),
             seeing_scalar_dead_npc: 10.0,
             min_range_unsighted_busted_proxy: 250.0,
+            magic: inc(0.1, 1),
         }
     }
 
@@ -1021,6 +1113,7 @@ impl AttentionConfig {
             ally_combat_target: inc(1.0, 3),
             ally_panic_target: inc(0.0, 2),
             ally_search_target: inc(0.0, 2),
+            magic: inc(0.1, 4),
             // Thresholds are its own (fallback skip), so their variance is the struct default 0.
             stopping_variance: [0.0; 4],
             ..Self::guard_unsuspecting()
@@ -1067,6 +1160,15 @@ impl Default for AiConfig {
                 proximity: 250.0,
                 reached_broadcast_range: 2000.0,
                 stationary_duration: [2.0, 3.0],
+                stare_radius: 500.0,
+                stare_max_time: 5.0,
+                anim_cooldown: 10.0,
+                pathing_fail_retries: 1,
+                pathing_fail_scale: 1.0,
+                pathing_fail_range: [500.0, 25.0, 500.0],
+                track_proximity: 150.0,
+                anim_lost_target: 0.0,
+                anim_corpse_check: 0.0,
             },
             panic: PanicConfig { cower_distance: 350.0, flee_point_claim_radius: 500.0, flee_interception_distance: 300.0, free_flight_time: 2.0, forbidden_angle_deg: 50.0, forbidden_radius: 500.0 },
             combat: CombatAiConfig {
@@ -1098,6 +1200,9 @@ impl Default for AiConfig {
             visual_detection_ratio_near: 0.3,
             rats: RatSwarmConfig::default(),
             devouring_swarm: RatSwarmConfig { swarm_type: 3, ..RatSwarmConfig::default() },
+            magic_reaction_delay: [0.2, 0.3],
+            anim_magic_lost_target: 0.0,
+            locomotion: Vec::new(),
             provenance: BTreeMap::new(),
         }
     }

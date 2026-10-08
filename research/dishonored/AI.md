@@ -668,7 +668,7 @@ Civilian (no behaviour change: only Guard is read). Factions still come from the
 |---|---|---|
 | Idle / Soiree / Patrol / Guard (routine) | Idle, Wander, WalkToPoint, GroupIdle, Patrol, Alert | `DishonoredRoute`s; `m_fGuardDuration` waits |
 | Notice (TurnToFace) | Notice | stop and face the proxy |
-| React / reaction delay | React | `m_ReactionDelay` 0.18-0.30 s before every escalation |
+| (none: the attention stimuli have no delay, systems/ai.md §1.4a) | React (unused) | `m_ReactionDelay` 0.18-0.30 s belongs to SearchRequest / Help |
 | Search: Investigate sub-state | Investigate | run for Danger/Help/Alarm (`m_SearchFromNoiseTweaks[4..7].m_bShouldRun`), proximity 250, wait 0.5-1 s on arrival (`m_fCancelInvestigateWaitTime*`) |
 | Search crumbs | Search | `DishonoredSearchCrumbsComponent`: 25 crumbs, heartbeat 0.8 s, wander 500-1000 uu within +-60 deg; ends when attention drops below the Investigate stop |
 | StationarySearch (civilians) | Investigate (in place) | 2-3 s |
