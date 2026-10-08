@@ -40,6 +40,30 @@ fn contact_particles_are_all_decoded() {
     assert!(sword.contains(".Blood."), "sword x body: {sword}");
 }
 
+/// The contact system's `DisContactSub_Decal`s: thirteen pairs, five materials in all (the
+/// importer's `GAMEPLAY_DECAL_MATERIALS`); only the subs with `m_Materials` fire (bullet and
+/// arrow impacts on `Environment` are the ones the sim can strike).
+#[test]
+fn contact_decals_are_decoded_and_their_materials_imported() {
+    use dishonored_assets::particle_material::GAMEPLAY_DECAL_MATERIALS;
+    let Ok(content) = dishonored_assets::Content::locate() else {
+        eprintln!("Dishonored install not found; skipping");
+        return;
+    };
+    let game = content.package("DishonoredGame").unwrap();
+    let cs = dishonored_audio::contact::ContactSystem::load(&game, &[]).expect("contact system");
+    assert_eq!(cs.decals().count(), 13);
+    let mut missing: Vec<String> = cs.decals().flat_map(|(_, _, d)| d.materials.iter().chain(d.material.iter()).cloned()).filter(|m| !GAMEPLAY_DECAL_MATERIALS.iter().any(|g| g.eq_ignore_ascii_case(m))).collect();
+    missing.sort();
+    missing.dedup();
+    assert!(missing.is_empty(), "contact decal materials not in GAMEPLAY_DECAL_MATERIALS: {missing:?}");
+    let d = cs.decal("DisContactType_Bullet", "DisContactType_Environment").expect("bullet x environment decal");
+    assert!(d.fires(None));
+    assert_eq!((d.max_width, d.max_height, d.lifetime), (8.0, 8.0, 10.0));
+    let blood = cs.decal("DisContactType_Corpse", "DisContactType_Environment").expect("corpse x environment decal");
+    assert!(blood.fires(Some(800.0)) && !blood.fires(Some(700.0)), "blood needs 750 uu/s");
+}
+
 #[test]
 fn codebooks_come_from_the_executable() {
     let Some(root) = install() else {

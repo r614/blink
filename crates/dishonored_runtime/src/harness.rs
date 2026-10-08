@@ -132,6 +132,8 @@ pub struct ShotQueue {
     pub pending: Vec<PathBuf>,
     pub quit_in: Option<u32>,
     pub frames_since_last_shot: u32,
+    /// Screenshots requested and not yet on disk (inspect mode waits for them before quitting).
+    pub in_flight: Vec<PathBuf>,
 }
 
 #[derive(Resource, Default)]
@@ -311,19 +313,30 @@ pub fn inspect_script(
     mut cam: ResMut<CameraRequest>,
     mut exit: MessageWriter<AppExit>,
     mut prof: Option<ResMut<crate::profile::Profile>>,
+    warm: Option<Res<crate::warmup::Warmup>>,
 ) {
+    // The script starts once the pipeline warm-up is over: frames during it are spent
+    // compiling, and a screenshot then could not be read back before the quit.
+    if warm.as_ref().is_some_and(|w| !w.done()) {
+        return;
+    }
     if let Some(p) = shots.pending.first().cloned() {
         shots.pending.remove(0);
         if let Some(d) = p.parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(p));
+        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(p.clone()));
+        shots.in_flight.push(p);
         shots.frames_since_last_shot = 0;
         return;
     }
     shots.frames_since_last_shot += 1;
+    shots.in_flight.retain(|p| !p.exists());
+    let written = shots.in_flight.is_empty();
     if let Some(n) = shots.quit_in.as_mut() {
-        if *n == 0 {
+        // Quit once the screenshots are written (readback can lag while pipelines compile),
+        // or after the cap.
+        if *n == 0 || (written && *n < 570) {
             exit.write(AppExit::Success);
         } else {
             *n -= 1;
@@ -356,7 +369,7 @@ pub fn inspect_script(
         Step::Dump { .. } | Step::Teleport { .. } | Step::View { .. } | Step::Hud { .. } => {}
         Step::Quit { .. } => {
             runner.done = true;
-            shots.quit_in = Some(30);
+            shots.quit_in = Some(600);
         }
     }
 }

@@ -48,7 +48,7 @@ pub struct FxLibrary {
     pub systems: HashMap<String, FxSystem>,
 }
 
-const FX_CACHE_VERSION: u32 = 1;
+const FX_CACHE_VERSION: u32 = 2;
 
 impl FxLibrary {
     /// Decode `GAMEPLAY_PARTICLES` through the level importer (as `level.rs` passes them in
@@ -69,6 +69,7 @@ impl FxLibrary {
             other_actors: false,
             particles: true,
             extra_particles: GAMEPLAY_PARTICLES.iter().map(|s| s.to_string()).collect(),
+            extra_materials: Vec::new(),
             lightmap_cache: None,
         };
         let (map, _) = dishonored_assets::level::import_level(&content, "oracle_fx", &[], &opts)?;
@@ -218,6 +219,16 @@ impl Presenter {
                     let who = nearest(players, from);
                     self.start(path, facing(from, to - from), None, who, &mut out);
                 }
+                // A gameplay decal (`DisContactSub_Decal`): recorded, there is nothing to draw.
+                FxRequest::Decal { material, at, normal, width, height, lifetime, .. } => {
+                    let who = nearest(players, at);
+                    out.push(PresentEvent {
+                        kind: "Decal",
+                        object: who,
+                        name: material,
+                        detail: format!("at={:.0},{:.0},{:.0} normal={:.2},{:.2},{:.2} size={width:.0}x{height:.0} life={lifetime:.0}", at.x, at.y, at.z, normal.x, normal.y, normal.z),
+                    });
+                }
                 // A trail whose projectile ended in its launch tick: started, then deactivated
                 // before its first update (`FxInstance::stop`); it ends with its particles.
                 FxRequest::EndedTrail { path, xf } => {
@@ -299,8 +310,9 @@ impl Presenter {
             let xf = l.transform;
             let mut rnd = || next_rand(rng);
             for (em, sim) in sys.system.emitters.iter().zip(l.sims.iter_mut()) {
-                step(em, sim, &xf, dt, &mut rnd, em.collision.as_ref().map(|_| ray_fn));
+                step(em, sim, &xf, dt, &mut rnd, (em.collision.is_some() || em.decal.is_some()).then_some(ray_fn));
             }
+            dispatch_events(&sys.system.emitters, &mut l.sims, &xf, &mut rnd);
             if l.one_shot && one_shot_finished(&l.sims) {
                 ended.push((l.inst, l.path.clone()));
                 false

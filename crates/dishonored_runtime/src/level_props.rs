@@ -29,12 +29,14 @@ use std::sync::Arc;
 pub struct PendingProps {
     level: String,
     props: Vec<SkeletalProp>,
+    /// The map's Kismet-streamed sublevels: a prop of one is tagged with its package.
+    streamed: Vec<String>,
 }
 
 /// Queue a level's props (called when its geometry is spawned).
 pub fn queue(level: &str, map: &dishonored_ir::DishonoredMap, commands: &mut Commands) {
     if !map.skeletal_props.is_empty() {
-        commands.spawn(PendingProps { level: level.to_string(), props: map.skeletal_props.clone() });
+        commands.spawn(PendingProps { level: level.to_string(), props: map.skeletal_props.clone(), streamed: map.streamed_levels.clone() });
     }
 }
 
@@ -160,6 +162,10 @@ pub fn spawn_props(
                     LevelProp { prop: prop.clone(), model: key.clone(), shown: prop.door.as_ref().map(|d| d.initial).unwrap_or(0), playing: None, posed: None, clock: 0.0 },
                 ))
                 .id();
+            // A prop of a Kismet-streamed sublevel leaves with it (level streaming).
+            if let Some(tag) = crate::level::streamed_tag(&p.streamed, crate::level::source_package(&prop.actor)) {
+                commands.entity(root).insert(tag);
+            }
             for (pi, part) in gpu.parts.iter().enumerate() {
                 let js: Vec<Entity> = part.bind.iter().enumerate().map(|(bi, bm)| commands.spawn((Transform::from_matrix(*bm), Joint { part: pi, bone: bi }, ChildOf(root))).id()).collect();
                 for (si, (mesh, mat)) in part.sections.iter().enumerate() {

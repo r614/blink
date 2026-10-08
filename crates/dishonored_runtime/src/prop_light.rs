@@ -59,11 +59,9 @@ fn vector(p: &MaterialParams, name: &str) -> Option<[f32; 4]> {
     p.vectors.iter().find(|(n, _)| n.trim().eq_ignore_ascii_case(name)).map(|v| v.1)
 }
 
-/// The extension for one material of a prop with light environment `env`; `unit` converts UE3
-/// light to Bevy units (`map_render::light_unit`).
-pub fn prop_light(env: &LightEnvironment, p: Option<&MaterialParams>, textures: &[Handle<Image>], unit: f32) -> PropLight {
-    let dir = crate::coords::dir(env.direction).normalize_or_zero();
-    let c = |v: [f32; 3]| Vec4::new(v[0] * unit, v[1] * unit, v[2] * unit, 1.0);
+/// The specular terms of a material as the light environment's base pass reads them: (spec,
+/// spec_color, spec_mask) uniforms and the specular texture.
+pub(crate) fn specular_terms(p: Option<&MaterialParams>, textures: &[Handle<Image>]) -> (Vec4, Vec4, Vec4, Option<Handle<Image>>) {
     let specular = p.and_then(|p| p.specular).filter(|_| p.is_some_and(|p| p.switch("S_Enable_Specular") != Some(false))).and_then(|t| textures.get(t)).cloned();
     let sp = p.and_then(|p| scalar(p, "SP_Specular_Power")).unwrap_or(15.0);
     // `S_Enable_Specular_color` multiplies by the colour (rgb x a, the Arkane colour convention).
@@ -77,16 +75,17 @@ pub fn prop_light(env: &LightEnvironment, p: Option<&MaterialParams>, textures: 
         }
         None => Vec4::new(1.0, 1.0, 1.0, 0.0),
     };
+    (Vec4::new(sp, if specular.is_some() { 1.0 } else { 0.0 }, if channel.is_some() { 1.0 } else { 0.0 }, 0.0), sc, mask, specular)
+}
+
+/// The extension for one material of a prop with light environment `env`; `unit` converts UE3
+/// light to Bevy units (`map_render::light_unit`).
+pub fn prop_light(env: &LightEnvironment, p: Option<&MaterialParams>, textures: &[Handle<Image>], unit: f32) -> PropLight {
+    let dir = crate::coords::dir(env.direction).normalize_or_zero();
+    let c = |v: [f32; 3]| Vec4::new(v[0] * unit, v[1] * unit, v[2] * unit, 1.0);
+    let (spec, spec_color, spec_mask, specular) = specular_terms(p, textures);
     PropLight {
-        params: PropLightUniform {
-            direction: dir.extend(0.0),
-            color: c(env.color),
-            upper_sky: c(env.upper_sky),
-            lower_sky: c(env.lower_sky),
-            spec: Vec4::new(sp, if specular.is_some() { 1.0 } else { 0.0 }, if channel.is_some() { 1.0 } else { 0.0 }, 0.0),
-            spec_color: sc,
-            spec_mask: mask,
-        },
+        params: PropLightUniform { direction: dir.extend(0.0), color: c(env.color), upper_sky: c(env.upper_sky), lower_sky: c(env.lower_sky), spec, spec_color, spec_mask },
         specular,
     }
 }
