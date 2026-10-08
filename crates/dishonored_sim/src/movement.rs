@@ -430,13 +430,35 @@ pub(crate) fn start_swimming(p: &mut PlayerState, events: &mut Vec<SimEvent>) {
     events.push(SimEvent::Swim { id: p.id, entered: true });
 }
 
-/// Linear traversal used by mantle and Blink. Returns true when finished.
+/// The mantle's move: up the face to the destination's height, then over the edge onto it (the
+/// original's mantle animations pull up, then step forward; their root motion and timings are
+/// not decoded, U-019). Time is shared out by the length of the two legs. A straight line from
+/// the foot of the face to the top cut through the ledge's corner, and the camera went through
+/// the wall on the way up (high ledges: the eye crossed the face below the top).
+/// Returns true when finished.
 pub fn advance_traversal(p: &mut PlayerState, dt: f32) -> bool {
     let t = &mut p.traversal;
     t.elapsed += dt;
     let a = if t.duration <= 0.0 { 1.0 } else { (t.elapsed / t.duration).min(1.0) };
-    p.position = t.from.lerp(t.to, a);
+    p.position = mantle_path(t.from, t.to, a);
     a >= 1.0
+}
+
+/// Point at fraction `a` (0..1) of the mantle's two-leg path from `from` to `to`.
+pub fn mantle_path(from: Vec3, to: Vec3, a: f32) -> Vec3 {
+    let up = (to.z - from.z).max(0.0);
+    let across = (to - from).truncate().length();
+    let total = up + across;
+    if total <= 1e-3 || up <= 1e-3 {
+        return from.lerp(to, a);
+    }
+    let corner = Vec3::new(from.x, from.y, to.z);
+    let split = up / total;
+    if a <= split {
+        from.lerp(corner, a / split)
+    } else {
+        corner.lerp(to, (a - split) / (1.0 - split))
+    }
 }
 
 /// Slide start (`StatePlayerMasterSlide` enter, 0x00A67FA0): the slide eases the
@@ -1047,6 +1069,18 @@ pub fn try_mantle_from(p: &mut PlayerState, fwd: Vec3, min_edge: f32, ctx: &Move
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mantle_rises_before_it_goes_over() {
+        let (from, to) = (Vec3::new(0.0, 0.0, 0.0), Vec3::new(100.0, 0.0, 200.0));
+        // Two thirds of the time up the face, then across.
+        let mid = mantle_path(from, to, 0.5);
+        assert!(mid.x.abs() < 1e-4 && (mid.z - 150.0).abs() < 1e-3, "{mid}");
+        let late = mantle_path(from, to, 5.0 / 6.0);
+        assert!((late.z - 200.0).abs() < 1e-3 && (late.x - 50.0).abs() < 1e-3, "{late}");
+        assert_eq!(mantle_path(from, to, 1.0), to);
+        assert_eq!(mantle_path(from, to, 0.0), from);
+    }
 
     #[test]
     fn braking_matches_the_substep_rule() {

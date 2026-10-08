@@ -522,6 +522,13 @@ fn surface_near(session: &Session, p: Vec3) -> String {
     best.and_then(|b| world.surface_of(b.1)).unwrap_or("DisContactType_Environment").to_string()
 }
 
+/// The same sound for the same pawn within this many seconds is one sound: the first- and
+/// third-person rigs of a pawn both report a clip's AkEvent notifies (not in step: their clips
+/// start on different frames), and a shot is also posted from `SimEvent::Fired`. The pistol
+/// played its shot twice when two of them were more than 0.05 s apart (the old window). Shorter
+/// than the fastest refire (`Pistol_Fire` exit 0.30 s).
+const SAME_SOUND_WINDOW: f32 = 0.2;
+
 /// Events the online client already played from its own prediction (skip the
 /// authoritative copy for the local player to avoid doubling).
 pub fn predicted_locally(e: &SimEvent, me: Option<PlayerId>) -> bool {
@@ -671,7 +678,7 @@ pub fn drive(
             match &n.kind {
                 NotifyKind::AkEvent { event, .. } => {
                     let key = (pid, event.clone());
-                    if audio.notify_recent.get(&key).is_some_and(|t| now - *t < 0.05) {
+                    if audio.notify_recent.get(&key).is_some_and(|t| now - *t < SAME_SOUND_WINDOW) {
                         continue;
                     }
                     audio.notify_recent.insert(key, now);
@@ -720,7 +727,15 @@ pub fn drive(
             }
             SimEvent::Fired { id, bolt, projectile } => {
                 audio.projectiles.insert(projectile, bolt);
-                posts.push((cue(if bolt { "crossbow_fire" } else { "pistol_fire" }), subject_obj(id)));
+                // One shot, one sound: skipped when a fire animation's AkEvent notify already
+                // posted it for this pawn, and recorded so a later notify of the same shot is
+                // skipped.
+                let fire = cue(if bolt { "crossbow_fire" } else { "pistol_fire" });
+                let key = (id, fire.clone());
+                if !audio.notify_recent.get(&key).is_some_and(|t| now - *t < SAME_SOUND_WINDOW) {
+                    audio.notify_recent.insert(key, now);
+                    posts.push((fire, subject_obj(id)));
+                }
             }
             SimEvent::Reloaded { id } => posts.push((cue("pistol_reload"), subject_obj(id))),
             SimEvent::BlinkStart { id, .. } => posts.push((cue("blink_start"), subject_obj(id))),

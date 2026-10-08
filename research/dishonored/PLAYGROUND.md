@@ -139,8 +139,46 @@ Health and mana are then filled to their maxima. `reset` first returns to the de
 
 A layout has no lightmaps, so the Playground is lit by dynamic lights only:
 - a copy of Boyle's moon (`L_Boyle_Ext_Light:DominantDirectionalLight_1`, shadowed);
-- work lights over the stations;
-- two lamps over the lit half of the stealth lane.
+- a grid of work lights 2000 apart, 700 up, over rows 1 to 3 (UE3 falloff exponent 2, radius
+  2200, brightness 1.6), so every face of a station is lit from two sides or more; one more in the
+  pool's basin and one over the far gallery targets;
+- two lamps over the lit half of the stealth lane. No work light reaches the lane: the row-3
+  lights end at y 5200, and the lane starts behind its wall at y 6200.
+
+## Surfaces
+
+- **Materials.** Every brush uses a finished Boyle material:
+  - ground: street cobbles; boundary: the brick facade, with dock stone above;
+  - steps: sidewalk paving; slopes and stairs: the stone ramp; mantle ledges: dock wall;
+  - gap platforms: bridge stone; Blink pads: the distillery's wood floor; pillars: brick; Blink wall: stone;
+  - chain tower: warehouse brick, its beam a basement wood beam; pool: basement plaster tile;
+  - fall ledges: metal plate; lean corner and tunnel: plaster, the tunnel roof planks;
+  - gallery boards: planks; the lane's roof: wood floor; alcoves: mossy stone.
+  `harness playground` refuses blockout or dev materials.
+- **Winding.** Brush triangles are wound as the cooked meshes are, for UE3's clockwise front
+  faces: (b - a) x (c - a) points into the solid, and the stored normal out of it. The renderer
+  keeps the indices through the coordinate change's handedness flip. The first layout importer
+  wound them the other way, so every brush showed only its inside faces, lit from behind. That
+  was the user's report of missing walls, and of boxes seen as a black interior grid. Collision
+  ignores the winding: rays turn the normal against the ray, and box checks use separating axes.
+- **Render against collision.** `playground::audit_brushes`, run by `harness playground`, checks
+  each brush:
+  - a colliding brush draws exactly the triangles it collides with;
+  - a brush without collision is a skin at most 4 thick (the water surface, the pain floor's gravel);
+  - every triangle is wound outward.
+- **Boundary.** The perimeter walls rise to 3000. The highest standing point is the fall-damage
+  stairs' top at 1600, and a Blink adds 500. The harness casts rays from inside at 100, 1700 and
+  2900 up.
+- **UV density.** Planar world-space mapping:
+  - 256 uu per texture repeat by default;
+  - 400 on the ground slabs;
+  - 512 on the upper boundary;
+  - 1024 on the water.
+- **Water.** The pool shows a surface 1 below the volume's top (z -31), using the Boyle river
+  material (`boyle_ext_MS.Water_boyle_ext_INST03`), with no collision. The port plays no effect
+  on entering, leaving or swimming in water, on any map: `SimEvent::Swim` has no effect hookup.
+  Its only water particle is the contact system's `Pfx_WaterSplash`, for projectile impacts on
+  surfaces whose contact type is Water.
 The AI light probe samples the same lights (`dishonored_assets::ai_level::probe_light`). The global
 player-light normalization applies, because a layout has no `DishonoredMapInfo`. This keeps the
 light-versus-dark comparison of the stealth lane self-consistent. The absolute light values are

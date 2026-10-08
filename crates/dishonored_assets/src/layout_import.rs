@@ -303,8 +303,12 @@ pub fn brush_mesh(b: &Brush, material: Option<MaterialId>, source: &str) -> Stat
         }
         for k in 1..world.len() - 1 {
             let (a, bb, c) = (world[0], world[k], world[k + 1]);
-            // Wound so (b - a) x (c - a) points out of the solid, as the importer's meshes.
-            if (bb - a).cross(c - a).dot(n) >= 0.0 {
+            // Wound as the cooked meshes are: (b - a) x (c - a) points into the solid in
+            // Dishonored space (UE3's clockwise front faces). The renderer keeps the indices
+            // through the handedness flip of the coordinate change (map_render), which makes
+            // them Bevy's counter-clockwise front faces. Wound the other way, every brush showed
+            // its inside faces only (the "missing walls"), lit from behind.
+            if (bb - a).cross(c - a).dot(n) <= 0.0 {
                 indices.extend([base, base + k as u32, base + k as u32 + 1]);
             } else {
                 indices.extend([base, base + k as u32 + 1, base + k as u32]);
@@ -338,11 +342,14 @@ mod tests {
     use super::*;
     use dishonored_ir::layout::Shape;
 
+    /// Wound as the cooked meshes (UE3 clockwise front faces): each triangle's
+    /// (b - a) x (c - a) points into the solid, and its stored normal out of it.
     fn outward(mesh: &StaticMeshAsset) -> bool {
         let c = mesh.positions.iter().copied().sum::<Vec3>() / mesh.positions.len() as f32;
         mesh.indices.chunks_exact(3).all(|t| {
             let (a, b, d) = (mesh.positions[t[0] as usize], mesh.positions[t[1] as usize], mesh.positions[t[2] as usize]);
-            (b - a).cross(d - a).dot((a + b + d) / 3.0 - c) > 0.0
+            let out = (a + b + d) / 3.0 - c;
+            (b - a).cross(d - a).dot(out) < 0.0 && mesh.normals[t[0] as usize].dot(out) > 0.0
         })
     }
 
