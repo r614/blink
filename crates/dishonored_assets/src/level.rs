@@ -1,4 +1,4 @@
-//! Level import: StaticMeshActors and StaticMeshCollectionActors from a set of
+﻿//! Level import: StaticMeshActors and StaticMeshCollectionActors from a set of
 //! level packages into a normalized [`DishonoredMap`].
 
 use crate::content::Content;
@@ -73,6 +73,8 @@ pub struct ImportStats {
     pub skeletal_props: usize,
     /// Static light actors skipped because their light is baked into the lightmaps.
     pub static_lights_skipped: usize,
+    /// Static lights with a light function imported as dynamic lights.
+    pub function_lights: usize,
     pub instances: usize,
     pub meshes: usize,
     pub mesh_failures: usize,
@@ -369,6 +371,7 @@ impl Importer<'_> {
                 }
             }
         }
+        self.import_function_lights(slot);
         for i in 0..pkg.exports.len() {
             let class = pkg.export_class(i);
             if !matches!(class.as_str(), "StaticMeshActor" | "StaticMeshCollectionActor")
@@ -504,6 +507,94 @@ impl Importer<'_> {
         });
     }
 
+    /// Static light components with a `LightFunction` (`UseDirectLightMap` is false for them, so their
+    /// direct light is not in the lightmaps and the engine draws them dynamically with the function:
+    /// LIKELY, stock `ULightComponent` behaviour, not confirmed in Dishonored.exe). Collected from
+    /// `StaticLightCollectionActor`s and plain `PointLight` / `SpotLight` actors; dominant lights
+    /// are imported by `import_light`, which attaches their function.
+    fn import_function_lights(&mut self, slot: usize) {
+        let pkg = self.pkgs[slot].clone();
+        for ci in 0..pkg.exports.len() {
+            let cclass = pkg.export_class(ci);
+            if !matches!(cclass.as_str(), "PointLightComponent" | "SpotLightComponent") {
+                continue;
+            }
+            let ObjRef::Export(ai) = ObjRef::from_index(pkg.exports[ci].outer) else { continue };
+            if pkg.obj_name(ObjRef::from_index(pkg.exports[ai].outer)) != "PersistentLevel" {
+                continue;
+            }
+            let aclass = pkg.export_class(ai);
+            if !matches!(aclass.as_str(), "StaticLightCollectionActor" | "PointLight" | "SpotLight") {
+                continue;
+            }
+            let Ok(ch) = pkg.read_object(ci) else { continue };
+            let Some(fref) = find(&ch.properties, "Function").and_then(|p| p.as_object()) else { continue };
+            let ObjRef::Export(fi) = ObjRef::from_index(fref) else { continue };
+            let Some(function) = self.read_light_function(slot, fi) else { continue };
+            let Ok(ah) = pkg.read_object(ai) else { continue };
+            match light_from_component(&pkg, &ah.properties, ci, &aclass) {
+                Ok(Some(mut l)) => {
+                    l.function = Some(function);
+                    self.stats.function_lights += 1;
+                    self.map.lights.push(l);
+                }
+                Ok(None) => {}
+                Err(e) => self.stats.errors.push(e),
+            }
+        }
+    }
+
+    /// A `LightFunction` object: its source material's parameters (the material's own expression
+    /// objects, whose `DefaultValue`s are the parameter values; unset means 0).
+    fn read_light_function(&mut self, slot: usize, fi: usize) -> Option<LightFunction> {
+        let pkg = self.pkgs[slot].clone();
+        let fh = pkg.read_object(fi).ok()?;
+        let mref = ObjRef::from_index(find(&fh.properties, "SourceMaterial")?.as_object()?);
+        let path = pkg.obj_path(mref);
+        let mut params: Vec<(String, f32)> = Vec::new();
+        let mut vec_params: Vec<(String, [f32; 3])> = Vec::new();
+        if let Some((ms, mi)) = self.resolve(slot, mref) {
+            let mp = self.pkgs[ms].clone();
+            for e in 0..mp.exports.len() {
+                if !matches!(ObjRef::from_index(mp.exports[e].outer), ObjRef::Export(o) if o == mi) {
+                    continue;
+                }
+                let Ok(eh) = mp.read_object(e) else { continue };
+                let Some(Value::Name(name)) = find(&eh.properties, "ParameterName").map(|p| &p.value) else { continue };
+                match mp.export_class(e).as_str() {
+                    "MaterialExpressionScalarParameter" => params.push((name.clone(), float_or(&eh.properties, "DefaultValue", 0.0))),
+                    "MaterialExpressionVectorParameter" => {
+                        if let Some(Value::LinearColor(c)) = find(&eh.properties, "DefaultValue").map(|p| &p.value) {
+                            vec_params.push((name.clone(), [c[0], c[1], c[2]]));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let scalar = |n: &str| params.iter().find(|(k, _)| k == n).map(|(_, v)| *v);
+        let lower = path.to_ascii_lowercase();
+        if lower.contains("flickering_light_function") {
+            // Parameter values as dumped from the three materials when the material is not loaded.
+            let (d1, d2) = if lower.contains("woodstove") {
+                (1.0, 0.25)
+            } else if lower.contains("boiler") {
+                (0.5, 0.0)
+            } else {
+                (5.0, 3.0)
+            };
+            Some(LightFunction::Flicker { speed1: scalar("F_Flickering_1_speed").unwrap_or(d1), speed2: scalar("F_Flickering_2_speed").unwrap_or(d2), material: path })
+        } else if lower.contains("casutics_lightfunction") || lower.contains("caustic") {
+            Some(LightFunction::Caustics {
+                speed: scalar("Speed").unwrap_or(0.35),
+                color: vec_params.iter().find(|(k, _)| k == "CausticColor").map(|(_, v)| *v).unwrap_or([0.859174; 3]),
+                scale: find(&fh.properties, "Scale").and_then(|p| p.as_vector()).map(|v| v[0]).unwrap_or(1.0),
+            })
+        } else {
+            self.stats.errors.push(format!("unknown light function material {path}"));
+            None
+        }
+    }
     /// Lights that UE3 renders dynamically: dominant lights (their direct light is not in
     /// the lightmaps) and toggleable/movable lights (direct light kept out of the lightmaps
     /// as shadow maps). Static lights (StaticLightCollectionActor, plain PointLight/SpotLight)
@@ -516,7 +607,16 @@ impl Importer<'_> {
             return;
         }
         match read_light(&pkg, actor, class) {
-            Ok(Some(l)) => self.map.lights.push(l),
+            Ok(Some(mut l)) => {
+                if let Ok(h) = pkg.read_object(actor) {
+                    if let Some(ObjRef::Export(ci)) = find(&h.properties, "LightComponent").and_then(|p| p.as_object()).map(ObjRef::from_index) {
+                        if let Some(ObjRef::Export(fi)) = pkg.read_object(ci).ok().and_then(|ch| find(&ch.properties, "Function").and_then(|p| p.as_object())).map(ObjRef::from_index) {
+                            l.function = self.read_light_function(slot, fi);
+                        }
+                    }
+                }
+                self.map.lights.push(l);
+            }
             Ok(None) => {}
             Err(e) => self.stats.errors.push(e),
         }
@@ -532,6 +632,13 @@ pub fn read_light(pkg: &Package, actor: usize, class: &str) -> std::result::Resu
         let Some(ObjRef::Export(ci)) = find(&h.properties, "LightComponent").and_then(|p| p.as_object()).map(ObjRef::from_index) else {
             return Ok(None);
         };
+        return light_from_component(pkg, &h.properties, ci, class);
+    }
+}
+
+/// The light of component export ci, owned by an actor with properties ctor of class class.
+pub fn light_from_component(pkg: &Package, actor: &[Property], ci: usize, class: &str) -> std::result::Result<Option<Light>, String> {
+    {
         let Ok(ch) = pkg.read_object(ci) else {
             return Err(format!("light component {}", pkg.obj_path(ObjRef::Export(ci))));
         };
@@ -553,7 +660,7 @@ pub fn read_light(pkg: &Package, actor: usize, class: &str) -> std::result::Resu
             }
             _ => None,
         };
-        let world = cached.unwrap_or_else(|| actor_transform(&h.properties)) * component_transform(c);
+        let world = cached.unwrap_or_else(|| actor_transform(actor)) * component_transform(c);
         let position = world.w_axis.truncate();
         let direction = world.x_axis.truncate().normalize_or(Vec3::NEG_Z);
         let color = match find(c, "LightColor").map(|p| &p.value) {
@@ -582,6 +689,7 @@ pub fn read_light(pkg: &Package, actor: usize, class: &str) -> std::result::Resu
                 Some(Value::Guid(g)) => *g,
                 _ => [0; 4],
             },
+            function: None,
         }))
     }
 }

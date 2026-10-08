@@ -1,4 +1,4 @@
-//! Real-time lights from the level's `_Light`/`_Env`/`_Script` packages (dominant and
+﻿//! Real-time lights from the level's `_Light`/`_Env`/`_Script` packages (dominant and
 //! toggleable lights; static lights are already in the lightmaps).
 //!
 //! Unit conversion (UE3 -> Bevy), with `U = map_render::light_unit()`:
@@ -21,7 +21,7 @@ use crate::coords;
 use crate::map_render::{RenderFeatures, light_unit};
 use bevy::light::CascadeShadowConfigBuilder;
 use bevy::prelude::*;
-use dishonored_ir::{DishonoredMap, Light, LightKind};
+use dishonored_ir::{DishonoredMap, Light, LightFunction, LightKind};
 
 /// Upper bound on spawned non-directional lights (clustered forward copes, but shadowed
 /// point lights are expensive: only dominant ones cast shadows).
@@ -30,6 +30,42 @@ pub const MAX_LIGHTS: usize = 64;
 #[derive(Component)]
 pub struct MapLight {
     pub source: String,
+}
+
+/// A light with a flickering light function (`*_light_function_PMAT`, pixel shader 1315): the
+/// light colour is multiplied by `clamp(cos(2 pi t s1), 0.5, 1) + clamp(cos(2 pi t s2), 0.2, 0.7)`
+/// (grey: the shader greyscales by `GreyscaleFactor`, 1 here; `SelectionColor` is 0 outside the editor).
+/// `t` is the material `Time`, the world time in seconds.
+#[derive(Component)]
+pub struct LightFlicker {
+    pub base_intensity: f32,
+    pub speed1: f32,
+    pub speed2: f32,
+}
+
+impl LightFlicker {
+    pub fn value(&self, t: f32) -> f32 {
+        let tau = std::f32::consts::TAU;
+        (t * self.speed1 * tau).cos().clamp(0.5, 1.0) + (t * self.speed2 * tau).cos().clamp(0.2, 0.7)
+    }
+}
+
+/// Drives [`LightFlicker`] lights (a few dozen per map at most).
+pub fn animate_flicker(time: Res<Time>, mut points: Query<(&LightFlicker, &mut PointLight)>, mut spots: Query<(&LightFlicker, &mut SpotLight), Without<PointLight>>) {
+    let t = time.elapsed_secs_wrapped();
+    for (f, mut l) in &mut points {
+        l.intensity = f.base_intensity * f.value(t);
+    }
+    for (f, mut l) in &mut spots {
+        l.intensity = f.base_intensity * f.value(t);
+    }
+}
+
+fn flicker_of(l: &Light) -> Option<LightFlicker> {
+    match &l.function {
+        Some(LightFunction::Flicker { speed1, speed2, .. }) => Some(LightFlicker { base_intensity: local_intensity(l), speed1: *speed1, speed2: *speed2 }),
+        _ => None,
+    }
 }
 
 fn color(l: &Light) -> Color {
@@ -198,7 +234,7 @@ pub fn spawn_lights(map: &DishonoredMap, commands: &mut Commands, features: &Ren
             _ if local >= MAX_LIGHTS => continue,
             LightKind::Point => {
                 local += 1;
-                commands.spawn((
+                let mut e = commands.spawn((
                     PointLight {
                         color: color(l),
                         intensity: local_intensity(l),
@@ -213,10 +249,13 @@ pub fn spawn_lights(map: &DishonoredMap, commands: &mut Commands, features: &Ren
                     at,
                     MapLight { source: l.source.clone() },
                 ));
+                if let Some(f) = flicker_of(l) {
+                    e.insert(f);
+                }
             }
             LightKind::Spot { inner_cone_deg, outer_cone_deg } => {
                 local += 1;
-                commands.spawn((
+                let mut e = commands.spawn((
                     SpotLight {
                         color: color(l),
                         intensity: local_intensity(l),
@@ -231,6 +270,9 @@ pub fn spawn_lights(map: &DishonoredMap, commands: &mut Commands, features: &Ren
                     at,
                     MapLight { source: l.source.clone() },
                 ));
+                if let Some(f) = flicker_of(l) {
+                    e.insert(f);
+                }
             }
         }
         n += 1;

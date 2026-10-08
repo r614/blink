@@ -1,6 +1,6 @@
-//! Normalized Dishonored content, independent of UE3 object semantics.
+﻿//! Normalized Dishonored content, independent of UE3 object semantics.
 //!
-//! Coordinate frame: **Dishonored world space** — Z-up, left-handed, Unreal units (uu),
+//! Coordinate frame: **Dishonored world space** â€” Z-up, left-handed, Unreal units (uu),
 //! exactly as the original game stores it. Simulation code works in this frame so
 //! original constants (speeds, gravity, ranges) apply unchanged. Presentation layers
 //! convert to their own frame (see `dishonored_runtime::coords`).
@@ -487,6 +487,21 @@ pub struct Light {
     /// The component's `LightGuid` (what `ShadowMap2D::LightGuid` refers to).
     #[serde(default)]
     pub guid: [u32; 4],
+    /// The component's LightFunction (its material's parameters), if any.
+    #[serde(default)]
+    pub function: Option<LightFunction>,
+}
+
+/// A light function (ULightComponent::Function): the light's colour is multiplied by the
+/// function material's value. Bodies come from the compiled light function shaders
+/// (research/dishonored/systems/render_lighting.md).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum LightFunction {
+    /// *_light_function_PMAT (Flickering, WoodStove, Boiler): grey value
+    /// clamp(cos(2 pi t s1), 0.5, 1) + clamp(cos(2 pi t s2), 0.2, 0.7) (shader 1315).
+    Flicker { speed1: f32, speed2: f32, material: String },
+    /// Casutics_LightFunction_PMAT: projected caustic texture (not rendered yet).
+    Caustics { speed: f32, color: [f32; 3], scale: f32 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
