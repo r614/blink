@@ -105,6 +105,9 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     let mut last_state = Value::Null;
     let mut max_rtt: f64 = 0.0;
     let mut max_others = 0usize;
+    // Walking into a wall or ledge: the original mantles only on Jump (movement.md MV-2), so a
+    // driver pushing forward without moving presses it, as a player would.
+    let mut stuck_since: Option<Instant> = None;
     while start.elapsed() < Duration::from_secs_f32(secs) {
         let Some(s) = ctl.call(serde_json::json!({"cmd":"state"})) else { break };
         let me = &s["me"];
@@ -127,6 +130,10 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
                 travelled += step;
             }
         }
+        let moved_now = match (&prev_pos, pos.len() == 3) {
+            (Some(p), true) => ((p[0] - pos[0]).powi(2) + (p[1] - pos[1]).powi(2)).sqrt() > 2.0,
+            _ => true,
+        };
         prev_pos = (pos.len() == 3).then(|| pos.clone());
         let nearest = s["others"].as_array().and_then(|o| {
             o.iter()
@@ -154,6 +161,14 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
                 }
                 if d > 500.0 {
                     buttons.push("SPRINT");
+                }
+                if d > 140.0 && !moved_now {
+                    let since = *stuck_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() > Duration::from_millis(500) {
+                        buttons.push("JUMP");
+                    }
+                } else {
+                    stuck_since = None;
                 }
                 serde_json::json!({"forward": if d > 140.0 {127} else {0}, "yaw": yaw, "pitch": pitch, "buttons": buttons, "left_hand": left})
             }

@@ -311,8 +311,10 @@ fn mantles(rep: &mut Report, mc: &MatchContent) {
         let mut jumped = false;
         for _ in 0..180 {
             let at_wall = s.p().position.y > -3500.0 - 35.0 - 30.0;
-            let b = if at_wall && !jumped { buttons::JUMP } else { 0 };
-            jumped |= b != 0;
+            // Jump is held from the face on: the airborne mantle request needs the button down
+            // (0x00ADBD00, movement.md MV-2); the press itself jumps once.
+            jumped |= at_wall;
+            let b = if jumped { buttons::JUMP } else { 0 };
             s.step(PlayerInput { buttons: b, ..fwd(90.0) });
             top = top.max(s.p().position.z);
         }
@@ -615,7 +617,7 @@ fn stations_in_mission(rep: &mut Report, maps: &MapContents, def: &MissionDef) -
         _ => None,
     }).collect();
     let still = p.m().world.player(id).map(|t| (t.position - tp).truncate().length()).unwrap_or(0.0);
-    rep.check(S, "sword dummy: a sword hit lands (14 = 0.2 x 70) and the dummy does not fight back", dmg.first().is_some_and(|d| (*d - 14.0).abs() < 0.5) && still < 50.0, format!("damage {dmg:?}, dummy moved {still:.0} uu"));
+    rep.check(S, "sword dummy: a sword hit lands (10 = Attribute_MeleeDamage, melee.md F1) and the dummy does not fight back", dmg.first().is_some_and(|d| (*d - 10.0).abs() < 0.5) && still < 50.0, format!("damage {dmg:?}, dummy moved {still:.0} uu"));
 
     // The stealth lane's patrol walks the generated navigation mesh between its two points.
     let guard = p.npc("patrol");
