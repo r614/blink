@@ -159,9 +159,68 @@ pub fn setup_dialogue_hud(mut commands: Commands) {
     commands.insert_resource(layout);
 }
 
-/// The subtitle to show: the newest main line (barks only when nothing else is spoken).
-fn current_line(mv: &dishonored_mission::runtime::MissionView) -> Option<&dishonored_mission::runtime::DialogueLineView> {
-    mv.dialogue.iter().filter(|l| l.main && !l.text.trim().is_empty()).max_by_key(|l| l.id).or_else(|| mv.dialogue.iter().filter(|l| !l.text.trim().is_empty()).max_by_key(|l| l.id))
+use dishonored_mission::runtime::{DialogueLineView, MissionView};
+
+/// Where a line's speaker stands: its pawn in the view (the player's own lines at the player);
+/// None for unbound speakers (2D voices).
+pub fn speaker_pos(view: &SessionView, mv: &MissionView, l: &DialogueLineView) -> Option<Vec3> {
+    if l.player {
+        return view.me.as_ref().map(|p| p.position);
+    }
+    let id = l.npc.as_ref().and_then(|n| mv.npc_ids.iter().find(|x| &x.0 == n)).map(|x| x.1)?;
+    view.others.iter().chain(view.me.iter()).find(|x| x.id == id).map(|x| x.position)
+}
+
+/// The dominant hook (`DisConvGlobalMan.m_CurDominantHook`, 0x00ca71c0 / 0x00c99f80): among
+/// the lines of running dialog hooks, the highest dominance above 1e-8 (the first strictly
+/// greater wins), dominance `1 - d / (m_fDominantMaxDistance_Percent * m_fVoiceRadius)` within
+/// that distance, 0 beyond. Distance: straight line from the local player (APPROXIMATION of the
+/// audio path distance `FUN_00c96920`); every NPC speaker is taken as distance-weighted (its
+/// interface flag 0x8; the flags 0x2 / 0x10 of other speaker kinds are not decoded). Unplaced
+/// speakers count as at the listener.
+pub fn dominant_instance(view: &SessionView, mv: &MissionView) -> Option<u32> {
+    let listener = view.me.as_ref().map(|p| p.position)?;
+    let mut best: (f32, Option<u32>) = (1e-8, None);
+    for l in mv.dialogue.iter().filter(|l| l.hook.is_some() && l.instance != 0) {
+        let d = speaker_pos(view, mv, l).map(|p| p.distance(listener)).unwrap_or(0.0);
+        let r = mv.dialogue_mix.dominant_pct * l.voice_radius;
+        let dom = if r > 0.0 && d <= r { 1.0 - d / r } else { 0.0 };
+        if dom > best.0 {
+            best = (dom, Some(l.instance));
+        }
+    }
+    best.1
+}
+
+/// The subtitle to show (`DisConvGlobalMan.m_SubtitlesInfo`, 0x00c9e660, R7): within the main
+/// lines (`m_bMainSubtitle`), the best `1 - d / m_fVoiceRadius` above 0 (lines beyond their
+/// voice radius are not shown), the dominant hook's line scoring 99; the secondary list
+/// (barks, `m_bMainSubtitle` false) picks the same way and shows when no main line does (the
+/// HUD movie has one subtitle field). Lines of a dead speaker are already dropped by the
+/// server. A voice radius of 0 (an older server) counts as at the speaker.
+fn current_line<'a>(view: &SessionView, mv: &'a MissionView) -> Option<&'a DialogueLineView> {
+    let listener = view.me.as_ref().map(|p| p.position);
+    let dominant = dominant_instance(view, mv);
+    let score = |l: &DialogueLineView| -> f32 {
+        if l.instance != 0 && dominant == Some(l.instance) {
+            return 99.0;
+        }
+        match (listener, speaker_pos(view, mv, l)) {
+            (Some(a), Some(b)) if l.voice_radius > 0.0 => 1.0 - a.distance(b) / l.voice_radius,
+            _ => 1.0,
+        }
+    };
+    let pick = |main: bool| {
+        let mut best: Option<(f32, &'a DialogueLineView)> = None;
+        for l in mv.dialogue.iter().filter(|l| l.main == main && !l.text.trim().is_empty()) {
+            let s = score(l);
+            if s > 0.0 && best.is_none_or(|b| s > b.0) {
+                best = Some((s, l));
+            }
+        }
+        best.map(|b| b.1)
+    };
+    pick(true).or_else(|| pick(false))
 }
 
 pub fn update_dialogue_hud(
@@ -179,7 +238,7 @@ pub fn update_dialogue_hud(
     let me = view.me.as_ref().map(|p| p.id);
     let choice: Option<&Vec<String>> = mv.and_then(|m| m.choices.iter().find(|c| Some(c.0) == me).map(|c| &c.1));
     let title = mv.and_then(|m| m.choice.as_ref()).filter(|c| choice.is_some_and(|o| *o == c.options)).map(|_| String::new());
-    let line = mv.and_then(current_line).filter(|_| choice.is_none());
+    let line = mv.and_then(|m| current_line(&view, m)).filter(|_| choice.is_none());
     let n = choice.map(|c| c.len().min(MAX_OPTIONS)).unwrap_or(0);
     for (kind, mut node, mut text, mut font, mut vis) in &mut texts {
         // UI components are written only on change (see gfx_hud::place).

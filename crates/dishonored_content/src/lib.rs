@@ -666,9 +666,10 @@ pub fn load_mission_conversations(def: &dishonored_mission::MissionDef) -> Resul
 
 /// Dialog graphs of the given cooked packages (cached per package list).
 pub fn load_conversations(content: &Content, pkgs: &[String]) -> Result<dishonored_conversation::ConversationDb> {
-    // The format version (2: `voice_trees`; 3: `CompareDarknessLevel` nodes) is part of the
-    // key so new fields are filled in.
-    let key = format!("v3:{}", pkgs.iter().map(|p| p.to_ascii_lowercase()).collect::<Vec<_>>().join("+"));
+    // The format version (2: `voice_trees`; 3: `CompareDarknessLevel` nodes; 4: hook node
+    // classes, `m_pFallbackTree`, `DisTweaks_ConvSettings`) is part of the key so new fields are
+    // filled in.
+    let key = format!("v4:{}", pkgs.iter().map(|p| p.to_ascii_lowercase()).collect::<Vec<_>>().join("+"));
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in key.bytes().chain(env!("CARGO_PKG_VERSION").bytes()) {
         h ^= b as u64;
