@@ -46,6 +46,53 @@ impl ReloadTiming {
     pub fn total(&self, reload_speed: f32) -> f32 {
         self.stages(reload_speed, 0.0).1
     }
+
+    /// The reload in whole ticks of `dt`, as the context runs it: (ticks from the reload's
+    /// start until the magazine loads, ticks until the reload ends).
+    ///
+    /// - ReloadIn and ReloadOut are actions: each ends on the tick its animation time,
+    ///   advanced by `dt` per tick, reaches the `DishonoredNotify_AnimStateExit` time
+    ///   ([`action_ticks`]).
+    /// - The timed stage is a countdown: the In action's end sets `m_fReloadTimeRemaining`
+    ///   (0x00C23620) and the context tick (0x00C2AC00) subtracts `dt` from the next tick on
+    ///   and loads the magazine on the tick it reaches zero or less ([`countdown_ticks`]). In
+    ///   float steps a whole number of ticks leaves a tiny remainder, so 0.75 s takes 46 ticks
+    ///   and 1.0 s 61: the measured 0.767 s and 1.02 s (HOOK_TRIAGE.md, U-501).
+    /// - `Attribute_FastReload` > 0: the fast action's countdown is the attribute's value, set
+    ///   at the reload's start (0x00C2AA80); the context ends when it loads (no ReloadOut).
+    pub fn ticks(&self, reload_speed: f32, fast_reload: f32, dt: f32) -> (u32, u32) {
+        if fast_reload > 0.0 {
+            let n = countdown_ticks(fast_reload, dt);
+            return (n, n);
+        }
+        let timed = if reload_speed != 0.0 { self.time / reload_speed } else { self.time };
+        let load = action_ticks(self.reload_in, dt) + countdown_ticks(timed, dt);
+        (load, load + action_ticks(self.reload_out, dt))
+    }
+}
+
+/// Ticks a `PawnAction` lasts: its animation time grows by `dt` each tick (f32) and the action
+/// ends on the first tick it reaches `exit` (the `DishonoredNotify_AnimStateExit` time over the
+/// play rate).
+pub fn action_ticks(exit: f32, dt: f32) -> u32 {
+    let (mut t, mut n) = (0.0f32, 0u32);
+    while t < exit && n < 1_000_000 {
+        t += dt;
+        n += 1;
+    }
+    n
+}
+
+/// Ticks of a countdown decremented by `dt` each tick (f32) until it is zero or less.
+pub fn countdown_ticks(time: f32, dt: f32) -> u32 {
+    let (mut r, mut n) = (time, 0u32);
+    loop {
+        r -= dt;
+        n += 1;
+        if r <= 0.0 || n >= 1_000_000 {
+            return n;
+        }
+    }
 }
 
 fn pistol_stages() -> ReloadTiming {

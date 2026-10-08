@@ -698,26 +698,8 @@ pub struct AnimInput<'a> {
     pub face: &'a [crate::facefx::FaceBone],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum HitKind {
-    Death,
-    DeathFast,
-    Melee,
-    Projectile,
-    Headshot,
-    Windblast,
-    Swing,
-    Parried,
-    Assassinated,
-    /// Knocked out by something other than a choke (sleep dart): falls like a death.
-    KnockedOut,
-    /// Choke victim: the choke ended (won: knocked out, lost: broke free, cancelled).
-    ChokeWin,
-    ChokeLose,
-    ChokeCancel,
-    /// A carried body was let go.
-    Dropped,
-}
+/// The animation reaction an event asks for (decided in the Bevy-free `present_rules`).
+pub use crate::present_rules::HitKind;
 
 /// Locomotion modifier for a pawn (`ArkComponentLocomotionConfig.m_Modifiers`).
 fn modifier_for(i: &AnimInput, cfg: &LocoConfig) -> String {
