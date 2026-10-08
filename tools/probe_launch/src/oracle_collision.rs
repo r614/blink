@@ -18,6 +18,11 @@ pub fn run(args: &[String]) -> Result<()> {
     let output = args.get(1).context("output file")?;
     let source = args.iter().position(|a| a == "--source").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("pawn");
     let mut c = crate::connect()?;
+    run_on(&mut c, input, output, source).map(|_| ())
+}
+
+/// Run the queries of input in the session, write output; the number of checks and seconds.
+pub fn run_on(c: &mut dishonored_probe::Client, input: &str, output: &str, source: &str) -> Result<(usize, f64)> {
     let src = match source {
         "none" => 0,
         _ => c.status_value("pawn")?.and_then(|v| crate::parse_u32(&v).ok()).unwrap_or(0),
@@ -46,7 +51,8 @@ pub fn run(args: &[String]) -> Result<()> {
     }
     let t0 = std::time::Instant::now();
     let r = c.line_checks(&q)?;
-    eprintln!("{} checks in {:.1} s", r.len(), t0.elapsed().as_secs_f32());
+    let secs = t0.elapsed().as_secs_f64();
+    eprintln!("{} checks in {:.1} s", r.len(), secs);
     let mut names: HashMap<u32, String> = HashMap::new();
     let mut name = |c: &mut dishonored_probe::Client, a: u32| -> String {
         if a == 0 {
@@ -69,7 +75,7 @@ pub fn run(args: &[String]) -> Result<()> {
         writeln!(out, "# door {pkg}:{actor} {state}")?;
     }
     for (id, x) in ids.iter().zip(&r) {
-        let (a, k) = if x.hit { (name(&mut c, x.actor), name(&mut c, x.component)) } else { ("-".into(), "-".into()) };
+        let (a, k) = if x.hit { (name(c, x.actor), name(c, x.component)) } else { ("-".into(), "-".into()) };
         writeln!(
             out,
             "{id} {} {:.5} {:.2} {:.2} {:.2} {:.4} {:.4} {:.4} {a} {k}",
@@ -77,5 +83,5 @@ pub fn run(args: &[String]) -> Result<()> {
         )?;
     }
     eprintln!("wrote {output}");
-    Ok(())
+    Ok((r.len(), secs))
 }
