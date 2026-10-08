@@ -234,3 +234,24 @@ physics/windblast_throw_d900
 #   session find class=SkeletalMeshComponent name=<guard Outer.Name>; session call object=<mesh> function=GetRootBodyIndex / read per-bone body velocity (same spec as powers/windblast_l2_hit with the dummy on Boyle, not the Playground: U-806)
 # P-8: RagdollImpact damage on the L1 throw (health 33 -> 23 -> 11 at ticks 75 / 79 in the cached powers/windblast_guard_l1 trace): the damage path 0x00B5CCD0
 # calls with damage type, amount, contact normal / speed, per call.
+# --- conversations, barks, cutscenes (research/dishonored/systems/conversation.md) ---
+# C1: bark observables (AkEvent posts on the guard, tick-exact) next to the brain channels; the three session lines after it read the NPC's per-hook
+# next-allowed table (DisConversationComponent.m_DialogHookInfo_InGame[hook] = fire time + rand*(max-min); the port stores the same without the +min of the gate)
+# and the manager's last-fire table (DisConvGlobalMan.m_DialogHookInfo_InGame[hook].m_fLastFireTime), world time via worldinfo TimeSeconds.
+conversation/bark_notice_detect600
+session dump class=DisConversationComponent filter=m_DialogHookInfo_InGame limit=60
+session dump class=DisConvGlobalMan filter=m_DialogHookInfo_InGame limit=2
+session read object=worldinfo path=TimeSeconds
+# C2: arbitration of simultaneous bark requests (group caps, loud / quiet, distance weight, 2.5 s lock) and what the manager holds right after.
+conversation/bark_group_arbitration
+session dump class=DisConversationComponent filter=m_DialogHookInfo_InGame limit=60
+session dump class=DisConvGlobalMan filter=m_QueuedHookGroups limit=2
+session dump class=DisConvGlobalMan filter=m_CurDominantHook limit=2
+session read object=worldinfo path=TimeSeconds
+# C3: which tweak object the manager really uses (the port assumes the class defaults of DisTweaks_ConvSettings: the refire overrides, the 13 fire groups, 5000 / 2000 uu, weight range 0.2).
+session find class=DisTweaks_ConvSettings limit=8
+session dump class=DisTweaks_ConvSettings limit=8
+session dump class=DisConvGlobalMan filter=m_pConvSettingTweaks limit=2
+# C4: cutscene lock: player path, camera and release under scripted input during Samuel's boat intro.
+cutscene/boyle_intro_lock
+session dump class=StatePlayerMasterSoiree limit=2
