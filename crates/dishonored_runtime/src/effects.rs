@@ -1329,12 +1329,24 @@ fn gameplay_effects(
 /// every frame and is killed when aiming ends (release, cancel, travel), as its emitters
 /// (`bKillOnDeactivate`, endless loops) are deactivated by the power.
 fn blink_indicator(mut commands: Commands, mut fx: ResMut<Effects>, mut meshes: ResMut<Assets<Mesh>>, view: Option<Res<SessionView>>, session: Option<Res<crate::session::Session>>, mut q: Query<&mut FxInstance>) {
-    let target = view.as_ref().and_then(|v| v.me.as_ref()).and_then(|me| me.left.blink_target);
-    let want = target.and_then(|t| {
+    let me = view.as_ref().and_then(|v| v.me.as_ref());
+    let target = me.and_then(|me| me.left.blink_target.map(|t| (me, t)));
+    let want = target.and_then(|(me, t)| {
         let s = session.as_ref()?;
-        let hh = s.content.sim.gameplay.movement.collision_half_height;
+        let mv = &s.content.sim.gameplay.movement;
+        let hh = mv.collision_half_height;
+        // Mantle: the Blink edge finder (`MantleEdgeFinder_Blink`, the search the arrival runs,
+        // `movement::try_blink_mantle`) finds a ledge from the target, facing the aim.
+        let mut probe = *me;
+        probe.position = t;
+        probe.velocity = Vec3::ZERO;
+        probe.mode = dishonored_sim::state::MoveMode::Falling;
+        let ctx = dishonored_sim::movement::MoveCtx { world: &s.content.collision, cfg: mv, dt: dishonored_sim::movement::DT };
+        if dishonored_sim::movement::try_blink_mantle(&mut probe, &ctx, &mut Vec::new()) {
+            return Some((BLINK_MANTLE_PS, t - Vec3::Z * hh));
+        }
         // The target is raised to CollisionHeight above the floor below it: a floor within that
-        // (plus a margin) means the pawn lands standing.
+        // (plus a margin) means the pawn lands standing (Ground); otherwise it falls (Fall).
         let floor = s.content.collision.raycast(t, -Vec3::Z, hh + 24.0, dishonored_world::channel::PAWN).map(|h| t - Vec3::Z * h.distance);
         Some(match floor {
             Some(f) => (BLINK_GROUND_PS, f),
