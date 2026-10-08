@@ -94,7 +94,8 @@ pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
     // v15: the integrated subsystem ports (ranged, world, melee, powers, movement, stealth).
     // v15x-physics: GameplayConfig.throw, windblast `cast.notify_time` (physics port).
     // v17: physics throw rest / get-up fields on top of v16.
-    let path = cache_dir().join("gameplay_config.v17.json");
+    // v17-ai2: AiConfig::special (the special NPC classes, ai.md F6).
+    let path = cache_dir().join("gameplay_config.v17-ai2.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);
@@ -421,7 +422,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         pkgs
     };
     // AI level data: factions, forbidden zones, alarm bells, probe lights (dishonored_ai).
-    let ai_path = dir.join(format!("{map}.ailevel3u-stealth.json"));
+    let ai_path = dir.join(format!("{map}.ailevel3u-ai2.json"));
     let ai_level: dishonored_ir::ai::AiLevel = match std::fs::read_to_string(&ai_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(a) => a,
         None => {

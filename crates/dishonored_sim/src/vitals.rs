@@ -139,9 +139,9 @@ pub fn apply_damage(
 }
 
 /// Damage types of the sim's causes that carry `m_bApplyDamageReduction` (DefaultWeapon.ini:
-/// `DishonoredDamageType_Bite` is one of the few that do not).
+/// `DishonoredDamageType_Bite` is one of the few that do not; `DisDamageType_Musical` sets it false).
 pub fn applies_damage_reduction(cause: DamageCause) -> bool {
-    !matches!(cause, DamageCause::Rats | DamageCause::RatBite | DamageCause::World | DamageCause::Drowning | DamageCause::Adrenaline)
+    !matches!(cause, DamageCause::Rats | DamageCause::RatBite | DamageCause::World | DamageCause::Drowning | DamageCause::Adrenaline | DamageCause::Musical)
 }
 
 pub fn kill(p: &mut PlayerState, killer: Option<PlayerId>, cause: DamageCause, events: &mut Vec<SimEvent>) {

@@ -6,6 +6,46 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// The NPC class a pawn's brain tweak makes it, read from the behaviour in its brain's
+/// Combat slot (`m_BehaviorTweak[i]` whose `m_DesignatedSlot` is `EAISlot_Combat`, its
+/// `m_pSpawnedObjectClass`). Pawns whose brain has no combat behaviour are civilians.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum NpcClass {
+    /// No combat behaviour (`BrainTweaks_Civilian`): panic.
+    #[default]
+    Civilian,
+    /// `DisBehaviorCombatEliteGuard` / `DisBehaviorCombatCityGuard` and the other sword
+    /// fighters the port plays with the elite guard's combat.
+    EliteGuard,
+    /// `DisBehaviorMusicalCombat` (the music-box Overseer).
+    MusicalOverseer,
+    /// `DisBehaviorTallBoyCombat`.
+    Tallboy,
+    /// `DisBehaviorCombatWolfhound`.
+    Wolfhound,
+    /// The weepers' combat behaviour.
+    Weeper,
+}
+
+impl NpcClass {
+    /// The class of a combat behaviour class name (`None`: not a combat behaviour).
+    pub fn from_combat_behavior(class: &str) -> NpcClass {
+        match class {
+            "DisBehaviorMusicalCombat" => NpcClass::MusicalOverseer,
+            "DisBehaviorTallBoyCombat" => NpcClass::Tallboy,
+            "DisBehaviorCombatWolfhound" => NpcClass::Wolfhound,
+            c if c.to_ascii_lowercase().contains("weep") => NpcClass::Weeper,
+            "" => NpcClass::Civilian,
+            _ => NpcClass::EliteGuard,
+        }
+    }
+
+    /// Has a combat behaviour (spawned as a fighter, never panics).
+    pub fn fights(self) -> bool {
+        self != NpcClass::Civilian
+    }
+}
+
 /// Attention levels (`EDisAttentionLevel`).
 pub const DAL_UNAWARE: u8 = 0;
 pub const DAL_HEAD_TRACK: u8 = 1;
@@ -677,6 +717,236 @@ pub struct CombatAiConfig {
     pub guard_health_max: f32,
 }
 
+/// Move codes of the special NPC classes' item contexts (`PlayerInput::npc_move`, after the
+/// elite guard's in `dishonored_sim::input::npc_moves`).
+pub mod special_moves {
+    /// Wolfhound bite (`DisItemContext_NPCAttackMedium` of `Twk_Inv_WolfhoundBite`).
+    pub const WH_BITE: u8 = 20;
+    /// `DisItemContext_WHJumpAttack` (knockdown).
+    pub const WH_JUMP_ATTACK: u8 = 21;
+    /// `DisItemContext_WHArmAttack` (sync grab; not ported).
+    pub const WH_ARM_ATTACK: u8 = 22;
+    /// Tallboy leg stomp (`DisItemContext_AttackNPCTallboyMelee`).
+    pub const TALLBOY_STOMP: u8 = 23;
+    /// Tallboy bow (`DisItemContext_NPCFireBow`): aiming, the shot on the Secondary press.
+    pub const TALLBOY_FIRE_BOW: u8 = 24;
+    /// Music-box Overseer bash (`DisItemContext_NPCBash` of the music box).
+    pub const OVERSEER_BASH: u8 = 25;
+    /// Music-box Overseer playing the combat tune (`DisItemContext_NPCTune_Combat`).
+    pub const OVERSEER_TUNE: u8 = 26;
+    /// Weeper arm grab (`DisItemContext_WeeperGrab`).
+    pub const WEEPER_GRAB: u8 = 27;
+    /// Weeper coughing the plague cloud (`DishonoredNotify_StartPlague`).
+    pub const WEEPER_COUGH: u8 = 28;
+}
+
+/// An attack item context of a special NPC class (`DisTweaks_ItemContext` of its weapon's
+/// pawn-specific tweaks): range, height limit, facing angle, cooldown, the combat manager's group
+/// inhibition and the damage of one hit (`ceil(m_fAttackDamageMultiplier x Attribute_MeleeDamage)`
+/// of the weapon, Normal).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SpecialAttack {
+    /// Item context class (`DisItemContext_WHJumpAttack`).
+    pub name: String,
+    /// Move code carried in `PlayerInput::npc_move` (`dishonored_sim::input::npc_moves`).
+    pub kind: u8,
+    pub min_range: f32,
+    pub max_range: f32,
+    /// `m_fIdealContextRange` (the attack pattern's ideal range, the shooting position's distance).
+    pub ideal_range: f32,
+    /// `m_fMaxContextHeightDifference` (no limit: `f32::MAX`).
+    pub max_height: f32,
+    /// `m_fAllowedAngle` (degrees off the pawn's facing).
+    pub angle: f32,
+    pub cooldown: [f32; 2],
+    pub inhibition: f32,
+    pub damage: f32,
+    /// `m_MainAttack.m_bUnblockable`.
+    pub unblockable: bool,
+}
+
+/// `DisTweaks_AISubProcess_ManageAttacks` of a special class's combat behaviour.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ManageAttacksConfig {
+    pub attacks_per_flurry: [i32; 2],
+    pub stamina_recovery: [f32; 2],
+    pub aggression_regen_rate: f32,
+    pub aggression_delta_per_damage: f32,
+    pub cooldown_factor_at_min_aggression: f32,
+}
+
+impl Default for ManageAttacksConfig {
+    fn default() -> Self {
+        ManageAttacksConfig { attacks_per_flurry: [2, 3], stamina_recovery: [3.0, 4.0], aggression_regen_rate: 0.1, aggression_delta_per_damage: -0.5, cooldown_factor_at_min_aggression: 1.0 }
+    }
+}
+
+/// The special NPC classes' combat tuning (research/dishonored/systems/ai.md F6), read from
+/// their pawn, brain, behaviour and weapon tweaks (`dishonored_assets::ai_config`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SpecialNpcConfig {
+    pub wolfhound: WolfhoundConfig,
+    pub weeper: WeeperConfig,
+    pub tallboy: TallboyConfig,
+    pub overseer: MusicalOverseerConfig,
+}
+
+impl SpecialNpcConfig {
+    /// `Attribute_HealthMax` (Normal) of a class's pawn tweak; `None`: the kind's default.
+    pub fn health_max(&self, c: NpcClass) -> Option<f32> {
+        let h = match c {
+            NpcClass::Wolfhound => self.wolfhound.health_max,
+            NpcClass::Weeper => self.weeper.health_max,
+            NpcClass::Tallboy => self.tallboy.health_max,
+            NpcClass::MusicalOverseer => self.overseer.health_max,
+            _ => 0.0,
+        };
+        (h > 0.0).then_some(h)
+    }
+
+    /// The special attack with a move code (any class).
+    pub fn attack(&self, kind: u8) -> Option<&SpecialAttack> {
+        self.wolfhound.attacks.iter().chain(self.tallboy.attacks.iter()).chain(self.overseer.attacks.iter()).find(|a| a.kind == kind)
+    }
+}
+
+/// `DisBehaviorCombatWolfhound` (`AI_Tweak_Behavior_WolfhoundCombat`) and the hound's bite
+/// (`Twk_Inv_Wolfhound.Twk_Inv_WolfhoundBite`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct WolfhoundConfig {
+    pub health_max: f32,
+    /// The bite's contexts in tweak order (AttackMedium, Left90, Right90, WHJumpAttack, WHArmAttack).
+    pub attacks: Vec<SpecialAttack>,
+    pub manage: ManageAttacksConfig,
+    /// `m_fWalkDistance` of the engage sub-state: within it the hound walks (WalkAttack).
+    pub walk_distance: f32,
+    /// The hound's attention profiles (`Twk_Attn_Wolfhound_*`).
+    pub unsuspecting: Option<AttentionConfig>,
+    pub suspecting: Option<AttentionConfig>,
+}
+
+/// `DisBehaviorWeep` (`TweakBehaviors_Weep_Default`), the arm grab and the plague cloud of the
+/// weeper pawn tweaks.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct WeeperConfig {
+    pub health_max: f32,
+    /// `m_fHomeRadius`, `m_LostTimer`.
+    pub home_radius: f32,
+    pub lost_timer: [f32; 2],
+    /// `m_fCoughingCooldown`.
+    pub coughing_cooldown: [f32; 2],
+    /// `m_SimultaneousRunnerAllowed`, `m_fTimeBeforeRunning`.
+    pub runners_allowed: u32,
+    pub time_before_running: f32,
+    /// `m_StandStillWeeping` after a grab.
+    pub stand_still: [f32; 2],
+    /// TakePosition arrival threshold of the follow sub-state.
+    pub follow_threshold: f32,
+    /// `DisTweaks_WeeperGrab`: range, feet height difference, angle, length, group inhibition.
+    pub grab_range: f32,
+    pub grab_height: f32,
+    pub grab_angle: f32,
+    pub grab_duration: f32,
+    pub grab_inhibition: f32,
+    /// Plague cloud of the pawn tweak: `m_fPlagueRadius`, `m_fPlagueDmgAngle`,
+    /// `m_iPlagueDmgPerTick`, `m_fPlagueDmgePeriod`, `m_fPlagueDmgLength`.
+    pub plague_radius: f32,
+    pub plague_angle: f32,
+    pub plague_damage: f32,
+    pub plague_period: f32,
+    pub plague_length: [f32; 2],
+}
+
+impl Default for WeeperConfig {
+    /// `Pwn_WeeperMiddle_MTall_1` / `TweakBehaviors_Weep_Default` / `DisTweaks_WeeperGrab_2` values.
+    fn default() -> Self {
+        WeeperConfig {
+            health_max: 30.0,
+            home_radius: 1500.0,
+            lost_timer: [1.0, 3.0],
+            coughing_cooldown: [2.0, 5.0],
+            runners_allowed: 3,
+            time_before_running: 0.0,
+            stand_still: [2.0, 5.0],
+            follow_threshold: 110.0,
+            grab_range: 400.0,
+            grab_height: 50.0,
+            grab_angle: 90.0,
+            grab_duration: 1.33,
+            grab_inhibition: 20.0,
+            plague_radius: 350.0,
+            plague_angle: 90.0,
+            plague_damage: 4.0,
+            plague_period: 0.5,
+            plague_length: [2.0, 3.0],
+        }
+    }
+}
+
+/// `DisBehaviorTallBoyCombat` (`AI_BehaviorTweaks_TallBoy_Combat`) and its bow.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct TallboyConfig {
+    pub health_max: f32,
+    /// Melee contexts (the leg stomp).
+    pub attacks: Vec<SpecialAttack>,
+    pub manage: ManageAttacksConfig,
+    /// `DisTweaks_NPCFireBow`: ranges, angle, cooldown, projectile speed.
+    pub bow: SpecialAttack,
+    pub arrow_speed: f32,
+    pub arrow_gravity_mult: f32,
+    /// `m_fAlliesHoldFireRadius`: an ally within it around the target denies the shot (0x00bf7550).
+    pub allies_hold_fire_radius: f32,
+    /// `StateNPCMasterTallboyAim`: the shot needs the aim yaw within `m_fAimAlignYawDegrees` of the
+    /// target for `m_fAimAlignTimeBeforeShooting` (0x00a87700, 0x00a7cd80).
+    pub aim_align_deg: f32,
+    pub aim_time: f32,
+    /// `Attribute_MaxAccuracy` / `Attribute_MinAccuracy` (Normal) of the pawn: the hit chance
+    /// runs from the first at the bow's min range to the second at its max range (0x00b732e0).
+    pub accuracy: [f32; 2],
+    /// `m_fCheatAngleDeviation`: a miss aims within this angle of the line to the target.
+    pub miss_angle: f32,
+    /// `GravityZ` of the world (the ballistic solve, 0x00c3f2a0).
+    pub gravity_z: f32,
+    /// The arrow's explosion (`TallboyArrowExplosion_Twk`).
+    pub explosion: crate::items::ExplosionConfig,
+    /// FindShootingPosition: avoidance radius, give-up time without progress.
+    pub fsp_avoidance: f32,
+    pub fsp_give_up: f32,
+}
+
+/// `DisBehaviorMusicalCombat` and the music box (`Twk_Weapon_MusicBox_Default`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct MusicalOverseerConfig {
+    pub health_max: f32,
+    /// The bash (`DisTweaks_NPCBash`).
+    pub attacks: Vec<SpecialAttack>,
+    /// The combat tune (`DisTweaks_NPCTune_Combat`): range, angle, cooldown.
+    pub tune: SpecialAttack,
+    /// `m_fMusicEffectPeriod` of its `DisTweaks_Tune`, `m_iMusicEffectDamage`.
+    pub tune_period: f32,
+    pub tune_damage: f32,
+    /// `m_fStopWhenNotSeeingTimer`, `m_fStopWhenOutOfRangeTimer`.
+    pub stop_not_seeing: f32,
+    pub stop_out_of_range: f32,
+    /// `m_fRepulseForceRange` (uu/s per second, at the far and near end of the range).
+    pub repulse: [f32; 2],
+    /// `DisTweaks_Tune_Protection.m_fMusicEffectRadius_InhibitPowers`: within it a pawn cannot use
+    /// powers while either tune plays (0x00bd7390).
+    pub inhibit_powers_radius: f32,
+    /// `m_fIdealContextRange` of the protection tune: the distance MaintainDistance closes to.
+    pub ideal_distance: f32,
+    /// The player's `Attribute_MusicDamageReduction` (Normal, `Twk_Pawn_Corvo_Release`): Musical
+    /// damage is `round(dmg x (1 - reduction))` (0x00b5ccd0).
+    pub player_music_reduction: f32,
+}
+
 /// `EAINoiseContext` (DisGlobalEnums, in enum order).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NoiseContext {
@@ -913,6 +1183,9 @@ pub struct AiConfig {
     /// before the ambient `DDH_PATROL_MISC` barks (0x00b47020).
     #[serde(default = "bark_inhibition")]
     pub ambient_bark_inhibition: f32,
+    /// The special NPC classes (tallboys, hounds, weepers, music-box Overseers).
+    #[serde(default)]
+    pub special: SpecialNpcConfig,
     pub provenance: BTreeMap<String, String>,
 }
 
@@ -1147,6 +1420,19 @@ pub struct AiLevel {
     /// The level's `DisStealthVolume`s.
     #[serde(default)]
     pub stealth_volumes: Vec<StealthVolume>,
+    /// Pawn tweak path -> the class name of its brain's Combat-slot behaviour
+    /// (`m_pBrainTweak` -> `m_BehaviorTweak[i].m_Difficulty[1]` with `m_DesignatedSlot`
+    /// `EAISlot_Combat` -> `m_pSpawnedObjectClass`); absent: no combat behaviour.
+    #[serde(default)]
+    pub tweak_combat: BTreeMap<String, String>,
+}
+
+impl AiLevel {
+    /// The NPC class of a pawn tweak (see [`NpcClass`]); `None` when the tweak's brain was not
+    /// resolved.
+    pub fn npc_class(&self, tweak: &str) -> Option<NpcClass> {
+        self.tweak_combat.get(tweak).map(|c| NpcClass::from_combat_behavior(c))
+    }
 }
 
 /// A `DisStealthVolume`: while the player touches it, the visibility component normalizes the
@@ -1424,6 +1710,7 @@ impl Default for AiConfig {
             anim_magic_lost_target: 0.0,
             locomotion: Vec::new(),
             ambient_bark_inhibition: bark_inhibition(),
+            special: SpecialNpcConfig::default(),
             provenance: BTreeMap::new(),
         }
     }

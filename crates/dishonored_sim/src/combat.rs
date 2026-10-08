@@ -159,6 +159,11 @@ pub fn melee_damage(a: &PlayerState, victim: &PlayerState, offscreen: bool, g: &
         return t.attack_damage_multiplier * base;
     }
     let c = &g.ai.combat;
+    // A special class's attack (hound bite, Tallboy stomp, Overseer bash): its own context and
+    // weapon (`ceil(m_fAttackDamageMultiplier x Attribute_MeleeDamage)`, Normal).
+    if let Some(s) = g.ai.special.attack(a.sword.npc_move) {
+        return s.damage;
+    }
     let mult = match a.sword.npc_move {
         0 => 1.0,
         // A pattern without the move (older configs): the elite sword's value for its class.
@@ -318,7 +323,9 @@ pub fn resolve_sword_hits(state: &mut WorldState, world: &dyn WorldQuery, g: &Ga
             let victim = state.players[vi];
             let to_attacker = attacker.position - victim.position;
             let facing = angle_deg(forward_vector(victim.yaw), to_attacker) <= t.block_half_angle;
-            if victim.sword.phase == SwordPhase::Blocking && facing {
+            // `m_MainAttack.m_bUnblockable` (the bash, the stomp, the hound's jump attack).
+            let unblockable = attacker.kind != PawnKind::Human && g.ai.special.attack(attacker.sword.npc_move).is_some_and(|s| s.unblockable);
+            if victim.sword.phase == SwordPhase::Blocking && facing && !unblockable {
                 if parries(&victim.sword, t) {
                     let a = &mut state.players[ai];
                     a.sword.phase = SwordPhase::Staggered;

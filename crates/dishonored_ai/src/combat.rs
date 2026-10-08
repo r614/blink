@@ -27,7 +27,7 @@ pub fn pick_context(ctxs: &[MeleeContextConfig], cooldowns: &[f32], inhibit: &[(
 /// Does the attack close distance as part of its animation (root motion)? The medium, long and
 /// jump attacks start beyond the sword's reach and travel to the target.
 pub fn lunges(kind: AttackKind) -> bool {
-    matches!(kind, npc_moves::ATTACK_MEDIUM | npc_moves::ATTACK_LONG | npc_moves::JUMP_ATTACK | npc_moves::ATTACK_SHORT)
+    matches!(kind, npc_moves::ATTACK_MEDIUM | npc_moves::ATTACK_LONG | npc_moves::JUMP_ATTACK | npc_moves::ATTACK_SHORT | npc_moves::WH_BITE | npc_moves::WH_JUMP_ATTACK | npc_moves::WH_ARM_ATTACK | npc_moves::TALLBOY_STOMP)
 }
 
 /// Pistol use decision of the elite combat refresh (0x00b0e220), returned as

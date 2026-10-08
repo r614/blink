@@ -267,3 +267,12 @@ session read object=worldinfo path=TimeSeconds
 session read object=worldinfo path=BendTimeSeconds
 session read object=worldinfo path=Game.m_fCurrentWorldTimeDilation
 session read object=worldinfo path=Game.m_fCurrentPlayerTimeDilation
+# --- special NPC classes (research/dishonored/systems/ai.md F6, 2026-10-08) ---
+# Each places the class's pawn tweak at its Boyle spawner point and alerts it on the player; the
+# brain channel (m_pCurrentBehavior) should show the class's combat behaviour.
+ai/boyle_tallboy_bow
+ai/boyle_weeper_plague
+ai/boyle_overseer_tune
+# The Overseer's power inhibition: the player's m_fPowersInhibitedUntil while the tune plays.
+session read object=pawn path=m_fPowersInhibitedUntil
+# ai/hound_bite needs a map that cooks the wolfhound (L_Ovrsr_*): not capturable on the port's maps.

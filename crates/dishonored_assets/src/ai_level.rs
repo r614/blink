@@ -53,6 +53,27 @@ fn faction(db: &TweakDb, path: &str) -> Option<Faction> {
     Some(Faction { name: path.to_string(), allies: objs(&m, "m_AlliedFactions"), enemies: objs(&m, "m_EnemyFactions"), parents })
 }
 
+/// The class of the behaviour in a pawn tweak's brain's Combat slot: the brain tweak
+/// (`m_pBrainTweak`), its behaviour list (`m_BehaviorTweak[i]`, the Normal column
+/// `m_Difficulty[1]`), the first one designated `EAISlot_Combat`, its `m_pSpawnedObjectClass`.
+/// `Some("")` for a resolved brain without a combat behaviour; `None` when unresolved.
+pub fn combat_behavior_class(db: &TweakDb, pawn_tweak: &str) -> Option<String> {
+    let m = db.try_resolve(pawn_tweak)?;
+    let brain = get_obj(&m, "m_pBrainTweak").filter(|b| !b.is_empty())?.to_string();
+    let b = db.try_resolve(&brain)?;
+    let Some(TVal::List(list)) = b.get("m_BehaviorTweak") else { return Some(String::new()) };
+    for e in list {
+        let Some(path) = get_obj(e, "m_Difficulty[1]").or_else(|| get_obj(e, "m_Difficulty")).filter(|p| !p.is_empty()) else { continue };
+        let Some(bt) = db.try_resolve(path) else { continue };
+        if matches!(bt.get("m_DesignatedSlot"), Some(TVal::Name(n)) if n == "EAISlot_Combat") {
+            if let Some(c) = get_obj(&bt, "m_pSpawnedObjectClass") {
+                return Some(c.rsplit('.').next().unwrap_or(c).to_string());
+            }
+        }
+    }
+    Some(String::new())
+}
+
 /// Read the AI level data. `packages` are the map's packages (persistent level and
 /// sublevels); `tweaks` are the pawn tweaks of the map's spawners.
 pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String], loudness: &[f32]) -> Result<AiLevel> {
@@ -94,6 +115,15 @@ pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String
             if !voices.is_empty() {
                 out.generic_trees.insert(t.clone(), voices);
             }
+        }
+    }
+    // The class of each pawn tweak's Combat-slot behaviour (its NPC class).
+    for t in tweaks {
+        if out.tweak_combat.contains_key(t) {
+            continue;
+        }
+        if let Some(c) = combat_behavior_class(&db, t) {
+            out.tweak_combat.insert(t.clone(), c);
         }
     }
     let mut seen = std::collections::BTreeSet::new();

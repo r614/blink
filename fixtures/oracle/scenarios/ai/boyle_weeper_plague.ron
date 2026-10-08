@@ -1,0 +1,27 @@
+// A Boyle street weeper (`Pwn_WeeperMiddle_MTall_1`, placed at its spawner
+// `DishonoredSpawner_28`, faction Faction_Weepers_Default: Corvo is an enemy) aware of the player
+// 300 uu in front of it. DisBehaviorWeep (ai.md F6): the weeper follows, runs (at most 3 runners)
+// and grabs (`DisTweaks_WeeperGrab_2`: range 400, 20 s group inhibition), and every 2-5 s
+// (`m_fCoughingCooldown`) coughs a plague cloud: for 2-3 s, every 0.5 s, 4 damage to every pawn
+// within 350 uu in front of it with a clear line (`m_iPlagueDmgPerTick`, 0x00c86ea0).
+(
+    name: "ai/boyle_weeper_plague",
+    system: Ai,
+    map: "L_Boyle_Ext_P",
+    description: "A Boyle weeper closes on a player and coughs plague clouds at it.",
+    setup: (
+        player: Some((position: (-12235, -3807, -1000), yaw: -132, snap_to_floor: true, health: Some(5000))),
+        npcs: [(id: Some("weeper"), tweak: Some("Pwn_WeeperMiddle_MTall_1.Pwn_WeeperMiddle_MTall_1"), position: Some((-12436.0, -4030.0, -1036.9)), yaw: 48, state: Some("Alerted"), faction: Some("DisFaction_Defaults.Faction_Weepers_Default"))],
+        settle: 1,
+    ),
+    ticks: 900,
+    input: [],
+    checkpoints: [
+        (name: "fights", expect: [(metric: TimeAt("npc.weeper.state", 9), value: 1, tol: 0, cmp: AtMost, source: "Alerted: CombatBegin starts DisBehaviorWeep (the weeper brain's Combat slot)", status: Static)]),
+        (name: "plague tick", expect: [(metric: EventValue("Sim:Damage@player[cause=Plague]", "amount"), value: 4, tol: 0.01, source: "m_iPlagueDmgPerTick 4 of Pwn_WeeperMiddle_MTall_1 (class default 2)", status: Static)]),
+        (name: "first plague damage", expect: [(metric: FirstAt("Sim:Damage@player[cause=Plague]"), value: 0, tol: 0, source: "the original's first plague damage: the cough cooldown 2-5 s plus one 0.5 s period", status: Unmeasured)]),
+        (name: "damage taken", expect: [(metric: DropFrom("pawn.health", 0), value: 0, tol: 0, source: "the original's total over 15 s", status: Unmeasured)]),
+    ],
+    record: [Pawn, Vitals, Npc("weeper"), SimEvents],
+    capture: Some("scenario boyle_weeper_plague: spawn Pwn_WeeperMiddle_MTall_1 at the spawner 28 point, alert it on the player; record its position and current behaviour and the player's health per tick"),
+)

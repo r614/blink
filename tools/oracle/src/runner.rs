@@ -104,6 +104,18 @@ fn loadout(s: &Scenario, notes: &mut Vec<String>) -> Option<Loadout> {
     Some(l)
 }
 
+/// The NPC class of a pawn tweak: the level's table (`AiLevel::npc_class`), else the tweak's
+/// brain resolved with the level script packages that cook the special NPCs.
+fn npc_class_of(tweak: &str, mc: &dishonored_content::MatchContent) -> Option<dishonored_ir::ai::NpcClass> {
+    if let Some(c) = mc.ai_level.npc_class(tweak) {
+        return Some(c);
+    }
+    let content = dishonored_assets::Content::locate().ok()?;
+    let pkgs: Vec<String> = dishonored_assets::ai_config::SPECIAL_NPC_PACKAGES.iter().filter(|p| content.has_package(p)).map(|s| s.to_string()).collect();
+    let db = dishonored_assets::tweaks::TweakDb::load_with(&content, &pkgs).ok()?;
+    dishonored_assets::ai_level::combat_behavior_class(&db, tweak).map(|c| dishonored_ir::ai::NpcClass::from_combat_behavior(&c))
+}
+
 fn ammo_type(n: &str) -> Option<dishonored_ir::items::AmmoType> {
     dishonored_ir::items::AmmoType::ALL.into_iter().find(|t| format!("{t:?}").eq_ignore_ascii_case(n))
 }
@@ -164,7 +176,7 @@ fn mission(s: &Scenario, mc: &dishonored_content::MatchContent, notes: &mut Vec<
             notes.push(format!("spawner `{}` not found on {}", n.spawner.as_deref().unwrap_or(""), s.map));
         }
         if n.tweak.is_some() {
-            notes.push(format!("{name}: pawn tweak `{}` not applied (mission NPCs take the role archetype; U-113 health rule)", n.tweak.as_deref().unwrap_or("")));
+            notes.push(format!("{name}: pawn tweak `{}`: its NPC class (brain) applies; look and health take the role archetype (U-113 health rule)", n.tweak.as_deref().unwrap_or("")));
         }
         let pos = n.position.map(Vec3::from).or(spawner.map(|x| x.position)).context(format!("NPC {name}: no position or spawner"))?;
         let kind = match n.kind.as_deref().map(|k| k.to_ascii_lowercase()) {
@@ -447,6 +459,32 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
     for (i, n) in s.setup.npcs.iter().enumerate() {
         let Some((_, id)) = tracked.iter().find(|t| t.0 == npc_names[i].0).cloned() else { continue };
         let m = mm_mut(&mut game);
+        // A placed pawn tweak gives the brain its NPC class (the combat behaviour of the
+        // tweak's brain): the level's table, else the tweak resolved with the level script
+        // packages that cook the special NPCs.
+        if let Some(t) = n.tweak.as_deref().filter(|_| n.position.is_some() || !s.setup.original_npcs) {
+            match npc_class_of(t, &mc) {
+                Some(c) => {
+                    if let Some(b) = m.crowd.brains.iter_mut().find(|b| b.id == id) {
+                        b.class = c;
+                        if c.fights() {
+                            b.kind = dishonored_sim::state::PawnKind::Guard;
+                        }
+                    }
+                    if let Some(p) = m.world.player_mut(id) {
+                        if c.fights() {
+                            p.kind = dishonored_sim::state::PawnKind::Guard;
+                        }
+                        // As `MissionMatch::spawn_original`: the class's health and the plague.
+                        if let Some(h) = cfg.gameplay.ai.special.health_max(c) {
+                            p.vitals.health = h;
+                        }
+                        p.plague = c == dishonored_ir::ai::NpcClass::Weeper;
+                    }
+                }
+                None => notes.push(format!("{}: brain of pawn tweak `{t}` not resolved (NPC class by kind)", npc_names[i].0)),
+            }
+        }
         if n.position.is_some() || n.spawner.is_some() {
             if let Some(p) = m.world.player_mut(id) {
                 // A mission NPC placed `At(x, y, z)` spawns with yaw 0 (the place carries no

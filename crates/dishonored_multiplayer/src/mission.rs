@@ -48,6 +48,9 @@ pub struct OriginalNpc {
     #[serde(default)]
     pub name: String,
     pub spawn: NpcSpawn,
+    /// The pawn tweak's NPC class (`AiLevel::npc_class`; `None`: brain not resolved).
+    #[serde(default)]
+    pub class: Option<dishonored_ir::ai::NpcClass>,
     pub tweak: String,
     pub props: dishonored_ir::spawners::SpawnerProps,
     /// Mesh parts (package, object path) of this pawn's look: body + its picked head.
@@ -371,7 +374,10 @@ impl MissionSetup {
         let mut anim_profiles: Vec<dishonored_ir::npc_anim::AnimProfile> = Vec::new();
         for m in maps.iter().filter(|m| def.original_npcs.iter().any(|o| o.eq_ignore_ascii_case(&m.name))) {
             for s in m.spawners {
-                let (kind, mut archetype) = original_archetype(s);
+                // [ai] The pawn tweak's NPC class (its brain's Combat-slot behaviour): a pawn with a
+                // combat behaviour (tallboys, hounds, weepers, overseers) is a fighter.
+                let class = m.ai_level.npc_class(&s.tweak);
+                let (kind, mut archetype) = original_archetype(s, class);
                 let id = ORIGINAL_NPC_BASE + original.len() as PlayerId;
                 // The pawn tweak's own body and head (the head picked per pawn, as the original
                 // picks one of `m_RandomHeadMeshes`); the role archetype is the fallback.
@@ -398,7 +404,7 @@ impl MissionSetup {
                     }
                 }
                 let p = snap_floor(m.world, s.position).unwrap_or(s.position);
-                original.push(OriginalNpc { map: m.name.clone(), name: s.name.clone(), spawn: NpcSpawn { id, kind, archetype, position: p, yaw: s.yaw }, tweak: s.tweak.clone(), props: s.props.clone(), parts, helmet: s.appearance.helmet(id), lineage: if s.lineage.is_empty() { vec![s.tweak.clone()] } else { s.lineage.clone() } });
+                original.push(OriginalNpc { map: m.name.clone(), name: s.name.clone(), spawn: NpcSpawn { id, kind, archetype, position: p, yaw: s.yaw }, class, tweak: s.tweak.clone(), props: s.props.clone(), parts, helmet: s.appearance.helmet(id), lineage: if s.lineage.is_empty() { vec![s.tweak.clone()] } else { s.lineage.clone() } });
             }
         }
         let mut doors = Vec::new();
@@ -683,6 +689,14 @@ impl MissionMatch {
         spawn_npc(&mut self.world, s.id, s.kind, arch, s.position, s.yaw, cfg);
         if let Some(p) = self.world.player_mut(s.id) {
             p.helmet = o.helmet;
+            if let Some(c) = o.class {
+                // [ai] The special classes' `Attribute_HealthMax` (tallboys 150, weepers 30,
+                // music-box Overseers 40) and the weepers' plague (`m_bHasPlague`).
+                if let Some(h) = cfg.gameplay.ai.special.health_max(c) {
+                    p.vitals.health = h;
+                }
+                p.plague = c == dishonored_ir::ai::NpcClass::Weeper;
+            }
         }
         if o.props.spawn_dead || o.props.knocked_out {
             if let Some(p) = self.world.player_mut(s.id) {
@@ -697,6 +711,10 @@ impl MissionMatch {
         }
         let mut b = Brain::new(s.id, s.kind, s.position, 0x5EED ^ s.id as u64);
         b.stay = !o.props.patrol_on_startup;
+        if let Some(c) = o.class {
+            // [ai] The Combat slot's behaviour of the pawn's brain (`dishonored_ai::special`).
+            b.class = c;
+        }
         if o.props.patrol_on_startup {
             // [ai] `EAIStimID_PatrolRequest` at startup: `DisBehaviorPatrol` adopts a route
             // (squad, capacity, adoption range) and walks it.
@@ -1521,9 +1539,9 @@ impl MissionMatch {
 /// Pawn kind and presentation archetype for an original spawner. The pawn tweak decides the
 /// real model; until tweak -> mesh resolution exists, guards use the elite guard and civilians
 /// the party models (female tweaks the female aristocrat).
-fn original_archetype(s: &dishonored_ir::spawners::Spawner) -> (PawnKind, u8) {
+fn original_archetype(s: &dishonored_ir::spawners::Spawner, class: Option<dishonored_ir::ai::NpcClass>) -> (PawnKind, u8) {
     let t = s.tweak.to_ascii_lowercase();
-    match s.guard {
+    match s.guard || class.is_some_and(|c| c.fights()) {
         true => (PawnKind::Guard, 1),
         _ if t.contains("_f_") || t.contains("female") || t.contains("lady") || t.contains("servant_f") => (PawnKind::Civilian, 3),
         _ => (PawnKind::Civilian, if s.position.x as i64 % 2 == 0 { 0 } else { 2 }),
