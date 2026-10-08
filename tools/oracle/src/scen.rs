@@ -44,6 +44,8 @@ pub struct GroupResult {
     pub first: String,
     /// Steady offsets (original minus port), reported once.
     pub offsets: Vec<String>,
+    /// Mapped events: counts per side, pairs, mean tick offset.
+    pub note: String,
     /// Runs of diverging ticks over the group's channels (`channel first-last`).
     pub spans: Vec<String>,
     /// Channel-ticks compared and within the tolerance after removing the offsets.
@@ -97,6 +99,7 @@ fn trace_compare(d: &diff::TraceDiff) -> TraceCompare {
                 first_tick: g.first.as_ref().map(|x| x.tick),
                 first: g.first.as_ref().map(divergence_text).unwrap_or_else(|| "-".into()),
                 offsets: g.offsets.iter().map(|(c, o)| format!("{c} {o:+.3}")).collect(),
+                note: g.note.clone(),
                 spans: d.channels.iter().filter(|c| c.group == g.group).flat_map(|c| c.spans.iter().map(move |(a, b)| format!("{} {a}-{b}", c.channel))).collect(),
                 ticks: d.channels.iter().filter(|c| c.group == g.group).map(|c| c.compared as u64).sum(),
                 agree_ticks: d.channels.iter().filter(|c| c.group == g.group).map(|c| c.agree_ticks as u64).sum(),
@@ -294,10 +297,9 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
                 }
                 r.first_divergence = match &orig {
                     Some(o) => {
-                        let kinds: Vec<&str> = o.events.iter().map(|e| e.kind.as_str()).collect();
-                        let mut port = run.trace.clone();
-                        port.events.retain(|e| kinds.contains(&e.kind.as_str()));
-                        let d = diff::compare_traces(o, &port, &|c| s.tolerance(c), &|c| s.is_relative(c));
+                        // Every port event goes in: the comparison maps both sides' events to one
+                        // vocabulary (`event_map`) and compares raw kinds only where both record them.
+                        let d = diff::compare_traces(o, &run.trace, &|c| s.tolerance(c), &|c| s.is_relative(c), s.event_tolerance);
                         r.trace_compare = Some(trace_compare(&d));
                         d.first.map(|x| {
                             let group = d.groups.iter().find(|g| g.first.as_ref() == Some(&x)).map(|g| g.group.clone()).unwrap_or_default();
@@ -316,7 +318,7 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
     });
     let mut card = Scorecard { title: "Scenarios: the port against the original's measurements and traces".into(), ..Default::default() };
     let mut table = Table::new("Scenarios", &["scenario", "status", "pass/fail/unmeasured/unverified", "channels agree/offset/diverge", "first divergence", "s"]);
-    let mut chan_table = Table::new("Trace comparison per channel group", &["scenario", "group", "agree/offset/diverge", "first divergence", "offsets", "diverging ticks"]);
+    let mut chan_table = Table::new("Trace comparison per channel group", &["scenario", "group", "agree/offset/diverge", "first divergence", "offsets (events: counts and timing)", "diverging ticks"]);
     let mut group_tot: BTreeMap<String, (usize, u32, u32, u32, u32, u64, u64)> = BTreeMap::new();
     let mut checks_table = Table::new("Checks", &["scenario", "checkpoint", "metric", "port", "expected", "status", "reference"]);
     let mut items = Vec::new();
@@ -361,7 +363,7 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
         let chans = r.trace_compare.as_ref().map(|c| format!("{}/{}/{} of {}", c.agree, c.offset, c.diverge, c.channels)).unwrap_or_else(|| "-".into());
         table.row(vec![r.name.clone(), r.status.clone(), format!("{}/{}/{}/{}", r.passed, r.failed, r.unmeasured, r.unverified), chans, div, format!("{:.2}", r.seconds)]);
         for g in r.trace_compare.iter().flat_map(|c| &c.groups) {
-            chan_table.row(vec![r.name.clone(), g.group.clone(), format!("{}/{}/{}", g.agree, g.offset, g.diverge), g.first_tick.map(|t| format!("tick {t}: {}", g.first)).unwrap_or_else(|| "-".into()), g.offsets.join(", "), g.spans.join(", ")]);
+            chan_table.row(vec![r.name.clone(), g.group.clone(), format!("{}/{}/{}", g.agree, g.offset, g.diverge), g.first_tick.map(|t| format!("tick {t}: {}", g.first)).unwrap_or_else(|| "-".into()), if g.note.is_empty() { g.offsets.join(", ") } else { g.note.clone() }, g.spans.join(", ")]);
             let e = group_tot.entry(g.group.clone()).or_default();
             *e = (e.0 + 1, e.1 + g.channels, e.2 + g.agree, e.3 + g.offset, e.4 + g.diverge, e.5 + g.agree_ticks, e.6 + g.ticks);
         }
