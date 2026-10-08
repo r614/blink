@@ -55,6 +55,8 @@ struct WaterFoamUniform {
 @group(#{MATERIAL_BIND_GROUP}) @binding(6) var wf_foam_tex: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(7) var wf_scene: texture_cube<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(8) var wf_scene_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(9) var wf_reflect: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(10) var wf_reflect_sampler: sampler;
 
 // Bevy units per Unreal unit (coords::UU_TO_BEVY).
 const UU_TO_BEVY: f32 = 0.02;
@@ -111,7 +113,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let off = wf.refl.x * n + wf.refl.y * wavy;
     let r_ts = vec3<f32>(-v_ts.x + off.x, -v_ts.y + off.y, v_ts.z);
     let r_ws = r_ts.x * tg - r_ts.y * bt + r_ts.z * ng;
-    let refl = textureSample(wf_scene, wf_scene_sampler, r_ws).rgb * wf.refl.z;
+    var refl = textureSample(wf_scene, wf_scene_sampler, r_ws).rgb * wf.refl.z;
+    if (wf.object.w > 0.0) {
+        // C_Realtime_reflection_Texture at the screen position + W_Distorsion_intensity n +
+        // Wavy_Cube wavy; the capture camera is the mirrored viewer, so its image is flipped in x.
+        let sv = (in.position.xy - view_bindings::view.viewport.xy) / view_bindings::view.viewport.zw;
+        let po = off;
+        refl = saturate(textureSampleLevel(wf_reflect, wf_reflect_sampler, vec2<f32>(1.0 - (sv.x + po.x), sv.y + po.y), 0.0).rgb) * wf.refl.z;
+    }
     let m = dot(textureSample(wf_mask, wf_sampler, uv), wf.mask);
     var rgb = (1.0 - m) * refl + wf.water.rgb;
     if (wf.foam_color.w > 0.0) {

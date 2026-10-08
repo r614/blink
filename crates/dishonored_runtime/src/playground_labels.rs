@@ -29,7 +29,7 @@ pub fn setup_labels(mut commands: Commands, args: Res<crate::Args>) {
 }
 
 /// Place each label over its world point (centred), hidden behind the camera or out of range.
-pub fn update_labels(camera: Query<(&Camera, &GlobalTransform), With<Camera3d>>, mut labels: Query<(&WorldLabel, &mut Node, &mut Visibility, &ComputedNode)>) {
+pub fn update_labels(camera: Query<(&Camera, &GlobalTransform), (With<Camera3d>, Without<crate::reflect::ReflectCamera>)>, mut labels: Query<(&WorldLabel, &mut Node, &mut Visibility, &ComputedNode)>) {
     let Some((cam, tf)) = camera.iter().find(|(c, _)| c.is_active) else { return };
     let eye = tf.translation();
     for (l, mut node, mut vis, computed) in &mut labels {

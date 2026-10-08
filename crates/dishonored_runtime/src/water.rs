@@ -55,6 +55,9 @@ pub struct WaterUniform {
     /// rgb: AmbientColorAndSkyFactor.rgb in Bevy light units (0 in game, `decals::BASE_PASS_AMBIENT`);
     /// w: UE3 radiance to Bevy light units (`map_render::light_unit`).
     pub ambient: Vec4,
+    /// x: 1 = the planar reflection render target (`ArkWater::reflect`) is bound and
+    /// C_Enable_Realtime_Reflection is on: the reflection reads it instead of the cube.
+    pub planar: Vec4,
 }
 
 fn vector(p: &MaterialParams, name: &str, d: [f32; 4]) -> [f32; 4] {
@@ -91,6 +94,7 @@ impl WaterUniform {
             water_color: Vec4::new(wc[0], wc[1], wc[2], on("D_Enable_Diffuse_Distorsion")),
             mask,
             ambient: a.extend(light_unit),
+            planar: Vec4::ZERO,
         })
     }
 }
@@ -121,6 +125,11 @@ pub struct ArkWater {
     pub lightmap: Option<Handle<Image>>,
     #[texture(110)]
     pub directional: Option<Handle<Image>>,
+    /// `C_Realtime_reflection_Texture`: the render target of the level's
+    /// `SceneCaptureReflectActor` (`reflect.rs`), read at the screen position.
+    #[texture(111)]
+    #[sampler(112)]
+    pub reflect: Option<Handle<Image>>,
 }
 
 impl MaterialExtension for ArkWater {
@@ -139,8 +148,11 @@ pub struct PendingWater(pub ArkWater);
 impl PendingWater {
     /// The water of a section; `lightmap` is the instance's directional lightmap (None: the
     /// dynamic lights only, e.g. a layout map). Missing textures leave their term out.
-    pub fn new(p: &MaterialParams, textures: &[(String, TextureId)], images: &[Handle<Image>], scene: Option<Handle<Image>>, lightmap: Option<crate::decals::DecalLightmapRef>) -> Option<PendingWater> {
-        let params = WaterUniform::decode(p, crate::map_render::light_unit())?;
+    pub fn new(p: &MaterialParams, textures: &[(String, TextureId)], images: &[Handle<Image>], scene: Option<Handle<Image>>, lightmap: Option<crate::decals::DecalLightmapRef>, reflect: Option<Handle<Image>>) -> Option<PendingWater> {
+        let mut params = WaterUniform::decode(p, crate::map_render::light_unit())?;
+        // The planar target replaces the cube only in the permutations that sample it.
+        let reflect = reflect.filter(|_| params.fog_color.w > 0.0);
+        params.planar.x = if reflect.is_some() { 1.0 } else { 0.0 };
         let off: Vec<&str> = UNDECODED_OFF.iter().copied().filter(|s| p.switch(s) != Some(true)).collect();
         if !off.is_empty() {
             debug!("water: switches off whose terms are not decoded: {}", off.join(", "));
@@ -150,7 +162,7 @@ impl PendingWater {
             Some(l) => (l.uniform, Some(l.color), Some(l.directional)),
             None => (crate::decals::DecalLightmap::default(), None, None),
         };
-        Some(PendingWater(ArkWater { params, waves: tex(TEXTURES[0]), diffuse_mask: tex(TEXTURES[1]), diffuse: tex(TEXTURES[2]), scene, lightmap_params, lightmap: lm, directional: dir }))
+        Some(PendingWater(ArkWater { params, waves: tex(TEXTURES[0]), diffuse_mask: tex(TEXTURES[1]), diffuse: tex(TEXTURES[2]), scene, lightmap_params, lightmap: lm, directional: dir, reflect }))
     }
 }
 
@@ -168,13 +180,13 @@ fn apply_pending_water(
     q: Query<(Entity, &PendingWater, &MeshMaterial3d<StandardMaterial>)>,
     std_mats: Res<Assets<StandardMaterial>>,
     mut mats: ResMut<Assets<WaterMaterial>>,
-    mut cache: Local<std::collections::HashMap<(AssetId<StandardMaterial>, Option<AssetId<Image>>, [u32; 4]), Handle<WaterMaterial>>>,
+    mut cache: Local<std::collections::HashMap<(AssetId<StandardMaterial>, Option<AssetId<Image>>, [u32; 4], Option<AssetId<Image>>), Handle<WaterMaterial>>>,
 ) {
     for (e, p, m) in &q {
         let Some(base) = std_mats.get(&m.0) else { continue };
         let rect = p.0.lightmap_params.rect.to_array().map(f32::to_bits);
         let h = cache
-            .entry((m.0.id(), p.0.lightmap.as_ref().map(|h| h.id()), rect))
+            .entry((m.0.id(), p.0.lightmap.as_ref().map(|h| h.id()), rect, p.0.reflect.as_ref().map(|h| h.id())))
             .or_insert_with(|| {
                 // The colour, opacity and normal are the shader's own: the StandardMaterial's
                 // textures (the moss as the colour, the waves as a normal map) are dropped.

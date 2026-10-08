@@ -19,7 +19,7 @@
 //!            --from-launcher (set by the launcher: window from the settings, Esc menu returns)
 //!   rendering (all on by default; for before/after comparisons):
 //!            --no-lightmaps --no-materials --no-fx --no-dynamic-lights --no-fog
-//!            --no-post --no-sky --no-lightmap-specular, or --baseline for all of them (diffuse-only renderer
+//!            --no-post --no-sky --no-lightmap-specular --no-reflections, or --baseline for all of them (diffuse-only renderer
 //!            with the placeholder sun/ambient)
 //!   harness: --script FILE --out DIR --control PORT --record DIR --record-every N
 //!            --record-fps F --exit-after SECONDS --size WxH
@@ -78,6 +78,8 @@ pub mod level_props;
 pub mod decals;
 #[doc(hidden)]
 pub mod water;
+#[doc(hidden)]
+pub mod reflect;
 #[doc(hidden)]
 pub mod volume_light;
 #[doc(hidden)]
@@ -319,6 +321,7 @@ pub fn main() {
     .add_plugins(lighting::Ue3FalloffPlugin)
     .add_plugins(decals::DecalPlugin)
     .add_plugins(water::WaterPlugin)
+    .add_plugins(reflect::ReflectPlugin)
     .add_plugins(volume_light::VolumeLightPlugin)
     .add_plugins(spillway::SpillwayPlugin)
     .add_plugins(water_foam::WaterFoamPlugin)

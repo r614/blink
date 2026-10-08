@@ -309,6 +309,22 @@ fn bool_or(props: &[Property], name: &str, d: bool) -> bool {
         _ => d,
     }
 }
+/// A `RenderingChannelContainer` property as a bit set (`dishonored_ir::reflect_channel`): the
+/// struct's serialized bools override `base`.
+pub(crate) fn channel_mask(props: &[Property], name: &str, base: u32) -> u32 {
+    let Some(Value::Struct(_, s)) = find(props, name).map(|p| &p.value) else { return base };
+    let mut m = base;
+    for (i, n) in dishonored_ir::reflect_channel::NAMES.iter().enumerate() {
+        if let Some(Value::Bool(b)) = find(s, n).map(|p| &p.value) {
+            if *b {
+                m |= 1 << i;
+            } else {
+                m &= !(1 << i);
+            }
+        }
+    }
+    m
+}
 fn rot_matrix(props: &[Property], name: &str) -> Mat4 {
     match find(props, name).and_then(|p| p.as_rotator()) {
         Some([p, y, r]) => rotator_matrix(p, y, r),
@@ -384,6 +400,9 @@ impl Importer<'_> {
                 }
                 continue;
             }
+            if class == "SceneCaptureReflectActor" && self.is_in_persistent_level(&pkg, i) {
+                self.import_reflect_capture(slot, i);
+            }
             match class.as_str() {
                 "StaticMeshActor" if self.is_in_persistent_level(&pkg, i) => {
                     if let Err(e) = self.import_static_mesh_actor(slot, i) {
@@ -417,6 +436,53 @@ impl Importer<'_> {
             }
         }
         Ok(())
+    }
+
+    /// A placed `SceneCaptureReflectActor`: its component's render target, channels and update
+    /// settings, and the mirror plane (normal = the actor's X axis, through its location;
+    /// `SceneCaptureReflectComponent` vtable slot 88, Dishonored.exe 0x006E8200). Defaults are
+    /// the classes' UnrealScript defaults (`SceneCaptureComponent`, `SceneCaptureReflectComponent`,
+    /// `Default__SceneCaptureReflectActor`'s component).
+    fn import_reflect_capture(&mut self, slot: usize, actor: usize) {
+        let pkg = self.pkgs[slot].clone();
+        let Ok(h) = pkg.read_object(actor) else { return };
+        let Some(ObjRef::Export(ci)) = find(&h.properties, "SceneCapture").and_then(|p| p.as_object()).map(ObjRef::from_index) else { return };
+        let Ok(ch) = pkg.read_object(ci) else { return };
+        let cp = &ch.properties;
+        let Some(t) = find(cp, "TextureTarget").and_then(|p| p.as_object()).filter(|o| *o != 0) else { return };
+        let Some(tk) = self.resolve(slot, ObjRef::from_index(t)) else { return };
+        let tpkg = self.pkgs[tk.0].clone();
+        let tp = tpkg.read_object(tk.1).map(|h| h.properties).unwrap_or_default();
+        let resolution_type = match find(&tp, "m_ResolutionType").map(|p| &p.value) {
+            Some(Value::Enum(e)) => match e.as_str() {
+                "TRT_FULLSIZE" => 1,
+                "TRT_HALFSIZE" => 2,
+                "TRT_QUARTERSIZE" => 3,
+                _ => 0,
+            },
+            _ => 0,
+        };
+        let int = |n: &str| match find(&tp, n).map(|p| &p.value) {
+            Some(Value::Int(v)) => (*v).max(0) as u32,
+            _ => 0,
+        };
+        let loc = vec3_or(&h.properties, "Location", Vec3::ZERO);
+        let normal = rot_matrix(&h.properties, "Rotation").transform_vector3(Vec3::X).normalize_or(Vec3::Z);
+        self.map.reflect_captures.push(dishonored_ir::ReflectCapture {
+            source: format!("{}:{}", pkg.name, pkg.obj_path(ObjRef::Export(actor))),
+            target: tpkg.obj_path(ObjRef::Export(tk.1)),
+            resolution_type,
+            size: [int("SizeX"), int("SizeY")],
+            normal,
+            d: normal.dot(loc),
+            channels: channel_mask(cp, "ReflectionChannels", dishonored_ir::reflect_channel::CAPTURE_DEFAULT),
+            frame_rate: float_or(cp, "FrameRate", 1000.0),
+            enabled: bool_or(cp, "bEnabled", true),
+            fog: bool_or(cp, "bEnableFog", false),
+            post_process: bool_or(cp, "bEnablePostProcess", false),
+            skip_if_unseen: bool_or(cp, "bSkipUpdateIfTextureUsersOccluded", true),
+            max_update_dist: float_or(cp, "MaxUpdateDist", 0.0),
+        });
     }
 
     /// Placed `Emitter`: its `ParticleSystemComponent`'s `Template` at the actor transform.
@@ -797,6 +863,7 @@ impl Importer<'_> {
             lightmap: None,
             mover: None,
             trace_mask,
+            reflect_channels: channel_mask(&props, "ReflectionChannels", 0),
         });
         Ok(())
     }
@@ -1430,6 +1497,7 @@ impl Importer<'_> {
             vectors: chain.vectors.clone(),
             sky,
             particle,
+            render_targets: chain.textures.iter().chain(chain.default_textures.iter()).filter(|(_, k)| self.pkgs[k.0].export_class(k.1) == "TextureRenderTarget2D").map(|(n, k)| (n.clone(), self.pkgs[k.0].obj_path(ObjRef::Export(k.1)))).collect(),
             base_material: chain.base_material.clone(),
             static_switches: {
                 let mut names: Vec<String> = chain.switch_defaults.iter().map(|(n, _)| n.clone()).collect();
@@ -1841,6 +1909,7 @@ impl Importer<'_> {
             lightmap: None,
             mover: None,
             trace_mask: dishonored_ir::all_trace_types(),
+            reflect_channels: 0,
         });
         self.stats.skeletal_props += 1;
         Ok(())

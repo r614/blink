@@ -325,8 +325,11 @@ everywhere. On Boyle the night lightmap hid it; under the Playground's work ligh
 green.
 
 Missing inputs (U-764):
-- The port has no planar reflection capture, so the realtime-reflection instances use the
-  cubemap term (the level's reflection cube, as the decals' scene reflection).
+- The realtime reflection is drawn: `reflect.rs` renders the level's `SceneCaptureReflectActor`
+  into the target (research/dishonored/systems/render_reflect.md) and the shader samples it at the
+  screen position. With `--no-reflections`, or when the capture is missing or off (U-960 .. U-963),
+  the realtime-reflection instances use the cubemap term (the level's reflection cube, as the
+  decals' scene reflection).
 - The camera has no depth prepass. Without one, the scene behind the water is taken as far
   (alpha and fake fog at their deep / far values); with `DepthPrepass` on the camera the
   shader reads the real depth.
@@ -415,8 +418,9 @@ pale fallback-colour plane before). Low chaos: `Enable_Foam` (37073 G / 37074 R 
   Foam_Brightness.rgb x a x m`, `m = F_Foam_Mask[F_Foam_Mask_Chanel]`;
 - `a = saturate((scene depth - pixel depth) / Opacity_Depth) x Translucency`.
 
-Missing inputs: the planar reflection (the level's reflection cube stands in, as for the river,
-U-764) and the depth prepass (`a = Translucency`, U-931).
+Missing inputs: the planar reflection falls back to the level's reflection cube only with
+`--no-reflections` or without a capture (`reflect.rs`), and the depth prepass (`a = Translucency`,
+U-931).
 
 ## Doors' emissive placeholder (skeletal prop materials)
 
