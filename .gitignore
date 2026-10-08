@@ -12,3 +12,4 @@
 /.bin
 /*.png
 /target-agents*/
+/target-check*/
