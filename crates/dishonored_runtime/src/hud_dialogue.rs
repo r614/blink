@@ -182,8 +182,12 @@ pub fn update_dialogue_hud(
     let line = mv.and_then(current_line).filter(|_| choice.is_none());
     let n = choice.map(|c| c.len().min(MAX_OPTIONS)).unwrap_or(0);
     for (kind, mut node, mut text, mut font, mut vis) in &mut texts {
+        // UI components are written only on change (see gfx_hud::place).
         if let Some(f) = &fonts {
-            font.font = f.normal.clone().into();
+            let want: bevy::text::FontSource = f.normal.clone().into();
+            if font.font != want {
+                font.font = want;
+            }
         }
         let (content, pos, width) = match kind {
             DialogueText::Subtitle => (line.map(|l| l.text.trim().to_string()).unwrap_or_default(), layout.sub_pos, layout.sub_size.x.max(560.0)),
@@ -196,12 +200,10 @@ pub fn update_dialogue_hud(
                 (content, Vec2::new(layout.menu_origin.x, y) + layout.option_text, layout.option_width)
             }
         };
-        *vis = if content.is_empty() { Visibility::Hidden } else { Visibility::Inherited };
-        text.0 = content;
-        font.font_size = FontSize::Px(24.0 * s);
+        vis.set_if_neq(if content.is_empty() { Visibility::Hidden } else { Visibility::Inherited });
+        crate::gfx_hud::set_text(&mut text, content);
+        crate::gfx_hud::set_font_size(&mut font, 24.0 * s);
         let p = pos * s + off;
-        node.left = px(p.x);
-        node.top = px(p.y);
-        node.width = px(width * s);
+        crate::gfx_hud::place(&mut node, px(p.x), px(p.y), Some(px(width * s)), None);
     }
 }

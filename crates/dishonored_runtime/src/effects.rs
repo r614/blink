@@ -211,11 +211,14 @@ struct EmitterSim {
     /// 0 fire on the first cycle too (they only fired from the second loop on, so one-shot
     /// effects lost every time-0 burst, e.g. the muzzle shockwave).
     last_burst_t: f32,
+    /// The emitter's sprite mesh holds no particles (the placeholder triangle): it is not
+    /// rebuilt (and re-uploaded) again until particles exist.
+    mesh_empty: bool,
 }
 
 impl Default for EmitterSim {
     fn default() -> Self {
-        Self { time: 0.0, spawn_acc: 0.0, loops: 0, done: false, particles: Vec::new(), last_burst_t: -1.0 }
+        Self { time: 0.0, spawn_acc: 0.0, loops: 0, done: false, particles: Vec::new(), last_burst_t: -1.0, mesh_empty: true }
     }
 }
 
@@ -544,6 +547,15 @@ fn spawn_instance(commands: &mut Commands, meshes: &mut Assets<Mesh>, lf: &Level
         warmed: one_shot,
     });
     Some(root)
+}
+
+/// Whether an emitter's sprite mesh is read: drawn by its own entity (`spawn_instance` spawns
+/// one unless the emitter is skipped, a mesh or glow emitter, or has no material) or copied by
+/// the distortion pass.
+fn sprite_mesh_used(lf: &LevelFx, system: usize, emitter: usize) -> bool {
+    let k = (system, emitter);
+    let drawn = !lf.mesh_parts.contains_key(&k) && !lf.skipped.contains(&k) && !lf.glow.contains_key(&k) && lf.materials.contains_key(&k);
+    drawn || lf.distortion.get(&k).is_some_and(|d| d.mesh.is_none())
 }
 
 fn empty_mesh() -> Mesh {
@@ -1007,8 +1019,13 @@ fn simulate(
                         };
                     }
                 }
-            } else if let Some(mut m) = inst.meshes.get(i).and_then(|h| meshes.get_mut(h)) {
-                build_mesh(em, sim, &xf, right, up, cam_pos_b, &mut m);
+            } else if sprite_mesh_used(&lf, inst.system, i) && !(sim.particles.is_empty() && sim.mesh_empty) {
+                // Rebuilding a mesh re-uploads it: skip emitters that draw nothing (no sprite
+                // entity and no distortion copy) and meshes that stay empty.
+                if let Some(mut m) = inst.meshes.get(i).and_then(|h| meshes.get_mut(h)) {
+                    build_mesh(em, sim, &xf, right, up, cam_pos_b, &mut m);
+                    sim.mesh_empty = sim.particles.is_empty();
+                }
             }
             // The distortion pass draws the same particles with the distortion material.
             if let Some(ds) = lf.distortion.get(&(inst.system, i)).filter(|_| !sim.particles.is_empty()) {

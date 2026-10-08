@@ -191,9 +191,19 @@ pub fn pose_props(
             p.shown = state;
         }
         let Some(bank) = bank.as_mut() else { continue };
-        let Some(Some(gpu)) = lp.models.get(&p.model).cloned() else { continue };
-        let sets = p.prop.anim_sets.clone();
-        let profile = *lp.profiles.entry(sets.clone()).or_insert_with(|| bank.sets_profile(&sets));
+        // (The model is cloned only when the pose changes, below, not every frame.)
+        if !matches!(lp.models.get(&p.model), Some(Some(_))) {
+            continue;
+        }
+        let profile = match lp.profiles.get(&p.prop.anim_sets) {
+            Some(i) => *i,
+            None => {
+                let sets = p.prop.anim_sets.clone();
+                let i = bank.sets_profile(&sets);
+                lp.profiles.insert(sets, i);
+                i
+            }
+        };
         // The transition plays to its end, then the door rests on its stage's pose.
         let mut sample: Option<(String, f32)> = None;
         if let Some((anim, t)) = p.playing.clone() {
@@ -212,7 +222,8 @@ pub fn pose_props(
         if p.posed == sample {
             continue;
         }
-        let parts = gpu.parts.clone();
+        let Some(Some(gpu)) = lp.models.get(&p.model) else { continue };
+        let parts = &gpu.parts;
         let mut pose: Pose = parts.iter().map(|q| vec![None; q.bones.len()]).collect();
         if let Some((anim, t)) = &sample {
             let t = match bank.clip(profile, anim) {

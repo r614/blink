@@ -287,6 +287,7 @@ pub fn inspect_script(
     mut shots: ResMut<ShotQueue>,
     mut cam: ResMut<CameraRequest>,
     mut exit: MessageWriter<AppExit>,
+    mut prof: Option<ResMut<crate::profile::Profile>>,
 ) {
     if let Some(p) = shots.pending.first().cloned() {
         shots.pending.remove(0);
@@ -322,7 +323,13 @@ pub fn inspect_script(
         Step::Wait { wait_ticks } => runner.ticks_left = wait_ticks,
         Step::Input { ticks, .. } => runner.ticks_left = ticks,
         Step::Camera { camera } => cam.0 = Some(camera),
-        Step::Screenshot { screenshot } => shots.pending.push(runner.out_dir.join(format!("{screenshot}.png"))),
+        Step::Screenshot { screenshot } => {
+            // `--profile`: frame statistics of this viewpoint (the frames since the last shot).
+            if let Some(p) = prof.as_mut() {
+                p.mark = Some(screenshot.clone());
+            }
+            shots.pending.push(runner.out_dir.join(format!("{screenshot}.png")))
+        }
         Step::Dump { .. } | Step::Teleport { .. } | Step::View { .. } => {}
         Step::Quit { .. } => {
             runner.done = true;

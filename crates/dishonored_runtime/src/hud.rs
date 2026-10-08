@@ -128,7 +128,7 @@ pub fn update_hud(
         s += &format!("{f}\n");
     }
     for mut t in &mut hud {
-        t.0 = s.clone();
+        crate::gfx_hud::set_text(&mut t, s.clone());
     }
     let m = &view.matchv;
     let show = keys.pressed(KeyCode::Tab) || m.phase == MatchPhase::Ended;
@@ -146,7 +146,7 @@ pub fn update_hud(
         }
     }
     for mut t in &mut board {
-        t.0 = b.clone();
+        crate::gfx_hud::set_text(&mut t, b.clone());
     }
 }
 

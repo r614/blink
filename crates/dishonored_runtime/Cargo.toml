@@ -5,6 +5,11 @@ version.workspace = true
 license.workspace = true
 description = "Bevy presentation runtime: renders imported Dishonored maps"
 
+[features]
+# Per-system CPU spans written as a Chrome trace (`trace-*.json` in the working directory);
+# see research/dishonored/RENDERING.md "Performance".
+trace = ["bevy/trace_chrome"]
+
 [dependencies]
 anyhow.workspace = true
 bevy = { version = "0.19", features = ["pbr_specular_textures"] }

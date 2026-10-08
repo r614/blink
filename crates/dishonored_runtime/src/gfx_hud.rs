@@ -414,6 +414,7 @@ pub fn update_gfx_hud(
     mut ammo: Query<(&AmmoText, &mut Node, &mut Text, &mut TextFont), (Without<HudQuad>, Without<EquipIcon>)>,
     cams: Query<(&Camera, &GlobalTransform), With<crate::players::GameCamera>>,
     mut sent_disp: Local<Option<(f32, f32)>>,
+    overrides: Option<Res<crate::hud_settings::HudOverrides>>,
 ) {
     let Some(hud) = hud.filter(|h| h.loaded) else { return };
     let Some(window) = windows.iter().next() else { return };
@@ -463,7 +464,9 @@ pub fn update_gfx_hud(
             Group::Marker => (alive && marker.is_some(), None),
             Group::OutcomeBg => (ended, None),
         };
-        *vis = if show && frac.is_none_or(|f| f > 0.001) { Visibility::Inherited } else { Visibility::Hidden };
+        // The HUD options (hud_settings.rs) hide or fade on top of the movie's state.
+        let (opt_hide, opt_alpha) = overrides.as_ref().map(|o| o.quad(hq)).unwrap_or((false, None));
+        vis.set_if_neq(if show && !opt_hide && frac.is_none_or(|f| f > 0.001) { Visibility::Inherited } else { Visibility::Hidden });
         let (src, dst) = match frac {
             Some(f) => crop(&hq.quad, f),
             None => (hq.quad.src, hq.quad.dst),
@@ -472,26 +475,35 @@ pub fn update_gfx_hud(
             (Group::Marker, Some(at)) => dst.map(|(x, y)| (x + at.x, y + at.y)),
             _ => dst,
         };
+        let mut alpha = None;
         let dst = match (&hq.cross, *sent_disp) {
             (Some(cp), Some((d, pct))) if matches!(hq.group, Group::CrossGun | Group::CrossCrossbow) => {
-                let (corners, alpha) = cross_layout(cp, hq.group == Group::CrossCrossbow, d, pct);
-                img.color.set_alpha(hq.quad.color.mul[3].clamp(0.0, 1.0) * alpha);
+                let (corners, a) = cross_layout(cp, hq.group == Group::CrossCrossbow, d, pct);
+                alpha = Some(hq.quad.color.mul[3].clamp(0.0, 1.0) * a);
                 corners.map(|c| (c.x, c.y))
             }
             _ => dst,
         };
-        img.rect = Some(Rect::new(src[0], src[1], src[2], src[3]));
+        // The crosshair opacity option replaces the clip alpha (as it did when applied after).
+        if let Some(a) = opt_alpha.or(alpha) {
+            if img.color.alpha() != a {
+                img.color.set_alpha(a);
+            }
+        }
+        let rect = Some(Rect::new(src[0], src[1], src[2], src[3]));
+        if img.rect != rect {
+            img.rect = rect;
+        }
         let p = |c: (f32, f32)| Vec2::new(c.0, c.1) * s + off;
         let (tl, tr, br, bl) = (p(dst[0]), p(dst[1]), p(dst[2]), p(dst[3]));
         let w = (tr - tl).length();
         let h = (bl - tl).length();
         let c = (tl + br) * 0.5;
-        node.left = px(c.x - w * 0.5);
-        node.top = px(c.y - h * 0.5);
-        node.width = px(w);
-        node.height = px(h);
-        let ang = (tr - tl).y.atan2((tr - tl).x);
-        xf.rotation = Rot2::radians(ang);
+        place(&mut node, px(c.x - w * 0.5), px(c.y - h * 0.5), Some(px(w)), Some(px(h)));
+        let rotation = Rot2::radians((tr - tl).y.atan2((tr - tl).x));
+        if xf.rotation != rotation {
+            xf.rotation = rotation;
+        }
     }
     let key = match item {
         LeftHand::Blink => Some("blink"),
@@ -507,28 +519,64 @@ pub fn update_gfx_hud(
     for (ei, mut node, mut img, mut vis) in &mut icon {
         match key.and_then(|k| hud.icons.get(k)).filter(|_| alive) {
             Some(h) => {
-                img.image = h.clone();
-                *vis = Visibility::Inherited;
+                if img.image != *h {
+                    img.image = h.clone();
+                }
+                vis.set_if_neq(Visibility::Inherited);
             }
-            None => *vis = Visibility::Hidden,
+            None => {
+                vis.set_if_neq(Visibility::Hidden);
+            }
         }
         let size = ei.size * s;
         let c = ei.center * s + off;
-        node.left = px(c.x - size * 0.5);
-        node.top = px(c.y - size * 0.5);
-        node.width = px(size);
-        node.height = px(size);
+        place(&mut node, px(c.x - size * 0.5), px(c.y - size * 0.5), Some(px(size)), Some(px(size)));
     }
     for (at, mut node, mut text, mut font) in &mut ammo {
         let p = at.pos * s + off;
-        node.left = px(p.x);
-        node.top = px(p.y);
-        font.font_size = FontSize::Px(18.0 * s);
-        text.0 = match (me, item) {
+        place(&mut node, px(p.x), px(p.y), None, None);
+        set_font_size(&mut font, 18.0 * s);
+        let t = match (me, item) {
             (Some(m), LeftHand::Pistol) if alive => format!("{} | {}", m.left.pistol_loaded, m.left.pistol_reserve),
             (Some(m), LeftHand::Crossbow) if alive => format!("{} | {}", m.left.bolts_loaded, m.left.bolts_reserve),
             _ => String::new(),
         };
+        set_text(&mut text, t);
+    }
+}
+
+// Writing a UI component marks it changed even when the value is the same, and any changed
+// node, image or text re-runs the UI layout (and re-shapes the text) that frame. The HUD is
+// recomputed every frame, so these write only real changes.
+
+/// Move / resize an absolutely placed node when its box changed.
+pub fn place(node: &mut Mut<Node>, left: Val, top: Val, width: Option<Val>, height: Option<Val>) {
+    let n: &Node = &**node;
+    if n.left == left && n.top == top && width.is_none_or(|w| n.width == w) && height.is_none_or(|h| n.height == h) {
+        return;
+    }
+    node.left = left;
+    node.top = top;
+    if let Some(w) = width {
+        node.width = w;
+    }
+    if let Some(h) = height {
+        node.height = h;
+    }
+}
+
+/// Set a text's string when it changed.
+pub fn set_text(text: &mut Mut<Text>, s: String) {
+    if text.0 != s {
+        text.0 = s;
+    }
+}
+
+/// Set a font size (pixels) when it changed.
+pub fn set_font_size(font: &mut Mut<TextFont>, px: f32) {
+    let size = FontSize::Px(px);
+    if font.font_size != size {
+        font.font_size = size;
     }
 }
 
@@ -649,6 +697,7 @@ pub fn update_anchored_text(
     mut seen: Local<HashMap<u32, f32>>,
     windows: Query<&Window>,
     mut texts: Query<(&AnchoredText, &mut Node, &mut Text, &mut TextFont, &mut Visibility)>,
+    overrides: Option<Res<crate::hud_settings::HudOverrides>>,
 ) {
     let Some(window) = windows.iter().next() else { return };
     let (s, off) = stage_xform(Vec2::new(window.width(), window.height()));
@@ -677,9 +726,10 @@ pub fn update_anchored_text(
             (TextKind::Prompt, Some(mv)) => (interaction_prompt(mv, &view, local.yaw, local.pitch), 16.0),
             (TextKind::Message | TextKind::Outcome | TextKind::Prompt, None) => (String::new(), 15.0),
         };
-        *vis = if content.is_empty() || m.mode.is_empty() { Visibility::Hidden } else { Visibility::Inherited };
-        text.0 = content;
-        font.font_size = FontSize::Px(size * s);
+        let hidden = content.is_empty() || m.mode.is_empty() || overrides.as_ref().is_some_and(|o| o.text_hidden(at.kind));
+        vis.set_if_neq(if hidden { Visibility::Hidden } else { Visibility::Inherited });
+        set_text(&mut text, content);
+        set_font_size(&mut font, size * s);
         let min = at.rect.min * s + off;
         let max = at.rect.max * s + off;
         // Banner strips: right-aligned inside the strip; target paper: inset block.
@@ -688,9 +738,7 @@ pub fn update_anchored_text(
             TextKind::Message | TextKind::Outcome | TextKind::Prompt => (Vec2::new(0.0, 0.0), min.y),
             _ => (Vec2::new(0.04, 0.0), (min.y + max.y) * 0.5 - size * s * 0.65),
         };
-        node.left = px(min.x + (max.x - min.x) * inset.x);
-        node.width = px((max.x - min.x) * (1.0 - 2.0 * inset.x));
-        node.top = px(top);
+        place(&mut node, px(min.x + (max.x - min.x) * inset.x), px(top), Some(px((max.x - min.x) * (1.0 - 2.0 * inset.x))), None);
     }
 }
 
