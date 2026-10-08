@@ -795,6 +795,7 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
         actions.push((*t, ScriptAction::Write(*addr, bytes)));
     }
     let hw = crate::hookev::Want {
+        kismet: want(&Record::Kismet),
         sounds: want(&Record::Sounds),
         effects: want(&Record::Effects),
         noises: want(&Record::Sounds) || spec.record.iter().any(|r| matches!(r, Record::Npc(_))),
@@ -1009,7 +1010,7 @@ pub fn run_reads(s: &mut Session, a: &Value) -> Result<Value> {
     let damage = a.get("damage").and_then(Value::as_bool).unwrap_or(false);
     let dh = if damage { Some(crate::oracle_combat::damage_hook(&mut s.c)?) } else { None };
     let flag = |k: &str| a.get(k).and_then(Value::as_bool).unwrap_or(false);
-    let hw = crate::hookev::Want { sounds: flag("sounds"), effects: flag("effects"), noises: flag("noises") };
+    let hw = crate::hookev::Want { kismet: flag("kismet"), sounds: flag("sounds"), effects: flag("effects"), noises: flag("noises") };
     let hooks = if hw.any() { Some(crate::hookev::install(s, hw)?) } else { None };
     let paths: Vec<ReadPath> = ch.list.iter().filter_map(|c| c.path.clone()).collect();
     let (base, frames, errors) = s.c.run_script(ticks, &paths, &actions, 3_600_000)?;

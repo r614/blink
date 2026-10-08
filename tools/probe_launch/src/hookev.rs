@@ -32,9 +32,17 @@ pub const FN_AK_SDK_W: (u32, u8) = (0x00d1_6cd0, 5);
 pub const FN_AK_SDK_A: (u32, u8) = (0x00d1_6d60, 5);
 pub const FN_PSC_ACTIVATE: (u32, u8) = (0x008b_1f80, 7);
 pub const FN_AI_NOISE: (u32, u8) = (0x00c5_a760, 10);
+/// `USequence::QueueSequenceOp` (slot 101, 0x006E5050, thiscall `(op, bPushTop)`): every op a
+/// link activates goes through it (KISMET.md); the op's input impulses (+0xA0 records of 0x30,
+/// impulse bit at +0xC) say which input.
+pub const FN_SEQ_QUEUE: (u32, u8) = (0x006e_5050, 7);
+/// `USequenceEvent::ActivateEvent` (slot 102, 0x006F5DD0, thiscall `(originator, instigator,
+/// TArray<int>* indices, bPushTop, bFromQueued)`).
+pub const FN_SEQ_EVENT: (u32, u8) = (0x006f_5dd0, 10);
 
 #[derive(Default, Clone, Copy)]
 pub struct Want {
+    pub kismet: bool,
     pub sounds: bool,
     pub effects: bool,
     pub noises: bool,
@@ -46,12 +54,16 @@ pub struct Hooks {
 
 impl Want {
     pub fn any(&self) -> bool {
-        self.sounds || self.effects || self.noises
+        self.kismet || self.sounds || self.effects || self.noises
     }
 }
 
 pub fn install(s: &mut Session, w: Want) -> Result<Hooks> {
     let mut ids = Vec::new();
+    if w.kismet {
+        ids.push(("KismetQueue", s.c.hook_set(FN_SEQ_QUEUE.0, FN_SEQ_QUEUE.1, 2, 200_000, &[HookDeref { src: 0, pre: 0xa0, off: 0, len: 0x30 * 8 }, HookDeref::arg(0, 0xa4, 4)])?, FN_SEQ_QUEUE));
+        ids.push(("KismetEvent", s.c.hook_set(FN_SEQ_EVENT.0, FN_SEQ_EVENT.1, 5, 100_000, &[HookDeref { src: 2, pre: 0, off: 0, len: 16 }, HookDeref::arg(2, 4, 4)])?, FN_SEQ_EVENT));
+    }
     if w.sounds {
         ids.push(("Sound", s.c.hook_set(FN_AK_SDK_ID.0, FN_AK_SDK_ID.1, 2, 100_000, &[])?, FN_AK_SDK_ID));
         ids.push(("SoundW", s.c.hook_set(FN_AK_SDK_W.0, FN_AK_SDK_W.1, 2, 100_000, &[HookDeref::arg(0, 0, 160)])?, FN_AK_SDK_W));
@@ -128,6 +140,26 @@ pub fn collect(s: &mut Session, h: Hooks, times: &[f64]) -> Result<Vec<TraceEven
                     let e = ak.get(&akid).cloned().unwrap_or_else(|| format!("akid:{akid:#010x}"));
                     let go = r.args.get(1).copied().unwrap_or(0);
                     TraceEvent { tick, kind: "Sound".into(), object: game_object(s, go), name: e, detail: format!("akid={akid:#010x}") }
+                }
+                "KismetQueue" => {
+                    let op = r.args.first().copied().unwrap_or(0);
+                    let n = (r.u32_at(0x30 * 8) as usize).min(8);
+                    let inputs: Vec<String> = (0..n).filter(|i| r.data.get(i * 0x30 + 0xc).is_some_and(|b| b & 1 != 0)).map(|i| i.to_string()).collect();
+                    if inputs.is_empty() {
+                        // A latent op kept on the stack for its next update (every tick while
+                        // it runs): not an activation.
+                        continue;
+                    }
+                    let o = name(s, op);
+                    TraceEvent { tick, kind: "KismetOp".into(), object: short(&o), name: "Activate".into(), detail: format!("class={} input={} top={}", o.split(' ').next().unwrap_or(""), inputs.join(","), r.args.get(1).copied().unwrap_or(0) & 1) }
+                }
+                "KismetEvent" => {
+                    let ev = name(s, r.ecx);
+                    let orig = name(s, r.args.first().copied().unwrap_or(0));
+                    let inst = name(s, r.args.get(1).copied().unwrap_or(0));
+                    // TArray<int>* of output indices (data, num): the indices are not followed (empty = all).
+                    let cnt = r.u32_at(16);
+                    TraceEvent { tick, kind: "KismetOp".into(), object: short(&ev), name: "ActivateEvent".into(), detail: format!("class={} originator={} instigator={} outputs={}", ev.split(' ').next().unwrap_or(""), short(&orig), short(&inst), if r.args.get(2).copied().unwrap_or(0) == 0 { "all".to_string() } else { format!("{cnt} given") }) }
                 }
                 "SoundW" | "SoundA" => {
                     let text: String = if kind == "SoundW" {
