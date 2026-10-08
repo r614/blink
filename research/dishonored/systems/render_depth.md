@@ -4,9 +4,25 @@ Scope: a scene-depth texture available to materials and every feature that reads
 depth-biased particles and translucency, SceneDepth material terms, distortion, height fog and fog
 volumes, ambient occlusion.
 
-Status: audit only, partial. No code changed. The `git merge main` and
-`git merge worktree-agent-a4c9db721993b0d16` steps from the brief were not done (the merge was
-refused by the permission system), so this branch is still at `ad302e7`.
+Status: audit plus the first implementation step. The branch now has main and
+worktree-agent-a4c9db721993b0d16 merged (LOG.md / UNKNOWNS.md conflicts resolved by keeping both
+sides).
+
+## Implemented (second pass)
+
+- **Depth prepass on the game and inspect cameras** (`lib.rs setup_world`: Bevy `DepthPrepass`;
+  `DISHONORED_NODEPTH=1` turns it off to measure cost). This activates the already-written
+  `#ifdef DEPTH_PREPASS` paths of `ark_water.wgsl` (thickness opacity, `F_Enable_Fake_Fog`),
+  `volume_light.wgsl` (Db fade) and `water_foam.wgsl`, via `prepass_utils::prepass_depth` +
+  `depth_ndc_to_view_z`. Option (a) of the plan was chosen because Bevy has no depth copy before
+  the transparent pass and these shaders were written against the prepass. Cost: a GPU depth-only
+  pass of the opaque geometry, plus the render-world queueing of the opaque meshes into the
+  prepass phase (CPU, per visible mesh). Measure with and without `DISHONORED_NODEPTH`.
+- **Distortion setting**: `Graphics.distortion` (BaseEngine.ini `Distortion=True`, default on) in
+  `dishonored_settings`; `distortion.rs tag_game_camera` leaves the pass out when it is off. The
+  original has no video-menu entry for it, so there is no UI toggle. `FilteredDistortion` and
+  `DropParticleDistortion` (False) are not exposed: no consumer yet.
+- `scripts/render_fixes.sh` step 6: L_Boyle_Ext_P and L_Flooded_FStreets_P.
 
 ## Engine-side findings
 
@@ -64,8 +80,8 @@ refused by the permission system), so this branch is still at `ad302e7`.
 | Fog volumes (FogVolume*DensityInfo) | not in the exe's class list; factories hidden in DefaultEngine.ini | none | not in the game |
 | DisFog height fog | `DisFog` actors, `FDisFogPixelShader*` | Boyle Ext confirmed (3 layers); per-map count TODO | implemented (`ark_post`); U-321 open |
 | Distortion | `Dist_Enable_Distortion` materials, global shader 237 | 12 emitters in the decoded set; per-map TODO | implemented (`distortion.rs`); no settings toggle yet |
-| Depth-biased alpha (soft particles) | `Db_Enable_Depth_Biased_Alpha`, `Db_Depth_Biased_Alpha_Intensity` | TODO (count MICs with the switch on, per map) | missing |
-| Water depth opacity / fake fog | `river_main_PMAT` `O_*`, `F_*`, `D_Enable_Opacity_over_Depth` | maps with river_main_PMAT water (Boyle, canals, ...); TODO count | shader written, inactive (no depth prepass) |
+| Depth-biased alpha (soft particles) | `Db_Enable_Depth_Biased_Alpha`, `Db_Depth_Biased_Alpha_Intensity` | TODO (count MICs with the switch on, per map) | Volume_Light beams: done (formula decoded, now fed by the prepass). Sprite/mesh particles: missing, see below |
+| Water depth opacity / fake fog | `river_main_PMAT` `O_*`, `F_*`, `D_Enable_Opacity_over_Depth` | maps with river_main_PMAT water (Boyle, canals, ...); TODO count | active with the depth prepass (unverified in screenshots) |
 | Other SceneDepth / DestDepth / PixelDepth terms | compiled shaders only | TODO (shader scan) | unknown |
 | Bloom-part depth test | main depth buffer | all maps with bloom parts | implemented |
 
@@ -96,3 +112,10 @@ refused by the permission system), so this branch is still at `ad302e7`.
    `dishonored_settings`, honouring the original's video options.
 8. Add the views that best show these features to `scripts/render_fixes.sh`: Boyle Ext river (water
    thickness), muzzle smoke / steam particles meeting geometry, Flooded district fog.
+
+## Left, and why
+
+- **Soft sprite particles.** The Db formula is decoded (olume_light.wgsl header: Db = saturate((scene depth - pixel depth) x k), k = 1 / ((1 - intensity) x 50), 1000 below intensity 0.001) and the switch and intensity are reachable through map.material_params (switch(Db_Enable_Depth_Biased_Alpha)). Applying it to sprite particles needs the particle Handle<StandardMaterial> (effects.rs materials, mesh_parts, the simulate mutation of base colour) to become an ExtendedMaterial with a depth-fade fragment, which is a refactor of the 1400-line effects.rs that could not be run here. It is also unconfirmed that the sprite permutations use the same k as Volume_Light; step 4 of the plan (decode one DefaultAdditive_PMAT permutation with fxc) must come first.
+- **SceneDepth/DestDepth shader scan** (plan step 2) not done.
+- **DisFog open points** (U-321) belong to ark_post and are unchanged.
+- **AO, HeightFog, FogVolume**: not in the game; nothing to implement.
