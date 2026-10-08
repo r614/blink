@@ -676,7 +676,7 @@ fn powers_in_mission(rep: &mut Report, maps: &MapContents, def: &MissionDef) -> 
         // not rat pawns; rat pawns (sewer swarms) count too.
         let (mut rats, mut bends, mut pushed) = (0usize, 0usize, 0.0f32);
         let mut grenade_trace: Option<String> = None;
-        for _ in 0..150 {
+        for _ in 0..300 {
             p.step(idle);
             let w = &p.m().world;
             let swarm_rats: usize = w.swarms.iter().filter(|s| s.owner == ME && s.spawn_delay <= 0.0).map(|s| s.rats as usize).sum();
