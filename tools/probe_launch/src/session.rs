@@ -22,7 +22,7 @@ pub const G_FIXED_DELTA: u32 = 0x0126_96b0;
 const LP_CONTROLLER_ID: u32 = 0x5c;
 const ENGINE_GAME_PLAYERS: u32 = 0x480;
 
-pub const OPS: &str = "status open reload setup give power equip find read write dump props call signature spawn step resume key console place collide events spawns names";
+pub const OPS: &str = "status open reload setup give power equip select_power find read write dump props call signature spawn step resume key console place collide events spawns run attention shaders census psconst names";
 
 pub struct Session {
     pub c: Client,
@@ -193,11 +193,37 @@ impl Session {
                 self.c.write(a + 0x304, &v.to_le_bytes())?;
             }
         }
+        // A real focus loss (another window activated) opens the pause menu despite the focus
+        // faking (`Engine.bPauseOnLossOfFocus` -> `Dis_OpenPauseMenu`, WorldInfo.Paused): off.
+        let engine = self.r.object(&mut self.c, "engine", None)?;
+        let pl = self.r.place(&mut self.c, engine, "bPauseOnLossOfFocus")?;
+        self.r.write_place(&mut self.c, &pl, &json!(false))?;
+        self.unpause()?;
         if keep_alive {
             let p = crate::lab::pawn(&mut self.c)?;
             self.c.write(p + 0x594, &1i32.to_le_bytes())?;
         }
         self.set_fixed_step(hz)
+    }
+
+    /// Close the pause menu if it is open (`WorldInfo.Paused`: Enter on its highlighted
+    /// "Resume"). Returns whether the world was paused.
+    pub fn unpause(&mut self) -> Result<bool> {
+        let wi = self.r.object(&mut self.c, "worldinfo", None)?;
+        let pl = self.r.place(&mut self.c, wi, "Paused")?;
+        if self.r.read_place(&mut self.c, &pl)? != json!(true) {
+            return Ok(false);
+        }
+        for _ in 0..5 {
+            self.c.key("Enter", true)?;
+            self.c.step(2, 30_000)?;
+            self.c.key("Enter", false)?;
+            self.c.step(10, 30_000)?;
+            if self.r.read_place(&mut self.c, &pl)? != json!(true) {
+                return Ok(true);
+            }
+        }
+        bail!("the world stays paused (a menu is open)")
     }
 
     /// Put the pawn at `loc` (feet snapped to the floor below when `snap`: the engine's own
@@ -483,6 +509,91 @@ impl Session {
                     json!({"ok": true})
                 }
             }
+            "select_power" => {
+                // The left hand on an active power: `DisItemPowers` equipped as the secondary
+                // item, its current power pointed at the pawn's component of that class.
+                let cls = s("component").context("component (DisActivePowerComponent_DarkVision, DishonoredActivePowerComponent_Possess...)")?;
+                let comp = crate::oracle_powers::select_power(&mut self.c, cls)?;
+                json!({"component": reflect::object_value(&mut self.c, comp)?})
+            }
+            "run" => crate::capture::run_reads(self, a)?,
+            "layout" => {
+                // Build a layout map (maps/<name>.ron) in the current level (`reload`: open the
+                // host level fresh first). Positions in the layout are then at +offset.
+                let file = match (s("file"), s("map")) {
+                    (Some(f), _) => std::path::PathBuf::from(f),
+                    (None, Some(m)) => crate::playground::layout_file(m).with_context(|| format!("no maps/{}.ron (run from the repository root)", m.to_ascii_lowercase()))?,
+                    _ => bail!("file or map"),
+                };
+                let l = crate::playground::parse_layout(&std::fs::read_to_string(&file)?)?;
+                let offset = crate::playground::check_offset(a.get("offset").unwrap_or(&Value::Null))?;
+                if a.get("reload").and_then(Value::as_bool).unwrap_or(true) {
+                    let host = s("host").unwrap_or(crate::playground::host_map()).to_string();
+                    self.open_map(&host, Duration::from_secs(600))?;
+                    self.setup(num("hz").unwrap_or(60.0), true)?;
+                }
+                self.build_layout(&l, offset)?
+            }
+            "shaders" => {
+                // Bytecode of the shaders the game created from id `since` on, written to
+                // $DISHONORED_CACHE/oracle/shaders/<exe>/<kind>s_<hash>.bin (retail-derived:
+                // never committed).
+                let since = num("since").unwrap_or(0.0) as u32;
+                let dir = shader_dir()?;
+                std::fs::create_dir_all(&dir)?;
+                let v = self.c.shader_dump(since)?;
+                let mut list = Vec::new();
+                let mut next = since;
+                for sh in &v {
+                    let kind = if sh.kind == b'v' { "vs" } else { "ps" };
+                    let file = dir.join(format!("{kind}_{:016x}.bin", sh.hash));
+                    if !file.exists() {
+                        std::fs::write(&file, &sh.code)?;
+                    }
+                    next = next.max(sh.id + 1);
+                    list.push(json!({"id": sh.id, "kind": kind, "hash": format!("0x{:016x}", sh.hash), "tick": sh.tick, "size": sh.code.len(), "ctab": sh.ctab, "file": file.display().to_string()}));
+                }
+                json!({"next": next, "dir": dir.display().to_string(), "shaders": list})
+            }
+            "census" => {
+                // Pixel shaders drawn over the next frames (the world runs freely meanwhile).
+                let _ = self.c.lockstep(false, 1000);
+                let frames = num("frames").unwrap_or(10.0) as u32;
+                let names: std::collections::HashMap<u64, String> = self.c.shaders()?.into_iter().map(|s| (s.hash, s.ctab)).collect();
+                let v = self.c.draw_census(frames)?;
+                json!({"frames": frames, "shaders": v.iter().map(|(h, d, p)| json!({"hash": format!("0x{h:016x}"), "draws": d, "prims": p, "ctab": names.get(h).cloned().unwrap_or_default()})).collect::<Vec<_>>()})
+            }
+            "psconst" => {
+                // Live constants of the next `draws` draws with a pixel shader, by its CTAB
+                // parameters (`name=c12x2`: registers c12..c13).
+                let _ = self.c.lockstep(false, 1000);
+                let h = s("hash").context("hash 0x...")?;
+                let hash = u64::from_str_radix(h.trim_start_matches("0x"), 16)?;
+                let draws = num("draws").unwrap_or(1.0) as u32;
+                let names: std::collections::HashMap<u64, String> = self.c.shaders()?.into_iter().map(|s| (s.hash, s.ctab)).collect();
+                let ctab = names.get(&hash).cloned().unwrap_or_default();
+                let mut out = Vec::new();
+                for (frame, _, regs) in self.c.ps_constants(hash, draws, "")? {
+                    let mut m = Map::new();
+                    for p in ctab.split_whitespace() {
+                        let Some((name, reg)) = p.split_once('=') else { continue };
+                        let Some(r) = reg.strip_prefix('c') else { continue };
+                        let Some((i, n)) = r.split_once('x') else { continue };
+                        let (i, n): (usize, usize) = (i.parse().unwrap_or(0), n.parse().unwrap_or(0));
+                        let v: Vec<[f32; 4]> = regs.iter().skip(i).take(n).copied().collect();
+                        m.insert(name.to_string(), json!(v));
+                    }
+                    out.push(json!({"frame": frame, "params": m}));
+                }
+                json!({"hash": h, "ctab": ctab, "draws": out})
+            }
+            "attention" => {
+                // The NPC's attention record about the player (`PlayerAttnInfo`,
+                // DisAttentionInfo_Complex under its controller).
+                let npc = self.r.object(&mut self.c, s("npc").context("npc")?, None)?;
+                let a = crate::oracle_stealth::attention_info(&mut self.c, npc)?;
+                json!({"attention": reflect::object_value(&mut self.c, a)?, "addr": hex(a)})
+            }
             "names" => {
                 let v: Vec<u32> = a.get("addrs").and_then(Value::as_array).map(|v| v.iter().filter_map(|x| x.as_str().and_then(reflect::parse_addr)).collect()).unwrap_or_default();
                 json!({"names": self.c.names_of(&v)?})
@@ -496,6 +607,14 @@ impl Session {
 /// (`TRACE_Blocking`), the trace type taken from the source pawn. Used to snap placements to
 /// the floor and as the default flags of `collide` queries.
 pub const TRACE_WORLD: u32 = 0x0000_20df;
+
+/// `$DISHONORED_CACHE/oracle/shaders/<exe sha256, 16 hex>`.
+pub fn shader_dir() -> Result<std::path::PathBuf> {
+    use dishonored_oracle::cache;
+    let root = cache::root();
+    let exe = cache::file_sha256(&root, &cache::exe_path(&dishonored_oracle::install_dir()))?;
+    Ok(root.join("shaders").join(&cache::hex(&exe)[..16]))
+}
 
 fn reflect_vec(c: &mut Client, a: u32) -> Result<[f32; 3]> {
     crate::lab::read_vec(c, a)
