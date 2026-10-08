@@ -1077,7 +1077,8 @@ pub fn clamp_throw_momentum(m: Vec3, min_2d: f32, min_z: f32) -> Vec3 {
 /// `StateNPCMasterThrown.m_ThrowDirection` for a throw: the throw start (0x00A81860) turns the
 /// pawn to face against the momentum, plus 90 (1), -90 (2) or 180 degrees (3) of yaw; the
 /// direction is the one that keeps the pawn's current facing (LIKELY: the code choosing it was
-/// not found; 0 is hit from the front, 3 from the back, 1 / 2 from the left / right).
+/// not found). 0 / 1 / 2 / 3 play `Generic_WindBlast_Front` / `_Left` / `_Right` / `_Back` (the
+/// `PushToRagdoll` chain's Windblast group, indexed by the direction).
 pub fn throw_direction(yaw: f32, momentum: Vec3) -> usize {
     let back = Vec2::new(-momentum.x, -momentum.y);
     if back.length_squared() < 1e-8 {
@@ -1117,8 +1118,52 @@ pub fn start_throw(p: &mut PlayerState, momentum: Vec3, th: &dishonored_ir::game
             ragdoll_at: th.windblast_ragdoll_notify[throw_direction(p.yaw, m)],
             air_speed: v.length(),
             friction: th.fluid_friction * 0.5,
+            ragdoll: false,
+            rest_timer: THROW_REST_TEST_DELAY,
+            prev_scale: 0.0,
         };
     }
+}
+
+/// `m_fBodyAtRestTestTimer` as the throw state's enter sets it (0x00A9FAA0: 0.5, a constant of
+/// the code).
+pub const THROW_REST_TEST_DELAY: f32 = 0.5;
+
+/// The thrown pawn's rest test and get-up (the throw state's tick 0x00A98DD0, after the move):
+/// while `m_fBodyAtRestTestTimer` runs it only counts down; then, when the pawn's time dilation
+/// was and is above zero, the pawn is at rest once both horizontal Velocity components are below
+/// `m_fMaxRagdollSpeedToRecover x CustomTimeDilation` (`FVector::IsNearlyZero` of (vx, vy, 0),
+/// 0x004019A0; the original also takes a sleeping PhysX body as at rest, which the sim has
+/// not). At rest the pawn walks again (`SetPhysics(PHYS_Walking)`) and goes to
+/// `StateNPCMasterStunned` with `eStunEnterAnim_RagdollFront` (0x00A814B0): the `Stun` chain's
+/// `RagdollToFront`, its loop step for `m_fStunDuration` (0 here: one tick) and one recovery
+/// sequence, the pawn held all along (`action_lock`). Until then the thrown pawn is held too.
+/// The ragdoll itself is the sim's falling and walking moves (P-5: its PhysX dynamics, hence
+/// when the original's body comes to rest, are not modelled).
+pub fn step_thrown(p: &mut PlayerState, th: &dishonored_ir::gameplay::ThrowConfig, scale: f32, dt: f32) {
+    if !p.alive || !(p.thrown.active || p.thrown.ragdoll) {
+        return;
+    }
+    let t = &mut p.thrown;
+    let mut rest = false;
+    if t.rest_timer > 0.0 {
+        t.rest_timer -= dt;
+    } else if t.prev_scale > 0.0 && scale > 0.0 {
+        let thr = th.max_ragdoll_speed_to_recover * scale;
+        rest = p.velocity.x.abs() < thr && p.velocity.y.abs() < thr;
+    }
+    t.prev_scale = scale;
+    if !rest {
+        p.action_lock = p.action_lock.max(dt);
+        return;
+    }
+    p.thrown = crate::state::ThrownState::default();
+    if p.mode == MoveMode::Falling {
+        p.mode = MoveMode::Walking;
+    }
+    let n = th.getup_recover.len();
+    let recover = if n == 0 { 0.0 } else { th.getup_recover[((p.roll() * n as f32) as usize).min(n - 1)] };
+    p.action_lock = th.getup_anim + DT + recover;
 }
 
 /// The Flying phase of a throw (`physFlying`, then the state's tick 0x00A98DD0 with `m_bRagdoll`
@@ -1149,6 +1194,7 @@ pub(crate) fn flying(p: &mut PlayerState, ctx: &MoveCtx) {
     p.thrown.time += dt;
     if p.thrown.time >= p.thrown.ragdoll_at {
         p.thrown.active = false;
+        p.thrown.ragdoll = true;
     }
 }
 
