@@ -194,6 +194,11 @@ impl ContactSystem {
                                 },
                                 min_velocity: num("m_fMinVelocity"),
                             });
+                        } else {
+                            // `m_DecalInfo` left at the class defaults is not serialized
+                            // (DisContactSub_Decal_13): no materials, so it never fires, but it is
+                            // still the pair's decal sub and silences the pairs below it.
+                            it.decal = Some(ContactDecal::default());
                         }
                     }
                     "DisContactSub_Particle" => {
