@@ -498,7 +498,9 @@ fn cmd_collision(a: &Args) -> Result<CollisionRun> {
         };
         let t_oracle = t.elapsed().as_secs_f64();
         let t = Instant::now();
-        let (w, _) = port::snapshot(&root, map, a.flag("--rebuild"))?.world();
+        // [streaming] `--stream L1,L2`: these Kismet-streamed sublevels visible (default none, as on a map opened from the console).
+        let stream: Vec<String> = a.opt("--stream").map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()).unwrap_or_default();
+        let (w, _) = port::snapshot(&root, map, a.flag("--rebuild"))?.world_with(&stream);
         let mv = port::movers(&w, &set.doors);
         let t_load = t.elapsed().as_secs_f64() + t_oracle;
         let t = Instant::now();

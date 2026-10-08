@@ -310,6 +310,18 @@ pub struct HostState {
     /// `SeqAct_SetMaterial` (`OnSetMaterial`): actor or pawn -> material index -> material path.
     #[serde(default)]
     pub materials: BTreeMap<Obj, BTreeMap<i32, String>>,
+    /// [streaming] `SeqAct_PrepareMapChange.InitiallyLoadedSecondaryLevelNames` of the pending
+    /// map change.
+    #[serde(default)]
+    pub secondary: Vec<String>,
+    /// [streaming] The `LevelStreamingKismet` flags of the active map's streamed sublevels
+    /// (lowercase package): (`bShouldBeLoaded`, `bShouldBeVisible`). A level is in the world
+    /// while both hold.
+    #[serde(default)]
+    pub streaming: BTreeMap<String, (bool, bool)>,
+    /// [streaming] Sublevels unloaded since they were last in the world (they come back fresh).
+    #[serde(default)]
+    pub unloaded: BTreeSet<String>,
 }
 
 /// A player's cinematic mode (`PlayerController.SetCinematicMode` 0x00 script, then
@@ -322,8 +334,17 @@ pub struct Cinematic {
     /// ignored (`IgnoreMoveInput` / `IgnoreLookInput`).
     pub no_move: bool,
     pub no_look: bool,
-    /// The HUD is hidden (`myHUD.bShowHUD = false`) and the player pawn hidden.
-    pub hide_hud: bool,
+    /// `m_bInputIgnoreInput_Cinematic` (controller +0x610 bit 0x1000): the buttons are ignored
+    /// (`bDisableInput` while on).
+    #[serde(default)]
+    pub no_buttons: bool,
+    /// `DishonoredHUD.m_ShowFlags[eDisHUDMaskLevel_Cinematic]` bits the mode clears (HUD
+    /// elements hidden: 0x7faf, plus 0x10 with `m_bHideLetterbox`) and sets (shown: 0x6010, the
+    /// letterbox bit 0x10 among them); 0 / 0 when off (the reverse was applied).
+    pub hud_hidden: u32,
+    #[serde(default)]
+    pub hud_shown: u32,
+    /// `bHidePlayer` (`PreSetCinematicMode_Native`).
     pub hide_player: bool,
 }
 
@@ -954,19 +975,24 @@ impl Host for H<'_> {
                 cx.fire(1);
                 HostResult::Done
             }
-            // `PlayerController.OnToggleCinematicMode` -> `DishonoredPlayerController.
-            // SetCinematicMode` (script) for each player target: input 0 enables, 1 disables, 2
-            // toggles `bCinematicMode`. `PlayerController.SetCinematicMode` ignores the move /
-            // look input (`bDisableMovement` / `bDisableTurning`) while on and gives it back
-            // when off (only when the state of that input changes); the HUD (`bHideHUD`; the
-            // Dishonored override passes it to the native) and the player (`bHidePlayer`) are
-            // hidden. The native 0x00aaf150 also swaps the pawn's action permissions when the
-            // mode starts (disables mask 0x7faf, enables 0x6010; ends: the reverse): the player
-            // cannot act in cinematic mode (applied to the buttons in `cinematic_inputs`).
+            // `PlayerController.OnToggleCinematicMode` (script) for each player target: input 0
+            // enables, 1 disables, 2 toggles `bCinematicMode`, then
+            // `DishonoredPlayerController.SetCinematicMode` (script): `PreSetCinematicMode_Native`,
+            // `PlayerController.SetCinematicMode` with `bAffectsHUD` false (it ignores the move /
+            // look input, `IgnoreMoveInput` / `IgnoreLookInput`, for `bDisableMovement` /
+            // `bDisableTurning` while on, and gives it back when off, only when that input's state
+            // changes), then `SetCinematicMode_Native` (0x009eea00 -> 0x00aaf150):
+            // - controller +0x610 bit 0x1000 `m_bInputIgnoreInput_Cinematic` = on && `bDisableInput`
+            //   (the buttons are ignored);
+            // - `DishonoredHUD.m_ShowFlags[eDisHUDMaskLevel_Cinematic]` (+0x4e0): on clears 0x7faf
+            //   and sets 0x6010, and clears 0x10 (the letterbox) with `m_bHideLetterbox`; off
+            //   clears 0x6010 and sets 0x7faf (whatever `bHideHUD` says: the Dishonored override
+            //   hides the HUD through this mask);
+            // - bit 0x20000 `m_bAllowProjectilesAndExplosionsInCinematicMode` (false from this op).
             "SeqAct_ToggleCinematicMode" => {
                 let targets: Vec<PlayerId> = cx.objects("Target").iter().filter_map(|o| self.pawn_of(o)).filter(|p| self.m.humans.contains(p)).collect();
                 let input = cx.input();
-                let (mv, turn, hud, hide) = (cx.prop_bool("bDisableMovement"), cx.prop_bool("bDisableTurning"), cx.prop_bool("bHideHUD"), cx.prop_bool("bHidePlayer"));
+                let (mv, turn, buttons, hide, letterbox) = (cx.prop_bool("bDisableMovement"), cx.prop_bool("bDisableTurning"), cx.prop_bool("bDisableInput"), cx.prop_bool("bHidePlayer"), cx.prop_bool("m_bHideLetterbox"));
                 for p in targets {
                     let c = self.st.cinematic.entry(p).or_default();
                     let on = match input {
@@ -982,12 +1008,11 @@ impl Host for H<'_> {
                     if turn && on != c.no_look {
                         c.no_look = on;
                     }
-                    if hud {
-                        c.hide_hud = on;
-                    }
+                    c.no_buttons = on && buttons;
+                    (c.hud_hidden, c.hud_shown) = if on { (0x7faf | if letterbox { 0x10 } else { 0 }, 0x6010 & if letterbox { !0x10 } else { !0 }) } else { (0, 0) };
                     c.hide_player = on && hide;
                     let c = *c;
-                    self.note(format!("cinematic mode {} for player {p} (move {}, look {}, HUD {})", if on { "on" } else { "off" }, !c.no_move, !c.no_look, !c.hide_hud));
+                    self.note(format!("cinematic mode {} for player {p} (move {}, look {}, buttons {}, HUD hidden {:#x})", if on { "on" } else { "off" }, !c.no_move, !c.no_look, !c.no_buttons, c.hud_hidden));
                 }
                 HostResult::Done
             }
@@ -1034,6 +1059,47 @@ impl Host for H<'_> {
             // L_Flooded_FIntro entry stall). NOT PORTED: the unequip itself and the inventory
             // backup and clear (0x00ba8980: items, upgrades and abstract items minus the skip
             // lists).
+            // [streaming] Level streaming ops (`SeqAct_LevelStreamingBase::ActivateLevel`
+            // 0x006dc230, `SeqAct_MultiLevelStreaming::Activated` 0x006e5f90,
+            // `SeqAct_LevelVisibility::Activated` 0x006e62e0; the level found by `LevelName`,
+            // 0x006e5d50). `LevelStreaming` flags +0x5c: 0x80 `bShouldBeLoaded`, 0x100
+            // `bShouldBeVisible`, 0x200 `bShouldBlockOnLoad`.
+            // - Load (input 0): loaded, visible |= `bMakeVisibleAfterLoad`, block = `bShouldBlockOnLoad`;
+            //   Unload (input 1): not loaded, not visible.
+            // - `SeqAct_MultiLevelStreaming` does that for each of `Levels`, then with
+            //   `bUnloadAllOtherLevels` clears loaded and visible on every other streaming level.
+            // - `SeqAct_LevelVisibility` Make Visible (input 0): loaded and visible; Hide (1):
+            //   not visible (still loaded).
+            // Always-loaded levels ignore the flags (`LevelStreamingAlwaysLoaded`). The op is
+            // latent: it finishes ("Finished") once the levels are there (instant in the port).
+            "SeqAct_LevelStreaming" | "SeqAct_MultiLevelStreaming" | "SeqAct_LevelVisibility" => {
+                let names: Vec<String> = if class == "SeqAct_MultiLevelStreaming" {
+                    cx.prop("Levels").map(|v| v.as_array().iter().filter_map(|l| l.field("LevelName").and_then(|n| n.as_str().map(str::to_string))).collect()).unwrap_or_default()
+                } else {
+                    vec![cx.prop_str("LevelName")]
+                };
+                let input = cx.input();
+                let make_visible = cx.prop_bool("bMakeVisibleAfterLoad");
+                let streamed = self.m.setup.streamed_levels.get(&self.m.current_map.to_ascii_lowercase()).cloned().unwrap_or_default();
+                for n in &names {
+                    let Some(p) = streamed.iter().find(|p| p.eq_ignore_ascii_case(n)) else { continue };
+                    let e = self.st.streaming.entry(p.to_ascii_lowercase()).or_default();
+                    match (class == "SeqAct_LevelVisibility", input) {
+                        (false, Some(0)) => *e = (true, e.1 || make_visible),
+                        (false, Some(1)) => *e = (false, false),
+                        (true, Some(0)) => *e = (true, true),
+                        (true, Some(1)) => e.1 = false,
+                        _ => {}
+                    }
+                }
+                if class == "SeqAct_MultiLevelStreaming" && cx.prop_bool("bUnloadAllOtherLevels") {
+                    for p in streamed.iter().filter(|p| !names.iter().any(|n| n.eq_ignore_ascii_case(p))) {
+                        self.st.streaming.insert(p.to_ascii_lowercase(), (false, false));
+                    }
+                }
+                self.note(format!("level streaming {} {:?}: {}", class.trim_start_matches("SeqAct_"), input, names.join(", ")));
+                HostResult::Latent
+            }
             "DisSeqAct_BackupAndClearInventory" => {
                 cx.fire(0);
                 cx.fire(1);
@@ -1266,6 +1332,10 @@ impl Host for H<'_> {
             "SeqAct_PrepareMapChange" => {
                 let map = cx.prop_str("MainLevelName");
                 self.st.pending_map = Some(map.clone());
+                // [streaming] `InitiallyLoadedSecondaryLevelNames`: loaded with the map and
+                // visible (UE3 `CommitMapChange` adds a `LevelStreamingPersistent_<name>` that
+                // should be loaded and visible for each prepared secondary level).
+                self.st.secondary = cx.prop("InitiallyLoadedSecondaryLevelNames").map(|v| v.as_array().iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
                 self.note(format!("prepare map change {map}"));
                 HostResult::Latent
             }
@@ -2199,6 +2269,10 @@ impl Host for H<'_> {
     fn update(&mut self, cx: &mut Ctx, dt: f32) -> bool {
         match cx.class() {
             "SeqAct_PrepareMapChange" => true,
+            // `SeqAct_LevelStreamingBase::UpdateOp` (`SeqAct_MultiLevelStreaming` 0x006dc370)
+            // waits until every named level has reached the state asked for; the port loads a
+            // level and makes it visible at once.
+            "SeqAct_LevelStreaming" | "SeqAct_MultiLevelStreaming" | "SeqAct_LevelVisibility" => true,
             "DisSeqAct_NPCMarkForVanish" => {
                 if self.new_input(cx) {
                     // A new Mark / Cancel while running.
@@ -2487,16 +2561,15 @@ pub fn choice(m: &mut MissionMatch, player: PlayerId, index: usize) -> bool {
 
 /// Cinematic mode (`SeqAct_ToggleCinematicMode`) applied to the players' inputs before the
 /// world steps: movement input ignored (`IgnoreMoveInput`), the view kept where it is
-/// (`IgnoreLookInput`), and no actions (the pawn's action permissions are off while in
-/// cinematic mode, 0x00aaf150). The bit-by-bit meaning of the permission mask 0x7faf is not
-/// decoded: every button is refused.
+/// (`IgnoreLookInput`), and the buttons ignored with `bDisableInput`
+/// (`m_bInputIgnoreInput_Cinematic`, 0x00aaf150).
 pub fn cinematic_inputs(m: &MissionMatch, inputs: &mut [(PlayerId, dishonored_sim::input::PlayerInput)]) {
     let Some(run) = m.kismet.as_ref() else { return };
     if run.st.cinematic.is_empty() {
         return;
     }
     for (id, i) in inputs.iter_mut() {
-        let Some(c) = run.st.cinematic.get(id).filter(|c| c.on || c.no_move || c.no_look) else { continue };
+        let Some(c) = run.st.cinematic.get(id).filter(|c| c.no_buttons || c.no_move || c.no_look) else { continue };
         let Some(me) = m.world.player(*id) else { continue };
         if c.no_move {
             i.forward = 0;
@@ -2506,7 +2579,7 @@ pub fn cinematic_inputs(m: &MissionMatch, inputs: &mut [(PlayerId, dishonored_si
             i.yaw = me.yaw;
             i.pitch = me.pitch;
         }
-        if c.on {
+        if c.no_buttons {
             i.buttons = 0;
             i.action = 0;
             i.left_hand = me.left.item;
@@ -2575,6 +2648,7 @@ pub fn step(m: &mut MissionMatch, sim_events: &[SimEvent], dt: f32, cfg: &SimCon
             let ratio = if player != 0.0 { world / player } else { 1.0 };
             k.tick_dilated(&mut h, dt * player, ratio);
             cutscene::apply(k, &mut h); // [interp]
+            apply_streaming(k, &mut h); // [streaming]
             h.drain_spawns(k);
             commit_map_change(k, &mut h);
         }
@@ -3018,6 +3092,30 @@ fn touch_filter(k: &Kismet, h: &H, e: OpId, pawn: PlayerId, human: bool) -> bool
     want_classes.iter().any(is_class) || want_tweaks.iter().any(tweak_is)
 }
 
+/// [streaming] Bring the world in line with the streaming flags: a Kismet-streamed sublevel is
+/// in the world while it should be loaded and visible (UE3 adds a level to the world when it is
+/// made visible and removes it when it is hidden or unloaded). Its sequences start or stop, its
+/// actors join or leave, its collision answers or not (through the match's visible set).
+fn apply_streaming(k: &mut Kismet, h: &mut H) {
+    let streamed = h.m.setup.streamed_levels.get(&h.m.current_map.to_ascii_lowercase()).cloned().unwrap_or_default();
+    for p in streamed {
+        let key = p.to_ascii_lowercase();
+        let (loaded, visible) = h.st.streaming.get(&key).copied().unwrap_or_default();
+        if !loaded {
+            h.st.unloaded.insert(key.clone());
+        }
+        let want = loaded && visible;
+        if want == h.m.levels_visible.contains(&key) {
+            continue;
+        }
+        let cfg = h.cfg;
+        h.m.set_level_visible(&p, want, cfg);
+        let fresh = want && h.st.unloaded.remove(&key);
+        k.set_level_loaded(h, &p, want, fresh);
+        h.note(format!("level {p} {}", if want { "streamed in" } else { "streamed out" }));
+    }
+}
+
 /// `SeqAct_CommitMapChange` ran this step: swap maps (or end the mission when the map is not
 /// one of its maps).
 fn commit_map_change(k: &mut Kismet, h: &mut H) {
@@ -3045,7 +3143,23 @@ fn commit_map_change(k: &mut Kismet, h: &mut H) {
     }
     if from.as_deref().is_none_or(|f| !f.eq_ignore_ascii_case(&map)) {
         h.st.map = Some(map.clone());
-        k.load_map(h, &map);
+        // [streaming] The map's Kismet-streamed sublevels start unloaded, but for the secondary
+        // levels the map change prepared (loaded and visible).
+        let streamed = h.m.setup.streamed_levels.get(&map.to_ascii_lowercase()).cloned().unwrap_or_default();
+        let secondary = std::mem::take(&mut h.st.secondary);
+        h.st.streaming.clear();
+        for p in &streamed {
+            let on = secondary.iter().any(|s| s.eq_ignore_ascii_case(p));
+            h.st.streaming.insert(p.to_ascii_lowercase(), (on, on));
+        }
+        let out: Vec<String> = streamed.iter().filter(|p| !secondary.iter().any(|s| s.eq_ignore_ascii_case(p))).cloned().collect();
+        k.load_map_levels(h, &map, &out);
+        // The secondary levels' actors join the world (their Kismet loaded with the map).
+        for p in streamed.iter().filter(|p| secondary.iter().any(|s| s.eq_ignore_ascii_case(p))) {
+            let cfg = h.cfg;
+            h.m.set_level_visible(p, true, cfg);
+            h.note(format!("level {p} streamed in (prepared with the map)"));
+        }
     }
     h.drain_spawns(k);
 }

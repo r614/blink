@@ -863,6 +863,20 @@ impl Importer<'_> {
         let ObjRef::Export(ci) = ObjRef::from_index(comp) else {
             return Ok(());
         };
+        // A StaticMeshActor the cooker kept (still referenced) whose component it moved into a
+        // `StaticMeshCollectionActor` (`StaticMeshCollectionActor.StaticMeshActor_SMC_<n>`):
+        // that collection places the component (its cached matrix carries the actor's
+        // transform, and the component's `Scale3D` the actor's scale); the actor itself adds
+        // nothing. Placing it again from the actor applied the actor's transform on top of the
+        // component's (Ovrsr's `StaticMeshActor_2223`, Tower's `StaticMeshActor_2`: a second copy
+        // scaled twice, far from where the original has it).
+        if pkg.exports[ci].outer != i as i32 + 1 && pkg.export_class(match ObjRef::from_index(pkg.exports[ci].outer) {
+            ObjRef::Export(o) => o,
+            _ => i,
+        }) == "StaticMeshCollectionActor"
+        {
+            return Ok(());
+        }
         self.stats.static_mesh_actors += 1;
         let hidden = bool_or(&props, "bHidden", false);
         let world = actor_transform(&props);

@@ -65,6 +65,10 @@ pub struct MatchView {
     /// Active persistent map (changes on level travel; clients reload the renderer).
     #[serde(default)]
     pub map: String,
+    /// [streaming] The active map's Kismet-streamed sublevels (`LevelStreamingKismet`) that are
+    /// not visible now: the renderer hides their instances (and the rest of their actors).
+    #[serde(default)]
+    pub hidden_levels: Vec<String>,
     /// Mission mode: objectives, messages, outcome and stats.
     #[serde(default)]
     pub mission: Option<dishonored_mission::runtime::MissionView>,

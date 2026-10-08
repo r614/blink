@@ -63,6 +63,9 @@ pub struct OriginalNpc {
     /// victim filter.
     #[serde(default)]
     pub lineage: Vec<String>,
+    /// The level package that places the spawner.
+    #[serde(default)]
+    pub package: String,
 }
 
 /// The victim tweak lineage of a mission NPC, which has no pawn tweak of its own: the base
@@ -259,6 +262,10 @@ pub struct MissionSetup {
     /// Breakables, whale oil batteries and receptacles of each mission map (lowercase name).
     #[serde(default)]
     pub world_actors: BTreeMap<String, dishonored_ir::world_actors::WorldActors>,
+    /// [streaming] Each mission map's (lowercase name) Kismet-streamed sublevels
+    /// (`LevelStreamingKismet` packages): not in the world until the Kismet streams them in.
+    #[serde(default)]
+    pub streamed_levels: BTreeMap<String, Vec<String>>,
 }
 
 /// Resolve a place to (position, yaw, map index).
@@ -407,7 +414,7 @@ impl MissionSetup {
                     }
                 }
                 let p = snap_floor(m.world, s.position).unwrap_or(s.position);
-                original.push(OriginalNpc { map: m.name.clone(), name: s.name.clone(), spawn: NpcSpawn { id, kind, archetype, position: p, yaw: s.yaw }, class, tweak: s.tweak.clone(), props: s.props.clone(), parts, helmet: s.appearance.helmet(id), lineage: if s.lineage.is_empty() { vec![s.tweak.clone()] } else { s.lineage.clone() } });
+                original.push(OriginalNpc { map: m.name.clone(), name: s.name.clone(), spawn: NpcSpawn { id, kind, archetype, position: p, yaw: s.yaw }, class, tweak: s.tweak.clone(), props: s.props.clone(), parts, helmet: s.appearance.helmet(id), lineage: if s.lineage.is_empty() { vec![s.tweak.clone()] } else { s.lineage.clone() }, package: s.package.clone() });
             }
         }
         let mut doors = Vec::new();
@@ -423,7 +430,7 @@ impl MissionSetup {
                 }
             }
         }
-        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances, pickups: BTreeMap::new(), usables: Vec::new(), world_actors: BTreeMap::new(), anim_profiles, kismet: None, ai_levels: maps.iter().map(|m| (m.name.to_ascii_lowercase(), m.ai_level.clone())).collect(), routes: maps
+        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances, pickups: BTreeMap::new(), usables: Vec::new(), world_actors: BTreeMap::new(), streamed_levels: BTreeMap::new(), anim_profiles, kismet: None, ai_levels: maps.iter().map(|m| (m.name.to_ascii_lowercase(), m.ai_level.clone())).collect(), routes: maps
                 .iter()
                 .map(|m| {
                     // Snapped to the floor as `Crowd::set_routes` does for the crowd's map.
@@ -529,6 +536,10 @@ pub struct MissionMatch {
     mover_keys: Vec<(String, glam::Mat4, u8)>,
     #[serde(skip)]
     mover_worlds: Vec<dishonored_world::CollisionWorld>,
+    /// [streaming] The Kismet-streamed sublevels visible now (lowercase package names; the
+    /// streaming ops and map changes of the original Kismet set them).
+    #[serde(default)]
+    pub levels_visible: BTreeSet<String>,
 }
 
 impl MissionMatch {
@@ -581,6 +592,7 @@ impl MissionMatch {
             world_events: Vec::new(),
             mover_keys: Vec::new(),
             mover_worlds: Vec::new(),
+            levels_visible: BTreeSet::new(),
         };
         // The score carried in from the previous missions (the manager's score persists).
         m.darkness.add(m.setup.def.settings.darkness);
@@ -622,6 +634,67 @@ impl MissionMatch {
         }
     }
 
+    /// [streaming] Whether a level package is a Kismet-streamed sublevel of some mission map.
+    pub fn is_streamed_level(&self, package: &str) -> bool {
+        self.setup.streamed_levels.values().flatten().any(|p| p.eq_ignore_ascii_case(package))
+    }
+
+    /// [streaming] Whether a level package's actors are in the world: always-loaded levels
+    /// always, Kismet-streamed ones while visible.
+    pub fn level_present(&self, package: &str) -> bool {
+        package.is_empty() || !self.is_streamed_level(package) || self.levels_visible.contains(&package.to_ascii_lowercase())
+    }
+
+    /// [streaming] The active map's Kismet-streamed sublevels that are visible / hidden now.
+    pub fn visible_levels(&self) -> Vec<String> {
+        self.setup.streamed_levels.get(&self.current_map.to_ascii_lowercase()).map(|l| l.iter().filter(|p| self.levels_visible.contains(&p.to_ascii_lowercase())).cloned().collect()).unwrap_or_default()
+    }
+    pub fn hidden_levels(&self) -> Vec<String> {
+        self.setup.streamed_levels.get(&self.current_map.to_ascii_lowercase()).map(|l| l.iter().filter(|p| !self.levels_visible.contains(&p.to_ascii_lowercase())).cloned().collect()).unwrap_or_default()
+    }
+
+    /// [streaming] Make a Kismet-streamed sublevel visible (its actors join the world: the
+    /// begin-play spawners spawn, the placed pickups appear) or hidden (its actors leave the
+    /// world: its spawners' pawns and its pickups are removed; UE3 removes a hidden level's
+    /// actors from the world). Collision follows through [`dishonored_world::WorldQuery::set_visible_levels`].
+    pub fn set_level_visible(&mut self, package: &str, visible: bool, cfg: &SimConfig) {
+        let key = package.to_ascii_lowercase();
+        if visible == self.levels_visible.contains(&key) {
+            return;
+        }
+        let here = self.setup.streamed_levels.get(&self.current_map.to_ascii_lowercase()).is_some_and(|l| l.iter().any(|p| p.eq_ignore_ascii_case(package)));
+        if visible {
+            self.levels_visible.insert(key);
+            if !here {
+                return;
+            }
+            for i in 0..self.setup.original.len() {
+                let o = &self.setup.original[i];
+                if o.package.eq_ignore_ascii_case(package) && o.map.eq_ignore_ascii_case(&self.current_map) && o.props.on_begin_play && o.props.travel_tags.is_empty() && o.props.at_suspicion.is_none() {
+                    self.spawn_original(i, false, cfg);
+                }
+            }
+            if let Some(placed) = self.setup.pickups.get(&self.current_map.to_ascii_lowercase()) {
+                let scripted = kismet_host::scripted_pickups(self);
+                let placed: Vec<_> = placed.iter().filter(|p| p.package.eq_ignore_ascii_case(package) && !scripted.iter().any(|(pk, n)| n.eq_ignore_ascii_case(&p.name) && pk.eq_ignore_ascii_case(&p.package))).cloned().collect();
+                let seed = self.setup.def.title.bytes().fold(0x811C_9DC5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+                dishonored_sim::inventory::spawn_pickups(&mut self.world, &placed, seed, &|_: &str| None);
+            }
+        } else {
+            self.levels_visible.remove(&key);
+            if !here {
+                return;
+            }
+            let ids: Vec<PlayerId> = self.setup.original.iter().filter(|o| o.package.eq_ignore_ascii_case(package)).map(|o| o.spawn.id).collect();
+            self.world.players.retain(|p| !ids.contains(&p.id));
+            self.crowd.brains.retain(|b| !ids.contains(&b.id));
+            for id in ids {
+                self.original_spawned.remove(&id);
+            }
+            self.world.pickups.retain(|p| !p.package.eq_ignore_ascii_case(package));
+        }
+    }
+
     /// First visit of the active map: its share of the crowd and of the mission NPCs.
     fn populate_fresh(&mut self, cfg: &SimConfig) {
         if self.setup.crowd_map.eq_ignore_ascii_case(&self.current_map) {
@@ -655,7 +728,7 @@ impl MissionMatch {
         // Original spawners that spawn on begin play (not alarm squads or travel pursuers).
         for i in 0..self.setup.original.len() {
             let o = &self.setup.original[i];
-            if o.map.eq_ignore_ascii_case(&self.current_map) && o.props.on_begin_play && o.props.travel_tags.is_empty() && o.props.at_suspicion.is_none() {
+            if o.map.eq_ignore_ascii_case(&self.current_map) && o.props.on_begin_play && o.props.travel_tags.is_empty() && o.props.at_suspicion.is_none() && self.level_present(&o.package) {
                 self.spawn_original(i, false, cfg);
             }
         }
@@ -671,6 +744,8 @@ impl MissionMatch {
             // [kismet] Pickups with a `DisSeqEvent_PickupPickedUp` stay Kismet usables.
             let scripted = kismet_host::scripted_pickups(self);
             placed.retain(|p| !scripted.iter().any(|(pk, n)| n.eq_ignore_ascii_case(&p.name) && pk.eq_ignore_ascii_case(&p.package)));
+            // [streaming] Not the pickups of hidden Kismet-streamed sublevels.
+            placed.retain(|p| self.level_present(&p.package));
             let owners: BTreeMap<String, PlayerId> = self.setup.original.iter().filter(|o| o.map.eq_ignore_ascii_case(&self.current_map) && self.original_spawned.contains(&o.spawn.id)).map(|o| (o.name.to_ascii_lowercase(), o.spawn.id)).collect();
             let seed = self.setup.def.title.bytes().fold(0x811C_9DC5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
             let first = self.world.pickups.len();
@@ -936,6 +1011,12 @@ impl MissionMatch {
             self.saved.insert(self.current_map.to_ascii_lowercase(), LevelState { npcs, pickups: std::mem::take(&mut self.world.pickups), brains: crowd.brains.clone(), layout: crowd.layout.clone(), spawns: crowd.spawns.clone(), level: Crowd { brains: Vec::new(), ..crowd } });
             self.world.players.retain(|p| humans.contains(&p.id));
             self.world.projectiles.clear();
+            // [streaming] The persistent map change drops the old map's streamed sublevels.
+            if let Some(old) = self.setup.streamed_levels.get(&self.current_map.to_ascii_lowercase()) {
+                for p in old {
+                    self.levels_visible.remove(&p.to_ascii_lowercase());
+                }
+            }
             self.current_map = self.setup.maps.iter().find(|m| m.eq_ignore_ascii_case(dest_map)).cloned().unwrap_or_else(|| dest_map.to_string());
             match self.saved.remove(&self.current_map.to_ascii_lowercase()) {
                 Some(ls) => {
@@ -1090,6 +1171,9 @@ impl MissionMatch {
 
     pub fn step(&mut self, inputs: &[(PlayerId, PlayerInput)], world: &dyn WorldQuery, cfg: &SimConfig) -> StepOutput {
         let dt = dishonored_sim::movement::DT;
+        // [streaming] The visible Kismet-streamed sublevels collide; the hidden ones do not.
+        world.set_visible_levels(&self.visible_levels());
+        self.view.hidden_levels = self.hidden_levels();
         // A player answering a dialog choice does not move or act (the original takes control away).
         let conv_chooser = self.state.view.choice.as_ref().and_then(|c| c.player);
         let mut all: Vec<(PlayerId, PlayerInput)> = inputs
@@ -1506,6 +1590,21 @@ impl MissionMatch {
             self.mover_worlds.clear();
         }
         for (i, m) in movers.iter().enumerate() {
+            // [streaming] A mover of a hidden Kismet-streamed sublevel is not in the world.
+            if !self.level_present(dishonored_world::source_package(&m.actor).unwrap_or("")) {
+                match self.mover_keys.get(i) {
+                    Some(k) if k.2 == u8::MAX => {}
+                    Some(_) => {
+                        self.mover_keys[i].2 = u8::MAX;
+                        self.mover_worlds[i] = dishonored_world::CollisionWorld::from_triangles(Vec::new(), Vec::new());
+                    }
+                    None => {
+                        self.mover_keys.push((m.actor.clone(), glam::Mat4::IDENTITY, u8::MAX));
+                        self.mover_worlds.push(dishonored_world::CollisionWorld::from_triangles(Vec::new(), Vec::new()));
+                    }
+                }
+                continue;
+            }
             let delta = self.kismet.as_ref().and_then(|k| k.mover_delta(&m.actor, m.actor_to_world)).unwrap_or(glam::Mat4::IDENTITY);
             let state = if m.is_door() { self.kismet.as_ref().and_then(|k| k.door_state(&m.actor)).or_else(|| self.props.get(&m.actor).map(|s| s.door)).unwrap_or(m.initial) } else { 0 };
             match self.mover_keys.get(i) {

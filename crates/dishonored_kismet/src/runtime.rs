@@ -227,7 +227,7 @@ pub fn deactivation(class: &str) -> DeAct {
         // Empty overrides: the class fires its outputs itself.
         "SeqAct_Switch" | "SeqAct_RandomSwitch" | "SeqAct_Delay" | "SeqAct_StreamInTextures" | "DisSeqAct_StartSpawn" | "DisSeqAct_AIDoFollow" | "DisSeqAct_AIDoSimpleBehaviors" | "DisSeqAct_NPCMarkForVanish" => DeAct::None,
         // SeqAct_Latent's (PrepareMapChange and AutoSave call it from their own).
-        "SeqAct_Latent" | "DisSeqAct_Latent" | "SeqAct_PrepareMapChange" | "DisSeqAct_AutoSave" | "DisSeqAct_ActivateUsable" | "DisSeqAct_BackupAndClearInventory" | "SeqAct_WaitForLevelsVisible" => DeAct::Latent,
+        "SeqAct_Latent" | "DisSeqAct_Latent" | "SeqAct_PrepareMapChange" | "SeqAct_LevelStreaming" | "SeqAct_MultiLevelStreaming" | "SeqAct_LevelVisibility" | "DisSeqAct_AutoSave" | "DisSeqAct_ActivateUsable" | "DisSeqAct_BackupAndClearInventory" | "SeqAct_WaitForLevelsVisible" => DeAct::Latent,
         "DisSeqAct_DialogScriptedChoice" => DeAct::AbortedFirst,
         // Own outputs decided by the op (matinee position; the AI behaviour's result).
         "SeqAct_Interp" | "DisSeqAct_AIGoToActor" | "DisSeqAct_AIShoot" | "SeqAct_ActorFactory" => DeAct::None,
@@ -471,7 +471,14 @@ impl Kismet {
     /// "Loaded and Visible" and "Beginning of Level"; return visit (state kept, as the
     /// original's `DisSeqAct_SaveLevelState` keeps Kismet with the level): "State Restored".
     pub fn load_map(&mut self, host: &mut dyn Host, map: &str) {
+        self.load_map_levels(host, map, &[]);
+    }
+
+    /// [`Kismet::load_map`] without the given sublevels (the map's Kismet-streamed levels that
+    /// are not in the world: their sequences start when [`Kismet::set_level_loaded`] adds them).
+    pub fn load_map_levels(&mut self, host: &mut dyn Host, map: &str, streamed_out: &[String]) {
         let Some(pk) = self.db.maps.iter().find(|m| m.0.eq_ignore_ascii_case(map)).map(|m| m.1.clone()) else { return };
+        let pk: Vec<u16> = pk.into_iter().filter(|p| !streamed_out.iter().any(|s| s.eq_ignore_ascii_case(self.db.package_name(*p)))).collect();
         let restored = pk.iter().any(|p| self.visited[*p as usize]);
         for p in &pk {
             self.loaded[*p as usize] = true;
@@ -517,6 +524,66 @@ impl Kismet {
                 if linked(self, e, i) {
                     self.check_activate(host, e, Obj::Path("WorldInfo".into()), Obj::None, false, Some(vec![i]), false);
                 }
+            }
+        }
+    }
+
+    /// Level streaming: a Kismet-streamed sublevel enters the world (its sequences run; its
+    /// `SeqEvent_LevelLoaded` "Loaded and Visible" and "Beginning of Level" fire, as UE3's
+    /// `AddToWorld` raises them for a level made visible after the match began) or leaves it
+    /// (its sequences stop). A level that was unloaded (`fresh`) comes back from disk: its ops
+    /// restart from their loaded state. Returns false for an unknown package.
+    pub fn set_level_loaded(&mut self, host: &mut dyn Host, package: &str, loaded: bool, fresh: bool) -> bool {
+        let Some(p) = self.db.packages.iter().position(|x| x.eq_ignore_ascii_case(package)) else { return false };
+        let roots = self.db.roots[p].clone();
+        if !loaded {
+            if self.loaded[p] {
+                self.loaded[p] = false;
+                self.level_roots.retain(|r| !roots.contains(r));
+                self.note(format!("level hidden: {package}"));
+            }
+            return true;
+        }
+        if self.loaded[p] {
+            return true;
+        }
+        if fresh && self.visited[p] {
+            self.reset_package(p as u16);
+        }
+        self.loaded[p] = true;
+        self.visited[p] = true;
+        for r in roots {
+            if !self.level_roots.contains(&r) {
+                self.level_roots.push(r);
+            }
+        }
+        self.note(format!("level visible: {package}"));
+        let events: Vec<OpId> = (0..self.n_static() as OpId).filter(|&e| self.db.ops[e as usize].package == p as u16 && self.is_a(e, "SeqEvent_LevelLoaded")).collect();
+        for e in events {
+            for i in [0, 1] {
+                if self.op(e).outputs.get(i).is_some_and(|o| !o.links.is_empty()) {
+                    self.check_activate(host, e, Obj::Path("WorldInfo".into()), Obj::None, false, Some(vec![i]), false);
+                }
+            }
+        }
+        true
+    }
+
+    /// The ops of a package back to their loaded state (a level reloaded from disk).
+    fn reset_package(&mut self, p: u16) {
+        for o in self.db.ops.iter().filter(|o| o.package == p) {
+            self.ops[o.id as usize] = OpRt {
+                in_imp: vec![false; o.inputs.len()],
+                in_queued: vec![0; o.inputs.len()],
+                out_imp: vec![false; o.outputs.len()],
+                in_disabled: o.inputs.iter().map(|l| l.disabled).collect(),
+                out_disabled: o.outputs.iter().map(|l| l.disabled).collect(),
+                enabled: o.props.get("bEnabled").and_then(Value::as_bool).unwrap_or(true),
+                ..Default::default()
+            };
+            self.touched.remove(&o.id);
+            if let Some(s) = self.seqs.get_mut(&o.id) {
+                *s = SeqRt::default();
             }
         }
     }
