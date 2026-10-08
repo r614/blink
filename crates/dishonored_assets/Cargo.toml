@@ -12,6 +12,7 @@ serde.workspace = true
 ue3_package.workspace = true
 dishonored_ir.workspace = true
 dishonored_world.workspace = true
+dishonored_audio = { path = "../dishonored_audio" }
 
 [dev-dependencies]
 glam = { workspace = true, features = ["serde"] }

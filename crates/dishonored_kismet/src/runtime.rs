@@ -147,6 +147,10 @@ pub struct Kismet {
     /// the host reports as speaking).
     #[serde(default)]
     pub interp_play: BTreeMap<OpId, crate::interp::PlayState>,
+    /// The game's chaos (score, level) as the host last reported it: what
+    /// `DisSeqVar_Darkness` / `DisSeqVar_DarknessLevel` read.
+    #[serde(default)]
+    pub darkness: (i32, i32),
 }
 
 /// The view an op has of the interpreter while it runs (host ops get one).
@@ -265,6 +269,7 @@ impl Kismet {
             event_index: Default::default(),
             touched: BTreeMap::new(),
             interp_play: BTreeMap::new(),
+            darkness: (0, 0),
         };
         for g in k.db.global.clone() {
             k.loaded[g as usize] = true;
@@ -621,6 +626,12 @@ impl Kismet {
             Value::Float(lo + (hi - lo) * u)
         } else if db.is_a(&class, "SeqVar_Float") {
             Value::Float(self.prop_float(v, "FloatValue"))
+        } else if class == "DisSeqVar_DarknessLevel" {
+            // 0x00B8BAA0: the darkness manager's level (0x00C487D0), not `IntValue`.
+            Value::Int(self.darkness.1)
+        } else if class == "DisSeqVar_Darkness" {
+            // 0x00B8B990: the darkness manager's score (`m_DarknessScore`).
+            Value::Int(self.darkness.0)
         } else if db.is_a(&class, "SeqVar_Int") {
             Value::Int(self.prop_int(v, "IntValue"))
         } else if db.is_a(&class, "SeqVar_String") {

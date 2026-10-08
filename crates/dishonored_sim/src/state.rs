@@ -84,6 +84,50 @@ pub struct SwordState {
     /// Parries won so far (wrapping): the view plays `Blocking Parry` on each.
     #[serde(default)]
     pub parries: u8,
+    /// NPC swings: the item context (`npc_moves`) the brain started the swing with; its
+    /// `m_fAttackDamageMultiplier` scales the damage (0 for the jump attack).
+    #[serde(default)]
+    pub npc_move: u8,
+    /// `m_AlreadyHitActors`: the pawns this swing has hit (each once), `hit_count` of them.
+    #[serde(default)]
+    pub hit_ids: [PlayerId; 8],
+    #[serde(default)]
+    pub hit_count: u8,
+    /// NPC swings: the player this swing started "effectively offscreen" for
+    /// (`DisItemContext_MeleeAttackNPCBase.m_bEffectivelyOffscreen`, set at the start 0x00C24020).
+    #[serde(default)]
+    pub offscreen_to: Option<PlayerId>,
+    /// Length of the current assassination (the played clip's `AnimStateExit`).
+    #[serde(default)]
+    pub lock_time: f32,
+}
+
+impl SwordState {
+    pub fn already_hit(&self, id: PlayerId) -> bool {
+        self.hit_ids[..(self.hit_count as usize).min(self.hit_ids.len())].contains(&id)
+    }
+    /// Record a hit; false once the list is full (the swing then hits no more pawns).
+    pub fn record_hit(&mut self, id: PlayerId) -> bool {
+        let n = self.hit_count as usize;
+        if n >= self.hit_ids.len() {
+            return false;
+        }
+        self.hit_ids[n] = id;
+        self.hit_count += 1;
+        true
+    }
+}
+
+/// `EAIAwareness` (DisGlobalEnums): the awareness the AI reports for a pawn (0x00B0C1E0).
+pub mod awareness {
+    pub const UNAWARE: u8 = 0;
+    pub const AWARE_OF_PLAYER: u8 = 1;
+    pub const SURPRISED: u8 = 2;
+    pub const SUSPICIOUS: u8 = 3;
+    pub const FEARFUL: u8 = 4;
+    pub const IN_COMBAT: u8 = 5;
+    pub const BEGGING: u8 = 6;
+    pub const CHOKED: u8 = 7;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -261,6 +305,11 @@ pub struct PlayerState {
     /// level 1 (0x00A87B60). False for players and when no AI sets it.
     #[serde(default)]
     pub ai_unaware: bool,
+    /// Hook written by the AI each tick for NPC pawns with a brain: the pawn's `EAIAwareness`
+    /// ([`awareness`]), which gates assassinations (`m_AssassinateOnAwareness`, 0x00C09060). A pawn
+    /// no AI writes (a brainless training dummy) keeps `AWARE_OF_PLAYER`, as `ai_unaware` false.
+    #[serde(default = "aware_of_player")]
+    pub ai_awareness: u8,
     /// Hook written by the mission host each tick for NPC pawns: the locomotion component follows
     /// a navmesh path, so the pawn walks on the navmesh (`movement::nav_walk_move`). False for
     /// players and when no host sets it.
@@ -293,12 +342,56 @@ pub struct PlayerState {
     /// This pawn's deterministic random stream (xorshift32; the original uses the C runtime `rand()`).
     #[serde(default)]
     pub rng: u32,
-    /// The sword is in its sheath (no weapon drawn): the ground speed takes
-    /// `Attribute_SwordSheathedSpeedFactor` instead of the unsheathed one (measured run / sprint
-    /// 400 / 600 uu/s sheathed, 360 / 540 drawn, INSTRUMENTATION.md). The game's players start
-    /// with it drawn (nothing sheathes it yet); scenario setups set it.
+    /// The item equipped in the right hand (the inventory's hand slot 1). The ground speed takes
+    /// `Attribute_SwordUnsheathedSpeedFactor` only while it is the sword class (0x00AA4700 walks
+    /// the class chain of that item), else `Attribute_SwordSheathedSpeedFactor` (measured run /
+    /// sprint 400 / 600 uu/s without the sword, 360 / 540 with it, INSTRUMENTATION.md). The
+    /// game's players hold the sword; scenario setups without `sword_drawn` start empty-handed,
+    /// as the original's pawn does before `Twk_Inv_SwordCorvo` is given.
     #[serde(default)]
-    pub sword_sheathed: bool,
+    pub right_hand: RightHandItem,
+    /// Hook written by the AI each tick: the number of NPCs in this pawn's skirmish (brains in
+    /// combat against it; `DisGlobalCombatManager.m_TargetToSkirmishMap[pawn].m_Combatants`, read
+    /// by 0x00C5AF60). Dark Vision ends in combat (0x00BF84C0). 0 when no AI sets it.
+    #[serde(default)]
+    pub combat_opponents: u8,
+    /// The pawn was last hit by this pawn's Windblast and has not landed since: the NPC rigid-body
+    /// collision (0x00B529C0) tests the last damage's instigator and type.
+    #[serde(default)]
+    pub windblasted_by: Option<PlayerId>,
+    /// Set by the falling move when it hit a wall this tick: (normal, speed before the hit).
+    /// Transient, read by `step_world` the same tick.
+    #[serde(skip)]
+    pub wall_hit: Option<(Vec3, f32)>,
+    /// Rat pawns: the Devouring Swarm ([`SwarmState::id`]) that released this rat.
+    #[serde(default)]
+    pub swarm: Option<u32>,
+    /// `DishonoredPlayerPawn.m_bMantleAllowed` (+0x8A0 bit 0): set every tick the pawn walks or
+    /// swims and by a Jump press (0x00ADBD00 / 0x00ADBE70), cleared when a mantle starts
+    /// (0x00ACD820). While falling the mantle request needs it.
+    #[serde(default)]
+    pub mantle_allowed: bool,
+    /// Phase (0..1) of the player's locomotion loop, whose `DishonoredNotify_Footfall`s make
+    /// the footfall contacts (and their AI noise, `noise::step_footfalls`).
+    #[serde(default)]
+    pub footfall_phase: f32,
+    /// `StatePlayerMasterFalling.m_bIsStealthFall`: the pawn was sneaking when its fall state
+    /// began (0x00A759F0); the landing is then `JumpLand_Stealth`.
+    #[serde(default)]
+    pub stealth_fall: bool,
+    /// `StatePlayerMasterFalling.m_bCameFromJump`: the fall state was entered from the jump.
+    #[serde(default)]
+    pub fall_from_jump: bool,
+}
+
+/// What the right hand holds (the inventory's hand slot 1, `FUN_00c04bd0(1)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RightHandItem {
+    /// The sword (`Twk_Inv_SwordCorvo`, an item of the class 0x00AA4700 tests for).
+    #[default]
+    Sword,
+    /// Nothing equipped.
+    Empty,
 }
 
 /// The attack group on a pawn: seconds under attack (`m_fInitialDelayBeforeDealingDamage`) and
@@ -309,6 +402,9 @@ pub struct RatAttackState {
     pub acc: f32,
 }
 
+fn aware_of_player() -> u8 {
+    awareness::AWARE_OF_PLAYER
+}
 fn one() -> f32 {
     1.0
 }
@@ -381,6 +477,9 @@ pub struct DarkVisionState {
     pub cooldown: f32,
     /// Level used (1 or 2) for the reveal distance.
     pub level: u8,
+    /// `m_fCombatTimer` (+0xB0): countdown from `m_fDesactivateInCombatTimer` while in combat.
+    #[serde(default)]
+    pub combat_timer: f32,
 }
 
 /// Power and charm progression indices (`DishonoredPowersComponent`): level 0 = not owned.
@@ -402,19 +501,27 @@ pub mod power {
 
 /// The player's inventory (`DishonoredInventory`): ammo counts by `eDisAmmoType` (bullets and
 /// bolts stay in [`LeftHandState`]'s reserves), `m_ElixirCounts`, the coin and rune abstract
-/// items, owned/equipped bone charms (bit per `m_Charms` index) and power levels.
+/// items, owned/equipped bone charms and power levels.
+///
+/// Bone charms are bits by charm slot: `m_Charms[i]` is slot `i`, `m_ScriptedCharms[j]` slot
+/// `m_Charms.len() + j` (`powers::charm_slot`). The original keeps the owned charms as
+/// (level, effect id) pairs (+0xB38); taking a charm already owned raises its level (0x00ABBA90),
+/// which [`Inventory::charms_level2`] records (the shipped charms have at most two levels).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Inventory {
     pub ammo: [u16; 8],
     pub elixirs: [u8; 2],
     pub coins: u32,
     pub runes: u16,
-    pub charms_owned: u32,
-    pub charms_equipped: u32,
-    pub power_levels: [u8; power::COUNT],
-    /// Owned workshop upgrades (bit per `ItemsConfig::upgrades` index).
+    pub charms_owned: u64,
+    pub charms_equipped: u64,
+    /// Owned charms at their second level (`m_Levels[1]`: the "II" values).
     #[serde(default)]
-    pub upgrades: u32,
+    pub charms_level2: u64,
+    pub power_levels: [u8; power::COUNT],
+    /// Owned workshop upgrades (bit per `ItemsConfig::upgrades` index; 34 upgrades ship).
+    #[serde(default)]
+    pub upgrades: u64,
 }
 
 impl Default for Inventory {
@@ -425,7 +532,7 @@ impl Default for Inventory {
         power_levels[power::BLINK] = 2;
         power_levels[power::WINDBLAST] = 2;
         power_levels[power::DARK_VISION] = 2;
-        Self { ammo: [0; 8], elixirs: [0; 2], coins: 0, runes: 0, charms_owned: 0, charms_equipped: 0, power_levels, upgrades: 0 }
+        Self { ammo: [0; 8], elixirs: [0; 2], coins: 0, runes: 0, charms_owned: 0, charms_equipped: 0, charms_level2: 0, power_levels, upgrades: 0 }
     }
 }
 
@@ -513,6 +620,16 @@ pub struct BlinkTravel {
     /// `m_fTimeToNextBlink`.
     pub step_timer: f32,
     pub steps: u16,
+    /// `m_bActive` (+0xA0 bit 0): set when aiming starts (0x00BFAAA0), cleared when the
+    /// cooldown after the move or cancel ends (0x00BE9180). The power cannot start while set.
+    #[serde(default)]
+    pub active: bool,
+    /// `m_BlinkMode` 2 / 3: the move ended or was cancelled; the cooldown runs.
+    #[serde(default)]
+    pub cooling: bool,
+    /// `m_fCooldownTimer` (+0x138): seconds of cooldown, zeroed when aiming starts.
+    #[serde(default)]
+    pub cooldown_timer: f32,
 }
 
 impl PlayerState {
@@ -572,6 +689,7 @@ impl PlayerState {
             rat_slow: 0.0,
             rat_slow_percent: 0.0,
             ai_unaware: false,
+            ai_awareness: awareness::AWARE_OF_PLAYER,
             nav_walk: false,
             nav_end: None,
             helmet: false,
@@ -579,7 +697,15 @@ impl PlayerState {
             damage_reduction: 0.0,
             free_spell_chance: 0.0,
             rng: id.wrapping_mul(0x9E37_79B9) | 1,
-            sword_sheathed: false,
+            right_hand: RightHandItem::Sword,
+            mantle_allowed: false,
+            combat_opponents: 0,
+            windblasted_by: None,
+            wall_hit: None,
+            swarm: None,
+            footfall_phase: 0.0,
+            stealth_fall: false,
+            fall_from_jump: false,
         }
     }
 
@@ -660,6 +786,14 @@ pub struct ProjectileState {
     pub stuck: bool,
     #[serde(default)]
     pub stuck_offset: Vec3,
+    /// Where it was launched (`DisProjectile.m_SpawnLoc`, set at launch by 0x00C1D370): the
+    /// bullet's close / long range bands are measured from here (0x00C29820).
+    #[serde(default)]
+    pub spawn: Vec3,
+    /// Bullets: the pawn a piercing shot already went through (0x00C3A660); the next pawn hit
+    /// takes `m_fPostPiercingDamageRatio` and stops it.
+    #[serde(default)]
+    pub pierced: Option<PlayerId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -688,6 +822,23 @@ pub struct WorldState {
     pub swarms: Vec<SwarmState>,
     #[serde(default)]
     pub next_entity_id: u32,
+    /// Blink's time-dilation layers (`BTC_BlinkPower` channel of the dilation helper), one per
+    /// caster while it differs from 1.
+    #[serde(default)]
+    pub blink_layers: Vec<DilationLayer>,
+}
+
+/// The world-rate part of one `BendTimeChannelInfo` (`DishonoredGameInfo.m_BendTimeInfo`,
+/// +0x4CC + channel x 0x40): `m_fCurrentWorldTimeDilation`, `m_fTargetWorldTimeDilation`,
+/// `m_fWorldTimeDilationVelocity`, set by the helper 0x009FA0D0 and advanced in real time by the
+/// GameInfo tick 0x009FCBC0.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DilationLayer {
+    pub caster: PlayerId,
+    pub current: f32,
+    pub target: f32,
+    /// Units per second toward `target`; `f32::MAX` = reach it at once (blend time 0).
+    pub velocity: f32,
 }
 
 /// The world parts added with inventory, gadgets and powers, replicated as one block in
@@ -700,6 +851,8 @@ pub struct WorldExtras {
     pub time_bends: Vec<TimeBendState>,
     pub swarms: Vec<SwarmState>,
     pub next_entity_id: u32,
+    #[serde(default)]
+    pub blink_layers: Vec<DilationLayer>,
 }
 
 impl WorldState {
@@ -711,6 +864,7 @@ impl WorldState {
             time_bends: self.time_bends.clone(),
             swarms: self.swarms.clone(),
             next_entity_id: self.next_entity_id,
+            blink_layers: self.blink_layers.clone(),
         }
     }
     pub fn set_extras(&mut self, e: WorldExtras) {
@@ -720,6 +874,7 @@ impl WorldState {
         self.time_bends = e.time_bends;
         self.swarms = e.swarms;
         self.next_entity_id = e.next_entity_id;
+        self.blink_layers = e.blink_layers;
     }
 }
 
@@ -782,25 +937,36 @@ pub struct TimeBendState {
     pub self_dilation: f32,
 }
 
-/// A Devouring Swarm.
+/// A Devouring Swarm (`DisRatSwarm` and its `DisRatSwarmSpawner`): the actor appears
+/// `m_fRatSwarmSpawnDelay` after the cast notify and its spawner releases the level's rats as
+/// individual rat pawns ([`PawnKind::Rat`], [`PlayerState::swarm`]) over [`SWARM_RELEASE_TICKS`]
+/// ticks; they live `m_fDuration`, then the swarm ends and its rats despawn over
+/// [`SWARM_DESPAWN_SECONDS`] (MEASURED 2026-10-08: 30 / 60 rats over 16 ticks, 30 s, about 10 s).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SwarmState {
     pub id: u32,
     pub owner: PlayerId,
     pub level: u8,
     pub position: Vec3,
-    /// Seconds until the rats appear (`m_fRatSwarmSpawnDelay`), then seconds alive.
+    /// Seconds until the swarm actor appears (`m_fRatSwarmSpawnDelay`), then seconds alive.
     pub spawn_delay: f32,
     pub age: f32,
+    /// Rats the spawner has still to release.
     pub rats: u16,
-    pub target: Option<PlayerId>,
-    /// Seconds on the current target (before `m_fInitialDelayBeforeDealingDamage`), and to the next bite.
-    pub attack_time: f32,
-    pub bite_timer: f32,
-    /// Corpse being eaten and seconds into eating it.
-    pub eating: Option<PlayerId>,
-    pub eat_time: f32,
+    /// Release ticks left (from [`SWARM_RELEASE_TICKS`]).
+    #[serde(default)]
+    pub release_ticks: u8,
+    /// Past `m_fDuration`: the rats no longer attack and despawn; the rats left when it began.
+    #[serde(default)]
+    pub ending: bool,
+    #[serde(default)]
+    pub rats_at_end: u16,
 }
+
+/// Ticks over which a swarm's spawner releases its rats (MEASURED: 30 and 60 rats over 16 ticks).
+pub const SWARM_RELEASE_TICKS: u8 = 16;
+/// Seconds over which an ended swarm's rats despawn (MEASURED: about 10 s).
+pub const SWARM_DESPAWN_SECONDS: f32 = 10.0;
 
 /// A Windblast: `m_fWarmupTime` after the cast the origin and direction are taken from
 /// the caster's view and the blast front expands at `m_Speed`; targets gathered at that
@@ -816,6 +982,16 @@ pub struct WindblastState {
     /// `m_ActorsToBlast` still to be reached.
     pub targets: Vec<PlayerId>,
     pub started: bool,
+    /// The caster's Windblast level, 0-based (`m_CurrentLevel - 1`): selects `m_Levels[level]`.
+    #[serde(default = "wb_level")]
+    pub level: u8,
+    /// `m_Distance x (1 + Attribute_SpellStrength)`: the gather radius and the front's cap.
+    #[serde(default)]
+    pub range: f32,
+}
+
+fn wb_level() -> u8 {
+    1
 }
 
 impl WorldState {

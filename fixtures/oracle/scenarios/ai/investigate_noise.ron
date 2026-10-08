@@ -1,29 +1,31 @@
-// A factionless guard facing away hears a pistol shot 3800 uu behind it (Pistol noise radius
+// The Playground stealth lane (navmeshed; the y = 0 runway has no navmesh). A default-faction
+// guard (an enemy of Corvo) facing away hears a pistol shot 3800 uu behind it (Pistol noise radius
 // 4000, so heard) from beyond its vision range (3500 uu): hearing alone sends it to investigate.
-// Nothing here is seen, so the attention comes from the noise only (`attn_noise`: the place
-// entry), and the brain goes React (m_ReactionDelay 0.18-0.30 s) -> Investigate.
+// The heard noise raises attention on its instigator, the player (proxy at the shot; measured on
+// the original, ai/boyle_hear_shot), and the attention poster's SearchBegin (no delay) starts
+// DisBehaviorSearch's Investigate on the next brain tick. A neutral guard would not search (the
+// poster posts nothing for a non-enemy top target).
 (
     name: "ai/investigate_noise",
     system: Ai,
     map: "Playground",
-    description: "Fire the pistol 3800 uu behind a guard, out of its sight: it reacts, then investigates.",
+    description: "Fire the pistol 3800 uu behind a hostile guard, out of its sight: it investigates the shot.",
     setup: (
-        player: Some((position: (-5600, 0, 96), yaw: 0, pitch: 60)),
+        player: Some((position: (-5600, 7000, 96), yaw: 0, pitch: 60)),
         items: ["Bullet:5"],
         left_hand: Some("Pistol"),
-        npcs: [(id: Some("guard"), position: Some((-1800, 0, 92)), yaw: 0, state: Some("Idle"), faction: Some("None"))],
+        npcs: [(id: Some("guard"), position: Some((-1800, 7000, 92)), yaw: 0, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default"))],
         settle: 120,
     ),
     ticks: 900,
     input: [(tick: 5, action: Press(Secondary))],
     checkpoints: [
-        (name: "heard: Investigate, not more", expect: [(metric: At("npc.guard.attn_noise", 8), value: 0.6, tol: 0.01, source: "AI.md (0x00b60ca0, CONFIRMED): a Danger sound adds 0.4 and floors the value at Investigate's start 0.6; hearing cannot raise attention above Investigate", status: Static)]),
+        (name: "heard: Investigate, not more", expect: [(metric: At("npc.guard.attn", 8), value: 0.6, tol: 0.01, source: "AI.md (0x00b60ca0, CONFIRMED): a Danger sound adds 0.4 and floors the value at Investigate's start 0.6 (guard unsuspecting profile toward an enemy); hearing cannot raise attention above Investigate", status: Static)]),
         (name: "investigates", expect: [(metric: TimeAt("npc.guard.state", 7), value: 15, tol: 0, cmp: AtMost, source: "a danger noise in hearing range sends a guard to investigate (DisAISubStateInvestigate)", status: Static)]),
-        (name: "player never perceived", expect: [(metric: Max("npc.guard.attn_level"), value: 0, tol: 0, cmp: AtMost, source: "the player is 3800 uu away, beyond the 3500 uu vision range, so no sight attention accrues (Twk_Vision_Default)", status: Static)]),
-        (name: "walks to the shot", expect: [(metric: Min("npc.guard.x"), value: -5350, tol: 0, cmp: AtMost, source: "DisAISubStateInvestigate goes to the attention proxy (the shot, proximity 250 uu, m_fSearchReachedProxyLocEqualsRange) within 900 ticks: 3800 uu at run speed takes under 10 s", status: Static)]),
-        (name: "reaction delay", expect: [(metric: Gap(FirstAt("Sim:Fired"), TimeAt("npc.guard.state", 4)), value: 0.02, tol: 0.05, source: "stimulus -> React is the next tick (stim queued with the global reaction delay m_ReactionDelay 0.18-0.30, DefaultAI.ini)", status: Unmeasured)]),
-        (name: "react lasts the reaction delay", expect: [(metric: Gap(TimeAt("npc.guard.state", 4), TimeAt("npc.guard.state", 7)), value: 0.24, tol: 0.09, source: "(one tick of sampling slack) DishonoredGlobalAIManager.m_ReactionDelay = (0.18, 0.30) in DefaultAI.ini (0x00b16eb0 releases a queued stimulus when its delay is <= 0)", status: Static)]),
+        (name: "hearing stays below Busted", expect: [(metric: At("npc.guard.attn_level", 60), value: 3, tol: 0, cmp: AtMost, source: "the player is 3800 uu away, beyond the 3500 uu vision range (Twk_Vision_Default), and Heard cannot raise attention to Busted; the guard sees the player once it has run to the shot", status: Static)]),
+        (name: "walks to the shot", expect: [(metric: Min("npc.guard.x"), value: -5350, tol: 0, cmp: AtMost, source: "DisAISubStateInvestigate goes to the attention proxy (the shot, proximity 250 uu) within 900 ticks: 3800 uu at run speed takes under 10 s", status: Static)]),
+        (name: "search starts on the next brain tick", expect: [(metric: Gap(FirstAt("Sim:Fired"), TimeAt("npc.guard.state", 7)), value: 0.0167, tol: 0.02, source: "the attention poster (0x00b25890 / 0x00b24d00) posts SearchBegin when the behaviour level steps to Investigate; its stimulus class's delay getter returns 0 (0x008fc830, vtable 0x01134478 +8), so the queue (0x00b148c0 / 0x00b16eb0) releases it at once. m_ReactionDelay belongs to SearchRequest / Help only (delay getter 0x00b01650, vtables 0x01134100 / 0x01134118)", status: Static)]),
     ],
     record: [Pawn, Npc("guard"), SimEvents],
-    capture: Some("fire the pistol behind a Boyle party guard out of sight: guard position per tick (ai/boyle_hear_shot)"),
+    capture: Some("fire the pistol behind a hostile Boyle guard out of sight: guard position and brain channels per tick"),
 )

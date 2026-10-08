@@ -313,6 +313,14 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
 
     let bp = "Twk_Powers.Blink.Twk_Blink";
     let blink_t = l.obj(bp)?;
+    // A per-level field of the Blink tweak (`m_Levels` element 0, then 1).
+    let per_level = |l: &mut Loader, m: &TMap, src: &str, field: &str, out: &str| -> Result<Vec<f32>> {
+        let mut v = Vec::new();
+        for (i, key) in ["m_Levels", "m_Levels[1]"].iter().enumerate() {
+            v.push(l.f(m, src, &format!("{key}.{field}"), &format!("{out}[{i}]"))?);
+        }
+        Ok(v)
+    };
     let comp_p = "Default__DishonoredActivePowerComponent_Blink";
     let blink_c = l.obj(comp_p)?;
     let mut horiz = Vec::new();
@@ -348,6 +356,9 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
             v
         },
         limit_vertical_from_ground: matches!(get(&blink_t, "m_bLimitVerticalDistanceFromGround"), Some(TVal::B(true))),
+        bend_time_down_time: per_level(&mut l, &blink_t, bp, "m_fBendTimeDownTime", "blink.bend_time_down_time")?,
+        bend_time_up_time: per_level(&mut l, &blink_t, bp, "m_fBendTimeUpTime", "blink.bend_time_up_time")?,
+        cooldown_time: per_level(&mut l, &blink_t, bp, "m_fCooldownTime", "blink.cooldown_time")?,
     };
 
     let power = |l: &mut Loader, path: &str, name: &str| -> Result<PowerConfig> {
@@ -412,7 +423,18 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
     let mut ai = crate::ai_config::load_ai_config(content, &[]);
     ai.player_visibility.ground_speed_sprint = movement.sprint_speed;
 
-    let items = crate::items_config::load_items_config(content, &db, &mut l.prov);
+    let items = crate::items_config::load_items_config(content, &db, &mut l.prov, &ai.loudness_distances);
+    // `DisTweaks_FirePistol.m_AINoiseLoudnessWhenFiring` (an `EAINoiseLoudness`; the class
+    // default `EAINoiseLoudness4` when the tweak leaves it) as a distance.
+    let mut pistol = pistol;
+    {
+        let fire_p = "Twk_Inv_PlayerSpecific.Twk_Inv_PistolCorvo.DisTweaks_InventoryItem_PlayerSpecific_0.DisTweaks_FirePistol_1";
+        let fire = l.obj(fire_p)?;
+        let loud4 = ai.loudness_distances.get(15).copied().unwrap_or(6000.0);
+        let r = crate::items_config::loudness_radius(&fire, "m_AINoiseLoudnessWhenFiring", &ai.loudness_distances).unwrap_or(loud4);
+        pistol.values.insert("fire.ai_noise_radius".into(), r);
+        l.prov.insert("pistol.fire.ai_noise_radius".into(), format!("{fire_p} :: m_AINoiseLoudnessWhenFiring -> m_LoudnessDistanceArray = {r}"));
+    }
     let adrenaline = {
         let d = AdrenalineConfig::default();
         let mv = |k: &str, v: f32| melee.values.get(k).copied().unwrap_or(v);

@@ -12,6 +12,8 @@
     description: "A Boyle patrolling guard unobserved for 20 s: its walking speed and route.",
     setup: (
         player: Some((position: (-3201.5, -2763.3, 20), yaw: 71.37, snap_to_floor: true)),
+        // The level's own spawner pawn (its patrol_on_startup, squad and faction).
+        original_npcs: true,
         npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_21"))],
         settle: 1,
     ),

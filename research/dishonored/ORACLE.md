@@ -790,7 +790,7 @@ lifetime), `EffectEnd`, `EffectMissing` (the runtime asks for a system it did no
 `AtMost`; reference status `Measured` (hook), `Static` (tweaks or decompiled code),
 `Unverified` (measured but not known to be sampled like the port: reported, not judged, listed
 as a capture request) and `Unmeasured` (the port's value is reported as a capture request);
-`capture` (how to take the original's side). `spec_hash` now covers only the run-defining
+`capture` (how to take the original's side); `relative` (channel prefixes judged as displacement from frame 0 against the original's trace). `spec_hash` now covers only the run-defining
 fields (map, setup, step, ticks, input, record, sweep), so correcting a reference keeps the
 captured traces.
 
@@ -837,6 +837,164 @@ the runner snaps with the engine's line check and keeps a placed NPC's yaw. Stil
 `criminal()` rule, U-862), `combat/crossbow_reload` (fire action two ticks long, U-868),
 `combat/sword_hit_dummy` damage (U-113, KnownDifference), `movement/lean` angle onset / limit /
 soften (lean height smoothing, U-867).
+**Trace alignment and comparison (`diff::compare_traces`, 2026-10-08).** Checked against both
+sides' code:
+- Hook: `script.rs` samples at boundary k before applying the actions of k. `GAME_TICK`
+  equals the base tick at boundary 0 and goes up at each boundary.
+  - A `ProcessEvent` / Kismet record raised during the world tick after boundary k carries
+    `GAME_TICK - base + 1 = k + 1`.
+  - A spawn found by the scan at boundary k + 1 carries `k + 1`.
+- Port: `runner.rs` pushes frame 0 after the settle ticks. The input of timeline tick t,
+  console commands included, goes into the `Game::step` that produces frame t + 1, and that
+  step's events carry t + 1.
+- The two conventions are the same, so there is no off-by-one: frame k is the end of tick k,
+  frame 0 is after setup and settle, and the input at boundary k acts in tick k + 1. Frames are
+  matched by tick number. A tick the original has and the port lacks is reported in the
+  `frames` group.
+
+How channels are compared:
+- **Matching names.** A shared channel is matched by name. Where the two sides record the same
+  quantity under different names, `diff::port_name` maps one to the other:
+  - `npc.<n>.player_attn.value` (the original's attention accumulator) is the port's
+    `npc.<n>.attn`;
+  - `camera.x/y/z/pitch/yaw/roll` are the port's `cam.*`.
+- **Camera frame of reference.** Both sides give the view the frame is rendered from (the
+  original: `Camera.CameraCache.POV`; the port: its view point and rotation) in the same world
+  frame. The hook subtracts the layout offset from `camera.*` as from `pawn.*`. Rotations are
+  degrees with pitch up positive on both sides, compared wrapped to ±180.
+  - Both sides also get derived `cam.rel_x/y/z` channels (group `camera offset`): the view
+    point minus the pawn's Location. They separate the camera rule from where the pawn is.
+  - Measured on Boyle (2026-10-08), at level pitch the original's view is 77.9 uu above the
+    Location and 5.2 uu ahead. The port's is 85.0 and 0. Pitching up moves the original's
+    view forward and down (29.6 ahead, 60.3 up at 75 degrees); the port's stays fixed.
+  - The original's pitch reads 0.15 degrees under the commanded one. Yaw, roll and the lean's
+    sideways offset agree (-119.42 / -119.40).
+  - Straight after the setup the original's camera is still easing toward the pawn (342 ->
+    95 uu above it over the first 20 ticks of `movement/lean_boyle`).
+- **Not compared.** Some channels are not the same quantity on both sides, so they are listed
+  as one-sided and not judged:
+  - `camera.fov`;
+  - `pawn.physics` against `pawn.mode`, whose enums differ;
+  - the attention levels.
+- **Absolute, relative or steady offset.** Each channel is judged one of three ways:
+  - absolute, by default;
+  - relative, when the spec lists its prefix in `relative`: judged on the displacement from the
+    baseline frame (the first frame both sides sampled);
+  - steady offset, for a continuous channel (not bool / enum / count) whose sides differ by a
+    steady amount beyond the tolerance. The steady amount is the median of original minus port.
+    The channel is judged after removing it. That catches cases like the pawn hovering 3.73 uu
+    above the floor on the original and 6.73 on the port: `movement/jump_standing` reports
+    `pawn.z` with an offset of -1.797, diverging on ticks 0-6 while the port falls onto its
+    floor and on ticks 64-90, and agreeing in between, through the launch.
+- **Verdicts.** Each channel gets one of three:
+  - `Agree`;
+  - `Offset`: only the offset, reported once with its value;
+  - `Diverge`: the first tick with both raw values, the spans of diverging ticks (up to 8) and
+    the worst difference.
+
+  Each channel also counts the ticks within its tolerance. Angles are wrapped to +-180.
+- **Groups.** Channels are grouped: `pawn position`, `pawn velocity`, `pawn state`, `vitals`,
+  `camera`, `camera offset`, `left hand`, `npc`, `behaviour`, `world`. A raw event kind that
+  both sides record (Kismet) is its own group, compared in order on (tick, object, name).
+- **Mapped events (`crates/dishonored_oracle/src/event_map.rs`).** Both sides' events are
+  brought to one set of labels, each compared as `events:<label>`. The tables are the single
+  place to edit:
+  - `EVENT_RULES`, actor spawns (hook) against the port's `Projectile` / `Sim` events:
+    - `DisBullet` -> `Projectile:Bullet`;
+    - `DisProjectile_Arrow` -> `Projectile:Arrow` (Bolt, SleepDart);
+    - `DisProjectile_Arrow_Explosive` -> `Projectile:ArrowExplosive` (IncendiaryBolt). The
+      host level's Tallboys fire these too, so they are not the player's alone;
+    - `DisProjectile_Grenade` / `_StickyGrenade` -> `Projectile:Grenade`;
+    - `DisExplosion` -> `Explosion` (port `Sim Explosion`);
+    - `DisGadget_SpringRazorPlaced` -> `SpringRazorPlaced` (`TrapPlaced`);
+    - `DisRatSwarm` -> `SwarmSummoned`;
+    - `DisEmitterCameraLensEffect*` -> `Effect:CameraLens`. The port's runner does not
+      present lens effects.
+  - **Effect spawns are mostly invisible.** Pooled particle systems
+    (`EmitterPool.SpawnEmitter`) are components, not actors, so the spawn scan cannot see the
+    original's effects. A capture request: record `SpawnEmitter` with its template.
+  - **`Damage`** is derived from the `pawn.health` / `npc.<n>.health` channels on both sides:
+    the first frame with a lower value. The amount is compared within 0.5.
+  - **`Behaviour`:** the original's `NpcBehavior` events of the current behaviour, mapped by
+    `BEHAVIOUR_STATES` (class -> the port's brain state), against changes of the port's
+    `npc.<n>.state` channel. An unlisted class stays `orig:<class>`.
+  - **Pairing.** Within a label, events are keyed by object (where both sides name it) and
+    state, and paired by an order-preserving alignment (`diff::align_events`): fewest unpaired
+    events, pairs only within `event_tolerance` + 60 ticks.
+  - **Agreement.** A pair agrees when its ticks differ by at most the spec's
+    `event_tolerance` (default 0). Each group notes the counts per side, the pairs and their
+    mean tick offset.
+- **Report.** Each group reports its own first divergence. The scenario's `first_divergence`
+  is the earliest of them; offset-only channels never count as divergences.
+  - `results.json` has `trace_compare` per scenario: counts, groups, one-sided channels and
+    per-channel detail.
+  - The scorecard adds "Agreement with the original's traces per channel group" (printed by
+    `oracle scenario`) and "Trace comparison per channel group" (per scenario).
+  - The original's trace is written beside the port's: `traces/<system>__<name>.original.json`.
+
+First results over the 90 scenarios with an original trace (2026-10-08, main at 7e1afcc;
+the last column counts channel-ticks within tolerance after removing offsets):
+
+| group | channels | agree / offset / diverge | channel-ticks within tolerance |
+|---|---|---|---|
+| pawn state | 90 | 87 / 0 / 3 | 98.7 % |
+| pawn velocity | 360 | 236 / 0 / 124 | 94.5 % |
+| pawn position | 270 | 125 / 28 / 117 | 86.7 % |
+| vitals | 42 | 27 / 0 / 15 | 87.4 % |
+| npc | 296 | 44 / 47 / 205 | 46.4 % |
+| behaviour | 38 | 9 / 0 / 29 | 43.0 % |
+
+What these results show about the comparison itself:
+- **No shared event kinds yet.** The original's traces record `ProcessEvent`, `Spawn` and
+  `NpcBehavior`; the port records `Sim`, `Projectile`, `Effect` and the others. So events are
+  not compared yet.
+- **No NPC tolerance was added.** The "NPC drift" is not settling. Both sides place the NPCs
+  and then run the spec's `settle` ticks before frame 0: the hook places them in
+  `capture.rs` before its settle; the runner builds the mission before its settle. Placed
+  NPCs that stand still hold their x / y exactly on both sides (`g0`, `g1`, `g3`, `g5` of
+  `combat/pistol_damage_range`; the dummy of `combat/sword_hit_dummy`).
+  - The NPCs that move on the original are `Passive` ones that keep walking after `UnPossess`:
+    the hook zeroes `Velocity` but not `Acceleration`. `g2` and `g4` of
+    `combat/pistol_damage_range` have already walked 51 / 96 uu by frame 0 and go on at about
+    1 uu per tick.
+  - That is a capture defect, so no tolerance should hide it. The capture request: zero the
+    pawn's `Acceleration` (and stop its movement) when a placed NPC is made `Passive`.
+  - The resting heights differ by a steady amount (original 97, port 94.23 on the Playground
+    floor), and starting health is 50 against 70. Both are reported once, as offsets.
+- **Fall traces do not fall.** In the cached original traces of `movement/fall_h700`, `fall_h1000`,
+  `fall_h1200` and `fall_h1350`, the pawn never falls: z stays at its start height for the whole run (`fall_stun` and `fall_1200` do fall). Those specs have no
+  `settle`, so the capture never set `PHYS_Falling`, and a walking pawn does not look for its
+  floor until it moves. Those traces are not valid captures; their `pawn.vz` divergence at
+  tick 1 (port -50, original 0) belongs to the capture, not to the port.
+
+With mapped events and camera channels (2026-10-08, 91 scenarios with an original trace):
+
+| group | scenarios | channels / events | agree / offset / diverge |
+|---|---|---|---|
+| camera | 4 | 24 | 4 / 0 / 20 |
+| camera offset | 4 | 12 | 0 / 2 / 10 |
+| events:Behaviour | 19 | 80 | 0 / 0 / 80 |
+| events:Damage | 33 | 112 | 1 / 0 / 111 |
+| events:Explosion | 11 | 16 | 0 / 0 / 16 |
+| events:Projectile:Bullet | 6 | 18 | 0 / 0 / 18 |
+| events:Projectile:Arrow | 3 | 8 | 0 / 0 / 8 |
+| events:Projectile:ArrowExplosive | 9 | 15 | 0 / 0 / 15 |
+| events:Projectile:Grenade | 3 | 3 | 0 / 0 / 3 |
+| events:SpringRazorPlaced | 2 | 2 | 2 / 0 / 0 |
+| events:SwarmSummoned | 1 | 1 | 0 / 0 / 1 |
+| events:Effect:CameraLens | 5 | 8 | 0 / 0 / 8 |
+
+The timing offsets are systematic:
+- Bullets spawn one tick earlier on the original than the port's `Projectile` (mean -1.00
+  over 9 pairs).
+- Bolts spawn one tick later (+1.0 to +1.5).
+- Grenades spawn 9 ticks later, and explode 8 ticks earlier (17 for the sticky grenade).
+- A heard shot starts the guard's `React` a tick earlier on the original.
+- The `Behaviour` groups mostly differ at frame 0: a spec's `Idle` NPC keeps the host
+  level's own AI on the original (Patrol, Soiree), while the port starts it `Idle`.
+- Explosive arrows and explosions late in the long Boyle runs come from the host level's
+  Tallboys, which the port does not have.
+
 **Usage for agents.** `oracle scenario --system powers` (or `--all`, or names, `combat/*`),
 then read `harness_out/oracle/scenario/results.json`: `totals`, `by_system` (pass, fail,
 unmeasured, error), and per scenario `status`, `first_divergence` (`against`: `original` when
@@ -844,8 +1002,8 @@ a captured trace exists, else the first failing checkpoint, with its tick), `che
 port `actual`, `expected`, `cmp`, `status`, `reference`, `source`), `notes` and `trace_file`
 (the full trace JSON: `channels`, `frames`, `events`). `capture_requests.json` lists every
 unmeasured / unverified check with the port's value and the `capture` recipe for the hook.
-Build with `cargo build --release -p oracle` into the shared target and copy the binary away
-(other worktrees build `oracle` into the same directory).
+Build with `cargo build --release -p oracle` into this agent's own target directory
+(`target-agents-oracle`); a target shared across worktrees can link another branch's crates.
 
 ## First port findings from the scenario runner
 

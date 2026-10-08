@@ -188,3 +188,31 @@ session dump class=DisAttentionInfo_Complex filter=m_PawnAttentionTweaks limit=6
 #   session find class=SkeletalMeshComponent name=<guard Outer.Name> ; session call object=<that mesh> function=GetBoneLocation args={"BoneName":"camera_jnt","Space":0}
 # Footfall noise: with the guard turned away (write its Rotation yaw), run/sprint toward it and record `session events functions=MakeNoise classes=DisAINoiseManager`
 #   if the dispatch is a script-visible call; otherwise trace 0x00c5a760 (loudness byte at event+0x20, context at +0x21, source at +0x24).
+
+# ranged F13 (BulletBlast 15): per-pawn damage records (shooter included) for a pistol shot at a guard 300 uu away, plus a second guard 150 uu behind the first and 10 deg off the line
+combat/pistol_damage_range
+combat/pistol_pierce
+
+# movement port: playground mantle / step / slope limits (U-804, U-763); mantle_330/360 now hold Jump (spec hash changed)
+movement/mantle_330
+movement/mantle_360
+movement/mantle_air_98_hold
+movement/mantle_air_98_tap
+movement/mantle_still_144
+movement/mantle_wall_144
+movement/slope_45
+movement/slope_55
+movement/step_50
+movement/step_56
+movement/walk_slope_34
+movement/walk_step_35
+# --- stealth port (2026-10-08) ---
+# F4 / F5: the guard's head pose per tick in detect_600 (the first sighting is outer-cone, the inner cone after the head turns).
+# Needed: the party guard's camera_jnt world location and rotation (GetBoneLocation / GetBoneQuaternion on its SkeletalMeshComponent) per tick,
+# its Rotation, the player's Location, PlayerAttnInfo m_fLastLOSDistance; and whether the body Rotation changes before Busted (head-only turning).
+#   session find class=SkeletalMeshComponent name=<guard Outer.Name> ; session call object=<that mesh> function=GetBoneLocation args={"BoneName":"camera_jnt","Space":0} (every tick of stealth/detect_600)
+stealth/detect_600
+# F1: footfall AI noises of a running / sprinting player (hear_footfalls): the port now emits 600 uu Footfall (run) / 1200 uu Anomaly (sprint)
+# at each DishonoredNotify_Footfall of the locomotion loop at RateScale 1. Needed: the tick of each footfall contact (trace 0x00b66a80) while
+# running at 400 / 360 uu/s and sprinting at 600 / 540, to decode the loop's play rate.
+stealth/hear_footfalls

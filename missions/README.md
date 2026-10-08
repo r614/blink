@@ -55,7 +55,7 @@ MissionDef(
     npcs: [ NpcDef(id: "...", kind: Civilian|Guard, archetype: 0..3, at: <Place>, behavior: <Behavior>, spawn_at_start: true, name: "...", talk: "Talk", talk_conversation: "<conversation ref>", speaker: "<original spawner>"), ... ],
     player_start: "<marker>",
     crowd: CrowdDef(civilians: 18, guards: 3, center: <Place>, radius: 2500.0),
-    settings: MissionSettings(respawn: false, respawn_delay: 5.0, time_limit: 900.0, high_chaos_kill_ratio: 0.2),
+    settings: MissionSettings(respawn: false, respawn_delay: 5.0, time_limit: 900.0),
     rules: [ RuleDef(on: <Trigger>, when: [<Condition>...], then: [<Action>...], once: true, id: "..."), ... ],
 )
 ```
@@ -157,8 +157,11 @@ rules listening for it.
 ### End of mission
 The mission ends on `Complete` / `Fail`, when the time limit runs out, or when every player is
 dead and `respawn` is off. The end screen shows the outcome and Dishonored-style statistics:
-hostiles and civilians killed, times detected, alarms, time taken, chaos (Low/High by kill
-ratio, an approximation), and the Ghost / Clean Hands feats.
+hostiles and civilians killed, times detected, alarms, time taken, chaos, and the Ghost /
+Clean Hands feats. Chaos is the game's score (kills by victim class, alarms rung, corpses
+found, Kismet `AddDarkness`); `settings.darkness` is the score the mission starts with and
+`settings.chaos_level_threshold` the chaos level reported "High" when the mission's Kismet does
+not set one.
 
 ## Sample
 `boyle_masked_host.ron`: three masked ladies, one of them the host. An informant reveals

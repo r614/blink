@@ -66,12 +66,15 @@ pub fn swimming(p: &mut PlayerState, input: &PlayerInput, can_move: bool, sword_
         leave_water(p, events);
         return;
     };
-    // Climbing out at the surface: the mantle finder still runs (pushing forward at an edge).
-    let head = eye_position(p, cfg);
-    let head_under = head.z < w.surface_z;
-    if !head_under && can_move && input.forward > 0 && crate::movement::try_mantle(p, input, ctx, events) {
+    // The mantle while swimming (0x00ADBD00, swimming branch): requested every tick the Jump
+    // button is down (with `m_bAutomaticallyMantleInWater`, which no shipped tweak sets, the
+    // forward input would do instead); the finder runs in the water as on land, along the
+    // facing. A step-up leaves the pawn swimming.
+    if can_move && p.kind != crate::state::PawnKind::Rat && input.pressed(buttons::JUMP) && crate::movement::try_mantle(p, ctx, events) && p.mode != MoveMode::Swimming {
         return;
     }
+    let head = eye_position(p, cfg);
+    let head_under = head.z < w.surface_z;
 
     // GetNetBuoyancy: the share of the cylinder below the surface.
     let hh = half_height(p, cfg);

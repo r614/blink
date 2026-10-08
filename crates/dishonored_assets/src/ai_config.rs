@@ -17,6 +17,10 @@ const CIV_UNS: &str = "Twk_Attn_Noncombatant_Uns.Twk_Attn_Noncombatant_Uns";
 const CIV_SUS: &str = "Twk_Attn_Noncombatant_Sus.Twk_Attn_Noncombatant_Sus";
 const NEUTRAL: &str = "Twk_Attn_Default_Neutral.Twk_Attn_Default_Neutral";
 const VISION: &str = "Twk_Vision_Default.Twk_Vision_Default";
+/// Level script packages that cook the NPC locomotion configs and animation sets (as the
+/// runtime's animation bank reads them).
+const NPC_ANIM_PACKAGES: &[&str] = &["L_Boyle_Ext_Script", "L_Boyle_Int_Script", "L_BoyleStreet_Ext_Script"];
+const GUARD_SWORD_SET: &str = "Npc_EliteGuard_Sword_as.Npc_EliteGuard_Sword_as";
 
 fn level_index(name: &str) -> Option<u8> {
     Some(match name {
@@ -115,6 +119,7 @@ fn attention(m: &TMap, d: &AttentionConfig) -> AttentionConfig {
         can_bust,
         seeing_scalar_dead_npc: f("m_fSeeingPawnAttentionIncreaseScalar_ToDeadNPC", d.seeing_scalar_dead_npc),
         min_range_unsighted_busted_proxy: f("m_fMinRangeToUnsightedBustedProxy", d.min_range_unsighted_busted_proxy),
+        magic: increase(m, "m_IncreaseForMagic", d.magic),
     }
 }
 
@@ -185,11 +190,31 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
     if let Some(m) = beh("AI_BehaviorTweaks_Search.TweaksBehavior_Search_Default") {
         out.search.cancel_investigate_wait = [get_f32(&m, "m_fCancelInvestigateWaitTimeMin").unwrap_or(0.5), get_f32(&m, "m_fCancelInvestigateWaitTimeMax").unwrap_or(1.0)];
         out.search.reached_broadcast_range = get_f32(&m, "m_fSearchReachedProxyBroadcastRange").unwrap_or(out.search.reached_broadcast_range);
+        out.search.stare_radius = get_f32(&m, "m_fInvestigateStareAtUnreachableRadius").unwrap_or(out.search.stare_radius);
+        out.search.stare_max_time = get_f32(&m, "m_fInvestigateStareAtUnreachableMaxTime_s").unwrap_or(out.search.stare_max_time);
+        out.search.anim_cooldown = get_f32(&m, "m_fSearchAnimCooldown").unwrap_or(out.search.anim_cooldown);
         prov.insert("ai.search.cancel_investigate_wait".into(), "AI_BehaviorTweaks_Search.TweaksBehavior_Search_Default".into());
+        prov.insert("ai.search.stare".into(), "AI_BehaviorTweaks_Search.TweaksBehavior_Search_Default.m_fInvestigateStareAtUnreachable{Radius,MaxTime_s}, m_fSearchAnimCooldown".into());
     }
     if let Some(m) = beh("AI_BehaviorTweaks_Search.TweaksBehavior_Search_Default.DisTweaks_AISubState_Investigate_0") {
-        out.search.proximity = get_f32(&m, "m_fProximityThresholds").unwrap_or(out.search.proximity);
+        let s = &mut out.search;
+        s.proximity = get_f32(&m, "m_fProximityThresholds").unwrap_or(s.proximity);
+        s.pathing_fail_retries = match m.get("m_PathingFailRetryCount") {
+            Some(TVal::I(v)) => (*v).max(0) as u32,
+            _ => s.pathing_fail_retries,
+        };
+        s.pathing_fail_scale = get_f32(&m, "m_fPathingFailDistanceScale").unwrap_or(s.pathing_fail_scale);
+        s.pathing_fail_range = [
+            get_f32(&m, "m_fPathingFailPointerSearchRange_Horiz").unwrap_or(s.pathing_fail_range[0]),
+            get_f32(&m, "m_fPathingFailPointerSearchRange_Up").unwrap_or(s.pathing_fail_range[1]),
+            get_f32(&m, "m_fPathingFailPointerSearchRange_Down").unwrap_or(s.pathing_fail_range[2]),
+        ];
         prov.insert("ai.search.proximity".into(), "TweaksBehavior_Search_Default.DisTweaks_AISubState_Investigate_0.m_fProximityThresholds".into());
+        prov.insert("ai.search.pathing_fail".into(), "TweaksBehavior_Search_Default.DisTweaks_AISubState_Investigate_0.m_PathingFail*".into());
+    }
+    if let Some(m) = beh("AI_BehaviorTweaks_Search.TweaksBehavior_Search_Default.DisTweaks_AISubState_TrackTarget_1") {
+        out.search.track_proximity = get_f32(&m, "m_fProximityThreshold").unwrap_or(out.search.track_proximity);
+        prov.insert("ai.search.track_proximity".into(), "TweaksBehavior_Search_Default.DisTweaks_AISubState_TrackTarget_1.m_fProximityThreshold".into());
     }
     if let Some(m) = beh("AI_BehaviorTweaks_Guard.TweaksBehavior_Guard_Default") {
         out.guard_attention_span = get_f32(&m, "m_fAttentionSpan").unwrap_or(out.guard_attention_span);
@@ -266,6 +291,11 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
                 d.angle_ranged_threat = get_f32(&s, "m_fAngleOfPerceivedRangedThreat").unwrap_or(d.angle_ranged_threat);
                 d.incoming_attacks_before_back_step = irng(&s, "m_IncomingAttacksBeforeBackStep", d.incoming_attacks_before_back_step);
                 d.forgive_incoming_attacks = get_f32(&s, "m_fTimeToForgiveIncomingAttacks").unwrap_or(d.forgive_incoming_attacks);
+                d.aggression_delta_per_damage = get_f32(&s, "m_fAggressionDeltaPerDamage").unwrap_or(d.aggression_delta_per_damage);
+                d.aggression_regen_rate = get_f32(&s, "m_fAggressionRegenRate").unwrap_or(d.aggression_regen_rate);
+                d.cooldown_factor_at_min_aggression = get_f32(&s, "m_fCooldownFactorAtMinAggression").unwrap_or(d.cooldown_factor_at_min_aggression);
+                d.stalemate_allowance = get_f32(&s, "m_fStalemateAllowanceTime").unwrap_or(d.stalemate_allowance);
+                d.blocked_attack_sensitivity = get_f32(&s, "m_fBlockedAttackSensitivity").unwrap_or(d.blocked_attack_sensitivity);
                 prov.insert("ai.combat.dodge".into(), path.clone());
             }
             if s.contains_key("m_TimeToFirstShot") || s.contains_key("m_TimeBeforeGivingUp") {
@@ -305,7 +335,26 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
             c.max_range = get_f32(&s, "m_fMaxContextRange").unwrap_or(c.max_range);
             // A negative height difference is no limit.
             c.max_height = get_f32(&s, "m_fMaxContextHeightDifference").map(|h| if h < 0.0 { f32::MAX } else { h }).unwrap_or(c.max_height);
+            c.damage_multiplier = get_f32(&s, "m_fAttackDamageMultiplier").or(c.damage_multiplier);
         }
+    }
+    // The sword's `Attribute_MeleeDamage` per difficulty (its `m_pAttributeTweak[1]`), the damage
+    // of every NPC slash (0x00C33DD0 -> 0x00C07C80).
+    let sword_attrs = db.try_resolve(SWORD.trim_end_matches('.')).and_then(|m| get_obj(&m, "m_pAttributeTweak[1]").map(str::to_string));
+    if let Some(m) = sword_attrs.as_deref().and_then(|p| db.try_resolve(p)) {
+        for (i, k) in ["m_fBaseValue1_Easy", "m_fBaseValue2_Normal", "m_fBaseValue3_Hard", "m_fBaseValue4_VeryHard"].iter().enumerate() {
+            out.combat.npc_sword_damage[i] = get_f32(&m, &format!("m_MeleeDamage.{k}")).unwrap_or(out.combat.npc_sword_damage[i]);
+        }
+        prov.insert("ai.combat.npc_sword_damage".into(), format!("{} :: m_MeleeDamage", sword_attrs.unwrap_or_default()));
+    }
+    // The guard archetype's attributes (Normal): HealthMax and MeleeDamageBonus.
+    const GUARD_PAWN: &str = "Pwn_EliteGuard_MTall_0.Pwn_EliteGuard_MTall_0";
+    let pawn_attrs = db.try_resolve(GUARD_PAWN).and_then(|m| get_obj(&m, "m_pAttributeTweaks[1]").map(str::to_string));
+    if let Some(m) = pawn_attrs.as_deref().and_then(|p| db.try_resolve(p)) {
+        let normal = |k: &str| get_f32(&m, &format!("{k}.m_fBaseValue2_Normal"));
+        out.combat.guard_health_max = normal("m_HealthMax").unwrap_or(out.combat.guard_health_max);
+        out.combat.npc_melee_damage_bonus = normal("m_MeleeDamageBonus").unwrap_or(out.combat.npc_melee_damage_bonus);
+        prov.insert("ai.combat.guard_health_max".into(), format!("{} :: m_HealthMax / m_MeleeDamageBonus", pawn_attrs.unwrap_or_default()));
     }
     prov.insert("ai.combat.melee_ranges".into(), format!("{SWORD}DisTweaks_InventoryItem_PawnSpecific_1.DisTweaks_NPC*"));
     // Rat swarms: the default swarm tweak and the Devouring Swarm's.
@@ -348,6 +397,7 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
         pv.bonus_walking = b("m_fVisLevelBonus_Walking");
         pv.bonus_sprinting = b("m_fVisLevelBonus_Sprinting");
         pv.bonus_swimming = b("m_fVisLevelBonus_Swimming");
+        pv.bonus_swimming_surface = b("m_fVisLevelBonus_SwimmingOnSurface");
         pv.zero_speed_sneaking = matches!(m.get("m_bForceZeroSpeedWhileSneaking"), Some(TVal::B(true)));
         prov.insert("ai.player_visibility".into(), "Twk_PlayerVisibility.Twk_PlayerVisibility".into());
     }
@@ -418,6 +468,30 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
         out.reaction_delay = r;
         prov.insert("ai.reaction_delay".into(), "DefaultAI.ini [DishonoredGame.DishonoredGlobalAIManager] m_ReactionDelay".into());
     }
+    if let Some(r) = range(ai.get("DishonoredGame.DishonoredGlobalAIManager", "m_MagicReactionDelay")) {
+        out.magic_reaction_delay = r;
+        prov.insert("ai.magic_reaction_delay".into(), "DefaultAI.ini [DishonoredGame.DishonoredGlobalAIManager] m_MagicReactionDelay".into());
+    }
+    // NPC locomotion configs (authored loop speeds per stance modifier) and the elite guard's
+    // GenericAction animation lengths, from the level script packages that cook them.
+    out.locomotion = crate::npc_anim::package_loco_configs(content, NPC_ANIM_PACKAGES);
+    if !out.locomotion.is_empty() {
+        prov.insert("ai.locomotion".into(), format!("ArkComponentLocomotionConfig exports of {NPC_ANIM_PACKAGES:?}: {}", out.locomotion.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")));
+    }
+    let seq = |name: &str| NPC_ANIM_PACKAGES.iter().find_map(|p| crate::npc_anim::sequence_play_length(content, p, GUARD_SWORD_SET, name));
+    // `DisNPCAnimDefinitions_EliteGuard`: SearchLostTarget = [Sword_SwordToPatrol -> <p2>OutOfSight],
+    // CorpseCheck = [<p2>CorpseCheck], MagicLostTarget = [<p2>Magic_OutOfSight]; the search keeps
+    // the sword out (`m_bAlwaysSearchWithSwordOut`), so the primary prefix is `Sword_`.
+    if let (Some(a), Some(b)) = (seq("Sword_SwordToPatrol"), seq("Sword_OutOfSight")) {
+        out.search.anim_lost_target = a + b;
+    }
+    if let Some(a) = seq("Sword_CorpseCheck") {
+        out.search.anim_corpse_check = a;
+    }
+    if let Some(a) = seq("Sword_Magic_OutOfSight") {
+        out.anim_magic_lost_target = a;
+    }
+    prov.insert("ai.search.anim_lengths".into(), format!("{GUARD_SWORD_SET} SequenceLength / RateScale: SearchLostTarget {} s, CorpseCheck {} s, MagicLostTarget {} s", out.search.anim_lost_target, out.search.anim_corpse_check, out.anim_magic_lost_target));
     let crumbs = "DishonoredGame.DishonoredSearchCrumbsComponent";
     let s = &mut out.search;
     s.crumbs = ai.get(crumbs, "m_iNumSearchCrumbs").and_then(|v| v.parse().ok()).unwrap_or(s.crumbs);
@@ -452,8 +526,111 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
         out.death_rattle_loudness = d;
         prov.insert("ai.death_rattle_loudness".into(), "Pwn_EliteGuard_*.m_DeathRattleLoudness = EAINoiseWhisper -> m_LoudnessDistanceArray[2]".into());
     }
+    // The AI noises (contact system, weapon tweaks, footfall notifies).
+    noise_table(content, &db, &mut out, &mut prov);
     out.provenance = prov;
     out
+}
+
+/// The player's pistol fire tweak (`DisTweaks_FirePistol`, `m_AINoiseLoudnessWhenFiring`).
+const FIRE_PISTOL: &str = "Twk_Inv_PlayerSpecific.Twk_Inv_PistolCorvo.DisTweaks_InventoryItem_PlayerSpecific_0.DisTweaks_FirePistol_1";
+/// The player's locomotion anim set (its loops carry `DishonoredNotify_Footfall`).
+const LOCOMOTION_SET: &str = "Ply_Sword_Locomotion_as.Ply_Sword_Locomotion_as";
+
+/// `AiConfig::noise` from the install: the contact system's `DisContactSub_AINoise` objects
+/// (loudness -> `m_LoudnessDistanceArray`, context, speed gate), `m_AINoiseLoudnessWhenFiring`
+/// of the pistol fire tweak, `m_fFall_Stun_Vel` (DefaultPlayerState.ini) and the footfall
+/// notify times of the player's locomotion loops. Entries not found keep the default (the same
+/// retail values) and say so in the provenance.
+fn noise_table(content: &Content, db: &TweakDb, out: &mut AiConfig, prov: &mut std::collections::BTreeMap<String, String>) {
+    use dishonored_ir::ai::{AiNoise, FootfallClip, NoiseContext};
+    let dist = out.loudness_distances.clone();
+    let radius = |name: &str| crate::ai_level::LOUDNESS_NAMES.iter().position(|n| *n == name).and_then(|i| dist.get(i).copied());
+    let game = content.package("DishonoredGame").ok();
+    let game_content = content.package("DishonoredGameContent").ok();
+    let cs = game.as_ref().and_then(|g| dishonored_audio::contact::ContactSystem::load(g, &game_content.iter().map(|p| &**p).collect::<Vec<_>>()));
+    let t = &mut out.noise;
+    match &cs {
+        Some(cs) => {
+            const ENV: &str = "Environment";
+            let mut set = |field: &str, slot: &mut AiNoise, striker: &str, struck: &str| {
+                let s = format!("DisContactType_{striker}");
+                let k = format!("DisContactType_{struck}");
+                match cs.ai_noise(&s, &k) {
+                    Some(n) => {
+                        let r = if n.loudness == "EAINoiseSilent" { Some(0.0) } else { radius(&n.loudness) };
+                        let ctx = NoiseContext::from_name(&n.context);
+                        if let (Some(r), Some(ctx)) = (r, ctx) {
+                            *slot = AiNoise::new(r, ctx, if n.volume.scale_with_speed { n.volume.min_speed } else { 0.0 });
+                            prov.insert(format!("ai.noise.{field}"), format!("Dis_ContactSystem ({s}, {k}) DisContactSub_AINoise {} {} min speed {} (scaled {})", n.loudness, n.context, n.volume.min_speed, n.volume.scale_with_speed));
+                        } else {
+                            prov.insert(format!("ai.noise.{field}"), format!("default (unknown loudness / context {} {})", n.loudness, n.context));
+                        }
+                    }
+                    // No AI noise sub on the pair or its ancestors: the contact is silent.
+                    None => {
+                        *slot = AiNoise::SILENT;
+                        prov.insert(format!("ai.noise.{field}"), format!("Dis_ContactSystem ({s}, {k}): no DisContactSub_AINoise"));
+                    }
+                }
+            };
+            set("footfall_run", &mut t.footfall_run, "Footfall_Run_Player", ENV);
+            set("footfall_sprint", &mut t.footfall_sprint, "Footfall_Sprint_Player", ENV);
+            set("footfall_sneak", &mut t.footfall_sneak, "Footfall_Sneak_Player", ENV);
+            set("footfall_silent", &mut t.footfall_silent, "Footfall_Run_Player_Silent", ENV);
+            set("land", &mut t.land, "JumpLand", ENV);
+            set("land_stealth", &mut t.land_stealth, "JumpLand_Stealth", ENV);
+            set("land_big", &mut t.land_big, "JumpLand_Big", ENV);
+            set("sword_body", &mut t.sword_body, "Sword", "Body");
+            set("sword_weapon", &mut t.sword_weapon, "Sword", "Weapon");
+            set("bullet_impact", &mut t.bullet_impact, "Bullet", ENV);
+            set("corpse", &mut t.corpse, "Corpse", ENV);
+            set("sleeping_body", &mut t.sleeping_body, "SleepingBody", ENV);
+        }
+        None => {
+            prov.insert("ai.noise".into(), "defaults (Dis_ContactSystem not loaded)".into());
+        }
+    }
+    match db.try_resolve(FIRE_PISTOL).and_then(|m| match m.get("m_AINoiseLoudnessWhenFiring") {
+        Some(TVal::Name(n)) => Some(n.clone()),
+        _ => None,
+    }) {
+        Some(n) => {
+            if let Some(r) = radius(&n) {
+                t.pistol_fire = AiNoise::new(r, NoiseContext::Danger, 0.0);
+                prov.insert("ai.noise.pistol_fire".into(), format!("{FIRE_PISTOL}.m_AINoiseLoudnessWhenFiring = {n}, context Danger (0x00C2A3E0)"));
+            }
+        }
+        None => {
+            prov.insert("ai.noise.pistol_fire".into(), format!("default (m_AINoiseLoudnessWhenFiring not in {FIRE_PISTOL})"));
+        }
+    }
+    let state = Ini::load_layered(&content.root, "PlayerState");
+    if let Some(v) = state.get_f32("DishonoredGame.StatePlayerMasterFalling", "m_fFall_Stun_Vel") {
+        t.fall_stun_speed = v;
+        prov.insert("ai.noise.fall_stun_speed".into(), "DefaultPlayerState.ini [DishonoredGame.StatePlayerMasterFalling] m_fFall_Stun_Vel".into());
+    }
+    if let Some(v) = state.get_f32("DishonoredGame.StatePlayerMasterFalling", "m_fAnimateFallTime") {
+        t.animate_fall_time = v;
+        prov.insert("ai.noise.animate_fall_time".into(), "DefaultPlayerState.ini [DishonoredGame.StatePlayerMasterFalling] m_fAnimateFallTime".into());
+    }
+    if let Ok(pkg) = content.package("Startup") {
+        if let Some(set) = (0..pkg.exports.len()).find(|&i| pkg.obj_path(ue3_package::ObjRef::Export(i)).eq_ignore_ascii_case(LOCOMOTION_SET)) {
+            let clips = dishonored_audio::anim_notify::read_anim_set(&pkg, set);
+            let clip = |name: &str, slot: &mut FootfallClip| {
+                if let Some(c) = clips.get(name) {
+                    let times: Vec<f32> = c.notifies.iter().filter(|n| matches!(n.kind, dishonored_audio::anim_notify::NotifyKind::Footfall { .. })).map(|n| n.time).collect();
+                    if c.length > 0.0 && !times.is_empty() {
+                        *slot = FootfallClip { length: c.length / c.rate.max(1e-6), footfalls: times.iter().map(|x| x / c.rate.max(1e-6)).collect() };
+                        return true;
+                    }
+                }
+                false
+            };
+            let ok = clip("Sword_Ready_Walk", &mut t.walk_clip) & clip("Sword_Ready_Run", &mut t.run_clip) & clip("Sword_Ready_Sprint", &mut t.sprint_clip);
+            prov.insert("ai.noise.footfall_clips".into(), format!("Startup {LOCOMOTION_SET} Sword_Ready_{{Walk,Run,Sprint}} DishonoredNotify_Footfall times{}", if ok { "" } else { " (some not found: defaults)" }));
+        }
+    }
 }
 
 /// A `DisTweaks_RatSwarm` over defaults.

@@ -1,8 +1,9 @@
 // The Boyle party guard `DishonoredSpawner_46` (yaw 251.37, faction Neutral_Guard: the masked
 // player is neutral to the party) with the player 800 uu BEHIND it, out of its cone, firing the
-// pistol once (Pistol noise radius 4000). Compares what the original guard does after a gunshot
+// pistol once (pistol noise 6000 Danger, `m_AINoiseLoudnessWhenFiring`). Compares what the original guard does after a gunshot
 // it hears but did not see coming: turn, walk to the shot, or fight. Position per tick is the
-// original-side observable (`Npc` channels: x, y, z, health, physics).
+// original-side observable (`Npc` channels: x, y, z, health, physics, brain channels).
+// Original (captured): DisBehaviorReact (slot 7) for 124 ticks, then DisBehaviorPatrol again; no search.
 (
     name: "ai/boyle_hear_shot",
     system: Ai,
@@ -18,7 +19,7 @@
     ticks: 720,
     input: [(tick: 5, action: Press(Secondary))],
     checkpoints: [
-        (name: "heard", expect: [(metric: At("npc.guard.attn_noise", 8), value: 0.6, tol: 0.01, source: "AI.md (0x00b60ca0): Danger sound = +0.4, floored at Investigate's start 0.6", status: Static)]),
+        (name: "heard", expect: [(metric: At("npc.guard.attn", 8), value: 1.0, tol: 0.01, source: "Original trace: the runner now gives the pawn its spawner's faction (spawner 46: Neutral_Guard, as in the original); the neutral profile's danger increase on the instigator (the player): its player attention goes to 1.0 at the shot and leaks at the neutral 2.0 / s (0.667 at tick 20, level HeadTrack), DisBehaviorReact runs in slot 7 from tick 7 to 131 and the guard does not move", status: Static)]),
         (name: "does not fight a neutral player", expect: [(metric: TimeAt("npc.guard.state", 9), value: 0, tol: 0, source: "Neutral_Guard has no enmity toward Corvo (AI.md Factions); a shot raises hearing attention only", status: Unverified)]),
         (name: "moves toward the shot", expect: [(metric: TimeToReach("npc.guard.speed2d", 20), value: 2, tol: 0, cmp: AtMost, source: "react 0.18-0.30 s, then Investigate runs for Danger noise (m_SearchFromNoiseTweaks[4].m_bShouldRun)", status: Unmeasured)]),
     ],

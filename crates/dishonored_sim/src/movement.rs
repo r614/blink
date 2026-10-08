@@ -276,8 +276,9 @@ pub fn update_locomotion_flags(p: &mut PlayerState, input: &PlayerInput, cfg: &M
 ///   unreachable: the controller never sets both flags);
 /// - sprinting: `GroundSpeedSprint * (StrafeMultiplierSprint | BackwardMultiplierSprint | 1)
 ///   / GroundSpeed`;
-/// - times the sword factor (`Attribute_SwordUnsheathedSpeedFactor` with a weapon drawn,
-///   in every stance including sprint);
+/// - times the sword factor (vslot 363, 0x00AA4700: `Attribute_SwordUnsheathedSpeedFactor` when
+///   the right-hand item is the sword class, else `Attribute_SwordSheathedSpeedFactor`; see
+///   [`sword_in_right_hand`]), in every stance including sprint;
 /// - a drop of more than 1e-4 below last tick's value is blended:
 ///   `last + (new - last) * clamp(dt * m_fSpeedBlendDownSpeed, 0, 1)`; rises are instant.
 pub fn speed_modifier(p: &mut PlayerState, input: &PlayerInput, cfg: &MovementConfig, sword_out: bool, dt: f32) -> f32 {
@@ -290,7 +291,12 @@ pub fn speed_modifier(p: &mut PlayerState, input: &PlayerInput, cfg: &MovementCo
     } else {
         1.0
     };
-    let mut m = if p.sprinting {
+    // An NPC brain's requested locomotion speed replaces the stance speeds (the authored loop
+    // speed already includes the weapon stance).
+    let npc = input.npc_speed > 0.0;
+    let mut m = if npc {
+        input.npc_speed / ground
+    } else if p.sprinting {
         let dir = if p.strafing {
             cfg.strafe_mult_sprint
         } else if p.moving_backwards {
@@ -308,7 +314,9 @@ pub fn speed_modifier(p: &mut PlayerState, input: &PlayerInput, cfg: &MovementCo
     } else {
         base
     };
-    m *= if sword_out { cfg.sword_unsheathed_speed_factor } else { cfg.sword_sheathed_speed_factor };
+    if !npc {
+        m *= if sword_out { cfg.sword_unsheathed_speed_factor } else { cfg.sword_sheathed_speed_factor };
+    }
     let last = p.speed_mod;
     if m < last && last - m > 1e-4 {
         let a = (dt * cfg.speed_blend_down_speed).clamp(0.0, 1.0);
@@ -316,6 +324,13 @@ pub fn speed_modifier(p: &mut PlayerState, input: &PlayerInput, cfg: &MovementCo
     }
     p.speed_mod = m;
     m
+}
+
+/// The speed modifier's sword test (0x00AA4700): the item in the right hand (hand slot 1) is of
+/// the sword class. A pawn carrying a body holds no sword (INVENTORY.md "Carrying": the sword is
+/// sheathed while carrying).
+pub fn sword_in_right_hand(p: &PlayerState) -> bool {
+    p.right_hand == crate::state::RightHandItem::Sword && p.carrying.is_none()
 }
 
 /// Braking (`APawn::ApplyVelocityBraking`, 0x006A2AC0): in sub-steps of at most 0.03 s,
@@ -403,6 +418,10 @@ pub fn step_movement(
         return;
     }
     let rat = p.kind == PawnKind::Rat;
+    // The player pawn's tick (0x00ADBD00): `m_bMantleAllowed` is set while walking or swimming.
+    if matches!(p.mode, MoveMode::Walking | MoveMode::Swimming) {
+        p.mantle_allowed = true;
+    }
 
     // `Dis_SneakOrSlide`: sneak toggle (keeps feet planted; standing up requires
     // headroom), or a slide when sprinting at `m_fMinSpeedToSlide` or faster.
@@ -759,13 +778,19 @@ fn walking(
     let cfg = ctx.cfg;
     let mut jump = false;
     if can_move && p.just_pressed(input, buttons::JUMP) && p.kind != PawnKind::Rat {
-        if try_mantle(p, input, ctx, events) {
-            return;
+        // `DoJump` (0x00AA3820): the mantle request first (0x00ADBE70: `m_bMantleAllowed` set, the
+        // Jump button is down), the Jump state only when it did not mantle. A step-up leaves the
+        // pawn walking and its physics runs this tick; the mantle state takes over.
+        if jump_press_mantle(p, ctx, events) {
+            if p.mode != MoveMode::Walking {
+                return;
+            }
+        } else {
+            if p.crouched {
+                set_crouch(p, false, ctx);
+            }
+            jump = !p.crouched;
         }
-        if p.crouched {
-            set_crouch(p, false, ctx);
-        }
-        jump = !p.crouched;
     }
     walking_move(p, input, sword_out, can_move, ctx);
     if jump && p.mode == MoveMode::Walking {
@@ -902,11 +927,20 @@ pub(crate) fn falling(p: &mut PlayerState, input: &PlayerInput, can_move: bool, 
     let power = if p.kind == PawnKind::Rat { 0.0 } else { cfg.power_jump_z };
     jump_tick(p, input, power, dt, events);
 
-    // Auto-mantle while airborne and pushing forward (Dishonored grabs ledges mid-jump).
-    if can_move && input.forward > 0 && -p.velocity.z < cfg.mantle.max_fall_speed_for_mantle && p.kind != PawnKind::Rat {
-        if try_mantle(p, input, ctx, events) {
+    // The mantle while airborne (0x00ADBD00, falling branch): every tick with `m_bMantleAllowed`
+    // and the Jump button down; a Jump press re-allows it (`DoJump` -> 0x00ADBE70). The stick
+    // plays no part (the finder searches along the facing). A step-up leaves the pawn falling.
+    if can_move && p.kind != PawnKind::Rat {
+        let mantled = if p.just_pressed(input, buttons::JUMP) {
+            jump_press_mantle(p, ctx, events)
+        } else {
+            p.mantle_allowed && input.pressed(buttons::JUMP) && try_mantle(p, ctx, events)
+        };
+        if mantled {
             p.jump.active = false;
-            return;
+            if p.mode != MoveMode::Falling {
+                return;
+            }
         }
     }
 
@@ -971,6 +1005,11 @@ pub(crate) fn falling(p: &mut PlayerState, input: &PlayerInput, can_move: bool, 
                 return;
             }
             hit_wall = true;
+            // A blasted NPC's wall contact (normal, speed before it) for the Windblast wall rule
+            // (`left_hand::windblast_wall_hits`).
+            if p.windblasted_by.is_some() && p.wall_hit.is_none() {
+                p.wall_hit = Some((n, v.length()));
+            }
             // ComputeSlideVector (slot 290): slide, never rising faster than the original move.
             let mut delta = (adjusted - n * adjusted.dot(n)) * (1.0 - t);
             if delta.z > 0.0 {
@@ -1003,11 +1042,14 @@ pub(crate) fn falling(p: &mut PlayerState, input: &PlayerInput, can_move: bool, 
             }
         }
         // Velocity from the move; twice the average less the old velocity while rising or
-        // speeding down (after a wall the measured velocity is kept).
+        // speeding down (physFalling tail, 0x006BF0E0). After a wall the saved old horizontal
+        // velocity is overwritten by the measured one before the formula, the old vz is kept:
+        // the horizontal part stays measured, only z is doubled.
         let measured = (p.position - old_loc) / tick;
         p.velocity = measured;
-        if !hit_wall && (measured.z < old_vel.z || old_vel.z >= 0.0) {
-            p.velocity = measured * 2.0 - old_vel;
+        if measured.z < old_vel.z || old_vel.z >= 0.0 {
+            let old = if hit_wall { Vec3::new(measured.x, measured.y, old_vel.z) } else { old_vel };
+            p.velocity = measured * 2.0 - old;
         }
         let terminal = cfg.terminal_velocity;
         if p.velocity.length_squared() > terminal * terminal {
@@ -1025,145 +1067,219 @@ fn land(p: &mut PlayerState, impact_speed: f32, normal: Vec3, events: &mut Vec<S
     p.fall_time = 0.0;
 }
 
-/// Ledge detection and mantle start for the player's own mantle (jump into a ledge, or
-/// grab one while airborne). Thresholds are the `pMantleTweaks` values; falling faster
-/// than `m_fFallSpeedForLedgeGrab` only grabs edges at least
-/// `m_fLedgeGrabMantleMinEdgeHeight` high, and nothing faster than
-/// `m_fMaxFallSpeedForMantle`.
-pub fn try_mantle(p: &mut PlayerState, input: &PlayerInput, ctx: &MoveCtx, events: &mut Vec<SimEvent>) -> bool {
-    let m = &ctx.cfg.mantle;
-    if input.forward <= 0 {
-        return false;
+/// The spot the mantle edge finder publishes (`DisMantleSpot`, 0x00AC6D40 from `CheckCanStand`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MantleSpot {
+    /// `m_StartLocation`: where the last forward box trace stopped against the face, at the
+    /// standing half height above the pawn's feet.
+    pub location: Vec3,
+    /// `m_StartYaw` as a horizontal unit vector: the direction of the clear trace over the edge.
+    pub dir: Vec3,
+    /// `m_fEdgeHeight`: above the feet, the bottom of the first crouched box that passed over the
+    /// edge (on the search's step grid, not the top surface's own height).
+    pub edge_height: f32,
+    /// `m_bRequiresImpactAnim`: the search started at the ledge-grab height (falling fast).
+    pub requires_impact_anim: bool,
+    /// `m_bForcesCrouch`: a standing box does not pass over the edge.
+    pub forces_crouch: bool,
+}
+
+/// The mantle edge finder (`DishonoredMantleEdgeFinderComponent`, a native state machine run in
+/// 0.25 ms slices; here run to completion when asked, so the original's lag of a few frames is
+/// not reproduced). All traces are box traces of the owner, `r` its radius, `c` =
+/// `Pawn.CrouchHeight` (`m_fCrouchHeight`, the crawl half height), `H` the standing half height,
+/// heights measured from the cylinder's bottom (the feet):
+/// - start height (0x00AD69B0): nothing when falling faster than `m_fMaxFallSpeedForMantle`;
+///   faster than `m_fFallSpeedForLedgeGrab` `m_fLedgeGrabMantleMinEdgeHeight` (and the impact
+///   flag), else the tweak's `m_MantleMinEdgeHeight`, less one search step, not below 0;
+/// - `FindClearDistanceAboveOwner` (0x00AD6410, setup 0x00AC6B80): a (r, r, c) box with its
+///   bottom at the feet swept up `m_MantleMaxEdgeHeight - 2c + 2H`; the clear height is the box
+///   top where it stopped;
+/// - `ForwardSearches` (0x00ADA6F0 setup, 0x00AD6600 step): (r, r, c) boxes centred from the
+///   start height + c up to `min(clear - c, m_MantleMaxEdgeHeight + c)` in steps of
+///   `m_LineCheckStepSize`, the grid placed so that its last height is 0.1 below the end; each
+///   is swept `m_MantleEdgeSearchDist` along the facing. A blocking face within
+///   `m_MaxVerticalAngleForEdgeFace` of vertical and `m_MaxHorizontalAngleForEdgeFace` of the
+///   facing moves the search start to where the box stopped and re-aims it along the face
+///   normal, `m_fMantleForwardMoveAmount` long after the first face, then the unused part of the
+///   last one; other faces are passed over. The first clear trace after a face is the edge;
+/// - `CheckDestinationValid` (0x00ADA4C0): the box at the end of that trace swept down one
+///   step plus 1; a floor steeper than `m_MaxSlopeAngleForEdgeTop` rejects the spot (an actor
+///   with `DisMantleableInterface` may still pass with its 6 x 6 grid, 0x00AD5F40: the port's
+///   world has no such actors);
+/// - `CheckCanStand` (0x00ACCAD0): a standing (r, r, H) box with its bottom at the edge height,
+///   swept along the same trace, must be clear and fit under the clear height, else the spot
+///   forces a crouch.
+pub fn find_mantle_spot(p: &PlayerState, facing: Vec3, min_edge: f32, ctx: &MoveCtx) -> Option<MantleSpot> {
+    let cfg = ctx.cfg;
+    let m = &cfg.mantle;
+    let step = m.line_check_step_size;
+    if step <= 0.0 {
+        return None;
     }
-    let fall = -p.velocity.z;
-    if p.mode == MoveMode::Falling && fall >= m.max_fall_speed_for_mantle {
-        return false;
+    // 0x00AD69B0: the owner's vertical velocity picks the start height. (The step it subtracts is
+    // the state's previous one, the tweak's after the first search.)
+    let vz = p.velocity.z;
+    if vz < -m.max_fall_speed_for_mantle {
+        return None;
     }
-    let min_edge = if p.mode == MoveMode::Falling && fall > m.fall_speed_for_ledge_grab { m.ledge_grab_min_edge_height } else { m.min_edge_height };
-    try_mantle_from(p, forward_vector(p.yaw), min_edge, ctx, events)
+    let impact = vz < -m.fall_speed_for_ledge_grab;
+    let start_h = ((if impact { m.ledge_grab_min_edge_height } else { min_edge }) - step).max(0.0);
+    let r = radius(p, cfg);
+    let c = cfg.crawl_half_height;
+    let stand = cfg.collision_half_height;
+    let foot = feet(p, cfg);
+    let swept = |center: Vec3, hh: f32, delta: Vec3| ctx.world.sweep_box(&PawnBox::new(center, r, hh), delta, channel::PAWN);
+
+    // FindClearDistanceAboveOwner.
+    let up = m.max_edge_height - 2.0 * c + 2.0 * stand;
+    let t = match swept(foot + Vec3::Z * c, c, Vec3::Z * up) {
+        Some(h) if h.start_penetrating => 0.0,
+        Some(h) => h.fraction,
+        None => 1.0,
+    };
+    let clear = t * up + 2.0 * c;
+
+    // ForwardSearches.
+    let first_h = start_h + c;
+    let end = (clear - c).min(m.max_edge_height + c);
+    let range = end - first_h;
+    let mut h = range - (range / step).floor() * step - 0.1 + first_h;
+    let facing = Vec3::new(facing.x, facing.y, 0.0).normalize_or_zero();
+    let max_horizontal = m.max_horizontal_angle_edge_face.to_radians();
+    let mut start = foot;
+    let mut dir = facing;
+    let mut dist = m.edge_search_dist;
+    let mut found = false;
+    let mut first = true;
+    loop {
+        let center = Vec3::new(start.x, start.y, foot.z + h);
+        let delta = dir * dist;
+        match swept(center, c, delta) {
+            Some(hit) => {
+                let n = hit.normal;
+                let t = if hit.start_penetrating { 0.0 } else { hit.fraction };
+                let vertical = 90.0 - n.z.clamp(-1.0, 1.0).acos().to_degrees() <= m.max_vertical_angle_edge_face;
+                let horizontal = (-(facing.x * n.x + facing.y * n.y)).clamp(-1.0, 1.0).acos() <= max_horizontal;
+                if vertical && horizontal {
+                    found = true;
+                    let at = center + delta * t;
+                    start = Vec3::new(at.x, at.y, start.z);
+                    dir = Vec3::new(-n.x, -n.y, 0.0);
+                    dist = if first { m.forward_move_amount } else { dist * (1.0 - t) };
+                    first = false;
+                }
+            }
+            None if found => {
+                // CheckDestinationValid.
+                if let Some(down) = swept(center + delta, c, -Vec3::Z * (step + 1.0)) {
+                    if down.normal.z.clamp(-1.0, 1.0).acos() > m.max_slope_angle_edge_top.to_radians() {
+                        return None;
+                    }
+                }
+                // CheckCanStand.
+                let edge = h - c;
+                let s = Vec3::new(start.x, start.y, foot.z + edge + stand);
+                let forces_crouch = if s.z + stand <= foot.z + clear { swept(s, stand, delta).is_some() } else { true };
+                return Some(MantleSpot {
+                    location: Vec3::new(start.x, start.y, foot.z + stand),
+                    dir: Vec3::new(delta.x, delta.y, 0.0).normalize_or(facing),
+                    edge_height: edge,
+                    requires_impact_anim: impact,
+                    forces_crouch,
+                });
+            }
+            None => {}
+        }
+        h += step;
+        if h > end {
+            return None;
+        }
+    }
+}
+
+/// The mantle request (0x00AD78D0) with the edge finder's spot along the pawn's facing; the
+/// stick plays no part. Returns true when the pawn mantled or stepped up.
+pub fn try_mantle(p: &mut PlayerState, ctx: &MoveCtx, events: &mut Vec<SimEvent>) -> bool {
+    let fwd = forward_vector(p.yaw);
+    match find_mantle_spot(p, fwd, ctx.cfg.mantle.min_edge_height, ctx) {
+        Some(spot) => {
+            start_mantle(p, spot, ctx, events);
+            true
+        }
+        None => false,
+    }
+}
+
+/// `DoJump`'s mantle attempt (0x00ADBE70): `m_bMantleAllowed` is set, then the request is made
+/// (the Jump button is down on its press).
+fn jump_press_mantle(p: &mut PlayerState, ctx: &MoveCtx, events: &mut Vec<SimEvent>) -> bool {
+    p.mantle_allowed = true;
+    try_mantle(p, ctx, events)
 }
 
 /// The mantle the original tries when a Blink ends (`ADishonoredPlayerPawn` 0x00AD78D0
 /// called from 0x00BE7420): the Blink edge finder uses `pMantleBlinkTweaks`, which leave
 /// `m_MantleMinEdgeHeight` at its class default 0 and match the normal tweaks otherwise.
 pub fn try_blink_mantle(p: &mut PlayerState, ctx: &MoveCtx, events: &mut Vec<SimEvent>) -> bool {
-    let dir = forward_vector(p.yaw);
-    try_mantle_from(p, dir, 0.0, ctx, events)
+    let fwd = forward_vector(p.yaw);
+    match find_mantle_spot(p, fwd, 0.0, ctx) {
+        Some(spot) => {
+            start_mantle(p, spot, ctx, events);
+            true
+        }
+        None => false,
+    }
 }
 
-/// Edge search in the spirit of `DisMantleFinderState_ForwardSearches` (0x00ADA6F0 /
-/// 0x00AD6600): horizontal traces `m_MantleEdgeSearchDist` beyond the cylinder, every
-/// `m_LineCheckStepSize` from the lowest edge height up to `m_MantleMaxEdgeHeight`; the
-/// wall must be within `m_MaxVerticalAngleForEdgeFace` of vertical and
-/// `m_MaxHorizontalAngleForEdgeFace` of the facing; the first clear trace above it marks
-/// the edge, whose top (slope within `m_MaxSlopeAngleForEdgeTop`) is found straight down.
-/// The finder's later states (destination valid, can stand, `m_FinalVerifyLocationGridSize`
-/// grid) are reduced to a box clearance test, standing then sneaking.
-pub fn try_mantle_from(p: &mut PlayerState, fwd: Vec3, min_edge: f32, ctx: &MoveCtx, events: &mut Vec<SimEvent>) -> bool {
-    let cfg = ctx.cfg;
-    let m = &cfg.mantle;
-    let base = feet(p, cfg);
-    let r = cfg.collision_radius;
-    let reach = r + m.edge_search_dist;
-    let step = m.line_check_step_size.max(1.0);
-    let max_vert = m.max_vertical_angle_edge_face.to_radians().sin();
-    let min_facing = m.max_horizontal_angle_edge_face.to_radians().cos();
-    let mut wall_dist = None;
-    let mut edge_clear_h = None;
-    let mut h = min_edge.max(step);
-    while h <= m.max_edge_height + step {
-        match ctx.world.raycast(base + Vec3::Z * h, fwd, reach, channel::PAWN) {
-            Some(hit) => {
-                let face_ok = hit.normal.z.abs() <= max_vert && (-hit.normal.truncate().normalize_or_zero()).dot(fwd.truncate()) >= min_facing;
-                if !face_ok {
-                    return false;
-                }
-                wall_dist = Some(hit.distance);
-            }
-            None if wall_dist.is_some() => {
-                edge_clear_h = Some(h);
-                break;
-            }
-            None => {}
-        }
-        h += step;
+/// 0x00AD78D0 with a valid spot: an edge no higher than `m_LowMantleMaxEdgeHeight` with
+/// `m_bLowMantleUseStepUp` and no crouch needed is the step-up (0x00AD35E0); any other enters
+/// `StatePlayerMasterMantle` (0x00ACD820, which clears `m_bMantleAllowed`).
+fn start_mantle(p: &mut PlayerState, spot: MantleSpot, ctx: &MoveCtx, events: &mut Vec<SimEvent>) {
+    let m = &ctx.cfg.mantle;
+    events.push(SimEvent::Mantle { id: p.id, edge_height: spot.edge_height });
+    if m.low_use_step_up && spot.edge_height <= m.low_max_edge_height && !spot.forces_crouch {
+        // 0x00AD35E0: three moves of the pawn (MoveActor, blocked by the world): to the spot's
+        // location, up by the edge height, forward along the spot's yaw by
+        // `m_fMantleForwardMoveAmount`. The velocity and the physics are left as they were (the
+        // camera is smoothed by `StepUpMantle`, `ADD_Head_Mantle_Low`, over
+        // `m_fLowMantleStepUpBlendTime`).
+        move_actor(p, spot.location - p.position, ctx);
+        move_actor(p, Vec3::Z * spot.edge_height, ctx);
+        move_actor(p, spot.dir * m.forward_move_amount, ctx);
+        p.traversal.step_ups = p.traversal.step_ups.wrapping_add(1);
+        return;
     }
-    let (Some(wall_dist), Some(clear_h)) = (wall_dist, edge_clear_h) else {
-        return false;
-    };
-    // Top of the edge, just beyond the wall face.
-    let probe_xy = base + fwd * (wall_dist + r * 0.5 + 4.0);
-    let top_start = probe_xy + Vec3::Z * clear_h;
-    let Some(top) = ctx.world.raycast(top_start, -Vec3::Z, step + 1.0, channel::PAWN) else {
-        return false;
-    };
-    let max_slope_z = m.max_slope_angle_edge_top.to_radians().cos();
-    if top.normal.z < max_slope_z {
-        return false;
+    p.mantle_allowed = false;
+    if spot.forces_crouch && !p.crouched {
+        p.crouched = true;
     }
-    let edge_h = top.point.z - base.z;
-    if edge_h < min_edge || edge_h > m.max_edge_height {
-        return false;
-    }
-    // The finder's location: the pawn against the face at its own height. (The finder's result
-    // location is not decoded, U-019; the step-up and the mantle sequences start from it.)
-    let fwd_h = Vec3::new(fwd.x, fwd.y, 0.0).normalize_or_zero();
-    let anchor = Vec3::new(base.x, base.y, p.position.z) + fwd_h * (wall_dist - r).max(0.0);
-    // The finder's classes (0x00AD78D0): low up to `m_LowMantleMaxEdgeHeight`, medium up to
-    // `m_MediumMantleMaxEdgeHeight`, else high; a low edge is a step-up when
-    // `m_bLowMantleUseStepUp` and no crouch is needed.
-    let kind = if edge_h <= m.low_max_edge_height {
+    p.velocity = Vec3::ZERO;
+    p.jump.active = false;
+    // The finder's classes: low up to `m_LowMantleMaxEdgeHeight`, medium up to
+    // `m_MediumMantleMaxEdgeHeight`, else high.
+    let kind = if spot.edge_height <= m.low_max_edge_height {
         0
-    } else if edge_h <= m.medium_max_edge_height {
+    } else if spot.edge_height <= m.medium_max_edge_height {
         1
     } else {
         2
     };
     let anim = m.anims.get(kind);
-    let step_up_allowed = m.low_use_step_up && kind == 0;
-    // How far past the finder's location the move ends: `m_fMantleForwardMoveAmount` for the
-    // step-up, the sequence's own forward root motion for a mantle.
-    let over = |step_up: bool| if step_up { m.forward_move_amount } else { anim.and_then(|a| a.root.last()).map(|e| e[0]).unwrap_or(m.forward_move_amount) };
-    let fits = |hh: f32, step_up: bool| {
-        let c = anchor + fwd_h * over(step_up);
-        let b = PawnBox::new(Vec3::new(c.x, c.y, top.point.z + hh + FLOOR_DIST), r, hh);
-        box_fits(ctx.world, &b).then_some(b.center)
-    };
-    // Standing on top, else sneaking (`m_bCrouchRequired`).
-    let (dest, crouch, step_up) = if let Some(c) = fits(cfg.collision_half_height, step_up_allowed) {
-        (c, false, step_up_allowed)
-    } else if let Some(c) = fits(cfg.crouch_half_height, false) {
-        (c, true, false)
-    } else {
-        return false;
-    };
-    if crouch && !p.crouched {
-        p.crouched = true;
-    }
-    p.velocity = Vec3::ZERO;
-    p.jump.active = false;
-    events.push(SimEvent::Mantle { id: p.id, edge_height: edge_h });
-    if step_up {
-        // 0x00AD35E0: moved to the finder's location, up by the height, then forward by
-        // `m_fMantleForwardMoveAmount`, at once (the camera is smoothed by `StepUpMantle`,
-        // `ADD_Head_Mantle_Low`, over `m_fLowMantleStepUpBlendTime`).
-        p.position = dest;
-        p.mode = MoveMode::Walking;
-        p.traversal.step_ups = p.traversal.step_ups.wrapping_add(1);
-        return true;
-    }
-    // The mantle state sets the pawn at its intro target at once (0x00A6EC20, no intro after
-    // walking or falling), then the sequence's root motion carries it to `dest`; the height
-    // (`m_fCurrentMantleHeight`) is the rise that lands it there.
+    // The mantle state sets the pawn at the spot's location at once (0x00A6EC20, no intro after
+    // walking or falling); the sequence's root motion carries it from there, its forward part
+    // as authored and its rise scaled to the edge height (0x00A8F9B0).
+    let fwd_end = anim.and_then(|a| a.root.last()).map(|e| e[0]).unwrap_or(m.forward_move_amount);
+    let from = spot.location;
+    let to = from + spot.dir * fwd_end + Vec3::Z * spot.edge_height;
     let rate = m.anim_rate.max(0.01);
     let (anim_i, duration) = match anim {
         Some(a) => (Some(kind as u8), a.duration / rate),
         None => (None, 0.0),
     };
-    p.position = anchor;
-    p.traversal = Traversal { from: anchor, to: dest, elapsed: 0.0, duration, edge_height: edge_h, anim: anim_i, rate, step_ups: p.traversal.step_ups };
+    p.position = from;
+    p.traversal = Traversal { from, to, elapsed: 0.0, duration, edge_height: spot.edge_height, anim: anim_i, rate, step_ups: p.traversal.step_ups };
     p.mode = MoveMode::Mantling;
-    true
 }
 #[cfg(test)]
 mod tests {

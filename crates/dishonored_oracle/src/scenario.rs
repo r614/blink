@@ -203,7 +203,8 @@ pub enum Action {
     /// A console command (original: `ConsoleCommand`; port: the matching debug hook, if any:
     /// `teleport X Y Z [YAW]`, `health N`, `mana N`, `power NAME LEVEL`, `alert NPC`,
     /// `calm NPC`, `give AMMOTYPE N`, `saveload` (save the match, load it back and continue from the copy; the
-    /// event detail says `same_state=true|false`), `cansave`; anything else is recorded as an
+    /// event detail says `same_state=true|false`), `cansave`, `adddarkness N` (the chaos cheat:
+    /// the darkness manager's Add); anything else is recorded as an
     /// unsupported-command event).
     Console(String),
     /// Select the left-hand item (power wheel / quick select), held until changed
@@ -429,6 +430,17 @@ pub struct Scenario {
     /// Absolute tolerance per channel-name prefix (longest prefix wins); default 1e-3.
     #[serde(default)]
     pub tolerances: Vec<(String, f64)>,
+    /// Channel-name prefixes judged relative to frame 0 against the original's trace (the
+    /// displacement from the start: `pawn.z` -> `pawn.z(k) - pawn.z(0)`), e.g. where the two
+    /// sides start the pawn at a different hover above the same floor. Every other channel is
+    /// judged absolute; either way a constant start offset is reported once, as an offset.
+    /// Not part of the spec hash (it changes the judgement, not the run).
+    #[serde(default)]
+    pub relative: Vec<String>,
+    /// Ticks two paired mapped events may differ by against the original's trace (default 0:
+    /// the same tick). Not part of the spec hash.
+    #[serde(default)]
+    pub event_tolerance: u32,
     #[serde(default)]
     pub sweep: Option<Sweep>,
     /// How to capture the original's side (hook commands), for the capture requests of
@@ -487,6 +499,11 @@ impl Scenario {
     /// Tolerance for a channel (longest matching prefix).
     pub fn tolerance(&self, channel: &str) -> f64 {
         self.tolerances.iter().filter(|(p, _)| channel.starts_with(p.as_str())).max_by_key(|(p, _)| p.len()).map(|x| x.1).unwrap_or(1e-3)
+    }
+
+    /// Whether a channel is judged relative to frame 0 (`relative`).
+    pub fn is_relative(&self, channel: &str) -> bool {
+        self.relative.iter().any(|p| channel.starts_with(p.as_str()))
     }
 
     /// The input state at every tick: (forward, right, yaw, pitch, held buttons).

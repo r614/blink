@@ -1,8 +1,8 @@
 // Devouring Swarm level 2 (Twk_DevouringSwarm): cost m_ManaCost 40, 60 rats (level 1: 30), spawn delay 0.65 s after the
 // cast notify, 30 s lifetime, detection radius 700, bite damage clamp(rats x 0.4, 2, 5) per 0.5 s after a
-// 2 s delay on NPCs (none on the player). The port keeps one group (U-503); the original spawns
-// individual crowd agents (`RatSwarm.CrowdAgent_SmallRat`, DisGameCrowdAgentSkeletalRat) - the hook
-// agent captures the actor count. Only the data-level checks are judged here.
+// 2 s delay on NPCs (none on the player). MEASURED 2026-10-08 (ORACLE.md "Capture requests answered"):
+// cost 40 at L1 and L2; the DisRatSwarm actor 39 ticks after the cost; its spawner releases 60 individual
+// DisGameCrowdAgentSkeletalRat crowd agents at L2 over 16 ticks. The port releases 60 rat pawns.
 (
     name: "powers/swarm_l2_cast",
     system: Powers,
@@ -12,8 +12,13 @@
     ticks: 300,
     input: [(tick: 5, action: Press(Secondary))],
     checkpoints: [
-        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 40, tol: 0.5, source: "Twk_DevouringSwarm m_ManaCost 40", status: Static)]),
-        (name: "rats", expect: [(metric: Max("world.swarm_rats"), value: 60, tol: 0, source: "level 2 rat count of the tweak; the original's actor count is a capture request", status: Static)]),
+        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 40, tol: 0.5, source: "measured 2026-10-08 (ORACLE.md): 40 mana; Twk_DevouringSwarm m_ManaCost 40")]),
+        (name: "rats", expect: [
+            (metric: Max("world.swarm_rats"), value: 60, tol: 0, source: "measured 2026-10-08: 60 rats at level 2"),
+            (metric: Max("world.rats"), value: 60, tol: 0, source: "measured 2026-10-08: individual crowd agents (rat pawns in the port)"),
+            (metric: Count("Sim:RatSpawned"), value: 60, tol: 0, source: "measured 2026-10-08: 60 released"),
+        ]),
+        (name: "release after the cost", expect: [(metric: Between("Sim:SwarmSummoned", "Sim:RatSpawned"), value: 0.65, tol: 0.02, source: "measured 2026-10-08: the swarm actor 39 ticks after the cost (the port takes the cost with SwarmSummoned, at the cast notify)")]),
         (name: "summon time", expect: [(metric: FirstAt("Sim:SwarmSummoned"), value: 0.25, tol: 0.1, source: "cast notify DisNotify_DevouringSwarm 0.165 s after the press at 0.083 s (the rats appear m_fRatSwarmSpawnDelay later)", status: Unmeasured)]),
     ],
     record: [Pawn, Vitals, Powers, SimEvents],

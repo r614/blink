@@ -237,6 +237,8 @@ port's `powers::shadow_kill_applies` and `adrenaline.rs` follow them (not re-ver
 
 ## 9. Findings
 
+(Port status after the 2026-10-08 port pass: section 12.)
+
 | id | class | finding | fix for the port |
 |---|---|---|---|
 | F-01 | port missing | Blink has a 1.0 s lock-out: `m_bActive` stays set from the aim until `m_fCooldownTime` after the move or cancel (0x00BE71F0 CanUse, 0x00BFC020, 0x00BED480, 0x00BE9180) | add an active/cooldown timer to the Blink state: set when aiming starts, after a release run the move (mode 2) or cancel (mode 3) then 1.0 s; refuse aim start while set. Scenario `powers/blink_cooldown` (Count BlinkStart 2) |
@@ -303,3 +305,27 @@ HOOK_TRIAGE.md.
 A trap met on the way: the Boyle runway start of the older scenarios (-3400, -3150, -190, facing
 south) has a wall 957 uu ahead in the port''s collision, so a 1600 uu Blink there is cut short; the
 sweeps therefore start at (-3201.5, -2763.3, 20) facing west (1594 uu clear at 5 degrees).
+
+## 12. Port status of the findings (2026-10-08, after the port pass)
+
+Re-read with the static index before porting; the decode details are in LOG.md (2026-10-08, "Powers
+findings ported"). Scenario run after the port: 21 pass, 0 fail, 2 unmeasured.
+
+| id | status | what the port does now | scenario before -> after |
+|---|---|---|---|
+| F-01 | **ported** | `BlinkTravel.active / cooling / cooldown_timer`: the press starts the power only when `blink::can_use`; the move's end, a cancel (release too close / no target, or deselecting while aiming) enter the cooldown; `blink::tick_cooldown` (every tick, whatever the left hand holds; dead pawns deactivate) clears it past `m_fCooldownTime` (new `BlinkConfig.cooldown_time`) | `blink_cooldown` fail (3 moves, 60 mana) -> pass (2 moves, 40 mana, no fizzle) |
+| F-02 | **ported** | no aim, no target, no event without the mana (0x00BFC020 returns before anything) | `blink_no_mana` fail -> pass |
+| F-03 | **ported** (world rate unmeasured) | `WorldState.blink_layers` (one `DilationLayer` per caster, replicated in `WorldExtras`): `set_blink_layer` is the helper's clamp and slope, `step_blink_layers` the GameInfo tick's linear step (real time); `pawn_time_scale` multiplies the other pawns by it, `world_time_scale` everything; the caster's own Bend Time clock runs at dt x its layer (`m_bAffectsBendTimePower`). Combination with Bend Time is multiplicative (decoded, 0x009FCBC0). The cooldown's end re-blends from the current value, so the return takes about 1 s + 2.5 s after the move | `blink_world_slow` unmeasured: the guard's rate dipped to 0.824 (the port's 10-tick move into the runway wall; the scenario's 0.718 assumes a full 16-tick move), back at 1.0 by tick 400 |
+| F-04 | **ported** | `CombatTuning.windblast_*` are per level; `WindblastState.level` from the caster's `m_Powers` level | `windblast_guard_l1` fail (26) -> pass (17; tol 1 around 18: the port's factor at this spot is 0.85-0.875) |
+| F-05 | **ported** | `WindblastState.range = m_Distance x (1 + SpellStrength)` (gather, front cap, lock-out) | covered by the level-2 scenarios (SpellStrength 0) |
+| F-06 | **ported** | `left_hand::windblast_wall_hits`: the falling move records a blasted NPC's wall contact (`PlayerState.wall_hit`, `windblasted_by`); rule as decoded (level 2 only, speed >= 500, wall-like normal, 100 damage, 30 % explode = body removed). The original collides the ragdoll, the port the falling capsule | new test `windblast_level_2_wall_hit_damages_the_thrown_npc` |
+| F-07 | **decoded, not ported** | the original never deletes projectiles: `DisProjectile` (vslot +0x37C) takes no damage and reacts by `m_WindblastBehavior` (Normal redirect / PushTowardNPC / Homing on the aimed NPC or point, x1.2 speed over 1.6 s). Porting needs each projectile tweak's behaviour and the homing steer in the projectile tick (the `+0x2B0` mode); the port still deletes projectiles in the cone | - |
+| F-08 | **ported** (combat definition LIKELY) | `PlayerState.combat_opponents` written by `dishonored_ai::Crowd::write_awareness` (brains in Combat against the pawn = the port's skirmish); `tick_dark_vision` runs the combat timer in the duration step | `dark_vision_combat` unmeasured: no end -> ends 1.05 s after the cast (expected 1.1 +- 0.4) |
+| F-09 | **ported** | `step_possession` adds `bend_time_extension[level-1]` when the possessor's bend has `elapsed < duration - m_fPostEffectCooldownTime` (new `BendTimeLevel.post_effect_cooldown`, 0.5) | `bend_time_possess_extension` fail (7.98 s) -> pass (12.0 s) |
+| F-10 | **ported** | higher-is-better score with the angle term normalised by the FOV, the distance term, the per-class priority weight (`PossessableConfig.targeting_priority`, `PossessConfig.priority_weights`), range x (1 + SpellStrength), cone `m_fMaxAngleFOVFraction x FOV`; pawns and swarm rats compete in one list. FOV: the sim's reference 75 deg (`m_fCurFOV` follows the player's FOV setting and camera FOV targets; whether Possession's `m_fCameraFOVZoomSpeed` narrows it while aiming is not decoded) | `possession_guard`, `possession_timeline` pass |
+| F-11 | **ported** | `powers::set_power_level` (used by `buy_power` and the oracle's `power` console command) | new test `vitality_raises_current_health_with_the_maximum` |
+| F-12 | **ported** (measured 2026-10-08) | the swarm releases its level's `m_RatCount` rats (30 / 60) as individual rat pawns (`PlayerState.swarm`) over 16 ticks once the actor appears `m_fRatSwarmSpawnDelay` after the cast notify; they live `m_fDuration` (30 s), then stop and despawn over 10 s. Each rat is driven by the `dishonored_ai` rat-swarm brain with the Devouring Swarm tweak (sparing the caster); bites go through the attack groups (`rats::step_rat_attacks`) with the level's damage values, credited to the caster as `DamageCause::Rats`; eaten corpses leave no body (the mission now applies the brains' `RatEat` devoured events). Possession takes a swarm rat like any rat pawn. The aggregate `SwarmState` group (target, bites, eating) is gone. Not decoded: where the spawner places each rat (the port spreads them on a sunflower spiral); the 10 s tail is spread evenly | `swarm_l2_cast`, `devouring_swarm_l1` (now measured references) |
+| F-13 | open | the Windblast component's tick dt under Bend Time not decoded further | - |
+| F-14 | open | the possession end test is object deletion; not changed | - |
+
+Other measurements of 2026-10-08 checked against the port: Bend Time and Devouring Swarm now take their cost with the cast notify (Bend Time 60 mana 9 ticks after the press, measured; the press needs the mana, `left_hand::update`). Possession L2's cost is taken 12 ticks after the release in the original (the cast notify); the port still pays at the release (open). Windblast L2: 26 damage matches; the blasted guard's ragdoll peaks at 1005 uu/s horizontally while the port adds the momentum (2367 uu/s) to the capsule's velocity: the ragdoll's impulse-to-velocity rule is not decoded (open; the wall rule's 500 uu/s threshold is still passed in the measurement: the 100 `DisDamageType_Impact` kill 5 ticks later is that rule).

@@ -253,46 +253,32 @@ fn eating_takes_the_startup_and_one_interval_per_limb_plus_one() {
     assert_eq!(rats::eat_clock_start(false, 0.5), 0.0);
 }
 
-fn swarm_at(r: &mut Run, pos: Vec3) {
-    let l = r.cfg.gameplay.items.swarm.levels[0];
-    r.state.swarms.push(SwarmState { id: 7000, owner: 1, level: 0, position: pos, spawn_delay: 0.0, age: 0.0, rats: l.rat_count, target: None, attack_time: 0.0, bite_timer: 0.0, eating: None, eat_time: 0.0 });
-}
-
+/// MEASURED 2026-10-08: a level 1 Devouring Swarm's spawner releases 30 individual rats over 16
+/// ticks; after `m_fDuration` (30 s) the swarm ends and its rats despawn over about 10 s.
 #[test]
-fn a_swarm_eats_a_found_corpse_without_the_kill_delay() {
-    let mut r = Run::new(&[(Vec3::new(400.0, 0.0, Z), 180.0)]);
-    r.pm(100).alive = false;
-    swarm_at(&mut r, Vec3::new(380.0, 0.0, 10.0));
+fn a_swarm_releases_rat_pawns_and_they_despawn_after_its_duration() {
+    let mut r = Run::new(&[(Vec3::new(3000.0, 0.0, Z), 180.0)]);
     let l = r.cfg.gameplay.items.swarm.levels[0];
-    let total = rats::eat_duration(true, rats::CORPSE_LIMBS, l.eat_startup, l.eat_per_limb);
-    let n = (0..2000).position(|_| {
+    r.state.swarms.push(SwarmState { id: 7000, owner: 1, level: 0, position: Vec3::new(0.0, 0.0, 10.0), spawn_delay: 1e-4, age: 0.0, rats: l.rat_count, release_ticks: 0, ending: false, rats_at_end: 0 });
+    let members = |r: &Run| r.state.players.iter().filter(|p| p.swarm == Some(7000) && p.kind == dishonored_sim::state::PawnKind::Rat).count();
+    let mut counts = Vec::new();
+    for _ in 0..20 {
         r.step(&[]);
-        r.p(100).no_body
-    });
-    let secs = n.expect("eaten") as f32 * TICK;
-    assert!((secs - total).abs() < 0.05, "{secs} vs {total}");
-    assert!(r.events.iter().any(|e| matches!(e, SimEvent::BodyRemoved { body: 100, ash: false })));
+        counts.push(members(&r));
+    }
+    assert_eq!(counts[15], l.rat_count as usize, "{counts:?}");
+    assert!(counts[0] > 0 && counts[0] < l.rat_count as usize, "{counts:?}");
+    assert!(r.events.iter().filter(|e| matches!(e, SimEvent::RatSpawned { swarm: Some(7000), .. })).count() == l.rat_count as usize);
+    // Alive for the duration, then gone within the despawn tail.
+    r.steps(((l.duration - 1.0) / TICK) as usize, &[]);
+    assert_eq!(members(&r), l.rat_count as usize);
+    r.steps((6.0 / TICK) as usize, &[]);
+    let mid = members(&r);
+    assert!(mid > 0 && mid < l.rat_count as usize, "{mid}");
+    r.steps((6.0 / TICK) as usize, &[]);
+    assert_eq!(members(&r), 0);
+    assert!(r.state.swarms.is_empty());
 }
-
-#[test]
-fn a_swarm_keeps_its_target_until_it_escapes() {
-    let mut r = Run::new(&[(Vec3::new(600.0, 0.0, Z), 180.0), (Vec3::new(0.0, 600.0, Z), 180.0)]);
-    swarm_at(&mut r, Vec3::new(300.0, 300.0, 10.0));
-    r.step(&[]);
-    let first = r.state.swarms[0].target.expect("a target");
-    // The other guard comes nearer: the group stays on its target (no switch to the nearest).
-    let other = if first == 100 { 101 } else { 100 };
-    let near = r.state.swarms[0].position + Vec3::new(30.0, 0.0, 82.0);
-    r.pm(other).position = near;
-    r.step(&[]);
-    assert_eq!(r.state.swarms[0].target, Some(first));
-    // Beyond m_fPawnEscapeRadius (750) it is dropped.
-    let far = r.state.swarms[0].position + Vec3::new(0.0, -2000.0, 82.0);
-    r.pm(first).position = far;
-    r.step(&[]);
-    assert_ne!(r.state.swarms[0].target, Some(first));
-}
-
 #[test]
 fn armour_absorbs_on_its_region_side_and_types() {
     use dishonored_sim::vitals::{ArmorSide, armor_absorbs};

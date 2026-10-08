@@ -31,6 +31,86 @@ pub struct Divergence {
     pub text: String,
 }
 
+/// One channel group's (or event kind's) comparison with the original's trace.
+#[derive(Serialize)]
+pub struct GroupResult {
+    pub group: String,
+    pub channels: u32,
+    pub agree: u32,
+    pub offset: u32,
+    pub diverge: u32,
+    pub first_tick: Option<u32>,
+    /// The group's first divergence (`-`: none).
+    pub first: String,
+    /// Steady offsets (original minus port), reported once.
+    pub offsets: Vec<String>,
+    /// Mapped events: counts per side, pairs, mean tick offset.
+    pub note: String,
+    /// Runs of diverging ticks over the group's channels (`channel first-last`).
+    pub spans: Vec<String>,
+    /// Channel-ticks compared and within the tolerance after removing the offsets.
+    pub ticks: u64,
+    pub agree_ticks: u64,
+}
+
+/// The comparison with the original's trace.
+#[derive(Serialize)]
+pub struct TraceCompare {
+    pub compared_ticks: u32,
+    pub channels: usize,
+    pub agree: usize,
+    pub offset: usize,
+    pub diverge: usize,
+    pub groups: Vec<GroupResult>,
+    pub only_original: Vec<String>,
+    pub only_port: Vec<String>,
+    /// Every compared channel (mode, verdict, start offset, first divergence, worst).
+    pub detail: Vec<diff::ChannelDiff>,
+}
+
+fn divergence_text(d: &diff::Divergence) -> String {
+    match &d.kind {
+        diff::DivergenceKind::Channel { channel, original, port, tolerance } => format!("{channel}: original {original:.3}, port {port:.3} (tol {tolerance})"),
+        diff::DivergenceKind::Event { index, original, port } => {
+            let e = |x: &Option<dishonored_oracle::trace::TraceEvent>| x.as_ref().map(|e| format!("{}@{} t{}", e.name, e.object, e.tick)).unwrap_or_else(|| "none".into());
+            format!("event #{index}: original {}, port {}", e(original), e(port))
+        }
+        diff::DivergenceKind::MissingFrame { side } => format!("no {side} frame"),
+    }
+}
+
+fn trace_compare(d: &diff::TraceDiff) -> TraceCompare {
+    let (agree, offset, diverge) = d.channel_counts();
+    TraceCompare {
+        compared_ticks: d.compared_ticks,
+        channels: d.channels.len(),
+        agree,
+        offset,
+        diverge,
+        groups: d
+            .groups
+            .iter()
+            .map(|g| GroupResult {
+                group: g.group.clone(),
+                channels: g.channels,
+                agree: g.agree,
+                offset: g.offset,
+                diverge: g.diverge,
+                first_tick: g.first.as_ref().map(|x| x.tick),
+                first: g.first.as_ref().map(divergence_text).unwrap_or_else(|| "-".into()),
+                offsets: g.offsets.iter().map(|(c, o)| format!("{c} {o:+.3}")).collect(),
+                note: g.note.clone(),
+                spans: d.channels.iter().filter(|c| c.group == g.group).flat_map(|c| c.spans.iter().map(move |(a, b)| format!("{} {a}-{b}", c.channel))).collect(),
+                ticks: d.channels.iter().filter(|c| c.group == g.group).map(|c| c.compared as u64).sum(),
+                agree_ticks: d.channels.iter().filter(|c| c.group == g.group).map(|c| c.agree_ticks as u64).sum(),
+            })
+            .collect(),
+        only_original: d.only_original.clone(),
+        only_port: d.only_port.clone(),
+        detail: d.channels.clone(),
+    }
+}
+
 #[derive(Serialize)]
 pub struct ScenarioResult {
     pub name: String,
@@ -48,6 +128,8 @@ pub struct ScenarioResult {
     pub notes: Vec<String>,
     pub first_divergence: Option<Divergence>,
     pub original_trace: bool,
+    /// Per channel group against the original's trace (when captured).
+    pub trace_compare: Option<TraceCompare>,
     pub spec_hash: String,
     pub trace_file: Option<String>,
     pub checks: Vec<Check>,
@@ -167,6 +249,7 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
                     notes: Vec::new(),
                     first_divergence: None,
                     original_trace: false,
+                    trace_compare: None,
                     spec_hash: format!("{:016x}", s.spec_hash()),
                     trace_file: None,
                     checks: Vec::new(),
@@ -208,13 +291,20 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
                     cache::load::<(Provenance, Trace)>(&root, &key).ok().map(|x| x.1)
                 });
                 r.original_trace = orig.is_some();
+                if let Some(o) = &orig {
+                    // The original's trace beside the port's, for side-by-side reading.
+                    let _ = std::fs::write(trace_dir.join(format!("{}.original.json", s.name.replace('/', "__"))), serde_json::to_string(o).unwrap_or_default());
+                }
                 r.first_divergence = match &orig {
                     Some(o) => {
-                        let kinds: Vec<&str> = o.events.iter().map(|e| e.kind.as_str()).collect();
-                        let mut port = run.trace.clone();
-                        port.events.retain(|e| kinds.contains(&e.kind.as_str()));
-                        let d = diff::first_divergence(o, &port, &|c| s.tolerance(c));
-                        d.first.map(|x| Divergence { against: "original".into(), tick: Some(x.tick), text: format!("{:?}", x.kind) })
+                        // Every port event goes in: the comparison maps both sides' events to one
+                        // vocabulary (`event_map`) and compares raw kinds only where both record them.
+                        let d = diff::compare_traces(o, &run.trace, &|c| s.tolerance(c), &|c| s.is_relative(c), s.event_tolerance);
+                        r.trace_compare = Some(trace_compare(&d));
+                        d.first.map(|x| {
+                            let group = d.groups.iter().find(|g| g.first.as_ref() == Some(&x)).map(|g| g.group.clone()).unwrap_or_default();
+                            Divergence { against: "original".into(), tick: Some(x.tick), text: format!("[{group}] {}", divergence_text(&x)) }
+                        })
                     }
                     None => r.checks.iter().find(|c| c.status == CheckStatus::Fail).map(|c| Divergence { against: "checkpoint".into(), tick: c.tick, text: format!("{}: {} = {} (original {}; {})", c.checkpoint, c.metric, val(c.actual), cmp_text(c), c.source) }),
                 };
@@ -227,7 +317,9 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
             .collect()
     });
     let mut card = Scorecard { title: "Scenarios: the port against the original's measurements and traces".into(), ..Default::default() };
-    let mut table = Table::new("Scenarios", &["scenario", "status", "pass/fail/unmeasured/unverified", "first divergence", "s"]);
+    let mut table = Table::new("Scenarios", &["scenario", "status", "pass/fail/unmeasured/unverified", "channels agree/offset/diverge", "first divergence", "s"]);
+    let mut chan_table = Table::new("Trace comparison per channel group", &["scenario", "group", "agree/offset/diverge", "first divergence", "offsets (events: counts and timing)", "diverging ticks"]);
+    let mut group_tot: BTreeMap<String, (usize, u32, u32, u32, u32, u64, u64)> = BTreeMap::new();
     let mut checks_table = Table::new("Checks", &["scenario", "checkpoint", "metric", "port", "expected", "status", "reference"]);
     let mut items = Vec::new();
     let mut captures = Vec::new();
@@ -268,7 +360,13 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
             (None, None) if r.original_trace => "none (original trace matches)".into(),
             (None, None) => "-".into(),
         };
-        table.row(vec![r.name.clone(), r.status.clone(), format!("{}/{}/{}/{}", r.passed, r.failed, r.unmeasured, r.unverified), div, format!("{:.2}", r.seconds)]);
+        let chans = r.trace_compare.as_ref().map(|c| format!("{}/{}/{} of {}", c.agree, c.offset, c.diverge, c.channels)).unwrap_or_else(|| "-".into());
+        table.row(vec![r.name.clone(), r.status.clone(), format!("{}/{}/{}/{}", r.passed, r.failed, r.unmeasured, r.unverified), chans, div, format!("{:.2}", r.seconds)]);
+        for g in r.trace_compare.iter().flat_map(|c| &c.groups) {
+            chan_table.row(vec![r.name.clone(), g.group.clone(), format!("{}/{}/{}", g.agree, g.offset, g.diverge), g.first_tick.map(|t| format!("tick {t}: {}", g.first)).unwrap_or_else(|| "-".into()), if g.note.is_empty() { g.offsets.join(", ") } else { g.note.clone() }, g.spans.join(", ")]);
+            let e = group_tot.entry(g.group.clone()).or_default();
+            *e = (e.0 + 1, e.1 + g.channels, e.2 + g.agree, e.3 + g.offset, e.4 + g.diverge, e.5 + g.agree_ticks, e.6 + g.ticks);
+        }
         for c in &r.checks {
             let st = match c.status {
                 CheckStatus::Pass => "pass",
@@ -314,7 +412,14 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
         sys.row(vec![k.clone(), v.0.to_string(), v.1.to_string(), v.2.to_string(), v.3.to_string()]);
     }
     card.tables.push(sys);
+    let mut gt = Table::new("Agreement with the original's traces per channel group", &["group", "scenarios", "channels (or events)", "agree", "offset only", "diverge", "channels agree or offset %", "channel-ticks within tolerance %"]);
+    for (g, (n, c, a, o, dv, at, tt)) in &group_tot {
+        let ticks = if *tt > 0 { format!("{:.1}", 100.0 * *at as f64 / *tt as f64) } else { "-".into() };
+        gt.row(vec![g.clone(), n.to_string(), c.to_string(), a.to_string(), o.to_string(), dv.to_string(), format!("{:.1}", 100.0 * (*a + *o) as f64 / (*c).max(1) as f64), ticks]);
+    }
+    card.tables.push(gt);
     card.tables.push(table);
+    card.tables.push(chan_table);
     card.tables.push(checks_table);
     let res = Results { totals: tot, by_system, scenarios: out_results, capture_requests: captures };
     std::fs::write(out.join("results.json"), serde_json::to_string_pretty(&res)?)?;

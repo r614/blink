@@ -19,10 +19,10 @@
 //! - passive powers (`DishonoredPowersComponent.m_Powers`, DefaultPlayer.ini) and bone charms
 //!   (`DisTweaks_WhaleBoneCharmList`) are attribute modifiers.
 
-use crate::events::{DamageCause, SimEvent, SoundCategory};
+use crate::events::{DamageCause, SimEvent};
 use crate::movement::{MoveCtx, eye_position, forward_vector, view_vector};
 use crate::state::{Condition, PawnKind, PlayerId, PlayerState, PossessStage, SwarmState, TimeBendState, WorldState, power};
-use crate::vitals::{apply_damage, spend_mana};
+use crate::vitals::spend_mana;
 use dishonored_ir::gameplay::{GameplayConfig, MovementConfig, VitalsConfig};
 use dishonored_ir::items::ModifierType;
 use dishonored_world::{Capsule, WorldQuery, channel};
@@ -59,27 +59,77 @@ pub fn attribute_for(p: &PlayerState, cfg: &GameplayConfig, name: &str, base: f3
         }
     }
     if p.inv.upgrades != 0 {
-        for (i, (un, attrs)) in items.upgrades.iter().enumerate().take(32) {
-            if p.inv.upgrades & (1 << i) != 0 && host(un) {
+        for (i, (un, attrs)) in items.upgrades.iter().enumerate().take(64) {
+            if p.inv.upgrades & (1u64 << i) != 0 && host(un) {
                 v += attrs.iter().filter(|(n, _)| n == name).map(|(_, x)| *x).sum::<f32>();
             }
         }
     }
     if p.inv.charms_equipped != 0 {
-        for (i, c) in items.charms.iter().enumerate().take(32) {
-            if p.inv.charms_equipped & (1 << i) != 0 && c.attribute == name {
-                v += c.values.first().copied().unwrap_or(0.0);
+        for slot in 0..charm_slots(cfg) {
+            let Some(c) = charm(cfg, slot) else { continue };
+            if p.inv.charms_equipped & (1u64 << slot) != 0 && c.attribute == name {
+                v += charm_value(p, cfg, slot);
             }
         }
     }
     v
 }
 
+/// Charm slots: `m_Charms` then `m_ScriptedCharms` (at most 64, the inventory's bit width).
+pub fn charm_slots(cfg: &GameplayConfig) -> usize {
+    (cfg.items.charms.len() + cfg.items.scripted_charms.len()).min(64)
+}
+
+/// The charm of a slot.
+pub fn charm(cfg: &GameplayConfig, slot: usize) -> Option<&dishonored_ir::items::BoneCharm> {
+    let n = cfg.items.charms.len();
+    if slot < n { cfg.items.charms.get(slot) } else { cfg.items.scripted_charms.get(slot - n) }
+}
+
+/// The slot of a charm effect id (0x00AA8EF0: below `SCRIPTED_CHARM_BASE` an index into
+/// `m_Charms`, from it up into `m_ScriptedCharms`).
+pub fn charm_slot(cfg: &GameplayConfig, effect: i32) -> Option<usize> {
+    let base = dishonored_ir::items::SCRIPTED_CHARM_BASE;
+    let n = cfg.items.charms.len();
+    let slot = match effect {
+        e if e < 0 => return None,
+        e if e < base => Some(e as usize).filter(|i| *i < n)?,
+        e => Some((e - base) as usize).filter(|j| *j < cfg.items.scripted_charms.len())? + n,
+    };
+    (slot < 64).then_some(slot)
+}
+
+/// The value an owned charm gives: `m_Levels[level].m_fValue` at its current level (the
+/// owned entry's level byte, 0x00AB9330).
+pub fn charm_value(p: &PlayerState, cfg: &GameplayConfig, slot: usize) -> f32 {
+    let Some(c) = charm(cfg, slot) else { return 0.0 };
+    let level = if p.inv.charms_level2 & (1u64 << slot) != 0 { 1 } else { 0 };
+    c.values.get(level).or(c.values.last()).copied().unwrap_or(0.0)
+}
+
+/// Take a bone charm effect (0x00ABBA90): a charm not owned yet is added at level 0 (and
+/// equipped while a slot is free, `m_bAutoEquipBoneCharm`); one already owned goes up a level
+/// (to the "II" values), never past its last level.
+pub fn take_charm(p: &mut PlayerState, cfg: &GameplayConfig, slot: usize) {
+    let bit = 1u64 << slot;
+    if p.inv.charms_owned & bit != 0 {
+        if charm(cfg, slot).is_some_and(|c| c.values.len() > 1) {
+            p.inv.charms_level2 |= bit;
+        }
+        return;
+    }
+    p.inv.charms_owned |= bit;
+    if (p.inv.charms_equipped.count_ones() as u8) < max_charms(p, cfg) {
+        p.inv.charms_equipped |= bit;
+    }
+}
+
 /// Give a workshop upgrade by name (`Twk_Upgrade_<name>`, e.g. `GrenadeBelt`).
 pub fn give_upgrade(p: &mut PlayerState, name: &str, cfg: &GameplayConfig) -> bool {
-    match cfg.items.upgrades.iter().take(32).position(|(n, _)| n.eq_ignore_ascii_case(name)) {
+    match cfg.items.upgrades.iter().take(64).position(|(n, _)| n.eq_ignore_ascii_case(name)) {
         Some(i) => {
-            p.inv.upgrades |= 1 << i;
+            p.inv.upgrades |= 1u64 << i;
             true
         }
         None => false,
@@ -90,8 +140,12 @@ fn any_modifiers(p: &PlayerState) -> bool {
     p.inv.charms_equipped != 0 || p.inv.upgrades != 0 || p.inv.power_levels[power::VITALITY] > 0 || p.inv.power_levels[power::AGILITY] > 0 || p.inv.power_levels[power::BLOOD_THIRSTY] > 0
 }
 
+/// `Attribute_HealthMax`: the player's (Corvo 70, with its modifiers) or a guard's (the guard
+/// archetype's pawn tweak, 50). Civilians keep the player's base (their archetypes vary: 10-11
+/// for aristocrats, not modelled per pawn).
 pub fn health_max(p: &PlayerState, cfg: &GameplayConfig) -> f32 {
-    attribute(p, cfg, "Attribute_HealthMax", cfg.vitals.health_max)
+    let base = if p.kind == PawnKind::Guard { cfg.ai.combat.guard_health_max } else { cfg.vitals.health_max };
+    attribute(p, cfg, "Attribute_HealthMax", base)
 }
 
 pub fn mana_max(p: &PlayerState, cfg: &GameplayConfig) -> f32 {
@@ -198,22 +252,35 @@ pub fn buy_power(p: &mut PlayerState, idx: usize, cfg: &GameplayConfig) -> bool 
         return false;
     }
     p.inv.runes -= cost as u16;
-    p.inv.power_levels[idx] += 1;
+    set_power_level(p, idx, p.inv.power_levels[idx] + 1, cfg);
     true
+}
+
+/// `SetPowerLevel` (0x00ACE270) without the heal flag: the current level's modifiers are
+/// replaced by the new level's, the stored `HealthMax` is recomputed (whole points) and, when it
+/// grew, current health grows by the same amount (Vitality 1 gives +20 health at once; 1 -> 2
+/// keeps the same maximum and gives nothing).
+pub fn set_power_level(p: &mut PlayerState, idx: usize, level: u8, cfg: &GameplayConfig) {
+    let before = health_max(p, cfg).trunc();
+    p.inv.power_levels[idx] = level;
+    let after = health_max(p, cfg).trunc();
+    if after > before {
+        p.vitals.health += after - before;
+    }
 }
 
 /// Equip or unequip an owned bone charm (`m_MaxActivatedBoneCharmCount` slots).
 pub fn set_charm(p: &mut PlayerState, i: usize, on: bool, cfg: &GameplayConfig) -> bool {
-    if i >= 32 || p.inv.charms_owned & (1 << i) == 0 {
+    if i >= 64 || p.inv.charms_owned & (1u64 << i) == 0 {
         return false;
     }
     if on {
-        if p.inv.charms_equipped & (1 << i) == 0 && p.inv.charms_equipped.count_ones() as u8 >= max_charms(p, cfg) {
+        if p.inv.charms_equipped & (1u64 << i) == 0 && p.inv.charms_equipped.count_ones() as u8 >= max_charms(p, cfg) {
             return false;
         }
-        p.inv.charms_equipped |= 1 << i;
+        p.inv.charms_equipped |= 1u64 << i;
     } else {
-        p.inv.charms_equipped &= !(1 << i);
+        p.inv.charms_equipped &= !(1u64 << i);
     }
     true
 }
@@ -273,12 +340,21 @@ fn ramp(b: &TimeBendState, target: f32, cfg: &GameplayConfig) -> f32 {
     }
 }
 
-/// Rate of time for a pawn: the caster runs at its own dilation, everything else at the world
-/// dilation of every active bend (several casters multiply).
+/// Rate of time for a pawn. The GameInfo tick (0x009FCBC0) multiplies the channels' rates: the
+/// player rate (`WorldInfo.TimeDilation`) is the product of the channels' player dilations and
+/// the world rate the product of their world dilations (no channel the powers use is
+/// `m_bExclusive`). Per caster here: a caster runs at its own dilation, everything else at the
+/// world dilation of every active bend (several casters multiply) and of every other pawn's
+/// Blink layer (Blink passes a caster rate of 1).
 pub fn pawn_time_scale(state: &WorldState, id: PlayerId, cfg: &GameplayConfig) -> f32 {
     let mut s = 1.0;
     for b in &state.time_bends {
         s *= if b.caster == id { ramp(b, b.self_dilation, cfg) } else { ramp(b, b.world_dilation, cfg) };
+    }
+    for l in &state.blink_layers {
+        if l.caster != id {
+            s *= l.current;
+        }
     }
     s
 }
@@ -294,13 +370,59 @@ pub fn world_time_scale(state: &WorldState, cfg: &GameplayConfig, projectile: bo
         }
         s *= ramp(b, b.world_dilation, cfg);
     }
+    for l in &state.blink_layers {
+        s *= l.current;
+    }
     s
 }
 
-/// Advance bends in real time; end those past their duration.
+/// The dilation helper (0x009FA0D0) for a caster's Blink layer: a non-zero target is kept
+/// within [0.05, caster rate 1]; the layer moves from where it is to the target at
+/// `(target - current) / blend` per second (at once when the blend is 0).
+pub fn set_blink_layer(state: &mut WorldState, caster: PlayerId, target: f32, blend: f32) {
+    let target = if target == 0.0 { 0.0 } else { target.clamp(0.05, 1.0) };
+    let i = match state.blink_layers.iter().position(|l| l.caster == caster) {
+        Some(i) => i,
+        None => {
+            if target == 1.0 {
+                return;
+            }
+            state.blink_layers.push(crate::state::DilationLayer { caster, current: 1.0, target: 1.0, velocity: 0.0 });
+            state.blink_layers.len() - 1
+        }
+    };
+    let l = &mut state.blink_layers[i];
+    l.target = target;
+    l.velocity = if blend.abs() >= 1e-8 { (target - l.current) / blend } else { f32::MAX };
+}
+
+/// The GameInfo tick's layer step (0x009FCBC0, real time): `current += velocity x dt`, landing
+/// on the target when it is reached or passed. Layers back at 1 are dropped.
+pub fn step_blink_layers(state: &mut WorldState, dt: f32) {
+    for l in state.blink_layers.iter_mut() {
+        if l.velocity == f32::MAX {
+            l.current = l.target;
+            continue;
+        }
+        let old = l.current;
+        let new = old + l.velocity * dt;
+        l.current = new;
+        if (l.target - new) * (l.target - old) <= 0.0 {
+            l.current = l.target;
+            l.velocity = f32::MAX;
+        }
+    }
+    state.blink_layers.retain(|l| !(l.current == 1.0 && l.target == 1.0));
+}
+
+/// Advance bends; end those past their duration. A bend's clock is
+/// `m_fBendTimePowerRealTimeSeconds` (0x009E9E80): real time scaled by the world dilation of
+/// the channels flagged `m_bAffectsBendTimePower`, which Blink's is and Bend Time's own is not
+/// (0x009FCBC0): the caster's Blink slows its own Bend Time clock.
 pub fn step_time_bends(state: &mut WorldState, dt: f32, events: &mut Vec<SimEvent>) {
     for b in state.time_bends.iter_mut() {
-        b.elapsed += dt;
+        let k: f32 = state.blink_layers.iter().filter(|l| l.caster == b.caster).map(|l| l.current).product();
+        b.elapsed += dt * k;
     }
     let ended: Vec<PlayerId> = state.time_bends.iter().filter(|b| b.elapsed > b.duration).map(|b| b.caster).collect();
     state.time_bends.retain(|b| b.elapsed <= b.duration);
@@ -338,50 +460,55 @@ pub fn possessable<'a>(t: &PlayerState, cfg: &'a GameplayConfig) -> &'a dishonor
     if t.kind == PawnKind::Rat { &cfg.items.possess.rat } else { &cfg.items.possess.npc }
 }
 
-/// What a Possession cast takes over: a pawn, or one rat of a Devouring Swarm (the swarm's rats
-/// are crowd agents in the original; the sim spawns that rat as a pawn when it is possessed).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PossessTarget {
-    Pawn(PlayerId),
-    SwarmRat(u32),
+/// Field of view the targeting cone and score use (`DishonoredPlayerCamera.m_fCurFOV`, degrees):
+/// the default horizontal FOV, the sim's fixed reference view (as for the gun dispersion).
+pub const POSSESS_REF_FOV_DEG: f32 = crate::left_hand::DISPERSION_REF_HFOV_DEG;
+
+/// Possession's targeting geometry for `p` (0x00BFB090 / 0x00BF8E20): the eye, the view, the
+/// range `m_fPossessRange x (1 + Attribute_SpellStrength)` (at least 1), the cone half-angle
+/// `m_fMaxAngleFOVFraction x FOV` and the score's angle normaliser, the FOV (at least 0.1 rad).
+struct PossessAim {
+    eye: Vec3,
+    dir: Vec3,
+    range: f32,
+    cone: f32,
+    fov: f32,
 }
 
-/// Possession target including swarm rats (same cone and range as [`possess_target`]).
-pub fn possess_target_any(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: &GameplayConfig) -> Option<PossessTarget> {
-    if let Some(id) = possess_target(state, p, world, cfg) {
-        return Some(PossessTarget::Pawn(id));
+fn possess_aim(p: &PlayerState, cfg: &GameplayConfig) -> PossessAim {
+    let pc = &cfg.items.possess;
+    let level = (p.inv.power_levels[power::POSSESSION] as usize).clamp(1, 2);
+    let strength = attribute(p, cfg, "Attribute_SpellStrength", 0.0);
+    let fov = POSSESS_REF_FOV_DEG.to_radians();
+    PossessAim {
+        eye: eye_position(p, &cfg.movement),
+        dir: view_vector(p.yaw, p.pitch),
+        range: (pc.range[level - 1] * (1.0 + strength)).max(1.0),
+        cone: pc.max_angle_fov_fraction * fov,
+        fov: fov.max(0.1),
     }
-    let level = p.inv.power_levels[power::POSSESSION] as usize;
-    if level < cfg.items.possess.rat.required_level as usize {
-        return None;
-    }
-    let range = cfg.items.possess.range[level.clamp(1, 2) - 1];
-    let eye = eye_position(p, &cfg.movement);
-    let dir = view_vector(p.yaw, p.pitch);
-    let max_angle = 0.3 * 90.0_f32;
-    let mut best: Option<(u32, f32)> = None;
-    for s in &state.swarms {
-        if s.spawn_delay > 0.0 || s.rats == 0 {
-            continue;
-        }
-        let to = s.position - eye;
+}
+
+impl PossessAim {
+    /// The candidate's score (higher wins, 0x00BFCAF0): `m_fAngleWeight x (fov - angle) / fov +
+    /// m_fDistanceWeight x (range - d) / range + m_TargetingPriorityWeights[priority]`; None when
+    /// it is out of range or outside the cone.
+    fn score(&self, to: Vec3, priority: u8, cfg: &GameplayConfig) -> Option<f32> {
+        let pc = &cfg.items.possess;
         let d = to.length();
-        if d > range || d < 1.0 {
-            continue;
+        if d > self.range || d < 1.0 {
+            return None;
         }
-        let ang = (to.dot(dir) / d).clamp(-1.0, 1.0).acos().to_degrees();
-        if ang > max_angle || world.raycast(eye, to, d, channel::MELEE).is_some_and(|h| h.distance < d - 20.0) {
-            continue;
+        let ang = (to.dot(self.dir) / d).clamp(-1.0, 1.0).acos();
+        if ang > self.cone {
+            return None;
         }
-        let score = d / range + 10.0 * ang / max_angle;
-        if best.is_none_or(|(_, b)| score < b) {
-            best = Some((s.id, score));
-        }
+        let prio = pc.priority_weights.get(priority as usize).copied().unwrap_or(0.0);
+        Some(pc.angle_weight * (self.fov - ang) / self.fov + pc.distance_weight * (self.range - d) / self.range + prio)
     }
-    best.map(|b| PossessTarget::SwarmRat(b.0))
 }
 
-/// Pawn id given to a rat taken out of a swarm.
+/// Pawn id for the next rat a Devouring Swarm releases.
 pub fn swarm_rat_id(state: &WorldState) -> PlayerId {
     let mut id = 0x4000_0000 | state.next_entity_id;
     while state.player(id).is_some() {
@@ -390,39 +517,32 @@ pub fn swarm_rat_id(state: &WorldState) -> PlayerId {
     id
 }
 
-/// Possession target under the crosshair (targeting stage, `FUN_00bfcec0`): within the level's
-/// `m_fPossessRange`, inside `m_fMaxAngleFOVFraction` of a 90-degree field of view, visible;
-/// scored by `m_fDistanceWeight * d/range + m_fAngleWeight * angle/max` (LIKELY weighting).
+/// Possession target under the crosshair (targeting stage, 0x00BFCEC0 -> 0x00BFCAF0): the
+/// candidates within range and inside the cone (0x00BF8E20), visible, with the highest
+/// [`PossessAim::score`]. The original tests the host's sample points and keeps the nearest
+/// distance and smallest angle; the sim uses the pawn's centre.
 pub fn possess_target(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: &GameplayConfig) -> Option<PlayerId> {
-    let pc = &cfg.items.possess;
-    let level = (p.inv.power_levels[power::POSSESSION] as usize).clamp(1, 2);
-    let range = pc.range[level - 1];
-    let eye = eye_position(p, &cfg.movement);
-    let dir = view_vector(p.yaw, p.pitch);
-    let max_angle = 0.3 * 90.0_f32;
+    possess_target_scored(state, p, world, cfg).map(|b| b.0)
+}
+
+fn possess_target_scored(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: &GameplayConfig) -> Option<(PlayerId, f32)> {
+    let aim = possess_aim(p, cfg);
     let mut best: Option<(PlayerId, f32)> = None;
     for t in &state.players {
         if !can_possess(p, t, cfg) {
             continue;
         }
-        let to = t.position - eye;
+        let to = t.position - aim.eye;
+        let Some(score) = aim.score(to, possessable(t, cfg).targeting_priority, cfg) else { continue };
         let d = to.length();
-        if d > range || d < 1.0 {
+        if world.raycast(aim.eye, to, d, channel::MELEE).is_some_and(|h| h.distance < d - cfg.movement.collision_radius) {
             continue;
         }
-        let ang = (to.dot(dir) / d).clamp(-1.0, 1.0).acos().to_degrees();
-        if ang > max_angle {
-            continue;
-        }
-        if world.raycast(eye, to, d, channel::MELEE).is_some_and(|h| h.distance < d - cfg.movement.collision_radius) {
-            continue;
-        }
-        let score = d / range + 10.0 * ang / max_angle;
-        if best.is_none_or(|(_, s)| score < s) {
+        if best.is_none_or(|(_, s)| score > s) {
             best = Some((t.id, score));
         }
     }
-    best.map(|b| b.0)
+    best
 }
 
 /// Begin possessing `host`: the possessor travels into it over `m_IntroDuration`.
@@ -471,6 +591,15 @@ pub fn step_possession(state: &mut WorldState, who: usize, ctx: &MoveCtx, cfg: &
                 let h = state.player_mut(host.id).unwrap();
                 h.condition = Condition::Possessed;
                 h.condition_by = Some(p.id);
+                // The possessor's running Bend Time gets `m_fBendTimeExtension` more (0x00BFB6C0 ->
+                // 0x00BFA120) unless it is already within `m_fPostEffectCooldownTime` of its end.
+                let ext = cfg.items.possess.bend_time_extension[level - 1];
+                if let Some(b) = state.time_bends.iter_mut().find(|b| b.caster == p.id) {
+                    let post = cfg.items.bend_time.levels[b.level as usize].post_effect_cooldown;
+                    if b.elapsed < b.duration - post {
+                        b.duration += ext;
+                    }
+                }
                 events.push(SimEvent::PossessStart { id: p.id, host: host.id });
             }
         }
@@ -568,128 +697,74 @@ pub fn summon_swarm(state: &mut WorldState, caster: PlayerId, world: &dyn WorldQ
     }
     let id = state.next_entity_id;
     state.next_entity_id = state.next_entity_id.wrapping_add(1);
-    state.swarms.push(SwarmState { id, owner: caster, level, position: pos, spawn_delay: cfg.items.swarm.spawn_delay, age: 0.0, rats: l.rat_count, target: None, attack_time: 0.0, bite_timer: 0.0, eating: None, eat_time: 0.0 });
+    state.swarms.push(SwarmState { id, owner: caster, level, position: pos, spawn_delay: cfg.items.swarm.spawn_delay, age: 0.0, rats: l.rat_count, release_ticks: 0, ending: false, rats_at_end: 0 });
     events.push(SimEvent::SwarmSummoned { id: caster, swarm: id, position: pos });
 }
 
-/// Devouring Swarm as one attack group, in the order of the swarm's Attack state (the state
-/// machine 0x00C65380 takes the first of Hidden, Flee, Attack, Move, Idle whose condition holds,
-/// then runs its update): the condition (0x00C87EA0) keeps or drops the group's target and turns
-/// a group whose target died into an eating one; detection picks a target when there is none; the
-/// update (0x00C89EE0) chases while no rat is in reach, else bites a living target (0x00C891E0:
-/// after `m_fInitialDelayBeforeDealingDamage`, none on the player, every `m_fDamageTimeInterval`
-/// `clamp(rats x m_fDamagePerBite, m_fMinDamage, m_fMaxDamage)`) or eats a body (0x00C6D760).
-pub fn step_swarms(state: &mut WorldState, dt_world: f32, cfg: &GameplayConfig, events: &mut Vec<SimEvent>) {
-    let mv = &cfg.movement;
-    let vitals = &cfg.vitals;
+/// The Devouring Swarm actor (`DisRatSwarm` with its `DisRatSwarmSpawner`), MEASURED 2026-10-08:
+/// it appears `m_fRatSwarmSpawnDelay` after the cast notify, its spawner releases the level's
+/// `m_RatCount` rats as individual crowd agents over 16 ticks, they live `m_fDuration`, then the
+/// swarm ends and its rats despawn over about 10 s. Each rat here is a rat pawn
+/// ([`crate::rats::spawn_rat`] with the swarm's id): a brain (`dishonored_ai` rat swarm brains,
+/// with the Devouring Swarm tweak, sparing the caster) drives it, the attack groups
+/// ([`crate::rats::step_rat_attacks`]) bite with the level's damage values. The release spot of
+/// each rat around the swarm point is not decoded (the spawner's crowd placement): the sim
+/// spreads them on a sunflower spiral of rat-sized spacing.
+pub fn step_swarms(state: &mut WorldState, dt_world: f32, cfg: &crate::SimConfig, events: &mut Vec<SimEvent>) {
+    let g = &cfg.gameplay;
     let mut swarms = std::mem::take(&mut state.swarms);
+    let mut gone: Vec<u32> = Vec::new();
     for s in swarms.iter_mut() {
         if s.spawn_delay > 0.0 {
             s.spawn_delay -= dt_world;
-            continue;
+            if s.spawn_delay > 0.0 {
+                continue;
+            }
+            s.release_ticks = crate::state::SWARM_RELEASE_TICKS;
         }
-        let l = cfg.items.swarm.levels[s.level as usize];
+        let l = g.items.swarm.levels[(s.level as usize).min(1)];
+        // Release: the rats left spread evenly over the release ticks left.
+        if s.rats > 0 && s.release_ticks > 0 {
+            let n = s.rats.div_ceil(s.release_ticks as u16);
+            let caster_yaw = state.player(s.owner).map_or(0.0, |p| p.yaw);
+            for _ in 0..n {
+                let k = (l.rat_count - s.rats) as f32;
+                let a = k * 2.399_963; // golden angle
+                let r = 2.0 * crate::movement::RAT_RADIUS * k.sqrt();
+                let pos = s.position + Vec3::new(r * a.cos(), r * a.sin(), crate::movement::RAT_HALF_HEIGHT);
+                let id = swarm_rat_id(state);
+                state.next_entity_id = state.next_entity_id.wrapping_add(1);
+                crate::rats::spawn_rat(state, id, pos, caster_yaw, Some(s.id), cfg, events);
+                s.rats -= 1;
+            }
+            s.release_ticks -= 1;
+        }
         s.age += dt_world;
-        let targetable = |p: &PlayerState| p.id != s.owner && p.kind != PawnKind::Rat && !p.no_body && p.carried_by.is_none() && !is_hidden(p);
-        // The Attack state's condition (0x00C87EA0) keeps the group's target while it is valid:
-        // a living target is dropped beyond `m_fPawnEscapeRadius`; a target that became a corpse
-        // is eaten when the group has `m_EatRequiredRatCount` rats, else dropped.
-        if let Some(tid) = s.target {
-            let keep = state.player(tid).is_some_and(|p| targetable(p) && (p.is_body() || p.position.distance(s.position) <= l.escape_radius));
-            if !keep {
-                s.target = None;
-                s.eating = None;
-            } else if s.eating != Some(tid) && state.player(tid).is_some_and(|p| p.is_body()) {
-                if s.rats >= l.eat_required_rats {
-                    // A group that was attacking (biting in reach) starts its eating clock at
-                    // `-m_fEatStartupDelayAfterKill` (0x00C89EE0).
-                    s.eat_time = crate::rats::eat_clock_start(s.attack_time > 0.0, l.eat_delay_after_kill);
-                    s.eating = Some(tid);
-                } else {
-                    s.target = None;
-                }
+        let sid = s.id;
+        let members = |state: &WorldState| state.players.iter().filter(|p| p.kind == PawnKind::Rat && p.swarm == Some(sid)).map(|p| p.id).collect::<Vec<_>>();
+        if !s.ending && s.age >= l.duration {
+            s.ending = true;
+            s.rats = 0;
+            s.rats_at_end = members(state).len() as u16;
+        }
+        if s.ending {
+            // Despawn over the tail: keep ceil(n x (1 - f)) of the rats there were at the end.
+            let f = ((s.age - l.duration) / crate::state::SWARM_DESPAWN_SECONDS).clamp(0.0, 1.0);
+            let keep = (s.rats_at_end as f32 * (1.0 - f)).ceil() as usize;
+            let mut ids = members(state);
+            if ids.len() > keep {
+                ids.sort_unstable();
+                let drop: Vec<PlayerId> = ids.split_off(keep);
+                state.players.retain(|p| !drop.contains(&p.id));
             }
-        }
-        // Detection: a swarm without a target takes the nearest pawn but the summoner within
-        // `m_fPawnDetectionRadius` (bodies are eaten, the living bitten).
-        if s.target.is_none() {
-            let mut best: Option<(PlayerId, f32)> = None;
-            for p in &state.players {
-                if !targetable(p) {
-                    continue;
-                }
-                let d = p.position.distance(s.position);
-                if d <= l.detection_radius && best.is_none_or(|(_, bd)| d < bd) {
-                    best = Some((p.id, d));
-                }
+            if f >= 1.0 {
+                gone.push(s.id);
             }
-            s.attack_time = 0.0;
-            s.bite_timer = 0.0;
-            s.eating = None;
-            s.eat_time = 0.0;
-            if let Some((tid, _)) = best {
-                s.target = Some(tid);
-                if state.player(tid).is_some_and(|p| p.is_body()) && s.rats >= l.eat_required_rats {
-                    s.eating = Some(tid);
-                    s.eat_time = crate::rats::eat_clock_start(false, l.eat_delay_after_kill);
-                }
-            }
-        }
-        let Some(tid) = s.target else { continue };
-        let tp = *state.player(tid).unwrap();
-        let d = tp.position.distance(s.position);
-        let tpos = tp.position - Vec3::Z * crate::movement::half_height(&tp, mv);
-        // Rats bite within `m_fAttackDistance` (120, `Twk_Rat`); a player standing within 200,
-        // sneaking within 60 (`m_fStand/CrouchedRatSwarmAttackDistance`).
-        let reach = if tp.is_body() { crate::rats::RAT_ATTACK_DISTANCE } else { crate::rats::attack_distance(&tp) };
-        if d > reach {
-            // No rat in reach: the group chases and its damage interval counter restarts.
-            let step = (tpos - s.position).normalize_or_zero() * RAT_SPEED * dt_world;
-            s.position += step;
-            s.bite_timer = 0.0;
-            continue;
-        }
-        if s.eating == Some(tid) {
-            // Eating (0x00C6D760): the clock runs with the required rats in reach; a dead body
-            // takes the startup and one interval per limb plus a last one.
-            let total = crate::rats::eat_duration(!tp.alive, crate::rats::CORPSE_LIMBS, l.eat_startup, l.eat_per_limb);
-            s.eat_time += dt_world;
-            if s.eat_time >= total {
-                if let Some(p) = state.player_mut(tid) {
-                    if p.alive {
-                        crate::vitals::kill(p, Some(s.owner), DamageCause::Rats, events);
-                    }
-                    p.no_body = true;
-                }
-                events.push(SimEvent::BodyRemoved { body: tid, ash: false });
-                s.eating = None;
-                s.target = None;
-                s.eat_time = 0.0;
-            }
-            continue;
-        }
-        let t = state.player_mut(tid).unwrap();
-        // Attack group (0x00C891E0): after the initial delay (none on the player), every interval
-        // (accumulated) one bite of clamp(rats x per-bite, min, max) as an int, plus the slowdown.
-        s.attack_time += dt_world;
-        if s.attack_time <= l.initial_damage_delay && t.kind != PawnKind::Human {
-            continue;
-        }
-        s.bite_timer += dt_world;
-        let tweak = crate::rats::RatAttackTweak { damage_per_bite: l.damage_per_bite, min_damage: l.min_damage, max_damage: l.max_damage, interval: l.damage_interval, ..Default::default() };
-        while s.bite_timer > l.damage_interval && t.alive {
-            s.bite_timer -= l.damage_interval;
-            let dmg = crate::rats::group_damage(s.rats as usize, &tweak);
-            t.rat_slow = tweak.slowdown_duration;
-            t.rat_slow_percent = tweak.slowdown_percent;
-            apply_damage(t, dmg, Some(s.owner), DamageCause::Rats, events, vitals);
-            events.push(SimEvent::Sound { position: s.position, radius: 800.0, category: SoundCategory::BodyFall, source: s.owner });
         }
     }
-    swarms.retain(|s| s.spawn_delay > 0.0 || s.age < cfg.items.swarm.levels[s.level as usize].duration);
+    swarms.retain(|s| !gone.contains(&s.id));
     state.swarms = swarms;
 }
-
 // ---------------------------------------------------------------------------------------
 // Shadow Kill
 

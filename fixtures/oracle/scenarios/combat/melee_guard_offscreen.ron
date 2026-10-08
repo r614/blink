@@ -17,7 +17,7 @@
     ticks: 900,
     input: [],
     checkpoints: [
-        (name: "first hit while offscreen", expect: [(metric: EventValue("Sim:Damage@player[cause=Sword]", "amount"), value: 8, tol: 0.5, source: "Twk_Inv_SwordEliteGuard MeleeDamage Normal 15 x (1 - 0.5), rounded (0x00C33DD0, DishonoredPlayerPawn defaults); the port gives 14", status: Static)]),
+        (name: "first hit while offscreen", expect: [(metric: EventValue("Sim:Damage@player[cause=Sword]", "amount"), value: 8, tol: 0.5, source: "Twk_Inv_SwordEliteGuard MeleeDamage Normal 15 x (1 - 0.5), appCeil (0x00C33DD0, 0x00C131C0, DishonoredPlayerPawn defaults); before the port: 14", status: Static)]),
     ],
     record: [Pawn, Vitals, Npc("guard"), SimEvents],
     capture: Some("measure sword npc=<doorman> --defend 10 with the player facing away; record each damage-path call amount"),

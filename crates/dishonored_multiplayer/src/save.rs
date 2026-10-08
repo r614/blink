@@ -78,6 +78,70 @@ pub struct AutosaveState {
     pub written: u32,
     #[serde(default)]
     pub denied: u32,
+    /// `m_fDisallowSavingTimer`: a popped save-disable type keeps saving off this much longer
+    /// (the pop's wait, `timer = max(timer, wait)`, 0x009F95F0).
+    #[serde(default)]
+    pub disallow_timer: f32,
+    /// The save-disable types (`EDisDisableSaveType`) pushed as of the last step.
+    #[serde(default)]
+    pub disallow_types: Vec<u8>,
+    /// `DisTweaks_PlayerPawn_Combat.m_bDisableManualSaveInCombat` (copied from the config each
+    /// step): combat pushes `DDST_PlayerInCombat`.
+    #[serde(default = "yes")]
+    pub combat_disables_save: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// `EDisDisableSaveType` (the engine's push / pop wrappers 0x00BEC820 / 0x00BEC850).
+pub mod ddst {
+    pub const KILL_CAM: u8 = 0;
+    pub const BLINK: u8 = 1;
+    pub const GAME_OVER_PENDING: u8 = 2;
+    pub const CINEMATIC_MODE: u8 = 3;
+    pub const PLAYER_IN_COMBAT: u8 = 4;
+    pub const ASSASSINATE: u8 = 10;
+    pub const CHOICE: u8 = 11;
+    pub const CHOKE: u8 = 12;
+    pub const DEAD: u8 = 13;
+    pub const PRE_POSSESS: u8 = 15;
+    pub const NAMES: [&str; 21] = [
+        "DDST_KillCam",
+        "DDST_Blink",
+        "DDST_GameOverPending",
+        "DDST_CinematicMode",
+        "DDST_PlayerInCombat",
+        "DDST_ItemContext_Assassinate",
+        "DDST_ItemContext_DropAssassinate",
+        "DDST_ItemContext_Fatality",
+        "DDST_ItemContext_FireCrossbow",
+        "DDST_Soiree",
+        "DDST_StatePlayerMasterAssassinate",
+        "DDST_StatePlayerMasterChoice_Base",
+        "DDST_StatePlayerMasterChoke",
+        "DDST_StatePlayerMasterDead",
+        "DDST_StatePlayerMasterMinigame",
+        "DDST_StatePlayerMasterPrePossess",
+        "DDST_StatePlayerMasterStunned",
+        "DDST_StatePlayerMasterVersus",
+        "DDST_StatePlayerMasterHolePeeking",
+        "DDST_Kismet",
+        "DDST_Pull",
+    ];
+}
+
+/// The wait a type's pop passes (`m_fDisallowSavingTimer = max(timer, wait)`): the choice
+/// state's pop passes 0.1 s (0x3DCCCCCD), cinematic mode 1 s, the combat tracker
+/// `m_fDisableManualSaveAfterCombatTime_s`; every other pop passes 0.
+pub fn pop_wait(t: u8, combat_wait: f32) -> f32 {
+    match t {
+        ddst::CHOICE => 0.1,
+        ddst::CINEMATIC_MODE => 1.0,
+        ddst::PLAYER_IN_COMBAT => combat_wait,
+        _ => 0.0,
+    }
 }
 
 /// `m_fAutosaveWaitTime`: a config value absent from the shipped ini files, so 0 (U-341).
@@ -133,37 +197,65 @@ pub fn saving_allowed(m: &MissionMatch) -> bool {
     save_blocked(m).is_none()
 }
 
-/// Why saving is disallowed now (`EDisDisableSaveType` names), if it is.
+/// Why saving is disallowed now (`EDisDisableSaveType` names, or the post-pop wait), if it is.
 pub fn save_blocked(m: &MissionMatch) -> Option<&'static str> {
-    use dishonored_sim::state::{ChokePhase, MoveMode, PossessStage};
-    if m.humans.is_empty() {
+    if m.humans.is_empty() || m.humans.iter().any(|h| m.world.player(*h).is_none()) {
         return Some("no player");
     }
+    if let Some(t) = disallow_types(m).first() {
+        return Some(ddst::NAMES[*t as usize]);
+    }
+    if m.autosave.disallow_timer > 0.0 {
+        return Some("m_fDisallowSavingTimer");
+    }
+    None
+}
+
+/// The save-disable types pushed now, from the states that push them (each player master
+/// state pushes its type on enter and pops it on exit; the item contexts, the combat tracker,
+/// cinematic mode and game over likewise). The port knows these of the original's types:
+/// Blink, GameOverPending, PlayerInCombat, Assassinate, Choice, Choke, Dead, PrePossess /
+/// Possess. Not modelled (no such state in the port): KillCam, CinematicMode (the Kismet host
+/// does not track it; a playing matinee is no stand-in), the item contexts Fatality /
+/// FireCrossbow / DropAssassinate, Soiree, Minigame, Stunned, Versus, HolePeeking, Kismet, Pull.
+pub fn disallow_types(m: &MissionMatch) -> Vec<u8> {
+    use dishonored_sim::state::{ChokePhase, MoveMode, PossessStage, SwordPhase};
+    let mut v = Vec::new();
+    let mut push = |t: u8| {
+        if !v.contains(&t) {
+            v.push(t);
+        }
+    };
     if m.view.phase == crate::MatchPhase::Ended {
-        return Some("DDST_GameOverPending");
+        push(ddst::GAME_OVER_PENDING);
     }
     for h in &m.humans {
-        let Some(p) = m.world.player(*h) else { return Some("no player") };
+        let Some(p) = m.world.player(*h) else { continue };
         if !p.alive {
-            return Some("DDST_StatePlayerMasterDead");
+            push(ddst::DEAD);
         }
         if p.choke.phase != ChokePhase::None {
-            return Some("DDST_StatePlayerMasterChoke");
+            push(ddst::CHOKE);
         }
         if p.mode == MoveMode::Blinking {
-            return Some("DDST_Blink");
+            push(ddst::BLINK);
         }
         if matches!(p.possess.stage, PossessStage::PrePossess | PossessStage::Active) {
-            return Some("DDST_StatePlayerMasterPrePossess");
+            push(ddst::PRE_POSSESS);
+        }
+        // `StatePlayerMasterAssassinate` (the attacker's side of an assassination).
+        if p.sword.phase == SwordPhase::Assassinating && p.sword.assassination_target.is_some() {
+            push(ddst::ASSASSINATE);
         }
     }
     if !m.choosing.is_empty() || m.state.view.choice.is_some() || m.humans.iter().any(|h| m.kismet.as_ref().is_some_and(|k| k.choosing(*h))) {
-        return Some("DDST_StatePlayerMasterChoice_Base");
+        push(ddst::CHOICE);
     }
-    // `DDST_CinematicMode` / `DDST_Kismet` / `DDST_Soiree` are not modelled: the port's Kismet
-    // host does not track cinematic mode, and "a matinee is playing" is no stand-in (the
-    // mansion runs looping ambient matinees all the time; U-342).
-    None
+    if m.autosave.combat_disables_save && player_in_combat(m) {
+        push(ddst::PLAYER_IN_COMBAT);
+    }
+    v.sort_unstable();
+    v
 }
 
 /// `DIAT_PlayerInCombat`: a guard is fighting a player (U-340).
@@ -173,7 +265,18 @@ fn player_in_combat(m: &MissionMatch) -> bool {
 
 /// Once per step, after the mission and the Kismet ran (engine tick order: timers, the
 /// pending autosave 0x00a0c530, the pending mission-start save 0x00a09640).
-pub(super) fn tick(m: &mut MissionMatch, dt: f32) {
+pub(super) fn tick(m: &mut MissionMatch, dt: f32, combat: &dishonored_ir::items::CombatSaveConfig) {
+    // Save-disable types popped since the last step start their wait (0x009F95F0); the
+    // engine counts the timer down.
+    m.autosave.combat_disables_save = combat.disable_manual_save;
+    m.autosave.disallow_timer = (m.autosave.disallow_timer - dt).max(0.0);
+    let now = disallow_types(m);
+    for t in std::mem::take(&mut m.autosave.disallow_types) {
+        if !now.contains(&t) {
+            m.autosave.disallow_timer = m.autosave.disallow_timer.max(pop_wait(t, combat.after_combat_time));
+        }
+    }
+    m.autosave.disallow_types = now;
     // The saves taken last step were written by the host: their actions are accepted
     // (vtable slot 71, 0x00b85f30: Saving -> Accepted).
     for op in std::mem::take(&mut m.autosave.notify) {

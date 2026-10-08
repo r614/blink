@@ -336,15 +336,18 @@ fn sleep_dart_knocks_out_after_one_and_a_half_seconds() {
     assert_eq!(r.p(100).condition, Condition::Normal);
     r.steps(90, &[(1, aim(0))]);
     assert_eq!(r.p(100).condition, Condition::Unconscious);
-    assert_eq!(r.p(100).vitals.health, r.cfg.gameplay.vitals.health_max, "no damage");
+    // The guard's own HealthMax (the guard archetype's 50, melee.md F9).
+    assert_eq!(r.p(100).vitals.health, r.cfg.gameplay.ai.combat.guard_health_max, "no damage");
 }
 
 #[test]
 fn shadow_kill_turns_a_stealth_kill_to_ash() {
     let mut r = Run::new(&[(Vec3::new(100.0, 0.0, Z), 0.0)]);
     r.pm(1).inv.power_levels[power::SHADOW_KILL] = 1;
-    // Level 1 needs the victim unaware (the AI's hook, 0x00A87B60).
+    // Level 1 needs the victim unaware (the AI's hook, 0x00A87B60); the back assassination needs an
+    // awareness the assassinate table allows (Unaware, melee.md F4).
     r.pm(100).ai_unaware = true;
+    r.pm(100).ai_awareness = dishonored_sim::state::awareness::UNAWARE;
     r.step(&[(1, input(0.0, 0.0, buttons::PRIMARY))]);
     r.steps(10, &[(1, input(0.0, 0.0, 0))]);
     assert!(!r.p(100).alive);
@@ -356,8 +359,12 @@ fn shadow_kill_turns_a_stealth_kill_to_ash() {
 fn shadow_kill_level_one_spares_an_aware_victim() {
     let mut r = Run::new(&[(Vec3::new(100.0, 0.0, Z), 0.0)]);
     r.pm(1).inv.power_levels[power::SHADOW_KILL] = 1;
-    r.step(&[(1, input(0.0, 0.0, buttons::PRIMARY))]);
-    r.steps(10, &[(1, input(0.0, 0.0, 0))]);
+    // A fighting guard (InCombat: not assassinable, not unaware) killed by five sword hits of 10 on its 50.
+    r.pm(100).ai_awareness = dishonored_sim::state::awareness::IN_COMBAT;
+    for _ in 0..5 {
+        r.step(&[(1, input(0.0, 0.0, buttons::PRIMARY))]);
+        r.steps(60, &[(1, input(0.0, 0.0, 0))]);
+    }
     assert!(!r.p(100).alive);
     assert!(!r.p(100).no_body, "an aware victim leaves a body at level 1");
 }
@@ -429,4 +436,35 @@ fn takedown_scenario_is_deterministic() {
     };
     assert_eq!(run(), run());
     let _ = MoveMode::Walking;
+}
+
+/// F-5: all 34 workshop upgrades fit the inventory mask (the 33rd and 34th were dropped by a
+/// 32-bit mask).
+#[test]
+fn every_workshop_upgrade_can_be_given() {
+    let cfg = cfg();
+    let mut p = dishonored_sim::state::PlayerState::new(1, Vec3::ZERO, 0.0);
+    for (name, _) in &cfg.gameplay.items.upgrades {
+        assert!(powers::give_upgrade(&mut p, name, &cfg.gameplay), "{name}");
+    }
+    assert_eq!(p.inv.upgrades.count_ones() as usize, cfg.gameplay.items.upgrades.len());
+}
+
+/// F-7: taking a charm effect already owned raises it to its second level (0x00ABBA90), whose
+/// value then applies; an effect id from 10,000,000 up is a scripted charm (0x00AA8EF0).
+#[test]
+fn a_charm_taken_twice_gives_its_level_two_value() {
+    let cfg = cfg();
+    let g = &cfg.gameplay;
+    let Some(slot) = g.items.charms.iter().position(|c| c.values.len() > 1) else { return };
+    let c = g.items.charms[slot].clone();
+    let mut p = dishonored_sim::state::PlayerState::new(1, Vec3::ZERO, 0.0);
+    assert_eq!(powers::charm_slot(g, slot as i32), Some(slot));
+    inventory::give_charm_effect(&mut p, g, Some(slot as i32), 0);
+    assert_eq!(powers::attribute(&p, g, &c.attribute, 0.0), c.values[0]);
+    inventory::give_charm_effect(&mut p, g, Some(slot as i32), 0);
+    assert_eq!(powers::attribute(&p, g, &c.attribute, 0.0), c.values[1]);
+    assert_eq!(powers::charm_slot(g, -1), None);
+    let base = dishonored_ir::items::SCRIPTED_CHARM_BASE;
+    assert_eq!(powers::charm_slot(g, base), (!g.items.scripted_charms.is_empty()).then_some(g.items.charms.len()));
 }
