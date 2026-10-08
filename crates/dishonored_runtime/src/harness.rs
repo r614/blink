@@ -406,7 +406,14 @@ pub fn harness_frame(
                 "effects" => {
                     // Gameplay effects asked for lately (path, spawned) and the live particle count.
                     let recent: Vec<serde_json::Value> = fx.as_ref().map(|f| f.recent.iter().map(|(p, ok)| serde_json::json!({"path": p, "spawned": ok})).collect()).unwrap_or_default();
-                    serde_json::json!({"recent": recent, "spawned_oneshots": fx.as_ref().map(|f| f.spawned_oneshots), "live_particles": fx.as_ref().map(|f| f.live_particles)}).to_string()
+                    serde_json::json!({
+                        "recent": recent,
+                        "spawned_oneshots": fx.as_ref().map(|f| f.spawned_oneshots),
+                        "live_oneshots": fx.as_ref().map(|f| f.live_oneshots),
+                        "live_particles": fx.as_ref().map(|f| f.live_particles),
+                        "blink_indicator": fx.as_ref().and_then(|f| crate::effects::blink_indicator_live(f)),
+                    })
+                    .to_string()
                 }
                 "pause" => {
                     if let Some(p) = pause.as_mut() {

@@ -16,7 +16,7 @@ use bevy::prelude::*;
 use dishonored_ir::particles::{ParticleBlend, ParticleEmitterAsset, ParticleSystemAsset};
 use dishonored_ir::DishonoredMap;
 use dishonored_sim::events::{DamageCause, SimEvent};
-use dishonored_sim::state::{MoveMode, PlayerState};
+use dishonored_sim::state::PlayerState;
 use dishonored_world::WorldQuery;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -82,6 +82,15 @@ impl Material for GlowMaterial {
 pub const GAMEPLAY_PARTICLES: &[&str] = dishonored_assets::particle_material::GAMEPLAY_PARTICLES;
 
 const MAX_PARTICLES: usize = 400;
+/// Longest life of a gameplay one-shot instance (s): looping emitters spawned as one-shots
+/// are cut here.
+pub const ONE_SHOT_LIMIT: f32 = 12.0;
+/// Blink's targeting indicators (`Twk_Blink`: `m_pGroundPS` on a floor, `m_pLowFallPS` /
+/// `m_pHighFallPS` in the air, `m_pMantlePS` on a ledge). Their emitters loop forever with
+/// `bKillOnDeactivate`: the power keeps one at the target while aiming and kills it on release.
+pub const BLINK_GROUND_PS: &str = "Vfx_GamePlay.Blink.Blink_Ground_01";
+pub const BLINK_FALL_PS: &str = "Vfx_GamePlay.Blink.Blink_Fall_01";
+pub const BLINK_MANTLE_PS: &str = "Vfx_GamePlay.Blink.Blink_Mantle_01";
 /// Placed emitters are simulated only within this distance of the camera (uu).
 const SIM_RANGE: f32 = 9000.0;
 
@@ -147,10 +156,14 @@ pub struct Effects {
     /// The last gameplay effects asked for: (system path, spawned) (harness `effects` command).
     pub recent: Vec<(String, bool)>,
     pub live_particles: usize,
+    /// Gameplay one-shot instances alive (systems still simulating).
+    pub live_oneshots: usize,
     /// Effects due later: (time, system, position, direction).
     delayed: Vec<(f32, String, Vec3, Vec3)>,
     /// Projectile id -> fired as a crossbow bolt (impact striker).
     bolts: HashMap<u32, bool>,
+    /// The Blink targeting indicator's instance and system while aiming.
+    indicator: Option<(Entity, &'static str)>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -233,6 +246,7 @@ impl Plugin for EffectsPlugin {
             Update,
             (
                 gameplay_effects.before(crate::audio::drive),
+                blink_indicator,
                 // After everything that places the camera or sets its projection this frame
                 // (`simulate` culls sprite meshes against that view).
                 simulate.after(crate::players::camera_follow).after(crate::cutscene::camera).after(crate::viewmodel::apply_fov).after(crate::inspect_cam),
@@ -986,6 +1000,7 @@ fn simulate(
     };
     let ray_fn: RayFn = &ray_closure;
     let mut live = 0;
+    fx.live_oneshots = q.iter().filter(|(_, i, _)| i.one_shot).count();
     for (e, mut inst, vis) in &mut q {
         if !vis.get() && !inst.one_shot {
             continue;
@@ -1133,7 +1148,10 @@ fn simulate(
                 }
             }
         }
-        if inst.one_shot && inst.sims.iter().all(|s| (s.done || s.time > 10.0) && s.particles.is_empty()) {
+        // One-shots end when every emitter is done and empty; an emitter that loops forever
+        // (`EmitterLoops` 0, e.g. the Blink indicators) is deactivated after ONE_SHOT_LIMIT, its
+        // particles killed (`bKillOnDeactivate`), so no spawned effect outlives its use.
+        if inst.one_shot && inst.sims.iter().all(|s| ((s.done || s.time > 10.0) && s.particles.is_empty()) || s.time > ONE_SHOT_LIMIT) {
             commands.entity(e).despawn();
         }
     }
@@ -1195,7 +1213,6 @@ fn gameplay_effects(
         }
         best.and_then(|b| world.surface_of(b.1)).unwrap_or("DisContactType_Environment").to_string()
     };
-    let mantled: Vec<u32> = events.iter().filter_map(|e| if let SimEvent::Mantle { id, .. } = e { Some(*id) } else { None }).collect();
     for ev in events.iter() {
         let (path, at, dir): (String, Vec3, Vec3) = match ev {
             SimEvent::SwordBlocked { defender, .. } | SimEvent::SwordParried { defender, .. } => {
@@ -1227,17 +1244,6 @@ fn gameplay_effects(
                 });
                 (path, p.position + Vec3::Z * 50.0, -fwd(p.yaw))
             }
-            SimEvent::BlinkEnd { id } => {
-                let Some(p) = find(*id) else { continue };
-                let path = if mantled.contains(id) {
-                    "Vfx_GamePlay.Blink.Blink_Mantle_01"
-                } else if p.mode == MoveMode::Falling {
-                    "Vfx_GamePlay.Blink.Blink_Fall_01"
-                } else {
-                    "Vfx_GamePlay.Blink.Blink_Ground_01"
-                };
-                (path.into(), p.position - Vec3::Z * 80.0, Vec3::Z)
-            }
             SimEvent::WindblastCast { id } => {
                 let Some(p) = find(*id) else { continue };
                 let lvl = p.inv.power_levels[dishonored_sim::state::power::WINDBLAST];
@@ -1266,6 +1272,56 @@ fn gameplay_effects(
         };
         spawn_effect(&mut commands, &mut meshes, &mut fx, &path, at, dir);
     }
+}
+
+/// Blink's targeting indicator (`Twk_Blink`, EFFECTS.md "Gameplay effects"): while the local
+/// player aims Blink (`left.blink_target`), one instance of `m_pGroundPS` stands on the floor
+/// under the target, or `m_pLowFallPS` floats at a target in the air; it follows the target
+/// every frame and is killed when aiming ends (release, cancel, travel), as its emitters
+/// (`bKillOnDeactivate`, endless loops) are deactivated by the power.
+fn blink_indicator(mut commands: Commands, mut fx: ResMut<Effects>, mut meshes: ResMut<Assets<Mesh>>, view: Option<Res<SessionView>>, session: Option<Res<crate::session::Session>>, mut q: Query<&mut FxInstance>) {
+    let target = view.as_ref().and_then(|v| v.me.as_ref()).and_then(|me| me.left.blink_target);
+    let want = target.and_then(|t| {
+        let s = session.as_ref()?;
+        let hh = s.content.sim.gameplay.movement.collision_half_height;
+        // The target is raised to CollisionHeight above the floor below it: a floor within that
+        // (plus a margin) means the pawn lands standing.
+        let floor = s.content.collision.raycast(t, -Vec3::Z, hh + 24.0, dishonored_world::channel::PAWN).map(|h| t - Vec3::Z * h.distance);
+        Some(match floor {
+            Some(f) => (BLINK_GROUND_PS, f),
+            None => (BLINK_FALL_PS, t),
+        })
+    });
+    let current = fx.indicator.take();
+    let Some((path, at)) = want else {
+        if let Some((e, _)) = current {
+            commands.entity(e).try_despawn();
+        }
+        return;
+    };
+    let m = Mat4::from_translation(at);
+    if let Some((e, p)) = current {
+        if p == path {
+            if let Ok(mut inst) = q.get_mut(e) {
+                inst.set_transform(m);
+                fx.indicator = Some((e, p));
+                return;
+            }
+        } else {
+            commands.entity(e).try_despawn();
+        }
+    }
+    let Some(lf) = fx.levels.get(&fx.active).cloned() else { return };
+    let Some(&si) = lf.by_path.get(&path.to_ascii_lowercase()) else { return };
+    let level = fx.active.clone();
+    if let Some(e) = spawn_instance(&mut commands, &mut meshes, &lf, &level, si, m, false) {
+        fx.indicator = Some((e, path));
+    }
+}
+
+/// The live Blink indicator, if any: (system path, entity) (harness `effects` command).
+pub fn blink_indicator_live(fx: &Effects) -> Option<&'static str> {
+    fx.indicator.map(|i| i.1)
 }
 
 /// World transform (Dishonored space), colour and alpha of a mesh-emitter particle: the mesh
