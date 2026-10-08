@@ -82,17 +82,30 @@ extern "C" fn boundary() {
     if SPAWN_ON.load(Relaxed) != 0 {
         spawn_scan(tick);
     }
+    crate::script::on_boundary(tick);
     if LOCKSTEP.load(Relaxed) != 0 {
+        let since = std::time::Instant::now();
         while LOCKSTEP.load(Relaxed) != 0 && GAME_TICK.load(Relaxed) >= HOLD_UNTIL.load(Relaxed) {
             PARKED.store(1, Relaxed);
             hook::run_pending_jobs();
+            crate::script::start_if_pending();
             if now_ms().saturating_sub(LAST_CONTACT.load(Relaxed)) > LOCKSTEP_IDLE_MS {
                 LOCKSTEP.store(0, Relaxed);
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_micros(200));
+            pause(since);
         }
         PARKED.store(0, Relaxed);
+    }
+}
+
+/// Busy-yield for the first 50 ms of a wait (a Windows sleep lasts a timer period, up to
+/// 15.6 ms, which would dominate a lockstep tick), then sleep 1 ms at a time.
+fn pause(since: std::time::Instant) {
+    if since.elapsed().as_millis() < 50 {
+        std::thread::yield_now();
+    } else {
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 
@@ -110,7 +123,7 @@ pub fn wait_parked(min_tick: u32, timeout_ms: u64) -> Result<u32, String> {
         if t0.elapsed().as_millis() as u64 > timeout_ms {
             return Err(format!("game thread not parked within {timeout_ms} ms (tick {t})"));
         }
-        std::thread::sleep(std::time::Duration::from_micros(200));
+        pause(t0);
     }
 }
 
@@ -126,7 +139,7 @@ pub fn wait_ticks(n: u32, timeout_ms: u64) -> Result<u32, String> {
         if t0.elapsed().as_millis() as u64 > timeout_ms {
             return Err(format!("{} of {n} ticks within {timeout_ms} ms", t.wrapping_sub(start)));
         }
-        std::thread::sleep(std::time::Duration::from_micros(500));
+        pause(t0);
     }
 }
 

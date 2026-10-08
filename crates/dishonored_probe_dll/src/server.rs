@@ -684,6 +684,80 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
                 30_000,
             )?;
         }
+        op::SCRIPT_START => {
+            use crate::script::{self, Act};
+            if crate::tick::LOCKSTEP.load(Relaxed) == 0 || crate::tick::PARKED.load(Relaxed) == 0 {
+                return Err("a tick script needs the game parked in lockstep".into());
+            }
+            if script::STATE.load(Relaxed) == script::RUNNING || script::STATE.load(Relaxed) == script::PENDING {
+                return Err("a tick script is already running".into());
+            }
+            let ticks = io(rd.u32())?;
+            let nr = io(rd.u32())?.min(4096);
+            let mut reads = Vec::new();
+            for _ in 0..nr {
+                let base = io(rd.u32())?;
+                let k = io(rd.u8())?.max(1) as usize;
+                let offs = (0..k).map(|_| io(rd.u32())).collect::<Result<Vec<u32>, String>>()?;
+                reads.push((base, offs, io(rd.u32())?.min(4096)));
+            }
+            let na = io(rd.u32())?;
+            let mut actions = Vec::new();
+            let console = engine::find_function("PlayerController.ConsoleCommand");
+            for _ in 0..na {
+                let t = io(rd.u32())?;
+                let a = match io(rd.u8())? {
+                    0 => {
+                        let key = io(rd.str())?;
+                        let ev = io(rd.u8())? as u32;
+                        Act::Key(engine::name_index(&key).ok_or_else(|| format!("no FName {key}"))?, ev)
+                    }
+                    1 => {
+                        let addr = io(rd.u32())?;
+                        Act::Write(addr, io(rd.bytes())?.to_vec())
+                    }
+                    2 => {
+                        if console == 0 {
+                            return Err("PlayerController.ConsoleCommand not found".into());
+                        }
+                        Act::Console(console, io(rd.str())?)
+                    }
+                    k => return Err(format!("unknown script action {k}")),
+                };
+                actions.push((t, a));
+            }
+            actions.sort_by_key(|a| a.0);
+            *script::SCRIPT.lock().map_err(|_| "poisoned")? = Some(script::Script { ticks, reads, actions, next: 0, base: 0, frames: Vec::new(), errors: Vec::new() });
+            script::STATE.store(script::PENDING, Relaxed);
+        }
+        op::SCRIPT_WAIT => {
+            use crate::script;
+            let timeout = io(rd.u32())? as u64;
+            let t0 = std::time::Instant::now();
+            loop {
+                crate::tick::touch();
+                let st = script::STATE.load(Relaxed);
+                if st == script::IDLE {
+                    return Err("no tick script".into());
+                }
+                if st == script::DONE && crate::tick::PARKED.load(Relaxed) != 0 {
+                    break;
+                }
+                if crate::tick::LOCKSTEP.load(Relaxed) == 0 {
+                    script::STATE.store(script::IDLE, Relaxed);
+                    return Err("lockstep was released during the script".into());
+                }
+                if t0.elapsed().as_millis() as u64 > timeout {
+                    return Err(format!("tick script not done within {timeout} ms (tick {})", crate::tick::GAME_TICK.load(Relaxed)));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            let s = script::SCRIPT.lock().map_err(|_| "poisoned")?.take().ok_or("no script")?;
+            script::STATE.store(script::IDLE, Relaxed);
+            put_u32(&mut out, s.base);
+            dishonored_probe::put_bytes(&mut out, &s.frames);
+            put_str(&mut out, &s.errors.join("\n"));
+        }
         op::NAME_INDEX => {
             let s = io(rd.str())?;
             let (i, n) = match engine::name_index(&s) {

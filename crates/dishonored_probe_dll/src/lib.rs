@@ -33,6 +33,8 @@ mod native;
 #[cfg(all(windows, target_arch = "x86"))]
 mod reflect;
 #[cfg(all(windows, target_arch = "x86"))]
+mod script;
+#[cfg(all(windows, target_arch = "x86"))]
 mod server;
 #[cfg(all(windows, target_arch = "x86"))]
 mod tick;

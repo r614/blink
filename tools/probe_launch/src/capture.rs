@@ -14,7 +14,7 @@
 //!
 //! Recorded channels (names shared with the port's runner, tools/oracle/src/runner.rs):
 //! - `Pawn`: `pawn.x/y/z` (Location), `pawn.vx/vy/vz` (Velocity), `pawn.speed2d`,
-//!   `pawn.crouched` (`bIsCrouched`), `pawn.physics` (EPhysics index);
+//!   `pawn.crouched` (`m_bSneakModeToggled`), `pawn.physics` (EPhysics index);
 //! - `Vitals`: `pawn.health` (Health), `pawn.mana` (the player pawn's mana, +0xA60);
 //! - `Camera`: `camera.x/y/z`, `camera.pitch/yaw/roll` (degrees), `camera.fov`
 //!   (`PlayerCamera.CameraCache.POV`);
@@ -32,7 +32,7 @@ use anyhow::{Context, Result, bail};
 use dishonored_oracle::cache::{self, OracleKey, Probe, Provenance};
 use dishonored_oracle::scenario::{self, Action, Button, Record, Scenario};
 use dishonored_oracle::trace::{Trace, TraceEvent};
-use dishonored_probe::ReadPath;
+use dishonored_probe::{ReadPath, ScriptAction};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -329,7 +329,8 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
             ch.list[n - 3 + k].name = format!("pawn.{c}");
         }
         ch.list.push(Chan { name: "pawn.speed2d".into(), unit: "uu/s".into(), path: None, kind: Kind::F32, speed_of: Some((n - 3, n - 2)) });
-        ch.add_path(s, "pawn.crouched", "bool", pawn, "bIsCrouched")?;
+        // Dishonored's sneak is its own toggle (`bIsCrouched` stays false while sneaking).
+        ch.add_path(s, "pawn.crouched", "bool", pawn, "m_bSneakModeToggled")?;
         ch.add_path(s, "pawn.physics", "enum", pawn, "Physics")?;
     }
     if want(&Record::Vitals) {
@@ -388,12 +389,11 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     let mut trace = Trace::new(&spec.name, "original", spec.tick_hz, &ch.list.iter().map(|c| (c.name.as_str(), c.unit.as_str())).collect::<Vec<_>>());
     let paths: Vec<(usize, ReadPath)> = ch.list.iter().enumerate().filter_map(|(i, c)| c.path.clone().map(|p| (i, p))).collect();
     let read_paths: Vec<ReadPath> = paths.iter().map(|x| x.1.clone()).collect();
-    let sample = |s: &mut Session| -> Result<Vec<f64>> {
-        let r = s.c.reads(&read_paths)?;
+    let to_values = |row: &[Option<Vec<u8>>]| -> Vec<f64> {
         let mut v = vec![f64::NAN; ch.list.len()];
-        for ((i, _), b) in paths.iter().zip(r) {
+        for ((i, _), b) in paths.iter().zip(row) {
             if let Some(b) = b {
-                v[*i] = value(ch.list[*i].kind, &b);
+                v[*i] = value(ch.list[*i].kind, b);
             }
         }
         for (i, c) in ch.list.iter().enumerate() {
@@ -401,59 +401,56 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
                 v[i] = (v[a] * v[a] + v[b] * v[b]).sqrt();
             }
         }
-        Ok(v)
+        v
     };
-    let base = s.c.lockstep(true, 30_000)?;
+    s.c.lockstep(true, 30_000)?;
     if tracing {
         s.c.event_fetch()?; // drop what the setup produced
     }
     if spawns {
         s.c.spawn_fetch()?;
     }
-    let t_run = Instant::now();
-    trace.push(0, sample(s)?);
+    // The input as a tick script: key changes, view writes, console commands per tick.
     let timeline = spec.input_timeline();
     let mut held: Vec<&'static str> = Vec::new();
     let (mut yaw, mut pitch) = (p.yaw, p.pitch);
     let rot = |deg: f32| ((deg / 360.0 * 65536.0).round() as i32) & 0xffff;
-    let mut raw_events = Vec::new();
-    let mut raw_spawns = Vec::new();
-    let consoles: HashMap<u32, Vec<String>> = spec.input.iter().filter_map(|st| if let Action::Console(c) = &st.action { Some((st.tick, c.clone())) } else { None }).fold(HashMap::new(), |mut m, (t, c)| {
-        m.entry(t).or_default().push(c);
-        m
-    });
+    let mut actions: Vec<(u32, ScriptAction)> = Vec::new();
     for (t, (fw, rt, y, pt, buttons)) in timeline.iter().enumerate() {
+        let t = t as u32;
         let mut want_keys = move_keys(*fw, *rt)?;
         for b in buttons {
             want_keys.push(button_key(*b)?);
         }
         for k in held.iter().filter(|k| !want_keys.contains(k)) {
-            s.c.key(k, false)?;
+            actions.push((t, ScriptAction::Key(k.to_string(), false)));
         }
         for k in want_keys.iter().filter(|k| !held.contains(k)) {
-            s.c.key(k, true)?;
+            actions.push((t, ScriptAction::Key(k.to_string(), true)));
         }
         held = want_keys;
         if (*y, *pt) != (yaw, pitch) || t == 0 {
             (yaw, pitch) = (*y, *pt);
-            s.c.write(pc + 0xd0, &rot(pitch).to_le_bytes())?;
-            s.c.write(pc + 0xd4, &rot(yaw).to_le_bytes())?;
-        }
-        if let Some(cmds) = consoles.get(&(t as u32)) {
-            for c in cmds {
-                s.c.console(c)?;
-            }
-        }
-        s.c.step(1, 60_000)?;
-        trace.push(t as u32 + 1, sample(s)?);
-        if tracing && (t % 30 == 29 || t + 1 == timeline.len()) {
-            raw_events.extend(s.c.event_fetch()?);
-        }
-        if spawns && (t % 30 == 29 || t + 1 == timeline.len()) {
-            raw_spawns.extend(s.c.spawn_fetch()?);
+            actions.push((t, ScriptAction::Write(pc + 0xd0, rot(pitch).to_le_bytes().to_vec())));
+            actions.push((t, ScriptAction::Write(pc + 0xd4, rot(yaw).to_le_bytes().to_vec())));
         }
     }
+    for st in &spec.input {
+        if let Action::Console(c) = &st.action {
+            actions.push((st.tick, ScriptAction::Console(c.clone())));
+        }
+    }
+    let t_run = Instant::now();
+    let (base, frames, errors) = s.c.run_script(spec.ticks, &read_paths, &actions, 3_600_000)?;
     let run_s = t_run.elapsed().as_secs_f64();
+    if !errors.is_empty() {
+        warnings.push(format!("script: {errors}"));
+    }
+    for (k, row) in frames.iter().enumerate() {
+        trace.push(k as u32, to_values(row));
+    }
+    let raw_events = if tracing { s.c.event_fetch()? } else { Vec::new() };
+    let raw_spawns = if spawns { s.c.spawn_fetch()? } else { Vec::new() };
     // world.dt: the game time each tick advanced (1 / tick_hz under the fixed step).
     if let Some(ti) = trace.channel("world.time") {
         trace.channels.push(dishonored_oracle::trace::Channel { name: "world.dt".into(), unit: "s".into() });

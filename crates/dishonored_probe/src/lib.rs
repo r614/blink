@@ -115,6 +115,22 @@ pub mod op {
     /// str name -> u32 FName index, u32 number (`Base_N` -> (Base, N + 1) when only the base
     /// exists). Error when the name is unknown.
     pub const NAME_INDEX: u8 = 39;
+    /// Start a tick script (the game must be parked in lockstep): u32 ticks, u32 n,
+    /// n * read (as `READS`), u32 m, m * (u32 tick, u8 kind, payload: 0 key = str key, u8
+    /// event; 1 write = u32 addr, bytes; 2 console = str) -> ().
+    pub const SCRIPT_START: u8 = 40;
+    /// u32 timeout ms -> u32 base tick, bytes frames (ticks + 1 of: u32 k, per read u8 ok +
+    /// len bytes), str errors. Waits until the script is done and the game parked again.
+    pub const SCRIPT_WAIT: u8 = 41;
+}
+
+/// One action of a tick script.
+#[derive(Clone, Debug)]
+pub enum ScriptAction {
+    /// Engine key name, pressed (true) or released.
+    Key(String, bool),
+    Write(u32, Vec<u8>),
+    Console(String),
 }
 
 /// One field of a struct's own `Children` chain (`FIELDS`).
@@ -856,6 +872,66 @@ impl Client {
         put_u32(&mut p, func);
         p.extend_from_slice(parms);
         self.request(op::CALL_FUNC, &p)
+    }
+
+    /// Run a tick script (module `op::SCRIPT_START`) and return (base tick, frames: per tick
+    /// k = 0..=ticks the reads, `None` where unreadable, errors).
+    pub fn run_script(&mut self, ticks: u32, reads: &[ReadPath], actions: &[(u32, ScriptAction)], timeout_ms: u32) -> io::Result<(u32, Vec<Vec<Option<Vec<u8>>>>, String)> {
+        let mut p = Vec::new();
+        put_u32(&mut p, ticks);
+        put_u32(&mut p, reads.len() as u32);
+        for x in reads {
+            put_u32(&mut p, x.base);
+            p.push(x.offsets.len().max(1) as u8);
+            if x.offsets.is_empty() {
+                put_u32(&mut p, 0);
+            }
+            for o in &x.offsets {
+                put_u32(&mut p, *o);
+            }
+            put_u32(&mut p, x.len);
+        }
+        put_u32(&mut p, actions.len() as u32);
+        for (t, a) in actions {
+            put_u32(&mut p, *t);
+            match a {
+                ScriptAction::Key(k, down) => {
+                    p.push(0);
+                    put_str(&mut p, k);
+                    p.push(if *down { 0 } else { 1 });
+                }
+                ScriptAction::Write(addr, b) => {
+                    p.push(1);
+                    put_u32(&mut p, *addr);
+                    put_bytes(&mut p, b);
+                }
+                ScriptAction::Console(c) => {
+                    p.push(2);
+                    put_str(&mut p, c);
+                }
+            }
+        }
+        self.request(op::SCRIPT_START, &p)?;
+        let mut w = Vec::new();
+        put_u32(&mut w, timeout_ms);
+        let r = self.request(op::SCRIPT_WAIT, &w)?;
+        let mut rd = Reader::new(&r);
+        let base = rd.u32()?;
+        let frames_b = rd.bytes()?;
+        let errors = rd.str()?;
+        let mut fr = Reader::new(frames_b);
+        let mut frames = Vec::new();
+        while fr.pos < frames_b.len() {
+            let _k = fr.u32()?;
+            let mut row = Vec::with_capacity(reads.len());
+            for x in reads {
+                let ok = fr.u8()? != 0;
+                let b = fr.take(x.len as usize)?;
+                row.push(ok.then(|| b.to_vec()));
+            }
+            frames.push(row);
+        }
+        Ok((base, frames, errors))
     }
 
     /// FName (index, number) of a name.
