@@ -614,8 +614,15 @@ lights (the stealth lane's light levels differ), labels and the nav grid; PhysX 
 - Placement by position (`npcs: [(position: ..)]`): a live NPC of the host level of the kind
   (`*Guard*` tweaks for guards, the others for civilians; not Tallboys, the boatman, Shaw) is
   teleported there; `Passive` unpossesses it (no controller, no AI: it takes damage and falls
-  like a dummy); `Idle` keeps its own AI. Tweaks, factions, routes and other states are setup
-  gaps (U-802).
+  like a dummy); `Idle` keeps its own AI; `Alerted` is approximated by filling its player attention
+  (1.0, a warning); `faction` writes `DishonoredNPCPawn.m_pCurFactionTweak` (a tweak by name,
+  `None` = null). Pawn tweaks, routes and other states are setup gaps (U-802). An NPC by
+  `spawner` is the spawner's live pawn (a pointer in its fields, its decoded arrays, or a pawn
+  pointing back at it).
+- `settle`: the placed player is set falling (`Physics` written; `SetPhysics` is ignored for
+  the player) so it lands and hovers before tick 0 like the port's settled pawn. On the
+  Playground's cubes the original hovers 3.73 uu above the floor (centre floor + 91.23), the
+  port 6.73 (94.23): reported as the first divergence of the Playground movement specs.
 - Brain channels per `Npc(id)` (through `Pawn.Controller.m_pAIBrain`, `DishonoredAIBrain`):
   `npc.<id>.suspicion` (`m_SuspicionLevel`), `.top_attn_level`, `.top_enemy_attn_level`,
   `.player_attn.level` / `.value` (`m_pAttentionProcess.m_pPlayerAttentionInfo`, accumulator

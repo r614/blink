@@ -183,6 +183,23 @@ fn npc_pawn(s: &mut Session, name: &str) -> Result<u32> {
             }
         }
     }
+    // Or one in its decoded fields (arrays of spawned pawns, structs).
+    let dump = s.r.dump_object(&mut s.c, o, None)?.to_string();
+    for part in dump.split("DishonoredNPCPawn ").skip(1) {
+        if let Some(a) = part.split('@').nth(1).and_then(|x| crate::reflect::parse_addr(&x[..10.min(x.len())]))
+            && pawns.contains(&a) {
+                return Ok(a);
+            }
+    }
+    // Or the live pawn whose spawner reference (any field) points back at it.
+    for p in &pawns {
+        let pc = s.r.class_of(&mut s.c, *p)?;
+        let size = s.r.info(&mut s.c, pc)?.size.min(0x2000);
+        if let Ok(raw) = s.c.read(*p, size)
+            && raw.chunks(4).any(|w| w.len() == 4 && u32::from_le_bytes(w.try_into().unwrap()) == o) {
+                return Ok(*p);
+            }
+    }
     bail!("{name}: neither a pawn nor a spawner with a live pawn")
 }
 
@@ -387,8 +404,25 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
         if n.tweak.is_some() {
             gap(format!("NPC {id}: tweak {:?} not applied (the host level's pawn keeps its own)", n.tweak), &mut warnings)?;
         }
-        if n.faction.is_some() || !n.route.is_empty() {
-            gap(format!("NPC {id}: faction / route not applied"), &mut warnings)?;
+        if !n.route.is_empty() {
+            gap(format!("NPC {id}: patrol route not applied"), &mut warnings)?;
+        }
+        if let Some(fac) = &n.faction {
+            // DishonoredNPCPawn.m_pCurFactionTweak: a faction tweak by name, or none.
+            let tw = if fac == "None" { 0 } else {
+                let name = fac.rsplit('.').next().unwrap_or(fac);
+                match s.c.find(name, "")?.first() {
+                    Some(a) => *a,
+                    None => {
+                        gap(format!("NPC {id}: faction tweak {fac} not loaded"), &mut warnings)?;
+                        u32::MAX
+                    }
+                }
+            };
+            if tw != u32::MAX {
+                let pl = s.r.place(&mut s.c, pawn, "m_pCurFactionTweak")?;
+                s.c.write(pl.addr, &tw.to_le_bytes())?;
+            }
         }
         if let Some(p) = n.position {
             let at = glam::Vec3::from(p) + off;
@@ -409,6 +443,13 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
                     s.r.call(&mut s.c, ctrl, "UnPossess", &Value::Null)?;
                 }
             }
+            Some("Alerted") => {
+                // Approximation: the guard's attention on the player filled (1.0); its own
+                // attention process then raises the level and starts combat.
+                let info = crate::oracle_stealth::attention_info(&mut s.c, pawn)?;
+                s.c.write(info + 0x8c, &1.0f32.to_le_bytes())?;
+                warnings.push(format!("NPC {id}: Alerted approximated by filling its player attention (1.0)"));
+            }
             Some(st) => gap(format!("NPC {id}: AI state {st} not applied"), &mut warnings)?,
         }
         placed.insert(id, pawn);
@@ -419,6 +460,14 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
             crate::lab::give(&mut s.c, "Twk_Inv_SwordCorvo", true)?;
         }
         s.place((glam::Vec3::from(ps.position) + off).to_array(), Some(ps.yaw), Some(ps.pitch), ps.snap_to_floor)?;
+        if spec.setup.settle > 0 {
+            // A walking pawn does not look for its floor until it moves: start the settle
+            // falling (PHYS_Falling written directly; `SetPhysics` is ignored for the player)
+            // so it lands on its floor and hovers like the port's settled pawn.
+            let pawn = crate::lab::pawn(&mut s.c)?;
+            let pl = s.r.place(&mut s.c, pawn, "Physics")?;
+            s.r.write_place(&mut s.c, &pl, &json!("PHYS_Falling"))?;
+        }
         if let Some(h) = ps.health {
             let pawn = crate::lab::pawn(&mut s.c)?;
             s.c.write(pawn + 0x344, &(h.round() as i32).to_le_bytes())?;
@@ -701,8 +750,12 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
             if v == prev || (v.is_nan() && prev.is_nan()) {
                 continue;
             }
+            let first = prev.is_nan() && fr.tick == trace.frames[0].tick;
             prev = v;
             let obj = if v.is_nan() { 0 } else { v as u32 };
+            if first && obj == 0 {
+                continue; // an empty slot at the start
+            }
             let cls = if obj == 0 {
                 "None".to_string()
             } else {
