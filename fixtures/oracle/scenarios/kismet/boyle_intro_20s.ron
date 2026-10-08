@@ -1,0 +1,21 @@
+// The same start as kismet/boyle_start, recorded for 20 s: the level change, the spawners, Samuel's
+// boat intro (matinee 29.8 s with event keys at 5.26 s and 23.90 s) and the first dialog. One
+// capture checks the whole sequence engine activation by activation: the depth-first order,
+// delayed links, latent ops and the tick each op activates in (research/dishonored/systems/
+// kismet.md F-1..F-8). Compare the "Kismet" events on (tick, object, name = Activated /
+// Deactivated); the port must record one per op activation (kismet.md F-12).
+(
+    name: "kismet/boyle_intro_20s",
+    system: Kismet,
+    map: "L_Boyle_Ext_P",
+    description: "Start Boyle Ext's original Kismet from ChangeLvl_fromHub_toBoyle and record every op activation for 20 s.",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true)), kismet: true, kismet_start: Some("ChangeLvl_fromHub_toBoyle"), original_npcs: true, seed: 1),
+    ticks: 1200,
+    input: [],
+    checkpoints: [
+        (name: "runs", expect: [(metric: Count("Kismet:*"), value: 1, tol: 0, cmp: AtLeast, source: "the level-change remote event starts the level's sequences", status: Static)]),
+    ],
+    record: [Pawn, Kismet],
+    event_tolerance: 0,
+    capture: Some("ProcessEvent Activated / Deactivated on SequenceOp objects (EVENT_FILTER function=Activated,Deactivated class=SequenceOp) per tick for 20 s after ChangeLvl_fromHub_toBoyle"),
+)
