@@ -472,6 +472,7 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     // keeps its own AI; other states, factions, routes and tweaks are not applied yet (U-802).
     let mut placed: HashMap<String, u32> = HashMap::new();
     let mut used: Vec<u32> = Vec::new();
+    let mut used_routes: Vec<u32> = Vec::new();
     for (k, n) in spec.setup.npcs.iter().enumerate() {
         let id = n.id.clone().or_else(|| n.spawner.clone()).unwrap_or_else(|| format!("npc{k}"));
         // NPCs placed by position are spawned fresh from a spawner (a copy of the named one, or
@@ -486,7 +487,17 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
                 Some(name) => Some(s.r.object(&mut s.c, name, None)?),
                 None => None,
             };
-            match s.spawn_npc_from(template, n.tweak.as_deref(), n.faction.as_deref(), guard, at, n.yaw) {
+            // A patrol route: a host route taken over and laid on the points (before the
+            // spawn, so the patroller adopts it at once).
+            let patrol = !n.route.is_empty();
+            if patrol {
+                let pts: Vec<glam::Vec3> = n.route.iter().map(|p| glam::Vec3::from(*p) + off).collect();
+                // The port's two-point routes walk back and forth: PingPong (1).
+                if let Err(e) = s.setup_route(&pts, 1, &mut used_routes) {
+                    gap(format!("NPC {id}: patrol route ({e:#})"), &mut warnings)?;
+                }
+            }
+            match s.spawn_npc_opts(template, n.tweak.as_deref(), n.faction.as_deref(), guard, at, n.yaw, patrol) {
                 Ok((p, staged)) => {
                     if staged {
                         warnings.push(format!("NPC {id}: the spawn was blocked at its position; spawned 600 uu above and moved there"));
@@ -507,8 +518,8 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
                 }
             }
         };
-        used.push(pawn);        if !n.route.is_empty() {
-            gap(format!("NPC {id}: patrol route not applied"), &mut warnings)?;
+        used.push(pawn);        if !n.route.is_empty() && !fresh {
+            gap(format!("NPC {id}: patrol route without a position (not applied)"), &mut warnings)?;
         }
         if let Some(fac) = n.faction.as_ref().filter(|_| !fresh) {
             // DishonoredNPCPawn.m_pCurFactionTweak: a faction tweak by name, or none.
@@ -531,6 +542,8 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
 
         match n.state.as_deref() {
             None | Some("Idle") => {}
+            // Patrol: the spawner's patrol start with the route above.
+            Some("Patrol") if fresh && !n.route.is_empty() => {}
             Some("Passive") => {
                 let co = field_off(s, pawn, "Controller")?;
                 let ctrl = s.c.read_u32(pawn + co)?;

@@ -545,9 +545,20 @@ impl Session {
             "lightenv" => self.light_env(a)?,
             "anim" => crate::anim::session_anim(self, a)?,
             "lights" => self.list_lights(a)?,
+            "route" => {
+                // `route points=x,y,z;x,y,z.. [type=0|1|2]`: a patrol route on the points (a host
+                // route taken over, see `setup_route`).
+                let pts: Vec<glam::Vec3> = s("points").context("points")?.split(';').map(|p| {
+                    let v: Vec<f32> = p.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    glam::Vec3::new(v[0], v[1], v[2])
+                }).collect();
+                let mut used = Vec::new();
+                let r = self.setup_route(&pts, num("type").unwrap_or(1.0) as u8, &mut used)?;
+                json!({"route": reflect::object_value(&mut self.c, r)?})
+            }
             "spawn_npc" => {
                 let loc = a.get("location").and_then(args_f32).context("location")?;
-                let (p, staged) = self.spawn_npc(s("tweak"), s("faction"), s("kind").unwrap_or("Guard") == "Guard", glam::Vec3::from(loc), num("yaw").unwrap_or(0.0) as f32)?;
+                let (p, staged) = self.spawn_npc_opts(None, s("tweak"), s("faction"), s("kind").unwrap_or("Guard") == "Guard", glam::Vec3::from(loc), num("yaw").unwrap_or(0.0) as f32, a.get("patrol").and_then(Value::as_bool).unwrap_or(false))?;
                 json!({"pawn": reflect::object_value(&mut self.c, p)?, "staged": staged, "location": crate::lab::read_vec(&mut self.c, p + 0xc4)?})
             }
             "darkness" => {
