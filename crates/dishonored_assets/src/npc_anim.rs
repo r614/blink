@@ -86,6 +86,44 @@ pub fn read_loco_config(pkg: &Package, export: usize) -> Result<LocoConfig> {
     Ok(c)
 }
 
+/// Every `ArkComponentLocomotionConfig` of the named packages (first package wins a name).
+pub fn package_loco_configs(content: &Content, packages: &[&str]) -> Vec<LocoConfig> {
+    let mut out: Vec<LocoConfig> = Vec::new();
+    for p in packages {
+        let Ok(pkg) = content.package(p) else { continue };
+        for i in 0..pkg.exports.len() {
+            if pkg.export_class(i) != "ArkComponentLocomotionConfig" {
+                continue;
+            }
+            let path = pkg.obj_path(ObjRef::Export(i));
+            if path.starts_with("Default__") || out.iter().any(|c| c.name.eq_ignore_ascii_case(&path)) {
+                continue;
+            }
+            if let Ok(c) = load_loco_config(content, &(p.to_string(), path)) {
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+/// Play length (s) of an `AnimSequence` of an `AnimSet`: `SequenceLength / RateScale`.
+pub fn sequence_play_length(content: &Content, package: &str, set_path: &str, sequence: &str) -> Option<f32> {
+    let pkg = content.package(package).ok()?;
+    let set = find_export(&pkg, set_path)?;
+    let h = pkg.read_object(set).ok()?;
+    for s in find(&h.properties, "Sequences")?.array_objects().ok()? {
+        let ObjRef::Export(e) = ObjRef::from_index(s) else { continue };
+        let Ok(sh) = pkg.read_object(e) else { continue };
+        if name_of(&sh.properties, "SequenceName").eq_ignore_ascii_case(sequence) {
+            let len = find(&sh.properties, "SequenceLength").and_then(|p| p.as_float())?;
+            let rate = find(&sh.properties, "RateScale").and_then(|p| p.as_float()).unwrap_or(1.0);
+            return Some(if rate > 0.0 { len / rate } else { len });
+        }
+    }
+    None
+}
+
 /// Load a locomotion config by (package, object path).
 pub fn load_loco_config(content: &Content, r: &(String, String)) -> Result<LocoConfig> {
     let pkg = content.package(&r.0)?;

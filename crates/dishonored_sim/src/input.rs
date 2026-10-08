@@ -102,6 +102,11 @@ pub struct PlayerInput {
     /// the matching animation. Always 0 for players.
     #[serde(default)]
     pub npc_move: u8,
+    /// NPC locomotion speed (uu/s) the brain requests: the authored speed of the locomotion
+    /// loop its stance modifier and speed index select, times the modifier's speed multiplier
+    /// (`ArkComponentLocomotionConfig`). 0: the player speeds (and always for players).
+    #[serde(default)]
+    pub npc_speed: f32,
 }
 
 /// NPC combat moves carried in [`PlayerInput::npc_move`] (`dishonored_ai::AttackKind`).
