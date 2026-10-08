@@ -25,6 +25,29 @@ pub fn is_usable_class(class: &str) -> bool {
     matches!(class, "DisDoor" | "DishonoredUsableObject" | "DishonoredDynamicUsableObject" | "DisWaterSource" | "DisAlarmBell" | "DisAudioLogPlayer")
 }
 
+/// Placed creatures drawn as animated skeletal props: `DisRiverKrust`. Its skeletal component
+/// is a native member (`m_pSkeletalMeshCpnt`) that only `CollisionComponent` names; its tree
+/// (`Npc_RiverKrust_at`: a `FullBodySlot` over an unnamed sequence node) plays the tweak's
+/// `m_AnimSequences[ERiverKrustAnimState]`, the ambient loop at rest (`ClamUp_Idle`).
+pub fn is_animated_prop_class(class: &str) -> bool {
+    class == "DisRiverKrust"
+}
+
+/// The resting loop of a river krust tweak: `m_AnimSequences[RiverKrustAnimState_Ambient]`
+/// (element 0) with its `m_PlaybackRateRange` and `m_StartTimeSecondsRange`.
+fn krust_idle(t: &crate::tweaks::TMap) -> Option<dishonored_ir::PropIdle> {
+    let anim = match get(t, "m_AnimSequences.m_SequenceName") {
+        Some(TVal::Name(n)) if n != "None" => n.clone(),
+        _ => return None,
+    };
+    let f = |p: &str, d: f32| crate::tweaks::get_f32(t, &format!("m_AnimSequences.{p}")).unwrap_or(d);
+    Some(dishonored_ir::PropIdle {
+        anim,
+        rate: [f("m_PlaybackRateRange.m_fMinValue", 1.0), f("m_PlaybackRateRange.m_fMaxValue", 1.0)],
+        start: [f("m_StartTimeSecondsRange.m_fMinValue", 0.0), f("m_StartTimeSecondsRange.m_fMaxValue", 0.0)],
+    })
+}
+
 /// `EDisDoorState` from its enum name (`DDS_Closed`, `DDS_Opened_CW`, `DDS_Opened_CCW`).
 pub fn door_state(name: &str) -> u8 {
     match name.trim() {
@@ -91,12 +114,17 @@ pub fn read_props_with_channels(content: &Content, packages: &[String]) -> Vec<(
         let Ok(pkg) = content.package(name) else { continue };
         for i in 0..pkg.exports.len() {
             let class = pkg.export_class(i);
-            if !is_usable_class(&class) || pkg.obj_name(ObjRef::from_index(pkg.exports[i].outer)) != "PersistentLevel" {
+            let animated = is_animated_prop_class(&class);
+            if !(is_usable_class(&class) || animated) || pkg.obj_name(ObjRef::from_index(pkg.exports[i].outer)) != "PersistentLevel" {
                 continue;
             }
             let Ok(h) = pkg.read_object(i) else { continue };
             let props = h.properties;
-            let Some(ObjRef::Export(ci)) = find(&props, "SkeletalMeshComponent").and_then(|p| p.as_object()).map(ObjRef::from_index) else { continue };
+            let comp = if animated { "CollisionComponent" } else { "SkeletalMeshComponent" };
+            let Some(ObjRef::Export(ci)) = find(&props, comp).and_then(|p| p.as_object()).map(ObjRef::from_index) else { continue };
+            if animated && !pkg.export_class(ci).contains("SkeletalMeshComponent") {
+                continue;
+            }
             let Ok(ch) = pkg.read_object(ci) else { continue };
             let c = ch.properties;
             let Some(mref) = find(&c, "SkeletalMesh").and_then(|p| p.as_object()).filter(|o| *o != 0) else { continue };
@@ -127,6 +155,14 @@ pub fn read_props_with_channels(content: &Content, packages: &[String]) -> Vec<(
                     close_ccw: stage_anim(&t, "m_DoorCloseCCW"),
                 }
             });
+            let idle = if animated {
+                tweaks.as_ref().and_then(|db| {
+                    let path = find(&props, "m_pRiverKrustTweaks").and_then(|p| p.as_object()).filter(|o| *o != 0).map(|o| pkg.obj_path(ObjRef::from_index(o)))?;
+                    krust_idle(&db.try_resolve(&path)?)
+                })
+            } else {
+                None
+            };
             let channels = crate::light_env::channel_bits(&c, 1 | 1 << 3);
             out.push((SkeletalProp {
                 actor: format!("{}:{}", pkg.name, pkg.obj_name(ObjRef::Export(i))),
@@ -138,6 +174,7 @@ pub fn read_props_with_channels(content: &Content, packages: &[String]) -> Vec<(
                 anim_sets,
                 door,
                 light_env: None,
+                idle,
             }, channels));
         }
     }

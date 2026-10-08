@@ -784,6 +784,10 @@ impl SoundEventState {
 pub enum HitKind {
     Death,
     DeathFast,
+    /// Killed by a weeper's plague cloud (`DisNPCAnim_DeathPlague`).
+    DeathPlague,
+    /// Killed by rats (`DisNPCAnim_DeathSwarmAttack`).
+    DeathSwarm,
     Melee,
     Projectile,
     Headshot,
@@ -829,7 +833,16 @@ pub fn collect_hits(events: &[SimEvent], all: &[&PlayerState]) -> HashMap<u32, V
                     out.entry(victim).or_default().push((k, pos(attacker, victim)));
                 }
             }
-            E::Death { victim, killer, .. } => out.entry(victim).or_default().push((H::Death, pos(killer, victim))),
+            // The death chains named after their damage (`DisNPCAnim_DeathPlague`,
+            // `DisNPCAnim_DeathSwarmAttack`; LIKELY: the code choosing them was not traced, U-890).
+            E::Death { victim, killer, cause } => {
+                let k = match cause {
+                    C::Plague => H::DeathPlague,
+                    C::Rats | C::RatBite => H::DeathSwarm,
+                    _ => H::Death,
+                };
+                out.entry(victim).or_default().push((k, pos(killer, victim)))
+            }
             E::SwordSwing { id } => out.entry(id).or_default().push((H::Swing, Vec3::ZERO)),
             E::SwordParried { attacker, defender } => out.entry(defender).or_default().push((H::Parried, pos(Some(attacker), defender))),
             E::KnockedOut { victim, by, cause } if cause != dishonored_sim::events::KnockoutCause::Choke => out.entry(victim).or_default().push((H::KnockedOut, pos(by, victim))),

@@ -1336,6 +1336,7 @@ impl MissionMatch {
             self.view.time_left = if self.setup.def.settings.time_limit > 0.0 { (self.setup.def.settings.time_limit - self.state.view.stats.time).max(0.0) } else { 0.0 };
         }
         self.view.npc_poses = crate::npc_poses(&self.crowd.brains);
+        self.view.npc_heads = crate::npc_heads(&self.crowd.brains, &self.crowd.ai, &self.world.players);
         // Level travel happens at the end of the step (the host swaps collision before the next).
         if let Some((m, tag)) = self.pending_travel.take() {
             self.travel(&m, &tag, cfg);

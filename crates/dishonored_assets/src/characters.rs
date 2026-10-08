@@ -564,6 +564,28 @@ pub fn resolve_appearances(content: &Content, level_packages: &[String], tweaks:
         if let Some(TVal::Obj(o)) = m.get("m_pComponentLookatConfig") {
             a.anim.lookat = locate(o).or_else(|| Some(("DishonoredGame".to_string(), o.clone())));
         }
+        // The item prefixes of item-prefixed chain steps: the primary item's (the loadout's first
+        // entry: the elite guard's sword, the Overseer's music box, the hound's bite, the
+        // Tallboy's bow) and the empty hands' `m_ItemPrefix`.
+        let item_prefix = |path: Option<&str>| -> String {
+            match path.and_then(|p| db.try_resolve(p)).as_ref().and_then(|t| t.get("m_ItemPrefix").cloned()) {
+                Some(TVal::Name(n)) | Some(TVal::Str(n)) if n != "None" => n,
+                _ => String::new(),
+            }
+        };
+        let first_item = match m.get("m_ContentInventoryLoadout") {
+            Some(TVal::List(l)) => l.first().and_then(|e| match e.get("obj") {
+                Some(TVal::Obj(o)) if !o.is_empty() => Some(o.clone()),
+                _ => None,
+            }),
+            _ => None,
+        };
+        a.anim.item_prefix = item_prefix(first_item.as_deref());
+        let empty = match m.get("m_pEmptyHandsItem") {
+            Some(TVal::Obj(o)) if !o.is_empty() => Some(o.clone()),
+            _ => None,
+        };
+        a.anim.empty_prefix = item_prefix(empty.as_deref());
         // Accessories: `m_RandomAccessoryInfo[Hat, Mask]` with `m_HatMeshes` / `m_MaskMeshes`.
         // A static array: element 0 under the plain name, element i under "name[i]".
         let info: Vec<f32> = ["m_RandomAccessoryInfo", "m_RandomAccessoryInfo[1]"]

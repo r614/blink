@@ -379,18 +379,16 @@ fn chain_clips(st: &crate::npc_anim::PawnAnim) -> Vec<(String, f32)> {
     [st.full.as_ref(), st.upper.as_ref()].into_iter().flatten().filter_map(|c| c.steps.get(c.i).map(|s| (s.0.clone(), c.t))).collect()
 }
 
-/// What an NPC looks at (APPROXIMATION, U-281: the original's look-at requests come from the
-/// AI's attention and conversations, which the host does not publish): the nearest living
-/// human player within 2000 uu while the pawn notices, searches, fights, panics or cowers, and
-/// within 600 uu while it talks.
-fn look_target(p: &PlayerState, stance: Option<dishonored_ir::npc_anim::NpcStance>, talking: bool, all: &[&PlayerState]) -> Option<glam::Vec3> {
-    use dishonored_ir::npc_anim::NpcStance as S;
+/// What an NPC looks at while it speaks a line (APPROXIMATION, U-281: the conversation's
+/// look-at requests were not decoded): the nearest living human player within 600 uu. The
+/// AI's attention look-at (HeadTrack) comes from the host (`MatchView::npc_heads`, the vision
+/// head's cursor), so alert pawns no longer use this.
+fn look_target(p: &PlayerState, _stance: Option<dishonored_ir::npc_anim::NpcStance>, talking: bool, all: &[&PlayerState]) -> Option<glam::Vec3> {
     use dishonored_sim::state::PawnKind;
     if p.kind == PawnKind::Human || !p.alive || p.incapacitated() {
         return None;
     }
-    let alert = matches!(stance, Some(S::Notice | S::Search | S::Combat | S::Panic | S::Cower));
-    let range = if alert { 2000.0 } else if talking { 600.0 } else { return None };
+    let range = if talking { 600.0 } else { return None };
     all.iter()
         .filter(|o| o.kind == PawnKind::Human && o.alive && o.id != p.id)
         .map(|o| (o.position.distance(p.position), o))
@@ -540,7 +538,7 @@ pub fn animate_characters(
                 .map(|t| [to_pawn(t.a), to_pawn(t.b), to_pawn(t.c)])
                 .collect()
         };
-        let input = crate::npc_anim::AnimInput { p, stance, armed, talking: talking.contains(&p.id), dt, hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), look_target: look_target(p, stance, talking.contains(&p.id), &all), face: faces.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), floor: -mv.collision_half_height, ground: Some(&ground), walls: Some(&walls), gravity: mv.gravity_z, carrier_speed: p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).map(|c| c.velocity.truncate().length()).unwrap_or(0.0) };
+        let input = crate::npc_anim::AnimInput { p, stance, armed, talking: talking.contains(&p.id), dt, hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), look_target: look_target(p, stance, talking.contains(&p.id), &all), head: view.matchv.npc_heads.iter().find(|h| h.id == p.id).copied(), face: faces.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), floor: -mv.collision_half_height, ground: Some(&ground), walls: Some(&walls), gravity: mv.gravity_z, carrier_speed: p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).map(|c| c.velocity.truncate().length()).unwrap_or(0.0) };
         let pose = match states.get_mut(entity) {
             Ok(mut st) => {
                 let before = chain_clips(&st);

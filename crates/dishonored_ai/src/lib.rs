@@ -1871,6 +1871,13 @@ impl Brain {
         self.head.step(ai, me.archetype, modifier, me.position, me.yaw, speed, request, dt);
     }
 
+    /// The look-at node's head and torso aims (radians) for the animation: the same cursor and
+    /// weights the vision eye uses ([`head::Head::parts`]).
+    pub fn head_parts(&self, me: &PlayerState, ai: &AiConfig) -> ([f32; 2], [f32; 2]) {
+        let (h, t) = self.head.parts(ai, self.head_modifier(ai), me.velocity.truncate().length());
+        (h.into(), t.into())
+    }
+
     /// The vision eye this tick: the head of the last step ([`head::Head::step`]).
     fn vision_eye(&self, me: &PlayerState, ai: &AiConfig) -> head::Eye {
         self.head.last_eye(ai, me.archetype, &self.head_modifier(ai), me.position, me.yaw)
