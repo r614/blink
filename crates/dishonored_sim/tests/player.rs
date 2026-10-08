@@ -283,8 +283,10 @@ fn pistol_dispersion_narrows_while_aiming_and_blooms_after_a_shot() {
     assert!(d > 15.0 && d < 45.0, "{d}");
     r.steps(30, &[(1, gun(0))]);
     assert_eq!(r.p(1).left.dispersion, 15.0);
-    // A shot leaves inside the minimum cone, then the dispersion is at the maximum.
+    // A shot leaves inside the minimum cone (the tick after the fire action starts), then the
+    // dispersion is at the maximum.
     r.steps(1, &[(1, gun(buttons::SECONDARY))]);
+    r.steps(1, &[(1, gun(0))]);
     let pr = r.state.projectiles.iter().find(|p| p.owner == 1).expect("a bullet");
     let k = 2.0 * (DISPERSION_REF_HFOV_DEG.to_radians() * 0.5).tan() / (720.0 * DISPERSION_REF_ASPECT);
     let off = pr.velocity.normalize().angle_between(Vec3::X);
