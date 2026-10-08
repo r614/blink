@@ -93,7 +93,8 @@ fn load_spawns(map: &str, m: Option<&DishonoredMap>) -> Vec<Spawn> {
 pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
     // v15: the integrated subsystem ports (ranged, world, melee, powers, movement, stealth).
     // v15x-physics: GameplayConfig.throw, windblast `cast.notify_time` (physics port).
-    let path = cache_dir().join("gameplay_config.v15x-physics.json");
+    // v16x-physics: ThrowConfig rest speed and get-up animation lengths.
+    let path = cache_dir().join("gameplay_config.v16x-physics.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);

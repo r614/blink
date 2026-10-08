@@ -988,6 +988,16 @@ pub struct ThrownState {
     pub air_speed: f32,
     /// The flight's `CalcVelocity` friction: half the physics volume's `FluidFriction`.
     pub friction: f32,
+    /// After the Flying phase: the ragdoll (`m_bRagdoll`), modelled by the falling / walking
+    /// moves with the pawn held, until the rest test passes.
+    #[serde(default)]
+    pub ragdoll: bool,
+    /// `m_fBodyAtRestTestTimer`: no rest test until it ran out (0.5 s from the throw).
+    #[serde(default)]
+    pub rest_timer: f32,
+    /// `m_fOldTimeDilation`: the pawn's time dilation at the previous test.
+    #[serde(default)]
+    pub prev_scale: f32,
 }
 
 /// A Windblast: the cast animation's notify after the cast, the origin and direction are taken from

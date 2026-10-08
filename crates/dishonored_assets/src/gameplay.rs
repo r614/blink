@@ -119,7 +119,38 @@ fn load_throw(l: &mut Loader, content: &Content) -> Result<ThrowConfig> {
         windblast_ragdoll_notify[i] = v;
         l.prov.insert(format!("throw.windblast_ragdoll_notify[{i}]"), format!("{pkg} {SET} {seq} DishonoredNotify_Ragdoll Time / RateScale = {v}"));
     }
+    // The rest test's speed (0x00A98DD0 reads the pawn tweak's body tweak +0x1F4).
+    let body = l.db.class_defaults("DisTweaks_NPCPawn_Body")?;
+    let max_ragdoll_speed_to_recover = l.f(&body, "Default__DisTweaks_NPCPawn_Body", "m_fMaxRagdollSpeedToRecover", "throw.max_ragdoll_speed_to_recover")?;
+    // The get-up: `StateNPCMasterStunned` plays the `Stun` chain's group `m_Animation` = 1
+    // (`eStunEnterAnim_RagdollFront`, the value the throw state's rest hands it, 0x00A814B0).
+    const DEFS: &str = "DisNPCAnimDefinitions_EliteGuard";
+    const SETS: [&str; 2] = ["Npc_EliteGuard_Generic_as.Npc_EliteGuard_Generic_as", "Npc_EliteGuard_Sword_as.Npc_EliteGuard_Sword_as"];
+    let pkgs: Vec<String> = crate::ai_config::NPC_ANIM_PACKAGES.iter().map(|s| s.to_string()).collect();
+    let defs = crate::npc_anim::load_anim_defs(content, &pkgs, DEFS)?;
+    let group = defs
+        .chain(dishonored_ir::npc_anim::NpcAnim::Stun)
+        .and_then(|c| c.groups.get(1))
+        .with_context(|| format!("{DEFS}: no Stun group 1"))?;
+    // A step's sequence: the name as authored, or with the set's prefix (`Generic_`; the
+    // primary-item prefix of a guard is `Sword_`).
+    let len = |name: &str, prefix: u8| -> Option<(String, f32)> {
+        let cands = [name.to_string(), format!("Generic_{name}"), if prefix == 2 { format!("Sword_{name}") } else { name.to_string() }];
+        cands.iter().find_map(|n| {
+            crate::ai_config::NPC_ANIM_PACKAGES.iter().find_map(|p| SETS.iter().find_map(|s| crate::npc_anim::sequence_play_length(content, p, s, n).map(|v| (n.clone(), v))))
+        })
+    };
+    let (first, last) = (group.steps.first().context("empty Stun group")?, group.steps.last().context("empty Stun group")?);
+    let (n0, getup_anim) = first.names.first().and_then(|n| len(n, first.item_prefix)).context("Stun group 1: first sequence not found")?;
+    let rec: Vec<(String, f32)> = last.names.iter().filter_map(|n| len(n, last.item_prefix)).collect();
+    anyhow::ensure!(!rec.is_empty(), "Stun group 1: no recovery sequence found");
+    l.prov.insert("throw.getup_anim".into(), format!("{DEFS} Stun group 1 step 0 {n0} play length = {getup_anim}"));
+    l.prov.insert("throw.getup_recover".into(), format!("{DEFS} Stun group 1 last step: {rec:?}"));
+    let getup_recover = rec.into_iter().map(|r| r.1).collect();
     Ok(ThrowConfig {
+        max_ragdoll_speed_to_recover,
+        getup_anim,
+        getup_recover,
         effective_mass,
         strong_hit_react_threshold,
         anim_ragdoll_threshold,

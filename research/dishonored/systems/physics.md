@@ -181,7 +181,7 @@ and `FRICTION` 0.6 are visual guesses.
 | 3.4 prop impulse `(dir.xy, 0.15)` | no props | missing (out of scope, see 7) |
 | 3.5 breakable threshold / steps | no breakables | missing (world.md section 4) |
 | 3.6 Location = root body | the sim keeps the capsule; the presentation ragdoll moves bones only | **known difference**, matters for discovery |
-| 3.7 end of an alive ragdoll | Falling -> Walking when landed | LIKELY close, timing unmeasured |
+| 3.7 end of an alive ragdoll | Falling -> Walking when landed | **ported 2026-10-08** (rest test + Stunned get-up, section 6a); the rest moment depends on the ragdoll dynamics (P-5) |
 | 3.8 impact damage 10 / 12 | none (except the wall hit) | **missing**, UNVERIFIED |
 | 3.9 ragdoll impulse and masses | presentation Verlet, not driven by the momentum | presentation-only |
 
@@ -258,13 +258,44 @@ Decoded during the port (static index, re-read):
 | P-9 | **ported** | `npc_anim::matrix_origin` = `matrix_rows(..)[3]`; test `anim_retail::elite_guard_physics_asset` (spine_3 capsule centre (7.25, 0, 0)) |
 | P-10 | left open | no breakables in the sim |
 
+**Rest and get-up (3.7), decoded and ported 2026-10-08 (second pass).** The throw state's tick
+0x00A98DD0, after the impulse part: `m_fBodyAtRestTestTimer` (+0x98, set to 0.5 by the enter
+0x00A9FAA0) counts down; once it ran out, and when `m_fOldTimeDilation` (+0x94, the previous
+tick's `Actor.CustomTimeDilation`) and the current dilation are above zero, the pawn is at rest
+when `(Velocity.x, Velocity.y, 0).IsNearlyZero(m_fMaxRagdollSpeedToRecover x dilation)`
+(0x004019A0: every component strictly below; `DisTweaks_NPCPawn_Body.m_fMaxRagdollSpeedToRecover`
+at body tweak +0x1F4, 5.0 for every NPC tweak in the Boyle packages). While the mesh simulates,
+a sleeping PhysX body (mesh vslot +0x1D4 false) also counts as at rest. At rest: a dead pawn
+goes limp (vslot +0x1A8: health < 1), else `SetPhysics(PHYS_Walking)`, the ragdoll blend weight
+set, and a transition (0x00A814B0) to `StateNPCMasterStunned` with `m_Animation` 1
+(`eStunEnterAnim_RagdollFront`). The stunned state (enter 0x00A78C20, tick 0x00A61E20, events
+0x00A65C50) plays `DisNPCAnimDefinitions_EliteGuard` chain `Stun` group 1:
+`Generic_RagdollToFront` (2.333 s), the `Sword_Stun_Loop` step left once `m_fStunTimer` passes
+`m_fStunDuration` (class default 0: one tick), then `Sword_RecoveryA` (1.867 s) or
+`Sword_RecoveryB` (1.5 s); the action ends with the chain; the ragdoll weight blends out over
+`m_fRagdollToAnimBlendTime` 0.5 s (presentation). The same dump confirms the throw direction
+order: chain 7 (`PushToRagdoll`) group 1 (`m_bWindblast`) is Front, Left, Right, Back, indexed by
+`m_ThrowDirection` (so 1 = Left, CONFIRMED).
+
+Port: `movement::step_thrown` (after the tick's lock count-down in `step_world`): the rest test as
+decoded, on the sim's ragdoll stand-in (the falling move, then the walking move's braking, the
+pawn held by `action_lock` from the throw on); at rest the pawn walks and is held for
+`getup_anim + 1 tick + one recovery` (picked with the pawn's roll). `ThrownState.ragdoll /
+rest_timer / prev_scale`, `ThrowConfig.max_ragdoll_speed_to_recover / getup_anim /
+getup_recover` (loaded). Not modelled: the PhysX sleep test, the dead-limp branch (dead pawns
+are bodies in the sim), the per-NPC-class anim definitions (the elite guard's are used for
+every NPC). The moment of rest still differs: the port's body brakes to rest at tick 70 of
+`powers/windblast_guard_l1`, the original's ragdoll at tick 117 (its tumbling and sliding is P-5).
+With the get-up the port's guard is held until about tick 305-327 (original about 358-375), so it
+no longer reaches the player within the trace: the vitals channels agree again (2 / 2).
+
 Scenarios (`oracle scenario --system physics --system powers`): before 25 pass / 1 fail
 (`windblast_throw_l1_flight` apex 109.8); after 26 pass / 0 fail. `windblast_throw_l1_flight`
 now also judges the damage time (port tick 24, original 25) and the flight drift over ticks
 26..36. `powers/windblast_fan_l2`'s front timing became 0.27 + 0.4 s. Side effect: the guard of
 `powers/windblast_guard_l1` now lands about 700 uu out instead of 1100 and, as the sim's NPC
 gets up on landing (no ragdoll rest, section 3.7), comes back and hits the player at tick 122;
-the original rests until tick 117.
+the original rests until tick 117. (Fixed by the rest / get-up port above.)
 
 ## 7. Recommendation: what the sim must model
 
