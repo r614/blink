@@ -155,9 +155,9 @@ cause book with the residual summary.
 | # | Probe | Kind | Phase 1 |
 |---|---|---|---|
 | 1 | Coverage scan | static, packages vs port source | done (below) |
-| 2 | Live state dump | hook, reflection walk of GObjects / UProperty | format + diff engine; dump in phase 2 |
+| 2 | Live state dump | hook, reflection walk of GObjects / UProperty | format + diff engine; phase 2: reflection and filtered dumps (`session dump`), full dump deferred |
 | 3 | Query oracles | hook: collision, navigation, light, visibility | collision: cached captures vs headless port |
-| 4 | Behaviour traces | hook, fixed-step scenario in both, first divergence | spec + trace + diff; port runner for movement; original traces in phase 2 |
+| 4 | Behaviour traces | hook, fixed-step scenario in both, first divergence | spec + trace + diff; port runner for movement; phase 2: original traces (`probe_launch scenario`) |
 | 5 | Ghidra index | native table, vtables, cross-references per exe hash | phase 3 |
 
 ### Coverage scan
@@ -313,6 +313,135 @@ snapshot load). The re-check target needs the narrow build; an importer fix also
 `oracle snapshot --map M` (the warm `load_match`, 0.2 s, plus the content caches the importer
 change invalidated: up to about 9 s cold).
 
+## Original side: the hooked session (phase 2)
+
+Status 2026-10-08: the persistent session, per-tick scenario traces into the cache, the by-name
+primitives and collision through the session work on L_Boyle_Ext_P and L_Boyle_Int_P. The full
+reflection dump of every live object and snapshot / restore are deferred (a filtered dump of the
+objects a request names exists: `session dump`).
+
+### How it works
+
+- **Tick boundary.** The DLL patches the engine loop's time update (0x009DDDF0, called once per
+  iteration by `FEngineLoop::Tick` 0x009E03B0, before the engine tick; prologue
+  `55 8B EC 83 EC 20`). Its callback runs on the game thread between two world ticks: the world
+  tick counter (`game_tick`), queued game-thread jobs, the old per-frame recorder, the spawn
+  watch, tick scripts and **lockstep** parking (the game thread waits at the boundary while the
+  client reads, writes and calls; `step N` releases exactly N ticks). With the fixed step from
+  `lab setup` / `session open` (`GUseFixedTimeStep` 0x0141B27C, `GFixedDeltaTime` 0x012696B0)
+  every released tick advances the world by 1 / Hz however long it was parked. A parked game
+  whose client stays silent for 5 minutes is released.
+- **Sampling point (traces).** Every channel of every frame is read at the boundary: the state
+  at the end of world tick k (input processed by the PlayerController, pawn physics done, Kismet
+  and timers run), before tick k + 1 starts. Frame 0 is the state right after the setup. The
+  input of tick k (key events through `FViewportClient::InputKey`, view writes, console
+  commands) is applied at boundary k and acts during the world tick that produces frame k + 1.
+  This is the port runner's convention (`trace.push(t + 1)` after `step_world` with the input of
+  t). Each frame also records `world.time` (`WorldInfo.TimeSeconds`) and `world.dt` (its
+  difference), so frame-timing differences are visible as such.
+- **Tick scripts.** A scenario's whole input and its read list are uploaded once
+  (`SCRIPT_START`); the DLL applies and samples at each boundary and parks at the end. No pipe
+  round trip per tick: 70-110 ticks / s on Boyle (faster than real time at 60 Hz).
+- **Reflection.** `FIELDS` walks a struct's `Children` chain (UField.Next +0x38, UStruct
+  Super / Children / PropertiesSize +0x44 / +0x48 / +0x4C, UProperty ArrayDim / ElementSize /
+  Flags / Offset +0x3C / +0x40 / +0x44 / +0x5C, the subclass pointer +0x6C; UFunction flags
+  +0x80, iNative +0x84, NumParms / ParmsSize / ReturnValueOffset +0x91 / +0x92 / +0x94; UEnum
+  names +0x3C). The client decodes typed values as JSON.
+- **Calls.** Functions without a native index go through `ProcessEvent`. `ProcessEvent` returns
+  early for functions with a native index (operators, `SetLocation`, `VSize`...), so those run
+  their exec thunk (`UFunction` +0x9C) directly with an `FFrame` like the one `ProcessEvent`
+  builds (vtable 0x00FB944C, Node +0x10, Object +0x14, Code = the function's own parameter
+  script of `EX_NativeParm` tokens, Locals = our parameter block +0x1C).
+
+### Commands (32-bit `probe_launch`, JSON out; ORACLE agents use these)
+
+```text
+P=target-agents/i686-pc-windows-msvc/release/probe_launch.exe
+$P session start --map L_Boyle_Ext_P [--hz 60]   launch if needed, front end, map, setup -> JSON timings
+$P session <op> '<json>' | key=value...          one request -> {"ok":..,"result":..,"ms":..}
+$P session repl                                  JSON lines {"op": ...} on stdin -> JSON lines out
+$P session stop                                  end the game
+$P scenario <NAME | file.ron>... [--no-reload] [--partial] [--channel N=OBJ:PATH] [--json OUT]
+                                                 per-tick trace -> oracle cache (Probe::Trace, spec hash)
+$P collide <queries> <out>                       collision checks (unchanged format)
+```
+
+Ops (arguments as JSON keys):
+
+| op | arguments | result |
+|---|---|---|
+| `status` | | map, pawn, pc, tick, lockstep, parked, fixed step |
+| `open` / `reload` | `map` (default: the current one), `hz` 60, `keep_alive` true | load / control seconds; the map is fresh (the restore primitive: reload, then re-apply the setup) |
+| `setup` | `hz`, `keep_alive` | tutorials off, keep alive, fixed step |
+| `give` / `power` / `equip` | `item` / `name`, `level` / `class`, `hand` | as `lab give / power / equip` |
+| `find` | `name` (`Outer.Name`, `Base_N`), `class`, `limit` | addresses and full names |
+| `read` | `object`, `path` (or none: every field, `filter`) | typed value(s) |
+| `write` | `object`, `path`, `value` | the value read back |
+| `dump` | `class` and / or `name`, `filter` (field-name substring), `limit` | objects keyed `<package>:<path>` with their fields |
+| `props` | `class` or `object`, `filter`, `functions` | property names, types, offsets (and functions) |
+| `call` | `object`, `function` (`Func` or `Class.Func`), `args` (object by name or list) | `return` and out parameters |
+| `signature` | `object` or `class`, `function` | parameters with optional / out / return flags |
+| `spawn` | `class`, `location`, `rotation` (degrees), `spawner` (pc), `package` (to load the class) | the new actor |
+| `step` | `n`, `free` | runs n ticks; the world then stays parked (lockstep) until `resume` |
+| `resume` | | lockstep off |
+| `key` | `key` (engine name), `event` down / up / tap, `ticks` | handled |
+| `console` | `command` | the console's answer |
+| `place` | `location`, `yaw`, `pitch`, `snap` | where the pawn was put |
+| `collide` | `queries` [[sx,sy,sz, ex,ey,ez, hx,hy,hz, flags]...], `source` | hits with actor / component |
+| `events` | `functions` (substrings), `classes` (is-a), `max`, or `fetch: true` | traced ProcessEvent calls with ticks |
+| `spawns` | `max`, or `fetch: true` | actors that appeared, with ticks |
+
+Object specs: `pawn`, `pc`, `camera`, `worldinfo`, `input`, `engine`, `0x<addr>`,
+`Default__<Class>`, or an object name (`DisDoor_21`, `PersistentLevel.DisDoor_21`). Paths:
+`Location.Z`, `Controller.PlayerCamera.CameraCache.POV`, `StreamingLevels[0].PackageName`.
+Values: numbers, enum names (`"PHYS_Walking"`), bools, strings, objects as
+`"<Class> <Path>@0x<addr>"` (any of these, an address or an object spec is accepted when
+writing), structs as objects or lists (`[x, y, z]`).
+
+Trace channels per `Record`: `Pawn` (`pawn.x/y/z/vx/vy/vz/speed2d/crouched/physics`;
+crouched is Dishonored's `m_bSneakModeToggled`, `bIsCrouched` stays false), `Vitals`
+(`pawn.health`, `pawn.mana` = `m_Mana`), `Camera` (`camera.x/y/z/pitch/yaw/roll/fov` from
+`CameraCache.POV`), `Npc(name)` (`npc.<name>.x/y/z/health/physics`), `Kismet` (events of kind
+`Kismet`: ProcessEvent on `SequenceOp` objects: `Activated` / `Deactivated`...),
+`ProcessEvent(filters)` (kind `ProcessEvent`; `Class:<Name>` traces every call on that class),
+`SimEvents` (kind `Spawn`: actors that appeared). `first_divergence` compares the event kinds
+both sides record and lists the others as one-sided. Buttons: Jump SpaceBar, Crouch C, Sprint
+LeftShift, Primary / Secondary mouse buttons, Block LeftControl, Lean Q / E, Use F (DefaultInput
+`m_PCBindings`); Walk and Reload have no key in the original; moves need -127 / 0 / 127.
+
+Setup gaps (an error, or a warning recorded in the provenance with `--partial`): story flags
+(the pawn's `m_StoryFlagInstances` are readable, not written yet), NPCs from tweaks and AI
+states (an existing pawn or a spawner's pawn can be moved), `kismet: false` (the original always
+runs its Kismet: a warning), `seed`.
+
+### Measured (2026-10-08, 16-thread machine with other agents compiling, CPU at 100 %)
+
+| Operation | Measured |
+|---|---|
+| Boot to in control (launch, front end, `open`, briefing) | 27-50 s (front end 19-38 s; 159 s once under full load); was about 4 min with the frame-count waits |
+| Map switch (`session open`) | Boyle Int -> Ext 10.7 s, Ext -> Int 4.4-10.7 s (load 0.8-2.5 s, the rest is the briefing and the in-control check) |
+| Scenario trace (tick script, Pawn + world clock) | 71-113 ticks / s (90 ticks in 0.8-1.3 s, 165 in 1.5 s); every channel kind (Pawn, Vitals, Camera, Kismet, ProcessEvent, Spawn) 240 ticks in 3.2 s (75 / s) |
+| Trace per tick with a client round trip (lockstep `step 1` loop) | 6-9 ticks / s (why the tick scripts exist) |
+| `step n` free run | 26-38 ticks / s in the level, 72 / s at the front end |
+| By-name read / write / call | 10-70 ms per CLI call (process start + reflection lookups); `repl` avoids the start |
+| Filtered dump | 18 doors with every field 225 ms (209 KB JSON); 33 NPCs' health fields 58 ms |
+| Collision through the session | 20000 checks 0.1 s in the game (200 k/s), 4.5 s with the hit names |
+
+### Usage for fuzzing agents
+
+Start (or reuse) the session with `probe_launch session start --map <M>` (a running session is
+reused; `session status` tells the map). Before each experiment call `session reload` (a fresh
+map: the restore primitive) and `session setup`, then put the world in the state you need with
+`place`, `give` / `power` / `equip`, `write` (any property by path) and `spawn`. Freeze the world
+with `step n=0`, then alternate `call` / `write` / `key` and `step n=K` and observe with `read`,
+`dump class=... filter=...`, `events` and `spawns`; `resume` when done. Look up names first with
+`props class=X filter=Y functions=true` and `signature`. For a whole scripted run, write a
+scenario RON and run `probe_launch scenario file.ron --json out.json`: the trace lands in the
+oracle cache under the spec hash and `oracle scenario NAME` reports the first divergence against
+the port. In PowerShell pass arguments as `key=value` (it strips quotes inside JSON); in bash
+JSON works. One game at a time: only the hook agent launches it; other agents use the running
+session through these commands.
+
 ## Phase plan
 
 **Phase 1 (this work, no hook).** Crates, cache and spec formats, the headless port runner
@@ -355,3 +484,13 @@ support per system in the port (NPC setup, powers, items, Kismet).
   launch tick is 750 uu/s against the original's 800 on its first airborne frame. Unclassified
   until the two sampling points are aligned (the original samples per rendered frame, the port
   after the tick's gravity step).
+- Same scenario with the phase 2 trace (both sides sampled at the end of the tick, 60 Hz,
+  2026-10-08). The original, Jump pressed at boundary 30: tick 30 z -217.567 vz 0 Walking;
+  tick 31 z -217.567 **vz 800 Falling** (the jump sets the velocity after that tick's physics: no
+  displacement yet); tick 32 z -204.650 vz 750; 33 -192.567 / 700; 34 -181.317 / 650;
+  35 -170.900 / 600; rise to the apex 106.667. The port launches and integrates in the same tick
+  (750 at its tick 31), so it is one tick early, not differently sampled (U-763 (3)). The first
+  divergence reported is earlier, at tick 0: the snapped start height (original -217.567 = floor +
+  `CollisionHeight` 87.5 + 1; port -221.567), and the original then settles 2.6 uu higher.
+- `movement/run_sprint` original: 400 / 600 uu/s plateaus (the spec does not draw the sword;
+  the port's pawn always has it drawn: 360 / 540).
