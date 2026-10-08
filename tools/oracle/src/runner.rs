@@ -317,8 +317,14 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
     let mv = &cfg.gameplay.movement;
     let mut pos = Vec3::from(ps.position);
     if ps.snap_to_floor {
-        if let Some(h) = maps.set.raycast(pos + Vec3::Z * 100.0, -Vec3::Z, 2000.0, channel::PAWN) {
-            pos = h.point + Vec3::Z * (mv.collision_half_height + 1.0);
+        // As the hook places the original's pawn (`probe_launch` `Session::place`): the
+        // engine's line check (flags 0x20DF, `TRACE_Blocking` of the pawn's moves) from 100 uu
+        // above to 1900 below, centre at the reported floor + CollisionHeight + 1. A
+        // non-accurate line check reports its hit backed off (`engine_check`), so both sides
+        // start from the same point.
+        let (a, b) = (pos + Vec3::Z * 100.0, pos - Vec3::Z * 1900.0);
+        if let Some(h) = dishonored_world::engine_check(&mc.collision, &[], a, b, Vec3::ZERO, channel::PAWN, 0x20df) {
+            pos = a + (b - a) * h.time + Vec3::Z * (mv.collision_half_height + 1.0);
         }
     }
     {
@@ -348,9 +354,12 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
                 }
             }
         }
-        if !ps.sword_drawn && s.setup.player.is_some() {
-            // The port's pawn always holds the sword (`sword_out` unless carrying a body).
-            notes.push("sword_drawn false: the port's pawn always has the sword out (speed factor 0.9)".into());
+        if s.setup.player.is_some() {
+            // `PlayerState::sword_sheathed`: the original's pawn starts with the sword sheathed;
+            // the hook draws it (`lab give Twk_Inv_SwordCorvo`) when the spec asks.
+            if let Some(p) = m.world.player_mut(ME) {
+                p.sword_sheathed = !ps.sword_drawn;
+            }
         }
         if s.setup.keep_alive {
             notes.push("keep_alive: not applied on the port (no minimum scripted health): deaths happen".into());

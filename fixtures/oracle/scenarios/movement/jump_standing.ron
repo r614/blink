@@ -11,8 +11,11 @@
     ticks: 90,
     input: [(tick: 30, action: Press(Jump))],
     checkpoints: [
-        (name: "launch", expect: [(metric: Max("pawn.vz"), value: 800, tol: 1, source: "INSTRUMENTATION.md 2026-10-06: Velocity.Z on the first airborne rendered frame; the port samples after the tick's gravity step (750 = 800 - 3000 / 60), so the sampling points differ", status: Unverified)]),
-        (name: "apex", expect: [(metric: RiseFrom("pawn.z", 30), value: 106.67, tol: 1, source: "INSTRUMENTATION.md 2026-10-06: parabola fit over 4 jumps")]),
+        (name: "launch", expect: [
+            (metric: At("pawn.vz", 31), value: 800, tol: 0.5, source: "hook trace 2026-10-08 (fixed 60 Hz, sampled at the tick boundary): the press tick ends with Velocity.Z 800, Physics Falling"),
+            (metric: Delta("pawn.z", 30, 31), value: 0, tol: 0.05, source: "hook trace 2026-10-08: no movement in the press tick"),
+            (metric: At("pawn.vz", 32), value: 750, tol: 0.5, source: "hook trace 2026-10-08: the climb starts in the next tick (750 after its physFalling)"),
+        ]),        (name: "apex", expect: [(metric: RiseFrom("pawn.z", 30), value: 106.67, tol: 1, source: "INSTRUMENTATION.md 2026-10-06: parabola fit over 4 jumps")]),
     ],
     record: [Pawn, SimEvents],
     tolerances: [("pawn.", 0.5)],

@@ -606,14 +606,14 @@ declaration order). Events: `Sim` (every SimEvent with `key=value` details, ids 
 the view in 720-line pixels, `off_px`, the dispersion, `disp`, and `rd` = off / disp),
 `Console`, and the presentation events below.
 
-**Presentation** (`tools/oracle/src/present.rs`, U-865). `build.rs` cuts the runtime's own
-handlers out of `crates/dishonored_runtime/src` (`effects::gameplay_effects`, `effects::step`
-and `simulate`'s one-shot despawn rule, `spawn_effect`'s emitter frame, the simulation-event part
-of `audio::drive`, `characters::collect_hits`) and compiles them against stand-ins for the Bevy
-resources, so the shim cannot drift from the game: a runtime change the stand-ins do not cover
-fails the oracle build. The gameplay ParticleSystems (`GAMEPLAY_PARTICLES`) are decoded headless
-through the level importer and cached; the contact system is loaded for impact and blood paths.
-Events: `Effect` (system, instance, position, emitters, untextured emitters, emitters without a
+**Presentation** (`tools/oracle/src/present.rs`, U-865). The presentation rules live in a
+Bevy-free module, `crates/dishonored_runtime/src/present_rules.rs` (which simulation events
+ask for which effect or beam, `FxEventState::requests`; which sounds are posted where,
+`SoundEventState::posts`; the Blink indicator and attached effects; the emitter step and the
+one-shot despawn rule; `collect_hits`). The game's `effects.rs` / `audio.rs` / `characters.rs`
+call it, and the oracle compiles the same file through `#[path]`, so both run one copy of the
+rules (no source extraction, nothing to drift). The gameplay ParticleSystems (`GAMEPLAY_PARTICLES`) are decoded headless
+through the level importer and cached; the contact system is loaded for impact and blood paths.Events: `Effect` (system, instance, position, emitters, untextured emitters, emitters without a
 lifetime), `EffectEnd`, `EffectMissing` (the runtime asks for a system it did not decode),
 `Sound` (the AkEvent posted; `(no cue)` for an unmapped one), `Anim` (hit reactions).
 
@@ -660,6 +660,17 @@ and the crossbow muzzle and trail; crossbow shot to load 1.583 s (1.555, U-501);
 shot raises attention to the maximum (U-862); passive NPCs turn to yaw 0 (U-863); lean onset
 10.7 degrees at 0.2 s (14.2); sword damage 14 for 10 (U-113, classified KnownDifference).
 
+**Rule fixes (2026-10-08, after the effects merge):** 46 scenarios: 37 pass, 4 fail, 5
+unmeasured; checks 111 pass, 7 fail, 36 unmeasured, 9 unverified (before: 35 pass / 6 fail).
+Fixed in the port: the jump launches after the press tick's walk (hook trace: vz 800 then 750);
+the lean camera is the decoded spring point (head displacement per tick matches); reload and
+fire stages count ticks like the original (f32 countdown, anim time against AnimStateExit,
+the shot a tick after the fire action starts); the sword can be sheathed (400 / 600);
+the runner snaps with the engine's line check and keeps a placed NPC's yaw. Still failing:
+`ai/investigate_noise` (the guard reaches Combat: instant NPC turning and the port-only
+`criminal()` rule, U-862), `combat/crossbow_reload` (fire action two ticks long, U-868),
+`combat/sword_hit_dummy` damage (U-113, KnownDifference), `movement/lean` angle onset / limit /
+soften (lean height smoothing, U-867).
 **Usage for agents.** `oracle scenario --system powers` (or `--all`, or names, `combat/*`),
 then read `harness_out/oracle/scenario/results.json`: `totals`, `by_system` (pass, fail,
 unmeasured, error), and per scenario `status`, `first_divergence` (`against`: `original` when
