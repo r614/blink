@@ -1,0 +1,25 @@
+(
+    name: "stealth/attention_thresholds",
+    system: Stealth,
+    map: "L_Boyle_Ext_P",
+    description: "The party guard sees the player standing 300 uu ahead: the seen value is clamped to 1.0 per second, so the attention level thresholds (0.125 HeadTrack, 0.35 TurnToFace, 0.6 Investigate, 0.85 Busted, Twk_Attn_Guard_Unsuspecting) are crossed at those times plus one tick.",
+    setup: (
+        player: Some((position: (-3201.5, -2763.3, 20), yaw: 71.37, snap_to_floor: true)),
+        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), yaw: 251.37, state: Some("Idle"))],
+        settle: 1,
+    ),
+    ticks: 120,
+    input: [
+        (tick: 1, action: Console("teleport -3105.71 -2478.99 -11.77 71.37")),
+    ],
+    checkpoints: [
+        (name: "level times", expect: [
+            (metric: TimeToReach("npc.guard.attn", 0.125), value: 0.125, tol: 0.05, source: "AI.md Twk_Attn_Guard_Unsuspecting m_AttentionThresholds start 0.125; rate clamped to 1.0 per second at 300 uu (norm 0.088: x = 0.91 on the 0.875-0.93 segment gives 1.65 before the clamp)", status: Static),
+            (metric: TimeToReach("npc.guard.attn", 0.35), value: 0.35, tol: 0.05, source: "AI.md Twk_Attn_Guard_Unsuspecting m_AttentionThresholds start 0.35; rate clamped to 1.0 per second at 300 uu (norm 0.088: x = 0.91 on the 0.875-0.93 segment gives 1.65 before the clamp)", status: Static),
+            (metric: TimeToReach("npc.guard.attn", 0.6), value: 0.6, tol: 0.05, source: "AI.md Twk_Attn_Guard_Unsuspecting m_AttentionThresholds start 0.6; rate clamped to 1.0 per second at 300 uu (norm 0.088: x = 0.91 on the 0.875-0.93 segment gives 1.65 before the clamp)", status: Static),
+            (metric: TimeToReach("npc.guard.attn", 0.85), value: 0.85, tol: 0.05, source: "AI.md Twk_Attn_Guard_Unsuspecting m_AttentionThresholds start 0.85; rate clamped to 1.0 per second at 300 uu (norm 0.088: x = 0.91 on the 0.875-0.93 segment gives 1.65 before the clamp)", status: Static),
+        ]),
+    ],
+    record: [Pawn, Npc("guard")],
+    capture: Some("reset the guard's attention, place the player 300 uu ahead; record m_AttentionAccumulator value and m_CurrentAttentionLevel per tick; also read which attention tweak the party guard uses for the player (PlayerAttnInfo m_PawnAttentionTweaks, +0x538) - neutral (Twk_Attn_Default_Neutral) or enemy"),
+)

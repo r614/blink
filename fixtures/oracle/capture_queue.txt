@@ -1,1 +1,24 @@
 # One scenario name per line (or 'session <op> key=value...'); the coordinator runs this queue on the hooked original.
+# --- stealth and detection (research/dishonored/systems/stealth.md) ---
+# Scenarios (Boyle Ext, the party guard DishonoredSpawner_46). detect_600 / detect_1300: re-capture with per-tick geometry (U-864): the guard's Location,
+# Rotation and the vision bone camera_jnt location, the player's Location, and the guard's PlayerAttnInfo m_fLastLOSDistance / m_AttentionAccumulator / m_CurrentAttentionLevel.
+stealth/detect_600
+stealth/detect_1300
+stealth/sweep_distance
+stealth/sweep_angle
+stealth/sweep_stance_speed
+stealth/attention_thresholds
+stealth/hear_footfalls
+# The sweep scenarios place the player per segment ("teleport" + "calm guard" console hooks are port-only): on the original use the session place op and write 0 to the
+# guard's PlayerAttnInfo m_AttentionAccumulator value and m_CurrentAttentionLevel at each segment start (probe_launch measure detect does this per placement).
+# Equivalent single-command captures of the existing hook: measure detect npc=<party guard> --dists 200,300,400,500,600,800,1000,1300,1700,2000 --stances stand,crouch --secs 1.0
+#   and --move strafe / --move sprint with --dists 2000 (speed term only). Keep detect.csv: it has the player and NPC locations per sample.
+# Original-side reads (live values of the data this model rests on):
+session dump class=DisAINoiseManager limit=2
+session dump class=DisTweaks_Vision filter=m_fVision limit=6
+session dump class=DishonoredVisibilityComponent limit=2
+session dump class=DisAttentionInfo_Complex filter=m_PawnAttentionTweaks limit=60
+# Eye height: camera_jnt of the party guard relative to its Location (needs the guard's SkeletalMeshComponent):
+#   session find class=SkeletalMeshComponent name=<guard Outer.Name> ; session call object=<that mesh> function=GetBoneLocation args={"BoneName":"camera_jnt","Space":0}
+# Footfall noise: with the guard turned away (write its Rotation yaw), run/sprint toward it and record `session events functions=MakeNoise classes=DisAINoiseManager`
+#   if the dispatch is a script-visible call; otherwise trace 0x00c5a760 (loudness byte at event+0x20, context at +0x21, source at +0x24).
