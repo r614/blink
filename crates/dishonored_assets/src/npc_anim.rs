@@ -305,6 +305,83 @@ pub fn load_lookat_config(content: &Content, r: &(String, String)) -> Result<Loo
     Ok(LookatConfig { modes, blink, blink_interval: [pick("MinDurationBetweenBlink", 0.5), pick("MaxDurationBetweenBlink", 6.0)], blink_rate: [pick("MinBlinkSpeed", 1.0), pick("MaxBlinkSpeed", 2.0)] })
 }
 
+/// Rows (X, Y, Z, W planes) of a cooked `Matrix` struct (`WPlane` struct rows, or 64 raw bytes).
+fn matrix_rows(v: Option<&Value>) -> Option<[[f32; 3]; 4]> {
+    match v? {
+        Value::Struct(_, rows) => {
+            let row = |n: &str| match find(rows, n).map(|x| &x.value) {
+                Some(Value::Struct(_, c)) => Some([f32_of(c, "X"), f32_of(c, "Y"), f32_of(c, "Z")]),
+                _ => None,
+            };
+            Some([row("XPlane")?, row("YPlane")?, row("ZPlane")?, row("WPlane")?])
+        }
+        // The cooked bytes hold each plane as (W, X, Y, Z): the W plane of an element reads
+        // (1, x, y, z) and its rotation rows (0, ...) (checked on Skm_EliteGuard_Physics: the
+        // leg capsules come out along the leg, the pelvis box at the pelvis).
+        Value::Raw(_, b) if b.len() >= 64 => {
+            let f = |i: usize| f32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap_or([0; 4]));
+            Some([[f(1), f(2), f(3)], [f(5), f(6), f(7)], [f(9), f(10), f(11)], [f(13), f(14), f(15)]])
+        }
+        _ => None,
+    }
+}
+
+/// The physics bodies of a rig in its bind pose, in the pawn's frame: every `KSphylElem`,
+/// `KSphereElem` and `KBoxElem` of the physics asset's `RB_BodySetup`s, placed by its `TM`
+/// in the bone's space and by the skeletal mesh's bind pose and mesh transform
+/// (`Origin` / `RotOrigin`). A capsule lies along its element's Z axis (`KSphylElem`).
+pub fn load_hit_bodies(content: &Content, package: &str, physics: &str, mesh: &str) -> Result<dishonored_ir::items::HitBodyConfig> {
+    use dishonored_ir::items::{HitBody, HitBodyConfig, HitRegion};
+    use glam::{Mat4, Vec3};
+    let pkg = content.package(package)?;
+    let mi = find_export(&pkg, mesh).with_context(|| format!("{mesh} not in {package}"))?;
+    let m = crate::skeletal_mesh::read_skeletal_mesh(&pkg, mi)?;
+    let bones: Vec<dishonored_ir::BoneAsset> = m.bones.iter().map(|b| dishonored_ir::BoneAsset { name: b.name.clone(), parent: b.parent, rotation: b.orientation, translation: b.position }).collect();
+    let g = crate::characters::bind_globals(&bones);
+    let m2p = crate::util::rotator_matrix(m.rot_origin[0], m.rot_origin[1], m.rot_origin[2]) * Mat4::from_translation(m.mesh_origin);
+    let pi = find_export(&pkg, physics).with_context(|| format!("{physics} not in {package}"))?;
+    let h = pkg.read_object(pi)?;
+    let mut out = HitBodyConfig { source: format!("{package}:{physics}"), half_height: 0.0, bodies: Vec::new() };
+    // The rig's origin sits `half_height` above its feet: the root bone's height below it.
+    if let Some(root) = g.first() {
+        out.half_height = -(m2p * *root).w_axis.z;
+    }
+    for b in find(&h.properties, "BodySetup").and_then(|p| p.array_objects().ok()).unwrap_or_default() {
+        let ObjRef::Export(e) = ObjRef::from_index(b) else { continue };
+        let Ok(bh) = pkg.read_object(e) else { continue };
+        let p = &bh.properties;
+        let bone = name_of(p, "BoneName");
+        let Some(bi) = bones.iter().position(|x| x.name.eq_ignore_ascii_case(&bone)) else { continue };
+        let to_pawn = m2p * g[bi];
+        let Some(Value::Struct(_, agg)) = find(p, "AggGeom").map(|x| &x.value) else { continue };
+        let mut push = |s: &[Property], half: [f32; 3], capsule: bool| {
+            let rows = matrix_rows(find(s, "TM").map(|x| &x.value)).unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0; 3]]);
+            let axis = |r: [f32; 3]| to_pawn.transform_vector3(Vec3::from(r)).normalize_or_zero().to_array();
+            out.bodies.push(HitBody {
+                bone: bone.clone(),
+                region: HitRegion::of_bone(&bone),
+                center: to_pawn.transform_point3(Vec3::from(rows[3])).to_array(),
+                axes: [axis(rows[0]), axis(rows[1]), axis(rows[2])],
+                half,
+                capsule,
+            });
+        };
+        for s in structs(&pkg, agg, "SphylElems") {
+            let r = f32_of(&s, "Radius");
+            push(&s, [r, r, f32_of(&s, "Length") * 0.5], true);
+        }
+        for s in structs(&pkg, agg, "SphereElems") {
+            let r = f32_of(&s, "Radius");
+            push(&s, [r, r, 0.0], true);
+        }
+        for s in structs(&pkg, agg, "BoxElems") {
+            push(&s, [f32_of(&s, "X") * 0.5, f32_of(&s, "Y") * 0.5, f32_of(&s, "Z") * 0.5], false);
+        }
+    }
+    anyhow::ensure!(!out.bodies.is_empty(), "no bodies in {physics}");
+    Ok(out)
+}
+
 /// Load a physics asset by (package, object path).
 pub fn load_physics_asset(content: &Content, r: &(String, String)) -> Result<PhysicsAssetData> {
     let pkg = content.package(&r.0)?;

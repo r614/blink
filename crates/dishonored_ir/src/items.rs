@@ -93,12 +93,20 @@ pub struct InventoryConfig {
     /// through their fallback chains): the projectile's base damage (0x00C257A0).
     pub crossbow_ranged_damage: f32,
     pub pistol_ranged_damage: f32,
+    /// `Attribute_RangedHeadshotMultiplier` of the crossbow (1.2): the bolt's headshot factor is
+    /// its `(int)` (0x00C38230), applied when the projectile does not kill on a headshot.
+    #[serde(default = "d_xbow_headshot")]
+    pub crossbow_headshot_mult: f32,
     /// `m_MaxActivatedBoneCharmCount`.
     pub max_equipped_charms: u8,
     /// `DishonoredPlayerPawn` `m_fMinSpeedRayScale`, `m_fRaySpeedScale`, `m_fRaySpeedScale_Max`
     /// (DefaultPlayer.ini): melee reach grows with forward speed (0x00AB2050).
     #[serde(default = "d_ray")]
     pub melee_ray_speed: [f32; 3],
+}
+
+fn d_xbow_headshot() -> f32 {
+    1.2
 }
 
 fn d_ray() -> [f32; 3] {
@@ -123,6 +131,7 @@ impl Default for InventoryConfig {
             throw_strength: 2000.0,
             crossbow_ranged_damage: 20.0,
             pistol_ranged_damage: 10.0,
+            crossbow_headshot_mult: d_xbow_headshot(),
             max_equipped_charms: 3,
             melee_ray_speed: d_ray(),
         }
@@ -351,11 +360,30 @@ pub struct ExplosionConfig {
     pub radial_momentum: f32,
     pub extra_up_force: f32,
     pub attached_damage: f32,
+    /// `m_AINoiseLoudness` (an `EAINoiseLoudness`) as a distance (`DefaultAI.ini`
+    /// `m_LoudnessDistanceArray`): the grenades' `EAINoiseLoudness4`, 6000 uu.
+    #[serde(default = "d_loudness4")]
+    pub ai_noise_radius: f32,
+}
+
+/// `EAINoiseLoudness4` (`m_LoudnessDistanceArray[15]`, DefaultAI.ini).
+fn d_loudness4() -> f32 {
+    6000.0
 }
 
 impl Default for ExplosionConfig {
     fn default() -> Self {
-        Self { radial_damage: 50.0, damage_radius: 600.0, full_damage_radius: 300.0, player_damage_radius: 600.0, player_full_damage_radius: 150.0, radial_momentum: 1500.0, extra_up_force: 500.0, attached_damage: 75.0 }
+        Self {
+            radial_damage: 50.0,
+            damage_radius: 600.0,
+            full_damage_radius: 300.0,
+            player_damage_radius: 600.0,
+            player_full_damage_radius: 150.0,
+            radial_momentum: 1500.0,
+            extra_up_force: 500.0,
+            attached_damage: 75.0,
+            ai_noise_radius: d_loudness4(),
+        }
     }
 }
 
@@ -370,16 +398,133 @@ pub struct GrenadeConfig {
     pub fuse: f32,
     /// `m_fMinDetonationDelayAfterHit`.
     pub min_delay_after_hit: f32,
+    /// `DisTweaks_Projectile_GrenadeBase.m_fBounciness` / `m_fBounceDamping` (walls; the sticky
+    /// grenade's only pair).
     pub bounciness: f32,
+    /// `DisTweaks_Projectile_Grenade.m_fFloorBounciness` (0 for the sticky grenade, which has none).
     pub floor_bounciness: f32,
+    #[serde(default = "d_bounce_damping")]
+    pub bounce_damping: f32,
+    /// `m_fFloorBounceDamping`, `m_fBodyBounciness`, `m_fBodyBounceDamping`,
+    /// `m_fRigidBodyZMagThreshold` (`DisTweaks_Projectile_Grenade`; the bounce 0x00C5D940).
+    #[serde(default = "d_floor_bounce_damping")]
+    pub floor_bounce_damping: f32,
+    #[serde(default = "d_body_bounciness")]
+    pub body_bounciness: f32,
+    #[serde(default = "d_body_bounce_damping")]
+    pub body_bounce_damping: f32,
+    #[serde(default = "d_rest_z")]
+    pub rest_z_threshold: f32,
+    /// `DisTweaks_Projectile_StickyGrenade.m_fSinkDistance` (0x00C5C280).
+    #[serde(default = "d_sink")]
+    pub sink_distance: f32,
     pub sticky: bool,
     pub explosion: ExplosionConfig,
 }
 
+fn d_bounce_damping() -> f32 {
+    0.1
+}
+fn d_floor_bounce_damping() -> f32 {
+    0.4
+}
+fn d_body_bounciness() -> f32 {
+    0.1
+}
+fn d_body_bounce_damping() -> f32 {
+    0.05
+}
+fn d_rest_z() -> f32 {
+    150.0
+}
+fn d_sink() -> f32 {
+    5.0
+}
+
 impl Default for GrenadeConfig {
     fn default() -> Self {
-        Self { throw_speed: 2500.0, throw_angle: 5.0, gravity_mult: 1.0, fuse: 3.0, min_delay_after_hit: 0.5, bounciness: 0.3, floor_bounciness: 0.65, sticky: false, explosion: ExplosionConfig::default() }
+        Self {
+            throw_speed: 2500.0,
+            throw_angle: 5.0,
+            gravity_mult: 1.0,
+            fuse: 3.0,
+            min_delay_after_hit: 0.5,
+            bounciness: 0.3,
+            floor_bounciness: 0.65,
+            bounce_damping: d_bounce_damping(),
+            floor_bounce_damping: d_floor_bounce_damping(),
+            body_bounciness: d_body_bounciness(),
+            body_bounce_damping: d_body_bounce_damping(),
+            rest_z_threshold: d_rest_z(),
+            sink_distance: d_sink(),
+            sticky: false,
+            explosion: ExplosionConfig::default(),
+        }
     }
+}
+
+/// `eDisHitRegion`: the region a hit bone belongs to (`DishonoredPawn.m_HitRegions_Map`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[repr(u8)]
+pub enum HitRegion {
+    #[default]
+    None = 0,
+    Head = 1,
+    Torso = 2,
+    LeftLeg = 3,
+    RightLeg = 4,
+    LeftArm = 5,
+    RightArm = 6,
+}
+
+impl HitRegion {
+    /// The region of a bone, by the rig's bone names (`head` / `neck`, `spine` / `Root` /
+    /// `Torso` / `pelvis`, `*_arm_*` / `hand`, `*_leg_*` / `foot`; side from `_L_` / `_R_`).
+    /// The original fills `m_HitRegions_Map` per pawn from a `DisRegionInfo` list whose
+    /// source was not found in the data (research/dishonored/systems/ranged.md F4): this
+    /// naming rule is the port's reading; bones it does not name (the coat panels) are
+    /// `None`.
+    pub fn of_bone(bone: &str) -> HitRegion {
+        let b = bone.to_ascii_lowercase();
+        let left = b.contains("_l_") || b.ends_with("_l");
+        if b.contains("head") || b.contains("neck") {
+            HitRegion::Head
+        } else if b.contains("arm") || b.contains("hand") || b.contains("shoulder") {
+            if left { HitRegion::LeftArm } else { HitRegion::RightArm }
+        } else if b.contains("leg") || b.contains("foot") {
+            if left { HitRegion::LeftLeg } else { HitRegion::RightLeg }
+        } else if b.contains("spine") || b.starts_with("root") || b.contains("torso") || b.contains("pelvis") {
+            HitRegion::Torso
+        } else {
+            HitRegion::None
+        }
+    }
+}
+
+/// One physics body of a pawn's `PhysicsAsset` in the bind pose, in the pawn's frame (x
+/// forward, y right, z up, origin at the pawn's location; UE3 axes).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HitBody {
+    pub bone: String,
+    pub region: HitRegion,
+    pub center: [f32; 3],
+    /// The element's axes (rows of its `TM` composed with the bone's bind transform).
+    pub axes: [[f32; 3]; 3],
+    /// Capsule (`KSphylElem`): `[radius, radius, half length]` along `axes[2]`; box
+    /// (`KBoxElem`): half extents along the three axes.
+    pub half: [f32; 3],
+    pub capsule: bool,
+}
+
+/// The bodies a projectile's line check meets on a pawn (`TRACE_ComplexCollision` hits the
+/// physics asset; the hit bone selects the region), taken from one rig. `half_height` is the
+/// distance from the rig's origin down to its feet (the mesh translation), used to fit the
+/// rig to a pawn's collision height.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct HitBodyConfig {
+    pub source: String,
+    pub half_height: f32,
+    pub bodies: Vec<HitBody>,
 }
 
 /// A crossbow ammo variant (`Twk_Proj_Arrow*`).
@@ -390,6 +535,13 @@ pub struct BoltConfig {
     pub gravity_mult: f32,
     pub limb_damage_cap: f32,
     pub kill_on_headshot: bool,
+    /// `DisTweaks_Arrow.m_fDamageMultiplier_Stealth` (class default 1.0; the bolt's 2.0).
+    #[serde(default = "d_one")]
+    pub stealth_mult: f32,
+}
+
+fn d_one() -> f32 {
+    1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -410,9 +562,9 @@ impl Default for GadgetConfig {
             springrazor: SpringRazorConfig::default(),
             grenade: GrenadeConfig::default(),
             sticky_grenade: GrenadeConfig { sticky: true, ..GrenadeConfig::default() },
-            bolt: BoltConfig { damage_mult: 1.0, speed_mult: 1.0, gravity_mult: 1.3, limb_damage_cap: 15.0, kill_on_headshot: true },
-            sleep_dart: BoltConfig { damage_mult: 1.25, speed_mult: 1.0, gravity_mult: 0.4, limb_damage_cap: 25.0, kill_on_headshot: false },
-            incendiary_bolt: BoltConfig { damage_mult: 2.5, speed_mult: 0.2, gravity_mult: 0.5, limb_damage_cap: 50.0, kill_on_headshot: false },
+            bolt: BoltConfig { damage_mult: 1.0, speed_mult: 1.0, gravity_mult: 1.3, limb_damage_cap: 15.0, kill_on_headshot: true, stealth_mult: 2.0 },
+            sleep_dart: BoltConfig { damage_mult: 1.25, speed_mult: 0.7, gravity_mult: 0.4, limb_damage_cap: 25.0, kill_on_headshot: false, stealth_mult: 1.0 },
+            incendiary_bolt: BoltConfig { damage_mult: 2.5, speed_mult: 0.2, gravity_mult: 0.5, limb_damage_cap: 50.0, kill_on_headshot: false, stealth_mult: 1.0 },
             immolation_time: 0.5,
         }
     }
@@ -448,6 +600,10 @@ pub struct ItemsConfig {
     /// `m_Attributes` (attribute, value added).
     #[serde(default)]
     pub upgrades: Vec<(String, Vec<(String, f32)>)>,
+    /// Hit bodies of the pawn rig projectiles are classified against (empty: the sim's
+    /// capsule-height rule).
+    #[serde(default)]
+    pub hit_bodies: HitBodyConfig,
 }
 
 impl AmmoType {

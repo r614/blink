@@ -340,6 +340,40 @@ crossbow 500 and throw 300 have no tweak behind them. Belongs to the AI hearing 
 **F12 Docs.** INVENTORY.md "sleep dart speed 1" should be 0.7; its "(0x00C257A0, 0x00C25D80)" are the NPC
 fire functions (`DisItemContext_NPCFireGun`); the player's are 0x00C2A3E0 (pistol) and 0x00C38230 (crossbow).
 
+### Port status (2026-10-08)
+
+| Finding | Status | Where |
+|---|---|---|
+| F1 | **ported**: `bullet_damage = trunc(pistol Attribute_RangedDamage) + m_fDamage` = 30. Capture: 45 at 300 uu (close band), matches | `tuning.rs` `CombatTuning::from_config` |
+| F2 | **ported**: bullet spawns at camera + `m_fBulletSpawnDistance` along the undispersed view, the crossbow (0x00C38230 re-read) at camera + `m_fArrowSpawnDistance` along the **dispersed** direction it flies; `ProjectileState.spawn`; bands from the spawn point, close strictly `<`, long strictly `>` (`m_fLongRange` / `_LongRange`), stealth factor unless in combat (`bullet_damage`). **Left open:** the bolt's muzzle-socket spawn when the camera and muzzle rays reach the same actor (socket offset needs a capture) | `left_hand.rs` `fire_gun`, `bullet_damage`, `step_projectiles` |
+| F3 | **ported**: on a bullet's first pawn hit, one draw of the shooter's stream `<= m_fPiercingChance` keeps the sweep going past the pawn (`pierced`); the next pawn takes x`m_fPostPiercingDamageRatio`. `pistol_pierce` now passes (30 / 15 / 0) | `step_projectiles` |
+| F4 | **ported**: `arrow_damage` (head kill or x`(int)Attribute_RangedHeadshotMultiplier`; head / torso x`m_fDamageMultiplier_Stealth` when the AI reports the pawn unaware; other regions capped). Regions: `hit_regions.rs` classifies the shot against the elite guard's `Skm_EliteGuard_Physics` bodies in the bind pose (loaded by `npc_anim::load_hit_bodies` into `items.hit_bodies`, fitted to the pawn's height and yaw), bone -> region by name (`HitRegion::of_bone`: neck = head, the asset has no head body; the coat panels = None, so capped). The pawn's `m_HitRegions_Map` source was not found: the name mapping is the port's reading. Capture: 40 on an idle guard's torso, matches. Passive scenario dummies have no brain, so `ai_unaware` is false and they take 20 | `left_hand.rs`, `hit_regions.rs`, `dishonored_assets::npc_anim` |
+| F5 | **ported**: crossbow launch speed x `max(1, Attribute_Range)` (no attribute tweak carries a Range base: 0, +2 with `Crossbow_Range`). The range part (0x00C072D0) has no counterpart in the sim | `crossbow_range_scale` |
+| F6 | **ported**: 0x00C5D940 law (wall / floor pair blended by `n.z`, pawn pair, rest when `-v.z < m_fRigidBodyZMagThreshold n.z`), the 20 uu/s stop removed; the sticky grenade on a pawn sits `m_fSinkDistance` back along its velocity. The sticky's stick-or-bounce flag stays open (it sticks) | `gadgets.rs` `bounce`, `world_bounce`, `step_grenades` |
+| F7 | **left open**: the hand offset is not in the data (capture the first projectile position); the throw still starts at the eye | |
+| F8 | left open (gate) | |
+| F9 | **left open**: the hit handler 0x00C4FEA0 sticks / pins (velocity x`m_fSpeedModifierWhenPinning` on a dead pawn's bone, vanish timer `m_fStuckInAlivePawnVanishTime`), but where `m_fChanceToBreak` and the recovery pickup are applied was not found (base `DisProjectile_Arrow` slots 246-248 not decoded); pinning needs ragdoll bodies the sim does not have | |
+| F10 | **ported** (0x00C36350, 0x00C35D60, 0x00C2D650, 0x00BC0280): cylinders from the trap's location along its normal to the height, `0 < h < H` and `r^2 < R^2` strict; a pawn without the razor interface offers its centre and +- 2/3 of its half height (NPCs answer through the interface: not decoded, the same points stand in); `m_fMaxDamageDistance` is handed to the damage, not a cull. Correction: the damage rule is the reverse of section 6: an NPC whose interface accepts the cut takes `m_NonNPCDamage[difficulty]` and is severed (the capture's 5 then death), a pawn **without** the interface (the player) takes `m_ImmuneNPCDamage` 50. Which NPCs refuse the cut is not decoded (none) | `gadgets.rs` `step_traps` |
+| F11 | **ported**: pistol `m_AINoiseLoudnessWhenFiring` and explosion `m_AINoiseLoudness` read by name (`EAINoiseLoudness4` -> 6000); the crossbow's and the throw's invented 500 / 300 noises removed (their tweaks have no loudness). An impact noise of the projectiles' noise-maker interface is not decoded | `gameplay.rs`, `items_config.rs`, `fire_gun`, `explode` |
+| F12 | **done**: INVENTORY.md sleep-dart speed 0.7, fire functions, Spring Razor damage | |
+
+**F13 Bullet blast (new, left open).** The capture shows 15 `DishonoredDamageType_BulletBlast`
+besides the 45. Decoded (0x00C36E50, called from the bullet's tick 0x00C3A500 on its first ticked
+step, and from its hit handlers when not yet `m_bBlasted`): origin = `m_ShotsLocation` (the
+muzzle socket, set by the fire 0x00C2A3E0) + `m_ShotsDirection` x `m_fSpreadDistanceFromBullet`
+(-200); every pawn but the pierced one within `m_fCloseRange` (400) of it whose bounding-box
+centre gets a positive Windblast-style factor (0x00BE8570, half angle `m_fSpreadAngle / 2` = 20
+deg) and is the first thing a trace from the origin meets takes `ROUND(m_fSpreadDamage)` = 15
+(not scaled by the factor) with momentum x`m_fSpreadForce`, at most `m_SpreadNumShots` (10)
+pawns; the remaining shots are spawned as spread pellets (0x00C21BA0). Not ported: the muzzle
+socket offset is unknown and the trace does not exclude the shooter, so whether the shooter or
+the target took the measured 15 needs the capture's per-pawn damage.
+
+The `crossbow_hit` trail check now fails: a bolt spawned 150 uu ahead reaches the guard 500 uu
+away in its launch tick and is never in a snapshot, so the presentation (`attached_want`) never
+starts its trail. The trail is attached at launch in the original; the presentation needs to
+start (and at once stop) it from `SimEvent::Fired` for a projectile that ended the same tick.
+
 ## 11. Open questions and captures
 
 - Pistol and crossbow damage on a guard (F1, F2, F4): the queued scenarios; each is a health-lost read.
