@@ -47,8 +47,8 @@ const KISMET_OP_CLASSES: u64 = 116;
 const KISMET_VARS: u64 = 1082;
 // Settings of the classes the port handles (98141 / 1815 before the collision audit named the
 // KActor family).
-const PROPS: u64 = 98671;
-const PROP_PAIRS: u64 = 1904;
+const PROPS: u64 = 99517;
+const PROP_PAIRS: u64 = 1909;
 const MAT_EXPRS: u64 = 604;
 const MAT_EXPR_CLASSES: u64 = 7;
 const FN_NATIVE: u32 = 823;
