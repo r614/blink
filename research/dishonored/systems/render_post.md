@@ -91,8 +91,12 @@ TraceDistance` (100000). The component transforms of a collection actor come fro
 3. Apply (155): scene x factor (`OcclusionMaskDarkness` where occluded, `1.5 - OMD / 2` where open,
    1 far from the light) + tinted bloom x saturate(`BloomScreenBlendThreshold` 2^(-3 luma)) x 4.
 
-Open: the downsample factor `SHAFT_FACTOR`, the targets' sampler filter and the single shaft light
-(the original loops over all lights).
+The shaft targets are the scene / `DAT_0144e320` with `DAT_0144e324/328` as their size: the same
+globals the bloom's separable blur reads (`FUN_0085c3d0`), the filter buffers
+(`FilterDownsampleFactor`), 4 (LIKELY: the port's decoded bloom filter buffers are quarter size;
+the writer of the globals goes through a struct pointer and was not found). Open: the targets'
+sampler filter (bilinear clamp assumed; `DAT_0144e358`) and the single shaft light (the original
+loops over all lights; the maps have one).
 
 ## Blocked (needs data not readable here)
 
