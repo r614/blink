@@ -252,7 +252,7 @@ pub fn step_world(
     // Rat attack groups.
     let rat_dt = DT * powers::world_time_scale(state, g, false);
     if rat_dt > 0.0 && state.players.iter().any(|p| p.kind == state::PawnKind::Rat) {
-        rats::step_rat_attacks(state, &ins, rat_dt, &g.vitals, &rats::RatAttackTweak::default(), &mut out.events);
+        rats::step_rat_attacks(state, &ins, rat_dt, &g.vitals, g, &mut out.events);
     }
 
     // World effects asked for by left hands.
@@ -268,24 +268,9 @@ pub fn step_world(
             left_hand::LeftAction::BlinkLayer { target, blend } => powers::set_blink_layer(state, id, target, blend),
             left_hand::LeftAction::PossessRelease => {
                 let p = state.players[i];
-                if let Some(target) = powers::possess_target_any(state, &p, world, g) {
+                // Rats of a Devouring Swarm are rat pawns: candidates like any other pawn.
+                if let Some(host) = powers::possess_target(state, &p, world, g) {
                     if vitals::spend_mana(&mut state.players[i], g.items.possess.mana_cost, &g.vitals) {
-                        let host = match target {
-                            powers::PossessTarget::Pawn(h) => h,
-                            powers::PossessTarget::SwarmRat(sid) => {
-                                // One rat leaves the swarm as a pawn to be possessed.
-                                let rid = powers::swarm_rat_id(state);
-                                let (pos, yaw) = match state.swarms.iter_mut().find(|s| s.id == sid) {
-                                    Some(s) => {
-                                        s.rats = s.rats.saturating_sub(1);
-                                        (s.position + Vec3::Z * movement::RAT_HALF_HEIGHT, p.yaw)
-                                    }
-                                    None => (p.position, p.yaw),
-                                };
-                                rats::spawn_rat(state, rid, pos, yaw, Some(sid), cfg, &mut out.events);
-                                rid
-                            }
-                        };
                         powers::begin_possession(state, id, host, g);
                     }
                 }
@@ -349,7 +334,7 @@ pub fn step_world(
     }
     if world_dt > 0.0 {
         gadgets::step_traps(state, world, g, world_dt, &mut out.events);
-        powers::step_swarms(state, world_dt, g, &mut out.events);
+        powers::step_swarms(state, world_dt, cfg, &mut out.events);
     }
     powers::step_time_bends(state, DT, &mut out.events);
     powers::step_blink_layers(state, DT);

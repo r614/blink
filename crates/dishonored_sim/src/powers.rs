@@ -19,10 +19,10 @@
 //! - passive powers (`DishonoredPowersComponent.m_Powers`, DefaultPlayer.ini) and bone charms
 //!   (`DisTweaks_WhaleBoneCharmList`) are attribute modifiers.
 
-use crate::events::{DamageCause, SimEvent, SoundCategory};
+use crate::events::{DamageCause, SimEvent};
 use crate::movement::{MoveCtx, eye_position, forward_vector, view_vector};
 use crate::state::{Condition, PawnKind, PlayerId, PlayerState, PossessStage, SwarmState, TimeBendState, WorldState, power};
-use crate::vitals::{apply_damage, spend_mana};
+use crate::vitals::spend_mana;
 use dishonored_ir::gameplay::{GameplayConfig, MovementConfig, VitalsConfig};
 use dishonored_ir::items::ModifierType;
 use dishonored_world::{Capsule, WorldQuery, channel};
@@ -406,14 +406,6 @@ pub fn possessable<'a>(t: &PlayerState, cfg: &'a GameplayConfig) -> &'a dishonor
     if t.kind == PawnKind::Rat { &cfg.items.possess.rat } else { &cfg.items.possess.npc }
 }
 
-/// What a Possession cast takes over: a pawn, or one rat of a Devouring Swarm (the swarm's rats
-/// are crowd agents in the original; the sim spawns that rat as a pawn when it is possessed).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PossessTarget {
-    Pawn(PlayerId),
-    SwarmRat(u32),
-}
-
 /// Field of view the targeting cone and score use (`DishonoredPlayerCamera.m_fCurFOV`, degrees):
 /// the default horizontal FOV, the sim's fixed reference view (as for the gun dispersion).
 pub const POSSESS_REF_FOV_DEG: f32 = crate::left_hand::DISPERSION_REF_HFOV_DEG;
@@ -462,33 +454,7 @@ impl PossessAim {
     }
 }
 
-/// Possession target including swarm rats: one candidate list, the highest score wins.
-pub fn possess_target_any(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: &GameplayConfig) -> Option<PossessTarget> {
-    let pawn = possess_target_scored(state, p, world, cfg);
-    let level = p.inv.power_levels[power::POSSESSION] as usize;
-    let mut best = pawn.map(|(id, s)| (PossessTarget::Pawn(id), s));
-    if level < cfg.items.possess.rat.required_level as usize {
-        return best.map(|b| b.0);
-    }
-    let aim = possess_aim(p, cfg);
-    for s in &state.swarms {
-        if s.spawn_delay > 0.0 || s.rats == 0 {
-            continue;
-        }
-        let to = s.position - aim.eye;
-        let Some(score) = aim.score(to, cfg.items.possess.rat.targeting_priority, cfg) else { continue };
-        let d = to.length();
-        if world.raycast(aim.eye, to, d, channel::MELEE).is_some_and(|h| h.distance < d - 20.0) {
-            continue;
-        }
-        if best.is_none_or(|(_, b)| score > b) {
-            best = Some((PossessTarget::SwarmRat(s.id), score));
-        }
-    }
-    best.map(|b| b.0)
-}
-
-/// Pawn id given to a rat taken out of a swarm.
+/// Pawn id for the next rat a Devouring Swarm releases.
 pub fn swarm_rat_id(state: &WorldState) -> PlayerId {
     let mut id = 0x4000_0000 | state.next_entity_id;
     while state.player(id).is_some() {
@@ -677,128 +643,74 @@ pub fn summon_swarm(state: &mut WorldState, caster: PlayerId, world: &dyn WorldQ
     }
     let id = state.next_entity_id;
     state.next_entity_id = state.next_entity_id.wrapping_add(1);
-    state.swarms.push(SwarmState { id, owner: caster, level, position: pos, spawn_delay: cfg.items.swarm.spawn_delay, age: 0.0, rats: l.rat_count, target: None, attack_time: 0.0, bite_timer: 0.0, eating: None, eat_time: 0.0 });
+    state.swarms.push(SwarmState { id, owner: caster, level, position: pos, spawn_delay: cfg.items.swarm.spawn_delay, age: 0.0, rats: l.rat_count, release_ticks: 0, ending: false, rats_at_end: 0 });
     events.push(SimEvent::SwarmSummoned { id: caster, swarm: id, position: pos });
 }
 
-/// Devouring Swarm as one attack group, in the order of the swarm's Attack state (the state
-/// machine 0x00C65380 takes the first of Hidden, Flee, Attack, Move, Idle whose condition holds,
-/// then runs its update): the condition (0x00C87EA0) keeps or drops the group's target and turns
-/// a group whose target died into an eating one; detection picks a target when there is none; the
-/// update (0x00C89EE0) chases while no rat is in reach, else bites a living target (0x00C891E0:
-/// after `m_fInitialDelayBeforeDealingDamage`, none on the player, every `m_fDamageTimeInterval`
-/// `clamp(rats x m_fDamagePerBite, m_fMinDamage, m_fMaxDamage)`) or eats a body (0x00C6D760).
-pub fn step_swarms(state: &mut WorldState, dt_world: f32, cfg: &GameplayConfig, events: &mut Vec<SimEvent>) {
-    let mv = &cfg.movement;
-    let vitals = &cfg.vitals;
+/// The Devouring Swarm actor (`DisRatSwarm` with its `DisRatSwarmSpawner`), MEASURED 2026-10-08:
+/// it appears `m_fRatSwarmSpawnDelay` after the cast notify, its spawner releases the level's
+/// `m_RatCount` rats as individual crowd agents over 16 ticks, they live `m_fDuration`, then the
+/// swarm ends and its rats despawn over about 10 s. Each rat here is a rat pawn
+/// ([`crate::rats::spawn_rat`] with the swarm's id): a brain (`dishonored_ai` rat swarm brains,
+/// with the Devouring Swarm tweak, sparing the caster) drives it, the attack groups
+/// ([`crate::rats::step_rat_attacks`]) bite with the level's damage values. The release spot of
+/// each rat around the swarm point is not decoded (the spawner's crowd placement): the sim
+/// spreads them on a sunflower spiral of rat-sized spacing.
+pub fn step_swarms(state: &mut WorldState, dt_world: f32, cfg: &crate::SimConfig, events: &mut Vec<SimEvent>) {
+    let g = &cfg.gameplay;
     let mut swarms = std::mem::take(&mut state.swarms);
+    let mut gone: Vec<u32> = Vec::new();
     for s in swarms.iter_mut() {
         if s.spawn_delay > 0.0 {
             s.spawn_delay -= dt_world;
-            continue;
+            if s.spawn_delay > 0.0 {
+                continue;
+            }
+            s.release_ticks = crate::state::SWARM_RELEASE_TICKS;
         }
-        let l = cfg.items.swarm.levels[s.level as usize];
+        let l = g.items.swarm.levels[(s.level as usize).min(1)];
+        // Release: the rats left spread evenly over the release ticks left.
+        if s.rats > 0 && s.release_ticks > 0 {
+            let n = s.rats.div_ceil(s.release_ticks as u16);
+            let caster_yaw = state.player(s.owner).map_or(0.0, |p| p.yaw);
+            for _ in 0..n {
+                let k = (l.rat_count - s.rats) as f32;
+                let a = k * 2.399_963; // golden angle
+                let r = 2.0 * crate::movement::RAT_RADIUS * k.sqrt();
+                let pos = s.position + Vec3::new(r * a.cos(), r * a.sin(), crate::movement::RAT_HALF_HEIGHT);
+                let id = swarm_rat_id(state);
+                state.next_entity_id = state.next_entity_id.wrapping_add(1);
+                crate::rats::spawn_rat(state, id, pos, caster_yaw, Some(s.id), cfg, events);
+                s.rats -= 1;
+            }
+            s.release_ticks -= 1;
+        }
         s.age += dt_world;
-        let targetable = |p: &PlayerState| p.id != s.owner && p.kind != PawnKind::Rat && !p.no_body && p.carried_by.is_none() && !is_hidden(p);
-        // The Attack state's condition (0x00C87EA0) keeps the group's target while it is valid:
-        // a living target is dropped beyond `m_fPawnEscapeRadius`; a target that became a corpse
-        // is eaten when the group has `m_EatRequiredRatCount` rats, else dropped.
-        if let Some(tid) = s.target {
-            let keep = state.player(tid).is_some_and(|p| targetable(p) && (p.is_body() || p.position.distance(s.position) <= l.escape_radius));
-            if !keep {
-                s.target = None;
-                s.eating = None;
-            } else if s.eating != Some(tid) && state.player(tid).is_some_and(|p| p.is_body()) {
-                if s.rats >= l.eat_required_rats {
-                    // A group that was attacking (biting in reach) starts its eating clock at
-                    // `-m_fEatStartupDelayAfterKill` (0x00C89EE0).
-                    s.eat_time = crate::rats::eat_clock_start(s.attack_time > 0.0, l.eat_delay_after_kill);
-                    s.eating = Some(tid);
-                } else {
-                    s.target = None;
-                }
+        let sid = s.id;
+        let members = |state: &WorldState| state.players.iter().filter(|p| p.kind == PawnKind::Rat && p.swarm == Some(sid)).map(|p| p.id).collect::<Vec<_>>();
+        if !s.ending && s.age >= l.duration {
+            s.ending = true;
+            s.rats = 0;
+            s.rats_at_end = members(state).len() as u16;
+        }
+        if s.ending {
+            // Despawn over the tail: keep ceil(n x (1 - f)) of the rats there were at the end.
+            let f = ((s.age - l.duration) / crate::state::SWARM_DESPAWN_SECONDS).clamp(0.0, 1.0);
+            let keep = (s.rats_at_end as f32 * (1.0 - f)).ceil() as usize;
+            let mut ids = members(state);
+            if ids.len() > keep {
+                ids.sort_unstable();
+                let drop: Vec<PlayerId> = ids.split_off(keep);
+                state.players.retain(|p| !drop.contains(&p.id));
             }
-        }
-        // Detection: a swarm without a target takes the nearest pawn but the summoner within
-        // `m_fPawnDetectionRadius` (bodies are eaten, the living bitten).
-        if s.target.is_none() {
-            let mut best: Option<(PlayerId, f32)> = None;
-            for p in &state.players {
-                if !targetable(p) {
-                    continue;
-                }
-                let d = p.position.distance(s.position);
-                if d <= l.detection_radius && best.is_none_or(|(_, bd)| d < bd) {
-                    best = Some((p.id, d));
-                }
+            if f >= 1.0 {
+                gone.push(s.id);
             }
-            s.attack_time = 0.0;
-            s.bite_timer = 0.0;
-            s.eating = None;
-            s.eat_time = 0.0;
-            if let Some((tid, _)) = best {
-                s.target = Some(tid);
-                if state.player(tid).is_some_and(|p| p.is_body()) && s.rats >= l.eat_required_rats {
-                    s.eating = Some(tid);
-                    s.eat_time = crate::rats::eat_clock_start(false, l.eat_delay_after_kill);
-                }
-            }
-        }
-        let Some(tid) = s.target else { continue };
-        let tp = *state.player(tid).unwrap();
-        let d = tp.position.distance(s.position);
-        let tpos = tp.position - Vec3::Z * crate::movement::half_height(&tp, mv);
-        // Rats bite within `m_fAttackDistance` (120, `Twk_Rat`); a player standing within 200,
-        // sneaking within 60 (`m_fStand/CrouchedRatSwarmAttackDistance`).
-        let reach = if tp.is_body() { crate::rats::RAT_ATTACK_DISTANCE } else { crate::rats::attack_distance(&tp) };
-        if d > reach {
-            // No rat in reach: the group chases and its damage interval counter restarts.
-            let step = (tpos - s.position).normalize_or_zero() * RAT_SPEED * dt_world;
-            s.position += step;
-            s.bite_timer = 0.0;
-            continue;
-        }
-        if s.eating == Some(tid) {
-            // Eating (0x00C6D760): the clock runs with the required rats in reach; a dead body
-            // takes the startup and one interval per limb plus a last one.
-            let total = crate::rats::eat_duration(!tp.alive, crate::rats::CORPSE_LIMBS, l.eat_startup, l.eat_per_limb);
-            s.eat_time += dt_world;
-            if s.eat_time >= total {
-                if let Some(p) = state.player_mut(tid) {
-                    if p.alive {
-                        crate::vitals::kill(p, Some(s.owner), DamageCause::Rats, events);
-                    }
-                    p.no_body = true;
-                }
-                events.push(SimEvent::BodyRemoved { body: tid, ash: false });
-                s.eating = None;
-                s.target = None;
-                s.eat_time = 0.0;
-            }
-            continue;
-        }
-        let t = state.player_mut(tid).unwrap();
-        // Attack group (0x00C891E0): after the initial delay (none on the player), every interval
-        // (accumulated) one bite of clamp(rats x per-bite, min, max) as an int, plus the slowdown.
-        s.attack_time += dt_world;
-        if s.attack_time <= l.initial_damage_delay && t.kind != PawnKind::Human {
-            continue;
-        }
-        s.bite_timer += dt_world;
-        let tweak = crate::rats::RatAttackTweak { damage_per_bite: l.damage_per_bite, min_damage: l.min_damage, max_damage: l.max_damage, interval: l.damage_interval, ..Default::default() };
-        while s.bite_timer > l.damage_interval && t.alive {
-            s.bite_timer -= l.damage_interval;
-            let dmg = crate::rats::group_damage(s.rats as usize, &tweak);
-            t.rat_slow = tweak.slowdown_duration;
-            t.rat_slow_percent = tweak.slowdown_percent;
-            apply_damage(t, dmg, Some(s.owner), DamageCause::Rats, events, vitals);
-            events.push(SimEvent::Sound { position: s.position, radius: 800.0, category: SoundCategory::BodyFall, source: s.owner });
         }
     }
-    swarms.retain(|s| s.spawn_delay > 0.0 || s.age < cfg.items.swarm.levels[s.level as usize].duration);
+    swarms.retain(|s| !gone.contains(&s.id));
     state.swarms = swarms;
 }
-
 // ---------------------------------------------------------------------------------------
 // Shadow Kill
 

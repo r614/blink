@@ -263,7 +263,9 @@ pub fn update(
             };
             match p.left.phase {
                 LeftPhase::Recovering => {
-                    if crossed(notify) {
+                    // The cost is taken with the cast notify (MEASURED 2026-10-08: Bend Time's 60
+                    // mana 9 ticks after the press; the swarm actor 39 ticks after its cost).
+                    if crossed(notify) && spend_mana(p, cost, &cfg.vitals) {
                         actions.push(if swarm { LeftAction::Swarm } else { LeftAction::BendTime });
                     }
                     if p.left.timer >= exit {
@@ -273,7 +275,8 @@ pub fn update(
                 _ if pressed && !busy && level(idx) > 0 => {
                     if !swarm && bend_active {
                         actions.push(LeftAction::EndBendTime);
-                    } else if spend_mana(p, cost, &cfg.vitals) {
+                    } else if p.vitals.mana >= cost {
+                        // The cast starts only when the power is usable (mana >= cost).
                         p.left.phase = LeftPhase::Recovering;
                         p.left.timer = 0.0;
                     }

@@ -465,7 +465,7 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             None => v.extend(std::iter::repeat_n(f64::NAN, PLAYER_CHANNELS)),
         }
         let rats = w.players.iter().filter(|p| p.kind == dishonored_sim::state::PawnKind::Rat && p.alive).count();
-        v.extend([w.projectiles.len() as f64, w.windblasts.len() as f64, w.traps.len() as f64, w.swarms.len() as f64, rats as f64, w.swarms.iter().map(|s| s.rats as f64).sum::<f64>(), w.time_bends.len() as f64]);
+        v.extend([w.projectiles.len() as f64, w.windblasts.len() as f64, w.traps.len() as f64, w.swarms.len() as f64, rats as f64, w.swarms.iter().map(|s| (s.rats as usize + w.players.iter().filter(|p| p.alive && p.swarm == Some(s.id)).count()) as f64).sum::<f64>(), w.time_bends.len() as f64]);
         match w.projectiles.iter().min_by_key(|p| p.id) {
             Some(pr) => v.extend([pr.position.x as f64, pr.position.y as f64, pr.position.z as f64, pr.velocity.length() as f64]),
             None => v.extend([f64::NAN; 4]),

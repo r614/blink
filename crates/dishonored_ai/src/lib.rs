@@ -968,8 +968,13 @@ impl Crowd {
             if possessed {
                 continue;
             }
-            let swarm = self.rat_swarm.get(&p.id).copied().flatten();
+            let swarm = self.rat_swarm.get(&p.id).copied().flatten().or(p.swarm);
             let power = swarm.and_then(|s| ws.swarms.iter().find(|x| x.id == s));
+            // An ended Devouring Swarm: its rats stop (they despawn, `dishonored_sim::powers::step_swarms`).
+            if power.is_some_and(|x| x.ending) {
+                out.push((p.id, PlayerInput { yaw: p.yaw, left_hand: LeftHand::Empty, ..Default::default() }));
+                continue;
+            }
             let count = match swarm {
                 Some(s) => ws.players.iter().filter(|q| q.kind == PawnKind::Rat && q.alive && self.rat_swarm.get(&q.id).copied().flatten() == Some(s)).count() as u32 + power.map_or(0, |x| x.rats as u32),
                 None => 1,

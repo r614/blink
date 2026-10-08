@@ -423,7 +423,7 @@ fn rats_bite_in_groups_and_slow_their_target() {
 }
 
 #[test]
-fn possession_takes_a_rat_out_of_a_swarm() {
+fn possession_takes_a_rat_of_a_swarm() {
     let mut r = Run::new(&[(1, Vec3::new(0., 0., 92.), 0.)]);
     r.pm(1).inv.power_levels[power::DEVOURING_SWARM] = 1;
     r.pm(1).inv.power_levels[power::POSSESSION] = 1;
@@ -431,16 +431,18 @@ fn possession_takes_a_rat_out_of_a_swarm() {
     r.step(&[(1, swarm(buttons::SECONDARY))]);
     r.steps(120, &[(1, swarm(0))]);
     assert_eq!(r.state.swarms.len(), 1);
-    let rats0 = r.state.swarms[0].rats;
+    let sid = r.state.swarms[0].id;
+    // The swarm's rats are pawns (30 at level 1).
+    assert_eq!(r.state.players.iter().filter(|p| p.swarm == Some(sid)).count(), 30);
     r.pm(1).vitals.mana = 100.0;
     let poss = |b| PlayerInput { pitch: -20.0, buttons: b, left_hand: LeftHand::Possession, ..Default::default() };
     r.steps(5, &[(1, poss(buttons::SECONDARY))]);
     r.step(&[(1, poss(0))]);
     r.steps(90, &[(1, poss(0))]);
-    assert_eq!(r.state.swarms[0].rats, rats0 - 1);
     assert_eq!(r.p(1).possess.stage, PossessStage::Active);
     let host = r.p(1).possess.host.unwrap();
     assert_eq!(r.p(host).kind, PawnKind::Rat);
+    assert_eq!(r.p(host).swarm, Some(sid));
     // Rat possession lasts the rat's level-1 duration (20 s).
     assert!((r.p(1).possess.timer - 20.0).abs() < 1.6, "{}", r.p(1).possess.timer);
 }

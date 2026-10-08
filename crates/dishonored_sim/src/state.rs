@@ -312,6 +312,9 @@ pub struct PlayerState {
     /// Transient, read by `step_world` the same tick.
     #[serde(skip)]
     pub wall_hit: Option<(Vec3, f32)>,
+    /// Rat pawns: the Devouring Swarm ([`SwarmState::id`]) that released this rat.
+    #[serde(default)]
+    pub swarm: Option<u32>,
 }
 
 /// The attack group on a pawn: seconds under attack (`m_fInitialDelayBeforeDealingDamage`) and
@@ -609,6 +612,7 @@ impl PlayerState {
             combat_opponents: 0,
             windblasted_by: None,
             wall_hit: None,
+            swarm: None,
         }
     }
 
@@ -832,25 +836,36 @@ pub struct TimeBendState {
     pub self_dilation: f32,
 }
 
-/// A Devouring Swarm.
+/// A Devouring Swarm (`DisRatSwarm` and its `DisRatSwarmSpawner`): the actor appears
+/// `m_fRatSwarmSpawnDelay` after the cast notify and its spawner releases the level's rats as
+/// individual rat pawns ([`PawnKind::Rat`], [`PlayerState::swarm`]) over [`SWARM_RELEASE_TICKS`]
+/// ticks; they live `m_fDuration`, then the swarm ends and its rats despawn over
+/// [`SWARM_DESPAWN_SECONDS`] (MEASURED 2026-10-08: 30 / 60 rats over 16 ticks, 30 s, about 10 s).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SwarmState {
     pub id: u32,
     pub owner: PlayerId,
     pub level: u8,
     pub position: Vec3,
-    /// Seconds until the rats appear (`m_fRatSwarmSpawnDelay`), then seconds alive.
+    /// Seconds until the swarm actor appears (`m_fRatSwarmSpawnDelay`), then seconds alive.
     pub spawn_delay: f32,
     pub age: f32,
+    /// Rats the spawner has still to release.
     pub rats: u16,
-    pub target: Option<PlayerId>,
-    /// Seconds on the current target (before `m_fInitialDelayBeforeDealingDamage`), and to the next bite.
-    pub attack_time: f32,
-    pub bite_timer: f32,
-    /// Corpse being eaten and seconds into eating it.
-    pub eating: Option<PlayerId>,
-    pub eat_time: f32,
+    /// Release ticks left (from [`SWARM_RELEASE_TICKS`]).
+    #[serde(default)]
+    pub release_ticks: u8,
+    /// Past `m_fDuration`: the rats no longer attack and despawn; the rats left when it began.
+    #[serde(default)]
+    pub ending: bool,
+    #[serde(default)]
+    pub rats_at_end: u16,
 }
+
+/// Ticks over which a swarm's spawner releases its rats (MEASURED: 30 and 60 rats over 16 ticks).
+pub const SWARM_RELEASE_TICKS: u8 = 16;
+/// Seconds over which an ended swarm's rats despawn (MEASURED: about 10 s).
+pub const SWARM_DESPAWN_SECONDS: f32 = 10.0;
 
 /// A Windblast: `m_fWarmupTime` after the cast the origin and direction are taken from
 /// the caster's view and the blast front expands at `m_Speed`; targets gathered at that
