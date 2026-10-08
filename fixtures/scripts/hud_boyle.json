@@ -17,5 +17,11 @@
   {"screenshot": "hud_boyle_11_sneak"},
   {"ticks": 1, "input": {"buttons": ["CROUCH"]}},
   {"ticks": 30, "input": {}},
+  {"hud": {"kind": "wheel", "open": true}},
+  {"wait_ticks": 30}, {"screenshot": "hud_boyle_12_wheel"},
+  {"hud": {"kind": "wheel_angle", "angle": 90}},
+  {"wait_ticks": 24}, {"screenshot": "hud_boyle_13_wheel_select"},
+  {"hud": {"kind": "wheel", "open": false}},
+  {"wait_ticks": 30}, {"screenshot": "hud_boyle_14_wheel_closed"},
   {"quit": true}
 ]}

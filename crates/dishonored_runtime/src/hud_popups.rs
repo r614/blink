@@ -392,8 +392,18 @@ pub enum HudTest {
     },
     /// Show / hide the cinematic stripes.
     Stripes { show: bool },
-    /// Show the location discovery banner (SetLocation, 5 s).
+    /// Show the location discovery banner (`SetLocation`, 5 s).
     Location { name: String },
+    /// Open / close the quick-access wheel (`hud_wheel.rs`).
+    Wheel { open: bool },
+    /// Point the open wheel at an angle (degrees clockwise from the top: `SetSelectionAngle`).
+    WheelAngle { angle: f32 },
+    /// Press (or release) a number key outside the wheel: the dock shows that slot.
+    Shortcut {
+        slot: usize,
+        #[serde(default)]
+        release: bool,
+    },
 }
 
 fn five() -> f32 {
@@ -460,6 +470,8 @@ pub fn apply_test(t: HudTest, q: &mut PopupQueue, w: &mut HudWidgets, st: &mut S
                 s.set(st, show, true);
             }
         }
+        // Handled by the wheel (`hud_wheel::update_power_wheel`).
+        HudTest::Wheel { .. } | HudTest::WheelAngle { .. } | HudTest::Shortcut { .. } => {}
         HudTest::Location { name } => {
             if let Some(l) = w.location.as_mut() {
                 l.set_location(st, &name, crate::gfx_hud::LOCATION_DISCOVERY_DURATION);

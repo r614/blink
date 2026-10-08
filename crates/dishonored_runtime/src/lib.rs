@@ -127,6 +127,9 @@ pub mod gfx_stage;
 pub mod hud_widgets;
 #[doc(hidden)]
 pub mod hud_sounds;
+/// [hud] The quick-access wheel movie (`UI_PowerWheel_SF`) and its native driver.
+#[doc(hidden)]
+pub mod hud_wheel;
 #[doc(hidden)]
 pub mod saves;
 /// [playground] In-world labels of layout maps.
@@ -436,6 +439,10 @@ pub fn main() {
             .add_systems(Startup, (players::setup_player_assets, hud::setup_hud, debug::setup_gizmos, (characters::load_library, characters::load_animations).chain(), characters::load_weapons, viewmodel::load_view_rig, gfx_hud::setup_gfx_hud, gfx_hud::load_game_fonts))
             .init_resource::<hud::DebugHud>()
             .add_systems(Update, (gfx_hud::update_gfx_hud.after(input_map::gather_input).after(players::camera_follow), gfx_hud::draw_gfx_hud.after(gfx_hud::update_gfx_hud)))
+            // [hud] the quick-access wheel: opened / closed before the input is read (it takes
+            // the mouse while open), drawn above the HUD.
+            .add_systems(Startup, hud_wheel::setup_power_wheel)
+            .add_systems(Update, (hud_wheel::update_power_wheel.before(input_map::gather_input).after(pause_menu::rebuild), hud_wheel::draw_power_wheel.after(hud_wheel::update_power_wheel).after(gfx_hud::draw_gfx_hud)))
             .init_resource::<viewmodel::ViewAnim>()
             .init_resource::<viewmodel::BodyFrames>()
             // Choked / carried bodies in their master's frame (the first-person rig's for the local player).

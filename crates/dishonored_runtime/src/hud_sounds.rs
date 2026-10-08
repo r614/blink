@@ -1,6 +1,7 @@
 //! The HUD's sounds: the names its classes give `SoundHandler.PlaySound`, bound by the HUD's
 //! sound theme (`Twk_InGameUI.Twk_GFxMoviePlayerHUD.DisUISoundTheme_0`, plus the common theme
-//! `Twk_InGameUI.UISoundTheme_Common`) to `Snd_UI_Ingame` events in `Bank_UI`.
+//! `Twk_InGameUI.UISoundTheme_Common`) to `Snd_UI_Ingame` events in `Bank_UI` (the objective
+//! window's in `Bank_UI_Objective`), and the power wheel's (`hud_wheel.rs`).
 
 use crate::audio::PcmClip;
 use bevy::audio::{AudioPlayer, PlaybackMode, PlaybackSettings, Volume};
@@ -26,6 +27,14 @@ pub const THEME: &[(&str, &str)] = &[
     ("H_windowNotification", "UI_H_windowNotification"),
     ("Validation", "UI_Validation"),
     ("Move", "UI_Move"),
+    // The power wheel (`Twk_GFxMoviePlayerPowerWheel`: `m_pShowSound` / `m_pHideSound` and
+    // its `DisUISoundTheme_0`), in `Bank_UI_Ingame_Wheel`.
+    ("W_show", "Snd_UI_Ingame_Wheel_Hand_In"),
+    ("W_hide", "Snd_UI_Ingame_Wheel_Hand_Out"),
+    ("itemSelection", "Snd_UI_Ingame_Wheel_Select"),
+    ("itemValidation", "Snd_UI_Ingame_Wheel_Validation"),
+    ("P_AssignShortcut", "UI_P_AssignShortcut"),
+    ("P_UnassignShortcut", "UI_P_UnassignShortcut"),
 ];
 
 type Decoded = HashMap<String, Vec<(Leaf, Arc<Pcm>)>>;
@@ -67,6 +76,10 @@ fn start_loading(mut s: ResMut<HudSounds>) {
                 let content = dishonored_assets::Content::locate()?;
                 let mut lib = SoundLibrary::new(&content.root)?;
                 lib.load_bank("Bank_UI")?;
+                // The objective window's events (`RequiredBank` Bank_UI_Objective) and the
+                // wheel's (Bank_UI_Ingame_Wheel); a missing bank leaves its sounds silent.
+                let _ = lib.load_bank("Bank_UI_Objective");
+                let _ = lib.load_bank("Bank_UI_Ingame_Wheel");
                 let mut out = HashMap::new();
                 for (name, ev) in THEME {
                     let Some(cue) = lib.resolve(ev) else { continue };

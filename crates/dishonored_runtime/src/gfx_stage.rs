@@ -51,6 +51,8 @@ pub enum Ease {
     BackIn,
     BackOut,
     BackInOut,
+    /// `mx.transitions.easing.Regular.easeOut` (quadratic; the power wheel's info fade).
+    RegularOut,
 }
 
 impl Ease {
@@ -61,6 +63,7 @@ impl Ease {
         const S: f32 = 1.70158;
         match self {
             Ease::Linear => t,
+            Ease::RegularOut => t * (2.0 - t),
             Ease::StrongIn => t.powi(5),
             Ease::StrongOut => (t - 1.0).powi(5) + 1.0,
             Ease::StrongInOut => {
