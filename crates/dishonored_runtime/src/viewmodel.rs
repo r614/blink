@@ -453,6 +453,113 @@ pub struct ViewRig {
     look_bones: [Option<usize>; 3],
 }
 
+/// The arms' materials that carry the power glow (`PlayerArms_Tatoo_inst`, EFFECTS.md "Arm glow").
+#[derive(Resource, Default)]
+pub struct ArmGlowMats(pub Vec<Handle<StandardMaterial>>);
+
+/// `Shr_DefaultPlayer`'s power-hand term, disassembled from `TBasePassPixelShaderFNoLightMapPolicy`
+/// (RefShaderCache shader 37254; the same term is in every lighting policy's pixel shader). With
+/// `Use_Power` = U and the instance's `F_Firy_Amount` 0.996 (the firy terms vanish: `clamp(1 -
+/// 3 x amount) = 0`), the emitted colour is `U x G(uv)`:
+/// `G = (2 - Ag) x P + Ag x SP.z x |TG|^Sat`, with `P = (1 - Tex#4.y) x (1 - D.r)^Amount x
+/// Power_Hand_Color` where `1 - D.r >= 1e-6` (else 0), D = `D_Diffuse` (PlayerArmsTatooed_D),
+/// SP = `SP_SpecPower` (PlayerArms_m), TG = `Tattoo_Glow_Color` (1, 0.5, 0), Sat =
+/// `Tattoo_Glow_Saturation` 2, Ag = `Tattoo_Glow_Amount` 0.2, `Amount` = `Power_Hand_Amount` 40,
+/// `Power_Hand_Color` = the instance's (10, 5, 1). G depends only on textures, so it is baked once
+/// into an HDR emissive texture and `Use_Power` scales the material's emissive colour.
+/// LIKELY: the shader map names the mask `Tex#4`; it is taken to be `M_Mask` (`PlayerArms_M2`),
+/// the only unused-by-name mask in the material.
+const POWER_HAND_COLOR: [f32; 3] = [10.0, 5.0, 1.0];
+const POWER_HAND_AMOUNT: f32 = 40.0;
+const TATTOO_GLOW_COLOR: [f32; 3] = [1.0, 0.5, 0.0];
+const TATTOO_GLOW_SATURATION: f32 = 2.0;
+const TATTOO_GLOW_AMOUNT: f32 = 0.2;
+
+fn arm_glow_materials(content: &dishonored_assets::Content, arms: &CharacterGpu, images: &mut Assets<Image>, mats: &mut Assets<StandardMaterial>) -> Vec<Handle<StandardMaterial>> {
+    use dishonored_assets::texture::{decode_rgba8, read_texture};
+    use ue3_package::ObjRef;
+    let lin = |v: u8, srgb: bool| {
+        let c = v as f32 / 255.0;
+        if srgb { if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) } } else { c }
+    };
+    // (width, height, texels as linear 0..1 rgba)
+    let load = |path: &str| -> Option<(u32, u32, Vec<[f32; 4]>)> {
+        for pkg_name in ["Engine", "Startup"] {
+            let Ok(pkg) = content.package(pkg_name) else { continue };
+            let Some(i) = (0..pkg.exports.len()).find(|&i| pkg.export_class(i) == "Texture2D" && pkg.obj_path(ObjRef::Export(i)).eq_ignore_ascii_case(path)) else { continue };
+            let t = read_texture(content, &pkg, i, 512).ok()?;
+            let (w, h, px) = decode_rgba8(&t, 0)?;
+            return Some((w, h, px.iter().map(|p| [lin(p[0], t.srgb), lin(p[1], t.srgb), lin(p[2], t.srgb), p[3] as f32 / 255.0]).collect()));
+        }
+        None
+    };
+    let (Some(d), Some(sp), Some(m)) = (load("Ply_Player.PlayerArmsTatooed_D"), load("Ply_Player.PlayerArms_m"), load("Ply_Player.PlayerArms_M2")) else {
+        warn!("arm glow: PlayerArms textures not found");
+        return Vec::new();
+    };
+    let at = |t: &(u32, u32, Vec<[f32; 4]>), u: f32, v: f32| {
+        let x = ((u * t.0 as f32) as i64).clamp(0, t.0 as i64 - 1) as usize;
+        let y = ((v * t.1 as f32) as i64).clamp(0, t.1 as i64 - 1) as usize;
+        t.2[y * t.0 as usize + x]
+    };
+    let tg: Vec<f32> = TATTOO_GLOW_COLOR.iter().map(|c| c.abs().max(1.0e-6).powf(TATTOO_GLOW_SATURATION)).collect();
+    let mut data: Vec<u8> = Vec::with_capacity(d.2.len() * 16);
+    for y in 0..d.1 {
+        for x in 0..d.0 {
+            let (u, v) = ((x as f32 + 0.5) / d.0 as f32, (y as f32 + 0.5) / d.1 as f32);
+            let dr = at(&d, u, v)[0];
+            let spz = at(&sp, u, v)[2];
+            let mask = at(&m, u, v)[1];
+            let dark = 1.0 - dr;
+            let p = if dark - 1.0e-6 >= 0.0 { (1.0 - mask) * dark.abs().powf(POWER_HAND_AMOUNT) } else { 0.0 };
+            for c in 0..3 {
+                let g = (2.0 - TATTOO_GLOW_AMOUNT) * p * POWER_HAND_COLOR[c] + TATTOO_GLOW_AMOUNT * spz * tg[c];
+                data.extend_from_slice(&g.to_le_bytes());
+            }
+            data.extend_from_slice(&1.0f32.to_le_bytes());
+        }
+    }
+    let img = images.add(Image::new(
+        bevy::render::render_resource::Extent3d { width: d.0, height: d.1, depth_or_array_layers: 1 },
+        bevy::render::render_resource::TextureDimension::D2,
+        data,
+        bevy::render::render_resource::TextureFormat::Rgba32Float,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+    ));
+    // The sections whose material is the tattoo instance (its `Power_Hand_Color` override).
+    let mut out = Vec::new();
+    for part in &arms.parts {
+        for (si, (_, h)) in part.sections.iter().enumerate() {
+            let Some(mi) = part.section_materials.get(si).copied().flatten() else { continue };
+            if arms.material_params.get(mi).is_some_and(|p| p.vectors.iter().any(|(n, _)| n.eq_ignore_ascii_case("Power_Hand_Color"))) && !out.contains(h) {
+                if let Some(mut m) = mats.get_mut(h) {
+                    m.emissive_texture = Some(img.clone());
+                    m.emissive = LinearRgba::BLACK;
+                    out.push(h.clone());
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        warn!("arm glow: no arm section uses PlayerArms_Tatoo_inst (material params not resolved?)");
+    }
+    out
+}
+
+/// `Use_Power` (`power_pp::ArmGlow`) on the arms' emissive colour.
+pub fn arm_glow_apply(glow: Res<crate::power_pp::ArmGlow>, handles: Option<Res<ArmGlowMats>>, mut mats: ResMut<Assets<StandardMaterial>>, mut last: Local<f32>) {
+    let Some(handles) = handles else { return };
+    if (*last - glow.value).abs() < 1.0e-4 || handles.0.is_empty() {
+        return;
+    }
+    *last = glow.value;
+    for h in &handles.0 {
+        if let Some(mut m) = mats.get_mut(h) {
+            m.emissive = LinearRgba::rgb(glow.value, glow.value, glow.value);
+        }
+    }
+}
+
 #[derive(Component)]
 pub struct ViewRoot;
 #[derive(Component)]
@@ -659,6 +766,8 @@ pub fn load_view_rig(
     }
     info!("first-person rig: particle notifies on {} sequences", pnotifies.len());
     let arms_gpu = upload(&arms, &mut meshes, &mut images, &mut mats, &mut binds, &feat);
+    let glow = arm_glow_materials(&content, &arms_gpu, &mut images, &mut mats);
+    commands.insert_resource(ArmGlowMats(glow));
     let bind_pose = bones.iter().map(|b| (b.rotation, b.translation)).collect();
     let look_bones = [find("Collarbone_R_Jnt"), find("Collarbone_L_Jnt"), find("spine_3_jnt")];
     commands.insert_resource(ViewRig { arms: arms_gpu, parents: parents(&bones), bones, bind_pose, m2p, weapons, bolts, lib, pnotifies, sockets: rig_sockets, effect_points, upper_body, left_arm, cam_bone, look_bones });

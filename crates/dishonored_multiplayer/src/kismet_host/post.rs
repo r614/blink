@@ -187,7 +187,7 @@ impl KismetPost {
 }
 
 /// `DisSeqAct_UberPostProcess::Activated` (0x00b91570): input 0 Start, input 1 Stop.
-pub fn uber(h: &mut H, cx: &Ctx) {
+pub(super) fn uber(h: &mut H, cx: &Ctx) {
     if cx.input() == Some(1) {
         h.st.post.required = false;
         return;
@@ -206,7 +206,7 @@ pub fn uber(h: &mut H, cx: &Ctx) {
 /// `Epp_Knocked` (0x0b) also sets the knock-out timer (`m_KnockOutTimer` +0x208 = time + 1),
 /// and every effect but `Epp_FakeBlink` (0x14) starts in the running state at once
 /// (`FUN_00be7dc0` with state 0); `Epp_FakeBlink` warms up.
-pub fn effect(h: &mut H, cx: &Ctx) {
+pub(super) fn effect(h: &mut H, cx: &Ctx) {
     let name = cx.prop_str("m_Effect");
     if cx.input() == Some(1) {
         h.st.post_effects.remove(&name);

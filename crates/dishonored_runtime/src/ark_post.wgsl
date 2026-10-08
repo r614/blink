@@ -36,6 +36,8 @@ struct ArkPost {
     dv_lid_color: vec4<f32>,
     // Blink's lens: (x distortion, y blur, on, 0).
     blink_lens: vec4<f32>,
+    // Possession's field: (R, G, on, material Time).
+    possess: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> view: View;
@@ -54,6 +56,65 @@ struct ArkPost {
 @group(0) @binding(6) var field_noise: texture_2d<f32>;
 @group(0) @binding(7) var field_mask: texture_2d<f32>;
 @group(0) @binding(8) var repeat_sampler: sampler;
+// Possession's field noise: `PPG_PossessionVectors` `Texture2D_0`.
+@group(0) @binding(9) var possess_noise: texture_2d<f32>;
+
+// `PPG_PossessionVectors` (captured shader 0x9312eee076ac74a4, its disassembly translated
+// instruction by instruction; EFFECTS.md "Power screen effects"): a swirl field around the screen
+// centre. d = uv - 0.5; theta = atan2-like angle of d (the shader's polynomial atan with its
+// quadrant fix-ups), rho = |d|; m = 20 |d.x| + 10 |d.y|; s = sin(frac((5 T + m) / 2 pi + 0.5) 2 pi
+// - pi) + 0.1 sin(frac((20 T + m) ...)); the angle becomes theta + 0.03 R s and the field is
+// rg = k x rho (sin, -cos) with k = G (120 noise(0.6 uv + 0.2).r + 60 s), ba = rho (cos, sin) + 0.5
+// - uv - rg / (3 x (1280, 720)). R, G = `UniformPixelVector_1.xy`, T = `UniformPixelScalars_0.x`.
+// The first sampler (the previous field) is black here, so its 0.6 weight adds nothing.
+fn possession_field(uv: vec2<f32>) -> vec4<f32> {
+    let c2 = vec4<f32>(0.600000024, 2.0, -2.0, 0.180141002);
+    let c3 = vec4<f32>(0.0208350997, -0.0851330012, 0.999866009, 0.0);
+    let c4 = vec4<f32>(0.199999794, -1.0, 1.0, -0.330299497);
+    let c5 = vec4<f32>(0.0, 1.0, -2.0, 1.57079637);
+    let pi = 3.14159274;
+    let r0 = uv.xyxy * c2.xxyz + c4.xxyz;
+    // ScreenPositionScaleBias of a full-buffer pass: (0.5, -0.5, 0.5, 0.5).
+    let r1 = r0.zw * vec2<f32>(0.5, -0.5);
+    let ax = abs(r1.x);
+    let ay = abs(r1.y);
+    let z1 = -ax + ay;
+    let w1 = -ay + ax;
+    let q = select(vec2<f32>(ay, ax), vec2<f32>(ax, ay), z1 >= 0.0);
+    let swap = select(1.0, 0.0, w1 >= 0.0);
+    let t = (1.0 / q.y) * q.x;
+    let t2 = t * t;
+    var p = t2 * c3.x + c3.y;
+    p = t2 * p + c2.w;
+    p = t2 * p + c4.w;
+    let a = t * (t2 * p + c3.z);
+    let k0 = a * c5.z + c5.w;
+    var th = k0 * swap + a;
+    th = th + select(-pi, 0.0, r1.x >= 0.0);
+    let th2 = th + th;
+    let dyx = r0.w * -0.5 - r1.x;
+    let sel = dyx >= 0.0;
+    let n2x = select(r1.y, r1.x, sel);
+    let n2y = select(r1.x, r1.y, sel);
+    let fy = select(0.0, 1.0, n2y >= 0.0);
+    let fx = select(fy, 0.0, n2x >= 0.0);
+    th = fx * -th2 + th;
+    let m = ay * 10.0 + ax * 20.0;
+    let rho = sqrt(r1.x * r1.x + r1.y * r1.y);
+    let tt = ark.possess.w;
+    var w = vec2<f32>(tt * 5.0 + m, tt * 20.0 + m);
+    w = fract(w * 0.159154937 + 0.5) * 6.28318548 - pi;
+    let s = sin(w.x) + sin(w.y) * 0.1;
+    var ang = th + s * ark.possess.x * 0.03;
+    ang = fract(ang * 0.159154937 + 0.5) * 6.28318548 - pi;
+    let cs = vec2<f32>(cos(ang), sin(ang));
+    let pos = cs * rho + vec2<f32>(0.5, 0.5);
+    let n = textureSampleLevel(possess_noise, repeat_sampler, r0.xy, 0.0).x;
+    let kk = (n * 120.0 + s * 60.0) * ark.possess.y;
+    let tang = kk * vec2<f32>(cs.y * rho, -cs.x * rho);
+    let sample_uv = tang * vec2<f32>(-0.00026041668, -0.000462962955) + pos;
+    return vec4<f32>(tang, sample_uv - uv);
+}
 
 // `PPG_BendTimeVectors_Std_INST` (captured shader 0xbbe665d07e36986b): the vector field in
 // sixteenths of a pixel. Two pans of the noise (rg x 2 - 1) summed, x 0.5, faded over the
@@ -89,6 +150,9 @@ fn blink_field(uv: vec2<f32>) -> vec4<f32> {
 fn power_field(uv: vec2<f32>) -> vec4<f32> {
     if (ark.blink_lens.z > 0.5) {
         return blink_field(uv);
+    }
+    if (ark.possess.z > 0.5) {
+        return possession_field(uv);
     }
     return vec4<f32>(bend_field(uv), 0.0, 0.0);
 }
@@ -275,7 +339,7 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     var colour = src.rgb;
     // Blink's / Bend Time's blur (Test_PPG `BlinkSwitch` / `BendTimeSwitch` -> `ArkPpNodeBlur`),
     // on the fogged scene.
-    if (ark.power_vectors.x > 0.0 || ark.blink_lens.z > 0.5) {
+    if (ark.power_vectors.x > 0.0 || ark.blink_lens.z > 0.5 || ark.possess.z > 0.5) {
         colour = power_blur(in.uv);
     }
     // Dark Vision's eyelid pass (`PPG_EyeLidFinal_Mat` / `PPG_DarkVisionFinal_Mat`, captured shader

@@ -84,6 +84,8 @@ pub struct ArkPost {
     pub dv_lid_color: Vec4,
     /// Blink's lens field (`power_pp::BlinkLens`): (x distortion, y blur, on, 0).
     pub blink_lens: Vec4,
+    /// Possession's field (`power_pp::PossessPp`, `PPG_PossessionVectors`): (R, G, on, material Time).
+    pub possess: Vec4,
 }
 
 /// Inputs kept on the camera so the uniform can be rebuilt (display gamma setting).
@@ -102,6 +104,9 @@ pub struct ArkPostSource {
     /// override layer, stacked after the power's.
     pub kismet_post: Option<PostSettings>,
     pub kismet_weight: f32,
+    /// The menus' background blur (`Epp_UberUI`, the `UI_Blur` tweak), stacked last.
+    pub ui_post: Option<PostSettings>,
+    pub ui_weight: f32,
     /// Bend Time's post effect (`power_pp.rs`): intensity 0..1 and the dilated material time.
     pub bend: f32,
     pub bend_time: f32,
@@ -109,6 +114,8 @@ pub struct ArkPostSource {
     pub eyelid: Option<f32>,
     /// Blink's lens field drive (x, y); zero = off.
     pub blink_lens: Vec2,
+    /// Possession's R / G (post manager `m_PossessionParams`); zero = off.
+    pub possess: Vec2,
 }
 
 fn post_value(p: Option<&PostSettings>, key: &str) -> Option<f32> {
@@ -134,6 +141,9 @@ impl ArkPostSource {
         if self.blink_lens != Vec2::ZERO {
             u.blink_lens = Vec4::new(self.blink_lens.x, self.blink_lens.y, 1.0, 0.0);
         }
+        if self.possess != Vec2::ZERO {
+            u.possess = Vec4::new(self.possess.x, self.possess.y, 1.0, self.bend_time);
+        }
         if let Some(a) = self.eyelid {
             u.dv_eyelid = Vec4::new(1.0, a, 0.0, 0.0);
             let c = crate::power_pp::EYELID_COLOR;
@@ -144,9 +154,19 @@ impl ArkPostSource {
         // manager's Kismet slot): the LUT terms of the overridden settings, blended by the
         // grade's weight (the colour pipeline is on while it shows).
         let mut graded = self.post_on;
-        for (over, weight) in [(&self.power_post, self.power_weight), (&self.kismet_post, self.kismet_weight)] {
+        for (over, weight) in [(&self.power_post, self.power_weight), (&self.kismet_post, self.kismet_weight), (&self.ui_post, self.ui_weight)] {
             let (Some(over), true) = (over, weight > 0.0) else { continue };
-            let src = ArkPostSource { post: Some(crate::dark_vision::merged(self.post.as_ref(), over)), post_on: true, power_post: None, power_weight: 0.0, kismet_post: None, kismet_weight: 0.0, ..self.clone() };
+            let src = ArkPostSource {
+                post: Some(crate::dark_vision::merged(self.post.as_ref(), over)),
+                post_on: true,
+                power_post: None,
+                power_weight: 0.0,
+                kismet_post: None,
+                kismet_weight: 0.0,
+                ui_post: None,
+                ui_weight: 0.0,
+                ..self.clone()
+            };
             let g = src.level_uniform(cam_z);
             let w = weight.clamp(0.0, 1.0);
             let lerp = |a: Vec4, b: Vec4| if graded { a.lerp(b, w) } else { b };
@@ -218,6 +238,7 @@ impl ArkPostSource {
             dv_eyelid: Vec4::ZERO,
             dv_lid_color: Vec4::ZERO,
             blink_lens: Vec4::ZERO,
+            possess: Vec4::ZERO,
         };
         if self.fog_on {
             // The sun layer goes first (only layer 0 gets the sun lobe in the shader).
@@ -355,6 +376,8 @@ fn layout(multisampled: bool) -> BindGroupLayoutDescriptor {
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
+                // Possession's field noise (`PPG_PossessionVectors` `Texture2D_0`).
+                texture_2d(TextureSampleType::Float { filterable: true }),
             ),
         ),
     )
@@ -458,6 +481,7 @@ pub fn ark_post_pass(
     let image_view = |h: Option<&Handle<Image>>| h.and_then(|h| gpu_images.get(h)).map(|g| g.texture_view.clone()).unwrap_or_else(|| zero.texture_view.clone());
     let noise_view = image_view(power_images.as_ref().and_then(|p| p.noise.as_ref()));
     let mask_view = image_view(power_images.as_ref().and_then(|p| p.mask.as_ref()));
+    let possess_view = image_view(power_images.as_ref().and_then(|p| p.possession.as_ref()));
     let (view_offset, target, depth, id, index, ark) = view.into_inner();
     let (Some(fog_rp), Some(down_rp), Some(uber_rp), Some(view_binding), Some(uniform_binding)) =
         (cache.get_render_pipeline(id.fog), cache.get_render_pipeline(id.down), cache.get_render_pipeline(id.uber), view_uniforms.uniforms.binding(), uniforms.binding())
@@ -473,7 +497,7 @@ pub fn ark_post_pass(
     let group = device.create_bind_group(
         Some("ark fog bind group"),
         &layout,
-        &BindGroupEntries::sequential((view_binding.clone(), depth.view(), post.source, &pipeline.sampler, uniform_binding.clone(), &bloom_view, &noise_view, &mask_view, &pipeline.repeat_sampler)),
+        &BindGroupEntries::sequential((view_binding.clone(), depth.view(), post.source, &pipeline.sampler, uniform_binding.clone(), &bloom_view, &noise_view, &mask_view, &pipeline.repeat_sampler, &possess_view)),
     );
     fullscreen_pass(&mut ctx, "ark fog", fog_rp, &group, &offsets, post.destination);
     let fogged = post.destination.clone();
@@ -509,7 +533,7 @@ pub fn ark_post_pass(
     let group = device.create_bind_group(
         Some("ark uber bind group"),
         &layout,
-        &BindGroupEntries::sequential((view_binding, depth.view(), post.source, &pipeline.sampler, uniform_binding, &low, &noise_view, &mask_view, &pipeline.repeat_sampler)),
+        &BindGroupEntries::sequential((view_binding, depth.view(), post.source, &pipeline.sampler, uniform_binding, &low, &noise_view, &mask_view, &pipeline.repeat_sampler, &possess_view)),
     );
     fullscreen_pass(&mut ctx, "ark uber", uber_rp, &group, &offsets, post.destination);
 }
