@@ -603,6 +603,59 @@ which masks later channels until that is resolved or tolerated.
 Third full run (2026-10-08, main d42497c's queue of 160 lines, this branch's build in
 `target-agents-hook`): 160 ok, 0 failed, 1098 s.
 
+### Stealth light environment (U-121, measured 2026-10-08)
+
+`session lightenv [lights=R] [toggle=true] [settle=N]` reads the player's
+`StealthLightingDLE` (`DynamicLightEnvironmentComponent`, `bDynamic`, `bForceCompositeAllLights`,
+`NumVolumeVisibilitySamples` 4, no synthesized lights; `OverriddenBounds` = the pawn cylinder,
+35 x 87.5) and its state (`+0x6C`, `FDynamicLightEnvironmentState`): band 0 (R, G, B) of the SH
+vectors at `+0x450` / `+0x4E0` (the two the light value sums; R / G / B 0x30 apart), `+0x300` /
+`+0x390` (static environment, copied to `+0x60` / `+0xF0`) and `+0x1B0` / `+0x240` (dynamic). On
+Boyle and the Playground everything is in `+0x450` (= `+0x300`); the others are 0. With `toggle`
+each light within R of the pawn (plus the directional and sky lights) is switched off
+(`LightComponent.SetEnabled`), the environment reset (`ResetEnvironment`, 12 ticks) and the
+difference recorded; then all off at once (what is left: the precomputed light volume).
+`session lights [class=...]` lists light components (Brightness, LightColor bytes, Radius,
+FalloffExponent, cone, shadows, position from `LightToWorld`).
+
+**The rule (10 points, every one exact to 4 decimals).** With `L = lum(band 0 of +0x450 and
++0x4E0) x 2 sqrt(pi)` (0.3 / 0.59 / 0.11), i.e. the sum of the lights' intensities:
+
+    raw light (DishonoredVisibilityComponent +0x68) = (L / (4 pi))^(1 / 2.2)
+
+and every light adds `Brightness x lum((byte / 255)^2.2) x falloff` to L (points:
+`(1 - d^2/R^2)^FalloffExponent`; spots also their cone and the shadow visibility). So
+`raw = (Sum I_lum / 4 pi)^(1/2.2)` = `(Y00 x band 0 lum)^(1/2.2)`: the light environment's band 0
+is `Sum I x Y00`, and the visibility value is that times Y00 again, not times 2 sqrt(pi) (the
+probe scale 1 of 2026-10-06 is off by 4 pi before the gamma). This is the port's "raw light about
+3x" on the lane: 3.26^(1/2.2) = 1.71 against the original's 0.542.
+
+| point | L (Sum I) | raw light | (L/4pi)^(1/2.2) | lights (delta of L) | rest (all off) |
+|---|---|---|---|---|---|
+| Boyle (-3017, -2407) | 0.9735 | 0.3126 | 0.3126 | SpotLight_70 0.446 (point falloff predicts 0.444), sky 0.152, SpotLight_156 0.090 (cone; point formula 1.19), SpotLight_168 0.017 | 0.269 (light volume) |
+| Boyle (-3162, -2539) | 0.4054 | 0.2100 | 0.2100 | sky 0.152, SpotLight_156 0.019, SpotLight_70 0.012, PointLight_46 0.0034 (= prediction) | 0.219 |
+| Playground (-3500, 6450) | 3.2607 | 0.5416 | 0.5416 | lamp PointLightMovable 2.958 (= prediction), sky 0.152, dominant directional 0.151 | 0 |
+| Playground (-4500, 6450) | 0.9301 | 0.3062 | 0.3062 | lamp 0.628 (= prediction), sky, directional | 0 |
+| Playground (-5200, 6000) | 0.3026 | 0.1838 | 0.1838 | sky 0.152, directional 0.151 | 0 |
+| Playground (-2500, 6450) | 1.5577 | 0.3871 | 0.3871 | two lamps 0.628 each, sky, directional | 0 |
+| Playground (0, -5500) | 1.6233 | 0.3945 | 0.3945 | two start lights 0.660 each, sky, directional | 0 |
+
+Three more Boyle points (-3400, -3150), (-2705, -1879) (the start, 0.588 = the earlier
+"constant" reading), (-4000, -2000) give `raw^2.2 / lum(band 0)` = 0.2821 = Y00 each. The sky
+light (`SkyLight_0_LC`, Brightness 0.1, (203, 229, 255)) adds 0.1515 everywhere outdoors and the
+host's `DominantDirectionalLight_1` (0.25, (164, 209, 255)) 0.1511 on the Playground (shadowed on
+the Boyle points). The precomputed light volume is 28 % / 54 % of L at the two Boyle points and
+absent at +20000 (Playground). The 358 `StaticLightCollectionActor` point components near the
+Boyle points have Brightness 0 live and contribute nothing.
+
+Colours: the layout's linear colour goes in as sRGB bytes (`(1, 0.8, 0.55)` -> `(255, 230, 194)`)
+and the light environment converts back with `(byte / 255)^2.2` (the deltas match the
+predictions with that conversion to 4 decimals), so the round trip is right. The 34 built
+Playground lights are `PointLightMovable` (Brightness 4 / 1.6 / 1.5, radius 1400-2400, falloff 2,
+no shadows); no light component of the original has an `m_LightProbe` property.
+Outputs (retail-derived, not committed): `le_boyle1/2.json`, `le_lane1..5.json`,
+`pg_lights.json` in the session scratch.
+
 ### Layout maps in the original (the Playground)
 
 A scenario whose map has a layout file (`maps/<map>.ron`, the Playground) is captured by
@@ -662,9 +715,25 @@ half peaks 0.5417 under the lamps (the earlier sneak-toggle readings were within
 
 ### NPCs in original traces
 
-- Placement by position (`npcs: [(position: ..)]`): a live NPC of the host level of the kind
-  (`*Guard*` tweaks for guards, the others for civilians; not Tallboys, the boatman, Shaw) is
-  teleported there; `Passive` unpossesses it (no controller, no AI: it takes damage and falls
+- Placement by position (`npcs: [(position: ..)]`, since 2026-10-08, U-807): a fresh NPC from a
+  `DishonoredSpawner` spawned with a host spawner of the kind as template (`*Guard*` tweaks for
+  guards, the others for civilians; `spawner` names the template; `tweak` / `faction` written
+  to `m_pPawnTweaks` / `m_pFactionTweakOverride`), put at the position and yaw, started with
+  `OnStartSpawn` (`session spawn_npc location=x,y,z [yaw=] [tweak=] [faction=] [kind=]`). The
+  copy leaves the template's squad (`m_Squad` None: the spawn 0x00A5E790 refuses at the squad's
+  alive / total caps), its spawned-pawn list and its queued requests (the ring at +0x29C and
+  its count / head / retries); a spawn still blocked after 30 ticks (rows of pawns 84 uu
+  apart) is re-requested 600 uu up and moved to the position (a warning). The requester is
+  `Default__DisSeqAct_StartSpawn` (None crashes the native handler 0x00A5C150); its counters are
+  restored afterwards and zeroed before every map load, because a StartSpawn loaded later
+  starts from them and a count above its output links trips an array assertion in its update
+  0x00B90050 (a modal "Assertion failed" box that stalls the game thread with low CPU).
+  Re-capture of the 58 NPC specs: 56 ok, `ai/patrol` and `chaos/corpse_discovered` fail on
+  their patrol routes (setup gap); the NPCs stay where placed for the whole run (before, they
+  went back to their spawners after ~4.3 s). Fresh guards start with `suspicion` 1 where the
+  reused host guards read 0. `combat/sword_hit_dummy`: the swing at tick 5 starts no hit on the
+  Passive dummy (no damage in 600 ticks; a press after the run kills it), reported as is.
+  Before 2026-10-08 a live NPC of the host level was teleported (it went home). `Passive` unpossesses it (no controller, no AI: it takes damage and falls
   like a dummy); `Idle` keeps its own AI; `Alerted` is approximated by filling its player attention
   (1.0, a warning); `faction` writes `DishonoredNPCPawn.m_pCurFactionTweak` (a tweak by name,
   `None` = null). Pawn tweaks, routes and other states are setup gaps (U-802). An NPC by
