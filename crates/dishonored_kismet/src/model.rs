@@ -339,6 +339,7 @@ pub struct KismetDb {
 }
 
 impl KismetDb {
+    #[track_caller]
     pub fn op(&self, id: OpId) -> &Op {
         &self.ops[id as usize]
     }

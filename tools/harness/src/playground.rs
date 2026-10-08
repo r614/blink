@@ -628,14 +628,23 @@ fn stations_in_mission(rep: &mut Report, maps: &MapContents, def: &MissionDef) -
     let guard = p.npc("patrol");
     let g0 = p.m().world.player(guard).map(|g| g.position).unwrap_or_default();
     p.teleport(Vec3::new(0.0, -5500.0, 92.0), 90.0);
-    let mut far = 0.0f32;
+    let (mut far, mut walked, mut moving_ticks, mut prev) = (0.0f32, 0.0f32, 0u32, g0);
     for _ in 0..(30 * 60) {
         p.step(PlayerInput { yaw: 90.0, ..Default::default() });
         if let Some(g) = p.m().world.player(guard) {
             far = far.max((g.position - g0).truncate().length());
+            let step = (g.position - prev).truncate().length();
+            if step > 0.5 {
+                walked += step;
+                moving_ticks += 1;
+            }
+            prev = g.position;
         }
     }
-    rep.check(S, "stealth lane: the guard patrols along the generated navigation", far > 1500.0, format!("moved up to {far:.0} uu from its start in 30 s"));
+    // Patrol walk speed: EmptyPatrol x Empty_Walk_Patrol = 116.3 uu/s (measured on the original,
+    // ORACLE.md capture requests; ai.md F3).
+    let speed = if moving_ticks > 0 { walked / (moving_ticks as f32 / 60.0) } else { 0.0 };
+    rep.check(S, "stealth lane: the guard patrols along the generated navigation at the measured patrol speed (116.3 uu/s)", far > 500.0 && (speed - 116.3).abs() < 10.0, format!("walked {walked:.0} uu at {speed:.1} uu/s while moving, up to {far:.0} uu from its start in 30 s"));
     Ok(())
 }
 

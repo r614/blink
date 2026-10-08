@@ -90,6 +90,39 @@ pub fn equip(c: &mut Client, class: &str, usage: u8) -> Result<()> {
     Ok(())
 }
 
+/// Move an actor through the engine's own `Actor.SetLocation` (its native exec: updates the
+/// components, their bounds and the touch / encroach state, may push the actor out of
+/// geometry), never by writing `Location` alone (stale collision bounds, light environments,
+/// touches). If the engine refuses the move (returns false: blocked), the location is written
+/// and `ForceUpdateComponents` run so the components follow anyway. Returns where it ended up.
+pub fn move_actor(c: &mut Client, actor: u32, loc: [f32; 3]) -> Result<[f32; 3]> {
+    let mut r = crate::reflect::Reflect::default();
+    move_actor_r(c, &mut r, actor, loc)
+}
+
+pub fn move_actor_r(c: &mut Client, r: &mut crate::reflect::Reflect, actor: u32, loc: [f32; 3]) -> Result<[f32; 3]> {
+    let ok = r.call(c, actor, "Actor.SetLocation", &serde_json::json!([loc]))?;
+    if ok.get("return").and_then(|v| v.as_bool()) != Some(true) {
+        let mut b = Vec::new();
+        for v in loc {
+            b.extend(v.to_le_bytes());
+        }
+        c.write(actor + 0xc4, &b)?;
+        r.call(c, actor, "Actor.ForceUpdateComponents", &serde_json::json!([false, false]))?;
+    }
+    read_vec(c, actor + 0xc4)
+}
+
+/// `Actor.SetRotation` with a yaw (degrees; pitch and roll kept).
+pub fn set_actor_yaw(c: &mut Client, r: &mut crate::reflect::Reflect, actor: u32, yaw_deg: f32) -> Result<()> {
+    let b = c.read(actor + 0xd0, 12)?;
+    let p = i32::from_le_bytes(b[0..4].try_into().unwrap());
+    let ro = i32::from_le_bytes(b[8..12].try_into().unwrap());
+    let y = (yaw_deg / 360.0 * 65536.0).round() as i32;
+    r.call(c, actor, "Actor.SetRotation", &serde_json::json!([[p, y, ro]]))?;
+    Ok(())
+}
+
 pub fn read_vec(c: &mut Client, addr: u32) -> Result<[f32; 3]> {
     let b = c.read(addr, 12)?;
     Ok([0, 1, 2].map(|i| f32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap())))

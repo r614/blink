@@ -622,3 +622,167 @@ fn level_loaded_fires_only_linked_outputs_and_state_restored_on_return() {
     tick(&mut k, &mut h, 2);
     assert_eq!(h.hits.iter().map(|x| x.1).collect::<Vec<_>>(), vec![restored]);
 }
+
+// ----- kismet.md F-1 .. F-6 (2026-10-08 port) -----
+
+#[test]
+fn delayed_activation_that_comes_due_runs_after_the_ops_already_queued() {
+    // F-1: 0x00700948 queues a due delayed op at the bottom (bPushTop 0). A gameplay event
+    // queued before the tick runs (and its chain) first.
+    let mut b = B::new();
+    let s = b.root(0);
+    let e1 = b.event(s, "SeqEvent_Console", vec![]);
+    let e2 = b.event(s, "SeqEvent_Console", vec![]);
+    let r1 = b.record(s);
+    let r2 = b.record(s);
+    b.link(e1, 0, r1, 0);
+    b.db.ops[e1 as usize].outputs[0].delay = 0.04;
+    b.link(e2, 0, r2, 0);
+    let mut k = b.build(1);
+    let mut h = Rec::default();
+    fire(&mut k, &mut h, e1);
+    tick(&mut k, &mut h, 3);
+    assert!(h.hits.is_empty());
+    fire(&mut k, &mut h, e2);
+    tick(&mut k, &mut h, 1);
+    assert_eq!(h.hits, vec![(4, r2, 0), (4, r1, 0)], "the due link (0.04 s, due at the 4th tick) runs after the event queued before the tick");
+}
+
+#[test]
+fn repeated_activation_goes_to_the_bottom_of_the_stack() {
+    // F-1: 0x00700f0d re-queues an op with a queued activation at the bottom (push 0).
+    let mut b = B::new();
+    let s = b.root(0);
+    let e1 = b.event(s, "SeqEvent_Console", vec![]);
+    let e2 = b.event(s, "SeqEvent_Console", vec![]);
+    let a = b.record(s);
+    let c = b.record(s);
+    let r2 = b.record(s);
+    b.link(e1, 0, a, 0);
+    b.link(e1, 0, c, 0);
+    b.link(e1, 0, a, 0);
+    b.link(e2, 0, r2, 0);
+    let mut k = b.build(1);
+    let mut h = Rec::default();
+    fire(&mut k, &mut h, e1);
+    fire(&mut k, &mut h, e2);
+    tick(&mut k, &mut h, 1);
+    let order: Vec<OpId> = h.hits.iter().map(|x| x.1).collect();
+    assert_eq!(order, vec![c, a, r2, a], "a's second activation waits behind e2's chain");
+}
+
+#[test]
+fn kept_latent_ops_come_back_in_reverse_so_the_first_met_updates_first() {
+    // F-2: the kept list is emptied from its end, each still-active op pushed on top
+    // (0x00701452..0x007014f1).
+    let mut b = B::new();
+    let s = b.root(0);
+    let e = b.event(s, "SeqEvent_Console", vec![]);
+    let d1 = b.add(0, "SeqAct_Delay", Kind::Action, Some(s), &["Start", "Stop", "Pause"], &["Finished"], vec![("Duration", Value::Float(0.5))]);
+    let d2 = b.add(0, "SeqAct_Delay", Kind::Action, Some(s), &["Start", "Stop", "Pause"], &["Finished"], vec![("Duration", Value::Float(0.5))]);
+    let r1 = b.record(s);
+    let r2 = b.record(s);
+    b.link(e, 0, d1, 0);
+    b.link(e, 0, d2, 0);
+    b.link(d1, 0, r1, 0);
+    b.link(d2, 0, r2, 0);
+    let mut k = b.build(1);
+    let mut h = Rec::default();
+    fire(&mut k, &mut h, e);
+    tick(&mut k, &mut h, 40);
+    let order: Vec<OpId> = h.hits.iter().map(|x| x.1).collect();
+    assert_eq!(order, vec![r1, r2], "d1 (met first) finishes first");
+    assert_eq!(h.hits[0].0, h.hits[1].0);
+}
+
+#[test]
+fn bend_time_slows_unflagged_ops_and_not_flagged_ones() {
+    // F-3: ExecuteActiveOps gives `dt * world / player` to ops without
+    // `m_bAlwaysOutOfBendTime` and the raw dt to flagged ones (0x00700740).
+    let run = |flagged: bool| {
+        let mut b = B::new();
+        let s = b.root(0);
+        let e = b.event(s, "SeqEvent_Console", vec![]);
+        let d = b.add(0, "SeqAct_Delay", Kind::Action, Some(s), &["Start", "Stop", "Pause"], &["Finished"], vec![("Duration", Value::Float(0.5)), ("m_bAlwaysOutOfBendTime", Value::Bool(flagged))]);
+        let r = b.record(s);
+        b.link(e, 0, d, 0);
+        b.link(d, 0, r, 0);
+        let mut k = b.build(1);
+        let mut h = Rec::default();
+        fire(&mut k, &mut h, e);
+        for _ in 0..200 {
+            h.tick += 1;
+            k.tick_dilated(&mut h, DT, 0.5);
+        }
+        h.hits[0].0
+    };
+    assert_eq!(run(true), 31, "flagged: the raw dt, as without Bend Time");
+    assert_eq!(run(false), 61, "unflagged: half the rate");
+}
+
+#[test]
+fn retrigger_delay_runs_on_the_bend_time_clock_unless_flagged() {
+    // F-4: ActivationTime / ReTriggerDelay use BendTimeSeconds, or TimeSeconds when flagged
+    // (0x006c8350, 0x006f5dd0).
+    for flagged in [false, true] {
+        let mut b = B::new();
+        let s = b.root(0);
+        let e = b.event(s, "SeqEvent_Console", vec![("MaxTriggerCount", Value::Int(0)), ("ReTriggerDelay", Value::Float(0.5)), ("m_bAlwaysOutOfBendTime", Value::Bool(flagged))]);
+        let mut k = b.build(1);
+        let mut h = Rec::default();
+        assert!(fire(&mut k, &mut h, e));
+        for _ in 0..40 {
+            k.tick_dilated(&mut h, DT, 0.5);
+        }
+        // 40 ticks: 0.667 s of TimeSeconds, 0.333 s of BendTimeSeconds.
+        assert_eq!(fire(&mut k, &mut h, e), flagged);
+    }
+}
+
+#[test]
+fn scalar_int_and_float_properties_take_the_sum_of_the_link() {
+    // F-5: SeqVar_Int::PopulateValue (0x006f6da0) / SeqVar_Float (0x006f69b0) write the sum of
+    // every variable of the link into a scalar property; SeqVar_Bool (0x006f6740) the AND.
+    let mut b = B::new();
+    for (c, p) in [("SeqVar_Int", "SequenceVariable"), ("SeqVar_Float", "SequenceVariable")] {
+        b.db.classes.insert(c.into(), vec![c.into(), p.into(), "SequenceObject".into()]);
+    }
+    let s = b.root(0);
+    let e = b.event(s, "SeqEvent_Console", vec![]);
+    let r = b.record(s);
+    let i1 = b.add(0, "SeqVar_Int", Kind::Variable, Some(s), &[], &[], vec![("IntValue", Value::Int(3))]);
+    let i2 = b.add(0, "SeqVar_Int", Kind::Variable, Some(s), &[], &[], vec![("IntValue", Value::Int(4))]);
+    let f1 = b.add(0, "SeqVar_Float", Kind::Variable, Some(s), &[], &[], vec![("FloatValue", Value::Float(0.25))]);
+    let f2 = b.add(0, "SeqVar_Float", Kind::Variable, Some(s), &[], &[], vec![("FloatValue", Value::Float(0.5))]);
+    let b1 = b.var_bool(s, true);
+    let b2 = b.var_bool(s, false);
+    b.var_link(r, "A", vec![i1, i2], "IntProp");
+    b.var_link(r, "B", vec![f1, f2], "FloatProp");
+    b.var_link(r, "C", vec![b1, b2], "BoolProp");
+    b.link(e, 0, r, 0);
+    let mut k = b.build(1);
+    let mut h = Rec::default();
+    fire(&mut k, &mut h, e);
+    tick(&mut k, &mut h, 1);
+    assert_eq!(k.prop(r, "IntProp"), Some(Value::Int(7)));
+    assert_eq!(k.prop(r, "FloatProp"), Some(Value::Float(0.75)));
+    assert_eq!(k.prop(r, "BoolProp"), Some(Value::Bool(false)));
+}
+
+#[test]
+fn activation_log_lists_activated_and_deactivated_in_call_order() {
+    // F-6: the hook sees the script Activated / Deactivated of every op, events included.
+    let mut b = B::new();
+    let s = b.root(0);
+    let e = b.event(s, "SeqEvent_Console", vec![]);
+    let r = b.record(s);
+    b.link(e, 0, r, 1);
+    let mut k = b.build(1);
+    k.record = true;
+    let mut h = Rec::default();
+    fire(&mut k, &mut h, e);
+    tick(&mut k, &mut h, 1);
+    let got: Vec<(OpId, &str, Vec<usize>)> = k.activations.iter().map(|a| (a.op, a.kind.name(), a.links.clone())).collect();
+    assert_eq!(got, vec![(e, "Activated", vec![0]), (e, "Deactivated", vec![0]), (r, "Activated", vec![1]), (r, "Deactivated", vec![])]);
+    assert_eq!(k.trace_name(r), format!("Global:Main_Sequence.TestRecord_{r}"));
+}

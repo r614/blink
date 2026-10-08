@@ -698,6 +698,21 @@ fn thrown_npc_flies_then_ragdolls() {
     }
     // Ragdoll after 27 more updates (28 x dt >= 0.455).
     assert_eq!(flying_ticks, 26, "the 27th step ends the flight");
+    // The ragdoll (the falling / walking moves) holds the pawn until the rest test passes
+    // (both horizontal Velocity components under m_fMaxRagdollSpeedToRecover, 0x00A98DD0); then
+    // the get-up (Stun chain: RagdollToFront, one loop tick, a recovery) holds it.
+    let mut ticks = 0;
+    while r.p(3).thrown.ragdoll && ticks < 600 {
+        assert!(r.p(3).action_lock > 0.0, "held while down");
+        r.step(&idle);
+        ticks += 1;
+    }
+    let n = r.p(3);
+    assert!(!n.thrown.ragdoll && n.mode == MoveMode::Walking, "rested after {ticks} ticks");
+    assert!(n.velocity.x.abs() < th.max_ragdoll_speed_to_recover);
+    let lo = th.getup_anim + th.getup_recover.iter().cloned().fold(f32::MAX, f32::min);
+    let hi = th.getup_anim + DT + th.getup_recover.iter().cloned().fold(0.0, f32::max);
+    assert!(n.action_lock >= lo && n.action_lock <= hi, "get-up {}", n.action_lock);
 }
 
 #[test]

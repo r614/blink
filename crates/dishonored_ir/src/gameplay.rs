@@ -488,6 +488,15 @@ pub struct ThrowConfig {
     pub min_momentum_z_stunned: f32,
     pub fluid_friction: f32,
     pub windblast_ragdoll_notify: [f32; 4],
+    /// `DisTweaks_NPCPawn_Body.m_fMaxRagdollSpeedToRecover`: the throw state's rest test
+    /// (0x00A98DD0) gets the pawn up once each horizontal Velocity component is below it (times
+    /// `CustomTimeDilation`).
+    pub max_ragdoll_speed_to_recover: f32,
+    /// The get-up after the rest (`StateNPCMasterStunned`, `eStunEnterAnim_RagdollFront`: the
+    /// elite guard's `Stun` chain group 1): the `RagdollToFront` sequence's play length, then
+    /// (after the loop step, left at once with `m_fStunDuration` 0) one of the recovery sequences.
+    pub getup_anim: f32,
+    pub getup_recover: Vec<f32>,
 }
 
 // Serde defaults for configs cached before the field was loaded: the loaded values.
@@ -505,6 +514,9 @@ impl Default for ThrowConfig {
             min_momentum_z_stunned: 1500.0,
             fluid_friction: 0.3,
             windblast_ragdoll_notify: [0.455, 0.39, 0.4483, 0.4179],
+            max_ragdoll_speed_to_recover: 5.0,
+            getup_anim: 2.3333,
+            getup_recover: vec![1.8667, 1.5],
         }
     }
 }

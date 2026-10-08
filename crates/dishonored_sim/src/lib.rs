@@ -250,6 +250,7 @@ pub fn step_world(
         swim::step_breath(p, world, &mvc, breath, 0.0, dt, &mut out.events);
         p.rat_slow = (p.rat_slow - dt).max(0.0);
         p.action_lock = (p.action_lock - dt).max(0.0);
+        movement::step_thrown(p, &g.throw, scale, dt);
         p.prev_buttons = input.buttons;
         p.last_input = input;
         takedown::step_afflictions(state, i, dt, g, &mut out.events);

@@ -354,6 +354,10 @@ pub struct Brain {
     /// Barks decided this tick (drained into `Crowd::events`).
     #[serde(default)]
     pub barks: Vec<(String, Option<PlayerId>)>,
+    /// `DisAISubProcessAmbientBarks.m_fBarkInhibitionTimer` (+0x6c) of the running patrol /
+    /// guard behaviour; None while no such behaviour runs.
+    #[serde(default)]
+    pub ambient_bark_timer: Option<f32>,
     /// Corpses this brain discovered by sight this tick (drained into `Crowd::events` as
     /// [`AiEvent::CorpseFound`]).
     #[serde(default)]
@@ -414,6 +418,7 @@ pub struct Brain {
 fn idle_state() -> BrainState {
     BrainState::Idle
 }
+
 
 /// What the brains of a crowd know about pawn relationships this tick.
 #[derive(Debug, Clone, Default)]
@@ -1087,6 +1092,7 @@ impl Crowd {
             }
             out.push((b.id, inp));
             b.transition_barks(was, me, world_state, &peers, ai);
+            b.ambient_barks(ai, dt);
             for (hook, initiator) in b.barks.drain(..) {
                 ai_events.push(AiEvent::Bark { npc: b.id, hook, initiator });
             }
@@ -1617,6 +1623,7 @@ impl Brain {
             enemies: Vec::new(),
             cause: 0,
             cause_danger: false,
+            ambient_bark_timer: None,
             bell: None,
             ring_wait: 0.0,
             alarm_enemy: None,
@@ -1887,13 +1894,18 @@ impl Brain {
                 l < 1.0 || !world.raycast(eye, to / l, l, channel::VISION).is_some_and(|h| h.distance < l - 40.0)
             })
         };
-        // Pain barks: attacked while on routine (`DDH_PATROL_ATTACKED_BY_ENEMY`, 0x00afc3e0),
-        // otherwise the hit reaction's `DDH_COMBAT_OUCH_SMALL` (LIKELY).
+        // Pain barks: the pawn's damage handler fires `DDH_COMBAT_OUCH_SMALL` (0x00b733f0, hook
+        // 60, initiator the damage causer); attacked while on routine, the behaviour also asks
+        // `DDH_PATROL_ATTACKED_BY_ENEMY` (0x00afc3e0). Both requests go to the bark manager, which
+        // arbitrates (conversation.md R6 / F9). The damage type's hook override (byte +0x84 of
+        // its tweak, `FUN_00b72c40`) is not modelled: no damage-type tweak reaches the AI.
         for e in events {
             if let SimEvent::Damage { victim, attacker, .. } = e {
                 if *victim == self.id {
-                    let h = if self.state.is_routine() { "DDH_PATROL_ATTACKED_BY_ENEMY" } else { "DDH_COMBAT_OUCH_SMALL" };
-                    self.barks.push((h.into(), *attacker));
+                    if self.state.is_routine() {
+                        self.barks.push(("DDH_PATROL_ATTACKED_BY_ENEMY".into(), *attacker));
+                    }
+                    self.barks.push(("DDH_COMBAT_OUCH_SMALL".into(), *attacker));
                 }
             }
         }
@@ -3356,6 +3368,42 @@ impl Brain {
         let _ = (me, ws);
     }
 
+    /// `DisAISubProcessAmbientBarks` of the patrol and guard behaviours (their tweaks own the
+    /// sub-process): activation (0x00b47020) sets the inhibition timer to
+    /// `m_fBarkInhibitionDuration`; each tick (0x00b3d5e0) counts it down, then asks for
+    /// `DDH_PATROL_MISC` every tick: the hook's refire delay (5-12 s per NPC) and the Casual
+    /// group spacing pace it. Not ported: the group variant `DDH_PATROL_MISC_GROUP` (a nearby
+    /// pawn in AI state 1, `FUN_00b14c00` / `FUN_00b043a0` not decoded), the route-switch bark
+    /// and the LOD disable.
+    fn ambient_barks(&mut self, ai: &AiConfig, dt: f32) {
+        let ambient = self.state == BrainState::Patrol || (self.state == BrainState::Idle && self.kind == PawnKind::Guard);
+        if !ambient {
+            self.ambient_bark_timer = None;
+            return;
+        }
+        // Activation (also the first tick of a brain that spawns patrolling).
+        let timer = self.ambient_bark_timer.get_or_insert(ai.ambient_bark_inhibition);
+        if *timer > 0.0 {
+            *timer -= dt;
+            return;
+        }
+        self.barks.push(("DDH_PATROL_MISC".into(), None));
+    }
+
+    /// How this brain perceives its top target (the initiator of its attention barks), for
+    /// `DisConv_Hook_Notice` (0x00cac450, `FUN_00b5bac0` on the owner's brain and the
+    /// initiator): the attention entry's change reason 19 (seen) -> 0, 7 (heard) -> 1, or 2 for
+    /// a danger noise (context above 3); anything else -> None (the hook cannot start).
+    pub fn notice_kind(&self) -> Option<u8> {
+        let who = self.target.or_else(|| self.attn.iter().filter(|a| a.who != NOISE).max_by(|x, y| x.value.total_cmp(&y.value)).map(|a| a.who))?;
+        let a = self.attn.iter().find(|a| a.who == who)?;
+        match a.why {
+            reason::SEEN => Some(0),
+            reason::HEARD => Some(1 + a.danger as u8),
+            _ => None,
+        }
+    }
+
     /// The combat behaviour ends: moves, dodges and the pistol sub-state stop.
     fn end_fight(&mut self) {
         self.in_fight = false;
@@ -4093,6 +4141,32 @@ mod tests {
         b.transition_barks(BrainState::Search, &me, &ws, &[], &ai);
         let hooks: Vec<&str> = b.barks.iter().map(|x| x.0.as_str()).collect();
         assert_eq!(hooks, ["DDH_ATTENTION_NOTICE_BEGIN", "DDH_SEARCH_ADETECTION_DANGER", "DDH_SEARCH_FIND_ENEMY", "DDH_COMBAT_LOST", "DDH_SEARCH_GIVEUP_POSTCORPSE"]);
+    }
+
+    /// `DisAISubProcessAmbientBarks` (0x00b47020 / 0x00b3d5e0): silent for
+    /// `m_fBarkInhibitionDuration` after the patrol starts, then `DDH_PATROL_MISC` every tick
+    /// (the bark manager's refire gate spaces them); leaving the behaviour re-arms it.
+    #[test]
+    fn ambient_barks_after_the_inhibition() {
+        let ai = AiConfig::default();
+        let mut b = Brain::new(NPC_ID_BASE, PawnKind::Guard, Vec3::ZERO, 1);
+        b.state = BrainState::Patrol;
+        let mut first = None;
+        for i in 0..800 {
+            b.ambient_barks(&ai, 1.0 / 60.0);
+            if first.is_none() && !b.barks.is_empty() {
+                first = Some(i);
+            }
+        }
+        let first = first.expect("a bark") as f32 / 60.0;
+        assert!((first - ai.ambient_bark_inhibition).abs() < 0.05, "{first}");
+        assert!(b.barks.iter().all(|x| x.0 == "DDH_PATROL_MISC"));
+        b.barks.clear();
+        b.state = BrainState::Search;
+        b.ambient_barks(&ai, 1.0 / 60.0);
+        b.state = BrainState::Patrol;
+        b.ambient_barks(&ai, 1.0 / 60.0);
+        assert!(b.barks.is_empty(), "re-armed");
     }
 
     /// The slot stack: a higher slot preempts, the lower behaviour stays dormant and resumes

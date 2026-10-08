@@ -25,7 +25,7 @@
 //! All state (branch counters, shuffles, time limits, memories, RNG) lives here, so a mission
 //! replays identically from the same inputs.
 
-use crate::hooks::{self, HookClock, HookRejection};
+use crate::hooks::{self, HookClock, HookInfo, HookQueue, HookRejection, QueuedHook};
 use crate::model::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -83,6 +83,50 @@ pub trait ConvEnv {
     fn distance(&self, _player: Option<u32>, _npc: Option<&str>) -> Option<f32> {
         None
     }
+    /// The NPC's health interface says dead (`FireHook` 0x00ca6bd0: only hooks 57-59 fire on a
+    /// dead owner).
+    fn npc_dead(&self, _npc: &str) -> bool {
+        false
+    }
+    /// Straight-line distance from the NPC to the player pawn (the bark weight, `FUN_00ca2580`,
+    /// and the distance cull); None = unknown (counts as 0).
+    fn listener_distance(&self, npc: &str) -> Option<f32> {
+        self.distance(None, Some(npc))
+    }
+    /// The speaker's audio path distance to the listener (`FUN_00c96920`: the obstructed path
+    /// length of its nearest emitter), which picks the Loud / Quiet lists. Default: the straight
+    /// line (APPROXIMATION until the occlusion path is decoded).
+    fn audio_distance(&self, npc: &str) -> Option<f32> {
+        self.listener_distance(npc)
+    }
+    /// What the hook node classes read from the owner's AI (R5).
+    fn hook_facts(&self, _npc: &str, _initiator: Option<u32>) -> HookFacts {
+        HookFacts::default()
+    }
+    /// Horizontal distance from the NPC (its speaker points) to the player pawn
+    /// (`Hook_PlayerLoiter` / `Hook_PlayerLookAt`); None = no player.
+    fn player_distance_2d(&self, _npc: &str) -> Option<f32> {
+        None
+    }
+    /// `Hook_PlayerLookAt`: the angle (degrees) between the player's view and each look-at
+    /// target actor (None = the actor is missing).
+    fn look_angles(&self, _npc: &str, targets: &[(String, f32, f32)]) -> Vec<Option<f32>> {
+        vec![None; targets.len()]
+    }
+}
+
+/// The owner's AI state as the hook node classes read it (virtual +0x158 of `DisConv_Hook_*`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HookFacts {
+    /// `Hook_SuspicionLevel`: the brain's suspicion level byte (`brain+0x41`).
+    pub suspicion: u8,
+    /// `Hook_DeathMode`: the dying pawn was knocked out (output 1) rather than killed (0).
+    pub knocked_out: bool,
+    /// `Hook_Notice`: how the owner perceives the initiator: 0 seen, 1 heard (anomaly),
+    /// 2 heard (danger: loudness above 3); None = neither (the hook cannot start).
+    pub notice: Option<u8>,
+    /// `Hook_Investigate`: the walk state's sub-state byte (`state+0x1c`).
+    pub investigate: u8,
 }
 
 /// Plain flag table, for tools and tests.
@@ -131,6 +175,15 @@ pub enum ConvEvent {
     Flag { name: String, value: bool },
     Soiree { instance: u32, guid: String, matinee: Option<String> },
     Ended { instance: u32, conversation: Option<u32>, name: String, label: String, interrupted: bool },
+    /// A dialog hook request and what became of it: `Queued` (passed `FireHook`, waiting for
+    /// the manager tick), `Fired` (started `instance`), or rejected / dropped.
+    Hook { npc: String, hook: String, result: Result<HookStage, HookRejection>, instance: Option<u32> },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum HookStage {
+    Queued,
+    Fired,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -206,6 +259,14 @@ pub struct Instance {
     pub started: f64,
 }
 
+impl Instance {
+    /// The NPC this instance speaks through when it has no conversation (a hook walk binds
+    /// ME = the owner, `FUN_00c9e2b0`).
+    fn owner(&self) -> Option<&str> {
+        self.bindings.first().and_then(|b| b.as_deref())
+    }
+}
+
 /// How to start.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StartSpec {
@@ -233,18 +294,28 @@ struct Memory {
     labels: BTreeMap<String, u32>,
 }
 
-/// A request to fire a dialog hook on an NPC (barks; see [`Runner::fire_hook`]).
-#[derive(Debug, Clone, PartialEq)]
+/// A request to fire a dialog hook on an NPC (barks; see [`Runner::request_hook`]).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HookRequest {
     /// The NPC the hook fires on (its trees are searched in `trees` order: one-shot trees,
-    /// additional generic trees, then its generic tree, as `FUN_00ca5670` does).
+    /// then the generic trees of its voice, as `FUN_00ca5670` does; each tree with its
+    /// `m_pFallbackTree` chain).
     pub npc: String,
     pub trees: Vec<u32>,
+    /// How many leading `trees` are one-shot trees (`m_OneShotInfo`): a category whose tree
+    /// had the hook but started nothing ends the search.
+    #[serde(default)]
+    pub oneshot_trees: usize,
     /// `DDH_*` name.
     pub hook: String,
-    /// Output of the hook node (Kismet hook name index; 0 otherwise).
-    pub output: usize,
+    /// Output of the hook node when the caller names it (Kismet hook names, polled player
+    /// hooks); None = the node class chooses (R5).
+    pub output: Option<usize>,
     pub initiator: Option<u32>,
+    /// The owner's pawn (an initiator that is the owner does not count against the
+    /// per-initiator caps).
+    #[serde(default)]
+    pub owner: Option<u32>,
 }
 
 /// Serializes for saved games without its database (the loader re-attaches it).
@@ -268,6 +339,17 @@ pub struct Runner {
     /// Lines started by an `Interrupted` branch: they play out on their own.
     pub detached: Vec<ActiveLine>,
     pub hooks: HookClock,
+    /// `DisConvGlobalMan.m_QueuedHookGroups` (the bark queue, [`Runner::tick_hooks`]).
+    #[serde(default)]
+    pub queue: HookQueue,
+    /// A `DisConv_TryFallbackTree` ended the last walk (the search goes on to the fallback tree).
+    #[serde(skip)]
+    fallback_hit: bool,
+    /// In-game data of the polled player hooks per (NPC, hook node).
+    #[serde(default)]
+    pub loiter: BTreeMap<(String, NodeId), hooks::LoiterHook>,
+    #[serde(default)]
+    pub look_at: BTreeMap<(String, NodeId), hooks::LookAtHook>,
     events: Vec<ConvEvent>,
     pub stats: RunnerStats,
     /// [interp] The host plays soiree matinees itself (their dialog keys speak the blurbs at
@@ -302,6 +384,10 @@ impl Runner {
             time_limit: BTreeMap::new(),
             detached: Vec::new(),
             hooks: HookClock::default(),
+            queue: HookQueue::default(),
+            fallback_hit: false,
+            loiter: BTreeMap::new(),
+            look_at: BTreeMap::new(),
             events: Vec::new(),
             stats: RunnerStats::default(),
             external_matinees: false,
@@ -402,54 +488,368 @@ impl Runner {
         Some(id)
     }
 
-    /// Fire a dialog hook on an NPC: the bark entry point for the AI.
+    /// Ask for a dialog hook on an NPC, the queued form of `FireHook` (`FUN_00ca7360` ->
+    /// `FUN_00ca6bd0` -> enqueue `FUN_00c9cc80`): the gates run now, the hook fires (or is
+    /// dropped) on the next [`Runner::tick_hooks`].
     ///
-    /// The refire delay of the hook on that NPC, the hook's global refire delay and its fire
-    /// group's minimum spacing gate the request (`HookClock`); the group's cap on concurrent
-    /// conversations and `m_MaxDialogHooksAtOnce` (unless the group ignores the global cap)
-    /// limit it; then the NPC's trees are searched in order for a hook node of that type. A
-    /// hook flagged "interrupts" (dying, pain, falling...) takes the NPC even when it is busy.
-    /// Success (a conversation started) re-arms the refire delay.
+    /// Gates in order: the NPC's trees have the hook; a dead owner only takes hooks 57-59; the
+    /// trial walk finds the first tree (with its fallback chain) holding the hook, the node class
+    /// gives its output (none: nothing happens) and the speaker passes the hook-time
+    /// availability test; the per-NPC refire gate; the global refire gate. Then the request
+    /// joins its fire group's Loud or Quiet list (audio path distance >= 2000 uu = Quiet),
+    /// unless the list is locked or the initiator already has its share of that list type
+    /// playing.
+    pub fn request_hook(&mut self, req: HookRequest, env: &mut dyn ConvEnv) -> Result<(), HookRejection> {
+        let res = self.gate(&req, env).and_then(|(idx, output)| self.enqueue(&req, idx, output, env));
+        let result = res.map(|_| HookStage::Queued);
+        self.events.push(ConvEvent::Hook { npc: req.npc.clone(), hook: req.hook.clone(), result, instance: None });
+        res
+    }
+
+    /// The immediate form of `FireHook` (`FUN_00ca73c0`): the same gates, then the hook fires at
+    /// once without the queue (it takes no fire-group room).
     pub fn fire_hook(&mut self, req: HookRequest, env: &mut dyn ConvEnv) -> Result<u32, HookRejection> {
-        let now = self.time;
-        self.hooks.allowed(&req.npc, &req.hook, now)?;
-        let info = hooks::hook_info(&req.hook);
-        let cfg = hooks::fire_group(info.group);
-        let in_group = self.active().filter(|i| i.hook.as_deref().is_some_and(|h| hooks::hook_info(h).group == info.group)).count();
-        if cfg.max_per_group >= 0 && in_group >= cfg.max_per_group as usize {
-            return Err(HookRejection::GroupCap);
+        let res = self.gate(&req, env).and_then(|(idx, output)| self.fire_now(&req, idx, output, env));
+        self.log_fire(&req, res);
+        res
+    }
+
+    fn log_fire(&mut self, req: &HookRequest, res: Result<u32, HookRejection>) {
+        self.events.push(ConvEvent::Hook { npc: req.npc.clone(), hook: req.hook.clone(), result: res.map(|_| HookStage::Fired), instance: res.ok() });
+    }
+
+    /// The hook node of `hook` in a tree, following `m_pFallbackTree` while a tree lacks it
+    /// (the trial walk `FUN_00ca4690`): (tree, node).
+    fn chain_hook(&self, tree: u32, hook: &str) -> Option<(u32, NodeId)> {
+        let mut t = Some(tree);
+        for _ in 0..32 {
+            let tr = t?;
+            let tt = &self.db.trees[tr as usize];
+            if let Some(&h) = tt.hooks.iter().find(|h| matches!(&self.db.node(**h).kind, NodeKind::Hook { hook: x, .. } if x.eq_ignore_ascii_case(hook))) {
+                return Some((tr, h));
+            }
+            t = tt.fallback;
         }
-        let ai_hooks = self.active().filter(|i| i.hook.as_deref().is_some_and(|h| hooks::hook_info(h).flags & 0x80 != 0)).count();
-        if !cfg.ignore_global_cap && info.flags & 0x80 != 0 && ai_hooks >= hooks::MAX_HOOKS_AT_ONCE {
-            return Err(HookRejection::GroupCap);
+        None
+    }
+
+    /// The output a hook node starts at (virtual +0x158 by node class, R5), or None when the
+    /// hook cannot start (-1, or an index past the node's outputs).
+    fn hook_output(&mut self, node: NodeId, req: &HookRequest, env: &dyn ConvEnv) -> Option<usize> {
+        let db = self.db.clone();
+        let n = db.node(node);
+        let NodeKind::Hook { class, .. } = &n.kind else { return None };
+        let out: i32 = match req.output {
+            Some(k) => k as i32,
+            None => {
+                let f = env.hook_facts(&req.npc, req.initiator);
+                match class {
+                    HookClass::SuspicionLevel => f.suspicion as i32,
+                    HookClass::DeathMode => f.knocked_out as i32,
+                    HookClass::Notice => f.notice.map_or(-1, |x| x as i32),
+                    HookClass::Investigate => f.investigate as i32,
+                    // Polled state machines (their in-game data per NPC and node).
+                    HookClass::PlayerLoiter { radius, min, max } => {
+                        let d = env.player_distance_2d(&req.npc).unwrap_or(f32::MAX);
+                        let roll = self.crand();
+                        let now = self.time;
+                        self.loiter.entry((req.npc.clone(), node)).or_default().update(now, d, *radius, *min, *max, roll).map_or(-1, |k| k as i32)
+                    }
+                    HookClass::PlayerLookAt { radius, targets } => {
+                        let d = env.player_distance_2d(&req.npc).unwrap_or(f32::MAX);
+                        let angles = env.look_angles(&req.npc, targets);
+                        let t: Vec<(f32, f32)> = targets.iter().map(|x| (x.1, x.2)).collect();
+                        let now = self.time;
+                        self.look_at.entry((req.npc.clone(), node)).or_default().update(now, d, *radius, &angles, &t).map_or(-1, |k| k as i32)
+                    }
+                    _ => 0,
+                }
+            }
+        };
+        // Cooked nodes omit an output list equal to the class default (one link).
+        (out >= 0 && (out as usize) < n.outputs.len().max(1)).then_some(out as usize)
+    }
+
+    /// Active instances in which `npc` speaks: hook walks bound to it, conversations naming it.
+    fn speaker_instances(&self, npc: &str) -> Vec<usize> {
+        (0..self.instances.len())
+            .filter(|&i| {
+                let o = &self.instances[i];
+                o.wait != Wait::Done
+                    && match o.conversation {
+                        Some(c) => self.npc_keys(i, c).iter().any(|k| k == npc),
+                        None => o.owner() == Some(npc),
+                    }
+            })
+            .collect()
+    }
+
+    /// `Available(newPriority, flags)` (`FUN_00c9d1f0`) folded with the requesting hook's flag
+    /// 0x2 (`FUN_00c9aec0`): 0 when the speaker is idle, 5 when it is in a state started by a
+    /// hook with flag 0x4, else 0 when its priority is lower than `priority` (or the request
+    /// is not a fresh start), else 4. Any result but 5 becomes 0 for a hook with flag 0x2.
+    fn available(&self, npc: &str, priority: u8, fresh: bool, info: &HookInfo) -> Result<(), HookRejection> {
+        for i in self.speaker_instances(npc) {
+            let o = &self.instances[i];
+            if o.hook.as_deref().is_some_and(|h| self.db.settings.hook_info(hooks::hook_index(h).unwrap_or(126)).flags & hooks::FLAG_NOT_INTERRUPTIBLE != 0) {
+                return Err(HookRejection::Busy);
+            }
+            let current = o.priority as u8 + 1;
+            if fresh && current >= priority && info.flags & hooks::FLAG_INTERRUPTS == 0 {
+                return Err(HookRejection::Busy);
+            }
         }
-        if cfg.max_per_initiator >= 0 {
-            let by_initiator = self.active().filter(|i| i.initiator == req.initiator && i.initiator.is_some() && i.hook.as_deref().is_some_and(|h| hooks::hook_info(h).group == info.group)).count();
-            if by_initiator >= cfg.max_per_initiator as usize {
+        Ok(())
+    }
+
+    /// `FireHook` steps 1-5 (`FUN_00ca6bd0`): the hook index and the trial walk's output.
+    fn gate(&mut self, req: &HookRequest, env: &mut dyn ConvEnv) -> Result<(u8, usize), HookRejection> {
+        let idx = hooks::hook_index(&req.hook).unwrap_or(126);
+        let info = self.db.settings.hook_info(idx);
+        // 1. `m_IsDialogHookSupported_Cache`: some tree has the hook.
+        let first = req.trees.iter().find_map(|&t| self.chain_hook(t, &req.hook)).ok_or(HookRejection::NoContent)?;
+        // 2. Dead owners take only the dying hooks.
+        if env.npc_dead(&req.npc) && !(57..=59).contains(&idx) {
+            return Err(HookRejection::Dead);
+        }
+        // 3. Trial walk: the first tree holding the hook decides; its node's output, then the
+        //    hook-time availability (priority 4, flags 4).
+        let output = self.hook_output(first.1, req, env).ok_or(HookRejection::NoContent)?;
+        self.available(&req.npc, 4, true, &info)?;
+        // 4. / 5. Refire gates.
+        self.hooks.allowed(&req.npc, idx, &info, self.time)?;
+        Ok((idx, output))
+    }
+
+    fn is_quiet(&self, npc: &str, env: &dyn ConvEnv) -> bool {
+        env.audio_distance(npc).unwrap_or(0.0) >= self.db.settings.loud_distance
+    }
+
+    /// The owner's running hook already has this initiator (`comp+0x8c` state initiator).
+    fn running_with(&self, npc: &str, who: u32) -> bool {
+        self.speaker_instances(npc).iter().any(|&i| self.instances[i].initiator == Some(who))
+    }
+
+    /// `FUN_00c9cc80`.
+    fn enqueue(&mut self, req: &HookRequest, idx: u8, output: usize, env: &dyn ConvEnv) -> Result<(), HookRejection> {
+        let info = self.db.settings.hook_info(idx);
+        let cfg = self.db.settings.fire_group(info.group);
+        let quiet = self.is_quiet(&req.npc, env);
+        if self.queue.list(info.group, quiet).locked {
+            return Err(HookRejection::GroupLocked);
+        }
+        let cap = cfg.max_per_initiator[quiet as usize];
+        if let Some(who) = req.initiator.filter(|w| cap > 0 && req.owner != Some(*w)) {
+            if self.queue.initiator_count(quiet, who) >= cap as usize && !self.running_with(&req.npc, who) {
                 return Err(HookRejection::GroupCap);
             }
         }
+        self.queue.list(info.group, quiet).pending.push(QueuedHook { request: req.clone(), hook: idx, output, instance: None });
+        Ok(())
+    }
+
+    /// The fire step (`FUN_00ca5670` -> `FUN_00ca5150` -> `FUN_00ca49e0`): walk the trees, each
+    /// with its fallback chain; a success stamps the refire tables.
+    ///
+    /// The one-shot trees are all tried, then the generic ones; when a tree of a category had
+    /// the hook but started nothing (and did not ask for its fallback tree) the search ends
+    /// after that category. A `DisConv_TryFallbackTree` at the end of a walk continues with the
+    /// tree's `m_pFallbackTree`; at the end of the chain the search goes on as if the tree had
+    /// lacked the hook.
+    fn fire_now(&mut self, req: &HookRequest, idx: u8, output: usize, env: &mut dyn ConvEnv) -> Result<u32, HookRejection> {
+        let now = self.time;
+        let info = self.db.settings.hook_info(idx);
+        // The walk binds ME = the owner (`FUN_00c9e2b0`): the speaker must be available for the
+        // hook node's priority (LIKELY, see conversation.md F7), and leaves what it was in.
+        let Some(first) = req.trees.iter().find_map(|&t| self.chain_hook(t, &req.hook)) else { return Err(HookRejection::NoContent) };
+        let (priority, _) = hook_meta(self.db.node(first.1));
+        self.available(&req.npc, priority as u8 + 1, true, &info)?;
+        let reason = if (57..=59).contains(&idx) { EndReason::Death } else { EndReason::NewConvo };
+        let displaced: Vec<u32> = self.speaker_instances(&req.npc).iter().map(|&i| self.instances[i].id).collect();
+        for id in displaced {
+            if let Some(i) = self.instances.iter().position(|x| x.id == id) {
+                self.end(i, reason, env);
+            }
+        }
+        self.gc();
         let db = self.db.clone();
-        for &tree in &req.trees {
-            let t = &db.trees[tree as usize];
-            let Some(&h) = t.hooks.iter().find(|h| matches!(&db.node(**h).kind, NodeKind::Hook { hook, .. } if hook.eq_ignore_ascii_case(&req.hook))) else { continue };
-            let target = match t.oneshot {
-                Some(o) => Target::Hook { oneshot: o, hook: h, output: req.output },
-                None => Target::TreeHook { tree, hook: h, output: req.output },
-            };
-            // Content: a conversation started, or lines spoken straight from the hook graph (the
-            // generic bark trees go hook -> random branch -> blurbs, no conversation node).
-            let before = (self.stats.started, self.stats.lines);
-            let spec = StartSpec { target, initiator: req.initiator, bindings: vec![Some(req.npc.clone())], force: info.flags & hooks::FLAG_INTERRUPTS != 0 };
-            if let Some(id) = self.start(spec, env) {
-                if self.stats.started > before.0 || self.stats.lines > before.1 {
-                    let unit = self.crand() as f32 / 32767.0;
-                    self.hooks.fired(&req.npc, &req.hook, now, unit);
-                    return Ok(id);
+        let split = req.oneshot_trees.min(req.trees.len());
+        for cat in [&req.trees[..split], &req.trees[split..]] {
+            let mut found = false;
+            for &tree in cat {
+                let mut t = Some(tree);
+                let mut chain_found = false;
+                for _ in 0..32 {
+                    let Some(tr) = t else { break };
+                    let tt = &db.trees[tr as usize];
+                    t = tt.fallback;
+                    let Some(&h) = tt.hooks.iter().find(|h| matches!(&db.node(**h).kind, NodeKind::Hook { hook, .. } if hook.eq_ignore_ascii_case(&req.hook))) else { continue };
+                    chain_found = true;
+                    let target = match tt.oneshot {
+                        Some(o) => Target::Hook { oneshot: o, hook: h, output },
+                        None => Target::TreeHook { tree: tr, hook: h, output },
+                    };
+                    // Content: a conversation started, or lines spoken straight from the hook graph
+                    // (the generic bark trees go hook -> random branch -> blurbs).
+                    let before = (self.stats.started, self.stats.lines);
+                    self.fallback_hit = false;
+                    let spec = StartSpec { target, initiator: req.initiator, bindings: vec![Some(req.npc.clone())], force: info.flags & hooks::FLAG_INTERRUPTS != 0 };
+                    if let Some(id) = self.start(spec, env) {
+                        if self.stats.started > before.0 || self.stats.lines > before.1 {
+                            let unit = self.crand() as f32 / 32767.0;
+                            self.hooks.fired(&req.npc, idx, &info, now, unit);
+                            return Ok(id);
+                        }
+                    }
+                    if !self.fallback_hit {
+                        break;
+                    }
                 }
+                // A chain that ended asking for a fallback counts as not found.
+                if chain_found && !self.fallback_hit {
+                    found = true;
+                }
+            }
+            if found {
+                return Err(HookRejection::NoContent);
             }
         }
         Err(HookRejection::NoContent)
+    }
+
+    /// The bark manager's tick (`DisConvGlobalMan` 0x00ca71c0 -> `FUN_00ca5b20`): every fire
+    /// group from 12 (GameplayImportant) down to 0 (Casual), each with its Loud then Quiet list:
+    /// - firing hooks whose speaker changed side of the 2000 uu audio distance move lists;
+    /// - a locked list counts its lockout down;
+    /// - group room = the list's cap minus its playing hooks (a cap below 1 is unlimited);
+    ///   every playing hook of a group that does not ignore the global cap uses one of the 5
+    ///   Loud / 5 Quiet global slots;
+    /// - with room, the pending requests are weighed (`1 - d / 5000 + rand * 0.2 / 32767`, 0
+    ///   beyond 5000 uu but for `DDH_KISMET_ACTIVATED`; 0 past the per-initiator cap) and fired
+    ///   best first: each attempt uses one unit of group room, each success one global slot;
+    ///   the rest (and every request of a list without room) are dropped.
+    ///
+    /// Then every list drops the hooks that stopped playing; a list whose group has a minimum
+    /// spacing locks for that long from the end of each one.
+    pub fn tick_hooks(&mut self, dt: f32, env: &mut dyn ConvEnv) {
+        let s = self.db.settings.clone();
+        if self.queue.lists.len() < 26 {
+            self.queue.lists.resize_with(26, Default::default);
+        }
+        let mut slots = s.max_at_once;
+        for g in (0..13usize).rev() {
+            // Re-classify the playing hooks (Loud <-> Quiet).
+            for t in 0..2 {
+                let mut k = 0;
+                while k < self.queue.lists[g * 2 + t].firing.len() {
+                    let quiet = self.is_quiet(&self.queue.lists[g * 2 + t].firing[k].request.npc, env) as usize;
+                    if quiet != t {
+                        let q = self.queue.lists[g * 2 + t].firing.remove(k);
+                        self.queue.lists[g * 2 + quiet].firing.push(q);
+                    } else {
+                        k += 1;
+                    }
+                }
+            }
+            let cfg = s.fire_groups[g];
+            for t in 0..2 {
+                let li = g * 2 + t;
+                {
+                    let l = &mut self.queue.lists[li];
+                    if l.locked {
+                        l.lockout -= dt;
+                        if l.lockout <= 0.0 {
+                            l.locked = false;
+                        }
+                    }
+                }
+                let firing = self.queue.lists[li].firing.len() as i32;
+                let cap = cfg.max_per_group[t];
+                let unlimited = cap < 1;
+                let mut room = if unlimited { 0 } else { cap - firing };
+                if !cfg.ignore_global_cap {
+                    slots[t] -= firing;
+                }
+                let room_group = room > 0 || unlimited;
+                let room_global = slots[t] >= 1 || cfg.ignore_global_cap;
+                let pending = std::mem::take(&mut self.queue.lists[li].pending);
+                if pending.is_empty() {
+                    continue;
+                }
+                let mut order: Vec<(f32, usize)> = Vec::with_capacity(pending.len());
+                if room_group && room_global {
+                    // Weights (`FUN_00ca2580`), with this tick's per-initiator tally.
+                    let icap = cfg.max_per_initiator[t];
+                    let mut inflight: BTreeMap<u32, usize> = BTreeMap::new();
+                    for (i, q) in pending.iter().enumerate() {
+                        let d = env.listener_distance(&q.request.npc).unwrap_or(0.0);
+                        let roll = self.crand();
+                        let mut w = hooks::bark_weight(&s, q.hook, d, roll);
+                        let in_range = d < s.max_distance || q.hook == 10;
+                        if in_range && icap > 0 {
+                            if let Some(who) = q.request.initiator.filter(|w| q.request.owner != Some(*w)) {
+                                let count = self.queue.initiator_count(t == 1, who);
+                                match inflight.get_mut(&who) {
+                                    None => {
+                                        inflight.insert(who, 1);
+                                    }
+                                    Some(n) if count + *n < icap as usize || self.running_with(&q.request.npc, who) => *n += 1,
+                                    Some(_) => w = 0.0,
+                                }
+                            }
+                        }
+                        order.push((w, i));
+                    }
+                    order.sort_by(|a, b| b.0.total_cmp(&a.0));
+                }
+                let mut done = vec![false; pending.len()];
+                for &(w, i) in &order {
+                    if (room < 1 && !unlimited) || w < 0.0001 {
+                        break;
+                    }
+                    let q = &pending[i];
+                    done[i] = true;
+                    let res = self.fire_now(&q.request, q.hook, q.output, env);
+                    self.log_fire(&q.request, res);
+                    if let Ok(id) = res {
+                        self.queue.lists[li].firing.push(QueuedHook { instance: Some(id), ..q.clone() });
+                        if !cfg.ignore_global_cap {
+                            slots[t] -= 1;
+                            if slots[t] < 1 {
+                                break;
+                            }
+                        }
+                    }
+                    room -= 1;
+                }
+                // Not fired this tick: dropped (reason 5).
+                for (i, q) in pending.iter().enumerate() {
+                    if !done[i] {
+                        self.events.push(ConvEvent::Hook { npc: q.request.npc.clone(), hook: q.request.hook.clone(), result: Err(HookRejection::Dropped), instance: None });
+                    }
+                }
+            }
+        }
+        // Housekeeping: a hook plays while its instance runs.
+        for g in 0..13usize {
+            let spacing = s.fire_groups[g].min_time_between;
+            for t in 0..2 {
+                let li = g * 2 + t;
+                let before = self.queue.lists[li].firing.len();
+                let active: Vec<bool> = self.queue.lists[li].firing.iter().map(|q| q.instance.is_some_and(|id| self.instances.iter().any(|x| x.id == id && x.wait != Wait::Done))).collect();
+                let mut k = 0;
+                self.queue.lists[li].firing.retain(|_| {
+                    k += 1;
+                    active[k - 1]
+                });
+                let ended = before - self.queue.lists[li].firing.len();
+                if ended > 0 && spacing > 0.0001 {
+                    let l = &mut self.queue.lists[li];
+                    l.locked = true;
+                    l.lockout = spacing;
+                }
+            }
+        }
     }
 
     /// Speaker identity for memories and engagement: the bound NPC, the player, or the
@@ -526,10 +926,11 @@ impl Runner {
             }
             if ok {
                 if let Some(key) = self.speaker_key(idx, slot) {
-                    for other in self.active().filter(|o| o.id != me && o.conversation.is_some()) {
-                        let oc = other.conversation.unwrap();
-                        let oi = self.instances.iter().position(|x| x.id == other.id).unwrap();
-                        if !self.npc_keys(oi, oc).contains(&key) {
+                    // Every state the speaker is in: conversations naming it and hook walks bound
+                    // to it (barks, R4).
+                    for oi in self.speaker_instances(&key) {
+                        let other = &self.instances[oi];
+                        if other.id == me {
                             continue;
                         }
                         let locked = other.hook.as_deref().is_some_and(|h| hooks::hook_info(h).flags & hooks::FLAG_NOT_INTERRUPTIBLE != 0);
@@ -549,7 +950,14 @@ impl Runner {
             .instances
             .iter()
             .enumerate()
-            .filter(|(i, o)| o.id != me && o.wait != Wait::Done && o.conversation.is_some_and(|oc| self.npc_keys(*i, oc).iter().any(|k| keys.contains(k))))
+            .filter(|(i, o)| {
+                o.id != me
+                    && o.wait != Wait::Done
+                    && match o.conversation {
+                        Some(oc) => self.npc_keys(*i, oc).iter().any(|k| keys.contains(k)),
+                        None => o.owner().is_some_and(|n| keys.iter().any(|k| k == n)),
+                    }
+            })
             .map(|(_, o)| o.id)
             .collect();
         for o in others {
@@ -1004,7 +1412,12 @@ impl Runner {
                 }
                 Step::Out(n)
             }
-            NodeKind::TryFallbackTree => Step::End(EndReason::Finished),
+            // `Evaluate` (0x00ca7b20) flags the walk state "continue to the fallback tree"
+            // (`FUN_00c8b290`) and stops the walk.
+            NodeKind::TryFallbackTree => {
+                self.fallback_hit = true;
+                Step::End(EndReason::Finished)
+            }
             NodeKind::Hook { .. } | NodeKind::Speaker { .. } | NodeKind::LookAt { .. } | NodeKind::Other => Step::Out(0),
         }
     }

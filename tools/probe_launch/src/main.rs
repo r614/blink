@@ -163,6 +163,37 @@ fn main() -> Result<()> {
         "kill" => kill_session()?,
         "session" => session::run(&args[1..])?,
         "queue" => queue::run(&args[1..])?,
+        "tracediff" => {
+            // tracediff <old dir> <new dir> [tol]: for every trace file in both, the first
+            // divergence and the worst channel difference (two captures of the original).
+            use dishonored_oracle::{cache, diff, trace::Trace};
+            let (a, b) = (PathBuf::from(args.get(1).context("old dir")?), PathBuf::from(args.get(2).context("new dir")?));
+            let tol: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.5);
+            let mut stack = vec![a.clone()];
+            while let Some(d) = stack.pop() {
+                for e in std::fs::read_dir(&d)?.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                        continue;
+                    }
+                    if !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("trace-")) {
+                        continue;
+                    }
+                    let q = b.join(p.strip_prefix(&a)?);
+                    if !q.exists() {
+                        println!("{}\tmissing in new", p.strip_prefix(&a)?.display());
+                        continue;
+                    }
+                    let (_, (_, ta)): (_, (cache::Provenance, Trace)) = cache::decode(&std::fs::read(&p)?)?;
+                    let (_, (_, tb)): (_, (cache::Provenance, Trace)) = cache::decode(&std::fs::read(&q)?)?;
+                    let dd = diff::first_divergence(&ta, &tb, &|_| tol);
+                    let worst = dd.worst.iter().filter(|(k, _)| !k.starts_with("world.")).max_by(|x, y| x.1.0.total_cmp(&y.1.0)).map(|(k, v)| format!("{k} {:.2} @{}", v.0, v.1)).unwrap_or_default();
+                    let first = dd.first.map(|f| format!("tick {} {:?}", f.tick, f.kind)).unwrap_or_else(|| "same".into());
+                    println!("{}\t{}\tworst {}", ta.scenario, first.chars().take(160).collect::<String>(), worst);
+                }
+            }
+        }
         "scenario" => capture::run(&args[1..])?,
         "ping" => println!("{:?}", connect()?.ping()?),
         "status" => print!("{}", connect()?.status()?),
@@ -251,7 +282,8 @@ fn main() -> Result<()> {
             for v in [x, y, z] {
                 b.extend(v.to_le_bytes());
             }
-            c.write(pawn + 0xc4, &b)?;
+            let _ = b;
+            lab::move_actor(&mut c, pawn, [x, y, z])?;
             c.key("W", true)?;
             c.wait_ticks(1)?;
             c.key("W", false)?;

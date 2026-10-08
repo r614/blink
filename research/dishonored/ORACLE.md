@@ -624,32 +624,39 @@ actor is placed, rotated and scaled first and the mesh set last (with `BlockRigi
 radius, falloff and shadow flag (34 on the Playground); `from` lights are the host's own. Not
 built: labels and the nav grid; no lightmass (dynamic lights only, as the port's layout).
 
-The player's light value (`DishonoredVisibilityComponent.m_fCurrentLightValue` +0x68,
-normalized +0x6C) is only re-evaluated when the stance changes into sneak: a stationary or
-walking measurement keeps the previous value (the 0.588 read everywhere until this was found).
-Measured on the original Playground, sneaking (C tapped at each point, 40 ticks), x/y in layout
-coordinates:
+**Placement goes through the engine (fixed 2026-10-08).** Writing an actor's `Location` leaves
+its components behind: the collision cylinder's `Bounds` keep the old spot, and everything
+derived from them goes stale (the pawn's Tick 0x00B50720 copies the cylinder bounds into the
+stealth light environment `m_pStealthLightingDLE` OverriddenBounds each tick: the light value
+read 0.588 everywhere; touch / overlap volumes, collision queries against the pawn and attention
+traces likewise). Every placement now calls `Actor.SetLocation` / `SetRotation` through the
+native exec (`lab::move_actor`: the player, NPCs, `session write` of Location / Rotation /
+DrawScale on an actor, and all the legacy `measure` commands), falling back to a write plus
+`ForceUpdateComponents` when the engine refuses the move. Light values measured on the
+original Playground, standing still after a SetLocation placement, then after walking 300 uu
+into the point with W (both without stance changes; the walk overshoots about 100 uu and stops
+at the lamp posts):
 
-| point | light | normalized |
+| point | light (placed) | light (walked in, end position) |
 |---|---|---|
-| (-5200, 6000) | 0.1838 | 0.0000 |
-| (-4500, 6450) | 0.3029 | 0.3429 |
-| (-3500, 6450) | 0.5382 | 1.0000 |
-| (-2500, 6450) | 0.3820 | 0.6068 |
-| (-1500, 6450) | 0.5382 | 1.0000 |
-| (-500, 6600) | 0.2980 | 0.3265 |
-| (500, 6600) | 0.1838 | 0.0000 |
-| (1500, 7100) | 0.1838 | 0.0000 |
-| (3000, 7100) | 0.1838 | 0.0000 |
-| (4500, 7100) | 0.1838 | 0.0000 |
-| (1500, 7850) | 0.1838 | 0.0000 |
-| (-1300, 7850) | 0.1838 | 0.0000 |
-| (-3500, 4000) | 0.3225 | 0.4082 |
-| (0, -5500) | 0.3919 | 0.6397 |
-| (-4600, -3900) | 0.4106 | 0.7021 |
+| (-5200, 6000) | 0.1838 | 0.1838 at (-5,103, 6,000) |
+| (-4500, 6450) | 0.3747 | 0.3478 at (-4,403, 6,450) |
+| (-3500, 6450) | 0.5417 | 0.5413 at (-3,557, 6,454) |
+| (-2500, 6450) | 0.3990 | 0.3913 at (-2,403, 6,450) |
+| (-1500, 6450) | 0.5417 | 0.5414 at (-1,557, 6,454) |
+| (-500, 6600) | 0.2342 | 0.2588 at (-403, 6,600) |
+| (500, 6600) | 0.1838 | 0.1838 at (597, 6,600) |
+| (1500, 7100) | 0.1838 | 0.1838 at (1,597, 7,100) |
+| (3000, 7100) | 0.1838 | 0.1838 at (3,097, 7,100) |
+| (4500, 7100) | 0.1838 | 0.1838 at (4,597, 7,100) |
+| (1500, 7850) | 0.1838 | 0.1838 at (1,445, 7,850) |
+| (-1300, 7850) | 0.1838 | 0.1838 at (-1,555, 7,850) |
+| (-3500, 4000) | 0.3238 | 0.3240 at (-3,403, 4,000) |
+| (0, -5500) | 0.3935 | 0.3941 at (97, -5,500) |
+| (-4600, -3900) | 0.4154 | 0.4146 at (-4,503, -3,900) |
 
-The dark east half and the alcoves read the floor value 0.1838 (no light reaches them); the lit
-west half peaks 0.5382 under the lamps at x -3500 / -1500. Measured on the original Playground:
+The two agree within the position difference; the dark half and alcoves sit at 0.1838, the lit
+half peaks 0.5417 under the lamps (the earlier sneak-toggle readings were within 0.07 of these). Measured on the original Playground:
 `movement/step_50` climbed (z 91.2 -> 141.2), `step_56` not, the 45 degree slope walked at
 400 uu/s to its 400 top, the 55 degree slope not.
 
@@ -818,7 +825,7 @@ projectile, live effects / particles, and per named NPC position, yaw, health, c
 state, stance, attention on the player (value, level, LOS norm, sighted), suspicion and time
 scale. Enumerated channels carry a fixed legend in their unit (`enum:Walking,Falling,...`,
 declaration order). Events: `Sim` (every SimEvent with `key=value` details, ids as names),
-`Kismet` (activations), `Projectile` / `ProjectileEnd` (player shots carry their offset from
+`Kismet` (one per op `Activated` / `Deactivated`, in call order, object named like the hook's `short_path`: `Package:Outer.Name`; until 2026-10-08 this kind carried the Kismet host's log notes, so the "39 activations" of `kismet/boyle_start` were 39 notes: systems/kismet.md F-6, F-14), `KismetNote` (the host's notes, port only, not compared), `Projectile` / `ProjectileEnd` (player shots carry their offset from
 the view in 720-line pixels, `off_px`, the dispersion, `disp`, and `rd` = off / disp),
 `Console`, and the presentation events below.
 
