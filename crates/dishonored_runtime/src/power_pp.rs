@@ -91,8 +91,23 @@ pub fn bend_intensity(elapsed: f32, duration: f32) -> f32 {
     up.min(down)
 }
 
-fn drive(view: Option<Res<SessionView>>, time: Res<Time>, mut lids: Local<EyelidState>, mut q: Query<&mut ArkPostSource>) {
+/// Blink's use of the Bend Time blur (`m_BendTimeIntensity` captured during a level-2 Blink,
+/// `effects/blink_l2.json`): it rises by 0.153 per 60 Hz frame while the pawn travels and decays
+/// by 0.57 every 5 frames afterwards (a time constant of 0.148 s), from the captured curves.
+pub const BLINK_BT_RISE: f32 = 9.2;
+pub const BLINK_BT_DECAY: f32 = 0.148;
+
+pub fn blink_bend_step(x: f32, travelling: bool, dt: f32) -> f32 {
+    if travelling { (x + BLINK_BT_RISE * dt).min(1.0) } else { x * (-dt / BLINK_BT_DECAY).exp() }
+}
+
+fn drive(view: Option<Res<SessionView>>, time: Res<Time>, mut lids: Local<EyelidState>, mut blink_bt: Local<f32>, mut q: Query<&mut ArkPostSource>) {
     let me = view.as_ref().and_then(|v| v.me.as_ref());
+    let travelling = me.is_some_and(|m| m.mode == dishonored_sim::state::MoveMode::Blinking);
+    *blink_bt = blink_bend_step(*blink_bt, travelling, time.delta_secs());
+    if *blink_bt < 1e-3 {
+        *blink_bt = 0.0;
+    }
     // Dark Vision's eyelids (LIKELY: the blink on both edges; the capture shows the pass only
     // while the power is on, with its constants not recorded).
     let dv_on = me.is_some_and(|m| m.vitals.dark_vision_remaining > 0.0);
@@ -116,6 +131,7 @@ fn drive(view: Option<Res<SessionView>>, time: Res<Time>, mut lids: Local<Eyelid
         (Some(v), Some(me)) => v.time_bends.iter().find(|b| b.caster == me.id).map(|b| bend_intensity(b.elapsed, b.duration)).unwrap_or(0.0),
         _ => 0.0,
     };
+    let bend = bend.max(*blink_bt);
     let rate = me.map(|m| m.time_scale).unwrap_or(1.0);
     for mut src in &mut q {
         let t = src.bend_time + time.delta_secs() * rate;
