@@ -9,7 +9,7 @@
     ticks: 90,
     input: [(tick: 5, action: Press(Jump))],
     checkpoints: [
-        (name: "airtime", expect: [(metric: Between("Sim:Jumped", "Sim:Landed"), value: 0.533, tol: 0.017, source: "INSTRUMENTATION.md 2026-10-06: airtime 0.533 s from the parabola fit (2 x 800 / 3000)")]),
+        (name: "airtime", expect: [(metric: Between("Sim:Jumped", "Sim:Landed"), value: 0.533, tol: 0.017, source: "INSTRUMENTATION.md 2026-10-06: airtime 0.533 s from a parabola fit (2 x 800 / 3000), not the interval between the jump and landing events of a fixed-step trace", status: Unverified)]),
         (name: "apex", expect: [(metric: RiseFrom("pawn.z", 0), value: 106.67, tol: 1, source: "INSTRUMENTATION.md 2026-10-06 / HOOK_TRIAGE.md (60 Hz): apex 106.67 uu")]),
     ],
     record: [Pawn, SimEvents],

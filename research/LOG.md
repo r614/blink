@@ -1763,3 +1763,15 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Tools:** `crates/dishonored_probe_dll/src/{tick,reflect,script}.rs`, protocol 5 in `crates/dishonored_probe`, `tools/probe_launch/src/{session,reflect,capture}.rs`; `dishonored_oracle::diff::first_divergence` compares the event kinds both sides record. Docs: ORACLE.md "Original side: the hooked session", INSTRUMENTATION.md.
 - **Confidence:** CONFIRMED (measured live) for the layouts, the call paths and the jump ticks.
 - **Open:** U-800 (Kismet always runs in the original), U-801 (story flags not set by the runner), U-802 (NPC setup from tweaks / AI states), U-803 (sounds are not traced), U-804 (snap height and floor hover differ at tick 0).
+
+## 2026-10-08 — Oracle phase 4: port rule fixes found by the scenario library
+- **Question:** Which Measured / Static scenario failures are port rule bugs, and what is the original's rule?
+- **Evidence:** Ghidra (pool scripts FuncDecomp / OffsetScan / G_Callers): reload contexts 0x00C2AA80 / 0x00C2AC00 (f32 countdown, actions end when the f32 anim time reaches AnimStateExit); DishonoredCamera_Lean (vtable 0x0111E890): spring 0x00AC0A00 (k 80, c 12), 0x00AC5950 (external force, circle around the pivot), 0x00AC5540 (limit and soften), lean speed 1000 via 0x00A76590 -> 0x00AC0950; NPC rotation intents 0x00B799C0 / 0x00B6E970 / 0x00B71570 / 0x00B71600; hook jump trace 2026-10-08; snap line check 0x20DF.
+- **Result:**
+  - Jump: the press tick only launches (Velocity.Z 800, Falling, no move); the fall starts next tick. `movement.rs` walking(): decide the jump, walk the tick, then launch. Matches the hook trace (`movement/jump_standing`).
+  - Lean: rebuilt as the decoded spring point; the head's sideways displacement matches the original per tick (13.33 / 26.31 / 62.7). The angle still differs (lean height smoothing, U-867).
+  - Reloads: tick counts from the decoded countdown / anim-time rule (`ReloadTiming::ticks`, `action_ticks`, `countdown_ticks`); the shot leaves one tick after the fire action starts. Crossbow fire action still 2 ticks long (U-868).
+  - Sword sheathed state (`PlayerState.sword_sheathed`, protocol 9): the original runs 400 / 600 with the sword away.
+  - Hearing: the attention rule matches (0.6); the escalation to combat comes from instant NPC turning and the port-only `criminal()` rule (U-862).
+- **Confidence:** CONFIRMED for jump order, head displacement, reload stages; LIKELY for the hearing cause.
+- **Implementation consequence:** `oracle scenario --all`: 46 scenarios, 37 pass / 4 fail / 5 unmeasured (before: 35 pass / 6 fail of 41).
