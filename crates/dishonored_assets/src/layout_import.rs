@@ -85,6 +85,7 @@ pub fn import_layout(content: &Content, layout: &MapLayout, opts: &ImportOptions
             trace_mask: dishonored_ir::all_trace_types(),
             reflect_channels: 0,
             stealth_shadow: interp_shadow && b.collide,
+            lighting_channels: 0,
         });
     }
     for (i, m) in layout.meshes.iter().enumerate() {
@@ -110,6 +111,7 @@ pub fn import_layout(content: &Content, layout: &MapLayout, opts: &ImportOptions
             trace_mask: dishonored_ir::all_trace_types(),
             reflect_channels: 0,
             stealth_shadow: interp_shadow && m.collide && has_collision,
+            lighting_channels: 0,
         });
         imp.stats.static_mesh_actors += 1;
     }
@@ -260,6 +262,8 @@ fn layout_light(imp: &Importer, l: &LayoutLight, layout_slots: usize) -> std::re
         casts_shadows: l.shadows,
         guid: [0; 4],
         function: None,
+        axes: [Vec3::ZERO; 2],
+        lighting_channels: dishonored_ir::lighting_channel::LIGHT_DEFAULT,
     }))
 }
 

@@ -155,6 +155,9 @@ fn base_raw_textures(base: &str) -> Option<&'static [&'static str]> {
         "Volume_Light_PMAT" => Some(&["LightRays_Mask_R"]),
         // Falling water sheets (runtime spillway.rs): base passes 1584 / 1585 / 1595 / 1596.
         "water_spillway_translu_PMAT" => Some(&["Normal", "SpillWay_Texture"]),
+        // Lens flares (runtime lens_flare.rs): the flare mask (`L_Enable_LensFlare_Mask`) and the
+        // dust (`Du_Enable_Dust_panner`), base passes 2649 / 2651.
+        "LensFlare_PMAT" => Some(&["L_Lensflare_Mask", "Du_Dust_Texture"]),
         // The island sea (runtime water_foam.rs): base passes 37072 .. 37076.
         "water_Foam_MAT" => Some(&["W_Waves_normalmap", "W_Waves_normalrain", "F_Foam_Mask", "F_Foam_Distortion", "F_Foam_Texture"]),
         _ => None,
@@ -175,6 +178,7 @@ fn base_uses_expression_textures(base: &str) -> bool {
 }
 
 const RESOURCE_CLASSES: &[&str] = &[
+    "LensFlare",
     "StaticMesh",
     "Texture2D",
     "Material",
@@ -292,6 +296,7 @@ pub fn import_level(
     imp.stats.unresolved_paths.dedup();
     imp.stats.material_chain_breaks.sort();
     imp.stats.material_chain_breaks.dedup();
+    imp.map.streamed_levels = crate::kismet_streamed_levels(content, name);
     imp.stats.instances = imp.map.instances.len();
     imp.stats.meshes = imp.map.meshes.len();
     imp.stats.materials = imp.map.materials.len();
@@ -326,6 +331,44 @@ pub(crate) fn channel_mask(props: &[Property], name: &str, base: u32) -> u32 {
         }
     }
     m
+}
+/// A `LightingChannelContainer` property as a bit set (`dishonored_ir::lighting_channel`): the
+/// struct's serialized bools over `base` (the owner's class default); `None` without the property.
+pub(crate) fn lighting_mask(props: &[Property], name: &str, base: u32) -> Option<u32> {
+    let Some(Value::Struct(_, s)) = find(props, name).map(|p| &p.value) else { return None };
+    let mut m = base;
+    for (i, n) in dishonored_ir::lighting_channel::NAMES.iter().enumerate() {
+        if let Some(Value::Bool(b)) = find(s, n).map(|p| &p.value) {
+            if *b {
+                m |= 1 << i;
+            } else {
+                m &= !(1 << i);
+            }
+        }
+    }
+    Some(m)
+}
+/// A cooked `FRawDistributionFloat/Vector` of a lens flare element as a [`dishonored_ir::particles::Dist`]
+/// (the decoding of `particles::dist`: `[min, max, samples...]`, chunk size, time scale); one the
+/// cooked struct omits is the class default's constant `default` (`Default__LensFlare.Distribution*`).
+fn lens_dist(props: &[Property], name: &str, dims: u8, default: [f32; 3]) -> dishonored_ir::particles::Dist {
+    use dishonored_ir::particles::Dist;
+    let Some(Value::Struct(_, s)) = find(props, name).map(|p| &p.value) else { return Dist::constant(default, dims) };
+    let Some((_, raw)) = find(s, "LookupTable").and_then(|p| p.array_raw()) else { return Dist::constant(default, dims) };
+    let table: Vec<f32> = raw.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let byte = |n: &str, d: u8| match find(s, n).map(|p| &p.value) {
+        Some(Value::Byte(b)) => *b,
+        Some(Value::Int(i)) => *i as u8,
+        _ => d,
+    };
+    let float = |n: &str| find(s, n).and_then(|p| p.as_float()).unwrap_or(0.0);
+    let op = byte("Op", 1);
+    let elems = byte("LookupTableNumElements", 1).max(1);
+    let chunk = byte("LookupTableChunkSize", elems * dims).max(1) as usize;
+    if table.len() < 2 + chunk {
+        return Dist::constant(default, dims);
+    }
+    Dist { table: table[2..].to_vec(), dims: (chunk / elems as usize).clamp(1, 3) as u8, ranged: elems >= 2 && matches!(op, 2 | 3), extreme: op == 3, time_scale: float("LookupTableTimeScale"), start_time: float("LookupTableStartTime") }
 }
 fn rot_matrix(props: &[Property], name: &str) -> Mat4 {
     match find(props, name).and_then(|p| p.as_rotator()) {
@@ -418,6 +461,7 @@ impl Importer<'_> {
                     }
                 }
                 "DisFog" if self.is_in_persistent_level(&pkg, i) => self.import_fog(slot, i),
+                "LensFlareSource" if self.opts.particles && self.opts.load_textures && self.is_in_persistent_level(&pkg, i) => self.import_lens_flare(slot, i),
                 "Emitter" if self.opts.particles && self.opts.load_textures && self.is_in_persistent_level(&pkg, i) => self.import_emitter(slot, i),
                 c if (c.ends_with("Light") || c.contains("LightToggleable") || c.contains("LightMovable")) && self.is_in_persistent_level(&pkg, i) => {
                     self.import_light(slot, i, c);
@@ -507,6 +551,97 @@ impl Importer<'_> {
             transform,
             source: format!("{}:{}", pkg.name, pkg.obj_path(ObjRef::Export(actor))),
             auto_activate: bool_or(&ch.properties, "bAutoActivate", true),
+        });
+    }
+
+    /// A placed `LensFlareSource`: its `LensFlareComponent`'s template (own `Template`, else the
+    /// archetype's: the candle prefab's source names it there), the template's source element and
+    /// the actor's position. Distributions the cooked element omits take the class defaults
+    /// (`Default__LensFlare.Distribution*`).
+    fn import_lens_flare(&mut self, slot: usize, actor: usize) {
+        let pkg = self.pkgs[slot].clone();
+        let Ok(h) = pkg.read_object(actor) else { return };
+        let Some(ObjRef::Export(ci)) = find(&h.properties, "LensFlareComp").and_then(|p| p.as_object()).map(ObjRef::from_index) else { return };
+        let Ok(ch) = pkg.read_object(ci) else { return };
+        let template = match find(&ch.properties, "Template").and_then(|p| p.as_object()).filter(|o| *o != 0) {
+            Some(t) => self.resolve(slot, ObjRef::from_index(t)).map(|k| self.pkgs[k.0].obj_path(ObjRef::Export(k.1))),
+            None => self.resolver.inherited_object_path(&pkg, ci, "Template"),
+        };
+        let source = format!("{}:{}", pkg.name, pkg.obj_path(ObjRef::Export(actor)));
+        let Some(tk) = template.as_ref().and_then(|p| self.index.get(&p.to_ascii_lowercase()).copied()) else {
+            self.stats.errors.push(format!("lens flare {source}: no template ({template:?})"));
+            return;
+        };
+        let tpkg = self.pkgs[tk.0].clone();
+        let Ok(th) = tpkg.read_object(tk.1) else { return };
+        let defaults = <Self as crate::particles::ParticleCtx>::class_default(self, "LensFlare");
+        let inner =|props: &[Property], name: &str| match find(props, name).map(|p| &p.value) {
+            Some(Value::Struct(_, s)) => s.clone(),
+            _ => Vec::new(),
+        };
+        let own = inner(&th.properties, "SourceElement");
+        let def = inner(&defaults, "SourceElement");
+        let get = |n: &str| find(&own, n).or_else(|| find(&def, n)).map(|p| &p.value);
+        let flag = |n: &str, d: bool| match get(n) {
+            Some(Value::Bool(b)) => *b,
+            _ => d,
+        };
+        let mut materials = Vec::new();
+        if let Some(p) = find(&own, "LFMaterials").or_else(|| find(&def, "LFMaterials")) {
+            for m in p.array_objects().unwrap_or_default() {
+                if let Some(id) = self.resolve(tk.0, ObjRef::from_index(m)).and_then(|k| self.material(k)) {
+                    materials.push(id);
+                }
+            }
+        }
+        let dist = |name: &str, dims: u8, d: [f32; 3]| lens_dist(&own, name, dims, d);
+        let element = LensFlareElement {
+            size: match get("Size") {
+                Some(Value::Vector(v)) => Vec3::from(*v),
+                _ => Vec3::splat(75.0),
+            },
+            ray_distance: match get("RayDistance") {
+                Some(Value::Float(f)) => *f,
+                _ => 0.0,
+            },
+            enabled: flag("bIsEnabled", true),
+            use_source_distance: flag("bUseSourceDistance", false),
+            normalize_radial_distance: flag("bNormalizeRadialDistance", false),
+            modulate_color_by_source: flag("bModulateColorBySource", false),
+            materials,
+            // `Default__LensFlare.Distribution*` constants.
+            material_index: dist("LFMaterialIndex", 1, [0.0; 3]),
+            scaling: dist("Scaling", 1, [1.0; 3]),
+            axis_scaling: dist("AxisScaling", 3, [1.0, 1.0, 0.0]),
+            rotation: dist("Rotation", 1, [0.0; 3]),
+            color: dist("Color", 3, [1.0; 3]),
+            alpha: dist("Alpha", 1, [1.0; 3]),
+            offset: dist("Offset", 3, [0.0; 3]),
+            dist_scale: dist("DistMap_Scale", 3, [1.0; 3]),
+            dist_color: dist("DistMap_Color", 3, [1.0; 3]),
+            dist_alpha: dist("DistMap_Alpha", 1, [1.0; 3]),
+        };
+        let bounds = match (find(&th.properties, "bUseFixedRelativeBoundingBox").map(|p| &p.value), find(&th.properties, "FixedRelativeBoundingBox").map(|p| &p.value)) {
+            (Some(Value::Bool(true)), Some(Value::Raw(_, b))) if b.len() == 25 && b[24] != 0 => {
+                let f = |i: usize| f32::from_le_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]]);
+                Some([Vec3::new(f(0), f(1), f(2)), Vec3::new(f(3), f(4), f(5))])
+            }
+            _ => None,
+        };
+        let reflections = find(&th.properties, "Reflections").and_then(|p| p.array_structs(&tpkg).ok()).map(|a| a.len()).unwrap_or(0);
+        let world = actor_transform(&h.properties) * component_transform(&ch.properties);
+        self.map.lens_flares.push(LensFlareSource {
+            source,
+            template: template.unwrap_or_default(),
+            position: world.w_axis.truncate(),
+            bounds,
+            hidden: bool_or(&h.properties, "bHidden", false),
+            source_color: match find(&ch.properties, "SourceColor").map(|p| &p.value) {
+                Some(Value::LinearColor(c)) => *c,
+                _ => [1.0; 4],
+            },
+            element,
+            reflections,
         });
     }
 
@@ -651,10 +786,22 @@ impl Importer<'_> {
             };
             Some(LightFunction::Flicker { speed1: scalar("F_Flickering_1_speed").unwrap_or(d1), speed2: scalar("F_Flickering_2_speed").unwrap_or(d2), material: path })
         } else if lower.contains("casutics_lightfunction") || lower.contains("caustic") {
+            // The textures its pixel shaders sample (`Texture2D_0` = Tex#0, `Texture2D_1` = Tex#1)
+            // are the unnamed expression textures of the material's native data.
+            let mut textures = [None, None];
+            if let Some(k) = self.resolve(slot, mref) {
+                let pkgs = self.pkgs.clone();
+                let chain = material_chain::walk(&pkgs, k, &mut |s, r| self.resolve(s, r));
+                for (i, t) in chain.expression_textures.iter().take(2).enumerate() {
+                    textures[i] = self.texture(*t);
+                }
+            }
             Some(LightFunction::Caustics {
                 speed: scalar("Speed").unwrap_or(0.35),
                 color: vec_params.iter().find(|(k, _)| k == "CausticColor").map(|(_, v)| *v).unwrap_or([0.859174; 3]),
-                scale: find(&fh.properties, "Scale").and_then(|p| p.as_vector()).map(|v| v[0]).unwrap_or(1.0),
+                // `Default__LightFunction.Scale`.
+                scale: find(&fh.properties, "Scale").and_then(|p| p.as_vector()).unwrap_or([1024.0; 3]),
+                textures,
             })
         } else {
             self.stats.errors.push(format!("unknown light function material {path}"));
@@ -756,6 +903,8 @@ pub fn light_from_component(pkg: &Package, actor: &[Property], ci: usize, class:
                 _ => [0; 4],
             },
             function: None,
+            axes: [world.y_axis.truncate().normalize_or(Vec3::Y), world.z_axis.truncate().normalize_or(Vec3::Z)],
+            lighting_channels: lighting_mask(c, "LightingChannels", dishonored_ir::lighting_channel::LIGHT_DEFAULT).unwrap_or(dishonored_ir::lighting_channel::LIGHT_DEFAULT),
         }))
     }
 }
@@ -988,6 +1137,9 @@ impl Importer<'_> {
             trace_mask,
             reflect_channels: channel_mask(&props, "ReflectionChannels", 0),
             stealth_shadow,
+            // `PrimitiveComponent` has no class default for the container: the serialized bools
+            // are the whole set.
+            lighting_channels: lighting_mask(&props, "LightingChannels", 0).unwrap_or(dishonored_ir::lighting_channel::STATIC_MESH_DEFAULT),
         });
         Ok(())
     }
@@ -2050,6 +2202,7 @@ impl Importer<'_> {
             // A render-only copy of a skeletal prop; skeletal components are not modelled as
             // stealth shadow casters (their flags were not decoded).
             stealth_shadow: false,
+            lighting_channels: 0,
         });
         self.stats.skeletal_props += 1;
         Ok(())
