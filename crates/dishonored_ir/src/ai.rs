@@ -254,6 +254,25 @@ pub struct MeleeContextConfig {
     pub max_range: f32,
     #[serde(default = "context_height")]
     pub max_height: f32,
+    /// `DisTweaks_MeleeAttack.m_fAttackDamageMultiplier` of the context (+0xCC): the hit deals
+    /// `round(multiplier x (MeleeDamage + MeleeDamageBonus))` (0x00C07C80). 1.0 for every slash
+    /// (class default); the elite guard sword's `NPCJumpAttack` and every `NPCBash` have 0.
+    /// `None` (configs written before it was read): the elite sword's value for the class.
+    #[serde(default)]
+    pub damage_multiplier: Option<f32>,
+}
+
+impl MeleeContextConfig {
+    /// The context's `m_fAttackDamageMultiplier` (see [`Self::damage_multiplier`]).
+    pub fn attack_damage_multiplier(&self) -> f32 {
+        self.damage_multiplier.unwrap_or_else(|| elite_sword_multiplier(&self.name))
+    }
+}
+
+/// `m_fAttackDamageMultiplier` of `Twk_Inv_SwordEliteGuard`'s pawn-specific contexts: 0 for
+/// `DisTweaks_NPCJumpAttack_4` and `DisTweaks_NPCBash_5`, 1 for the slashes.
+pub fn elite_sword_multiplier(class: &str) -> f32 {
+    if matches!(class, "DisItemContext_NPCJumpAttack" | "DisItemContext_NPCBash") { 0.0 } else { 1.0 }
 }
 
 fn big_range() -> f32 {
@@ -267,7 +286,8 @@ impl MeleeContextConfig {
     /// A context of an attack pattern with its class-default range (`DisTweaks_NPCAttack*`).
     pub fn of_class(name: &str, cooldown: [f32; 2], inhibition: f32) -> Self {
         let (kind, min_range, max_range, max_height) = context_class_defaults(name);
-        MeleeContextConfig { name: name.into(), cooldown, inhibition, kind, min_range, max_range, max_height }
+        let damage_multiplier = Some(elite_sword_multiplier(name));
+        MeleeContextConfig { name: name.into(), cooldown, inhibition, kind, min_range, max_range, max_height, damage_multiplier }
     }
 }
 
@@ -299,6 +319,7 @@ pub fn default_melee_contexts() -> Vec<MeleeContextConfig> {
         MeleeContextConfig { min_range: 0.0, max_range: 170.0, max_height: 100.0, ..MeleeContextConfig::of_class("DisItemContext_NPCAttackStepBack", [0.5, 2.0], 1.0) },
         MeleeContextConfig { min_range: 235.0, max_range: 375.0, max_height: 300.0, ..MeleeContextConfig::of_class("DisItemContext_NPCAttackMedium", [3.0, 5.0], 1.0) },
         MeleeContextConfig { min_range: 375.0, max_range: 570.0, max_height: 200.0, ..MeleeContextConfig::of_class("DisItemContext_NPCAttackLong", [15.0, 20.0], 0.8) },
+        // The elite sword's jump attack deals no damage itself (`m_fAttackDamageMultiplier` 0).
         MeleeContextConfig { min_range: 730.0, max_range: 850.0, max_height: 100.0, ..MeleeContextConfig::of_class("DisItemContext_NPCJumpAttack", [15.0, 20.0], 3.0) },
     ]
 }
@@ -566,6 +587,19 @@ pub struct CombatAiConfig {
     pub dodge: DodgeConfig,
     #[serde(default)]
     pub pistol: PistolConfig,
+    /// `Attribute_MeleeDamage` of the guards' sword by difficulty (Easy, Normal, Hard, Very Hard:
+    /// `Twk_Inv_SwordEliteGuard`'s attributes, cooked into the level script packages; read when
+    /// they are loaded, else these values read from them).
+    #[serde(default = "d_npc_sword_damage")]
+    pub npc_sword_damage: [f32; 4],
+    /// The guard pawns' `Attribute_MeleeDamageBonus` (Normal).
+    #[serde(default)]
+    pub npc_melee_damage_bonus: f32,
+    /// `Attribute_HealthMax` (Normal) of the guard archetype mission guards take: every
+    /// `Pwn_EliteGuard_*` pawn tweak of the Boyle levels resolves to 50 (Lord Shaw 10, tallboys
+    /// 150, weepers 30, aristocrats 10-11 are other archetypes).
+    #[serde(default = "d_guard_health_max")]
+    pub guard_health_max: f32,
 }
 
 /// `EAINoiseContext` (DisGlobalEnums, in enum order).
@@ -723,6 +757,16 @@ impl Default for NoiseTable {
         }
     }
 }
+fn d_npc_sword_damage() -> [f32; 4] {
+    [10.0, 15.0, 20.0, 30.0]
+}
+fn d_guard_health_max() -> f32 {
+    50.0
+}
+
+/// The difficulty index the port plays at (`EDifficulty_Normal`): the tweak attributes'
+/// `m_fBaseValue2_Normal` column and the `[difficulty]` arrays' index 1.
+pub const DIFFICULTY_NORMAL: usize = 1;
 
 /// NPC perception and behaviour tuning.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1244,6 +1288,9 @@ impl Default for AiConfig {
                 melee_contexts: default_melee_contexts(),
                 dodge: DodgeConfig::default(),
                 pistol: PistolConfig::default(),
+                npc_sword_damage: d_npc_sword_damage(),
+                npc_melee_damage_bonus: 0.0,
+                guard_health_max: d_guard_health_max(),
             },
             guard_attention_span: 3.0,
             alarm_companion_range: 2000.0,

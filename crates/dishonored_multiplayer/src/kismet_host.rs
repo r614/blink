@@ -77,10 +77,8 @@ pub const PRESENTATION: &[&str] = &[
     "DisSeqAct_ToggleTutorial",
     "DisSeqAct_SetTutorialMessage",
     "DisSeqAct_SetCurrentChapter",
-    "DisSeqAct_MissionStatsTracking",
     "DisSeqAct_EvalAchievement",
     "DisSeqAct_ToggleAchievementEval",
-    "DisSeqAct_IncrementPlayerStat",
     "DisSeqAct_GetPlayerStat",
     "DisSeqAct_ToggleJournal",
     "DisSeqAct_TogglePowerWheel",
@@ -241,6 +239,14 @@ pub struct HostState {
     pub attached: BTreeMap<u32, (Obj, Vec3)>,
     /// `DisSeqAct_ActivateUsable`: usable actor -> its active stage.
     pub usable_stage: BTreeMap<u32, i32>,
+    /// `DisSeqAct_Lock` on usables that are not doors: actor -> `m_bLocked` (others keep the
+    /// level's value).
+    #[serde(default)]
+    pub usable_locked: BTreeMap<u32, bool>,
+    /// `DisSeqAct_SetBoneCharmEffect`: bone charm actor -> its `m_Effect` (others keep the
+    /// level's).
+    #[serde(default)]
+    pub charm_effect: BTreeMap<u32, i32>,
     /// Door state changes to report as `DisSeqEvent_Door` outputs: (door actor, output).
     door_events: Vec<(u32, usize)>,
     /// `DisSeqAct_AIDoFollow`: follower -> (leader, distance, run).
@@ -259,8 +265,6 @@ pub struct HostState {
     track_id: i32,
     /// `SeqEvent_LOS` events a player is looking at: (event, player).
     los: BTreeSet<(OpId, PlayerId)>,
-    /// Chaos added by `DisSeqAct_AddDarkness`.
-    pub chaos: i32,
     /// Activations of classes whose system the port does not have, per class.
     pub not_modelled: BTreeMap<String, u32>,
     /// Usables moved to a stage by `DisSeqAct_ActivateUsable`: (actor, stage).
@@ -653,6 +657,15 @@ impl H<'_> {
         (state, locked)
     }
 
+    /// `m_bLocked` of a usable that is not a door: `DisSeqAct_Lock`'s, else the level's.
+    fn usable_locked(&self, a: u32) -> bool {
+        if let Some(l) = self.st.usable_locked.get(&a) {
+            return *l;
+        }
+        let act = &self.db.actors[a as usize];
+        !act.class.contains("Door") && act.props.get("m_bLocked").and_then(|v| v.as_bool()).unwrap_or(false)
+    }
+
     fn players_obj(&self) -> Obj {
         self.m.humans.first().map(|p| Obj::Pawn(*p)).unwrap_or_default()
     }
@@ -865,6 +878,84 @@ impl Host for H<'_> {
                 } else {
                     self.m.state.items.remove(&item);
                 }
+                HostResult::Done
+            }
+            // `DisSeqAct_SetBoneCharmEffect` -> `DisWhaleBoneCharm.OnSetBoneCharmEffect` (slot 241,
+            // 0x00A22970): the charm targets take the op's `m_Effect` (a regular effect they held
+            // goes back to the game's pool, which the port does not model, U-W12).
+            "DisSeqAct_SetBoneCharmEffect" => {
+                let e = cx.prop("m_Effect").and_then(|v| v.as_int()).unwrap_or(-1);
+                for t in cx.objects("Target") {
+                    let Obj::Actor(a) = t else { continue };
+                    let act = &self.db.actors[a as usize];
+                    let (name, pkg) = (act.name.clone(), act.package.clone());
+                    self.st.charm_effect.insert(a, e);
+                    for pk in self.m.world.pickups.iter_mut().filter(|p| p.name.eq_ignore_ascii_case(&name) && (p.package.is_empty() || p.package.eq_ignore_ascii_case(&pkg))) {
+                        if let dishonored_ir::items::PickupKind::BoneCharm(x) = &mut pk.kind {
+                            *x = (e >= 0).then_some(e);
+                        }
+                    }
+                    self.note(format!("bone charm {name}: effect {e}"));
+                }
+                HostResult::Done
+            }
+            // `DisSeqAct_GiveUpgrade` -> `DishonoredPlayerPawn.OnGiveUpgrade` (0x009EF300): the
+            // player owns the `m_pUpgrade` workshop upgrade (its attributes apply).
+            "DisSeqAct_GiveUpgrade" => {
+                let up = obj_name(&cx.prop_obj("m_pUpgrade"));
+                let name = up.trim_start_matches("Twk_Upgrade_").to_string();
+                for p in self.players() {
+                    if let Some(pl) = self.m.world.player_mut(p) {
+                        if !dishonored_sim::powers::give_upgrade(pl, &name, &self.cfg.gameplay) {
+                            self.note(format!("upgrade {up}: not in the config"));
+                        }
+                    }
+                }
+                self.note(format!("upgrade {up} given"));
+                HostResult::Done
+            }
+            // `DisSeqAct_AddInventoryItem` -> `DishonoredPawn.OnAddInventoryItem` (0x009EC950): the
+            // `m_pItemToAdd` inventory item joins the player's inventory.
+            "DisSeqAct_AddInventoryItem" => {
+                let Obj::Path(item) = cx.prop_obj("m_pItemToAdd") else { return HostResult::Done };
+                for p in self.players() {
+                    dishonored_sim::inventory::give_item(&mut self.m.world, p, &item, 1);
+                }
+                self.note(format!("inventory item {item} added"));
+                HostResult::Done
+            }
+            // `DisSeqAct_ModifyElixirCount`: the pawn's elixir count (`ModifyElixirCount`
+            // 0x00C04E10, clamped to [0, max]) for `m_ElixirType` by `m_ElixirOp` (add, remove,
+            // set) and `m_Value`.
+            "DisSeqAct_ModifyElixirCount" => {
+                let kind = if cx.prop_str("m_ElixirType").contains("Mana") { dishonored_ir::items::ElixirType::Mana } else { dishonored_ir::items::ElixirType::Health };
+                let op = cx.prop_str("m_ElixirOp");
+                let v = cx.prop_int("m_Value");
+                for p in self.players() {
+                    if let Some(pl) = self.m.world.player_mut(p) {
+                        let cur = pl.inv.elixirs[kind as usize] as i32;
+                        let delta = match op.as_str() {
+                            "eDisElixirOp_RemoveElixirs" => -v,
+                            "eDisElixirOp_SetElixirCount" => v - cur,
+                            _ => v,
+                        };
+                        dishonored_sim::inventory::add_elixirs(pl, kind, delta, &self.cfg.gameplay);
+                    }
+                }
+                HostResult::Done
+            }
+            // `DisSeqAct_GetAbstractItemQuantity`: the player's count of `m_pItem` into
+            // `m_Quantity` (and its linked variable).
+            "DisSeqAct_GetAbstractItemQuantity" => {
+                let item = obj_name(&cx.prop_obj("m_pItem"));
+                let p = self.players().first().and_then(|p| self.m.world.player(*p)).copied();
+                let q = match (item.as_str(), p) {
+                    (dishonored_sim::inventory::COINS_ITEM, Some(p)) => p.inv.coins as i32,
+                    (dishonored_sim::inventory::RUNE_ITEM, Some(p)) => p.inv.runes as i32,
+                    _ => self.m.state.items.iter().filter(|(k, _)| k.eq_ignore_ascii_case(&item)).map(|(_, v)| *v).sum(),
+                };
+                cx.set_prop("m_Quantity", Value::Int(q));
+                cx.set_link("Quantity", Value::Int(q));
                 HostResult::Done
             }
             // ----- travel -----
@@ -1393,12 +1484,47 @@ impl Host for H<'_> {
                 }
                 HostResult::Done
             }
-            // Chaos (`DisSeqAct_AddDarkness`, 0x00bb3360: adds `m_Value` to the player's chaos
-            // and shows `m_Text`): kept with the mission statistics.
+            // Chaos (`DisSeqAct_AddDarkness`, 0x00bb3360): the darkness manager's `Add(m_Value)`
+            // (0x00C41B50, clamped at 0), then `m_Text` on the HUD when it is not empty.
             "DisSeqAct_AddDarkness" => {
                 let v = cx.prop_int("m_Value");
-                self.st.chaos += v;
-                self.note(format!("chaos {v:+} (total {})", self.st.chaos));
+                self.m.darkness.add(v);
+                self.m.sync_darkness(self.cfg);
+                self.note(format!("chaos {v:+} (score {}, level {})", self.m.darkness.score, self.m.state.darkness_level));
+                let text = cx.prop_str("m_Text");
+                if !text.is_empty() {
+                    self.act(vec![Action::Message(text)]);
+                }
+                HostResult::Done
+            }
+            // `DisSeqAct_IncrementPlayerStat::Activated` (0x00AB9B90) ends with the stat increment
+            // (0x00AB9560: `m_StatToIncrement`, `m_fNumToIncrementBy`, the victim `m_pTweaks`),
+            // which ends with the chaos deeds (0x00C4D2C0). The statistics themselves are not kept.
+            "DisSeqAct_IncrementPlayerStat" => {
+                *self.st.presentation.entry(class).or_insert(0) += 1;
+                let stat = cx.prop_str("m_StatToIncrement");
+                let amount = cx.prop("m_fNumToIncrementBy").and_then(|v| v.as_float()).unwrap_or(1.0) as i32;
+                let tweak = match cx.prop_obj("m_pTweaks") {
+                    Obj::Path(p) => Some(p),
+                    _ => None,
+                };
+                let lineage = tweak.map(|t| self.m.setup.original.iter().find(|o| o.tweak.eq_ignore_ascii_case(&t)).map(|o| o.lineage.clone()).unwrap_or_else(|| vec![t]));
+                self.m.player_stat(&stat, lineage.as_deref(), amount, self.cfg);
+                HostResult::Done
+            }
+            // `DisSeqAct_NotifyMissionEnd` (0x00B8B110): the darkness manager's deed counters are
+            // cleared (0x00C4D500); the score stays.
+            "DisSeqAct_NotifyMissionEnd" => {
+                self.m.darkness.mission_end();
+                self.note("mission end: chaos deed counters cleared".into());
+                HostResult::Done
+            }
+            // `DisSeqAct_MissionStatsTracking` (0x009FE090): the stats screen's chaos entry is
+            // High when the chaos level reaches `m_ChaosLevelThreshold`.
+            "DisSeqAct_MissionStatsTracking" => {
+                *self.st.presentation.entry(class).or_insert(0) += 1;
+                // An op that leaves the threshold unset has the class default 0.
+                self.m.state.chaos_threshold = Some(cx.prop("m_ChaosLevelThreshold").and_then(|v| v.as_int()).unwrap_or(0));
                 HostResult::Done
             }
             "DisSeqAct_NPCSetMaterials" => {
@@ -1449,9 +1575,13 @@ impl Host for H<'_> {
                         continue;
                     }
                     let (state, locked) = self.door(a);
+                    // Open (0x00A1A450) only from closed, Close (0x00A1A4B0) only from open; both
+                    // also need CanUse (0x00A4E2E0), which the port's doors (no transition
+                    // time, never disabled) always pass.
                     let (ns, nl) = match input {
-                        0 => (1, locked),
-                        1 => (2, locked),
+                        0 if state == 0 => (1, locked),
+                        1 if state == 0 => (2, locked),
+                        0 | 1 => (state, locked),
                         2 => (0, locked),
                         3 => (state, true),
                         _ => (state, false),
@@ -1466,6 +1596,30 @@ impl Host for H<'_> {
                     if (state == 0) != (ns == 0) {
                         self.st.door_events.push((a, if ns == 0 { 1 } else { 0 }));
                     }
+                }
+                HostResult::Done
+            }
+            // `DisSeqAct_Lock::Activated` (0x00B8F730): the first input with an impulse (Lock /
+            // Unlock) on every `DishonoredUsableObject` target: `Lock` (slot 238, 0x00A4E870) sets
+            // `m_bLocked`, `Unlock` (slot 239, 0x00A4E910) clears it; a door's override also
+            // switches its path blocker (0x00A32490 / 0x00A324B0 -> 0x00A2D430).
+            "DisSeqAct_Lock" => {
+                let Some(input) = cx.input().filter(|i| *i < 2) else { return HostResult::Done };
+                let lock = input == 0;
+                for t in cx.objects("Target") {
+                    let Obj::Actor(a) = t else { continue };
+                    let act = &self.db.actors[a as usize];
+                    let name = act.name.clone();
+                    if act.class.contains("Door") {
+                        let (state, locked) = self.door(a);
+                        self.st.doors.insert(a, (state, lock));
+                        if locked != lock {
+                            self.st.door_version += 1;
+                        }
+                    } else {
+                        self.st.usable_locked.insert(a, lock);
+                    }
+                    self.note(format!("{} {name}", if lock { "locked" } else { "unlocked" }));
                 }
                 HostResult::Done
             }
@@ -2093,6 +2247,17 @@ fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
     // Uses.
     for (p, u) in std::mem::take(&mut h.st.uses) {
         match u {
+            KUse::Actor(a) if h.usable_locked(a) => {
+                // A locked usable is not used: its `DisSeqEvent_Used` fires the special
+                // "used but locked" output (`UOSO_UsedButLocked`) instead of a stage.
+                h.note(format!("used {} while locked", h.db.actors[a as usize].name));
+                for e in k.events_for("DisSeqEvent_Used", &[Obj::Actor(a)]) {
+                    let out = k.op(e).outputs.iter().position(|o| o.name.to_ascii_lowercase().replace(' ', "").contains("locked"));
+                    if let (Some(i), true) = (out, k.ops[e as usize].enabled) {
+                        k.check_activate(h, e, Obj::Actor(a), Obj::Pawn(p), false, Some(vec![i]), false);
+                    }
+                }
+            }
             KUse::Actor(a) => {
                 // A use moves the usable to its next stage; when the transition completes the
                 // usable's `DisSeqEvent_Used` fires that stage's output (0x00a57640).
@@ -2111,6 +2276,13 @@ fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
                 if let Some(Obj::Path(p)) = h.db.actors[a as usize].props.get("m_pAbstractItem").and_then(|v| v.as_obj().cloned()) {
                     let item = obj_name(&Obj::Path(p));
                     *h.m.state.items.entry(item).or_insert(0) += 1;
+                }
+                // A bone charm gives its effect (0x00A19D50 -> 0x00ABBA90).
+                if h.db.actors[a as usize].class == "DisWhaleBoneCharm" {
+                    let e = h.st.charm_effect.get(&a).copied().or_else(|| h.db.actors[a as usize].props.get("m_Effect").and_then(|v| v.as_int())).filter(|e| *e >= 0);
+                    if let Some(pl) = h.m.world.player_mut(p) {
+                        dishonored_sim::inventory::give_charm_effect(pl, &h.cfg.gameplay, e, a);
+                    }
                 }
                 let fired = k.trigger(h, "DisSeqEvent_PickupPickedUp", &[Obj::Actor(a)], Obj::Pawn(p), None);
                 if fired.is_empty() || fired.iter().any(|e| k.prop(*e, "m_bDestroyPickup").and_then(|v| v.as_bool()).unwrap_or(true)) {

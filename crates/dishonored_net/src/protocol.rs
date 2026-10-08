@@ -14,7 +14,7 @@ use dishonored_sim::state::{PlayerId, PlayerState, ProjectileState, WindblastSta
 use serde::{Deserialize, Serialize};
 
 pub const MAGIC: u32 = 0x4449_5331; // "DIS1"
-pub const PROTOCOL_VERSION: u32 = 10; // 4: PlayerState.climb, SimEvent::Climb / ClimbSound; 5: LeftHandState.dispersion; 6: MissionView.doors / movers; 7: SwordState.swings / swing_clip; 8: Look.tweak (NPC names); 9: PlayerState.sword_sheathed / lean_velocity_z; 10: SimEvent::Sound.context, new SoundCategory variants, PlayerState.footfall_phase / stealth_fall / fall_from_jump
+pub const PROTOCOL_VERSION: u32 = 13; // 4: PlayerState.climb, SimEvent::Climb / ClimbSound; 5: LeftHandState.dispersion; 6: MissionView.doors / movers; 7: SwordState.swings / swing_clip; 8: Look.tweak (NPC names); 9: PlayerState.sword_sheathed / lean_velocity_z; 10: ProjectileState.spawn / pierced, Traversal mantle anim, SwordState.parries; 11: u64 inventory upgrade / charm masks, Inventory.charms_level2, MissionView darkness fields; 12: melee / powers / movement / stealth ports (SwordState hit list / offscreen / npc_move, PlayerState ai_awareness / combat_opponents / windblasted_by / swarm / right_hand / mantle_allowed / footfall_phase, BlinkTravel cooldown, WindblastState level / range, SwarmState rats as pawns, blink layers, Sound context); 13: stealth port (SimEvent::Sound.context, SoundCategory BulletImpact / Explosion / Rats / Scripted, PlayerState.footfall_phase / stealth_fall / fall_from_jump)
 pub const MAX_DATAGRAM: usize = 60_000;
 /// Inputs resent per packet.
 pub const INPUT_REDUNDANCY: usize = 8;

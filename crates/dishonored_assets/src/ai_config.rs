@@ -305,7 +305,26 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
             c.max_range = get_f32(&s, "m_fMaxContextRange").unwrap_or(c.max_range);
             // A negative height difference is no limit.
             c.max_height = get_f32(&s, "m_fMaxContextHeightDifference").map(|h| if h < 0.0 { f32::MAX } else { h }).unwrap_or(c.max_height);
+            c.damage_multiplier = get_f32(&s, "m_fAttackDamageMultiplier").or(c.damage_multiplier);
         }
+    }
+    // The sword's `Attribute_MeleeDamage` per difficulty (its `m_pAttributeTweak[1]`), the damage
+    // of every NPC slash (0x00C33DD0 -> 0x00C07C80).
+    let sword_attrs = db.try_resolve(SWORD.trim_end_matches('.')).and_then(|m| get_obj(&m, "m_pAttributeTweak[1]").map(str::to_string));
+    if let Some(m) = sword_attrs.as_deref().and_then(|p| db.try_resolve(p)) {
+        for (i, k) in ["m_fBaseValue1_Easy", "m_fBaseValue2_Normal", "m_fBaseValue3_Hard", "m_fBaseValue4_VeryHard"].iter().enumerate() {
+            out.combat.npc_sword_damage[i] = get_f32(&m, &format!("m_MeleeDamage.{k}")).unwrap_or(out.combat.npc_sword_damage[i]);
+        }
+        prov.insert("ai.combat.npc_sword_damage".into(), format!("{} :: m_MeleeDamage", sword_attrs.unwrap_or_default()));
+    }
+    // The guard archetype's attributes (Normal): HealthMax and MeleeDamageBonus.
+    const GUARD_PAWN: &str = "Pwn_EliteGuard_MTall_0.Pwn_EliteGuard_MTall_0";
+    let pawn_attrs = db.try_resolve(GUARD_PAWN).and_then(|m| get_obj(&m, "m_pAttributeTweaks[1]").map(str::to_string));
+    if let Some(m) = pawn_attrs.as_deref().and_then(|p| db.try_resolve(p)) {
+        let normal = |k: &str| get_f32(&m, &format!("{k}.m_fBaseValue2_Normal"));
+        out.combat.guard_health_max = normal("m_HealthMax").unwrap_or(out.combat.guard_health_max);
+        out.combat.npc_melee_damage_bonus = normal("m_MeleeDamageBonus").unwrap_or(out.combat.npc_melee_damage_bonus);
+        prov.insert("ai.combat.guard_health_max".into(), format!("{} :: m_HealthMax / m_MeleeDamageBonus", pawn_attrs.unwrap_or_default()));
     }
     prov.insert("ai.combat.melee_ranges".into(), format!("{SWORD}DisTweaks_InventoryItem_PawnSpecific_1.DisTweaks_NPC*"));
     // Rat swarms: the default swarm tweak and the Devouring Swarm's.

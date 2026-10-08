@@ -112,9 +112,13 @@ natively (`dishonored_multiplayer::mission::{UsableDef, door_use}`). From `DisDo
   identity origin transform for these meshes (LIKELY, U-760).
 - **Kismet open** (0x00A1A450, `DisSeqAct_Door`): direction 0 gives state 1 (stage 1), direction 1
   gives state 2 (stage 0), only from closed.
-- **Can use** (0x00A4E2E0): not while deleted or disabled; and, for a locked door (`+0x2C4`),
-  only when the vfunc at +0x3C4 says yes (the key check against `m_MatchingKeys`, not decoded,
-  U-760), the stage allows use while locked (stage flag 4), or the pawn's flag `+0xF4` bit 4 is set.
+- **Can use** (0x00A4E2E0): not while deleted, not when slot 240 says no, not while disabled
+  (`m_bEnabled`, bit 1 of `+0x2B0`); and while a transition runs (`+0x2C4` is `m_State`,
+  `EUsableObjectState`, not the lock flag) only when the active stage is hold-to-use or the tweak
+  flag `+0xF4` bit 4 (`m_bKeepFocusedInTransition`) is set. CORRECTION (world.md F-19): an earlier
+  reading took `+0x2C4` for the lock and the slot-241 call for a key check; the lock flag is
+  `m_bLocked`, bit 0 of `+0x2B0`, consumed by the stage selector (0x00A1A750), and CanUse is not
+  the lock test. The key match against `m_MatchingKeys` is not decoded (world.md U-W4).
   The port refuses every use of a locked door and shows the tweak's `m_LockedMessage`.
 - Other usables (lockers, bins) go to their next stage, wrapping (the `DisSeqAct_ActivateUsable`
   default, `kismet_host`).

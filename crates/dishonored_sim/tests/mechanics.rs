@@ -386,16 +386,17 @@ fn blink_range_follows_the_power_level() {
 fn sword_hit_block_parry() {
     let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.), (2, Vec3::new(120., 0., STAND_Z + 1.), 180.)]);
     r.settle();
-    // Unblocked hit: 0.2 x 70 = 14.
+    // Unblocked hit: Corvo's sword Attribute_MeleeDamage 10 (+ bonus 0) x multiplier 1.0, whatever
+    // the victim's HealthMax (0x00C07C80; the 0.2 / 0.7 ratios only pick the contact effect).
     r.step(&[(1, input(0., 0, buttons::PRIMARY)), (2, input(180., 0, 0))]);
     r.steps(40, &[(1, input(0., 0, 0)), (2, input(180., 0, 0))]);
-    assert!((r.p(2).vitals.health - 56.0).abs() < 1e-3, "health {}", r.p(2).vitals.health);
+    assert!((r.p(2).vitals.health - 60.0).abs() < 1e-3, "health {}", r.p(2).vitals.health);
     // Late block: blocked, no damage.
     r.steps(30, &[(1, input(0., 0, 0)), (2, input(180., 0, buttons::BLOCK))]);
     r.step(&[(1, input(0., 0, buttons::PRIMARY)), (2, input(180., 0, buttons::BLOCK))]);
     r.steps(40, &[(1, input(0., 0, 0)), (2, input(180., 0, buttons::BLOCK))]);
     assert!(r.events.iter().any(|e| matches!(e, SimEvent::SwordBlocked { .. })));
-    assert!((r.p(2).vitals.health - 56.0).abs() < 1e-3);
+    assert!((r.p(2).vitals.health - 60.0).abs() < 1e-3);
     // Perfect block (block pressed right before the hit lands, ~0.13 s after the swing):
     // attacker staggered.
     r.steps(30, &[(1, input(0., 0, 0)), (2, input(180., 0, 0))]);
@@ -462,6 +463,143 @@ fn npcs_never_assassinate() {
     assert!(r.p(2).vitals.health < 70.0, "the swing still lands: {}", r.p(2).vitals.health);
 }
 
+/// A guard (`spawn_npc`: the guard archetype's HealthMax 50) at `at`, facing `yaw`.
+fn with_guard(r: &mut Run, id: u32, at: Vec3, yaw: f32, awareness: u8) {
+    dishonored_sim::spawn_npc(&mut r.state, id, dishonored_sim::state::PawnKind::Guard, 1, at, yaw, &r.cfg.clone());
+    r.state.player_mut(id).unwrap().ai_awareness = awareness;
+}
+
+/// melee.md F1 / F9: a hit deals `appCeil(m_fAttackDamageMultiplier x (Attribute_MeleeDamage +
+/// Attribute_MeleeDamageBonus))` (0x00C131C0 / 0x00C07C80): Corvo's sword 10, on a guard of 50
+/// (the hook's 10 of 50), not 0.2 x HealthMax.
+#[test]
+fn sword_damage_is_the_attribute_not_a_health_ratio() {
+    use dishonored_sim::combat::app_ceil;
+    use dishonored_sim::state::awareness;
+    assert_eq!((app_ceil(10.0), app_ceil(15.0), app_ceil(7.5), app_ceil(7.25), app_ceil(1.0)), (10.0, 15.0, 8.0, 8.0, 1.0));
+    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.)]);
+    with_guard(&mut r, 100, Vec3::new(120., 0., STAND_Z + 1.), 180.0, awareness::IN_COMBAT);
+    r.settle();
+    assert_eq!(r.p(100).vitals.health, 50.0, "guard HealthMax");
+    r.step(&[(1, input(0., 0, buttons::PRIMARY)), (100, input(180., 0, 0))]);
+    r.steps(40, &[(1, input(0., 0, 0)), (100, input(180., 0, 0))]);
+    assert_eq!(r.p(100).vitals.health, 40.0);
+    assert!(!r.events.iter().any(|e| matches!(e, SimEvent::Death { .. })), "an InCombat guard is not assassinated");
+}
+
+/// melee.md F4: the assassinate context (0x00C0D8F0) takes an NPC on any side within its reach
+/// (275) when `m_AssassinateOnAwareness` allows its awareness, and refuses running targets; the
+/// kill plays the move set of the side (0x00BBA970), whose clip sets the lock.
+#[test]
+fn unaware_guards_are_assassinated_from_any_side() {
+    use dishonored_sim::state::awareness;
+    let t = cfg().tuning;
+    // (guard position, guard yaw, awareness, expect a kill, expected lock)
+    let cases = [
+        (Vec3::new(120., 0., 0.), 180.0, awareness::UNAWARE, true, t.assassination_times[0]),
+        (Vec3::new(120., 0., 0.), 90.0, awareness::SUSPICIOUS, true, t.assassination_times[2]),
+        (Vec3::new(120., 0., 0.), -90.0, awareness::SURPRISED, true, t.assassination_times[1]),
+        (Vec3::new(120., 0., 0.), 0.0, awareness::UNAWARE, true, t.assassination_times[3]),
+        (Vec3::new(260., 0., 0.), 180.0, awareness::UNAWARE, true, t.assassination_times[0]),
+        (Vec3::new(300., 0., 0.), 180.0, awareness::UNAWARE, false, 0.0),
+        (Vec3::new(120., 0., 0.), 180.0, awareness::IN_COMBAT, false, 0.0),
+        (Vec3::new(120., 0., 0.), 180.0, awareness::FEARFUL, false, 0.0),
+        (Vec3::new(120., 0., 0.), 180.0, awareness::AWARE_OF_PLAYER, false, 0.0),
+    ];
+    for (k, (at, yaw, aw, kill, lock)) in cases.into_iter().enumerate() {
+        let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.)]);
+        with_guard(&mut r, 100, at + Vec3::Z * (STAND_Z + 1.), yaw, aw);
+        r.settle();
+        r.step(&[(1, input(0., 0, buttons::PRIMARY)), (100, input(yaw, 0, 0))]);
+        let killed = r.events.iter().any(|e| matches!(e, SimEvent::Death { cause: DamageCause::Assassination, .. }));
+        assert_eq!(killed, kill, "case {k}");
+        if kill {
+            assert!((r.p(1).sword.lock_time - lock).abs() < 1e-6, "case {k}: lock {}", r.p(1).sword.lock_time);
+        }
+    }
+    // A running target (its gait at run speed) is refused.
+    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.)]);
+    with_guard(&mut r, 100, Vec3::new(150., -200., STAND_Z + 1.), 90.0, awareness::UNAWARE);
+    r.settle();
+    let run = PlayerInput { yaw: 90.0, forward: 127, buttons: buttons::SPRINT, ..Default::default() };
+    for _ in 0..60 {
+        if r.p(100).position.y > -10.0 {
+            break;
+        }
+        r.step(&[(1, input(0., 0, 0)), (100, run)]);
+    }
+    assert!(r.p(100).velocity.truncate().length() > 300.0, "running");
+    r.step(&[(1, input(0., 0, buttons::PRIMARY)), (100, run)]);
+    assert!(!r.events.iter().any(|e| matches!(e, SimEvent::Death { cause: DamageCause::Assassination, .. })));
+}
+
+/// melee.md F2 / F3 / F8: an NPC slash deals the guards' sword `MeleeDamage` (15 on Normal)
+/// times its context's multiplier (the jump attack's is 0), less half when the swing started
+/// out of the player's view and the player still does not see it (0x00C24020, 0x00C33DD0).
+#[test]
+fn guard_slash_damage_jump_attack_and_offscreen() {
+    use dishonored_sim::input::npc_moves;
+    use dishonored_sim::state::awareness;
+    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.)]);
+    with_guard(&mut r, 100, Vec3::new(120., 0., STAND_Z + 1.), 180.0, awareness::IN_COMBAT);
+    r.settle();
+    let swing = |r: &mut Run, me_yaw: f32, mv: u8| {
+        r.events.clear();
+        let g = PlayerInput { yaw: 180.0, buttons: buttons::PRIMARY, npc_move: mv, ..Default::default() };
+        r.step(&[(1, input(me_yaw, 0, 0)), (100, g)]);
+        r.steps(60, &[(1, input(me_yaw, 0, 0)), (100, input(180., 0, 0))]);
+        r.events.iter().filter_map(|e| match e {
+            SimEvent::Damage { victim: 1, amount, .. } => Some(*amount),
+            _ => None,
+        }).collect::<Vec<_>>()
+    };
+    assert_eq!(swing(&mut r, 0.0, npc_moves::ATTACK_SHORT), vec![15.0], "seen: the sword's 15");
+    assert_eq!(swing(&mut r, 0.0, npc_moves::JUMP_ATTACK), Vec::<f32>::new(), "the jump attack deals nothing");
+    assert_eq!(swing(&mut r, 180.0, npc_moves::ATTACK_SHORT), vec![8.0], "offscreen: 15 x 0.5 = 7.5 -> 8");
+}
+
+/// melee.md F6: one swing hits every pawn its sweep meets, once each (`m_AlreadyHitActors`).
+#[test]
+fn one_swing_hits_every_pawn_in_the_sweep() {
+    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.), (2, Vec3::new(100., 0., STAND_Z + 1.), 180.), (3, Vec3::new(160., 30., STAND_Z + 1.), 180.)]);
+    r.settle();
+    r.step(&[(1, input(0., 0, buttons::PRIMARY)), (2, input(180., 0, 0)), (3, input(180., 0, 0))]);
+    r.steps(40, &[(1, input(0., 0, 0)), (2, input(180., 0, 0)), (3, input(180., 0, 0))]);
+    assert_eq!((r.p(2).vitals.health, r.p(3).vitals.health), (60.0, 60.0));
+    let hits = r.events.iter().filter(|e| matches!(e, SimEvent::Damage { attacker: Some(1), .. })).count();
+    assert_eq!(hits, 2);
+}
+
+/// melee.md F5: the drop context (0x00C09A50 / 0x00C09900) needs only a fall (no minimum speed)
+/// and the target at most `m_fMaxDropDistToTarget` (350) below; it is evaluated every tick, so
+/// holding attack from higher up kills once the fall brings the target within reach.
+#[test]
+fn drop_assassination_needs_no_fall_speed_and_350_uu() {
+    use dishonored_sim::state::awareness;
+    let hh = cfg().gameplay.movement.collision_half_height;
+    let gz = STAND_Z + HOVER;
+    let drop = |h: f32, hold: bool| {
+        let mut r = Run::new(floor_world(|_| {}), &[]);
+        with_guard(&mut r, 100, Vec3::new(0., 0., STAND_Z + 1.), 0.0, awareness::IN_COMBAT);
+        r.settle();
+        spawn_player(&mut r.state, 1, Vec3::new(0., 0., gz + h + hh), 0.0, &r.cfg.clone());
+        for _ in 0..10 {
+            r.step(&[(1, input(0., 0, 0)), (100, input(0., 0, 0))]);
+            if r.p(1).velocity.z < 0.0 {
+                break;
+            }
+        }
+        // Falling, well under the port's former 300 uu/s floor.
+        assert!(r.p(1).velocity.z < 0.0 && r.p(1).velocity.z > -300.0, "slow fall {}", r.p(1).velocity.z);
+        r.step(&[(1, input(0., 0, buttons::PRIMARY)), (100, input(0., 0, 0))]);
+        let b = if hold { buttons::PRIMARY } else { 0 };
+        r.steps(60, &[(1, input(0., 0, b)), (100, input(0., 0, 0))]);
+        r.events.iter().any(|e| matches!(e, SimEvent::Death { victim: 100, cause: DamageCause::DropAssassination, .. }))
+    };
+    assert!(drop(250.0, false), "250 uu: DoNow at the press");
+    assert!(!drop(450.0, false), "450 uu: TooHighToStart at the press");
+    assert!(drop(450.0, true), "held: taken once within 350 uu");
+}
 #[test]
 fn pistol_damage_close_and_far() {
     let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.), (2, Vec3::new(300., 0., STAND_Z + 1.), 180.), (3, Vec3::new(0., 2000., STAND_Z + 1.), 0.)]);
@@ -470,8 +608,9 @@ fn pistol_damage_close_and_far() {
     r.steps(40, &[(1, gun(0., -15., 0))]);
     r.step(&[(1, gun(0., -15., buttons::SECONDARY))]);
     r.steps(5, &[(1, gun(0., -15., 0))]);
-    // Close-range body shot: 20 x 1.5 = 30.
-    assert!((r.p(2).vitals.health - 40.0).abs() < 1e-3, "health {}", r.p(2).vitals.health);
+    // Close-range body shot: ((int)Attribute_RangedDamage 10 + m_fDamage 20) x 1.5 = 45
+    // (0x00C29820; the spawn point, 150 uu ahead of the eye, is under m_fCloseRange 400).
+    assert!((r.p(2).vitals.health - 25.0).abs() < 1e-3, "health {}", r.p(2).vitals.health);
     // Reload consumes reserve.
     r.steps(5, &[(1, gun(0., -15., buttons::RELOAD))]);
     r.steps(120, &[(1, gun(0., -15., 0))]);

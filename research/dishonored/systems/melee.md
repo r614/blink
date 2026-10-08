@@ -267,6 +267,43 @@ are not applied.
 | F10 | known / open | Friendly fire (U-660) | 2.8 | no change |
 | F11 | open | Held attack (`m_fCurHoldAttackTime`) and chain input window not decoded | | decode `DisItemContext_MeleeAttackPlayer` slots 73/74/97 (0x00C0E710, 0x00C17640, 0x00C15060) |
 
+### 3.1 Port status (2026-10-08)
+
+Re-read before porting: 0x00C131C0, 0x00C07C80, 0x00C33DD0, 0x00BBEF40, 0x00C24020, 0x00C0D8F0, 0x00C09060,
+0x00C090D0, 0x00C146C0, 0x00BBA970, 0x00C09810, 0x00C09900, 0x00C09A50, 0x00C14960 (static index); tweaks with
+the Boyle script packages (`TWEAK_PKGS`); `DisGlobalEnums.EAIAwareness` (enum_dump of DishonoredGame.upk);
+`Ply_Sword_Assassination_as` notifies. Corrections to the text above found on the way:
+
+* The rounding in 0x00C131C0 (`-(ROUND(-0.5 - 2d) >> 1)`) is UE3 `appCeil`, not plain rounding (7.25 -> 8).
+* `m_bEffectivelyOffscreen` is set when the context starts (slot 98, 0x00C24020): the target is the local
+  player pawn and 0x00BBEF40 is false for the attacker. 0x00BBEF40 tests `DishonoredNPCPawn.m_bRenderedByPlayer`
+  (+0x964 bit 5) and the view plane. The damage function re-tests 0x00BBEF40 at the hit.
+* `EAIAwareness`: 0 Unaware, 1 AwareOfPlayer, 2 Surprised, 3 Suspicious, 4 Fearful, 5 InCombat, 6 Begging,
+  7 Choked. The assassinate table allows Unaware, Surprised, Suspicious, Begging.
+* The drop context (`DisItemContext_DropAssassinate` < `DisItemContext`, not a subclass of Assassinate) never
+  calls 0x00C0D8F0: **no awareness gate** for drops (2.10's last bullet is wrong). Its target (0x00C09A50) is
+  the context's melee-info target, else the first pawn of a pawn-extent sweep (flags 0x20DF) along the
+  predicted fall (0x00C09810: velocity x 4 s with Z at least 100 down, plus gravity), else straight down.
+  The height difference is the player's base (location - CollisionHeight) minus the target's point.
+* 0x00BBA970 picks the move set from the attacker's offset in the victim's frame (dominant axis): front,
+  left, right, back. Clip exits: Front 2.062, Left 2.271, Right 2.281, Back 1.886 s; drops 1.900 (Back 1.973).
+* Guard `HealthMax` is decodable with the level script packages: every `Pwn_EliteGuard_*` pawn of the Boyle
+  levels resolves to 50 (`pAttributeTweaksNormal`); Lord Shaw 10, tallboys 150, weepers 30, aristocrats 10-11.
+* The elite sword's `NPCJumpAttack` multiplier is 0 (class default 1.0); every `NPCBash` is 0.
+
+| ID | Status | Port change |
+|---|---|---|
+| F1 | ported | `combat.rs:melee_damage` + `app_ceil` (hit handler): `attack_damage_multiplier x (Attribute_MeleeDamage + Attribute_MeleeDamageBonus)` through `powers::attribute` (`InventoryConfig::sword_melee_damage` 10 / `melee_damage_bonus` 0, loaded in `items_config.rs` from the sword's `m_pAttributeTweak[1]` and `Twk_Pawn_Corvo`). `big_damage_ratio` no longer scales damage (kept with `normal_damage_ratio` as the contact-effect thresholds); `SwordCounter` is no longer emitted. causes.ron rule retired, U-113 is the PvP mapping only. |
+| F2 | ported (Normal) | `CombatAiConfig::npc_sword_damage` [10, 15, 20, 30] (`ai_config.rs` reads the elite sword's attributes when the level packages are loaded), indexed by `DIFFICULTY_NORMAL` (the port has no difficulty setting). One sword for every NPC (other archetypes' swords not in loadable packages). |
+| F3 | ported, LIKELY | `SwordState::offscreen_to` set at the swing start (the human the NPC faces that does not see it), `combat.rs:seen_by` (75-degree 16:9 view, melee trace) stands in for `m_bRenderedByPlayer`; `x (1 - offscreen_melee_reduction[Normal])`, at least 1 (DefaultPlayer.ini). |
+| F4 | ported (NPC targets) | `find_assassination`: reach `context_reach(275, 1.25)`, any side, `assassinate_on_awareness[PlayerState::ai_awareness]`, runners refused (`running`: Sprint at speed), the side's clip as `SwordState::lock_time`. `ai_awareness` is written by `Crowd::write_awareness` from `Brain::awareness` (LIKELY mapping of the port's states); brainless pawns keep AwareOfPlayer. Players (PvP, the original has none): from behind, not blocking, same reach. The target selection (`m_PawnInfo_Melee`) is not decoded: the view-within-45-degrees stand-in stays. Choke target unchanged (U-103). |
+| F5 | ported | `find_drop_assassination` / `drop_ready`: no fall-speed floor, 0 < height <= 350, pawn trace, fall-path sweep, evaluated every tick of a fall while attack is held. Target point = the target's location (the exact point of 0x00B68010 not decoded). |
+| F6 | multi-hit ported; rebound, clash, chains open | `SwordState::hit_ids` (`m_AlreadyHitActors`, up to 8): one swing hits every pawn its sweep meets once, nearest first, stopping at a block or parry. The rebound's consequence and the versus rule are not decoded. |
+| F7 | open | No clip mapping for the parried / blocked attacker (`Ply_Sword_Hit_as` / `Versus_as` exits listed, the action-to-clip link not read). |
+| F8 | ported | `MeleeContextConfig::damage_multiplier` (elite JumpAttack 0, Bash 0 by class); the sim takes it from the swing's `SwordState::npc_move`. The port has no Bash move (no block-break). |
+| F9 | ported | `spawn_npc` gives guards `CombatAiConfig::guard_health_max` 50; `powers::health_max` uses it for `PawnKind::Guard`. Civilians keep 70. |
+| F10 / F11 | open | unchanged. |
+
 Multiplayer note: with F1 the player-versus-player sword hit becomes 10 of 70 (7 hits) instead of 14
 (5 hits). That is the original's number for any attacker with Corvo's sword; if the fork wants 14 it
 should say so as a rule (`melee_damage = 14`), not through a health ratio.

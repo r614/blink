@@ -48,8 +48,10 @@ Deliberate differences:
 - **Named markers and NPCs instead of object variables.**
 - **Server-authoritative.** The interpreter is deterministic and runs on dedicated servers,
   in replays and in the harness.
-- **Chaos is approximated** by the kill ratio (`high_chaos_kill_ratio`). The original's exact
-  formula is not reverse-engineered.
+- **Chaos is the original's score** (`DisDarknessManager`, systems/world.md section 2): kills by
+  victim class, alarms rung and corpses found feed its deeds, Kismet `AddDarkness` adds to it;
+  `settings.darkness` carries a score into the mission, `settings.chaos_level_threshold` is the
+  High / Low threshold when the mission's Kismet sets none.
 - **Conversations are data:** the original `DisConversation` graphs run as-is in
   `dishonored_conversation` (`Conversation(..)` action = `DisSeqAct_DialogInputs`,
   `ConversationOutput(..)` trigger = `DisSeqEvent_DialogOutputs`, story flags shared by name).

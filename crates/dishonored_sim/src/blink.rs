@@ -24,8 +24,20 @@
 //! current view direction, within 25 uu horizontally, or farther from the start than the
 //! target was. The pre-Blink velocity and physics are then restored.
 //! Release closer than the pawn's bounding sphere radius to the target cancels.
+//!
+//! Lock-out (CanUse 0x00BE71F0 = mana >= `m_ManaCost` and `m_bActive` clear): starting the
+//! power (0x00BFC020) needs CanUse and sets `m_bActive` (0x00BFAAA0); the move's end or a cancel
+//! (0x00BFAB80) enters the cooldown modes, whose tick (0x00BED480) counts `m_fCooldownTimer` up
+//! past `m_fCooldownTime` and clears `m_bActive` (0x00BE9180). Without the mana the power never
+//! starts aiming.
+//!
+//! World slow-down: the move starts the `BTC_BlinkPower` dilation layer toward 0.01 (clamped to
+//! 0.05 by the helper) over `m_fBendTimeDownTime`, caster rate 1 (0x00BFC990); the end or cancel
+//! and again the cooldown's end blend it back to 1 over `m_fBendTimeUpTime` from where it is
+//! (0x00BE7380).
 
 use crate::events::{SimEvent, SoundCategory};
+use crate::left_hand::LeftAction;
 use crate::movement::{MoveCtx, eye_position, view_vector};
 use crate::state::{BlinkTravel, MoveMode, PlayerState};
 use crate::vitals::spend_mana;
@@ -39,6 +51,68 @@ pub const BLINK_LEVEL: usize = 1;
 pub const REACHED_DISTANCE: f32 = 25.0;
 /// Ground probe length below the target point (20000 uu in 0x00BF5520).
 pub const GROUND_PROBE: f32 = 20000.0;
+/// World rate the move asks of the dilation layer (the literal 0.01 passed by 0x00BFC990; the
+/// helper raises any non-zero target below 0.05 to 0.05).
+pub const WORLD_SLOW_TARGET: f32 = 0.01;
+
+fn per_level(v: &[f32], lv: usize) -> f32 {
+    v.get(lv).or(v.last()).copied().unwrap_or(0.0)
+}
+
+/// CanUse (slot +0x1A4, 0x00BE71F0): the mana check (0x00BF3060, whole points >= `m_ManaCost`)
+/// and `m_bActive` clear.
+pub fn can_use(p: &PlayerState, cfg: &BlinkConfig) -> bool {
+    !p.blink.active && p.vitals.mana >= cfg.mana_cost
+}
+
+/// Aiming (`m_BlinkMode` 0 with `m_bActive`).
+pub fn aiming(p: &PlayerState) -> bool {
+    p.blink.active && !p.blink.cooling && p.mode != MoveMode::Blinking
+}
+
+/// The move ended or the aim was cancelled (0x00BFAB80): the cooldown mode starts and the
+/// dilation layer blends back to 1 (0x00BE7380).
+fn enter_cooldown(p: &mut PlayerState, cfg: &BlinkConfig, actions: &mut Vec<LeftAction>) {
+    let lv = level(p, cfg);
+    p.blink.cooling = true;
+    actions.push(LeftAction::BlinkLayer { target: 1.0, blend: per_level(&cfg.bend_time_up_time, lv) });
+}
+
+/// Cancel an aim in progress (the power deselected, 0x00BFAE50 -> 0x00BFAB80 with 1).
+pub fn cancel(p: &mut PlayerState, cfg: &BlinkConfig, actions: &mut Vec<LeftAction>) {
+    if aiming(p) {
+        p.left.blink_target = None;
+        enter_cooldown(p, cfg, actions);
+    }
+}
+
+/// The cooldown modes' tick (0x00BED480): `m_fCooldownTimer` grows by the step; past
+/// `m_fCooldownTime` it is clamped and the power deactivates (0x00BE9180, which blends the
+/// layer back to 1 again from its current value). A dead pawn deactivates at once (0x00BFC5D0).
+pub fn tick_cooldown(p: &mut PlayerState, dt: f32, cfg: &BlinkConfig, actions: &mut Vec<LeftAction>) {
+    if !p.blink.active {
+        return;
+    }
+    let lv = level(p, cfg);
+    let up = LeftAction::BlinkLayer { target: 1.0, blend: per_level(&cfg.bend_time_up_time, lv) };
+    if !p.alive {
+        p.blink.active = false;
+        p.blink.cooling = false;
+        p.left.blink_target = None;
+        actions.push(up);
+        return;
+    }
+    if p.blink.cooling {
+        p.blink.cooldown_timer += dt;
+        let max = per_level(&cfg.cooldown_time, lv);
+        if max < p.blink.cooldown_timer {
+            p.blink.cooldown_timer = max;
+            p.blink.active = false;
+            p.blink.cooling = false;
+            actions.push(up);
+        }
+    }
+}
 
 /// Index of the pawn's Blink level in the per-level tweak arrays (`m_HorizDistance[level]`...):
 /// its `m_Powers` level 1 or 2 (index 0 or 1); a pawn without Blink recorded uses [`BLINK_LEVEL`].
@@ -160,20 +234,25 @@ pub fn compute_target(p: &PlayerState, world: &dyn WorldQuery, mv: &MovementConf
     Some(target)
 }
 
-/// Per-tick Blink handling from the left hand. `aiming` = button held this tick.
+/// Per-tick Blink handling from the left hand: `pressed` starts the power (aiming), `held`
+/// keeps aiming, `released` moves or cancels.
+#[allow(clippy::too_many_arguments)]
 pub fn update(
     p: &mut PlayerState,
-    aiming: bool,
+    pressed: bool,
+    held: bool,
     released: bool,
     ctx: &MoveCtx,
     cfg: &BlinkConfig,
     vitals: &VitalsConfig,
+    actions: &mut Vec<LeftAction>,
     events: &mut Vec<SimEvent>,
 ) {
     if p.mode == MoveMode::Blinking {
         let done = travel(p, ctx, cfg);
         // The Blink step's probe grabs a chain it meets (0x00BECDF0); the climb takes over.
         if crate::climb::try_touch_grab(p, ctx, events) {
+            enter_cooldown(p, cfg, actions);
             events.push(SimEvent::BlinkEnd { id: p.id });
             return;
         }
@@ -181,16 +260,27 @@ pub fn update(
             // Blink end (0x00BFAB80): restore the velocity and physics from before.
             p.mode = MoveMode::Falling;
             p.velocity = p.blink.origin_velocity;
+            enter_cooldown(p, cfg, actions);
             events.push(SimEvent::BlinkEnd { id: p.id });
             // Then the Blink edge finder's ledge, if any, is mantled (0x00BE7420).
             crate::movement::try_blink_mantle(p, ctx, events);
         }
         return;
     }
-    if aiming {
+    // Start (0x00BFC020): only when CanUse; otherwise nothing happens (no aim, nothing to fizzle).
+    if pressed && can_use(p, cfg) {
+        p.blink.active = true;
+        p.blink.cooling = false;
+        p.blink.cooldown_timer = 0.0;
+    }
+    if !aiming(p) {
+        p.left.blink_target = None;
+        return;
+    }
+    if held {
         p.left.blink_target = compute_target(p, ctx.world, ctx.cfg, cfg);
     }
-    if released {
+    if released || !held {
         let target = p.left.blink_target.take();
         let can = matches!(p.mode, MoveMode::Walking | MoveMode::Falling);
         match target {
@@ -199,6 +289,7 @@ pub fn update(
                 if p.crouched {
                     p.crouched = false;
                 }
+                let lv = level(p, cfg);
                 p.blink = BlinkTravel {
                     target: to,
                     origin: from,
@@ -206,7 +297,11 @@ pub fn update(
                     max_distance: from.distance(to),
                     step_timer: 0.0,
                     steps: 0,
+                    active: true,
+                    cooling: false,
+                    cooldown_timer: 0.0,
                 };
+                actions.push(LeftAction::BlinkLayer { target: WORLD_SLOW_TARGET, blend: per_level(&cfg.bend_time_down_time, lv) });
                 p.traversal = crate::state::Traversal { from, to, elapsed: 0.0, duration: 0.0, edge_height: 0.0, anim: None, rate: 0.0, step_ups: p.traversal.step_ups };
                 p.mode = MoveMode::Blinking;
                 p.velocity = Vec3::ZERO;
@@ -214,7 +309,11 @@ pub fn update(
                 // Port value: no Blink AI noise was found in the original (stealth.md section 5.4).
                 events.push(SimEvent::Sound { position: from, radius: 400.0, category: SoundCategory::Blink, context: crate::events::NoiseContext::Anomaly, source: p.id });
             }
-            _ => events.push(SimEvent::BlinkFizzle { id: p.id }),
+            _ => {
+                // Cancel (0x00BFAB80 with 1): the cooldown follows a cancel as well.
+                enter_cooldown(p, cfg, actions);
+                events.push(SimEvent::BlinkFizzle { id: p.id });
+            }
         }
     }
 }

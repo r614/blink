@@ -679,7 +679,7 @@ fn powers_in_mission(rep: &mut Report, maps: &MapContents, def: &MissionDef) -> 
         for _ in 0..300 {
             p.step(idle);
             let w = &p.m().world;
-            let swarm_rats: usize = w.swarms.iter().filter(|s| s.owner == ME && s.spawn_delay <= 0.0).map(|s| s.rats as usize).sum();
+            let swarm_rats: usize = w.swarms.iter().filter(|s| s.owner == ME && s.spawn_delay <= 0.0).map(|s| s.rats as usize + w.players.iter().filter(|p| p.alive && p.swarm == Some(s.id)).count()).sum();
             rats = rats.max(w.players.iter().filter(|q| q.kind == PawnKind::Rat).count() + swarm_rats);
             if let Some(g) = w.projectiles.iter().find(|g| g.kind.is_grenade() && g.owner == ME) {
                 grenade_trace = Some(format!(

@@ -134,6 +134,10 @@ pub enum AiEvent {
     /// A rat brain's meal ([`rats::RatEvent`]): it started eating a corpse, or ate it (no body
     /// remains) when `devoured`.
     RatEat { rat: PlayerId, corpse: PlayerId, devoured: bool },
+    /// An NPC saw a corpse it had not seen before (the corpse reaction, 0x00B40740, which
+    /// reports the discovery 0x00A98950: the game counts `NumCorpsesDiscovered` the first time a
+    /// given corpse is discovered by anyone).
+    CorpseFound { npc: PlayerId, corpse: PlayerId },
 }
 
 /// Runtime state of a `DisAlarmBell`.
@@ -310,6 +314,10 @@ pub struct Brain {
     /// Barks decided this tick (drained into `Crowd::events`).
     #[serde(default)]
     pub barks: Vec<(String, Option<PlayerId>)>,
+    /// Corpses this brain discovered by sight this tick (drained into `Crowd::events` as
+    /// [`AiEvent::CorpseFound`]).
+    #[serde(default)]
+    pub found_corpses: Vec<PlayerId>,
     /// Time left before the first pistol shot is allowed (`m_GunUsageStart`, `m_fGunTimer`).
     #[serde(default)]
     pub gun_timer: f32,
@@ -992,6 +1000,9 @@ impl Crowd {
             for (hook, initiator) in b.barks.drain(..) {
                 ai_events.push(AiEvent::Bark { npc: b.id, hook, initiator });
             }
+            for corpse in b.found_corpses.drain(..) {
+                ai_events.push(AiEvent::CorpseFound { npc: b.id, corpse });
+            }
             let panicked = |s: BrainState| matches!(s, BrainState::Flee | BrainState::Cower);
             if b.kind != PawnKind::Guard && panicked(b.state) && !panicked(was) {
                 // `DisAISubStateFlee.bDoBarkForHelp`: call for help at talking loudness.
@@ -1031,8 +1042,13 @@ impl Crowd {
             if possessed {
                 continue;
             }
-            let swarm = self.rat_swarm.get(&p.id).copied().flatten();
+            let swarm = self.rat_swarm.get(&p.id).copied().flatten().or(p.swarm);
             let power = swarm.and_then(|s| ws.swarms.iter().find(|x| x.id == s));
+            // An ended Devouring Swarm: its rats stop (they despawn, `dishonored_sim::powers::step_swarms`).
+            if power.is_some_and(|x| x.ending) {
+                out.push((p.id, PlayerInput { yaw: p.yaw, left_hand: LeftHand::Empty, ..Default::default() }));
+                continue;
+            }
             let count = match swarm {
                 Some(s) => ws.players.iter().filter(|q| q.kind == PawnKind::Rat && q.alive && self.rat_swarm.get(&q.id).copied().flatten() == Some(s)).count() as u32 + power.map_or(0, |x| x.rats as u32),
                 None => 1,
@@ -1055,13 +1071,23 @@ impl Crowd {
         out
     }
 
-    /// Write `PlayerState::ai_unaware` for every NPC with a brain (sleep darts' instant sleep
-    /// and Shadow Kill level 1 read it): see [`Brain::unaware_of`].
+    /// Write `PlayerState::ai_unaware` (sleep darts' instant sleep and Shadow Kill level 1 read
+    /// it, see [`Brain::unaware_of`]) and `PlayerState::ai_awareness` (the assassination gate, see
+    /// [`Brain::awareness`]) for every NPC with a brain.
     pub fn write_awareness(&self, ws: &mut WorldState) {
         for b in &self.brains {
             if let Some(p) = ws.player_mut(b.id) {
                 p.ai_unaware = b.unaware_of(NOISE);
+                p.ai_awareness = b.awareness();
             }
+        }
+        // `PlayerState::combat_opponents`: the pawn's skirmish size (the `DisGlobalCombatManager`
+        // skirmish of a target holds the brains in combat against it, 0x00C5AF60); Dark Vision
+        // reads it (0x00BF84C0). LIKELY: the port's skirmish is the set of Combat brains on that
+        // target (`assign_skirmish`).
+        for p in ws.players.iter_mut() {
+            let n = self.brains.iter().filter(|b| b.state == BrainState::Combat && b.target == Some(p.id)).count();
+            p.combat_opponents = n.min(u8::MAX as usize) as u8;
         }
     }
 
@@ -1436,6 +1462,7 @@ impl Brain {
             ring_wait: 0.0,
             alarm_enemy: None,
             barks: Vec::new(),
+            found_corpses: Vec::new(),
             gun_timer: -1.0,
             hostile_faction: Vec::new(),
             deaf: false,
@@ -1813,6 +1840,7 @@ impl Brain {
                     let seen = !self.blind && Self::look(me, p, world, ai).is_some_and(|n| seen_rate(prof, prof.seeing_scalar_dead_npc, n, 0.0) > 0.0);
                     if seen {
                         self.corpses_seen.push(p.id);
+                        self.found_corpses.push(p.id);
                         let inc = prof.discovered_corpse;
                         self.bump(ai, NOISE, inc, p.position, false, reason::FOUND_CORPSE);
                         self.suspecting = true;
@@ -2954,6 +2982,22 @@ impl Brain {
     pub fn unaware_of(&self, _who: PlayerId) -> bool {
         // The reaction delay is `EAIAwareness_Surprised` (0x00b0c1e0 returns 2): not combat yet.
         !matches!(self.state, BrainState::Combat | BrainState::RingAlarm)
+    }
+
+    /// The pawn's `EAIAwareness` (0x00B0C1E0): `Surprised` during a reaction delay, else the
+    /// awareness of the current behaviour. The port's states map to the original behaviours'
+    /// (LIKELY: the behaviours' awareness values were not read): fighting and ringing an alarm
+    /// `InCombat`, panic `Fearful`, notice / investigate / search `Suspicious`, routines
+    /// `Unaware`. `AwareOfPlayer` and `Begging` have no port state.
+    pub fn awareness(&self) -> u8 {
+        use dishonored_sim::state::awareness as a;
+        match self.state {
+            BrainState::React => a::SURPRISED,
+            BrainState::Combat | BrainState::RingAlarm => a::IN_COMBAT,
+            BrainState::Flee | BrainState::Cower => a::FEARFUL,
+            BrainState::Notice | BrainState::Investigate | BrainState::Search => a::SUSPICIOUS,
+            BrainState::Idle | BrainState::Wander | BrainState::WalkToPoint | BrainState::GroupIdle | BrainState::Patrol | BrainState::Alert => a::UNAWARE,
+        }
     }
 }
 

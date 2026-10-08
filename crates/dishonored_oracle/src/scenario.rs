@@ -203,7 +203,8 @@ pub enum Action {
     /// A console command (original: `ConsoleCommand`; port: the matching debug hook, if any:
     /// `teleport X Y Z [YAW]`, `health N`, `mana N`, `power NAME LEVEL`, `alert NPC`,
     /// `calm NPC`, `give AMMOTYPE N`, `saveload` (save the match, load it back and continue from the copy; the
-    /// event detail says `same_state=true|false`), `cansave`; anything else is recorded as an
+    /// event detail says `same_state=true|false`), `cansave`, `adddarkness N` (the chaos cheat:
+    /// the darkness manager's Add); anything else is recorded as an
     /// unsupported-command event).
     Console(String),
     /// Select the left-hand item (power wheel / quick select), held until changed

@@ -94,7 +94,9 @@ pub enum SimEvent {
     SwordSwing { id: PlayerId },
     SwordBlocked { attacker: PlayerId, defender: PlayerId },
     SwordParried { attacker: PlayerId, defender: PlayerId },
-    Fired { id: PlayerId, bolt: bool, projectile: u32 },
+    /// A projectile left: its kind, spawn point and velocity (presentation starts its trail from
+    /// here, as a bolt can hit within its launch tick and never be in a snapshot).
+    Fired { id: PlayerId, bolt: bool, projectile: u32, kind: crate::state::ProjectileKind, origin: Vec3, velocity: Vec3 },
     Reloaded { id: PlayerId },
     WindblastCast { id: PlayerId },
     DarkVision { id: PlayerId, active: bool },

@@ -24,7 +24,7 @@ as elsewhere: CONFIRMED, LIKELY, SPECULATIVE. Movement, Blink, Windblast, parry 
 | Use reach | `DisTweaks_InteractableInterface.m_fMaxDistance` (class default; no pickup overrides it) | 200 |
 | Ranged damage | `Attribute_RangedDamage` of the crossbow / pistol item attributes (through their fallback chains) | 20 / 10 |
 | Ranged dispersion | `DisTweaks_WeaponRanged_Attributes` `Attribute_DispersionMax` / `Min` / `InterpolationSpeed`, in pixels of a 720-line screen (PLAYER.md "Ranged weapon dispersion") | pistol 45 / 15 / 70, crossbow 30 / 0 / 70 |
-| Bolts | `Twk_Proj_Arrow*`: `m_fDamageMultiplier`, `m_fSpeedMultiplier`, `m_fGravityMultiplier`, `m_fLegsAndArmsDamageCap` | bolt 1 / 1 / 1.3 / 15; sleep dart 1.25 / 1 / 0.4 / 25; incendiary 2.5 / 0.2 / 0.5 / 50 |
+| Bolts | `Twk_Proj_Arrow*`: `m_fDamageMultiplier`, `m_fSpeedMultiplier`, `m_fGravityMultiplier`, `m_fLegsAndArmsDamageCap` | bolt 1 / 1 / 1.3 / 15; sleep dart 1.25 / 0.7 / 0.4 / 25; incendiary 2.5 / 0.2 / 0.5 / 50 |
 | Possession | `Twk_Powers_Possess`, `Twk_Possessable_BaseNPC`, `Twk_Possessable_Rat` | cost 60, range 1000 / 2000, cancel cooldown 1.0, intro 1.1 s; people: level 2 only, 15 s, 300 uu/s, not while choked; rats: level 1, 20 / 30 s |
 | Bend Time | `Twk_Powers.BendTime.Twk_BendTime` | cost 60; level 1: world 0.15, caster 0.85, 12 s; level 2: world 0, caster 0.9, 8 s; dilation warm-up 0.15 s, cool-down 0.25 s, projectile early wake-up 0.25 s |
 | Devouring Swarm | `Twk_DevouringSwarm` + `Twk_RatSwarm.Twk_DevouringSwarm_Lvl1/2` | cost 40, spawn delay 0.65 s, 1500 uu, 30 s, 30 / 60 rats, detection 700, first bite after 2 s, every 0.5 s, 0.4 per bite clamped to 2..5 |
@@ -224,7 +224,8 @@ an NPC carries (pickpocketing). Boyle Ext (with the street script) has 68: 54 ab
 ## Gadgets
 
 - Crossbow ammo and damage: the item fires the projectile with `(int)Attribute_RangedDamage` and
-  `(int)Attribute_RangedHeadshotMultiplier` (0x00C257A0, 0x00C25D80); the projectile's damage is
+  `(int)Attribute_RangedHeadshotMultiplier` (the player's fire 0x00C38230, the pistol's 0x00C2A3E0;
+  0x00C257A0 / 0x00C25D80 are the NPCs' `DisItemContext_NPCFireGun`); the projectile's damage is
   that times its `m_fDamageMultiplier` (0x00C4A310). Bolts 20, sleep darts 25, incendiary 50
   (U-049 resolved: was 35 in the sim).
 - Incendiary bolts (`DisDamageType_Arrow_Flare`): `m_bCannotKillNPC`, `m_bPutToFire`; the NPC is
@@ -244,8 +245,10 @@ an NPC carries (pickpocketing). Boyle Ext (with the street script) has 68: 54 ab
   `DisSpringRazorTargetInterface` pawns (NPCs only; the player never triggers it) inside the
   detection cylinder with a clear line (0x00C2D650) -> `m_fTriggerReactionTime` (or
   `m_fDamageReactionTime` when damaged, 0x00C31F80) -> detonation (0x00C2D970) ->
-  `m_fDamageActorDelayTime` -> damage in the detonation cylinder (0x00C36350): NPCs are cut down,
-  other pawns take `m_NonNPCDamage` (5). Radii scale with `Attribute_SpringRazorRadiusBonus`
+  `m_fDamageActorDelayTime` -> damage in the detonation cylinder (0x00C36350 -> 0x00C35D60): a pawn
+  whose razor interface accepts the cut (NPCs) takes `m_NonNPCDamage[difficulty]` (5) and is severed;
+  a pawn without the interface (the player) or an NPC that refuses it takes `m_ImmuneNPCDamage` (50)
+  (corrected 2026-10-08, ranged.md F10). Radii scale with `Attribute_SpringRazorRadiusBonus`
   (0x00C2D360). CONFIRMED.
 - Deploy timings: grenade `FireProjectile` at 0.300 s (exit 0.680), Spring Razor placed at
   0.200 s (`Gadgets_SpringRazor_Deploy`, 0.367 s).

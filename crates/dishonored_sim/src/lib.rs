@@ -10,8 +10,10 @@ pub mod adrenaline;
 pub mod blink;
 pub mod climb;
 pub mod combat;
+pub mod darkness;
 pub mod events;
 pub mod gadgets;
+pub mod hit_regions;
 pub mod input;
 pub mod inventory;
 pub mod left_hand;
@@ -144,6 +146,10 @@ pub fn step_world(
         let ctx = MoveCtx { world, cfg: &mvc, dt };
         if !p0.alive || p0.incapacitated() {
             let p = &mut state.players[i];
+            // The Blink component still ticks (a dead caster deactivates it, 0x00BFC5D0).
+            let mut acts = Vec::new();
+            blink::tick_cooldown(p, dt, &g.blink, &mut acts);
+            actions.extend(acts.into_iter().map(|a| (i, a)));
             if p.alive && p.condition == state::Condition::BeingChoked {
                 p.velocity = Vec3::ZERO;
             } else if p.carried_by.is_none() {
@@ -219,7 +225,7 @@ pub fn step_world(
         let p = &mut state.players[i];
         let choke_lock = p.choke.phase != state::ChokePhase::None;
         let locked = combat::sword_locks_movement(p) || p.mode == MoveMode::Blinking || choke_lock || p.action_lock > 0.0 || p.carry_anim > 0.0;
-        let sword_out = p.carrying.is_none() && !p.sword_sheathed;
+        let sword_out = movement::sword_in_right_hand(p);
         movement::step_movement(p, &input, sword_out, !locked, &ctx, &mut out.events);
         noise::track_fall(&p0, p);
         noise::step_footfalls(p, g, dt, &mut out.events);
@@ -239,7 +245,7 @@ pub fn step_world(
         let air_max = swim::air_capacity(&mvc.water, breath);
         let drowning = p0.water.under && air_max > 0.0 && p0.water.air_used >= air_max - 1e-6;
         vitals::tick_with(p, &powers::effective_vitals(&p0, g), dt, !drowning);
-        left_hand::tick_dark_vision(p, dt, &mut out.events);
+        left_hand::tick_dark_vision(p, dt, cfg.tuning.dark_vision_combat_timer, &mut out.events);
         adrenaline::tick(p, g, dt);
         swim::step_breath(p, world, &mvc, breath, 0.0, dt, &mut out.events);
         p.rat_slow = (p.rat_slow - dt).max(0.0);
@@ -251,7 +257,7 @@ pub fn step_world(
     // Rat attack groups.
     let rat_dt = DT * powers::world_time_scale(state, g, false);
     if rat_dt > 0.0 && state.players.iter().any(|p| p.kind == state::PawnKind::Rat) {
-        rats::step_rat_attacks(state, &ins, rat_dt, &g.vitals, &rats::RatAttackTweak::default(), &mut out.events);
+        rats::step_rat_attacks(state, &ins, rat_dt, &g.vitals, g, &mut out.events);
     }
 
     // World effects asked for by left hands.
@@ -264,26 +270,12 @@ pub fn step_world(
             }
             left_hand::LeftAction::Swarm => powers::summon_swarm(state, id, world, g, &mut out.events),
             left_hand::LeftAction::PlaceTrap => gadgets::place_trap(state, id, world, g, &mut out.events),
+            left_hand::LeftAction::BlinkLayer { target, blend } => powers::set_blink_layer(state, id, target, blend),
             left_hand::LeftAction::PossessRelease => {
                 let p = state.players[i];
-                if let Some(target) = powers::possess_target_any(state, &p, world, g) {
+                // Rats of a Devouring Swarm are rat pawns: candidates like any other pawn.
+                if let Some(host) = powers::possess_target(state, &p, world, g) {
                     if vitals::spend_mana(&mut state.players[i], g.items.possess.mana_cost, &g.vitals) {
-                        let host = match target {
-                            powers::PossessTarget::Pawn(h) => h,
-                            powers::PossessTarget::SwarmRat(sid) => {
-                                // One rat leaves the swarm as a pawn to be possessed.
-                                let rid = powers::swarm_rat_id(state);
-                                let (pos, yaw) = match state.swarms.iter_mut().find(|s| s.id == sid) {
-                                    Some(s) => {
-                                        s.rats = s.rats.saturating_sub(1);
-                                        (s.position + Vec3::Z * movement::RAT_HALF_HEIGHT, p.yaw)
-                                    }
-                                    None => (p.position, p.yaw),
-                                };
-                                rats::spawn_rat(state, rid, pos, yaw, Some(sid), cfg, &mut out.events);
-                                rid
-                            }
-                        };
                         powers::begin_possession(state, id, host, g);
                     }
                 }
@@ -307,16 +299,17 @@ pub fn step_world(
         let id = state.next_projectile_id;
         state.next_projectile_id = state.next_projectile_id.wrapping_add(1);
         state.projectiles.push(left_hand::make_projectile(id, owner, kind, pos, vel, &cfg.tuning));
-        out.events.push(SimEvent::Fired { id: owner, bolt: kind.is_bolt(), projectile: id });
+        out.events.push(SimEvent::Fired { id: owner, bolt: kind.is_bolt(), projectile: id, kind, origin: pos, velocity: vel });
     }
 
     // Health before the sword resolves (assassinations give adrenaline by the victim's health).
     let pre_health: Vec<(PlayerId, f32)> = state.players.iter().map(|p| (p.id, p.vitals.health)).collect();
-    combat::resolve_sword_hits(state, world, mv, &cfg.gameplay.vitals, &cfg.tuning, &g.ai.noise, &mut out.events);
+    combat::resolve_sword_hits(state, world, g, &cfg.tuning, &mut out.events);
     movement::slide_impacts(state, mv, &cfg.gameplay.vitals, &mut out.events);
 
     for e in &out.events {
         if let SimEvent::WindblastCast { id } = e {
+            let (level, range) = state.player(*id).map_or((1, cfg.tuning.windblast_distance[1]), |p| left_hand::windblast_params(p, g, &cfg.tuning));
             state.windblasts.push(state::WindblastState {
                 caster: *id,
                 warmup: left_hand::WINDBLAST_WARMUP,
@@ -325,9 +318,13 @@ pub fn step_world(
                 direction: Vec3::X,
                 targets: Vec::new(),
                 started: false,
+                level,
+                range,
             });
         }
     }
+    // A Windblasted NPC hitting a wall (its rigid-body collision, 0x00B529C0).
+    left_hand::windblast_wall_hits(state, &cfg.tuning, &g.vitals, &mut out.events);
     let world_dt = DT * powers::world_time_scale(state, g, false);
     let proj_dt = DT * powers::world_time_scale(state, g, true);
     if world_dt > 0.0 {
@@ -339,7 +336,7 @@ pub fn step_world(
         let sleep_delay = |id: u32| delays.iter().find(|d| d.0 == id).map_or(takedown::SLEEP_DELAY, |d| d.1);
         let bullets: Vec<(u32, PlayerId, Vec3)> = state.projectiles.iter().filter(|p| p.kind == state::ProjectileKind::Bullet).map(|p| (p.id, p.owner, p.velocity)).collect();
         let first = out.events.len();
-        left_hand::step_projectiles(state, world, mv, &cfg.tuning, &cfg.gameplay.vitals, mv.gravity_z, proj_dt, &sleep_delay, &mut out.events);
+        left_hand::step_projectiles(state, world, mv, &cfg.tuning, &g.items.hit_bodies, &cfg.gameplay.vitals, mv.gravity_z, proj_dt, &sleep_delay, &mut out.events);
         // A bullet hitting the world is a `Bullet` -> `Environment` contact: its AI noise at the
         // impact, made by the shooter.
         let impacts: Vec<(Vec3, PlayerId, f32)> = out.events[first..]
@@ -356,9 +353,10 @@ pub fn step_world(
     }
     if world_dt > 0.0 {
         gadgets::step_traps(state, world, g, world_dt, &mut out.events);
-        powers::step_swarms(state, world_dt, g, &mut out.events);
+        powers::step_swarms(state, world_dt, cfg, &mut out.events);
     }
     powers::step_time_bends(state, DT, &mut out.events);
+    powers::step_blink_layers(state, DT);
     inventory::update_carried(state, mv);
 
     volumes::step_pain(state, world, cfg, &mut out.events);
@@ -388,6 +386,12 @@ pub fn step_world(
                 }
             }
             SimEvent::Damage { victim, attacker, amount, cause } => {
+                // Other damage replaces the last hit's instigator and type.
+                if cause != DamageCause::Windblast {
+                    if let Some(p) = state.player_mut(victim) {
+                        p.windblasted_by = None;
+                    }
+                }
                 let ad = &g.adrenaline;
                 if let Some(a) = attacker.filter(|a| *a != victim) {
                     let gain = match cause {
@@ -525,7 +529,7 @@ pub fn state_hash(state: &WorldState) -> u64 {
         for f in [p.water.air_used, p.water.stroke, p.adrenaline.value, p.dark.remaining, p.rat_slow, p.jump.held] {
             mix(f.to_bits() as u64);
         }
-        mix(p.helmet as u64 | (p.jump.powered as u64) << 1 | (p.ai_unaware as u64) << 2);
+        mix(p.helmet as u64 | (p.jump.powered as u64) << 1 | (p.ai_unaware as u64) << 2 | ((p.ai_awareness ^ state::awareness::AWARE_OF_PLAYER) as u64) << 3);
         mix(p.rng as u64);
         // Climbing (only once a pawn has touched a chain, so earlier hashes are unchanged).
         if p.climb != state::ClimbState::default() {
@@ -572,5 +576,7 @@ pub fn spawn_npc(state: &mut WorldState, id: PlayerId, kind: state::PawnKind, ar
     if let Some(p) = state.player_mut(id) {
         p.kind = kind;
         p.archetype = archetype;
+        // The archetype's `Attribute_HealthMax` (guards: the elite guard pawn tweaks' 50).
+        p.vitals.health = powers::health_max(p, &cfg.gameplay);
     }
 }

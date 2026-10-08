@@ -125,7 +125,7 @@ pub struct StepInput<'a> {
     /// Positions of living mission NPCs (for task targets).
     pub npc_positions: &'a BTreeMap<String, Vec3>,
     pub events: &'a [MissionEvent],
-    /// Crowd + mission NPC count, for the chaos ratio.
+    /// Crowd + mission NPC count (statistics).
     pub total_npcs: u32,
 }
 
@@ -153,9 +153,6 @@ impl MissionStats {
     /// Nobody killed by a player (Dishonored's "Clean Hands").
     pub fn clean_hands(&self) -> bool {
         self.hostiles_killed + self.civilians_killed == 0
-    }
-    pub fn high_chaos(&self, ratio: f32) -> bool {
-        self.total_npcs > 0 && (self.hostiles_killed + self.civilians_killed) as f32 / self.total_npcs as f32 > ratio
     }
 }
 
@@ -192,7 +189,14 @@ pub struct MissionView {
     pub notification: Option<(u32, String, String)>,
     pub outcome: Option<Outcome>,
     pub stats: MissionStats,
+    /// Chaos "High" on the mission-stats screen: the chaos level reached the stats op's
+    /// `m_ChaosLevelThreshold` (0x009FE090).
     pub high_chaos: bool,
+    /// The game's chaos score and level (`DisDarknessManager`).
+    #[serde(default)]
+    pub darkness_score: i32,
+    #[serde(default)]
+    pub darkness_level: i32,
     /// World position the HUD marker points at (active task target).
     pub target: Option<[f32; 3]>,
     pub sounds: Vec<(u32, String)>,
@@ -277,6 +281,7 @@ struct Env<'a> {
     npc_pos: &'a BTreeMap<String, Vec3>,
     players: &'a [(u32, Vec3, bool)],
     items: &'a BTreeMap<String, i32>,
+    darkness_level: i32,
 }
 
 impl Env<'_> {
@@ -307,6 +312,9 @@ impl ConvEnv for Env<'_> {
     }
     fn item_count(&self, _player: Option<u32>, item: &str) -> i32 {
         self.abstract_count(item) + item.contains("Sword") as i32
+    }
+    fn darkness_level(&self) -> i32 {
+        self.darkness_level
     }
     fn distance(&self, player: Option<u32>, npc: Option<&str>) -> Option<f32> {
         let np = self.npc_pos.get(npc?)?;
@@ -385,6 +393,16 @@ pub struct MissionState {
     /// [kismet] Abstract items the players hold (`DisSeqAct_AddAbstractItem` /
     /// `RemoveAbstractItem`, by object name): the conversations' `DisConv_HasAbstractItem` checks.
     pub items: BTreeMap<String, i32>,
+    /// The game's chaos score and level (`DisDarknessManager`, kept by the host; set before
+    /// each step): `DisConv_CompareDarknessLevel` reads the level.
+    #[serde(default)]
+    pub darkness_score: i32,
+    #[serde(default)]
+    pub darkness_level: i32,
+    /// `DisSeqAct_MissionStatsTracking.m_ChaosLevelThreshold` of the last stats op the Kismet
+    /// ran (else the mission's `chaos_level_threshold`): the HUD's High / Low.
+    #[serde(default)]
+    pub chaos_threshold: Option<i32>,
 }
 
 impl MissionState {
@@ -442,6 +460,9 @@ impl MissionState {
             ai_hooks_requested: 0,
             ai_hook_rejections: BTreeMap::new(),
             items: BTreeMap::new(),
+            darkness_score: 0,
+            darkness_level: 0,
+            chaos_threshold: None,
         };
         s.refresh_view(&BTreeMap::new());
         s
@@ -576,7 +597,7 @@ impl MissionState {
     /// queue (Kismet-style cascade within the step).
     fn with_conv(&mut self, queue: &mut VecDeque<Ev>, f: impl FnOnce(&mut Runner, &mut dyn ConvEnv)) {
         let Some(runner) = self.conv.as_mut() else { return };
-        let mut env = Env { flags: &mut self.flags, changed: Vec::new(), alive: &self.npc_alive, suspicion: &self.npc_suspicion, npc_pos: &self.last_npc_pos, players: &self.last_players, items: &self.items };
+        let mut env = Env { flags: &mut self.flags, changed: Vec::new(), alive: &self.npc_alive, suspicion: &self.npc_suspicion, npc_pos: &self.last_npc_pos, players: &self.last_players, items: &self.items, darkness_level: self.darkness_level };
         f(runner, &mut env);
         let changed = env.changed;
         let events = runner.take_events();
@@ -711,7 +732,8 @@ impl MissionState {
                     queue.push_back(Ev::PickedUp { pickup: pickup.clone(), item: item.clone() });
                 }
                 MissionEvent::NpcKnockedOut { npc, by_player, .. } => {
-                    // Non-lethal: counts for the statistics, not for the kill-ratio chaos.
+                    // Non-lethal: only `HostilePutToSleep` / `CivilianPutToSleep` (0x00B738F0),
+                    // which no chaos deed counts.
                     if *by_player {
                         self.view.stats.knocked_out += 1;
                     }
@@ -1033,7 +1055,12 @@ impl MissionState {
                     .collect(),
             })
             .collect();
-        self.view.high_chaos = self.view.stats.high_chaos(self.def.settings.high_chaos_kill_ratio);
+        // The mission-stats chaos line (0x009FE090): High when the chaos level reaches the
+        // threshold of `DisSeqAct_MissionStatsTracking` (or the mission's own).
+        let threshold = self.chaos_threshold.or(self.def.settings.chaos_level_threshold);
+        self.view.high_chaos = threshold.is_some_and(|t| self.darkness_level >= t);
+        self.view.darkness_score = self.darkness_score;
+        self.view.darkness_level = self.darkness_level;
         let on_map = |m: &String| self.current_map.is_empty() || self.marker_map.get(m).is_none_or(|mm| mm.eq_ignore_ascii_case(&self.current_map));
         self.view.usables = self.usable.iter().filter(|(m, _)| on_map(m)).filter_map(|(m, p)| self.markers.get(m).map(|x| (x.0.to_array(), p.clone()))).collect();
         self.view.talkers = self.talk.iter().filter(|(n, _)| self.npc_alive.contains(*n)).map(|(n, p)| (n.clone(), p.clone())).collect();

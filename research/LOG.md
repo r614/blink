@@ -1837,7 +1837,105 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613â€¦c6fb` unless
   - Death (vslot 232, 0x00C844E0): a directional `m_Death*AnimName` (side from 0x00BBE900) plays only on one damage-class branch, when fewer than 5 ... and `rand < m_fRagdollRatio`. Another branch ragdolls (0x00C6C3D0). The damage classes were not resolved, so dead rats are not drawn yet.
   - Windblast: `m_WindBlastAnimName` (0x00C66500 and others) is not done.
 
-## 2026-10-08 — Stealth port: AI noise table, footfalls, landings, visibility states, stealth volumes
+## 2026-10-08: Ranged weapons and gadgets ported (ranged.md F1-F6, F10-F12)
+
+- **Question:** Port the decoded ranged rules (research/dishonored/systems/ranged.md section 10).
+- **Evidence:** Re-read in the static index: 0x00C29820 (bullet damage), 0x00C2A3E0 / 0x00C38230
+  (fire, spawn, `Attribute_Range`), 0x00C3A660 (pierce), 0x00C503D0 / 0x00C4A310 (arrow damage),
+  0x00B66900 / 0x00B66950 (hit regions), 0x00C5D940 / 0x00C5C280 (bounce, sticky sink),
+  0x00C36350 / 0x00C35D60 / 0x00C2D650 / 0x00BC0280 (Spring Razor), 0x00C36E50 (bullet blast).
+- **Result:**
+  - Bullet 10 + 20, x1.5 strictly under 400 from the spawn point (camera + 150), long-range and
+    stealth factors, pierce through one pawn (x0.5 on the next). Measured since (ORACLE.md
+    2026-10-08): 45 at 300 uu, matches.
+  - Crossbow: spawn 150 ahead along the dispersed direction, speed x max(1, Attribute_Range);
+    head kill, x2 on unaware head / torso, limb cap. Measured 40 on an idle guard's torso.
+  - Hit regions: the elite guard's physics bodies (bind pose) classify the shot; the cooked
+    `KAggregateGeom` element `TM` stores each plane as (W, X, Y, Z) (the ragdoll's
+    `matrix_origin` reads it shifted by one float).
+  - Grenade bounce law with blended restitution / damping and the rest threshold; sticky 5 uu
+    sink on pawns.
+  - Spring Razor: cylinder from the base to its height, strict bounds; three points at the
+    centre +- 2/3 of the half height; a pawn without the razor interface (the player) takes
+    `m_ImmuneNPCDamage` (50), not `m_NonNPCDamage`.
+  - AI noise: pistol and explosion from their `EAINoiseLoudness` (6000); crossbow and throw have
+    no loudness field and no longer make noise.
+- **Confidence:** CONFIRMED (decompiled; pistol and crossbow damage measured); the region
+  bone mapping and the razor's NPC sample points are the port's reading.
+- **Implementation consequence:** gameplay config cache key `v13r`; `ProjectileState` gains
+  `spawn` / `pierced` (protocol bump needed). Open: muzzle-socket bolt spawn, throw origin at
+  the hand, aim assist, bolt recovery / pinning, the bullet blast (F13), grenade impact damage 6.
+
+## 2026-10-08: Movement findings ported (MV-1, MV-2, MV-3, MV-6, MV-7)
+- **Question:** Port the movement findings of `systems/movement.md` from the decoded code.
+- **Evidence:** `oracle index fn` 0x006BF0E0 (physFalling tail), 0x00ADBD00 / 0x00ADBE70 / 0x00AA3820 / 0x00AD78D0 / 0x00ACD820 / 0x00AD35E0 (mantle trigger, request, step-up), 0x00AC6B80 / 0x00AD6410 / 0x00ADA6F0 / 0x00AD6600 / 0x00AD69B0 / 0x00ADA4C0 / 0x00ACCAD0 / 0x00AD5F40 / 0x00AC6D40 (edge finder), 0x00AA4700 (sword factor), 0x00AB53A0 / 0x00A63BB0 + `DefaultPlayerState.ini` (stun), 0x00AC5420 / 0x00AC5540 / 0x00AC5950 / 0x00AC0A00 (lean), 0x006BD150 at 0x006BECD8 (ledge fall); class layouts of `DisTweaks_PlayerPawn_Mantle`, `DishonoredMantleEdgeFinderComponent`, `DisMantleFinderState_*`, `Pawn.CrouchHeight` (+0x290).
+- **Result:** MV-1, MV-2, MV-3, MV-7 ported; MV-6 ported except the mantleable-actor grid (the 6 x 6 grid is not a landing check, correction in movement.md); MV-4 was already rebuilt (re-read, the remaining angle gap is U-867); MV-5 open (the stun length depends on animation events: `EStunAnimState` phases, only Stunned uses `m_fStunDuration` 0.1); MV-8 open (the ledge-fall condition depends on undecoded +0x280 bits); MV-9 open (no actor data in hits). `PlayerState.right_hand` replaces `sword_sheathed`, `PlayerState.mantle_allowed` added (protocol 11). Scenarios `mantle_330` / `mantle_360` hold Jump (spec hash changed: recapture).
+- **Confidence:** CONFIRMED (decompiled code) for the ported rules.
+- **Implementation consequence:** `oracle scenario --system movement`: 23 pass / 3 fail / 12 unmeasured (lean, lean_boyle: U-867 and a contradictory reference; mantle_330: a flush-contact collision artifact, movement.md "Port status"). Floor hover (U-804): the Playground needs simple-collision brushes, blocked by the same flush-contact issue in `sat`.
+## 2026-10-08: Porting the world findings: chaos as the darkness score, charms, doors, save waits
+
+- **Question:** Port systems/world.md F-1..F-19 by the decoded rules.
+- **Evidence (re-read with the static index):** `Add` 0x00C41B50 (sum, then `& ((x < 0) - 1)`: clamp at 0); level 0x00C487D0 (largest i with score >= levels[i], -1 below); deeds 0x00C4D2C0 (counter += (int)amount; at the threshold add `m_Value`, clamp, reset to 0; victim filter by the tweak name test 0x00C6F450 against the victim tweak's name and `m_FallbackChainCooked`); `DisSeqVar_DarknessLevel` slot 93 0x00B8BAA0 / `DisSeqVar_Darkness` 0x00B8B990 write the level / score; `DisConv_CompareDarknessLevel` 0x00CA8FE0 (0 equal, `(cmp <= level) + 1`); `DisSeqAct_MissionStatsTracking` 0x009FE090 (stat type 0x1B: level >= `m_ChaosLevelThreshold` -> 1); `DisSeqAct_NotifyMissionEnd` 0x00B8B110 -> 0x00C4D500; `DisSeqAct_IncrementPlayerStat` 0x00AB9B90 ends in the stat increment 0x00AB9560, which calls the deeds; alarm bell slot 244 0x00A3D080 (stat 3); corpse 0x00A98950 (stat 4, once per corpse).
+- **Data:** `m_DarknessLevels` is a `TArray<int>` the generic tweak reader took for object references; read raw (`TweakDb::int_array`): 0, 12, 48, 72, 96, 114, 138, 162, 168, 200, 390 (closes U-W1 from the data). `m_Deeds` as in world.md; tweak names are cooked `Pkg+++Obj Class`.
+- **Bone charms (correction of F-7):** `m_Effect` is an effect id: below 10,000,000 an index into `m_Charms`, from it up into `m_ScriptedCharms` (0x00AA8EF0); the owned list is (level byte, id) pairs and taking an owned id raises its level (0x00ABBA90). `m_ScriptedCharms` has 12 entries. Placed charms in Boyle have no `m_Effect` (class default -1): a run-time distribution (pool at +0xB44 of the game object, which `SetBoneCharmEffect` 0x00A22970 returns regular effects to) is not decoded (U-W12).
+- **Doors:** Kismet Open 0x00A1A450 only from closed and CanUse, Close 0x00A1A4B0 only from open; `DisSeqAct_Lock` 0x00B8F730 calls usable slots 238 / 239 (0x00A4E870 / 0x00A4E910; the door's 0x00A32490 adds the path blocker). CanUse 0x00A4E2E0: `+0x2C4` is `m_State` (PLAYGROUND.md corrected). No key path in `DisDoor::Use` 0x00A37C10 (U-W4 stays open).
+- **Save waits:** pop 0x009F95F0 (`count--`, `timer = max(timer, wait)`); pop sites: Choice_Base 0x00A6C7E0 (0.1), controller cinematic 0x00AAF150 (1.0), combat tracker 0x00AB9FA0 (type 4 pushed when `DisTweaks_PlayerPawn_Combat.m_bDisableManualSaveInCombat`, popped with `m_fDisableManualSaveAfterCombatTime_s` = 1.0: closes U-W8); the others pass 0.
+- **Result:** ported F-1..F-5, F-7 (corrected), F-8, F-10, F-16, part of F-17, F-6 as data, F-19; F-9, F-13, F-14, the AddPower level mapping and the store purchase rule left open (world.md 10.1). Oracle: `darkness.*` channels and `adddarkness` console hook; `chaos/adddarkness_sweep`, `civilian_kills`, `guard_kills_sweep`, `corpse_discovered` pass.
+- **Confidence:** CONFIRMED for the rules above; the kill-credit side test (U-W2) and whether placed (spawned-dead) corpses count are LIKELY.
+- **Implementation consequence:** cache keys: gameplay config `v12x-world2`, pickups `pickups2`, new `<map>.lineage1.json`, dialog `v3`; net protocol 10 (u64 inventory masks, `charms_level2`, `MissionView` darkness fields); saves gain `MissionMatch::darkness` / `corpses_discovered` and autosave timer fields (serde defaults keep old saves loading).
+## 2026-10-08: Melee findings ported (sword damage, NPC damage, offscreen, assassination, drop, multi-hit, guard health)
+
+- **Question:** Port the verified melee findings (research/dishonored/systems/melee.md F1-F9).
+- **Evidence:** Re-read 0x00C131C0 / 0x00C07C80 / 0x00C33DD0 (damage), 0x00C24020 / 0x00BBEF40 (offscreen flag:
+  `m_bRenderedByPlayer` and the view plane), 0x00C0D8F0 / 0x00C09060 / 0x00C090D0 (assassinate target test),
+  0x00BBA970 (move-set side), 0x00C09810 / 0x00C09900 / 0x00C09A50 / 0x00C14960 (drop). Tweaks with the Boyle script
+  packages: elite sword MeleeDamage 10/15/20/30, JumpAttack and Bash multipliers 0, every `Pwn_EliteGuard_*` HealthMax
+  50. `DisGlobalEnums.EAIAwareness` from DishonoredGame.upk. Assassination clip exits from `Ply_Sword_Assassination_as`.
+- **Result:**
+  - Damage = `appCeil(m_fAttackDamageMultiplier x (Attribute_MeleeDamage + Attribute_MeleeDamageBonus))` (the handler's
+    rounding is appCeil); the health ratios only pick the contact effect. Player 10, guard 15 (Normal), 8 offscreen.
+  - Assassinate: NPC within 275 (speed-scaled at 1.25), any side, awareness Unaware / Surprised / Suspicious /
+    Begging, not running. Drop: no awareness gate (the drop context never calls 0x00C0D8F0), no fall-speed floor,
+    height 0..350, fall-path sweep, every tick.
+  - Scenarios (combat): before 12 pass / 4 fail; after 14 pass / 2 fail (crossbow_hit, pistol_pierce: not melee).
+    sword_hit_dummy damage 14 -> 10 (pass), melee_guard_offscreen 14 -> 8 (pass), guard_attack 14 -> 15.
+- **Confidence:** CONFIRMED for the damage rule, the tables and the drop geometry; LIKELY for the brain-state to
+  `EAIAwareness` mapping and the `m_bRenderedByPlayer` stand-in (view frustum + trace).
+- **Implementation consequence:** `dishonored_sim::combat` (melee_damage, app_ceil, seen_by, find_assassination,
+  find_drop_assassination, multi-hit), `SwordState` (npc_move, hit_ids, offscreen_to, lock_time),
+  `PlayerState::ai_awareness`, `Brain::awareness`, config fields (InventoryConfig sword_melee_damage /
+  melee_damage_bonus / offscreen_melee_reduction; CombatAiConfig npc_sword_damage / guard_health_max;
+  MeleeContextConfig damage_multiplier), gameplay cache `v13m`. U-113 is the PvP mapping only; the oracle cause
+  rule is retired. Open: rebound, sword clash, chains, stagger / recoil timings, the context target selection.
+## 2026-10-08: Powers findings ported (Blink lock-out and dilation layer, Windblast levels and wall rule, Dark Vision combat, Possession)
+
+- **Question:** Port the findings of `dishonored/systems/powers.md` (F-01..F-11, F-13/F-14 if decodable).
+- **Evidence (re-read with the static index):**
+  - Blink CanUse 0x00BE71F0 = mana check 0x00BF3060 (whole points >= `m_ManaCost`) and not `m_bActive` (slot +0x160 = `+0xA0 & 1`); the start 0x00BFC020 returns at once when CanUse fails (no sound, no aim). 0x00BFAAA0 sets `m_bActive` and zeroes `m_fCooldownTimer` (+0x138); 0x00BED480 (modes 2/3) adds the step and, past the level block's `m_fCooldownTime` (+0x20), clamps it and calls 0x00BE9180 (clears `m_bActive`, calls 0x00BE7380 again).
+  - Dilation channels: `DishonoredGameInfo.m_BendTimeInfo[11]` (`BendTimeChannelInfo`, +0x4CC, 0x40 each; `EBendTimeChannel`: 0 BendTimePower, 1 BlinkPower, 2 PossessPower...). The helper 0x009FA0D0 sets a channel's targets (world target 0 kept, else clamped to [0.05, caster target]) and velocities `(target - current) / blend`. The GameInfo tick 0x009FCBC0 (real time) moves each value linearly, landing on the target, then multiplies: player rate = product of the channels' player dilations (written to `WorldInfo.TimeDilation`), world rate = product of their world dilations (`m_bExclusive` channels override the others; none of the powers' channels is exclusive). `m_fBendTimePowerRealTimeSeconds` (+0x1348, Bend Time's clock, 0x009E9E80) advances by dt x the world dilation of the channels with `m_bAffectsBendTimePower` (Blink's has it, Bend Time's own has not).
+  - Blink's calls: 0x00BFC990 (1, 0.01, 1.0, 1.0, `m_fBendTimeDownTime`), 0x00BE7380 (1, 1.0, 1.0, 1.0, `m_fBendTimeUpTime`) from the end/cancel 0x00BFAB80 and from 0x00BE9180 at the cooldown's end (the slope is recomputed from the current value there).
+  - Windblast: 0x00BF6780 / 0x00BF7090 read `m_Levels[m_CurrentLevel - 1]`, range `m_Distance x (1 + SpellStrength)`. The wall rule is the NPC pawn's rigid-body collision 0x00B529C0 (vslot +0x290): other side world/static, last instigator the player and last damage type Windblast, the player's Windblast component at `m_CurrentLevel > 1`, contact normal with `n.z^2 < n.x^2 + n.y^2`, speed >= `m_fMinSpeedToExplodeNPCs` (500) -> TakeDamage(`m_HitWallAdditionalDamage` 100, momentum = velocity); if that kills it and `rand <= m_fChanceToExplodeNPCs` (0.3) the body explodes (0x00B52530, impulse `m_fExplodeImpulseStrength`).
+  - Windblast and projectiles (F-07): the gather takes every colliding actor in range except one excluded class; a hit first calls the actor's vslot +0x37C: pawns return 0 (TakeDamage + impulse), `DisProjectile` (0x00C4F290) takes no damage and reacts by its tweak's `m_WindblastBehavior` (None / Normal: velocity redirected along the blast, 0x00C4A430 / PushTowardNPC / Homing: 0x00C4A650 homes on the aimed NPC within a 0.8 dot cone, else on the aim trace's hit point, at `m_fWindblastVelocityMultiplier` x speed over `m_fWindblastHomingTime`; class default Homing, 1.2, 1.6 s).
+  - Dark Vision combat 0x00BF84C0: count = `DisGlobalCombatManager.m_TargetToSkirmishMap[player].m_Combatants.Num` (0x00C58CD0 / 0x00C5AF60); the first combat step sets `m_fCombatTimer` to `m_fDesactivateInCombatTimer`, later ones count down, zero zeroes `m_fTimeRemaining`; out of combat (or when 0x00B45310 reports its flag) the timer is reset.
+  - Possession: 0x00BFA120 extends `m_fMaxDuration` while `clock - start < max - m_fPostEffectCooldownTime` (+0x18 of the Bend Time level block). Scoring 0x00BFB090 / 0x00BFCAF0: `m_fAngleWeight x (fov - angle) / fov + m_fDistanceWeight x (range - d) / range + m_TargetingPriorityWeights[possessable.m_TargetingPriority]`, highest wins; fov = `DishonoredPlayerCamera.m_fCurFOV` in radians (>= 0.1), range x (1 + SpellStrength) (>= 1); the cone 0x00BF8E20 is `m_fMaxAngleFOVFraction x m_fCurFOV`; priorities `EDisPossessTargetingPriority` Animal 0 / Civilian 1 / Wolfhound 2 / Combatant 3, weights {0, 1, 2, 2}; BaseNPC is Combatant, Rat Animal.
+  - SetPowerLevel 0x00ACE270: after each new modifier the stored HealthMax (+0x348) is recomputed and, when it grew and the heal flag is clear, Health (+0x344) grows by the difference.
+- **Result:** ported in `blink.rs`, `powers.rs`, `left_hand.rs`, `lib.rs`, `movement.rs`, `tuning.rs`, `state.rs`, `dishonored_ai` (`combat_opponents`), with the new tweak fields loaded through the gameplay config. Powers scenarios: 21 pass, 0 fail, 2 unmeasured (were 4 fail).
+- **Confidence:** CONFIRMED (decoded) for the rules; the Blink layer's world rate and the Dark Vision combat definition remain unmeasured.
+- **Implementation consequence:** protocol 10; the cached gameplay config needs a refresh for the new fields (serde defaults hold the tweak values meanwhile). F-07 (projectile reactions), F-12, F-13, F-14 stay open (see powers.md section 12).
+## 2026-10-08: Devouring Swarm as individual rats (F-12), power costs at the cast notify
+
+- **Question:** Rebuild the Devouring Swarm per the measurement (ORACLE.md "Capture requests answered": individual pooled crowd-agent rats, 30 / 60, 30 s, cost 40); check the measured power cost timings.
+- **Result:** `SwarmState` is now the swarm actor and its spawner: after `m_fRatSwarmSpawnDelay` it releases its rats as rat pawns over 16 ticks (`state::SWARM_RELEASE_TICKS`), ends at `m_fDuration` and despawns them over 10 s. The rats use the existing rat-swarm brains and attack groups (per-swarm tweak `rats::swarm_tweak`); the aggregate group logic was removed. Bend Time and Devouring Swarm take their cost at the cast notify (Bend Time measured 9 ticks after the press = the 0.140 s notify). Tests: `gaps::a_swarm_releases_rat_pawns_and_they_despawn_after_its_duration`, `player::possession_takes_a_rat_of_a_swarm`.
+- **Confidence:** MEASURED counts and times; the rats' placement at release and the even despawn tail are not decoded.
+- **Implementation consequence:** `PlayerState.swarm`, `SwarmState.release_ticks / ending / rats_at_end` (protocol 10, same pass). The mission applies `AiEvent::RatEat { devoured: true }` (no body left). Open: Possession's cost timing (12 ticks after the release), the Windblast ragdoll speed (1005 vs the port's 2367 uu/s).
+## 2026-10-08: Power screen effects from the captured shaders; launch-tick trails
+
+- **Question:** What do Bend Time, Blink, Dark Vision and Possession draw on screen, from the shaders the hook captured in the running game; and how should a bolt that hits within its launch tick show its trail?
+- **Method:** `fxc /dumpbin` of the captured blobs (`oracle/shaders/70da96138fe2171c`), their recorded constants and the post manager channels (`effects/*.json`); `obj_dump` / `export_hex` of `AltScreen_Effects.PostProcessMaterial.*` (parameters, `UniformExpressionTextures` from the native data) and the chain `Test_PPG`.
+- **Findings:** EFFECTS.md "Power screen effects": the Bend Time field and its two blur passes (fully decoded with constants), Blink's use of the Bend Time blur, the Dark Vision eyelid pass; Blink's lens field disassembled without constants; no Possession screen pass captured. A trail whose projectile dies at once: started and deactivated in the same tick (the trail component is deactivated with the projectile).
+- **Port:** `power_pp.rs` (intensity curves, textures), `ark_post.rs` / `.wgsl` (field, blur, eyelid pass, new bindings), `SessionView.time_bends`; `SimEvent::Fired` now carries kind, origin and velocity; `FxRequest::EndedTrail`, `StopAtOnce`; oracle presenter mirrors it; `Flare_Bolt_Trail` for incendiary bolts.
+- **Confidence:** CONFIRMED for the shader terms and the Bend Time constants; LIKELY for the eyelid Alpha curve; curve-fit (from the capture) for Blink's blur intensity.
+## 2026-10-08 ï¿½ Stealth port: AI noise table, footfalls, landings, visibility states, stealth volumes
 - **Question:** Port stealth.md F1-F8: which player and world contacts make AI noise, how a footfall becomes attention, how the visibility component picks its bonus, how stealth volumes change the light range.
 - **Evidence:** 0x00BD6C20 (`DisContactSub_AINoise` fire), 0x00B40B70 (attention process noise handler: Footfall -> anomaly increase, stimulus raised to the walker), 0x00AAB7D0 (footfall striker, `Attribute_SilentRunning` / `Attribute_SilentSprinting`), 0x00A8D5F0 / 0x00B66ED0 / 0x00B66A80 (footfall notifies -> contact), 0x00AB53A0, 0x00A759F0 and 0x00A5FF10 (landing striker, `m_bIsStealthFall`, `m_fFall_Stun_Vel`, no landing for a non-jump fall of at most `m_fAnimateFallTime` 0.25 s), 0x00C2A3E0 (pistol noise at the shooter), 0x00B863C0 (Kismet noise context), 0x00AD1590 (visibility bonus order), 0x00BD0120 / 0x00C8C280 (stealth volumes); `enum_dump` of `EAINoiseContext`; the contact table read by the new loader.
 - **Result:** run 600 Footfall, sprint 1200 Anomaly, sneak / silent / stealth landing Silent, landing 400, stun landing 800, sword hit / clash 800 Threatening, bullet impact 3000 Danger, pistol 6000 Danger, corpse / sleeping body 300 Anomaly (the 200 min speed is inert: the sub is not speed-scaled). Footfall times from `Ply_Sword_Locomotion_as`. Prison: 3 stealth volumes (priorities 1/0/2, ranges none / 0.2-0.6 / 0.3-0.8).
