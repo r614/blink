@@ -26,6 +26,7 @@ use std::path::PathBuf;
 
 mod capture;
 mod hookev;
+mod anim;
 mod lab;
 mod lightenv;
 mod measure;

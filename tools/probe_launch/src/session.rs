@@ -127,6 +127,12 @@ impl Session {
         self.r = Reflect::default();
         self.claim_controller()?;
         let t1 = Instant::now();
+        // The front end (DefaultEngine.ini Map / TransitionMap = DishonoredGameFull_P, with the
+        // Dishonored_MainMenu sublevels): no gameplay control to wait for, and an Enter there
+        // picks a main-menu entry (it started a game and left the map).
+        if want.ends_with("dishonoredgamefull_p") {
+            return Ok((load, 0.0));
+        }
         let mut last_err = String::new();
         loop {
             // The game thread can stay busy for seconds after the load (streaming): job
@@ -543,10 +549,22 @@ impl Session {
             }
             "run" => crate::capture::run_reads(self, a)?,
             "lightenv" => self.light_env(a)?,
+            "anim" => crate::anim::session_anim(self, a)?,
             "lights" => self.list_lights(a)?,
+            "route" => {
+                // `route points=x,y,z;x,y,z.. [type=0|1|2]`: a patrol route on the points (a host
+                // route taken over, see `setup_route`).
+                let pts: Vec<glam::Vec3> = s("points").context("points")?.split(';').map(|p| {
+                    let v: Vec<f32> = p.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    glam::Vec3::new(v[0], v[1], v[2])
+                }).collect();
+                let mut used = Vec::new();
+                let r = self.setup_route(&pts, num("type").unwrap_or(1.0) as u8, &mut used)?;
+                json!({"route": reflect::object_value(&mut self.c, r)?})
+            }
             "spawn_npc" => {
                 let loc = a.get("location").and_then(args_f32).context("location")?;
-                let (p, staged) = self.spawn_npc(s("tweak"), s("faction"), s("kind").unwrap_or("Guard") == "Guard", glam::Vec3::from(loc), num("yaw").unwrap_or(0.0) as f32)?;
+                let (p, staged) = self.spawn_npc_opts(None, s("tweak"), s("faction"), s("kind").unwrap_or("Guard") == "Guard", glam::Vec3::from(loc), num("yaw").unwrap_or(0.0) as f32, a.get("patrol").and_then(Value::as_bool).unwrap_or(false))?;
                 json!({"pawn": reflect::object_value(&mut self.c, p)?, "staged": staged, "location": crate::lab::read_vec(&mut self.c, p + 0xc4)?})
             }
             "darkness" => {
@@ -599,6 +617,18 @@ impl Session {
                 // never committed).
                 let since = num("since").unwrap_or(0.0) as u32;
                 let dir = shader_dir()?;
+                if a.get("next_only").and_then(Value::as_bool).unwrap_or(false) {
+                    // The next shader id without the bytecode (after many map loads the whole
+                    // store is too big for one answer): the first id with nothing after it.
+                    // Ids are dense from 0: binary search with one-shader answers.
+                    let (mut lo, mut hi) = (0u32, 1u32 << 24);
+                    while lo < hi {
+                        let mid = lo + (hi - lo) / 2;
+                        if self.c.shader_dump_max(mid, 1)?.is_empty() { hi = mid } else { lo = mid + 1 }
+                    }
+                    let next = lo;
+                    return Ok(json!({"next": next, "dir": dir.display().to_string(), "shaders": []}));
+                }
                 std::fs::create_dir_all(&dir)?;
                 let v = self.c.shader_dump(since)?;
                 let mut list = Vec::new();
@@ -635,8 +665,15 @@ impl Session {
                 let h = s("hash").context("hash 0x...")?;
                 let hash = u64::from_str_radix(h.trim_start_matches("0x"), 16)?;
                 let draws = num("draws").unwrap_or(1.0) as u32;
-                let names: std::collections::HashMap<u64, String> = self.c.shaders()?.into_iter().map(|s| (s.hash, s.ctab)).collect();
-                let ctab = names.get(&hash).cloned().unwrap_or_default();
+                // The CTAB names, fetched once per process (the list grows to tens of thousands
+                // of shaders after many maps; fetching it per call took seconds).
+                static CTABS: std::sync::Mutex<Option<std::collections::HashMap<u64, String>>> = std::sync::Mutex::new(None);
+                let mut cache = CTABS.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+                if cache.as_ref().is_none_or(|m| !m.contains_key(&hash)) {
+                    *cache = Some(self.c.shaders()?.into_iter().map(|s| (s.hash, s.ctab)).collect());
+                }
+                let ctab = cache.as_ref().and_then(|m| m.get(&hash)).cloned().unwrap_or_default();
+                drop(cache);
                 let mut out = Vec::new();
                 for (frame, _, regs) in self.c.ps_constants(hash, draws, "")? {
                     let mut m = Map::new();

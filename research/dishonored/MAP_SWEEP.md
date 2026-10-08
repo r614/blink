@@ -348,11 +348,11 @@ The hook's map switch has only been exercised for Boyle; a failed `session open`
 
 ### Original-side collision capture: results (2026-10-08)
 
-One hooked session, `probe_launch queue run` over the 42 blocks (`session open`, `collide`, `maps/<name>`): 125 / 126 lines ok in 1263 s. Agreement from `oracle collision --map M` (answered queries that agree; clusters = disagreement clusters). Switch = the `open` line (load s / control s). `DishonoredGameFull_P`: the `open` returns but the session stays on the previous level (the front-end map is not entered by the console `open`), so its collide line fails; its smoke scenario ran on the level it was on.
+One hooked session, `probe_launch queue run` over the 42 blocks (`session open`, `collide`, `maps/<name>`): 125 / 126 lines ok in 1263 s. Agreement from `oracle collision --map M` (answered queries that agree; clusters = disagreement clusters). Switch = the `open` line (load s / control s). `DishonoredGameFull_P` is the front end (DefaultEngine.ini `Map` / `TransitionMap`, sublevels `Dishonored_MainMenu*`): the first run's `open` loaded it, then the runner's wait for control pressed Enter, which picked a main-menu entry and left the map; `open_map` now returns at once on it (2026-10-08 re-run: 20 / 20).
 
 | map | open | switch s | load / control s | collide | queries | doors | agree (rate), clusters | smoke scenario |
 |---|---|---|---|---|---|---|---|---|
-| DishonoredGameFull_P | ok | 12.3 | 0.3 / 12.0 | failed |  |  |  | maps/DishonoredGameFull ok |
+| DishonoredGameFull_P | ok | 0.9 | 0.9 / - | ok (re-run) | 20 | 0 | 20 / 20 (100.00 %), 0 clusters | maps/DishonoredGameFull ok |
 | L_ArtDealer_P | ok | 2.7 | 0.8 / 1.9 | ok | 31884 | 5 | 31695 / 31698 (99.99 %), 3 clusters | maps/ArtDealer ok |
 | L_Boyle_Ext_P | ok | 7.6 | 0.8 / 6.8 | ok | 77283 | 8 | 76800 / 76842 (99.95 %), 18 clusters | maps/Boyle_Ext ok |
 | L_Boyle_Int_P | ok | 4.9 | 1.0 / 3.8 | ok | 45475 | 18 | 44680 / 44872 (99.57 %), 35 clusters | maps/Boyle_Int ok |
