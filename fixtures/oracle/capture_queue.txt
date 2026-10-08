@@ -267,3 +267,133 @@ session read object=worldinfo path=TimeSeconds
 session read object=worldinfo path=BendTimeSeconds
 session read object=worldinfo path=Game.m_fCurrentWorldTimeDilation
 session read object=worldinfo path=Game.m_fCurrentPlayerTimeDilation
+# --- map sweep (research/dishonored/MAP_SWEEP.md) ---
+# Per map: open it on the hooked game, then the collision capture (not a queue line: run by hand per MAP_SWEEP.md, 'Original-side collision capture'):
+#   probe_launch collide <cache>/oracle/queries/M.txt <out> ; oracle import collision --map M --queries <that file> --results <out> --generator harness-collision-v1
+# then the map's smoke scenario (original Kismet trace, 10 s).
+session open map=DishonoredGameFull_P
+# collide: probe_launch collide <cache>/oracle/queries/DishonoredGameFull_P.txt <out>/DishonoredGameFull_P.results.txt  (generator primitive-directed-v1(reach 64))
+maps/DishonoredGameFull
+session open map=L_ArtDealer_P
+# collide: probe_launch collide <cache>/oracle/queries/L_ArtDealer_P.txt <out>/L_ArtDealer_P.results.txt  (generator harness-collision-v1)
+maps/ArtDealer
+session open map=L_Boyle_Ext_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Boyle_Ext_P.txt <out>/L_Boyle_Ext_P.results.txt  (generator harness-collision-v1)
+maps/Boyle_Ext
+session open map=L_Boyle_Int_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Boyle_Int_P.txt <out>/L_Boyle_Int_P.results.txt  (generator harness-collision-v1)
+maps/Boyle_Int
+session open map=L_Bridge_Part1a_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Bridge_Part1a_P.txt <out>/L_Bridge_Part1a_P.results.txt  (generator harness-collision-v1)
+maps/Bridge_Part1a
+session open map=L_Bridge_Part1b_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Bridge_Part1b_P.txt <out>/L_Bridge_Part1b_P.results.txt  (generator harness-collision-v1)
+maps/Bridge_Part1b
+session open map=L_Bridge_Part1c_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Bridge_Part1c_P.txt <out>/L_Bridge_Part1c_P.results.txt  (generator harness-collision-v1)
+maps/Bridge_Part1c
+session open map=L_Bridge_Part2_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Bridge_Part2_P.txt <out>/L_Bridge_Part2_P.results.txt  (generator harness-collision-v1)
+maps/Bridge_Part2
+session open map=L_Brothel_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Brothel_P.txt <out>/L_Brothel_P.results.txt  (generator harness-collision-v1)
+maps/Brothel
+session open map=L_Distillery2_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Distillery2_P.txt <out>/L_Distillery2_P.results.txt  (generator harness-collision-v1)
+maps/Distillery2
+session open map=L_Distillery_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Distillery_P.txt <out>/L_Distillery_P.results.txt  (generator harness-collision-v1)
+maps/Distillery
+session open map=L_Flooded_FAssassins_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Flooded_FAssassins_P.txt <out>/L_Flooded_FAssassins_P.results.txt  (generator harness-collision-v1)
+maps/Flooded_FAssassins
+session open map=L_Flooded_FGate_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Flooded_FGate_P.txt <out>/L_Flooded_FGate_P.results.txt  (generator harness-collision-v1)
+maps/Flooded_FGate
+session open map=L_Flooded_FIntro_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Flooded_FIntro_P.txt <out>/L_Flooded_FIntro_P.results.txt  (generator harness-collision-v1)
+maps/Flooded_FIntro
+session open map=L_Flooded_FRefinery_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Flooded_FRefinery_P.txt <out>/L_Flooded_FRefinery_P.results.txt  (generator harness-collision-v1)
+maps/Flooded_FRefinery
+session open map=L_Flooded_FStreets_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Flooded_FStreets_P.txt <out>/L_Flooded_FStreets_P.results.txt  (generator harness-collision-v1)
+maps/Flooded_FStreets
+session open map=L_Galvani1_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Galvani1_P.txt <out>/L_Galvani1_P.results.txt  (generator harness-collision-v1)
+maps/Galvani1
+session open map=L_Galvani2_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Galvani2_P.txt <out>/L_Galvani2_P.results.txt  (generator harness-collision-v1)
+maps/Galvani2
+session open map=L_Isl_HighChaos_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Isl_HighChaos_P.txt <out>/L_Isl_HighChaos_P.results.txt  (generator harness-collision-v1)
+maps/Isl_HighChaos
+session open map=L_Isl_LowChaos_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Isl_LowChaos_P.txt <out>/L_Isl_LowChaos_P.results.txt  (generator harness-collision-v1)
+maps/Isl_LowChaos
+session open map=L_LightH_HighChaos_P
+# collide: probe_launch collide <cache>/oracle/queries/L_LightH_HighChaos_P.txt <out>/L_LightH_HighChaos_P.results.txt  (generator harness-collision-v1)
+maps/LightH_HighChaos
+session open map=L_LightH_LowChaos_P
+# collide: probe_launch collide <cache>/oracle/queries/L_LightH_LowChaos_P.txt <out>/L_LightH_LowChaos_P.results.txt  (generator harness-collision-v1)
+maps/LightH_LowChaos
+session open map=L_Out_HighChaos_EmilyAlive_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Out_HighChaos_EmilyAlive_P.txt <out>/L_Out_HighChaos_EmilyAlive_P.results.txt  (generator harness-collision-v1)
+maps/Out_HighChaos_EmilyAlive
+session open map=L_Out_HighChaos_emilyDead_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Out_HighChaos_emilyDead_P.txt <out>/L_Out_HighChaos_emilyDead_P.results.txt  (generator harness-collision-v1)
+maps/Out_HighChaos_emilyDead
+session open map=L_Out_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Out_P.txt <out>/L_Out_P.results.txt  (generator harness-collision-v1)
+maps/Out
+session open map=L_OutsiderDream_P
+# collide: probe_launch collide <cache>/oracle/queries/L_OutsiderDream_P.txt <out>/L_OutsiderDream_P.results.txt  (generator harness-collision-v1)
+maps/OutsiderDream
+session open map=L_Ovrsr_Back_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Ovrsr_Back_P.txt <out>/L_Ovrsr_Back_P.results.txt  (generator harness-collision-v1)
+maps/Ovrsr_Back
+session open map=L_Ovrsr_Kennel_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Ovrsr_Kennel_P.txt <out>/L_Ovrsr_Kennel_P.results.txt  (generator harness-collision-v1)
+maps/Ovrsr_Kennel
+session open map=L_Ovrsr_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Ovrsr_P.txt <out>/L_Ovrsr_P.results.txt  (generator harness-collision-v1)
+maps/Ovrsr
+session open map=L_Prison_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Prison_P.txt <out>/L_Prison_P.results.txt  (generator harness-collision-v1)
+maps/Prison
+session open map=L_PrsnSewer_P
+# collide: probe_launch collide <cache>/oracle/queries/L_PrsnSewer_P.txt <out>/L_PrsnSewer_P.results.txt  (generator harness-collision-v1)
+maps/PrsnSewer
+session open map=L_Pub_Assault_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Pub_Assault_P.txt <out>/L_Pub_Assault_P.results.txt  (generator harness-collision-v1)
+maps/Pub_Assault
+session open map=L_Pub_Day_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Pub_Day_P.txt <out>/L_Pub_Day_P.results.txt  (generator harness-collision-v1)
+maps/Pub_Day
+session open map=L_Pub_Dusk_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Pub_Dusk_P.txt <out>/L_Pub_Dusk_P.results.txt  (generator harness-collision-v1)
+maps/Pub_Dusk
+session open map=L_Pub_Morning_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Pub_Morning_P.txt <out>/L_Pub_Morning_P.results.txt  (generator harness-collision-v1)
+maps/Pub_Morning
+session open map=L_Pub_Night_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Pub_Night_P.txt <out>/L_Pub_Night_P.results.txt  (generator harness-collision-v1)
+maps/Pub_Night
+session open map=L_Streets1_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Streets1_P.txt <out>/L_Streets1_P.results.txt  (generator harness-collision-v1)
+maps/Streets1
+session open map=L_Streets2_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Streets2_P.txt <out>/L_Streets2_P.results.txt  (generator harness-collision-v1)
+maps/Streets2
+session open map=L_Streetsewer_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Streetsewer_P.txt <out>/L_Streetsewer_P.results.txt  (generator harness-collision-v1)
+maps/Streetsewer
+session open map=L_Tower_P
+# collide: probe_launch collide <cache>/oracle/queries/L_Tower_P.txt <out>/L_Tower_P.results.txt  (generator harness-collision-v1)
+maps/Tower
+session open map=L_TowerRtrn_Int_P
+# collide: probe_launch collide <cache>/oracle/queries/L_TowerRtrn_Int_P.txt <out>/L_TowerRtrn_Int_P.results.txt  (generator harness-collision-v1)
+maps/TowerRtrn_Int
+session open map=L_TowerRtrn_Yard_P
+# collide: probe_launch collide <cache>/oracle/queries/L_TowerRtrn_Yard_P.txt <out>/L_TowerRtrn_Yard_P.results.txt  (generator harness-collision-v1)
+maps/TowerRtrn_Yard
