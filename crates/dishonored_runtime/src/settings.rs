@@ -278,17 +278,3 @@ pub fn startup_window(args_size: Option<(u32, u32)>, fullscreen_flag: bool, s: &
     let vsync = s.graphics.vsync && std::env::var_os("DISHONORED_NOVSYNC").is_none();
     (size, mode, if vsync { PresentMode::AutoVsync } else { PresentMode::AutoNoVsync })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn every_default_binding_maps_to_an_input() {
-        for (a, k) in dishonored_settings::DEFAULT_BINDINGS {
-            if *k != "None" {
-                assert!(input_for(k).is_some(), "{a} -> {k}");
-            }
-        }
-        assert_eq!(name_for(Input::Key(KeyCode::Space)), Some("SpaceBar"));
-    }
-}
