@@ -139,7 +139,7 @@ struct Importer<'a> {
 }
 
 /// Single-channel static component masks kept in `MaterialParams::mask_channels`.
-const MASK_CHANNELS: &[&str] = &["C_Cubemap_Mask_Channel", "O_Opacity_Mask_Channel", "S_Specular_Mask_Channel", "E_Emissive_Channel", "F_Fresnel_Mask_Channel", "D2_Diffuse_Variation_mask_channel", "S2_Specular_variation_Mask_Channel", "D_Diffuse_Mask_Chanel", "W_Distorsion_Mask_Chanel"];
+const MASK_CHANNELS: &[&str] = &["C_Cubemap_Mask_Channel", "O_Opacity_Mask_Channel", "S_Specular_Mask_Channel", "E_Emissive_Channel", "F_Fresnel_Mask_Channel", "D2_Diffuse_Variation_mask_channel", "S2_Specular_variation_Mask_Channel", "D_Diffuse_Mask_Chanel", "W_Distorsion_Mask_Chanel", "F_Foam_Mask_Chanel"];
 
 /// The textures a base material's compiled base pass samples, kept by name in
 /// `MaterialAsset::texture_params` for the runtime's decoded shaders (None: the generic slots only).
@@ -149,6 +149,8 @@ fn base_raw_textures(base: &str) -> Option<&'static [&'static str]> {
         "Volume_Light_PMAT" => Some(&["LightRays_Mask_R"]),
         // Falling water sheets (runtime spillway.rs): base passes 1584 / 1585 / 1595 / 1596.
         "water_spillway_translu_PMAT" => Some(&["Normal", "SpillWay_Texture"]),
+        // The island sea (runtime water_foam.rs): base passes 37072 .. 37076.
+        "water_Foam_MAT" => Some(&["W_Waves_normalmap", "W_Waves_normalrain", "F_Foam_Mask", "F_Foam_Distortion", "F_Foam_Texture"]),
         _ => None,
     }
 }

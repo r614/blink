@@ -588,6 +588,21 @@ pub fn spawn_map(
                 .flatten()
             {
                 e.insert(sp);
+            } else if let Some(wf) = (translucent && features.materials && !inst.hidden)
+                .then(|| {
+                    // The island sea (water_Foam_MAT): its own shading (water_foam.rs), with the
+                    // instance's world bounds origin (`ObjectWorldPositionAndRadius`).
+                    let m = mat_id?;
+                    let p = map.material_params.get(m)?;
+                    if !p.base_material.as_deref().is_some_and(|b| b.eq_ignore_ascii_case(crate::water_foam::WATER_FOAM_MAT)) {
+                        return None;
+                    }
+                    let scene = decal_scene.get_or_insert_with(|| reflection_cube(map).map(|i| images.add(i))).clone();
+                    crate::water_foam::PendingWaterFoam::new(p, &map.materials[m].texture_params, &image_handles, world_bounds_origin(mesh, inst.transform), scene)
+                })
+                .flatten()
+            {
+                e.insert(wf);
             } else if translucent && features.materials && !inst.hidden {
                 // Translucent decals (generic_translucent_PMAT): the material's own shading (decals.rs).
                 let scene = decal_scene.get_or_insert_with(|| reflection_cube(map).map(|i| images.add(i))).clone();
@@ -762,6 +777,20 @@ pub fn spawn_map(
         info!("static geometry merged into {n_batches} batches");
     }
     spawned
+}
+
+/// The origin of a static mesh instance's world bounds (UE3 space): the centre of the world
+/// box around the transformed local bounds, as UE3's `FBoxSphereBounds::TransformBy`.
+fn world_bounds_origin(mesh: &dishonored_ir::StaticMeshAsset, m: Mat4) -> Vec3 {
+    let (lo, hi) = (mesh.bounds_min, mesh.bounds_max);
+    let (mut a, mut b) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for k in 0..8 {
+        let c = Vec3::new(if k & 1 == 0 { lo.x } else { hi.x }, if k & 2 == 0 { lo.y } else { hi.y }, if k & 4 == 0 { lo.z } else { hi.z });
+        let w = m.transform_point3(c);
+        a = a.min(w);
+        b = b.max(w);
+    }
+    (a + b) * 0.5
 }
 
 /// Batch cell size (Dishonored units): coarse enough to cut draw calls, fine enough to keep
