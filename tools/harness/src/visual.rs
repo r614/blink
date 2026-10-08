@@ -147,7 +147,11 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
         });
         let input = match nearest {
             Some((q, d)) => {
-                let yaw = (q[1] - pos[1]).atan2(q[0] - pos[0]).to_degrees();
+                let mut yaw = (q[1] - pos[1]).atan2(q[0] - pos[0]).to_degrees();
+                // Still stuck after jumping (a pillar between it and the bot): walk around it.
+                if stuck_since.is_some_and(|s| s.elapsed() > Duration::from_millis(1500)) {
+                    yaw += 90.0;
+                }
                 let pitch = ((q[2] - pos[2]) / d.max(1.0)).atan().to_degrees();
                 let mut buttons = vec![];
                 let mut left = "Blink";
