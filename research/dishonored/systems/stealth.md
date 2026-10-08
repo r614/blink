@@ -358,7 +358,8 @@ Decoded in this pass (re-read with the static index):
   on world geometry is the stun landing (class `DAT_0146f0c4`, read as `JumpLand_Big` by its meaning; the class
   getters' static order would put it last, so this is LIKELY); otherwise `JumpLand_Stealth` when
   `StatePlayerMasterFalling.m_bIsStealthFall` (set at the fall state's entry from `m_bSneakModeToggled`,
-  0x00A759F0), else `JumpLand`.
+  0x00A759F0), else `JumpLand`. A fall that did not come from the jump and lasted at most `m_fAnimateFallTime`
+  (0.25, DefaultPlayerState.ini) makes no landing at all (0x00A5FF10): steps down are silent.
 * **Contact noise gate (F3).** 0x00BD6C20: `m_fMinSpeed` gates only speed-scaled subs; none of the AINoise
   subs read here is speed-scaled, so the corpse's 200 is inert. The volume scale only gates (<= 1e-4); the
   radius is `array[loudness] x (1 - attenuation)`. Kismet `DisSeqAct_AINoise.m_eNoiseContext`
