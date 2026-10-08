@@ -472,7 +472,7 @@ fn speaking_lines(view: &crate::session::SessionView) -> Vec<(u32, u32, String, 
 
 /// FaceFX bone offsets per speaking pawn this frame (ANIMATION.md §12): the speaker's head
 /// actor driven by the blurb's animation at the time since the line started.
-fn face_frames(bank: &mut crate::npc_anim::AnimBank, lib: &CharacterLibrary, view: &crate::session::SessionView, roots: &[(u32, usize)], now: f64) -> HashMap<u32, Vec<crate::facefx::FaceBone>> {
+fn face_frames(bank: &mut crate::npc_anim::AnimBank, lib: &CharacterLibrary, view: &crate::session::SessionView, roots: &[(u32, usize)], now: f64, cached: &mut Option<(String, Vec<String>)>) -> HashMap<u32, Vec<crate::facefx::FaceBone>> {
     let lines = speaking_lines(view);
     let live: std::collections::HashSet<u32> = lines.iter().map(|l| l.1).collect();
     bank.facefx.retain_lines(&live);
@@ -481,14 +481,20 @@ fn face_frames(bank: &mut crate::npc_anim::AnimBank, lib: &CharacterLibrary, vie
         return out;
     }
     let content = bank.content();
-    let map = view.matchv.map.clone();
-    let mut packages = if map.is_empty() { Vec::new() } else { dishonored_assets::map_packages(&content, &map) };
-    for p in ["L_Boyle_Int_Script", "L_Boyle_Ext_Script", "L_BoyleStreet_Ext_Script"] {
-        if !packages.iter().any(|x| x.eq_ignore_ascii_case(p)) {
-            packages.push(p.to_string());
+    let map = &view.matchv.map;
+    // The map's packages (read from its WorldInfo and the install), once per map rather than
+    // every frame a line plays.
+    if cached.as_ref().is_none_or(|c| &c.0 != map) {
+        let mut packages = if map.is_empty() { Vec::new() } else { dishonored_assets::map_packages(&content, map) };
+        for p in ["L_Boyle_Int_Script", "L_Boyle_Ext_Script", "L_BoyleStreet_Ext_Script"] {
+            if !packages.iter().any(|x| x.eq_ignore_ascii_case(p)) {
+                packages.push(p.to_string());
+            }
         }
+        *cached = Some((map.clone(), packages));
     }
-    bank.facefx.index(&content, &packages);
+    let packages = &cached.as_ref().expect("set above").1;
+    bank.facefx.index(&content, packages);
     let base = dishonored_multiplayer::mission::APPEARANCE_BASE as usize;
     for (pawn, line, blurb, elapsed) in lines {
         let Some(&(_, model)) = roots.iter().find(|r| r.0 == pawn) else { continue };
@@ -502,6 +508,15 @@ fn face_frames(bank: &mut crate::npc_anim::AnimBank, lib: &CharacterLibrary, vie
     out
 }
 
+/// `DISH_ANIM_DEBUG=<pawn id>`, read once (not per pawn per frame).
+pub struct AnimDebug(Option<u32>);
+
+impl Default for AnimDebug {
+    fn default() -> Self {
+        Self(std::env::var("DISH_ANIM_DEBUG").ok().and_then(|v| v.parse::<u32>().ok()))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn animate_characters(
     bank: Option<ResMut<crate::npc_anim::AnimBank>>,
@@ -510,7 +525,8 @@ pub fn animate_characters(
     lib: Option<Res<CharacterLibrary>>,
     weapons: Option<Res<WeaponLibrary>>,
     mut view: ResMut<crate::session::SessionView>,
-    time: Res<Time>,
+    // (Grouped: a system takes at most 16 parameters.)
+    (time, mut face_packages, anim_debug): (Res<Time>, Local<Option<(String, Vec<String>)>>, Local<AnimDebug>),
     roots: Query<(Entity, &CharacterRoot, &crate::players::PlayerBody, &Children, &GlobalTransform)>,
     mut joints: Query<(&Joint, &mut Transform), (Without<TpWeaponJoint>, Without<AccessoryJoint>)>,
     mut wjoints: Query<(&TpWeaponJoint, &mut Transform), (Without<Joint>, Without<AccessoryJoint>)>,
@@ -528,7 +544,7 @@ pub fn animate_characters(
     let hits = collect_hits(&events, &all);
     let talking = talking_pawns(&view);
     let root_models: Vec<(u32, usize)> = roots.iter().map(|r| (r.2.0, r.1.archetype)).collect();
-    let faces = face_frames(&mut bank, &lib, &view, &root_models, time.elapsed_secs_f64());
+    let faces = face_frames(&mut bank, &lib, &view, &root_models, time.elapsed_secs_f64(), &mut face_packages);
     let dt = time.delta_secs().min(0.1);
     let mv = &session.content.sim.gameplay.movement;
     for (entity, root, body, children, root_gt) in &roots {
@@ -606,7 +622,7 @@ pub fn animate_characters(
         };
         let globals: Vec<Vec<glam::Mat4>> = model.parts.iter().zip(&pose).map(|(part, pp)| crate::npc_anim::globals(part, pp)).collect();
         // Diagnostics: DISH_ANIM_DEBUG=<pawn id> logs the pawn's slots and root.
-        if std::env::var("DISH_ANIM_DEBUG").ok().and_then(|v| v.parse::<u32>().ok()) == Some(p.id) {
+        if anim_debug.0 == Some(p.id) {
             if let Ok(st) = states.get(entity) {
                 let slot = |c: &Option<crate::npc_anim::Chain>| c.as_ref().map(|c| format!("{}:{}@{:.2}w{:.2}", c.key, c.steps[c.i].0, c.t, c.weight)).unwrap_or_default();
                 info!("anim {} mod={} vel={:.0},{:.0} full={} upper={} ragdoll={} root={:?} pelvis={:?}", p.id, st.modifier, st.vel.0, st.vel.1, slot(&st.full), slot(&st.upper), st.ragdoll.is_some(), pose[0].first().copied().flatten().map(|k| k.t), globals[0].get(1).map(|m| m.w_axis.truncate()));

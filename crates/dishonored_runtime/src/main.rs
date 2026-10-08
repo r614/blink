@@ -71,6 +71,8 @@ mod hud_popups;
 mod saves;
 /// [playground] In-world labels of layout maps.
 mod playground_labels;
+mod profile;
+mod env_map;
 /// [interp] Cutscene (matinee) presentation.
 mod cutscene;
 
@@ -255,6 +257,7 @@ fn main() {
     .add_plugins(decals::DecalPlugin)
     .add_plugins(prop_light::PropLightPlugin)
     .add_plugins(bloom::BloomPlugin)
+    .add_plugins(env_map::EnvMapOncePlugin)
     .add_plugins(bevy::diagnostic::EntityCountDiagnosticsPlugin::default())
     .insert_resource(ClearColor(Color::srgb(0.08, 0.09, 0.12)))
     // Placeholder ambient; with real lights it only fills non-lightmapped meshes at night level.
@@ -341,7 +344,8 @@ fn main() {
             .insert_resource(game_settings.clone())
             .init_resource::<menu_ui::MenuNav>()
             .add_systems(Startup, pause_menu::setup)
-            .add_systems(Update, (settings::sync_bindings, settings::apply_window, settings::apply_camera, hud_settings::apply.after(gfx_hud::update_gfx_hud).after(gfx_hud::update_anchored_text)))
+            .add_systems(Update, (settings::sync_bindings, settings::apply_window, settings::apply_camera, hud_settings::update.before(gfx_hud::update_gfx_hud).before(gfx_hud::update_anchored_text)))
+            .init_resource::<hud_settings::HudOverrides>()
             .add_systems(Update, (pause_menu::toggle, menu_ui::gather_menu_input, pause_menu::handle, pause_menu::rebuild, menu_art::layout_prims).chain().before(input_map::gather_input));
         app.insert_resource(session)
             .insert_resource(session::SessionView::default())
@@ -397,7 +401,7 @@ fn main() {
     }
     bevy::asset::embedded_asset!(app, "lightmap_ext.wgsl");
     if std::env::args().any(|a| a == "--profile") {
-        app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin).add_systems(Update, profile_report);
+        app.add_plugins(profile::ProfilePlugin);
     }
     app.add_systems(Update, exit_after);
     app.init_resource::<handoff::ReturnToMenu>().add_systems(Update, handoff::return_to_menu);
@@ -503,33 +507,6 @@ fn inspect_cam(
         let target = tf.translation + fwd;
         tf.look_at(target, Vec3::Y);
     }
-}
-
-/// `--profile`: every 5 s log fps, frame time, entity count and the most expensive render
-/// passes (GPU and CPU time from `RenderDiagnosticsPlugin`).
-fn profile_report(diag: Res<bevy::diagnostic::DiagnosticsStore>, time: Res<Time>, mut last: Local<f32>) {
-    if time.elapsed_secs() - *last < 5.0 {
-        return;
-    }
-    *last = time.elapsed_secs();
-    let val = |d: &bevy::diagnostic::Diagnostic| d.smoothed().or(d.value()).unwrap_or(0.0);
-    let mut gpu: Vec<(String, f64)> = Vec::new();
-    let mut cpu: Vec<(String, f64)> = Vec::new();
-    let mut head = String::new();
-    for d in diag.iter() {
-        let p = d.path().as_str().to_string();
-        if p.ends_with("elapsed_gpu") {
-            gpu.push((p, val(d)));
-        } else if p.ends_with("elapsed_cpu") {
-            cpu.push((p, val(d)));
-        } else if p == "fps" || p == "frame_time" || p == "entity_count" {
-            head += &format!("{p} {:.1}  ", val(d));
-        }
-    }
-    gpu.sort_by(|a, b| b.1.total_cmp(&a.1));
-    cpu.sort_by(|a, b| b.1.total_cmp(&a.1));
-    let fmt = |v: &[(String, f64)]| v.iter().take(8).map(|(p, t)| format!("{}={t:.2}ms", p.trim_start_matches("render/").trim_end_matches("/elapsed_gpu").trim_end_matches("/elapsed_cpu"))).collect::<Vec<_>>().join(" ");
-    info!("PROFILE {head}\n  GPU: {}\n  CPU: {}", fmt(&gpu), fmt(&cpu));
 }
 
 /// The `--autopilot` bot for an online session, seeded from the player name so clients differ.

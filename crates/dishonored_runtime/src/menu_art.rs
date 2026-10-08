@@ -403,13 +403,14 @@ pub fn layout_prims(windows: Query<&Window, With<bevy::window::PrimaryWindow>>, 
                 let mirrored = e1.x * e2.y - e1.y * e2.x < 0.0;
                 let (w, h) = (e1.length(), e2.length());
                 let c = (tl + br) * 0.5;
-                node.left = px(c.x - w * 0.5);
-                node.top = px(c.y - h * 0.5);
-                node.width = px(w);
-                node.height = px(h);
+                // Written only on change: a changed node re-runs the UI layout (gfx_hud::place).
+                crate::gfx_hud::place(&mut node, px(c.x - w * 0.5), px(c.y - h * 0.5), Some(px(w)), Some(px(h)));
                 let dir = if mirrored { -e1 } else { e1 };
                 if let Some(mut xf) = xf {
-                    xf.rotation = Rot2::radians(dir.y.atan2(dir.x));
+                    let r = Rot2::radians(dir.y.atan2(dir.x));
+                    if xf.rotation != r {
+                        xf.rotation = r;
+                    }
                 }
                 if let Some(mut img) = img {
                     if img.flip_x != mirrored {
@@ -422,10 +423,7 @@ pub fn layout_prims(windows: Query<&Window, With<bevy::window::PrimaryWindow>>, 
                     // Rotated label: a fixed box rotated about its centre.
                     let min = rect.min * s + off;
                     let max = rect.max * s + off;
-                    node.left = px(min.x);
-                    node.top = px(min.y);
-                    node.width = px(max.x - min.x);
-                    node.height = px(max.y - min.y);
+                    crate::gfx_hud::place(&mut node, px(min.x), px(min.y), Some(px(max.x - min.x)), Some(px(max.y - min.y)));
                     if let Some(mut f) = font {
                         let want = FontSize::Px((size * s).max(1.0));
                         if f.font_size != want {
@@ -436,10 +434,9 @@ pub fn layout_prims(windows: Query<&Window, With<bevy::window::PrimaryWindow>>, 
                 }
                 let min = rect.min * s + off;
                 let max = rect.max * s + off;
-                node.left = px(min.x);
-                node.width = px((max.x - min.x).max(1.0));
                 // Vertically centred in the field.
-                node.top = px(if *top { min.y } else { (min.y + max.y) * 0.5 - size * s * 0.62 });
+                let y = if *top { min.y } else { (min.y + max.y) * 0.5 - size * s * 0.62 };
+                crate::gfx_hud::place(&mut node, px(min.x), px(y), Some(px((max.x - min.x).max(1.0))), None);
                 if let Some(mut f) = font {
                     let want = FontSize::Px((size * s).max(1.0));
                     if f.font_size != want {
@@ -450,10 +447,7 @@ pub fn layout_prims(windows: Query<&Window, With<bevy::window::PrimaryWindow>>, 
             StagePrim::Fill(r) => {
                 let min = r.min * s + off;
                 let max = r.max * s + off;
-                node.left = px(min.x);
-                node.top = px(min.y);
-                node.width = px(max.x - min.x);
-                node.height = px(max.y - min.y);
+                crate::gfx_hud::place(&mut node, px(min.x), px(min.y), Some(px(max.x - min.x)), Some(px(max.y - min.y)));
             }
         }
     }
