@@ -333,6 +333,11 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             if s.setup.player.is_some() {
                 p.position = pos;
                 p.velocity = Vec3::ZERO;
+                // The hook's `Session::place` writes Location and Velocity only: the original's
+                // pawn keeps walking physics (no fall at tick 1).
+                if ps.snap_to_floor {
+                    p.mode = dishonored_sim::state::MoveMode::Walking;
+                }
             }
             p.yaw = ps.yaw;
             p.pitch = ps.pitch;
