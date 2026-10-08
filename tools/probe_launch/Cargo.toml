@@ -11,6 +11,10 @@ serde_json.workspace = true
 dishonored_probe = { path = "../../crates/dishonored_probe" }
 # Scenario specs, traces and the oracle cache the captures are written into.
 dishonored_oracle.workspace = true
+# Layout maps (maps/*.ron) built in the original.
+dishonored_ir.workspace = true
+glam.workspace = true
+ron = "0.12"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

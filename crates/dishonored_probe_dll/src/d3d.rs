@@ -23,6 +23,29 @@ const DEV_DRAW_INDEXED_PRIMITIVE_UP: usize = 84;
 const DEV_CREATE_PIXEL_SHADER: usize = 106;
 const DEV_SET_PIXEL_SHADER: usize = 107;
 const DEV_SET_PS_CONST_F: usize = 109;
+const DEV_CREATE_VERTEX_SHADER: usize = 91;
+
+/// Bytecode of every distinct shader the game created (pixel and vertex), with the world tick
+/// of its creation, for `SHADER_DUMP`.
+pub struct StoredShader {
+    pub id: u32,
+    /// b'p' or b'v'.
+    pub kind: u8,
+    pub hash: u64,
+    pub tick: u32,
+    pub ctab: String,
+    pub code: Vec<u8>,
+}
+pub static SHADER_CODE: Mutex<Vec<StoredShader>> = Mutex::new(Vec::new());
+
+fn store_shader(kind: u8, code: &[u8]) {
+    let hash = dishonored_probe::fnv64(code);
+    if let Ok(mut v) = SHADER_CODE.lock()
+        && !v.iter().any(|s| s.hash == hash && s.kind == kind) {
+            let id = v.len() as u32;
+            v.push(StoredShader { id, kind, hash, tick: crate::tick::GAME_TICK.load(Relaxed), ctab: ctab_names(code), code: code.to_vec() });
+        }
+}
 const SURF_GET_DESC: usize = 12;
 const SURF_LOCK_RECT: usize = 13;
 const SURF_UNLOCK_RECT: usize = 14;
@@ -126,7 +149,8 @@ unsafe extern "system" fn create_device_hook(this: u32, adapter: u32, ty: u32, h
 
 unsafe fn hook_device(dev: u32) {
     let vt = unsafe { *(dev as *const u32) };
-    let hooks: [(usize, u32); 8] = [
+    let hooks: [(usize, u32); 9] = [
+        (DEV_CREATE_VERTEX_SHADER, create_vs_hook as *const () as usize as u32),
         (DEV_PRESENT, present_hook as *const () as usize as u32),
         (DEV_DRAW_PRIMITIVE, draw_primitive_hook as *const () as usize as u32),
         (DEV_DRAW_INDEXED_PRIMITIVE, draw_indexed_hook as *const () as usize as u32),
@@ -281,12 +305,25 @@ unsafe extern "system" fn create_ps_hook(dev: u32, func: *const u32, out: *mut u
         let len = unsafe { bytecode_len(func) };
         if len > 0 {
             let code = unsafe { std::slice::from_raw_parts(func as *const u8, len) };
+            store_shader(b'p', code);
             let shader = unsafe { *out };
             if let Ok(mut g) = PS.lock()
                 && let Some(ps) = g.as_mut() {
                     let id = ps.shaders.len() as u32;
                     ps.shaders.insert(shader, Shader { id, hash: dishonored_probe::fnv64(code), size: len as u32, ctab: ctab_names(code) });
                 }
+        }
+    }
+    hr
+}
+
+unsafe extern "system" fn create_vs_hook(dev: u32, func: *const u32, out: *mut u32) -> i32 {
+    let f: unsafe extern "system" fn(u32, *const u32, *mut u32) -> i32 = unsafe { std::mem::transmute(orig(DEV_CREATE_VERTEX_SHADER)) };
+    let hr = unsafe { f(dev, func, out) };
+    if hr >= 0 && !func.is_null() {
+        let len = unsafe { bytecode_len(func) };
+        if len > 0 {
+            store_shader(b'v', unsafe { std::slice::from_raw_parts(func as *const u8, len) });
         }
     }
     hr
