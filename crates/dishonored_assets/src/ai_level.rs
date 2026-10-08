@@ -130,6 +130,11 @@ pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String
                         out.alarms.push(b);
                     }
                 }
+                "DisStealthVolume" => {
+                    if let Some(v) = read_stealth_volume(&pkg, i, &db) {
+                        out.stealth_volumes.push(v);
+                    }
+                }
                 c if c.ends_with("Light") || c.contains("LightToggleable") || c.contains("LightMovable") => {
                     if let Ok(Some(l)) = crate::level::read_light(&pkg, i, c) {
                         out.lights.push(probe_light(&l));
@@ -340,6 +345,23 @@ fn read_zone(pkg: &Package, i: usize) -> Option<ForbiddenZone> {
     find(p, "BrushComponent")?;
     let hulls = brush_hulls(pkg, p);
     Some(ForbiddenZone { name: pkg.obj_name(ObjRef::Export(i)).to_string(), enabled, owning: names("m_OwningFactions"), forbidden: names("m_ForbiddenFactions"), hulls })
+}
+
+/// A `DisStealthVolume`: `m_StealthVolumePriority`, the darkest / brightest values of its
+/// `m_pVisSettings` (`DisTweaks_PlayerVisSettings`) and the brush's world hulls.
+fn read_stealth_volume(pkg: &Package, i: usize, db: &TweakDb) -> Option<dishonored_ir::ai::StealthVolume> {
+    let h = pkg.read_object(i).ok()?;
+    let p = &h.properties;
+    find(p, "BrushComponent")?;
+    let priority = match find(p, "m_StealthVolumePriority").map(|x| &x.value) {
+        Some(Value::Int(v)) => *v,
+        _ => 0,
+    };
+    let light_range = find(p, "m_pVisSettings").and_then(|x| x.as_object()).map(ObjRef::from_index).filter(|r| *r != ObjRef::Null).and_then(|r| {
+        let m = db.try_resolve(&pkg.obj_path(r))?;
+        Some([get_f32(&m, "m_fLightValueDarkestVal")?, get_f32(&m, "m_fLightValueBrightestVal")?])
+    });
+    Some(dishonored_ir::ai::StealthVolume { name: pkg.obj_name(ObjRef::Export(i)).to_string(), priority, light_range, hulls: brush_hulls(pkg, p) })
 }
 
 fn read_bell(pkg: &Package, i: usize, package: &str, db: &TweakDb, loudness: &[f32]) -> Option<AlarmBellDef> {

@@ -193,7 +193,19 @@ fn mission(s: &Scenario, mc: &dishonored_content::MatchContent, notes: &mut Vec<
             faction: match n.faction.as_deref() {
                 Some("") | Some("None") | Some("none") => None,
                 Some(f) => Some(f.to_string()),
-                None if kind == NpcKind::Guard && state != "passive" => Some("DisFaction_Defaults.Faction_Guard_Default".into()),
+                // A spawner-placed NPC takes the spawner's faction like the original
+                // (`DisSpawnerInfo`): its `m_pFactionTweakOverride`, else its pawn tweak's
+                // `m_pFactionTweak` (Boyle's party guard, spawner 46: a neutral guard).
+                None if spawner.is_some_and(|sp| !sp.props.faction.is_empty() || mc.ai_level.tweak_factions.contains_key(&sp.tweak)) => {
+                    let sp = spawner.unwrap();
+                    Some(if sp.props.faction.is_empty() { mc.ai_level.tweak_factions[&sp.tweak].clone() } else { sp.props.faction.clone() })
+                }
+                None if kind == NpcKind::Guard && state != "passive" => {
+                    if let Some(sp) = spawner {
+                        notes.push(format!("{name}: spawner `{}` has no faction (tweak `{}` not resolved): Faction_Guard_Default", sp.name, sp.tweak));
+                    }
+                    Some("DisFaction_Defaults.Faction_Guard_Default".into())
+                }
                 None => None,
             },
             passive: state == "passive",

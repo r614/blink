@@ -1,30 +1,31 @@
-// U-864 (stealth.md): the port's LOS norm here is exactly |eye - player centre| / 3500 = 604.1 / 3500 (the guard's
-// eye is 70 uu above its centre, the player stands level with it). The original's 0.164 is 574 uu, shorter than the 600
-// uu *horizontal* placement, so the original's geometry at the sample was not the nominal one (the guard or the
-// target point differ); the formula (norm -> DistanceTuning) agrees on both sides for their own norm. Not a rate bug.
-// The positions of both pawns per tick are needed to compare: capture_queue.txt.
 // The Boyle party guard (`DishonoredSpawner_46`, yaw 251.4) sees the player standing 600 uu in
-// front of it (HOOK_TRIAGE.md / INSTRUMENTATION.md 2026-10-06, `measure detect --dists 600`):
-// LOS norm 0.164 (d / 3500 from the eye), seen value 0.703 / s = DistanceTuning(1 - norm) +
-// 0.1 x (raw - 0.2) / 0.3 + speed term. How the probe placed the player at "600" (centre or eye,
-// horizontal or 3D) is not recorded (0.164 x 3500 = 574), so the points are unverified.
+// front of it. Original, per-tick trace (ORACLE.md "Capture requests answered", 2026-10-08): the
+// first sighting is through the OUTER cone (LOS norm 0.353 = 600 / 1700, 0.339 / s), level 1 at
+// frame 45; once the head turns toward the player the inner cone applies (norm 0.169 = 591 / 3500,
+// 0.79 / s), level 4 at frame 111. So the vision axis is the head (`camera_jnt`), not the body,
+// and HeadTrack turns the head (stealth.md F4 / F5): U-864's 0.164 was taken with the head
+// already turned. The port tests the cone along the body yaw from an eye at centre + 70, so it
+// sees the player in the inner cone from the first tick (0.1726): these checks fail until the
+// guard's head pose (idle `camera_jnt` orientation and the HeadTrack look-at) is modelled.
 (
     name: "stealth/detect_600",
     system: Stealth,
     map: "L_Boyle_Ext_P",
-    description: "Stand 600 uu in front of the party guard: LOS norm and attention rate over the first half second.",
+    description: "Stand 600 uu in front of the party guard: outer-cone sighting first, inner cone once the head turns.",
     setup: (
         player: Some((position: (-3201.5, -2763.3, 20), yaw: 71.37, snap_to_floor: true)),
         npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), yaw: 251.37, state: Some("Idle"))],
         settle: 1,
     ),
-    ticks: 120,
+    ticks: 130,
     input: [],
     checkpoints: [
-        (name: "LOS norm", expect: [(metric: At("npc.guard.los", 10), value: 0.164, tol: 0.01, source: "HOOK_TRIAGE.md 2026-10-06: d / 3500 in the inner cone; 0.164 at the 600 placement", status: Unverified)]),
-        (name: "rate", expect: [(metric: Delta("npc.guard.attn", 5, 35), value: 0.3515, tol: 0.03, source: "INSTRUMENTATION.md regression baseline: 0.703 / s at 600 uu (half a second)", status: Unverified)]),
-        (name: "notices", expect: [(metric: TimeToReach("npc.guard.attn_level", 1), value: 0, tol: 0, source: "time to the first attention level", status: Unmeasured)]),
+        (name: "first LOS norm (outer cone)", expect: [(metric: At("npc.guard.los", 10), value: 0.353, tol: 0.01, source: "ORACLE.md 2026-10-08 detect_600: 600 / 1700 at first", status: Measured)]),
+        (name: "first rate", expect: [(metric: Delta("npc.guard.attn", 5, 35), value: 0.1695, tol: 0.03, source: "ORACLE.md 2026-10-08: 0.339 / s before the head turns", status: Measured)]),
+        (name: "notices", expect: [(metric: TimeToReach("npc.guard.attn_level", 1), value: 0.75, tol: 0.05, source: "ORACLE.md 2026-10-08: level 1 at frame 45", status: Measured)]),
+        (name: "busted", expect: [(metric: TimeToReach("npc.guard.attn_level", 4), value: 1.85, tol: 0.1, source: "ORACLE.md 2026-10-08: level 4 at frame 111", status: Measured)]),
+        (name: "LOS norm after the head turns (inner cone)", expect: [(metric: At("npc.guard.los", 100), value: 0.169, tol: 0.01, source: "ORACLE.md 2026-10-08: 591 / 3500 once the head turned (the turn tick is not given)", status: Unverified)]),
     ],
     record: [Pawn, Npc("guard")],
-    capture: Some("measure detect npc=<party guard> --dists 600 --stances stand, logging the player's Location and the guard's eye per tick"),
+    capture: Some("captured 2026-10-08 (session run with npc attention channels); the camera_jnt pose per tick is still requested (capture_queue.txt)"),
 )

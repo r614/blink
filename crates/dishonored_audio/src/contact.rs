@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use ue3_package::properties::{Value, find};
 use ue3_package::{ObjRef, Package};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ContactSound {
     /// AkEvent name.
     pub event: String,
@@ -34,6 +34,25 @@ pub struct Intersection {
     pub sound_volume: Option<ContactSound>,
     /// ParticleSystem path of the particle sub-intersection.
     pub particle: Option<String>,
+    /// The AI noise sub-intersection (`DisContactSub_AINoise`).
+    pub ai_noise: Option<ContactNoise>,
+}
+
+/// A `DisContactSub_AINoise` (fire: 0x00BD6C20). Nothing is emitted when `m_NoiseLoudness` is
+/// Silent (index 0), when `m_bScaleWithSpeed` is set and the contact speed is below
+/// `m_fMinSpeed`, or when the speed-scaled volume is at most 1e-4; otherwise an AI noise of the
+/// loudness class and context at the contact point, attenuated by `m_AttenuationAttribute` of
+/// the struck object when named (radius `m_LoudnessDistanceArray[loudness] x (1 - attenuation)`,
+/// 0x00C5A760).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ContactNoise {
+    /// `EAINoiseLoudness` name (e.g. `EAINoiseLoudness6m`).
+    pub loudness: String,
+    /// `EAINoiseContext` name (class default `EAINoiseContext_Anomaly`).
+    pub context: String,
+    pub volume: ContactSound,
+    /// `m_AttenuationAttribute` (`None` name: no attenuation).
+    pub attenuation_attribute: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -81,6 +100,27 @@ impl ContactSystem {
                             Some(ev) => it.sound = Some(ContactSound { event: ev, ..snd }),
                             None => it.sound_volume = Some(snd),
                         }
+                    }
+                    "DisContactSub_AINoise" => {
+                        // Class defaults: `m_VolumeSettings` (no speed scaling, 0 / 1000 / 0.3),
+                        // loudness Silent, context Anomaly, no attenuation attribute.
+                        let mut vol = ContactSound { max_speed: 1000.0, min_volume_scale: 0.3, ..Default::default() };
+                        if let Some(Value::Struct(_, v)) = find(p, "m_VolumeSettings").map(|p| &p.value) {
+                            vol.scale_with_speed = matches!(find(v, "m_bScaleWithSpeed").map(|p| &p.value), Some(Value::Bool(true)));
+                            vol.min_speed = find(v, "m_fMinSpeed").and_then(|p| p.as_float()).unwrap_or(0.0);
+                            vol.max_speed = find(v, "m_fMaxSpeed").and_then(|p| p.as_float()).unwrap_or(1000.0);
+                            vol.min_volume_scale = find(v, "m_fMinVolumeScale").and_then(|p| p.as_float()).unwrap_or(0.3);
+                        }
+                        let name = |k: &str| match find(p, k).map(|p| &p.value) {
+                            Some(Value::Name(n)) | Some(Value::Enum(n)) => Some(n.clone()),
+                            _ => None,
+                        };
+                        it.ai_noise = Some(ContactNoise {
+                            loudness: name("m_NoiseLoudness").unwrap_or_else(|| "EAINoiseSilent".into()),
+                            context: name("m_NoiseContext").unwrap_or_else(|| "EAINoiseContext_Anomaly".into()),
+                            volume: vol,
+                            attenuation_attribute: name("m_AttenuationAttribute").filter(|n| n != "None"),
+                        });
                     }
                     "DisContactSub_Particle" => {
                         it.particle = p
@@ -161,6 +201,17 @@ impl ContactSystem {
 
     pub fn particle(&self, striker: &str, struck: &str) -> Option<String> {
         self.resolve(striker, struck, |i| i.particle.clone())
+    }
+
+    /// The AI noise of a contact: the nearest pair with a `DisContactSub_AINoise` (resolved like
+    /// every slot; a Silent sub on a derived pair silences the pairs below it).
+    pub fn ai_noise(&self, striker: &str, struck: &str) -> Option<ContactNoise> {
+        self.resolve(striker, struck, |i| i.ai_noise.clone())
+    }
+
+    /// Every pair that carries a `DisContactSub_AINoise`, in table order.
+    pub fn ai_noises(&self) -> impl Iterator<Item = (&str, &str, &ContactNoise)> {
+        self.intersections.iter().filter_map(|i| i.ai_noise.as_ref().map(|n| (i.striker.as_str(), i.struck.as_str(), n)))
     }
 }
 

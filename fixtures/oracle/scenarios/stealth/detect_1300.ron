@@ -1,22 +1,24 @@
-// As `stealth/detect_600` at 1300 uu: LOS norm 0.358, 0.226 / s. The port's 0.3795 is 1328.4 / 3500: the player is
-// on the sunken floor 270 uu below the guard's eye (horizontal 1300.6). The original's 1253 uu is below the horizontal
-// distance, so the nominal placement was not what the original sampled (U-864, stealth.md).
+// As `stealth/detect_600` at 1300 uu. The placement snaps to the sunken courtyard floor (z -217.8 in the original,
+// ORACLE.md 2026-10-08): no LOS for 30 ticks, then norm 0.78-0.88 (the outer cone, 1326-1496 uu over 1700) at about
+// 0.1 / s, level 1 at frame 169, later 0.373. The port sees the player in the inner cone (1328.4 / 3500 = 0.3795) from the
+// start: the same head-pose difference as detect_600 (stealth.md F4 / F5). The 2026-10-06 values (0.358, 0.226 / s) were
+// from another placement and are dropped.
 (
     name: "stealth/detect_1300",
     system: Stealth,
     map: "L_Boyle_Ext_P",
-    description: "Stand 1300 uu in front of the party guard: LOS norm and attention rate over the first second.",
+    description: "Stand 1300 uu in front of the party guard (on the lower floor): LOS norm and time to the first attention level.",
     setup: (
         player: Some((position: (-3424.9, -3427.3, 20), yaw: 71.37, snap_to_floor: true)),
         npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), yaw: 251.37, state: Some("Idle"))],
         settle: 1,
     ),
-    ticks: 120,
+    ticks: 200,
     input: [],
     checkpoints: [
-        (name: "LOS norm", expect: [(metric: At("npc.guard.los", 10), value: 0.358, tol: 0.01, source: "HOOK_TRIAGE.md 2026-10-06: 0.358 at the 1300 placement", status: Unverified)]),
-        (name: "rate", expect: [(metric: Delta("npc.guard.attn", 5, 65), value: 0.226, tol: 0.03, source: "INSTRUMENTATION.md regression baseline: 0.226 / s at 1300 uu", status: Unverified)]),
+        (name: "LOS norm (outer cone)", expect: [(metric: At("npc.guard.los", 60), value: 0.83, tol: 0.05, source: "ORACLE.md 2026-10-08 detect_1300: 0.78-0.88 after the first 30 ticks (per-tick values not given)", status: Unverified)]),
+        (name: "notices", expect: [(metric: TimeToReach("npc.guard.attn_level", 1), value: 2.817, tol: 0.1, source: "ORACLE.md 2026-10-08: level 1 at frame 169", status: Measured)]),
     ],
     record: [Pawn, Npc("guard")],
-    capture: Some("measure detect npc=<party guard> --dists 1300 --stances stand"),
+    capture: Some("captured 2026-10-08; per-tick los values and the camera_jnt pose requested (capture_queue.txt)"),
 )

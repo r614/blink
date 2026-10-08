@@ -1295,7 +1295,15 @@ impl Host for H<'_> {
                 let radius = if li == 16 { cx.prop_float("m_fCustomSoundRadius") } else { self.m.crowd.ai.loudness_distances.get(li).copied().unwrap_or(0.0) };
                 let (Some(pos), true) = (self.pos_of(&loc), radius > 0.0) else { return HostResult::Done };
                 let source = self.pawn_of(&maker).unwrap_or(0);
-                self.st.noises.push(SimEvent::Sound { position: pos, radius, category: dishonored_sim::events::SoundCategory::Pistol, source });
+                // `m_eNoiseContext` (`EDisAINoiseLimitedContext`) -> `EAINoiseContext` (0x00B863C0).
+                use dishonored_sim::events::NoiseContext;
+                let context = match cx.prop_str("m_eNoiseContext").as_str() {
+                    "EDisAINoiseLimitedContext_Threatening" => NoiseContext::Threatening,
+                    "EDisAINoiseLimitedContext_Danger" => NoiseContext::Danger,
+                    "EDisAINoiseLimitedContext_AlarmBell" => NoiseContext::AlarmBell,
+                    _ => NoiseContext::Anomaly,
+                };
+                self.st.noises.push(SimEvent::Sound { position: pos, radius, category: dishonored_sim::events::SoundCategory::Scripted, context, source });
                 self.note(format!("AI noise {radius:.0} uu at {:.0},{:.0}", pos.x, pos.y));
                 HostResult::Done
             }

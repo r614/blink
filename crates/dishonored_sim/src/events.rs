@@ -5,6 +5,9 @@ use crate::state::PlayerId;
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
+pub use dishonored_ir::ai::NoiseContext;
+
+/// What made an AI noise (`SimEvent::Sound`); the AI reacts to its `NoiseContext`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum SoundCategory {
     Footstep,
@@ -19,6 +22,14 @@ pub enum SoundCategory {
     Windblast,
     BodyFall,
     Mantle,
+    /// A bullet's impact on the world.
+    BulletImpact,
+    /// A grenade's explosion.
+    Explosion,
+    /// A rat swarm biting.
+    Rats,
+    /// A Kismet `DisSeqAct_AINoise`.
+    Scripted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
@@ -92,7 +103,9 @@ pub enum SimEvent {
     Damage { victim: PlayerId, attacker: Option<PlayerId>, amount: f32, cause: DamageCause },
     Death { victim: PlayerId, killer: Option<PlayerId>, cause: DamageCause },
     ProjectileImpact { projectile: u32, point: Vec3, victim: Option<PlayerId> },
-    Sound { position: Vec3, radius: f32, category: SoundCategory, source: PlayerId },
+    /// An AI noise (`DisAINoiseInfo`): heard by listeners other than `source` strictly within
+    /// `radius` (0x00C5A760); `context` is its `EAINoiseContext`.
+    Sound { position: Vec3, radius: f32, category: SoundCategory, context: NoiseContext, source: PlayerId },
     // --- inventory ---
     /// A pickup was taken (`DisSeqEvent_PickupPickedUp`); `name` is the level actor name.
     PickedUp { id: PlayerId, pickup: u32 },

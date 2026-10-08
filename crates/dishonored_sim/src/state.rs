@@ -371,6 +371,17 @@ pub struct PlayerState {
     /// (0x00ACD820). While falling the mantle request needs it.
     #[serde(default)]
     pub mantle_allowed: bool,
+    /// Phase (0..1) of the player's locomotion loop, whose `DishonoredNotify_Footfall`s make
+    /// the footfall contacts (and their AI noise, `noise::step_footfalls`).
+    #[serde(default)]
+    pub footfall_phase: f32,
+    /// `StatePlayerMasterFalling.m_bIsStealthFall`: the pawn was sneaking when its fall state
+    /// began (0x00A759F0); the landing is then `JumpLand_Stealth`.
+    #[serde(default)]
+    pub stealth_fall: bool,
+    /// `StatePlayerMasterFalling.m_bCameFromJump`: the fall state was entered from the jump.
+    #[serde(default)]
+    pub fall_from_jump: bool,
 }
 
 /// What the right hand holds (the inventory's hand slot 1, `FUN_00c04bd0(1)`).
@@ -692,6 +703,9 @@ impl PlayerState {
             windblasted_by: None,
             wall_hit: None,
             swarm: None,
+            footfall_phase: 0.0,
+            stealth_fall: false,
+            fall_from_jump: false,
         }
     }
 

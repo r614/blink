@@ -18,6 +18,7 @@ pub mod input;
 pub mod inventory;
 pub mod left_hand;
 pub mod movement;
+pub mod noise;
 pub mod powers;
 pub mod rats;
 pub mod state;
@@ -152,7 +153,7 @@ pub fn step_world(
             if p.alive && p.condition == state::Condition::BeingChoked {
                 p.velocity = Vec3::ZERO;
             } else if p.carried_by.is_none() {
-                takedown::step_body(p, world, g, dt);
+                takedown::step_body(p, world, g, dt, &mut out.events);
             }
             if !p.alive {
                 p.yaw = input.yaw;
@@ -226,6 +227,8 @@ pub fn step_world(
         let locked = combat::sword_locks_movement(p) || p.mode == MoveMode::Blinking || choke_lock || p.action_lock > 0.0 || p.carry_anim > 0.0;
         let sword_out = movement::sword_in_right_hand(p);
         movement::step_movement(p, &input, sword_out, !locked, &ctx, &mut out.events);
+        noise::track_fall(&p0, p);
+        noise::step_footfalls(p, g, dt, &mut out.events);
         // No sword while choking, carrying or in an action.
         let sword_input = if choke_lock || p.carrying.is_some() || p.action_lock > 0.0 {
             PlayerInput { buttons: input.buttons & !(input::buttons::PRIMARY | input::buttons::BLOCK), ..input }
@@ -331,7 +334,21 @@ pub fn step_world(
         // `m_fTimeBeforeSleep` less the owner's `Attribute_SleepDelayReduction` (Instant Sleep upgrade, LIKELY).
         let delays: Vec<(PlayerId, f32)> = state.players.iter().map(|p| (p.id, (takedown::SLEEP_DELAY - powers::attribute(p, g, "Attribute_SleepDelayReduction", 0.0)).max(0.0))).collect();
         let sleep_delay = |id: u32| delays.iter().find(|d| d.0 == id).map_or(takedown::SLEEP_DELAY, |d| d.1);
+        let bullets: Vec<(u32, PlayerId, Vec3)> = state.projectiles.iter().filter(|p| p.kind == state::ProjectileKind::Bullet).map(|p| (p.id, p.owner, p.velocity)).collect();
+        let first = out.events.len();
         left_hand::step_projectiles(state, world, mv, &cfg.tuning, &g.items.hit_bodies, &cfg.gameplay.vitals, mv.gravity_z, proj_dt, &sleep_delay, &mut out.events);
+        // A bullet hitting the world is a `Bullet` -> `Environment` contact: its AI noise at the
+        // impact, made by the shooter.
+        let impacts: Vec<(Vec3, PlayerId, f32)> = out.events[first..]
+            .iter()
+            .filter_map(|e| match e {
+                SimEvent::ProjectileImpact { projectile, point, victim: None } => bullets.iter().find(|b| b.0 == *projectile).map(|b| (*point, b.1, b.2.length())),
+                _ => None,
+            })
+            .collect();
+        for (point, owner, speed) in impacts {
+            noise::emit(&mut out.events, &g.ai.noise.bullet_impact, point, events::SoundCategory::BulletImpact, owner, speed);
+        }
         gadgets::step_grenades(state, world, g, proj_dt, &mut out.events);
     }
     if world_dt > 0.0 {
@@ -353,12 +370,13 @@ pub fn step_world(
                     vitals::kill(p, None, DamageCause::World, &mut out.events);
                 }
             }
-            SimEvent::Landed { id, speed, .. } => {
+            SimEvent::Landed { id, speed, fall_time } => {
                 // `ADishonoredPawn::TakeFallingDamage` (0x00B4DCC0, DishonoredPawn vtable +0x528):
                 // damage = (int)(HealthMax * clamp((v - dmg) / (death - dmg), 0, 1)) for
                 // an impact speed v above Attribute_MaxSpeedBeforeFallingDamage.
                 // The thresholds are attributes (Agility raises them, 0x00B56880).
                 let Some(p0) = state.player(id).copied() else { continue };
+                noise::landing(&p0, speed, fall_time, g, &mut out.events);
                 let pm = powers::effective_movement(&p0, g);
                 let dmg = fall_damage(speed, &pm, powers::health_max(&p0, g));
                 if dmg > 0.0 {
@@ -438,6 +456,18 @@ pub fn step_world(
             _ => {}
         }
     }
+
+    // Bodies that fell this step touch the floor (their contact's AI noise).
+    let fell: Vec<PlayerId> = out
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            SimEvent::Death { victim, .. } | SimEvent::KnockedOut { victim, .. } => Some(*victim),
+            SimEvent::BodyDropped { body, .. } => Some(*body),
+            _ => None,
+        })
+        .collect();
+    noise::body_falls(state, &fell, g, &mut out.events);
 
     state.tick += 1;
     out

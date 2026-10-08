@@ -396,7 +396,8 @@ pub fn update(
                         p.left.phase = LeftPhase::Recovering;
                         p.left.timer = 0.0;
                         events.push(SimEvent::WindblastCast { id: p.id });
-                        events.push(SimEvent::Sound { position: p.position, radius: 1500.0, category: SoundCategory::Windblast, source: p.id });
+                        // Port value: the Windblast's AI noise caller was not decoded (stealth.md section 5.4).
+                        events.push(SimEvent::Sound { position: p.position, radius: 1500.0, category: SoundCategory::Windblast, context: crate::events::NoiseContext::Danger, source: p.id });
                     }
                 }
                 _ => {}
@@ -504,7 +505,9 @@ fn fire_gun(p: &mut PlayerState, bolt: bool, ctx: &MoveCtx, cfg: &GameplayConfig
         spawn.push((ProjectileKind::Bolt, eye + dir * t.bolt_spawn_distance, dir * speed));
     } else {
         spawn.push((ProjectileKind::Bullet, eye + view * t.bullet_spawn_distance, dir * t.bullet_speed));
-        events.push(SimEvent::Sound { position: eye, radius: t.pistol_noise_radius, category: SoundCategory::Pistol, source: p.id });
+        // `m_AINoiseLoudnessWhenFiring` (`AiConfig::noise.pistol_fire`, Danger) at the shooter's
+        // Location (0x00C2A3E0 passes the pawn's +0xC4).
+        crate::noise::emit(events, &cfg.ai.noise.pistol_fire, p.position, SoundCategory::Pistol, p.id, 0.0);
     }
 }
 /// Dark Vision is in effect (`DisActivePowerComponent_DarkVision` slot +0x160: any of the fade-in,

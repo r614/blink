@@ -64,7 +64,7 @@ pub fn explode(state: &mut WorldState, owner: PlayerId, pos: Vec3, stuck_to: Opt
     let cause = if kind == ProjectileKind::StickyGrenade { DamageCause::StickyGrenade } else { DamageCause::Grenade };
     events.push(SimEvent::Explosion { owner, position: pos, sticky: kind == ProjectileKind::StickyGrenade });
     // `DisTweaks_Explosion.m_AINoiseLoudness` (`EAINoiseLoudness4`).
-    events.push(SimEvent::Sound { position: pos, radius: e.ai_noise_radius, category: SoundCategory::Pistol, source: owner });
+    events.push(SimEvent::Sound { position: pos, radius: e.ai_noise_radius, category: SoundCategory::Explosion, context: crate::events::NoiseContext::Danger, source: owner });
     let mv = &cfg.movement;
     for v in state.players.iter_mut() {
         if !v.alive && !v.is_body() {
@@ -332,7 +332,8 @@ pub fn step_traps(state: &mut WorldState, world: &dyn WorldQuery, cfg: &Gameplay
             }
             t.detonated = true;
             t.damage_timer = rc.damage_delay;
-            events.push(SimEvent::Sound { position: t.position, radius: 1500.0, category: SoundCategory::SwordImpact, source: t.owner });
+            // Port value (the razor's detonation noise caller was not decoded).
+            events.push(SimEvent::Sound { position: t.position, radius: 1500.0, category: SoundCategory::Explosion, context: crate::events::NoiseContext::Danger, source: t.owner });
             continue;
         }
         if !t.emitted {

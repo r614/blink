@@ -151,6 +151,29 @@ fn boyle_ext_player_light_range() {
     assert_eq!(lvl.player_light_range, Some([0.2, 0.5]));
 }
 
+/// The AI noise table from the contact system and the pistol tweak is the documented one
+/// (stealth.md section 5.2), and the swimming-on-surface bonus is read.
+#[test]
+fn ai_noise_table_from_the_contact_system() {
+    let Some(c) = content() else { return };
+    let ai = dishonored_assets::ai_config::load_ai_config(&c, &[]);
+    assert_eq!(ai.noise, dishonored_ir::ai::NoiseTable::default(), "{:#?}", ai.provenance.iter().filter(|(k, _)| k.starts_with("ai.noise")).collect::<Vec<_>>());
+    let pv = &ai.player_visibility;
+    assert_eq!((pv.bonus_autocrouching, pv.bonus_sliding, pv.bonus_swimming, pv.bonus_swimming_surface), (-1.0, 0.0, -1.0, 0.0));
+}
+
+/// The prison's stealth volumes: brush hulls, priorities and their vis settings' range.
+#[test]
+fn prison_stealth_volumes() {
+    let Some(c) = content() else { return };
+    let lvl = dishonored_assets::ai_level::extract_ai_level(&c, &["L_Prison_Stealth".to_string()], &[], &[]).unwrap();
+    assert_eq!(lvl.stealth_volumes.len(), 3, "{:#?}", lvl.stealth_volumes.iter().map(|v| (&v.name, v.priority, v.light_range)).collect::<Vec<_>>());
+    for v in &lvl.stealth_volumes {
+        assert!(!v.hulls.is_empty() && v.hulls.iter().all(|h| h.len() >= 4), "{}", v.name);
+    }
+    eprintln!("{:#?}", lvl.stealth_volumes.iter().map(|v| (&v.name, v.priority, v.light_range)).collect::<Vec<_>>());
+}
+
 /// Every gameplay particle system decodes, and no translucent / masked / additive sprite
 /// material falls back to an opaque diffuse alpha (the square blood and smoke of U-770): the
 /// decoded recipes resolve their opacity texture and the sprite texture's alpha is not opaque
