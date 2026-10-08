@@ -11,7 +11,7 @@
 // MOVED from the Playground to Boyle Ext (round 8): the original Playground has no navmesh, so the
 // guard stood still on its first route point and never found the body. Placement: the quiet flat
 // navmesh corridor x = -8958, y -8871 .. -6671 (floor z -1318), the geometry rotated from +x to +y
-// (player and guard yaw 90); the guard walks 1600 uu out (route end y -6730) instead of 2000 and back.
+// (player and guard yaw 90); the guard walks 650 uu out (route end y -6730; the corridor is 2200 long and OPEN capture problem (round 8): in the original capture the press kills nothing here (the civilian keeps its 11 health; the same press kills a guard at the same spot, and killed a lone civilian at y -7800 in a scratch run), cause not found) instead of 2000 and back.
 // The player is teleported away at tick 150 to the upper courtyard (-3201.5, -2763.3), 7000 uu off.
 (
     name: "chaos/corpse_discovered",
@@ -19,10 +19,10 @@
     map: "L_Boyle_Ext_P",
     description: "Kill a civilian out of a patrolling guard's sight; the guard walks up and finds the body: one corpse discovered, once, no chaos yet.",
     setup: (
-        player: Some((sword_drawn: true, position: (-8958, -8750, -1222), yaw: 90, pitch: 0, snap_to_floor: true)),
+        player: Some((sword_drawn: true, position: (-8958, -7800, -1222), yaw: 90, pitch: 0, snap_to_floor: true)),
         npcs: [
-            (id: Some("civ"), kind: Some("Civilian"), position: Some((-8958, -8630, -1218)), yaw: 90, state: Some("Passive")),
-            (id: Some("guard"), position: Some((-8958, -8330, -1218)), yaw: 90, state: Some("Patrol"), faction: Some("None"), route: [(-8958, -6730, -1218), (-8958, -8330, -1218)]),
+            (id: Some("civ"), kind: Some("Civilian"), position: Some((-8958, -7680, -1218)), yaw: 90, state: Some("Passive")),
+            (id: Some("guard"), position: Some((-8958, -7380, -1218)), yaw: 90, state: Some("Patrol"), faction: Some("None"), route: [(-8958, -6730, -1218), (-8958, -7380, -1218)]),
         ],
         settle: 5,
     ),
