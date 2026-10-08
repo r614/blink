@@ -1181,7 +1181,7 @@ fn activate(l: &mut Launcher, gs: &mut GameSettings, nav: &mut MenuNav, id: &str
         // [playground] The test level, offline, every power and item.
         "main:playground" => {
             sounds.play("validation");
-            l.launch(vec!["--playground".into(), "--name".into(), gs.s.multiplayer.name.clone()], gs, window);
+            l.launch(vec!["--playground".into(), "--name".into(), gs.s.multiplayer.name.clone()], gs, window, "");
         }
         "main:load" => {
             l.saves = dishonored_save::list(&saves_dir(gs));
