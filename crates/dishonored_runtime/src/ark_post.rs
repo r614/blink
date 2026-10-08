@@ -82,6 +82,8 @@ pub struct ArkPost {
     /// Dark Vision's eyelid pass (`power_pp.rs`): (on, Alpha, 0, 0) and `EyeLidColor`.
     pub dv_eyelid: Vec4,
     pub dv_lid_color: Vec4,
+    /// Blink's lens field (`power_pp::BlinkLens`): (x distortion, y blur, on, 0).
+    pub blink_lens: Vec4,
 }
 
 /// Inputs kept on the camera so the uniform can be rebuilt (display gamma setting).
@@ -101,6 +103,8 @@ pub struct ArkPostSource {
     pub bend_time: f32,
     /// Dark Vision's eyelid pass: Some(Alpha) while it runs.
     pub eyelid: Option<f32>,
+    /// Blink's lens field drive (x, y); zero = off.
+    pub blink_lens: Vec2,
 }
 
 fn post_value(p: Option<&PostSettings>, key: &str) -> Option<f32> {
@@ -122,6 +126,9 @@ impl ArkPostSource {
             let fr = |x: f32| x - x.floor();
             u.power_vectors = Vec4::new(self.bend, crate::power_pp::BEND_VECTOR_SCALE, 0.0, 0.0);
             u.power_pans = Vec4::new(fr(t * 0.2), fr(t * -0.1), fr(t * -0.15), fr(t * 0.3));
+        }
+        if self.blink_lens != Vec2::ZERO {
+            u.blink_lens = Vec4::new(self.blink_lens.x, self.blink_lens.y, 1.0, 0.0);
         }
         if let Some(a) = self.eyelid {
             u.dv_eyelid = Vec4::new(1.0, a, 0.0, 0.0);
@@ -199,6 +206,7 @@ impl ArkPostSource {
             power_pans: Vec4::ZERO,
             dv_eyelid: Vec4::ZERO,
             dv_lid_color: Vec4::ZERO,
+            blink_lens: Vec4::ZERO,
         };
         if self.fog_on {
             // The sun layer goes first (only layer 0 gets the sun lobe in the shader).

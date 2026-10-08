@@ -279,17 +279,26 @@ per tick). Decoded and ported (`power_pp.rs`, `ark_post.wgsl`):
   60 Hz frame from the cast (0.5 s, the tweak's `m_fPostEffectWarmupTime`), 1 while it lasts, down
   over `m_fPostEffectCooldownTime`. The port evaluates the field per tap inside the uber pass
   (same values at pixel centres as the original's field target).
-- Blink: travel drives the same blur through `bt` (captured: +0.153 per frame while travelling,
-  then x 0.57 per 5 frames). Its own lens field `0x0b36c71ce1512549` (`PPG_BlinkVectors`, driven
-  by the `blink` channel during the warmup) is disassembled but its constants were not recorded:
-  not ported.
+- Blink: its own field `0x0b36c71ce1512549` (`PPG_BlinkVectors`, `Tex#0` =
+  `fxt_eyelid_gradient` from the native data), with d = uv - 0.5, rho = |(1.975 d.x, 2 d.y)|:
+  rg = 240 y (1 - saturate(gradient.r + 0.5 - y)) d (radial blur), ba = 0.15 x (1 - rho^3) d (lens
+  bulge, the blur's second pass starts at uv + ba). x / y (`UniformPixelVector_1.xy`, the
+  `blink` / `blinkg` channels; `Bend Time`'s `bt` stays 0 during a Blink) from
+  `blink_lens_timeline.json`: aiming, x wobbles up to 1.3 x then rests at
+  `m_fWarmupDistorionMinStrength` x `m_fWarmupWobbleMaxStrength` (0.35 x 0.2 = 0.07; the captured
+  shape is replayed relative to that rest); travelling, x and y grow to
+  `m_fMoveDistortionMaxStrength` 1.5 / `m_fMoveBlurMaxStrength` 2.5 by
+  `m_fMoveReachMaxAtPercentage` 0.8 of the distance (cubic fit of the samples); after, they decay
+  with a 0.24 s time constant, x with `m_CoolDownWobbleCount` 10 wobbles over `m_fCooldownTime`.
+  The residual 0.0075 the capture keeps while Blink stays selected is not reproduced.
 - Dark Vision: the eyelid pass `0x3c1c89ab574a7626` (`PPG_EyeLidFinal_Mat` /
   `PPG_DarkVisionFinal_Mat`, texture `fxt_eyelid_gradient`): `lerp(EyeLidColor,
   gradient.g x lerp(scene, souls, souls.a), saturate(gradient.r - (1 - 2 Alpha)))`. The souls are
   rendered into their own target in the original and blended here; the port's soul passes blend
-  into the scene directly (the same lerp). Alpha's curve was not recorded: a blink of
-  `m_EyeLidClosingDuration` 0.05 s / `m_EyeLidOpeningDuration` 0.1 s on each edge, 1 while on
-  (LIKELY).
+  into the scene directly (the same lerp). `darkvision_eyelid_timeline.json`: the colour is
+  `EyeLidColor` in linear space (0.1275, 0.0892, 0.0582); Alpha is the power's fade (0 -> 1 over
+  `m_PowerFadeInDuration`, 1 for the duration, the fade-out remaining over
+  `m_PowerFadeOutDuration`, one frame late), the pass drawn only while the power is on.
 - Possession: no screen pass among its active-only shaders (the possession travel's distortion
   meshes and particles only); the `pos*` channels rise ~1 s after the cast (`pos` +0.18 / s,
   `posg` +0.55 / s). Not ported.
