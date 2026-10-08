@@ -173,12 +173,13 @@ fn look_control_turns_about_the_bone_in_pawn_space() {
         apply_look_controls(&par, &mut local, m2p, &[(4, 30.0)]);
         let after = to_component(&par, &local);
         let pawn = |c: &[(Quat, Vec3)], i: usize| m2p.transform_point3(c[i].1);
-        assert!((pawn(&after, 4) - pawn(&before, 4)).length() < 1e-4);
+        let (after, before) = (&after[..], &before[..]);
+        assert!((pawn(after, 4) - pawn(before, 4)).length() < 1e-4);
         let turn = Quat::from_rotation_y(-30f32.to_radians());
-        let expect = pawn(&before, 4) + turn * (pawn(&before, 5) - pawn(&before, 4));
-        assert!((pawn(&after, 5) - expect).length() < 1e-3, "{:?} vs {expect:?}", pawn(&after, 5));
+        let expect = pawn(before, 4) + turn * (pawn(before, 5) - pawn(before, 4));
+        assert!((pawn(after, 5) - expect).length() < 1e-3, "{:?} vs {expect:?}", pawn(after, 5));
         // Bones off the controlled branch are untouched.
-        assert!((pawn(&after, 3) - pawn(&before, 3)).length() < 1e-5);
+        assert!((pawn(after, 3) - pawn(before, 3)).length() < 1e-5);
     }
 }
 
