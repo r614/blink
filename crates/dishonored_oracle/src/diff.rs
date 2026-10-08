@@ -414,6 +414,9 @@ pub struct GroupDiff {
     pub first: Option<Divergence>,
     /// Offsets removed in the group: (channel, original minus port).
     pub offsets: Vec<(String, f64)>,
+    /// Mapped events: counts per side, pairs and their mean tick offset (original minus port).
+    #[serde(default)]
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -457,6 +460,7 @@ pub fn channel_group(name: &str) -> &'static str {
         "pawn.vx" | "pawn.vy" | "pawn.vz" | "pawn.speed2d" => "pawn velocity",
         "pawn.health" | "pawn.mana" | "pawn.health_max" | "pawn.air_used" => "vitals",
         _ if name.starts_with("pawn.") => "pawn state",
+        _ if name.starts_with("cam.rel_") => "camera offset",
         _ if name.starts_with("cam.") || name.starts_with("camera.") => "camera",
         _ if name.starts_with("left.") => "left hand",
         _ => "world",
@@ -466,11 +470,52 @@ pub fn channel_group(name: &str) -> &'static str {
 /// The port's name of an original channel recorded under another name (the same quantity).
 /// `npc.<n>.player_attn.value` is `DisAttentionInfo_Complex.m_AttentionAccumulator.m_fCurrentValue`
 /// of the player's entry, the port's `npc.<n>.attn` (AI.md "Attention").
+///
+/// `camera.x/y/z/pitch/yaw/roll` (`Camera.CameraCache.POV`, the view the frame is rendered
+/// from) are the port's `cam.*` (the view point and rotation it renders from): the same
+/// quantity in the same world frame (the hook subtracts the layout offset from `camera.*` as
+/// from `pawn.*`; rotations are degrees, pitch up positive on both, compared wrapped to
+/// +-180). Measured on Boyle (2026-10-08): the original's view sits 77.9 uu above the pawn's
+/// Location and 5.2 uu ahead at level pitch (the port: 85.0 and 0), its pitch reads 0.15
+/// degrees under the commanded one; yaw, roll and the lean's sideways offset agree.
 pub fn port_name(original: &str) -> String {
     if let Some(n) = original.strip_prefix("npc.").and_then(|r| r.strip_suffix(".player_attn.value")) {
         return format!("npc.{n}.attn");
     }
+    if let Some(c) = original.strip_prefix("camera.")
+        && matches!(c, "x" | "y" | "z" | "pitch" | "yaw" | "roll")
+    {
+        return format!("cam.{c}");
+    }
     original.to_string()
+}
+
+/// A trace with the shared names (the original's channels renamed by [`port_name`]) and the
+/// derived channels both sides can give: `cam.rel_x/y/z`, the view point minus the pawn's
+/// Location (the camera rule apart from where the pawn is). Returns the renames (new -> old).
+fn normalised(t: &Trace, original: bool) -> (Trace, BTreeMap<String, String>) {
+    let mut t = t.clone();
+    let mut renamed = BTreeMap::new();
+    if original {
+        for c in t.channels.iter_mut() {
+            let n = port_name(&c.name);
+            if n != c.name {
+                renamed.insert(n.clone(), std::mem::replace(&mut c.name, n));
+            }
+        }
+    }
+    let idx: Vec<Option<(usize, usize)>> = ["x", "y", "z"].iter().map(|a| t.channel(&format!("cam.{a}")).zip(t.channel(&format!("pawn.{a}")))).collect();
+    if idx.iter().all(Option::is_some) {
+        for (a, ix) in ["x", "y", "z"].iter().zip(&idx) {
+            let (c, p) = ix.unwrap();
+            t.channels.push(crate::trace::Channel { name: format!("cam.rel_{a}"), unit: "uu".into() });
+            for f in t.frames.iter_mut() {
+                let v = f.values[c] - f.values[p];
+                f.values.push(v);
+            }
+        }
+    }
+    (t, renamed)
 }
 
 /// Whether a channel's values are a continuum (a start offset can be separated from the
@@ -495,22 +540,24 @@ fn delta(unit: &str, a: f64, b: f64) -> f64 {
 /// on top of it; the ticks still beyond the tolerance are listed as spans. Each group reports its own first divergence, so a
 /// position offset does not mask velocity, vitals, NPC or behaviour channels. Event kinds both
 /// sides record are compared in order (tick, object, name), each kind on its own.
-pub fn compare_traces(orig: &Trace, port: &Trace, tol: &dyn Fn(&str) -> f64, relative: &dyn Fn(&str) -> bool) -> TraceDiff {
+pub fn compare_traces(orig: &Trace, port: &Trace, tol: &dyn Fn(&str) -> f64, relative: &dyn Fn(&str) -> bool, event_tol: u32) -> TraceDiff {
     let mut d = TraceDiff::default();
+    let (orig_n, renamed) = normalised(orig, true);
+    let (port_n, _) = normalised(port, false);
+    let (orig, port) = (&orig_n, &port_n);
     let pairs: Vec<(String, Option<String>, usize, usize, String)> = orig
         .channels
         .iter()
         .enumerate()
         .filter_map(|(i, c)| {
-            let pn = port_name(&c.name);
-            port.channel(&pn).map(|j| {
+            port.channel(&c.name).map(|j| {
                 let unit = if port.channels[j].unit.is_empty() { c.unit.clone() } else { port.channels[j].unit.clone() };
-                (pn.clone(), (pn != c.name).then(|| c.name.clone()), i, j, unit)
+                (c.name.clone(), renamed.get(&c.name).cloned(), i, j, unit)
             })
         })
         .collect();
     let matched_port: std::collections::BTreeSet<&str> = pairs.iter().map(|p| p.0.as_str()).collect();
-    d.only_original = orig.channels.iter().filter(|c| !matched_port.contains(port_name(&c.name).as_str())).map(|c| c.name.clone()).collect();
+    d.only_original = orig.channels.iter().filter(|c| !matched_port.contains(c.name.as_str())).map(|c| renamed.get(&c.name).cloned().unwrap_or_else(|| c.name.clone())).collect();
     d.only_port = port.channels.iter().filter(|c| !matched_port.contains(c.name.as_str())).map(|c| c.name.clone()).collect();
     let pf: BTreeMap<u32, &Vec<f64>> = port.frames.iter().map(|f| (f.tick, &f.values)).collect();
     let both: Vec<(u32, &Vec<f64>, &Vec<f64>)> = orig
@@ -576,7 +623,7 @@ pub fn compare_traces(orig: &Trace, port: &Trace, tol: &dyn Fn(&str) -> f64, rel
     }    // Groups.
     let mut groups: BTreeMap<String, GroupDiff> = BTreeMap::new();
     for c in &d.channels {
-        let g = groups.entry(c.group.clone()).or_insert_with(|| GroupDiff { group: c.group.clone(), channels: 0, agree: 0, offset: 0, diverge: 0, first: None, offsets: Vec::new() });
+        let g = groups.entry(c.group.clone()).or_insert_with(|| GroupDiff { group: c.group.clone(), channels: 0, agree: 0, offset: 0, diverge: 0, first: None, offsets: Vec::new(), note: String::new() });
         g.channels += 1;
         match c.verdict {
             ChannelVerdict::Agree => g.agree += 1,
@@ -617,10 +664,14 @@ pub fn compare_traces(orig: &Trace, port: &Trace, tol: &dyn Fn(&str) -> f64, rel
             break;
         }
         let n = oe.len().max(pe.len()) as u32;
-        groups.insert(format!("events:{kind}"), GroupDiff { group: format!("events:{kind}"), channels: n, agree: same_n, offset: 0, diverge: n - same_n, first, offsets: Vec::new() });
+        groups.insert(format!("events:{kind}"), GroupDiff { group: format!("events:{kind}"), channels: n, agree: same_n, offset: 0, diverge: n - same_n, first, offsets: Vec::new(), note: String::new() });
+    }
+    // Mapped events (`event_map`): per label, paired in order per key, timing within `event_tol`.
+    for g in mapped_event_groups(orig, port, event_tol) {
+        groups.insert(g.group.clone(), g);
     }
     if let Some(&k) = d.missing_ticks.first() {
-        groups.insert("frames".into(), GroupDiff { group: "frames".into(), channels: 1, agree: 0, offset: 0, diverge: 1, first: Some(Divergence { tick: k, kind: DivergenceKind::MissingFrame { side: "port".into() } }), offsets: Vec::new() });
+        groups.insert("frames".into(), GroupDiff { group: "frames".into(), channels: 1, agree: 0, offset: 0, diverge: 1, first: Some(Divergence { tick: k, kind: DivergenceKind::MissingFrame { side: "port".into() } }), offsets: Vec::new(), note: String::new() });
     }
     d.groups = groups.into_values().collect();
     // Earliest; on the same tick a channel before an event.
@@ -629,9 +680,113 @@ pub fn compare_traces(orig: &Trace, port: &Trace, tol: &dyn Fn(&str) -> f64, rel
 }
 
 /// Earliest divergence of two traces with every channel judged absolute unless it starts
-/// offset ([`compare_traces`] without `relative` prefixes).
+/// offset ([`compare_traces`] without `relative` prefixes, events at the same tick).
 pub fn first_divergence(orig: &Trace, port: &Trace, tol: &dyn Fn(&str) -> f64) -> TraceDiff {
-    compare_traces(orig, port, tol, &|_| false)
+    compare_traces(orig, port, tol, &|_| false, 0)
+}
+
+/// Ticks within which two events of the same key may still be paired (a pair beyond the
+/// tolerance is a timing divergence; beyond this window they are two unpaired events).
+pub const EVENT_PAIR_WINDOW: u32 = 60;
+
+/// Order-preserving pairing of two event tick lists (an alignment: fewest unpaired events, then
+/// fewest pairs beyond `tol`); pairs only within `tol` + [`EVENT_PAIR_WINDOW`] ticks. Returns
+/// (original index, port index) per aligned slot, `None` for an unpaired event.
+pub fn align_events(a: &[u32], b: &[u32], tol: u32) -> Vec<(Option<usize>, Option<usize>)> {
+    let (n, m) = (a.len(), b.len());
+    let win = tol + EVENT_PAIR_WINDOW;
+    // cost in half units: unpaired 2, paired beyond tol 1, paired within tol 0.
+    let mut c = vec![vec![u32::MAX; m + 1]; n + 1];
+    c[n][m] = 0;
+    for i in (0..=n).rev() {
+        for j in (0..=m).rev() {
+            if i == n && j == m {
+                continue;
+            }
+            let mut best = u32::MAX;
+            if i < n {
+                best = best.min(c[i + 1][j].saturating_add(2));
+            }
+            if j < m {
+                best = best.min(c[i][j + 1].saturating_add(2));
+            }
+            if i < n && j < m {
+                let d = a[i].abs_diff(b[j]);
+                if d <= win {
+                    best = best.min(c[i + 1][j + 1].saturating_add(if d <= tol { 0 } else { 1 }));
+                }
+            }
+            c[i][j] = best;
+        }
+    }
+    let (mut i, mut j, mut out) = (0, 0, Vec::new());
+    while i < n || j < m {
+        if i < n && j < m && a[i].abs_diff(b[j]) <= win && c[i][j] == c[i + 1][j + 1].saturating_add(if a[i].abs_diff(b[j]) <= tol { 0 } else { 1 }) {
+            out.push((Some(i), Some(j)));
+            i += 1;
+            j += 1;
+        } else if i < n && c[i][j] == c[i + 1][j].saturating_add(2) {
+            out.push((Some(i), None));
+            i += 1;
+        } else {
+            out.push((None, Some(j)));
+            j += 1;
+        }
+    }
+    out
+}
+
+/// The mapped events of both sides as `events:<label>` groups. Within a label, events are keyed
+/// by [`crate::event_map::pair_key`] (the object where both sides name it, the behaviour state)
+/// and paired by [`align_events`]; a pair agrees when the ticks differ by at most `event_tol` and, where
+/// both carry a value (a damage amount), the values by at most 0.5. An unpaired event is a
+/// divergence at its tick.
+fn mapped_event_groups(orig: &Trace, port: &Trace, event_tol: u32) -> Vec<GroupDiff> {
+    use crate::event_map::{CanonEvent, Side, canonical_events, pair_key};
+    let (a, b) = (canonical_events(orig, Side::Original), canonical_events(port, Side::Port));
+    let mut labels: Vec<String> = a.iter().chain(&b).map(|e| e.label.clone()).collect();
+    labels.sort();
+    labels.dedup();
+    let as_event = |e: &CanonEvent| TraceEvent { tick: e.tick, kind: e.label.clone(), object: e.object.clone(), name: e.what.clone(), detail: if e.value.is_nan() { String::new() } else { format!("value={:.2}", e.value) } };
+    let mut out = Vec::new();
+    for label in labels {
+        let (oa, pb): (Vec<&CanonEvent>, Vec<&CanonEvent>) = (a.iter().filter(|e| e.label == label).collect(), b.iter().filter(|e| e.label == label).collect());
+        let mut keys: Vec<String> = oa.iter().chain(&pb).map(|e| pair_key(e)).collect();
+        keys.sort();
+        keys.dedup();
+        let (mut n, mut agree, mut paired, mut dt_sum) = (0u32, 0u32, 0u32, 0i64);
+        let mut first: Option<Divergence> = None;
+        let mut note_first = |dv: Divergence| {
+            if first.as_ref().is_none_or(|f| dv.tick < f.tick) {
+                first = Some(dv);
+            }
+        };
+        for key in &keys {
+            let x: Vec<&&CanonEvent> = oa.iter().filter(|e| &pair_key(e) == key).collect();
+            let y: Vec<&&CanonEvent> = pb.iter().filter(|e| &pair_key(e) == key).collect();
+            for (i, (pi, qi)) in align_events(&x.iter().map(|e| e.tick).collect::<Vec<_>>(), &y.iter().map(|e| e.tick).collect::<Vec<_>>(), event_tol).into_iter().enumerate() {
+                n += 1;
+                let (p, q): (Option<&CanonEvent>, Option<&CanonEvent>) = (pi.map(|k| *x[k]), qi.map(|k| *y[k]));
+                let ok = match (p, q) {
+                    (Some(p), Some(q)) => {
+                        paired += 1;
+                        dt_sum += p.tick as i64 - q.tick as i64;
+                        p.tick.abs_diff(q.tick) <= event_tol && (p.value.is_nan() || q.value.is_nan() || (p.value - q.value).abs() <= 0.5)
+                    }
+                    _ => false,
+                };
+                if ok {
+                    agree += 1;
+                } else {
+                    let tick = p.map(|e| e.tick).into_iter().chain(q.map(|e| e.tick)).min().unwrap_or(0);
+                    note_first(Divergence { tick, kind: DivergenceKind::Event { index: i, original: p.map(as_event), port: q.map(as_event) } });
+                }
+            }
+        }
+        let note = format!("original {}, port {}, paired {paired}{}", oa.len(), pb.len(), if paired > 0 { format!(", mean tick offset (original - port) {:+.2}", dt_sum as f64 / paired as f64) } else { String::new() });
+        out.push(GroupDiff { group: format!("events:{label}"), channels: n, agree, offset: 0, diverge: n - agree, first, offsets: Vec::new(), note });
+    }
+    out
 }
 
 /// A checkpoint expectation's outcome on one trace.
@@ -806,7 +961,7 @@ mod tests {
         let mut p = mk("port", -214.567, 0.0);
         // The port names the attention channel `npc.g.attn`.
         p.channels[2].name = "npc.g.attn".into();
-        let d = compare_traces(&o, &p, &|_| 0.1, &|_| false);
+        let d = compare_traces(&o, &p, &|_| 0.1, &|_| false, 0);
         let z = d.channels.iter().find(|c| c.channel == "pawn.z").unwrap();
         assert_eq!((z.mode, z.verdict), (ChannelMode::SteadyOffset, ChannelVerdict::Offset));
         assert!((z.start_offset + 3.0).abs() < 1e-9);
@@ -826,16 +981,25 @@ mod tests {
             a.push(k as u32, vec![if k == 7 { 12.9 } else { 0.0 }]);
             b.push(k as u32, vec![*pz]);
         }
-        let d = compare_traces(&a, &b, &|_| 0.1, &|_| false);
+        let d = compare_traces(&a, &b, &|_| 0.1, &|_| false, 0);
         let z = &d.channels[0];
         assert_eq!(z.mode, ChannelMode::SteadyOffset);
         assert!((z.offset + 1.8).abs() < 1e-9);
         assert_eq!(z.spans, vec![(0, 2)]);
         // `relative` judges a channel by its displacement even when the start agrees.
-        let d = compare_traces(&o, &o, &|_| 0.1, &|c| c == "pawn.z");
+        let d = compare_traces(&o, &o, &|_| 0.1, &|c| c == "pawn.z", 0);
         assert_eq!(d.channels[0].mode, ChannelMode::Relative);
         // (The attention channel has no port name on an original-only pair.)
         assert_eq!(d.channel_counts(), (2, 0, 0));
+    }
+
+    #[test]
+    fn event_alignment() {
+        // The port misses the first of three shots; the others are a tick late.
+        assert_eq!(align_events(&[161, 311, 461], &[312, 462], 0), vec![(Some(0), None), (Some(1), Some(0)), (Some(2), Some(1))]);
+        // Beyond the window: unpaired on both sides.
+        assert_eq!(align_events(&[33], &[200], 0), vec![(Some(0), None), (None, Some(0))]);
+        assert_eq!(align_events(&[], &[5], 0), vec![(None, Some(0))]);
     }
 
     #[test]

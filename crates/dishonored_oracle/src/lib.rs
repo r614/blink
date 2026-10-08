@@ -21,6 +21,7 @@
 pub mod cache;
 pub mod coverage;
 pub mod diff;
+pub mod event_map;
 pub mod index;
 pub mod query;
 pub mod report;

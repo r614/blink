@@ -437,6 +437,10 @@ pub struct Scenario {
     /// Not part of the spec hash (it changes the judgement, not the run).
     #[serde(default)]
     pub relative: Vec<String>,
+    /// Ticks two paired mapped events may differ by against the original's trace (default 0:
+    /// the same tick). Not part of the spec hash.
+    #[serde(default)]
+    pub event_tolerance: u32,
     #[serde(default)]
     pub sweep: Option<Sweep>,
     /// How to capture the original's side (hook commands), for the capture requests of
