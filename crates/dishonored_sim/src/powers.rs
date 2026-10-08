@@ -141,10 +141,15 @@ fn any_modifiers(p: &PlayerState) -> bool {
 }
 
 /// `Attribute_HealthMax`: the player's (Corvo 70, with its modifiers) or a guard's (the guard
-/// archetype's pawn tweak, 50). Civilians keep the player's base (their archetypes vary: 10-11
-/// for aristocrats, not modelled per pawn).
+/// archetype's pawn tweak, 50). Other NPCs take their visual archetype's pawn tweak
+/// (`AiConfig::archetype_health_max`: party aristocrats 11, the female aristocrat 12); an
+/// original NPC's spawn sets its own tweak's value (the mission host).
 pub fn health_max(p: &PlayerState, cfg: &GameplayConfig) -> f32 {
-    let base = if p.kind == PawnKind::Guard { cfg.ai.combat.guard_health_max } else { cfg.vitals.health_max };
+    let base = match p.kind {
+        PawnKind::Guard => cfg.ai.combat.guard_health_max,
+        PawnKind::Civilian => cfg.ai.archetype_health_max.get(p.archetype as usize).copied().unwrap_or(cfg.vitals.health_max),
+        _ => cfg.vitals.health_max,
+    };
     attribute(p, cfg, "Attribute_HealthMax", base)
 }
 

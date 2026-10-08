@@ -256,6 +256,9 @@ pub struct MissionSetup {
     /// Doors and usables used natively (layout maps; original maps use theirs through the Kismet).
     #[serde(default)]
     pub usables: Vec<UsableDef>,
+    /// Breakables, whale oil batteries and receptacles of each mission map (lowercase name).
+    #[serde(default)]
+    pub world_actors: BTreeMap<String, dishonored_ir::world_actors::WorldActors>,
 }
 
 /// Resolve a place to (position, yaw, map index).
@@ -420,7 +423,7 @@ impl MissionSetup {
                 }
             }
         }
-        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances, pickups: BTreeMap::new(), usables: Vec::new(), anim_profiles, kismet: None, ai_levels: maps.iter().map(|m| (m.name.to_ascii_lowercase(), m.ai_level.clone())).collect(), routes: maps
+        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances, pickups: BTreeMap::new(), usables: Vec::new(), world_actors: BTreeMap::new(), anim_profiles, kismet: None, ai_levels: maps.iter().map(|m| (m.name.to_ascii_lowercase(), m.ai_level.clone())).collect(), routes: maps
                 .iter()
                 .map(|m| {
                     // Snapped to the floor as `Crowd::set_routes` does for the crowd's map.
@@ -513,6 +516,13 @@ pub struct MissionMatch {
     /// NPCs placed from a spawner or tweak; original spawns take theirs from their tweak).
     #[serde(default)]
     pub bark_voices: BTreeMap<PlayerId, String>,
+    /// [world] Breakables, whale oil batteries and receptacles of each visited map (lowercase
+    /// name), saved with the match.
+    #[serde(default)]
+    pub world_actors: BTreeMap<String, dishonored_sim::world_actors::WorldActorsState>,
+    /// [world] What they reported this step (the Kismet host fires the events).
+    #[serde(skip)]
+    pub world_events: Vec<dishonored_sim::world_actors::WorldEvent>,
     /// Mover collision placed where the movers are: (actor, delta) and, in the same order, the
     /// placed collision (rebuilt when a mover moves).
     #[serde(skip)]
@@ -567,6 +577,8 @@ impl MissionMatch {
             darkness: Default::default(),
             corpses_discovered: BTreeSet::new(),
             bark_voices: BTreeMap::new(),
+            world_actors: BTreeMap::new(),
+            world_events: Vec::new(),
             mover_keys: Vec::new(),
             mover_worlds: Vec::new(),
         };
@@ -687,8 +699,13 @@ impl MissionMatch {
         let s = o.spawn;
         let arch = self.look_override.get(&s.id).copied().unwrap_or(s.archetype);
         spawn_npc(&mut self.world, s.id, s.kind, arch, s.position, s.yaw, cfg);
+        // [ai] The pawn tweak's own `Attribute_HealthMax` (civilians: aristocrats 11, ...).
+        let tweak_health = self.crowd.tweak_health_max.get(&o.tweak).copied();
         if let Some(p) = self.world.player_mut(s.id) {
             p.helmet = o.helmet;
+            if let Some(h) = tweak_health.filter(|_| s.kind == PawnKind::Civilian) {
+                p.vitals.health = h;
+            }
             if let Some(c) = o.class {
                 // [ai] The special classes' `Attribute_HealthMax` (tallboys 150, weepers 30,
                 // music-box Overseers 40) and the weepers' plague (`m_bHasPlague`).
@@ -733,6 +750,10 @@ impl MissionMatch {
         // [ai] DisSpawnerInfo: faction override (else the pawn tweak's), squad, and the
         // spawner's m_SpawnAtSuspicionLevel.
         b.faction = self.crowd.spawner_faction(&o.props.faction, &o.tweak);
+        // [distraction] The pawn tweak's lineage (the distractors' tweak filters) and its
+        // `m_fDistractionCooldownTime`.
+        b.lineage = o.lineage.clone();
+        b.distraction_cooldown_time = self.crowd.tweak_distraction_cooldown.get(&o.tweak).copied().unwrap_or(0.0);
         b.squad = o.props.squad.clone();
         b.suspecting = o.props.at_suspicion.as_deref() == Some("DAISL_Suspecting");
         self.crowd.brains.retain(|x| x.id != s.id);
@@ -843,6 +864,11 @@ impl MissionMatch {
         // A passive NPC (a training dummy) has no brain: it stands and takes hits.
         if def.passive {
             self.crowd.brains.retain(|x| x.id != s.id);
+            // A pawn without a brain reads as `EAIAwareness` 0, Unaware (0x00B5E250: no brain
+            // -> 0), which the assassination table allows (0x00C09060).
+            if let Some(p) = self.world.player_mut(s.id) {
+                p.ai_awareness = dishonored_sim::state::awareness::UNAWARE;
+            }
             return;
         }
         let mut b = Brain::new(s.id, s.kind, s.position, 0x5EED ^ s.id as u64);
@@ -916,7 +942,7 @@ impl MissionMatch {
                     self.world.players.extend(ls.npcs);
                     self.world.pickups = ls.pickups;
                     let routes = self.setup.routes.get(&self.current_map.to_ascii_lowercase()).cloned().unwrap_or_default();
-                    self.crowd = Crowd { brains: ls.brains, layout: ls.layout, spawns: ls.spawns, ai: self.crowd.ai.clone(), routes, factions: ls.level.factions, player_faction: ls.level.player_faction, tweak_factions: ls.level.tweak_factions, zones: ls.level.zones, overrides: ls.level.overrides, alarms: ls.level.alarms, lights: ls.level.lights, ..Default::default() };
+                    self.crowd = Crowd { brains: ls.brains, layout: ls.layout, spawns: ls.spawns, ai: self.crowd.ai.clone(), routes, factions: ls.level.factions, player_faction: ls.level.player_faction, tweak_factions: ls.level.tweak_factions, zones: ls.level.zones, overrides: ls.level.overrides, alarms: ls.level.alarms, lights: ls.level.lights, distractors: ls.level.distractors, tweak_distraction_cooldown: ls.level.tweak_distraction_cooldown, tweak_health_max: ls.level.tweak_health_max, ..Default::default() };
                 }
                 None => self.populate_fresh(cfg),
             }
@@ -1104,6 +1130,14 @@ impl MissionMatch {
         all.extend(thought);
         self.crowd.write_awareness(&mut self.world);
         let out = step_world(&mut self.world, &all, world, cfg);
+        // [world] Breakables, batteries and receptacles of the active map: explosions damage the
+        // breakables, the receptacles plug their placed batteries, steps break.
+        let key = self.current_map.to_ascii_lowercase();
+        if let Some(defs) = self.setup.world_actors.get(&key) {
+            let st = self.world_actors.entry(key).or_insert_with(|| dishonored_sim::world_actors::WorldActorsState::new(defs));
+            let evs = st.step(defs, &out.events, &cfg.gameplay, dt);
+            self.world_events.extend(evs);
+        }
         let mut events = Vec::new();
         if let Some(m) = self.arrived.take() {
             events.push(MissionEvent::Arrived(m));
@@ -1277,7 +1311,8 @@ impl MissionMatch {
                         p.no_body = true;
                     }
                 }
-                dishonored_ai::AiEvent::AlarmEnded { .. } | dishonored_ai::AiEvent::RatEat { .. } => {}
+                // [distraction] The Kismet host fires `DisSeqEvent_Distracted`.
+                dishonored_ai::AiEvent::AlarmEnded { .. } | dishonored_ai::AiEvent::RatEat { .. } | dishonored_ai::AiEvent::Distracted { .. } => {}
             }
         }
         // Respawns (if the mission allows them).
@@ -1400,6 +1435,12 @@ impl MissionMatch {
         // [kismet] AI noises made by the Kismet (`DisSeqAct_AINoise`) are heard next step.
         if let Some(k) = &mut self.kismet {
             self.last_events.append(&mut k.st.noises);
+        }
+        // [world] What no Kismet took this step: the AI noises are heard next step.
+        for e in std::mem::take(&mut self.world_events) {
+            if let dishonored_sim::world_actors::WorldEvent::Noise(s) = e {
+                self.last_events.push(s);
+            }
         }
         self.mover_worlds = placed;
         out

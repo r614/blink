@@ -48,6 +48,8 @@ pub struct MatchContent {
     /// Doors and usables the player uses natively (layout maps; empty on original maps, whose
     /// usables the original Kismet drives).
     pub usables: Vec<dishonored_multiplayer::mission::UsableDef>,
+    /// Breakables, whale oil batteries and receptacles of the map's levels.
+    pub world_actors: dishonored_ir::world_actors::WorldActors,
 }
 
 // [playground] Maps built from a layout of original assets (`maps/*.ron`).
@@ -95,7 +97,9 @@ pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
     // v15x-physics: GameplayConfig.throw, windblast `cast.notify_time` (physics port).
     // v17: physics throw rest / get-up fields on top of v16.
     // v19: special NPC classes (ai.md F6) and AI head poses / look-at (stealth F4 / F5).
-    let path = cache_dir().join("gameplay_config.v19.json");
+    // v21: the built-in archetypes' HealthMax (ai.archetype_health_max).
+    // v20: the explosions' `m_pRadialDamageType` (breakables' immune / instant-break lists).
+    let path = cache_dir().join("gameplay_config.v21.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);
@@ -425,17 +429,34 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         }
         pkgs
     };
-    // AI level data: factions, forbidden zones, alarm bells, probe lights (dishonored_ai).
-    // ailevel6: directional stealth lights carry their TraceDistance.
-    let ai_path = dir.join(format!("{map}.ailevel6.json"));
+    // AI level data: factions, forbidden zones, alarm bells, probe lights, distractors
+    // (dishonored_ai). ailevel8: directional stealth lights carry their TraceDistance; distractors
+    // and per-tweak health / distraction cooldowns.
+    let ai_path = dir.join(format!("{map}.ailevel8.json"));
     let ai_level: dishonored_ir::ai::AiLevel = match std::fs::read_to_string(&ai_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(a) => a,
         None => {
             let pkgs = level_pkgs();
             let tweaks: Vec<String> = npcs.spawns.iter().map(|s| s.tweak.clone()).filter(|t| !t.is_empty()).collect();
-            let a = dishonored_assets::ai_level::extract_ai_level(&content, &pkgs, &tweaks, &sim.gameplay.ai.loudness_distances).unwrap_or_default();
+            let mut a = dishonored_assets::ai_level::extract_ai_level(&content, &pkgs, &tweaks, &sim.gameplay.ai.loudness_distances).unwrap_or_default();
+            for d in a.distractors.iter_mut() {
+                if let Some((len, keys)) = soiree_keys(&content, &d.package, &d.soiree_matinee) {
+                    d.soiree_length = len;
+                    d.soiree_keys = keys;
+                }
+            }
             std::fs::write(&ai_path, serde_json::to_string(&a)?).ok();
             a
+        }
+    };
+    // Breakables, whale oil batteries and receptacles (dishonored_sim::world_actors).
+    let wa_path = dir.join(format!("{map}.worldactors1.json"));
+    let world_actors: dishonored_ir::world_actors::WorldActors = match std::fs::read_to_string(&wa_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
+        Some(w) => w,
+        None => {
+            let w = dishonored_assets::world_actors::extract_world_actors(&content, &level_pkgs(), &sim.gameplay.ai.loudness_distances).unwrap_or_default();
+            std::fs::write(&wa_path, serde_json::to_string(&w)?).ok();
+            w
         }
     };
     // Placed pickups (with the spawners that carry one), cached per map.
@@ -449,7 +470,26 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
             p
         }
     };
-    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts, flee_points, spawners, routes: npcs.routes.clone(), ai_level, pickups, usables: Vec::new() })
+    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts, flee_points, spawners, routes: npcs.routes.clone(), ai_level, pickups, usables: Vec::new(), world_actors })
+}
+
+/// A distractor's soiree matinee (`m_pDistractionMatineeData`, an export of the distractor's
+/// package): its `InterpLength` and the keys of its soiree control tracks, which decide how long
+/// it plays (`dishonored_kismet::interp::PlayState`, 0x00900480 / 0x009005e0).
+fn soiree_keys(content: &dishonored_assets::Content, package: &str, path: &str) -> Option<(f32, Vec<dishonored_ir::ai::SoireeKeyDef>)> {
+    if path.is_empty() {
+        return None;
+    }
+    let pkg = content.package(package).ok()?;
+    let e = (0..pkg.exports.len()).find(|&i| pkg.obj_path(ue3_package::ObjRef::Export(i)).eq_ignore_ascii_case(path))?;
+    let m = dishonored_kismet::interp::load(&pkg, e)?;
+    let mut keys = Vec::new();
+    for t in m.groups.iter().flat_map(|g| g.tracks.iter()).filter(|t| !t.disabled) {
+        if let dishonored_kismet::interp::TrackKind::SoireeControl { keys: k } = &t.kind {
+            keys.extend(k.iter().map(|k| dishonored_ir::ai::SoireeKeyDef { pin: k.pin.clone(), start: k.start, length: k.length, loops: k.loops, pause: k.pause }));
+        }
+    }
+    Some((m.length, keys))
 }
 
 /// Persistent maps a mission uses: its start map, then the maps reachable through travel.
@@ -629,6 +669,7 @@ pub fn mission_setup(maps: &MapContents, def: dishonored_mission::MissionDef) ->
     for name in mission_maps(&setup.def) {
         if let Some(mc) = maps.get(&name) {
             setup.pickups.insert(name.to_ascii_lowercase(), mc.pickups.clone());
+            setup.world_actors.insert(name.to_ascii_lowercase(), mc.world_actors.clone());
             setup.usables.extend(mc.usables.iter().cloned());
         }
     }

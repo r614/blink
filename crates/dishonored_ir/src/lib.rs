@@ -13,6 +13,7 @@ pub mod nav;
 pub mod particles;
 pub mod npc_anim;
 pub mod spawners;
+pub mod world_actors;
 
 use glam::{Mat4, Vec2, Vec3};
 use serde::{Deserialize, Serialize};

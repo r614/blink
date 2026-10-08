@@ -267,6 +267,18 @@ session read object=worldinfo path=TimeSeconds
 session read object=worldinfo path=BendTimeSeconds
 session read object=worldinfo path=Game.m_fCurrentWorldTimeDilation
 session read object=worldinfo path=Game.m_fCurrentPlayerTimeDilation
+# --- world actors: distractors, breakables, whale oil batteries (research/dishonored/systems/world.md F-12 / F-13 / F-14, kismet.md 3.1 / 3.4 / 3.5) ---
+kismet/boyle_distractor_railing
+session dump class=DisNPCDistractionComponent filter=m_fCooldownTimer limit=10
+session dump class=DisNPCDistractionComponent filter=m_pLinked limit=10
+session dump class=DisNPCDistractionComponent filter=m_NearbyBrains limit=10
+kismet/boyle_int_bottles_grenade
+session dump class=DishonoredMovable filter=m_CurHealth limit=20
+session dump class=DishonoredMovable filter=m_NextStep limit=20
+# Batteries: charges and plugs as loaded (no port scenario: the charge consumers, walls of light / arc pylons / watchtowers, are not in the port); a level with receptacles (Streets1 / Bridge Part 2).
+session dump class=DisWhaleOilBattery filter=m_CurrentCharges limit=20
+session dump class=DisWhaleOilBattery filter=m_pPlug limit=20
+session dump class=DisWhaleOilReceptacle filter=m_pAttachedBattery limit=20
 # --- map sweep (research/dishonored/MAP_SWEEP.md) ---
 # Per map: open it on the hooked game, then the collision capture (not a queue line: run by hand per MAP_SWEEP.md, 'Original-side collision capture'):
 #   probe_launch collide <cache>/oracle/queries/M.txt <out> ; oracle import collision --map M --queries <that file> --results <out> --generator harness-collision-v1

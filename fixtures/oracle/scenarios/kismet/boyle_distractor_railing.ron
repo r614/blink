@@ -1,0 +1,30 @@
+// NPC distraction (kismet.md 3.1, world.md F-13): `DisNPCDistractor_5` of L_BoyleStreet_Ext_Script
+// (the railing soiree: `m_SuspicionLvl1_Chances` animate 1.0, look 0, no allowed routes, no LOS, range
+// 1000, cooldown 60, `m_lDistractionSoireeLoops` Loop 1..1). A guard patrols past it 480 uu away.
+// Decoded rule (0x00b52050 / 0x00b842f0 / 0x00b83bb0): a brain whose patrol behaviour (owner of the
+// distractions sub-process) is current enters the distractor's nearby / check lists in range; the ready
+// distractor rolls it at once (relaxed guard: locomotion modifier EmptyPatrol, index 4, suspicion 0 ->
+// Lvl1 chances; animate 1.0 normalized by max(sum, 1) always wins). `DisBehaviorInteract` walks it to
+// the distractor (exact placement); on arrival `DisSeqEvent_Distracted` output 0 (0x00b84750 soiree
+// variant) plays the event's `SeqAct_Interp` (the same `DistractionSoiree.Railing` with the pawn as
+// `DistractedPawn`); at the soiree's end output 1 (0x00b844f0).
+// Port: `dishonored_ai::distraction`; the soiree's duration comes from the matinee's loop keys and the
+// distractor's loop counts.
+(
+    name: "kismet/boyle_distractor_railing",
+    system: Kismet,
+    map: "L_Boyle_Ext_P",
+    description: "A guard patrolling 480 uu from DisNPCDistractor_5 (railing soiree, animate chance 1): Distracted Start on arrival, End after the soiree.",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true)), kismet: true, kismet_start: Some("ChangeLvl_fromHub_toBoyle"), original_npcs: true, seed: 1,
+        npcs: [(id: Some("g"), kind: Some("Guard"), position: Some((-8929, -5700, -1200)), yaw: 90, state: Some("Patrol"), route: [(-8929, -5700, -1200), (-8929, -4700, -1200)])]),
+    ticks: 1800,
+    input: [],
+    checkpoints: [
+        (name: "distracted", expect: [(metric: Count("Kismet:Activated@*DisNPCDistractor_5_seq.DisSeqEvent_Distracted_5[out=0]"), value: 1, tol: 0, cmp: AtLeast, source: "decoded 0x00b83bb0 / 0x00b84d60 / 0x00b84750: a patrolling guard within m_fDistractionRange 1000 of the ready DisNPCDistractor_5 (m_fChanceToAnimate 1.0, no m_AllowedRoutes, m_bRequireLOS false) walks to it and fires output 0 on arrival", status: Static)]),
+        (name: "soiree over", expect: [(metric: Count("Kismet:Activated@*DisNPCDistractor_5_seq.DisSeqEvent_Distracted_5[out=1]"), value: 1, tol: 0, cmp: AtLeast, source: "decoded 0x00b844f0: output 1 when the soiree finishes; DistractionSoiree.Railing's Loop key played once (m_lDistractionSoireeLoops Loop 1..1, 0x00b79cf0)", status: Static)]),
+        (name: "arrival time", expect: [(metric: FirstAt("Kismet:Activated@*DisNPCDistractor_5_seq.DisSeqEvent_Distracted_5[out=0]"), value: 4.07, tol: 0.5, source: "port: 480 uu at the patrol walk speed; the original's go-to and its start delay need the capture", status: Unmeasured)]),
+        (name: "soiree length", expect: [(metric: Between("Kismet:Activated@*DisNPCDistractor_5_seq.DisSeqEvent_Distracted_5[out=0]", "Kismet:Activated@*DisNPCDistractor_5_seq.DisSeqEvent_Distracted_5[out=1]"), value: 8.93, tol: 0.2, source: "port: DistractionSoiree.Railing InterpLength with its Loop key played once; the original ends on the soiree's own completion callback", status: Unmeasured)]),
+    ],
+    record: [Pawn, Kismet, SimEvents, Npc("g")],
+    capture: Some("Boyle Ext after ChangeLvl_fromHub_toBoyle with a guard spawned at (-8929, -5700, -1200) patrolling to (-8929, -4700): ProcessEvent trace of SequenceOp activations (DisSeqEvent_Distracted outputs of DisNPCDistractor_5_seq), the guard's location per tick, the component's m_fCooldownTimer / m_pLinkedGoToPawn / m_pLinkedAnimPawn / m_AnimDistractionState"),
+)

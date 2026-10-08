@@ -312,6 +312,14 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
                     l.prov.insert(format!("{pre}.explosion.ai_noise_radius"), format!("{expl_path} :: m_AINoiseLoudness -> m_LoudnessDistanceArray = {r}"));
                     r
                 },
+                radial_damage_type: match get(&em, "m_pRadialDamageType") {
+                    Some(TVal::Obj(o)) => {
+                        let c = o.rsplit('.').next().unwrap_or(o).to_string();
+                        l.prov.insert(format!("{pre}.explosion.radial_damage_type"), format!("{expl_path} :: m_pRadialDamageType = {c}"));
+                        c
+                    }
+                    _ => de.radial_damage_type.clone(),
+                },
             },
         }
     };

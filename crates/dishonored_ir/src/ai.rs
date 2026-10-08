@@ -1200,6 +1200,11 @@ pub struct AiConfig {
     /// like the visual archetypes (`PlayerState::archetype`).
     #[serde(default)]
     pub head_poses: Vec<HeadPose>,
+    /// `Attribute_HealthMax` (Normal) of each built-in visual archetype's pawn tweak
+    /// (`characters::ARCHETYPE_TWEAKS`: party aristocrats 11, the party guard 50, the female
+    /// aristocrat 12), indexed like `PlayerState::archetype`; empty when not loaded.
+    #[serde(default)]
+    pub archetype_health_max: Vec<f32>,
     /// The look-at config the head model reads (`DisTweaks_NPCPawn.m_pComponentLookatConfig`,
     /// `DisLookatConfig.DefaultLookatConfig`).
     #[serde(default)]
@@ -1523,6 +1528,15 @@ pub struct AiLevel {
     /// its stealth lights are never occluded (captured: the dominant light reaches every lane point).
     #[serde(default)]
     pub stealth_light_unoccluded: bool,
+    /// The level's `DisNPCDistractor`s (their `DisNPCDistractionComponent`).
+    #[serde(default)]
+    pub distractors: Vec<DistractorDef>,
+    /// Pawn tweak path -> its `m_fDistractionCooldownTime` (the pawn's distraction cooldown).
+    #[serde(default)]
+    pub tweak_distraction_cooldown: BTreeMap<String, f32>,
+    /// Pawn tweak path -> its `Attribute_HealthMax` (Normal, `m_pAttributeTweaks[1]`).
+    #[serde(default)]
+    pub tweak_health_max: BTreeMap<String, f32>,
 }
 
 impl AiLevel {
@@ -1698,6 +1712,70 @@ impl LightVolume {
         }
         if total > 1e-4 { sum / total } else { 0.0 }
     }
+}
+
+
+/// `DisNPCDistractionComponent.DistractionChances` (`m_fChanceToLook`, `m_fChanceToAnimate`).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct DistractionChances {
+    pub look: f32,
+    pub animate: f32,
+}
+
+/// A placed `DisNPCDistractor` and the settings of its `DisNPCDistractionComponent` (archetype
+/// and class defaults applied).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct DistractorDef {
+    pub name: String,
+    pub package: String,
+    pub position: glam::Vec3,
+    /// The actor's yaw (degrees): the go-to rotation of an animated distraction.
+    pub yaw: f32,
+    /// `m_bDistractionEnabled`, `m_bRequireLOS`, `m_bLowerAIAlertness`, `m_bUseSoireeInsteadAnim`.
+    pub enabled: bool,
+    pub require_los: bool,
+    pub lower_alertness: bool,
+    pub soiree: bool,
+    /// `m_fDistractionRange`, `m_fCooldownTime`, `m_fDistractionPulseTime` (< 0: no pulse).
+    pub range: f32,
+    pub cooldown: f32,
+    pub pulse: f32,
+    /// `m_DistractionTime` (cooked lookup table): the look-at duration and the animation loop.
+    pub time: crate::particles::Dist,
+    /// `m_SuspicionLvl1_Chances` / `m_SuspicionLvl234_Chances`.
+    pub chances_lvl1: DistractionChances,
+    pub chances_lvl234: DistractionChances,
+    /// `m_DistractablePawnTweaks` / `m_NonDistractablePawnTweaks` (tweak paths) and
+    /// `m_AllowedRoutes` (route actor names).
+    pub distractable: Vec<String>,
+    pub non_distractable: Vec<String>,
+    pub routes: Vec<String>,
+    /// `m_NPCDistractionType` (`eDistractionType` index).
+    pub kind: u8,
+    /// `m_pDistractionMatineeData` (soiree matinee path).
+    pub soiree_matinee: String,
+    /// The soiree matinee's `InterpLength` and its soiree control keys (0 / empty when it
+    /// could not be read).
+    pub soiree_length: f32,
+    pub soiree_keys: Vec<SoireeKeyDef>,
+    /// `m_lDistractionSoireeLoops`: (`m_SoireeLoopName`, `m_iLoopMin`, `m_iLoopMax`), the loop
+    /// counts set on the soiree's pins when it starts (0x00b79cf0).
+    pub soiree_loops: Vec<(String, i32, i32)>,
+}
+
+/// An `InterpTrackSoireeControl` key of a soiree matinee (the loop / pause sections that
+/// decide how long it plays).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SoireeKeyDef {
+    pub pin: String,
+    pub start: f32,
+    pub length: f32,
+    /// `m_LoopCount` (0: until broken).
+    pub loops: i32,
+    /// A pause key (holds until broken).
+    pub pause: bool,
 }
 
 /// A `DisStealthVolume`: while the player touches it, the visibility component normalizes the
@@ -1975,6 +2053,7 @@ impl Default for AiConfig {
             anim_magic_lost_target: 0.0,
             locomotion: Vec::new(),
             head_poses: Vec::new(),
+            archetype_health_max: Vec::new(),
             lookat: crate::npc_anim::LookatConfig::default(),
             head_track_torso_ratio: 0.0,
             player_eye: [0.0, 0.0],
