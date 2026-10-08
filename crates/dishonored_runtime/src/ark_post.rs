@@ -98,6 +98,10 @@ pub struct ArkPostSource {
     /// overriding the level's, blended in by `power_weight` (0..1).
     pub power_post: Option<PostSettings>,
     pub power_weight: f32,
+    /// The Kismet's grade (`DisSeqAct_UberPostProcess`, `MissionView::post_fx`): the same kind of
+    /// override layer, stacked after the power's.
+    pub kismet_post: Option<PostSettings>,
+    pub kismet_weight: f32,
     /// Bend Time's post effect (`power_pp.rs`): intensity 0..1 and the dilated material time.
     pub bend: f32,
     pub bend_time: f32,
@@ -135,24 +139,31 @@ impl ArkPostSource {
             let c = crate::power_pp::EYELID_COLOR;
             u.dv_lid_color = Vec4::new(c[0], c[1], c[2], 1.0);
         }
-        // A power's grade: the LUT terms of the overridden settings, blended by its weight
-        // (the colour pipeline is on while it shows).
-        if let (Some(over), true) = (&self.power_post, self.power_weight > 0.0) {
-            let src = ArkPostSource { post: Some(crate::dark_vision::merged(self.post.as_ref(), over)), post_on: true, power_post: None, power_weight: 0.0, ..self.clone() };
+        // The weighted grades, in the order the original stacks them: a power's (Dark Vision's
+        // `m_StaticUberAdjustement`) then the Kismet's (`DisSeqAct_UberPostProcess`, the post
+        // manager's Kismet slot): the LUT terms of the overridden settings, blended by the
+        // grade's weight (the colour pipeline is on while it shows).
+        let mut graded = self.post_on;
+        for (over, weight) in [(&self.power_post, self.power_weight), (&self.kismet_post, self.kismet_weight)] {
+            let (Some(over), true) = (over, weight > 0.0) else { continue };
+            let src = ArkPostSource { post: Some(crate::dark_vision::merged(self.post.as_ref(), over)), post_on: true, power_post: None, power_weight: 0.0, kismet_post: None, kismet_weight: 0.0, ..self.clone() };
             let g = src.level_uniform(cam_z);
-            let w = self.power_weight.clamp(0.0, 1.0);
-            let lerp = |a: Vec4, b: Vec4| if self.post_on { a.lerp(b, w) } else { b };
+            let w = weight.clamp(0.0, 1.0);
+            let lerp = |a: Vec4, b: Vec4| if graded { a.lerp(b, w) } else { b };
             u.cb_shadows_opacity = lerp(u.cb_shadows_opacity, g.cb_shadows_opacity);
             u.cb_midtones = lerp(u.cb_midtones, g.cb_midtones);
             u.cb_highlights = lerp(u.cb_highlights, g.cb_highlights);
             u.exposure_gamma_desat = lerp(u.exposure_gamma_desat, g.exposure_gamma_desat);
             u.brightness_contrast = lerp(u.brightness_contrast, g.brightness_contrast);
             u.grain = lerp(u.grain, g.grain);
-            if !self.post_on {
-                // Level post off (`--no-post`): only the power's grade runs, faded by its weight
-                // through the LUT opacity.
+            u.dof = lerp(u.dof, g.dof);
+            if !graded {
+                // Level post off (`--no-post`): only the grade runs, faded by its weight through
+                // the LUT opacity (and the far blur amount).
                 u.misc.z = 1.0;
                 u.cb_shadows_opacity.w *= w;
+                u.dof.z *= w;
+                graded = true;
             }
         }
         u

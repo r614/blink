@@ -150,8 +150,28 @@ pub fn bend_intensity(elapsed: f32, duration: f32) -> f32 {
     up.min(down)
 }
 
-fn drive(view: Option<Res<SessionView>>, time: Res<Time>, mut lens: Local<BlinkLens>, mut q: Query<&mut ArkPostSource>) {
+/// The Kismet's screen grade (`MissionView::post_fx`) as the ArkPp override layer.
+fn kismet_layer(fx: &dishonored_mission::runtime::PostFxView) -> dishonored_ir::PostSettings {
+    dishonored_ir::PostSettings {
+        source: "DisSeqAct_UberPostProcess.m_Parameters".into(),
+        values: fx.values.clone(),
+        vectors: fx.vectors.iter().map(|(k, v)| (k.clone(), [v[0], v[1], v[2], 0.0])).collect(),
+    }
+}
+
+fn drive(view: Option<Res<SessionView>>, time: Res<Time>, mut lens: Local<BlinkLens>, mut kismet: Local<Option<dishonored_mission::runtime::PostFxView>>, mut q: Query<&mut ArkPostSource>) {
     let me = view.as_ref().and_then(|v| v.me.as_ref());
+    let fx = view.as_ref().and_then(|v| v.matchv.mission.as_ref()).and_then(|m| m.post_fx.as_ref());
+    let kismet_weight = fx.map(|f| f.weight).unwrap_or(0.0);
+    let same = match (fx, kismet.as_ref()) {
+        (Some(a), Some(b)) => a.values == b.values && a.vectors == b.vectors,
+        (None, None) => true,
+        _ => false,
+    };
+    let layer = (!same).then(|| fx.map(kismet_layer));
+    if !same {
+        *kismet = fx.cloned();
+    }
     // Dark Vision's eyelid pass runs while the power is on, its `Alpha` the power's fade (the
     // capture: 0 -> 1 over `m_PowerFadeInDuration`, then 1, then the fade-out remaining /
     // `m_PowerFadeOutDuration`, one frame late).
@@ -166,6 +186,12 @@ fn drive(view: Option<Res<SessionView>>, time: Res<Time>, mut lens: Local<BlinkL
     };
     let rate = me.map(|m| m.time_scale).unwrap_or(1.0);
     for mut src in &mut q {
+        if layer.is_some() || (src.kismet_post.is_none() && fx.is_some()) {
+            src.kismet_post = fx.map(kismet_layer);
+        }
+        if src.kismet_weight != kismet_weight {
+            src.kismet_weight = kismet_weight;
+        }
         let t = src.bend_time + time.delta_secs() * rate;
         src.bend_time = if t > 1.0e4 { t - 1.0e4 } else { t };
         if src.bend != bend {
