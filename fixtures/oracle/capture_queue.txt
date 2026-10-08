@@ -220,7 +220,6 @@ stealth/detect_600
 # running at 400 / 360 uu/s and sprinting at 600 / 540, to decode the loop's play rate.
 stealth/hear_footfalls
 
-<<<<<<< HEAD
 # --- physics (research/dishonored/systems/physics.md, 2026-10-08) ---
 # P-3: Windblast level 1 at 300 / 600 / 800 / 900 uu: |momentum| 1627 / 1259 / 1044 / 946 against m_fStrongHitReactThreshold 500,
 # m_fAnimRagdollThreshold 1000, m_fFullRagdollThreshold 3800. Needed per run: npc.guard x/y/z/physics/health (physics 4 Flying = the animated
@@ -256,7 +255,6 @@ session dump class=DisConvGlobalMan filter=m_pConvSettingTweaks limit=2
 # C4: cutscene lock: player path, camera and release under scripted input during Samuel's boat intro.
 cutscene/boyle_intro_lock
 session dump class=StatePlayerMasterSoiree limit=2
-=======
 # --- kismet (research/dishonored/systems/kismet.md) ---
 kismet/boyle_start
 kismet/boyle_intro_20s
@@ -268,4 +266,3 @@ session read object=worldinfo path=TimeSeconds
 session read object=worldinfo path=BendTimeSeconds
 session read object=worldinfo path=Game.m_fCurrentWorldTimeDilation
 session read object=worldinfo path=Game.m_fCurrentPlayerTimeDilation
->>>>>>> worktree-agent-ac3ee2d683f58c660
