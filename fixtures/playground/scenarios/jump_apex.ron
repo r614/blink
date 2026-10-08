@@ -1,0 +1,16 @@
+// A standing jump on the Playground's floor (by the start). Reference: research/dishonored/
+// INSTRUMENTATION.md, first measurements (2026-10-06): launch 800 uu/s, apex 106.67 uu at 60 Hz.
+(
+    name: "playground/jump_apex",
+    system: Movement,
+    map: "Playground",
+    description: "Settle half a second, one jump press: launch speed and apex height on a layout floor.",
+    setup: (player: Some((position: (0, -5000, 92), yaw: 90))),
+    ticks: 90,
+    input: [(tick: 30, action: Press(Jump))],
+    checkpoints: [
+        (name: "launch", expect: [(metric: Max("pawn.vz"), value: 800, tol: 1, source: "INSTRUMENTATION.md 2026-10-06: Velocity.Z on the first airborne frame")]),
+        (name: "apex", expect: [(metric: RiseFrom("pawn.z", 30), value: 106.67, tol: 1, source: "INSTRUMENTATION.md 2026-10-06: parabola fit over 4 jumps")]),
+    ],
+    record: [Pawn],
+)
