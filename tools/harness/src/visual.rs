@@ -157,8 +157,6 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
                 let mut left = "Blink";
                 if d < 180.0 {
                     buttons.push("PRIMARY");
-                } else if d > 900.0 && (start.elapsed().as_millis() / 700) % 5 == 0 {
-                    buttons.push("SECONDARY");
                 } else if d < 700.0 && (start.elapsed().as_millis() / 900) % 4 == 0 {
                     left = "Pistol";
                     buttons.push("SECONDARY");
@@ -217,6 +215,10 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     }
     // Blink's targeting indicator (`Twk_Blink` m_pGroundPS / m_pLowFallPS) shows while aiming
     // and is gone after the release; nothing of it stays behind.
+    // The driver never casts Blink (mana stays above Blink's 20, powers F-02); wait out any
+    // Blink lock-out (m_fCooldownTime 1 s, F-01) with Blink selected before aiming.
+    ctl.call(serde_json::json!({"cmd":"input","ticks":90,"input": {"yaw": yaw, "pitch": -10.0, "left_hand": "Blink"}}));
+    std::thread::sleep(Duration::from_millis(1600));
     ctl.call(serde_json::json!({"cmd":"input","ticks":45,"input": {"yaw": yaw, "pitch": -10.0, "left_hand": "Blink", "buttons": ["SECONDARY"]}}));
     std::thread::sleep(Duration::from_millis(600));
     let aiming = ctl.call(serde_json::json!({"cmd":"effects"})).unwrap_or(Value::Null);
