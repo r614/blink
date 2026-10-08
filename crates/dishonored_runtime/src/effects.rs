@@ -16,6 +16,7 @@ use bevy::prelude::*;
 use dishonored_ir::particles::{ParticleBlend, ParticleEmitterAsset, ParticleSystemAsset};
 use dishonored_ir::DishonoredMap;
 use dishonored_sim::events::{DamageCause, SimEvent};
+use dishonored_sim::input::LeftHand;
 use dishonored_sim::state::PlayerState;
 use dishonored_world::WorldQuery;
 use std::collections::HashMap;
@@ -786,6 +787,10 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
     }
     sim.particles.retain(|p| p.age < p.life);
     if sim.done {
+        // A completed emitter (all `EmitterLoops` played) is destroyed with its particles that
+        // have no Lifetime module (they live until the emitter goes, e.g. the five sprite
+        // emitters of the pistol muzzle `Ps_PlayerPistol_StdMuzzle_01`).
+        sim.particles.retain(|p| p.life.is_finite());
         return;
     }
     // Emitter time, loops, spawn rate and bursts (burst times are fractions of the duration).
@@ -1225,6 +1230,10 @@ fn gameplay_effects(
                     continue;
                 }
                 let Some(p) = find(*id) else { continue };
+                // Grenade throws also report `Fired` (a projectile without a bolt): no muzzle.
+                if matches!(p.left.item, LeftHand::Grenade | LeftHand::StickyGrenade) {
+                    continue;
+                }
                 let path = if Some(*id) == me { PLAYER_MUZZLE } else { PAWN_MUZZLE };
                 // The animated pistol's socket; without one (first person), in front of the eye.
                 let (at, dir) = sockets.muzzle.get(id).copied().filter(|m| m.0.distance(p.position) < 200.0).unwrap_or((p.position + Vec3::Z * 60.0 + look(&p) * 50.0, look(&p)));

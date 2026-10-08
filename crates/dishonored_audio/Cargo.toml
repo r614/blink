@@ -9,3 +9,6 @@ description = "Wwise containers (AKPK, SoundBank, WEM) and Wwise Vorbis decoding
 anyhow.workspace = true
 lewton = "0.10"
 ue3_package.workspace = true
+
+[dev-dependencies]
+dishonored_assets.workspace = true
