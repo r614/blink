@@ -63,7 +63,8 @@ pub fn explode(state: &mut WorldState, owner: PlayerId, pos: Vec3, stuck_to: Opt
     let e = &g.explosion;
     let cause = if kind == ProjectileKind::StickyGrenade { DamageCause::StickyGrenade } else { DamageCause::Grenade };
     events.push(SimEvent::Explosion { owner, position: pos, sticky: kind == ProjectileKind::StickyGrenade });
-    events.push(SimEvent::Sound { position: pos, radius: 4000.0, category: SoundCategory::Pistol, source: owner });
+    // `DisTweaks_Explosion.m_AINoiseLoudness` (`EAINoiseLoudness4`).
+    events.push(SimEvent::Sound { position: pos, radius: e.ai_noise_radius, category: SoundCategory::Pistol, source: owner });
     let mv = &cfg.movement;
     for v in state.players.iter_mut() {
         if !v.alive && !v.is_body() {
@@ -139,7 +140,7 @@ pub fn step_grenades(state: &mut WorldState, world: &dyn WorldQuery, cfg: &Gamep
             let len = delta.length();
             let world_hit = if len > 1e-6 { world.raycast(pr.position, delta, len, channel::PROJECTILE) } else { None };
             // Pawn hit (sticky grenades stick to pawns; plain ones bounce off them).
-            let mut pawn: Option<(PlayerId, f32, Vec3)> = None;
+            let mut pawn: Option<(PlayerId, f32, Vec3, Vec3)> = None;
             for v in &state.players {
                 if !v.alive || v.id == pr.owner || v.carried_by.is_some() || crate::powers::is_hidden(v) {
                     continue;
@@ -150,39 +151,43 @@ pub fn step_grenades(state: &mut WorldState, world: &dyn WorldQuery, cfg: &Gamep
                 let (on_seg, on_axis) = closest_segment_segment(pr.position, pr.position + delta, a0, a1);
                 if on_seg.distance(on_axis) <= mv.collision_radius {
                     let along = (on_seg - pr.position).length();
-                    if pawn.is_none_or(|(_, d, _)| along < d) {
-                        pawn = Some((v.id, along, on_seg));
+                    if pawn.is_none_or(|(_, d, _, _)| along < d) {
+                        let n = (on_seg - on_axis).normalize_or(-delta.normalize_or_zero());
+                        pawn = Some((v.id, along, on_seg, n));
                     }
                 }
             }
             match (pawn, world_hit) {
-                (Some((vid, along, point)), wh) if wh.is_none_or(|w| along <= w.distance) => {
+                (Some((vid, along, point, n)), wh) if wh.is_none_or(|w| along <= w.distance) => {
                     arm(&mut pr, &g);
                     if g.sticky {
+                        // 0x00C5C280: stuck to the pawn's mesh, `m_fSinkDistance` back along the
+                        // velocity from the hit point (the sim's mesh is the capsule).
+                        let back = old_v.normalize_or_zero() * g.sink_distance;
                         pr.stuck_to = Some(vid);
-                        pr.stuck_offset = point - state.player(vid).unwrap().position;
-                        pr.position = point;
+                        pr.position = point - back;
+                        pr.stuck_offset = pr.position - state.player(vid).unwrap().position;
                         pr.velocity = Vec3::ZERO;
                     } else {
-                        // `m_fBodyBounciness` (0.1 for the grenade).
                         pr.position = point;
-                        pr.velocity = -old_v * 0.1;
+                        pr.velocity = bounce(old_v, n, g.body_bounciness, g.body_bounce_damping);
                     }
                 }
                 (_, Some(h)) => {
                     arm(&mut pr, &g);
                     pr.position = h.point + h.normal * 2.0;
                     if g.sticky {
+                        // A world hit keeps the grenade where the move stopped it.
                         pr.stuck = true;
                         pr.velocity = Vec3::ZERO;
                     } else {
-                        // Reflect, scaled by `m_fFloorBounciness` on floors, `m_fBounciness` on walls.
-                        let b = if h.normal.z > mv.walkable_floor_z { g.floor_bounciness } else { g.bounciness };
-                        let v = pr.velocity;
-                        pr.velocity = (v - 2.0 * v.dot(h.normal) * h.normal) * b;
-                        if pr.velocity.length() < 20.0 {
-                            pr.velocity = Vec3::ZERO;
-                            pr.stuck = true;
+                        match world_bounce(pr.velocity, h.normal, &g) {
+                            Some(v) => pr.velocity = v,
+                            None => {
+                                // At rest (0x00C5BFE0).
+                                pr.velocity = Vec3::ZERO;
+                                pr.stuck = true;
+                            }
                         }
                     }
                 }
@@ -210,6 +215,28 @@ pub fn step_grenades(state: &mut WorldState, world: &dyn WorldQuery, cfg: &Gamep
     for (owner, pos, stuck, kind) in booms {
         explode(state, owner, pos, stuck, kind, world, cfg, events);
     }
+}
+
+/// The grenade bounce (0x00C5D940): `v' = (v - (1 + e)(v . n) n) x d`.
+pub fn bounce(v: Vec3, n: Vec3, e: f32, d: f32) -> Vec3 {
+    (v - (1.0 + e) * v.dot(n) * n) * d
+}
+
+/// A grenade's bounce off the world (0x00C5D940): on a surface facing up (`n.z > 0.0001`) it
+/// comes to rest when `-v.z < m_fRigidBodyZMagThreshold x n.z` (`None`), else bounces with the
+/// restitution and damping blended by `n.z` between the wall pair (`m_fBounciness`,
+/// `m_fBounceDamping`) and the floor pair (`m_fFloorBounciness`, `m_fFloorBounceDamping`);
+/// walls and ceilings use the wall pair.
+pub fn world_bounce(v: Vec3, n: Vec3, g: &GrenadeConfig) -> Option<Vec3> {
+    let (mut e, mut d) = (g.bounciness, g.bounce_damping);
+    if n.z > 0.0001 {
+        if -v.z < g.rest_z_threshold * n.z {
+            return None;
+        }
+        e = g.floor_bounciness * n.z + (1.0 - n.z) * e;
+        d = g.floor_bounce_damping * n.z + (1.0 - n.z) * d;
+    }
+    Some(bounce(v, n, e, d))
 }
 
 fn arm(pr: &mut ProjectileState, g: &GrenadeConfig) {
@@ -244,14 +271,28 @@ pub fn place_trap(state: &mut WorldState, owner: PlayerId, world: &dyn WorldQuer
     events.push(SimEvent::TrapPlaced { id: owner, trap: id, position: pos });
 }
 
-/// Point inside the trap's cylinder (radius about its axis, height along its normal).
-fn in_cylinder(axis_origin: Vec3, normal: Vec3, radius: f32, height: f32, p: Vec3) -> bool {
-    let rel = p - axis_origin;
+/// Point inside the trap's cylinder (0x00BC0280): from the trap's location up its normal to
+/// `height`, both ends and the radius strict.
+fn in_cylinder(base: Vec3, normal: Vec3, radius: f32, height: f32, p: Vec3) -> bool {
+    let rel = p - base;
     let h = rel.dot(normal);
-    if !(-height * 0.5..=height).contains(&h) {
-        return false;
-    }
-    (rel - normal * h).length() <= radius
+    h > 0.0 && h < height && (rel - normal * h).length_squared() < radius * radius
+}
+
+/// The sample points of a pawn the razor tests (0x00C36350): a pawn without the
+/// `DisSpringRazorTargetInterface` offers its centre and the centre +- two thirds of its
+/// bounding box's half height. NPCs answer through the interface (their own points, not
+/// decoded): the same three points stand in for them.
+fn razor_points(v: &crate::state::PlayerState, mv: &dishonored_ir::gameplay::MovementConfig) -> [Vec3; 3] {
+    let k = half_height(v, mv) * (2.0 / 3.0);
+    [v.position, v.position + Vec3::Z * k, v.position - Vec3::Z * k]
+}
+
+/// A clear line from the razor's sensor to a sample point (0x00C2D650: nothing in between, or
+/// the target itself).
+fn razor_sees(world: &dyn WorldQuery, sensor: Vec3, p: Vec3, mv: &dishonored_ir::gameplay::MovementConfig) -> bool {
+    let to = p - sensor;
+    world.raycast(sensor, to, to.length(), channel::PROJECTILE).is_none_or(|h| h.distance >= to.length() - mv.collision_radius)
 }
 
 /// Spring Razor tick (0x00C39C10 with 0x00C2D650 detection and 0x00C36350 damage).
@@ -274,9 +315,7 @@ pub fn step_traps(state: &mut WorldState, world: &dyn WorldQuery, cfg: &Gameplay
                 if !v.alive || v.kind == PawnKind::Human || v.carried_by.is_some() || v.incapacitated() {
                     continue;
                 }
-                let hh = half_height(v, mv) * 0.5;
-                let pts = [v.position, v.position + Vec3::Z * hh, v.position - Vec3::Z * hh];
-                let hit = pts.iter().any(|p| in_cylinder(t.position, t.normal, rc.detection_radius * t.radius_scale, rc.detection_height, *p) && world.raycast(sensor, *p - sensor, (*p - sensor).length(), channel::PROJECTILE).is_none_or(|h| h.distance >= (*p - sensor).length() - mv.collision_radius));
+                let hit = razor_points(v, mv).iter().any(|p| in_cylinder(t.position, t.normal, rc.detection_radius * t.radius_scale, rc.detection_height, *p) && razor_sees(world, sensor, *p, mv));
                 if hit {
                     t.triggered = true;
                     t.detonation = rc.trigger_reaction_time;
@@ -307,14 +346,18 @@ pub fn step_traps(state: &mut WorldState, world: &dyn WorldQuery, cfg: &Gameplay
                 if !v.alive || crate::powers::is_hidden(v) {
                     continue;
                 }
-                let hh = half_height(v, mv) * 0.5;
-                let pts = [v.position, v.position + Vec3::Z * hh, v.position - Vec3::Z * hh];
-                let inside = pts.iter().any(|p| in_cylinder(t.position, t.normal, rc.detonation_radius * t.radius_scale, rc.detonation_height, *p) && p.distance(t.position) <= rc.max_damage_distance && world.raycast(sensor, *p - sensor, (*p - sensor).length(), channel::PROJECTILE).is_none_or(|h| h.distance >= (*p - sensor).length() - mv.collision_radius));
+                // `m_fMaxDamageDistance` is handed to the damage and the severing (0x00C35D60),
+                // not a cull.
+                let inside = razor_points(v, mv).iter().any(|p| in_cylinder(t.position, t.normal, rc.detonation_radius * t.radius_scale, rc.detonation_height, *p) && razor_sees(world, sensor, *p, mv));
                 if !inside {
                     continue;
                 }
+                // 0x00C35D60: a pawn whose `DisSpringRazorTargetInterface` accepts the cut (NPCs)
+                // takes `m_NonNPCDamage[difficulty]` and is severed (dies); a pawn without the
+                // interface (the player pawn) or an NPC that refuses it takes `m_ImmuneNPCDamage`.
+                // Which NPCs refuse is not decoded: none here.
                 if v.kind == PawnKind::Human {
-                    apply_damage(v, rc.non_npc_damage, Some(t.owner), DamageCause::SpringRazor, events, &cfg.vitals);
+                    apply_damage(v, rc.immune_npc_damage, Some(t.owner), DamageCause::SpringRazor, events, &cfg.vitals);
                 } else {
                     kill(v, Some(t.owner), DamageCause::SpringRazor, events);
                 }

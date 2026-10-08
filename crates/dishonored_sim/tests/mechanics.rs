@@ -470,8 +470,9 @@ fn pistol_damage_close_and_far() {
     r.steps(40, &[(1, gun(0., -15., 0))]);
     r.step(&[(1, gun(0., -15., buttons::SECONDARY))]);
     r.steps(5, &[(1, gun(0., -15., 0))]);
-    // Close-range body shot: 20 x 1.5 = 30.
-    assert!((r.p(2).vitals.health - 40.0).abs() < 1e-3, "health {}", r.p(2).vitals.health);
+    // Close-range body shot: ((int)Attribute_RangedDamage 10 + m_fDamage 20) x 1.5 = 45
+    // (0x00C29820; the spawn point, 150 uu ahead of the eye, is under m_fCloseRange 400).
+    assert!((r.p(2).vitals.health - 25.0).abs() < 1e-3, "health {}", r.p(2).vitals.health);
     // Reload consumes reserve.
     r.steps(5, &[(1, gun(0., -15., buttons::RELOAD))]);
     r.steps(120, &[(1, gun(0., -15., 0))]);

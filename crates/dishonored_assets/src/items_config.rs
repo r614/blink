@@ -12,6 +12,9 @@ use std::collections::BTreeMap;
 
 const CORVO: &str = "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release";
 const NORMAL: &str = "m_fBaseValue2_Normal";
+/// The rig whose physics bodies classify projectile hits: the elite guard's
+/// (`Pwn_EliteGuard_*` `m_pPhysicsAsset`), as (package, physics asset, skeletal mesh).
+const HIT_RIG: (&str, &str, &str) = ("L_Boyle_Ext_Script", "Npc_EliteGuard.Physics.Skm_EliteGuard_Physics", "Npc_EliteGuard.Mesh.Skm_EliteGuard_Body");
 
 struct L<'a> {
     db: &'a TweakDb,
@@ -49,7 +52,17 @@ fn costs(m: &TMap, d: [i32; 2]) -> [i32; 2] {
     [c("m_RuneCosts", d[0]), c("m_RuneCosts[1]", d[1])]
 }
 
-pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<String, String>) -> ItemsConfig {
+/// An `EAINoiseLoudness` field of a tweak as a distance (`loudness`: DefaultAI.ini
+/// `m_LoudnessDistanceArray`, indexed by the enum).
+pub fn loudness_radius(m: &TMap, field: &str, loudness: &[f32]) -> Option<f32> {
+    match get(m, field)? {
+        TVal::Name(n) => crate::ai_level::LOUDNESS_NAMES.iter().position(|x| x == n).and_then(|i| loudness.get(i).copied()),
+        TVal::I(v) => loudness.get(*v as usize).copied(),
+        _ => None,
+    }
+}
+
+pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<String, String>, loudness: &[f32]) -> ItemsConfig {
     let mut l = L { db, prov };
     let mut cfg = ItemsConfig::default();
 
@@ -91,6 +104,7 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
     let xbow = "Twk_Inv_PlayerSpecific.Twk_Inv_CrossbowCorvo.DisTweaks_InventoryItem_Attributes_21";
     let xbow_m = l.obj(xbow);
     inv.crossbow_ranged_damage = l.attr(&xbow_m, xbow, "m_RangedDamage", "items.inventory.crossbow_ranged_damage", d.crossbow_ranged_damage);
+    inv.crossbow_headshot_mult = l.attr(&xbow_m, xbow, "m_RangedHeadshotMultiplier", "items.inventory.crossbow_headshot_mult", d.crossbow_headshot_mult);
     let pistol = "Twk_Inv_PlayerSpecific.Twk_Inv_PistolCorvo.DisTweaks_InventoryItem_Attributes_25";
     let pistol_m = l.obj(pistol);
     inv.pistol_ranged_damage = l.attr(&pistol_m, pistol, "m_RangedDamage", "items.inventory.pistol_ranged_damage", d.pistol_ranged_damage);
@@ -245,6 +259,12 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
             min_delay_after_hit: l.f(&cm, comp, "m_fMinDetonationDelayAfterHit", &format!("{pre}.min_delay_after_hit"), d.min_delay_after_hit),
             bounciness: get_f32(&pm, "m_fBounciness").unwrap_or(d.bounciness),
             floor_bounciness: get_f32(&pm, "m_fFloorBounciness").unwrap_or(if sticky { 0.0 } else { d.floor_bounciness }),
+            bounce_damping: l.f(&pm, proj, "m_fBounceDamping", &format!("{pre}.bounce_damping"), d.bounce_damping),
+            floor_bounce_damping: l.f(&pm, proj, "m_fFloorBounceDamping", &format!("{pre}.floor_bounce_damping"), if sticky { 0.0 } else { d.floor_bounce_damping }),
+            body_bounciness: l.f(&pm, proj, "m_fBodyBounciness", &format!("{pre}.body_bounciness"), if sticky { 0.0 } else { d.body_bounciness }),
+            body_bounce_damping: l.f(&pm, proj, "m_fBodyBounceDamping", &format!("{pre}.body_bounce_damping"), if sticky { 0.0 } else { d.body_bounce_damping }),
+            rest_z_threshold: l.f(&pm, proj, "m_fRigidBodyZMagThreshold", &format!("{pre}.rest_z_threshold"), if sticky { 0.0 } else { d.rest_z_threshold }),
+            sink_distance: l.f(&pm, proj, "m_fSinkDistance", &format!("{pre}.sink_distance"), if sticky { d.sink_distance } else { 0.0 }),
             sticky,
             explosion: ExplosionConfig {
                 radial_damage: l.f(&em, &expl_path, &format!("m_RadialDamage.{NORMAL}"), &format!("{pre}.explosion.radial_damage"), de.radial_damage),
@@ -255,6 +275,11 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
                 radial_momentum: l.f(&em, &expl_path, "m_fRadialMomentum", &format!("{pre}.explosion.radial_momentum"), de.radial_momentum),
                 extra_up_force: l.f(&em, &expl_path, "m_fExtraUpForce", &format!("{pre}.explosion.extra_up_force"), de.extra_up_force),
                 attached_damage: l.f(&em, &expl_path, "m_fAttachedDamage", &format!("{pre}.explosion.attached_damage"), de.attached_damage),
+                ai_noise_radius: {
+                    let r = loudness_radius(&em, "m_AINoiseLoudness", loudness).unwrap_or(de.ai_noise_radius);
+                    l.prov.insert(format!("{pre}.explosion.ai_noise_radius"), format!("{expl_path} :: m_AINoiseLoudness -> m_LoudnessDistanceArray = {r}"));
+                    r
+                },
             },
         }
     };
@@ -269,6 +294,8 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
             gravity_mult: l.f(&m, path, "m_fGravityMultiplier", &format!("{pre}.gravity_mult"), d.gravity_mult),
             limb_damage_cap: l.f(&m, path, "m_fLegsAndArmsDamageCap", &format!("{pre}.limb_damage_cap"), d.limb_damage_cap),
             kill_on_headshot: get(&m, "m_bKillOnHeadshot").map(|v| matches!(v, TVal::B(true))).unwrap_or(d.kill_on_headshot),
+            // Absent on the dart and the flare: the `DisTweaks_Arrow` class default 1.0.
+            stealth_mult: l.f(&m, path, "m_fDamageMultiplier_Stealth", &format!("{pre}.stealth_mult"), 1.0),
         }
     };
     let dg = GadgetConfig::default();
@@ -277,6 +304,17 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
     g.incendiary_bolt = bolt(&mut l, "Twk_Projectiles.Twk_Proj_Arrow_Flare", "incendiary_bolt", dg.incendiary_bolt);
     let flare = l.obj("Twk_Projectiles.Twk_Proj_Arrow_Flare");
     g.immolation_time = l.f(&flare, "Twk_Projectiles.Twk_Proj_Arrow_Flare", "m_fNPCImmolationTime", "items.gadgets.immolation_time", dg.immolation_time);
+
+    // --- hit bodies (projectile hit regions, research/dishonored/systems/ranged.md F4) ---
+    match crate::npc_anim::load_hit_bodies(content, HIT_RIG.0, HIT_RIG.1, HIT_RIG.2) {
+        Ok(h) => {
+            l.prov.insert("items.hit_bodies".into(), format!("{} + {} ({}), bind pose, {} bodies", HIT_RIG.1, HIT_RIG.2, HIT_RIG.0, h.bodies.len()));
+            cfg.hit_bodies = h;
+        }
+        Err(e) => {
+            l.prov.insert("items.hit_bodies".into(), format!("not decoded ({e:#}): the sim's capsule-height rule"));
+        }
+    }
 
     // --- rune costs of the active powers ---
     for (name, path) in [
