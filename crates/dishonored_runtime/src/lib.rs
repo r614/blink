@@ -518,9 +518,20 @@ fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Asset
     let far = if args.features.sky { 12000.0 } else { 6000.0 };
     let projection = Projection::Perspective(PerspectiveProjection { fov: 75f32.to_radians(), near: 0.005, far, ..default() });
     let camera = if args.mode == Mode::Inspect {
-        commands.spawn((Camera3d::default(), projection, Transform::from_translation(coords::pos(start)), FreeCam { yaw, pitch: args.pitch })).id()
+        let mut cam = commands.spawn((Camera3d::default(), projection, Transform::from_translation(coords::pos(start)), FreeCam { yaw, pitch: args.pitch }));
+        if std::env::var_os("DISHONORED_NODEPTH").is_none() {
+            cam.insert(bevy::core_pipeline::prepass::DepthPrepass);
+        }
+        cam.id()
     } else {
-        commands.spawn((Camera3d::default(), projection, Transform::default(), players::GameCamera { third_person: args.spectate, follow: None }, if std::env::var_os("DISHONORED_NOMSAA").is_some() { Msaa::Off } else { Msaa::Sample4 })).id()
+        let mut cam = commands.spawn((Camera3d::default(), projection, Transform::default(), players::GameCamera { third_person: args.spectate, follow: None }, if std::env::var_os("DISHONORED_NOMSAA").is_some() { Msaa::Off } else { Msaa::Sample4 }));
+        // The scene-depth texture of the translucent materials (water thickness and fake fog,
+        // volume light and foam depth fades; research/dishonored/systems/render_depth.md).
+        // DISHONORED_NODEPTH=1 leaves the prepass out to measure its cost.
+        if std::env::var_os("DISHONORED_NODEPTH").is_none() {
+            cam.insert(bevy::core_pipeline::prepass::DepthPrepass);
+        }
+        cam.id()
     };
     level::apply_look(&levels, &args.map, camera, &mut commands, &args.features);
     commands.insert_resource(levels);

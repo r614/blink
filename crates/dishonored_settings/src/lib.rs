@@ -367,11 +367,14 @@ pub struct Graphics {
     /// 0 Off, 1 MLAA, 2 FXAA.
     pub anti_aliasing: i32,
     pub rat_shadows: bool,
+    /// BaseEngine.ini `Distortion=True` (no entry in the original's video menu): the heat-haze /
+    /// refraction pass.
+    pub distortion: bool,
 }
 
 impl Default for Graphics {
     fn default() -> Self {
-        Self { gamma: 2.2, resolution: None, fullscreen: true, vsync: true, fov: 75.0, texture_details: 2, model_details: 0, light_shafts: true, anti_aliasing: 1, rat_shadows: false }
+        Self { gamma: 2.2, resolution: None, fullscreen: true, vsync: true, fov: 75.0, texture_details: 2, model_details: 0, light_shafts: true, anti_aliasing: 1, rat_shadows: false, distortion: true }
     }
 }
 

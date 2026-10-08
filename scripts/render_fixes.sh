@@ -30,5 +30,8 @@ for m in L_PrsnSewer_P L_Isl_HighChaos_P L_Isl_LowChaos_P L_Out_HighChaos_EmilyA
 run L_TowerRtrn_Int_P 600
 # 4. The reported hang: profile lines every 5 s show whether frames come at all.
 run L_Bridge_Part2_P 900 --profile
+# 6. Depth prepass (water thickness / fake fog, volume-light and foam depth fades): Boyle exterior
+# river and the flooded streets, on top of the sets above. DISHONORED_NODEPTH=1 gives the old look.
+for m in L_Boyle_Ext_P L_Flooded_FStreets_P; do run "$m" 600; done
 # 5. The dark starts (no code change; for the record).
 for m in L_Prison_P L_Ovrsr_P L_Flooded_FStreets_P; do run "$m" 600; done
