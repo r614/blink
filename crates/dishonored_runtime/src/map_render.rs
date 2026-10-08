@@ -804,7 +804,7 @@ pub fn spawn_prepared(
             .collect();
         commands.spawn((crate::bloom::BloomParts { batches }, Transform::IDENTITY, Visibility::default(), MapGeometry { instance: usize::MAX }));
     }
-    let n_batches = batches.len();
+    let n_batches = built.len();
     // Lightmap debugging (`DISHONORED_LIGHTMAP_DEBUG`): `nospec` drops the lightmap specular,
     // `flat` ignores normal maps in the directional reconstruction.
     let lm_debug = match std::env::var("DISHONORED_LIGHTMAP_DEBUG").as_deref() {
@@ -820,45 +820,6 @@ pub fn spawn_prepared(
         _ => 0.0,
     };
     let mut baked_cache: std::collections::HashMap<(u32, u32, bool, Option<u32>, Option<u32>), Handle<BakedMaterial>> = std::collections::HashMap::new();
-    // Build batch meshes (MikkTSpace tangents dominate) across all cores.
-    let built: Vec<(BatchKey, Mesh)> = {
-        let jobs: Vec<(BatchKey, Batch)> = batches.into_iter().filter(|(_, b)| !b.indices.is_empty()).collect();
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-        let chunk = jobs.len().div_ceil(threads).max(1);
-        let tangents = features.materials;
-        let mut jobs = jobs;
-        let mut parts: Vec<Vec<(BatchKey, Batch)>> = Vec::new();
-        while !jobs.is_empty() {
-            let rest = jobs.split_off(chunk.min(jobs.len()));
-            parts.push(std::mem::replace(&mut jobs, rest));
-        }
-        std::thread::scope(|s| {
-            let handles: Vec<_> = parts
-                .into_iter()
-                .map(|part| {
-                    s.spawn(move || {
-                        part.into_iter()
-                            .map(|(key, b)| {
-                                let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
-                                    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, b.positions)
-                                    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, b.normals)
-                                    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, b.uv0)
-                                    .with_inserted_indices(Indices::U32(b.indices));
-                                if key.uv1 {
-                                    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, b.uv1);
-                                }
-                                if tangents {
-                                    let _ = mesh.generate_tangents();
-                                }
-                                (key, mesh)
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect();
-            handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
-        })
-    };
     for (key, mesh) in built {
         let mat = if key.material == u32::MAX { default_material.clone() } else { material_handles[key.material as usize].clone() };
         let mut e = commands.spawn((Mesh3d(meshes.add(mesh)), Transform::IDENTITY, MapGeometry { instance: usize::MAX }));
@@ -931,7 +892,7 @@ pub fn spawn_prepared(
         }
         spawned += 1;
     }
-    if merge {
+    if n_batches > 0 {
         info!("static geometry merged into {n_batches} batches");
     }
     spawned
