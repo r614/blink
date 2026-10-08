@@ -591,6 +591,15 @@ fails with the reason instead of being forced), a `session <op> key=value...` li
 The results file maps every line to ok / failed / skipped with the reason or the answer; the
 traces go to the oracle cache. Run it from the repository root.
 
+First full run (2026-10-08, main edf53a7's queue of 101 lines: 68 scenarios, 33 session lines):
+98 ok, 3 failed in 924 s (one session; Playground specs built as layouts). The failures are
+setup gaps: `SleepDart` and `StickyGrenade` ammo (their inventory tweaks are not loaded in
+Boyle; mapping them needs their tweak names and a `DynamicLoadObject`, about an hour) and a
+mid-run `Hand` switch (scripted hand switches: the power wheel / item select path, about half a
+day). `oracle scenario` then reports a first divergence for all 68; most are at tick 0, the
+settled height: the original hovers 3.73 uu above a floor (cube or Boyle runway), the port 6.73,
+which masks later channels until that is resolved or tolerated.
+
 ### Layout maps in the original (the Playground)
 
 A scenario whose map has a layout file (`maps/<map>.ron`, the Playground) is captured by
