@@ -252,7 +252,21 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     let st = s.status()?;
     let cur = st["map"].as_str().unwrap_or("").to_string();
     let mut load = json!(null);
-    if reload || !cur.eq_ignore_ascii_case(&spec.map) {
+    // A layout map (maps/<map>.ron, e.g. the Playground) is built in the host level at an
+    // offset; positions in and out of the trace are the layout's own.
+    let layout = crate::playground::layout_file(&spec.map);
+    let off = if layout.is_some() { glam::Vec3::from(crate::playground::DEFAULT_OFFSET) } else { glam::Vec3::ZERO };
+    if let Some(file) = &layout {
+        let l = crate::playground::parse_layout(&std::fs::read_to_string(file)?)?;
+        let (lt, c) = s.open_map(crate::playground::host_map(), Duration::from_secs(600))?;
+        s.setup(spec.tick_hz as f64, spec.setup.keep_alive)?;
+        let built = s.build_layout(&l, off)?;
+        if let Some(errs) = built["errors"].as_array().filter(|e| !e.is_empty()) {
+            warnings.push(format!("layout: {} parts not built: {}", errs.len(), errs.iter().filter_map(|e| e.as_str()).collect::<Vec<_>>().join("; ")));
+        }
+        warnings.push("layout: lights, labels and the nav grid are not built in the original (U-806)".into());
+        load = json!({"load_s": lt, "control_s": c, "layout": built});
+    } else if reload || !cur.eq_ignore_ascii_case(&spec.map) {
         let (l, c) = s.open_map(&spec.map, Duration::from_secs(600))?;
         load = json!({"load_s": l, "control_s": c});
     }
@@ -268,7 +282,27 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
         warnings.push("seed: the original's random streams are not seeded by the runner".into());
     }
     for it in &spec.setup.items {
-        crate::lab::give(&mut s.c, it, true)?;
+        // Port item names -> the original's inventory tweaks (a weapon tweak brings its ammo).
+        let name = it.split(':').next().unwrap_or(it);
+        let tweaks: &[&str] = match name {
+            n if n.starts_with("Twk_") => &[],
+            "FullAmmo" => &["Twk_Inv_PistolCorvo", "Twk_Inv_CrossbowCorvo", "Twk_Inv_GrenadeCorvo", "Twk_Inv_SpringRazorCorvo"],
+            "Bullet" => &["Twk_Inv_PistolCorvo"],
+            "Bolt" => &["Twk_Inv_CrossbowCorvo"],
+            "Grenade" => &["Twk_Inv_GrenadeCorvo"],
+            "SpringRazor" => &["Twk_Inv_SpringRazorCorvo"],
+            "Reset" => &[],
+            _ => {
+                gap(format!("item {it} has no mapping to an original tweak"), &mut warnings)?;
+                &[]
+            }
+        };
+        if name.starts_with("Twk_") {
+            crate::lab::give(&mut s.c, name, true)?;
+        }
+        for t in tweaks {
+            crate::lab::give(&mut s.c, t, true)?;
+        }
     }
     for (cls, hand) in &spec.setup.equip {
         crate::lab::equip(&mut s.c, cls, *hand)?;
@@ -285,7 +319,7 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
                 if let Some(p) = n.position {
                     let pawn = npc_pawn(s, name)?;
                     let mut b = Vec::new();
-                    for v in p {
+                    for v in (glam::Vec3::from(p) + off).to_array() {
                         b.extend(v.to_le_bytes());
                     }
                     s.c.write(pawn + 0xc4, &b)?;
@@ -301,7 +335,7 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
         if ps.sword_drawn {
             crate::lab::give(&mut s.c, "Twk_Inv_SwordCorvo", true)?;
         }
-        s.place(ps.position, Some(ps.yaw), Some(ps.pitch), ps.snap_to_floor)?;
+        s.place((glam::Vec3::from(ps.position) + off).to_array(), Some(ps.yaw), Some(ps.pitch), ps.snap_to_floor)?;
         if let Some(h) = ps.health {
             let pawn = crate::lab::pawn(&mut s.c)?;
             s.c.write(pawn + 0x344, &(h.round() as i32).to_le_bytes())?;
@@ -310,6 +344,43 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
             let pawn = crate::lab::pawn(&mut s.c)?;
             s.c.write(pawn + crate::oracle_powers::PAWN_MANA, &(m.round() as i32).to_le_bytes())?;
         }
+    }
+    // The left hand at the start: a power (DisItemPowers on its component) or a weapon.
+    if let Some(h) = &spec.setup.left_hand {
+        let power = match h.as_str() {
+            "Blink" => Some("DishonoredActivePowerComponent_Blink"),
+            "Windblast" | "WindBlast" => Some("DishonoredActivePowerComponent_WindBlast"),
+            "DarkVision" => Some("DisActivePowerComponent_DarkVision"),
+            "Possession" | "Possess" => Some("DishonoredActivePowerComponent_Possess"),
+            "BendTime" => Some("DishonoredActivePowerComponent_BendTime"),
+            "DevouringSwarm" => Some("DishonoredActivePowerComponent_DevouringSwarm"),
+            _ => None,
+        };
+        let weapon = match h.as_str() {
+            "Pistol" => Some(("Twk_Inv_PistolCorvo", "DishonoredWepPistol")),
+            "Crossbow" | "SleepDart" | "IncendiaryBolt" => Some(("Twk_Inv_CrossbowCorvo", "DisWepCrossbow")),
+            "Grenade" | "StickyGrenade" => Some(("Twk_Inv_GrenadeCorvo", "DisWepGrenade")),
+            "SpringRazor" => Some(("Twk_Inv_SpringRazorCorvo", "DisGadget_SpringRazor")),
+            _ => None,
+        };
+        if let Some(comp) = power {
+            crate::oracle_powers::select_power(&mut s.c, comp)?;
+        } else if let Some((tw, cls)) = weapon {
+            crate::lab::give(&mut s.c, tw, true)?;
+            crate::lab::equip(&mut s.c, cls, 2)?;
+        } else {
+            gap(format!("left hand {h}"), &mut warnings)?;
+        }
+    }
+    for st in &spec.input {
+        if matches!(st.action, Action::Hand(_) | Action::Drink(_)) {
+            gap(format!("input {:?} at tick {} (hand switches and drinks are not scripted on the original yet)", st.action, st.tick), &mut warnings)?;
+        }
+    }
+    // `settle`: ticks run before tick 0 (the pawn lands and equips).
+    if spec.setup.settle > 0 {
+        s.c.lockstep(true, 30_000)?;
+        s.c.step(spec.setup.settle, 600_000)?;
     }
     // Release every key the script uses (a previous run may have left one down).
     for k in ["W", "S", "A", "D", "SpaceBar", "C", "LeftShift", "LeftMouseButton", "RightMouseButton", "LeftControl", "Q", "E", "F"] {
@@ -448,6 +519,21 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     }
     for (k, row) in frames.iter().enumerate() {
         trace.push(k as u32, to_values(row));
+    }
+    // Back to the layout's coordinates.
+    if off != glam::Vec3::ZERO {
+        for (i, c) in trace.channels.clone().iter().enumerate() {
+            let is_pos = c.name.starts_with("pawn.") || c.name.starts_with("camera.") || c.name.starts_with("npc.");
+            let k = match c.name.rsplit('.').next() {
+                Some("x") if is_pos => 0,
+                Some("y") if is_pos => 1,
+                Some("z") if is_pos => 2,
+                _ => continue,
+            };
+            for fr in trace.frames.iter_mut() {
+                fr.values[i] -= off[k] as f64;
+            }
+        }
     }
     let raw_events = if tracing { s.c.event_fetch()? } else { Vec::new() };
     let raw_spawns = if spawns { s.c.spawn_fetch()? } else { Vec::new() };

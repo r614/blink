@@ -517,6 +517,23 @@ impl Session {
                 json!({"component": reflect::object_value(&mut self.c, comp)?})
             }
             "run" => crate::capture::run_reads(self, a)?,
+            "layout" => {
+                // Build a layout map (maps/<name>.ron) in the current level (`reload`: open the
+                // host level fresh first). Positions in the layout are then at +offset.
+                let file = match (s("file"), s("map")) {
+                    (Some(f), _) => std::path::PathBuf::from(f),
+                    (None, Some(m)) => crate::playground::layout_file(m).with_context(|| format!("no maps/{}.ron (run from the repository root)", m.to_ascii_lowercase()))?,
+                    _ => bail!("file or map"),
+                };
+                let l = crate::playground::parse_layout(&std::fs::read_to_string(&file)?)?;
+                let offset = crate::playground::check_offset(a.get("offset").unwrap_or(&Value::Null))?;
+                if a.get("reload").and_then(Value::as_bool).unwrap_or(true) {
+                    let host = s("host").unwrap_or(crate::playground::host_map()).to_string();
+                    self.open_map(&host, Duration::from_secs(600))?;
+                    self.setup(num("hz").unwrap_or(60.0), true)?;
+                }
+                self.build_layout(&l, offset)?
+            }
             "shaders" => {
                 // Bytecode of the shaders the game created from id `since` on, written to
                 // $DISHONORED_CACHE/oracle/shaders/<exe>/<kind>s_<hash>.bin (retail-derived:

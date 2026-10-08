@@ -25,6 +25,7 @@ use std::path::PathBuf;
 mod capture;
 mod lab;
 mod measure;
+mod playground;
 mod reflect;
 mod session;
 mod oracle;
