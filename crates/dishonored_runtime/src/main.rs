@@ -62,6 +62,7 @@ mod menu_audio;
 mod menu_options;
 mod launcher;
 mod launcher_bg;
+mod handoff;
 mod pause_menu;
 mod hud_settings;
 mod saves;
@@ -71,7 +72,7 @@ mod cutscene;
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowPosition};
 
 use dishonored_net::client::NetClient;
 use dishonored_net::socket::{LinkConditions, NetSocket};
@@ -204,12 +205,17 @@ fn main() {
         (args.size, bevy::window::WindowMode::Windowed, if std::env::var_os("DISHONORED_NOVSYNC").is_some() { bevy::window::PresentMode::AutoNoVsync } else { bevy::window::PresentMode::AutoVsync })
     };
     let mut app = App::new();
+    // Started by the launcher: open hidden where the launcher window is, and show once frames
+    // are coming (`handoff.rs`), so menu and match share one window on screen.
+    let position = handoff::window_pos_arg().map(WindowPosition::At).unwrap_or_default();
     let mut plugins = DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
-            title: format!("Blink - {}", args.map),
+            title: if from_launcher { "Dishonored".into() } else { format!("Blink - {}", args.map) },
             resolution: size.into(),
             mode,
             present_mode: present,
+            position,
+            visible: !from_launcher,
             ..default()
         }),
         ..default()
@@ -368,6 +374,10 @@ fn main() {
         app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin).add_systems(Update, profile_report);
     }
     app.add_systems(Update, exit_after);
+    app.init_resource::<handoff::ReturnToMenu>().add_systems(Update, handoff::return_to_menu);
+    if from_launcher {
+        app.init_resource::<handoff::Reveal>().add_systems(Update, handoff::reveal).add_systems(Last, handoff::report_exit);
+    }
     let exit = app.run();
     if let Some(dir) = &args.record {
         match harness::encode_video(dir, args.record_fps) {

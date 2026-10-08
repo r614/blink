@@ -345,6 +345,7 @@ pub fn harness_frame(
     mut pause: Option<ResMut<crate::pause_menu::PauseMenu>>,
     fx: Option<Res<crate::effects::Effects>>,
     mut exit: MessageWriter<AppExit>,
+    mut nav: Option<ResMut<crate::menu_ui::MenuNav>>,
 ) {
     shots.frames_since_last_shot += 1;
     // Pace screenshots: at most one per frame (the capture pipeline is asynchronous).
@@ -403,6 +404,14 @@ pub fn harness_frame(
                 "pause" => {
                     if let Some(p) = pause.as_mut() {
                         p.request = true;
+                    }
+                    "{\"ok\":true}".into()
+                }
+                "menu" => {
+                    // Activate a pause-menu entry like a click (e.g. `pause:quit`, Back to Main Menu).
+                    let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    if let Some(n) = nav.as_mut() {
+                        n.events.push(crate::menu_ui::MenuEvent::Activate { id, at: None });
                     }
                     "{\"ok\":true}".into()
                 }
