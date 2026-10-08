@@ -5,7 +5,7 @@
 # game data (collision, navmeshes, gameplay config, NPC / travel / dialog caches).
 if (Get-Command sccache -ErrorAction SilentlyContinue) {
     $env:RUSTC_WRAPPER = "sccache"
-    $env:CARGO_INCREMENTAL = "0"
+    Remove-Item Env:CARGO_INCREMENTAL -ErrorAction SilentlyContinue  # see dev-env.sh
     if (-not $env:SCCACHE_CACHE_SIZE) { $env:SCCACHE_CACHE_SIZE = "40G" }
 } else {
     Write-Warning "dev-env: sccache not found (cargo install sccache --locked); building without it"

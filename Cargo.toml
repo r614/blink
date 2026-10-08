@@ -32,6 +32,17 @@ dishonored_oracle = { path = "crates/dishonored_oracle" }
 
 [profile.dev]
 opt-level = 1
+# File and line in backtraces without full debug info: much less for the linker to process.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
+
+# Optimised builds for the harness and local testing: release speed, built in more parallel
+# units and incrementally. `cargo build --profile fast-release` (output in target/fast-release).
+# Distribution zips still use the plain release profile.
+[profile.fast-release]
+inherits = "release"
+codegen-units = 256
+incremental = true

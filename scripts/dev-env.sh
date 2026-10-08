@@ -9,8 +9,11 @@
 #   its format.
 if command -v sccache >/dev/null 2>&1; then
   export RUSTC_WRAPPER=sccache
-  # sccache cannot cache incremental compilation.
-  export CARGO_INCREMENTAL=0
+  # Incremental compilation for the workspace crates (cargo's dev default; fast edit-rebuild
+  # loops). sccache refuses to run when CARGO_INCREMENTAL is set at all, so leave it unset:
+  # cargo builds only path crates incrementally, and those sccache passes through uncached, while
+  # dependencies stay cached.
+  unset CARGO_INCREMENTAL
   export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-40G}"
 else
   echo "dev-env: sccache not found (cargo install sccache --locked); building without it" >&2

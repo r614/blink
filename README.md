@@ -220,7 +220,7 @@ cargo install sccache --locked   # once
 source scripts/dev-env.sh        # PowerShell: . .\scripts\dev-env.ps1
 ```
 
-- **sccache** (`RUSTC_WRAPPER=sccache`, `CARGO_INCREMENTAL=0`) caches compiled crates by content,
+- **sccache** (`RUSTC_WRAPPER=sccache`; `CARGO_INCREMENTAL` left unset so the workspace crates build incrementally while dependencies stay cached) caches compiled crates by content,
   so a new worktree reuses most of the dependencies another checkout already built. Measured on a
   fresh worktree's release build: 219 of 342 cacheable compiles hit (64%).
   - Still compiled per worktree: the workspace's own crates, plus dependencies whose build-script

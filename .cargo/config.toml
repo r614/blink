@@ -1,0 +1,4 @@
+# Faster links on Windows: rust-lld ships with every rustup toolchain and links the large
+# runtime binary several times faster than MSVC link.exe.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
