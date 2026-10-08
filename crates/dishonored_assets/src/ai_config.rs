@@ -187,6 +187,12 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
         prov.insert("ai.vision".into(), VISION.into());
     }
     let beh = |path: &str| db.try_resolve(path);
+    // Ambient barks of the patrol / guard behaviours (`DisTweaks_AISubProcess_AmbientBarks`).
+    const AMBIENT: &str = "AI_BehaviorTweaks_Patrol.TweaksBehavior_Patrol_Default.DisTweaks_AISubProcess_AmbientBarks_0";
+    if let Some(m) = beh(AMBIENT) {
+        out.ambient_bark_inhibition = get_f32(&m, "m_fBarkInhibitionDuration").unwrap_or(out.ambient_bark_inhibition);
+        prov.insert("ai.ambient_bark_inhibition".into(), format!("{AMBIENT}.m_fBarkInhibitionDuration"));
+    }
     if let Some(m) = beh("AI_BehaviorTweaks_Search.TweaksBehavior_Search_Default") {
         out.search.cancel_investigate_wait = [get_f32(&m, "m_fCancelInvestigateWaitTimeMin").unwrap_or(0.5), get_f32(&m, "m_fCancelInvestigateWaitTimeMax").unwrap_or(1.0)];
         out.search.reached_broadcast_range = get_f32(&m, "m_fSearchReachedProxyBroadcastRange").unwrap_or(out.search.reached_broadcast_range);

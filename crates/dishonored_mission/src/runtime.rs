@@ -4,7 +4,7 @@
 //! does within a frame), and returns commands for the host to apply to NPCs.
 
 use crate::{Action, Behavior, Condition, MissionDef, NpcKind, TargetRef, TaskState, Trigger};
-use dishonored_conversation::runner::{ConvEnv, ConvEvent, Runner, StartSpec};
+use dishonored_conversation::runner::{ConvEnv, ConvEvent, HookFacts, HookRequest, HookStage, Runner, StartSpec};
 use dishonored_conversation::{ConversationDb, Target};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
@@ -86,6 +86,32 @@ pub struct DialogueLineView {
     /// The blurb's GUID (`m_iBlurbGUID`, 32 hex digits): names the speaker's FaceFX animation.
     #[serde(default)]
     pub blurb: Option<String>,
+    /// `m_fVoiceRadius` (uu): the subtitle shows only within it (`DisSubtitle`, R7).
+    #[serde(default)]
+    pub voice_radius: f32,
+    /// The conversation instance speaking it (0 = a detached line) and the dialog hook that
+    /// started that instance (barks): the dominant hook's line is preferred and the others duck.
+    #[serde(default)]
+    pub instance: u32,
+    #[serde(default)]
+    pub hook: Option<String>,
+}
+
+/// `DisTweaks_ConvSettings` values the client mixes dialogue with (R7): the non-dominant
+/// voices' volume scale, its blend speed (per second) and the dominance distance fraction of
+/// the voice radius.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct DialogueMix {
+    pub non_dominant_scale: f32,
+    pub blend_speed: f32,
+    pub dominant_pct: f32,
+}
+
+impl Default for DialogueMix {
+    fn default() -> Self {
+        let s = dishonored_conversation::hooks::ConvSettings::default();
+        Self { non_dominant_scale: s.non_dominant_volume_scale, blend_speed: s.duck_blend_speed, dominant_pct: s.dominant_max_distance_percent }
+    }
 }
 
 /// A player choice waiting for input.
@@ -219,6 +245,8 @@ pub struct MissionView {
     /// Lines being spoken in original conversations (oldest first).
     #[serde(default)]
     pub dialogue: Vec<DialogueLineView>,
+    #[serde(default)]
+    pub dialogue_mix: DialogueMix,
     /// Player choice waiting for input.
     #[serde(default)]
     pub choice: Option<DialogueChoiceView>,
@@ -282,6 +310,10 @@ struct Env<'a> {
     players: &'a [(u32, Vec3, bool)],
     items: &'a BTreeMap<String, i32>,
     darkness_level: i32,
+    /// [ai] Positions of every NPC that can bark (mission and original), set by the host.
+    speaker_pos: &'a BTreeMap<String, Vec3>,
+    dead: &'a BTreeSet<String>,
+    facts: &'a BTreeMap<String, HookFacts>,
 }
 
 impl Env<'_> {
@@ -317,9 +349,30 @@ impl ConvEnv for Env<'_> {
         self.darkness_level
     }
     fn distance(&self, player: Option<u32>, npc: Option<&str>) -> Option<f32> {
-        let np = self.npc_pos.get(npc?)?;
+        let np = self.pos_of(npc?)?;
         let p = self.players.iter().find(|p| Some(p.0) == player || player.is_none())?;
-        Some(p.1.distance(*np))
+        Some(p.1.distance(np))
+    }
+    fn npc_dead(&self, npc: &str) -> bool {
+        self.dead.contains(npc)
+    }
+    /// The nearest living player (the original has one listener, the local player pawn).
+    fn listener_distance(&self, npc: &str) -> Option<f32> {
+        let np = self.pos_of(npc)?;
+        self.players.iter().filter(|p| p.2).map(|p| p.1.distance(np)).min_by(f32::total_cmp)
+    }
+    fn player_distance_2d(&self, npc: &str) -> Option<f32> {
+        let np = self.pos_of(npc)?;
+        self.players.iter().filter(|p| p.2).map(|p| p.1.truncate().distance(np.truncate())).min_by(f32::total_cmp)
+    }
+    fn hook_facts(&self, npc: &str, _initiator: Option<u32>) -> HookFacts {
+        self.facts.get(npc).copied().unwrap_or_default()
+    }
+}
+
+impl Env<'_> {
+    fn pos_of(&self, npc: &str) -> Option<Vec3> {
+        self.speaker_pos.get(npc).or_else(|| self.npc_pos.get(npc)).copied()
     }
 }
 
@@ -379,9 +432,26 @@ pub struct MissionState {
     /// Distance tracker per (NPC, approach hook node), as `DisConv_Hook_Distance_InGameData`.
     approach_track: BTreeMap<(String, u32), dishonored_conversation::hooks::DistanceHook>,
     /// [ai] Dialog hooks the AI fired this step (barks): (NPC binding name, speaker actor,
-    /// `DDH_*` hook, initiator, the pawn's generic voice data path if it has one). Queued by
-    /// the host, fired in `step`.
-    pub ai_hooks: Vec<(String, String, String, Option<u32>, Option<String>)>,
+    /// `DDH_*` hook, initiator, the pawn's generic voice data path if it has one, the pawn).
+    /// Queued by the host, requested in `step` (`Runner::request_hook`) and fired by the bark
+    /// manager's tick (`Runner::tick_hooks`).
+    pub ai_hooks: Vec<(String, String, String, Option<u32>, Option<String>, Option<u32>)>,
+    /// [ai] Where every NPC that can bark stands (mission NPCs and original spawns, by bark
+    /// name), the dead ones, and what their hook nodes read from their AI. Set by the host
+    /// before each step.
+    #[serde(skip)]
+    pub speaker_pos: BTreeMap<String, Vec3>,
+    #[serde(default)]
+    pub dead_speakers: BTreeSet<String>,
+    #[serde(skip)]
+    pub hook_facts: BTreeMap<String, HookFacts>,
+    /// Polled player hooks (`DDH_PLAYER_LOITERS(_RADIAL)`, `DDH_PLAYER_LOOKAT(_RADIAL)`) of
+    /// one-shots whose me-speaker a mission NPC stands in for: (npc, tree, hook).
+    #[serde(default)]
+    player_hooks: Vec<(String, u32, String)>,
+    /// [ai] Dialog hook requests and their outcome (`ConvEvent::Hook`; tools drain it; capped).
+    #[serde(skip)]
+    pub hook_log: Vec<ConvEvent>,
     /// [ai] Barks that started a conversation so far.
     pub ai_hooks_fired: u32,
     /// [ai] Barks asked for so far (started or not).
@@ -456,6 +526,11 @@ impl MissionState {
             approach: Vec::new(),
             approach_track: BTreeMap::new(),
             ai_hooks: Vec::new(),
+            speaker_pos: BTreeMap::new(),
+            dead_speakers: BTreeSet::new(),
+            hook_facts: BTreeMap::new(),
+            player_hooks: Vec::new(),
+            hook_log: Vec::new(),
             ai_hooks_fired: 0,
             ai_hooks_requested: 0,
             ai_hook_rejections: BTreeMap::new(),
@@ -473,6 +548,7 @@ impl MissionState {
     pub fn set_conversations(&mut self, db: Arc<ConversationDb>) {
         let seed = self.def.title.bytes().fold(0xC0FFEEu64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64));
         self.approach.clear();
+        self.player_hooks.clear();
         for n in &self.def.npcs {
             let Some(actor) = n.speaker_actor() else { continue };
             for (oi, o) in db.oneshots.iter().enumerate() {
@@ -486,6 +562,11 @@ impl MissionState {
                     if let dishonored_conversation::NodeKind::Hook { hook, distances: Some(d), .. } = &node.kind {
                         if (hook == "DDH_PLAYER_APPROACHES" || hook == "DDH_PLAYER_APPROACHES_RADIAL") && node.outputs.iter().any(|o| o.is_some()) {
                             self.approach.push((n.id.clone(), oi as u32, *h, *d));
+                        }
+                    }
+                    if let dishonored_conversation::NodeKind::Hook { hook, class: dishonored_conversation::model::HookClass::PlayerLoiter { .. } | dishonored_conversation::model::HookClass::PlayerLookAt { .. }, .. } = &node.kind {
+                        if !self.player_hooks.iter().any(|p| p.0 == n.id && p.1 == t && &p.2 == hook) {
+                            self.player_hooks.push((n.id.clone(), t, hook.clone()));
                         }
                     }
                 }
@@ -517,14 +598,16 @@ impl MissionState {
         }
     }
 
-    /// [ai] AI barks (`Runner::fire_hook`): the NPC's trees are the trees of the one-shots whose
-    /// first speaker is its actor, then the generic trees of its voice
-    /// (`m_pGenericDialogData_Cached`, 0x00C8D2C0).
-    fn fire_ai_hooks(&mut self, queue: &mut VecDeque<Ev>) {
+    /// [ai] AI barks: each request goes through `FireHook` (`Runner::request_hook`: the NPC's
+    /// trees are the trees of the one-shots whose first speaker is its actor, then the generic
+    /// trees of its voice, `m_pGenericDialogData_Cached` 0x00C8D2C0), the polled player hooks
+    /// ask too, then the bark manager's tick (`Runner::tick_hooks`) fires the winners.
+    fn fire_ai_hooks(&mut self, dt: f32, queue: &mut VecDeque<Ev>) {
         let hooks = std::mem::take(&mut self.ai_hooks);
         let Some(r) = &self.conv else { return };
         let db = r.db.clone();
-        for (npc, actor, hook, initiator, voice) in hooks {
+        let mut reqs = Vec::new();
+        for (npc, actor, hook, initiator, voice, owner) in hooks {
             self.ai_hooks_requested += 1;
             let mut trees: Vec<u32> = db
                 .oneshots
@@ -532,25 +615,28 @@ impl MissionState {
                 .filter(|o| o.speakers.first().and_then(|s| s.actor.as_deref()).is_some_and(|m| actor_matches(&actor, &o.package, m)))
                 .filter_map(|o| o.tree)
                 .collect();
+            let oneshot_trees = trees.len();
             if let Some(v) = voice.as_ref().and_then(|v| db.voice_trees.get(v)) {
                 trees.extend(v.iter().copied().filter(|t| !trees.contains(t)).collect::<Vec<_>>());
             }
             if trees.is_empty() {
                 continue;
             }
-            let req = dishonored_conversation::runner::HookRequest { npc, trees, hook, output: 0, initiator };
-            let mut res = None;
-            self.with_conv(queue, |runner, env| {
-                res = Some(runner.fire_hook(req, env));
-            });
-            match res {
-                Some(Ok(_)) => self.ai_hooks_fired += 1,
-                Some(Err(e)) => *self.ai_hook_rejections.entry(format!("{e:?}")).or_default() += 1,
-                None => {}
-            }
+            reqs.push(HookRequest { npc, trees, oneshot_trees, hook, output: None, initiator, owner });
         }
+        // Player hooks: asked every step; the node's own state machine decides (R5, F12).
+        let nearest = |np: Vec3| self.last_players.iter().filter(|p| p.2).min_by(|a, b| a.1.distance(np).total_cmp(&b.1.distance(np))).map(|p| p.0);
+        for (npc, tree, hook) in &self.player_hooks {
+            let Some(np) = self.speaker_pos.get(npc).or_else(|| self.last_npc_pos.get(npc)).copied() else { continue };
+            reqs.push(HookRequest { npc: npc.clone(), trees: vec![*tree], oneshot_trees: 1, hook: hook.clone(), output: None, initiator: nearest(np), owner: None });
+        }
+        self.with_conv(queue, |runner, env| {
+            for req in reqs {
+                let _ = runner.request_hook(req, env);
+            }
+            runner.tick_hooks(dt, env);
+        });
     }
-
     fn conv_bindings(&self, target: &Target, explicit: &[String], talker: Option<&str>) -> Vec<Option<String>> {
         let Some(r) = &self.conv else { return Vec::new() };
         let oneshot = match target {
@@ -597,7 +683,7 @@ impl MissionState {
     /// queue (Kismet-style cascade within the step).
     fn with_conv(&mut self, queue: &mut VecDeque<Ev>, f: impl FnOnce(&mut Runner, &mut dyn ConvEnv)) {
         let Some(runner) = self.conv.as_mut() else { return };
-        let mut env = Env { flags: &mut self.flags, changed: Vec::new(), alive: &self.npc_alive, suspicion: &self.npc_suspicion, npc_pos: &self.last_npc_pos, players: &self.last_players, items: &self.items, darkness_level: self.darkness_level };
+        let mut env = Env { flags: &mut self.flags, changed: Vec::new(), alive: &self.npc_alive, suspicion: &self.npc_suspicion, npc_pos: &self.last_npc_pos, players: &self.last_players, items: &self.items, darkness_level: self.darkness_level, speaker_pos: &self.speaker_pos, dead: &self.dead_speakers, facts: &self.hook_facts };
         f(runner, &mut env);
         let changed = env.changed;
         let events = runner.take_events();
@@ -608,6 +694,16 @@ impl MissionState {
             match &e {
                 ConvEvent::Output { name, oneshot, .. } => queue.push_back(Ev::ConvOutput { name: name.clone(), oneshot: oneshot.clone() }),
                 ConvEvent::Ended { name, label, .. } => queue.push_back(Ev::ConvEnded { name: name.clone(), label: label.clone() }),
+                ConvEvent::Hook { result, .. } => {
+                    match result {
+                        Ok(HookStage::Fired) => self.ai_hooks_fired += 1,
+                        Ok(HookStage::Queued) => {}
+                        Err(e) => *self.ai_hook_rejections.entry(format!("{e:?}")).or_default() += 1,
+                    }
+                    // Hook requests (one per ambient bark tick) have their own log.
+                    self.hook_log.push(e);
+                    continue;
+                }
                 _ => {}
             }
             self.conv_log.push(e);
@@ -615,6 +711,10 @@ impl MissionState {
         let n = self.conv_log.len();
         if n > 4096 {
             self.conv_log.drain(..n - 4096);
+        }
+        let n = self.hook_log.len();
+        if n > 4096 {
+            self.hook_log.drain(..n - 4096);
         }
     }
 
@@ -753,7 +853,7 @@ impl MissionState {
         let dt = input.dt;
         self.with_conv(&mut queue, |r, env| r.update(dt, env));
         self.approach_hooks(&mut queue);
-        self.fire_ai_hooks(&mut queue);
+        self.fire_ai_hooks(dt, &mut queue);
         // Delayed actions that are due run before rules (they were scheduled earlier).
         let due: Vec<Vec<Action>> = {
             let t = self.time;
@@ -1070,7 +1170,7 @@ impl MissionState {
             // A line shows (and plays) only when the original would show a subtitle: lines
             // without a VO event are silent skips there. Lines started by an `Interrupted`
             // branch play out detached from their ended conversation.
-            let line_view = |l: &dishonored_conversation::runner::ActiveLine, conversation: String| {
+            let line_view = |l: &dishonored_conversation::runner::ActiveLine, conversation: String, instance: u32, hook: Option<String>| {
                 let elapsed = (r.time - l.started) as f32;
                 DialogueLineView {
                     id: l.id,
@@ -1089,15 +1189,25 @@ impl MissionState {
                         dishonored_conversation::NodeKind::Line(x) => Some(x.guid.clone()),
                         _ => None,
                     },
+                    voice_radius: match &r.db.node(l.node).kind {
+                        dishonored_conversation::NodeKind::Line(x) => x.voice_radius,
+                        _ => 3000.0,
+                    },
+                    instance,
+                    hook,
                 }
             };
-            for l in r.detached.iter().filter(|l| l.subtitle) {
-                self.view.dialogue.push(line_view(l, String::new()));
+            self.view.dialogue_mix = DialogueMix { non_dominant_scale: r.db.settings.non_dominant_volume_scale, blend_speed: r.db.settings.duck_blend_speed, dominant_pct: r.db.settings.dominant_max_distance_percent };
+            // A subtitle goes with its owner: dropped once the speaker is dead (`DisSubtitle`
+            // owner health <= 0, R7).
+            let alive = |l: &&dishonored_conversation::runner::ActiveLine| l.subtitle && l.speaker.npc.as_ref().is_none_or(|n| !self.dead_speakers.contains(n));
+            for l in r.detached.iter().filter(alive) {
+                self.view.dialogue.push(line_view(l, String::new(), 0, None));
             }
             for inst in r.active() {
                 let conversation = inst.conversation.map(|c| r.db.conversation_name(c)).unwrap_or_default();
-                if let Some(l) = inst.line.as_ref().filter(|l| l.subtitle) {
-                    self.view.dialogue.push(line_view(l, conversation.clone()));
+                if let Some(l) = inst.line.as_ref().filter(alive) {
+                    self.view.dialogue.push(line_view(l, conversation.clone(), inst.id, inst.hook.clone()));
                 }
                 if let (Some(c), None) = (&inst.choice, &self.view.choice) {
                     self.view.choice = Some(DialogueChoiceView { id: c.id, options: c.options.clone(), player: c.player, conversation });

@@ -30,3 +30,4 @@ fn elite_guard_voice_barks() {
     }
     assert!(!started.is_empty(), "no generic bark starts");
 }
+
