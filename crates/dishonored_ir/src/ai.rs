@@ -1375,8 +1375,10 @@ impl Default for AiConfig {
                 pathing_fail_scale: 1.0,
                 pathing_fail_range: [500.0, 25.0, 500.0],
                 track_proximity: 150.0,
-                anim_lost_target: 0.0,
-                anim_corpse_check: 0.0,
+                // The elite guard's search animations (Startup AnimSets; the loader finds them even
+                // without level packages).
+                anim_lost_target: 3.7,
+                anim_corpse_check: 5.233333,
             },
             panic: PanicConfig { cower_distance: 350.0, flee_point_claim_radius: 500.0, flee_interception_distance: 300.0, free_flight_time: 2.0, forbidden_angle_deg: 50.0, forbidden_radius: 500.0 },
             combat: CombatAiConfig {
