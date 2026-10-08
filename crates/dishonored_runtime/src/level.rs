@@ -32,7 +32,7 @@ pub struct Levels {
     looks: HashMap<String, LevelLook>,
     /// A level change in progress: the target, and its import running on a worker thread.
     pending: Option<String>,
-    import: Option<std::sync::Mutex<std::sync::mpsc::Receiver<Result<DishonoredMap, String>>>>,
+    import: Option<std::sync::Mutex<std::sync::mpsc::Receiver<Result<(DishonoredMap, map_render::PreparedMap), String>>>>,
 }
 
 pub struct LevelOptions {
@@ -64,7 +64,7 @@ pub fn spawn_level(
         for e in &stats.errors {
             warn!("layout {name}: {e}");
         }
-        return spawn_imported(name, map, stats.instances, opts, features, commands, meshes, images, materials, baked, fx_mats, levels, fx);
+        return spawn_imported(name, map, None, stats.instances, opts, features, commands, meshes, images, materials, baked, fx_mats, levels, fx);
     }
     // --legacy-geometry: the pre-fidelity package/actor coverage (prefix-matched sublevels,
     // StaticMeshActor + StaticMeshCollectionActor only), for before/after comparisons.
@@ -80,7 +80,7 @@ pub fn spawn_level(
         stats.timings.iter().map(|(k, s)| format!("{k} {s:.1} s")).collect::<Vec<_>>().join(", "),
         if stats.lightmaps_cached { "from the cache" } else { "baked" }
     );
-    spawn_imported(name, map, stats.instances, opts, features, commands, meshes, images, materials, baked, fx_mats, levels, fx)
+    spawn_imported(name, map, None, stats.instances, opts, features, commands, meshes, images, materials, baked, fx_mats, levels, fx)
 }
 
 /// The importer's options. Baked lightmap pages are cached under DISHONORED_CACHE
@@ -92,16 +92,20 @@ fn import_options(name: &str, opts: &LevelOptions) -> ImportOptions {
     ImportOptions { max_texture_size: opts.max_tex, other_actors: !opts.legacy, extra_particles: crate::effects::GAMEPLAY_PARTICLES.iter().map(|s| s.to_string()).collect(), lightmap_cache, ..Default::default() }
 }
 
-/// Import a level (worker-thread safe).
-fn import(name: &str, opts: &LevelOptions) -> Result<DishonoredMap, String> {
+/// Import a level and prepare its render data (worker-thread safe): the frame that spawns it
+/// then has next to nothing left to do (`map_render::prepare_map`).
+fn import(name: &str, opts: &LevelOptions, features: &RenderFeatures) -> Result<(DishonoredMap, map_render::PreparedMap), String> {
     let content = Content::locate().map_err(|e| e.to_string())?;
-    if let Some(layout) = dishonored_content::playground::layout_for(name) {
+    let map = if let Some(layout) = dishonored_content::playground::layout_for(name) {
         let layout = layout.map_err(|e| format!("{e:#}"))?;
-        return dishonored_assets::level::layout_import::import_layout(&content, &layout, &import_options(name, opts)).map(|r| r.0).map_err(|e| format!("{e:#}"));
-    }
-    let pkgs = if opts.legacy { dishonored_assets::map_packages_by_prefix(&content, name) } else { map_packages(&content, name) };
-    let iopts = import_options(name, opts);
-    import_level(&content, name, &pkgs, &iopts).map(|r| r.0).map_err(|e| format!("{e:#}"))
+        dishonored_assets::level::layout_import::import_layout(&content, &layout, &import_options(name, opts)).map(|r| r.0).map_err(|e| format!("{e:#}"))?
+    } else {
+        let pkgs = if opts.legacy { dishonored_assets::map_packages_by_prefix(&content, name) } else { map_packages(&content, name) };
+        let iopts = import_options(name, opts);
+        import_level(&content, name, &pkgs, &iopts).map(|r| r.0).map_err(|e| format!("{e:#}"))?
+    };
+    let prep = map_render::prepare_map(&map, opts.show_hidden, features);
+    Ok((map, prep))
 }
 
 /// Spawn an imported level's geometry and lights and record its look.
@@ -109,6 +113,7 @@ fn import(name: &str, opts: &LevelOptions) -> Result<DishonoredMap, String> {
 fn spawn_imported(
     name: &str,
     map: DishonoredMap,
+    prepared: Option<map_render::PreparedMap>,
     instances: usize,
     opts: &LevelOptions,
     features: &RenderFeatures,
@@ -121,7 +126,10 @@ fn spawn_imported(
     levels: &mut Levels,
     fx: &mut crate::effects::Effects,
 ) -> DishonoredMap {
-    let spawned = map_render::spawn_map(&map, commands, meshes, images, materials, baked, opts.show_hidden, features);
+    let spawned = match prepared {
+        Some(p) => map_render::spawn_prepared(&map, p, commands, meshes, images, materials, baked, opts.show_hidden, features),
+        None => map_render::spawn_map(&map, commands, meshes, images, materials, baked, opts.show_hidden, features),
+    };
     crate::effects::spawn_level_effects(name, &map, commands, meshes, images, fx_mats, fx);
     crate::level_props::queue(name, &map, commands);
     info!("{}: {} instances, {} meshes, {} textures, {} entities", name, instances, map.meshes.len(), map.textures.len(), spawned);
@@ -183,6 +191,7 @@ pub fn follow_level(
     mut vis: Query<(&LevelOf, &mut Visibility)>,
     mut fx: ResMut<crate::effects::Effects>,
     camera: Query<Entity, (With<Camera3d>, Without<crate::reflect::ReflectCamera>)>,
+    mut warm: ResMut<crate::warmup::Warmup>,
 ) {
     let want = session.content.map_name.clone();
     let Some(target) = levels.pending.clone() else {
@@ -194,10 +203,11 @@ pub fn follow_level(
             let (tx, rx) = std::sync::mpsc::channel();
             let name = want.clone();
             let o = LevelOptions { max_tex: opts.0.max_tex, show_hidden: opts.0.show_hidden, legacy: opts.0.legacy };
+            let f = features.clone();
             std::thread::Builder::new()
                 .name(format!("import {name}"))
                 .spawn(move || {
-                    let _ = tx.send(import(&name, &o));
+                    let _ = tx.send(import(&name, &o, &f));
                 })
                 .ok();
             levels.import = Some(std::sync::Mutex::new(rx));
@@ -206,6 +216,7 @@ pub fn follow_level(
         return;
     };
     // First visit: wait for the worker's import, then spawn it.
+    let mut new_level = false;
     if let Some(rx) = levels.import.take() {
         let got = rx.lock().ok().and_then(|r| r.try_recv().ok());
         match got {
@@ -213,9 +224,10 @@ pub fn follow_level(
                 levels.import = Some(rx);
                 return;
             }
-            Some(Ok(map)) => {
+            Some(Ok((map, prep))) => {
                 let n = map.instances.len();
-                spawn_imported(&target, map, n, &opts.0, &features, &mut commands, &mut meshes, &mut images, &mut materials, &mut baked, &mut fx_mats, &mut levels, &mut fx);
+                new_level = true;
+                spawn_imported(&target, map, Some(prep), n, &opts.0, &features, &mut commands, &mut meshes, &mut images, &mut materials, &mut baked, &mut fx_mats, &mut levels, &mut fx);
             }
             Some(Err(e)) => error!("importing {target}: {e}"),
         }
@@ -229,6 +241,10 @@ pub fn follow_level(
     if let Ok(cam) = camera.single() {
         apply_look(&levels, &target, cam, &mut commands, &features);
     }
-    loading.end();
+    // A level seen for the first time compiles its pipelines behind the loading screen, which
+    // the warm-up takes down when none are waiting; a revisit has them cached already.
+    if !(new_level && warm.begin(true, true)) {
+        loading.end();
+    }
     info!("level travel: now showing {target}");
 }

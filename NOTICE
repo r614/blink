@@ -1,3 +1,4 @@
 ﻿Blink includes code adapted from dishonored-bevy by Eamon (https://github.com/Eamo5/dishonored-bevy),
 used with the author's permission:
 - crates/ue3_shader/src/{sm3,shadercache,ue3prog}.rs (D3D9 SM3 bytecode to WGSL, shader cache reader, program assembly; from crates/dhcook/src)
+- crates/dishonored_runtime/src/warmup.rs (shader / pipeline warm-up; from game/src/warmup.rs)

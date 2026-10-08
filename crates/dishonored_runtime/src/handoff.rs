@@ -89,8 +89,9 @@ const SHOW_AFTER_FRAMES: u32 = 4;
 const SHOW_AFTER_SECS: f64 = 0.25;
 const ANNOUNCE_AFTER_FRAMES: u32 = 3;
 
-pub fn reveal(time: Res<Time<Real>>, mut r: ResMut<Reveal>, mut windows: Query<&mut Window, With<PrimaryWindow>>) {
-    if r.done {
+pub fn reveal(time: Res<Time<Real>>, mut r: ResMut<Reveal>, mut windows: Query<&mut Window, With<PrimaryWindow>>, warm: Res<crate::warmup::Warmup>) {
+    // The launcher's loading screen stays up until the level's pipelines are compiled.
+    if r.done || !warm.done() {
         return;
     }
     r.frames += 1;
