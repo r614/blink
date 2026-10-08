@@ -18,6 +18,10 @@ use ue3_package::properties::{Property, Value, find};
 use ue3_package::reader::Reader;
 use ue3_package::{ObjRef, Package};
 
+// [playground] Maps built from a layout of original assets (`dishonored_ir::layout`).
+#[path = "layout_import.rs"]
+pub mod layout_import;
+
 pub struct ImportOptions {
     /// Largest texture side to load (smaller mips are kept).
     pub max_texture_size: u32,
