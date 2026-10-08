@@ -1,0 +1,19 @@
+// Same wall as mantle_wall_144, no forward input. The original requests the mantle from the Jump
+// button alone (DoJump 0x00AA3820 -> 0x00ADBE70 -> 0x00AD78D0 with the controller's m_bJumpButton);
+// the port requires the forward axis, so it should jump and not mantle (PORT BUG MV-2).
+(
+    name: "movement/mantle_still_144",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Stand 44 uu from the same wall without any stick input and press Jump.",
+    setup: (player: Some((position: (-2650, -2400, -9.8), yaw: 90, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 100,
+    input: [(tick: 40, action: Press(Jump))],
+    checkpoints: [
+        (name: "mantle", expect: [(metric: Count("Sim:Mantle"), value: 0, tol: 0, status: Unmeasured, source: "no reference: capture request (the original's finder decides)")]),
+    ],
+    record: [Pawn, SimEvents],
+    tolerances: [("pawn.", 0.5)],
+    capture: Some("lab setup 60; place at (-2650, -2400, -9.8) no snap, yaw 90; tick script: (tick: 40, action: Press(Jump)); Pawn channels; session read pawn m_pMantleEdgeFinder.m_CurrentMantleSpot"),
+)

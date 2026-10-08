@@ -1,0 +1,18 @@
+// Lean while running (360 uu/s): the original's controller tweak m_fBreakLean_Speed_PC is 200
+// (DisTweaks_PlayerInput +0x100), the port allows a lean only below 10 uu/s. What the original does
+// with Q held at run speed is not decoded: the trace decides (lean angle and roll over time).
+(
+    name: "movement/lean_moving",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Run forward, hold lean left from tick 40: does the lean start, and does it break.",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 100,
+    input: [(tick: 10, action: Move(forward: 127, right: 0)), (tick: 40, hold: 40, action: Press(LeanLeft))],
+    checkpoints: [
+        (name: "roll while running", expect: [(metric: Max("cam.roll"), value: 0, tol: 0, status: Unmeasured, source: "no reference: capture request")]),
+    ],
+    record: [Pawn, Camera],
+    capture: Some("lab setup 60; lab equip DisWepMelee 1; tick script: W from 10, Q 40-80; Pawn + Camera channels"),
+)

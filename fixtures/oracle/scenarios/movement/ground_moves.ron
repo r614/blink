@@ -1,0 +1,40 @@
+// Ground locomotion rules on the Boyle exterior runway (sword drawn, 60 Hz): acceleration to the
+// plateau, braking, and the direction multipliers chosen by the stick angle. Keyboard input only
+// (W / A / S / D are the only stick values the original side can feed: -127 / 0 / 127).
+// Rules (PLAYER.md "Movement", decoded 0x00AAE610 / 0x00B56C40 / 0x006ACD50 / 0x006A2AC0):
+//   forward run  GroundSpeed 400 x 0.9 (sword)            = 360
+//   strafe       x StrafeMultiplierRun 0.7  x 0.9         = 252
+//   backwards    x BackwardMultiplierRun 0.8 x 0.9        = 288
+//   W+D          neither flag (45 deg is outside both)     = 360
+//   braking      one 1/60 s sub-step: v (1 - 2 x 8 / 60), zero below 12.7 uu/s
+// Phases (ticks): forward 30-90, strafe right 120-180, back 210-270, forward+right 300-360.
+(
+    name: "movement/ground_moves",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Run forward, strafe right, back up, run diagonally, braking to a stop between: speed plateaus and the braking curve.",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 390,
+    input: [
+        (tick: 30, action: Move(forward: 127, right: 0)),
+        (tick: 90, action: Move(forward: 0, right: 0)),
+        (tick: 120, action: Move(forward: 0, right: 127)),
+        (tick: 180, action: Move(forward: 0, right: 0)),
+        (tick: 210, action: Move(forward: -127, right: 0)),
+        (tick: 270, action: Move(forward: 0, right: 0)),
+        (tick: 300, action: Move(forward: 127, right: 127)),
+        (tick: 360, action: Move(forward: 0, right: 0)),
+    ],
+    checkpoints: [
+        (name: "run plateau", expect: [(metric: At("pawn.speed2d", 85), value: 360, tol: 1, source: "PLAYER.md: 400 x 0.9, INSTRUMENTATION.md regression baseline 360", status: Static)]),
+        (name: "first braking tick", expect: [(metric: At("pawn.speed2d", 91), value: 264, tol: 2, source: "0x006A2AC0: one sub-step v x (1 - 2 x 8 / 60) from 360", status: Static)]),
+        (name: "stopped", expect: [(metric: At("pawn.speed2d", 112), value: 0, tol: 0.5, source: "0x006A2AC0: braking stops below 12.7 uu/s", status: Static)]),
+        (name: "strafe plateau", expect: [(metric: At("pawn.speed2d", 175), value: 252, tol: 1.5, source: "PLAYER.md: 400 x 0.7 x 0.9", status: Static)]),
+        (name: "backwards plateau", expect: [(metric: At("pawn.speed2d", 265), value: 288, tol: 1.5, source: "PLAYER.md: 400 x 0.8 x 0.9", status: Static)]),
+        (name: "diagonal plateau", expect: [(metric: At("pawn.speed2d", 355), value: 360, tol: 1.5, source: "PLAYER.md: W+D (45 deg) is neither strafing nor backwards", status: Static)]),
+    ],
+    record: [Pawn],
+    tolerances: [("pawn.", 0.5)],
+    capture: Some("lab setup 60; lab equip DisWepMelee 1; tick script: W 30-90, D 120-180, S 210-270, W+D 300-360; Pawn channels"),
+)

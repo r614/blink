@@ -1,0 +1,23 @@
+// A drop of 1350 uu onto the Boyle runway (placed in the air, no snap): impact speed about
+// sqrt(4 x 1500 x h) = 2846 uu/s (physFalling gains 2 g per tick, PLAYER.md) and falling damage
+// trunc(70 x clamp((v - 2250) / (2900 - 2250))) = about 64 (0x00B4DCC0; HOOK_TRIAGE.md U-462:
+// v 2401 / 2675 / 2775 / 2925 -> 16 / 45 / 56 / 70). The sweep over h (700 / 1000 / 1200 / 1350)
+// covers the whole damage ramp; the continuous formula ignores the per-tick discretisation, so
+// the tolerance is 3 points. The port kills at 70 (keep_alive is not applied), so no drop reaches 2900.
+(
+    name: "movement/fall_h1350",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Fall 1350 uu onto flat floor: landing speed and falling damage.",
+    setup: (player: Some((position: (-3400, -3150, 1134.2), yaw: 270, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 150,
+    input: [],
+    checkpoints: [
+        (name: "damage", expect: [(metric: DropFrom("pawn.health", 0), value: 64, tol: 3, status: Static, source: "0x00B4DCC0 with v = sqrt(4 g h), g = 1500: trunc(70 (v - 2250) / 650)")]),
+        (name: "landing speed", expect: [(metric: Min("pawn.vz"), value: -2846, tol: 60, status: Unverified, source: "sqrt(4 x 1500 x h); the last airborne sample is up to one tick (50 uu/s) from the speed TakeFallingDamage sees")]),
+    ],
+    record: [Pawn, Vitals, SimEvents],
+    tolerances: [("pawn.", 0.5)],
+    capture: Some("lab setup 60; place at z = floor + 1350 with no floor snap (write Location.Z); tick script, no input; Pawn + Vitals channels; hook 0x00B4DCC0 for the landing speed"),
+)

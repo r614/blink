@@ -1,0 +1,25 @@
+// Jump pressed in the middle of a slide. The slide runs in PHYS_Custom (INSTRUMENTATION.md); the
+// player's DoJump (DishonoredPlayerPawn vtable +0x774, 0x00AA3820) requests the Jump state only when
+// the physics is Walking (1), Spider (8) or Ladder (9), so a slide probably blocks the jump (the
+// state machine may still offer another route). The port jumps out of a slide. The trace decides.
+(
+    name: "movement/slide_jump",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Sprint, slide, press Jump 0.33 s into the slide: does the pawn leave the ground, and when.",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 130,
+    input: [
+        (tick: 10, action: Move(forward: 127, right: 0)),
+        (tick: 15, hold: 90, action: Press(Sprint)),
+        (tick: 45, action: Press(Crouch)),
+        (tick: 65, action: Press(Jump)),
+    ],
+    checkpoints: [
+        (name: "jumped", expect: [(metric: Count("Sim:Jumped"), value: 0, tol: 0, status: Unmeasured, source: "no reference: capture request")]),
+    ],
+    record: [Pawn, SimEvents],
+    tolerances: [("pawn.", 0.5)],
+    capture: Some("lab setup 60; lab equip DisWepMelee 1; tick script: W from 10, LeftShift 15-105, C tap at 45, Jump tap at 65; Pawn channels"),
+)

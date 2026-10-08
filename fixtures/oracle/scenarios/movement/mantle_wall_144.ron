@@ -1,0 +1,20 @@
+// Found by scanning the Boyle exterior with the port: at (-2650, -2400) facing +Y the pawn walks
+// 16 uu into a face and stops; a Jump press then starts a medium mantle (edge 144.3 above the feet,
+// <= 170) on the press tick. Tests the finder result and the Jump-press trigger (DoJump 0x00AA3820),
+// the mantle motion (root motion of Sword_Ready_MantleMedium) and where the pawn ends (~132 up).
+(
+    name: "movement/mantle_wall_144",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Run into a wall 144 uu high, then press Jump: a mantle at the press.",
+    setup: (player: Some((position: (-2650, -2400, -9.8), yaw: 90, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 100,
+    input: [(tick: 20, action: Move(forward: 127, right: 0)), (tick: 40, action: Press(Jump))],
+    checkpoints: [
+        (name: "mantle", expect: [(metric: Count("Sim:Mantle"), value: 0, tol: 0, status: Unmeasured, source: "no reference: capture request (the original's finder decides)")]),
+    ],
+    record: [Pawn, SimEvents],
+    tolerances: [("pawn.", 0.5)],
+    capture: Some("lab setup 60; place at (-2650, -2400, -9.8) no snap, yaw 90; tick script: (tick: 20, action: Move(forward: 127, right: 0)), (tick: 40, action: Press(Jump)); Pawn channels; session read pawn m_pMantleEdgeFinder.m_CurrentMantleSpot"),
+)

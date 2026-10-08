@@ -1,0 +1,22 @@
+// Run up a 34 degree slope on the Boyle exterior (found by scanning with the port): from (-3150, -3300)
+// facing +X the floor rises 40 uu per 60 uu of travel between x = -3090 and -2790. It is walkable
+// (WalkableFloorZ 0.6428 = 50 degrees). In the port the horizontal speed stays 360: the move is
+// horizontal, the slope counts as a hit (floor normal Z below 0.98) and stepUp lifts the pawn;
+// whether the original loses speed on a slope is not known.
+(
+    name: "movement/walk_slope_34",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Run up a 34 degree slope: the climb rate and the horizontal speed on it.",
+    setup: (player: Some((position: (-3150, -3300, -209.8), yaw: 0, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 100,
+    input: [(tick: 20, action: Move(forward: 127, right: 0))],
+    checkpoints: [
+        (name: "speed on the slope", expect: [(metric: At("pawn.speed2d", 70), value: 360, tol: 1.5, status: Unverified, source: "the port keeps 360; no reference for the original")]),
+        (name: "climbed", expect: [(metric: RiseFrom("pawn.z", 20), value: 190, tol: 0, cmp: AtLeast, status: Static, source: "a 34 degree slope is walkable (limit 50 degrees)")]),
+    ],
+    record: [Pawn],
+    tolerances: [("pawn.", 0.5)],
+    capture: Some("lab setup 60; lab equip DisWepMelee 1; place at (-3150, -3300, -209.8) no snap, yaw 0; tick script: W from 20; Pawn channels"),
+)

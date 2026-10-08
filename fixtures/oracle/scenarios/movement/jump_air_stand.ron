@@ -1,0 +1,20 @@
+// A standing jump with forward held while airborne. physFalling (0x006BF0E0): with bLimitFallAccel
+// the acceleration is limited to AccelRate x AirControl (2000 x 0.2 = 400) and the velocity then
+// gains twice that per tick (v = 2 x measured - v0, PLAYER.md); the original's horizontal speed
+// after the jump is the sharpest test of both factors.
+(
+    name: "movement/jump_air_stand",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Stand, jump, hold forward in the air: horizontal speed gained during the 0.533 s flight.",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 100,
+    input: [(tick: 30, action: Press(Jump)), (tick: 31, action: Move(forward: 127, right: 0))],
+    checkpoints: [
+        (name: "air speed", expect: [(metric: Max("pawn.speed2d"), value: 0, tol: 0, status: Unmeasured, source: "no reference: capture request (air control, 400 or 800 uu/s^2)")]),
+    ],
+    record: [Pawn, SimEvents],
+    tolerances: [("pawn.", 0.5)],
+    capture: Some("lab setup 60; tick script: Jump tap at 30, W held from 31; Pawn channels"),
+)

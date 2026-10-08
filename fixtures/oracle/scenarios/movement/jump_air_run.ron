@@ -1,0 +1,19 @@
+// A running jump with forward held: speed already near GroundSpeed. physFalling: at or above
+// GroundSpeed (400) the horizontal speed may not grow (MaxAirSpeed); below it air control adds.
+// Running with the sword is 360, so the air control may lift it toward 400.
+(
+    name: "movement/jump_air_run",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Run to the plateau, jump, keep forward held: horizontal speed in the air and the range.",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 130,
+    input: [(tick: 20, action: Move(forward: 127, right: 0)), (tick: 60, action: Press(Jump))],
+    checkpoints: [
+        (name: "air speed", expect: [(metric: Max("pawn.speed2d"), value: 0, tol: 0, status: Unmeasured, source: "no reference: capture request")]),
+    ],
+    record: [Pawn, SimEvents],
+    tolerances: [("pawn.", 0.5)],
+    capture: Some("lab setup 60; lab equip DisWepMelee 1; tick script: W from 20, Jump tap at 60; Pawn channels"),
+)

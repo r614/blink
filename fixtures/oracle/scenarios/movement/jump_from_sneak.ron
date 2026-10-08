@@ -1,0 +1,20 @@
+// Jump pressed while sneaking. The port stands the pawn up (headroom permitting) and launches in the
+// same tick; the original's jump transition from the sneak stance is not decoded (the Jump state
+// enter 0x00A75EE0 sets Velocity.Z = JumpZ; whether sneaking blocks, delays or allows it is not
+// known). The trace decides: tick of take-off, centre height before and after, apex.
+(
+    name: "movement/jump_from_sneak",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Sneak (Crouch), then jump 1 s later: does the jump start at once, and from which height.",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 130,
+    input: [(tick: 20, action: Press(Crouch)), (tick: 80, action: Press(Jump))],
+    checkpoints: [
+        (name: "apex", expect: [(metric: RiseFrom("pawn.z", 79), value: 0, tol: 0, status: Unmeasured, source: "no reference: capture request")]),
+    ],
+    record: [Pawn, SimEvents],
+    tolerances: [("pawn.", 0.5)],
+    capture: Some("lab setup 60; tick script: C tap at 20, Jump tap at 80; Pawn channels"),
+)

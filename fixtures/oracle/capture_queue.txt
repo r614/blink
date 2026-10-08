@@ -44,3 +44,46 @@ session read object=pawn path=m_fOffscreenMeleeDamageReduction
 session dump class=DisTweaks_Assassinate filter=Awareness limit=3
 session dump class=DisTweaks_DropAssassinate filter=m_f limit=3
 session dump class=DisTweaks_MeleeAttackPlayer filter=m_f limit=3
+movement/ground_moves
+movement/sprint_slide
+movement/jump_standing
+movement/jump_air_stand
+movement/jump_air_run
+movement/jump_air_sprint_side
+movement/run_sprint
+movement/fall_h700
+movement/fall_h1000
+movement/fall_h1200
+movement/fall_h1350
+movement/fall_stun
+movement/swim_entry
+movement/lean_boyle
+movement/lean_moving
+movement/sneak_height
+session read object=pawn path=CylinderComponent.CollisionHeight
+session read object=pawn path=CylinderComponent.CollisionRadius
+session read object=pawn path=GroundSpeed
+session read object=pawn path=AccelRate
+session read object=pawn path=AirControl
+session read object=pawn path=JumpZ
+session read object=pawn path=MaxStepHeight
+session read object=pawn path=WalkableFloorZ
+session read object=pawn path=Buoyancy
+session read object=pawn path=bLimitFallAccel
+session read object=pawn path=m_fMantleDisallowFallTimer
+session read object=pawn path=m_pMantleEdgeFinder.m_bHasValidMantleSpot
+session read object=pawn path=m_pMantleEdgeFinder.m_CurrentMantleSpot
+session dump class=DishonoredCamera_Lean filter=Lean
+session dump class=DisTweaks_PlayerPawn_Mantle
+session dump class=StatePlayerMasterStunned
+session dump class=StatePlayerMasterFalling filter=Stun
+movement/jump_from_sneak
+movement/drown_boyle
+movement/climb_chain
+movement/slide_jump
+movement/mantle_wall_144
+movement/mantle_still_144
+movement/mantle_air_98_tap
+movement/mantle_air_98_hold
+movement/walk_step_35
+movement/walk_slope_34
