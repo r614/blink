@@ -76,6 +76,14 @@ pub struct AttentionConfig {
     /// NPC is this close to the proxy while the target is farther from it.
     #[serde(default = "min_range_unsighted")]
     pub min_range_unsighted_busted_proxy: f32,
+    /// `m_IncreaseForMagic` (+0x180): the change a magic witness that is not Busted on the caster
+    /// gets toward it (reason Magic, 0x00b41190).
+    #[serde(default = "magic_increase")]
+    pub magic: AttentionIncrease,
+}
+
+fn magic_increase() -> AttentionIncrease {
+    AttentionIncrease { amount: 0.1, to_level: 1 }
 }
 
 fn yes() -> bool {
@@ -250,6 +258,25 @@ pub struct MeleeContextConfig {
     pub max_range: f32,
     #[serde(default = "context_height")]
     pub max_height: f32,
+    /// `DisTweaks_MeleeAttack.m_fAttackDamageMultiplier` of the context (+0xCC): the hit deals
+    /// `round(multiplier x (MeleeDamage + MeleeDamageBonus))` (0x00C07C80). 1.0 for every slash
+    /// (class default); the elite guard sword's `NPCJumpAttack` and every `NPCBash` have 0.
+    /// `None` (configs written before it was read): the elite sword's value for the class.
+    #[serde(default)]
+    pub damage_multiplier: Option<f32>,
+}
+
+impl MeleeContextConfig {
+    /// The context's `m_fAttackDamageMultiplier` (see [`Self::damage_multiplier`]).
+    pub fn attack_damage_multiplier(&self) -> f32 {
+        self.damage_multiplier.unwrap_or_else(|| elite_sword_multiplier(&self.name))
+    }
+}
+
+/// `m_fAttackDamageMultiplier` of `Twk_Inv_SwordEliteGuard`'s pawn-specific contexts: 0 for
+/// `DisTweaks_NPCJumpAttack_4` and `DisTweaks_NPCBash_5`, 1 for the slashes.
+pub fn elite_sword_multiplier(class: &str) -> f32 {
+    if matches!(class, "DisItemContext_NPCJumpAttack" | "DisItemContext_NPCBash") { 0.0 } else { 1.0 }
 }
 
 fn big_range() -> f32 {
@@ -263,7 +290,8 @@ impl MeleeContextConfig {
     /// A context of an attack pattern with its class-default range (`DisTweaks_NPCAttack*`).
     pub fn of_class(name: &str, cooldown: [f32; 2], inhibition: f32) -> Self {
         let (kind, min_range, max_range, max_height) = context_class_defaults(name);
-        MeleeContextConfig { name: name.into(), cooldown, inhibition, kind, min_range, max_range, max_height }
+        let damage_multiplier = Some(elite_sword_multiplier(name));
+        MeleeContextConfig { name: name.into(), cooldown, inhibition, kind, min_range, max_range, max_height, damage_multiplier }
     }
 }
 
@@ -295,6 +323,7 @@ pub fn default_melee_contexts() -> Vec<MeleeContextConfig> {
         MeleeContextConfig { min_range: 0.0, max_range: 170.0, max_height: 100.0, ..MeleeContextConfig::of_class("DisItemContext_NPCAttackStepBack", [0.5, 2.0], 1.0) },
         MeleeContextConfig { min_range: 235.0, max_range: 375.0, max_height: 300.0, ..MeleeContextConfig::of_class("DisItemContext_NPCAttackMedium", [3.0, 5.0], 1.0) },
         MeleeContextConfig { min_range: 375.0, max_range: 570.0, max_height: 200.0, ..MeleeContextConfig::of_class("DisItemContext_NPCAttackLong", [15.0, 20.0], 0.8) },
+        // The elite sword's jump attack deals no damage itself (`m_fAttackDamageMultiplier` 0).
         MeleeContextConfig { min_range: 730.0, max_range: 850.0, max_height: 100.0, ..MeleeContextConfig::of_class("DisItemContext_NPCJumpAttack", [15.0, 20.0], 3.0) },
     ]
 }
@@ -321,11 +350,28 @@ pub struct DodgeConfig {
     /// `DisGlobalCombatManager.m_fInhibitionTimeSideStep` / `BackStep`.
     pub side_step_inhibition: f32,
     pub back_step_inhibition: f32,
+    /// `m_fAggressionDeltaPerDamage`: added to `m_fAggression` (clamped to [0, 1]) by the
+    /// `EAIStimID_AttackedByEnemy` handler (0x00b3e070).
+    pub aggression_delta_per_damage: f32,
+    /// `m_fAggressionRegenRate` per second (0x00b39e50, every tick of the process).
+    pub aggression_regen_rate: f32,
+    /// `m_fCooldownFactorAtMinAggression`: a chosen attack's cooldown is scaled by
+    /// `(1 - aggression) * factor + 1` (0x00b3deb0).
+    pub cooldown_factor_at_min_aggression: f32,
+    /// `m_fStalemateAllowanceTime`, `m_fBlockedAttackSensitivity` (kept for the formation and
+    /// block-breaker rules, which are not ported).
+    pub stalemate_allowance: f32,
+    pub blocked_attack_sensitivity: f32,
 }
 
 impl Default for DodgeConfig {
     fn default() -> Self {
         DodgeConfig {
+            aggression_delta_per_damage: -0.5,
+            aggression_regen_rate: 0.1,
+            cooldown_factor_at_min_aggression: 1.0,
+            stalemate_allowance: 3.0,
+            blocked_attack_sensitivity: 7.0,
             attacks_per_flurry: [2, 3],
             stamina_recovery: [4.0, 5.0],
             time_for_threat_side_step: [2.0, 3.0],
@@ -533,6 +579,56 @@ pub struct SearchConfig {
     pub reached_broadcast_range: f32,
     /// `TwkBehavior_StationarySearch_Default` duration (civilians).
     pub stationary_duration: [f32; 2],
+    /// `m_fInvestigateStareAtUnreachableRadius` / `m_fInvestigateStareAtUnreachableMaxTime_s`
+    /// (`DisBehaviorSearch` StareAtUnreachable, 0x00af4bd0 / 0x00af4c40 / 0x00af4440).
+    #[serde(default = "stare_radius")]
+    pub stare_radius: f32,
+    #[serde(default = "stare_time")]
+    pub stare_max_time: f32,
+    /// `m_fSearchAnimCooldown`: set when the search animation (GenericAction) ends (0x00af4ab0).
+    #[serde(default = "anim_cooldown")]
+    pub anim_cooldown: f32,
+    /// `DisTweaks_AISubState_Investigate`: `m_PathingFailRetryCount`,
+    /// `m_fPathingFailDistanceScale`, `m_fPathingFailPointerSearchRange_Horiz/Up/Down`
+    /// (the PathingFail handler 0x00b33850).
+    #[serde(default = "one_u32")]
+    pub pathing_fail_retries: u32,
+    #[serde(default = "one_f32")]
+    pub pathing_fail_scale: f32,
+    #[serde(default = "pathing_fail_range")]
+    pub pathing_fail_range: [f32; 3],
+    /// `DisTweaks_AISubState_TrackTarget.m_fProximityThreshold` (a wander step is reached).
+    #[serde(default = "track_proximity")]
+    pub track_proximity: f32,
+    /// Lengths (s) of the search GenericAction animation groups of the elite guard
+    /// (`DisNPCAnimDefinitions_EliteGuard` SearchLostTarget / CorpseCheck with the sword prefix);
+    /// 0 when the animation sets were not loaded.
+    #[serde(default)]
+    pub anim_lost_target: f32,
+    #[serde(default)]
+    pub anim_corpse_check: f32,
+}
+
+fn stare_radius() -> f32 {
+    500.0
+}
+fn stare_time() -> f32 {
+    5.0
+}
+fn anim_cooldown() -> f32 {
+    10.0
+}
+fn one_u32() -> u32 {
+    1
+}
+fn one_f32() -> f32 {
+    1.0
+}
+fn pathing_fail_range() -> [f32; 3] {
+    [500.0, 25.0, 500.0]
+}
+fn track_proximity() -> f32 {
+    150.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -562,7 +658,31 @@ pub struct CombatAiConfig {
     pub dodge: DodgeConfig,
     #[serde(default)]
     pub pistol: PistolConfig,
+    /// `Attribute_MeleeDamage` of the guards' sword by difficulty (Easy, Normal, Hard, Very Hard:
+    /// `Twk_Inv_SwordEliteGuard`'s attributes, cooked into the level script packages; read when
+    /// they are loaded, else these values read from them).
+    #[serde(default = "d_npc_sword_damage")]
+    pub npc_sword_damage: [f32; 4],
+    /// The guard pawns' `Attribute_MeleeDamageBonus` (Normal).
+    #[serde(default)]
+    pub npc_melee_damage_bonus: f32,
+    /// `Attribute_HealthMax` (Normal) of the guard archetype mission guards take: every
+    /// `Pwn_EliteGuard_*` pawn tweak of the Boyle levels resolves to 50 (Lord Shaw 10, tallboys
+    /// 150, weepers 30, aristocrats 10-11 are other archetypes).
+    #[serde(default = "d_guard_health_max")]
+    pub guard_health_max: f32,
 }
+
+fn d_npc_sword_damage() -> [f32; 4] {
+    [10.0, 15.0, 20.0, 30.0]
+}
+fn d_guard_health_max() -> f32 {
+    50.0
+}
+
+/// The difficulty index the port plays at (`EDifficulty_Normal`): the tweak attributes'
+/// `m_fBaseValue2_Normal` column and the `[difficulty]` arrays' index 1.
+pub const DIFFICULTY_NORMAL: usize = 1;
 
 /// NPC perception and behaviour tuning.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -614,7 +734,23 @@ pub struct AiConfig {
     pub rats: RatSwarmConfig,
     #[serde(default)]
     pub devouring_swarm: RatSwarmConfig,
+    /// `DishonoredGlobalAIManager.m_MagicReactionDelay`: the delay of `EAIStimID_WitnessMagic`
+    /// (its stimulus class's delay getter 0x00b016e0 -> 0x00c47840).
+    #[serde(default = "magic_delay")]
+    pub magic_reaction_delay: [f32; 2],
+    /// Length (s) of the elite guard's MagicLostTarget animation (`Sword_Magic_OutOfSight`),
+    /// the GenericAction of `DisBehaviorMagicResponse` when the caster disappeared; 0 unloaded.
+    #[serde(default)]
+    pub anim_magic_lost_target: f32,
+    /// NPC locomotion configs (`ArkComponentLocomotionConfig`): the authored loop speeds and
+    /// stance modifiers NPC moves use. Empty: NPCs move at the player's speeds.
+    #[serde(default)]
+    pub locomotion: Vec<crate::npc_anim::LocoConfig>,
     pub provenance: BTreeMap<String, String>,
+}
+
+fn magic_delay() -> [f32; 2] {
+    [0.2, 0.3]
 }
 
 fn group_distance() -> f32 {
@@ -938,6 +1074,7 @@ impl AttentionConfig {
             can_bust: guard_can_bust(),
             seeing_scalar_dead_npc: 10.0,
             min_range_unsighted_busted_proxy: 250.0,
+            magic: inc(0.1, 1),
         }
     }
 
@@ -976,6 +1113,7 @@ impl AttentionConfig {
             ally_combat_target: inc(1.0, 3),
             ally_panic_target: inc(0.0, 2),
             ally_search_target: inc(0.0, 2),
+            magic: inc(0.1, 4),
             // Thresholds are its own (fallback skip), so their variance is the struct default 0.
             stopping_variance: [0.0; 4],
             ..Self::guard_unsuspecting()
@@ -1022,6 +1160,15 @@ impl Default for AiConfig {
                 proximity: 250.0,
                 reached_broadcast_range: 2000.0,
                 stationary_duration: [2.0, 3.0],
+                stare_radius: 500.0,
+                stare_max_time: 5.0,
+                anim_cooldown: 10.0,
+                pathing_fail_retries: 1,
+                pathing_fail_scale: 1.0,
+                pathing_fail_range: [500.0, 25.0, 500.0],
+                track_proximity: 150.0,
+                anim_lost_target: 0.0,
+                anim_corpse_check: 0.0,
             },
             panic: PanicConfig { cower_distance: 350.0, flee_point_claim_radius: 500.0, flee_interception_distance: 300.0, free_flight_time: 2.0, forbidden_angle_deg: 50.0, forbidden_radius: 500.0 },
             combat: CombatAiConfig {
@@ -1035,6 +1182,9 @@ impl Default for AiConfig {
                 melee_contexts: default_melee_contexts(),
                 dodge: DodgeConfig::default(),
                 pistol: PistolConfig::default(),
+                npc_sword_damage: d_npc_sword_damage(),
+                npc_melee_damage_bonus: 0.0,
+                guard_health_max: d_guard_health_max(),
             },
             guard_attention_span: 3.0,
             alarm_companion_range: 2000.0,
@@ -1050,6 +1200,9 @@ impl Default for AiConfig {
             visual_detection_ratio_near: 0.3,
             rats: RatSwarmConfig::default(),
             devouring_swarm: RatSwarmConfig { swarm_type: 3, ..RatSwarmConfig::default() },
+            magic_reaction_delay: [0.2, 0.3],
+            anim_magic_lost_target: 0.0,
+            locomotion: Vec::new(),
             provenance: BTreeMap::new(),
         }
     }

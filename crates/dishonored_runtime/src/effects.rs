@@ -542,6 +542,10 @@ pub fn spawn_beam(commands: &mut Commands, meshes: &mut Assets<Mesh>, fx: &mut E
 #[derive(Component)]
 struct BeamTarget(Vec3);
 
+/// An instance deactivated before its first update (`FxRequest::EndedTrail`).
+#[derive(Component)]
+struct StopAtOnce;
+
 /// Spawn a gameplay effect by ParticleSystem path at a Dishonored position and direction.
 pub fn spawn_effect(commands: &mut Commands, meshes: &mut Assets<Mesh>, fx: &mut Effects, path: &str, at: Vec3, dir: Vec3) -> bool {
     if fx.recent.len() >= 64 {
@@ -709,7 +713,7 @@ fn simulate(
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut glow_mats: ResMut<Assets<GlowMaterial>>,
-    mut q: Query<(Entity, &mut FxInstance, &InheritedVisibility, Option<&BeamTarget>)>,
+    mut q: Query<(Entity, &mut FxInstance, &InheritedVisibility, Option<&BeamTarget>, Option<&StopAtOnce>)>,
     cams: Query<(&GlobalTransform, &Transform, &Projection, Option<&ChildOf>), With<Camera3d>>,
     session: Option<Res<crate::session::Session>>,
     mut dframe: ResMut<DistortionFrame>,
@@ -740,8 +744,12 @@ fn simulate(
     };
     let ray_fn: RayFn = &ray_closure;
     let mut live = 0;
-    fx.live_oneshots = q.iter().filter(|(_, i, _, _)| i.one_shot).count();
-    for (e, mut inst, vis, beam) in &mut q {
+    fx.live_oneshots = q.iter().filter(|(_, i, _, _, _)| i.one_shot).count();
+    for (e, mut inst, vis, beam, stop_now) in &mut q {
+        if stop_now.is_some() {
+            inst.stop();
+            commands.entity(e).remove::<StopAtOnce>();
+        }
         if let Some(b) = beam {
             inst.beam_target = Some(b.0);
         }
@@ -931,7 +939,7 @@ fn gameplay_effects(
     let now = time.elapsed_secs();
     let me = session.as_ref().and_then(|s| s.local_id());
     let players: Vec<PlayerState> = view.me.iter().chain(view.others.iter()).copied().collect();
-    let scene = FxScene { players: &players, me, muzzle: &sockets.muzzle, bones: &sockets.bones, contact: audio.as_ref().and_then(|a| a.contact()), world: session.as_ref().map(|s| &s.content.collision), now };
+    let scene = FxScene { players: &players, me, muzzle: &sockets.muzzle, bones: &sockets.bones, contact: audio.as_ref().and_then(|a| a.contact()), world: session.as_ref().map(|s| &s.content.collision), now, projectiles: &view.projectiles };
     let requests = fx.rules.requests(&events, &scene);
     for r in requests {
         match r {
@@ -940,6 +948,14 @@ fn gameplay_effects(
             }
             FxRequest::Beam { path, from, to } => {
                 spawn_beam(&mut commands, &mut meshes, &mut fx, path, from, to);
+            }
+            FxRequest::EndedTrail { path, xf } => {
+                let Some(lf) = fx.levels.get(&fx.active).cloned() else { continue };
+                let Some(&si) = lf.by_path.get(&path.to_ascii_lowercase()) else { continue };
+                let level = fx.active.clone();
+                if let Some(e) = spawn_instance(&mut commands, &mut meshes, &lf, &level, si, xf, true) {
+                    commands.entity(e).insert(StopAtOnce);
+                }
             }
             // The local player's cast effects ride the first-person rig's hand socket.
             FxRequest::HandCast { path, at, dir } => {

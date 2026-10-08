@@ -295,7 +295,13 @@ impl NavWorld {
     /// Closest point on the navmesh to `p` within `radius` (XY) and a vertical window
     /// (pawn centres sit ~90 uu above the floor).
     pub fn closest_point(&self, p: Vec3, radius: f32) -> Option<(u32, Vec3)> {
-        if let Some(i) = self.locate(p, 60.0, 260.0) {
+        self.closest_point_in(p, radius, 60.0, 260.0)
+    }
+
+    /// [`NavWorld::closest_point`] with an explicit vertical window: floor points at most `up`
+    /// above and `down` below `p`.
+    pub fn closest_point_in(&self, p: Vec3, radius: f32, up: f32, down: f32) -> Option<(u32, Vec3)> {
+        if let Some(i) = self.locate(p, up, down) {
             return Some((i, Vec3::new(p.x, p.y, self.poly_z(i, p.x, p.y))));
         }
         let q = p.truncate();
@@ -319,7 +325,7 @@ impl NavWorld {
             let inward = (poly.center.truncate() - cp).normalize_or_zero() * 2.0;
             let cp = cp + inward;
             let z = self.poly_z(i, cp.x, cp.y);
-            if z > p.z + 60.0 || z < p.z - 260.0 || bd > radius {
+            if z > p.z + up || z < p.z - down || bd > radius {
                 continue;
             }
             let score = bd + (p.z - z - 90.0).abs() * 0.25;

@@ -262,10 +262,38 @@ only the tweak's grade is applied. The debug capsules stay behind F3.
 `PPG_KOVectors`, `PPG_LensVectors`) feeding `ArkPpNodeBlur.m_VectorField` (a directional blur of
 the scene along the field), with `DisPostProcessManager.PpBridge` driving the switches
 (`m_BendTimeIntensity`, `m_fPostEffectWarmupTime` / `CooldownTime` 2 s in DefaultPower.ini). None
-of the `PPG_*` materials has a shader map in RefShaderCache, so Bend Time's (and Blink's,
-Possession's) screen effect is not reproduced yet: it needs those shaders from another source
-(the oracle's capture of the running game) or the materials' expression graphs, which the cooker
-stripped.
+of the `PPG_*` materials has a shader map in RefShaderCache; their shaders were captured from
+the running game (oracle shader capture `oracle/shaders/70da96138fe2171c`, `effects/*.json`:
+the shaders drawn only while the effect is on, their constants and the post manager's channels
+per tick). Decoded and ported (`power_pp.rs`, `ark_post.wgsl`):
+
+- Bend Time: vector field `0xbbe665d07e36986b` (`PPG_BendTimeVectors_Std_INST`; its
+  `UniformExpressionTextures` read from the material's native data: `Tex#0` = `water2`,
+  `Tex#1` = `fxt_eyelid_gradient`): `50 x vBendTimeOpacity x (1 - eyelid.r) x (0.15 x edge x
+  (n1 + n2) - (2 uv - 1))`, n = water2.rg x 2 - 1 at `uv + frac(T (0.2, -0.1))` and
+  `uv + frac(T (-0.15, 0.3))` (pans measured from the constants: per world second at the 0.85
+  dilation), edge = saturate(10 - |10 (2 uv - 1)|). `ArkPpNodeBlur` passes `0xbd9a42b61794aabb`
+  / `0x6095a5daa9109b1d`: 4 taps at `uv + k x field x gVectorFieldScales` (k = 0..3), scales
+  `1 / (16 x size)` then `1 / (4 x size)` (captured (4.88e-5, 8.68e-5) and (1.95e-4, 3.47e-4) at
+  1280 x 720), the second on the first's output. Intensity `bt` (= vBendTimeOpacity): +0.0333 per
+  60 Hz frame from the cast (0.5 s, the tweak's `m_fPostEffectWarmupTime`), 1 while it lasts, down
+  over `m_fPostEffectCooldownTime`. The port evaluates the field per tap inside the uber pass
+  (same values at pixel centres as the original's field target).
+- Blink: travel drives the same blur through `bt` (captured: +0.153 per frame while travelling,
+  then x 0.57 per 5 frames). Its own lens field `0x0b36c71ce1512549` (`PPG_BlinkVectors`, driven
+  by the `blink` channel during the warmup) is disassembled but its constants were not recorded:
+  not ported.
+- Dark Vision: the eyelid pass `0x3c1c89ab574a7626` (`PPG_EyeLidFinal_Mat` /
+  `PPG_DarkVisionFinal_Mat`, texture `fxt_eyelid_gradient`): `lerp(EyeLidColor,
+  gradient.g x lerp(scene, souls, souls.a), saturate(gradient.r - (1 - 2 Alpha)))`. The souls are
+  rendered into their own target in the original and blended here; the port's soul passes blend
+  into the scene directly (the same lerp). Alpha's curve was not recorded: a blink of
+  `m_EyeLidClosingDuration` 0.05 s / `m_EyeLidOpeningDuration` 0.1 s on each edge, 1 while on
+  (LIKELY).
+- Possession: no screen pass among its active-only shaders (the possession travel's distortion
+  meshes and particles only); the `pos*` channels rise ~1 s after the cast (`pos` +0.18 / s,
+  `posg` +0.55 / s). Not ported.
+- The arm glow is not among the captured shaders.
 
 ## Distortion (U-360 resolved, U-400 open)
 

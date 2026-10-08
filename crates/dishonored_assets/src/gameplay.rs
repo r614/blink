@@ -313,6 +313,14 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
 
     let bp = "Twk_Powers.Blink.Twk_Blink";
     let blink_t = l.obj(bp)?;
+    // A per-level field of the Blink tweak (`m_Levels` element 0, then 1).
+    let per_level = |l: &mut Loader, m: &TMap, src: &str, field: &str, out: &str| -> Result<Vec<f32>> {
+        let mut v = Vec::new();
+        for (i, key) in ["m_Levels", "m_Levels[1]"].iter().enumerate() {
+            v.push(l.f(m, src, &format!("{key}.{field}"), &format!("{out}[{i}]"))?);
+        }
+        Ok(v)
+    };
     let comp_p = "Default__DishonoredActivePowerComponent_Blink";
     let blink_c = l.obj(comp_p)?;
     let mut horiz = Vec::new();
@@ -348,6 +356,9 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
             v
         },
         limit_vertical_from_ground: matches!(get(&blink_t, "m_bLimitVerticalDistanceFromGround"), Some(TVal::B(true))),
+        bend_time_down_time: per_level(&mut l, &blink_t, bp, "m_fBendTimeDownTime", "blink.bend_time_down_time")?,
+        bend_time_up_time: per_level(&mut l, &blink_t, bp, "m_fBendTimeUpTime", "blink.bend_time_up_time")?,
+        cooldown_time: per_level(&mut l, &blink_t, bp, "m_fCooldownTime", "blink.cooldown_time")?,
     };
 
     let power = |l: &mut Loader, path: &str, name: &str| -> Result<PowerConfig> {

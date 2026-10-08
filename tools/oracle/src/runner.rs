@@ -333,6 +333,11 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             if s.setup.player.is_some() {
                 p.position = pos;
                 p.velocity = Vec3::ZERO;
+                // The hook's `Session::place` writes Location and Velocity only: the original's
+                // pawn keeps walking physics (no fall at tick 1).
+                if ps.snap_to_floor {
+                    p.mode = dishonored_sim::state::MoveMode::Walking;
+                }
             }
             p.yaw = ps.yaw;
             p.pitch = ps.pitch;
@@ -355,10 +360,10 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             }
         }
         if s.setup.player.is_some() {
-            // `PlayerState::sword_sheathed`: the original's pawn starts with the sword sheathed;
-            // the hook draws it (`lab give Twk_Inv_SwordCorvo`) when the spec asks.
+            // `PlayerState::right_hand`: the original's pawn starts with nothing in the right
+            // hand; the hook gives it the sword (`lab give Twk_Inv_SwordCorvo`) when the spec asks.
             if let Some(p) = m.world.player_mut(ME) {
-                p.sword_sheathed = !ps.sword_drawn;
+                p.right_hand = if ps.sword_drawn { dishonored_sim::state::RightHandItem::Sword } else { dishonored_sim::state::RightHandItem::Empty };
             }
         }
         if s.setup.keep_alive {
@@ -458,14 +463,15 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
                 let bt = p.left.blink_target;
                 v.extend([leg.idx("left.item", p.left.item), leg.idx("left.phase", p.left.phase), p.left.timer as f64, p.left.pistol_loaded as f64, p.left.pistol_reserve as f64, p.left.bolts_loaded as f64, p.left.bolts_reserve as f64, p.left.dispersion as f64]);
                 v.extend([b(bt.is_some()), bt.map_or(f64::NAN, |t| t.x as f64), bt.map_or(f64::NAN, |t| t.y as f64), bt.map_or(f64::NAN, |t| t.z as f64)]);
-                let wd = w.time_bends.iter().map(|t| t.world_dilation).fold(1.0f32, f32::min);
+                // The world rate in effect (every bend's ramped world dilation and every Blink layer).
+                let wd = dishonored_sim::powers::world_time_scale(w, &cfg.gameplay, false);
                 v.extend([p.time_scale as f64, wd as f64, p.vitals.dark_vision_remaining as f64, leg.idx("power.possess", p.possess.stage), p.action_lock as f64]);
                 v.extend([am(A::Grenade), am(A::StickyGrenade), am(A::SpringRazor), am(A::SleepDart), am(A::IncendiaryBolt), p.inv.elixirs[0] as f64, p.inv.elixirs[1] as f64, p.inv.coins as f64, p.inv.runes as f64]);
             }
             None => v.extend(std::iter::repeat_n(f64::NAN, PLAYER_CHANNELS)),
         }
         let rats = w.players.iter().filter(|p| p.kind == dishonored_sim::state::PawnKind::Rat && p.alive).count();
-        v.extend([w.projectiles.len() as f64, w.windblasts.len() as f64, w.traps.len() as f64, w.swarms.len() as f64, rats as f64, w.swarms.iter().map(|s| s.rats as f64).sum::<f64>(), w.time_bends.len() as f64]);
+        v.extend([w.projectiles.len() as f64, w.windblasts.len() as f64, w.traps.len() as f64, w.swarms.len() as f64, rats as f64, w.swarms.iter().map(|s| (s.rats as usize + w.players.iter().filter(|p| p.alive && p.swarm == Some(s.id)).count()) as f64).sum::<f64>(), w.time_bends.len() as f64]);
         // Chaos: the darkness manager's score and level (0x00C487D0), corpses found so far.
         let dl = m.darkness.level(&cfg.gameplay.items.darkness);
         let high = m.view.mission.as_ref().is_some_and(|mv| mv.high_chaos);
@@ -529,7 +535,7 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         tick += 1;
         // The shooter's view and dispersion before the step (a shot leaves at these).
         let before = mm(&game).world.player(ME).map(|p| (p.yaw, p.pitch, p.left.dispersion));
-        let input = PlayerInput { tick, forward: ti.forward, right: ti.right, yaw: ti.yaw, pitch: ti.pitch, buttons: button_bits(&ti.held), left_hand: hand, action, npc_move: 0 };
+        let input = PlayerInput { tick, forward: ti.forward, right: ti.right, yaw: ti.yaw, pitch: ti.pitch, buttons: button_bits(&ti.held), left_hand: hand, action, npc_move: 0, npc_speed: 0.0 };
         let out = game.step(&[(ME, input)], &maps.set, cfg);
         // Simulation events.
         for e in &out.events {
@@ -607,7 +613,9 @@ fn console(game: &mut Game, cmd: &str, by_id: &HashMap<PlayerId, String>, cfg: &
         Some("mana") => m.world.player_mut(ME).context("no player")?.vitals.mana = f(1)?,
         Some("power") => {
             let i = power::NAMES.iter().position(|n| n.eq_ignore_ascii_case(w.get(1).copied().unwrap_or(""))).context("power name")?;
-            m.world.player_mut(ME).context("no player")?.inv.power_levels[i] = f(2)? as u8;
+            // SetPowerLevel (0x00ACE270): a raised HealthMax raises the health with it.
+            let level = f(2)? as u8;
+            dishonored_sim::powers::set_power_level(m.world.player_mut(ME).context("no player")?, i, level, &cfg.gameplay);
         }
         Some("give") => {
             let t = ammo_type(w.get(1).copied().unwrap_or("")).context("ammo type")?;

@@ -103,6 +103,17 @@ pub struct InventoryConfig {
     /// (DefaultPlayer.ini): melee reach grows with forward speed (0x00AB2050).
     #[serde(default = "d_ray")]
     pub melee_ray_speed: [f32; 3],
+    /// `Attribute_MeleeDamage` of Corvo's sword (`Twk_Inv_SwordCorvo` attributes, Normal) and
+    /// Corvo's own `Attribute_MeleeDamageBonus` (`Twk_Pawn_Corvo`): a sword hit deals
+    /// `round(m_fAttackDamageMultiplier x (MeleeDamage + MeleeDamageBonus))` (0x00C07C80).
+    #[serde(default = "d_sword_damage")]
+    pub sword_melee_damage: f32,
+    #[serde(default)]
+    pub melee_damage_bonus: f32,
+    /// `DishonoredPlayerPawn.m_fOffscreenMeleeDamageReduction[difficulty]` (DefaultPlayer.ini):
+    /// an NPC melee hit from offscreen loses this fraction (0x00C33DD0).
+    #[serde(default = "d_offscreen")]
+    pub offscreen_melee_reduction: [f32; 4],
 }
 
 fn d_xbow_headshot() -> f32 {
@@ -111,6 +122,12 @@ fn d_xbow_headshot() -> f32 {
 
 fn d_ray() -> [f32; 3] {
     [400.0, 0.005, 1.5]
+}
+fn d_sword_damage() -> f32 {
+    10.0
+}
+fn d_offscreen() -> [f32; 4] {
+    [0.5; 4]
 }
 
 impl Default for InventoryConfig {
@@ -134,6 +151,9 @@ impl Default for InventoryConfig {
             crossbow_headshot_mult: d_xbow_headshot(),
             max_equipped_charms: 3,
             melee_ray_speed: d_ray(),
+            sword_melee_damage: d_sword_damage(),
+            melee_damage_bonus: 0.0,
+            offscreen_melee_reduction: d_offscreen(),
         }
     }
 }
@@ -150,6 +170,10 @@ pub struct PossessableConfig {
     /// `m_AwarenessSettings[EAIAwareness].m_bCanBePossessed`.
     pub awareness: [bool; 8],
     pub disallow: bool,
+    /// `m_TargetingPriority` (`EDisPossessTargetingPriority`: 0 Animal, 1 Civilian, 2 Wolfhound,
+    /// 3 Combatant): index into `DisTweaks_Possess.m_TargetingPriorityWeights`.
+    #[serde(default)]
+    pub targeting_priority: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -167,9 +191,34 @@ pub struct PossessConfig {
     pub intro_duration: f32,
     pub warn_before_exit: f32,
     pub exit_fade: f32,
+    /// Targeting score weights (0x00BFB090): `m_fDistanceWeight`, `m_fAngleWeight`,
+    /// `m_TargetingPriorityWeights[m_TargetingPriority]`; the cone is `m_fMaxAngleFOVFraction`
+    /// of the camera's field of view (0x00BF8E20).
+    #[serde(default = "d_one")]
+    pub distance_weight: f32,
+    #[serde(default = "d_angle_weight")]
+    pub angle_weight: f32,
+    #[serde(default = "d_fov_fraction")]
+    pub max_angle_fov_fraction: f32,
+    #[serde(default = "d_priority_weights")]
+    pub priority_weights: [f32; 4],
     /// `Twk_Possessable_BaseNPC` and `Twk_Possessable_Rat`.
     pub npc: PossessableConfig,
     pub rat: PossessableConfig,
+}
+
+// `Twk_Powers_Possess` values, for configs cached before these fields were loaded.
+fn d_one() -> f32 {
+    1.0
+}
+fn d_angle_weight() -> f32 {
+    10.0
+}
+fn d_fov_fraction() -> f32 {
+    0.3
+}
+fn d_priority_weights() -> [f32; 4] {
+    [0.0, 1.0, 2.0, 2.0]
 }
 
 impl Default for PossessConfig {
@@ -184,8 +233,12 @@ impl Default for PossessConfig {
             intro_duration: 1.1,
             warn_before_exit: 4.0,
             exit_fade: 0.8,
-            npc: PossessableConfig { duration: [0.0, 15.0], required_level: 2, ground_speed: 300.0, awareness: [true, true, true, true, true, true, true, false], disallow: false },
-            rat: PossessableConfig { duration: [20.0, 30.0], required_level: 1, ground_speed: 300.0, awareness: [true; 8], disallow: false },
+            distance_weight: d_one(),
+            angle_weight: d_angle_weight(),
+            max_angle_fov_fraction: d_fov_fraction(),
+            priority_weights: d_priority_weights(),
+            npc: PossessableConfig { duration: [0.0, 15.0], required_level: 2, ground_speed: 300.0, awareness: [true, true, true, true, true, true, true, false], disallow: false, targeting_priority: 3 },
+            rat: PossessableConfig { duration: [20.0, 30.0], required_level: 1, ground_speed: 300.0, awareness: [true; 8], disallow: false, targeting_priority: 0 },
         }
     }
 }
@@ -199,6 +252,14 @@ pub struct BendTimeLevel {
     pub dilation_warmup: f32,
     pub dilation_cooldown: f32,
     pub projectile_early_wakeup: f32,
+    /// `m_fPostEffectCooldownTime`: Possession's extension applies only before
+    /// `m_fMaxDuration - this` (0x00BFA120).
+    #[serde(default = "d_post_cooldown")]
+    pub post_effect_cooldown: f32,
+}
+
+fn d_post_cooldown() -> f32 {
+    0.5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -210,7 +271,7 @@ pub struct BendTimeConfig {
 
 impl Default for BendTimeConfig {
     fn default() -> Self {
-        let l = |w, p, d| BendTimeLevel { world_dilation: w, player_dilation: p, duration: d, dilation_warmup: 0.15, dilation_cooldown: 0.25, projectile_early_wakeup: 0.25 };
+        let l = |w, p, d| BendTimeLevel { world_dilation: w, player_dilation: p, duration: d, dilation_warmup: 0.15, dilation_cooldown: 0.25, projectile_early_wakeup: 0.25, post_effect_cooldown: 0.5 };
         Self { mana_cost: 60.0, rune_costs: [2, 8], levels: [l(0.15, 0.85, 12.0), l(0.0, 0.9, 8.0)] }
     }
 }

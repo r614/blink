@@ -249,10 +249,12 @@ fn top_exit_jumps_onto_the_ledge() {
     assert_eq!(r.p().mode, MoveMode::Climbing);
     r.steps(400, input(0.0, 35.0, 127, 0));
     assert!((r.p().position.z - HIGH).abs() < 0.01);
-    // Jump with the stick forward: off the chain, onto the platform (mantle while airborne).
+    // Jump with the stick forward: off the chain, onto the platform (mantle while airborne). The
+    // airborne mantle is requested only while the Jump button is down (0x00ADBD00, movement.md
+    // MV-2), so Jump stays held.
     r.step(input(0.0, 0.0, 127, buttons::JUMP));
     for _ in 0..240 {
-        r.step(input(0.0, 0.0, 127, 0));
+        r.step(input(0.0, 0.0, 127, buttons::JUMP));
         if r.p().mode == MoveMode::Walking {
             break;
         }

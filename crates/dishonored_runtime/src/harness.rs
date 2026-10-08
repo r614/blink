@@ -58,7 +58,7 @@ impl ScriptInput {
                 _ => 0,
             };
         }
-        PlayerInput { tick: 0, forward: self.forward, right: self.right, yaw: self.yaw, pitch: self.pitch, buttons: b, left_hand: self.left_hand.unwrap_or_default(), action: 0, npc_move: 0 }
+        PlayerInput { tick: 0, forward: self.forward, right: self.right, yaw: self.yaw, pitch: self.pitch, buttons: b, left_hand: self.left_hand.unwrap_or_default(), action: 0, npc_move: 0, npc_speed: 0.0 }
     }
 }
 

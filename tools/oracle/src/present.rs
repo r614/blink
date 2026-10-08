@@ -205,7 +205,7 @@ impl Presenter {
         let others: Vec<PlayerState> = players.iter().filter(|p| p.id != self.local).copied().collect();
         let content = self.content.clone();
         let (muzzle, bones) = (HashMap::new(), HashMap::new());
-        let scene = FxScene { players, me: Some(self.local), muzzle: &muzzle, bones: &bones, contact: self.contact.as_deref(), world: Some(&content.collision), now: self.now };
+        let scene = FxScene { players, me: Some(self.local), muzzle: &muzzle, bones: &bones, contact: self.contact.as_deref(), world: Some(&content.collision), now: self.now, projectiles: &world.projectiles };
         for r in self.fx.requests(events, &scene) {
             match r {
                 // A hand cast is the same effect; headless there is no rig, so it plays at the
@@ -217,6 +217,20 @@ impl Presenter {
                 FxRequest::Beam { path, from, to } => {
                     let who = nearest(players, from);
                     self.start(path, facing(from, to - from), None, who, &mut out);
+                }
+                // A trail whose projectile ended in its launch tick: started, then deactivated
+                // before its first update (`FxInstance::stop`); it ends with its particles.
+                FxRequest::EndedTrail { path, xf } => {
+                    let who = nearest(players, xf.w_axis.truncate());
+                    if self.start(path, xf, Some(Owner::Attached((0, u32::MAX))), who, &mut out) {
+                        if let Some(l) = self.live.last_mut() {
+                            l.owner = None;
+                            l.one_shot = true;
+                            for s in &mut l.sims {
+                                s.done = true;
+                            }
+                        }
+                    }
                 }
             }
         }

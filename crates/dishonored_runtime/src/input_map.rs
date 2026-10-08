@@ -39,7 +39,7 @@ impl LocalInput {
             self.left_hand = o.left_hand;
             return o;
         }
-        let i = PlayerInput { tick: 0, forward: self.forward, right: self.right, yaw: self.yaw, pitch: self.pitch, buttons: self.held | self.latched, left_hand: self.left_hand, action: self.action, npc_move: 0 };
+        let i = PlayerInput { tick: 0, forward: self.forward, right: self.right, yaw: self.yaw, pitch: self.pitch, buttons: self.held | self.latched, left_hand: self.left_hand, action: self.action, npc_move: 0, npc_speed: 0.0 };
         self.latched = 0;
         self.action = 0;
         i
