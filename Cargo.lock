@@ -2636,6 +2636,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "rayon",
+ "regex",
  "ron",
  "serde",
  "serde_json",

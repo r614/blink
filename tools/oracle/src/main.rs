@@ -6,7 +6,7 @@
 //!                         [--generator G] [--capture-seconds S]
 //! oracle snapshot --map M...                 build the port snapshot (needs the `import` feature)
 //! oracle collision [--map M]... [--ids 1,2,3] [--out DIR] [--examples N]
-//! oracle gen collision --map M --out Q.txt [--sampling navmesh,prim] [--reach R]
+//! oracle gen collision --map M --out Q.txt [--sampling navmesh,prim] [--reach R] [--profiles enumerated]
 //!                                            query batch for `probe_launch collide`
 //! oracle densify collision --map M --out Q.txt [--per N] [--radius R]   queries around disagreements
 //! oracle structure --map M                   port collision structure (vs a cached reflection dump)
@@ -14,6 +14,8 @@
 //! oracle sweep [--out DIR] [--no-coverage]   every cached map and scenario -> scorecard + work list
 //! oracle bench import|queries --map M        measure the port's costs
 //! oracle cache list
+//! oracle index build|fn|class|uscript|xref|search|natives|traces|field|vcall|stats ...
+//!                                            the static index (`oracle index help`)
 //! ```
 //! Outputs go to `harness_out/oracle/<command>/` (gitignored); cached answers and port
 //! snapshots to the oracle cache (`$DISHONORED_CACHE/oracle`).
@@ -79,6 +81,7 @@ fn repo_root() -> PathBuf {
 fn write_report(dir: &Path, card: &mut Scorecard, items: &mut [WorkItem], limit: usize) -> Result<()> {
     let book = dishonored_oracle::residual::CauseBook::load(&repo_root().join("fixtures").join("oracle").join("causes.ron"))?;
     book.classify(items);
+    dishonored_oracle::index::annotate(items);
     let summary = dishonored_oracle::residual::ResidualSummary::of(items);
     card.tables.insert(0, summary.table());
     report::write_all(dir, card, items, limit)?;
@@ -112,8 +115,9 @@ fn main() -> Result<()> {
         "sweep" => cmd_sweep(&a),
         "bench" => cmd_bench(&a),
         "cache" => cmd_cache(&a),
+        "index" => dishonored_oracle::index::cli::run(&a.0[1..]),
         _ => {
-            eprintln!("{}", include_str!("main.rs").lines().skip(2).take(16).map(|l| l.trim_start_matches("//! ")).collect::<Vec<_>>().join("\n"));
+            eprintln!("{}", include_str!("main.rs").lines().skip(2).take(18).map(|l| l.trim_start_matches("//! ")).collect::<Vec<_>>().join("\n"));
             bail!("unknown command `{cmd}`")
         }
     }
@@ -359,8 +363,11 @@ fn cmd_gen(a: &Args) -> Result<()> {
                 // original's (phase 2): every collision source, every measured profile.
                 let reach: f32 = a.opt("--reach").and_then(|s| s.parse().ok()).unwrap_or(64.0);
                 let prims = querygen::port_primitives(&w);
-                q.extend(dishonored_oracle::sampling::primitive_directed(&prims, &querygen::measured_profiles(pawn), reach));
-                generator.push(format!("{}-v1(reach {reach})", querygen::PRIM_GENERATOR));
+                // `--profiles enumerated`: every trace profile of the exe's call sites (the static index).
+                let enumerated = a.opt("--profiles").as_deref() == Some("enumerated");
+                let profiles = if enumerated { dishonored_oracle::index::enumerated_profiles(Some([pawn.0, pawn.0, pawn.1]))? } else { querygen::measured_profiles(pawn) };
+                q.extend(dishonored_oracle::sampling::primitive_directed(&prims, &profiles, reach));
+                generator.push(format!("{}-v1(reach {reach}{})", querygen::PRIM_GENERATOR, if enumerated { ", enumerated profiles" } else { "" }));
             }
             other => bail!("unknown sampling `{other}` (navmesh, prim)"),
         }
