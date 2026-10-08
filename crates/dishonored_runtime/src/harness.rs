@@ -311,7 +311,13 @@ pub fn inspect_script(
     mut cam: ResMut<CameraRequest>,
     mut exit: MessageWriter<AppExit>,
     mut prof: Option<ResMut<crate::profile::Profile>>,
+    warm: Option<Res<crate::warmup::Warmup>>,
 ) {
+    // The script starts once the pipeline warm-up is over: frames during it are spent
+    // compiling, and a screenshot then could not be read back before the quit.
+    if warm.as_ref().is_some_and(|w| !w.done()) {
+        return;
+    }
     if let Some(p) = shots.pending.first().cloned() {
         shots.pending.remove(0);
         if let Some(d) = p.parent() {
