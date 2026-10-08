@@ -74,6 +74,9 @@ struct LevelFx {
     erode: std::collections::HashSet<(usize, usize)>,
     /// Untextured (procedural) mesh emitters: mesh, colour x intensity, glow parameters.
     glow: HashMap<(usize, usize), (Handle<Mesh>, Vec4, Vec4)>,
+    /// Mesh emitters on Volume_Light_PMAT materials: mesh (with its vertex colours) and the decoded
+    /// material (volume_light.rs), whose `MeshEmitterVertexColor` each particle sets.
+    volume: HashMap<(usize, usize), (Handle<Mesh>, crate::volume_light::VolumeLightMaterial)>,
     /// Emitters with distortion materials, drawn again by the distortion pass.
     distortion: HashMap<(usize, usize), DistortionSource>,
     /// [interp] Placed emitters by "package:actor" (lowercase): (system, transform,
@@ -146,6 +149,8 @@ pub struct FxInstance {
     pools: Vec<Vec<(Entity, Handle<StandardMaterial>, LinearRgba)>>,
     /// Glow mesh emitters: one entity and material per live particle.
     glow_pools: Vec<Vec<(Entity, Handle<GlowMaterial>)>>,
+    /// Light-beam mesh emitters: one entity and material per live particle.
+    volume_pools: Vec<Vec<(Entity, Handle<crate::volume_light::VolumeLightMaterial>)>>,
     one_shot: bool,
     warmed: bool,
     /// Beam emitters with `TargetMethod` = `PEB2STM_UserSet`: the end point the game set
@@ -291,6 +296,7 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
     let mut mesh_handles: HashMap<usize, Handle<Mesh>> = HashMap::new();
     let mut skipped = std::collections::HashSet::new();
     let mut glow = HashMap::new();
+    let mut volume = HashMap::new();
     let mut distortion = HashMap::new();
     for (si, s) in map.particle_systems.iter().enumerate() {
         for (ei, e) in s.emitters.iter().enumerate() {
@@ -337,6 +343,24 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
             // Volumetric glow meshes with procedural materials (no texture; the cooked graph keeps
             // only its parameters): the glow material rebuilt from those parameters.
             let eff = if e.mesh_override_material && e.material.is_some() { e.material } else { map.meshes[mid].sections.first().and_then(|s| s.material) };
+            // Light beams (Volume_Light_PMAT): the decoded material (volume_light.rs; the particle
+            // vertex factory's base passes compute the same as the static mesh ones), the particle
+            // colour as its `MeshEmitterVertexColor`.
+            if let Some((vp, ma)) = eff.and_then(|m| Some((map.material_params.get(m)?, map.materials.get(m)?))).filter(|(p, _)| crate::volume_light::is_volume_light(p)) {
+                if let Some(params) = crate::volume_light::VolumeLightUniform::decode(vp, crate::map_render::light_unit()) {
+                    let rays = ma.texture_params.iter().find(|(k, _)| k.eq_ignore_ascii_case(crate::volume_light::RAYS_TEXTURE)).and_then(|t| {
+                        if let Some(h) = cache.get(&t.1) {
+                            return Some(h.clone());
+                        }
+                        let h = images.add(to_image(map.textures.get(t.1)?));
+                        cache.insert(t.1, h.clone());
+                        Some(h)
+                    });
+                    let mh = meshes.add(crate::volume_light::beam_mesh(&map.meshes[mid]));
+                    volume.insert((si, ei), (mh, crate::volume_light::VolumeLightMaterial { params, rays }));
+                    continue;
+                }
+            }
             let textured = eff.and_then(|m| map.materials.get(m)).is_some_and(|m| m.diffuse.is_some() || !m.texture_params.is_empty());
             if !textured {
                 let mh = mesh_handles.entry(mid).or_insert_with(|| meshes.add(bevy_mesh(&map.meshes[mid]))).clone();
@@ -383,6 +407,7 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
         mesh_parts,
         skipped,
         glow,
+        volume,
         distortion,
         placed: map
             .emitters
@@ -477,7 +502,7 @@ fn spawn_instance(commands: &mut Commands, meshes: &mut Assets<Mesh>, lf: &Level
     for (ei, _) in s.emitters.iter().enumerate() {
         let mesh = meshes.add(empty_mesh());
         handles.push(mesh.clone());
-        if lf.mesh_parts.contains_key(&(system, ei)) || lf.skipped.contains(&(system, ei)) || lf.glow.contains_key(&(system, ei)) {
+        if lf.mesh_parts.contains_key(&(system, ei)) || lf.skipped.contains(&(system, ei)) || lf.glow.contains_key(&(system, ei)) || lf.volume.contains_key(&(system, ei)) {
             continue;
         }
         let Some(mat) = lf.materials.get(&(system, ei)) else { continue };
@@ -491,6 +516,7 @@ fn spawn_instance(commands: &mut Commands, meshes: &mut Assets<Mesh>, lf: &Level
         meshes: handles,
         pools: s.emitters.iter().map(|_| Vec::new()).collect(),
         glow_pools: s.emitters.iter().map(|_| Vec::new()).collect(),
+        volume_pools: s.emitters.iter().map(|_| Vec::new()).collect(),
         one_shot,
         warmed: one_shot,
         beam_target: None,
@@ -503,7 +529,7 @@ fn spawn_instance(commands: &mut Commands, meshes: &mut Assets<Mesh>, lf: &Level
 /// the distortion pass.
 fn sprite_mesh_used(lf: &LevelFx, system: usize, emitter: usize) -> bool {
     let k = (system, emitter);
-    let drawn = !lf.mesh_parts.contains_key(&k) && !lf.skipped.contains(&k) && !lf.glow.contains_key(&k) && lf.materials.contains_key(&k);
+    let drawn = !lf.mesh_parts.contains_key(&k) && !lf.skipped.contains(&k) && !lf.glow.contains_key(&k) && !lf.volume.contains_key(&k) && lf.materials.contains_key(&k);
     drawn || lf.distortion.get(&k).is_some_and(|d| d.mesh.is_none())
 }
 
@@ -713,6 +739,7 @@ fn simulate(
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut glow_mats: ResMut<Assets<GlowMaterial>>,
+    mut volume_mats: ResMut<Assets<crate::volume_light::VolumeLightMaterial>>,
     mut q: Query<(Entity, &mut FxInstance, &InheritedVisibility, Option<&BeamTarget>, Option<&StopAtOnce>)>,
     cams: Query<(&GlobalTransform, &Transform, &Projection, Option<&ChildOf>), With<Camera3d>>,
     session: Option<Res<crate::session::Session>>,
@@ -798,6 +825,29 @@ fn simulate(
                         let (s, _, t) = world.to_scale_rotation_translation();
                         m.sphere = coords::pos(t).extend(params.w * s.max_element() * coords::UU_TO_BEVY);
                         m.color = Vec4::new(color.x * c.x * a, color.y * c.y * a, color.z * c.z * a, 1.0);
+                    }
+                }
+            } else if let Some((mh, vm)) = lf.volume.get(&(inst.system, i)) {
+                // Light-beam mesh particles: one entity and material each, the particle colour
+                // and alpha as `MeshEmitterVertexColor`.
+                let pool = &mut inst.volume_pools[i];
+                let want = sim.particles.len().min(64);
+                while pool.len() < want {
+                    let vh = volume_mats.add(vm.clone());
+                    let id = commands.spawn((Mesh3d(mh.clone()), MeshMaterial3d(vh.clone()), Transform::IDENTITY, bevy::light::NotShadowCaster, bevy::light::NotShadowReceiver, FxMeshParticle, ChildOf(e))).id();
+                    pool.push((id, vh));
+                }
+                while pool.len() > want {
+                    if let Some((id, vh)) = pool.pop() {
+                        volume_mats.remove(&vh);
+                        commands.entity(id).despawn();
+                    }
+                }
+                for (k, p) in sim.particles.iter().take(want).enumerate() {
+                    let (world, c, a) = mesh_particle(em, p, &xf);
+                    commands.entity(pool[k].0).insert(Transform::from_matrix(coords::transform(world)));
+                    if let Some(mut m) = volume_mats.get_mut(&pool[k].1) {
+                        m.params.mesh_color = Vec4::new(c.x, c.y, c.z, a);
                     }
                 }
             } else if let Some((mh, mat)) = lf.mesh_parts.get(&(inst.system, i)) {

@@ -102,7 +102,10 @@ Other module classes are listed per emitter as unsupported.
   (`volume_glow.wgsl`): additive Color x LightIntensity x particle colour, faded toward the
   silhouette by |N.V|^Fresnel_exponent, away from the particle by the sphere mask
   (SphereMask_Power over Distance x mesh radius) and near the camera over StartOffset, scaled by
-  0.1 (U-305). Depth-biased alpha and the rays texture are not reproduced. Emissive mesh
+  0.1 (U-305). Depth-biased alpha and the rays texture are not reproduced. Since 2026-10-08 mesh
+  emitters on `Volume_Light_PMAT` use the material decoded from its shaders instead
+  (`volume_light.rs`, RENDERING.md "Light beams"; the particle colour is its
+  `MeshEmitterVertexColor`); `GlowMaterial` remains for the other untextured bases. Emissive mesh
   materials (`E_Emissive_Color` with intensity > 1, e.g. the fireflies x25) are drawn additively
   in their emissive colour.
 - Captures: `fixtures/scripts/effects_boyle.json` (inspect mode, Boyle Ext viewpoints: chimney
