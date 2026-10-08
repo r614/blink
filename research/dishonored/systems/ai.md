@@ -111,7 +111,36 @@ hideout transitions. Behaviour sub-processes (per behaviour tweak): StandardBody
 AmbientBarks, WatchPoints, PersonalSpace, Distractions, FleetingGaze, HeadTrackBark / Pause,
 ManageAttacks (combat), CombatBarks.
 
-### 1.4 What turns attention into NoticeBegin / SearchBegin / CombatBegin (OPEN)
+### 1.4a The attention poster (CONFIRMED, port pass 2026-10-08)
+
+Traced from the three constructors of the attention-behaviour stimulus class (0x00b17a80 with id
+0x3f / 0x57 / 0x11 through 0x00b19890 / 0x00b19ba0 / 0x00b19cf0) to their only caller 0x00b24d00:
+
+- The attention component keeps a behaviour level (+0x44) and the relationship of its top target
+  (+0x45, `ERelationship`: 0 Neutral, 1 Ally, 2 Enemy). 0x00b25890 steps +0x44 one level at a time
+  toward the target's attention level. Each step up posts the begin of the new level (0x00b24d00:
+  1 HeadTrackBegin 44, 2 NoticeBegin 63, 3 SearchBegin 87, 4 CombatBegin 17); each step down posts
+  the end of the level left (0x00b22ec0: HeadTrackEnd 45, NoticeEnd 64, SearchEnd 88, CombatEnd 18).
+  Both only when +0x45 == 2 (an enemy top target); the begins of levels 2-4 also need the target
+  pawn not dead (its vslot 13).
+- A new top target (0x00b25e50) first steps the level down to 0 (the old target's ends), then
+  stores the target and steps up to its level.
+- These stimuli have no delay: the stimulus class's delay getter (vtable +8) is 0x008fc830
+  (`return 0`). The queue (0x00b148c0) asks every queued stimulus whether the new one replaces it
+  or is dropped (vslot 3 handler), then stores it with `delay = GetDelay(brain)`.
+- Delays exist per stimulus class: 0x00b01650 (`m_ReactionDelay`, 0x00c477f0) for SearchRequest
+  (90) and Help (48) (vtables 0x01134100 / 0x01134118); 0x00b016e0 (`m_MagicReactionDelay`,
+  0x00c47840) for WitnessMagic (112, vtable 0x01133ab8); a stored delay for Stolen (97). So a guard
+  that hears or sees something starts its Notice / Search / Combat on the next brain tick; the
+  0.18-0.30 s reaction delay is an ally request's (SearchRequest) and a help call's.
+- `DisAISubStateInvestigate.m_fReactionDelayTimer` (+0x110, counted down by 0x00b2a000) delays the
+  investigate dialog hook (0x00bd0470), not the movement. `TweaksBehavior_Search_Default
+  .m_SearchReactionDelay` (0-1 s) exists; its reader was not found.
+
+So the "React" state of the old port (a reaction delay before every escalation) has no original
+counterpart; the escalation rule `Brain::select` assumed is replaced by this poster.
+
+### 1.4 What turns attention into NoticeBegin / SearchBegin / CombatBegin (superseded by 1.4a)
 
 The three attention-driven behaviours evaluate only their `*Begin` stimulus, and `AttentionBehaviorBegin`
 exists as a stimulus, but the poster that maps "top enemy attention level reached TurnToFace /
@@ -372,3 +401,68 @@ hook read (`m_pCurrentBehavior`). Until then AI checks are Static (from data) or
 F11. **The attention-to-stimulus poster is not traced** (section 1.4); the port's mapping is assumed.
 
 Do not edit port code from this document: the fixes above are for the porting agents.
+
+## 11. Port pass (2026-10-08): status per finding
+
+**Core rebuild (§1).** `crates/dishonored_ai/src/slots.rs`: the brain is now the slot stack
+(`Brain::slots`, one `Behavior` per `EAISlot`, the highest occupied slot current, lower ones
+dormant and resumed), the stimulus queue (`Brain::stims`, per-stimulus delay, dispatch through
+the behaviours' complete / evaluate masks) and the attention poster of §1.4a
+(`Brain::post_attention`). `Brain::state` is now the projection of the current behaviour
+(`Brain::project`); an external write of it (mission control, Kismet, the runner) is turned into
+that behaviour (`Brain::force`). Behaviours: Routine (Idle slot), Notice, Search /
+StationarySearch, Combat, TriggerAlarm (Alert), MagicResponse (Awe, new `BrainState::Awe`), Panic
+(Escape). `Brain::select` / `escalate` / `back_to_routine` / `go_search` and the React state's
+reaction delay are gone (§1.4a: no delay on the attention stimuli). Not ported: the active
+behaviours' filter masks (dispatch stops at a filtering top behaviour), the queue's
+replace/drop handlers (0x00b148c0 vslot 3), HeadTrack stimuli (no behaviour evaluates them in the
+guard list; head tracking stays the port's `look`), the behaviours not listed above.
+
+- **F1 ported.** Combined with F4: the Investigate sub-state follows the live proxy (0x00b29f00),
+  is reached within the proximity (0x00b38530), and on a path failure runs the PathingFail
+  handler (0x00b33850: `m_PathingFailRetryCount` 1, nearest navmesh point within 500 uu around /
+  25 up / 500 down, `NavWorld::closest_point_in`), then finishes; the loop of the old React /
+  Investigate is gone with React.
+- **F2 ported.** `MissionMatch::spawn_original` posts `PatrolRequest` (`Brain::request_patrol`)
+  for `patrol_on_startup`; `DisBehaviorPatrol` adopts a route at dispatch.
+- **F3 ported (LIKELY rule).** `Brain::loco_speed`: forward loop speed of the speed mode (Walk 1,
+  Jog 2) of the stance modifier x `m_fSpeedMultiplier`, from `AiConfig::locomotion` (every
+  `ArkComponentLocomotionConfig` of the Boyle script packages); the sim takes it through
+  `PlayerInput::npc_speed` (`movement::speed_modifier`, no sword factor). The pawn's config comes
+  from its tweak's anim profile (`Brain::loco`), else EliteGuardLocomotionConfig. Acceleration
+  (540-1100) and the 0.5 s modifier blend are not ported.
+- **F4 ported.** The Search decision after Investigate (0x00afeb00): StareAtUnreachable when the
+  failed proxy is > 500 uu above (literal in 0x00b33850), timer `m_fInvestigateStareAtUnreachable
+  MaxTime_s` counting only while the target is unseen (0x00af4c40), cancelled when the target is
+  farther than the radius from the proxy (0x00af4440); Stand for `m_fCancelInvestigateWaitTime`
+  when the proxy was not reached (0x00af4b10); else the search animation (GenericAction,
+  SearchLostTarget or CorpseCheck, length loaded from the elite guard's sword AnimSet) unless
+  `m_fSearchAnimCooldown` (10 s, set on leaving it, 0x00af4ab0) runs; then TrackTarget (the
+  crumbs). The x0.8 search speed comes with F3 (SearchSword / SearchEmpty).
+- **F5 partly ported.** CONFIRMED and ported: aggression rolled in [0, 1) at start (0x00b3dc10),
+  regen `m_fAggressionRegenRate` per second (0x00b39e50), `m_fAggressionDeltaPerDamage` on being
+  attacked (0x00b3e070, the AttackedByEnemy handler: applied on the brain's damage event), cooldown
+  scale `(1 - a) x factor + 1` (0x00b3deb0). Decoded, not ported: the block breaker (blocked
+  weight += a roll between the pawn attributes `Attribute_BlockBreakRate_Min/Max` on a blocked own
+  attack (EvadedMelee_Outgoing, 0x00b3a030), timer = `m_fBlockedAttackSensitivity`, wants
+  `NPCBash` at weight >= 1 (0x00b39e50); the sim has no bash move and the attribute owner is not
+  resolved) and the formation distance with the stalemate timer (0x00b3e120: the desired distance
+  interpolates the shortest / longest formation attacks' ranges by aggression; after
+  `m_fStalemateAllowanceTime` without an action it closes in).
+- **F6 open.** Overseer musical combat, tallboys, weepers and hounds need their own behaviours and
+  item contexts (bows, tunes, grenades); not attempted.
+- **F7 open** (needs the original).
+- **F8 ported.** WitnessMagic per 0x00b23e50 with the modes of the power callers of 0x00bf9fb0
+  (Windblast / Swarm / slowing Bend Time end 0; Blink end / possession end / stopping Bend Time end
+  1; Blink start / possession start / Bend Time stop 2): Busted on the user -> WitnessMagic after
+  `m_MagicReactionDelay`; mode 1 not Busted -> `m_IncreaseForMagic` and a 3 s window in which
+  becoming Busted (0x00b24ec0) or leaving Busted (0x00b23160, disappeared) reacts.
+  MagicResponse (Awe): face the user unless an ally, bark DDH_MAGIC_WITNESSED and finish, or
+  DDH_MAGIC_DISAPPEARED and, unless ally or in sight, the MagicLostTarget animation. Not ported:
+  the soiree check (0x00b4b4c0: reactions disabled by a soiree give only the bark), the sense-flag
+  check of mode 1, the repeated polling of possession's inactive stage (once here).
+- **F9 ported (the rule); turning open.** `criminal()` removed: firing or swinging near an NPC is
+  `m_Response_PlayerThreats` (Harmless) in every reaction tweak. NPC turning through rotation
+  intents stays open: the intents' rate writers for the AI's face-to requests (`m_fRotationSpeed`
+  -100 default) were not traced (U-862).
+- **F10** unchanged. **F11 resolved** (§1.4a).

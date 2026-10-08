@@ -1,7 +1,8 @@
 // A factionless guard facing away hears a pistol shot 3800 uu behind it (Pistol noise radius
 // 4000, so heard) from beyond its vision range (3500 uu): hearing alone sends it to investigate.
 // Nothing here is seen, so the attention comes from the noise only (`attn_noise`: the place
-// entry), and the brain goes React (m_ReactionDelay 0.18-0.30 s) -> Investigate.
+// entry), and the attention poster's SearchBegin (no delay) starts DisBehaviorSearch's
+// Investigate on the next brain tick.
 (
     name: "ai/investigate_noise",
     system: Ai,
@@ -21,8 +22,7 @@
         (name: "investigates", expect: [(metric: TimeAt("npc.guard.state", 7), value: 15, tol: 0, cmp: AtMost, source: "a danger noise in hearing range sends a guard to investigate (DisAISubStateInvestigate)", status: Static)]),
         (name: "player never perceived", expect: [(metric: Max("npc.guard.attn_level"), value: 0, tol: 0, cmp: AtMost, source: "the player is 3800 uu away, beyond the 3500 uu vision range, so no sight attention accrues (Twk_Vision_Default)", status: Static)]),
         (name: "walks to the shot", expect: [(metric: Min("npc.guard.x"), value: -5350, tol: 0, cmp: AtMost, source: "DisAISubStateInvestigate goes to the attention proxy (the shot, proximity 250 uu, m_fSearchReachedProxyLocEqualsRange) within 900 ticks: 3800 uu at run speed takes under 10 s", status: Static)]),
-        (name: "reaction delay", expect: [(metric: Gap(FirstAt("Sim:Fired"), TimeAt("npc.guard.state", 4)), value: 0.02, tol: 0.05, source: "stimulus -> React is the next tick (stim queued with the global reaction delay m_ReactionDelay 0.18-0.30, DefaultAI.ini)", status: Unmeasured)]),
-        (name: "react lasts the reaction delay", expect: [(metric: Gap(TimeAt("npc.guard.state", 4), TimeAt("npc.guard.state", 7)), value: 0.24, tol: 0.09, source: "(one tick of sampling slack) DishonoredGlobalAIManager.m_ReactionDelay = (0.18, 0.30) in DefaultAI.ini (0x00b16eb0 releases a queued stimulus when its delay is <= 0)", status: Static)]),
+        (name: "search starts on the next brain tick", expect: [(metric: Gap(FirstAt("Sim:Fired"), TimeAt("npc.guard.state", 7)), value: 0.0167, tol: 0.02, source: "the attention poster (0x00b25890 / 0x00b24d00) posts SearchBegin when the behaviour level steps to Investigate; its stimulus class's delay getter returns 0 (0x008fc830, vtable 0x01134478 +8), so the queue (0x00b148c0 / 0x00b16eb0) releases it at once. m_ReactionDelay belongs to SearchRequest / Help only (delay getter 0x00b01650, vtables 0x01134100 / 0x01134118)", status: Static)]),
     ],
     record: [Pawn, Npc("guard"), SimEvents],
     capture: Some("fire the pistol behind a Boyle party guard out of sight: guard position per tick (ai/boyle_hear_shot)"),

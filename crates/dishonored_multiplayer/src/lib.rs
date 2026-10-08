@@ -110,7 +110,7 @@ pub fn npc_poses(brains: &[dishonored_ai::Brain]) -> Vec<(PlayerId, dishonored_i
                 B::Combat => S::Combat,
                 B::Flee => S::Panic,
                 B::Cower => S::Cower,
-                B::React | B::Notice => S::Notice,
+                B::React | B::Notice | B::Awe => S::Notice,
             };
             (b.id, s)
         })

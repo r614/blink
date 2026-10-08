@@ -17,6 +17,10 @@ const CIV_UNS: &str = "Twk_Attn_Noncombatant_Uns.Twk_Attn_Noncombatant_Uns";
 const CIV_SUS: &str = "Twk_Attn_Noncombatant_Sus.Twk_Attn_Noncombatant_Sus";
 const NEUTRAL: &str = "Twk_Attn_Default_Neutral.Twk_Attn_Default_Neutral";
 const VISION: &str = "Twk_Vision_Default.Twk_Vision_Default";
+/// Level script packages that cook the NPC locomotion configs and animation sets (as the
+/// runtime's animation bank reads them).
+const NPC_ANIM_PACKAGES: &[&str] = &["L_Boyle_Ext_Script", "L_Boyle_Int_Script", "L_BoyleStreet_Ext_Script"];
+const GUARD_SWORD_SET: &str = "Npc_EliteGuard_Sword_as.Npc_EliteGuard_Sword_as";
 
 fn level_index(name: &str) -> Option<u8> {
     Some(match name {
@@ -115,6 +119,7 @@ fn attention(m: &TMap, d: &AttentionConfig) -> AttentionConfig {
         can_bust,
         seeing_scalar_dead_npc: f("m_fSeeingPawnAttentionIncreaseScalar_ToDeadNPC", d.seeing_scalar_dead_npc),
         min_range_unsighted_busted_proxy: f("m_fMinRangeToUnsightedBustedProxy", d.min_range_unsighted_busted_proxy),
+        magic: increase(m, "m_IncreaseForMagic", d.magic),
     }
 }
 
@@ -185,11 +190,31 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
     if let Some(m) = beh("AI_BehaviorTweaks_Search.TweaksBehavior_Search_Default") {
         out.search.cancel_investigate_wait = [get_f32(&m, "m_fCancelInvestigateWaitTimeMin").unwrap_or(0.5), get_f32(&m, "m_fCancelInvestigateWaitTimeMax").unwrap_or(1.0)];
         out.search.reached_broadcast_range = get_f32(&m, "m_fSearchReachedProxyBroadcastRange").unwrap_or(out.search.reached_broadcast_range);
+        out.search.stare_radius = get_f32(&m, "m_fInvestigateStareAtUnreachableRadius").unwrap_or(out.search.stare_radius);
+        out.search.stare_max_time = get_f32(&m, "m_fInvestigateStareAtUnreachableMaxTime_s").unwrap_or(out.search.stare_max_time);
+        out.search.anim_cooldown = get_f32(&m, "m_fSearchAnimCooldown").unwrap_or(out.search.anim_cooldown);
         prov.insert("ai.search.cancel_investigate_wait".into(), "AI_BehaviorTweaks_Search.TweaksBehavior_Search_Default".into());
+        prov.insert("ai.search.stare".into(), "AI_BehaviorTweaks_Search.TweaksBehavior_Search_Default.m_fInvestigateStareAtUnreachable{Radius,MaxTime_s}, m_fSearchAnimCooldown".into());
     }
     if let Some(m) = beh("AI_BehaviorTweaks_Search.TweaksBehavior_Search_Default.DisTweaks_AISubState_Investigate_0") {
-        out.search.proximity = get_f32(&m, "m_fProximityThresholds").unwrap_or(out.search.proximity);
+        let s = &mut out.search;
+        s.proximity = get_f32(&m, "m_fProximityThresholds").unwrap_or(s.proximity);
+        s.pathing_fail_retries = match m.get("m_PathingFailRetryCount") {
+            Some(TVal::I(v)) => (*v).max(0) as u32,
+            _ => s.pathing_fail_retries,
+        };
+        s.pathing_fail_scale = get_f32(&m, "m_fPathingFailDistanceScale").unwrap_or(s.pathing_fail_scale);
+        s.pathing_fail_range = [
+            get_f32(&m, "m_fPathingFailPointerSearchRange_Horiz").unwrap_or(s.pathing_fail_range[0]),
+            get_f32(&m, "m_fPathingFailPointerSearchRange_Up").unwrap_or(s.pathing_fail_range[1]),
+            get_f32(&m, "m_fPathingFailPointerSearchRange_Down").unwrap_or(s.pathing_fail_range[2]),
+        ];
         prov.insert("ai.search.proximity".into(), "TweaksBehavior_Search_Default.DisTweaks_AISubState_Investigate_0.m_fProximityThresholds".into());
+        prov.insert("ai.search.pathing_fail".into(), "TweaksBehavior_Search_Default.DisTweaks_AISubState_Investigate_0.m_PathingFail*".into());
+    }
+    if let Some(m) = beh("AI_BehaviorTweaks_Search.TweaksBehavior_Search_Default.DisTweaks_AISubState_TrackTarget_1") {
+        out.search.track_proximity = get_f32(&m, "m_fProximityThreshold").unwrap_or(out.search.track_proximity);
+        prov.insert("ai.search.track_proximity".into(), "TweaksBehavior_Search_Default.DisTweaks_AISubState_TrackTarget_1.m_fProximityThreshold".into());
     }
     if let Some(m) = beh("AI_BehaviorTweaks_Guard.TweaksBehavior_Guard_Default") {
         out.guard_attention_span = get_f32(&m, "m_fAttentionSpan").unwrap_or(out.guard_attention_span);
@@ -266,6 +291,11 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
                 d.angle_ranged_threat = get_f32(&s, "m_fAngleOfPerceivedRangedThreat").unwrap_or(d.angle_ranged_threat);
                 d.incoming_attacks_before_back_step = irng(&s, "m_IncomingAttacksBeforeBackStep", d.incoming_attacks_before_back_step);
                 d.forgive_incoming_attacks = get_f32(&s, "m_fTimeToForgiveIncomingAttacks").unwrap_or(d.forgive_incoming_attacks);
+                d.aggression_delta_per_damage = get_f32(&s, "m_fAggressionDeltaPerDamage").unwrap_or(d.aggression_delta_per_damage);
+                d.aggression_regen_rate = get_f32(&s, "m_fAggressionRegenRate").unwrap_or(d.aggression_regen_rate);
+                d.cooldown_factor_at_min_aggression = get_f32(&s, "m_fCooldownFactorAtMinAggression").unwrap_or(d.cooldown_factor_at_min_aggression);
+                d.stalemate_allowance = get_f32(&s, "m_fStalemateAllowanceTime").unwrap_or(d.stalemate_allowance);
+                d.blocked_attack_sensitivity = get_f32(&s, "m_fBlockedAttackSensitivity").unwrap_or(d.blocked_attack_sensitivity);
                 prov.insert("ai.combat.dodge".into(), path.clone());
             }
             if s.contains_key("m_TimeToFirstShot") || s.contains_key("m_TimeBeforeGivingUp") {
@@ -418,6 +448,30 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
         out.reaction_delay = r;
         prov.insert("ai.reaction_delay".into(), "DefaultAI.ini [DishonoredGame.DishonoredGlobalAIManager] m_ReactionDelay".into());
     }
+    if let Some(r) = range(ai.get("DishonoredGame.DishonoredGlobalAIManager", "m_MagicReactionDelay")) {
+        out.magic_reaction_delay = r;
+        prov.insert("ai.magic_reaction_delay".into(), "DefaultAI.ini [DishonoredGame.DishonoredGlobalAIManager] m_MagicReactionDelay".into());
+    }
+    // NPC locomotion configs (authored loop speeds per stance modifier) and the elite guard's
+    // GenericAction animation lengths, from the level script packages that cook them.
+    out.locomotion = crate::npc_anim::package_loco_configs(content, NPC_ANIM_PACKAGES);
+    if !out.locomotion.is_empty() {
+        prov.insert("ai.locomotion".into(), format!("ArkComponentLocomotionConfig exports of {NPC_ANIM_PACKAGES:?}: {}", out.locomotion.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")));
+    }
+    let seq = |name: &str| NPC_ANIM_PACKAGES.iter().find_map(|p| crate::npc_anim::sequence_play_length(content, p, GUARD_SWORD_SET, name));
+    // `DisNPCAnimDefinitions_EliteGuard`: SearchLostTarget = [Sword_SwordToPatrol -> <p2>OutOfSight],
+    // CorpseCheck = [<p2>CorpseCheck], MagicLostTarget = [<p2>Magic_OutOfSight]; the search keeps
+    // the sword out (`m_bAlwaysSearchWithSwordOut`), so the primary prefix is `Sword_`.
+    if let (Some(a), Some(b)) = (seq("Sword_SwordToPatrol"), seq("Sword_OutOfSight")) {
+        out.search.anim_lost_target = a + b;
+    }
+    if let Some(a) = seq("Sword_CorpseCheck") {
+        out.search.anim_corpse_check = a;
+    }
+    if let Some(a) = seq("Sword_Magic_OutOfSight") {
+        out.anim_magic_lost_target = a;
+    }
+    prov.insert("ai.search.anim_lengths".into(), format!("{GUARD_SWORD_SET} SequenceLength / RateScale: SearchLostTarget {} s, CorpseCheck {} s, MagicLostTarget {} s", out.search.anim_lost_target, out.search.anim_corpse_check, out.anim_magic_lost_target));
     let crumbs = "DishonoredGame.DishonoredSearchCrumbsComponent";
     let s = &mut out.search;
     s.crumbs = ai.get(crumbs, "m_iNumSearchCrumbs").and_then(|v| v.parse().ok()).unwrap_or(s.crumbs);
