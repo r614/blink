@@ -109,6 +109,79 @@ fn rat_move_blend() {
     assert_eq!(p[0].0, "WalkSlowN");
     assert!((pct - 0.5).abs() < 1e-5);
 }
+/// `m_ArmPitch_OffsetKeys` (0x00ACB8D0): flat between -10 and 10 degrees, a cosine ease between
+/// keys, the end keys' differences beyond them.
+#[test]
+fn arm_pitch_offset_keys() {
+    use dishonored_runtime::viewmodel::{ARM_PITCH_KEYS_DEFAULT, ARM_PITCH_KEYS_GUN, arm_pitch_offset};
+    let k = &ARM_PITCH_KEYS_DEFAULT;
+    assert_eq!(arm_pitch_offset(k, 0.0), 0.0);
+    assert_eq!(arm_pitch_offset(k, -90.0), 10.0);
+    assert_eq!(arm_pitch_offset(k, -120.0), 10.0);
+    assert_eq!(arm_pitch_offset(k, 95.0), -15.0);
+    assert!((arm_pitch_offset(k, -50.0) - 5.0).abs() < 1e-4);
+    assert!((arm_pitch_offset(k, 50.0) + 7.5).abs() < 1e-4);
+    // Eased, not linear: a quarter of the way from 10 to 90 gives (1 - cos(pi / 4)) / 2 of -15.
+    let q = arm_pitch_offset(k, 30.0);
+    assert!((q + 15.0 * (1.0 - std::f32::consts::FRAC_PI_4.cos()) * 0.5).abs() < 1e-4, "{q}");
+    assert!((arm_pitch_offset(&ARM_PITCH_KEYS_GUN, -90.0) - 2.0).abs() < 1e-6);
+}
+
+/// UE3 rotators in pawn space (X forward, Y right, Z up): pitch lifts the forward axis, yaw turns
+/// it toward +Y, and the frame-to-rotator conversion inverts them.
+#[test]
+fn rotators_round_trip() {
+    use dishonored_runtime::viewmodel::{frame_rotator, rotator_quat};
+    let q = rotator_quat(30.0, 0.0, 0.0);
+    assert!((q * Vec3::X - Vec3::new(30f32.to_radians().cos(), 0.0, 30f32.to_radians().sin())).length() < 1e-5);
+    assert!((rotator_quat(0.0, 90.0, 0.0) * Vec3::X - Vec3::Y).length() < 1e-5);
+    // Positive roll lowers the right axis (`FRotationMatrix`: Y = (0, cos r, -sin r)).
+    assert!((rotator_quat(0.0, 0.0, 90.0) * Vec3::Y - Vec3::NEG_Z).length() < 1e-5);
+    for (p, y, r) in [(20.0, -35.0, 10.0), (-60.0, 120.0, -25.0), (5.0, 0.0, 0.0)] {
+        let q = rotator_quat(p, y, r);
+        let (p2, y2, r2) = frame_rotator(q * Vec3::X, q * Vec3::Y, q * Vec3::Z);
+        assert!((p - p2).abs() < 1e-3 && (y - y2).abs() < 1e-3 && (r - r2).abs() < 1e-3, "{p} {y} {r} -> {p2} {y2} {r2}");
+    }
+}
+
+/// The view takes the look pitch plus `m_RollAmount` (0.7) of the camera bone's animated
+/// rotation (0x00AABB70).
+#[test]
+fn view_takes_seventy_percent_of_the_bone() {
+    use dishonored_runtime::viewmodel::{ROLL_AMOUNT, frame_rotator, rotator_quat, view_rotation};
+    let look = -30.0;
+    let bone = rotator_quat(look + 10.0, 20.0, 5.0);
+    let v = view_rotation(bone * Vec3::X, bone * Vec3::Y, bone * Vec3::Z, look);
+    let (p, y, r) = frame_rotator(v * Vec3::X, v * Vec3::Y, v * Vec3::Z);
+    assert!((p - (look + 10.0 * ROLL_AMOUNT)).abs() < 1e-3 && (y - 20.0 * ROLL_AMOUNT).abs() < 1e-3 && (r - 5.0 * ROLL_AMOUNT).abs() < 1e-3, "{p} {y} {r}");
+    // A bone that only carries the look pitch gives exactly the look.
+    let still = rotator_quat(look, 0.0, 0.0);
+    let v = view_rotation(still * Vec3::X, still * Vec3::Y, still * Vec3::Z, look);
+    assert!(v.dot(still).abs() > 1.0 - 1e-6);
+}
+
+/// The look controls (actor-space added rotation): the bone keeps its position and its children
+/// turn about it by the pitch in pawn space, whatever the mesh's RotOrigin.
+#[test]
+fn look_control_turns_about_the_bone_in_pawn_space() {
+    use dishonored_runtime::viewmodel::apply_look_controls;
+    let bones = chain();
+    let par = parents(&bones);
+    for m2p in [Mat4::IDENTITY, Mat4::from_translation(Vec3::new(0.0, 87.5, 0.0)) * rotator_matrix(0, -16384, 16384)] {
+        let mut local: Vec<(Quat, Vec3)> = bones.iter().map(|b| (b.rotation, b.translation)).collect();
+        let before = to_component(&par, &local);
+        apply_look_controls(&par, &mut local, m2p, &[(4, 30.0)]);
+        let after = to_component(&par, &local);
+        let pawn = |c: &[(Quat, Vec3)], i: usize| m2p.transform_point3(c[i].1);
+        assert!((pawn(&after, 4) - pawn(&before, 4)).length() < 1e-4);
+        let turn = Quat::from_rotation_y(-30f32.to_radians());
+        let expect = pawn(&before, 4) + turn * (pawn(&before, 5) - pawn(&before, 4));
+        assert!((pawn(&after, 5) - expect).length() < 1e-3, "{:?} vs {expect:?}", pawn(&after, 5));
+        // Bones off the controlled branch are untouched.
+        assert!((pawn(&after, 3) - pawn(&before, 3)).length() < 1e-5);
+    }
+}
+
 /// `AnimNodeSequenceBlendByAim`: centred aim weighs only the centre; full right weighs only the
 /// right centre; halfway up-right splits four ways.
 #[test]

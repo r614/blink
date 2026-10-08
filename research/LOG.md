@@ -1985,3 +1985,37 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Tests:** `cargo test --release -p dishonored_conversation -p dishonored_ai -p dishonored_mission` (32 + 1 conversation, 44 ai, 5 mission); oracle `--system conversation --system ai`: ai 6 pass / 0 fail / 2 unmeasured (unchanged), conversation 2 unmeasured (no original trace).
 - **Confidence:** CONFIRMED for the gates, queue, weights, caps, lock, output classes, fallback, loiter / look-at; LIKELY for the bind-time availability of hook walks (F7) and the Notice context threshold; APPROXIMATION for the audio path distance (straight line) and the duck blend curve.
 - **Implementation consequence:** dialog cache key v3 -> v4; protocol (MissionView.dialogue_mix, DialogueLineView.voice_radius / instance / hook) and save (Runner.queue / loiter / look_at, HookClock without last_group, MissionState and Brain fields) need the coordinator's bumps; `AiConfig::ambient_bark_inhibition` (serde default 12 = the tweak value, gameplay config cache key unchanged).
+
+## 2026-10-08: First-person view and arms placement (camera bone, look controls, arm pitch offsets)
+- **Question:** The Playground shots of `viewmodel_states.json` showed:
+  - no arms in the sword swing, the Blink aim and the mantles;
+  - a large hand near the face in Windblast;
+  - only the blade tip in the sword idle.
+
+  How does the original place the first-person camera relative to the arms mesh?
+- **Evidence (static, Ghidra + cooked data):**
+  - `DishonoredCamera_PlayerControl` slot 80 (0x00ACBA40) builds the POV:
+    - location = pawn vfunc +0x630 (0x00AABA60): the `camera_jnt` world position after the skeletal controls;
+    - rotation = vfunc +0x3E8 (0x00AABB70): controller rotation + `m_RollAmount` (0.7) x the bone's rotation relative to the pawn (pitch minus the look control's pitch);
+    - the bone frame is first turned by `DisTweaks_Pawn_Body.m_fBone_AngleOffset_Pitch` -90 (`m_AngleOffsetMatrix`, 0x00B57110).
+  - `DishonoredCamera_AnimDriven` has default weight 0 (`DefaultCamera.ini`).
+  - The pawn's view-target update 0x00AABDD0 drives `Ply_Player_at`'s three look controls and the arms mesh:
+    - the collarbones get the look pitch + the item's arm pitch offset;
+    - `spine_3_jnt` gets the look pitch;
+    - the arms mesh gets `m_Offset` = the additive camera offset;
+    - arms FOV `m_FOV` = lerp(POV FOV, `m_fCurFOV_Arms`, `m_MeshSpecificFOVWeight`). The proxy re-projects with it (0x00ADEC40) only when it differs. FOV targets lock the arms only with `m_bLockArms`.
+  - Arm pitch offset (0x00ACB8D0): `m_ArmPitch_OffsetKeys` with a cosine ease, times 65536 / 360 (FMUL at 0x00ACBC0C).
+- **fp_probe of the decoded clips:**
+  - The sword idle's hand is 46 uu below the eye.
+  - `Sword_Ready_AttackRight_A_Small` winds up off-screen to the right and crosses the centre at about 0.27 s.
+  - `Sword_*_Mantle*` move only the root and the camera.
+  - Windblast draws the hand back to about 18 uu from the eye at 0.2 s.
+  - So most of the "missing" arms are the data at the captured instants, not a placement bug.
+- **Harness finding:** a `screenshot` step is captured after the fixed tick that already ran the next input step's first tick. The Blink aim shot therefore released the button, the Blink started, and the port's Blinking rule hid the rig.
+- **Port:**
+  - `viewmodel.rs` adds `apply_look_controls`, `arm_pitch_offset` (with the keys) and `view_rotation` (`ROLL_AMOUNT`).
+  - The game camera moves by the camera bone's motion from the additives and the look pivot, and turns to the view rotation.
+  - The rig undoes the lean roll, and stays drawn during a Blink's travel (U-781).
+  - `fixtures/scripts/viewmodel_states.json` waits one tick after every screenshot. It adds time series of the swing, Windblast, Blink aim and cast, and the mantles, plus look down / up and lean.
+  - Tests in `crates/dishonored_runtime/tests/viewmodel.rs`.
+- **Confidence:** CONFIRMED (decoded) for the eye, the view rotation, the look controls and the offset keys. LIKELY for a pawn pitch of 0 (UE3 `Pawn.FaceRotation` while walking or falling, U-782) and for the arms staying visible through a Blink (U-781).

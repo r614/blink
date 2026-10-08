@@ -21,9 +21,17 @@
 //! full-body walk and run cycles.
 //!
 //! The weapon meshes play their own sets (`CorvoGun_as`, `Crossbow_as`, `PlySword_Anim_as`)
-//! with the hand that holds them. The rig is placed so that the animated `camera_jnt` coincides
-//! with the game camera, so authored camera motion becomes arm motion relative to the view.
-//! Presentation only.
+//! with the hand that holds them.
+//!
+//! The view follows the original's player camera (ANIMATION.md section 11, "View and arms"):
+//! - the eye is at `camera_jnt`;
+//! - the view looks along the controller's rotation plus 70 % (`m_RollAmount`) of that bone's
+//!   animated rotation;
+//! - the look controls of `Ply_Player_at` pitch both collarbones (plus each item's arm pitch
+//!   offset) and `spine_3_jnt` with the look.
+//!
+//! The rig is placed relative to that view, so authored camera motion shows partly as arm
+//! motion. Presentation only.
 
 use crate::characters::{CharacterGpu, to_bevy, upload};
 use crate::players::GameCamera;
@@ -257,6 +265,82 @@ pub fn directional_weights(a: f32) -> [f32; 4] {
     }
 }
 
+/// `DishonoredPlayerCamera.m_RollAmount` (`DefaultCamera.ini` 0.7): the share of the camera
+/// bone's animated rotation (relative to the pawn) that the view takes. The pawn's view rotation
+/// (`DishonoredPlayerPawn` vfunc +0x3E8, 0x00AABB70) is the controller's plus this share of the
+/// bone's pitch (minus the camera look control's own pitch), yaw and roll.
+pub const ROLL_AMOUNT: f32 = 0.7;
+
+/// `DisTweaks_InventoryItem_PlayerSpecific.m_ArmPitch_OffsetKeys` (view pitch, arm pitch
+/// difference, both degrees): Corvo's sword (`Twk_Inv_SwordCorvo`), the powers
+/// (`Twk_Inv_Powers`), grenades (`Twk_Inv_GrenadeCorvo`) and the Spring Razor
+/// (`Twk_Inv_SpringRazorCorvo`).
+pub const ARM_PITCH_KEYS_DEFAULT: [(f32, f32); 4] = [(-90.0, 10.0), (-10.0, 0.0), (10.0, 0.0), (90.0, -15.0)];
+/// The same for the pistol (`Twk_Inv_PistolCorvo`) and the crossbow (`Twk_Inv_CrossbowCorvo`).
+pub const ARM_PITCH_KEYS_GUN: [(f32, f32); 4] = [(-90.0, 2.0), (-10.0, 0.0), (10.0, 0.0), (90.0, -3.0)];
+
+/// The arm pitch offset of an item for a view pitch (0x00ACB8D0): between the bracketing keys
+/// with a cosine ease, the first / last key's difference outside them.
+pub fn arm_pitch_offset(keys: &[(f32, f32)], pitch: f32) -> f32 {
+    let Some(next) = keys.iter().position(|k| k.0 > pitch) else {
+        return keys.last().map(|k| k.1).unwrap_or(0.0);
+    };
+    if next == 0 {
+        return keys[0].1;
+    }
+    let (a, b) = (keys[next - 1], keys[next]);
+    let t = ((pitch - a.0) / (b.0 - a.0)).clamp(0.0, 1.0);
+    (b.1 - a.1) * (1.0 - (t * std::f32::consts::PI).cos()) * 0.5 + a.1
+}
+
+/// A UE3 rotator (pitch, yaw, roll in degrees) as a rotation of pawn space (X forward, Y right,
+/// Z up): roll about X, then pitch, then yaw (`FRotationMatrix`; positive pitch lifts X toward
+/// Z, positive roll lowers Y).
+pub fn rotator_quat(pitch: f32, yaw: f32, roll: f32) -> Quat {
+    Quat::from_rotation_z(yaw.to_radians()) * Quat::from_rotation_y(-pitch.to_radians()) * Quat::from_rotation_x(-roll.to_radians())
+}
+
+/// The rotator of a frame given by its forward, right and up axes in pawn space (the matrix to
+/// rotator conversion of 0x0041D720).
+pub fn frame_rotator(fwd: Vec3, right: Vec3, up: Vec3) -> (f32, f32, f32) {
+    let pitch = fwd.z.atan2(fwd.truncate().length());
+    let yaw = fwd.y.atan2(fwd.x);
+    let y0 = Vec3::new(-yaw.sin(), yaw.cos(), 0.0);
+    let roll = up.dot(y0).atan2(right.dot(y0));
+    (pitch.to_degrees(), yaw.to_degrees(), roll.to_degrees())
+}
+
+fn wrap_deg(a: f32) -> f32 {
+    (a + 180.0).rem_euclid(360.0) - 180.0
+}
+
+/// The view's rotation relative to the pawn from the camera bone's frame (after the camera look
+/// control) and the look pitch (0x00AABB70): the look pitch plus `ROLL_AMOUNT` of what the
+/// animation adds to it.
+pub fn view_rotation(fwd: Vec3, right: Vec3, up: Vec3, look_pitch: f32) -> Quat {
+    let (p, y, r) = frame_rotator(fwd, right, up);
+    rotator_quat(look_pitch + ROLL_AMOUNT * wrap_deg(p - look_pitch), ROLL_AMOUNT * wrap_deg(y), ROLL_AMOUNT * wrap_deg(r))
+}
+
+/// `SkelControlSingleBone` with `bApplyRotation`, `bAddRotation` and `BoneRotationSpace =
+/// BCS_ActorSpace` (the look controls of `Ply_Player_at`): each listed bone turns by a pitch
+/// (degrees, positive up) about its own origin in actor (pawn) space, its children following.
+/// `mesh_to_pawn` is the mesh's Origin / RotOrigin transform.
+pub fn apply_look_controls(parents: &[Option<usize>], local: &mut [(Quat, Vec3)], mesh_to_pawn: glam::Mat4, controls: &[(usize, f32)]) {
+    let comp = to_component(parents, local);
+    let (_, m2p_rot, _) = mesh_to_pawn.to_scale_rotation_translation();
+    for &(bone, pitch) in controls {
+        if bone >= local.len() || pitch == 0.0 {
+            continue;
+        }
+        let actor = Quat::from_rotation_y(-pitch.to_radians());
+        let turn = m2p_rot.inverse() * actor * m2p_rot;
+        let new_rot = (turn * comp[bone].0).normalize();
+        let parent_rot = parents.get(bone).copied().flatten().map(|p| comp[p].0).unwrap_or(Quat::IDENTITY);
+        local[bone].0 = (parent_rot.inverse() * new_rot).normalize();
+    }
+}
+
 /// Playable length: the clip's duration, at most its last frame.
 fn clip_len(c: &BakedClip) -> f32 {
     let frames = c.num_frames.saturating_sub(1) as f32 / c.sample_rate.max(1.0);
@@ -363,6 +447,10 @@ pub struct ViewRig {
     upper_body: Vec<bool>,
     left_arm: Vec<bool>,
     cam_bone: usize,
+    /// The bones of `Ply_Player_at`'s look controls: `LookAtControl_RightHand`
+    /// (`Collarbone_R_Jnt`), `LookAtControl_LeftHand` (`Collarbone_L_Jnt`) and
+    /// `LookAtControl_Camera` (`spine_3_jnt`).
+    look_bones: [Option<usize>; 3],
 }
 
 #[derive(Component)]
@@ -572,7 +660,8 @@ pub fn load_view_rig(
     info!("first-person rig: particle notifies on {} sequences", pnotifies.len());
     let arms_gpu = upload(&arms, &mut meshes, &mut images, &mut mats, &mut binds, &feat);
     let bind_pose = bones.iter().map(|b| (b.rotation, b.translation)).collect();
-    commands.insert_resource(ViewRig { arms: arms_gpu, parents: parents(&bones), bones, bind_pose, m2p, weapons, bolts, lib, pnotifies, sockets: rig_sockets, effect_points, upper_body, left_arm, cam_bone });
+    let look_bones = [find("Collarbone_R_Jnt"), find("Collarbone_L_Jnt"), find("spine_3_jnt")];
+    commands.insert_resource(ViewRig { arms: arms_gpu, parents: parents(&bones), bones, bind_pose, m2p, weapons, bolts, lib, pnotifies, sockets: rig_sockets, effect_points, upper_body, left_arm, cam_bone, look_bones });
 }
 
 /// The rig, parented to the game camera and drawn in the main view (see `VIEW_SCALE`).
@@ -845,6 +934,15 @@ fn left_prefix(item: LeftHand) -> Option<&'static str> {
         LeftHand::Pistol | LeftHand::Crossbow | LeftHand::SleepDart | LeftHand::IncendiaryBolt => Some("Guns_"),
         LeftHand::Grenade | LeftHand::StickyGrenade | LeftHand::SpringRazor => Some("Gadgets_"),
         _ => Some("Powers_"),
+    }
+}
+
+/// The left item's arm pitch keys (none for an empty hand: 0x00ACB8D0 returns 0 without an item).
+fn left_arm_pitch_keys(item: LeftHand) -> Option<&'static [(f32, f32)]> {
+    match item {
+        LeftHand::Empty => None,
+        LeftHand::Pistol | LeftHand::Crossbow | LeftHand::SleepDart | LeftHand::IncendiaryBolt => Some(&ARM_PITCH_KEYS_GUN),
+        _ => Some(&ARM_PITCH_KEYS_DEFAULT),
     }
 }
 
@@ -1262,7 +1360,9 @@ pub fn animate_view_rig(
     // [interp] A soiree's player group puts both hands' items away (`StatePlayerMasterSoiree`
     // enter, 0x00a66ff0: both hands blended to 1 through 0x00aa1cf0).
     let held = cutscenes.as_ref().is_some_and(|c| c.held);
-    let shown = view.me.as_ref().filter(|m| m.alive && first_person && m.mode != MoveMode::Blinking && !held);
+    // The rig stays drawn through a Blink's travel: the cast plays `Powers_Cast_Blink_Out` on
+    // the left arm as the move starts, and no Blink code hides the player's mesh (U-781).
+    let shown = view.me.as_ref().filter(|m| m.alive && first_person && !held);
     let Some(me) = shown else {
         if let Some(m) = view.me.as_ref() {
             anim.prev = Some(Prev::of(m));
@@ -1280,6 +1380,9 @@ pub fn animate_view_rig(
         let f = t.rotation * Vec3::NEG_Z;
         f.z.atan2(f.x).to_degrees()
     });
+    // The controller's look pitch (degrees, positive up) from the game camera, before this
+    // frame's view adjustment.
+    let look_pitch = cams.iter().next().map(|(_, t)| (t.rotation * Vec3::NEG_Z).y.clamp(-1.0, 1.0).asin().to_degrees()).unwrap_or(0.0);
     let gameplay = &session.content.sim.gameplay;
     let tuning = CombatTuning::from_config(gameplay);
     let lib = &rig.lib;
@@ -1394,8 +1497,22 @@ pub fn animate_view_rig(
         add_additive(lib, STEP_UP_HEAD, t, false, w, &mut locals);
         a.step_up = (t + dt < len).then_some(t + dt);
     }
+    // The look controls (`Ply_Player_at` SkelControlLists, driven by the pawn's view target
+    // update 0x00AABDD0): both collarbones turn by the look pitch plus their item's arm pitch
+    // offset (`m_ArmFollowOffset_Rot_Primary` / `_Secondary`, 0x00ACB8D0 from the view pitch,
+    // eased by 1 - cos(pi x weight) / 2 at the full weight the player control sets), and
+    // `spine_3_jnt` (the head and the camera bone) by the look pitch alone. The pawn itself
+    // does not pitch while walking or falling.
+    {
+        let right = look_pitch + arm_pitch_offset(&ARM_PITCH_KEYS_DEFAULT, look_pitch);
+        let left = look_pitch + left_arm_pitch_keys(me.left.item).map_or(0.0, |k| arm_pitch_offset(k, look_pitch));
+        let controls: Vec<(usize, f32)> = rig.look_bones.iter().zip([right, left, look_pitch]).filter_map(|(&b, p)| b.map(|b| (b, p))).collect();
+        apply_look_controls(&rig.parents, &mut locals, rig.m2p, &controls);
+    }
     let bones: Vec<BoneAsset> = rig.bones.iter().zip(&locals).map(|(b, (q, t))| BoneAsset { rotation: *q, translation: *t, ..b.clone() }).collect();
     let globals = bind_globals(&bones);
+    // The camera bone without the additives and the look controls: the simulation's eye stands
+    // for it.
     let bones0: Vec<BoneAsset> = rig.bones.iter().zip(&filters(&fb_base)).map(|(b, (q, t))| BoneAsset { rotation: *q, translation: *t, ..b.clone() }).collect();
     let cam0 = rig.m2p * bind_globals(&bones0)[rig.cam_bone];
 
@@ -1447,22 +1564,36 @@ pub fn animate_view_rig(
         let wk: Vec<&str> = a.weapons.iter().map(|w| w.key.as_str()).collect();
         info!("vm fb={} ub={}({:.2}) la={}({:.2}) weapons={:?} {}", a.fb.clip, a.ub.clip, a.ub.weight, a.la.clip, a.la.weight, wk, names.join(" "));
     }
-    // Camera bone frame: forward = -Z, right = +Y, up = +X (pawn space).
+    // The view (0x00AABA60 / 0x00AABB70): at the camera bone (`m_CameraBoneName` camera_jnt,
+    // its frame turned by `DisTweaks_Pawn_Body.m_fBone_AngleOffset_Pitch` -90, i.e. forward =
+    // -Z, right = +Y, up = +X of the bone), looking along the controller's rotation plus
+    // `ROLL_AMOUNT` of the bone's own animated rotation. The arms are drawn where the mesh is,
+    // so they show the rest of the bone's rotation relative to the view.
     let cam = rig.m2p * globals[rig.cam_bone];
-    let v = glam::Mat4::from_cols(-cam.z_axis, cam.y_axis, cam.x_axis, cam.w_axis);
+    let (fwd, right, up) = (-cam.z_axis.truncate(), cam.y_axis.truncate(), cam.x_axis.truncate());
+    let view_rot = view_rotation(fwd, right, up, look_pitch);
+    let v = glam::Mat4::from_rotation_translation(view_rot, cam.w_axis.truncate());
     // Pawn canonical (X fwd, Y right, Z up) in Bevy-converted space -> camera local.
     let a_rot = Mat4::from_quat(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
-    let master_local = a_rot * to_bevy(v).inverse();
-    // The view is the camera bone (`m_CameraBoneName`): the additives' motion of `camera_jnt`
-    // (head bob, the step-up's head) moves the game camera by the bobbed bone relative to the
-    // unbobbed one. The game camera stands for the unbobbed bone.
-    let v0 = glam::Mat4::from_cols(-cam0.z_axis, cam0.y_axis, cam0.x_axis, cam0.w_axis);
-    let master0 = a_rot * to_bevy(v0).inverse();
+    // The lean influence rolls the view (`m_fCameraTiltPercent`), but the arm look controls take
+    // only pitch (0x00AABDD0), so the arms stay level: undo the camera's lean roll on the rig.
+    let lean = dishonored_sim::movement::lean_roll(me, &gameplay.movement).to_radians();
+    let master_local = Mat4::from_rotation_z(lean) * a_rot * to_bevy(v).inverse();
+    // The game camera stands for the camera bone without the additives and the look controls;
+    // the bone's motion from those (head bob, the step-up's head, the look pivot about
+    // `spine_3_jnt`) moves it, and it turns to the view rotation above (and the lean roll).
+    let delta = cam.w_axis.truncate() - cam0.w_axis.truncate();
     let mut cam_world = Mat4::IDENTITY;
     for (_, mut ct) in &mut cams {
-        let bobbed = ct.to_matrix() * master0 * master_local.inverse();
-        *ct = Transform::from_matrix(bobbed);
-        cam_world = bobbed;
+        let f = ct.rotation * Vec3::NEG_Z;
+        let fh = Vec3::new(f.x, 0.0, f.z).try_normalize().unwrap_or(Vec3::NEG_Z);
+        let rh = fh.cross(Vec3::Y);
+        let map = |p: glam::Vec3| fh * p.x + rh * p.y + Vec3::Y * p.z;
+        let (vf, vu) = (view_rot * glam::Vec3::X, view_rot * glam::Vec3::Z);
+        let mut t = Transform::from_translation(ct.translation + map(delta) * crate::coords::UU_TO_BEVY).looking_to(map(vf), map(vu));
+        t.rotate_local_z(-lean);
+        *ct = t;
+        cam_world = t.to_matrix();
     }
     a.master_local = Some(master_local);
     *root_t = Transform::from_matrix(Mat4::from_scale(Vec3::splat(VIEW_SCALE)) * master_local);
