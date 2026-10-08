@@ -79,6 +79,9 @@ pub struct ArkPost {
     pub power_vectors: Vec4,
     /// The field's two noise pans (`Periodic(Time x (0.2, -0.1))`, `Periodic(Time x (-0.15, 0.3))`).
     pub power_pans: Vec4,
+    /// Dark Vision's eyelid pass (`power_pp.rs`): (on, Alpha, 0, 0) and `EyeLidColor`.
+    pub dv_eyelid: Vec4,
+    pub dv_lid_color: Vec4,
 }
 
 /// Inputs kept on the camera so the uniform can be rebuilt (display gamma setting).
@@ -96,6 +99,8 @@ pub struct ArkPostSource {
     /// Bend Time's post effect (`power_pp.rs`): intensity 0..1 and the dilated material time.
     pub bend: f32,
     pub bend_time: f32,
+    /// Dark Vision's eyelid pass: Some(Alpha) while it runs.
+    pub eyelid: Option<f32>,
 }
 
 fn post_value(p: Option<&PostSettings>, key: &str) -> Option<f32> {
@@ -117,6 +122,11 @@ impl ArkPostSource {
             let fr = |x: f32| x - x.floor();
             u.power_vectors = Vec4::new(self.bend, crate::power_pp::BEND_VECTOR_SCALE, 0.0, 0.0);
             u.power_pans = Vec4::new(fr(t * 0.2), fr(t * -0.1), fr(t * -0.15), fr(t * 0.3));
+        }
+        if let Some(a) = self.eyelid {
+            u.dv_eyelid = Vec4::new(1.0, a, 0.0, 0.0);
+            let c = crate::power_pp::EYELID_COLOR;
+            u.dv_lid_color = Vec4::new(c[0], c[1], c[2], 1.0);
         }
         // A power's grade: the LUT terms of the overridden settings, blended by its weight
         // (the colour pipeline is on while it shows).
@@ -187,6 +197,8 @@ impl ArkPostSource {
             },
             power_vectors: Vec4::ZERO,
             power_pans: Vec4::ZERO,
+            dv_eyelid: Vec4::ZERO,
+            dv_lid_color: Vec4::ZERO,
         };
         if self.fog_on {
             // The sun layer goes first (only layer 0 gets the sun lobe in the shader).

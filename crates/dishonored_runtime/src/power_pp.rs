@@ -24,6 +24,32 @@ pub const BEND_VECTOR_SCALE: f32 = 50.0;
 pub const BEND_POST_WARMUP: f32 = 0.5;
 pub const BEND_POST_COOLDOWN: f32 = 0.5;
 
+/// `PPG_EyeLidFinal_Mat` / `PPG_DarkVisionFinal_Mat` `EyeLidColor` default (0.392, 0.333, 0.275).
+pub const EYELID_COLOR: [f32; 3] = [0.392, 0.333, 0.275];
+/// `Twk_DarkVision` `m_PpPerLevelParameters`: `m_EyeLidClosingDuration`, `m_EyeLidOpeningDuration`.
+pub const EYELID_CLOSE: f32 = 0.05;
+pub const EYELID_OPEN: f32 = 0.1;
+
+/// The eyelid pass's `Alpha` `t` seconds after the lids start a blink (shut over the closing
+/// time, open over the opening time), or None once the blink is over.
+pub fn eyelid_alpha(t: f32) -> Option<f32> {
+    if t < EYELID_CLOSE {
+        Some(1.0 - t / EYELID_CLOSE)
+    } else if t < EYELID_CLOSE + EYELID_OPEN {
+        Some((t - EYELID_CLOSE) / EYELID_OPEN)
+    } else {
+        None
+    }
+}
+
+/// Dark Vision's eyelid state: a blink when the power turns on and when it turns off; the pass
+/// runs (Alpha 1, the gradient's vignette) while the power is on.
+#[derive(Default)]
+struct EyelidState {
+    on: bool,
+    blink: Option<f32>,
+}
+
 /// The field's textures, extracted for the post pass.
 #[derive(Resource, Clone, Default, ExtractResource)]
 pub struct PowerPpImages {
@@ -65,8 +91,27 @@ pub fn bend_intensity(elapsed: f32, duration: f32) -> f32 {
     up.min(down)
 }
 
-fn drive(view: Option<Res<SessionView>>, time: Res<Time>, mut q: Query<&mut ArkPostSource>) {
+fn drive(view: Option<Res<SessionView>>, time: Res<Time>, mut lids: Local<EyelidState>, mut q: Query<&mut ArkPostSource>) {
     let me = view.as_ref().and_then(|v| v.me.as_ref());
+    // Dark Vision's eyelids (LIKELY: the blink on both edges; the capture shows the pass only
+    // while the power is on, with its constants not recorded).
+    let dv_on = me.is_some_and(|m| m.vitals.dark_vision_remaining > 0.0);
+    if dv_on != lids.on {
+        lids.on = dv_on;
+        lids.blink = Some(0.0);
+    }
+    let blink_alpha = lids.blink.and_then(eyelid_alpha);
+    if let Some(t) = lids.blink.as_mut() {
+        *t += time.delta_secs();
+    }
+    if blink_alpha.is_none() {
+        lids.blink = None;
+    }
+    let eyelid = match blink_alpha {
+        Some(a) => Some(a),
+        None if dv_on => Some(1.0),
+        None => None,
+    };
     let bend = match (view.as_ref(), me) {
         (Some(v), Some(me)) => v.time_bends.iter().find(|b| b.caster == me.id).map(|b| bend_intensity(b.elapsed, b.duration)).unwrap_or(0.0),
         _ => 0.0,
@@ -77,6 +122,9 @@ fn drive(view: Option<Res<SessionView>>, time: Res<Time>, mut q: Query<&mut ArkP
         src.bend_time = if t > 1.0e4 { t - 1.0e4 } else { t };
         if src.bend != bend {
             src.bend = bend;
+        }
+        if src.eyelid != eyelid {
+            src.eyelid = eyelid;
         }
     }
 }

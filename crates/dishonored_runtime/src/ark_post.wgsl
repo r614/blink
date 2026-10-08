@@ -31,6 +31,9 @@ struct ArkPost {
     // Bend Time (power_pp.rs): (intensity, vector scale, 0, 0) and the two noise pans.
     power_vectors: vec4<f32>,
     power_pans: vec4<f32>,
+    // Dark Vision's eyelid pass: (on, Alpha, 0, 0) and EyeLidColor.
+    dv_eyelid: vec4<f32>,
+    dv_lid_color: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> view: View;
@@ -245,6 +248,14 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // Bend Time's blur (Test_PPG `BendTimeSwitch` -> `ArkPpNodeBlur`), on the fogged scene.
     if (ark.power_vectors.x > 0.0) {
         colour = bend_blur(in.uv);
+    }
+    // Dark Vision's eyelid pass (`PPG_EyeLidFinal_Mat` / `PPG_DarkVisionFinal_Mat`, captured shader
+    // 0x3c1c89ab574a7626): the scene (souls already blended in) x fxt_eyelid_gradient.g, faded
+    // towards EyeLidColor by saturate(gradient.r - (1 - 2 Alpha)); Alpha 0 = lids shut.
+    if (ark.dv_eyelid.x > 0.5) {
+        let g = textureSampleLevel(field_mask, source_sampler, in.uv, 0.0);
+        let k = clamp(g.r - (1.0 - 2.0 * ark.dv_eyelid.y), 0.0, 1.0);
+        colour = mix(ark.dv_lid_color.rgb, g.g * colour, k);
     }
     if (ark.misc.z < 0.5) {
         return vec4<f32>(colour, src.a);
