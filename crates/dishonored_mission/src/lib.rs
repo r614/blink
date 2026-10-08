@@ -119,14 +119,21 @@ pub struct MissionSettings {
     pub respawn_delay: f32,
     /// Seconds; 0 = none. Running out fails the mission.
     pub time_limit: f32,
-    /// Fraction of mission NPCs + crowd killed above which chaos is reported High
-    /// (APPROXIMATION of Dishonored's kill-ratio chaos).
-    pub high_chaos_kill_ratio: f32,
+    /// The chaos score the mission starts with: the game keeps one `DisDarknessManager` score
+    /// across missions (serialized, 0x00C52CA0), so a campaign hands the previous mission's
+    /// score in here.
+    #[serde(default)]
+    pub darkness: i32,
+    /// The chaos level from which the HUD reports chaos "High" when the mission's Kismet has
+    /// not set one (`DisSeqAct_MissionStatsTracking.m_ChaosLevelThreshold`, 0x009FE090:
+    /// `level >= threshold` is High). None: Low until the Kismet sets it.
+    #[serde(default)]
+    pub chaos_level_threshold: Option<i32>,
 }
 
 impl Default for MissionSettings {
     fn default() -> Self {
-        Self { respawn: false, respawn_delay: 5.0, time_limit: 0.0, high_chaos_kill_ratio: 0.2 }
+        Self { respawn: false, respawn_delay: 5.0, time_limit: 0.0, darkness: 0, chaos_level_threshold: None }
     }
 }
 

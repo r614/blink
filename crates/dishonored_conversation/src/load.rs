@@ -514,6 +514,7 @@ impl Loader {
                     quantity: (class == "DisConv_HasAbstractItem").then(|| pint(&props, "m_Quantity", 0)),
                 },
                 "DisConv_IsSpeakerAvailable" => NodeKind::SpeakerAvailable,
+                "DisConv_CompareDarknessLevel" => NodeKind::CompareDarknessLevel { level: pint(&props, "m_LevelToCompare", 0) },
                 "DisConv_SpeakerInStoryGroup" | "DisConv_SpeakerHasTweaks" | "DisConv_FactionBranch" | "DisConv_SpawnerBranch" | "DisConv_SpeakerSupportsDialogTree" => {
                     let kind = match class.as_str() {
                         "DisConv_SpeakerInStoryGroup" => GroupKind::StoryGroup,

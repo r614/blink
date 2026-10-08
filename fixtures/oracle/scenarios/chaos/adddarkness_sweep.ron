@@ -1,0 +1,38 @@
+// Chaos score and level (research/dishonored/systems/world.md 2.1): the cheat `adddarkness N`
+// (DishonoredCheatManager slot 300, 0x00B753A0) calls the darkness manager's Add (0x00C41B50:
+// score = max(0, score + N)); the level (0x00C487D0) is the largest i with score >=
+// m_DarknessLevels[i] = 0, 12, 48, 72, 96, 114, 138, 162, 168, 200, 390.
+(
+    name: "chaos/adddarkness_sweep",
+    system: Chaos,
+    map: "Playground",
+    description: "From score 0, add -50, then step the score to 11, 12, 47, 48, 389, 390 and read the level after each.",
+    setup: (player: Some((position: (0, -5300, 92), yaw: 90)), settle: 5),
+    ticks: 20,
+    input: [
+        (tick: 2, action: Console("adddarkness -50")),
+        (tick: 4, action: Console("adddarkness 11")),
+        (tick: 6, action: Console("adddarkness 1")),
+        (tick: 8, action: Console("adddarkness 35")),
+        (tick: 10, action: Console("adddarkness 1")),
+        (tick: 12, action: Console("adddarkness 341")),
+        (tick: 14, action: Console("adddarkness 1")),
+    ],
+    checkpoints: [
+        (name: "clamped at 0", expect: [
+            (metric: At("darkness.score", 3), value: 0, tol: 0, source: "0x00C41B50 clamps the sum at 0", status: Static),
+            (metric: At("darkness.level", 3), value: 0, tol: 0, source: "m_DarknessLevels[0] = 0 (0x00C487D0)", status: Static),
+        ]),
+        (name: "11 -> level 0", expect: [(metric: At("darkness.level", 5), value: 0, tol: 0, source: "11 < m_DarknessLevels[1] = 12", status: Static)]),
+        (name: "12 -> level 1", expect: [(metric: At("darkness.level", 7), value: 1, tol: 0, source: "12 >= m_DarknessLevels[1]", status: Static)]),
+        (name: "47 -> level 1", expect: [(metric: At("darkness.level", 9), value: 1, tol: 0, source: "47 < m_DarknessLevels[2] = 48", status: Static)]),
+        (name: "48 -> level 2", expect: [(metric: At("darkness.level", 11), value: 2, tol: 0, source: "48 >= m_DarknessLevels[2]", status: Static)]),
+        (name: "389 -> level 9", expect: [(metric: At("darkness.level", 13), value: 9, tol: 0, source: "200 <= 389 < 390 (m_DarknessLevels[9], [10])", status: Static)]),
+        (name: "390 -> level 10", expect: [
+            (metric: At("darkness.level", 15), value: 10, tol: 0, source: "390 >= m_DarknessLevels[10]", status: Static),
+            (metric: Final("darkness.score"), value: 390, tol: 0, source: "-50 clamped, then 11 + 1 + 35 + 1 + 341 + 1", status: Static),
+        ]),
+    ],
+    record: [Pawn, SimEvents],
+    capture: Some("session: debugdarkness, then adddarkness -50 / 11 / 1 / 35 / 1 / 341 / 1, read DisDarknessManager.m_DarknessScore (+0x38) and the level after each (U-W1)"),
+)

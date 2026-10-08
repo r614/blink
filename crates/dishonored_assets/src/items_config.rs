@@ -12,6 +12,9 @@ use std::collections::BTreeMap;
 
 const CORVO: &str = "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release";
 const NORMAL: &str = "m_fBaseValue2_Normal";
+/// The rig whose physics bodies classify projectile hits: the elite guard's
+/// (`Pwn_EliteGuard_*` `m_pPhysicsAsset`), as (package, physics asset, skeletal mesh).
+const HIT_RIG: (&str, &str, &str) = ("L_Boyle_Ext_Script", "Npc_EliteGuard.Physics.Skm_EliteGuard_Physics", "Npc_EliteGuard.Mesh.Skm_EliteGuard_Body");
 
 struct L<'a> {
     db: &'a TweakDb,
@@ -49,7 +52,17 @@ fn costs(m: &TMap, d: [i32; 2]) -> [i32; 2] {
     [c("m_RuneCosts", d[0]), c("m_RuneCosts[1]", d[1])]
 }
 
-pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<String, String>) -> ItemsConfig {
+/// An `EAINoiseLoudness` field of a tweak as a distance (`loudness`: DefaultAI.ini
+/// `m_LoudnessDistanceArray`, indexed by the enum).
+pub fn loudness_radius(m: &TMap, field: &str, loudness: &[f32]) -> Option<f32> {
+    match get(m, field)? {
+        TVal::Name(n) => crate::ai_level::LOUDNESS_NAMES.iter().position(|x| x == n).and_then(|i| loudness.get(i).copied()),
+        TVal::I(v) => loudness.get(*v as usize).copied(),
+        _ => None,
+    }
+}
+
+pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<String, String>, loudness: &[f32]) -> ItemsConfig {
     let mut l = L { db, prov };
     let mut cfg = ItemsConfig::default();
 
@@ -91,6 +104,7 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
     let xbow = "Twk_Inv_PlayerSpecific.Twk_Inv_CrossbowCorvo.DisTweaks_InventoryItem_Attributes_21";
     let xbow_m = l.obj(xbow);
     inv.crossbow_ranged_damage = l.attr(&xbow_m, xbow, "m_RangedDamage", "items.inventory.crossbow_ranged_damage", d.crossbow_ranged_damage);
+    inv.crossbow_headshot_mult = l.attr(&xbow_m, xbow, "m_RangedHeadshotMultiplier", "items.inventory.crossbow_headshot_mult", d.crossbow_headshot_mult);
     let pistol = "Twk_Inv_PlayerSpecific.Twk_Inv_PistolCorvo.DisTweaks_InventoryItem_Attributes_25";
     let pistol_m = l.obj(pistol);
     inv.pistol_ranged_damage = l.attr(&pistol_m, pistol, "m_RangedDamage", "items.inventory.pistol_ranged_damage", d.pistol_ranged_damage);
@@ -245,6 +259,12 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
             min_delay_after_hit: l.f(&cm, comp, "m_fMinDetonationDelayAfterHit", &format!("{pre}.min_delay_after_hit"), d.min_delay_after_hit),
             bounciness: get_f32(&pm, "m_fBounciness").unwrap_or(d.bounciness),
             floor_bounciness: get_f32(&pm, "m_fFloorBounciness").unwrap_or(if sticky { 0.0 } else { d.floor_bounciness }),
+            bounce_damping: l.f(&pm, proj, "m_fBounceDamping", &format!("{pre}.bounce_damping"), d.bounce_damping),
+            floor_bounce_damping: l.f(&pm, proj, "m_fFloorBounceDamping", &format!("{pre}.floor_bounce_damping"), if sticky { 0.0 } else { d.floor_bounce_damping }),
+            body_bounciness: l.f(&pm, proj, "m_fBodyBounciness", &format!("{pre}.body_bounciness"), if sticky { 0.0 } else { d.body_bounciness }),
+            body_bounce_damping: l.f(&pm, proj, "m_fBodyBounceDamping", &format!("{pre}.body_bounce_damping"), if sticky { 0.0 } else { d.body_bounce_damping }),
+            rest_z_threshold: l.f(&pm, proj, "m_fRigidBodyZMagThreshold", &format!("{pre}.rest_z_threshold"), if sticky { 0.0 } else { d.rest_z_threshold }),
+            sink_distance: l.f(&pm, proj, "m_fSinkDistance", &format!("{pre}.sink_distance"), if sticky { d.sink_distance } else { 0.0 }),
             sticky,
             explosion: ExplosionConfig {
                 radial_damage: l.f(&em, &expl_path, &format!("m_RadialDamage.{NORMAL}"), &format!("{pre}.explosion.radial_damage"), de.radial_damage),
@@ -255,6 +275,11 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
                 radial_momentum: l.f(&em, &expl_path, "m_fRadialMomentum", &format!("{pre}.explosion.radial_momentum"), de.radial_momentum),
                 extra_up_force: l.f(&em, &expl_path, "m_fExtraUpForce", &format!("{pre}.explosion.extra_up_force"), de.extra_up_force),
                 attached_damage: l.f(&em, &expl_path, "m_fAttachedDamage", &format!("{pre}.explosion.attached_damage"), de.attached_damage),
+                ai_noise_radius: {
+                    let r = loudness_radius(&em, "m_AINoiseLoudness", loudness).unwrap_or(de.ai_noise_radius);
+                    l.prov.insert(format!("{pre}.explosion.ai_noise_radius"), format!("{expl_path} :: m_AINoiseLoudness -> m_LoudnessDistanceArray = {r}"));
+                    r
+                },
             },
         }
     };
@@ -269,6 +294,8 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
             gravity_mult: l.f(&m, path, "m_fGravityMultiplier", &format!("{pre}.gravity_mult"), d.gravity_mult),
             limb_damage_cap: l.f(&m, path, "m_fLegsAndArmsDamageCap", &format!("{pre}.limb_damage_cap"), d.limb_damage_cap),
             kill_on_headshot: get(&m, "m_bKillOnHeadshot").map(|v| matches!(v, TVal::B(true))).unwrap_or(d.kill_on_headshot),
+            // Absent on the dart and the flare: the `DisTweaks_Arrow` class default 1.0.
+            stealth_mult: l.f(&m, path, "m_fDamageMultiplier_Stealth", &format!("{pre}.stealth_mult"), 1.0),
         }
     };
     let dg = GadgetConfig::default();
@@ -277,6 +304,17 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
     g.incendiary_bolt = bolt(&mut l, "Twk_Projectiles.Twk_Proj_Arrow_Flare", "incendiary_bolt", dg.incendiary_bolt);
     let flare = l.obj("Twk_Projectiles.Twk_Proj_Arrow_Flare");
     g.immolation_time = l.f(&flare, "Twk_Projectiles.Twk_Proj_Arrow_Flare", "m_fNPCImmolationTime", "items.gadgets.immolation_time", dg.immolation_time);
+
+    // --- hit bodies (projectile hit regions, research/dishonored/systems/ranged.md F4) ---
+    match crate::npc_anim::load_hit_bodies(content, HIT_RIG.0, HIT_RIG.1, HIT_RIG.2) {
+        Ok(h) => {
+            l.prov.insert("items.hit_bodies".into(), format!("{} + {} ({}), bind pose, {} bodies", HIT_RIG.1, HIT_RIG.2, HIT_RIG.0, h.bodies.len()));
+            cfg.hit_bodies = h;
+        }
+        Err(e) => {
+            l.prov.insert("items.hit_bodies".into(), format!("not decoded ({e:#}): the sim's capsule-height rule"));
+        }
+    }
 
     // --- rune costs of the active powers ---
     for (name, path) in [
@@ -314,28 +352,129 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
     // --- bone charms ---
     if let Some(TVal::Obj(list)) = get(&corvo, "m_pCharmListTweaks") {
         let m = l.obj(list);
-        if let Some(TVal::List(charms)) = m.get("m_Charms") {
-            for c in charms {
-                let attribute = match c.get("m_AttributeName") {
-                    Some(TVal::Name(n)) => n.clone(),
-                    _ => continue,
-                };
-                let mut name = String::new();
-                let mut values = Vec::new();
-                if let Some(TVal::List(levels)) = c.get("m_Levels") {
-                    for lv in levels {
-                        if name.is_empty() {
-                            if let Some(TVal::Str(s)) = lv.get("m_Name") {
-                                name = s.trim().to_string();
+        let read = |key: &str| -> Vec<BoneCharm> {
+            let mut out = Vec::new();
+            if let Some(TVal::List(charms)) = m.get(key) {
+                for c in charms {
+                    let attribute = match c.get("m_AttributeName") {
+                        Some(TVal::Name(n)) => n.clone(),
+                        _ => continue,
+                    };
+                    let mut name = String::new();
+                    let mut values = Vec::new();
+                    if let Some(TVal::List(levels)) = c.get("m_Levels") {
+                        for lv in levels {
+                            if name.is_empty() {
+                                if let Some(TVal::Str(s)) = lv.get("m_Name") {
+                                    name = s.trim().to_string();
+                                }
                             }
+                            values.push(get_f32(lv, "m_fValue").unwrap_or(0.0));
                         }
-                        values.push(get_f32(lv, "m_fValue").unwrap_or(0.0));
                     }
+                    out.push(BoneCharm { name, attribute, values });
                 }
-                cfg.charms.push(BoneCharm { name, attribute, values });
+            }
+            out
+        };
+        cfg.charms = read("m_Charms");
+        cfg.scripted_charms = read("m_ScriptedCharms");
+        l.prov.insert("items.charms".into(), format!("{list} :: m_Charms ({} charms)", cfg.charms.len()));
+        l.prov.insert("items.scripted_charms".into(), format!("{list} :: m_ScriptedCharms ({} charms)", cfg.scripted_charms.len()));
+    }
+
+    // --- chaos: `m_DarknessLevels` (TArray<int>, read raw) and `m_Deeds` ---
+    let dd = DarknessConfig::default();
+    match l.db.int_array(CORVO, "m_DarknessLevels") {
+        Some(v) if !v.is_empty() => {
+            l.prov.insert("items.darkness.levels".into(), format!("{CORVO} :: m_DarknessLevels = {v:?}"));
+            cfg.darkness.levels = v;
+        }
+        _ => {
+            l.prov.insert("items.darkness.levels".into(), format!("{CORVO} :: m_DarknessLevels absent, original table {:?}", dd.levels));
+        }
+    }
+    if let Some(TVal::List(deeds)) = corvo.get("m_Deeds") {
+        let name_of = |m: &TMap| match get(m, "m_TweaksName") {
+            Some(TVal::Name(n)) if n != "None" && !n.is_empty() => Some(n.clone()),
+            _ => None,
+        };
+        cfg.darkness.deeds = deeds
+            .iter()
+            .map(|d| DarknessDeed {
+                stat: match d.get("m_Stat") {
+                    Some(TVal::Name(n)) => n.clone(),
+                    _ => String::new(),
+                },
+                threshold: get_f32(d, "m_Threshold").unwrap_or(0.0) as i32,
+                value: get_f32(d, "m_Value").unwrap_or(0.0) as i32,
+                tweak: match d.get("m_TweaksNamePair") {
+                    Some(TVal::Struct(p)) => name_of(p),
+                    _ => None,
+                },
+                excluded: match d.get("m_ExcludedTweaksNamePairs") {
+                    Some(TVal::List(x)) => x.iter().filter_map(name_of).collect(),
+                    _ => Vec::new(),
+                },
+            })
+            .collect();
+        l.prov.insert("items.darkness.deeds".into(), format!("{CORVO} :: m_Deeds ({} deeds)", cfg.darkness.deeds.len()));
+    } else {
+        l.prov.insert("items.darkness.deeds".into(), format!("{CORVO} :: m_Deeds absent, original table ({} deeds)", dd.deeds.len()));
+    }
+
+    // --- combat save rules (`DisTweaks_PlayerPawn_Combat`) ---
+    let cp = format!("{CORVO}.pCombatTweaks");
+    let cm = l.obj(&cp);
+    let dc = CombatSaveConfig::default();
+    let flag = |m: &TMap, k: &str, d: bool| match get(m, k) {
+        Some(TVal::B(b)) => *b,
+        _ => d,
+    };
+    cfg.combat_save = CombatSaveConfig {
+        disable_manual_save: flag(&cm, "m_bDisableManualSaveInCombat", dc.disable_manual_save),
+        disable_autosave: flag(&cm, "m_bDisableAutosaveInCombat", dc.disable_autosave),
+        after_combat_time: l.f(&cm, &cp, "m_fDisableManualSaveAfterCombatTime_s", "items.combat_save.after_combat_time", dc.after_combat_time),
+    };
+    l.prov.insert("items.combat_save".into(), format!("{cp} :: m_bDisableManualSaveInCombat / m_bDisableAutosaveInCombat = {:?}", cfg.combat_save));
+
+    // --- Piero's workshop (`DisTweaks_Store`, cooked into L_Pub_Craftsman) ---
+    if let Ok(sdb) = TweakDb::load_with(content, &["L_Pub_Craftsman".to_string()]) {
+        let sp = "Stores_Twk.Stores.Twk_Store_Craftsman";
+        let sm = sdb.try_resolve(sp).unwrap_or_default();
+        let obj = |m: &TMap, k: &str| match m.get(k) {
+            Some(TVal::Obj(o)) => o.clone(),
+            _ => String::new(),
+        };
+        if let Some(TVal::List(items)) = sm.get("m_StoreItems") {
+            for it in items {
+                let cost = match it.get("m_Cost") {
+                    Some(TVal::List(c)) => c.iter().map(|c| (obj(c, "m_Type"), get_f32(c, "m_Quantity").unwrap_or(0.0) as i32)).collect(),
+                    _ => Vec::new(),
+                };
+                let prerequisites = match it.get("m_Prerequisites") {
+                    Some(TVal::List(p)) => p.iter().map(|p| obj(p, "obj")).filter(|s| !s.is_empty()).collect(),
+                    _ => Vec::new(),
+                };
+                cfg.store.items.push(StoreItem {
+                    name: match it.get("m_Name") {
+                        Some(TVal::Str(s)) => s.clone(),
+                        _ => String::new(),
+                    },
+                    section: get_f32(it, "m_SubSectionIndex").unwrap_or(0.0) as i32,
+                    item: obj(it, "m_Item"),
+                    additional: obj(it, "m_AdditionalItem"),
+                    cost,
+                    prerequisites,
+                    visibility_prereq: get_f32(it, "m_VisibilityPrereqIdx").unwrap_or(-1.0) as i32,
+                    output: match it.get("m_OutputLinkOnPurchase") {
+                        Some(TVal::Str(s)) => s.clone(),
+                        _ => String::new(),
+                    },
+                });
             }
         }
-        l.prov.insert("items.charms".into(), format!("{list} :: m_Charms ({} charms)", cfg.charms.len()));
+        l.prov.insert("items.store".into(), format!("L_Pub_Craftsman {sp} :: m_StoreItems ({} items)", cfg.store.items.len()));
     }
 
     // --- passive powers: DishonoredPowersComponent.m_Powers in DefaultPlayer.ini ---

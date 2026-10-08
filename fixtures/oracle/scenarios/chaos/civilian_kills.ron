@@ -1,0 +1,41 @@
+// Chaos from civilian kills (research/dishonored/systems/world.md 2.1): the kill report
+// (0x00B73990) raises NumKills with the victim's tweak; deed 0 (m_Deeds[0]: NumKills,
+// m_Threshold 1, m_Value 6, victim Pwn_Civ_Base minus the weepers) adds 6 per civilian, and the
+// level reaches 1 at m_DarknessLevels[1] = 12. The port's scenario civilians are mission NPCs,
+// whose victim tweak is their role's base tweak (Pwn_Civ_Base). Kills by back assassination
+// (combat/melee_assassinate_back_d120).
+(
+    name: "chaos/civilian_kills",
+    system: Chaos,
+    map: "Playground",
+    description: "Assassinate two civilians from behind: the chaos score is 6 after the first and 12 (level 1) after the second.",
+    setup: (
+        player: Some((position: (-5300, 0, 96), yaw: 180, pitch: 0)),
+        npcs: [
+            (id: Some("civ1"), kind: Some("Civilian"), position: Some((-5420, 0, 92)), yaw: 180, state: Some("Passive")),
+            (id: Some("civ2"), kind: Some("Civilian"), position: Some((-5420, 800, 92)), yaw: 180, state: Some("Passive")),
+        ],
+        settle: 30,
+    ),
+    ticks: 420,
+    input: [
+        (tick: 5, action: Press(Primary)),
+        (tick: 200, action: Console("teleport -5300 800 96 180")),
+        (tick: 210, action: Press(Primary)),
+    ],
+    checkpoints: [
+        (name: "start", expect: [(metric: At("darkness.score", 0), value: 0, tol: 0, source: "new game: m_DarknessScore 0", status: Static)]),
+        (name: "first kill", expect: [
+            (metric: Count("Sim:Death@civ1"), value: 1, tol: 0, source: "setup: the assassination kills (combat/melee_assassinate_back_d120)", status: Static),
+            (metric: At("darkness.score", 195), value: 6, tol: 0, source: "deed 0: threshold 1, value 6 (Twk_Pawn_Corvo_Release m_Deeds[0]; 0x00C4D2C0)", status: Static),
+            (metric: At("darkness.level", 195), value: 0, tol: 0, source: "6 < m_DarknessLevels[1] = 12", status: Static),
+        ]),
+        (name: "second kill", expect: [
+            (metric: Count("Sim:Death@civ2"), value: 1, tol: 0, source: "setup", status: Static),
+            (metric: Final("darkness.score"), value: 12, tol: 0, source: "2 x deed 0", status: Static),
+            (metric: Final("darkness.level"), value: 1, tol: 0, source: "12 >= m_DarknessLevels[1] (0x00C487D0)", status: Static),
+        ]),
+    ],
+    record: [Pawn, Npc("civ1"), Npc("civ2"), SimEvents],
+    capture: Some("session: two unaware civilians (Pwn_Civ_Base descendants, not weepers); assassinate each, read DisDarknessManager +0x38 (score) and the level after each"),
+)

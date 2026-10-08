@@ -74,6 +74,11 @@ pub trait ConvEnv {
     fn npc_spawner(&self, _npc: &str) -> Option<String> {
         None
     }
+    /// The game's chaos level (`DisDarknessManager`, 0x00C487D0) for
+    /// `DisConv_CompareDarknessLevel`.
+    fn darkness_level(&self) -> i32 {
+        0
+    }
     /// Distance between a player and an NPC; None = unknown.
     fn distance(&self, _player: Option<u32>, _npc: Option<&str>) -> Option<f32> {
         None
@@ -971,6 +976,14 @@ impl Runner {
             NodeKind::SpeakerAvailable => {
                 let npc = self.speaker_of(idx, node).npc;
                 Step::Out(env.speaker_available(npc.as_deref()) as usize)
+            }
+            NodeKind::CompareDarknessLevel { level } => {
+                let cur = env.darkness_level();
+                Step::Out(match cur.cmp(level) {
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Less => 1,
+                    std::cmp::Ordering::Greater => 2,
+                })
             }
             NodeKind::GroupBranch { kind, entries, groups } => {
                 let n = if entries.is_empty() { node.outputs.len().saturating_sub(1).max(groups.len()) } else { entries.len() };

@@ -43,7 +43,7 @@ MissionDef(
     ],
 
     player_start: "start",
-    settings: MissionSettings(respawn: false, respawn_delay: 5.0, time_limit: 0.0, high_chaos_kill_ratio: 0.2),
+    settings: MissionSettings(respawn: false, respawn_delay: 5.0, time_limit: 0.0),
 
     rules: [
         RuleDef(on: Start, then: [Message("Guests at the Gate")]),

@@ -191,11 +191,38 @@ pub struct CombatTuning {
     pub drop_assassination_min_fall_speed: f32,
 
     // --- pistol (CONFIRMED: Twk_Proj_Bullet) ---
+    /// `(int)Attribute_RangedDamage` of the pistol (the projectile's `m_Damage`, set by the
+    /// fire 0x00C2A3E0) plus the bullet tweak's `m_fDamage` (0x00C29820:
+    /// `cvtsi2ss [this+0x27C]; addss [tweak+0xE8]`): 10 + 20.
     pub bullet_damage: f32,
     pub bullet_speed: f32,
     pub bullet_headshot_mult: f32,
+    /// `m_fCloseRange` / `m_fDamageMultiplier_CloseRange` (distance from the spawn point
+    /// strictly below the range), `m_fLongRange` / `m_fDamageMultiplier_LongRange` (strictly
+    /// above), `m_fDamageMultiplier_Stealth` (any awareness but `InCombat`), 0x00C29820.
     pub bullet_close_range: f32,
     pub bullet_close_mult: f32,
+    #[serde(default)]
+    pub bullet_long_range: f32,
+    #[serde(default)]
+    pub bullet_long_mult: f32,
+    #[serde(default)]
+    pub bullet_stealth_mult: f32,
+    /// `m_fPiercingChance` and `m_fPostPiercingDamageRatio` (0x00C3A660, 0x00C29820).
+    #[serde(default)]
+    pub bullet_pierce_chance: f32,
+    #[serde(default)]
+    pub bullet_post_pierce_ratio: f32,
+    /// `DisTweaks_FirePistol.m_fBulletSpawnDistance` / `DisTweaks_FireCrossbow.m_fArrowSpawnDistance`
+    /// (`+0x420` of the fire tweak): the projectile starts this far in front of the camera
+    /// (0x00C2A3E0, 0x00C38230).
+    #[serde(default)]
+    pub bullet_spawn_distance: f32,
+    #[serde(default)]
+    pub bolt_spawn_distance: f32,
+    /// `m_AINoiseLoudnessWhenFiring` of the pistol as a distance (`EAINoiseLoudness4`, 6000).
+    #[serde(default)]
+    pub pistol_noise_radius: f32,
     pub pistol_reserve: u16,
     // pistol timings (LIKELY: Ply_Pistol_as / Ply_Guns_as / CorvoGun_Mag_as notifies)
     pub pistol_equip: f32,
@@ -242,6 +269,14 @@ pub struct CombatTuning {
     /// `DisTweaks_Arrow.m_fLegsAndArmsDamageCap` (CONFIRMED data; limb hits are not
     /// modelled, the sim has head and body only).
     pub bolt_limb_damage_cap: f32,
+    /// The hit rules of the bolt, the sleep dart and the incendiary bolt, in that order
+    /// (`DisProjectile_Arrow` damage 0x00C503D0 over the base 0x00C4A310).
+    #[serde(default)]
+    pub arrows: [ArrowDamage; 3],
+    /// `(int)Attribute_RangedHeadshotMultiplier` of the crossbow (`(int)1.2` = 1): the
+    /// projectile's headshot factor (0x00C38230), used when it does not kill on a headshot.
+    #[serde(default)]
+    pub bolt_headshot_mult: f32,
     pub crossbow_reserve: u16,
     pub crossbow_equip: f32,
     /// Whole normal reload (see `crossbow_reload_stages`).
@@ -291,6 +326,15 @@ pub struct CombatTuning {
     pub pistol_dispersion: DispersionTuning,
     #[serde(default)]
     pub crossbow_dispersion: DispersionTuning,
+}
+
+/// One crossbow projectile's hit rules (`DisTweaks_Arrow`): `m_fDamageMultiplier_Stealth`,
+/// `m_fLegsAndArmsDamageCap`, `m_bKillOnHeadshot`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+pub struct ArrowDamage {
+    pub stealth_mult: f32,
+    pub limb_cap: f32,
+    pub kill_on_headshot: bool,
 }
 
 /// A ranged weapon's dispersion: `Attribute_DispersionMax` / `Min` /
@@ -358,11 +402,20 @@ impl CombatTuning {
             back_half_angle: 60.0,
             drop_assassination_min_fall_speed: 300.0,
 
-            bullet_damage: v(pb, "projectile.m_fDamage", 20.0),
+            bullet_damage: c.items.inventory.pistol_ranged_damage.trunc() + v(pb, "projectile.m_fDamage", 20.0),
             bullet_speed: v(pb, "projectile.m_fSpeed", 100000.0),
             bullet_headshot_mult: v(pb, "projectile.m_fDamageMultiplier_Headshot", 3.0),
             bullet_close_range: v(pb, "projectile.m_fCloseRange", 400.0),
             bullet_close_mult: v(pb, "projectile.m_fDamageMultiplier_CloseRange", 1.5),
+            bullet_long_range: v(pb, "projectile.m_fLongRange", 1500.0),
+            bullet_long_mult: v(pb, "projectile.m_fDamageMultiplier_LongRange", 1.0),
+            bullet_stealth_mult: v(pb, "projectile.m_fDamageMultiplier_Stealth", 1.0),
+            bullet_pierce_chance: v(pb, "projectile.m_fPiercingChance", 1.0),
+            bullet_post_pierce_ratio: v(pb, "projectile.m_fPostPiercingDamageRatio", 0.5),
+            bullet_spawn_distance: v(pb, "fire.m_fBulletSpawnDistance", 150.0),
+            bolt_spawn_distance: v(cb, "fire.m_fArrowSpawnDistance", 150.0),
+            // `EAINoiseLoudness4` = `m_LoudnessDistanceArray[15]` when the config predates the field.
+            pistol_noise_radius: v(pb, "fire.ai_noise_radius", c.ai.loudness_distances.get(15).copied().unwrap_or(6000.0)),
             pistol_reserve: 10,
             // Guns_Ready_Equip AnimStateExit 0.43; Pistol_Fire exit 0.30.
             pistol_equip: 0.43,
@@ -386,6 +439,15 @@ impl CombatTuning {
             // DisTweaks_FireCrossbow.m_fArrowFireSpeed x DisTweaks_Projectile.m_fSpeedMultiplier.
             bolt_speed: v(cb, "fire.m_fArrowFireSpeed", 20000.0) * v(cb, "projectile.m_fSpeedMultiplier", 1.0),
             bolt_limb_damage_cap: v(cb, "projectile.m_fLegsAndArmsDamageCap", 15.0),
+            arrows: {
+                let gd = &c.items.gadgets;
+                let a = |b: &dishonored_ir::items::BoltConfig| ArrowDamage { stealth_mult: b.stealth_mult, limb_cap: b.limb_damage_cap, kill_on_headshot: b.kill_on_headshot };
+                // The bolt's own values come from the crossbow's projectile tweak (the same
+                // `Twk_Proj_Arrow`).
+                let bolt = ArrowDamage { stealth_mult: v(cb, "projectile.m_fDamageMultiplier_Stealth", 2.0), limb_cap: v(cb, "projectile.m_fLegsAndArmsDamageCap", 15.0), ..a(&gd.bolt) };
+                [bolt, a(&gd.sleep_dart), a(&gd.incendiary_bolt)]
+            },
+            bolt_headshot_mult: c.items.inventory.crossbow_headshot_mult.trunc(),
             crossbow_reserve: 10,
             // Guns_Ready_Equip exit 0.43; Crossbow_Fire exit 0.398 (Ply_Crossbow_as).
             crossbow_equip: 0.43,

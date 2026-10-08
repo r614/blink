@@ -50,7 +50,7 @@ MissionDef(
     ],
 
     player_start: "start",
-    settings: MissionSettings(respawn: true, respawn_delay: 3.0, time_limit: 0.0, high_chaos_kill_ratio: 1.0),
+    settings: MissionSettings(respawn: true, respawn_delay: 3.0, time_limit: 0.0),
     loadout: (all_powers: true, full_ammo: true, elixirs: (10, 10)),
 
     rules: [

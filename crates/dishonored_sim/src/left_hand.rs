@@ -314,8 +314,11 @@ pub fn update(
                         } else {
                             let kind = if ammo == AmmoType::Grenade { ProjectileKind::Grenade } else { ProjectileKind::StickyGrenade };
                             let g = crate::gadgets::grenade_cfg(cfg, kind);
+                            // From the eye: the original starts it at the hand
+                            // (`m_AlignmentBoneName`, after a line check from the eye,
+                            // 0x00C38F70); the hand's offset needs a capture (ranged.md F7).
+                            // `DisTweaks_ThrowGrenade` has no AI loudness: the throw is silent.
                             spawn.push((kind, eye_position(p, ctx.cfg), crate::gadgets::throw_velocity(p.yaw, p.pitch, g)));
-                            events.push(SimEvent::Sound { position: p.position, radius: 300.0, category: SoundCategory::SwordSwing, source: p.id });
                         }
                     }
                     if p.left.timer >= exit {
@@ -357,12 +360,13 @@ pub fn update(
                 }
                 LeftPhase::Idle if !busy && pressed && crate::inventory::ammo(p, ammo) > 0 => {
                     crate::inventory::remove_ammo(p, ammo, 1);
+                    // The crossbow's shot (`fire_gun`): `m_fArrowSpawnDistance` along the
+                    // dispersed direction, speed scaled by `max(1, Attribute_Range)`, no AI noise.
                     let eye = eye_position(p, ctx.cfg);
                     let dir = fire_direction(p, cfg, t);
-                    spawn.push((kind, eye, dir * speed));
+                    spawn.push((kind, eye + dir * t.bolt_spawn_distance, dir * speed * crossbow_range_scale(p, cfg)));
                     p.left.phase = LeftPhase::Recovering;
                     p.left.timer = 0.0;
-                    events.push(SimEvent::Sound { position: eye, radius: 500.0, category: SoundCategory::Crossbow, source: p.id });
                 }
                 _ => {}
             }
@@ -466,16 +470,32 @@ pub fn update(
     }
 }
 
-/// The shot of a pistol or crossbow: the projectile from the eye through the dispersion offset
-/// (`fire_direction`), and its noise.
+/// The crossbow's `max(1, Attribute_Range)` (0x00C38230: the launch speed `m_fArrowFireSpeed`
+/// is scaled by it; the weapon's range too, 0x00C072D0, which the sim does not model). No
+/// attribute tweak carries a Range base, so it is 0 until the `Crossbow_Range` upgrade (+2).
+pub fn crossbow_range_scale(p: &PlayerState, cfg: &GameplayConfig) -> f32 {
+    crate::powers::attribute_for(p, cfg, "Attribute_Range", 0.0, |n| n.starts_with("Crossbow")).max(1.0)
+}
+
+/// The shot of a pistol or crossbow (0x00C2A3E0 / 0x00C38230): the projectile starts
+/// `m_fBulletSpawnDistance` / `m_fArrowSpawnDistance` in front of the camera (the pistol along
+/// the undispersed view, the crossbow along the dispersed direction it flies) and flies through
+/// the dispersion offset (`fire_direction`); the pistol makes its AI noise
+/// (`m_AINoiseLoudnessWhenFiring`). The crossbow's fire tweak has no loudness. Its muzzle-socket
+/// spawn (when the muzzle and the camera rays reach the same actor) is not modelled: the socket
+/// offset needs a capture (research/dishonored/systems/ranged.md F2).
 #[allow(clippy::too_many_arguments)]
 fn fire_gun(p: &mut PlayerState, bolt: bool, ctx: &MoveCtx, cfg: &GameplayConfig, t: &CombatTuning, spawn: &mut Vec<(ProjectileKind, Vec3, Vec3)>, events: &mut Vec<SimEvent>) {
     let eye = eye_position(p, ctx.cfg);
+    let view = view_vector(p.yaw, p.pitch);
     let dir = fire_direction(p, cfg, t);
-    let speed = if bolt { t.bolt_speed } else { t.bullet_speed };
-    spawn.push((if bolt { ProjectileKind::Bolt } else { ProjectileKind::Bullet }, eye, dir * speed));
-    let (radius, cat) = if bolt { (500.0, SoundCategory::Crossbow) } else { (4000.0, SoundCategory::Pistol) };
-    events.push(SimEvent::Sound { position: eye, radius, category: cat, source: p.id });
+    if bolt {
+        let speed = t.bolt_speed * crossbow_range_scale(p, cfg);
+        spawn.push((ProjectileKind::Bolt, eye + dir * t.bolt_spawn_distance, dir * speed));
+    } else {
+        spawn.push((ProjectileKind::Bullet, eye + view * t.bullet_spawn_distance, dir * t.bullet_speed));
+        events.push(SimEvent::Sound { position: eye, radius: t.pistol_noise_radius, category: SoundCategory::Pistol, source: p.id });
+    }
 }
 /// Dark Vision is in effect (`DisActivePowerComponent_DarkVision` slot +0x160: any of the fade-in,
 /// effect and fade-out timers running).
@@ -689,21 +709,74 @@ pub fn step_windblasts(
     state.windblasts = blasts;
 }
 
+/// The pistol bullet's damage on a pawn (`DisBullet` slot 239, 0x00C29820):
+/// `m_Damage + m_fDamage`, times `m_fDamageMultiplier_Headshot` on the head region and
+/// `m_fDamageMultiplier_Stealth` unless the pawn is `InCombat`; then the distance from the
+/// spawn point picks `m_fDamageMultiplier_CloseRange` (strictly below `m_fCloseRange`) or
+/// `m_fDamageMultiplier_LongRange` (strictly above `m_fLongRange`); a bullet that already went
+/// through a pawn deals `m_fPostPiercingDamageRatio` of it.
+pub fn bullet_damage(t: &CombatTuning, base: f32, head: bool, in_combat: bool, dist: f32, pierced: bool) -> f32 {
+    let mut d = base;
+    if head {
+        d *= t.bullet_headshot_mult;
+    }
+    if !in_combat {
+        d *= t.bullet_stealth_mult;
+    }
+    if dist < t.bullet_close_range {
+        d *= t.bullet_close_mult;
+    } else if dist > t.bullet_long_range {
+        d *= t.bullet_long_mult;
+    }
+    if pierced {
+        d *= t.bullet_post_pierce_ratio;
+    }
+    d
+}
+
+/// A crossbow projectile's damage on a pawn (`DisProjectile_Arrow` slot 239, 0x00C503D0 over
+/// the base 0x00C4A310): `None` for a kill (`m_bKillOnHeadshot` on the head region, through the
+/// pawn's instakill interface); otherwise the base (`m_Damage x m_fDamageMultiplier`), times the
+/// headshot factor on the head; head and torso hits on a pawn that is not aware of the shooter
+/// (Unaware, Surprised, Suspicious, Fearful) times `m_fDamageMultiplier_Stealth`; any other
+/// region capped at `m_fLegsAndArmsDamageCap`.
+pub fn arrow_damage(t: &CombatTuning, a: &crate::tuning::ArrowDamage, base: f32, region: dishonored_ir::items::HitRegion, stealth: bool) -> Option<f32> {
+    use dishonored_ir::items::HitRegion;
+    let mut d = base;
+    if region == HitRegion::Head {
+        if a.kill_on_headshot {
+            return None;
+        }
+        d *= t.bolt_headshot_mult.max(1.0);
+    }
+    if crate::hit_regions::is_core(region) {
+        if stealth {
+            d *= a.stealth_mult;
+        }
+    } else {
+        d = d.min(a.limb_cap);
+    }
+    Some(d)
+}
+
 /// Advance projectiles: sub-stepped segment tests against world and player bodies.
+#[allow(clippy::too_many_arguments)]
 pub fn step_projectiles(
     state: &mut WorldState,
     world: &dyn WorldQuery,
     mv: &MovementConfig,
     t: &CombatTuning,
+    hb: &dishonored_ir::items::HitBodyConfig,
     vitals: &dishonored_ir::gameplay::VitalsConfig,
     gravity_z: f32,
     dt: f32,
     sleep_delay: &dyn Fn(u32) -> f32,
     events: &mut Vec<SimEvent>,
 ) {
+    use dishonored_ir::items::HitRegion;
     let mut keep = Vec::with_capacity(state.projectiles.len());
     let projectiles = std::mem::take(&mut state.projectiles);
-    for mut pr in projectiles {
+    'shots: for mut pr in projectiles {
         if pr.kind.is_grenade() {
             keep.push(pr);
             continue;
@@ -712,86 +785,110 @@ pub fn step_projectiles(
         let old_v = pr.velocity;
         pr.velocity.z += gravity_z * pr.gravity_mult * dt;
         let delta = (old_v + pr.velocity) * 0.5 * dt;
-        let from = pr.position;
+        let mut from = pr.position;
         let to = from + delta;
-        let len = delta.length();
-        // World hit.
-        let world_hit = world.raycast(from, delta, len, channel::PROJECTILE).map(|h| h.distance);
-        // Body hits (capsule vs segment), owner excluded.
-        let mut body: Option<(usize, f32, Vec3)> = None;
-        for (i, v) in state.players.iter().enumerate() {
-            if !v.alive || v.id == pr.owner || v.carried_by.is_some() || crate::powers::is_hidden(v) {
-                continue;
-            }
-            let hh = crate::movement::half_height(v, mv);
-            let a0 = v.position - Vec3::Z * (hh - mv.collision_radius);
-            let a1 = v.position + Vec3::Z * (hh - mv.collision_radius);
-            let (on_seg, on_axis) = closest_segment_segment(from, to, a0, a1);
-            if on_seg.distance(on_axis) <= mv.collision_radius {
-                let along = (on_seg - from).length();
-                if body.is_none_or(|(_, d, _)| along < d) {
-                    body = Some((i, along, on_seg));
-                }
-            }
-        }
-        match (body, world_hit) {
-            (Some((i, along, point)), wh) if wh.is_none_or(|w| along <= w) => {
-                let v = &mut state.players[i];
-                let hh = crate::movement::half_height(v, mv);
-                let head = point.z > v.position.z + hh * 0.6;
-                let dist = (pr.age - dt).max(0.0) * old_v.length() + along;
-                // Sleep darts (`m_bPutToSleep`, `m_fTimeBeforeSleep`) and incendiary bolts
-                // (`m_bPutToFire`, `m_bCannotKillNPC`) act on NPCs; on players they only hit.
-                if pr.kind == ProjectileKind::SleepDart {
-                    events.push(SimEvent::ProjectileImpact { projectile: pr.id, point, victim: Some(v.id) });
-                    if v.kind != PawnKind::Human && v.condition == crate::state::Condition::Normal && v.sleep_timer <= 0.0 {
-                        // `m_bInstantSleepForUnawareNPCs`: an NPC the AI reports unaware sleeps at once.
-                        v.sleep_timer = if v.ai_unaware { 1e-3 } else { sleep_delay(pr.owner).max(1e-3) };
-                        v.condition_by = Some(pr.owner);
-                    }
+        let dir = delta.normalize_or_zero();
+        // The sweep goes on past a pierced pawn (0x00C4F3A0 re-traces from the hit).
+        loop {
+            let seg = to - from;
+            let len = seg.length();
+            // World hit.
+            let world_hit = if len > 1e-6 { world.raycast(from, seg, len, channel::PROJECTILE).map(|h| h.distance) } else { None };
+            // Body hits (capsule vs segment), owner and the pierced pawn excluded.
+            let mut body: Option<(usize, f32, Vec3)> = None;
+            for (i, v) in state.players.iter().enumerate() {
+                if !v.alive || v.id == pr.owner || Some(v.id) == pr.pierced || v.carried_by.is_some() || crate::powers::is_hidden(v) {
                     continue;
                 }
-                // `Twk_Inv_EliteHelmet.m_DamageTypesThatKnockOff`: bullets and bolts on the head,
-                // flare bolts anywhere. The hit itself is applied unchanged: the shipped helmets'
-                // `m_DamageTypesToAbsorb` is empty (U-246).
-                if v.helmet && (pr.kind == ProjectileKind::IncendiaryBolt || head) {
-                    v.helmet = false;
+                let hh = crate::movement::half_height(v, mv);
+                let a0 = v.position - Vec3::Z * (hh - mv.collision_radius);
+                let a1 = v.position + Vec3::Z * (hh - mv.collision_radius);
+                let (on_seg, on_axis) = closest_segment_segment(from, to, a0, a1);
+                if on_seg.distance(on_axis) <= mv.collision_radius {
+                    let along = (on_seg - from).length();
+                    if body.is_none_or(|(_, d, _)| along < d) {
+                        body = Some((i, along, on_seg));
+                    }
                 }
-                if pr.kind == ProjectileKind::IncendiaryBolt {
-                    events.push(SimEvent::ProjectileImpact { projectile: pr.id, point, victim: Some(v.id) });
-                    let mut dmg = pr.damage;
-                    if v.kind != PawnKind::Human {
-                        dmg = dmg.min(v.vitals.health - 1.0).max(0.0);
-                        if v.burning <= 0.0 {
-                            v.burning = 1e-4;
+            }
+            match (body, world_hit) {
+                (Some((i, along, point)), wh) if wh.is_none_or(|w| along <= w) => {
+                    // `rand()` for the pierce, from the shooter's stream (0x00C3A660 draws it
+                    // after the damage, on a bullet that has not pierced yet).
+                    let pierce_roll = if pr.kind == ProjectileKind::Bullet && pr.pierced.is_none() { state.player_mut(pr.owner).map(|o| o.roll()) } else { None };
+                    let v = &mut state.players[i];
+                    let region = crate::hit_regions::hit_region(v, mv, hb, point, dir);
+                    let head = region == HitRegion::Head;
+                    // Sleep darts (`m_bPutToSleep`, `m_fTimeBeforeSleep`) and incendiary bolts
+                    // (`m_bPutToFire`, `m_bCannotKillNPC`) act on NPCs; on players they only hit.
+                    if pr.kind == ProjectileKind::SleepDart {
+                        events.push(SimEvent::ProjectileImpact { projectile: pr.id, point, victim: Some(v.id) });
+                        if v.kind != PawnKind::Human && v.condition == crate::state::Condition::Normal && v.sleep_timer <= 0.0 {
+                            // `m_bInstantSleepForUnawareNPCs`: an NPC the AI reports unaware sleeps at once.
+                            v.sleep_timer = if v.ai_unaware { 1e-3 } else { sleep_delay(pr.owner).max(1e-3) };
                             v.condition_by = Some(pr.owner);
-                            events.push(SimEvent::Ignited { victim: v.id, by: pr.owner });
+                        }
+                        continue 'shots;
+                    }
+                    // `Twk_Inv_EliteHelmet.m_DamageTypesThatKnockOff`: bullets and bolts on the head,
+                    // flare bolts anywhere. The hit itself is applied unchanged: the shipped helmets'
+                    // `m_DamageTypesToAbsorb` is empty (U-246).
+                    if v.helmet && (pr.kind == ProjectileKind::IncendiaryBolt || head) {
+                        v.helmet = false;
+                    }
+                    // Awareness of the shooter: the AI's `ai_unaware` (any state but combat) stands
+                    // for the original's Unaware / Surprised / Suspicious / Fearful set (players
+                    // are never unaware).
+                    let stealth = v.ai_unaware;
+                    if pr.kind == ProjectileKind::IncendiaryBolt {
+                        events.push(SimEvent::ProjectileImpact { projectile: pr.id, point, victim: Some(v.id) });
+                        let mut dmg = arrow_damage(t, &t.arrows[2], pr.damage, region, stealth).unwrap_or(v.vitals.health.max(pr.damage));
+                        if v.kind != PawnKind::Human {
+                            dmg = dmg.min(v.vitals.health - 1.0).max(0.0);
+                            if v.burning <= 0.0 {
+                                v.burning = 1e-4;
+                                v.condition_by = Some(pr.owner);
+                                events.push(SimEvent::Ignited { victim: v.id, by: pr.owner });
+                            }
+                        }
+                        apply_damage(v, dmg, Some(pr.owner), DamageCause::Crossbow, events, vitals);
+                        continue 'shots;
+                    }
+                    let (dmg, cause) = if pr.kind == ProjectileKind::Bullet {
+                        let dist = point.distance(pr.spawn);
+                        let cause = if head { DamageCause::PistolHeadshot } else { DamageCause::Pistol };
+                        (bullet_damage(t, pr.damage, head, !stealth, dist, pr.pierced.is_some()), cause)
+                    } else {
+                        match arrow_damage(t, &t.arrows[0], pr.damage, region, stealth) {
+                            None => (v.vitals.health.max(pr.damage), DamageCause::CrossbowHeadshot),
+                            Some(d) => (d, if head { DamageCause::CrossbowHeadshot } else { DamageCause::Crossbow }),
+                        }
+                    };
+                    let victim = v.id;
+                    events.push(SimEvent::ProjectileImpact { projectile: pr.id, point, victim: Some(victim) });
+                    // `TakeDamage` takes the int of the damage (slot 239's float, truncated).
+                    apply_damage(v, dmg.trunc(), Some(pr.owner), cause, events, vitals);
+                    // Piercing (0x00C3A660): `rand() / 32767 <= m_fPiercingChance` keeps the bullet
+                    // going through its first pawn.
+                    if let Some(r) = pierce_roll {
+                        if r <= t.bullet_pierce_chance {
+                            pr.pierced = Some(victim);
+                            from = point;
+                            continue;
                         }
                     }
-                    apply_damage(v, dmg, Some(pr.owner), DamageCause::Crossbow, events, vitals);
-                    continue;
+                    continue 'shots;
                 }
-                let (mut dmg, cause) = match (pr.kind, head) {
-                    (ProjectileKind::Bullet, true) => (pr.damage * t.bullet_headshot_mult, DamageCause::PistolHeadshot),
-                    (ProjectileKind::Bullet, false) => (pr.damage, DamageCause::Pistol),
-                    (_, true) => (v.vitals.health.max(pr.damage), DamageCause::CrossbowHeadshot),
-                    (_, false) => (pr.damage, DamageCause::Crossbow),
-                };
-                if pr.kind == ProjectileKind::Bullet && dist <= t.bullet_close_range {
-                    dmg *= t.bullet_close_mult;
+                (_, Some(w)) => {
+                    events.push(SimEvent::ProjectileImpact { projectile: pr.id, point: from + seg.normalize_or_zero() * w, victim: None });
+                    continue 'shots;
                 }
-                events.push(SimEvent::ProjectileImpact { projectile: pr.id, point, victim: Some(v.id) });
-                apply_damage(v, dmg, Some(pr.owner), cause, events, vitals);
+                _ => break,
             }
-            (_, Some(w)) => {
-                events.push(SimEvent::ProjectileImpact { projectile: pr.id, point: from + delta.normalize_or_zero() * w, victim: None });
-            }
-            _ => {
-                pr.position = to;
-                if pr.age < 5.0 && pr.position.z > crate::movement::KILL_Z {
-                    keep.push(pr);
-                }
-            }
+        }
+        pr.position = to;
+        if pr.age < 5.0 && pr.position.z > crate::movement::KILL_Z {
+            keep.push(pr);
         }
     }
     state.projectiles = keep;
@@ -806,7 +903,7 @@ pub fn make_projectile(id: u32, owner: u32, kind: ProjectileKind, pos: Vec3, vel
         // Grenades carry their own gravity (`step_grenades`).
         ProjectileKind::Grenade | ProjectileKind::StickyGrenade => (0.0, 0.0),
     };
-    ProjectileState { id, kind, owner, position: pos, velocity: vel, age: 0.0, damage, gravity_mult, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO }
+    ProjectileState { id, kind, owner, position: pos, velocity: vel, age: 0.0, damage, gravity_mult, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO, spawn: pos, pierced: None }
 }
 
 /// Pawns revealed to `viewer` by Dark Vision: the "souls" of living pawns within `m_fDistance`
