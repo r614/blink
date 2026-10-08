@@ -219,3 +219,18 @@ stealth/detect_600
 # at each DishonoredNotify_Footfall of the locomotion loop at RateScale 1. Needed: the tick of each footfall contact (trace 0x00b66a80) while
 # running at 400 / 360 uu/s and sprinting at 600 / 540, to decode the loop's play rate.
 stealth/hear_footfalls
+
+# --- physics (research/dishonored/systems/physics.md, 2026-10-08) ---
+# P-3: Windblast level 1 at 300 / 600 / 800 / 900 uu: |momentum| 1627 / 1259 / 1044 / 946 against m_fStrongHitReactThreshold 500,
+# m_fAnimRagdollThreshold 1000, m_fFullRagdollThreshold 3800. Needed per run: npc.guard x/y/z/physics/health (physics 4 Flying = the animated
+# throw, 10 RigidBody; 1 = no throw) and the tick of each change; expected: 300/600/800 throw (Flying 4 then RigidBody 10), 900 no throw.
+physics/windblast_throw_d300
+physics/windblast_throw_d600
+physics/windblast_throw_d800
+physics/windblast_throw_d900
+# P-5 (ragdoll impulse calibration): after a Windblast on a Passive guard (no Flying phase), per tick for 40 ticks the Velocity of the pawn AND of every
+# body of its SkeletalMeshComponent (GetRBLinearVelocity / body instance velocity per bone) and each body's Mass; plus the pawn's Location against the
+# Root_jnt body location. Needed to decode the 1005 uu/s: the impulse is momentum/2 split over N bodies (NX_IMPULSE), so only the masses are open.
+#   session find class=SkeletalMeshComponent name=<guard Outer.Name>; session call object=<mesh> function=GetRootBodyIndex / read per-bone body velocity (same spec as powers/windblast_l2_hit with the dummy on Boyle, not the Playground: U-806)
+# P-8: RagdollImpact damage on the L1 throw (health 33 -> 23 -> 11 at ticks 75 / 79 in the cached powers/windblast_guard_l1 trace): the damage path 0x00B5CCD0
+# calls with damage type, amount, contact normal / speed, per call.
