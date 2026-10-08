@@ -1241,6 +1241,9 @@ pub struct HeadLoop {
     pub duration: f32,
     pub sample_rate: f32,
     pub samples: Vec<[f32; 6]>,
+    /// The eye matrix's right and up axes per frame, `[rx, ry, rz, ux, uy, uz]` (the eye's roll).
+    #[serde(default)]
+    pub axes: Vec<[f32; 6]>,
 }
 
 impl HeadLoop {
@@ -1258,6 +1261,25 @@ impl HeadLoop {
         let j = (i + 1).min(n - 1);
         let w = f - i as f32;
         let (a, b) = (self.samples[i], self.samples[j]);
+        Some(std::array::from_fn(|k| a[k] + (b[k] - a[k]) * w))
+    }
+}
+
+impl HeadLoop {
+    /// The eye's right and up axes at loop time `t` (wrapped; zero when the loop carries none).
+    pub fn axes_at(&self, t: f32) -> Option<[f32; 6]> {
+        let n = self.axes.len();
+        if n == 0 {
+            return None;
+        }
+        if n == 1 || self.duration <= 0.0 {
+            return Some(self.axes[0]);
+        }
+        let f = (t.rem_euclid(self.duration) * self.sample_rate).max(0.0);
+        let i = (f.floor() as usize).min(n - 1);
+        let j = (i + 1).min(n - 1);
+        let w = f - i as f32;
+        let (a, b) = (self.axes[i], self.axes[j]);
         Some(std::array::from_fn(|k| a[k] + (b[k] - a[k]) * w))
     }
 }
@@ -2057,3 +2079,5 @@ impl Default for AiConfig {
         }
     }
 }
+
+
