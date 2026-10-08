@@ -69,6 +69,18 @@ pub struct DishonoredMap {
     /// gameplay decals' materials): (object path, index into `materials`).
     #[serde(default)]
     pub named_materials: Vec<(String, MaterialId)>,
+    /// `ShadowMap1D`s of the instances' first LOD (the dominant light's visibility per vertex).
+    #[serde(default)]
+    pub vertex_shadows: Vec<VertexShadow>,
+}
+
+/// A `ShadowMap1D`: `samples[v]` is the visibility (0 shadowed .. 1 lit) of vertex `v` of
+/// [`DishonoredMap::instances`]`[instance]`'s mesh to the light `light_guid`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct VertexShadow {
+    pub instance: usize,
+    pub light_guid: [u32; 4],
+    pub samples: Vec<f32>,
 }
 
 /// `RenderingChannelContainer` bit of a reflection channel (declaration order of the struct:

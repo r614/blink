@@ -315,3 +315,21 @@ impl ContactSound {
         Some((speed / self.max_speed.max(1e-3)).clamp(self.min_volume_scale, 1.0))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `FUN_00bcf000`: no materials, no decal; a contact velocity must exceed `m_fMinVelocity`.
+    #[test]
+    fn a_decal_sub_fires_with_materials_and_enough_speed() {
+        let mut d = ContactDecal { materials: vec!["M".into()], min_velocity: 750.0, ..Default::default() };
+        assert!(d.fires(None));
+        assert!(d.fires(Some(800.0)));
+        assert!(!d.fires(Some(750.0)));
+        assert!(!d.fires(Some(100.0)));
+        d.materials.clear();
+        d.material = Some("M".into());
+        assert!(!d.fires(None), "m_pMaterial alone never fires the sub (the fire function reads m_Materials)");
+    }
+}

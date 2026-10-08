@@ -805,7 +805,9 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
         } else {
             (rx, ry)
         };
-        // (decals: flat on the surface, turned by the particle's rotation, a hair above it)
+        // (decals: flat on the surface, turned by the particle's rotation, a hair above it;
+        // adapted from dishonored-bevy by Eamon (github.com/Eamo5/dishonored-bevy), used with
+        // permission: the decal quad of its particles.rs mesh builder)
         let (rx, ry, c) = match decal_normal {
             Some(nb) if nb != Vec3::ZERO => {
                 let t0 = nb.any_orthonormal_vector();

@@ -246,6 +246,10 @@ pub fn spawn_at(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, rnd:
 /// Deliver the events the emitters of an instance generated this frame to the emitters that
 /// receive them (`ParticleModuleEventReceiverSpawn`: `SpawnCount` particles at the event, taking
 /// `InheritVelocityScale` of its velocity). Always drains the events.
+///
+/// Adapted from dishonored-bevy by Eamon (github.com/Eamo5/dishonored-bevy), used with
+/// permission: the generator / receiver flow of its particles.rs `step` (collision events with the
+/// surface normal, receivers spawning at the event place, decal particles taking the normal).
 pub fn dispatch_events(ems: &[ParticleEmitterAsset], sims: &mut [EmitterSim], xf: &Mat4, rnd: &mut dyn FnMut() -> f32) {
     let events: Vec<PfxEvent> = sims.iter_mut().flat_map(|s| std::mem::take(&mut s.events)).collect();
     if events.is_empty() {
@@ -1009,4 +1013,32 @@ pub fn collect_hits(events: &[SimEvent], all: &[&PlayerState]) -> HashMap<u32, V
         }
     }
     out
+}
+
+#[cfg(test)]
+mod decal_tests {
+    use super::*;
+    use dishonored_ir::particles::{DecalEmitter, Dist, EVENT_COLLISION, EventIn};
+
+    /// A generator's collision event reaches the receiver of its name only: `SpawnCount`
+    /// particles at the event, each lying on the struck surface.
+    #[test]
+    fn a_collision_event_spawns_the_receivers_decals_on_the_surface() {
+        let generator = ParticleEmitterAsset::default();
+        let receiver = ParticleEmitterAsset {
+            decal: Some(DecalEmitter::default()),
+            events_in: vec![EventIn { kind: EVENT_COLLISION, name: "Blood_Decal".into(), count: Some(Dist::constant([2.0; 3], 1)), inherit_velocity: None }],
+            ..Default::default()
+        };
+        let mut sims = vec![EmitterSim::default(), EmitterSim::default()];
+        let at = Vec3::new(10.0, 20.0, 30.0);
+        sims[0].events.push(PfxEvent { kind: EVENT_COLLISION, name: "Blood_Decal".into(), pos: at, vel: Vec3::ZERO, normal: Some(Vec3::Z) });
+        sims[0].events.push(PfxEvent { kind: EVENT_COLLISION, name: "Other".into(), pos: Vec3::ZERO, vel: Vec3::ZERO, normal: Some(Vec3::X) });
+        let mut r = || 0.5;
+        dispatch_events(&[generator, receiver], &mut sims, &Mat4::IDENTITY, &mut r);
+        assert!(sims[0].events.is_empty(), "the events are drained");
+        assert_eq!(sims[1].particles.len(), 2);
+        assert_eq!(sims[1].particles[0].pos, at);
+        assert_eq!(sims[1].particles[0].normal, Some(Vec3::Z));
+    }
 }

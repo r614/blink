@@ -193,6 +193,14 @@ fn to_ue(p: Vec3) -> glam::Vec3 {
     glam::Vec3::new(p.x, p.z, p.y) / crate::coords::UU_TO_BEVY
 }
 
+/// Whether characters get their light environment: with materials and dynamic lights on and not
+/// in the lighting debug view; `DISHONORED_LEGACY_CHARACTER_LIGHT=1` keeps Bevy's lighting on
+/// them (for comparison).
+fn enabled(features: Option<&crate::map_render::RenderFeatures>) -> bool {
+    static LEGACY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    features.is_none_or(|f| f.materials && f.dynamic_lights && !f.debug_lighting) && !*LEGACY.get_or_init(|| std::env::var_os("DISHONORED_LEGACY_CHARACTER_LIGHT").is_some())
+}
+
 pub struct CharLightPlugin;
 
 impl Plugin for CharLightPlugin {
@@ -216,8 +224,7 @@ fn upgrade_characters(
     meshes: Query<(&Mesh3d, &MeshMaterial3d<StandardMaterial>)>,
 ) {
     let Some(lib) = lib else { return };
-    let on = features.as_deref().is_none_or(|f| f.materials && f.dynamic_lights && !f.debug_lighting);
-    if !on || !world.active() {
+    if !enabled(features.as_deref()) || !world.active() {
         return;
     }
     for (root, cr, children) in &roots {
@@ -338,8 +345,7 @@ fn light_view_rig(
     meshes: Query<(&Mesh3d, &MeshMaterial3d<StandardMaterial>)>,
 ) {
     let (Some(rig), Some(session), Some(view)) = (rig, session, view) else { return };
-    let on = features.as_deref().is_none_or(|f| f.materials && f.dynamic_lights && !f.debug_lighting);
-    if !on || !world.active() {
+    if !enabled(features.as_deref()) || !world.active() {
         return;
     }
     let Some(me) = view.me.as_ref() else { return };

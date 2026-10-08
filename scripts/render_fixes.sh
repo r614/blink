@@ -57,3 +57,18 @@ for m in L_PrsnSewer_P L_Streetsewer_P L_Flooded_FStreets_P; do run "$m" 600; do
 #    The Tower Return lens TV (SceneCapture2DActor -> saili_FT_LensTV.screen_MAT, tv_screen.rs): the
 #    Int map's start view; the TV is in the room the lens mission shows.
 for m in L_TowerRtrn_Int_P L_TowerRtrn_Yard_P; do run "$m" 900; done
+# 8. Lighting, round 2 (research/dishonored/systems/render_lighting.md).
+#    Characters, the player's arms and ragdolls lit by their light environment (char_light.rs): maps
+#    with many placed pawns and strong local lights (the Pub's rooms, the Brothel, the Streets, the
+#    Boyle exterior); compare with DISHONORED_LEGACY_CHARACTER_LIGHT=1 where set (Bevy lighting).
+for m in L_Pub_Day_P L_Pub_Night_P L_Brothel_P L_Streets1_P L_Boyle_Ext_P; do run "$m" 600; done
+( export DISHONORED_LEGACY_CHARACTER_LIGHT=1; OUT="$OUT/legacy_character_light"; run L_Pub_Day_P 600 )
+#    The dominant point light's shadow of dynamic objects (DynamicShadows + LightEnvironmentShadows,
+#    lighting.rs): the flooded Refinery has six dominant point lights, the Assassins' street two, the
+#    Brothel and the Boyle exterior one each. The last run is the Refinery with --no-point-shadows.
+for m in L_Flooded_FRefinery_P L_Flooded_FAssassins_P L_Out_P; do run "$m" 600; done
+( OUT="$OUT/no_point_shadows"; run L_Flooded_FRefinery_P 600 --no-point-shadows )
+#    Gameplay decals (decals/impacts): the maps whose placed emitters and gameplay systems carry
+#    ParticleModuleTypeDataDecal (blood, burns, River Krust splatter) are shot in play, not in the
+#    start view; --no-decals in OUT/no_decals shows the same start with the decal pool off.
+( OUT="$OUT/no_decals"; run L_Streets1_P 600 --no-decals )

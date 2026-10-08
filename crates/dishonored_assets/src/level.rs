@@ -1126,14 +1126,25 @@ impl Importer<'_> {
         let stealth_shadow = self.component_stealth_shadow(&pkg, ci);
         if self.opts.load_textures && self.opts.load_lightmaps {
             match pkg.export_data(ci).and_then(|d| read_static_mesh_component_lods(d, native_offset)) {
-                Ok(lods) => match lods.into_iter().next().map(|l| (l.lightmap, l.shadow_maps)) {
-                    Some((LightMapRef::Texture(lm), shadow_maps)) => {
-                        self.stats.lightmaps_texture += 1;
-                        let shadows = shadow_maps.into_iter().filter_map(|s| self.distance_field_shadow_map(slot, s)).collect();
-                        self.pending_lightmaps.push(PendingLightmap { instance: self.map.instances.len(), slot, lm, shadows });
+                Ok(lods) => match lods.into_iter().next().map(|l| (l.lightmap, l.shadow_maps, l.shadow_vertex_buffers)) {
+                    Some((lightmap, shadow_maps, vertex_buffers)) => {
+                        // Per-vertex shadow maps of the dominant light (`ShadowMap1D`).
+                        for obj in vertex_buffers {
+                            if let Some(s) = self.vertex_shadow_map(slot, obj) {
+                                self.map.vertex_shadows.push(dishonored_ir::VertexShadow { instance: self.map.instances.len(), light_guid: s.light_guid, samples: s.samples });
+                            }
+                        }
+                        match lightmap {
+                            LightMapRef::Texture(lm) => {
+                                self.stats.lightmaps_texture += 1;
+                                let shadows = shadow_maps.into_iter().filter_map(|s| self.distance_field_shadow_map(slot, s)).collect();
+                                self.pending_lightmaps.push(PendingLightmap { instance: self.map.instances.len(), slot, lm, shadows });
+                            }
+                            LightMapRef::Vertex { .. } => self.stats.lightmaps_vertex += 1,
+                            LightMapRef::None => self.stats.lightmaps_none += 1,
+                        }
                     }
-                    Some((LightMapRef::Vertex { .. }, _)) => self.stats.lightmaps_vertex += 1,
-                    _ => self.stats.lightmaps_none += 1,
+                    None => self.stats.lightmaps_none += 1,
                 },
                 Err(_) if is_spline => self.stats.lightmaps_none += 1,
                 Err(e) => {
@@ -1559,6 +1570,15 @@ impl Importer<'_> {
         };
         let texture = self.resolve(k.0, ObjRef::from_index(find(p, "Texture")?.as_object()?))?;
         Some(ShadowMapRef { light_guid, texture, scale: v2("CoordinateScale")?, bias: v2("CoordinateBias")? })
+    }
+
+    /// A component LOD's `ShadowMap1D` (`ShadowVertexBuffers`): the dominant light's visibility per
+    /// vertex (lightmap.rs `read_shadow_map_1d`).
+    fn vertex_shadow_map(&mut self, slot: usize, obj: i32) -> Option<crate::lightmap::ShadowMap1D> {
+        let k = self.resolve(slot, ObjRef::from_index(obj))?;
+        let pkg = self.pkgs[k.0].clone();
+        let native_offset = pkg.read_object(k.1).ok()?.native_offset;
+        crate::lightmap::read_shadow_map_1d(pkg.export_data(k.1).ok()?, native_offset).ok()
     }
 
     /// `LightGuid`s of the levels' `DominantDirectionalLightComponent`s.
