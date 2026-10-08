@@ -439,3 +439,65 @@ Clear / ClearAll per `EDisSetDispositionKismetInput`, decoded 0x00c79000) and
   port lacks; they are counted apart from unsupported classes.
 - A hook output outside a conversation (a use hook's Kismet output) finds its one-shot by name
   in the loaded levels.
+
+### Op coverage pass (2026-10-08)
+
+Decoded from `Dishonored.exe` (`oracle index fn / uscript / vcall`), checked against the
+oracle's coverage report (`oracle coverage`). Interpreter (`runtime.rs`):
+
+- `SeqAct_AndGate` 0x006dcd60 (Activated), 0x006dcc40 (slot 96, `OnReceivedImpulse`), 0x006ec1b0
+  (slot 88, rebuilds `LinkedOutputFiredStatus`): `LinkedOutputs` is every output link of a
+  sibling in the gate's sequence that leads to the gate; an impulse from an op marks all of
+  that op's outputs leading here (while `bOpen`); once all are marked Activated arms output 0
+  and clears `bOpen` for good. Delayed links deliver without a source, so the gate misses them.
+- `SeqAct_CastToInt` 0x00706b20 (`bTruncate`, else `(int)ROUND(v * 2 + 0.5) >> 1`),
+  `SeqAct_CastToFloat` 0x00706e10, `SeqCond_Increment` 0x00704f20 / `IncrementFloat` 0x00705080
+  (`ValueA += IncrementAmount`, outputs `<=`, `>`, `==`, `<`, `>=` against `ValueB`; the
+  interpreter used to hand `SeqCond_Increment` to the host, which never ran it).
+- Object lists (`SeqVar_ObjectList.ObjList`): `SeqAct_ModifyObjectList` 0x00704300 / 0x00701ba0 /
+  0x006f8460 (Add = `AddUniqueItem`, Remove = every occurrence, Empty; then `ListEntriesCount`),
+  `SeqAct_AccessObjectList` 0x006f8840 (random = `ROUND(appFrand() * (n - 1))`, first, last,
+  `ObjectIndex`), `SeqAct_IsInObjectList` 0x006f8b90 / 0x006f8d50: the decoded loop keeps only
+  the result of the LAST test object (the inner loop resets it), `runtime::in_object_list`.
+  ModifyObjectList / AccessObjectList `DeActivated` (0x006dab90) arms every output whatever
+  `bAutoActivateOutputLinks` says (`DeAct::AllOutputs`).
+- `SeqVar_External` (a variable inside a sequence standing for the sequence's own link
+  `VariableLabel`): ops read what the sequence is linked to (the engine's Externals have no
+  value of their own). `SeqVar_Vector` (`VectValue`) reads and writes.
+
+Host (`kismet_host.rs`): `SeqAct_GetDistance` 0x006fb9f0, `SeqCond_IsAlive` 0x006fad70,
+`SeqAct_SetLocation` 0x006fb0b0, `SeqAct_GetLocationAndRotation` 0x006fbf70 (rotation as Euler
+degrees roll / pitch / yaw), `SeqAct_SetVelocity` (script `Actor.OnSetVelocity`),
+`DisSeqCond_IsPlayerInCombat` 0x00b8efc0 (reads `DishonoredPlayerPawn.m_bIsInCombat`, 0x00aa2350;
+its writer is not decoded: the port answers with `MissionMatch::engaged`),
+`DisSeqCond_IsDLCUnlocked` 0x00b8ee30 (`KismetSetup::dlc_unlocked`), `DisSeqAct_AddPower` /
+`RemovePower` (0x00aa38a0 / 0x00aa3920 -> `SetPowerLevel` 0x00ace270: the level index, -1 removes),
+`DisSeqAct_ModifyAmmo` 0x00b51cc0 (0x00c052e0 add, 0x00c05380 set, 0x00c05260 remove),
+`DisSeqAct_AddKey` / `RemoveKey` (0x00aa1530 / 0x00aa1560, key ring), `AdrenalineToggle` 0x00aaa100,
+`ToggleChoke` 0x00ab1bd0 (`m_InputEnableMask[7]` bit 0x20000), `AISetBrainFlags` 0x00b90690,
+`SetAudioOcclusion` 0x00ba1780 (on `DishonoredAudioPortal` actors). The keys, adrenaline, choke,
+brain flags, occlusion and actor velocities are recorded in `HostState` only: nothing in the
+port reads them yet.
+
+Event firing sites (the engine fires them through 0x00bc7b30 `FireGeneratedEvents(actor, class,
+originator, instigator, exact, outputs)`; found by resolving each caller's class getter to its
+class descriptor name). Not fed by the port yet (the host feeds the classes in `FED_EVENTS`):
+
+| event class | firing functions |
+|---|---|
+| `DisSeqEvent_Possessed` | 0x00a52130, 0x00a5a990 (possessable pawn states; output 0 Started, 1 Finished), 0x00b7d110, 0x00b7d2f0 (DLC06) |
+| `DisSeqEvent_PatrolPointReached` | 0x00af2300, 0x00afd350 |
+| `DisSeqEvent_BehaviorStarted` / `Combat` | 0x00af7670 / 0x00af7d00 |
+| `DisSeqEvent_MovablePickedUp` / `MovableDropped` | 0x00a45fd0 / 0x00a46380 |
+| `DisSeqEvent_Corpse` (0 picked up, 1 dropped, 2 discovered) | 0x00a998a0, 0x00a90b50, 0x00b40740 |
+| `DisSeqEvent_PlayerCrouch` (0 stand, 1 sneak, 2 crouch; `m_OldCrouchState`) | 0x00ab0960 |
+| `DisSeqEvent_PlayerHolsterWeapon` | 0x00ab3d80 |
+| `DisSeqEvent_PlayerManaThreshold` | 0x00ab1a30 |
+| `DisSeqEvent_Windblasted` | 0x00c4de90, 0x00c53790 |
+| `DisSeqEvent_KeyHoleUsed` / `Lock` | 0x00a2e4e0 / 0x00a4e870, 0x00a4e910 |
+| `DisSeqEvent_Assassinated` | 0x00a78270, 0x00a7beb0 |
+| `DisSeqEvt_Choke` | 0x00a6d380, 0x00a74720, 0x00a7c270, 0x00a7c4d0 |
+| `DisSeqEvent_Investigate` | 0x00ae9fe0, 0x00b2e050 |
+| `DisSeqEvent_TeleportSpell` | 0x00c2ba40, 0x00c35280, 0x00cd7090, 0x00ce0aa0, 0x00cf12f0 |
+| `DisSeqEvent_WatchTower` / `DefenceTower` / `WallOfLight` | 0x00a2a770 / 0x00a258f0, 0x00a2fce0..0x00a2fff0 / 0x00a28f80, 0x00a29170, 0x00a3c010, 0x00a3eb10, 0x00a3eca0 |
+| `DisSeqEvent_Interact` / `AttackedByRats` / `RatPossess` | 0x00a3df60, 0x00a3e0b0 / 0x00a70450 / 0x00c7fbc0 |

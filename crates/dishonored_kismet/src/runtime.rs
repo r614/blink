@@ -59,6 +59,9 @@ pub struct OpRt {
     pub t: f64,
     pub t2: f64,
     pub flags: u32,
+    /// `SeqAct_AndGate.LinkedOutputFiredStatus`, parallel to [`Kismet::and_inputs`].
+    #[serde(default)]
+    pub and_fired: Vec<bool>,
 }
 
 /// An event duplicated onto an actor by `SeqAct_AttachToEvent` (`<Event>_AttachDup`).
@@ -200,6 +203,33 @@ pub struct Kismet {
     pub activations: Vec<Activation>,
 }
 
+/// `SeqAct_IsInObjectList` (0x006f8b90 for `bCheckForAllObjects`, else 0x006f8d50), exactly as
+/// decoded: for each test object in turn, over the list entries, "all" stops at the first entry
+/// that differs from it (not found) and "any" at the first that equals it (found); the result is
+/// what the last test object's pass left (an empty list leaves the previous result), so only
+/// the last test object counts.
+pub fn in_object_list(all: bool, list: &[Obj], tests: &[Obj]) -> bool {
+    let mut found = false;
+    for t in tests {
+        for l in list {
+            if all {
+                if t != l {
+                    found = false;
+                    break;
+                }
+                found = true;
+            } else {
+                if t == l {
+                    found = true;
+                    break;
+                }
+                found = false;
+            }
+        }
+    }
+    found
+}
+
 /// The view an op has of the interpreter while it runs (host ops get one).
 pub struct Ctx<'a> {
     pub k: &'a mut Kismet,
@@ -217,6 +247,9 @@ pub enum DeAct {
     Latent,
     /// Output 0 only when aborted (`DisSeqAct_DialogScriptedChoice`: "Player Busy").
     AbortedFirst,
+    /// Every output link that is not disabled, whatever `bAutoActivateOutputLinks` says
+    /// (`SeqAct_ModifyObjectList` / `SeqAct_AccessObjectList`, 0x006dab90).
+    AllOutputs,
 }
 
 /// `DeActivated` per class, from the vtables of `Dishonored.exe` (slot 94): the engine
@@ -229,6 +262,10 @@ pub fn deactivation(class: &str) -> DeAct {
         // SeqAct_Latent's (PrepareMapChange and AutoSave call it from their own).
         "SeqAct_Latent" | "DisSeqAct_Latent" | "SeqAct_PrepareMapChange" | "SeqAct_LevelStreaming" | "SeqAct_MultiLevelStreaming" | "SeqAct_LevelVisibility" | "DisSeqAct_AutoSave" | "DisSeqAct_ActivateUsable" | "DisSeqAct_BackupAndClearInventory" | "SeqAct_WaitForLevelsVisible" => DeAct::Latent,
         "DisSeqAct_DialogScriptedChoice" => DeAct::AbortedFirst,
+        // `SeqAct_IsInObjectList::DeActivated` (0x006dac10) arms output 0 ("In List") when the
+        // test found something, else output 1; the interpreter fires it from `Activated`.
+        "SeqAct_IsInObjectList" => DeAct::None,
+        "SeqAct_ModifyObjectList" | "SeqAct_AccessObjectList" => DeAct::AllOutputs,
         // Own outputs decided by the op (matinee position; the AI behaviour's result).
         "SeqAct_Interp" | "DisSeqAct_AIGoToActor" | "DisSeqAct_AIShoot" | "SeqAct_ActorFactory" => DeAct::None,
         _ => DeAct::Auto,
@@ -815,6 +852,7 @@ impl Kismet {
         }
         for (t, idx) in targets.into_iter().rev() {
             if self.impulse(t, idx as usize) {
+                self.received_impulse(t, op);
                 self.queue_op(seq, t, true);
             }
         }
@@ -825,7 +863,47 @@ impl Kismet {
     /// Linked variables of a link (named variables resolved).
     pub fn link_vars(&self, op: OpId, link: &str) -> Vec<OpId> {
         let Some(l) = self.op(op).var_link(link) else { return Vec::new() };
-        l.vars.iter().map(|v| self.resolve_var(*v)).collect()
+        self.expand_externals(&l.vars).into_iter().map(|v| self.resolve_var(v)).collect()
+    }
+
+    /// `SeqVar_External` variables inside a sequence stand for what the sequence's own variable
+    /// link of that name (`VariableLabel`) holds: the variables an op links through one are the
+    /// ones its sequence is linked to. Others are kept as they are; an external with no matching
+    /// link stays itself.
+    fn expand_externals(&self, vars: &[OpId]) -> Vec<OpId> {
+        let mut out = Vec::with_capacity(vars.len());
+        for v in vars {
+            self.expand_external(*v, &mut out, 0);
+        }
+        out
+    }
+
+    fn expand_external(&self, v: OpId, out: &mut Vec<OpId>, depth: u8) {
+        let r = self.resolve_var(v);
+        if depth < 8 && self.op(r).class == "SeqVar_External" {
+            let label = self.op(r).props.str("VariableLabel");
+            let link = self.parent(r).and_then(|p| self.op(p).var_link(label));
+            if let Some(l) = link {
+                for x in &l.vars {
+                    self.expand_external(*x, out, depth + 1);
+                }
+                return;
+            }
+        }
+        out.push(v);
+    }
+
+    /// Entries of a `SeqVar_ObjectList` (`ObjList`, runtime value else the loaded one), without
+    /// empty slots.
+    pub fn list_entries(&self, v: OpId) -> Vec<Obj> {
+        let v = self.resolve_var(v);
+        self.prop(v, "ObjList").map(|l| l.as_array().iter().filter_map(|x| x.as_obj().cloned()).filter(|o| !o.is_none()).collect()).unwrap_or_default()
+    }
+
+    /// Replace the entries of a `SeqVar_ObjectList`.
+    pub fn set_list_entries(&mut self, v: OpId, entries: Vec<Obj>) {
+        let v = self.resolve_var(v);
+        self.set_prop(v, "ObjList", Value::Array(entries.into_iter().map(Value::Obj).collect()));
     }
 
     fn resolve_var(&self, v: OpId) -> OpId {
@@ -856,6 +934,12 @@ impl Kismet {
             Value::Int(self.prop_int(v, "IntValue"))
         } else if db.is_a(&class, "SeqVar_String") {
             Value::Str(self.prop_str(v, "StrValue"))
+        } else if db.is_a(&class, "SeqVar_Vector") {
+            // `VectValue` (a vector variable cooked at zero has no property).
+            match self.prop(v, "VectValue") {
+                Some(Value::Vector(a)) => Value::Vector(a),
+                _ => Value::Vector([0.0; 3]),
+            }
         } else if db.is_a(&class, "SeqVar_Object") || db.is_a(&class, "SequenceVariable") {
             Value::Obj(self.objects_of(v).into_iter().next().unwrap_or_default())
         } else {
@@ -889,6 +973,10 @@ impl Kismet {
         if class == "InterpData" {
             return vec![Obj::Op(v)];
         }
+        // `SeqVar_ObjectList` hands out every entry (`GetObjectRef(i)` is `ObjList[i]`).
+        if db.is_a(class, "SeqVar_ObjectList") {
+            return self.list_entries(v);
+        }
         if val.is_none() { Vec::new() } else { vec![val] }
     }
 
@@ -903,6 +991,11 @@ impl Kismet {
     }
     pub fn strings(&mut self, op: OpId, link: &str) -> Vec<String> {
         self.link_vars(op, link).into_iter().map(|v| self.var_value(v).as_str().unwrap_or("").to_string()).collect()
+    }
+    /// Values of the vector variables of a link (`SeqVar_Vector.VectValue`).
+    pub fn vectors(&mut self, op: OpId, link: &str) -> Vec<[f32; 3]> {
+        let vars: Vec<OpId> = self.link_vars(op, link).into_iter().filter(|v| self.is_a(*v, "SeqVar_Vector")).collect();
+        vars.into_iter().filter_map(|v| if let Value::Vector(a) = self.var_value(v) { Some(a) } else { None }).collect()
     }
     pub fn objects(&self, op: OpId, link: &str) -> Vec<Obj> {
         self.link_vars(op, link).into_iter().flat_map(|v| self.objects_of(v)).collect()
@@ -926,13 +1019,26 @@ impl Kismet {
             self.set_prop(v, "IntValue", Value::Int(i));
         } else if db.is_a(&class, "SeqVar_String") {
             self.set_prop(v, "StrValue", Value::Str(val.as_str().unwrap_or("").to_string()));
+        } else if db.is_a(&class, "SeqVar_Vector") {
+            if let Value::Vector(a) = val {
+                self.set_prop(v, "VectValue", Value::Vector(*a));
+            }
         } else if db.is_a(&class, "SeqVar_Object") {
             let o = match val {
                 Value::Obj(o) => o.clone(),
                 Value::Array(a) => a.first().and_then(|x| x.as_obj().cloned()).unwrap_or_default(),
                 _ => Obj::None,
             };
-            if !db.is_a(&class, "SeqVar_Player") {
+            if db.is_a(&class, "SeqVar_ObjectList") {
+                // `SeqVar_ObjectList.SetObjectValue`: `ObjList[0] = NewValue`.
+                let mut list: Vec<Value> = self.prop(v, "ObjList").map(|l| l.as_array().to_vec()).unwrap_or_default();
+                if list.is_empty() {
+                    list.push(Value::Obj(o));
+                } else {
+                    list[0] = Value::Obj(o);
+                }
+                self.set_prop(v, "ObjList", Value::Array(list));
+            } else if !db.is_a(&class, "SeqVar_Player") {
                 self.set_prop(v, "ObjValue", Value::Obj(o));
             }
         }
@@ -949,7 +1055,8 @@ impl Kismet {
     fn populate(&mut self, op: OpId) {
         let links = self.op(op).vars.clone();
         for l in links {
-            if l.property.is_empty() || l.property == "None" || l.vars.is_empty() {
+            let vars = self.expand_externals(&l.vars);
+            if l.property.is_empty() || l.property == "None" || vars.is_empty() {
                 continue;
             }
             // Array properties take every linked variable (empty arrays are not cooked, so
@@ -959,7 +1066,7 @@ impl Kismet {
                 || (l.property == "Value" && matches!(self.class(op), "SeqAct_SetInt" | "SeqAct_SetFloat"));
             if is_array {
                 let mut vals = Vec::new();
-                for v in &l.vars {
+                for v in &vars {
                     if self.is_a(self.resolve_var(*v), "SeqVar_Object") {
                         vals.extend(self.objects_of(*v).into_iter().map(Value::Obj));
                     } else {
@@ -968,7 +1075,7 @@ impl Kismet {
                 }
                 self.set_prop(op, &l.property, Value::Array(vals));
             } else {
-                let v = self.populate_scalar(&l.vars);
+                let v = self.populate_scalar(&vars);
                 self.set_prop(op, &l.property, v);
             }
         }
@@ -1033,7 +1140,8 @@ impl Kismet {
     fn publish(&mut self, op: OpId) {
         let links = self.op(op).vars.clone();
         for l in links {
-            if l.property.is_empty() || l.property == "None" || l.vars.is_empty() {
+            let vars = self.expand_externals(&l.vars);
+            if l.property.is_empty() || l.property == "None" || vars.is_empty() {
                 continue;
             }
             let Some(v) = self.prop(op, &l.property) else { continue };
@@ -1044,7 +1152,7 @@ impl Kismet {
             // all three Lord Shaw (U-221). `populate` skips empty object variables, so when the
             // counts differ the entries cannot be matched to their variables and nothing is
             // written back.
-            for (var, val) in l.vars.iter().zip(publish_values(&v, l.vars.len())) {
+            for (var, val) in vars.iter().zip(publish_values(&v, vars.len())) {
                 if let Some(val) = val {
                     self.write_var(*var, &val);
                 }
@@ -1444,7 +1552,59 @@ impl Kismet {
                 let eq = a.iter().all(|x| b.iter().all(|y| x == y));
                 self.fire(op, if eq { 0 } else { 1 });
             }
-            "SeqCond_IsSameTeam" | "SeqCond_Increment" => return None,
+            // `SeqCond_Increment::Activated` (0x00704f20) / `SeqCond_IncrementFloat` (0x00705080):
+            // `ValueA += IncrementAmount`, then the same five tests as the comparisons against
+            // `ValueB` arm outputs 0 (<=), 1 (>), 2 (==), 3 (<), 4 (>=); `ValueA` goes back to its
+            // variable when the op finishes.
+            "SeqCond_Increment" => {
+                let a = self.prop_int(op, "ValueA").wrapping_add(self.prop_int(op, "IncrementAmount"));
+                let b = self.prop_int(op, "ValueB");
+                self.set_prop(op, "ValueA", Value::Int(a));
+                self.fire_compare(op, a.cmp(&b));
+            }
+            "SeqCond_IncrementFloat" => {
+                let a = self.prop_float(op, "ValueA") + self.prop_float(op, "IncrementAmount");
+                let b = self.prop_float(op, "ValueB");
+                self.set_prop(op, "ValueA", Value::Float(a));
+                let ord = if a < b { std::cmp::Ordering::Less } else if a > b { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Equal };
+                self.fire_compare(op, ord);
+            }
+            "SeqCond_IsSameTeam" => return None,
+            // `SeqAct_CastToInt::Activated` (0x00706b20): output 0, `IntResult` the value
+            // truncated (`bTruncate`) or rounded (`(int)ROUND(v * 2 + 0.5) >> 1`).
+            "SeqAct_CastToInt" => {
+                let v = self.prop_float(op, "Value");
+                let i = if self.prop_bool(op, "bTruncate") { v as i32 } else { ((v * 2.0 + 0.5).round_ties_even() as i32) >> 1 };
+                self.set_prop(op, "IntResult", Value::Int(i));
+                self.fire(op, 0);
+            }
+            // `SeqAct_CastToFloat::Activated` (0x00706e10): output 0, `FloatResult = (float)Value`.
+            "SeqAct_CastToFloat" => {
+                let v = self.prop_int(op, "Value");
+                self.set_prop(op, "FloatResult", Value::Float(v as f32));
+                self.fire(op, 0);
+            }
+            // `SeqAct_AndGate::Activated` (0x006dcd60): while `bOpen`, once every output link
+            // that leads here has delivered an impulse (`LinkedOutputFiredStatus`, marked by
+            // `OnReceivedImpulse`, 0x006dcc40: [`Kismet::received_impulse`]) it arms output 0
+            // and closes for good (nothing reopens it).
+            "SeqAct_AndGate" => {
+                self.and_sync(op);
+                let open = self.prop(op, "bOpen").and_then(|v| v.as_bool()).unwrap_or(true);
+                if open && self.ops[op as usize].and_fired.iter().all(|f| *f) {
+                    self.fire(op, 0);
+                    self.set_prop(op, "bOpen", Value::Bool(false));
+                }
+            }
+            "SeqAct_ModifyObjectList" => self.modify_object_list(op),
+            "SeqAct_IsInObjectList" => {
+                let list = self.objects(op, "ObjectListVar");
+                let tests = self.objects(op, "Object(s)ToTest");
+                let found = in_object_list(self.prop_bool(op, "bCheckForAllObjects"), &list, &tests);
+                self.set_prop(op, "bObjectFound", Value::Bool(found));
+                self.fire(op, if found { 0 } else { 1 });
+            }
+            "SeqAct_AccessObjectList" => self.access_object_list(op),
             "SeqAct_Log" => {
                 let mut parts: Vec<String> = Vec::new();
                 for s in self.strings(op, "String") {
@@ -1521,11 +1681,127 @@ impl Kismet {
                     }
                 }
             }
+            DeAct::AllOutputs => {
+                for i in 0..self.ops[op as usize].out_imp.len() {
+                    self.fire(op, i);
+                }
+            }
         }
     }
 
     // ----- engine actions -----
 
+    /// Outputs of the five-way comparison conditions (`SeqCond_CompareInt` and the increment
+    /// conditions): 0 `<=`, 1 `>`, 2 `==`, 3 `<`, 4 `>=` of the counter against its target.
+    fn fire_compare(&mut self, op: OpId, ord: std::cmp::Ordering) {
+        use std::cmp::Ordering::*;
+        let tests = [ord != Greater, ord == Greater, ord == Equal, ord == Less, ord != Less];
+        for (i, t) in tests.iter().enumerate() {
+            if *t {
+                self.fire(op, i);
+            }
+        }
+    }
+
+    /// `SeqAct_AndGate.LinkedOutputs`: every output link of a sibling in the gate's sequence
+    /// that leads to the gate (sibling in `SequenceObjects` order, then link order), as
+    /// (op, output index).
+    fn and_inputs(&self, gate: OpId) -> Vec<(OpId, usize)> {
+        let Some(parent) = self.parent(gate) else { return Vec::new() };
+        let mut out = Vec::new();
+        for c in &self.op(parent).children {
+            for (i, l) in self.op(*c).outputs.iter().enumerate() {
+                if l.links.iter().any(|(t, _)| *t == gate) {
+                    out.push((*c, i));
+                }
+            }
+        }
+        out
+    }
+
+    /// The gate's `LinkedOutputFiredStatus` is (re)built to one cleared entry per linked output
+    /// when its size differs (vtable slot 88, 0x006ec1b0).
+    fn and_sync(&mut self, gate: OpId) {
+        let n = self.and_inputs(gate).len();
+        let f = &mut self.ops[gate as usize].and_fired;
+        if f.len() != n {
+            *f = vec![false; n];
+        }
+    }
+
+    /// `OnReceivedImpulse` (vtable slot 96): `SeqAct_AndGate` (0x006dcc40) marks, while open,
+    /// every one of the activator's output links that leads to the gate as fired. (A delayed
+    /// link delivers later without its source: the gate does not see those.)
+    fn received_impulse(&mut self, op: OpId, from: OpId) {
+        if self.class(op) != "SeqAct_AndGate" {
+            return;
+        }
+        self.and_sync(op);
+        if !self.prop(op, "bOpen").and_then(|v| v.as_bool()).unwrap_or(true) {
+            return;
+        }
+        for (k, (src, _)) in self.and_inputs(op).into_iter().enumerate() {
+            if src == from {
+                self.ops[op as usize].and_fired[k] = true;
+            }
+        }
+    }
+
+    /// `SeqAct_ModifyObjectList::Activated` (0x00704300 after 0x00701ba0 / 0x006f8460): the
+    /// first of the inputs Add / Remove / Empty with an impulse changes every list variable of
+    /// "ObjectListVar" (Add is `AddUniqueItem` of each "ObjectRef" object, Remove removes every
+    /// occurrence, Empty clears), then `ListEntriesCount` is the number of entries over all the
+    /// lists. Empty object slots are not added.
+    fn modify_object_list(&mut self, op: OpId) {
+        let mode = (0..3).find(|i| self.has_impulse(op, *i));
+        if let Some(mode) = mode {
+            let refs = self.objects(op, "ObjectRef");
+            let lists: Vec<OpId> = self.link_vars(op, "ObjectListVar").into_iter().filter(|v| self.is_a(*v, "SeqVar_ObjectList")).collect();
+            for l in lists {
+                let mut e = self.list_entries(l);
+                match mode {
+                    0 => {
+                        for r in &refs {
+                            if !e.contains(r) {
+                                e.push(r.clone());
+                            }
+                        }
+                    }
+                    1 => e.retain(|x| !refs.contains(x)),
+                    _ => e.clear(),
+                }
+                self.set_list_entries(l, e);
+            }
+        }
+        let n = self.objects(op, "ObjectListVar").len() as i32;
+        self.set_prop(op, "ListEntriesCount", Value::Int(n));
+    }
+
+    /// `SeqAct_AccessObjectList::Activated` (0x006f8840): from the list of the first variable
+    /// link, input 0 picks a random entry (`ROUND(appFrand() * (n - 1))`), 1 the first, 2 the
+    /// last, 3 the entry at `ObjectIndex` (none out of range) into `OutputObject`; an empty list
+    /// gives none. No input with an impulse leaves it alone.
+    fn access_object_list(&mut self, op: OpId) {
+        let Some(first) = self.op(op).vars.first().and_then(|l| l.vars.first().copied()) else { return };
+        let list = self.list_entries(first);
+        let pick = if self.has_impulse(op, 0) {
+            if list.is_empty() {
+                None
+            } else {
+                let f = self.rand_unit() * (list.len() - 1) as f32;
+                list.get(((f * 2.0 + 0.5).round_ties_even() as i32 >> 1) as usize).cloned()
+            }
+        } else if self.has_impulse(op, 1) {
+            list.first().cloned()
+        } else if self.has_impulse(op, 2) {
+            list.last().cloned()
+        } else if self.has_impulse(op, 3) {
+            usize::try_from(self.prop_int(op, "ObjectIndex")).ok().and_then(|i| list.get(i).cloned())
+        } else {
+            return;
+        };
+        self.set_prop(op, "OutputObject", Value::Obj(pick.unwrap_or_default()));
+    }
     /// `SeqAct_Gate` (decoded): In passes while open; Open/Close/Toggle; `AutoCloseCount`
     /// closes after that many passes counted from the opening activation.
     fn gate(&mut self, op: OpId) {
@@ -2057,6 +2333,9 @@ impl Ctx<'_> {
     }
     pub fn strings(&mut self, link: &str) -> Vec<String> {
         self.k.strings(self.op, link)
+    }
+    pub fn vectors(&mut self, link: &str) -> Vec<[f32; 3]> {
+        self.k.vectors(self.op, link)
     }
     pub fn set_link(&mut self, link: &str, v: Value) {
         self.k.set_link(self.op, link, v)
