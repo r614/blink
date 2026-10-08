@@ -24,8 +24,12 @@ struct Sky {
     speeds: vec4<f32>,
     // (C_Clouds_Visibility, C2_Clouds_2_Visibility, sky_contrast, U_Offset)
     misc: vec4<f32>,
-    // (Storm_Offset, Use_UV_Channel_2, 0, 0)
+    // (Storm_Offset, Use_UV_Channel_2, H_HorizonIntensity, Storm_mask channel or -1 for RGB)
     misc2: vec4<f32>,
+    // Horizon_Color.rgb x a, w = H_Enable_Horizon
+    horizon: vec4<f32>,
+    // (H_Horizon_Speed, H_Horizon_UV_Distortion, H_HorizonOffset, H_HorizonExponent)
+    horizon2: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> sky: Sky;
@@ -35,6 +39,7 @@ struct Sky {
 @group(#{MATERIAL_BIND_GROUP}) @binding(4) var sky_clouds: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(5) var sky_clouds2: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(6) var sky_storm: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(7) var sky_noise: texture_2d<f32>;
 
 // The cloud layers turn about the texture centre by Speed x Time x 0.1 radians.
 fn rotated(uv: vec2<f32>, speed: f32) -> vec2<f32> {
@@ -57,9 +62,6 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 #else
     uv1 = uv0;
 #endif
-    if (sky.misc2.y < 0.5) {
-        uv1 = uv0;
-    }
     var clouds = vec3<f32>(0.0);
     if (sky.flags.y > 0.5) {
         clouds = textureSample(sky_clouds, sky_sampler, rotated(uv0, sky.speeds.x)).rgb;
@@ -71,7 +73,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         let w = select(0.0, pow(v, sky.speeds.w), v - 1e-6 >= 0.0);
         colour = sky.grad_top.rgb + (sky.grad_bottom.rgb - sky.grad_top.rgb) * w;
     } else {
-        let duv = vec2<f32>(sky.misc.w - uv1.x, uv1.y) + clouds.r * sky.speeds.z;
+        // With Use_UV_Channel_2 at (U_Offset - UV1.x, UV1.y), else at (-UV0.x, UV0.y) (6046 / 6044).
+        var duv = vec2<f32>(-uv0.x, uv0.y);
+        if (sky.misc2.y > 0.5) {
+            duv = vec2<f32>(sky.misc.w - uv1.x, uv1.y);
+        }
+        duv = duv + clouds.r * sky.speeds.z;
         colour = textureSample(sky_diffuse, sky_sampler, duv).rgb;
     }
     colour = colour * sky.diffuse_color.rgb;
@@ -83,8 +90,23 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         colour = colour + c2 * sky.misc.y * (sky.clouds2_color.rgb * c2 - colour);
     }
     colour = pow(max(abs(colour), vec3<f32>(1e-6)), vec3<f32>(sky.misc.z));
+    if (sky.horizon.w > 0.5) {
+        // H_Enable_Horizon (6044, 6059): the contrast result saturated, then lerped to the horizon
+        // colour by the horizon band over UV1.y, distorted by the noise Tex#1.
+        colour = saturate(colour);
+        let pan = fract(sky.horizon2.x * globals.time * vec2<f32>(0.01, 0.025));
+        let noise = textureSample(sky_noise, sky_sampler, vec2<f32>(2.0 * uv1.x, 0.25 * uv1.y) + pan).r;
+        let h = saturate((noise * sky.horizon2.y + uv1.y + sky.horizon2.z) * uv1.y * 0.5 + sky.horizon2.z);
+        let k = select(0.0, pow(max(h, 1e-6), sky.horizon2.w) * sky.misc2.z, h - 1e-6 >= 0.0);
+        colour = colour + k * (sky.horizon.rgb - colour);
+    }
     if (sky.flags.w > 0.5) {
-        let storm = textureSample(sky_storm, sky_sampler, vec2<f32>(sky.misc2.x + uv1.x, uv1.y)).rgb;
+        let st = textureSample(sky_storm, sky_sampler, vec2<f32>(sky.misc2.x + uv1.x, uv1.y));
+        // Storm_mask: one channel for all three (6059: R), or RGB.
+        var storm = st.rgb;
+        if (sky.misc2.w >= 0.0) {
+            storm = vec3<f32>(st[i32(sky.misc2.w)]);
+        }
         colour = colour + storm * sky.storm_color.rgb * sky.storm_color.w;
     }
     var out: FragmentOutput;

@@ -200,8 +200,8 @@ impl Plugin for DistortionPlugin {
 }
 
 /// `--no-distortion` (render comparisons) leaves the pass out.
-fn tag_game_camera(mut commands: Commands, q: Query<Entity, (With<crate::players::GameCamera>, Without<DistortionView>)>, mut off: Local<Option<bool>>) {
-    if *off.get_or_insert_with(|| std::env::args().any(|a| a == "--no-distortion")) {
+fn tag_game_camera(mut commands: Commands, q: Query<Entity, (With<crate::players::GameCamera>, Without<DistortionView>)>, mut off: Local<Option<bool>>, settings: Option<Res<crate::settings::GameSettings>>) {
+    if *off.get_or_insert_with(|| std::env::args().any(|a| a == "--no-distortion")) || settings.is_some_and(|s| !s.s.graphics.distortion) {
         return;
     }
     for e in &q {

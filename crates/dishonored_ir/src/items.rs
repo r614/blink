@@ -425,6 +425,10 @@ pub struct ExplosionConfig {
     /// `m_LoudnessDistanceArray`): the grenades' `EAINoiseLoudness4`, 6000 uu.
     #[serde(default = "d_loudness4")]
     pub ai_noise_radius: f32,
+    /// `m_pRadialDamageType` (class name; `DisDamageType_Grenade` for both grenades): what a
+    /// breakable's immune / instant-break lists are matched against. Empty when not loaded.
+    #[serde(default)]
+    pub radial_damage_type: String,
 }
 
 /// `EAINoiseLoudness4` (`m_LoudnessDistanceArray[15]`, DefaultAI.ini).
@@ -444,6 +448,7 @@ impl Default for ExplosionConfig {
             extra_up_force: 500.0,
             attached_damage: 75.0,
             ai_noise_radius: d_loudness4(),
+            radial_damage_type: String::new(),
         }
     }
 }

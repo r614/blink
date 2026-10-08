@@ -306,8 +306,9 @@ pub struct PlayerState {
     #[serde(default)]
     pub ai_unaware: bool,
     /// Hook written by the AI each tick for NPC pawns with a brain: the pawn's `EAIAwareness`
-    /// ([`awareness`]), which gates assassinations (`m_AssassinateOnAwareness`, 0x00C09060). A pawn
-    /// no AI writes (a brainless training dummy) keeps `AWARE_OF_PLAYER`, as `ai_unaware` false.
+    /// ([`awareness`]), which gates assassinations (`m_AssassinateOnAwareness`, 0x00C09060). The
+    /// default is `AWARE_OF_PLAYER`; a mission's brainless NPC (Passive) is set to `UNAWARE`, the
+    /// value 0x00B5E250 returns for a pawn without a brain.
     #[serde(default = "aware_of_player")]
     pub ai_awareness: u8,
     /// Hook written by the mission host each tick for NPC pawns: the locomotion component follows

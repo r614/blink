@@ -27,6 +27,29 @@ pub struct PartGpu {
     pub bind: Vec<Mat4>,
     pub bones: Vec<dishonored_ir::BoneAsset>,
     pub mesh_to_pawn: glam::Mat4,
+    /// Culling box relative to the body root: the bind-pose vertices grown by
+    /// `ANIMATED_BOUNDS_PAD` (see `animated_bounds`).
+    pub bounds: bevy::camera::primitives::Aabb,
+}
+
+/// Margin (uu) added on every side of a skinned part's bind-pose box. Bevy culls a skinned
+/// mesh by the box of its bind-pose vertices, which does not follow the animated pose: a big
+/// swing, a fall or a body drawn at its carrier's root would pop out at the screen edges.
+const ANIMATED_BOUNDS_PAD: f32 = 250.0;
+
+/// The culling box of a skinned part (Bevy space, relative to the body root), spawned with
+/// `NoAutoAabb` so Bevy keeps it instead of recomputing the bind-pose box.
+pub fn animated_bounds(pos: &[[f32; 3]]) -> bevy::camera::primitives::Aabb {
+    let pad = Vec3::splat(ANIMATED_BOUNDS_PAD * coords::UU_TO_BEVY);
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for p in pos {
+        lo = lo.min(Vec3::from_array(*p));
+        hi = hi.max(Vec3::from_array(*p));
+    }
+    if pos.is_empty() {
+        (lo, hi) = (Vec3::ZERO, Vec3::ZERO);
+    }
+    bevy::camera::primitives::Aabb::from_min_max(lo - pad, hi + pad)
 }
 
 #[derive(Clone)]
@@ -151,7 +174,8 @@ pub fn upload(model: &CharacterModel, meshes: &mut Assets<Mesh>, images: &mut As
             sections.push((meshes.add(mesh), mat));
             section_materials.push(s.material);
         }
-        parts.push(PartGpu { source: p.source.clone(), sections, section_materials, inverse_bindposes: ib, bind, bones: p.bones.clone(), mesh_to_pawn: m2p });
+        let bounds = animated_bounds(&pos);
+        parts.push(PartGpu { source: p.source.clone(), sections, section_materials, inverse_bindposes: ib, bind, bones: p.bones.clone(), mesh_to_pawn: m2p, bounds });
     }
     CharacterGpu { name: model.name.clone(), parts, textures: tex, material_params: model.material_params.clone() }
 }
@@ -213,6 +237,8 @@ pub fn spawn_character(commands: &mut Commands, root: Entity, lib: &CharacterLib
                 MeshMaterial3d(mat.clone()),
                 SkinnedMesh { inverse_bindposes: part.inverse_bindposes.clone(), joints: joints.clone() },
                 Transform::default(),
+                part.bounds,
+                bevy::camera::visibility::NoAutoAabb,
                 ChildOf(root),
             ));
         }
@@ -379,18 +405,16 @@ fn chain_clips(st: &crate::npc_anim::PawnAnim) -> Vec<(String, f32)> {
     [st.full.as_ref(), st.upper.as_ref()].into_iter().flatten().filter_map(|c| c.steps.get(c.i).map(|s| (s.0.clone(), c.t))).collect()
 }
 
-/// What an NPC looks at (APPROXIMATION, U-281: the original's look-at requests come from the
-/// AI's attention and conversations, which the host does not publish): the nearest living
-/// human player within 2000 uu while the pawn notices, searches, fights, panics or cowers, and
-/// within 600 uu while it talks.
-fn look_target(p: &PlayerState, stance: Option<dishonored_ir::npc_anim::NpcStance>, talking: bool, all: &[&PlayerState]) -> Option<glam::Vec3> {
-    use dishonored_ir::npc_anim::NpcStance as S;
+/// What an NPC looks at while it speaks a line (APPROXIMATION, U-281: the conversation's
+/// look-at requests were not decoded): the nearest living human player within 600 uu. The
+/// AI's attention look-at (HeadTrack) comes from the host (`MatchView::npc_heads`, the vision
+/// head's cursor), so alert pawns no longer use this.
+fn look_target(p: &PlayerState, _stance: Option<dishonored_ir::npc_anim::NpcStance>, talking: bool, all: &[&PlayerState]) -> Option<glam::Vec3> {
     use dishonored_sim::state::PawnKind;
     if p.kind == PawnKind::Human || !p.alive || p.incapacitated() {
         return None;
     }
-    let alert = matches!(stance, Some(S::Notice | S::Search | S::Combat | S::Panic | S::Cower));
-    let range = if alert { 2000.0 } else if talking { 600.0 } else { return None };
+    let range = if talking { 600.0 } else { return None };
     all.iter()
         .filter(|o| o.kind == PawnKind::Human && o.alive && o.id != p.id)
         .map(|o| (o.position.distance(p.position), o))
@@ -461,12 +485,46 @@ fn face_frames(bank: &mut crate::npc_anim::AnimBank, lib: &CharacterLibrary, vie
     out
 }
 
-/// `DISH_ANIM_DEBUG=<pawn id>`, read once (not per pawn per frame).
-pub struct AnimDebug(Option<u32>);
+/// `DISH_ANIM_DEBUG=<pawn id>`, read once (not per pawn per frame); `DISH_ANIM_DUMP=<pawn
+/// id>:<file>` appends that pawn's bone transforms every frame (`dump_bones`).
+pub struct AnimDebug(Option<u32>, Option<(u32, std::path::PathBuf)>);
 
 impl Default for AnimDebug {
     fn default() -> Self {
-        Self(std::env::var("DISH_ANIM_DEBUG").ok().and_then(|v| v.parse::<u32>().ok()))
+        let dump = std::env::var("DISH_ANIM_DUMP").ok().and_then(|v| {
+            let (id, file) = v.split_once(':').filter(|(_, f)| !f.is_empty())?;
+            Some((id.parse::<u32>().ok()?, std::path::PathBuf::from(file)))
+        });
+        Self(std::env::var("DISH_ANIM_DEBUG").ok().and_then(|v| v.parse::<u32>().ok()), dump)
+    }
+}
+
+/// One JSON line per frame for the animation diff against the original's per-tick bone capture
+/// (fixtures/oracle/capture_queue.txt, `session bones`): the sim tick, the pawn's location and
+/// yaw, the slots playing, and every bone of the body in component space (the skeletal mesh's
+/// own space, before its `Origin` / `RotOrigin`, like UE3's `SpaceBases`): rotation (x, y, z,
+/// w) and translation, Dishonored units.
+pub fn dump_bones(file: &std::path::Path, tick: u64, p: &PlayerState, st: Option<&crate::npc_anim::PawnAnim>, part: &PartGpu, globals: &[glam::Mat4]) {
+    use std::io::Write;
+    let inv = part.mesh_to_pawn.inverse();
+    let bones: Vec<serde_json::Value> = part
+        .bones
+        .iter()
+        .zip(globals)
+        .map(|(b, g)| {
+            let (_, q, t) = (inv * *g).to_scale_rotation_translation();
+            serde_json::json!({"name": b.name, "q": [q.x, q.y, q.z, q.w], "t": [t.x, t.y, t.z]})
+        })
+        .collect();
+    let slot = |c: Option<&crate::npc_anim::Chain>| c.map(|c| serde_json::json!({"key": c.key, "seq": c.steps[c.i].0, "t": c.t, "w": c.weight}));
+    let line = serde_json::json!({
+        "tick": tick, "id": p.id, "pos": [p.position.x, p.position.y, p.position.z], "yaw": p.yaw,
+        "modifier": st.map(|s| s.modifier.clone()), "vel": st.map(|s| [s.vel.0, s.vel.1]), "phase": st.map(|s| s.phase),
+        "full": slot(st.and_then(|s| s.full.as_ref())), "upper": slot(st.and_then(|s| s.upper.as_ref())), "ragdoll": st.is_some_and(|s| s.ragdoll.is_some()),
+        "bones": bones,
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file) {
+        let _ = writeln!(f, "{line}");
     }
 }
 
@@ -540,7 +598,7 @@ pub fn animate_characters(
                 .map(|t| [to_pawn(t.a), to_pawn(t.b), to_pawn(t.c)])
                 .collect()
         };
-        let input = crate::npc_anim::AnimInput { p, stance, armed, talking: talking.contains(&p.id), dt, hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), look_target: look_target(p, stance, talking.contains(&p.id), &all), face: faces.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), floor: -mv.collision_half_height, ground: Some(&ground), walls: Some(&walls), gravity: mv.gravity_z, carrier_speed: p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).map(|c| c.velocity.truncate().length()).unwrap_or(0.0) };
+        let input = crate::npc_anim::AnimInput { p, stance, armed, talking: talking.contains(&p.id), dt, hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), look_target: look_target(p, stance, talking.contains(&p.id), &all), head: view.matchv.npc_heads.iter().find(|h| h.id == p.id).copied(), face: faces.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), floor: -mv.collision_half_height, ground: Some(&ground), walls: Some(&walls), gravity: mv.gravity_z, carrier_speed: p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).map(|c| c.velocity.truncate().length()).unwrap_or(0.0) };
         let pose = match states.get_mut(entity) {
             Ok(mut st) => {
                 let before = chain_clips(&st);
@@ -579,6 +637,10 @@ pub fn animate_characters(
             }
         };
         let globals: Vec<Vec<glam::Mat4>> = model.parts.iter().zip(&pose).map(|(part, pp)| crate::npc_anim::globals(part, pp)).collect();
+        // DISH_ANIM_DUMP=<pawn id>:<file>: the pawn's bones every frame (animation diff).
+        if let Some((_, file)) = anim_debug.1.as_ref().filter(|d| d.0 == p.id) {
+            dump_bones(file, view.tick, p, states.get(entity).ok(), &model.parts[0], &globals[0]);
+        }
         // Diagnostics: DISH_ANIM_DEBUG=<pawn id> logs the pawn's slots and root.
         if anim_debug.0 == Some(p.id) {
             if let Ok(st) = states.get(entity) {

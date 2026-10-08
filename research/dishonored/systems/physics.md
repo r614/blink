@@ -256,7 +256,7 @@ Decoded during the port (static index, re-read):
 | P-7 | left open | the ragdoll-impact damage rule is not in 0x00B529C0 / 0x0078F7D0 nor in script; capture P-8 of the queue |
 | P-8 | **ported** | `CombatTuning::windblast_start_delay` (the cast notify, loaded) replaces the 0.1 s warmup in `step_world` and `windblast_lockout` |
 | P-9 | **ported** | `npc_anim::matrix_origin` = `matrix_rows(..)[3]`; test `anim_retail::elite_guard_physics_asset` (spine_3 capsule centre (7.25, 0, 0)) |
-| P-10 | left open | no breakables in the sim |
+| P-10 | ported (2026-10-08, world port) | `dishonored_sim::world_actors::BreakableState`: the `DishonoredBreakable` rule (vslot 235, 0x00a26a90; the `DisSkeletalBreakable` one of 3.5 differs: its special type always passes the threshold, and `DishonoredBreakable` has an instant-break list instead) with the tick's step application (0x00a3b0d0 / 0x00a3a5f0) and step timers; damage from grenade explosions. Skeletal breakables (usables) not ported. world.md 10.1 F-12 |
 
 **Rest and get-up (3.7), decoded and ported 2026-10-08 (second pass).** The throw state's tick
 0x00A98DD0, after the impulse part: `m_fBodyAtRestTestTimer` (+0x98, set to 0.5 by the enter

@@ -29,9 +29,16 @@ pub const THEME: &[(&str, &str)] = &[
     ("change", "UI_Change"),
     ("ChangeMainTab", "UI_ChangeMainTab"),
     ("ChangeSubTab", "UI_ChangeSubTab"),
+    ("Stop", "UI_Stop"),
+    ("ToHome", "UI_ToHome"),
+    ("ToEnd", "UI_ToEnd"),
     ("Reset", "UI_Reset"),
     ("M_PressStart", "UI_M_PressStart"),
     ("M_OpenMainMenu", "UI_M_OpenMainMenu"),
+    // `Twk_GFxMoviePlayerGlobal.DisUISoundTheme_1` (message box) and
+    // `Twk_GFxMoviePlayerPauseMenu.DisUISoundTheme_2` (game over).
+    ("G_MsgBoxOpen", "UI_G_MsgBoxOpen"),
+    ("GO_OpenGameOverMenu", "UI_GO_OpenGameOverMenu"),
 ];
 pub const MUSIC_EVENT: &str = "Music_Menu";
 
@@ -48,13 +55,22 @@ pub struct MenuSounds {
     pub loaded: bool,
     /// Count of sounds played (harness evidence).
     pub played: u64,
+    history: Vec<String>,
 }
 
 impl MenuSounds {
+    /// Post a theme event. Names match case-insensitively, like the theme's `FName` lookup
+    /// (the movies post both `Validation` and `validation`, `Back` and `back`).
     pub fn play(&mut self, name: &str) {
         if self.queue.len() < 16 {
-            self.queue.push(name.to_string());
+            let n = THEME.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(k, _)| k.to_string()).unwrap_or_else(|| name.to_string());
+            self.queue.push(n);
         }
+    }
+
+    /// Theme events posted so far, newest last (harness evidence of what the menus play).
+    pub fn history(&self) -> &[String] {
+        &self.history
     }
 }
 
@@ -144,6 +160,11 @@ fn play_queue(mut commands: Commands, mut s: ResMut<MenuSounds>, settings: Optio
     let q = std::mem::take(&mut s.queue);
     let g = gain(settings.as_deref(), dishonored_settings::Bus::Sfx);
     for name in q {
+        s.history.push(name.clone());
+        let n = s.history.len();
+        if n > 64 {
+            s.history.drain(0..n - 64);
+        }
         let Some(hs) = s.sounds.get(&name).cloned() else { continue };
         s.played += 1;
         for (h, v) in hs {

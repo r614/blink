@@ -13,6 +13,7 @@ pub mod nav;
 pub mod particles;
 pub mod npc_anim;
 pub mod spawners;
+pub mod world_actors;
 
 use glam::{Mat4, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
@@ -161,6 +162,19 @@ pub struct SkeletalProp {
     /// (`dishonored_assets::light_env`); `None` when it could not be computed.
     #[serde(default)]
     pub light_env: Option<LightEnvironment>,
+    /// The looping animation the prop plays at rest (`DisRiverKrust`: its tweak's
+    /// `m_AnimSequences[RiverKrustAnimState_Ambient]`); None: the reference pose.
+    #[serde(default)]
+    pub idle: Option<PropIdle>,
+}
+
+/// A prop's resting loop (`RiverKrustAnimSequenceSpec`): sequence, play-rate range and start-time
+/// range (the original rolls both at random per instance).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PropIdle {
+    pub anim: String,
+    pub rate: [f32; 2],
+    pub start: [f32; 2],
 }
 
 /// A light environment's synthesized lights (`FDynamicLightEnvironmentState`): one directional
@@ -303,6 +317,10 @@ pub struct StaticMeshAsset {
     /// it differs from `uv1`, i.e. when `LightMapCoordinateIndex` is not 1; empty otherwise.
     #[serde(default)]
     pub uv_set1: Vec<Vec2>,
+    /// The mesh's vertex colours (R, G, B, A bytes; the shaders read them as byte / 255), one per
+    /// position; empty when the mesh has none.
+    #[serde(default)]
+    pub colors: Vec<[u8; 4]>,
     pub indices: Vec<u32>,
     pub sections: Vec<MeshSection>,
     /// Collision triangles from the mesh's kDOP tree (indices into `positions`) with the

@@ -1,0 +1,27 @@
+// Breakables (world.md section 4 / F-12, physics.md 3.5 / P-10, kismet.md 3.4): the bottles on the bar
+// of Boyle Int (L_Boyle_Int_Script `DishonoredMovable_1, 2, 3, 6, 7, 9, 10, 38`: movable_twk pub / glass
+// bottles, m_Health 5 or 1, m_DamageThreshold 1, one break step at health 0) each have a
+// `DisSeqEvent_BreakableBroken` in Main_Sequence.Boyle_Objectives. A sticky grenade thrown at the
+// player's feet 250 uu from them blows 3 s later.
+// Decoded rule: damage per actor 0x00A02E90 / 0x009FEAA0 (50 inside 300 uu, falling to 0 at 600, rounded);
+// DishonoredBreakable damage 0x00a26a90: not immune, m_CurHealth >= 0 and damage >= m_DamageThreshold ->
+// health down (floored at 0), the highest step whose m_HealthThreshold is at least the health is wanted;
+// the tick 0x00a3b0d0 / 0x00a3a5f0 applies it and fires the event's output Num(m_Steps) - step - 1 (0,
+// "Broken 100%", for a single step), originator the breakable.
+// Port: `dishonored_sim::world_actors`; the blast's line check to the actor (0x00A02B60) is not applied.
+(
+    name: "kismet/boyle_int_bottles_grenade",
+    system: Kismet,
+    map: "L_Boyle_Int_P",
+    description: "A sticky grenade at the bar of Boyle Int: the bottles' BreakableBroken events.",
+    setup: (player: Some((position: (-110, -1800, 1250), yaw: 270, pitch: -89, snap_to_floor: true)), kismet: true, kismet_start: Some("ChangeLvl_fromBoyleExterior_toBoyleInterior"), original_npcs: false, seed: 1, items: ["StickyGrenade:3"], left_hand: Some("StickyGrenade")),
+    ticks: 420,
+    input: [(tick: 30, action: Press(Secondary))],
+    checkpoints: [
+        (name: "one blast", expect: [(metric: Count("Sim:Explosion"), value: 1, tol: 0, source: "a sticky grenade explodes once", status: Static)]),
+        (name: "bottles broken", expect: [(metric: Count("Kismet:Activated@*Boyle_Objectives.DisSeqEvent_BreakableBroken*[out=0]"), value: 8, tol: 0, source: "decoded 0x00a26a90 / 0x00a3a5f0 with the blast damage of 0x009FEAA0 at the bottles' distance (about 220 to 300 uu: 50): every bottle within reach reaches its only step; whether the blast's line check (0x00A02B60) reaches each bottle on the shelf needs the capture", status: Unmeasured)]),
+        (name: "break tick", expect: [(metric: FirstAt("Kismet:Activated@*Boyle_Objectives.DisSeqEvent_BreakableBroken*"), value: 3.88, tol: 0.05, source: "port: the step is applied in the tick of the blast; the original applies it in the breakable's next tick (actor order vs the grenade component, UNVERIFIED)", status: Unmeasured)]),
+    ],
+    record: [Pawn, Kismet, SimEvents],
+    capture: Some("Boyle Int after ChangeLvl_fromBoyleExterior_toBoyleInterior, player at (-110, -1800) on the bar side, lab give stickygrenade, throw at pitch -89: ProcessEvent trace of SequenceOp activations (DisSeqEvent_BreakableBroken of Boyle_Objectives), the bottles' m_CurHealth / m_NextStep before and after, the grenade's Location at the blast"),
+)

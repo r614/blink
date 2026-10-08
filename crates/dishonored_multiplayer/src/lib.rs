@@ -72,6 +72,10 @@ pub struct MatchView {
     /// manager, `DisGlobalMusicManager`). Host-filled; empty outside missions.
     #[serde(default)]
     pub ai: Vec<AiPresence>,
+    /// AI pawns' look-at aims (the vision head's cursor split into the head and torso grids),
+    /// every snapshot: the animation turns the visible head the way the AI looks.
+    #[serde(default)]
+    pub npc_heads: Vec<dishonored_ir::npc_anim::NpcHead>,
 }
 
 /// An NPC look: skeletal mesh parts (package, object path; body first, then head) and material
@@ -92,6 +96,20 @@ pub struct Look {
     /// subobject's localized `m_Name` as the pawn's name (kill feed).
     #[serde(default)]
     pub tweak: String,
+}
+
+/// The look-at aims of the AI pawns whose head turns (`dishonored_ai::Brain::head_parts`);
+/// pawns looking straight ahead are left out.
+pub fn npc_heads(brains: &[dishonored_ai::Brain], ai: &dishonored_ir::ai::AiConfig, players: &[dishonored_sim::state::PlayerState]) -> Vec<dishonored_ir::npc_anim::NpcHead> {
+    brains
+        .iter()
+        .filter_map(|b| {
+            let me = players.iter().find(|p| p.id == b.id)?;
+            let (head, torso) = b.head_parts(me, ai);
+            let still = head.iter().chain(torso.iter()).all(|v| v.abs() < 1e-4);
+            (!still).then_some(dishonored_ir::npc_anim::NpcHead { id: b.id, head, torso })
+        })
+        .collect()
 }
 
 /// Presentation stance of every AI pawn, from its brain state (animation only: locomotion

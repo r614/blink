@@ -225,10 +225,17 @@ fn push_material(content: &Content, pkg: &std::sync::Arc<ue3_package::Package>, 
         Some(ObjRef::Export(ti)) => Some((0usize, ti)),
         _ => None,
     };
+    // Static switches of the compiled permutation gate the Arkane slots, as for level materials
+    // (`level.rs`): a slot whose `*_Enable_*` switch is off is not sampled by the original's
+    // shader even when the instance still names a texture for it. E.g. the doors'
+    // `Doors.doors_poor_interior_01_inst` keeps `E_Emissive_texture = obsolete_door_d` (an
+    // editor placeholder reading "I'M OBSOLETE, REPLACE ME BY DISTWEAKS_DOOR ...") with
+    // `E_Enable_Emissive` false: drawn as emissive, the text showed on every such door.
+    let off = |s: &str| chain.switch(s) == Some(false);
     let diffuse = tex_key(crate::material_chain::slot(&chain, "d_", &["mask"]).or(chain.diffuse_input)).or_else(|| tex_key(local(res.diffuse)));
-    let normal = tex_key(crate::material_chain::slot(&chain, "n_", &[]).or(chain.normal_input)).or_else(|| tex_key(local(res.normal)));
-    let specular = tex_key(crate::material_chain::slot(&chain, "s_", &["mask"]));
-    let emissive = tex_key(crate::material_chain::slot(&chain, "e_", &["mask"]));
+    let normal = if off("N_Enable_NormalMap") { None } else { tex_key(crate::material_chain::slot(&chain, "n_", &[]).or(chain.normal_input)).or_else(|| tex_key(local(res.normal))) };
+    let specular = if off("S_Enable_Specular") { None } else { tex_key(crate::material_chain::slot(&chain, "s_", &["mask"])) };
+    let emissive = if off("E_Enable_Emissive") { None } else { tex_key(crate::material_chain::slot(&chain, "e_", &["mask"])) };
     let masked = res.masked || chain.blend_mode.as_deref() == Some("BLEND_Masked");
     let blend = match chain.blend_mode.as_deref() {
         Some("BLEND_Translucent") | Some("BLEND_AlphaComposite") => MaterialBlend::Translucent,
@@ -564,6 +571,28 @@ pub fn resolve_appearances(content: &Content, level_packages: &[String], tweaks:
         if let Some(TVal::Obj(o)) = m.get("m_pComponentLookatConfig") {
             a.anim.lookat = locate(o).or_else(|| Some(("DishonoredGame".to_string(), o.clone())));
         }
+        // The item prefixes of item-prefixed chain steps: the primary item's (the loadout's first
+        // entry: the elite guard's sword, the Overseer's music box, the hound's bite, the
+        // Tallboy's bow) and the empty hands' `m_ItemPrefix`.
+        let item_prefix = |path: Option<&str>| -> String {
+            match path.and_then(|p| db.try_resolve(p)).as_ref().and_then(|t| t.get("m_ItemPrefix").cloned()) {
+                Some(TVal::Name(n)) | Some(TVal::Str(n)) if n != "None" => n,
+                _ => String::new(),
+            }
+        };
+        let first_item = match m.get("m_ContentInventoryLoadout") {
+            Some(TVal::List(l)) => l.first().and_then(|e| match e.get("obj") {
+                Some(TVal::Obj(o)) if !o.is_empty() => Some(o.clone()),
+                _ => None,
+            }),
+            _ => None,
+        };
+        a.anim.item_prefix = item_prefix(first_item.as_deref());
+        let empty = match m.get("m_pEmptyHandsItem") {
+            Some(TVal::Obj(o)) if !o.is_empty() => Some(o.clone()),
+            _ => None,
+        };
+        a.anim.empty_prefix = item_prefix(empty.as_deref());
         // Accessories: `m_RandomAccessoryInfo[Hat, Mask]` with `m_HatMeshes` / `m_MaskMeshes`.
         // A static array: element 0 under the plain name, element i under "name[i]".
         let info: Vec<f32> = ["m_RandomAccessoryInfo", "m_RandomAccessoryInfo[1]"]

@@ -3,8 +3,9 @@
 // (hook round 4, 2026-10-08), against the port's light probe (pawn.light / pawn.light01,
 // Crowd::player_light). The player is teleported to each point (crouched, as measured) and
 // sampled 25 ticks later. (500, 6600) and every point east read the darkest value (0.1838).
-// Known port difference: U-121 (the probe sums the level's light actors; the original's stealth
-// light environment samples the precomputed light volume and the m_LightProbe channel lights).
+// Port: the stealth light environment (stealth.md sections 11 and 14): the layout's lights, Boyle's
+// dominant directional and sky light, unoccluded (the original builds the layout from movable
+// InterpActor cubes, which a TRACE_ShadowCast line check ignores), raw light (L / 4 pi)^(1/2.2).
 (
     name: "stealth/light_probe_lane",
     system: Stealth,

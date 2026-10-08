@@ -11,6 +11,8 @@
 //!     --inspect              free camera, no gameplay (--pos x,y,z --yaw --pitch)
 //!     --playground           the Playground test level, offline, every power and item
 //!                            (missions/playground.ron; `--bots N` adds bots, none by default)
+//!     --freeroam             free roam of --map: offline, no mission of the port's own, the map's
+//!                            original Kismet (--start-event E: the global sequence's entry event)
 //!     --mission FILE         a custom mission; --load SAVE continues a saved game (F5 / F9
 //!                            quicksave / quickload; saves in --saves DIR, default SaveData
 //!                            next to the settings file)
@@ -79,6 +81,12 @@ pub mod decals;
 #[doc(hidden)]
 pub mod water;
 #[doc(hidden)]
+pub mod volume_light;
+#[doc(hidden)]
+pub mod spillway;
+#[doc(hidden)]
+pub mod water_foam;
+#[doc(hidden)]
 pub mod prop_light;
 #[doc(hidden)]
 pub mod loading_screen;
@@ -108,6 +116,12 @@ pub mod menu_ui;
 pub mod menu_audio;
 #[doc(hidden)]
 pub mod menu_options;
+#[doc(hidden)]
+pub mod menu_anim;
+#[doc(hidden)]
+pub mod menu_widgets;
+#[doc(hidden)]
+pub mod menu_maps;
 #[doc(hidden)]
 pub mod launcher;
 #[doc(hidden)]
@@ -205,7 +219,13 @@ fn parse_args() -> Args {
     // `--playground`: the Playground test level (missions/playground.ron on maps/playground.ron).
     let playground = has("--playground").then(|| playground_mission().unwrap_or_else(|| panic!("missions/playground.ron not found")).to_string_lossy().into_owned());
     let mission_path = get("--mission").or(playground).or_else(|| load.as_ref().map(|l| saves::header_of(l).unwrap_or_else(|e| panic!("save {}: {e:#}", l.display())).mission));
-    let mission = mission_path.as_ref().map(|p| dishonored_mission::MissionDef::load(std::path::Path::new(p)).unwrap_or_else(|e| panic!("mission {p}: {e:#}")));
+    let mut mission = mission_path.as_ref().map(|p| dishonored_mission::MissionDef::load(std::path::Path::new(p)).unwrap_or_else(|e| panic!("mission {p}: {e:#}")));
+    // `--freeroam --map M [--start-event E]`: the map offline with its original Kismet, no
+    // mission of the port's own and no bots.
+    if has("--freeroam") && mission.is_none() {
+        let map = get("--map").unwrap_or_else(|| dishonored_content::DEFAULT_MAP.into());
+        mission = Some(freeroam_mission(&map, get("--start-event")));
+    }
     // The Playground (a layout map) has no bots unless asked for.
     let bots = get("--bots").and_then(|s| s.parse().ok()).unwrap_or(if mission.as_ref().is_some_and(|m| dishonored_content::playground::is_layout_map(&m.map)) { 0 } else { 3 });
     Args {
@@ -243,6 +263,28 @@ fn parse_args() -> Args {
         lat: get("--lat").and_then(|s| s.parse().ok()).unwrap_or(0.0),
         loss: get("--loss").and_then(|s| s.parse().ok()).unwrap_or(0.0),
         size,
+    }
+}
+
+/// Free roam of `map`: a mission definition with no objectives or rules of its own that runs the
+/// original Kismet of the map and the global game sequence (started by the map's entry event
+/// when given, which puts the player at its travel start; otherwise the level's own Kismet
+/// runs from its default player start), the level's original NPCs and its dialog graphs. The
+/// story state is the one the full game has (`SF_Global_RealGameStarted`, as in
+/// `missions/boyle_original.ron`). The original's objectives still appear when the level's
+/// Kismet adds them.
+pub fn freeroam_mission(map: &str, start_event: Option<String>) -> dishonored_mission::MissionDef {
+    let dialog_packages = dishonored_assets::Content::locate().map(|c| dishonored_assets::map_packages(&c, map)).unwrap_or_default();
+    dishonored_mission::MissionDef {
+        title: map.to_string(),
+        map: map.to_string(),
+        objectives: Vec::new(),
+        flags_set: vec!["SF_Global_RealGameStarted".into()],
+        original_npcs: vec![map.to_string()],
+        dialog_packages,
+        original_kismet: Some(dishonored_mission::OriginalKismet { start_event: start_event.unwrap_or_default(), seed: 1 }),
+        settings: dishonored_mission::MissionSettings { respawn: true, respawn_delay: 3.0, ..Default::default() },
+        ..Default::default()
     }
 }
 
@@ -313,6 +355,9 @@ pub fn main() {
     .add_plugins(lighting::Ue3FalloffPlugin)
     .add_plugins(decals::DecalPlugin)
     .add_plugins(water::WaterPlugin)
+    .add_plugins(volume_light::VolumeLightPlugin)
+    .add_plugins(spillway::SpillwayPlugin)
+    .add_plugins(water_foam::WaterFoamPlugin)
     .add_plugins(prop_light::PropLightPlugin)
     .add_plugins(bloom::BloomPlugin)
     .add_plugins(env_map::EnvMapOncePlugin)
@@ -509,9 +554,20 @@ fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Asset
     let far = if args.features.sky { 12000.0 } else { 6000.0 };
     let projection = Projection::Perspective(PerspectiveProjection { fov: 75f32.to_radians(), near: 0.005, far, ..default() });
     let camera = if args.mode == Mode::Inspect {
-        commands.spawn((Camera3d::default(), projection, Transform::from_translation(coords::pos(start)), FreeCam { yaw, pitch: args.pitch })).id()
+        let mut cam = commands.spawn((Camera3d::default(), projection, Transform::from_translation(coords::pos(start)), FreeCam { yaw, pitch: args.pitch }));
+        if std::env::var_os("DISHONORED_NODEPTH").is_none() {
+            cam.insert(bevy::core_pipeline::prepass::DepthPrepass);
+        }
+        cam.id()
     } else {
-        commands.spawn((Camera3d::default(), projection, Transform::default(), players::GameCamera { third_person: args.spectate, follow: None }, if std::env::var_os("DISHONORED_NOMSAA").is_some() { Msaa::Off } else { Msaa::Sample4 })).id()
+        let mut cam = commands.spawn((Camera3d::default(), projection, Transform::default(), players::GameCamera { third_person: args.spectate, follow: None }, if std::env::var_os("DISHONORED_NOMSAA").is_some() { Msaa::Off } else { Msaa::Sample4 }));
+        // The scene-depth texture of the translucent materials (water thickness and fake fog,
+        // volume light and foam depth fades; research/dishonored/systems/render_depth.md).
+        // DISHONORED_NODEPTH=1 leaves the prepass out to measure its cost.
+        if std::env::var_os("DISHONORED_NODEPTH").is_none() {
+            cam.insert(bevy::core_pipeline::prepass::DepthPrepass);
+        }
+        cam.id()
     };
     level::apply_look(&levels, &args.map, camera, &mut commands, &args.features);
     commands.insert_resource(levels);

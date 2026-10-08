@@ -48,6 +48,29 @@ pub struct LevelProp {
     playing: Option<(String, f32)>,
     /// What the joints were last posed for (animation, time), to skip unchanged frames.
     posed: Option<(String, f32)>,
+    /// Seconds of the resting loop played (`SkeletalProp::idle`), at its rate.
+    clock: f32,
+}
+
+/// Two fractions in [0, 1) from an actor name: the per-instance roll of a resting loop's rate
+/// and start time (the original rolls them at random, `RiverKrustAnimSequenceSpec`).
+pub fn idle_roll(actor: &str) -> (f32, f32) {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in actor.to_ascii_lowercase().bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    (((h >> 8) & 0xFFFF) as f32 / 65536.0, ((h >> 32) & 0xFFFF) as f32 / 65536.0)
+}
+
+/// The time into a resting loop of length `len` after `clock` seconds at the rolled rate.
+pub fn idle_time(idle: &dishonored_ir::PropIdle, roll: (f32, f32), clock: f32, len: f32) -> f32 {
+    if len <= 0.0 {
+        return 0.0;
+    }
+    let rate = idle.rate[0] + (idle.rate[1] - idle.rate[0]) * roll.0;
+    let start = idle.start[0] + (idle.start[1] - idle.start[0]) * roll.1;
+    (start + clock * rate).rem_euclid(len)
 }
 
 #[derive(Resource, Default)]
@@ -134,7 +157,7 @@ pub fn spawn_props(
                     Transform::from_matrix(coords::transform(prop.transform)),
                     vis,
                     LevelOf(p.level.clone()),
-                    LevelProp { prop: prop.clone(), model: key.clone(), shown: prop.door.as_ref().map(|d| d.initial).unwrap_or(0), playing: None, posed: None },
+                    LevelProp { prop: prop.clone(), model: key.clone(), shown: prop.door.as_ref().map(|d| d.initial).unwrap_or(0), playing: None, posed: None, clock: 0.0 },
                 ))
                 .id();
             for (pi, part) in gpu.parts.iter().enumerate() {
@@ -148,10 +171,10 @@ pub fn spawn_props(
                             let p = part.section_materials.get(si).copied().flatten().and_then(|m| gpu.material_params.get(m));
                             let ext = crate::prop_light::prop_light(&env, p, &gpu.textures, crate::map_render::light_unit());
                             let h = prop_mats.add(crate::prop_light::PropMaterial { base: base.clone(), extension: ext });
-                            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(h), skin, Transform::default(), ChildOf(root)));
+                            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(h), skin, Transform::default(), part.bounds, bevy::camera::visibility::NoAutoAabb, ChildOf(root)));
                         }
                         _ => {
-                            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), skin, Transform::default(), ChildOf(root)));
+                            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), skin, Transform::default(), part.bounds, bevy::camera::visibility::NoAutoAabb, ChildOf(root)));
                         }
                     }
                 }
@@ -162,7 +185,8 @@ pub fn spawn_props(
     }
 }
 
-/// Place the props where the Kismet has their actors, and pose doors for their state.
+/// Place the props where the Kismet has their actors, pose doors for their state and play the
+/// resting loops of animated props.
 pub fn pose_props(
     time: Res<Time>,
     mut lp: ResMut<LevelProps>,
@@ -182,11 +206,15 @@ pub fn pose_props(
         if *tr != want {
             *tr = want;
         }
-        // Door state.
-        let Some(door) = p.prop.door.clone() else { continue };
-        let state = mission.and_then(|m| m.doors.iter().find(|d| d.0.eq_ignore_ascii_case(&p.prop.actor)).map(|d| d.1)).unwrap_or(door.initial);
-        if state != p.shown {
-            let anim = transition_anim(&door, p.shown, state).to_string();
+        // Door state, or the resting loop of an animated prop (river krusts).
+        let idle = p.prop.idle.clone();
+        let door = p.prop.door.clone();
+        if door.is_none() && idle.is_none() {
+            continue;
+        }
+        let state = door.as_ref().map(|door| mission.and_then(|m| m.doors.iter().find(|d| d.0.eq_ignore_ascii_case(&p.prop.actor)).map(|d| d.1)).unwrap_or(door.initial)).unwrap_or(0);
+        if let Some(door) = door.as_ref().filter(|_| state != p.shown) {
+            let anim = transition_anim(door, p.shown, state).to_string();
             p.playing = (!anim.is_empty()).then_some((anim, 0.0));
             p.shown = state;
         }
@@ -206,6 +234,15 @@ pub fn pose_props(
         };
         // The transition plays to its end, then the door rests on its stage's pose.
         let mut sample: Option<(String, f32)> = None;
+        if let Some(idle) = idle.as_ref().filter(|_| door.is_none()) {
+            // The resting loop (`Npc_RiverKrust_at`'s full-body slot source), from its rolled
+            // start time at its rolled rate.
+            let len = bank.clip(profile, &idle.anim).map(|c| c.1.duration).unwrap_or(0.0);
+            p.clock += dt;
+            if len > 0.0 {
+                sample = Some((idle.anim.clone(), idle_time(idle, idle_roll(&p.prop.actor), p.clock, len)));
+            }
+        }
         if let Some((anim, t)) = p.playing.clone() {
             let len = bank.clip(profile, &anim).map(|c| c.1.duration).unwrap_or(0.0);
             let t = t + dt;
@@ -217,7 +254,9 @@ pub fn pose_props(
             }
         }
         if sample.is_none() {
-            sample = rest_anim(&door, state).map(|a| (a.to_string(), f32::MAX));
+            if let Some(door) = door.as_ref() {
+                sample = rest_anim(door, state).map(|a| (a.to_string(), f32::MAX));
+            }
         }
         if p.posed == sample {
             continue;
@@ -232,7 +271,7 @@ pub fn pose_props(
             };
             match bank.sample_parts(&parts, profile, anim, t) {
                 Some(sp) => crate::npc_anim::blend_into(&mut pose, &sp, 1.0, &parts),
-                None => warn!("door {}: no animation {anim}", p.prop.actor),
+                None => warn!("prop {}: no animation {anim}", p.prop.actor),
             }
         }
         let globals: Vec<Vec<glam::Mat4>> = parts.iter().zip(&pose).map(|(part, pp)| crate::npc_anim::globals(part, pp)).collect();

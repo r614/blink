@@ -119,7 +119,11 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     );
     let mut c = Control::connect(cport, Duration::from_secs(60)).context("launcher control socket")?;
     let (bg_ok, s0) = c.wait(90.0, |s| s["background"].as_str().is_some_and(|b| b != "loading"));
-    rep.check(S, "launcher opens on the main menu with the 3D menu level", bg_ok && s0["page"] == "main" && s0["background"] == "level", format!("page {}, background {}", s0["page"], s0["background"]));
+    // The original front end opens on the start screen ("press any key"); any key opens the menu.
+    let on_start = s0["page"] == "start";
+    c.activate("start:any");
+    let (main_ok, s0m) = c.wait(10.0, |s| s["page"] == "main");
+    rep.check(S, "launcher opens on the start screen, then the main menu, with the 3D menu level", bg_ok && on_start && main_ok && s0m["background"] == "level", format!("first page {}, then {}, background {}", s0["page"], s0m["page"], s0["background"]));
     let (snd, s1) = c.wait(20.0, |s| s["sounds"]["loaded"].as_bool() == Some(true));
     rep.check(S, "menu music and UI sound theme decoded", snd, format!("sounds {}", s1["sounds"]));
     // The original takes input 0.58 s after the main menu opens (`PlayOpenAnimation`: 180 ms,
@@ -172,12 +176,17 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     // Video Settings screen: windowed (the original default is fullscreen), then Accept.
     c.activate("opt:line:t_Modify_VideoSettings");
     let video = c.state()["options"]["secondary"] == "Video";
-    c.call(json!({"cmd":"step","id":"opt:line:PSI_GraphicsPC_bFullScreen","dir":1}));
+    c.call(json!({"cmd":"step","id":"opt:line:PSI_GraphicsPC_bFullScreen","dir":-1}));
     std::thread::sleep(Duration::from_millis(100));
     c.activate("video:accept");
+    // Accept with a change asks `t_Q_VideoSettings` (keep the new settings?): Yes.
+    c.activate("msg:btn:0");
+    let _ = c.wait(5.0, |s| s["message_box"].is_null() && s["options"]["secondary"].is_null());
     c.activate("opt:tab:1");
     c.activate("opt:sub:1");
-    c.activate("opt:line:PSI_Mouse_bInvertY");
+    // Booleans are Off / On steppers (right = On), as the original's.
+    c.call(json!({"cmd":"step","id":"opt:line:PSI_Mouse_bInvertY","dir":1}));
+    std::thread::sleep(Duration::from_millis(100));
     c.activate("opt:sub:0");
     c.activate("opt:bind:GBA_Jump");
     let capturing = c.state()["capturing"].as_str().map(String::from);
@@ -223,8 +232,11 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
             g.screenshot(&out.join("game_pause_menu.png"));
             rep.check(S, "in-game pause menu opens (offline match paused)", paused, String::new());
             std::thread::sleep(Duration::from_secs(1));
-            // Back to Main Menu, as the player picks it.
+            // Back to Main Menu, as the player picks it: the entry, then Yes on its question
+            // (`t_Q_BackToMainMenu`; the box takes input 250 ms after it opens).
             g.call(json!({"cmd":"menu","id":"pause:quit"}));
+            std::thread::sleep(Duration::from_millis(900));
+            g.call(json!({"cmd":"menu","id":"msg:btn:0"}));
             via_menu = true;
         }
     }

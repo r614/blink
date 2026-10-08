@@ -726,6 +726,79 @@ impl H<'_> {
     fn players_obj(&self) -> Obj {
         self.m.humans.first().map(|p| Obj::Pawn(*p)).unwrap_or_default()
     }
+
+    /// [world] The world actors of the active map (breakables, batteries, receptacles).
+    fn world_defs(&self) -> Option<std::sync::Arc<dishonored_ir::world_actors::WorldActors>> {
+        self.m.setup.world_actors.get(&self.m.current_map.to_ascii_lowercase()).map(|w| std::sync::Arc::new(w.clone()))
+    }
+
+    /// [world] The Kismet actor of a placed actor (`package`, `name`).
+    fn kismet_actor(&self, package: &str, name: &str) -> Option<u32> {
+        self.db.find_actor(&format!("{package}:{name}"))
+    }
+
+    /// [world] Index of the breakable (battery) a Kismet object names, in the active map.
+    fn world_battery(&self, defs: &dishonored_ir::world_actors::WorldActors, o: &Obj) -> Option<usize> {
+        let Obj::Actor(a) = o else { return None };
+        let act = &self.db.actors[*a as usize];
+        dishonored_sim::world_actors::WorldActorsState::find(defs, Some(&act.package), &act.name).filter(|&i| defs.breakables[i].battery.is_some())
+    }
+
+    /// [world] Index of the receptacle a Kismet object names, in the active map.
+    fn world_receptacle(&self, defs: &dishonored_ir::world_actors::WorldActors, o: &Obj) -> Option<usize> {
+        let Obj::Actor(a) = o else { return None };
+        let act = &self.db.actors[*a as usize];
+        defs.receptacles.iter().position(|r| r.name.eq_ignore_ascii_case(&act.name) && r.package.eq_ignore_ascii_case(&act.package))
+    }
+
+    /// [distraction] Index into the crowd's distractors of a Kismet object.
+    fn distractor_of(&self, o: &Obj) -> Option<usize> {
+        let Obj::Actor(a) = o else { return None };
+        let act = &self.db.actors[*a as usize];
+        self.m.crowd.distractor(Some(&act.package), &act.name)
+    }
+}
+
+/// [world] Breakable / battery / receptacle notifications -> their Kismet events, as the
+/// original's `0x00bc7b30(actor, class, originator, instigator, 0, [output])` calls fire them:
+/// `DisSeqEvent_BreakableBroken` (0x00a3a5f0: originator the breakable, no instigator),
+/// `DisSeqEvent_WhaleOilBattery` (0x00c81d70 / 0x00c7d660: originator and instigator the
+/// battery), `DisSeqEvent_WhaleOilReceptacle` (0x00c7b490 / 0x00c7b6b0: originator the
+/// receptacle, instigator the battery). AI noises are heard next step.
+fn world_events(k: &mut Kismet, h: &mut H, evs: Vec<dishonored_sim::world_actors::WorldEvent>) {
+    use dishonored_sim::world_actors::WorldEvent;
+    if evs.is_empty() {
+        return;
+    }
+    let Some(defs) = h.world_defs() else { return };
+    for e in evs {
+        let (class, actor, instigator, output) = match e {
+            WorldEvent::Noise(s) => {
+                h.st.noises.push(s);
+                continue;
+            }
+            WorldEvent::Broken { breakable, output } => {
+                let d = &defs.breakables[breakable];
+                ("DisSeqEvent_BreakableBroken", h.kismet_actor(&d.package, &d.name), Obj::None, output)
+            }
+            WorldEvent::Battery { battery, output } => {
+                let d = &defs.breakables[battery];
+                let a = h.kismet_actor(&d.package, &d.name);
+                ("DisSeqEvent_WhaleOilBattery", a, a.map(Obj::Actor).unwrap_or_default(), output)
+            }
+            WorldEvent::Receptacle { receptacle, battery, output } => {
+                let r = &defs.receptacles[receptacle];
+                let b = &defs.breakables[battery];
+                ("DisSeqEvent_WhaleOilReceptacle", h.kismet_actor(&r.package, &r.name), h.kismet_actor(&b.package, &b.name).map(Obj::Actor).unwrap_or_default(), output)
+            }
+        };
+        let Some(a) = actor else { continue };
+        let fired = k.trigger(h, class, &[Obj::Actor(a)], instigator, Some(vec![output]));
+        if !fired.is_empty() {
+            let n = &h.db.actors[a as usize];
+            h.note(format!("{class} output {output} of {}:{}", n.package, n.name));
+        }
+    }
 }
 
 impl Host for H<'_> {
@@ -773,6 +846,12 @@ impl Host for H<'_> {
     fn toggle_actors(&mut self, _cx: &mut Ctx, targets: &[Obj], mode: u8) {
         for t in targets {
             let Obj::Actor(a) = t else { continue };
+            // [distraction] `DisNPCDistractor.OnToggle` (0x00a4c350): the component's
+            // `m_bDistractionEnabled`.
+            if let Some(i) = self.distractor_of(t) {
+                self.m.crowd.toggle_distractor(i, mode);
+                continue;
+            }
             let on = match mode {
                 0 => true,
                 1 => false,
@@ -1614,21 +1693,72 @@ impl Host for H<'_> {
                 }
                 HostResult::Done
             }
-            // `OnAIStartDistraction` (0x00b63ed0): an NPC with a distraction behaviour goes to
-            // the distractor (a soiree object) and plays it.
+            // `OnAIStartDistraction` (0x00b63ed0): for each NPC target, when the distractor is
+            // ready (its cooldown ignored) and the NPC has a positive animate chance, the
+            // animate message: `DisBehaviorInteract` walks it to the distractor, which then plays
+            // (`dishonored_ai::distraction`).
             "DisSeqAct_AIStartDistraction" => {
-                let at = cx.objects("Distractor").into_iter().next().or_else(|| Some(cx.prop_obj("m_pDistractor")).filter(|o| !o.is_none())).and_then(|o| self.pos_of(&o));
-                if let Some(g) = at {
+                let d = cx.objects("Distractor").into_iter().next().or_else(|| Some(cx.prop_obj("m_pDistractor")).filter(|o| !o.is_none())).and_then(|o| self.distractor_of(&o));
+                if let Some(i) = d {
                     for p in self.target_pawns(cx) {
-                        if let Some(b) = self.m.crowd.brains.iter_mut().find(|b| b.id == p).filter(|b| b.state.is_routine()) {
-                            b.goal = Some(g);
-                            b.run = false;
-                            b.stay = true;
-                            b.state = BrainState::WalkToPoint;
-                            b.follow = Default::default();
+                        if self.m.crowd.start_distraction(p, i) {
+                            self.note(format!("pawn {p} starts distraction {}", self.m.crowd.distractors[i].def.name));
                         }
                     }
                 }
+                HostResult::Done
+            }
+            // [world] `DisSeqAct_RefillWhaleOilBattery::Activated` (0x00c82190): every battery
+            // target gets `SetCharges(int(m_PercentageCharge * 0.01 * m_NumberOfCharges), 0)`
+            // (truncated; not notified, an emptied battery leaves its receptacle).
+            "DisSeqAct_RefillWhaleOilBattery" => {
+                let Some(defs) = self.world_defs() else { return HostResult::Done };
+                let pct = cx.prop_float("m_PercentageCharge");
+                let mut evs = Vec::new();
+                for t in cx.objects("Battery") {
+                    let Some(b) = self.world_battery(&defs, &t) else { continue };
+                    let max = defs.breakables[b].battery.as_ref().map_or(0, |x| x.max_charges);
+                    let n = (pct * 0.01 * max as f32) as i32;
+                    let key = self.m.current_map.to_ascii_lowercase();
+                    let st = self.m.world_actors.entry(key).or_insert_with(|| dishonored_sim::world_actors::WorldActorsState::new(&defs));
+                    evs.extend(st.set_charges(&defs, b, n, false));
+                    self.note(format!("battery {} refilled to {n}", defs.breakables[b].name));
+                }
+                world_events(cx.k, self, evs);
+                HostResult::Done
+            }
+            // [world] `DisSeqAct_PlugWhaleOilBattery::Activated` (0x00c7d7c0): with both inputs
+            // nothing; the batteries ("Battery", `Targets`) and receptacles ("Receptacle") pair up
+            // when their counts match: Plug (input 0) plugs each battery, notified (0x00c7b490),
+            // unless the receptacle holds a charged battery; Unplug (input 1) ejects it
+            // (0x00c7d190).
+            "DisSeqAct_PlugWhaleOilBattery" => {
+                let Some(defs) = self.world_defs() else { return HostResult::Done };
+                let plug = cx.has_impulse(0);
+                if plug && cx.has_impulse(1) {
+                    return HostResult::Done;
+                }
+                let bats = cx.objects("Battery");
+                let recs = cx.objects("Receptacle");
+                if bats.len() != recs.len() {
+                    return HostResult::Done;
+                }
+                let key = self.m.current_map.to_ascii_lowercase();
+                let mut evs = Vec::new();
+                for (bo, ro) in bats.iter().zip(recs.iter()) {
+                    let (Some(b), Some(r)) = (self.world_battery(&defs, bo), self.world_receptacle(&defs, ro)) else { continue };
+                    let st = self.m.world_actors.entry(key.clone()).or_insert_with(|| dishonored_sim::world_actors::WorldActorsState::new(&defs));
+                    if plug {
+                        let held = st.receptacles[r].attached.and_then(|a| st.batteries.get(&a)).is_some_and(|x| x.charges >= 1);
+                        if held {
+                            continue;
+                        }
+                        evs.extend(st.plug(&defs, r, b, true).1);
+                    } else {
+                        evs.extend(st.eject(b));
+                    }
+                }
+                world_events(cx.k, self, evs);
                 HostResult::Done
             }
             // `DisSeqAct_SetIgnoreDeath`: the target NPCs ignore the deaths of `m_Ignorers`
@@ -2520,6 +2650,23 @@ fn attention_events(k: &mut Kismet, h: &mut H) {
 /// Gameplay -> Kismet events.
 fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
     h.drain_spawns(k);
+    // [world] Breakables, batteries and receptacles of this step.
+    let evs = std::mem::take(&mut h.m.world_events);
+    world_events(k, h, evs);
+    // [distraction] `FireDistracted` (0x00b79b80): every `DisSeqEvent_Distracted` of the
+    // distractor (originator) checks with the pawn as instigator and the output as its index.
+    let distracted: Vec<(usize, PlayerId, u8)> = h.m.crowd.events.iter().filter_map(|e| match e {
+        dishonored_ai::AiEvent::Distracted { distractor, pawn, output } => Some((*distractor, *pawn, *output)),
+        _ => None,
+    }).collect();
+    for (i, pawn, out) in distracted {
+        let Some((pkg, name)) = h.m.crowd.distractors.get(i).map(|d| (d.def.package.clone(), d.def.name.clone())) else { continue };
+        let Some(a) = h.kismet_actor(&pkg, &name) else { continue };
+        let fired = k.trigger(h, "DisSeqEvent_Distracted", &[Obj::Actor(a)], Obj::Pawn(pawn), Some(vec![out as usize]));
+        if !fired.is_empty() {
+            h.note(format!("pawn {pawn} distracted by {pkg}:{name}: output {out}"));
+        }
+    }
     // Usables the Kismet moved to a stage (`DisSeqAct_ActivateUsable`): the usable's
     // `DisSeqEvent_Used` output for that stage, instigated by the player.
     for (a, stage) in std::mem::take(&mut h.st.usable_events) {
