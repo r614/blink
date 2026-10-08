@@ -64,6 +64,10 @@ pub struct ImportStats {
     pub other_actor_components: usize,
     /// SplineMeshComponents baked into deformed mesh copies.
     pub spline_meshes: usize,
+    /// Spline loft actors (`SplineLoftActor`, `DisSplineLoftActor`: cables, rails) imported
+    /// through their cooked `SplineMeshComponent`s (`SplineMeshComps`, the loft of `DeformMesh`
+    /// along the actor's spline to its `Connections`, generated in the editor and cooked).
+    pub spline_loft_actors: usize,
     /// [foliage-survey] Placed SkeletalMeshComponents (doors, usable objects, sinks, alarm bells,
     /// climbable chains) imported as render-only instances in their reference pose.
     pub skeletal_props: usize,
@@ -345,6 +349,9 @@ impl Importer<'_> {
                 && owned.contains_key(&i)
                 && self.is_in_persistent_level(&pkg, i)
             {
+                if matches!(class.as_str(), "SplineLoftActor" | "DisSplineLoftActor") {
+                    self.stats.spline_loft_actors += 1;
+                }
                 if let Err(e) = self.import_owned_components(slot, i, &owned[&i]) {
                     self.stats.errors.push(format!("{}: {e:#}", pkg.obj_path(ObjRef::Export(i))));
                 }

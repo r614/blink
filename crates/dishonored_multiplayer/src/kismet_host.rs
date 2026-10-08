@@ -65,12 +65,8 @@ pub struct KismetSetup {
 /// Classes that only present something (camera, HUD, tutorials, saves, statistics, ambient
 /// audio, materials): run as no-ops, counted apart from the unsupported ones.
 pub const PRESENTATION: &[&str] = &[
-    "SeqAct_ToggleCinematicMode",
     "SeqAct_ToggleHUD",
     "SeqAct_Log",
-
-    "SeqAct_SetMatInstScalarParam",
-    "SeqAct_SetMaterial",
     "SeqAct_StreamInTextures",
     "SeqAct_ConsoleCommand",
     "DisSeqAct_ToggleHUDElement",
@@ -103,6 +99,28 @@ pub const NOT_MODELLED: &[&str] = &[
     "SeqAct_SetDamageInstigator",
     "DisSeqAct_AIProtectNeutralsOverride",
     "DisSeqAct_ApplyPlayerLoadout",
+];
+
+/// Event classes the game activates (this host's `feed`, `drain_spawns`, the conversation
+/// outputs, `used_stage`); with their subclasses. A level's events of any other class are
+/// reported once as unsupported when it loads ([`dishonored_kismet::Host::fires_event`]).
+/// Add a class here when its events are fed.
+pub const FED_EVENTS: &[&str] = &[
+    "SeqEvent_Touch",
+    "SeqEvent_Used",
+    "SeqEvent_Death",
+    "SeqEvent_TakeDamage",
+    "SeqEvent_LOS",
+    "DisSeqEvent_Used",
+    "DisSeqEvent_PickupPickedUp",
+    "DisSeqEvent_Spawned",
+    "DisSeqEvent_KnockedOut",
+    "DisSeqEvent_PutToSleep",
+    "DisSeqEvent_NPCIncapacitated",
+    "DisSeqEvent_Door",
+    "DisSeqEvent_DialogOutputs",
+    "DisSeqEvent_AttentionIncreasedTo",
+    "DisSeqEvent_AttentionDecreasedTo",
 ];
 
 /// A usable the Kismet offers (an actor with `DisSeqEvent_Used` or a pickup with
@@ -277,6 +295,36 @@ pub struct HostState {
     /// `SeqAct_SetPhysics`: the `EPhysics` the Kismet gave a level actor or pawn. Recorded only:
     /// the port has no rigid bodies or per-actor physics modes to apply it to.
     pub physics: BTreeMap<Obj, u8>,
+    /// `SeqAct_ToggleCinematicMode`: each player's cinematic mode (`PlayerController.
+    /// SetCinematicMode`).
+    #[serde(default)]
+    pub cinematic: BTreeMap<PlayerId, Cinematic>,
+    /// `SeqAct_SetMatInstScalarParam` on a `MaterialInstanceConstant` (object path): parameter ->
+    /// value. A material instance is shared by every mesh using it.
+    #[serde(default)]
+    pub mat_scalars: BTreeMap<String, BTreeMap<String, f32>>,
+    /// `SeqAct_SetMatInstScalarParam` with `m_pMaterialOwnerPawn`: (pawn, material index) ->
+    /// parameter -> value.
+    #[serde(default)]
+    pub pawn_mat_scalars: BTreeMap<(PlayerId, i32), BTreeMap<String, f32>>,
+    /// `SeqAct_SetMaterial` (`OnSetMaterial`): actor or pawn -> material index -> material path.
+    #[serde(default)]
+    pub materials: BTreeMap<Obj, BTreeMap<i32, String>>,
+}
+
+/// A player's cinematic mode (`PlayerController.SetCinematicMode` 0x00 script, then
+/// `DishonoredPlayerController.SetCinematicMode_Native` 0x009eea00 -> 0x00aaf150).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct Cinematic {
+    /// `bCinematicMode`.
+    pub on: bool,
+    /// `bCinemaDisableInputMove` / `bCinemaDisableInputLook`: the movement / look input is
+    /// ignored (`IgnoreMoveInput` / `IgnoreLookInput`).
+    pub no_move: bool,
+    pub no_look: bool,
+    /// The HUD is hidden (`myHUD.bShowHUD = false`) and the player pawn hidden.
+    pub hide_hud: bool,
+    pub hide_player: bool,
 }
 
 /// Stage names of a usable: the outputs of its `DisSeqEvent_Used` (the editor names them
@@ -697,6 +745,10 @@ impl Host for H<'_> {
         let _ = text;
     }
 
+    fn fires_event(&self, class: &str) -> bool {
+        FED_EVENTS.iter().any(|c| self.db.is_a(class, c))
+    }
+
     fn matinee(&mut self, cx: &mut Ctx, what: Matinee) {
         match what {
             Matinee::Started { length, .. } => {
@@ -734,12 +786,22 @@ impl Host for H<'_> {
     fn activated(&mut self, cx: &mut Ctx) -> HostResult {
         self.st.act_time.insert(cx.op, cx.k.time);
         let class = cx.class().to_string();
+        // The no-op classes are named once in the history (the trace's `KismetNote`s), so a
+        // run lists what it skipped.
         if PRESENTATION.contains(&class.as_str()) {
-            *self.st.presentation.entry(class).or_insert(0) += 1;
+            let n = self.st.presentation.entry(class.clone()).or_insert(0);
+            *n += 1;
+            if *n == 1 {
+                self.note(format!("not modelled (presentation) Kismet class {class} (first at {})", cx.describe()));
+            }
             return HostResult::Done;
         }
         if NOT_MODELLED.contains(&class.as_str()) {
-            *self.st.not_modelled.entry(class).or_insert(0) += 1;
+            let n = self.st.not_modelled.entry(class.clone()).or_insert(0);
+            *n += 1;
+            if *n == 1 {
+                self.note(format!("not modelled (no such system) Kismet class {class} (first at {})", cx.describe()));
+            }
             return HostResult::Done;
         }
         match class.as_str() {
@@ -789,6 +851,134 @@ impl Host for H<'_> {
                 let name = cx.prop_str("m_StoryFlagName");
                 let set = self.m.state.flag(&name);
                 cx.fire(if set { 0 } else { 1 });
+                HostResult::Done
+            }
+            // `DisSeqCond_CompareBoolExtended::Activated` (0x00b9b3e0): over the "Bool" variables,
+            // `m_bResultAnd` (starts true) ANDs and `m_bResultOr` (starts false) ORs their
+            // values; output 0 when all are true, else output 2 when some are, else output 1.
+            "DisSeqCond_CompareBoolExtended" => {
+                let vals = cx.bools("Bool");
+                let and = vals.iter().all(|b| *b);
+                let or = vals.iter().any(|b| *b);
+                cx.set_prop("m_bResultAnd", Value::Bool(and));
+                cx.set_prop("m_bResultOr", Value::Bool(or));
+                cx.fire(if and { 0 } else if or { 2 } else { 1 });
+                HostResult::Done
+            }
+            // `DisSeqCond_IsSentinel::Activated` (0x00b8f070): output 0 when the game has an
+            // automated-test manager (`GameInfo.MyAutoTestManager`, +0x304 of
+            // `WorldInfo.Game`), else output 1. The port never runs the Sentinel test mode.
+            "DisSeqCond_IsSentinel" => {
+                cx.fire(1);
+                HostResult::Done
+            }
+            // `PlayerController.OnToggleCinematicMode` -> `DishonoredPlayerController.
+            // SetCinematicMode` (script) for each player target: input 0 enables, 1 disables, 2
+            // toggles `bCinematicMode`. `PlayerController.SetCinematicMode` ignores the move /
+            // look input (`bDisableMovement` / `bDisableTurning`) while on and gives it back
+            // when off (only when the state of that input changes); the HUD (`bHideHUD`; the
+            // Dishonored override passes it to the native) and the player (`bHidePlayer`) are
+            // hidden. The native 0x00aaf150 also swaps the pawn's action permissions when the
+            // mode starts (disables mask 0x7faf, enables 0x6010; ends: the reverse): the player
+            // cannot act in cinematic mode (applied to the buttons in `cinematic_inputs`).
+            "SeqAct_ToggleCinematicMode" => {
+                let targets: Vec<PlayerId> = cx.objects("Target").iter().filter_map(|o| self.pawn_of(o)).filter(|p| self.m.humans.contains(p)).collect();
+                let input = cx.input();
+                let (mv, turn, hud, hide) = (cx.prop_bool("bDisableMovement"), cx.prop_bool("bDisableTurning"), cx.prop_bool("bHideHUD"), cx.prop_bool("bHidePlayer"));
+                for p in targets {
+                    let c = self.st.cinematic.entry(p).or_default();
+                    let on = match input {
+                        Some(0) => true,
+                        Some(1) => false,
+                        Some(2) => !c.on,
+                        _ => continue,
+                    };
+                    c.on = on;
+                    if mv && on != c.no_move {
+                        c.no_move = on;
+                    }
+                    if turn && on != c.no_look {
+                        c.no_look = on;
+                    }
+                    if hud {
+                        c.hide_hud = on;
+                    }
+                    c.hide_player = on && hide;
+                    let c = *c;
+                    self.note(format!("cinematic mode {} for player {p} (move {}, look {}, HUD {})", if on { "on" } else { "off" }, !c.no_move, !c.no_look, !c.hide_hud));
+                }
+                HostResult::Done
+            }
+            // `SeqAct_SetMatInstScalarParam::Activated` (0x006d1d90): without
+            // `m_pMaterialOwnerPawn`, `MatInst.SetScalarParameterValue(ParamName, ScalarValue)`;
+            // with it, the same on the material instance at `m_iMaterialIndex` of that pawn's
+            // mesh (a constant instance only).
+            "SeqAct_SetMatInstScalarParam" => {
+                let param = cx.prop_str("ParamName");
+                let v = cx.prop_float("ScalarValue");
+                let owner = cx.prop_obj("m_pMaterialOwnerPawn");
+                if !owner.is_none() {
+                    if let Some(p) = self.pawn_of(&owner) {
+                        let idx = cx.prop_int("m_iMaterialIndex");
+                        self.st.pawn_mat_scalars.entry((p, idx)).or_default().insert(param, v);
+                    }
+                } else if let Obj::Path(mi) = cx.prop_obj("MatInst") {
+                    self.st.mat_scalars.entry(mi).or_default().insert(param, v);
+                }
+                HostResult::Done
+            }
+            // `SeqAct_SetMaterial` -> `OnSetMaterial` of each target (`DynamicSMActor`,
+            // `SkeletalMeshActor`: their mesh component; `Pawn`: its `Mesh`):
+            // `SetMaterial(MaterialIndex, NewMaterial)`.
+            "SeqAct_SetMaterial" => {
+                let Obj::Path(mat) = cx.prop_obj("NewMaterial") else { return HostResult::Done };
+                let idx = cx.prop_int("MaterialIndex");
+                for t in cx.objects("Target") {
+                    let t = self.pawn_of(&t).map(Obj::Pawn).unwrap_or(t);
+                    self.st.materials.entry(t).or_default().insert(idx, mat.clone());
+                }
+                HostResult::Done
+            }
+            // `DisSeqAct_BackupAndClearInventory::Activated` (0x00ba91d0): "Out" fires at once.
+            // Each player target whose hands are not both empty (0x00b4e070: hand slots 1 and 2
+            // hold nothing) is asked to unequip slots 1 and 2 (0x00b51790) and the op waits
+            // (`m_bTryingToUnequip`); Update (0x00baf050) waits until every target's hands are
+            // empty. Then the inventory is backed up and cleared (0x00ba8980) and "Finished
+            // (After Unequip)" (output 1) fires; the op ends (`SeqAct_Latent`'s DeActivated
+            // fires "Out" again). The port has no hand-slot unequip request (the hands follow the
+            // player's input, with no holster time), so it takes the original's path for empty
+            // hands: both outputs in `Activated`, finished in the first update. This is what
+            // lets `fromHub_toFloodedDistrict` reach its travel destination and commit (the
+            // L_Flooded_FIntro entry stall). NOT PORTED: the unequip itself and the inventory
+            // backup and clear (0x00ba8980: items, upgrades and abstract items minus the skip
+            // lists).
+            "DisSeqAct_BackupAndClearInventory" => {
+                cx.fire(0);
+                cx.fire(1);
+                HostResult::Done
+            }
+            // `DisSeqAct_AIGuard` -> `ADishonoredNPCController::OnAIGuard` (0x00b63a80): Start
+            // gives the NPC a guard stimulus on `m_pHomeActor` (a controller's pawn) with
+            // `m_fGuardAwarenessRadius` (0x00b18820); Stop ends it. The port's brain walks to
+            // the home actor and holds there; the awareness radius is not modelled.
+            "DisSeqAct_AIGuard" => {
+                let start = cx.input() != Some(1);
+                let home = cx.objects("Home Actor").into_iter().next().or_else(|| Some(cx.prop_obj("m_pHomeActor")).filter(|o| !o.is_none())).and_then(|o| self.pos_of(&o));
+                for p in self.target_pawns(cx) {
+                    let Some(b) = self.m.crowd.brains.iter_mut().find(|b| b.id == p) else { continue };
+                    match (start, home) {
+                        (true, Some(h)) => {
+                            b.home = h;
+                            b.goal = Some(h);
+                            b.stay = true;
+                            if b.state.is_routine() {
+                                b.state = BrainState::WalkToPoint;
+                            }
+                        }
+                        (false, _) => b.stay = false,
+                        _ => {}
+                    }
+                }
                 HostResult::Done
             }
             // ----- objectives -----
@@ -2162,6 +2352,35 @@ pub fn choice(m: &mut MissionMatch, player: PlayerId, index: usize) -> bool {
     }
 }
 
+/// Cinematic mode (`SeqAct_ToggleCinematicMode`) applied to the players' inputs before the
+/// world steps: movement input ignored (`IgnoreMoveInput`), the view kept where it is
+/// (`IgnoreLookInput`), and no actions (the pawn's action permissions are off while in
+/// cinematic mode, 0x00aaf150). The bit-by-bit meaning of the permission mask 0x7faf is not
+/// decoded: every button is refused.
+pub fn cinematic_inputs(m: &MissionMatch, inputs: &mut [(PlayerId, dishonored_sim::input::PlayerInput)]) {
+    let Some(run) = m.kismet.as_ref() else { return };
+    if run.st.cinematic.is_empty() {
+        return;
+    }
+    for (id, i) in inputs.iter_mut() {
+        let Some(c) = run.st.cinematic.get(id).filter(|c| c.on || c.no_move || c.no_look) else { continue };
+        let Some(me) = m.world.player(*id) else { continue };
+        if c.no_move {
+            i.forward = 0;
+            i.right = 0;
+        }
+        if c.no_look {
+            i.yaw = me.yaw;
+            i.pitch = me.pitch;
+        }
+        if c.on {
+            i.buttons = 0;
+            i.action = 0;
+            i.left_hand = me.left.item;
+        }
+    }
+}
+
 /// Forced view tracking (`ViewTrack`) applied to the players' inputs before the world steps:
 /// the tracked view replaces the input's yaw / pitch, alpha advances, and a channel that
 /// reached 1 without `m_bHoldUntilStopped` ends (0x00aaf3a0 -> 0x00aa0e60).
@@ -2225,6 +2444,10 @@ pub fn step(m: &mut MissionMatch, sim_events: &[SimEvent], dt: f32, cfg: &SimCon
             cutscene::apply(k, &mut h); // [interp]
             h.drain_spawns(k);
             commit_map_change(k, &mut h);
+        }
+        // Unsupported op / event classes the interpreter met (once per class).
+        for n in std::mem::take(&mut k.notices) {
+            h.note(n);
         }
     }
     m.kismet = Some(run);
