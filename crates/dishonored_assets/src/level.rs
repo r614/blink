@@ -1742,7 +1742,9 @@ impl Importer<'_> {
             }
             let ObjRef::Export(actor) = ObjRef::from_index(pkg.exports[ci].outer) else { continue };
             let class = pkg.export_class(actor);
-            let scenery = SKELETAL_PROP_CLASSES.contains(&class.as_str()) || (class == "SkeletalMeshActor" && !scripted.contains(&actor));
+            // [anim-parity] A SkeletalMeshActor looping its own animation (Boyle Int's clock) is an
+            // animated prop (`usable_props::playing_loop`), drawn by the runtime's level props.
+            let scenery = SKELETAL_PROP_CLASSES.contains(&class.as_str()) || (class == "SkeletalMeshActor" && !scripted.contains(&actor) && crate::usable_props::playing_loop(&pkg, ci).is_none());
             if !scenery || !self.is_in_persistent_level(&pkg, actor) {
                 continue;
             }

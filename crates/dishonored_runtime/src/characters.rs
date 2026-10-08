@@ -459,12 +459,46 @@ fn face_frames(bank: &mut crate::npc_anim::AnimBank, lib: &CharacterLibrary, vie
     out
 }
 
-/// `DISH_ANIM_DEBUG=<pawn id>`, read once (not per pawn per frame).
-pub struct AnimDebug(Option<u32>);
+/// `DISH_ANIM_DEBUG=<pawn id>`, read once (not per pawn per frame); `DISH_ANIM_DUMP=<pawn
+/// id>:<file>` appends that pawn's bone transforms every frame (`dump_bones`).
+pub struct AnimDebug(Option<u32>, Option<(u32, std::path::PathBuf)>);
 
 impl Default for AnimDebug {
     fn default() -> Self {
-        Self(std::env::var("DISH_ANIM_DEBUG").ok().and_then(|v| v.parse::<u32>().ok()))
+        let dump = std::env::var("DISH_ANIM_DUMP").ok().and_then(|v| {
+            let (id, file) = v.split_once(':').filter(|(_, f)| !f.is_empty())?;
+            Some((id.parse::<u32>().ok()?, std::path::PathBuf::from(file)))
+        });
+        Self(std::env::var("DISH_ANIM_DEBUG").ok().and_then(|v| v.parse::<u32>().ok()), dump)
+    }
+}
+
+/// One JSON line per frame for the animation diff against the original's per-tick bone capture
+/// (fixtures/oracle/capture_queue.txt, `session bones`): the sim tick, the pawn's location and
+/// yaw, the slots playing, and every bone of the body in component space (the skeletal mesh's
+/// own space, before its `Origin` / `RotOrigin`, like UE3's `SpaceBases`): rotation (x, y, z,
+/// w) and translation, Dishonored units.
+pub fn dump_bones(file: &std::path::Path, tick: u64, p: &PlayerState, st: Option<&crate::npc_anim::PawnAnim>, part: &PartGpu, globals: &[glam::Mat4]) {
+    use std::io::Write;
+    let inv = part.mesh_to_pawn.inverse();
+    let bones: Vec<serde_json::Value> = part
+        .bones
+        .iter()
+        .zip(globals)
+        .map(|(b, g)| {
+            let (_, q, t) = (inv * *g).to_scale_rotation_translation();
+            serde_json::json!({"name": b.name, "q": [q.x, q.y, q.z, q.w], "t": [t.x, t.y, t.z]})
+        })
+        .collect();
+    let slot = |c: Option<&crate::npc_anim::Chain>| c.map(|c| serde_json::json!({"key": c.key, "seq": c.steps[c.i].0, "t": c.t, "w": c.weight}));
+    let line = serde_json::json!({
+        "tick": tick, "id": p.id, "pos": [p.position.x, p.position.y, p.position.z], "yaw": p.yaw,
+        "modifier": st.map(|s| s.modifier.clone()), "vel": st.map(|s| [s.vel.0, s.vel.1]), "phase": st.map(|s| s.phase),
+        "full": slot(st.and_then(|s| s.full.as_ref())), "upper": slot(st.and_then(|s| s.upper.as_ref())), "ragdoll": st.is_some_and(|s| s.ragdoll.is_some()),
+        "bones": bones,
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file) {
+        let _ = writeln!(f, "{line}");
     }
 }
 
@@ -577,6 +611,10 @@ pub fn animate_characters(
             }
         };
         let globals: Vec<Vec<glam::Mat4>> = model.parts.iter().zip(&pose).map(|(part, pp)| crate::npc_anim::globals(part, pp)).collect();
+        // DISH_ANIM_DUMP=<pawn id>:<file>: the pawn's bones every frame (animation diff).
+        if let Some((_, file)) = anim_debug.1.as_ref().filter(|d| d.0 == p.id) {
+            dump_bones(file, view.tick, p, states.get(entity).ok(), &model.parts[0], &globals[0]);
+        }
         // Diagnostics: DISH_ANIM_DEBUG=<pawn id> logs the pawn's slots and root.
         if anim_debug.0 == Some(p.id) {
             if let Ok(st) = states.get(entity) {

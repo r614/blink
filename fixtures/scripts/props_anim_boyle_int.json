@@ -1,0 +1,14 @@
+{"steps":[
+  {"wait_ticks": 180},
+  {"teleport": {"pos": [2318, 390, 103], "yaw": 270, "pitch": 8}},
+  {"ticks": 2, "input": {"yaw": 270, "pitch": 8, "left_hand": "Empty"}},
+  {"screenshot": "pa_01_clock_a"},
+  {"wait_ticks": 1},
+  {"ticks": 20, "input": {"yaw": 270, "pitch": 8, "left_hand": "Empty"}},
+  {"screenshot": "pa_02_clock_b"},
+  {"wait_ticks": 1},
+  {"ticks": 20, "input": {"yaw": 270, "pitch": 8, "left_hand": "Empty"}},
+  {"screenshot": "pa_03_clock_c"},
+  {"wait_ticks": 1},
+  {"quit": true}
+]}

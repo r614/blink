@@ -33,6 +33,43 @@ pub fn is_animated_prop_class(class: &str) -> bool {
     class == "DisRiverKrust"
 }
 
+/// The loop a placed skeletal component plays on its own: its `Animations` node is an
+/// `AnimNodeSequence` with `bPlaying` and `bLooping` (Boyle Int's pendulum clock,
+/// `Clock_TickAnim`), at its `Rate` from its `CurrentTime`. A `SkeletalMeshActor` doing so is
+/// drawn as an animated prop rather than as scenery in its reference pose.
+pub fn playing_loop(pkg: &Package, component: usize) -> Option<dishonored_ir::PropIdle> {
+    let c = pkg.read_object(component).ok()?.properties;
+    let ObjRef::Export(n) = find(&c, "Animations").and_then(|p| p.as_object()).map(ObjRef::from_index)? else { return None };
+    if pkg.export_class(n) != "AnimNodeSequence" {
+        return None;
+    }
+    let node = pkg.read_object(n).ok()?.properties;
+    let anim = match find(&node, "AnimSeqName").map(|p| &p.value) {
+        Some(Value::Name(s)) if s != "None" => s.clone(),
+        _ => return None,
+    };
+    if !(bool_or(&node, "bPlaying", false) && bool_or(&node, "bLooping", false)) {
+        return None;
+    }
+    let f = |k: &str, d: f32| find(&node, k).and_then(|p| p.as_float()).unwrap_or(d);
+    let (rate, start) = (f("Rate", 1.0), f("CurrentTime", 0.0));
+    Some(dishonored_ir::PropIdle { anim, rate: [rate, rate], start: [start, start] })
+}
+
+/// Exports a package's Kismet names (`SeqVar_Object.ObjValue`): those actors belong to the
+/// mission's scripts (matinee props), not to the static scenery.
+fn kismet_objects(pkg: &Package) -> std::collections::HashSet<usize> {
+    let mut out = std::collections::HashSet::new();
+    for i in 0..pkg.exports.len() {
+        if pkg.export_class(i) == "SeqVar_Object" {
+            if let Some(ObjRef::Export(o)) = pkg.read_object(i).ok().and_then(|h| find(&h.properties, "ObjValue").and_then(|p| p.as_object())).map(ObjRef::from_index) {
+                out.insert(o);
+            }
+        }
+    }
+    out
+}
+
 /// The resting loop of a river krust tweak: `m_AnimSequences[RiverKrustAnimState_Ambient]`
 /// (element 0) with its `m_PlaybackRateRange` and `m_StartTimeSecondsRange`.
 fn krust_idle(t: &crate::tweaks::TMap) -> Option<dishonored_ir::PropIdle> {
@@ -112,10 +149,12 @@ pub fn read_props_with_channels(content: &Content, packages: &[String]) -> Vec<(
     let mut out = Vec::new();
     for name in packages.iter().filter(|p| content.has_package(p)) {
         let Ok(pkg) = content.package(name) else { continue };
+        let mut scripted: Option<std::collections::HashSet<usize>> = None;
         for i in 0..pkg.exports.len() {
             let class = pkg.export_class(i);
             let animated = is_animated_prop_class(&class);
-            if !(is_usable_class(&class) || animated) || pkg.obj_name(ObjRef::from_index(pkg.exports[i].outer)) != "PersistentLevel" {
+            let scenery = class == "SkeletalMeshActor";
+            if !(is_usable_class(&class) || animated || scenery) || pkg.obj_name(ObjRef::from_index(pkg.exports[i].outer)) != "PersistentLevel" {
                 continue;
             }
             let Ok(h) = pkg.read_object(i) else { continue };
@@ -123,6 +162,12 @@ pub fn read_props_with_channels(content: &Content, packages: &[String]) -> Vec<(
             let comp = if animated { "CollisionComponent" } else { "SkeletalMeshComponent" };
             let Some(ObjRef::Export(ci)) = find(&props, comp).and_then(|p| p.as_object()).map(ObjRef::from_index) else { continue };
             if animated && !pkg.export_class(ci).contains("SkeletalMeshComponent") {
+                continue;
+            }
+            // Scenery skeletal meshes are props only when they loop an animation on their own
+            // and no Kismet names them.
+            let looping = if scenery { playing_loop(&pkg, ci) } else { None };
+            if scenery && (looping.is_none() || scripted.get_or_insert_with(|| kismet_objects(&pkg)).contains(&i)) {
                 continue;
             }
             let Ok(ch) = pkg.read_object(ci) else { continue };
@@ -161,7 +206,7 @@ pub fn read_props_with_channels(content: &Content, packages: &[String]) -> Vec<(
                     krust_idle(&db.try_resolve(&path)?)
                 })
             } else {
-                None
+                looping
             };
             let channels = crate::light_env::channel_bits(&c, 1 | 1 << 3);
             out.push((SkeletalProp {
