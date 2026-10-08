@@ -103,6 +103,15 @@ mod imp {
         // The world-tick boundary (time update); optional: without it ticks are counted per
         // rendered frame as before.
         crate::tick::install();
+        // Several hooked games side by side: 0x009E3C60 (before WinMain's engine start) shows
+        // "Dishonored is already running" and quits when the startup mutex's GetLastError,
+        // kept at 0x0145CF60, is ERROR_ALREADY_EXISTS (0xB7). Its `JNZ` at 0x009E3C9D becomes
+        // a `JMP` (only if the byte is the expected 0x75).
+        unsafe {
+            if *(0x009e3c9d as *const u8) == 0x75 && *(0x009e3c93 as *const u16) == 0x3d81 {
+                crate::mem::patch(0x009e3c9d, &[0xeb]);
+            }
+        }
         crate::d3d::install();
         crate::iat::install();
         // Focus faking (the engine pauses on focus loss): on unless the launcher says "0".

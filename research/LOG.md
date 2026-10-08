@@ -1986,6 +1986,14 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Confidence:** CONFIRMED for the gates, queue, weights, caps, lock, output classes, fallback, loiter / look-at; LIKELY for the bind-time availability of hook walks (F7) and the Notice context threshold; APPROXIMATION for the audio path distance (straight line) and the duck blend curve.
 - **Implementation consequence:** dialog cache key v3 -> v4; protocol (MissionView.dialogue_mix, DialogueLineView.voice_radius / instance / hook) and save (Runner.queue / loiter / look_at, HookClock without last_group, MissionState and Brain fields) need the coordinator's bumps; `AiConfig::ambient_bark_inhibition` (serde default 12 = the tweak value, gameplay config cache key unchanged).
 
+## 2026-10-08: Fresh scenario NPCs from spawners and the stealth light environment in the original (U-807, U-121)
+
+- **Question:** Can scenario NPCs stay where placed (U-807), and how does the original turn its stealth light environment into the raw light value (U-121)?
+- **Method:** hook session on the original (probe_launch `session spawn_npc`, `lightenv`, `lights`), Ghidra on the spawner (`ClassDecomp DishonoredSpawner`: 0x00A5E790 spawn with reason codes, 0x00A4B300, 0x00A5C150), the StartSpawn op (0x00B9BCC0, 0x00B90050) and the light value (0x004E1DB0, 0x004E1F40, caller 0x00A57FF0, normalization 0x00BC9040).
+- **Result:** scenario NPCs spawn fresh from a copied host spawner (squad, pawn list and queued requests cleared; blocked spawns re-requested higher); the 58 NPC specs re-captured (56 ok). The raw light is `(L / 4 pi)^(1/2.2)`, L = sum of light intensities `Brightness x lum((byte/255)^2.2) x falloff` (band 0 luminance of the state's +0x450 / +0x4E0 x 2 sqrt(pi)), exact to 4 decimals at 10 points; per-light contributions, sky and directional terms and the light-volume share recorded (ORACLE.md "Stealth light environment").
+- **Confidence:** CONFIRMED (measured) for the light rule and the contributions; the decompiled max-channel path of 0x004E1DB0 called with mode 1 is not fully read (the measured rule fits the luminance at every point).
+- **Implementation consequence:** the port's light probe needs the 1/(4 pi) before the 1/2.2 gamma; the class default StartSpawn counters must stay zero (assertion on the next map load otherwise).
+
 ## 2026-10-08: Special NPC classes (systems/ai.md F6, section 12)
 - **Question:** How do music-box Overseers, Tallboys, wolfhounds and weepers fight (the port played Overseers as elite guards and tallboys / weepers as panicking civilians)?
 - **Evidence:** brain tweaks `Twk_Brain_OverSeerMusical_Default`, `BrainTweaks_TallBoy`, `BrainTweaks_WolfHound` (L_Ovrsr scripts), `BrainTweaks_Weeper`; DisBehaviorMusicalCombat vtable 011322e0 (00b13a00 / 00b13a20 / 00b13a50, 00b138a0, 00b13990, 00b13920), MaintainDistance 00b2e600, tune context 00c2b680, tune component 00c6a240 / 00c6bfc0 / 00c66ef0 / 00c75270, power gate 00bd7390 / 00b49020, Musical reduction 00b5ccd0; DisBehaviorTallBoyCombat 01132510 (00b144a0, 00b14630), FindShootingPosition 00b475e0 / 00b46960, ManageAttacks 00b470d0, bow CanDo 00c25240, launch 00c2fab0, accuracy 00b732e0, arrow 00c550d0; DisBehaviorCombatWolfhound sub-states 00b13c70 / 00b13e40 / 00b14010 / 00b13a80; DisBehaviorWeep 011272a0 (00afe030, 00affe30, 00af6bd0, 00afbe30, 00aff9e0), plague 00c70e10 / 00c86ea0; the class tweaks' contexts, attributes, locomotion configs and DefaultAI.ini inhibitions.
@@ -2012,3 +2020,42 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Result:** `dishonored_assets::head_pose` bakes `camera_jnt` (position, vision forward = bone -Z) over every stance's idle / walk loop into `AiConfig::head_poses`; `dishonored_ai::head` ports the cursor, weights and node blend; vision uses the head eye. detect_600: first LOS 0.171 (original 0.353, outer cone), after the turn 0.170 (original 0.169); detect_1300 notices at 0.88 s (original 2.82 s). With the look-at enabled and no request the original's axis is the pawn's rotation, so the outer-cone first sighting is not explained by the head model; ambient idles disable the look-at (bone axis) and the vision-target point (F6) is undecoded.
 - **Confidence:** CONFIRMED for the decoded rules (code read); the bake's mesh placement (no mesh offset component) and the stance choice are LIKELY.
 - **Implementation consequence:** cache key `gameplay_config.v18-head.json`; the archetype AnimSet lists moved to `dishonored_assets::characters`; the `camera_jnt` capture in detect_600 (queued) decides between the ambient-idle and F6 explanations.
+## 2026-10-08: First-person view and arms placement (camera bone, look controls, arm pitch offsets)
+- **Question:** The Playground shots of `viewmodel_states.json` showed:
+  - no arms in the sword swing, the Blink aim and the mantles;
+  - a large hand near the face in Windblast;
+  - only the blade tip in the sword idle.
+
+  How does the original place the first-person camera relative to the arms mesh?
+- **Evidence (static, Ghidra + cooked data):**
+  - `DishonoredCamera_PlayerControl` slot 80 (0x00ACBA40) builds the POV:
+    - location = pawn vfunc +0x630 (0x00AABA60): the `camera_jnt` world position after the skeletal controls;
+    - rotation = vfunc +0x3E8 (0x00AABB70): controller rotation + `m_RollAmount` (0.7) x the bone's rotation relative to the pawn (pitch minus the look control's pitch);
+    - the bone frame is first turned by `DisTweaks_Pawn_Body.m_fBone_AngleOffset_Pitch` -90 (`m_AngleOffsetMatrix`, 0x00B57110).
+  - `DishonoredCamera_AnimDriven` has default weight 0 (`DefaultCamera.ini`).
+  - The pawn's view-target update 0x00AABDD0 drives `Ply_Player_at`'s three look controls and the arms mesh:
+    - the collarbones get the look pitch + the item's arm pitch offset;
+    - `spine_3_jnt` gets the look pitch;
+    - the arms mesh gets `m_Offset` = the additive camera offset;
+    - arms FOV `m_FOV` = lerp(POV FOV, `m_fCurFOV_Arms`, `m_MeshSpecificFOVWeight`). The proxy re-projects with it (0x00ADEC40) only when it differs. FOV targets lock the arms only with `m_bLockArms`.
+  - Arm pitch offset (0x00ACB8D0): `m_ArmPitch_OffsetKeys` with a cosine ease, times 65536 / 360 (FMUL at 0x00ACBC0C).
+- **fp_probe of the decoded clips:**
+  - The sword idle's hand is 46 uu below the eye.
+  - `Sword_Ready_AttackRight_A_Small` winds up off-screen to the right and crosses the centre at about 0.27 s.
+  - `Sword_*_Mantle*` move only the root and the camera.
+  - Windblast draws the hand back to about 18 uu from the eye at 0.2 s.
+  - So most of the "missing" arms are the data at the captured instants, not a placement bug.
+- **Harness finding:** a `screenshot` step is captured after the fixed tick that already ran the next input step's first tick. The Blink aim shot therefore released the button, the Blink started, and the port's Blinking rule hid the rig.
+- **Port:**
+  - `viewmodel.rs` adds `apply_look_controls`, `arm_pitch_offset` (with the keys) and `view_rotation` (`ROLL_AMOUNT`).
+  - The game camera moves by the camera bone's motion from the additives and the look pivot, and turns to the view rotation.
+  - The rig undoes the lean roll, and stays drawn during a Blink's travel (U-781).
+  - `fixtures/scripts/viewmodel_states.json` waits one tick after every screenshot. It adds time series of the swing, Windblast, Blink aim and cast, and the mantles, plus look down / up and lean.
+  - Tests in `crates/dishonored_runtime/tests/viewmodel.rs`.
+- **Confidence:** CONFIRMED (decoded) for the eye, the view rotation, the look controls and the offset keys. LIKELY for a pawn pitch of 0 (UE3 `Pawn.FaceRotation` while walking or falling, U-782) and for the arms staying visible through a Blink (U-781).
+## 2026-10-08: Map blockers (MAP_SWEEP.md) and free roam between a level's maps
+- **Question:** Fix the map sweep's blockers no other porter owns: silent unsupported ops, movers without collision, spline actors, the Flooded_FIntro entry stall, the next Kismet ops by instance count, the 10 redirected entries; then (coordinator) free roam between a campaign level's interior / exterior maps.
+- **Evidence (static index):** `DisSeqAct_BackupAndClearInventory` 0x00ba91d0 / 0x00baf050 / 0x00b4e070 (outputs "Out" and "Finished (After Unequip)", hand slots 1-2); `SeqAct_SetMatInstScalarParam` 0x006d1d90; `PlayerController.OnToggleCinematicMode` / `SetCinematicMode` (script), `DishonoredPlayerController.SetCinematicMode_Native` 0x009eea00 -> 0x00aaf150 (action mask 0x7faf / 0x6010); `OnSetMaterial` (script, three classes); `OnAIGuard` 0x009f4e30 -> 0x00b63a80; `DisSeqCond_IsSentinel` 0x00b8f070 (`GameInfo.MyAutoTestManager`); `DisSeqCond_CompareBoolExtended` 0x00b9b3e0. Level data: `DisRiverKrust` / `DisWatchTower` name their skeletal component only via `CollisionComponent`; the mesh-less usables; the loft actors' cooked `SplineMeshComponent`s; the global `ChangeLvl_*` handlers' branches (kismet bwd / fwd).
+- **Result:** 41 / 41 maps reach their own entry (FIntro commits; Pub x5 had the wrong chapter's entry event; Isl_HighChaos by `adddarkness 168`, LightH_LowChaos / Out x3 by their handlers' flags). Unsupported event / op classes are listed once per run (`KismetNote`), per map in MAP_SWEEP. Cold loads: 0 collision warnings (were 79). Spline loft actors: all cooked components imported, none collides (as the Boyle captures). Ops ported: SetMatInstScalarParam, ToggleCinematicMode, SetMaterial, AIGuard (no awareness radius), IsSentinel, CompareBoolExtended, BackupAndClearInventory (outputs only). Free roam: `dishonored_content::{freeroam_def, level_group, entry_event, map_exits}`, `dishonored_assets::travel::{map_exits, global_entries}`; `harness freeroam` 58 / 58 (19 pairs both ways).
+- **Confidence:** CONFIRMED for the decoded op rules and the collision sources; LIKELY that the loft actors do not collide (no disagreement near a cable on the Boyle captures, not a direct test); APPROXIMATION: cinematic mode refuses every button (mask bits not decoded), AIGuard without its awareness radius.
+- **Implementation consequence:** collision cache key `collision17` (shared-cache files of other branches using 16 stay valid); new cache files `<map>.exits2.json`; `HostState` gains `cinematic`, `mat_scalars`, `pawn_mat_scalars`, `materials` (serde defaults; saves grow); `Kismet::notices` (not saved); `Host::fires_event` (default true). Not wired yet: cinematic HUD / player hiding and the material changes in the view (would need protocol fields). Open: the inventory backup / clear, PatrolPointReached / Possessed / MovablePickedUp / Combat / BehaviorStarted / TaskStateChanged (fire sites not found), the original-side collision for the 40 queued maps.

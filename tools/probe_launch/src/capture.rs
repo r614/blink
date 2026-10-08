@@ -465,40 +465,45 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     let mut used: Vec<u32> = Vec::new();
     for (k, n) in spec.setup.npcs.iter().enumerate() {
         let id = n.id.clone().or_else(|| n.spawner.clone()).unwrap_or_else(|| format!("npc{k}"));
-        // A pawn tweak: the host level's live NPC with that tweak, when there is one.
-        let by_tweak = match &n.tweak {
-            Some(tw) => {
-                let short = tw.rsplit('.').next().unwrap_or(tw).to_string();
-                crate::lab::npcs(&mut s.c)?.into_iter().find(|c| c.health > 0 && !used.contains(&c.addr) && (c.tweak == *tw || c.tweak.ends_with(&format!(".{short}")))).map(|c| c.addr)
-            }
-            None => None,
-        };
-        let pawn = match (&n.spawner, by_tweak) {
-            (_, Some(p)) => p,
-            (Some(name), None) => npc_pawn(s, name)?,
-            (None, None) => {
-                let guard = n.kind.as_deref().unwrap_or("Guard").eq_ignore_ascii_case("Guard");
-                let cand = crate::lab::npcs(&mut s.c)?.into_iter().find(|c| c.health > 0 && !used.contains(&c.addr) && c.tweak.contains("Guard") == guard && !c.tweak.contains("Tallboy") && !c.tweak.contains("Boatman") && !c.tweak.contains("LordShaw"));
-                match cand {
-                    Some(c) => c.addr,
-                    None => {
-                        gap(format!("NPC {id}: no free live {} in the host level to place", if guard { "guard" } else { "civilian" }), &mut warnings)?;
-                        continue;
+        // NPCs placed by position are spawned fresh from a spawner (a copy of the named one, or
+        // of a host spawner with the tweak / of the kind) at that spot (U-807: reused host pawns
+        // returned to their home after ~4.3 s). Without a position, the named pawn / spawner's
+        // pawn is used where it stands.
+        let guard = n.kind.as_deref().unwrap_or("Guard").eq_ignore_ascii_case("Guard");
+        let fresh = n.position.is_some();
+        let pawn = if let Some(p) = n.position {
+            let at = glam::Vec3::from(p) + off;
+            let template = match &n.spawner {
+                Some(name) => Some(s.r.object(&mut s.c, name, None)?),
+                None => None,
+            };
+            match s.spawn_npc_from(template, n.tweak.as_deref(), n.faction.as_deref(), guard, at, n.yaw) {
+                Ok((p, staged)) => {
+                    if staged {
+                        warnings.push(format!("NPC {id}: the spawn was blocked at its position; spawned 600 uu above and moved there"));
                     }
+                    p
+                }
+                Err(e) => {
+                    gap(format!("NPC {id}: could not spawn ({e:#})"), &mut warnings)?;
+                    continue;
+                }
+            }
+        } else {
+            match &n.spawner {
+                Some(name) => npc_pawn(s, name)?,
+                None => {
+                    gap(format!("NPC {id}: neither a position nor a spawner"), &mut warnings)?;
+                    continue;
                 }
             }
         };
-        used.push(pawn);
-        if n.tweak.is_some() && by_tweak.is_none() {
-            // Every live NPC with that tweak is taken (several placements of one tweak): a pawn
-            // of the kind stands in, recorded as a warning.
-            warnings.push(format!("NPC {id}: no free live pawn with tweak {:?}; a pawn of the kind stands in", n.tweak));
-        }
-        if !n.route.is_empty() {
+        used.push(pawn);        if !n.route.is_empty() {
             gap(format!("NPC {id}: patrol route not applied"), &mut warnings)?;
         }
-        if let Some(fac) = &n.faction {
+        if let Some(fac) = n.faction.as_ref().filter(|_| !fresh) {
             // DishonoredNPCPawn.m_pCurFactionTweak: a faction tweak by name, or none.
+
             let tw = if fac == "None" { 0 } else {
                 let name = fac.rsplit('.').next().unwrap_or(fac);
                 match s.c.find(name, "")?.first() {
@@ -514,13 +519,7 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
                 s.c.write(pl.addr, &tw.to_le_bytes())?;
             }
         }
-        if let Some(p) = n.position {
-            let at = glam::Vec3::from(p) + off;
-            crate::lab::move_actor_r(&mut s.c, &mut s.r, pawn, at.to_array())?;
-            let pl = s.r.place(&mut s.c, pawn, "Velocity")?;
-            s.r.write_place(&mut s.c, &pl, &json!([0, 0, 0]))?;
-            crate::lab::set_actor_yaw(&mut s.c, &mut s.r, pawn, n.yaw)?;
-        }
+
         match n.state.as_deref() {
             None | Some("Idle") => {}
             Some("Passive") => {

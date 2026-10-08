@@ -49,6 +49,13 @@ pub trait Host {
     fn matinee(&mut self, _cx: &mut Ctx, _what: Matinee) {}
     /// `SeqAct_Log` text.
     fn log(&mut self, _text: &str) {}
+    /// Whether the game activates events of this class (or one of its ancestors) at all
+    /// (touches, uses, deaths...). Events the interpreter raises itself (level loaded, remote,
+    /// sequence activated, console) are not asked. A level's events of a class no one fires are
+    /// reported once as unsupported when the level loads.
+    fn fires_event(&self, _class: &str) -> bool {
+        true
+    }
 }
 
 /// A host that supports nothing (unit tests and data checks).

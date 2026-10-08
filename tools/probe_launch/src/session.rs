@@ -116,6 +116,7 @@ impl Session {
     pub fn open_map(&mut self, map: &str, timeout: Duration) -> Result<(f64, f64)> {
         let _ = self.c.lockstep(false, 1000);
         self.release_keys();
+        let _ = self.clear_start_spawn_counts();
         let t0 = Instant::now();
         let s = st_map(&mut self.c)?;
         let old_pawn = st_hex(&s, "pawn");
@@ -541,6 +542,13 @@ impl Session {
                 json!({"component": reflect::object_value(&mut self.c, comp)?})
             }
             "run" => crate::capture::run_reads(self, a)?,
+            "lightenv" => self.light_env(a)?,
+            "lights" => self.list_lights(a)?,
+            "spawn_npc" => {
+                let loc = a.get("location").and_then(args_f32).context("location")?;
+                let (p, staged) = self.spawn_npc(s("tweak"), s("faction"), s("kind").unwrap_or("Guard") == "Guard", glam::Vec3::from(loc), num("yaw").unwrap_or(0.0) as f32)?;
+                json!({"pawn": reflect::object_value(&mut self.c, p)?, "staged": staged, "location": crate::lab::read_vec(&mut self.c, p + 0xc4)?})
+            }
             "darkness" => {
                 // The player's chaos (DisDarknessManager, pawn.m_pDarknessManager): `add` runs the
                 // engine's own add (0x00C41B50, thiscall (int): score += n, clamped at 0, as
@@ -598,8 +606,14 @@ impl Session {
                 for sh in &v {
                     let kind = if sh.kind == b'v' { "vs" } else { "ps" };
                     let file = dir.join(format!("{kind}_{:016x}.bin", sh.hash));
+                    // Content-addressed, so sessions share the store; written through a
+                    // per-process temporary name so parallel sessions never see a partial file.
                     if !file.exists() {
-                        std::fs::write(&file, &sh.code)?;
+                        let tmp = file.with_extension(format!("tmp{}", std::process::id()));
+                        std::fs::write(&tmp, &sh.code)?;
+                        if std::fs::rename(&tmp, &file).is_err() {
+                            let _ = std::fs::remove_file(&tmp);
+                        }
                     }
                     next = next.max(sh.id + 1);
                     list.push(json!({"id": sh.id, "kind": kind, "hash": format!("0x{:016x}", sh.hash), "tick": sh.tick, "size": sh.code.len(), "ctab": sh.ctab, "file": file.display().to_string()}));

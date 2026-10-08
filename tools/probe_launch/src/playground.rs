@@ -326,3 +326,154 @@ pub fn check_offset(v: &Value) -> Result<Vec3> {
         _ => bail!("offset [x, y, z]"),
     }
 }
+
+impl Session {
+    /// A fresh NPC from a spawner (U-807): a `DishonoredSpawner` copied from a host spawner of
+    /// the kind (`Spawn` with it as ActorTemplate: its factory and settings), put at `at` /
+    /// `yaw`, given the pawn tweak and faction override when asked, then started through its
+    /// Kismet handler `OnStartSpawn` (`DisSeqAct_StartSpawn`'s default with
+    /// `m_bSpawnEvenIfVisible`). Waits up to 120 ticks for the pawn (`m_SpawnedPawns`).
+    pub fn spawn_npc(&mut self, tweak: Option<&str>, faction: Option<&str>, guard: bool, at: Vec3, yaw: f32) -> Result<(u32, bool)> {
+        self.spawn_npc_from(None, tweak, faction, guard, at, yaw)
+    }
+
+    pub fn spawn_npc_from(&mut self, from: Option<u32>, tweak: Option<&str>, faction: Option<&str>, guard: bool, at: Vec3, yaw: f32) -> Result<(u32, bool)> {
+        let spawners = if from.is_some() { Vec::new() } else { self.c.find("", "DishonoredSpawner")? };
+        let mut template = from;
+        let mut tweak_obj = None;
+        if let Some(tw) = tweak {
+            let short = tw.rsplit('.').next().unwrap_or(tw);
+            tweak_obj = self.c.find(short, "")?.into_iter().find(|_| true);
+        }
+        for sp in &spawners {
+            let n = self.c.name_of(*sp)?;
+            if n.contains("Default__") {
+                continue;
+            }
+            let pl = self.r.place(&mut self.c, *sp, "m_pPawnTweaks")?;
+            let tw = self.c.read_u32(pl.addr)?;
+            if tw == 0 {
+                continue;
+            }
+            let twn = self.c.name_of(tw)?;
+            if tweak_obj.is_some_and(|t| t == tw) {
+                template = Some(*sp);
+                break;
+            }
+            let is_guard = twn.contains("Guard") && !twn.contains("Tallboy");
+            let civ = !twn.contains("Guard") && !twn.contains("Tallboy") && !twn.contains("Weeper") && twn.contains("DisTweaks_NPCPawn ");
+            if template.is_none() && ((guard && is_guard) || (!guard && civ)) {
+                template = Some(*sp);
+            }
+        }
+        let template = template.context("no host spawner of that kind to copy")?;
+        let sp = self.spawn_any("DishonoredSpawner", at, [0.0, yaw, 0.0], Some(template))?;
+        if let Some(t) = tweak_obj {
+            let pl = self.r.place(&mut self.c, sp, "m_pPawnTweaks")?;
+            self.c.write(pl.addr, &t.to_le_bytes())?;
+        } else if let Some(tw) = tweak {
+            anyhow::bail!("pawn tweak {tw} is not loaded");
+        }
+        if let Some(f) = faction {
+            let fo = if f == "None" { 0 } else { self.c.find(f.rsplit('.').next().unwrap_or(f), "")?.first().copied().with_context(|| format!("faction {f} not loaded"))? };
+            let pl = self.r.place(&mut self.c, sp, "m_pFactionTweakOverride")?;
+            self.c.write(pl.addr, &fo.to_le_bytes())?;
+        }
+        for (k, v) in [("m_bCanSpawnWhenVisible", json!(true)), ("m_bCanSpawnWhenPlayerNear", json!(true)), ("m_bPatrolUponStartup", json!(false)), ("m_bSpawnOnBeginPlay", json!(false))] {
+            let pl = self.r.place(&mut self.c, sp, k)?;
+            self.r.write_place(&mut self.c, &pl, &v)?;
+        }
+        crate::lab::move_actor_r(&mut self.c, &mut self.r, sp, at.to_array())?;
+        // The template copy carries the host spawner's `m_SpawnedPawns` (its own pawn): empty the
+        // copy (data, num, max zeroed: the copied buffer is left alone rather than shared).
+        let pl = self.r.place(&mut self.c, sp, "m_SpawnedPawns")?;
+        self.c.write(pl.addr, &[0u8; 12])?;
+        // Nor does it join the template's squad: the spawn (0x00A5E790) refuses once the
+        // squad's alive / total caps are reached (reasons 3 / 2), so `m_Squad` is None.
+        let pl = self.r.place(&mut self.c, sp, "m_Squad")?;
+        self.c.write(pl.addr, &[0u8; 8])?;
+        // Nor the template's queued spawn requests (ring m_PendingSpawns with its count, head,
+        // retries and retry timer).
+        for k in ["m_NumPendingSpawns", "m_FirstPendingSpawn", "m_NumRetryAttempts", "m_fRetryTimer"] {
+            let pl = self.r.place(&mut self.c, sp, k)?;
+            self.c.write(pl.addr, &[0u8; 4])?;
+        }
+        // The requester is the class default `DisSeqAct_StartSpawn` (the native OnStartSpawn
+        // 0x00A5C150 dereferences it; None crashes). The spawner counts on it
+        // (m_PendingSpawnCount / m_SpawnedCount / m_FailedCount), and every StartSpawn loaded
+        // later starts from those values (a count above the instance's output links trips an
+        // array assertion in its latent update 0x00B90050 after the next map load). So its flag
+        // and counters are put back afterwards, a failed spawn's queue is cancelled (no late
+        // spawn counts on it), and `open_map` clears the counters before every load.
+        let act = self.r.object(&mut self.c, "Default__DisSeqAct_StartSpawn", None)?;
+        let pl = self.r.place(&mut self.c, act, "m_bSpawnEvenIfVisible")?;
+        let saved = self.c.read(pl.addr, 16)?;
+        self.r.write_place(&mut self.c, &pl, &json!(true))?;
+        let r = self.start_spawn(sp, act, at);
+        let _ = self.c.write(pl.addr, &saved);
+        r
+    }
+
+    /// Zero the class default StartSpawn's counters (see `spawn_npc_from`).
+    pub fn clear_start_spawn_counts(&mut self) -> Result<()> {
+        let act = self.r.object(&mut self.c, "Default__DisSeqAct_StartSpawn", None)?;
+        for k in ["m_PendingSpawnCount", "m_SpawnedCount", "m_FailedCount"] {
+            let pl = self.r.place(&mut self.c, act, k)?;
+            self.c.write(pl.addr, &[0u8; 4])?;
+        }
+        Ok(())
+    }
+    /// The pawn, and whether it had to be staged: when the spawn keeps being retried at `at`
+    /// (another pawn there blocks it, e.g. a row of NPCs 84 uu apart), the spawner is moved
+    /// 600 uu up after 30 ticks with a new request, the pawn spawns there and is put at `at`
+    /// (spawner too).
+    fn start_spawn(&mut self, sp: u32, act: u32, at: Vec3) -> Result<(u32, bool)> {
+        self.r.call(&mut self.c, sp, "DishonoredSpawner.OnStartSpawn", &json!([hex(act)]))?;
+        let _ = self.c.lockstep(true, 30_000);
+        let mut staged = false;
+        for i in 0..60 {
+            if i == 15 && !staged {
+                let pl = self.r.place(&mut self.c, sp, "m_NumPendingSpawns")?;
+                if self.c.read_u32(pl.addr)? > 0 {
+                    // The queued request keeps its own location: cancel it, move, ask again.
+                    for k in ["m_NumPendingSpawns", "m_FirstPendingSpawn", "m_NumRetryAttempts", "m_fRetryTimer"] {
+                        let pl = self.r.place(&mut self.c, sp, k)?;
+                        self.c.write(pl.addr, &[0u8; 4])?;
+                    }
+                    crate::lab::move_actor_r(&mut self.c, &mut self.r, sp, (at + Vec3::Z * 600.0).to_array())?;
+                    self.r.call(&mut self.c, sp, "DishonoredSpawner.OnStartSpawn", &json!([hex(act)]))?;
+                    let _ = self.c.lockstep(true, 30_000);
+                    staged = true;
+                }
+            }
+            self.c.step(2, 30_000)?;
+            let pl = self.r.place(&mut self.c, sp, "m_SpawnedPawns")?;
+            let arr = self.c.read(pl.addr, 8)?;
+            let (data, num) = (u32::from_le_bytes(arr[0..4].try_into().unwrap()), u32::from_le_bytes(arr[4..8].try_into().unwrap()));
+            if num > 0 {
+                let p = self.c.read_u32(data)?;
+                if p != 0 {
+                    if staged {
+                        crate::lab::move_actor_r(&mut self.c, &mut self.r, sp, at.to_array())?;
+                        crate::lab::move_actor_r(&mut self.c, &mut self.r, p, at.to_array())?;
+                        self.c.step(1, 30_000)?;
+                    }
+                    return Ok((p, staged));
+                }
+            }
+        }
+        let mut st = Vec::new();
+        for k in ["m_NumPendingSpawns", "m_NumRetryAttempts", "m_fRetryTimer", "m_fTimeSinceLastSpawn"] {
+            if let Ok(pl) = self.r.place(&mut self.c, sp, k) {
+                st.push(format!("{k} {}", self.r.read_place(&mut self.c, &pl).unwrap_or_default()));
+            }
+        }
+        // Cancel what is still queued, so no pawn appears later.
+        for k in ["m_NumPendingSpawns", "m_NumRetryAttempts"] {
+            if let Ok(pl) = self.r.place(&mut self.c, sp, k) {
+                let _ = self.c.write(pl.addr, &[0u8; 4]);
+            }
+        }
+        anyhow::bail!("the spawner {sp:#x} made no pawn within 120 ticks ({})", st.join(", "))
+    }
+}

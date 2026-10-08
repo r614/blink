@@ -27,6 +27,7 @@ use std::path::PathBuf;
 mod capture;
 mod hookev;
 mod lab;
+mod lightenv;
 mod measure;
 mod playground;
 mod queue;
@@ -42,8 +43,21 @@ mod oracle_collision;
 #[cfg_attr(not(all(windows, target_arch = "x86")), allow(dead_code))]
 const GAME_DIR: &str = r"C:\Program Files\GOG Galaxy\Games\Dishonored\Binaries\Win32";
 
+/// The session this process addresses: `--session NAME` (taken out of the arguments in
+/// `main`) or `PROBE_SESSION`; unnamed is the default session. Each named session has its own
+/// session file (game pid and pipe; the pipe name already carries the pid), so several hooked
+/// games run side by side.
+static SESSION_NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+pub fn session_name() -> Option<&'static str> {
+    SESSION_NAME.get_or_init(|| std::env::var("PROBE_SESSION").ok().filter(|s| !s.is_empty())).as_deref()
+}
+
 fn session_file() -> PathBuf {
-    std::env::temp_dir().join("dishonored_probe_session.txt")
+    match session_name() {
+        None | Some("default") => std::env::temp_dir().join("dishonored_probe_session.txt"),
+        Some(n) => std::env::temp_dir().join(format!("dishonored_probe_session_{n}.txt")),
+    }
 }
 
 /// (pid, pipe name) of the current session.
@@ -135,7 +149,12 @@ fn main() -> Result<()> {
         // Single-threaded here, before anything reads the environment.
         unsafe { std::env::set_var("DISHONORED_CACHE", PathBuf::from(l).join("dishonored-rs").join("cache")) };
     }
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(i) = args.iter().position(|a| a == "--session") {
+        let name = args.get(i + 1).cloned().context("--session NAME")?;
+        args.drain(i..i + 2);
+        let _ = SESSION_NAME.set(Some(name));
+    }
     let cmd = args.first().map(String::as_str).unwrap_or("");
     match cmd {
         "launch" => {
@@ -163,6 +182,21 @@ fn main() -> Result<()> {
         "kill" => kill_session()?,
         "session" => session::run(&args[1..])?,
         "queue" => queue::run(&args[1..])?,
+        "tracestat" => {
+            // tracestat <trace.orc> [channel prefix]: first / min / max / last of each channel.
+            use dishonored_oracle::{cache, trace::Trace};
+            let p = PathBuf::from(args.get(1).context("trace file")?);
+            let pre = args.get(2).cloned().unwrap_or_default();
+            let (_, (_, t)): (_, (cache::Provenance, Trace)) = cache::decode(&std::fs::read(&p)?)?;
+            for (i, ch) in t.channels.iter().enumerate() {
+                if !ch.name.starts_with(&pre) {
+                    continue;
+                }
+                let v: Vec<f64> = t.frames.iter().filter_map(|f| f.values.get(i).copied().filter(|x| x.is_finite())).collect();
+                let (mn, mx) = v.iter().fold((f64::MAX, f64::MIN), |a, &x| (a.0.min(x), a.1.max(x)));
+                println!("{}\tfirst {:.2}\tmin {:.2}\tmax {:.2}\tlast {:.2}", ch.name, v.first().unwrap_or(&f64::NAN), mn, mx, v.last().unwrap_or(&f64::NAN));
+            }
+        }
         "tracediff" => {
             // tracediff <old dir> <new dir> [tol]: for every trace file in both, the first
             // divergence and the worst channel difference (two captures of the original).

@@ -267,6 +267,108 @@ pub fn extract_travel(content: &Content, packages: &[String]) -> Result<Vec<Trav
     Ok(links)
 }
 
+/// A level change a map's Kismet can ask for: a `ChangeLvl_*` remote event it activates, the
+/// persistent maps the global handler can prepare (`SeqAct_PrepareMapChange.MainLevelName` of
+/// every branch: the handlers pick one by story flags, chaos or the sequence input), and
+/// whether the handler crosses a mission boundary (it runs `DisSeqAct_MissionStatsTracking` or
+/// `DisSeqAct_ShowMissionStats`: a mission begins or ends, e.g. the boat to and from the hub).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MapExit {
+    pub change_event: String,
+    pub destinations: Vec<String>,
+    pub mission_boundary: bool,
+}
+
+/// What the global handler of a `ChangeLvl_*` remote event does: (destination maps, mission
+/// boundary). `global` is the Kismet of `DishonoredGameFull_P`.
+fn handler(global: &MapKismet, event: &str) -> (Vec<String>, bool) {
+    let mut dest: Vec<String> = Vec::new();
+    let mut boundary = false;
+    let Some(ls) = global.listeners.get(&event.to_ascii_lowercase()) else { return (dest, boundary) };
+    let mut q: VecDeque<(usize, usize)> = ls.iter().copied().collect();
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(at) = q.pop_front() {
+        if !seen.insert(at) || seen.len() > 2000 {
+            continue;
+        }
+        let o = global.op(at);
+        match o.class.as_str() {
+            "SeqAct_PrepareMapChange" => {
+                if let Some(m) = prop(o, "MainLevelName").map(unwrap_value) {
+                    if !dest.iter().any(|d| d.eq_ignore_ascii_case(&m)) {
+                        dest.push(m);
+                    }
+                }
+            }
+            "DisSeqAct_MissionStatsTracking" | "DisSeqAct_ShowMissionStats" => boundary = true,
+            // Another level change started from this one is its own handler.
+            "SeqAct_ActivateRemoteEvent" if prop(o, "EventName").map(unwrap_value).is_some_and(|n| n.to_ascii_lowercase().starts_with("changelvl")) => continue,
+            _ => {}
+        }
+        q.extend(global.next(at));
+    }
+    (dest, boundary)
+}
+
+/// The level changes the Kismet of a map's packages can ask for (see [`MapExit`]): the
+/// `ChangeLvl_*` remote events reached from the level's gameplay events (uses, touches,
+/// dialog outputs, deaths...; not from `SeqEvent_Console`, the developers' skip commands).
+pub fn map_exits(content: &Content, packages: &[String]) -> Vec<MapExit> {
+    let k = MapKismet::new(content, packages);
+    let global = MapKismet::new(content, &["DishonoredGameFull_P".to_string()]);
+    let mut events: Vec<String> = Vec::new();
+    let mut q: VecDeque<(usize, usize)> = VecDeque::new();
+    for (gi, (_, g)) in k.graphs.iter().enumerate() {
+        for (oi, op) in g.ops.iter().enumerate() {
+            if op.kind() == "event" && !matches!(op.class.as_str(), "SeqEvent_Console" | "SeqEvent_RemoteEvent" | "SeqEvent_SequenceActivated") {
+                q.push_back((gi, oi));
+            }
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(at) = q.pop_front() {
+        if !seen.insert(at) {
+            continue;
+        }
+        let op = k.op(at);
+        if op.class == "SeqAct_ActivateRemoteEvent" {
+            if let Some(n) = prop(op, "EventName").map(unwrap_value) {
+                if n.to_ascii_lowercase().starts_with("changelvl") {
+                    if !events.iter().any(|e| e.eq_ignore_ascii_case(&n)) {
+                        events.push(n);
+                    }
+                    continue;
+                }
+            }
+        }
+        q.extend(k.next(at));
+    }
+    events
+        .into_iter()
+        .map(|e| {
+            let (destinations, mission_boundary) = handler(&global, &e);
+            MapExit { change_event: e, destinations, mission_boundary }
+        })
+        .collect()
+}
+
+/// The global `ChangeLvl_*` remote events and what their handlers do: (event, destination maps,
+/// mission boundary). The entry points of every map.
+pub fn global_entries(content: &Content) -> Vec<(String, Vec<String>, bool)> {
+    let global = MapKismet::new(content, &["DishonoredGameFull_P".to_string()]);
+    let mut out: Vec<(String, Vec<String>, bool)> = Vec::new();
+    let mut names: Vec<String> = global.listeners.keys().filter(|n| n.starts_with("changelvl")).cloned().collect();
+    names.sort();
+    for n in names {
+        // The event's own spelling.
+        let (gi, oi) = global.listeners[&n][0];
+        let name = prop(&global.graphs[gi].1.ops[oi], "EventName").map(unwrap_value).unwrap_or(n.clone());
+        let (d, b) = handler(&global, &name);
+        out.push((name, d, b));
+    }
+    out
+}
+
 /// Location and usable tweak name of a level actor (searched across the map's packages).
 fn actor_info(content: &Content, packages: &[String], name: &str) -> Option<(Vec3, String)> {
     for p in packages {

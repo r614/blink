@@ -4,8 +4,8 @@
     name: "maps/LightH_LowChaos",
     system: Kismet,
     map: "L_LightH_LowChaos_P",
-    description: "Smoke run: the populated level at the player's default spawn with the original Kismet started by the remote event ChangeLvl_fromLighthouseIsland_toLighthouse (the map's entry event in the global sequence); no input, 10 s.",
-    setup: (kismet: true, kismet_start: Some("ChangeLvl_fromLighthouseIsland_toLighthouse"), original_npcs: true, seed: 1),
+    description: "Smoke run: the populated level at the player's default spawn with the original Kismet started by the remote event ChangeLvl_fromLighthouseIsland_toLighthouse (the map's entry event in the global sequence: fromLigthouseIsland_toLighthouse: CheckStoryFlag_0 SF_85AF2F6F4448BE014FCA78BCEDED2E03 (the low-chaos flag fromHub7_toLighthouseIsland sets when the darkness level is below RequiredChaosLevelForHighChaosVersionOf_Lighthouse) True -> PrepareMapChange_0 L_LightH_LowChaos_P); no input, 10 s.",
+    setup: (kismet: true, kismet_start: Some("ChangeLvl_fromLighthouseIsland_toLighthouse"), original_npcs: true, seed: 1, story_flags: [("SF_85AF2F6F4448BE014FCA78BCEDED2E03", true)]),
     ticks: 600,
     input: [],
     checkpoints: [

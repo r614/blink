@@ -1076,6 +1076,7 @@ impl MissionMatch {
                 }
             })
             .collect();
+        kismet_host::cinematic_inputs(self, &mut all); // [kismet] SeqAct_ToggleCinematicMode
         kismet_host::track_views(self, &mut all, dt); // [kismet] DisSeqAct_PlayerTrackTarget
         // Movers (`InterpActor`s) collide where the Kismet has moved them.
         self.place_movers(world);

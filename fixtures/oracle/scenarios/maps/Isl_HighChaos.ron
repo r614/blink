@@ -4,10 +4,10 @@
     name: "maps/Isl_HighChaos",
     system: Kismet,
     map: "L_Isl_HighChaos_P",
-    description: "Smoke run: the populated level at the player's default spawn with the original Kismet started by the remote event ChangeLvl_fromHub7_toLighthouseIsland (the map's entry event in the global sequence); no input, 10 s.",
+    description: "Smoke run: the populated level at the player's default spawn with the original Kismet started by the remote event ChangeLvl_fromHub7_toLighthouseIsland (the map's entry event in the global sequence: fromHub7_toLighthouseIsland: SeqCond_CompareInt_0 DisSeqVar_DarknessLevel >= RequiredChaosLevelForHighChaosVersionOf_Lighthouse (8: score 168, m_DarknessLevels[8]) -> PrepareMapChange_0 L_Isl_HighChaos_P; the score is raised with the cheat adddarkness before the entry event runs); no input, 10 s.",
     setup: (kismet: true, kismet_start: Some("ChangeLvl_fromHub7_toLighthouseIsland"), original_npcs: true, seed: 1),
     ticks: 600,
-    input: [],
+    input: [(tick: 0, action: Console("adddarkness 168"))],
     checkpoints: [
         (name: "smoke", expect: [
             (metric: Count("Kismet:*"), value: 0, tol: 0, source: "Kismet activations in the first 10 s on the original", status: Unmeasured),
