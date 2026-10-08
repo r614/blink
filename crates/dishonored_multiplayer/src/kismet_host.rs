@@ -2285,7 +2285,7 @@ fn attention_events(k: &mut Kismet, h: &mut H) {
             }
             // Originator: the observer pawn (0x00b363d0 passes the component's owner).
             if k.check_activate(h, ev, Obj::Pawn(observer), Obj::Pawn(target), false, None, false) {
-                h.note(format!("attention of pawn {observer} on {target}: {from} -> {to}: {}", h.db.describe(ev)));
+                h.note(format!("attention of pawn {observer} on {target}: {from} -> {to}: {}", k.describe(ev)));
             }
         }
     }
@@ -2455,7 +2455,7 @@ fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
                 k.set_prop(ev, "CurrentDamage", Value::Float(0.0));
                 let orig = k.event_originator(ev).unwrap_or(Obj::Pawn(*victim));
                 if k.check_activate(h, ev, orig, inst.clone(), false, None, false) {
-                    h.note(format!("pawn {victim} took {amount:.0} damage: {}", h.db.describe(ev)));
+                    h.note(format!("pawn {victim} took {amount:.0} damage: {}", k.describe(ev)));
                 }
             } else {
                 k.set_prop(ev, "CurrentDamage", Value::Float(cur));

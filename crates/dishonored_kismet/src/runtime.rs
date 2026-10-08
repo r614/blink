@@ -405,6 +405,17 @@ impl Kismet {
     /// `Package:Outer.Name`, without `TheWorld.PersistentLevel.`). An event duplicated by
     /// `SeqAct_AttachToEvent` is named `<Event>_AttachDup` inside the attaching sequence
     /// (UNVERIFIED against a capture).
+    /// `KismetDb::describe` for any runtime op, including events duplicated by
+    /// `SeqAct_AttachToEvent` (described through their source, marked attached).
+    pub fn describe(&self, op: OpId) -> String {
+        let i = op as usize;
+        if i < self.n_static() {
+            self.db.describe(op)
+        } else {
+            format!("{} (attached)", self.db.describe(self.dups[i - self.n_static()].source))
+        }
+    }
+
     pub fn trace_name(&self, op: OpId) -> String {
         let i = op as usize;
         let (pkg, path) = if i < self.n_static() {
@@ -412,8 +423,8 @@ impl Kismet {
             (o.package, o.path.clone())
         } else {
             let d = &self.dups[i - self.n_static()];
-            let parent = self.db.op(d.parent);
-            (parent.package, format!("{}.{}_AttachDup", parent.path, self.db.op(d.source).name))
+            let parent = self.op(d.parent);
+            (parent.package, format!("{}.{}_AttachDup", parent.path, self.op(d.source).name))
         };
         format!("{}:{}", self.db.package_name(pkg), path.trim_start_matches("TheWorld.PersistentLevel."))
     }
