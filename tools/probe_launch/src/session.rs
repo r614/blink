@@ -522,6 +522,27 @@ impl Session {
                 json!({"component": reflect::object_value(&mut self.c, comp)?})
             }
             "run" => crate::capture::run_reads(self, a)?,
+            "darkness" => {
+                // The player's chaos (DisDarknessManager, pawn.m_pDarknessManager): `add` runs the
+                // engine's own add (0x00C41B50, thiscall (int): score += n, clamped at 0, as
+                // DisSeqAct_AddDarkness's Activated does), `set` writes the score; the answer has
+                // the score (0x00A446B0) and the level the engine derives (0x00C487D0, as
+                // DisSeqVar_DarknessLevel reads it).
+                let pawn = crate::lab::pawn(&mut self.c)?;
+                let pl = self.r.place(&mut self.c, pawn, "m_pDarknessManager")?;
+                let mgr = self.c.read_u32(pl.addr)?;
+                anyhow::ensure!(mgr != 0, "no darkness manager");
+                if let Some(n) = num("add") {
+                    self.c.native_call(0x00c4_1b50, mgr, &[n as i32 as u32], false)?;
+                }
+                if let Some(n) = num("set") {
+                    self.c.write(mgr + 0x38, &(n as i32).to_le_bytes())?;
+                }
+                let score = self.c.native_call(0x00a4_46b0, mgr, &[], false)?.0 as i32;
+                let level = self.c.native_call(0x00c4_87d0, mgr, &[], false)?.0 as i32;
+                let deeds = self.r.dump_object(&mut self.c, mgr, Some("m_DeedCounters"))?;
+                json!({"score": score, "level": level, "deeds": deeds["m_DeedCounters"]})
+            }
             "enum" => {
                 // The value names of an enum (`eDisAmmoType`).
                 let n = s("name").context("name")?;
