@@ -638,11 +638,9 @@ fn stations_in_mission(rep: &mut Report, maps: &MapContents, def: &MissionDef) -
 fn powers_in_mission(rep: &mut Report, maps: &MapContents, def: &MissionDef) -> Result<()> {
     use dishonored_ir::items::AmmoType;
     use dishonored_sim::state::PawnKind;
-    let mut p = Play::new(maps, def.clone())?;
-    p.idle(10, PlayerInput { yaw: 90.0, ..Default::default() });
-    let dummy = p.npc("dummy_a");
     let spot = Vec3::new(0.0, 4300.0, 92.0);
     let mut rows = Vec::new();
+    let sim = maps.get(MAP).context("playground")?.sim.clone();
     for (name, hand, hold) in [
         ("Blink", LeftHand::Blink, 10usize),
         ("Windblast", LeftHand::Windblast, 1),
@@ -654,6 +652,11 @@ fn powers_in_mission(rep: &mut Report, maps: &MapContents, def: &MissionDef) -> 
         ("Sticky grenade", LeftHand::StickyGrenade, 1),
         ("Spring Razor", LeftHand::SpringRazor, 1),
     ] {
+        // Each item in a fresh match, so one power's state (a Bend Time, a possession, a swarm)
+        // cannot hide another's result.
+        let mut p = Play::new(maps, def.clone())?;
+        p.idle(10, PlayerInput { yaw: 90.0, ..Default::default() });
+        let dummy = p.npc("dummy_a");
         p.teleport(spot, 90.0);
         if let Some(me) = p.mm().world.player_mut(ME) {
             me.vitals.mana = 100.0;
@@ -669,10 +672,28 @@ fn powers_in_mission(rep: &mut Report, maps: &MapContents, def: &MissionDef) -> 
             p.step(PlayerInput { buttons: buttons::SECONDARY, ..idle });
         }
         // Watch for 5 s: rats, time bends and the dummy's displacement.
+        // Rats: the Devouring Swarm is one attack group (`SwarmState.rats`, `powers::step_swarms`),
+        // not rat pawns; rat pawns (sewer swarms) count too.
         let (mut rats, mut bends, mut pushed) = (0usize, 0usize, 0.0f32);
+        let mut grenade_trace: Option<String> = None;
         for _ in 0..150 {
             p.step(idle);
-            rats = rats.max(p.m().world.players.iter().filter(|q| q.kind == PawnKind::Rat).count());
+            let w = &p.m().world;
+            let swarm_rats: usize = w.swarms.iter().filter(|s| s.owner == ME && s.spawn_delay <= 0.0).map(|s| s.rats as usize).sum();
+            rats = rats.max(w.players.iter().filter(|q| q.kind == PawnKind::Rat).count() + swarm_rats);
+            if let Some(g) = w.projectiles.iter().find(|g| g.kind.is_grenade() && g.owner == ME) {
+                grenade_trace = Some(format!(
+                    "grenade at {:.0?} armed {} fuse {:.2} min {:.2} stuck {} age {:.2}, world scale {:.2} (projectiles {:.2})",
+                    g.position,
+                    g.armed,
+                    g.fuse,
+                    g.min_fuse,
+                    g.stuck || g.stuck_to.is_some(),
+                    g.age,
+                    dishonored_sim::powers::world_time_scale(w, &sim.gameplay, false),
+                    dishonored_sim::powers::world_time_scale(w, &sim.gameplay, true)
+                ));
+            }
             bends = bends.max(p.m().world.time_bends.len());
             if let Some(t) = p.m().world.player(dummy) {
                 pushed = pushed.max((t.position - tp).length());
@@ -692,7 +713,11 @@ fn powers_in_mission(rep: &mut Report, maps: &MapContents, def: &MissionDef) -> 
             LeftHand::Grenade | LeftHand::StickyGrenade => {
                 let t = if hand == LeftHand::Grenade { AmmoType::Grenade } else { AmmoType::StickyGrenade };
                 let used = ammo(&me0, t) - ammo(&me1, t);
-                (used == 1 && ev.iter().any(|e| matches!(e, SimEvent::Explosion { owner, .. } if *owner == ME)), format!("ammo used {used}, exploded {}", ev.iter().any(|e| matches!(e, SimEvent::Explosion { .. }))))
+                let fired = ev.iter().any(|e| matches!(e, SimEvent::Fired { id, bolt: false, .. } if *id == ME));
+                (
+                    used == 1 && ev.iter().any(|e| matches!(e, SimEvent::Explosion { owner, .. } if *owner == ME)),
+                    format!("ammo used {used}, thrown {fired}, exploded {}; last seen: {}", ev.iter().any(|e| matches!(e, SimEvent::Explosion { .. })), grenade_trace.clone().unwrap_or_else(|| "never in flight".into())),
+                )
             }
             _ => {
                 let used = ammo(&me0, AmmoType::SpringRazor) - ammo(&me1, AmmoType::SpringRazor);
