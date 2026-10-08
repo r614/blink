@@ -1,0 +1,18 @@
+{"steps":[
+  {"wait_ticks": 180}, {"screenshot": "pg_01_start_bench"},
+  {"teleport": {"pos": [-4600, -4300, 92], "yaw": 90, "pitch": -8}}, {"wait_ticks": 40}, {"screenshot": "pg_02_steps"},
+  {"teleport": {"pos": [-2000, -4300, 92], "yaw": 90, "pitch": 0}}, {"wait_ticks": 40}, {"screenshot": "pg_03_slopes"},
+  {"teleport": {"pos": [800, -4400, 92], "yaw": 90, "pitch": 5}}, {"wait_ticks": 40}, {"screenshot": "pg_04_mantle"},
+  {"teleport": {"pos": [3600, -4800, 92], "yaw": 70, "pitch": 5}}, {"wait_ticks": 40}, {"screenshot": "pg_05_gaps"},
+  {"teleport": {"pos": [-5700, -300, 96], "yaw": 15, "pitch": 0}}, {"wait_ticks": 40}, {"screenshot": "pg_06_blink"},
+  {"teleport": {"pos": [-1000, -700, 92], "yaw": 90, "pitch": 15}}, {"wait_ticks": 40}, {"screenshot": "pg_07_chain"},
+  {"teleport": {"pos": [2600, -1500, 92], "yaw": 90, "pitch": -20}}, {"wait_ticks": 40}, {"screenshot": "pg_08_pool"},
+  {"teleport": {"pos": [4600, -1800, 92], "yaw": 60, "pitch": 15}}, {"wait_ticks": 40}, {"screenshot": "pg_09_fall_stairs"},
+  {"teleport": {"pos": [-4700, 2300, 92], "yaw": 90, "pitch": 0}}, {"wait_ticks": 40}, {"screenshot": "pg_10_doors"},
+  {"teleport": {"pos": [-1200, 2400, 92], "yaw": 70, "pitch": 0}}, {"wait_ticks": 40}, {"screenshot": "pg_11_lean_tunnel"},
+  {"teleport": {"pos": [1000, 2300, 92], "yaw": 90, "pitch": -15}}, {"wait_ticks": 40}, {"screenshot": "pg_12_pain"},
+  {"teleport": {"pos": [3000, 2600, 92], "yaw": 80, "pitch": 0}}, {"wait_ticks": 40}, {"screenshot": "pg_13_gallery"},
+  {"teleport": {"pos": [300, 4100, 92], "yaw": 90, "pitch": 0}}, {"wait_ticks": 40}, {"screenshot": "pg_14_dummies"},
+  {"teleport": {"pos": [-5200, 6900, 92], "yaw": 0, "pitch": 0}}, {"wait_ticks": 40}, {"screenshot": "pg_15_stealth"},
+  {"quit": true}
+]}
