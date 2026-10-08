@@ -4630,6 +4630,7 @@ dependencies = [
  "dishonored_assets",
  "dishonored_audio",
  "dishonored_content",
+ "dishonored_conversation",
  "dishonored_ir",
  "dishonored_mission",
  "dishonored_multiplayer",

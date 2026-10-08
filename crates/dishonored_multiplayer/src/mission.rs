@@ -503,6 +503,10 @@ pub struct MissionMatch {
     /// Corpses some NPC has discovered (0x00A98950 keeps the set: a corpse counts once).
     #[serde(default)]
     pub corpses_discovered: BTreeSet<PlayerId>,
+    /// [ai] Generic dialog voice (`DisDialogVoiceData` path) of pawns the host gave one (mission
+    /// NPCs placed from a spawner or tweak; original spawns take theirs from their tweak).
+    #[serde(default)]
+    pub bark_voices: BTreeMap<PlayerId, String>,
     /// Mover collision placed where the movers are: (actor, delta) and, in the same order, the
     /// placed collision (rebuilt when a mover moves).
     #[serde(skip)]
@@ -556,6 +560,7 @@ impl MissionMatch {
             props: BTreeMap::new(),
             darkness: Default::default(),
             corpses_discovered: BTreeSet::new(),
+            bark_voices: BTreeMap::new(),
             mover_keys: Vec::new(),
             mover_worlds: Vec::new(),
         };
@@ -1295,6 +1300,7 @@ impl MissionMatch {
                     Some((n.clone(), level))
                 })
                 .collect();
+            self.bark_speakers(); // [ai] who can bark, where, and what their hook nodes read
             kismet_host::filter_events(self, &mut events); // [kismet] scripted choices
             self.sync_darkness(cfg);
             let cmds = self.state.step(&StepInput { dt, map: &map, players: &players, npc_positions: &npc_positions, events: &events, total_npcs: total });
@@ -1388,13 +1394,45 @@ impl MissionMatch {
     pub fn request_bark(&mut self, npc: PlayerId, hook: &str, initiator: Option<PlayerId>) {
         let named = self.npc_by_id.get(&npc).and_then(|n| self.setup.def.npcs.iter().find(|d| &d.id == n).map(|d| (n.clone(), d.speaker_actor().unwrap_or(n).to_string())));
         let named = named.or_else(|| self.setup.original.iter().find(|o| o.spawn.id == npc).map(|o| (o.name.clone(), o.name.clone())));
-        let voice = self.setup.original.iter().find(|o| o.spawn.id == npc).and_then(|o| {
-            let list = self.setup.ai_levels.get(&o.map.to_ascii_lowercase())?.generic_trees.get(&o.tweak)?;
-            (!list.is_empty()).then(|| list[npc as usize % list.len()].clone())
+        let voice = self.bark_voices.get(&npc).cloned().or_else(|| {
+            self.setup.original.iter().find(|o| o.spawn.id == npc).and_then(|o| {
+                let list = self.setup.ai_levels.get(&o.map.to_ascii_lowercase())?.generic_trees.get(&o.tweak)?;
+                (!list.is_empty()).then(|| list[npc as usize % list.len()].clone())
+            })
         });
         if let Some((name, actor)) = named {
-            self.state.ai_hooks.push((name, actor, hook.to_string(), initiator, voice));
+            self.state.ai_hooks.push((name, actor, hook.to_string(), initiator, voice, Some(npc)));
         }
+    }
+
+    /// [ai] The bark speakers for the conversation runner: every mission NPC and original spawn
+    /// by its bark name (as [`Self::request_bark`] names it), where it stands, the dead ones,
+    /// and the AI facts the hook node classes read (R5): the brain's suspicion level, knocked
+    /// out, and how it perceives its current stimulus (seen 0, heard 1, heard danger 2).
+    fn bark_speakers(&mut self) {
+        let mut pos = BTreeMap::new();
+        let mut dead = BTreeSet::new();
+        let mut facts = BTreeMap::new();
+        let names: Vec<(PlayerId, String)> = self.npc_by_id.iter().map(|(id, n)| (*id, n.clone())).chain(self.setup.original.iter().map(|o| (o.spawn.id, o.name.clone()))).collect();
+        for (id, name) in names {
+            let Some(p) = self.world.player(id) else { continue };
+            if !p.alive {
+                dead.insert(name.clone());
+            } else {
+                pos.entry(name.clone()).or_insert(p.position);
+            }
+            let brain = self.crowd.brains.iter().find(|b| b.id == id);
+            let f = dishonored_conversation::HookFacts {
+                suspicion: brain.map(|b| b.suspicion_level() as u8).unwrap_or(0),
+                knocked_out: p.condition == dishonored_sim::state::Condition::Unconscious,
+                notice: brain.and_then(dishonored_ai::Brain::notice_kind),
+                investigate: 0,
+            };
+            facts.entry(name).or_insert(f);
+        }
+        self.state.speaker_pos = pos;
+        self.state.dead_speakers = dead;
+        self.state.hook_facts = facts;
     }
 
     /// Place the map's movers where their actors are now (identity for movers the Kismet has

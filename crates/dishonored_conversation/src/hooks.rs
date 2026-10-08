@@ -1,14 +1,18 @@
 //! Dialog hook rules of the original (`eDisDialogHook`): per-hook info, fire groups, refire
-//! delays, and the distance-hook band logic.
+//! delays, the bark queue of `DisConvGlobalMan`, and the polled hook-node state machines.
 //!
-//! Sources (research/dishonored/CONVERSATIONS.md):
+//! Sources (research/dishonored/CONVERSATIONS.md, research/dishonored/systems/conversation.md):
 //! - The per-hook table is built natively by `FUN_00c8d820` (0x50 bytes per hook: hook class,
-//!   fire group, refire min/max/global, bust time, flags). The numbers below were read from it.
-//! - `DisTweaks_ConvSettings` defaults (its `Twk_ConvSettings` object is not shipped, so the
-//!   class defaults apply): `m_DialogHookOverrides`, `m_FireGroupConfig`,
-//!   `m_MaxDialogHooksAtOnce` 5, `m_fMaxDialogDistance` 5000.
-//! - A successful fire on an NPC sets that NPC's next allowed time for the hook to
-//!   `now + rand * (max - min)` (`FUN_00ca5670`; the minimum is not added, as in the original).
+//!   fire group +0x34, refire min +0x38 / max +0x3c / global +0x40, bust time +0x44, flags
+//!   +0x48). The numbers below were read from it (engine constants).
+//! - `DisTweaks_ConvSettings` (the manager's `m_pConvSettingTweaks`; no `Twk_ConvSettings`
+//!   object is shipped, so the class defaults apply): [`ConvSettings`], read from
+//!   `Default__DisTweaks_ConvSettings` by the loader (`load.rs`), the cooked values as the
+//!   fallback.
+//! - Refire (`FUN_00ca6bd0` gate, `FUN_00ca5670` stamp): a successful fire on an NPC stores
+//!   `next = now + rand() * (max - min) / 32767`; a later request passes when
+//!   `next < 1e-8 || min < (now - next) + 1e-8`, so the effective delay is
+//!   `min + u * (max - min)` from the start.
 //! - Hook flags: 0x2 interrupts (an NPC answers it even when busy, unless its current hook is
 //!   not interruptible), 0x4 not interruptible, 0x8 battle sound, 0x20 search sound,
 //!   0x1000 notice sound (the blurb emits an AI noise of the tweak's loudness), 0x40
@@ -168,7 +172,7 @@ pub enum FireGroup {
 }
 
 impl FireGroup {
-    fn from_index(i: u8) -> Self {
+    pub fn from_index(i: u8) -> Self {
         use FireGroup::*;
         [Casual, CasualStateChanges, Attention, Reaction, Exertions, Agitated, CombatCries, Combat, Threat, WitnessedMagic, SoundAlarm, CombatImportant, GameplayImportant][(i as usize).min(12)]
     }
@@ -302,7 +306,9 @@ const TABLE: &[(u8, u8, f32, f32, u32)] = &[
     (107, 2, 1.0, 1.0, 0x80),
     (108, 2, 1.0, 1.0, 0x1080),
     (109, 2, 1.0, 1.0, 0x80),
-    (110, 2, 1.0, 1.0, 0x80),
+    // `DDH_ATTENTION_INVESTIGATE`: the `FUN_00c8bce0` call right after the `< 0x6f` check sets
+    // 0xa0 (search sound).
+    (110, 2, 1.0, 1.0, 0xa0),
     (111, 2, 1.0, 1.0, 0xa0),
     (112, 2, 1.0, 1.0, 0x80),
     (113, 2, 1.0, 1.0, 0x80),
@@ -320,131 +326,356 @@ const TABLE: &[(u8, u8, f32, f32, u32)] = &[
     (125, 7, 1.0, 1.0, 0x86),
 ];
 
-/// `DisTweaks_ConvSettings.m_DialogHookOverrides` defaults: (hook, min, max, global, group).
-const OVERRIDES: &[(u8, f32, f32, f32, u8)] = &[
-    (31, 8.0, 12.0, 0.0, 5),
-    (32, 8.0, 12.0, 0.0, 5),
-    (85, 2.0, 5.0, 0.0, 7),
-    (40, 5.0, 13.0, 0.0, 8),
-    (41, 5.0, 13.0, 0.0, 8),
-    (118, -1.0, 0.0, 0.0, 12),
-    (11, 5.0, 12.0, 0.0, 0),
-    (12, 20.0, 60.0, 0.0, 0),
-];
+/// `DisDialogHookOverride` (`m_DialogHookOverrides[]`): replaces a hook row's refire delays and
+/// fire group.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct HookOverride {
+    pub hook: u8,
+    pub min: f32,
+    pub max: f32,
+    pub global: f32,
+    pub group: u8,
+}
 
-/// `DisFireGroupConfig` defaults: (group, max playing per group, per initiator, ignore global
-/// cap, min seconds between firings). -1 = unlimited.
-const FIRE_GROUPS: &[(u8, i32, i32, bool, f32)] = &[
-    (0, 3, 1, false, 3.0),
-    (1, 3, 1, false, 12.0),
-    (2, 2, 2, false, 0.2),
-    (4, 2, -1, false, 0.0),
-    (7, 5, 2, false, 0.0),
-    (8, 1, 1, false, 0.0),
-    (5, 1, 1, false, 2.5),
-    (9, 3, 3, false, 3.0),
-    (12, -1, -1, true, 0.0),
-    (3, 1, 1, false, 0.0),
-    (10, 2, 1, false, 0.0),
-    (6, 2, 2, false, 2.0),
-    (11, 2, 2, false, 1.5),
-];
+/// `DisFireGroupConfig` (`m_FireGroupConfig[]`). Index 0 = the Loud list, 1 = the Quiet list
+/// (`m_MaxPlaying_PerGroup` / `_Quiet`, `m_MaxPlaying_PerInitiator` / `_Quiet`); a cap below 1
+/// is unlimited.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct FireGroupConfig {
+    pub max_per_group: [i32; 2],
+    pub max_per_initiator: [i32; 2],
+    /// `m_bIgnoreGlobalCap`.
+    pub ignore_global_cap: bool,
+    /// `m_fMinTimeBetweenFiring`: the group's list locks for this long after one of its hooks
+    /// ends.
+    pub min_time_between: f32,
+}
 
-/// `m_MaxDialogHooksAtOnce`.
-pub const MAX_HOOKS_AT_ONCE: usize = 5;
+impl Default for FireGroupConfig {
+    fn default() -> Self {
+        Self { max_per_group: [-1, -1], max_per_initiator: [-1, -1], ignore_global_cap: false, min_time_between: 0.0 }
+    }
+}
 
-/// Enum index of a `DDH_*` name.
+/// `DisTweaks_ConvSettings` (`DisConvGlobalMan.m_pConvSettingTweaks`). The loader reads
+/// `Default__DisTweaks_ConvSettings` (`DishonoredGame.upk`); `Default` holds the same cooked
+/// values for databases built without it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConvSettings {
+    /// `m_BattleLoudness` / `m_SearchLoudness` / `m_NoticeLoudness` (`EAINoiseLoudness<n>`): the
+    /// AI noise a blurb of a hook with flag 0x8 / 0x20 / 0x1000 makes.
+    pub battle_loudness: u8,
+    pub search_loudness: u8,
+    pub notice_loudness: u8,
+    pub overrides: Vec<HookOverride>,
+    /// `m_MaxDialogHooksAtOnce`, `m_MaxDialogHooksAtOnce_Quiet` (tweak +0x9c / +0xa0).
+    pub max_at_once: [i32; 2],
+    /// `m_fMaxDialogDistance` (+0xa4): speakers farther from the player never bark (except
+    /// `DDH_KISMET_ACTIVATED`).
+    pub max_distance: f32,
+    /// `m_fDialogDistanceConsideredLoud` (+0xa8): audio path distance from which a speaker
+    /// uses the Quiet lists.
+    pub loud_distance: f32,
+    /// `m_fHookWeightRandRange` (+0xac).
+    pub weight_rand_range: f32,
+    /// By `eDisDialogHookFireGroup`.
+    pub fire_groups: [FireGroupConfig; 13],
+    /// `m_fNonDominantVolumeScale`, `m_fDominantMaxDistance_Percent` (+0xc0),
+    /// `m_fAudioDuckBlendSpeed` (presentation: [`dominance`]).
+    pub non_dominant_volume_scale: f32,
+    pub dominant_max_distance_percent: f32,
+    pub duck_blend_speed: f32,
+}
+
+impl Default for ConvSettings {
+    /// The cooked `Default__DisTweaks_ConvSettings` (obj_dump of DishonoredGame.upk).
+    fn default() -> Self {
+        let ov = |hook, min, max, group| HookOverride { hook, min, max, global: 0.0, group };
+        let g = |a: i32, b: i32, ignore: bool, t: f32| FireGroupConfig { max_per_group: [a, a], max_per_initiator: [b, b], ignore_global_cap: ignore, min_time_between: t };
+        Self {
+            battle_loudness: 3,
+            search_loudness: 2,
+            notice_loudness: 1,
+            overrides: vec![ov(31, 8.0, 12.0, 5), ov(32, 8.0, 12.0, 5), ov(85, 2.0, 5.0, 7), ov(40, 5.0, 13.0, 8), ov(41, 5.0, 13.0, 8), ov(118, -1.0, 0.0, 12), ov(11, 5.0, 12.0, 0), ov(12, 20.0, 60.0, 0)],
+            max_at_once: [5, 5],
+            max_distance: 5000.0,
+            loud_distance: 2000.0,
+            weight_rand_range: 0.2,
+            fire_groups: [
+                g(3, 1, false, 3.0),   // Casual
+                g(3, 1, false, 12.0),  // CasualStateChanges
+                g(2, 2, false, 0.2),   // Attention
+                g(1, 1, false, 0.0),   // Reaction
+                g(2, -1, false, 0.0),  // Exertions
+                g(1, 1, false, 2.5),   // Agitated
+                g(2, 2, false, 2.0),   // CombatCries
+                g(5, 2, false, 0.0),   // Combat
+                g(1, 1, false, 0.0),   // Threat
+                g(3, 3, false, 3.0),   // WitnessedMagic
+                g(2, 1, false, 0.0),   // SoundAlarm
+                g(2, 2, false, 1.5),   // CombatImportant
+                g(-1, -1, true, 0.0),  // GameplayImportant
+            ],
+            non_dominant_volume_scale: 0.3,
+            dominant_max_distance_percent: 0.4,
+            duck_blend_speed: 5.0,
+        }
+    }
+}
+
+impl ConvSettings {
+    /// The hook's info row (native table, then the tweak overrides).
+    pub fn hook_info(&self, idx: u8) -> HookInfo {
+        let mut info = HookInfo { group: FireGroup::Casual, refire_min: 1.0, refire_max: 1.0, refire_global: 0.0, bust_time: 0.0, flags: 0x80 };
+        if let Some(&(_, g, mn, mx, f)) = TABLE.iter().find(|r| r.0 == idx) {
+            info = HookInfo { group: FireGroup::from_index(g), refire_min: mn, refire_max: mx, refire_global: 0.0, bust_time: if idx == 1 { 1.0 } else { 0.0 }, flags: f };
+        }
+        if let Some(o) = self.overrides.iter().find(|o| o.hook == idx) {
+            info.refire_min = o.min;
+            info.refire_max = o.max;
+            info.refire_global = o.global;
+            info.group = FireGroup::from_index(o.group);
+        }
+        info
+    }
+
+    pub fn fire_group(&self, g: FireGroup) -> FireGroupConfig {
+        self.fire_groups[g as usize]
+    }
+}
+
+/// Enum index of a `DDH_*` name (126 `DDH_INVALID` for unknown names).
 pub fn hook_index(name: &str) -> Option<u8> {
     HOOK_NAMES.iter().position(|n| n.eq_ignore_ascii_case(name)).map(|i| i as u8)
 }
 
-/// The hook's info row (native table, then the tweak overrides).
+/// The hook's info row with the cooked tweak defaults.
 pub fn hook_info(name: &str) -> HookInfo {
-    let idx = hook_index(name).unwrap_or(126);
-    let mut info = HookInfo { group: FireGroup::Casual, refire_min: 1.0, refire_max: 1.0, refire_global: 0.0, bust_time: 0.0, flags: 0x80 };
-    if let Some(&(_, g, mn, mx, f)) = TABLE.iter().find(|r| r.0 == idx) {
-        info = HookInfo { group: FireGroup::from_index(g), refire_min: mn, refire_max: mx, refire_global: 0.0, bust_time: if idx == 1 { 1.0 } else { 0.0 }, flags: f };
-    }
-    if let Some(&(_, mn, mx, gl, g)) = OVERRIDES.iter().find(|r| r.0 == idx) {
-        info.refire_min = mn;
-        info.refire_max = mx;
-        info.refire_global = gl;
-        info.group = FireGroup::from_index(g);
-    }
-    info
+    ConvSettings::default().hook_info(hook_index(name).unwrap_or(126))
 }
 
-/// `DisFireGroupConfig` of a group.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FireGroupConfig {
-    pub max_per_group: i32,
-    pub max_per_initiator: i32,
-    pub ignore_global_cap: bool,
-    pub min_time_between: f32,
-}
-
+/// `DisFireGroupConfig` of a group (cooked tweak defaults).
 pub fn fire_group(g: FireGroup) -> FireGroupConfig {
-    FIRE_GROUPS
-        .iter()
-        .find(|r| r.0 == g as u8)
-        .map(|&(_, a, b, c, d)| FireGroupConfig { max_per_group: a, max_per_initiator: b, ignore_global_cap: c, min_time_between: d })
-        .unwrap_or(FireGroupConfig { max_per_group: -1, max_per_initiator: -1, ignore_global_cap: false, min_time_between: 0.0 })
+    ConvSettings::default().fire_group(g)
 }
 
-/// Refire bookkeeping for hooks fired on NPCs (what `DisConversationComponent` and
-/// `DisConvGlobalMan` keep). Deterministic: the random refire delay comes from the caller.
+/// Refire bookkeeping: the NPC's `m_DialogHookInfo_InGame[h]` (+0x98, the time stamp `next_h`)
+/// and the manager's `m_DialogHookInfo_InGame[h].m_fLastFireTime` (+0x558).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct HookClock {
-    /// (npc, hook) -> earliest time the hook may fire on that NPC again.
+    /// (npc, hook) -> `next_h` = fire time + `u * (max - min)`.
     pub next_allowed: BTreeMap<(String, u8), f64>,
     /// hook -> last time it fired on anyone (for `m_fRefire_Delay_Global`).
     pub last_global: BTreeMap<u8, f64>,
-    /// fire group -> last time any hook of the group fired.
-    pub last_group: BTreeMap<u8, f64>,
 }
 
-/// Why a hook did not fire.
+/// Why a hook did not fire (`eDisDialogDebugFailReason` where one exists).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HookRejection {
-    /// `eDisDialogDebugFailReason_RejectedByRefireDelay`.
+    /// 0 `RejectedByRefireDelay`.
     RefireDelay,
-    /// `..._RejectedByGlobalRefire`.
+    /// 1 `RejectedByGlobalRefire`.
     GlobalRefire,
-    /// `..._FiringGroupLocked` (minimum time between firings of the group).
+    /// 3 `FiringGroupLocked`: the list is locked for the group's minimum spacing.
     GroupLocked,
-    /// `..._FiringGroupInitiatorCap` / group cap / global cap.
+    /// 4 `FiringGroupInitiatorCap`.
     GroupCap,
-    /// `..._FiredButNoContent`: the NPC's trees have no such hook, or it led nowhere.
+    /// 5: queued, but not fired on the manager tick (group room, global slots or weight); the
+    /// request is dropped.
+    Dropped,
+    /// The NPC's trees have no such hook, the hook node gives no output, or the walk led
+    /// nowhere (`FiredButNoContent`).
     NoContent,
-    /// The NPC could not take the conversation (busy with a higher priority one).
+    /// The speaker cannot take it (`Available` 4 / 5, R4).
     Busy,
+    /// The owner is dead and the hook is not one of 57-59.
+    Dead,
 }
 
 impl HookClock {
-    /// Gate for firing `hook` on `npc` at `now`.
-    pub fn allowed(&self, npc: &str, hook: &str, now: f64) -> Result<(), HookRejection> {
-        let idx = hook_index(hook).unwrap_or(126);
-        let info = hook_info(hook);
-        if self.next_allowed.get(&(npc.to_string(), idx)).is_some_and(|t| now < *t) {
+    /// Per-NPC and global refire gates of `FUN_00ca6bd0`:
+    /// pass iff `next < 1e-8 || min < (now - next) + 1e-8` (the minimum is added to the stamp
+    /// `next = fire + u * (max - min)`), then the same with the global delay.
+    pub fn allowed(&self, npc: &str, idx: u8, info: &HookInfo, now: f64) -> Result<(), HookRejection> {
+        let gate = |stamp: Option<&f64>, delay: f32| stamp.is_none_or(|t| *t < 1e-8 || (delay as f64) < (now - t) + 1e-8);
+        if !gate(self.next_allowed.get(&(npc.to_string(), idx)), info.refire_min) {
             return Err(HookRejection::RefireDelay);
         }
-        if info.refire_global > 0.0 && self.last_global.get(&idx).is_some_and(|t| now - t < info.refire_global as f64) {
+        if !gate(self.last_global.get(&idx), info.refire_global) {
             return Err(HookRejection::GlobalRefire);
-        }
-        let cfg = fire_group(info.group);
-        if cfg.min_time_between > 0.0 && self.last_group.get(&(info.group as u8)).is_some_and(|t| now - t < cfg.min_time_between as f64) {
-            return Err(HookRejection::GroupLocked);
         }
         Ok(())
     }
 
-    /// Record a successful fire. `unit` is a uniform roll in [0, 1).
-    pub fn fired(&mut self, npc: &str, hook: &str, now: f64, unit: f32) {
-        let idx = hook_index(hook).unwrap_or(126);
-        let info = hook_info(hook);
+    /// The stamp of a successful fire (`FUN_00ca5670`): `unit` = `rand() / 32767`.
+    pub fn fired(&mut self, npc: &str, idx: u8, info: &HookInfo, now: f64, unit: f32) {
         self.next_allowed.insert((npc.to_string(), idx), now + (unit * (info.refire_max - info.refire_min)) as f64);
         self.last_global.insert(idx, now);
-        self.last_group.insert(info.group as u8, now);
+    }
+}
+
+/// `DisConvGlobalMan.m_QueuedHookGroups`: 13 fire groups x {Loud, Quiet}
+/// (`DisQueuedFireDialogHookGroup`, 0x30 bytes each from +0x78).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct HookQueue {
+    /// Index `group * 2 + quiet`.
+    pub lists: Vec<HookList>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct HookList {
+    /// `m_PendingHooks` (+0x78): requests of this manager tick.
+    pub pending: Vec<QueuedHook>,
+    /// `m_FiringHooks` (+0x84): hooks this list started that still play.
+    pub firing: Vec<QueuedHook>,
+    /// `m_bIsLocked` (+0xa0 bit 0) and `m_fGroupLockoutTimer` (+0xa4).
+    pub locked: bool,
+    pub lockout: f32,
+}
+
+/// A queued request (`0x4c`-byte entry: hook, sub-index, fire tag, component, initiator,
+/// hook params).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QueuedHook {
+    pub request: crate::runner::HookRequest,
+    pub hook: u8,
+    /// The hook node's output found by the trial walk (the sub-index).
+    pub output: usize,
+    /// The instance it started (firing entries); it plays while that instance runs.
+    pub instance: Option<u32>,
+}
+
+impl HookQueue {
+    pub fn list(&mut self, group: FireGroup, quiet: bool) -> &mut HookList {
+        if self.lists.len() < 26 {
+            self.lists.resize_with(26, HookList::default);
+        }
+        &mut self.lists[group as usize * 2 + quiet as usize]
+    }
+
+    /// `m_InitiatorCountMap[quiet]`: firing hooks of every group of this list type whose
+    /// initiator is `who` (an initiator that is the owner itself is not counted).
+    pub fn initiator_count(&self, quiet: bool, who: u32) -> usize {
+        self.lists.iter().enumerate().filter(|(i, _)| (i % 2 == 1) == quiet).flat_map(|(_, l)| l.firing.iter()).filter(|q| q.request.initiator == Some(who) && q.request.owner != Some(who)).count()
+    }
+}
+
+/// Bark weight of a pending request (`FUN_00ca2580`) before the initiator cap: `d` is the
+/// speaker's straight-line distance to the player (0 for the player's own pawn), `roll` a
+/// `rand()` draw.
+pub fn bark_weight(settings: &ConvSettings, hook: u8, d: f32, roll: u32) -> f32 {
+    let max = settings.max_distance;
+    if d < max || hook == 10 {
+        (1.0 - d.clamp(0.0, max) / max) + roll as f32 * settings.weight_rand_range * (1.0 / 32767.0)
+    } else {
+        0.0
+    }
+}
+
+/// Dominance of a firing hook (`FUN_00c99f80`) from its speaker's interface flags (+0xbc) and
+/// its playing voices: flag 0x10 -> 0, 0x2 -> 1, 0x8 -> the best `1 - d / (pct * radius)` over
+/// the voices within `pct * radius` (path distance `d`, voice radius `radius`).
+pub fn dominance(settings: &ConvSettings, flags: u32, voices: &[(f32, f32)]) -> f32 {
+    if flags & 0x10 != 0 {
+        return 0.0;
+    }
+    if flags & 0x2 != 0 {
+        return 1.0;
+    }
+    let mut best = 0.0f32;
+    if flags & 0x8 != 0 {
+        for &(d, radius) in voices {
+            let r = settings.dominant_max_distance_percent * radius;
+            if d <= r && r > 0.0 {
+                best = best.max(1.0 - d / r);
+            }
+        }
+    }
+    best
+}
+
+/// `DisConv_Hook_PlayerLoiter` (+0x158, `FUN_00cb53c0`), per (NPC, hook node): polled every
+/// tick. The player counts as loitering while a speaker is within `radius` (2D); entering
+/// arms a timer of `min + rand() * (max - min) / 32767`; staying past it fires output 0 and
+/// re-arms on the next poll. A gap of more than 0.5 s between polls counts as having left.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct LoiterHook {
+    pub last_poll: f64,
+    pub target: f32,
+    pub elapsed: f32,
+    pub inside: bool,
+}
+
+impl LoiterHook {
+    /// `dist2d`: the nearest speaker's horizontal distance to the player; `roll` a `rand()`.
+    pub fn update(&mut self, now: f64, dist2d: f32, radius: f32, min: f32, max: f32, roll: u32) -> Option<usize> {
+        let dt = (now - self.last_poll) as f32;
+        let was = self.inside && dt <= 0.5;
+        self.last_poll = now;
+        self.inside = dist2d < radius;
+        if !was && self.inside {
+            self.target = roll as f32 * (max - min) * (1.0 / 32767.0) + min;
+            self.elapsed = 0.0;
+        }
+        if self.target > 0.0001 && self.inside && was {
+            self.elapsed += dt;
+            if self.target < self.elapsed {
+                self.inside = false;
+                return Some(0);
+            }
+        }
+        None
+    }
+}
+
+/// `DisConv_Hook_PlayerLookAt` (+0x158, `FUN_00cb5680`), per (NPC, hook node): while the
+/// player is within `radius` (2D) of a speaker, the look-at target with the smallest view angle
+/// under its own angle becomes current (a change restarts the clock); it fires its output once
+/// after its time.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct LookAtHook {
+    pub current: i32,
+    pub since: f64,
+    pub fired: bool,
+}
+
+impl Default for LookAtHook {
+    fn default() -> Self {
+        Self { current: -1, since: 0.0, fired: false }
+    }
+}
+
+impl LookAtHook {
+    /// `angles[i]`: the view angle to target i in degrees (None = no actor); `targets[i]` =
+    /// (max angle, time).
+    pub fn update(&mut self, now: f64, dist2d: f32, radius: f32, angles: &[Option<f32>], targets: &[(f32, f32)]) -> Option<usize> {
+        if dist2d >= radius {
+            self.current = -1;
+        } else {
+            let mut pick = -1i32;
+            let mut best = f32::MAX;
+            for (i, (a, t)) in angles.iter().zip(targets).enumerate() {
+                if let Some(a) = a {
+                    if *a < t.0 && *a < best {
+                        best = *a;
+                        pick = i as i32;
+                    }
+                }
+            }
+            if pick != self.current {
+                self.since = now;
+                self.fired = false;
+                self.current = pick;
+            }
+        }
+        if self.current >= 0 && !self.fired {
+            let k = self.current as usize;
+            if targets.get(k).is_some_and(|t| t.1 as f64 <= now - self.since) {
+                self.fired = true;
+                return Some(k);
+            }
+        }
+        None
     }
 }
 

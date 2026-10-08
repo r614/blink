@@ -169,7 +169,9 @@ impl Loader {
         let cooked = cooked.into();
         let flags = StoryFlags::load(&cooked).context("story flags (Startup.upk)")?;
         let language = std::env::var("DISHONORED_LANGUAGE").unwrap_or_else(|_| "INT".into());
-        Ok(Self { cooked, flags, db: ConversationDb::default(), language })
+        let mut db = ConversationDb::default();
+        db.settings = load_settings(&cooked).context("Default__DisTweaks_ConvSettings (DishonoredGame.upk)")?;
+        Ok(Self { cooked, flags, db, language })
     }
 
     /// Default install location (`DISHONORED_DIR` or the GOG path).
@@ -330,6 +332,12 @@ impl Loader {
                 oneshot,
                 hooks: object_array(&props, "m_DialogHooks").into_iter().flatten().filter_map(|e| node_id.get(&e).copied()).collect(),
                 conversations: object_array(&props, "m_Conversations").into_iter().flatten().filter_map(|e| conv_id.get(&e).copied()).collect(),
+                // `m_pFallbackTree` (+0x148), an export of this package or a tree of a package
+                // loaded before (matched by path).
+                fallback: find(&props, "m_pFallbackTree").and_then(|p| p.as_object()).map(ObjRef::from_index).filter(|r| *r != ObjRef::Null).and_then(|r| {
+                    let path = pkg.obj_path(r).to_ascii_lowercase();
+                    tree_by_path.get(&path).copied().or_else(|| self.db.trees.iter().position(|t| t.path.eq_ignore_ascii_case(&path)).map(|p| p as u32))
+                }),
             });
         }
         // Owner of an export: walk outers up to a conversation or tree.
@@ -505,6 +513,27 @@ impl Loader {
                     names: name_array(&pkg, &props, "m_KismetDialogHooks"),
                     priority: pstr(&props, "m_Priority").map(|p| Priority::from_enum(&p)),
                     distances: (c == "DisConv_Hook_Distance").then(|| [pfloat(&props, "m_fCloseDistance", 200.0), pfloat(&props, "m_fMediumDistance", 500.0), pfloat(&props, "m_fFarDistance", 1000.0)]),
+                    // Class defaults (`Default__DisConv_Hook_*`): loiter 600 uu / 5-7 s, look-at
+                    // 300 uu, suspicion distance 500 uu.
+                    class: match HookClass::from_class(c) {
+                        HookClass::SuspicionDist { .. } => HookClass::SuspicionDist { radius: pfloat(&props, "m_fRadius", 500.0) },
+                        HookClass::PlayerLoiter { .. } => HookClass::PlayerLoiter { radius: pfloat(&props, "m_fLoiterRadius", 600.0), min: pfloat(&props, "m_fLoiterTime_Min", 5.0), max: pfloat(&props, "m_fLoiterTime_Max", 7.0) },
+                        HookClass::PlayerLookAt { .. } => HookClass::PlayerLookAt {
+                            radius: pfloat(&props, "m_fLookAtRadius", 300.0),
+                            // `m_LookAtTargets[]` entries (0xc bytes: actor, angle, time).
+                            targets: find(&props, "m_LookAtTargets")
+                                .and_then(|p| p.array_structs(&pkg).ok())
+                                .unwrap_or_default()
+                                .iter()
+                                .map(|t| {
+                                    let actor = t.iter().find_map(|p| if let Value::Object(o) = p.value { (o != 0).then(|| pkg.obj_name(ObjRef::from_index(o))) } else { None }).unwrap_or_default();
+                                    let floats: Vec<f32> = t.iter().filter_map(|p| p.as_float()).collect();
+                                    (actor, floats.first().copied().unwrap_or(0.0), floats.get(1).copied().unwrap_or(0.0))
+                                })
+                                .collect(),
+                        },
+                        k => k,
+                    },
                 },
                 "DisConv_CheckSpeakerSuspicionLevel" => NodeKind::CheckSuspicion,
                 "DisConv_IsPossessed" => NodeKind::IsPossessed,
@@ -561,6 +590,51 @@ impl Loader {
         }
         Ok(())
     }
+}
+
+/// `DisTweaks_ConvSettings` from its class default object (the only tweak data of the class:
+/// no `Twk_ConvSettings` object is shipped). Values the cooked object omits keep the class
+/// defaults of [`crate::hooks::ConvSettings`].
+pub fn load_settings(cooked: &Path) -> Result<crate::hooks::ConvSettings> {
+    use crate::hooks::{ConvSettings, HookOverride};
+    let pkg = Package::open(cooked.join("DishonoredGame.upk"))?;
+    let i = (0..pkg.exports.len()).find(|&i| pkg.obj_name(ObjRef::Export(i)) == "Default__DisTweaks_ConvSettings").context("no Default__DisTweaks_ConvSettings")?;
+    let props = pkg.read_object(i)?.properties;
+    let mut s = ConvSettings::default();
+    let loud = |props: &[Property], n: &str, d: u8| pstr(props, n).and_then(|e| e.strip_prefix("EAINoiseLoudness").and_then(|x| x.parse().ok())).unwrap_or(d);
+    s.battle_loudness = loud(&props, "m_BattleLoudness", s.battle_loudness);
+    s.search_loudness = loud(&props, "m_SearchLoudness", s.search_loudness);
+    s.notice_loudness = loud(&props, "m_NoticeLoudness", s.notice_loudness);
+    let group = |props: &[Property]| pstr(props, "m_FireGroup").and_then(|e| e.strip_prefix("eDisDialogHookFireGroup_").map(str::to_string)).and_then(|n| ["Casual", "CasualStateChanges", "Attention", "Reaction", "Exertions", "Agitated", "CombatCries", "Combat", "Threat", "WitnessedMagic", "SoundAlarm", "CombatImportant", "GameplayImportant"].iter().position(|g| *g == n)).map(|g| g as u8);
+    if let Some(list) = find(&props, "m_DialogHookOverrides").and_then(|p| p.array_structs(&pkg).ok()) {
+        s.overrides = list
+            .iter()
+            .filter_map(|o| {
+                let hook = pstr(o, "m_DialogHookToOverride").and_then(|h| crate::hooks::hook_index(&h))?;
+                Some(HookOverride { hook, min: pfloat(o, "m_fRefire_DelayMin", 1.0), max: pfloat(o, "m_fRefire_DelayMax", 1.0), global: pfloat(o, "m_fRefire_Delay_Global", 0.0), group: group(o).unwrap_or(0) })
+            })
+            .collect();
+    }
+    s.max_at_once = [pint(&props, "m_MaxDialogHooksAtOnce", s.max_at_once[0]), pint(&props, "m_MaxDialogHooksAtOnce_Quiet", s.max_at_once[1])];
+    s.max_distance = pfloat(&props, "m_fMaxDialogDistance", s.max_distance);
+    s.loud_distance = pfloat(&props, "m_fDialogDistanceConsideredLoud", s.loud_distance);
+    s.weight_rand_range = pfloat(&props, "m_fHookWeightRandRange", s.weight_rand_range);
+    if let Some(list) = find(&props, "m_FireGroupConfig").and_then(|p| p.array_structs(&pkg).ok()) {
+        for c in &list {
+            let Some(g) = group(c) else { continue };
+            let d = s.fire_groups[g as usize];
+            s.fire_groups[g as usize] = crate::hooks::FireGroupConfig {
+                max_per_group: [pint(c, "m_MaxPlaying_PerGroup", d.max_per_group[0]), pint(c, "m_MaxPlaying_PerGroup_Quiet", d.max_per_group[1])],
+                max_per_initiator: [pint(c, "m_MaxPlaying_PerInitiator", d.max_per_initiator[0]), pint(c, "m_MaxPlaying_PerInitiator_Quiet", d.max_per_initiator[1])],
+                ignore_global_cap: pbool(c, "m_bIgnoreGlobalCap", d.ignore_global_cap),
+                min_time_between: pfloat(c, "m_fMinTimeBetweenFiring", d.min_time_between),
+            };
+        }
+    }
+    s.non_dominant_volume_scale = pfloat(&props, "m_fNonDominantVolumeScale", s.non_dominant_volume_scale);
+    s.dominant_max_distance_percent = pfloat(&props, "m_fDominantMaxDistance_Percent", s.dominant_max_distance_percent);
+    s.duck_blend_speed = pfloat(&props, "m_fAudioDuckBlendSpeed", s.duck_blend_speed);
+    Ok(s)
 }
 
 /// Load the packages named (cooked package names without extension).

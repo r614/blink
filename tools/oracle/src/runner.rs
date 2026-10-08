@@ -135,6 +135,15 @@ fn mission(s: &Scenario, mc: &dishonored_content::MatchContent, notes: &mut Vec<
         def.original_kismet = Some(OriginalKismet { start_event: start, seed: st.seed });
     }
     def.loadout = loadout(s, notes);
+    // Dialog scenarios run the conversation runner on the map's dialog graphs and voices (the
+    // generic bark trees live in the level's script packages).
+    if s.system == dishonored_oracle::scenario::System::Conversation {
+        match dishonored_assets::Content::locate() {
+            // Cooked packages only (the Playground is the port's own map).
+            Ok(content) => def.dialog_packages = dishonored_assets::map_packages(&content, &s.map).into_iter().filter(|p| content.cooked.join(format!("{p}.upk")).exists()).collect(),
+            Err(e) => notes.push(format!("dialog packages of {}: {e:#}", s.map)),
+        }
+    }
     // NPCs: (trace name, original spawner name when it is the level's own pawn).
     let mut names = Vec::new();
     for (i, n) in st.npcs.iter().enumerate() {
@@ -412,6 +421,28 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             }
         }
     }
+    // Generic dialog voices (barks) of the scenario's NPCs: their pawn tweak (the scenario's,
+    // else their spawner's) picks one of `m_GenericDialogData` as for original spawns.
+    {
+        let m = mm_mut(&mut game);
+        let level = m.setup.ai_levels.get(&s.map.to_ascii_lowercase()).cloned();
+        for (i, n) in s.setup.npcs.iter().enumerate() {
+            let Some((_, id)) = tracked.iter().find(|t| t.0 == npc_names[i].0).cloned() else { continue };
+            let tweak = n.tweak.clone().or_else(|| n.spawner.as_ref().and_then(|sp| mc.spawners.iter().find(|x| x.name.eq_ignore_ascii_case(sp))).map(|x| x.tweak.clone()));
+            let list = tweak.as_ref().and_then(|t| level.as_ref().and_then(|l| l.generic_trees.get(t)));
+            match list.filter(|l| !l.is_empty()) {
+                Some(list) => {
+                    let voice = list[id as usize % list.len()].clone();
+                    if m.setup.conversations.as_ref().is_some_and(|db| !db.voice_trees.contains_key(&voice)) {
+                        notes.push(format!("{}: voice {voice} has no dialog trees in the loaded packages (no barks)", npc_names[i].0));
+                    }
+                    m.bark_voices.insert(id, voice);
+                }
+                None if s.system == dishonored_oracle::scenario::System::Conversation => notes.push(format!("{}: no generic dialog voice for tweak {tweak:?} (no barks)", npc_names[i].0)),
+                None => {}
+            }
+        }
+    }
     // NPC facing and alerted states.
     for (i, n) in s.setup.npcs.iter().enumerate() {
         let Some((_, id)) = tracked.iter().find(|t| t.0 == npc_names[i].0).cloned() else { continue };
@@ -533,6 +564,8 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
     if let Some(k) = mm_mut(&mut game).kismet.as_mut() {
         k.k.activations.clear();
     }
+    let mut conv_seen = mm(&game).state.conv_log.len();
+    mm_mut(&mut game).state.hook_log.clear();
     for (t, ti) in timeline.iter().enumerate() {
         let tk = t as u32 + 1;
         for c in &ti.console {
@@ -577,6 +610,39 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             }
             kismet_seen = k.st.history.len();
         }
+        // Conversations and barks (conversation.md F18): every dialog hook request
+        // `Bark:<hook>@<npc>` (result=Queued / Fired / Rejected:<why>; the per-tick refire
+        // rejections of the ambient barks are left out), conversation starts and ends, and each
+        // line's VO post `Sound:Play_<hex>@<speaker>`, the shape of the original's AkEvent posts.
+        {
+            let st = &mut mm_mut(&mut game).state;
+            for e in std::mem::take(&mut st.hook_log) {
+                use dishonored_conversation::runner::{ConvEvent, HookStage};
+                if let ConvEvent::Hook { npc, hook, result, instance } = e {
+                    let r = match result {
+                        Ok(HookStage::Queued) => "Queued".to_string(),
+                        Ok(HookStage::Fired) => format!("Fired instance={}", instance.unwrap_or(0)),
+                        Err(dishonored_conversation::hooks::HookRejection::RefireDelay) => continue,
+                        Err(why) => format!("Rejected:{why:?}"),
+                    };
+                    trace.events.push(TraceEvent { tick: tk, kind: "Bark".into(), object: npc, name: hook, detail: format!("result={r}") });
+                }
+            }
+            let log = &st.conv_log;
+            for e in log.iter().skip(conv_seen.min(log.len())) {
+                use dishonored_conversation::runner::ConvEvent;
+                match e {
+                    ConvEvent::Started { instance, label, .. } => trace.events.push(TraceEvent { tick: tk, kind: "Conv".into(), object: String::new(), name: "Started".into(), detail: format!("instance={instance} label={}", label.replace(' ', "_")) }),
+                    ConvEvent::Ended { instance, label, interrupted, .. } => trace.events.push(TraceEvent { tick: tk, kind: "Conv".into(), object: String::new(), name: "Ended".into(), detail: format!("instance={instance} label={} interrupted={interrupted}", label.replace(' ', "_")) }),
+                    ConvEvent::Line { instance, line_id, speaker, vo: Some(vo), duration, .. } => {
+                        let who = if speaker.player { "player".to_string() } else { speaker.npc.clone().unwrap_or_default() };
+                        trace.events.push(TraceEvent { tick: tk, kind: "Sound".into(), object: who, name: vo.event.clone(), detail: format!("line={line_id} instance={instance} dur={duration:.3}") });
+                    }
+                    _ => {}
+                }
+            }
+            conv_seen = log.len();
+        }
         // Projectiles.
         let w = &mm(&game).world;
         for p in &w.projectiles {
@@ -611,6 +677,10 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         }
         let v = sample(&game, &mut leg, &present);
         trace.push(tk, v);
+    }
+    if s.system == dishonored_oracle::scenario::System::Conversation {
+        let st = &mm(&game).state;
+        notes.push(format!("barks: dialog data {}, {} asked, {} fired, rejected {:?}", if st.conv.is_some() { "loaded" } else { "missing" }, st.ai_hooks_requested, st.ai_hooks_fired, st.ai_hook_rejections));
     }
     for (chan, names) in leg.0 {
         if let Some(i) = trace.channel(&chan) {

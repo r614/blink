@@ -475,3 +475,51 @@ Parameter sweeps (the formulas are functions of distance/time, so one capture ea
 - The speaker-bind path `FUN_00c9e2b0` / `FUN_00c9c6c0` for hook-only walks (F7) is read from call structure, not
   line by line: marked LIKELY until C2 shows overlapping/interrupted barks on one NPC.
 - Subtitle part splitting (`m_TextPartsRatio`) and `FUN_00c96cb0` (the exact ducking maths) are not decoded.
+
+---------------------------------------------------------------------------------------------------
+
+## 8. Port status (2026-10-08, conversation port pass)
+
+Corrections found while re-reading the cited functions with the static index:
+- **Random divisor.** The refire stamp (`FUN_00ca5670`) and the bark weight (`FUN_00ca2580`) both multiply
+  `rand()` by `3.051851e-05` = 1/32767, not 1/32768 (R1, R3, F1, F14 say 32768). The port keeps 32767.
+- **R3 tick step 1** re-classifies the *firing* entries (the lists at +0x84, the ones the housekeeping checks),
+  moving them between Loud and Quiet with their initiator counts; pending entries are classified at enqueue only.
+- **R3 per-initiator weight:** the first pending entry of an initiator in a tick is never zeroed (the tally map
+  gets it with count 1 unchecked); later ones are zeroed when `count + in-flight >= cap` unless the owner's
+  running hook has that initiator.
+- **R1 trial walk** (`FUN_00ca4690`): the first tree whose fallback chain holds the hook decides; the output must
+  also be below the node's output count, else the hook cannot start.
+- **R6:** `FUN_00a77d10` fires hook 62 (`DDH_COMBAT_IMMOLATED`) or the damage type's override, not a dying hook;
+  `FUN_00b73630` fires 61. The sites of hooks 57-59 were not found among the direct `FireHook` callers.
+- **Ambient barks:** activation (vslot 75, 0x00b47020) clears the flags and sets the inhibition timer to the tweak
+  (+0x8c, `m_fBarkInhibitionDuration` 12 s); the tick (0x00b3d5e0) counts down, then asks hook 11 every tick (or
+  hook 12 through `FUN_00b2f210` when a nearby pawn in AI state 1 qualifies, hook 15 when a route switch is
+  flagged). The sub-process exists only in the Patrol and Guard behaviour tweaks.
+- **Player hooks:** `Hook_PlayerLoiter` (0x00cb53c0) and `Hook_PlayerLookAt` (0x00cb5680) decoded (see
+  `hooks.rs::LoiterHook` / `LookAtHook`): 2D distances, a gap above 0.5 s between polls resets the loiter, the
+  loiter timer is `min + rand * (max - min) / 32767`, a look-at target fires its output once after its time.
+- **Hook_Notice** reads the attention change reason of the owner's stimulus for the initiator: 19 (seen) -> 0,
+  7 (heard) -> 1 + (context > 3).
+
+| Finding | Status | Port |
+|---|---|---|
+| F1 refire gate | ported | `hooks.rs::HookClock::allowed` (`next < 1e-8 \|\| min < now - next + 1e-8`), `fired` unchanged (1/32767); test `hook_table_and_refire` rewritten with the R1 vector |
+| F2 group lock at the end | ported | `Runner::tick_hooks` housekeeping locks the list for `m_fMinTimeBetweenFiring` when one of its hooks stops playing; enqueue rejects `GroupLocked` |
+| F3 queue | ported | `Runner::request_hook` (R1 gates + enqueue), `Runner::tick_hooks` (groups 12 -> 0, Loud / Quiet, slots 5 + 5, weights, sort, room per attempt, drop the rest); `fire_hook` stays as the immediate form (`FUN_00ca73c0`); the mission requests the AI's barks and ticks the manager every step |
+| F4 Loud / Quiet, cull | ported | `ConvEnv::audio_distance` (>= 2000 = Quiet) and `listener_distance` (weight 0 beyond 5000 but hook 10). APPROXIMATION: the audio path distance is the straight line to the nearest living player |
+| F5 output by node class | ported | `HookClass` on hook nodes (loader), `Runner::hook_output`, `ConvEnv::hook_facts` (suspicion level, knocked out, notice kind; investigate sub-state 0: not decoded). `SplitByTypeAndActor`, `Distraction`, `WitnessedMagic`, `Heart*`: output 0 (not decoded) |
+| F6 fallback trees | ported | `Tree.fallback` (`m_pFallbackTree`), the walk follows it when a tree lacks the hook or ends in `DisConv_TryFallbackTree`; the one-shot and generic categories end the search when a tree had the hook but started nothing |
+| F7 bark speakers | ported (LIKELY rule) | hook-time test (priority 4) in `gate`, bind-time test with the hook node's priority in `fire_now`; a displaced state ends `NewConvo` (`Death` for 57-59); conversations now see and end hook-only states |
+| F8 hook 110 flags | ported | 0xa0 (re-read in `FUN_00c8d820`). The blurb-start AI noise of flags 0x8 / 0x20 / 0x1000 is still not emitted (left open: the noise call `FUN_00c9bb50` and its position were not decoded) |
+| F9 call sites | partly | ambient `DDH_PATROL_MISC` (patrol, guard behaviours, `m_fBarkInhibitionDuration` from the tweak), pain asks both 60 and 16; `Hook_Notice` facts. Left open: 12 / 15 (nearby-pawn query and route switch not decoded), GenericBark timers, the dying family 57-59 (sites not found), the damage-type hook override (no damage-type tweak in the AI), 17-19, 47, 61, 65, 71, 86, 90, 94-105, 107, 111, 116 (field-driven sites not resolved) |
+| F10 subtitles | ported (runtime, not built here) | `DialogueLineView.voice_radius / instance / hook`; dead speakers' lines dropped by the server; `hud_dialogue::current_line` scores `1 - d / radius` (> 0), 99 for the dominant hook's line, main list first then secondary. Text parts left open (`m_TextPartsRatio` not decoded) |
+| F11 dominance, ducking | ported (runtime, not built here) | `hud_dialogue::dominant_instance` (0.4 x voice radius), `dialogue_vo` scales the other hooks' voices to 0.3, blended at 5 / s (linear blend: APPROXIMATION, `FUN_00c96cb0` not decoded); NPC speakers taken as flag 0x8 |
+| F12 player hooks | partly | loiter (4, 5) polled every step for one-shots whose me-speaker is a mission NPC; look-at (6, 7) state machine and data ported but `ConvEnv::look_angles` returns no angles (the view direction and target actors are not in the mission step). 8 / 9 and the "aware" rule of 2 / 4 / 6 left open (not decoded) |
+| F18 oracle events | ported | `Bark:<hook>@<npc>` (result Queued / Fired / Rejected:<why>, per-tick refire rejections left out), `Conv:Started` / `Conv:Ended`, `Sound:Play_<hex>@<speaker>`; conversation scenarios load the map's dialog packages and give scenario NPCs the generic voice of their tweak |
+
+Scenarios: `conversation/bark_notice_detect600` runs with dialog data but the port's party guard never leaves
+Idle in 8 s (no bark; the brain finding of stealth/detect_600); with a hostile guard (scratch run) it posts
+`DDH_ATTENTION_NOTICE_BEGIN` (Notice output 0) at tick 30 and `DDH_ALARM_GO_TO_RING_ALARM` at tick 73, each a
+`Sound:Play_*@guard`. `conversation/bark_group_arbitration` runs on the Playground, which has no cooked dialog
+packages and no generic voice for the Boyle tweak: no barks until the Playground's AI level lists voices.

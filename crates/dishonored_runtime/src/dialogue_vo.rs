@@ -47,6 +47,8 @@ pub struct DialogueVoice {
     pawn: Option<u32>,
     gain_db: f32,
     curve: Vec<f32>,
+    /// Dominant-hook ducking scale (1 = full), blended toward its target.
+    duck: f32,
 }
 
 pub fn init(app: &mut App) {
@@ -120,7 +122,7 @@ pub fn play_dialogue_vo(mut commands: Commands, vo: Option<ResMut<DialogueVo>>, 
             AudioPlayer(clips.add(PcmClip(r.pcm))),
             PlaybackSettings { mode: PlaybackMode::Despawn, volume: Volume::Linear(if spatial { 0.0 } else { db(r.volume_db) }), spatial, spatial_scale: Some(SpatialScale::new(SPATIAL_SCALE)), ..PlaybackSettings::ONCE },
             Transform::default(),
-            DialogueVoice { line: r.line, pawn: r.pawn, gain_db: r.volume_db, curve: r.curve },
+            DialogueVoice { line: r.line, pawn: r.pawn, gain_db: r.volume_db, curve: r.curve, duck: 1.0 },
         ));
     }
     for (e, v) in &voices {
@@ -135,29 +137,58 @@ pub fn play_dialogue_vo(mut commands: Commands, vo: Option<ResMut<DialogueVo>>, 
     }
 }
 
-/// Follow the speaking pawn and apply the distance attenuation and master volume.
+/// The ducking target of a voice (`FUN_00c96cb0` with `m_CurDominantHook`, R7): while a
+/// dialog hook dominates, the voices of the other running hooks play at
+/// `m_fNonDominantVolumeScale`; voices of conversations not started by a hook, and every voice
+/// while no hook dominates, play at full volume.
+fn duck_target(mv: Option<&dishonored_mission::runtime::MissionView>, dominant: Option<u32>, line: u32) -> f32 {
+    let (Some(mv), Some(d)) = (mv, dominant) else { return 1.0 };
+    match mv.dialogue.iter().find(|l| l.id == line) {
+        Some(l) if l.hook.is_some() && l.instance != 0 && l.instance != d => mv.dialogue_mix.non_dominant_scale,
+        _ => 1.0,
+    }
+}
+
+/// Move the ducking scale toward its target at `m_fAudioDuckBlendSpeed` per second (the blend
+/// curve of `FUN_00c96cb0` is not decoded: linear in the scale, APPROXIMATION).
+fn blend_duck(duck: &mut f32, target: f32, speed: f32, dt: f32) {
+    let step = speed * dt;
+    *duck = if (*duck - target).abs() <= step { target } else { *duck + step * (target - *duck).signum() };
+}
+
+/// Follow the speaking pawn and apply the distance attenuation, the dominant-hook ducking and
+/// master volume.
 pub fn update_dialogue_voices(
     settings: Option<Res<AudioSettings>>,
     view: Res<SessionView>,
+    time: Res<Time>,
     cams: Query<&GlobalTransform, With<SpatialListener>>,
-    mut spatial: Query<(&DialogueVoice, &mut Transform, &mut SpatialAudioSink)>,
-    mut flat: Query<(&DialogueVoice, &mut AudioSink)>,
+    mut spatial: Query<(&mut DialogueVoice, &mut Transform, &mut SpatialAudioSink)>,
+    mut flat: Query<(&mut DialogueVoice, &mut AudioSink), Without<SpatialAudioSink>>,
 ) {
     let master = settings.map(|s| s.volume).unwrap_or(1.0);
+    let mv = view.matchv.mission.as_ref();
+    let dominant = mv.and_then(|m| crate::hud_dialogue::dominant_instance(&view, m));
+    let speed = mv.map(|m| m.dialogue_mix.blend_speed).unwrap_or(5.0);
+    let dt = time.delta_secs();
     let listener = cams.iter().next().map(|t| {
         let b = t.translation() / coords::UU_TO_BEVY;
         Vec3::new(b.x, b.z, b.y)
     });
-    for (v, mut tf, mut sink) in &mut spatial {
+    for (mut v, mut tf, mut sink) in &mut spatial {
+        let target = duck_target(mv, dominant, v.line);
+        blend_duck(&mut v.duck, target, speed, dt);
         let Some(p) = v.pawn.and_then(|id| view.others.iter().chain(view.me.iter()).find(|x| x.id == id)) else { continue };
         let at = p.position + Vec3::Z * 60.0;
         tf.translation = coords::pos(at);
         let d = listener.map(|l| l.distance(at)).unwrap_or(0.0);
         let i = (d / 100.0) as usize;
         let att = v.curve.get(i).copied().unwrap_or(-200.0);
-        sink.set_volume(Volume::Linear(db(v.gain_db + att) * master));
+        sink.set_volume(Volume::Linear(db(v.gain_db + att) * v.duck * master));
     }
-    for (v, mut sink) in &mut flat {
-        sink.set_volume(Volume::Linear(db(v.gain_db) * master));
+    for (mut v, mut sink) in &mut flat {
+        let target = duck_target(mv, dominant, v.line);
+        blend_duck(&mut v.duck, target, speed, dt);
+        sink.set_volume(Volume::Linear(db(v.gain_db) * v.duck * master));
     }
 }

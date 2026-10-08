@@ -908,7 +908,16 @@ pub struct AiConfig {
     /// stance modifiers NPC moves use. Empty: NPCs move at the player's speeds.
     #[serde(default)]
     pub locomotion: Vec<crate::npc_anim::LocoConfig>,
+    /// `DisTweaks_AISubProcess_AmbientBarks.m_fBarkInhibitionDuration` of the Patrol / Guard
+    /// behaviours (`TweaksBehavior_Patrol_Default`): the silence after the behaviour starts
+    /// before the ambient `DDH_PATROL_MISC` barks (0x00b47020).
+    #[serde(default = "bark_inhibition")]
+    pub ambient_bark_inhibition: f32,
     pub provenance: BTreeMap<String, String>,
+}
+
+fn bark_inhibition() -> f32 {
+    12.0
 }
 
 fn magic_delay() -> [f32; 2] {
@@ -1414,6 +1423,7 @@ impl Default for AiConfig {
             magic_reaction_delay: [0.2, 0.3],
             anim_magic_lost_target: 0.0,
             locomotion: Vec::new(),
+            ambient_bark_inhibition: bark_inhibition(),
             provenance: BTreeMap::new(),
         }
     }
