@@ -29,6 +29,17 @@ pub struct Traversal {
     pub to: Vec3,
     pub elapsed: f32,
     pub duration: f32,
+    /// Mantle: the edge's height above the feet (`DishonoredAnimNodeBlendByMantleType` picks
+    /// low / medium / high from it against `m_LowMantleMaxEdgeHeight` /
+    /// `m_MediumMantleMaxEdgeHeight`).
+    #[serde(default)]
+    pub edge_height: f32,
+    /// Mantle: the sequence moving the pawn (index into `MantleConfig::anims`: low, medium,
+    /// high) and its play rate; `None` interpolates `from` -> `to` linearly.
+    #[serde(default)]
+    pub anim: Option<u8>,
+    #[serde(default)]
+    pub rate: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

@@ -282,12 +282,18 @@ pub struct AnimLibrary {
 /// Object path of the `AnimSet` export of a package whose own name (the last path component)
 /// is `name`, for sets whose outer is not known (the weapons' sets).
 pub fn anim_set_path(content: &Content, pkg_name: &str, name: &str) -> Result<String> {
+    export_path(content, pkg_name, "AnimSet", name)
+}
+
+/// Object path of the export of class `class` whose own name (the last path component) is
+/// `name` (the first such export).
+pub fn export_path(content: &Content, pkg_name: &str, class: &str, name: &str) -> Result<String> {
     let pkg = content.package(pkg_name)?;
     (0..pkg.exports.len())
-        .filter(|&i| pkg.export_class(i) == "AnimSet")
+        .filter(|&i| pkg.export_class(i) == class)
         .map(|i| pkg.obj_path(ObjRef::Export(i)))
         .find(|p| p.rsplit('.').next().is_some_and(|n| n.eq_ignore_ascii_case(name)))
-        .with_context(|| format!("AnimSet {name} not in {pkg_name}"))
+        .with_context(|| format!("{class} {name} not in {pkg_name}"))
 }
 
 /// Load and bake the named sequences of an AnimSet.

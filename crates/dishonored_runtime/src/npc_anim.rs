@@ -1090,8 +1090,33 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
                 }
                 continue;
             }
+            // A carried body let go: the slave of the carrier's low drop
+            // (`Corpses_CarryCorpse_DropLow_Slave` with `Empty_CarryCorpse_DropLow_Master`), drawn
+            // in the carrier's frame (`viewmodel::BodyFrames`), then the ragdoll at its
+            // `DishonoredNotify_Ragdoll` or end; without it, the ragdoll at once.
             HitKind::Dropped => {
-                st.dropped = true;
+                let drop = bank.profiles[profile]
+                    .defs
+                    .as_ref()
+                    .and_then(|d| d.chain(NpcAnim::CorpseBeingCarried))
+                    .and_then(|c| c.groups.first())
+                    .and_then(|g| {
+                        g.steps.iter().filter_map(|s| s.names.first()).find(|n| {
+                            let l = n.to_ascii_lowercase();
+                            l.contains("droplow") && !l.contains("sneak")
+                        })
+                    })
+                    .cloned();
+                match drop.filter(|n| bank.has(profile, n)) {
+                    Some(n) => {
+                        let mut c = Chain::one(n, "dropped");
+                        c.hold = true;
+                        c.weight = 1.0;
+                        st.full = Some(c);
+                        st.ragdoll = None;
+                    }
+                    None => st.dropped = true,
+                }
                 continue;
             }
             _ => None,
@@ -1122,7 +1147,14 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
         st.ragdoll = None;
         st.dropped = false;
         let steps: Vec<String> = bank.profiles[profile].defs.as_ref().and_then(|d| d.chain(NpcAnim::CorpseBeingCarried)).and_then(|c| c.groups.first()).map(|g| g.steps.iter().filter_map(|s| s.names.first().cloned()).collect()).unwrap_or_default();
-        let (lift, idle, walk) = (steps.first().cloned(), steps.get(1).cloned(), steps.get(2).cloned());
+        let (mut lift, idle, walk) = (steps.first().cloned(), steps.get(1).cloned(), steps.get(2).cloned());
+        // Lifted straight from a won choke: the choke's `Generic_Choke_CarryCorpse_Slave` (with
+        // the master's `Sword_Choke_CarryCorpse_Master`) instead of the lift from the ground.
+        if st.full.as_ref().is_some_and(|c| c.key == "choke_end" || c.key == "choke") {
+            if let Some(n) = bank.choke_step(profile, "carrycorpse") {
+                lift = Some(n);
+            }
+        }
         if st.full.as_ref().is_none_or(|c| c.key != "carried") {
             let mut c = Chain::one(String::new(), "carried");
             c.steps = [lift.clone().map(|n| (n, false)), idle.clone().map(|n| (n, true))].into_iter().flatten().filter(|s| bank.has(profile, &s.0)).collect();
