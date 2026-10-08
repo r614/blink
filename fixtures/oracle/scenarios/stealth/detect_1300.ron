@@ -1,0 +1,20 @@
+// As `stealth/detect_600` at 1300 uu: LOS norm 0.358, 0.226 / s.
+(
+    name: "stealth/detect_1300",
+    system: Stealth,
+    map: "L_Boyle_Ext_P",
+    description: "Stand 1300 uu in front of the party guard: LOS norm and attention rate over the first second.",
+    setup: (
+        player: Some((position: (-3424.9, -3427.3, 20), yaw: 71.37, snap_to_floor: true)),
+        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), yaw: 251.37, state: Some("Idle"))],
+        settle: 1,
+    ),
+    ticks: 120,
+    input: [],
+    checkpoints: [
+        (name: "LOS norm", expect: [(metric: At("npc.guard.los", 10), value: 0.358, tol: 0.01, source: "HOOK_TRIAGE.md 2026-10-06: 0.358 at the 1300 placement", status: Unverified)]),
+        (name: "rate", expect: [(metric: Delta("npc.guard.attn", 5, 65), value: 0.226, tol: 0.03, source: "INSTRUMENTATION.md regression baseline: 0.226 / s at 1300 uu", status: Unverified)]),
+    ],
+    record: [Pawn, Npc("guard")],
+    capture: Some("measure detect npc=<party guard> --dists 1300 --stances stand"),
+)

@@ -1,0 +1,12 @@
+// A placed pawn without AI keeps the rotation it was placed with.
+(
+    name: "ai/passive_keeps_rotation",
+    system: Ai,
+    map: "Playground",
+    description: "A passive guard placed facing south (yaw -90): its yaw after a second.",
+    setup: (player: Some((position: (-5600, 0, 96), yaw: 0)), npcs: [(id: Some("dummy"), position: Some((-5200, 0, 92)), yaw: -90, state: Some("Passive"))]),
+    ticks: 60,
+    input: [],
+    checkpoints: [(name: "rotation kept", expect: [(metric: At("npc.dummy.yaw", 60), value: -90, tol: 0.5, source: "a placed pawn without input keeps its spawn rotation", status: Static)])],
+    record: [Npc("dummy")],
+)

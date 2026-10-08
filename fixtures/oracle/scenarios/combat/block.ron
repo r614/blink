@@ -1,0 +1,21 @@
+// The player holds block against an alerted guard: frontal NPC sword hits are blocked.
+(
+    name: "combat/block",
+    system: Combat,
+    map: "Playground",
+    description: "Hold block facing an alerted guard for 15 s: blocks, no sword damage taken.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0)),
+        npcs: [(id: Some("guard"), position: Some((-5300, 0, 92)), yaw: 180, state: Some("Alerted"))],
+        settle: 1,
+    ),
+    ticks: 900,
+    input: [(tick: 0, hold: 900, action: Press(Block))],
+    checkpoints: [
+        (name: "blocked", expect: [(metric: Count("Sim:SwordBlocked"), value: 1, tol: 0, cmp: AtLeast, source: "a held block stops frontal melee attacks", status: Static)]),
+        (name: "no sword damage", expect: [(metric: Count("Sim:Damage@player[cause=Sword]"), value: 0, tol: 0, source: "a held block stops frontal melee attacks", status: Static)]),
+        (name: "sparks", expect: [(metric: Count("Effect:Vfx_Weapon.Effects.Ps_SwordSparks_Parry"), value: 1, tol: 0, cmp: AtLeast, source: "sparks on a blocked hit on the original (system not confirmed from the tweaks)", status: Unmeasured)]),
+    ],
+    record: [Pawn, Vitals, Npc("guard"), SimEvents, Effects, Sounds],
+    capture: Some("measure sword npc=<doorman> --block (damage-path calls, sparks)"),
+)

@@ -577,8 +577,8 @@ fn cmd_scenario(a: &Args) -> Result<(Scorecard, Vec<WorkItem>)> {
             }
             let t = &res.totals;
             println!(
-                "{} scenarios: {} pass, {} fail, {} unmeasured, {} error; checks {} pass / {} fail / {} unmeasured; {:.2} s",
-                t.scenarios, t.pass, t.fail, t.unmeasured, t.error, t.checks_pass, t.checks_fail, t.checks_unmeasured, t.seconds
+                "{} scenarios: {} pass, {} fail, {} unmeasured, {} error; checks {} pass / {} fail / {} unmeasured / {} unverified; {:.2} s",
+                t.scenarios, t.pass, t.fail, t.unmeasured, t.error, t.checks_pass, t.checks_fail, t.checks_unmeasured, t.checks_unverified, t.seconds
             );
             println!("results: {} (capture requests: {})", dir.join("results.json").display(), dir.join("CAPTURE_REQUESTS.md").display());
         }

@@ -41,6 +41,8 @@ pub struct ScenarioResult {
     pub passed: usize,
     pub failed: usize,
     pub unmeasured: usize,
+    /// Measured but not known to be sampled comparably (reported, not judged).
+    pub unverified: usize,
     pub seconds: f64,
     pub error: Option<String>,
     pub notes: Vec<String>,
@@ -73,6 +75,7 @@ pub struct Totals {
     pub checks_pass: usize,
     pub checks_fail: usize,
     pub checks_unmeasured: usize,
+    pub checks_unverified: usize,
     pub seconds: f64,
 }
 
@@ -85,7 +88,7 @@ pub struct Results {
 }
 
 fn status_of(checks: &[Check]) -> &'static str {
-    let judged: Vec<&Check> = checks.iter().filter(|c| c.status != CheckStatus::Unmeasured).collect();
+    let judged: Vec<&Check> = checks.iter().filter(|c| matches!(c.status, CheckStatus::Pass | CheckStatus::Fail)).collect();
     if judged.iter().any(|c| c.status == CheckStatus::Fail) {
         "fail"
     } else if judged.is_empty() {
@@ -158,6 +161,7 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
                     passed: 0,
                     failed: 0,
                     unmeasured: 0,
+                    unverified: 0,
                     seconds: 0.0,
                     error: None,
                     notes: Vec::new(),
@@ -195,6 +199,7 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
                 r.passed = r.checks.iter().filter(|c| c.status == CheckStatus::Pass).count();
                 r.failed = r.checks.iter().filter(|c| c.status == CheckStatus::Fail).count();
                 r.unmeasured = r.checks.iter().filter(|c| c.status == CheckStatus::Unmeasured).count();
+                r.unverified = r.checks.iter().filter(|c| c.status == CheckStatus::Unverified).count();
                 r.status = status_of(&r.checks).into();
                 // The original's trace for this run (cached by the hook), compared on the
                 // channels and event kinds it recorded.
@@ -222,12 +227,12 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
             .collect()
     });
     let mut card = Scorecard { title: "Scenarios: the port against the original's measurements and traces".into(), ..Default::default() };
-    let mut table = Table::new("Scenarios", &["scenario", "status", "pass/fail/unmeasured", "first divergence", "s"]);
+    let mut table = Table::new("Scenarios", &["scenario", "status", "pass/fail/unmeasured/unverified", "first divergence", "s"]);
     let mut checks_table = Table::new("Checks", &["scenario", "checkpoint", "metric", "port", "expected", "status", "reference"]);
     let mut items = Vec::new();
     let mut captures = Vec::new();
     let mut by_system: BTreeMap<String, (usize, usize, usize, usize)> = BTreeMap::new();
-    let mut tot = Totals { scenarios: 0, pass: 0, fail: 0, unmeasured: 0, error: 0, checks_pass: 0, checks_fail: 0, checks_unmeasured: 0, seconds: 0.0 };
+    let mut tot = Totals { scenarios: 0, pass: 0, fail: 0, unmeasured: 0, error: 0, checks_pass: 0, checks_fail: 0, checks_unmeasured: 0, checks_unverified: 0, seconds: 0.0 };
     let mut out_results = Vec::new();
     for ((r, _), s) in results.into_iter().zip(chosen.iter()) {
         if r.status == "sweep" {
@@ -256,22 +261,25 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
         tot.checks_pass += r.passed;
         tot.checks_fail += r.failed;
         tot.checks_unmeasured += r.unmeasured;
+        tot.checks_unverified += r.unverified;
         let div = match (&r.error, &r.first_divergence) {
             (Some(e), _) => format!("error: {e}"),
             (None, Some(d)) => format!("{}{}: {}", d.against, d.tick.map(|t| format!(" tick {t}")).unwrap_or_default(), d.text),
             (None, None) if r.original_trace => "none (original trace matches)".into(),
             (None, None) => "-".into(),
         };
-        table.row(vec![r.name.clone(), r.status.clone(), format!("{}/{}/{}", r.passed, r.failed, r.unmeasured), div, format!("{:.2}", r.seconds)]);
+        table.row(vec![r.name.clone(), r.status.clone(), format!("{}/{}/{}/{}", r.passed, r.failed, r.unmeasured, r.unverified), div, format!("{:.2}", r.seconds)]);
         for c in &r.checks {
             let st = match c.status {
                 CheckStatus::Pass => "pass",
                 CheckStatus::Fail => "**FAIL**",
                 CheckStatus::Unmeasured => "unmeasured",
+                CheckStatus::Unverified => "unverified",
             };
             checks_table.row(vec![r.name.clone(), c.checkpoint.clone(), c.metric.clone(), val(c.actual), if c.reference == Reference::Unmeasured { "?".into() } else { cmp_text(c) }, st.into(), format!("{:?}: {}", c.reference, c.source)]);
-            if c.status == CheckStatus::Unmeasured {
-                captures.push(CaptureRequest { scenario: r.name.clone(), map: r.map.clone(), checkpoint: c.checkpoint.clone(), metric: c.metric.clone(), port_value: c.actual, note: c.source.clone(), capture: s.capture.clone(), spec_hash: r.spec_hash.clone() });
+            if matches!(c.status, CheckStatus::Unmeasured | CheckStatus::Unverified) {
+                let note = if c.status == CheckStatus::Unverified { format!("unverified (measured {}, sampling to confirm): {}", cmp_text(c), c.source) } else { c.source.clone() };
+                captures.push(CaptureRequest { scenario: r.name.clone(), map: r.map.clone(), checkpoint: c.checkpoint.clone(), metric: c.metric.clone(), port_value: c.actual, note, capture: s.capture.clone(), spec_hash: r.spec_hash.clone() });
             }
             if c.status == CheckStatus::Fail {
                 items.push(WorkItem {
@@ -299,7 +307,7 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
     }
     tot.seconds = t_all.elapsed().as_secs_f64();
     card.summary.push(("scenarios".into(), format!("{} run: {} pass, {} fail, {} unmeasured, {} error", tot.scenarios, tot.pass, tot.fail, tot.unmeasured, tot.error)));
-    card.summary.push(("checks".into(), format!("{} pass, {} fail, {} unmeasured (capture requests)", tot.checks_pass, tot.checks_fail, tot.checks_unmeasured)));
+    card.summary.push(("checks".into(), format!("{} pass, {} fail, {} unmeasured, {} unverified (capture requests)", tot.checks_pass, tot.checks_fail, tot.checks_unmeasured, tot.checks_unverified)));
     card.summary.push(("time".into(), format!("{:.2} s ({load_s:.2} s loading maps and effects)", tot.seconds)));
     let mut sys = Table::new("Per system", &["system", "pass", "fail", "unmeasured", "error"]);
     for (k, v) in &by_system {

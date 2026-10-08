@@ -1,0 +1,12 @@
+// The 360 uu ledge is out of reach: 360 > 230 + 106.7.
+(
+    name: "movement/mantle_360",
+    system: Movement,
+    map: "Playground",
+    description: "Run north at the 360 ledge, jump at its face: no mantle.",
+    setup: (player: Some((position: (2000, -3900, 92), yaw: 90)), settle: 20),
+    ticks: 180,
+    input: [(tick: 1, action: Move(forward: 127, right: 0)), (tick: 56, hold: 2, action: Press(Jump))],
+    checkpoints: [(name: "not on top", expect: [(metric: RiseFrom("pawn.z", 0), value: 300, tol: 0, cmp: AtMost, source: "tweaks: m_MantleMaxEdgeHeight 230 above the feet", status: Static)])],
+    record: [Pawn, SimEvents],
+)

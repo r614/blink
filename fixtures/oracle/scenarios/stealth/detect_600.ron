@@ -1,0 +1,25 @@
+// The Boyle party guard (`DishonoredSpawner_46`, yaw 251.4) sees the player standing 600 uu in
+// front of it (HOOK_TRIAGE.md / INSTRUMENTATION.md 2026-10-06, `measure detect --dists 600`):
+// LOS norm 0.164 (d / 3500 from the eye), seen value 0.703 / s = DistanceTuning(1 - norm) +
+// 0.1 x (raw - 0.2) / 0.3 + speed term. How the probe placed the player at "600" (centre or eye,
+// horizontal or 3D) is not recorded (0.164 x 3500 = 574), so the points are unverified.
+(
+    name: "stealth/detect_600",
+    system: Stealth,
+    map: "L_Boyle_Ext_P",
+    description: "Stand 600 uu in front of the party guard: LOS norm and attention rate over the first half second.",
+    setup: (
+        player: Some((position: (-3201.5, -2763.3, 20), yaw: 71.37, snap_to_floor: true)),
+        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), yaw: 251.37, state: Some("Idle"))],
+        settle: 1,
+    ),
+    ticks: 120,
+    input: [],
+    checkpoints: [
+        (name: "LOS norm", expect: [(metric: At("npc.guard.los", 10), value: 0.164, tol: 0.01, source: "HOOK_TRIAGE.md 2026-10-06: d / 3500 in the inner cone; 0.164 at the 600 placement", status: Unverified)]),
+        (name: "rate", expect: [(metric: Delta("npc.guard.attn", 5, 35), value: 0.3515, tol: 0.03, source: "INSTRUMENTATION.md regression baseline: 0.703 / s at 600 uu (half a second)", status: Unverified)]),
+        (name: "notices", expect: [(metric: TimeToReach("npc.guard.attn_level", 1), value: 0, tol: 0, source: "time to the first attention level", status: Unmeasured)]),
+    ],
+    record: [Pawn, Npc("guard")],
+    capture: Some("measure detect npc=<party guard> --dists 600 --stances stand, logging the player's Location and the guard's eye per tick"),
+)

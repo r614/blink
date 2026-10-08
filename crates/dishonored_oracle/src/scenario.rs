@@ -99,7 +99,8 @@ pub struct NpcSetup {
     /// (combat against the player from the start), `Passive` (no AI: a training dummy).
     #[serde(default)]
     pub state: Option<String>,
-    /// Faction tweak (`DisFaction_Defaults.Faction_Guard_Default`).
+    /// Faction tweak (`DisFaction_Defaults.Faction_Guard_Default`, the default of guards that
+    /// are not passive); `None` for no faction (unaware of the player until alerted).
     #[serde(default)]
     pub faction: Option<String>,
     /// Patrol points (with `state: Patrol`).
@@ -201,7 +202,9 @@ pub enum Action {
     Press(Button),
     /// A console command (original: `ConsoleCommand`; port: the matching debug hook, if any:
     /// `teleport X Y Z [YAW]`, `health N`, `mana N`, `power NAME LEVEL`, `alert NPC`,
-    /// `calm NPC`; anything else is recorded as an unsupported-command event).
+    /// `calm NPC`, `give AMMOTYPE N`, `saveload` (save the match, load it back and continue from the copy; the
+    /// event detail says `same_state=true|false`), `cansave`; anything else is recorded as an
+    /// unsupported-command event).
     Console(String),
     /// Select the left-hand item (power wheel / quick select), held until changed
     /// (`LeftHand` name: `Blink`, `Windblast`, `DarkVision`, `Possession`, `BendTime`,
@@ -258,6 +261,18 @@ pub enum Metric {
     Lifetime(String),
     /// Matching Effect spawns whose instance has no EffectEnd by the end of the run.
     Unended(String),
+    /// First tick at which the channel drops below the threshold (<), in seconds.
+    TimeBelow(String, f64),
+    /// First tick at which the channel equals the value (within 0.5: enumerated channels), in
+    /// seconds.
+    TimeAt(String, f64),
+    /// The second metric minus the first (the time between two channel events).
+    Gap(Box<Metric>, Box<Metric>),
+    /// The magnitude of a metric (quantities whose sign convention differs between the sides).
+    Abs(Box<Metric>),
+    /// Mean / variance of a numeric `key=value` over the matching events.
+    EventMean(String, String),
+    EventVar(String, String),
 }
 
 /// How an expectation compares.
@@ -283,6 +298,10 @@ pub enum Reference {
     /// Not measured yet: the port's value is reported and the expectation is a capture
     /// request for the hook (`value` is a placeholder and never fails the scenario).
     Unmeasured,
+    /// Measured on the original, but not known to be sampled like the port (another sampling
+    /// point, frame of reference or unit): reported with the port's value, never judged, and
+    /// listed as a capture request until the hook samples it comparably.
+    Unverified,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -535,6 +554,7 @@ impl Scenario {
                 });
                 let status = match (e.status, ok) {
                     (Reference::Unmeasured, _) => CheckStatus::Unmeasured,
+                    (Reference::Unverified, _) => CheckStatus::Unverified,
                     (_, true) => CheckStatus::Pass,
                     (_, false) => CheckStatus::Fail,
                 };
@@ -570,6 +590,8 @@ pub enum CheckStatus {
     Fail,
     /// Unmeasured reference: the port's value is reported, nothing is judged.
     Unmeasured,
+    /// Measured, but not known to be sampled comparably: reported, not judged.
+    Unverified,
 }
 
 /// An expectation's outcome ([`Scenario::evaluate`]).
@@ -608,6 +630,12 @@ pub fn metric_label(m: &Metric) -> String {
         Metric::EventSum(p, k) => format!("EventSum({p}, {k})"),
         Metric::Lifetime(p) => format!("Lifetime({p})"),
         Metric::Unended(p) => format!("Unended({p})"),
+        Metric::TimeBelow(c, v) => format!("TimeBelow({c}, {v})"),
+        Metric::TimeAt(c, v) => format!("TimeAt({c}, {v})"),
+        Metric::Gap(a, b) => format!("Gap({}, {})", metric_label(a), metric_label(b)),
+        Metric::Abs(a) => format!("Abs({})", metric_label(a)),
+        Metric::EventMean(p, k) => format!("EventMean({p}, {k})"),
+        Metric::EventVar(p, k) => format!("EventVar({p}, {k})"),
     }
 }
 
@@ -730,6 +758,19 @@ pub fn extra_metric(t: &Trace, m: &Metric) -> Option<f64> {
             let ended: Vec<String> = t.events.iter().filter(|e| e.kind == "EffectEnd").filter_map(inst).collect();
             Some(t.events.iter().filter(|e| e.kind == "Effect" && p.matches(e)).filter(|e| inst(e).is_none_or(|i| !ended.contains(&i))).count() as f64)
         }
+        Metric::TimeBelow(c, thr) => t.series(c).into_iter().find(|x| x.1 < *thr).map(|x| secs(x.0)),
+        Metric::TimeAt(c, v) => t.series(c).into_iter().find(|x| (x.1 - v).abs() < 0.5).map(|x| secs(x.0)),
+        Metric::Gap(a, b) => Some(crate::diff::metric_value(t, b)? - crate::diff::metric_value(t, a)?),
+        Metric::Abs(a) => crate::diff::metric_value(t, a).map(f64::abs),
+        Metric::EventMean(p, k) | Metric::EventVar(p, k) => {
+            let p = EventPattern::parse(p);
+            let v: Vec<f64> = t.events.iter().filter(|e| p.matches(e)).filter_map(|e| field(e, k)).collect();
+            if v.is_empty() {
+                return None;
+            }
+            let mean = v.iter().sum::<f64>() / v.len() as f64;
+            Some(if matches!(m, Metric::EventMean(..)) { mean } else { v.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / v.len() as f64 })
+        }
         _ => None,
     }
 }
@@ -801,6 +842,50 @@ mod tests {
         assert_ne!(t.spec_hash(), h);
         // Round trip through RON keeps the spec.
         assert_eq!(Scenario::parse(&ron::to_string(&s).unwrap()).unwrap(), s);
+    }
+
+    #[test]
+    fn event_metrics_and_statuses() {
+        let mut t = Trace::new("s", "port", 60, &[("pawn.health", "pt")]);
+        for k in 0..120u32 {
+            t.push(k, vec![if k < 70 { 70.0 } else { 60.0 }]);
+        }
+        let ev = |tick: u32, kind: &str, object: &str, name: &str, detail: &str| TraceEvent { tick, kind: kind.into(), object: object.into(), name: name.into(), detail: detail.into() };
+        t.events = vec![
+            ev(6, "Sim", "player", "SwordSwing", "id=player"),
+            ev(24, "Sim", "dummy", "Damage", "victim=dummy amount=14 cause=Sword"),
+            ev(24, "Effect", "dummy", "Vfx_PhysMat.Blood.Pfx_BloodMotion", "inst=1 untextured=0"),
+            ev(30, "Effect", "player", "Vfx_GamePlay.Blink.Blink_Fall_01", "inst=2"),
+            ev(84, "EffectEnd", "", "Vfx_PhysMat.Blood.Pfx_BloodMotion", "inst=1"),
+        ];
+        let m = |x: Metric| crate::diff::metric_value(&t, &x);
+        assert_eq!(m(Metric::Count("Sim:Damage@dummy[cause=Sword]".into())), Some(1.0));
+        assert_eq!(m(Metric::Count("Sim:Damage@dummy[cause=Pistol]".into())), Some(0.0));
+        assert_eq!(m(Metric::Count("Effect:Vfx_PhysMat.Blood.*".into())), Some(1.0));
+        assert_eq!(m(Metric::Between("Sim:SwordSwing".into(), "Sim:Damage@dummy".into())), Some(0.3));
+        assert_eq!(m(Metric::EventValue("Sim:Damage".into(), "amount".into())), Some(14.0));
+        assert_eq!(m(Metric::Lifetime("Vfx_PhysMat.Blood.*".into())), Some(1.0));
+        assert_eq!(m(Metric::Lifetime("Vfx_GamePlay.Blink.*".into())), None);
+        assert_eq!(m(Metric::Unended("*".into())), Some(1.0));
+        assert_eq!(m(Metric::DropFrom("pawn.health".into(), 0)), Some(10.0));
+        assert_eq!(m(Metric::Gap(Box::new(Metric::FirstAt("Sim:SwordSwing".into())), Box::new(Metric::TimeBelow("pawn.health".into(), 65.0)))).map(|v| (v * 60.0).round()), Some(64.0));
+        assert_eq!(m(Metric::Abs(Box::new(Metric::Delta("pawn.health".into(), 0, 100)))), Some(10.0));
+        let s = Scenario::parse(
+            r#"(name: "combat/x", system: Combat, map: "M", ticks: 10, checkpoints: [(name: "c", expect: [
+                (metric: Count("Sim:Damage"), value: 1, tol: 0, source: "m"),
+                (metric: Count("Sim:Damage"), value: 2, tol: 0, source: "m", status: Static),
+                (metric: Count("Sim:Damage"), value: 5, tol: 0, source: "m", status: Unmeasured),
+                (metric: Count("Sim:Damage"), value: 5, tol: 0, source: "m", status: Unverified),
+                (metric: Count("Effect:*"), value: 1, tol: 0, cmp: AtLeast, source: "m"),
+            ])])"#,
+        )
+        .unwrap();
+        let st: Vec<CheckStatus> = s.evaluate(&t).iter().map(|c| c.status).collect();
+        assert_eq!(st, vec![CheckStatus::Pass, CheckStatus::Fail, CheckStatus::Unmeasured, CheckStatus::Unverified, CheckStatus::Pass]);
+        // The spec hash ignores checkpoints (correcting a reference keeps captured traces).
+        let mut s2 = s.clone();
+        s2.checkpoints.clear();
+        assert_eq!(s.spec_hash(), s2.spec_hash());
     }
 
     #[test]

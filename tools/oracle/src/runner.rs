@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 const ME: PlayerId = 1;
 /// Channels sampled from the player (pawn, vitals, camera, left hand, powers, inventory).
-const PLAYER_CHANNELS: usize = 45;
+const PLAYER_CHANNELS: usize = 49;
 
 /// What a run produced besides the trace.
 pub struct RunOut {
@@ -145,6 +145,12 @@ fn mission(s: &Scenario, mc: &dishonored_content::MatchContent, notes: &mut Vec<
             continue;
         }
         let spawner = n.spawner.as_ref().and_then(|sp| mc.spawners.iter().find(|x| x.name.eq_ignore_ascii_case(sp)));
+        if let Some(sp) = &n.spawner {
+            let k = mc.spawners.iter().filter(|x| x.name.eq_ignore_ascii_case(sp)).count();
+            if k > 1 {
+                notes.push(format!("spawner `{sp}` is ambiguous on {} ({k} spawners of that name in the level's packages): the first is used", s.map));
+            }
+        }
         if n.spawner.is_some() && spawner.is_none() {
             notes.push(format!("spawner `{}` not found on {}", n.spawner.as_deref().unwrap_or(""), s.map));
         }
@@ -201,11 +207,26 @@ fn mission(s: &Scenario, mc: &dishonored_content::MatchContent, notes: &mut Vec<
 #[derive(Default)]
 struct Legends(BTreeMap<String, Vec<String>>);
 
+/// Fixed legends (declaration order) of the enumerated channels, so `TimeAt("pawn.mode", 5)`
+/// means Swimming in every trace. Keyed by the channel's last segment.
+const SEEDS: &[(&str, &[&str])] = &[
+    ("mode", &["Walking", "Falling", "Mantling", "Blinking", "Dead", "Swimming", "Climbing"]),
+    ("phase", &["Idle", "Aiming", "Equipping", "Recovering", "Reloading"]),
+    ("item", &["Blink", "Windblast", "DarkVision", "Pistol", "Crossbow", "Empty", "Possession", "BendTime", "DevouringSwarm", "SleepDart", "IncendiaryBolt", "Grenade", "StickyGrenade", "SpringRazor"]),
+    ("possess", &["Inactive", "Targeting", "PrePossess", "Active", "Cooldown"]),
+    ("state", &["Idle", "Wander", "WalkToPoint", "GroupIdle", "React", "Flee", "Patrol", "Investigate", "Alert", "Combat", "Notice", "Search", "Cower", "RingAlarm"]),
+    ("condition", &["Normal", "BeingChoked", "Unconscious", "Possessed"]),
+    ("stance", &["Relaxed", "Patrol", "Search", "Combat", "Panic", "Cower", "Notice"]),
+];
+
 impl Legends {
     fn idx(&mut self, chan: &str, v: impl std::fmt::Debug) -> f64 {
         let s = format!("{v:?}");
         let s = s.split([' ', '{', '(']).next().unwrap_or("").to_string();
-        let l = self.0.entry(chan.to_string()).or_default();
+        let l = self.0.entry(chan.to_string()).or_insert_with(|| {
+            let last = chan.rsplit('.').next().unwrap_or("");
+            SEEDS.iter().find(|x| x.0 == last).map(|x| x.1.iter().map(|s| s.to_string()).collect()).unwrap_or_default()
+        });
         match l.iter().position(|x| *x == s) {
             Some(i) => i as f64,
             None => {
@@ -383,9 +404,9 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
     // Channels.
     let mut chans: Vec<(String, &str)> = Vec::new();
     for (c, u) in [
-        ("pawn.x", "uu"), ("pawn.y", "uu"), ("pawn.z", "uu"), ("pawn.vx", "uu/s"), ("pawn.vy", "uu/s"), ("pawn.vz", "uu/s"), ("pawn.speed2d", "uu/s"), ("pawn.crouched", "bool"), ("pawn.mode", "enum"), ("pawn.alive", "bool"),
+        ("pawn.x", "uu"), ("pawn.y", "uu"), ("pawn.z", "uu"), ("pawn.vx", "uu/s"), ("pawn.vy", "uu/s"), ("pawn.vz", "uu/s"), ("pawn.speed2d", "uu/s"), ("pawn.crouched", "bool"), ("pawn.mode", "enum"), ("pawn.alive", "bool"), ("pawn.under", "bool"), ("pawn.air_used", "s"),
         ("pawn.health", "pt"), ("pawn.mana", "pt"), ("pawn.health_max", "pt"),
-        ("cam.x", "uu"), ("cam.y", "uu"), ("cam.z", "uu"), ("cam.yaw", "deg"), ("cam.pitch", "deg"), ("cam.lean", "1"),
+        ("cam.x", "uu"), ("cam.y", "uu"), ("cam.z", "uu"), ("cam.yaw", "deg"), ("cam.pitch", "deg"), ("cam.lean", "1"), ("cam.lean_deg", "deg"), ("cam.roll", "deg"),
         ("left.item", "enum"), ("left.phase", "enum"), ("left.timer", "s"), ("left.pistol_loaded", "n"), ("left.pistol_reserve", "n"), ("left.bolts_loaded", "n"), ("left.bolts_reserve", "n"), ("left.dispersion", "px720"),
         ("left.blink_target", "bool"), ("left.blink_tx", "uu"), ("left.blink_ty", "uu"), ("left.blink_tz", "uu"),
         ("power.time_scale", "1"), ("power.world_dilation", "1"), ("power.dark_vision", "s"), ("power.possess", "enum"), ("power.action_lock", "s"),
@@ -417,9 +438,9 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
                 let hmax = dishonored_sim::powers::health_max(p, &cfg.gameplay) as f64;
                 let am = |t: dishonored_ir::items::AmmoType| dishonored_sim::inventory::ammo(p, t) as f64;
                 use dishonored_ir::items::AmmoType as A;
-                v.extend([p.position.x as f64, p.position.y as f64, p.position.z as f64, p.velocity.x as f64, p.velocity.y as f64, p.velocity.z as f64, p.velocity.truncate().length() as f64, b(p.crouched), leg.idx("pawn.mode", p.mode), b(p.alive)]);
+                v.extend([p.position.x as f64, p.position.y as f64, p.position.z as f64, p.velocity.x as f64, p.velocity.y as f64, p.velocity.z as f64, p.velocity.truncate().length() as f64, b(p.crouched), leg.idx("pawn.mode", p.mode), b(p.alive), b(p.water.under), p.water.air_used as f64]);
                 v.extend([p.vitals.health as f64, p.vitals.mana as f64, hmax]);
-                v.extend([eye.x as f64, eye.y as f64, eye.z as f64, p.yaw as f64, p.pitch as f64, p.lean as f64]);
+                v.extend([eye.x as f64, eye.y as f64, eye.z as f64, p.yaw as f64, p.pitch as f64, p.lean as f64, dishonored_sim::movement::lean_angle(p, mv) as f64, dishonored_sim::movement::lean_roll(p, mv) as f64]);
                 let bt = p.left.blink_target;
                 v.extend([leg.idx("left.item", p.left.item), leg.idx("left.phase", p.left.phase), p.left.timer as f64, p.left.pistol_loaded as f64, p.left.pistol_reserve as f64, p.left.bolts_loaded as f64, p.left.bolts_reserve as f64, p.left.dispersion as f64]);
                 v.extend([b(bt.is_some()), bt.map_or(f64::NAN, |t| t.x as f64), bt.map_or(f64::NAN, |t| t.y as f64), bt.map_or(f64::NAN, |t| t.z as f64)]);
@@ -472,7 +493,7 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         for c in &ti.console {
             let r = console(&mut game, c, &by_id, cfg);
             trace.events.push(TraceEvent { tick: tk, kind: "Console".into(), object: "player".into(), name: c.split_whitespace().next().unwrap_or("").to_string(), detail: match r {
-                Ok(()) => format!("cmd={}", c.replace(' ', "_")),
+                Ok(d) => format!("cmd={} {d}", c.replace(' ', "_")),
                 Err(e) => format!("unsupported cmd={} why={}", c.replace(' ', "_"), e.to_string().replace(' ', "_")),
             } });
         }
@@ -487,6 +508,8 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             None => actions::NONE,
         };
         tick += 1;
+        // The shooter's view and dispersion before the step (a shot leaves at these).
+        let before = mm(&game).world.player(ME).map(|p| (p.yaw, p.pitch, p.left.dispersion));
         let input = PlayerInput { tick, forward: ti.forward, right: ti.right, yaw: ti.yaw, pitch: ti.pitch, buttons: button_bits(&ti.held), left_hand: hand, action, npc_move: 0 };
         let out = game.step(&[(ME, input)], &maps.set, cfg);
         // Simulation events.
@@ -508,7 +531,19 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         for p in &w.projectiles {
             if !seen_proj.contains_key(&p.id) {
                 seen_proj.insert(p.id, (format!("{:?}", p.kind), 0.0));
-                trace.events.push(TraceEvent { tick: tk, kind: "Projectile".into(), object: name_of(p.owner), name: format!("{:?}", p.kind), detail: format!("id={} speed={:.1} dmg={:.1}", p.id, p.velocity.length(), p.damage) });
+                // Player shots: the offset from the view in 720-line pixels (as 0x00AA2B10 draws it,
+                // `left_hand::offset_direction` inverted) and its ratio to the dispersion.
+                let spread = match before.filter(|_| p.owner == ME) {
+                    Some((yaw, pitch, disp)) => {
+                        let f = dishonored_sim::movement::view_vector(yaw, pitch);
+                        let v = p.velocity.normalize_or_zero();
+                        let k = 2.0 * (dishonored_sim::left_hand::DISPERSION_REF_HFOV_DEG.to_radians() * 0.5).tan() / (720.0 * dishonored_sim::left_hand::DISPERSION_REF_ASPECT);
+                        let off = (v / v.dot(f).max(1e-6) - f).length() / k;
+                        format!(" off_px={off:.3} disp={disp:.3} rd={:.4}", if disp > 0.0 { off / disp } else { f32::NAN })
+                    }
+                    None => String::new(),
+                };
+                trace.events.push(TraceEvent { tick: tk, kind: "Projectile".into(), object: name_of(p.owner), name: format!("{:?}", p.kind), detail: format!("id={} speed={:.1} dmg={:.1}{spread}", p.id, p.velocity.length(), p.damage) });
             }
             if let Some(e) = seen_proj.get_mut(&p.id) {
                 e.1 = p.age;
@@ -536,7 +571,7 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
 }
 
 /// The port's console hooks for `Action::Console`.
-fn console(game: &mut Game, cmd: &str, by_id: &HashMap<PlayerId, String>, cfg: &dishonored_sim::SimConfig) -> Result<()> {
+fn console(game: &mut Game, cmd: &str, by_id: &HashMap<PlayerId, String>, cfg: &dishonored_sim::SimConfig) -> Result<String> {
     let w: Vec<&str> = cmd.split_whitespace().collect();
     let f = |i: usize| -> Result<f32> { w.get(i).context("missing argument")?.parse::<f32>().context("number") };
     let npc = |name: &str| by_id.iter().find(|(_, n)| n.eq_ignore_ascii_case(name)).map(|(id, _)| *id).context("unknown NPC");
@@ -556,6 +591,11 @@ fn console(game: &mut Game, cmd: &str, by_id: &HashMap<PlayerId, String>, cfg: &
             let i = power::NAMES.iter().position(|n| n.eq_ignore_ascii_case(w.get(1).copied().unwrap_or(""))).context("power name")?;
             m.world.player_mut(ME).context("no player")?.inv.power_levels[i] = f(2)? as u8;
         }
+        Some("give") => {
+            let t = ammo_type(w.get(1).copied().unwrap_or("")).context("ammo type")?;
+            let p = m.world.player_mut(ME).context("no player")?;
+            dishonored_sim::inventory::add_ammo(p, t, f(2)? as _, &cfg.gameplay);
+        }
         Some("alert") => {
             let id = npc(w.get(1).copied().unwrap_or(""))?;
             m.alert_npc(id);
@@ -567,8 +607,23 @@ fn console(game: &mut Game, cmd: &str, by_id: &HashMap<PlayerId, String>, cfg: &
                 b.state = dishonored_ai::BrainState::Idle;
             }
         }
+        // Save the match (save::encode), load it back (save::restore) and continue from the copy.
+        Some("saveload") => {
+            use dishonored_multiplayer::mission::save;
+            let blocked = save::save_blocked(m);
+            let h0 = save::state_hash(m);
+            let bytes = save::encode(m, 0, "oracle")?;
+            let (_, restored) = save::restore(&bytes, m.setup.clone())?;
+            *m = restored;
+            let h1 = save::state_hash(m);
+            return Ok(format!("bytes={} same_state={} allowed={} blocked={}", bytes.len(), h0 == h1, blocked.is_none(), blocked.unwrap_or("-").replace(' ', "_")));
+        }
+        Some("cansave") => {
+            let blocked = dishonored_multiplayer::mission::save::save_blocked(m);
+            return Ok(format!("allowed={} blocked={}", blocked.is_none(), blocked.unwrap_or("-").replace(' ', "_")));
+        }
         _ => bail!("no port hook"),
     }
     let _ = cfg;
-    Ok(())
+    Ok(String::new())
 }
