@@ -651,7 +651,7 @@ Three native entry hooks turn the paths that bypass ProcessEvent into trace even
 
 | Kind | Native | Event |
 |---|---|---|
-| `Sound` | 0x009B2BE0 (audio device post, thiscall `(UAkEvent*, AActor* source, ...)`; `Actor.PostAkEvent`'s exec 0x005C1050 -> 0x006CD730 -> it; native callers directly) | object = source actor, name = `Package.AkEvent` |
+| `Sound` | the Wwise SDK `AK::SoundEngine::PostEvent` entries (cdecl): by id 0x00D17670, by wide name 0x00D16CD0, by name 0x00D16D60 (the engine wrapper 0x009B2BE0 -> 0x009B2150 -> by id; footsteps post on pooled `DishonoredAudioSystem` AkComponents) | object = the AkGameObjectID's object (an AkComponent: `<actor>.DisAkComponent_N`, or `global`), name = the AkEvent whose `m_akID` (+0x40) matches, or the posted name |
 | `Effect` | `UParticleSystemComponent::ActivateSystem` 0x008B1F80 (pooled effects too: U-805) | object = the component's Owner (+0x48), name = Template (+0x1C4), detail `comp=0x..` |
 | `Noise` | AI noise dispatch 0x00C5A760 (thiscall on the noise manager, `(event*)`) | object = source (+0x24), name = `EAINoiseLoudness` (+0x20), detail `context=` (`EAINoiseContext`, +0x21), location (+0x14), +0x38 |
 
@@ -661,8 +661,8 @@ the press, `..._Fire` 8 ticks after, rats' screams, `Snd_P_Sprint_Breath`, music
 the shot's tick, the impact 3 ticks later; noises: the shot `EAINoiseLoudness4` Danger at the
 player, the bullet's impact `EAINoiseLoudness3` Danger, sprint steps `EAINoiseLoudness12m`
 (context shown as Anomaly: the context byte is read at +0x21 and not yet cross-checked against
-the decompiled dispatch) every 16 ticks, a `6m` Footfall at the stop. Footstep sounds were not
-seen in this path (the footstep AkEvents may be posted by another native: open).
+the decompiled dispatch) every 16 ticks, a `6m` Footfall at the stop. Footsteps: `Wwise_FS_Bank.FS_P_Grass_R` (per surface) every 26-28 ticks while walking on the
+Boyle runway, posted on the audio system's pooled positional components.
 
 ### Setup additions (2026-10-08, second round)
 
@@ -678,6 +678,14 @@ seen in this path (the footstep AkEvents may be posted by another native: open).
 - Airborne starts (no floor within half height + 10 below the start, no `settle`): the pawn
   starts `PHYS_Falling` with zero velocity at frame 0, as the port does (the fall specs before
   this fix hovered at their start height: re-captured).
+- Door Use (queue): stand 100 uu from the door's collision centre on the side its thin axis
+  faces (`DisDoor_21`: (-3307.7, 2784.8), yaw 0, pitch -8): F opens it (`m_DoorState` 0 ->
+  `DDS_Opened_CCW`); the locked `DisDoor_2` stays closed and posts
+  `Snd_FixInt_AP_Door_Wood_Locked`.
+- `session darkness [add=N | set=N]`: the engine's chaos add (0x00C41B50, thiscall on the
+  pawn's `DisDarknessManager`: score += n, clamped at 0), score (0x00A446B0) and level
+  (0x00C487D0, the level table): the queue's sweep gives 0 / 11 -> 0 / 12 -> 1 / 47 -> 1 / 48 -> 2 /
+  389 -> 9 / 390 -> 10. (`lab ncall` of 0x00AA15B0 with `ecx` 0 hangs the game thread: avoid.)
 - `session` key=value: a token without `=` continues the previous value
   (`console command=adddarkness 11`). The darkness / debug console commands are not in retail
   ("Command not recognized" in Launch.log): the darkness sequence of the queue needs direct writes
