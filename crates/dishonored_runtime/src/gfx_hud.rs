@@ -202,6 +202,14 @@ const ICONS: &[(&str, &str, &str)] = &[
     ("pistol", "UI_ItemIcons_Large", "Gun_Large"),
     ("crossbow", "UI_ItemIcons_Large", "Crossbow_Large"),
     ("sword", "UI_ItemIcons_Large", "CorvoSword_Large"),
+    ("possession", "UI_Powers_Large", "PossessionBig"),
+    ("bendtime", "UI_Powers_Large", "BendTimeBig"),
+    ("swarm", "UI_Powers_Large", "RatSwarmBig"),
+    ("grenade", "UI_ItemIcons_Large", "CorvoGrenade_Large"),
+    ("sticky", "UI_ItemIcons_Large", "CorvoStickyGrenade_Large"),
+    ("razor", "UI_ItemIcons_Large", "SpringRazor_Large"),
+    ("sleepdart", "UI_ItemIcons_Large", "CrossbowSleepDart_Large"),
+    ("flarebolt", "UI_ItemIcons_Large", "CrossbowFlareBolt_Large"),
 ];
 
 fn movie_raw(pkg: &ue3_package::Package, name: &str) -> Option<Vec<u8>> {
@@ -522,9 +530,15 @@ pub fn update_gfx_hud(
         LeftHand::Pistol => Some("pistol"),
         LeftHand::Crossbow => Some("crossbow"),
         LeftHand::Empty => Some("sword"),
-        LeftHand::SleepDart | LeftHand::IncendiaryBolt => Some("crossbow"),
-        // Icons for these are not loaded yet (owned by the HUD work).
-        LeftHand::Possession | LeftHand::BendTime | LeftHand::DevouringSwarm | LeftHand::Grenade | LeftHand::StickyGrenade | LeftHand::SpringRazor => None,
+        // The crossbow's ammo types show their bolt (UI_ItemIcons_Large, as the inventory).
+        LeftHand::SleepDart => Some("sleepdart"),
+        LeftHand::IncendiaryBolt => Some("flarebolt"),
+        LeftHand::Possession => Some("possession"),
+        LeftHand::BendTime => Some("bendtime"),
+        LeftHand::DevouringSwarm => Some("swarm"),
+        LeftHand::Grenade => Some("grenade"),
+        LeftHand::StickyGrenade => Some("sticky"),
+        LeftHand::SpringRazor => Some("razor"),
     };
     for (ei, mut node, mut img, mut vis) in &mut icon {
         match key.and_then(|k| hud.icons.get(k)).filter(|_| alive) {
