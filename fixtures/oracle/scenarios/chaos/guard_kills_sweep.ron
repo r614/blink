@@ -2,13 +2,18 @@
 // NumKills, m_Threshold 4, m_Value 6, victim Pwn_Guard_Base) counts guard kills and adds 6 on
 // every fourth, resetting its counter (0x00C4D2C0, no carry). The port's scenario guards are
 // mission NPCs whose victim tweak is their role's base tweak (Pwn_Guard_Base).
+//
+// Round 8 (original capture): the player must start with the sword in hand (sword_drawn: true). A fresh
+// level leaves the right hand empty, so the first press only draws the sword and the first capture held
+// the later kills only (the first real kill came after the tick-200 teleport). The console teleports
+// are now applied on the original as an engine SetLocation at their tick boundary (capture round 8).
 (
     name: "chaos/guard_kills_sweep",
     system: Chaos,
     map: "Playground",
     description: "Assassinate four guards from behind: the score stays 0 for three kills and becomes 6 on the fourth.",
     setup: (
-        player: Some((position: (-5300, 0, 96), yaw: 180, pitch: 0)),
+        player: Some((position: (-5300, 0, 96), yaw: 180, pitch: 0, sword_drawn: true)),
         npcs: [
             (id: Some("g1"), position: Some((-5420, 0, 92)), yaw: 180, state: Some("Passive")),
             (id: Some("g2"), position: Some((-5420, 800, 92)), yaw: 180, state: Some("Passive")),

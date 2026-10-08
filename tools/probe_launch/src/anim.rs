@@ -69,7 +69,7 @@ impl Session {
         if self.r.field(&mut self.c, cls, "SpaceBases", false)?.is_some() {
             return Ok(obj);
         }
-        for f in ["Mesh", "SkeletalMeshComponent", "SkelMesh", "SkeletalMesh"] {
+        for f in ["Mesh", "SkeletalMeshComponent", "m_pSkeletalMeshCpnt", "SkelMesh", "SkeletalMesh"] {
             if let Ok(pl) = self.r.place(&mut self.c, obj, f) {
                 let v = self.c.read_u32(pl.addr)?;
                 if v != 0 && self.r.class_of(&mut self.c, v).and_then(|c| self.r.field(&mut self.c, c, "SpaceBases", false)).ok().flatten().is_some() {
@@ -101,7 +101,18 @@ impl Session {
         }
         let mut nodes = Vec::new();
         let tree = self.c.read_u32(comp + ANIMATIONS)?;
-        if tree != 0 {
+        // A prop that plays one sequence directly (`Animations` is an `AnimNodeSequence`, no
+        // tree: the pendulum clock, krusts): that node is the whole state.
+        let tree_cls = if tree != 0 { Some(self.r.class_of(&mut self.c, tree)?) } else { None };
+        let direct = match tree_cls {
+            Some(c) => self.r.field(&mut self.c, c, "AnimSeqName", false)?.is_some(),
+            None => false,
+        };
+        if direct {
+            let nm = self.r.place(&mut self.c, tree, "NodeName").and_then(|pl| self.r.read_place(&mut self.c, &pl)).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+            let class = self.c.name_of(tree).unwrap_or_default().split(' ').next().unwrap_or("").to_string();
+            nodes.push(Node { addr: tree, name: if nm == "None" { String::new() } else { nm }, class, seq: true, blend: None });
+        } else if tree != 0 {
             let a = self.c.read(tree + TICK_ARRAY, 8)?;
             let (data, n) = (u32_at(&a, 0), u32_at(&a, 4).min(2048));
             let list = if n > 0 { self.c.read(data, n * 4)? } else { Vec::new() };

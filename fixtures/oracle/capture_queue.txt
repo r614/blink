@@ -427,43 +427,58 @@ stealth/light_probe_lane
 # F4/F5 vision from the head (stealth.md section 12): during stealth/detect_600 (and with the guard idle and no player for 2 s first), per tick: the party guard's camera_jnt world location and its X axis (session call object=<guard mesh> function=GetBoneLocation args={"BoneName":"camera_jnt","Space":0} and GetBoneQuaternion or the bone matrix), the pawn Location and Rotation, PlayerAttnInfo m_fLastLOSDistance, and the ArkAnimNodeLookAt's m_Cursor.m_CurrentValue / m_TargetValue (the head look-at aim).
 stealth/detect_600
 
-# --- NPC, world and map animation parity (research/dishonored/ANIMATION.md section 13, 2026-10-08) ---
-# NEW HOOK OP (to add to probe_launch session.rs): session bones scenario=<scenario name> object=<npc id or actor> ticks=N [every=1]
-#   Runs the scenario's setup like a queue line, then for N ticks (one line every `every` ticks) records, for the object's
-#   SkeletalMeshComponent (a scenario npc id -> that pawn's Mesh; a level actor "<package>:<actor>" -> its
-#   SkeletalMeshComponent, else its CollisionComponent when that is skeletal):
-#   - tick, the owner's Location and Rotation, the component's LocalToWorld;
-#   - every bone of SpaceBases (component space: the mesh's own space, before LocalToWorld): rotation quaternion
-#     (x, y, z, w) and translation, with SkeletalMesh.RefSkeleton[i].Name read once;
-#   - NPC_Human_at state: per DisAnimNodeSlot (FullBodySlot, UpperBodySlot, AdditiveReactSlot, FaceSlot, MatineeStackNode
-#     channels) the playing child's AnimSeq name, CurrentTime, Rate and child weights; the LocoBlender (ArkAnimNodeLocomotion)
-#     m_SmoothedAngle +0x200, m_fSmoothedSpeed +0x204, m_fSmoothedSpeedWithBlend +0x208, m_fOutOfShapeRatio +0x20C,
-#     m_fMostRelevantRateScale +0x21C, its two modifier slots and the sync group's position; the LookatBlender
-#     (ArkAnimNodeLookAt) blended aim +0x1C0 and the look-at component's cursor (m_Cursor current / target);
-#     the pawn's m_WalkUpperBodyDesire (+0xDB0..+0xDB8) and its master state class (StateNPCMaster*).
-#   Output: one JSON line per tick with the same fields as the port's DISH_ANIM_DUMP=<pawn id>:<file> lines
-#   (dishonored_runtime characters::dump_bones: tick, id, pos, yaw, modifier, vel, phase, full, upper, ragdoll, bones[name, q, t]),
-#   so `oracle` can diff bone by bone (rotation angle and translation per bone per tick, after aligning the tick of the
-#   scenario's first input).
+# --- NPC, world and map animation parity (research/dishonored/ANIMATION.md section 13, 2026-10-08; round 8) ---
+# The specs below carry Bones(<subject>, ["+world"]) and AnimState(<subject>) records (ORACLE.md "Skeletal animation"): capturing the
+# scenario writes the sidecar anim-<spec hash>.json (every bone in component and world space per tick, every AnimTree node's weight /
+# sequence / time / rate, the blend children) next to the trace in the oracle cache. A world object that is not a scenario NPC uses
+# session anim object=X ticks=N bones=all world=true.
 # Locomotion: the Boyle patrol guard walking its route (sync-group rate, direction blend, no foot sliding).
-session bones scenario=ai/boyle_patrol_speed object=guard ticks=600
-# Idle, blink, ambient idle, look-at: the party guard idle, then turning its head to the player (HeadTrack).
-session bones scenario=stealth/detect_600 object=guard ticks=130
-# Combat chains: AttackShort / Medium / Long, Parry_AwaitingImpact, hit reacts on the guard.
-session bones scenario=combat/guard_attack object=guard ticks=900
-# Thrown, ragdoll, rest and get-up (PushToRagdoll Windblast step, DishonoredNotify_Ragdoll, Stun group 1: RagdollToFront, Stun_Loop, RecoveryA|B).
-session bones scenario=physics/windblast_throw_d600 object=guard ticks=600
+ai/boyle_patrol_speed
+# Idle, blink, ambient idle, look-at: the party guard idle, then turning its head to the player (HeadTrack). F4 / F5 (stealth.md section 12):
+# the same record carries camera_jnt's world transform per tick (its X axis is the vision axis) next to npc.guard.los, so the outer-cone
+# first sighting, the head turn and the inner cone can be read from one trace.
+stealth/detect_600
+# Combat chains: AttackShort / Medium / Long, Parry_AwaitingImpact, hit reacts on the guard (now on Boyle's navmesh: the guard walks and strafes).
+combat/guard_attack
+# Thrown, ragdoll, rest and get-up (PushToRagdoll Windblast step, DishonoredNotify_Ragdoll, Stun group 1: RagdollToFront, Stun_Loop, RecoveryA|B), 600 ticks.
+physics/windblast_throw_d600
 # Special classes: the Tallboy's bow aim states (sub-states 1/2 in, 4 aim, 0 shoot, 3 out) and stomp; the Overseer's music box
 # walk upper body (MusicBoxIdle), combat tune (PlayCombatTune in / loop / out) and PlayMusic after it; the weeper's grab and cough.
-session bones scenario=ai/boyle_tallboy_bow object=tallboy ticks=900
-session bones scenario=ai/boyle_overseer_tune object=overseer ticks=600
-session bones scenario=ai/boyle_weeper_plague object=weeper ticks=900
-# Matinee: Samuel and his boat during the Boyle intro (character and prop tracks, timing); bones every 2 ticks.
-session bones scenario=kismet/boyle_intro_20s object=Samuel ticks=1200 every=2
+ai/boyle_tallboy_bow
+ai/boyle_overseer_tune
+ai/boyle_weeper_plague
+# Matinee: Samuel (DishonoredSpawner_15's pawn, skm_Samuel_Body) during the Boyle intro, 1200 ticks.
+kismet/boyle_intro_20s
 # World props: the Boyle Int pendulum clock (SkeletalMeshActor looping Clock_TickAnim) and a Flooded river krust's ambient
 # loop (ClamUp_Idle; its Rate and start time are rolled per instance: record both so the port's roll can be compared).
 session open map=L_Boyle_Int_P
-session bones object=L_Boyle_Int_Env:SkeletalMeshActor_1 ticks=120
+session anim object=L_Boyle_Int_Env.TheWorld.PersistentLevel.SkeletalMeshActor_1 ticks=240 bones=all world=true out=harness_out/oracle/anim/boyle_int_clock.json
 session open map=L_Flooded_FRefinery_P
-session bones object=L_Flooded_FRefinery_Script:DisRiverKrust_0 ticks=120
-session read object=L_Flooded_FRefinery_Script:DisRiverKrust_0 path=m_pSkeletalMeshCpnt
+session anim object=L_Flooded_FRefinery_Script.TheWorld.PersistentLevel.DisRiverKrust_0 ticks=240 bones=all world=true out=harness_out/oracle/anim/flooded_refinery_krust_0.json
+session read object=L_Flooded_FRefinery_Script.TheWorld.PersistentLevel.DisRiverKrust_0 path=m_pSkeletalMeshCpnt
+# --- round 8: NPC-movement specs moved onto Boyle's navmesh (the original's Playground has none: NPCs there never move) and the kill scenarios ---
+ai/patrol
+ai/combat_cadence
+ai/investigate_noise
+ai/shot_in_view_of_neutral
+chaos/corpse_discovered
+combat/block
+combat/sword_hit_dummy
+combat/melee_guard_offscreen
+conversation/bark_group_arbitration
+# Two kills each: the sword must be in hand (sword_drawn) or the first press only draws it; the console teleports are engine SetLocations.
+chaos/civilian_kills
+chaos/guard_kills_sweep
+# Melee specs that press the sword: now sword_drawn (the earlier captures never swung: a fresh level has no sword in hand).
+combat/melee_assassinate_back_d120
+combat/melee_assassinate_back_d220
+combat/melee_assassinate_back_d300
+combat/melee_assassinate_front
+combat/melee_drop_assassinate_h250
+combat/melee_drop_assassinate_h450
+combat/melee_lateral_60
+combat/melee_lateral_90
+combat/melee_reach_d160
+combat/melee_reach_d230
+combat/melee_reach_d260
+combat/melee_reach_d300

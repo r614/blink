@@ -439,6 +439,7 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
                 ps.want_filter = filter;
                 ps.want_draws = draws;
                 ps.got.clear();
+                ps.got_tex.clear();
             }
             let t0 = std::time::Instant::now();
             loop {
@@ -448,6 +449,7 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
                 if ps.want_draws == 0 || t0.elapsed().as_secs() >= 5 {
                     ps.want_draws = 0;
                     let got = std::mem::take(&mut ps.got);
+                    let got_tex = std::mem::take(&mut ps.got_tex);
                     put_u32(&mut out, got.len() as u32);
                     for (frame, hash, regs) in got {
                         put_u32(&mut out, frame);
@@ -456,6 +458,16 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
                             for v in r {
                                 out.extend(v.to_le_bytes());
                             }
+                        }
+                    }
+                    // After the draws: the textures bound at each (a new client reads them).
+                    for tx in got_tex {
+                        put_u32(&mut out, tx.len() as u32);
+                        for t in tx {
+                            for v in [t.stage, t.ptr, t.ty, t.format, t.usage, t.pool, t.width, t.height, t.levels] {
+                                put_u32(&mut out, v);
+                            }
+                            out.extend(t.hash.to_le_bytes());
                         }
                     }
                     break;
@@ -721,6 +733,13 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
                             return Err("PlayerController.ConsoleCommand not found".into());
                         }
                         Act::Console(console, io(rd.str())?)
+                    }
+                    3 => {
+                        let func = io(rd.u32())?;
+                        let this = io(rd.u32())?;
+                        let n = io(rd.u8())? as usize;
+                        let args = (0..n).map(|_| io(rd.u32())).collect::<Result<Vec<u32>, String>>()?;
+                        Act::Native(func, this, args)
                     }
                     k => return Err(format!("unknown script action {k}")),
                 };

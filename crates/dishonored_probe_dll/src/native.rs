@@ -42,38 +42,41 @@ pub fn native_call(func: u32, this: u32, args: Vec<u32>, ret_float: bool) -> Res
     if func < 0x401000 {
         return Err(format!("bad function address {func:#x}"));
     }
-    hook::on_game_thread(
-        move || unsafe {
-            let page = VirtualAlloc(std::ptr::null(), 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE) as u32;
-            if page == 0 {
-                return Err("VirtualAlloc failed".to_string());
-            }
-            // The float result slot sits at the end of the page.
-            let slot = page + 4092;
-            let mut c: Vec<u8> = vec![0x55, 0x89, 0xe5]; // push ebp; mov ebp, esp
-            for a in args.iter().rev() {
-                c.push(0x68);
-                c.extend(a.to_le_bytes());
-            }
-            c.push(0xb9);
-            c.extend(this.to_le_bytes()); // mov ecx, this
-            c.push(0xb8);
-            c.extend(func.to_le_bytes()); // mov eax, func
-            c.extend([0xff, 0xd0]); // call eax
-            if ret_float {
-                c.extend([0xd9, 0x1d]);
-                c.extend(slot.to_le_bytes()); // fstp dword [slot]
-            }
-            c.extend([0x89, 0xec, 0x5d, 0xc3]); // mov esp, ebp; pop ebp; ret
-            std::ptr::copy_nonoverlapping(c.as_ptr(), page as *mut u8, c.len());
-            let f: extern "C" fn() -> u32 = std::mem::transmute(page as usize);
-            let eax = f();
-            let st0 = *(slot as *const f32);
-            // The page is leaked on purpose (a few calls per session).
-            Ok(CallResult { eax, st0 })
-        },
-        10_000,
-    )?
+    hook::on_game_thread(move || unsafe { call_now(func, this, &args, ret_float) }, 10_000)?
+}
+
+/// `native_call` on the calling thread (which must be the game thread: tick-script actions run
+/// there at the tick boundary).
+pub unsafe fn call_now(func: u32, this: u32, args: &[u32], ret_float: bool) -> Result<CallResult, String> {
+    unsafe {
+        let page = VirtualAlloc(std::ptr::null(), 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE) as u32;
+        if page == 0 {
+            return Err("VirtualAlloc failed".to_string());
+        }
+        // The float result slot sits at the end of the page.
+        let slot = page + 4092;
+        let mut c: Vec<u8> = vec![0x55, 0x89, 0xe5]; // push ebp; mov ebp, esp
+        for a in args.iter().rev() {
+            c.push(0x68);
+            c.extend(a.to_le_bytes());
+        }
+        c.push(0xb9);
+        c.extend(this.to_le_bytes()); // mov ecx, this
+        c.push(0xb8);
+        c.extend(func.to_le_bytes()); // mov eax, func
+        c.extend([0xff, 0xd0]); // call eax
+        if ret_float {
+            c.extend([0xd9, 0x1d]);
+            c.extend(slot.to_le_bytes()); // fstp dword [slot]
+        }
+        c.extend([0x89, 0xec, 0x5d, 0xc3]); // mov esp, ebp; pop ebp; ret
+        std::ptr::copy_nonoverlapping(c.as_ptr(), page as *mut u8, c.len());
+        let f: extern "C" fn() -> u32 = std::mem::transmute(page as usize);
+        let eax = f();
+        let st0 = *(slot as *const f32);
+        // The page is leaked on purpose (a few calls per session).
+        Ok(CallResult { eax, st0 })
+    }
 }
 
 /// Where a logged memory read starts: a stack argument, `ecx` or a fixed address.

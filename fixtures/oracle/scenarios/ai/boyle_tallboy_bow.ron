@@ -25,6 +25,6 @@
         (name: "arrows in 15 s", expect: [(metric: Count("Projectile:TallboyArrow@tallboy"), value: 0, tol: 0, source: "the original's DisProjectile_Arrow_Explosive count", status: Unmeasured)]),
         (name: "damage taken", expect: [(metric: DropFrom("pawn.health", 0), value: 0, tol: 0, source: "explosions 40 within 100 uu of the player, 0 at 500 (TallboyArrowExplosion_Twk); the original's total", status: Unmeasured)]),
     ],
-    record: [Pawn, Vitals, Npc("tallboy"), SimEvents],
+    record: [Pawn, Vitals, Npc("tallboy"), SimEvents, Bones("tallboy", ["+world"]), AnimState("tallboy")],
     capture: Some("scenario boyle_tallboy_bow: spawn Twk_Pawn_Tallboy.Pwn_Tallboy_Wood at the spawner 38 point, alert it on the player; record DisProjectile_Arrow_Explosive spawns, the Tallboy's position and current behaviour, the player's health per tick"),
 )
