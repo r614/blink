@@ -834,6 +834,22 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     }
     for st in &spec.input {
         if let Action::Console(c) = &st.action {
+            // `teleport x y z [yaw]` is the port's console hook; the original has no such command:
+            // the player is moved through the engine (`Actor.SetLocation`, as every placement is)
+            // at that tick boundary, in layout coordinates plus the host offset.
+            let w: Vec<&str> = c.split_whitespace().collect();
+            if w.first().is_some_and(|x| x.eq_ignore_ascii_case("teleport")) && w.len() >= 4 {
+                let n: Vec<f32> = w[1..].iter().map(|x| x.parse::<f32>().context("teleport x y z [yaw]")).collect::<Result<_>>()?;
+                let o = off.to_array();
+                let loc = [n[0] + o[0], n[1] + o[1], n[2] + o[2]];
+                let pawn_addr = crate::lab::pawn(&mut s.c)?;
+                let (thunk, args) = s.r.prepare_native(&mut s.c, pawn_addr, "Actor.SetLocation", &serde_json::json!([loc]))?;
+                actions.push((st.tick, ScriptAction::Native(thunk, pawn_addr, args)));
+                if let Some(yw) = n.get(3) {
+                    actions.push((st.tick, ScriptAction::Write(pc + 0xd4, rot(*yw).to_le_bytes().to_vec())));
+                }
+                continue;
+            }
             actions.push((st.tick, ScriptAction::Console(c.clone())));
         }
     }

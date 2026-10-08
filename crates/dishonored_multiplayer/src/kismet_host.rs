@@ -29,6 +29,9 @@ use super::{Interaction, MissionMatch};
 /// [interp] Matinees played on the server (gameplay side of cutscenes).
 #[path = "kismet_host/cutscene.rs"]
 pub mod cutscene;
+/// The Kismet screen grades (`DisSeqAct_UberPostProcess`, `DisSeqAct_PostProcess`).
+#[path = "kismet_host/post.rs"]
+pub mod post;
 use dishonored_ai::BrainState;
 use dishonored_kismet::host::Matinee;
 use dishonored_kismet::runtime::Ctx;
@@ -232,6 +235,11 @@ pub struct HostState {
     pub ambient: BTreeMap<u32, bool>,
     /// Actors hidden by `SeqAct_ToggleHidden`.
     pub hidden: BTreeSet<u32>,
+    /// `SeqAct_Toggle` on scene capture actors (`SceneCaptureActor.OnToggle` sets the component's
+    /// `bEnabled`: input 0 on, 1 off, 2 flips it): actor -> (last explicit On / Off, whether an odd
+    /// number of Toggles followed it). The level's own `bEnabled` is the renderer's.
+    #[serde(default)]
+    pub capture_toggles: BTreeMap<u32, (Option<bool>, bool)>,
     /// `NPCMarkForVanish` in progress: op -> (pawns, seconds left).
     vanish: BTreeMap<OpId, Vec<(PlayerId, f32)>>,
     /// [interp] Matinees playing with their bound groups.
@@ -322,6 +330,12 @@ pub struct HostState {
     /// [streaming] Sublevels unloaded since they were last in the world (they come back fresh).
     #[serde(default)]
     pub unloaded: BTreeSet<String>,
+    /// The post manager's Kismet slot (`DisSeqAct_UberPostProcess`, `post.rs`).
+    #[serde(default)]
+    pub post: post::KismetPost,
+    /// `DisSeqAct_PostProcess`: the `eEffectPp` names the Kismet requires.
+    #[serde(default)]
+    pub post_effects: BTreeSet<String>,
 }
 
 /// A player's cinematic mode (`PlayerController.SetCinematicMode` 0x00 script, then
@@ -864,9 +878,19 @@ impl Host for H<'_> {
         }
     }
 
-    fn toggle_actors(&mut self, _cx: &mut Ctx, targets: &[Obj], mode: u8) {
+    fn toggle_actors(&mut self, cx: &mut Ctx, targets: &[Obj], mode: u8) {
         for t in targets {
             let Obj::Actor(a) = t else { continue };
+            // [render] `SceneCaptureActor.OnToggle`: the capture component's `bEnabled` (reflect.rs).
+            if cx.k.db.actors.get(*a as usize).is_some_and(|x| x.class.starts_with("SceneCapture")) {
+                let e = self.st.capture_toggles.entry(*a).or_insert((None, false));
+                match mode {
+                    0 => *e = (Some(true), false),
+                    1 => *e = (Some(false), false),
+                    _ => e.1 = !e.1,
+                }
+                continue;
+            }
             // [distraction] `DisNPCDistractor.OnToggle` (0x00a4c350): the component's
             // `m_bDistractionEnabled`.
             if let Some(i) = self.distractor_of(t) {
@@ -908,6 +932,14 @@ impl Host for H<'_> {
             return HostResult::Done;
         }
         match class.as_str() {
+            "DisSeqAct_UberPostProcess" => {
+                post::uber(self, cx);
+                HostResult::Done
+            }
+            "DisSeqAct_PostProcess" => {
+                post::effect(self, cx);
+                HostResult::Done
+            }
             // `DisSeqAct_PlayerTrackTarget::Activated` (0x00b8f9c0): Start with a target asks the
             // player camera to track it (0x00aaf4c0: flags 0xC3, 0xC7 with
             // `m_bHoldUntilStopped`; the target's skeletal mesh and `m_TrackedBone` /
@@ -2647,6 +2679,7 @@ pub fn step(m: &mut MissionMatch, sim_events: &[SimEvent], dt: f32, cfg: &SimCon
             let world = dishonored_sim::powers::world_time_scale(&h.m.world, &h.cfg.gameplay, false);
             let ratio = if player != 0.0 { world / player } else { 1.0 };
             k.tick_dilated(&mut h, dt * player, ratio);
+            h.st.post.step(dt * player); // FUN_00bef9b0, the post manager's Kismet slot
             cutscene::apply(k, &mut h); // [interp]
             apply_streaming(k, &mut h); // [streaming]
             h.drain_spawns(k);
@@ -3178,6 +3211,12 @@ pub fn view(m: &MissionMatch, mv: &mut dishonored_mission::runtime::MissionView)
             mv.ambient.push((format!("{}:{}", a.package, a.name), on));
         }
     }
+    // Scene capture actors toggled by Kismet (`SceneCaptureActor.OnToggle`).
+    for (&i, &(set, flipped)) in &run.st.capture_toggles {
+        if let Some(a) = run.k.db.actors.get(i as usize) {
+            mv.captures.push((format!("{}:{}", a.package, a.name), set, flipped));
+        }
+    }
     for (_, p, prompt) in usables(m) {
         mv.usables.push(((p + Vec3::Z * 20.0).to_array(), prompt));
     }
@@ -3221,6 +3260,8 @@ pub fn view(m: &MissionMatch, mv: &mut dishonored_mission::runtime::MissionView)
         mv.target = target;
     }
     mv.cutscenes = cutscene::view(run); // [interp]
+    mv.post_fx = run.st.post.view();
+    mv.post_effects = run.st.post_effects.iter().cloned().collect();
     let db = &run.k.db;
     let on_map = |a: u32| {
         let Some(map) = run.st.map.as_deref() else { return true };

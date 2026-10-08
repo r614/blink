@@ -16,6 +16,9 @@ pub enum Act {
     Write(u32, Vec<u8>),
     /// `PlayerController.ConsoleCommand` function, command.
     Console(u32, String),
+    /// A native call at the boundary: function address, `this` (ecx), stack arguments. Used with
+    /// a client-built `FFrame` (a native `UFunction`'s exec thunk), e.g. `Actor.SetLocation`.
+    Native(u32, u32, Vec<u32>),
 }
 
 pub struct Script {
@@ -66,6 +69,13 @@ fn act(s: &mut Script, k: u32) {
                     Ok(())
                 } else {
                     Err(format!("unwritable {a:#x}"))
+                }
+            }
+            Act::Native(func, this, args) => {
+                if *func < 0x401000 {
+                    Err(format!("bad function address {func:#x}"))
+                } else {
+                    unsafe { crate::native::call_now(*func, *this, args, false) }.map(|_| ())
                 }
             }
             Act::Console(func, cmd) => {

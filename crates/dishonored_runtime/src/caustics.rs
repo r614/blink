@@ -7,7 +7,9 @@
 //! false) and the function material, rendered by `FLightFunctionPixelShader` (36479), multiplies the
 //! light's attenuation. The caustics function samples `T_Caustics_2` twice (`|texel|^0.4` each,
 //! multiplied, x `CausticColor`), the two samples' coordinates pushed by two scrolled samples of
-//! `T_EV_DustPanner_01`, and is greyscaled. The lights carry `LightingChannels` {Dynamic, Unnamed_6}:
+//! `T_EV_DustPanner_01`, and is greyscaled. It is the material's own pixel shader here, translated
+//! by `ue3_shader` (`ue3prog::build_fragment`) and appended to `caustic_light.wgsl`; it reads the
+//! scene depth from the depth prepass. The lights carry `LightingChannels` {Dynamic, Unnamed_6}:
 //! they light only the primitives that have the `Unnamed_6` channel (the canal-side facades), not the
 //! whole map as the plain Bevy lights the importer produced before did.
 //!
@@ -18,21 +20,111 @@
 //! albedo and the normal map are the section's own (`ExtendedMaterial` over its `StandardMaterial`),
 //! so the pass costs one extra draw per reached section and no per-frame CPU work.
 //!
-//! LIKELY (not traced in the engine): the function's coordinates. The shader takes them from
-//! `ScreenToLight` x scene position with a perspective divide; here the light-function space is the
-//! plane of the light's Y and Z axes (its X axis is the cone axis) at `LightFunction::Scale` uu per
-//! repeat, orthographic: `Default__LightFunction.Scale` (1024) and the authored 600 only mean
-//! something for a world-space projection.
+//! LIKELY (not traced in the engine): the `ScreenToLight` matrix the engine passes. The shader reads
+//! columns x, y and w of (x w, y w, w, 1) x `ScreenToLight` (c6..c9), then divides by w; here the matrix
+//! is built in the fragment so that this is the scene point's offset from the light along the light's
+//! Y and Z axes (its X axis is the cone axis) over `LightFunction::Scale` uu per repeat, with w = 1
+//! (an affine light transform): `Default__LightFunction.Scale` (1024) and the authored 600 only mean
+//! something for such a world-space projection. Which two light axes the function's xy are, and the
+//! `GreyscaleFactor` (1 here), are not traced.
 
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, DepthBiasState, ShaderType};
 use dishonored_ir::{DishonoredMap, LightFunction, LightKind, MeshInstance, lighting_channel};
+use std::sync::OnceLock;
+use ue3_shader::shadercache::Expr;
+use ue3_shader::ue3prog;
 
 use crate::coords;
 use crate::map_render::{RenderFeatures, light_unit};
 
 /// Lights per receiver (the nearest are kept).
 const MAX_LIGHTS: usize = 4;
+
+/// The light function material (`Vfx_Materials.main_materials.Casutics_LightFunction_PMAT`), by the
+/// friendly name of its shader map.
+const FUNCTION_MATERIAL: &str = "casutics_lightfunction";
+
+/// The module's parameter slots (`caustic_light.wgsl`'s `UeMaterial`): one per parameter occurrence in the\n/// shader map's uniform expressions, as `Ue3Material::params`.
+const FUNCTION_SLOTS: usize = ue3prog::MAX_PARAMS;
+
+/// The assembled module's shader (installed by [`apply_pending_caustics`]).
+const CAUSTIC_SHADER: Handle<Shader> = bevy::asset::uuid_handle!("6d1f0b0a-5e1c-4a57-9f0e-3c2b7a8e41d2");
+
+/// The function material's parameter values, in its shader map's slot order.
+#[derive(Clone, Copy, Debug, PartialEq, ShaderType)]
+pub struct FunctionParams {
+    pub p: [Vec4; FUNCTION_SLOTS],
+}
+
+impl Default for FunctionParams {
+    fn default() -> Self {
+        FunctionParams { p: [Vec4::ZERO; FUNCTION_SLOTS] }
+    }
+}
+
+/// `caustic_light.wgsl` with the function material's translated pixel shader appended.
+struct Module {
+    wgsl: String,
+    /// The shader map's parameter nodes: (name, is a vector parameter).
+    slots: Vec<(String, bool)>,
+}
+
+impl Module {
+    fn params(&self, speed: f32, color: [f32; 3]) -> FunctionParams {
+        let mut out = FunctionParams::default();
+        for (i, (name, vector)) in self.slots.iter().enumerate().take(FUNCTION_SLOTS) {
+            out.p[i] = match (name.as_str(), vector) {
+                ("Speed", _) => Vec4::splat(speed),
+                ("CausticColor", true) => Vec4::new(color[0], color[1], color[2], 1.0),
+                _ => Vec4::ZERO,
+            };
+        }
+        out
+    }
+}
+
+/// The module, built once (None: no shader library, or the shader does not translate).
+fn module() -> Option<&'static Module> {
+    static MODULE: OnceLock<Option<Module>> = OnceLock::new();
+    MODULE.get_or_init(build_module).as_ref()
+}
+
+fn build_module() -> Option<Module> {
+    let lib = crate::ue3mat::library()?;
+    let map = lib.maps.iter().find(|m| m.name.to_ascii_lowercase().contains(FUNCTION_MATERIAL))?;
+    let ps = lib.code.get(&map.shader("FLocalVertexFactory", "FLightFunctionPixelShader")?)?;
+    let nodes = ue3_shader::shadercache::param_nodes(map);
+    if nodes.len() > FUNCTION_SLOTS {
+        warn!("caustics: {} has {} parameters (at most {FUNCTION_SLOTS})", map.name, nodes.len());
+        return None;
+    }
+    let frag = match ue3prog::build_fragment(map, ps) {
+        Ok(f) => f,
+        Err(e) => {
+            warn!("caustics: the light function shader does not translate: {e:#}");
+            return None;
+        }
+    };
+    if !frag.unknown.is_empty() {
+        warn!("caustics: unsupported constants {:?}", frag.unknown);
+    }
+    let slots = nodes
+        .iter()
+        .map(|e| match e {
+            Expr::VectorParameter(n, _) => (n.clone(), true),
+            Expr::ScalarParameter(n, _) => (n.clone(), false),
+            _ => (String::new(), false),
+        })
+        .collect();
+    let wgsl = format!("{}{}", include_str!("caustic_light.wgsl"), frag.wgsl);
+    if std::env::var("DH_UE3_DUMP").is_ok() {
+        let dir = dishonored_content::cache_dir().join("debug").join("programs");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("caustic_light.wgsl"), &wgsl);
+    }
+    Some(Module { wgsl, slots })
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, ShaderType)]
 pub struct CausticLightData {
@@ -69,14 +161,18 @@ pub struct CausticLight {
     pub noise: Option<Handle<Image>>,
     /// `Texture2D_1`: `T_Caustics_2`.
     #[texture(103)]
+    #[sampler(104)]
     pub caustic: Option<Handle<Image>>,
+    /// The function material's parameters (`Speed`, `CausticColor`).
+    #[uniform(105)]
+    pub function: FunctionParams,
 }
 
 pub type CausticMaterial = bevy::pbr::ExtendedMaterial<StandardMaterial, CausticLight>;
 
 impl bevy::pbr::MaterialExtension for CausticLight {
     fn fragment_shader() -> bevy::shader::ShaderRef {
-        "embedded://dishonored_runtime/caustic_light.wgsl".into()
+        bevy::shader::ShaderRef::Handle(CAUSTIC_SHADER)
     }
     fn alpha_mode() -> Option<AlphaMode> {
         Some(AlphaMode::Add)
@@ -139,7 +235,7 @@ pub fn is_caustic(l: &dishonored_ir::Light) -> bool {
 impl CausticLights {
     pub fn new(map: &DishonoredMap, features: &RenderFeatures) -> CausticLights {
         let mut out = CausticLights::default();
-        if !features.caustics || !features.dynamic_lights || !features.materials {
+        if !features.caustics || !features.dynamic_lights || !features.materials || module().is_none() {
             return out;
         }
         for l in map.lights.iter().filter(|l| is_caustic(l)) {
@@ -218,7 +314,8 @@ impl CausticLights {
         for (k, &i) in reach.iter().take(MAX_LIGHTS).enumerate() {
             params.lights[k] = self.lights[i].data;
         }
-        PendingCaustic(bevy::pbr::ExtendedMaterial { base, extension: CausticLight { params, noise: images.noise.clone(), caustic: images.caustic.clone() } })
+        let function = module().map(|m| m.params(first.speed, first.color)).unwrap_or_default();
+        PendingCaustic(bevy::pbr::ExtendedMaterial { base, extension: CausticLight { params, noise: images.noise.clone(), caustic: images.caustic.clone(), function } })
     }
 }
 
@@ -226,12 +323,27 @@ pub struct CausticsPlugin;
 
 impl Plugin for CausticsPlugin {
     fn build(&self, app: &mut App) {
-        bevy::asset::embedded_asset!(app, "caustic_light.wgsl");
         app.add_plugins(MaterialPlugin::<CausticMaterial>::default()).add_systems(Update, apply_pending_caustics);
     }
 }
 
-fn apply_pending_caustics(mut commands: Commands, q: Query<(Entity, &PendingCaustic)>, mut mats: ResMut<Assets<CausticMaterial>>) {
+fn apply_pending_caustics(
+    mut commands: Commands,
+    q: Query<(Entity, &PendingCaustic)>,
+    mut mats: ResMut<Assets<CausticMaterial>>,
+    mut shaders: ResMut<Assets<Shader>>,
+    mut installed: Local<bool>,
+) {
+    if q.is_empty() {
+        return;
+    }
+    // The module (the translated function shader behind `caustic_light.wgsl`), once.
+    if !*installed {
+        if let Some(m) = module() {
+            let _ = shaders.insert(CAUSTIC_SHADER.id(), Shader::from_wgsl(m.wgsl.clone(), "ue3/caustic_light.wgsl"));
+        }
+        *installed = true;
+    }
     for (e, p) in &q {
         let h = mats.add(p.0.clone());
         commands.entity(e).remove::<PendingCaustic>().insert(MeshMaterial3d(h));

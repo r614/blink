@@ -22,6 +22,6 @@
         (name: "first plague damage", expect: [(metric: FirstAt("Sim:Damage@player[cause=Plague]"), value: 0, tol: 0, source: "the original's first plague damage: the cough cooldown 2-5 s plus one 0.5 s period", status: Unmeasured)]),
         (name: "damage taken", expect: [(metric: DropFrom("pawn.health", 0), value: 0, tol: 0, source: "the original's total over 15 s", status: Unmeasured)]),
     ],
-    record: [Pawn, Vitals, Npc("weeper"), SimEvents],
+    record: [Pawn, Vitals, Npc("weeper"), SimEvents, Bones("weeper", ["+world"]), AnimState("weeper")],
     capture: Some("scenario boyle_weeper_plague: spawn Pwn_WeeperMiddle_MTall_1 at the spawner 28 point, alert it on the player; record its position and current behaviour and the player's health per tick"),
 )

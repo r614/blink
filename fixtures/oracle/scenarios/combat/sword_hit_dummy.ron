@@ -1,3 +1,7 @@
+// MOVED from the Playground to Boyle Ext (round 8): the original Playground has no navmesh, and the
+// alerted guard is a fighting pawn that steps, blocks and counter-attacks on a navmesh. Placement: the
+// quiet flat navmesh corridor x = -8958, y -8871 .. -6671 (floor z -1318), the same 140 uu geometry
+// rotated to the y axis (player yaw -90, dummy yaw 90, so the yaw checkpoint reads 90 not 0).
 // One sword attack on a guard 140 uu ahead (HOOK_TRIAGE.md 2026-10-06: a hit of 10 on
 // the guard's 50, `DisDamageType_FastHit_Right`, 0.300-0.350 s after the press). The hit is the sword's
 // Attribute_MeleeDamage 10 x m_fAttackDamageMultiplier 1.0 (0x00C07C80; melee.md F1), and guards have HealthMax 50.
@@ -8,17 +12,17 @@
 (
     name: "combat/sword_hit_dummy",
     system: Combat,
-    map: "Playground",
+    map: "L_Boyle_Ext_P",
     description: "Swing once at an alerted guard 140 uu ahead facing the player (no back assassination): timing, damage, blood, hit reaction, sounds.",
     setup: (
-        player: Some((position: (-5300, 0, 96), yaw: 180, pitch: -5, sword_drawn: true)),
-        npcs: [(id: Some("dummy"), position: Some((-5440, 0, 92)), yaw: 0, state: Some("Alerted"))],
+        player: Some((position: (-8958, -7800, -1222), yaw: -90, pitch: -5, sword_drawn: true, snap_to_floor: true)),
+        npcs: [(id: Some("dummy"), position: Some((-8958, -7940, -1218)), yaw: 90, state: Some("Alerted"))],
         settle: 30,
     ),
     ticks: 600,
     input: [(tick: 5, action: Press(Primary))],
     checkpoints: [
-        (name: "dummy keeps facing the player", expect: [(metric: At("npc.dummy.yaw", 5), value: 0, tol: 0.5, source: "a placed pawn keeps its spawn rotation without input", status: Static)]),
+        (name: "dummy keeps facing the player", expect: [(metric: At("npc.dummy.yaw", 5), value: 90, tol: 0.5, source: "a placed pawn keeps its spawn rotation without input (yaw 90: the 140 uu geometry rotated from x to y on Boyle)", status: Static)]),
         (name: "timing", expect: [(metric: Between("Sim:SwordSwing", "Sim:Damage@dummy"), value: 0.325, tol: 0.026, source: "HOOK_TRIAGE.md 2026-10-06: press -> damage 0.300-0.350 s (U-590)")]),
         (name: "damage", expect: [(metric: EventValue("Sim:Damage@dummy", "amount"), value: 10, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: 10 of 50 per hit (the sword's Attribute_MeleeDamage 10)")]),
         (name: "blood", expect: [

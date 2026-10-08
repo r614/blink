@@ -280,6 +280,10 @@ pub fn apply_camera(
             if (ark.display_gamma - g).abs() > 1e-4 {
                 ark.display_gamma = g;
             }
+            // `PSI_GraphicsPC_LightShaftEnable`.
+            if ark.shafts_on != settings.s.graphics.light_shafts {
+                ark.shafts_on = settings.s.graphics.light_shafts;
+            }
         } else if (cg.midtones.gamma - n).abs() > 1e-4 {
             cg.shadows.gamma = n;
             cg.midtones.gamma = n;

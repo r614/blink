@@ -1,19 +1,24 @@
 // The caustic spot lights' contribution (caustics.rs): the original's light pass for a spot light with
-// the `Casutics_LightFunction_PMAT` function (RefShaderCache pixel shader 36479), on a static mesh
-// section the light reaches, added to the frame.
+// the `Casutics_LightFunction_PMAT` function, on a static mesh section the light reaches, added to the
+// frame. The module is this file followed by the function material's pixel shader (RefShaderCache
+// 36479, `FLightFunctionPixelShader`) translated by `ue3_shader` (`ue3prog::build_fragment`:
+// `ue_ps_call`), assembled in caustics.rs.
 //
 //   light  = LightColor x Brightness x atten x cone x f x (albedo x saturate(N.L) + spec)
 //   atten  = max(1 - d^2 / R^2, 0)^FalloffExponent (0 below 1e-6)
 //   cone   = saturate((cos a - cos outer) / (cos inner - cos outer))^2
 //   spec   = S x saturate(R.L)^SP x (SP + 8) / (8 pi), S = 2 sqrt(F0 / 0.16), SP from the roughness
 //            (the same light-pass terms as `lighting::ue3_light`)
+//   f      = the function shader's grey value
 //
-// The function f (36479), with t = Time x Speed and (u, v) the light-function coordinates:
-//   n  = Tex0(2 (u, v) + frac(t (0.75, -0.005))).x + Tex0(2 (u, v) + frac(t (0, 0.75))).x
-//   cA = |Tex1((u, v) (-1.5, 1.5) + frac(t (0.05, 0.25)) + 0.12 n)|^0.4
-//   cB = |Tex1(1.35 (u, v) + frac(t (-0.25, -0.05)) + 0.12 n)|^0.4
-//   f  = dot(cA x cB x CausticColor.rgb x CausticColor.w, 0.333)     (greyscaled)
-// LIKELY: (u, v) = the offset from the light along the light's Y and Z axes / Scale (orthographic).
+// The function shader is a screen-space pass: it reads the scene depth (`SceneColorTexture` alpha,
+// uu / 256; here the depth prepass), rebuilds (x w, y w, w, 1) from the pixel and multiplies it by
+// `ScreenToLight` (c6..c9, rows; the shader uses the columns x, y and w). The engine's matrix is
+// the light function's world-to-light transform, scaled by the function's `Scale`; here its rows
+// are the images of the camera's pixel basis, so the product is the scene point's offset from the
+// light along the light's Y and Z axes over `Scale`, with w = 1 (LIKELY: which light axes the
+// function's xy are, see caustics.rs). `GreyscaleFactor` is 1 (LIKELY: the pass's result is the
+// light's attenuation, a grey value).
 
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
@@ -22,6 +27,8 @@
     pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT,
     mesh_view_bindings as view_bindings,
     lighting,
+    prepass_utils,
+    view_transformations,
 }
 
 struct CausticLightData {
@@ -39,25 +46,56 @@ struct Caustics {
     lights: array<CausticLightData, 4>,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> caustics: Caustics;
-@group(#{MATERIAL_BIND_GROUP}) @binding(101) var caustic_noise: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(102) var caustic_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(103) var caustic_tex: texture_2d<f32>;
+// The function material's parameter slots (`param_nodes` order: Speed, CausticColor).
+struct UeMaterial { p: array<vec4<f32>, 64> };
 
-// The material function at light-function coordinates `uv` (grey).
-fn caustic_function(uv: vec2<f32>) -> f32 {
-    let t = view_bindings::globals.time * caustics.head.y;
-    let c10 = fract(vec2<f32>(0.05, 0.25) * t);
-    let c11 = fract(vec2<f32>(0.75, -0.005) * t);
-    let c12 = fract(vec2<f32>(0.0, 0.75) * t);
-    let c13 = fract(vec2<f32>(-0.25, -0.05) * t);
-    let n = textureSample(caustic_noise, caustic_sampler, uv * 2.0 + c11).x + textureSample(caustic_noise, caustic_sampler, uv * 2.0 + c12).x;
-    let a = textureSample(caustic_tex, caustic_sampler, uv * vec2<f32>(-1.5, 1.5) + c10 + vec2<f32>(0.12 * n)).rgb;
-    let b = textureSample(caustic_tex, caustic_sampler, uv * 1.35 + c13 + vec2<f32>(0.12 * n)).rgb;
-    let pa = pow(max(abs(a), vec3<f32>(1e-6)), vec3<f32>(0.4));
-    let pb = pow(max(abs(b), vec3<f32>(1e-6)), vec3<f32>(0.4));
-    let col = pa * pb * (caustics.color.rgb * caustics.color.w);
-    return dot(col, vec3<f32>(0.333));
+@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> caustics: Caustics;
+// Texture2D_0: T_EV_DustPanner_01, Texture2D_1: T_Caustics_2
+@group(#{MATERIAL_BIND_GROUP}) @binding(101) var ue_t0: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(102) var ue_s0: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(103) var ue_t1: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(104) var ue_s1: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(105) var<uniform> ue_mat: UeMaterial;
+
+// What the translated shader reads.
+var<private> ue_screen_to_light: array<vec4<f32>, 4>;
+var<private> frag_depth_uu: f32;
+fn ue_time() -> f32 { return view_bindings::globals.time; }
+fn ue_greyscale() -> vec4<f32> { return vec4<f32>(1.0); }
+// The scene depth in the alpha channel (uu / 256), from the depth prepass.
+fn ue_scene_color(uv: vec2<f32>) -> vec4<f32> {
+#ifdef DEPTH_PREPASS
+    let d = prepass_utils::prepass_depth(vec4<f32>(uv * view_bindings::view.viewport.zw, 0.0, 0.0), 0u);
+    let z = -view_transformations::depth_ndc_to_view_z(max(d, 1e-7)) * 50.0;
+    return vec4<f32>(0.0, 0.0, 0.0, z / 256.0);
+#else
+    return vec4<f32>(0.0, 0.0, 0.0, frag_depth_uu / 256.0);
+#endif
+}
+
+// The material function for a light: `ScreenToLight` as the images of the pixel basis.
+fn caustic_function(frag: vec4<f32>, l: CausticLightData) -> f32 {
+    let v = view_bindings::view;
+    let tan_x = 1.0 / v.clip_from_view[0][0];
+    let tan_y = 1.0 / v.clip_from_view[1][1];
+    // Bevy units per uu along the pixel basis (x w, y w, w): the camera's right, up and forward.
+    let bx = v.world_from_view[0].xyz * tan_x * 0.02;
+    let by = v.world_from_view[1].xyz * tan_y * 0.02;
+    let bz = -v.world_from_view[2].xyz * 0.02;
+    let o = v.world_position - l.pos_radius.xyz;
+    let r = l.right.xyz;
+    let u = l.up.xyz;
+    let su = l.shape.y;
+    let sv = l.shape.z;
+    ue_screen_to_light[0] = vec4<f32>(dot(bx, r) / su, dot(bx, u) / sv, 0.0, 0.0);
+    ue_screen_to_light[1] = vec4<f32>(dot(by, r) / su, dot(by, u) / sv, 0.0, 0.0);
+    ue_screen_to_light[2] = vec4<f32>(dot(bz, r) / su, dot(bz, u) / sv, 0.0, 0.0);
+    ue_screen_to_light[3] = vec4<f32>(dot(o, r) / su, dot(o, u) / sv, 0.0, 1.0);
+    let size = v.viewport.zw;
+    let ndc = vec2<f32>(frag.x / size.x * 2.0 - 1.0, 1.0 - frag.y / size.y * 2.0);
+    var tc: array<vec4<f32>, 8>;
+    tc[0] = vec4<f32>(ndc, 0.0, 1.0);
+    return ue_ps_call(tc, frag).x;
 }
 
 @fragment
@@ -68,6 +106,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let n = normalize(pbr_input.N);
     let v = normalize(pbr_input.V);
     let p = in.world_position.xyz;
+    frag_depth_uu = -view_transformations::position_world_to_view(p).z * 50.0;
     let diffuse_color = calculate_diffuse_color(m.base_color.rgb, m.metallic, m.specular_transmission, m.diffuse_transmission);
     let a = lighting::perceptualRoughnessToRoughness(m.perceptual_roughness);
     let sp = max(2.0 / max(a * a, 1e-8) - 2.0, 0.0);
@@ -97,9 +136,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         if (rdotl - 1e-6 >= 0.0) {
             spec = s * pow(rdotl, sp) * (sp + 8.0) * 0.0397887342;
         }
-        // Light-function coordinates: the offset from the light along its Y and Z axes, Scale per repeat.
-        let off = p - l.pos_radius.xyz;
-        let f = caustic_function(vec2<f32>(dot(off, l.right.xyz) / l.shape.y, dot(off, l.up.xyz) / l.shape.z));
+        let f = caustic_function(in.position, l);
         total = total + (d + spec) * l.color_cos_inner.rgb * (atten * cone * f);
     }
     var out: FragmentOutput;
@@ -111,3 +148,5 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     out.color = vec4<f32>(total * view_bindings::view.exposure, 0.0);
     return out;
 }
+
+// ---- the function material's pixel shader (translated), appended by caustics.rs ----

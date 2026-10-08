@@ -1239,3 +1239,38 @@ Build with `cargo build --release -p oracle` into this agent's own target direct
   `CollisionHeight` 87.5 + 1; port -221.567), and the original then settles 2.6 uu higher.
 - `movement/run_sprint` original: 400 / 600 uu/s plateaus (the spec does not draw the sword;
   the port's pawn always has it drawn: 360 / 540).
+
+### Round 8: NPC movement on Boyle, sword draw, console teleports (2026-10-08)
+
+- **Specs moved onto Boyle's navmesh** (each notes the move in its header): `ai/patrol`, `ai/combat_cadence`,
+  `ai/investigate_noise`, `ai/shot_in_view_of_neutral`, `chaos/corpse_discovered`, `combat/block`,
+  `combat/guard_attack`, `combat/melee_guard_offscreen`, `combat/sword_hit_dummy`,
+  `conversation/bark_group_arbitration`. Quiet places come from `oracle navspots --map M` (flat
+  walkable polygons far from every NPC spawn / route / nav point of the NPC cache) and
+  `oracle navlines --map M [--min-len L] [--clear D] [--flat F]` (long straight flat navmesh lines):
+  the south-west yard of Boyle Ext, corridor x = -8958, y -8871 .. -6671 (floor z -1318) and the
+  diagonal (-8155, -9576) -> (-9475, -6388) (direction 112.5 deg, floor -1317), nothing within 800 uu
+  and no live pawn within 1200 uu. Verified on the original: the Boyle guard patrols this corridor at
+  145.3 uu/s (`ai/patrol`). NPC z = floor + 100 (floor + 92 collides: the spawn is re-requested 95 uu up).
+  Not moved: `ai/hound_bite` (needs the kennel packages), the Idle / Passive specs (no movement
+  dependence: `melee_assassinate_*` fire at tick 5), `stealth/light_vs_dark*` (Playground lamp layout).
+- **The sword is not in hand on a fresh level**: a press without `sword_drawn: true` only draws it, so
+  every melee spec captured earlier never swung (the dummy kept 50 health). `sword_drawn: true` added
+  to the 12 melee specs, `chaos/*_kills*` and `corpse_discovered`; re-captured.
+- **Console `teleport x y z [yaw]` on the original**: a tick-script action `Native` (protocol script action
+  3: function, `this`, stack arguments; `dishonored_probe_dll::native::call_now`) runs `Actor.SetLocation`
+  through its exec thunk at that tick boundary (`Reflect::prepare_native` builds the `FFrame` in a fresh
+  game block). `chaos/civilian_kills` and `guard_kills_sweep` now hold all their kills.
+- **Open**: `chaos/corpse_discovered`: the original's press kills nothing there (a civilian keeps 11 health;
+  a guard at the same spot dies; a scratch run killed a lone civilian at y -7800): cause not found.
+- **Texture bindings**: `SetTexture` is hooked; `psconst` (and `Client::ps_constants_tex`) returns per draw the
+  bound textures (stage, resource pointer, type, format, usage, pool, size, levels, FNV-64 of level 0 for
+  lockable textures). `tools/probe_launch/scripts/pp_effect.ps1` forces `DisPostProcessManager.m_RequiredEffects[e]`
+  and diffs the census (EXPERIMENTAL: forcing the flag alone drew no Knocked screen shader; the state machine
+  needs more than the required flag; no effect captures were kept).
+- **Bones / AnimState**: records added to `ai/boyle_patrol_speed`, `stealth/detect_600`, `combat/guard_attack`,
+  `physics/windblast_throw_d600` (now 600 ticks), the Tallboy / Overseer / weeper specs and
+  `kismet/boyle_intro_20s` (Samuel, spawner DishonoredSpawner_15). `session anim` accepts a prop whose `Animations`
+  is one `AnimNodeSequence` (the pendulum clock `L_Boyle_Int_Env.TheWorld.PersistentLevel.SkeletalMeshActor_1`,
+  `Clock_TickAnim`) and a `DisRiverKrust` (`m_pSkeletalMeshCpnt`; `L_Flooded_FRefinery_Script...DisRiverKrust_0..2`);
+  captured under `$DISHONORED_CACHE/oracle/<exe16>/anim/`.

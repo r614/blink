@@ -1,4 +1,4 @@
-﻿//! Level import: StaticMeshActors and StaticMeshCollectionActors from a set of
+//! Level import: StaticMeshActors and StaticMeshCollectionActors from a set of
 //! level packages into a normalized [`DishonoredMap`].
 
 use crate::content::Content;
@@ -21,6 +21,9 @@ use ue3_package::{ObjRef, Package};
 // [playground] Maps built from a layout of original assets (`dishonored_ir::layout`).
 #[path = "layout_import.rs"]
 pub mod layout_import;
+// The post-process graph's materials (the runtime's `ppgraph`).
+#[path = "post_materials.rs"]
+pub mod post_materials;
 
 pub struct ImportOptions {
     /// Largest texture side to load (smaller mips are kept).
@@ -420,6 +423,7 @@ impl Importer<'_> {
 
     fn import_actors(&mut self, slot: usize) -> Result<()> {
         let pkg = self.pkgs[slot].clone();
+        self.map.environment.light_shafts.extend(read_light_shafts(&pkg));
         // Placed StaticMeshComponents owned by other actor classes (InterpActor, KActor,
         // DishonoredMovable, DisDoor, pickups, usable objects...): outer -> components.
         let mut owned: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -448,6 +452,9 @@ impl Importer<'_> {
             }
             if class == "SceneCaptureReflectActor" && self.is_in_persistent_level(&pkg, i) {
                 self.import_reflect_capture(slot, i);
+            }
+            if class == "SceneCapture2DActor" && self.is_in_persistent_level(&pkg, i) {
+                self.import_scene_capture_2d(slot, i);
             }
             match class.as_str() {
                 "StaticMeshActor" if self.is_in_persistent_level(&pkg, i) => {
@@ -529,6 +536,58 @@ impl Importer<'_> {
             post_process: bool_or(cp, "bEnablePostProcess", false),
             skip_if_unseen: bool_or(cp, "bSkipUpdateIfTextureUsersOccluded", true),
             max_update_dist: float_or(cp, "MaxUpdateDist", 0.0),
+            scene2d: None,
+        });
+    }
+
+    /// A placed SceneCapture2DActor: its render target and fixed view. Defaults are the class's
+    /// (SceneCapture2DComponent: FieldOfView 80, NearPlane 20, FarPlane 500; SceneCaptureComponent:
+    /// Enabled true, no fog, no post-process, SkipUpdateIfTextureUsersOccluded false).
+    fn import_scene_capture_2d(&mut self, slot: usize, actor: usize) {
+        let pkg = self.pkgs[slot].clone();
+        let Ok(h) = pkg.read_object(actor) else { return };
+        let Some(ObjRef::Export(ci)) = find(&h.properties, "SceneCapture").and_then(|p| p.as_object()).map(ObjRef::from_index) else { return };
+        let Ok(ch) = pkg.read_object(ci) else { return };
+        let cp = &ch.properties;
+        let Some(t) = find(cp, "TextureTarget").and_then(|p| p.as_object()).filter(|o| *o != 0) else { return };
+        let Some(tk) = self.resolve(slot, ObjRef::from_index(t)) else { return };
+        let tpkg = self.pkgs[tk.0].clone();
+        let tp = tpkg.read_object(tk.1).map(|h| h.properties).unwrap_or_default();
+        let resolution_type = match find(&tp, "m_ResolutionType").map(|p| &p.value) {
+            Some(Value::Enum(e)) => match e.as_str() {
+                "TRT_FULLSIZE" => 1,
+                "TRT_HALFSIZE" => 2,
+                "TRT_QUARTERSIZE" => 3,
+                _ => 0,
+            },
+            _ => 0,
+        };
+        let int = |n: &str| match find(&tp, n).map(|p| &p.value) {
+            Some(Value::Int(v)) => (*v).max(0) as u32,
+            _ => 0,
+        };
+        let rot = rot_matrix(&h.properties, "Rotation");
+        self.map.reflect_captures.push(dishonored_ir::ReflectCapture {
+            source: format!("{}:{}", pkg.name, pkg.obj_path(ObjRef::Export(actor))),
+            target: tpkg.obj_path(ObjRef::Export(tk.1)),
+            resolution_type,
+            size: [int("SizeX"), int("SizeY")],
+            channels: 0,
+            frame_rate: float_or(cp, "FrameRate", 1000.0),
+            enabled: bool_or(cp, "bEnabled", true),
+            fog: bool_or(cp, "bEnableFog", false),
+            post_process: bool_or(cp, "bEnablePostProcess", false),
+            skip_if_unseen: bool_or(cp, "bSkipUpdateIfTextureUsersOccluded", false),
+            max_update_dist: float_or(cp, "MaxUpdateDist", 0.0),
+            scene2d: Some(dishonored_ir::SceneCamera {
+                location: vec3_or(&h.properties, "Location", Vec3::ZERO),
+                forward: rot.transform_vector3(Vec3::X).normalize_or(Vec3::X),
+                up: rot.transform_vector3(Vec3::Z).normalize_or(Vec3::Z),
+                fov: float_or(cp, "FieldOfView", 80.0),
+                near: float_or(cp, "NearPlane", 20.0),
+                far: float_or(cp, "FarPlane", 500.0),
+            }),
+            ..Default::default()
         });
     }
 
@@ -834,6 +893,90 @@ impl Importer<'_> {
             Err(e) => self.stats.errors.push(e),
         }
     }
+}
+
+/// The world matrices of a `StaticLightCollectionActor`'s components, by component export index.
+/// The actor's native data is its `LightComponents` array (count, then object references) and,
+/// as the last `count x 64` bytes, one native `FMatrix` (rows X Y Z W, translation in row 3) per
+/// component, in array order.
+fn collection_matrices(pkg: &Package, actor: usize) -> HashMap<usize, glam::Mat4> {
+    let mut out = HashMap::new();
+    let Ok(data) = pkg.export_data(actor) else { return out };
+    let u32_at = |p: usize| data.get(p..p + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let comps: Vec<usize> = (0..pkg.exports.len()).filter(|&c| pkg.exports[c].outer == actor as i32 + 1 && pkg.export_class(c).ends_with("LightComponent")).collect();
+    if comps.is_empty() {
+        return out;
+    }
+    // The array: a count `n` followed by n object references that are all exports of the actor
+    // (a positive index).
+    let n_max = data.len() / 68;
+    for o in (0..data.len().saturating_sub(8)).step_by(4) {
+        let Some(n) = u32_at(o).map(|v| v as usize) else { break };
+        if n < comps.len() || n > n_max || o + 4 + n * 4 + n * 64 > data.len() {
+            continue;
+        }
+        let refs: Vec<u32> = (0..n).filter_map(|k| u32_at(o + 4 + k * 4)).collect();
+        if refs.len() != n || !refs.iter().all(|&r| r > 0 && (r as usize) <= pkg.exports.len()) || !comps.iter().all(|&c| refs.contains(&(c as u32 + 1))) {
+            continue;
+        }
+        let base = data.len() - n * 64;
+        for (k, r) in refs.iter().enumerate() {
+            let f: Vec<f32> = (0..16).map(|j| f32::from_bits(u32_at(base + k * 64 + j * 4).unwrap_or(0))).collect();
+            out.insert(*r as usize - 1, fmatrix_rows([[f[0], f[1], f[2], f[3]], [f[4], f[5], f[6], f[7]], [f[8], f[9], f[10], f[11]], [f[12], f[13], f[14], f[15]]]));
+        }
+        break;
+    }
+    out
+}
+
+/// The light components of `pkg` with `bRenderLightShafts` (UE3 light shafts; the retail ones are
+/// `DirectionalLightComponent`s, many in a `StaticLightCollectionActor` with no direct light). The
+/// light's position is `ULightComponent::GetPosition` (0x004e0440): `-direction x TraceDistance`
+/// (default 100000).
+pub fn read_light_shafts(pkg: &Package) -> Vec<dishonored_ir::LightShaft> {
+    let mut out = Vec::new();
+    let mut collections: HashMap<usize, HashMap<usize, glam::Mat4>> = HashMap::new();
+    for ci in 0..pkg.exports.len() {
+        if pkg.export_class(ci) != "DirectionalLightComponent" {
+            continue;
+        }
+        let ObjRef::Export(ai) = ObjRef::from_index(pkg.exports[ci].outer) else { continue };
+        if pkg.obj_name(ObjRef::from_index(pkg.exports[ai].outer)) != "PersistentLevel" {
+            continue;
+        }
+        let Ok(ch) = pkg.read_object(ci) else { continue };
+        let c = &ch.properties;
+        if !bool_or(c, "bRenderLightShafts", false) || !bool_or(c, "bEnabled", true) {
+            continue;
+        }
+        let world = match find(c, "CachedParentToWorld").map(|p| &p.value) {
+            Some(Value::Raw(_, b)) if b.len() == 64 => {
+                let f: Vec<f32> = b.chunks_exact(4).map(|x| f32::from_le_bytes([x[0], x[1], x[2], x[3]])).collect();
+                let row = |i: usize| [f[4 * i + 1], f[4 * i + 2], f[4 * i + 3], f[4 * i]];
+                fmatrix_rows([row(0), row(1), row(2), row(3)])
+            }
+            _ if pkg.export_class(ai) == "StaticLightCollectionActor" => collections.entry(ai).or_insert_with(|| collection_matrices(pkg, ai)).get(&ci).copied().unwrap_or(glam::Mat4::IDENTITY),
+            _ => pkg.read_object(ai).map(|h| actor_transform(&h.properties)).unwrap_or(glam::Mat4::IDENTITY),
+        } * component_transform(c);
+        let direction = world.x_axis.truncate().normalize_or(Vec3::NEG_Z);
+        let tint = match find(c, "BloomTint").map(|p| &p.value) {
+            Some(Value::Color(rgba)) => [0, 1, 2].map(|k| crate::lightmap::color_to_linear(rgba[k])),
+            _ => [1.0; 3],
+        };
+        out.push(dishonored_ir::LightShaft {
+            source: format!("{}:{}", pkg.name, pkg.obj_path(ObjRef::Export(ci))),
+            position: -direction * float_or(c, "TraceDistance", 100000.0),
+            // `Default__LightComponent`.
+            occlusion_depth_range: float_or(c, "OcclusionDepthRange", 20000.0),
+            bloom_scale: float_or(c, "BloomScale", 2.0),
+            bloom_threshold: float_or(c, "BloomThreshold", 0.0),
+            bloom_screen_blend_threshold: float_or(c, "BloomScreenBlendThreshold", 1.0),
+            bloom_tint: if find(c, "BloomTint").is_some() { tint } else { [1.0; 3] },
+            radial_blur_percent: float_or(c, "RadialBlurPercent", 100.0),
+            occlusion_mask_darkness: float_or(c, "OcclusionMaskDarkness", 0.3),
+        });
+    }
+    out
 }
 
 /// A placed light actor of `pkg` (`PointLight`, `SpotLightToggleable`, `DominantDirectionalLight`,
@@ -1769,7 +1912,9 @@ impl Importer<'_> {
             (Some(t), Some(ch)) => self.channel_texture(t, ch),
             (t, _) => t,
         };
+        let ue3 = self.ue3_material(&chain);
         let params = MaterialParams {
+            ue3,
             specular,
             emissive,
             opacity,
@@ -2068,6 +2213,112 @@ impl Importer<'_> {
             faces.push(self.texture(k)?);
         }
         Some(faces)
+    }
+
+    /// Link a material to its compiled shader map and resolve the map's parameters and
+    /// textures for this material (instance). Adapted from dishonored-bevy by Eamon
+    /// (github.com/Eamo5/dishonored-bevy), used with permission (dhcook's `ue3_material`); here
+    /// over the material chain (`material_chain::walk`) and the level's textures.
+    fn ue3_material(&mut self, chain: &material_chain::MaterialChain) -> Option<dishonored_ir::Ue3Material> {
+        use ue3_shader::shadercache::{self, CookedMap, Expr};
+        if !self.opts.load_textures {
+            return None;
+        }
+        let lib = &crate::shaders::library()?.index;
+        let (res_id, res_textures) = chain.resource.clone()?;
+        let base = chain.base_resource.as_ref().map(|b| b.0).unwrap_or(res_id);
+        // the leaf-most compiled instance's static parameter values
+        let (switches, masks): (Vec<(String, bool)>, Vec<(String, [bool; 4])>) = match &chain.static_params {
+            Some(s) => (s.switches.iter().map(|(n, v, _)| (n.clone(), *v)).collect(), s.masks.iter().map(|(n, m, _)| (n.clone(), *m)).collect()),
+            None => (Vec::new(), Vec::new()),
+        };
+        let mi = lib.find(&base, &switches, &masks)?;
+        let map = CookedMap::from(&lib.maps[mi]);
+        let vector = |n: &str| chain.vectors.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map(|v| v.1);
+        let scalar = |n: &str| chain.scalars.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map(|v| v.1);
+        let nodes = shadercache::param_nodes(&map);
+        let params = nodes
+            .iter()
+            .map(|e| match e {
+                Expr::VectorParameter(n, d) => vector(n).unwrap_or(*d),
+                Expr::ScalarParameter(n, d) => [scalar(n).unwrap_or(*d); 4],
+                _ => [0.0; 4],
+            })
+            .collect();
+        let param_names = nodes
+            .iter()
+            .map(|e| match e {
+                Expr::VectorParameter(n, _) | Expr::ScalarParameter(n, _) => n.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        // a texture parameter's value: the chain's (child wins), then the base material's
+        // `Texture2D` defaults
+        let class = |imp: &Self, k: Key| imp.pkgs[k.0].export_class(k.1);
+        let named = |imp: &Self, n: &str| -> Option<Key> {
+            chain.textures.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map(|t| t.1).or_else(|| {
+                chain.default_textures.iter().find(|(k, t)| k.eq_ignore_ascii_case(n) && class(imp, *t).starts_with("Texture2D")).map(|t| t.1)
+            })
+        };
+        let res_tex = |i: i32| -> Option<Key> { *res_textures.get(usize::try_from(i).ok()?)? };
+        enum Tex {
+            Plain(TextureId),
+            Cube(Vec<TextureId>),
+        }
+        let texture = |imp: &mut Self, e: &Expr, cube: bool| -> Option<Tex> {
+            let key = match e {
+                Expr::TextureParameter(n, i) => named(imp, n).or_else(|| res_tex(*i)),
+                Expr::Texture(i) | Expr::FlipBook(i) => res_tex(*i),
+                _ => None,
+            }?;
+            let cls = class(imp, key);
+            // scene capture targets: nothing is in their rendering channels, so they hold
+            // their clear colour
+            if cls.starts_with("TextureRenderTarget") {
+                return Some(Tex::Plain(dishonored_ir::UE3_TEX_BLACK));
+            }
+            if cube {
+                return imp.cube_faces(key).map(Tex::Cube);
+            }
+            if !cls.starts_with("Texture2D") && cls != "TextureFlipBook" && cls != "LightMapTexture2D" {
+                return None;
+            }
+            imp.texture(key).map(Tex::Plain)
+        };
+        let textures = map
+            .pixel
+            .textures
+            .iter()
+            .map(|e| match texture(self, e, false) {
+                Some(Tex::Plain(t)) => Some(t),
+                _ => None,
+            })
+            .collect();
+        let cube_textures = map
+            .cube_textures
+            .iter()
+            .map(|e| match texture(self, e, true) {
+                Some(Tex::Cube(f)) => Some(f),
+                _ => None,
+            })
+            .collect();
+        let blend = match chain.blend_mode.as_deref().unwrap_or("BLEND_Opaque") {
+            "BLEND_Masked" | "BLEND_SoftMasked" | "BLEND_DitheredTranslucent" => MaterialBlend::Masked,
+            "BLEND_Translucent" | "BLEND_AlphaComposite" => MaterialBlend::Translucent,
+            "BLEND_Additive" => MaterialBlend::Additive,
+            "BLEND_Modulate" | "BLEND_ModulateAndAdd" => MaterialBlend::Modulate,
+            _ => MaterialBlend::Opaque,
+        };
+        Some(dishonored_ir::Ue3Material {
+            map: mi as u32,
+            params,
+            param_names,
+            textures,
+            cube_textures,
+            blend,
+            two_sided: chain.two_sided.unwrap_or(false),
+            unlit: chain.lighting_model.as_deref() == Some("MLM_Unlit"),
+        })
     }
 
     fn texture(&mut self, k: Key) -> Option<TextureId> {
