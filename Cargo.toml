@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "tools/*"]
+# Ghidra scripts of the oracle's static index (Java, not a crate).
+exclude = ["tools/ghidra_index"]
 
 [workspace.package]
 edition = "2024"
