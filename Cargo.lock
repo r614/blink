@@ -2533,8 +2533,10 @@ dependencies = [
  "dishonored_sim",
  "dishonored_world",
  "glam",
+ "ron",
  "serde",
  "serde_json",
+ "ue3_package",
 ]
 
 [[package]]
@@ -3377,6 +3379,7 @@ dependencies = [
  "dishonored_mission",
  "dishonored_multiplayer",
  "dishonored_net",
+ "dishonored_oracle",
  "dishonored_save",
  "dishonored_settings",
  "dishonored_sim",

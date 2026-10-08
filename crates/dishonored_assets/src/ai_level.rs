@@ -167,7 +167,7 @@ fn map_player_light_range(pkg: &Package, db: &TweakDb) -> Option<[f32; 2]> {
     None
 }
 
-fn probe_light(l: &Light) -> ProbeLight {
+pub fn probe_light(l: &Light) -> ProbeLight {
     // `FLinearColor::GetLuminance` (0.3, 0.59, 0.11), as the light environment reduces its SH
     // to a brightness (0x004da330).
     let lum = luminance(l.color);
