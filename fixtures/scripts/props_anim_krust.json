@@ -1,0 +1,14 @@
+{"steps":[
+  {"wait_ticks": 180},
+  {"teleport": {"pos": [2360, 3950, 260], "yaw": 90, "pitch": -30}},
+  {"ticks": 2, "input": {"yaw": 90, "pitch": -30, "left_hand": "Empty"}},
+  {"screenshot": "pk_01_krust_a"},
+  {"wait_ticks": 1},
+  {"teleport": {"pos": [2360, 3950, 260], "yaw": 90, "pitch": -30}},
+  {"ticks": 30, "input": {"yaw": 90, "pitch": -30, "left_hand": "Empty"}},
+  {"teleport": {"pos": [2360, 3950, 260], "yaw": 90, "pitch": -30}},
+  {"ticks": 2, "input": {"yaw": 90, "pitch": -30, "left_hand": "Empty"}},
+  {"screenshot": "pk_02_krust_b"},
+  {"wait_ticks": 1},
+  {"quit": true}
+]}

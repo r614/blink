@@ -178,7 +178,11 @@ is also reported, for loops that do have notifies (player rigs, other sets).
 Each entry is a `DisAnimationChain`: alternative `m_Groups` (one is picked); each group a chain of
 `DisAnimation` steps (`m_Name` alternatives, `m_bLoop`, `m_fBlendInTime` default 0.2,
 `m_FirstItemPrefix`), `m_fBlendOutTime` (0.1) and `m_bEndChainAfterOneAnimation`. Steps with an
-item prefix get the held item's prefix (`Sword_` / `Empty_`). The subclasses' default objects
+item prefix get the held item's `m_ItemPrefix`: the pawn tweak's primary item
+(`m_ContentInventoryLoadout[0]`: elite guard sword `Sword_`, music box `MusicBox_`, wolfhound bite
+`Patrol_`, Tallboy bow `Empty_`) or its empty hands (`m_pEmptyHandsItem`: `Empty_`); a pawn
+without a primary item (weepers) uses its empty hands' (`AnimProfile::item_prefix` /
+`empty_prefix`). The subclasses' default objects
 are cooked into the level script packages (`DishonoredGameContent.Default__DisNPCAnimDefinitions_*`),
 the base class defaults into Startup; a default object without `m_Animations` inherits its super
 class's.
@@ -277,6 +281,9 @@ Relaxed, Patrol, Search, Combat, Panic, Cower, Notice) and `MatchView::anim_prof
 | noticing | `ReactToNoticing` | same |
 | talking | the blurb's FaceFX animation on the face and head (§12); body gestures only from soiree matinees (U-142, resolved: blurbs carry no animation, `DisBehaviorBlockingDialog` only faces the listener, no `eDisNPCAnimations` chain is a gesture, and the FaceFX actors pose `head_jnt` and the face bones only) | FaceFX lip sync and head motion (§12); body: the soiree matinee's AI-group anim tracks (CUTSCENES.md) |
 | crouched armed player | no crouch locomotion in the NPC sets | `Sword_Cover_Loop` held |
+| thrown (Windblast, push) | `StateNPCMasterThrown`: `PushToRagdoll` group 1 by direction, ragdoll at its notify; at rest `StateNPCMasterStunned` (`eStunEnterAnim_RagdollFront`) | §13 |
+| special classes (`npc_move` 20-28) | the item contexts' `m_MainAttack.m_Animation`, the minigame groups, the Tallboy aim sub-states, the music box's walk upper body | §13 |
+| plague / rat death | `DeathPlague` / `DeathSwarmAttack` (by name, U-890) | same |
 
 Directional steps (U-143): the step index is a direction enum's value. Groups of 4 follow
 `ECardinalDirection` (Forward, Left, Right, Back): `StateNPCMasterStrongHitReact` plays its
@@ -360,13 +367,16 @@ deltas. Blinking uses the class defaults: `BlinkEnabled`, a blink every
 `[MinDurationBetweenBlink, MaxDurationBetweenBlink]` = 0.5-6 s at a play rate in
 `[MinBlinkSpeed, MaxBlinkSpeed]` = 1-2.
 
-Port: the mode is picked from the locomotion modifier (Search / Sword / Empty) and gait; the
-target's yaw and pitch against the mode's ranges weight the 3x3 grid bilinearly, for the torso
-and then the head, and each delta is applied as `delta * local rotation` (UE3 additive
-blending). Which target the AI looks at, the split between torso and head
-(`m_HeadAndTorso_*Percentage`, `Start_Torso`, `End_Head`) and the turn speed were not decoded:
-the port looks at the nearest player while alert (2000 uu) or talking (600 uu) and eases in about
-0.25 s (APPROXIMATION, U-281). Blinks play the profile's `Blink` sequence on those timings.
+Port: the mode is picked from the locomotion modifier (Search / Sword / Empty) and gait; an aim's
+yaw and pitch against the mode's ranges weight the 3x3 grid bilinearly, for the torso and then
+the head, and each delta is applied as `delta * local rotation` (UE3 additive blending). The
+aims are the AI's own (2026-10-08): the vision head (`dishonored_ai::head`, stealth.md section
+12: the HeadTrack request, the look-at cursor and the head / torso weights) is split by the node's
+rule (0x009176F0, `head::split_aim`) into a torso part and a head part, published per pawn
+(`MatchView::npc_heads`), and each grid is posed by its own part, so the visible head turns where
+the vision cone points. A pawn speaking a line without a HeadTrack request looks at the nearest
+player within 600 uu with both grids and eases in about 0.25 s (APPROXIMATION, U-281). Blinks
+play the profile's `Blink` sequence on those timings.
 
 ## 10. Bodies, chokes and carrying
 
@@ -642,3 +652,106 @@ code). Runtime: `crates/dishonored_runtime/src/facefx.rs`, applied in `npc_anim:
   - `npc_anim::animate` applies them last: rotation = delta x animated rotation, position =
     animated (or bind) position + delta. Bones are bound by name in every part.
   - Masked party heads have no `FaceFXAsset`, so they do not lip sync.
+
+## 13. NPC, world and map animation parity (2026-10-08)
+
+### Special classes
+
+Their definitions classes are cooked into the Boyle scripts (`DisNPCAnimDefinitions_Tallboy`,
+`_Weeper`: L_BoyleStreet_Ext_Script; `_MusicalOverseer`: L_Boyle_Int_Script) and the Overseer
+kennel scripts (`_Wolfhound`). Each AI move code (`dishonored_ir::ai::special_moves`) plays the
+chain its item context names (`DisTweaks_ItemContext.m_MainAttack.m_Animation`, read with
+`tweaks`):
+
+| `npc_move` | context (tweak) | chain | sequences (this pawn's sets) |
+|---|---|---|---|
+| 20 `WH_BITE` | `pNPCAttackMedium` of `Twk_Inv_WolfhoundBite` | `AttackMedium` | `Attack_Medium` (the second group names elite-guard sequences the hound lacks: the first group with sequences plays) |
+| 21 `WH_JUMP_ATTACK` | `DisTweaks_WHJumpAttack_0` (`DisTweaks_Minigame`, `m_GroupIndex` 1) | `SyncAttack` group 1 | `Attack_JumpAttack_Jump_Minigame`, then `_StepBack_Minigame` (steps 1-3 are None) |
+| 22 `WH_ARM_ATTACK` | `DisItemContext_WHArmAttack` (group 0) | `SyncAttack` group 0 | `Attack_ArmAttack_JumpGlide_Minigame`, `_GrabMiss_Minigame` |
+| 23 `TALLBOY_STOMP` | `DisTweaks_AttackNPCTallboyMelee_1` | `TallboyStompAttack` | `Empty_StompAttack` |
+| 24 `TALLBOY_FIRE_BOW` | `DisTweaks_NPCFireBow_1` (no animation: `StateNPCMasterTallboyAim`) | sub-state -> chain at 0x00A7CEB0: 1 / 2 `TallboyAimIn`, 4 `TallboyAim` (loop), 0 `TallboyAimShoot`, 3 `TallboyAimOut`, 5 `TallboyStompAttack` | `Empty_Bow_Charged_In`, `Empty_Bow_Charged` (held while aiming), `Empty_Bow_Fire` on each shot, `Empty_Bow_Charged_Out` |
+| 25 `OVERSEER_BASH` | `DisTweaks_NPCBash_8` | `Bash` | `MusicBox_Attack_KickMedium` |
+| 26 `OVERSEER_TUNE` | `DisTweaks_NPCTune_Combat_0`: slot 108 (0x00C202B0) requests chain 0x77 | `PlayCombatTune` | `MusicAmp_PlayMusic_In`, `_Loop` (held while the tune plays), `_Out` |
+| 27 `WEEPER_GRAB` | `DisTweaks_WeeperGrab_2` (`m_NPCAnimation` `SyncAttack`, group 0, `m_fAnimDuration` 1.33) | `SyncAttack` group 0 | `Empty_ArmGrab_Try`, `Empty_ArmGrab_Miss` |
+| 28 `WEEPER_COUGH` | the cough (`DishonoredNotify_StartPlague`) | `Weeper_Cough` (0x4B) | `Empty_Idle_Cough` |
+
+The simulation has no sync-attack hold, so a minigame attack never connects: the port plays the
+jump / try step and then the miss or step-back step (LIKELY, U-893).
+
+Music box (CONFIRMED, code): `DisWepMusicBox` slots 81 / 96 (0x00C291F0, 0x00C29220) set the
+pawn's `m_WalkUpperBodyDesire` (+0xDB0, via 0x00B53960) to `MusicBoxIdle` (0x79,
+`Musicbox_Idle`); the combat tune's end (slot 103, 0x00C26F70) sets it to `PlayMusic` step 1
+(0x76, `MusicBox_PlayMusic_Loop`). The port loops the desire on the upper-body slot and fades it
+under full-body actions (U-891). The elite guard locomotion config's `MusicBox` modifier (idle
+`Musicbox_Idle`, walk `EmptyWalk`) is used for pawns holding the music box (U-892).
+
+Locomotion configs: Tallboy `TallBoyLocomotionConfig` (Idle, Walk; `Empty` only: walk N 213,
+S 196, W 149, E 141), weeper `WeepTallLocomotionConfig` (`Empty`, `SearchEmpty`; walk 83 every
+direction, run N 541), wolfhound `WolfHoundLocomotionConfig` (Startup; Idle, Walk, Trot, Run;
+`Empty`, `SearchEmpty`, `EmptyPatrol`, `Sword`, `SearchSword`, `SwordPatrol` and five `_NotUsed`;
+run 990, trot 387, attack walk N 282). The existing modifier rules fall back to the config's
+first modifier, so Tallboys and weepers use `Empty`, hounds `SwordPatrol` / `Sword`.
+
+### Thrown NPCs
+
+`StateNPCMasterThrown` (physics.md 3.7; `movement::start_throw` / `step_thrown`): the port plays
+`PushToRagdoll` group 1 (`Generic_WindBlast_{Front,Left,Right,Back}`, step by
+`movement::throw_direction`), holds it to its `DishonoredNotify_Ragdoll` (0.455 / 0.390 / 0.448 /
+0.418 s) where the presentation ragdoll takes over, and when the simulation stands the pawn up
+plays `Stun` group 1: `Generic_RagdollToFront`, the stun loop for one tick
+(`m_fStunDuration` 0) and the recovery whose length matches the simulation's hold
+(`Sword_RecoveryA` 1.867 s / `_RecoveryB` 1.5 s for guards; `Patrol_Recovery` for hounds,
+`Empty_RecoveryA|B` for weepers). The get-up starts from the lying pose without blending from the
+ragdoll's.
+
+### World props
+
+- River krusts (`DisRiverKrust`, 48 placed over the Flooded, Bridge, Pub and Streetsewer maps):
+  their skeletal component is the `CollisionComponent` (MAP_SWEEP.md); the tree
+  `Npc_RiverKrust_at` is a `FullBodySlot` over an unnamed sequence node the actor drives from its
+  tweak's `m_AnimSequences[ERiverKrustAnimState]` (`RiverKrustAnimSequenceSpec`: name, play-rate
+  range, blend in / out, start-time range, looping). At rest (`RiverKrustAnimState_Ambient`, 0) a
+  small-pearl krust loops `ClamUp_Idle` at a rate in 0.9-1.05 from a start in 0-1 s. The port
+  draws krusts as level props (`usable_props::is_animated_prop_class`, `SkeletalProp::idle`)
+  looping that sequence, rate and start rolled per actor (`level_props::idle_roll`), and poses
+  their collision bodies by the loop's first frame (collision cache 19). Their other states and
+  the watch towers' orientation nodes are not played (U-894).
+- Looping skeletal scenery: a `SkeletalMeshActor` whose `Animations` node is a playing, looping
+  `AnimNodeSequence` (Boyle Int's pendulum clock `SkeletalMeshActor_1`, `Clock_TickAnim`) is an
+  animated prop (`usable_props::playing_loop`) instead of a reference-pose instance, unless the
+  Kismet names it (then the cutscene player draws it).
+- Doors: unchanged (stage transitions, rest on the open stage's last frame; RENDERING.md).
+- Distractions (U-895): every Boyle distractor plays a soiree matinee (`DistractionSoiree.*`),
+  which the port does not start.
+
+### Verification
+
+Render scripts (`fixtures/scripts/`, run with `dishonored_runtime ... --script <file> --out
+<dir>`; set `DISH_ANIM_DUMP=<pawn id>:<file>` to write that pawn's component-space bones every
+frame as JSON lines, `characters::dump_bones`):
+
+| script | command | shot | expected |
+|---|---|---|---|
+| `npc_anim_playground.json` | `--playground` | `na_01_dummy_idle` | dummy B 200 uu ahead in the sword-patrol idle, blinking |
+| | | `na_02/03_dummy_hit_react_*` | a `Sword_Hit{Front,...}_A` reaction 0.4 s / 0.6 s after the swing (front step: the player is in front) |
+| | | `na_04_dummy_projectile_react` | dummy A in a `HitReactProjectile` step (stomach / legs / front sides) |
+| | | `na_05_thrown_flight` | dummy C in `Generic_WindBlast_Front` while flying back |
+| | | `na_06_thrown_ragdoll` | the ragdoll falling / on the floor (state dump: `thrown.ragdoll`) |
+| | | `na_07`-`na_09` | lying, then `Generic_RagdollToFront`, the recovery, standing in the idle |
+| | | `na_10`-`na_12` | the patrol guard walking (`SwordPatrol` walk loop, feet planted, no sliding) |
+| | | `na_13_patrol_notices_head` | the guard turning its head and torso toward the player (published head aim) |
+| `props_anim_boyle_int.json` | `--map L_Boyle_Int_P --bots 0` | `pa_01`-`pa_03` | the pendulum clock with its pendulum in three different positions |
+| `props_anim_krust.json` | `--map L_Flooded_FRefinery_P --bots 0` | `pk_01`, `pk_02` | river krust 0 drawn (no longer missing), its shell in two phases of `ClamUp_Idle` |
+| `npc_anim_boyle.json` | `--mission missions/boyle_original.ron` | `nb_01`-`nb_04` | Samuel's boat intro at 1, 3, 8 and 15 s (matinee character and camera tracks) |
+| | | `nb_05`, `nb_06` | the party guard at its post (idle, ambient, blink) |
+| | | `nb_07_street_tallboy` | the street Tallboy if the original Kismet spawned it (walk loop, bow states) |
+
+Original side: `session bones` (a new hook op, specified in `fixtures/oracle/capture_queue.txt`)
+records the same per-tick line from the original's `SpaceBases` and tree state for the patrol,
+detect, guard attack, Windblast throw, Tallboy, Overseer, weeper, Boyle intro, clock and krust
+cases, so poses can be diffed bone by bone.
+
+Not done: turning in place (the turn sequences exist for every class; the locomotion component's
+request rule is not decoded, U-280), foot placement (U-280), the additive small hit reactions,
+the weeper / hound idle behaviours and the Tallboy's stilts mesh (U-896), the distraction
+matinees (U-895).

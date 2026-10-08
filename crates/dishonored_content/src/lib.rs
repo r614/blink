@@ -336,7 +336,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     }
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).ok();
-    let coll_path = dir.join(format!("{map}.collision18.bin"));
+    let coll_path = dir.join(format!("{map}.collision19.bin"));
     let spawn_path = dir.join(format!("{map}.spawns.json"));
     let (collision, spawns) = match (CollisionWorld::load(&coll_path), std::fs::read_to_string(&spawn_path)) {
         (Ok(w), Ok(s)) => (w, serde_json::from_str::<Vec<Spawn>>(&s).unwrap_or_default()),
@@ -391,7 +391,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     };
     let flee_points = markers.iter().filter(|m| m.class == "DisFleePointActor").map(|m| m.position).collect();
     // Each spawner's look from its pawn tweak (body + head options), resolved once per map.
-    let look_path = dir.join(format!("{map}.appearance4.json"));
+    let look_path = dir.join(format!("{map}.appearance5.json"));
     let looks: std::collections::HashMap<String, dishonored_ir::spawners::Appearance> = match std::fs::read_to_string(&look_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(l) => l,
         None => {

@@ -233,6 +233,13 @@ pub fn reach(range: [f32; 4], dir: Vec2) -> Vec2 {
 /// `ArkAnimNodeLookAt` 0x009176F0: the aim (radians) split between the torso and the head
 /// grids by their reaches; returns the blended aim (+0x1C0).
 pub fn blended_aim(mode: &LookatMode, aim: Vec2, use_head: f32, use_torso: f32, dead_zone: f32) -> Vec2 {
+    let (head, torso) = split_aim(mode, aim, use_head, use_torso, dead_zone);
+    head + torso
+}
+
+/// The node's split of the aim (radians) into the head grid's and the torso grid's parts
+/// (0x009176F0); their sum is [`blended_aim`]. The animation poses each grid by its part.
+pub fn split_aim(mode: &LookatMode, aim: Vec2, use_head: f32, use_torso: f32, dead_zone: f32) -> (Vec2, Vec2) {
     let hr = reach(mode.head_range, aim) * use_head;
     let tr = reach(mode.torso_range, aim) * use_torso;
     let (lh, lt) = (hr.length(), tr.length());
@@ -265,7 +272,7 @@ pub fn blended_aim(mode: &LookatMode, aim: Vec2, use_head: f32, use_torso: f32, 
             torso = tr;
         }
     }
-    head + torso
+    (head, torso)
 }
 
 /// The NPC's head state (look-at component plus node).
@@ -405,6 +412,19 @@ impl Head {
         eye
     }
 
+    /// The node's head and torso parts of the current aim (radians; [`split_aim`] of the cursor
+    /// with the head / torso weights, as [`Head::step`] blends them), for the animation's
+    /// look-at grids. Zero when both weights are zero.
+    pub fn parts(&self, ai: &AiConfig, modifier: &str, speed: f32) -> (Vec2, Vec2) {
+        let (uh, ut) = (self.use_head.cur.clamp(0.0, 1.0), self.use_torso.cur.clamp(0.0, 1.0));
+        if uh <= 0.0 && ut <= 0.0 {
+            return (Vec2::ZERO, Vec2::ZERO);
+        }
+        let Some(m) = mode(ai, modifier, speed) else { return (Vec2::ZERO, Vec2::ZERO) };
+        let aim = Vec2::new(self.cursor.cur[0].clamp(-PI, PI), self.cursor.cur[1].clamp(-FRAC_PI_2, FRAC_PI_2));
+        split_aim(m, aim, uh, ut, 1.0)
+    }
+
     /// The vision eye (0x00C676A0): the bone position; with a request the pawn's rotation
     /// turned by the blended aim, else the pawn's rotation; the null zone snaps an axis within
     /// `m_fVision_BoneNullzone_Deg` of the pawn's rotation to it.
@@ -459,6 +479,26 @@ mod tests {
         assert!((yaw - 27.0).abs() < 1.0, "{yaw}");
         let eye = h.step(&ai, 0, "Empty", Vec3::ZERO, 0.0, 0.0, None, 1.0 / 30.0);
         assert!(eye.fwd.y.abs() < 1e-5);
+    }
+
+    /// The animation's head / torso parts are the blended aim split: they sum to it, and with
+    /// head weight only the torso part is zero.
+    #[test]
+    fn parts_sum_to_the_blended_aim() {
+        let mut ai = AiConfig::default();
+        ai.lookat.modes.push(LookatMode { name: "EmptyIdle".into(), head_range: [65.0, -65.0, 60.0, -35.0], torso_range: [60.0, -60.0, 35.0, -45.0], head_horizontal_pct: 90.0, head_vertical_pct: 100.0, end_head: 1.0, ..Default::default() });
+        let mut h = Head::default();
+        let target = Vec3::new(1000.0 * 40f32.to_radians().cos(), 1000.0 * 40f32.to_radians().sin(), 200.0);
+        let req = LookRequest { target, head_weight: 1.0, torso_weight: 0.5, torso_speed_reduction: true, speed: 0.5 };
+        for _ in 0..60 {
+            h.step(&ai, 0, "Empty", Vec3::ZERO, 0.0, 0.0, Some(req), 1.0 / 30.0);
+        }
+        let (head, torso) = h.parts(&ai, "Empty", 0.0);
+        let sum = head + torso;
+        assert!((sum.x - h.aim[0]).abs() < 1e-5 && (sum.y - h.aim[1]).abs() < 1e-5, "{head:?} {torso:?} {:?}", h.aim);
+        assert!(head.x > 0.0 && torso.x >= 0.0, "{head:?} {torso:?}");
+        let (_, torso) = split_aim(&ai.lookat.modes[0], Vec2::new(0.5, 0.1), 1.0, 0.0, 1.0);
+        assert!(torso.length() < 1e-6, "{torso:?}");
     }
 
     #[test]

@@ -26,6 +26,39 @@ pub struct AnimProfile {
     /// `DisTweaks_NPCPawn.m_pComponentLookatConfig` (look-at modes, blinking).
     #[serde(default)]
     pub lookat: Option<(String, String)>,
+    /// `m_ItemPrefix` of the pawn's primary item (`m_ContentInventoryLoadout[0]`): the prefix of
+    /// the chain steps with an item prefix while the item is held (`Sword_` elite guards,
+    /// `MusicBox_` music-box Overseers, `Patrol_` wolfhounds, `Empty_` Tallboys). Empty: none.
+    #[serde(default)]
+    pub item_prefix: String,
+    /// `m_ItemPrefix` of the pawn's empty hands (`m_pEmptyHandsItem`): `Empty_` for every
+    /// Boyle pawn. Empty: none.
+    #[serde(default)]
+    pub empty_prefix: String,
+}
+
+impl AnimProfile {
+    /// The prefix of item-prefixed chain steps (`m_FirstItemPrefix`) for a pawn holding its
+    /// primary item (`armed`) or nothing. A pawn without a primary item (weepers) holds its empty
+    /// hands; `Sword_` / `Empty_` when the tweak was not resolved (both prefixes empty).
+    pub fn prefix(&self, armed: bool) -> &str {
+        match (armed, self.item_prefix.is_empty(), self.empty_prefix.is_empty()) {
+            (true, false, _) => self.item_prefix.as_str(),
+            (true, true, true) => "Sword_",
+            (_, _, false) => self.empty_prefix.as_str(),
+            (false, _, true) => "Empty_",
+        }
+    }
+}
+
+/// An NPC's look-at aim as the AI's head computes it (`ArkAnimNodeLookAt` 0x009176F0 split of
+/// the look-at cursor between the torso and head grids; `dishonored_ai::head`), published so the
+/// visible head turns where the vision cone points. Radians: yaw to the pawn's right, pitch up.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct NpcHead {
+    pub id: u32,
+    pub head: [f32; 2],
+    pub torso: [f32; 2],
 }
 
 /// One `ArkComponentLookatConfig.m_LookAtModes` entry: the additive head / torso grids for a
@@ -225,6 +258,8 @@ pub enum NpcAnim {
     Beg = 1,
     Panic = 5,
     Stun = 6,
+    /// Thrown by a push or a Windblast (group 1: `Generic_WindBlast_{Front,Left,Right,Back}`).
+    PushToRagdoll = 7,
     HitReactStrong = 8,
     HitReactWindblast = 9,
     HitReactSmallAdditive = 10,
@@ -232,6 +267,8 @@ pub enum NpcAnim {
     Death = 13,
     DeathNoDirection = 14,
     DeathFast = 16,
+    DeathSwarmAttack = 17,
+    DeathPlague = 19,
     EquipToCombat = 20,
     EquipToRelaxedPatrol = 21,
     UnequipFromCombat = 23,
@@ -246,7 +283,12 @@ pub enum NpcAnim {
     AttackMedium = 40,
     AttackShort = 41,
     AttackStepBack = 42,
+    Bash = 48,
     JumpAttack = 50,
+    /// Minigame attacks (`DisTweaks_Minigame.m_NPCAnimation`): the wolfhound's arm and jump
+    /// attacks, the weeper's arm grab; the group is the context's `m_GroupIndex`, the step the
+    /// minigame state.
+    SyncAttack = 56,
     Dodge = 64,
     SideStep = 65,
     ParryAwaitingImpact = 61,
@@ -254,7 +296,10 @@ pub enum NpcAnim {
     ParryVersus = 63,
     AmbientIdle = 66,
     AmbientAnxiousGradual = 68,
+    AmbientWeepVariation = 70,
     CorpseBeingCarried = 71,
+    Weep = 72,
+    WeeperCough = 75,
     Assassination = 76,
     AssassinationFast = 78,
     Fatality = 88,
@@ -262,7 +307,19 @@ pub enum NpcAnim {
     AimShoot = 96,
     AimReload = 97,
     AimIn = 98,
+    /// `StateNPCMasterTallboyAim` sub-states (0x00A7CEB0): 4 aim loop, 0 shoot, 1 / 2 in, 3 out,
+    /// 5 the stomp.
+    TallboyAim = 103,
+    TallboyAimShoot = 104,
+    TallboyAimIn = 105,
+    TallboyAimOut = 106,
+    TallboyStompAttack = 107,
     JumpBack = 112,
+    PlayMusic = 118,
+    PlayCombatTune = 119,
+    /// The music box held: `DisWepMusicBox` slots 81 / 96 (0x00C291F0, 0x00C29220) set the
+    /// pawn's `m_WalkUpperBodyDesire` to it.
+    MusicBoxIdle = 121,
 }
 
 /// Names of `eDisNPCAnimations` (DishonoredGame `DisAnimDefinitions`), for tools and docs.
@@ -303,4 +360,41 @@ pub enum NpcStance {
     Cower = 5,
     /// Noticing / reaction delay (`DisBehaviorNotice`, `React`).
     Notice = 6,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `NpcAnim` value is the index of its `eDisNPCAnimations` name.
+    #[test]
+    fn npc_anim_values_match_the_enum_names() {
+        use NpcAnim as A;
+        let named = [
+            (A::Beg, "Beg"), (A::Panic, "Panic"), (A::Stun, "Stun"), (A::PushToRagdoll, "PushToRagdoll"), (A::HitReactStrong, "HitReactStrong"),
+            (A::HitReactWindblast, "HitReactWindblast"), (A::HitReactProjectile, "HitReactProjectile"), (A::Death, "Death"), (A::DeathFast, "DeathFast"),
+            (A::DeathSwarmAttack, "DeathSwarmAttack"), (A::DeathPlague, "DeathPlague"), (A::AttackShort, "AttackShort"), (A::Bash, "Bash"),
+            (A::JumpAttack, "JumpAttack"), (A::SyncAttack, "SyncAttack"), (A::SideStep, "SideStep"), (A::Parry, "Parry"), (A::AmbientIdle, "AmbientIdle"),
+            (A::AmbientWeepVariation, "AmbientWeepVariation"), (A::CorpseBeingCarried, "CorpseBeingCarried"), (A::Weep, "Weep"), (A::WeeperCough, "Weeper_Cough"),
+            (A::Assassination, "Assassination"), (A::Choke, "Choke"), (A::AimShoot, "AimShoot"), (A::TallboyAim, "TallboyAim"), (A::TallboyAimShoot, "TallboyAimShoot"),
+            (A::TallboyAimIn, "TallboyAimIn"), (A::TallboyAimOut, "TallboyAimOut"), (A::TallboyStompAttack, "TallboyStompAttack"), (A::JumpBack, "JumpBack"),
+            (A::PlayMusic, "PlayMusic"), (A::PlayCombatTune, "PlayCombatTune"), (A::MusicBoxIdle, "MusicBoxIdle"),
+        ];
+        for (a, n) in named {
+            assert_eq!(NPC_ANIM_NAMES[a as usize], n);
+        }
+    }
+
+    #[test]
+    fn item_prefix_falls_back_to_sword_and_empty() {
+        let mut p = AnimProfile::default();
+        assert_eq!(p.prefix(true), "Sword_");
+        assert_eq!(p.prefix(false), "Empty_");
+        // A weeper: no primary item, its empty hands.
+        p.empty_prefix = "Empty_".into();
+        assert_eq!(p.prefix(true), "Empty_");
+        p.item_prefix = "MusicBox_".into();
+        assert_eq!(p.prefix(true), "MusicBox_");
+        assert_eq!(p.prefix(false), "Empty_");
+    }
 }

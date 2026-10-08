@@ -468,6 +468,7 @@ impl ContractsMatch {
                 spawn_npc(&mut self.world, s.id, s.kind, s.archetype, s.position, s.yaw, cfg);
             }
             self.view.npc_poses = crate::npc_poses(&crowd.brains);
+            self.view.npc_heads = crate::npc_heads(&crowd.brains, &crowd.ai, &self.world.players);
         }
 
         match self.view.phase {

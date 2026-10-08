@@ -32,3 +32,22 @@ fn movers_match_actor_and_placement() {
     // Same name in another sublevel (elsewhere): not moved.
     assert!(mover_delta(&mv, "L_A:InterpActor_1", glam::Vec3::new(5000.0, 0.0, 0.0)).is_none());
 }
+
+#[test]
+fn resting_loops_roll_rate_and_start_per_actor() {
+    // `Twk_Actor_RiverKrust_SmallPearl.m_AnimSequences[Ambient]`: rate 0.9-1.05, start 0-1 s.
+    let idle = dishonored_ir::PropIdle { anim: "ClamUp_Idle".into(), rate: [0.9, 1.05], start: [0.0, 1.0] };
+    let a = idle_roll("L_Flooded_FRefinery_Script:DisRiverKrust_0");
+    let b = idle_roll("L_Flooded_FRefinery_Script:DisRiverKrust_1");
+    assert_ne!(a, b);
+    assert_eq!(a, idle_roll("l_flooded_frefinery_script:disriverkrust_0"));
+    for r in [a, b] {
+        assert!((0.0..1.0).contains(&r.0) && (0.0..1.0).contains(&r.1));
+        // At clock 0 the loop sits at its rolled start; it wraps at the length.
+        let t0 = idle_time(&idle, r, 0.0, 3.0);
+        assert!((t0 - r.1).abs() < 1e-5);
+        let t = idle_time(&idle, r, 10.0, 3.0);
+        assert!((0.0..3.0).contains(&t));
+    }
+    assert_eq!(idle_time(&idle, a, 5.0, 0.0), 0.0);
+}

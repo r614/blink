@@ -173,14 +173,18 @@ pub fn frame_pose(content: &Content, anim_sets: &[(String, String)], bone_order:
 
 /// The bodies of a usable object (not a door) as the map starts: posed by the first frame of its
 /// first stage's transition animation (`m_Stages[0].m_TransitionAnimName` of its usable-object
-/// tweak), else at the reference pose.
+/// tweak), else at the reference pose. A prop with a resting loop (river krusts: the ambient
+/// `ClamUp_Idle`) is posed by the loop's first frame (the original starts it at a random time
+/// in its `m_StartTimeSecondsRange`, 0-1 s, and its bodies follow the animation).
 pub fn usable_start_bodies(content: &Content, packages: &[String], prop: &dishonored_ir::SkeletalProp, tweak: Option<&crate::tweaks::TMap>) -> Result<PropBodies> {
-    let anim = tweak.and_then(|t| match t.get("m_Stages") {
-        Some(crate::tweaks::TVal::List(l)) => match l.first().and_then(|s| s.get("m_TransitionAnimName")) {
-            Some(crate::tweaks::TVal::Name(n)) if n != "None" => Some(n.clone()),
+    let anim = prop.idle.as_ref().map(|i| i.anim.clone()).or_else(|| {
+        tweak.and_then(|t| match t.get("m_Stages") {
+            Some(crate::tweaks::TVal::List(l)) => match l.first().and_then(|s| s.get("m_TransitionAnimName")) {
+                Some(crate::tweaks::TVal::Name(n)) if n != "None" => Some(n.clone()),
+                _ => None,
+            },
             _ => None,
-        },
-        _ => None,
+        })
     });
     let mut pose = BonePose::new();
     if let Some(anim) = anim {

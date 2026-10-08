@@ -162,6 +162,19 @@ pub struct SkeletalProp {
     /// (`dishonored_assets::light_env`); `None` when it could not be computed.
     #[serde(default)]
     pub light_env: Option<LightEnvironment>,
+    /// The looping animation the prop plays at rest (`DisRiverKrust`: its tweak's
+    /// `m_AnimSequences[RiverKrustAnimState_Ambient]`); None: the reference pose.
+    #[serde(default)]
+    pub idle: Option<PropIdle>,
+}
+
+/// A prop's resting loop (`RiverKrustAnimSequenceSpec`): sequence, play-rate range and start-time
+/// range (the original rolls both at random per instance).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PropIdle {
+    pub anim: String,
+    pub rate: [f32; 2],
+    pub start: [f32; 2],
 }
 
 /// A light environment's synthesized lights (`FDynamicLightEnvironmentState`): one directional

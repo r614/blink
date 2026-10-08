@@ -43,6 +43,9 @@ pub struct Profile {
     pub physics: Option<Arc<PhysicsAssetData>>,
     /// The pawn tweak's `ArkComponentLookatConfig` (look-at grids, blinking).
     pub lookat: Option<Arc<LookatConfig>>,
+    /// Item prefixes of item-prefixed steps: [primary item held, empty hands]
+    /// (`AnimProfile::prefix`).
+    pub prefix: [String; 2],
 }
 
 #[derive(Resource)]
@@ -117,6 +120,9 @@ impl AnimBank {
             ragdoll_on_death: false,
             physics: Some((physics.0.to_string(), physics.1.to_string())),
             lookat: Some(("DishonoredGame".to_string(), "DisLookatConfig.DefaultLookatConfig".to_string())),
+            // The Boyle tweaks' sword (`Twk_Inv_SwordEliteGuard`) and empty hands.
+            item_prefix: if archetype == 1 { "Sword_".to_string() } else { String::new() },
+            empty_prefix: "Empty_".to_string(),
         }
     }
 
@@ -170,7 +176,8 @@ impl AnimBank {
         // default config.
         let default_lookat = ("DishonoredGame".to_string(), "DisLookatConfig.DefaultLookatConfig".to_string());
         let lookat = p.lookat.as_ref().and_then(|r| dishonored_assets::npc_anim::load_lookat_config(&self.content, r).ok()).or_else(|| p.lookat.as_ref().and_then(|_| dishonored_assets::npc_anim::load_lookat_config(&self.content, &default_lookat).ok())).map(Arc::new);
-        self.profiles.push(Profile { sets, loco, defs, lookup: HashMap::new(), physics, lookat });
+        let prefix = [p.prefix(true).to_string(), p.prefix(false).to_string()];
+        self.profiles.push(Profile { sets, loco, defs, lookup: HashMap::new(), physics, lookat, prefix });
         self.profile_index.insert(p.clone(), self.profiles.len() - 1);
         self.profiles.len() - 1
     }
@@ -413,6 +420,11 @@ pub enum Sustain {
     Choke,
     /// Carried over a shoulder (`CorpseBeingCarried`).
     Carried,
+    /// Held while the AI keeps this combat move (`PlayerInput::npc_move`): the Tallboy's bow
+    /// aim, the Overseer's combat tune.
+    Move(u8),
+    /// Held until replaced (the held item's walk upper body).
+    Held,
 }
 
 /// A chain of sequences played in a slot (one group of a `DisAnimationChain`).
@@ -482,6 +494,13 @@ pub struct PawnAnim {
     /// Feet planted (left, right), and those that touched down this frame.
     pub feet: [bool; 2],
     pub feet_down: [bool; 2],
+    /// Thrown (flying or in the throw's ragdoll) last frame.
+    pub thrown: bool,
+    /// The bow's fire button seen held last frame (the Tallboy's shot is its press).
+    pub shot: bool,
+    /// The upper-body loop the held item asks for (`DishonoredNPCPawn.m_WalkUpperBodyDesire`:
+    /// chain, group, step), e.g. the music box's `MusicBoxIdle`.
+    pub walk_upper: Option<(NpcAnim, usize, usize)>,
 }
 
 impl PawnAnim {
@@ -493,9 +512,17 @@ impl PawnAnim {
     }
 }
 
-/// Item prefix of `eDisItemPrefix` steps: the equipped primary's ("Sword_") or "Empty_".
-fn prefixed(name: &str, prefix: u8, armed: bool) -> String {
-    if prefix == 0 { name.to_string() } else if armed { format!("Sword_{name}") } else { format!("Empty_{name}") }
+/// Item prefix of `eDisItemPrefix` steps: the held item's `m_ItemPrefix` (`Sword_`, `MusicBox_`,
+/// `Patrol_`, ...) or the empty hands' (`Empty_`), from the pawn tweak (`Profile::prefix`).
+fn prefixed(name: &str, kind: u8, prefix: &str) -> String {
+    if kind == 0 { name.to_string() } else { format!("{prefix}{name}") }
+}
+
+impl AnimBank {
+    /// The item prefix of a profile for a pawn holding its primary item or nothing.
+    pub fn item_prefix(&self, profile: usize, armed: bool) -> String {
+        self.profiles.get(profile).map(|p| p.prefix[if armed { 0 } else { 1 }].clone()).unwrap_or_else(|| if armed { "Sword_".into() } else { "Empty_".into() })
+    }
 }
 
 /// Direction of a hit source relative to the victim's facing, degrees (0 front, +90 right).
@@ -564,29 +591,98 @@ impl AnimBank {
         let ch = defs.chain(anim)?.clone();
         let g = group.unwrap_or(((rng * ch.groups.len() as f32) as usize).min(ch.groups.len() - 1));
         let grp = ch.groups.get(g)?.clone();
+        let prefix = self.item_prefix(profile, armed);
         let mut steps: Vec<(String, bool, String)> = Vec::new();
         if grp.end_after_one {
             let k = directional_step(grp.steps.len(), angle);
             let s = grp.steps.get(k).or(grp.steps.first())?;
             let name = s.names.get(((rng * 7919.0) as usize) % s.names.len().max(1)).cloned()?;
-            steps.push((prefixed(&name, s.item_prefix, armed), s.looped, s.face.clone()));
+            steps.push((prefixed(&name, s.item_prefix, &prefix), s.looped, s.face.clone()));
         } else {
             for s in &grp.steps {
                 if s.names.is_empty() {
                     continue;
                 }
                 let name = &s.names[((rng * 7919.0) as usize) % s.names.len()];
-                steps.push((prefixed(name, s.item_prefix, armed), s.looped, s.face.clone()));
+                steps.push((prefixed(name, s.item_prefix, &prefix), s.looped, s.face.clone()));
             }
         }
         steps.retain(|(n, _, _)| n != "None" && self.has(profile, n));
         if steps.is_empty() {
+            // A randomly picked group whose sequences this pawn's sets lack (the wolfhound's
+            // second `AttackMedium` group names elite-guard sequences): the first group that
+            // has them (LIKELY: the chain player's fallback was not traced).
+            if group.is_none() {
+                for k in 0..ch.groups.len() {
+                    if k != g {
+                        if let Some(c) = self.chain(profile, anim, Some(k), angle, armed, rng, key) {
+                            return Some(c);
+                        }
+                    }
+                }
+            }
             return None;
         }
         let blend_in = grp.steps.first().map(|s| s.blend_in).unwrap_or(0.2);
         let faces = steps.iter().map(|s| if self.has(profile, &s.2) { s.2.clone() } else { String::new() }).collect();
         let steps = steps.into_iter().map(|s| (s.0, s.1)).collect();
         Some(Chain { steps, faces, i: 0, t: 0.0, sustain: Sustain::None, weight: 0.0, blend_in, blend_out: grp.blend_out, hold: false, fading: false, key })
+    }
+
+    /// Given steps of one group of a chain, in order (each step's first name, item-prefixed),
+    /// skipping the `None` and missing ones. `looped` steps keep their loop flag.
+    fn chain_steps(&mut self, profile: usize, anim: NpcAnim, group: usize, steps: &[usize], armed: bool, key: &'static str) -> Option<Chain> {
+        let defs = self.profiles[profile].defs.as_ref()?;
+        let grp = defs.chain(anim)?.groups.get(group)?.clone();
+        let prefix = self.item_prefix(profile, armed);
+        let mut c = Chain::one(String::new(), key);
+        c.steps = steps
+            .iter()
+            .filter_map(|k| grp.steps.get(*k))
+            .filter_map(|s| s.names.first().map(|n| (prefixed(n, s.item_prefix, &prefix), s.looped)))
+            .filter(|(n, _)| n != "None")
+            .collect();
+        c.steps.retain(|(n, _)| self.has(profile, n));
+        if c.steps.is_empty() {
+            return None;
+        }
+        c.blend_in = grp.steps.first().map(|s| s.blend_in).unwrap_or(0.2);
+        c.blend_out = grp.blend_out;
+        Some(c)
+    }
+
+    /// The get-up of a thrown pawn at rest (`StateNPCMasterStunned` with
+    /// `eStunEnterAnim_RagdollFront`, 0x00A814B0): `Stun` group 1, `Generic_RagdollToFront`, the
+    /// stun loop for `m_fStunDuration` (0 here: one tick) and one recovery. The simulation rolled
+    /// the recovery and holds the pawn for its length (`movement::step_thrown`): the alternative
+    /// whose length best matches the hold left after the first two steps is the one played.
+    fn stun_getup(&mut self, profile: usize, armed: bool, hold: f32) -> Option<Chain> {
+        let defs = self.profiles[profile].defs.as_ref()?;
+        let grp = defs.chain(NpcAnim::Stun)?.groups.get(1)?.clone();
+        let prefix = self.item_prefix(profile, armed);
+        let mut c = Chain::one(String::new(), "getup");
+        c.steps.clear();
+        let mut used = 0.0;
+        for (k, s) in grp.steps.iter().enumerate() {
+            let names: Vec<String> = s.names.iter().map(|n| prefixed(n, s.item_prefix, &prefix)).filter(|n| n != "None" && self.has(profile, n)).collect();
+            let Some(first) = names.first().cloned() else { continue };
+            let name = if k + 1 == grp.steps.len() && names.len() > 1 {
+                let left = hold - used;
+                names.iter().min_by(|a, b| (self.duration(profile, a).unwrap_or(0.0) - left).abs().total_cmp(&(self.duration(profile, b).unwrap_or(0.0) - left).abs())).cloned().unwrap_or(first)
+            } else {
+                first
+            };
+            if !s.looped {
+                used += self.duration(profile, &name).unwrap_or(0.0);
+            }
+            c.steps.push((name, s.looped));
+        }
+        if c.steps.is_empty() {
+            return None;
+        }
+        c.blend_in = grp.steps.first().map(|s| s.blend_in).unwrap_or(0.2);
+        c.blend_out = grp.blend_out;
+        Some(c)
     }
 
     /// A step of the profile's `Choke` chain whose sequence name contains `suffix` (the slave
@@ -636,8 +732,11 @@ pub struct AnimInput<'a> {
     pub gravity: f32,
     /// Ground speed of the pawn carrying this body (0 when not carried).
     pub carrier_speed: f32,
-    /// What the pawn looks at (world position), when anything.
+    /// What the pawn looks at (world position), when anything (the approximation for spoken
+    /// lines; the AI's own look-at is `head`).
     pub look_target: Option<Vec3>,
+    /// The AI's look-at aims (`MatchView::npc_heads`), when the head is turned.
+    pub head: Option<NpcHead>,
     /// FaceFX bone offsets of the line the pawn speaks (ANIMATION.md §12).
     pub face: &'a [crate::facefx::FaceBone],
 }
@@ -646,8 +745,17 @@ pub struct AnimInput<'a> {
 pub use crate::present_rules::HitKind;
 
 /// Locomotion modifier for a pawn (`ArkComponentLocomotionConfig.m_Modifiers`).
-fn modifier_for(i: &AnimInput, cfg: &LocoConfig) -> String {
+fn modifier_for(i: &AnimInput, cfg: &LocoConfig, item: &str) -> String {
     use dishonored_sim::state::PawnKind;
+    // An item with a modifier of its own name in the config: the music box (`MusicBox`, idle
+    // `Musicbox_Idle`) of the elite guard config's Overseers (LIKELY: the modifier choice of the
+    // locomotion component was not traced, U-892).
+    let stem = item.trim_end_matches('_');
+    if i.armed && i.p.kind != PawnKind::Human && !matches!(stem, "" | "Sword" | "Empty") {
+        if let Some(k) = cfg.modifier(stem) {
+            return cfg.modifiers[k].name.clone();
+        }
+    }
     let gun_aim = i.p.left.phase == dishonored_sim::state::LeftPhase::Aiming && matches!(i.p.left.item, dishonored_sim::input::LeftHand::Pistol | dishonored_sim::input::LeftHand::Crossbow);
     let want: &[&str] = match (i.p.kind, i.stance, i.armed) {
         (PawnKind::Human, _, true) if gun_aim => &["Aim", "Sword"],
@@ -940,36 +1048,123 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
     // the move's `eDisNPCAnimations` chain starts when the move changes. Short attacks play
     // through the swing below; side steps take the front step of their directional group.
     let mv = p.last_input.npc_move;
+    // The held item's upper-body loop (`m_WalkUpperBodyDesire`): the music box's equip
+    // (`DisWepMusicBox` slot 81, 0x00C291F0) asks for `MusicBoxIdle`.
+    if st.walk_upper.is_none() && i.armed && bank.item_prefix(profile, true).eq_ignore_ascii_case("MusicBox_") {
+        st.walk_upper = Some((NpcAnim::MusicBoxIdle, 0, 0));
+    }
+    let dead = st.full.as_ref().is_some_and(|f| f.hold && f.key == "dead");
     if mv != st.last_move {
+        let prev = st.last_move;
         st.last_move = mv;
         use dishonored_sim::input::npc_moves as m;
-        let anim = match mv {
-            m::ATTACK_STEP_BACK => Some(NpcAnim::AttackStepBack),
-            m::ATTACK_MEDIUM => Some(NpcAnim::AttackMedium),
-            m::ATTACK_LONG => Some(NpcAnim::AttackLong),
-            m::JUMP_ATTACK => Some(NpcAnim::JumpAttack),
-            m::SIDE_STEP => Some(NpcAnim::SideStep),
-            m::BACK_STEP => Some(NpcAnim::JumpBack),
-            m::FIRE_PISTOL => Some(NpcAnim::AimShoot),
-            _ => None,
+        let able = p.alive && !dead && !p.incapacitated();
+        // A held move that ended plays its outro: the Tallboy's aim state leaves through
+        // `TallboyAimOut` (sub-state 3). The combat tune's chain carries its own outro step. Its
+        // end (`DisItemContext_NPCTune_Combat` slot 103, 0x00C26F70) sets the walk upper body
+        // to `PlayMusic` step 1 (`MusicBox_PlayMusic_Loop`).
+        if prev == m::TALLBOY_FIRE_BOW && able {
+            if let Some(c) = bank.chain(profile, NpcAnim::TallboyAimOut, Some(0), 0.0, true, r, "move") {
+                let w = st.full.as_ref().map_or(0.0, |f| f.weight);
+                st.full = Some(Chain { weight: w, ..c });
+            }
+        }
+        if prev == m::OVERSEER_TUNE {
+            st.walk_upper = Some((NpcAnim::PlayMusic, 0, 1));
+        }
+        let next = if !able {
+            None
+        } else {
+            match mv {
+                m::ATTACK_STEP_BACK => bank.chain(profile, NpcAnim::AttackStepBack, None, 0.0, true, r, "move"),
+                m::ATTACK_MEDIUM => bank.chain(profile, NpcAnim::AttackMedium, None, 0.0, true, r, "move"),
+                m::ATTACK_LONG => bank.chain(profile, NpcAnim::AttackLong, None, 0.0, true, r, "move"),
+                m::JUMP_ATTACK => bank.chain(profile, NpcAnim::JumpAttack, None, 0.0, true, r, "move"),
+                m::SIDE_STEP => bank.chain(profile, NpcAnim::SideStep, None, 0.0, true, r, "move"),
+                m::BACK_STEP => bank.chain(profile, NpcAnim::JumpBack, None, 0.0, true, r, "move"),
+                m::FIRE_PISTOL => bank.chain(profile, NpcAnim::AimShoot, None, 0.0, true, r, "move"),
+                // The special classes (systems/ai.md section 12). Each context's
+                // `m_MainAttack.m_Animation`: the hound's bite `AttackMedium`, the Tallboy's leg
+                // `TallboyStompAttack`, the music box's `Bash`.
+                m::WH_BITE => bank.chain(profile, NpcAnim::AttackMedium, None, 0.0, true, r, "move"),
+                m::TALLBOY_STOMP => bank.chain(profile, NpcAnim::TallboyStompAttack, None, 0.0, true, r, "move"),
+                m::OVERSEER_BASH => bank.chain(profile, NpcAnim::Bash, None, 0.0, true, r, "move"),
+                // Minigame attacks (`DisTweaks_Minigame.m_NPCAnimation` = `SyncAttack`, group
+                // `m_GroupIndex`, steps by minigame state). The simulation has no sync-attack
+                // hold, so the grab never connects: the hound's jump attack (group 1) jumps then
+                // steps back (its steps 1-3 are None: the knockdown), its arm attack (group 0)
+                // and the weeper's grab (`DisTweaks_WeeperGrab_2`, group 0) try and miss
+                // (LIKELY, U-893).
+                m::WH_JUMP_ATTACK => bank.chain_steps(profile, NpcAnim::SyncAttack, 1, &[0, 4], true, "move"),
+                m::WH_ARM_ATTACK => bank.chain_steps(profile, NpcAnim::SyncAttack, 0, &[0, 1], true, "move"),
+                m::WEEPER_GRAB => bank.chain_steps(profile, NpcAnim::SyncAttack, 0, &[0, 1], i.armed, "move"),
+                // The weeper's cough (`DisNPCAnim_Weeper_Cough`, `Empty_Idle_Cough`).
+                m::WEEPER_COUGH => bank.chain(profile, NpcAnim::WeeperCough, None, 0.0, i.armed, r, "move"),
+                // `StateNPCMasterTallboyAim` (0x00A7CEB0): in (sub-state 1), the aim loop (4)
+                // held while the AI aims; the shot and the outro below.
+                m::TALLBOY_FIRE_BOW => {
+                    let mut c = bank.chain(profile, NpcAnim::TallboyAimIn, Some(0), 0.0, true, r, "move");
+                    if let (Some(c), Some(l)) = (c.as_mut(), bank.chain(profile, NpcAnim::TallboyAim, Some(0), 0.0, true, r, "move")) {
+                        c.steps.extend(l.steps);
+                        c.faces.clear();
+                    }
+                    c.map(|mut c| {
+                        c.sustain = Sustain::Move(mv);
+                        c
+                    })
+                }
+                // The combat tune (`DisItemContext_NPCTune_Combat` slot 108, 0x00C202B0: chain
+                // 0x77 `PlayCombatTune`): in, the loop held while the tune plays, out.
+                m::OVERSEER_TUNE => bank.chain(profile, NpcAnim::PlayCombatTune, None, 0.0, true, r, "move").map(|mut c| {
+                    c.sustain = Sustain::Move(mv);
+                    c
+                }),
+                _ => None,
+            }
         };
-        let dead = st.full.as_ref().is_some_and(|f| f.hold && f.key == "dead");
-        if let Some(c) = anim.filter(|_| p.alive && !dead).and_then(|a| bank.chain(profile, a, None, 0.0, true, r, "move")) {
+        if let Some(c) = next {
             let w = st.full.as_ref().map_or(0.0, |f| f.weight);
             st.full = Some(Chain { weight: w * 0.5, ..c });
         }
+    }
+    // The Tallboy's shot (sub-state 0, `TallboyAimShoot`) on the bow's fire press, back to the
+    // aim loop after it.
+    {
+        use dishonored_sim::input::{buttons, npc_moves as m};
+        let fire = mv == m::TALLBOY_FIRE_BOW && p.last_input.pressed(buttons::SECONDARY);
+        if fire && !st.shot && p.alive && !dead {
+            let shoot = bank.chain(profile, NpcAnim::TallboyAimShoot, Some(0), 0.0, true, r, "move");
+            let aim = bank.chain(profile, NpcAnim::TallboyAim, Some(0), 0.0, true, r, "move");
+            if let Some(mut c) = shoot {
+                if let Some(l) = aim {
+                    c.steps.extend(l.steps);
+                }
+                c.faces.clear();
+                c.sustain = Sustain::Move(mv);
+                c.weight = st.full.as_ref().map_or(0.0, |f| f.weight);
+                st.full = Some(c);
+            }
+        }
+        st.shot = fire;
     }
     // Event-driven actions.
     for (kind, from) in i.hits {
         let q = hit_angle(p, *from);
         let next = match kind {
-            HitKind::Death | HitKind::DeathFast => {
+            HitKind::Death | HitKind::DeathFast | HitKind::DeathPlague | HitKind::DeathSwarm => {
                 // An assassination victim keeps its assassination sequence as its death.
                 if let Some(c) = st.full.as_mut().filter(|c| c.key == "assassinated") {
                     c.hold = true;
                     continue;
                 }
-                let a = if *kind == HitKind::DeathFast { NpcAnim::DeathFast } else { NpcAnim::Death };
+                // The death chain of the damage (`Generic_Death_Plague`, `<item>SwarmAttack_Out`),
+                // else the directional `Death`.
+                let a = match kind {
+                    HitKind::DeathFast => NpcAnim::DeathFast,
+                    HitKind::DeathPlague => NpcAnim::DeathPlague,
+                    HitKind::DeathSwarm => NpcAnim::DeathSwarmAttack,
+                    _ => NpcAnim::Death,
+                };
                 bank.chain(profile, a, None, q, i.armed, r, "dead").or_else(|| bank.chain(profile, NpcAnim::Death, None, q, i.armed, r, "dead")).map(|mut c| {
                     c.hold = true;
                     c
@@ -980,7 +1175,7 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
             HitKind::Projectile | HitKind::Headshot if p.alive => {
                 // Steps: (none), head, stomach, left leg, right leg, front left, front right.
                 let k = if *kind == HitKind::Headshot { 1 } else { 2 + ((r * 5.0) as usize).min(4) };
-                bank.profiles[profile].defs.as_ref().and_then(|d| d.chain(NpcAnim::HitReactProjectile)).and_then(|c| c.groups.first()).and_then(|g| g.steps.get(k)).and_then(|s| s.names.first().cloned()).map(|n| prefixed(&n, 2, i.armed)).filter(|n| bank.has(profile, n)).map(|n| Chain::one(n, "hit"))
+                bank.profiles[profile].defs.as_ref().and_then(|d| d.chain(NpcAnim::HitReactProjectile)).and_then(|c| c.groups.first()).and_then(|g| g.steps.get(k)).and_then(|s| s.names.first().cloned()).map(|n| prefixed(&n, 2, &bank.item_prefix(profile, i.armed))).filter(|n| bank.has(profile, n)).map(|n| Chain::one(n, "hit"))
             }
             HitKind::Swing if p.alive => {
                 let g = if p.kind == PawnKind::Human && p.sword.phase == SwordPhase::Assassinating { Some(5) } else { None };
@@ -1099,9 +1294,33 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
             }
         }
     }
+    // Thrown (`StateNPCMasterThrown`, physics.md 3.7): the `PushToRagdoll` chain's Windblast
+    // group, its step by the throw's direction (`movement::throw_direction`: Front, Left, Right,
+    // Back), held to its `DishonoredNotify_Ragdoll` where the ragdoll takes over (below). At
+    // rest the simulation stands the pawn up and holds it for the get-up
+    // (`StateNPCMasterStunned`, `eStunEnterAnim_RagdollFront`): `Stun` group 1.
+    let thrown = p.alive && (p.thrown.active || p.thrown.ragdoll);
+    if thrown && !st.thrown && !dead {
+        let dir = dishonored_sim::movement::throw_direction(p.yaw, p.velocity);
+        if let Some(mut c) = bank.chain_steps(profile, NpcAnim::PushToRagdoll, 1, &[dir], i.armed, "thrown") {
+            c.hold = true;
+            c.weight = st.full.as_ref().map_or(0.0, |f| f.weight);
+            st.full = Some(c);
+            st.upper = None;
+        }
+    }
+    if !thrown && st.thrown && p.alive && !p.incapacitated() {
+        st.ragdoll = None;
+        st.full = bank.stun_getup(profile, i.armed, p.action_lock).map(|mut c| {
+            // From the body on the ground (the ragdoll's pose is not blended from).
+            c.weight = 1.0;
+            c
+        });
+    }
+    st.thrown = thrown;
     // State-driven actions (sustained loops).
     let busy = st.full.as_ref().is_some_and(|c| !c.fading);
-    if p.alive && !p.incapacitated() {
+    if p.alive && !p.incapacitated() && !thrown {
         if !st.was_alive || st.was_down {
             st.full = None;
             st.ragdoll = None;
@@ -1159,7 +1378,10 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
     st.stance = i.stance;
     st.sword = Some(p.sword.phase);
     st.left = Some(p.left.phase);
-    let mut sustain = Vec::new();
+    let mut sustain = vec![Sustain::Held];
+    if mv != 0 {
+        sustain.push(Sustain::Move(mv));
+    }
     if p.sword.phase == SwordPhase::Blocking {
         sustain.push(Sustain::Block);
     }
@@ -1186,7 +1408,7 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
     // Locomotion modifier and transition sequences (`m_Transitions`).
     let cfg = bank.profiles[profile].loco.clone();
     if let Some(cfg) = cfg.as_ref() {
-        let m = modifier_for(i, cfg);
+        let m = modifier_for(i, cfg, &bank.item_prefix(profile, true));
         if m != st.modifier {
             // Transitions start only once the node's speed is below the config's
             // `m_fVelocityToStopMoving` (class default 20; 0x00911230 compares config +0x94).
@@ -1254,7 +1476,8 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
             st.ambient = st.rand() * hi;
         }
         let still = p.velocity.truncate().length() < 20.0;
-        let free = if full_body { st.full.is_none() } else { st.upper.is_none() && st.full.is_none() };
+        let upper_free = st.upper.as_ref().is_none_or(|c| c.key == "walk_upper");
+        let free = if full_body { st.full.is_none() } else { upper_free && st.full.is_none() };
         if free && (still || !check_movement) {
             st.ambient -= i.dt;
             if st.ambient <= 0.0 {
@@ -1268,6 +1491,24 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
                     }
                 }
                 st.ambient = lo + st.rand() * (hi - lo);
+            }
+        }
+    }
+    // The held item's walk upper body (`m_WalkUpperBodyDesire`, set by the music box's equip and
+    // the combat tune's end) loops on the upper-body slot whenever no other upper-body action
+    // plays there (LIKELY: its tree node and its stop were not traced, U-891).
+    if let Some((anim, g, s)) = st.walk_upper.filter(|_| p.alive && !down && !thrown && p.carried_by.is_none()) {
+        let other = st.upper.as_ref().is_some_and(|c| c.key != "walk_upper" && !c.fading);
+        if !other {
+            if let Some(mut c) = bank.chain_steps(profile, anim, g, &[s], i.armed, "walk_upper") {
+                for x in c.steps.iter_mut() {
+                    x.1 = true;
+                }
+                c.sustain = Sustain::Held;
+                let same = st.upper.as_ref().is_some_and(|u| u.key == "walk_upper" && !u.fading && u.steps.first().map(|x| &x.0) == c.steps.first().map(|x| &x.0));
+                if !same {
+                    st.upper = Some(c);
+                }
             }
         }
     }
@@ -1326,7 +1567,8 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
     st.phase = phase;
     // A body on the ground hands over to the ragdoll at the death sequence's
     // `DishonoredNotify_Ragdoll` (or its end without one), from the pose at exactly that time.
-    let lying = down && p.carried_by.is_none() && !p.no_body;
+    // A thrown pawn goes to the ragdoll the same way, at its throw sequence's notify.
+    let lying = (down || thrown) && p.carried_by.is_none() && !p.no_body;
     if !lying {
         st.ragdoll = None;
     } else if st.ragdoll.is_none() {
@@ -1400,7 +1642,9 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
         let (name, _) = &c.steps[c.i];
         if let Some(up) = bank.sample(lib, model, profile, name, c.t, false) {
             let mask = bank.mask(lib, model);
-            overlay(&mut pose, &up, c.weight, Some(&mask), parts);
+            // The walk upper body gives way to full-body actions (the bash, the combat tune).
+            let w = if c.key == "walk_upper" { c.weight * (1.0 - st.full.as_ref().map_or(0.0, |f| f.weight)) } else { c.weight };
+            overlay(&mut pose, &up, w, Some(&mask), parts);
         }
     }
     let lookat = bank.profiles[profile].lookat.clone();
@@ -1462,14 +1706,23 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
         let (ty, tp, tw) = want.map(|(y, p)| (y, p, 1.0)).unwrap_or((st.look.0, st.look.1, 0.0));
         st.look = (st.look.0 + (ty - st.look.0) * k, st.look.1 + (tp - st.look.1) * k, st.look.2 + (tw - st.look.2) * k);
     }
-    if let Some(lc) = lookat.as_ref().filter(|_| st.look.2 > 0.01) {
+    // The AI's look-at (`MatchView::npc_heads`): the vision head's cursor split into the torso
+    // and head parts as `ArkAnimNodeLookAt` (0x009176F0) poses them, so the visible head turns
+    // where the vision cone points. Without it (a line spoken), the eased approximation above
+    // gives both grids the same angles (U-281).
+    let (aims, look_w) = match i.head.filter(|_| p.alive && !down) {
+        Some(h) => ([(h.torso[0].to_degrees(), h.torso[1].to_degrees()), (h.head[0].to_degrees(), h.head[1].to_degrees())], 1.0),
+        None => ([(st.look.0, st.look.1); 2], st.look.2),
+    };
+    if let Some(lc) = lookat.as_ref().filter(|_| look_w > 0.01) {
         let stance = if st.modifier.starts_with("Search") { "Search" } else if st.modifier.starts_with("Sword") || st.modifier == "Aim" { "Sword" } else { "Empty" };
         let gait = if st.vel.1 > 250.0 { "Run" } else if st.vel.1 > 20.0 { "Walk" } else { "Idle" };
         let name = format!("{stance}{gait}");
         if let Some(mode) = lc.modes.iter().find(|m| m.name.eq_ignore_ascii_case(&name)).or_else(|| lc.modes.first()) {
-            for (grid, range) in [(&mode.torso, mode.torso_range), (&mode.head, mode.head_range)] {
-                let x = if st.look.0 >= 0.0 { st.look.0 / range[0].max(1.0) } else { st.look.0 / range[1].min(-1.0) * -1.0 };
-                let y = if st.look.1 >= 0.0 { st.look.1 / range[2].max(1.0) } else { st.look.1 / range[3].min(-1.0) * -1.0 };
+            for (gi, (grid, range)) in [(&mode.torso, mode.torso_range), (&mode.head, mode.head_range)].into_iter().enumerate() {
+                let (ax, ay) = aims[gi];
+                let x = if ax >= 0.0 { ax / range[0].max(1.0) } else { ax / range[1].min(-1.0) * -1.0 };
+                let y = if ay >= 0.0 { ay / range[2].max(1.0) } else { ay / range[3].min(-1.0) * -1.0 };
                 let (x, y) = (x.clamp(-1.0, 1.0), y.clamp(-1.0, 1.0));
                 // Grid order LU, LC, LD, CU, CC, CD, RU, RC, RD: columns left / centre / right,
                 // rows up / centre / down; bilinear between the four around (x, y).
@@ -1497,7 +1750,7 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
                     }
                 }
                 if let Some(add) = acc {
-                    apply_additive(&mut pose, &add, st.look.2, parts);
+                    apply_additive(&mut pose, &add, look_w, parts);
                 }
             }
         }
@@ -1564,8 +1817,8 @@ impl AnimBank {
         }
         let loco = self.profiles[profile].loco.clone();
         // The matinee's sets extend the pawn's profile; look-at and physics stay the pawn's.
-        let (lookat, physics) = (self.profiles[profile].lookat.clone(), self.profiles[profile].physics.clone());
-        self.profiles.push(Profile { sets, loco, defs: None, lookup: HashMap::new(), lookat, physics });
+        let (lookat, physics, prefix) = (self.profiles[profile].lookat.clone(), self.profiles[profile].physics.clone(), self.profiles[profile].prefix.clone());
+        self.profiles.push(Profile { sets, loco, defs: None, lookup: HashMap::new(), lookat, physics, prefix });
         let id = self.profiles.len() - 1;
         self.derived.insert(key, id);
         id
@@ -1573,7 +1826,7 @@ impl AnimBank {
 
     /// [interp] A profile made of AnimSets only (matinee props such as Samuel's boat).
     pub fn sets_profile(&mut self, sets: &[(String, String)]) -> usize {
-        self.profile(&AnimProfile { sets: sets.to_vec(), locomotion: None, defs: String::new(), ragdoll_on_death: false, physics: None, lookat: None })
+        self.profile(&AnimProfile { sets: sets.to_vec(), ..Default::default() })
     }
 
     /// [interp] Sample a sequence on parts outside the character library (matinee props): the
