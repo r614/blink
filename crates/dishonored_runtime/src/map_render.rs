@@ -49,6 +49,15 @@ pub struct RenderFeatures {
     /// The caustic light functions on the static meshes the caustic lights reach
     /// (`--no-caustics` turns them off; `caustics.rs`).
     pub caustics: bool,
+    /// The dominant point light's Bevy shadow map (a cube map: six scene passes). The original's
+    /// DynamicShadows and LightEnvironmentShadows system settings are both True
+    /// (dishonored_settings::Graphics); --no-point-shadows (or DISHONORED_NO_POINT_SHADOWS)
+    /// turns it off for frame time (lighting.rs).
+    pub point_shadows: bool,
+    /// Gameplay decals (the contact system's, `effects.rs`): the original's `DynamicDecals`
+    /// system setting (BaseEngine.ini [SystemSettings], True; `DecalManager.AreDynamicDecalsEnabled`
+    /// answers it); `--no-decals` turns them off.
+    pub dynamic_decals: bool,
 }
 
 impl RenderFeatures {
@@ -71,6 +80,8 @@ impl RenderFeatures {
             reflections: on("--no-reflections"),
             lens_flares: on("--no-lens-flares"),
             caustics: on("--no-caustics"),
+            point_shadows: on("--no-point-shadows") && std::env::var_os("DISHONORED_NO_POINT_SHADOWS").is_none(),
+            dynamic_decals: on("--no-decals"),
         }
     }
 }

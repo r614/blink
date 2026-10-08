@@ -88,6 +88,17 @@ fn int_or(props: &[Property], name: &str, d: i32) -> i32 {
     }
 }
 
+/// `EParticleEventType` (`EPET_Any`, `Spawn`, `Death`, `Collision`, `Kismet`) as the IR's kind.
+fn event_kind(e: Option<&str>) -> u8 {
+    use dishonored_ir::particles::{EVENT_ANY, EVENT_COLLISION, EVENT_DEATH, EVENT_SPAWN};
+    match e {
+        Some("EPET_Spawn") => EVENT_SPAWN,
+        Some("EPET_Death") => EVENT_DEATH,
+        Some("EPET_Collision") => EVENT_COLLISION,
+        _ => EVENT_ANY,
+    }
+}
+
 fn bursts(pkg: &Package, props: &[Property]) -> Vec<(i32, i32, f32)> {
     find(props, "BurstList")
         .and_then(|p| p.array_structs(pkg).ok())
@@ -322,6 +333,38 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
                         em.mesh_override_material = true;
                     }
                 }
+            }
+            "ParticleModuleTypeDataDecal" => {
+                // Every particle is a decal (`m_pDecalMaterial` replaces the required module's
+                // sprite material); where it lies comes from the event that spawned it.
+                let mut d = dishonored_ir::particles::DecalEmitter { no_clip: bool_or(p, "m_bNoClip", false), on_skeletal: bool_or(p, "m_bProjectOnSkeletalMeshes", false), ..Default::default() };
+                if let Some(mat) = find(p, "m_pDecalMaterial").and_then(|x| x.as_object()).filter(|o| *o != 0) {
+                    if let Some(mk2) = ctx.resolve_ref(mk.0, ObjRef::from_index(mat)) {
+                        d.material = ctx.import_material(mk2);
+                        if d.material.is_some() {
+                            em.material = d.material;
+                            em.blend = em.material.map(|m| ctx.material_blend(m)).unwrap_or_default();
+                        }
+                    }
+                }
+                em.decal = Some(d);
+            }
+            "ParticleModuleEventGenerator" => {
+                for e in find(p, "Events").and_then(|x| x.array_structs(&mpkg).ok()).unwrap_or_default() {
+                    let name = match find(&e, "CustomName").map(|x| &x.value) {
+                        Some(Value::Name(n)) => n.clone(),
+                        _ => String::new(),
+                    };
+                    em.events_out.push(dishonored_ir::particles::EventOut { kind: event_kind(enum_of(&e, "Type").as_deref()), name, first_only: bool_or(&e, "FirstTimeOnly", false) });
+                }
+            }
+            "ParticleModuleEventReceiverSpawn" => {
+                let name = match find(p, "EventName").map(|x| &x.value) {
+                    Some(Value::Name(n)) => n.clone(),
+                    _ => String::new(),
+                };
+                let kind = enum_of(p, "EventGeneratorType").or_else(|| DEFAULTS.with(|d| enum_of(&d.borrow(), "EventGeneratorType")));
+                em.events_in.push(dishonored_ir::particles::EventIn { kind: event_kind(kind.as_deref()), name, count: dist(p, "SpawnCount", 1), inherit_velocity: dist(p, "InheritVelocityScale", 3) });
             }
             c => em.unsupported.push(c.to_string()),
         }

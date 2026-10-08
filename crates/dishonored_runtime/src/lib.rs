@@ -93,6 +93,7 @@ pub mod spillway;
 pub mod water_foam;
 #[doc(hidden)]
 pub mod prop_light;
+pub mod char_light;
 #[doc(hidden)]
 pub mod loading_screen;
 #[doc(hidden)]
@@ -342,6 +343,10 @@ pub fn main() {
     }
     let mut args = parse_args();
     let game_settings = settings::GameSettings::load();
+    // The original's `DynamicShadows` and `LightEnvironmentShadows` system settings gate the
+    // dominant point light's shadow.
+    args.features.point_shadows &= game_settings.s.graphics.dynamic_shadows && game_settings.s.graphics.light_environment_shadows;
+    args.features.dynamic_decals &= game_settings.s.graphics.dynamic_decals;
     if !std::env::args().any(|a| a == "--max-tex") {
         args.max_tex = settings::max_texture_size(&game_settings.s);
     }
@@ -391,6 +396,7 @@ pub fn main() {
     .add_plugins(spillway::SpillwayPlugin)
     .add_plugins(water_foam::WaterFoamPlugin)
     .add_plugins(prop_light::PropLightPlugin)
+    .add_plugins(char_light::CharLightPlugin)
     .add_plugins(bloom::BloomPlugin)
     .add_plugins(env_map::EnvMapOncePlugin)
     .add_plugins(warmup::WarmupPlugin)

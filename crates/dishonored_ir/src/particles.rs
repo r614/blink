@@ -178,8 +178,51 @@ pub struct ParticleEmitterAsset {
     /// origin along its X axis (or to the `ParticleModuleBeamTarget` point).
     #[serde(default)]
     pub beam: Option<BeamParams>,
+    /// `ParticleModuleTypeDataDecal`: every particle is a decal lying on the surface it was
+    /// placed on (`Particle::normal`).
+    #[serde(default)]
+    pub decal: Option<DecalEmitter>,
+    /// `ParticleModuleEventGenerator.Events`: what the emitter reports to the system.
+    #[serde(default)]
+    pub events_out: Vec<EventOut>,
+    /// `ParticleModuleEventReceiverSpawn`: events that spawn this emitter's particles.
+    #[serde(default)]
+    pub events_in: Vec<EventIn>,
     /// Module classes present but not simulated (for the import report).
     pub unsupported: Vec<String>,
+}
+
+/// `ParticleModuleTypeDataDecal` (`m_pDecalMaterial`, `m_bNoClip`, `m_bProjectOnSkeletalMeshes`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DecalEmitter {
+    pub material: Option<MaterialId>,
+    pub no_clip: bool,
+    pub on_skeletal: bool,
+}
+
+/// `EParticleEventType` of the event modules: 0 spawn, 1 death, 2 collision, 3 any (a receiver
+/// only).
+pub const EVENT_SPAWN: u8 = 0;
+pub const EVENT_DEATH: u8 = 1;
+pub const EVENT_COLLISION: u8 = 2;
+pub const EVENT_ANY: u8 = 3;
+
+/// One `ParticleModuleEventGenerator` event: its type, `CustomName` and `FirstTimeOnly`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EventOut {
+    pub kind: u8,
+    pub name: String,
+    pub first_only: bool,
+}
+
+/// `ParticleModuleEventReceiverSpawn`: `EventGeneratorType`, `EventName`, `SpawnCount` and
+/// `InheritVelocityScale`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EventIn {
+    pub kind: u8,
+    pub name: String,
+    pub count: Option<Dist>,
+    pub inherit_velocity: Option<Dist>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -6,6 +6,7 @@
 //! convert to their own frame (see `dishonored_runtime::coords`).
 
 pub mod ai;
+pub mod env_light;
 pub mod gameplay;
 pub mod items;
 pub mod layout;
@@ -56,6 +57,10 @@ pub struct DishonoredMap {
     /// Placed doors and usable objects drawn with a skeletal mesh.
     #[serde(default)]
     pub skeletal_props: Vec<SkeletalProp>,
+    /// The static lights and light volumes the characters' light environments read at run time
+    /// (`dishonored_runtime::char_light`).
+    #[serde(default)]
+    pub light_env_world: env_light::LightEnvWorld,
     /// Placed `SceneCaptureReflectActor`s: the planar reflections that fill the water's render
     /// targets (research/dishonored/systems/render_reflect.md).
     #[serde(default)]
@@ -69,6 +74,13 @@ pub struct DishonoredMap {
     /// source id before `:`) so `MatchView::hidden_levels` can hide it.
     #[serde(default)]
     pub streamed_levels: Vec<String>,
+    /// Materials the importer was asked for by path (`ImportOptions::extra_materials`: the
+    /// gameplay decals' materials): (object path, index into `materials`).
+    #[serde(default)]
+    pub named_materials: Vec<(String, MaterialId)>,
+    /// `ShadowMap1D`s of the instances' first LOD (the dominant light's visibility per vertex).
+    #[serde(default)]
+    pub vertex_shadows: Vec<VertexShadow>,
 }
 
 /// `LightingChannelContainer` bits, in the class's declaration order (Engine.LightComponent): a
@@ -135,6 +147,16 @@ pub struct LensFlareElement {
     pub dist_scale: particles::Dist,
     pub dist_color: particles::Dist,
     pub dist_alpha: particles::Dist,
+}
+
+
+/// A `ShadowMap1D`: `samples[v]` is the visibility (0 shadowed .. 1 lit) of vertex `v` of
+/// [`DishonoredMap::instances`]`[instance]`'s mesh to the light `light_guid`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct VertexShadow {
+    pub instance: usize,
+    pub light_guid: [u32; 4],
+    pub samples: Vec<f32>,
 }
 
 /// `RenderingChannelContainer` bit of a reflection channel (declaration order of the struct:

@@ -370,11 +370,22 @@ pub struct Graphics {
     /// BaseEngine.ini `Distortion=True` (no entry in the original's video menu): the heat-haze /
     /// refraction pass.
     pub distortion: bool,
+    /// BaseEngine.ini [SystemSettings] DynamicShadows=True (no entry in the original's video
+    /// menu): the engine's dynamic shadows (per-object and whole-scene).
+    pub dynamic_shadows: bool,
+    /// BaseEngine.ini LightEnvironmentShadows=True: the light environments' (dominant light)
+    /// shadows of dynamic objects. With dynamic_shadows it gates the dominant point light's
+    /// shadow (lighting.rs).
+    pub light_environment_shadows: bool,
+    /// BaseEngine.ini [SystemSettings] DynamicDecals=True (and [Engine.Engine]
+    /// bDynamicDecalsEnabled=True; no entry in the original's video menu): the gameplay decals
+    /// (`DecalManager.AreDynamicDecalsEnabled`; effects.rs).
+    pub dynamic_decals: bool,
 }
 
 impl Default for Graphics {
     fn default() -> Self {
-        Self { gamma: 2.2, resolution: None, fullscreen: true, vsync: true, fov: 75.0, texture_details: 2, model_details: 0, light_shafts: true, anti_aliasing: 1, rat_shadows: false, distortion: true }
+        Self { gamma: 2.2, resolution: None, fullscreen: true, vsync: true, fov: 75.0, texture_details: 2, model_details: 0, light_shafts: true, anti_aliasing: 1, rat_shadows: false, distortion: true, dynamic_shadows: true, light_environment_shadows: true, dynamic_decals: true }
     }
 }
 

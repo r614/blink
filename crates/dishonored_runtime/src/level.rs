@@ -116,7 +116,7 @@ fn import_options(name: &str, opts: &LevelOptions) -> ImportOptions {
     let lightmap_cache = std::env::var_os("DISHONORED_NO_LIGHTMAP_CACHE")
         .is_none()
         .then(|| dishonored_content::cache_dir().join(format!("{name}{}.lightmaps1.bin", if opts.legacy { ".legacy" } else { "" })));
-    ImportOptions { max_texture_size: opts.max_tex, other_actors: !opts.legacy, extra_particles: crate::effects::GAMEPLAY_PARTICLES.iter().map(|s| s.to_string()).collect(), lightmap_cache, ..Default::default() }
+    ImportOptions { max_texture_size: opts.max_tex, other_actors: !opts.legacy, extra_particles: crate::effects::GAMEPLAY_PARTICLES.iter().map(|s| s.to_string()).collect(), extra_materials: dishonored_assets::particle_material::GAMEPLAY_DECAL_MATERIALS.iter().map(|s| s.to_string()).collect(), lightmap_cache, ..Default::default() }
 }
 
 /// Import a level and prepare its render data (worker-thread safe): the frame that spawns it
@@ -153,6 +153,8 @@ fn spawn_imported(
     levels: &mut Levels,
     fx: &mut crate::effects::Effects,
 ) -> DishonoredMap {
+    // The characters' light environments read this level's static lights and light volumes.
+    commands.insert_resource(crate::char_light::CharLightWorld::from_ir(name, &map.light_env_world));
     let spawned = match prepared {
         Some(p) => map_render::spawn_prepared(&map, p, commands, meshes, images, materials, baked, opts.show_hidden, features),
         None => map_render::spawn_map(&map, commands, meshes, images, materials, baked, opts.show_hidden, features),

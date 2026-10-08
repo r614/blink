@@ -149,6 +149,17 @@ struct LevelFx {
     /// [interp] Placed emitters by "package:actor" (lowercase): (system, transform,
     /// `bAutoActivate`), for matinee toggle tracks.
     placed: HashMap<String, (usize, Mat4, bool)>,
+    /// The contact system's decal materials (`GAMEPLAY_DECAL_MATERIALS`) by lowercase path.
+    decals: HashMap<String, Handle<FxMaterial>>,
+}
+
+/// A gameplay decal (`DisContactSub_Decal`) of the pool of `DisDecalManager`: when it was made,
+/// its lifetime and when a view last saw it (`PrimitiveComponent.LastRenderTime`).
+#[derive(Component)]
+struct ContactDecal {
+    born: f32,
+    life: f32,
+    seen: f32,
 }
 
 /// A distorting emitter: its decoded material, textures and (mesh emitters) the mesh's
@@ -189,6 +200,8 @@ pub struct Effects {
     active: String,
     rng: u64,
     pub spawned_oneshots: u64,
+    /// Gameplay decals made so far (`DisContactSub_Decal`).
+    pub spawned_decals: u64,
     /// The last gameplay effects asked for: (system path, spawned) (harness `effects` command).
     pub recent: Vec<(String, bool)>,
     pub live_particles: usize,
@@ -237,6 +250,7 @@ impl Plugin for EffectsPlugin {
             Update,
             (
                 gameplay_effects.before(crate::audio::drive),
+                age_decals,
                 blink_indicator,
                 attached_effects,
                 hand_effects.after(crate::viewmodel::animate_view_rig),
@@ -333,6 +347,60 @@ fn material_for(map: &DishonoredMap, em: &ParticleEmitterAsset, images: &mut Ass
         base: StandardMaterial { base_color, base_color_texture: image, unlit: true, alpha_mode, cull_mode: None, double_sided: true, fog_enabled: alpha_mode != AlphaMode::Add, ..default() },
         extension: SoftFade { soft: Vec4::new(soft, 0.0, 0.0, 0.0) },
     })
+}
+
+/// A material's blend as the particle systems name it (the importer's `material_blend`).
+fn blend_of(map: &DishonoredMap, id: usize) -> ParticleBlend {
+    use dishonored_ir::MaterialBlend as B;
+    match map.material_params.get(id).map(|p| p.blend) {
+        Some(B::Additive) => ParticleBlend::Additive,
+        Some(B::Masked) => ParticleBlend::Masked,
+        Some(B::Opaque) => ParticleBlend::Opaque,
+        Some(B::Modulate) => ParticleBlend::Modulate,
+        _ => ParticleBlend::Translucent,
+    }
+}
+
+/// How far a decal lies off its surface (uu): the engine's depth bias, `DecalDepthBias` -6e-5.
+const DECAL_LIFT: f32 = 0.25;
+
+/// A decal's quad (`DishonoredDecalComponent`: `Width` x `Height` uu about the contact, lying on
+/// the surface of normal `normal`; Dishonored world in, Bevy space out). Its texture axis is the
+/// direction the contact came along (`dir`, on the surface plane); without one, the reference
+/// tangent of `DisContactSub_Decal`'s fire function (0x00bcf000). APPROXIMATION: the engine
+/// clips the receivers' triangles to the decal's frustum (`DecalComponent`: FieldOfView 80,
+/// FarPlane 300, BlendRange 89.5..180 degrees); this quad is flat.
+fn decal_mesh(at: Vec3, normal: Vec3, dir: Vec3, width: f32, height: f32) -> Mesh {
+    let n = normal.normalize_or(Vec3::Z);
+    let reference = if n.x.abs() + n.y.abs() >= 1e-4 { Vec3::Z } else { Vec3::X };
+    let t0 = (reference - n * n.dot(reference)).normalize_or(Vec3::X);
+    let d = dir - n * n.dot(dir);
+    let u = if d.length_squared() > 1e-6 { d.normalize() } else { t0 };
+    let v = n.cross(u);
+    let c = at + n * DECAL_LIFT;
+    let (hw, hh) = (width * 0.5, height * 0.5);
+    let corners = [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
+    let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    m.insert_attribute(Mesh::ATTRIBUTE_POSITION, corners.iter().map(|(x, y)| coords::pos(c + u * hw * *x + v * hh * *y).to_array()).collect::<Vec<[f32; 3]>>());
+    m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![coords::dir(n).normalize_or_zero().to_array(); 4]);
+    m.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]);
+    m.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0f32; 4]; 4]);
+    m.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3]));
+    m
+}
+
+/// The pool's bookkeeping: note when a view last saw each decal, and end the ones past their
+/// lifetime (`ActiveDecalInfo.LifetimeRemaining`, `m_fLifetime`).
+fn age_decals(time: Res<Time>, mut commands: Commands, mut q: Query<(Entity, &mut ContactDecal, &ViewVisibility)>) {
+    let now = time.elapsed_secs();
+    for (e, mut d, vis) in &mut q {
+        if vis.get() {
+            d.seen = now;
+        }
+        if now - d.born >= d.life {
+            commands.entity(e).despawn();
+        }
+    }
 }
 
 /// A white disc fading to transparent at its edge (`(1 - r)^power`), for procedural glows.
@@ -489,6 +557,15 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
             .filter_map(|e| {
                 let (pkg, path) = e.source.split_once(':')?;
                 Some((format!("{pkg}:{}", path.rsplit('.').next()?).to_ascii_lowercase(), (e.system, e.transform, e.auto_activate)))
+            })
+            .collect(),
+        decals: map
+            .named_materials
+            .iter()
+            .map(|(path, id)| {
+                // The decal quad is a sprite of the material (the decal shader is not run).
+                let em = ParticleEmitterAsset { material: Some(*id), blend: blend_of(map, *id), ..Default::default() };
+                (path.to_ascii_lowercase(), material_for(map, &em, images, &mut cache, mats))
             })
             .collect(),
     });
@@ -697,6 +774,13 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
         return;
     }
     for p in &sim.particles {
+        // A decal emitter's particle lies on the surface it was placed on; one without
+        // (not placed yet) is not drawn.
+        let decal_normal = match (&em.decal, p.normal) {
+            (Some(_), Some(n)) => Some(coords::dir(n).normalize_or_zero()),
+            (Some(_), None) => continue,
+            _ => None,
+        };
         let rel = (p.age / p.life).clamp(0.0, 1.0);
         let (color, alpha, size) = look(p);
         let alpha = if erode { 1.0 - alpha.clamp(0.0, 1.0) } else { alpha };
@@ -724,6 +808,17 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
             (side, v)
         } else {
             (rx, ry)
+        };
+        // (decals: flat on the surface, turned by the particle's rotation, a hair above it;
+        // adapted from dishonored-bevy by Eamon (github.com/Eamo5/dishonored-bevy), used with
+        // permission: the decal quad of its particles.rs mesh builder)
+        let (rx, ry, c) = match decal_normal {
+            Some(nb) if nb != Vec3::ZERO => {
+                let t0 = nb.any_orthonormal_vector();
+                let b0 = nb.cross(t0);
+                (t0 * co + b0 * s, b0 * co - t0 * s, c + nb * DECAL_LIFT * coords::UU_TO_BEVY)
+            }
+            _ => (rx, ry, c),
         };
         let base = pos.len() as u32;
         for (ox, oy) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
@@ -874,12 +969,13 @@ fn simulate(
             let steps = (sys.warmup * 15.0).min(300.0) as usize;
             for _ in 0..steps {
                 for (em, sim) in sys.emitters.iter().zip(inst.sims.iter_mut()) {
-                    step(em, sim, &xf, 1.0 / 15.0, &mut rnd, em.collision.as_ref().map(|_| ray_fn));
+                    step(em, sim, &xf, 1.0 / 15.0, &mut rnd, (em.collision.is_some() || em.decal.is_some()).then_some(ray_fn));
                 }
+                dispatch_events(&sys.emitters, &mut inst.sims, &xf, &mut rnd);
             }
         }
         for (i, (em, sim)) in sys.emitters.iter().zip(inst.sims.iter_mut()).enumerate() {
-            step(em, sim, &xf, dt, &mut rnd, em.collision.as_ref().map(|_| ray_fn));
+            step(em, sim, &xf, dt, &mut rnd, (em.collision.is_some() || em.decal.is_some()).then_some(ray_fn));
             live += sim.particles.len();
             let mut sprite_culled = false;
             if let Some((mh, color, params)) = lf.glow.get(&(inst.system, i)) {
@@ -1027,6 +1123,9 @@ fn simulate(
                 }
             }
         }
+        // The events the emitters generated reach the emitters that receive them (blood drops
+        // that strike a surface spawn the decal emitter's particles there).
+        dispatch_events(&sys.emitters, &mut inst.sims, &xf, &mut rnd);
         // One-shots end when every emitter is done and empty; an emitter that loops forever
         // (`EmitterLoops` 0, e.g. the Blink indicators) is deactivated after ONE_SHOT_LIMIT, its
         // particles killed (`bKillOnDeactivate`), so no spawned effect outlives its use.
@@ -1057,6 +1156,8 @@ fn gameplay_effects(
     session: Option<Res<crate::session::Session>>,
     time: Res<Time>,
     mut hands: ResMut<HandEffects>,
+    features: Option<Res<crate::map_render::RenderFeatures>>,
+    decals: Query<(Entity, &ContactDecal)>,
 ) {
     let Some(mut view) = view else { return };
     let events = view.audio_events.clone();
@@ -1069,8 +1170,33 @@ fn gameplay_effects(
     let players: Vec<PlayerState> = view.me.iter().chain(view.others.iter()).copied().collect();
     let scene = FxScene { players: &players, me, muzzle: &sockets.muzzle, bones: &sockets.bones, contact: audio.as_ref().and_then(|a| a.contact()), world: session.as_ref().map(|s| &s.content.collision), now, projectiles: &view.projectiles };
     let requests = fx.rules.requests(&events, &scene);
+    // `DisDecalManager`'s pool: (entity, made, last seen).
+    let mut pool: Vec<(Entity, f32, f32)> = decals.iter().map(|(e, d)| (e, d.born, d.seen)).collect();
+    let decals_on = features.as_deref().is_none_or(|f| f.dynamic_decals);
     for r in requests {
         match r {
+            FxRequest::Decal { material, at, normal, dir, width, height, lifetime } => {
+                if !decals_on {
+                    continue;
+                }
+                let Some(mat) = fx.levels.get(&fx.active).and_then(|lf| lf.decals.get(&material.to_ascii_lowercase())).cloned() else {
+                    warn!("effects: decal material {material} not decoded for {}", fx.active);
+                    continue;
+                };
+                // `FUN_00bc6480`: with `MAX_DECAL_COUNT` live, the first one not rendered for more
+                // than `DECAL_EVICT_AFTER` seconds goes; none to give up, no new decal.
+                if pool.len() >= dishonored_audio::contact::MAX_DECAL_COUNT {
+                    let victim = pool.iter().filter(|d| now - d.2 > dishonored_audio::contact::DECAL_EVICT_AFTER).min_by(|a, b| a.1.total_cmp(&b.1)).map(|d| d.0);
+                    let Some(victim) = victim else { continue };
+                    commands.entity(victim).despawn();
+                    pool.retain(|d| d.0 != victim);
+                }
+                let e = commands
+                    .spawn((Mesh3d(meshes.add(decal_mesh(at, normal, dir, width, height))), MeshMaterial3d(mat), Transform::IDENTITY, bevy::light::NotShadowCaster, LevelOf(fx.active.clone()), ContactDecal { born: now, life: lifetime, seen: -1000.0 }))
+                    .id();
+                pool.push((e, now, -1000.0));
+                fx.spawned_decals += 1;
+            }
             FxRequest::Effect { path, at, dir } => {
                 spawn_effect(&mut commands, &mut meshes, &mut fx, &path, at, dir);
             }

@@ -190,6 +190,9 @@ pub fn import_layout(content: &Content, layout: &MapLayout, opts: &ImportOptions
         for p in &opts.extra_particles {
             imp.particle_by_path(p);
         }
+        for p in &opts.extra_materials {
+            imp.named_material(p);
+        }
     }
     imp.stats.timings.push(("layout", t.elapsed().as_secs_f32()));
     imp.stats.instances = imp.map.instances.len();

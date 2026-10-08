@@ -251,9 +251,13 @@ pub fn spawn_lights(map: &DishonoredMap, commands: &mut Commands, features: &Ren
                         intensity: local_intensity(l),
                         range: l.radius * coords::UU_TO_BEVY,
                         radius: falloff_radius(l),
-                        // Cube shadow maps cost six scene passes; the one dominant point light
-                        // (sewer) is left unshadowed for frame time.
-                        shadow_maps_enabled: false,
+                        // The dominant point light's shadow (render_lighting.md "Dominant point
+                        // light shadows"): the original's `DynamicShadows` and
+                        // `LightEnvironmentShadows` settings are True, so the dominant light
+                        // shadows the dynamic objects (a light environment's per-object shadow).
+                        // A Bevy cube shadow map costs six scene passes, so only the dominant
+                        // light has one, and `--no-point-shadows` turns it off.
+                        shadow_maps_enabled: shadows && features.point_shadows,
                         affects_lightmapped_mesh_diffuse: true,
                         ..default()
                     },

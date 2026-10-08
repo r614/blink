@@ -37,6 +37,9 @@ pub struct ImportOptions {
     pub particles: bool,
     /// Further ParticleSystem paths to decode (gameplay effects), resolved through the index.
     pub extra_particles: Vec<String>,
+    /// Materials to import by path (the gameplay decals' materials), recorded in
+    /// `DishonoredMap::named_materials`.
+    pub extra_materials: Vec<String>,
     /// File caching the baked lightmap pages (lightmap_cache.rs); None bakes every time.
     pub lightmap_cache: Option<std::path::PathBuf>,
 }
@@ -50,6 +53,7 @@ impl Default for ImportOptions {
             other_actors: true,
             particles: true,
             extra_particles: Vec::new(),
+            extra_materials: Vec::new(),
             lightmap_cache: None,
         }
     }
@@ -274,6 +278,9 @@ pub fn import_level(
         for p in &opts.extra_particles {
             imp.particle_by_path(p);
         }
+        for p in &opts.extra_materials {
+            imp.named_material(p);
+        }
     }
     imp.stats.timings.push(("actors", t.elapsed().as_secs_f32()));
     let t = std::time::Instant::now();
@@ -293,6 +300,15 @@ pub fn import_level(
         let volumes: Vec<Option<Vec<crate::light_env::VolumeSample>>> = imp.pkgs[..level_slots].iter().map(|p| crate::light_env::read_light_volume(p)).collect();
         let lights: Vec<crate::light_env::EnvLight> = imp.pkgs[..level_slots].iter().flat_map(|p| crate::light_env::read_static_lights(p)).collect();
         crate::light_env::light_props(content, &mut imp.map, &instance_level, &volumes, &lights, &channels);
+        // The same data for the characters' light environments (`dishonored_runtime::char_light`).
+        imp.map.light_env_world = dishonored_ir::env_light::LightEnvWorld {
+            lights: lights.iter().map(|l| l.to_data()).collect(),
+            volumes: volumes
+                .iter()
+                .zip(&imp.pkgs[..level_slots])
+                .filter_map(|(v, p)| v.as_ref().map(|v| dishonored_ir::env_light::LightVolumeData { level: p.name.clone(), samples: v.iter().map(|s| s.to_data()).collect() }))
+                .collect(),
+        };
         imp.stats.timings.push(("light environments", t.elapsed().as_secs_f32()));
     }
     imp.stats.unresolved_paths.sort();
@@ -722,6 +738,14 @@ impl Importer<'_> {
     fn particle_by_path(&mut self, path: &str) -> Option<usize> {
         let k = *self.index.get(&path.to_ascii_lowercase())?;
         self.particle_system(k)
+    }
+
+    /// Import a material by object path (a gameplay decal's) and record it by name.
+    fn named_material(&mut self, path: &str) -> Option<MaterialId> {
+        let k = *self.index.get(&path.to_ascii_lowercase())?;
+        let id = self.material(k)?;
+        self.map.named_materials.push((path.to_string(), id));
+        Some(id)
     }
 
     /// Arkane `DisFog` layer (defaults from `Engine.Default__DisFogComponent`: Opacity 0.8,
@@ -1251,14 +1275,25 @@ impl Importer<'_> {
         let stealth_shadow = self.component_stealth_shadow(&pkg, ci);
         if self.opts.load_textures && self.opts.load_lightmaps {
             match pkg.export_data(ci).and_then(|d| read_static_mesh_component_lods(d, native_offset)) {
-                Ok(lods) => match lods.into_iter().next().map(|l| (l.lightmap, l.shadow_maps)) {
-                    Some((LightMapRef::Texture(lm), shadow_maps)) => {
-                        self.stats.lightmaps_texture += 1;
-                        let shadows = shadow_maps.into_iter().filter_map(|s| self.distance_field_shadow_map(slot, s)).collect();
-                        self.pending_lightmaps.push(PendingLightmap { instance: self.map.instances.len(), slot, lm, shadows });
+                Ok(lods) => match lods.into_iter().next().map(|l| (l.lightmap, l.shadow_maps, l.shadow_vertex_buffers)) {
+                    Some((lightmap, shadow_maps, vertex_buffers)) => {
+                        // Per-vertex shadow maps of the dominant light (`ShadowMap1D`).
+                        for obj in vertex_buffers {
+                            if let Some(s) = self.vertex_shadow_map(slot, obj) {
+                                self.map.vertex_shadows.push(dishonored_ir::VertexShadow { instance: self.map.instances.len(), light_guid: s.light_guid, samples: s.samples });
+                            }
+                        }
+                        match lightmap {
+                            LightMapRef::Texture(lm) => {
+                                self.stats.lightmaps_texture += 1;
+                                let shadows = shadow_maps.into_iter().filter_map(|s| self.distance_field_shadow_map(slot, s)).collect();
+                                self.pending_lightmaps.push(PendingLightmap { instance: self.map.instances.len(), slot, lm, shadows });
+                            }
+                            LightMapRef::Vertex { .. } => self.stats.lightmaps_vertex += 1,
+                            LightMapRef::None => self.stats.lightmaps_none += 1,
+                        }
                     }
-                    Some((LightMapRef::Vertex { .. }, _)) => self.stats.lightmaps_vertex += 1,
-                    _ => self.stats.lightmaps_none += 1,
+                    None => self.stats.lightmaps_none += 1,
                 },
                 Err(_) if is_spline => self.stats.lightmaps_none += 1,
                 Err(e) => {
@@ -1687,6 +1722,15 @@ impl Importer<'_> {
         };
         let texture = self.resolve(k.0, ObjRef::from_index(find(p, "Texture")?.as_object()?))?;
         Some(ShadowMapRef { light_guid, texture, scale: v2("CoordinateScale")?, bias: v2("CoordinateBias")? })
+    }
+
+    /// A component LOD's `ShadowMap1D` (`ShadowVertexBuffers`): the dominant light's visibility per
+    /// vertex (lightmap.rs `read_shadow_map_1d`).
+    fn vertex_shadow_map(&mut self, slot: usize, obj: i32) -> Option<crate::lightmap::ShadowMap1D> {
+        let k = self.resolve(slot, ObjRef::from_index(obj))?;
+        let pkg = self.pkgs[k.0].clone();
+        let native_offset = pkg.read_object(k.1).ok()?.native_offset;
+        crate::lightmap::read_shadow_map_1d(pkg.export_data(k.1).ok()?, native_offset).ok()
     }
 
     /// `LightGuid`s of the levels' `DominantDirectionalLightComponent`s.
