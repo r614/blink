@@ -415,9 +415,9 @@ from the tweaks (`Twk_Blink.m_pGroundPS`, `Twk_WindBlast.m_EffectTemplate`,
 `Twk_DevouringSwarm.m_pSpawnFX`, the grenade's `m_pExplosionEffect`, ...) and decoded rules
 (AI.md attention increases, COLLISION.md step / slope limits).
 
-**Results (2026-10-08, worktree branch, release build, 16 threads):** 46 scenarios in 9.8 s
-(the Boyle Kismet one 10 s alone; the rest 0.01-1.8 s each; maps and effects load once):
-27 pass, 14 fail, 5 unmeasured; checks 81 pass, 27 fail, 36 unmeasured, 10 unverified (46
+**Results (2026-10-08, worktree branch, release build, 16 threads):** 46 scenarios in 6-10 s
+(the Boyle Kismet one 5-10 s alone; the rest 0.01-1.8 s each; maps and effects load once):
+28 pass, 13 fail, 5 unmeasured; checks 84 pass, 24 fail, 36 unmeasured, 10 unverified (46
 capture requests). Matching the hook's measurements: Blink range (1096.7 / 1597.7), aimed-up
 target (1385.8 / +500.0), travel 0.267 s, cost 20 and refund; Windblast 26 damage, cost 50; Bend
 Time 0.15 / 0.85 / 12.0 s; grenade fuse 3.0 s; pistol shot to load 1.483 s, dispersion 70 / s,
