@@ -47,6 +47,8 @@ enum Kind {
     Bool(u32),
     /// Unreal rotator units (i32) -> degrees in [0, 360).
     RotDeg,
+    /// A raw object pointer (hidden channels turned into events after the run).
+    Ptr,
 }
 
 struct Chan {
@@ -80,6 +82,7 @@ fn value(k: Kind, b: &[u8]) -> f64 {
         Kind::U8 => b[0] as f64,
         Kind::Bool(m) => (u(b) & m != 0) as u8 as f64,
         Kind::RotDeg => ((u(b) as i32).rem_euclid(65536)) as f64 * 360.0 / 65536.0,
+        Kind::Ptr => u(b) as f64,
     }
 }
 
@@ -181,6 +184,51 @@ fn npc_pawn(s: &mut Session, name: &str) -> Result<u32> {
         }
     }
     bail!("{name}: neither a pawn nor a spawner with a live pawn")
+}
+
+/// Offset of a property in an object's class (or its supers).
+fn field_off(s: &mut Session, obj: u32, name: &str) -> Result<u32> {
+    let cls = s.r.class_of(&mut s.c, obj)?;
+    Ok(s.r.field(&mut s.c, cls, name, false)?.with_context(|| format!("no property {name}"))?.offset)
+}
+
+/// The NPC's AI brain state per tick (DishonoredAIBrain via Pawn.Controller.m_pAIBrain):
+/// `npc.<n>.suspicion`, `.top_attn_level`, `.top_enemy_attn_level`, the player attention entry
+/// (`.player_attn.level` / `.value`), the first four attention entries (`.attn<i>.level` /
+/// `.value`), and hidden pointer channels for the current behaviour and the 19 behaviour-stack
+/// slots (turned into `NpcBehavior` events).
+fn add_brain_channels(s: &mut Session, ch: &mut Channels, name: &str, np: u32) -> Result<()> {
+    let ctrl_off = field_off(s, np, "Controller")?;
+    let ctrl = s.c.read_u32(np + ctrl_off)?;
+    anyhow::ensure!(ctrl != 0, "no controller");
+    let brain_off = field_off(s, ctrl, "m_pAIBrain")?;
+    let brain = s.c.read_u32(ctrl + brain_off)?;
+    anyhow::ensure!(brain != 0, "no brain");
+    let b = |s: &mut Session, f: &str| field_off(s, brain, f);
+    let (susp, top, top_enemy, cur, stack, attn) = (b(s, "m_SuspicionLevel")?, b(s, "m_TopAttnTargetAttentionLevel")?, b(s, "m_TopEnemyAttnTargetAttentionLevel")?, b(s, "m_pCurrentBehavior")?, b(s, "m_ActiveBehaviorStack")?, b(s, "m_pAttentionProcess")?);
+    let path = |offs: Vec<u32>, len: u32| Some(ReadPath { base: np, offsets: offs, len });
+    let mut push = |name: String, unit: &str, offs: Vec<u32>, kind: Kind| ch.list.push(Chan { name, unit: unit.into(), path: path(offs, len_of(kind)), kind, speed_of: None });
+    push(format!("npc.{name}.suspicion"), "enum", vec![ctrl_off, brain_off, susp], Kind::U8);
+    push(format!("npc.{name}.top_attn_level"), "enum", vec![ctrl_off, brain_off, top], Kind::U8);
+    push(format!("npc.{name}.top_enemy_attn_level"), "enum", vec![ctrl_off, brain_off, top_enemy], Kind::U8);
+    push(format!("npc.{name}.brain.current"), "ptr", vec![ctrl_off, brain_off, cur], Kind::Ptr);
+    for k in 0..19u32 {
+        push(format!("npc.{name}.brain.slot{k}"), "ptr", vec![ctrl_off, brain_off, stack + 4 * k], Kind::Ptr);
+    }
+    let proc_ = s.c.read_u32(brain + attn)?;
+    if proc_ != 0 {
+        let infos = field_off(s, proc_, "m_AttentionInfos")?;
+        let player = field_off(s, proc_, "m_pPlayerAttentionInfo")?;
+        // DisAttentionInfo_Complex: m_AttentionAccumulator.m_fCurrentValue +0x8C, level +0xAC.
+        push(format!("npc.{name}.player_attn.level"), "enum", vec![ctrl_off, brain_off, attn, player, 0xac], Kind::U8);
+        push(format!("npc.{name}.player_attn.value"), "", vec![ctrl_off, brain_off, attn, player, 0x8c], Kind::F32);
+        push(format!("npc.{name}.attn_count"), "", vec![ctrl_off, brain_off, attn, infos + 4], Kind::I32);
+        for i in 0..4u32 {
+            push(format!("npc.{name}.attn{i}.level"), "enum", vec![ctrl_off, brain_off, attn, infos, 4 * i, 0xac], Kind::U8);
+            push(format!("npc.{name}.attn{i}.value"), "", vec![ctrl_off, brain_off, attn, infos, 4 * i, 0x8c], Kind::F32);
+        }
+    }
+    Ok(())
 }
 
 fn exe_hash() -> Result<[u8; 32]> {
@@ -313,22 +361,57 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     for f in &spec.setup.story_flags {
         gap(format!("story flag {f:?}"), &mut warnings)?;
     }
-    for n in &spec.setup.npcs {
-        match (&n.spawner, &n.tweak, &n.state) {
-            (Some(name), None, None) => {
-                if let Some(p) = n.position {
-                    let pawn = npc_pawn(s, name)?;
-                    let mut b = Vec::new();
-                    for v in (glam::Vec3::from(p) + off).to_array() {
-                        b.extend(v.to_le_bytes());
+    // NPCs: an existing pawn (by spawner / pawn name) or, for a placement by position, one of the
+    // host level's live NPCs of the kind (guards: `*Guard*` tweaks, civilians: the others)
+    // teleported there. `Passive` unpossesses it (no AI: a dummy that takes damage); `Idle`
+    // keeps its own AI; other states, factions, routes and tweaks are not applied yet (U-802).
+    let mut placed: HashMap<String, u32> = HashMap::new();
+    let mut used: Vec<u32> = Vec::new();
+    for (k, n) in spec.setup.npcs.iter().enumerate() {
+        let id = n.id.clone().or_else(|| n.spawner.clone()).unwrap_or_else(|| format!("npc{k}"));
+        let pawn = match &n.spawner {
+            Some(name) => npc_pawn(s, name)?,
+            None => {
+                let guard = n.kind.as_deref().unwrap_or("Guard").eq_ignore_ascii_case("Guard");
+                let cand = crate::lab::npcs(&mut s.c)?.into_iter().find(|c| c.health > 0 && !used.contains(&c.addr) && c.tweak.contains("Guard") == guard && !c.tweak.contains("Tallboy") && !c.tweak.contains("Boatman") && !c.tweak.contains("LordShaw"));
+                match cand {
+                    Some(c) => c.addr,
+                    None => {
+                        gap(format!("NPC {id}: no free live {} in the host level to place", if guard { "guard" } else { "civilian" }), &mut warnings)?;
+                        continue;
                     }
-                    s.c.write(pawn + 0xc4, &b)?;
-                    let yaw = ((n.yaw / 360.0 * 65536.0).round() as i32) & 0xffff;
-                    s.c.write(pawn + 0xd4, &yaw.to_le_bytes())?;
                 }
             }
-            _ => gap(format!("NPC setup {n:?} (only moving an existing pawn / spawner's pawn is supported)"), &mut warnings)?,
+        };
+        used.push(pawn);
+        if n.tweak.is_some() {
+            gap(format!("NPC {id}: tweak {:?} not applied (the host level's pawn keeps its own)", n.tweak), &mut warnings)?;
         }
+        if n.faction.is_some() || !n.route.is_empty() {
+            gap(format!("NPC {id}: faction / route not applied"), &mut warnings)?;
+        }
+        if let Some(p) = n.position {
+            let at = glam::Vec3::from(p) + off;
+            let pl = s.r.place(&mut s.c, pawn, "Location")?;
+            s.r.write_place(&mut s.c, &pl, &json!([at.x, at.y, at.z]))?;
+            let pl = s.r.place(&mut s.c, pawn, "Velocity")?;
+            s.r.write_place(&mut s.c, &pl, &json!([0, 0, 0]))?;
+            let yaw = ((n.yaw / 360.0 * 65536.0).round() as i32) & 0xffff;
+            s.c.write(pawn + 0xd4, &yaw.to_le_bytes())?;
+            let _ = s.r.call(&mut s.c, pawn, "SetLocation", &json!([[at.x, at.y, at.z]]));
+        }
+        match n.state.as_deref() {
+            None | Some("Idle") => {}
+            Some("Passive") => {
+                let co = field_off(s, pawn, "Controller")?;
+                let ctrl = s.c.read_u32(pawn + co)?;
+                if ctrl != 0 {
+                    s.r.call(&mut s.c, ctrl, "UnPossess", &Value::Null)?;
+                }
+            }
+            Some(st) => gap(format!("NPC {id}: AI state {st} not applied"), &mut warnings)?,
+        }
+        placed.insert(id, pawn);
     }
     let p = spec.setup.player.clone().unwrap_or_default();
     if let Some(ps) = &spec.setup.player {
@@ -416,10 +499,16 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     }
     for r in &spec.record {
         if let Record::Npc(name) = r {
-            let np = npc_pawn(s, name)?;
+            let np = match placed.get(name) {
+                Some(p) => *p,
+                None => npc_pawn(s, name)?,
+            };
             ch.add_path(s, &format!("npc.{name}"), "uu", np, "Location")?;
             ch.add_path(s, &format!("npc.{name}.health"), "pt", np, "Health")?;
             ch.add_path(s, &format!("npc.{name}.physics"), "enum", np, "Physics")?;
+            if let Err(e) = add_brain_channels(s, &mut ch, name, np) {
+                warnings.push(format!("npc {name}: no AI brain channels ({e:#})"));
+            }
         }
     }
     // The world clock of every sample (`world.dt` is derived after the run): frame-timing
@@ -598,6 +687,36 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
         let obj = name(s, r.object);
         let cls = obj.split(' ').next().unwrap_or("").to_string();
         trace.events.push(TraceEvent { tick: r.tick.wrapping_sub(base), kind: "Spawn".into(), object: short_path(&obj), name: cls, detail: String::new() });
+    }
+    // Hidden pointer channels -> `NpcBehavior` events (the class of the current behaviour and
+    // of each occupied slot of the active stack, whenever it changes), then dropped.
+    let hidden: Vec<usize> = trace.channels.iter().enumerate().filter(|(_, c)| c.unit == "ptr").map(|(i, _)| i).collect();
+    let mut class_names: HashMap<u32, String> = HashMap::new();
+    for &i in &hidden {
+        let cname = trace.channels[i].name.clone();
+        let (npc, what) = cname.strip_prefix("npc.").and_then(|r| r.split_once(".brain.")).map(|(a, b)| (a.to_string(), b.to_string())).unwrap_or_default();
+        let mut prev = f64::NAN;
+        for fr in &trace.frames {
+            let v = fr.values[i];
+            if v == prev || (v.is_nan() && prev.is_nan()) {
+                continue;
+            }
+            prev = v;
+            let obj = if v.is_nan() { 0 } else { v as u32 };
+            let cls = if obj == 0 {
+                "None".to_string()
+            } else {
+                let cl = s.c.read_u32(obj + 0x30).unwrap_or(0);
+                class_names.entry(cl).or_insert_with(|| s.c.name_of(cl).ok().map(|n| n.rsplit('.').next().unwrap_or("").to_string()).unwrap_or_default()).clone()
+            };
+            trace.events.push(TraceEvent { tick: fr.tick, kind: "NpcBehavior".into(), object: format!("npc.{npc}"), name: cls, detail: what.clone() });
+        }
+    }
+    for &i in hidden.iter().rev() {
+        trace.channels.remove(i);
+        for fr in trace.frames.iter_mut() {
+            fr.values.remove(i);
+        }
     }
     trace.events.sort_by_key(|e| e.tick);
     // ---- store ----

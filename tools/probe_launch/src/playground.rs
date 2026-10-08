@@ -127,6 +127,9 @@ impl Session {
         self.r.call(&mut self.c, a, "SetRotation", &json!([[units(rot[0]), units(rot[1]), units(rot[2])]]))?;
         self.r.call(&mut self.c, a, "SetCollision", &json!([true, true]))?;
         self.r.call(&mut self.c, a, "SetCollisionType", &json!(["COLLIDE_BlockAll"]))?;
+        // Ragdolls and physics objects (PhysX) collide with it too.
+        let _ = self.r.call(&mut self.c, comp, "SetBlockRigidBody", &json!([true]));
+        let _ = self.r.call(&mut self.c, a, "ReattachComponent", &json!([hex(comp)]));
         Ok(a)
     }
 

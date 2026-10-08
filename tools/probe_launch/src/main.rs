@@ -18,6 +18,8 @@
 //!     The persistent hooked session and its JSON ops (session.rs, ORACLE.md).
 //! probe_launch scenario <NAME | file.ron>... [--no-reload] [--partial] [--channel ..] [--json OUT]
 //!     Per-tick trace of a scenario spec into the oracle cache (capture.rs).
+//! probe_launch queue run [FILE] [--out RESULTS.json] [--skip-layouts] [--only PREFIX]
+//!     The capture queue (fixtures/oracle/capture_queue.txt) in the running session (queue.rs).
 use anyhow::{Context, Result, bail};
 use dishonored_probe::Client;
 use std::path::PathBuf;
@@ -26,6 +28,7 @@ mod capture;
 mod lab;
 mod measure;
 mod playground;
+mod queue;
 mod reflect;
 mod session;
 mod oracle;
@@ -158,6 +161,7 @@ fn main() -> Result<()> {
         }
         "kill" => kill_session()?,
         "session" => session::run(&args[1..])?,
+        "queue" => queue::run(&args[1..])?,
         "scenario" => capture::run(&args[1..])?,
         "ping" => println!("{:?}", connect()?.ping()?),
         "status" => print!("{}", connect()?.status()?),

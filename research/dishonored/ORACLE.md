@@ -490,6 +490,7 @@ Ops (arguments as JSON keys):
 | `select_power` | `component` (`DisActivePowerComponent_DarkVision`, `DishonoredActivePowerComponent_Possess`...) | the left hand on that power (after `power`) |
 | `run` | `ticks`, `channels` {name: "object:path"}, `keys` [[tick, key, down]], `console` [[tick, cmd]], `events`, `spawns`, `damage` (pawn damage path), `every` | per-tick frames (end-of-tick state) inside the game, events / spawns / damage with ticks |
 | `attention` | `npc` | the NPC's `PlayerAttnInfo` (`DisAttentionInfo_Complex`) |
+| `layout` | `map` (or `file`), `offset` [0, 0, 20000], `reload`, `host` | builds a layout map in the host level (below) |
 | `shaders` | `since` (id) | the distinct pixel and vertex shaders the game created (D3D9 `CreatePixelShader` / `CreateVertexShader`), bytecode written to `$DISHONORED_CACHE/oracle/shaders/<exe16>/{ps,vs}_<fnv64>.bin`; id, kind, creation tick, CTAB parameter -> register layout |
 | `census` | `frames` | pixel shaders drawn per frame (draws, primitives, CTAB) while the world runs |
 | `psconst` | `hash`, `draws` | live constants of the next draws with that shader, by CTAB parameter name |
@@ -567,7 +568,7 @@ created as materials are first used during the load (7283 distinct, 6365 PS + 91
 Boyle Ext); casting a power created no new ones, so the effect shaders come from the store and
 are identified by drawing.
 
-`scratchpad P2_out/effect.ps1 -Label L -Power P -Level N -Component C` (session ops `census`,
+`tools/probe_launch/scripts/effect.ps1 -Label L -Power P -Level N -Component C` (session ops `census`,
 `select_power`, `run`, `shaders`, `psconst`) writes
 `$DISHONORED_CACHE/oracle/shaders/<exe16>/effects/<label>.json`: the census before the cast and
 while active, the shaders drawn only while active (hash, CTAB layout; bytecode in the store as
@@ -581,6 +582,47 @@ aiming, the same vector-field blur and SceneColor-sampling material passes), `da
 (27, mostly the lit scene variants Dark Vision switches to), `possession_l2` (17 during the
 transfer). The "drawn only while active" sets include scene shaders whose draws changed with the
 view; decode with `fxc /dumpbin` against the CTAB names. Never committed.
+### The capture queue (`probe_launch queue run`)
+
+`probe_launch queue run [fixtures/oracle/capture_queue.txt] [--out harness_out/oracle/capture_queue_results.json] [--skip-layouts] [--only PREFIX]`
+runs the queue in the running session, in file order: a scenario name is captured like
+`probe_launch scenario NAME` (fresh map, strict setup: a setup the original cannot reproduce
+fails with the reason instead of being forced), a `session <op> key=value...` line runs that op.
+The results file maps every line to ok / failed / skipped with the reason or the answer; the
+traces go to the oracle cache. Run it from the repository root.
+
+### Layout maps in the original (the Playground)
+
+A scenario whose map has a layout file (`maps/<map>.ron`, the Playground) is captured by
+building the layout in the host level `L_Boyle_Ext_P` at +20000 uu z (`session layout
+map=Playground`; 161 boxes, 9 meshes, 13 actors, 2 volumes in 2.5 s): every box, stair step and
+ramp is an `InterpActor` with the level blockout cube `Env_Blockout.staticmeshes.Cube_100`
+(100 uu, simple box collision) scaled and rotated to it (a `DynamicSMActor_Spawnable` turns
+`PHYS_RigidBody` and falls once a pawn steps off it); original meshes the same way; doors,
+usables, pickups and the chain copied with `Spawn(ActorTemplate = the placed original)` (the
+chain from Boyle's basement is replaced by the exterior's `DisClimbable_3`); the pool and the
+pain floor reuse a host `DishonoredWaterVolume` / `PhysicsVolume` moved and scaled. The trace's
+positions are converted back (`pawn.*`, `camera.*`, `npc.*` minus the offset). Engine checks hit
+the cubes exactly (line hits 1 uu above a top face, pawn boxes at top + 72 + 1). Not built: the
+lights (the stealth lane's light levels differ), labels and the nav grid; PhysX bodies
+(ragdolls, physics props) fall through the cubes (U-806). Measured on the original Playground:
+`movement/step_50` climbed (z 91.2 -> 141.2), `step_56` not, the 45 degree slope walked at
+400 uu/s to its 400 top, the 55 degree slope not.
+
+### NPCs in original traces
+
+- Placement by position (`npcs: [(position: ..)]`): a live NPC of the host level of the kind
+  (`*Guard*` tweaks for guards, the others for civilians; not Tallboys, the boatman, Shaw) is
+  teleported there; `Passive` unpossesses it (no controller, no AI: it takes damage and falls
+  like a dummy); `Idle` keeps its own AI. Tweaks, factions, routes and other states are setup
+  gaps (U-802).
+- Brain channels per `Npc(id)` (through `Pawn.Controller.m_pAIBrain`, `DishonoredAIBrain`):
+  `npc.<id>.suspicion` (`m_SuspicionLevel`), `.top_attn_level`, `.top_enemy_attn_level`,
+  `.player_attn.level` / `.value` (`m_pAttentionProcess.m_pPlayerAttentionInfo`, accumulator
+  +0x8C, level +0xAC), `.attn_count` and `.attn<0..3>.level` / `.value`
+  (`m_AttentionInfos`), and `NpcBehavior` events naming the class of `m_pCurrentBehavior`
+  (+0x14C, detail `current`) and of each occupied slot of `m_ActiveBehaviorStack` (+0x100, 19
+  slots, detail `slot<k>`) whenever they change.
 ### Usage for fuzzing agents
 
 Start (or reuse) the session with `probe_launch session start --map <M>` (a running session is
