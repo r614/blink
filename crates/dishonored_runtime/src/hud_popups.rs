@@ -404,6 +404,8 @@ pub enum HudTest {
         #[serde(default)]
         release: bool,
     },
+    /// A game save: the saving notification (`hud_global.rs`).
+    Saving,
 }
 
 fn five() -> f32 {
@@ -471,7 +473,7 @@ pub fn apply_test(t: HudTest, q: &mut PopupQueue, w: &mut HudWidgets, st: &mut S
             }
         }
         // Handled by the wheel (`hud_wheel::update_power_wheel`).
-        HudTest::Wheel { .. } | HudTest::WheelAngle { .. } | HudTest::Shortcut { .. } => {}
+        HudTest::Wheel { .. } | HudTest::WheelAngle { .. } | HudTest::Shortcut { .. } | HudTest::Saving => {}
         HudTest::Location { name } => {
             if let Some(l) = w.location.as_mut() {
                 l.set_location(st, &name, crate::gfx_hud::LOCATION_DISCOVERY_DURATION);

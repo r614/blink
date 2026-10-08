@@ -130,6 +130,9 @@ pub mod hud_sounds;
 /// [hud] The quick-access wheel movie (`UI_PowerWheel_SF`) and its native driver.
 #[doc(hidden)]
 pub mod hud_wheel;
+/// [hud] The saving notification (`UI_Global.Global`).
+#[doc(hidden)]
+pub mod hud_global;
 #[doc(hidden)]
 pub mod saves;
 /// [playground] In-world labels of layout maps.
@@ -441,7 +444,8 @@ pub fn main() {
             .add_systems(Update, (gfx_hud::update_gfx_hud.after(input_map::gather_input).after(players::camera_follow), gfx_hud::draw_gfx_hud.after(gfx_hud::update_gfx_hud)))
             // [hud] the quick-access wheel: opened / closed before the input is read (it takes
             // the mouse while open), drawn above the HUD.
-            .add_systems(Startup, hud_wheel::setup_power_wheel)
+            .add_systems(Startup, (hud_wheel::setup_power_wheel, hud_global::setup_global_movie))
+            .add_systems(Update, (hud_global::update_global_movie.before(gfx_hud::update_gfx_hud), hud_global::draw_global_movie.after(hud_global::update_global_movie).after(hud_wheel::draw_power_wheel)))
             .add_systems(Update, (hud_wheel::update_power_wheel.before(input_map::gather_input).after(pause_menu::rebuild), hud_wheel::draw_power_wheel.after(hud_wheel::update_power_wheel).after(gfx_hud::draw_gfx_hud)))
             .init_resource::<viewmodel::ViewAnim>()
             .init_resource::<viewmodel::BodyFrames>()

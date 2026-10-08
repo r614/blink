@@ -20,6 +20,8 @@ pub struct Saves {
     pending: Vec<Cmd>,
     /// Last result, shown on the HUD feed.
     pub last: Option<String>,
+    /// Saves written so far (the saving notification, `hud_global.rs`, shows on a change).
+    pub written: u32,
 }
 
 enum Cmd {
@@ -29,7 +31,7 @@ enum Cmd {
 
 impl Saves {
     pub fn new(mission_path: Option<String>) -> Self {
-        Saves { mission_path, dir: dishonored_save::saves_dir(), pending: Vec::new(), last: None }
+        Saves { mission_path, dir: dishonored_save::saves_dir(), pending: Vec::new(), last: None, written: 0 }
     }
     /// `Dis_Save(slot)`.
     pub fn save(&mut self, slot: i32) {
@@ -117,7 +119,13 @@ pub fn process(mut saves: ResMut<Saves>, mut session: ResMut<Session>, mut view:
     let cmds = std::mem::take(&mut saves.pending);
     for c in cmds {
         let r = match c {
-            Cmd::Save(s) => save_now(&saves, &mut session, s),
+            Cmd::Save(s) => {
+                let r = save_now(&saves, &mut session, s);
+                if r.is_ok() {
+                    saves.written += 1;
+                }
+                r
+            }
             Cmd::Load(p) => load_into(&mut session, &p).map(|h| format!("Loaded {}", h.title)),
         };
         let msg = r.unwrap_or_else(|e| format!("{e:#}"));
@@ -171,7 +179,10 @@ pub fn write_autosaves(mut saves: ResMut<Saves>, mut session: ResMut<Session>) {
             save::SaveRequest::MissionStart(s) => s,
         };
         match save::encode(m, s, &path).and_then(|b| dishonored_save::write_file(&dishonored_save::slot_path(&dir, s), &b)) {
-            Ok(()) => saves.last = Some(format!("autosave {}", dishonored_save::slot_file(s))),
+            Ok(()) => {
+                saves.last = Some(format!("autosave {}", dishonored_save::slot_file(s)));
+                saves.written += 1;
+            }
             Err(e) => warn!("autosave failed: {e:#}"),
         }
     }
