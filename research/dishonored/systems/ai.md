@@ -1,0 +1,374 @@
+# AI behaviour: the core model, checked against the port
+
+Scope: the NPC brain (`DishonoredAIBrain`, its behaviours, processes and stimuli), patrol, investigate,
+search, combat, ranged and special NPCs, civilians, bodies and magic. Perception (vision cones, light,
+attention accumulation) belongs to the stealth system doc; where AI consumes it, only the interface is
+noted. Detailed decodes that already exist stay in `research/dishonored/AI.md` (attention code, combat
+moves, rats, go-to completion, alarm bells, hearing through audio cells); this file adds the brain's
+decision machinery, the missing rules and the port comparison.
+
+Sources: `oracle index` (decompiled `Dishonored.exe` 70da9613, UnrealScript index), the cooked tweak
+data (`tweaks`, level packages `L_Boyle_Ext_Script` and `L_Boyle_Int_Script` loaded), `enum_dump`
+(`DishonoredGame.upk`), `DefaultAI.ini`, the port source, and the port runner
+(`oracle scenario`, results of 2026-10-08). Nothing decompiled is reproduced here. Evidence grades:
+CONFIRMED (read from code or data), LIKELY (consistent reading, not traced), UNVERIFIED (needs the
+original running).
+
+## 1. The brain: stimuli, slots, behaviours
+
+### 1.1 Rule: behaviours are chosen by stimulus, and priority is the slot number (CONFIRMED)
+
+`DishonoredAIBrain` (size 0x1f4, vtable 0x01133ce0) owns:
+- `m_BehaviorArray` (+0x178): the behaviours built from the brain tweak's `m_BehaviorTweak[]`, in tweak
+  order (the difficulty column picks the Easy variant of combat only);
+- `m_ActiveBehaviorStack[19]` (+0x100): one behaviour per `EAISlot`; `m_pCurrentBehavior` (+0x14c);
+- `m_StimQueue` (+0x164): stimuli with a delay in seconds (`DisStimRef` = stimulus + float);
+- `m_BrainProcesses` (+0x150): the processes (below).
+
+Per brain tick (0x00b17100 -> queue drain 0x00b16eb0 -> dispatch 0x00b11960):
+1. Every queued stimulus whose delay is `<= 0` leaves the queue and is dispatched; the others wait. The
+   delay is how a reaction delay is applied: a stimulus is queued with `m_ReactionDelay`
+   (`DefaultAI.ini`: 0.18-0.30 s), `m_MagicReactionDelay` (0.20-0.30 s), `m_TetherDelay` (6-8 s),
+   `m_BullyCooldownPeriod` (3-8 s).
+2. A brain whose sense flags (+0x88) exclude the stimulus drops it (0x00b03f10: the deaf / blind /
+   numb switches of `DisSeqAct_AISetSenses`).
+3. Dispatch order: the already-active behaviours are offered the stimulus from the highest slot down
+   (filter mask `m_pFilterStimMask`, the sub-process filter, the "complete" mask, and
+   `m_pShouldFinishWhileDormantStimMask` for the paused ones). If the top one filters it, dispatch
+   ends. Otherwise every behaviour in `m_BehaviorArray` order whose **evaluate mask**
+   (`m_pEvaluateStimMask`) contains the stimulus is asked to evaluate it; for each slot only the first
+   behaviour in tweak order that accepts wins. The winner replaces whatever occupies its slot (that
+   one is aborted) and starts; if the brain's current behaviour sits in a **lower** slot than the new
+   one, the current one is dropped and the new one becomes current.
+4. After the drain (0x00b17100), behaviours whose complete flag is set (or that report finished) are
+   removed from their slot, and if no current behaviour remains **the highest occupied slot becomes
+   current**. A behaviour in a lower slot therefore stays alive but dormant while a higher one runs and
+   resumes when the higher one finishes; this is how patrol resumes after a notice or a search.
+
+So the "priority" of a behaviour is exactly its `EAISlot`, and the state machine of the NPC is the
+slot stack, not a single enum.
+
+`EAISlot` (enum_dump, ascending priority): 0 Idle, 1 Fulfill, 2 Act, 3 Notice, 4 Perform, 5 Search,
+6 Distraction, 7 React, 8 Engage, 9 Evade, 10 Resign, 11 Combat, 12 Adapt, 13 Alert, 14 Awe,
+15 Escape, 16 Preserve, 17 Comply, 18 Inhibited.
+
+### 1.2 Behaviour list of the Boyle elite guard (`BrainTweaks_Guard_Elite_Party`), slot and activation
+
+Slot from each behaviour tweak's `m_DesignatedSlot` (a blank is the enum default, Idle). Activation is
+the evaluate mask of the behaviour class (read from the class's mask getter; one stimulus each unless
+listed):
+
+| behaviour (tweak order) | slot | evaluates | notes |
+|---|---|---|---|
+| TriggerAlarm | 13 Alert | EnemyBusted, ForceRingAlarm, Help, WitnessDeath | chance tweak, see AI.md "Alarm bells" |
+| EscapeExplosion | 16 Preserve | | |
+| Follow (not interruptible) | 17 Comply | | |
+| GoHome | 10 Resign | TetherRequest | |
+| EnemyUnreachable | 12 Adapt | ReachabilityChange | menace / stare |
+| CombatRatSwarm(EliteGuard) | 8 Engage | | rats |
+| **Combat** (CombatEliteGuard) | 11 Combat | CombatBegin | |
+| BattleVictory | 2 Act | BattleVictory | |
+| **Search** | 5 Search | SearchBegin | |
+| TakePosition (high / default) | 17 Comply / 1 Fulfill | | scripted go-to |
+| PatrolSearch | 0 Idle | PatrolSearchRequest | |
+| **Patrol** | 0 Idle | PatrolRequest | |
+| **Idle** | 0 Idle | BrainInit, IdleRequest | |
+| BlockingDialog / Soiree / Interact | 4, 2, 6 | BlockingDialogRequest, Soiree, ... | |
+| RatStomp, Stolen | 7 React | | |
+| Shoot (Kismet) | 17 Comply | ShootRequest | |
+| Guard | 0 Idle | GuardRequest | |
+| **Notice** | 3 Notice | NoticeBegin | |
+| React | 7 React | ReactionRequest | |
+| MagicResponse | 14 Awe | WitnessMagic | |
+| ReturnTravel | 0 Idle | ReturnTravelRequest | |
+
+Civilian list (`BrainTweaks_Civilian`): StationarySearch (5 Search, SearchBegin), **Panic** (15 Escape,
+Panicked), EscapeExplosion, Follow, TakePosition, BlockingDialog, Interact, RatStomp, PatrolSearch,
+Patrol, Idle, Soiree, Notice (3), React (7), MagicResponse (14). City guard (`BrainTweaks_Guard`) has
+the same layout with `CombatCityGuard`, a Panic behaviour (`TweaksBehavior_Panic_CityGuard`, Escape),
+EscapePlague (9 Evade) and aggressive patrol / idle / guard variants. Overseers use
+`BrainTweaks_OverSeerMusical`: `DisBehaviorMusicalCombat` in slot Combat, a musical patrol, no pistol
+elite behaviours.
+
+Consequences (all CONFIRMED from the slot numbers):
+- Routine behaviours (Patrol, PatrolSearch, Idle, Guard, ReturnTravel) share slot 0; a request for one
+  replaces the other. They are triggered by explicit requests (spawner flags, Kismet, the end of a
+  search), never by attention.
+- Notice (3) < Search (5) < React (7) < Combat (11) < Alert (13, the alarm) < Awe (14, magic) < Escape
+  (15, panic) < Comply (17, scripted orders). A guard in combat is not interrupted by a new Search or
+  Notice stimulus (they take their slots but stay dormant); the alarm run (13), a magic response (14)
+  and any scripted order (17) do interrupt combat.
+- Combat ending posts `CombatToSearch` / `CombatEnd`; the Search behaviour (already dormant in slot 5)
+  or the paused routine behaviour then resumes.
+
+### 1.3 Brain processes (`m_BrainProcessTweaks`)
+
+Guards: Attention (`DisAIBrainProcessAttention`, drives the stimuli via the attention levels),
+BattleSense (victory barks `m_VictoryBarkDelay` 2.5-3 s) and RatCrusher. Civilians add Panic
+(`DisAIBrainProcessPanic`: stimulus table of AI.md "Patrols, combat and panic"). Wolfhounds have a
+Wolfhound process and sub-process (count); `DisAIBrainProcessHideoutWatcher` handles the player's
+hideout transitions. Behaviour sub-processes (per behaviour tweak): StandardBodyIntention, AmbientAnims,
+AmbientBarks, WatchPoints, PersonalSpace, Distractions, FleetingGaze, HeadTrackBark / Pause,
+ManageAttacks (combat), CombatBarks.
+
+### 1.4 What turns attention into NoticeBegin / SearchBegin / CombatBegin (OPEN)
+
+The three attention-driven behaviours evaluate only their `*Begin` stimulus, and `AttentionBehaviorBegin`
+exists as a stimulus, but the poster that maps "top enemy attention level reached TurnToFace /
+Investigate / Busted" onto those stimuli was not traced (the brain stores
+`m_TopEnemyAttnTargetAttentionLevel` at +0x42 and re-posts on changes in 0x00b24ae0). The port's
+`Brain::select` assumes TurnToFace -> Notice, Investigate -> Search (via the Investigate sub-state) and
+Busted -> Combat, which agrees with the data in the tweaks and with AI.md's observed hook behaviour but
+is not read from this code. Request: trace the poster of stimuli 63 / 87 / 17.
+
+### 1.5 Port structure (`crates/dishonored_ai/src/lib.rs`)
+
+The port keeps one `BrainState` enum (14 states) in `Brain::state` and picks it in `Brain::select`
+from the strongest attention entry (`focus`): Busted -> Combat or Flee, Investigate -> Investigate,
+TurnToFace -> Notice, with `Brain::escalate` inserting `React` (reaction delay 0.18-0.30 s from
+`AiConfig::reaction_delay`). `back_to_routine` always restarts the routine. Differences to the slot
+model:
+- There is no dormant/resume: leaving Notice, Search or Combat re-enters Patrol (`back_to_routine`)
+  or Alert; the original resumes the paused behaviour (same effect for patrol, but a guard that was in
+  a Soiree, Interact or scripted TakePosition is not resumed).
+- Priorities are hard-coded (Combat/Flee over Investigate over Notice), not slot-ordered: the alarm
+  (Alert 13) is a special `RingAlarm` state entered from `consider_alarm`; Awe (14, magic) and
+  Preserve (EscapeExplosion) have no state at all.
+- `React` is a state with a timer; in the original it is a queue delay on the stimulus, applied to
+  every stimulus the same way, plus a `DisBehaviorReact` behaviour (slot 7) on `ReactionRequest`.
+- The port's `escalate` restarts the delay each time a different target state is requested while in
+  `React`, so a stimulus that keeps firing overwrites the pending transition (see finding F1).
+
+## 2. Patrol
+
+Original (AI.md "Patrols" and "Routes" still hold). New data: the pawn speed is not a constant; it is the
+authored root speed of the locomotion loop the behaviour requests, scaled by the stance modifier
+(`DisLocomotionConfig.EliteGuardLocomotionConfig`, `m_fAnimSpeed` per direction, forward = the N loop):
+
+| speed mode | forward loop | authored uu/s |
+|---|---|---|
+| EmptyWalk | Empty_WalkN | 157.7 |
+| EmptyWalkPatrol | Empty_Walk_Patrol | 126.4 |
+| EmptyRun | Empty_RunN | 643.2 |
+| SwordWalk | Sword_WalkN | 192.0 |
+| SwordPatrolWalk | Sword_Patrol_WalkN | 145.24 |
+| SwordRun | Sword_RunN | 809.0 |
+
+Modifiers: Empty 1.0, SearchEmpty 0.8, EmptyPatrol 0.92, Sword 1.0, SearchSword 0.8, SwordPatrol 1.0,
+MeleeRush 1.0; accelerations 550 / 450 (empty), 540 (sword), 1100 (SwordPatrol), 65 / 130 (SearchEmpty).
+So a sword-carrying guard on patrol walks at about 145 uu/s (LIKELY: speed = authored loop speed), an
+investigating or chasing guard runs at about 809 uu/s forward (sideways loops 350-512). Walk-to-point
+arrival: `m_fUnaccuracyRadius` 120 (AI.md "Go-to completion").
+
+Port: patrol, wander and walk-to-point use `PlayerInput` with `buttons::WALK`, which the shared player
+movement turns into the player's walk speed (250 uu/s, scenario `ai/patrol` Max speed2d 250.0) and
+`SPRINT` for runs (540 uu/s, `ai/boyle_hear_shot`). Route adoption and neglect follow AI.md and are
+unit-tested; at a point the port arrives within 70 uu (`Self::reached(.., 70.0)`) where the original
+uses the locomotion arrival (120 uu with a stop animation, 0.1 uu for accurate stops).
+
+## 3. Investigate and search
+
+Data (CONFIRMED, `TweaksBehavior_Search_Default`, `DefaultAI.ini`): Search activates on SearchBegin;
+`m_SearchFromNoiseTweaks[4..7].m_bShouldRun` and the listed `m_SearchFromReasonTweaks` make the guard run
+for Danger, Help, Alarm and DeathRattle noises and for found corpses, deaths, magic, attacks, sightings;
+`m_fCancelInvestigateWaitTime` 0.5-1.0 s on arrival; `m_fSearchReachedProxyLocEqualsRange` 250 (proxy
+reached); `m_fSearchReachedProxyBroadcastRange` 2000; `m_fSearchAnimCooldown` 10 s;
+`m_bAlwaysSearchWithSwordOut`; `m_fInvestigateStareAtUnreachableMaxTime_s` 5 s within
+`m_fInvestigateStareAtUnreachableRadius` 500 (sub-state `StareAtUnreachable` when the proxy cannot be
+reached); sub-states Investigate, GenericAction, Stand, StareAtUnreachable, TrackTarget; search crumbs
+(25, spacing, heartbeat 0.8 s, wander 500-1000 uu within 60 degrees) in `DishonoredSearchCrumbsComponent`.
+Search ends when the attention to the stimulus falls under the Investigate stop (suspecting profile:
+leak 0.015 / s from 0.6 to the 0.1 stop: about 33 s; unsuspecting 0.025 / s to 0.3: about 12 s) or the
+crumbs run out. Locomotion modifier during search is `SearchEmpty` / `SearchSword` (speed x 0.8).
+
+Port: `BrainState::Investigate` -> `Search` with the same constants (`AiConfig::search`). Missing:
+`StareAtUnreachable`, the search locomotion modifier (x 0.8) and the proximity range
+(`m_fSearchReachedProxyLocEqualsRange` 250 is used as `search.proximity`, matches), the animation
+cooldown. Finding F1 below is a port loop when the proxy path fails.
+
+## 4. Combat
+
+Already decoded (AI.md "Combat moves"): attack contexts and ranges, ManageAttacks flurry and stamina
+pacing, back step after incoming attacks, side step after a ranged threat, pistol willingness and the
+`FirePistol` timers, skirmish caps. New in this pass (CONFIRMED from `DisAISubProcessManageAttacks`
+0x00b3dc10 / 0x00b3deb0 / 0x00b3e070 and the tweak):
+
+- **Aggression.** `m_fAggression` (+0x68) starts at a uniform random in [0, 1) each time the process
+  activates. The handler registered for the incoming-attack reaction (0x00b3e070, used for the back-step
+  logic) adds `m_fAggressionDeltaPerDamage` (-0.5 for the elite guard) to it, clamps to [0, 1],
+  decrements the incoming-attack counter and resets the forgiveness timer. Whenever an attack context is
+  selected (0x00b3deb0) its cooldown timer is scaled by `(1 - aggression) * m_fCooldownFactorAtMinAggression + 1`
+  (factor 1.0 for the elite guard: cooldowns x1 at aggression 1, x2 at aggression 0).
+  `m_fAggressionRegenRate` 0.1 / s is the matching recovery (LIKELY; the regen call site was not traced).
+  The port has none of this: every cooldown is the plain roll (`combat::pick_context`, `Brain::melee_cd`).
+- `m_fStalemateAllowanceTime` 3 s (`m_fStalemateTimer` +0x9c counts down while no action is chosen and is
+  clamped to the same value), `m_fBlockedAttackSensitivity` 7 with `m_fBlockedAttackWeight` /
+  `m_fBlockedAttackTimer` (+0x6c / +0x70) decide when the process asks for the block breaker
+  `DisItemContext_NPCBash` (`m_pBlockBreakerAttack`, usable when `m_bCapableOfBlockBreaker`): an NPC whose
+  attacks keep being blocked bashes. Not in the port (`Brain::combat` blocks purely as a reaction).
+- `m_fPaddingAgainstNPCs` -150, `m_fPaddingAgainstPlayer`, `m_pShortestFormationAttack` =
+  `NPCAttackStepBack`, `m_pLongestFormationAttack` = `NPCFireGun`: the formation distances used by the
+  skirmish placement. The port's outer ring is a distance rule (`pistol.max_range.min(1500)`).
+- Blocking: the NPC's own block is not a ManageAttacks decision. There is no block context in the
+  attack list (`NPCRiposte` and `NPCBash` exist as contexts); the port blocks whenever the target is in
+  sword startup and within reach (`Brain::combat` tail). UNVERIFIED against the original.
+
+Ranged and special NPCs (class list, `oracle index search`): `DisBehaviorCombatEliteGuard` (sword +
+pistol), `DisBehaviorCombatCityGuard`, `DisBehaviorOverseerCombat` / `OverseerHMasterCombat` /
+`MusicalCombat` (Overseers, music box and tune contexts `NPCTune`, `NPCTune_Combat`,
+`NPCTune_Protection`, `NPCAttractSpell`, `NPCTeleportSpell`, grenades `NPCThrowGrenade`),
+`DisBehaviorTallBoyCombat` + `DisBehaviorTallboyShoot` (bow, `NPCFireBow`), `DisBehaviorAssassinCombat`
+(pull / attract spells, DLC), `DisBehaviorThugCombat`, `DisBehaviorCombatWolfhound` (+ short / long
+distance sub-states, `WHJumpAttack` inhibition 30 s, `WHArmAttack` 8 s), `DisBehaviorCombatRatSwarm`,
+weepers (`DisBehaviorWeep`, arm grab inhibition 20 s). Port: guard role -> elite-guard melee + one
+pistol round for every sworded or armed pawn including Overseers (`role_from_chain`); tallboys, weepers
+and hounds have role Other and no combat brain (`npcs::role_from_tweak_data`); rats have their own
+brains (`dishonored_ai::rats`). Overseer music-box combat, tallboy bows and grenade throwers are not
+modelled.
+
+## 5. Civilians and fear
+
+AI.md already covers the panic triggers (`TweaksBehavior_Panic_Civilian`: SeeEnemy, WitnessDeath,
+WitnessCorpse, AttackedMelee/Ranged, WitnessAllyCombat, WitnessAllyPanic, WithinDangerZone, HearNoise
+with AlarmBell, Help, DeathRattle), the group distance 1000 uu, flee points (50 degree forbidden cone
+within 500 uu), 2 s free flight, cower within 350 uu, help bark at Loudness2 (1500 uu). Slot: Panic is
+slot 15 Escape and triggers on the `Panicked` stimulus from `DisAIBrainProcessPanic`; StationarySearch
+(civilian investigate, 2-3 s) is slot 5. The port's Flee / Cower states reproduce these constants.
+Locomotion for panic uses `PanicEmpty` / `PanicSword` modifiers (acceleration 120 / 100, deceleration
+220 / 200, speed x1.0) with the panic run loops (`Empty_RunN_Panic1` 503.5 uu/s forward); the port
+sprints at 540.
+
+## 6. Bodies, unconscious and sleeping NPCs
+
+- Corpse discovery is the attention reason `DACRT_FoundCorpse` -> Investigate (AI.md); the vision scalar
+  for a dead target is `m_fSeeingPawnAttentionIncreaseScalar_ToDeadNPC`. The reaction table
+  (`DisTweaks_AIBrain_Reaction`) reacts to carried corpses: `CarryAllyCorpse` / `CarryNeutralCorpse`
+  (Hostile for the Boyle elite) and `CarryEnemyCorpse` (Harmless).
+- Whether an **unconscious or sleeping** NPC counts as "dead" for this scalar, and whether guards
+  investigate unconscious bodies, was not found in the code (the dead flag of the target record,
+  0x00c86bf0 / 0x00b68e10, was not traced). UNVERIFIED. Port: `perceive_with` discovers only
+  `!p.alive` pawns; an unconscious pawn (`Condition::Unconscious`, alive) is never discovered and does
+  not alarm anyone. `Brain::unaware_of` and sleep darts follow AI.md ("Sleep darts").
+- Unconscious pawns never wake in the port (`takedown.rs` note); the original has no wake state for
+  choked or darted NPCs (stated in the same note, LIKELY).
+
+## 7. Magic: Windblast, possession, Bend Time
+
+`DisBehaviorMagicResponse` (slot 14 Awe, above Combat and below Panic) is the response to
+`WitnessMagic`; its tweak has only a GenericAction and a Stand sub-state. The global
+`m_MagicReactionDelay` 0.20-0.30 s delays the stimulus. `DACRT_Magic` is a Busted-capable attention
+reason (AI.md), `EAINoiseContext_WolZap` / `FlareCombustion` are separate noise contexts, and
+`m_eWallsOfLightConfidence` (Confident for the party elite) tunes the Walls of Light response. Port:
+no `MagicResponse` behaviour; Windblast is only a Danger sound (`noise_context`), possession and Bend
+Time give no AI reaction, and the world time scale slows the brains with the pawns
+(`npc.<name>.time_scale` channel). Window of the original's reaction (what animation, how long, does it
+alert) is UNVERIFIED.
+
+## 8. Rule-by-rule comparison with the port
+
+| rule | original source | port | status |
+|---|---|---|---|
+| slot priority and preempt/resume | 0x00b17100, 0x00b11960 | `Brain::select`, `escalate`, `back_to_routine` | port simplified; structural |
+| activation stimuli per behaviour | class evaluate masks | hard-coded attention-level mapping | agrees for Notice / Search / Combat; poster not traced |
+| stimulus queue delay | 0x00b16eb0, DefaultAI.ini | `escalate` + `AiConfig::reaction_delay` 0.18-0.30 | match (scenario `ai/investigate_noise`: 10 ticks, one-tick slack) |
+| magic reaction delay 0.2-0.3 | DefaultAI.ini | none | port missing |
+| patrol route adoption | 0x00c41590, 0x00a4bc70 | `Crowd::set_routes`, `adopt_route` | match for crowd guards; **not applied to original-spawner guards** (F2) |
+| patrol / run speed | EliteGuardLocomotionConfig | player walk 250 / sprint 540 | divergence (F3), capture requested |
+| search constants | tweak + ini | `AiConfig::search` | match; StareAtUnreachable, x0.8 speed missing |
+| attack cadence (flurry, stamina) | 0x00b47880 | `Brain::combat` flurry / stamina_timer | match in structure: scenario shows swing groups of 2-3 about 5 s apart |
+| aggression-scaled cooldown | 0x00b3deb0, 0x00b3e070 | none | port missing (F5) |
+| block breaker, stalemate | tweak, 0x00b47880 | none | port missing |
+| pistol willingness, give-up | AI.md | `combat::pistol_willing` | match (unit-tested) |
+| overseer / tallboy / hound combat | classes above | none or elite-guard melee | port missing (F6) |
+| unconscious body discovery | unknown | none | UNVERIFIED (F7) |
+| magic response | `DisBehaviorMagicResponse` | none | port missing (F8) |
+
+## 9. Scenarios (fixtures/oracle/scenarios/ai)
+
+Run with `oracle scenario --system ai --dir <worktree>/fixtures/oracle/scenarios --out <dir>`
+(port side, 2.0 s for all eight). Values below are the port's.
+
+| scenario | map | what it pins | port result |
+|---|---|---|---|
+| `ai/investigate_noise` (rewritten) | Playground | a pistol shot 3800 uu behind a guard, out of sight: attention 0.6 (noise entry), React lasts the reaction delay, Investigate, walks to the shot | attention 0.6 pass; Investigate at 0.30 s pass; **walk to the shot fails** (F1) |
+| `ai/shot_in_view_of_neutral` | Playground | does a neutral guard that turns to a shot and sees the shooter go Busted | port: Combat at 0.32 s, attention level 4 (UNVERIFIED reference) |
+| `ai/patrol` | Playground | route patrol; speed | reaches the far point; speed 250 (reference 145.24 Unmeasured) |
+| `ai/combat_cadence` | Playground | alerted guard vs motionless player, 40 s | 15 swings, first at 4.63 s, groups of 1-3 swings about 5 s apart |
+| `ai/passive_keeps_rotation` | Playground | unchanged | pass |
+| `ai/boyle_patrol_speed` | L_Boyle_Ext_P | spawner 21 (Footbridge guard, patrol_on_startup): patrol speed, route | port: guard never leaves its spawn in 20 s (F2); original capture queued |
+| `ai/boyle_hear_shot` | L_Boyle_Ext_P | party guard 46, shot 800 uu behind | port: React, Investigate, runs 540 uu/s to the shot, never Combat; original capture queued |
+| `ai/boyle_doorman_duel` | L_Boyle_Ext_P | elite guard vs motionless player 500 uu away | port: React / Notice / Investigate chain, Combat at 1.47 s, hits at 3.4, 8.0, 8.6, 13.4, 14.0 s (14 damage each), player dead at 14.0 s; original capture queued |
+
+Captures requested in `fixtures/oracle/capture_queue.txt`: the three Boyle scenarios plus by-name reads of
+`m_ReactionDelay` / `m_MagicReactionDelay`. The original-side observable for NPCs is position / health
+per tick; behaviour state is not traced, so state-machine claims stay Static or Unverified until the
+hook can read `m_pCurrentBehavior` (class name) of the brain: request to the hook agent, property path
+`Controller` -> brain object -> `m_pCurrentBehavior` (`DishonoredAIBrain` +0x14c), plus `m_ActiveBehaviorStack`.
+
+## 10. Findings
+
+F1. **Far investigate loops between React and Investigate (port bug, diagnosed from code and trace).**
+`ai/investigate_noise`: the guard hears the shot (attention 0.6 at tick 8), goes React for 10 ticks,
+Investigate for 2 ticks, React again, and so on; over 15 s it moves 77 uu instead of 3800. Cause (code
+reading, not instrumented): in `act_inner` the Investigate branch sets `self.next = Search` and state
+`React` when `reached(..) || follow.failed`; `Brain::select` then still sees the Investigate-level
+focus, finds `state != Investigate` and calls `escalate(.., Investigate)`, which replaces the pending
+Search with a new reaction delay and so restarts the loop each time the path fails. The failure itself
+(path to the shot position on the Playground navigation, presumably the proxy at the player's eye
+height or off the generated mesh) is a second question. Original behaviour for an unreachable proxy:
+`StareAtUnreachable` for at most 5 s (radius 500), then search (finding F4). Fix: make `escalate` ignore a
+request for the state the brain is already heading to *or* returning from (do not restart `React` when
+`next` is set by the brain itself), and implement the unreachable-proxy branch.
+
+F2. **Guards from original spawners with `patrol_on_startup` never adopt a route (port bug).**
+`MissionMatch::spawn_original` (`dishonored_multiplayer/src/mission.rs:619-665`) creates the brain with
+`stay = !patrol_on_startup` but only `Crowd::set_routes` adopts routes, and it runs over the brains that
+exist at that moment (line 344 for the crowd, line 580 copies `crowd.routes` without adopting). Trace:
+`ai/boyle_patrol_speed` (spawner `DishonoredSpawner_21`, squad Footbridge_Guard, routes 12 / 18 with
+that squad exist): state Idle and position fixed for 20 s. The brain should call `adopt_route` (squad,
+capacity, adoption range, `m_NeglectTimer`) when spawned with patrol_on_startup and then enter Patrol.
+Original: `PatrolRequest` posted at startup for these spawners (Patrol evaluates PatrolRequest).
+
+F3. **Patrol, search and run speeds are the player's (port, needs capture).** The original derives the NPC
+speed from the authored locomotion loops (section 2: sword patrol walk 145.24, empty patrol 126.4,
+sword run 809 forward, search x0.8, panic run 503.5 forward). The port walks at 250 and runs at 540.
+Capture `ai/boyle_patrol_speed` and `ai/boyle_hear_shot` (position per tick) to confirm that speed =
+authored loop speed x modifier; then give NPC pawns their own per-mode speeds (and the 0.5 s modifier
+blend, acceleration 540-1100).
+
+F4. **Missing branches of Search:** StareAtUnreachable (5 s, 500 uu), search-speed modifier 0.8, search
+animation cooldown 10 s (port missing).
+
+F5. **Combat aggression and block breaker missing (port missing).** Aggression random in [0, 1) at
+activation; cooldown scale `1 + (1 - aggression) x 1.0`; -0.5 per incoming-attack reaction clamped to
+[0, 1]; regen 0.1 / s (LIKELY). Stalemate allowance 3 s, blocked-attack sensitivity 7, block breaker
+`NPCBash`. Effect on cadence: a fresh fight has cooldowns between x1 and x2 of the table values; the port
+always uses x1 (`ai/combat_cadence` first swing at 4.63 s, 15 swings in 40 s are the baseline to compare
+with the doorman capture). Also check why the port's first swing comes 4.6 s after combat starts for a
+target 300 uu away (chase plus the initial stamina timer?); no reference yet.
+
+F6. **Special combat NPCs missing (port missing):** Overseers (musical combat, tunes, grenades), tallboys
+(bow, `TallboyShoot`), weepers, hounds. Overseers currently fight as elite guards.
+
+F7. **Unconscious bodies are ignored by guards (UNVERIFIED divergence).** Needs the original: place an
+unconscious NPC (choked) in a guard's view and record the guard's position / attention. Request: a
+hook-driven scenario (`call` the NPC's knock-out or use a spawner with `m_bTreatAsKnockedOut`) and
+`read` of the guard's attention level.
+
+F8. **No magic response (port missing):** `WitnessMagic` -> `MagicResponse` (Awe) with
+`m_MagicReactionDelay`; Windblast, possession and Bend Time have no AI reaction beyond the Danger noise.
+
+F9. **A pistol shot witnessed after the fact makes a neutral guard hostile (suspected port divergence).**
+`criminal()` treats the player's pistol Recovering phase as an attack in progress, so a neutral guard
+that turns toward the noise within about 1.5 s turns Busted and fights (`ai/shot_in_view_of_neutral`:
+Combat at 0.32 s). The original reaction table has no response for a fired gun (only the listed events),
+and `Neutral_Guard` is not an enemy of Corvo. Original behaviour is UNVERIFIED; `ai/boyle_hear_shot`
+captures it for the party guard.
+
+F10. **Oracle limitation.** The original trace has only position / health / physics per NPC; the
+port's state enum (`npc.<n>.state`) has no original counterpart. Brain behaviour class per tick needs a
+hook read (`m_pCurrentBehavior`). Until then AI checks are Static (from data) or position-based.
+
+F11. **The attention-to-stimulus poster is not traced** (section 1.4); the port's mapping is assumed.
+
+Do not edit port code from this document: the fixes above are for the porting agents.

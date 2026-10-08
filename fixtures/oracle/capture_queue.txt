@@ -105,3 +105,9 @@ combat/ammo_capacity
 session dump class=DishonoredWepPistol filter=Ranged limit=2
 session dump class=DishonoredWepPistol filter=Attribute limit=2
 session dump class=DisWepCrossbow filter=Attribute limit=2
+ai/boyle_patrol_speed
+ai/boyle_hear_shot
+ai/boyle_doorman_duel
+session read object=Default__DishonoredGlobalAIManager path=m_ReactionDelay
+session read object=Default__DishonoredGlobalAIManager path=m_MagicReactionDelay
+session props class=DishonoredAIBrain filter=Behavior

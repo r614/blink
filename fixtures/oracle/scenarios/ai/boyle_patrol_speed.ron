@@ -1,0 +1,28 @@
+// Boyle Ext: the Footbridge guard (`DishonoredSpawner_21`, squad Footbridge_Guard,
+// patrol_on_startup) adopts a Footbridge_Guard route and walks it with no guard durations
+// (`L_BoyleStreet_Ext_Script:DishonoredRoute_12` six points / `_18` two points, gd 0). The player
+// stands on the upper courtyard, 4900 uu away and a level above, so nothing is perceived and the
+// guard's position trace is pure patrol locomotion: the speed of `DisBehaviorPatrol`
+// (locomotion modifier `EmptyPatrol`, 0.92 x the authored walk loop; the port's patrol speed is
+// unmeasured).
+(
+    name: "ai/boyle_patrol_speed",
+    system: Ai,
+    map: "L_Boyle_Ext_P",
+    description: "A Boyle patrolling guard unobserved for 20 s: its walking speed and route.",
+    setup: (
+        player: Some((position: (-3201.5, -2763.3, 20), yaw: 71.37, snap_to_floor: true)),
+        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_21"))],
+        settle: 1,
+    ),
+    ticks: 1200,
+    input: [],
+    checkpoints: [
+        (name: "unobserved", expect: [(metric: Max("npc.guard.attn"), value: 0, tol: 0, cmp: AtMost, source: "the run is only valid while the guard never gained attention on the player", status: Static)]),
+        (name: "patrol state", expect: [(metric: TimeAt("npc.guard.state", 6), value: 1, tol: 0, cmp: AtMost, source: "patrol_on_startup spawner: DisBehaviorPatrol is the active behaviour (PatrolRequest, slot Idle)", status: Static)]),
+        (name: "walk speed", expect: [(metric: Max("npc.guard.speed2d"), value: 145.24, tol: 5, source: "EliteGuardLocomotionConfig: SwordPatrolWalk forward loop Sword_Patrol_WalkN authored 145.24 uu/s (modifier SwordPatrol x1.0); empty-handed EmptyWalkPatrol Empty_Walk_Patrol 126.4. Speed = authored loop speed is LIKELY, not measured", status: Unmeasured)]),
+        (name: "distance in 20 s", expect: [(metric: Delta("npc.guard.x", 0, 1200), value: 0, tol: 0, source: "route geometry", status: Unmeasured)]),
+    ],
+    record: [Pawn, Npc("guard")],
+    capture: Some("scenario boyle_patrol_speed: guard Location per tick (probe_launch scenario); the guard is found by spawner name, speed = |d Location| / dt over the walking ticks"),
+)
