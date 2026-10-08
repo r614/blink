@@ -683,7 +683,8 @@ pub fn step_swarms(state: &mut WorldState, dt_world: f32, cfg: &GameplayConfig, 
             t.rat_slow = tweak.slowdown_duration;
             t.rat_slow_percent = tweak.slowdown_percent;
             apply_damage(t, dmg, Some(s.owner), DamageCause::Rats, events, vitals);
-            events.push(SimEvent::Sound { position: s.position, radius: 800.0, category: SoundCategory::BodyFall, source: s.owner });
+            // Port radius (the swarm's noise caller was not decoded); `EAINoiseContext_RatSwarm`.
+            events.push(SimEvent::Sound { position: s.position, radius: 800.0, category: SoundCategory::Rats, context: crate::events::NoiseContext::RatSwarm, source: s.owner });
         }
     }
     swarms.retain(|s| s.spawn_delay > 0.0 || s.age < cfg.items.swarm.levels[s.level as usize].duration);

@@ -315,7 +315,6 @@ pub fn update(
                             let kind = if ammo == AmmoType::Grenade { ProjectileKind::Grenade } else { ProjectileKind::StickyGrenade };
                             let g = crate::gadgets::grenade_cfg(cfg, kind);
                             spawn.push((kind, eye_position(p, ctx.cfg), crate::gadgets::throw_velocity(p.yaw, p.pitch, g)));
-                            events.push(SimEvent::Sound { position: p.position, radius: 300.0, category: SoundCategory::SwordSwing, source: p.id });
                         }
                     }
                     if p.left.timer >= exit {
@@ -362,7 +361,6 @@ pub fn update(
                     spawn.push((kind, eye, dir * speed));
                     p.left.phase = LeftPhase::Recovering;
                     p.left.timer = 0.0;
-                    events.push(SimEvent::Sound { position: eye, radius: 500.0, category: SoundCategory::Crossbow, source: p.id });
                 }
                 _ => {}
             }
@@ -382,7 +380,8 @@ pub fn update(
                         p.left.phase = LeftPhase::Recovering;
                         p.left.timer = 0.0;
                         events.push(SimEvent::WindblastCast { id: p.id });
-                        events.push(SimEvent::Sound { position: p.position, radius: 1500.0, category: SoundCategory::Windblast, source: p.id });
+                        // Port value: the Windblast's AI noise caller was not decoded (stealth.md section 5.4).
+                        events.push(SimEvent::Sound { position: p.position, radius: 1500.0, category: SoundCategory::Windblast, context: crate::events::NoiseContext::Danger, source: p.id });
                     }
                 }
                 _ => {}
@@ -474,8 +473,11 @@ fn fire_gun(p: &mut PlayerState, bolt: bool, ctx: &MoveCtx, cfg: &GameplayConfig
     let dir = fire_direction(p, cfg, t);
     let speed = if bolt { t.bolt_speed } else { t.bullet_speed };
     spawn.push((if bolt { ProjectileKind::Bolt } else { ProjectileKind::Bullet }, eye, dir * speed));
-    let (radius, cat) = if bolt { (500.0, SoundCategory::Crossbow) } else { (4000.0, SoundCategory::Pistol) };
-    events.push(SimEvent::Sound { position: eye, radius, category: cat, source: p.id });
+    // The pistol's m_AINoiseLoudnessWhenFiring at the shooter (0x00C2A3E0); the crossbow's fire
+    // context makes no AI noise (its bolts' impacts do).
+    if !bolt {
+        crate::noise::emit(events, &cfg.ai.noise.pistol_fire, p.position, SoundCategory::Pistol, p.id, 0.0);
+    }
 }
 /// Dark Vision is in effect (`DisActivePowerComponent_DarkVision` slot +0x160: any of the fade-in,
 /// effect and fade-out timers running).

@@ -91,7 +91,7 @@ fn load_spawns(map: &str, m: Option<&DishonoredMap>) -> Vec<Spawn> {
 }
 
 pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
-    let path = cache_dir().join("gameplay_config.v12x.json");
+    let path = cache_dir().join("gameplay_config.v12x-stealth.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);
@@ -402,7 +402,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         pkgs
     };
     // AI level data: factions, forbidden zones, alarm bells, probe lights (dishonored_ai).
-    let ai_path = dir.join(format!("{map}.ailevel3u.json"));
+    let ai_path = dir.join(format!("{map}.ailevel3u-stealth.json"));
     let ai_level: dishonored_ir::ai::AiLevel = match std::fs::read_to_string(&ai_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(a) => a,
         None => {

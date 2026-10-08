@@ -211,7 +211,8 @@ pub fn update(
                 p.mode = MoveMode::Blinking;
                 p.velocity = Vec3::ZERO;
                 events.push(SimEvent::BlinkStart { id: p.id, from, to });
-                events.push(SimEvent::Sound { position: from, radius: 400.0, category: SoundCategory::Blink, source: p.id });
+                // Port value: no Blink AI noise was found in the original (stealth.md section 5.4).
+                events.push(SimEvent::Sound { position: from, radius: 400.0, category: SoundCategory::Blink, context: crate::events::NoiseContext::Anomaly, source: p.id });
             }
             _ => events.push(SimEvent::BlinkFizzle { id: p.id }),
         }

@@ -194,6 +194,9 @@ pub struct PlayerVisibilityConfig {
     pub bonus_walking: f32,
     pub bonus_sprinting: f32,
     pub bonus_swimming: f32,
+    /// `m_fVisLevelBonus_SwimmingOnSurface` (the swim state with the head out of the water).
+    #[serde(default)]
+    pub bonus_swimming_surface: f32,
     /// `m_bForceZeroSpeedWhileSneaking`.
     pub zero_speed_sneaking: bool,
     /// `Twk_GlobalPlayerVisSettings.m_fLightValue{Darkest,Brightest}Val`.
@@ -221,6 +224,7 @@ impl Default for PlayerVisibilityConfig {
             bonus_walking: 0.0,
             bonus_sprinting: 0.0,
             bonus_swimming: -1.0,
+            bonus_swimming_surface: 0.0,
             zero_speed_sneaking: true,
             light_darkest: 0.05,
             light_brightest: 1.0,
@@ -564,6 +568,149 @@ pub struct CombatAiConfig {
     pub pistol: PistolConfig,
 }
 
+/// `EAINoiseContext` (DisGlobalEnums, in enum order).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NoiseContext {
+    AmbientWhiteNoise,
+    #[default]
+    Anomaly,
+    Footfall,
+    Threatening,
+    Danger,
+    Help,
+    AlarmBell,
+    RatSwarm,
+    ImpendingExplosion,
+    WolZap,
+    AllySearchRequest,
+    DeathRattle,
+    AllyNotice,
+    FlareCombustion,
+    WatchTowerAttack,
+}
+
+impl NoiseContext {
+    pub const ALL: [NoiseContext; 15] = [
+        NoiseContext::AmbientWhiteNoise,
+        NoiseContext::Anomaly,
+        NoiseContext::Footfall,
+        NoiseContext::Threatening,
+        NoiseContext::Danger,
+        NoiseContext::Help,
+        NoiseContext::AlarmBell,
+        NoiseContext::RatSwarm,
+        NoiseContext::ImpendingExplosion,
+        NoiseContext::WolZap,
+        NoiseContext::AllySearchRequest,
+        NoiseContext::DeathRattle,
+        NoiseContext::AllyNotice,
+        NoiseContext::FlareCombustion,
+        NoiseContext::WatchTowerAttack,
+    ];
+
+    /// From the enum name (`EAINoiseContext_Anomaly`).
+    pub fn from_name(n: &str) -> Option<Self> {
+        let s = n.strip_prefix("EAINoiseContext_")?;
+        Self::ALL.iter().copied().find(|c| format!("{c:?}") == s)
+    }
+}
+
+/// One AI noise source: the radius (`m_LoudnessDistanceArray[loudness]`, 0 = Silent: nothing
+/// is emitted), the context, and the contact speed below which a speed-scaled contact makes no
+/// noise (`m_VolumeSettings.m_fMinSpeed` when `m_bScaleWithSpeed`, else 0).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct AiNoise {
+    pub radius: f32,
+    pub context: NoiseContext,
+    #[serde(default)]
+    pub min_speed: f32,
+}
+
+impl AiNoise {
+    pub const fn new(radius: f32, context: NoiseContext, min_speed: f32) -> Self {
+        AiNoise { radius, context, min_speed }
+    }
+    pub const SILENT: AiNoise = AiNoise { radius: 0.0, context: NoiseContext::Anomaly, min_speed: 0.0 };
+
+    /// Whether a contact at `speed` makes this noise (0x00BD6C20: silent below the minimum
+    /// speed of a speed-scaled sub, or for loudness Silent).
+    pub fn emits(&self, speed: f32) -> bool {
+        self.radius > 0.0 && speed >= self.min_speed
+    }
+}
+
+/// The AI noises the simulation emits, from the contact system's `DisContactSub_AINoise`
+/// objects (`Phy_ContactSystem.ContactSystem.Dis_ContactSystem`, struck type
+/// `DisContactType_Environment` unless named) and the weapon tweaks, with radii from
+/// `m_LoudnessDistanceArray`. See research/dishonored/systems/stealth.md section 5.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NoiseTable {
+    /// Player footfalls by striker (`DishonoredPlayerPawn` vslot 398, 0x00AAB7D0):
+    /// `Footfall_Run_Player` (the body tweak's `m_pFootfallContactType`), `_Sprint_Player`
+    /// while sprinting, `_Sneak_Player` while sneaking, `_Run_Player_Silent` with
+    /// `Attribute_SilentRunning` / `Attribute_SilentSprinting`.
+    pub footfall_run: AiNoise,
+    pub footfall_sprint: AiNoise,
+    pub footfall_sneak: AiNoise,
+    pub footfall_silent: AiNoise,
+    /// Player landings (0x00AB53A0): `JumpLand`, `JumpLand_Stealth` (a fall begun sneaking,
+    /// `StatePlayerMasterFalling.m_bIsStealthFall`), `JumpLand_Big` (the stun landing).
+    pub land: AiNoise,
+    pub land_stealth: AiNoise,
+    pub land_big: AiNoise,
+    /// `StatePlayerMasterFalling.m_fFall_Stun_Vel` (DefaultPlayerState.ini): a landing faster
+    /// than this is the stun landing.
+    pub fall_stun_speed: f32,
+    /// `Sword` -> `Body` (a hit) and `Sword` -> `Weapon` (a clash / block).
+    pub sword_body: AiNoise,
+    pub sword_weapon: AiNoise,
+    /// `Bullet` -> `Environment` (the pistol bullet's impact).
+    pub bullet_impact: AiNoise,
+    /// `Corpse` -> `Environment` (a body hitting the floor).
+    pub corpse: AiNoise,
+    /// `DisTweaks_FirePistol.m_AINoiseLoudnessWhenFiring`, context Danger, at the shooter
+    /// (0x00C2A3E0). The crossbow's fire tweak has no AI noise: firing a bolt is silent.
+    pub pistol_fire: AiNoise,
+    /// The player's locomotion clips' `DishonoredNotify_Footfall` times (Startup
+    /// `Ply_Sword_Locomotion_as`): `Sword_Ready_Walk`, `_Run`, `_Sprint`.
+    pub walk_clip: FootfallClip,
+    pub run_clip: FootfallClip,
+    pub sprint_clip: FootfallClip,
+}
+
+/// A looping locomotion clip's length and its footfall notify times (seconds).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FootfallClip {
+    pub length: f32,
+    pub footfalls: Vec<f32>,
+}
+
+impl Default for NoiseTable {
+    /// The retail values (GOG; `dishonored_assets::ai_config` reloads them).
+    fn default() -> Self {
+        use NoiseContext::*;
+        NoiseTable {
+            footfall_run: AiNoise::new(600.0, Footfall, 0.0),
+            footfall_sprint: AiNoise::new(1200.0, Anomaly, 0.0),
+            footfall_sneak: AiNoise::SILENT,
+            footfall_silent: AiNoise::SILENT,
+            land: AiNoise::new(400.0, Anomaly, 0.0),
+            land_stealth: AiNoise::SILENT,
+            land_big: AiNoise::new(800.0, Anomaly, 0.0),
+            fall_stun_speed: 2200.0,
+            sword_body: AiNoise::new(800.0, Threatening, 0.0),
+            sword_weapon: AiNoise::new(800.0, Threatening, 0.0),
+            bullet_impact: AiNoise::new(3000.0, Danger, 0.0),
+            corpse: AiNoise::new(300.0, Anomaly, 200.0),
+            pistol_fire: AiNoise::new(6000.0, Danger, 0.0),
+            walk_clip: FootfallClip { length: 2.0, footfalls: vec![1.0, 1.915] },
+            run_clip: FootfallClip { length: 0.967, footfalls: vec![0.467, 0.933] },
+            sprint_clip: FootfallClip { length: 0.567, footfalls: vec![0.267, 0.533] },
+        }
+    }
+}
+
 /// NPC perception and behaviour tuning.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AiConfig {
@@ -614,6 +761,9 @@ pub struct AiConfig {
     pub rats: RatSwarmConfig,
     #[serde(default)]
     pub devouring_swarm: RatSwarmConfig,
+    /// The AI noises the simulation emits (contact system and weapon tweaks).
+    #[serde(default)]
+    pub noise: NoiseTable,
     pub provenance: BTreeMap<String, String>,
 }
 
@@ -837,6 +987,52 @@ pub struct AiLevel {
     /// 0.2 / 0.5, measured on the original).
     #[serde(default)]
     pub player_light_range: Option<[f32; 2]>,
+    /// The level's `DisStealthVolume`s.
+    #[serde(default)]
+    pub stealth_volumes: Vec<StealthVolume>,
+}
+
+/// A `DisStealthVolume`: while the player touches it, the visibility component normalizes the
+/// light with the volume's `m_pVisSettings` instead of the map's (0x00BD0120). Touching volumes
+/// are kept in a list ordered by `m_StealthVolumePriority` (0x00C8C280 inserts before the first
+/// lower priority), whose head is used; a head without settings falls through to the map's.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct StealthVolume {
+    pub name: String,
+    /// `m_StealthVolumePriority`.
+    pub priority: i32,
+    /// `m_pVisSettings` darkest / brightest (`None`: no settings).
+    pub light_range: Option<[f32; 2]>,
+    /// Convex hulls (world planes `n.p <= d`, like [`ForbiddenZone`]).
+    pub hulls: Vec<Vec<[f32; 4]>>,
+}
+
+impl StealthVolume {
+    pub fn contains(&self, p: glam::Vec3) -> bool {
+        self.hulls.iter().any(|h| !h.is_empty() && h.iter().all(|pl| pl[0] * p.x + pl[1] * p.y + pl[2] * p.z <= pl[3] + 1e-3))
+    }
+}
+
+/// The light range of the stealth volumes at `p`: the highest-priority volume containing `p`
+/// (the first of equal priorities, as the list keeps insertion order among them) and its
+/// settings; `None` outside every volume or when that volume has no settings, where the map's
+/// range applies (0x00BD0120 -> 0x00BC8E60).
+pub fn stealth_light_range(volumes: &[StealthVolume], p: glam::Vec3) -> Option<[f32; 2]> {
+    let mut head: Option<&StealthVolume> = None;
+    for v in volumes.iter().filter(|v| v.contains(p)) {
+        if head.is_none_or(|h| v.priority > h.priority) {
+            head = Some(v);
+        }
+    }
+    head.and_then(|v| v.light_range)
+}
+
+impl AiLevel {
+    /// The player light range at `p` (stealth volume, else the map's; `None`: the global one).
+    pub fn light_range_at(&self, p: glam::Vec3) -> Option<[f32; 2]> {
+        stealth_light_range(&self.stealth_volumes, p).or(self.player_light_range)
+    }
 }
 
 /// A `DishonoredAudioVolume`: an audio cell.
@@ -1050,6 +1246,7 @@ impl Default for AiConfig {
             visual_detection_ratio_near: 0.3,
             rats: RatSwarmConfig::default(),
             devouring_swarm: RatSwarmConfig { swarm_type: 3, ..RatSwarmConfig::default() },
+            noise: NoiseTable::default(),
             provenance: BTreeMap::new(),
         }
     }

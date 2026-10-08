@@ -37,7 +37,6 @@ pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, 
                 s.swing_clip = if p.crouched { 4 } else { s.swings % 4 };
                 s.swings = s.swings.wrapping_add(1);
                 events.push(SimEvent::SwordSwing { id: p.id });
-                events.push(SimEvent::Sound { position: p.position, radius: 300.0, category: SoundCategory::SwordSwing, source: p.id });
             }
         }
         SwordPhase::Blocking => {
@@ -134,6 +133,7 @@ pub fn resolve_sword_hits(
     mv: &MovementConfig,
     vitals: &VitalsConfig,
     t: &CombatTuning,
+    noise: &dishonored_ir::ai::NoiseTable,
     events: &mut Vec<SimEvent>,
 ) {
     let n = state.players.len();
@@ -164,7 +164,6 @@ pub fn resolve_sword_hits(
                 }
                 let v = &mut state.players[vi];
                 kill(v, Some(attacker.id), cause, events);
-                events.push(SimEvent::Sound { position: v.position, radius: 250.0, category: SoundCategory::BodyFall, source: attacker.id });
                 continue;
             }
         }
@@ -215,14 +214,16 @@ pub fn resolve_sword_hits(
                 a.sword.timer = -t.blocked_recoil;
                 events.push(SimEvent::SwordBlocked { attacker: attacker.id, defender: victim.id });
             }
-            events.push(SimEvent::Sound { position: victim.position, radius: 600.0, category: SoundCategory::SwordBlock, source: attacker.id });
+            // The blade meets the weapon: the `Sword` -> `Weapon` contact's AI noise (a swing that
+            // hits nothing makes none: there is no contact).
+            crate::noise::emit(events, &noise.sword_weapon, victim.position, SoundCategory::SwordBlock, attacker.id, 0.0);
             continue;
         }
         // Blood Thirsty: with a full gauge the attack on an NPC is a finisher (0x00C10EF0).
         if attacker.adrenaline.full && victim.kind != crate::state::PawnKind::Human {
             crate::adrenaline::spend(&mut state.players[ai], events);
             let v = &mut state.players[vi];
-            events.push(SimEvent::Sound { position: v.position, radius: 600.0, category: SoundCategory::SwordImpact, source: attacker.id });
+            crate::noise::emit(events, &noise.sword_body, v.position, SoundCategory::SwordImpact, attacker.id, 0.0);
             kill(v, Some(attacker.id), DamageCause::Adrenaline, events);
             continue;
         }
@@ -233,7 +234,8 @@ pub fn resolve_sword_hits(
         };
         let dmg = ratio * vitals.health_max;
         let v = &mut state.players[vi];
-        events.push(SimEvent::Sound { position: v.position, radius: 600.0, category: SoundCategory::SwordImpact, source: attacker.id });
+        // The `Sword` -> `Body` contact's AI noise.
+        crate::noise::emit(events, &noise.sword_body, v.position, SoundCategory::SwordImpact, attacker.id, 0.0);
         apply_damage(v, dmg, Some(attacker.id), cause, events, vitals);
         // Interrupt the victim's own swing.
         if v.alive && matches!(v.sword.phase, SwordPhase::Startup) {

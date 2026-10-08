@@ -44,7 +44,9 @@
 
 use dishonored_ir::ai::{AiConfig, AiLevel, AlarmBellDef, AttentionConfig, AttentionIncrease, DAL_BUSTED, DAL_HEAD_TRACK, DAL_INVESTIGATE, DAL_TURN_TO_FACE, FactionTable, ForbiddenZone, PatrolRoute, PlayerVisibilityConfig, ProbeLight, Relationship, VisionConfig, reason};
 use std::collections::BTreeMap;
-use dishonored_sim::events::{SimEvent, SoundCategory};
+use dishonored_sim::events::{NoiseContext, SimEvent};
+#[cfg(test)]
+use dishonored_sim::events::SoundCategory;
 use dishonored_sim::input::{LeftHand, PlayerInput, buttons, npc_moves};
 use dishonored_sim::state::{PawnKind, PlayerId, PlayerState, SwordPhase, WorldState};
 use dishonored_world::nav::{Follower, NavWorld};
@@ -503,6 +505,9 @@ pub struct Crowd {
     /// level's own range (`AiLevel::player_light_range`) is installed in `ai`.
     #[serde(default)]
     pub global_light_range: Option<[f32; 2]>,
+    /// The level's `DisStealthVolume`s (their light range replaces the map's inside them).
+    #[serde(default)]
+    pub stealth_volumes: Vec<dishonored_ir::ai::StealthVolume>,
     /// Brains of the rat pawns (`PawnKind::Rat`) and the swarm each rat was spawned in
     /// (`SimEvent::RatSpawned`).
     #[serde(default)]
@@ -634,22 +639,68 @@ pub fn seen_rate(prof: &AttentionConfig, scalar: f32, norm: f32, visibility: f32
     scalar * v
 }
 
-/// The player's `Attribute_Visibility` (`DishonoredVisibilityComponent`, 0x00ad1590): the
-/// light tuning of the normalized light is the operand of the speed tuning of the speed value
-/// (zero while sneaking), plus the stance bonus.
-pub fn player_visibility(pv: &PlayerVisibilityConfig, light: f32, speed01: f32, crouched: bool, sprinting: bool) -> f32 {
-    let span = (pv.light_brightest - pv.light_darkest).max(1e-6);
-    let light01 = ((light - pv.light_darkest) / span).clamp(0.0, 1.0);
-    let speed = if crouched && pv.zero_speed_sneaking { 0.0 } else { speed01 };
+/// The raw light normalized between a range's darkest and brightest values (0x00BC9040): 0.5
+/// for an empty range, else clamped to [0, 1].
+pub fn light01(light: f32, [dark, bright]: [f32; 2]) -> f32 {
+    let span = bright - dark;
+    if span == 0.0 {
+        return 0.5;
+    }
+    ((light - dark) / span).clamp(0.0, 1.0)
+}
+
+/// The player's movement state as the visibility component reads it (0x00AD1590).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VisState {
+    /// The swim state: `Some(true)` with the head under water (`m_pActiveWaterVolume` set),
+    /// `Some(false)` at the surface (0x00AAB9D0: 2 / 1).
+    pub swimming: Option<bool>,
+    /// In `StatePlayerMasterSlide`.
+    pub sliding: bool,
+    /// `Pawn.bIsCrouched`: the engine crouch (the crawl, forced by a low ceiling), not the sneak.
+    pub autocrouch: bool,
+    /// `m_bSneakModeToggled` (pawn vslot 415).
+    pub sneaking: bool,
+    /// `m_bSprinting`.
+    pub sprinting: bool,
+}
+
+/// The visibility component's view of a pawn: the swim state from the sim's swimming mode and
+/// head-under flag, the slide, the sneak (the sim's `crouched` is `m_bSneakModeToggled`) and
+/// `m_bSprinting`. The sim has no engine crouch (`bIsCrouched`, the crawl), so auto-crouching
+/// never applies (stealth.md F7).
+pub fn vis_state(p: &PlayerState) -> VisState {
+    VisState {
+        swimming: (p.mode == dishonored_sim::state::MoveMode::Swimming).then_some(p.water.under),
+        sliding: p.slide.active,
+        autocrouch: false,
+        sneaking: p.crouched,
+        sprinting: p.sprinting,
+    }
+}
+
+/// The player's `Attribute_Visibility` (`DishonoredVisibilityComponent`, 0x00AD1590): the
+/// light tuning of the normalized light is the operand of the speed tuning of the speed value,
+/// plus the bonus of the movement state.
+///
+/// The speed value is forced to 0 (`m_bForceZeroSpeedWhileSneaking`) while sneaking or
+/// auto-crouching, unless swimming. The bonus is chosen in this order: swimming (under water /
+/// at the surface), sliding, auto-crouching, sneaking, standing (speed below 1e-4), walking
+/// (not `m_bSprinting`), sprinting. (`m_fSneakToStandBonusDelayTime` would keep the sneaking
+/// bonus for a while after standing up; it is 0 in the shipped tweak.)
+pub fn player_visibility(pv: &PlayerVisibilityConfig, light01: f32, speed01: f32, s: VisState) -> f32 {
+    let zero = (s.sneaking || s.autocrouch) && s.swimming.is_none();
+    let speed = if zero && pv.zero_speed_sneaking { 0.0 } else { speed01 };
     let base = pv.speed.apply(speed, pv.light.value(light01));
-    let bonus = if crouched {
-        pv.bonus_sneaking
-    } else if speed01 < 1e-4 {
-        pv.bonus_standing
-    } else if sprinting {
-        pv.bonus_sprinting
-    } else {
-        pv.bonus_walking
+    let bonus = match s.swimming {
+        Some(true) => pv.bonus_swimming,
+        Some(false) => pv.bonus_swimming_surface,
+        None if s.sliding => pv.bonus_sliding,
+        None if s.autocrouch => pv.bonus_autocrouching,
+        None if s.sneaking => pv.bonus_sneaking,
+        None if speed01 < 1e-4 => pv.bonus_standing,
+        None if !s.sprinting => pv.bonus_walking,
+        None => pv.bonus_sprinting,
     };
     base + bonus
 }
@@ -720,7 +771,7 @@ pub struct Senses<'a> {
     busted: &'a [(PlayerId, PawnKind, Vec3, Vec3)],
     alarm_noise: &'a [(Vec3, f32)],
     social: &'a Social,
-    /// Raw light value at each player.
+    /// Normalized light value (0..1) at each player.
     light: &'a BTreeMap<PlayerId, f32>,
     audio: &'a dishonored_ir::ai::AudioCells,
 }
@@ -897,8 +948,20 @@ impl Crowd {
         }
         let alarm_noise = std::mem::take(&mut self.alarm_noise);
         let social = self.social(world_state);
-        // The light at each player (the original samples the pawn's light environment).
-        let light: BTreeMap<PlayerId, f32> = world_state.players.iter().filter(|p| p.kind == PawnKind::Human && p.alive).map(|p| (p.id, if self.lights.is_empty() && self.sky_light <= 0.0 { LIGHT_LEVEL } else { light_at_with(&self.lights, self.sky_light, p.position, world) })).collect();
+        // The light at each player (the original samples the pawn's light environment),
+        // normalized by the range of the stealth volume the player is in, else the map's
+        // (`DishonoredVisibilityComponent` tick 0x00AD51E0: 0x00BD0120, 0x00BC9040).
+        let pv = &self.ai.player_visibility;
+        let light: BTreeMap<PlayerId, f32> = world_state
+            .players
+            .iter()
+            .filter(|p| p.kind == PawnKind::Human && p.alive)
+            .map(|p| {
+                let raw = if self.lights.is_empty() && self.sky_light <= 0.0 { LIGHT_LEVEL } else { light_at_with(&self.lights, self.sky_light, p.position, world) };
+                let range = dishonored_ir::ai::stealth_light_range(&self.stealth_volumes, p.position).unwrap_or([pv.light_darkest, pv.light_brightest]);
+                (p.id, light01(raw, range))
+            })
+            .collect();
         let senses = Senses { peers: &peers, barks: &barks, busted: &busted, alarm_noise: &alarm_noise, social: &social, light: &light, audio: &self.audio };
         let layout = &self.layout;
         let ai = &self.ai;
@@ -1083,6 +1146,7 @@ impl Crowd {
         let [dark, bright] = level.player_light_range.unwrap_or(global);
         pv.light_darkest = dark;
         pv.light_brightest = bright;
+        self.stealth_volumes = level.stealth_volumes.clone();
     }
 
     /// Faction of a spawned NPC: the spawner's `m_pFactionTweakOverride`, else its pawn
@@ -1304,20 +1368,26 @@ fn criminal(p: &PlayerState) -> bool {
     matches!(p.sword.phase, SwordPhase::Startup | SwordPhase::Active | SwordPhase::Assassinating) || p.left.phase == dishonored_sim::state::LeftPhase::Recovering
 }
 
-/// AI noise context of a simulation sound (`EAINoiseContext`).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Noise {
-    Danger,
-    Threatening,
-    Anomaly,
-}
-
-fn noise_context(c: SoundCategory) -> Noise {
-    match c {
-        SoundCategory::Pistol | SoundCategory::Crossbow | SoundCategory::SwordImpact | SoundCategory::SwordBlock | SoundCategory::Windblast | SoundCategory::BodyFall => Noise::Danger,
-        SoundCategory::SwordSwing => Noise::Threatening,
-        SoundCategory::Footstep | SoundCategory::Sprint | SoundCategory::Land | SoundCategory::Blink | SoundCategory::Mantle => Noise::Anomaly,
-    }
+/// The attention increase a heard noise asks for, by its context: the attention process's
+/// noise handler (0x00B40B70, reached from the brain's noise message 0x00B43E10) takes
+/// Anomaly and Footfall -> `m_IncreaseForAnomalySound`, Threatening and WolZap ->
+/// `m_IncreaseForThreateningSound`, Danger, RatSwarm and WatchTowerAttack ->
+/// `m_IncreaseForDangerSound`, DeathRattle -> `m_IncreaseForDeathRattleSound`. Help and the
+/// alarm bell go through their own stimuli (0x00C58560 cases 5, 6): `m_IncreaseForHelpSound`,
+/// `m_IncreaseForAlarmSound`. The other contexts (ambient white noise, impending explosion,
+/// ally search requests and notices, flare combustion) raise no attention there.
+/// Returns the increase and whether it is a danger noise (`EAINoiseContext_Danger` and the
+/// contexts read like it).
+fn noise_increase(prof: &AttentionConfig, c: NoiseContext) -> Option<(AttentionIncrease, bool)> {
+    Some(match c {
+        NoiseContext::Anomaly | NoiseContext::Footfall => (prof.anomaly_sound, false),
+        NoiseContext::Threatening | NoiseContext::WolZap => (prof.threatening_sound, false),
+        NoiseContext::Danger | NoiseContext::RatSwarm | NoiseContext::WatchTowerAttack => (prof.danger_sound, true),
+        NoiseContext::DeathRattle => (prof.death_rattle, true),
+        NoiseContext::Help => (prof.help_sound, true),
+        NoiseContext::AlarmBell => (prof.alarm_sound, true),
+        _ => return None,
+    })
 }
 
 impl Brain {
@@ -1566,14 +1636,13 @@ impl Brain {
     /// The target's `Attribute_Visibility`: built from light, speed and stance for players,
     /// the attribute base (0) for NPCs.
     /// The speed value is the horizontal speed over `Attribute_GroundSpeedSprint`, unclamped
-    /// (0x00ac33b0); `light` is the raw light value at the player.
-    fn visibility(ai: &AiConfig, other: &PlayerState, light: f32) -> f32 {
+    /// (0x00ac33b0); `light01` is the normalized light value at the player.
+    fn visibility(ai: &AiConfig, other: &PlayerState, light01: f32) -> f32 {
         if other.kind != PawnKind::Human {
             return 0.0;
         }
         let speed01 = other.velocity.truncate().length() / ai.player_visibility.ground_speed_sprint.max(1.0);
-        let sprinting = other.last_input.buttons & buttons::SPRINT != 0;
-        player_visibility(&ai.player_visibility, light, speed01, other.crouched, sprinting)
+        player_visibility(&ai.player_visibility, light01, speed01, vis_state(other))
     }
 
     #[cfg(test)]
@@ -1647,19 +1716,20 @@ impl Brain {
         // Sounds (gameplay sound events, never raw audio) -> attention toward the place
         // (`DACRT_Heard`).
         for e in events {
-            if let SimEvent::Sound { position, radius, category, source } = e {
+            if let SimEvent::Sound { position, radius, context, source, .. } = e {
                 if *source == self.id || !heard(*position, *radius) {
                     continue;
                 }
                 let prof = self.profile(ai, NOISE);
-                let ctx = noise_context(*category);
-                let (inc, urgent) = match ctx {
-                    Noise::Danger => (prof.danger_sound, true),
-                    Noise::Threatening => (prof.threatening_sound, false),
-                    Noise::Anomaly => (prof.anomaly_sound, false),
+                let Some((inc, urgent)) = noise_increase(prof, *context) else { continue };
+                // A footfall's stimulus is raised from the floor contact to the walker's
+                // height (0x00B40B70 case Footfall: z + target point - floor).
+                let at = match (*context, ws.player(*source)) {
+                    (NoiseContext::Footfall, Some(src)) => Vec3::new(position.x, position.y, src.position.z),
+                    _ => *position,
                 };
-                self.bump(ai, NOISE, inc, *position, urgent, reason::HEARD);
-                if ctx == Noise::Danger {
+                self.bump(ai, NOISE, inc, at, urgent, reason::HEARD);
+                if matches!(*context, NoiseContext::Danger | NoiseContext::RatSwarm | NoiseContext::WatchTowerAttack) {
                     if let Some(a) = self.attn.iter_mut().find(|a| a.who == NOISE) {
                         a.danger = true;
                     }
@@ -1770,7 +1840,8 @@ impl Brain {
             let hostile = self.enemies.contains(&p.id);
             let prof = self.profile(ai, p.id).clone();
             let stop = self.stops(ai, p.id);
-            let vis = Self::visibility(ai, p, senses.light.get(&p.id).copied().unwrap_or(LIGHT_LEVEL));
+            let pv = &ai.player_visibility;
+            let vis = Self::visibility(ai, p, senses.light.get(&p.id).copied().unwrap_or_else(|| light01(LIGHT_LEVEL, [pv.light_darkest, pv.light_brightest])));
             let near = (p.position - me.position).truncate().length() <= prof.distance_to_lose_sight && (p.position.z - me.position.z).abs() <= prof.distance_to_lose_sight;
             let touching = !self.numb && p.position.distance(me.position) < 80.0;
             if seen.is_none() && !touching && !self.attn.iter().any(|a| a.who == p.id) {
@@ -2997,7 +3068,7 @@ mod tests {
         let prof = AttentionConfig::guard_unsuspecting();
         // (raw light, LOS norm, speed / 600, the original's unclamped value)
         for (light, norm, speed, want) in [(0.3126, 0.145, 0.0, 0.788), (0.1897, 0.164, 0.0, 0.703), (0.1933, 0.214, 0.0, 0.582), (0.1972, 0.358, 0.0, 0.226), (0.191, 0.1402, 0.4228, 0.869)] {
-            let vis = player_visibility(pv, light, speed, false, speed > 0.0);
+            let vis = player_visibility(pv, light01(light, [pv.light_darkest, pv.light_brightest]), speed, VisState { sprinting: speed > 0.0, ..Default::default() });
             let v = prof.distance_tuning.apply(1.0 - norm, vis);
             assert!((v - want).abs() < 0.006, "light {light} norm {norm}: {v} vs {want}");
         }
@@ -3009,14 +3080,46 @@ mod tests {
     #[test]
     fn player_visibility_light_speed_stance() {
         let pv = PlayerVisibilityConfig::default();
+        let range = [pv.light_darkest, pv.light_brightest];
+        let l = |raw: f32| light01(raw, range);
+        let st = VisState::default();
         // Lit, standing: light 0.1 * 1.0.
-        assert!(close(player_visibility(&pv, 1.0, 0.0, false, false), 0.1));
+        assert!(close(player_visibility(&pv, l(1.0), 0.0, st), 0.1));
         // Lit, full speed: + 0.25.
-        assert!(close(player_visibility(&pv, 1.0, 1.0, false, true), 0.35));
+        assert!(close(player_visibility(&pv, l(1.0), 1.0, VisState { sprinting: true, ..st }), 0.35));
         // Sneaking: the speed counts as zero.
-        assert!(close(player_visibility(&pv, 1.0, 1.0, true, false), 0.1));
+        assert!(close(player_visibility(&pv, l(1.0), 1.0, VisState { sneaking: true, ..st }), 0.1));
         // Darkest light: nothing from light.
-        assert!(close(player_visibility(&pv, 0.05, 0.0, false, false), 0.0));
+        assert!(close(player_visibility(&pv, l(0.05), 0.0, st), 0.0));
+        // 0x00AD1590: under water -1 (m_fVisLevelBonus_Swimming) and the speed counts; at the
+        // surface the surface bonus; auto-crouching -1 with zero speed; sliding its own bonus.
+        assert!(close(player_visibility(&pv, l(1.0), 1.0, VisState { swimming: Some(true), sneaking: true, ..st }), 0.35 - 1.0));
+        assert!(close(player_visibility(&pv, l(1.0), 0.0, VisState { swimming: Some(false), ..st }), 0.1 + pv.bonus_swimming_surface));
+        assert!(close(player_visibility(&pv, l(1.0), 1.0, VisState { autocrouch: true, ..st }), 0.1 - 1.0));
+        assert!(close(player_visibility(&pv, l(1.0), 1.0, VisState { sliding: true, ..st }), 0.35 + pv.bonus_sliding));
+        // An empty light range reads 0.5 (0x00BC9040).
+        assert_eq!(light01(0.3, [0.4, 0.4]), 0.5);
+    }
+
+    /// A stealth volume's range replaces the map's inside it; the highest priority wins and a
+    /// head without settings falls through to the map's (0x00BD0120, 0x00C8C280).
+    #[test]
+    fn stealth_volume_light_range() {
+        use dishonored_ir::ai::StealthVolume;
+        let cube = |c: f32| vec![vec![[1.0, 0.0, 0.0, c + 100.0], [-1.0, 0.0, 0.0, -(c - 100.0)], [0.0, 1.0, 0.0, 100.0], [0.0, -1.0, 0.0, 100.0], [0.0, 0.0, 1.0, 100.0], [0.0, 0.0, -1.0, 100.0]]];
+        let level = AiLevel {
+            player_light_range: Some([0.2, 0.5]),
+            stealth_volumes: vec![
+                StealthVolume { name: "low".into(), priority: 0, light_range: Some([0.0, 0.1]), hulls: cube(0.0) },
+                StealthVolume { name: "high".into(), priority: 5, light_range: Some([0.3, 0.9]), hulls: cube(50.0) },
+                StealthVolume { name: "empty".into(), priority: 9, light_range: None, hulls: cube(500.0) },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(level.light_range_at(Vec3::new(-80.0, 0.0, 0.0)), Some([0.0, 0.1]));
+        assert_eq!(level.light_range_at(Vec3::new(20.0, 0.0, 0.0)), Some([0.3, 0.9]));
+        assert_eq!(level.light_range_at(Vec3::new(500.0, 0.0, 0.0)), Some([0.2, 0.5]));
+        assert_eq!(level.light_range_at(Vec3::new(2000.0, 0.0, 0.0)), Some([0.2, 0.5]));
     }
 
     #[test]
@@ -3122,7 +3225,7 @@ mod tests {
         let mut ws = WorldState::default();
         ws.players = vec![guard.clone()];
         let mut b = Brain::new(guard.id, PawnKind::Guard, guard.position, 1);
-        let shot = SimEvent::Sound { position: Vec3::new(-500.0, 0.0, 90.0), radius: 1500.0, category: SoundCategory::Pistol, source: 7 };
+        let shot = SimEvent::Sound { position: Vec3::new(-500.0, 0.0, 90.0), radius: 1500.0, category: SoundCategory::Pistol, context: NoiseContext::Danger, source: 7 };
         b.perceive(&guard, &ws, std::slice::from_ref(&shot), &[], &[], &[], &w, &ai, 1.0 / 60.0);
         assert_eq!(b.focus().map(|f| f.1), Some(DAL_INVESTIGATE));
         // Leak 0.025/s from 0.6: after 10 s 0.35, above the Investigate stop (0.3 +- 0.025).
@@ -3135,6 +3238,29 @@ mod tests {
             b.perceive(&guard, &ws, &[], &[], &[], &[], &w, &ai, 1.0 / 60.0);
         }
         assert!(b.focus().is_none());
+    }
+
+    /// 0x00B40B70: a Footfall noise is an anomaly noise (`m_IncreaseForAnomalySound`, +0.2 up to
+    /// HeadTrack) whose stimulus is lifted from the floor contact to the walker's height; an
+    /// ambient white noise raises nothing.
+    #[test]
+    fn footfall_noise_is_an_anomaly_at_the_walker() {
+        let ai = AiConfig::default();
+        let w = flat_world();
+        let guard = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(0.0, 0.0, 90.0), 0.0);
+        let walker = pawn(1, PawnKind::Human, Vec3::new(-400.0, 300.0, 90.0), 0.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![guard.clone(), walker];
+        let mut b = Brain::new(guard.id, PawnKind::Guard, guard.position, 1);
+        let ambient = SimEvent::Sound { position: Vec3::new(-400.0, 300.0, 2.5), radius: 600.0, category: SoundCategory::Footstep, context: NoiseContext::AmbientWhiteNoise, source: 1 };
+        b.perceive(&guard, &ws, std::slice::from_ref(&ambient), &[], &[], &[], &w, &ai, 1.0 / 60.0);
+        assert!(b.focus().is_none());
+        let step = SimEvent::Sound { position: Vec3::new(-400.0, 300.0, 2.5), radius: 600.0, category: SoundCategory::Footstep, context: NoiseContext::Footfall, source: 1 };
+        b.perceive(&guard, &ws, std::slice::from_ref(&step), &[], &[], &[], &w, &ai, 1.0 / 60.0);
+        assert_eq!(b.focus().map(|f| f.1), Some(DAL_HEAD_TRACK));
+        let a = b.attn.iter().find(|a| a.who == NOISE).unwrap();
+        assert!((a.value - ai.guard_unsuspecting.anomaly_sound.amount.max(ai.guard_unsuspecting.start[0])).abs() < 1e-3, "{}", a.value);
+        assert_eq!(a.proxy, Vec3::new(-400.0, 300.0, 90.0));
     }
 
     #[test]
@@ -3424,15 +3550,15 @@ mod tests {
         let mut ws = WorldState::default();
         ws.players = vec![guard.clone()];
         let mut b = Brain::new(guard.id, PawnKind::Guard, guard.position, 1);
-        let behind = SimEvent::Sound { position: Vec3::new(500.0, 0.0, 90.0), radius: 1500.0, category: SoundCategory::Pistol, source: 7 };
+        let behind = SimEvent::Sound { position: Vec3::new(500.0, 0.0, 90.0), radius: 1500.0, category: SoundCategory::Pistol, context: NoiseContext::Danger, source: 7 };
         b.perceive(&guard, &ws, std::slice::from_ref(&behind), &[], &[], &[], &w, &ai, 1.0 / 60.0);
         assert!(b.focus().is_none());
-        let open = SimEvent::Sound { position: Vec3::new(-500.0, 0.0, 90.0), radius: 1500.0, category: SoundCategory::Pistol, source: 7 };
+        let open = SimEvent::Sound { position: Vec3::new(-500.0, 0.0, 90.0), radius: 1500.0, category: SoundCategory::Pistol, context: NoiseContext::Danger, source: 7 };
         b.perceive(&guard, &ws, std::slice::from_ref(&open), &[], &[], &[], &w, &ai, 1.0 / 60.0);
         assert_eq!(b.focus().map(|f| f.1), Some(DAL_INVESTIGATE));
         // Exactly at the radius: not heard (strict).
         let mut c2 = Brain::new(guard.id, PawnKind::Guard, guard.position, 1);
-        let edge = SimEvent::Sound { position: Vec3::new(-1500.0, 0.0, 90.0), radius: 1500.0, category: SoundCategory::Pistol, source: 7 };
+        let edge = SimEvent::Sound { position: Vec3::new(-1500.0, 0.0, 90.0), radius: 1500.0, category: SoundCategory::Pistol, context: NoiseContext::Danger, source: 7 };
         c2.perceive(&guard, &ws, std::slice::from_ref(&edge), &[], &[], &[], &w, &ai, 1.0 / 60.0);
         assert!(c2.focus().is_none());
     }

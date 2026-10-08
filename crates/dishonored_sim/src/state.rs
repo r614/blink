@@ -299,6 +299,14 @@ pub struct PlayerState {
     /// with it drawn (nothing sheathes it yet); scenario setups set it.
     #[serde(default)]
     pub sword_sheathed: bool,
+    /// Phase (0..1) of the player's locomotion loop, whose `DishonoredNotify_Footfall`s make
+    /// the footfall contacts (and their AI noise, `noise::step_footfalls`).
+    #[serde(default)]
+    pub footfall_phase: f32,
+    /// `StatePlayerMasterFalling.m_bIsStealthFall`: the pawn was sneaking when its fall state
+    /// began (0x00A759F0); the landing is then `JumpLand_Stealth`.
+    #[serde(default)]
+    pub stealth_fall: bool,
 }
 
 /// The attack group on a pawn: seconds under attack (`m_fInitialDelayBeforeDealingDamage`) and
@@ -580,6 +588,8 @@ impl PlayerState {
             free_spell_chance: 0.0,
             rng: id.wrapping_mul(0x9E37_79B9) | 1,
             sword_sheathed: false,
+            footfall_phase: 0.0,
+            stealth_fall: false,
         }
     }
 

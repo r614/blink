@@ -348,6 +348,7 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
         pv.bonus_walking = b("m_fVisLevelBonus_Walking");
         pv.bonus_sprinting = b("m_fVisLevelBonus_Sprinting");
         pv.bonus_swimming = b("m_fVisLevelBonus_Swimming");
+        pv.bonus_swimming_surface = b("m_fVisLevelBonus_SwimmingOnSurface");
         pv.zero_speed_sneaking = matches!(m.get("m_bForceZeroSpeedWhileSneaking"), Some(TVal::B(true)));
         prov.insert("ai.player_visibility".into(), "Twk_PlayerVisibility.Twk_PlayerVisibility".into());
     }
@@ -452,8 +453,106 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
         out.death_rattle_loudness = d;
         prov.insert("ai.death_rattle_loudness".into(), "Pwn_EliteGuard_*.m_DeathRattleLoudness = EAINoiseWhisper -> m_LoudnessDistanceArray[2]".into());
     }
+    // The AI noises (contact system, weapon tweaks, footfall notifies).
+    noise_table(content, &db, &mut out, &mut prov);
     out.provenance = prov;
     out
+}
+
+/// The player's pistol fire tweak (`DisTweaks_FirePistol`, `m_AINoiseLoudnessWhenFiring`).
+const FIRE_PISTOL: &str = "Twk_Inv_PlayerSpecific.Twk_Inv_PistolCorvo.DisTweaks_InventoryItem_PlayerSpecific_0.DisTweaks_FirePistol_1";
+/// The player's locomotion anim set (its loops carry `DishonoredNotify_Footfall`).
+const LOCOMOTION_SET: &str = "Ply_Sword_Locomotion_as.Ply_Sword_Locomotion_as";
+
+/// `AiConfig::noise` from the install: the contact system's `DisContactSub_AINoise` objects
+/// (loudness -> `m_LoudnessDistanceArray`, context, speed gate), `m_AINoiseLoudnessWhenFiring`
+/// of the pistol fire tweak, `m_fFall_Stun_Vel` (DefaultPlayerState.ini) and the footfall
+/// notify times of the player's locomotion loops. Entries not found keep the default (the same
+/// retail values) and say so in the provenance.
+fn noise_table(content: &Content, db: &TweakDb, out: &mut AiConfig, prov: &mut std::collections::BTreeMap<String, String>) {
+    use dishonored_ir::ai::{AiNoise, FootfallClip, NoiseContext};
+    let dist = out.loudness_distances.clone();
+    let radius = |name: &str| crate::ai_level::LOUDNESS_NAMES.iter().position(|n| *n == name).and_then(|i| dist.get(i).copied());
+    let game = content.package("DishonoredGame").ok();
+    let game_content = content.package("DishonoredGameContent").ok();
+    let cs = game.as_ref().and_then(|g| dishonored_audio::contact::ContactSystem::load(g, &game_content.iter().map(|p| &**p).collect::<Vec<_>>()));
+    let t = &mut out.noise;
+    match &cs {
+        Some(cs) => {
+            const ENV: &str = "DisContactType_Environment";
+            let mut set = |field: &str, slot: &mut AiNoise, striker: &str, struck: &str| {
+                let s = format!("DisContactType_{striker}");
+                let k = format!("DisContactType_{struck}");
+                match cs.ai_noise(&s, &k) {
+                    Some(n) => {
+                        let r = if n.loudness == "EAINoiseSilent" { Some(0.0) } else { radius(&n.loudness) };
+                        let ctx = NoiseContext::from_name(&n.context);
+                        if let (Some(r), Some(ctx)) = (r, ctx) {
+                            *slot = AiNoise::new(r, ctx, if n.volume.scale_with_speed { n.volume.min_speed } else { 0.0 });
+                            prov.insert(format!("ai.noise.{field}"), format!("Dis_ContactSystem ({s}, {k}) DisContactSub_AINoise {} {} min speed {} (scaled {})", n.loudness, n.context, n.volume.min_speed, n.volume.scale_with_speed));
+                        } else {
+                            prov.insert(format!("ai.noise.{field}"), format!("default (unknown loudness / context {} {})", n.loudness, n.context));
+                        }
+                    }
+                    // No AI noise sub on the pair or its ancestors: the contact is silent.
+                    None => {
+                        *slot = AiNoise::SILENT;
+                        prov.insert(format!("ai.noise.{field}"), format!("Dis_ContactSystem ({s}, {k}): no DisContactSub_AINoise"));
+                    }
+                }
+            };
+            set("footfall_run", &mut t.footfall_run, "Footfall_Run_Player", ENV);
+            set("footfall_sprint", &mut t.footfall_sprint, "Footfall_Sprint_Player", ENV);
+            set("footfall_sneak", &mut t.footfall_sneak, "Footfall_Sneak_Player", ENV);
+            set("footfall_silent", &mut t.footfall_silent, "Footfall_Run_Player_Silent", ENV);
+            set("land", &mut t.land, "JumpLand", ENV);
+            set("land_stealth", &mut t.land_stealth, "JumpLand_Stealth", ENV);
+            set("land_big", &mut t.land_big, "JumpLand_Big", ENV);
+            set("sword_body", &mut t.sword_body, "Sword", "Body");
+            set("sword_weapon", &mut t.sword_weapon, "Sword", "Weapon");
+            set("bullet_impact", &mut t.bullet_impact, "Bullet", ENV);
+            set("corpse", &mut t.corpse, "Corpse", ENV);
+        }
+        None => {
+            prov.insert("ai.noise".into(), "defaults (Dis_ContactSystem not loaded)".into());
+        }
+    }
+    match db.try_resolve(FIRE_PISTOL).and_then(|m| match m.get("m_AINoiseLoudnessWhenFiring") {
+        Some(TVal::Name(n)) => Some(n.clone()),
+        _ => None,
+    }) {
+        Some(n) => {
+            if let Some(r) = radius(&n) {
+                t.pistol_fire = AiNoise::new(r, NoiseContext::Danger, 0.0);
+                prov.insert("ai.noise.pistol_fire".into(), format!("{FIRE_PISTOL}.m_AINoiseLoudnessWhenFiring = {n}, context Danger (0x00C2A3E0)"));
+            }
+        }
+        None => {
+            prov.insert("ai.noise.pistol_fire".into(), format!("default (m_AINoiseLoudnessWhenFiring not in {FIRE_PISTOL})"));
+        }
+    }
+    let state = Ini::load_layered(&content.root, "PlayerState");
+    if let Some(v) = state.get_f32("DishonoredGame.StatePlayerMasterFalling", "m_fFall_Stun_Vel") {
+        t.fall_stun_speed = v;
+        prov.insert("ai.noise.fall_stun_speed".into(), "DefaultPlayerState.ini [DishonoredGame.StatePlayerMasterFalling] m_fFall_Stun_Vel".into());
+    }
+    if let Ok(pkg) = content.package("Startup") {
+        if let Some(set) = (0..pkg.exports.len()).find(|&i| pkg.obj_path(ue3_package::ObjRef::Export(i)).eq_ignore_ascii_case(LOCOMOTION_SET)) {
+            let clips = dishonored_audio::anim_notify::read_anim_set(&pkg, set);
+            let clip = |name: &str, slot: &mut FootfallClip| {
+                if let Some(c) = clips.get(name) {
+                    let times: Vec<f32> = c.notifies.iter().filter(|n| matches!(n.kind, dishonored_audio::anim_notify::NotifyKind::Footfall { .. })).map(|n| n.time).collect();
+                    if c.length > 0.0 && !times.is_empty() {
+                        *slot = FootfallClip { length: c.length / c.rate.max(1e-6), footfalls: times.iter().map(|x| x / c.rate.max(1e-6)).collect() };
+                        return true;
+                    }
+                }
+                false
+            };
+            let ok = clip("Sword_Ready_Walk", &mut t.walk_clip) & clip("Sword_Ready_Run", &mut t.run_clip) & clip("Sword_Ready_Sprint", &mut t.sprint_clip);
+            prov.insert("ai.noise.footfall_clips".into(), format!("Startup {LOCOMOTION_SET} Sword_Ready_{{Walk,Run,Sprint}} DishonoredNotify_Footfall times{}", if ok { "" } else { " (some not found: defaults)" }));
+        }
+    }
 }
 
 /// A `DisTweaks_RatSwarm` over defaults.

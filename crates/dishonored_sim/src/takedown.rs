@@ -92,7 +92,6 @@ pub fn start_choke(state: &mut WorldState, ai: usize, vi: usize, cfg: &GameplayC
     p.choke.hold = cfg.items.inventory.choke_hold_to_auto_carry;
     p.velocity = Vec3::ZERO;
     events.push(SimEvent::ChokeStart { attacker: a.id, victim: vid });
-    events.push(SimEvent::Sound { position: a.position, radius: 300.0, category: SoundCategory::BodyFall, source: a.id });
 }
 
 fn set_phase(p: &mut PlayerState, ph: ChokePhase) {
@@ -280,11 +279,12 @@ pub fn release(state: &mut WorldState, carrier: PlayerId, velocity: Vec3, world:
         cp.carry_anim = 0.0;
     }
     events.push(SimEvent::BodyDropped { carrier, body: bid });
-    events.push(SimEvent::Sound { position: pos, radius: 400.0, category: SoundCategory::BodyFall, source: carrier });
 }
 
 /// Bodies on the ground fall to the floor (they do not run the locomotion of living pawns).
-pub fn step_body(b: &mut PlayerState, world: &dyn WorldQuery, cfg: &GameplayConfig, dt: f32) {
+/// A body hitting a surface is a `Corpse` contact: its AI noise (`Corpse` -> `Environment`,
+/// only from `m_fMinSpeed` up) at the contact, made by the body (`noise::emit`).
+pub fn step_body(b: &mut PlayerState, world: &dyn WorldQuery, cfg: &GameplayConfig, dt: f32, events: &mut Vec<SimEvent>) {
     let mv = &cfg.movement;
     let hh = crate::movement::half_height(b, mv);
     if b.velocity.length_squared() < 1e-4 {
@@ -304,6 +304,7 @@ pub fn step_body(b: &mut PlayerState, world: &dyn WorldQuery, cfg: &GameplayConf
     if let Some(h) = world.raycast(b.position, probe, probe.length(), channel::PAWN) {
         let back = if delta.z < 0.0 { hh } else { mv.collision_radius };
         b.position += delta.normalize_or_zero() * (h.distance - back).max(0.0);
+        crate::noise::emit(events, &cfg.ai.noise.corpse, h.point, SoundCategory::BodyFall, b.id, b.velocity.length());
         b.velocity = Vec3::ZERO;
     } else {
         b.position += delta;
