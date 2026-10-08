@@ -6,6 +6,7 @@
 //! convert to their own frame (see `dishonored_runtime::coords`).
 
 pub mod ai;
+pub mod env_light;
 pub mod gameplay;
 pub mod items;
 pub mod layout;
@@ -56,6 +57,10 @@ pub struct DishonoredMap {
     /// Placed doors and usable objects drawn with a skeletal mesh.
     #[serde(default)]
     pub skeletal_props: Vec<SkeletalProp>,
+    /// The static lights and light volumes the characters' light environments read at run time
+    /// (`dishonored_runtime::char_light`).
+    #[serde(default)]
+    pub light_env_world: env_light::LightEnvWorld,
     /// Placed `SceneCaptureReflectActor`s: the planar reflections that fill the water's render
     /// targets (research/dishonored/systems/render_reflect.md).
     #[serde(default)]

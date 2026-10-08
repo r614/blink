@@ -119,6 +119,8 @@ fn spawn_imported(
     levels: &mut Levels,
     fx: &mut crate::effects::Effects,
 ) -> DishonoredMap {
+    // The characters' light environments read this level's static lights and light volumes.
+    commands.insert_resource(crate::char_light::CharLightWorld::from_ir(name, &map.light_env_world));
     let spawned = map_render::spawn_map(&map, commands, meshes, images, materials, baked, opts.show_hidden, features);
     crate::effects::spawn_level_effects(name, &map, commands, meshes, images, materials, fx);
     crate::level_props::queue(name, &map, commands);

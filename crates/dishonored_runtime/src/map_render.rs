@@ -43,6 +43,11 @@ pub struct RenderFeatures {
     /// (`--no-reflections` turns them off; `reflect.rs`). The original's video options have no
     /// switch for them.
     pub reflections: bool,
+    /// The dominant point light's Bevy shadow map (a cube map: six scene passes). The original's
+    /// DynamicShadows and LightEnvironmentShadows system settings are both True
+    /// (dishonored_settings::Graphics); --no-point-shadows (or DISHONORED_NO_POINT_SHADOWS)
+    /// turns it off for frame time (lighting.rs).
+    pub point_shadows: bool,
 }
 
 impl RenderFeatures {
@@ -63,6 +68,7 @@ impl RenderFeatures {
             lightmap_specular: on("--no-lightmap-specular"),
             df_shadows: on("--no-df-shadows"),
             reflections: on("--no-reflections"),
+            point_shadows: on("--no-point-shadows") && std::env::var_os("DISHONORED_NO_POINT_SHADOWS").is_none(),
         }
     }
 }

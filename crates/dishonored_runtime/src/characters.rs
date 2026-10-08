@@ -60,6 +60,9 @@ pub struct CharacterGpu {
     /// built on top of the uploaded ones (the level props' light environments).
     pub textures: Vec<Handle<Image>>,
     pub material_params: Vec<dishonored_ir::MaterialParams>,
+    /// The bind pose's bounding sphere in pawn space (uu): the centre of its box and the farthest
+    /// vertex from it, a light environment's bounds (`char_light.rs`).
+    pub sphere: (glam::Vec3, f32),
 }
 
 #[derive(Resource, Default)]
@@ -177,7 +180,10 @@ pub fn upload(model: &CharacterModel, meshes: &mut Assets<Mesh>, images: &mut As
         let bounds = animated_bounds(&pos);
         parts.push(PartGpu { source: p.source.clone(), sections, section_materials, inverse_bindposes: ib, bind, bones: p.bones.clone(), mesh_to_pawn: m2p, bounds });
     }
-    CharacterGpu { name: model.name.clone(), parts, textures: tex, material_params: model.material_params.clone() }
+    let all: Vec<glam::Vec3> = model.parts.iter().flat_map(|p| p.positions.iter().map(|v| p.mesh_to_pawn.transform_point3(*v))).collect();
+    let (lo, hi) = all.iter().fold((glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN)), |(a, b), v| (a.min(*v), b.max(*v)));
+    let sphere = if all.is_empty() { (glam::Vec3::ZERO, 0.0) } else { let c = (lo + hi) * 0.5; (c, all.iter().map(|v| v.distance(c)).fold(0.0, f32::max)) };
+    CharacterGpu { name: model.name.clone(), parts, textures: tex, material_params: model.material_params.clone(), sphere }
 }
 
 pub fn load_library(

@@ -286,6 +286,15 @@ pub fn import_level(
         let volumes: Vec<Option<Vec<crate::light_env::VolumeSample>>> = imp.pkgs[..level_slots].iter().map(|p| crate::light_env::read_light_volume(p)).collect();
         let lights: Vec<crate::light_env::EnvLight> = imp.pkgs[..level_slots].iter().flat_map(|p| crate::light_env::read_static_lights(p)).collect();
         crate::light_env::light_props(content, &mut imp.map, &instance_level, &volumes, &lights, &channels);
+        // The same data for the characters' light environments (`dishonored_runtime::char_light`).
+        imp.map.light_env_world = dishonored_ir::env_light::LightEnvWorld {
+            lights: lights.iter().map(|l| l.to_data()).collect(),
+            volumes: volumes
+                .iter()
+                .zip(&imp.pkgs[..level_slots])
+                .filter_map(|(v, p)| v.as_ref().map(|v| dishonored_ir::env_light::LightVolumeData { level: p.name.clone(), samples: v.iter().map(|s| s.to_data()).collect() }))
+                .collect(),
+        };
         imp.stats.timings.push(("light environments", t.elapsed().as_secs_f32()));
     }
     imp.stats.unresolved_paths.sort();

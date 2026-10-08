@@ -453,6 +453,13 @@ pub struct ViewRig {
     look_bones: [Option<usize>; 3],
 }
 
+impl ViewRig {
+    /// The arms' uploaded model (`char_light.rs` lights it with the pawn's light environment).
+    pub fn arms(&self) -> &CharacterGpu {
+        &self.arms
+    }
+}
+
 #[derive(Component)]
 pub struct ViewRoot;
 #[derive(Component)]
