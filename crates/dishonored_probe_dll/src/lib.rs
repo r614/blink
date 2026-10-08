@@ -8,6 +8,8 @@
 //!   suspended) installs the hooks and starts the pipe server:
 //!   - `UObject::ProcessEvent` (0x00470640) is detoured; the local `PlayerController`'s
 //!     `PlayerTick` event is the per-tick game-thread callback (samples, input, queued jobs).
+//!   - the engine loop's time update (0x009DDDF0) calls `tick::boundary` once per world
+//!     tick: tick counter, game-thread jobs, per-tick samples, lockstep parking, spawn watch;
 //!   - `IDirect3D9::CreateDevice` is patched in d3d9's shared vtable; the created device's
 //!     `Present`, pixel-shader and draw entries are then patched (capture, PS constants).
 //! - The pipe `\\.\pipe\dishonored_probe_<pid>_<token>` is local-only and its DACL grants
@@ -29,7 +31,13 @@ mod mem;
 #[cfg(all(windows, target_arch = "x86"))]
 mod native;
 #[cfg(all(windows, target_arch = "x86"))]
+mod reflect;
+#[cfg(all(windows, target_arch = "x86"))]
+mod script;
+#[cfg(all(windows, target_arch = "x86"))]
 mod server;
+#[cfg(all(windows, target_arch = "x86"))]
+mod tick;
 
 #[cfg(all(windows, target_arch = "x86"))]
 pub use imp::*;
@@ -92,6 +100,9 @@ mod imp {
         if !crate::hook::install_process_event() {
             return 0;
         }
+        // The world-tick boundary (time update); optional: without it ticks are counted per
+        // rendered frame as before.
+        crate::tick::install();
         crate::d3d::install();
         crate::iat::install();
         // Focus faking (the engine pauses on focus loss): on unless the launcher says "0".

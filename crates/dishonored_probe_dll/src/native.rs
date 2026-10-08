@@ -201,29 +201,61 @@ pub fn hook_fetch(id: u32) -> Result<Vec<HookRecord>, String> {
 
 pub struct EventRecord {
     pub time: f32,
+    /// World tick (`tick::GAME_TICK`) of the call.
+    pub tick: u32,
     pub this: u32,
     pub func: u32,
     pub parms: Vec<u8>,
 }
 
 pub struct EventTrace {
+    /// Sorted function addresses.
     pub funcs: Vec<u32>,
+    /// Objects of these classes (or subclasses) are traced whatever the function.
+    pub classes: Option<crate::reflect::IsACache>,
     pub parm_len: u32,
     pub max: usize,
     pub records: Vec<EventRecord>,
+    /// Calls dropped because the buffer was full.
+    pub dropped: u32,
 }
 
 pub static TRACE_ON: AtomicU32 = AtomicU32::new(0);
-pub static TRACE: Mutex<EventTrace> = Mutex::new(EventTrace { funcs: Vec::new(), parm_len: 0, max: 0, records: Vec::new() });
+pub static TRACE: Mutex<EventTrace> = Mutex::new(EventTrace { funcs: Vec::new(), classes: None, parm_len: 0, max: 0, records: Vec::new(), dropped: 0 });
 
 /// From the ProcessEvent detour, before the call.
 pub fn trace_event(this: u32, func: u32, parms: u32) {
     let Ok(mut t) = TRACE.lock() else { return };
-    if t.records.len() >= t.max || !t.funcs.contains(&func) {
+    let hit = t.funcs.binary_search(&func).is_ok() || t.classes.as_mut().is_some_and(|c| c.test(this));
+    if !hit {
+        return;
+    }
+    if t.records.len() >= t.max {
+        t.dropped += 1;
         return;
     }
     let parms = if t.parm_len > 0 { mem::read_bytes(parms, t.parm_len as usize).unwrap_or_default() } else { Vec::new() };
-    t.records.push(EventRecord { time: world_time(), this, func, parms });
+    let tick = crate::tick::GAME_TICK.load(std::sync::atomic::Ordering::Relaxed);
+    t.records.push(EventRecord { time: world_time(), tick, this, func, parms });
+}
+
+/// Function objects whose `Outer.Name` path contains one of `subs` (case-insensitive), from
+/// a scan of every live `Function`.
+pub fn functions_matching(subs: &[String]) -> Vec<u32> {
+    if subs.is_empty() {
+        return Vec::new();
+    }
+    let subs: Vec<String> = subs.iter().map(|s| s.to_ascii_lowercase()).collect();
+    let mut out = Vec::new();
+    for f in engine::find("", "Function") {
+        let n = engine::obj_name(f).unwrap_or_default();
+        let o = mem::u32(f + engine::OBJ_OUTER).and_then(engine::obj_name).unwrap_or_default();
+        let path = format!("{o}.{n}").to_ascii_lowercase();
+        if subs.iter().any(|s| path.contains(s.as_str())) {
+            out.push(f);
+        }
+    }
+    out
 }
 
 /// `GWorld` (the `UWorld*` global) and `UWorld::SingleLineCheck` (thiscall: `FCheckResult& Hit,

@@ -225,6 +225,27 @@ draws make a feature (the `moon` glow: the sky dome, U-580). Status also reports
 (every draw counted under hash 0, `measure consts` sampled nothing); a relaunch fixed it, so
 check `ps_sets_known` before relying on shader filters.
 
+## World ticks, lockstep, reflection, tick scripts (protocol 5, 2026-10-08)
+
+The DLL also patches the time update 0x009DDDF0 (once per engine-loop iteration, before the
+engine tick): `tick.rs` counts world ticks, runs game-thread jobs there and can park the game
+thread between ticks (lockstep). `WAIT_TICKS` and the per-tick recorder now use world ticks;
+the D3D hook only counts presents. A job whose caller timed out is dropped, never run late.
+
+| Op | Use |
+|---|---|
+| `TICK`, `LOCKSTEP`, `STEP` | world tick counter; park at the boundary; release exactly N ticks |
+| `READS` | many pointer-chain reads in one request |
+| `FIELDS`, `ENUM_NAMES`, `NAME_INDEX` | reflection: own fields of a struct / class / function, enum names, FName lookup |
+| `EVENT_FILTER` | ProcessEvent trace by function-name substring and by object class (is-a); records carry the world tick |
+| `SPAWN_WATCH` / `SPAWN_FETCH` | actors that appear in `GObjObjects` with a `Level` outer, per tick |
+| `CALL_FUNC`, `NAMES_OF` | ProcessEvent of a function object; many full names in one request |
+| `SCRIPT_START` / `SCRIPT_WAIT` | a whole scripted run (key events, writes, console per tick; reads sampled at every boundary) inside the game |
+
+Layouts and the native-function call path are in ORACLE.md "Original side: the hooked
+session"; the JSON command set (`probe_launch session ...`, `probe_launch scenario ...`) too.
+`FIND` runs on the game thread (direct reads, an FName cache) and accepts `Base_N` names.
+
 ## Release-time regression baseline
 
 Run in a fresh session: `launch`, `measure boot`, `lab setup 60`, then the four scenarios. The

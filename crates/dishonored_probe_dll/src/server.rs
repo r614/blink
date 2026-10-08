@@ -149,6 +149,7 @@ fn serve(pipe: Pipe) {
             if !read_exact(h, &mut body) {
                 break;
             }
+            crate::tick::touch();
             let resp = match handle(body[0], &body[1..]) {
                 Ok(p) => {
                     let mut r = vec![0u8];
@@ -255,6 +256,14 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
                     })
                     .unwrap_or_default(),
             );
+            let s = format!(
+                "{s}game_tick={}\ntick_hook={}\nlockstep={}\nparked={}\ntrace_dropped={}\n",
+                crate::tick::GAME_TICK.load(Relaxed),
+                crate::tick::INSTALLED.load(Relaxed),
+                crate::tick::LOCKSTEP.load(Relaxed),
+                crate::tick::PARKED.load(Relaxed),
+                native::TRACE.lock().map(|t| t.dropped).unwrap_or(0),
+            );
             out = s.into_bytes();
         }
         op::FIND => {
@@ -347,6 +356,11 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
             let event = io(rd.u8())? as u32;
             let handled = input::input_key(&key, event)?;
             out.push(handled as u8);
+        }
+        op::WAIT_TICKS if crate::tick::INSTALLED.load(Relaxed) != 0 => {
+            // World ticks from the boundary hook (in lockstep: released and parked again).
+            let n = io(rd.u32())?;
+            crate::tick::step(n, 120_000)?;
         }
         op::WAIT_TICKS => {
             let n = io(rd.u32())?;
@@ -520,19 +534,256 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
         }
         op::EVENT_TRACE => {
             let (max, parm_len, n) = (io(rd.u32())?, io(rd.u32())?, io(rd.u32())?);
-            let funcs = (0..n).map(|_| io(rd.u32())).collect::<Result<Vec<u32>, String>>()?;
+            let mut funcs = (0..n).map(|_| io(rd.u32())).collect::<Result<Vec<u32>, String>>()?;
+            funcs.sort_unstable();
             let mut t = native::TRACE.lock().map_err(|_| "poisoned")?;
             t.funcs = funcs;
+            t.classes = None;
             t.parm_len = parm_len.min(1024);
             t.max = max as usize;
             t.records.clear();
+            t.dropped = 0;
             native::TRACE_ON.store((max > 0 && !t.funcs.is_empty()) as u32, Relaxed);
+        }
+        op::EVENT_FILTER => {
+            let (max, parm_len) = (io(rd.u32())?, io(rd.u32())?);
+            let nf = io(rd.u32())?.min(1024);
+            let subs = (0..nf).map(|_| io(rd.str())).collect::<Result<Vec<String>, String>>()?;
+            let nc = io(rd.u32())?.min(1024);
+            let classes = (0..nc).map(|_| io(rd.str())).collect::<Result<Vec<String>, String>>()?;
+            let na = io(rd.u32())?.min(1 << 20);
+            let mut funcs = (0..na).map(|_| io(rd.u32())).collect::<Result<Vec<u32>, String>>()?;
+            funcs.extend(native::functions_matching(&subs));
+            funcs.sort_unstable();
+            funcs.dedup();
+            let class_idx: Vec<u32> = classes.iter().filter_map(|c| engine::name_index(c)).collect();
+            if class_idx.len() != classes.len() {
+                return Err(format!("unknown class name among {classes:?}"));
+            }
+            let mut t = native::TRACE.lock().map_err(|_| "poisoned")?;
+            put_u32(&mut out, funcs.len() as u32);
+            let on = max > 0 && (!funcs.is_empty() || !class_idx.is_empty());
+            t.funcs = funcs;
+            t.classes = (!class_idx.is_empty()).then(|| crate::reflect::IsACache::new(class_idx));
+            t.parm_len = parm_len.min(1024);
+            t.max = max as usize;
+            t.records.clear();
+            t.dropped = 0;
+            native::TRACE_ON.store(on as u32, Relaxed);
+        }
+        op::TICK => {
+            put_u32(&mut out, crate::tick::GAME_TICK.load(Relaxed));
+            out.push(crate::tick::INSTALLED.load(Relaxed) as u8);
+            out.push(crate::tick::LOCKSTEP.load(Relaxed) as u8);
+            out.push(crate::tick::PARKED.load(Relaxed) as u8);
+            put_u32(&mut out, d3d::PRESENTS.load(Relaxed));
+        }
+        op::LOCKSTEP => {
+            let on = io(rd.u8())? != 0;
+            let timeout = io(rd.u32())?.max(1000) as u64;
+            if crate::tick::INSTALLED.load(Relaxed) == 0 {
+                return Err("the tick boundary hook is not installed".into());
+            }
+            let t = if on {
+                crate::tick::lockstep_on(timeout)?
+            } else {
+                crate::tick::lockstep_off();
+                crate::tick::GAME_TICK.load(Relaxed)
+            };
+            put_u32(&mut out, t);
+        }
+        op::STEP => {
+            let n = io(rd.u32())?;
+            let timeout = io(rd.u32())?.max(1000) as u64;
+            if crate::tick::INSTALLED.load(Relaxed) == 0 {
+                return Err("the tick boundary hook is not installed".into());
+            }
+            put_u32(&mut out, crate::tick::step(n, timeout)?);
+        }
+        op::READS => {
+            let n = io(rd.u32())?;
+            if n > 1 << 16 {
+                return Err("too many reads".into());
+            }
+            for _ in 0..n {
+                let mut a = io(rd.u32())?;
+                let k = io(rd.u8())?.max(1) as usize;
+                let offs = (0..k).map(|_| io(rd.u32())).collect::<Result<Vec<u32>, String>>()?;
+                let len = io(rd.u32())?.min(1 << 20) as usize;
+                let mut ok = a != 0;
+                for o in &offs[..k - 1] {
+                    if !ok {
+                        break;
+                    }
+                    match mem::u32(a.wrapping_add(*o)) {
+                        Some(v) if v != 0 => a = v,
+                        _ => ok = false,
+                    }
+                }
+                let b = if ok { mem::read_bytes(a.wrapping_add(offs[k - 1]), len) } else { None };
+                out.push(b.is_some() as u8);
+                out.extend(b.unwrap_or_else(|| vec![0; len]));
+            }
+        }
+        op::FIELDS => {
+            let st = io(rd.u32())?;
+            if engine::obj_name(st).is_none() {
+                return Err(format!("{st:#x} is not an object"));
+            }
+            put_u32(&mut out, crate::reflect::super_of(st));
+            put_u32(&mut out, crate::reflect::struct_size(st));
+            put_str(&mut out, &engine::obj_name(st).unwrap_or_default());
+            put_str(&mut out, &engine::class_name(st).unwrap_or_default());
+            let f = crate::reflect::fields(st);
+            put_u32(&mut out, f.len() as u32);
+            for x in f {
+                put_u32(&mut out, x.addr);
+                put_str(&mut out, &x.name);
+                put_str(&mut out, &x.class);
+                put_u32(&mut out, x.offset);
+                put_u32(&mut out, x.element_size);
+                put_u32(&mut out, x.array_dim);
+                out.extend(x.flags.to_le_bytes());
+                put_u32(&mut out, x.aux);
+                put_u32(&mut out, x.aux2);
+            }
+        }
+        op::ENUM_NAMES => {
+            let names = crate::reflect::enum_names(io(rd.u32())?);
+            put_u32(&mut out, names.len() as u32);
+            for n in names {
+                put_str(&mut out, &n);
+            }
+        }
+        op::SPAWN_WATCH => {
+            crate::tick::spawn_watch(io(rd.u32())?)?;
+        }
+        op::SPAWN_FETCH => {
+            let recs = std::mem::take(&mut crate::tick::SPAWNS.lock().map_err(|_| "poisoned")?.records);
+            put_u32(&mut out, recs.len() as u32);
+            for (t, o, c) in recs {
+                put_u32(&mut out, t);
+                put_u32(&mut out, o);
+                put_u32(&mut out, c);
+            }
+        }
+        op::CALL_FUNC => {
+            let obj = io(rd.u32())?;
+            let func = io(rd.u32())?;
+            let parms = rd.rest().to_vec();
+            if obj == 0 || engine::class_name(func).as_deref() != Some("Function") {
+                return Err(format!("bad object {obj:#x} or function {func:#x}"));
+            }
+            out = hook::on_game_thread(
+                move || {
+                    let mut buf = parms;
+                    buf.resize(buf.len().max(256), 0);
+                    unsafe { hook::process_event_virtual(obj, func, buf.as_mut_ptr() as u32) };
+                    buf
+                },
+                30_000,
+            )?;
+        }
+        op::SCRIPT_START => {
+            use crate::script::{self, Act};
+            if crate::tick::LOCKSTEP.load(Relaxed) == 0 || crate::tick::PARKED.load(Relaxed) == 0 {
+                return Err("a tick script needs the game parked in lockstep".into());
+            }
+            if script::STATE.load(Relaxed) == script::RUNNING || script::STATE.load(Relaxed) == script::PENDING {
+                return Err("a tick script is already running".into());
+            }
+            let ticks = io(rd.u32())?;
+            let nr = io(rd.u32())?.min(4096);
+            let mut reads = Vec::new();
+            for _ in 0..nr {
+                let base = io(rd.u32())?;
+                let k = io(rd.u8())?.max(1) as usize;
+                let offs = (0..k).map(|_| io(rd.u32())).collect::<Result<Vec<u32>, String>>()?;
+                reads.push((base, offs, io(rd.u32())?.min(4096)));
+            }
+            let na = io(rd.u32())?;
+            let mut actions = Vec::new();
+            let console = engine::find_function("PlayerController.ConsoleCommand");
+            for _ in 0..na {
+                let t = io(rd.u32())?;
+                let a = match io(rd.u8())? {
+                    0 => {
+                        let key = io(rd.str())?;
+                        let ev = io(rd.u8())? as u32;
+                        Act::Key(engine::name_index(&key).ok_or_else(|| format!("no FName {key}"))?, ev)
+                    }
+                    1 => {
+                        let addr = io(rd.u32())?;
+                        Act::Write(addr, io(rd.bytes())?.to_vec())
+                    }
+                    2 => {
+                        if console == 0 {
+                            return Err("PlayerController.ConsoleCommand not found".into());
+                        }
+                        Act::Console(console, io(rd.str())?)
+                    }
+                    k => return Err(format!("unknown script action {k}")),
+                };
+                actions.push((t, a));
+            }
+            actions.sort_by_key(|a| a.0);
+            *script::SCRIPT.lock().map_err(|_| "poisoned")? = Some(script::Script { ticks, reads, actions, next: 0, base: 0, frames: Vec::new(), errors: Vec::new() });
+            script::STATE.store(script::PENDING, Relaxed);
+        }
+        op::SCRIPT_WAIT => {
+            use crate::script;
+            let timeout = io(rd.u32())? as u64;
+            let t0 = std::time::Instant::now();
+            loop {
+                crate::tick::touch();
+                let st = script::STATE.load(Relaxed);
+                if st == script::IDLE {
+                    return Err("no tick script".into());
+                }
+                if st == script::DONE && crate::tick::PARKED.load(Relaxed) != 0 {
+                    break;
+                }
+                if crate::tick::LOCKSTEP.load(Relaxed) == 0 {
+                    script::STATE.store(script::IDLE, Relaxed);
+                    return Err("lockstep was released during the script".into());
+                }
+                if t0.elapsed().as_millis() as u64 > timeout {
+                    return Err(format!("tick script not done within {timeout} ms (tick {})", crate::tick::GAME_TICK.load(Relaxed)));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            let s = script::SCRIPT.lock().map_err(|_| "poisoned")?.take().ok_or("no script")?;
+            script::STATE.store(script::IDLE, Relaxed);
+            put_u32(&mut out, s.base);
+            dishonored_probe::put_bytes(&mut out, &s.frames);
+            put_str(&mut out, &s.errors.join("\n"));
+        }
+        op::NAME_INDEX => {
+            let s = io(rd.str())?;
+            let (i, n) = match engine::name_index(&s) {
+                Some(i) => (i, 0),
+                None => {
+                    let (b, k) = s.rsplit_once('_').ok_or_else(|| format!("no FName {s}"))?;
+                    let k: u32 = k.parse().map_err(|_| format!("no FName {s}"))?;
+                    (engine::name_index(b).ok_or_else(|| format!("no FName {s}"))?, k + 1)
+                }
+            };
+            put_u32(&mut out, i);
+            put_u32(&mut out, n);
+        }
+        op::NAMES_OF => {
+            let n = io(rd.u32())?.min(1 << 16);
+            for _ in 0..n {
+                let a = io(rd.u32())?;
+                put_str(&mut out, &engine::full_name(a).unwrap_or_default());
+            }
         }
         op::EVENT_FETCH => {
             let recs = std::mem::take(&mut native::TRACE.lock().map_err(|_| "poisoned")?.records);
             put_u32(&mut out, recs.len() as u32);
             for r in recs {
                 out.extend(r.time.to_le_bytes());
+                put_u32(&mut out, r.tick);
                 put_u32(&mut out, r.this);
                 put_u32(&mut out, r.func);
                 dishonored_probe::put_bytes(&mut out, &r.parms);

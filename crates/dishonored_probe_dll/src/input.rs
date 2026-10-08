@@ -52,6 +52,18 @@ pub fn game_window() -> Option<HWND> {
     Some(h)
 }
 
+/// `InputKey` called directly: game thread only (the tick scripts).
+pub fn input_key_now(idx: u32, event: u32) -> Result<bool, String> {
+    let gvc = mem::u32(engine::GENGINE.load(Relaxed) + ENGINE_GAME_VIEWPORT).filter(|&g| g != 0).ok_or("no GameViewport")?;
+    unsafe {
+        let client = gvc + GVC_FVIEWPORTCLIENT;
+        let viewport = *((gvc + GVC_VIEWPORT) as *const u32);
+        let vt = *(client as *const u32);
+        let f: InputKeyFn = std::mem::transmute(*((vt + VT_INPUT_KEY) as *const u32) as usize);
+        Ok(f(client, viewport, 0, idx, 0, event, 1.0, 0) != 0)
+    }
+}
+
 /// Send one key event (`event`: 0 pressed, 1 released, 2 repeat) named like the engine's keys
 /// (`SpaceBar`, `W`, `LeftShift`, `C`, `Enter`, `Escape`, ...). Returns the handled flag.
 pub fn input_key(key: &str, event: u32) -> Result<bool, String> {

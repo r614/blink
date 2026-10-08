@@ -151,7 +151,10 @@ fn orig(slot: usize) -> usize {
 
 unsafe extern "system" fn present_hook(dev: u32, a: u32, b: u32, c: u32, d: u32) -> i32 {
     PRESENTS.fetch_add(1, Relaxed);
-    crate::hook::frame();
+    // With the tick boundary hook the per-tick work runs there, on the game thread.
+    if crate::tick::INSTALLED.load(Relaxed) == 0 {
+        crate::hook::frame();
+    }
     let want = CAPTURE.lock().map(|c| c.pending).unwrap_or(false);
     if want {
         let r = unsafe { capture_back_buffer(dev) };
