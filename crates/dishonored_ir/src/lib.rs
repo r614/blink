@@ -8,6 +8,7 @@
 pub mod ai;
 pub mod gameplay;
 pub mod items;
+pub mod layout;
 pub mod nav;
 pub mod particles;
 pub mod npc_anim;

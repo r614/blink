@@ -81,6 +81,98 @@ pub struct TravelDoor {
     pub sound: Option<String>,
 }
 
+/// A door or usable object the player uses natively (no original Kismet drives it): maps built
+/// from a layout (the Playground). `DisDoor` use, decoded (research/dishonored/PLAYGROUND.md,
+/// "Doors"): the use handler (vtable slot 242, 0x00A37C10) opens a closed door away from the
+/// user (0x00A2D2E0: the side of the user along the door's reference axis picks Open CCW, state
+/// 2, or Open CW, state 1) and closes an open one; a locked door cannot be used (0x00A4E2E0).
+/// Other usables step to their next stage (wrapping).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UsableDef {
+    /// `<package>:<actor>` (the name the movers and props use).
+    pub actor: String,
+    pub map: String,
+    /// The actor's `Location`.
+    pub location: Vec3,
+    /// Where the player aims to use it (the centre of its collision bodies).
+    pub center: Vec3,
+    /// Doors: the reference axis in world space (the side test of 0x00A2D2E0); None: a usable.
+    pub door_axis: Option<Vec3>,
+    pub locked: bool,
+    /// Initial door state (`m_InitialDoorState`).
+    pub initial: u8,
+    /// Stage count of a usable (at least 2: a toggle).
+    pub stages: i32,
+    /// Original interaction text (localized `m_InteractText`), and the text while locked.
+    pub prompt: String,
+    pub locked_prompt: String,
+}
+
+/// State of a natively used door or usable.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct PropState {
+    /// `EDisDoorState` (0 closed, 1 opened CW, 2 opened CCW).
+    pub door: u8,
+    pub locked: bool,
+    /// Current stage of a usable.
+    pub stage: i32,
+}
+
+/// Use a door (0x00A37C10): the next state, or None when it cannot be used (locked, 0x00A4E2E0).
+pub fn door_use(state: PropState, location: Vec3, axis: Vec3, user: Vec3) -> Option<u8> {
+    if state.locked {
+        return None;
+    }
+    Some(match state.door {
+        // 0x00A2D2E0: (user - door) . axis < 0 -> stage Open CCW (state 2), else Open CW (1).
+        0 => {
+            if (user - location).dot(axis) < 0.0 {
+                2
+            } else {
+                1
+            }
+        }
+        _ => 0,
+    })
+}
+
+/// Give a player powers and items (`Loadout`): the original's `OnAddPower` / `AddInventoryItem`
+/// handlers. Health and mana are topped up to their (possibly new) maxima.
+pub fn apply_loadout(p: &mut PlayerState, l: &dishonored_mission::Loadout, cfg: &SimConfig) {
+    use dishonored_ir::items::{AmmoType, ElixirType};
+    use dishonored_sim::state::power;
+    let g = &cfg.gameplay;
+    if l.reset {
+        p.inv = Default::default();
+        dishonored_sim::left_hand::reset_loadout(p, &cfg.tuning);
+    }
+    if l.all_powers {
+        p.inv.power_levels = [2; power::COUNT];
+    }
+    for (name, level) in &l.powers {
+        if let Some(i) = power::NAMES.iter().position(|n| n.eq_ignore_ascii_case(name)) {
+            p.inv.power_levels[i] = (*level).min(2);
+        }
+    }
+    if l.full_ammo {
+        for t in AmmoType::ALL {
+            let cap = dishonored_sim::inventory::capacity(p, t, g);
+            dishonored_sim::inventory::add_ammo(p, t, cap, g);
+        }
+    }
+    dishonored_sim::inventory::add_elixirs(p, ElixirType::Health, l.elixirs.0 as i32, g);
+    dishonored_sim::inventory::add_elixirs(p, ElixirType::Mana, l.elixirs.1 as i32, g);
+    p.inv.runes = p.inv.runes.saturating_add(l.runes);
+    p.inv.coins = p.inv.coins.saturating_add(l.coins);
+    for u in &l.upgrades {
+        dishonored_sim::powers::give_upgrade(p, u, g);
+    }
+    p.vitals.health = dishonored_sim::powers::health_max(p, g);
+    p.vitals.mana = dishonored_sim::powers::mana_max(p, g);
+    p.vitals.mana_regen_cap = p.vitals.mana;
+    p.vitals.mana_regen_pool = 0.0;
+}
+
 /// Everything the setup needs from one persistent map.
 pub struct MapInput<'a> {
     pub name: String,
@@ -147,6 +239,9 @@ pub struct MissionSetup {
     /// Pickups placed in each mission map (lowercase name), put in the world on a first visit.
     #[serde(default)]
     pub pickups: BTreeMap<String, Vec<dishonored_ir::items::PlacedPickup>>,
+    /// Doors and usables used natively (layout maps; original maps use theirs through the Kismet).
+    #[serde(default)]
+    pub usables: Vec<UsableDef>,
 }
 
 /// Resolve a place to (position, yaw, map index).
@@ -308,7 +403,7 @@ impl MissionSetup {
                 }
             }
         }
-        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances, pickups: BTreeMap::new(), anim_profiles, kismet: None, ai_levels: maps.iter().map(|m| (m.name.to_ascii_lowercase(), m.ai_level.clone())).collect(), routes: maps
+        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances, pickups: BTreeMap::new(), usables: Vec::new(), anim_profiles, kismet: None, ai_levels: maps.iter().map(|m| (m.name.to_ascii_lowercase(), m.ai_level.clone())).collect(), routes: maps
                 .iter()
                 .map(|m| {
                     // Snapped to the floor as `Crowd::set_routes` does for the crowd's map.
@@ -340,6 +435,8 @@ pub enum Interaction {
     Door(usize),
     /// [kismet] Index into `kismet_host::usables` of this step.
     Kismet(usize),
+    /// Index into `MissionSetup::usables` (a native door or usable).
+    Prop(usize),
 }
 
 /// The whole match state serializes for saved games (`save.rs`) except the setup, which the
@@ -386,6 +483,9 @@ pub struct MissionMatch {
     /// [save] Pending autosaves and the saves taken this step.
     #[serde(default)]
     pub autosave: save::AutosaveState,
+    /// States of the natively used doors and usables (`MissionSetup::usables`), by actor.
+    #[serde(default)]
+    pub props: BTreeMap<String, PropState>,
     /// Mover collision placed where the movers are: (actor, delta) and, in the same order, the
     /// placed collision (rebuilt when a mover moves).
     #[serde(skip)]
@@ -436,9 +536,11 @@ impl MissionMatch {
             spawn_log: Vec::new(),
             pending_stealables: Vec::new(),
             autosave: Default::default(),
+            props: BTreeMap::new(),
             mover_keys: Vec::new(),
             mover_worlds: Vec::new(),
         };
+        m.props = m.setup.usables.iter().map(|u| (u.actor.clone(), PropState { door: u.initial, locked: u.locked, stage: 0 })).collect();
         // [kismet]
         m.kismet = m.setup.kismet.as_ref().map(|k| kismet_host::KismetRun::new(k, &m.setup));
         m.populate_fresh(cfg);
@@ -649,20 +751,25 @@ impl MissionMatch {
         if !self.setup.npc_map.get(&name).is_some_and(|m| m.eq_ignore_ascii_case(&self.current_map)) {
             return;
         }
-        let def = &self.setup.def.npcs[index];
+        let def = self.setup.def.npcs[index].clone();
         spawn_npc(&mut self.world, s.id, s.kind, s.archetype, s.position, s.yaw, cfg);
+        // A passive NPC (a training dummy) has no brain: it stands and takes hits.
+        if def.passive {
+            self.crowd.brains.retain(|x| x.id != s.id);
+            return;
+        }
         let mut b = Brain::new(s.id, s.kind, s.position, 0x5EED ^ s.id as u64);
         b.stay = matches!(def.behavior, Behavior::Idle);
+        if let Some(f) = &def.faction {
+            b.faction = Some(self.crowd.factions.intern(f));
+        }
         self.crowd.brains.retain(|x| x.id != s.id);
         self.crowd.brains.push(b);
     }
 
     pub fn add_player(&mut self, id: PlayerId, name: &str, archetype: u8, cfg: &SimConfig) {
-        let (p, yaw) = self.start_for(self.humans.len());
-        spawn_player(&mut self.world, id, p, yaw, cfg);
-        if let Some(pl) = self.world.player_mut(id) {
-            pl.archetype = archetype;
-        }
+        let at = self.start_for(self.humans.len());
+        self.spawn_human(id, at, archetype, cfg);
         if !self.humans.contains(&id) {
             self.humans.push(id);
             self.view.scores.push(ScoreEntry { id, name: name.to_string(), kills: 0, deaths: 0, score: 0 });
@@ -829,6 +936,42 @@ impl MissionMatch {
                 }
             }
             Command::Sound(_) => {}
+            Command::Equip(l) => {
+                for h in self.humans.clone() {
+                    if let Some(p) = self.world.player_mut(h) {
+                        apply_loadout(p, &l, cfg);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Spawn (or respawn) a human with the mission's loadout.
+    fn spawn_human(&mut self, id: PlayerId, at: (Vec3, f32), archetype: u8, cfg: &SimConfig) {
+        spawn_player(&mut self.world, id, at.0, at.1, cfg);
+        let loadout = self.setup.def.loadout.clone();
+        if let Some(pl) = self.world.player_mut(id) {
+            pl.archetype = archetype;
+            if let Some(l) = &loadout {
+                apply_loadout(pl, l, cfg);
+            }
+        }
+    }
+
+    /// A player uses a native door or usable (`MissionSetup::usables[i]`).
+    fn use_prop(&mut self, player: PlayerId, i: usize) {
+        let Some(u) = self.setup.usables.get(i).cloned() else { return };
+        let Some(user) = self.world.player(player).map(|p| p.position) else { return };
+        let st = self.props.entry(u.actor.clone()).or_insert(PropState { door: u.initial, locked: u.locked, stage: 0 });
+        match u.door_axis {
+            Some(axis) => match door_use(*st, u.location, axis, user) {
+                Some(next) => st.door = next,
+                None => {
+                    // The original's "used while locked" output: a HUD line.
+                    let _ = self.state.apply(&[dishonored_mission::Action::Message(u.locked_prompt.clone())], &BTreeMap::new());
+                }
+            },
+            None => st.stage = (st.stage + 1) % u.stages.max(2),
         }
     }
 
@@ -918,6 +1061,7 @@ impl MissionMatch {
                         }
                     }
                     Some(Interaction::Kismet(i)) => kismet_host::use_usable(self, *id, i),
+                    Some(Interaction::Prop(i)) => self.use_prop(*id, i),
                     None => {}
                 }
             } else if !pressed {
@@ -1033,12 +1177,9 @@ impl MissionMatch {
         self.respawn_queue.retain(|(_, t)| *t > 0.0);
         for id in due {
             let i = self.humans.iter().position(|h| *h == id).unwrap_or(0);
-            let (p, yaw) = self.start_for(i);
+            let at = self.start_for(i);
             let arch = self.world.player(id).map(|p| p.archetype).unwrap_or(0);
-            spawn_player(&mut self.world, id, p, yaw, cfg);
-            if let Some(pl) = self.world.player_mut(id) {
-                pl.archetype = arch;
-            }
+            self.spawn_human(id, at, arch, cfg);
         }
         // Mission interpreter (only once someone is in the game).
         if !self.humans.is_empty() {
@@ -1108,6 +1249,15 @@ impl MissionMatch {
             }
         }
         kismet_host::view(self, &mut mv); // [kismet] usables, scripted choice, task target
+        // Native doors and usables: their prompts and the doors' states.
+        for u in self.setup.usables.iter().filter(|u| u.map.eq_ignore_ascii_case(&self.current_map)) {
+            let st = self.props.get(&u.actor).copied().unwrap_or_default();
+            let prompt = if u.door_axis.is_some() && st.locked { u.locked_prompt.clone() } else { u.prompt.clone() };
+            mv.usables.push((u.center.to_array(), prompt));
+            if u.door_axis.is_some() && st.door != u.initial {
+                mv.doors.push((u.actor.clone(), st.door));
+            }
+        }
         self.view.mission = Some(mv);
         self.view.map = self.current_map.clone();
         // Presentation: NPCs within music range (4500 uu, `m_fEnemyRangeForChase[1]`) of a human.
@@ -1161,7 +1311,7 @@ impl MissionMatch {
         }
         for (i, m) in movers.iter().enumerate() {
             let delta = self.kismet.as_ref().and_then(|k| k.mover_delta(&m.actor, m.actor_to_world)).unwrap_or(glam::Mat4::IDENTITY);
-            let state = if m.is_door() { self.kismet.as_ref().and_then(|k| k.door_state(&m.actor)).unwrap_or(m.initial) } else { 0 };
+            let state = if m.is_door() { self.kismet.as_ref().and_then(|k| k.door_state(&m.actor)).or_else(|| self.props.get(&m.actor).map(|s| s.door)).unwrap_or(m.initial) } else { 0 };
             match self.mover_keys.get(i) {
                 Some(k) if k.1.abs_diff_eq(delta, 1e-4) && k.2 == state => {}
                 Some(_) => {
@@ -1219,6 +1369,11 @@ impl MissionMatch {
         }
         for (pos, reach, it) in kismet_host::interactions(self) {
             consider(pos, reach, it); // [kismet]
+        }
+        for (i, u) in self.setup.usables.iter().enumerate() {
+            if u.map.eq_ignore_ascii_case(&self.current_map) {
+                consider(u.center, 220.0, Interaction::Prop(i));
+            }
         }
         best.map(|b| b.1)
     }

@@ -28,6 +28,8 @@ from your install.
   and is someone else's target. Find yours, get close without being spotted, and take them out.
 - **Custom missions** (single player or co-op): missions written as `missions/*.ron` files, played
   on the original level with its NPCs, dialogue and scripting. See `missions/README.md`.
+- **Playground** (offline): a test level for the player mechanics, built from the original's
+  assets. See [Playground](#playground).
 
 ## How this project is made
 
@@ -116,6 +118,7 @@ the menu music and UI sounds. Its entries:
 
 - Play: offline match against bots.
 - Missions: `missions/*.ron`.
+- Playground: the test level (see [Playground](#playground)).
 - Multiplayer:
   - Join: server browser through the master, plus direct connect.
   - Host: server creator. It starts a local `dishonored_server` and optionally a local
@@ -186,6 +189,45 @@ install at startup (the codebook table is located inside `Dishonored.exe`), and 
 events post the original events (sword, guns, powers, footsteps by surface, pain/death),
 plus the Boyle bed, score and placed emitters. `--no-audio` disables it, `--volume V` scales it.
 See `research/dishonored/AUDIO_FORMAT.md`.
+
+### Playground
+
+A test level for the player mechanics, built only from the original game's assets read from your
+install. The layout is new: `maps/playground.ron`, format in `research/dishonored/PLAYGROUND.md`.
+It runs offline with every power and item, and has no bots unless you ask for them with
+`--bots N`. You can also start it from the launcher's PLAYGROUND entry, or from Missions.
+
+```bash
+cargo run --release -p dishonored_runtime -- --playground
+```
+
+Each station is labelled in the world and announced when you walk up to it.
+
+- **Start:** a bench that gives every power and item, or the starting loadout back, and the pickups
+  (elixirs, ammunition, food, a rune, a bone charm, coins).
+- **Row 1 (south):**
+  - step heights 30 / 40 / 44 / 45 / 50;
+  - slopes of 40 / 45 / 50 / 55 / 60 degrees;
+  - mantle ledges from 60 to 300;
+  - jump gaps from 100 to 500.
+- **Row 2:**
+  - a Blink course: targets at 500 / 1100 / 1600, pillars of 400 / 500 / 600, a wall to Blink-mantle;
+  - a climbable chain;
+  - a 600-deep pool for swimming and drowning;
+  - stairs along the east wall with ledges at 880 to 1520 to drop from (fall damage).
+- **Row 3:**
+  - doors (one of them locked), a locker and a bin;
+  - a lean corner;
+  - a crouch tunnel;
+  - a pain volume;
+  - a shooting gallery with targets at 10 / 20 / 40 m;
+  - sword-training dummies.
+- **Row 4 (north):** a stealth lane with a lit half and a dark half, hiding spots and a patrolling
+  guard.
+
+`harness playground` plays every station headless with scripted input and checks each mechanic
+against the values measured on the original (step and slope limits, mantle heights, Blink ranges,
+fall damage, drowning, doors, pickups, hits, detection in light and dark).
 
 ### Map viewer (`--inspect`)
 

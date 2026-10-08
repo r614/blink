@@ -64,6 +64,8 @@ MissionDef(
 - **Places:** `At(x, y, z)` in Dishonored units, `Actor("TargetPoint_5")` or `Actor("L_Boyle_Ext_Script:TargetPoint_5")` when the name exists in several sublevels, `Marker("id")`, and `Offset(<Place>, (dx, dy, dz))`.
 - **Behaviour:** `Idle` (holds position), `Wander`, or `Patrol(["marker", ...])`.
 - **Body archetypes:** 0 masked gentleman, 1 guard, 2 gentleman B, 3 masked lady.
+- **NPC options:** `faction: "DisFaction_Defaults.Faction_Guard_Default"` gives the NPC an original faction, so its AI treats Corvo as an enemy (without one it is neutral until a rule alerts it); `passive: true` spawns it without AI (a training dummy).
+- **Loadout:** `loadout: (all_powers: true, full_ammo: true, elixirs: (10, 10))` is given to players when they spawn and respawn.
 
 ### Triggers (`on:`)
 
@@ -105,6 +107,7 @@ MissionDef(
 | `Usable(m, prompt)`, `NotUsable(m)` | make a marker usable with F |
 | `Conversation(ref, [npc..])` | start an original conversation (`DisSeqAct_DialogInputs`); see below |
 | `StopConversation(ref)` | stop matching conversations (`""` = all); their `Interrupted` output runs |
+| `Equip((all_powers: true, full_ammo: true, elixirs: (10, 10)))` | give every player powers and items (`reset`, `powers: [("Blink", 1)]`, `runes`, `coins`, `upgrades`) |
 | `Complete(text)`, `Fail(text)` | end the mission |
 
 ### Original conversations

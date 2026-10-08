@@ -45,7 +45,13 @@ pub struct MatchContent {
     pub ai_level: dishonored_ir::ai::AiLevel,
     /// Pickups placed in the map's levels.
     pub pickups: Vec<dishonored_ir::items::PlacedPickup>,
+    /// Doors and usables the player uses natively (layout maps; empty on original maps, whose
+    /// usables the original Kismet drives).
+    pub usables: Vec<dishonored_multiplayer::mission::UsableDef>,
 }
+
+// [playground] Maps built from a layout of original assets (`maps/*.ron`).
+pub mod playground;
 
 pub fn cache_dir() -> PathBuf {
     std::env::var_os("DISHONORED_CACHE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("cache"))
@@ -53,6 +59,9 @@ pub fn cache_dir() -> PathBuf {
 
 /// Import geometry only (no textures) for simulation use.
 pub fn import_geometry(content: &Content, map: &str) -> Result<DishonoredMap> {
+    if let Some(layout) = playground::layout_for(map) {
+        return playground::import_layout_geometry(content, &layout?);
+    }
     let pkgs = map_packages(content, map);
     let opts = ImportOptions { load_textures: false, ..Default::default() };
     let (m, _) = import_level(content, map, &pkgs, &opts)?;
@@ -310,6 +319,9 @@ pub fn ffa_spawns(mc: &MatchContent) -> Vec<dishonored_multiplayer::ffa::SpawnPo
 pub fn load_match(map: &str) -> Result<MatchContent> {
     let content = Content::locate()?;
     let sim = load_sim_config(&content).context("gameplay config")?;
+    if let Some(layout) = playground::layout_for(map) {
+        return playground::load_layout_match(&content, sim, &layout?);
+    }
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).ok();
     let coll_path = dir.join(format!("{map}.collision16.bin"));
@@ -412,7 +424,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
             p
         }
     };
-    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts, flee_points, spawners, routes: npcs.routes.clone(), ai_level, pickups })
+    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts, flee_points, spawners, routes: npcs.routes.clone(), ai_level, pickups, usables: Vec::new() })
 }
 
 /// Persistent maps a mission uses: its start map, then the maps reachable through travel.
@@ -493,6 +505,7 @@ pub fn mission_setup(maps: &MapContents, def: dishonored_mission::MissionDef) ->
     for name in mission_maps(&setup.def) {
         if let Some(mc) = maps.get(&name) {
             setup.pickups.insert(name.to_ascii_lowercase(), mc.pickups.clone());
+            setup.usables.extend(mc.usables.iter().cloned());
         }
     }
     if let Some(ks) = kismet {

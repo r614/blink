@@ -27,6 +27,8 @@
 //! harness launcher           the launcher end to end: screenshots of every screen, settings
 //!                             persisted and picked up by a launched game, pause menu, host +
 //!                             browse + join a local server through the launcher
+//! harness playground         the Playground test level: every station played with scripted input,
+//!                             each mechanic checked against the measured original
 //! harness collision [--map M]  the port's collision against the stored results of the original's
 //!                             own collision checks (`gen` / `check` build them with probe_launch)
 //! harness all               sim, net, visual, contracts, audio; writes harness_out/<run>/REPORT.md
@@ -39,6 +41,7 @@ mod contracts;
 mod conversation;
 mod kismet;
 mod mission;
+mod playground;
 mod travel;
 mod fidelity;
 mod ffa;
@@ -92,6 +95,7 @@ fn main() -> Result<()> {
         "kismet" => kismet::run(&ctx, &mut rep)?,
         "save" => save::run(&ctx, &mut rep)?,
         "launcher" => launcher::run(&ctx, &mut rep)?,
+        "playground" => playground::run(&ctx, &mut rep)?,
         "replay" => {
             let file = args.get(1).expect("replay file");
             netsoak::verify_replay_file(&PathBuf::from(file), &mut rep)?;

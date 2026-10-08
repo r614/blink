@@ -561,6 +561,7 @@ fn main_entries(t: &MenuTexts, has_saves: bool) -> Vec<(&'static str, String)> {
     v.extend([
         ("main:play", "PLAY".into()),
         ("main:missions", t.t(SEC_MAIN, "t_Missions").to_uppercase()),
+        ("main:playground", "PLAYGROUND".into()),
     ]);
     if has_saves {
         v.push(("main:load", t.t(SEC_MENU, "t_LoadGame").to_uppercase()));
@@ -988,6 +989,11 @@ fn activate(l: &mut Launcher, gs: &mut GameSettings, nav: &mut MenuNav, id: &str
     match id {
         "main:play" => goto(l, nav, Page::Play, sounds),
         "main:missions" => goto(l, nav, Page::Missions, sounds),
+        // [playground] The test level, offline, every power and item.
+        "main:playground" => {
+            sounds.play("validation");
+            l.launch(vec!["--playground".into(), "--name".into(), gs.s.multiplayer.name.clone()], gs, window);
+        }
         "main:load" => {
             l.saves = dishonored_save::list(&saves_dir(gs));
             l.save_sel = 0;

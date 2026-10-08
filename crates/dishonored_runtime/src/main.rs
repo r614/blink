@@ -9,6 +9,8 @@
 //!     --connect HOST:PORT    join a dedicated server (--autopilot [duelist|gunner|wanderer]: a test bot plays)
 //!     --browse MASTER        list servers from a control plane and join the best one
 //!     --inspect              free camera, no gameplay (--pos x,y,z --yaw --pitch)
+//!     --playground           the Playground test level, offline, every power and item
+//!                            (missions/playground.ron; `--bots N` adds bots, none by default)
 //!     --mission FILE         a custom mission; --load SAVE continues a saved game (F5 / F9
 //!                            quicksave / quickload; saves in --saves DIR, default SaveData
 //!                            next to the settings file)
@@ -65,6 +67,8 @@ mod launcher_bg;
 mod pause_menu;
 mod hud_settings;
 mod saves;
+/// [playground] In-world labels of layout maps.
+mod playground_labels;
 /// [interp] Cutscene (matinee) presentation.
 mod cutscene;
 
@@ -137,8 +141,12 @@ fn parse_args() -> Args {
         .and_then(|s| s.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))))
         .unwrap_or((1600, 900));
     let load = get("--load").map(PathBuf::from);
-    let mission_path = get("--mission").or_else(|| load.as_ref().map(|l| saves::header_of(l).unwrap_or_else(|e| panic!("save {}: {e:#}", l.display())).mission));
+    // `--playground`: the Playground test level (missions/playground.ron on maps/playground.ron).
+    let playground = has("--playground").then(|| playground_mission().unwrap_or_else(|| panic!("missions/playground.ron not found")).to_string_lossy().into_owned());
+    let mission_path = get("--mission").or(playground).or_else(|| load.as_ref().map(|l| saves::header_of(l).unwrap_or_else(|e| panic!("save {}: {e:#}", l.display())).mission));
     let mission = mission_path.as_ref().map(|p| dishonored_mission::MissionDef::load(std::path::Path::new(p)).unwrap_or_else(|e| panic!("mission {p}: {e:#}")));
+    // The Playground (a layout map) has no bots unless asked for.
+    let bots = get("--bots").and_then(|s| s.parse().ok()).unwrap_or(if mission.as_ref().is_some_and(|m| dishonored_content::playground::is_layout_map(&m.map)) { 0 } else { 3 });
     Args {
         map: get("--map").or_else(|| mission.as_ref().map(|m| m.map.clone())).unwrap_or_else(|| dishonored_content::DEFAULT_MAP.into()),
         mission,
@@ -146,7 +154,8 @@ fn parse_args() -> Args {
         load,
         mode,
         name: get("--name").unwrap_or_else(|| "player".into()),
-        bots: get("--bots").and_then(|s| s.parse().ok()).unwrap_or(3),
+        // The Playground has no bots unless asked for.
+        bots,
         spectate: has("--spectate"),
         autopilot: has("--autopilot").then(|| match get("--autopilot").as_deref() {
             Some("gunner") => dishonored_bots::BotStyle::Gunner,
@@ -174,6 +183,17 @@ fn parse_args() -> Args {
         loss: get("--loss").and_then(|s| s.parse().ok()).unwrap_or(0.0),
         size,
     }
+}
+
+/// The Playground's mission file: `missions/playground.ron` next to the working directory or the
+/// executable (or the repository root of a `target/<profile>` build).
+fn playground_mission() -> Option<PathBuf> {
+    let mut dirs = vec![PathBuf::from("missions"), PathBuf::from("../../missions")];
+    if let Some(d) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) {
+        dirs.push(d.join("missions"));
+        dirs.push(d.join("../../missions"));
+    }
+    dirs.into_iter().map(|d| d.join("playground.ron")).find(|p| p.is_file())
 }
 
 #[derive(Component)]
@@ -333,6 +353,9 @@ fn main() {
             .init_resource::<viewmodel::ViewAnim>()
             .add_systems(FixedUpdate, (harness::script_fixed, session::fixed_tick, saves::write_autosaves).chain().run_if(pause_menu::sim_running))
             .insert_resource(saves::Saves::new(args.mission_path.clone()))
+            // [playground] station labels of layout maps
+            .add_systems(Startup, playground_labels::setup_labels)
+            .add_systems(Update, playground_labels::update_labels.after(players::camera_follow).after(cutscene::camera))
             .add_systems(Update, (saves::hotkeys, saves::process).chain().after(pause_menu::handle))
             // [interp] cutscenes: before the characters are animated; the director camera after the follow camera
             .init_resource::<cutscene::Cutscenes>()

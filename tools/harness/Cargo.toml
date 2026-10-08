@@ -25,3 +25,4 @@ dishonored_assets.workspace = true
 dishonored_conversation = { workspace = true, features = ["load"] }
 dishonored_kismet.workspace = true
 dishonored_save.workspace = true
+dishonored_oracle.workspace = true

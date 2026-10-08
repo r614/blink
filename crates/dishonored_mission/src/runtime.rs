@@ -112,6 +112,8 @@ pub enum Command {
     Travel(String),
     SetMaterials { npc: String, body: Vec<(u32, String)>, head: Vec<(u32, String)> },
     ClearMaterials(String),
+    /// Give every player these powers and items.
+    Equip(crate::Loadout),
 }
 
 pub struct StepInput<'a> {
@@ -989,6 +991,7 @@ impl MissionState {
                 Action::Travel(tag) => out.push(Command::Travel(tag.clone())),
                 Action::SetMaterials { npc, body, head } => out.push(Command::SetMaterials { npc: npc.clone(), body: body.clone(), head: head.clone() }),
                 Action::ClearMaterials(npc) => out.push(Command::ClearMaterials(npc.clone())),
+                Action::Equip(l) => out.push(Command::Equip(l.clone())),
                 // Kismet starts go through `DDH_KISMET_ACTIVATED` (flags 0x500, not "interrupts"):
                 // busy speakers refuse unless the conversation outranks theirs.
                 Action::Conversation(c, speakers) => self.start_conversation(c, speakers, None, None, false, queue),
