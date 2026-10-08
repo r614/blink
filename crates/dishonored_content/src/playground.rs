@@ -11,7 +11,6 @@ use dishonored_ir::layout::{MapLayout, NavGrid, v3};
 use dishonored_ir::nav::{NavData, NavEdge, NavEdgeClass, NavEdgeType, NavMesh, NavPoly, NavPylon};
 use dishonored_multiplayer::mission::UsableDef;
 use dishonored_world::{PawnBox, WorldQuery, channel};
-use glam::Mat4;
 use std::collections::HashMap;
 
 /// The pawn a generated navigation mesh is for.
@@ -373,7 +372,7 @@ pub fn generate_nav(world: &CollisionWorld, g: &NavGrid, mv: &NavAgent) -> disho
     let cell = g.cell.max(25.0);
     let nx = (((g.max.0 - g.min.0) / cell).ceil().max(1.0)) as i32;
     let ny = (((g.max.1 - g.min.1) / cell).ceil().max(1.0)) as i32;
-    let top = world.bounds.map(|b| b.max.z).unwrap_or(5000.0) + 10.0;
+    let top = world.bounds.as_ref().map(|b| b.max.z).unwrap_or(5000.0) + 10.0;
     let (r, hh) = (mv.collision_radius, mv.collision_half_height);
     // Nodes per cell: floor heights.
     let mut nodes: Vec<(i32, i32, f32)> = Vec::new();
@@ -445,6 +444,7 @@ pub fn generate_nav(world: &CollisionWorld, g: &NavGrid, mv: &NavAgent) -> disho
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Mat4;
 
     #[test]
     fn layout_parses_with_implicit_some() {

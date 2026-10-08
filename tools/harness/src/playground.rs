@@ -15,6 +15,7 @@ use dishonored_sim::events::{DamageCause, SimEvent};
 use dishonored_sim::input::{LeftHand, PlayerInput, buttons};
 use dishonored_sim::state::{MoveMode, PlayerState, WorldState, power};
 use dishonored_sim::{spawn_player, step_world};
+use dishonored_world::WorldQuery;
 use glam::Vec3;
 
 const S: &str = "Playground";
