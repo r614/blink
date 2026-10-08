@@ -42,6 +42,11 @@ fn st_num(m: &std::collections::HashMap<String, String>, k: &str) -> u64 {
 }
 
 fn args_f32(v: &Value) -> Option<[f32; 3]> {
+    // "x,y,z" (key=value arguments) as well as [x, y, z].
+    if let Some(s) = v.as_str() {
+        let p: Vec<f32> = s.split([',', ' ']).filter(|x| !x.is_empty()).filter_map(|x| x.parse().ok()).collect();
+        return (p.len() == 3).then(|| [p[0], p[1], p[2]]);
+    }
     let a = v.as_array()?;
     Some([a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32, a.get(2)?.as_f64()? as f32])
 }
@@ -517,6 +522,12 @@ impl Session {
                 json!({"component": reflect::object_value(&mut self.c, comp)?})
             }
             "run" => crate::capture::run_reads(self, a)?,
+            "enum" => {
+                // The value names of an enum (`eDisAmmoType`).
+                let n = s("name").context("name")?;
+                let e = *self.c.find(n, "Enum")?.first().with_context(|| format!("no enum {n}"))?;
+                json!({"enum": n, "names": self.r.enum_names(&mut self.c, e)?.clone()})
+            }
             "layout" => {
                 // Build a layout map (maps/<name>.ron) in the current level (`reload`: open the
                 // host level fresh first). Positions in the layout are then at +offset.
@@ -629,10 +640,23 @@ pub fn parse_args(args: &[String]) -> Result<Value> {
         Some(j) if j.trim_start().starts_with('{') => serde_json::from_str(j).with_context(|| format!("arguments must be a JSON object: {j}")),
         Some(f) if f.starts_with('@') => Ok(serde_json::from_str(&std::fs::read_to_string(&f[1..])?)?),
         Some(_) => {
-            let mut m = Map::new();
+            // A token without `=` continues the previous value (`command=adddarkness 11`).
+            let mut pairs: Vec<(String, String)> = Vec::new();
             for a in args {
-                let (k, v) = a.split_once('=').with_context(|| format!("expected key=value, got {a}"))?;
-                m.insert(k.to_string(), serde_json::from_str(v).unwrap_or_else(|_| json!(v)));
+                match a.split_once('=') {
+                    Some((k, v)) if !k.is_empty() && !k.contains(' ') => pairs.push((k.to_string(), v.to_string())),
+                    _ => match pairs.last_mut() {
+                        Some(p) => {
+                            p.1.push(' ');
+                            p.1.push_str(a);
+                        }
+                        None => bail!("expected key=value, got {a}"),
+                    },
+                }
+            }
+            let mut m = Map::new();
+            for (k, v) in pairs {
+                m.insert(k, serde_json::from_str(&v).unwrap_or_else(|_| json!(v)));
             }
             Ok(Value::Object(m))
         }

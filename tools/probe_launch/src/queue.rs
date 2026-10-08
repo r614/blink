@@ -15,7 +15,7 @@ use std::time::Instant;
 
 pub fn run(args: &[String]) -> Result<()> {
     if args.first().map(String::as_str) != Some("run") {
-        anyhow::bail!("probe_launch queue run [FILE] [--out RESULTS.json] [--dir SCENARIOS] [--skip-layouts] [--only PREFIX]");
+        anyhow::bail!("probe_launch queue run [FILE] [--out RESULTS.json] [--dir SCENARIOS] [--skip-layouts] [--only PREFIX] [--from LINE]");
     }
     let opt = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let file = args.get(1).filter(|a| !a.starts_with("--")).cloned().unwrap_or_else(|| "fixtures/oracle/capture_queue.txt".into());
@@ -23,6 +23,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let dir = PathBuf::from(opt("--dir").unwrap_or_else(|| "fixtures/oracle/scenarios".into()));
     let skip_layouts = args.iter().any(|a| a == "--skip-layouts");
     let only = opt("--only");
+    let from: usize = opt("--from").and_then(|v| v.parse().ok()).unwrap_or(1);
     let text = std::fs::read_to_string(&file).with_context(|| file.clone())?;
     let specs = scenario::load_dir(&dir)?;
     let mut s = Session::connect()?;
@@ -31,7 +32,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let (mut ok, mut failed, mut skipped) = (0, 0, 0);
     for (n, raw) in text.lines().enumerate() {
         let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
+        if line.is_empty() || line.starts_with('#') || n + 1 < from {
             continue;
         }
         if only.as_ref().is_some_and(|p| !line.starts_with(p.as_str())) {
