@@ -307,7 +307,7 @@ pub fn focused_interaction(mv: &MissionView, view: &crate::session::SessionView,
 }
 
 /// `m_AsleepCrosshairText` (the pawn tweaks' value): the crosshair's info line over someone
-/// asleep or knocked out.
+/// asleep or knocked out. Adapted from dishonored-bevy by Eamon (github.com/Eamo5/dishonored-bevy), used with permission.
 pub const ASLEEP_CROSSHAIR_TEXT: &str = "(Unconscious)";
 
 /// How far the crosshair probe reaches a body (uu).
@@ -455,6 +455,8 @@ pub enum HudTest {
     },
     /// Add task markers on the spot: (metres ahead of the player, sideways, up, optional, name).
     TaskMarkers { markers: Vec<(f32, f32, f32, bool, String)> },
+    /// The game over screen (the pause menu movie with `ShowGameOverMenu`), as if the player died.
+    GameOver,
     /// A game save: the saving notification (`hud_global.rs`).
     Saving,
 }
@@ -526,7 +528,7 @@ pub fn apply_test(t: HudTest, q: &mut PopupQueue, w: &mut HudWidgets, st: &mut S
         // Handled by the wheel (`hud_wheel::update_power_wheel`).
         HudTest::Wheel { .. } | HudTest::WheelAngle { .. } | HudTest::Shortcut { .. } | HudTest::ShortcutStep { .. } | HudTest::Assign { .. } | HudTest::Saving => {}
         // Handled by the HUD itself (`gfx_hud::update_gfx_hud`).
-        HudTest::Tutorial { .. } | HudTest::TutorialWindow { .. } | HudTest::TaskMarkers { .. } => {}
+        HudTest::Tutorial { .. } | HudTest::TutorialWindow { .. } | HudTest::TaskMarkers { .. } | HudTest::GameOver => {}
         HudTest::Location { name } => {
             if let Some(l) = w.location.as_mut() {
                 l.set_location(st, &name, crate::gfx_hud::LOCATION_DISCOVERY_DURATION);

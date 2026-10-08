@@ -1,4 +1,4 @@
-//! Wire protocol. Every datagram is `MAGIC (u32) | bincode(Packet)`.
+﻿//! Wire protocol. Every datagram is `MAGIC (u32) | bincode(Packet)`.
 //!
 //! Model (Quake/Source style): clients number their inputs with a sequence and send the
 //! last few unacknowledged inputs every packet (loss tolerance). The server consumes one

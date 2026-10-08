@@ -22,7 +22,12 @@
 //! - game messages: `gameMsg_mc.SetGameMessage(msg, m_fGameMessageDuration 5 s)`;
 //! - the objective / target popups through the queue (0x00BAFE70);
 //! - the pickup log (`AddLogItem(name (count), icon)`, 0x00B98630);
-//! - subtitles and choices (`hud_dialogue.rs`).
+//! - subtitles and choices (`hud_dialogue.rs`);
+//! - task markers (one per task target, with the description), awareness markers, the tutorial
+//!   line and window, the crosshair texts (research/dishonored/HUD.md).
+//!
+//! The tutorial window's first-rune / first-bone-charm triggers and the crosshair's sleeper line
+//! follow dishonored-bevy's `interact.rs` / `crosshair.rs`. Adapted from dishonored-bevy by Eamon (github.com/Eamo5/dishonored-bevy), used with permission.
 
 use crate::gfx_stage::{Draw, Event, Fonts, ImageRef, MovieData, SlotImage, SlotText, Stage, StageTextures, StageView};
 use crate::hud_popups::{PopupContent, PopupQueue};
@@ -405,6 +410,8 @@ pub const MARKER_FOCUS_DISTANCE: f32 = 225.0;
 /// a marker outside the marker area (or behind the camera) is simply hidden. The description
 /// (`_description_mc`) is shown on the focused marker: the target's `m_TargetName` and, with
 /// `m_TaskMarkerSpecificSettings.m_bShowDistance`, its distance in metres (100 uu).
+///
+/// The focus rule and the distance text are Adapted from dishonored-bevy by Eamon (github.com/Eamo5/dishonored-bevy), used with permission.
 fn update_task_markers(st: &mut Stage, n: &mut Native, layer: Option<crate::gfx_stage::Id>, wanted: &[(glam::Vec3, bool, String)], cam: Option<&GlobalTransform>, window: Option<Vec2>, tan_h: f32) {
     use crate::gfx_stage::Prop;
     let (Some(layer), Some(cam), Some(win)) = (layer, cam, window) else {

@@ -1,0 +1,33 @@
+{"steps":[
+  {"wait_ticks": 240},
+  {"ticks": 30, "input": {"yaw": 90, "pitch": 0, "left_hand": "Empty"}},
+  {"screenshot": "hud2_00_idle"},
+
+  {"hud": {"kind": "wheel", "open": true}},
+  {"wait_ticks": 30}, {"screenshot": "hud2_01_wheel_content_auto_assigned"},
+  {"hud": {"kind": "wheel_angle", "angle": 0}},
+  {"wait_ticks": 24}, {"screenshot": "hud2_01_wheel_infos_top"},
+  {"hud": {"kind": "assign", "slot": 8}},
+  {"wait_ticks": 12}, {"screenshot": "hud2_02_assign_slot9"},
+  {"hud": {"kind": "assign", "slot": 8}},
+  {"wait_ticks": 12}, {"screenshot": "hud2_02_unassign_slot9"},
+  {"hud": {"kind": "wheel_angle", "angle": 120}},
+  {"wait_ticks": 24}, {"screenshot": "hud2_03_wheel_infos_power"},
+  {"hud": {"kind": "wheel", "open": false}},
+  {"wait_ticks": 60},
+
+  {"hud": {"kind": "shortcut", "slot": 0}},
+  {"wait_ticks": 12}, {"screenshot": "hud2_04_key1_dock"},
+  {"hud": {"kind": "shortcut", "slot": 0, "release": true}},
+  {"wait_ticks": 60}, {"screenshot": "hud2_04_key1_equipped"},
+
+  {"hud": {"kind": "shortcut_step", "dir": 1}},
+  {"wait_ticks": 3}, {"screenshot": "hud2_05_mouse_step1"},
+  {"hud": {"kind": "shortcut_step", "dir": 1}},
+  {"wait_ticks": 3}, {"screenshot": "hud2_05_mouse_step2"},
+  {"hud": {"kind": "shortcut_step", "dir": -1}},
+  {"wait_ticks": 3}, {"screenshot": "hud2_05_mouse_back"},
+  {"wait_ticks": 18}, {"screenshot": "hud2_05_mouse_used"},
+  {"wait_ticks": 60}, {"screenshot": "hud2_05_mouse_gone"},
+  {"quit": true}
+]}

@@ -1264,7 +1264,8 @@ impl Host for H<'_> {
                 let now = if add { have + q.max(1) } else if q <= 0 { 0 } else { (have - q).max(0) };
                 self.note(format!("abstract item {item}: {have} -> {now}"));
                 // A mission clue (a chapter log): the tutorial window with the note
-                // (`m_PressKeyToReadChapterNoteMessage`, text left to the HUD).
+                // (`m_PressKeyToReadChapterNoteMessage`, text left to the HUD). The trigger is
+                // from dishonored-bevy's `campaign.rs` (Eamon, used with permission).
                 if add && have == 0 && item.contains("ChapterLog") {
                     self.act(vec![Action::TutorialWindow(1, String::new())]);
                 }
