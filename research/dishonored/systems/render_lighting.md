@@ -1,7 +1,7 @@
-# Rendering area 4: lighting (WIP audit)
+﻿# Rendering area 4: lighting (WIP audit)
 
 Scope: lightmaps and shadow maps, dynamic shadows, light functions, light environments, decals,
-lens flares, emissive / glow. Status: audit started, no code changed yet.
+lens flares, emissive / glow. Status: audit extended with lens flare and light function dumps; no code changed (blocked on the dumps listed under Needed dumps).
 
 ## Class census (retail CookedPCConsole, `package_scan`)
 
@@ -31,20 +31,53 @@ Per-map coverage is not computed yet (see next steps).
 `map_dump <map> --survey` (first line) gives each persistent map's packages; 41 persistent
 `L_*_P` maps. Partial output was being collected when the task was stopped.
 
-## Next steps
+## Lens flares (dump: LensFlare*.txt, 23 sources)
 
-1. Per-map coverage: for each class above, `package_scan <dir> --class <C>` and map packages to
-   persistent maps with `map_dump <map> --survey` package lists.
-2. Light functions: dump the 124 LightFunction objects (owning light, SourceMaterial, Scale);
-   decode the function materials from RefShaderCache; implement as a light cookie on the Bevy
-   spot/point lights (GPU-side).
-3. Lens flares: dump the 23 LensFlareSource actors and their LensFlare templates (elements,
-   materials, ray distance, curves); render as screen-space sprites with occlusion query.
-4. Light environments for characters and dynamic props (6789 components): reuse
-   `light_env` + `prop_light.wgsl` for NPC skinned meshes; check character brightness/contrast
-   WorldInfo scales.
-5. Gameplay decals: DisContactSub_Decal / DisDecalManager lifetimes and materials; projected
-   decal pass.
-6. ShadowMap1D (vertex shadow maps) on the 15 level components.
-7. Dominant point light shadows: settings toggle (original's shadow quality option).
-8. Add the maps that best show these to `scripts/render_fixes.sh`.
+- Only two templates exist: `LensFlares.Candles_01_LF` (every candle: the `candle_flames_01_prefab` source,
+  embedded in about 19 sub-level packages: ArtDealer, Boyle_Int, Bridge_Part1a/1b, Brothel, Distillery,
+  Distillery2, Galvani1, Ovrsr_Light, PrsnSewer, Streets1, Streets2, Streetsewer, TowerRtrn_Int, OutsiderDream)
+  and `Lighthouse_01_bo.light06_LF` (L_Streetsewer_Block, source `LensFlareSource_9`).
+  Placed free sources: Bridge_Part1a_Env (`LensFlareSource_0`, loc -417,-1402,1392), Bridge_Part1a_Script
+  (`LensFlareSource_0`, loc -4167,-5125,641), OutsiderDream_Script (`_1`), Streetsewer_Block (`_9`).
+- Candles_01_LF: one SourceElement, Size 250, bUseSourceDistance, bNormalizeRadialDistance, one LFMaterial
+  (`Materials_ref.FX_materials.LensFlare_PMAT`, BLEND_Additive, Unlit, 48 expressions: flare mask texture,
+  dust texture, params L_LensFlare_Power 5, L_Maximum_Opacity 1, Lg_LensFlare_Glowing_Speed 0.5 / Range 0.1,
+  Db_Depth_Biased_Alpha_Intensity 0.1), FixedRelativeBoundingBox, ScreenPercentageMap (4 key lookup table).
+  Component: DepthPriorityGroup Foreground.
+- Status: not implemented. The distribution lookup tables (Scaling 4, Color 8, DistMap_Scale 8,
+  DistMap_Alpha 4, ScreenPercentageMap 4 entries) and the material's texture/switch wiring are summarised
+  by obj_dump only as "[N elems]", so the values are not yet available.
+
+## Light functions (dump: LightFunction*.txt, 124 functions in 34 packages)
+
+- Function materials: `Materials_ref.FX_materials.Flickering_light_function_PMAT` (68 uses, spot lights
+  mostly), `Hub_MS.Flickering_light_function_WoodStove_PMAT` (28), `Hub_MS.Flickering_light_function_Boiler_PMAT`
+  (20), `Vfx_Materials.main_materials.Casutics_LightFunction_PMAT` (14, Scale 600 on 8; Unlit,
+  bUsedAsLightFunction, parameters Speed 0.35, colour 0.859, 26 expressions, 2 textures).
+- Maps (function count by package family): Pub Night 16 / Day 15 / Dusk 14 / Morning 14 / Assault 12,
+  PrsnSewer 5(+2), Flooded_FAssassins 4, Streetsewer lights 4, Flooded_FRefinery(Env2) 3+3, Flooded_FStreets 3,
+  Bridge_Part1b 3, Boyle_Ext 3, Out_HighChaos_EmilyAlive 2, Isl_Geom_Slave/Master 2+2, Brothel 2, Ovrsr_Kennel 2,
+  and 1 each in Prison, TowerRtrn_Int, Distillery(2), Bridge_Part1a, ArtDealer, MainMenu, Flooded_FGate,
+  Ovrsr, Ovrsr_Back, Out_EnvCallistaDead, Galvani1, Isl_HighChaos.
+- Every owner is a Spot/Point/DominantPoint component inside a `StaticLightCollectionActor`, i.e. a light the
+  importer currently skips as baked (`level.rs::import_light`, `static_lights_skipped`). Whether the engine
+  evaluates the function for such a light at run time or only bakes it is the open engine question.
+- Status: not implemented.
+
+## Needed dumps (to continue; the .bin tools are denied to this agent by the permission classifier)
+
+1. `obj_dump` full expression graph (expression class, inputs, constants, texture refs) of
+   `LensFlares.Candles_01_LF`, `Lighthouse_01_bo.light06_LF`, `Materials_ref.FX_materials.LensFlare_PMAT`,
+   the three flicker materials and `Casutics_LightFunction_PMAT`, including the raw distribution lookup tables.
+2. Engine side (oracle index / Ghidra): how static lights with a `Function` are treated by the lighting build
+   (`ULightComponent` function / `HasStaticLighting`) and in the light pass (function shader sampling), the
+   lens flare render path (`FLensFlareRenderer`, occlusion and `ScreenPercentageMap` use).
+
+## Next steps (after the dumps)
+
+1. Lens flares: screen-space additive sprites, GPU occlusion by sampling the depth texture (area 1) at the source.
+2. Light functions: flicker multiplier on the matching Bevy lights (time-driven from the decoded material), caustic
+   function as a projected texture on the Scale-600 point lights.
+3. Light environments for characters and dynamic props (`light_env` + `prop_light.wgsl`).
+4. Gameplay decals (DisDecalManager), ShadowMap1D, dominant point shadow toggle, `render_fixes.sh` entries
+   (L_Pub_Night_P, L_Streetsewer_P, L_Bridge_Part1a_P for flares and functions).
