@@ -36,9 +36,11 @@ pub enum Policy {
 pub const DYN_SHADOW_SLOT: usize = 58;
 
 /// Distance-field shadows: the shaders take `DistanceFieldParameters` as (bias, scale,
-/// exponent) for `pow(saturate((distance + bias) * scale), exponent)`. The engine's values
-/// are native; this keeps the 0.5 contour (the shadow edge) at half light.
-const DISTANCE_FIELD_SHARPNESS: f32 = 8.0;
+/// exponent) for `pow(saturate((distance + bias) * scale), exponent)`. Blink: the values measured
+/// in the running game for Boyle Ext's moon (U-401, U-460; `dishonored_runtime::map_render::DF_SHADOW`):
+/// scale 3.75, exponent 2, bias -0.5 + 0.5 / scale (dishonored-bevy used scale 8, exponent 1).
+const DISTANCE_FIELD_SHARPNESS: f32 = 3.75;
+const DISTANCE_FIELD_EXPONENT: f32 = 2.0;
 
 /// First of the four material uniform slots a dynamic light pass reads: position and
 /// inverse radius, colour and falloff exponent, spot angles, spot direction (UE space).
@@ -237,7 +239,7 @@ fn constant_value(name: &str, i: u32, stage: Stage, map: &CookedMap, ctx: &mut C
         ("LocalToWorldRotDeterminantFlip", _) => "vec4<f32>(ue_det_sign)".into(),
         // a dominant light's pass: its shadow map's coordinates
         ("LightmapCoordinateScaleBias", _) if ctx.dyn_light => format!("ue_mat.p[{}]", DYN_SHADOW_SLOT),
-        ("DistanceFieldParameters", _) => format!("vec4<f32>({:?}, {DISTANCE_FIELD_SHARPNESS:?}, 1.0, 0.0)", 0.5 / DISTANCE_FIELD_SHARPNESS - 0.5),
+        ("DistanceFieldParameters", _) => format!("vec4<f32>({:?}, {DISTANCE_FIELD_SHARPNESS:?}, {DISTANCE_FIELD_EXPONENT:?}, 0.0)", 0.5 / DISTANCE_FIELD_SHARPNESS - 0.5),
         // the light pass maps the light-map coordinates to the light's static shadow map
         ("LightmapCoordinateScaleBias", _) if ctx.light => "vec4<f32>(ue_inst[ue_base + 4u].xy, ue_inst[ue_base + 4u].wz)".into(),
         ("LightmapCoordinateScaleBias", _) => "vec4<f32>(ue_inst[ue_base].xy, ue_inst[ue_base].wz)".into(),
@@ -413,6 +415,7 @@ const PLATFORM_BEVY: &str = r#"#import bevy_pbr::mesh_functions
 #ifndef PREPASS_PIPELINE
 #import bevy_pbr::mesh_view_bindings::{lights, globals}
 #import bevy_pbr::shadows::fetch_directional_shadow
+#import bevy_pbr::mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT
 #endif
 #import bevy_pbr::skinning
 #import bevy_pbr::prepass_utils
@@ -474,7 +477,8 @@ fn ue_light_attenuation(x: vec4<f32>) -> vec4<f32> {
 #ifdef PREPASS_PIPELINE
     return x;
 #else
-    if (lights.n_directional_lights == 0u) {
+    // (Blink: the dominant light may have no shadow maps, `DISHONORED_NO_SHADOWS`)
+    if (lights.n_directional_lights == 0u || (lights.directional_lights[0].flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) == 0u) {
         return x;
     }
     let view_z = (view.view_from_world * vec4<f32>(ue_frag_world, 1.0)).z;
@@ -493,7 +497,7 @@ fn ue_scene_color(uv: vec2<f32>) -> vec4<f32> {
 #ifdef DEPTH_PREPASS
 #ifndef PREPASS_PIPELINE
     let d = prepass_utils::prepass_depth(vec4<f32>(uv * view.viewport.zw, 0.0, 0.0), 0u);
-    let z = -view_transformations::depth_ndc_to_view_z(max(d, 1e-7)) * 100.0;
+    let z = -view_transformations::depth_ndc_to_view_z(max(d, 1e-7)) * 50.0;
     return vec4<f32>(0.0, 0.0, 0.0, z / 256.0);
 #else
     return vec4<f32>(0.0, 0.0, 0.0, 4096.0);
@@ -571,8 +575,9 @@ var<private> ue_w2l: mat3x3<f32>;
 var<private> ue_cam: vec3<f32>;
 var<private> ue_det_sign: f32;
 
-// Bevy (right-handed, Y up, metres) <-> UE3 (left-handed, Z up, centimetres)
-fn ue_p(v: vec3<f32>) -> vec3<f32> { return vec3<f32>(v.x, v.z, v.y) * 100.0; }
+// Bevy (right-handed, Y up) <-> UE3 (left-handed, Z up, uu). Blink presents 1 uu as 0.02 Bevy
+// units (dishonored_runtime::coords::UU_TO_BEVY; dishonored-bevy used 0.01).
+fn ue_p(v: vec3<f32>) -> vec3<f32> { return vec3<f32>(v.x, v.z, v.y) * 50.0; }
 fn ue_d(v: vec3<f32>) -> vec3<f32> { return vec3<f32>(v.x, v.z, v.y); }
 const UE_SWAP = mat4x4<f32>(vec4<f32>(1.0, 0.0, 0.0, 0.0), vec4<f32>(0.0, 0.0, 1.0, 0.0), vec4<f32>(0.0, 1.0, 0.0, 0.0), vec4<f32>(0.0, 0.0, 0.0, 1.0));
 fn ue_scale(s: f32) -> mat4x4<f32> {
@@ -598,9 +603,9 @@ fn ue_setup_model(model: mat4x4<f32>, tag: u32) {
     ue_shadow_layer = i32(info.y);
     ue_sun = select(0.0, 1.0, info.w != 0u);
     ue_shadow_full = select(0.0, 1.0, info.w == 2u);
-    // UE world = C^-1 * Bevy world with C = scale(0.01) * swap
-    let to_ue = UE_SWAP * ue_scale(100.0);
-    let from_ue = ue_scale(0.01) * UE_SWAP;
+    // UE world = C^-1 * Bevy world with C = scale(0.02) * swap
+    let to_ue = UE_SWAP * ue_scale(50.0);
+    let from_ue = ue_scale(0.02) * UE_SWAP;
     ue_l2w = to_ue * model * from_ue;
     let m3 = mat3x3<f32>(ue_l2w[0].xyz, ue_l2w[1].xyz, ue_l2w[2].xyz);
     let det = determinant(m3);
@@ -610,9 +615,9 @@ fn ue_setup_model(model: mat4x4<f32>, tag: u32) {
     let c1 = cross(m3[2], m3[0]);
     let c2 = cross(m3[0], m3[1]);
     ue_w2l = transpose(mat3x3<f32>(c0, c1, c2)) * (1.0 / det);
-    // clip = 100 * clip_from_world(Bevy) * C: same NDC, w in UE units
+    // clip = 50 * clip_from_world(Bevy) * C: same NDC, w in UE units
     let vp = ue_clip_from_world() * from_ue;
-    ue_vp = mat4x4<f32>(vp[0] * 100.0, vp[1] * 100.0, vp[2] * 100.0, vp[3] * 100.0);
+    ue_vp = mat4x4<f32>(vp[0] * 50.0, vp[1] * 50.0, vp[2] * 50.0, vp[3] * 50.0);
     ue_cam = ue_p(ue_view_position());
 }
 "#;

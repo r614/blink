@@ -273,6 +273,10 @@ pub struct MissionView {
     /// The Kismet screen grade (`DisSeqAct_UberPostProcess`) while it shows.
     #[serde(default)]
     pub post_fx: Option<PostFxView>,
+    /// The Kismet's screen effects running (`DisSeqAct_PostProcess`: `Epp_Knocked`,
+    /// `Epp_Weepers`, `Epp_MaskOn`), drawn by the post-process graph (`ppgraph`).
+    #[serde(default)]
+    pub post_effects: Vec<String>,
     /// `DisDoor`s the Kismet opened or closed (`DisSeqAct_Door`): ("package:actor",
     /// `EDisDoorState` 0 closed, 1 opened CW, 2 opened CCW). Other doors keep their level state.
     #[serde(default)]

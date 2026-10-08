@@ -2503,6 +2503,7 @@ dependencies = [
  "glam",
  "serde",
  "ue3_package",
+ "ue3_shader",
 ]
 
 [[package]]
@@ -2682,6 +2683,7 @@ dependencies = [
  "serde",
  "serde_json",
  "ue3_package",
+ "ue3_shader",
 ]
 
 [[package]]

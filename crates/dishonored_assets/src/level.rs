@@ -21,6 +21,9 @@ use ue3_package::{ObjRef, Package};
 // [playground] Maps built from a layout of original assets (`dishonored_ir::layout`).
 #[path = "layout_import.rs"]
 pub mod layout_import;
+// The post-process graph's materials (the runtime's `ppgraph`).
+#[path = "post_materials.rs"]
+pub mod post_materials;
 
 pub struct ImportOptions {
     /// Largest texture side to load (smaller mips are kept).
@@ -1757,7 +1760,9 @@ impl Importer<'_> {
             (Some(t), Some(ch)) => self.channel_texture(t, ch),
             (t, _) => t,
         };
+        let ue3 = self.ue3_material(&chain);
         let params = MaterialParams {
+            ue3,
             specular,
             emissive,
             opacity,
@@ -2056,6 +2061,112 @@ impl Importer<'_> {
             faces.push(self.texture(k)?);
         }
         Some(faces)
+    }
+
+    /// Link a material to its compiled shader map and resolve the map's parameters and
+    /// textures for this material (instance). Adapted from dishonored-bevy by Eamon
+    /// (github.com/Eamo5/dishonored-bevy), used with permission (dhcook's `ue3_material`); here
+    /// over the material chain (`material_chain::walk`) and the level's textures.
+    fn ue3_material(&mut self, chain: &material_chain::MaterialChain) -> Option<dishonored_ir::Ue3Material> {
+        use ue3_shader::shadercache::{self, CookedMap, Expr};
+        if !self.opts.load_textures {
+            return None;
+        }
+        let lib = &crate::shaders::library()?.index;
+        let (res_id, res_textures) = chain.resource.clone()?;
+        let base = chain.base_resource.as_ref().map(|b| b.0).unwrap_or(res_id);
+        // the leaf-most compiled instance's static parameter values
+        let (switches, masks): (Vec<(String, bool)>, Vec<(String, [bool; 4])>) = match &chain.static_params {
+            Some(s) => (s.switches.iter().map(|(n, v, _)| (n.clone(), *v)).collect(), s.masks.iter().map(|(n, m, _)| (n.clone(), *m)).collect()),
+            None => (Vec::new(), Vec::new()),
+        };
+        let mi = lib.find(&base, &switches, &masks)?;
+        let map = CookedMap::from(&lib.maps[mi]);
+        let vector = |n: &str| chain.vectors.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map(|v| v.1);
+        let scalar = |n: &str| chain.scalars.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map(|v| v.1);
+        let nodes = shadercache::param_nodes(&map);
+        let params = nodes
+            .iter()
+            .map(|e| match e {
+                Expr::VectorParameter(n, d) => vector(n).unwrap_or(*d),
+                Expr::ScalarParameter(n, d) => [scalar(n).unwrap_or(*d); 4],
+                _ => [0.0; 4],
+            })
+            .collect();
+        let param_names = nodes
+            .iter()
+            .map(|e| match e {
+                Expr::VectorParameter(n, _) | Expr::ScalarParameter(n, _) => n.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        // a texture parameter's value: the chain's (child wins), then the base material's
+        // `Texture2D` defaults
+        let class = |imp: &Self, k: Key| imp.pkgs[k.0].export_class(k.1);
+        let named = |imp: &Self, n: &str| -> Option<Key> {
+            chain.textures.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map(|t| t.1).or_else(|| {
+                chain.default_textures.iter().find(|(k, t)| k.eq_ignore_ascii_case(n) && class(imp, *t).starts_with("Texture2D")).map(|t| t.1)
+            })
+        };
+        let res_tex = |i: i32| -> Option<Key> { *res_textures.get(usize::try_from(i).ok()?)? };
+        enum Tex {
+            Plain(TextureId),
+            Cube(Vec<TextureId>),
+        }
+        let texture = |imp: &mut Self, e: &Expr, cube: bool| -> Option<Tex> {
+            let key = match e {
+                Expr::TextureParameter(n, i) => named(imp, n).or_else(|| res_tex(*i)),
+                Expr::Texture(i) | Expr::FlipBook(i) => res_tex(*i),
+                _ => None,
+            }?;
+            let cls = class(imp, key);
+            // scene capture targets: nothing is in their rendering channels, so they hold
+            // their clear colour
+            if cls.starts_with("TextureRenderTarget") {
+                return Some(Tex::Plain(dishonored_ir::UE3_TEX_BLACK));
+            }
+            if cube {
+                return imp.cube_faces(key).map(Tex::Cube);
+            }
+            if !cls.starts_with("Texture2D") && cls != "TextureFlipBook" && cls != "LightMapTexture2D" {
+                return None;
+            }
+            imp.texture(key).map(Tex::Plain)
+        };
+        let textures = map
+            .pixel
+            .textures
+            .iter()
+            .map(|e| match texture(self, e, false) {
+                Some(Tex::Plain(t)) => Some(t),
+                _ => None,
+            })
+            .collect();
+        let cube_textures = map
+            .cube_textures
+            .iter()
+            .map(|e| match texture(self, e, true) {
+                Some(Tex::Cube(f)) => Some(f),
+                _ => None,
+            })
+            .collect();
+        let blend = match chain.blend_mode.as_deref().unwrap_or("BLEND_Opaque") {
+            "BLEND_Masked" | "BLEND_SoftMasked" | "BLEND_DitheredTranslucent" => MaterialBlend::Masked,
+            "BLEND_Translucent" | "BLEND_AlphaComposite" => MaterialBlend::Translucent,
+            "BLEND_Additive" => MaterialBlend::Additive,
+            "BLEND_Modulate" | "BLEND_ModulateAndAdd" => MaterialBlend::Modulate,
+            _ => MaterialBlend::Opaque,
+        };
+        Some(dishonored_ir::Ue3Material {
+            map: mi as u32,
+            params,
+            param_names,
+            textures,
+            cube_textures,
+            blend,
+            two_sided: chain.two_sided.unwrap_or(false),
+            unlit: chain.lighting_model.as_deref() == Some("MLM_Unlit"),
+        })
     }
 
     fn texture(&mut self, k: Key) -> Option<TextureId> {

@@ -100,6 +100,12 @@ pub mod lighting;
 #[doc(hidden)]
 pub mod map_render;
 #[doc(hidden)]
+pub mod ue3mat;
+#[doc(hidden)]
+pub mod ue3_level;
+#[doc(hidden)]
+pub mod ppgraph;
+#[doc(hidden)]
 pub mod players;
 #[doc(hidden)]
 pub mod session;
@@ -367,6 +373,8 @@ pub fn main() {
     .insert_resource(audio::global_volume())
     .add_plugins(FrameTimeDiagnosticsPlugin::default())
     .add_plugins(MaterialPlugin::<map_render::BakedMaterial>::default())
+    .add_plugins(ue3mat::Ue3Plugin)
+    .add_plugins(ppgraph::PostGraphPlugin)
     .add_plugins(ark_post::ArkPostPlugin)
     .add_plugins(distortion::DistortionPlugin)
     .add_plugins(sky::SkyPlugin)

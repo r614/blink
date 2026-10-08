@@ -1,4 +1,10 @@
-﻿Blink includes code adapted from dishonored-bevy by Eamon (https://github.com/Eamo5/dishonored-bevy),
+Blink includes code adapted from dishonored-bevy by Eamon (https://github.com/Eamo5/dishonored-bevy),
 used with the author's permission:
 - crates/ue3_shader/src/{sm3,shadercache,ue3prog}.rs (D3D9 SM3 bytecode to WGSL, shader cache reader, program assembly; from crates/dhcook/src)
 - crates/dishonored_runtime/src/warmup.rs (shader / pipeline warm-up; from game/src/warmup.rs)
+- crates/dishonored_runtime/src/ue3mat.rs and ue3_prepass.wgsl (materials rendered with their original shaders; from game/src/ue3mat.rs, game/src/ue3_prepass.wgsl)
+- crates/dishonored_runtime/src/ue3_level.rs (building a level's original-shader materials, instance buffer, light-map page arrays and dynamic light passes; from game/src/level.rs, game/src/lightmap.rs)
+- crates/dishonored_runtime/src/ppgraph.rs (the post-process graph: vector fields, motion blur node, node grades; from game/src/ppgraph.rs, game/src/postfx.rs uber_fields)
+- crates/dishonored_assets/src/shaders.rs (loading the shader library; from crates/dhcook/src/lib.rs shader_library / cook_shader_library)
+- crates/dishonored_assets/src/post_materials.rs (the post-process graph's materials, curves and grading nodes; from crates/dhcook/src/lib.rs POST_MATERIALS / mitv_curves, crates/dhcook/src/gamedata.rs post_nodes)
+- crates/dishonored_assets/src/level.rs Importer::ue3_material and crates/dishonored_ir Ue3Material / PostCurve (linking a material to its shader map; from crates/dhcook/src/lib.rs ue3_material, crates/dhcook/src/format.rs)

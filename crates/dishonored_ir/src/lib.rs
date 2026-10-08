@@ -172,6 +172,68 @@ pub struct MaterialParams {
     /// `SceneCaptureReflectActor`): (parameter name, render target object path).
     #[serde(default)]
     pub render_targets: Vec<(String, String)>,
+    /// The material's compiled shaders in the install's `RefShaderCache-PC-D3D-SM3.upk`
+    /// (`ue3_shader`), for the runtime's original-shader path; None when no shader map matches.
+    #[serde(default)]
+    pub ue3: Option<Ue3Material>,
+}
+
+/// Texture slot value of a render target (scene captures) in [`Ue3Material::textures`]: its
+/// clear colour, black.
+pub const UE3_TEX_BLACK: TextureId = usize::MAX;
+
+/// A material linked to its compiled shader map, with the map's parameters and textures
+/// resolved for this material (instance). Adapted from dishonored-bevy by Eamon
+/// (github.com/Eamo5/dishonored-bevy), used with permission (its `format::Ue3Material`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Ue3Material {
+    /// Index of the shader map in the shader cache (`ShaderLibrary::maps`).
+    pub map: u32,
+    /// Values of the shader map's parameter nodes, in `shadercache::param_nodes` order.
+    pub params: Vec<[f32; 4]>,
+    /// Those parameters' names (what the level scripts set: `SeqAct_SetMatInstScalarParam`).
+    pub param_names: Vec<String>,
+    /// Texture of each pixel `Texture2D_N` expression ([`UE3_TEX_BLACK`]: a render target).
+    pub textures: Vec<Option<TextureId>>,
+    /// Faces (+X, -X, +Y, -Y, +Z, -Z) of each cube texture expression.
+    pub cube_textures: Vec<Option<Vec<TextureId>>>,
+    /// The base material's own blend mode, two-sidedness and lighting model.
+    pub blend: MaterialBlend,
+    pub two_sided: bool,
+    pub unlit: bool,
+}
+
+/// A time-varying material parameter (`MaterialInstanceTimeVarying` `ScalarParameterValues[]
+/// .ParameterValueCurve`): its value before it plays and its keys (seconds, value; linear).
+/// Adapted from dishonored-bevy by Eamon (github.com/Eamo5/dishonored-bevy), used with permission.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PostCurve {
+    pub param: String,
+    pub default: f32,
+    pub keys: Vec<[f32; 2]>,
+}
+
+impl PostCurve {
+    /// The value at `t` seconds (held before the first key and after the last).
+    pub fn at(&self, t: f32) -> f32 {
+        let Some(first) = self.keys.first() else { return self.default };
+        if t <= first[0] {
+            return first[1];
+        }
+        for w in self.keys.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if t <= b[0] {
+                let k = if b[0] > a[0] { (t - a[0]) / (b[0] - a[0]) } else { 1.0 };
+                return a[1] + (b[1] - a[1]) * k;
+            }
+        }
+        self.keys.last().map(|k| k[1]).unwrap_or(self.default)
+    }
+
+    /// When its last key is.
+    pub fn end(&self) -> f32 {
+        self.keys.last().map(|k| k[0]).unwrap_or(0.0)
+    }
 }
 
 /// How a particle material's shader combines the sprite texture (colour x opacity, baked into

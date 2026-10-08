@@ -132,6 +132,14 @@ pub struct ArkPostSource {
     /// A scene capture's own fog / post (reflect.rs: bEnableFog, bEnablePostProcess): the bloom
     /// parts belong to the game view and are not added.
     pub capture: bool,
+    /// The original post-process graph (`ppgraph`) draws the powers' vector fields with their
+    /// translated materials: this pass's hand-ported fields (Bend Time, Blink's lens, Possession)
+    /// stay off (they run under `DISHONORED_LEGACY_MATERIALS=1`, or without the shader library).
+    pub graph: bool,
+    /// The graph's running nodes' own grade (`ArkPpNodeMaterial::m_bOverrideUberPp`), stacked
+    /// after the power's, by its fade weight.
+    pub graph_post: Option<PostSettings>,
+    pub graph_weight: f32,
 }
 
 fn post_value(p: Option<&PostSettings>, key: &str) -> Option<f32> {
@@ -148,16 +156,16 @@ impl ArkPostSource {
     /// `cam_z` is the camera's world Z in uu (custom transitions depend on it).
     pub fn uniform(&self, cam_z: f32) -> ArkPost {
         let mut u = self.level_uniform(cam_z);
-        if self.bend > 0.0 {
+        if self.bend > 0.0 && !self.graph {
             let t = self.bend_time;
             let fr = |x: f32| x - x.floor();
             u.power_vectors = Vec4::new(self.bend, crate::power_pp::BEND_VECTOR_SCALE, 0.0, 0.0);
             u.power_pans = Vec4::new(fr(t * 0.2), fr(t * -0.1), fr(t * -0.15), fr(t * 0.3));
         }
-        if self.blink_lens != Vec2::ZERO {
+        if self.blink_lens != Vec2::ZERO && !self.graph {
             u.blink_lens = Vec4::new(self.blink_lens.x, self.blink_lens.y, 1.0, 0.0);
         }
-        if self.possess != Vec2::ZERO {
+        if self.possess != Vec2::ZERO && !self.graph {
             u.possess = Vec4::new(self.possess.x, self.possess.y, 1.0, self.bend_time);
         }
         if let Some(a) = self.eyelid {
@@ -170,13 +178,15 @@ impl ArkPostSource {
         // manager's Kismet slot): the LUT terms of the overridden settings, blended by the
         // grade's weight (the colour pipeline is on while it shows).
         let mut graded = self.post_on;
-        for (over, weight) in [(&self.power_post, self.power_weight), (&self.kismet_post, self.kismet_weight), (&self.ui_post, self.ui_weight)] {
+        for (over, weight) in [(&self.power_post, self.power_weight), (&self.graph_post, self.graph_weight), (&self.kismet_post, self.kismet_weight), (&self.ui_post, self.ui_weight)] {
             let (Some(over), true) = (over, weight > 0.0) else { continue };
             let src = ArkPostSource {
                 post: Some(crate::dark_vision::merged(self.post.as_ref(), over)),
                 post_on: true,
                 power_post: None,
                 power_weight: 0.0,
+                graph_post: None,
+                graph_weight: 0.0,
                 kismet_post: None,
                 kismet_weight: 0.0,
                 ui_post: None,

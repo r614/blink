@@ -42,6 +42,7 @@ pub mod climbable;
 pub mod collision_audit;
 pub mod prop_collision;
 pub mod simple_collision;
+pub mod shaders;
 
 pub use content::Content;
 pub use level::{ImportOptions, ImportStats, import_level};

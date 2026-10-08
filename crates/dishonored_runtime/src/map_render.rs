@@ -392,10 +392,12 @@ pub struct PreparedMap {
     d2_rects: std::collections::HashMap<u32, (Vec2, Vec2)>,
     /// The merged batch meshes.
     built: Vec<(BatchKey, Mesh)>,
+    /// The sections drawn with their original shaders (`ue3_level`); None: the path is off.
+    ue3: Option<crate::ue3_level::Prepared>,
 }
 
 /// `f` over `items` on all cores, in order.
-fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+pub(crate) fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let chunk = items.len().div_ceil(threads).max(1);
     let f = &f;
@@ -406,7 +408,7 @@ fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> 
 }
 
 /// One Bevy mesh for a (static mesh, section) pair.
-fn build_section_mesh(map: &DishonoredMap, mi: usize, si: usize, features: &RenderFeatures) -> Mesh {
+pub(crate) fn build_section_mesh(map: &DishonoredMap, mi: usize, si: usize, features: &RenderFeatures) -> Mesh {
     let m = &map.meshes[mi];
     let positions: Vec<[f32; 3]> = m.positions.iter().map(|p| coords::pos(*p).to_array()).collect();
     let normals: Vec<[f32; 3]> = m.normals.iter().map(|n| coords::dir(*n).normalize_or_zero().to_array()).collect();
@@ -435,6 +437,10 @@ fn build_section_mesh(map: &DishonoredMap, mi: usize, si: usize, features: &Rend
 /// The map-only half of [`spawn_map`] (see [`PreparedMap`]); safe to run on a worker thread.
 pub fn prepare_map(map: &DishonoredMap, show_hidden: bool, features: &RenderFeatures) -> PreparedMap {
     let layers = crate::reflect::Layers::new(map, features);
+    // The original-shader sections (and their programs) first: they are drawn per instance,
+    // outside the merged batches.
+    let ue3 = crate::ue3_level::prepare(map, features);
+    let is_ue3 = |ii: usize, si: usize| ue3.as_ref().is_some_and(|u| u.parts.contains_key(&(ii, si)));
     let textures = par_map(&map.textures, to_image);
     let (lightmaps, shadows, shadow_locals) = if features.lightmaps {
         (
@@ -473,6 +479,10 @@ pub fn prepare_map(map: &DishonoredMap, show_hidden: bool, features: &RenderFeat
                     let entry = bloom_parts.entry(m).or_insert_with(|| (tex, colour, Vec::new()));
                     append_world_triangles(&mut entry.2, mesh, si, coords::transform(inst.transform));
                 }
+            }
+            // Sections drawn with their original shaders: per instance, with their own meshes.
+            if is_ue3(ii, si) {
+                continue;
             }
             // Static opaque/masked geometry is merged into world-space batches (one draw per
             // material, lightmap page and cell instead of one per instance section); sorted
@@ -541,7 +551,7 @@ pub fn prepare_map(map: &DishonoredMap, show_hidden: bool, features: &RenderFeat
     for (a, img) in flat_needed.iter().copied().zip(par_map(&flat_needed, |a| lightmap_image(&map.lightmaps[*a], LightmapPlane::Flat))) {
         flat[a] = Some(img);
     }
-    PreparedMap { layers, textures, lightmaps, shadows, shadow_locals, flat, merged, section_meshes, bloom_parts, d2_rects, built }
+    PreparedMap { layers, textures, lightmaps, shadows, shadow_locals, flat, merged, section_meshes, bloom_parts, d2_rects, built, ue3 }
 }
 
 /// [`prepare_map`] and [`spawn_prepared`] in one call (the map is prepared on this thread's
@@ -574,9 +584,12 @@ pub fn spawn_prepared(
     show_hidden: bool,
     features: &RenderFeatures,
 ) -> usize {
-    let PreparedMap { layers: reflect_layers, textures, lightmaps, shadows, shadow_locals, flat, merged, section_meshes: mut prepared_meshes, bloom_parts, d2_rects, built } = prep;
+    let PreparedMap { layers: reflect_layers, textures, lightmaps, shadows, shadow_locals, flat, merged, section_meshes: mut prepared_meshes, bloom_parts, d2_rects, built, ue3 } = prep;
     let show_fx = features.fx;
     let image_handles: Vec<Handle<Image>> = textures.into_iter().map(|t| images.add(t)).collect();
+    // The sections drawn with their original shaders (their materials are made once the
+    // entities exist: `Ue3Spawn::apply`).
+    let mut ue3 = ue3.map(|u| crate::ue3_level::Ue3Spawn::new(u, map, &image_handles, images, meshes));
     // Planar reflections: the capture cameras and their render targets (reflect.rs), and the
     // render layers the reflected primitives are drawn in.
     let reflect_targets = crate::reflect::spawn_captures(map, &reflect_layers, features, commands, images);
@@ -652,6 +665,26 @@ pub fn spawn_prepared(
             }
             // [interp] Matinee-driven actors (InterpActor) stay separate so cutscenes can move them.
             let mover = crate::cutscene::mover_of(&inst.source, inst.transform);
+            // Original shaders (`ue3_level`): the full mesh now, the material once it is made.
+            if let Some((part, mesh_h)) = ue3.as_ref().and_then(|u| u.part(ii, si)) {
+                let mut e = commands.spawn((Mesh3d(mesh_h), transform, MapGeometry { instance: ii }));
+                if is_sky || translucent {
+                    e.insert(bevy::light::NotShadowCaster);
+                }
+                if reflect_bits != 0 {
+                    e.insert(crate::reflect::render_layers(reflect_bits));
+                }
+                if let Some(m) = mover {
+                    e.insert(m); // [interp]
+                }
+                let fallback = material_handles[part.mat].clone();
+                let id = e.id();
+                if let Some(u) = ue3.as_mut() {
+                    u.push(id, part, fallback);
+                }
+                spawned += 1;
+                continue;
+            }
             let mat = if inst.hidden {
                 hidden_material.clone()
             } else {
@@ -894,6 +927,9 @@ pub fn spawn_prepared(
     }
     if n_batches > 0 {
         info!("static geometry merged into {n_batches} batches");
+    }
+    if let Some(u) = ue3 {
+        commands.queue(move |world: &mut World| u.apply(world));
     }
     spawned
 }

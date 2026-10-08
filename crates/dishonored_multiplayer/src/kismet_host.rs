@@ -3261,6 +3261,7 @@ pub fn view(m: &MissionMatch, mv: &mut dishonored_mission::runtime::MissionView)
     }
     mv.cutscenes = cutscene::view(run); // [interp]
     mv.post_fx = run.st.post.view();
+    mv.post_effects = run.st.post_effects.iter().cloned().collect();
     let db = &run.k.db;
     let on_map = |a: u32| {
         let Some(map) = run.st.map.as_deref() else { return true };
