@@ -41,6 +41,8 @@ pub mod ragdoll;
 #[doc(hidden)]
 pub mod debug;
 #[doc(hidden)]
+pub mod dark_vision;
+#[doc(hidden)]
 pub mod effects;
 #[doc(hidden)]
 pub mod harness;
@@ -317,6 +319,7 @@ pub fn main() {
     .init_resource::<atmosphere::FogLayers>()
     .add_systems(Startup, setup_world)
     .add_plugins(effects::EffectsPlugin)
+    .add_plugins(dark_vision::DarkVisionPlugin)
     .add_systems(Update, atmosphere::update_fog)
     // Doors and usable objects (skeletal meshes), posed for their state.
     .init_resource::<level_props::LevelProps>()

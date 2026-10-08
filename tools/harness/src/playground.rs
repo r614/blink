@@ -206,6 +206,7 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     lean_and_tunnel(rep, &mc);
     pain(rep, &mc);
     stations_in_mission(rep, &maps, &def)?;
+    powers_in_mission(rep, &maps, &def)?;
     detection(rep, &maps)?;
     rep.check(S, "suite time", true, format!("{:.1?}", t0.elapsed()));
     Ok(())
@@ -628,6 +629,86 @@ fn stations_in_mission(rep: &mut Report, maps: &MapContents, def: &MissionDef) -
         }
     }
     rep.check(S, "stealth lane: the guard patrols along the generated navigation", far > 1500.0, format!("moved up to {far:.0} uu from its start in 30 s"));
+    Ok(())
+}
+
+/// Every left-hand power and gadget at the sword dummies, cast through the mission match (the
+/// playground's own path): its cost is paid (mana or ammunition) and its effect happens in the
+/// simulation (events, pushed dummy, rats, time bends, projectiles, explosions, traps).
+fn powers_in_mission(rep: &mut Report, maps: &MapContents, def: &MissionDef) -> Result<()> {
+    use dishonored_ir::items::AmmoType;
+    use dishonored_sim::state::PawnKind;
+    let mut p = Play::new(maps, def.clone())?;
+    p.idle(10, PlayerInput { yaw: 90.0, ..Default::default() });
+    let dummy = p.npc("dummy_a");
+    let spot = Vec3::new(0.0, 4300.0, 92.0);
+    let mut rows = Vec::new();
+    for (name, hand, hold) in [
+        ("Blink", LeftHand::Blink, 10usize),
+        ("Windblast", LeftHand::Windblast, 1),
+        ("Dark Vision", LeftHand::DarkVision, 1),
+        ("Possession", LeftHand::Possession, 15),
+        ("Bend Time", LeftHand::BendTime, 1),
+        ("Devouring Swarm", LeftHand::DevouringSwarm, 1),
+        ("Grenade", LeftHand::Grenade, 1),
+        ("Sticky grenade", LeftHand::StickyGrenade, 1),
+        ("Spring Razor", LeftHand::SpringRazor, 1),
+    ] {
+        p.teleport(spot, 90.0);
+        if let Some(me) = p.mm().world.player_mut(ME) {
+            me.vitals.mana = 100.0;
+        }
+        let tp = p.m().world.player(dummy).map(|t| t.position).unwrap_or(spot + Vec3::Y * 300.0);
+        // Aim at the dummy (Possession, Windblast); Blink a little to the side of it.
+        let (y, pi) = if hand == LeftHand::Blink { p.aim(spot + Vec3::new(400.0, 200.0, -60.0)) } else { p.aim(tp + Vec3::Z * 20.0) };
+        let idle = PlayerInput { yaw: y, pitch: pi, left_hand: hand, ..Default::default() };
+        p.idle(45, idle);
+        let (mana0, me0) = (p.p().vitals.mana, p.p());
+        let before = p.events.len();
+        for _ in 0..hold {
+            p.step(PlayerInput { buttons: buttons::SECONDARY, ..idle });
+        }
+        // Watch for 5 s: rats, time bends and the dummy's displacement.
+        let (mut rats, mut bends, mut pushed) = (0usize, 0usize, 0.0f32);
+        for _ in 0..150 {
+            p.step(idle);
+            rats = rats.max(p.m().world.players.iter().filter(|q| q.kind == PawnKind::Rat).count());
+            bends = bends.max(p.m().world.time_bends.len());
+            if let Some(t) = p.m().world.player(dummy) {
+                pushed = pushed.max((t.position - tp).length());
+            }
+        }
+        let ev: Vec<&SimEvent> = p.events[before..].iter().map(|(_, e)| e).collect();
+        let me1 = p.p();
+        let spent = mana0 - me1.vitals.mana;
+        let ammo = |m: &PlayerState, t: AmmoType| dishonored_sim::inventory::ammo(m, t) as i32;
+        let (ok, what) = match hand {
+            LeftHand::Blink => (ev.iter().any(|e| matches!(e, SimEvent::BlinkEnd { id } if *id == ME)) && spent > 0.0, format!("moved {:.0} uu", (me1.position - me0.position).length())),
+            LeftHand::Windblast => (ev.iter().any(|e| matches!(e, SimEvent::WindblastCast { id } if *id == ME)) && pushed > 20.0, format!("dummy pushed {pushed:.0} uu")),
+            LeftHand::DarkVision => (ev.iter().any(|e| matches!(e, SimEvent::DarkVision { id, active: true } if *id == ME)), format!("remaining {:.1} s", me1.vitals.dark_vision_remaining)),
+            LeftHand::Possession => (ev.iter().any(|e| matches!(e, SimEvent::PossessStart { id, .. } if *id == ME)), format!("stage {:?}", me1.possess.stage)),
+            LeftHand::BendTime => (ev.iter().any(|e| matches!(e, SimEvent::BendTimeStart { id, .. } if *id == ME)) && bends > 0, format!("{bends} time bends")),
+            LeftHand::DevouringSwarm => (ev.iter().any(|e| matches!(e, SimEvent::SwarmSummoned { id, .. } if *id == ME)) && rats > 0, format!("{rats} rats")),
+            LeftHand::Grenade | LeftHand::StickyGrenade => {
+                let t = if hand == LeftHand::Grenade { AmmoType::Grenade } else { AmmoType::StickyGrenade };
+                let used = ammo(&me0, t) - ammo(&me1, t);
+                (used == 1 && ev.iter().any(|e| matches!(e, SimEvent::Explosion { owner, .. } if *owner == ME)), format!("ammo used {used}, exploded {}", ev.iter().any(|e| matches!(e, SimEvent::Explosion { .. }))))
+            }
+            _ => {
+                let used = ammo(&me0, AmmoType::SpringRazor) - ammo(&me1, AmmoType::SpringRazor);
+                (used == 1 && ev.iter().any(|e| matches!(e, SimEvent::TrapPlaced { id, .. } if *id == ME)), format!("ammo used {used}"))
+            }
+        };
+        rep.check(S, &format!("power {name}: cast in the mission, cost paid and its effect happens"), ok, format!("mana spent {spent:.0}, {what}"));
+        rows.push(vec![name.to_string(), format!("{spent:.0}"), what, if ok { "ok".into() } else { "FAIL".into() }]);
+        // End what keeps running (possession, bend time) before the next one.
+        if matches!(hand, LeftHand::Possession | LeftHand::BendTime) {
+            p.step(PlayerInput { buttons: buttons::SECONDARY, ..idle });
+            p.idle(60, idle);
+        }
+        p.idle(60, PlayerInput { yaw: y, pitch: pi, ..Default::default() });
+    }
+    rep.table("Powers and gadgets in the mission match", &["item", "mana spent", "result", ""], rows);
     Ok(())
 }
 

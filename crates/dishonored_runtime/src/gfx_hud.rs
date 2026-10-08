@@ -202,6 +202,14 @@ const ICONS: &[(&str, &str, &str)] = &[
     ("pistol", "UI_ItemIcons_Large", "Gun_Large"),
     ("crossbow", "UI_ItemIcons_Large", "Crossbow_Large"),
     ("sword", "UI_ItemIcons_Large", "CorvoSword_Large"),
+    ("possession", "UI_Powers_Large", "PossessionBig"),
+    ("bendtime", "UI_Powers_Large", "BendTimeBig"),
+    ("swarm", "UI_Powers_Large", "RatSwarmBig"),
+    ("grenade", "UI_ItemIcons_Large", "CorvoGrenade_Large"),
+    ("sticky", "UI_ItemIcons_Large", "CorvoStickyGrenade_Large"),
+    ("razor", "UI_ItemIcons_Large", "SpringRazor_Large"),
+    ("sleepdart", "UI_ItemIcons_Large", "CrossbowSleepDart_Large"),
+    ("flarebolt", "UI_ItemIcons_Large", "CrossbowFlareBolt_Large"),
 ];
 
 fn movie_raw(pkg: &ue3_package::Package, name: &str) -> Option<Vec<u8>> {
@@ -274,13 +282,10 @@ pub fn setup_gfx_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) 
         if let Some(p) = placed(name) {
             let mut qs = Vec::new();
             movie.flatten(p.character.unwrap_or(0), p.matrix.unwrap_or_default(), ColorTransform::default(), name, &frame0, &mut qs);
-            // Decorative schema lines and the animated portrait stay out.
-            // In the game the two never show together; here the paper sits under the banner.
-            let dy = if g == Group::TargetNote { 120.0 } else { 0.0 };
-            pieces.extend(qs.into_iter().filter(|q| !q.path.contains("schema") && !q.path.contains("animPortrait") && !q.path.contains("objState")).map(|mut q| {
-                q.dst = q.dst.map(|(x, y)| (x, y + dy));
-                (g, q)
-            }));
+            // Decorative schema lines and the portrait (its strokes and animated clips are
+            // timelines the port does not play: frozen at frame 0 they read as torn shards)
+            // stay out. Both panels keep the movie's own placement.
+            pieces.extend(qs.into_iter().filter(|q| !q.path.contains("schema") && !q.path.contains("_portrait_mc") && !q.path.contains("animPortrait") && !q.path.contains("objState")).map(|q| (g, q)));
         }
     }
     // Stance icon (bottom left).
@@ -443,7 +448,10 @@ pub fn update_gfx_hud(
     // Objectives banner and target paper are popups (`hud_popups`): alpha and slide.
     let now = time.elapsed_secs();
     let banner = popups.banner_env(now);
-    let paper = if mission.is_some() { banner } else { popups.target_env(now) };
+    // The target paper is its own popup (`TargetNotification`): the Contracts target or a
+    // mission's Notify action, never the task list.
+    let paper = popups.target_env(now);
+    let notified = mission.is_some_and(|m| m.notification.is_some());
     // Crosshair spread: `SetDispersion(d, d / max x 100)` (0x00B9FF30), sent when `d` moved by
     // at least 0.1 since the last call.
     let disp = me.and_then(|m| dishonored_sim::left_hand::Dispersion::of(m, &session.content.sim.gameplay, &session.content.sim.tuning).map(|d| (m.left.dispersion, d.max)));
@@ -465,7 +473,7 @@ pub fn update_gfx_hud(
             Group::CrossPower => (alive && aiming_power, None),
             Group::Crouch => (alive && crouched, None),
             Group::Objectives => (has_match && banner.shown(), None),
-            Group::TargetNote => ((view.target_info.is_some() || (mission.is_some() && !ended)) && paper.shown(), None),
+            Group::TargetNote => ((view.target_info.is_some() || (notified && !ended)) && paper.shown(), None),
             Group::Marker => (alive && marker.is_some(), None),
             Group::OutcomeBg => (ended, None),
         };
@@ -522,9 +530,15 @@ pub fn update_gfx_hud(
         LeftHand::Pistol => Some("pistol"),
         LeftHand::Crossbow => Some("crossbow"),
         LeftHand::Empty => Some("sword"),
-        LeftHand::SleepDart | LeftHand::IncendiaryBolt => Some("crossbow"),
-        // Icons for these are not loaded yet (owned by the HUD work).
-        LeftHand::Possession | LeftHand::BendTime | LeftHand::DevouringSwarm | LeftHand::Grenade | LeftHand::StickyGrenade | LeftHand::SpringRazor => None,
+        // The crossbow's ammo types show their bolt (UI_ItemIcons_Large, as the inventory).
+        LeftHand::SleepDart => Some("sleepdart"),
+        LeftHand::IncendiaryBolt => Some("flarebolt"),
+        LeftHand::Possession => Some("possession"),
+        LeftHand::BendTime => Some("bendtime"),
+        LeftHand::DevouringSwarm => Some("swarm"),
+        LeftHand::Grenade => Some("grenade"),
+        LeftHand::StickyGrenade => Some("sticky"),
+        LeftHand::SpringRazor => Some("razor"),
     };
     for (ei, mut node, mut img, mut vis) in &mut icon {
         match key.and_then(|k| hud.icons.get(k)).filter(|_| alive) {
@@ -718,13 +732,13 @@ pub fn update_anchored_text(
     let leader = m.scores.iter().max_by_key(|e| e.score);
     let now = time.elapsed_secs();
     let banner = popups.banner_env(now);
-    let paper = if m.mission.is_some() { banner } else { popups.target_env(now) };
+    let paper = popups.target_env(now);
     for (at, mut node, mut text, mut font, mut vis, mut color) in &mut texts {
         let mission = m.mission.as_ref();
         let (content, size) = match (at.kind, mission) {
             (TextKind::ObjTitle, Some(mv)) => (mission_title(mv), 17.0),
             (TextKind::ObjName, Some(mv)) => (mission_task(mv), 15.0),
-            (TextKind::TargetBody, Some(mv)) => (mission_paper(mv, time.elapsed_secs(), &mut seen), 15.0),
+            (TextKind::TargetBody, Some(mv)) => (mission_paper(mv), 15.0),
             (TextKind::ObjTitle, None) => (format!("{}   {}:{:02}", if m.mode.eq_ignore_ascii_case("contracts") { "CONTRACTS" } else { "FREE FOR ALL" }, (m.time_left / 60.0).floor() as i32, (m.time_left % 60.0) as i32), 17.0),
             (TextKind::ObjName, None) => (
                 match (mine, leader) {
@@ -793,27 +807,9 @@ fn mission_task(mv: &dishonored_mission::runtime::MissionView) -> String {
         .unwrap_or_default()
 }
 
-/// Target paper: a fresh notification for a few seconds, otherwise the task list.
-fn mission_paper(mv: &dishonored_mission::runtime::MissionView, now: f32, seen: &mut HashMap<u32, f32>) -> String {
-    use dishonored_mission::TaskState;
-    if let Some((id, title, text)) = &mv.notification {
-        let t0 = *seen.entry(*id).or_insert(now);
-        if now - t0 < 8.0 {
-            return format!("{}\n{}", title.to_uppercase(), text);
-        }
-    }
-    let mut s = String::new();
-    for o in mv.objectives.iter().filter(|o| !o.hidden) {
-        for t in o.tasks.iter().filter(|t| !t.hidden && t.state != TaskState::Inactive) {
-            let mark = match t.state {
-                TaskState::Completed => "  (done)",
-                TaskState::Failed => "  (failed)",
-                _ => "",
-            };
-            s += &format!("{}{mark}\n", t.description);
-        }
-    }
-    s
+/// Target paper in a mission: the newest notification (the popup decides when it shows).
+fn mission_paper(mv: &dishonored_mission::runtime::MissionView) -> String {
+    mv.notification.as_ref().map(|(_, title, text)| format!("{}\n{}", title.to_uppercase(), text)).unwrap_or_default()
 }
 
 /// Newest HUD message, for four seconds after it first appears.

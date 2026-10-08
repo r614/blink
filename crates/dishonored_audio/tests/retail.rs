@@ -20,6 +20,26 @@ fn event_ids_are_fnv1_of_lowercase_names() {
     assert_eq!(dishonored_audio::fnv1_32("snd_sword_corvo_out"), 795089353);
 }
 
+/// Every particle the contact table names (impacts, blood, footfalls...) is decoded with the
+/// levels (`particle_material::GAMEPLAY_PARTICLES`), so `spawn_effect` finds it: Sword x Body
+/// names `Pfx_BloodMotion`, which was missing (no blood on sword hits).
+#[test]
+fn contact_particles_are_all_decoded() {
+    use dishonored_assets::particle_material::GAMEPLAY_PARTICLES;
+    let Ok(content) = dishonored_assets::Content::locate() else {
+        eprintln!("Dishonored install not found; skipping");
+        return;
+    };
+    let game = content.package("DishonoredGame").unwrap();
+    let cs = dishonored_audio::contact::ContactSystem::load(&game, &[]).expect("contact system");
+    let mut missing: Vec<String> = cs.intersections.iter().filter_map(|i| i.particle.clone()).filter(|p| !GAMEPLAY_PARTICLES.iter().any(|g| g.eq_ignore_ascii_case(p))).collect();
+    missing.sort();
+    missing.dedup();
+    assert!(missing.is_empty(), "contact particles not in GAMEPLAY_PARTICLES: {missing:?}");
+    let sword = cs.particle("DisContactType_Sword", "DisContactType_Body").unwrap_or_default();
+    assert!(sword.contains(".Blood."), "sword x body: {sword}");
+}
+
 #[test]
 fn codebooks_come_from_the_executable() {
     let Some(root) = install() else {

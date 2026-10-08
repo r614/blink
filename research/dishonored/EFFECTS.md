@@ -109,7 +109,7 @@ Other module classes are listed per emitter as unsupported.
   smoke, sewer smoke, street lamp, small lights, fireflies) and
   `fixtures/scripts/effects_gameplay.json` (offline: pistol, Windblast, Blink).
 
-## Particle materials (`DefaultTranslu_PMAT`)
+## Particle materials
 
 The party lanterns' system `Boyle_FX.Lights.Ps_SmallLights_01` (11 placed, e.g. at
 (-3353, -2173, -74) and (-3669, -1638, -77) by the front-door steps) has a steam emitter on
@@ -136,9 +136,42 @@ texture's own alpha (opaque) and tinted by `Color` (absent), so the steam and sm
 grey squares (`D_DiffuseColorTweak` (0.21, 0.20, 0.16)). Now the importer puts the permutation's
 colour source (D_Diffuse / white / Motion_Mask) with its opacity source in alpha into the
 diffuse slot, and the sprite material tints by `D_DiffuseColorTweak` (alpha into the opacity).
-APPROXIMATION: the motion distortion of the mask (up to 0.2 uv) is not animated and
-`D_Diffuse_Channel` = R permutations keep the RGB texture. The other particle bases (the
-additive and glow ones) are unchanged; the additive ones cannot show dark squares.
+APPROXIMATION: the motion distortion of the mask (up to 0.2 uv) is not animated.
+
+### Every particle base
+
+The same method over every particle base material the gameplay effects use (118 materials
+in DishonoredGame's particle systems, grouped by base; `crates/dishonored_assets/src/particle_material.rs`
+holds the recipes, each citing its shaders):
+
+| Base | Blend | Colour | Opacity |
+|---|---|---|---|
+| DefaultTranslu / Translu2sided / TransluFOG, DefaultAdditive / _2Sided / _UV / _OutBendTime | translucent / additive | `D_Diffuse` (one channel as grey with `D_Enable_Diffuse_Channel`; white with `D_DisableDiffuse` / `D_Disable_Diffuse`; `Motion_Mask` with motion) x `D_DiffuseColorTweak`.rgb | `O_Opacity[O_Opacity_Channel]` (alpha with `O_EnableOpacityAlpha`, `Motion_Mask.r` with motion) x tweak.a; additive: rgb x alpha |
+| Default_Simple_Translucent (37612..37620) | translucent | `D_Diffuse` (or `D_Diffuse_color` x a) | vertex alpha only; x `MA_MaskTexture[MA_Mask_Channel]` with `MA_Use_Masked_Alpha` |
+| HeightMapAnim (6086..6107; blood anims) | translucent | `D_Diffuse` x `D_Diffuse_Brightness` (`DiffuseColor` with `B_Enable_Blood`) | `saturate((O_OpacityRGB_R_is_default[R / G Use_Green / B Use_Blue] - vertex alpha) x Mask_Multiply)` |
+| SubUV_HeightMap (5807, 5820, 5872; blood splash / spray) | masked | two sub-images of `D_diffuse_texture` x brightness (+ cubemap) | clip where `saturate((H - vertex alpha) x Mask_Multiply)` < 1/3, H = `H_HightMap_RGB_R_is_default` channel as above |
+| HeavySmoke | translucent | `D_DiffuseAlpha` | `O_Opacity[channel]` |
+| Water_Translu / Water_Additive | translucent / additive | `R_Reflexion2d` x tweak.rgb x a | `Alpha[Alpha_Mask]` |
+| WaterSplash | additive | `Tex#0` x `Brightness` | `saturate((Shape.r - vertex alpha) x Max_Opacity)` |
+| Fire_Explosion (_02 / _03 / _Oil) | translucent | `F_Fire_Color_Texture` x `F_Fire_Color` | `D_Diffuse.b` |
+| Look_Up_Fire (grenade fire) | translucent | gradient lookup (APPROXIMATION: `Tex#0` x `lookup_color`) | smoothstep of `Diffuse.r` (APPROXIMATION: `Diffuse.r`) |
+| Volume_Light_translu | translucent | `Color` x a | `A_Alpha.r` x `Opacity` |
+| Glow_PMAT | additive | `G_GlowColor` | procedural `max(1 - 2r, 0)^G_GlowPower` |
+
+The blood squares: `Blood_Splash_INST` / `Blood_Spray*_INST` are SubUV_HeightMap materials with
+an opaque DXT1 `D_diffuse_texture`; the port alpha-tested that alpha, so every sprite passed as
+a square. The importer now bakes the colour source with the opacity channel in alpha
+(`MaterialParams::particle` keeps the constants), the sprite takes a random 2 x 2 sub-image
+(`PSUVIM_Random`, `ParticleEmitterAsset::sub_random`). The eroding materials (height-map blood,
+water splash) bake `saturate(H x multiplier)` and fade by `1 - vertex alpha` (APPROXIMATION:
+the original's shape shrinks instead). Bases without a recipe that are translucent, additive or
+masked take the first conventional opacity parameter (`OPACITY_PARAMS`). Checks:
+`dishonored_assets` test `particle_material` (recipes) and retail
+`gameplay_particle_sprites_have_an_opacity` (no gameplay sprite keeps an opaque alpha).
+
+Particles without a Lifetime module live until their emitter is destroyed; an emitter that has
+played its `EmitterLoops` is destroyed with them (the pistol muzzle's five sprite emitters
+stayed forever before). One-shot instances whose emitters loop forever are cut after 12 s.
 
 ## Gameplay effects (U-165 resolved)
 
@@ -148,7 +181,12 @@ From the tweaks (`tweaks` tool):
 |---|---|---|
 | Player pistol muzzle | `Twk_Inv_PistolCorvo` `DisTweaks_FirePistol` | `Vfx_Weapon.Effects.pistol.Ps_PlayerPistol_StdMuzzle_01` at `m_MuzzleSocketName` `Spitfire` |
 | Third-person pistol muzzle | pawn-specific `DisTweaks_NPCFireGun` | `Vfx_Weapon.Effects.Ps_PistolMuzzle` at `Spitfire` |
-| Blink | `Twk_Powers.Blink.Twk_Blink` | `m_pGroundPS` Blink_Ground_01, `m_pMantlePS` Blink_Mantle_01, `m_pLowFallPS` / `m_pHighFallPS` Blink_Fall_01 |
+| Blink target indicator | `Twk_Powers.Blink.Twk_Blink` | `m_pGroundPS` Blink_Ground_01, `m_pMantlePS` Blink_Mantle_01, `m_pLowFallPS` / `m_pHighFallPS` Blink_Fall_01 (indicator sizes `m_fTargetingGroundIndicatorSize` 80, `m_fTargetingGoalIndicatorSize` 130); every emitter loops forever with `bKillOnDeactivate` |
+| Possession | power class / Startup | Possession_HandCast_01 at the hand, PossesTarget_Human_01 / PossesTarget_Rats_01 on the host |
+| Devouring Swarm | power class | Ps_RSwarm_HandCast_01, RSwarm_Summoning_lvl1 / lvl2 at the swarm |
+| Dark Vision | `Twk_DarkVision` | `m_AINoiseVisualEffect` Ps_DVision_Sounds_Base01, NPC `m_VisionConePatrolTemplate` Ps_DVision_VCone_Blue_01, grade `m_StaticUberAdjustement`, souls `DarkVision_Souls_INST` (`m_LowerColor` / `m_UpperColor`) |
+| Grenade, Spring Razor | Startup | `Vfx_Weapon.Effects.Grenade.ps_grenade`, `Ps_Grenade_Trail`; `SpringRazor.Ps_SpringRazor` |
+| Projectile trails, crossbow muzzle | Startup | `Trails.Ps_Pistol_StdTracer_01`, `Trails.StdBolt_Trail`, `Ps_CrossBowMuzzle` |
 | Windblast | `Twk_WindBlast` levels | `m_EffectTemplate` Windblast_lvl1 / Windblast_lvl2 (`m_HandEffectSocketName` LeftHandWpn on level 2, no hand template), underwater Windblast_UndWater_lvl1 |
 | Shadow Kill | `Twk_Pawn_DefaultNPC` | `m_ShadowKillFXs`: `Vfx_GamePlay.ShadowKill.ps_SK_Leg_Arms` on 10 bones (upper/lower legs and arms, spine_1, head), `m_fShadowKillDelay` 0.1 s, fiery material `Shadow_kill_inst` 2 s, sound `Snd_Power_Shadow_Kill` |
 | Impacts, blood | contact system particle slots | striker (Bullet / Arrow / Sword) x surface or body |
@@ -158,9 +196,27 @@ The `Spitfire` socket is a `SkeletalMeshSocket` of the weapon mesh (third-person
 The runtime computes it from the animated third-person pistol each frame
 (`EffectSockets::muzzle`); the first-person shot (no third-person pawn drawn) uses the eye
 offset. The Shadow Kill bones come from the animated corpse (`EffectSockets::bones`).
-Remaining approximations: the Windblast origin (pawn eye height along the view), the Blink
-arrival height (80 uu below the pawn centre), the underwater test (not wired), the fiery
-material.
+The Blink systems are the targeting indicator, not an arrival effect: while the local player
+aims (`left.blink_target`) one instance stands on the floor under the target (Ground) or at a
+target in the air (Fall) and follows it; release, cancel or travel kills it
+(`effects::blink_indicator`). The port used to spawn them as one-shots at the arrival, picked
+Fall because the pawn is Falling for a tick there, and their endless emitters left a glowing orb
+at every destination. APPROXIMATION: the Mantle variant is not chosen (no ledge test at aim
+time) and the indicator sizes are not applied. Trails and Dark Vision's cones follow their object
+(`effects::attached_effects`); a trail whose projectile is gone fades out.
+Remaining approximations: the Windblast origin (pawn eye height along the view), the
+underwater test (not wired), the fiery material, cast effects at the eye instead of the hand
+socket.
+
+## Dark Vision
+
+`dark_vision.rs`: the static uber adjustment of `Twk_DarkVision` (colour balance shadows
+(0.5, 0.1, -0.2), midtones / highlights (0.1, 0, 0), opacity 1, pre-desaturation 1,
+post-desaturation 0.5, exposure 0.1) blended into the ArkPp grade by the power's fade (0.1 s in,
+0.2 s out), and the revealed pawns redrawn through walls (no depth test, additive) with the soul
+ramp `m_LowerColor` (131, 69, 33) x 1.301 to `m_UpperColor` (202, 154, 97) x 0.9827, brighter at
+the silhouette. APPROXIMATION: `PPG_DarkVisionFinal_Mat`, `PPG_EyeLidFinal_Mat` and
+`DarkVision_Souls_INST` are not decoded; the debug capsules stay behind F3.
 
 ## Distortion (U-360 resolved, U-400 open)
 

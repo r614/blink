@@ -1,5 +1,5 @@
-//! Collision debugger: nearby collision triangles and normals, character capsule, Blink
-//! target query, sword sweep, Dark Vision x-ray silhouettes (drawn through walls).
+//! Collision debugger (F3): nearby collision triangles and normals, character capsule, Blink
+//! target query, sword sweep, Dark Vision reveal capsules (drawn through walls).
 
 use crate::coords;
 use crate::session::{Session, SessionView};
@@ -51,21 +51,22 @@ pub fn draw_debug(
     let mv = &session.content.sim.gameplay.movement;
     let Some(me) = view.me.as_ref() else { return };
 
-    // Blink target marker (always shown while aiming, like the original's indicator).
+    // Debug drawing only (F3): the original's Blink indicator is a particle system
+    // (`effects::blink_indicator`) and Dark Vision draws silhouettes (`dark_vision.rs`).
+    if !toggles.collision {
+        return;
+    }
+    // Blink target query.
     if let Some(t) = me.left.blink_target {
         let feet = t - glam::Vec3::Z * mv.collision_half_height;
         xray.sphere(Isometry3d::from_translation(coords::pos(feet)), 0.4, Color::srgb(0.4, 0.8, 1.0));
         xray.line(coords::pos(eye_position(me, mv)), coords::pos(feet), Color::srgba(0.4, 0.8, 1.0, 0.4));
     }
-    // Dark Vision: revealed players through walls.
+    // Dark Vision: the revealed pawns' capsules.
     for id in &view.dark_vision_reveals {
         if let Some(o) = view.others.iter().find(|o| o.id == *id) {
             capsule_lines(&mut xray, o, mv, Color::srgb(1.0, 0.85, 0.3));
         }
-    }
-
-    if !toggles.collision {
-        return;
     }
     capsule_lines(&mut gizmos, me, mv, Color::srgb(0.2, 1.0, 0.2));
     // Sword sweep ray during the hit window.
