@@ -120,16 +120,24 @@ impl Session {
         let a = self.spawn_any("InterpActor", loc, rot, None)?;
         let comp = self.r.place(&mut self.c, a, "StaticMeshComponent")?;
         let comp = Self::addr_of(&self.r.read_place(&mut self.c, &comp)?).context("no StaticMeshComponent")?;
-        self.r.call(&mut self.c, comp, "SetStaticMesh", &json!({"NewMesh": hex(mesh)}))?;
+        // PhysX: the body is made when the component (re)attaches with BlockRigidBody, so set it
+        // (and the channels ragdolls and props collide with) before the mesh attaches.
+        let _ = self.r.call(&mut self.c, comp, "SetBlockRigidBody", &json!([true]));
+        for (k, v) in [("RBChannel", json!("RBCC_Default")), ("RBCollideWithChannels", json!({"Default": true, "Pawn": true, "DeadPawn": true, "GameplayPhysics": true, "EffectPhysics": true, "FracturedMeshPart": true, "SeveredLimbs": true}))] {
+            if let Ok(pl) = self.r.place(&mut self.c, comp, k) {
+                let _ = self.r.write_place(&mut self.c, &pl, &v);
+            }
+        }
+        // The PhysX body is built once, when the mesh attaches, from the transform at that
+        // moment (a later scale does not rebuild it): place, rotate and scale the empty actor
+        // first, then set the mesh.
         self.r.call(&mut self.c, a, "SetDrawScale3D", &json!([[scale.x, scale.y, scale.z]]))?;
         // Spawn may have nudged the actor out of geometry: put it exactly.
         self.r.call(&mut self.c, a, "SetLocation", &json!([[loc.x, loc.y, loc.z]]))?;
         self.r.call(&mut self.c, a, "SetRotation", &json!([[units(rot[0]), units(rot[1]), units(rot[2])]]))?;
         self.r.call(&mut self.c, a, "SetCollision", &json!([true, true]))?;
         self.r.call(&mut self.c, a, "SetCollisionType", &json!(["COLLIDE_BlockAll"]))?;
-        // Ragdolls and physics objects (PhysX) collide with it too.
-        let _ = self.r.call(&mut self.c, comp, "SetBlockRigidBody", &json!([true]));
-        let _ = self.r.call(&mut self.c, a, "ReattachComponent", &json!([hex(comp)]));
+        self.r.call(&mut self.c, comp, "SetStaticMesh", &json!({"NewMesh": hex(mesh)}))?;
         Ok(a)
     }
 
@@ -228,6 +236,49 @@ impl Session {
                 Err(e) => errors.push(format!("actor {}: {e:#}", a.from)),
             }
         }
+        // Lights: movable point / spot light actors with the layout's colour (linear, written
+        // as the sRGB bytes UE3's FColor holds), brightness, radius, falloff and shadows.
+        // `from` lights are the host level's own (Boyle's moon): kept as they are.
+        let mut lights = 0;
+        for lt in &l.lights {
+            if lt.from.is_some() {
+                continue;
+            }
+            let at = Vec3::new(lt.at.0, lt.at.1, lt.at.2) + offset;
+            let r = (|| -> Result<()> {
+                let (class, rot) = match lt.kind {
+                    dishonored_ir::layout::LightType::Point => ("PointLightMovable", [0.0; 3]),
+                    dishonored_ir::layout::LightType::Spot => {
+                        let d = Vec3::new(lt.direction.0, lt.direction.1, lt.direction.2).normalize_or_zero();
+                        ("SpotLightMovable", [d.z.asin().to_degrees(), d.y.atan2(d.x).to_degrees(), 0.0])
+                    }
+                    dishonored_ir::layout::LightType::Directional => anyhow::bail!("directional layout lights are not built"),
+                };
+                let a = self.spawn_any(class, at, rot, None)?;
+                let lc = self.r.place(&mut self.c, a, "LightComponent")?;
+                let lc = Self::addr_of(&self.r.read_place(&mut self.c, &lc)?).context("no LightComponent")?;
+                let srgb = |v: f32| (v.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0).round() as u8;
+                let mut set = |k: &str, v: Value| -> Result<()> {
+                    let pl = self.r.place(&mut self.c, lc, k)?;
+                    self.r.write_place(&mut self.c, &pl, &v)
+                };
+                set("Brightness", json!(lt.brightness))?;
+                set("LightColor", json!({"R": srgb(lt.color.0), "G": srgb(lt.color.1), "B": srgb(lt.color.2), "A": 255}))?;
+                set("Radius", json!(lt.radius))?;
+                set("FalloffExponent", json!(lt.falloff_exponent))?;
+                set("CastShadows", json!(lt.shadows))?;
+                if let Some((inner, outer)) = lt.cone {
+                    let _ = set("InnerConeAngle", json!(inner));
+                    let _ = set("OuterConeAngle", json!(outer));
+                }
+                self.r.call(&mut self.c, a, "ReattachComponent", &json!([hex(lc)]))?;
+                Ok(())
+            })();
+            match r {
+                Ok(()) => lights += 1,
+                Err(e) => errors.push(format!("light at {:?}: {e:#}", lt.at)),
+            }
+        }
         let mut used = Vec::new();
         let mut volumes = Vec::new();
         for w in &l.water {
@@ -252,8 +303,8 @@ impl Session {
             }
         }
         Ok(json!({
-            "layout": l.name, "offset": [offset.x, offset.y, offset.z], "boxes": boxes, "meshes": meshes, "actors": actors, "volumes": volumes,
-            "not_built": ["lights", "labels", "nav"], "errors": errors, "seconds": t0.elapsed().as_secs_f64(),
+            "layout": l.name, "offset": [offset.x, offset.y, offset.z], "boxes": boxes, "meshes": meshes, "lights": lights, "actors": actors, "volumes": volumes,
+            "not_built": ["labels", "nav"], "errors": errors, "seconds": t0.elapsed().as_secs_f64(),
         }))
     }
 }

@@ -151,7 +151,7 @@ session dump class=DisDoor filter=m_MatchingKeys limit=40
 # (adjust the placement with the door's collision centre from the dump above)
 # (placement from the door's collision centre (-3207.7, 2784.8, 322.7), the panel thin along X: 100 uu on -X, facing +X)
 session place location=-3307.7,2784.8,300 yaw=0 pitch=-8 snap=true
-session step n=0
+session step n=20
 session read object=DisDoor_21 path=m_DoorState
 session key key=F event=tap ticks=3
 session step n=90
@@ -159,6 +159,7 @@ session read object=DisDoor_21 path=m_DoorState
 # Locked key door DisDoor_2 at (-2023, 2315, 453) without the key: Use must not open it (state stays 0)
 # (collision centre (-2022.2, 2240, 573), thin along X: 100 uu on -X, facing +X)
 session place location=-2122.2,2240,560 yaw=0 pitch=-8 snap=true
+session step n=20
 session key key=F event=tap ticks=3
 session step n=90
 session read object=DisDoor_2 path=m_DoorState

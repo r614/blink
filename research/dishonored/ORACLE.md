@@ -615,9 +615,41 @@ usables, pickups and the chain copied with `Spawn(ActorTemplate = the placed ori
 chain from Boyle's basement is replaced by the exterior's `DisClimbable_3`); the pool and the
 pain floor reuse a host `DishonoredWaterVolume` / `PhysicsVolume` moved and scaled. The trace's
 positions are converted back (`pawn.*`, `camera.*`, `npc.*` minus the offset). Engine checks hit
-the cubes exactly (line hits 1 uu above a top face, pawn boxes at top + 72 + 1). Not built: the
-lights (the stealth lane's light levels differ), labels and the nav grid; PhysX bodies
-(ragdolls, physics props) fall through the cubes (U-806). Measured on the original Playground:
+the cubes exactly (line hits 1 uu above a top face, pawn boxes at top + 72 + 1). PhysX: the
+cube's body is built once, when its mesh attaches, from the transform at that moment, so the
+actor is placed, rotated and scaled first and the mesh set last (with `BlockRigidBody` and the
+`Default` channel): ragdolls now rest on the cubes (the `combat/pistol_hit` dummy lands at z
+97-101 instead of falling to -7300). Lights: every point / spot light of the layout is a
+`PointLightMovable` / `SpotLightMovable` with its colour (linear -> sRGB bytes), brightness,
+radius, falloff and shadow flag (34 on the Playground); `from` lights are the host's own. Not
+built: labels and the nav grid; no lightmass (dynamic lights only, as the port's layout).
+
+The player's light value (`DishonoredVisibilityComponent.m_fCurrentLightValue` +0x68,
+normalized +0x6C) is only re-evaluated when the stance changes into sneak: a stationary or
+walking measurement keeps the previous value (the 0.588 read everywhere until this was found).
+Measured on the original Playground, sneaking (C tapped at each point, 40 ticks), x/y in layout
+coordinates:
+
+| point | light | normalized |
+|---|---|---|
+| (-5200, 6000) | 0.1838 | 0.0000 |
+| (-4500, 6450) | 0.3029 | 0.3429 |
+| (-3500, 6450) | 0.5382 | 1.0000 |
+| (-2500, 6450) | 0.3820 | 0.6068 |
+| (-1500, 6450) | 0.5382 | 1.0000 |
+| (-500, 6600) | 0.2980 | 0.3265 |
+| (500, 6600) | 0.1838 | 0.0000 |
+| (1500, 7100) | 0.1838 | 0.0000 |
+| (3000, 7100) | 0.1838 | 0.0000 |
+| (4500, 7100) | 0.1838 | 0.0000 |
+| (1500, 7850) | 0.1838 | 0.0000 |
+| (-1300, 7850) | 0.1838 | 0.0000 |
+| (-3500, 4000) | 0.3225 | 0.4082 |
+| (0, -5500) | 0.3919 | 0.6397 |
+| (-4600, -3900) | 0.4106 | 0.7021 |
+
+The dark east half and the alcoves read the floor value 0.1838 (no light reaches them); the lit
+west half peaks 0.5382 under the lamps at x -3500 / -1500. Measured on the original Playground:
 `movement/step_50` climbed (z 91.2 -> 141.2), `step_56` not, the 45 degree slope walked at
 400 uu/s to its 400 top, the 55 degree slope not.
 
@@ -698,6 +730,16 @@ Boyle runway, posted on the audio system's pooled positional components.
   `effects/blink_lens_timeline.json` (0x0b36c71ce1512549: `UniformPixelVector_1.x` rises to 0.091
   while aiming and settles at 0.07; during the travel x and y peak at (1.47, 1.88) / (0.61,
   2.43), then decay to 0 over about 1 s).
+### Kismet activation records
+
+`Kismet` records (and `session run` with `"kismet": true`) add `KismetOp` events from two native
+entry hooks: `Activate` from `USequence::QueueSequenceOp` (slot 101, 0x006E5050) whenever an op
+is queued with an input impulse (detail `class=.. input=<indices> top=<bPushTop>`; latent ops
+re-queued for their next update, with no impulse, are skipped), and `ActivateEvent` from
+`USequenceEvent::ActivateEvent` (slot 102, 0x006F5DD0; detail originator, instigator, output
+indices given or all). Deactivations come from the existing `Kismet` ProcessEvent records
+(`Deactivated` on script-visible ops). 300 ticks after a Boyle Ext reload: 52 activations, 10
+event activations.
 ### Usage for fuzzing agents
 
 Start (or reuse) the session with `probe_launch session start --map <M>` (a running session is
