@@ -85,12 +85,26 @@ pistol kill of the same target = 200.
   violent sounds or Blink.
 - Civilians (original AI points; social spots for groups) flee from violent sounds and
   witnessed murders. They recover after 8 s, so panic stays local.
+- Only players assassinate. Back and drop assassinations are player item contexts
+  (`DisItemContext_Assassinate` < `_Finisher` < `_MeleeAttackPlayer`, `DisItemContext_DropAssassinate`);
+  NPC swings are their own `DisItemContext_NPCAttack*` moves and only deal damage. Their swings and
+  shots still hit whoever is in the way, allies included (no relationship filter in the melee trace
+  0x00C102C0 or the hit handling 0x00C131C0; U-660).
+- A guard's grudge is held against a pawn, not a player: when a player respawns (a new pawn under
+  the same id) the crowd forgets its individual hostility and attention toward that id
+  (`Crowd::forget`). Before, guards who had once seen a player attack killed every later respawn.
+- The kill feed names NPCs as the original does: the pawn tweak's interactable `m_Name`
+  (`Twk_Pawn_Boyle_Party.int`: party guests "Party Guest", guards "Watch Officer"; looks resolved
+  from a tweak carry it in `Look::tweak`, net protocol 8).
 - Gameplay sound events (`SimEvent::Sound` with category and radius) are the only hearing
   input. Raw audio is never used.
 
 ## Spawn rules
 
-Spawn candidates are the map's PlayerStarts plus original AI points, scored against:
+Spawn candidates are the map's PlayerStarts plus original AI points that stand on the original navmesh in
+the largest group a pawn can walk between (as the free-for-all spawns: Boyle Ext's canal drop-off,
+roof patio and river grate starts are left out; a player spawned on the river grate island could
+never reach anyone), scored against:
 - distance from other humans (penalty under 1200 uu)
 - being in their view (heavy penalty)
 - nearby civilians (bonus)

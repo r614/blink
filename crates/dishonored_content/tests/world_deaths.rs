@@ -86,3 +86,48 @@ fn ffa_spawns_are_the_estate_starts() {
     xy.sort();
     assert_eq!(xy, vec![(-2663, -1879), (1355, 1445)]);
 }
+
+/// AI pawns go by their original NPC names (the pawn tweak's localized interactable `m_Name`),
+/// never by id: the built-in party guests and guards, and a tweak-resolved look.
+#[test]
+fn npc_names_come_from_the_pawn_tweaks() {
+    if dishonored_assets::Content::locate().is_err() {
+        return;
+    }
+    use dishonored_sim::state::PawnKind;
+    assert_eq!(dishonored_content::pawn_name(PawnKind::Civilian, 0, &[]).as_deref(), Some("Party Guest"));
+    assert_eq!(dishonored_content::pawn_name(PawnKind::Guard, 1, &[]).as_deref(), Some("Watch Officer"));
+    assert_eq!(dishonored_content::pawn_name(PawnKind::Civilian, 3, &[]).as_deref(), Some("Party Guest"));
+    let looks = vec![
+        dishonored_multiplayer::Look { tweak: "Twk_Pawn_Boyle_Party.Twk_Pawn_LordBrisby".into(), ..Default::default() },
+        dishonored_multiplayer::Look { tweak: "Twk_Pawn_Boyle_Party.Twk_Pawn_Boyle_Aristocrat1".into(), ..Default::default() },
+    ];
+    let base = dishonored_multiplayer::mission::APPEARANCE_BASE;
+    assert_eq!(dishonored_content::pawn_name(PawnKind::Civilian, base, &looks).as_deref(), Some("Lord Brisby"));
+    // A tweak without a name of its own falls back to its role's party tweak.
+    assert_eq!(dishonored_content::pawn_name(PawnKind::Civilian, base + 1, &looks).as_deref(), Some("Party Guest"));
+}
+
+/// Contracts spawns: like free-for-all, never on the scripted canal drop-off or the navmesh
+/// islands (roof patio, river grate), where a player can never reach anyone; every spawn is
+/// walkable to the estate starts.
+#[test]
+fn contracts_spawns_stay_in_the_walkable_estate() {
+    if dishonored_assets::Content::locate().is_err() {
+        return;
+    }
+    use dishonored_multiplayer::contracts::ContractsRules;
+    use dishonored_multiplayer::game::{CrowdSource, GameSetup, crowd_center, default_crowd};
+    let mc = load_match(DEFAULT_MAP).unwrap();
+    let pts: Vec<(Vec3, f32)> = mc.spawns.iter().map(|s| (s.position, s.yaw)).collect();
+    let rules = ContractsRules { warmup_time: 0.0, crowd: Some(default_crowd(crowd_center(&pts))), ..Default::default() };
+    let src = CrowdSource { points: &mc.ai_points, guard_spawns: &mc.guard_spawns, flee_points: &mc.flee_points, routes: &mc.routes, ai: Some((&mc.ai_level, &mc.spawners)) };
+    let mut g = GameSetup::contracts(rules, pts, Some(src), &mc.collision).build(&mc.sim);
+    let nav = mc.collision.nav().unwrap();
+    let garden = dishonored_content::ffa_spawns(&mc)[0].position;
+    for id in 1..=8 {
+        g.add_player(id, &format!("p{id}"), 0, &mc.collision, &mc.sim);
+        let p = g.world().player(id).unwrap().position;
+        assert!(nav.find_path(p, garden, &Default::default()).is_some(), "player {id} spawned at {p:?}, cut off from the estate");
+    }
+}

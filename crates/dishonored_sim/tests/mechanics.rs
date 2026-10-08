@@ -437,6 +437,20 @@ fn back_assassination_kills() {
 }
 
 #[test]
+fn npcs_never_assassinate() {
+    // The same back position, but the attacker is a guard: assassination is a player item
+    // context, so its swing is an ordinary attack (damage on hit, no instant kill).
+    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.), (2, Vec3::new(110., 0., STAND_Z + 1.), 0.)]);
+    r.state.player_mut(1).unwrap().kind = dishonored_sim::state::PawnKind::Guard;
+    r.settle();
+    r.step(&[(1, input(0., 0, buttons::PRIMARY)), (2, input(0., 0, 0))]);
+    r.steps(40, &[(1, input(0., 0, 0)), (2, input(0., 0, 0))]);
+    assert!(!r.events.iter().any(|e| matches!(e, SimEvent::Death { cause: DamageCause::Assassination | DamageCause::DropAssassination, .. })));
+    assert!(r.p(2).alive);
+    assert!(r.p(2).vitals.health < 70.0, "the swing still lands: {}", r.p(2).vitals.health);
+}
+
+#[test]
 fn pistol_damage_close_and_far() {
     let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.), (2, Vec3::new(300., 0., STAND_Z + 1.), 180.), (3, Vec3::new(0., 2000., STAND_Z + 1.), 0.)]);
     r.settle();

@@ -112,8 +112,12 @@ impl Session {
     }
 }
 
-fn describe(e: &SimEvent, names: &MatchView) -> Option<String> {
-    let name = |id: PlayerId| names.scores.iter().find(|s| s.id == id).map(|s| s.name.clone()).unwrap_or(format!("#{id}"));
+/// A kill-feed line. Players go by their scoreboard name, AI pawns by the original NPC name of
+/// their pawn tweak ([`dishonored_content::pawn_name`]).
+fn describe(e: &SimEvent, names: &MatchView, pawns: &[PlayerState]) -> Option<String> {
+    let name = |id: PlayerId| {
+        names.scores.iter().find(|s| s.id == id).map(|s| s.name.clone()).or_else(|| pawns.iter().find(|p| p.id == id).and_then(|p| dishonored_content::pawn_name(p.kind, p.archetype, &names.appearances))).unwrap_or(format!("#{id}"))
+    };
     match e {
         SimEvent::Death { victim, killer: Some(k), cause } if k != victim => Some(format!("{} killed {} ({cause:?})", name(*k), name(*victim))),
         SimEvent::Death { victim, cause, .. } => Some(format!("{} died ({cause:?})", name(*victim))),
@@ -156,7 +160,7 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
             view.audio_events.extend(out.events.iter().copied());
             view.anim_events.extend(out.events.iter().copied());
             for e in &out.events {
-                if let Some(s) = describe(e, game.view()) {
+                if let Some(s) = describe(e, game.view(), &game.world().players) {
                     view.feed.push(s);
                 }
             }
@@ -204,7 +208,7 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
                 if !crate::audio::predicted_locally(&e, me) {
                     view.audio_events.push(e);
                 }
-                if let Some(s) = describe(&e, &client.matchv) {
+                if let Some(s) = describe(&e, &client.matchv, &client.predicted.players) {
                     view.feed.push(s);
                 }
             }

@@ -88,6 +88,10 @@ pub struct Look {
     /// Hats and masks rolled for the pawn (`m_RandomAccessoryInfo`): (static mesh, socket).
     #[serde(default)]
     pub accessories: Vec<((String, String), String)>,
+    /// The pawn tweak the look comes from (`Package.Object`): clients show its interactable
+    /// subobject's localized `m_Name` as the pawn's name (kill feed).
+    #[serde(default)]
+    pub tweak: String,
 }
 
 /// Presentation stance of every AI pawn, from its brain state (animation only: locomotion
