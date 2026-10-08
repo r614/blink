@@ -283,6 +283,59 @@ in `lightmap_ext.wgsl`) and the base pass ambient (`decals::BASE_PASS_AMBIENT`:
 takes the component's distance field. Before, Bevy's environment specular (bright at the ground's
 grazing angles) and the placeholder ambient made the puddles pale patches, and then, without the
 lightmap, nearly black ones over every path.
+
+## Water (river_main_PMAT; `water.rs`, `ark_water.wgsl`)
+
+The Boyle river (`boyle_ext_MS.boyle_ext_water`, `StaticMeshCollectionActor_29[72]`) uses
+`boyle_ext_MS.Water_boyle_ext_INST03`. Its mirrored copy below the surface (`[73]`, the river seen
+from under water) uses `Water_boyle_ext_under_01_INST`. Both have the base material
+`Materials_ref.water_materials.river_main_PMAT`, which is translucent and has distortion.
+
+Matching the static switches (`mic_static`) to the shader maps (`shader_maps`):
+- **INST03:** map 0x62e048d. Switches: Di_Enable_Distorsion, D_Enable_Opacity_over_Depth,
+  D_Enable_Diffuse_on_top, C_Enable_Realtime_Reflection, D_Enable_Diffuse_Distorsion,
+  F_Enable_Fake_Fog. Masks: W_Distorsion_Mask_Chanel G, D_Diffuse_Mask_Chanel R. Base pass 11099
+  (`FNoLightMapPolicy`) and 11093 (`FDirectionalLightMapTexturePolicy`); light passes for
+  directional, point and spot lights; distortion 10892.
+- **under_01:** map 0x62c9ea5 (no realtime reflection, no diffuse on top): base pass 10608.
+
+Textures:
+- Texture2D_0 `W_Waves_normalmap`.
+- Texture2D_1 `C_Realtime_reflection_Texture`: `boyle_ext_MS.RealTime_refl`, a
+  `TextureRenderTarget2D` drawn by `SceneCaptureReflectActor_0` of L_Boyle_Ext_Env.
+- Texture2D_2 `D_diffuse_mask` (`Boyle_Water_m`).
+- Texture2D_3 `D_diffuse_texture` (`moss_01.moss_02_d`).
+- TextureCube_0 `C_Cubemap_texture`, only in the permutations without realtime reflection.
+- `SceneColorTexture`: its alpha is the scene depth / 256.
+
+Decoded from those shaders (formulas at the top of `ark_water.wgsl`):
+- **Waves:** the sum of two panning, rotated samples of the waves normal map.
+- **Reflection R:**
+  - realtime: the planar reflection at the screen position plus intensity × n.xy;
+  - otherwise: the cubemap at the reflected camera vector plus intensity × n, in tangent space.
+  - Either way, times `C_Cubemap_color.rgb × a`.
+- **Diffuse:** the moss through its mask channel, both offset by the waves.
+- **Lit diffuse:** D = lerp(R, moss, mask) + `W_Water_Color`. It takes the lightmap (flat normal),
+  the ambient and the light passes.
+- **Unlit term:** E = lerp(R (1 - mask), `F_Fog_color`, fake fog of the scene depth).
+- **Opacity:** a function of the water's thickness, from the scene depth.
+
+Before, the port drew the material as a lit StandardMaterial with the moss as its colour: green
+everywhere. On Boyle the night lightmap hid it; under the Playground's work lights it was bright
+green.
+
+Missing inputs (U-764):
+- The port has no planar reflection capture, so the realtime-reflection instances use the
+  cubemap term (the level's reflection cube, as the decals' scene reflection).
+- The camera has no depth prepass. Without one, the scene behind the water is taken as far
+  (alpha and fake fog at their deep / far values); with `DepthPrepass` on the camera the
+  shader reads the real depth.
+- The distortion pass (10892: scene refraction offset by
+  n × `Di_Distorsion_Strenght_in_Water`) is not wired into `distortion.rs`.
+- The sky-light term (`UpperSkyColor` / `LowerSkyColor`) is left out, as for the decals.
+- The lightmap's diffuse weight is the flat-normal basis weight (1/3 per vector). The shader
+  reads `c26.w`, whose value is not measured.
+
 ## Diffuse colour (`map_render::diffuse_color_terms`)
 
 Every base material that exposes `D_Diffuse_color` multiplies its colour by its alpha in the

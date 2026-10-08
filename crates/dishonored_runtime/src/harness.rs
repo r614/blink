@@ -257,6 +257,11 @@ pub fn script_fixed(mut runner: ResMut<ScriptRunner>, mut local: ResMut<LocalInp
                 vreq.pending = Some(view);
             }
             Step::Teleport { teleport } => {
+                // The view comes from the local input (camera, and every later tick's input),
+                // so the step turns it too; setting only the pawn's yaw / pitch was undone on the
+                // next tick and the camera kept looking where it was.
+                local.yaw = teleport.yaw;
+                local.pitch = teleport.pitch;
                 if let crate::session::SessionKind::Offline { game, .. } = &mut session.kind {
                     if let Some(p) = game.world_mut().player_mut(crate::session::LOCAL_ID) {
                         p.position = glam::Vec3::from(teleport.pos);
@@ -406,7 +411,14 @@ pub fn harness_frame(
                 "effects" => {
                     // Gameplay effects asked for lately (path, spawned) and the live particle count.
                     let recent: Vec<serde_json::Value> = fx.as_ref().map(|f| f.recent.iter().map(|(p, ok)| serde_json::json!({"path": p, "spawned": ok})).collect()).unwrap_or_default();
-                    serde_json::json!({"recent": recent, "spawned_oneshots": fx.as_ref().map(|f| f.spawned_oneshots), "live_particles": fx.as_ref().map(|f| f.live_particles)}).to_string()
+                    serde_json::json!({
+                        "recent": recent,
+                        "spawned_oneshots": fx.as_ref().map(|f| f.spawned_oneshots),
+                        "live_oneshots": fx.as_ref().map(|f| f.live_oneshots),
+                        "live_particles": fx.as_ref().map(|f| f.live_particles),
+                        "blink_indicator": fx.as_ref().and_then(|f| crate::effects::blink_indicator_live(f)),
+                    })
+                    .to_string()
                 }
                 "pause" => {
                     if let Some(p) = pause.as_mut() {

@@ -84,6 +84,10 @@ pub struct ArkPostSource {
     pub fog_on: bool,
     pub post_on: bool,
     pub display_gamma: f32,
+    /// A power's grade (Dark Vision's `m_StaticUberAdjustement`, `dark_vision.rs`): ArkPp fields
+    /// overriding the level's, blended in by `power_weight` (0..1).
+    pub power_post: Option<PostSettings>,
+    pub power_weight: f32,
 }
 
 fn post_value(p: Option<&PostSettings>, key: &str) -> Option<f32> {
@@ -99,6 +103,31 @@ impl ArkPostSource {
     /// colour balance 0, opacity 1, desaturation 0, grain / brightness / contrast 0.
     /// `cam_z` is the camera's world Z in uu (custom transitions depend on it).
     pub fn uniform(&self, cam_z: f32) -> ArkPost {
+        let mut u = self.level_uniform(cam_z);
+        // A power's grade: the LUT terms of the overridden settings, blended by its weight
+        // (the colour pipeline is on while it shows).
+        if let (Some(over), true) = (&self.power_post, self.power_weight > 0.0) {
+            let src = ArkPostSource { post: Some(crate::dark_vision::merged(self.post.as_ref(), over)), post_on: true, power_post: None, power_weight: 0.0, ..self.clone() };
+            let g = src.level_uniform(cam_z);
+            let w = self.power_weight.clamp(0.0, 1.0);
+            let lerp = |a: Vec4, b: Vec4| if self.post_on { a.lerp(b, w) } else { b };
+            u.cb_shadows_opacity = lerp(u.cb_shadows_opacity, g.cb_shadows_opacity);
+            u.cb_midtones = lerp(u.cb_midtones, g.cb_midtones);
+            u.cb_highlights = lerp(u.cb_highlights, g.cb_highlights);
+            u.exposure_gamma_desat = lerp(u.exposure_gamma_desat, g.exposure_gamma_desat);
+            u.brightness_contrast = lerp(u.brightness_contrast, g.brightness_contrast);
+            u.grain = lerp(u.grain, g.grain);
+            if !self.post_on {
+                // Level post off (`--no-post`): only the power's grade runs, faded by its weight
+                // through the LUT opacity.
+                u.misc.z = 1.0;
+                u.cb_shadows_opacity.w *= w;
+            }
+        }
+        u
+    }
+
+    fn level_uniform(&self, cam_z: f32) -> ArkPost {
         let p = self.post.as_ref();
         let v = |k: &str, d: f32| post_value(p, k).unwrap_or(d);
         let vec3 = |k: &str| post_vector(p, k).map(|c| Vec4::new(c[0], c[1], c[2], 0.0)).unwrap_or(Vec4::ZERO);

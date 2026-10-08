@@ -1,0 +1,19 @@
+// The dark east half of the stealth lane, same geometry as `stealth/light_vs_dark`.
+(
+    name: "stealth/light_vs_dark_dark",
+    system: Stealth,
+    map: "Playground",
+    description: "Dark lane: a guard 900 uu away facing the player; time to notice.",
+    setup: (
+        player: Some((position: (2400, 7000, 92), yaw: 180)),
+        npcs: [(id: Some("guard"), position: Some((1500, 7000, 92)), yaw: 0, state: Some("Idle"))],
+        settle: 1,
+    ),
+    ticks: 1200,
+    input: [],
+    checkpoints: [
+        (name: "notices", expect: [(metric: TimeToReach("npc.guard.attn_level", 1), value: 0, tol: 0, source: "time to notice in the dark lane (later than lit)", status: Unmeasured)]),
+    ],
+    record: [Pawn, Npc("guard"), SimEvents],
+    capture: Some("not an original map: use stealth/detect_* on Boyle"),
+)

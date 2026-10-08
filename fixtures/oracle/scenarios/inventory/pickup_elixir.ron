@@ -1,0 +1,15 @@
+// Use on the Playground's health elixir pickup (copied from L_Boyle_Ext_Script:DisElixirHealth_1).
+(
+    name: "inventory/pickup_elixir",
+    system: Inventory,
+    map: "Playground",
+    description: "Stand at the health elixir, look at it, press Use: picked up, one elixir held.",
+    setup: (player: Some((position: (-600, -4890, 92), yaw: 90, pitch: -57)), settle: 20),
+    ticks: 30,
+    input: [(tick: 2, action: Press(Use))],
+    checkpoints: [
+        (name: "picked up", expect: [(metric: Count("Sim:PickedUp@player"), value: 1, tol: 0, source: "Use on a pickup in reach takes it", status: Static)]),
+        (name: "elixir held", expect: [(metric: Delta("inv.elixir_health", 0, 29), value: 1, tol: 0, source: "a health elixir pickup gives one", status: Static)]),
+    ],
+    record: [Pawn, Powers, SimEvents],
+)

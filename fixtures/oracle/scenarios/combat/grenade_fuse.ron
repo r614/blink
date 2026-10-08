@@ -1,0 +1,30 @@
+// A grenade thrown at a passive guard 400 uu ahead (U-102, HOOK_TRIAGE.md 2026-10-06: armed at
+// the throw, 3.0 s to the explosion whatever it hits). Presentation (tweaks): the projectile's
+// `m_pTrailEffect` `Ps_Grenade_Trail`, the explosion's `m_pExplosionEffect` `ps_grenade`.
+(
+    name: "combat/grenade_fuse",
+    system: Combat,
+    map: "Playground",
+    description: "Throw a grenade toward a passive guard: fuse, damage, the trail and explosion effects.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0, pitch: -20)),
+        items: ["Grenade:3"],
+        left_hand: Some("Grenade"),
+        npcs: [(id: Some("dummy"), position: Some((-5200, 0, 92)), yaw: 180, state: Some("Passive"))],
+        settle: 30,
+    ),
+    ticks: 600,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "fuse", expect: [(metric: Between("Projectile:Grenade", "Sim:Explosion"), value: 3.0, tol: 0.017, source: "HOOK_TRIAGE.md 2026-10-06 (U-102): armed at the throw, 3.0 s")]),
+        (name: "ammo", expect: [(metric: Final("inv.grenades"), value: 2, tol: 0, source: "one grenade used", status: Static)]),
+        (name: "damage", expect: [(metric: EventSum("Sim:Damage@dummy[cause=Grenade]", "amount"), value: 0, tol: 0, source: "grenade damage at the guard (Twk_Proj_Grenade explosion)", status: Unmeasured)]),
+        (name: "effects", expect: [
+            (metric: Count("Effect:Vfx_Weapon.Effects.Grenade.ps_grenade"), value: 1, tol: 0, source: "tweaks: Twk_Proj_Grenade DisTweaks_Explosion_0.m_pExplosionEffect", status: Static),
+            (metric: Count("Effect:Vfx_Weapon.Effects.Grenade.Ps_Grenade_Trail"), value: 1, tol: 0, source: "tweaks: Twk_Proj_Grenade.m_pTrailEffect", status: Static),
+            (metric: Unended("*"), value: 0, tol: 0, source: "UE3 one-shot gameplay ParticleSystemComponent: destroyed when its emitters finish", status: Static),
+        ]),
+    ],
+    record: [Pawn, Powers, Projectiles, Npc("dummy"), SimEvents, Effects, Sounds],
+    capture: Some("lab give grenade; measure grenade --pitch 10; event trace of ParticleSystemComponent activations"),
+)

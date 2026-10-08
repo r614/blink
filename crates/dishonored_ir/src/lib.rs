@@ -100,6 +100,32 @@ pub struct MaterialParams {
     /// (`C_Cubemap_Mask_Channel` = B -> 2), U-027.
     #[serde(default)]
     pub mask_channels: Vec<(String, u8)>,
+    /// Particle sprite shading decoded from the base material's compiled shaders
+    /// (`dishonored_assets::particle_material`, EFFECTS.md "Particle materials"); the
+    /// material's diffuse slot then holds the colour source with the opacity source in alpha.
+    #[serde(default)]
+    pub particle: Option<ParticleShading>,
+}
+
+/// How a particle material's shader combines the sprite texture (colour x opacity, baked into
+/// the diffuse slot by the importer) with constants and the particle's vertex colour.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ParticleShading {
+    /// Constant colour factor (`D_DiffuseColorTweak.rgb`, `D_Diffuse_Brightness`, `Color`...).
+    pub tint: [f32; 3],
+    /// Constant opacity factor (`D_DiffuseColorTweak.a`, `Opacity`...).
+    pub opacity: f32,
+    /// The particle's alpha erodes the opacity map instead of scaling it
+    /// (`saturate((H - vertex alpha) x Mask_Multiply)`, the height-map blood materials).
+    pub erode: bool,
+    /// The shader ignores the texture's opacity: only the vertex alpha (and `opacity`) count
+    /// (`Default_Simple_Translucent_PMAT` without `MA_Use_Masked_Alpha`).
+    pub vertex_alpha_only: bool,
+    /// The recipe's opacity texture did not resolve (regression checks list these).
+    #[serde(default)]
+    pub opacity_missing: bool,
+    /// Procedural radial glow (`Glow_PMAT`): no texture, `(1 - 2r)^power`.
+    pub radial_power: Option<f32>,
 }
 
 impl MaterialParams {

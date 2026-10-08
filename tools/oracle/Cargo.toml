@@ -7,14 +7,14 @@ description = "Differential oracle CLI: coverage scan, cached original answers v
 
 [features]
 # `import` lets the tool build the port's derived data itself (map import through
-# dishonored_content); `scenarios` links the simulation (dishonored_sim) for the scenario
-# runner. Without them the tool links only dishonored_world and reads the port snapshot, which
-# keeps the collision fix / re-check loop under ten seconds:
-#   cargo build -p oracle --no-default-features
-#   cargo build -p oracle --no-default-features --features scenarios
+# dishonored_content); `scenarios` links the game's match (dishonored_content's loader,
+# dishonored_multiplayer's mission match, dishonored_sim, dishonored_ai) and the presentation
+# shim for the scenario runner. Without them the tool links only dishonored_world and reads
+# the port snapshot, which keeps the collision fix / re-check loop under ten seconds:
+#   cargo build --release -p oracle --no-default-features
 default = ["import", "scenarios"]
-import = ["dep:dishonored_content", "scenarios"]
-scenarios = ["dep:dishonored_sim"]
+import = ["dep:dishonored_content"]
+scenarios = ["import", "dep:dishonored_sim", "dep:dishonored_multiplayer", "dep:dishonored_mission", "dep:dishonored_ai", "dep:dishonored_audio", "dep:dishonored_assets"]
 
 [dependencies]
 anyhow.workspace = true
@@ -28,3 +28,8 @@ dishonored_world.workspace = true
 dishonored_ir.workspace = true
 dishonored_sim = { workspace = true, optional = true }
 dishonored_content = { workspace = true, optional = true }
+dishonored_multiplayer = { workspace = true, optional = true }
+dishonored_mission = { workspace = true, optional = true }
+dishonored_ai = { workspace = true, optional = true }
+dishonored_audio = { path = "../../crates/dishonored_audio", optional = true }
+dishonored_assets = { workspace = true, optional = true }

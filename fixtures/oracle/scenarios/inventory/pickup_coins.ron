@@ -1,0 +1,16 @@
+// Use on the Playground's coin pickup (copied from L_Boyle_Ext_P:DisAbstractItemPickup_0).
+(
+    name: "inventory/pickup_coins",
+    system: Economy,
+    map: "Playground",
+    description: "Pick up the coins: the coin count rises by the pickup's quantity.",
+    setup: (player: Some((position: (600, -4890, 92), yaw: 90, pitch: -57)), settle: 20),
+    ticks: 30,
+    input: [(tick: 2, action: Press(Use))],
+    checkpoints: [
+        (name: "picked up", expect: [(metric: Count("Sim:PickedUp@player"), value: 1, tol: 0, source: "Use on a pickup in reach takes it", status: Static)]),
+        (name: "coins", expect: [(metric: Delta("inv.coins", 0, 29), value: 0, tol: 0, source: "coins of L_Boyle_Ext_P:DisAbstractItemPickup_0", status: Unmeasured)]),
+    ],
+    record: [Pawn, Powers, SimEvents],
+    capture: Some("pick up L_Boyle_Ext_P:DisAbstractItemPickup_0 and read the coin count"),
+)

@@ -96,6 +96,57 @@ pub fn import_layout_geometry(content: &Content, layout: &MapLayout) -> Result<D
     Ok(m)
 }
 
+/// Check the imported brushes of a layout against the layout: every colliding brush draws the
+/// same triangles it collides with; a brush without collision is a thin surface skin (water,
+/// a floor decal: at most 4 thick), never a wall; every triangle is wound as the cooked meshes
+/// are (UE3 clockwise front faces: (b - a) x (c - a) into the solid, the normal out of it), or it
+/// would be culled from outside and show the solid's inside. Returns the problems found.
+pub fn audit_brushes(layout: &MapLayout, map: &DishonoredMap) -> Vec<String> {
+    let mut errs = Vec::new();
+    let prefix = format!("{}:Brush_", layout.name);
+    let mut seen = vec![false; layout.brushes.len()];
+    for inst in &map.instances {
+        let Some(i) = inst.source.strip_prefix(&prefix).and_then(|s| s.parse::<usize>().ok()) else { continue };
+        let Some(b) = layout.brushes.get(i) else {
+            errs.push(format!("{}: no such brush", inst.source));
+            continue;
+        };
+        seen[i] = true;
+        let mesh = &map.meshes[inst.mesh];
+        let tris = mesh.indices.len() / 3;
+        if tris == 0 {
+            errs.push(format!("brush {i}: no visible faces"));
+        }
+        if b.collide {
+            if !inst.collides || mesh.collision_triangles.len() != tris {
+                errs.push(format!("brush {i}: draws {tris} triangles but collides with {} (instance collides {})", mesh.collision_triangles.len(), inst.collides));
+            }
+        } else {
+            let thick = (mesh.bounds_max - mesh.bounds_min).min_element();
+            if inst.collides || !mesh.collision_triangles.is_empty() {
+                errs.push(format!("brush {i}: marked collide: false but collides"));
+            }
+            if thick > 4.0 {
+                errs.push(format!("brush {i}: visible without collision and {thick:.0} thick (only thin skins may skip collision)"));
+            }
+        }
+        for t in mesh.indices.chunks_exact(3) {
+            let (a, bb, c) = (mesh.positions[t[0] as usize], mesh.positions[t[1] as usize], mesh.positions[t[2] as usize]);
+            let n = mesh.normals[t[0] as usize];
+            if (bb - a).cross(c - a).dot(n) >= 0.0 {
+                errs.push(format!("brush {i}: a triangle is wound against its normal (shows from inside)"));
+                break;
+            }
+        }
+    }
+    for (i, s) in seen.iter().enumerate() {
+        if !s {
+            errs.push(format!("brush {i}: not imported"));
+        }
+    }
+    errs
+}
+
 /// The match content of a layout map (cached under `DISHONORED_CACHE`, keyed by the layout).
 pub fn load_layout_match(content: &Content, sim: SimConfig, layout: &MapLayout) -> Result<MatchContent> {
     let key = layout_key(layout);

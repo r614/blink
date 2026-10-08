@@ -41,6 +41,8 @@ pub mod ragdoll;
 #[doc(hidden)]
 pub mod debug;
 #[doc(hidden)]
+pub mod dark_vision;
+#[doc(hidden)]
 pub mod effects;
 #[doc(hidden)]
 pub mod harness;
@@ -68,6 +70,8 @@ pub mod level;
 pub mod level_props;
 #[doc(hidden)]
 pub mod decals;
+#[doc(hidden)]
+pub mod water;
 #[doc(hidden)]
 pub mod prop_light;
 #[doc(hidden)]
@@ -302,6 +306,7 @@ pub fn main() {
     .add_plugins(sky::SkyPlugin)
     .add_plugins(lighting::Ue3FalloffPlugin)
     .add_plugins(decals::DecalPlugin)
+    .add_plugins(water::WaterPlugin)
     .add_plugins(prop_light::PropLightPlugin)
     .add_plugins(bloom::BloomPlugin)
     .add_plugins(env_map::EnvMapOncePlugin)
@@ -314,6 +319,7 @@ pub fn main() {
     .init_resource::<atmosphere::FogLayers>()
     .add_systems(Startup, setup_world)
     .add_plugins(effects::EffectsPlugin)
+    .add_plugins(dark_vision::DarkVisionPlugin)
     .add_systems(Update, atmosphere::update_fog)
     // Doors and usable objects (skeletal meshes), posed for their state.
     .init_resource::<level_props::LevelProps>()

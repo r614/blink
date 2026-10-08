@@ -39,6 +39,22 @@ debug = "line-tables-only"
 opt-level = 3
 debug = false
 
+# Release builds the workspace crates incrementally in many units (a change to the game crate
+# rebuilds in a fraction of the full time); dependencies keep the default release settings, so
+# their compiled artifacts stay cached. Distribution zips use `--profile dist` (full optimisation).
+[profile.release]
+incremental = true
+codegen-units = 256
+
+[profile.release.package."*"]
+incremental = false
+codegen-units = 16
+
+[profile.dist]
+inherits = "release"
+incremental = false
+codegen-units = 16
+
 # Optimised builds for the harness and local testing: release speed, built in more parallel
 # units and incrementally. `cargo build --profile fast-release` (output in target/fast-release).
 # Distribution zips still use the plain release profile.

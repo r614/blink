@@ -1,0 +1,17 @@
+// Standing jump on the Playground's flat start area: airtime 0.533 s back to the take-off
+// height (INSTRUMENTATION.md 2026-10-06: 2 x 800 / 3000 from the parabola fit over 4 jumps).
+(
+    name: "movement/jump_airtime",
+    system: Movement,
+    map: "Playground",
+    description: "One jump on flat floor: jump-to-landing time and apex.",
+    setup: (player: Some((position: (0, -5300, 92), yaw: 90)), settle: 30),
+    ticks: 90,
+    input: [(tick: 5, action: Press(Jump))],
+    checkpoints: [
+        (name: "airtime", expect: [(metric: Between("Sim:Jumped", "Sim:Landed"), value: 0.533, tol: 0.017, source: "INSTRUMENTATION.md 2026-10-06: airtime 0.533 s from the parabola fit (2 x 800 / 3000)")]),
+        (name: "apex", expect: [(metric: RiseFrom("pawn.z", 0), value: 106.67, tol: 1, source: "INSTRUMENTATION.md 2026-10-06 / HOOK_TRIAGE.md (60 Hz): apex 106.67 uu")]),
+    ],
+    record: [Pawn, SimEvents],
+    capture: Some("lab setup 60; measure jump 2 (per-tick Location.Z)"),
+)

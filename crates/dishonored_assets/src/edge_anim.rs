@@ -586,11 +586,22 @@ impl EdgeClip {
 impl BakedClip {
     /// Sample at `time` seconds (looping), blending neighbouring frames.
     pub fn sample(&self, time: f32, joint: usize) -> (Option<Quat>, Option<Vec3>) {
+        let len = (self.num_frames.max(1) - 1).max(1) as f32;
+        self.sample_frame((time * self.sample_rate).rem_euclid(len), joint)
+    }
+
+    /// Sample at `time` seconds without looping: past the end holds the last frame (a door's
+    /// open pose, a matinee's final pose). Looping sampling wrapped the clip's end back to its
+    /// first frame, so a door that finished opening snapped shut.
+    pub fn sample_held(&self, time: f32, joint: usize) -> (Option<Quat>, Option<Vec3>) {
+        let len = (self.num_frames.max(1) - 1) as f32;
+        self.sample_frame((time * self.sample_rate).clamp(0.0, len), joint)
+    }
+
+    fn sample_frame(&self, fpos: f32, joint: usize) -> (Option<Quat>, Option<Vec3>) {
         if self.num_frames == 0 || self.rotations.first().is_none_or(|r| joint >= r.len()) {
             return (None, None);
         }
-        let len = (self.num_frames - 1).max(1) as f32;
-        let fpos = (time * self.sample_rate).rem_euclid(len);
         let f0 = fpos.floor() as usize;
         let f1 = (f0 + 1).min(self.num_frames - 1);
         let t = fpos - f0 as f32;

@@ -1,0 +1,27 @@
+// Bend Time level 1 (U-109, HOOK_TRIAGE.md / LOG.md 2026-10-06, fixed 1/60 s): the caster runs at
+// 0.85, the world clock at 0.15 x real, linear ramps in 0.15 s and out 0.25 s, 12 s real.
+(
+    name: "powers/bend_time_l1",
+    system: Powers,
+    map: "Playground",
+    description: "Cast Bend Time level 1 and wait it out: world and caster dilation, duration, cost.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0)),
+        powers: [("BendTime", 1)],
+        left_hand: Some("BendTime"),
+        npcs: [(id: Some("guard"), position: Some((-4800, 0, 92)), yaw: 180, state: Some("Passive"))],
+        settle: 30,
+    ),
+    ticks: 900,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "world dilation", expect: [(metric: Min("power.world_dilation"), value: 0.15, tol: 0.001, source: "LOG.md 2026-10-06 (U-109): world clock 0.15 x real")]),
+        (name: "caster dilation", expect: [(metric: Min("power.time_scale"), value: 0.85, tol: 0.001, source: "LOG.md 2026-10-06 (U-109): absolute caster rate 0.85")]),
+        (name: "guard slowed", expect: [(metric: Min("npc.guard.time_scale"), value: 0.15, tol: 0.001, source: "LOG.md 2026-10-06 (U-109): the world (NPCs) at 0.15")]),
+        (name: "duration", expect: [(metric: Between("Sim:BendTimeStart", "Sim:BendTimeEnd"), value: 12.0, tol: 0.05, source: "HOOK_TRIAGE.md 2026-10-06: ends at 12.01 s real (ramp out from 11.76 s)")]),
+        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 0, tol: 0, source: "Bend Time level 1 mana cost on the original", status: Unmeasured)]),
+        (name: "effects", expect: [(metric: Count("EffectMissing:*"), value: 0, tol: 0, source: "every system the presentation asks for exists", status: Static)]),
+    ],
+    record: [Pawn, Vitals, Powers, Npc("guard"), SimEvents, Effects, Sounds],
+    capture: Some("lab power BendTime 1; measure bendtime"),
+)

@@ -150,3 +150,47 @@ fn boyle_ext_player_light_range() {
     let lvl = dishonored_assets::ai_level::extract_ai_level(&c, &pkgs, &[], &[]).unwrap();
     assert_eq!(lvl.player_light_range, Some([0.2, 0.5]));
 }
+
+/// Every gameplay particle system decodes, and no translucent / masked / additive sprite
+/// material falls back to an opaque diffuse alpha (the square blood and smoke of U-770): the
+/// decoded recipes resolve their opacity texture and the sprite texture's alpha is not opaque
+/// everywhere (EFFECTS.md "Particle materials").
+#[test]
+fn gameplay_particle_sprites_have_an_opacity() {
+    use dishonored_assets::particle_material::GAMEPLAY_PARTICLES;
+    use dishonored_assets::texture::decode_rgba8;
+    use dishonored_ir::MaterialBlend;
+    let Some(c) = content() else { return };
+    let pkgs = map_packages(&c, "L_Boyle_Ext_P");
+    let opts = ImportOptions { load_lightmaps: false, max_texture_size: 256, extra_particles: GAMEPLAY_PARTICLES.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+    let (map, _) = import_level(&c, "L_Boyle_Ext_P", &pkgs, &opts).unwrap();
+    let missing: Vec<&&str> = GAMEPLAY_PARTICLES.iter().filter(|p| !map.particle_systems.iter().any(|s| s.source.eq_ignore_ascii_case(p))).collect();
+    assert!(missing.is_empty(), "gameplay systems not decoded: {missing:?}");
+    let mut bad = Vec::new();
+    for s in &map.particle_systems {
+        for e in s.emitters.iter().filter(|e| e.mesh.is_none()) {
+            let Some(m) = e.material else { continue };
+            let p = &map.material_params[m];
+            if !matches!(p.blend, MaterialBlend::Translucent | MaterialBlend::Masked | MaterialBlend::Additive) {
+                continue;
+            }
+            let name = &map.materials[m].source;
+            if let Some(sh) = p.particle {
+                if sh.opacity_missing {
+                    bad.push(format!("{} / {name}: opacity texture unresolved ({:?})", s.source, p.base_material));
+                    continue;
+                }
+                if sh.vertex_alpha_only || sh.radial_power.is_some() {
+                    continue;
+                }
+            }
+            let Some(t) = map.materials[m].diffuse else { continue };
+            let tex = &map.textures[t];
+            let opaque = decode_rgba8(tex, 0).is_some_and(|(_, _, px)| px.iter().all(|p| p[3] >= 250));
+            if opaque {
+                bad.push(format!("{} / {name}: sprite alpha opaque ({}, base {:?})", s.source, tex.source, p.base_material));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "particle sprites without an opacity:\n{}", bad.join("\n"));
+}

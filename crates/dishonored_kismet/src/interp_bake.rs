@@ -236,7 +236,10 @@ fn pose(sets: &mut Sets, skel: &Skeleton, g: &Group, t: f32) -> Vec<dishonored_i
         tracks.sort_by_key(|n| skel.bones.iter().position(|b| b.name.eq_ignore_ascii_case(n)).unwrap_or(usize::MAX));
         for (j, tn) in tracks.iter().enumerate() {
             let Some(b) = skel.bones.iter().position(|x| x.name.eq_ignore_ascii_case(tn)) else { continue };
-            let (q, tr_) = clip.sample(s.position.min(clip.duration), j);
+            // `s.position` is resolved by `anim_at` / `stretch_at` (looping keys wrapped, others
+            // clamped to their end, as GetAnimForTime): held, not looped again (a finished key
+            // wrapped back to its first frame).
+            let (q, tr_) = clip.sample_held(s.position.min(clip.duration), j);
             if let Some(q) = q {
                 overlay(&mut slots[b], &skel.bones[b], q, tr_, w);
             }

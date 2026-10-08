@@ -2,10 +2,28 @@
 //! pistol and crossbow on the hand sockets, drawn in the world camera (scaled about the eye)
 //! and driven by decoded player AnimSets chosen from simulation state.
 //!
-//! Layering follows the data: the sword sets animate the whole rig (camera, spine, both
-//! arms), the gun/power sets only the left arm, which overrides it. The rig is placed so
-//! that the animated `camera_jnt` coincides with the game camera, so authored camera
-//! motion becomes arm motion relative to the view. Presentation only.
+//! Selection and layering follow the player's AnimTree (`Startup` `Ply_Player_at`) and the
+//! animation states of `Twk_Pawn_Corvo` (`pFullBodyTweaks`, `pUpperBodyTweaks`,
+//! `pSpecialTweaks`: sequence, item prefix, `m_fBlendTime`, `m_bBlocksChildren`):
+//! - the full-body picker (`Nav_Default_Ready` / `Nav_Sprinting_Ready` / `Nav_Crouched`, mantle,
+//!   stunned, choke, assassination) poses the whole rig;
+//! - `UpperBodyFilter` (`DisAnimNodeBlendPerBone`, branches `spine_3_jnt`, `Collarbone_R_Jnt`,
+//!   `Collarbone_L_Jnt`) lays the upper-body picker over it (melee attacks, block, the gunshot
+//!   reaction, jump in / small land, crouch in / out, equip);
+//! - `LeftArmFilter` (branch `Collarbone_L_Jnt`) lays the left-arm picker over that (the left
+//!   item's locomotion `Ply_Nav_LeftHand_at` and its actions: equip, switch, fire, reload, casts,
+//!   gadgets, the sword-slash and jump reactions).
+//!
+//! Both filters cook `LocalToCompReqBones`, so they blend in component space (not
+//! `bForceLocalSpaceBlend`): a filtered branch keeps the pose its own sequence gives it relative
+//! to the root. `Collarbone_L_Jnt` hangs off bone 1 (the left filter's required bones are 0, 1
+//! and the collarbone), so a local-space blend made the gun arm inherit the pelvis twist of the
+//! full-body walk and run cycles.
+//!
+//! The weapon meshes play their own sets (`CorvoGun_as`, `Crossbow_as`, `PlySword_Anim_as`)
+//! with the hand that holds them. The rig is placed so that the animated `camera_jnt` coincides
+//! with the game camera, so authored camera motion becomes arm motion relative to the view.
+//! Presentation only.
 
 use crate::characters::{CharacterGpu, to_bevy, upload};
 use crate::players::GameCamera;
@@ -13,11 +31,13 @@ use crate::session::SessionView;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::prelude::*;
-use dishonored_assets::characters::{bind_globals, load_anim_set, load_model};
+use dishonored_assets::characters::{anim_set_path, bind_globals, load_anim_set, load_model};
 use dishonored_assets::edge_anim::BakedClip;
 use dishonored_ir::BoneAsset;
+use dishonored_ir::gameplay::{GameplayConfig, MovementConfig};
 use dishonored_sim::input::LeftHand;
-use dishonored_sim::state::{LeftPhase, MoveMode, PlayerState, SwordPhase};
+use dishonored_sim::state::{ChokePhase, LeftPhase, MoveMode, PlayerState, PossessStage, SwordPhase};
+use dishonored_sim::tuning::CombatTuning;
 use std::collections::HashMap;
 
 /// The rig is drawn in the world camera, shrunk about the eye: uniform scaling about the
@@ -29,8 +49,36 @@ const VIEW_SCALE: f32 = 0.2;
 /// The first-person rig uses the same FOV (UE3 foreground depth group, no separate weapon FOV
 /// found in the INIs).
 pub const HORIZONTAL_FOV_DEG: f32 = 75.0;
-/// Crossfade between clips (seconds).
-const FADE: f32 = 0.12;
+
+/// `m_fBlendTime` of the animation states (`Twk_Pawn_Corvo_Release` animation tweaks).
+/// Navigation states (`Nav_Default_Ready`, `Nav_Sprinting_Ready`, `Nav_Crouched`).
+const BLEND_NAV: f32 = 0.2;
+/// `DishonoredAnimNodeBlendBySpeed` `BlendUpTime` / `BlendDownTime` (idle / walk / run inside a
+/// navigation tree, and the left hand's `WalkingSpeedBlend`).
+const BLEND_SPEED: f32 = 0.4;
+/// `Mantle`.
+const BLEND_MANTLE: f32 = 0.25;
+/// `Choke` (0: the choke masters cut in).
+const BLEND_CHOKE: f32 = 0.0;
+/// Simple actions: equip / unequip, crouch in / out, small land, gunshot reaction,
+/// assassination, stunned, grenade and Spring Razor deploys, the left hand's sword-slash and
+/// jump reactions.
+const BLEND_ACTION: f32 = 0.2;
+/// Melee attacks, `AnimMeleeBlock`, `Upper_Jump_In`.
+const BLEND_MELEE: f32 = 0.1;
+/// Gun fire, reload in / out, power casts (`CastBlink`, `CastPossess`, `CastWindBlast`, ...),
+/// `AnimSwitchPower`.
+const BLEND_CAST: f32 = 0.1;
+/// Weapon mesh clip changes (the weapons' own trees are not decoded).
+const WEAPON_FADE: f32 = 0.1;
+/// A finished swing keeps the upper body until this far into its clip (the port's
+/// interruptible point; the original exits on `DishonoredNotify_AnimStateExit`).
+const SWING_TAIL: f32 = 0.6;
+
+/// `UpperBodyFilter.BranchStartBoneName`.
+const UPPER_BODY_BRANCHES: &[&str] = &["spine_3_jnt", "Collarbone_R_Jnt", "Collarbone_L_Jnt"];
+/// `LeftArmFilter.BranchStartBoneName`.
+const LEFT_ARM_BRANCHES: &[&str] = &["Collarbone_L_Jnt"];
 
 const SETS: &[&str] = &[
     "Ply_Sword_Idle_as",
@@ -50,19 +98,30 @@ const SETS: &[&str] = &[
     "Ply_Gadgets_SpringRazor_as",
 ];
 
+/// Sequences the states below name (item prefix applied).
 const CLIPS: &[&str] = &[
-    "Sword_Ready_Idle", "Sword_Sneak_Idle", "Sword_Ready_Walk", "Sword_Sneak_Walk", "Sword_Ready_Run", "Sword_Sneak_Run", "Sword_Ready_Sprint",
-    "Sword_Ready_Jump", "Sword_Ready_JumpLandSmall", "Sword_Ready_MantleMedium", "Sword_Ready_Equip",
-    "Sword_Ready_AttackRight_A_Small", "Sword_Ready_AttackLeft_A_Small", "Sword_Ready_AttackRight_B_Small", "Sword_Ready_AttackLeft_B_Small", "Sword_Sneak_Attack_Small",
-    "Sword_Ready_ParryIdle_In", "Sword_Ready_ParryIdle", "Sword_Ready_Parry_A", "Sword_Stun_In", "Sword_BigHit_Front", "Sword_Ready_Assassination_Back",
-    "Pistol_Fire", "Pistol_FastReload", "Crossbow_Fire", "Crossbow_RapidReload",
-    "Guns_Idle", "Guns_Walk", "Guns_Sprint", "Guns_Ready_Equip",
-    "Powers_Idle", "Powers_Walk", "Powers_Sprint", "Powers_Ready_Equip", "Powers_Cast_Blink_In", "Powers_Cast_Blink_Loop", "Powers_Cast_Blink_Out", "Powers_Cast_Windblast", "Powers_Switch",
-    "Powers_Cast_BendTime", "Powers_Cast_Swarm", "Powers_Cast_Possession_In", "Powers_Cast_Possession_Loop", "Powers_Cast_Possession_Out", "Powers_Cast_Possession_Cancel", "Powers_OutOfMana",
+    // Full body: navigation, air, mantle, stunned, assassination.
+    "Sword_Ready_Idle", "Sword_Ready_Walk", "Sword_Ready_Run", "Sword_Ready_Sprint", "Sword_Ready_Jump",
+    "Sword_Sneak_Idle", "Sword_Sneak_Walk", "Sword_Sneak_Jump",
+    "Sword_Ready_MantleLow", "Sword_Ready_MantleMedium", "Sword_Ready_MantleHigh", "Sword_Sneak_MantleLow", "Sword_Sneak_MantleMedium", "Sword_Sneak_MantleHigh",
+    "Sword_Stun_In", "Sword_Stun_Loop", "Sword_Ready_Assassination_Back_Master", "Sword_Ready_Assassination_Generic",
     "Sword_Choke_In_Master", "Sword_Choke_Loop_Master", "Sword_Choke_Win_Master", "Sword_Choke_Lose_Master", "Sword_Choke_Cancel_Master", "Sword_Choke_CarryCorpse_Master",
     "Empty_CarryCorpse_In_Master", "Empty_CarryCorpse_Idle_Master", "Empty_CarryCorpse_Walk_Master", "Empty_CarryCorpse_DropLow_Master",
-    "Gadgets_Idle", "Gadgets_Walk", "Gadgets_Sprint", "Gadgets_Ready_Equip", "Gadgets_Deploy", "Gadgets_Reload",
-    "Gadgets_Grenade_Cooking_In", "Gadgets_Grenade_Cooking_Idle", "Gadgets_Grenade_Deploy", "Gadgets_SpringRazor_Deploy",
+    // Upper body.
+    "Sword_Ready_AttackRight_A_Small", "Sword_Ready_AttackLeft_A_Small", "Sword_Ready_AttackRight_B_Small", "Sword_Ready_AttackLeft_B_Small", "Sword_Sneak_Attack_Small",
+    "Sword_Ready_ParryIdle_In", "Sword_Sneak_ParryIdle_In", "Sword_Ready_ParryIdle", "Sword_Ready_ParryIdle_Out", "Sword_Sneak_ParryIdle_Out",
+    "Sword_Ready_GunshotReaction", "Sword_Sneak_GunshotReaction", "Sword_Ready_JumpIn", "Sword_Sneak_JumpIn", "Sword_Ready_JumpLandSmall", "Sword_Sneak_JumpLandSmall",
+    "Sword_Sneak_In", "Sword_Sneak_Out", "Sword_Ready_Equip",
+    // Left arm: locomotion and reactions per item prefix.
+    "Guns_Idle", "Guns_Walk", "Guns_Sprint", "Guns_Jump", "Guns_JumpIn", "Guns_JumpLandSmall", "Guns_Ready_Equip", "Guns_SwordSlash_Left", "Guns_SwordSlash_Right",
+    "Powers_Idle", "Powers_Walk", "Powers_Sprint", "Powers_Jump", "Powers_JumpIn", "Powers_JumpLandSmall", "Powers_Ready_Equip", "Powers_SwordSlash_Left", "Powers_SwordSlash_Right", "Powers_Switch",
+    "Gadgets_Idle", "Gadgets_Walk", "Gadgets_Sprint", "Gadgets_Jump", "Gadgets_JumpIn", "Gadgets_JumpLandSmall", "Gadgets_Ready_Equip", "Gadgets_SwordSlash_Left", "Gadgets_SwordSlash_Right", "Gadgets_Switch",
+    // Left arm: actions.
+    "Pistol_Fire", "Pistol_Reload_In", "Pistol_Reload_Out", "Pistol_FastReload",
+    "Crossbow_Fire", "Crossbow_Fire_FastReload", "Crossbow_Reload_In", "Crossbow_Reload_Out", "Crossbow_RapidReload",
+    "Powers_Cast_Blink_In", "Powers_Cast_Blink_Loop", "Powers_Cast_Blink_Out", "Powers_Cast_Windblast", "Powers_Cast_BendTime", "Powers_Cast_Swarm",
+    "Powers_Cast_Possession_In", "Powers_Cast_Possession_Loop", "Powers_Cast_Possession_Out", "Powers_Cast_Possession_Cancel",
+    "Gadgets_Grenade_Deploy", "Gadgets_SpringRazor_Deploy",
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -72,33 +131,104 @@ enum Held {
     Crossbow,
 }
 
-const WEAPONS: &[(Held, &str, &str)] = &[
-    (Held::Sword, "Wpn_PlySwords.Wpn_PlySword01", "handAttachment_R_jnt"),
-    (Held::Pistol, "Wpn_PlyGuns.Wpn_PlyGunElite", "handAttachment_L_jnt"),
-    (Held::Crossbow, "Crossbows.crossbow_01", "handAttachment_L_jnt"),
+/// (held, mesh, attach bone, the mesh's own AnimSets, prefixes its sequences may carry).
+const WEAPONS: &[(Held, &str, &str, &[&str], &[&str])] = &[
+    (Held::Sword, "Wpn_PlySwords.Wpn_PlySword01", "handAttachment_R_jnt", &["PlySword_Anim_as"], &["Sword"]),
+    (Held::Pistol, "Wpn_PlyGuns.Wpn_PlyGunElite", "handAttachment_L_jnt", &["CorvoGun_as"], &["Pistol", "CorvoGun", "Gun"]),
+    (Held::Crossbow, "Crossbows.crossbow_01", "handAttachment_L_jnt", &["Crossbow_as", "Crossbows_as"], &["Crossbow"]),
 ];
+
+/// Local bone transforms (rotation, translation).
+pub type Pose = Vec<(Quat, Vec3)>;
+
+/// Decoded sequences of some AnimSets, mapped to a skeleton.
+#[derive(Default)]
+struct ClipLib {
+    /// Per AnimSet: track index -> bone index.
+    sets: Vec<Vec<Option<usize>>>,
+    clips: HashMap<String, (usize, BakedClip)>,
+}
+
+/// Playable length: the clip's duration, at most its last frame.
+fn clip_len(c: &BakedClip) -> f32 {
+    let frames = c.num_frames.saturating_sub(1) as f32 / c.sample_rate.max(1.0);
+    if frames > 0.0 { c.duration.min(frames) } else { c.duration }
+}
+
+impl ClipLib {
+    fn load(content: &dishonored_assets::Content, bones: &[BoneAsset], paths: &[String], wanted: &[&str]) -> Self {
+        let mut lib = ClipLib::default();
+        for path in paths {
+            match load_anim_set(content, "Startup", path, wanted) {
+                Ok(mut set) => {
+                    set.edge_order(bones);
+                    let si = lib.sets.len();
+                    lib.sets.push(set.tracks.iter().map(|t| bones.iter().position(|b| b.name.eq_ignore_ascii_case(t))).collect());
+                    for (name, clip) in set.clips {
+                        lib.clips.insert(name, (si, clip));
+                    }
+                }
+                Err(e) => warn!("{path}: {e:#}"),
+            }
+        }
+        lib
+    }
+
+    fn has(&self, name: &str) -> bool {
+        self.clips.contains_key(name)
+    }
+
+    fn length(&self, name: &str) -> f32 {
+        self.clips.get(name).map(|(_, c)| clip_len(c)).unwrap_or(0.0)
+    }
+
+    /// Overwrite the bones the clip drives with its pose at `time` (clamped unless looped).
+    fn sample(&self, name: &str, time: f32, looped: bool, pose: &mut [(Quat, Vec3)]) {
+        let Some((set, clip)) = self.clips.get(name) else { return };
+        let t = if looped { time } else { time.clamp(0.0, (clip_len(clip) - 1e-3).max(0.0)) };
+        for (track, bone) in self.sets[*set].iter().enumerate() {
+            let Some(b) = *bone else { continue };
+            if b >= pose.len() {
+                continue;
+            }
+            let (r, p) = clip.sample(t, track);
+            if let Some(r) = r {
+                pose[b].0 = r;
+            }
+            if let Some(p) = p {
+                pose[b].1 = p;
+            }
+        }
+    }
+}
 
 struct WeaponGpu {
     held: Held,
     gpu: CharacterGpu,
     socket: usize,
+    /// The weapon's skeleton and its bind pose.
+    bones: Vec<BoneAsset>,
+    bind_pose: Pose,
     /// Weapon bind globals in weapon mesh space.
     bind: Vec<glam::Mat4>,
     m2p: glam::Mat4,
     /// The rig socket the weapon attaches to (`RightHandWpn` / `LeftHandWpn` of
     /// `Skm_Player`): transform relative to its bone.
     socket_rel: glam::Mat4,
+    lib: ClipLib,
+    prefixes: &'static [&'static str],
 }
 
 #[derive(Resource)]
 pub struct ViewRig {
     arms: CharacterGpu,
     bones: Vec<BoneAsset>,
+    parents: Vec<Option<usize>>,
+    bind_pose: Pose,
     m2p: glam::Mat4,
     weapons: Vec<WeaponGpu>,
-    /// Per AnimSet: track index -> bone index.
-    sets: Vec<Vec<Option<usize>>>,
-    clips: HashMap<String, (usize, BakedClip)>,
+    lib: ClipLib,
+    upper_body: Vec<bool>,
     left_arm: Vec<bool>,
     cam_bone: usize,
 }
@@ -114,6 +244,75 @@ pub struct WeaponJoint {
 }
 #[derive(Component)]
 pub struct WeaponMesh(usize);
+
+/// Parent of each bone (`None` for a root), read as `bind_globals` reads `BoneAsset::parent`.
+pub fn parents(bones: &[BoneAsset]) -> Vec<Option<usize>> {
+    bones.iter().enumerate().map(|(i, b)| (i != 0 && b.parent >= 0 && (b.parent as usize) < i).then_some(b.parent as usize)).collect()
+}
+
+/// Bones at or below any of `branches` (`AnimNodeBlendPerBone::BranchStartBoneName`, whose
+/// cooked `Child2PerBoneWeight` is 1 over those subtrees).
+pub fn branch_mask(bones: &[BoneAsset], branches: &[&str]) -> Vec<bool> {
+    let par = parents(bones);
+    let mut mask = vec![false; bones.len()];
+    for (i, b) in bones.iter().enumerate() {
+        let on = branches.iter().any(|n| b.name.eq_ignore_ascii_case(n)) || par[i].is_some_and(|p| mask[p]);
+        mask[i] = on;
+    }
+    mask
+}
+
+fn compose(parent: (Quat, Vec3), local: (Quat, Vec3)) -> (Quat, Vec3) {
+    ((parent.0 * local.0).normalize(), parent.1 + parent.0 * local.1)
+}
+
+fn relative(parent: (Quat, Vec3), comp: (Quat, Vec3)) -> (Quat, Vec3) {
+    let inv = parent.0.inverse();
+    ((inv * comp.0).normalize(), inv * (comp.1 - parent.1))
+}
+
+fn mix(a: (Quat, Vec3), b: (Quat, Vec3), w: f32) -> (Quat, Vec3) {
+    let q = if a.0.dot(b.0) < 0.0 { -b.0 } else { b.0 };
+    (a.0.lerp(q, w).normalize(), a.1.lerp(b.1, w))
+}
+
+/// Component-space (mesh-space) transforms of a local pose.
+pub fn to_component(parents: &[Option<usize>], local: &[(Quat, Vec3)]) -> Pose {
+    let mut c: Pose = Vec::with_capacity(local.len());
+    for (i, l) in local.iter().enumerate() {
+        let v = match parents.get(i).copied().flatten() {
+            Some(p) => compose(c[p], *l),
+            None => *l,
+        };
+        c.push(v);
+    }
+    c
+}
+
+/// `AnimNodeBlendPerBone` blending in component space: a masked bone takes the blend (by
+/// `weight`) of the two children's component-space transforms, converted back to local space
+/// under the result's parent; other bones keep the source's local transform.
+pub fn blend_per_bone(parents: &[Option<usize>], source: &[(Quat, Vec3)], target: &[(Quat, Vec3)], mask: &[bool], weight: f32) -> Pose {
+    if weight <= 0.0 || source.len() != target.len() {
+        return source.to_vec();
+    }
+    let w = weight.min(1.0);
+    let cs = to_component(parents, source);
+    let ct = to_component(parents, target);
+    let mut out = source.to_vec();
+    let mut oc: Pose = Vec::with_capacity(source.len());
+    for (i, src) in source.iter().enumerate() {
+        let parent = parents.get(i).copied().flatten().map(|p| oc[p]);
+        if mask.get(i).copied().unwrap_or(false) {
+            let c = mix(cs[i], ct[i], w);
+            out[i] = parent.map_or(c, |p| relative(p, c));
+            oc.push(c);
+        } else {
+            oc.push(parent.map_or(*src, |p| compose(p, *src)));
+        }
+    }
+    out
+}
 
 pub fn load_view_rig(
     mut commands: Commands,
@@ -133,55 +332,62 @@ pub fn load_view_rig(
     let m2p = arms.parts[0].mesh_to_pawn;
     let find = |n: &str| bones.iter().position(|b| b.name.eq_ignore_ascii_case(n));
     let Some(cam_bone) = find("camera_jnt") else { return warn!("first-person rig: no camera_jnt") };
-    let collar_l = find("Collarbone_L_Jnt");
-    let mut left_arm = vec![false; bones.len()];
-    for i in 0..bones.len() {
-        let mut c = i as i32;
-        while c >= 0 {
-            if Some(c as usize) == collar_l {
-                left_arm[i] = true;
-                break;
-            }
-            let p = bones[c as usize].parent;
-            c = if p == c || c == 0 { -1 } else { p };
+    for n in UPPER_BODY_BRANCHES {
+        if find(n).is_none() {
+            warn!("first-person rig: no {n}");
         }
     }
+    let upper_body = branch_mask(&bones, UPPER_BODY_BRANCHES);
+    let left_arm = branch_mask(&bones, LEFT_ARM_BRANCHES);
     let mut weapons = Vec::new();
     let sockets = dishonored_assets::characters::mesh_sockets(&content, "Engine", "Ply_Player.Skm_Player").unwrap_or_default();
-    for (wi, (held, path, socket)) in WEAPONS.iter().enumerate() {
+    for (held, path, socket, sets, prefixes) in WEAPONS {
         match load_model(&content, path, &[("Startup", path)], None, 1024) {
             Ok(w) => {
                 let Some(socket) = find(socket) else { continue };
                 let part = &w.parts[0];
                 let sock_name = if *held == Held::Sword { "RightHandWpn" } else { "LeftHandWpn" };
                 let socket_rel = sockets.iter().find(|s| s.name.eq_ignore_ascii_case(sock_name)).map(|s| glam::Mat4::from_translation(s.location) * dishonored_assets::util::rotator_matrix(s.rotation[0], s.rotation[1], s.rotation[2])).unwrap_or(glam::Mat4::IDENTITY);
-                weapons.push(WeaponGpu { held: *held, socket, bind: bind_globals(&part.bones), m2p: part.mesh_to_pawn, socket_rel, gpu: upload(&w, &mut meshes, &mut images, &mut mats, &mut binds, &feat) });
-                let _ = wi;
+                let set_paths: Vec<String> = sets
+                    .iter()
+                    .filter_map(|s| match anim_set_path(&content, "Startup", s) {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            warn!("weapon {path}: {e:#}");
+                            None
+                        }
+                    })
+                    .collect();
+                let lib = ClipLib::load(&content, &part.bones, &set_paths, &[]);
+                let mut names: Vec<&String> = lib.clips.keys().collect();
+                names.sort();
+                info!("first-person weapon {path}: sets {set_paths:?}, clips {names:?}");
+                weapons.push(WeaponGpu {
+                    held: *held,
+                    socket,
+                    bones: part.bones.clone(),
+                    bind_pose: part.bones.iter().map(|b| (b.rotation, b.translation)).collect(),
+                    bind: bind_globals(&part.bones),
+                    m2p: part.mesh_to_pawn,
+                    socket_rel,
+                    lib,
+                    prefixes: *prefixes,
+                    gpu: upload(&w, &mut meshes, &mut images, &mut mats, &mut binds, &feat),
+                });
             }
             Err(e) => warn!("weapon {path}: {e:#}"),
         }
     }
-    let mut sets = Vec::new();
-    let mut clips = HashMap::new();
-    for (si, set) in SETS.iter().enumerate() {
-        match load_anim_set(&content, "Startup", &format!("{set}.{set}"), CLIPS) {
-            Ok(lib) => {
-                let mut lib = lib;
-                lib.edge_order(&bones);
-                sets.push(lib.tracks.iter().map(|t| find(t)).collect());
-                for (name, clip) in lib.clips {
-                    clips.insert(name, (si, clip));
-                }
-            }
-            Err(e) => {
-                warn!("{set}: {e:#}");
-                sets.push(Vec::new());
-            }
-        }
+    let set_paths: Vec<String> = SETS.iter().map(|s| format!("{s}.{s}")).collect();
+    let lib = ClipLib::load(&content, &bones, &set_paths, CLIPS);
+    let missing: Vec<&&str> = CLIPS.iter().filter(|c| !lib.has(c)).collect();
+    if !missing.is_empty() {
+        warn!("first-person rig: sequences not found: {missing:?}");
     }
-    info!("first-person rig: {} bones, {} weapons, {} clips", bones.len(), weapons.len(), clips.len());
+    info!("first-person rig: {} bones, {} weapons, {} clips", bones.len(), weapons.len(), lib.clips.len());
     let arms_gpu = upload(&arms, &mut meshes, &mut images, &mut mats, &mut binds, &feat);
-    commands.insert_resource(ViewRig { arms: arms_gpu, bones, m2p, weapons, sets, clips, left_arm, cam_bone });
+    let bind_pose = bones.iter().map(|b| (b.rotation, b.translation)).collect();
+    commands.insert_resource(ViewRig { arms: arms_gpu, parents: parents(&bones), bones, bind_pose, m2p, weapons, lib, upper_body, left_arm, cam_bone });
 }
 
 /// The rig, parented to the game camera and drawn in the main view (see `VIEW_SCALE`).
@@ -215,6 +421,30 @@ pub fn spawn_view_rig(
     }
 }
 
+/// A sequence request for a layer.
+#[derive(Clone, Debug)]
+struct Play {
+    /// Identity of the request: a new key restarts the layer and crossfades into it.
+    key: String,
+    clip: String,
+    looped: bool,
+    rate: f32,
+    /// Blend-in time (the state's `m_fBlendTime`, or the tree node's own).
+    blend: f32,
+    /// Sound notifies fire (the left hand's locomotion players have `bNoNotifies`).
+    notifies: bool,
+}
+
+fn once(key: impl Into<String>, clip: &str, blend: f32) -> Play {
+    Play { key: key.into(), clip: clip.to_string(), looped: false, rate: 1.0, blend, notifies: true }
+}
+
+fn looping(key: impl Into<String>, clip: &str, rate: f32, blend: f32) -> Play {
+    Play { key: key.into(), clip: clip.to_string(), looped: true, rate, blend, notifies: true }
+}
+
+/// One picker of the tree: the playing sequence, the crossfade from the previous one and the
+/// filter weight it enters the final pose with.
 #[derive(Default)]
 struct Layer {
     key: String,
@@ -222,204 +452,485 @@ struct Layer {
     time: f32,
     rate: f32,
     looped: bool,
-    from: Option<Vec<(Quat, Vec3)>>,
+    notifies: bool,
+    blend: f32,
     fade: f32,
+    from: Option<Pose>,
+    last: Pose,
+    /// Filter weight (`Child2Weight`): 1 = the layer's branch is fully shown.
+    weight: f32,
 }
 
 impl Layer {
-    fn set(&mut self, key: String, clip: &str, looped: bool, rate: f32, current: Option<Vec<(Quat, Vec3)>>) {
-        self.rate = rate;
-        if self.key == key {
+    fn set(&mut self, p: &Play) {
+        self.rate = p.rate;
+        if self.key == p.key {
             return;
         }
-        self.key = key;
-        self.clip = clip.to_string();
+        // Crossfade from what the layer showed, unless it was not shown at all.
+        self.from = (self.weight > 0.0 && !self.last.is_empty()).then(|| self.last.clone());
+        self.key = p.key.clone();
+        self.clip = p.clip.clone();
+        self.looped = p.looped;
+        self.notifies = p.notifies;
+        self.blend = p.blend;
         self.time = 0.0;
-        self.looped = looped;
-        self.from = current;
         self.fade = 0.0;
+    }
+
+    /// Move the filter weight toward `target` over `time` seconds.
+    fn approach(&mut self, target: f32, time: f32, dt: f32) {
+        self.weight = if time <= 0.0 {
+            target
+        } else if self.weight < target {
+            (self.weight + dt / time).min(target)
+        } else {
+            (self.weight - dt / time).max(target)
+        };
+    }
+
+    fn pose(&mut self, lib: &ClipLib, bind: &[(Quat, Vec3)]) -> Pose {
+        // Bones the sequence does not drive keep the reference pose (a sequence player's
+        // default; the gun and power sets drive only bones 0 and 1 and the left arm).
+        let mut pose = bind.to_vec();
+        lib.sample(&self.clip, self.time, self.looped, &mut pose);
+        let w = if self.blend > 0.0 { (self.fade / self.blend).clamp(0.0, 1.0) } else { 1.0 };
+        let done = match &self.from {
+            Some(from) if w < 1.0 && from.len() == pose.len() => {
+                for (p, f) in pose.iter_mut().zip(from) {
+                    *p = mix(*f, *p, w);
+                }
+                false
+            }
+            _ => true,
+        };
+        if done {
+            self.from = None;
+        }
+        self.last.clone_from(&pose);
+        pose
+    }
+}
+
+fn advance_layer(l: &mut Layer, dt: f32, sounds: Option<&mut crate::audio::AnimSounds>, id: dishonored_sim::state::PlayerId) {
+    let from = l.time;
+    l.time += dt * l.rate;
+    l.fade += dt;
+    // Sound notifies (AnimNotify_AkEvent, footfalls) of the advanced window.
+    if l.notifies && l.weight > 0.0 {
+        if let Some(s) = sounds {
+            s.advance(id, &l.clip, from, l.time, l.looped);
+        }
+    }
+}
+
+/// The weapon mesh's own clip, crossfaded on changes.
+#[derive(Default)]
+struct WeaponAnim {
+    key: String,
+    from: Option<Pose>,
+    fade: f32,
+    last: Pose,
+}
+
+/// What the previous frame showed, for the transitions that start one-shot actions.
+#[derive(Clone, Copy)]
+struct Prev {
+    mode: MoveMode,
+    crouched: bool,
+    alive: bool,
+    swings: u8,
+    sword: SwordPhase,
+    item: LeftHand,
+    left: LeftPhase,
+    possess: PossessStage,
+}
+
+impl Prev {
+    fn of(p: &PlayerState) -> Self {
+        Prev { mode: p.mode, crouched: p.crouched, alive: p.alive, swings: p.sword.swings, sword: p.sword.phase, item: p.left.item, left: p.left.phase, possess: p.possess.stage }
     }
 }
 
 /// First-person animation state (local view only).
 #[derive(Resource, Default)]
 pub struct ViewAnim {
-    right: Layer,
-    left: Layer,
-    swing: u32,
-    prev_sword: SwordPhase,
-    prev_left: LeftPhase,
+    /// `FullBodyStatePicker`.
+    fb: Layer,
+    /// `UpperBodyStatePicker` through `UpperBodyFilter`.
+    ub: Layer,
+    /// `LeftArmStatePicker` through `LeftArmFilter`.
+    la: Layer,
+    /// One-shot upper-body / left-arm actions started by a transition (played to their end).
+    ub_shot: Option<Play>,
+    la_shot: Option<Play>,
+    shots: u32,
+    /// Left-hand phase changes (keys of back-to-back actions differ).
     left_action: u32,
-    prev_locals: Vec<(Quat, Vec3)>,
+    prev: Option<Prev>,
+    weapons: Vec<WeaponAnim>,
 }
 
-/// Attack clips in `SwordState::swing_clip` order.
+/// Attack clips in `SwordState::swing_clip` order (`Attack_Seq` of the melee states
+/// `RightAttackA`, `LeftAttackA`, `RightAttackB`, `LeftAttackB`, `SneakAttackA`).
 const SWING_CLIPS: [&str; 5] = ["Sword_Ready_AttackRight_A_Small", "Sword_Ready_AttackLeft_A_Small", "Sword_Ready_AttackRight_B_Small", "Sword_Ready_AttackLeft_B_Small", "Sword_Sneak_Attack_Small"];
 
-/// Right-hand (sword, full-body) clip for a player state: (key, clip, looped, rate).
-fn right_clip(p: &PlayerState, a: &mut ViewAnim) -> (String, &'static str, bool, f32) {
-    use SwordPhase::*;
-    // The simulation picks the clip (its damage zone times the hit, `SwingTiming`).
-    a.swing = p.sword.swings as u32;
-    a.prev_sword = p.sword.phase;
-    let swing_clip = SWING_CLIPS[(p.sword.swing_clip as usize).min(4)];
-    let one = |k: &str, c: &'static str| (k.to_string(), c, false, 1.0);
-    // Choke (`Ply_Sword_Choke_as` masters, by `eChokeState`) and carrying a body
-    // (`Ply_Empty_CarryCorpse_as` masters): whole rig.
-    {
-        use dishonored_sim::state::ChokePhase as C;
-        let choke = match p.choke.phase {
-            C::In => Some(("choke_in", "Sword_Choke_In_Master", false)),
-            C::Loop => Some(("choke_loop", "Sword_Choke_Loop_Master", true)),
-            C::Win => Some(("choke_win", "Sword_Choke_Win_Master", false)),
-            C::Lose => Some(("choke_lose", "Sword_Choke_Lose_Master", false)),
-            C::Cancel => Some(("choke_cancel", "Sword_Choke_Cancel_Master", false)),
-            C::None => None,
-        };
-        if let Some((k, c, l)) = choke {
-            return (k.to_string(), c, l, 1.0);
-        }
-        if p.carrying.is_some() {
-            if p.carry_anim > 0.0 {
-                // Lifted straight from a won choke, or picked up from the ground.
-                let from_choke = a.right.key.starts_with("choke") || a.right.key == "carry_choke";
-                return if from_choke { one("carry_choke", "Sword_Choke_CarryCorpse_Master") } else { one("carry_in", "Empty_CarryCorpse_In_Master") };
-            }
-            let walking = p.mode == MoveMode::Walking && p.velocity.truncate().length() > 30.0;
-            return if walking { ("carry_walk".into(), "Empty_CarryCorpse_Walk_Master", true, (p.velocity.truncate().length() / 200.0).clamp(0.6, 1.4)) } else { ("carry_idle".into(), "Empty_CarryCorpse_Idle_Master", true, 1.0) };
-        }
-        // The low drop plays out over the action lock that follows it.
-        if p.action_lock > 0.0 && (a.right.key.starts_with("carry") || a.right.key == "carry_drop") {
-            return one("carry_drop", "Empty_CarryCorpse_DropLow_Master");
-        }
-    }
-    match p.sword.phase {
-        Startup | Active | Recovery => return (format!("swing{}", a.swing), swing_clip, false, 1.0),
-        Blocking => return if p.sword.block_time < 0.5 { one("block_in", "Sword_Ready_ParryIdle_In") } else { ("block".into(), "Sword_Ready_ParryIdle", true, 1.0) },
-        Staggered => return one("stagger", "Sword_Stun_In"),
-        Assassinating => return one("assassinate", "Sword_Ready_Assassination_Back"),
-        Idle => {}
-    }
-    // Let a finished swing play out to its interruptible point before locomotion.
-    if a.right.key.starts_with("swing") && a.right.time < 0.6 {
-        return (a.right.key.clone(), swing_clip, false, 1.0);
-    }
-    let speed = p.velocity.truncate().length();
-    match p.mode {
-        MoveMode::Falling => return ("air".into(), "Sword_Ready_Jump", false, 1.0),
-        MoveMode::Mantling => return one("mantle", "Sword_Ready_MantleMedium"),
-        _ => {}
-    }
-    let sneak = p.crouched;
-    if speed > 480.0 {
-        ("sprint".into(), "Sword_Ready_Sprint", true, (speed / 600.0).clamp(0.6, 1.5))
-    } else if speed > 260.0 {
-        if sneak { ("run_s".into(), "Sword_Sneak_Run", true, (speed / 275.0).clamp(0.6, 1.5)) } else { ("run".into(), "Sword_Ready_Run", true, (speed / 400.0).clamp(0.6, 1.5)) }
-    } else if speed > 30.0 {
-        if sneak { ("walk_s".into(), "Sword_Sneak_Walk", true, (speed / 200.0).clamp(0.5, 1.6)) } else { ("walk".into(), "Sword_Ready_Walk", true, (speed / 200.0).clamp(0.5, 1.6)) }
-    } else if sneak {
-        ("idle_s".into(), "Sword_Sneak_Idle", true, 1.0)
-    } else {
-        ("idle".into(), "Sword_Ready_Idle", true, 1.0)
+fn swing_clip(p: &PlayerState) -> &'static str {
+    SWING_CLIPS[(p.sword.swing_clip as usize).min(4)]
+}
+
+/// Item prefix of the left hand (`m_ApplyItemEquipPrefix = EDisEquipUsage_Secondary`).
+fn left_prefix(item: LeftHand) -> Option<&'static str> {
+    match item {
+        LeftHand::Empty => None,
+        LeftHand::Pistol | LeftHand::Crossbow | LeftHand::SleepDart | LeftHand::IncendiaryBolt => Some("Guns_"),
+        LeftHand::Grenade | LeftHand::StickyGrenade | LeftHand::SpringRazor => Some("Gadgets_"),
+        _ => Some("Powers_"),
     }
 }
 
-/// Left-hand (gun/power, left arm only) clip.
-fn left_clip(p: &PlayerState, a: &mut ViewAnim, tuning: &dishonored_sim::tuning::CombatTuning) -> Option<(String, &'static str, bool, f32)> {
-    let item = p.left.item;
-    // Choking and carrying use both arms (whole-rig clips on the right layer).
-    if item == LeftHand::Empty || p.carrying.is_some() || p.choke.phase != dishonored_sim::state::ChokePhase::None || a.right.key == "carry_drop" {
+fn stance(p: &PlayerState) -> &'static str {
+    if p.crouched { "Sneak" } else { "Ready" }
+}
+
+/// A one-shot action with a fresh key, if the clip was decoded.
+fn shot(a: &mut ViewAnim, lib: &ClipLib, clip: &str, blend: f32) -> Option<Play> {
+    if !lib.has(clip) {
         return None;
     }
-    let gadget = matches!(item, LeftHand::Grenade | LeftHand::StickyGrenade | LeftHand::SpringRazor);
-    if p.left.phase != a.prev_left && p.left.phase != LeftPhase::Idle {
+    a.shots += 1;
+    Some(once(format!("{clip}#s{}", a.shots), clip, blend))
+}
+
+/// Transitions since the last frame that start one-shot actions.
+fn transitions(p: &PlayerState, a: &mut ViewAnim, lib: &ClipLib) {
+    let Some(prev) = a.prev else { return };
+    let st = stance(p);
+    let pre = left_prefix(p.left.item);
+    if p.left.phase != prev.left && p.left.phase != LeftPhase::Idle {
         a.left_action += 1;
     }
-    a.prev_left = p.left.phase;
-    let gun = matches!(item, LeftHand::Pistol | LeftHand::Crossbow) || item.is_crossbow();
-    let n = a.left_action;
-    let one = |c: &'static str, rate: f32| Some((format!("{c}{n}"), c, false, rate));
-    // Possession: in while targeting, loop while possessing (`Ply_Powers_as`).
-    {
-        use dishonored_sim::state::PossessStage as S;
-        if item == LeftHand::Possession {
-            match p.possess.stage {
-                S::Targeting => return Some(if p.left.timer < 0.3 && !a.left.key.starts_with("poss_loop") { ("poss_in".into(), "Powers_Cast_Possession_In", false, 1.0) } else { ("poss_loop".into(), "Powers_Cast_Possession_Loop", true, 1.0) }),
-                S::PrePossess => return Some(("poss_out".into(), "Powers_Cast_Possession_Out", false, 1.0)),
-                _ => {}
-            }
+    // Respawn: `EquipItem_Ready` (Sword_Ready_Equip).
+    if p.alive && !prev.alive {
+        a.ub_shot = shot(a, lib, "Sword_Ready_Equip", BLEND_ACTION);
+    }
+    // `Upper_GoTo_Crouch` / `Upper_Leave_Crouch` (Sneak_In / Sneak_Out).
+    if p.crouched != prev.crouched && p.mode == MoveMode::Walking {
+        a.ub_shot = shot(a, lib, if p.crouched { "Sword_Sneak_In" } else { "Sword_Sneak_Out" }, BLEND_ACTION);
+    }
+    // `Upper_Jump_In` / `Upper_Jump_In_LeftHand`.
+    if prev.mode == MoveMode::Walking && p.mode == MoveMode::Falling && p.velocity.z > 0.0 {
+        a.ub_shot = shot(a, lib, &format!("Sword_{st}_JumpIn"), BLEND_MELEE);
+        if let Some(pre) = pre {
+            a.la_shot = shot(a, lib, &format!("{pre}JumpIn"), BLEND_ACTION);
         }
     }
-    match p.left.phase {
-        LeftPhase::Equipping => return one(if gun { "Guns_Ready_Equip" } else if gadget { "Gadgets_Ready_Equip" } else { "Powers_Ready_Equip" }, 1.0),
-        LeftPhase::Recovering => {
-            return match item {
-                LeftHand::Pistol => one("Pistol_Fire", 1.0),
-                LeftHand::Crossbow | LeftHand::SleepDart | LeftHand::IncendiaryBolt => one("Crossbow_Fire", 1.0),
-                LeftHand::Blink => one("Powers_Cast_Blink_Out", 1.0),
-                LeftHand::Windblast => one("Powers_Cast_Windblast", 1.0),
-                LeftHand::BendTime => one("Powers_Cast_BendTime", 1.0),
-                LeftHand::DevouringSwarm => one("Powers_Cast_Swarm", 1.0),
-                LeftHand::Grenade | LeftHand::StickyGrenade => one("Gadgets_Grenade_Deploy", 1.0),
-                LeftHand::SpringRazor => one("Gadgets_SpringRazor_Deploy", 1.0),
-                _ => one("Powers_Switch", 1.0),
-            };
+    // `Upper_Jump_Land_Small` / `Upper_Jump_Land_Small_LeftHand`.
+    if prev.mode == MoveMode::Falling && p.mode == MoveMode::Walking {
+        a.ub_shot = shot(a, lib, &format!("Sword_{st}_JumpLandSmall"), BLEND_ACTION);
+        if let Some(pre) = pre {
+            a.la_shot = shot(a, lib, &format!("{pre}JumpLandSmall"), BLEND_ACTION);
         }
-        LeftPhase::Reloading => {
-            // The reload clip is stretched to the simulation's reload time.
-            return match item {
-                LeftHand::Pistol => one("Pistol_FastReload", 0.8 / tuning.pistol_reload.max(0.1)),
-                _ => one("Crossbow_RapidReload", 0.533 / tuning.crossbow_reload.max(0.1)),
-            };
+    }
+    // A new swing: the left hand's `SwordSlash_Left` / `SwordSlash_Right`.
+    if p.sword.swings != prev.swings && matches!(p.sword.phase, SwordPhase::Startup | SwordPhase::Active | SwordPhase::Recovery) {
+        if let Some(pre) = pre {
+            let side = if matches!(p.sword.swing_clip, 1 | 3) { "Left" } else { "Right" };
+            a.la_shot = shot(a, lib, &format!("{pre}SwordSlash_{side}"), BLEND_ACTION);
         }
-        LeftPhase::Aiming if item == LeftHand::Blink => {
-            return Some(if p.left.timer < 0.3 && !a.left.key.starts_with("blink_loop") { ("blink_in".into(), "Powers_Cast_Blink_In", false, 1.0) } else { ("blink_loop".into(), "Powers_Cast_Blink_Loop", true, 1.0) });
+    }
+    // A shot: `PistolReaction` / `CrossbowReaction` (Ready_GunshotReaction) moves the sword arm.
+    let gun = p.left.item == LeftHand::Pistol || p.left.item.is_crossbow();
+    if gun && p.left.phase == LeftPhase::Recovering && prev.left != LeftPhase::Recovering {
+        a.ub_shot = shot(a, lib, &format!("Sword_{st}_GunshotReaction"), BLEND_ACTION);
+    }
+    // Item change: `AnimSwitchPower` between items of one kind, else `EquipItem_Ready`.
+    if p.left.item != prev.item {
+        if let Some(pre) = pre {
+            let switch = format!("{pre}Switch");
+            a.la_shot = if left_prefix(prev.item) == Some(pre) && lib.has(&switch) { shot(a, lib, &switch, BLEND_CAST) } else { shot(a, lib, &format!("{pre}Ready_Equip"), BLEND_ACTION) };
+        }
+    }
+    // Cancels: `CastPossess` Cancel, `CastBlink` Cancel (= Powers_Cast_Blink_Out).
+    if prev.possess == PossessStage::Targeting && p.possess.stage == PossessStage::Inactive && p.left.item == LeftHand::Possession {
+        a.la_shot = shot(a, lib, "Powers_Cast_Possession_Cancel", BLEND_CAST);
+    }
+    if p.left.item == LeftHand::Blink && prev.item == LeftHand::Blink && prev.left == LeftPhase::Aiming && p.left.phase == LeftPhase::Idle {
+        a.la_shot = shot(a, lib, "Powers_Cast_Blink_Out", BLEND_CAST);
+    }
+    // Block released: `Block Canceled` (ParryIdle_Out).
+    if prev.sword == SwordPhase::Blocking && p.sword.phase == SwordPhase::Idle {
+        a.ub_shot = shot(a, lib, &format!("Sword_{st}_ParryIdle_Out"), BLEND_MELEE);
+    }
+}
+
+/// The one-shot still playing (it ends a blend time before its clip does, so the layer has
+/// faded out when the clip ends).
+fn running_shot(slot: &mut Option<Play>, layer: &Layer, lib: &ClipLib) -> Option<Play> {
+    let s = slot.as_ref()?;
+    let finished = layer.key == s.key && layer.time + s.blend * s.rate >= lib.length(&s.clip);
+    if finished {
+        *slot = None;
+        return None;
+    }
+    Some(s.clone())
+}
+
+/// The first decoded clip of `candidates`.
+fn pick<'a>(lib: &ClipLib, candidates: &[&'a str]) -> Option<&'a str> {
+    candidates.iter().copied().find(|c| lib.has(c))
+}
+
+/// Full-body state (`FullBodyStatePicker`) and whether it blocks the upper-body and left-arm
+/// pickers (`m_bBlocksChildren`).
+fn full_body(p: &PlayerState, a: &ViewAnim, lib: &ClipLib, mv: &MovementConfig) -> (Play, bool) {
+    // Choke (`Ply_Sword_Choke_as` masters, by `eChokeState`) and carrying a body
+    // (`Ply_Empty_CarryCorpse_as` masters): whole rig.
+    let choke = match p.choke.phase {
+        ChokePhase::In => Some(("choke_in", "Sword_Choke_In_Master", false)),
+        ChokePhase::Loop => Some(("choke_loop", "Sword_Choke_Loop_Master", true)),
+        ChokePhase::Win => Some(("choke_win", "Sword_Choke_Win_Master", false)),
+        ChokePhase::Lose => Some(("choke_lose", "Sword_Choke_Lose_Master", false)),
+        ChokePhase::Cancel => Some(("choke_cancel", "Sword_Choke_Cancel_Master", false)),
+        ChokePhase::None => None,
+    };
+    if let Some((k, c, l)) = choke {
+        return (Play { key: k.into(), clip: c.into(), looped: l, rate: 1.0, blend: BLEND_CHOKE, notifies: true }, true);
+    }
+    let speed = p.velocity.truncate().length();
+    if p.carrying.is_some() {
+        if p.carry_anim > 0.0 {
+            // Lifted straight from a won choke, or picked up from the ground.
+            let from_choke = a.fb.key.starts_with("choke") || a.fb.key == "carry_choke";
+            return (if from_choke { once("carry_choke", "Sword_Choke_CarryCorpse_Master", BLEND_CHOKE) } else { once("carry_in", "Empty_CarryCorpse_In_Master", BLEND_ACTION) }, true);
+        }
+        let walking = p.mode == MoveMode::Walking && speed > 30.0;
+        return (if walking { looping("carry_walk", "Empty_CarryCorpse_Walk_Master", (speed / 200.0).clamp(0.6, 1.4), BLEND_NAV) } else { looping("carry_idle", "Empty_CarryCorpse_Idle_Master", 1.0, BLEND_NAV) }, true);
+    }
+    // The low drop plays out over the action lock that follows it.
+    if p.action_lock > 0.0 && a.fb.key.starts_with("carry") {
+        return (once("carry_drop", "Empty_CarryCorpse_DropLow_Master", BLEND_ACTION), true);
+    }
+    match p.sword.phase {
+        // `Assassinate_BackA` (KillSeq Ready_Assassination_Back_Master), else the upper-body
+        // `Assassinate_GenericA`.
+        SwordPhase::Assassinating => {
+            if let Some(c) = pick(lib, &["Sword_Ready_Assassination_Back_Master", "Sword_Ready_Assassination_Generic"]) {
+                return (once("assassinate", c, BLEND_ACTION), true);
+            }
+        }
+        // `AnimStunned` (`Ply_Player_Stunned_at`: in, then loop).
+        SwordPhase::Staggered => {
+            let in_done = a.fb.key == "stun_loop" || (a.fb.key == "stun_in" && a.fb.time >= lib.length("Sword_Stun_In"));
+            if in_done && lib.has("Sword_Stun_Loop") {
+                return (looping("stun_loop", "Sword_Stun_Loop", 1.0, BLEND_ACTION), true);
+            }
+            if lib.has("Sword_Stun_In") {
+                return (once("stun_in", "Sword_Stun_In", BLEND_ACTION), true);
+            }
         }
         _ => {}
     }
-    let speed = p.velocity.truncate().length();
-    let (idle, walk, sprint) = if gun {
-        ("Guns_Idle", "Guns_Walk", "Guns_Sprint")
-    } else if gadget {
-        ("Gadgets_Idle", "Gadgets_Walk", "Gadgets_Sprint")
+    // `Mantle` (`DishonoredAnimNodeSeqMantle` per type: travel Z 20 low, 50 medium, 80 high;
+    // sneaking variants), stretched over the simulation's traversal.
+    if p.mode == MoveMode::Mantling {
+        let dz = p.traversal.to.z - p.traversal.from.z;
+        let h = if dz < 35.0 {
+            "Low"
+        } else if dz < 65.0 {
+            "Medium"
+        } else {
+            "High"
+        };
+        let clip = format!("Sword_{}_Mantle{h}", stance(p));
+        let clip = if lib.has(&clip) { clip } else { format!("Sword_Ready_Mantle{h}") };
+        if lib.has(&clip) {
+            let len = lib.length(&clip);
+            let rate = if p.traversal.duration > 0.0 { (len / p.traversal.duration).clamp(0.5, 2.0) } else { 1.0 };
+            return (Play { key: format!("mantle_{h}"), clip, looped: false, rate, blend: BLEND_MANTLE, notifies: true }, true);
+        }
+    }
+    // Navigation: the air child (`CustomAirIdle`, looping), else `WalkingSpeedBlend`.
+    if p.mode == MoveMode::Falling {
+        if let Some(c) = pick(lib, &[if p.crouched { "Sword_Sneak_Jump" } else { "Sword_Ready_Jump" }, "Sword_Ready_Jump"]) {
+            return (looping(format!("nav_air:{c}"), c, 1.0, BLEND_NAV), false);
+        }
+    }
+    let moving = speed > 20.0 && matches!(p.mode, MoveMode::Walking | MoveMode::Swimming);
+    let rate = |nominal: f32| if nominal > 0.0 { (speed / nominal).clamp(0.5, 1.6) } else { 1.0 };
+    let (tree, child, clip, r) = if p.crouched {
+        // `Nav_Crouched`: idle or walk.
+        if moving { ("crouch", "walk", "Sword_Sneak_Walk", rate(mv.crouch_speed)) } else { ("crouch", "idle", "Sword_Sneak_Idle", 1.0) }
+    } else if p.sprinting && moving {
+        ("sprint", "sprint", "Sword_Ready_Sprint", rate(mv.sprint_speed))
+    } else if !moving {
+        ("default", "idle", "Sword_Ready_Idle", 1.0)
+    } else if speed < 0.45 * (mv.walk_speed + mv.run_speed) {
+        ("default", "walk", "Sword_Ready_Walk", rate(mv.walk_speed))
     } else {
-        ("Powers_Idle", "Powers_Walk", "Powers_Sprint")
+        ("default", "run", "Sword_Ready_Run", rate(mv.run_speed))
     };
-    Some(if p.mode == MoveMode::Walking && speed > 480.0 {
-        (sprint.into(), sprint, true, 1.0)
-    } else if p.mode == MoveMode::Walking && speed > 30.0 {
-        (walk.into(), walk, true, (speed / 250.0).clamp(0.5, 1.6))
-    } else {
-        (idle.into(), idle, true, 1.0)
-    })
+    let clip = pick(lib, &[clip, "Sword_Ready_Idle"]).unwrap_or("Sword_Ready_Idle");
+    let same_tree = a.fb.key.starts_with(&format!("nav_{tree}:"));
+    (looping(format!("nav_{tree}:{child}"), clip, r, if same_tree { BLEND_SPEED } else { BLEND_NAV }), false)
 }
 
-fn sample_into(rig: &ViewRig, layer: &Layer, locals: &mut [(Quat, Vec3)], mask: Option<&[bool]>) {
-    let Some((set, clip)) = rig.clips.get(&layer.clip) else { return };
-    let t = if layer.looped { layer.time } else { layer.time.min(clip.duration - 1e-3).max(0.0) };
-    let mut target = locals.to_vec();
-    for (track, bone) in rig.sets[*set].iter().enumerate() {
-        let Some(b) = *bone else { continue };
-        if mask.is_some_and(|m| !m[b]) {
-            continue;
+/// Upper-body state (`UpperBodyStatePicker`), if any.
+fn upper_body(p: &PlayerState, a: &mut ViewAnim, lib: &ClipLib) -> Option<Play> {
+    match p.sword.phase {
+        // The simulation picks the clip (its damage zone times the hit, `SwingTiming`).
+        SwordPhase::Startup | SwordPhase::Active | SwordPhase::Recovery => {
+            a.ub_shot = None;
+            return Some(once(format!("swing{}", p.sword.swings), swing_clip(p), BLEND_MELEE));
         }
-        let (r, p) = clip.sample(t, track);
-        if let Some(r) = r {
-            target[b].0 = r;
+        // `AnimMeleeBlock` (`Ply_Player_MeleeBlock_at`): start block, then the loop.
+        SwordPhase::Blocking => {
+            a.ub_shot = None;
+            let start = format!("Sword_{}_ParryIdle_In", stance(p));
+            let in_done = a.ub.key == "block" || (a.ub.key == "block_in" && a.ub.time >= lib.length(&a.ub.clip));
+            return Some(if in_done || !lib.has(&start) { looping("block", "Sword_Ready_ParryIdle", 1.0, BLEND_MELEE) } else { once("block_in", &start, BLEND_MELEE) });
         }
-        if let Some(p) = p {
-            target[b].1 = p;
+        _ => {}
+    }
+    // A finished swing plays out to its interruptible point.
+    if a.ub.key.starts_with("swing") && a.ub.weight > 0.0 && a.ub.time < SWING_TAIL && a.ub_shot.is_none() {
+        return Some(once(a.ub.key.clone(), &a.ub.clip, BLEND_MELEE));
+    }
+    running_shot(&mut a.ub_shot, &a.ub, lib)
+}
+
+/// Left-arm state (`LeftArmStatePicker`), if the left hand holds something.
+fn left_arm(p: &PlayerState, a: &mut ViewAnim, lib: &ClipLib, tuning: &CombatTuning, gameplay: &GameplayConfig) -> Option<Play> {
+    let item = p.left.item;
+    let pre = left_prefix(item)?;
+    // `CastPossess` (`Ply_CastPower_at`): in, loop while targeting, out when possessing.
+    if item == LeftHand::Possession {
+        match p.possess.stage {
+            PossessStage::Targeting => {
+                a.la_shot = None;
+                let in_done = a.la.key == "poss_loop" || (a.la.key == "poss_in" && a.la.time >= lib.length("Powers_Cast_Possession_In"));
+                return Some(if in_done { looping("poss_loop", "Powers_Cast_Possession_Loop", 1.0, BLEND_CAST) } else { once("poss_in", "Powers_Cast_Possession_In", BLEND_CAST) });
+            }
+            PossessStage::PrePossess => {
+                a.la_shot = None;
+                return Some(once("poss_out", "Powers_Cast_Possession_Out", BLEND_CAST));
+            }
+            _ => {}
         }
     }
-    let w = if layer.from.is_some() { (layer.fade / FADE).clamp(0.0, 1.0) } else { 1.0 };
-    for (i, l) in locals.iter_mut().enumerate() {
-        if mask.is_some_and(|m| !m[i]) {
-            continue;
+    let n = a.left_action;
+    let act = |c: &str, rate: f32, blend: f32| Some(Play { key: format!("{c}#{n}"), clip: c.to_string(), looped: false, rate, blend, notifies: true });
+    let action = match p.left.phase {
+        LeftPhase::Recovering => match item {
+            LeftHand::Pistol => act("Pistol_Fire", 1.0, BLEND_CAST),
+            // `FireReloadFastCrossbow` (Crossbow_Fire_FastReload at play rate 1.5) with
+            // `Attribute_FastReload`.
+            i if i.is_crossbow() => {
+                if dishonored_sim::left_hand::gun_reload(p, gameplay, tuning).fast > 0.0 { act("Crossbow_Fire_FastReload", 1.5, BLEND_CAST) } else { act("Crossbow_Fire", 1.0, BLEND_CAST) }
+            }
+            LeftHand::Blink => act("Powers_Cast_Blink_Out", 1.0, BLEND_CAST),
+            LeftHand::Windblast => act("Powers_Cast_Windblast", 1.0, BLEND_CAST),
+            LeftHand::BendTime => act("Powers_Cast_BendTime", 1.0, BLEND_CAST),
+            LeftHand::DevouringSwarm => act("Powers_Cast_Swarm", 1.0, BLEND_CAST),
+            LeftHand::Grenade | LeftHand::StickyGrenade => act("Gadgets_Grenade_Deploy", 1.0, BLEND_ACTION),
+            LeftHand::SpringRazor => act("Gadgets_SpringRazor_Deploy", 1.0, BLEND_ACTION),
+            _ => None,
+        },
+        // The reload context (`DisItemContext_ReloadGunPlayer`): ReloadIn, the timed stage
+        // (ReloadIn holds its last frame), ReloadOut; or the fast reload stretched over its
+        // stage. Crossbow actions play at rate 1.3 (`Twk_Inv_CrossbowCorvo`).
+        LeftPhase::Reloading => {
+            let g = dishonored_sim::left_hand::gun_reload(p, gameplay, tuning);
+            let pistol = item == LeftHand::Pistol;
+            if g.fast > 0.0 {
+                let c = if pistol { "Pistol_FastReload" } else { "Crossbow_RapidReload" };
+                let rate = if g.end > 0.0 { (lib.length(c) / g.end).clamp(0.25, 4.0) } else { 1.0 };
+                act(c, rate, 0.0)
+            } else {
+                let (rin, rout, rate) = if pistol { ("Pistol_Reload_In", "Pistol_Reload_Out", 1.0) } else { ("Crossbow_Reload_In", "Crossbow_Reload_Out", 1.3) };
+                act(if p.left.timer < g.load { rin } else { rout }, rate, BLEND_CAST)
+            }
         }
-        let from = layer.from.as_ref().and_then(|f| f.get(i)).copied().unwrap_or(*l);
-        l.0 = from.0.slerp(target[i].0, w);
-        l.1 = from.1.lerp(target[i].1, w);
+        // `CastBlink`: in, then loop while aiming.
+        LeftPhase::Aiming if item == LeftHand::Blink => {
+            let in_done = a.la.key == "blink_loop" || (a.la.key == "blink_in" && a.la.time >= lib.length("Powers_Cast_Blink_In"));
+            Some(if in_done { looping("blink_loop", "Powers_Cast_Blink_Loop", 1.0, BLEND_CAST) } else { once("blink_in", "Powers_Cast_Blink_In", BLEND_CAST) })
+        }
+        _ => None,
+    };
+    if let Some(play) = action.filter(|pl| lib.has(&pl.clip)) {
+        a.la_shot = None;
+        return Some(play);
     }
+    if let Some(s) = running_shot(&mut a.la_shot, &a.la, lib) {
+        return Some(s);
+    }
+    // `Nav_Default` of the left hand (`Ply_Nav_LeftHand_at`): idle below the speed blend,
+    // `CustomWalk` walking or running, `CustomSprint` sprinting, `CustomAirIdle` falling.
+    let speed = p.velocity.truncate().length();
+    let moving = speed > 20.0;
+    let (child, suffix) = if p.mode == MoveMode::Falling {
+        ("air", "Jump")
+    } else if !moving {
+        ("idle", "Idle")
+    } else if p.sprinting {
+        ("sprint", "Sprint")
+    } else {
+        ("walk", "Walk")
+    };
+    let clip = format!("{pre}{suffix}");
+    let clip = if lib.has(&clip) { clip } else { format!("{pre}Idle") };
+    let blend = if a.la.key.starts_with("lnav:") && child != "air" && !a.la.key.starts_with("lnav:air") { BLEND_SPEED } else { BLEND_NAV };
+    Some(Play { key: format!("lnav:{child}:{clip}"), clip, looped: true, rate: 1.0, blend, notifies: false })
+}
+
+/// Sync group of a full-body / left-arm locomotion key (`MasterIdleSync`, `MasterRunSync`,
+/// `MasterSprintSync`; the full body's walk is in `WalkCycles`, which the left hand does not
+/// join).
+fn sync_group(key: &str) -> Option<&'static str> {
+    if key.starts_with("nav_default:idle") || key.starts_with("nav_crouch:idle") || key.starts_with("lnav:idle:") {
+        Some("idle")
+    } else if key.starts_with("nav_default:run") || key.starts_with("lnav:walk:") {
+        Some("run")
+    } else if key.starts_with("nav_sprint:sprint") || key.starts_with("lnav:sprint:") {
+        Some("sprint")
+    } else {
+        None
+    }
+}
+
+/// The weapon mesh's clip for what its hand plays: the hand's sequence name, or the same
+/// action under the weapon's prefixes, else the weapon's idle.
+fn weapon_clip(w: &WeaponGpu, driver: &Layer, p: &PlayerState) -> Option<String> {
+    if driver.weight <= 0.0 || driver.clip.is_empty() {
+        return None;
+    }
+    let arm = driver.clip.as_str();
+    if w.held == Held::Sword {
+        return w.lib.has(arm).then(|| arm.to_string());
+    }
+    let stem = arm.split_once('_').map(|(_, s)| s).unwrap_or(arm);
+    let bare = stem.strip_prefix("Ready_").unwrap_or(stem);
+    let mut cands: Vec<String> = vec![arm.to_string()];
+    for pre in w.prefixes {
+        cands.push(format!("{pre}_{stem}"));
+        cands.push(format!("{pre}_{bare}"));
+    }
+    cands.push(stem.to_string());
+    cands.push(bare.to_string());
+    let empty = match w.held {
+        Held::Crossbow => p.left.bolts_loaded == 0,
+        Held::Pistol => p.left.pistol_loaded == 0,
+        Held::Sword => false,
+    };
+    for pre in w.prefixes {
+        if empty {
+            cands.push(format!("{pre}_OutOfAmmo_Idle"));
+        }
+        cands.push(format!("{pre}_Idle"));
+    }
+    cands.push("Idle".into());
+    cands.into_iter().find(|c| w.lib.has(c))
 }
 
 pub fn animate_view_rig(
@@ -442,46 +953,125 @@ pub fn animate_view_rig(
     // [interp] A soiree's player group puts both hands' items away (`StatePlayerMasterSoiree`
     // enter, 0x00a66ff0: both hands blended to 1 through 0x00aa1cf0).
     let held = cutscenes.as_ref().is_some_and(|c| c.held);
-    let Some(me) = view.me.as_ref().filter(|m| m.alive && first_person && m.mode != MoveMode::Blinking && !held) else {
+    let shown = view.me.as_ref().filter(|m| m.alive && first_person && m.mode != MoveMode::Blinking && !held);
+    let Some(me) = shown else {
+        if let Some(m) = view.me.as_ref() {
+            anim.prev = Some(Prev::of(m));
+        }
         *root_vis = Visibility::Hidden;
         return;
     };
     *root_vis = Visibility::Inherited;
     let dt = time.delta_secs();
-    let tuning = dishonored_sim::tuning::CombatTuning::from_config(&session.content.sim.gameplay);
+    let gameplay = &session.content.sim.gameplay;
+    let tuning = CombatTuning::from_config(gameplay);
+    let lib = &rig.lib;
     let a = &mut *anim;
-    if a.prev_locals.len() != rig.bones.len() {
-        a.prev_locals = rig.bones.iter().map(|b| (b.rotation, b.translation)).collect();
+
+    // Pick each layer's state.
+    transitions(me, a, lib);
+    let (fb_play, blocks) = full_body(me, a, lib, &gameplay.movement);
+    a.fb.set(&fb_play);
+    a.fb.weight = 1.0;
+    if blocks {
+        a.ub_shot = None;
+        a.la_shot = None;
     }
-    let (rk, rc, rl, rr) = right_clip(me, a);
-    let snap = a.prev_locals.clone();
-    a.right.set(rk, rc, rl, rr, Some(snap.clone()));
-    match left_clip(me, a, &tuning) {
-        Some((k, c, l, r)) => a.left.set(k, c, l, r, Some(snap)),
-        None => a.left.set(String::new(), "", true, 1.0, Some(snap)),
-    }
-    for l in [&mut a.right, &mut a.left] {
-        let from = l.time;
-        l.time += dt * l.rate;
-        // Sound notifies (AnimNotify_AkEvent, footfalls) of the advanced window.
-        if let Some(s) = anim_sounds.as_mut() {
-            s.advance(me.id, &l.clip, from, l.time, l.looped);
+    let ub_play = if blocks { None } else { upper_body(me, a, lib) };
+    match ub_play {
+        Some(pl) => {
+            a.ub.set(&pl);
+            a.ub.approach(1.0, pl.blend, dt);
         }
-        l.fade += dt;
+        None => {
+            let b = a.ub.blend;
+            a.ub.approach(0.0, b, dt);
+        }
     }
-    let mut locals: Vec<(Quat, Vec3)> = rig.bones.iter().map(|b| (b.rotation, b.translation)).collect();
-    sample_into(&rig, &a.right, &mut locals, None);
-    if !a.left.clip.is_empty() {
-        sample_into(&rig, &a.left, &mut locals, Some(&rig.left_arm));
+    let la_play = if blocks { None } else { left_arm(me, a, lib, &tuning, gameplay) };
+    match la_play {
+        Some(pl) => {
+            a.la.set(&pl);
+            a.la.approach(1.0, pl.blend, dt);
+        }
+        None => {
+            let b = a.la.blend;
+            a.la.approach(0.0, b, dt);
+        }
     }
-    a.prev_locals = locals.clone();
+    a.prev = Some(Prev::of(me));
+
+    // Advance; the left hand's locomotion follows the full body's in a shared sync group.
+    for l in [&mut a.fb, &mut a.ub, &mut a.la] {
+        advance_layer(l, dt, anim_sounds.as_deref_mut(), me.id);
+    }
+    if let (Some(gf), Some(gl)) = (sync_group(&a.fb.key), sync_group(&a.la.key)) {
+        let (lf, ll) = (lib.length(&a.fb.clip), lib.length(&a.la.clip));
+        if gf == gl && lf > 0.0 && ll > 0.0 {
+            a.la.time = (a.fb.time / lf).rem_euclid(1.0) * ll;
+        }
+    }
+
+    // Compose: full body, then the filters in component space.
+    let mut locals = a.fb.pose(lib, &rig.bind_pose);
+    if a.ub.weight > 0.0 {
+        let ub = a.ub.pose(lib, &rig.bind_pose);
+        locals = blend_per_bone(&rig.parents, &locals, &ub, &rig.upper_body, a.ub.weight);
+    }
+    if a.la.weight > 0.0 {
+        let la = a.la.pose(lib, &rig.bind_pose);
+        locals = blend_per_bone(&rig.parents, &locals, &la, &rig.left_arm, a.la.weight);
+    }
     let bones: Vec<BoneAsset> = rig.bones.iter().zip(&locals).map(|(b, (q, t))| BoneAsset { rotation: *q, translation: *t, ..b.clone() }).collect();
     let globals = bind_globals(&bones);
+
+    // The weapons' own sequences, with the hand that holds them.
+    if a.weapons.len() != rig.weapons.len() {
+        a.weapons = rig.weapons.iter().map(|_| WeaponAnim::default()).collect();
+    }
+    let mut wglobals: Vec<Vec<glam::Mat4>> = Vec::with_capacity(rig.weapons.len());
+    for (w, wa) in rig.weapons.iter().zip(a.weapons.iter_mut()) {
+        let driver = match w.held {
+            Held::Sword if a.ub.weight > 0.5 => &a.ub,
+            Held::Sword => &a.fb,
+            Held::Pistol | Held::Crossbow => &a.la,
+        };
+        let clip = weapon_clip(w, driver, me);
+        let mut pose = w.bind_pose.clone();
+        if let Some(c) = &clip {
+            w.lib.sample(c, driver.time, driver.looped, &mut pose);
+        }
+        let key = clip.unwrap_or_default();
+        if wa.key != key {
+            wa.from = (!wa.last.is_empty()).then(|| wa.last.clone());
+            wa.key = key;
+            wa.fade = 0.0;
+        }
+        wa.fade += dt;
+        let fw = (wa.fade / WEAPON_FADE).clamp(0.0, 1.0);
+        let done = match &wa.from {
+            Some(from) if fw < 1.0 && from.len() == pose.len() => {
+                for (p, f) in pose.iter_mut().zip(from) {
+                    *p = mix(*f, *p, fw);
+                }
+                false
+            }
+            _ => true,
+        };
+        if done {
+            wa.from = None;
+        }
+        wa.last.clone_from(&pose);
+        let wb: Vec<BoneAsset> = w.bones.iter().zip(&pose).map(|(b, (q, t))| BoneAsset { rotation: *q, translation: *t, ..b.clone() }).collect();
+        wglobals.push(bind_globals(&wb));
+    }
+
     if std::env::var_os("DISH_VM_DEBUG").is_some() {
         let cam = rig.m2p * globals[rig.cam_bone];
         let rel = |i: usize| cam.inverse().transform_point3((rig.m2p * globals[i]).w_axis.truncate());
         let names: Vec<String> = rig.weapons.iter().map(|w| format!("{}={:.0}", rig.bones[w.socket].name, rel(w.socket))).collect();
-        info!("vm r={} l={} {}", a.right.clip, a.left.clip, names.join(" "));
+        let wk: Vec<&str> = a.weapons.iter().map(|w| w.key.as_str()).collect();
+        info!("vm fb={} ub={}({:.2}) la={}({:.2}) weapons={:?} {}", a.fb.clip, a.ub.clip, a.ub.weight, a.la.clip, a.la.weight, wk, names.join(" "));
     }
     // Camera bone frame: forward = -Z, right = +Y, up = +X (pawn space).
     let cam = rig.m2p * globals[rig.cam_bone];
@@ -496,25 +1086,26 @@ pub fn animate_view_rig(
     for (wj, mut t) in &mut wjoints {
         let w = &rig.weapons[wj.weapon];
         let base = rig.m2p * globals[w.socket];
+        let wb = wglobals.get(wj.weapon).and_then(|g| g.get(wj.bone)).copied().unwrap_or(w.bind[wj.bone]);
         let m = match attach.as_str() {
-            "A" => base * w.bind[wj.bone],
-            "B" => base * w.m2p * w.bind[wj.bone],
-            "C" => base * w.m2p.inverse() * w.bind[wj.bone],
-            "E" => base * glam::Mat4::from_rotation_x(std::f32::consts::PI) * w.m2p.inverse() * w.bind[wj.bone],
+            "A" => base * wb,
+            "B" => base * w.m2p * wb,
+            "C" => base * w.m2p.inverse() * wb,
+            "E" => base * glam::Mat4::from_rotation_x(std::f32::consts::PI) * w.m2p.inverse() * wb,
             // The earlier visual choice for the sword (U-025): Rz(180) * inverse RotOrigin.
-            "V" => base * glam::Mat4::from_rotation_z(std::f32::consts::PI) * w.m2p.inverse() * w.bind[wj.bone],
+            "V" => base * glam::Mat4::from_rotation_z(std::f32::consts::PI) * w.m2p.inverse() * wb,
             // The original attach: the rig socket (`RightHandWpn` yaw +90 / `LeftHandWpn`
             // (0, -16384, 16384) on the hand attachment bones of `Skm_Player`), then the weapon
             // mesh's own Origin / RotOrigin. For the guns this equals the inverse RotOrigin used
             // before (the rotator is a 120-degree axis cycle); for the sword it keeps the blade
             // direction and fixes its roll.
-            _ => base * w.socket_rel * w.m2p * w.bind[wj.bone],
+            _ => base * w.socket_rel * w.m2p * wb,
         };
         *t = Transform::from_matrix(to_bevy(m));
     }
     for (wm, mut vis) in &mut wmeshes {
         // Carrying a body sheathes the sword and lowers the left hand.
-        let carrying = me.carrying.is_some() || a.right.key == "carry_drop";
+        let carrying = me.carrying.is_some() || a.fb.key == "carry_drop";
         let show = match rig.weapons[wm.0].held {
             Held::Sword => !carrying,
             Held::Pistol => me.left.item == LeftHand::Pistol && !carrying,

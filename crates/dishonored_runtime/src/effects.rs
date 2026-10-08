@@ -16,7 +16,8 @@ use bevy::prelude::*;
 use dishonored_ir::particles::{ParticleBlend, ParticleEmitterAsset, ParticleSystemAsset};
 use dishonored_ir::DishonoredMap;
 use dishonored_sim::events::{DamageCause, SimEvent};
-use dishonored_sim::state::{MoveMode, PlayerState};
+use dishonored_sim::input::LeftHand;
+use dishonored_sim::state::PlayerState;
 use dishonored_world::WorldQuery;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -77,29 +78,20 @@ impl Material for GlowMaterial {
     }
 }
 
-/// ParticleSystems the gameplay effects use (decoded with every level, from DishonoredGame).
-pub const GAMEPLAY_PARTICLES: &[&str] = &[
-    PLAYER_MUZZLE,
-    PAWN_MUZZLE,
-    SHADOW_KILL_PS,
-    "Vfx_GamePlay.Blink.Blink_Mantle_01",
-    "Vfx_GamePlay.Windblast.Windblast_lvl2",
-    "Vfx_GamePlay.Windblast.Windblast_UndWater_lvl1",
-    "Vfx_PhysMat.pistol.Ps_Pistol_Blast",
-    "Vfx_Weapon.Effects.Ps_SwordSparks_Parry",
-    "Vfx_PhysMat.Blood.Pfx_PistolBlood_Blast",
-    "Vfx_PhysMat.Blood.Pfx_BloodSProjectile_Default",
-    "Vfx_GamePlay.Blink.Blink_Ground_01",
-    "Vfx_GamePlay.Blink.Blink_Fall_01",
-    "Vfx_GamePlay.Windblast.Windblast_lvl1",
-    "Vfx_PhysMat.pistol.Ps_PistolImpact_DirtPs_PistolImpact_Dirt",
-    "Vfx_PhysMat.pistol.Ps_PistolImpact_MetalPs_PistolImpact_Dirt",
-    "Vfx_PhysMat.pistol.Ps_PistolImpact_WoodPs_PistolImpact_Dirt",
-    "Vfx_PhysMat.Wood.Pfx_wooden_shard",
-    "Vfx_PhysMat.Water.Pfx_WaterSplash",
-];
+/// ParticleSystems the gameplay effects use (decoded with every level, from DishonoredGame):
+/// the tweaks' effects and every contact-system particle (`particle_material::GAMEPLAY_PARTICLES`).
+pub const GAMEPLAY_PARTICLES: &[&str] = dishonored_assets::particle_material::GAMEPLAY_PARTICLES;
 
 const MAX_PARTICLES: usize = 400;
+/// Longest life of a gameplay one-shot instance (s): looping emitters spawned as one-shots
+/// are cut here.
+pub const ONE_SHOT_LIMIT: f32 = 12.0;
+/// Blink's targeting indicators (`Twk_Blink`: `m_pGroundPS` on a floor, `m_pLowFallPS` /
+/// `m_pHighFallPS` in the air, `m_pMantlePS` on a ledge). Their emitters loop forever with
+/// `bKillOnDeactivate`: the power keeps one at the target while aiming and kills it on release.
+pub const BLINK_GROUND_PS: &str = "Vfx_GamePlay.Blink.Blink_Ground_01";
+pub const BLINK_FALL_PS: &str = "Vfx_GamePlay.Blink.Blink_Fall_01";
+pub const BLINK_MANTLE_PS: &str = "Vfx_GamePlay.Blink.Blink_Mantle_01";
 /// Placed emitters are simulated only within this distance of the camera (uu).
 const SIM_RANGE: f32 = 9000.0;
 
@@ -113,6 +105,8 @@ struct LevelFx {
     mesh_parts: HashMap<(usize, usize), (Handle<Mesh>, Handle<StandardMaterial>)>,
     /// Emitters not drawn (untextured mesh emitters).
     skipped: std::collections::HashSet<(usize, usize)>,
+    /// Sprite emitters whose material erodes by the particle alpha (`ParticleShading::erode`).
+    erode: std::collections::HashSet<(usize, usize)>,
     /// Untextured (procedural) mesh emitters: mesh, colour x intensity, glow parameters.
     glow: HashMap<(usize, usize), (Handle<Mesh>, Vec4, Vec4)>,
     /// Emitters with distortion materials, drawn again by the distortion pass.
@@ -163,10 +157,18 @@ pub struct Effects {
     /// The last gameplay effects asked for: (system path, spawned) (harness `effects` command).
     pub recent: Vec<(String, bool)>,
     pub live_particles: usize,
+    /// Gameplay one-shot instances alive (systems still simulating).
+    pub live_oneshots: usize,
     /// Effects due later: (time, system, position, direction).
     delayed: Vec<(f32, String, Vec3, Vec3)>,
     /// Projectile id -> fired as a crossbow bolt (impact striker).
     bolts: HashMap<u32, bool>,
+    /// The Blink targeting indicator's instance and system while aiming.
+    indicator: Option<(Entity, &'static str)>,
+    /// Effects that follow a live object (`attached_effects`): (kind, key) -> instance, system.
+    attached: HashMap<(u8, u32), (Entity, &'static str)>,
+    /// Spring Razor traps placed: trap id -> position (their trigger effect).
+    traps: HashMap<u32, Vec3>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -249,6 +251,8 @@ impl Plugin for EffectsPlugin {
             Update,
             (
                 gameplay_effects.before(crate::audio::drive),
+                blink_indicator,
+                attached_effects,
                 // After everything that places the camera or sets its projection this frame
                 // (`simulate` culls sprite meshes against that view).
                 simulate.after(crate::players::camera_follow).after(crate::cutscene::camera).after(crate::viewmodel::apply_fov).after(crate::inspect_cam),
@@ -275,6 +279,10 @@ impl Effects {
 fn material_for(map: &DishonoredMap, em: &ParticleEmitterAsset, images: &mut Assets<Image>, cache: &mut HashMap<usize, Handle<Image>>, mats: &mut Assets<StandardMaterial>) -> Handle<StandardMaterial> {
     let tex = em.material.and_then(|m| {
         let ma = map.materials.get(m)?;
+        // A decoded particle material's sprite texture is its diffuse slot (or none).
+        if map.material_params.get(m).is_some_and(|p| p.particle.is_some()) {
+            return ma.diffuse;
+        }
         ma.diffuse.or_else(|| ma.texture_params.first().map(|t| t.1)).or_else(|| map.material_params.get(m).and_then(|p| p.opacity.or(p.emissive)))
     });
     let image = tex.and_then(|t| {
@@ -300,19 +308,19 @@ fn material_for(map: &DishonoredMap, em: &ParticleEmitterAsset, images: &mut Ass
     let gain: f32 = params
         .map(|p| p.scalars.iter().filter(|s| ["LightIntensity", "Opacity", "Intensity", "EmissiveIntensity", "Emissive_Intensity"].iter().any(|n| s.0.eq_ignore_ascii_case(n))).map(|s| s.1).product())
         .unwrap_or(1.0);
-    // `DefaultTranslu_PMAT` sprites (decoded shaders, EFFECTS.md "Particle materials"): the
-    // importer put the permutation's colour x opacity texture in the diffuse slot; the shader
-    // multiplies it by `D_DiffuseColorTweak` (rgb, and alpha into the opacity) and the vertex
-    // colour, nothing else.
-    let translu = params.is_some_and(|p| p.base_material.as_deref().is_some_and(|b| b.ends_with("DefaultTranslu_PMAT")));
-    let (tint, gain) = if translu {
-        let tw = params.and_then(|p| p.vectors.iter().find(|v| v.0.eq_ignore_ascii_case("D_DiffuseColorTweak")).map(|v| v.1)).unwrap_or([1.0; 4]);
-        ([tw[0], tw[1], tw[2], 1.0], tw[3])
-    } else {
-        (tint, gain)
+    // Decoded particle materials (EFFECTS.md "Particle materials"): the importer baked the
+    // shader's colour x opacity sources into the diffuse slot; the shader multiplies them by
+    // its constants and the vertex colour, nothing else.
+    let shading = params.and_then(|p| p.particle);
+    let (tint, gain) = match shading {
+        Some(s) => ([s.tint[0], s.tint[1], s.tint[2], 1.0], s.opacity),
+        None => (tint, gain),
     };
-    let image = image.or_else(|| {
-        let power = params.and_then(|p| p.scalars.iter().find(|s| s.0.eq_ignore_ascii_case("SphereMask_Power")).map(|s| s.1)).unwrap_or(2.0);
+    // A decoded sprite with only a colour constant (no texture) draws a plain quad, as the
+    // original; only procedural glows get the radial falloff.
+    let plain = shading.is_some_and(|s| s.radial_power.is_none());
+    let image = if plain { image } else { image.or_else(|| {
+        let power = shading.and_then(|s| s.radial_power).or_else(|| params.and_then(|p| p.scalars.iter().find(|s| s.0.eq_ignore_ascii_case("SphereMask_Power")).map(|s| s.1))).unwrap_or(2.0);
         let key = usize::MAX - (power * 100.0) as usize;
         if let Some(h) = cache.get(&key) {
             return Some(h.clone());
@@ -320,7 +328,7 @@ fn material_for(map: &DishonoredMap, em: &ParticleEmitterAsset, images: &mut Ass
         let h = images.add(radial_falloff(power));
         cache.insert(key, h.clone());
         Some(h)
-    });
+    }) };
     // Emissive bug / glow materials (`E_Emissive_Color`, alpha = intensity: fireflies x25):
     // drawn additively with the emissive colour (unlit, so it reads as the glowing body).
     let emissive = params.and_then(|p| p.vectors.iter().find(|v| v.0.eq_ignore_ascii_case("E_Emissive_Color")).map(|v| v.1)).filter(|e| e[3] > 1.0);
@@ -453,6 +461,12 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
     let lf = Arc::new(LevelFx {
         by_path: map.particle_systems.iter().enumerate().map(|(i, s)| (s.source.to_ascii_lowercase(), i)).collect(),
         systems: map.particle_systems.clone(),
+        erode: map
+            .particle_systems
+            .iter()
+            .enumerate()
+            .flat_map(|(si, s)| s.emitters.iter().enumerate().filter(|(_, e)| e.material.and_then(|m| map.material_params.get(m)).and_then(|p| p.particle).is_some_and(|p| p.erode)).map(move |(ei, _)| (si, ei)))
+            .collect(),
         materials,
         mesh_parts,
         skipped,
@@ -778,6 +792,10 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
     }
     sim.particles.retain(|p| p.age < p.life);
     if sim.done {
+        // A completed emitter (all `EmitterLoops` played) is destroyed with its particles that
+        // have no Lifetime module (they live until the emitter goes, e.g. the five sprite
+        // emitters of the pistol muzzle `Ps_PlayerPistol_StdMuzzle_01`).
+        sim.particles.retain(|p| p.life.is_finite());
         return;
     }
     // Emitter time, loops, spawn rate and bursts (burst times are fractions of the duration).
@@ -822,7 +840,11 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
 }
 
 /// Write the sprite quads of one emitter into its mesh (Bevy space, facing the camera).
-fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right: Vec3, cam_up: Vec3, cam_pos: Vec3, mesh: &mut Mesh) {
+/// `erode`: the material erodes its opacity map by the particle alpha
+/// (`saturate((H - alpha) x Mask_Multiply)`, `ParticleShading::erode`); the importer baked
+/// `saturate(H x Mask_Multiply)` and the vertex alpha becomes `1 - alpha` (APPROXIMATION: the
+/// sprite fades where the original's shape shrinks).
+fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right: Vec3, cam_up: Vec3, cam_pos: Vec3, erode: bool, mesh: &mut Mesh) {
     let n = sim.particles.len();
     let mut pos = Vec::with_capacity(n * 4);
     let mut uv = Vec::with_capacity(n * 4);
@@ -839,6 +861,7 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
     for p in &sim.particles {
         let rel = (p.age / p.life).clamp(0.0, 1.0);
         let (color, alpha, size) = look(p);
+        let alpha = if erode { 1.0 - alpha.clamp(0.0, 1.0) } else { alpha };
         let world = world_of(p);
         let c = coords::pos(world);
         let (hw, hh) = (size.x * 0.5 * coords::UU_TO_BEVY, if em.screen_align == 1 { size.y } else { size.x } * 0.5 * coords::UU_TO_BEVY);
@@ -872,6 +895,8 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
         }
         let f = match &em.sub_image {
             Some(d) => (d.eval1(rel, p.r[2]).floor().max(0.0) as u32).min(frames - 1),
+            // `PSUVIM_Random`: a random sub-image per particle (blood splashes, 2 x 2).
+            None if em.sub_random => ((p.r[2] * frames as f32) as u32).min(frames - 1),
             None => 0,
         };
         let (fx, fy) = ((f % em.sub_h) as f32, (f / em.sub_h) as f32);
@@ -985,6 +1010,7 @@ fn simulate(
     };
     let ray_fn: RayFn = &ray_closure;
     let mut live = 0;
+    fx.live_oneshots = q.iter().filter(|(_, i, _)| i.one_shot).count();
     for (e, mut inst, vis) in &mut q {
         if !vis.get() && !inst.one_shot {
             continue;
@@ -1085,7 +1111,7 @@ fn simulate(
             } else if crate::profile::perf_baseline() {
                 // Before / after timings: the old per-frame rebuild of every sprite mesh.
                 if let Some(mut m) = inst.meshes.get(i).and_then(|h| meshes.get_mut(h)) {
-                    build_mesh(em, sim, &xf, right, up, cam_pos_b, &mut m);
+                    build_mesh(em, sim, &xf, right, up, cam_pos_b, lf.erode.contains(&(inst.system, i)), &mut m);
                     sim.mesh_empty = sim.particles.is_empty();
                 }
             } else if sprite_mesh_used(&lf, inst.system, i) {
@@ -1100,7 +1126,7 @@ fn simulate(
                         if sprite_culled {
                             clear_sprite_mesh(&mut m);
                         } else {
-                            build_mesh(em, sim, &xf, right, up, cam_pos_b, &mut m);
+                            build_mesh(em, sim, &xf, right, up, cam_pos_b, lf.erode.contains(&(inst.system, i)), &mut m);
                         }
                         sim.mesh_empty = empty;
                     }
@@ -1132,7 +1158,10 @@ fn simulate(
                 }
             }
         }
-        if inst.one_shot && inst.sims.iter().all(|s| (s.done || s.time > 10.0) && s.particles.is_empty()) {
+        // One-shots end when every emitter is done and empty; an emitter that loops forever
+        // (`EmitterLoops` 0, e.g. the Blink indicators) is deactivated after ONE_SHOT_LIMIT, its
+        // particles killed (`bKillOnDeactivate`), so no spawned effect outlives its use.
+        if inst.one_shot && inst.sims.iter().all(|s| ((s.done || s.time > 10.0) && s.particles.is_empty()) || s.time > ONE_SHOT_LIMIT) {
             commands.entity(e).despawn();
         }
     }
@@ -1194,7 +1223,6 @@ fn gameplay_effects(
         }
         best.and_then(|b| world.surface_of(b.1)).unwrap_or("DisContactType_Environment").to_string()
     };
-    let mantled: Vec<u32> = events.iter().filter_map(|e| if let SimEvent::Mantle { id, .. } = e { Some(*id) } else { None }).collect();
     for ev in events.iter() {
         let (path, at, dir): (String, Vec3, Vec3) = match ev {
             SimEvent::SwordBlocked { defender, .. } | SimEvent::SwordParried { defender, .. } => {
@@ -1203,14 +1231,53 @@ fn gameplay_effects(
             }
             SimEvent::Fired { id, bolt, projectile } => {
                 fx.bolts.insert(*projectile, *bolt);
-                if *bolt {
-                    continue;
-                }
                 let Some(p) = find(*id) else { continue };
-                let path = if Some(*id) == me { PLAYER_MUZZLE } else { PAWN_MUZZLE };
-                // The animated pistol's socket; without one (first person), in front of the eye.
-                let (at, dir) = sockets.muzzle.get(id).copied().filter(|m| m.0.distance(p.position) < 200.0).unwrap_or((p.position + Vec3::Z * 60.0 + look(&p) * 50.0, look(&p)));
-                (path.into(), at, dir)
+                if *bolt {
+                    // The crossbow's muzzle (`Twk_Inv_Crossbow`'s fire tweak), in front of the eye.
+                    (CROSSBOW_MUZZLE.into(), p.position + Vec3::Z * 60.0 + look(&p) * 50.0, look(&p))
+                } else {
+                    // Grenade throws also report `Fired` (a projectile without a bolt): no muzzle.
+                    if matches!(p.left.item, LeftHand::Grenade | LeftHand::StickyGrenade) {
+                        continue;
+                    }
+                    let path = if Some(*id) == me { PLAYER_MUZZLE } else { PAWN_MUZZLE };
+                    // The animated pistol's socket; without one (first person), in front of the eye.
+                    let (at, dir) = sockets.muzzle.get(id).copied().filter(|m| m.0.distance(p.position) < 200.0).unwrap_or((p.position + Vec3::Z * 60.0 + look(&p) * 50.0, look(&p)));
+                    (path.into(), at, dir)
+                }
+            }
+            // Possession: the cast at the caster's hand and the possession burst on the host
+            // (`PossesTarget_Rats_01` for a rat).
+            SimEvent::PossessStart { id, host } => {
+                let (Some(p), Some(h)) = (find(*id), find(*host)) else { continue };
+                spawn_effect(&mut commands, &mut meshes, &mut fx, POSSESSION_CAST_PS, p.position + Vec3::Z * 40.0 + look(&p) * 40.0, look(&p));
+                let target = if h.kind == dishonored_sim::state::PawnKind::Rat { POSSESSION_RAT_PS } else { POSSESSION_HUMAN_PS };
+                (target.into(), h.position, Vec3::Z)
+            }
+            SimEvent::PossessEnd { host, .. } => {
+                let Some(h) = find(*host) else { continue };
+                let target = if h.kind == dishonored_sim::state::PawnKind::Rat { POSSESSION_RAT_PS } else { POSSESSION_HUMAN_PS };
+                (target.into(), h.position, Vec3::Z)
+            }
+            // Devouring Swarm: the hand cast and the summoning at the swarm's spot (level 2 has
+            // its own system).
+            SimEvent::SwarmSummoned { id, position, .. } => {
+                if let Some(p) = find(*id) {
+                    spawn_effect(&mut commands, &mut meshes, &mut fx, SWARM_CAST_PS, p.position + Vec3::Z * 40.0 + look(&p) * 40.0, look(&p));
+                }
+                let lvl = find(*id).map(|p| p.inv.power_levels[dishonored_sim::state::power::DEVOURING_SWARM]).unwrap_or(1);
+                ((if lvl >= 2 { SWARM_SUMMON2_PS } else { SWARM_SUMMON_PS }).into(), *position, Vec3::Z)
+            }
+            // Grenade / sticky grenade explosion (`DisProjectile_Grenade` explosion template).
+            SimEvent::Explosion { position, .. } => (GRENADE_EXPLOSION_PS.into(), *position, Vec3::Z),
+            // Spring Razor: the trap's burst when it springs, at the trap.
+            SimEvent::TrapPlaced { trap, position, .. } => {
+                fx.traps.insert(*trap, *position);
+                continue;
+            }
+            SimEvent::TrapTriggered { trap } => {
+                let Some(at) = fx.traps.remove(trap) else { continue };
+                (SPRING_RAZOR_PS.into(), at, Vec3::Z)
             }
             SimEvent::Damage { victim, cause, .. } => {
                 let Some(p) = find(*victim) else { continue };
@@ -1225,17 +1292,6 @@ fn gameplay_effects(
                     _ => "Vfx_PhysMat.Blood.Pfx_BloodSProjectile_Default".into(),
                 });
                 (path, p.position + Vec3::Z * 50.0, -fwd(p.yaw))
-            }
-            SimEvent::BlinkEnd { id } => {
-                let Some(p) = find(*id) else { continue };
-                let path = if mantled.contains(id) {
-                    "Vfx_GamePlay.Blink.Blink_Mantle_01"
-                } else if p.mode == MoveMode::Falling {
-                    "Vfx_GamePlay.Blink.Blink_Fall_01"
-                } else {
-                    "Vfx_GamePlay.Blink.Blink_Ground_01"
-                };
-                (path.into(), p.position - Vec3::Z * 80.0, Vec3::Z)
             }
             SimEvent::WindblastCast { id } => {
                 let Some(p) = find(*id) else { continue };
@@ -1265,6 +1321,135 @@ fn gameplay_effects(
         };
         spawn_effect(&mut commands, &mut meshes, &mut fx, &path, at, dir);
     }
+}
+
+/// Blink's targeting indicator (`Twk_Blink`, EFFECTS.md "Gameplay effects"): while the local
+/// player aims Blink (`left.blink_target`), one instance of `m_pGroundPS` stands on the floor
+/// under the target, or `m_pLowFallPS` floats at a target in the air; it follows the target
+/// every frame and is killed when aiming ends (release, cancel, travel), as its emitters
+/// (`bKillOnDeactivate`, endless loops) are deactivated by the power.
+fn blink_indicator(mut commands: Commands, mut fx: ResMut<Effects>, mut meshes: ResMut<Assets<Mesh>>, view: Option<Res<SessionView>>, session: Option<Res<crate::session::Session>>, mut q: Query<&mut FxInstance>) {
+    let target = view.as_ref().and_then(|v| v.me.as_ref()).and_then(|me| me.left.blink_target);
+    let want = target.and_then(|t| {
+        let s = session.as_ref()?;
+        let hh = s.content.sim.gameplay.movement.collision_half_height;
+        // The target is raised to CollisionHeight above the floor below it: a floor within that
+        // (plus a margin) means the pawn lands standing.
+        let floor = s.content.collision.raycast(t, -Vec3::Z, hh + 24.0, dishonored_world::channel::PAWN).map(|h| t - Vec3::Z * h.distance);
+        Some(match floor {
+            Some(f) => (BLINK_GROUND_PS, f),
+            None => (BLINK_FALL_PS, t),
+        })
+    });
+    let current = fx.indicator.take();
+    let Some((path, at)) = want else {
+        if let Some((e, _)) = current {
+            commands.entity(e).try_despawn();
+        }
+        return;
+    };
+    let m = Mat4::from_translation(at);
+    if let Some((e, p)) = current {
+        if p == path {
+            if let Ok(mut inst) = q.get_mut(e) {
+                inst.set_transform(m);
+                fx.indicator = Some((e, p));
+                return;
+            }
+        } else {
+            commands.entity(e).try_despawn();
+        }
+    }
+    let Some(lf) = fx.levels.get(&fx.active).cloned() else { return };
+    let Some(&si) = lf.by_path.get(&path.to_ascii_lowercase()) else { return };
+    let level = fx.active.clone();
+    if let Some(e) = spawn_instance(&mut commands, &mut meshes, &lf, &level, si, m, false) {
+        fx.indicator = Some((e, path));
+    }
+}
+
+/// Crossbow muzzle (`Startup`).
+pub const CROSSBOW_MUZZLE: &str = "Vfx_Weapon.Effects.Ps_CrossBowMuzzle";
+/// Possession: the hand cast, and the burst on a human / rat host.
+pub const POSSESSION_CAST_PS: &str = "Vfx_GamePlay.Possession.Possession_HandCast_01";
+pub const POSSESSION_HUMAN_PS: &str = "Vfx_GamePlay.Possession.PossesTarget_Human_01";
+pub const POSSESSION_RAT_PS: &str = "Vfx_GamePlay.Possession.PossesTarget_Rats_01";
+/// Devouring Swarm: the hand cast and the summoning (levels 1 / 2).
+pub const SWARM_CAST_PS: &str = "Vfx_GamePlay.RatSwarm.Ps_RSwarm_HandCast_01";
+pub const SWARM_SUMMON_PS: &str = "Vfx_GamePlay.RatSwarm.RSwarm_Summoning_lvl1";
+pub const SWARM_SUMMON2_PS: &str = "Vfx_GamePlay.RatSwarm.RSwarm_Summoning_lvl2";
+/// Grenade explosion and Spring Razor burst (`Startup`).
+pub const GRENADE_EXPLOSION_PS: &str = "Vfx_Weapon.Effects.Grenade.ps_grenade";
+pub const SPRING_RAZOR_PS: &str = "Vfx_Weapon.Effects.SpringRazor.Ps_SpringRazor";
+
+/// Projectile trails (`Twk_Proj_*` trail templates): pistol tracer, bolt trail, grenade trail.
+pub const PISTOL_TRACER_PS: &str = "Vfx_Weapon.Effects.Trails.Ps_Pistol_StdTracer_01";
+pub const BOLT_TRAIL_PS: &str = "Vfx_Weapon.Effects.Trails.StdBolt_Trail";
+pub const GRENADE_TRAIL_PS: &str = "Vfx_Weapon.Effects.Grenade.Ps_Grenade_Trail";
+/// Dark Vision's NPC vision cones (`Twk_DarkVision` / pawn `m_VisionConePatrolTemplate`).
+pub const DV_CONE_PS: &str = "Vfx_GamePlay.DarkVision.Ps_DVision_VCone_Blue_01";
+
+/// A transform whose X axis points along `dir` (UE3 effects face +X), at `at`.
+fn facing(at: Vec3, dir: Vec3) -> Mat4 {
+    let x = if dir.length_squared() > 1e-6 { dir.normalize() } else { Vec3::X };
+    let z = if x.z.abs() > 0.99 { Vec3::X } else { Vec3::Z };
+    let y = z.cross(x).normalize();
+    let z = x.cross(y);
+    Mat4::from_cols(x.extend(0.0), y.extend(0.0), z.extend(0.0), at.extend(1.0))
+}
+
+/// Effects that follow a live object, kept alive while it exists: projectile trails along the
+/// flight, and Dark Vision's vision cones on the revealed NPCs while the power is on. A trail
+/// whose projectile is gone stops spawning and fades out; a cone goes with the power.
+fn attached_effects(mut commands: Commands, mut fx: ResMut<Effects>, mut meshes: ResMut<Assets<Mesh>>, view: Option<Res<SessionView>>, mut q: Query<&mut FxInstance>) {
+    let Some(view) = view else { return };
+    let mut want: Vec<((u8, u32), &'static str, Mat4)> = Vec::new();
+    for p in &view.projectiles {
+        use dishonored_sim::state::ProjectileKind as K;
+        let path = match p.kind {
+            K::Bullet => PISTOL_TRACER_PS,
+            K::Bolt | K::SleepDart | K::IncendiaryBolt => BOLT_TRAIL_PS,
+            K::Grenade | K::StickyGrenade => GRENADE_TRAIL_PS,
+        };
+        want.push(((0, p.id), path, facing(p.position, p.velocity)));
+    }
+    if view.me.as_ref().is_some_and(|me| me.vitals.dark_vision_remaining > 0.0) {
+        for o in view.others.iter().filter(|o| o.alive && view.dark_vision_reveals.contains(&o.id) && matches!(o.kind, dishonored_sim::state::PawnKind::Guard | dishonored_sim::state::PawnKind::Civilian)) {
+            let dir = Vec3::new(o.yaw.to_radians().cos(), o.yaw.to_radians().sin(), 0.0);
+            want.push(((1, o.id), DV_CONE_PS, facing(o.position + Vec3::Z * 60.0, dir)));
+        }
+    }
+    let gone: Vec<(u8, u32)> = fx.attached.keys().filter(|k| !want.iter().any(|w| w.0 == **k)).copied().collect();
+    for k in gone {
+        if let Some((e, _)) = fx.attached.remove(&k) {
+            match q.get_mut(e) {
+                // Trails fade out (their particles live on); cones are killed.
+                Ok(mut inst) if k.0 == 0 => inst.stop(),
+                _ => {
+                    commands.entity(e).try_despawn();
+                }
+            }
+        }
+    }
+    let Some(lf) = fx.levels.get(&fx.active).cloned() else { return };
+    let level = fx.active.clone();
+    for (k, path, m) in want {
+        if let Some((e, _)) = fx.attached.get(&k) {
+            if let Ok(mut inst) = q.get_mut(*e) {
+                inst.set_transform(m);
+                continue;
+            }
+        }
+        let Some(&si) = lf.by_path.get(&path.to_ascii_lowercase()) else { continue };
+        if let Some(e) = spawn_instance(&mut commands, &mut meshes, &lf, &level, si, m, false) {
+            fx.attached.insert(k, (e, path));
+        }
+    }
+}
+
+/// The live Blink indicator, if any: (system path, entity) (harness `effects` command).
+pub fn blink_indicator_live(fx: &Effects) -> Option<&'static str> {
+    fx.indicator.map(|i| i.1)
 }
 
 /// World transform (Dishonored space), colour and alpha of a mesh-emitter particle: the mesh

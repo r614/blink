@@ -1,0 +1,12 @@
+// Walking into a 56 uu step: stopped (above MaxStepHeight 44 + 2.54 + 6.73 = 53.3).
+(
+    name: "movement/step_56",
+    system: Movement,
+    map: "Playground",
+    description: "Walk north into the 56 uu step: the pawn stays below.",
+    setup: (player: Some((position: (-4200, -3900, 92), yaw: 90)), settle: 20),
+    ticks: 110,
+    input: [(tick: 1, action: Move(forward: 127, right: 0))],
+    checkpoints: [(name: "not climbed", expect: [(metric: RiseFrom("pawn.z", 0), value: 20, tol: 0, cmp: AtMost, source: "COLLISION.md: MaxStepHeight 44 live; stepUp rule (PLAYGROUND.md): up to 53.3", status: Static)])],
+    record: [Pawn],
+)

@@ -1,0 +1,23 @@
+// Blink level 2 aimed 10 degrees down: the target is on the floor, the pawn arrives walking,
+// so the arrival system is `Twk_Blink.m_pGroundPS` (`Vfx_GamePlay.Blink.Blink_Ground_01`).
+(
+    name: "powers/blink_l2_down",
+    system: Powers,
+    map: "Playground",
+    description: "Blink aimed 10 degrees down onto the lane floor: the ground arrival effect, spawned once and ended.",
+    setup: (player: Some((position: (-5600, 0, 96), yaw: 0, pitch: -10)), powers: [("Blink", 2)], left_hand: Some("Blink"), settle: 30),
+    ticks: 900,
+    input: [(tick: 1, hold: 10, action: Press(Secondary))],
+    checkpoints: [
+        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 20, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: Blink costs 20")]),
+        (name: "ground arrival effect", expect: [
+            (metric: Count("Effect:Vfx_GamePlay.Blink.*"), value: 1, tol: 0, source: "tweaks: Twk_Blink arrival systems, one per arrival", status: Static),
+            (metric: Count("Effect:Vfx_GamePlay.Blink.Blink_Ground_01"), value: 1, tol: 0, source: "tweaks: m_pGroundPS for an arrival on the floor (which system the original picks is not captured)", status: Unmeasured),
+            (metric: Unended("Vfx_GamePlay.Blink.*"), value: 0, tol: 0, source: "UE3 one-shot gameplay ParticleSystemComponent: destroyed when its emitters finish", status: Static),
+            (metric: Lifetime("Vfx_GamePlay.Blink.*"), value: 0, tol: 0, source: "lifetime of Blink_Ground_01 on the original", status: Unmeasured),
+        ]),
+        (name: "travel distance", expect: [(metric: Delta("pawn.x", 0, 60), value: 0, tol: 0, source: "distance of a Blink aimed 10 degrees down (target on the floor)", status: Unmeasured)]),
+    ],
+    record: [Pawn, Vitals, Powers, SimEvents, Effects, Sounds],
+    capture: Some("lab setup 60; lab power Blink 2; place -3400 -3150 -190 270; measure blink --pitch -10; event trace of ParticleSystemComponent activations"),
+)

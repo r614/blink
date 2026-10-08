@@ -1,0 +1,21 @@
+// A guard patrolling two points 2000 uu apart in the Playground's stealth lane (no player in
+// view): DisBehaviorPatrol walks the route.
+(
+    name: "ai/patrol",
+    system: Ai,
+    map: "Playground",
+    description: "A patrolling guard reaches the far end of its route.",
+    setup: (
+        player: Some((position: (0, -5500, 92), yaw: 90)),
+        npcs: [(id: Some("guard"), position: Some((-1000, 7100, 92)), state: Some("Patrol"), route: [(-1000, 7100, 92), (1000, 7100, 92)])],
+    ),
+    ticks: 1800,
+    input: [],
+    checkpoints: [
+        (name: "patrol state", expect: [(metric: TimeAt("npc.guard.state", 6), value: 1, tol: 0, cmp: AtMost, source: "a patrolling spawn starts in DisBehaviorPatrol", status: Static)]),
+        (name: "reaches the far point", expect: [(metric: Max("npc.guard.x"), value: 900, tol: 0, cmp: AtLeast, source: "DisBehaviorPatrol walks to each route point", status: Static)]),
+        (name: "walk speed", expect: [(metric: Max("npc.guard.speed2d"), value: 0, tol: 0, source: "patrol walk speed of an elite guard", status: Unmeasured)]),
+    ],
+    record: [Npc("guard")],
+    capture: Some("lab npcs: sample a patrolling Boyle guard's Location and behaviour per tick"),
+)

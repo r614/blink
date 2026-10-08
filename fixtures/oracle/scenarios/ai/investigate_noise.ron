@@ -1,0 +1,24 @@
+// A factionless guard facing away hears a pistol shot 800 uu behind it (noise radius 4000): it
+// turns to investigate (DisAISubStateInvestigate) after its reaction delay.
+(
+    name: "ai/investigate_noise",
+    system: Ai,
+    map: "Playground",
+    description: "Fire the pistol into the air behind a guard: the guard goes to investigate.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0, pitch: 60)),
+        items: ["Bullet:5"],
+        left_hand: Some("Pistol"),
+        npcs: [(id: Some("guard"), position: Some((-4800, 0, 92)), yaw: 0, state: Some("Idle"), faction: Some("None"))],
+        settle: 120,
+    ),
+    ticks: 900,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "heard: Investigate, not more", expect: [(metric: At("npc.guard.attn", 8), value: 0.6, tol: 0.01, source: "AI.md (0x00b60ca0, CONFIRMED): a Danger sound adds 0.4 and floors the value at Investigate's start 0.6; hearing cannot raise attention above Investigate", status: Static)]),
+        (name: "investigates", expect: [(metric: TimeAt("npc.guard.state", 7), value: 15, tol: 0, cmp: AtMost, source: "a danger noise in hearing range sends a guard to investigate (DisAISubStateInvestigate)", status: Static)]),
+        (name: "reaction delay", expect: [(metric: Gap(FirstAt("Sim:Fired"), TimeAt("npc.guard.state", 7)), value: 0, tol: 0, source: "shot -> investigate on the original", status: Unmeasured)]),
+    ],
+    record: [Pawn, Npc("guard"), SimEvents],
+    capture: Some("fire the pistol behind a party guard (Boyle Ext); event trace of the guard's behaviour changes"),
+)

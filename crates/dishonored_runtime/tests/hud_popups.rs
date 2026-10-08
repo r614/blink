@@ -71,3 +71,24 @@ fn no_match_no_popup() {
     p.step(0.0, Triggers::default(), 0, true, true);
     assert!(!p.banner_env(1.0).shown());
 }
+
+#[test]
+fn mission_paper_opens_for_a_notification_only() {
+    let mut p = HudPopups::default();
+    let mut g = Triggers { game: Some(("mission".into(), 1)), objectives: vec![("Try the stations".into(), false, vec![("Blink".into(), 1, false)])], ..Default::default() };
+    p.step(0.0, g.clone(), 1, false, true);
+    // The banner opens after the start delay; the target paper does not (no notification).
+    assert!(p.banner_env(2.5).shown());
+    assert!(!p.target_env(2.5).shown());
+    // A task change reopens the banner, not the paper.
+    g.objectives[0].2[0].1 = 2;
+    p.step(20.0, g.clone(), 1, false, true);
+    assert!(p.banner_env(20.5).shown());
+    assert!(!p.target_env(20.5).shown());
+    // A Notify action opens the paper with the target timing (1 s + 5 s, then the fade).
+    g.notification = Some(3);
+    p.step(30.0, g, 1, false, true);
+    assert!(p.target_env(30.5).shown());
+    assert_eq!(p.target_env(35.9).alpha, 1.0);
+    assert!(!p.target_env(36.3).shown());
+}

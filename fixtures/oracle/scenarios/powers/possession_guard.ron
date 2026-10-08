@@ -1,0 +1,29 @@
+// Possession level 2 on an unaware guard 300 uu ahead. Presentation (tweaks):
+// `Twk_Powers_Possess.m_pHandCastParticle` = `Possession_HandCast_01` on the cast, and the
+// target's `Twk_Possessable_BaseNPC.m_pTargetingHighlightEffect` = `PossesTarget_Human_01`
+// while targeting.
+(
+    name: "powers/possession_guard",
+    system: Powers,
+    map: "Playground",
+    description: "Hold Possession on a guard 300 uu ahead for 0.5 s, release: the possession starts, mana, and the cast / targeting effects.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0)),
+        powers: [("Possess", 2)],
+        left_hand: Some("Possession"),
+        npcs: [(id: Some("guard"), position: Some((-5300, 0, 92)), yaw: 0, state: Some("Idle"), faction: Some("None"))],
+        settle: 30,
+    ),
+    ticks: 600,
+    input: [(tick: 5, hold: 30, action: Press(Secondary))],
+    checkpoints: [
+        (name: "possessed", expect: [(metric: Count("Sim:PossessStart"), value: 1, tol: 0, source: "a released Possession on a possessable guard in range possesses it", status: Static)]),
+        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 0, tol: 0, source: "Possession mana cost on the original", status: Unmeasured)]),
+        (name: "effects", expect: [
+            (metric: Count("Effect:Vfx_GamePlay.Possession.Possession_HandCast_01"), value: 1, tol: 0, cmp: AtLeast, source: "tweaks: Twk_Powers_Possess.m_pHandCastParticle", status: Static),
+            (metric: Count("Effect:Vfx_GamePlay.Possession.PossesTarget_Human_01"), value: 1, tol: 0, cmp: AtLeast, source: "tweaks: Twk_Possessable_BaseNPC.m_pTargetingHighlightEffect", status: Static),
+        ]),
+    ],
+    record: [Pawn, Vitals, Powers, Npc("guard"), SimEvents, Effects, Sounds],
+    capture: Some("lab power Possess 2; possess the party guard; read DishonoredActivePowerComponent_Possess stages and the mana"),
+)

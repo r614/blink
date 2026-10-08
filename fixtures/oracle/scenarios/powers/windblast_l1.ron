@@ -1,0 +1,19 @@
+// Windblast level 1: `Twk_WindBlast` level 1 `m_EffectTemplate` = `Windblast_lvl1`.
+(
+    name: "powers/windblast_l1",
+    system: Powers,
+    map: "Playground",
+    description: "Cast Windblast level 1 into the open lane: cost and the level 1 effect.",
+    setup: (player: Some((position: (-5600, 0, 96), yaw: 0)), powers: [("WindBlast", 1)], left_hand: Some("Windblast"), settle: 30),
+    ticks: 900,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 50, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: Windblast costs 50 (measured at level 2)")]),
+        (name: "blast effect", expect: [
+            (metric: Count("Effect:Vfx_GamePlay.Windblast.Windblast_lvl1"), value: 1, tol: 0, source: "tweaks: Twk_WindBlast level 1 m_EffectTemplate", status: Static),
+            (metric: Unended("Vfx_GamePlay.Windblast.*"), value: 0, tol: 0, source: "UE3 one-shot gameplay ParticleSystemComponent: destroyed when its emitters finish", status: Static),
+        ]),
+    ],
+    record: [Pawn, Vitals, Powers, SimEvents, Effects, Sounds],
+    capture: Some("lab power WindBlast 1; cast into the open"),
+)
