@@ -1041,17 +1041,7 @@ impl Crowd {
         // The light at each player (the original samples the pawn's light environment),
         // normalized by the range of the stealth volume the player is in, else the map's
         // (`DishonoredVisibilityComponent` tick 0x00AD51E0: 0x00BD0120, 0x00BC9040).
-        let pv = &self.ai.player_visibility;
-        let light: BTreeMap<PlayerId, f32> = world_state
-            .players
-            .iter()
-            .filter(|p| p.kind == PawnKind::Human && p.alive)
-            .map(|p| {
-                let raw = if self.lights.is_empty() && self.sky_light <= 0.0 { LIGHT_LEVEL } else { light_at_with(&self.lights, self.sky_light, p.position, world) };
-                let range = dishonored_ir::ai::stealth_light_range(&self.stealth_volumes, p.position).unwrap_or([pv.light_darkest, pv.light_brightest]);
-                (p.id, light01(raw, range))
-            })
-            .collect();
+        let light: BTreeMap<PlayerId, f32> = world_state.players.iter().filter(|p| p.kind == PawnKind::Human && p.alive).map(|p| (p.id, self.player_light(p.position, world).1)).collect();
         let magic = magic_modes(events, world_state, &mut self.bend_stop);
         let senses = Senses { peers: &peers, barks: &barks, busted: &busted, alarm_noise: &alarm_noise, social: &social, light: &light, audio: &self.audio, magic: &magic };
         let layout = &self.layout;
@@ -1238,6 +1228,16 @@ impl Crowd {
             }
         }
         Social { factions: Some(self.factions.clone()), pawn_faction, trespass, overrides: self.overrides.clone() }
+    }
+
+    /// The light at a player at `p`: the raw value of the light probe and its normalization by
+    /// the stealth volume's range there, else the map's (`DishonoredVisibilityComponent` tick
+    /// 0x00AD51E0: `m_fCurrentLightValue` / `_Normalized`; 0x00BD0120, 0x00BC9040).
+    pub fn player_light(&self, p: Vec3, world: &dyn WorldQuery) -> (f32, f32) {
+        let pv = &self.ai.player_visibility;
+        let raw = if self.lights.is_empty() && self.sky_light <= 0.0 { LIGHT_LEVEL } else { light_at_with(&self.lights, self.sky_light, p, world) };
+        let range = dishonored_ir::ai::stealth_light_range(&self.stealth_volumes, p).unwrap_or([pv.light_darkest, pv.light_brightest]);
+        (raw, light01(raw, range))
     }
 
     /// Install the level's AI data (factions, forbidden zones, alarm bells, probe lights).

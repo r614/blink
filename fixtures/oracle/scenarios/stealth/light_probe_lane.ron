@@ -1,0 +1,47 @@
+// The stealth lane's light levels (DishonoredVisibilityComponent.m_fCurrentLightValue /
+// _Normalized) measured on the original's Playground with the player sneaking at each point
+// (hook round 4, 2026-10-08), against the port's light probe (pawn.light / pawn.light01,
+// Crowd::player_light). The player is teleported to each point (crouched, as measured) and
+// sampled 25 ticks later. (500, 6600) and every point east read the darkest value (0.1838).
+// Known port difference: U-121 (the probe sums the level's light actors; the original's stealth
+// light environment samples the precomputed light volume and the m_LightProbe channel lights).
+(
+    name: "stealth/light_probe_lane",
+    system: Stealth,
+    map: "Playground",
+    description: "The light value at the stealth lane's points, sneaking: port probe against the original's visibility component.",
+    setup: (
+        player: Some((position: (-5200, 6000, 92), yaw: 0)),
+        settle: 1,
+    ),
+    ticks: 336,
+    input: [
+        (tick: 1, action: Press(Crouch)),
+        (tick: 1, action: Console("teleport -5200 6000 120 0")),
+        (tick: 31, action: Console("teleport -4500 6450 120 0")),
+        (tick: 61, action: Console("teleport -3500 6450 120 0")),
+        (tick: 91, action: Console("teleport -2500 6450 120 0")),
+        (tick: 121, action: Console("teleport -1500 6450 120 0")),
+        (tick: 151, action: Console("teleport -500 6600 120 0")),
+        (tick: 181, action: Console("teleport 500 6600 120 0")),
+        (tick: 211, action: Console("teleport 1500 6600 120 0")),
+        (tick: 241, action: Console("teleport -3500 4000 120 0")),
+        (tick: 271, action: Console("teleport 0 -5500 120 0")),
+        (tick: 301, action: Console("teleport -4600 -3900 120 0")),
+    ],
+    checkpoints: [
+        (name: "(-5200, 6000)", expect: [(metric: At("pawn.light", 26), value: 0.1838, tol: 0.01, source: "hook round 4 (Playground, sneaking): raw light 0.1838", status: Measured), (metric: At("pawn.light01", 26), value: 0, tol: 0.02, source: "hook round 4: normalized 0 (the original Playground is built inside L_Boyle_Ext_P, so it normalizes with Boyle's Pvs_BoyleExterior 0.2 / 0.5; the port's Playground uses the global 0.05 / 1.0)", status: Unverified)]),
+        (name: "(-4500, 6450)", expect: [(metric: At("pawn.light", 56), value: 0.3029, tol: 0.01, source: "hook round 4 (Playground, sneaking): raw light 0.3029", status: Measured), (metric: At("pawn.light01", 56), value: 0.343, tol: 0.02, source: "hook round 4: normalized 0.343 (the original Playground is built inside L_Boyle_Ext_P, so it normalizes with Boyle's Pvs_BoyleExterior 0.2 / 0.5; the port's Playground uses the global 0.05 / 1.0)", status: Unverified)]),
+        (name: "(-3500, 6450)", expect: [(metric: At("pawn.light", 86), value: 0.5382, tol: 0.01, source: "hook round 4 (Playground, sneaking): raw light 0.5382", status: Measured), (metric: At("pawn.light01", 86), value: 1, tol: 0.02, source: "hook round 4: normalized 1 (the original Playground is built inside L_Boyle_Ext_P, so it normalizes with Boyle's Pvs_BoyleExterior 0.2 / 0.5; the port's Playground uses the global 0.05 / 1.0)", status: Unverified)]),
+        (name: "(-2500, 6450)", expect: [(metric: At("pawn.light", 116), value: 0.382, tol: 0.01, source: "hook round 4 (Playground, sneaking): raw light 0.382", status: Measured), (metric: At("pawn.light01", 116), value: 0.607, tol: 0.02, source: "hook round 4: normalized 0.607 (the original Playground is built inside L_Boyle_Ext_P, so it normalizes with Boyle's Pvs_BoyleExterior 0.2 / 0.5; the port's Playground uses the global 0.05 / 1.0)", status: Unverified)]),
+        (name: "(-1500, 6450)", expect: [(metric: At("pawn.light", 146), value: 0.5382, tol: 0.01, source: "hook round 4 (Playground, sneaking): raw light 0.5382", status: Measured), (metric: At("pawn.light01", 146), value: 1, tol: 0.02, source: "hook round 4: normalized 1 (the original Playground is built inside L_Boyle_Ext_P, so it normalizes with Boyle's Pvs_BoyleExterior 0.2 / 0.5; the port's Playground uses the global 0.05 / 1.0)", status: Unverified)]),
+        (name: "(-500, 6600)", expect: [(metric: At("pawn.light", 176), value: 0.298, tol: 0.01, source: "hook round 4 (Playground, sneaking): raw light 0.298", status: Measured), (metric: At("pawn.light01", 176), value: 0.327, tol: 0.02, source: "hook round 4: normalized 0.327 (the original Playground is built inside L_Boyle_Ext_P, so it normalizes with Boyle's Pvs_BoyleExterior 0.2 / 0.5; the port's Playground uses the global 0.05 / 1.0)", status: Unverified)]),
+        (name: "(500, 6600)", expect: [(metric: At("pawn.light", 206), value: 0.1838, tol: 0.01, source: "hook round 4 (Playground, sneaking): raw light 0.1838", status: Measured), (metric: At("pawn.light01", 206), value: 0, tol: 0.02, source: "hook round 4: normalized 0 (the original Playground is built inside L_Boyle_Ext_P, so it normalizes with Boyle's Pvs_BoyleExterior 0.2 / 0.5; the port's Playground uses the global 0.05 / 1.0)", status: Unverified)]),
+        (name: "(1500, 6600)", expect: [(metric: At("pawn.light", 236), value: 0.1838, tol: 0.01, source: "hook round 4 (Playground, sneaking): raw light 0.1838", status: Measured), (metric: At("pawn.light01", 236), value: 0, tol: 0.02, source: "hook round 4: normalized 0 (the original Playground is built inside L_Boyle_Ext_P, so it normalizes with Boyle's Pvs_BoyleExterior 0.2 / 0.5; the port's Playground uses the global 0.05 / 1.0)", status: Unverified)]),
+        (name: "(-3500, 4000)", expect: [(metric: At("pawn.light", 266), value: 0.3225, tol: 0.01, source: "hook round 4 (Playground, sneaking): raw light 0.3225", status: Measured), (metric: At("pawn.light01", 266), value: 0.408, tol: 0.02, source: "hook round 4: normalized 0.408 (the original Playground is built inside L_Boyle_Ext_P, so it normalizes with Boyle's Pvs_BoyleExterior 0.2 / 0.5; the port's Playground uses the global 0.05 / 1.0)", status: Unverified)]),
+        (name: "(0, -5500)", expect: [(metric: At("pawn.light", 296), value: 0.3919, tol: 0.01, source: "hook round 4 (Playground, sneaking): raw light 0.3919", status: Measured), (metric: At("pawn.light01", 296), value: 0.64, tol: 0.02, source: "hook round 4: normalized 0.64 (the original Playground is built inside L_Boyle_Ext_P, so it normalizes with Boyle's Pvs_BoyleExterior 0.2 / 0.5; the port's Playground uses the global 0.05 / 1.0)", status: Unverified)]),
+        (name: "(-4600, -3900)", expect: [(metric: At("pawn.light", 326), value: 0.4106, tol: 0.01, source: "hook round 4 (Playground, sneaking): raw light 0.4106", status: Measured), (metric: At("pawn.light01", 326), value: 0.702, tol: 0.02, source: "hook round 4: normalized 0.702 (the original Playground is built inside L_Boyle_Ext_P, so it normalizes with Boyle's Pvs_BoyleExterior 0.2 / 0.5; the port's Playground uses the global 0.05 / 1.0)", status: Unverified)]),
+    ],
+    record: [Pawn, SimEvents],
+    capture: Some("measured (hook round 4): sneak at each point, read m_fCurrentLightValue and m_fCurrentLightValue_Normalized"),
+)
