@@ -342,6 +342,12 @@ pub struct CombatTuning {
     pub windblast_wall_min_speed: f32,
     #[serde(default)]
     pub windblast_explode_chance: f32,
+    /// Seconds from the cast until the blast starts (origin and direction taken, 0x00BF9570):
+    /// the `DisNotify_WindBlast` of the player's `Powers_Cast_Windblast` (0x00A96AE0). The
+    /// power's own `m_fWarmupTime` only leads to the fire mode (0x00BF9720), which waits for the
+    /// notify while the cast action plays.
+    #[serde(default = "windblast_start_delay")]
+    pub windblast_start_delay: f32,
 
     // --- Dark Vision (CONFIRMED: Twk_DarkVision) ---
     pub dark_vision_cost: f32,
@@ -418,6 +424,11 @@ pub struct DropRule {
 
 fn one() -> f32 {
     1.0
+}
+/// `Ply_Powers_as` `Powers_Cast_Windblast` `DisNotify_WindBlast` (configs cached before the
+/// value was loaded).
+fn windblast_start_delay() -> f32 {
+    0.27
 }
 fn assassinate_ray_scale() -> f32 {
     1.25
@@ -564,6 +575,7 @@ impl CombatTuning {
             windblast_wall_damage: v(wb, "m_HitWallAdditionalDamage", 100.0),
             windblast_wall_min_speed: v(wb, "m_fMinSpeedToExplodeNPCs", 500.0),
             windblast_explode_chance: v(wb, "m_fChanceToExplodeNPCs", 0.3),
+            windblast_start_delay: v(wb, "cast.notify_time", windblast_start_delay()),
 
             dark_vision_cost: c.dark_vision.mana_cost,
             dark_vision_duration: v(dv, "m_Levels[1].m_fDuration", v(dv, "m_Levels.m_fDuration", 30.0)),

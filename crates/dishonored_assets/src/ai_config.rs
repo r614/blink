@@ -19,7 +19,7 @@ const NEUTRAL: &str = "Twk_Attn_Default_Neutral.Twk_Attn_Default_Neutral";
 const VISION: &str = "Twk_Vision_Default.Twk_Vision_Default";
 /// Level script packages that cook the NPC locomotion configs and animation sets (as the
 /// runtime's animation bank reads them).
-const NPC_ANIM_PACKAGES: &[&str] = &["L_Boyle_Ext_Script", "L_Boyle_Int_Script", "L_BoyleStreet_Ext_Script"];
+pub(crate) const NPC_ANIM_PACKAGES: &[&str] = &["L_Boyle_Ext_Script", "L_Boyle_Int_Script", "L_BoyleStreet_Ext_Script"];
 const GUARD_SWORD_SET: &str = "Npc_EliteGuard_Sword_as.Npc_EliteGuard_Sword_as";
 
 fn level_index(name: &str) -> Option<u8> {

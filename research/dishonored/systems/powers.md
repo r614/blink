@@ -118,6 +118,11 @@ the caster is in a refusing state, then 0x00BF9570) -> 3 execute (expanding fron
 4 cooldown (1.0 s) -> 0. Use (0x00BFB950) needs CanUse and starts the warmup. Port: `LeftHand::Windblast`
 in `left_hand::update` sets the lock-out `0.1 + distance / speed + 1.0` s (1.7 s at level 2) and
 `step_windblasts` runs warmup / start / front: **match** in structure.
+Correction (physics port, 2026-10-08, physics.md P-8): the fire mode waits while the cast action
+(`Powers_Cast_Windblast`) plays, and that action's `DisNotify_WindBlast` at 0.27 s starts the blast
+(0x00A96AE0 -> 0x00C44E10 -> 0x00BF9570); the port now starts it 0.27 s after the cast
+(`CombatTuning::windblast_start_delay`, also in the lock-out): damage 19 ticks after the press at
+183 uu (original 20).
 
 1. **Start** (0x00BF9570): origin and direction from the camera; direction flattened unless
    directional (it is); the targets are gathered once (0x00BF6780): every actor (not of the excluded

@@ -312,7 +312,7 @@ pub fn step_world(
             let (level, range) = state.player(*id).map_or((1, cfg.tuning.windblast_distance[1]), |p| left_hand::windblast_params(p, g, &cfg.tuning));
             state.windblasts.push(state::WindblastState {
                 caster: *id,
-                warmup: left_hand::WINDBLAST_WARMUP,
+                warmup: cfg.tuning.windblast_start_delay,
                 elapsed: 0.0,
                 origin: Vec3::ZERO,
                 direction: Vec3::X,
@@ -328,7 +328,7 @@ pub fn step_world(
     let world_dt = DT * powers::world_time_scale(state, g, false);
     let proj_dt = DT * powers::world_time_scale(state, g, true);
     if world_dt > 0.0 {
-        left_hand::step_windblasts(state, world, mv, &cfg.gameplay.vitals, &cfg.tuning, world_dt, &mut out.events);
+        left_hand::step_windblasts(state, world, mv, &cfg.gameplay.vitals, &cfg.gameplay.throw, &cfg.tuning, world_dt, &mut out.events);
     }
     if proj_dt > 0.0 {
         // `m_fTimeBeforeSleep` less the owner's `Attribute_SleepDelayReduction` (Instant Sleep upgrade, LIKELY).

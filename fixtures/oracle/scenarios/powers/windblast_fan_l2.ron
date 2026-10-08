@@ -38,7 +38,7 @@
         (name: "f: 1200 uu, -35 deg", expect: [(metric: EventValue("Sim:Damage@f[cause=Windblast]", "amount"), value: 5, tol: 1, source: "k = 0.1798; round(30 k) = 5", status: Static)]),
         (name: "g: 1200 uu, 28 deg", expect: [(metric: EventValue("Sim:Damage@g[cause=Windblast]", "amount"), value: 7, tol: 1, source: "k = 0.2362; round(30 k) = 7", status: Static)]),
         (name: "h: 2000 uu, 0 deg", expect: [(metric: EventValue("Sim:Damage@h[cause=Windblast]", "amount"), value: 3, tol: 1, source: "k = 0.111; round(30 k) = 3", status: Static)]),
-        (name: "front reaches h", expect: [(metric: Between("Sim:WindblastCast", "Sim:Damage@h[cause=Windblast]"), value: 0.5, tol: 0.1, source: "warmup 0.1 s + 2000 uu / 5000 uu/s front speed (0x00BF7090: reach = elapsed x m_Speed)", status: Static)]),
+        (name: "front reaches h", expect: [(metric: Between("Sim:WindblastCast", "Sim:Damage@h[cause=Windblast]"), value: 0.67, tol: 0.1, source: "the blast starts at the cast animation's DisNotify_WindBlast (Ply_Powers_as Powers_Cast_Windblast 0.27 s; 0x00A96AE0 -> 0x00BF9570; the 0.1 s m_fWarmupTime only leads to the fire mode 0x00BF9720, which waits for it) + 2000 uu / 5000 uu/s front speed (0x00BF7090: reach = elapsed x m_Speed)", status: Static)]),
     ],
     record: [Pawn, Vitals, Powers, Npc("a"), Npc("b"), Npc("c"), Npc("d"), Npc("e"), Npc("f"), Npc("g"), Npc("h"), SimEvents],
 )

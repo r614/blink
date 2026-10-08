@@ -458,6 +458,7 @@ pub fn step_movement(
     }
     match p.mode {
         MoveMode::Walking => walking(p, input, sword_out, can_move, ctx, events),
+        MoveMode::Falling if p.thrown.active => flying(p, ctx),
         MoveMode::Falling => {
             falling(p, input, can_move, ctx.dt, ctx, events);
             // A chain touched while airborne is grabbed (0x00A3FA70).
@@ -1055,6 +1056,99 @@ pub(crate) fn falling(p: &mut PlayerState, input: &PlayerInput, can_move: bool, 
         if p.velocity.length_squared() > terminal * terminal {
             p.velocity = p.velocity.normalize_or_zero() * terminal;
         }
+    }
+}
+
+/// The minimum momentum of a throw (0x00BE8710, run by the throw state's entry 0x00A86B90): a
+/// horizontal part shorter than `min_2d` is scaled up to it (kept zero when it is zero), and
+/// `z` is raised to at least `min_z`.
+pub fn clamp_throw_momentum(m: Vec3, min_2d: f32, min_z: f32) -> Vec3 {
+    let mut out = m;
+    let h2 = m.x * m.x + m.y * m.y;
+    if h2.sqrt() < min_2d {
+        let n = if h2 >= 1e-8 { Vec2::new(m.x, m.y) / h2.sqrt() } else { Vec2::ZERO };
+        out.x = n.x * min_2d;
+        out.y = n.y * min_2d;
+    }
+    out.z = out.z.max(min_z);
+    out
+}
+
+/// `StateNPCMasterThrown.m_ThrowDirection` for a throw: the throw start (0x00A81860) turns the
+/// pawn to face against the momentum, plus 90 (1), -90 (2) or 180 degrees (3) of yaw; the
+/// direction is the one that keeps the pawn's current facing (LIKELY: the code choosing it was
+/// not found; 0 is hit from the front, 3 from the back, 1 / 2 from the left / right).
+pub fn throw_direction(yaw: f32, momentum: Vec3) -> usize {
+    let back = Vec2::new(-momentum.x, -momentum.y);
+    if back.length_squared() < 1e-8 {
+        return 0;
+    }
+    let face = back.y.atan2(back.x).to_degrees();
+    let rel = (yaw - face + 540.0).rem_euclid(360.0) - 180.0;
+    if rel.abs() <= 45.0 {
+        0
+    } else if rel > 45.0 && rel <= 135.0 {
+        1
+    } else if rel < -45.0 && rel >= -135.0 {
+        2
+    } else {
+        3
+    }
+}
+
+/// A thrown NPC (the Windblast's `TakeDamage` on an NPC pawn, `StateNPCMasterThrown`): the
+/// momentum is clamped (`clamp_throw_momentum`), the velocity is `momentum /
+/// m_fEffectiveMassForThrowing` (0x00BEB6E0) and, on foot or in the air, the pawn flies
+/// (0x00A81860: `PHYS_Flying`, `AirSpeed = |v|`) until the Windblast throw animation of its
+/// direction reaches its `DishonoredNotify_Ragdoll`. `anim_dt` is the animation's first update,
+/// which runs in the hit's tick (the original trace: the ragdoll at the 28th update).
+pub fn start_throw(p: &mut PlayerState, momentum: Vec3, th: &dishonored_ir::gameplay::ThrowConfig, anim_dt: f32) {
+    let m = clamp_throw_momentum(momentum, th.min_momentum_2d, th.min_momentum_z);
+    let v = m / th.effective_mass;
+    p.velocity = v;
+    if matches!(p.mode, MoveMode::Walking | MoveMode::Falling) {
+        p.mode = MoveMode::Falling;
+        p.fall_time = 0.0;
+        p.jump.active = false;
+        p.slide.active = false;
+        p.thrown = crate::state::ThrownState {
+            active: true,
+            time: anim_dt,
+            ragdoll_at: th.windblast_ragdoll_notify[throw_direction(p.yaw, m)],
+            air_speed: v.length(),
+            friction: th.fluid_friction * 0.5,
+        };
+    }
+}
+
+/// The Flying phase of a throw (`physFlying`, then the state's tick 0x00A98DD0 with `m_bRagdoll`
+/// clear): `CalcVelocity` with no acceleration, friction `FluidFriction / 2`, fluid, no braking
+/// (0x006ACD50: `v (1 - f dt)` twice per tick, measured 0.99500 / tick on the original trace),
+/// speed capped at `AirSpeed`; the move slides along what it hits (no landing in `PHYS_Flying`)
+/// and the velocity is the move's; then the state adds `GravityZ dt` to `Velocity.z` (the
+/// trace's first flight step has no gravity in it: 406.6 uu/s up against the 412 thrown). The
+/// throw animation advances; at its ragdoll notify the pawn goes to the ragdoll, which the sim
+/// models with the falling move from the flight's velocity (the ragdoll impulse is `|v|` along
+/// `v`, 0x00A98DD0 with `m_bUseMomemtumAsForce` clear; its per-body scale is not decoded, P-5).
+pub(crate) fn flying(p: &mut PlayerState, ctx: &MoveCtx) {
+    let dt = ctx.dt;
+    let cfg = ctx.cfg;
+    let (v, _) = calc_velocity(p.velocity, Vec3::ZERO, Vec3::ZERO, dt, p.thrown.air_speed, p.thrown.friction, true, false, None, 1.0, cfg.accel_rate);
+    p.velocity = v;
+    let zone = dishonored_world::volume_at(ctx.world.physics_volumes(), p.position).map(|z| z.zone_velocity).unwrap_or(Vec3::ZERO);
+    let adjusted = (v + zone) * dt;
+    let old = p.position;
+    if let Some((n, t)) = move_actor(p, adjusted, ctx) {
+        let delta = (adjusted - n * adjusted.dot(n)) * (1.0 - t);
+        if delta.dot(adjusted) > 0.0 {
+            move_actor(p, delta, ctx);
+        }
+    }
+    p.velocity = (p.position - old) / dt;
+    p.velocity.z += cfg.gravity_z * dt;
+    p.thrown.time += dt;
+    if p.thrown.time >= p.thrown.ragdoll_at {
+        p.thrown.active = false;
     }
 }
 

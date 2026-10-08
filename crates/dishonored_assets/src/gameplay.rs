@@ -72,6 +72,68 @@ pub fn flatten(m: &TMap) -> BTreeMap<String, f32> {
     out
 }
 
+/// The thrown-NPC config (`ThrowConfig`, research/dishonored/systems/physics.md): the NPC hit
+/// reaction tweak, the throw state's class defaults, the default physics volume's fluid
+/// friction and the Windblast throw animations' ragdoll notifies.
+fn load_throw(l: &mut Loader, content: &Content) -> Result<ThrowConfig> {
+    let tp = "Twk_Component.Twk_Component_HitReactionThrow_NPC";
+    let t = l.obj(tp)?;
+    let c = "m_ComponentConfig";
+    let effective_mass = l.f(&t, tp, &format!("{c}.m_fEffectiveMassForThrowing"), "throw.effective_mass")?;
+    let strong_hit_react_threshold = l.f(&t, tp, &format!("{c}.m_fStrongHitReactThreshold"), "throw.strong_hit_react_threshold")?;
+    let anim_ragdoll_threshold = l.f(&t, tp, &format!("{c}.m_fAnimRagdollThreshold"), "throw.anim_ragdoll_threshold")?;
+    let full_ragdoll_threshold = l.f(&t, tp, &format!("{c}.m_fFullRagdollThreshold"), "throw.full_ragdoll_threshold")?;
+    let ragdoll_move_end_threshold = l.f(&t, tp, &format!("{c}.m_fRagdollMoveEndThreshold"), "throw.ragdoll_move_end_threshold")?;
+    // `StateNPCMasterThrown` class defaults; a field the defaults leave out is zero.
+    let sp = "Default__StateNPCMasterThrown";
+    let st = l.db.class_defaults("StateNPCMasterThrown")?;
+    let mut sf = |field: &str, out: &str| {
+        let v = get_f32(&st, field).unwrap_or(0.0);
+        l.prov.insert(out.to_string(), format!("{sp} :: {field} = {v}"));
+        v
+    };
+    let min_momentum_2d = sf("m_fMinMomentum2DMagnitude", "throw.min_momentum_2d");
+    let min_momentum_z = sf("m_fMinMomentumZ", "throw.min_momentum_z");
+    let min_momentum_2d_stunned = sf("m_fMinMomentum2DMagnitudeWhenStunned", "throw.min_momentum_2d_stunned");
+    let min_momentum_z_stunned = sf("m_fMinMomentumZWhenStunned", "throw.min_momentum_z_stunned");
+    let pv = l.db.class_defaults("PhysicsVolume")?;
+    let fluid_friction = match get_f32(&pv, "FluidFriction") {
+        Some(v) => {
+            l.prov.insert("throw.fluid_friction".into(), format!("Default__PhysicsVolume :: FluidFriction = {v}"));
+            v
+        }
+        None => {
+            // UE3 stock, as `movement.ground_friction` (LIKELY; the Engine CDO is not parsed).
+            l.prov.insert("throw.fluid_friction".into(), "Engine.upk Default__PhysicsVolume.FluidFriction = 0.3 (UE3 stock)".into());
+            0.3
+        }
+    };
+    const SET: &str = "Npc_EliteGuard_Generic_as.Npc_EliteGuard_Generic_as";
+    let mut windblast_ragdoll_notify = [0.0; 4];
+    for (i, dir) in ["Front", "Left", "Right", "Back"].iter().enumerate() {
+        let seq = format!("Generic_WindBlast_{dir}");
+        let (pkg, v) = crate::ai_config::NPC_ANIM_PACKAGES
+            .iter()
+            .find_map(|p| crate::npc_anim::sequence_notify_time(content, p, SET, &seq, "DishonoredNotify_Ragdoll").map(|v| (*p, v)))
+            .with_context(|| format!("{SET} {seq}: no DishonoredNotify_Ragdoll"))?;
+        windblast_ragdoll_notify[i] = v;
+        l.prov.insert(format!("throw.windblast_ragdoll_notify[{i}]"), format!("{pkg} {SET} {seq} DishonoredNotify_Ragdoll Time / RateScale = {v}"));
+    }
+    Ok(ThrowConfig {
+        effective_mass,
+        strong_hit_react_threshold,
+        anim_ragdoll_threshold,
+        full_ragdoll_threshold,
+        ragdoll_move_end_threshold,
+        min_momentum_2d,
+        min_momentum_z,
+        min_momentum_2d_stunned,
+        min_momentum_z_stunned,
+        fluid_friction,
+        windblast_ragdoll_notify,
+    })
+}
+
 /// The player's mantle sequences, low / medium / high (`Ply_Sword_Locomotion_as`, the
 /// `Sword_` item prefix of the `Mantle` state's tree `Ply_Player_Mantle_at`): the root bone's
 /// translation per frame taken to pawn space through `Ply_Player.Skm_Player`'s mesh transform,
@@ -367,7 +429,16 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
         l.prov.insert(format!("{name}.values"), format!("{path} (flattened)"));
         Ok(PowerConfig { mana_cost, values: flatten(&m) })
     };
-    let windblast = power(&mut l, "Twk_Powers.Windblast.Twk_WindBlast", "windblast")?;
+    let mut windblast = power(&mut l, "Twk_Powers.Windblast.Twk_WindBlast", "windblast")?;
+    // The blast starts at the cast animation's `DisNotify_WindBlast` (0x00A96AE0 -> 0x00C44E10
+    // -> 0x00BF9570); the power's fire mode (0x00BF9720) waits for it while the cast action plays.
+    {
+        let (pkg, set, seq) = ("Startup", "Ply_Powers_as.Ply_Powers_as", "Powers_Cast_Windblast");
+        let t = crate::npc_anim::sequence_notify_time(content, pkg, set, seq, "DisNotify_WindBlast").with_context(|| format!("{pkg} {set} {seq}: no DisNotify_WindBlast"))?;
+        windblast.values.insert("cast.notify_time".into(), t);
+        l.prov.insert("windblast.cast.notify_time".into(), format!("{pkg}.upk {set} {seq} DisNotify_WindBlast Time / RateScale = {t}"));
+    }
+    let throw = load_throw(&mut l, content)?;
     let dark_vision = power(&mut l, "Twk_Powers.DarkVision.Twk_DarkVision", "dark_vision")?;
 
     let weapon = |l: &mut Loader, parts: &[(&str, &str)], name: &str| -> Result<WeaponConfig> {
@@ -451,6 +522,7 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
     };
     Ok(GameplayConfig {
         adrenaline,
+        throw,
         items,
         movement,
         vitals,
