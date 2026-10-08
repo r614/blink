@@ -164,6 +164,21 @@ fn main() -> Result<()> {
         "kill" => kill_session()?,
         "session" => session::run(&args[1..])?,
         "queue" => queue::run(&args[1..])?,
+        "tracestat" => {
+            // tracestat <trace.orc> [channel prefix]: first / min / max / last of each channel.
+            use dishonored_oracle::{cache, trace::Trace};
+            let p = PathBuf::from(args.get(1).context("trace file")?);
+            let pre = args.get(2).cloned().unwrap_or_default();
+            let (_, (_, t)): (_, (cache::Provenance, Trace)) = cache::decode(&std::fs::read(&p)?)?;
+            for (i, ch) in t.channels.iter().enumerate() {
+                if !ch.name.starts_with(&pre) {
+                    continue;
+                }
+                let v: Vec<f64> = t.frames.iter().filter_map(|f| f.values.get(i).copied().filter(|x| x.is_finite())).collect();
+                let (mn, mx) = v.iter().fold((f64::MAX, f64::MIN), |a, &x| (a.0.min(x), a.1.max(x)));
+                println!("{}\tfirst {:.2}\tmin {:.2}\tmax {:.2}\tlast {:.2}", ch.name, v.first().unwrap_or(&f64::NAN), mn, mx, v.last().unwrap_or(&f64::NAN));
+            }
+        }
         "tracediff" => {
             // tracediff <old dir> <new dir> [tol]: for every trace file in both, the first
             // divergence and the worst channel difference (two captures of the original).

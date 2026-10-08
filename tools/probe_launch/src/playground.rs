@@ -425,7 +425,8 @@ impl Session {
     }
     /// The pawn, and whether it had to be staged: when the spawn keeps being retried at `at`
     /// (another pawn there blocks it, e.g. a row of NPCs 84 uu apart), the spawner is moved
-    /// 600 uu up after 30 ticks, the pawn spawns there and is put at `at` (spawner too).
+    /// 600 uu up after 30 ticks with a new request, the pawn spawns there and is put at `at`
+    /// (spawner too).
     fn start_spawn(&mut self, sp: u32, act: u32, at: Vec3) -> Result<(u32, bool)> {
         self.r.call(&mut self.c, sp, "DishonoredSpawner.OnStartSpawn", &json!([hex(act)]))?;
         let _ = self.c.lockstep(true, 30_000);
@@ -434,7 +435,14 @@ impl Session {
             if i == 15 && !staged {
                 let pl = self.r.place(&mut self.c, sp, "m_NumPendingSpawns")?;
                 if self.c.read_u32(pl.addr)? > 0 {
+                    // The queued request keeps its own location: cancel it, move, ask again.
+                    for k in ["m_NumPendingSpawns", "m_FirstPendingSpawn", "m_NumRetryAttempts", "m_fRetryTimer"] {
+                        let pl = self.r.place(&mut self.c, sp, k)?;
+                        self.c.write(pl.addr, &[0u8; 4])?;
+                    }
                     crate::lab::move_actor_r(&mut self.c, &mut self.r, sp, (at + Vec3::Z * 600.0).to_array())?;
+                    self.r.call(&mut self.c, sp, "DishonoredSpawner.OnStartSpawn", &json!([hex(act)]))?;
+                    let _ = self.c.lockstep(true, 30_000);
                     staged = true;
                 }
             }
