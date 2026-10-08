@@ -186,7 +186,9 @@ fn rig_camera(bank: &mut AnimBank, rig: &Rig, profile: usize, anims: &[(String, 
         let k = w.min(1.0);
         for (j, tn) in tracks.iter().enumerate() {
             let Some(b) = rig.bones.iter().position(|x| x.name.eq_ignore_ascii_case(tn)) else { continue };
-            let (q, tr) = clip.sample(t.min(clip.duration), j);
+            // The position is already resolved by `interp::anim_at` (looping keys wrapped,
+            // others clamped to their end, as GetAnimForTime): held, not looped again.
+            let (q, tr) = clip.sample_held(t.min(clip.duration), j);
             if let Some(q) = q {
                 let q = if bones[b].rotation.dot(q) < 0.0 { -q } else { q };
                 bones[b].rotation = bones[b].rotation.lerp(q, k).normalize();
