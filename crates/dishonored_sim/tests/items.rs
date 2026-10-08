@@ -336,15 +336,18 @@ fn sleep_dart_knocks_out_after_one_and_a_half_seconds() {
     assert_eq!(r.p(100).condition, Condition::Normal);
     r.steps(90, &[(1, aim(0))]);
     assert_eq!(r.p(100).condition, Condition::Unconscious);
-    assert_eq!(r.p(100).vitals.health, r.cfg.gameplay.vitals.health_max, "no damage");
+    // The guard's own HealthMax (the guard archetype's 50, melee.md F9).
+    assert_eq!(r.p(100).vitals.health, r.cfg.gameplay.ai.combat.guard_health_max, "no damage");
 }
 
 #[test]
 fn shadow_kill_turns_a_stealth_kill_to_ash() {
     let mut r = Run::new(&[(Vec3::new(100.0, 0.0, Z), 0.0)]);
     r.pm(1).inv.power_levels[power::SHADOW_KILL] = 1;
-    // Level 1 needs the victim unaware (the AI's hook, 0x00A87B60).
+    // Level 1 needs the victim unaware (the AI's hook, 0x00A87B60); the back assassination needs an
+    // awareness the assassinate table allows (Unaware, melee.md F4).
     r.pm(100).ai_unaware = true;
+    r.pm(100).ai_awareness = dishonored_sim::state::awareness::UNAWARE;
     r.step(&[(1, input(0.0, 0.0, buttons::PRIMARY))]);
     r.steps(10, &[(1, input(0.0, 0.0, 0))]);
     assert!(!r.p(100).alive);
@@ -356,8 +359,12 @@ fn shadow_kill_turns_a_stealth_kill_to_ash() {
 fn shadow_kill_level_one_spares_an_aware_victim() {
     let mut r = Run::new(&[(Vec3::new(100.0, 0.0, Z), 0.0)]);
     r.pm(1).inv.power_levels[power::SHADOW_KILL] = 1;
-    r.step(&[(1, input(0.0, 0.0, buttons::PRIMARY))]);
-    r.steps(10, &[(1, input(0.0, 0.0, 0))]);
+    // A fighting guard (InCombat: not assassinable, not unaware) killed by five sword hits of 10 on its 50.
+    r.pm(100).ai_awareness = dishonored_sim::state::awareness::IN_COMBAT;
+    for _ in 0..5 {
+        r.step(&[(1, input(0.0, 0.0, buttons::PRIMARY))]);
+        r.steps(60, &[(1, input(0.0, 0.0, 0))]);
+    }
     assert!(!r.p(100).alive);
     assert!(!r.p(100).no_body, "an aware victim leaves a body at level 1");
 }

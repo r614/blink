@@ -84,6 +84,50 @@ pub struct SwordState {
     /// Parries won so far (wrapping): the view plays `Blocking Parry` on each.
     #[serde(default)]
     pub parries: u8,
+    /// NPC swings: the item context (`npc_moves`) the brain started the swing with; its
+    /// `m_fAttackDamageMultiplier` scales the damage (0 for the jump attack).
+    #[serde(default)]
+    pub npc_move: u8,
+    /// `m_AlreadyHitActors`: the pawns this swing has hit (each once), `hit_count` of them.
+    #[serde(default)]
+    pub hit_ids: [PlayerId; 8],
+    #[serde(default)]
+    pub hit_count: u8,
+    /// NPC swings: the player this swing started "effectively offscreen" for
+    /// (`DisItemContext_MeleeAttackNPCBase.m_bEffectivelyOffscreen`, set at the start 0x00C24020).
+    #[serde(default)]
+    pub offscreen_to: Option<PlayerId>,
+    /// Length of the current assassination (the played clip's `AnimStateExit`).
+    #[serde(default)]
+    pub lock_time: f32,
+}
+
+impl SwordState {
+    pub fn already_hit(&self, id: PlayerId) -> bool {
+        self.hit_ids[..(self.hit_count as usize).min(self.hit_ids.len())].contains(&id)
+    }
+    /// Record a hit; false once the list is full (the swing then hits no more pawns).
+    pub fn record_hit(&mut self, id: PlayerId) -> bool {
+        let n = self.hit_count as usize;
+        if n >= self.hit_ids.len() {
+            return false;
+        }
+        self.hit_ids[n] = id;
+        self.hit_count += 1;
+        true
+    }
+}
+
+/// `EAIAwareness` (DisGlobalEnums): the awareness the AI reports for a pawn (0x00B0C1E0).
+pub mod awareness {
+    pub const UNAWARE: u8 = 0;
+    pub const AWARE_OF_PLAYER: u8 = 1;
+    pub const SURPRISED: u8 = 2;
+    pub const SUSPICIOUS: u8 = 3;
+    pub const FEARFUL: u8 = 4;
+    pub const IN_COMBAT: u8 = 5;
+    pub const BEGGING: u8 = 6;
+    pub const CHOKED: u8 = 7;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -261,6 +305,11 @@ pub struct PlayerState {
     /// level 1 (0x00A87B60). False for players and when no AI sets it.
     #[serde(default)]
     pub ai_unaware: bool,
+    /// Hook written by the AI each tick for NPC pawns with a brain: the pawn's `EAIAwareness`
+    /// ([`awareness`]), which gates assassinations (`m_AssassinateOnAwareness`, 0x00C09060). A pawn
+    /// no AI writes (a brainless training dummy) keeps `AWARE_OF_PLAYER`, as `ai_unaware` false.
+    #[serde(default = "aware_of_player")]
+    pub ai_awareness: u8,
     /// Hook written by the mission host each tick for NPC pawns: the locomotion component follows
     /// a navmesh path, so the pawn walks on the navmesh (`movement::nav_walk_move`). False for
     /// players and when no host sets it.
@@ -309,6 +358,9 @@ pub struct RatAttackState {
     pub acc: f32,
 }
 
+fn aware_of_player() -> u8 {
+    awareness::AWARE_OF_PLAYER
+}
 fn one() -> f32 {
     1.0
 }
@@ -572,6 +624,7 @@ impl PlayerState {
             rat_slow: 0.0,
             rat_slow_percent: 0.0,
             ai_unaware: false,
+            ai_awareness: awareness::AWARE_OF_PLAYER,
             nav_walk: false,
             nav_end: None,
             helmet: false,

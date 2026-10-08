@@ -309,7 +309,7 @@ pub fn step_world(
 
     // Health before the sword resolves (assassinations give adrenaline by the victim's health).
     let pre_health: Vec<(PlayerId, f32)> = state.players.iter().map(|p| (p.id, p.vitals.health)).collect();
-    combat::resolve_sword_hits(state, world, mv, &cfg.gameplay.vitals, &cfg.tuning, &mut out.events);
+    combat::resolve_sword_hits(state, world, g, &cfg.tuning, &mut out.events);
     movement::slide_impacts(state, mv, &cfg.gameplay.vitals, &mut out.events);
 
     for e in &out.events {
@@ -495,7 +495,7 @@ pub fn state_hash(state: &WorldState) -> u64 {
         for f in [p.water.air_used, p.water.stroke, p.adrenaline.value, p.dark.remaining, p.rat_slow, p.jump.held] {
             mix(f.to_bits() as u64);
         }
-        mix(p.helmet as u64 | (p.jump.powered as u64) << 1 | (p.ai_unaware as u64) << 2);
+        mix(p.helmet as u64 | (p.jump.powered as u64) << 1 | (p.ai_unaware as u64) << 2 | ((p.ai_awareness ^ state::awareness::AWARE_OF_PLAYER) as u64) << 3);
         mix(p.rng as u64);
         // Climbing (only once a pawn has touched a chain, so earlier hashes are unchanged).
         if p.climb != state::ClimbState::default() {
@@ -542,5 +542,7 @@ pub fn spawn_npc(state: &mut WorldState, id: PlayerId, kind: state::PawnKind, ar
     if let Some(p) = state.player_mut(id) {
         p.kind = kind;
         p.archetype = archetype;
+        // The archetype's `Attribute_HealthMax` (guards: the elite guard pawn tweaks' 50).
+        p.vitals.health = powers::health_max(p, &cfg.gameplay);
     }
 }

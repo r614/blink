@@ -1,0 +1,4 @@
+// Front assassination of an unaware guard (melee.md F4, ported): the assassinate move sets have Front / Left /
+// Right / Back variants chosen by the side the player is on (0x00BBA970), m_fAllowedAngleFromTargetDir is 360, and
+// the gate is the target's awareness (m_AssassinateOnAwareness: Unaware, Surprised, Suspicious, Begging), not the
+// direction. The dummy is an idle guard with a brain and no faction (Unaware). UNMEASURED on the original.

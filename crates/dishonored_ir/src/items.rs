@@ -99,10 +99,27 @@ pub struct InventoryConfig {
     /// (DefaultPlayer.ini): melee reach grows with forward speed (0x00AB2050).
     #[serde(default = "d_ray")]
     pub melee_ray_speed: [f32; 3],
+    /// `Attribute_MeleeDamage` of Corvo's sword (`Twk_Inv_SwordCorvo` attributes, Normal) and
+    /// Corvo's own `Attribute_MeleeDamageBonus` (`Twk_Pawn_Corvo`): a sword hit deals
+    /// `round(m_fAttackDamageMultiplier x (MeleeDamage + MeleeDamageBonus))` (0x00C07C80).
+    #[serde(default = "d_sword_damage")]
+    pub sword_melee_damage: f32,
+    #[serde(default)]
+    pub melee_damage_bonus: f32,
+    /// `DishonoredPlayerPawn.m_fOffscreenMeleeDamageReduction[difficulty]` (DefaultPlayer.ini):
+    /// an NPC melee hit from offscreen loses this fraction (0x00C33DD0).
+    #[serde(default = "d_offscreen")]
+    pub offscreen_melee_reduction: [f32; 4],
 }
 
 fn d_ray() -> [f32; 3] {
     [400.0, 0.005, 1.5]
+}
+fn d_sword_damage() -> f32 {
+    10.0
+}
+fn d_offscreen() -> [f32; 4] {
+    [0.5; 4]
 }
 
 impl Default for InventoryConfig {
@@ -125,6 +142,9 @@ impl Default for InventoryConfig {
             pistol_ranged_damage: 10.0,
             max_equipped_charms: 3,
             melee_ray_speed: d_ray(),
+            sword_melee_damage: d_sword_damage(),
+            melee_damage_bonus: 0.0,
+            offscreen_melee_reduction: d_offscreen(),
         }
     }
 }

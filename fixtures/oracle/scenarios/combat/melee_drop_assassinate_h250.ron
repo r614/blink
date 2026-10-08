@@ -1,16 +1,17 @@
-// Drop assassination from 250 uu above an unaware guard (attack pressed while falling, directly above).
-// Original (melee.md, 0x00C09900): the player falls (Velocity.z < 0), the target NPC is below within
-// m_fMaxDropDistToTarget 350 (otherwise the type is TooHighToStart), and a pawn-extent trace (flags 0x20DF)
-// from the pawn reaches the target; context reach 250. No minimum fall speed. The port requires a
-// fall speed of 300 uu/s at the press tick (SPECULATIVE) and checks only once, at the press.
+// Drop assassination from 250 uu above a guard (attack pressed while falling, directly above). Rule (melee.md
+// F5, ported, 0x00C09A50 / 0x00C09900): the player falls (Velocity.z < m_fMaxAllowedDropJumpVel 0; no minimum
+// fall speed), the target is below by at most m_fMaxDropDistToTarget 350 (else TooHighToStart), and a pawn trace
+// reaches it; the target is the context's own or the first pawn a pawn-box sweep along the predicted fall
+// (m_fHitWindowInSeconds 4, at least m_fMinDropDownVel 100 down) meets. Evaluated every tick of the fall while the
+// attack is down. No awareness gate. The expected value follows the decoded rule (UNMEASURED).
 (
     name: "combat/melee_drop_assassinate_h250",
     system: Combat,
     map: "Playground",
-    description: "Teleport 250 uu above a passive guard and press attack right after the fall starts.",
+    description: "Teleport 250 uu above an idle guard and press attack right after the fall starts.",
     setup: (
         player: Some((position: (-5440, 0, 96), yaw: 180)),
-        npcs: [(id: Some("dummy"), position: Some((-5440, 0, 92)), yaw: 180, state: Some("Passive"))],
+        npcs: [(id: Some("dummy"), position: Some((-5440, 0, 92)), yaw: 180, state: Some("Idle"), faction: Some("None"))],
         settle: 30,
     ),
     ticks: 120,
@@ -19,7 +20,7 @@
         (tick: 3, action: Press(Primary)),
     ],
     checkpoints: [
-        (name: "drop assassination", expect: [(metric: Count("Sim:Death@dummy[cause=DropAssassination]"), value: 1, tol: 0, source: "TooHighToStart above 350 uu; DoNow within (melee.md); port needs 300 uu/s at the press", status: Unmeasured)]),
+        (name: "drop assassination", expect: [(metric: Count("Sim:Death@dummy[cause=DropAssassination]"), value: 1, tol: 0, source: "TooHighToStart above 350 uu; DoNow within (melee.md); before the port: 300 uu/s needed at the press", status: Unmeasured)]),
     ],
     record: [Pawn, Npc("dummy"), SimEvents],
     capture: Some("place the player 250 uu above an unaware guard, press attack one tick after the fall begins; record the context (DisItemContext_DropAssassinate) and m_CachedDropType"),

@@ -94,6 +94,16 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
     let pistol = "Twk_Inv_PlayerSpecific.Twk_Inv_PistolCorvo.DisTweaks_InventoryItem_Attributes_25";
     let pistol_m = l.obj(pistol);
     inv.pistol_ranged_damage = l.attr(&pistol_m, pistol, "m_RangedDamage", "items.inventory.pistol_ranged_damage", d.pistol_ranged_damage);
+    // Sword damage (0x00C07C80): the sword's `Attribute_MeleeDamage` (its Normal attribute tweak,
+    // `m_pAttributeTweak[1]`) plus the wielder's `Attribute_MeleeDamageBonus`.
+    let sword_root = "Twk_Inv_PlayerSpecific.Twk_Inv_SwordCorvo";
+    let sword_attrs = match get(&l.obj(sword_root), "m_pAttributeTweak[1]") {
+        Some(TVal::Obj(o)) => o.clone(),
+        _ => format!("{sword_root}.DisTweaks_InventoryItem_Attributes_41"),
+    };
+    let sword_m = l.obj(&sword_attrs);
+    inv.sword_melee_damage = l.attr(&sword_m, &sword_attrs, "m_MeleeDamage", "items.inventory.sword_melee_damage", d.sword_melee_damage);
+    inv.melee_damage_bonus = l.attr(&attrs, &attrs_path, "m_MeleeDamageBonus", "items.inventory.melee_damage_bonus", d.melee_damage_bonus);
 
     {
         let ini = Ini::load_layered(&content.root, "Player");
@@ -104,6 +114,12 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
             }
         }
         l.prov.insert("items.inventory.melee_ray_speed".into(), format!("DefaultPlayer.ini [{sec}] = {:?}", cfg.inventory.melee_ray_speed));
+        for i in 0..4 {
+            if let Some(v) = ini.get_f32(sec, &format!("m_fOffscreenMeleeDamageReduction[{i}]")) {
+                cfg.inventory.offscreen_melee_reduction[i] = v;
+            }
+        }
+        l.prov.insert("items.inventory.offscreen_melee_reduction".into(), format!("DefaultPlayer.ini [{sec}] m_fOffscreenMeleeDamageReduction = {:?}", cfg.inventory.offscreen_melee_reduction));
     }
 
     // --- Possession ---

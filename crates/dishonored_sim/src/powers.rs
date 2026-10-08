@@ -90,8 +90,12 @@ fn any_modifiers(p: &PlayerState) -> bool {
     p.inv.charms_equipped != 0 || p.inv.upgrades != 0 || p.inv.power_levels[power::VITALITY] > 0 || p.inv.power_levels[power::AGILITY] > 0 || p.inv.power_levels[power::BLOOD_THIRSTY] > 0
 }
 
+/// `Attribute_HealthMax`: the player's (Corvo 70, with its modifiers) or a guard's (the guard
+/// archetype's pawn tweak, 50). Civilians keep the player's base (their archetypes vary: 10-11
+/// for aristocrats, not modelled per pawn).
 pub fn health_max(p: &PlayerState, cfg: &GameplayConfig) -> f32 {
-    attribute(p, cfg, "Attribute_HealthMax", cfg.vitals.health_max)
+    let base = if p.kind == PawnKind::Guard { cfg.ai.combat.guard_health_max } else { cfg.vitals.health_max };
+    attribute(p, cfg, "Attribute_HealthMax", base)
 }
 
 pub fn mana_max(p: &PlayerState, cfg: &GameplayConfig) -> f32 {
