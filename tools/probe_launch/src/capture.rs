@@ -478,7 +478,12 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
                 None => None,
             };
             match s.spawn_npc_from(template, n.tweak.as_deref(), n.faction.as_deref(), guard, at, n.yaw) {
-                Ok(p) => p,
+                Ok((p, staged)) => {
+                    if staged {
+                        warnings.push(format!("NPC {id}: the spawn was blocked at its position; spawned 600 uu above and moved there"));
+                    }
+                    p
+                }
                 Err(e) => {
                     gap(format!("NPC {id}: could not spawn ({e:#})"), &mut warnings)?;
                     continue;

@@ -116,6 +116,7 @@ impl Session {
     pub fn open_map(&mut self, map: &str, timeout: Duration) -> Result<(f64, f64)> {
         let _ = self.c.lockstep(false, 1000);
         self.release_keys();
+        let _ = self.clear_start_spawn_counts();
         let t0 = Instant::now();
         let s = st_map(&mut self.c)?;
         let old_pawn = st_hex(&s, "pawn");
@@ -541,10 +542,12 @@ impl Session {
                 json!({"component": reflect::object_value(&mut self.c, comp)?})
             }
             "run" => crate::capture::run_reads(self, a)?,
+            "lightenv" => self.light_env(a)?,
+            "lights" => self.list_lights(a)?,
             "spawn_npc" => {
                 let loc = a.get("location").and_then(args_f32).context("location")?;
-                let p = self.spawn_npc(s("tweak"), s("faction"), s("kind").unwrap_or("Guard") == "Guard", glam::Vec3::from(loc), num("yaw").unwrap_or(0.0) as f32)?;
-                json!({"pawn": reflect::object_value(&mut self.c, p)?, "location": crate::lab::read_vec(&mut self.c, p + 0xc4)?})
+                let (p, staged) = self.spawn_npc(s("tweak"), s("faction"), s("kind").unwrap_or("Guard") == "Guard", glam::Vec3::from(loc), num("yaw").unwrap_or(0.0) as f32)?;
+                json!({"pawn": reflect::object_value(&mut self.c, p)?, "staged": staged, "location": crate::lab::read_vec(&mut self.c, p + 0xc4)?})
             }
             "darkness" => {
                 // The player's chaos (DisDarknessManager, pawn.m_pDarknessManager): `add` runs the
