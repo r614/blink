@@ -25,7 +25,8 @@ use dishonored_audio::engine::ObjId;
 use dishonored_content::MatchContent;
 use dishonored_ir::particles::{ParticleEmitterAsset, ParticleSystemAsset};
 use dishonored_sim::events::{DamageCause, SimEvent};
-use dishonored_sim::state::{MoveMode, PawnKind, PlayerId, PlayerState};
+use dishonored_sim::input::LeftHand;
+use dishonored_sim::state::{MoveMode, PawnKind, PlayerId, PlayerState, ProjectileState};
 use dishonored_world::WorldQuery;
 use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
@@ -40,6 +41,8 @@ pub struct FxShim {
     rng: u64,
     bolts: HashMap<u32, bool>,
     delayed: Vec<(f32, String, Vec3, Vec3)>,
+    /// Placed Spring Razors: trap id -> position.
+    traps: HashMap<u32, Vec3>,
     /// Spawn requests of this frame: (system path, position, direction).
     spawned: Vec<(String, Vec3, Vec3)>,
 }
@@ -49,6 +52,8 @@ pub struct FxShim {
 pub struct SessionView {
     pub me: Option<PlayerState>,
     pub others: Vec<PlayerState>,
+    pub projectiles: Vec<ProjectileState>,
+    pub dark_vision_reveals: Vec<PlayerId>,
 }
 
 /// Stand-in for `session::Session`.
@@ -68,6 +73,7 @@ impl Session {
 pub struct AudioShim {
     notify_driven: HashMap<PlayerId, f32>,
     projectiles: HashMap<u32, bool>,
+    notify_recent: HashMap<(PlayerId, String), f32>,
     contact: Option<Arc<ContactSystem>>,
     next_temp: u64,
 }
@@ -184,8 +190,18 @@ pub struct PresentEvent {
     pub detail: String,
 }
 
+/// What owns a persistent (not one-shot) instance.
+#[derive(Clone, Copy, PartialEq)]
+enum Owner {
+    /// The Blink target indicator.
+    Indicator,
+    /// `attached_effects`: (0, projectile) trails, (1, pawn) Dark Vision cones.
+    Attached((u8, u32)),
+}
+
 struct LiveFx {
     inst: u32,
+    owner: Option<Owner>,
     path: String,
     transform: Mat4,
     shim: FxInstanceShim,
@@ -225,32 +241,102 @@ impl Presenter {
         self.live.iter().map(|l| l.shim.sims.iter().map(|s| s.particles.len()).sum::<usize>()).sum()
     }
 
-    /// One frame: the tick's events through the runtime's handlers, then the particle step.
-    pub fn frame(&mut self, events: &[SimEvent], players: &[PlayerState], dt: f32) -> Vec<PresentEvent> {
+    /// Start an instance of a system (`spawn_effect` / `spawn_instance`); None when the runtime
+    /// did not decode it.
+    fn start(&mut self, path: &str, xf: Mat4, owner: Option<Owner>, who: PlayerId, out: &mut Vec<PresentEvent>) -> bool {
+        let at = xf.w_axis.truncate();
+        let Some(sys) = self.lib.systems.get(&path.to_ascii_lowercase()) else {
+            out.push(PresentEvent { kind: "EffectMissing", object: who, name: path.to_string(), detail: format!("not decoded (GAMEPLAY_PARTICLES) at={:.0},{:.0},{:.0}", at.x, at.y, at.z) });
+            return false;
+        };
+        self.next_inst += 1;
+        let untextured = sys.emitters.iter().filter(|e| !e.0).count();
+        let infinite = sys.system.emitters.iter().filter(|e| e.lifetime.as_ref().is_none_or(|l| l.eval1(0.0, 1.0) <= 0.0)).count();
+        let kind = match owner {
+            None => "oneshot",
+            Some(Owner::Indicator) => "indicator",
+            Some(Owner::Attached((0, _))) => "trail",
+            Some(Owner::Attached(_)) => "attached",
+        };
+        out.push(PresentEvent {
+            kind: "Effect",
+            object: who,
+            name: path.to_string(),
+            detail: format!("inst={} kind={kind} at={:.0},{:.0},{:.0} emitters={} untextured={untextured} no_lifetime={infinite}", self.next_inst, at.x, at.y, at.z, sys.system.emitters.len()),
+        });
+        let one_shot = owner.is_none();
+        self.live.push(LiveFx { inst: self.next_inst, owner, path: path.to_string(), transform: xf, shim: FxInstanceShim { one_shot, sims: sys.system.emitters.iter().map(|_| EmitterSim::default()).collect() } });
+        true
+    }
+
+    /// Remove an owned instance at once (`despawn`).
+    fn kill(&mut self, owner: Owner, out: &mut Vec<PresentEvent>) {
+        if let Some(i) = self.live.iter().position(|l| l.owner == Some(owner)) {
+            let l = self.live.remove(i);
+            out.push(PresentEvent { kind: "EffectEnd", object: 0, name: l.path, detail: format!("inst={} killed", l.inst) });
+        }
+    }
+
+    /// One frame: the tick's events through the runtime's handlers (one-shots), the Blink
+    /// indicator and the attached effects (trails, Dark Vision cones), then the particle step.
+    pub fn frame(&mut self, events: &[SimEvent], world: &dishonored_sim::state::WorldState, reveals: Vec<PlayerId>, dt: f32) -> Vec<PresentEvent> {
         let mut out = Vec::new();
         let local = self.session.local;
-        let view = SessionView { me: players.iter().find(|p| Some(p.id) == local).copied(), others: players.iter().filter(|p| Some(p.id) != local).copied().collect() };
-        // Effects.
+        let players = &world.players;
+        let view = SessionView {
+            me: players.iter().find(|p| Some(p.id) == local).copied(),
+            others: players.iter().filter(|p| Some(p.id) != local).copied().collect(),
+            projectiles: world.projectiles.clone(),
+            dark_vision_reveals: reveals,
+        };
+        // One-shot effects.
         gameplay_effects_body((), (), &mut self.fx, &view, Some(&self.audio), &self.sockets, Some(&self.session), self.now, events.to_vec());
         for (path, at, dir) in std::mem::take(&mut self.fx.spawned) {
             let who = nearest(players, at);
-            match self.lib.systems.get(&path.to_ascii_lowercase()) {
-                Some(sys) => {
-                    self.next_inst += 1;
-                    let untextured = sys.emitters.iter().filter(|e| !e.0).count();
-                    let infinite = sys.system.emitters.iter().filter(|e| e.lifetime.as_ref().is_none_or(|l| l.eval1(0.0, 1.0) <= 0.0)).count();
-                    out.push(PresentEvent {
-                        kind: "Effect",
-                        object: who,
-                        name: path.clone(),
-                        detail: format!("inst={} at={:.0},{:.0},{:.0} emitters={} untextured={untextured} no_lifetime={infinite}", self.next_inst, at.x, at.y, at.z, sys.system.emitters.len()),
-                    });
-                    self.live.push(LiveFx { inst: self.next_inst, path, transform: effect_transform(at, dir), shim: FxInstanceShim { one_shot: true, sims: sys.system.emitters.iter().map(|_| EmitterSim::default()).collect() } });
+            self.start(&path, effect_transform(at, dir), None, who, &mut out);
+        }
+        // The Blink indicator: one instance following the target while aiming.
+        let me = local.unwrap_or(0);
+        let want = blink_indicator_want(Some(&view), Some(&self.session));
+        let cur = self.live.iter().position(|l| l.owner == Some(Owner::Indicator));
+        match (want, cur) {
+            (None, Some(_)) => self.kill(Owner::Indicator, &mut out),
+            (Some((path, at)), Some(i)) if self.live[i].path == path => self.live[i].transform = Mat4::from_translation(at),
+            (Some((path, at)), _) => {
+                self.kill(Owner::Indicator, &mut out);
+                self.start(path, Mat4::from_translation(at), Some(Owner::Indicator), me, &mut out);
+            }
+            (None, None) => {}
+        }
+        // Attached effects: trails stop and fade out when their projectile is gone, cones are
+        // killed with the power.
+        let want = attached_want(&view);
+        let owned: Vec<(u8, u32)> = self.live.iter().filter_map(|l| match l.owner {
+            Some(Owner::Attached(k)) => Some(k),
+            _ => None,
+        }).collect();
+        for k in owned.into_iter().filter(|k| !want.iter().any(|w| w.0 == *k)) {
+            if k.0 == 0 {
+                if let Some(l) = self.live.iter_mut().find(|l| l.owner == Some(Owner::Attached(k))) {
+                    // `FxInstance::stop`: no more spawning, gone once its particles die.
+                    l.owner = None;
+                    l.shim.one_shot = true;
+                    for s in &mut l.shim.sims {
+                        s.done = true;
+                    }
                 }
-                None => out.push(PresentEvent { kind: "EffectMissing", object: who, name: path.clone(), detail: format!("not decoded (GAMEPLAY_PARTICLES) at={:.0},{:.0},{:.0}", at.x, at.y, at.z) }),
+            } else {
+                self.kill(Owner::Attached(k), &mut out);
             }
         }
-        // Particles (`simulate`): every live one-shot instance, then the despawn rule.
+        for (k, path, m) in want {
+            match self.live.iter_mut().find(|l| l.owner == Some(Owner::Attached(k))) {
+                Some(l) => l.transform = m,
+                None => {
+                    self.start(path, m, Some(Owner::Attached(k)), if k.0 == 1 { k.1 } else { me }, &mut out);
+                }
+            }
+        }        // Particles (`simulate`): every live one-shot instance, then the despawn rule.
         let world = &self.session.content.collision;
         let ray_closure = |a: Vec3, b: Vec3| -> Option<(Vec3, Vec3)> {
             let d = b - a;
@@ -282,6 +368,7 @@ impl Presenter {
             out.push(PresentEvent { kind: "EffectEnd", object: 0, name: path, detail: format!("inst={inst}") });
         }
         // Sounds.
+        self.audio.notify_recent.retain(|_, t| self.now - *t < 1.0);
         let e = audio_events_body(&mut self.audio, EngineShim::default(), &view, &self.session, local, self.now, events.to_vec());
         for (ev, obj) in e.posts {
             let object = if obj >= PLAYER_OBJ && obj < TEMP_OBJ { (obj - PLAYER_OBJ) as PlayerId } else { 0 };
