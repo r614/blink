@@ -1,0 +1,29 @@
+// Blink's cooldown (decoded, not measured). Pressing Blink starts the power (0x00BFC020 -> 0x00BFAAA0):
+// `m_bActive` (+0xA0 bit 0) is set and the power is usable only while mana >= m_ManaCost AND not
+// active (CanUse, slot +0x1A4 = 0x00BE71F0). Releasing (a travel, mode 2, or a cancel / fizzle,
+// mode 3) leaves the power active; the mode-2/3 tick (0x00BED480) counts m_fCooldownTimer up to
+// `PowerAttributes_Blink.m_fCooldownTime` (1.0 s at both levels) and then clears the active flag
+// (0x00BE9180). The port has no such lockout: every release can be followed at once by another aim.
+// Timeline (60 Hz): aim + release at tick 5..15, travel to about tick 31, cooldown over at about
+// tick 91. A second attempt at tick 60 must do nothing; a third at tick 130 works.
+(
+    name: "powers/blink_cooldown",
+    system: Powers,
+    map: "L_Boyle_Ext_P",
+    description: "Blink three times at ticks 5, 60 and 130: the original refuses the second (cooldown m_fCooldownTime 1.0 s after the first move ends).",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true)), powers: [("Blink", 2)], left_hand: Some("Blink"), settle: 30),
+    ticks: 260,
+    input: [
+        (tick: 5, hold: 10, action: Press(Secondary)),
+        (tick: 50, action: Look(yaw: 90, pitch: 0)),
+        (tick: 60, hold: 10, action: Press(Secondary)),
+        (tick: 130, hold: 10, action: Press(Secondary)),
+    ],
+    checkpoints: [
+        (name: "moves", expect: [(metric: Count("Sim:BlinkStart"), value: 2, tol: 0, source: "decompiled: CanUse = mana and not m_bActive (0x00BE71F0); m_bActive stays set for m_fCooldownTime 1.0 s after the move (0x00BED480 / 0x00BE9180)", status: Static)]),
+        (name: "second attempt does nothing", expect: [(metric: Count("Sim:BlinkFizzle"), value: 0, tol: 0, source: "an unusable power does not start aiming, so there is nothing to fizzle", status: Unmeasured)]),
+        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 40, tol: 0.5, source: "two Blinks of m_ManaCost 20 each before any refund (the refund starts 3 s after a spend)", status: Static)]),
+    ],
+    record: [Pawn, Vitals, Powers, SimEvents],
+    capture: Some("lab setup 60; lab power Blink 2; place -3400 -3150 -190 270; key Secondary at ticks 5, 60, 130 (held 10 ticks), view yaw 90 from tick 50; read m_bActive / m_BlinkMode / m_fCooldownTimer of DishonoredActivePowerComponent_Blink each tick and the pawn location"),
+)

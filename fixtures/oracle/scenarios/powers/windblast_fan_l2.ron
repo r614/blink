@@ -1,0 +1,45 @@
+// Windblast level 2: the blast factor over distance and bearing (port-only formula check; the
+// Playground does not exist in the original, so the original side is the single-guard cases).
+// Rule (0x00BE8570 with 0x00BE9770): k = 0 unless the horizontal dot product of the direction and
+// the bearing to the target exceeds cos(angle / 2) (angle 135, so 67.5 deg); else
+// k = (1 - min(d / range, 1))^2, times ((dot - cos) / (1 - cos))^2 when d > 100; damage = round(30 k).
+// d is the 3D distance from the eye to the target's bounds centre (the target is 40.4 uu below the
+// eye here, from the measured 182.8 horizontal / 187.2 3D case). Eight passive dummies on distinct
+// bearings so no ray passes another body. Expected damage = round(30 k).
+(
+    name: "powers/windblast_fan_l2",
+    system: Powers,
+    map: "Playground",
+    description: "Windblast level 2 into a fan of eight dummies at 80..2000 uu and bearings -35..+60 deg: each takes round(30 k).",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0)),
+        powers: [("WindBlast", 2)],
+        left_hand: Some("Windblast"),
+        npcs: [
+            (id: Some("a"), position: Some((-5561.4, 46.0, 92)), yaw: 180, state: Some("Passive")),
+            (id: Some("b"), position: Some((-5308.9, -72.6, 92)), yaw: 180, state: Some("Passive")),
+            (id: Some("c"), position: Some((-5370.2, 192.8, 92)), yaw: 180, state: Some("Passive")),
+            (id: Some("d"), position: Some((-5450.0, 259.8, 92)), yaw: 180, state: Some("Passive")),
+            (id: Some("e"), position: Some((-4920.8, 169.3, 92)), yaw: 180, state: Some("Passive")),
+            (id: Some("f"), position: Some((-4617.0, -688.3, 92)), yaw: 180, state: Some("Passive")),
+            (id: Some("g"), position: Some((-4540.5, 563.4, 92)), yaw: 180, state: Some("Passive")),
+            (id: Some("h"), position: Some((-3600.0, 0, 92)), yaw: 180, state: Some("Passive")),
+        ],
+        settle: 30,
+    ),
+    ticks: 300,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "a: 60 uu, 50 deg (d <= 100 branch: no angle term)", expect: [(metric: EventValue("Sim:Damage@a[cause=Windblast]", "amount"), value: 28, tol: 1, source: "if the 3D eye-to-centre distance is <= 100 there is no angle term (k = 0.93-0.96, damage 28-29). The port's standing eye is 85 uu above the pawn centre, so this dummy is at 3D 104 and gets the angle term (damage 5); the original's eye-to-centre offset is not established (the Boyle measurement, 182.8 horizontal and 3D 187.2 from the momentum, suggests 41)", status: Unmeasured)]),
+        (name: "b: 300 uu, -14 deg", expect: [(metric: EventValue("Sim:Damage@b[cause=Windblast]", "amount"), value: 22, tol: 1, source: "k = (1 - 302.7/3000)^2 x ((cos14 - cos67.5)/(1 - cos67.5))^2 = 0.8083 x 0.906 = 0.7325; round(30 k) = 22", status: Static)]),
+        (name: "c: 300 uu, 40 deg", expect: [(metric: EventValue("Sim:Damage@c[cause=Windblast]", "amount"), value: 9, tol: 1, source: "k = 0.8083 x ((cos40 - cos67.5)/(1 - cos67.5))^2 = 0.8083 x 0.3856 = 0.3117; round(30 k) = 9", status: Static)]),
+        (name: "d: 300 uu, 60 deg (near the cone edge)", expect: [(metric: EventValue("Sim:Damage@d[cause=Windblast]", "amount"), value: 1, tol: 1, source: "k = 0.0292; round(30 k) = 1", status: Static)]),
+        (name: "e: 700 uu, 14 deg", expect: [(metric: EventValue("Sim:Damage@e[cause=Windblast]", "amount"), value: 16, tol: 1, source: "k = 0.532; round(30 k) = 16", status: Static)]),
+        (name: "f: 1200 uu, -35 deg", expect: [(metric: EventValue("Sim:Damage@f[cause=Windblast]", "amount"), value: 5, tol: 1, source: "k = 0.1798; round(30 k) = 5", status: Static)]),
+        (name: "g: 1200 uu, 28 deg", expect: [(metric: EventValue("Sim:Damage@g[cause=Windblast]", "amount"), value: 7, tol: 1, source: "k = 0.2362; round(30 k) = 7", status: Static)]),
+        (name: "h: 2000 uu, 0 deg", expect: [(metric: EventValue("Sim:Damage@h[cause=Windblast]", "amount"), value: 3, tol: 1, source: "k = 0.111; round(30 k) = 3", status: Static)]),
+        (name: "front reaches h", expect: [(metric: Between("Sim:WindblastCast", "Sim:Damage@h[cause=Windblast]"), value: 0.5, tol: 0.1, source: "warmup 0.1 s + 2000 uu / 5000 uu/s front speed (0x00BF7090: reach = elapsed x m_Speed)", status: Static)]),
+    ],
+    record: [Pawn, Vitals, Powers, Npc("a"), Npc("b"), Npc("c"), Npc("d"), Npc("e"), Npc("f"), Npc("g"), Npc("h"), SimEvents],
+)
+

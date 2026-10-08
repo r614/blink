@@ -1,0 +1,28 @@
+// Dark Vision deactivates in combat (decoded, not measured): the duration step 0x00BF9AB0 first calls
+// 0x00BF84C0, which, while the player has combat opponents (the count read by 0x00C5AF60 on the pawn is
+// at least 1 and 0x00B464A0 says no), counts `m_fCombatTimer` down from
+// `Twk_DarkVision.m_fDesactivateInCombatTimer` (1.0 s) and, when it reaches zero, zeroes
+// `m_fTimeRemaining` (+0x94), so the effect ends about a second after combat starts. Out of combat the
+// timer is reset to 0. What exactly counts as combat for 0x00C5AF60 / 0x00B464A0 is not decoded
+// (LIKELY: the number of NPCs attacking / hunting the player). The port keeps Dark Vision on for 30 s
+// whatever the guards do.
+(
+    name: "powers/dark_vision_combat",
+    system: Powers,
+    map: "L_Boyle_Ext_P",
+    description: "Cast Dark Vision with an alerted (hostile) guard 300 uu away: the original ends the effect about 1 s later.",
+    setup: (
+        player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true)),
+        powers: [("DarkVision", 2)],
+        left_hand: Some("DarkVision"),
+        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), position: Some((-3400, -3450, -217.5)), yaw: 90, state: Some("Alerted")), ],
+        settle: 1,
+    ),
+    ticks: 600,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "ends in combat", expect: [(metric: Between("Sim:DarkVision[active=true]", "Sim:DarkVision[active=false]"), value: 1.1, tol: 0.4, source: "decompiled 0x00BF84C0: m_fDesactivateInCombatTimer 1.0 s after the first tick with combat opponents, plus the 0.05 s fade-in", status: Unmeasured)]),
+    ],
+    record: [Pawn, Vitals, Powers, Npc("guard"), SimEvents],
+    capture: Some("lab setup 60; lab power DarkVision 2; alert the party guard (lab alert) 300 uu ahead, cast Dark Vision; read m_fCombatTimer (+0xB0) and m_fTimeRemaining of DisActivePowerComponent_DarkVision each tick"),
+)

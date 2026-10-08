@@ -1,1 +1,24 @@
 # One scenario name per line (or 'session <op> key=value...'); the coordinator runs this queue on the hooked original.
+# --- powers (research/dishonored/systems/powers.md) ---
+powers/blink_pitch_sweep_l2
+powers/blink_pitch_sweep_l1
+powers/blink_cooldown
+powers/blink_no_mana
+powers/blink_world_slow
+powers/windblast_guard_l1
+powers/dark_vision_timeline
+powers/dark_vision_combat
+powers/possession_timeline
+powers/bend_time_l2_stop
+powers/bend_time_possess_extension
+powers/swarm_l2_cast
+# Vitality purchase heals by the HealthMax increase (SetPowerLevel 0x00ACE270): read, set the level, read again.
+session reload
+session setup
+session read object=pawn path=Health
+session power name=Vitality level=1
+session step n=2
+session read object=pawn path=Health
+session power name=Vitality level=2
+session step n=2
+session read object=pawn path=Health
