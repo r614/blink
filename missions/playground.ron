@@ -1,0 +1,98 @@
+// The Playground: a test level for the player mechanics (map: maps/playground.ron).
+// Every mechanic here is the port's normal one; only the level and this mission are new.
+//   dishonored_runtime --playground          (offline, all powers and items)
+//   harness playground                       (scripted checks of every station)
+MissionDef(
+    title: "Playground",
+    map: "Playground",
+    briefing: "A test level for the player mechanics. Walk to a station to see what it tests. The bench by the start gives every power and item, or the starting loadout back.",
+
+    objectives: [
+        ObjectiveDef(id: "free", description: "Playground", tasks: [
+            TaskDef(id: "explore", description: "Try the stations (the bench is by the start)", initial: Active),
+        ]),
+    ],
+
+    markers: [
+        MarkerDef(id: "start", at: Actor("start")),
+        MarkerDef(id: "bench_all", at: Actor("bench_all"), radius: 150.0),
+        MarkerDef(id: "bench_reset", at: Actor("bench_reset"), radius: 150.0),
+        MarkerDef(id: "exit", at: Actor("exit"), radius: 150.0),
+        MarkerDef(id: "steps", at: Actor("steps"), radius: 500.0),
+        MarkerDef(id: "slopes", at: Actor("slopes"), radius: 500.0),
+        MarkerDef(id: "mantle", at: Actor("mantle"), radius: 500.0),
+        MarkerDef(id: "gaps", at: Actor("gaps"), radius: 500.0),
+        MarkerDef(id: "blink", at: Actor("blink"), radius: 300.0),
+        MarkerDef(id: "chain", at: Actor("chain"), radius: 300.0),
+        MarkerDef(id: "pool", at: Actor("pool"), radius: 400.0),
+        MarkerDef(id: "falls", at: Actor("falls"), radius: 300.0),
+        MarkerDef(id: "doors", at: Actor("doors"), radius: 500.0),
+        MarkerDef(id: "lean", at: Actor("lean"), radius: 300.0),
+        MarkerDef(id: "tunnel", at: Actor("tunnel"), radius: 250.0),
+        MarkerDef(id: "pain", at: Actor("pain"), radius: 300.0),
+        MarkerDef(id: "gallery", at: Actor("gallery"), radius: 400.0),
+        MarkerDef(id: "dummies", at: Actor("dummies"), radius: 400.0),
+        MarkerDef(id: "stealth", at: Actor("stealth"), radius: 500.0),
+        MarkerDef(id: "patrol_west", at: Actor("patrol_west")),
+        MarkerDef(id: "patrol_east", at: Actor("patrol_east")),
+    ],
+
+    npcs: [
+        // The stealth lane's patrol: a guard with the guard faction (hostile to Corvo).
+        NpcDef(id: "patrol", kind: Guard, at: Marker("patrol_west"), behavior: Patrol(["patrol_west", "patrol_east"]), name: "Patrolling guard", faction: "DisFaction_Defaults.Faction_Guard_Default"),
+        // Sword-training dummies and shooting-gallery targets: guards without AI.
+        NpcDef(id: "dummy_a", kind: Guard, at: Actor("dummy_a"), name: "Dummy", passive: true),
+        NpcDef(id: "dummy_b", kind: Guard, at: Actor("dummy_b"), name: "Dummy", passive: true),
+        NpcDef(id: "dummy_c", kind: Guard, at: Actor("dummy_c"), name: "Dummy", passive: true),
+        NpcDef(id: "target_10m", kind: Guard, at: Actor("target_10m"), name: "Target 10 m", passive: true),
+        NpcDef(id: "target_20m", kind: Guard, at: Actor("target_20m"), name: "Target 20 m", passive: true),
+        NpcDef(id: "target_40m", kind: Guard, at: Actor("target_40m"), name: "Target 40 m", passive: true),
+    ],
+
+    player_start: "start",
+    settings: MissionSettings(respawn: true, respawn_delay: 3.0, time_limit: 0.0, high_chaos_kill_ratio: 1.0),
+    loadout: (all_powers: true, full_ammo: true, elixirs: (10, 10)),
+
+    rules: [
+        RuleDef(on: Start, then: [
+            Usable("bench_all", "Take every power and item"),
+            Usable("bench_reset", "Back to the starting loadout"),
+            Usable("exit", "Leave the Playground"),
+            Message("The Playground: walk to a station"),
+        ]),
+        RuleDef(on: Use("bench_all"), once: false, then: [
+            Equip((all_powers: true, full_ammo: true, elixirs: (10, 10), runes: 10, coins: 500)),
+            Message("Every power at level 2, full ammunition, ten elixirs of each"),
+        ]),
+        RuleDef(on: Use("bench_reset"), once: false, then: [
+            Equip((reset: true)),
+            Message("The starting loadout (Blink, Windblast, Dark Vision)"),
+        ]),
+        RuleDef(on: Use("exit"), then: [Complete("Left the Playground")]),
+
+        RuleDef(on: Enter("steps"), once: false, then: [Message("Step heights 30 / 40 / 44 / 45 / 50: the engine steps up at most MaxStepHeight 44")]),
+        RuleDef(on: Enter("slopes"), once: false, then: [Message("Slopes 40 / 45 / 50 / 55 / 60: floors steeper than 50 degrees are not walkable")]),
+        RuleDef(on: Enter("mantle"), once: false, then: [Message("Mantle ledges 60 to 300: jump at the edge (edges from 55 to 230 above the feet)")]),
+        RuleDef(on: Enter("gaps"), once: false, then: [Message("Jump gaps 100 to 500: run or sprint and jump north")]),
+        RuleDef(on: Enter("blink"), once: false, then: [Message("Blink east: the targets lie 500 / 1100 / 1600 away; the pillars are 400 / 500 / 600 high")]),
+        RuleDef(on: Enter("chain"), once: false, then: [Message("A climbable chain: Use to grab, look up and move forward to climb, jump to get off")]),
+        RuleDef(on: Enter("pool"), once: false, then: [Message("The pool: 30 s of air under water, then 1 health a second")]),
+        RuleDef(on: Enter("falls"), once: false, then: [Message("Falling damage from 2250 uu/s: drop off the ledges (880 to 1520)")]),
+        RuleDef(on: Enter("doors"), once: false, then: [Message("Doors open away from you; the right-hand door is locked. A locker and a bin")]),
+        RuleDef(on: Enter("lean"), once: false, then: [Message("Lean around the corner with Q and E")]),
+        RuleDef(on: Enter("tunnel"), once: false, then: [Message("Crouch tunnel: 150 high, sneak (C) to get through")]),
+        RuleDef(on: Enter("pain"), once: false, then: [Message("A pain-causing volume: 10 damage a second")]),
+        RuleDef(on: Enter("gallery"), once: false, then: [Message("Shooting gallery: targets at 10 / 20 / 40 m")]),
+        RuleDef(on: Enter("dummies"), once: false, then: [Message("Sword dummies: they do not fight back")]),
+        RuleDef(on: Enter("stealth"), once: false, then: [Message("Stealth lane: a guard patrols; the east half is dark")]),
+
+        // Dummies and targets come back.
+        RuleDef(on: NpcKilled("dummy_a"), once: false, then: [After(5.0, [Spawn("dummy_a")])]),
+        RuleDef(on: NpcKilled("dummy_b"), once: false, then: [After(5.0, [Spawn("dummy_b")])]),
+        RuleDef(on: NpcKilled("dummy_c"), once: false, then: [After(5.0, [Spawn("dummy_c")])]),
+        RuleDef(on: NpcKilled("target_10m"), once: false, then: [After(5.0, [Spawn("target_10m")])]),
+        RuleDef(on: NpcKilled("target_20m"), once: false, then: [After(5.0, [Spawn("target_20m")])]),
+        RuleDef(on: NpcKilled("target_40m"), once: false, then: [After(5.0, [Spawn("target_40m")])]),
+        RuleDef(on: NpcKilled("patrol"), once: false, then: [After(10.0, [Spawn("patrol"), Patrol("patrol", ["patrol_west", "patrol_east"])])]),
+    ],
+)
