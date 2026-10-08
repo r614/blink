@@ -296,7 +296,7 @@ pub fn step_world(
         let id = state.next_projectile_id;
         state.next_projectile_id = state.next_projectile_id.wrapping_add(1);
         state.projectiles.push(left_hand::make_projectile(id, owner, kind, pos, vel, &cfg.tuning));
-        out.events.push(SimEvent::Fired { id: owner, bolt: kind.is_bolt(), projectile: id });
+        out.events.push(SimEvent::Fired { id: owner, bolt: kind.is_bolt(), projectile: id, kind, origin: pos, velocity: vel });
     }
 
     // Health before the sword resolves (assassinations give adrenaline by the victim's health).
