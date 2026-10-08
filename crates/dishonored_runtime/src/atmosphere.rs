@@ -37,7 +37,7 @@ pub fn setup_camera(map: &DishonoredMap, camera: &mut EntityCommands, features: 
     camera.remove::<(Bloom, bevy::post_process::dof::DepthOfField, bevy::pbr::DistanceFog)>();
     camera.insert(ColorGrading::default());
     if fog_on || post_on {
-        let src = ArkPostSource { fog: map.environment.fog.clone(), post: map.environment.post.clone(), fog_on, post_on, display_gamma: 2.2 };
+        let src = ArkPostSource { fog: map.environment.fog.clone(), post: map.environment.post.clone(), fog_on, post_on, display_gamma: 2.2, ..Default::default() };
         let u = src.uniform(0.0);
         camera.insert((src, u));
     } else {
