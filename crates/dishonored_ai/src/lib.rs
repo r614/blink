@@ -55,6 +55,7 @@ use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
 pub mod combat;
+pub mod head;
 pub mod hearing;
 pub mod rats;
 pub mod slots;
@@ -413,6 +414,9 @@ pub struct Brain {
     /// The combat behaviour has started (its timers are rolled once per fight).
     #[serde(default)]
     pub in_fight: bool,
+    /// The look-at head and the vision eye ([`head`]).
+    #[serde(default)]
+    pub head: head::Head,
 }
 
 fn idle_state() -> BrainState {
@@ -1087,6 +1091,7 @@ impl Crowd {
             b.perceive_with(me, world_state, events, &senses, world, ai, dt);
             let mut ctx = Ctx { layout, routes, users, neglect, inhibit, alarms: &mut *alarms, events: &mut ai_events, cooldown };
             let mut inp = b.act(me, world_state, &mut ctx, world, ai, dt);
+            b.step_head(me, world_state, ai, dt);
             if inp.npc_move == 0 {
                 inp.npc_move = b.attack_kind();
             }
@@ -1649,6 +1654,7 @@ impl Brain {
             fire_timer: 0.0,
             give_up: 0.0,
             in_fight: false,
+            head: head::Head::default(),
         }
     }
 
@@ -1807,20 +1813,54 @@ impl Brain {
         self.bump(ai, NOISE, AttentionIncrease { amount: 0.0, to_level: DAL_BUSTED }, at, true, FORCED);
     }
 
-    /// Eye-space offset of a point seen by `me` (yaw only; x forward, y lateral, z up).
-    fn eye_local(me: &PlayerState, p: Vec3) -> Vec3 {
-        let d = p - (me.position + Vec3::Z * EYE);
-        let (s, c) = me.yaw.to_radians().sin_cos();
-        Vec3::new(d.x * c + d.y * s, -d.x * s + d.y * c, d.z)
+    /// The stance modifier of the head's locomotion loop (the runtime's modifier choice:
+    /// guards carry the sword, `SwordPatrol` on routine).
+    fn head_modifier(&self, _ai: &AiConfig) -> &'static str {
+        let guard = self.kind == PawnKind::Guard;
+        match self.state {
+            BrainState::Combat => if guard { "Sword" } else { "Empty" },
+            BrainState::Flee | BrainState::Cower => if guard { "PanicSword" } else { "PanicEmpty" },
+            s if s.is_routine() => if guard { "SwordPatrol" } else { "Empty" },
+            _ => if guard { "SearchSword" } else { "SearchEmpty" },
+        }
+    }
+
+    /// The look-at head after this tick's decisions: the attention process's HeadTrack request
+    /// (0x00B25890: behaviour level HeadTrack on an enemy focus; head weight 1, torso weight
+    /// `m_fHeadTrackTorsoRatio`, speed 0.5) toward the focus's eyes, then the cursor and the
+    /// eye ([`head::Head::step`]).
+    fn step_head(&mut self, me: &PlayerState, ws: &WorldState, ai: &AiConfig, dt: f32) {
+        let focus = if self.att_level == DAL_HEAD_TRACK && self.att_enemy { self.att_target.and_then(|t| ws.player(t)) } else { None };
+        let request = focus.map(|t| {
+            // `GetActorEyesViewPoint`: `BaseEyeHeight` below the standing cylinder top, the same
+            // offset from the crouched top.
+            let [eye_h, hh] = ai.player_eye;
+            let target = if t.kind == PawnKind::Human && hh > 0.0 {
+                let cur = if t.crouched { ai.player_visibility.cylinder[2] } else { hh };
+                t.position + Vec3::Z * (cur - (hh - eye_h))
+            } else {
+                t.position + Vec3::Z * EYE
+            };
+            head::LookRequest { target, head_weight: 1.0, torso_weight: ai.head_track_torso_ratio, torso_speed_reduction: true, speed: 0.5 }
+        });
+        let modifier = self.head_modifier(ai);
+        let speed = me.velocity.truncate().length();
+        self.head.step(ai, me.archetype, modifier, me.position, me.yaw, speed, request, dt);
+    }
+
+    /// The vision eye this tick: the head of the last step ([`head::Head::step`]).
+    fn vision_eye(&self, me: &PlayerState, ai: &AiConfig) -> head::Eye {
+        self.head.last_eye(ai, me.archetype, &self.head_modifier(ai), me.position, me.yaw)
     }
 
     /// The vision component's test (0x00c788e0): the target's location inside a cone, then a
     /// line-of-sight trace to one of its test points (top, middle, bottom of the pawn).
-    /// Returns the normalized vision distance.
-    fn look(me: &PlayerState, other: &PlayerState, world: &dyn WorldQuery, ai: &AiConfig) -> Option<f32> {
+    /// Returns the normalized vision distance. The cones are along the head's axis from the
+    /// `camera_jnt` eye ([`head`]).
+    fn look(veye: &head::Eye, other: &PlayerState, world: &dyn WorldQuery, ai: &AiConfig) -> Option<f32> {
         let (inner, outer) = cones(&ai.vision);
-        let (norm, _) = vision_distance(&inner, &outer, Self::eye_local(me, other.position))?;
-        let eye = me.position + Vec3::Z * EYE;
+        let (norm, _) = vision_distance(&inner, &outer, veye.local(other.position))?;
+        let eye = veye.pos;
         let clear = |p: Vec3| {
             let to = p - eye;
             let d = to.length();
@@ -1830,8 +1870,8 @@ impl Brain {
     }
 
     /// Cone and line-of-sight test (events, allies, corpses).
-    fn sees(me: &PlayerState, other: &PlayerState, world: &dyn WorldQuery, ai: &AiConfig) -> bool {
-        Self::look(me, other, world, ai).is_some()
+    fn sees(veye: &head::Eye, other: &PlayerState, world: &dyn WorldQuery, ai: &AiConfig) -> bool {
+        Self::look(veye, other, world, ai).is_some()
     }
 
     /// The target's `Attribute_Visibility`: built from light, speed and stance for players,
@@ -1877,6 +1917,7 @@ impl Brain {
         self.enemies = ws.players.iter().filter(|p| p.id != self.id && p.alive && self.relation(p.id, senses.social) == Relationship::Enemy).map(|p| p.id).collect();
         self.allies = ws.players.iter().filter(|p| p.id != self.id && self.relation(p.id, senses.social) == Relationship::Ally).map(|p| p.id).collect();
         let eye = me.position + Vec3::Z * EYE;
+        let veye = self.vision_eye(me, ai);
         // Hearing (0x00bb50d0, `hearing::heard`): strictly within the noise radius; between
         // audio cells along the precomputed portal paths; for listeners and noises outside the
         // cells, a trace from the listener to the noise (blocked: not heard).
@@ -1970,7 +2011,7 @@ impl Brain {
                     continue;
                 }
                 let witnessed = match kind {
-                    PawnKind::Guard => ws.player(src).is_some_and(|g| Self::sees(me, g, world, ai)),
+                    PawnKind::Guard => ws.player(src).is_some_and(|g| Self::sees(&veye, g, world, ai)),
                     _ => true,
                 };
                 if witnessed {
@@ -1999,7 +2040,7 @@ impl Brain {
                     let (Some(v), Some(kp)) = (ws.player(*victim), ws.player(*k)) else {
                         continue;
                     };
-                    if Self::sees(me, v, world, ai) || Self::sees(me, kp, world, ai) {
+                    if Self::sees(&veye, v, world, ai) || Self::sees(&veye, kp, world, ai) {
                         // Witnessed murder: the killer becomes an enemy at full attention.
                         self.make_hostile(*k);
                         let inc = self.profile(ai, *k).attacked_enemy;
@@ -2028,7 +2069,7 @@ impl Brain {
                 // A corpse is discovered once its seen value is non-zero (dead-NPC scalar).
                 if p.kind != PawnKind::Human && !self.corpses_seen.contains(&p.id) {
                     let prof = self.profile(ai, NOISE);
-                    let seen = !self.blind && Self::look(me, p, world, ai).is_some_and(|n| seen_rate(prof, prof.seeing_scalar_dead_npc, n, 0.0) > 0.0);
+                    let seen = !self.blind && Self::look(&veye, p, world, ai).is_some_and(|n| seen_rate(prof, prof.seeing_scalar_dead_npc, n, 0.0) > 0.0);
                     if seen {
                         self.corpses_seen.push(p.id);
                         self.found_corpses.push(p.id);
@@ -2051,7 +2092,7 @@ impl Brain {
             // (`ResponseCategory_Harmless`, a bark) in every brain reaction tweak: it changes no
             // relationship. Hostility comes from the Hostile responses (hurt by the player),
             // witnessed deaths, factions and allies' fights.
-            let seen = if self.blind { None } else { Self::look(me, p, world, ai) };
+            let seen = if self.blind { None } else { Self::look(&veye, p, world, ai) };
             let hostile = self.enemies.contains(&p.id);
             let prof = self.profile(ai, p.id).clone();
             let stop = self.stops(ai, p.id);
@@ -2100,7 +2141,7 @@ impl Brain {
             match (peer.kind, peer.state) {
                 (PawnKind::Guard, BrainState::Combat) => {
                     let Some(t) = peer.target else { continue };
-                    if self.state == BrainState::Combat || !Self::sees(me, pp, world, ai) {
+                    if self.state == BrainState::Combat || !Self::sees(&veye, pp, world, ai) {
                         continue;
                     }
                     let tp = ws.player(t).map(|p| p.position).unwrap_or(pp.position);
@@ -2109,7 +2150,7 @@ impl Brain {
                     self.bump(ai, t, inc, tp, true, reason::SEE_ALLY_COMBAT);
                 }
                 (PawnKind::Civilian, BrainState::Flee | BrainState::Cower) => {
-                    if Self::sees(me, pp, world, ai) {
+                    if Self::sees(&veye, pp, world, ai) {
                         let inc = self.profile(ai, NOISE).ally_panic_target;
                         self.bump(ai, NOISE, inc, peer.threat.unwrap_or(pp.position), false, reason::SEE_ALLY_PANIC);
                     }
@@ -3011,7 +3052,8 @@ impl Brain {
         if sighted {
             self.threat_pos = Some(t.position);
         }
-        let visible = sighted && Self::sees(me, &t, world, ai);
+        let veye = self.vision_eye(me, ai);
+        let visible = sighted && Self::sees(&veye, &t, world, ai);
         let d = t.position.distance(me.position);
         let dz = t.position.z - me.position.z;
         let reach = ai.combat.reachable_melee_range;

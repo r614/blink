@@ -38,6 +38,16 @@ pub struct LookatMode {
     pub torso_range: [f32; 4],
     pub head_horizontal_pct: f32,
     pub head_vertical_pct: f32,
+    /// `m_bDoClampRange` with `m_ClampRightRange`, `m_ClampLeftRange`, `m_ClampUpRange`,
+    /// `m_ClampDownRange` (degrees, left and down negative).
+    #[serde(default)]
+    pub clamp: Option<[f32; 4]>,
+    /// `Start_Torso` / `End_Head`: where along the reach the torso starts taking the aim
+    /// (0x009176F0).
+    #[serde(default)]
+    pub start_torso: f32,
+    #[serde(default)]
+    pub end_head: f32,
     /// 3x3 grids in the order LU, LC, LD, CU, CC, CD, RU, RC, RD (empty name: none).
     pub head: Vec<String>,
     pub torso: Vec<String>,
@@ -52,6 +62,10 @@ pub struct LookatConfig {
     /// `MaxBlinkSpeed` (play rate).
     pub blink_interval: [f32; 2],
     pub blink_rate: [f32; 2],
+    /// `m_fTorsoInfluenceMaxMoveSpeed` (class default 200): the torso weight of a request
+    /// flagged so falls linearly to 0 at this pawn speed (0x00953050).
+    #[serde(default)]
+    pub torso_influence_max_move_speed: f32,
 }
 
 /// One rigid body of a `PhysicsAsset` (`RB_BodySetup`): the bone it drives and its collision

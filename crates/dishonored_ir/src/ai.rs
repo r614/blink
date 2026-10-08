@@ -574,6 +574,14 @@ pub struct VisionConfig {
     pub outer_range: f32,
     pub outer_up: f32,
     pub outer_down: f32,
+    /// `m_fVision_BoneNullzone_Deg`: a head axis this close to the pawn's rotation is the
+    /// pawn's rotation (0x00C676A0).
+    #[serde(default = "nullzone")]
+    pub bone_nullzone_deg: f32,
+}
+
+fn nullzone() -> f32 {
+    5.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -918,12 +926,78 @@ pub struct AiConfig {
     /// stance modifiers NPC moves use. Empty: NPCs move at the player's speeds.
     #[serde(default)]
     pub locomotion: Vec<crate::npc_anim::LocoConfig>,
+    /// The vision bone (`camera_jnt`) baked from each archetype's idle and walk loops, indexed
+    /// like the visual archetypes (`PlayerState::archetype`).
+    #[serde(default)]
+    pub head_poses: Vec<HeadPose>,
+    /// The look-at config the head model reads (`DisTweaks_NPCPawn.m_pComponentLookatConfig`,
+    /// `DisLookatConfig.DefaultLookatConfig`).
+    #[serde(default)]
+    pub lookat: crate::npc_anim::LookatConfig,
+    /// `DisTweaks_PawnAttention.m_fHeadTrackTorsoRatio` of the guard / civilian attention
+    /// tweaks: the torso weight of the HeadTrack look-at request (0x00B25890).
+    #[serde(default)]
+    pub head_track_torso_ratio: f32,
+    /// The player's `BaseEyeHeight` and collision half height: a look-at request follows the
+    /// player's eyes view point (0x00952BD0), the same offset below the cylinder top.
+    #[serde(default)]
+    pub player_eye: [f32; 2],
     /// `DisTweaks_AISubProcess_AmbientBarks.m_fBarkInhibitionDuration` of the Patrol / Guard
     /// behaviours (`TweaksBehavior_Patrol_Default`): the silence after the behaviour starts
     /// before the ambient `DDH_PATROL_MISC` barks (0x00b47020).
     #[serde(default = "bark_inhibition")]
     pub ambient_bark_inhibition: f32,
     pub provenance: BTreeMap<String, String>,
+}
+
+/// One locomotion loop of a head bake: `camera_jnt` per frame in the pawn's frame (x forward,
+/// z up, origin the pawn's Location): `[px, py, pz, fx, fy, fz]`, position then the bone's X
+/// axis.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct HeadLoop {
+    /// Stance modifier of the locomotion config (`Empty`, `Sword`, ...).
+    pub modifier: String,
+    /// Speed index (0 idle, 1 walk).
+    pub speed: u8,
+    pub sequence: String,
+    pub duration: f32,
+    pub sample_rate: f32,
+    pub samples: Vec<[f32; 6]>,
+}
+
+impl HeadLoop {
+    /// The bone at loop time `t` (wrapped), linearly between frames.
+    pub fn at(&self, t: f32) -> Option<[f32; 6]> {
+        let n = self.samples.len();
+        if n == 0 {
+            return None;
+        }
+        if n == 1 || self.duration <= 0.0 {
+            return Some(self.samples[0]);
+        }
+        let f = (t.rem_euclid(self.duration) * self.sample_rate).max(0.0);
+        let i = (f.floor() as usize).min(n - 1);
+        let j = (i + 1).min(n - 1);
+        let w = f - i as f32;
+        let (a, b) = (self.samples[i], self.samples[j]);
+        Some(std::array::from_fn(|k| a[k] + (b[k] - a[k]) * w))
+    }
+}
+
+/// The vision bone of one visual archetype.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct HeadPose {
+    pub archetype: String,
+    pub mesh: String,
+    pub loops: Vec<HeadLoop>,
+}
+
+impl HeadPose {
+    /// The loop for a stance modifier and speed index (the first modifier's when the stance
+    /// has none).
+    pub fn find(&self, modifier: &str, speed: u8) -> Option<&HeadLoop> {
+        self.loops.iter().find(|l| l.speed == speed && l.modifier.eq_ignore_ascii_case(modifier)).or_else(|| self.loops.iter().find(|l| l.speed == speed))
+    }
 }
 
 fn bark_inhibition() -> f32 {
@@ -1534,7 +1608,7 @@ impl Default for AiConfig {
     /// `dishonored_assets::gameplay` reloads them from the install.
     fn default() -> Self {
         AiConfig {
-            vision: VisionConfig { inner_fov_deg: 45.0, inner_range: 3500.0, inner_up: 0.25, inner_down: 0.7, outer_fov_deg: 160.0, outer_range: 1700.0, outer_up: 0.1, outer_down: 0.7 },
+            vision: VisionConfig { inner_fov_deg: 45.0, inner_range: 3500.0, inner_up: 0.25, inner_down: 0.7, outer_fov_deg: 160.0, outer_range: 1700.0, outer_up: 0.1, outer_down: 0.7, bone_nullzone_deg: 5.0 },
             guard_unsuspecting: AttentionConfig::guard_unsuspecting(),
             guard_suspecting: AttentionConfig::guard_suspecting(),
             civilian_unsuspecting: AttentionConfig::guard_unsuspecting(),
@@ -1600,6 +1674,10 @@ impl Default for AiConfig {
             magic_reaction_delay: [0.2, 0.3],
             anim_magic_lost_target: 0.0,
             locomotion: Vec::new(),
+            head_poses: Vec::new(),
+            lookat: crate::npc_anim::LookatConfig::default(),
+            head_track_torso_ratio: 0.0,
+            player_eye: [0.0, 0.0],
             ambient_bark_inhibition: bark_inhibition(),
             provenance: BTreeMap::new(),
         }

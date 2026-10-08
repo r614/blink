@@ -184,6 +184,7 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
         out.vision.inner_down = g("m_fVision_InnerVerticalFOVScale_Down", d.inner_down);
         out.vision.outer_up = g("m_fVision_OuterVerticalFOVScale_Up", d.outer_up);
         out.vision.outer_down = g("m_fVision_OuterVerticalFOVScale_Down", d.outer_down);
+        out.vision.bone_nullzone_deg = g("m_fVision_BoneNullzone_Deg", d.bone_nullzone_deg);
         prov.insert("ai.vision".into(), VISION.into());
     }
     let beh = |path: &str| db.try_resolve(path);
@@ -483,6 +484,59 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
     out.locomotion = crate::npc_anim::package_loco_configs(content, NPC_ANIM_PACKAGES);
     if !out.locomotion.is_empty() {
         prov.insert("ai.locomotion".into(), format!("ArkComponentLocomotionConfig exports of {NPC_ANIM_PACKAGES:?}: {}", out.locomotion.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")));
+    }
+    // The vision head (stealth.md section 13): the look-at config the head model reads, the
+    // HeadTrack request's torso weight, and `camera_jnt` baked per archetype.
+    let lookat_ref = ("DishonoredGame".to_string(), "DisLookatConfig.DefaultLookatConfig".to_string());
+    match crate::npc_anim::load_lookat_config(content, &lookat_ref) {
+        Ok(l) => {
+            out.lookat = l;
+            prov.insert("ai.lookat".into(), "DishonoredGame DisLookatConfig.DefaultLookatConfig (DisTweaks_NPCPawn.m_pComponentLookatConfig default)".into());
+        }
+        Err(e) => {
+            prov.insert("ai.lookat".into(), format!("missing ({e:#})"));
+        }
+    }
+    let ratio = db.try_resolve(GUARD_UNS).and_then(|m| get_f32(&m, "m_fHeadTrackTorsoRatio"));
+    out.head_track_torso_ratio = ratio.unwrap_or(0.0);
+    prov.insert("ai.head_track_torso_ratio".into(), match ratio {
+        Some(v) => format!("{GUARD_UNS} :: m_fHeadTrackTorsoRatio = {v}"),
+        None => "DisTweaks_PawnAttention class default 0 (no shipped attention tweak sets m_fHeadTrackTorsoRatio)".into(),
+    });
+    {
+        use crate::characters::{ARCHETYPES, ARCHETYPE_TWEAKS, ARISTO_SETS, FEMALE_LOCO, FEMALE_SETS, GUARD_LOCO, GUARD_SETS};
+        const DEFAULT_NPC_BODY: &str = "Twk_Pawn_DefaultNPC.Twk_Pawn_DefaultNPC.DisTweaks_NPCPawn_Body_0";
+        for (i, (name, parts)) in ARCHETYPES.iter().enumerate() {
+            let (sets, loco_name) = match i {
+                1 => (GUARD_SETS, GUARD_LOCO),
+                3 => (FEMALE_SETS, FEMALE_LOCO),
+                _ => (ARISTO_SETS, GUARD_LOCO),
+            };
+            // `DisTweaks_Pawn_Body.m_fBone_AngleOffset_*` of the archetype's pawn tweak, else
+            // the default NPC body tweak (pitch -90).
+            let body_path = ARCHETYPE_TWEAKS.get(i).and_then(|t| db.try_resolve(t)).and_then(|m| get_obj(&m, "m_pBodyTweaks").map(|s| s.to_string())).filter(|p| db.try_resolve(p).is_some()).unwrap_or_else(|| DEFAULT_NPC_BODY.to_string());
+            let body = db.try_resolve(&body_path).unwrap_or_default();
+            let offset = [get_f32(&body, "m_fBone_AngleOffset_Yaw").unwrap_or(0.0), get_f32(&body, "m_fBone_AngleOffset_Pitch").unwrap_or(0.0), get_f32(&body, "m_fBone_AngleOffset_Roll").unwrap_or(0.0)];
+            let Some(loco) = out.locomotion.iter().find(|l| l.name.eq_ignore_ascii_case(loco_name)) else {
+                prov.insert(format!("ai.head_poses.{i}"), format!("{name}: no {loco_name}"));
+                out.head_poses.push(dishonored_ir::ai::HeadPose { archetype: name.to_string(), ..Default::default() });
+                continue;
+            };
+            match parts.first().map(|b| crate::head_pose::bake(content, name, *b, loco, sets, NPC_ANIM_PACKAGES, offset)) {
+                Some(Ok(h)) => {
+                    prov.insert(format!("ai.head_poses.{i}"), format!("{name}: {} camera_jnt over the {} idle / walk loops of {loco_name}; vision forward = X after {body_path} m_fBone_AngleOffset (yaw, pitch, roll) = {offset:?}", h.mesh, h.loops.len()));
+                    out.head_poses.push(h);
+                }
+                other => {
+                    let why = match other {
+                        Some(Err(e)) => format!("{e:#}"),
+                        _ => "no body part".into(),
+                    };
+                    prov.insert(format!("ai.head_poses.{i}"), format!("{name}: bake failed ({why})"));
+                    out.head_poses.push(dishonored_ir::ai::HeadPose { archetype: name.to_string(), ..Default::default() });
+                }
+            }
+        }
     }
     let seq = |name: &str| NPC_ANIM_PACKAGES.iter().find_map(|p| crate::npc_anim::sequence_play_length(content, p, GUARD_SWORD_SET, name));
     // `DisNPCAnimDefinitions_EliteGuard`: SearchLostTarget = [Sword_SwordToPatrol -> <p2>OutOfSight],

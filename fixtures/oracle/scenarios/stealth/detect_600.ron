@@ -4,9 +4,10 @@
 // frame 45; once the head turns toward the player the inner cone applies (norm 0.169 = 591 / 3500,
 // 0.79 / s), level 4 at frame 111. So the vision axis is the head (`camera_jnt`), not the body,
 // and HeadTrack turns the head (stealth.md F4 / F5): U-864's 0.164 was taken with the head
-// already turned. The port tests the cone along the body yaw from an eye at centre + 70, so it
-// sees the player in the inner cone from the first tick (0.1726): these checks fail until the
-// guard's head pose (idle `camera_jnt` orientation and the HeadTrack look-at) is modelled.
+// already turned. The port's head (stealth.md section 13): eye at the baked `camera_jnt`, axis the
+// pawn's rotation while no look-at request runs (look-at enabled), the HeadTrack cursor after. It
+// sees the player in the inner cone from the first tick (0.171); an outer first sighting needs the
+// look-at disabled by an ambient idle (bone axis) or another vision-target point (F6): capture queued.
 (
     name: "stealth/detect_600",
     system: Stealth,

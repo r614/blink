@@ -94,7 +94,8 @@ pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
     // v15: the integrated subsystem ports (ranged, world, melee, powers, movement, stealth).
     // v15x-physics: GameplayConfig.throw, windblast `cast.notify_time` (physics port).
     // v17: physics throw rest / get-up fields on top of v16.
-    let path = cache_dir().join("gameplay_config.v17.json");
+    // v18: AI head poses, look-at config and HeadTrack torso ratio (stealth F4 / F5).
+    let path = cache_dir().join("gameplay_config.v18-head.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);

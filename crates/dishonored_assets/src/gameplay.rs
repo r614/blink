@@ -526,6 +526,8 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
     ai.player_visibility.ground_speed_sprint = movement.sprint_speed;
     // The stealth light environment's bounds are the collision cylinder's.
     ai.player_visibility.cylinder = [movement.collision_radius, movement.collision_half_height, movement.crouch_half_height];
+    // A look-at request follows the player's eyes (`GetActorEyesViewPoint`).
+    ai.player_eye = [movement.base_eye_height, movement.collision_half_height];
 
     let items = crate::items_config::load_items_config(content, &db, &mut l.prov, &ai.loudness_distances);
     // `DisTweaks_FirePistol.m_AINoiseLoudnessWhenFiring` (an `EAINoiseLoudness`; the class
