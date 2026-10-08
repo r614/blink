@@ -329,6 +329,12 @@ impl OptionsMenu {
                 self.old_list = None;
             }
         }
+        if self.slide.as_ref().is_some_and(|s| now - s.3 > 0.3) {
+            self.slide = None;
+        }
+        if self.bind_at.as_ref().is_some_and(|b| b.2.is_some_and(|e| now - e > 0.5)) {
+            self.bind_at = None;
+        }
         self.anim.busy(now, 1.0) || self.closing.is_some() || self.slide.is_some() || self.bind_at.is_some() || self.focus.is_some()
     }
 
