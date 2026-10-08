@@ -1836,3 +1836,32 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   - Spawn: the agent's begin play (vslot 233, 0x00C792E0) plays a random `m_DevouringSwarmSpawnAnims` sequence only for rats of a Devouring Swarm. The sim keeps a Devouring Swarm as an aggregate (no rat pawns), so no rat pawn plays it.
   - Death (vslot 232, 0x00C844E0): a directional `m_Death*AnimName` (side from 0x00BBE900) plays only on one damage-class branch, when fewer than 5 ... and `rand < m_fRagdollRatio`. Another branch ragdolls (0x00C6C3D0). The damage classes were not resolved, so dead rats are not drawn yet.
   - Windblast: `m_WindBlastAnimName` (0x00C66500 and others) is not done.
+
+## 2026-10-08: Ranged weapons and gadgets ported (ranged.md F1-F6, F10-F12)
+
+- **Question:** Port the decoded ranged rules (research/dishonored/systems/ranged.md section 10).
+- **Evidence:** Re-read in the static index: 0x00C29820 (bullet damage), 0x00C2A3E0 / 0x00C38230
+  (fire, spawn, `Attribute_Range`), 0x00C3A660 (pierce), 0x00C503D0 / 0x00C4A310 (arrow damage),
+  0x00B66900 / 0x00B66950 (hit regions), 0x00C5D940 / 0x00C5C280 (bounce, sticky sink),
+  0x00C36350 / 0x00C35D60 / 0x00C2D650 / 0x00BC0280 (Spring Razor), 0x00C36E50 (bullet blast).
+- **Result:**
+  - Bullet 10 + 20, x1.5 strictly under 400 from the spawn point (camera + 150), long-range and
+    stealth factors, pierce through one pawn (x0.5 on the next). Measured since (ORACLE.md
+    2026-10-08): 45 at 300 uu, matches.
+  - Crossbow: spawn 150 ahead along the dispersed direction, speed x max(1, Attribute_Range);
+    head kill, x2 on unaware head / torso, limb cap. Measured 40 on an idle guard's torso.
+  - Hit regions: the elite guard's physics bodies (bind pose) classify the shot; the cooked
+    `KAggregateGeom` element `TM` stores each plane as (W, X, Y, Z) (the ragdoll's
+    `matrix_origin` reads it shifted by one float).
+  - Grenade bounce law with blended restitution / damping and the rest threshold; sticky 5 uu
+    sink on pawns.
+  - Spring Razor: cylinder from the base to its height, strict bounds; three points at the
+    centre +- 2/3 of the half height; a pawn without the razor interface (the player) takes
+    `m_ImmuneNPCDamage` (50), not `m_NonNPCDamage`.
+  - AI noise: pistol and explosion from their `EAINoiseLoudness` (6000); crossbow and throw have
+    no loudness field and no longer make noise.
+- **Confidence:** CONFIRMED (decompiled; pistol and crossbow damage measured); the region
+  bone mapping and the razor's NPC sample points are the port's reading.
+- **Implementation consequence:** gameplay config cache key `v13r`; `ProjectileState` gains
+  `spawn` / `pierced` (protocol bump needed). Open: muzzle-socket bolt spawn, throw origin at
+  the hand, aim assist, bolt recovery / pinning, the bullet blast (F13), grenade impact damage 6.

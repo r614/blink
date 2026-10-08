@@ -1,0 +1,45 @@
+(
+    name: "stealth/hear_footfalls",
+    system: Stealth,
+    map: "L_Boyle_Ext_P",
+    description: "The guard faces away (yaw 71.37); the player approaches it from 1800 uu along the open lane behind it, sneaking, running and sprinting. The original plays footfall contact AI noises: run Footfall_Run_Player Loudness6m (600 uu), sprint Footfall_Sprint_Player Loudness12m (1200 uu), sneak none. Records the distance at which the guard first hears.",
+    setup: (
+        player: Some((position: (-3201.5, -2763.3, 20), yaw: 71.37, snap_to_floor: true)),
+        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), yaw: 71.37, state: Some("Idle"))],
+        settle: 1,
+    ),
+    ticks: 992,
+    input: [
+        (tick: 1, action: Console("calm guard")),
+        (tick: 1, action: Console("teleport -3584.89 -3900.39 -221.8 71.37")),
+        (tick: 1, action: Press(Crouch)),
+        (tick: 1, action: Move(forward: 127, right: 0)),
+        (tick: 328, action: Move(forward: 0, right: 0)),
+        (tick: 328, action: Press(Crouch)),
+        (tick: 331, action: Console("calm guard")),
+        (tick: 331, action: Console("teleport -3584.89 -3900.39 -221.8 71.37")),
+        (tick: 331, action: Move(forward: 127, right: 0)),
+        (tick: 658, action: Move(forward: 0, right: 0)),
+        (tick: 661, action: Console("calm guard")),
+        (tick: 661, action: Console("teleport -3584.89 -3900.39 -221.8 71.37")),
+        (tick: 661, action: Move(forward: 127, right: 0)),
+        (tick: 661, hold: 320, action: Press(Sprint)),
+        (tick: 988, action: Move(forward: 0, right: 0)),
+    ],
+    checkpoints: [
+        (name: "sneak (crouch + forward)", expect: [
+            (metric: TimeToReach("npc.guard.attn_noise", 0.001), value: 0, tol: 0, source: "capture: first time the guard has noise attention (the player is 1800 uu away at the segment start, 1 ticks in; distance then = 1800 - speed x elapsed); original: sprint inside 1200 uu, run inside 600 uu, sneak never", status: Unmeasured),
+            (metric: Max("npc.guard.attn_noise"), value: 0, tol: 0, source: "capture: the highest noise attention reached in the run (cumulative over the three segments unless the capture resets it)", status: Unmeasured),
+        ]),
+        (name: "run (forward)", expect: [
+            (metric: TimeToReach("npc.guard.attn_noise", 0.001), value: 0, tol: 0, source: "capture: first time the guard has noise attention (the player is 1800 uu away at the segment start, 331 ticks in; distance then = 1800 - speed x elapsed); original: sprint inside 1200 uu, run inside 600 uu, sneak never", status: Unmeasured),
+            (metric: Max("npc.guard.attn_noise"), value: 0, tol: 0, source: "capture: the highest noise attention reached in the run (cumulative over the three segments unless the capture resets it)", status: Unmeasured),
+        ]),
+        (name: "sprint (forward)", expect: [
+            (metric: TimeToReach("npc.guard.attn_noise", 0.001), value: 0, tol: 0, source: "capture: first time the guard has noise attention (the player is 1800 uu away at the segment start, 661 ticks in; distance then = 1800 - speed x elapsed); original: sprint inside 1200 uu, run inside 600 uu, sneak never", status: Unmeasured),
+            (metric: Max("npc.guard.attn_noise"), value: 0, tol: 0, source: "capture: the highest noise attention reached in the run (cumulative over the three segments unless the capture resets it)", status: Unmeasured),
+        ]),
+    ],
+    record: [Pawn, Npc("guard"), SimEvents],
+    capture: Some("turn the original guard away (write its Rotation yaw to 71.37) and keep it unaware of the player; place and reset per segment as stealth/sweep_distance; trace the AI noise dispatch (0x00c5a760: loudness, context, position per call) and the guard's attention changes"),
+)

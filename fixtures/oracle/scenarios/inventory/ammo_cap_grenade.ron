@@ -1,0 +1,15 @@
+// Ammo capacity clamp: AddAmmo (0x00C052E0) adds min(n, capacity - count).
+(
+    name: "inventory/ammo_cap_grenade",
+    system: Inventory,
+    map: "Playground",
+    description: "Give 20 grenades to a pawn holding none: the count stops at the capacity (5 on Normal).",
+    setup: (player: Some((position: (0, -5300, 92), yaw: 90)), settle: 5),
+    ticks: 20,
+    input: [(tick: 2, action: Console("give Grenade 20"))],
+    checkpoints: [
+        (name: "clamped", expect: [(metric: Final("inv.grenades"), value: 5, tol: 0, source: "Twk_Pawn_Corvo_Release.pAttributeTweaksNormal grenade capacity 5, copied to m_AmmoInfo by 0x00B56880; AddAmmo clamps", status: Static)]),
+    ],
+    record: [Pawn, Powers, SimEvents],
+    capture: Some("session: add the grenade ammo item 20 times, read the grenade count"),
+)

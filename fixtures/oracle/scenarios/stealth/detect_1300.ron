@@ -1,4 +1,6 @@
-// As `stealth/detect_600` at 1300 uu: LOS norm 0.358, 0.226 / s.
+// As `stealth/detect_600` at 1300 uu: LOS norm 0.358, 0.226 / s. The port's 0.3795 is 1328.4 / 3500: the player is
+// on the sunken floor 270 uu below the guard's eye (horizontal 1300.6). The original's 1253 uu is below the horizontal
+// distance, so the nominal placement was not what the original sampled (U-864, stealth.md).
 (
     name: "stealth/detect_1300",
     system: Stealth,

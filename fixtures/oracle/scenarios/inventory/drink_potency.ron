@@ -1,0 +1,15 @@
+// A health elixir restores (int)((1 + Attribute_HealthPotionPotencyBonus) * 40): 40 with no charm.
+(
+    name: "inventory/drink_potency",
+    system: Inventory,
+    map: "Playground",
+    description: "Drink a health elixir at 10 health with no charm: +40 health.",
+    setup: (player: Some((position: (0, -5300, 92), yaw: 90, health: Some(10))), items: ["HealthElixir:1"], settle: 5),
+    ticks: 30,
+    input: [(tick: 5, action: Drink("HealthElixir"))],
+    checkpoints: [
+        (name: "health", expect: [(metric: Final("pawn.health"), value: 50, tol: 0.01, source: "m_nHealthElixirValue 40 x (1 + 0), 0x00C04FC0; whether regen adds to it within 25 ticks is not captured", status: Unverified)]),
+    ],
+    record: [Pawn, Vitals, Powers, SimEvents],
+    capture: Some("session: write Health 10, consume a health elixir, step 25 ticks, read Health"),
+)

@@ -1,0 +1,15 @@
+// Grenade Belt upgrade: Attribute_GrenadeCapacity +4 (Twk_Upgrades.Twk_Upgrade_GrenadeBelt).
+(
+    name: "inventory/ammo_cap_grenade_belt",
+    system: Inventory,
+    map: "Playground",
+    description: "With the Grenade Belt upgrade the grenade capacity is 5 + 4.",
+    setup: (player: Some((position: (0, -5300, 92), yaw: 90)), items: ["Upgrade:GrenadeBelt"], settle: 5),
+    ticks: 20,
+    input: [(tick: 2, action: Console("give Grenade 20"))],
+    checkpoints: [
+        (name: "clamped", expect: [(metric: Final("inv.grenades"), value: 9, tol: 0, source: "capacity 5 + Attribute_GrenadeCapacity 4 (Twk_Upgrade_GrenadeBelt m_Attributes)", status: Static)]),
+    ],
+    record: [Pawn, Powers, SimEvents],
+    capture: Some("session: give Twk_Upgrade_GrenadeBelt, add 20 grenades, read the count"),
+)

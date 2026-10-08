@@ -678,6 +678,14 @@ pub struct ProjectileState {
     pub stuck: bool,
     #[serde(default)]
     pub stuck_offset: Vec3,
+    /// Where it was launched (`DisProjectile.m_SpawnLoc`, set at launch by 0x00C1D370): the
+    /// bullet's close / long range bands are measured from here (0x00C29820).
+    #[serde(default)]
+    pub spawn: Vec3,
+    /// Bullets: the pawn a piercing shot already went through (0x00C3A660); the next pawn hit
+    /// takes `m_fPostPiercingDamageRatio` and stops it.
+    #[serde(default)]
+    pub pierced: Option<PlayerId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
