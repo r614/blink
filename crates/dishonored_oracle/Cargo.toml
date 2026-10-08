@@ -15,4 +15,5 @@ ue3_package.workspace = true
 bincode = { version = "2", features = ["serde"] }
 ron = "0.12"
 rayon = "1"
+regex = "1"
 sha2 = "0.10"

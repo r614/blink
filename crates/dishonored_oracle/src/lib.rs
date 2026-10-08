@@ -11,7 +11,9 @@
 //! - [`coverage`]: the static scan of every package against what the port's source handles.
 //! - [`structure`]: field-by-field structural diff of live objects (the primary proof);
 //! - [`sampling`]: primitive-directed queries, trace-profile expansion, densification;
-//! - [`residual`]: cause classification of residuals (the definition of done).
+//! - [`residual`]: cause classification of residuals (the definition of done);
+//! - [`index`]: the static index of the original (phase 3): the exe's natives, vtables,
+//!   cross-references, trace call sites and decompiled C, and the decompiled UnrealScript.
 //!
 //! The port side (the headless runner calling `dishonored_world`, `dishonored_sim`...) lives in
 //! the `oracle` tool so this crate builds in seconds and never depends on Bevy or the runtime.
@@ -19,6 +21,7 @@
 pub mod cache;
 pub mod coverage;
 pub mod diff;
+pub mod index;
 pub mod query;
 pub mod report;
 pub mod residual;
