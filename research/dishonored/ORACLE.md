@@ -639,6 +639,54 @@ lights (the stealth lane's light levels differ), labels and the nav grid; PhysX 
   (`m_AttentionInfos`), and `NpcBehavior` events naming the class of `m_pCurrentBehavior`
   (+0x14C, detail `current`) and of each occupied slot of `m_ActiveBehaviorStack` (+0x100, 19
   slots, detail `slot<k>`) whenever they change.
+### Sounds, effects and AI noises in traces (U-803, U-805)
+
+Three native entry hooks turn the paths that bypass ProcessEvent into trace events (capture:
+`Sounds` records `Sound` and `Noise` events, `Effects` records `Effect`, any `Npc(..)` record adds
+`Noise`; `session run` takes `"sounds"`, `"effects"`, `"noises": true` and answers
+`hook_events`):
+
+| Kind | Native | Event |
+|---|---|---|
+| `Sound` | 0x009B2BE0 (audio device post, thiscall `(UAkEvent*, AActor* source, ...)`; `Actor.PostAkEvent`'s exec 0x005C1050 -> 0x006CD730 -> it; native callers directly) | object = source actor, name = `Package.AkEvent` |
+| `Effect` | `UParticleSystemComponent::ActivateSystem` 0x008B1F80 (pooled effects too: U-805) | object = the component's Owner (+0x48), name = Template (+0x1C4), detail `comp=0x..` |
+| `Noise` | AI noise dispatch 0x00C5A760 (thiscall on the noise manager, `(event*)`) | object = source (+0x24), name = `EAINoiseLoudness` (+0x20), detail `context=` (`EAINoiseContext`, +0x21), location (+0x14), +0x38 |
+
+Measured (Boyle Ext, a pistol shot then a sprint): `Snd_Weapon_Gun_Corvo_Prefire` 1 tick after
+the press, `..._Fire` 8 ticks after, rats' screams, `Snd_P_Sprint_Breath`, music state posts
+(source None); effects `Ps_PlayerPistol_StdMuzzle_01` and the pooled `Ps_Pistol_StdTracer_01` in
+the shot's tick, the impact 3 ticks later; noises: the shot `EAINoiseLoudness4` Danger at the
+player, the bullet's impact `EAINoiseLoudness3` Danger, sprint steps `EAINoiseLoudness12m`
+(context shown as Anomaly: the context byte is read at +0x21 and not yet cross-checked against
+the decompiled dispatch) every 16 ticks, a `6m` Footfall at the stop. Footstep sounds were not
+seen in this path (the footstep AkEvents may be posted by another native: open).
+
+### Setup additions (2026-10-08, second round)
+
+- Ammo: `Bullet` / `BulletExplosive` / `Bolt` / `SleepDart` / `IncendiaryBolt` / `SpringRazor` /
+  `Grenade` / `StickyGrenade` with `:<n>` write `DishonoredInventory.m_AmmoInfo[eDisAmmoType]`
+  (after giving the weapon); a weapon's ammo selection (`left_hand` or a mid-run `Hand`) writes
+  `m_CurAmmoType` (+0x118) and `m_iCurAmmoType` (+0x120; the loaded round is kept, a warning).
+- `HealthElixir:<n>` / `ManaElixir:<n>`: `m_ElixirCounts[0 / 1]`; `Drink(..)` presses R / T.
+- `Upgrade:<Name>`: `DishonoredPlayerPawn.OnGiveUpgrade` with `DisSeqAct_GiveUpgrade`'s
+  default pointing at `Twk_Upgrades.Twk_Upgrade_<Name>`.
+- Mid-run `Hand(<power>)`: a write of `DisItemPowers.m_pCurrentActivePower` at that tick.
+- NPC `tweak`: the host level's live NPC with that tweak (e.g. the Boyle doorman).
+- Airborne starts (no floor within half height + 10 below the start, no `settle`): the pawn
+  starts `PHYS_Falling` with zero velocity at frame 0, as the port does (the fall specs before
+  this fix hovered at their start height: re-captured).
+- `session` key=value: a token without `=` continues the previous value
+  (`console command=adddarkness 11`). The darkness / debug console commands are not in retail
+  ("Command not recognized" in Launch.log): the darkness sequence of the queue needs direct writes
+  of the darkness manager instead.
+- Shader timelines: `tools/probe_launch/scripts/shader_timeline.ps1` samples one pixel shader's
+  constants per frame across a power (through one `session repl`) with the power's state:
+  `effects/darkvision_eyelid_timeline.json` (0x3c1c89ab574a7626: `UniformPixelVector_1` the
+  eyelid colour (0.1275, 0.0892, 0.0582, 1), `UniformPixelVector_2` the alpha, 0 -> 1 within the
+  first 0.35 s, 1 for the 30 s, then down through the 0.2 s fade-out) and
+  `effects/blink_lens_timeline.json` (0x0b36c71ce1512549: `UniformPixelVector_1.x` rises to 0.091
+  while aiming and settles at 0.07; during the travel x and y peak at (1.47, 1.88) / (0.61,
+  2.43), then decay to 0 over about 1 s).
 ### Usage for fuzzing agents
 
 Start (or reuse) the session with `probe_launch session start --map <M>` (a running session is

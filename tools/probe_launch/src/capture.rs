@@ -548,6 +548,22 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
             crate::lab::give(&mut s.c, "Twk_Inv_SwordCorvo", true)?;
         }
         s.place((glam::Vec3::from(ps.position) + off).to_array(), Some(ps.yaw), Some(ps.pitch), ps.snap_to_floor)?;
+        // An airborne start (no floor within the cylinder's half height + 10 below the
+        // centre): the pawn starts PHYS_Falling with zero velocity, as the port's runner does;
+        // a walking pawn left in the air would hover there.
+        let airborne = {
+            let at = glam::Vec3::from(ps.position) + off;
+            let pawn = crate::lab::pawn(&mut s.c)?;
+            let h = s.read_value("pawn", "CylinderComponent.CollisionHeight")?.as_f64().unwrap_or(87.5) as f32;
+            let q = dishonored_probe::LineQuery { start: at.to_array(), end: (at - glam::Vec3::Z * (h + 10.0)).to_array(), extent: [0.0; 3], flags: crate::session::TRACE_WORLD, source: pawn };
+            !s.c.line_checks(&[q])?.first().is_some_and(|r| r.hit)
+        };
+        if airborne && spec.setup.settle == 0 {
+            let pawn = crate::lab::pawn(&mut s.c)?;
+            let pl = s.r.place(&mut s.c, pawn, "Physics")?;
+            s.r.write_place(&mut s.c, &pl, &json!("PHYS_Falling"))?;
+            warnings.push("airborne start: PHYS_Falling set at frame 0".into());
+        }
         if spec.setup.settle > 0 {
             // A walking pawn does not look for its floor until it moves: start the settle
             // falling (PHYS_Falling written directly; `SetPhysics` is ignored for the player)
@@ -594,6 +610,7 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     // Mid-run hand switches between powers: a write of DisItemPowers.m_pCurrentActivePower
     // (the power wheel's selection) at that tick; weapons and drinks are not scripted yet.
     let mut hand_writes: Vec<(u32, u32, u32)> = Vec::new();
+    let mut drink_keys: Vec<(u32, &'static str)> = Vec::new();
     for st in &spec.input {
         match &st.action {
             Action::Hand(h) => match power_component(h) {
@@ -620,7 +637,11 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
                     _ => gap(format!("input Hand({h}) at tick {} (weapon switches are not scripted on the original yet)", st.tick), &mut warnings)?,
                 },
             },
-            Action::Drink(_) => gap(format!("input {:?} at tick {} (drinks are not scripted on the original yet)", st.action, st.tick), &mut warnings)?,
+            // Drinks: the elixir keys (DefaultInput m_PCBindings: R GBA_HealthElixir, T GBA_ManaElixir).
+            Action::Drink(x) => {
+                let k = if x.contains("Mana") { "T" } else { "R" };
+                drink_keys.push((st.tick, k));
+            }
             _ => {}
         }
     }
@@ -763,6 +784,10 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
         if let Action::Console(c) = &st.action {
             actions.push((st.tick, ScriptAction::Console(c.clone())));
         }
+    }
+    for (t, k) in &drink_keys {
+        actions.push((*t, ScriptAction::Key(k.to_string(), true)));
+        actions.push((*t + 2, ScriptAction::Key(k.to_string(), false)));
     }
     for (t, addr, v) in &hand_writes {
         // 0xFFFFFF00 | byte: a one-byte write.
