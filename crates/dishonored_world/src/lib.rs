@@ -322,6 +322,122 @@ pub trait WorldQuery {
     fn hit_package(&self, _origin: Vec3, _dir: Vec3, _max_dist: f32) -> Option<String> {
         None
     }
+    /// Level streaming: which of the map's Kismet-streamed sublevels are visible (in the
+    /// world: they collide); the others do not. Worlds without streamed levels ignore it.
+    fn set_visible_levels(&self, _visible: &[String]) {}
+}
+
+/// The collision of a map's Kismet-streamed sublevels (`LevelStreamingKismet`), one world per
+/// sublevel, and which are visible now (UE3 adds a streamed level's actors to the world when it
+/// is made visible and removes them when it is hidden). Set by the game each step from the
+/// Kismet's streaming state ([`WorldQuery::set_visible_levels`]).
+#[derive(Debug, Default)]
+pub struct StreamedLevels {
+    pub levels: Vec<(String, CollisionWorld)>,
+    visible: std::sync::atomic::AtomicU64,
+}
+
+impl StreamedLevels {
+    pub fn new(levels: Vec<(String, CollisionWorld)>) -> Self {
+        StreamedLevels { levels, visible: Default::default() }
+    }
+    /// Save / load the sublevel worlds (the derived-data cache).
+    pub fn save_levels(levels: &[(String, CollisionWorld)], path: &std::path::Path) -> Result<()> {
+        std::fs::write(path, bincode::serde::encode_to_vec(levels, bincode::config::standard())?)?;
+        Ok(())
+    }
+    pub fn load_levels(path: &std::path::Path) -> Result<Vec<(String, CollisionWorld)>> {
+        let bytes = std::fs::read(path)?;
+        Ok(bincode::serde::decode_from_slice(&bytes, bincode::config::standard())?.0)
+    }
+    /// Make exactly these sublevels visible (case-insensitive; others hidden).
+    pub fn set_visible(&self, visible: &[String]) {
+        let mut m = 0u64;
+        for (i, (n, _)) in self.levels.iter().enumerate().take(64) {
+            if visible.iter().any(|v| v.eq_ignore_ascii_case(n)) {
+                m |= 1 << i;
+            }
+        }
+        self.visible.store(m, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// The visible sublevels' worlds.
+    pub fn visible(&self) -> impl Iterator<Item = &CollisionWorld> {
+        let m = self.visible.load(std::sync::atomic::Ordering::Relaxed);
+        self.levels.iter().enumerate().filter(move |(i, _)| *i < 64 && m & (1 << i) != 0).map(|(_, l)| &l.1)
+    }
+    pub fn visible_names(&self) -> Vec<String> {
+        let m = self.visible.load(std::sync::atomic::Ordering::Relaxed);
+        self.levels.iter().enumerate().filter(|(i, _)| *i < 64 && m & (1 << i) != 0).map(|(_, l)| l.0.clone()).collect()
+    }
+}
+
+/// A map's always-loaded collision plus its visible streamed sublevels: queries answer for the
+/// nearest hit over all of them (like [`Layered`]).
+pub struct WithLevels<'a> {
+    pub base: &'a CollisionWorld,
+    pub levels: &'a StreamedLevels,
+}
+
+impl WorldQuery for WithLevels<'_> {
+    fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32, channels: u8) -> Option<RayHit> {
+        let mut best = self.base.raycast(origin, dir, max_dist, channels);
+        for l in self.levels.visible() {
+            let reach = best.map(|h| h.distance).unwrap_or(max_dist);
+            if let Some(h) = l.raycast(origin, dir, reach, channels) {
+                if best.is_none_or(|b| h.distance < b.distance) {
+                    best = Some(h);
+                }
+            }
+        }
+        best
+    }
+    fn capsule_contacts(&self, cap: &Capsule, channels: u8, out: &mut Vec<Contact>) {
+        self.base.capsule_contacts(cap, channels, out);
+        for l in self.levels.visible() {
+            l.capsule_contacts(cap, channels, out);
+        }
+    }
+    fn sweep_capsule(&self, cap: &Capsule, delta: Vec3, channels: u8) -> Option<SweepHit> {
+        self.levels.visible().fold(self.base.sweep_capsule(cap, delta, channels), |acc, l| nearer(acc, l.sweep_capsule(cap, delta, channels)))
+    }
+    fn nav(&self) -> Option<&nav::NavWorld> {
+        self.base.nav()
+    }
+    fn box_contacts(&self, b: &PawnBox, channels: u8, out: &mut Vec<Contact>) {
+        self.base.box_contacts(b, channels, out);
+        for l in self.levels.visible() {
+            l.box_contacts(b, channels, out);
+        }
+    }
+    fn sweep_box(&self, b: &PawnBox, delta: Vec3, channels: u8) -> Option<SweepHit> {
+        self.levels.visible().fold(self.base.sweep_box(b, delta, channels), |acc, l| nearer(acc, l.sweep_box(b, delta, channels)))
+    }
+    fn water_at(&self, p: Vec3) -> Option<WaterInfo> {
+        self.base.water_at(p)
+    }
+    fn movers(&self) -> &[MoverCollision] {
+        self.base.movers()
+    }
+    fn physics_volumes(&self) -> &[PhysicsVolume] {
+        self.base.physics_volumes()
+    }
+    fn climbables(&self) -> &[Climbable] {
+        self.base.climbables()
+    }
+    fn hit_package(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<String> {
+        let mut best: Option<(f32, &CollisionWorld)> = self.base.raycast(origin, dir, max_dist, channel::ALL).map(|h| (h.distance, self.base));
+        for l in self.levels.visible() {
+            if let Some(h) = l.raycast(origin, dir, max_dist, channel::ALL) {
+                if best.is_none_or(|b| h.distance < b.0) {
+                    best = Some((h.distance, l));
+                }
+            }
+        }
+        best?.1.hit_package(origin, dir, max_dist)
+    }
+    fn set_visible_levels(&self, visible: &[String]) {
+        self.levels.set_visible(visible)
+    }
 }
 
 
@@ -712,7 +828,130 @@ impl CollisionWorld {
     }
 }
 
+/// The level package of a collision source: `<mesh> <- <package>:<actor path>` ([`CollisionWorld::from_map`])
+/// or `<package>:<actor>` (blockers, movers); None when it names none.
+pub fn source_package(source: &str) -> Option<&str> {
+    let inst = source.rsplit(" <- ").next()?;
+    let (p, rest) = inst.split_once(':')?;
+    (!p.is_empty() && !rest.is_empty()).then_some(p)
+}
+
 impl CollisionWorld {
+    /// Split off the triangles of the given level packages (case-insensitive): this world
+    /// without them, and one world per package (in `levels` order) with them. Each world keeps
+    /// its triangles' sources, surfaces, check shapes, kinds and convex elements. Movers stay
+    /// in the base world.
+    pub fn split_levels(self, levels: &[String]) -> (CollisionWorld, Vec<(String, CollisionWorld)>) {
+        let level_of: Vec<Option<usize>> = self.sources.iter().map(|s| source_package(s).and_then(|p| levels.iter().position(|l| l.eq_ignore_ascii_case(p)))).collect();
+        if levels.is_empty() || level_of.iter().all(Option::is_none) {
+            let n = levels.len();
+            return (self, (0..n).map(|i| (levels[i].clone(), CollisionWorld::from_triangles(Vec::new(), Vec::new()))).collect());
+        }
+        let CollisionWorld { tris, sources, tri_surface, surfaces, tri_shape, tri_kind, tri_elem, nav, water, volumes, movers, climbables, .. } = self;
+        // Partition `n + 1` ways (last = base).
+        let n = levels.len();
+        struct Part {
+            tris: Vec<Tri>,
+            surface: Vec<u16>,
+            shape: Vec<u8>,
+            kind: Vec<u8>,
+            elem: Vec<u32>,
+            src_map: std::collections::HashMap<u32, u32>,
+            sources: Vec<String>,
+        }
+        let mut parts: Vec<Part> = (0..=n).map(|_| Part { tris: Vec::new(), surface: Vec::new(), shape: Vec::new(), kind: Vec::new(), elem: Vec::new(), src_map: Default::default(), sources: Vec::new() }).collect();
+        for (i, t) in tris.into_iter().enumerate() {
+            let p = &mut parts[level_of.get(t.source as usize).copied().flatten().unwrap_or(n)];
+            let s = *p.src_map.entry(t.source).or_insert_with(|| {
+                p.sources.push(sources[t.source as usize].clone());
+                (p.sources.len() - 1) as u32
+            });
+            p.tris.push(Tri { source: s, ..t });
+            p.surface.push(tri_surface.get(i).copied().unwrap_or(0));
+            p.shape.push(tri_shape.get(i).copied().unwrap_or(shape::ALL));
+            p.kind.push(tri_kind.get(i).copied().unwrap_or(hit_kind::COMPLEX));
+            p.elem.push(tri_elem.get(i).copied().unwrap_or(u32::MAX));
+        }
+        let mut worlds: Vec<CollisionWorld> = parts
+            .into_iter()
+            .map(|p| {
+                let mut w = CollisionWorld::from_triangles(p.tris, p.sources);
+                w.tri_surface = p.surface;
+                w.surfaces = surfaces.clone();
+                w.tri_shape = p.shape;
+                w.tri_kind = p.kind;
+                w.tri_elem = p.elem;
+                w.index_elements();
+                w
+            })
+            .collect();
+        let mut base = worlds.pop().unwrap();
+        base.nav = nav;
+        base.water = water;
+        base.volumes = volumes;
+        base.movers = movers;
+        base.climbables = climbables;
+        (base, levels.iter().cloned().zip(worlds).collect())
+    }
+
+    /// This world with the triangles of `others` added (sublevels made visible), keeping each
+    /// triangle's source, surface, check shape, kind and convex element; navigation, volumes
+    /// and movers stay this world's.
+    pub fn merged(self, others: &[&CollisionWorld]) -> CollisionWorld {
+        if others.iter().all(|o| o.tris.is_empty()) {
+            return self;
+        }
+        let CollisionWorld { mut tris, mut sources, mut tri_surface, mut surfaces, mut tri_shape, mut tri_kind, mut tri_elem, nav, water, volumes, movers, climbables, .. } = self;
+        tri_surface.resize(tris.len(), 0);
+        tri_shape.resize(tris.len(), shape::ALL);
+        tri_kind.resize(tris.len(), hit_kind::COMPLEX);
+        tri_elem.resize(tris.len(), u32::MAX);
+        if surfaces.is_empty() {
+            surfaces.push(String::new());
+        }
+        let mut next = tri_elem.iter().filter(|e| **e != u32::MAX).max().map_or(0, |m| m + 1);
+        for o in others {
+            let src0 = sources.len() as u32;
+            sources.extend(o.sources.iter().cloned());
+            let surf: Vec<u16> = o
+                .surfaces
+                .iter()
+                .map(|s| match surfaces.iter().position(|x| x == s) {
+                    Some(i) => i as u16,
+                    None => {
+                        surfaces.push(s.clone());
+                        (surfaces.len() - 1) as u16
+                    }
+                })
+                .collect();
+            let base = next;
+            for (i, t) in o.tris.iter().enumerate() {
+                tris.push(Tri { source: t.source + src0, ..*t });
+                tri_surface.push(o.tri_surface.get(i).and_then(|s| surf.get(*s as usize)).copied().unwrap_or(0));
+                tri_shape.push(o.shape_of(i as u32));
+                tri_kind.push(o.kind_of(i as u32));
+                let e = o.tri_elem.get(i).copied().unwrap_or(u32::MAX);
+                tri_elem.push(if e == u32::MAX { u32::MAX } else { base + e });
+                if e != u32::MAX {
+                    next = next.max(base + e + 1);
+                }
+            }
+        }
+        let mut w = CollisionWorld::from_triangles(tris, sources);
+        w.tri_surface = tri_surface;
+        w.surfaces = surfaces;
+        w.tri_shape = tri_shape;
+        w.tri_kind = tri_kind;
+        w.tri_elem = tri_elem;
+        w.index_elements();
+        w.nav = nav;
+        w.water = water;
+        w.volumes = volumes;
+        w.movers = movers;
+        w.climbables = climbables;
+        w
+    }
+
     pub fn from_triangles(tris: Vec<Tri>, sources: Vec<String>) -> Self {
         let bounds: Vec<Aabb> = tris
             .iter()
@@ -1303,6 +1542,9 @@ impl WorldQuery for Layered<'_> {
         self.base.raycast(origin, dir, max_dist, channel::ALL).filter(|h| h.distance <= reach + 1e-3)?;
         self.base.hit_package(origin, dir, max_dist)
     }
+    fn set_visible_levels(&self, visible: &[String]) {
+        self.base.set_visible_levels(visible)
+    }
 }
 
 #[cfg(test)]
@@ -1360,6 +1602,29 @@ mod tests {
         assert!(h.fraction > 0.4 && h.fraction < 0.5, "{}", h.fraction);
         // Traces (vision, projectiles) pass through.
         assert!(w.raycast(Vec3::new(0.0, 0.0, 100.0), -Vec3::X, 600.0, channel::VISION | channel::PROJECTILE).is_none());
+    }
+
+    #[test]
+    fn streamed_sublevel_collides_only_while_visible() {
+        // Floor from the persistent level, wall from a Kismet-streamed sublevel.
+        let mut w = floor_and_wall();
+        w.sources = vec!["floor <- Map_P:Floor".into(), "wall <- Map_Sub:Wall".into()];
+        for t in w.tris.iter_mut().skip(2) {
+            t.source = 1;
+        }
+        let (base, levels) = w.split_levels(&["Map_Sub".to_string()]);
+        assert_eq!((base.tris.len(), levels[0].1.tris.len()), (2, 2));
+        let s = StreamedLevels::new(levels);
+        let q = WithLevels { base: &base, levels: &s };
+        let ray = |q: &WithLevels| q.raycast(Vec3::new(0., 0., 100.), Vec3::X, 1000.0, channel::ALL).map(|h| h.distance);
+        assert_eq!(ray(&q), None, "hidden: no wall");
+        q.set_visible_levels(&["map_sub".to_string()]);
+        assert!(ray(&q).is_some_and(|d| (d - 500.0).abs() < 1e-3));
+        assert_eq!(q.hit_package(Vec3::new(0., 0., 100.), Vec3::X, 1000.0).as_deref(), Some("Map_Sub"));
+        // Merged back (the oracle's comparison world) the wall answers again.
+        let m = base.clone().merged(&[&s.levels[0].1]);
+        assert_eq!(m.tris.len(), 4);
+        assert!(m.raycast(Vec3::new(0., 0., 100.), Vec3::X, 1000.0, channel::ALL).is_some());
     }
 
     #[test]
@@ -1501,5 +1766,8 @@ impl WorldQuery for MapSet {
     }
     fn hit_package(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<String> {
         self.cur().hit_package(origin, dir, max_dist)
+    }
+    fn set_visible_levels(&self, visible: &[String]) {
+        self.cur().set_visible_levels(visible)
     }
 }

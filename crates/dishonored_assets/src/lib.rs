@@ -85,6 +85,35 @@ pub fn streaming_levels(content: &Content, persistent: &str) -> Option<Vec<Strin
     Some(out)
 }
 
+/// The sublevels a persistent map streams by Kismet: the `PackageName`s of its
+/// `WorldInfo.StreamingLevels` entries of class `LevelStreamingKismet`. The shipped maps use
+/// only two streaming classes: `LevelStreamingAlwaysLoaded` (loaded and visible with the map)
+/// and `LevelStreamingKismet` (not loaded until `SeqAct_LevelStreaming` /
+/// `SeqAct_MultiLevelStreaming` / `SeqAct_LevelVisibility` or the map change that prepared the
+/// map names it in `InitiallyLoadedSecondaryLevelNames`). 22 such sublevels over 9 maps
+/// (L_Out_P's story variants, the Pub's per-chapter script levels, Bridge 2 / Brothel high chaos,
+/// Streets1's Outsider shrine, Tower's water).
+pub fn kismet_streamed_levels(content: &Content, persistent: &str) -> Vec<String> {
+    use ue3_package::ObjRef;
+    use ue3_package::properties::{Value, find};
+    let Ok(pkg) = content.package(persistent) else { return Vec::new() };
+    let Some(wi) = (0..pkg.exports.len()).find(|&i| pkg.export_class(i) == "WorldInfo" && pkg.obj_name(ObjRef::from_index(pkg.exports[i].outer)) == "PersistentLevel") else { return Vec::new() };
+    let Ok(h) = pkg.read_object(wi) else { return Vec::new() };
+    let refs = find(&h.properties, "StreamingLevels").and_then(|p| p.array_objects().ok()).unwrap_or_default();
+    let mut out = Vec::new();
+    for r in refs {
+        let ObjRef::Export(e) = ObjRef::from_index(r) else { continue };
+        if pkg.export_class(e) != "LevelStreamingKismet" {
+            continue;
+        }
+        let Ok(h) = pkg.read_object(e) else { continue };
+        if let Some(Value::Name(n)) = find(&h.properties, "PackageName").map(|p| &p.value) {
+            out.push(n.clone());
+        }
+    }
+    out
+}
+
 /// Every package sharing the persistent level's prefix (`L_Boyle_Ext_P` -> `L_Boyle_Ext_*`).
 pub fn map_packages_by_prefix(content: &Content, persistent: &str) -> Vec<String> {
     let prefix = persistent.strip_suffix("_P").unwrap_or(persistent).to_ascii_lowercase();

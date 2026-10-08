@@ -623,6 +623,40 @@ fn level_loaded_fires_only_linked_outputs_and_state_restored_on_return() {
     assert_eq!(h.hits.iter().map(|x| x.1).collect::<Vec<_>>(), vec![restored]);
 }
 
+#[test]
+fn streamed_sublevel_sequences_run_only_while_in_the_world() {
+    // A map with a Kismet-streamed sublevel (package 2): left out of the map load, its
+    // sequences start when it is streamed in (its level-loaded event fires), stop when it is
+    // hidden, and restart fresh after an unload.
+    let mut b = B::new();
+    b.db.packages.push("SubPkg".into());
+    b.db.roots.push(Vec::new());
+    b.db.maps[0].1.push(2);
+    b.db.classes.insert("SeqEvent_LevelLoaded".into(), vec!["SeqEvent_LevelLoaded".into(), "SequenceEvent".into(), "SequenceOp".into()]);
+    let s = b.root(2);
+    let ev = b.add(2, "SeqEvent_LevelLoaded", Kind::Event, Some(s), &[], &["Loaded and Visible", "Beginning of Level"], vec![("MaxTriggerCount", Value::Int(1))]);
+    let r = b.record(s);
+    b.link(ev, 0, r, 0);
+    let mut k = b.build(1);
+    let mut h = Rec::default();
+    k.load_map_levels(&mut h, "Map", &["SubPkg".to_string()]);
+    tick(&mut k, &mut h, 2);
+    assert!(h.hits.is_empty(), "the streamed-out sublevel's Kismet does not run");
+    assert!(k.set_level_loaded(&mut h, "SubPkg", true, false));
+    tick(&mut k, &mut h, 1);
+    assert_eq!(h.hits.len(), 1, "streamed in: Loaded and Visible");
+    // Hidden then shown again (still loaded): its state is kept (the one-shot event stays used).
+    k.set_level_loaded(&mut h, "SubPkg", false, false);
+    k.set_level_loaded(&mut h, "SubPkg", true, false);
+    tick(&mut k, &mut h, 1);
+    assert_eq!(h.hits.len(), 1);
+    // Unloaded and loaded again: a fresh level, the event fires again.
+    k.set_level_loaded(&mut h, "SubPkg", false, false);
+    k.set_level_loaded(&mut h, "SubPkg", true, true);
+    tick(&mut k, &mut h, 1);
+    assert_eq!(h.hits.len(), 2);
+}
+
 // ----- kismet.md F-1 .. F-6 (2026-10-08 port) -----
 
 #[test]

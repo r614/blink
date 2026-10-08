@@ -49,6 +49,10 @@ pub struct Spawner {
     /// first), as `Pkg.Obj` paths: what "is or inherits from" tests (0x00C6F450).
     #[serde(default)]
     pub lineage: Vec<String>,
+    /// The level package that places the spawner (a Kismet-streamed sublevel's spawners exist
+    /// only while it is visible).
+    #[serde(default)]
+    pub package: String,
 }
 /// An NPC's look from its pawn tweak (`DisTweaks_NPCPawn`, resolved through Arkane's fallback
 /// chain): the body `m_pSkeletalMesh` and the `m_RandomHeadMeshes` options. Mesh references are

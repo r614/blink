@@ -197,6 +197,7 @@ pub fn load_layout_match(content: &Content, sim: SimConfig, layout: &MapLayout) 
     Ok(MatchContent {
         map_name: layout.name.clone(),
         collision,
+        levels: Default::default(),
         spawns,
         sim,
         ai_points: Vec::new(),

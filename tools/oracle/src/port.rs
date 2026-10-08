@@ -16,7 +16,7 @@ use std::sync::Arc;
 const SNAP_MAGIC: &[u8; 8] = b"BLKPSNAP";
 /// Bump when [`PortSnapshot`] or the port's collision import changes (2: the collision audit). A `dishonored_world` serde change also invalidates
 /// snapshots: decoding fails and the tool asks for `oracle snapshot`.
-const SNAP_VERSION: u32 = 2;
+const SNAP_VERSION: u32 = 3;
 
 /// The port's view of a map, as `dishonored_content::load_match` builds it for the game.
 #[derive(Serialize, Deserialize)]
@@ -33,12 +33,26 @@ pub struct PortSnapshot {
     /// `GameplayConfig` as JSON (the sim config is rebuilt from it).
     pub gameplay_json: String,
     pub spawns: Vec<(Vec3, f32)>,
+    /// [streaming] The Kismet-streamed sublevels' collision (not in [Self::collision]).
+    #[serde(default)]
+    pub levels: Vec<(String, CollisionWorld)>,
 }
 
 impl PortSnapshot {
     /// The collision world with its navigation and volumes attached, ready for queries.
-    pub fn world(mut self) -> (CollisionWorld, String) {
-        let mut w = std::mem::take(&mut self.collision);
+    pub fn world(self) -> (CollisionWorld, String) {
+        self.world_with(&[])
+    }
+
+    /// [`Self::world`] with these Kismet-streamed sublevels visible (the level streaming state
+    /// to compare against; a capture of a map opened from the console has none of them).
+    pub fn world_with(mut self, stream: &[String]) -> (CollisionWorld, String) {
+        let visible: Vec<&CollisionWorld> = self.levels.iter().filter(|l| stream.iter().any(|s| s.eq_ignore_ascii_case(&l.0))).map(|l| &l.1).collect();
+        let mut base = std::mem::take(&mut self.collision);
+        // Movers of hidden streamed sublevels are not in the world either.
+        let hidden: Vec<&str> = self.levels.iter().map(|l| l.0.as_str()).filter(|l| !stream.iter().any(|s| s.eq_ignore_ascii_case(l))).collect();
+        base.movers.retain(|m| dishonored_world::source_package(&m.actor).is_none_or(|p| !hidden.iter().any(|h| h.eq_ignore_ascii_case(p))));
+        let mut w = base.merged(&visible);
         w.nav = self.nav.take().map(|mut n| {
             n.finish_load();
             Arc::new(n)
@@ -83,6 +97,7 @@ pub fn load_snapshot(root: &Path, map: &str) -> Result<PortSnapshot> {
 pub fn build_snapshot(map: &str) -> Result<PortSnapshot> {
     let mc = dishonored_content::load_match(map)?;
     let gameplay_json = serde_json::to_string(&mc.sim.gameplay)?;
+    let levels = mc.levels.levels.clone();
     let mut c = mc.collision;
     let nav = c.nav.take().map(|n| (*n).clone());
     let water = c.water.take().map(|w| (*w).clone()).unwrap_or_default();
@@ -99,6 +114,7 @@ pub fn build_snapshot(map: &str) -> Result<PortSnapshot> {
         climbables,
         gameplay_json,
         spawns: mc.spawns.iter().map(|s| (s.position, s.yaw)).collect(),
+        levels,
     })
 }
 

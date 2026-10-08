@@ -148,6 +148,78 @@ Coordinator follow-ups (top clusters, not fixed here):
   another position on the original) and `DisDoor_1` (55).
 - DishonoredGameFull_P: not opened on the original (the console `open` stays on the previous level); no comparison.
 
+### Level streaming (2026-10-08, second pass)
+
+The shipped maps stream sublevels with two classes only (a survey of every persistent map's `WorldInfo.StreamingLevels`): 311
+`LevelStreamingAlwaysLoaded` (loaded and visible with the map) and 22 `LevelStreamingKismet` on 9 maps (no flag serialized: not loaded
+until something streams them): L_Out_P's nine story variants (`L_Out_EnvSamAlive / SamDead / CallistaCurnow / CallistaAlive /
+CallistaDead / LabEmpty / LabSokolov / LabPiero / LabPieroAndSokolov`), the Pub's per-chapter script levels (`L_Pub_From<Chapter>_Script`
+[`_Sleep`]: 3 on Day, 3 on Dusk, 2 on Morning, 1 on Night), `L_Bridge_Part2_HighChaos`, `L_Brothel_HighChaos`, `L_Streets1_Outsider`,
+`L_Tower_Water`. Before, the port imported and ran every one of them at once.
+
+What streams them (decoded):
+
+| source | rule |
+|---|---|
+| `SeqAct_PrepareMapChange.InitiallyLoadedSecondaryLevelNames` | loaded and visible with the map: `CommitMapChange` (0x0062d570) adds a `LevelStreamingPersistent_<name>` for each prepared secondary level. The global handlers pick L_Out_P's three variants this way (by story flags) and the Pub's chapter script (`L_Pub_FromBridge_Script_Sleep`...). LIKELY (UE3 code and the format string; the flag writes were not traced bit by bit) |
+| `SeqAct_LevelStreaming` / `SeqAct_MultiLevelStreaming` (`ActivateLevel` 0x006dc230, 0x006e5f90) | the level found by `LevelName` (0x006e5d50). `LevelStreaming` +0x5c: 0x80 `bShouldBeLoaded`, 0x100 `bShouldBeVisible`, 0x200 `bShouldBlockOnLoad`. Load (input 0): loaded, visible \|= `bMakeVisibleAfterLoad`, block = `bShouldBlockOnLoad`; Unload (1): neither. `bUnloadAllOtherLevels` clears both on every other streaming level. Latent: `UpdateOp` (0x006dc370) finishes when every level reached its state |
+| `SeqAct_LevelVisibility` (0x006e62e0) | Make Visible (0): loaded and visible; Hide (1): not visible |
+| `LevelStreamingAlwaysLoaded` | ignores the flags (always in) |
+
+The port's model: a Kismet-streamed sublevel is in the world while it should be loaded and visible (UE3 adds a level to the world when it
+is made visible and removes it when hidden or unloaded):
+
+- **Collision** (`dishonored_content::load_match`): the map's collision is split by level package
+  (`CollisionWorld::split_levels`, cached as `<map>.collision20.bin` + `<map>.levels20.bin`): the always-loaded levels in
+  `MatchContent::collision`, one world per streamed sublevel in `MatchContent::levels` (`dishonored_world::StreamedLevels`, a visibility
+  mask). Queries answer over the base plus the visible sublevels (`WithLevels`); the game sets the mask every step
+  (`WorldQuery::set_visible_levels`, forwarded by `MapSet` and `Layered`). Movers of hidden sublevels do not collide (`place_movers`).
+- **Kismet**: a map loads without its streamed-out sublevels (`Kismet::load_map_levels`); `Kismet::set_level_loaded` adds or removes a
+  sublevel's sequences (its `SeqEvent_LevelLoaded` fires "Loaded and Visible" / "Beginning of Level" as `AddToWorld` raises them; a level
+  unloaded in between comes back fresh). The host runs the three streaming ops and the map change's secondary levels
+  (`HostState::streaming`, `apply_streaming`).
+- **Actors**: `MissionMatch::set_level_visible` spawns a sublevel's begin-play spawners and its pickups when it appears and removes them
+  when it leaves (`OriginalNpc::package`, `Spawner::package`); a fresh visit of the map skips the hidden ones.
+- **Rendering**: `MatchView::hidden_levels` lists the active map's streamed sublevels that are not visible. NOT WIRED in the renderer
+  (runtime crate, not built here): it must tag each map entity with its instance's level package (`MeshInstance::level`) and hide the
+  listed ones.
+- Not per sublevel yet (what the streamed levels hold, surveyed): the Pub chapter scripts' `DishonoredNavPoint`s (19-31 each, AI patrol
+  points) and their one `BlockingVolume` each (that one is split with the collision), `L_Out_EnvLabPiero`'s `Pylon` (its navmesh),
+  `L_Tower_Water`'s `WaterVolume`. Navigation, AI points, markers and water stay map-wide.
+
+`oracle collision --stream L1,L2` compares with those sublevels visible; the default is none, which is the state of a map opened from the
+console (how the hook captures: no map change prepared it, and the level's own streaming ops wait for story events).
+
+Collision against the hook's captures, before (main) -> after, the 10 maps that changed (no map got worse; the other 31 identical):
+
+| map | before | after | why |
+|---|---|---|---|
+| L_Out_P | 57.14 % | **100.00 %** | the nine story variants out of the world (the capture had none) |
+| L_Pub_Day_P | 99.20 % | 99.43 % | chapter scripts out (and their movers) |
+| L_Pub_Dusk_P | 99.46 % | 99.84 % | same |
+| L_Pub_Morning_P | 99.46 % | 99.84 % | same |
+| L_Pub_Night_P | 99.58 % | 99.83 % | same |
+| L_Brothel_P | 99.80 % | 99.96 % | `L_Brothel_HighChaos` out |
+| L_Bridge_Part2_P | 99.60 % | 99.67 % | `L_Bridge_Part2_HighChaos` out |
+| L_Ovrsr_P | 98.51 % | **99.80 %** | orphan StaticMeshActor fix (below) |
+| L_Tower_P | 98.86 % | 99.43 % | same |
+| L_Pub_Assault_P | 98.91 % | 98.94 % | same |
+
+Isl High / Low have no Kismet-streamed levels (99.73 / 99.70 %, unchanged: their residuals are other clusters).
+
+**Ovrsr / Tower Script-package blockers**: not a flag. `L_Ovrsr_Script:StaticMeshActor_2223` and `L_Tower_Script:StaticMeshActor_2` are
+StaticMeshActors the cooker kept (still referenced) while it moved their component into the package's `StaticMeshCollectionActor`
+(`StaticMeshActor_SMC_2223`, `_SMC_2`: the collection's cached matrix places it, the component's `Scale3D` carries the actor's scale). The
+importer also placed the component from the actor, applying the actor's transform on top of the component's: a second copy, scaled twice,
+thousands of units away (Ovrsr's 9.5 x 10 x 0.5 blockout cube became 90 x 100 x 0.25). The importer now leaves such components to their
+collection (`Importer::import_static_mesh_actor`).
+
+**ToggleCinematicMode mask (decoded)**: the 0x7faf / 0x6010 words are not action permissions but `DishonoredHUD.m_ShowFlags`
+`[eDisHUDMaskLevel_Cinematic]` (+0x4e0): cinematic mode hides HUD elements 0x7faf and shows 0x6010 (bit 0x10, the letterbox, unless
+`m_bHideLetterbox`), whatever `bHideHUD` says. The buttons are ignored only with `bDisableInput` (controller +0x610 bit 0x1000
+`m_bInputIgnoreInput_Cinematic`); movement and view follow `bDisableMovement` / `bDisableTurning`. `kismet_host::Cinematic` now keeps
+`no_buttons`, `hud_hidden`, `hud_shown`; the button refusal follows `bDisableInput` (it refused every button before).
+
 ### Free roam between a level's maps
 
 `dishonored_content::freeroam_def(map, seed)` builds the session a free-roam launcher runs: the map, the other maps of its campaign level

@@ -23,7 +23,11 @@ pub struct Spawn {
 
 pub struct MatchContent {
     pub map_name: String,
+    /// The collision of the always-loaded levels (persistent level and LevelStreamingAlwaysLoaded).
     pub collision: CollisionWorld,
+    /// The Kismet-streamed sublevels' collision (LevelStreamingKismet), visible as the game's
+    /// streaming state says ([dishonored_world::WorldQuery::set_visible_levels]).
+    pub levels: std::sync::Arc<dishonored_world::StreamedLevels>,
     pub spawns: Vec<Spawn>,
     pub sim: SimConfig,
     /// Original AI points (nav/target/watch) and guard spawners, for crowds.
@@ -324,6 +328,10 @@ pub fn ffa_spawns(mc: &MatchContent) -> Vec<dishonored_multiplayer::ffa::SpawnPo
     }
 }
 
+fn spawn_path_of(dir: &Path, map: &str) -> PathBuf {
+    dir.join(format!("{map}.spawns.json"))
+}
+
 pub fn load_match(map: &str) -> Result<MatchContent> {
     let content = Content::locate()?;
     let sim = load_sim_config(&content).context("gameplay config")?;
@@ -332,23 +340,33 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     }
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).ok();
-    let coll_path = dir.join(format!("{map}.collision18.bin"));
-    let spawn_path = dir.join(format!("{map}.spawns.json"));
-    let (collision, spawns) = match (CollisionWorld::load(&coll_path), std::fs::read_to_string(&spawn_path)) {
-        (Ok(w), Ok(s)) => (w, serde_json::from_str::<Vec<Spawn>>(&s).unwrap_or_default()),
-        _ => {
+    // The always-loaded levels' collision, and one world per Kismet-streamed sublevel.
+    let coll_path = dir.join(format!("{map}.collision20.bin"));
+    let levels_path = dir.join(format!("{map}.levels20.bin"));
+    let streamed = dishonored_assets::kismet_streamed_levels(&content, map);
+    let cached = match (CollisionWorld::load(&coll_path), dishonored_world::StreamedLevels::load_levels(&levels_path), std::fs::read_to_string(&spawn_path_of(&dir, map))) {
+        (Ok(w), Ok(l), Ok(s)) => Some((w, l, serde_json::from_str::<Vec<Spawn>>(&s).unwrap_or_default())),
+        _ => None,
+    };
+    let spawn_path = spawn_path_of(&dir, map);
+    let (collision, level_worlds, spawns) = match cached {
+        Some(c) => c,
+        None => {
             let m = import_geometry(&content, map)?;
-            let w = add_level_blockers(CollisionWorld::from_map(&m), &content, map);
+            let full = add_level_blockers(CollisionWorld::from_map(&m), &content, map);
+            let (w, l) = full.split_levels(&streamed);
             w.save(&coll_path).ok();
+            dishonored_world::StreamedLevels::save_levels(&l, &levels_path).ok();
             let s: Vec<Spawn> = m
                 .spawn_candidates
                 .iter()
                 .map(|s| Spawn { position: s.position + Vec3::Z * 5.0, yaw: s.yaw_deg })
                 .collect();
             std::fs::write(&spawn_path, serde_json::to_string(&s)?).ok();
-            (w, s)
+            (w, l, s)
         }
     };
+    let levels = std::sync::Arc::new(dishonored_world::StreamedLevels::new(level_worlds));
     let mut collision = collision;
     match load_nav(&content, map) {
         Ok(nav) => collision.nav = Some(std::sync::Arc::new(nav)),
@@ -417,7 +435,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
             l
         }
     };
-    let spawners = npcs.spawns.iter().map(|s| dishonored_ir::spawners::Spawner { name: s.source.rsplit('.').next().unwrap_or("").to_string(), position: s.position, yaw: s.yaw, tweak: s.tweak.clone(), guard: s.role == dishonored_assets::npcs::NpcRole::Guard, props: s.spawner.clone(), appearance: looks.get(&s.tweak).cloned().unwrap_or_default(), lineage: lineages.get(&s.tweak).cloned().unwrap_or_default() }).collect();
+    let spawners = npcs.spawns.iter().map(|s| dishonored_ir::spawners::Spawner { name: s.source.rsplit('.').next().unwrap_or("").to_string(), position: s.position, yaw: s.yaw, tweak: s.tweak.clone(), guard: s.role == dishonored_assets::npcs::NpcRole::Guard, props: s.spawner.clone(), appearance: looks.get(&s.tweak).cloned().unwrap_or_default(), lineage: lineages.get(&s.tweak).cloned().unwrap_or_default(), package: s.source.split(':').next().unwrap_or("").to_string() }).collect();
     let level_pkgs = || {
         let mut pkgs = map_packages(&content, map);
         if map.starts_with("L_Boyle_Ext") {
@@ -448,7 +466,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
             p
         }
     };
-    Ok(MatchContent { map_name: map.to_string(), collision, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts, flee_points, spawners, routes: npcs.routes.clone(), ai_level, pickups, usables: Vec::new() })
+    Ok(MatchContent { map_name: map.to_string(), collision, levels, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts, flee_points, spawners, routes: npcs.routes.clone(), ai_level, pickups, usables: Vec::new() })
 }
 
 /// Persistent maps a mission uses: its start map, then the maps reachable through travel.
@@ -628,6 +646,7 @@ pub fn mission_setup(maps: &MapContents, def: dishonored_mission::MissionDef) ->
     for name in mission_maps(&setup.def) {
         if let Some(mc) = maps.get(&name) {
             setup.pickups.insert(name.to_ascii_lowercase(), mc.pickups.clone());
+            setup.streamed_levels.insert(name.to_ascii_lowercase(), mc.levels.levels.iter().map(|l| l.0.clone()).collect());
             setup.usables.extend(mc.usables.iter().cloned());
         }
     }
@@ -773,24 +792,32 @@ pub fn load_conversations(content: &Content, pkgs: &[String]) -> Result<dishonor
     Ok(db)
 }
 
+impl MatchContent {
+    /// The map's collision as the game sees it now: the always-loaded levels plus the visible
+    /// Kismet-streamed sublevels.
+    pub fn world(&self) -> dishonored_world::WithLevels<'_> {
+        dishonored_world::WithLevels { base: &self.collision, levels: &self.levels }
+    }
+}
+
 impl dishonored_world::WorldQuery for MatchContent {
     fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32, channels: u8) -> Option<dishonored_world::RayHit> {
-        self.collision.raycast(origin, dir, max_dist, channels)
+        self.world().raycast(origin, dir, max_dist, channels)
     }
     fn capsule_contacts(&self, cap: &dishonored_world::Capsule, channels: u8, out: &mut Vec<dishonored_world::Contact>) {
-        self.collision.capsule_contacts(cap, channels, out)
+        self.world().capsule_contacts(cap, channels, out)
     }
     fn sweep_capsule(&self, cap: &dishonored_world::Capsule, delta: Vec3, channels: u8) -> Option<dishonored_world::SweepHit> {
-        self.collision.sweep_capsule(cap, delta, channels)
+        self.world().sweep_capsule(cap, delta, channels)
     }
     fn nav(&self) -> Option<&dishonored_world::nav::NavWorld> {
         self.collision.nav.as_deref()
     }
     fn box_contacts(&self, b: &dishonored_world::PawnBox, channels: u8, out: &mut Vec<dishonored_world::Contact>) {
-        self.collision.box_contacts(b, channels, out)
+        self.world().box_contacts(b, channels, out)
     }
     fn sweep_box(&self, b: &dishonored_world::PawnBox, delta: Vec3, channels: u8) -> Option<dishonored_world::SweepHit> {
-        self.collision.sweep_box(b, delta, channels)
+        self.world().sweep_box(b, delta, channels)
     }
     fn water_at(&self, p: Vec3) -> Option<dishonored_world::WaterInfo> {
         self.collision.water_at(p)
@@ -805,7 +832,10 @@ impl dishonored_world::WorldQuery for MatchContent {
         self.collision.climbables()
     }
     fn hit_package(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<String> {
-        self.collision.hit_package(origin, dir, max_dist)
+        self.world().hit_package(origin, dir, max_dist)
+    }
+    fn set_visible_levels(&self, visible: &[String]) {
+        self.levels.set_visible(visible)
     }
 }
 
