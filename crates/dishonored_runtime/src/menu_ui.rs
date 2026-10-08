@@ -85,6 +85,8 @@ pub struct MenuArt {
     pub movies: HashMap<&'static str, MovieArt>,
     /// Loose textures the movies load at runtime (`img://`), with their pixel size.
     pub images: HashMap<&'static str, (Handle<Image>, Vec2)>,
+    /// Advance widths of the menu fonts (layouts computed from text widths).
+    pub metrics: crate::menu_art::FontMetrics,
 }
 
 impl MenuArt {
@@ -99,10 +101,14 @@ pub const MOVIES: &[(&str, &str, &str)] = &[
     ("options", "Startup", "OptionsMenu"),
     ("pause", "UI_PauseMenu_SF", "PauseMenu"),
     ("gamma", "UI_Gamma_SF", "GammaImage"),
+    // Shared library (title bar, help bar, key icons, tabs) and the global movie (message box).
+    ("common", "Startup", "Common_assets.lib"),
+    ("global", "DishonoredGame", "UI_Global.Global"),
+    ("load", "Startup", "UI_LoadGame.LoadGame"),
 ];
 
 pub fn load_menu_art(keys: &[&'static str], images: &mut Assets<Image>) -> MenuArt {
-    let mut art = MenuArt::default();
+    let mut art = MenuArt { metrics: crate::menu_art::FontMetrics::load(), ..Default::default() };
     let Ok(content) = dishonored_assets::Content::locate() else { return art };
     for (k, pkg, movie) in MOVIES.iter().filter(|m| keys.contains(&m.0)) {
         match MovieArt::load(&content, pkg, movie, images) {
@@ -137,6 +143,10 @@ pub enum MenuEvent {
     Captured { id: String, key: Option<String> },
     /// Focus moved (sound + redraw).
     Focus(String),
+    /// A pad button the movies bind besides A / B / directions: `X` (Shift on PC: restore
+    /// defaults, delete save), `LB` / `RB` (Numpad 4 / 7: main tabs), `LT` / `RT` (Numpad 5 /
+    /// 8: sub tabs).
+    Button(&'static str),
 }
 
 /// Focus, text entry and key capture state of the active menu.
@@ -153,6 +163,12 @@ pub struct MenuNav {
     /// Ignore input for a frame after opening (the click that opened it).
     pub settle: u8,
     pub enabled: bool,
+    /// Up / down wrap around the list (`_bSelectionLoop`: the main menu bar and the pause
+    /// list do, option lists and the save list do not).
+    pub wrap: bool,
+    /// A horizontal menu (`_menuType = 'horizontal'`, the main menu bar): left / right move the
+    /// selection, up / down do nothing.
+    pub horizontal: bool,
 }
 
 impl MenuNav {
@@ -168,6 +184,8 @@ impl MenuNav {
         self.items = items;
     }
 
+    /// Move the focus along the focusable items. Lists that do not loop (`wrap` false, the
+    /// `SelectionHandler` default) stop at their ends: `Button("Stop")` is posted instead.
     fn move_focus(&mut self, dir: i32) -> Option<String> {
         let nav: Vec<&Item> = self.items.iter().filter(|i| i.nav).collect();
         if nav.is_empty() {
@@ -175,7 +193,14 @@ impl MenuNav {
         }
         let cur = self.focus.as_ref().and_then(|f| nav.iter().position(|i| &i.id == f));
         let next = match cur {
-            Some(c) => (c as i32 + dir).rem_euclid(nav.len() as i32) as usize,
+            Some(c) => {
+                let n = c as i32 + dir;
+                if !self.wrap && (n < 0 || n >= nav.len() as i32) {
+                    self.events.push(MenuEvent::Button("Stop"));
+                    return None;
+                }
+                n.rem_euclid(nav.len() as i32) as usize
+            }
             None => 0,
         };
         self.focus = Some(nav[next].id.clone());
@@ -277,43 +302,44 @@ pub fn gather_menu_input(
             }
         }
     }
-    if mouse.just_pressed(MouseButton::Right) {
-        nav.events.push(MenuEvent::Back);
-    }
-    let up = keys.just_pressed(KeyCode::ArrowUp);
-    let down = keys.just_pressed(KeyCode::ArrowDown) || (keys.just_pressed(KeyCode::Tab) && !keys.pressed(KeyCode::ShiftLeft));
-    if up || down {
-        if let Some(f) = nav.move_focus(if up { -1 } else { 1 }) {
-            nav.events.push(MenuEvent::Focus(f));
+    // Keys as the movies' `InputsManager` maps PC key codes (directions repeat while held, the
+    // buttons fire once per press): A = Enter / Numpad 0, B = Esc / Backspace / Numpad 1,
+    // X = Shift / Numpad 2, LB / LT / RB / RT = Numpad 4 / 5 / 7 / 8.
+    let _ = &keys;
+    for k in &typed {
+        if k.state != bevy::input::ButtonState::Pressed {
+            continue;
         }
-    }
-    for (k, dir) in [(KeyCode::ArrowLeft, -1), (KeyCode::ArrowRight, 1)] {
-        if keys.just_pressed(k) {
-            if let Some(f) = nav.focus.clone() {
-                nav.events.push(MenuEvent::Step { id: f, dir });
+        let repeat = k.repeat;
+        match k.key_code {
+            KeyCode::ArrowUp | KeyCode::ArrowDown if !nav.horizontal => {
+                if let Some(f) = nav.move_focus(if k.key_code == KeyCode::ArrowUp { -1 } else { 1 }) {
+                    nav.events.push(MenuEvent::Focus(f));
+                }
             }
-        }
-    }
-    if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) || keys.just_pressed(KeyCode::Space) {
-        if let Some(f) = nav.focus.clone() {
-            nav.events.push(MenuEvent::Activate { id: f, at: None });
-        }
-    }
-    if keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::Backspace) {
-        nav.events.push(MenuEvent::Back);
-    }
-    // Shoulder-button equivalents on the options screen: Q / E change tab, R restores.
-    let has_tabs = nav.items.iter().any(|i| i.id == "opt:tab:0");
-    let has_restore = nav.items.iter().any(|i| i.id == "opt:restore");
-    if has_tabs {
-        for (k, dir) in [(KeyCode::KeyQ, -1), (KeyCode::KeyE, 1)] {
-            if keys.just_pressed(k) {
-                nav.events.push(MenuEvent::Step { id: "opt:tab:0".into(), dir });
+            KeyCode::ArrowLeft | KeyCode::ArrowRight if nav.horizontal => {
+                if let Some(f) = nav.move_focus(if k.key_code == KeyCode::ArrowLeft { -1 } else { 1 }) {
+                    nav.events.push(MenuEvent::Focus(f));
+                }
             }
+            KeyCode::ArrowLeft | KeyCode::ArrowRight => {
+                if let Some(f) = nav.focus.clone() {
+                    nav.events.push(MenuEvent::Step { id: f, dir: if k.key_code == KeyCode::ArrowLeft { -1 } else { 1 } });
+                }
+            }
+            KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Numpad0 if !repeat => {
+                if let Some(f) = nav.focus.clone() {
+                    nav.events.push(MenuEvent::Activate { id: f, at: None });
+                }
+            }
+            KeyCode::Escape | KeyCode::Backspace | KeyCode::Numpad1 if !repeat => nav.events.push(MenuEvent::Back),
+            KeyCode::ShiftLeft | KeyCode::ShiftRight | KeyCode::Numpad2 if !repeat => nav.events.push(MenuEvent::Button("X")),
+            KeyCode::Numpad4 => nav.events.push(MenuEvent::Button("LB")),
+            KeyCode::Numpad7 => nav.events.push(MenuEvent::Button("RB")),
+            KeyCode::Numpad5 => nav.events.push(MenuEvent::Button("LT")),
+            KeyCode::Numpad8 => nav.events.push(MenuEvent::Button("RT")),
+            _ => {}
         }
-    }
-    if has_restore && keys.just_pressed(KeyCode::KeyR) {
-        nav.events.push(MenuEvent::Activate { id: "opt:restore".into(), at: None });
     }
     if scroll.delta.y != 0.0 {
         nav.events.push(MenuEvent::Scroll(if scroll.delta.y > 0.0 { -1 } else { 1 }));

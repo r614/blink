@@ -150,7 +150,7 @@ pub const OPTIONS: &[OptionDef] = &[
     opt!("PSI_Gameplay_KillCamMode", 105, Gameplay, Kind::Choice(&["KCM_Off", "KCM_Normal", "KCM_Frequent"]), SavedOnly),
     opt!("PSI_Gameplay_Difficulty", 106, Gameplay, Kind::Choice(&["EDifficulty_Easy", "EDifficulty_Normal", "EDifficulty_Hard", "EDifficulty_VeryHard"]), SavedOnly),
     opt!("PSI_Gameplay_bAutoSaveInMenu", 107, Gameplay, BOOL, SavedOnly),
-    opt!("PSI_Gameplay_HeadBobAmount", 108, Gameplay, Kind::Range { min: 0.0, max: 1.0, step: 0.1 }, SavedOnly),
+    opt!("PSI_Gameplay_HeadBobAmount", 108, Gameplay, Kind::Range { min: 0.0, max: 1.0, step: 0.1 }, Applied),
     opt!("PSI_Gameplay_CameraRelativeClimbing", 109, Gameplay, BOOL, SavedOnly),
     // User Interface (HUD)
     opt!("PSI_HUD_Visibility", 87, Hud, Kind::Choice(&["HV_Off", "HV_Contextual", "HV_Always"]), Applied),
@@ -453,7 +453,8 @@ pub const DEFAULT_BINDINGS: &[(&str, &str)] = &[
 /// Bindings the port acts on; the rest are shown, rebindable and saved.
 pub const APPLIED_ACTIONS: &[&str] = &[
     "GBA_MoveForward", "GBA_MoveBackward", "GBA_StrafeLeft", "GBA_StrafeRight", "GBA_Jump", "GBA_Sneak", "GBA_Sprint", "GBA_LeanLeft", "GBA_LeanRight", "GBA_Use",
-    "GBA_Primary", "GBA_Secondary", "GBA_Block", "GBA_Shortcut_0", "GBA_Shortcut_1", "GBA_Shortcut_2", "GBA_Shortcut_3", "GBA_Shortcut_4", "PORT_Walk", "PORT_Reload",
+    "GBA_Primary", "GBA_Secondary", "GBA_Block", "GBA_HealthElixir", "GBA_ManaElixir", "GBA_QuickSave", "GBA_QuickLoad", "GBA_Shortcut_0", "GBA_Shortcut_1", "GBA_Shortcut_2", "GBA_Shortcut_3",
+    "GBA_Shortcut_4", "GBA_Shortcut_5", "GBA_Shortcut_6", "GBA_Shortcut_7", "GBA_Shortcut_8", "GBA_Shortcut_9", "PORT_Walk", "PORT_Reload",
 ];
 
 pub fn default_bindings() -> Vec<Binding> {
@@ -534,6 +535,25 @@ impl Default for HostSettings {
     }
 }
 
+/// The launcher's last picks (port-specific): the offline match and free roam.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LauncherPrefs {
+    /// Offline mode index on the Play screen.
+    pub play_mode: usize,
+    pub bots: u32,
+    /// Map of the offline match.
+    pub play_map: String,
+    /// Map last picked for free roam.
+    pub freeroam_map: String,
+}
+
+impl Default for LauncherPrefs {
+    fn default() -> Self {
+        Self { play_mode: 0, bots: 3, play_map: "L_Boyle_Ext_P".into(), freeroam_map: "L_Boyle_Ext_P".into() }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -546,6 +566,7 @@ pub struct Settings {
     pub graphics: Graphics,
     pub audio: Audio,
     pub multiplayer: Multiplayer,
+    pub launcher: LauncherPrefs,
 }
 
 impl Default for Settings {
@@ -560,6 +581,7 @@ impl Default for Settings {
             graphics: Graphics::default(),
             audio: Audio::default(),
             multiplayer: Multiplayer::default(),
+            launcher: LauncherPrefs::default(),
         }
     }
 }
@@ -833,16 +855,31 @@ impl Settings {
     }
 
     /// Step an option the way the stepper arrows / slider keys do (`dir` = -1 or +1).
-    /// Booleans toggle, choices wrap like the original stepper.
+    /// Returns whether the value changed: the original widgets clamp at their ends (the
+    /// options list creates every stepper with `isLoop` false; a boolean is a two-value
+    /// stepper, Off then On), where they play `Stop` instead.
     pub fn step(&mut self, id: &str, dir: i32) -> bool {
         let (Some(def), Some(cur)) = (option(id), self.get(id)) else { return false };
         let next = match (def.kind, cur) {
-            (Kind::Bool, Value::Bool(b)) => Value::Bool(!b),
-            (Kind::Choice(c), Value::Int(i)) => Value::Int((i + dir).rem_euclid(c.len() as i32)),
+            (Kind::Bool, Value::Bool(b)) => {
+                let want = dir > 0;
+                if want == b {
+                    return false;
+                }
+                Value::Bool(want)
+            }
+            (Kind::Choice(c), Value::Int(i)) => {
+                let n = i + dir.signum();
+                if n < 0 || n >= c.len() as i32 {
+                    return false;
+                }
+                Value::Int(n)
+            }
             (Kind::Range { step, .. }, v) => Value::Float(v.as_f32() + step * dir as f32),
             _ => return false,
         };
-        self.set(id, next)
+        let before = self.get(id);
+        self.set(id, next) && self.get(id) != before
     }
 
     /// Mouse look scale in degrees per mouse count: the runtime's 0.1 deg/count base times
@@ -909,10 +946,13 @@ mod tests {
         assert_eq!(s.graphics.fov, 90.0);
         assert!(s.set("PSI_GraphicsPC_FOV", Value::Float(500.0)));
         assert_eq!(s.graphics.fov, 110.0);
-        assert!(s.step("PSI_GraphicsPC_FOV", 1));
+        assert!(!s.step("PSI_GraphicsPC_FOV", 1), "sliders clamp");
         assert_eq!(s.graphics.fov, 110.0);
-        assert!(s.step("PSI_HUD_CrosshairStyle", 1));
-        assert_eq!(s.hud.crosshair_style, 0, "steppers wrap");
+        assert!(!s.step("PSI_HUD_CrosshairStyle", 1), "steppers clamp at the last value");
+        assert_eq!(s.hud.crosshair_style, 2);
+        assert!(s.step("PSI_HUD_CrosshairStyle", -1));
+        assert_eq!(s.hud.crosshair_style, 1);
+        assert!(!s.step("PSI_Mouse_bInvertY", -1), "Off is the first value");
         assert!(s.step("PSI_Mouse_bInvertY", 1));
         assert!(s.mouse.invert_y);
         assert!(s.step("PSI_Mouse_Sensitivity", -1));
