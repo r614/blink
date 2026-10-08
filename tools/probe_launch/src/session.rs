@@ -22,7 +22,7 @@ pub const G_FIXED_DELTA: u32 = 0x0126_96b0;
 const LP_CONTROLLER_ID: u32 = 0x5c;
 const ENGINE_GAME_PLAYERS: u32 = 0x480;
 
-pub const OPS: &str = "status open reload setup give power equip select_power find read write dump props call signature spawn step resume key console place collide events spawns run names";
+pub const OPS: &str = "status open reload setup give power equip select_power find read write dump props call signature spawn step resume key console place collide events spawns run attention shaders census psconst names";
 
 pub struct Session {
     pub c: Client,
@@ -517,6 +517,59 @@ impl Session {
                 json!({"component": reflect::object_value(&mut self.c, comp)?})
             }
             "run" => crate::capture::run_reads(self, a)?,
+            "shaders" => {
+                // Bytecode of the shaders the game created from id `since` on, written to
+                // $DISHONORED_CACHE/oracle/shaders/<exe>/<kind>s_<hash>.bin (retail-derived:
+                // never committed).
+                let since = num("since").unwrap_or(0.0) as u32;
+                let dir = shader_dir()?;
+                std::fs::create_dir_all(&dir)?;
+                let v = self.c.shader_dump(since)?;
+                let mut list = Vec::new();
+                let mut next = since;
+                for sh in &v {
+                    let kind = if sh.kind == b'v' { "vs" } else { "ps" };
+                    let file = dir.join(format!("{kind}_{:016x}.bin", sh.hash));
+                    if !file.exists() {
+                        std::fs::write(&file, &sh.code)?;
+                    }
+                    next = next.max(sh.id + 1);
+                    list.push(json!({"id": sh.id, "kind": kind, "hash": format!("0x{:016x}", sh.hash), "tick": sh.tick, "size": sh.code.len(), "ctab": sh.ctab, "file": file.display().to_string()}));
+                }
+                json!({"next": next, "dir": dir.display().to_string(), "shaders": list})
+            }
+            "census" => {
+                // Pixel shaders drawn over the next frames (the world runs freely meanwhile).
+                let _ = self.c.lockstep(false, 1000);
+                let frames = num("frames").unwrap_or(10.0) as u32;
+                let names: std::collections::HashMap<u64, String> = self.c.shaders()?.into_iter().map(|s| (s.hash, s.ctab)).collect();
+                let v = self.c.draw_census(frames)?;
+                json!({"frames": frames, "shaders": v.iter().map(|(h, d, p)| json!({"hash": format!("0x{h:016x}"), "draws": d, "prims": p, "ctab": names.get(h).cloned().unwrap_or_default()})).collect::<Vec<_>>()})
+            }
+            "psconst" => {
+                // Live constants of the next `draws` draws with a pixel shader, by its CTAB
+                // parameters (`name=c12x2`: registers c12..c13).
+                let _ = self.c.lockstep(false, 1000);
+                let h = s("hash").context("hash 0x...")?;
+                let hash = u64::from_str_radix(h.trim_start_matches("0x"), 16)?;
+                let draws = num("draws").unwrap_or(1.0) as u32;
+                let names: std::collections::HashMap<u64, String> = self.c.shaders()?.into_iter().map(|s| (s.hash, s.ctab)).collect();
+                let ctab = names.get(&hash).cloned().unwrap_or_default();
+                let mut out = Vec::new();
+                for (frame, _, regs) in self.c.ps_constants(hash, draws, "")? {
+                    let mut m = Map::new();
+                    for p in ctab.split_whitespace() {
+                        let Some((name, reg)) = p.split_once('=') else { continue };
+                        let Some(r) = reg.strip_prefix('c') else { continue };
+                        let Some((i, n)) = r.split_once('x') else { continue };
+                        let (i, n): (usize, usize) = (i.parse().unwrap_or(0), n.parse().unwrap_or(0));
+                        let v: Vec<[f32; 4]> = regs.iter().skip(i).take(n).copied().collect();
+                        m.insert(name.to_string(), json!(v));
+                    }
+                    out.push(json!({"frame": frame, "params": m}));
+                }
+                json!({"hash": h, "ctab": ctab, "draws": out})
+            }
             "attention" => {
                 // The NPC's attention record about the player (`PlayerAttnInfo`,
                 // DisAttentionInfo_Complex under its controller).
@@ -537,6 +590,14 @@ impl Session {
 /// (`TRACE_Blocking`), the trace type taken from the source pawn. Used to snap placements to
 /// the floor and as the default flags of `collide` queries.
 pub const TRACE_WORLD: u32 = 0x0000_20df;
+
+/// `$DISHONORED_CACHE/oracle/shaders/<exe sha256, 16 hex>`.
+pub fn shader_dir() -> Result<std::path::PathBuf> {
+    use dishonored_oracle::cache;
+    let root = cache::root();
+    let exe = cache::file_sha256(&root, &cache::exe_path(&dishonored_oracle::install_dir()))?;
+    Ok(root.join("shaders").join(&cache::hex(&exe)[..16]))
+}
 
 fn reflect_vec(c: &mut Client, a: u32) -> Result<[f32; 3]> {
     crate::lab::read_vec(c, a)

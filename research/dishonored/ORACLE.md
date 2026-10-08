@@ -395,6 +395,9 @@ Ops (arguments as JSON keys):
 | `select_power` | `component` (`DisActivePowerComponent_DarkVision`, `DishonoredActivePowerComponent_Possess`...) | the left hand on that power (after `power`) |
 | `run` | `ticks`, `channels` {name: "object:path"}, `keys` [[tick, key, down]], `console` [[tick, cmd]], `events`, `spawns`, `damage` (pawn damage path), `every` | per-tick frames (end-of-tick state) inside the game, events / spawns / damage with ticks |
 | `attention` | `npc` | the NPC's `PlayerAttnInfo` (`DisAttentionInfo_Complex`) |
+| `shaders` | `since` (id) | the distinct pixel and vertex shaders the game created (D3D9 `CreatePixelShader` / `CreateVertexShader`), bytecode written to `$DISHONORED_CACHE/oracle/shaders/<exe16>/{ps,vs}_<fnv64>.bin`; id, kind, creation tick, CTAB parameter -> register layout |
+| `census` | `frames` | pixel shaders drawn per frame (draws, primitives, CTAB) while the world runs |
+| `psconst` | `hash`, `draws` | live constants of the next draws with that shader, by CTAB parameter name |
 
 Object specs: `pawn`, `pc`, `camera`, `worldinfo`, `input`, `engine`, `0x<addr>`,
 `Default__<Class>`, or an object name (`DisDoor_21`, `PersistentLevel.DisDoor_21`). Paths:
@@ -460,6 +463,29 @@ what their checkpoints ask for, measured on Boyle placements.
 | Sneak speed, sword drawn (`movement/crouch_tunnel`) | **247.5** uu/s (`m_bSneakModeToggled`, CollisionHeight 65) | = the port |
 | Blink L2 effects (`powers/blink_l2_level`) | the camera lens effect `Blink2.Blink_PlayerWind_01` lives 59 ticks (0.98 s); `Powers.Ps_Tattoo_Glow_02` (the hand mark) ends 23 and 29 ticks after the cast; no arrival system is recycled through the emitter pool | effect starts are not visible (spawned by script calls, which do not pass through ProcessEvent): lifetimes of pooled effects are known only from their ends (U-805) |
 | Sounds (several) | not captured (U-803) | |
+### Power screen effects: shaders and parameters (2026-10-08)
+
+The cooked PPG_* post materials (Bend Time vectors, Blink, Possession, Dark Vision) and
+`BlinkTarget_PMAT` have no shader map on disk; the running game creates their shaders, and the
+DLL keeps the bytecode of every shader it creates (`SHADER_DUMP`, protocol op 42). Shaders are
+created as materials are first used during the load (7283 distinct, 6365 PS + 918 VS, 12.7 MB on
+Boyle Ext); casting a power created no new ones, so the effect shaders come from the store and
+are identified by drawing.
+
+`scratchpad P2_out/effect.ps1 -Label L -Power P -Level N -Component C` (session ops `census`,
+`select_power`, `run`, `shaders`, `psconst`) writes
+`$DISHONORED_CACHE/oracle/shaders/<exe16>/effects/<label>.json`: the census before the cast and
+while active, the shaders drawn only while active (hash, CTAB layout; bytecode in the store as
+`ps_<hash>.bin`), up to 12 constant sets per such shader, and `DisPostProcessManager`
+(`L_Boyle_Ext_P...DishonoredGameInfo.pPpManager`) parameters per tick (`m_BendTimeIntensity`,
+`m_BlinkParams`, `m_PossessionParams`, `m_PossessionStateTime`) plus `TimeDilation`. Captured:
+`bendtime_l1` (the ArkPp vector-field blur `gSrcTexture / gVectorFieldScales / gVectorFieldTexture`,
+two passes 0xbd9a42b61794aabb and 0x6095a5daa9109b1d, the vector-field material pass
+0xbbe665d07e36986b; `m_BendTimeIntensity` 0 -> 0.63 over 15 ticks), `blink_l2` (14 shaders while
+aiming, the same vector-field blur and SceneColor-sampling material passes), `darkvision_l2`
+(27, mostly the lit scene variants Dark Vision switches to), `possession_l2` (17 during the
+transfer). The "drawn only while active" sets include scene shaders whose draws changed with the
+view; decode with `fxc /dumpbin` against the CTAB names. Never committed.
 ### Usage for fuzzing agents
 
 Start (or reuse) the session with `probe_launch session start --map <M>` (a running session is
