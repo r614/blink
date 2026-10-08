@@ -120,6 +120,13 @@ pub mod pause_menu;
 pub mod hud_settings;
 #[doc(hidden)]
 pub mod hud_popups;
+/// [hud] Scaleform stage playing the original UI movies; the HUD movie's classes; HUD sounds.
+#[doc(hidden)]
+pub mod gfx_stage;
+#[doc(hidden)]
+pub mod hud_widgets;
+#[doc(hidden)]
+pub mod hud_sounds;
 #[doc(hidden)]
 pub mod saves;
 /// [playground] In-world labels of layout maps.
@@ -395,6 +402,13 @@ pub fn main() {
         }
         app.add_plugins(audio::GameAudioPlugin);
         app.add_plugins(hud_dialogue::DialoguePlugin);
+        // [hud] the HUD movie's textures (loaded at startup) and its sound theme.
+        app.init_resource::<gfx_stage::StageTextures>();
+        if audio::AudioSettings::from_args().enabled {
+            app.add_plugins(hud_sounds::HudSoundsPlugin);
+        } else {
+            app.init_resource::<hud_sounds::HudSounds>();
+        }
         // Settings, pause menu (Esc) and the HUD options.
         if audio::AudioSettings::from_args().enabled {
             app.add_plugins(menu_audio::MenuAudioPlugin { register_source: false, music: false });
@@ -405,8 +419,7 @@ pub fn main() {
             .insert_resource(game_settings.clone())
             .init_resource::<menu_ui::MenuNav>()
             .add_systems(Startup, pause_menu::setup)
-            .add_systems(Update, (settings::sync_bindings, settings::apply_window, settings::apply_camera, hud_settings::update.before(gfx_hud::update_gfx_hud).before(gfx_hud::update_anchored_text)))
-            .init_resource::<hud_settings::HudOverrides>()
+            .add_systems(Update, (settings::sync_bindings, settings::apply_window, settings::apply_camera))
             .add_systems(Update, (pause_menu::toggle, menu_ui::gather_menu_input, pause_menu::handle, pause_menu::rebuild, menu_art::layout_prims).chain().before(input_map::gather_input));
         app.insert_resource(session)
             .insert_resource(session::SessionView::default())
@@ -422,8 +435,7 @@ pub fn main() {
             .init_gizmo_group::<debug::XRayGizmos>()
             .add_systems(Startup, (players::setup_player_assets, hud::setup_hud, debug::setup_gizmos, (characters::load_library, characters::load_animations).chain(), characters::load_weapons, viewmodel::load_view_rig, gfx_hud::setup_gfx_hud, gfx_hud::load_game_fonts))
             .init_resource::<hud::DebugHud>()
-            .init_resource::<hud_popups::HudPopups>()
-            .add_systems(Update, hud_popups::track.after(input_map::gather_input).before(gfx_hud::update_gfx_hud).before(gfx_hud::update_anchored_text))
+            .add_systems(Update, (gfx_hud::update_gfx_hud.after(input_map::gather_input).after(players::camera_follow), gfx_hud::draw_gfx_hud.after(gfx_hud::update_gfx_hud)))
             .init_resource::<viewmodel::ViewAnim>()
             .init_resource::<viewmodel::BodyFrames>()
             // Choked / carried bodies in their master's frame (the first-person rig's for the local player).
@@ -452,9 +464,7 @@ pub fn main() {
                     players::sync_projectiles,
                     players::camera_follow,
                     hud::update_hud,
-                    gfx_hud::update_gfx_hud,
                     gfx_hud::apply_game_fonts,
-                    gfx_hud::update_anchored_text,
                     debug::draw_debug,
                     harness::harness_frame,
                     loading_screen::update_loading_screen,

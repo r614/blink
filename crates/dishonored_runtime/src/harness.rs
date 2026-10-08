@@ -75,6 +75,9 @@ pub enum Step {
     Teleport { teleport: CameraStep },
     /// Game camera: third person, follow a pawn id, orbit angle (degrees) around it.
     View { view: ViewStep },
+    /// Game mode: show a HUD popup or state (`hud_popups::HudTest`), e.g.
+    /// `{"hud": {"kind": "objective", "name": "...", "event": 0}}`.
+    Hud { hud: crate::hud_popups::HudTest },
     Quit { quit: bool },
 }
 
@@ -206,7 +209,17 @@ pub fn state_json(view: &SessionView, session: &Session) -> serde_json::Value {
 }
 
 /// Fixed-tick side of scripting: choose the override input for this tick.
-pub fn script_fixed(mut runner: ResMut<ScriptRunner>, mut local: ResMut<LocalInput>, mut shots: ResMut<ShotQueue>, view: Res<SessionView>, mut session: ResMut<Session>, mut ctrl: ResMut<ControlOverride>, mut vreq: ResMut<ViewRequest>) {
+#[allow(clippy::too_many_arguments)]
+pub fn script_fixed(
+    mut runner: ResMut<ScriptRunner>,
+    mut local: ResMut<LocalInput>,
+    mut shots: ResMut<ShotQueue>,
+    view: Res<SessionView>,
+    mut session: ResMut<Session>,
+    mut ctrl: ResMut<ControlOverride>,
+    mut vreq: ResMut<ViewRequest>,
+    mut hud: Option<ResMut<crate::gfx_hud::GfxHud>>,
+) {
     if let Some(t) = ctrl.ticks_left.as_mut() {
         if *t == 0 {
             local.override_input = None;
@@ -255,6 +268,11 @@ pub fn script_fixed(mut runner: ResMut<ScriptRunner>, mut local: ResMut<LocalInp
                 vreq.distance = view.distance;
                 vreq.height = view.height;
                 vreq.pending = Some(view);
+            }
+            Step::Hud { hud: t } => {
+                if let Some(h) = hud.as_mut() {
+                    h.tests.push(t);
+                }
             }
             Step::Teleport { teleport } => {
                 // The view comes from the local input (camera, and every later tick's input),
@@ -335,7 +353,7 @@ pub fn inspect_script(
             }
             shots.pending.push(runner.out_dir.join(format!("{screenshot}.png")))
         }
-        Step::Dump { .. } | Step::Teleport { .. } | Step::View { .. } => {}
+        Step::Dump { .. } | Step::Teleport { .. } | Step::View { .. } | Step::Hud { .. } => {}
         Step::Quit { .. } => {
             runner.done = true;
             shots.quit_in = Some(30);
