@@ -160,10 +160,41 @@ pub struct CombatTuning {
     pub attack_range: f32,
     pub attack_sweep_size: f32,
     pub assassinate_range: f32,
-    /// Fraction of victim max health per normal hit (`m_fHealthRatio_NormalDamage`).
+    /// `m_fHealthRatio_NormalDamage` / `_BigDamage`: NOT damage factors. The hit handler
+    /// (0x00C131C0) divides the health a hit took by the victim's HealthMax and picks the
+    /// contact effect (small below 0.2, normal, big from 0.7); presentation only.
     pub normal_damage_ratio: f32,
-    /// Fraction for counter-attacks on a staggered target (`m_fHealthRatio_BigDamage`).
     pub big_damage_ratio: f32,
+    /// `m_fAttackDamageMultiplier` of the player's attack context (`DisTweaks_MeleeAttackPlayer`).
+    #[serde(default = "one")]
+    pub attack_damage_multiplier: f32,
+    /// `DisTweaks_Assassinate` `m_fRayScalePercent` (the reach's speed blend) and
+    /// `DisTweaks_DropAssassinate` `m_fMaxContextRange` / `m_fRayScalePercent`.
+    #[serde(default = "assassinate_ray_scale")]
+    pub assassinate_ray_scale: f32,
+    #[serde(default = "drop_range")]
+    pub drop_assassinate_range: f32,
+    #[serde(default = "drop_ray_scale")]
+    pub drop_assassinate_ray_scale: f32,
+    /// `m_AssassinateOnAwareness[EAIAwareness].m_bAssassinate` (0x00C09060): the shipped table
+    /// allows Unaware, Surprised, Suspicious and Begging.
+    #[serde(default = "assassinate_awareness")]
+    pub assassinate_on_awareness: [bool; 8],
+    /// `m_bCanAssassinateRunners` (tweak +0x1C00): off, so running targets are refused.
+    #[serde(default)]
+    pub assassinate_runners: bool,
+    /// `DisTweaks_DropAssassinate`: `m_fHitWindowInSeconds`, `m_fMinDropDownVel`,
+    /// `m_fMaxAllowedDropJumpVel`, `m_fMinDropDistToTarget`, `m_fMaxDropDistToTarget`
+    /// (0x00C09810 / 0x00C09900).
+    #[serde(default = "drop_rule")]
+    pub drop_rule: DropRule,
+    /// `AnimStateExit` of the assassination clips the move sets play, by the direction
+    /// 0x00BBA970 returns (0 front, 1 left, 2 right, 3 back): `Sword_Ready_Assassination_*_Master`
+    /// and `_Drop*_Master` of `Ply_Sword_Assassination_as`.
+    #[serde(default = "assassination_times")]
+    pub assassination_times: [f32; 4],
+    #[serde(default = "drop_assassination_times")]
+    pub drop_assassination_times: [f32; 4],
     // --- sword timings (LIKELY: Ply_Sword_Attack_as / Ply_Sword_Versus_as notifies;
     // stagger and recoil still SPECULATIVE) ---
     /// Uniform swing phases of AI-driven pawns (guards, civilians): a port approximation,
@@ -182,13 +213,12 @@ pub struct CombatTuning {
     pub force_block_after_tap: f32,
     pub stagger_time: f32,
     pub blocked_recoil: f32,
-    pub assassination_time: f32,
     /// Max angle (deg) between defender facing and attacker direction for a block.
     pub block_half_angle: f32,
-    /// Attacker must be within this angle (deg) behind the victim for a back assassination.
+    /// Port rule (not the original's): attacker within this angle (deg) behind the victim, for
+    /// the choke (U-103) and for assassinating another player (the original only assassinates
+    /// NPCs; a player has no AI awareness to gate it).
     pub back_half_angle: f32,
-    /// Minimum fall speed for a drop assassination (SPECULATIVE).
-    pub drop_assassination_min_fall_speed: f32,
 
     // --- pistol (CONFIRMED: Twk_Proj_Bullet) ---
     /// `(int)Attribute_RangedDamage` of the pistol (the projectile's `m_Damage`, set by the
@@ -366,6 +396,41 @@ impl DispersionTuning {
     }
 }
 
+/// `DisTweaks_DropAssassinate` target rule (0x00C09810 / 0x00C09900).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct DropRule {
+    pub hit_window: f32,
+    pub min_drop_down_vel: f32,
+    pub max_allowed_drop_jump_vel: f32,
+    pub min_drop_dist: f32,
+    pub max_drop_dist: f32,
+}
+
+fn one() -> f32 {
+    1.0
+}
+fn assassinate_ray_scale() -> f32 {
+    1.25
+}
+fn drop_range() -> f32 {
+    250.0
+}
+fn drop_ray_scale() -> f32 {
+    2.0
+}
+fn assassinate_awareness() -> [bool; 8] {
+    [true, false, true, true, false, false, true, false]
+}
+fn drop_rule() -> DropRule {
+    DropRule { hit_window: 4.0, min_drop_down_vel: 100.0, max_allowed_drop_jump_vel: 0.0, min_drop_dist: 0.0, max_drop_dist: 350.0 }
+}
+fn assassination_times() -> [f32; 4] {
+    [2.062, 2.271, 2.281, 1.886]
+}
+fn drop_assassination_times() -> [f32; 4] {
+    [1.900, 1.900, 1.900, 1.973]
+}
+
 fn v(map: &std::collections::BTreeMap<String, f32>, key: &str, default: f32) -> f32 {
     map.get(key).copied().unwrap_or(default)
 }
@@ -383,6 +448,31 @@ impl CombatTuning {
             assassinate_range: v(m, "assassinate.m_fMaxContextRange", 275.0),
             normal_damage_ratio: v(m, "attack.m_fHealthRatio_NormalDamage", 0.2),
             big_damage_ratio: v(m, "attack.m_fHealthRatio_BigDamage", 0.7),
+            attack_damage_multiplier: v(m, "attack.m_fAttackDamageMultiplier", 1.0),
+            assassinate_ray_scale: v(m, "assassinate.m_fRayScalePercent", 1.25),
+            drop_assassinate_range: v(m, "drop_assassinate.m_fMaxContextRange", 250.0),
+            drop_assassinate_ray_scale: v(m, "drop_assassinate.m_fRayScalePercent", 2.0),
+            // The flattened tweak lists only the true entries (struct default false).
+            assassinate_on_awareness: std::array::from_fn(|i| {
+                let k = if i == 0 { "assassinate.m_AssassinateOnAwareness.m_bAssassinate".to_string() } else { format!("assassinate.m_AssassinateOnAwareness[{i}].m_bAssassinate") };
+                match m.get(&k) {
+                    Some(x) => *x != 0.0,
+                    None if m.keys().any(|k| k.starts_with("assassinate.")) => false,
+                    None => assassinate_awareness()[i],
+                }
+            }),
+            assassinate_runners: v(m, "assassinate.m_bCanAssassinateRunners", 0.0) != 0.0,
+            drop_rule: DropRule {
+                hit_window: v(m, "drop_assassinate.m_fHitWindowInSeconds", 4.0),
+                min_drop_down_vel: v(m, "drop_assassinate.m_fMinDropDownVel", 100.0),
+                max_allowed_drop_jump_vel: v(m, "drop_assassinate.m_fMaxAllowedDropJumpVel", 0.0),
+                min_drop_dist: v(m, "drop_assassinate.m_fMinDropDistToTarget", 0.0),
+                max_drop_dist: v(m, "drop_assassinate.m_fMaxDropDistToTarget", 350.0),
+            },
+            // Ply_Sword_Assassination_as AnimStateExit: Front 2.062, Left 2.271, Right 2.281,
+            // Back 1.886; DropFront / DropLeft / DropRight 1.900, DropBack 1.973.
+            assassination_times: assassination_times(),
+            drop_assassination_times: drop_assassination_times(),
             // "Small" attacks: DishonoredNotify_AttackZone starts 0.104-0.158 s (mean 0.13),
             // lasts 0.186-0.243 s (mean 0.21); AttackInterruptable at ~0.6 s.
             swing_startup: 0.13,
@@ -395,12 +485,9 @@ impl CombatTuning {
             force_block_after_tap: v(m, "block.m_fForceBlockTimeOnPerfectParryTap", 0.3),
             stagger_time: 1.0,
             blocked_recoil: 0.4,
-            // Sword_Ready_Assassination_Back_Master AnimStateExit at 1.886 s.
-            assassination_time: 1.886,
             // DisTweaks_MeleeBlock.m_fBlockAngle (horizontal half-angle of the block cone).
             block_half_angle: v(m, "block.m_fBlockAngle", 50.0),
             back_half_angle: 60.0,
-            drop_assassination_min_fall_speed: 300.0,
 
             bullet_damage: c.items.inventory.pistol_ranged_damage.trunc() + v(pb, "projectile.m_fDamage", 20.0),
             bullet_speed: v(pb, "projectile.m_fSpeed", 100000.0),

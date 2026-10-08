@@ -1003,12 +1003,14 @@ impl Crowd {
         out
     }
 
-    /// Write `PlayerState::ai_unaware` for every NPC with a brain (sleep darts' instant sleep
-    /// and Shadow Kill level 1 read it): see [`Brain::unaware_of`].
+    /// Write `PlayerState::ai_unaware` (sleep darts' instant sleep and Shadow Kill level 1 read
+    /// it, see [`Brain::unaware_of`]) and `PlayerState::ai_awareness` (the assassination gate, see
+    /// [`Brain::awareness`]) for every NPC with a brain.
     pub fn write_awareness(&self, ws: &mut WorldState) {
         for b in &self.brains {
             if let Some(p) = ws.player_mut(b.id) {
                 p.ai_unaware = b.unaware_of(NOISE);
+                p.ai_awareness = b.awareness();
             }
         }
     }
@@ -2896,6 +2898,22 @@ impl Brain {
     pub fn unaware_of(&self, _who: PlayerId) -> bool {
         // The reaction delay is `EAIAwareness_Surprised` (0x00b0c1e0 returns 2): not combat yet.
         !matches!(self.state, BrainState::Combat | BrainState::RingAlarm)
+    }
+
+    /// The pawn's `EAIAwareness` (0x00B0C1E0): `Surprised` during a reaction delay, else the
+    /// awareness of the current behaviour. The port's states map to the original behaviours'
+    /// (LIKELY: the behaviours' awareness values were not read): fighting and ringing an alarm
+    /// `InCombat`, panic `Fearful`, notice / investigate / search `Suspicious`, routines
+    /// `Unaware`. `AwareOfPlayer` and `Begging` have no port state.
+    pub fn awareness(&self) -> u8 {
+        use dishonored_sim::state::awareness as a;
+        match self.state {
+            BrainState::React => a::SURPRISED,
+            BrainState::Combat | BrainState::RingAlarm => a::IN_COMBAT,
+            BrainState::Flee | BrainState::Cower => a::FEARFUL,
+            BrainState::Notice | BrainState::Investigate | BrainState::Search => a::SUSPICIOUS,
+            BrainState::Idle | BrainState::Wander | BrainState::WalkToPoint | BrainState::GroupIdle | BrainState::Patrol | BrainState::Alert => a::UNAWARE,
+        }
     }
 }
 

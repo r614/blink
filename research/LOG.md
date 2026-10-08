@@ -1876,3 +1876,27 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Result:** ported F-1..F-5, F-7 (corrected), F-8, F-10, F-16, part of F-17, F-6 as data, F-19; F-9, F-13, F-14, the AddPower level mapping and the store purchase rule left open (world.md 10.1). Oracle: `darkness.*` channels and `adddarkness` console hook; `chaos/adddarkness_sweep`, `civilian_kills`, `guard_kills_sweep`, `corpse_discovered` pass.
 - **Confidence:** CONFIRMED for the rules above; the kill-credit side test (U-W2) and whether placed (spawned-dead) corpses count are LIKELY.
 - **Implementation consequence:** cache keys: gameplay config `v12x-world2`, pickups `pickups2`, new `<map>.lineage1.json`, dialog `v3`; net protocol 10 (u64 inventory masks, `charms_level2`, `MissionView` darkness fields); saves gain `MissionMatch::darkness` / `corpses_discovered` and autosave timer fields (serde defaults keep old saves loading).
+## 2026-10-08: Melee findings ported (sword damage, NPC damage, offscreen, assassination, drop, multi-hit, guard health)
+
+- **Question:** Port the verified melee findings (research/dishonored/systems/melee.md F1-F9).
+- **Evidence:** Re-read 0x00C131C0 / 0x00C07C80 / 0x00C33DD0 (damage), 0x00C24020 / 0x00BBEF40 (offscreen flag:
+  `m_bRenderedByPlayer` and the view plane), 0x00C0D8F0 / 0x00C09060 / 0x00C090D0 (assassinate target test),
+  0x00BBA970 (move-set side), 0x00C09810 / 0x00C09900 / 0x00C09A50 / 0x00C14960 (drop). Tweaks with the Boyle script
+  packages: elite sword MeleeDamage 10/15/20/30, JumpAttack and Bash multipliers 0, every `Pwn_EliteGuard_*` HealthMax
+  50. `DisGlobalEnums.EAIAwareness` from DishonoredGame.upk. Assassination clip exits from `Ply_Sword_Assassination_as`.
+- **Result:**
+  - Damage = `appCeil(m_fAttackDamageMultiplier x (Attribute_MeleeDamage + Attribute_MeleeDamageBonus))` (the handler's
+    rounding is appCeil); the health ratios only pick the contact effect. Player 10, guard 15 (Normal), 8 offscreen.
+  - Assassinate: NPC within 275 (speed-scaled at 1.25), any side, awareness Unaware / Surprised / Suspicious /
+    Begging, not running. Drop: no awareness gate (the drop context never calls 0x00C0D8F0), no fall-speed floor,
+    height 0..350, fall-path sweep, every tick.
+  - Scenarios (combat): before 12 pass / 4 fail; after 14 pass / 2 fail (crossbow_hit, pistol_pierce: not melee).
+    sword_hit_dummy damage 14 -> 10 (pass), melee_guard_offscreen 14 -> 8 (pass), guard_attack 14 -> 15.
+- **Confidence:** CONFIRMED for the damage rule, the tables and the drop geometry; LIKELY for the brain-state to
+  `EAIAwareness` mapping and the `m_bRenderedByPlayer` stand-in (view frustum + trace).
+- **Implementation consequence:** `dishonored_sim::combat` (melee_damage, app_ceil, seen_by, find_assassination,
+  find_drop_assassination, multi-hit), `SwordState` (npc_move, hit_ids, offscreen_to, lock_time),
+  `PlayerState::ai_awareness`, `Brain::awareness`, config fields (InventoryConfig sword_melee_damage /
+  melee_damage_bonus / offscreen_melee_reduction; CombatAiConfig npc_sword_damage / guard_health_max;
+  MeleeContextConfig damage_multiplier), gameplay cache `v13m`. U-113 is the PvP mapping only; the oracle cause
+  rule is retired. Open: rebound, sword clash, chains, stagger / recoil timings, the context target selection.
