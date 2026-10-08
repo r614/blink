@@ -541,6 +541,11 @@ impl Session {
                 json!({"component": reflect::object_value(&mut self.c, comp)?})
             }
             "run" => crate::capture::run_reads(self, a)?,
+            "spawn_npc" => {
+                let loc = a.get("location").and_then(args_f32).context("location")?;
+                let p = self.spawn_npc(s("tweak"), s("faction"), s("kind").unwrap_or("Guard") == "Guard", glam::Vec3::from(loc), num("yaw").unwrap_or(0.0) as f32)?;
+                json!({"pawn": reflect::object_value(&mut self.c, p)?, "location": crate::lab::read_vec(&mut self.c, p + 0xc4)?})
+            }
             "darkness" => {
                 // The player's chaos (DisDarknessManager, pawn.m_pDarknessManager): `add` runs the
                 // engine's own add (0x00C41B50, thiscall (int): score += n, clamped at 0, as
