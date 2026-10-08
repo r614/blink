@@ -179,7 +179,12 @@ pub fn environment_light(map: &DishonoredMap, images: &mut Assets<Image>) -> Opt
 /// The level's reflection cubemap as a cube image (same face assignment as [`environment_light`]);
 /// also the `SceneReflectionTexture` of the translucent decals (`decals.rs`).
 pub fn reflection_cube(map: &DishonoredMap) -> Option<Image> {
-    let faces = &map.environment.cubemap_faces;
+    cube_from_faces(map, &map.environment.cubemap_faces)
+}
+
+/// A `TextureCube`'s six face textures (+X, -X, +Y, -Y, +Z, -Z in UE3 space) as a cube image,
+/// with the face assignment of [`environment_light`].
+pub fn cube_from_faces(map: &DishonoredMap, faces: &[dishonored_ir::TextureId]) -> Option<Image> {
     if faces.len() != 6 {
         return None;
     }
@@ -457,6 +462,10 @@ pub fn spawn_map(
     let mut spawned = 0;
     // The level's reflection cube for the translucent decals, built on first use.
     let mut decal_scene: Option<Option<Handle<Image>>> = None;
+    // Light-beam sections with their vertex colours, by (mesh, section).
+    let mut volume_light_meshes: std::collections::HashMap<(usize, usize), Handle<Mesh>> = std::collections::HashMap::new();
+    // Material cubemaps by their face textures.
+    let mut cube_cache: std::collections::HashMap<Vec<dishonored_ir::TextureId>, Option<Handle<Image>>> = std::collections::HashMap::new();
     for (ii, inst) in map.instances.iter().enumerate() {
         if inst.hidden && !show_hidden {
             continue;
@@ -556,8 +565,46 @@ pub fn spawn_map(
                     e.insert(crate::sky_disc::PendingSkyDisc(dm));
                 }
             }
-            // Translucent decals (generic_translucent_PMAT): the material's own shading (decals.rs).
-            if translucent && features.materials && !inst.hidden {
+            // Light beams (Volume_Light_PMAT): their own shading (volume_light.rs), with the
+            // mesh's vertex colours for the `Use_Vertex_Color` permutations.
+            let volume_light = (translucent && features.materials && !inst.hidden)
+                .then(|| mat_id.and_then(|m| crate::volume_light::VolumeLightMaterial::new(map.material_params.get(m)?, &map.materials[m].texture_params, &image_handles)))
+                .flatten();
+            if let Some(vl) = volume_light {
+                let h = section_mesh(inst.mesh, si, meshes);
+                let coloured = volume_light_meshes
+                    .entry((inst.mesh, si))
+                    .or_insert_with(|| meshes.get(&h).cloned().map(|m| meshes.add(crate::volume_light::with_vertex_colors(m, mesh))).unwrap_or(h))
+                    .clone();
+                e.insert((Mesh3d(coloured), crate::volume_light::PendingVolumeLight(vl)));
+            } else if let Some(sp) = (translucent && features.materials && !inst.hidden)
+                .then(|| {
+                    // Water sheets (water_spillway_translu_PMAT): their own shading (spillway.rs),
+                    // with the material's cubemap and the instance's LocalToWorld.
+                    let m = mat_id?;
+                    let mut cube = |f: &[dishonored_ir::TextureId]| cube_cache.entry(f.to_vec()).or_insert_with(|| cube_from_faces(map, f).map(|i| images.add(i))).clone();
+                    crate::spillway::PendingSpillway::new(map.material_params.get(m)?, &map.materials[m].texture_params, &image_handles, coords::transform(inst.transform), &mut cube)
+                })
+                .flatten()
+            {
+                e.insert(sp);
+            } else if let Some(wf) = (translucent && features.materials && !inst.hidden)
+                .then(|| {
+                    // The island sea (water_Foam_MAT): its own shading (water_foam.rs), with the
+                    // instance's world bounds origin (`ObjectWorldPositionAndRadius`).
+                    let m = mat_id?;
+                    let p = map.material_params.get(m)?;
+                    if !p.base_material.as_deref().is_some_and(|b| b.eq_ignore_ascii_case(crate::water_foam::WATER_FOAM_MAT)) {
+                        return None;
+                    }
+                    let scene = decal_scene.get_or_insert_with(|| reflection_cube(map).map(|i| images.add(i))).clone();
+                    crate::water_foam::PendingWaterFoam::new(p, &map.materials[m].texture_params, &image_handles, world_bounds_origin(mesh, inst.transform), scene)
+                })
+                .flatten()
+            {
+                e.insert(wf);
+            } else if translucent && features.materials && !inst.hidden {
+                // Translucent decals (generic_translucent_PMAT): the material's own shading (decals.rs).
                 let scene = decal_scene.get_or_insert_with(|| reflection_cube(map).map(|i| images.add(i))).clone();
                 // The component's directional lightmap (the base pass of a lightmapped
                 // translucent static mesh is `FDirectionalLightMapTexturePolicy`, decals.rs).
@@ -730,6 +777,20 @@ pub fn spawn_map(
         info!("static geometry merged into {n_batches} batches");
     }
     spawned
+}
+
+/// The origin of a static mesh instance's world bounds (UE3 space): the centre of the world
+/// box around the transformed local bounds, as UE3's `FBoxSphereBounds::TransformBy`.
+fn world_bounds_origin(mesh: &dishonored_ir::StaticMeshAsset, m: Mat4) -> Vec3 {
+    let (lo, hi) = (mesh.bounds_min, mesh.bounds_max);
+    let (mut a, mut b) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for k in 0..8 {
+        let c = Vec3::new(if k & 1 == 0 { lo.x } else { hi.x }, if k & 2 == 0 { lo.y } else { hi.y }, if k & 4 == 0 { lo.z } else { hi.z });
+        let w = m.transform_point3(c);
+        a = a.min(w);
+        b = b.max(w);
+    }
+    (a + b) * 0.5
 }
 
 /// Batch cell size (Dishonored units): coarse enough to cut draw calls, fine enough to keep

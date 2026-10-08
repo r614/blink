@@ -31,6 +31,8 @@ pub struct RawStaticMesh {
     pub tangent_x: Vec<Vec3>,
     pub normals: Vec<Vec3>,
     pub uvs: Vec<Vec<Vec2>>,
+    /// The mesh's vertex colours (R, G, B, A bytes); empty when it has none.
+    pub colors: Vec<[u8; 4]>,
     pub indices: Vec<u16>,
 }
 
@@ -157,7 +159,13 @@ fn decode(r: &mut Reader) -> Result<RawStaticMesh> {
     let _color_stride = r.u32()?;
     let ncolor = r.u32()?;
     if ncolor > 0 {
-        r.bulk_array()?;
+        // FColor per vertex, stored B, G, R, A (e.g. 34 colours on
+        // `Hub_FX.Light.Hub_Medium_Window`, white at the window and black at the far end of the
+        // light beam: Volume_Light_PMAT's `Use_Vertex_Color` reads the red channel).
+        let (esz, n, colors) = r.bulk_array()?;
+        if esz == 4 && n == m.positions.len() {
+            m.colors = colors.chunks_exact(4).map(|c| [c[2], c[1], c[0], c[3]]).collect();
+        }
     }
     let _num_vertices = r.u32()?;
 
