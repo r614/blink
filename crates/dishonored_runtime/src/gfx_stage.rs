@@ -125,7 +125,7 @@ impl FontMetrics {
     /// Width of `s` at `size` pixels (missing glyphs count as half an EM).
     pub fn width(&self, s: &str, size: f32, spacing: f32) -> f32 {
         let mut w = 0.0;
-        let mut n = 0;
+        let mut n: usize = 0;
         for c in s.chars() {
             w += self.advances.get(&(c as u32 as u16)).copied().unwrap_or(512.0) / 1024.0 * size;
             n += 1;
@@ -258,7 +258,7 @@ pub struct ImageRef {
 }
 
 #[derive(Clone, Debug)]
-pub struct Node {
+pub struct StageNode {
     /// Movie the character belongs to (0: the stage's movie; others: imported libraries).
     pub src: usize,
     pub character: u16,
@@ -315,7 +315,7 @@ pub struct Stage {
     pub data: Arc<MovieData>,
     /// The stage's movie (0) and the libraries it imports from.
     pub movies: Vec<Arc<MovieData>>,
-    nodes: Vec<Option<Node>>,
+    nodes: Vec<Option<StageNode>>,
     pub root: Id,
     /// Movie clock (seconds): `getTimer()` / 1000.
     pub time: f64,
@@ -377,7 +377,7 @@ impl Stage {
         let mut movies = vec![data.clone()];
         movies.extend(libs);
         let mut s = Self { data, movies, nodes: Vec::new(), root: 0, time: 0.0, next_frame: frame_dt, tweens: Vec::new(), timers: Vec::new(), next_timer: 1, events: VecDeque::new(), dl_cache: HashMap::new() };
-        let root = s.alloc(Node {
+        let root = s.alloc(StageNode {
             src: 0,
             character: 0,
             name: Some("_root".into()),
@@ -431,15 +431,15 @@ impl Stage {
         self.node(id).map(|n| n.src).unwrap_or(0)
     }
 
-    fn alloc(&mut self, n: Node) -> Id {
+    fn alloc(&mut self, n: StageNode) -> Id {
         self.nodes.push(Some(n));
         self.nodes.len() - 1
     }
 
-    pub fn node(&self, id: Id) -> Option<&Node> {
+    pub fn node(&self, id: Id) -> Option<&StageNode> {
         self.nodes.get(id).and_then(|n| n.as_ref())
     }
-    fn node_mut(&mut self, id: Id) -> Option<&mut Node> {
+    fn node_mut(&mut self, id: Id) -> Option<&mut StageNode> {
         self.nodes.get_mut(id).and_then(|n| n.as_mut())
     }
     pub fn alive(&self, id: Id) -> bool {
@@ -482,7 +482,7 @@ impl Stage {
                 .unwrap_or(0.0),
         });
         let playing = self.frames_of(src, character) > 1;
-        let id = self.alloc(Node {
+        let id = self.alloc(StageNode {
             src,
             character,
             name,
