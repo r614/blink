@@ -169,6 +169,8 @@ pub struct Effects {
     attached: HashMap<(u8, u32), (Entity, &'static str)>,
     /// Spring Razor traps placed: trap id -> position (their trigger effect).
     traps: HashMap<u32, Vec3>,
+    /// Pistol shots in flight: projectile id -> muzzle point (the tracer's start).
+    shots: HashMap<u32, Vec3>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -239,6 +241,9 @@ pub struct FxInstance {
     glow_pools: Vec<Vec<(Entity, Handle<GlowMaterial>)>>,
     one_shot: bool,
     warmed: bool,
+    /// Beam emitters with `TargetMethod` = `PEB2STM_UserSet`: the end point the game set
+    /// (Dishonored world), e.g. the pistol tracer to its impact.
+    beam_target: Option<Vec3>,
 }
 
 pub struct EffectsPlugin;
@@ -581,6 +586,7 @@ fn spawn_instance(commands: &mut Commands, meshes: &mut Assets<Mesh>, lf: &Level
         glow_pools: s.emitters.iter().map(|_| Vec::new()).collect(),
         one_shot,
         warmed: one_shot,
+        beam_target: None,
     });
     Some(root)
 }
@@ -603,6 +609,31 @@ fn empty_mesh() -> Mesh {
     m.insert_indices(Indices::U32(vec![0, 1, 2]));
     m
 }
+
+/// Spawn a beam system (`TargetMethod` = `PEB2STM_UserSet`) from `from` to `to` (Dishonored
+/// world), as a one-shot.
+pub fn spawn_beam(commands: &mut Commands, meshes: &mut Assets<Mesh>, fx: &mut Effects, path: &str, from: Vec3, to: Vec3) -> bool {
+    if fx.recent.len() >= 64 {
+        fx.recent.remove(0);
+    }
+    fx.recent.push((path.to_string(), false));
+    let Some(lf) = fx.levels.get(&fx.active).cloned() else { return false };
+    let Some(&si) = lf.by_path.get(&path.to_ascii_lowercase()) else { return false };
+    let level = fx.active.clone();
+    let m = facing(from, to - from);
+    let Some(e) = spawn_instance(commands, meshes, &lf, &level, si, m, true) else { return false };
+    // `simulate` copies it into the instance (spawned through commands, not yet queryable).
+    commands.entity(e).insert(BeamTarget(to));
+    fx.spawned_oneshots += 1;
+    if let Some(r) = fx.recent.last_mut() {
+        r.1 = true;
+    }
+    true
+}
+
+/// The user-set end of a beam instance, applied to its `FxInstance` on the next simulate.
+#[derive(Component)]
+struct BeamTarget(Vec3);
 
 /// Spawn a gameplay effect by ParticleSystem path at a Dishonored position and direction.
 pub fn spawn_effect(commands: &mut Commands, meshes: &mut Assets<Mesh>, fx: &mut Effects, path: &str, at: Vec3, dir: Vec3) -> bool {
@@ -844,7 +875,7 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
 /// (`saturate((H - alpha) x Mask_Multiply)`, `ParticleShading::erode`); the importer baked
 /// `saturate(H x Mask_Multiply)` and the vertex alpha becomes `1 - alpha` (APPROXIMATION: the
 /// sprite fades where the original's shape shrinks).
-fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right: Vec3, cam_up: Vec3, cam_pos: Vec3, erode: bool, mesh: &mut Mesh) {
+fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right: Vec3, cam_up: Vec3, cam_pos: Vec3, erode: bool, beam_target: Option<Vec3>, mesh: &mut Mesh) {
     let n = sim.particles.len();
     let mut pos = Vec::with_capacity(n * 4);
     let mut uv = Vec::with_capacity(n * 4);
@@ -855,7 +886,7 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
     let look = |p: &Particle| particle_look(em, p);
     let world_of = |p: &Particle| particle_world(em, xf, p);
     if em.trail.is_some() || em.beam.is_some() {
-        strip_mesh(em, sim, xf, cam_pos, &look, &world_of, mesh);
+        strip_mesh(em, sim, xf, cam_pos, &look, &world_of, beam_target, mesh);
         return;
     }
     for p in &sim.particles {
@@ -979,7 +1010,7 @@ fn simulate(
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut glow_mats: ResMut<Assets<GlowMaterial>>,
-    mut q: Query<(Entity, &mut FxInstance, &InheritedVisibility)>,
+    mut q: Query<(Entity, &mut FxInstance, &InheritedVisibility, Option<&BeamTarget>)>,
     cams: Query<(&GlobalTransform, &Transform, &Projection, Option<&ChildOf>), With<Camera3d>>,
     session: Option<Res<crate::session::Session>>,
     mut dframe: ResMut<DistortionFrame>,
@@ -1010,8 +1041,11 @@ fn simulate(
     };
     let ray_fn: RayFn = &ray_closure;
     let mut live = 0;
-    fx.live_oneshots = q.iter().filter(|(_, i, _)| i.one_shot).count();
-    for (e, mut inst, vis) in &mut q {
+    fx.live_oneshots = q.iter().filter(|(_, i, _, _)| i.one_shot).count();
+    for (e, mut inst, vis, beam) in &mut q {
+        if let Some(b) = beam {
+            inst.beam_target = Some(b.0);
+        }
         if !vis.get() && !inst.one_shot {
             continue;
         }
@@ -1111,7 +1145,7 @@ fn simulate(
             } else if crate::profile::perf_baseline() {
                 // Before / after timings: the old per-frame rebuild of every sprite mesh.
                 if let Some(mut m) = inst.meshes.get(i).and_then(|h| meshes.get_mut(h)) {
-                    build_mesh(em, sim, &xf, right, up, cam_pos_b, lf.erode.contains(&(inst.system, i)), &mut m);
+                    build_mesh(em, sim, &xf, right, up, cam_pos_b, lf.erode.contains(&(inst.system, i)), inst.beam_target, &mut m);
                     sim.mesh_empty = sim.particles.is_empty();
                 }
             } else if sprite_mesh_used(&lf, inst.system, i) {
@@ -1126,7 +1160,7 @@ fn simulate(
                         if sprite_culled {
                             clear_sprite_mesh(&mut m);
                         } else {
-                            build_mesh(em, sim, &xf, right, up, cam_pos_b, lf.erode.contains(&(inst.system, i)), &mut m);
+                            build_mesh(em, sim, &xf, right, up, cam_pos_b, lf.erode.contains(&(inst.system, i)), inst.beam_target, &mut m);
                         }
                         sim.mesh_empty = empty;
                     }
@@ -1243,6 +1277,7 @@ fn gameplay_effects(
                     let path = if Some(*id) == me { PLAYER_MUZZLE } else { PAWN_MUZZLE };
                     // The animated pistol's socket; without one (first person), in front of the eye.
                     let (at, dir) = sockets.muzzle.get(id).copied().filter(|m| m.0.distance(p.position) < 200.0).unwrap_or((p.position + Vec3::Z * 60.0 + look(&p) * 50.0, look(&p)));
+                    fx.shots.insert(*projectile, at);
                     (path.into(), at, dir)
                 }
             }
@@ -1306,6 +1341,20 @@ fn gameplay_effects(
                     fx.delayed.push((now + SHADOW_KILL_DELAY, SHADOW_KILL_PS.into(), b, Vec3::Z));
                 }
                 continue;
+            }
+            SimEvent::ProjectileImpact { projectile, point, victim } if fx.shots.contains_key(projectile) => {
+                // `Twk_Proj_Bullet.m_pBulletTracerFX`: a beam (`TypeDataBeam2`, target
+                // `PEB2STM_UserSet`, one 0.1 s loop) from the muzzle to the hit, set by the shot.
+                let from = fx.shots.remove(projectile).unwrap_or(*point);
+                spawn_beam(&mut commands, &mut meshes, &mut fx, PISTOL_TRACER_PS, from, *point);
+                if victim.is_some() {
+                    fx.bolts.remove(projectile);
+                    continue;
+                }
+                let s = surface(*point);
+                fx.bolts.remove(projectile);
+                let path = contact.and_then(|c| c.particle("DisContactType_Bullet", &s)).unwrap_or_else(|| "Vfx_PhysMat.pistol.Ps_PistolImpact_DirtPs_PistolImpact_Dirt".into());
+                (path, *point, Vec3::Z)
             }
             SimEvent::ProjectileImpact { projectile, point, victim: None } => {
                 let striker = if fx.bolts.remove(projectile).unwrap_or(false) { "DisContactType_Arrow" } else { "DisContactType_Bullet" };
@@ -1419,7 +1468,8 @@ fn attached_effects(mut commands: Commands, mut fx: ResMut<Effects>, mut meshes:
     for p in &view.projectiles {
         use dishonored_sim::state::ProjectileKind as K;
         let path = match p.kind {
-            K::Bullet => PISTOL_TRACER_PS,
+            // The pistol tracer is a beam from the muzzle to the hit (`spawn_beam` on impact).
+            K::Bullet => continue,
             K::Bolt | K::SleepDart | K::IncendiaryBolt => BOLT_TRAIL_PS,
             K::Grenade | K::StickyGrenade => GRENADE_TRAIL_PS,
         };
@@ -1495,7 +1545,7 @@ fn mesh_particle(em: &ParticleEmitterAsset, p: &Particle, xf: &Mat4) -> (Mat4, V
 /// axis by `Distance` or to the `BeamTarget` point, displaced by `BeamNoise`). The texture runs
 /// along the strip (U) once per segment set by the tiling.
 #[allow(clippy::type_complexity)]
-fn strip_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_pos: Vec3, look: &dyn Fn(&Particle) -> (Vec3, f32, Vec3), world_of: &dyn Fn(&Particle) -> Vec3, mesh: &mut Mesh) {
+fn strip_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_pos: Vec3, look: &dyn Fn(&Particle) -> (Vec3, f32, Vec3), world_of: &dyn Fn(&Particle) -> Vec3, beam_target: Option<Vec3>, mesh: &mut Mesh) {
     let mut pos: Vec<[f32; 3]> = Vec::new();
     let mut uv: Vec<[f32; 2]> = Vec::new();
     let mut col: Vec<[f32; 4]> = Vec::new();
@@ -1536,9 +1586,10 @@ fn strip_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_pos: V
         let origin = xf.w_axis.truncate();
         for (i, p) in sim.particles.iter().enumerate() {
             let (_, hw, colr) = point(p);
-            let end = match (&b.target, &b.distance) {
-                (Some(t), _) => xf.transform_point3(Vec3::from(t.eval(sim.time, p.r[0]))),
-                (None, Some(d)) => origin + xf.x_axis.truncate().normalize_or_zero() * d.eval1(sim.time, p.r[0]),
+            let end = match (beam_target, &b.target, &b.distance) {
+                (Some(t), _, _) => t,
+                (None, Some(t), _) => xf.transform_point3(Vec3::from(t.eval(sim.time, p.r[0]))),
+                (None, None, Some(d)) => origin + xf.x_axis.truncate().normalize_or_zero() * d.eval1(sim.time, p.r[0]),
                 _ => origin + xf.x_axis.truncate().normalize_or_zero() * 100.0,
             };
             let n = b.noise.as_ref().map(|x| x.1.max(1)).unwrap_or(1) as usize;
