@@ -55,6 +55,29 @@ Root timeline. Frame 0 holds `mainMenu_mc` (`m_MainMenu`, 242), `newGame_mc` (`m
   `ScrollBarList`, `SelectionHandler`, `TabsHandler`, `SlideMenu`, `InputsManager`,
   `MessageBoxInvoke`, `ImgLoader`, `Vignette`). They are not executed by the port.
 
+#### Opening and input timing
+
+Read from the AS2 bytecode (`swf_dump Dishonored_MainMenu MainMenu - --actions <sprite>`):
+
+- `MainMenu.PlayOpenAnimation` (class sprite 291) runs whenever the main menu opens: after
+  the start screen and from `BackToMainMenu` (return from a sub-screen). It plays
+  `M_OpenMainMenu`, tweens the menu to its start properties (0.85 s, `Strong.easeOut`),
+  opens the splatters, logo, blades, Corvo and compass, and sets a 180 ms interval to
+  `OnOpened`.
+- `OnOpened` calls `OpenMenu`: `_menu_mc` (the button band) is set to alpha 0 and moved
+  `_width + 150` px right of its rest place, then tweened back over 0.35 s
+  (`Strong.easeOut`); `SetMenu` builds the buttons and calls `Open`
+  (`_common.GenericMenu`, sprite 281).
+- `MainMenuButtonBar.Open` (sprite 289) tweens its lines (0.25 s) and sets a 400 ms interval
+  to its `OnOpened`, which calls `InitInputs` (`GenericMenu.InitInputs`: `EnableInputs(true)`,
+  the accept / back inputs, and the selection handler's `_handlerEnabledState = true`). Only
+  then does the button bar take keys, pad or mouse selection.
+
+So the original's main menu takes input 180 + 400 = 580 ms after it opens. The port plays
+the band slide and the same input lock (`launcher.rs` `OPEN_INPUT_DELAY`), counted from the
+first frame the menu is drawn; the other opening tweens (splatters, logo, blades, compass,
+the 0.85 s root tween and the per-button scale-in) are not reproduced (APPROXIMATION).
+
 ### Options (`UI_OptionsMenu.OptionsMenu`)
 
 Root: `options_mc` (`o_OptionsScreen`: only `_bkgdTexture_mc`; everything else is attached by
@@ -274,5 +297,11 @@ and `crates/dishonored_settings`. The approach:
   entries along the strips) are this port's. Original geometry inside each widget is kept.
 - The Missions screen is a list of option-style lines rather than the card slide, because
   custom missions have no card artwork.
+- One window, as in the original: games run in a child process, but the launcher shows the
+  original loading screen for the map (`loading_screen.rs`), the child opens its window
+  hidden at the launcher window's place and size (`--window-pos`, `--size`), shows it once
+  it renders and prints a hand-over line, and the launcher hides. Back to Main Menu prints
+  the game window's place; the launcher shows its main menu there and the game exits 0.2 s
+  later (`handoff.rs`). A game that ends any other way also brings the menu back.
 - Settings live in `%APPDATA%/dishonored-rs/settings.ron`. `--settings FILE` or
   `DISHONORED_RS_SETTINGS` overrides the path. The defaults are the values above.

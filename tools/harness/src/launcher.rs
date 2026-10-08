@@ -2,11 +2,14 @@
 //! control socket like a player would:
 //!
 //! 1. scripted screenshots of every launcher screen (`fixtures/scripts/launcher_screens.json`);
-//! 2. opens each screen and checks the launcher reports it;
+//! 2. opens each screen and checks the launcher reports it; the main menu takes input when
+//!    the original's does (0.58 s after it opens) and no later;
 //! 3. changes settings through the options screen (FOV stepper, invert-Y toggle, Jump
 //!    rebound to V) and checks the settings file on disk;
 //! 4. starts an offline game from Play and checks, through the game's own control socket,
-//!    that it runs with those settings; opens the pause menu; quits back to the launcher;
+//!    that it runs with those settings, in one window (loading screen in the launcher
+//!    window, then the game window in its place); opens the pause menu; Back to Main Menu
+//!    shows the launcher again;
 //! 5. hosts a server with the server creator (local master + `dishonored_server`), finds it
 //!    in the Join browser through the master, joins it and checks the client connects.
 //!
@@ -119,6 +122,18 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     rep.check(S, "launcher opens on the main menu with the 3D menu level", bg_ok && s0["page"] == "main" && s0["background"] == "level", format!("page {}, background {}", s0["page"], s0["background"]));
     let (snd, s1) = c.wait(20.0, |s| s["sounds"]["loaded"].as_bool() == Some(true));
     rep.check(S, "menu music and UI sound theme decoded", snd, format!("sounds {}", s1["sounds"]));
+    // The original takes input 0.58 s after the main menu opens (`PlayOpenAnimation`: 180 ms,
+    // then `MainMenuButtonBar.Open` 400 ms before `InitInputs`); nothing else may hold it back
+    // (asset or menu-level loading). Allowance: a few frames at a busy machine's rate.
+    let tm = &s1["timing"];
+    let (drawn, ready) = (tm["menu_drawn_s"].as_f64(), tm["input_ready_s"].as_f64());
+    let delay = drawn.zip(ready).map(|(d, r)| r - d);
+    rep.check(
+        S,
+        "main menu takes input 0.58 s after it is drawn (the original's opening), not later",
+        delay.is_some_and(|d| (0.57..=0.58 + 0.25).contains(&d)),
+        format!("drawn at {:.2} s, input at {:.2} s ({}), hitches after drawing (s, ms) {}", drawn.unwrap_or(-1.0), ready.unwrap_or(-1.0), delay.map(|d| format!("{:.0} ms", d * 1000.0)).unwrap_or("-".into()), tm["hitches"]),
+    );
 
     // Every screen.
     let mut visited = Vec::new();
@@ -177,9 +192,24 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     // 4. A launched game picks the settings up.
     c.activate("main:play");
     c.activate("play:start");
-    let (running, _) = c.wait(10.0, |s| s["game_running"].as_bool() == Some(true));
+    let t_launch = Instant::now();
+    let (running, sl) = c.wait(10.0, |s| s["game_running"].as_bool() == Some(true));
+    rep.check(S, "starting a game puts the original loading screen up in the launcher window", running && sl["loading_screen"].as_bool() == Some(true) && sl["launcher_visible"].as_bool() == Some(true), format!("loading screen {} launcher visible {}", sl["loading_screen"], sl["launcher_visible"]));
+    c.screenshot(&out.join("ctl_loading.png"));
+    // One window: the game's window replaces the launcher's once it renders.
+    let (handed, sh) = c.wait(120.0, |s| s["game_window_shown"].as_bool() == Some(true) && s["launcher_visible"].as_bool() == Some(false));
+    let t_handed = t_launch.elapsed().as_secs_f32();
+    std::thread::sleep(Duration::from_millis(500));
+    let sh2 = c.state();
+    rep.check(
+        S,
+        "the game window takes the launcher window's place (launcher hidden, loading screen down)",
+        handed && sh2["launcher_visible"].as_bool() == Some(false) && sh2["loading_screen"].as_bool() == Some(false),
+        format!("game window shown {} after {t_handed:.1} s; launcher visible {} loading screen {}", sh["game_window_shown"], sh2["launcher_visible"], sh2["loading_screen"]),
+    );
     let mut game_ok = false;
     let mut detail = String::from("game did not start");
+    let mut via_menu = false;
     if running {
         if let Some(mut g) = Control::connect(gport, Duration::from_secs(90)) {
             let (ok, s) = g.wait(90.0, |s| !s["me"].is_null() && s["settings"]["fov"].as_f64() == Some(90.0));
@@ -193,13 +223,26 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
             g.screenshot(&out.join("game_pause_menu.png"));
             rep.check(S, "in-game pause menu opens (offline match paused)", paused, String::new());
             std::thread::sleep(Duration::from_secs(1));
-            g.call(json!({"cmd":"quit"}));
+            // Back to Main Menu, as the player picks it.
+            g.call(json!({"cmd":"menu","id":"pause:quit"}));
+            via_menu = true;
         }
     }
     rep.check(S, "game launched from the launcher runs with the changed settings", game_ok, detail);
+    let t_back = Instant::now();
+    let (shown_again, sv) = c.wait(30.0, |s| s["launcher_visible"].as_bool() == Some(true) && s["in_game"].as_bool() == Some(false));
+    let t_shown = t_back.elapsed().as_secs_f32();
     let (back, s) = c.wait(30.0, |s| s["game_running"].as_bool() == Some(false));
-    rep.check(S, "quitting the game returns to the launcher", back, format!("last exit {}", s["last_game_exit"]));
-    for n in ["ctl_play", "ctl_missions", "ctl_multiplayer", "ctl_options", "ctl_options_rebound", "game_offline", "game_pause_menu"] {
+    std::thread::sleep(Duration::from_millis(300));
+    let s_after = c.state();
+    rep.check(
+        S,
+        "Back to Main Menu returns to the launcher's main menu in the same place (no loading screen left up)",
+        via_menu && shown_again && back && s_after["page"] == "main" && s_after["loading_screen"].as_bool() == Some(false) && s_after["launcher_visible"].as_bool() == Some(true),
+        format!("menu shown after {t_shown:.2} s (page {}), game exited {back} (last exit {}), loading screen {}", sv["page"], s["last_game_exit"], s_after["loading_screen"]),
+    );
+    c.screenshot(&out.join("ctl_back_to_menu.png"));
+    for n in ["ctl_play", "ctl_missions", "ctl_multiplayer", "ctl_options", "ctl_options_rebound", "ctl_loading", "game_offline", "game_pause_menu", "ctl_back_to_menu"] {
         let p = out.join(format!("{n}.png"));
         if p.exists() {
             rep.artifact(n, &p);

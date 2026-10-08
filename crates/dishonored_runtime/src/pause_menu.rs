@@ -95,6 +95,7 @@ pub fn handle(
     mut exit: MessageWriter<AppExit>,
     mut saves: Option<ResMut<crate::saves::Saves>>,
     texts: Option<Res<MenuTexts>>,
+    mut back: Option<ResMut<crate::handoff::ReturnToMenu>>,
 ) {
     if !p.open {
         nav.events.clear();
@@ -179,13 +180,19 @@ pub fn handle(
                 }
                 "pause:quit" => {
                     sounds.play("validation");
-                    if !p.from_launcher {
-                        // Started from the command line: open a launcher for the player.
-                        if let Ok(exe) = std::env::current_exe() {
-                            let _ = std::process::Command::new(exe).spawn();
+                    match (p.from_launcher, back.as_mut()) {
+                        // The launcher shows its menu in this window's place, then this exits.
+                        (true, Some(r)) => r.request = true,
+                        (from_launcher, _) => {
+                            if !from_launcher {
+                                // Started from the command line: open a launcher for the player.
+                                if let Ok(exe) = std::env::current_exe() {
+                                    let _ = std::process::Command::new(exe).spawn();
+                                }
+                            }
+                            exit.write(AppExit::Success);
                         }
                     }
-                    exit.write(AppExit::Success);
                 }
                 _ => {}
             },

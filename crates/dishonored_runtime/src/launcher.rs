@@ -13,8 +13,14 @@
 //! - **Quit**.
 //!
 //! Games run as a child `dishonored_runtime` process with the matching CLI arguments plus
-//! `--from-launcher` (window size / fullscreen from the settings); the launcher window is
-//! minimised meanwhile and comes back when the game exits (pause menu "Back to Main Menu").
+//! `--from-launcher` (`--window-pos` / `--size` of the launcher window, fullscreen from the
+//! settings). The player sees one window (`handoff.rs`): the launcher shows the original
+//! loading screen for the map, the game's window opens hidden in the same place and replaces
+//! it once it renders, and the launcher hides; the pause menu's "Back to Main Menu" (or the
+//! game ending) shows the launcher's main menu in its place again.
+//!
+//! The main menu opens like the original's (`PlayOpenAnimation`): the button band slides in
+//! and input starts 0.58 s after the menu is shown, see [`OPEN_INPUT_DELAY`].
 //! `DISHONORED_LAUNCHER_CHILD_ARGS` (whitespace-separated) is prepended to every child's
 //! arguments; the harness uses it to reach the game's control socket.
 //!
@@ -30,7 +36,10 @@ use crate::menu_ui::{self, MenuArt, MenuEvent, MenuNav, MenuTexts, SEC_BASE, SEC
 use crate::settings::GameSettings;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
-use bevy::window::PrimaryWindow;
+use bevy::ecs::system::NonSendMarker;
+use bevy::window::{PrimaryWindow, WindowMode, WindowPosition};
+use bevy::winit::{UpdateMode, WinitSettings};
+use crate::handoff;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -84,7 +93,17 @@ pub struct ServerRow {
 struct Proc {
     child: Child,
     log: Arc<Mutex<Vec<String>>>,
+    /// Window hand-over lines from a game child (`handoff.rs`).
+    handoff: Arc<Mutex<Handoff>>,
     what: String,
+}
+
+#[derive(Default, Clone)]
+struct Handoff {
+    /// The game window is up (the launcher steps aside).
+    shown: bool,
+    /// Back to Main Menu: where the game window was (the launcher takes its place).
+    returned: Option<Option<handoff::Placement>>,
 }
 
 impl Proc {
@@ -92,10 +111,17 @@ impl Proc {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
         let mut child = cmd.spawn()?;
         let log = Arc::new(Mutex::new(Vec::new()));
+        let marks = Arc::new(Mutex::new(Handoff::default()));
         for out in [child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>), child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>)].into_iter().flatten() {
             let log = log.clone();
+            let marks = marks.clone();
             std::thread::spawn(move || {
                 for line in BufReader::new(out).lines().map_while(Result::ok) {
+                    if line.contains(handoff::SHOWN) {
+                        marks.lock().unwrap().shown = true;
+                    } else if line.contains(handoff::RETURN) {
+                        marks.lock().unwrap().returned = Some(handoff::Placement::parse_return(&line));
+                    }
                     let mut l = log.lock().unwrap();
                     l.push(line);
                     let n = l.len();
@@ -105,7 +131,10 @@ impl Proc {
                 }
             });
         }
-        Ok(Self { child, log, what: what.to_string() })
+        Ok(Self { child, log, handoff: marks, what: what.to_string() })
+    }
+    fn handoff(&self) -> Handoff {
+        self.handoff.lock().unwrap().clone()
     }
     fn tail(&self, n: usize) -> Vec<String> {
         let l = self.log.lock().unwrap();
@@ -142,7 +171,17 @@ pub struct Launcher {
     pub last_game_exit: Option<i32>,
     pub dirty: bool,
     root: Option<Entity>,
-    minimized: bool,
+    /// The launcher window is hidden while the game's window stands in for it.
+    hidden: bool,
+    /// Map whose loading screen goes up (set by [`Launcher::launch`]).
+    begin_loading: Option<String>,
+    /// When the main menu last opened (real seconds): its opening animation and input lock.
+    opened_at: Option<f64>,
+    /// Real seconds at which the menu was first drawn / first took input (harness timings).
+    first_drawn: Option<f64>,
+    first_input: Option<f64>,
+    /// Frames slower than [`HITCH_MS`] after the menu was first drawn: (seconds, ms).
+    hitches: Vec<(f32, f32)>,
     pub maps: Vec<String>,
     /// Saved games, newest first (refreshed on the main and load pages).
     pub saves: Vec<(PathBuf, dishonored_save::SaveHeader)>,
@@ -223,26 +262,42 @@ impl Launcher {
             last_game_exit: None,
             dirty: true,
             root: None,
-            minimized: false,
+            hidden: false,
+            begin_loading: None,
+            opened_at: None,
+            first_drawn: None,
+            first_input: None,
+            hitches: Vec::new(),
             maps,
             saves: Vec::new(),
             save_sel: 0,
         }
     }
 
+    /// A game process exists (from launch until it exits).
     pub fn game_running(&self) -> bool {
         self.game.is_some()
     }
 
-    /// Start a game child process with `args` (plus launcher-provided window settings).
-    fn launch(&mut self, args: Vec<String>, gs: &GameSettings, window: Option<&Window>) {
+    /// The game is loading or being played (not yet handed back to the menu).
+    fn in_game(&self) -> bool {
+        self.game.as_ref().is_some_and(|g| g.handoff().returned.is_none())
+    }
+
+    /// Start a game child process with `args` (plus launcher-provided window settings): it
+    /// opens hidden at the launcher window's place and size and takes over once it renders
+    /// (`handoff.rs`); meanwhile the launcher shows `map`'s loading screen.
+    fn launch(&mut self, args: Vec<String>, gs: &GameSettings, place: Option<handoff::Placement>, map: &str) {
         let mut cmd = Command::new(sibling_exe("dishonored_runtime"));
         if let Ok(extra) = std::env::var("DISHONORED_LAUNCHER_CHILD_ARGS") {
             cmd.args(extra.split_whitespace());
         }
         cmd.args(&args).arg("--from-launcher").arg("--settings").arg(&gs.path);
-        let size = gs.s.graphics.resolution.or_else(|| window.map(|w| (w.resolution.physical_width(), w.resolution.physical_height()))).unwrap_or((1600, 900));
+        let size = place.map(|p| p.size).or(gs.s.graphics.resolution).unwrap_or((1600, 900));
         cmd.args(["--size", &format!("{}x{}", size.0, size.1)]);
+        if let Some(pos) = place.and_then(|p| p.pos) {
+            cmd.args(["--window-pos", &format!("{},{}", pos.x, pos.y)]);
+        }
         if gs.s.graphics.fullscreen {
             cmd.arg("--fullscreen");
         }
@@ -251,6 +306,7 @@ impl Launcher {
             Ok(p) => {
                 self.game = Some(p);
                 self.last_game_exit = None;
+                self.begin_loading = Some(map.to_string());
             }
             Err(e) => warn!("could not start the game: {e}"),
         }
@@ -458,6 +514,7 @@ pub fn run() -> AppExit {
     .insert_resource(gs)
     .insert_resource(MenuTexts::load())
     .insert_resource(MenuNav { enabled: true, ..default() })
+    .init_resource::<crate::loading_screen::LoadingScreen>()
     .insert_resource(Launcher::new());
     if let Some(port) = la.control {
         app.insert_resource(crate::harness::start_control_server(port));
@@ -477,13 +534,17 @@ pub fn run() -> AppExit {
         .add_systems(
             Update,
             (
+                frame_timing,
                 launcher_bg::finish,
                 crate::atmosphere::update_fog,
+                menu_lock,
                 menu_ui::gather_menu_input,
                 control,
                 run_script,
                 handle,
+                window_handoff,
                 rebuild,
+                crate::loading_screen::update_loading_screen,
                 menu_art::layout_prims,
                 crate::settings::apply_window,
                 crate::settings::apply_camera,
@@ -501,16 +562,128 @@ fn exit_after(time: Res<Time>, e: Option<Res<ExitAfter>>, mut exit: MessageWrite
     }
 }
 
-fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut l: ResMut<Launcher>, mut sounds: ResMut<MenuSounds>) {
+fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut l: ResMut<Launcher>) {
     launcher_bg::spawn_camera(&mut commands);
     commands.insert_resource(menu_ui::load_menu_art(&["main", "options", "gamma"], &mut images));
     l.root = Some(menu_art::spawn_layer(&mut commands, 10));
-    sounds.play("M_OpenMainMenu");
+}
+
+/// The main menu's opening (`MainMenu.PlayOpenAnimation`, AS2 class sprite 291 of
+/// `UI_MainMenu.MainMenu`): after a 180 ms interval `OpenMenu` slides the button band
+/// (`_menu_mc`) in from `width + 150` px to the right with alpha 0 -> 100 over 0.35 s
+/// (`Strong.easeOut`); the band's `MainMenuButtonBar.Open` (sprite 289) then waits a
+/// 400 ms interval before `OnOpened` -> `InitInputs`. Until then the menu takes no input.
+const OPEN_BAND_DELAY: f32 = 0.18;
+const OPEN_BAND_TWEEN: f32 = 0.35;
+const OPEN_INPUT_DELAY: f32 = 0.18 + 0.40;
+/// A frame this slow after the menu is drawn counts as a hitch (harness timing evidence).
+const HITCH_MS: f32 = 100.0;
+
+/// `mx.transitions.easing.Strong.easeOut` (quintic).
+fn strong_ease_out(t: f32) -> f32 {
+    let u = t.clamp(0.0, 1.0) - 1.0;
+    u * u * u * u * u + 1.0
+}
+
+/// Seconds since the main menu opened (None before it is first drawn).
+fn open_t(l: &Launcher, time: &Time<Real>) -> Option<f32> {
+    l.opened_at.map(|t| (time.elapsed_secs_f64() - t) as f32)
+}
+
+/// Real frame times once the menu is drawn: slow frames are where clicks wait.
+fn frame_timing(time: Res<Time<Real>>, mut l: ResMut<Launcher>) {
+    let dt = time.delta_secs() * 1000.0;
+    if l.first_drawn.is_some() && !l.hidden && dt > HITCH_MS && l.hitches.len() < 64 {
+        let at = time.elapsed_secs();
+        l.hitches.push((at, dt));
+    }
+}
+
+/// The original's input lock while the main menu opens; nothing else gates input.
+fn menu_lock(time: Res<Time<Real>>, mut l: ResMut<Launcher>, mut nav: ResMut<MenuNav>) {
+    let opening = l.page == Page::Main && open_t(&l, &time).is_none_or(|t| t < OPEN_INPUT_DELAY);
+    let enabled = !opening && !l.game_running();
+    if enabled && l.first_input.is_none() {
+        l.first_input = Some(time.elapsed_secs_f64());
+    }
+    if nav.enabled != enabled {
+        nav.enabled = enabled;
+    }
+    // The band slides in: redraw each frame of the opening.
+    if l.page == Page::Main && open_t(&l, &time).is_some_and(|t| t < OPEN_BAND_DELAY + OPEN_BAND_TWEEN + 0.05) {
+        l.dirty = true;
+    }
+}
+
+/// Hand the window to the game and take it back (`handoff.rs`), with the loading screen in
+/// between.
+#[allow(clippy::too_many_arguments)]
+fn window_handoff(
+    mut commands: Commands,
+    mut l: ResMut<Launcher>,
+    mut loading: ResMut<crate::loading_screen::LoadingScreen>,
+    mut images: ResMut<Assets<Image>>,
+    mut sounds: ResMut<MenuSounds>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut cams: Query<&mut Camera, With<launcher_bg::MenuCamera>>,
+    mut winit: ResMut<WinitSettings>,
+    mut nav: ResMut<MenuNav>,
+) {
+    if let Some(map) = l.begin_loading.take() {
+        // `m_pStopMusicEvent`: the menu music stops as the level loads.
+        sounds.want_music = false;
+        loading.begin(&mut commands, &mut images, &map);
+    }
+    let marks = l.game.as_ref().map(|g| g.handoff()).unwrap_or_default();
+    let back = l.game.is_none() || marks.returned.is_some();
+    if !l.hidden && !back && marks.shown {
+        // The game window is up in our place: step aside, render nothing, poll slowly.
+        if let Some(mut w) = windows.iter_mut().next() {
+            w.visible = false;
+        }
+        for mut c in &mut cams {
+            c.is_active = false;
+        }
+        *winit = WinitSettings { focused_mode: UpdateMode::reactive(std::time::Duration::from_millis(30)), unfocused_mode: UpdateMode::reactive(std::time::Duration::from_millis(30)) };
+        l.hidden = true;
+    } else if l.hidden && loading.active {
+        // A frame after hiding (the screen is no longer shown): stop the movie.
+        loading.close(&mut commands);
+    }
+    if back && (l.hidden || loading.active) {
+        // Back to Main Menu (or the game ended / failed to start): the menu in the game
+        // window's place.
+        loading.close(&mut commands);
+        if l.hidden {
+            if let Some(mut w) = windows.iter_mut().next() {
+                if let Some(Some(p)) = marks.returned {
+                    if matches!(w.mode, WindowMode::Windowed) {
+                        if let Some(pos) = p.pos {
+                            w.position = WindowPosition::At(pos);
+                        }
+                        w.resolution.set_physical_resolution(p.size.0, p.size.1);
+                    }
+                }
+                w.visible = true;
+                w.focused = true;
+            }
+            for mut c in &mut cams {
+                c.is_active = true;
+            }
+            *winit = WinitSettings::game();
+            l.hidden = false;
+        }
+        sounds.want_music = true;
+        l.page = Page::Main;
+        l.opened_at = None;
+        nav.focus = None;
+        l.dirty = true;
+    }
 }
 
 /// Screen content for the current page.
 #[allow(clippy::too_many_arguments)]
-fn build(l: &Launcher, art: &MenuArt, t: &MenuTexts, gs: &GameSettings, nav: &MenuNav, bg: &str) -> DisplayList {
+fn build(l: &Launcher, art: &MenuArt, t: &MenuTexts, gs: &GameSettings, nav: &MenuNav, bg: &str, open_t: Option<f32>) -> DisplayList {
     let mut dl = DisplayList::default();
     let focus = nav.focus.as_deref().unwrap_or("");
     let Some(main) = art.get("main") else {
@@ -518,9 +691,8 @@ fn build(l: &Launcher, art: &MenuArt, t: &MenuTexts, gs: &GameSettings, nav: &Me
         dl.text("Blink: Dishonored install not found (set DISHONORED_DIR)", Rect::new(100.0, 100.0, 1200.0, 140.0), 24.0, FontKind::Normal, TEXT, Justify::Left);
         return dl;
     };
-    if l.game_running() {
-        dl.fill(Rect::new(0.0, 0.0, 1280.0, 720.0), Color::srgba(0.0, 0.0, 0.0, 0.7));
-        dl.text(t.t(SEC_BASE, "t_Loading"), Rect::new(0.0, 330.0, 1280.0, 390.0), 40.0, FontKind::Title, TEXT, Justify::Center);
+    // Loading a game: the loading screen (`loading_screen.rs`) covers the window.
+    if l.in_game() {
         return dl;
     }
     // Without the 3D level, the new-game screen's painted background stands in.
@@ -532,7 +704,7 @@ fn build(l: &Launcher, art: &MenuArt, t: &MenuTexts, gs: &GameSettings, nav: &Me
         }
     }
     match l.page {
-        Page::Main => build_main(&mut dl, main, t, focus, !l.saves.is_empty()),
+        Page::Main => build_main(&mut dl, main, t, focus, !l.saves.is_empty(), open_t.unwrap_or(0.0)),
         Page::Load => build_load(&mut dl, art.get("options"), l, t, focus),
         Page::Play => build_play(&mut dl, main, art.get("options"), l, t, focus),
         Page::Missions => build_missions(&mut dl, main, art.get("options"), l, t, focus),
@@ -574,22 +746,34 @@ fn main_entries(t: &MenuTexts, has_saves: bool) -> Vec<(&'static str, String)> {
     v
 }
 
-fn build_main(dl: &mut DisplayList, art: &MovieArt, t: &MenuTexts, focus: &str, has_saves: bool) {
+fn build_main(dl: &mut DisplayList, art: &MovieArt, t: &MenuTexts, focus: &str, has_saves: bool, open_t: f32) {
     let Some((mm, m)) = art.root_child("mainMenu_mc") else { return };
     let sp = art.sprite(mm).cloned().unwrap_or_default();
+    // The band's opening tween (see `OPEN_BAND_DELAY`): hidden, then sliding in from the right.
+    let Some((menu, mmx)) = art.child(mm, "_menu_mc") else { return };
+    let band_rest = m.mul(&mmx);
+    let band = art.child(menu, "_bkgd_mc").and_then(|(b, bm)| art.bounds(b, band_rest.mul(&bm), &States::default()));
+    let p = if open_t < OPEN_BAND_DELAY { 0.0 } else { strong_ease_out((open_t - OPEN_BAND_DELAY) / OPEN_BAND_TWEEN) };
+    let band_w = band.map(|r| r.width()).unwrap_or(1280.0);
+    let slide = (band_w + 150.0) * (1.0 - p);
     // Everything of mainMenu_mc but the DLC button (console store entry).
-    for p in art.movie.display_list(&sp, 0) {
-        let Some(c) = p.character else { continue };
-        if p.name.as_deref() == Some("_DLCButton_mc") {
+    for e in art.movie.display_list(&sp, 0) {
+        let Some(c) = e.character else { continue };
+        let is_band = e.name.as_deref() == Some("_menu_mc");
+        if e.name.as_deref() == Some("_DLCButton_mc") || (is_band && p <= 0.0) {
             continue;
         }
-        let cm = m.mul(&p.matrix.unwrap_or_default());
-        dl.movie(art, c, cm, &States::default(), 1.0);
+        let mut cm = m.mul(&e.matrix.unwrap_or_default());
+        if is_band {
+            cm.tx += slide * 20.0;
+        }
+        dl.movie(art, c, cm, &States::default(), if is_band { p } else { 1.0 });
+    }
+    if p <= 0.0 {
+        return;
     }
     // The horizontal button bar (MainMenuButtonBar) along the _menu_mc band.
-    let Some((menu, mmx)) = art.child(mm, "_menu_mc") else { return };
-    let band_m = m.mul(&mmx);
-    let band = art.child(menu, "_bkgd_mc").and_then(|(b, bm)| art.bounds(b, band_m.mul(&bm), &States::default()));
+    let band_m = band_rest;
     let entries = main_entries(t, has_saves);
     // Band-local layout: buttons spread over the visible part of the band.
     let (x0, x1) = match band {
@@ -599,7 +783,7 @@ fn build_main(dl: &mut DisplayList, art: &MovieArt, t: &MenuTexts, focus: &str, 
     let cy = band.map(|r| r.center().y).unwrap_or(590.0);
     let n = entries.len() as f32;
     for (i, (id, label)) in entries.iter().enumerate() {
-        let x = x0 + (x1 - x0) * (i as f32 + 0.5) / n;
+        let x = x0 + (x1 - x0) * (i as f32 + 0.5) / n + slide;
         let bm = dishonored_assets::swf::Matrix { a: band_m.a, b: band_m.b, c: band_m.c, d: band_m.d, tx: x * 20.0, ty: cy * 20.0 };
         menu_ui::movie_button(dl, art, "m_MainMenu_btn_", bm, id, label, focus == *id, Vec2::new((x1 - x0) / n - 10.0, 44.0));
     }
@@ -826,10 +1010,20 @@ fn rebuild(
     mut nav: ResMut<MenuNav>,
     bg: Option<Res<MenuBackground>>,
     fonts: Option<Res<crate::gfx_hud::GameFonts>>,
+    time: Res<Time<Real>>,
+    mut sounds: ResMut<MenuSounds>,
     mut last: Local<(Option<String>, Option<(String, String)>, Option<String>, &'static str, bool)>,
 ) {
     let Some(art) = art else { return };
     let Some(root) = l.root else { return };
+    if l.page == Page::Main && l.opened_at.is_none() && !l.in_game() {
+        // `PlayOpenAnimation`: on first show, on return from a screen or a game.
+        let now = time.elapsed_secs_f64();
+        l.opened_at = Some(now);
+        l.first_drawn.get_or_insert(now);
+        sounds.play("M_OpenMainMenu");
+        l.dirty = true;
+    }
     let bgs = bg.map(|b| b.state).unwrap_or("movie");
     let key = (nav.focus.clone(), nav.editing.clone(), nav.capturing.clone(), bgs, fonts.is_some());
     if !l.dirty && *last == key {
@@ -841,7 +1035,7 @@ fn rebuild(
         // Continue / Load appear once a save exists (headers only).
         l.saves = dishonored_save::list(&saves_dir(&gs));
     }
-    let dl = build(&l, &art, &t, &gs, &nav, bgs);
+    let dl = build(&l, &art, &t, &gs, &nav, bgs, open_t(&l, &time));
     nav.set_items(dl.items.clone());
     menu_art::spawn_list(&mut commands, root, &dl, fonts.as_deref());
 }
@@ -852,20 +1046,12 @@ fn handle(
     mut nav: ResMut<MenuNav>,
     mut gs: ResMut<GameSettings>,
     mut sounds: ResMut<MenuSounds>,
-    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    windows: Query<(Entity, &Window), With<PrimaryWindow>>,
     monitors: Query<&bevy::window::Monitor>,
     mut exit: MessageWriter<AppExit>,
+    main_thread: NonSendMarker,
 ) {
     l.poll();
-    // Minimise while a game runs; restore when it ends.
-    let running = l.game_running();
-    if running != l.minimized {
-        if let Some(mut w) = windows.iter_mut().next() {
-            w.set_minimized(running);
-        }
-        l.minimized = running;
-        sounds.want_music = !running;
-    }
     if l.options.resolutions.is_empty() {
         let mut res: Vec<(u32, u32)> = monitors.iter().flat_map(|m| m.video_modes.iter().map(|v| (v.physical_size.x, v.physical_size.y))).filter(|r| r.0 >= 1024).collect();
         res.sort();
@@ -874,15 +1060,16 @@ fn handle(
     }
     let events = std::mem::take(&mut nav.events);
     for ev in events {
-        if running {
+        if l.game_running() {
             continue;
         }
-        let window = windows.iter().next().cloned();
+        let window = windows.iter().next().map(|(e, w)| handoff::placement(e, w, &main_thread));
         if l.page == Page::Options {
             let o = &mut l.options;
             match o.handle(&ev, &mut gs, &mut nav, &mut sounds) {
                 Outcome::Close => {
                     l.page = Page::Main;
+                    l.opened_at = None;
                     nav.focus = Some("main:options".into());
                 }
                 Outcome::None => {}
@@ -898,6 +1085,7 @@ fn handle(
                     sounds.play("back");
                     let from = l.page;
                     l.page = Page::Main;
+                    l.opened_at = None;
                     nav.focus = Some(format!("main:{}", from.name()));
                     l.dirty = true;
                 }
@@ -909,7 +1097,7 @@ fn handle(
                 l.dirty = true;
             }
             MenuEvent::Step { id, dir } => step(&mut l, &mut gs, &id, dir, &mut sounds),
-            MenuEvent::Activate { id, .. } => activate(&mut l, &mut gs, &mut nav, &id, &mut sounds, window.as_ref(), &mut exit),
+            MenuEvent::Activate { id, .. } => activate(&mut l, &mut gs, &mut nav, &id, &mut sounds, window, &mut exit),
         }
     }
 }
@@ -975,7 +1163,7 @@ fn step(l: &mut Launcher, gs: &mut GameSettings, id: &str, dir: i32, sounds: &mu
 }
 
 #[allow(clippy::too_many_arguments)]
-fn activate(l: &mut Launcher, gs: &mut GameSettings, nav: &mut MenuNav, id: &str, sounds: &mut MenuSounds, window: Option<&Window>, exit: &mut MessageWriter<AppExit>) {
+fn activate(l: &mut Launcher, gs: &mut GameSettings, nav: &mut MenuNav, id: &str, sounds: &mut MenuSounds, window: Option<handoff::Placement>, exit: &mut MessageWriter<AppExit>) {
     l.dirty = true;
     // Arrow items of stepper lines.
     if id.ends_with(":-1") || id.ends_with(":+1") {
@@ -1002,17 +1190,17 @@ fn activate(l: &mut Launcher, gs: &mut GameSettings, nav: &mut MenuNav, id: &str
         "main:continue" => {
             // `OnLoadLastSaveClicked`: the newest save.
             l.saves = dishonored_save::list(&saves_dir(gs));
-            if let Some((p, _)) = l.saves.first().cloned() {
+            if let Some((p, h)) = l.saves.first().cloned() {
                 sounds.play("validation");
-                l.launch(vec!["--load".into(), p.display().to_string(), "--name".into(), gs.s.multiplayer.name.clone()], gs, window);
+                l.launch(vec!["--load".into(), p.display().to_string(), "--name".into(), gs.s.multiplayer.name.clone()], gs, window, &h.map);
             }
         }
         x if x.starts_with("load:item:") => {
             let i: usize = x.rsplit(':').next().and_then(|i| i.parse().ok()).unwrap_or(0);
             if i == l.save_sel {
-                if let Some((p, _)) = l.saves.get(i).cloned() {
+                if let Some((p, h)) = l.saves.get(i).cloned() {
                     sounds.play("validation");
-                    l.launch(vec!["--load".into(), p.display().to_string(), "--name".into(), gs.s.multiplayer.name.clone()], gs, window);
+                    l.launch(vec!["--load".into(), p.display().to_string(), "--name".into(), gs.s.multiplayer.name.clone()], gs, window, &h.map);
                 }
             } else {
                 l.save_sel = i;
@@ -1032,6 +1220,7 @@ fn activate(l: &mut Launcher, gs: &mut GameSettings, nav: &mut MenuNav, id: &str
             sounds.play("back");
             let from = l.page;
             l.page = Page::Main;
+            l.opened_at = None;
             nav.focus = Some(format!("main:{}", from.name()));
         }
         "play:start" => {
@@ -1042,12 +1231,12 @@ fn activate(l: &mut Launcher, gs: &mut GameSettings, nav: &mut MenuNav, id: &str
                 2 => args.extend(["--spectate".into(), "--bots".into(), l.bots.to_string()]),
                 _ => args.extend(["--bots".into(), l.bots.to_string()]),
             }
-            l.launch(args, gs, window);
+            l.launch(args, gs, window, dishonored_content::DEFAULT_MAP);
         }
         "missions:launch" => {
             if let Some(m) = l.missions.get(l.mission_sel).cloned() {
                 sounds.play("validation");
-                l.launch(vec!["--mission".into(), m.path.display().to_string(), "--name".into(), gs.s.multiplayer.name.clone()], gs, window);
+                l.launch(vec!["--mission".into(), m.path.display().to_string(), "--name".into(), gs.s.multiplayer.name.clone()], gs, window, &m.map);
             }
         }
         "mp:tab:join" => {
@@ -1070,7 +1259,7 @@ fn activate(l: &mut Launcher, gs: &mut GameSettings, nav: &mut MenuNav, id: &str
         "join:connect" => {
             sounds.play("validation");
             let addr = gs.s.multiplayer.last_connect.clone();
-            l.launch(vec!["--connect".into(), addr, "--name".into(), gs.s.multiplayer.name.clone()], gs, window);
+            l.launch(vec!["--connect".into(), addr, "--name".into(), gs.s.multiplayer.name.clone()], gs, window, "");
         }
         "host:start" => {
             sounds.play("validation");
@@ -1083,12 +1272,14 @@ fn activate(l: &mut Launcher, gs: &mut GameSettings, nav: &mut MenuNav, id: &str
         "host:join" => {
             sounds.play("validation");
             let addr = format!("127.0.0.1:{}", gs.s.multiplayer.host.port);
-            l.launch(vec!["--connect".into(), addr, "--name".into(), gs.s.multiplayer.name.clone()], gs, window);
+            let h = &gs.s.multiplayer.host;
+            let map = if h.mode == "mission" { l.missions.iter().find(|m| m.path.file_name().is_some_and(|f| f.to_string_lossy() == h.mission)).or(l.missions.first()).map(|m| m.map.clone()).unwrap_or_default() } else { h.map.clone() };
+            l.launch(vec!["--connect".into(), addr, "--name".into(), gs.s.multiplayer.name.clone()], gs, window, &map);
         }
         x if x.starts_with("join:server:") => {
             if let Some(s) = x.rsplit(':').next().and_then(|i| i.parse::<usize>().ok()).and_then(|i| l.servers.get(i)).cloned() {
                 sounds.play("validation");
-                l.launch(vec!["--connect".into(), s.addr, "--name".into(), gs.s.multiplayer.name.clone()], gs, window);
+                l.launch(vec!["--connect".into(), s.addr, "--name".into(), gs.s.multiplayer.name.clone()], gs, window, &s.map);
             }
         }
         x if x.starts_with("play:mode:") => {
@@ -1132,6 +1323,8 @@ fn control(
     bg: Option<Res<MenuBackground>>,
     sounds: Res<MenuSounds>,
     mut script: ResMut<LauncherScript>,
+    loading: Res<crate::loading_screen::LoadingScreen>,
+    time: Res<Time<Real>>,
 ) {
     let Some(rx) = rx else { return };
     let rx = rx.0.lock().unwrap();
@@ -1139,7 +1332,7 @@ fn control(
         let v: serde_json::Value = serde_json::from_str(&msg.line).unwrap_or_default();
         let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
         let reply = match v.get("cmd").and_then(|c| c.as_str()).unwrap_or("") {
-            "state" => state_json(&l, &gs, &nav, bg.as_deref(), &sounds).to_string(),
+            "state" => state_json(&l, &gs, &nav, bg.as_deref(), &sounds, &loading, &time).to_string(),
             "activate" => {
                 nav.events.push(MenuEvent::Activate { id, at: None });
                 "{\"ok\":true}".into()
@@ -1178,7 +1371,7 @@ fn control(
     let _ = &mut commands;
 }
 
-fn state_json(l: &Launcher, gs: &GameSettings, nav: &MenuNav, bg: Option<&MenuBackground>, sounds: &MenuSounds) -> serde_json::Value {
+fn state_json(l: &Launcher, gs: &GameSettings, nav: &MenuNav, bg: Option<&MenuBackground>, sounds: &MenuSounds, loading: &crate::loading_screen::LoadingScreen, time: &Time<Real>) -> serde_json::Value {
     serde_json::json!({
         "page": l.page.name(),
         "options": { "category": format!("{:?}", l.options.category()), "sub": format!("{:?}", l.options.sub_category()), "secondary": l.options.secondary.map(|s| format!("{s:?}")) },
@@ -1190,6 +1383,11 @@ fn state_json(l: &Launcher, gs: &GameSettings, nav: &MenuNav, bg: Option<&MenuBa
         "settings": serde_json::to_value(&gs.s).unwrap_or_default(),
         "background": bg.map(|b| b.state).unwrap_or("movie"),
         "game_running": l.game_running(),
+        "in_game": l.in_game(),
+        "launcher_visible": !l.hidden,
+        "game_window_shown": l.game.as_ref().is_some_and(|g| g.handoff().shown),
+        "loading_screen": loading.active,
+        "timing": { "uptime_s": time.elapsed_secs(), "menu_drawn_s": l.first_drawn, "input_ready_s": l.first_input, "hitches": l.hitches },
         "last_game_exit": l.last_game_exit,
         "server": { "status": l.server_status, "log": l.server.as_ref().map(|s| s.tail(20)).unwrap_or_default(), "what": l.server.as_ref().map(|s| s.what.clone()) },
         "master_running": l.master.is_some(),

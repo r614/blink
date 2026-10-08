@@ -350,6 +350,11 @@ impl LoadingScreen {
         self.want_end = true;
     }
 
+    /// Take the screen down now (the launcher, once the game window has taken over).
+    pub fn close(&mut self, commands: &mut Commands) {
+        self.end_now(commands);
+    }
+
     fn end_now(&mut self, commands: &mut Commands) {
         if let Some(r) = self.root.take() {
             commands.entity(r).despawn();
