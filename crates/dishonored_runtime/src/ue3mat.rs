@@ -25,6 +25,7 @@ use bevy::render::storage::ShaderBuffer;
 use dishonored_ir::MaterialBlend as Blend;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
+use crate::ue3_shader_cache::{self, Class, ProgramSource};
 use ue3_shader::shadercache::CookedLibrary;
 use ue3_shader::ue3prog::{self, Policy, MAX_PARAMS};
 
@@ -33,7 +34,7 @@ pub struct Ue3Plugin;
 impl Plugin for Ue3Plugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "ue3_prepass.wgsl");
-        app.add_plugins(MaterialPlugin::<Ue3Material>::default()).init_resource::<Ue3Programs>();
+        app.add_plugins((MaterialPlugin::<Ue3Material>::default(), crate::ue3_shader_cache::Ue3ShaderCachePlugin)).init_resource::<Ue3Programs>();
     }
 }
 
@@ -48,6 +49,9 @@ pub fn library() -> Option<Arc<CookedLibrary>> {
 
 /// Program shaders, indexed by the program id in a material's key.
 static PROGRAMS: RwLock<Vec<Handle<Shader>>> = RwLock::new(Vec::new());
+
+/// Their WGSL, by program id (composed per pipeline variant by `ue3_shader_cache`).
+static PROGRAM_SRC: RwLock<Vec<ProgramSource>> = RwLock::new(Vec::new());
 
 /// Programs' WGSL by (shader map, light-map policy, dominant light pass), built on first
 /// request from any thread (a level's worker builds its programs ahead of the spawn).
@@ -118,9 +122,11 @@ impl Ue3Programs {
         if let Some(&id) = self.by_hash.get(&hash) {
             return id;
         }
+        let src = ProgramSource::new(Arc::from(wgsl.as_str()));
         let handle = shaders.add(Shader::from_wgsl(wgsl, format!("ue3/{hash:016x}.wgsl")));
         let mut programs = PROGRAMS.write().unwrap();
         programs.push(handle);
+        PROGRAM_SRC.write().unwrap().push(src);
         let id = programs.len() as u32 - 1;
         self.by_hash.insert(hash, id);
         id
@@ -134,6 +140,29 @@ impl Ue3Programs {
             depth_variants: self.depth_ids.len(),
         }
     }
+}
+
+/// Whether the programs' pipeline variants are composed here (`ue3_shader_cache`).
+pub fn shader_cache_enabled() -> bool {
+    ue3_shader_cache::enabled()
+}
+
+/// Start composing the pipeline variants of programs (from a level's worker): per use, the
+/// program's key ((shader map, policy, with light) or, depth-only, (shader map, policy, masked)),
+/// whether it is the depth-only program, and the material's `Ue3Key::blend`.
+pub fn prefetch_variants(uses: Vec<((u32, Policy, bool), bool, u8)>) {
+    let mut sources: HashMap<((u32, Policy, bool), bool), Option<ProgramSource>> = HashMap::new();
+    let mut items = Vec::new();
+    for (k, depth, blend) in uses {
+        let src = sources
+            .entry((k, depth))
+            .or_insert_with(|| if depth { depth_wgsl(k.0, k.1, k.2) } else { program_wgsl(k.0, k.1, k.2) }.map(|w| ProgramSource::new(Arc::from(w))))
+            .clone();
+        let Some(src) = src else { continue };
+        let class = if depth { Class { depth: true, prepass: true, blend, fg: false, fg_world: false } } else { Class::main(blend) };
+        items.push((src, class));
+    }
+    ue3_shader_cache::prefetch(items);
 }
 
 /// The WGSL of a depth-only program (cached; None: it does not build).
@@ -240,14 +269,18 @@ pub struct Ue3Key {
 
 impl Ue3Key {
     pub fn new(program: u32, blend: Blend, two_sided: bool) -> Self {
-        let blend = match blend {
-            Blend::Opaque => 0,
-            Blend::Masked => 1,
-            Blend::Translucent => 2,
-            Blend::Additive => 3,
-            Blend::Modulate => 4,
-        };
-        Ue3Key { program, depth: u32::MAX, blend, two_sided, foreground: false, foreground_world: false, light_pass: false }
+        Ue3Key { program, depth: u32::MAX, blend: blend_code(blend), two_sided, foreground: false, foreground_world: false, light_pass: false }
+    }
+}
+
+/// `Ue3Key::blend` of a blend mode.
+pub fn blend_code(blend: Blend) -> u8 {
+    match blend {
+        Blend::Opaque => 0,
+        Blend::Masked => 1,
+        Blend::Translucent => 2,
+        Blend::Additive => 3,
+        Blend::Modulate => 4,
     }
 }
 
@@ -394,10 +427,20 @@ impl Material for Ue3Material {
         let prepass = descriptor.vertex.shader_defs.iter().any(|d| matches!(d, bevy::shader::ShaderDefVal::Bool(n, true) if n == "PREPASS_PIPELINE"));
         // The depth prepass and the shadow passes run UE3's depth-only shaders: the base pass
         // vertex shader's position alone (opaque, shared), plus the clipping for masked ones.
-        let id = if prepass && k.depth != u32::MAX { k.depth } else { k.program };
+        let depth_program = prepass && k.depth != u32::MAX;
+        let id = if depth_program { k.depth } else { k.program };
         let shader = PROGRAMS.read().unwrap().get(id as usize).cloned();
         // materials are only created once their program is registered
         let Some(shader) = shader else { return Ok(()) };
+        // (last step, once the defs are final: the variant composed off the render thread)
+        let precompose = |descriptor: &mut RenderPipelineDescriptor| {
+            if !ue3_shader_cache::enabled() {
+                return;
+            }
+            let Some(src) = PROGRAM_SRC.read().unwrap().get(id as usize).cloned() else { return };
+            let class = Class { depth: depth_program, prepass, blend: k.blend, fg: k.foreground, fg_world: k.foreground_world };
+            ue3_shader_cache::use_precomposed(&src, class, descriptor);
+        };
         if k.foreground || k.foreground_world {
             descriptor.vertex.shader_defs.push("UE_FOREGROUND".into());
         }
@@ -442,6 +485,7 @@ impl Material for Ue3Material {
                 fragment.shader = shader;
                 fragment.entry_point = Some("prepass_fragment".into());
             }
+            precompose(descriptor);
             return Ok(());
         }
         if let Some(fragment) = descriptor.fragment.as_mut() {
@@ -461,6 +505,7 @@ impl Material for Ue3Material {
                 t.blend = blend;
             }
         }
+        precompose(descriptor);
         Ok(())
     }
 }

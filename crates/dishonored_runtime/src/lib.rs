@@ -106,6 +106,7 @@ pub mod map_render;
 pub mod ue3mat;
 #[doc(hidden)]
 pub mod ue3_level;
+pub mod ue3_shader_cache;
 #[doc(hidden)]
 pub mod ppgraph;
 #[doc(hidden)]

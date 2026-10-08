@@ -98,6 +98,7 @@ pub fn prepare(map: &DishonoredMap, features: &RenderFeatures) -> Option<Prepare
         set1: bool,
         /// the depth-only program it takes (masked: with its clipping); None: translucent
         depth: Option<bool>,
+        blend: Blend,
     }
     let mut cands = Vec::new();
     for (ii, inst) in map.instances.iter().enumerate() {
@@ -127,7 +128,7 @@ pub fn prepare(map: &DishonoredMap, features: &RenderFeatures) -> Option<Prepare
                 Blend::Masked => Some(true),
                 _ => None,
             };
-            cands.push(Cand { ii, si, mat, map: ue.map, policy, lit, set1, depth });
+            cands.push(Cand { ii, si, mat, map: ue.map, policy, lit, set1, depth, blend: ue.blend });
         }
     }
     let built = build_programs(cands.iter().map(|c| (c.map, c.policy, c.lit)));
@@ -273,6 +274,25 @@ pub fn prepare(map: &DishonoredMap, features: &RenderFeatures) -> Option<Prepare
     // the light passes' programs (lit materials only: `ue3_light_material`)
     let light_ok = |mat: usize| map.material_params[mat].ue3.as_ref().is_some_and(|ue| !ue.unlit && matches!(ue.blend, Blend::Opaque | Blend::Masked) && ue.params.len() <= DYN_SHADOW_SLOT);
     let light_built = build_programs(cands.iter().filter(|c| light_ok(c.mat)).flat_map(|c| inst_passes.get(&c.ii).into_iter().flatten().map(move |p| (c.map, p.policy, false))));
+
+    // start composing their pipeline variants (the def lists recorded for each kind of use) on
+    // the shader pool, while the level finishes loading
+    if ue3mat::shader_cache_enabled() {
+        let mut uses: HashSet<((u32, Policy, bool), bool, u8)> = HashSet::new();
+        for c in &cands {
+            uses.insert(((c.map, c.policy, c.lit), false, ue3mat::blend_code(c.blend)));
+            if let Some(masked) = c.depth {
+                uses.insert(((c.map, c.policy, masked), true, masked as u8));
+            }
+            if light_ok(c.mat) {
+                for p in inst_passes.get(&c.ii).into_iter().flatten().filter(|p| light_built.contains(&(c.map, p.policy, false))) {
+                    // (a light pass: additive, `ue3_light_material`)
+                    uses.insert(((c.map, p.policy, false), false, 3));
+                }
+            }
+        }
+        ue3mat::prefetch_variants(uses.into_iter().collect());
+    }
 
     let mut parts = HashMap::new();
     for c in &cands {

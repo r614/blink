@@ -166,6 +166,78 @@ fn load_module(
     Ok(shader_module)
 }
 
+/// [blink patch] Shader modules composed outside the [`ShaderCache`] (naga IR, keyed by the
+/// shader id the pipeline descriptors name, with no shader defs). A pipeline task makes the
+/// module itself, without holding the shader cache's lock, so modules of different pipelines
+/// are created in parallel; an id not registered (yet) goes through the shader cache as usual
+/// (`ShaderNotLoaded` until something registers it).
+#[cfg(not(feature = "decoupled_naga"))]
+#[derive(Clone, Default)]
+pub struct BlinkShaderModules(Arc<Mutex<HashMap<AssetId<Shader>, Arc<BlinkShaderModule>>>>);
+
+#[cfg(not(feature = "decoupled_naga"))]
+struct BlinkShaderModule {
+    source: Mutex<Option<naga::Module>>,
+    module: std::sync::OnceLock<Result<Arc<WgpuWrapper<ShaderModule>>, String>>,
+}
+
+#[cfg(not(feature = "decoupled_naga"))]
+impl BlinkShaderModules {
+    /// Register the module of a shader id (replacing nothing: the first registration stays).
+    pub fn insert(&self, id: AssetId<Shader>, module: naga::Module) {
+        let mut map = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        map.entry(id).or_insert_with(|| {
+            Arc::new(BlinkShaderModule {
+                source: Mutex::new(Some(module)),
+                module: std::sync::OnceLock::new(),
+            })
+        });
+    }
+
+    pub fn contains(&self, id: AssetId<Shader>) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains_key(&id)
+    }
+
+    /// The module of a registered id, made on first use (concurrent users of the same id wait
+    /// for that one creation; other ids are not blocked).
+    fn get(
+        &self,
+        device: &RenderDevice,
+        id: AssetId<Shader>,
+    ) -> Option<Result<Arc<WgpuWrapper<ShaderModule>>, ShaderCacheError>> {
+        let entry = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .cloned()?;
+        let made = entry.module.get_or_init(|| {
+            let source = entry
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            let Some(source) = source else {
+                return Err(String::from("blink shader module source already taken"));
+            };
+            load_module(
+                device,
+                ShaderCacheSource::Naga(source),
+                &ValidateShader::Disabled,
+            )
+            .map(Arc::new)
+            .map_err(|e| e.to_string())
+        });
+        Some(match made {
+            Ok(m) => Ok(m.clone()),
+            Err(e) => Err(ShaderCacheError::CreateShaderModule(e.clone())),
+        })
+    }
+}
+
 #[derive(Default)]
 struct BindGroupLayoutCache {
     bgls: HashMap<BindGroupLayoutDescriptor, BindGroupLayout>,
@@ -217,6 +289,9 @@ pub struct PipelineCache {
     /// [blink patch] wgpu pipeline cache (Vulkan only), loaded from and saved to `wgpu_cache_path`.
     wgpu_cache: Option<Arc<wgpu::PipelineCache>>,
     wgpu_cache_path: Option<std::path::PathBuf>,
+    /// [blink patch] modules composed outside the shader cache
+    #[cfg(not(feature = "decoupled_naga"))]
+    blink_modules: BlinkShaderModules,
 }
 
 impl PipelineCache {
@@ -272,6 +347,8 @@ impl PipelineCache {
             needs_shader_reload: true,
             wgpu_cache,
             wgpu_cache_path,
+            #[cfg(not(feature = "decoupled_naga"))]
+            blink_modules: default(),
         }
     }
 
@@ -480,6 +557,8 @@ impl PipelineCache {
         let wgpu_cache = self.wgpu_cache.clone();
         let shader_cache = self.shader_cache.clone();
         let layout_cache = self.layout_cache.clone();
+        #[cfg(not(feature = "decoupled_naga"))]
+        let blink_modules = self.blink_modules.clone();
         let mut bindgroup_layout_cache = self.bindgroup_layout_cache.lock().unwrap();
         let bind_group_layout = descriptor
             .layout
@@ -491,25 +570,40 @@ impl PipelineCache {
 
         create_pipeline_task(
             async move {
+                // [blink patch] modules composed outside the shader cache: made here, before
+                // (and without) taking its lock
+                #[cfg(not(feature = "decoupled_naga"))]
+                let (blink_vertex, blink_fragment) = (
+                    blink_modules.get(&device, descriptor.vertex.shader.id()),
+                    descriptor
+                        .fragment
+                        .as_ref()
+                        .and_then(|f| blink_modules.get(&device, f.shader.id())),
+                );
+                #[cfg(feature = "decoupled_naga")]
+                let (blink_vertex, blink_fragment) = (None, None);
+
                 let mut shader_cache = shader_cache.lock().unwrap();
                 let mut layout_cache = layout_cache.lock().unwrap();
 
-                let vertex_module = match shader_cache.get(
-                    id,
-                    descriptor.vertex.shader.id(),
-                    &descriptor.vertex.shader_defs,
-                ) {
+                let vertex_module = match blink_vertex.unwrap_or_else(|| {
+                    shader_cache.get(
+                        id,
+                        descriptor.vertex.shader.id(),
+                        &descriptor.vertex.shader_defs,
+                    )
+                }) {
                     Ok(module) => module,
                     Err(err) => return Err(err),
                 };
 
                 let fragment_module = match &descriptor.fragment {
-                    Some(fragment) => {
-                        match shader_cache.get(id, fragment.shader.id(), &fragment.shader_defs) {
-                            Ok(module) => Some(module),
-                            Err(err) => return Err(err),
-                        }
-                    }
+                    Some(fragment) => match blink_fragment.unwrap_or_else(|| {
+                        shader_cache.get(id, fragment.shader.id(), &fragment.shader_defs)
+                    }) {
+                        Ok(module) => Some(module),
+                        Err(err) => return Err(err),
+                    },
                     None => None,
                 };
 
@@ -897,5 +991,12 @@ impl PipelineCache {
     /// [blink patch] Whether a persistent pipeline cache is active.
     pub fn has_wgpu_pipeline_cache(&self) -> bool {
         self.wgpu_cache.is_some()
+    }
+
+    /// [blink patch] The registry of modules composed outside the shader cache (shared: modules
+    /// can be registered from any thread).
+    #[cfg(not(feature = "decoupled_naga"))]
+    pub fn blink_shader_modules(&self) -> BlinkShaderModules {
+        self.blink_modules.clone()
     }
 }
