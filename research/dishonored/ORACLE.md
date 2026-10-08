@@ -839,17 +839,17 @@ How channels are compared:
     `oracle scenario`) and "Trace comparison per channel group" (per scenario).
   - The original's trace is written beside the port's: `traces/<system>__<name>.original.json`.
 
-First results over the 74 scenarios with an original trace (2026-10-08, channel-ticks within
-tolerance after removing offsets):
+First results over the 90 scenarios with an original trace (2026-10-08, main at 7e1afcc;
+the last column counts channel-ticks within tolerance after removing offsets):
 
 | group | channels | agree / offset / diverge | channel-ticks within tolerance |
 |---|---|---|---|
-| pawn state | 74 | 72 / 0 / 2 | 99.6 % |
-| pawn velocity | 296 | 190 / 0 / 106 | 96.5 % |
-| pawn position | 222 | 106 / 25 / 91 | 89.7 % |
-| vitals | 38 | 25 / 0 / 13 | 89.7 % |
-| npc | 216 | 28 / 32 / 156 | 45.7 % |
-| behaviour | 16 | 2 / 0 / 14 | 44.4 % |
+| pawn state | 90 | 87 / 0 / 3 | 98.7 % |
+| pawn velocity | 360 | 236 / 0 / 124 | 94.5 % |
+| pawn position | 270 | 125 / 28 / 117 | 86.7 % |
+| vitals | 42 | 27 / 0 / 15 | 87.4 % |
+| npc | 296 | 44 / 47 / 205 | 46.4 % |
+| behaviour | 38 | 9 / 0 / 29 | 43.0 % |
 
 What these results show about the comparison itself:
 - **No shared event kinds yet.** The original's traces record `ProcessEvent`, `Spawn` and
