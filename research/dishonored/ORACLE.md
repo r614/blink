@@ -374,7 +374,7 @@ Ops (arguments as JSON keys):
 |---|---|---|
 | `status` | | map, pawn, pc, tick, lockstep, parked, fixed step |
 | `open` / `reload` | `map` (default: the current one), `hz` 60, `keep_alive` true | load / control seconds; the map is fresh (the restore primitive: reload, then re-apply the setup) |
-| `setup` | `hz`, `keep_alive` | tutorials off, keep alive, fixed step |
+| `setup` | `hz`, `keep_alive` | tutorials off, keep alive, fixed step, no pause on a real focus loss (`Engine.bPauseOnLossOfFocus`; an open pause menu is closed) |
 | `give` / `power` / `equip` | `item` / `name`, `level` / `class`, `hand` | as `lab give / power / equip` |
 | `find` | `name` (`Outer.Name`, `Base_N`), `class`, `limit` | addresses and full names |
 | `read` | `object`, `path` (or none: every field, `filter`) | typed value(s) |
@@ -392,6 +392,9 @@ Ops (arguments as JSON keys):
 | `collide` | `queries` [[sx,sy,sz, ex,ey,ez, hx,hy,hz, flags]...], `source` | hits with actor / component |
 | `events` | `functions` (substrings), `classes` (is-a), `max`, or `fetch: true` | traced ProcessEvent calls with ticks |
 | `spawns` | `max`, or `fetch: true` | actors that appeared, with ticks |
+| `select_power` | `component` (`DisActivePowerComponent_DarkVision`, `DishonoredActivePowerComponent_Possess`...) | the left hand on that power (after `power`) |
+| `run` | `ticks`, `channels` {name: "object:path"}, `keys` [[tick, key, down]], `console` [[tick, cmd]], `events`, `spawns`, `damage` (pawn damage path), `every` | per-tick frames (end-of-tick state) inside the game, events / spawns / damage with ticks |
+| `attention` | `npc` | the NPC's `PlayerAttnInfo` (`DisAttentionInfo_Complex`) |
 
 Object specs: `pawn`, `pc`, `camera`, `worldinfo`, `input`, `engine`, `0x<addr>`,
 `Default__<Class>`, or an object name (`DisDoor_21`, `PersistentLevel.DisDoor_21`). Paths:
@@ -429,6 +432,34 @@ runs its Kismet: a warning), `seed`.
 | Filtered dump | 18 doors with every field 225 ms (209 KB JSON); 33 NPCs' health fields 58 ms |
 | Collision through the session | 20000 checks 0.1 s in the game (200 k/s), 4.5 s with the hit names |
 
+### Capture requests answered (2026-10-08, Boyle Ext, fixed 60 Hz, end-of-tick sampling)
+
+Measured with `session run` (tick scripts) on the running original; ticks are frames after the
+press boundary (press at k: the input acts in the tick producing frame k + 1). The Playground
+scenarios' own traces need the Playground in the original (next deliverable); these values are
+what their checkpoints ask for, measured on Boyle placements.
+
+| Request (scenario) | Original | Notes |
+|---|---|---|
+| Dark Vision L2 cost / duration (`powers/dark_vision`) | **20** mana; **30.0 s** (`m_fTimeRemaining` set to 30 the tick after the press, counting from 2 ticks later); fade in 0.033 s, fade out 0.2 s | a second press cancels it without cost; mana regenerates the 20 from 3.0 s on (1 point / 7 ticks) while it is active |
+| Bend Time L1 cost (`powers/bend_time_l1`) | **60** mana, taken 9 ticks after the press (cast animation); `TimeDilation` 1 -> 0.85 in 9 ticks (-1/60 per tick) | |
+| Possession L2 cost (`powers/possession_guard`) | **60** mana, 42 ticks (0.70 s) after the press (held 30 ticks, guard 300 uu ahead); the player travels into the guard in 4 ticks; the guard is hidden 44 ticks later | L1 cannot take a human |
+| Devouring Swarm cost / rats (`powers/devouring_swarm_l1`) | **40** mana (L1 and L2); a `DisRatSwarm` actor 39 ticks after the cost, its `DisRatSwarmSpawner` releases **30 rats (L1), 60 (L2)** over 16 ticks, individual `DisGameCrowdAgentSkeletalRat` crowd agents (pooled: the spawn watch saw 27 new ones, the rest reused); `m_fDuration` 30 s, then the swarm flees / ends and the rats despawn over about 10 s | the port's single-group model has no per-rat agents |
+| Pistol on a guard (`combat/pistol_hit`) | **45** `DishonoredDamageType_Bullet` (300 uu, body) 3 ticks after the press; plus **15** `DishonoredDamageType_BulletBlast` to pawns near the impact | |
+| Crossbow bolt on a guard (`combat/crossbow_hit`) | **40** `DisDamageType_Arrow`; the `DisProjectile_Arrow` spawns 3 ticks after the press, hits 2 ticks later at 300 uu | |
+| Grenade (`combat/grenade_fuse`) | armed when cooked in the hand (10 ticks after the press), **3.0 s** fuse from arming; thrown on release (18 ticks), launch (798.8, 2369.0, -7.7) = 2500 uu/s horizontal at -5 deg pitch, gravity 1500 uu/s^2 (-25 uu/s per tick), first displacement one tick after the spawn; impact damage 6 (`DishonoredDamageType_Projectile`); explosion (`DisExplosion`) at fuse 0: **50** to the guard at 50 hp (killed), 11 to a 10 hp NPC, **33** to the player about 1050 uu away (`DisDamageType_Grenade`) | per-tick trace in the session scratch |
+| Spring razor (`combat/spring_razor`) | placed (`DisGadget_SpringRazorPlaced`) 13 ticks after the press at a guard's feet; triggers 53 ticks later: the hook sees **5** `DisDamageType_SpringRazor` per pawn in range, but the guard's health goes 50 -> 0 (the razor kills: the amount is changed after the damage-path entry) | |
+| Windblast L2 knock-back (`powers/windblast_l2_hit`) | cost 50 the tick after the press; damage 19 ticks after: **26** (`DisDamageType_WindBlast`, momentum (756, 2243, 1307)) at 182.8 uu; the guard becomes `PHYS_RigidBody`, peak horizontal speed **1005 uu/s** 2 ticks later, then 100 `DisDamageType_Impact` (killed) 5 ticks later | the spec's 2373 is the momentum, not the ragdoll's speed |
+| NPC slash (`combat/guard_attack`) | **15** `DisDamageType_NPCSlash` (an alerted guard on an NPC) | a sword hit on an unaware guard is 99999 (a one-hit kill) |
+| Hearing (`ai/investigate_noise`) | a pistol shot fired up 800 uu behind the party guard: its `PlayerAttnInfo` jumps to 1.0 / level 3 in the shot's tick, level 4 two ticks later, the guard starts moving **3 ticks (0.05 s)** after the shot | |
+| Patrol speed (`ai/patrol`) | **116.3 uu/s** (three walking Boyle guards, steady) | |
+| Detection at the 600 placement (`stealth/detect_600`) | LOS norm **0.353 = 600 / 1700** (outer cone) at first, rate 0.339 / s; level 1 at frame 45; the head turns and the norm becomes 0.169 (= 591 / 3500, inner cone), rate 0.79 / s; level 4 at frame 111 | U-864: the 2026-10-06 0.164 was taken with the head already turned |
+| Detection at the 1300 placement (`stealth/detect_1300`) | the snapped placement is on the lower floor (z -217.8): no LOS for 30 ticks, then norm 0.78-0.88 at rate 0.1 / s, level 1 at frame 169, then 0.373 | the spec's placement is not the 2026-10-06 one |
+| Lean (`movement/lean`) | Q held: the camera moves **88.9** uu sideways and **16.0** down, roll **-10** deg; 78.5 uu at 0.2 s | HOOK_TRIAGE's 119.7 / 21.4 was measured from another pose |
+| Fall 1200 (`movement/fall_1200`) | landing speed **2675** uu/s, damage **45** (`DmgType_Fell`), gravity 3000 uu/s^2 | |
+| Sneak speed, sword drawn (`movement/crouch_tunnel`) | **247.5** uu/s (`m_bSneakModeToggled`, CollisionHeight 65) | = the port |
+| Blink L2 effects (`powers/blink_l2_level`) | the camera lens effect `Blink2.Blink_PlayerWind_01` lives 59 ticks (0.98 s); `Powers.Ps_Tattoo_Glow_02` (the hand mark) ends 23 and 29 ticks after the cast; no arrival system is recycled through the emitter pool | effect starts are not visible (spawned by script calls, which do not pass through ProcessEvent): lifetimes of pooled effects are known only from their ends (U-805) |
+| Sounds (several) | not captured (U-803) | |
 ### Usage for fuzzing agents
 
 Start (or reuse) the session with `probe_launch session start --map <M>` (a running session is

@@ -460,6 +460,10 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
             fr.values.push(t - prev);
             prev = t;
         }
+        let stalled = trace.frames.iter().skip(1).filter(|f| f.values.last().is_some_and(|d| *d <= 0.0)).count();
+        if stalled > 0 {
+            warnings.push(format!("the world clock did not advance on {stalled} ticks (paused?): this trace is not valid"));
+        }
     }
     for k in &held {
         let _ = s.c.key(k, false);
@@ -543,4 +547,110 @@ fn short_path(full: &str) -> String {
         Some((pkg, rest)) => format!("{pkg}:{}", rest.trim_start_matches("TheWorld.PersistentLevel.")),
         None => path.to_string(),
     }
+}
+
+/// The `run` session op: a tick script with arbitrary channels, keys and console commands,
+/// answered as JSON. `{"ticks": N, "channels": {"mana": "pawn:m_Mana", "pos": "pawn:Location"},
+/// "keys": [[tick, "RightMouseButton", true], ...], "console": [[tick, "cmd"], ...],
+/// "events": {"functions": [..], "classes": [..]}, "spawns": true, "every": k}`. Frame k is the
+/// end-of-tick state (ORACLE.md "Sampling point"); a Vector / Rotator adds .x/.y/.z
+/// (.pitch/.yaw/.roll) channels.
+pub fn run_reads(s: &mut Session, a: &Value) -> Result<Value> {
+    let ticks = a.get("ticks").and_then(Value::as_u64).context("ticks")? as u32;
+    let every = a.get("every").and_then(Value::as_u64).unwrap_or(1).max(1) as usize;
+    let mut ch = Channels { list: Vec::new() };
+    if let Some(m) = a.get("channels").and_then(Value::as_object) {
+        for (name, spec) in m {
+            let spec = spec.as_str().context("channel spec \"object:path\"")?;
+            let (o, p) = spec.split_once(':').context("channel spec \"object:path\"")?;
+            let obj = s.r.object(&mut s.c, o, None)?;
+            ch.add_path(s, name, "", obj, p)?;
+        }
+    }
+    let wi = s.r.object(&mut s.c, "worldinfo", None)?;
+    ch.add_path(s, "world.time", "s", wi, "TimeSeconds")?;
+    let mut actions: Vec<(u32, ScriptAction)> = Vec::new();
+    for k in a.get("keys").and_then(Value::as_array).into_iter().flatten() {
+        let t = k.get(0).and_then(Value::as_u64).context("key [tick, name, down]")? as u32;
+        let n = k.get(1).and_then(Value::as_str).context("key [tick, name, down]")?;
+        actions.push((t, ScriptAction::Key(n.into(), k.get(2).and_then(Value::as_bool).unwrap_or(true))));
+    }
+    for k in a.get("console").and_then(Value::as_array).into_iter().flatten() {
+        let t = k.get(0).and_then(Value::as_u64).context("console [tick, cmd]")? as u32;
+        actions.push((t, ScriptAction::Console(k.get(1).and_then(Value::as_str).context("console [tick, cmd]")?.into())));
+    }
+    let ev = a.get("events");
+    let strs = |k: &str| -> Vec<String> { ev.and_then(|e| e.get(k)).and_then(Value::as_array).map(|v| v.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default() };
+    let (funcs, classes) = (strs("functions"), strs("classes"));
+    let tracing = !funcs.is_empty() || !classes.is_empty();
+    let spawns = a.get("spawns").and_then(Value::as_bool).unwrap_or(false);
+    s.c.lockstep(true, 30_000)?;
+    if tracing {
+        s.c.event_filter(&funcs, &classes, &[], ev.and_then(|e| e.get("parms")).and_then(Value::as_u64).unwrap_or(0) as u32, 1_000_000)?;
+    }
+    if spawns {
+        s.c.spawn_watch(100_000)?;
+    }
+    // "damage": true logs every call of the pawn damage path (0x00B5CCD0, oracle.rs).
+    let damage = a.get("damage").and_then(Value::as_bool).unwrap_or(false);
+    let dh = if damage { Some(crate::oracle_combat::damage_hook(&mut s.c)?) } else { None };
+    let paths: Vec<ReadPath> = ch.list.iter().filter_map(|c| c.path.clone()).collect();
+    let (base, frames, errors) = s.c.run_script(ticks, &paths, &actions, 3_600_000)?;
+    let damage_recs = match dh {
+        Some(h) => {
+            let r = s.c.hook_fetch(h)?;
+            let f = crate::oracle::FN_PAWN_DAMAGE;
+            let _ = s.c.hook_set(f.0, f.1, 0, 0, &[]);
+            r
+        }
+        None => Vec::new(),
+    };
+    let mut out_frames = Vec::new();
+    for (k, row) in frames.iter().enumerate() {
+        if k % every != 0 && k + 1 != frames.len() {
+            continue;
+        }
+        let mut v = vec![json!(k)];
+        for (c, b) in ch.list.iter().zip(row) {
+            v.push(b.as_ref().map(|b| json!(value(c.kind, b))).unwrap_or(Value::Null));
+        }
+        out_frames.push(Value::Array(v));
+    }
+    let mut out = json!({"base_tick": base, "channels": ch.list.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), "frames": out_frames, "errors": errors});
+    if damage {
+        // The frame whose world time first reaches the call's time is the tick it happened in.
+        let ti = ch.list.iter().position(|c| c.name == "world.time").unwrap();
+        let times: Vec<f64> = frames.iter().map(|row| row[ti].as_ref().map(|b| value(Kind::F32, b)).unwrap_or(f64::NAN)).collect();
+        let mut v = Vec::new();
+        for r in &damage_recs {
+            let tick = times.iter().position(|t| *t + 1e-4 >= r.time as f64).unwrap_or(times.len());
+            let n = s.c.names_of(&[r.ecx, r.args.get(1).copied().unwrap_or(0), r.args.get(6).copied().unwrap_or(0)])?;
+            v.push(json!({
+                "tick": tick, "victim": short_path(&n[0]), "amount": r.u32_at(0) as i32, "health_before": r.u32_at(16) as i32,
+                "momentum": [r.f32_at(4), r.f32_at(8), r.f32_at(12)], "instigator": short_path(&n[1]), "type": n[2].rsplit('.').next().unwrap_or(""),
+            }));
+        }
+        out["damage"] = Value::Array(v);
+    }
+    if tracing {
+        let recs = s.c.event_fetch()?;
+        s.c.event_filter(&[], &[], &[], 0, 0)?;
+        let mut v = Vec::new();
+        for r in recs {
+            let n = s.c.names_of(&[r.object, r.func])?;
+            v.push(json!({"tick": r.tick.wrapping_sub(base), "object": short_path(&n[0]), "function": n[1].rsplit(' ').next().unwrap_or(""), "parms": r.parms.iter().map(|b| format!("{b:02x}")).collect::<String>()}));
+        }
+        out["events"] = Value::Array(v);
+    }
+    if spawns {
+        let recs = s.c.spawn_fetch()?;
+        s.c.spawn_watch(0)?;
+        let mut v = Vec::new();
+        for r in recs {
+            let n = s.c.names_of(&[r.object])?;
+            v.push(json!({"tick": r.tick.wrapping_sub(base), "object": format!("{}@{}", n[0], crate::reflect::hex(r.object))}));
+        }
+        out["spawns"] = Value::Array(v);
+    }
+    Ok(out)
 }

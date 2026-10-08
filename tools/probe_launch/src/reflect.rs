@@ -153,7 +153,14 @@ impl Reflect {
                 Some(a) => a,
                 None => {
                     let found = c.find(s, class.unwrap_or(""))?;
-                    *found.first().with_context(|| format!("no live object {s}{}", class.map(|c| format!(" of class {c}")).unwrap_or_default()))?
+                    // Prefer a live object over a class default's subobject (`Default__X.Comp`)
+                    // and the persistent level's over a transient one.
+                    let names = c.names_of(&found[..found.len().min(64)])?;
+                    let pick = names.iter().position(|n| !n.contains("Default__") && n.contains("PersistentLevel")).or_else(|| names.iter().position(|n| !n.contains("Default__")));
+                    match pick {
+                        Some(i) => found[i],
+                        None => *found.first().with_context(|| format!("no live object {s}{}", class.map(|c| format!(" of class {c}")).unwrap_or_default()))?,
+                    }
                 }
             },
         };

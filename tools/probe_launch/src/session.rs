@@ -22,7 +22,7 @@ pub const G_FIXED_DELTA: u32 = 0x0126_96b0;
 const LP_CONTROLLER_ID: u32 = 0x5c;
 const ENGINE_GAME_PLAYERS: u32 = 0x480;
 
-pub const OPS: &str = "status open reload setup give power equip find read write dump props call signature spawn step resume key console place collide events spawns names";
+pub const OPS: &str = "status open reload setup give power equip select_power find read write dump props call signature spawn step resume key console place collide events spawns run names";
 
 pub struct Session {
     pub c: Client,
@@ -193,11 +193,37 @@ impl Session {
                 self.c.write(a + 0x304, &v.to_le_bytes())?;
             }
         }
+        // A real focus loss (another window activated) opens the pause menu despite the focus
+        // faking (`Engine.bPauseOnLossOfFocus` -> `Dis_OpenPauseMenu`, WorldInfo.Paused): off.
+        let engine = self.r.object(&mut self.c, "engine", None)?;
+        let pl = self.r.place(&mut self.c, engine, "bPauseOnLossOfFocus")?;
+        self.r.write_place(&mut self.c, &pl, &json!(false))?;
+        self.unpause()?;
         if keep_alive {
             let p = crate::lab::pawn(&mut self.c)?;
             self.c.write(p + 0x594, &1i32.to_le_bytes())?;
         }
         self.set_fixed_step(hz)
+    }
+
+    /// Close the pause menu if it is open (`WorldInfo.Paused`: Enter on its highlighted
+    /// "Resume"). Returns whether the world was paused.
+    pub fn unpause(&mut self) -> Result<bool> {
+        let wi = self.r.object(&mut self.c, "worldinfo", None)?;
+        let pl = self.r.place(&mut self.c, wi, "Paused")?;
+        if self.r.read_place(&mut self.c, &pl)? != json!(true) {
+            return Ok(false);
+        }
+        for _ in 0..5 {
+            self.c.key("Enter", true)?;
+            self.c.step(2, 30_000)?;
+            self.c.key("Enter", false)?;
+            self.c.step(10, 30_000)?;
+            if self.r.read_place(&mut self.c, &pl)? != json!(true) {
+                return Ok(true);
+            }
+        }
+        bail!("the world stays paused (a menu is open)")
     }
 
     /// Put the pawn at `loc` (feet snapped to the floor below when `snap`: the engine's own
@@ -482,6 +508,21 @@ impl Session {
                     self.c.spawn_watch(num("max").unwrap_or(10_000.0) as u32)?;
                     json!({"ok": true})
                 }
+            }
+            "select_power" => {
+                // The left hand on an active power: `DisItemPowers` equipped as the secondary
+                // item, its current power pointed at the pawn's component of that class.
+                let cls = s("component").context("component (DisActivePowerComponent_DarkVision, DishonoredActivePowerComponent_Possess...)")?;
+                let comp = crate::oracle_powers::select_power(&mut self.c, cls)?;
+                json!({"component": reflect::object_value(&mut self.c, comp)?})
+            }
+            "run" => crate::capture::run_reads(self, a)?,
+            "attention" => {
+                // The NPC's attention record about the player (`PlayerAttnInfo`,
+                // DisAttentionInfo_Complex under its controller).
+                let npc = self.r.object(&mut self.c, s("npc").context("npc")?, None)?;
+                let a = crate::oracle_stealth::attention_info(&mut self.c, npc)?;
+                json!({"attention": reflect::object_value(&mut self.c, a)?, "addr": hex(a)})
             }
             "names" => {
                 let v: Vec<u32> = a.get("addrs").and_then(Value::as_array).map(|v| v.iter().filter_map(|x| x.as_str().and_then(reflect::parse_addr)).collect()).unwrap_or_default();
