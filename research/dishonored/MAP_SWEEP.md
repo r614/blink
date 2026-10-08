@@ -175,8 +175,8 @@ Needs an Opus porter: 1 (the ops carry game logic), 2 (importer / archetype reso
 (`--sampling prim`). Boyle Ext / Int regenerate to the 77283 / 45475 queries of the existing captures (counts match; hashes not compared). Galvani1 / 2 and Pub_Day / Pub_Night generate identical sets (same hash) because
 their geometry is the same; both are still queued since their door and mover states differ.
 
-`fixtures/oracle/capture_queue.txt` has one block per map: `session open map=M` (fresh map on the hooked game), a comment with the exact collision command,
-then the `maps/<name>` smoke scenario (original Kismet trace). The queue runner has no collide line (the `collide` session op takes inline queries), so the hook agent runs per map:
+`fixtures/oracle/capture_queue.txt` has one block per map: `session open map=M` (fresh map on the hooked game), a `collide map=M` line (run the map's query set in the session and import it into the oracle cache, `queue run`'s collide line, 2026-10-08),
+then the `maps/<name>` smoke scenario (original Kismet trace). `probe_launch queue run fixtures/oracle/capture_queue.txt --only ...` or `--sessions a,b` runs the blocks unattended; by hand, per map:
 
 `
 P=target-agents/i686-pc-windows-msvc/release/probe_launch.exe
