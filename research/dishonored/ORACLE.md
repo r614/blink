@@ -582,6 +582,31 @@ aiming, the same vector-field blur and SceneColor-sampling material passes), `da
 (27, mostly the lit scene variants Dark Vision switches to), `possession_l2` (17 during the
 transfer). The "drawn only while active" sets include scene shaders whose draws changed with the
 view; decode with `fxc /dumpbin` against the CTAB names. Never committed.
+### Several hooked games at once (2026-10-08)
+
+Every `probe_launch` command takes `--session NAME` (or `PROBE_SESSION=NAME`): the session file
+becomes `%TEMP%\dishonored_probe_session_NAME.txt` (game pid and pipe; the pipe name carries the
+pid and a random token, so pipes never collide). Unnamed (or `default`) is the old single
+session. `probe_launch --session b session start --map M` starts a second Dishonored.exe and
+`--session b session stop` ends only that one (by pid).
+
+The original refuses a second instance: 0x009E3C60, before the engine starts, shows "Dishonored
+is already running" and quits when the startup mutex's `GetLastError` (kept at 0x0145CF60) is
+`ERROR_ALREADY_EXISTS`. The DLL's `probe_init` (run while the game is still suspended) turns the
+`JNZ` at 0x009E3C9D into a `JMP` (after checking the bytes), so every hooked game starts; tested
+with Boyle Ext and Boyle Int running side by side (about 40 s to a playable map each, the first
+one undisturbed).
+
+`queue run FILE --sessions A,B,..` shards a queue over running sessions: units are a scenario
+line, or a `session open` / `session reload` line with the `session` / `collide` lines after it;
+unit k goes to session k mod N, each session runs its shard as a child
+`probe_launch --session X queue run FILE --shard k/N --out <out>.X.json` in parallel, and the
+summaries are merged. `--shard k/N` alone runs one shard in the current session. Outputs: traces
+and collision sets go to the shared oracle cache (keys differ per subject, so shards never
+write the same file); the shader store is content-addressed and written through per-process
+temporary names, so sessions share it; queue results default to `<out>.<session>.json` for a
+named session.
+
 ### The capture queue (`probe_launch queue run`)
 
 `probe_launch queue run [fixtures/oracle/capture_queue.txt] [--out harness_out/oracle/capture_queue_results.json] [--skip-layouts] [--only PREFIX]`

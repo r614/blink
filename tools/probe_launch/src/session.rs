@@ -606,8 +606,14 @@ impl Session {
                 for sh in &v {
                     let kind = if sh.kind == b'v' { "vs" } else { "ps" };
                     let file = dir.join(format!("{kind}_{:016x}.bin", sh.hash));
+                    // Content-addressed, so sessions share the store; written through a
+                    // per-process temporary name so parallel sessions never see a partial file.
                     if !file.exists() {
-                        std::fs::write(&file, &sh.code)?;
+                        let tmp = file.with_extension(format!("tmp{}", std::process::id()));
+                        std::fs::write(&tmp, &sh.code)?;
+                        if std::fs::rename(&tmp, &file).is_err() {
+                            let _ = std::fs::remove_file(&tmp);
+                        }
                     }
                     next = next.max(sh.id + 1);
                     list.push(json!({"id": sh.id, "kind": kind, "hash": format!("0x{:016x}", sh.hash), "tick": sh.tick, "size": sh.code.len(), "ctab": sh.ctab, "file": file.display().to_string()}));
