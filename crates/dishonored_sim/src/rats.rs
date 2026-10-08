@@ -3,9 +3,10 @@
 //!
 //! The original's rats are crowd agents (`DisGameCrowdAgentSkeletalRat`, archetype
 //! `RatSwarm.CrowdAgent_SmallRat`: `MaxSpeed` 350, `Health` 1, tweak `Twk_RatSwarm.Twk_Rat` with
-//! `m_fAttackDistance` 120) grouped in swarms (`DisRatSwarm`). The sim keeps a Devouring Swarm as
-//! one aggregate ([`crate::state::SwarmState`]) and models individual rats as small pawns that a
-//! brain (`dishonored_ai`) or a possessor drives through [`PlayerInput`]s.
+//! `m_fAttackDistance` 120) grouped in swarms (`DisRatSwarm`). The sim models each rat as a small
+//! pawn that a brain (`dishonored_ai`) or a possessor drives through [`PlayerInput`]s; a Devouring
+//! Swarm ([`crate::state::SwarmState`]) releases its rats as such pawns (MEASURED 2026-10-08:
+//! individual pooled crowd agents, 30 / 60 per level).
 //!
 //! Attack groups (0x00C891E0): the rats attacking one pawn deal, every `m_fDamageTimeInterval`,
 //! `clamp(count x m_fDamagePerBite, m_fMinDamage, m_fMaxDamage)` as an int with the bite damage
@@ -123,6 +124,7 @@ pub fn spawn_rat(state: &mut WorldState, id: PlayerId, position: Vec3, yaw: f32,
         p.inv = crate::state::Inventory { power_levels: [0; crate::state::power::COUNT], ..Default::default() };
         p.left.item = LeftHand::Empty;
         p.last_input.left_hand = LeftHand::Empty;
+        p.swarm = swarm;
     }
     events.push(SimEvent::RatSpawned { rat: id, swarm });
 }
@@ -140,6 +142,10 @@ pub fn attack_distance(v: &PlayerState) -> f32 {
 /// pawn within the attack distance and in front of it (within 90 degrees).
 pub fn rat_target(state: &WorldState, rat: &PlayerState, input: &PlayerInput) -> Option<usize> {
     if rat.kind != PawnKind::Rat || !rat.alive || rat.condition != Condition::Normal || !input.pressed(buttons::PRIMARY) {
+        return None;
+    }
+    // The rats of an ended Devouring Swarm flee and despawn: no more bites.
+    if rat.swarm.is_some_and(|s| state.swarms.iter().find(|x| x.id == s).is_none_or(|x| x.ending)) {
         return None;
     }
     let fwd = crate::movement::forward_vector(rat.yaw);
@@ -160,17 +166,40 @@ pub fn rat_target(state: &WorldState, rat: &PlayerState, input: &PlayerInput) ->
     best.map(|b| b.0)
 }
 
-/// Resolve rat attacks for one tick. `inputs[i]` is the input of `state.players[i]`.
-pub fn step_rat_attacks(state: &mut WorldState, inputs: &[PlayerInput], dt: f32, vitals: &VitalsConfig, t: &RatAttackTweak, events: &mut Vec<SimEvent>) {
+/// The attack tweak of a rat's swarm: a Devouring Swarm's level values
+/// (`PowerAttributes_DevouringSwarm`), else the ambient swarm's.
+pub fn swarm_tweak(state: &WorldState, swarm: Option<u32>, cfg: &dishonored_ir::gameplay::GameplayConfig) -> RatAttackTweak {
+    let d = RatAttackTweak::default();
+    match swarm.and_then(|s| state.swarms.iter().find(|x| x.id == s)) {
+        Some(s) => {
+            let l = cfg.items.swarm.levels[(s.level as usize).min(1)];
+            RatAttackTweak { initial_delay: l.initial_damage_delay, damage_per_bite: l.damage_per_bite, min_damage: l.min_damage, max_damage: l.max_damage, interval: l.damage_interval, ..d }
+        }
+        None => d,
+    }
+}
+
+/// Resolve rat attacks for one tick. `inputs[i]` is the input of `state.players[i]`. A pawn's
+/// attack group takes the tweak of its first attacker's swarm ([`swarm_tweak`]; the original
+/// keeps one group per swarm, a pawn bitten by two swarms at once is not modelled).
+pub fn step_rat_attacks(state: &mut WorldState, inputs: &[PlayerInput], dt: f32, vitals: &VitalsConfig, cfg: &dishonored_ir::gameplay::GameplayConfig, events: &mut Vec<SimEvent>) {
     let n = state.players.len();
     let mut groups: Vec<Vec<PlayerId>> = vec![Vec::new(); n];
+    let mut tweaks: Vec<RatAttackTweak> = vec![RatAttackTweak::default(); n];
+    // A Devouring Swarm's bites are its caster's (the earlier aggregate model's attribution).
+    let mut owners: Vec<Option<PlayerId>> = vec![None; n];
     for (i, inp) in inputs.iter().enumerate().take(n) {
         let rat = state.players[i];
         if let Some(vi) = rat_target(state, &rat, inp) {
+            if groups[vi].is_empty() {
+                tweaks[vi] = swarm_tweak(state, rat.swarm, cfg);
+                owners[vi] = rat.swarm.and_then(|s| state.swarms.iter().find(|x| x.id == s)).map(|s| s.owner);
+            }
             groups[vi].push(rat.id);
         }
     }
     for (vi, group) in groups.iter().enumerate() {
+        let t = &tweaks[vi];
         let v = &mut state.players[vi];
         if group.is_empty() {
             v.rat_attack = Default::default();
@@ -188,7 +217,11 @@ pub fn step_rat_attacks(state: &mut WorldState, inputs: &[PlayerInput], dt: f32,
             v.rat_slow = t.slowdown_duration;
             v.rat_slow_percent = t.slowdown_percent;
             events.push(SimEvent::RatBite { rat: biter, victim: v.id });
-            crate::vitals::apply_damage(v, dmg, Some(biter), DamageCause::RatBite, events, vitals);
+            let (by, cause) = match owners[vi] {
+                Some(o) => (o, DamageCause::Rats),
+                None => (biter, DamageCause::RatBite),
+            };
+            crate::vitals::apply_damage(v, dmg, Some(by), cause, events, vitals);
         }
     }
 }

@@ -979,8 +979,13 @@ impl Crowd {
             if possessed {
                 continue;
             }
-            let swarm = self.rat_swarm.get(&p.id).copied().flatten();
+            let swarm = self.rat_swarm.get(&p.id).copied().flatten().or(p.swarm);
             let power = swarm.and_then(|s| ws.swarms.iter().find(|x| x.id == s));
+            // An ended Devouring Swarm: its rats stop (they despawn, `dishonored_sim::powers::step_swarms`).
+            if power.is_some_and(|x| x.ending) {
+                out.push((p.id, PlayerInput { yaw: p.yaw, left_hand: LeftHand::Empty, ..Default::default() }));
+                continue;
+            }
             let count = match swarm {
                 Some(s) => ws.players.iter().filter(|q| q.kind == PawnKind::Rat && q.alive && self.rat_swarm.get(&q.id).copied().flatten() == Some(s)).count() as u32 + power.map_or(0, |x| x.rats as u32),
                 None => 1,
@@ -1012,6 +1017,14 @@ impl Crowd {
                 p.ai_unaware = b.unaware_of(NOISE);
                 p.ai_awareness = b.awareness();
             }
+        }
+        // `PlayerState::combat_opponents`: the pawn's skirmish size (the `DisGlobalCombatManager`
+        // skirmish of a target holds the brains in combat against it, 0x00C5AF60); Dark Vision
+        // reads it (0x00BF84C0). LIKELY: the port's skirmish is the set of Combat brains on that
+        // target (`assign_skirmish`).
+        for p in ws.players.iter_mut() {
+            let n = self.brains.iter().filter(|b| b.state == BrainState::Combat && b.target == Some(p.id)).count();
+            p.combat_opponents = n.min(u8::MAX as usize) as u8;
         }
     }
 

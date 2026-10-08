@@ -152,6 +152,15 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
     p.intro_duration = l.f(&pm, pp, "m_IntroDuration", "items.possess.intro_duration", dp.intro_duration);
     p.warn_before_exit = l.f(&pm, pp, "m_WarnApparitionInSecondsBeforeForceExit", "items.possess.warn_before_exit", dp.warn_before_exit);
     p.exit_fade = l.f(&pm, pp, "m_ExitFadeDuration", "items.possess.exit_fade", dp.exit_fade);
+    p.distance_weight = l.f(&pm, pp, "m_fDistanceWeight", "items.possess.distance_weight", dp.distance_weight);
+    p.angle_weight = l.f(&pm, pp, "m_fAngleWeight", "items.possess.angle_weight", dp.angle_weight);
+    p.max_angle_fov_fraction = l.f(&pm, pp, "m_fMaxAngleFOVFraction", "items.possess.max_angle_fov_fraction", dp.max_angle_fov_fraction);
+    for i in 0..4 {
+        // Elements left at the class default (0) are absent from the tweak.
+        let k = if i == 0 { "m_TargetingPriorityWeights".to_string() } else { format!("m_TargetingPriorityWeights[{i}]") };
+        p.priority_weights[i] = get_f32(&pm, &k).unwrap_or(0.0);
+    }
+    l.prov.insert("items.possess.priority_weights".into(), format!("{pp} :: m_TargetingPriorityWeights = {:?}", p.priority_weights));
     let possessable = |l: &mut L, path: &str, name: &str, d: &PossessableConfig| -> PossessableConfig {
         let m = l.obj(path);
         let mut c = d.clone();
@@ -166,6 +175,12 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
             *a = matches!(get(&m, &k), Some(TVal::B(true)));
         }
         c.disallow = matches!(get(&m, "m_bDisallowPossession"), Some(TVal::B(true)));
+        // `EDisPossessTargetingPriority`; absent = the class default DPTP_Animal (0).
+        c.targeting_priority = match get(&m, "m_TargetingPriority") {
+            Some(TVal::Name(n)) | Some(TVal::Str(n)) => ["DPTP_Animal", "DPTP_Civilian", "DPTP_Wolfhound", "DPTP_Combatant"].iter().position(|x| x.eq_ignore_ascii_case(n)).unwrap_or(0) as u8,
+            _ => 0,
+        };
+        l.prov.insert(format!("items.possess.{name}.targeting_priority"), format!("{path} :: m_TargetingPriority = {}", c.targeting_priority));
         c
     };
     p.npc = possessable(&mut l, "Twk_Possessable_BaseNPC.Twk_Possessable_BaseNPC", "npc", &dp.npc);
@@ -187,6 +202,7 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
             dilation_warmup: get_f32(&bm, &k("m_fTimeDilationWarmupTime")).unwrap_or(dl.dilation_warmup),
             dilation_cooldown: get_f32(&bm, &k("m_fTimeDilationCooldownTime")).unwrap_or(dl.dilation_cooldown),
             projectile_early_wakeup: get_f32(&bm, &k("m_fProjectileEarlyWakeupTime")).unwrap_or(dl.projectile_early_wakeup),
+            post_effect_cooldown: get_f32(&bm, &k("m_fPostEffectCooldownTime")).unwrap_or(dl.post_effect_cooldown),
         };
     }
     l.prov.insert("items.bend_time.levels".into(), format!("{bp} :: m_Levels = {:?}", cfg.bend_time.levels));

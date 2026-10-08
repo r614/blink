@@ -17,8 +17,8 @@
     input: [(tick: 5, action: Press(Secondary))],
     checkpoints: [
         (name: "summoned", expect: [(metric: Count("Sim:SwarmSummoned"), value: 1, tol: 0, source: "a cast with mana summons the swarm (Twk_DevouringSwarm)", status: Static)]),
-        (name: "rats", expect: [(metric: Max("world.swarm_rats"), value: 0, tol: 0, source: "rats of a level 1 swarm (Twk_DevouringSwarm_Lvl1)", status: Unmeasured)]),
-        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 0, tol: 0, source: "Devouring Swarm mana cost", status: Unmeasured)]),
+        (name: "rats", expect: [(metric: Max("world.swarm_rats"), value: 30, tol: 0, source: "measured 2026-10-08 (ORACLE.md): 30 individual rats at level 1")]),
+        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 40, tol: 0.5, source: "measured 2026-10-08 (ORACLE.md): 40 mana")]),
         (name: "effects", expect: [
             (metric: Count("Effect:Vfx_GamePlay.RatSwarm.RSwarm_Summoning_lvl1"), value: 1, tol: 0, cmp: AtLeast, source: "tweaks: Twk_DevouringSwarm level 1 m_pSpawnFX", status: Static),
             (metric: Count("Effect:Vfx_GamePlay.RatSwarm.Ps_RSwarm_HandCast_01"), value: 1, tol: 0, cmp: AtLeast, source: "tweaks: Twk_DevouringSwarm.m_pHandFX", status: Static),

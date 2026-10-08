@@ -1231,6 +1231,13 @@ impl MissionMatch {
                     }
                 }
                 dishonored_ai::AiEvent::Bark { npc, hook, initiator } => self.request_bark(*npc, hook, *initiator),
+                // A corpse the rats finished eating (0x00C6D760, `eDisEatenState_CorpseConsumed`)
+                // leaves no body.
+                dishonored_ai::AiEvent::RatEat { corpse, devoured: true, .. } => {
+                    if let Some(p) = self.world.player_mut(*corpse) {
+                        p.no_body = true;
+                    }
+                }
                 dishonored_ai::AiEvent::AlarmEnded { .. } | dishonored_ai::AiEvent::RatEat { .. } => {}
             }
         }
