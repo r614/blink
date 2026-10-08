@@ -753,7 +753,26 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     // ---- run ----
     let mut trace = Trace::new(&spec.name, "original", spec.tick_hz, &ch.list.iter().map(|c| (c.name.as_str(), c.unit.as_str())).collect::<Vec<_>>());
     let paths: Vec<(usize, ReadPath)> = ch.list.iter().enumerate().filter_map(|(i, c)| c.path.clone().map(|p| (i, p))).collect();
-    let read_paths: Vec<ReadPath> = paths.iter().map(|x| x.1.clone()).collect();
+    let mut read_paths: Vec<ReadPath> = paths.iter().map(|x| x.1.clone()).collect();
+    // Skeletal animation (`Bones` / `AnimState`): extra reads after the channels', decoded
+    // into a sidecar file next to the trace.
+    let mut anim_recs = Vec::new();
+    for r in &spec.record {
+        let (who, bones, filter) = match r {
+            Record::Bones(w, f) => (w, true, f.clone()),
+            Record::AnimState(w) => (w, false, Vec::new()),
+            _ => continue,
+        };
+        let subject = match placed.get(who) {
+            Some(p) => Ok(*p),
+            None if who == "player" => crate::lab::pawn(&mut s.c),
+            None => npc_pawn(s, who).or_else(|_| s.r.object(&mut s.c, who, None)),
+        };
+        match subject.and_then(|o| s.skel_component(o)).and_then(|comp| s.anim_rec(who, comp, bones, &filter, &mut read_paths)) {
+            Ok(rec) => anim_recs.push(rec),
+            Err(e) => warnings.push(format!("{who}: no animation record ({e:#})")),
+        }
+    }
     let to_values = |row: &[Option<Vec<u8>>]| -> Vec<f64> {
         let mut v = vec![f64::NAN; ch.list.len()];
         for ((i, _), b) in paths.iter().zip(row) {
@@ -829,6 +848,13 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     }
     for (k, row) in frames.iter().enumerate() {
         trace.push(k as u32, to_values(row));
+    }
+    let mut anim_out = Vec::new();
+    for rec in &anim_recs {
+        match rec.decode(s, &frames, off.to_array()) {
+            Ok(v) => anim_out.push(v),
+            Err(e) => warnings.push(format!("{}: animation decode ({e:#})", rec.label)),
+        }
     }
     // Back to the layout's coordinates.
     if off != glam::Vec3::ZERO {
@@ -958,10 +984,19 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
         capture_seconds: t_all.elapsed().as_secs_f64(),
     };
     let path = cache::store(&cache::root(), &key, &(prov, trace.clone()))?;
+    let anim_path = if anim_out.is_empty() {
+        None
+    } else {
+        let name = path.file_name().map(|n| n.to_string_lossy().replace("trace-", "anim-").replace(".orc", ".json")).unwrap_or_else(|| "anim.json".into());
+        let p = path.with_file_name(name);
+        std::fs::write(&p, serde_json::to_string(&json!({"scenario": spec.name, "spec_hash": format!("{:016x}", spec.spec_hash()), "meshes": anim_out}))?)?;
+        Some(p.display().to_string())
+    };
     let summary = json!({
         "scenario": spec.name,
         "spec_hash": format!("{:016x}", spec.spec_hash()),
         "cache": path.display().to_string(),
+        "anim": anim_path,
         "frames": trace.frames.len(),
         "channels": trace.channels.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
         "events": trace.events.len(),

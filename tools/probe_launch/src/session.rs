@@ -543,6 +543,7 @@ impl Session {
             }
             "run" => crate::capture::run_reads(self, a)?,
             "lightenv" => self.light_env(a)?,
+            "anim" => crate::anim::session_anim(self, a)?,
             "lights" => self.list_lights(a)?,
             "spawn_npc" => {
                 let loc = a.get("location").and_then(args_f32).context("location")?;

@@ -353,6 +353,14 @@ pub enum Record {
     Sounds,
     /// Animation inputs (hits, deaths, swings: `Anim`) and NPC stances.
     Anim,
+    /// Per-tick bone transforms (component and world space) of a skeletal mesh, plus its
+    /// animation state (`AnimState`): an NPC id, `player`, or an actor / component name; the
+    /// bone names to keep (empty: all). Original side: a sidecar `anim-<hash>.json` next to the
+    /// trace (`probe_launch` capture).
+    Bones(String, Vec<String>),
+    /// Per-tick animation state of a skeletal mesh (the AnimTree's nodes: sequence name,
+    /// position, rate, node weights, blend children weights), same subjects as `Bones`.
+    AnimState(String),
 }
 
 /// How a sweep picks its queries (several can be combined).
