@@ -139,7 +139,8 @@ pub fn lean(c: &mut Client, o: &Opts) -> Result<()> {
         for x in v.iter().take(3) {
             b.extend(x.to_le_bytes());
         }
-        c.write(pawn + ACTOR_LOCATION, &b)?;
+        let _ = b;
+        crate::lab::move_actor(c, pawn, [v[0], v[1], v[2]])?;
         c.write(pawn + ACTOR_VELOCITY, &[0u8; 12])?;
         // PHYS_Falling so it lands and walks again after a frozen viewpoint.
         c.write(pawn + ACTOR_PHYSICS, &[2u8])?;

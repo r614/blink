@@ -41,7 +41,8 @@ pub fn place(c: &mut Client, at: [f32; 3]) -> Result<()> {
     for v in at {
         b.extend(v.to_le_bytes());
     }
-    c.write(p + ACTOR_LOCATION, &b)?;
+    let _ = b;
+    lab::move_actor(c, p, at)?;
     c.write(p + ACTOR_VELOCITY, &[0u8; 12])?;
     c.key("W", true)?;
     c.wait_ticks(1)?;

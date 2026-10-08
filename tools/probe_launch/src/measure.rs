@@ -263,7 +263,8 @@ fn views(c: &mut Client, o: &Opts) -> Result<()> {
             for v in target {
                 b.extend(v.to_le_bytes());
             }
-            c.write(p + 0xc4, &b)?;
+            let _ = b;
+            crate::lab::move_actor(c, p, target)?;
             c.write(p + 0x1b4, &[0u8; 12])?;
             c.write(p + 0x104, &[0u8])?;
             rot(c)?;
@@ -280,7 +281,8 @@ fn views(c: &mut Client, o: &Opts) -> Result<()> {
         for v in target {
             b.extend(v.to_le_bytes());
         }
-        c.write(p + 0xc4, &b)?;
+        let _ = b;
+        crate::lab::move_actor(c, p, target)?;
         c.write(p + 0x104, &[0u8])?;
         rot(c)?;
         c.wait_ticks(30)?;
@@ -571,7 +573,8 @@ fn run_sprint_slide(c: &mut Client, o: &Opts) -> Result<()> {
             for x in &v {
                 b.extend(x.to_le_bytes());
             }
-            c.write(p + 0xc4, &b)?;
+            let _ = b;
+            crate::lab::move_actor(c, p, [v[0], v[1], v[2]])?;
             tap(c, VK_W, 1)?;
             c.wait_ticks(60)?;
         }
