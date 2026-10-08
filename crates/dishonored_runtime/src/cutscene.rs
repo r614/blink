@@ -476,7 +476,7 @@ pub fn props(
                         for (pi, part) in pm.gpu.parts.iter().enumerate() {
                             let js: Vec<Entity> = part.bind.iter().enumerate().map(|(bi, bm)| commands.spawn((Transform::from_matrix(*bm), Joint { part: pi, bone: bi }, ChildOf(root))).id()).collect();
                             for (mesh, mat) in &part.sections {
-                                commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), bevy::mesh::skinning::SkinnedMesh { inverse_bindposes: part.inverse_bindposes.clone(), joints: js.clone() }, Transform::default(), ChildOf(root)));
+                                commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), bevy::mesh::skinning::SkinnedMesh { inverse_bindposes: part.inverse_bindposes.clone(), joints: js.clone() }, Transform::default(), part.bounds, bevy::camera::visibility::NoAutoAabb, ChildOf(root)));
                             }
                         }
                         info!("cutscene prop {key} ({} parts)", pm.gpu.parts.len());

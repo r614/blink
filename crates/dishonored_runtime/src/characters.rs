@@ -27,6 +27,29 @@ pub struct PartGpu {
     pub bind: Vec<Mat4>,
     pub bones: Vec<dishonored_ir::BoneAsset>,
     pub mesh_to_pawn: glam::Mat4,
+    /// Culling box relative to the body root: the bind-pose vertices grown by
+    /// `ANIMATED_BOUNDS_PAD` (see `animated_bounds`).
+    pub bounds: bevy::camera::primitives::Aabb,
+}
+
+/// Margin (uu) added on every side of a skinned part's bind-pose box. Bevy culls a skinned
+/// mesh by the box of its bind-pose vertices, which does not follow the animated pose: a big
+/// swing, a fall or a body drawn at its carrier's root would pop out at the screen edges.
+const ANIMATED_BOUNDS_PAD: f32 = 250.0;
+
+/// The culling box of a skinned part (Bevy space, relative to the body root), spawned with
+/// `NoAutoAabb` so Bevy keeps it instead of recomputing the bind-pose box.
+pub fn animated_bounds(pos: &[[f32; 3]]) -> bevy::camera::primitives::Aabb {
+    let pad = Vec3::splat(ANIMATED_BOUNDS_PAD * coords::UU_TO_BEVY);
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for p in pos {
+        lo = lo.min(Vec3::from_array(*p));
+        hi = hi.max(Vec3::from_array(*p));
+    }
+    if pos.is_empty() {
+        (lo, hi) = (Vec3::ZERO, Vec3::ZERO);
+    }
+    bevy::camera::primitives::Aabb::from_min_max(lo - pad, hi + pad)
 }
 
 #[derive(Clone)]
@@ -151,7 +174,8 @@ pub fn upload(model: &CharacterModel, meshes: &mut Assets<Mesh>, images: &mut As
             sections.push((meshes.add(mesh), mat));
             section_materials.push(s.material);
         }
-        parts.push(PartGpu { source: p.source.clone(), sections, section_materials, inverse_bindposes: ib, bind, bones: p.bones.clone(), mesh_to_pawn: m2p });
+        let bounds = animated_bounds(&pos);
+        parts.push(PartGpu { source: p.source.clone(), sections, section_materials, inverse_bindposes: ib, bind, bones: p.bones.clone(), mesh_to_pawn: m2p, bounds });
     }
     CharacterGpu { name: model.name.clone(), parts, textures: tex, material_params: model.material_params.clone() }
 }
@@ -213,6 +237,8 @@ pub fn spawn_character(commands: &mut Commands, root: Entity, lib: &CharacterLib
                 MeshMaterial3d(mat.clone()),
                 SkinnedMesh { inverse_bindposes: part.inverse_bindposes.clone(), joints: joints.clone() },
                 Transform::default(),
+                part.bounds,
+                bevy::camera::visibility::NoAutoAabb,
                 ChildOf(root),
             ));
         }
