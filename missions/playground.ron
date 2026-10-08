@@ -70,9 +70,9 @@ MissionDef(
         ]),
         RuleDef(on: Use("exit"), then: [Complete("Left the Playground")]),
 
-        RuleDef(on: Enter("steps"), once: false, then: [Message("Step heights 30 / 40 / 44 / 45 / 50: the engine steps up at most MaxStepHeight 44")]),
+        RuleDef(on: Enter("steps"), once: false, then: [Message("Step heights 30 / 44 / 50 / 56 / 60: walking climbs up to about 53 (MaxStepHeight 44 + 2.54, from 6.73 above the floor)")]),
         RuleDef(on: Enter("slopes"), once: false, then: [Message("Slopes 40 / 45 / 50 / 55 / 60: floors steeper than 50 degrees are not walkable")]),
-        RuleDef(on: Enter("mantle"), once: false, then: [Message("Mantle ledges 60 to 300: jump at the edge (edges from 55 to 230 above the feet)")]),
+        RuleDef(on: Enter("mantle"), once: false, then: [Message("Mantle ledges 60 to 360: jump at the face (edges up to 230 above the feet, mid-jump too)")]),
         RuleDef(on: Enter("gaps"), once: false, then: [Message("Jump gaps 100 to 500: run or sprint and jump north")]),
         RuleDef(on: Enter("blink"), once: false, then: [Message("Blink east: the targets lie 500 / 1100 / 1600 away; the pillars are 400 / 500 / 600 high")]),
         RuleDef(on: Enter("chain"), once: false, then: [Message("A climbable chain: Use to grab, look up and move forward to climb, jump to get off")]),

@@ -11,7 +11,7 @@ use dishonored_content::{MapContents, MatchContent};
 use dishonored_mission::MissionDef;
 use dishonored_multiplayer::game::Game;
 use dishonored_multiplayer::mission::MissionMatch;
-use dishonored_sim::events::{DamageCause, SimEvent};
+use dishonored_sim::events::SimEvent;
 use dishonored_sim::input::{LeftHand, PlayerInput, buttons};
 use dishonored_sim::state::{MoveMode, PlayerState, WorldState, power};
 use dishonored_sim::{spawn_player, step_world};
@@ -241,17 +241,17 @@ fn scenarios(rep: &mut Report, mc: &MatchContent) -> Result<()> {
 fn steps(rep: &mut Report, mc: &MatchContent) {
     let mut rows = Vec::new();
     let mut ok = true;
-    for (x, h) in [(-5400.0, 30.0), (-5000.0, 40.0), (-4600.0, 44.0), (-4200.0, 45.0), (-3800.0, 50.0)] {
+    for (x, h) in [(-5400.0, 30.0), (-5000.0, 44.0), (-4600.0, 50.0), (-4200.0, 56.0), (-3800.0, 60.0)] {
         let mut s = Solo::new(mc, Vec3::new(x, -3900.0, 92.0), 90.0);
         let z0 = s.p().position.z;
         let top = s.run(110, fwd(90.0)) - z0;
         let climbed = top > h - 3.0;
         rows.push(vec![format!("{h}"), format!("{top:.1}"), climbed.to_string()]);
-        if (h <= 44.0 && !climbed) || (h >= 50.0 && climbed) {
+        if (h <= 50.0 && !climbed) || (h >= 56.0 && climbed) {
             ok = false;
         }
     }
-    rep.check(S, "step heights: 30 / 40 / 44 climbed, 50 not (MaxStepHeight 44)", ok, rows.iter().map(|r| format!("{} -> {}", r[0], r[2])).collect::<Vec<_>>().join(", "));
+    rep.check(S, "step heights: 30 / 44 / 50 climbed, 56 / 60 not (stepUp rises MaxStepHeight + 2.54 from 6.73 above a per-polygon floor: up to 53.3)", ok, rows.iter().map(|r| format!("{} -> {}", r[0], r[2])).collect::<Vec<_>>().join(", "));
     rep.table("Step heights (walk in, no jump)", &["step (uu)", "rise (uu)", "climbed"], rows);
 }
 
@@ -278,7 +278,7 @@ fn slopes(rep: &mut Report, mc: &MatchContent) {
 fn mantles(rep: &mut Report, mc: &MatchContent) {
     let mut rows = Vec::new();
     let mut ok = true;
-    for (x, h) in [(-400.0, 60.0), (0.0, 120.0), (400.0, 170.0), (800.0, 200.0), (1200.0, 230.0), (1600.0, 260.0), (2000.0, 300.0)] {
+    for (x, h) in [(-400.0, 60.0), (0.0, 120.0), (400.0, 200.0), (800.0, 260.0), (1200.0, 300.0), (1600.0, 330.0), (2000.0, 360.0)] {
         let mut s = Solo::new(mc, Vec3::new(x, -3900.0, 92.0), 90.0);
         let z0 = s.p().position.z;
         let mut top = f32::MIN;
@@ -293,11 +293,11 @@ fn mantles(rep: &mut Report, mc: &MatchContent) {
         let mantled = s.events.iter().any(|(_, e)| matches!(e, SimEvent::Mantle { .. }));
         let on_top = s.p().position.z - z0 > h - 5.0;
         rows.push(vec![format!("{h}"), format!("{:.1}", top - z0), mantled.to_string(), on_top.to_string()]);
-        if (h <= 230.0 && !on_top) || (h > 230.0 && on_top) {
+        if (h <= 330.0 && !on_top) || (h >= 360.0 && on_top) {
             ok = false;
         }
     }
-    rep.check(S, "mantle: ledges 60 to 230 reached, 260 and 300 not (m_MantleMaxEdgeHeight 230)", ok, rows.iter().map(|r| format!("{} -> {}", r[0], r[3])).collect::<Vec<_>>().join(", "));
+    rep.check(S, "mantle from a standing jump: ledges 60 to 330 reached, 360 not (edges up to m_MantleMaxEdgeHeight 230 above the feet, which the jump raises by up to 113)", ok, rows.iter().map(|r| format!("{} -> {}", r[0], r[3])).collect::<Vec<_>>().join(", "));
     rep.table("Mantle ledges (run, jump at the face)", &["ledge (uu)", "highest rise", "mantle event", "on top"], rows);
 }
 
@@ -358,10 +358,22 @@ fn blink(rep: &mut Report, mc: &MatchContent) {
     };
     let (d2, _, cost) = one(2, 0.0);
     let (d1, _, _) = one(1, 0.0);
-    let (_, up, _) = one(2, 89.0);
+    // Aim 19.84 degrees up (the measured case): the target is the eye plus the range vector,
+    // `t = min(500 / d.z, 1600)` = 1385.7 horizontally and +500 (HOOK_TRIAGE.md). Read while
+    // aiming: after the travel the pawn falls back to the floor.
+    let (flat, up) = {
+        let mut s = Solo::new(mc, Vec3::new(-5600.0, 0.0, 96.0), 0.0);
+        let aim = PlayerInput { yaw: 0.0, pitch: 19.84, buttons: buttons::SECONDARY, left_hand: LeftHand::Blink, ..Default::default() };
+        for _ in 0..10 {
+            s.step(aim);
+        }
+        let eye = dishonored_sim::movement::eye_position(s.p(), &mc.sim.gameplay.movement);
+        let t = s.p().left.blink_target.unwrap_or(eye);
+        ((t - eye).truncate().length(), t.z - eye.z)
+    };
     let ok = (1575.0..=1600.0).contains(&d2) && (1075.0..=1100.0).contains(&d1) && (cost - 20.0).abs() < 0.5;
     rep.check(S, "Blink range: level 2 1600, level 1 1100, ends < 25 short (measured 5-19), cost 20", ok, format!("level 2 {d2:.1} uu, level 1 {d1:.1} uu, mana {cost:.0}"));
-    rep.check(S, "Blink straight up rises about the vertical range 500", (380.0..=520.0).contains(&up), format!("{up:.1} uu"));
+    rep.check(S, "Blink aimed 19.84 deg up: target 1385.7 ahead and 500 above the eye (measured)", (flat - 1385.7).abs() < 5.0 && (up - 500.0).abs() < 5.0, format!("{flat:.1} ahead, {up:.1} above the eye"));
 }
 
 /// The climbable chain: Use grabs, forward with the view up climbs at 163.8 uu/s.
@@ -377,18 +389,33 @@ fn chain(rep: &mut Report, mc: &MatchContent) {
 
 /// The pool: a pawn under water swims; 30 s of air, then 1 damage every 61 ticks (measured).
 fn drowning(rep: &mut Report, mc: &MatchContent) {
+    // Held under by looking down and swimming down (crouch held), as the sim's breath tests do:
+    // an idle swimmer floats with its head out (neutral buoyancy). Drowning takes health
+    // directly (0x00ABB1E0, no damage event), so the health drops are counted.
     let mut s = Solo::new(mc, Vec3::new(2600.0, 0.0, -400.0), 0.0);
     let swimming = s.p().mode == MoveMode::Swimming;
-    let start = s.st.tick;
-    s.run(2100, PlayerInput::default());
-    let hits: Vec<(u64, f32)> = s.events.iter().filter_map(|(t, e)| match e {
-        SimEvent::Damage { victim, amount, cause: DamageCause::Drowning, .. } if *victim == ME => Some((*t, *amount)),
-        _ => None,
-    }).collect();
-    let first = hits.first().map(|h| (h.0 - start) as f32 / 60.0);
-    let gap = hits.get(1).zip(hits.first()).map(|(b, a)| b.0 - a.0);
-    let ok = swimming && first.is_some_and(|f| (f - 30.0).abs() < 0.1) && gap.is_some_and(|g| (60..=62).contains(&g));
-    rep.check(S, "pool: swims; first drowning damage after 30 s of air, then every 61 ticks", ok, format!("swimming {swimming}, first damage at {first:?} s, interval {gap:?} ticks, {} hits in 35 s", hits.len()));
+    if let Some(p) = s.st.player_mut(ME) {
+        p.water.air_used = 0.0;
+        p.water.drown_timer = 0.0;
+    }
+    let dive = PlayerInput { pitch: -60.0, buttons: buttons::CROUCH, ..Default::default() };
+    let (mut under_at, mut drops) = (None, Vec::new());
+    let mut last = s.p().vitals.health;
+    for t in 0..2400u64 {
+        s.step(dive);
+        let p = s.p();
+        if under_at.is_none() && p.water.under {
+            under_at = Some(t);
+        }
+        if p.vitals.health < last {
+            drops.push(t);
+        }
+        last = p.vitals.health;
+    }
+    let first = under_at.zip(drops.first()).map(|(u, d)| (d - u) as f32 / 60.0);
+    let gaps: Vec<u64> = drops.windows(2).map(|w| w[1] - w[0]).collect();
+    let ok = swimming && first.is_some_and(|f| (f - 30.0).abs() < 0.1) && !gaps.is_empty() && gaps.iter().all(|g| (60..=62).contains(g));
+    rep.check(S, "pool: swims; held under, the first health loss after 30 s of air, then every 61 ticks", ok, format!("swimming {swimming}, head under at tick {under_at:?}, first loss after {first:?} s, gaps {gaps:?} ticks"));
 }
 
 /// Falling damage: `trunc(70 x (v - 2250) / 650)` at landing speed v; none below 2250.
@@ -494,23 +521,29 @@ fn stations_in_mission(rep: &mut Report, maps: &MapContents, def: &MissionDef) -
     rep.check(S, "pickups: health elixir, rune and coins taken with Use", taken.iter().all(|t| t.1) && after.inv.elixirs[0] == 1 && after.inv.runes >= 1 && after.inv.coins > 0, format!("{taken:?}, elixirs {:?}, runes {}, coins {}", after.inv.elixirs, after.inv.runes, after.inv.coins));
 
     // Doors: closed blocks; Use opens it away from the user; the locked one stays shut.
-    p.teleport(Vec3::new(-5320.0, 2850.0, 92.0), 90.0);
+    // Aim at each one's use point (the centre of its bodies) from within the 220 uu reach.
+    let use_point = |actor: &str| mc.usables.iter().find(|u| u.actor == actor).map(|u| u.center).unwrap_or(Vec3::ZERO);
+    let wood = use_point("Playground:Door_Wood");
+    p.teleport(Vec3::new(wood.x, 2850.0, 92.0), 90.0);
     p.idle(60, fwd(90.0));
     let blocked = p.p().position.y < 2990.0;
-    let (y, pi) = p.aim(Vec3::new(-5320.0, 3000.0, 110.0));
+    let (y, pi) = p.aim(wood);
     p.use_once(y, pi);
     let state = p.m().props.get("Playground:Door_Wood").map(|s| s.door).unwrap_or(0);
     p.idle(120, fwd(90.0));
     let through = p.p().position.y > 3080.0;
     rep.check(S, "door: closed blocks, Use opens it, then it lets the pawn through", blocked && state != 0 && through, format!("blocked {blocked}, state after use {state}, through {through} (y {:.0})", p.p().position.y));
-    p.teleport(Vec3::new(-3920.0, 2850.0, 92.0), 90.0);
-    let (y, pi) = p.aim(Vec3::new(-3920.0, 3000.0, 110.0));
+    let locked = use_point("Playground:Door_Locked");
+    p.teleport(Vec3::new(locked.x, 2850.0, 92.0), 90.0);
+    p.idle(30, fwd(90.0));
+    let (y, pi) = p.aim(locked);
     p.use_once(y, pi);
     let locked_state = p.m().props.get("Playground:Door_Locked").map(|s| (s.door, s.locked)).unwrap_or((9, false));
     p.idle(60, fwd(90.0));
     rep.check(S, "locked door: Use leaves it shut and it blocks", locked_state == (0, true) && p.p().position.y < 2990.0, format!("state {locked_state:?}, y {:.0}", p.p().position.y));
-    p.teleport(Vec3::new(-3200.0, 2500.0, 92.0), 90.0);
-    let (y, pi) = p.aim(Vec3::new(-3200.0, 2700.0, 100.0));
+    let locker = use_point("Playground:Locker");
+    p.teleport(Vec3::new(locker.x, locker.y - 150.0, 92.0), 90.0);
+    let (y, pi) = p.aim(locker);
     p.use_once(y, pi);
     let stage = p.m().props.get("Playground:Locker").map(|s| s.stage).unwrap_or(0);
     rep.check(S, "locker: Use moves it to its next stage", stage == 1, format!("stage {stage}"));

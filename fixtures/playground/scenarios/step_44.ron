@@ -5,7 +5,7 @@
     system: Movement,
     map: "Playground",
     description: "Run north into the 44 uu step of the step-height station.",
-    setup: (player: Some((position: (-4600, -3900, 92), yaw: 90))),
+    setup: (player: Some((position: (-5000, -3900, 92), yaw: 90))),
     ticks: 140,
     input: [(tick: 30, action: Move(forward: 127, right: 0))],
     checkpoints: [

@@ -1,0 +1,14 @@
+// The 56 uu step is above what stepUp reaches (MaxStepHeight 44 + 2.54, from 6.73 above a per-polygon floor: 53.3); walking into it does not climb it.
+(
+    name: "playground/step_56",
+    system: Movement,
+    map: "Playground",
+    description: "Run north into the 56 uu step of the step-height station.",
+    setup: (player: Some((position: (-4200, -3900, 92), yaw: 90))),
+    ticks: 140,
+    input: [(tick: 30, action: Move(forward: 127, right: 0))],
+    checkpoints: [
+        (name: "stopped", expect: [(metric: RiseFrom("pawn.z", 30), value: 0, tol: 3, source: "PLAYER.md stepUp (0x006ADC10) and the measured 6.73 hover (COLLISION.md)")]),
+    ],
+    record: [Pawn],
+)

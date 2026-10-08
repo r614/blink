@@ -40,12 +40,12 @@
 
         // ---- Start: the item and power bench (two metal tables are original meshes below).
 
-        // ---- A. Step heights 30 / 40 / 44 / 45 / 50 (front faces at y -3500; walk in from y -3900).
+        // ---- A. Step heights 30 / 44 / 50 / 56 / 60 (front faces at y -3500; walk in from y -3900).
         (at: (-5400, -3200, 0), shape: Box((300, 600, 30))),
-        (at: (-5000, -3200, 0), shape: Box((300, 600, 40))),
-        (at: (-4600, -3200, 0), shape: Box((300, 600, 44))),
-        (at: (-4200, -3200, 0), shape: Box((300, 600, 45))),
-        (at: (-3800, -3200, 0), shape: Box((300, 600, 50))),
+        (at: (-5000, -3200, 0), shape: Box((300, 600, 44))),
+        (at: (-4600, -3200, 0), shape: Box((300, 600, 50))),
+        (at: (-4200, -3200, 0), shape: Box((300, 600, 56))),
+        (at: (-3800, -3200, 0), shape: Box((300, 600, 60))),
 
         // ---- B. Slopes 40 / 45 / 50 / 55 / 60 degrees (400 long, rising north from y -3500).
         (at: (-2800, -3500, 0), yaw: 90, shape: Ramp(width: 300, length: 400, angle: 40)),
@@ -54,14 +54,14 @@
         (at: (-1600, -3500, 0), yaw: 90, shape: Ramp(width: 300, length: 400, angle: 55)),
         (at: (-1200, -3500, 0), yaw: 90, shape: Ramp(width: 300, length: 400, angle: 60)),
 
-        // ---- C. Mantle ledges 60 / 120 / 170 / 200 / 230 / 260 / 300 (front faces at y -3500).
+        // ---- C. Mantle ledges 60 / 120 / 200 / 260 / 300 / 330 / 360 (front faces at y -3500).
         (at: (-400, -3200, 0), shape: Box((300, 600, 60))),
         (at: (0, -3200, 0), shape: Box((300, 600, 120))),
-        (at: (400, -3200, 0), shape: Box((300, 600, 170))),
-        (at: (800, -3200, 0), shape: Box((300, 600, 200))),
-        (at: (1200, -3200, 0), shape: Box((300, 600, 230))),
-        (at: (1600, -3200, 0), shape: Box((300, 600, 260))),
-        (at: (2000, -3200, 0), shape: Box((300, 600, 300))),
+        (at: (400, -3200, 0), shape: Box((300, 600, 200))),
+        (at: (800, -3200, 0), shape: Box((300, 600, 260))),
+        (at: (1200, -3200, 0), shape: Box((300, 600, 300))),
+        (at: (1600, -3200, 0), shape: Box((300, 600, 330))),
+        (at: (2000, -3200, 0), shape: Box((300, 600, 360))),
 
         // ---- D. Jump gaps 100 / 200 / 300 / 400 / 500 between 240-high platforms; stairs up.
         (at: (2800, -4500, 0), yaw: 90, shape: Stairs(width: 300, steps: 6, rise: 40, run: 100)),
@@ -112,11 +112,11 @@
         (at: (5350, 1750, 0), shape: Box((300, 100, 1360))),
         (at: (5350, 2150, 0), shape: Box((300, 100, 1520))),
 
-        // ---- I. Doors and usables: a wall at y 3000 with three doorways.
+        // ---- I. Doors and usables: a wall at y 3000 with three doorways. The doors copied with yaw -90 lie along +X from their hinge (Location), 152 wide (harness "Doors and usables" table).
         (at: (-5700, 3000, 0), shape: Box((600, 40, 400)), material: "boyle_brick_wall_ext.boyle_brick_wall_ext_std"),
-        (at: (-5020, 3000, 0), shape: Box((440, 40, 400)), material: "boyle_brick_wall_ext.boyle_brick_wall_ext_std"),
-        (at: (-4300, 3000, 0), shape: Box((600, 40, 400)), material: "boyle_brick_wall_ext.boyle_brick_wall_ext_std"),
-        (at: (-3270, 3000, 0), shape: Box((1140, 40, 400)), material: "boyle_brick_wall_ext.boyle_brick_wall_ext_std"),
+        (at: (-5024, 3000, 0), shape: Box((448, 40, 400)), material: "boyle_brick_wall_ext.boyle_brick_wall_ext_std"),
+        (at: (-4324, 3000, 0), shape: Box((648, 40, 400)), material: "boyle_brick_wall_ext.boyle_brick_wall_ext_std"),
+        (at: (-3274, 3000, 0), shape: Box((1148, 40, 400)), material: "boyle_brick_wall_ext.boyle_brick_wall_ext_std"),
 
         // ---- J. Lean corner and crouch tunnel (clearance 150: sneaking fits, standing does not).
         (at: (-1500, 3000, 0), shape: Box((1000, 40, 300))),
@@ -161,9 +161,9 @@
 
     actors: [
         // Doors: unlocked small wood, unlocked medium wood, locked small metal.
-        (from: "L_Boyle_Ext_Audio:DisDoor_21", name: "Door_Wood", at: (-5320, 3000, 0), yaw: 0),
-        (from: "L_Boyle_Ext_Audio:DisDoor_7", name: "Door_Reinforced", at: (-4700, 3000, 0), yaw: 0),
-        (from: "L_Boyle_Ext_Audio:DisDoor_0", name: "Door_Locked", at: (-3920, 3000, 0), yaw: 0, locked: true),
+        (from: "L_Boyle_Ext_Audio:DisDoor_21", name: "Door_Wood", at: (-5400, 3000, 0), yaw: -90),
+        (from: "L_Boyle_Ext_Audio:DisDoor_7", name: "Door_Reinforced", at: (-4800, 3000, 0), yaw: -90),
+        (from: "L_Boyle_Ext_Audio:DisDoor_0", name: "Door_Locked", at: (-4000, 3000, 0), yaw: -90, locked: true),
         // A locker and a trash bin.
         (from: "L_Boyle_Ext_Env:DishonoredUsableObject_0", name: "Locker", at: (-3200, 2700, 0), yaw: -90),
         (from: "L_Boyle_Ext_Env:DishonoredUsableObject_13", name: "Bin", at: (-2800, 2700, 0), yaw: 0),
@@ -241,26 +241,26 @@
     ],
 
     labels: [
-        (at: (-4600, -3600, 260), text: "STEP HEIGHT (MaxStepHeight 44): walk in"),
+        (at: (-4600, -3600, 260), text: "STEP HEIGHT: walk in (MaxStepHeight 44 + 2.54 from 6.73 above the floor)"),
         (at: (-5400, -3560, 120), text: "30"),
-        (at: (-5000, -3560, 120), text: "40"),
-        (at: (-4600, -3560, 120), text: "44"),
-        (at: (-4200, -3560, 120), text: "45"),
-        (at: (-3800, -3560, 120), text: "50"),
+        (at: (-5000, -3560, 120), text: "44"),
+        (at: (-4600, -3560, 120), text: "50"),
+        (at: (-4200, -3560, 120), text: "56"),
+        (at: (-3800, -3560, 120), text: "60"),
         (at: (-2000, -3600, 260), text: "SLOPES (walkable up to 50 degrees)"),
         (at: (-2800, -3560, 120), text: "40"),
         (at: (-2400, -3560, 120), text: "45"),
         (at: (-2000, -3560, 120), text: "50"),
         (at: (-1600, -3560, 120), text: "55"),
         (at: (-1200, -3560, 120), text: "60"),
-        (at: (800, -3600, 380), text: "MANTLE LEDGES (jump at the edge)"),
+        (at: (800, -3600, 420), text: "MANTLE LEDGES (jump at the face: edges up to 230 above the feet, mid-jump too)"),
         (at: (-400, -3560, 140), text: "60"),
         (at: (0, -3560, 180), text: "120"),
-        (at: (400, -3560, 230), text: "170"),
-        (at: (800, -3560, 260), text: "200"),
-        (at: (1200, -3560, 290), text: "230"),
-        (at: (1600, -3560, 320), text: "260"),
-        (at: (2000, -3560, 360), text: "300"),
+        (at: (400, -3560, 260), text: "200"),
+        (at: (800, -3560, 320), text: "260"),
+        (at: (1200, -3560, 360), text: "300"),
+        (at: (1600, -3560, 390), text: "330"),
+        (at: (2000, -3560, 420), text: "360"),
         (at: (4000, -4600, 260), text: "JUMP GAPS (stairs up, jump north)"),
         (at: (2800, -3650, 330), text: "100"),
         (at: (3400, -3650, 330), text: "200"),

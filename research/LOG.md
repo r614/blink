@@ -1675,3 +1675,22 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Port:** `env_map.rs` (filter once), `effects.rs` (sprite meshes rebuilt only with particles in this frame's view, emptied once when they leave it), `gfx_hud.rs` (`place`, `set_text`, `set_font_size`), `hud_settings.rs` (`HudOverrides`, decided before the HUD), `hud.rs`, `hud_dialogue.rs`, `menu_art.rs`, `level_props.rs`, `characters.rs`, `profile.rs`. Docs: RENDERING.md "Performance".
 - **Results:** pending the integrated build's measurements (frame time at the 8 fidelity viewpoints and in a 3-bot match, 1280x720 and 1920x1080, before and after; `harness fidelity --configs full` SSIM before and after).
 - **Confidence:** CONFIRMED (code read) that each removed piece of work left the output unchanged; the size of each saving is not measured yet.
+
+
+## 2026-10-07: Playground failures after integration (9 of 31)
+
+- **Question:** Which of the first `harness playground` failures are port bugs, and which come from the layout or the harness?
+- **Method:** the integrated release harness run on the layout as it was and after the layout changes; the sim's Blink, stepUp, mantle and breath code read against PLAYER.md, COLLISION.md and HOOK_TRIAGE.md.
+- **Findings:**
+  - Blink level 1 travelled 1600: **port bug**. The range used a fixed level index (`BLINK_LEVEL`), not the pawn's `m_Powers` level. The measured value is 1100 at level 1 (HOOK_TRIAGE.md).
+  - Blink "straight up" read 0: **harness**. It measured the pawn after it had fallen back. It now reads the target while aiming at 19.84 degrees up, the measured case (1385.7 ahead, +500).
+  - Steps 45 and 50 climbed: **expectation**. `stepUp` rises `MaxStepHeight` + 2.54 from where the box rests, 6.73 above a per-polygon floor, so it clears up to about 53. With the new steps (30 / 44 / 50 / 56 / 60), 50 is climbed and 56 is not.
+  - Mantle 260 and 300 reached: **expectation**. The finder also runs every airborne tick, and the jump lifts the feet by up to 113. With the new ledges (up to 360), 330 is reached and 360 is not.
+  - These two limits, and the launch speed below, are LIKELY, not measured (U-763).
+  - Jump launch 750 against 800: **sampling**. The port's trace is taken after the jump tick's physFalling. The apex agrees. The launch check is dropped from the Playground scenario (U-763).
+  - No drowning: **harness**. The idle swimmer floats with its head out, and drowning takes health directly, with no damage event. The harness now dives and counts the health drops.
+  - Door not passable: **layout**. With yaw 0 the copied doors stood across the doorway. They now use yaw -90 with the hinge at the gap's edge. The gaps are 152 wide, as the door bodies are.
+  - Locker unused: **harness**. Its use point was out of the 220 uu reach.
+- **Port:** `dishonored_sim::blink` (the level per pawn; new test `blink_range_follows_the_power_level`), `maps/playground.ron`, `missions/playground.ron`, `fixtures/playground/scenarios`, `tools/harness/src/playground.rs`, PLAYGROUND.md, U-763.
+- **Results:** with the old binary on the new layout, steps, mantle and both doors pass (26 / 31). The Blink, pool and locker fixes need the next build.
+- **Confidence:** CONFIRMED (code read) for the Blink level bug; LIKELY for the step and mantle limits and the launch sampling (U-763).

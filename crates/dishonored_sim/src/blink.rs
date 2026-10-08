@@ -33,14 +33,21 @@ use dishonored_ir::gameplay::{BlinkConfig, MovementConfig, VitalsConfig};
 use dishonored_world::{PawnBox, WorldQuery, channel};
 use glam::Vec3;
 
-pub const BLINK_LEVEL: usize = 1; // Contracts/FFA give level 2 Blink (index 1).
+/// Blink level of a pawn without the power recorded (Contracts / FFA give level 2, index 1).
+pub const BLINK_LEVEL: usize = 1;
 /// Horizontal distance at which the target counts as reached (`DAT_01359B8C` = 25.0).
 pub const REACHED_DISTANCE: f32 = 25.0;
 /// Ground probe length below the target point (20000 uu in 0x00BF5520).
 pub const GROUND_PROBE: f32 = 20000.0;
 
-fn level(cfg: &BlinkConfig) -> usize {
-    BLINK_LEVEL.min(cfg.horiz_distance.len().saturating_sub(1))
+/// Index of the pawn's Blink level in the per-level tweak arrays (`m_HorizDistance[level]`...):
+/// its `m_Powers` level 1 or 2 (index 0 or 1); a pawn without Blink recorded uses [`BLINK_LEVEL`].
+fn level(p: &PlayerState, cfg: &BlinkConfig) -> usize {
+    let lv = match p.inv.power_levels[crate::state::power::BLINK] {
+        0 => BLINK_LEVEL,
+        l => (l as usize).min(2) - 1,
+    };
+    lv.min(cfg.horiz_distance.len().saturating_sub(1))
 }
 
 /// Radius of the pawn's bounding sphere (cylinder bounds: |(r, r, h)|).
@@ -76,7 +83,7 @@ fn box_fits(world: &dyn WorldQuery, center: Vec3, radius: f32, half_height: f32)
 
 /// Compute the Blink destination (capsule centre) for the current view.
 pub fn compute_target(p: &PlayerState, world: &dyn WorldQuery, mv: &MovementConfig, cfg: &BlinkConfig) -> Option<Vec3> {
-    let lv = level(cfg);
+    let lv = level(p, cfg);
     let (horiz, vert) = (cfg.horiz_distance[lv], cfg.vert_distance[lv]);
     let mut start = eye_position(p, mv);
     let view = view_vector(p.yaw, p.pitch);
@@ -213,7 +220,7 @@ pub fn update(
 
 /// One tick of Blink travel. Returns true when the move is over.
 fn travel(p: &mut PlayerState, ctx: &MoveCtx, cfg: &BlinkConfig) -> bool {
-    let lv = level(cfg);
+    let lv = level(p, cfg);
     let step_time = cfg.time_between_steps.get(lv).copied().unwrap_or(0.01);
     let b = &mut p.blink;
     b.step_timer -= ctx.dt;

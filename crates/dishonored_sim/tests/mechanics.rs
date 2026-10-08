@@ -371,6 +371,18 @@ fn blink_range_is_clamped_horizontally() {
 }
 
 #[test]
+fn blink_range_follows_the_power_level() {
+    // Level 1 Blink: `m_Levels[0]`, 1100 uu horizontally (measured, HOOK_TRIAGE.md).
+    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.0), 0.)]);
+    r.settle();
+    r.state.player_mut(1).unwrap().inv.power_levels[dishonored_sim::state::power::BLINK] = 1;
+    let i = PlayerInput { yaw: 0.0, pitch: 0.0, buttons: buttons::SECONDARY, left_hand: LeftHand::Blink, ..Default::default() };
+    r.steps(3, &[(1, i)]);
+    let t = r.p(1).left.blink_target.expect("target");
+    assert!((t.x - 1100.0).abs() < 40.0, "target x {}", t.x);
+}
+
+#[test]
 fn sword_hit_block_parry() {
     let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.), (2, Vec3::new(120., 0., STAND_Z + 1.), 180.)]);
     r.settle();

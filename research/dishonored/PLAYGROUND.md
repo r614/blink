@@ -72,13 +72,13 @@ space (Z up, Unreal units), angles in degrees.
 |---|---|---|---|
 | start | Bench (two tables) | Use: every power at level 2, full ammunition, elixirs; or the starting loadout | `Equip` |
 | start | Pickups | health and mana elixirs, bullets, food, a rune, a bone charm, coins | taken with Use |
-| 1 | Step heights 30 / 40 / 44 / 45 / 50 | walking in climbs up to `MaxStepHeight` 44 | 44 yes, 50 no (COLLISION.md, live `MaxStepHeight`) |
+| 1 | Step heights 30 / 44 / 50 / 56 / 60 | walking in: `stepUp` rises `MaxStepHeight` + 2.54 = 46.54 from where the box rests, 6.73 above a per-polygon floor, so it clears up to 53.3 | 50 yes, 56 no (PLAYER.md `stepUp`, COLLISION.md hover; LIKELY, U-763) |
 | 1 | Slopes 40 / 45 / 50 / 55 / 60 | `WalkableFloorZ` = cos 50 = 0.643 | 40, 45 walkable; 55, 60 not (PLAYER.md) |
-| 1 | Mantle ledges 60 / 120 / 170 / 200 / 230 / 260 / 300 | the mantle finder: edges 55 to 230 above the feet | 230 yes, 260 no (`DisTweaks_PlayerPawn_Mantle`) |
+| 1 | Mantle ledges 60 / 120 / 200 / 260 / 300 / 330 / 360 | a standing jump at the face: the finder runs on the press and every airborne tick, edges up to 230 above the feet, and the jump lifts the feet up to 113 (106.67 + 6.73) | 330 yes, 360 no (`DisTweaks_PlayerPawn_Mantle`; LIKELY, U-763) |
 | 1 | Jump gaps 100 to 500 (platforms 240 high) | airtime 0.533 s at 360 (run) / 540 (sprint) uu/s | run clears 200, sprint 300 (measured airtime) |
-| 2 | Blink: floor targets at 500 / 1100 / 1600, pillars 400 / 500 / 600, a 350 wall | range 1600 (level 2) / 1100 (level 1) horizontally, 500 up; the Blink mantle | measured (HOOK_TRIAGE.md) |
+| 2 | Blink: floor targets at 500 / 1100 / 1600, pillars 400 / 500 / 600, a 350 wall | range 1600 (level 2) / 1100 (level 1) horizontally, 20 deg up: 1385.7 ahead and 500 up; the Blink mantle | measured (HOOK_TRIAGE.md) |
 | 2 | Climbable chain (Boyle basement's `DisClimbable_1`) beside a 500 tower | grab, climb 163.8 uu/s, jump off | PLAYER.md "Climbing" |
-| 2 | Pool, 600 deep, stairs out | swimming; 30 s of air, then 1 damage per 61 ticks | measured (U-242) |
+| 2 | Pool, 600 deep, stairs out | swimming; held under (looking down, crouch held), 30 s of air, then 1 health per 61 ticks (an idle swimmer floats with its head out) | measured (U-242) |
 | 2 | Fall-damage stairs, ledges 880 / 1040 / 1200 / 1360 / 1520 | `trunc(70 (v - 2250) / 650)`, death above 2900 | 0x00B4DCC0, measured (U-462) |
 | 3 | Doors: unlocked wood, unlocked reinforced, locked metal; a locker; a bin | native use (below) | — |
 | 3 | Lean corner | lean 15 + 5 degrees | PLAYER.md "Lean" |

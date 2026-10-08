@@ -206,9 +206,9 @@ Each station is labelled in the world and announced when you walk up to it.
 - **Start:** a bench that gives every power and item, or the starting loadout back, and the pickups
   (elixirs, ammunition, food, a rune, a bone charm, coins).
 - **Row 1 (south):**
-  - step heights 30 / 40 / 44 / 45 / 50;
+  - step heights 30 / 44 / 50 / 56 / 60;
   - slopes of 40 / 45 / 50 / 55 / 60 degrees;
-  - mantle ledges from 60 to 300;
+  - mantle ledges from 60 to 360;
   - jump gaps from 100 to 500.
 - **Row 2:**
   - a Blink course: targets at 500 / 1100 / 1600, pillars of 400 / 500 / 600, a wall to Blink-mantle;
