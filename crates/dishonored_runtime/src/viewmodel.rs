@@ -1562,7 +1562,7 @@ pub fn animate_view_rig(
         let rel = |i: usize| cam.inverse().transform_point3((rig.m2p * globals[i]).w_axis.truncate());
         let names: Vec<String> = rig.weapons.iter().map(|w| format!("{}={:.0}", rig.bones[w.socket].name, rel(w.socket))).collect();
         let wk: Vec<&str> = a.weapons.iter().map(|w| w.key.as_str()).collect();
-        info!("vm fb={} ub={}({:.2}) la={}({:.2}) weapons={:?} {}", a.fb.clip, a.ub.clip, a.ub.weight, a.la.clip, a.la.weight, wk, names.join(" "));
+        info!("vm fb={}@{:.3} ub={}@{:.3}({:.2}) la={}@{:.3}({:.2}) weapons={:?} {}", a.fb.clip, a.fb.time, a.ub.clip, a.ub.time, a.ub.weight, a.la.clip, a.la.time, a.la.weight, wk, names.join(" "));
     }
     // The view (0x00AABA60 / 0x00AABB70): at the camera bone (`m_CameraBoneName` camera_jnt,
     // its frame turned by `DisTweaks_Pawn_Body.m_fBone_AngleOffset_Pitch` -90, i.e. forward =

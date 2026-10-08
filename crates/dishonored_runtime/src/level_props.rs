@@ -148,10 +148,10 @@ pub fn spawn_props(
                             let p = part.section_materials.get(si).copied().flatten().and_then(|m| gpu.material_params.get(m));
                             let ext = crate::prop_light::prop_light(&env, p, &gpu.textures, crate::map_render::light_unit());
                             let h = prop_mats.add(crate::prop_light::PropMaterial { base: base.clone(), extension: ext });
-                            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(h), skin, Transform::default(), ChildOf(root)));
+                            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(h), skin, Transform::default(), part.bounds, bevy::camera::visibility::NoAutoAabb, ChildOf(root)));
                         }
                         _ => {
-                            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), skin, Transform::default(), ChildOf(root)));
+                            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), skin, Transform::default(), part.bounds, bevy::camera::visibility::NoAutoAabb, ChildOf(root)));
                         }
                     }
                 }

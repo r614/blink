@@ -2053,3 +2053,15 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   - `fixtures/scripts/viewmodel_states.json` waits one tick after every screenshot. It adds time series of the swing, Windblast, Blink aim and cast, and the mantles, plus look down / up and lean.
   - Tests in `crates/dishonored_runtime/tests/viewmodel.rs`.
 - **Confidence:** CONFIRMED (decoded) for the eye, the view rotation, the look controls and the offset keys. LIKELY for a pawn pitch of 0 (UE3 `Pawn.FaceRotation` while walking or falling, U-782) and for the arms staying visible through a Blink (U-781).
+
+## 2026-10-08: First-person swing shots and skinned-mesh culling
+- **Question:** the coordinator's render of the swing series showed no arm or sword at the shots named 17t and 22t, and suspected frustum culling by the bind-pose box.
+- **Finding:**
+  - The first-person arms, weapons and bolts have had `NoFrustumCulling` since they were added. Bevy 0.19 honours it in CPU culling (`check_visibility`) and in GPU preprocessing (`MESH_FLAGS_NO_FRUSTUM_CULLING_BIT`). No camera has `OcclusionCulling`, which would ignore the flag. So culling does not hide the rig.
+  - The shot names undercounted the ticks: each `screenshot` is followed by `wait_ticks: 1`, so the shots were at about 6, 13, 19, 25 and 34 ticks after the press. `fp_probe` on `Sword_Ready_AttackRight_A_Small`: the hand is upper right at 0.2 s, crosses the centre at about 0.27 s (51 uu ahead, 13 below the eye), and is 35-41 uu below the eye at 0.33-0.37 s, under the 75-degree view's lower edge. The empty shots are the data at those instants.
+  - Third-person skinned meshes (characters, level props, cutscene props) had no `NoFrustumCulling`, so Bevy culled them by their bind-pose box when it could compute one.
+- **Port:**
+  - Skinned parts get a culling box from their bind-pose vertices grown by 250 uu on every side (`characters::animated_bounds`), spawned with `NoAutoAabb` so Bevy keeps it. Big swings, falls and bodies drawn at their carrier's root no longer pop at the screen edges, and far off-screen pawns are still culled.
+  - The swing series now shoots at 6, 13, 15, 17, 22 and 30 elapsed ticks (names match the elapsed ticks).
+  - The `DISH_VM_DEBUG` log line prints each layer's clip time.
+- **Confidence:** CONFIRMED for the culling flags (Bevy source) and the tick count (script). The swing poses are from the decoded clip.
