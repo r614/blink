@@ -53,6 +53,17 @@ pub struct VolumeSample {
     pub shadowed: bool,
 }
 
+impl VolumeSample {
+    /// The serializable form carried in the map (`dishonored_ir::env_light`).
+    pub fn to_data(&self) -> dishonored_ir::env_light::VolumeSampleData {
+        dishonored_ir::env_light::VolumeSampleData { position: self.position, radius: self.radius, directions: self.directions, indirect: self.indirect, environment: self.environment, ambient: self.ambient }
+    }
+
+    pub fn from_data(d: &dishonored_ir::env_light::VolumeSampleData) -> VolumeSample {
+        VolumeSample { position: d.position, radius: d.radius, directions: d.directions, indirect: d.indirect, environment: d.environment, ambient: d.ambient, shadowed: false }
+    }
+}
+
 fn f32_at(d: &[u8], o: usize) -> f32 {
     f32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]])
 }
@@ -360,6 +371,51 @@ pub fn read_lights(pkg: &Package, all: bool) -> Vec<EnvLight> {
 }
 
 impl EnvLight {
+    /// The serializable form carried in the map (`dishonored_ir::env_light`), for the runtime's
+    /// characters.
+    pub fn to_data(&self) -> dishonored_ir::env_light::EnvLightData {
+        let (kind, inner_deg, outer_deg) = match self.kind {
+            EnvLightKind::Point => (0, 0.0, 0.0),
+            EnvLightKind::Spot { inner_deg, outer_deg } => (1, inner_deg, outer_deg),
+            EnvLightKind::Directional => (2, 0.0, 0.0),
+            EnvLightKind::Sky => (3, 0.0, 0.0),
+        };
+        dishonored_ir::env_light::EnvLightData {
+            kind,
+            inner_deg,
+            outer_deg,
+            position: self.position,
+            direction: self.direction,
+            intensity: self.intensity,
+            radius: self.radius,
+            falloff_exponent: self.falloff_exponent,
+            channels: self.channels,
+            traced: self.traced,
+            only_levels: self.only_levels.clone(),
+        }
+    }
+
+    /// The light of its serialized form (`source` is not carried).
+    pub fn from_data(d: &dishonored_ir::env_light::EnvLightData) -> EnvLight {
+        EnvLight {
+            kind: match d.kind {
+                0 => EnvLightKind::Point,
+                1 => EnvLightKind::Spot { inner_deg: d.inner_deg, outer_deg: d.outer_deg },
+                2 => EnvLightKind::Directional,
+                _ => EnvLightKind::Sky,
+            },
+            position: d.position,
+            direction: d.direction,
+            intensity: d.intensity,
+            radius: d.radius,
+            falloff_exponent: d.falloff_exponent,
+            channels: d.channels,
+            traced: d.traced,
+            source: String::new(),
+            only_levels: d.only_levels.clone(),
+        }
+    }
+
     /// `ULightComponent::GetPosition`: (position, 1) for point and spot lights, (-axis, 0) for
     /// directional lights, (0, 0, 1, 0) for sky lights.
     fn position4(&self) -> (Vec3, f32) {
@@ -456,6 +512,9 @@ pub struct EnvQuery<'a> {
     pub volume: Option<&'a [VolumeSample]>,
     /// Print the contributions (`DISHONORED_LIGHT_ENV_DEBUG=<actor substring>`).
     pub debug: bool,
+    /// The level package of the floor below the origin: a light with `bOnlyAffectSameAndSpecifiedLevels`
+    /// affects the environment only when it lists this level (0x00516400). None: not tested.
+    pub level: Option<&'a str>,
 }
 
 /// The static environment SH of a light environment; `visible(from, to)` is the line check.
@@ -465,6 +524,11 @@ pub fn static_environment(q: &EnvQuery, mut visible: impl FnMut(Vec3, Vec3) -> b
         // CompositeDynamic stands for Dynamic in the light environment's channel test.
         if !channels_overlap(l.channels, q.channels) || !l.affects(q.origin, q.sphere_radius) {
             continue;
+        }
+        if let (Some(level), Some(only)) = (q.level, l.only_levels.as_ref()) {
+            if !only.iter().any(|o| o.eq_ignore_ascii_case(level)) {
+                continue;
+            }
         }
         let (pos, w) = l.position4();
         let to_light = (pos - q.origin * w).normalize_or_zero();
@@ -571,7 +635,7 @@ pub fn light_props(content: &Content, map: &mut DishonoredMap, instance_level: &
         if debug {
             eprintln!("light environment of {}: origin {origin:.0} radius {radius:.0} floor level {level:?}", prop.actor);
         }
-        let q = EnvQuery { origin, sphere_radius: radius, channels: prop_channels.get(pi).copied().unwrap_or(1 | 1 << 3), lights, volume, debug };
+        let q = EnvQuery { origin, sphere_radius: radius, channels: prop_channels.get(pi).copied().unwrap_or(1 | 1 << 3), lights, volume, debug, level: None };
         let sh = static_environment(&q, |a, b| {
             let d = b - a;
             let len = d.length();

@@ -207,14 +207,22 @@ pub fn spawn_lights(map: &DishonoredMap, commands: &mut Commands, features: &Ren
     }
     let mut n = 0;
     let mut local = 0;
+    // The caustic lights are drawn by their receivers' own pass (caustics.rs): they light only the
+    // primitives of their lighting channel, with their function.
+    let caustics = crate::caustics::CausticLights::new(map, features);
     for l in &map.lights {
+        if !caustics.is_empty() && crate::caustics::is_caustic(l) {
+            continue;
+        }
         let dir = coords::dir(l.direction).normalize_or(Vec3::NEG_Y);
         let up = if dir.abs().dot(Vec3::Y) > 0.99 { Vec3::Z } else { Vec3::Y };
         let at = Transform::from_translation(coords::pos(l.position)).looking_to(dir, up);
         let shadows = l.casts_shadows && l.dominant && std::env::var("DISHONORED_NO_SHADOWS").is_err();
+        // Lights of a Kismet-streamed sublevel leave with it (level streaming).
+        let stream_tag = crate::level::streamed_tag(&map.streamed_levels, crate::level::source_package(&l.source));
         match l.kind {
             LightKind::Directional => {
-                commands.spawn((
+                let mut e = commands.spawn((
                     DirectionalLight {
                         color: color(l),
                         illuminance: l.brightness * std::f32::consts::PI * light_unit(),
@@ -230,6 +238,9 @@ pub fn spawn_lights(map: &DishonoredMap, commands: &mut Commands, features: &Ren
                     at,
                     MapLight { source: l.source.clone() },
                 ));
+                if let Some(t) = stream_tag {
+                    e.insert(t);
+                }
             }
             _ if local >= MAX_LIGHTS => continue,
             LightKind::Point => {
@@ -240,9 +251,13 @@ pub fn spawn_lights(map: &DishonoredMap, commands: &mut Commands, features: &Ren
                         intensity: local_intensity(l),
                         range: l.radius * coords::UU_TO_BEVY,
                         radius: falloff_radius(l),
-                        // Cube shadow maps cost six scene passes; the one dominant point light
-                        // (sewer) is left unshadowed for frame time.
-                        shadow_maps_enabled: false,
+                        // The dominant point light's shadow (render_lighting.md "Dominant point
+                        // light shadows"): the original's `DynamicShadows` and
+                        // `LightEnvironmentShadows` settings are True, so the dominant light
+                        // shadows the dynamic objects (a light environment's per-object shadow).
+                        // A Bevy cube shadow map costs six scene passes, so only the dominant
+                        // light has one, and `--no-point-shadows` turns it off.
+                        shadow_maps_enabled: shadows && features.point_shadows,
                         affects_lightmapped_mesh_diffuse: true,
                         ..default()
                     },
@@ -251,6 +266,9 @@ pub fn spawn_lights(map: &DishonoredMap, commands: &mut Commands, features: &Ren
                 ));
                 if let Some(f) = flicker_of(l) {
                     e.insert(f);
+                }
+                if let Some(t) = stream_tag {
+                    e.insert(t);
                 }
             }
             LightKind::Spot { inner_cone_deg, outer_cone_deg } => {
@@ -272,6 +290,9 @@ pub fn spawn_lights(map: &DishonoredMap, commands: &mut Commands, features: &Ren
                 ));
                 if let Some(f) = flicker_of(l) {
                     e.insert(f);
+                }
+                if let Some(t) = stream_tag {
+                    e.insert(t);
                 }
             }
         }

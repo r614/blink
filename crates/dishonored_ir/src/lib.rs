@@ -6,6 +6,7 @@
 //! convert to their own frame (see `dishonored_runtime::coords`).
 
 pub mod ai;
+pub mod env_light;
 pub mod gameplay;
 pub mod items;
 pub mod layout;
@@ -56,10 +57,106 @@ pub struct DishonoredMap {
     /// Placed doors and usable objects drawn with a skeletal mesh.
     #[serde(default)]
     pub skeletal_props: Vec<SkeletalProp>,
+    /// The static lights and light volumes the characters' light environments read at run time
+    /// (`dishonored_runtime::char_light`).
+    #[serde(default)]
+    pub light_env_world: env_light::LightEnvWorld,
     /// Placed `SceneCaptureReflectActor`s: the planar reflections that fill the water's render
     /// targets (research/dishonored/systems/render_reflect.md).
     #[serde(default)]
     pub reflect_captures: Vec<ReflectCapture>,
+    /// Placed `LensFlareSource` actors (research/dishonored/systems/render_lighting.md "Lens
+    /// flares").
+    #[serde(default)]
+    pub lens_flares: Vec<LensFlareSource>,
+    /// The persistent map's Kismet-streamed sublevels (`LevelStreamingKismet` packages): the
+    /// renderer tags what they hold with their package (`MeshInstance::level`, the part of a
+    /// source id before `:`) so `MatchView::hidden_levels` can hide it.
+    #[serde(default)]
+    pub streamed_levels: Vec<String>,
+    /// Materials the importer was asked for by path (`ImportOptions::extra_materials`: the
+    /// gameplay decals' materials): (object path, index into `materials`).
+    #[serde(default)]
+    pub named_materials: Vec<(String, MaterialId)>,
+    /// `ShadowMap1D`s of the instances' first LOD (the dominant light's visibility per vertex).
+    #[serde(default)]
+    pub vertex_shadows: Vec<VertexShadow>,
+}
+
+/// `LightingChannelContainer` bits, in the class's declaration order (Engine.LightComponent): a
+/// light affects a primitive when their channel sets share a bit other than `INITIALIZED`.
+pub mod lighting_channel {
+    pub const NAMES: [&str; 29] = [
+        "bInitialized", "BSP", "Static", "Dynamic", "CompositeDynamic", "Skybox", "Unnamed_1", "Unnamed_2", "Unnamed_3", "Unnamed_4", "Unnamed_5", "Unnamed_6", "Cinematic_1", "Cinematic_2", "Cinematic_3", "Cinematic_4", "Cinematic_5",
+        "Cinematic_6", "Cinematic_7", "Cinematic_8", "Cinematic_9", "Cinematic_10", "Gameplay_1", "Gameplay_2", "Gameplay_3", "Gameplay_4", "Crowd", "m_LightProbe", "m_bOutsider",
+    ];
+    pub const INITIALIZED: u32 = 1;
+    /// `LightComponent` class defaults: bInitialized, BSP, Static, Dynamic, CompositeDynamic.
+    pub const LIGHT_DEFAULT: u32 = 0b1_1111;
+    /// A static mesh component without a serialized container (the component's own
+    /// `PostLoad` fills it; LIKELY: bInitialized and Static).
+    pub const STATIC_MESH_DEFAULT: u32 = 0b101;
+    pub fn shares(a: u32, b: u32) -> bool {
+        (a & b & !INITIALIZED) != 0
+    }
+}
+
+/// A placed `LensFlareSource` and the `LensFlare` template its `LensFlareComponent` uses
+/// (`FLensFlareSceneProxy`, Dishonored.exe 0x008eb560; the source element is drawn by
+/// 0x008e5b50 in the template's `SourceDPG`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LensFlareSource {
+    /// `<package>:<actor path>`.
+    pub source: String,
+    pub template: String,
+    /// The source's world position (the actor x component transform's translation), Dishonored
+    /// world space.
+    pub position: Vec3,
+    /// `FixedRelativeBoundingBox` of the template (`bUseFixedRelativeBoundingBox`): the flare is
+    /// culled with this box about the position.
+    pub bounds: Option<[Vec3; 2]>,
+    /// The actor's `bHidden` (Kismet toggles the source through `SeqAct_Toggle`).
+    pub hidden: bool,
+    /// The component's `SourceColor` (`bModulateColorBySource`).
+    pub source_color: [f32; 4],
+    pub element: LensFlareElement,
+    /// Entries of the template's `Reflections` array (not drawn; none in the retail data).
+    pub reflections: usize,
+}
+
+/// A `LensFlareElement`: size, material list and the distributions that shade one flare quad.
+/// The distributions without a `DistMap_` prefix are looked up at the radial or source distance
+/// (`bUseSourceDistance`), the `DistMap_` ones at the camera distance to the source in uu.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LensFlareElement {
+    pub size: Vec3,
+    pub ray_distance: f32,
+    pub enabled: bool,
+    pub use_source_distance: bool,
+    pub normalize_radial_distance: bool,
+    pub modulate_color_by_source: bool,
+    /// `LFMaterials` (indices into `DishonoredMap::materials`).
+    pub materials: Vec<MaterialId>,
+    pub material_index: particles::Dist,
+    pub scaling: particles::Dist,
+    pub axis_scaling: particles::Dist,
+    pub rotation: particles::Dist,
+    pub color: particles::Dist,
+    pub alpha: particles::Dist,
+    pub offset: particles::Dist,
+    pub dist_scale: particles::Dist,
+    pub dist_color: particles::Dist,
+    pub dist_alpha: particles::Dist,
+}
+
+
+/// A `ShadowMap1D`: `samples[v]` is the visibility (0 shadowed .. 1 lit) of vertex `v` of
+/// [`DishonoredMap::instances`]`[instance]`'s mesh to the light `light_guid`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct VertexShadow {
+    pub instance: usize,
+    pub light_guid: [u32; 4],
+    pub samples: Vec<f32>,
 }
 
 /// `RenderingChannelContainer` bit of a reflection channel (declaration order of the struct:
@@ -613,6 +710,10 @@ pub struct MeshInstance {
     /// 0x00519760; research/dishonored/systems/stealth.md section 14).
     #[serde(default)]
     pub stealth_shadow: bool,
+    /// The component's `LightingChannels` ([`lighting_channel`] bits; the serialized struct over
+    /// `lighting_channel::STATIC_MESH_DEFAULT`). 0 for instances that were not read from a component.
+    #[serde(default)]
+    pub lighting_channels: u32,
 }
 
 pub fn all_trace_types() -> u8 {
@@ -664,6 +765,13 @@ pub struct Light {
     /// The component's LightFunction (its material's parameters), if any.
     #[serde(default)]
     pub function: Option<LightFunction>,
+    /// The light's local Y and Z axes in world space (`direction` is its X axis): the plane a
+    /// projected light function lies in.
+    #[serde(default)]
+    pub axes: [Vec3; 2],
+    /// `LightingChannels` ([`lighting_channel`] bits): the light affects primitives sharing one.
+    #[serde(default)]
+    pub lighting_channels: u32,
 }
 
 /// A light function (ULightComponent::Function): the light's colour is multiplied by the
@@ -674,8 +782,11 @@ pub enum LightFunction {
     /// *_light_function_PMAT (Flickering, WoodStove, Boiler): grey value
     /// clamp(cos(2 pi t s1), 0.5, 1) + clamp(cos(2 pi t s2), 0.2, 0.7) (shader 1315).
     Flicker { speed1: f32, speed2: f32, material: String },
-    /// Casutics_LightFunction_PMAT: projected caustic texture (not rendered yet).
-    Caustics { speed: f32, color: [f32; 3], scale: f32 },
+    /// Casutics_LightFunction_PMAT (pixel shader 36479): two scrolled samples of `textures[1]`
+    /// (`T_Caustics_2`), their offsets pushed by two samples of `textures[0]`
+    /// (`T_EV_DustPanner_01`), projected onto the plane of the light's Y and Z axes at `scale` uu
+    /// per texture repeat (`LightFunction::Scale`).
+    Caustics { speed: f32, color: [f32; 3], scale: [f32; 3], textures: [Option<TextureId>; 2] },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

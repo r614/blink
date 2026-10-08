@@ -36,7 +36,54 @@ pub struct Intersection {
     pub particle: Option<String>,
     /// The AI noise sub-intersection (`DisContactSub_AINoise`).
     pub ai_noise: Option<ContactNoise>,
+    /// The decal sub-intersection (`DisContactSub_Decal`).
+    pub decal: Option<ContactDecal>,
 }
+
+/// A `DisContactSub_Decal`'s `m_DecalInfo` (`DishonoredDecalInfo`, 0x48 bytes), decoded from the
+/// fire function `FUN_00bcf000` and the decal component (`DishonoredDecalComponent`, its
+/// constructor `FUN_00a0c3c0` and tick `FUN_00a01000` / `FUN_009fb520`):
+///
+/// - the sub fires only with `m_Materials` non-empty (`m_DecalInfo + 8` > 0) and, when the
+///   contact carries a velocity, `m_fMinVelocity^2 < |v|^2`;
+/// - the component takes one of `m_Materials` at random (`m_pMaterial` only when the list is
+///   empty, which the fire function never reaches), `Width` / `Height` = `m_MaxWidth` /
+///   `m_MaxHeight` (uu), and starts its growth state at `m_MinWidth` / `m_MinHeight`;
+/// - the grow tick runs only for `m_Behaviour` 1 (every decal of the retail table has 0, which is
+///   done at once: the decal is its final size from the first frame);
+/// - `m_fLifetime` is the manager's `ActiveDecalInfo.LifetimeRemaining`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ContactDecal {
+    /// `m_pMaterial` (used by the component when `materials` is empty).
+    pub material: Option<String>,
+    /// `m_Materials`: ParticleSystem-style object paths of `MaterialInstanceConstant`s.
+    pub materials: Vec<String>,
+    pub min_width: f32,
+    pub min_height: f32,
+    pub max_width: f32,
+    pub max_height: f32,
+    pub time_step: f32,
+    pub width_step: f32,
+    pub height_step: f32,
+    pub lifetime: f32,
+    pub looped: bool,
+    pub behaviour: u8,
+    pub min_velocity: f32,
+}
+
+impl ContactDecal {
+    /// Whether the sub-intersection spawns a decal for a contact of speed `speed` (`None`: the
+    /// contact has no velocity).
+    pub fn fires(&self, speed: Option<f32>) -> bool {
+        !self.materials.is_empty() && speed.is_none_or(|s| self.min_velocity * self.min_velocity < s * s)
+    }
+}
+
+/// `DisDecalManager.MaxDecalCount`: the pool of `DishonoredDecalActor`s (`FUN_00bc6480`: with ten
+/// live, a decal not rendered for more than `DECAL_EVICT_AFTER` seconds is destroyed to make
+/// room; with none to give up, no decal is made).
+pub const MAX_DECAL_COUNT: usize = 10;
+pub const DECAL_EVICT_AFTER: f32 = 0.2;
 
 /// A `DisContactSub_AINoise` (fire: 0x00BD6C20). Nothing is emitted when `m_NoiseLoudness` is
 /// Silent (index 0), when `m_bScaleWithSpeed` is set and the contact speed is below
@@ -122,6 +169,33 @@ impl ContactSystem {
                             attenuation_attribute: name("m_AttenuationAttribute").filter(|n| n != "None"),
                         });
                     }
+                    "DisContactSub_Decal" => {
+                        if let Some(Value::Struct(_, v)) = find(p, "m_DecalInfo").map(|p| &p.value) {
+                            let num = |k: &str| match find(v, k).map(|p| &p.value) {
+                                Some(Value::Int(i)) => *i as f32,
+                                _ => find(v, k).and_then(|p| p.as_float()).unwrap_or(0.0),
+                            };
+                            let path = |o: i32| game.obj_path(ObjRef::from_index(o));
+                            it.decal = Some(ContactDecal {
+                                material: find(v, "m_pMaterial").and_then(|p| p.as_object()).filter(|o| *o != 0).map(path),
+                                materials: find(v, "m_Materials").and_then(|p| p.array_objects().ok()).unwrap_or_default().into_iter().filter(|o| *o != 0).map(path).collect(),
+                                min_width: num("m_MinWidth"),
+                                min_height: num("m_MinHeight"),
+                                max_width: num("m_MaxWidth"),
+                                max_height: num("m_MaxHeight"),
+                                time_step: num("m_fTimeStep"),
+                                width_step: num("m_fWidthStep"),
+                                height_step: num("m_fHeightStep"),
+                                lifetime: num("m_fLifetime"),
+                                looped: matches!(find(v, "m_bLoop").map(|p| &p.value), Some(Value::Bool(true))),
+                                behaviour: match find(v, "m_Behaviour").map(|p| &p.value) {
+                                    Some(Value::Byte(b)) => *b,
+                                    _ => 0,
+                                },
+                                min_velocity: num("m_fMinVelocity"),
+                            });
+                        }
+                    }
                     "DisContactSub_Particle" => {
                         it.particle = p
                             .iter()
@@ -203,6 +277,17 @@ impl ContactSystem {
         self.resolve(striker, struck, |i| i.particle.clone())
     }
 
+    /// The decal of a contact: the nearest pair with a `DisContactSub_Decal` (resolved like every
+    /// slot; a decal sub without materials silences the pairs below it).
+    pub fn decal(&self, striker: &str, struck: &str) -> Option<ContactDecal> {
+        self.resolve(striker, struck, |i| i.decal.clone())
+    }
+
+    /// Every pair that carries a `DisContactSub_Decal`, in table order.
+    pub fn decals(&self) -> impl Iterator<Item = (&str, &str, &ContactDecal)> {
+        self.intersections.iter().filter_map(|i| i.decal.as_ref().map(|d| (i.striker.as_str(), i.struck.as_str(), d)))
+    }
+
     /// The AI noise of a contact: the nearest pair with a `DisContactSub_AINoise` (resolved like
     /// every slot; a Silent sub on a derived pair silences the pairs below it).
     pub fn ai_noise(&self, striker: &str, struck: &str) -> Option<ContactNoise> {
@@ -228,5 +313,23 @@ impl ContactSound {
             return None;
         }
         Some((speed / self.max_speed.max(1e-3)).clamp(self.min_volume_scale, 1.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `FUN_00bcf000`: no materials, no decal; a contact velocity must exceed `m_fMinVelocity`.
+    #[test]
+    fn a_decal_sub_fires_with_materials_and_enough_speed() {
+        let mut d = ContactDecal { materials: vec!["M".into()], min_velocity: 750.0, ..Default::default() };
+        assert!(d.fires(None));
+        assert!(d.fires(Some(800.0)));
+        assert!(!d.fires(Some(750.0)));
+        assert!(!d.fires(Some(100.0)));
+        d.materials.clear();
+        d.material = Some("M".into());
+        assert!(!d.fires(None), "m_pMaterial alone never fires the sub (the fire function reads m_Materials)");
     }
 }
