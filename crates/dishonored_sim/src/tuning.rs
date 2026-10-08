@@ -258,18 +258,25 @@ pub struct CombatTuning {
     #[serde(default = "crossbow_fast_fire")]
     pub crossbow_fast_fire: f32,
 
-    // --- Windblast (CONFIRMED: Twk_WindBlast level 2) ---
+    // --- Windblast (CONFIRMED: Twk_WindBlast; per level, index = `m_CurrentLevel - 1`, the
+    // block 0x00BF6780 / 0x00BF7090 read) ---
     pub windblast_cost: f32,
-    pub windblast_angle: f32,
-    pub windblast_distance: f32,
-    pub windblast_force: f32,
-    pub windblast_up_force: f32,
-    pub windblast_damage: f32,
+    pub windblast_angle: [f32; 2],
+    pub windblast_distance: [f32; 2],
+    pub windblast_force: [f32; 2],
+    pub windblast_up_force: [f32; 2],
+    pub windblast_damage: [f32; 2],
     /// Speed of the blast front (`m_Speed`): targets are hit when it reaches them.
-    pub windblast_speed: f32,
+    pub windblast_speed: [f32; 2],
     /// `m_bUseDirectionalWindblast`: keep the aim pitch (else flattened).
     pub windblast_directional: bool,
+    /// `m_HitWallAdditionalDamage`, `m_fMinSpeedToExplodeNPCs`, `m_fChanceToExplodeNPCs`: a
+    /// blasted NPC hitting a wall (0x00B529C0).
     pub windblast_wall_damage: f32,
+    #[serde(default)]
+    pub windblast_wall_min_speed: f32,
+    #[serde(default)]
+    pub windblast_explode_chance: f32,
 
     // --- Dark Vision (CONFIRMED: Twk_DarkVision) ---
     pub dark_vision_cost: f32,
@@ -284,6 +291,9 @@ pub struct CombatTuning {
     pub dark_vision_fade_out: f32,
     #[serde(default)]
     pub dark_vision_cooldown: f32,
+    /// `m_fDesactivateInCombatTimer`: seconds in combat before the effect ends (0x00BF84C0).
+    #[serde(default)]
+    pub dark_vision_combat_timer: f32,
 
     // --- ranged dispersion (U-247; `DisTweaks_WeaponRanged_Attributes` of Corvo's weapons,
     // CONFIRMED data) ---
@@ -395,14 +405,16 @@ impl CombatTuning {
             crossbow_fast_fire: 0.625 / 1.5,
 
             windblast_cost: c.windblast.mana_cost,
-            windblast_angle: v(wb, "m_Levels[1].m_Angle", v(wb, "m_Levels.m_Angle", 135.0)),
-            windblast_distance: v(wb, "m_Levels[1].m_Distance", 3000.0),
-            windblast_force: v(wb, "m_Levels[1].m_Force", 2700.0),
-            windblast_up_force: v(wb, "m_Levels[1].m_ExtraUpForce", 1600.0),
-            windblast_damage: v(wb, "m_Levels[1].m_Damage", 30.0),
-            windblast_speed: v(wb, "m_Levels[1].m_Speed", 5000.0),
+            windblast_angle: [v(wb, "m_Levels.m_Angle", 135.0), v(wb, "m_Levels[1].m_Angle", 135.0)],
+            windblast_distance: [v(wb, "m_Levels.m_Distance", 3000.0), v(wb, "m_Levels[1].m_Distance", 3000.0)],
+            windblast_force: [v(wb, "m_Levels.m_Force", 1800.0), v(wb, "m_Levels[1].m_Force", 2700.0)],
+            windblast_up_force: [v(wb, "m_Levels.m_ExtraUpForce", 1000.0), v(wb, "m_Levels[1].m_ExtraUpForce", 1600.0)],
+            windblast_damage: [v(wb, "m_Levels.m_Damage", 20.0), v(wb, "m_Levels[1].m_Damage", 30.0)],
+            windblast_speed: [v(wb, "m_Levels.m_Speed", 5000.0), v(wb, "m_Levels[1].m_Speed", 5000.0)],
             windblast_directional: v(wb, "m_bUseDirectionalWindblast", 1.0) != 0.0,
             windblast_wall_damage: v(wb, "m_HitWallAdditionalDamage", 100.0),
+            windblast_wall_min_speed: v(wb, "m_fMinSpeedToExplodeNPCs", 500.0),
+            windblast_explode_chance: v(wb, "m_fChanceToExplodeNPCs", 0.3),
 
             dark_vision_cost: c.dark_vision.mana_cost,
             dark_vision_duration: v(dv, "m_Levels[1].m_fDuration", v(dv, "m_Levels.m_fDuration", 30.0)),
@@ -410,6 +422,7 @@ impl CombatTuning {
             dark_vision_fade_in: v(dv, "m_Levels[1].m_PpPerLevelParameters.m_EyeLidClosingDuration", 0.5),
             dark_vision_fade_out: v(dv, "m_Levels[1].m_PpPerLevelParameters.m_PowerFadeOutDuration", 2.0),
             dark_vision_cooldown: v(dv, "m_fCooldownTimer", 1.0),
+            dark_vision_combat_timer: v(dv, "m_fDesactivateInCombatTimer", 1.0),
 
             // Corvo's pistol 45 / 15 / 70, crossbow 30 / 0 / 70 (Normal difficulty column).
             pistol_dispersion: DispersionTuning::from_values(pb, 45.0, 15.0, 70.0),

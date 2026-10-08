@@ -198,8 +198,21 @@ pub fn buy_power(p: &mut PlayerState, idx: usize, cfg: &GameplayConfig) -> bool 
         return false;
     }
     p.inv.runes -= cost as u16;
-    p.inv.power_levels[idx] += 1;
+    set_power_level(p, idx, p.inv.power_levels[idx] + 1, cfg);
     true
+}
+
+/// `SetPowerLevel` (0x00ACE270) without the heal flag: the current level's modifiers are
+/// replaced by the new level's, the stored `HealthMax` is recomputed (whole points) and, when it
+/// grew, current health grows by the same amount (Vitality 1 gives +20 health at once; 1 -> 2
+/// keeps the same maximum and gives nothing).
+pub fn set_power_level(p: &mut PlayerState, idx: usize, level: u8, cfg: &GameplayConfig) {
+    let before = health_max(p, cfg).trunc();
+    p.inv.power_levels[idx] = level;
+    let after = health_max(p, cfg).trunc();
+    if after > before {
+        p.vitals.health += after - before;
+    }
 }
 
 /// Equip or unequip an owned bone charm (`m_MaxActivatedBoneCharmCount` slots).
@@ -273,12 +286,21 @@ fn ramp(b: &TimeBendState, target: f32, cfg: &GameplayConfig) -> f32 {
     }
 }
 
-/// Rate of time for a pawn: the caster runs at its own dilation, everything else at the world
-/// dilation of every active bend (several casters multiply).
+/// Rate of time for a pawn. The GameInfo tick (0x009FCBC0) multiplies the channels' rates: the
+/// player rate (`WorldInfo.TimeDilation`) is the product of the channels' player dilations and
+/// the world rate the product of their world dilations (no channel the powers use is
+/// `m_bExclusive`). Per caster here: a caster runs at its own dilation, everything else at the
+/// world dilation of every active bend (several casters multiply) and of every other pawn's
+/// Blink layer (Blink passes a caster rate of 1).
 pub fn pawn_time_scale(state: &WorldState, id: PlayerId, cfg: &GameplayConfig) -> f32 {
     let mut s = 1.0;
     for b in &state.time_bends {
         s *= if b.caster == id { ramp(b, b.self_dilation, cfg) } else { ramp(b, b.world_dilation, cfg) };
+    }
+    for l in &state.blink_layers {
+        if l.caster != id {
+            s *= l.current;
+        }
     }
     s
 }
@@ -294,13 +316,59 @@ pub fn world_time_scale(state: &WorldState, cfg: &GameplayConfig, projectile: bo
         }
         s *= ramp(b, b.world_dilation, cfg);
     }
+    for l in &state.blink_layers {
+        s *= l.current;
+    }
     s
 }
 
-/// Advance bends in real time; end those past their duration.
+/// The dilation helper (0x009FA0D0) for a caster's Blink layer: a non-zero target is kept
+/// within [0.05, caster rate 1]; the layer moves from where it is to the target at
+/// `(target - current) / blend` per second (at once when the blend is 0).
+pub fn set_blink_layer(state: &mut WorldState, caster: PlayerId, target: f32, blend: f32) {
+    let target = if target == 0.0 { 0.0 } else { target.clamp(0.05, 1.0) };
+    let i = match state.blink_layers.iter().position(|l| l.caster == caster) {
+        Some(i) => i,
+        None => {
+            if target == 1.0 {
+                return;
+            }
+            state.blink_layers.push(crate::state::DilationLayer { caster, current: 1.0, target: 1.0, velocity: 0.0 });
+            state.blink_layers.len() - 1
+        }
+    };
+    let l = &mut state.blink_layers[i];
+    l.target = target;
+    l.velocity = if blend.abs() >= 1e-8 { (target - l.current) / blend } else { f32::MAX };
+}
+
+/// The GameInfo tick's layer step (0x009FCBC0, real time): `current += velocity x dt`, landing
+/// on the target when it is reached or passed. Layers back at 1 are dropped.
+pub fn step_blink_layers(state: &mut WorldState, dt: f32) {
+    for l in state.blink_layers.iter_mut() {
+        if l.velocity == f32::MAX {
+            l.current = l.target;
+            continue;
+        }
+        let old = l.current;
+        let new = old + l.velocity * dt;
+        l.current = new;
+        if (l.target - new) * (l.target - old) <= 0.0 {
+            l.current = l.target;
+            l.velocity = f32::MAX;
+        }
+    }
+    state.blink_layers.retain(|l| !(l.current == 1.0 && l.target == 1.0));
+}
+
+/// Advance bends; end those past their duration. A bend's clock is
+/// `m_fBendTimePowerRealTimeSeconds` (0x009E9E80): real time scaled by the world dilation of
+/// the channels flagged `m_bAffectsBendTimePower`, which Blink's is and Bend Time's own is not
+/// (0x009FCBC0): the caster's Blink slows its own Bend Time clock.
 pub fn step_time_bends(state: &mut WorldState, dt: f32, events: &mut Vec<SimEvent>) {
     for b in state.time_bends.iter_mut() {
-        b.elapsed += dt;
+        let k: f32 = state.blink_layers.iter().filter(|l| l.caster == b.caster).map(|l| l.current).product();
+        b.elapsed += dt * k;
     }
     let ended: Vec<PlayerId> = state.time_bends.iter().filter(|b| b.elapsed > b.duration).map(|b| b.caster).collect();
     state.time_bends.retain(|b| b.elapsed <= b.duration);
@@ -346,39 +414,78 @@ pub enum PossessTarget {
     SwarmRat(u32),
 }
 
-/// Possession target including swarm rats (same cone and range as [`possess_target`]).
+/// Field of view the targeting cone and score use (`DishonoredPlayerCamera.m_fCurFOV`, degrees):
+/// the default horizontal FOV, the sim's fixed reference view (as for the gun dispersion).
+pub const POSSESS_REF_FOV_DEG: f32 = crate::left_hand::DISPERSION_REF_HFOV_DEG;
+
+/// Possession's targeting geometry for `p` (0x00BFB090 / 0x00BF8E20): the eye, the view, the
+/// range `m_fPossessRange x (1 + Attribute_SpellStrength)` (at least 1), the cone half-angle
+/// `m_fMaxAngleFOVFraction x FOV` and the score's angle normaliser, the FOV (at least 0.1 rad).
+struct PossessAim {
+    eye: Vec3,
+    dir: Vec3,
+    range: f32,
+    cone: f32,
+    fov: f32,
+}
+
+fn possess_aim(p: &PlayerState, cfg: &GameplayConfig) -> PossessAim {
+    let pc = &cfg.items.possess;
+    let level = (p.inv.power_levels[power::POSSESSION] as usize).clamp(1, 2);
+    let strength = attribute(p, cfg, "Attribute_SpellStrength", 0.0);
+    let fov = POSSESS_REF_FOV_DEG.to_radians();
+    PossessAim {
+        eye: eye_position(p, &cfg.movement),
+        dir: view_vector(p.yaw, p.pitch),
+        range: (pc.range[level - 1] * (1.0 + strength)).max(1.0),
+        cone: pc.max_angle_fov_fraction * fov,
+        fov: fov.max(0.1),
+    }
+}
+
+impl PossessAim {
+    /// The candidate's score (higher wins, 0x00BFCAF0): `m_fAngleWeight x (fov - angle) / fov +
+    /// m_fDistanceWeight x (range - d) / range + m_TargetingPriorityWeights[priority]`; None when
+    /// it is out of range or outside the cone.
+    fn score(&self, to: Vec3, priority: u8, cfg: &GameplayConfig) -> Option<f32> {
+        let pc = &cfg.items.possess;
+        let d = to.length();
+        if d > self.range || d < 1.0 {
+            return None;
+        }
+        let ang = (to.dot(self.dir) / d).clamp(-1.0, 1.0).acos();
+        if ang > self.cone {
+            return None;
+        }
+        let prio = pc.priority_weights.get(priority as usize).copied().unwrap_or(0.0);
+        Some(pc.angle_weight * (self.fov - ang) / self.fov + pc.distance_weight * (self.range - d) / self.range + prio)
+    }
+}
+
+/// Possession target including swarm rats: one candidate list, the highest score wins.
 pub fn possess_target_any(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: &GameplayConfig) -> Option<PossessTarget> {
-    if let Some(id) = possess_target(state, p, world, cfg) {
-        return Some(PossessTarget::Pawn(id));
-    }
+    let pawn = possess_target_scored(state, p, world, cfg);
     let level = p.inv.power_levels[power::POSSESSION] as usize;
+    let mut best = pawn.map(|(id, s)| (PossessTarget::Pawn(id), s));
     if level < cfg.items.possess.rat.required_level as usize {
-        return None;
+        return best.map(|b| b.0);
     }
-    let range = cfg.items.possess.range[level.clamp(1, 2) - 1];
-    let eye = eye_position(p, &cfg.movement);
-    let dir = view_vector(p.yaw, p.pitch);
-    let max_angle = 0.3 * 90.0_f32;
-    let mut best: Option<(u32, f32)> = None;
+    let aim = possess_aim(p, cfg);
     for s in &state.swarms {
         if s.spawn_delay > 0.0 || s.rats == 0 {
             continue;
         }
-        let to = s.position - eye;
+        let to = s.position - aim.eye;
+        let Some(score) = aim.score(to, cfg.items.possess.rat.targeting_priority, cfg) else { continue };
         let d = to.length();
-        if d > range || d < 1.0 {
+        if world.raycast(aim.eye, to, d, channel::MELEE).is_some_and(|h| h.distance < d - 20.0) {
             continue;
         }
-        let ang = (to.dot(dir) / d).clamp(-1.0, 1.0).acos().to_degrees();
-        if ang > max_angle || world.raycast(eye, to, d, channel::MELEE).is_some_and(|h| h.distance < d - 20.0) {
-            continue;
-        }
-        let score = d / range + 10.0 * ang / max_angle;
-        if best.is_none_or(|(_, b)| score < b) {
-            best = Some((s.id, score));
+        if best.is_none_or(|(_, b)| score > b) {
+            best = Some((PossessTarget::SwarmRat(s.id), score));
         }
     }
-    best.map(|b| PossessTarget::SwarmRat(b.0))
+    best.map(|b| b.0)
 }
 
 /// Pawn id given to a rat taken out of a swarm.
@@ -390,39 +497,32 @@ pub fn swarm_rat_id(state: &WorldState) -> PlayerId {
     id
 }
 
-/// Possession target under the crosshair (targeting stage, `FUN_00bfcec0`): within the level's
-/// `m_fPossessRange`, inside `m_fMaxAngleFOVFraction` of a 90-degree field of view, visible;
-/// scored by `m_fDistanceWeight * d/range + m_fAngleWeight * angle/max` (LIKELY weighting).
+/// Possession target under the crosshair (targeting stage, 0x00BFCEC0 -> 0x00BFCAF0): the
+/// candidates within range and inside the cone (0x00BF8E20), visible, with the highest
+/// [`PossessAim::score`]. The original tests the host's sample points and keeps the nearest
+/// distance and smallest angle; the sim uses the pawn's centre.
 pub fn possess_target(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: &GameplayConfig) -> Option<PlayerId> {
-    let pc = &cfg.items.possess;
-    let level = (p.inv.power_levels[power::POSSESSION] as usize).clamp(1, 2);
-    let range = pc.range[level - 1];
-    let eye = eye_position(p, &cfg.movement);
-    let dir = view_vector(p.yaw, p.pitch);
-    let max_angle = 0.3 * 90.0_f32;
+    possess_target_scored(state, p, world, cfg).map(|b| b.0)
+}
+
+fn possess_target_scored(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: &GameplayConfig) -> Option<(PlayerId, f32)> {
+    let aim = possess_aim(p, cfg);
     let mut best: Option<(PlayerId, f32)> = None;
     for t in &state.players {
         if !can_possess(p, t, cfg) {
             continue;
         }
-        let to = t.position - eye;
+        let to = t.position - aim.eye;
+        let Some(score) = aim.score(to, possessable(t, cfg).targeting_priority, cfg) else { continue };
         let d = to.length();
-        if d > range || d < 1.0 {
+        if world.raycast(aim.eye, to, d, channel::MELEE).is_some_and(|h| h.distance < d - cfg.movement.collision_radius) {
             continue;
         }
-        let ang = (to.dot(dir) / d).clamp(-1.0, 1.0).acos().to_degrees();
-        if ang > max_angle {
-            continue;
-        }
-        if world.raycast(eye, to, d, channel::MELEE).is_some_and(|h| h.distance < d - cfg.movement.collision_radius) {
-            continue;
-        }
-        let score = d / range + 10.0 * ang / max_angle;
-        if best.is_none_or(|(_, s)| score < s) {
+        if best.is_none_or(|(_, s)| score > s) {
             best = Some((t.id, score));
         }
     }
-    best.map(|b| b.0)
+    best
 }
 
 /// Begin possessing `host`: the possessor travels into it over `m_IntroDuration`.
@@ -471,6 +571,15 @@ pub fn step_possession(state: &mut WorldState, who: usize, ctx: &MoveCtx, cfg: &
                 let h = state.player_mut(host.id).unwrap();
                 h.condition = Condition::Possessed;
                 h.condition_by = Some(p.id);
+                // The possessor's running Bend Time gets `m_fBendTimeExtension` more (0x00BFB6C0 ->
+                // 0x00BFA120) unless it is already within `m_fPostEffectCooldownTime` of its end.
+                let ext = cfg.items.possess.bend_time_extension[level - 1];
+                if let Some(b) = state.time_bends.iter_mut().find(|b| b.caster == p.id) {
+                    let post = cfg.items.bend_time.levels[b.level as usize].post_effect_cooldown;
+                    if b.elapsed < b.duration - post {
+                        b.duration += ext;
+                    }
+                }
                 events.push(SimEvent::PossessStart { id: p.id, host: host.id });
             }
         }

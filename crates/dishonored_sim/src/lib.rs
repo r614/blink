@@ -143,6 +143,10 @@ pub fn step_world(
         let ctx = MoveCtx { world, cfg: &mvc, dt };
         if !p0.alive || p0.incapacitated() {
             let p = &mut state.players[i];
+            // The Blink component still ticks (a dead caster deactivates it, 0x00BFC5D0).
+            let mut acts = Vec::new();
+            blink::tick_cooldown(p, dt, &g.blink, &mut acts);
+            actions.extend(acts.into_iter().map(|a| (i, a)));
             if p.alive && p.condition == state::Condition::BeingChoked {
                 p.velocity = Vec3::ZERO;
             } else if p.carried_by.is_none() {
@@ -236,7 +240,7 @@ pub fn step_world(
         let air_max = swim::air_capacity(&mvc.water, breath);
         let drowning = p0.water.under && air_max > 0.0 && p0.water.air_used >= air_max - 1e-6;
         vitals::tick_with(p, &powers::effective_vitals(&p0, g), dt, !drowning);
-        left_hand::tick_dark_vision(p, dt, &mut out.events);
+        left_hand::tick_dark_vision(p, dt, cfg.tuning.dark_vision_combat_timer, &mut out.events);
         adrenaline::tick(p, g, dt);
         swim::step_breath(p, world, &mvc, breath, 0.0, dt, &mut out.events);
         p.rat_slow = (p.rat_slow - dt).max(0.0);
@@ -261,6 +265,7 @@ pub fn step_world(
             }
             left_hand::LeftAction::Swarm => powers::summon_swarm(state, id, world, g, &mut out.events),
             left_hand::LeftAction::PlaceTrap => gadgets::place_trap(state, id, world, g, &mut out.events),
+            left_hand::LeftAction::BlinkLayer { target, blend } => powers::set_blink_layer(state, id, target, blend),
             left_hand::LeftAction::PossessRelease => {
                 let p = state.players[i];
                 if let Some(target) = powers::possess_target_any(state, &p, world, g) {
@@ -314,6 +319,7 @@ pub fn step_world(
 
     for e in &out.events {
         if let SimEvent::WindblastCast { id } = e {
+            let (level, range) = state.player(*id).map_or((1, cfg.tuning.windblast_distance[1]), |p| left_hand::windblast_params(p, g, &cfg.tuning));
             state.windblasts.push(state::WindblastState {
                 caster: *id,
                 warmup: left_hand::WINDBLAST_WARMUP,
@@ -322,9 +328,13 @@ pub fn step_world(
                 direction: Vec3::X,
                 targets: Vec::new(),
                 started: false,
+                level,
+                range,
             });
         }
     }
+    // A Windblasted NPC hitting a wall (its rigid-body collision, 0x00B529C0).
+    left_hand::windblast_wall_hits(state, &cfg.tuning, &g.vitals, &mut out.events);
     let world_dt = DT * powers::world_time_scale(state, g, false);
     let proj_dt = DT * powers::world_time_scale(state, g, true);
     if world_dt > 0.0 {
@@ -342,6 +352,7 @@ pub fn step_world(
         powers::step_swarms(state, world_dt, g, &mut out.events);
     }
     powers::step_time_bends(state, DT, &mut out.events);
+    powers::step_blink_layers(state, DT);
     inventory::update_carried(state, mv);
 
     volumes::step_pain(state, world, cfg, &mut out.events);
@@ -370,6 +381,12 @@ pub fn step_world(
                 }
             }
             SimEvent::Damage { victim, attacker, amount, cause } => {
+                // Other damage replaces the last hit's instigator and type.
+                if cause != DamageCause::Windblast {
+                    if let Some(p) = state.player_mut(victim) {
+                        p.windblasted_by = None;
+                    }
+                }
                 let ad = &g.adrenaline;
                 if let Some(a) = attacker.filter(|a| *a != victim) {
                     let gain = match cause {

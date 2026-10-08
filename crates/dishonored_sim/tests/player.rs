@@ -506,3 +506,165 @@ fn outside_pain_volume_no_damage() {
     r.steps(200, &[]);
     assert_eq!(r.p(1).vitals.health, h0);
 }
+
+/// Blink's lock-out (0x00BE71F0 / 0x00BED480): a second Blink right after the first move is
+/// refused until `m_fCooldownTime` after the move ends; with less mana than the cost the power
+/// never aims. The move slows the other pawns through the Blink dilation layer (0x00BFC990,
+/// 0x00BE7380) and leaves the caster at rate 1.
+#[test]
+fn blink_cooldown_no_mana_and_world_slow() {
+    let mut r = Run::new(&[(1, Vec3::new(0., 0., 92.), 0.)]);
+    spawn_npc(&mut r.state, 100, PawnKind::Civilian, 1, Vec3::new(-1500., 0., 92.), 0.0, &r.cfg);
+    r.steps(20, &[]);
+    let bl = |b| PlayerInput { buttons: b, left_hand: LeftHand::Blink, ..Default::default() };
+    let blink = |r: &mut Run| {
+        r.steps(5, &[(1, bl(buttons::SECONDARY))]);
+        r.step(&[(1, bl(0))]);
+    };
+    let starts = |r: &Run| r.events.iter().filter(|e| matches!(e, SimEvent::BlinkStart { id: 1, .. })).count();
+    blink(&mut r);
+    assert_eq!(starts(&r), 1);
+    let mut min_rate = 1.0f32;
+    for _ in 0..30 {
+        r.step(&[(1, bl(0))]);
+        min_rate = min_rate.min(r.p(100).time_scale);
+        assert_eq!(r.p(1).time_scale, 1.0, "the caster runs at 1");
+    }
+    assert!(min_rate < 0.95 && min_rate >= 0.05, "world slowed to {min_rate}");
+    // Within the cooldown: refused, nothing to fizzle.
+    blink(&mut r);
+    assert_eq!(starts(&r), 1);
+    assert!(!r.events.iter().any(|e| matches!(e, SimEvent::BlinkFizzle { .. })));
+    // After it (1 s after the move): usable again.
+    r.steps(60, &[(1, bl(0))]);
+    blink(&mut r);
+    assert_eq!(starts(&r), 2);
+    // The layer returns to 1 (the cooldown's end blends it again from where it is).
+    r.steps(60 * 6, &[(1, bl(0))]);
+    assert!(r.state.blink_layers.is_empty());
+    assert_eq!(r.p(100).time_scale, 1.0);
+    // No mana: no aim at all.
+    r.pm(1).vitals.mana = 10.0;
+    r.steps(5, &[(1, bl(buttons::SECONDARY))]);
+    assert!(r.p(1).left.blink_target.is_none());
+}
+
+/// The dilation helper (0x009FA0D0) and the layer step (0x009FCBC0): a non-zero target below
+/// 0.05 is raised to 0.05; linear blend; the layer lands on its target.
+#[test]
+fn blink_layer_blends_linearly_to_its_clamped_target() {
+    let mut s = WorldState::default();
+    powers::set_blink_layer(&mut s, 7, 0.01, 0.9);
+    let l = s.blink_layers[0];
+    assert_eq!(l.target, 0.05);
+    assert!((l.velocity - (0.05 - 1.0) / 0.9).abs() < 1e-6);
+    for _ in 0..16 {
+        powers::step_blink_layers(&mut s, 1.0 / 60.0);
+    }
+    assert!((s.blink_layers[0].current - (1.0 - 0.95 * 16.0 / 60.0 / 0.9)).abs() < 1e-4);
+    powers::set_blink_layer(&mut s, 7, 1.0, 2.5);
+    for _ in 0..(60 * 3) {
+        powers::step_blink_layers(&mut s, 1.0 / 60.0);
+    }
+    assert!(s.blink_layers.is_empty());
+}
+
+/// SetPowerLevel (0x00ACE270): Vitality 1 raises HealthMax by 20 and health with it; 1 -> 2 keeps
+/// the maximum and gives nothing.
+#[test]
+fn vitality_raises_current_health_with_the_maximum() {
+    let mut r = Run::new(&[(1, Vec3::new(0., 0., 92.), 0.)]);
+    let g = r.cfg.gameplay.clone();
+    r.pm(1).vitals.health = 50.0;
+    r.pm(1).inv.runes = 20;
+    let max0 = powers::health_max(r.p(1), &g);
+    assert!(powers::buy_power(r.pm(1), power::VITALITY, &g));
+    let gain = powers::health_max(r.p(1), &g) - max0;
+    assert!(gain > 0.0);
+    assert_eq!(r.p(1).vitals.health, 50.0 + gain);
+    assert!(powers::buy_power(r.pm(1), power::VITALITY, &g));
+    assert_eq!(r.p(1).vitals.health, 50.0 + gain);
+}
+
+/// Dark Vision in combat (0x00BF84C0): with combat opponents the effect ends
+/// `m_fDesactivateInCombatTimer` after the first such step.
+#[test]
+fn dark_vision_ends_in_combat() {
+    let mut r = Run::new(&[(1, Vec3::new(0., 0., 92.), 0.)]);
+    let dv = |b| PlayerInput { buttons: b, left_hand: LeftHand::DarkVision, ..Default::default() };
+    r.step(&[(1, dv(buttons::SECONDARY))]);
+    r.steps(30, &[(1, dv(0))]);
+    assert!(r.p(1).dark.remaining > 25.0);
+    r.pm(1).combat_opponents = 1;
+    let mut ticks = 0;
+    while r.p(1).dark.remaining > 0.0 && ticks < 200 {
+        r.step(&[(1, dv(0))]);
+        ticks += 1;
+    }
+    let t = r.cfg.tuning.dark_vision_combat_timer;
+    assert!((ticks as f32 / 60.0 - t).abs() <= 2.0 / 60.0, "ended after {ticks} ticks");
+}
+
+/// Possession during Bend Time extends it by `m_fBendTimeExtension` (0x00BFB6C0 -> 0x00BFA120).
+#[test]
+fn possession_extends_a_running_bend_time() {
+    let mut r = Run::new(&[(1, Vec3::new(0., 0., 92.), 0.)]);
+    spawn_npc(&mut r.state, 100, PawnKind::Guard, 1, Vec3::new(400., 0., 92.), 180.0, &r.cfg);
+    r.steps(20, &[]);
+    r.pm(1).inv.power_levels[power::BEND_TIME] = 2;
+    r.pm(1).inv.power_levels[power::POSSESSION] = 2;
+    let g = r.cfg.gameplay.clone();
+    let mut ev = Vec::new();
+    powers::start_bend_time(&mut r.state, 1, &g, &mut ev);
+    let d0 = r.state.time_bends[0].duration;
+    let host = powers::possess_target(&r.state, r.p(1), &r.world, &g);
+    assert_eq!(host, Some(100));
+    powers::begin_possession(&mut r.state, 1, 100, &g);
+    r.steps(90, &[]);
+    assert_eq!(r.p(1).possess.stage, PossessStage::Active);
+    assert_eq!(r.state.time_bends[0].duration, d0 + g.items.possess.bend_time_extension[1]);
+}
+
+/// A level 2 Windblast throws an NPC into a wall: `m_HitWallAdditionalDamage` from the blaster
+/// (0x00B529C0); at level 1 the wall does nothing.
+#[test]
+fn windblast_level_2_wall_hit_damages_the_thrown_npc() {
+    let walled = || {
+        let mut tris = Vec::new();
+        let mut quad = |a: Vec3, b: Vec3, c: Vec3, d: Vec3| {
+            for (x, y, z) in [(a, b, c), (a, c, d)] {
+                let n = (y - x).cross(z - x).normalize();
+                tris.push(Tri { a: x, b: y, c: z, n, channels: channel::ALL, source: 0 });
+            }
+        };
+        quad(Vec3::new(-5000., -5000., 0.), Vec3::new(5000., -5000., 0.), Vec3::new(5000., 5000., 0.), Vec3::new(-5000., 5000., 0.));
+        // A wall facing -x at x = 700.
+        quad(Vec3::new(700., -5000., 0.), Vec3::new(700., -5000., 2000.), Vec3::new(700., 5000., 2000.), Vec3::new(700., 5000., 0.));
+        CollisionWorld::from_triangles(tris, vec!["fixture".into()])
+    };
+    for level in [1u8, 2] {
+        let mut r = Run::new(&[(1, Vec3::new(0., 0., 92.), 0.)]);
+        r.world = walled();
+        spawn_npc(&mut r.state, 100, PawnKind::Guard, 1, Vec3::new(200., 0., 92.), 180.0, &r.cfg);
+        r.steps(20, &[]);
+        r.pm(1).inv.power_levels[power::WINDBLAST] = level;
+        let wb = |b| PlayerInput { buttons: b, left_hand: LeftHand::Windblast, ..Default::default() };
+        r.step(&[(1, wb(buttons::SECONDARY))]);
+        r.steps(90, &[(1, wb(0))]);
+        let wall: Vec<f32> = r
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                SimEvent::Damage { victim: 100, amount, cause: DamageCause::Windblast, .. } => Some(*amount),
+                _ => None,
+            })
+            .collect();
+        let blast = r.cfg.tuning.windblast_damage[level as usize - 1];
+        assert!(wall[0] <= blast, "blast {wall:?}");
+        if level == 2 {
+            assert_eq!(wall.get(1).copied(), Some(r.cfg.tuning.windblast_wall_damage), "level 2: {wall:?}");
+        } else {
+            assert_eq!(wall.len(), 1, "level 1: {wall:?}");
+        }
+    }
+}

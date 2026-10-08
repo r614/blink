@@ -971,6 +971,11 @@ pub(crate) fn falling(p: &mut PlayerState, input: &PlayerInput, can_move: bool, 
                 return;
             }
             hit_wall = true;
+            // A blasted NPC's wall contact (normal, speed before it) for the Windblast wall rule
+            // (`left_hand::windblast_wall_hits`).
+            if p.windblasted_by.is_some() && p.wall_hit.is_none() {
+                p.wall_hit = Some((n, v.length()));
+            }
             // ComputeSlideVector (slot 290): slide, never rising faster than the original move.
             let mut delta = (adjusted - n * adjusted.dot(n)) * (1.0 - t);
             if delta.z > 0.0 {

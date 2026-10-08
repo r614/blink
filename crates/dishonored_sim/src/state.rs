@@ -299,6 +299,19 @@ pub struct PlayerState {
     /// with it drawn (nothing sheathes it yet); scenario setups set it.
     #[serde(default)]
     pub sword_sheathed: bool,
+    /// Hook written by the AI each tick: the number of NPCs in this pawn's skirmish (brains in
+    /// combat against it; `DisGlobalCombatManager.m_TargetToSkirmishMap[pawn].m_Combatants`, read
+    /// by 0x00C5AF60). Dark Vision ends in combat (0x00BF84C0). 0 when no AI sets it.
+    #[serde(default)]
+    pub combat_opponents: u8,
+    /// The pawn was last hit by this pawn's Windblast and has not landed since: the NPC rigid-body
+    /// collision (0x00B529C0) tests the last damage's instigator and type.
+    #[serde(default)]
+    pub windblasted_by: Option<PlayerId>,
+    /// Set by the falling move when it hit a wall this tick: (normal, speed before the hit).
+    /// Transient, read by `step_world` the same tick.
+    #[serde(skip)]
+    pub wall_hit: Option<(Vec3, f32)>,
 }
 
 /// The attack group on a pawn: seconds under attack (`m_fInitialDelayBeforeDealingDamage`) and
@@ -381,6 +394,9 @@ pub struct DarkVisionState {
     pub cooldown: f32,
     /// Level used (1 or 2) for the reveal distance.
     pub level: u8,
+    /// `m_fCombatTimer` (+0xB0): countdown from `m_fDesactivateInCombatTimer` while in combat.
+    #[serde(default)]
+    pub combat_timer: f32,
 }
 
 /// Power and charm progression indices (`DishonoredPowersComponent`): level 0 = not owned.
@@ -513,6 +529,16 @@ pub struct BlinkTravel {
     /// `m_fTimeToNextBlink`.
     pub step_timer: f32,
     pub steps: u16,
+    /// `m_bActive` (+0xA0 bit 0): set when aiming starts (0x00BFAAA0), cleared when the
+    /// cooldown after the move or cancel ends (0x00BE9180). The power cannot start while set.
+    #[serde(default)]
+    pub active: bool,
+    /// `m_BlinkMode` 2 / 3: the move ended or was cancelled; the cooldown runs.
+    #[serde(default)]
+    pub cooling: bool,
+    /// `m_fCooldownTimer` (+0x138): seconds of cooldown, zeroed when aiming starts.
+    #[serde(default)]
+    pub cooldown_timer: f32,
 }
 
 impl PlayerState {
@@ -580,6 +606,9 @@ impl PlayerState {
             free_spell_chance: 0.0,
             rng: id.wrapping_mul(0x9E37_79B9) | 1,
             sword_sheathed: false,
+            combat_opponents: 0,
+            windblasted_by: None,
+            wall_hit: None,
         }
     }
 
@@ -688,6 +717,23 @@ pub struct WorldState {
     pub swarms: Vec<SwarmState>,
     #[serde(default)]
     pub next_entity_id: u32,
+    /// Blink's time-dilation layers (`BTC_BlinkPower` channel of the dilation helper), one per
+    /// caster while it differs from 1.
+    #[serde(default)]
+    pub blink_layers: Vec<DilationLayer>,
+}
+
+/// The world-rate part of one `BendTimeChannelInfo` (`DishonoredGameInfo.m_BendTimeInfo`,
+/// +0x4CC + channel x 0x40): `m_fCurrentWorldTimeDilation`, `m_fTargetWorldTimeDilation`,
+/// `m_fWorldTimeDilationVelocity`, set by the helper 0x009FA0D0 and advanced in real time by the
+/// GameInfo tick 0x009FCBC0.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DilationLayer {
+    pub caster: PlayerId,
+    pub current: f32,
+    pub target: f32,
+    /// Units per second toward `target`; `f32::MAX` = reach it at once (blend time 0).
+    pub velocity: f32,
 }
 
 /// The world parts added with inventory, gadgets and powers, replicated as one block in
@@ -700,6 +746,8 @@ pub struct WorldExtras {
     pub time_bends: Vec<TimeBendState>,
     pub swarms: Vec<SwarmState>,
     pub next_entity_id: u32,
+    #[serde(default)]
+    pub blink_layers: Vec<DilationLayer>,
 }
 
 impl WorldState {
@@ -711,6 +759,7 @@ impl WorldState {
             time_bends: self.time_bends.clone(),
             swarms: self.swarms.clone(),
             next_entity_id: self.next_entity_id,
+            blink_layers: self.blink_layers.clone(),
         }
     }
     pub fn set_extras(&mut self, e: WorldExtras) {
@@ -720,6 +769,7 @@ impl WorldState {
         self.time_bends = e.time_bends;
         self.swarms = e.swarms;
         self.next_entity_id = e.next_entity_id;
+        self.blink_layers = e.blink_layers;
     }
 }
 
@@ -816,6 +866,16 @@ pub struct WindblastState {
     /// `m_ActorsToBlast` still to be reached.
     pub targets: Vec<PlayerId>,
     pub started: bool,
+    /// The caster's Windblast level, 0-based (`m_CurrentLevel - 1`): selects `m_Levels[level]`.
+    #[serde(default = "wb_level")]
+    pub level: u8,
+    /// `m_Distance x (1 + Attribute_SpellStrength)`: the gather radius and the front's cap.
+    #[serde(default)]
+    pub range: f32,
+}
+
+fn wb_level() -> u8 {
+    1
 }
 
 impl WorldState {

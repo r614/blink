@@ -195,6 +195,9 @@ pub enum LeftAction {
     PossessEnd,
     /// `DisNotify_PlaceSpringRazor`.
     PlaceTrap,
+    /// Blink asks its time-dilation layer (`BTC_BlinkPower`) for a world rate over a blend
+    /// time (0x009FA0D0 from 0x00BFC990 / 0x00BE7380).
+    BlinkLayer { target: f32, blend: f32 },
 }
 
 /// Per-player left-hand update. Spawned projectiles are pushed to `spawn`, world effects to
@@ -212,17 +215,21 @@ pub fn update(
     events: &mut Vec<SimEvent>,
 ) {
     let dt = ctx.dt;
+    // The Blink component ticks whatever the left hand holds (its cooldown, 0x00BFC5D0).
+    blink::tick_cooldown(p, dt, &cfg.blink, actions);
     if !p.alive || p.incapacitated() {
         return;
     }
     // A Blink move in progress finishes whatever the left hand selects.
     if p.mode == MoveMode::Blinking {
-        blink::update(p, false, false, ctx, &cfg.blink, &cfg.vitals, events);
+        blink::update(p, false, false, false, ctx, &cfg.blink, &cfg.vitals, actions, events);
         return;
     }
     let casting = p.left.phase == LeftPhase::Recovering && is_cast(p.left.item);
     // Item switch (not in the middle of a power cast or gadget throw).
     if input.left_hand != p.left.item && !casting {
+        // Deselecting Blink while aiming cancels it (the cooldown follows).
+        blink::cancel(p, &cfg.blink, actions);
         p.left.item = input.left_hand;
         p.left.blink_target = None;
         p.left.phase = if input.left_hand.is_crossbow() || input.left_hand == LeftHand::Pistol { LeftPhase::Equipping } else { LeftPhase::Idle };
@@ -369,14 +376,14 @@ pub fn update(
         }
         LeftHand::Blink => {
             if p.mode == MoveMode::Blinking {
-                blink::update(p, false, false, ctx, &cfg.blink, &cfg.vitals, events);
+                blink::update(p, false, false, false, ctx, &cfg.blink, &cfg.vitals, actions, events);
             } else if !busy {
-                blink::update(p, held, released, ctx, &cfg.blink, &cfg.vitals, events);
+                blink::update(p, pressed, held, released, ctx, &cfg.blink, &cfg.vitals, actions, events);
             }
         }
         LeftHand::Windblast => {
             match p.left.phase {
-                LeftPhase::Recovering if p.left.timer >= windblast_lockout(t) => p.left.phase = LeftPhase::Idle,
+                LeftPhase::Recovering if p.left.timer >= windblast_lockout(p, cfg, t) => p.left.phase = LeftPhase::Idle,
                 LeftPhase::Idle if pressed && !busy => {
                     if spend_mana(p, t.windblast_cost, &cfg.vitals) {
                         p.left.phase = LeftPhase::Recovering;
@@ -512,7 +519,12 @@ pub fn use_dark_vision(p: &mut PlayerState, cfg: &GameplayConfig, t: &CombatTuni
 
 /// Dark Vision tick (slot +0x13C, 0x00BFBC90): the cooldown runs down; the step is spent on the
 /// fade-in first, the rest on the duration, then on the fade-out.
-pub fn tick_dark_vision(p: &mut PlayerState, dt: f32, events: &mut Vec<SimEvent>) {
+///
+/// The duration step (0x00BF9AB0) first runs the combat check (0x00BF84C0): while the pawn has
+/// combat opponents (its skirmish's combatant count, 0x00C5AF60, at least 1) `m_fCombatTimer`
+/// is set to `m_fDesactivateInCombatTimer` on the first such step and counted down on the next
+/// ones; when it reaches zero the remaining duration is zeroed. Out of combat it is reset to 0.
+pub fn tick_dark_vision(p: &mut PlayerState, dt: f32, combat_timer: f32, events: &mut Vec<SimEvent>) {
     p.dark.cooldown -= dt;
     if !dark_vision_active(p) {
         p.vitals.dark_vision_remaining = 0.0;
@@ -523,6 +535,19 @@ pub fn tick_dark_vision(p: &mut PlayerState, dt: f32, events: &mut Vec<SimEvent>
         let used = left.min(p.dark.fade_in);
         p.dark.fade_in -= used;
         left -= used;
+    }
+    if left > 0.0 && p.dark.remaining > 0.0 {
+        if p.combat_opponents < 1 {
+            p.dark.combat_timer = 0.0;
+        } else if p.dark.combat_timer <= 0.0 {
+            p.dark.combat_timer = combat_timer;
+        } else {
+            p.dark.combat_timer -= left;
+            if p.dark.combat_timer <= 0.0 {
+                p.dark.remaining = 0.0;
+                events.push(SimEvent::DarkVision { id: p.id, active: false });
+            }
+        }
     }
     if left > 0.0 && p.dark.remaining > 0.0 {
         let used = left.min(p.dark.remaining);
@@ -549,9 +574,19 @@ fn is_cast(item: LeftHand) -> bool {
 pub const WINDBLAST_WARMUP: f32 = 0.1;
 pub const WINDBLAST_COOLDOWN: f32 = 1.0;
 
+/// The caster's Windblast level index (`m_CurrentLevel - 1`, 0x00BF6780 / 0x00BF7090 read
+/// `m_Levels[m_CurrentLevel - 1]`) and its range `m_Distance x (1 + Attribute_SpellStrength)`
+/// (the gather radius and the front's cap).
+pub fn windblast_params(p: &PlayerState, cfg: &GameplayConfig, t: &CombatTuning) -> (u8, f32) {
+    let level = p.inv.power_levels[power::WINDBLAST].clamp(1, 2) - 1;
+    let strength = crate::powers::attribute(p, cfg, "Attribute_SpellStrength", 0.0);
+    (level, (strength + 1.0) * t.windblast_distance[level as usize])
+}
+
 /// Seconds from the cast until Windblast can be cast again (warmup, front travel, cooldown).
-pub fn windblast_lockout(t: &CombatTuning) -> f32 {
-    WINDBLAST_WARMUP + t.windblast_distance / t.windblast_speed.max(1.0) + WINDBLAST_COOLDOWN
+pub fn windblast_lockout(p: &PlayerState, cfg: &GameplayConfig, t: &CombatTuning) -> f32 {
+    let (level, range) = windblast_params(p, cfg, t);
+    WINDBLAST_WARMUP + range / t.windblast_speed[level as usize].max(1.0) + WINDBLAST_COOLDOWN
 }
 
 /// Strength of the blast on a target (0x00BE8570): zero outside the cone (tested in the
@@ -581,9 +616,7 @@ pub fn windblast_factor(dir: Vec3, center: Vec3, origin: Vec3, range: f32, cos_h
 /// 2026-10-06 (engine hook, level aim, the damage path's momentum argument): a hit at 183 uu
 /// with k = 0.879 received (2362, -227, 1317) = (2700 dir.xy k, 0.939 x 1600 x k); an earlier
 /// decode read the z as `0.15 x |impulse| x k` (407 here). Applying the momentum as a velocity
-/// change is an inference (the original only ever blasts NPCs, which ragdoll).|impulse| * k)` with `k` the
-/// blast factor. Applying the momentum as a velocity change is an inference (the original
-/// only ever blasts NPCs, which ragdoll).
+/// change is an inference (the original only ever blasts NPCs, which ragdoll).
 pub fn windblast_momentum(dir: Vec3, force: f32, up_force: f32, d: f32, range: f32, k: f32) -> Vec3 {
     let mut imp = dir * force;
     let up = (1.0 - (d / range).min(1.0)) * up_force;
@@ -603,10 +636,11 @@ pub fn step_windblasts(
     dt: f32,
     events: &mut Vec<SimEvent>,
 ) {
-    let range = t.windblast_distance;
-    let cos_half = (t.windblast_angle * 0.5).to_radians().cos();
     let mut blasts = std::mem::take(&mut state.windblasts);
     for wb in blasts.iter_mut() {
+        let lv = (wb.level as usize).min(1);
+        let range = if wb.range > 0.0 { wb.range } else { t.windblast_distance[lv] };
+        let cos_half = (t.windblast_angle[lv] * 0.5).to_radians().cos();
         if !wb.started {
             wb.warmup -= dt;
             if wb.warmup > 0.0 {
@@ -639,7 +673,7 @@ pub fn step_windblasts(
             state.projectiles.retain(|pr| windblast_factor(d, pr.position, o, range, cos_half) <= 0.0 || pr.position.distance(o) >= range);
         }
         // Front advance (0x00BF7090): reach = (elapsed + dt) * speed, capped at the range.
-        let reach = ((wb.elapsed + dt) * t.windblast_speed).min(range);
+        let reach = ((wb.elapsed + dt) * t.windblast_speed[lv]).min(range);
         let mut remaining = Vec::new();
         for &vid in &wb.targets {
             let Some(v) = state.player_mut(vid) else { continue };
@@ -665,18 +699,21 @@ pub fn step_windblasts(
             // pawn's damage path (0x00B5CCD0) hands it only to the hit reactions and clears it,
             // so players are not pushed (U-051).
             if v.kind != PawnKind::Human {
-                v.velocity += windblast_momentum(wb.direction, t.windblast_force, t.windblast_up_force, d, range, k);
+                v.velocity += windblast_momentum(wb.direction, t.windblast_force[lv], t.windblast_up_force[lv], d, range, k);
                 if matches!(v.mode, MoveMode::Walking) {
                     v.mode = MoveMode::Falling;
                     v.fall_time = 0.0;
                 }
+                // Last hit by this caster's Windblast (instigator and damage type, read by the
+                // NPC wall collision 0x00B529C0).
+                v.windblasted_by = Some(wb.caster);
             }
             // `Twk_Inv_EliteHelmet`: Windblast knocks a helmet off whatever it hits.
             v.helmet = false;
             if v.sword.phase == crate::state::SwordPhase::Blocking {
                 v.sword.phase = crate::state::SwordPhase::Idle;
             }
-            let dmg = (t.windblast_damage * k + 0.5).floor();
+            let dmg = (t.windblast_damage[lv] * k + 0.5).floor();
             apply_damage(v, dmg, Some(wb.caster), DamageCause::Windblast, events, vitals);
         }
         wb.targets = remaining;
@@ -687,6 +724,38 @@ pub fn step_windblasts(
     }
     blasts.retain(|wb| !wb.started || !wb.targets.is_empty());
     state.windblasts = blasts;
+}
+
+/// A blasted NPC hitting a wall (the NPC pawn's rigid-body collision, 0x00B529C0): when the
+/// pawn's last hit was the player's Windblast, the other side is world geometry, the contact
+/// normal is wall-like (`n.z^2 < n.x^2 + n.y^2`), the blaster's Windblast is at level 2
+/// (`m_CurrentLevel > 1`) and the pawn moves at `m_fMinSpeedToExplodeNPCs` or faster, it takes
+/// `m_HitWallAdditionalDamage` from the blaster; if that kills it, a roll at or below
+/// `m_fChanceToExplodeNPCs` explodes the body (0x00B52530, no corpse left). The original
+/// collides the ragdoll; the sim collides the falling capsule (the hit is recorded by the
+/// falling move in `PlayerState::wall_hit`). A pawn that landed is no longer "blasted".
+pub fn windblast_wall_hits(state: &mut WorldState, t: &CombatTuning, vitals: &dishonored_ir::gameplay::VitalsConfig, events: &mut Vec<SimEvent>) {
+    for i in 0..state.players.len() {
+        let hit = state.players[i].wall_hit.take();
+        let p = state.players[i];
+        let Some(by) = p.windblasted_by else { continue };
+        if p.mode != MoveMode::Falling {
+            state.players[i].windblasted_by = None;
+        }
+        let Some((n, speed)) = hit else { continue };
+        if p.kind == PawnKind::Human || !p.alive || n.z * n.z >= n.x * n.x + n.y * n.y || speed < t.windblast_wall_min_speed {
+            continue;
+        }
+        if state.player(by).is_none_or(|c| c.inv.power_levels[power::WINDBLAST] <= 1) {
+            continue;
+        }
+        let v = &mut state.players[i];
+        apply_damage(v, t.windblast_wall_damage, Some(by), DamageCause::Windblast, events, vitals);
+        if !v.alive && t.windblast_explode_chance > 0.0 && v.roll() <= t.windblast_explode_chance {
+            v.no_body = true;
+            events.push(SimEvent::BodyRemoved { body: v.id, ash: false });
+        }
+    }
 }
 
 /// Advance projectiles: sub-stepped segment tests against world and player bodies.

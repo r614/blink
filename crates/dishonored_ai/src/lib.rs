@@ -1000,6 +1000,14 @@ impl Crowd {
                 p.ai_unaware = b.unaware_of(NOISE);
             }
         }
+        // `PlayerState::combat_opponents`: the pawn's skirmish size (the `DisGlobalCombatManager`
+        // skirmish of a target holds the brains in combat against it, 0x00C5AF60); Dark Vision
+        // reads it (0x00BF84C0). LIKELY: the port's skirmish is the set of Combat brains on that
+        // target (`assign_skirmish`).
+        for p in ws.players.iter_mut() {
+            let n = self.brains.iter().filter(|b| b.state == BrainState::Combat && b.target == Some(p.id)).count();
+            p.combat_opponents = n.min(u8::MAX as usize) as u8;
+        }
     }
 
     /// Alarm bells after the brains acted (`DisAlarmBell` tick 0x00a3d0c0): a ringing bell
