@@ -69,6 +69,8 @@ pub mod level_props;
 #[doc(hidden)]
 pub mod decals;
 #[doc(hidden)]
+pub mod water;
+#[doc(hidden)]
 pub mod prop_light;
 #[doc(hidden)]
 pub mod loading_screen;
@@ -302,6 +304,7 @@ pub fn main() {
     .add_plugins(sky::SkyPlugin)
     .add_plugins(lighting::Ue3FalloffPlugin)
     .add_plugins(decals::DecalPlugin)
+    .add_plugins(water::WaterPlugin)
     .add_plugins(prop_light::PropLightPlugin)
     .add_plugins(bloom::BloomPlugin)
     .add_plugins(env_map::EnvMapOncePlugin)

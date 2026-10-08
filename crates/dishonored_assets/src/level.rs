@@ -139,7 +139,7 @@ struct Importer<'a> {
 }
 
 /// Single-channel static component masks kept in `MaterialParams::mask_channels`.
-const MASK_CHANNELS: &[&str] = &["C_Cubemap_Mask_Channel", "O_Opacity_Mask_Channel", "S_Specular_Mask_Channel", "E_Emissive_Channel", "F_Fresnel_Mask_Channel", "D2_Diffuse_Variation_mask_channel", "S2_Specular_variation_Mask_Channel"];
+const MASK_CHANNELS: &[&str] = &["C_Cubemap_Mask_Channel", "O_Opacity_Mask_Channel", "S_Specular_Mask_Channel", "E_Emissive_Channel", "F_Fresnel_Mask_Channel", "D2_Diffuse_Variation_mask_channel", "S2_Specular_variation_Mask_Channel", "D_Diffuse_Mask_Chanel", "W_Distorsion_Mask_Chanel"];
 
 const RESOURCE_CLASSES: &[&str] = &[
     "StaticMesh",
@@ -1443,6 +1443,9 @@ impl Importer<'_> {
         // (Skies_PMAT): the textures its shader samples.
         let raw: &[&str] = if chain.switch("Dist_Enable_Distortion") == Some(true) {
             &["Dist_Distortion", "O_Opacity", "UV_Distortion"]
+        } else if chain.base_material.as_deref().is_some_and(|b| b.eq_ignore_ascii_case("Materials_ref.water_materials.river_main_PMAT")) {
+            // Water (river_main_PMAT, the runtime's water.rs): the textures its base pass samples.
+            &["W_Waves_normalmap", "D_diffuse_mask", "D_diffuse_texture"]
         } else if blend == MaterialBlend::Translucent && chain.switch("C_Enable_CubemapMask") == Some(true) {
             // Translucent decals (generic_translucent_PMAT): the scene reflection's mask.
             &["C_Cubemap_Mask"]
