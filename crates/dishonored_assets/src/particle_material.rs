@@ -277,6 +277,22 @@ pub const GAMEPLAY_PARTICLES: &[&str] = &[
     "Vfx_PhysMat.Metal.Pfx_SwordImpact_Metal",
     "Vfx_PhysMat.Impact.Impact_generic",
     "Vfx_PhysMat.Impact.Impact_MetalvsMetal",
+    // Powers, gadgets and projectiles (tweaks: Possession, Devouring Swarm, Dark Vision
+    // cones, grenades, Spring Razor, trails, the crossbow muzzle; most live in Startup).
+    "Vfx_GamePlay.Possession.Possession_HandCast_01",
+    "Vfx_GamePlay.Possession.PossesTarget_Human_01",
+    "Vfx_GamePlay.Possession.PossesTarget_Rats_01",
+    "Vfx_GamePlay.RatSwarm.Ps_RSwarm_HandCast_01",
+    "Vfx_GamePlay.RatSwarm.RSwarm_Summoning_lvl1",
+    "Vfx_GamePlay.RatSwarm.RSwarm_Summoning_lvl2",
+    "Vfx_GamePlay.DarkVision.Ps_DVision_VCone_Blue_01",
+    "Vfx_GamePlay.DarkVision.Ps_DVision_Sounds_Base01",
+    "Vfx_Weapon.Effects.Grenade.ps_grenade",
+    "Vfx_Weapon.Effects.Grenade.Ps_Grenade_Trail",
+    "Vfx_Weapon.Effects.SpringRazor.Ps_SpringRazor",
+    "Vfx_Weapon.Effects.Trails.Ps_Pistol_StdTracer_01",
+    "Vfx_Weapon.Effects.Trails.StdBolt_Trail",
+    "Vfx_Weapon.Effects.Ps_CrossBowMuzzle",
     // The rest of the contact table (footfalls, landings, slides, thrown objects, creatures).
     "Vfx_PhysMat.Dirt.Ps_JumpLand_Big_DirtGravel",
     "Vfx_PhysMat.Dirt.Pfx_Thrown_Rocks",

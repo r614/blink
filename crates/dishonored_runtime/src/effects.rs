@@ -165,6 +165,10 @@ pub struct Effects {
     bolts: HashMap<u32, bool>,
     /// The Blink targeting indicator's instance and system while aiming.
     indicator: Option<(Entity, &'static str)>,
+    /// Effects that follow a live object (`attached_effects`): (kind, key) -> instance, system.
+    attached: HashMap<(u8, u32), (Entity, &'static str)>,
+    /// Spring Razor traps placed: trap id -> position (their trigger effect).
+    traps: HashMap<u32, Vec3>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -248,6 +252,7 @@ impl Plugin for EffectsPlugin {
             (
                 gameplay_effects.before(crate::audio::drive),
                 blink_indicator,
+                attached_effects,
                 // After everything that places the camera or sets its projection this frame
                 // (`simulate` culls sprite meshes against that view).
                 simulate.after(crate::players::camera_follow).after(crate::cutscene::camera).after(crate::viewmodel::apply_fov).after(crate::inspect_cam),
@@ -1226,18 +1231,53 @@ fn gameplay_effects(
             }
             SimEvent::Fired { id, bolt, projectile } => {
                 fx.bolts.insert(*projectile, *bolt);
-                if *bolt {
-                    continue;
-                }
                 let Some(p) = find(*id) else { continue };
-                // Grenade throws also report `Fired` (a projectile without a bolt): no muzzle.
-                if matches!(p.left.item, LeftHand::Grenade | LeftHand::StickyGrenade) {
-                    continue;
+                if *bolt {
+                    // The crossbow's muzzle (`Twk_Inv_Crossbow`'s fire tweak), in front of the eye.
+                    (CROSSBOW_MUZZLE.into(), p.position + Vec3::Z * 60.0 + look(&p) * 50.0, look(&p))
+                } else {
+                    // Grenade throws also report `Fired` (a projectile without a bolt): no muzzle.
+                    if matches!(p.left.item, LeftHand::Grenade | LeftHand::StickyGrenade) {
+                        continue;
+                    }
+                    let path = if Some(*id) == me { PLAYER_MUZZLE } else { PAWN_MUZZLE };
+                    // The animated pistol's socket; without one (first person), in front of the eye.
+                    let (at, dir) = sockets.muzzle.get(id).copied().filter(|m| m.0.distance(p.position) < 200.0).unwrap_or((p.position + Vec3::Z * 60.0 + look(&p) * 50.0, look(&p)));
+                    (path.into(), at, dir)
                 }
-                let path = if Some(*id) == me { PLAYER_MUZZLE } else { PAWN_MUZZLE };
-                // The animated pistol's socket; without one (first person), in front of the eye.
-                let (at, dir) = sockets.muzzle.get(id).copied().filter(|m| m.0.distance(p.position) < 200.0).unwrap_or((p.position + Vec3::Z * 60.0 + look(&p) * 50.0, look(&p)));
-                (path.into(), at, dir)
+            }
+            // Possession: the cast at the caster's hand and the possession burst on the host
+            // (`PossesTarget_Rats_01` for a rat).
+            SimEvent::PossessStart { id, host } => {
+                let (Some(p), Some(h)) = (find(*id), find(*host)) else { continue };
+                spawn_effect(&mut commands, &mut meshes, &mut fx, POSSESSION_CAST_PS, p.position + Vec3::Z * 40.0 + look(&p) * 40.0, look(&p));
+                let target = if h.kind == dishonored_sim::state::PawnKind::Rat { POSSESSION_RAT_PS } else { POSSESSION_HUMAN_PS };
+                (target.into(), h.position, Vec3::Z)
+            }
+            SimEvent::PossessEnd { host, .. } => {
+                let Some(h) = find(*host) else { continue };
+                let target = if h.kind == dishonored_sim::state::PawnKind::Rat { POSSESSION_RAT_PS } else { POSSESSION_HUMAN_PS };
+                (target.into(), h.position, Vec3::Z)
+            }
+            // Devouring Swarm: the hand cast and the summoning at the swarm's spot (level 2 has
+            // its own system).
+            SimEvent::SwarmSummoned { id, position, .. } => {
+                if let Some(p) = find(*id) {
+                    spawn_effect(&mut commands, &mut meshes, &mut fx, SWARM_CAST_PS, p.position + Vec3::Z * 40.0 + look(&p) * 40.0, look(&p));
+                }
+                let lvl = find(*id).map(|p| p.inv.power_levels[dishonored_sim::state::power::DEVOURING_SWARM]).unwrap_or(1);
+                ((if lvl >= 2 { SWARM_SUMMON2_PS } else { SWARM_SUMMON_PS }).into(), *position, Vec3::Z)
+            }
+            // Grenade / sticky grenade explosion (`DisProjectile_Grenade` explosion template).
+            SimEvent::Explosion { position, .. } => (GRENADE_EXPLOSION_PS.into(), *position, Vec3::Z),
+            // Spring Razor: the trap's burst when it springs, at the trap.
+            SimEvent::TrapPlaced { trap, position, .. } => {
+                fx.traps.insert(*trap, *position);
+                continue;
+            }
+            SimEvent::TrapTriggered { trap } => {
+                let Some(at) = fx.traps.remove(trap) else { continue };
+                (SPRING_RAZOR_PS.into(), at, Vec3::Z)
             }
             SimEvent::Damage { victim, cause, .. } => {
                 let Some(p) = find(*victim) else { continue };
@@ -1325,6 +1365,85 @@ fn blink_indicator(mut commands: Commands, mut fx: ResMut<Effects>, mut meshes: 
     let level = fx.active.clone();
     if let Some(e) = spawn_instance(&mut commands, &mut meshes, &lf, &level, si, m, false) {
         fx.indicator = Some((e, path));
+    }
+}
+
+/// Crossbow muzzle (`Startup`).
+pub const CROSSBOW_MUZZLE: &str = "Vfx_Weapon.Effects.Ps_CrossBowMuzzle";
+/// Possession: the hand cast, and the burst on a human / rat host.
+pub const POSSESSION_CAST_PS: &str = "Vfx_GamePlay.Possession.Possession_HandCast_01";
+pub const POSSESSION_HUMAN_PS: &str = "Vfx_GamePlay.Possession.PossesTarget_Human_01";
+pub const POSSESSION_RAT_PS: &str = "Vfx_GamePlay.Possession.PossesTarget_Rats_01";
+/// Devouring Swarm: the hand cast and the summoning (levels 1 / 2).
+pub const SWARM_CAST_PS: &str = "Vfx_GamePlay.RatSwarm.Ps_RSwarm_HandCast_01";
+pub const SWARM_SUMMON_PS: &str = "Vfx_GamePlay.RatSwarm.RSwarm_Summoning_lvl1";
+pub const SWARM_SUMMON2_PS: &str = "Vfx_GamePlay.RatSwarm.RSwarm_Summoning_lvl2";
+/// Grenade explosion and Spring Razor burst (`Startup`).
+pub const GRENADE_EXPLOSION_PS: &str = "Vfx_Weapon.Effects.Grenade.ps_grenade";
+pub const SPRING_RAZOR_PS: &str = "Vfx_Weapon.Effects.SpringRazor.Ps_SpringRazor";
+
+/// Projectile trails (`Twk_Proj_*` trail templates): pistol tracer, bolt trail, grenade trail.
+pub const PISTOL_TRACER_PS: &str = "Vfx_Weapon.Effects.Trails.Ps_Pistol_StdTracer_01";
+pub const BOLT_TRAIL_PS: &str = "Vfx_Weapon.Effects.Trails.StdBolt_Trail";
+pub const GRENADE_TRAIL_PS: &str = "Vfx_Weapon.Effects.Grenade.Ps_Grenade_Trail";
+/// Dark Vision's NPC vision cones (`Twk_DarkVision` / pawn `m_VisionConePatrolTemplate`).
+pub const DV_CONE_PS: &str = "Vfx_GamePlay.DarkVision.Ps_DVision_VCone_Blue_01";
+
+/// A transform whose X axis points along `dir` (UE3 effects face +X), at `at`.
+fn facing(at: Vec3, dir: Vec3) -> Mat4 {
+    let x = if dir.length_squared() > 1e-6 { dir.normalize() } else { Vec3::X };
+    let z = if x.z.abs() > 0.99 { Vec3::X } else { Vec3::Z };
+    let y = z.cross(x).normalize();
+    let z = x.cross(y);
+    Mat4::from_cols(x.extend(0.0), y.extend(0.0), z.extend(0.0), at.extend(1.0))
+}
+
+/// Effects that follow a live object, kept alive while it exists: projectile trails along the
+/// flight, and Dark Vision's vision cones on the revealed NPCs while the power is on. A trail
+/// whose projectile is gone stops spawning and fades out; a cone goes with the power.
+fn attached_effects(mut commands: Commands, mut fx: ResMut<Effects>, mut meshes: ResMut<Assets<Mesh>>, view: Option<Res<SessionView>>, mut q: Query<&mut FxInstance>) {
+    let Some(view) = view else { return };
+    let mut want: Vec<((u8, u32), &'static str, Mat4)> = Vec::new();
+    for p in &view.projectiles {
+        use dishonored_sim::state::ProjectileKind as K;
+        let path = match p.kind {
+            K::Bullet => PISTOL_TRACER_PS,
+            K::Bolt | K::SleepDart | K::IncendiaryBolt => BOLT_TRAIL_PS,
+            K::Grenade | K::StickyGrenade => GRENADE_TRAIL_PS,
+        };
+        want.push(((0, p.id), path, facing(p.position, p.velocity)));
+    }
+    if view.me.as_ref().is_some_and(|me| me.vitals.dark_vision_remaining > 0.0) {
+        for o in view.others.iter().filter(|o| o.alive && view.dark_vision_reveals.contains(&o.id) && o.kind == dishonored_sim::state::PawnKind::Human) {
+            let dir = Vec3::new(o.yaw.to_radians().cos(), o.yaw.to_radians().sin(), 0.0);
+            want.push(((1, o.id), DV_CONE_PS, facing(o.position + Vec3::Z * 60.0, dir)));
+        }
+    }
+    let gone: Vec<(u8, u32)> = fx.attached.keys().filter(|k| !want.iter().any(|w| w.0 == **k)).copied().collect();
+    for k in gone {
+        if let Some((e, _)) = fx.attached.remove(&k) {
+            match q.get_mut(e) {
+                // Trails fade out (their particles live on); cones are killed.
+                Ok(mut inst) if k.0 == 0 => inst.stop(),
+                _ => {
+                    commands.entity(e).try_despawn();
+                }
+            }
+        }
+    }
+    let Some(lf) = fx.levels.get(&fx.active).cloned() else { return };
+    let level = fx.active.clone();
+    for (k, path, m) in want {
+        if let Some((e, _)) = fx.attached.get(&k) {
+            if let Ok(mut inst) = q.get_mut(*e) {
+                inst.set_transform(m);
+                continue;
+            }
+        }
+        let Some(&si) = lf.by_path.get(&path.to_ascii_lowercase()) else { continue };
+        if let Some(e) = spawn_instance(&mut commands, &mut meshes, &lf, &level, si, m, false) {
+            fx.attached.insert(k, (e, path));
+        }
     }
 }
 
