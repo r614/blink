@@ -81,3 +81,21 @@ Per-map coverage is not computed yet (see next steps).
 3. Light environments for characters and dynamic props (`light_env` + `prop_light.wgsl`).
 4. Gameplay decals (DisDecalManager), ShadowMap1D, dominant point shadow toggle, `render_fixes.sh` entries
    (L_Pub_Night_P, L_Streetsewer_P, L_Bridge_Part1a_P for flares and functions).
+
+## Graph dumps (decoded so far)
+
+- Lens flare element (identical Size 250 for both templates, bUseSourceDistance, bNormalizeRadialDistance):
+  Candles_01_LF: Scaling table [1.3 x4]; Color table [0.5 1.9 1.9 1.5 0.5 1.9 1.5 0.5]; DistMap_Scale table
+  [0.25 3.0 0.25 0.25 0.25 3.0 3.0 3.0] (LookupTableTimeScale 1/2048); DistMap_Alpha [0.15 0.25 0.15 0.25]
+  (same time scale); ScreenPercentageMap [0 x4] (time scale 0). Material: `LensFlare_PMAT_INST` parent
+  `LensFlare_PMAT`: L_Radial_Distance_Factor 0.5, L_LensFlare_Power 10, L_Maximum_Opacity 1, L_Minimum_Opacity 0,
+  L_LensFlare_Color (1, 0.7508, 0.4548, 4.0), mask texture `tguichard_LookAt.LensFlare.Txr_LensRoot`,
+  dust `Materials_ref.Textures.clouds`. Lighthouse_01_bo.light06_LF: Color [1 5 5 4 1 5 4 1], Alpha [0.25 x4],
+  same DistMap tables, material instance `LensFlares.generic_foggy_light_01_INST`.
+  Open: the table layout. A vector table of 8 floats is not a multiple of 3, so the header/chunk layout of
+  the cooked `FRawDistribution` (LookupTableNumElements / ChunkSize / StartTime / TimeScale and the sample
+  order) is needed before the values can be used (U-lensflare-table).
+- Light functions: the cooked expression arrays of Flickering / WoodStove / Boiler keep only
+  F_Flickering_1_speed (5 / 1 / 0.5) and F_Flickering_2_speed (3 / 0.25 / default 0); Caustics keeps Speed
+  0.35 and CausticColor 0.859. The graph bodies are not recoverable from the package; they come from the
+  compiled light function shaders in RefShaderCache (not yet located).
