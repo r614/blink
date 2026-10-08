@@ -23,7 +23,7 @@ use bevy::render::render_resource::{
 };
 use bevy::render::storage::ShaderBuffer;
 use dishonored_ir::MaterialBlend as Blend;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use ue3_shader::shadercache::CookedLibrary;
 use ue3_shader::ue3prog::{self, Policy, MAX_PARAMS};
@@ -53,10 +53,30 @@ static PROGRAMS: RwLock<Vec<Handle<Shader>>> = RwLock::new(Vec::new());
 /// request from any thread (a level's worker builds its programs ahead of the spawn).
 static WGSL: Mutex<Option<HashMap<(u32, Policy, bool), Option<String>>>> = Mutex::new(None);
 
-/// Programs built so far, by (shader map, light-map policy).
+/// Depth-only programs' WGSL by (shader map, light-map policy, masked).
+static DEPTH_WGSL: Mutex<Option<HashMap<(u32, Policy, bool), Option<String>>>> = Mutex::new(None);
+
+/// Programs built so far, by (shader map, light-map policy). Programs are keyed by a hash of
+/// their WGSL text, so identical programs (many materials compile to the same shaders; the
+/// opaque depth-only programs differ only by vertex shader) share one shader and its pipelines.
 #[derive(Resource, Default)]
 pub struct Ue3Programs {
     by_key: HashMap<(u32, Policy, bool), Option<u32>>,
+    by_depth: HashMap<(u32, Policy, bool), Option<u32>>,
+    by_hash: HashMap<u64, u32>,
+    /// distinct base (colour pass) programs, and distinct depth-only programs
+    base_ids: HashSet<u32>,
+    depth_ids: HashSet<u32>,
+}
+
+/// What `Ue3Programs` has built: base program requests, distinct base programs, depth-only
+/// requests, distinct depth-only programs.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProgramStats {
+    pub programs: usize,
+    pub distinct: usize,
+    pub depth_requests: usize,
+    pub depth_variants: usize,
 }
 
 impl Ue3Programs {
@@ -66,9 +86,78 @@ impl Ue3Programs {
         if let Some(p) = self.by_key.get(&(map, policy, with_light)) {
             return *p;
         }
-        let r = build_program(map, policy, with_light, shaders);
+        let r = program_wgsl(map, policy, with_light).map(|w| self.register(w, shaders));
+        if let Some(id) = r {
+            self.base_ids.insert(id);
+        }
         self.by_key.insert((map, policy, with_light), r);
         r
+    }
+
+    /// The depth-only program (depth prepass and shadow depth) of a shader map's base pass
+    /// vertex shader: for opaque materials the position only (shared by every material with the
+    /// same vertex shader), for masked ones (`masked`) with their pixel shader's clipping.
+    pub fn get_depth(&mut self, map: u32, policy: Policy, masked: bool, shaders: &mut Assets<Shader>) -> Option<u32> {
+        if let Some(p) = self.by_depth.get(&(map, policy, masked)) {
+            return *p;
+        }
+        let r = depth_wgsl(map, policy, masked).map(|w| self.register(w, shaders));
+        if let Some(id) = r {
+            self.depth_ids.insert(id);
+        }
+        self.by_depth.insert((map, policy, masked), r);
+        r
+    }
+
+    /// The id of a program with this WGSL text (added on first sight).
+    fn register(&mut self, wgsl: String, shaders: &mut Assets<Shader>) -> u32 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        wgsl.hash(&mut h);
+        let hash = h.finish();
+        if let Some(&id) = self.by_hash.get(&hash) {
+            return id;
+        }
+        let handle = shaders.add(Shader::from_wgsl(wgsl, format!("ue3/{hash:016x}.wgsl")));
+        let mut programs = PROGRAMS.write().unwrap();
+        programs.push(handle);
+        let id = programs.len() as u32 - 1;
+        self.by_hash.insert(hash, id);
+        id
+    }
+
+    pub fn stats(&self) -> ProgramStats {
+        ProgramStats {
+            programs: self.by_key.values().filter(|p| p.is_some()).count(),
+            distinct: self.base_ids.len(),
+            depth_requests: self.by_depth.values().filter(|p| p.is_some()).count(),
+            depth_variants: self.depth_ids.len(),
+        }
+    }
+}
+
+/// The WGSL of a depth-only program (cached; None: it does not build).
+pub fn depth_wgsl(map_id: u32, policy: Policy, masked: bool) -> Option<String> {
+    if let Some(w) = DEPTH_WGSL.lock().unwrap().get_or_insert_with(HashMap::new).get(&(map_id, policy, masked)) {
+        return w.clone();
+    }
+    let w = build_depth_wgsl(map_id, policy, masked);
+    DEPTH_WGSL.lock().unwrap().get_or_insert_with(HashMap::new).insert((map_id, policy, masked), w.clone());
+    w
+}
+
+fn build_depth_wgsl(map_id: u32, policy: Policy, masked: bool) -> Option<String> {
+    let lib = library()?;
+    let map = lib.maps.get(map_id as usize)?;
+    let (vst, pst) = policy.shader_types();
+    let vs = lib.code.get(&map.shader("FLocalVertexFactory", vst)?)?;
+    let ps = if masked { Some(lib.code.get(&map.shader("FLocalVertexFactory", pst)?)?.as_slice()) } else { None };
+    match ue3prog::build_depth(map, vs, ps, ue3prog::Platform::Bevy) {
+        Ok(p) => Some(p.wgsl),
+        Err(e) => {
+            warn!("depth program {} {policy:?}: {e:#}", map.name);
+            None
+        }
     }
 }
 
@@ -131,17 +220,12 @@ fn build_wgsl(map_id: u32, policy: Policy, with_light: bool) -> Option<String> {
     Some(wgsl)
 }
 
-fn build_program(map_id: u32, policy: Policy, with_light: bool, shaders: &mut Assets<Shader>) -> Option<u32> {
-    let wgsl = program_wgsl(map_id, policy, with_light)?;
-    let handle = shaders.add(Shader::from_wgsl(wgsl, format!("ue3/{map_id}_{policy:?}.wgsl")));
-    let mut programs = PROGRAMS.write().unwrap();
-    programs.push(handle);
-    Some(programs.len() as u32 - 1)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Ue3Key {
     pub program: u32,
+    /// the depth-only program of the depth prepass and shadow passes (`u32::MAX`: none, the
+    /// program's own prepass entry points run)
+    pub depth: u32,
     /// 0 opaque, 1 masked, 2 translucent, 3 additive, 4 modulate
     pub blend: u8,
     pub two_sided: bool,
@@ -163,7 +247,7 @@ impl Ue3Key {
             Blend::Additive => 3,
             Blend::Modulate => 4,
         };
-        Ue3Key { program, blend, two_sided, foreground: false, foreground_world: false, light_pass: false }
+        Ue3Key { program, depth: u32::MAX, blend, two_sided, foreground: false, foreground_world: false, light_pass: false }
     }
 }
 
@@ -307,10 +391,13 @@ impl Material for Ue3Material {
         key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         let k = key.bind_group_data;
-        let shader = PROGRAMS.read().unwrap().get(k.program as usize).cloned();
+        let prepass = descriptor.vertex.shader_defs.iter().any(|d| matches!(d, bevy::shader::ShaderDefVal::Bool(n, true) if n == "PREPASS_PIPELINE"));
+        // The depth prepass and the shadow passes run UE3's depth-only shaders: the base pass
+        // vertex shader's position alone (opaque, shared), plus the clipping for masked ones.
+        let id = if prepass && k.depth != u32::MAX { k.depth } else { k.program };
+        let shader = PROGRAMS.read().unwrap().get(id as usize).cloned();
         // materials are only created once their program is registered
         let Some(shader) = shader else { return Ok(()) };
-        let prepass = descriptor.vertex.shader_defs.iter().any(|d| matches!(d, bevy::shader::ShaderDefVal::Bool(n, true) if n == "PREPASS_PIPELINE"));
         if k.foreground || k.foreground_world {
             descriptor.vertex.shader_defs.push("UE_FOREGROUND".into());
         }
