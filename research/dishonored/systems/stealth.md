@@ -473,3 +473,28 @@ The hook captured the player's stealth light environment (ORACLE.md "Stealth lig
 * **Per light** the port's intensities match the capture to about 1 % (Boyle: spot 70 0.444 / 0.446, spot 156 0.090, spot 168 0.0165, point 46 0.0034; the light volume 0.27 of 0.97).
 
 Result: `stealth/light_probe_lane` passes on raw light at all 11 points. The new `stealth/light_probe_boyle` (two captured Boyle points, raw and normalized) passes. Cache keys: `<map>.ailevel6.json`, Playground DERIVED_VERSION 5.
+
+(The layout-map flag `stealth_light_unoccluded` of this section is replaced by the decoded rule of section 15.)
+
+### 15. The stealth light's line check: which primitives it meets, 2026-10-08
+
+Section 14 inferred "the trace ignores the Playground's InterpActor cubes" from a capture and carried a layout-map flag. The rule is now decoded and the flag is gone.
+
+**Flags 0x2397** (bit meanings of `UWorld::MultiLineCheck` 0x0064A860 and COLLISION.md): `TRACE_Pawns` 0x1, `TRACE_Movers` 0x2, `TRACE_Level` 0x4 (the world BSP, 0x00646500), `TRACE_Others` 0x10, `TRACE_LevelGeometry` 0x80, `TRACE_ShadowCast` 0x100, `TRACE_StopAtAnyHit` 0x200, `TRACE_Terrain` 0x2000. No `TRACE_Blocking` (0x40), none of the gameplay / movement bits (0xF000000, 0x30000000), no complex bit (0x20000). `SingleLineCheck` (0x0064E7A0) adds `TRACE_SingleResult` and passes the player as source actor and the light as source light.
+
+**The octree's line check (0x006B12C0, the world's primitive octree, `World+0x114`).** For each primitive of a visited node whose owner exists and is not the source actor:
+* flags without `TRACE_ShadowCast`: the movement / gameplay trace-type bit (0x00529990) and the collision test (0x00529E90), as in COLLISION.md;
+* **with `TRACE_ShadowCast`**: neither. The primitive must have `CastShadow` (`PrimitiveComponent+0x114` bit 20) and `bUsePrecomputedShadows` (bit 30), and `light.AffectsPrimitive(component, 0)` (0x00519760) must hold: the component's `LightEnvironment` (+0xE8, when enabled) equals the light's (+0x118: none for placed lights), `bAcceptsLights` (bit 27), `bAcceptsDynamicLights` (bit 28) or a static light (0x00512850), the light's `AffectsBounds` on the component's bounds (vtable +0x164), and the component's level loaded (0x00516400);
+* then the owner's `ShouldTrace` (vtable +0x1C4) must accept the flags (every actor does: `TRACE_Movers` / `TRACE_Others` without `TRACE_Blocking`; `InterpActor::ShouldTrace` 0x00568990 returns 1), and the component's `LineCheck` (vtable +0x194) hits. `UStaticMeshComponent::LineCheck` (0x007717D0) tests `flags & 0x20100`: `TRACE_ShadowCast` makes it use the per-polygon kDOP triangles, never the simplified collision.
+* Only components attached to the octree can be met: those with `CollideActors` whose actor has `bCollideActors` (the attach code, e.g. 0x0052A0B0, calls the hash's `AddPrimitive` (vtable +8) only then). The port's earlier rule (any collider blocks the light) was wrong both ways: a collider that casts no static shadow (a movable class, an invisible blocker) does not occlude; a shadow-casting mesh that does not block pawns does.
+
+**Why the cubes do not occlude** (read from the Engine package class defaults, effective through the archetype chain): `Default__StaticMeshActor.StaticMeshComponent0` has `CastShadow` true, `bUsePrecomputedShadows` true, `bAcceptsLights` true, no `LightEnvironment`. `Default__InterpActor`, `DynamicSMActor`, `DynamicSMActor_Spawnable`, `KActor`, `KActorSpawnable` and `InterpActor_ForCinematic` have `bUsePrecomputedShadows` unset (false) and a `LightEnvironment` (a `DynamicLightEnvironmentComponent`): either alone excludes them. The Playground's boxes, steps, ramps and meshes are `InterpActor`s (ORACLE.md), so they never occlude, as captured; the port now derives that from the class defaults.
+
+**Port.**
+* `dishonored_assets::collision_audit::blocks_stealth_light` (the rule over effective component and actor properties) and `class_blocks_stealth_light` (an Engine class default's `StaticMeshComponent0`).
+* `dishonored_ir::MeshInstance::stealth_shadow`, set per placed component in `level.rs::add_component` (`component_stealth_shadow`) and, for layout maps, from `InterpActor`'s defaults (`layout_import.rs`).
+* `dishonored_world::channel::SHADOW` (bit 7, not in `ALL`, a complex-collision channel): `CollisionWorld::from_map` puts it on the triangles of flagged instances, including those that collide without blocking pawns (shadow only); movers (`InterpActor`s placed in a level) stay layered and unflagged.
+* `dishonored_ai::Crowd::update_player_light` traces `channel::SHADOW`; `AiLevel::stealth_light_unoccluded` and the Playground's setting are removed.
+* Cache keys: `<map>.collision20-stealthshadow.bin`, `<map>.ailevel8.json`, Playground `DERIVED_VERSION` 6.
+
+**Not decoded / not modelled.** (1) The octree entry that selects 0x006B12C0 was not found by name (its callers are virtual; a sibling traversal 0x006B1880 has no `TRACE_ShadowCast` branch): the ShadowCast branch is taken from the one traversal that has it, consistent with the capture and the class defaults. (2) `bAcceptsDynamicLights` and the light's static test (0x00512850) are not evaluated (static mesh component defaults accept dynamic lights). (3) A `LightEnvironment` counts as set when the property is non-null (its `bEnabled` is not read). (4) Skeletal components (props, pawns) are never shadow casters in the port. (5) The world BSP (`TRACE_Level`) is not modelled as a separate occluder. (6) `AffectsBounds` and the level test are implied by the check running from inside the light's reach.

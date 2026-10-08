@@ -1517,12 +1517,6 @@ pub struct AiLevel {
     /// The levels' precomputed light volumes, reduced to what the stealth light reads.
     #[serde(default)]
     pub light_volumes: Vec<LightVolume>,
-    /// No static shadow caster: the light environment's line checks (`TRACE_ShadowCast`, flags
-    /// 0x2397 at 0x004FF5C2) see only static-shadowing primitives, and a layout map is built in the
-    /// original from movable `InterpActor` cubes (ORACLE.md `Layout maps in the original`), so
-    /// its stealth lights are never occluded (captured: the dominant light reaches every lane point).
-    #[serde(default)]
-    pub stealth_light_unoccluded: bool,
 }
 
 impl AiLevel {

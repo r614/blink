@@ -58,6 +58,10 @@ pub fn import_layout(content: &Content, layout: &MapLayout, opts: &ImportOptions
             None => imp.stats.errors.push(format!("environment package {env} is not in the layout's packages")),
         }
     }
+    // Every box and mesh of a layout is an `InterpActor` in the original (ORACLE.md "Layout maps in
+    // the original"): the stealth light's line check meets it as that class's component flags say
+    // (a movable class: it does not).
+    let interp_shadow = crate::collision_audit::class_blocks_stealth_light(content, "InterpActor");
     let default_material = imp.material_by_path(&layout.default_material);
     for (i, b) in layout.brushes.iter().enumerate() {
         let mat = match &b.material {
@@ -79,6 +83,7 @@ pub fn import_layout(content: &Content, layout: &MapLayout, opts: &ImportOptions
             lightmap: None,
             mover: None,
             trace_mask: dishonored_ir::all_trace_types(),
+            stealth_shadow: interp_shadow && b.collide,
         });
     }
     for (i, m) in layout.meshes.iter().enumerate() {
@@ -102,6 +107,7 @@ pub fn import_layout(content: &Content, layout: &MapLayout, opts: &ImportOptions
             lightmap: None,
             mover: None,
             trace_mask: dishonored_ir::all_trace_types(),
+            stealth_shadow: interp_shadow && m.collide && has_collision,
         });
         imp.stats.static_mesh_actors += 1;
     }

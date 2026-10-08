@@ -435,6 +435,13 @@ pub struct MeshInstance {
     /// 1 move NPC, 2 move player, 3 crosshair, 4 projectile, 5 melee, 6 vision).
     #[serde(default = "all_trace_types")]
     pub trace_mask: u8,
+    /// The stealth light's visibility line check (`TRACE_ShadowCast`, flags 0x2397 at 0x004FF5C2)
+    /// hits this component: it is in the primitive octree (`CollideActors`, its actor's
+    /// `bCollideActors`), `CastShadow` and `bUsePrecomputedShadows`, `bAcceptsLights`, and has no
+    /// `LightEnvironment` (the octree's line check 0x006B12C0 and `ULightComponent::AffectsPrimitive`
+    /// 0x00519760; research/dishonored/systems/stealth.md section 14).
+    #[serde(default)]
+    pub stealth_shadow: bool,
 }
 
 pub fn all_trace_types() -> u8 {

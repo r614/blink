@@ -734,6 +734,7 @@ impl Importer<'_> {
         }
         let hidden = actor_hidden || bool_or(&props, "HiddenGame", false);
         let (collides, trace_mask) = self.component_collision(&pkg, ci);
+        let stealth_shadow = self.component_stealth_shadow(&pkg, ci);
         if self.opts.load_textures && self.opts.load_lightmaps {
             match pkg.export_data(ci).and_then(|d| read_static_mesh_component_lods(d, native_offset)) {
                 Ok(lods) => match lods.into_iter().next().map(|l| (l.lightmap, l.shadow_maps)) {
@@ -763,6 +764,7 @@ impl Importer<'_> {
             lightmap: None,
             mover: None,
             trace_mask,
+            stealth_shadow,
         });
         Ok(())
     }
@@ -796,6 +798,17 @@ impl Importer<'_> {
         }
         let fixed = self.tweaks.as_ref().and_then(|t| t.as_ref()).and_then(|t| t.try_resolve(&tweak)).is_some_and(|t| matches!(t.get("m_bFixed"), Some(crate::tweaks::TVal::B(true))));
         !fixed
+    }
+
+    /// Whether the stealth light's line check hits a placed component
+    /// ([`crate::collision_audit::blocks_stealth_light`]): its effective flags and its actor's.
+    fn component_stealth_shadow(&mut self, pkg: &Arc<Package>, ci: usize) -> bool {
+        let cp = self.resolver.effective(pkg, ci);
+        let ap = match ObjRef::from_index(pkg.exports[ci].outer) {
+            ObjRef::Export(a) => Some(self.resolver.effective(pkg, a)),
+            _ => None,
+        };
+        crate::collision_audit::blocks_stealth_light(&cp, ap.as_deref().map(|a| a.as_slice()))
     }
 
     /// Whether a placed component blocks the player's checks at all, and its trace types
@@ -1774,6 +1787,9 @@ impl Importer<'_> {
             lightmap: None,
             mover: None,
             trace_mask: dishonored_ir::all_trace_types(),
+            // A render-only copy of a skeletal prop; skeletal components are not modelled as
+            // stealth shadow casters (their flags were not decoded).
+            stealth_shadow: false,
         });
         self.stats.skeletal_props += 1;
         Ok(())
