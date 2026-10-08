@@ -583,6 +583,8 @@ pub struct Crowd {
     pub stealth_lights: Vec<ProbeLight>,
     #[serde(default)]
     pub light_volumes: Vec<dishonored_ir::ai::LightVolume>,
+    /// [`dishonored_ir::ai::AiLevel::stealth_light_unoccluded`].
+    pub stealth_light_unoccluded: bool,
     /// Per (player, stealth light): the last visibility traces (bit mask over the samples, next
     /// sample, update stamp; 0x004FF270) and the update counter.
     #[serde(skip)]
@@ -1299,6 +1301,7 @@ impl Crowd {
                 }
             }
             let stamp = self.light_updates;
+            let unoccluded = self.stealth_light_unoccluded;
             let vis = &mut self.light_vis;
             let id = p.id;
             dishonored_ir::ai::stealth_light_value(&self.stealth_lights, volume, origin, sphere, |i, l| {
@@ -1310,7 +1313,7 @@ impl Crowd {
                 let (a, b) = dishonored_ir::ai::visibility_segment(l, origin, sphere, extent, points[k]);
                 let d = b - a;
                 let len = d.length();
-                let clear = len < 1e-3 || world.raycast(a, d / len, len, channel::ALL).is_none();
+                let clear = unoccluded || len < 1e-3 || world.raycast(a, d / len, len, channel::ALL).is_none();
                 e.0 = if clear { e.0 | 1 << k } else { e.0 & !(1 << k) };
                 e.1 = ((k + 1) % SAMPLES) as u8;
                 e.2 = stamp;
@@ -1346,6 +1349,7 @@ impl Crowd {
         self.stealth_volumes = level.stealth_volumes.clone();
         self.stealth_lights = level.stealth_lights.clone();
         self.light_volumes = level.light_volumes.clone();
+        self.stealth_light_unoccluded = level.stealth_light_unoccluded;
     }
 
     /// Faction of a spawned NPC: the spawner's `m_pFactionTweakOverride`, else its pawn

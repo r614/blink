@@ -2045,3 +2045,10 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   - `fixtures/scripts/viewmodel_states.json` waits one tick after every screenshot. It adds time series of the swing, Windblast, Blink aim and cast, and the mantles, plus look down / up and lean.
   - Tests in `crates/dishonored_runtime/tests/viewmodel.rs`.
 - **Confidence:** CONFIRMED (decoded) for the eye, the view rotation, the look controls and the offset keys. LIKELY for a pawn pitch of 0 (UE3 `Pawn.FaceRotation` while walking or falling, U-782) and for the arms staying visible through a Blink (U-781).
+
+## 2026-10-08: Stealth light value matched to the hook capture
+- **Question:** Make the port's stealth light value match the captured light environment (scale, light selection, occlusion).
+- **Evidence:** 0x004E1F02 (`fmul 0.25`, `fmul 1/pi` before the 1/2.2 power), 0x004E0440 (directional `GetPosition` = `-axis x TraceDistance`), 0x004FF270 (`SingleLineCheck` flags 0x2397: `TRACE_ShadowCast`), 0x004DB470 (sky light through the hemisphere functions), hook outputs `le_lane1..5`, `le_boyle1..2`.
+- **Result:** raw light `(L / 4 pi)^(1/2.2)`; directional lights traced 100000 uu; sky lights at 2 Y00; layout maps unoccluded (InterpActor cubes have no static shadowing); Boyle's sky light added to the Playground. `stealth/light_probe_lane` passes on raw light (11 / 11), new `stealth/light_probe_boyle` passes (raw and normalized).
+- **Confidence:** CONFIRMED (code and capture agree to about 1 % per light).
+- **Implementation consequence:** cache keys `<map>.ailevel6.json`, Playground DERIVED_VERSION 5. The `m_LightProbe` channel filter is kept: the live channels of every contributing light have it, and the packages store `false` on the excluded ones.

@@ -22,7 +22,7 @@ pub struct NavAgent {
 }
 
 /// Bumped when the derived data below changes shape.
-const DERIVED_VERSION: u32 = 3; // 2: brushes collide as the original's Cube_100 (simple box collision); 3: stealth light environment (Boyle's light range, layout lights as stealth lights)
+const DERIVED_VERSION: u32 = 5; // 2: brushes collide as the original's Cube_100 (simple box collision); 3: stealth light environment (Boyle's light range, layout lights as stealth lights); 4: Boyle's sky light in the stealth lights; 5: stealth lights unoccluded (InterpActor layout)
 
 /// The layout file of a map, when the map is a layout (`maps/<name>.ron`, lower case): next to the
 /// working directory, the executable, or the repository root of a `target/<profile>` build;
@@ -394,7 +394,19 @@ fn derive(content: &Content, sim: &SimConfig, layout: &MapLayout) -> Result<(Col
     // The stealth light environment: the layout's lights (built as `PointLight`s, in the
     // `m_LightProbe` channel by that template), no light volume (the layout has none).
     ai_level.stealth_lights = ai_level.lights.clone();
+    // Boyle's sky light (`L_Boyle_Ext_Env` `SkyLight_0_LC`, `m_LightProbe`) reaches the original's
+    // Playground too: captured at 0.1515 of the linear light at every lane point (ORACLE.md
+    // "Stealth light environment"). The layout's directional stands for Boyle's dominant one.
+    if let Ok(pkg) = content.package("L_Boyle_Ext_Env") {
+        for l in dishonored_assets::light_env::read_lights(&pkg, true) {
+            let p = dishonored_assets::ai_level::stealth_light(&l);
+            if p.kind == 3 && dishonored_assets::light_env::channels_overlap(l.channels, dishonored_assets::light_env::STEALTH_DLE_CHANNELS) {
+                ai_level.stealth_lights.push(p);
+            }
+        }
+    }
     ai_level.light_volumes.clear();
+    ai_level.stealth_light_unoccluded = true;
     ai_level.sky_light = layout.sky_light;
     Ok((collision, Derived { water, volumes, climbables, pickups, usables, ai_level }))
 }

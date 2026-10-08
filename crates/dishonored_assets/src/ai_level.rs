@@ -262,7 +262,9 @@ pub fn probe_light(l: &Light) -> ProbeLight {
         LightKind::Spot { inner_cone_deg, outer_cone_deg } => (1, inner_cone_deg, outer_cone_deg),
         LightKind::Directional => (2, 0.0, 0.0),
     };
-    ProbeLight { kind, position: l.position, direction: l.direction, intensity: l.brightness * lum, radius: l.radius, falloff_exponent: l.falloff_exponent, inner_cone: inner, outer_cone: outer, casts_shadows: l.casts_shadows }
+    // A directional light's adius is its TraceDistance (class default 100000; 0x004E0440).
+    let radius = if kind == 2 { 100_000.0 } else { l.radius };
+    ProbeLight { kind, position: l.position, direction: l.direction, intensity: l.brightness * lum, radius, falloff_exponent: l.falloff_exponent, inner_cone: inner, outer_cone: outer, casts_shadows: l.casts_shadows }
 }
 
 fn luminance(c: [f32; 3]) -> f32 {
