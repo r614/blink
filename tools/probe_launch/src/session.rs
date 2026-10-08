@@ -127,6 +127,12 @@ impl Session {
         self.r = Reflect::default();
         self.claim_controller()?;
         let t1 = Instant::now();
+        // The front end (DefaultEngine.ini Map / TransitionMap = DishonoredGameFull_P, with the
+        // Dishonored_MainMenu sublevels): no gameplay control to wait for, and an Enter there
+        // picks a main-menu entry (it started a game and left the map).
+        if want.ends_with("dishonoredgamefull_p") {
+            return Ok((load, 0.0));
+        }
         let mut last_err = String::new();
         loop {
             // The game thread can stay busy for seconds after the load (streaming): job
