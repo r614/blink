@@ -122,6 +122,20 @@ pub mod op {
     /// u32 timeout ms -> u32 base tick, bytes frames (ticks + 1 of: u32 k, per read u8 ok +
     /// len bytes), str errors. Waits until the script is done and the game parked again.
     pub const SCRIPT_WAIT: u8 = 41;
+    /// u32 first id -> u32 n, n * (u32 id, u8 kind b'p' / b'v', u64 fnv hash, u32 world tick
+    /// of creation, str CTAB names, bytes bytecode): the distinct shaders created so far.
+    pub const SHADER_DUMP: u8 = 42;
+}
+
+/// A shader the game created (`SHADER_DUMP`).
+#[derive(Clone, Debug)]
+pub struct ShaderCode {
+    pub id: u32,
+    pub kind: u8,
+    pub hash: u64,
+    pub tick: u32,
+    pub ctab: String,
+    pub code: Vec<u8>,
 }
 
 /// One action of a tick script.
@@ -932,6 +946,16 @@ impl Client {
             frames.push(row);
         }
         Ok((base, frames, errors))
+    }
+
+    /// Shaders created by the game from id `since` on (bytecode included).
+    pub fn shader_dump(&mut self, since: u32) -> io::Result<Vec<ShaderCode>> {
+        let mut p = Vec::new();
+        put_u32(&mut p, since);
+        let r = self.request(op::SHADER_DUMP, &p)?;
+        let mut rd = Reader::new(&r);
+        let n = rd.u32()?;
+        (0..n).map(|_| Ok(ShaderCode { id: rd.u32()?, kind: rd.u8()?, hash: rd.u64()?, tick: rd.u32()?, ctab: rd.str()?, code: rd.bytes()?.to_vec() })).collect()
     }
 
     /// FName (index, number) of a name.

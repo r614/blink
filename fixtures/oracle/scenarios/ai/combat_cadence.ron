@@ -1,0 +1,27 @@
+// An alerted guard against a player who stands still and does not fight back (300 uu in front
+// of it, large health pool). The elite guard's attack cadence is DisAISubProcessManageAttacks
+// (0x00b47880): a flurry of 2-3 stamina-draining attacks, then `m_StaminaRecoveryDuration`
+// 4-5 s of no new attack, with every attack context on its own cooldown (Short 1-3 s,
+// StepBack 0.5-2 s, Medium 3-5 s, Long and Jump 15-20 s) and the group inhibition per target.
+// The port rolls the flurry and the recovery as the original does; it has no aggression term.
+(
+    name: "ai/combat_cadence",
+    system: Ai,
+    map: "Playground",
+    description: "An alerted guard swings at a motionless player for 40 s: swing count and flurry pacing.",
+    setup: (
+        player: Some((position: (-1000, -2600, 96), yaw: 90, health: Some(5000))),
+        npcs: [(id: Some("guard"), position: Some((-1000, -2300, 92)), yaw: -90, state: Some("Alerted"))],
+        settle: 30,
+    ),
+    ticks: 2400,
+    input: [],
+    checkpoints: [
+        (name: "fights", expect: [(metric: TimeAt("npc.guard.state", 9), value: 3, tol: 0, cmp: AtMost, source: "Alerted starts in DisBehaviorCombatEliteGuard", status: Static)]),
+        (name: "swings", expect: [(metric: Count("Sim:SwordSwing@guard"), value: 12, tol: 0, cmp: AtLeast, source: "Short attack cooldown 1-3 s, flurries of 2-3 with 4-5 s recovery: about 3 swings per 6-8 s, so at least 12 in 40 s of unblocked contact", status: Static)]),
+        (name: "swing count", expect: [(metric: Count("Sim:SwordSwing@guard"), value: 0, tol: 0, source: "the original's count over the same 40 s (aggression-scaled cooldowns)", status: Unmeasured)]),
+        (name: "first swing", expect: [(metric: FirstAt("Sim:SwordSwing@guard"), value: 0, tol: 0, source: "the original's time from combat start to the first attack", status: Unmeasured)]),
+    ],
+    record: [Pawn, Vitals, Npc("guard"), SimEvents],
+    capture: Some("scenario boyle_doorman_duel on the original (guard health / position per tick; the swing events are not traced there, use the player's health steps)"),
+)
