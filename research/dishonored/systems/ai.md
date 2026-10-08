@@ -425,7 +425,7 @@ guard list; head tracking stays the port's `look`), the behaviours not listed ab
   Investigate is gone with React.
 - **F2 ported.** `MissionMatch::spawn_original` posts `PatrolRequest` (`Brain::request_patrol`)
   for `patrol_on_startup`; `DisBehaviorPatrol` adopts a route at dispatch.
-- **F3 ported (LIKELY rule).** `Brain::loco_speed`: forward loop speed of the speed mode (Walk 1,
+- **F3 ported, patrol speed measured (116.3 uu/s, EmptyPatrol, see below).** `Brain::loco_speed`: forward loop speed of the speed mode (Walk 1,
   Jog 2) of the stance modifier x `m_fSpeedMultiplier`, from `AiConfig::locomotion` (every
   `ArkComponentLocomotionConfig` of the Boyle script packages); the sim takes it through
   `PlayerInput::npc_speed` (`movement::speed_modifier`, no sword factor). The pawn's config comes
@@ -466,3 +466,25 @@ guard list; head tracking stays the port's `look`), the behaviours not listed ab
   intents stays open: the intents' rate writers for the AI's face-to requests (`m_fRotationSpeed`
   -100 default) were not traced (U-862).
 - **F10** unchanged. **F11 resolved** (§1.4a).
+
+**Checked against the original's brain channels (captures of 2026-10-08, main d42497c).**
+- Slot stack: `ai/boyle_doorman_duel` shows `DisBehaviorSoiree` current in slot 2 with
+  `DisBehaviorPatrol` dormant in slot 0; `ai/boyle_hear_shot` shows `DisBehaviorReact` entering
+  slot 7 above the patrol and the patrol becoming current again when it ends: the model of §1.1.
+- Patrol speed: measured 116.3 uu/s = `EmptyPatrol` (x0.92) on `Empty_Walk_Patrol` (126.4), not
+  the sword patrol loop (145.24): a patrolling guard walks sheathed. `Brain::loco_speed` uses
+  EmptyPatrol for a guard's routine; `ai/boyle_patrol_speed` (now with `original_npcs: true`, the
+  level's own spawner pawn) gives 116.29 uu/s on its adopted route.
+- Hearing: the neutral party guard's *player* attention goes to 1.0 at the shot and leaks at the
+  neutral profile's 2.0 / s (0.667 ten ticks later, level HeadTrack): a heard noise raises
+  attention on its instigator, with the profile of the relationship toward it (the port used a
+  place entry). Ported in `perceive_with` (pawn-made noises; alarm bells, help barks, death
+  rattles stay place entries). With it a neutral guard does not search a shot, as on the
+  original; a hostile one does (`ai/investigate_noise`, moved to the navmeshed stealth lane with a
+  hostile guard: Investigate the tick after the shot, 647 uu/s run = SearchSword x Sword_RunN).
+- Open: the neutral guard's `DisBehaviorReact` (slot 7, 124 ticks, `ReactionRequest` from the
+  reaction table: here `m_Response_PlayerThreats`, Harmless). Not ported: the response trigger
+  for a heard shot and the behaviour's length (its animation) are not decoded.
+- Tooling note: the runner places a spawner NPC without an explicit faction as
+  `Faction_Guard_Default`; spawner 46 is `Neutral_Guard` on the original, so `ai/boyle_hear_shot`
+  and the stealth scenarios compare a hostile port guard with a neutral original one.

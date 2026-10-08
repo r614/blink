@@ -972,6 +972,7 @@ impl Crowd {
         self.inhibit.retain(|i| i.2 > 0.0);
         self.events.clear();
         // Route neglect timers (`m_NeglectTimer`: grows while nobody walks the route).
+        self.route_users.resize(self.routes.len(), 0);
         self.route_neglect.resize(self.routes.len(), 0.0);
         for (t, u) in self.route_neglect.iter_mut().zip(self.route_users.iter()) {
             *t = if *u > 0 { 0.0 } else { *t + dt };
@@ -1749,16 +1750,22 @@ impl Brain {
                 if *source == self.id || !heard(*position, *radius) {
                     continue;
                 }
-                let prof = self.profile(ai, NOISE);
+                // The attention goes to the noise's instigator (proxy at the noise), with the
+                // profile of the relationship toward it: measured on the original
+                // (`ai/boyle_hear_shot`, a neutral party guard: player attention 1.0 at the shot,
+                // the neutral profile's danger increase to Busted's start, then its 2.0 / s leak,
+                // level HeadTrack). A noise without a pawn stays a place entry.
+                let who = if *source != NOISE && ws.player(*source).is_some() { *source } else { NOISE };
+                let prof = self.profile(ai, who);
                 let ctx = noise_context(*category);
                 let (inc, urgent) = match ctx {
                     Noise::Danger => (prof.danger_sound, true),
                     Noise::Threatening => (prof.threatening_sound, false),
                     Noise::Anomaly => (prof.anomaly_sound, false),
                 };
-                self.bump(ai, NOISE, inc, *position, urgent, reason::HEARD);
+                self.bump(ai, who, inc, *position, urgent, reason::HEARD);
                 if ctx == Noise::Danger {
-                    if let Some(a) = self.attn.iter_mut().find(|a| a.who == NOISE) {
+                    if let Some(a) = self.attn.iter_mut().find(|a| a.who == who) {
                         a.danger = true;
                     }
                 }
