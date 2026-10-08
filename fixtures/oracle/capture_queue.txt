@@ -256,3 +256,14 @@ session dump class=DisConvGlobalMan filter=m_pConvSettingTweaks limit=2
 # C4: cutscene lock: player path, camera and release under scripted input during Samuel's boat intro.
 cutscene/boyle_intro_lock
 session dump class=StatePlayerMasterSoiree limit=2
+# --- kismet (research/dishonored/systems/kismet.md) ---
+kismet/boyle_start
+kismet/boyle_intro_20s
+# F-3: field names and idle values of the Kismet time ratio and the two clocks
+session reload
+session setup
+session read object=worldinfo path=TimeDilation
+session read object=worldinfo path=TimeSeconds
+session read object=worldinfo path=BendTimeSeconds
+session read object=worldinfo path=Game.m_fCurrentWorldTimeDilation
+session read object=worldinfo path=Game.m_fCurrentPlayerTimeDilation

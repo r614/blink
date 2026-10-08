@@ -87,6 +87,33 @@ struct SeqRt {
     queued_events: VecDeque<QueuedEvent>,
 }
 
+/// Which script event of an op the engine raised (`SequenceOp.Activated` /
+/// `SequenceOp.Deactivated`, the ProcessEvent calls the original's hook records).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActKind {
+    Activated,
+    Deactivated,
+}
+
+impl ActKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            ActKind::Activated => "Activated",
+            ActKind::Deactivated => "Deactivated",
+        }
+    }
+}
+
+/// One entry of the activation log, in call order: the op, the event, and the links that carry
+/// an impulse at that moment (Activated: the inputs; an event's Activated and every
+/// Deactivated: the outputs).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Activation {
+    pub op: OpId,
+    pub kind: ActKind,
+    pub links: Vec<usize>,
+}
+
 /// What ran and what did not.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Coverage {
@@ -122,7 +149,15 @@ pub struct Kismet {
     pub loaded: Vec<bool>,
     /// Packages whose levels were loaded before (their state is restored on return).
     pub visited: Vec<bool>,
+    /// `WorldInfo.TimeSeconds`: advances by the tick's `dt` (already scaled by
+    /// `WorldInfo.TimeDilation`, the player dilation). The clock of events flagged
+    /// `m_bAlwaysOutOfBendTime` and of `SeqAct_Delay`'s start stamp.
     pub time: f64,
+    /// `WorldInfo.BendTimeSeconds` (+0x398): advances at the world dilation (HOOK_TRIAGE U-109:
+    /// 0.15 x real time under Bend Time level 1). The clock of unflagged events
+    /// (`ActivationTime`, `ReTriggerDelay`; 0x006c8350, 0x006f5dd0).
+    #[serde(default)]
+    pub bend_time: f64,
     rng: CrtRand,
     /// Remote event name (lowercase) -> `SeqEvent_RemoteEvent` ops.
     remote: BTreeMap<String, Vec<OpId>>,
@@ -151,6 +186,13 @@ pub struct Kismet {
     /// `DisSeqVar_Darkness` / `DisSeqVar_DarknessLevel` read.
     #[serde(default)]
     pub darkness: (i32, i32),
+    /// Keep the activation log ([`Kismet::activations`]); off by default (it grows without
+    /// bound), the oracle turns it on and drains it every step.
+    #[serde(skip)]
+    pub record: bool,
+    /// `Activated` / `Deactivated` of every op, in call order, while [`Kismet::record`] is set.
+    #[serde(skip)]
+    pub activations: Vec<Activation>,
 }
 
 /// The view an op has of the interpreter while it runs (host ops get one).
@@ -257,6 +299,7 @@ impl Kismet {
             loaded: vec![false; np],
             visited: vec![false; np],
             time: 0.0,
+            bend_time: 0.0,
             rng: CrtRand::new(seed as u32),
             remote,
             players: Vec::new(),
@@ -270,6 +313,8 @@ impl Kismet {
             touched: BTreeMap::new(),
             interp_play: BTreeMap::new(),
             darkness: (0, 0),
+            record: false,
+            activations: Vec::new(),
         };
         for g in k.db.global.clone() {
             k.loaded[g as usize] = true;
@@ -343,6 +388,56 @@ impl Kismet {
         }
     }
 
+    /// Append to the activation log (when recording).
+    fn log_act(&mut self, op: OpId, kind: ActKind, links: Vec<usize>) {
+        if self.record {
+            self.activations.push(Activation { op, kind, links });
+        }
+    }
+
+    /// Inputs (Activated) or outputs with an impulse now.
+    fn impulses(&self, op: OpId, outputs: bool) -> Vec<usize> {
+        let v = if outputs { &self.ops[op as usize].out_imp } else { &self.ops[op as usize].in_imp };
+        v.iter().enumerate().filter(|(_, b)| **b).map(|(i, _)| i).collect()
+    }
+
+    /// The op's name as the original's ProcessEvent trace writes it (`probe_launch` `short_path`:
+    /// `Package:Outer.Name`, without `TheWorld.PersistentLevel.`). An event duplicated by
+    /// `SeqAct_AttachToEvent` is named `<Event>_AttachDup` inside the attaching sequence
+    /// (UNVERIFIED against a capture).
+    pub fn trace_name(&self, op: OpId) -> String {
+        let i = op as usize;
+        let (pkg, path) = if i < self.n_static() {
+            let o = &self.db.ops[i];
+            (o.package, o.path.clone())
+        } else {
+            let d = &self.dups[i - self.n_static()];
+            let parent = self.db.op(d.parent);
+            (parent.package, format!("{}.{}_AttachDup", parent.path, self.db.op(d.source).name))
+        };
+        format!("{}:{}", self.db.package_name(pkg), path.trim_start_matches("TheWorld.PersistentLevel."))
+    }
+
+    /// `class=<class> in=<inputs>` (an op's Activated) or `out=<outputs>` (an event's Activated,
+    /// every Deactivated): the detail of a trace entry.
+    pub fn activation_detail(&self, a: &Activation) -> String {
+        let links = a.links.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let side = if a.kind == ActKind::Activated && self.op(a.op).kind != Kind::Event { "in" } else { "out" };
+        format!("class={} {side}={links}", self.class(a.op))
+    }
+
+    /// Whether an op runs on raw time (`SequenceOp.m_bAlwaysOutOfBendTime`, op flags +0x8c bit
+    /// 0x400): its delayed activations and `UpdateOp` get the tick's `dt`, its event clock is
+    /// `TimeSeconds`; other ops get `dt` x the world / player dilation ratio and `BendTimeSeconds`.
+    pub fn out_of_bend_time(&self, op: OpId) -> bool {
+        self.prop_bool(op, "m_bAlwaysOutOfBendTime")
+    }
+
+    /// The clock an event's `ActivationTime` and `ReTriggerDelay` use (0x006c8350).
+    fn event_clock(&self, ev: OpId) -> f64 {
+        if self.out_of_bend_time(ev) { self.time } else { self.bend_time }
+    }
+
     pub fn rand(&mut self, n: usize) -> usize {
         // `rand() % n`, as `SeqAct_RandomSwitch` (0x006dc630) and `SeqAct_ActorFactory` do.
         if n == 0 { 0 } else { (self.rng.next() % n as i32) as usize }
@@ -407,26 +502,37 @@ impl Kismet {
 
     // ----- ticking -----
 
-    /// One fixed step: global sequence, then the loaded levels' sequences.
+    /// One fixed step with no time dilation: global sequence, then the loaded levels' sequences.
     pub fn tick(&mut self, host: &mut dyn Host, dt: f32) {
+        self.tick_dilated(host, dt, 1.0);
+    }
+
+    /// One step. `dt` is the world tick's delta (`WorldInfo.TimeDilation`, the player dilation,
+    /// already applied); `ratio` is `GameInfo` vslot 244 (`DishonoredGameInfo` 0x009e9e90:
+    /// `m_fCurrentWorldTimeDilation / m_fCurrentPlayerTimeDilation`). `ExecuteActiveOps`
+    /// (0x00700740) gives ops flagged `m_bAlwaysOutOfBendTime` the raw `dt` and the others
+    /// `dt * ratio` (computed in x87 precision, stored as a float), i.e. the world rate.
+    pub fn tick_dilated(&mut self, host: &mut dyn Host, dt: f32, ratio: f32) {
+        let scaled = (ratio as f64 * dt as f64) as f32;
         self.time += dt as f64;
+        self.bend_time += scaled as f64;
         let globals: Vec<OpId> = self.db.global.iter().flat_map(|p| self.db.roots[*p as usize].clone()).collect();
         for r in &globals {
-            self.update_seq(host, *r, dt, true);
+            self.update_seq(host, *r, dt, scaled);
         }
         for r in self.level_roots.clone() {
-            self.update_seq(host, r, dt, true);
+            self.update_seq(host, r, dt, scaled);
         }
     }
 
-    fn update_seq(&mut self, host: &mut dyn Host, seq: OpId, dt: f32, _root: bool) {
+    fn update_seq(&mut self, host: &mut dyn Host, seq: OpId, dt: f32, scaled: f32) {
         if !self.is_loaded(seq) || !self.ops[seq as usize].enabled {
             return;
         }
-        self.execute_active_ops(host, seq, dt);
+        self.execute_active_ops(host, seq, dt, scaled);
         let nested: Vec<OpId> = self.op(seq).children.iter().copied().filter(|c| self.db.ops[*c as usize].kind == Kind::Sequence).collect();
         for n in nested {
-            self.update_seq(host, n, dt, false);
+            self.update_seq(host, n, dt, scaled);
         }
     }
 
@@ -469,20 +575,25 @@ impl Kismet {
         }
     }
 
-    fn execute_active_ops(&mut self, host: &mut dyn Host, seq: OpId, dt: f32) {
-        // Delayed activations.
+    fn execute_active_ops(&mut self, host: &mut dyn Host, seq: OpId, dt: f32, scaled: f32) {
+        // Delayed activations: each counts down by the raw dt when its target op is flagged
+        // `m_bAlwaysOutOfBendTime`, else by the scaled dt; one that comes due gives its input an
+        // impulse and queues the op at the BOTTOM of the stack (0x00700948: `push edi`, edi = 0),
+        // in list order, so it runs after everything already queued (kismet.md F-1, F-3).
         let mut due = Vec::new();
-        if let Some(s) = self.seqs.get_mut(&seq) {
-            for d in s.delayed.iter_mut() {
-                d.2 -= dt;
+        if let Some(mut delayed) = self.seqs.get_mut(&seq).map(|s| std::mem::take(&mut s.delayed)) {
+            for d in delayed.iter_mut() {
+                d.2 -= if self.out_of_bend_time(d.0) { dt } else { scaled };
             }
-            let (now, later): (Vec<_>, Vec<_>) = s.delayed.drain(..).partition(|d| d.2 <= 0.0);
-            s.delayed = later;
+            let (now, later): (Vec<_>, Vec<_>) = delayed.into_iter().partition(|d| d.2 <= 0.0);
+            if let Some(s) = self.seqs.get_mut(&seq) {
+                s.delayed = later;
+            }
             due = now;
         }
         for (op, input, _) in due {
             if self.impulse(op, input as usize) {
-                self.queue_op(seq, op, true);
+                self.queue_op(seq, op, false);
             }
         }
         let prev = self.exec_seq.replace(seq);
@@ -511,13 +622,15 @@ impl Kismet {
                 self.queue_op(seq, op, true);
                 break;
             }
-            self.run_op(host, seq, op, dt, &mut latent_keep);
+            let op_dt = if self.out_of_bend_time(op) { dt } else { scaled };
+            self.run_op(host, seq, op, op_dt, &mut latent_keep);
         }
-        if let Some(s) = self.seqs.get_mut(&seq) {
-            for op in latent_keep {
-                if !s.active.contains(&op) {
-                    s.active.push(op);
-                }
+        // Latent ops kept this pass: the list is emptied from its end and each op still active
+        // is pushed on top (0x00701452..0x007014f1), so the one met first runs first next tick
+        // (kismet.md F-2).
+        for op in latent_keep.into_iter().rev() {
+            if self.ops[op as usize].active {
+                self.queue_op(seq, op, true);
             }
         }
         self.exec_seq = prev;
@@ -529,7 +642,10 @@ impl Kismet {
             self.ops[op as usize].active = true;
             self.ops[op as usize].activate_count += 1;
             *self.coverage.activations.entry(op).or_insert(0) += 1;
+            let inputs = self.impulses(op, false);
+            // Native `Activated` (slot 93), then the script event the hook sees.
             self.activated(host, op);
+            self.log_act(op, ActKind::Activated, inputs);
         }
         let mut finished = false;
         let mut propagate = false;
@@ -537,7 +653,10 @@ impl Kismet {
             let done = self.update(host, op, dt);
             self.ops[op as usize].active = !done;
             if done {
+                // Native `DeActivated` (slot 94, arms the outputs), then the script event.
                 self.deactivated(op);
+                let outs = self.impulses(op, true);
+                self.log_act(op, ActKind::Deactivated, outs);
                 self.publish(op);
                 finished = true;
                 propagate = true;
@@ -587,8 +706,10 @@ impl Kismet {
                 again = true;
             }
         }
+        // A queued activation left: the op goes back at the BOTTOM (0x00700f0d `push 0`), behind
+        // everything queued (kismet.md F-1).
         if again {
-            self.queue_op(seq, op, true);
+            self.queue_op(seq, op, false);
         }
         for o in self.ops[op as usize].out_imp.iter_mut() {
             *o = false;
@@ -748,8 +869,62 @@ impl Kismet {
                 }
                 self.set_prop(op, &l.property, Value::Array(vals));
             } else {
-                let v = self.var_value(l.vars[0]);
+                let v = self.populate_scalar(&l.vars);
                 self.set_prop(op, &l.property, v);
+            }
+        }
+    }
+
+    /// A scalar property from a link (kismet.md K-6 / F-5). `PopulateLinkedVariableValues`
+    /// (0x006ef6c0) calls `PopulateValue` of the first linked variable only, and that variable's
+    /// class reads the whole link: `SeqVar_Int` (0x006f6da0) writes the sum of every int variable
+    /// of the link, `SeqVar_Float` (0x006f69b0) the float sum (accumulated in order from 0),
+    /// `SeqVar_Bool` (0x006f6740) the AND of every bool variable. Other variables give their own
+    /// value.
+    fn populate_scalar(&mut self, vars: &[OpId]) -> Value {
+        let first = self.resolve_var(vars[0]);
+        let class = self.op(first).class.clone();
+        let db = self.db.clone();
+        let family = |c: &str| -> u8 {
+            if db.is_a(c, "SeqVar_Bool") {
+                1
+            } else if db.is_a(c, "SeqVar_Float") {
+                2
+            } else if db.is_a(c, "SeqVar_Int") {
+                3
+            } else {
+                0
+            }
+        };
+        let f = family(&class);
+        if f == 0 || vars.len() == 1 {
+            return self.var_value(vars[0]);
+        }
+        let same: Vec<OpId> = vars.iter().copied().filter(|v| family(&self.op(self.resolve_var(*v)).class) == f).collect();
+        match f {
+            1 => {
+                let mut all = true;
+                for v in same {
+                    all &= self.var_value(v).as_bool().unwrap_or(false);
+                    if !all {
+                        break;
+                    }
+                }
+                Value::Bool(all)
+            }
+            2 => {
+                let mut sum = 0.0f32;
+                for v in same {
+                    sum += self.var_value(v).as_float().unwrap_or(0.0);
+                }
+                Value::Float(sum)
+            }
+            _ => {
+                let mut sum = 0i32;
+                for v in same {
+                    sum = sum.wrapping_add(self.var_value(v).as_int().unwrap_or(0));
+                }
+                Value::Int(sum)
             }
         }
     }
@@ -831,7 +1006,9 @@ impl Kismet {
             return false;
         }
         let delay = self.prop_float(ev, "ReTriggerDelay") as f64;
-        if delay != 0.0 && rt.trigger_count != 0 && !(delay < self.time - rt.activation_time) {
+        // On the event's clock: BendTimeSeconds, or TimeSeconds when flagged (kismet.md F-4).
+        let now = self.event_clock(ev);
+        if delay != 0.0 && rt.trigger_count != 0 && !(delay < now - rt.activation_time) {
             return false;
         }
         if !test && rt.enabled {
@@ -844,7 +1021,7 @@ impl Kismet {
     fn activate_event(&mut self, host: &mut dyn Host, ev: OpId, originator: Obj, instigator: Obj, indices: Option<Vec<usize>>, push_top: bool) {
         let parent = self.parent(ev);
         {
-            let now = self.time;
+            let now = self.event_clock(ev);
             let rt = &mut self.ops[ev as usize];
             rt.originator = originator.clone();
             rt.instigator = instigator.clone();
@@ -870,6 +1047,10 @@ impl Kismet {
                     self.fire(ev, i);
                 }),
             }
+            // The script `Activated` (raised right after the native one, 0x006f5dd0); the
+            // outputs it is about to send are recorded with it.
+            let outs = self.impulses(ev, true);
+            self.log_act(ev, ActKind::Activated, outs);
             let seq = parent.unwrap_or(ev);
             self.queue_op(seq, ev, push_top);
             let _ = host;

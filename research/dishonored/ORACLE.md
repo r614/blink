@@ -818,7 +818,7 @@ projectile, live effects / particles, and per named NPC position, yaw, health, c
 state, stance, attention on the player (value, level, LOS norm, sighted), suspicion and time
 scale. Enumerated channels carry a fixed legend in their unit (`enum:Walking,Falling,...`,
 declaration order). Events: `Sim` (every SimEvent with `key=value` details, ids as names),
-`Kismet` (activations), `Projectile` / `ProjectileEnd` (player shots carry their offset from
+`Kismet` (one per op `Activated` / `Deactivated`, in call order, object named like the hook's `short_path`: `Package:Outer.Name`; until 2026-10-08 this kind carried the Kismet host's log notes, so the "39 activations" of `kismet/boyle_start` were 39 notes: systems/kismet.md F-6, F-14), `KismetNote` (the host's notes, port only, not compared), `Projectile` / `ProjectileEnd` (player shots carry their offset from
 the view in 720-line pixels, `off_px`, the dispersion, `disp`, and `rd` = off / disp),
 `Console`, and the presentation events below.
 

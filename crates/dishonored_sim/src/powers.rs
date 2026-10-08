@@ -359,6 +359,17 @@ pub fn pawn_time_scale(state: &WorldState, id: PlayerId, cfg: &GameplayConfig) -
     s
 }
 
+/// The GameInfo's player dilation (`m_fCurrentPlayerTimeDilation` +0x3ac, which it writes to
+/// `WorldInfo.TimeDilation`): the product of the channels' player dilations. Bend Time's channel
+/// carries its caster dilation; Blink's passes a caster rate of 1 (0x009FCBC0).
+pub fn player_time_dilation(state: &WorldState, cfg: &GameplayConfig) -> f32 {
+    let mut s = 1.0;
+    for b in &state.time_bends {
+        s *= ramp(b, b.self_dilation, cfg);
+    }
+    s
+}
+
 /// Rate of time for projectiles, traps and swarms: the world dilation, except that projectiles
 /// wake up `m_fProjectileEarlyWakeupTime` before a bend ends.
 pub fn world_time_scale(state: &WorldState, cfg: &GameplayConfig, projectile: bool) -> f32 {
