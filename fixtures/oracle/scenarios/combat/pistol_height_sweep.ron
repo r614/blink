@@ -1,0 +1,67 @@
+// Pistol damage against the height of the aim point: ten shots at 600 uu, the aim point from the
+// guard's knees to above its head. The original's head region is a bone (physics-asset body) lookup
+// (DisBullet 0x00C29820 -> 0x00B66A50 region byte == DHR_HEAD); the port's is z > centre + 0.6 x
+// half height (left_hand::step_projectiles). The sweep gives the boundary on both sides.
+// Dispersion 15 px adds up to +-11 uu at this distance, so a boundary is a band, not a line.
+(
+    name: "combat/pistol_height_sweep",
+    system: Combat,
+    map: "Playground",
+    description: "Ten pistol shots at one distance, aim z from 60 to 175: where the headshot multiplier starts.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0, pitch: 0)),
+        items: ["Bullet:50"],
+        left_hand: Some("Pistol"),
+        npcs: [
+        (id: Some("h0"), position: Some((-5114.59, -352.671, 92)), yaw: 144, state: Some("Passive")),
+        (id: Some("h1"), position: Some((-5070.231, -281.683, 92)), yaw: 152, state: Some("Passive")),
+        (id: Some("h2"), position: Some((-5036.184, -205.212, 92)), yaw: 160, state: Some("Passive")),
+        (id: Some("h3"), position: Some((-5013.111, -124.747, 92)), yaw: 168, state: Some("Passive")),
+        (id: Some("h4"), position: Some((-5001.462, -41.854, 92)), yaw: 176, state: Some("Passive")),
+        (id: Some("h5"), position: Some((-5001.462, 41.854, 92)), yaw: 184, state: Some("Passive")),
+        (id: Some("h6"), position: Some((-5013.111, 124.747, 92)), yaw: 192, state: Some("Passive")),
+        (id: Some("h7"), position: Some((-5036.184, 205.212, 92)), yaw: 200, state: Some("Passive")),
+        (id: Some("h8"), position: Some((-5070.231, 281.683, 92)), yaw: 208, state: Some("Passive")),
+        (id: Some("h9"), position: Some((-5114.59, 352.671, 92)), yaw: 216, state: Some("Passive"))
+        ],
+        settle: 60,
+    ),
+    ticks: 1570,
+    input: [
+        (tick: 7, action: Look(yaw: -36, pitch: -11.402)),
+        (tick: 10, action: Press(Secondary)),
+        (tick: 157, action: Look(yaw: -28, pitch: -10.019)),
+        (tick: 160, action: Press(Secondary)),
+        (tick: 307, action: Look(yaw: -20, pitch: -8.624)),
+        (tick: 310, action: Press(Secondary)),
+        (tick: 457, action: Look(yaw: -12, pitch: -7.219)),
+        (tick: 460, action: Press(Secondary)),
+        (tick: 607, action: Look(yaw: -4, pitch: -5.805)),
+        (tick: 610, action: Press(Secondary)),
+        (tick: 710, action: Console("give Bullet 50")),
+        (tick: 757, action: Look(yaw: 4, pitch: -4.384)),
+        (tick: 760, action: Press(Secondary)),
+        (tick: 907, action: Look(yaw: 12, pitch: -3.434)),
+        (tick: 910, action: Press(Secondary)),
+        (tick: 1057, action: Look(yaw: 20, pitch: -2.481)),
+        (tick: 1060, action: Press(Secondary)),
+        (tick: 1207, action: Look(yaw: 28, pitch: -1.528)),
+        (tick: 1210, action: Press(Secondary)),
+        (tick: 1357, action: Look(yaw: 36, pitch: -0.573)),
+        (tick: 1360, action: Press(Secondary)),
+    ],
+    checkpoints: [
+        (name: "aim z=60 (centre + -32)", expect: [(metric: DropFrom("npc.h0.health", 5), value: 30, tol: 0, source: "head region x3: the body value is 30, the head 90 (decompiled 0x00C29820); the head / body boundary is the original's bone map (m_HitRegions_Map), the port uses z > centre + 0.6 x 87.5 = 144.5: capture needed", status: Unmeasured)]),
+        (name: "aim z=75 (centre + -17)", expect: [(metric: DropFrom("npc.h1.health", 5), value: 30, tol: 0, source: "head region x3: the body value is 30, the head 90 (decompiled 0x00C29820); the head / body boundary is the original's bone map (m_HitRegions_Map), the port uses z > centre + 0.6 x 87.5 = 144.5: capture needed", status: Unmeasured)]),
+        (name: "aim z=90 (centre + -2)", expect: [(metric: DropFrom("npc.h2.health", 5), value: 30, tol: 0, source: "head region x3: the body value is 30, the head 90 (decompiled 0x00C29820); the head / body boundary is the original's bone map (m_HitRegions_Map), the port uses z > centre + 0.6 x 87.5 = 144.5: capture needed", status: Unmeasured)]),
+        (name: "aim z=105 (centre + 13)", expect: [(metric: DropFrom("npc.h3.health", 5), value: 30, tol: 0, source: "head region x3: the body value is 30, the head 90 (decompiled 0x00C29820); the head / body boundary is the original's bone map (m_HitRegions_Map), the port uses z > centre + 0.6 x 87.5 = 144.5: capture needed", status: Unmeasured)]),
+        (name: "aim z=120 (centre + 28)", expect: [(metric: DropFrom("npc.h4.health", 5), value: 30, tol: 0, source: "head region x3: the body value is 30, the head 90 (decompiled 0x00C29820); the head / body boundary is the original's bone map (m_HitRegions_Map), the port uses z > centre + 0.6 x 87.5 = 144.5: capture needed", status: Unmeasured)]),
+        (name: "aim z=135 (centre + 43)", expect: [(metric: DropFrom("npc.h5.health", 5), value: 30, tol: 0, source: "head region x3: the body value is 30, the head 90 (decompiled 0x00C29820); the head / body boundary is the original's bone map (m_HitRegions_Map), the port uses z > centre + 0.6 x 87.5 = 144.5: capture needed", status: Unmeasured)]),
+        (name: "aim z=145 (centre + 53)", expect: [(metric: DropFrom("npc.h6.health", 5), value: 90, tol: 0, source: "head region x3: the body value is 30, the head 90 (decompiled 0x00C29820); the head / body boundary is the original's bone map (m_HitRegions_Map), the port uses z > centre + 0.6 x 87.5 = 144.5: capture needed", status: Unmeasured)]),
+        (name: "aim z=155 (centre + 63)", expect: [(metric: DropFrom("npc.h7.health", 5), value: 90, tol: 0, source: "head region x3: the body value is 30, the head 90 (decompiled 0x00C29820); the head / body boundary is the original's bone map (m_HitRegions_Map), the port uses z > centre + 0.6 x 87.5 = 144.5: capture needed", status: Unmeasured)]),
+        (name: "aim z=165 (centre + 73)", expect: [(metric: DropFrom("npc.h8.health", 5), value: 90, tol: 0, source: "head region x3: the body value is 30, the head 90 (decompiled 0x00C29820); the head / body boundary is the original's bone map (m_HitRegions_Map), the port uses z > centre + 0.6 x 87.5 = 144.5: capture needed", status: Unmeasured)]),
+        (name: "aim z=175 (centre + 83)", expect: [(metric: DropFrom("npc.h9.health", 5), value: 90, tol: 0, source: "head region x3: the body value is 30, the head 90 (decompiled 0x00C29820); the head / body boundary is the original's bone map (m_HitRegions_Map), the port uses z > centre + 0.6 x 87.5 = 144.5: capture needed", status: Unmeasured)]),
+    ],
+    record: [Pawn, Powers, Projectiles, Npc("h0"), Npc("h1"), Npc("h2"), Npc("h3"), Npc("h4"), Npc("h5"), Npc("h6"), Npc("h7"), Npc("h8"), Npc("h9"), SimEvents],
+    capture: Some("lab equip DishonoredWepPistol 2; per shot: guard health before / after; same bearings and pitches"),
+)

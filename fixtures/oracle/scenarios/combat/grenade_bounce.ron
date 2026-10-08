@@ -1,0 +1,32 @@
+// A grenade thrown at the floor, 30 degrees down (the throw adds m_fThrowAngle 5 up): first impact
+// about 370 uu ahead, then the bounces. The original's response (DisProjectile_GrenadeBase slot 235 / 236
+// -> 0x00C5D940): with the floor-normal z nz and the velocity v, e = lerp(m_fBounciness 0.3, m_fFloorBounciness 0.65, nz),
+// d = lerp(m_fBounceDamping 0.1, m_fFloorBounceDamping 0.4, nz), v' = (v - (1 + e)(v . n) n) x d; at rest instead
+// when -v.z < m_fRigidBodyZMagThreshold 150 x nz. A pawn hit uses m_fBodyBounciness 0.1 / m_fBodyBounceDamping 0.05.
+// The port reflects (v - 2 (v . n) n) and scales the whole vector by the bounciness (0.65 floor / 0.3 wall).
+// Position of the first projectile per tick; the fuse is 3.0 s from the throw.
+(
+    name: "combat/grenade_bounce",
+    system: Combat,
+    map: "Playground",
+    description: "A grenade thrown down at the floor: the bounce response (restitution and damping) and the fuse.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0, pitch: -30)),
+        items: ["Grenade:3"],
+        left_hand: Some("Grenade"),
+        settle: 30,
+    ),
+    ticks: 300,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "fuse", expect: [(metric: Between("Projectile:Grenade", "Sim:Explosion"), value: 3.0, tol: 0.017, source: "HOOK_TRIAGE.md 2026-10-06 (U-102): armed at the throw, 3.0 s")]),
+        (name: "launch speed", expect: [(metric: EventValue("Projectile:Grenade", "speed"), value: 2500, tol: 15, source: "(sampled after the spawn tick's gravity step: +10.7) Twk_Inv_GrenadeCorvo DisTweaks_ThrowGrenade m_fThrowSpeed 2500 (decompiled 0x00C38F70: not added to the pawn's velocity)", status: Static)]),
+        (name: "x at 0.5 s after the throw", expect: [(metric: At("proj.x", 53), value: 0, tol: 0, source: "bounce response differs (see header): capture needed", status: Unmeasured)]),
+        (name: "x at 1.0 s after the throw", expect: [(metric: At("proj.x", 83), value: 0, tol: 0, source: "bounce response differs (see header): capture needed", status: Unmeasured)]),
+        (name: "z at 1.0 s after the throw", expect: [(metric: At("proj.z", 83), value: 0, tol: 0, source: "bounce response differs (see header): capture needed", status: Unmeasured)]),
+        (name: "x at 2.0 s after the throw", expect: [(metric: At("proj.x", 143), value: 0, tol: 0, source: "bounce response differs (see header): capture needed", status: Unmeasured)]),
+        (name: "x just before the blast", expect: [(metric: At("proj.x", 200), value: 0, tol: 0, source: "rest position: capture needed", status: Unmeasured)]),
+    ],
+    record: [Pawn, Powers, Projectiles, SimEvents],
+    capture: Some("lab give grenade; throw at pitch -30 from the same spot; per tick the Location / Velocity of the DisProjectile_Grenade (the component tick 0x00C5A2A0 hooked with c:0x64:4 c:0xB0:8 gives the fuse)"),
+)

@@ -1,1 +1,19 @@
 # One scenario name per line (or 'session <op> key=value...'); the coordinator runs this queue on the hooked original.
+# ranged weapons and gadgets (research/dishonored/systems/ranged.md)
+combat/pistol_damage_range
+combat/pistol_height_sweep
+combat/pistol_pierce
+combat/pistol_hit
+combat/crossbow_damage_regions
+combat/crossbow_trajectory
+combat/crossbow_hit
+combat/grenade_bounce
+combat/grenade_fuse
+combat/grenade_explosion_falloff
+combat/spring_razor_radius
+combat/spring_razor
+combat/ammo_capacity
+# by-name reads: the attributes the damage and speed formulas take (pistol RangedDamage expected 10, crossbow 20; Attribute_Range base)
+session dump class=DishonoredWepPistol filter=Ranged limit=2
+session dump class=DishonoredWepPistol filter=Attribute limit=2
+session dump class=DisWepCrossbow filter=Attribute limit=2

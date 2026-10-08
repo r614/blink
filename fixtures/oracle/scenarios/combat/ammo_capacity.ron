@@ -1,0 +1,30 @@
+// Ammunition capacities at "FullAmmo" (Twk_Pawn_Corvo_Release.pAttributeTweaksNormal m_*Capacity, copied into
+// m_AmmoInfo[].m_AmmoCapacity by 0x00B56880): bullets 10, bolts 10, sleep darts 10, incendiary bolts 10,
+// Spring Razors 5, grenades 5, sticky grenades 5. The pistol and crossbow chamber one round of their own
+// (the port: left.pistol_loaded / bolts_loaded 1 plus the reserve), so whether the capacity counts the chambered
+// round is a capture question.
+(
+    name: "combat/ammo_capacity",
+    system: Combat,
+    map: "Playground",
+    description: "Full ammunition: the capacity of every ranged ammo type.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0, pitch: 0)),
+        items: ["FullAmmo"],
+        left_hand: Some("Pistol"),
+        settle: 30,
+    ),
+    ticks: 20,
+    input: [],
+    checkpoints: [
+        (name: "grenades", expect: [(metric: Final("inv.grenades"), value: 5, tol: 0, source: "Twk_Pawn_Corvo_Release m_GrenadeCapacity (INVENTORY.md)", status: Static)]),
+        (name: "sticky grenades", expect: [(metric: Final("inv.sticky"), value: 5, tol: 0, source: "m_StickyGrenadeCapacity", status: Static)]),
+        (name: "Spring Razors", expect: [(metric: Final("inv.razors"), value: 5, tol: 0, source: "m_SpringRazorCapacity", status: Static)]),
+        (name: "sleep darts", expect: [(metric: Final("inv.sleep_darts"), value: 10, tol: 0, source: "m_SleepArrowCapacity", status: Static)]),
+        (name: "incendiary bolts", expect: [(metric: Final("inv.incendiary"), value: 10, tol: 0, source: "m_FlareArrowCapacity", status: Static)]),
+        (name: "pistol reserve", expect: [(metric: Final("left.pistol_reserve"), value: 10, tol: 0, source: "m_BulletCapacity 10; whether the chambered round is inside it is not known", status: Unverified)]),
+        (name: "crossbow reserve", expect: [(metric: Final("left.bolts_reserve"), value: 10, tol: 0, source: "m_ArrowCapacity 10; whether the chambered bolt is inside it is not known", status: Unverified)]),
+    ],
+    record: [Pawn, Powers],
+    capture: Some("lab give all ammo; read DishonoredInventory.m_AmmoInfo[] (count, capacity) and the pistol / crossbow m_nAmmoLoaded"),
+)
