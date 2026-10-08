@@ -10,7 +10,7 @@
 //!                                            query batch for `probe_launch collide`
 //! oracle densify collision --map M --out Q.txt [--per N] [--radius R]   queries around disagreements
 //! oracle structure --map M                   port collision structure (vs a cached reflection dump)
-//! oracle scenario [NAME...] [--dir DIR] [--out DIR]
+//! oracle scenario [NAME...] [--system S]... [--all] [--jobs N] [--json] [--dir DIR] [--out DIR]
 //! oracle sweep [--out DIR] [--no-coverage]   every cached map and scenario -> scorecard + work list
 //! oracle bench import|queries --map M        measure the port's costs
 //! oracle cache list
@@ -21,7 +21,11 @@
 mod querygen;
 mod port;
 #[cfg(feature = "scenarios")]
+mod present;
+#[cfg(feature = "scenarios")]
 mod runner;
+#[cfg(feature = "scenarios")]
+mod scen;
 
 use anyhow::{Context, Result, bail};
 use dishonored_oracle::cache::{self, OracleKey, Probe, Provenance};
@@ -29,10 +33,6 @@ use dishonored_oracle::coverage::{self, scan, source::PortRegistry};
 use dishonored_oracle::diff;
 use dishonored_oracle::query::{self, CollisionSet};
 use dishonored_oracle::report::{self, Scorecard, Table, WorkItem};
-#[cfg(feature = "scenarios")]
-use dishonored_oracle::scenario::{self, Scenario};
-#[cfg(feature = "scenarios")]
-use dishonored_oracle::trace::Trace;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -58,7 +58,7 @@ impl Args {
         while i < self.0.len() {
             let a = &self.0[i];
             if a.starts_with("--") {
-                if !matches!(a.as_str(), "--dlc" | "--no-cache" | "--no-coverage" | "--rebuild") {
+                if !matches!(a.as_str(), "--dlc" | "--no-cache" | "--no-coverage" | "--rebuild" | "--all" | "--json") {
                     i += 1;
                 }
             } else {
@@ -323,11 +323,6 @@ fn cmd_snapshot(a: &Args) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "scenarios")]
-fn sim_config(json: &str) -> Result<dishonored_sim::SimConfig> {
-    dishonored_sim::SimConfig::from_json(json).map_err(|e| anyhow::anyhow!("gameplay config: {e}"))
-}
-
 /// The player's collision cylinder (radius, half height) from the gameplay config JSON.
 fn pawn_extent(json: &str) -> Result<(f32, f32)> {
     let v: serde_json::Value = serde_json::from_str(json)?;
@@ -557,79 +552,39 @@ fn cmd_scenario(_a: &Args) -> Result<(Scorecard, Vec<WorkItem>)> {
 
 #[cfg(feature = "scenarios")]
 fn cmd_scenario(a: &Args) -> Result<(Scorecard, Vec<WorkItem>)> {
-    let t_all = Instant::now();
     let root = cache::root();
     let names = if a.0.first().map(String::as_str) == Some("scenario") { a.free(1) } else { Vec::new() };
-    let all = scenario::load_dir(&scenario_dir(a))?;
-    let chosen: Vec<&(PathBuf, Scenario)> = all.iter().filter(|(_, s)| names.is_empty() || names.iter().any(|n| s.name == *n || s.name.ends_with(&format!("/{n}")))).collect();
+    let all = scen::load(&scenario_dir(a))?;
+    let systems = a.all("--system");
+    let names = if a.flag("--all") { Vec::new() } else { names };
+    let chosen = scen::select(&all, &names, &systems);
     if chosen.is_empty() {
-        bail!("no scenario matches {names:?} in {}", scenario_dir(a).display());
+        bail!("no scenario matches {names:?} / --system {systems:?} in {}", scenario_dir(a).display());
     }
     let exe = exe_sha(a, &root).ok();
-    let mut card = Scorecard { title: "Scenarios: port runs against the original's measurements and traces".into(), ..Default::default() };
-    let mut table = Table::new("Scenarios", &["scenario", "system", "map", "status", "checkpoints", "first divergence", "time s"]);
-    let mut checks_table = Table::new("Checkpoints", &["scenario", "checkpoint", "metric", "port", "original", "tol", "pass", "reference"]);
-    let mut items = Vec::new();
-    let mut worlds: HashMap<String, (dishonored_world::CollisionWorld, dishonored_sim::SimConfig)> = HashMap::new();
-    for (_, s) in chosen {
-        let t = Instant::now();
-        if s.sweep.is_some() {
-            table.row(vec![s.name.clone(), format!("{:?}", s.system), s.map.clone(), "sweep (run by `oracle collision`)".into(), "-".into(), "-".into(), "-".into()]);
-            continue;
-        }
-        if !runner::supports(s.system) {
-            table.row(vec![s.name.clone(), format!("{:?}", s.system), s.map.clone(), "not supported by the headless runner yet".into(), "-".into(), "-".into(), "-".into()]);
-            continue;
-        }
-        if !worlds.contains_key(&s.map) {
-            let (w, json) = port::snapshot(&root, &s.map, a.flag("--rebuild"))?.world();
-            worlds.insert(s.map.clone(), (w, sim_config(&json)?));
-        }
-        let (w, cfg) = &worlds[&s.map];
-        let trace = match runner::run(s, w, cfg) {
-            Ok(t) => t,
-            Err(e) => {
-                table.row(vec![s.name.clone(), format!("{:?}", s.system), s.map.clone(), format!("error: {e:#}"), "-".into(), "-".into(), "-".into()]);
-                continue;
-            }
-        };
-        let checks = diff::check_checkpoints(&trace, &s.checkpoints);
-        for c in &checks {
-            checks_table.row(vec![s.name.clone(), c.checkpoint.clone(), c.metric.clone(), c.actual.map(|v| format!("{v:.3}")).unwrap_or_else(|| "-".into()), format!("{}", c.expected), format!("{}", c.tol), if c.pass { "yes".into() } else { "**no**".into() }, c.source.clone()]);
-        }
-        // The original's trace for this exact spec, when captured.
-        let orig: Option<Trace> = exe.and_then(|e| {
-            let key = OracleKey { exe_sha256: e, subject: s.name.clone(), probe: Probe::Trace, query_hash: s.spec_hash() };
-            cache::load::<(Provenance, Trace)>(&root, &key).ok().map(|x| x.1)
-        });
-        let td = orig.as_ref().map(|o| diff::first_divergence(o, &trace, &|c| s.tolerance(c)));
-        let div = match &td {
-            None => "no original trace yet".to_string(),
-            Some(d) => match &d.first {
-                None => "none".into(),
-                Some(x) => format!("tick {}: {:?}", x.tick, x.kind),
-            },
-        };
-        let passed = checks.iter().filter(|c| c.pass).count();
-        table.row(vec![s.name.clone(), format!("{:?}", s.system), s.map.clone(), "ran".into(), format!("{passed}/{}", checks.len()), div, format!("{:.3}", t.elapsed().as_secs_f64())]);
-        items.extend(diff::scenario_work_items(s, &checks, td.as_ref()));
-        let dir = out_dir(a, "scenario").join("traces");
-        std::fs::create_dir_all(&dir).ok();
-        std::fs::write(dir.join(format!("{}.json", s.name.replace('/', "__"))), serde_json::to_string(&trace)?).ok();
-    }
-    card.tables.push(table);
-    card.tables.push(checks_table);
-    card.summary.push(("total time".into(), format!("{:.2} s", t_all.elapsed().as_secs_f64())));
+    let dir = out_dir(a, "scenario");
+    std::fs::create_dir_all(&dir)?;
+    let jobs = a.opt("--jobs").and_then(|s| s.parse().ok());
+    let (res, mut card, mut items) = scen::run(chosen, &dir, exe, jobs)?;
     if a.0.first().map(String::as_str) == Some("scenario") {
-        let dir = out_dir(a, "scenario");
-        write_report(&dir, &mut card, &mut items, 100)?;
-        print!("{}", card.tables[0].markdown());
-        print!("{}", card.tables[1].markdown());
-        println!("report: {} ({:.2} s)", dir.join("SCORECARD.md").display(), t_all.elapsed().as_secs_f64());
+        write_report(&dir, &mut card, &mut items, 200)?;
+        if a.flag("--json") {
+            println!("{}", serde_json::to_string_pretty(&res)?);
+        } else {
+            // The per-system and per-scenario tables (after the residual table write_report adds).
+            for t in card.tables.iter().filter(|t| t.title == "Per system" || t.title == "Scenarios") {
+                print!("{}", t.markdown());
+            }
+            let t = &res.totals;
+            println!(
+                "{} scenarios: {} pass, {} fail, {} unmeasured, {} error; checks {} pass / {} fail / {} unmeasured; {:.2} s",
+                t.scenarios, t.pass, t.fail, t.unmeasured, t.error, t.checks_pass, t.checks_fail, t.checks_unmeasured, t.seconds
+            );
+            println!("results: {} (capture requests: {})", dir.join("results.json").display(), dir.join("CAPTURE_REQUESTS.md").display());
+        }
     }
     Ok((card, items))
 }
-
 // ----- sweep -----
 
 fn cmd_sweep(a: &Args) -> Result<()> {
