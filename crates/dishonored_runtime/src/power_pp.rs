@@ -293,7 +293,7 @@ pub fn drive(
     mut kismet: Local<Option<dishonored_mission::runtime::PostFxView>>,
     mut poss: Local<PossessPp>,
     mut glow: ResMut<ArmGlow>,
-    mut q: Query<&mut ArkPostSource>,
+    mut q: Query<&mut ArkPostSource, Without<crate::reflect::ReflectCamera>>,
 ) {
     let slot = ui.get_or_insert_with(ui_slot);
     slot.required = pause.is_some_and(|p| p.open);

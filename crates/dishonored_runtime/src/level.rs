@@ -52,6 +52,7 @@ pub fn spawn_level(
     images: &mut Assets<Image>,
     materials: &mut Assets<StandardMaterial>,
     baked: &mut Assets<BakedMaterial>,
+    fx_mats: &mut Assets<crate::effects::FxMaterial>,
     levels: &mut Levels,
     fx: &mut crate::effects::Effects,
 ) -> DishonoredMap {
@@ -63,7 +64,7 @@ pub fn spawn_level(
         for e in &stats.errors {
             warn!("layout {name}: {e}");
         }
-        return spawn_imported(name, map, stats.instances, opts, features, commands, meshes, images, materials, baked, levels, fx);
+        return spawn_imported(name, map, stats.instances, opts, features, commands, meshes, images, materials, baked, fx_mats, levels, fx);
     }
     // --legacy-geometry: the pre-fidelity package/actor coverage (prefix-matched sublevels,
     // StaticMeshActor + StaticMeshCollectionActor only), for before/after comparisons.
@@ -79,7 +80,7 @@ pub fn spawn_level(
         stats.timings.iter().map(|(k, s)| format!("{k} {s:.1} s")).collect::<Vec<_>>().join(", "),
         if stats.lightmaps_cached { "from the cache" } else { "baked" }
     );
-    spawn_imported(name, map, stats.instances, opts, features, commands, meshes, images, materials, baked, levels, fx)
+    spawn_imported(name, map, stats.instances, opts, features, commands, meshes, images, materials, baked, fx_mats, levels, fx)
 }
 
 /// The importer's options. Baked lightmap pages are cached under DISHONORED_CACHE
@@ -116,11 +117,12 @@ fn spawn_imported(
     images: &mut Assets<Image>,
     materials: &mut Assets<StandardMaterial>,
     baked: &mut Assets<BakedMaterial>,
+    fx_mats: &mut Assets<crate::effects::FxMaterial>,
     levels: &mut Levels,
     fx: &mut crate::effects::Effects,
 ) -> DishonoredMap {
     let spawned = map_render::spawn_map(&map, commands, meshes, images, materials, baked, opts.show_hidden, features);
-    crate::effects::spawn_level_effects(name, &map, commands, meshes, images, materials, fx);
+    crate::effects::spawn_level_effects(name, &map, commands, meshes, images, fx_mats, fx);
     crate::level_props::queue(name, &map, commands);
     info!("{}: {} instances, {} meshes, {} textures, {} entities", name, instances, map.meshes.len(), map.textures.len(), spawned);
     let lights = lighting::spawn_lights(&map, commands, features);
@@ -177,6 +179,7 @@ pub fn follow_level(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut baked: ResMut<Assets<BakedMaterial>>,
+    mut fx_mats: ResMut<Assets<crate::effects::FxMaterial>>,
     mut vis: Query<(&LevelOf, &mut Visibility)>,
     mut fx: ResMut<crate::effects::Effects>,
     camera: Query<Entity, (With<Camera3d>, Without<crate::reflect::ReflectCamera>)>,
@@ -212,7 +215,7 @@ pub fn follow_level(
             }
             Some(Ok(map)) => {
                 let n = map.instances.len();
-                spawn_imported(&target, map, n, &opts.0, &features, &mut commands, &mut meshes, &mut images, &mut materials, &mut baked, &mut levels, &mut fx);
+                spawn_imported(&target, map, n, &opts.0, &features, &mut commands, &mut meshes, &mut images, &mut materials, &mut baked, &mut fx_mats, &mut levels, &mut fx);
             }
             Some(Err(e)) => error!("importing {target}: {e}"),
         }

@@ -241,6 +241,11 @@ pub struct MissionView {
     /// Kismet-controlled ambient sound actors ("package:actor name", playing).
     #[serde(default)]
     pub ambient: Vec<(String, bool)>,
+    /// Kismet `SeqAct_Toggle`s of scene capture actors (`SceneCaptureActor.OnToggle`): (`package:actor`,
+    /// the last explicit On / Off, whether an odd number of Toggle impulses followed it). The renderer
+    /// combines them with the capture component's `bEnabled` from the level (`reflect.rs`).
+    #[serde(default)]
+    pub captures: Vec<(String, Option<bool>, bool)>,
     /// Usable markers: (position, prompt).
     #[serde(default)]
     pub usables: Vec<([f32; 3], String)>,

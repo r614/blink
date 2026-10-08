@@ -384,7 +384,7 @@ pub fn spawn_map(
     // Planar reflections: the capture cameras and their render targets (reflect.rs), and the
     // render layers the reflected primitives are drawn in.
     let reflect_layers = crate::reflect::Layers::new(map, features);
-    let reflect_targets = crate::reflect::spawn_captures(map, &reflect_layers, commands, images);
+    let reflect_targets = crate::reflect::spawn_captures(map, &reflect_layers, features, commands, images);
     let default_params = MaterialParams::default();
     let material_handles: Vec<Handle<StandardMaterial>> = map
         .materials
@@ -508,7 +508,15 @@ pub fn spawn_map(
             // translucent, sky and debug geometry stays per instance.
             // [interp] Matinee-driven actors (InterpActor) stay separate so cutscenes can move them.
             let mover = crate::cutscene::mover_of(&inst.source, inst.transform);
-            if merge && !inst.hidden && !is_sky && !translucent && mover.is_none() {
+            // The lens TV (tv_screen.rs): a material that samples a scene capture's render target.
+            let screen = (features.materials && features.reflections && !inst.hidden)
+                .then(|| {
+                    let p = map.material_params.get(mat_id?)?;
+                    let h = reflect_targets.get(&crate::reflect::screen_target(p)?.to_ascii_lowercase())?.clone();
+                    Some((crate::tv_screen::TvScreenMaterial::new(p, h.clone()), h))
+                })
+                .flatten();
+            if merge && !inst.hidden && !is_sky && !translucent && mover.is_none() && screen.is_none() {
                 let has_uv1 = mesh.uv1.len() == mesh.positions.len();
                 let lm = inst.lightmap.filter(|_| features.lightmaps && has_uv1);
                 let t = inst.transform.w_axis;
@@ -584,6 +592,9 @@ pub fn spawn_map(
                     e.insert(crate::sky_disc::PendingSkyDisc(dm));
                 }
             }
+            if let Some((tv, target)) = screen {
+                e.insert((crate::tv_screen::PendingTvScreen(tv), crate::reflect::ReflectUser(target), bevy::camera::visibility::RenderLayers::layer(crate::reflect::SCREEN_LAYER)));
+            }
             // Light beams (Volume_Light_PMAT): their own shading (volume_light.rs), with the
             // mesh's vertex colours for the `Use_Vertex_Color` permutations.
             let volume_light = (translucent && features.materials && !inst.hidden)
@@ -651,6 +662,9 @@ pub fn spawn_map(
                     e.insert(w);
                 } else if let Some(d) = mat_id.and_then(|m| crate::decals::PendingDecal::new(map.material_params.get(m)?, &map.materials[m].texture_params, &image_handles, scene, lightmap)) {
                     e.insert(d);
+                } else if let Some(k) = mat_id.and_then(|m| map.material_params.get(m)).map(crate::effects::soft_scale).filter(|k| *k > 0.0) {
+                    // Particle-base level meshes (light cones, glows) with depth-biased alpha.
+                    e.insert(crate::effects::PendingSoft(k));
                 }
             }
             if let Some(m) = mover {

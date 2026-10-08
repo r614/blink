@@ -57,6 +57,73 @@ impl Material for GlowMaterial {
     }
 }
 
+/// Soft particles (depth-biased alpha) on top of the sprite's unlit StandardMaterial: the
+/// particle_soft.wgsl fragment multiplies the alpha by the scene-depth fade. One material per
+/// emitter, so the sprite meshes batch exactly as before; soft.x = 0 draws a plain sprite.
+#[derive(Asset, bevy::render::render_resource::AsBindGroup, Reflect, Debug, Clone, Default)]
+pub struct SoftFade {
+    /// x: the depth-fade scale k (0: off), see `soft_scale`.
+    #[uniform(100)]
+    pub soft: Vec4,
+}
+
+impl bevy::pbr::MaterialExtension for SoftFade {
+    fn fragment_shader() -> bevy::shader::ShaderRef {
+        "embedded://dishonored_runtime/particle_soft.wgsl".into()
+    }
+}
+
+pub type FxMaterial = bevy::pbr::ExtendedMaterial<StandardMaterial, SoftFade>;
+
+/// The depth fade scale of a material's depth-biased alpha (0: none), from the particle bases'
+/// compiled base passes (shader_maps / fxc /dumpbin; render_depth.md "Soft particles"): with
+/// `Db_Enable_Depth_Biased_Alpha` (DefaultAdditive / DefaultTranslu families, Glow, LensFlare,
+/// WindSwirls, Volume_Light_Ring / _translu, ...; 36033, 35519, 35911, 6869, ...)
+/// k = 1 / ((1 - Db_Depth_Biased_Alpha_Intensity) x 250); `lightCone_twoSided_PMAT` has the same
+/// term under `Da_Enable_Depth_Biased_Alpha` / `Da_Depth_Biased_Alpha_Intensity` (default 0.5) with
+/// 500 for 250 (shader 2726; LIKELY, read from the disassembly's constants). k is 1000 when the
+/// product is below 0.001. (Volume_Light_PMAT uses 50, `volume_light.rs`.)
+pub fn soft_scale(p: &dishonored_ir::MaterialParams) -> f32 {
+    let scalar = |n: &str, d: f32| p.scalars.iter().find(|s| s.0.trim().eq_ignore_ascii_case(n)).map(|s| s.1).unwrap_or(d);
+    let (range, intensity) = if p.switch("Db_Enable_Depth_Biased_Alpha") == Some(true) {
+        (250.0, scalar("Db_Depth_Biased_Alpha_Intensity", 0.05))
+    } else if p.switch("Da_Enable_Depth_Biased_Alpha") == Some(true) {
+        (500.0, scalar("Da_Depth_Biased_Alpha_Intensity", 0.5))
+    } else {
+        return 0.0;
+    };
+    let b = (1.0 - intensity) * range;
+    if b - 0.001 >= 0.0 { 1.0 / b } else { 1000.0 }
+}
+
+/// A static-mesh section of a particle base with depth-biased alpha (level meshes: light cones,
+/// glows, translucent props), waiting for its `FxMaterial` (spawned with a `StandardMaterial` by
+/// `map_render::spawn_map`, swapped on the next update; one `FxMaterial` per source material, so
+/// batches are kept).
+#[derive(Component, Clone, Copy)]
+pub struct PendingSoft(pub f32);
+
+fn apply_pending_soft(
+    mut commands: Commands,
+    q: Query<(Entity, &PendingSoft, &MeshMaterial3d<StandardMaterial>)>,
+    std_mats: Res<Assets<StandardMaterial>>,
+    mut mats: ResMut<Assets<FxMaterial>>,
+    mut cache: Local<HashMap<(AssetId<StandardMaterial>, u32), Handle<FxMaterial>>>,
+) {
+    for (e, p, m) in &q {
+        let key = (m.0.id(), p.0.to_bits());
+        let h = match cache.get(&key) {
+            Some(h) => h.clone(),
+            None => {
+                let Some(base) = std_mats.get(&m.0).cloned() else { continue };
+                let h = mats.add(FxMaterial { base, extension: SoftFade { soft: Vec4::new(p.0, 0.0, 0.0, 0.0) } });
+                cache.insert(key, h.clone());
+                h
+            }
+        };
+        commands.entity(e).remove::<(PendingSoft, MeshMaterial3d<StandardMaterial>)>().insert(MeshMaterial3d(h));
+    }
+}
 /// Placed emitters are simulated only within this distance of the camera (uu).
 const SIM_RANGE: f32 = 9000.0;
 
@@ -65,9 +132,9 @@ struct LevelFx {
     systems: Vec<ParticleSystemAsset>,
     by_path: HashMap<String, usize>,
     /// (system, emitter) -> material handle.
-    materials: HashMap<(usize, usize), Handle<StandardMaterial>>,
+    materials: HashMap<(usize, usize), Handle<FxMaterial>>,
     /// Mesh emitters: (system, emitter) -> (mesh, material).
-    mesh_parts: HashMap<(usize, usize), (Handle<Mesh>, Handle<StandardMaterial>)>,
+    mesh_parts: HashMap<(usize, usize), (Handle<Mesh>, Handle<FxMaterial>)>,
     /// Emitters not drawn (untextured mesh emitters).
     skipped: std::collections::HashSet<(usize, usize)>,
     /// Sprite emitters whose material erodes by the particle alpha (`ParticleShading::erode`).
@@ -146,7 +213,7 @@ pub struct FxInstance {
     sims: Vec<EmitterSim>,
     meshes: Vec<Handle<Mesh>>,
     /// Mesh emitters: one entity per live particle.
-    pools: Vec<Vec<(Entity, Handle<StandardMaterial>, LinearRgba)>>,
+    pools: Vec<Vec<(Entity, Handle<FxMaterial>, LinearRgba)>>,
     /// Glow mesh emitters: one entity and material per live particle.
     glow_pools: Vec<Vec<(Entity, Handle<GlowMaterial>)>>,
     /// Light-beam mesh emitters: one entity and material per live particle.
@@ -163,6 +230,8 @@ pub struct EffectsPlugin;
 impl Plugin for EffectsPlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "volume_glow.wgsl");
+        bevy::asset::embedded_asset!(app, "particle_soft.wgsl");
+        app.add_plugins(MaterialPlugin::<FxMaterial>::default()).add_systems(Update, apply_pending_soft);
         app.add_plugins(MaterialPlugin::<GlowMaterial>::default());
         app.init_resource::<Effects>().init_resource::<EffectSockets>().init_resource::<HandEffects>().add_systems(
             Update,
@@ -193,7 +262,7 @@ impl Effects {
     }
 }
 
-fn material_for(map: &DishonoredMap, em: &ParticleEmitterAsset, images: &mut Assets<Image>, cache: &mut HashMap<usize, Handle<Image>>, mats: &mut Assets<StandardMaterial>) -> Handle<StandardMaterial> {
+fn material_for(map: &DishonoredMap, em: &ParticleEmitterAsset, images: &mut Assets<Image>, cache: &mut HashMap<usize, Handle<Image>>, mats: &mut Assets<FxMaterial>) -> Handle<FxMaterial> {
     let tex = em.material.and_then(|m| {
         let ma = map.materials.get(m)?;
         // A decoded particle material's sprite texture is its diffuse slot (or none).
@@ -258,7 +327,12 @@ fn material_for(map: &DishonoredMap, em: &ParticleEmitterAsset, images: &mut Ass
     } else {
         Color::linear_rgba(tint[0], tint[1], tint[2], gain.clamp(0.0, 1.0))
     };
-    mats.add(StandardMaterial { base_color, base_color_texture: image, unlit: true, alpha_mode, cull_mode: None, double_sided: true, fog_enabled: alpha_mode != AlphaMode::Add, ..default() })
+    // Depth-biased alpha (soft particles): Db_Enable_Depth_Biased_Alpha permutations fade by the scene depth.
+    let soft = params.map(soft_scale).unwrap_or(0.0);
+    mats.add(FxMaterial {
+        base: StandardMaterial { base_color, base_color_texture: image, unlit: true, alpha_mode, cull_mode: None, double_sided: true, fog_enabled: alpha_mode != AlphaMode::Add, ..default() },
+        extension: SoftFade { soft: Vec4::new(soft, 0.0, 0.0, 0.0) },
+    })
 }
 
 /// A white disc fading to transparent at its edge (`(1 - r)^power`), for procedural glows.
@@ -283,7 +357,7 @@ fn radial_falloff(power: f32) -> Image {
 }
 
 /// Register a level's particle systems and spawn its placed emitters (called on level spawn).
-pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Commands, meshes: &mut Assets<Mesh>, images: &mut Assets<Image>, mats: &mut Assets<StandardMaterial>, fx: &mut Effects) -> usize {
+pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Commands, meshes: &mut Assets<Mesh>, images: &mut Assets<Image>, mats: &mut Assets<FxMaterial>, fx: &mut Effects) -> usize {
     let mut cache = HashMap::new();
     let mut materials = HashMap::new();
     for (si, s) in map.particle_systems.iter().enumerate() {
@@ -737,7 +811,7 @@ fn simulate(
     mut fx: ResMut<Effects>,
     time: Res<Time>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut mats: ResMut<Assets<StandardMaterial>>,
+    mut mats: ResMut<Assets<FxMaterial>>,
     mut glow_mats: ResMut<Assets<GlowMaterial>>,
     mut volume_mats: ResMut<Assets<crate::volume_light::VolumeLightMaterial>>,
     mut q: Query<(Entity, &mut FxInstance, &InheritedVisibility, Option<&BeamTarget>, Option<&StopAtOnce>)>,
@@ -857,7 +931,7 @@ fn simulate(
                 let want = sim.particles.len().min(64);
                 while pool.len() < want {
                     let base = mats.get(mat).cloned().unwrap_or_default();
-                    let tintc = base.base_color.to_linear();
+                    let tintc = base.base.base_color.to_linear();
                     let pm = mats.add(base);
                     let id = commands.spawn((Mesh3d(mh.clone()), MeshMaterial3d(pm.clone()), Transform::IDENTITY, bevy::light::NotShadowCaster, FxMeshParticle, ChildOf(e))).id();
                     pool.push((id, pm, tintc));
@@ -892,7 +966,7 @@ fn simulate(
                     let color = em.color_over_life.as_ref().map(|d| Vec3::from(d.eval(rel, p.r[0]))).unwrap_or(p.color);
                     let alpha = em.alpha_over_life.as_ref().map(|d| d.eval1(rel, p.r[0])).unwrap_or(p.alpha).clamp(0.0, 1.0);
                     if let Some(mut m) = mats.get_mut(&pool[k].1) {
-                        m.base_color = if em.blend == ParticleBlend::Additive || m.alpha_mode == AlphaMode::Add {
+                        m.base.base_color = if em.blend == ParticleBlend::Additive || m.base.alpha_mode == AlphaMode::Add {
                             Color::linear_rgb(color.x * alpha * pool[k].2.red, color.y * alpha * pool[k].2.green, color.z * alpha * pool[k].2.blue)
                         } else {
                             Color::linear_rgba(color.x * pool[k].2.red, color.y * pool[k].2.green, color.z * pool[k].2.blue, alpha * pool[k].2.alpha)

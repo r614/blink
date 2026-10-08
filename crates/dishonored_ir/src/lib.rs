@@ -1,4 +1,4 @@
-﻿//! Normalized Dishonored content, independent of UE3 object semantics.
+//! Normalized Dishonored content, independent of UE3 object semantics.
 //!
 //! Coordinate frame: **Dishonored world space** â€” Z-up, left-handed, Unreal units (uu),
 //! exactly as the original game stores it. Simulation code works in this frame so
@@ -102,7 +102,24 @@ pub struct ReflectCapture {
     pub skip_if_unseen: bool,
     /// `MaxUpdateDist` (0: no limit), uu.
     pub max_update_dist: f32,
+    /// A `SceneCapture2DActor` (the Tower Return lens TV): a fixed camera instead of the mirror
+    /// plane (`normal`, `d` and `channels` are unused: it draws the whole scene).
+    #[serde(default)]
+    pub scene2d: Option<SceneCamera>,
 }
+
+/// The fixed view of a `SceneCapture2DComponent` (Dishonored world space): the actor's location and
+/// its X (forward) and Z (up) axes, the horizontal field of view in degrees and the clip planes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct SceneCamera {
+    pub location: Vec3,
+    pub forward: Vec3,
+    pub up: Vec3,
+    pub fov: f32,
+    pub near: f32,
+    pub far: f32,
+}
+
 /// UE3 `EBlendMode` of the base material.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MaterialBlend {
