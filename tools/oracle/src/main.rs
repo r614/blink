@@ -701,8 +701,22 @@ fn bench_import(_map: &str) -> Result<()> {
 }
 
 fn cmd_cache(a: &Args) -> Result<()> {
+    if a.0.get(1).map(String::as_str) == Some("show") {
+        // `oracle cache show <subject> <out.json>`: a cached original trace as JSON (the same
+        // format as the port traces `oracle scenario` writes).
+        let (Some(subject), Some(out)) = (a.0.get(2), a.0.get(3)) else { bail!("oracle cache show <subject> <out.json>") };
+        let root = cache::root();
+        for (k, p) in cache::list(&root, None) {
+            if k.probe == Probe::Trace && k.subject == *subject {
+                let (_, (_, tr)): (OracleKey, (Provenance, dishonored_oracle::trace::Trace)) = cache::decode(&std::fs::read(&p)?)?;
+                std::fs::write(out, serde_json::to_string(&tr)?)?;
+                println!("{} ({:016x}) -> {out}", k.subject, k.query_hash);
+            }
+        }
+        return Ok(());
+    }
     if a.0.get(1).map(String::as_str) != Some("list") {
-        bail!("oracle cache list");
+        bail!("oracle cache list | oracle cache show <subject> <out.json>");
     }
     let root = cache::root();
     println!("oracle cache: {}", root.display());
