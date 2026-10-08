@@ -350,7 +350,29 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     }
     let t_all = Instant::now();
     let mut warnings: Vec<String> = Vec::new();
-    let gap = |w: String, warnings: &mut Vec<String>| -> Result<()> {
+    // The ambient idle pick (`DisAISubProcessAmbientAnims` tick 0x00B39620): `push edi; call
+    // 0x00401940 (rand() * n / 32768); add esp, 4` at 0x00B39728. A pinned variant replaces the
+    // 5-byte call by `mov eax, index`; otherwise the call is restored (the code outlives the
+    // map reloads of a session).
+    {
+        const PICK_CALL: u32 = 0x00B39728;
+        let pin = spec.setup.npcs.iter().find_map(|n| n.ambient.as_deref()).map(|s| s.rsplit('_').next().and_then(|d| d.parse::<u32>().ok()).unwrap_or(1));
+        let bytes: [u8; 5] = match pin {
+            Some(v) => {
+                let i = v.saturating_sub(1);
+                [0xB8, i as u8, (i >> 8) as u8, (i >> 16) as u8, (i >> 24) as u8]
+            }
+            None => [0xE8, 0x13, 0x82, 0x8C, 0xFF],
+        };
+        let now = s.c.read(PICK_CALL, 5)?;
+        if now[..] != bytes[..] {
+            if now[0] != 0xE8 && now[0] != 0xB8 {
+                bail!("{}: unexpected code at the ambient idle pick {PICK_CALL:#x}: {now:02x?}", spec.name);
+            }
+            s.c.write(PICK_CALL, &bytes)?;
+        }
+    }
+    let gap =|w: String, warnings: &mut Vec<String>| -> Result<()> {
         if partial {
             warnings.push(w);
             Ok(())
@@ -555,8 +577,13 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
                 // Approximation: the guard's attention on the player filled (1.0); its own
                 // attention process then raises the level and starts combat.
                 let info = crate::oracle_stealth::attention_info(&mut s.c, pawn)?;
+                // Value alone is not enough: the cached sword_hit_dummy capture (value only) had
+                // the process clamp it to 0.7 at level 3 (not combat), and the guard was
+                // assassinated from behind-style (throat fatality). Level 4 = Busted (the port's
+                // DAL_BUSTED) selects combat.
                 s.c.write(info + 0x8c, &1.0f32.to_le_bytes())?;
-                warnings.push(format!("NPC {id}: Alerted approximated by filling its player attention (1.0)"));
+                s.c.write(info + crate::oracle_stealth::ATTN_LEVEL, &[4u8])?;
+                warnings.push(format!("NPC {id}: Alerted approximated by filling its player attention (1.0, level Busted)"));
             }
             Some(st) => gap(format!("NPC {id}: AI state {st} not applied"), &mut warnings)?,
         }

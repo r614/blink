@@ -9,22 +9,34 @@
 // pawn has no brain, which reads as Unaware (0x00B5E250) and would be assassinated (0x00C09060, as in the chaos
 // captures), so the dummy is Alerted: aware of the player (InCombat), not assassinable.
 // Presentation: blood from the contact system (Sword x Body), the hit reaction.
+//
+// RE-CAPTURED (detect2 pass): the cached original of the "Alerted" setup did not match this text. The
+// original-side `Alerted` was an approximation (the player attention info filled to 1.0), and the live attention
+// process cut it back to level 3 / value 0.7 (DisBehaviorSearch, not combat); the guard was then assassinated
+// (throat fatality, health 50 -> 0 at tick 46), so the port's "InCombat at tick 0" (1.0, level 4) could never
+// agree. The runner now writes level Busted as well, but the process still returns it to Search, so an Alerted
+// fill cannot make a combat guard on the original. What does: a guard of the hostile faction that has seen the
+// player for a while. This spec therefore places the Doorman with `Faction_Guard_Default` and settles 120 ticks.
+// In that capture the guard is in DisBehaviorCombatEliteGuard (level 4, value 2.18 and rising: the accumulator has no upper bound, the port now agrees: 1.98), but it steps back 73 uu
+// during the settle (y -8013 at tick 0, not -7940), so the swing at tick 5 whiffs: no damage in 600 ticks. The
+// HOOK_TRIAGE 2026-10-06 hit (10 of 50, 0.30-0.35 s) was on a guard that stood in reach; timing and damage are
+// therefore Unverified here, not a measurement of this capture.
 (
     name: "combat/sword_hit_dummy",
     system: Combat,
     map: "L_Boyle_Ext_P",
-    description: "Swing once at an alerted guard 140 uu ahead facing the player (no back assassination): timing, damage, blood, hit reaction, sounds.",
+    description: "Swing once at a hostile guard 140 uu ahead facing the player (no back assassination): timing, damage, blood, hit reaction, sounds.",
     setup: (
         player: Some((position: (-8958, -7800, -1222), yaw: -90, pitch: -5, sword_drawn: true, snap_to_floor: true)),
-        npcs: [(id: Some("dummy"), position: Some((-8958, -7940, -1218)), yaw: 90, state: Some("Alerted"))],
-        settle: 30,
+        npcs: [(id: Some("dummy"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-8958, -7940, -1218)), yaw: 90, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default"))],
+        settle: 120,
     ),
     ticks: 600,
     input: [(tick: 5, action: Press(Primary))],
     checkpoints: [
         (name: "dummy keeps facing the player", expect: [(metric: At("npc.dummy.yaw", 5), value: 90, tol: 0.5, source: "a placed pawn keeps its spawn rotation without input (yaw 90: the 140 uu geometry rotated from x to y on Boyle)", status: Static)]),
-        (name: "timing", expect: [(metric: Between("Sim:SwordSwing", "Sim:Damage@dummy"), value: 0.325, tol: 0.026, source: "HOOK_TRIAGE.md 2026-10-06: press -> damage 0.300-0.350 s (U-590)")]),
-        (name: "damage", expect: [(metric: EventValue("Sim:Damage@dummy", "amount"), value: 10, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: 10 of 50 per hit (the sword's Attribute_MeleeDamage 10)")]),
+        (name: "timing", expect: [(metric: Between("Sim:SwordSwing", "Sim:Damage@dummy"), value: 0.325, tol: 0.026, source: "HOOK_TRIAGE.md 2026-10-06: press -> damage 0.300-0.350 s (U-590); not in this capture (the swing whiffs)", status: Unverified)]),
+        (name: "damage", expect: [(metric: EventValue("Sim:Damage@dummy", "amount"), value: 10, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: 10 of 50 per hit (the sword's Attribute_MeleeDamage 10); not in this capture (the swing whiffs)", status: Unverified)]),
         (name: "blood", expect: [
             (metric: Count("Effect:Vfx_PhysMat.Blood.*@dummy"), value: 1, tol: 0, source: "contact system: Sword x Body particle sub-intersection", status: Static),
             (metric: Count("EffectMissing:*"), value: 0, tol: 0, source: "every system the contact system names exists in the packages", status: Static),

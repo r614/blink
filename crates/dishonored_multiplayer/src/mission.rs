@@ -909,6 +909,15 @@ impl MissionMatch {
         }
     }
 
+    /// An NPC plays the ambient idle `seq` (`Empty_Idle_03`), already `age` seconds in. A
+    /// negative `age` counts down to its start. The pick is pinned to it.
+    pub fn start_ambient_idle(&mut self, id: PlayerId, seq: &str, age: f32) {
+        let ai = self.crowd.ai.clone();
+        if let Some(b) = self.crowd.brains.iter_mut().find(|b| b.id == id) {
+            b.start_ambient(&ai, seq, age);
+        }
+    }
+
     /// Put an NPC brain into combat (guards) or flight (civilians) against the nearest player.
     pub fn alert_npc(&mut self, id: PlayerId) {
         let pos = self.world.player(id).map(|p| p.position).unwrap_or(Vec3::ZERO);

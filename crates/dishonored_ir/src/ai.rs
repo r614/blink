@@ -618,10 +618,29 @@ pub struct VisionConfig {
     /// pawn's rotation (0x00C676A0).
     #[serde(default = "nullzone")]
     pub bone_nullzone_deg: f32,
+    /// The player's vision regions (`DisTweaks_PlayerVisRegion.m_VisRegionSettings`: standing,
+    /// sneaking, crouching): `[width, offset towards the NPC, top, bottom]`, top and bottom in
+    /// uu above the feet. They place the five line-of-sight test points of the player target
+    /// (0x00C77FC0).
+    #[serde(default = "vis_regions")]
+    pub vis_regions: [[f32; 4]; 3],
+    /// The player target's line-of-sight check period (`Twk_Component_Observable_Player`
+    /// `m_fLOSCheckPeriod`, target vslot 7): a candidate is traced again once this long has
+    /// passed since its last trace (0x00C788E0).
+    #[serde(default = "los_period")]
+    pub los_period: f32,
 }
 
 fn nullzone() -> f32 {
     5.0
+}
+
+fn vis_regions() -> [[f32; 4]; 3] {
+    [[20.0, 35.0, 150.0, 30.0], [20.0, 35.0, 90.0, 50.0], [20.0, 35.0, 60.0, 30.0]]
+}
+
+fn los_period() -> f32 {
+    0.1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1222,6 +1241,11 @@ pub struct AiConfig {
     /// before the ambient `DDH_PATROL_MISC` barks (0x00b47020).
     #[serde(default = "bark_inhibition")]
     pub ambient_bark_inhibition: f32,
+    /// `DisTweaks_AISubProcess_AmbientAnims` (`m_fMinAmbientAnimFrequency`,
+    /// `m_fMaxAmbientAnimFrequency`): seconds between a patrolling / guarding NPC's ambient idle
+    /// animations (`TweaksBehavior_Patrol_Default`: 30 .. 60).
+    #[serde(default = "ambient_anim_freq")]
+    pub ambient_anim_freq: [f32; 2],
     /// The special NPC classes (tallboys, hounds, weepers, music-box Overseers).
     #[serde(default)]
     pub special: SpecialNpcConfig,
@@ -1298,6 +1322,10 @@ impl HeadPose {
     pub fn find(&self, modifier: &str, speed: u8) -> Option<&HeadLoop> {
         self.loops.iter().find(|l| l.speed == speed && l.modifier.eq_ignore_ascii_case(modifier)).or_else(|| self.loops.iter().find(|l| l.speed == speed))
     }
+}
+
+fn ambient_anim_freq() -> [f32; 2] {
+    [30.0, 60.0]
 }
 
 fn bark_inhibition() -> f32 {
@@ -2002,7 +2030,7 @@ impl Default for AiConfig {
     /// `dishonored_assets::gameplay` reloads them from the install.
     fn default() -> Self {
         AiConfig {
-            vision: VisionConfig { inner_fov_deg: 45.0, inner_range: 3500.0, inner_up: 0.25, inner_down: 0.7, outer_fov_deg: 160.0, outer_range: 1700.0, outer_up: 0.1, outer_down: 0.7, bone_nullzone_deg: 5.0 },
+            vision: VisionConfig { inner_fov_deg: 45.0, inner_range: 3500.0, inner_up: 0.25, inner_down: 0.7, outer_fov_deg: 160.0, outer_range: 1700.0, outer_up: 0.1, outer_down: 0.7, bone_nullzone_deg: 5.0, vis_regions: vis_regions(), los_period: los_period() },
             guard_unsuspecting: AttentionConfig::guard_unsuspecting(),
             guard_suspecting: AttentionConfig::guard_suspecting(),
             civilian_unsuspecting: AttentionConfig::guard_unsuspecting(),
@@ -2074,6 +2102,7 @@ impl Default for AiConfig {
             head_track_torso_ratio: 0.0,
             player_eye: [0.0, 0.0],
             ambient_bark_inhibition: bark_inhibition(),
+            ambient_anim_freq: ambient_anim_freq(),
             special: SpecialNpcConfig::default(),
             provenance: BTreeMap::new(),
         }
