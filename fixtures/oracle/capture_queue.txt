@@ -216,3 +216,24 @@ stealth/detect_600
 # at each DishonoredNotify_Footfall of the locomotion loop at RateScale 1. Needed: the tick of each footfall contact (trace 0x00b66a80) while
 # running at 400 / 360 uu/s and sprinting at 600 / 540, to decode the loop's play rate.
 stealth/hear_footfalls
+# --- conversations, barks, cutscenes (research/dishonored/systems/conversation.md) ---
+# C1: bark observables (AkEvent posts on the guard, tick-exact) next to the brain channels; the three session lines after it read the NPC's per-hook
+# next-allowed table (DisConversationComponent.m_DialogHookInfo_InGame[hook] = fire time + rand*(max-min); the port stores the same without the +min of the gate)
+# and the manager's last-fire table (DisConvGlobalMan.m_DialogHookInfo_InGame[hook].m_fLastFireTime), world time via worldinfo TimeSeconds.
+conversation/bark_notice_detect600
+session dump class=DisConversationComponent filter=m_DialogHookInfo_InGame limit=60
+session dump class=DisConvGlobalMan filter=m_DialogHookInfo_InGame limit=2
+session read object=worldinfo path=TimeSeconds
+# C2: arbitration of simultaneous bark requests (group caps, loud / quiet, distance weight, 2.5 s lock) and what the manager holds right after.
+conversation/bark_group_arbitration
+session dump class=DisConversationComponent filter=m_DialogHookInfo_InGame limit=60
+session dump class=DisConvGlobalMan filter=m_QueuedHookGroups limit=2
+session dump class=DisConvGlobalMan filter=m_CurDominantHook limit=2
+session read object=worldinfo path=TimeSeconds
+# C3: which tweak object the manager really uses (the port assumes the class defaults of DisTweaks_ConvSettings: the refire overrides, the 13 fire groups, 5000 / 2000 uu, weight range 0.2).
+session find class=DisTweaks_ConvSettings limit=8
+session dump class=DisTweaks_ConvSettings limit=8
+session dump class=DisConvGlobalMan filter=m_pConvSettingTweaks limit=2
+# C4: cutscene lock: player path, camera and release under scripted input during Samuel's boat intro.
+cutscene/boyle_intro_lock
+session dump class=StatePlayerMasterSoiree limit=2

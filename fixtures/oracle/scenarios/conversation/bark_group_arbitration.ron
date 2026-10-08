@@ -1,0 +1,41 @@
+// Bark arbitration by fire group and distance (conversation.md findings 4-9). Six hostile guards
+// stand in a row down the Playground stealth lane at 600 .. 3600 uu from the player, all facing
+// away. One pistol shot (Danger noise) is heard by every guard; the near ones also see the player,
+// so the room goes through notice / search / combat barks within seconds. Barks of one fire group
+// compete: the original queues the requests per group and per Loud / Quiet audio distance (2000 uu)
+// and fires the best weight first (weight = 1 - d / 5000 + rand * 0.2, DisConvGlobalMan tick
+// 0x00ca5b20, weights 0x00ca2580); the rest are dropped for that tick, the group allows 1 (Threat,
+// Agitated) or 2 (Combat cries, Attention) at once per queue (a bark from a speaker whose audio path
+// is 2000 uu or more away is in the separate Quiet queue, so one Loud and one Quiet bark of a group
+// may play together) and locks for its minimum spacing when a bark ends.
+// The port fires requests in asking order and rejects the others by the group cap.
+// Observables: the order and tick of the AkEvent posts per guard, the number of posts per window,
+// and that no two barks of a 1-slot group overlap.
+(
+    name: "conversation/bark_group_arbitration",
+    system: Conversation,
+    map: "Playground",
+    description: "Six guards react to one shot at 600..3600 uu: which barks play, in what order, how many at once.",
+    setup: (
+        player: Some((position: (-5600, 7000, 96), yaw: 0, pitch: 60)),
+        items: ["Bullet:5"],
+        left_hand: Some("Pistol"),
+        npcs: [
+            (id: Some("g600"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-5000, 7000, 92)), yaw: 0, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default")),
+            (id: Some("g1200"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-4400, 7000, 92)), yaw: 0, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default")),
+            (id: Some("g1800"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-3800, 7000, 92)), yaw: 0, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default")),
+            (id: Some("g2400"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-3200, 7000, 92)), yaw: 0, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default")),
+            (id: Some("g3000"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-2600, 7000, 92)), yaw: 0, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default")),
+            (id: Some("g3600"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-2000, 7000, 92)), yaw: 0, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default")),
+        ],
+        settle: 120,
+    ),
+    ticks: 360,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "all six investigate", expect: [(metric: TimeAt("npc.g600.state", 7), value: 15, tol: 0, cmp: AtMost, source: "ai/investigate_noise: a Danger noise in hearing range sends a guard to investigate", status: Unverified)]),
+        (name: "barks posted in the first 3 s after the shot", expect: [(metric: Count("Sound:*Play_*"), value: 0, tol: 0, source: "DisConvGlobalMan tick 0x00ca5b20: fire group Agitated allows 1 playing (DisTweaks_ConvSettings m_FireGroupConfig); the first bark locks the group for m_fMinTimeBetweenFiring 2.5 s after it ends", status: Unmeasured)]),
+    ],
+    record: [Pawn, Npc("g600"), Npc("g1800"), Npc("g3600"), SimEvents, Sounds],
+    capture: Some("shot with six hostile guards in a row: per-guard brain state, and every AkEvent post (ProcessEvent filter AkComponent / Class:DisConversationComponent) with tick and object; then session read of each guard's DisConversationComponent m_DialogHookInfo_InGame[25]"),
+)
