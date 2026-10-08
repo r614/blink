@@ -41,6 +41,16 @@ pub const ARCHETYPES: &[(&str, &[(&str, &str)])] = &[
     ]),
 ];
 
+/// The Boyle party pawn tweak each built-in archetype stands for (same index as
+/// [`ARCHETYPES`]). Its interactable subobject's localized `m_Name` is the pawn's display name
+/// (`Twk_Pawn_Boyle_Party.int`: "Party Guest", "Watch Officer").
+pub const ARCHETYPE_TWEAKS: &[&str] = &[
+    "Twk_Pawn_Boyle_Party.Pwn_AristoParty_MTall_1Pwn_AristoParty_MTall_1",
+    "Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_0_Party",
+    "Twk_Pawn_Boyle_Party.Pwn_AristoParty_MTall_3Pwn_AristoParty_MTall_3",
+    "Twk_Pawn_Boyle_Party.Twk_Pawn_Boyle_AristoF1",
+];
+
 /// Load one archetype. `pawn_half_height` aligns the feet with the collision cylinder.
 pub fn load_character(content: &Content, name: &str, pawn_half_height: f32, max_tex: u32) -> Result<CharacterModel> {
     let (_, parts) = ARCHETYPES.iter().find(|a| a.0 == name).with_context(|| format!("unknown archetype {name}"))?;

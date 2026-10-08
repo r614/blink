@@ -191,6 +191,8 @@ pub struct ContractsMatch {
     rng: u64,
     /// Movers and doors as the map starts them.
     start: dishonored_world::StartLayers,
+    /// Spawn candidates a pawn can walk between (built on the first spawn, see `candidates`).
+    candidates: Option<Vec<(Vec3, f32)>>,
 }
 
 fn rng_next(s: &mut u64) -> f32 {
@@ -217,7 +219,7 @@ fn sees(world: &dyn WorldQuery, a: &PlayerState, b: &PlayerState, range: f32, fo
 impl ContractsMatch {
     pub fn new(rules: ContractsRules, spawns: Vec<(Vec3, f32)>, crowd: Option<Crowd>, cfg: &SimConfig) -> Self {
         let view = MatchView { mode: "contracts".into(), phase: MatchPhase::Warmup, time_left: rules.time_limit, score_limit: 0, ..Default::default() };
-        let mut m = Self { rules, world: WorldState::default(), view, spawns, contracts: Vec::new(), crowd, last_events: Vec::new(), phase_timer: 0.0, respawn_queue: Vec::new(), rng: 0xC0FF_EE11, start: Default::default() };
+        let mut m = Self { rules, world: WorldState::default(), view, spawns, contracts: Vec::new(), crowd, last_events: Vec::new(), phase_timer: 0.0, respawn_queue: Vec::new(), rng: 0xC0FF_EE11, start: Default::default(), candidates: None };
         if let Some(c) = m.crowd.as_mut() {
             // Original AI tuning (perception, thresholds, search, panic) from the install.
             c.ai = cfg.gameplay.ai.clone();
@@ -235,13 +237,51 @@ impl ContractsMatch {
         self.contracts.iter_mut().find(|c| c.id == id)
     }
 
+    /// Spawn candidates: the match spawns and the crowd's AI points that stand on the original
+    /// navmesh in the largest group a pawn can walk between (as the free-for-all spawns: Boyle
+    /// Ext's canal drop-off, roof patio and river grate starts are left out, else a player
+    /// spawned there can never reach anyone). Without a navmesh every candidate is kept.
+    fn walkable_candidates(&self, world: &dyn WorldQuery) -> Vec<(Vec3, f32)> {
+        let mut all: Vec<(Vec3, f32)> = self.spawns.clone();
+        if let Some(c) = self.crowd.as_ref() {
+            all.extend(c.layout.points.iter().map(|p| (*p, 0.0)));
+        }
+        let Some(nav) = world.nav().filter(|n| !n.polys.is_empty()) else { return all };
+        let on: Vec<usize> = (0..all.len()).filter(|&i| nav.locate(all[i].0, 60.0, 260.0).is_some()).collect();
+        // Group the candidates by reachability from each unassigned one (largest group wins).
+        let mut group_of: Vec<Option<usize>> = vec![None; all.len()];
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for &i in &on {
+            if group_of[i].is_some() {
+                continue;
+            }
+            let g = groups.len();
+            let mut members = vec![i];
+            group_of[i] = Some(g);
+            for &j in &on {
+                if group_of[j].is_none() && nav.find_path(all[i].0, all[j].0, &Default::default()).is_some() {
+                    group_of[j] = Some(g);
+                    members.push(j);
+                }
+            }
+            groups.push(members);
+        }
+        match groups.into_iter().max_by(|a, b| a.len().cmp(&b.len()).then(b[0].cmp(&a[0]))) {
+            Some(mut g) if g.len() >= 2 => {
+                g.sort_unstable();
+                g.into_iter().map(|i| all[i]).collect()
+            }
+            _ => all,
+        }
+    }
+
     /// Spawn rule (brief): not in direct view of enemies, not next to target/pursuer,
     /// not in combat; prefer NPC-populated places. Deterministic scoring.
     fn pick_spawn(&mut self, for_id: PlayerId, world: &dyn WorldQuery) -> (Vec3, f32) {
-        let mut candidates: Vec<(Vec3, f32)> = self.spawns.clone();
-        if let Some(c) = self.crowd.as_ref() {
-            candidates.extend(c.layout.points.iter().map(|p| (*p, 0.0)));
+        if self.candidates.is_none() {
+            self.candidates = Some(self.walkable_candidates(world));
         }
+        let candidates = self.candidates.clone().unwrap_or_default();
         if candidates.is_empty() {
             return (Vec3::new(0.0, 0.0, 200.0), 0.0);
         }
@@ -488,6 +528,10 @@ impl ContractsMatch {
             spawn_player(&mut self.world, id, p, y, cfg);
             if let Some(pl) = self.world.player_mut(id) {
                 pl.archetype = arch;
+            }
+            // A new pawn: the guards' grudges and attention were held against the old one.
+            if let Some(c) = self.crowd.as_mut() {
+                c.forget(id);
             }
             let delay = self.rules.reacquire_delay;
             if let Some(c) = self.contract_mut(id) {

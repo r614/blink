@@ -41,6 +41,19 @@ struct Stats {
     winner: Option<u32>,
     npcs: usize,
     final_scores: Vec<(String, i32)>,
+    /// Every death by (killer class, victim class, cause).
+    deaths: BTreeMap<(String, String, String), usize>,
+}
+
+/// Pawn class for the death breakdown.
+fn class_of(kind: Option<PawnKind>) -> &'static str {
+    match kind {
+        Some(PawnKind::Human) => "player",
+        Some(PawnKind::Guard) => "guard",
+        Some(PawnKind::Civilian) => "civilian",
+        Some(PawnKind::Rat) => "rat",
+        None => "world",
+    }
 }
 
 fn run_headless(mc: &MatchContent, minutes: f32, seed: u64) -> Stats {
@@ -55,7 +68,7 @@ fn run_headless(mc: &MatchContent, minutes: f32, seed: u64) -> Stats {
         g.add_player(b.id, &format!("bot{}", b.id), [0u8, 2, 3][b.id as usize % 3], &mc.collision, &mc.sim);
     }
     let npcs = g.world().players.iter().filter(|p| p.kind != PawnKind::Human).count();
-    let mut st = Stats { hash: 0, contract_kills: 0, by_cause: BTreeMap::new(), npc_deaths: 0, pursuits: 0, guard_combat_ticks: 0, civilian_flee_ticks: 0, cycle_errors: Vec::new(), ended: false, winner: None, npcs, final_scores: Vec::new() };
+    let mut st = Stats { hash: 0, contract_kills: 0, by_cause: BTreeMap::new(), npc_deaths: 0, pursuits: 0, guard_combat_ticks: 0, civilian_flee_ticks: 0, cycle_errors: Vec::new(), ended: false, winner: None, npcs, final_scores: Vec::new(), deaths: BTreeMap::new() };
     let mut prev_kills = 0;
     let mut prev_aw: BTreeMap<u32, PursuitAwareness> = BTreeMap::new();
     for tick in 0..((minutes * 60.0 * 60.0) as usize) {
@@ -101,6 +114,11 @@ fn run_headless(mc: &MatchContent, minutes: f32, seed: u64) -> Stats {
         }
         let kills: i32 = g.view().scores.iter().map(|s| s.kills).sum();
         for e in &out.events {
+            if let SimEvent::Death { victim, killer, cause } = e {
+                let kk = killer.and_then(|k| g.world().player(k)).map(|p| p.kind);
+                let vk = g.world().player(*victim).map(|p| p.kind);
+                *st.deaths.entry((class_of(kk).into(), class_of(vk).into(), format!("{cause:?}"))).or_default() += 1;
+            }
             if let SimEvent::Death { victim, killer: Some(k), cause } = e {
                 let vk = g.world().player(*victim).map(|p| p.kind);
                 if vk != Some(PawnKind::Human) {
@@ -143,6 +161,13 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
         rows.push(vec![k.clone(), n.to_string(), format!("{:.0}", *pts as f32 / (*n).max(1) as f32)]);
     }
     rep.table("Contract kills by method (mean score)", &["method", "count", "mean score"], rows);
+    let rows: Vec<Vec<String>> = st.deaths.iter().map(|((k, v, c), n)| vec![k.clone(), v.clone(), c.clone(), n.to_string()]).collect();
+    rep.table("All deaths by source", &["killer", "victim", "cause", "count"], rows);
+    let npc_assassinations: usize = st.deaths.iter().filter(|((k, _, c), _)| k != "player" && c.contains("Assassination")).map(|(_, n)| n).sum();
+    rep.check(S, "only players assassinate", npc_assassinations == 0, format!("{npc_assassinations} assassinations by NPCs"));
+    // NPC-on-NPC deaths left are friendly fire: a guard's swing or shot at a player that hits
+    // an ally in the way (the original's melee trace 0x00C102C0 and hit handling 0x00C131C0 have no
+    // relationship filter; U-660). They are reported in the table above, not failed.
     let mean = |k: &str| st.by_cause.get(k).map(|(n, p)| *p as f32 / (*n).max(1) as f32);
     let ordering_ok = match (mean("assassination"), mean("pistol")) {
         (Some(a), Some(p)) => a > p,

@@ -60,6 +60,10 @@ pub struct Bot {
     water_exit: Option<Vec3>,
     /// Consecutive ticks the hazard check refused the wanted move.
     refused: u32,
+    /// Contracts: ticks spent close to the target, flight from a charging guard.
+    close_ticks: u32,
+    flee_ticks: u32,
+    flee_from: Vec3,
 }
 
 impl Bot {
@@ -84,6 +88,9 @@ impl Bot {
             side_yaw: 0.0,
             water_exit: None,
             refused: 0,
+            close_ticks: 0,
+            flee_ticks: 0,
+            flee_from: Vec3::ZERO,
         }
     }
 
@@ -402,14 +409,100 @@ impl Bot {
     }
 }
 
+/// Contracts bot tuning (test tooling, not game rules).
+mod contract {
+    /// A guard closer than this with a clear line and the bot in front of it sees a strike.
+    pub const WITNESS_RANGE: f32 = 2200.0;
+    /// Half the frontal arc (degrees) in which a guard is counted as watching.
+    pub const WITNESS_HALF_ARC: f32 = 70.0;
+    /// Back assassination reach and arc the bot waits for (inside the sim's 0.6 x 275 uu and
+    /// 60 degrees, with margin for the target moving during the swing start).
+    pub const BACK_REACH: f32 = 150.0;
+    pub const BACK_HALF_ARC: f32 = 50.0;
+    /// Seconds (ticks) close to the target without a back opening before a frontal attack.
+    pub const OPENING_TICKS: u32 = 480;
+    /// A guard running at the bot (uu/s, toward it) this close starts a flight.
+    pub const CHARGE_SPEED: f32 = 280.0;
+    pub const CHARGE_RANGE: f32 = 1100.0;
+    pub const FLEE_TICKS: u32 = 240;
+}
+
 impl Bot {
-    /// Contracts behaviour (test bot): pursue only the assigned target, walking to blend
-    /// in until close, then strike; avoid everyone else. Bots know their target's identity
-    /// (humans must infer it) — they exist to exercise the rules, not to be fair.
+    /// Is a guard watching `me` (in its frontal arc, close, with a clear line)?
+    fn watched(me: &PlayerState, others: &[PlayerState], world: &dyn WorldQuery) -> bool {
+        others.iter().filter(|g| g.alive && g.kind == PawnKind::Guard).any(|g| {
+            let to = me.position - g.position;
+            let d = to.length();
+            if d > contract::WITNESS_RANGE || d < 1.0 {
+                return false;
+            }
+            let ang = forward_vector(g.yaw).truncate().normalize_or_zero().dot(to.truncate().normalize_or_zero()).clamp(-1.0, 1.0).acos().to_degrees();
+            if ang > contract::WITNESS_HALF_ARC && d > 200.0 {
+                return false;
+            }
+            let eye = g.position + Vec3::Z * EYE;
+            let seg = me.position + Vec3::Z * 40.0 - eye;
+            let l = seg.length();
+            world.raycast(eye, seg / l, l, channel::VISION).is_none_or(|h| h.distance >= l - 40.0)
+        })
+    }
+
+    /// A guard charging the bot (running toward it, close): the position to run from.
+    fn charging_guard(me: &PlayerState, others: &[PlayerState]) -> Option<Vec3> {
+        others
+            .iter()
+            .filter(|g| g.alive && g.kind == PawnKind::Guard)
+            .filter(|g| {
+                let to = (me.position - g.position).truncate();
+                let d = to.length();
+                d < contract::CHARGE_RANGE && d > 1.0 && g.velocity.truncate().dot(to / d) > contract::CHARGE_SPEED
+            })
+            .map(|g| g.position)
+            .min_by(|a, b| a.distance(me.position).total_cmp(&b.distance(me.position)))
+    }
+
+    /// The back assassination is lined up: the bot stands behind `t`, close, and no other pawn
+    /// would be taken instead (the sim assassinates the nearest pawn in the context's geometry).
+    fn back_open(me: &PlayerState, t: &PlayerState, others: &[PlayerState]) -> bool {
+        let lined = |v: &PlayerState| {
+            let to_me = (me.position - v.position).truncate();
+            let d = to_me.length();
+            let back = -forward_vector(v.yaw).truncate().normalize_or_zero();
+            d <= contract::BACK_REACH && (v.position.z - me.position.z).abs() < 60.0 && back.dot(to_me / d.max(1.0)).clamp(-1.0, 1.0).acos().to_degrees() <= contract::BACK_HALF_ARC
+        };
+        if !lined(t) {
+            return false;
+        }
+        let dt = t.position.distance(me.position);
+        !others.iter().any(|o| o.id != t.id && o.id != me.id && o.alive && o.position.distance(me.position) < dt + 20.0 && o.position.distance(me.position) < 220.0)
+    }
+
+    /// Nothing but the target is within sword reach in front of the bot.
+    fn clear_swing(me: &PlayerState, t: &PlayerState, others: &[PlayerState]) -> bool {
+        let fwd = (t.position - me.position).truncate().normalize_or_zero();
+        let dt = t.position.distance(me.position);
+        !others.iter().any(|o| {
+            if o.id == t.id || o.id == me.id || !o.alive {
+                return false;
+            }
+            let to = (o.position - me.position).truncate();
+            let d = to.length();
+            d < dt + 60.0 && d < 260.0 && fwd.dot(to / d.max(1.0)) > 0.3
+        })
+    }
+
+    /// Contracts behaviour (test bot). Bots know their target's identity (humans must infer
+    /// it); they exist to exercise the rules, not to be fair. They play the way the mode is
+    /// meant to be played: walk among the guests, line up a silent back assassination, never
+    /// strike in front of a guard (a seen attack makes every guard who sees it hostile), never
+    /// swing with a bystander in the way, and run from a guard charging them. A duelist falls
+    /// back to the sword and a gunner to the pistol when no back opening comes.
     pub fn think_contract(&mut self, me: &PlayerState, others: &[PlayerState], world: &dyn WorldQuery, target: Option<PlayerId>) -> PlayerInput {
         self.tick += 1;
         let mut input = PlayerInput { yaw: me.yaw, left_hand: LeftHand::Blink, ..Default::default() };
         if !me.alive {
+            self.close_ticks = 0;
+            self.flee_ticks = 0;
             return input;
         }
         // Stuck: hop, sidestep and replan.
@@ -426,27 +519,6 @@ impl Bot {
             self.blink_hold = 20;
             self.route.force_replan();
         }
-        let Some(t) = target.and_then(|id| others.iter().find(|o| o.id == id && o.alive)) else {
-            // No contract yet: stroll like a civilian.
-            if self.tick % 240 == 0 {
-                self.wander_yaw += (self.rand() - 0.5) * 140.0;
-            }
-            input.yaw = self.wander_yaw;
-            input.forward = 100;
-            input.buttons |= buttons::WALK;
-            if unstick {
-                input.buttons |= buttons::JUMP;
-            }
-            self.keep_safe(me, world, &mut input, false);
-            return input;
-        };
-        // Aim for a point behind the target (back assassination).
-        let behind = t.position - Vec3::new(t.yaw.to_radians().cos(), t.yaw.to_radians().sin(), 0.0) * 90.0;
-        let dist = (t.position - me.position).truncate().length();
-        // Path on the original navmesh when far; straight in when close or off the mesh.
-        let goal = if dist > 250.0 { self.route.steer(world, me.position, behind) } else { behind };
-        let to = goal - me.position;
-        input.yaw = to.y.atan2(to.x).to_degrees();
         if self.blink_hold > 0 {
             // Sidestep out of whatever we are wedged against.
             self.blink_hold -= 1;
@@ -455,18 +527,96 @@ impl Bot {
             if self.blink_hold == 19 {
                 input.buttons |= buttons::JUMP;
             }
-        } else if dist > 1500.0 {
+            self.keep_safe(me, world, &mut input, false);
+            return input;
+        }
+        // Run from a guard charging us (along the navmesh, away from it).
+        if let Some(g) = Self::charging_guard(me, others) {
+            self.flee_ticks = contract::FLEE_TICKS;
+            self.flee_from = g;
+        }
+        if self.flee_ticks > 0 {
+            self.flee_ticks -= 1;
+            let away = (me.position - self.flee_from).truncate().normalize_or_zero();
+            let goal = me.position + away.extend(0.0) * 900.0;
+            let steer = self.route.steer(world, me.position, goal);
+            let to = if self.route.failed { goal - me.position } else { steer - me.position };
+            input.yaw = to.y.atan2(to.x).to_degrees();
             input.forward = 127;
             input.buttons |= buttons::SPRINT;
-        } else if dist > 160.0 {
-            input.forward = 127;
+            self.keep_safe(me, world, &mut input, false);
+            return input;
+        }
+        let Some(t) = target.and_then(|id| others.iter().find(|o| o.id == id && o.alive)) else {
+            // No contract yet: stroll like a civilian.
+            self.close_ticks = 0;
+            if self.tick % 240 == 0 {
+                self.wander_yaw += (self.rand() - 0.5) * 140.0;
+            }
+            input.yaw = self.wander_yaw;
+            input.forward = 100;
             input.buttons |= buttons::WALK;
-        } else {
+            self.keep_safe(me, world, &mut input, false);
+            return input;
+        };
+        let dist = (t.position - me.position).truncate().length();
+        let face = |input: &mut PlayerInput| {
             let tt = t.position - me.position;
             input.yaw = tt.y.atan2(tt.x).to_degrees();
+            input.pitch = (tt.z / tt.truncate().length().max(1.0)).atan().to_degrees().clamp(-30.0, 30.0);
+        };
+        let watched = dist < 400.0 && Self::watched(me, others, world);
+        if dist < 400.0 {
+            self.close_ticks += 1;
+        } else {
+            self.close_ticks = 0;
+        }
+        // Strike: a lined-up back assassination, or after a long wait a frontal attack; never
+        // while a guard watches.
+        if !watched && Self::back_open(me, t, others) {
+            face(&mut input);
+            input.forward = 30;
+            if self.tick % 10 == 0 {
+                input.buttons |= buttons::PRIMARY;
+            }
+            self.keep_safe(me, world, &mut input, false);
+            return input;
+        }
+        let frontal = !watched && self.close_ticks > contract::OPENING_TICKS;
+        if frontal && self.style == BotStyle::Gunner && dist < 700.0 && Self::clear_swing(me, t, &[]) {
+            face(&mut input);
+            input.left_hand = LeftHand::Pistol;
+            if self.fire_cooldown == 0 {
+                input.buttons |= buttons::SECONDARY;
+                self.fire_cooldown = 50;
+            } else {
+                self.fire_cooldown -= 1;
+            }
+            self.keep_safe(me, world, &mut input, false);
+            return input;
+        }
+        if frontal && dist < 160.0 && Self::clear_swing(me, t, others) {
+            face(&mut input);
             if self.tick % 20 == 0 {
                 input.buttons |= buttons::PRIMARY;
             }
+            self.keep_safe(me, world, &mut input, false);
+            return input;
+        }
+        // Approach a point behind the target; while watched, hang back at talking distance.
+        let back = -forward_vector(t.yaw).truncate().normalize_or_zero().extend(0.0);
+        let behind = t.position + back * if watched { 320.0 } else { 90.0 };
+        let goal = if dist > 250.0 { self.route.steer(world, me.position, behind) } else { behind };
+        let to = goal - me.position;
+        input.yaw = to.y.atan2(to.x).to_degrees();
+        if (behind - me.position).truncate().length() < 30.0 {
+            face(&mut input);
+        } else if dist > 1500.0 {
+            input.forward = 127;
+            input.buttons |= buttons::SPRINT;
+        } else {
+            input.forward = 127;
+            input.buttons |= buttons::WALK;
         }
         self.keep_safe(me, world, &mut input, false);
         input

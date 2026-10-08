@@ -146,8 +146,11 @@ pub fn resolve_sword_hits(
         let wants_attack = attacker.sword.phase == SwordPhase::Startup && attacker.sword.timer == 0.0;
         let active = attacker.sword.phase == SwordPhase::Active && !attacker.sword.hit_done;
 
-        // Assassinations are decided at swing start, like the original's context action.
-        if wants_attack {
+        // Assassinations are decided at swing start, like the original's context action. They
+        // are player item contexts (`DisItemContext_Assassinate` < `_Finisher` <
+        // `_MeleeAttackPlayer`; `DisItemContext_DropAssassinate` on the player's sword): NPC
+        // swings are their own `DisItemContext_NPCAttack*` moves and never assassinate.
+        if wants_attack && attacker.kind == crate::state::PawnKind::Human {
             if let Some(vi) = find_assassination(&attacker, state, world, mv, t) {
                 let vid = state.players[vi].id;
                 let drop = attacker.mode == MoveMode::Falling;

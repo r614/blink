@@ -444,6 +444,27 @@ pub fn localization() -> &'static dishonored_assets::localization::Localization 
     LOC.get_or_init(|| Content::locate().map(|c| dishonored_assets::localization::Localization::load(&c, "INT")).unwrap_or_default())
 }
 
+/// An AI pawn's display name, as the original names NPCs: its pawn tweak's interactable
+/// subobject's localized `m_Name` (`Twk_Pawn_Boyle_Party.int`: "Party Guest", "Watch Officer";
+/// named characters such as "Lord Brisby" carry their own). Built-in archetypes use the party
+/// tweak they stand for (`characters::ARCHETYPE_TWEAKS`); a look whose tweak names nobody (e.g.
+/// `Twk_Pawn_Boyle_Aristocrat1`) falls back to the party tweak of its role.
+pub fn pawn_name(kind: dishonored_sim::state::PawnKind, archetype: u8, appearances: &[dishonored_multiplayer::Look]) -> Option<String> {
+    use dishonored_assets::characters::ARCHETYPE_TWEAKS;
+    use dishonored_sim::state::PawnKind;
+    let loc = localization();
+    let named = |tweak: &str| loc.get(tweak, "m_Name").map(str::to_string);
+    let own = match archetype.checked_sub(dishonored_multiplayer::mission::APPEARANCE_BASE) {
+        Some(i) => appearances.get(i as usize).and_then(|l| named(&l.tweak)),
+        None => ARCHETYPE_TWEAKS.get(archetype as usize).and_then(|t| named(t)),
+    };
+    own.or_else(|| match kind {
+        PawnKind::Guard => named(ARCHETYPE_TWEAKS[1]),
+        PawnKind::Civilian => named(ARCHETYPE_TWEAKS[0]),
+        _ => None,
+    })
+}
+
 /// The original prompt of a travel door: its usable tweak's localized `m_InteractText`.
 pub fn travel_prompt(link: &dishonored_assets::travel::TravelLink, use_key: &str) -> String {
     match localization().get(&link.door_tweak, "m_InteractText") {

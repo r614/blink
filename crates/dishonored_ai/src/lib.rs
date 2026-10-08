@@ -853,6 +853,19 @@ impl Crowd {
         Crowd { brains, layout, spawns, ..Default::default() }
     }
 
+    /// A player pawn was replaced (a multiplayer respawn reuses the player id): the original
+    /// keeps individual relationships and attention per pawn actor (`m_Response_*` hostility,
+    /// the attention entries), and a new pawn starts with none of them. Combat against the old
+    /// pawn then ends through the usual Busted test (no entry left: search).
+    pub fn forget(&mut self, who: PlayerId) {
+        for b in self.brains.iter_mut() {
+            b.hostile.retain(|h| *h != who);
+            b.enemies.retain(|h| *h != who);
+            b.attn.retain(|a| a.who != who);
+        }
+        self.inhibit.retain(|i| i.0 != who);
+    }
+
     /// Sleep-dart hook (`m_bInstantSleepForUnawareNPCs`): is NPC `npc` unaware of `who`?
     /// Pawns without a brain count as unaware.
     pub fn unaware_of(&self, npc: PlayerId, who: PlayerId) -> bool {
@@ -3298,6 +3311,31 @@ mod tests {
         assert!(c.brains[0].enemies.is_empty() && c.brains[0].state != BrainState::Combat);
         // The pain bark fires.
         assert!(c.events.is_empty() || c.events.iter().all(|e| !matches!(e, AiEvent::AlarmRang { .. })));
+    }
+
+    #[test]
+    fn a_new_pawn_starts_without_the_old_grudges() {
+        let ai = AiConfig::default();
+        let w = flat_world();
+        let mut c = Crowd { ai: ai.clone(), ..Default::default() };
+        let guard = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(0.0, 0.0, 90.0), 0.0);
+        let player = pawn(1, PawnKind::Human, Vec3::new(300.0, 0.0, 90.0), 180.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![player.clone(), guard.clone()];
+        let mut b = Brain::new(guard.id, PawnKind::Guard, guard.position, 1);
+        b.alert_to(&ai, player.id, player.position);
+        c.brains.push(b);
+        for _ in 0..10 {
+            c.think(&ws, &[], &w, 1.0 / 60.0);
+        }
+        assert!(c.brains[0].hostile.contains(&player.id));
+        // The player respawns (same id, new pawn).
+        c.forget(player.id);
+        assert!(!c.brains[0].hostile.contains(&player.id) && !c.brains[0].attn.iter().any(|a| a.who == player.id));
+        for _ in 0..10 {
+            c.think(&ws, &[], &w, 1.0 / 60.0);
+        }
+        assert!(!c.brains[0].enemies.contains(&player.id) && c.brains[0].state != BrainState::Combat);
     }
 
     #[test]
