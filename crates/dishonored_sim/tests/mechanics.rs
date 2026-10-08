@@ -224,23 +224,32 @@ fn lean_swings_the_eye_about_the_pivot() {
     let eye0 = dishonored_sim::movement::eye_position(r.p(1), &r.cfg.gameplay.movement);
     let mv = r.cfg.gameplay.movement.clone();
     // Measured on the original (engine hook, 60 Hz, E held): the camera swings about a pivot
-    // 350 uu below the eye (2.0 x 87.5 x 2), past 15 degrees after 0.2 s (14.2) and on to
-    // 20 (15 + the 5 degree soften, at about 5 / s): 119.7 uu right, 21.4 down, roll 10 (U-048).
+    // 350 uu below the eye (2.0 x 87.5 x 2) and on to 20 degrees (15 + the 5 degree soften, at
+    // about 5 / s): 119.7 uu right, 21.4 down, roll 10 (U-048).
     let mut at = Vec::new();
+    let mut onset = Vec::new();
     for k in 1..=120 {
         r.step(&[(1, input(0., 0, buttons::LEAN_RIGHT))]);
+        if k <= 10 {
+            onset.push(dishonored_sim::movement::lean_angle(r.p(1), &mv).abs());
+        }
         if [30, 60, 120].contains(&k) {
             at.push(dishonored_sim::movement::lean_angle(r.p(1), &mv).abs());
         }
+    }
+    // The original's per-tick angle at a fixed 1/60 s (scenario trace `movement/lean`, 2 x the
+    // camera roll): nothing on the press tick (the lean influence's first frame is short of its
+    // 0.016667 s step), then 2.175, 4.307, 6.383, 8.405, 10.360, 12.272, 14.117, 15.007, 15.425.
+    let orig_onset = [0.0, 2.175, 4.307, 6.383, 8.405, 10.360, 12.272, 14.117, 15.007, 15.425];
+    for (k, (a, o)) in onset.iter().zip(orig_onset).enumerate() {
+        assert!((a - o).abs() < 0.03, "onset tick {k}: {a} vs {o} ({onset:?})");
     }
     let eye = dishonored_sim::movement::eye_position(r.p(1), &mv);
     let d = eye - eye0;
     assert!((d.y.abs() - 350.0 * 20f32.to_radians().sin()).abs() < 2.0, "lean {d}");
     assert!((d.z + 350.0 * (1.0 - 20f32.to_radians().cos())).abs() < 1.0, "lean drop {d}");
     assert!((dishonored_sim::movement::lean_roll(r.p(1), &mv).abs() - 10.0).abs() < 0.1);
-    // Original at 0.5 / 1 / 2 s: 18.9, 19.9, 20.0 degrees. (Its onset is faster: 14.2 at 0.2 s
-    // against the port's 10.7; the head-point spring towards the lean request is not
-    // reproduced, U-048.)
+    // Original at 0.5 / 1 / 2 s: 18.9, 19.9, 20.0 degrees.
     let orig = [18.94, 19.91, 20.0];
     for (a, o) in at.iter().zip(orig) {
         assert!((a - o).abs() < 1.5, "angles {at:?} vs {orig:?}");

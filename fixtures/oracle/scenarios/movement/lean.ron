@@ -1,9 +1,14 @@
 // Holding lean left (Q) at the Playground's lean station. The original at a fixed 1/60 s
-// (`measure lean`, CameraCache.POV per tick, roll = half the lean angle, U-048): the angle is
-// 2.26, 4.66, 7.14, 9.67, 12.21 degrees in the first five ticks of the held key, the 15 degree
-// limit on the sixth, then the soften angle takes it toward 20 (18.2 eighteen ticks in); held
-// 20 degrees, roll 10. The camera offsets are the original's camera POV against the port's eye
-// point (another frame of reference), so they are unverified.
+// (scenario trace captured by the hook, CameraCache.POV roll per tick, lean angle = 2 x roll,
+// U-048): the key goes down on tick 1 and the first head step runs on tick 3 (the lean state
+// starts on the press; the influence's accumulator starts empty and the 1/60 s frame is short
+// of its 0.016667 step). The angle is then 2.175, 4.307, 6.383, 8.405, 10.360, 12.272, 14.117
+// degrees, 15.007 on the tenth tick (the m_fMaxLeanAngle limit, the soften angle starting),
+// 17.9 on the twentieth, 20 held (roll 10). The port's rule reproduces the whole series to 0.01
+// degrees. The camera POV position in that capture is eased in over the first ~60 ticks (its z
+// climbs 10 -> 148 after the setup teleport, its y trails the head point by 80 % on the first
+// tick), so the sideways onset is not a clean measure of the lean spring and those checks are
+// Unverified; the held offsets agree (119.7 sideways).
 (
     name: "movement/lean",
     system: Movement,
@@ -14,17 +19,16 @@
     input: [(tick: 1, hold: 119, action: Press(LeanLeft))],
     checkpoints: [
         (name: "onset (head displacement)", expect: [
-            (metric: Abs(Delta("cam.y", 1, 2)), value: 13.33, tol: 0.3, source: "lean trace 2026-10-06 (fixed 1/60 s): the camera moves 13.33 uu sideways in the first tick of the held key (head velocity set to m_fLeanSpeed 1000, then the k 80 / c 12 spring)"),
-            (metric: Abs(Delta("cam.y", 1, 3)), value: 26.31, tol: 0.5, source: "lean trace: 26.31 uu after two ticks"),
-            (metric: Abs(Delta("cam.y", 1, 6)), value: 62.68, tol: 1.5, source: "lean trace: 62.68 uu after five ticks"),
+            (metric: Abs(Delta("cam.y", 2, 3)), value: 13.33, tol: 0.3, source: "older lean trace 2026-10-06: 13.33 uu in the first step (head velocity m_fLeanSpeed 1000, then the k 80 / c 12 spring); the 2026-10-08 scenario capture shows the POV easing in instead (2.66 uu), so the position onset is not judged", status: Unverified),
+            (metric: Abs(Delta("cam.y", 2, 4)), value: 26.31, tol: 0.5, source: "older lean trace: 26.31 uu after two steps (see above)", status: Unverified),
+            (metric: Abs(Delta("cam.y", 2, 7)), value: 62.68, tol: 1.5, source: "older lean trace: 62.68 uu after five steps (see above)", status: Unverified),
         ]),
         (name: "onset (angle)", expect: [
-            (metric: Abs(At("cam.lean_deg", 2)), value: 2.264, tol: 0.05, source: "lean trace: first tick, 2 x roll 1.132"),
-            (metric: Abs(At("cam.lean_deg", 6)), value: 12.206, tol: 0.15, source: "lean trace: fifth tick, 2 x roll 6.103"),
+            (metric: Abs(At("cam.lean_deg", 3)), value: 2.175, tol: 0.05, source: "scenario trace of the original (60 Hz): first head step, 2 x roll 1.0875"),
+            (metric: Abs(At("cam.lean_deg", 8)), value: 12.272, tol: 0.15, source: "scenario trace of the original: sixth head step, 2 x roll 6.136"),
         ]),
-        (name: "limit", expect: [(metric: Abs(At("cam.lean_deg", 7)), value: 15.0, tol: 0.1, source: "lean trace: the 15 degree limit (m_fMaxLeanAngle) on the sixth tick, 2 x roll 7.498")]),
-        (name: "soften", expect: [(metric: Abs(At("cam.lean_deg", 19)), value: 18.226, tol: 0.2, source: "lean trace: eighteenth tick, 2 x roll 9.113 (soften toward 5 at 5 / s)")]),
-        (name: "held angle", expect: [(metric: Abs(At("cam.lean_deg", 110)), value: 20, tol: 0.2, source: "HOOK_TRIAGE.md 2026-10-06 (U-048): 20 degrees held (15 + 5 soften)")]),
+        (name: "limit", expect: [(metric: Abs(At("cam.lean_deg", 10)), value: 15.007, tol: 0.1, source: "scenario trace of the original: the 15 degree limit (m_fMaxLeanAngle) on the eighth head step, 2 x roll 7.5035")]),
+        (name: "soften", expect: [(metric: Abs(At("cam.lean_deg", 20)), value: 17.908, tol: 0.2, source: "scenario trace of the original: eighteenth head step, 2 x roll 8.954 (soften toward 5 at 5 / s)")]),        (name: "held angle", expect: [(metric: Abs(At("cam.lean_deg", 110)), value: 20, tol: 0.2, source: "HOOK_TRIAGE.md 2026-10-06 (U-048): 20 degrees held (15 + 5 soften)")]),
         (name: "roll", expect: [(metric: Abs(At("cam.roll", 110)), value: 10, tol: 0.2, source: "HOOK_TRIAGE.md 2026-10-06 (U-048): roll 10 (m_fCameraTiltPercent 0.5)")]),
         (name: "sideways", expect: [(metric: Abs(Delta("cam.y", 0, 110)), value: 119.7, tol: 2, source: "HOOK_TRIAGE.md 2026-10-06: CameraCache.POV 119.7 uu sideways (camera POV vs the port's eye point)", status: Unverified)]),
         (name: "down", expect: [(metric: Delta("cam.z", 0, 110), value: -21.4, tol: 2, source: "HOOK_TRIAGE.md 2026-10-06: CameraCache.POV 21.4 uu down", status: Unverified)]),

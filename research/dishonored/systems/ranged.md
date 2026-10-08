@@ -4,7 +4,7 @@ Pistol, crossbow (bolt, sleep dart, incendiary bolt), grenade, sticky grenade, S
 Written 2026-10-08 from the decompiled exe (`oracle index`), the tweaks (`tweaks`), the hook
 measurements in HOOK_TRIAGE.md and the port (`crates/dishonored_sim`: `left_hand.rs`, `gadgets.rs`,
 `tuning.rs`, `inventory.rs`). Addresses are the GOG exe's (image base 0x00400000). Reload timing is
-out of scope here (another agent owns the crossbow 1.583 vs 1.555 s question); only the facts the
+in PLAYER.md (out of scope here, except the crossbow shot time, F14); only the facts the
 damage and ammo rules need are repeated.
 
 Status words: **matches** (rule and port agree, hook- or code-confirmed), **differs** (port bug or
@@ -123,8 +123,8 @@ contact and has no bolt pickup. **differs** (F9).
 speed (and, through 0x00C072D0, the weapon range) by `max(1, Attribute_Range)`. The port keeps the
 upgrade for the HUD only. **differs** (F5).
 
-Fire timing (shot -> recovery 0.398, fast-reload shot 0.4167) and the reload stages: PLAYER.md, out of
-scope.
+Fire timing (action end 0.3984, fast-reload action 0.4166) and the reload stages: PLAYER.md. The shot
+itself leaves at the fire clip's `DishonoredNotify_FireProjectile` (F14).
 
 ## 4. Ammunition, magazines, upgrades
 
@@ -357,6 +357,22 @@ fire functions (`DisItemContext_NPCFireGun`); the player's are 0x00C2A3E0 (pisto
 | F11 | **ported**: pistol `m_AINoiseLoudnessWhenFiring` and explosion `m_AINoiseLoudness` read by name (`EAINoiseLoudness4` -> 6000); the crossbow's and the throw's invented 500 / 300 noises removed (their tweaks have no loudness). An impact noise of the projectiles' noise-maker interface is not decoded | `gameplay.rs`, `items_config.rs`, `fire_gun`, `explode` |
 | F12 | **done**: INVENTORY.md sleep-dart speed 0.7, fire functions, Spring Razor damage | |
 
+**F14 Crossbow shot time (ported 2026-10-08).** The bolt does not leave on the press: the fire clip in the
+weapon's own AnimSet (`Crossbows_as.Crossbow_as`, `Crossbow_Fire`) carries a
+`DishonoredNotify_FireProjectile` at 0.0336 s (`Crossbow_Fire_FastReload`: 0.000), which reaches the item
+context's fire (0x00A96890 -> pawn slot 451 -> the context, 0x00C38230). The action that plays it
+(`m_FireCrossbowAction`, no `m_fPlayRateOverride`) ends at the player set's
+`Ply_Crossbow_as.Crossbow_Fire` `AnimStateExit` 0.3984 s. Original capture of `combat/crossbow_hit`
+(60 Hz, press on tick 5): fire sound on tick 6, bolt spawn and trail on tick 8, `Reload_In` sound on
+tick 30, `Reload_Out` clothes sound on tick 102. So the action is 24 ticks, the reload In 11 and the
+timed stage 61 (as ported), and the shot is on the third tick of the action (the animation advances
+from the press tick: 0.0167, 0.0333, 0.05 >= 0.0336). The port fired on the second (a one-tick
+delay for every gun), which put the load 95 ticks after the shot (1.583 s); with the notify it is 94
+(1.567 s, measured 1.555). `left_hand::bolt_shot_tick`, `CombatTuning.crossbow_fire_notify` /
+`crossbow_fast_fire_notify` and the action ends `crossbow_fire_recovery` / `crossbow_fast_fire` are
+read from the AnimSets (`dishonored_assets::gameplay`, `crossbow.values["fire.*_time"]`); the sleep
+dart and the incendiary bolt use the same clip and now leave on the same tick instead of the press.
+The pistol clips have no `FireProjectile` notify: it keeps the next-tick shot.
 **F13 Bullet blast (new, left open).** The capture shows 15 `DishonoredDamageType_BulletBlast`
 besides the 45. Decoded (0x00C36E50, called from the bullet's tick 0x00C3A500 on its first ticked
 step, and from its hit handlers when not yet `m_bBlasted`): origin = `m_ShotsLocation` (the
