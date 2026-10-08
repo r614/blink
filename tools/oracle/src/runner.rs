@@ -515,6 +515,11 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
     let base_hand = s.setup.left_hand.as_deref().map(|h| left_hand(h).with_context(|| format!("left_hand `{h}`"))).transpose()?;
     let mut tick: u64 = 0;
     let neutral = PlayerInput { yaw: ps.yaw, pitch: ps.pitch, left_hand: base_hand.unwrap_or_default(), ..Default::default() };
+    // The Kismet's per-op activation log (kismet.md F-6): recorded from the start, the settle
+    // steps' entries dropped below like their notes.
+    if let Some(k) = mm_mut(&mut game).kismet.as_mut() {
+        k.k.record = true;
+    }
     for _ in 0..s.setup.settle {
         tick += 1;
         let out = game.step(&[(ME, PlayerInput { tick, ..neutral })], &maps.set, cfg);
@@ -525,6 +530,9 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
     trace.push(0, first);
     let mut seen_proj: BTreeMap<u32, (String, f32)> = BTreeMap::new();
     let mut kismet_seen = mm(&game).kismet.as_ref().map(|k| k.st.history.len()).unwrap_or(0);
+    if let Some(k) = mm_mut(&mut game).kismet.as_mut() {
+        k.k.activations.clear();
+    }
     for (t, ti) in timeline.iter().enumerate() {
         let tk = t as u32 + 1;
         for c in &ti.console {
@@ -555,11 +563,17 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             let object = detail.split_whitespace().next().and_then(|f| f.split_once('=')).map(|x| x.1.to_string()).unwrap_or_default();
             trace.events.push(TraceEvent { tick: tk, kind: "Sim".into(), object, name, detail });
         }
-        // Kismet activations.
-        if let Some(k) = mm(&game).kismet.as_ref() {
+        // Kismet: one `Kismet` event per op `Activated` / `Deactivated`, in call order, named as
+        // the original's ProcessEvent trace names the op (compared on tick, object, name); the
+        // host's notes go out as `KismetNote` (not compared: the original has none).
+        if let Some(k) = mm_mut(&mut game).kismet.as_mut() {
+            for a in std::mem::take(&mut k.k.activations) {
+                let detail = k.k.activation_detail(&a);
+                trace.events.push(TraceEvent { tick: tk, kind: "Kismet".into(), object: k.k.trace_name(a.op), name: a.kind.name().into(), detail });
+            }
             for h in k.st.history.iter().skip(kismet_seen) {
                 let name = h.split_whitespace().next().unwrap_or("").to_string();
-                trace.events.push(TraceEvent { tick: tk, kind: "Kismet".into(), object: String::new(), name, detail: h.clone() });
+                trace.events.push(TraceEvent { tick: tk, kind: "KismetNote".into(), object: String::new(), name, detail: h.clone() });
             }
             kismet_seen = k.st.history.len();
         }

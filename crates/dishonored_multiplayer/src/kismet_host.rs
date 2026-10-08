@@ -271,6 +271,12 @@ pub struct HostState {
     usable_events: Vec<(u32, usize)>,
     /// `SeqAct_ActorFactory` in progress: op -> (spawn points, count, spawned, delay left).
     factories: BTreeMap<OpId, (Vec<Obj>, u32, u32, f32)>,
+    /// Attention level of each NPC toward each pawn at the last step (non-zero only), for
+    /// `DisSeqEvent_AttentionIncreasedTo` / `DecreasedTo`.
+    attn_levels: BTreeMap<(PlayerId, PlayerId), u8>,
+    /// `SeqAct_SetPhysics`: the `EPhysics` the Kismet gave a level actor or pawn. Recorded only:
+    /// the port has no rigid bodies or per-actor physics modes to apply it to.
+    pub physics: BTreeMap<Obj, u8>,
 }
 
 /// Stage names of a usable: the outputs of its `DisSeqEvent_Used` (the editor names them
@@ -1548,6 +1554,27 @@ impl Host for H<'_> {
                 }
                 HostResult::Done
             }
+            // `SeqAct_SetPhysics` (kismet.md 3.6): `SequenceAction::Activated` calls
+            // `OnSetPhysics(action)` on every target: `Actor.OnSetPhysics` is
+            // `SetPhysics(newPhysics)`, `Controller.OnSetPhysics` forwards to its pawn (the port's
+            // targets are already pawns). `newPhysics` is stored only when not `PHYS_None`. The
+            // port has no rigid bodies or per-actor physics modes: the mode is recorded for the
+            // actors, nothing moves (kismet.md F-11, left open).
+            "SeqAct_SetPhysics" => {
+                const PHYS: [&str; 15] = ["PHYS_None", "PHYS_Walking", "PHYS_Falling", "PHYS_Swimming", "PHYS_Flying", "PHYS_Rotating", "PHYS_Projectile", "PHYS_Interpolating", "PHYS_Spider", "PHYS_Ladder", "PHYS_RigidBody", "PHYS_SoftBody", "PHYS_NavMeshWalking", "PHYS_Unused", "PHYS_Custom"];
+                let mode = match cx.prop("newPhysics") {
+                    Some(Value::Enum(s)) | Some(Value::Name(s)) => PHYS.iter().position(|n| n.eq_ignore_ascii_case(&s)).unwrap_or(0) as u8,
+                    Some(Value::Byte(b)) => b,
+                    _ => 0,
+                };
+                for t in cx.objects("Target") {
+                    if matches!(t, Obj::Actor(_) | Obj::Pawn(_)) {
+                        self.note(format!("set physics of {t:?}: {}", PHYS.get(mode as usize).unwrap_or(&"?")));
+                        self.st.physics.insert(t, mode);
+                    }
+                }
+                HostResult::Done
+            }
             "SeqAct_Teleport" => {
                 let dest = cx.objects("Destination").into_iter().next();
                 let Some(d) = dest else { return HostResult::Done };
@@ -2188,13 +2215,80 @@ pub fn step(m: &mut MissionMatch, sim_events: &[SimEvent], dt: f32, cfg: &SimCon
             }
             feed(k, &mut h, sim_events);
             approach_hooks(&mut h);
-            k.tick(&mut h, dt);
+            // The world tick's dt is scaled by `WorldInfo.TimeDilation` (the player dilation);
+            // `ExecuteActiveOps` scales it again by world / player for the ops not flagged
+            // `m_bAlwaysOutOfBendTime` (kismet.md K-2, F-3).
+            let player = dishonored_sim::powers::player_time_dilation(&h.m.world, &h.cfg.gameplay);
+            let world = dishonored_sim::powers::world_time_scale(&h.m.world, &h.cfg.gameplay, false);
+            let ratio = if player != 0.0 { world / player } else { 1.0 };
+            k.tick_dilated(&mut h, dt * player, ratio);
             cutscene::apply(k, &mut h); // [interp]
             h.drain_spawns(k);
             commit_map_change(k, &mut h);
         }
     }
     m.kismet = Some(run);
+}
+
+/// `EDisAttentionLevel` by name (`DAL_Unaware` 0 .. `DAL_Busted` 4).
+fn attention_level(v: &Value) -> Option<u8> {
+    match v {
+        Value::Enum(s) | Value::Name(s) => ["DAL_Unaware", "DAL_HeadTrack", "DAL_TurnToFace", "DAL_Investigate", "DAL_Busted"].iter().position(|n| n.eq_ignore_ascii_case(s)).map(|i| i as u8),
+        Value::Byte(b) => Some(*b),
+        Value::Int(i) => u8::try_from(*i).ok(),
+        _ => None,
+    }
+}
+
+/// `DisSeqEvent_AttentionIncreasedTo` / `AttentionDecreasedTo` (kismet.md 3.3). The attention
+/// tick hands each target's batch of level changes to 0x00b3b350, which calls 0x00b363d0 once
+/// with the level before the first change and after the last (a jump, not each level passed).
+/// When they differ, every enabled event of that direction in the observer's
+/// `GeneratedEvents` gets `m_eActivatedAttentionLevel` = the new level and `CheckActivate`
+/// (observer, target); the override `DisSeqEvent_Attention::CheckActivate` (0x00b8a2a0) passes
+/// only when that level equals the event's `m_eAttentionLevel` and, with `bPlayerOnly`, the
+/// target is the player pawn. The port's brains update attention once per tick, so the batch is
+/// the change since the last step. The noise pseudo-target is not a pawn and is skipped; the
+/// DLC06 variants (fired with `ActivateIndices = [level]`) are not in the port's maps.
+fn attention_events(k: &mut Kismet, h: &mut H) {
+    let mut now: BTreeMap<(PlayerId, PlayerId), u8> = BTreeMap::new();
+    for b in &h.m.crowd.brains {
+        if !h.m.world.player(b.id).is_some_and(|p| p.alive) {
+            continue;
+        }
+        for a in &b.attn {
+            if a.who != dishonored_ai::NOISE && a.level > 0 {
+                now.insert((b.id, a.who), a.level);
+            }
+        }
+    }
+    let old = std::mem::replace(&mut h.st.attn_levels, now.clone());
+    let keys: BTreeSet<(PlayerId, PlayerId)> = old.keys().chain(now.keys()).copied().collect();
+    for (observer, target) in keys {
+        let (from, to) = (old.get(&(observer, target)).copied().unwrap_or(0), now.get(&(observer, target)).copied().unwrap_or(0));
+        if from == to || !h.m.world.player(observer).is_some_and(|p| p.alive) {
+            continue;
+        }
+        let class = if from < to { "DisSeqEvent_AttentionIncreasedTo" } else { "DisSeqEvent_AttentionDecreasedTo" };
+        let mut origs = vec![Obj::Pawn(observer)];
+        if let Some((&a, _)) = h.st.spawner.iter().find(|(_, i)| h.m.setup.original[**i].spawn.id == observer) {
+            origs.push(Obj::Actor(a));
+        }
+        for ev in k.events_for(class, &origs) {
+            if !k.ops[ev as usize].enabled {
+                continue;
+            }
+            k.set_prop(ev, "m_eActivatedAttentionLevel", Value::Byte(to));
+            let want = k.prop(ev, "m_eAttentionLevel").as_ref().and_then(attention_level).unwrap_or(0);
+            if want != to || (k.prop_bool(ev, "bPlayerOnly") && !h.m.humans.contains(&target)) {
+                continue;
+            }
+            // Originator: the observer pawn (0x00b363d0 passes the component's owner).
+            if k.check_activate(h, ev, Obj::Pawn(observer), Obj::Pawn(target), false, None, false) {
+                h.note(format!("attention of pawn {observer} on {target}: {from} -> {to}: {}", h.db.describe(ev)));
+            }
+        }
+    }
 }
 
 /// Gameplay -> Kismet events.
@@ -2386,6 +2480,7 @@ fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
             }
         }
     }
+    attention_events(k, h);
     // Touches (players; NPC pawns for events that are not player-only).
     let touch_events = k.events_for("SeqEvent_Touch", &[]);
     for e in touch_events {

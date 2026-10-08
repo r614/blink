@@ -240,18 +240,18 @@ As KISMET.md sections 2 and "Random numbers"; no change.
 |---|---|---|
 | K-1 nesting, enabled chain | `runtime.rs : update_seq` | match |
 | K-1 UpdateOp per tick, remote event on the next tick | `kismet_host.rs : step` | match (UNVERIFIED order vs actors, F-13) |
-| K-2 dt scaling, flag | `runtime.rs : tick`, `execute_active_ops` | **missing** (F-3) |
-| K-2 event clocks | `runtime.rs : check_activate` (`self.time`) | **missing** (F-4) |
+| K-2 dt scaling, flag | `runtime.rs : tick_dilated`, `execute_active_ops`; `kismet_host.rs : step` | match (F-3 ported 2026-10-08) |
+| K-2 event clocks | `runtime.rs : check_activate`, `activate_event` (`event_clock`: `time` / `bend_time`) | match (F-4 ported) |
 | K-3 impulses, queued counts, disabled, delays | `runtime.rs : impulse`, `run_op`, `execute_active_ops` | match |
 | K-3 PlayerIndex / GamepadID | none | missing, harmless in single player (F-5) |
 | K-4 target push order | `run_op` (`targets.into_iter().rev()`) | match |
-| K-4 delayed-due / repeat queue position | `execute_active_ops`, `run_op` | **differs** (F-1) |
+| K-4 delayed-due / repeat queue position | `execute_active_ops`, `run_op` | match (F-1 ported) |
 | K-4 cap, replay | `execute_active_ops` | match |
-| K-5 latent keep | `execute_active_ops` (`latent_keep`) | **differs** (F-2) |
-| K-6 populate / publish | `populate`, `publish`, `publish_values` | subset (F-5) |
+| K-5 latent keep | `execute_active_ops` (`latent_keep`) | match (F-2 ported) |
+| K-6 populate / publish | `populate`, `populate_scalar`, `publish`, `publish_values` | match for Int / Float / Bool scalars (F-5 ported); PlayerIndex / GamepadID not kept |
 | K-7 CheckActivate / ActivateEvent | `check_activate`, `activate_event` | match except gates and clocks |
 | K-8 native event sources | `kismet_host.rs : feed` and friends | partial: section 5 |
-| Trace | `tools/oracle/src/runner.rs:558` | **not comparable** (F-6) |
+| Trace | `runtime.rs : activations`, `trace_name`; `tools/oracle/src/runner.rs` | comparable (F-6 ported): per-op `Activated` / `Deactivated` |
 
 ---
 
@@ -555,8 +555,7 @@ Scenarios (`fixtures/oracle/scenarios/kismet/`, queued in `fixtures/oracle/captu
 | `kismet/boyle_start` (exists) | the first 5 s of `ChangeLvl_fromHub_toBoyle` activation by activation: depth-first order, the remote-event tick, spawner events |
 | `kismet/boyle_intro_20s` (new, 1200 ticks, port runs it in 10 s) | the same for 20 s: Samuel's intro conversation, objectives, delayed links, latent op finishing order (F-2), delayed-due position (F-1), and the activation tick of everything relative to the world clock (F-13: the first activation tick) |
 
-Both need F-6 on the port side before the comparison is meaningful (until then the original's trace is
-compared against notes). The original trace can be captured now.
+F-6 is ported (section 7): the port records the same per-op events, so a capture compares directly.
 
 Unverified checks and what decides them:
 - **F-13 (Kismet vs actors).** From the two traces: in the original, find an op that depends on a
@@ -574,6 +573,27 @@ Unverified checks and what decides them:
 
 ---
 
+## 7. Port status (2026-10-08)
+
+Each cited function was re-read (`oracle index fn`, `exe_probe dis`) before porting.
+
+| Id | Status | Where | Notes |
+|---|---|---|---|
+| F-1 | **ported** | `runtime.rs : execute_active_ops` (due delayed ops), `run_op` (repeat) | `queue_op(.., false)`; `edi` = 0 at 0x00700948 checked (set at 0x007008ac); `push 0` at 0x00700f0d. Test `delayed_activation_that_comes_due_runs_after_the_ops_already_queued`, `repeated_activation_goes_to_the_bottom_of_the_stack`. |
+| F-2 | **ported** | `execute_active_ops` | reverse, `bActive` test (0x007014db), push top; the local list is AddUnique (0x00514c60). Test `kept_latent_ops_come_back_in_reverse_so_the_first_met_updates_first`. |
+| F-3 | **ported** | `runtime.rs : tick_dilated`, `execute_active_ops`; `kismet_host.rs : step`; `dishonored_sim::powers::player_time_dilation` | The host passes `dt x player dilation` (the world tick's TimeDilation-scaled dt) and `world / player` from the powers' Bend Time / Blink channels (`time_bends`, `blink_layers`: Blink's channel has player rate 1). Flag of the target op for delayed entries. `dt * ratio` is computed in double (the x87 product) and stored as f32. LIKELY part unchanged: the dt handed to `UpdateOp` is TimeDilation-scaled (consistent with U-109). Test `bend_time_slows_unflagged_ops_and_not_flagged_ones`. |
+| F-4 | **ported** | `runtime.rs : event_clock` (`check_activate`, `activate_event`) | `Kismet.time` = TimeSeconds (+= dt), `Kismet.bend_time` = BendTimeSeconds (+= dt x ratio = world rate, as U-109 measured). `SeqAct_Delay` keeps stamping TimeSeconds. Test `retrigger_delay_runs_on_the_bend_time_clock_unless_flagged`. |
+| F-5 | **ported** (scalars) | `runtime.rs : populate_scalar` | The first variable's class decides: `SeqVar_Int` sum (0x006f6da0), `SeqVar_Float` float sum from 0 in link order (0x006f69b0), `SeqVar_Bool` AND (0x006f6740), over the link's variables of that class. Publish already wrote a scalar to every variable. Array properties unchanged. PlayerIndex / GamepadID not kept (single player: 0). Test `scalar_int_and_float_properties_take_the_sum_of_the_link`. |
+| F-6 | **ported** | `runtime.rs : record`, `activations`, `trace_name`, `activation_detail`; `tools/oracle/src/runner.rs` | Log entries: an op's `Activated` after its native `Activated` (with the inputs carrying an impulse), `Deactivated` after its native `DeActivated` (outputs), an event's `Activated` in `ActivateEvent` (outputs). Trace: kind `Kismet`, object = `Package:Outer.Name` without `TheWorld.PersistentLevel.` (the hook's `short_path`), name `Activated` / `Deactivated`, detail `class=.. in=..` / `out=..`; host notes go out as `KismetNote`. Attached duplicates are named `<Event>_AttachDup` in the attaching sequence (UNVERIFIED). `kismet/boyle_start`: 301 `Kismet` events in 5 s (and the 39 notes). Test `activation_log_lists_activated_and_deactivated_in_call_order`. |
+| F-7 | open | - | no `DisNPCDistractor` / distraction sub-process in the sim. |
+| F-8 | **ported** | `kismet_host.rs : attention_events` (from `feed`) | 0x00b3b350 calls 0x00b363d0 once per target batch with the first record's old level and the last record's new level (a jump; this settles the section 6 question for the fire site). The port diffs each brain's per-target levels once per step (the brains update attention once per tick): originator the observer pawn (events found through the pawn and its spawner), instigator the target, `m_eActivatedAttentionLevel` set, the level gate and the `bPlayerOnly` player test, then `CheckActivate`. The noise pseudo-target is skipped; the DLC06 variants (indices `[level]`) are not in the port's maps. |
+| F-9 | open | - | no stepped `DishonoredBreakable` in the sim. |
+| F-10 | open | - | no `DisWhaleOilBattery` actor in the sim. |
+| F-11 | partial | `kismet_host.rs` `"SeqAct_SetPhysics"` | the class is handled: the `EPhysics` per target is recorded (`HostState.physics`); nothing moves (no rigid bodies, no per-actor physics mode in the sim). |
+| F-13 | open | - | needs the captures of section 6. |
+| F-14 | **done** | ORACLE.md | the 39 were the host's notes; corrected. |
+
+The trace of the port's `Sequence` op (`fromHub_toBoyle`) shows an `Activated` with no `Deactivated` (the port's `Sequence::Activated` clears `bActive`); the first capture of `kismet/boyle_start` decides whether the original does the same.
 ## Appendix A. Native fire sites per event class
 
 Method: class pointer cache `DAT_xxx` (from the lazy getter) -> `exe_probe find-imm` ->
