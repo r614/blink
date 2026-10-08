@@ -1633,7 +1633,8 @@ impl AnimBank {
                     let mut v: Vec<Option<Key>> = vec![None; p.bones.len()];
                     for (j, tn) in tracks.iter().enumerate() {
                         if let Some(b) = p.bones.iter().position(|b| b.name.eq_ignore_ascii_case(tn)) {
-                            let (q, tr) = clip.sample(t.min(clip.duration), j);
+                            // Held at the end, not looped (the caller clamps to the duration).
+                            let (q, tr) = clip.sample_held(t.min(clip.duration), j);
                             if let Some(q) = q {
                                 v[b] = Some(Key { q, t: tr });
                             }
