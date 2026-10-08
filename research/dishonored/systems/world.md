@@ -51,8 +51,9 @@ more for scripted effects): each entry is one attribute with a list of LEVELS, e
 a name and a value (`m_fValue`). Charms with two levels are "I" and "II" variants: Healthy
 Appetite 10 / 20, Unnerving Target 0.05 / 0.10, Robust 0.125 / 0.25 (health potion potency),
 Spirited 0.10 / 0.20 (mana potion potency), Twist of Fortune 0.10 / 0.20, Whirlwind 0.10 / 0.20.
-A placed charm pickup (`DisWhaleBoneCharm`) carries `m_Effect`, a flat index over all levels of
-all charms (-1 = none; the pickup refuses to be taken, vslot 240 0x00A19D50); Kismet sets it with
+A placed charm pickup (`DisWhaleBoneCharm`) carries `m_Effect`, a charm effect id (CORRECTED in
+10.1 F-7: an index into `m_Charms`, or `m_ScriptedCharms` from 10,000,000 up; the level comes from
+taking the same effect again) (-1 = none; the pickup refuses to be taken, vslot 240 0x00A19D50); Kismet sets it with
 `DisSeqAct_SetBoneCharmEffect` (vslot 241, 0x00A22970; 12 ops in the maps). Taking it calls the
 engine's charm table (0x00ABBA90). Slots: `m_MaxActivatedBoneCharmCount` 3 plus the
 `Attribute_MaxActivatedBoneCharmCountBonus` of the owned upgrades: Bone Charms Capacity 1 (+1),
@@ -509,6 +510,31 @@ run, so every Kismet-locked usable stays in its initial lock state.
 | F-17 | port missing | Kismet inventory ops (AddInventoryItem 26, AddKey 15, AddPower 11, GiveUpgrade 2, ModifyElixirCount 3, GetAbstractItemQuantity 10) and the `PlayerInventoryChanged` event | coverage table | map each to the sim function (`give_item`, `buy_power` without cost, `give_upgrade`, `add_elixirs`) |
 | F-18 | known difference | Attribute modifier order and difficulty bases | 0x00C863F0 | Normal only; low priority |
 | F-19 | doc correction | PLAYGROUND.md "Can use" reads `+0x2C4` as the lock flag; it is `m_State`. The lock flag is bit 0 of `+0x2B0` | 0x00A4E2E0 | edit PLAYGROUND.md |
+
+### 10.1 Port status (2026-10-08)
+
+| id | status | what changed / why not |
+|---|---|---|
+| F-1 | ported | `dishonored_sim::darkness` (`Darkness { score, counters }`: `add` 0x00C41B50, `level` 0x00C487D0, `notify_deed` 0x00C4D2C0, `mission_end` 0x00C4D500). Tables from the tweak: `ItemsConfig.darkness` (`m_DarknessLevels` read as a raw int array, `TweakDb::int_array`; `m_Deeds` with tweak and exclusion names). Victims match by tweak lineage (the tweak and its `m_FallbackChainCooked`, `TweakDb::lineage`, cached per map as `<map>.lineage1.json`, `Spawner::lineage` / `OriginalNpc::lineage`); mission NPCs use their role's base tweak (`Pwn_Civ_Base` / `Pwn_Guard_Base`). Hooks in `MissionMatch::step`: a player kill -> `NumKills` with the victim lineage; `AiEvent::AlarmRang` -> `NumAlarmsTriggered`; the new `AiEvent::CorpseFound` (first sight of a corpse by a brain) -> `NumCorpsesDiscovered` once per corpse (`MissionMatch::corpses_discovered`). The score is saved with the match (`MissionMatch::darkness`) and a mission can start from a carried-in score (`MissionSettings::darkness`). The kill-ratio chaos (`high_chaos_kill_ratio`, `MissionStats::high_chaos`) is gone. |
+| F-2 | ported | `DisSeqAct_AddDarkness` -> `Darkness::add` (clamped) and its `m_Text` as a HUD line; `DisSeqVar_Darkness` / `DisSeqVar_DarknessLevel` read `Kismet::darkness` (score, level) that the host syncs; `DisSeqAct_IncrementPlayerStat` (0x00AB9B90) feeds the deeds; `DisSeqAct_NotifyMissionEnd` clears the counters. |
+| F-3 | ported | `NodeKind::CompareDarknessLevel` (`m_LevelToCompare`), outputs 0 equal / 1 lower / 2 higher; `ConvEnv::darkness_level`. Dialog cache key v2 -> v3. |
+| F-4 | ported | `MissionView::high_chaos` = level >= `m_ChaosLevelThreshold` of the last `DisSeqAct_MissionStatsTracking` (0x009FE090; an unset threshold is the class default 0), else `MissionSettings::chaos_level_threshold`; `MissionView::darkness_score` / `darkness_level` added. |
+| F-5 | ported | `Inventory::upgrades` (and the charm masks) are `u64`; `give_upgrade` / `attribute_for` take all 34 upgrades. |
+| F-7 | ported, with a correction | The decoded rule differs from the finding: `m_Effect` is a charm effect id, below 10,000,000 an index into `m_Charms` and from it up into `m_ScriptedCharms` (0x00AA8EF0), not a flat index over levels. The owned charms are (level, effect id) pairs; taking an effect already owned raises its level (0x00ABBA90), which is how the "II" values apply. Port: `Inventory::charms_level2`, `powers::take_charm` / `charm_value` / `charm_slot`, `ItemsConfig::scripted_charms` (12 in the shipped list, not 14), the placed actor's `m_Effect` read into `PickupKind::BoneCharm(Option<i32>)` (pickups cache key 1 -> 2), `DisSeqAct_SetBoneCharmEffect` sets the targets' effect, and Kismet charm pickups give theirs. Left open: the placed charms of the shipped levels have no `m_Effect` (the class default -1); the run-time distribution that assigns them (a pool at the game object's +0xB44) is not decoded (U-W12), so -1 charms keep the deterministic stand-in. |
+| F-8 | ported | `DisSeqAct_Door` Open applies only to a closed door (0x00A1A450), Close only to an open one (0x00A1A4B0). CanUse's other terms (disabled, mid-transition) never apply to the port's doors. |
+| F-9 | left open | U-W4: `DisDoor::Use` (0x00A37C10) has no key path and the key match against `m_MatchingKeys` / `DisKeyRing` was not found in this pass; `DisSeqAct_AddKey` is therefore not run either. |
+| F-10 | ported | `DisSeqAct_Lock` (0x00B8F730): Lock / Unlock on every usable target; doors switch `m_bLocked` and the AI's path blocking (door version), other usables keep a lock that makes a use fire their `DisSeqEvent_Used` "used but locked" output instead of a stage. |
+| F-16 | ported (the types the port has) | `save::disallow_types` lists the pushed `EDisDisableSaveType`s the port can see (Blink, GameOverPending, PlayerInCombat, StatePlayerMasterAssassinate, Choice, Choke, Dead, PrePossess / Possess); a pop keeps saving off for its wait (`m_fDisallowSavingTimer = max(timer, wait)`, 0x009F95F0): Choice 0.1 s (0x00A6C7E0), CinematicMode 1 s (0x00AAF150), PlayerInCombat `m_fDisableManualSaveAfterCombatTime_s` 1.0 of `DisTweaks_PlayerPawn_Combat` when `m_bDisableManualSaveInCombat` (0x00AB9FA0; this closes U-W8; `ItemsConfig::combat_save`). Not modelled: KillCam, CinematicMode, the item contexts Fatality / FireCrossbow / DropAssassinate, Soiree, Minigame, Stunned, Versus, HolePeeking, Kismet, Pull (no such state in the port). |
+| F-17 | partly ported | `DisSeqAct_GiveUpgrade`, `AddInventoryItem`, `ModifyElixirCount` (add / remove / set, clamped by 0x00C04E10), `GetAbstractItemQuantity` run. Left open: `AddPower` (0x00AA38A0 calls the level setter 0x00ACE270 with `m_PowerLevel`; how the original's level index maps to the port's 0..2 levels of active powers is not settled), `AddKey` (F-9), `PlayerInventoryChanged`. |
+| F-6 | data ported | `ItemsConfig::store` (`DisTweaks_Store.m_StoreItems`, 42 items from `L_Pub_Craftsman`: name, sub-section, item, cost list, prerequisites, visibility prerequisite, purchase output). The purchase rule (`Req_BuyItem`, a store movie slot behind the shared thunk 0x009ECD10) is not decoded; no buy function yet. |
+| F-13, F-14 | left open | Not reached in this pass. |
+| F-19 | done | PLAYGROUND.md corrected (`+0x2C4` is `m_State`; the lock is bit 0 of `+0x2B0`). |
+
+U-W1 is closed by the data read: `m_DarknessLevels` = 0, 12, 48, 72, 96, 114, 138, 162, 168, 200, 390
+(raw int array of `Twk_Pawn_Corvo_Release`). Scenarios (system Chaos): `chaos/adddarkness_sweep`,
+`chaos/civilian_kills`, `chaos/guard_kills_sweep`, `chaos/corpse_discovered` (all Static, all pass;
+before this port the channels did not exist and the score was a constant 0). No alarm scenario:
+the Playground has no alarm bell; the alarm deed is covered by `darkness` unit tests.
 
 Open questions: U-W1 confirm the level table by `session read`; U-W2 the exact kill-credit
 conditions of 0x00B73990; U-W3 the lock gate between Use and the opening stage; U-W4 the key

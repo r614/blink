@@ -352,28 +352,129 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
     // --- bone charms ---
     if let Some(TVal::Obj(list)) = get(&corvo, "m_pCharmListTweaks") {
         let m = l.obj(list);
-        if let Some(TVal::List(charms)) = m.get("m_Charms") {
-            for c in charms {
-                let attribute = match c.get("m_AttributeName") {
-                    Some(TVal::Name(n)) => n.clone(),
-                    _ => continue,
-                };
-                let mut name = String::new();
-                let mut values = Vec::new();
-                if let Some(TVal::List(levels)) = c.get("m_Levels") {
-                    for lv in levels {
-                        if name.is_empty() {
-                            if let Some(TVal::Str(s)) = lv.get("m_Name") {
-                                name = s.trim().to_string();
+        let read = |key: &str| -> Vec<BoneCharm> {
+            let mut out = Vec::new();
+            if let Some(TVal::List(charms)) = m.get(key) {
+                for c in charms {
+                    let attribute = match c.get("m_AttributeName") {
+                        Some(TVal::Name(n)) => n.clone(),
+                        _ => continue,
+                    };
+                    let mut name = String::new();
+                    let mut values = Vec::new();
+                    if let Some(TVal::List(levels)) = c.get("m_Levels") {
+                        for lv in levels {
+                            if name.is_empty() {
+                                if let Some(TVal::Str(s)) = lv.get("m_Name") {
+                                    name = s.trim().to_string();
+                                }
                             }
+                            values.push(get_f32(lv, "m_fValue").unwrap_or(0.0));
                         }
-                        values.push(get_f32(lv, "m_fValue").unwrap_or(0.0));
                     }
+                    out.push(BoneCharm { name, attribute, values });
                 }
-                cfg.charms.push(BoneCharm { name, attribute, values });
+            }
+            out
+        };
+        cfg.charms = read("m_Charms");
+        cfg.scripted_charms = read("m_ScriptedCharms");
+        l.prov.insert("items.charms".into(), format!("{list} :: m_Charms ({} charms)", cfg.charms.len()));
+        l.prov.insert("items.scripted_charms".into(), format!("{list} :: m_ScriptedCharms ({} charms)", cfg.scripted_charms.len()));
+    }
+
+    // --- chaos: `m_DarknessLevels` (TArray<int>, read raw) and `m_Deeds` ---
+    let dd = DarknessConfig::default();
+    match l.db.int_array(CORVO, "m_DarknessLevels") {
+        Some(v) if !v.is_empty() => {
+            l.prov.insert("items.darkness.levels".into(), format!("{CORVO} :: m_DarknessLevels = {v:?}"));
+            cfg.darkness.levels = v;
+        }
+        _ => {
+            l.prov.insert("items.darkness.levels".into(), format!("{CORVO} :: m_DarknessLevels absent, original table {:?}", dd.levels));
+        }
+    }
+    if let Some(TVal::List(deeds)) = corvo.get("m_Deeds") {
+        let name_of = |m: &TMap| match get(m, "m_TweaksName") {
+            Some(TVal::Name(n)) if n != "None" && !n.is_empty() => Some(n.clone()),
+            _ => None,
+        };
+        cfg.darkness.deeds = deeds
+            .iter()
+            .map(|d| DarknessDeed {
+                stat: match d.get("m_Stat") {
+                    Some(TVal::Name(n)) => n.clone(),
+                    _ => String::new(),
+                },
+                threshold: get_f32(d, "m_Threshold").unwrap_or(0.0) as i32,
+                value: get_f32(d, "m_Value").unwrap_or(0.0) as i32,
+                tweak: match d.get("m_TweaksNamePair") {
+                    Some(TVal::Struct(p)) => name_of(p),
+                    _ => None,
+                },
+                excluded: match d.get("m_ExcludedTweaksNamePairs") {
+                    Some(TVal::List(x)) => x.iter().filter_map(name_of).collect(),
+                    _ => Vec::new(),
+                },
+            })
+            .collect();
+        l.prov.insert("items.darkness.deeds".into(), format!("{CORVO} :: m_Deeds ({} deeds)", cfg.darkness.deeds.len()));
+    } else {
+        l.prov.insert("items.darkness.deeds".into(), format!("{CORVO} :: m_Deeds absent, original table ({} deeds)", dd.deeds.len()));
+    }
+
+    // --- combat save rules (`DisTweaks_PlayerPawn_Combat`) ---
+    let cp = format!("{CORVO}.pCombatTweaks");
+    let cm = l.obj(&cp);
+    let dc = CombatSaveConfig::default();
+    let flag = |m: &TMap, k: &str, d: bool| match get(m, k) {
+        Some(TVal::B(b)) => *b,
+        _ => d,
+    };
+    cfg.combat_save = CombatSaveConfig {
+        disable_manual_save: flag(&cm, "m_bDisableManualSaveInCombat", dc.disable_manual_save),
+        disable_autosave: flag(&cm, "m_bDisableAutosaveInCombat", dc.disable_autosave),
+        after_combat_time: l.f(&cm, &cp, "m_fDisableManualSaveAfterCombatTime_s", "items.combat_save.after_combat_time", dc.after_combat_time),
+    };
+    l.prov.insert("items.combat_save".into(), format!("{cp} :: m_bDisableManualSaveInCombat / m_bDisableAutosaveInCombat = {:?}", cfg.combat_save));
+
+    // --- Piero's workshop (`DisTweaks_Store`, cooked into L_Pub_Craftsman) ---
+    if let Ok(sdb) = TweakDb::load_with(content, &["L_Pub_Craftsman".to_string()]) {
+        let sp = "Stores_Twk.Stores.Twk_Store_Craftsman";
+        let sm = sdb.try_resolve(sp).unwrap_or_default();
+        let obj = |m: &TMap, k: &str| match m.get(k) {
+            Some(TVal::Obj(o)) => o.clone(),
+            _ => String::new(),
+        };
+        if let Some(TVal::List(items)) = sm.get("m_StoreItems") {
+            for it in items {
+                let cost = match it.get("m_Cost") {
+                    Some(TVal::List(c)) => c.iter().map(|c| (obj(c, "m_Type"), get_f32(c, "m_Quantity").unwrap_or(0.0) as i32)).collect(),
+                    _ => Vec::new(),
+                };
+                let prerequisites = match it.get("m_Prerequisites") {
+                    Some(TVal::List(p)) => p.iter().map(|p| obj(p, "obj")).filter(|s| !s.is_empty()).collect(),
+                    _ => Vec::new(),
+                };
+                cfg.store.items.push(StoreItem {
+                    name: match it.get("m_Name") {
+                        Some(TVal::Str(s)) => s.clone(),
+                        _ => String::new(),
+                    },
+                    section: get_f32(it, "m_SubSectionIndex").unwrap_or(0.0) as i32,
+                    item: obj(it, "m_Item"),
+                    additional: obj(it, "m_AdditionalItem"),
+                    cost,
+                    prerequisites,
+                    visibility_prereq: get_f32(it, "m_VisibilityPrereqIdx").unwrap_or(-1.0) as i32,
+                    output: match it.get("m_OutputLinkOnPurchase") {
+                        Some(TVal::Str(s)) => s.clone(),
+                        _ => String::new(),
+                    },
+                });
             }
         }
-        l.prov.insert("items.charms".into(), format!("{list} :: m_Charms ({} charms)", cfg.charms.len()));
+        l.prov.insert("items.store".into(), format!("L_Pub_Craftsman {sp} :: m_StoreItems ({} items)", cfg.store.items.len()));
     }
 
     // --- passive powers: DishonoredPowersComponent.m_Powers in DefaultPlayer.ini ---

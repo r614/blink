@@ -430,6 +430,7 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         ("power.time_scale", "1"), ("power.world_dilation", "1"), ("power.dark_vision", "s"), ("power.possess", "enum"), ("power.action_lock", "s"),
         ("inv.grenades", "n"), ("inv.sticky", "n"), ("inv.razors", "n"), ("inv.sleep_darts", "n"), ("inv.incendiary", "n"), ("inv.elixir_health", "n"), ("inv.elixir_mana", "n"), ("inv.coins", "n"), ("inv.runes", "n"),
         ("world.projectiles", "n"), ("world.windblasts", "n"), ("world.traps", "n"), ("world.swarms", "n"), ("world.rats", "n"), ("world.swarm_rats", "n"), ("world.time_bends", "n"),
+        ("darkness.score", "n"), ("darkness.level", "n"), ("darkness.corpses_found", "n"), ("darkness.high", "bool"),
         ("proj.x", "uu"), ("proj.y", "uu"), ("proj.z", "uu"), ("proj.speed", "uu/s"),
         ("fx.live", "n"), ("fx.particles", "n"),
     ] {
@@ -470,6 +471,10 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         }
         let rats = w.players.iter().filter(|p| p.kind == dishonored_sim::state::PawnKind::Rat && p.alive).count();
         v.extend([w.projectiles.len() as f64, w.windblasts.len() as f64, w.traps.len() as f64, w.swarms.len() as f64, rats as f64, w.swarms.iter().map(|s| s.rats as f64).sum::<f64>(), w.time_bends.len() as f64]);
+        // Chaos: the darkness manager's score and level (0x00C487D0), corpses found so far.
+        let dl = m.darkness.level(&cfg.gameplay.items.darkness);
+        let high = m.view.mission.as_ref().is_some_and(|mv| mv.high_chaos);
+        v.extend([m.darkness.score as f64, dl as f64, m.corpses_discovered.len() as f64, b(high)]);
         match w.projectiles.iter().min_by_key(|p| p.id) {
             Some(pr) => v.extend([pr.position.x as f64, pr.position.y as f64, pr.position.z as f64, pr.velocity.length() as f64]),
             None => v.extend([f64::NAN; 4]),
@@ -617,6 +622,13 @@ fn console(game: &mut Game, cmd: &str, by_id: &HashMap<PlayerId, String>, cfg: &
         Some("alert") => {
             let id = npc(w.get(1).copied().unwrap_or(""))?;
             m.alert_npc(id);
+        }
+        // The cheat `adddarkness N` (DishonoredCheatManager slot 300, 0x00B753A0): the darkness
+        // manager's Add (0x00C41B50).
+        Some("adddarkness") => {
+            m.darkness.add(f(1)? as i32);
+            m.sync_darkness(cfg);
+            return Ok(format!("score={} level={}", m.darkness.score, m.state.darkness_level));
         }
         Some("calm") => {
             let id = npc(w.get(1).copied().unwrap_or(""))?;

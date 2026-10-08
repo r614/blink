@@ -59,27 +59,77 @@ pub fn attribute_for(p: &PlayerState, cfg: &GameplayConfig, name: &str, base: f3
         }
     }
     if p.inv.upgrades != 0 {
-        for (i, (un, attrs)) in items.upgrades.iter().enumerate().take(32) {
-            if p.inv.upgrades & (1 << i) != 0 && host(un) {
+        for (i, (un, attrs)) in items.upgrades.iter().enumerate().take(64) {
+            if p.inv.upgrades & (1u64 << i) != 0 && host(un) {
                 v += attrs.iter().filter(|(n, _)| n == name).map(|(_, x)| *x).sum::<f32>();
             }
         }
     }
     if p.inv.charms_equipped != 0 {
-        for (i, c) in items.charms.iter().enumerate().take(32) {
-            if p.inv.charms_equipped & (1 << i) != 0 && c.attribute == name {
-                v += c.values.first().copied().unwrap_or(0.0);
+        for slot in 0..charm_slots(cfg) {
+            let Some(c) = charm(cfg, slot) else { continue };
+            if p.inv.charms_equipped & (1u64 << slot) != 0 && c.attribute == name {
+                v += charm_value(p, cfg, slot);
             }
         }
     }
     v
 }
 
+/// Charm slots: `m_Charms` then `m_ScriptedCharms` (at most 64, the inventory's bit width).
+pub fn charm_slots(cfg: &GameplayConfig) -> usize {
+    (cfg.items.charms.len() + cfg.items.scripted_charms.len()).min(64)
+}
+
+/// The charm of a slot.
+pub fn charm(cfg: &GameplayConfig, slot: usize) -> Option<&dishonored_ir::items::BoneCharm> {
+    let n = cfg.items.charms.len();
+    if slot < n { cfg.items.charms.get(slot) } else { cfg.items.scripted_charms.get(slot - n) }
+}
+
+/// The slot of a charm effect id (0x00AA8EF0: below `SCRIPTED_CHARM_BASE` an index into
+/// `m_Charms`, from it up into `m_ScriptedCharms`).
+pub fn charm_slot(cfg: &GameplayConfig, effect: i32) -> Option<usize> {
+    let base = dishonored_ir::items::SCRIPTED_CHARM_BASE;
+    let n = cfg.items.charms.len();
+    let slot = match effect {
+        e if e < 0 => return None,
+        e if e < base => Some(e as usize).filter(|i| *i < n)?,
+        e => Some((e - base) as usize).filter(|j| *j < cfg.items.scripted_charms.len())? + n,
+    };
+    (slot < 64).then_some(slot)
+}
+
+/// The value an owned charm gives: `m_Levels[level].m_fValue` at its current level (the
+/// owned entry's level byte, 0x00AB9330).
+pub fn charm_value(p: &PlayerState, cfg: &GameplayConfig, slot: usize) -> f32 {
+    let Some(c) = charm(cfg, slot) else { return 0.0 };
+    let level = if p.inv.charms_level2 & (1u64 << slot) != 0 { 1 } else { 0 };
+    c.values.get(level).or(c.values.last()).copied().unwrap_or(0.0)
+}
+
+/// Take a bone charm effect (0x00ABBA90): a charm not owned yet is added at level 0 (and
+/// equipped while a slot is free, `m_bAutoEquipBoneCharm`); one already owned goes up a level
+/// (to the "II" values), never past its last level.
+pub fn take_charm(p: &mut PlayerState, cfg: &GameplayConfig, slot: usize) {
+    let bit = 1u64 << slot;
+    if p.inv.charms_owned & bit != 0 {
+        if charm(cfg, slot).is_some_and(|c| c.values.len() > 1) {
+            p.inv.charms_level2 |= bit;
+        }
+        return;
+    }
+    p.inv.charms_owned |= bit;
+    if (p.inv.charms_equipped.count_ones() as u8) < max_charms(p, cfg) {
+        p.inv.charms_equipped |= bit;
+    }
+}
+
 /// Give a workshop upgrade by name (`Twk_Upgrade_<name>`, e.g. `GrenadeBelt`).
 pub fn give_upgrade(p: &mut PlayerState, name: &str, cfg: &GameplayConfig) -> bool {
-    match cfg.items.upgrades.iter().take(32).position(|(n, _)| n.eq_ignore_ascii_case(name)) {
+    match cfg.items.upgrades.iter().take(64).position(|(n, _)| n.eq_ignore_ascii_case(name)) {
         Some(i) => {
-            p.inv.upgrades |= 1 << i;
+            p.inv.upgrades |= 1u64 << i;
             true
         }
         None => false,
@@ -204,16 +254,16 @@ pub fn buy_power(p: &mut PlayerState, idx: usize, cfg: &GameplayConfig) -> bool 
 
 /// Equip or unequip an owned bone charm (`m_MaxActivatedBoneCharmCount` slots).
 pub fn set_charm(p: &mut PlayerState, i: usize, on: bool, cfg: &GameplayConfig) -> bool {
-    if i >= 32 || p.inv.charms_owned & (1 << i) == 0 {
+    if i >= 64 || p.inv.charms_owned & (1u64 << i) == 0 {
         return false;
     }
     if on {
-        if p.inv.charms_equipped & (1 << i) == 0 && p.inv.charms_equipped.count_ones() as u8 >= max_charms(p, cfg) {
+        if p.inv.charms_equipped & (1u64 << i) == 0 && p.inv.charms_equipped.count_ones() as u8 >= max_charms(p, cfg) {
             return false;
         }
-        p.inv.charms_equipped |= 1 << i;
+        p.inv.charms_equipped |= 1u64 << i;
     } else {
-        p.inv.charms_equipped &= !(1 << i);
+        p.inv.charms_equipped &= !(1u64 << i);
     }
     true
 }

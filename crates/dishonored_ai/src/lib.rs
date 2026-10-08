@@ -132,6 +132,10 @@ pub enum AiEvent {
     /// A rat brain's meal ([`rats::RatEvent`]): it started eating a corpse, or ate it (no body
     /// remains) when `devoured`.
     RatEat { rat: PlayerId, corpse: PlayerId, devoured: bool },
+    /// An NPC saw a corpse it had not seen before (the corpse reaction, 0x00B40740, which
+    /// reports the discovery 0x00A98950: the game counts `NumCorpsesDiscovered` the first time a
+    /// given corpse is discovered by anyone).
+    CorpseFound { npc: PlayerId, corpse: PlayerId },
 }
 
 /// Runtime state of a `DisAlarmBell`.
@@ -308,6 +312,10 @@ pub struct Brain {
     /// Barks decided this tick (drained into `Crowd::events`).
     #[serde(default)]
     pub barks: Vec<(String, Option<PlayerId>)>,
+    /// Corpses this brain discovered by sight this tick (drained into `Crowd::events` as
+    /// [`AiEvent::CorpseFound`]).
+    #[serde(default)]
+    pub found_corpses: Vec<PlayerId>,
     /// Time left before the first pistol shot is allowed (`m_GunUsageStart`, `m_fGunTimer`).
     #[serde(default)]
     pub gun_timer: f32,
@@ -929,6 +937,9 @@ impl Crowd {
             for (hook, initiator) in b.barks.drain(..) {
                 ai_events.push(AiEvent::Bark { npc: b.id, hook, initiator });
             }
+            for corpse in b.found_corpses.drain(..) {
+                ai_events.push(AiEvent::CorpseFound { npc: b.id, corpse });
+            }
             let panicked = |s: BrainState| matches!(s, BrainState::Flee | BrainState::Cower);
             if b.kind != PawnKind::Guard && panicked(b.state) && !panicked(was) {
                 // `DisAISubStateFlee.bDoBarkForHelp`: call for help at talking loudness.
@@ -1366,6 +1377,7 @@ impl Brain {
             ring_wait: 0.0,
             alarm_enemy: None,
             barks: Vec::new(),
+            found_corpses: Vec::new(),
             gun_timer: -1.0,
             hostile_faction: Vec::new(),
             deaf: false,
@@ -1743,6 +1755,7 @@ impl Brain {
                     let seen = !self.blind && Self::look(me, p, world, ai).is_some_and(|n| seen_rate(prof, prof.seeing_scalar_dead_npc, n, 0.0) > 0.0);
                     if seen {
                         self.corpses_seen.push(p.id);
+                        self.found_corpses.push(p.id);
                         let inc = prof.discovered_corpse;
                         self.bump(ai, NOISE, inc, p.position, false, reason::FOUND_CORPSE);
                         self.suspecting = true;

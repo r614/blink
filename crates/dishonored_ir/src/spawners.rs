@@ -45,6 +45,10 @@ pub struct Spawner {
     /// The pawn tweak's look (empty when unresolved).
     #[serde(default)]
     pub appearance: Appearance,
+    /// The pawn tweak and the tweaks it inherits from (its `m_FallbackChainCooked`, nearest
+    /// first), as `Pkg.Obj` paths: what "is or inherits from" tests (0x00C6F450).
+    #[serde(default)]
+    pub lineage: Vec<String>,
 }
 /// An NPC's look from its pawn tweak (`DisTweaks_NPCPawn`, resolved through Arkane's fallback
 /// chain): the body `m_pSkeletalMesh` and the `m_RandomHeadMeshes` options. Mesh references are

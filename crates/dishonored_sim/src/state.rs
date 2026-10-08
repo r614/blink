@@ -419,19 +419,27 @@ pub mod power {
 
 /// The player's inventory (`DishonoredInventory`): ammo counts by `eDisAmmoType` (bullets and
 /// bolts stay in [`LeftHandState`]'s reserves), `m_ElixirCounts`, the coin and rune abstract
-/// items, owned/equipped bone charms (bit per `m_Charms` index) and power levels.
+/// items, owned/equipped bone charms and power levels.
+///
+/// Bone charms are bits by charm slot: `m_Charms[i]` is slot `i`, `m_ScriptedCharms[j]` slot
+/// `m_Charms.len() + j` (`powers::charm_slot`). The original keeps the owned charms as
+/// (level, effect id) pairs (+0xB38); taking a charm already owned raises its level (0x00ABBA90),
+/// which [`Inventory::charms_level2`] records (the shipped charms have at most two levels).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Inventory {
     pub ammo: [u16; 8],
     pub elixirs: [u8; 2],
     pub coins: u32,
     pub runes: u16,
-    pub charms_owned: u32,
-    pub charms_equipped: u32,
-    pub power_levels: [u8; power::COUNT],
-    /// Owned workshop upgrades (bit per `ItemsConfig::upgrades` index).
+    pub charms_owned: u64,
+    pub charms_equipped: u64,
+    /// Owned charms at their second level (`m_Levels[1]`: the "II" values).
     #[serde(default)]
-    pub upgrades: u32,
+    pub charms_level2: u64,
+    pub power_levels: [u8; power::COUNT],
+    /// Owned workshop upgrades (bit per `ItemsConfig::upgrades` index; 34 upgrades ship).
+    #[serde(default)]
+    pub upgrades: u64,
 }
 
 impl Default for Inventory {
@@ -442,7 +450,7 @@ impl Default for Inventory {
         power_levels[power::BLINK] = 2;
         power_levels[power::WINDBLAST] = 2;
         power_levels[power::DARK_VISION] = 2;
-        Self { ammo: [0; 8], elixirs: [0; 2], coins: 0, runes: 0, charms_owned: 0, charms_equipped: 0, power_levels, upgrades: 0 }
+        Self { ammo: [0; 8], elixirs: [0; 2], coins: 0, runes: 0, charms_owned: 0, charms_equipped: 0, charms_level2: 0, power_levels, upgrades: 0 }
     }
 }
 
