@@ -408,3 +408,52 @@ The UE3 gamma-correction pass (1875) runs every frame but does not reach the scr
 its draws (probe `skip`) leaves the frame unchanged, while skipping the uber shader (1903) leaves
 it black, so the uber pass writes the displayed image and its LUT output is the display value,
 as the port treats it (U-582 resolved).
+
+## Performance
+
+Frame time is measured, not guessed. Every change here must leave the frames as they were:
+`harness fidelity --configs full`, SSIM per viewpoint within about 0.002 of the run before.
+
+### Measuring
+
+- `--profile` (`profile.rs`): adds Bevy's `RenderDiagnosticsPlugin` and logs `PROFILE` lines
+  with:
+  - frame time mean, median, p95, p99 and maximum, and the entity count;
+  - the 12 most expensive render passes' GPU and CPU times, averaged over the same frames.
+
+  Lines come every 5 s. In `--inspect` scripts they also come at every `screenshot` step,
+  labelled with the shot's name and covering the frames since the previous shot (one
+  viewpoint). Use `DISHONORED_NOVSYNC=1` for uncapped numbers.
+- `--features trace` (`cargo build --release -p dishonored_runtime --features trace`) writes
+  Bevy's per-system and per-render-pass spans to `trace-*.json` (Chrome trace) in the working
+  directory. Summing it by span name gives each system's CPU cost per frame.
+- `DISHONORED_ENV_EVERY_FRAME=1` restores the per-frame environment-map filtering, for
+  comparisons.
+
+### Per-frame work removed (output unchanged)
+
+- Reflection cubemap (`env_map.rs`): Bevy's `GeneratedEnvironmentMapLight` re-runs its whole
+  filter chain every frame: copy, downsampling, the radiance convolution of every specular mip
+  and the irradiance convolution. The level's cubemap is static and the filter is deterministic
+  (fixed blue-noise texture, no frame index), so it is now filtered once. The camera keeps the
+  `EnvironmentMapLight` with the filtered textures. Travel to a level with another cubemap
+  filters that one once.
+- Particles (`effects.rs`): every emitter in range rebuilt and re-uploaded its sprite mesh every
+  frame. That included emitters with no particles, emitters that draw nothing (skipped, or no
+  material) and emitters behind the camera.
+  - A mesh is now rebuilt only when it has particles and some of them are inside this frame's
+    view: a bounding sphere of the quads, tested against the frustum of the camera transform
+    set this frame.
+  - A mesh outside the view is emptied once, and rebuilt from the current particles when it
+    comes back, so the drawn result is the same.
+  - The simulation is unchanged: it still steps every emitter in range. Trails and beams are
+    always rebuilt.
+- HUD and menus (`gfx_hud.rs`, `hud.rs`, `hud_dialogue.rs`, `menu_art.rs`, `hud_settings.rs`):
+  every HUD quad, text and node was written every frame. A write marks a UI component changed,
+  which re-runs the UI layout that frame (and re-shapes text). Values are now written only when
+  they change. The HUD options are decided before the HUD is laid out and folded into the
+  written values; applying them afterwards flipped the same components every frame.
+- Doors and usables (`level_props.rs`): each prop's skeletal model was cloned every frame,
+  before checking whether its pose had changed.
+- Lip sync (`characters.rs`): the map's package list was re-read from the install every frame
+  a line played. It is now kept per map.

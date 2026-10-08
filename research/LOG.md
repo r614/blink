@@ -1638,3 +1638,16 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Port:** `crates/dishonored_sim/tests/mechanics.rs` (`HOVER` = `FLOOR_DIST + 4`, new `walking_hover_follows_the_floor_back_off`), `tools/harness/src/kismet.rs` (`place_to_use`), `tools/harness/src/mission.rs` (alternating sidesteps, `MISSION_AGENT_DEBUG`), `tools/probe_launch` (`place`). Docs: COLLISION.md "Movement and the back-off", PLAYER.md, INSTRUMENTATION.md.
 - **Results:** `cargo test -p dishonored_sim --test mechanics` 30 passed (4 failed before); `harness collision` unchanged (Ext 99.94 %, Int 99.90 %); every harness suite and route passes (release build, muted; `visual`'s "player moves" failed once, walked 160 uu, and passed on the rerun); `cargo test --workspace --no-fail-fast` 112 test binaries, 0 failures.
 - **Confidence:** CONFIRMED (measured and code read) for the hover heights and the post blocking.
+
+## 2026-10-07: Frame rate in a free-for-all on Boyle Ext (per-frame work, first pass)
+
+- **Question:** A player reported very low frame rates in an offline free-for-all on `L_Boyle_Ext_P` (release 13eb647, from the launcher). What costs the frame time, and what can go without changing the image?
+- **Method:** code reading of every `Update` system and the custom render passes, and of Bevy 0.19's environment-map generator and UI layout; new `--profile` statistics (per viewpoint in `--inspect` scripts) and an optional Chrome trace build (`--features trace`) for the measurements. The measurements, before and after, are taken on the integrated build (RENDERING.md "Performance").
+- **Findings (per-frame work that does not change the output):**
+  - Bevy's `GeneratedEnvironmentMapLight` re-filters the level's static reflection cubemap every frame (copy, downsample, radiance and irradiance convolutions); the filter is deterministic.
+  - Every particle emitter in range (9000 uu) rebuilt and re-uploaded its sprite mesh every frame: empty emitters, emitters that draw nothing and emitters behind the camera included.
+  - The HUD, dialogue HUD and menu layout wrote every UI node, image and text every frame, so Bevy re-ran the UI layout and re-shaped the texts every frame; the HUD options were applied after the HUD and flipped the same components back each frame.
+  - Each door and usable cloned its skeletal model every frame; lip sync re-read the map's package list from the install every frame a line played; `DISH_ANIM_DEBUG` was read from the environment per pawn per frame.
+- **Port:** `env_map.rs` (filter once), `effects.rs` (sprite meshes rebuilt only with particles in this frame's view, emptied once when they leave it), `gfx_hud.rs` (`place`, `set_text`, `set_font_size`), `hud_settings.rs` (`HudOverrides`, decided before the HUD), `hud.rs`, `hud_dialogue.rs`, `menu_art.rs`, `level_props.rs`, `characters.rs`, `profile.rs`. Docs: RENDERING.md "Performance".
+- **Results:** pending the integrated build's measurements (frame time at the 8 fidelity viewpoints and in a 3-bot match, 1280x720 and 1920x1080, before and after; `harness fidelity --configs full` SSIM before and after).
+- **Confidence:** CONFIRMED (code read) that each removed piece of work left the output unchanged; the size of each saving is not measured yet.
