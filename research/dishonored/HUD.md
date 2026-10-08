@@ -18,9 +18,10 @@ native drivers follow the exe (`gfx_hud.rs`, `hud_popups.rs`, `hud_dialogue.rs`)
 | `UI_HUDFX.HUDFX` | `DishonoredGame` | `DisGFxMoviePlayerHUDFX` | `hud_widgets.rs` (HUDFX section), drawn under the HUD |
 | `UI_PowerWheel.powerwheel` + the lib | `UI_PowerWheel_SF` | `DisGFxMoviePlayerPowerWheel` | `hud_wheel.rs`, drawn above the HUD |
 | `UI_Global.Global` | `DishonoredGame` | `DisGFxMoviePlayerGlobal` | `hud_global.rs` (saving icon only) |
-| `UI_MissionStats.MissionStats` (+ `UI_MissionStatsBg_*`) | `UI_MissionStats_SF` | `DisGFxMoviePlayerMissionStats` | not yet |
+| `UI_MissionStats.MissionStats` (+ `UI_MissionStatsBg_*`) | `UI_MissionStats_SF` | `DisGFxMoviePlayerMissionStats` | not yet (classes decoded, "Mission stats" below) |
 | `UI_Journal` | `UI_Journal_SF` | journal player | not yet |
-| `UI_Tuto_*` | `UI_Tuto_*_SF` | tutorial windows | not yet |
+| `tutorialWindow_mc` / `tutorialMsg_mc` (HUD movie) | `UI_HUD_SF` | `DisGFxMoviePlayerHUD` (0x00BAD2F0 / 0x00BAD060) | `hud_widgets.rs` (`TutorialWindow`, `TutorialMessage`), `gfx_hud.rs` |
+| `UI_Tuto_*` (the Help list of the pause menu) | `UI_Tuto_*_SF` | tutorial notes | not yet |
 
 ## The stage
 
@@ -89,7 +90,11 @@ restart-on-reopen banner.
   0x00B97D40 / 0x00B97F80; `m_LowHealthThreshold` 30, `m_LowManaThreshold` 19), sent only on
   change. The fill mask's `_yscale` tweens to the value in `_meterFillDuration` 0.45 s
   (Strong out), the indicator to the top of the fill (hidden at 100). Upgrade frames: default,
-  upgd2 (small: a charm raised the maximum), upgd4 (large: Vitality), upgd6 (both).
+  upgd2 (small), upgd4 (large: Vitality), upgd6 (both). The bits (0x00B9F6E0, `FUN_00C7E1C0`
+  asks an attribute whether it carries a modifier of a given name): small = `Attribute_HealthMax`
+  has a "Whale Bone Charm Attribute_HealthMax" modifier, large = a "Vitality 1 (0)" or "Vitality 2
+  (0)" one; the mana gauge's upgrade bit is the same for `Attribute_ManaMax` and "Whale Bone Charm
+  Attribute_ManaMax". The port asks `dishonored_sim::powers::charm_modifies` (U-887, resolved).
 - Glow loop: 2.25 s between alpha 15 and 40; low: 0.55 s between 35 and 75.
 - Contextual visibility (`FUN_009EA160`): shown `m_fPlayerInfoDisplayDuration` 8 s after a
   change and while low; `Open()` / `Close()` 0.35 s alpha tweens; gated until the HUD ticked
@@ -211,23 +216,73 @@ Native (`DisGFxMoviePlayerPowerWheel`, `Twk_GFxMoviePlayerPowerWheel`):
   items cleared, then `OpenWheel(content)`), mode 2 the dock alone (0x00BE2BB0), mode 4 the
   quick potion. `m_fWheelInputDelay` 0.25 s applies to the gamepad only; the first mouse input
   after opening resets the cursor.
-- Content (0x00BD5530): the inventory's weapons with each known ammo type, the Heart, the
-  learned powers; `itemQuantity` the ammo count ("--" with infinite ammo).
+- Content (0x00BD5530): for each item of the inventory that is a weapon (item type not 0 / 1, and
+  `FUN_00C0C680(2)` or type 0x0D / 0x10 / 0x13 / 0x19), every ammo type in the weapon's ammo list
+  that `FUN_00C1C9D0` accepts (all but type 1, explosive bullets, which needs a non-zero
+  `Attribute_ExplosiveBulletUnlock`, and type 7, sticky grenades, `Attribute_StickyGrenadeUnlock`;
+  an ammo type with a zero count is still listed and shows "stop_empty"), then the learned powers
+  (the second list); `itemQuantity` the ammo count ("--" with infinite ammo). Nothing is gated on
+  "ammo held once" (U-883, resolved; the port has no weapon items, so the Spring Razor and grenade
+  groups appear once one was held).
 - Tick (0x00BD5250 with 0x00BCD660): the mouse delta accumulates into `m_MousePosition`,
   clamped to `m_fMouseZoneSize` 0.1 x the viewport size; a frame whose delta exceeds
   `m_fMouseDeadZone` 0.01 of the zone sends the position / zone; beyond `m_fStickDeadZone` 0.4
   its angle (acos, clockwise from up, 360 - a on the left) goes to `SetSelectionAngle`.
-- `onSelectionChanged(item)` (0x00BCD800) keeps `m_CurItemIdx` and answers `UpdateItemInfos`
-  (0x00BC3B00 weapons, 0x00BC3940 powers, 0x00BC3E30 Heart); closing (`CloseWheel`,
+- `onSelectionChanged(item)` (0x00BCD800) keeps `m_CurItemIdx` and answers `UpdateItemInfos`:
+  a power 0x00BC3B00 (name `[DisUISelectionType] <Name>`, text `<Name>_<level>_ShortDescription`
+  with the level of the power, e.g. "Short Teleport"; nothing for a power not learned; 0x00C4C6B0 /
+  0x00C45930), the Heart 0x00BC3E30 (`Heart_ShortDescription`), a weapon 0x00BC3940 (name, then the
+  ammo name of `[DisAmmoType]`, or for the Spring Razor `SpringRazor_ShortDescription`,
+  "Proximity Mine"; "no_ammo" when it has neither). U-885, resolved. Closing (`CloseWheel`,
   0x00BBD1D0) keeps the item: it is the one equipped.
-- While open the world runs at `m_fBendTimeFactor` 0.05.
+- While open the world runs at `m_fBendTimeFactor` 0.05 (see "World time" below).
+
+Shortcuts (controller tick 0x00AB7D30, `m_fShortcutsInputTimer` 0.33 s; U-882):
+
+- A number key `KeyboardSelect n` (0x00AA0900) sets `+0x648` / `+0x64C`; the tick shows the dock
+  alone (start mode 2, `OpenShortcuts` after `SetShortcuts`) with slot n selected
+  (`SetShortcutSelection`); `KeyboardUse n` (0x00AA0950, on release) makes the slot's item the
+  current one (0x00BBD090: `m_CurItemIdx`, `m_LastUsedShortcutIndex` = n), closes the dock with
+  `use` and equips it (0x00BCD400). Pressing a number key with the wheel open assigns the current
+  item to the slot (0x00BC3400: the slot takes it, or empties when it already holds it; the slot's
+  bit in `m_ShortcutPlayerAssignFlags` is set; every other slot holding the item is emptied).
+- The mouse wheel (`GBA_NextItem` = MouseScrollUp, `GBA_PrevItem` = MouseScrollDown, 0x00AA0A10,
+  not while a key is held or within `m_fShortcutsInputTimer` of the wheel closing): each step
+  counts (`+0x654`) and restarts the timer (`+0x658`); the first step brings up the dock with the
+  selection `count` filled slots from the last used one (0x00BBD0F0 skips the empty slots,
+  wraps), the others move it (0x00BC36C0); when the timer runs out the shown slot becomes current
+  (0x00BBD180) and is equipped as the dock closes. Ignored while the wheel is open.
+- `SetShortcuts` (0x00BE1310, on every start): slots whose item is not in the wheel content are
+  emptied, then the auto-assignment 0x00BDC610 fills the free slots that the player did not
+  assign or empty himself: slots from the highest `m_AutoAssign_KeyboardShortcut[i].m_Priority`
+  down (10 .. 1 for slots 0 .. 9), each taking the first item of `m_AutoAssign_KeyboardItemOrder`
+  (class default: regular bullet, bolt, grenade, spring razor, Heart, Blink, Dark Vision,
+  Windblast, Swarm, Bend Time, Possession, sleep dart, flare bolt, sticky grenade, explosive
+  bullet, then the DLC06 items) that is available, not on a slot yet and of the kind the slot
+  accepts (`m_bWeapon` slots 0 .. 4, `m_bHeart` slot 5, `m_bPower` slots 6 .. 9; the tweak
+  `Twk_GFxMoviePlayerPowerWheel`). With everything available keys 1 .. 0 hold pistol, crossbow,
+  grenade, Spring Razor, sleep dart, Heart, Blink, Dark Vision, Windblast, Swarm.
+
+World time (U-881, resolved): start mode 1 (0x00BE4280) calls the dilation helper 0x009FA0D0
+with the wheel's channel (6) and `m_fBendTimeFactor` for the caster, the world and the third rate
+(`m_fTimeTransition` has no value: the rate changes at once); 0x00BD4FC0 sets 1 back. Port: the
+client sets `buttons::WHEEL` in the player's input while the wheel is open, and
+`dishonored_sim::step_world` keeps one `DilationLayer` (`wheel: true`) per human at 0.05 (the
+Bend Time clock is not slowed by it); the simulation is deterministic and the input travels with
+the tick like any button. Only a world with a single human pawn honours it (the original needs the
+GameInfo, present on the server / standalone): in multiplayer with two or more humans the button
+does nothing, so one player cannot slow the others (a dedicated server with one connected human
+slows for him, like a listen server host).
 - Sounds: `m_pShowSound` Snd_UI_Ingame_Wheel_Hand_In, `m_pHideSound` ..._Hand_Out, the theme's
   itemSelection -> Snd_UI_Ingame_Wheel_Select, itemValidation -> ..._Validation (bank
   `Bank_UI_Ingame_Wheel`), P_AssignShortcut / P_UnassignShortcut (Bank_UI).
 
 Port: `hud_wheel.rs`; the wheel takes the mouse and the number keys while open
-(`LocalInput.wheel_open`), the player stands still (the world is not slowed, U-881); the dock's
-table drives the number keys (`LocalInput.shortcuts`), starting from the port's default list.
+(`LocalInput.wheel_open`, which also slows the world); the shortcut table (`ShortcutTable`) is
+filled by `SetShortcuts` / the auto-assignment, the number keys and the mouse wheel equip through
+the dock (`input_map.rs` no longer equips on a key press); the content comes from the exe's rule
+(`hud_wheel::wheel_content`). Not reproduced: the gamepad wheel and d-pad shortcuts, the Heart
+(the sim has none), DLC06 items.
 
 ## Saving notification (`UI_Global.Global`)
 
@@ -248,7 +303,7 @@ timer runs out, then the icon closes (unless a profile save is showing it). The 
 text (`g_SavingNotification_Text`, "t_Checkpoint" sliding 75 px in 0.3 s) is never opened by
 these paths.
 
-## Awareness markers (decoded, not drawn yet)
+## Awareness markers
 
 Symbol `awarenessIndicator` (`m_AwarenessMarkerSettings`, in `markers_mc`): two halves
 `left_mc` / `right_mc` (labels default, fadeIn, visible, quickFadeOut), each with three chevrons
@@ -280,9 +335,98 @@ Marker class (vtable at file offset 0xD61FC0: init 0x00BC5B40, release 0x00BC5C1
   off screen the symbol shows frame 2, turns toward the NPC (angle from the screen centre + 90,
   mirrored on the left) and its scale is clamped to 50..150.
 
-Open for the port: the manager's anchor point and projection for these markers, the allowed
-awareness list, and the attention level reaching the HUD (the session view carries no per-NPC
-attention; an offline mission could read its brains) (U-886).
+Port (`gfx_hud.rs` `update_awareness`, `hud_widgets.rs` `AwarenessMarker`): the match view carries
+`marks` (each NPC's attention entry toward a human, its `EAIAwareness` and the proxy point the
+NPC believes the player is at), the marker hangs on the `head_jnt` position the renderer reports
+(`EffectSockets.heads`), the allowed list is `awareness::ALLOWED`, and the detection stinger plays
+as a marker with TurnToFace or more comes up. Compared with dishonored-bevy's `awareness.rs`
+(Eamon): same symbol, halves, chevron labels and 75 % scale / 150-200 uu alpha, but its levels are
+read from its own NPC state, it marks hostile NPCs only, and it fades by its own timers; the
+exe's state machine above (seen test, display timers, busted look, off-screen frame) is kept.
+What the original's `DisSeqAct_OverrideAwarenessDisplay` does for scripted markers is not
+modelled (bevy shows them for the NPCs the scripts name). U-886: the manager's anchor and the
+allowed list are decoded in the port; the exact visibility test (`FUN_00B4A300`) is approximated
+by a line of sight to the head.
+## Task markers
+
+`m_TaskMarkers` (0x00BAD550 builds one per active task target of the player; the ctor 0x00BCE750
+sets the `_description_mc.txt` field once to the target's localised `m_TargetName`):
+`m_TaskMarkerSettings` / `m_OptionalTaskMarkerSettings` (the secondary symbol for an optional
+task): `m_fWorldOffsetZ` 10 uu, scale 90 % at 10000 uu growing to 150 % at 500 uu, alpha 100 from
+1000 uu down to 0 at the target, `m_bCanFocus`, `m_fMarkerFocusDistance` 225 stage px: the marker
+nearest the middle within that distance is focused and shows its description. No
+`m_bKeepBBInMarkerArea`: a marker outside the marker area (`m_fMarkerAreaRatio_PC` 0.9) or
+behind the camera is not drawn (the Heart's rune / bone charm markers and the grenade indicator
+are kept at the edge). `m_TaskMarkerSpecificSettings.m_bShowDistance` is true and
+`m_VanishPreset_VeryClose` (alpha 100 from 400 uu to 0) / `_Never` are chosen by
+`DisSeqAct_UpdateTaskTarget.m_MarkerVanishPreset`; the exe has no distance format string next
+to the marker code (U-964), so the port follows dishonored-bevy's `markers.rs` (Eamon) for the
+text: the target name, then the distance in metres (100 uu): "Name (12 m)", or "12 m" without a
+name. The marker list is the Kismet's `UpdateTaskTarget` targets with their `m_TargetName`
+(`MissionView.task_markers`); the vanish preset is not applied (the one alpha variation above is).
+
+## Tutorials
+
+- `TutorialMessage` (`tutorialMsg_mc`): `DisSeqAct_SetTutorialMessage` (`m_TutorialMessage` for
+  `m_fDuration` seconds, else `m_fTutorialDuration` 10 s; `m_bShowOnce` / `m_bAllowCycling` /
+  `m_fTutorialCycleDelay` 5 s are not modelled) reaches the view as `MissionView.tutorial`.
+  The pawn tweaks' own messages (`m_AcquiredElixirTutorialMessage`, `m_HeartTargetTutorialMessage`,
+  `m_BlockTutorialMessage` ...) come from the HUD's tutorial stack (0x00BAFA60, `m_TutorialStack`),
+  not decoded (U-965); bevy raises the Heart one and the elixir ones from its own events.
+- `TutorialWindow` (`tutorialWindow_mc`, class sprite 812; 0x00BAD2F0 -> `SetTutorialWindow(text,
+  image)`): in from the left at 250 % (0.2 s `Back.easeOut`), the picture (200 %), strokes and text
+  settle 150 ms later, then the parts drift (`Anim` 5 s, `AnimLoop` 4.25 s, each re-armed 0.5 s
+  early); the native side keeps it `m_fTutorialWindowDuration` 10 s, then `Close()` (0.4 s) and
+  `OnClosed`; windows queue one behind the other. Pictures: 0 gear, 1 note, 2 rune, 3 bone charm.
+  Texts (HUD tweak): `m_PressKeyToBuyPowers`, `m_PressKeyToEquipBoneCharms` for the first rune /
+  bone charm, `m_PressKeyToReadChapterNoteMessage` when the Kismet adds a chapter log item
+  (`DisSeqAct_AddAbstractItem`) - the triggers are bevy's (`interact.rs`, `campaign.rs`), the
+  native's tests (`m_NumRunesPickedUp`, `m_bHasNewBoneCharm`) are not traced. Sound
+  `H_windowNotification`. Option `PSI_HUD_bShowTutorialNotifications` empties the queue.
+
+## Crosshair texts
+
+- The interaction window's title is the interactable's name (`m_InteractableName`): a talker's
+  `NpcDef.name` (`MissionView.npc_names`).
+- `crosshairInfosTxt_mc` over someone asleep: the pawn tweak's `m_AsleepCrosshairText`
+  ("(Unconscious)", its value in the retail pawn tweaks per dishonored-bevy `crosshair.rs`); the
+  probe (`DisUIInteractionProbe`) is approximated by the view ray passing within 45 uu of the
+  body's chest within 300 uu (U-966).
+
+## Game over (pause movie)
+
+`PauseScreen.ShowGameOverMenu(reason)` (0x00BCCD80): the pause movie with `_bIsGameOverMenu`:
+title `t_GameOver`, `_gameOver_mc` (class `GameOverTitle`, the reason text in from 150 px right,
+the backing from 350 px left, 0.25 s `Strong.easeOut`), the mask portrait plays `anim_slice`,
+sound `GO_OpenGameOverMenu` (not `OpenScreen`); entries `t_ContinueFromLastSave` (locked without a
+save; `Dis_Load 0`), `t_LoadASpecificSave`, `t_BackToMainMenu`, `t_BackToWindows`; no resume. The
+reason is `m_GameOverMessage` or the pause tweak's `m_PlayerDiedMessage` ("You have met your
+demise."). Port: `pause_menu.rs` (`PauseMenu.game_over`) shows it when the local player is dead in
+an offline mission that does not respawn him, `GAME_OVER_DELAY` (2 s) after the death (the native
+trigger and delay are not traced, U-967).
+
+## Mission stats (decoded, not drawn)
+
+`UI_MissionStats.MissionStats` classes (`swf_dump UI_MissionStats_SF MissionStats - --actions N`):
+`MissionStatsBase` (137: attaches `ms_statsScreen` `missionStats_mc`, `ms_BlackVeil`,
+`m_Vignette`), `MS_StatsScreen` (150: `SetMissionStats(list, pickUps, name, image, inMenu,
+replay)`; opens the black veil 0.75 s, `OpenElements` plays `OpenScreen`, the pick-ups panel
+(1.25 s from +100, +50, `_yrotation` -10), the background and the list; `OnOpened` at 1.3 s starts
+the title / list / pick-ups drift 5.25 s / 4.25 s; A -> `OnContinueClicked` + `Close`, X ->
+`OnReplayMissionClicked` after `t_Q_ReplayMission`, B in the menu), `MS_StatsList` (139: sections
+`ms_statList_section`, rows `ms_statList_item` 4 px apart, sections 25 px, rows open 40 ms apart
+from x + 20, 150 %, alpha 0 over 0.25 s; boolean values show `checkBox_mc` frame 2),
+`MS_PickUpsList` (138: `t_Found`, lines "name value / max", `ic_mc` frame), `MS_Background` (148:
+Corvo / image / blades / left / right panels in over 0.9 s, drift 6.25 s / 5.05 s),
+`MS_StatsScreenTitle` over `_common.TitleBar` (147 / 145), `_common.AnimatedBackground` /
+`AnimatedBlades` / `Vignette` (143 / 144 / 151). The rows are the `DisTweaks_MissionStats` of the
+mission (`m_MissionStats` rows with `m_Description`, `m_Stat` (`ePlayerStat_*`), `m_bCheckbox`,
+`m_bCheckIfNonZero`, `m_bAddOtherStat`, `m_MissionStatsMaxValues`, `m_MissionSummaryItems` with a
+story flag); the port's `ShowMissionStats` op fires "Closed" at once (the server would have to
+hold it until the screen is closed) and keeps only a few of the `ePlayerStat` counters, so the
+screen is not drawn (U-968). dishonored-bevy's `mission.rs` draws the same screen by hand from the
+same rows (Eamon).
+
 ## HUD options
 
 `hud_settings.rs` maps the `PSI_HUD_*` options (`dishonored_settings::Hud`): popups, pickup log,
@@ -294,11 +438,18 @@ opacity. The subtitles option is not applied (the port cannot tell unset from of
 `fixtures/scripts/hud_playground.json` (playground) and `hud_boyle.json` (`missions/
 boyle_original.ron`) use `{"hud": {...}}` steps (`HudTest`): objective, target, pickup,
 message, subtitle, choice, interaction, stripes, location, wheel, wheel_angle, shortcut,
-saving; screenshots at open / hold / close / gone.
+saving; screenshots at open / hold / close / gone. `hud_wheel2.json` covers the wheel's content
+and auto-assigned dock, assign / unassign (`assign`), the number key (`shortcut`) and the mouse
+wheel (`shortcut_step`); `hud_screens.json` the tutorial window and line (`tutorial_window`,
+`tutorial`), task markers placed ahead of the player (`task_markers`), the interaction title and
+the game over screen (`game_over`). The scripts have not been run in this branch (no run was
+allowed); the awareness markers and the world slow-down have `cargo test` coverage in the sim
+(`wheel_slows_the_world_in_a_single_human_world_only`).
 
 ## Not done yet
 
-Awareness markers (decoded above, not drawn), the death screen (pause menu movie,
-owned by the menus work), the mission stats screen, the journal, the tutorial windows and rune
-or bone-charm messages, the low-health / low-mana post-process, the crosshair focus name, the
-task marker's description and distance texts. See research/UNKNOWNS.md U-880..U-887.
+The mission stats screen (decoded above; needs the server to hold the op), the journal (an
+interactive screen over notes, powers and charms: needs the notes and the rune spending in the
+sim), the pause menu's tutorial notes (`UI_Tuto_*`), the Heart's wheel item and markers, the
+low-health / low-mana post-process, the vanish presets of task markers, the pawn tweaks'
+tutorial messages. See research/UNKNOWNS.md U-880..U-887 and U-964..U-968.

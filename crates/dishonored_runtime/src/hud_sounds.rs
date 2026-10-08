@@ -35,6 +35,8 @@ pub const THEME: &[(&str, &str)] = &[
     ("itemValidation", "Snd_UI_Ingame_Wheel_Validation"),
     ("P_AssignShortcut", "UI_P_AssignShortcut"),
     ("P_UnassignShortcut", "UI_P_UnassignShortcut"),
+    // `m_pAwarenessStingerEvent` (`Musics.Music_Player_Detected`, `Bank_Music_Player_Detected`).
+    ("MusicPlayerDetected", "Music_Player_Detected"),
 ];
 
 type Decoded = HashMap<String, Vec<(Leaf, Arc<Pcm>)>>;
@@ -80,6 +82,7 @@ fn start_loading(mut s: ResMut<HudSounds>) {
                 // wheel's (Bank_UI_Ingame_Wheel); a missing bank leaves its sounds silent.
                 let _ = lib.load_bank("Bank_UI_Objective");
                 let _ = lib.load_bank("Bank_UI_Ingame_Wheel");
+                let _ = lib.load_bank("Bank_Music_Player_Detected");
                 let mut out = HashMap::new();
                 for (name, ev) in THEME {
                     let Some(cue) = lib.resolve(ev) else { continue };

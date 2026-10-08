@@ -1,0 +1,39 @@
+{"steps":[
+  {"wait_ticks": 240},
+  {"ticks": 30, "input": {"yaw": 90, "pitch": 0, "left_hand": "Empty"}},
+  {"screenshot": "hud3_00_idle"},
+
+  {"hud": {"kind": "tutorial_window", "image": 2}},
+  {"wait_ticks": 6}, {"screenshot": "hud3_01_rune_window_open"},
+  {"wait_ticks": 30}, {"screenshot": "hud3_01_rune_window_settled"},
+  {"wait_ticks": 150}, {"screenshot": "hud3_01_rune_window_drift"},
+  {"wait_ticks": 150}, {"screenshot": "hud3_01_rune_window_late"},
+  {"wait_ticks": 330}, {"screenshot": "hud3_01_rune_window_closing"},
+  {"wait_ticks": 40}, {"screenshot": "hud3_01_rune_window_gone"},
+
+  {"hud": {"kind": "tutorial_window", "image": 3}},
+  {"hud": {"kind": "tutorial_window", "image": 1, "text": "Mission Clues updated<br />Press [J] to read"}},
+  {"wait_ticks": 30}, {"screenshot": "hud3_02_charm_window"},
+  {"wait_ticks": 400}, {"screenshot": "hud3_02_note_window_queued"},
+  {"wait_ticks": 400},
+
+  {"hud": {"kind": "tutorial", "text": "Hold [Middle Mouse] to open the Quick-access Wheel", "seconds": 4}},
+  {"wait_ticks": 12}, {"screenshot": "hud3_03_tutorial_line"},
+  {"wait_ticks": 150}, {"screenshot": "hud3_03_tutorial_line_gone"},
+
+  {"hud": {"kind": "task_markers", "markers": [[12, 0, 0.5, false, "Lady Boyle"], [25, -6, 0.5, true, ""], [8, 4, 0.5, false, "Samuel"]]}},
+  {"wait_ticks": 12}, {"screenshot": "hud3_04_task_markers"},
+  {"ticks": 12, "input": {"yaw": 80, "pitch": 0, "left_hand": "Empty"}},
+  {"screenshot": "hud3_04_task_markers_focus"},
+  {"hud": {"kind": "task_markers", "markers": []}},
+
+  {"hud": {"kind": "interaction", "name": "Samuel", "text": "[F] Talk"}},
+  {"wait_ticks": 6}, {"screenshot": "hud3_05_interaction_name"},
+  {"hud": {"kind": "interaction"}},
+  {"wait_ticks": 12},
+
+  {"hud": {"kind": "game_over"}},
+  {"wait_ticks": 30}, {"screenshot": "hud3_06_game_over_open"},
+  {"wait_ticks": 90}, {"screenshot": "hud3_06_game_over_settled"},
+  {"quit": true}
+]}

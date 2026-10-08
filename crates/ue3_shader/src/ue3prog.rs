@@ -190,12 +190,16 @@ fn expr(e: &Expr, slot: &mut usize) -> String {
 }
 
 /// Uniform expression functions: `ue_pv{i}`, `ue_ps{i}`, `ue_vv{i}`, `ue_vs{i}`.
-fn expression_functions(map: &CookedMap, ctx: &mut Ctx) -> String {
+fn expression_functions(map: &CookedMap, ctx: &mut Ctx, vertex_only: bool) -> String {
     let mut m = String::new();
     let mut slot = 0usize;
     for (prefix, list) in [("pv", &map.pixel.vectors), ("ps", &map.pixel.scalars), ("vv", &map.vertex.vectors), ("vs", &map.vertex.scalars)] {
         for (i, e) in list.iter().enumerate() {
-            let _ = writeln!(m, "fn ue_{prefix}{i}() -> vec4<f32> {{ return {}; }}", expr(e, &mut slot));
+            // (parameter slots count through the pixel expressions too)
+            let body = expr(e, &mut slot);
+            if !(vertex_only && prefix.starts_with('p')) {
+                let _ = writeln!(m, "fn ue_{prefix}{i}() -> vec4<f32> {{ return {body}; }}");
+            }
         }
     }
     ctx.slots = slot;
@@ -629,9 +633,26 @@ fn ue_setup_model(model: mat4x4<f32>, tag: u32) {
 /// Build a program for a material shader map: its base pass shaders, plus optionally the
 /// dominant directional light's pass (added to the base pass result).
 pub fn build(map: &CookedMap, vs_code: &[u8], ps_code: &[u8], light: Option<(&[u8], &[u8])>, platform: Platform) -> Result<Program> {
+    build_inner(map, vs_code, Some(ps_code), light, platform, false)
+}
+
+/// The depth-only program of a material's base pass vertex shader (UE3's depth-only and
+/// shadow depth passes: the position only, no material code). `ps_code`: a masked material's
+/// pixel shader, run only for its clipping; None (opaque): no pixel stage at all, so every
+/// material with the same vertex shader (and no world position offset) gets the same text.
+/// The position comes from the same vertex shader as the base pass, so the depths agree
+/// exactly with it.
+pub fn build_depth(map: &CookedMap, vs_code: &[u8], ps_code: Option<&[u8]>, platform: Platform) -> Result<Program> {
+    build_inner(map, vs_code, ps_code, None, platform, true)
+}
+
+fn build_inner(map: &CookedMap, vs_code: &[u8], ps_code: Option<&[u8]>, light: Option<(&[u8], &[u8])>, platform: Platform, depth_only: bool) -> Result<Program> {
     let vs = stage(vs_code, "vs_")?;
-    let ps = stage(ps_code, "ps_")?;
-    if vs.sh.stage != Some(Stage::Vertex) || ps.sh.stage != Some(Stage::Pixel) {
+    let ps = match ps_code {
+        Some(c) => Some(stage(c, "ps_")?),
+        None => None,
+    };
+    if vs.sh.stage != Some(Stage::Vertex) || ps.as_ref().is_some_and(|p| p.sh.stage != Some(Stage::Pixel)) {
         bail!("shader stages mismatch");
     }
     let light = match light {
@@ -645,7 +666,7 @@ pub fn build(map: &CookedMap, vs_code: &[u8], ps_code: &[u8], light: Option<(&[u
         None => None,
     };
     // a dynamic light's pass: its pixel shader takes the light's colour
-    let dyn_light = light.is_none() && ps.sh.ctab.iter().any(|c| c.name == "LightColorAndFalloffExponent");
+    let dyn_light = light.is_none() && !depth_only && ps.as_ref().is_some_and(|p| p.sh.ctab.iter().any(|c| c.name == "LightColorAndFalloffExponent"));
     let mut ctx = Ctx { unknown: BTreeSet::new(), slots: 0, light: false, dyn_light };
     let mut m = String::new();
     m.push_str(match platform {
@@ -657,8 +678,12 @@ pub fn build(map: &CookedMap, vs_code: &[u8], ps_code: &[u8], light: Option<(&[u
         Platform::Standalone => "3",
     };
     m.push_str(&COMMON.replace("MATGROUP", group));
-    m.push_str(&expression_functions(map, &mut ctx));
-    let mut stages: Vec<(&StageT, &str)> = vec![(&vs, "vs_"), (&ps, "ps_")];
+    // (a vertex-only depth program emits just the vertex expressions: they are all it reads)
+    m.push_str(&expression_functions(map, &mut ctx, ps.is_none()));
+    let mut stages: Vec<(&StageT, &str)> = vec![(&vs, "vs_")];
+    if let Some(ps) = &ps {
+        stages.push((ps, "ps_"));
+    }
     if let Some((lvs, lps)) = &light {
         stages.push((lvs, "lvs_"));
         stages.push((lps, "lps_"));
@@ -669,7 +694,7 @@ pub fn build(map: &CookedMap, vs_code: &[u8], ps_code: &[u8], light: Option<(&[u
         m.push_str(&st.body);
     }
     let vs_fill = constant_fill(&vs, "vs_", map, &mut ctx);
-    let ps_fill = constant_fill(&ps, "ps_", map, &mut ctx);
+    let ps_fill = ps.as_ref().map(|p| constant_fill(p, "ps_", map, &mut ctx)).unwrap_or_default();
     ctx.light = true;
     let (lvs_fill, lps_fill) = match &light {
         Some((lvs, lps)) => (constant_fill(lvs, "lvs_", map, &mut ctx), constant_fill(lps, "lps_", map, &mut ctx)),
@@ -683,7 +708,7 @@ pub fn build(map: &CookedMap, vs_code: &[u8], ps_code: &[u8], light: Option<(&[u
         v.dedup();
         v
     };
-    let base_sem = semantics(&ps);
+    let base_sem = ps.as_ref().map(semantics).unwrap_or_default();
     let light_sem = light.as_ref().map(|(_, lps)| semantics(lps)).unwrap_or_default();
     let mut loc = 0;
     m.push_str("struct UeVertex {\n    @builtin(instance_index) instance_index: u32,\n");
@@ -750,6 +775,12 @@ pub fn build(map: &CookedMap, vs_code: &[u8], ps_code: &[u8], light: Option<(&[u
     m.push_str("@vertex\nfn vertex(v: UeVertex) -> UeVaryings {\n    return ue_vertex(v);\n}\n");
     m.push_str("@vertex\nfn prepass_vertex(v: UeVertex) -> UeVaryings {\n    return ue_vertex(v);\n}\n");
     // depth prepass of masked materials: the base pass pixel shader only for its clipping
+    let Some(ps) = ps else {
+        // (opaque depth-only: no pixel work; the entry only exists for pipelines that ask for one)
+        m.push_str("@fragment\nfn prepass_fragment(in: UeVaryings) {}\n");
+        let _ = ctx.slots;
+        return Ok(Program { wgsl: m, unknown: ctx.unknown });
+    };
     m.push_str("@fragment\nfn prepass_fragment(in: UeVaryings, @builtin(front_facing) face: bool) {\n    ue_setup(in.ids.x, in.ids.y);\n");
     m.push_str(&ps_fill);
     m.push_str("    var io: ps_Io;\n");
@@ -758,6 +789,10 @@ pub fn build(map: &CookedMap, vs_code: &[u8], ps_code: &[u8], light: Option<(&[u
         let _ = writeln!(m, "    io.{n} = in.s{usage}_{index};");
     }
     m.push_str("    io.vpos = vec4<f32>(floor(in.position.xy), 0.0, 1.0);\n    io.vface = vec4<f32>(select(-1.0, 1.0, face));\n    ps_main(&io);\n}\n");
+    if depth_only {
+        let _ = ctx.slots;
+        return Ok(Program { wgsl: m, unknown: ctx.unknown });
+    }
 
     // fragment entry: base pass plus the light pass
     m.push_str("@fragment\nfn fragment(in: UeVaryings, @builtin(front_facing) face: bool) -> @location(0) vec4<f32> {\n");
@@ -854,7 +889,7 @@ pub fn build_post(map: &CookedMap, ps_code: &[u8]) -> Result<Program> {
     m.push_str(
         "fn ue_append(a: vec4<f32>, b: vec4<f32>, n: u32) -> vec4<f32> {\n    if n == 1u { return vec4<f32>(a.x, b.x, b.y, b.z); }\n    if n == 2u { return vec4<f32>(a.x, a.y, b.x, b.y); }\n    return vec4<f32>(a.x, a.y, a.z, b.x);\n}\n",
     );
-    m.push_str(&expression_functions(map, &mut ctx));
+    m.push_str(&expression_functions(map, &mut ctx, false));
     m.push_str(&helpers(&ps, "ps_"));
     m.push_str(&sm3::stage_decls(&ps.sh, &ps.iface, "ps_"));
     m.push_str(&ps.body);
@@ -902,7 +937,7 @@ pub fn build_fragment(map: &CookedMap, ps_code: &[u8]) -> Result<Program> {
     m.push_str(
         "fn ue_append(a: vec4<f32>, b: vec4<f32>, n: u32) -> vec4<f32> {\n    if n == 1u { return vec4<f32>(a.x, b.x, b.y, b.z); }\n    if n == 2u { return vec4<f32>(a.x, a.y, b.x, b.y); }\n    return vec4<f32>(a.x, a.y, a.z, b.x);\n}\n",
     );
-    m.push_str(&expression_functions(map, &mut ctx));
+    m.push_str(&expression_functions(map, &mut ctx, false));
     m.push_str(&helpers(&ps, "ps_"));
     m.push_str(&sm3::stage_decls(&ps.sh, &ps.iface, "ps_"));
     m.push_str(&ps.body);

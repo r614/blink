@@ -24,11 +24,18 @@
 //! - Sounds: `m_pShowSound` Snd_UI_Ingame_Wheel_Hand_In, `m_pHideSound` ..._Hand_Out, the
 //!   theme's itemSelection / P_AssignShortcut / P_UnassignShortcut.
 //!
+//! - The shortcut table (`m_KeyboardShortcuts`) is filled by `SetShortcuts` (0x00BE1310 and the
+//!   auto-assignment 0x00BDC610, [`ShortcutTable::refresh`]) whenever the wheel or the dock
+//!   opens; a number key shows the dock and equips the slot's item on release (0x00AB7D30); the
+//!   mouse wheel steps through the filled slots and equips the shown one `m_fShortcutsInputTimer`
+//!   (0.33 s) after the last step ([`WheelCycle`]).
+//! - The world slows to `m_fBendTimeFactor` (0.05) while the wheel is open: [`LocalInput::wheel_open`]
+//!   sets `buttons::WHEEL` in the player's input and the simulation does the rest
+//!   (`dishonored_sim::powers::set_wheel_layer`, single-human worlds only).
+//!
 //! Not reproduced: the movie's 3D (`_xrotation`, `_yrotation`, `_z`: the glass tilt following
-//! the selection), the `_noise` white texture (BitmapData noise), the world slowing to
-//! `m_fBendTimeFactor` (0.05) while the wheel is open (a simulation change: the port stops the
-//! local player's input instead), the gamepad wheel and d-pad shortcuts, mouse-wheel shortcut
-//! cycling (`Dis_WheelShortcuts_MouseNext`).
+//! the selection), the `_noise` white texture (BitmapData noise), the gamepad wheel and d-pad
+//! shortcuts, the Heart (the sim has none).
 
 use crate::gfx_stage::{AutoSize, Draw, Ease, Event, Fonts, Id, ImageRef, MovieData, Prop, SlotImage, SlotText, Stage, StageTextures, StageView};
 use bevy::prelude::*;
@@ -104,21 +111,6 @@ pub fn hand_of(item: u8) -> Option<LeftHand> {
         BLINK => LeftHand::Blink,
         BEND_TIME => LeftHand::BendTime,
         POSSESSION => LeftHand::Possession,
-        _ => return None,
-    })
-}
-
-/// Ammo type of a weapon item.
-fn ammo_of(item: u8) -> Option<AmmoType> {
-    Some(match item {
-        REGULAR_BOLT => AmmoType::Bolt,
-        SLEEP_DART => AmmoType::SleepDart,
-        FLARE_BOLT => AmmoType::IncendiaryBolt,
-        SPRING_RAZOR => AmmoType::SpringRazor,
-        REGULAR_GRENADE => AmmoType::Grenade,
-        STICKY_GRENADE => AmmoType::StickyGrenade,
-        REGULAR_BULLET => AmmoType::Bullet,
-        EXPLOSIVE_BULLET => AmmoType::BulletExplosive,
         _ => return None,
     })
 }
@@ -938,6 +930,28 @@ impl PcShortcuts {
         self.slot_over = visible;
     }
 
+    /// The slot just emptied: faded to 55 % at 95 %, its icon shrinking away.
+    fn play_emptied(&mut self, st: &mut Stage, i: usize) {
+        let Some(&s) = self.slots.get(i) else { return };
+        st.set(s, Prop::Alpha, 100.0);
+        st.tween_to(s, 0.2, &[(Prop::Alpha, 55.0), (Prop::XScale, 95.0), (Prop::YScale, 95.0)], Ease::StrongOut, None);
+        if let Some(ic) = st.child(s, "ic") {
+            st.set(ic, Prop::Alpha, 100.0);
+            st.tween_to(ic, 0.15, &[(Prop::Alpha, 0.0), (Prop::XScale, 60.0), (Prop::YScale, 60.0)], Ease::StrongOut, None);
+        }
+    }
+
+    /// The native `AssignShortcut(slot, 0)` call for a slot that held the item just assigned
+    /// elsewhere (0x00BC3400 empties every other slot with the same item).
+    fn clear_slot(&mut self, st: &mut Stage, i: usize, icon: &mut dyn FnMut(u8) -> Option<ImageRef>) {
+        if i >= self.layout.len() || self.layout[i].item.is_none() {
+            return;
+        }
+        self.layout[i] = Shortcut::default();
+        self.set_icon(st, i, icon);
+        self.play_emptied(st, i);
+    }
+
     /// PC `AssignShortcut(shortcutIdx)` with the base class's: the wheel's selection goes to
     /// the slot (or leaves it when it already holds it).
     fn assign_shortcut(&mut self, st: &mut Stage, i: usize, wheel: &WheelHandler, icon: &mut dyn FnMut(u8) -> Option<ImageRef>, sounds: &mut Vec<&'static str>) {
@@ -961,12 +975,7 @@ impl PcShortcuts {
         self.set_icon(st, i, icon);
         let ic = st.child(s, "ic");
         if self.layout[i].item.is_none() {
-            st.set(s, Prop::Alpha, 100.0);
-            st.tween_to(s, 0.2, &[(Prop::Alpha, 55.0), (Prop::XScale, 95.0), (Prop::YScale, 95.0)], Ease::StrongOut, None);
-            if let Some(ic) = ic {
-                st.set(ic, Prop::Alpha, 100.0);
-                st.tween_to(ic, 0.15, &[(Prop::Alpha, 0.0), (Prop::XScale, 60.0), (Prop::YScale, 60.0)], Ease::StrongOut, None);
-            }
+            self.play_emptied(st, i);
         } else {
             let label = if self.is_power(i) { "out_pow" } else { "out" };
             st.set(s, Prop::XScale, 110.0);
@@ -1229,6 +1238,12 @@ impl WheelMovie {
             d.assign_shortcut(&mut self.stage, idx, w, icon, &mut self.sounds);
         }
     }
+    /// Empty a dock slot (the native side took its item away).
+    pub fn clear_shortcut(&mut self, idx: usize, icon: &mut dyn FnMut(u8) -> Option<ImageRef>) {
+        if let Some(d) = self.dock.as_mut() {
+            d.clear_slot(&mut self.stage, idx, icon);
+        }
+    }
     pub fn set_potions_count(&mut self, h: i32, m: i32) {
         if let Some(p) = self.potions.as_mut() {
             p.set_potions_count(&mut self.stage, h, m);
@@ -1398,12 +1413,69 @@ impl WheelMovie {
 pub struct WheelTexts {
     pub names: HashMap<u8, String>,
     pub ammo: HashMap<u8, String>,
+    /// `<Name>_ShortDescription` of the items without a level or an ammo name: the Spring Razor
+    /// ("Proximity Mine", 0x00C45C90) and the Heart (0x00C45C10).
+    pub short: HashMap<u8, String>,
+    /// `<Name>_<level>_ShortDescription` of the powers (0x00C45930), by item and level (1, 2).
+    pub power_short: HashMap<(u8, u8), String>,
+}
+
+/// The player's level (0: not learned) of the power behind a wheel item.
+pub fn power_level(p: &PlayerState, item: u8) -> u8 {
+    use dishonored_sim::state::power;
+    let idx = match item {
+        WIND_BLAST => power::WINDBLAST,
+        DARK_VISION => power::DARK_VISION,
+        BLINK => power::BLINK,
+        DEVOURING_SWARM => power::DEVOURING_SWARM,
+        BEND_TIME => power::BEND_TIME,
+        POSSESSION => power::POSSESSION,
+        _ => return 0,
+    };
+    p.inv.power_levels[idx]
+}
+
+/// What `UpdateItemInfos(name, ammo)` carries for a wheel item (0x00BCD800 picks the sender:
+/// powers 0x00BC3B00, the Heart 0x00BC3E30, weapons 0x00BC3940). `level` is the player's level
+/// of the power; an unlearned power sends nothing.
+pub fn item_infos(t: &WheelTexts, item: u8, level: u8) -> Option<(String, Option<String>)> {
+    let name = t.names.get(&item).cloned().unwrap_or_default();
+    if item > FIRST_POWER_INDEX {
+        if level == 0 {
+            return None;
+        }
+        return Some((name, t.power_short.get(&(item, level)).cloned()));
+    }
+    let info = match item {
+        HEART | SPRING_RAZOR => t.short.get(&item).cloned(),
+        _ => t.ammo.get(&item).cloned(),
+    };
+    Some((name, info))
 }
 
 fn load_texts(content: &dishonored_assets::Content) -> WheelTexts {
     let loc = dishonored_assets::loc::Localization::load(&content.root, "INT", &["RPG"]);
     let g = |s: &str, k: &str| loc.get(s, k).map(str::to_string).unwrap_or_else(|| k.to_string());
     let mut t = WheelTexts::default();
+    for (item, key) in [(HEART, "Heart_ShortDescription"), (SPRING_RAZOR, "SpringRazor_ShortDescription")] {
+        if let Some(s) = loc.get("DisUISelectionType", key) {
+            t.short.insert(item, s.to_string());
+        }
+    }
+    for (item, sel) in [
+        (DARK_VISION, "DarkVision"),
+        (WIND_BLAST, "WindBlast"),
+        (DEVOURING_SWARM, "DevouringSwarm"),
+        (BLINK, "Blink"),
+        (BEND_TIME, "BendTime"),
+        (POSSESSION, "Possess"),
+    ] {
+        for level in 1..=2u8 {
+            if let Some(s) = loc.get("DisUISelectionType", &format!("{sel}_{level}_ShortDescription")) {
+                t.power_short.insert((item, level), s.to_string());
+            }
+        }
+    }
     for (item, sel) in [
         (REGULAR_BOLT, "Crossbow"),
         (SLEEP_DART, "Crossbow"),
@@ -1438,8 +1510,153 @@ fn load_texts(content: &dishonored_assets::Content) -> WheelTexts {
     t
 }
 
-/// The port's default keyboard shortcuts (`input_map.rs`: 1 Blink ... 0 Spring Razor).
-const DEFAULT_SHORTCUTS: [u8; 10] = [BLINK, WIND_BLAST, DARK_VISION, REGULAR_BULLET, REGULAR_BOLT, POSSESSION, BEND_TIME, DEVOURING_SWARM, REGULAR_GRENADE, SPRING_RAZOR];
+// --- keyboard shortcuts: auto-assignment and cycling (U-882) -----------------------------------
+
+/// `DisGFxMoviePlayerPowerWheel.m_AutoAssign_KeyboardItemOrder` (class default; the DLC06 items
+/// between the powers and the sleep dart are left out: the port has no DLC06 content).
+pub const AUTO_ASSIGN_ORDER: [u8; 15] = [REGULAR_BULLET, REGULAR_BOLT, REGULAR_GRENADE, SPRING_RAZOR, HEART, BLINK, DARK_VISION, WIND_BLAST, DEVOURING_SWARM, BEND_TIME, POSSESSION, SLEEP_DART, FLARE_BOLT, STICKY_GRENADE, EXPLOSIVE_BULLET];
+
+/// What a slot accepts (`DisShortcutAutoAssignSettings`: `m_bWeapon`, `m_bPower`, `m_bHeart`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SlotKind {
+    Weapon,
+    Power,
+    Heart,
+}
+
+/// `Twk_GFxMoviePlayerPowerWheel.m_AutoAssign_KeyboardShortcut[10]`: (accepts, priority).
+pub const AUTO_ASSIGN_SLOTS: [(SlotKind, i32); 10] = [
+    (SlotKind::Weapon, 10),
+    (SlotKind::Weapon, 9),
+    (SlotKind::Weapon, 8),
+    (SlotKind::Weapon, 7),
+    (SlotKind::Weapon, 6),
+    (SlotKind::Heart, 5),
+    (SlotKind::Power, 4),
+    (SlotKind::Power, 3),
+    (SlotKind::Power, 2),
+    (SlotKind::Power, 1),
+];
+
+/// `m_KeyboardShortcuts` and what goes with it: the slots' items (0: empty), the bits of the
+/// slots the player assigned or emptied himself (`m_ShortcutPlayerAssignFlags`: those are
+/// never auto-filled) and the last used slot (`m_LastUsedShortcutIndex`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ShortcutTable {
+    pub slots: [u8; 10],
+    pub player_flags: u16,
+    pub last_used: usize,
+}
+
+impl ShortcutTable {
+    /// `SetShortcuts` (0x00BE1310): the slots whose item is not available are emptied, then
+    /// `FUN_00BDC610` fills the free ones that were not assigned by the player: the slots from
+    /// the highest priority down, each taking the first item of the order that is available,
+    /// not on a slot yet, and of the kind the slot accepts.
+    pub fn refresh(&mut self, available: &[u8]) {
+        for s in self.slots.iter_mut() {
+            if *s != 0 && !available.contains(s) {
+                *s = 0;
+            }
+        }
+        let mut free: Vec<usize> = Vec::new();
+        for i in 0..10 {
+            if self.slots[i] == 0 && self.player_flags >> i & 1 == 0 {
+                // Inserted before the first slot of a lower priority (stable for equal ones).
+                let at = free.iter().position(|&j| AUTO_ASSIGN_SLOTS[j].1 < AUTO_ASSIGN_SLOTS[i].1).unwrap_or(free.len());
+                free.insert(at, i);
+            }
+        }
+        let mut candidates: Vec<u8> = AUTO_ASSIGN_ORDER.iter().copied().filter(|i| available.contains(i) && !self.slots.contains(i)).collect();
+        for slot in free {
+            let kind = AUTO_ASSIGN_SLOTS[slot].0;
+            let fits = |item: u8| match item {
+                HEART => kind == SlotKind::Heart,
+                i if i > FIRST_POWER_INDEX => kind == SlotKind::Power,
+                _ => kind == SlotKind::Weapon,
+            };
+            if let Some(k) = candidates.iter().position(|&c| fits(c)) {
+                self.slots[slot] = candidates.remove(k);
+            }
+        }
+    }
+
+    /// `AssignShortcut` (0x00BC3400): the current item goes to the slot, or leaves it when it
+    /// already holds it; the slot is the player's from then on and any other slot with the item
+    /// is emptied. Returns the slots emptied that way.
+    pub fn assign(&mut self, slot: usize, current: u8) -> Vec<usize> {
+        let mut cleared = Vec::new();
+        if slot >= 10 {
+            return cleared;
+        }
+        let item = if self.slots[slot] == current { 0 } else { current };
+        self.slots[slot] = item;
+        self.player_flags |= 1 << slot;
+        if item != 0 {
+            for j in 0..10 {
+                if j != slot && self.slots[j] == item {
+                    self.slots[j] = 0;
+                    cleared.push(j);
+                    if self.last_used == j {
+                        self.last_used = slot;
+                    }
+                }
+            }
+        }
+        cleared
+    }
+
+    /// `FUN_00BBD0F0`: the slot `steps` filled slots after (before, when negative) the last used
+    /// one, wrapping around; the last used one itself without steps; None when it is empty.
+    pub fn cycle(&self, steps: i32) -> Option<usize> {
+        let mut i = self.last_used as i32;
+        if steps != 0 && self.slots.iter().any(|&s| s != 0) {
+            let dir = if steps > 0 { 1 } else { -1 };
+            let mut left = steps.abs();
+            while left != 0 {
+                i = (i + dir).rem_euclid(10);
+                if self.slots[i as usize] != 0 {
+                    left -= 1;
+                }
+            }
+        }
+        (self.slots[i as usize] != 0).then_some(i as usize)
+    }
+}
+
+/// `DishonoredPlayerController.m_fShortcutsInputTimer` (DishonoredGame's class default): how
+/// long the dock waits after the last mouse-wheel step before using the item it shows.
+pub const SHORTCUTS_INPUT_TIMER: f32 = 0.33;
+
+/// The mouse wheel stepping through the shortcuts (controller 0x00AA0A10 counts the steps and
+/// restarts the timer, 0x00AB7D30 shows the dock on the first step, moves the selection on the
+/// others and uses the item when the timer runs out).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WheelCycle {
+    /// Steps so far (`+0x654`); GBA_NextItem adds one, GBA_PrevItem takes one.
+    pub steps: i32,
+    /// Seconds until the item is used (`+0x658`).
+    pub timer: f32,
+}
+
+impl WheelCycle {
+    pub fn active(&self) -> bool {
+        self.timer > 0.0
+    }
+    /// A step of the mouse wheel.
+    pub fn step(&mut self, dir: i32) {
+        self.steps += dir;
+        self.timer = SHORTCUTS_INPUT_TIMER;
+    }
+    /// Count the timer down: true when it ran out this frame (use the item).
+    pub fn tick(&mut self, dt: f32) -> bool {
+        if self.timer <= 0.0 {
+            return false;
+        }
+        self.timer -= dt;
+        self.timer <= 0.0
+    }
+}
 
 #[derive(Default)]
 struct Native {
@@ -1448,10 +1665,15 @@ struct Native {
     first_input: bool,
     /// `m_CurItemIdx`.
     cur_item: u8,
-    /// Ammo types picked up this match (the wheel lists an ammo type once known).
+    /// Ammo types picked up this match (the wheel lists the gadgets once one was held).
     known_ammo: u8,
-    shortcuts: Option<[Option<u8>; 10]>,
+    shortcuts: ShortcutTable,
     dock_key: Option<usize>,
+    /// The dock was brought up by the mouse wheel.
+    cycle: WheelCycle,
+    /// Seconds since the wheel closed (the controller ignores the mouse wheel for
+    /// `m_fShortcutsInputTimer` after it: `m_dLastWheelCloseTime`).
+    since_close: f32,
     elixirs: Option<[u8; 2]>,
     last_match: Option<(String, u32)>,
 }
@@ -1492,19 +1714,47 @@ pub fn setup_power_wheel(mut commands: Commands, mut images: ResMut<Assets<Image
     commands.insert_resource(pw);
 }
 
-/// The wheel content for a player (0x00BD5530): weapons whose ammo type is known (bullets and
-/// bolts always), with their counts; learned powers.
-pub fn wheel_content(p: &PlayerState, known_ammo: u8) -> Vec<Item> {
+/// The weapons a player carries and the ammo types each lists (0x00BD5530): the pistol and the
+/// crossbow always; the Spring Razor and the grenades once one was held (`known_ammo`, the
+/// port keeps no weapon items).
+const WEAPON_GROUPS: [(&[AmmoType], Option<u8>); 4] = [
+    (&[AmmoType::Bullet, AmmoType::BulletExplosive], None),
+    (&[AmmoType::Bolt, AmmoType::SleepDart, AmmoType::IncendiaryBolt], None),
+    (&[AmmoType::SpringRazor], Some(1 << AmmoType::SpringRazor as u8)),
+    (&[AmmoType::Grenade, AmmoType::StickyGrenade], Some(1 << AmmoType::Grenade as u8 | 1 << AmmoType::StickyGrenade as u8)),
+];
+
+/// The wheel content for a player (0x00BD5530): every ammo type of each weapon carried that
+/// `FUN_00C1C9D0` lists (all but the explosive bullets and the sticky grenades, which need their
+/// unlock attribute; the port also lists one it holds), with the count (an empty one shows
+/// "stop_empty"); the learned powers. The Heart has no sim state and is left out.
+pub fn wheel_content(p: &PlayerState, cfg: &dishonored_ir::gameplay::GameplayConfig, known_ammo: u8) -> Vec<Item> {
     let mut out = Vec::new();
-    for item in WEAPONS_ORDER {
-        let Some(t) = ammo_of(item) else { continue };
-        if hand_of(item).is_none() {
+    let mut listed: Vec<Item> = Vec::new();
+    for (types, owned) in WEAPON_GROUPS {
+        if owned.is_some_and(|mask| known_ammo & mask == 0) {
             continue;
         }
-        let always = matches!(t, AmmoType::Bullet | AmmoType::Bolt);
-        if always || known_ammo & (1 << t as u8) != 0 {
-            out.push(Item { index: item, quantity: Some(dishonored_sim::inventory::ammo(p, t) as i32) });
+        for &t in types {
+            let count = dishonored_sim::inventory::ammo(p, t) as i32;
+            if !dishonored_sim::powers::ammo_unlocked(p, cfg, t) && count == 0 {
+                continue;
+            }
+            let item = match t {
+                AmmoType::Bullet => REGULAR_BULLET,
+                AmmoType::BulletExplosive => EXPLOSIVE_BULLET,
+                AmmoType::Bolt => REGULAR_BOLT,
+                AmmoType::SleepDart => SLEEP_DART,
+                AmmoType::IncendiaryBolt => FLARE_BOLT,
+                AmmoType::SpringRazor => SPRING_RAZOR,
+                AmmoType::Grenade => REGULAR_GRENADE,
+                AmmoType::StickyGrenade => STICKY_GRENADE,
+            };
+            listed.push(Item { index: item, quantity: Some(count) });
         }
+    }
+    for item in WEAPONS_ORDER {
+        out.extend(listed.iter().filter(|i| i.index == item).cloned());
     }
     use dishonored_sim::state::power;
     for (item, pw) in [(WIND_BLAST, power::WINDBLAST), (DARK_VISION, power::DARK_VISION), (BLINK, power::BLINK), (DEVOURING_SWARM, power::DEVOURING_SWARM), (BEND_TIME, power::BEND_TIME), (POSSESSION, power::POSSESSION)] {
@@ -1559,12 +1809,15 @@ pub fn update_power_wheel(
     mut textures: ResMut<StageTextures>,
     mut images: ResMut<Assets<Image>>,
     mut sounds: ResMut<crate::hud_sounds::HudSounds>,
+    session: Res<crate::session::Session>,
+    scroll: Res<bevy::input::mouse::AccumulatedMouseScroll>,
 ) {
     let pw = &mut *pw;
     let Some(m) = pw.movie.as_mut() else { return };
     let n = &mut pw.native;
     let dt = time.delta_secs();
     let me = view.me.as_ref();
+    let cfg = &session.content.sim.gameplay;
     let content = hud.content.clone();
     let icons = pw.icons.get_or_insert_with(|| hud.texts.equipment_icons.clone());
     let mut icon = |item: u8| -> Option<ImageRef> {
@@ -1578,7 +1831,8 @@ pub fn update_power_wheel(
     if n.last_match != game {
         n.last_match = game;
         n.known_ammo = 0;
-        n.shortcuts = None;
+        n.shortcuts = ShortcutTable::default();
+        n.cycle = WheelCycle::default();
         n.elixirs = None;
     }
     if let Some(p) = me {
@@ -1588,7 +1842,7 @@ pub fn update_power_wheel(
             }
         }
     }
-    let shortcuts = *n.shortcuts.get_or_insert_with(|| DEFAULT_SHORTCUTS.map(Some));
+    n.since_close += dt;
     let paused = pause.as_ref().is_some_and(|p| p.open);
     let cutscene = view.matchv.mission.as_ref().is_some_and(|mv| !mv.cutscenes.is_empty());
     let can_open = me.is_some_and(|p| p.alive) && !paused && !cutscene && !local.choice_open && local.enabled;
@@ -1606,7 +1860,17 @@ pub fn update_power_wheel(
     let mut want: Option<bool> = None;
     let mut angles = Vec::new();
     let mut dock_tests = Vec::new();
+    let mut step_tests: Vec<i32> = Vec::new();
+    let mut assign_tests: Vec<usize> = Vec::new();
     hud.tests.retain(|t| match t {
+        crate::hud_popups::HudTest::ShortcutStep { dir } => {
+            step_tests.push(*dir);
+            false
+        }
+        crate::hud_popups::HudTest::Assign { slot } => {
+            assign_tests.push(*slot);
+            false
+        }
         crate::hud_popups::HudTest::Wheel { open } => {
             want = Some(*open);
             false
@@ -1627,12 +1891,19 @@ pub fn update_power_wheel(
         None => held && can_open,
     };
 
-    let layout = |sc: &[Option<u8>; 10], content: &[Item]| -> Vec<Shortcut> {
-        // 0x00BE1310: shortcuts to items not available are cleared.
-        sc.iter().map(|s| match s.and_then(|i| content.iter().find(|c| c.index == i)) {
-            Some(c) => Shortcut { item: Some(c.index), quantity: c.quantity },
-            None => Shortcut::default(),
-        }).collect()
+    // `SetShortcuts` (0x00BE1310): empty the slots of items no longer available, auto-assign the
+    // free ones, and the dock's layout from what is left.
+    fn dock_layout(t: &mut ShortcutTable, content: &[Item]) -> Vec<Shortcut> {
+        let available: Vec<u8> = content.iter().map(|c| c.index).collect();
+        t.refresh(&available);
+        t.slots.iter().map(|&s| if s == 0 { Shortcut::default() } else { Shortcut { item: Some(s), quantity: content.iter().find(|c| c.index == s).and_then(|c| c.quantity) } }).collect()
+    }
+    // The shortcut keys and the mouse wheel use the dock, never while the wheel is open.
+    // The item a slot holds is used (equipped) when the dock closes with `use`.
+    let equip = |local: &mut crate::input_map::LocalInput, item: u8| {
+        if let Some(h) = hand_of(item) {
+            local.left_hand = h;
+        }
     };
 
     if open_now && !n.open {
@@ -1641,17 +1912,21 @@ pub fn update_power_wheel(
         n.first_input = true;
         n.mouse = Vec2::ZERO;
         n.cur_item = 0;
-        let items = me.map(|p| wheel_content(p, n.known_ammo)).unwrap_or_default();
+        // (a dock the mouse wheel brought up is gone: the wheel takes over)
+        n.cycle = WheelCycle::default();
+        n.dock_key = None;
+        let items = me.map(|p| wheel_content(p, cfg, n.known_ammo)).unwrap_or_default();
         let el = me.map(|p| p.inv.elixirs).unwrap_or([0, 0]);
         n.elixirs = Some(el);
         let kb = |a: &str| crate::gfx_hud::convert_key_tags(&format!("`{a}`"), bindings.as_deref(), &hud.texts.keys);
         m.set_potion_bindings(kb("GBA_HealthElixir"), kb("GBA_ManaElixir"));
         m.set_potions_count(el[0] as i32, el[1] as i32);
-        m.set_shortcuts(layout(&shortcuts, &items), &mut icon);
+        m.set_shortcuts(dock_layout(&mut n.shortcuts, &items), &mut icon);
         m.open_wheel(&items, &mut icon);
         sounds.play("W_show");
     } else if !open_now && n.open {
         n.open = false;
+        n.since_close = 0.0;
         // Closing keeps `m_CurItemIdx` selected.
         if let Some(h) = hand_of(n.cur_item) {
             local.left_hand = h;
@@ -1673,17 +1948,19 @@ pub fn update_power_wheel(
         for a in angles.drain(..) {
             m.set_selection_angle(a);
         }
-        // Number keys assign the selection to a dock slot.
-        for i in 0..10 {
-            if bind.just_pressed(&format!("GBA_Shortcut_{i}"), &keys, &mouse, 0.0) {
-                m.assign_shortcut(i, &mut icon);
-                if let Some(d) = m.dock.as_ref() {
-                    let mut sc = [None; 10];
-                    for (j, s) in d.layout.iter().enumerate().take(10) {
-                        sc[j] = s.item;
-                    }
-                    n.shortcuts = Some(sc);
-                }
+        // Number keys assign the selection to a dock slot (`AssignShortcut`, 0x00BC3400).
+        let mut assigns = std::mem::take(&mut assign_tests);
+        if local.override_input.is_none() {
+            assigns.extend((0..10).filter(|i| bind.just_pressed(&format!("GBA_Shortcut_{i}"), &keys, &mouse, 0.0)));
+        }
+        for i in assigns {
+            if i >= 10 {
+                continue;
+            }
+            m.assign_shortcut(i, &mut icon);
+            let cleared = n.shortcuts.assign(i, n.cur_item);
+            for j in cleared {
+                m.clear_shortcut(j, &mut icon);
             }
         }
         // Elixirs drunk while open: the counters and the consumption flash.
@@ -1703,12 +1980,15 @@ pub fn update_power_wheel(
             n.elixirs = Some(el);
         }
     } else {
-        // The dock alone on a number key (start mode 2), closed on release.
+        // The dock alone on a number key (start mode 2), used and closed on release
+        // (controller 0x00AA0900 / 0x00AA0950, 0x00AB7D30).
         let mut presses: Vec<(usize, bool)> = dock_tests;
-        if local.override_input.is_none() && can_open {
+        let live = local.override_input.is_none() && can_open;
+        if live {
             for i in 0..10 {
                 let a = format!("GBA_Shortcut_{i}");
-                if bind.just_pressed(&a, &keys, &mouse, 0.0) {
+                // (not while the mouse wheel's timer runs: `m_fRelativeShortcutTimer`)
+                if bind.just_pressed(&a, &keys, &mouse, 0.0) && !n.cycle.active() {
                     presses.push((i, false));
                 }
                 if n.dock_key == Some(i) && !bind.pressed(&a, &keys, &mouse, 0.0) {
@@ -1718,18 +1998,65 @@ pub fn update_power_wheel(
         }
         for (i, release) in presses {
             if !release {
-                let items = me.map(|p| wheel_content(p, n.known_ammo)).unwrap_or_default();
-                m.set_shortcuts(layout(&shortcuts, &items), &mut icon);
+                let items = me.map(|p| wheel_content(p, cfg, n.known_ammo)).unwrap_or_default();
+                m.set_shortcuts(dock_layout(&mut n.shortcuts, &items), &mut icon);
                 m.open_shortcuts();
                 m.set_shortcut_selection(i as i32);
                 n.dock_key = Some(i);
             } else if n.dock_key == Some(i) {
+                // `KeyboardUse`: the slot's item becomes the current one (0x00BBD090) and is
+                // equipped as the dock closes.
+                let item = n.shortcuts.slots[i];
+                n.shortcuts.last_used = i;
+                if item != 0 {
+                    equip(&mut local, item);
+                }
                 m.close_shortcuts();
                 n.dock_key = None;
             }
         }
+        // The mouse wheel (`Dis_WheelShortcuts_MouseNext / MousePrevious`): not while a key is
+        // held, not within `m_fShortcutsInputTimer` of the wheel closing.
+        let mut steps: Vec<i32> = std::mem::take(&mut step_tests);
+        if live && n.dock_key.is_none() {
+            let w = scroll.delta.y;
+            if bind.just_pressed("GBA_NextItem", &keys, &mouse, w) {
+                steps.push(1);
+            }
+            if bind.just_pressed("GBA_PrevItem", &keys, &mouse, w) {
+                steps.push(-1);
+            }
+        }
+        if n.dock_key.is_none() && can_open {
+            for dir in steps {
+                if n.since_close < SHORTCUTS_INPUT_TIMER {
+                    continue;
+                }
+                let first = !n.cycle.active();
+                if first {
+                    n.cycle = WheelCycle::default();
+                }
+                n.cycle.step(dir);
+                if first {
+                    let items = me.map(|p| wheel_content(p, cfg, n.known_ammo)).unwrap_or_default();
+                    m.set_shortcuts(dock_layout(&mut n.shortcuts, &items), &mut icon);
+                    m.open_shortcuts();
+                }
+                if let Some(s) = n.shortcuts.cycle(n.cycle.steps) {
+                    m.set_shortcut_selection(s as i32);
+                }
+            }
+            if n.cycle.tick(dt) {
+                // Still for the timer: the shown slot is used and the dock closes.
+                if let Some(s) = n.shortcuts.cycle(n.cycle.steps) {
+                    n.shortcuts.last_used = s;
+                    equip(&mut local, n.shortcuts.slots[s]);
+                }
+                n.cycle = WheelCycle::default();
+                m.close_shortcuts();
+            }
+        }
     }
-    local.shortcuts = n.shortcuts.map(|s| s.map(|x| x.and_then(hand_of)));
 
     m.run(dt);
     // The movie's calls to the native side.
@@ -1738,9 +2065,10 @@ pub fn update_power_wheel(
             Callback::SelectionChanged(item) => {
                 n.cur_item = item;
                 if item != 0 {
-                    let name = pw.texts.names.get(&item).cloned().unwrap_or_default();
-                    let ammo = pw.texts.ammo.get(&item).cloned();
-                    m.update_item_infos(&name, ammo.as_deref());
+                    let level = me.map(|p| power_level(p, item)).unwrap_or(0);
+                    if let Some((name, info)) = item_infos(&pw.texts, item, level) {
+                        m.update_item_infos(&name, info.as_deref());
+                    }
                 }
             }
             Callback::Closed => {}
@@ -1804,6 +2132,76 @@ mod tests {
         assert!((v.length() - 1.0).abs() < 1e-4);
         // Below the dead zone: nothing is sent.
         assert_eq!(accumulate_mouse(&mut pos, &mut first, Vec2::new(0.5, 0.0), 72.0), None);
+    }
+
+    #[test]
+    fn auto_assign_follows_the_item_order_and_slot_kinds() {
+        let all = [REGULAR_BULLET, REGULAR_BOLT, REGULAR_GRENADE, SPRING_RAZOR, SLEEP_DART, HEART, BLINK, DARK_VISION, WIND_BLAST, DEVOURING_SWARM, BEND_TIME, POSSESSION];
+        let mut t = ShortcutTable::default();
+        t.refresh(&all);
+        assert_eq!(t.slots, [REGULAR_BULLET, REGULAR_BOLT, REGULAR_GRENADE, SPRING_RAZOR, SLEEP_DART, HEART, BLINK, DARK_VISION, WIND_BLAST, DEVOURING_SWARM]);
+        // Without the Heart its slot stays empty (it takes nothing else); the powers fill from 7.
+        let mut t = ShortcutTable::default();
+        t.refresh(&[REGULAR_BULLET, REGULAR_BOLT, BLINK, WIND_BLAST]);
+        assert_eq!(t.slots, [REGULAR_BULLET, REGULAR_BOLT, 0, 0, 0, 0, BLINK, WIND_BLAST, 0, 0]);
+        // A new item takes the best free slot of its kind; an item gone empties its slot.
+        t.refresh(&[REGULAR_BULLET, REGULAR_BOLT, BLINK, WIND_BLAST, REGULAR_GRENADE, HEART]);
+        assert_eq!(t.slots, [REGULAR_BULLET, REGULAR_BOLT, REGULAR_GRENADE, 0, 0, HEART, BLINK, WIND_BLAST, 0, 0]);
+        t.refresh(&[REGULAR_BULLET, BLINK]);
+        assert_eq!(t.slots, [REGULAR_BULLET, 0, 0, 0, 0, 0, BLINK, 0, 0, 0]);
+    }
+
+    #[test]
+    fn assigned_slots_belong_to_the_player() {
+        let mut t = ShortcutTable::default();
+        t.refresh(&[REGULAR_BULLET, REGULAR_BOLT, BLINK]);
+        // Blink to slot 0 (weapon slot): the player may; slot 6 (its old one) is emptied.
+        assert_eq!(t.assign(0, BLINK), vec![6]);
+        assert_eq!(t.slots[0], BLINK);
+        // Assigning the same item again empties the slot, and it is not refilled.
+        assert!(t.assign(0, BLINK).is_empty());
+        assert_eq!(t.slots[0], 0);
+        t.refresh(&[REGULAR_BULLET, REGULAR_BOLT, BLINK]);
+        assert_eq!(t.slots[0], 0);
+        // (Blink is now nowhere: the free power slot 6 is not the player's, so it takes it back)
+        assert_eq!(t.slots[6], BLINK);
+    }
+
+    #[test]
+    fn mouse_wheel_cycles_filled_slots() {
+        let mut t = ShortcutTable { slots: [8, 0, 6, 0, 0, 0, 24, 0, 0, 0], ..Default::default() };
+        assert_eq!(t.cycle(0), Some(0));
+        assert_eq!(t.cycle(1), Some(2));
+        assert_eq!(t.cycle(2), Some(6));
+        assert_eq!(t.cycle(3), Some(0));
+        assert_eq!(t.cycle(-1), Some(6));
+        t.last_used = 6;
+        assert_eq!(t.cycle(1), Some(0));
+        t.last_used = 1;
+        assert_eq!(t.cycle(0), None);
+        assert_eq!(t.cycle(1), Some(2));
+        let mut c = WheelCycle::default();
+        c.step(1);
+        c.step(1);
+        assert_eq!(c.steps, 2);
+        assert!(!c.tick(0.2));
+        assert!(c.tick(0.2));
+        assert!(!c.active());
+    }
+
+    #[test]
+    fn item_texts_follow_the_sender() {
+        let mut t = WheelTexts::default();
+        t.names.insert(BLINK, "Blink".into());
+        t.power_short.insert((BLINK, 2), "Short Teleport".into());
+        t.names.insert(HEART, "The Heart".into());
+        t.short.insert(HEART, "Reveal Runes & Bone Charms".into());
+        t.names.insert(REGULAR_BOLT, "Crossbow".into());
+        t.ammo.insert(REGULAR_BOLT, "Crossbow Bolt".into());
+        assert_eq!(item_infos(&t, BLINK, 2), Some(("Blink".into(), Some("Short Teleport".into()))));
+        assert_eq!(item_infos(&t, BLINK, 0), None);
+        assert_eq!(item_infos(&t, HEART, 0), Some(("The Heart".into(), Some("Reveal Runes & Bone Charms".into()))));
+        assert_eq!(item_infos(&t, REGULAR_BOLT, 0), Some(("Crossbow".into(), Some("Crossbow Bolt".into()))));
     }
 
     #[test]

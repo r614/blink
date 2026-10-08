@@ -24,6 +24,10 @@ pub mod buttons {
     pub const CHOICE_3: u16 = 1 << 13;
     pub const CHOICE_4: u16 = 1 << 14;
     pub const CHOICES: [u16; 4] = [CHOICE_1, CHOICE_2, CHOICE_3, CHOICE_4];
+    /// The quick-access wheel is open for this player (`DisGFxMoviePlayerPowerWheel` mode 1,
+    /// 0x00BE4280). In a single-human world it slows the world to `m_fBendTimeFactor`
+    /// ([`crate::powers::WHEEL_TIME_FACTOR`]); with other human players it is ignored.
+    pub const WHEEL: u16 = 1 << 15;
 }
 
 /// One-shot item actions (`Dis_ConsumeElixir`, the quick-use keys), carried in

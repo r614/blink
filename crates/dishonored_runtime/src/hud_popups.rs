@@ -254,6 +254,8 @@ pub struct Focus {
     pub text: String,
     /// Where the crosshair moves to (world, Dishonored units).
     pub point: Option<[f32; 3]>,
+    /// What it is (`m_InteractableName`, the window's title): a talker's name.
+    pub name: String,
 }
 
 /// Same reach / facing rule as the server (`MissionMatch::interaction`).
@@ -267,12 +269,12 @@ pub fn focused_interaction(mv: &MissionView, view: &crate::session::SessionView,
     }
     // On a chain: `DisTweaks_Climbable.m_StopClimbingInteractText` ("`GBA_Jump` Jump off").
     if me.mode == dishonored_sim::state::MoveMode::Climbing {
-        return Some(Focus { text: "`GBA_Jump` Jump off".into(), point: None });
+        return Some(Focus { text: "`GBA_Jump` Jump off".into(), point: None, name: String::new() });
     }
     let eye = me.position + glam::Vec3::Z * 64.0;
     let fwd = dishonored_sim::movement::view_vector(yaw, pitch);
-    let mut best: Option<(f32, String, glam::Vec3)> = None;
-    let mut consider = |pos: glam::Vec3, reach: f32, prompt: &str| {
+    let mut best: Option<(f32, String, glam::Vec3, String)> = None;
+    let mut consider = |pos: glam::Vec3, reach: f32, prompt: &str, name: &str| {
         let d = pos - eye;
         let dist = d.length();
         if dist > reach || dist < 1.0 {
@@ -284,23 +286,51 @@ pub fn focused_interaction(mv: &MissionView, view: &crate::session::SessionView,
         }
         let score = dist * (2.0 - facing);
         if best.as_ref().is_none_or(|b| score < b.0) {
-            best = Some((score, prompt.to_string(), pos));
+            best = Some((score, prompt.to_string(), pos, name.to_string()));
         }
     };
     for (p, prompt) in &mv.usables {
-        consider(glam::Vec3::from(*p), 220.0, prompt);
+        consider(glam::Vec3::from(*p), 220.0, prompt, "");
     }
     for (npc, prompt) in &mv.talkers {
         let Some(id) = mv.npc_ids.iter().find(|x| &x.0 == npc).map(|x| x.1) else { continue };
         if let Some(o) = view.others.iter().find(|o| o.id == id && o.alive) {
-            consider(o.position + glam::Vec3::Z * 40.0, 200.0, prompt);
+            let name = mv.npc_names.iter().find(|x| &x.0 == npc).map(|x| x.1.as_str()).unwrap_or("");
+            consider(o.position + glam::Vec3::Z * 40.0, 200.0, prompt, name);
         }
     }
-    best.map(|(_, prompt, pos)| {
+    best.map(|(_, prompt, pos, name)| {
         // Prompts without a key tag are Use interactions (`m_InteractText` "`GBA_Use` ...").
         let text = if prompt.contains('`') { prompt } else { format!("`GBA_Use` {prompt}") };
-        Focus { text, point: Some(pos.to_array()) }
+        Focus { text, point: Some(pos.to_array()), name }
     })
+}
+
+/// `m_AsleepCrosshairText` (the pawn tweaks' value): the crosshair's info line over someone
+/// asleep or knocked out. Adapted from dishonored-bevy by Eamon (github.com/Eamo5/dishonored-bevy), used with permission.
+pub const ASLEEP_CROSSHAIR_TEXT: &str = "(Unconscious)";
+
+/// How far the crosshair probe reaches a body (uu).
+const SLEEPER_REACH: f32 = 300.0;
+
+/// The unconscious pawn under the crosshair, if any (`DisUIInteractionProbe`, approximated by the
+/// view ray passing within 45 uu of the pawn's chest).
+pub fn focused_sleeper<'a>(view: &'a crate::session::SessionView, me: &dishonored_sim::state::PlayerState, yaw: f32, pitch: f32) -> Option<&'a dishonored_sim::state::PlayerState> {
+    if !me.alive {
+        return None;
+    }
+    let eye = me.position + glam::Vec3::Z * 64.0;
+    let fwd = dishonored_sim::movement::view_vector(yaw, pitch);
+    view.others
+        .iter()
+        .filter(|o| o.alive && o.condition == dishonored_sim::state::Condition::Unconscious)
+        .filter_map(|o| {
+            let d = o.position + glam::Vec3::Z * 40.0 - eye;
+            let t = d.dot(fwd);
+            (t > 0.0 && t < SLEEPER_REACH && (d - fwd * t).length() < 45.0).then_some((t, o))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|x| x.1)
 }
 
 // --- pickup log -------------------------------------------------------------------------------
@@ -404,6 +434,29 @@ pub enum HudTest {
         #[serde(default)]
         release: bool,
     },
+    /// A step of the mouse wheel outside the quick-access wheel (`GBA_NextItem` +1,
+    /// `GBA_PrevItem` -1): the dock cycles through the filled slots and uses the one it shows
+    /// when the wheel has been still for `m_fShortcutsInputTimer`.
+    ShortcutStep { dir: i32 },
+    /// A number key while the wheel is open: the pointed-at item goes to the slot.
+    Assign { slot: usize },
+    /// The tutorial line (`SetTutorialMessage`), up `seconds` (10 by default).
+    Tutorial {
+        text: String,
+        #[serde(default)]
+        seconds: Option<f32>,
+    },
+    /// A tutorial window (`SetTutorialWindow`): picture 0 gear, 1 note, 2 rune, 3 bone charm; the
+    /// HUD tweak's text for the picture when none is given.
+    TutorialWindow {
+        image: u8,
+        #[serde(default)]
+        text: Option<String>,
+    },
+    /// Add task markers on the spot: (metres ahead of the player, sideways, up, optional, name).
+    TaskMarkers { markers: Vec<(f32, f32, f32, bool, String)> },
+    /// The game over screen (the pause menu movie with `ShowGameOverMenu`), as if the player died.
+    GameOver,
     /// A game save: the saving notification (`hud_global.rs`).
     Saving,
 }
@@ -473,7 +526,9 @@ pub fn apply_test(t: HudTest, q: &mut PopupQueue, w: &mut HudWidgets, st: &mut S
             }
         }
         // Handled by the wheel (`hud_wheel::update_power_wheel`).
-        HudTest::Wheel { .. } | HudTest::WheelAngle { .. } | HudTest::Shortcut { .. } | HudTest::Saving => {}
+        HudTest::Wheel { .. } | HudTest::WheelAngle { .. } | HudTest::Shortcut { .. } | HudTest::ShortcutStep { .. } | HudTest::Assign { .. } | HudTest::Saving => {}
+        // Handled by the HUD itself (`gfx_hud::update_gfx_hud`).
+        HudTest::Tutorial { .. } | HudTest::TutorialWindow { .. } | HudTest::TaskMarkers { .. } | HudTest::GameOver => {}
         HudTest::Location { name } => {
             if let Some(l) = w.location.as_mut() {
                 l.set_location(st, &name, crate::gfx_hud::LOCATION_DISCOVERY_DURATION);

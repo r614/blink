@@ -16,6 +16,9 @@ pub mod host;
 pub mod interp;
 pub mod model;
 pub mod runtime;
+/// Hand-built graphs for tests (no retail data).
+#[doc(hidden)]
+pub mod testkit;
 
 #[cfg(feature = "load")]
 pub mod load;
