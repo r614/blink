@@ -158,6 +158,17 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
             t0.elapsed()
         ),
     );
+    // Where the copied doors and usables stand (their bodies' bounds against the floor at z 0).
+    let rows: Vec<Vec<String>> = mc
+        .usables
+        .iter()
+        .map(|u| {
+            let tris: Vec<Vec3> = mc.collision.movers.iter().filter(|m| m.actor == u.actor).flat_map(|m| m.tris.iter().flat_map(|t| t.iter().copied())).collect();
+            let (lo, hi) = tris.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(a, b), v| (a.min(*v), b.max(*v)));
+            vec![u.actor.clone(), format!("{:.0?}", u.location), format!("{:.0?}", u.center), if tris.is_empty() { "-".into() } else { format!("{:.0?} .. {:.0?}", lo, hi) }, u.prompt.clone(), u.locked_prompt.clone()]
+        })
+        .collect();
+    rep.table("Doors and usables", &["actor", "location", "use point", "door bodies (closed)", "prompt", "locked prompt"], rows);
     scenarios(rep, &mc)?;
     steps(rep, &mc);
     slopes(rep, &mc);
