@@ -332,10 +332,11 @@ pub fn inspect_script(
     }
     shots.frames_since_last_shot += 1;
     shots.in_flight.retain(|p| !p.exists());
+    let written = shots.in_flight.is_empty();
     if let Some(n) = shots.quit_in.as_mut() {
         // Quit once the screenshots are written (readback can lag while pipelines compile),
         // or after the cap.
-        if *n == 0 || (shots.in_flight.is_empty() && *n < 570) {
+        if *n == 0 || (written && *n < 570) {
             exit.write(AppExit::Success);
         } else {
             *n -= 1;
