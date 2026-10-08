@@ -207,6 +207,7 @@ pub fn resolve_sword_hits(
                 if victim.sword.block_time < t.parry_tap_window {
                     state.players[vi].sword.force_block = t.force_block_after_tap;
                 }
+                state.players[vi].sword.parries = state.players[vi].sword.parries.wrapping_add(1);
                 events.push(SimEvent::SwordParried { attacker: attacker.id, defender: victim.id });
             } else {
                 let a = &mut state.players[ai];

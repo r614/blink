@@ -140,7 +140,9 @@ pub fn spawn_particle(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4
         vel += local.normalize_or_zero() * vr.eval1(et, r[2]);
     }
     let (pos, vel) = if em.local_space { (local, vel) } else { (xf.transform_point3(local), xf.transform_vector3(vel)) };
-    let size = d3(&em.size, et, r[0], [1.0; 3]);
+    // A scaled instance transform scales the particles too (the first-person hand effects ride
+    // the rig drawn at the viewmodel scale); gameplay transforms are unscaled.
+    let size = d3(&em.size, et, r[0], [1.0; 3]) * xf.x_axis.truncate().length();
     let color = d3(&em.color, et, r[1], [1.0; 3]);
     let alpha = em.alpha.as_ref().map(|d| d.eval1(et, r[1])).unwrap_or(1.0);
     let (mut orbit_off, mut orbit_rot, mut orbit_rate) = (Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
@@ -319,6 +321,8 @@ pub const POSSESSION_HUMAN_PS: &str = "Vfx_GamePlay.Possession.PossesTarget_Huma
 pub const POSSESSION_RAT_PS: &str = "Vfx_GamePlay.Possession.PossesTarget_Rats_01";
 /// Devouring Swarm: the hand cast and the summoning (levels 1 / 2).
 pub const SWARM_CAST_PS: &str = "Vfx_GamePlay.RatSwarm.Ps_RSwarm_HandCast_01";
+/// `Twk_Powers_Possess.m_HandCastParticleAttachSocket` / `Twk_DevouringSwarm.m_HandFXSocketName`.
+pub const HAND_CAST_SOCKET: &str = "LeftHand_PowerCastA";
 pub const SWARM_SUMMON_PS: &str = "Vfx_GamePlay.RatSwarm.RSwarm_Summoning_lvl1";
 pub const SWARM_SUMMON2_PS: &str = "Vfx_GamePlay.RatSwarm.RSwarm_Summoning_lvl2";
 /// Grenade explosion and Spring Razor burst (`Startup`).
@@ -380,6 +384,9 @@ pub fn surface_below(world: &CollisionWorld, pos: Vec3, depth: f32) -> Option<(S
 pub enum FxRequest {
     /// A one-shot system at a point, its X axis along `dir`.
     Effect { path: String, at: Vec3, dir: Vec3 },
+    /// A cast effect on the local player's left hand (`LeftHand_PowerCastA`); `at` / `dir` are
+    /// the fallback placement when the rig has no such socket.
+    HandCast { path: String, at: Vec3, dir: Vec3 },
     /// A beam one-shot (`PEB2STM_UserSet` target) from `from` to `to`.
     Beam { path: &'static str, from: Vec3, to: Vec3 },
 }
@@ -463,7 +470,12 @@ impl FxEventState {
                 // (`PossesTarget_Rats_01` for a rat).
                 SimEvent::PossessStart { id, host } => {
                     let (Some(p), Some(h)) = (find(*id), find(*host)) else { continue };
-                    out_push(&mut out, POSSESSION_CAST_PS, p.position + Vec3::Z * 40.0 + look(&p) * 40.0, look(&p));
+                    let (at, dir) = (p.position + Vec3::Z * 40.0 + look(&p) * 40.0, look(&p));
+                    if Some(*id) == s.me {
+                        out.push(FxRequest::HandCast { path: POSSESSION_CAST_PS.into(), at, dir });
+                    } else {
+                        out_push(&mut out, POSSESSION_CAST_PS, at, dir);
+                    }
                     let target = if h.kind == PawnKind::Rat { POSSESSION_RAT_PS } else { POSSESSION_HUMAN_PS };
                     (target.into(), h.position, Vec3::Z)
                 }
@@ -476,7 +488,12 @@ impl FxEventState {
                 // has its own system).
                 SimEvent::SwarmSummoned { id, position, .. } => {
                     if let Some(p) = find(*id) {
-                        out_push(&mut out, SWARM_CAST_PS, p.position + Vec3::Z * 40.0 + look(&p) * 40.0, look(&p));
+                        let (at, dir) = (p.position + Vec3::Z * 40.0 + look(&p) * 40.0, look(&p));
+                        if Some(*id) == s.me {
+                            out.push(FxRequest::HandCast { path: SWARM_CAST_PS.into(), at, dir });
+                        } else {
+                            out_push(&mut out, SWARM_CAST_PS, at, dir);
+                        }
                     }
                     let lvl = find(*id).map(|p| p.inv.power_levels[dishonored_sim::state::power::DEVOURING_SWARM]).unwrap_or(1);
                     ((if lvl >= 2 { SWARM_SUMMON2_PS } else { SWARM_SUMMON_PS }).into(), *position, Vec3::Z)

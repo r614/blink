@@ -279,6 +279,52 @@ pub struct AnimLibrary {
     pub clips: HashMap<String, crate::edge_anim::BakedClip>,
 }
 
+/// An `AnimNotify_PlayParticleEffect` of a sequence: the system played at `time` on a socket
+/// or bone of the mesh, attached (follows it) or not.
+#[derive(Debug, Clone)]
+pub struct ParticleNotify {
+    pub sequence: String,
+    pub time: f32,
+    pub template: String,
+    pub socket: String,
+    pub bone: String,
+    pub attach: bool,
+}
+
+/// The particle notifies of an AnimSet's sequences.
+pub fn particle_notifies(content: &Content, pkg_name: &str, set_path: &str) -> Result<Vec<ParticleNotify>> {
+    use ue3_package::properties::{Value, find};
+    let pkg = content.package(pkg_name)?;
+    let set = (0..pkg.exports.len()).find(|&i| pkg.obj_path(ObjRef::Export(i)).eq_ignore_ascii_case(set_path)).with_context(|| format!("{set_path} not in {pkg_name}"))?;
+    let sh = pkg.read_object(set)?;
+    let mut out = Vec::new();
+    for s in find(&sh.properties, "Sequences").context("Sequences")?.array_objects()? {
+        let ObjRef::Export(e) = ObjRef::from_index(s) else { continue };
+        let h = pkg.read_object(e)?;
+        let Some(Value::Name(sequence)) = find(&h.properties, "SequenceName").map(|p| &p.value) else { continue };
+        let Some(n) = find(&h.properties, "Notifies") else { continue };
+        for ev in n.array_structs(&pkg).unwrap_or_default() {
+            let time = find(&ev, "Time").and_then(|p| p.as_float()).unwrap_or(0.0);
+            let Some(ObjRef::Export(ni)) = find(&ev, "Notify").and_then(|p| p.as_object()).map(ObjRef::from_index) else { continue };
+            if pkg.export_class(ni) != "AnimNotify_PlayParticleEffect" {
+                continue;
+            }
+            let props = pkg.read_object(ni)?.properties;
+            let name = |k: &str| match find(&props, k).map(|p| &p.value) {
+                Some(Value::Name(v)) if v != "None" => v.clone(),
+                _ => String::new(),
+            };
+            let template = match find(&props, "PSTemplate").and_then(|p| p.as_object()).map(ObjRef::from_index) {
+                Some(r @ (ObjRef::Export(_) | ObjRef::Import(_))) => pkg.obj_path(r),
+                _ => continue,
+            };
+            let attach = matches!(find(&props, "bAttach").map(|p| &p.value), Some(Value::Bool(true)));
+            out.push(ParticleNotify { sequence: sequence.clone(), time, template, socket: name("SocketName"), bone: name("BoneName"), attach });
+        }
+    }
+    Ok(out)
+}
+
 /// Object path of the `AnimSet` export of a package whose own name (the last path component)
 /// is `name`, for sets whose outer is not known (the weapons' sets).
 pub fn anim_set_path(content: &Content, pkg_name: &str, name: &str) -> Result<String> {
