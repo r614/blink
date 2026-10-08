@@ -1,0 +1,32 @@
+// One sword attack on a passive guard 140 uu ahead (HOOK_TRIAGE.md 2026-10-06: a hit of 10 on
+// the guard's 50 = 0.2 x HealthMax, `DisDamageType_FastHit_Right`, 0.300-0.350 s after the
+// press). The port gives NPCs the player's 70 health by rule (U-113), so its hit is 14.
+// Presentation: blood from the contact system (Sword x Body), the hit reaction.
+(
+    name: "combat/sword_hit_dummy",
+    system: Combat,
+    map: "Playground",
+    description: "Swing once at a passive guard 140 uu ahead facing the player (no back assassination): timing, damage, blood, hit reaction, sounds.",
+    setup: (
+        player: Some((position: (-5300, 0, 96), yaw: 180, pitch: -5)),
+        npcs: [(id: Some("dummy"), position: Some((-5440, 0, 92)), yaw: 0, state: Some("Passive"))],
+        settle: 30,
+    ),
+    ticks: 600,
+    input: [(tick: 5, action: Press(Primary))],
+    checkpoints: [
+        (name: "dummy keeps facing the player", expect: [(metric: At("npc.dummy.yaw", 5), value: 0, tol: 0.5, source: "a placed pawn keeps its spawn rotation without input", status: Static)]),
+        (name: "timing", expect: [(metric: Between("Sim:SwordSwing", "Sim:Damage@dummy"), value: 0.325, tol: 0.026, source: "HOOK_TRIAGE.md 2026-10-06: press -> damage 0.300-0.350 s (U-590)")]),
+        (name: "damage", expect: [(metric: EventValue("Sim:Damage@dummy", "amount"), value: 10, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: 10 of 50 per hit (0.2 x HealthMax of the guard)")]),
+        (name: "blood", expect: [
+            (metric: Count("Effect:Vfx_PhysMat.Blood.*@dummy"), value: 1, tol: 0, source: "contact system: Sword x Body particle sub-intersection", status: Static),
+            (metric: Count("EffectMissing:*"), value: 0, tol: 0, source: "every system the contact system names exists in the packages", status: Static),
+            (metric: Unended("*"), value: 0, tol: 0, source: "UE3 one-shot gameplay ParticleSystemComponent: destroyed when its emitters finish", status: Static),
+            (metric: EventValue("Effect:Vfx_PhysMat.Blood.*", "untextured"), value: 0, tol: 0, source: "the blood system draws textured sprites (the playground showed squares)", status: Static),
+        ]),
+        (name: "hit reaction", expect: [(metric: Count("Anim:Melee@dummy"), value: 1, tol: 0, cmp: AtLeast, source: "the guard plays a melee hit reaction", status: Unmeasured)]),
+        (name: "sounds", expect: [(metric: Count("Sound:(no cue)"), value: 0, tol: 0, source: "each sword event has a cue", status: Static)]),
+    ],
+    record: [Pawn, Powers, Npc("dummy"), SimEvents, Effects, Sounds, Anim],
+    capture: Some("lab equip DisWepMelee 1; measure sword npc=<doorman> --swings 1; event trace of ParticleSystemComponent activations"),
+)

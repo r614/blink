@@ -184,7 +184,12 @@ fn mission(s: &Scenario, mc: &dishonored_content::MatchContent, notes: &mut Vec<
             talk: None,
             talk_conversation: None,
             speaker: None,
-            faction: n.faction.clone().or(if kind == NpcKind::Guard && state != "passive" { Some("DisFaction_Defaults.Faction_Guard_Default".into()) } else { None }),
+            faction: match n.faction.as_deref() {
+                Some("") | Some("None") | Some("none") => None,
+                Some(f) => Some(f.to_string()),
+                None if kind == NpcKind::Guard && state != "passive" => Some("DisFaction_Defaults.Faction_Guard_Default".into()),
+                None => None,
+            },
             passive: state == "passive",
         });
         names.push((name, None));
@@ -385,14 +390,14 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         ("left.blink_target", "bool"), ("left.blink_tx", "uu"), ("left.blink_ty", "uu"), ("left.blink_tz", "uu"),
         ("power.time_scale", "1"), ("power.world_dilation", "1"), ("power.dark_vision", "s"), ("power.possess", "enum"), ("power.action_lock", "s"),
         ("inv.grenades", "n"), ("inv.sticky", "n"), ("inv.razors", "n"), ("inv.sleep_darts", "n"), ("inv.incendiary", "n"), ("inv.elixir_health", "n"), ("inv.elixir_mana", "n"), ("inv.coins", "n"), ("inv.runes", "n"),
-        ("world.projectiles", "n"), ("world.windblasts", "n"), ("world.traps", "n"), ("world.swarms", "n"), ("world.rats", "n"), ("world.time_bends", "n"),
+        ("world.projectiles", "n"), ("world.windblasts", "n"), ("world.traps", "n"), ("world.swarms", "n"), ("world.rats", "n"), ("world.swarm_rats", "n"), ("world.time_bends", "n"),
         ("proj.x", "uu"), ("proj.y", "uu"), ("proj.z", "uu"), ("proj.speed", "uu/s"),
         ("fx.live", "n"), ("fx.particles", "n"),
     ] {
         chans.push((c.to_string(), u));
     }
     for (name, _) in &tracked {
-        for (c, u) in [("x", "uu"), ("y", "uu"), ("z", "uu"), ("health", "pt"), ("alive", "bool"), ("condition", "enum"), ("state", "enum"), ("stance", "enum"), ("attn", "1"), ("attn_level", "n"), ("los", "1"), ("sighted", "bool"), ("suspicion", "n"), ("time_scale", "1"), ("speed2d", "uu/s")] {
+        for (c, u) in [("x", "uu"), ("y", "uu"), ("z", "uu"), ("yaw", "deg"), ("health", "pt"), ("alive", "bool"), ("condition", "enum"), ("state", "enum"), ("stance", "enum"), ("attn", "1"), ("attn_level", "n"), ("los", "1"), ("sighted", "bool"), ("suspicion", "n"), ("time_scale", "1"), ("speed2d", "uu/s")] {
             chans.push((format!("npc.{name}.{c}"), u));
         }
     }
@@ -425,7 +430,7 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             None => v.extend(std::iter::repeat_n(f64::NAN, PLAYER_CHANNELS)),
         }
         let rats = w.players.iter().filter(|p| p.kind == dishonored_sim::state::PawnKind::Rat && p.alive).count();
-        v.extend([w.projectiles.len() as f64, w.windblasts.len() as f64, w.traps.len() as f64, w.swarms.len() as f64, rats as f64, w.time_bends.len() as f64]);
+        v.extend([w.projectiles.len() as f64, w.windblasts.len() as f64, w.traps.len() as f64, w.swarms.len() as f64, rats as f64, w.swarms.iter().map(|s| s.rats as f64).sum::<f64>(), w.time_bends.len() as f64]);
         match w.projectiles.iter().min_by_key(|p| p.id) {
             Some(pr) => v.extend([pr.position.x as f64, pr.position.y as f64, pr.position.z as f64, pr.velocity.length() as f64]),
             None => v.extend([f64::NAN; 4]),
@@ -437,8 +442,8 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             let brain = m.crowd.brains.iter().find(|b| b.id == *id);
             let attn = brain.and_then(|b| b.attn.iter().find(|a| a.who == ME));
             match p {
-                Some(p) => v.extend([p.position.x as f64, p.position.y as f64, p.position.z as f64, p.vitals.health as f64, b(p.alive), leg.idx(&format!("npc.{name}.condition"), p.condition)]),
-                None => v.extend([f64::NAN; 6]),
+                Some(p) => v.extend([p.position.x as f64, p.position.y as f64, p.position.z as f64, p.yaw as f64, p.vitals.health as f64, b(p.alive), leg.idx(&format!("npc.{name}.condition"), p.condition)]),
+                None => v.extend([f64::NAN; 7]),
             }
             v.push(brain.map_or(f64::NAN, |b| leg.idx(&format!("npc.{name}.state"), b.state)));
             v.push(poses.iter().find(|x| x.0 == *id).map_or(f64::NAN, |x| leg.idx(&format!("npc.{name}.stance"), x.1)));

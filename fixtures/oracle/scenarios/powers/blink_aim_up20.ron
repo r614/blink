@@ -1,0 +1,17 @@
+// Blink aimed 19.84 degrees up (the measured case): the target is the eye plus the range
+// vector clipped to 500 up, `t = min(500 / d.z, 1600)`: 1385.7 uu ahead and 500 above the eye.
+(
+    name: "powers/blink_aim_up20",
+    system: Powers,
+    map: "Playground",
+    description: "Hold Blink aimed 19.84 degrees up; the target point while aiming.",
+    setup: (player: Some((position: (-5600, 0, 96), yaw: 0, pitch: 19.84)), powers: [("Blink", 2)], left_hand: Some("Blink"), settle: 30),
+    ticks: 20,
+    input: [(tick: 1, hold: 15, action: Press(Secondary))],
+    checkpoints: [
+        (name: "target ahead", expect: [(metric: Diff("left.blink_tx", "cam.x", 10), value: 1385.7, tol: 5, source: "HOOK_TRIAGE.md 2026-10-06: 1385.7 horizontal at camera pitch 19.84")]),
+        (name: "target up", expect: [(metric: Diff("left.blink_tz", "cam.z", 10), value: 500, tol: 5, source: "HOOK_TRIAGE.md 2026-10-06: +500")]),
+    ],
+    record: [Pawn, Camera, Powers],
+    capture: Some("measure blink --pitch 19.84 (m_TargetPoint +0x60 against CameraCache.POV)"),
+)

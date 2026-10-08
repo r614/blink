@@ -1,0 +1,16 @@
+// Blink level 1: range 1100 uu (HOOK_TRIAGE.md 2026-10-06; `m_CurrentLevel` 1 = `m_Levels[0]`).
+(
+    name: "powers/blink_l1_level",
+    system: Powers,
+    map: "Playground",
+    description: "Blink level 1 at eye level: range and cost.",
+    setup: (player: Some((position: (-5600, 0, 96), yaw: 0)), powers: [("Blink", 1)], left_hand: Some("Blink"), settle: 30),
+    ticks: 120,
+    input: [(tick: 1, hold: 10, action: Press(Secondary))],
+    checkpoints: [
+        (name: "range", expect: [(metric: Delta("pawn.x", 0, 60), value: 1087.5, tol: 12.5, source: "HOOK_TRIAGE.md 2026-10-06: level 1 range 1100 uu from the eye, ends 5-19 uu short")]),
+        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 20, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: Blink costs 20")]),
+    ],
+    record: [Pawn, Vitals, Powers, SimEvents],
+    capture: Some("lab setup 60; lab power Blink 1; measure blink --pitch 0"),
+)

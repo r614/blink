@@ -1,0 +1,32 @@
+// One crossbow bolt at a passive guard 500 uu ahead. Reload measured (HOOK_TRIAGE.md
+// 2026-10-06, 60 Hz): shot -> load 1.555 s. Presentation (tweaks): `Twk_Inv_CrossbowCorvo`
+// `m_pTracerFX` `Ps_CrossBowMuzzle`, the bolt's `m_pTrailEffect` `StdBolt_Trail`; blood from
+// the contact system (Arrow x Body).
+(
+    name: "combat/crossbow_hit",
+    system: Combat,
+    map: "Playground",
+    description: "Shoot a bolt at a passive guard 500 uu ahead: damage, the reload, the effects.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0, pitch: -1)),
+        items: ["Bolt:10"],
+        left_hand: Some("Crossbow"),
+        npcs: [(id: Some("dummy"), position: Some((-5100, 0, 92)), yaw: 180, state: Some("Passive"))],
+        settle: 150,
+    ),
+    ticks: 400,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "hit", expect: [(metric: Count("Sim:Damage@dummy"), value: 1, tol: 0, source: "a settled bolt at 10 m hits", status: Static)]),
+        (name: "damage", expect: [(metric: EventValue("Sim:Damage@dummy", "amount"), value: 0, tol: 0, source: "crossbow damage to a guard (body)", status: Unmeasured)]),
+        (name: "reload", expect: [(metric: Between("Sim:Fired", "Sim:Reloaded"), value: 1.555, tol: 0.017, source: "HOOK_TRIAGE.md 2026-10-06: shot -> load 1.555 s at 60 Hz (U-501)")]),
+        (name: "effects", expect: [
+            (metric: Count("Effect:Vfx_Weapon.Effects.Ps_CrossBowMuzzle"), value: 1, tol: 0, source: "tweaks: Twk_Inv_CrossbowCorvo DisTweaks_FireCrossbow.m_pTracerFX", status: Static),
+            (metric: Count("Effect:Vfx_Weapon.Effects.Trails.StdBolt_Trail"), value: 1, tol: 0, source: "tweaks: Twk_Projectiles.Twk_Proj_Arrow.m_pTrailEffect", status: Static),
+            (metric: Count("Effect:Vfx_PhysMat.Blood.*@dummy"), value: 1, tol: 0, source: "contact system: Arrow x Body particle sub-intersection", status: Static),
+            (metric: Unended("*"), value: 0, tol: 0, source: "UE3 one-shot gameplay ParticleSystemComponent: destroyed when its emitters finish", status: Static),
+        ]),
+    ],
+    record: [Pawn, Powers, Projectiles, Npc("dummy"), SimEvents, Effects, Sounds, Anim],
+    capture: Some("lab equip crossbow; measure gun --weapon crossbow --shots 1 at a guard"),
+)

@@ -240,6 +240,8 @@ pub enum Metric {
     Delta(String, u32, u32),
     /// Value at a tick minus the minimum from that tick on (a drop: damage taken, mana spent).
     DropFrom(String, u32),
+    /// First channel minus the second, both at a tick (a Blink target ahead of the eye).
+    Diff(String, String, u32),
     /// Number of trace events matching a pattern (see [`EventPattern`]).
     Count(String),
     /// Seconds from tick 0 to the first matching event.
@@ -254,6 +256,8 @@ pub enum Metric {
     /// Seconds from the first matching `Effect` spawn to the end of that instance
     /// (`EffectEnd` with the same `inst`): missing when it never ends within the run.
     Lifetime(String),
+    /// Matching Effect spawns whose instance has no EffectEnd by the end of the run.
+    Unended(String),
 }
 
 /// How an expectation compares.
@@ -535,7 +539,7 @@ impl Scenario {
                     (_, false) => CheckStatus::Fail,
                 };
                 let first_event = match &e.metric {
-                    Metric::Count(p) | Metric::FirstAt(p) | Metric::EventValue(p, _) | Metric::EventSum(p, _) | Metric::Lifetime(p) | Metric::Between(p, _) => EventPattern::parse(p).first(t).map(|ev| ev.tick),
+                    Metric::Count(p) | Metric::FirstAt(p) | Metric::EventValue(p, _) | Metric::EventSum(p, _) | Metric::Lifetime(p) | Metric::Unended(p) | Metric::Between(p, _) => EventPattern::parse(p).first(t).map(|ev| ev.tick),
                     _ => None,
                 };
                 out.push(Check { checkpoint: cp.name.clone(), metric: metric_label(&e.metric), cmp: e.cmp, expected: e.value, tol: e.tol, actual, status, reference: e.status, source: e.source.clone(), tick: first_event });
@@ -596,12 +600,14 @@ pub fn metric_label(m: &Metric) -> String {
         Metric::Final(c) => format!("Final({c})"),
         Metric::Delta(c, a, b) => format!("Delta({c}, {a}, {b})"),
         Metric::DropFrom(c, t) => format!("DropFrom({c}, {t})"),
+        Metric::Diff(a, b, t) => format!("Diff({a}, {b}, {t})"),
         Metric::Count(p) => format!("Count({p})"),
         Metric::FirstAt(p) => format!("FirstAt({p})"),
         Metric::Between(a, b) => format!("Between({a}, {b})"),
         Metric::EventValue(p, k) => format!("EventValue({p}, {k})"),
         Metric::EventSum(p, k) => format!("EventSum({p}, {k})"),
         Metric::Lifetime(p) => format!("Lifetime({p})"),
+        Metric::Unended(p) => format!("Unended({p})"),
     }
 }
 
@@ -691,6 +697,7 @@ pub fn extra_metric(t: &Trace, m: &Metric) -> Option<f64> {
             let v0 = at(c, *tick)?;
             t.series(c).into_iter().filter(|x| x.0 >= *tick).map(|x| x.1).reduce(f64::min).map(|m| v0 - m)
         }
+        Metric::Diff(a, b, tick) => Some(at(a, *tick)? - at(b, *tick)?),
         Metric::Count(p) => {
             let p = EventPattern::parse(p);
             Some(t.events.iter().filter(|e| p.matches(e)).count() as f64)
@@ -716,6 +723,12 @@ pub fn extra_metric(t: &Trace, m: &Metric) -> Option<f64> {
             let inst = detail_fields(&spawn.detail).into_iter().find(|(k, _)| *k == "inst")?.1.to_string();
             let end = t.events.iter().find(|e| e.kind == "EffectEnd" && detail_fields(&e.detail).iter().any(|(k, v)| *k == "inst" && *v == inst))?;
             Some(secs(end.tick - spawn.tick))
+        }
+        Metric::Unended(p) => {
+            let p = EventPattern::parse(p);
+            let inst = |e: &TraceEvent| detail_fields(&e.detail).into_iter().find(|(k, _)| *k == "inst").map(|x| x.1.to_string());
+            let ended: Vec<String> = t.events.iter().filter(|e| e.kind == "EffectEnd").filter_map(inst).collect();
+            Some(t.events.iter().filter(|e| e.kind == "Effect" && p.matches(e)).filter(|e| inst(e).is_none_or(|i| !ended.contains(&i))).count() as f64)
         }
         _ => None,
     }

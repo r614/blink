@@ -1,0 +1,29 @@
+// Devouring Swarm level 1 aimed at the floor 400 uu ahead. Presentation (tweaks):
+// `Twk_DevouringSwarm.m_pHandFX` = `Ps_RSwarm_HandCast_01`, level 1 `m_pSpawnFX` =
+// `RSwarm_Summoning_lvl1`.
+(
+    name: "powers/devouring_swarm_l1",
+    system: Powers,
+    map: "Playground",
+    description: "Summon a level 1 swarm ahead of a passive guard: rats, cost, the summoning and hand effects.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0, pitch: -15)),
+        powers: [("DevouringSwarm", 1)],
+        left_hand: Some("DevouringSwarm"),
+        npcs: [(id: Some("dummy"), position: Some((-5100, 0, 92)), yaw: 180, state: Some("Passive"))],
+        settle: 30,
+    ),
+    ticks: 900,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "summoned", expect: [(metric: Count("Sim:SwarmSummoned"), value: 1, tol: 0, source: "a cast with mana summons the swarm (Twk_DevouringSwarm)", status: Static)]),
+        (name: "rats", expect: [(metric: Max("world.swarm_rats"), value: 0, tol: 0, source: "rats of a level 1 swarm (Twk_DevouringSwarm_Lvl1)", status: Unmeasured)]),
+        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 0, tol: 0, source: "Devouring Swarm mana cost", status: Unmeasured)]),
+        (name: "effects", expect: [
+            (metric: Count("Effect:Vfx_GamePlay.RatSwarm.RSwarm_Summoning_lvl1"), value: 1, tol: 0, cmp: AtLeast, source: "tweaks: Twk_DevouringSwarm level 1 m_pSpawnFX", status: Static),
+            (metric: Count("Effect:Vfx_GamePlay.RatSwarm.Ps_RSwarm_HandCast_01"), value: 1, tol: 0, cmp: AtLeast, source: "tweaks: Twk_DevouringSwarm.m_pHandFX", status: Static),
+        ]),
+    ],
+    record: [Pawn, Vitals, Powers, Npc("dummy"), SimEvents, Effects, Sounds],
+    capture: Some("lab power DevouringSwarm 1; cast at the floor; count DisGameCrowdAgentSkeletalRat; event trace of ParticleSystemComponent activations"),
+)
