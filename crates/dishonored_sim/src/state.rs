@@ -508,7 +508,9 @@ impl PlayerState {
             alive: true,
             respawn_timer: 0.0,
             prev_buttons: 0,
-            last_input: PlayerInput::default(),
+            // A pawn without input this tick repeats its last one (`step_world`): it starts
+            // with the spawn view, so a passive NPC keeps its placed yaw.
+            last_input: PlayerInput { yaw, ..PlayerInput::default() },
             fall_time: 0.0,
             lean: 0.0,
             lean_velocity: 0.0,
