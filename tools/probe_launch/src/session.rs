@@ -248,16 +248,12 @@ impl Session {
                 floor = json!(h.location[2]);
             }
         }
-        let mut b = Vec::new();
-        for v in at {
-            b.extend(v.to_le_bytes());
-        }
-        self.c.write(pawn + 0xc4, &b)?;
+        let at = crate::lab::move_actor_r(&mut self.c, &mut self.r, pawn, at)?;
         self.c.write(pawn + 0x1b4, &[0u8; 12])?;
         let rot = |deg: f32| ((deg / 360.0 * 65536.0).round() as i32) & 0xffff;
         if let Some(y) = yaw {
             self.c.write(pc + 0xd4, &rot(y).to_le_bytes())?;
-            self.c.write(pawn + 0xd4, &rot(y).to_le_bytes())?;
+            crate::lab::set_actor_yaw(&mut self.c, &mut self.r, pawn, y)?;
         }
         if let Some(p) = pitch {
             self.c.write(pc + 0xd0, &rot(p).to_le_bytes())?;
@@ -326,7 +322,30 @@ impl Session {
                 let pl = self.r.place(&mut self.c, o, p)?;
                 let v = a.get("value").context("value")?;
                 self.r.write_place(&mut self.c, &pl, v)?;
-                json!({"object": hex(o), "path": p, "value": self.r.read_place(&mut self.c, &pl)?})
+                // A transform written on an actor goes through the engine so its components
+                // (collision bounds, light environments, touches) follow.
+                let top = p.split(['.', '[']).next().unwrap_or("");
+                let mut via = Value::Null;
+                if matches!(top, "Location" | "Rotation" | "DrawScale" | "DrawScale3D") && { let oc = self.r.class_of(&mut self.c, o)?; self.r.field(&mut self.c, oc, "Location", false)?.is_some() } {
+                    match top {
+                        "Location" => {
+                            let l = crate::lab::read_vec(&mut self.c, o + 0xc4)?;
+                            crate::lab::move_actor_r(&mut self.c, &mut self.r, o, l)?;
+                            via = json!("SetLocation");
+                        }
+                        "Rotation" => {
+                            let b = self.c.read(o + 0xd0, 12)?;
+                            let r: Vec<i32> = b.chunks(4).map(|w| i32::from_le_bytes(w.try_into().unwrap())).collect();
+                            self.r.call(&mut self.c, o, "Actor.SetRotation", &json!([r]))?;
+                            via = json!("SetRotation");
+                        }
+                        _ => {
+                            self.r.call(&mut self.c, o, "Actor.ForceUpdateComponents", &json!([false, false]))?;
+                            via = json!("ForceUpdateComponents");
+                        }
+                    }
+                }
+                json!({"object": hex(o), "path": p, "value": self.r.read_place(&mut self.c, &pl)?, "updated_by": via})
             }
             "dump" => {
                 // The objects a request names: by class and / or name, each with its fields

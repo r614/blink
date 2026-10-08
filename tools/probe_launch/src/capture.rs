@@ -514,13 +514,10 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
         }
         if let Some(p) = n.position {
             let at = glam::Vec3::from(p) + off;
-            let pl = s.r.place(&mut s.c, pawn, "Location")?;
-            s.r.write_place(&mut s.c, &pl, &json!([at.x, at.y, at.z]))?;
+            crate::lab::move_actor_r(&mut s.c, &mut s.r, pawn, at.to_array())?;
             let pl = s.r.place(&mut s.c, pawn, "Velocity")?;
             s.r.write_place(&mut s.c, &pl, &json!([0, 0, 0]))?;
-            let yaw = ((n.yaw / 360.0 * 65536.0).round() as i32) & 0xffff;
-            s.c.write(pawn + 0xd4, &yaw.to_le_bytes())?;
-            let _ = s.r.call(&mut s.c, pawn, "SetLocation", &json!([[at.x, at.y, at.z]]));
+            crate::lab::set_actor_yaw(&mut s.c, &mut s.r, pawn, n.yaw)?;
         }
         match n.state.as_deref() {
             None | Some("Idle") => {}

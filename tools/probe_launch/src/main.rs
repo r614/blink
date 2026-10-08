@@ -251,7 +251,8 @@ fn main() -> Result<()> {
             for v in [x, y, z] {
                 b.extend(v.to_le_bytes());
             }
-            c.write(pawn + 0xc4, &b)?;
+            let _ = b;
+            lab::move_actor(&mut c, pawn, [x, y, z])?;
             c.key("W", true)?;
             c.wait_ticks(1)?;
             c.key("W", false)?;
