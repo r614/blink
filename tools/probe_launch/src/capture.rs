@@ -405,6 +405,15 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
             "StickyGrenade" => &["Twk_Inv_GrenadeCorvo"],
             "BulletExplosive" => &["Twk_Inv_PistolCorvo"],
             "Reset" => &[],
+            "AllPowers" => {
+                // The port's AllPowers: every power at level 2 (OnAddPower per power).
+                for p in ["Blink", "WindBlast", "DarkVision", "Possess", "BendTime", "DevouringSwarm", "Vitality", "BloodThirsty", "ShadowKill", "Celerity"] {
+                    if let Err(e) = crate::lab::power(&mut s.c, p, 2) {
+                        warnings.push(format!("AllPowers: {p}: {e:#}"));
+                    }
+                }
+                &[]
+            }
             "HealthElixir" | "ManaElixir" => {
                 // DishonoredInventory.m_ElixirCounts[0 health, 1 mana].
                 let k = if name == "HealthElixir" { 0 } else { 1 };
@@ -543,7 +552,20 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     let p = spec.setup.player.clone().unwrap_or_default();
     if let Some(ps) = &spec.setup.player {
         if ps.sword_drawn {
-            crate::lab::give(&mut s.c, "Twk_Inv_SwordCorvo", true)?;
+            // Corvo already holds his sword in the right hand: giving it again re-equips it,
+            // and the draw blocks attacks for about 1.1 s (a press at tick 5 after settle 30
+            // was ignored; from 36 on it acts). Give it only when it is not the equipped one.
+            let held = crate::oracle::player_item(&mut s.c, "DishonoredWepSword").ok().and_then(|w| s.c.read(w + 0x59, 1).ok()).is_some_and(|b| b.first() == Some(&1));
+            if held {
+                warnings.push("sword_drawn: the sword is already equipped (not given again)".into());
+            } else {
+                // `sword_drawn` means drawn at tick 0 (the port's start): the draw is run out
+                // here, before the placement and the settle.
+                crate::lab::give(&mut s.c, "Twk_Inv_SwordCorvo", true)?;
+                s.c.lockstep(true, 30_000)?;
+                s.c.step(75, 120_000)?;
+                warnings.push("sword_drawn: sword given and equipped, 75 ticks run for its draw before the setup".into());
+            }
         }
         s.place((glam::Vec3::from(ps.position) + off).to_array(), Some(ps.yaw), Some(ps.pitch), ps.snap_to_floor)?;
         // An airborne start (no floor within the cylinder's half height + 10 below the
