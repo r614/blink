@@ -448,6 +448,142 @@ pub struct ItemsConfig {
     /// `m_Attributes` (attribute, value added).
     #[serde(default)]
     pub upgrades: Vec<(String, Vec<(String, f32)>)>,
+    /// `DisTweaks_WhaleBoneCharmList.m_ScriptedCharms`: the charms Kismet hands out (effect ids
+    /// from [`SCRIPTED_CHARM_BASE`] up, 0x00AA8EF0).
+    #[serde(default)]
+    pub scripted_charms: Vec<BoneCharm>,
+    /// Chaos (`DisDarknessManager`, the player tweak's `m_DarknessLevels` and `m_Deeds`).
+    #[serde(default)]
+    pub darkness: DarknessConfig,
+    /// Piero's workshop (`DisTweaks_Store`, `Stores_Twk.Stores.Twk_Store_Craftsman`).
+    #[serde(default)]
+    pub store: StoreConfig,
+    /// The player's combat save rules (`DisTweaks_PlayerPawn_Combat` of Corvo's
+    /// `m_pCombatTweaks`, read by the combat tracker 0x00AB9FA0).
+    #[serde(default)]
+    pub combat_save: CombatSaveConfig,
+}
+
+/// `DisTweaks_PlayerPawn_Combat` save fields: entering combat pushes the save-disable type
+/// `DDST_PlayerInCombat` when `m_bDisableManualSaveInCombat`; leaving pops it with the wait
+/// `m_fDisableManualSaveAfterCombatTime_s` (0x00AB9FA0 -> 0x00BEC820 / 0x00BEC850).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CombatSaveConfig {
+    pub disable_manual_save: bool,
+    pub disable_autosave: bool,
+    pub after_combat_time: f32,
+}
+
+impl Default for CombatSaveConfig {
+    fn default() -> Self {
+        Self { disable_manual_save: true, disable_autosave: true, after_combat_time: 1.0 }
+    }
+}
+
+/// A bone charm effect id at or above this indexes `m_ScriptedCharms` (`id - base`), below it
+/// `m_Charms` (0x00AA8EF0).
+pub const SCRIPTED_CHARM_BASE: i32 = 10_000_000;
+
+/// One `DisTweaks_PlayerPawn.m_Deeds` entry (`DisDarknessDeed`): every `threshold` units of
+/// `stat` raised against a matching victim add `value` to the chaos score (0x00C4D2C0).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DarknessDeed {
+    /// `m_Stat` (`EDisPlayerStat` name, e.g. `ePlayerStat_NumKills`).
+    pub stat: String,
+    pub threshold: i32,
+    pub value: i32,
+    /// `m_TweaksNamePair.m_TweaksName` (`Pkg.Obj`): the victim must be this tweak or inherit
+    /// from it; None (`None`) accepts any victim.
+    pub tweak: Option<String>,
+    /// `m_ExcludedTweaksNamePairs[].m_TweaksName`: victims that are or inherit from one of these
+    /// are skipped.
+    pub excluded: Vec<String>,
+}
+
+/// `DisDarknessManager`'s tables (the player tweak `Twk_Pawn_Corvo_Release`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DarknessConfig {
+    /// `m_DarknessLevels`: the level is the largest index whose entry the score reaches
+    /// (0x00C487D0).
+    pub levels: Vec<i32>,
+    pub deeds: Vec<DarknessDeed>,
+}
+
+impl Default for DarknessConfig {
+    /// The GOG install's tables (Startup.upk export 3423, the `Twk_Pawn_Corvo_Release` dump).
+    fn default() -> Self {
+        let kills = |threshold, tweak: &str, excluded: &[&str]| DarknessDeed { stat: "ePlayerStat_NumKills".into(), threshold, value: 6, tweak: Some(tweak.into()), excluded: excluded.iter().map(|s| s.to_string()).collect() };
+        let weepers = [
+            "Twk_Pawn_E3_Noble.Twk_Pawn_E3_Noble",
+            "Pwn_Bridge.Pwn_BridgeWeeperCiv_F_2",
+            "Pwn_Grif_MSmall.Pwn_Griff_Weeper_MSmall",
+            "Pwn_Weeper_Base.Pwn_Weeper_Base",
+            "Pwn_WeeperAristo_F_1.Pwn_WeeperAristo_F_1",
+            "Pwn_WeeperAristo_MTall_1.Pwn_WeeperAristo_MTall_1",
+            "Pwn_WeeperElite_MTall_1.Pwn_WeeperElite_MTall_1",
+            "Pwn_WeeperMiddle_F_1.Pwn_WeeperMiddle_F_1",
+            "Pwn_WeeperMiddle_F_2.Pwn_WeeperMiddle_F_2",
+            "Pwn_WeeperMiddle_MSmall_1.Pwn_WeeperMiddle_MSmall_1",
+            "Pwn_WeeperMiddle_MTall_1.Pwn_WeeperMiddle_MTall_1",
+            "Pwn_WeeperOverseer_1.Pwn_WeeperOverseer_1",
+            "Pwn_WeeperOverseer_1.Pwn_WeeperOverseer_Campbell_1",
+            "Pwn_WeeperThug_MSmall_1.Pwn_WeeperThug_MSmall_1",
+            "Pwn_WeeperThug_MSmall_2.Pwn_WeeperThug_MSmall_2",
+            "Pwn_Dead_NPCs.PwnDead_WeeperMC_F_2",
+            "Pwn_Dead_NPCs.PwnDead_WeeperMC_MTall_1",
+            "Pwn_Dead_NPCs.PwnDead_WeeperMiddle_F_1",
+            "Pwn_Dead_NPCs.PwnDead_WeeperMiddle_MSmall_1",
+            "Pwn_Dead_NPCs.PwnDead_WeeperProstitute_F_1",
+            "Twk_Pawn_E3_Weeper.Twk_Pawn_E3_Weeper",
+            "Pwn_WeeperCity_MSmall_1.Twk_Pawn_WeeperCity",
+            "Pwn_GrannyRags_F.Pwn_GrannyRags_F",
+        ];
+        let any = |stat: &str| DarknessDeed { stat: stat.into(), threshold: 5, value: 6, tweak: None, excluded: Vec::new() };
+        Self {
+            levels: vec![0, 12, 48, 72, 96, 114, 138, 162, 168, 200, 390],
+            deeds: vec![
+                kills(1, "Pwn_Civ_Base.Pwn_Civ_Base", &weepers),
+                kills(4, "Pwn_Thug_Base.Pwn_Thug_Base", &[]),
+                kills(4, "Pwn_Guard_Base.Pwn_Guard_Base", &[]),
+                kills(4, "Pwn_Overseer_MTall_1.Pwn_Overseer_MTall_1", &[]),
+                kills(4, "Pwn_Assassin_MTBase.Pwn_Assassin_MTBase", &["Pwn_AssassinIntro_MTall_1.Pwn_AssassinIntro_MTall_1", "Twk_Pawn_Executioner.Pwn_Executioner_Combatant"]),
+                kills(4, "Twk_Pawn_Tallboy.Pwn_Tallboy_Wood", &[]),
+                kills(4, "Pwn_Weeper_Base.Pwn_Weeper_Base", &[]),
+                any("ePlayerStat_NumAlarmsTriggered"),
+                any("ePlayerStat_NumCorpsesDiscovered"),
+            ],
+        }
+    }
+}
+
+/// One `DisTweaks_Store.m_StoreItems` entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StoreItem {
+    /// `m_Name` (localized display name).
+    pub name: String,
+    /// `m_SubSectionIndex`: 0 supplies, 1 weapon upgrades, 2 other upgrades.
+    pub section: i32,
+    /// `m_Item`: what it sells (an ammo / inventory pickup tweak, an abstract item or a
+    /// `DisTweaks_Upgrade`; object path).
+    pub item: String,
+    /// `m_AdditionalItem` (object path, empty when none).
+    #[serde(default)]
+    pub additional: String,
+    /// `m_Cost[]`: (abstract item object path, quantity); the shipped items cost coins.
+    pub cost: Vec<(String, i32)>,
+    /// `m_Prerequisites[]`: object paths the buyer must own (an inventory item, a blueprint
+    /// abstract item, the previous upgrade tier).
+    pub prerequisites: Vec<String>,
+    /// `m_VisibilityPrereqIdx` (-1: always listed).
+    pub visibility_prereq: i32,
+    /// `m_OutputLinkOnPurchase`: the Kismet output the purchase fires.
+    pub output: String,
+}
+
+/// Piero's workshop (`DisTweaks_Store`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StoreConfig {
+    pub items: Vec<StoreItem>,
 }
 
 impl AmmoType {
@@ -476,8 +612,10 @@ pub enum PickupKind {
     Stat { health: i32, mana: i32, food: bool, ammo: [(i16, i16); 8] },
     /// `DisElixirHealth` / `DisElixirMana`.
     Elixir(ElixirType),
-    /// `DisWhaleBoneCharm` (index into the charm list when known).
-    BoneCharm(Option<u8>),
+    /// `DisWhaleBoneCharm.m_Effect`: the charm effect id (below [`SCRIPTED_CHARM_BASE`] an
+    /// index into `m_Charms`, from it up into `m_ScriptedCharms`); None = -1 (no effect: the
+    /// pickup refuses to be taken, 0x00A19D50). Set by the level or `DisSeqAct_SetBoneCharmEffect`.
+    BoneCharm(Option<i32>),
     /// `DishonoredInventoryPickup`: an inventory item (weapon, gadget).
     Inventory { item: String },
 }

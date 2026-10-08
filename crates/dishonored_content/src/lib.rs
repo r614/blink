@@ -91,7 +91,7 @@ fn load_spawns(map: &str, m: Option<&DishonoredMap>) -> Vec<Spawn> {
 }
 
 pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
-    let path = cache_dir().join("gameplay_config.v12x.json");
+    let path = cache_dir().join("gameplay_config.v12x-world2.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);
@@ -393,7 +393,23 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
             l
         }
     };
-    let spawners = npcs.spawns.iter().map(|s| dishonored_ir::spawners::Spawner { name: s.source.rsplit('.').next().unwrap_or("").to_string(), position: s.position, yaw: s.yaw, tweak: s.tweak.clone(), guard: s.role == dishonored_assets::npcs::NpcRole::Guard, props: s.spawner.clone(), appearance: looks.get(&s.tweak).cloned().unwrap_or_default() }).collect();
+    // Each pawn tweak's lineage (itself and its `m_FallbackChainCooked`): the chaos deeds match
+    // victims by it (0x00C6F450).
+    let lineage_path = dir.join(format!("{map}.lineage1.json"));
+    let lineages: std::collections::HashMap<String, Vec<String>> = match std::fs::read_to_string(&lineage_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
+        Some(l) => l,
+        None => {
+            let mut pkgs = map_packages(&content, map);
+            if map.starts_with("L_Boyle_Ext") {
+                pkgs.push("L_BoyleStreet_Ext_Script".into());
+            }
+            let tweaks: Vec<String> = npcs.spawns.iter().map(|s| s.tweak.clone()).filter(|t| !t.is_empty()).collect();
+            let l = dishonored_assets::tweaks::TweakDb::load_with(&content, &pkgs).map(|db| tweaks.iter().map(|t| (t.clone(), db.lineage(t))).collect()).unwrap_or_default();
+            std::fs::write(&lineage_path, serde_json::to_string(&l)?).ok();
+            l
+        }
+    };
+    let spawners = npcs.spawns.iter().map(|s| dishonored_ir::spawners::Spawner { name: s.source.rsplit('.').next().unwrap_or("").to_string(), position: s.position, yaw: s.yaw, tweak: s.tweak.clone(), guard: s.role == dishonored_assets::npcs::NpcRole::Guard, props: s.spawner.clone(), appearance: looks.get(&s.tweak).cloned().unwrap_or_default(), lineage: lineages.get(&s.tweak).cloned().unwrap_or_default() }).collect();
     let level_pkgs = || {
         let mut pkgs = map_packages(&content, map);
         if map.starts_with("L_Boyle_Ext") {
@@ -414,7 +430,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         }
     };
     // Placed pickups (with the spawners that carry one), cached per map.
-    let pickup_path = dir.join(format!("{map}.pickups1.json"));
+    let pickup_path = dir.join(format!("{map}.pickups2.json"));
     let pickups: Vec<dishonored_ir::items::PlacedPickup> = match std::fs::read_to_string(&pickup_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(p) => p,
         None => {
@@ -649,8 +665,9 @@ pub fn load_mission_conversations(def: &dishonored_mission::MissionDef) -> Resul
 
 /// Dialog graphs of the given cooked packages (cached per package list).
 pub fn load_conversations(content: &Content, pkgs: &[String]) -> Result<dishonored_conversation::ConversationDb> {
-    // The format version (2: `voice_trees`) is part of the key so new fields are filled in.
-    let key = format!("v2:{}", pkgs.iter().map(|p| p.to_ascii_lowercase()).collect::<Vec<_>>().join("+"));
+    // The format version (2: `voice_trees`; 3: `CompareDarknessLevel` nodes) is part of the
+    // key so new fields are filled in.
+    let key = format!("v3:{}", pkgs.iter().map(|p| p.to_ascii_lowercase()).collect::<Vec<_>>().join("+"));
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in key.bytes().chain(env!("CARGO_PKG_VERSION").bytes()) {
         h ^= b as u64;

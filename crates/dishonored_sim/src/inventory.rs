@@ -260,20 +260,7 @@ pub fn take(state: &mut WorldState, pi: usize, who: usize, cfg: &GameplayConfig,
                 give_item(state, pid, item, *quantity);
             }
         }
-        PickupKind::BoneCharm(idx) => {
-            let n = cfg.items.charms.len().min(32);
-            let p = &mut state.players[who];
-            // The original gives the charm placed in the level; untyped placements get the first
-            // charm not owned yet, in list order from the pickup id (deterministic stand-in).
-            let pick = idx.map(|i| i as usize).filter(|i| *i < n).or_else(|| (0..n).map(|k| (k + pk.id as usize) % n.max(1)).find(|i| p.inv.charms_owned & (1 << i) == 0));
-            if let Some(i) = pick {
-                p.inv.charms_owned |= 1 << i;
-                // `m_bAutoEquipBoneCharm`: equipped while a slot is free.
-                if (p.inv.charms_equipped.count_ones() as u8) < crate::powers::max_charms(p, cfg) {
-                    p.inv.charms_equipped |= 1 << i;
-                }
-            }
-        }
+        PickupKind::BoneCharm(effect) => give_charm_effect(&mut state.players[who], cfg, *effect, pk.id),
         PickupKind::Inventory { item } => give_item(state, pid, item, 1),
     }
     if used_up {
@@ -282,6 +269,18 @@ pub fn take(state: &mut WorldState, pi: usize, who: usize, cfg: &GameplayConfig,
     }
     events.push(SimEvent::PickedUp { id: pid, pickup: pk.id });
     used_up
+}
+
+/// A bone charm pickup is taken (0x00A19D50 -> 0x00ABBA90): the charm of its `m_Effect`. A
+/// placed charm the level leaves at -1 gets its effect at run time from a distribution the port
+/// has not decoded (U-W12); until then it gives the first regular charm not owned yet, in list
+/// order from `salt` (the pickup id: a deterministic stand-in).
+pub fn give_charm_effect(p: &mut PlayerState, cfg: &GameplayConfig, effect: Option<i32>, salt: u32) {
+    let n = cfg.items.charms.len().min(64);
+    let pick = effect.and_then(|e| crate::powers::charm_slot(cfg, e)).or_else(|| (0..n).map(|k| (k + salt as usize) % n.max(1)).find(|i| p.inv.charms_owned & (1u64 << i) == 0));
+    if let Some(slot) = pick {
+        crate::powers::take_charm(p, cfg, slot);
+    }
 }
 
 /// The pickup `p` is looking at within `m_fMaxDistance` (closest to the view direction, visible).

@@ -10,6 +10,7 @@ pub mod adrenaline;
 pub mod blink;
 pub mod climb;
 pub mod combat;
+pub mod darkness;
 pub mod events;
 pub mod gadgets;
 pub mod input;

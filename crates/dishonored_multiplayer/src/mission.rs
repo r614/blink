@@ -56,6 +56,17 @@ pub struct OriginalNpc {
     /// Wears a helmet (`m_PotentialNPCArmor` head armour, rolled per pawn): `PlayerState::helmet`.
     #[serde(default)]
     pub helmet: bool,
+    /// The pawn tweak and the tweaks it inherits from (`Spawner::lineage`): the chaos deeds'
+    /// victim filter.
+    #[serde(default)]
+    pub lineage: Vec<String>,
+}
+
+/// The victim tweak lineage of a mission NPC, which has no pawn tweak of its own: the base
+/// tweak of its role archetype (civilians `Pwn_Civ_Base`, guards `Pwn_Guard_Base`, the tweaks the
+/// chaos deeds name for those classes).
+pub fn role_lineage(kind: PawnKind) -> Vec<String> {
+    vec![if kind == PawnKind::Guard { "Pwn_Guard_Base.Pwn_Guard_Base" } else { "Pwn_Civ_Base.Pwn_Civ_Base" }.to_string()]
 }
 
 /// A named original actor of a level: (package, name, position, yaw).
@@ -387,7 +398,7 @@ impl MissionSetup {
                     }
                 }
                 let p = snap_floor(m.world, s.position).unwrap_or(s.position);
-                original.push(OriginalNpc { map: m.name.clone(), name: s.name.clone(), spawn: NpcSpawn { id, kind, archetype, position: p, yaw: s.yaw }, tweak: s.tweak.clone(), props: s.props.clone(), parts, helmet: s.appearance.helmet(id) });
+                original.push(OriginalNpc { map: m.name.clone(), name: s.name.clone(), spawn: NpcSpawn { id, kind, archetype, position: p, yaw: s.yaw }, tweak: s.tweak.clone(), props: s.props.clone(), parts, helmet: s.appearance.helmet(id), lineage: if s.lineage.is_empty() { vec![s.tweak.clone()] } else { s.lineage.clone() } });
             }
         }
         let mut doors = Vec::new();
@@ -486,6 +497,12 @@ pub struct MissionMatch {
     /// States of the natively used doors and usables (`MissionSetup::usables`), by actor.
     #[serde(default)]
     pub props: BTreeMap<String, PropState>,
+    /// The game's chaos (`DisDarknessManager`): one score for the match, saved with it.
+    #[serde(default)]
+    pub darkness: dishonored_sim::darkness::Darkness,
+    /// Corpses some NPC has discovered (0x00A98950 keeps the set: a corpse counts once).
+    #[serde(default)]
+    pub corpses_discovered: BTreeSet<PlayerId>,
     /// Mover collision placed where the movers are: (actor, delta) and, in the same order, the
     /// placed collision (rebuilt when a mover moves).
     #[serde(skip)]
@@ -537,9 +554,14 @@ impl MissionMatch {
             pending_stealables: Vec::new(),
             autosave: Default::default(),
             props: BTreeMap::new(),
+            darkness: Default::default(),
+            corpses_discovered: BTreeSet::new(),
             mover_keys: Vec::new(),
             mover_worlds: Vec::new(),
         };
+        // The score carried in from the previous missions (the manager's score persists).
+        m.darkness.add(m.setup.def.settings.darkness);
+        m.sync_darkness(cfg);
         m.props = m.setup.usables.iter().map(|u| (u.actor.clone(), PropState { door: u.initial, locked: u.locked, stage: 0 })).collect();
         // [kismet]
         m.kismet = m.setup.kismet.as_ref().map(|k| kismet_host::KismetRun::new(k, &m.setup));
@@ -548,6 +570,33 @@ impl MissionMatch {
             m.apply(c, cfg);
         }
         m
+    }
+
+    /// Hand the chaos score and level to the readers: the mission interpreter (conversations'
+    /// `DisConv_CompareDarknessLevel`, the HUD) and the Kismet (`DisSeqVar_Darkness*`).
+    pub fn sync_darkness(&mut self, cfg: &SimConfig) {
+        let level = self.darkness.level(&cfg.gameplay.items.darkness);
+        self.state.darkness_score = self.darkness.score;
+        self.state.darkness_level = level;
+        if let Some(k) = self.kismet.as_mut() {
+            k.k.darkness = (self.darkness.score, level);
+        }
+    }
+
+    /// A player statistic was raised (the stat increment 0x00AB9560 ends with the deed check
+    /// 0x00C4D2C0): the chaos deeds on that stat count it.
+    pub fn player_stat(&mut self, stat: &str, victim: Option<&[String]>, amount: i32, cfg: &SimConfig) {
+        if self.darkness.notify_deed(&cfg.gameplay.items.darkness, stat, victim, amount).is_some() {
+            self.sync_darkness(cfg);
+        }
+    }
+
+    /// The pawn tweak lineage of an NPC (its spawner's tweak, else its role's base tweak).
+    pub fn victim_lineage(&self, id: PlayerId, kind: PawnKind) -> Vec<String> {
+        match self.setup.original.iter().find(|o| o.spawn.id == id) {
+            Some(o) => o.lineage.clone(),
+            None => role_lineage(kind),
+        }
     }
 
     /// First visit of the active map: its share of the crowd and of the mission NPCs.
@@ -1088,6 +1137,14 @@ impl MissionMatch {
                     }
                     let kind = if k == PawnKind::Guard { NpcKind::Guard } else { NpcKind::Civilian };
                     events.push(MissionEvent::NpcKilled { npc: self.npc_by_id.get(victim).cloned(), by_player, kind });
+                    // The kill report (0x00B73990): a kill credited to the player raises
+                    // `NumKills` with the victim's tweak, which the chaos deeds filter by class
+                    // (the exact player-side test is U-W2; a knock-out reports only the sleep
+                    // stats, 0x00B738F0).
+                    if by_player && *killer != Some(*victim) && k != PawnKind::Rat {
+                        let lineage = self.victim_lineage(*victim, k);
+                        self.player_stat(dishonored_sim::darkness::stat::NUM_KILLS, Some(&lineage), 1, cfg);
+                    }
                     self.crowd.brains.retain(|b| b.id != *victim);
                 }
             }
@@ -1152,7 +1209,18 @@ impl MissionMatch {
         let ai_events = self.crowd.events.clone();
         for e in &ai_events {
             match e {
-                dishonored_ai::AiEvent::AlarmRang { .. } => events.push(MissionEvent::AlarmRaised),
+                dishonored_ai::AiEvent::AlarmRang { .. } => {
+                    events.push(MissionEvent::AlarmRaised);
+                    // The bell's trigger (`DisAlarmBell` slot 244, 0x00A3D080) raises
+                    // `NumAlarmsTriggered`.
+                    self.player_stat(dishonored_sim::darkness::stat::NUM_ALARMS_TRIGGERED, None, 1, cfg);
+                }
+                dishonored_ai::AiEvent::CorpseFound { corpse, .. } => {
+                    // 0x00A98950: `NumCorpsesDiscovered` the first time a given corpse is found.
+                    if self.corpses_discovered.insert(*corpse) {
+                        self.player_stat(dishonored_sim::darkness::stat::NUM_CORPSES_DISCOVERED, None, 1, cfg);
+                    }
+                }
                 dishonored_ai::AiEvent::AlarmSpawn { bell, enemy_pos, .. } => {
                     let Some(def) = self.crowd.alarms.get(*bell).map(|a| a.def.clone()) else { continue };
                     let here: Vec<(String, Vec3)> = self.setup.original.iter().filter(|o| o.map.eq_ignore_ascii_case(&self.current_map)).map(|o| (o.name.clone(), o.spawn.position)).collect();
@@ -1206,12 +1274,15 @@ impl MissionMatch {
                 })
                 .collect();
             kismet_host::filter_events(self, &mut events); // [kismet] scripted choices
+            self.sync_darkness(cfg);
             let cmds = self.state.step(&StepInput { dt, map: &map, players: &players, npc_positions: &npc_positions, events: &events, total_npcs: total });
             for c in cmds {
                 self.apply(c, cfg);
             }
+            self.sync_darkness(cfg);
             kismet_host::step(self, &out.events, dt, cfg); // [kismet]
-            save::tick(self, dt); // [save] autosaves
+            self.sync_darkness(cfg);
+            save::tick(self, dt, &cfg.gameplay.items.combat_save); // [save] autosaves
             if self.state.outcome().is_some() && self.view.phase != MatchPhase::Ended {
                 self.view.phase = MatchPhase::Ended;
             }
@@ -1223,7 +1294,11 @@ impl MissionMatch {
             self.travel(&m, &tag, cfg);
         }
         let mut mv = self.state.view.clone();
-        mv.npc_ids = self.id_by_npc.iter().map(|(n, i)| (n.clone(), *i)).collect();
+        // Chaos as of the end of the step (the Kismet may have added to it after the view).
+        mv.darkness_score = self.state.darkness_score;
+        mv.darkness_level = self.state.darkness_level;
+        mv.high_chaos = self.state.chaos_threshold.or(self.setup.def.settings.chaos_level_threshold).is_some_and(|t| self.state.darkness_level >= t);
+        mv.npc_ids =self.id_by_npc.iter().map(|(n, i)| (n.clone(), *i)).collect();
         // Travel doors of the active map are usable with their original prompts.
         for d in self.setup.doors.iter().filter(|d| d.map.eq_ignore_ascii_case(&self.current_map)) {
             mv.usables.push(((d.position + Vec3::Z * 60.0).to_array(), d.prompt.clone()));

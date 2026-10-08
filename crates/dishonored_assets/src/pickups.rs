@@ -96,6 +96,12 @@ pub fn extract_pickups(content: &Content, packages: &[String]) -> Result<Vec<Pla
             };
             let resolved = db.try_resolve(&tweak).unwrap_or_default();
             let Some(mut kind) = kind_of(&class, &resolved) else { continue };
+            // `DisWhaleBoneCharm.m_Effect` on the placed actor (class default -1: no effect).
+            if let PickupKind::BoneCharm(e) = &mut kind {
+                if let Some(Value::Int(v)) = find(&h.properties, "m_Effect").map(|p| &p.value) {
+                    *e = (*v >= 0).then_some(*v);
+                }
+            }
             // A note actor can name its abstract item directly (`m_pAbstractItem` on the actor).
             if let PickupKind::Abstract { item, .. } = &mut kind {
                 if item.is_empty() {
