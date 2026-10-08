@@ -1,0 +1,5 @@
+{"steps":[
+  {"wait_ticks": 240},
+  {"screenshot": "start"},
+  {"quit": true}
+]}

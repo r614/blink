@@ -225,10 +225,17 @@ fn push_material(content: &Content, pkg: &std::sync::Arc<ue3_package::Package>, 
         Some(ObjRef::Export(ti)) => Some((0usize, ti)),
         _ => None,
     };
+    // Static switches of the compiled permutation gate the Arkane slots, as for level materials
+    // (`level.rs`): a slot whose `*_Enable_*` switch is off is not sampled by the original's
+    // shader even when the instance still names a texture for it. E.g. the doors'
+    // `Doors.doors_poor_interior_01_inst` keeps `E_Emissive_texture = obsolete_door_d` (an
+    // editor placeholder reading "I'M OBSOLETE, REPLACE ME BY DISTWEAKS_DOOR ...") with
+    // `E_Enable_Emissive` false: drawn as emissive, the text showed on every such door.
+    let off = |s: &str| chain.switch(s) == Some(false);
     let diffuse = tex_key(crate::material_chain::slot(&chain, "d_", &["mask"]).or(chain.diffuse_input)).or_else(|| tex_key(local(res.diffuse)));
-    let normal = tex_key(crate::material_chain::slot(&chain, "n_", &[]).or(chain.normal_input)).or_else(|| tex_key(local(res.normal)));
-    let specular = tex_key(crate::material_chain::slot(&chain, "s_", &["mask"]));
-    let emissive = tex_key(crate::material_chain::slot(&chain, "e_", &["mask"]));
+    let normal = if off("N_Enable_NormalMap") { None } else { tex_key(crate::material_chain::slot(&chain, "n_", &[]).or(chain.normal_input)).or_else(|| tex_key(local(res.normal))) };
+    let specular = if off("S_Enable_Specular") { None } else { tex_key(crate::material_chain::slot(&chain, "s_", &["mask"])) };
+    let emissive = if off("E_Enable_Emissive") { None } else { tex_key(crate::material_chain::slot(&chain, "e_", &["mask"])) };
     let masked = res.masked || chain.blend_mode.as_deref() == Some("BLEND_Masked");
     let blend = match chain.blend_mode.as_deref() {
         Some("BLEND_Translucent") | Some("BLEND_AlphaComposite") => MaterialBlend::Translucent,
