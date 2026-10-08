@@ -547,16 +547,34 @@ fn arm_glow_materials(content: &dishonored_assets::Content, arms: &CharacterGpu,
 }
 
 /// `Use_Power` (`power_pp::ArmGlow`) on the arms' emissive colour.
-pub fn arm_glow_apply(glow: Res<crate::power_pp::ArmGlow>, handles: Option<Res<ArmGlowMats>>, mut mats: ResMut<Assets<StandardMaterial>>, mut last: Local<f32>) {
+pub fn arm_glow_apply(glow: Res<crate::power_pp::ArmGlow>, handles: Option<Res<ArmGlowMats>>, mut mats: ResMut<Assets<StandardMaterial>>, mut light_mats: ResMut<Assets<crate::char_light::CharMaterial>>, mut last: Local<f32>) {
     let Some(handles) = handles else { return };
     if (*last - glow.value).abs() < 1.0e-4 || handles.0.is_empty() {
         return;
     }
     *last = glow.value;
+    let glow_colour = LinearRgba::rgb(glow.value, glow.value, glow.value);
+    let mut textures = Vec::new();
     for h in &handles.0 {
         if let Some(mut m) = mats.get_mut(h) {
-            m.emissive = LinearRgba::rgb(glow.value, glow.value, glow.value);
+            m.emissive = glow_colour;
+            textures.extend(m.emissive_texture.clone());
         }
+    }
+    // The arms are lit by their light environment (char_light.rs), which draws copies of these
+    // materials: the copies sharing the glow texture take the same colour.
+    let lit: Vec<_> = light_mats.iter().filter(|(_, m)| m.base.emissive_texture.as_ref().is_some_and(|t| textures.contains(t))).map(|(id, _)| id).collect();
+    for id in lit {
+        if let Some(mut m) = light_mats.get_mut(id) {
+            m.base.emissive = glow_colour;
+        }
+    }
+}
+
+impl ViewRig {
+    /// The arms' uploaded model (`char_light.rs` lights it with the pawn's light environment).
+    pub fn arms(&self) -> &CharacterGpu {
+        &self.arms
     }
 }
 

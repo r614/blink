@@ -89,6 +89,26 @@ fn read_lightmap(r: &mut Reader) -> Result<LightMapRef> {
     }
 }
 
+/// A `UShadowMap1D` (an entry of a component LOD's `ShadowVertexBuffers`): the dominant light's
+/// visibility of every vertex of the LOD, 0 (shadowed) .. 1 (lit), and the light's `LightGuid`.
+/// Layout (checked on the 15 retail exports, all 788 bytes for 189 vertices): no tagged
+/// properties; then `u32 count`, `count` x `f32`, `FGuid LightGuid`, ending exactly at the end
+/// of the export.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShadowMap1D {
+    pub light_guid: [u32; 4],
+    pub samples: Vec<f32>,
+}
+
+pub fn read_shadow_map_1d(data: &[u8], native_offset: usize) -> Result<ShadowMap1D> {
+    let mut r = Reader::at(data, native_offset);
+    let n = r.count(4)?;
+    let samples = (0..n).map(|_| r.f32()).collect::<Result<Vec<_>>>()?;
+    let light_guid = [r.u32()?, r.u32()?, r.u32()?, r.u32()?];
+    ensure!(r.pos() == data.len(), "ShadowMap1D ended at {:#x}, export ends at {:#x}", r.pos(), data.len());
+    Ok(ShadowMap1D { light_guid, samples })
+}
+
 /// Parse the `LODData` array that follows a StaticMeshComponent's tagged properties.
 /// Strict: the stream must end exactly at the end of the export.
 pub fn read_static_mesh_component_lods(data: &[u8], native_offset: usize) -> Result<Vec<LodLighting>> {
@@ -277,6 +297,24 @@ mod tests {
         assert_eq!(sample_r8_bilinear(&d, 2, 1, glam::Vec2::new(0.5, 0.5)), 100);
         assert_eq!(sample_r8_bilinear(&d, 2, 1, glam::Vec2::new(2.0, 0.5)), 200);
         assert_eq!(sample_r8_bilinear(&[], 0, 0, glam::Vec2::ZERO), 255);
+    }
+
+    #[test]
+    fn shadow_map_1d_layout() {
+        // The retail layout: a 12-byte header (net index, the "None" that ends the properties),
+        // the sample count, the samples, the light's guid, and nothing after it.
+        let mut d = vec![0u8; 12];
+        d.extend_from_slice(&3u32.to_le_bytes());
+        for v in [1.0f32, 0.5, 0.0] {
+            d.extend_from_slice(&v.to_le_bytes());
+        }
+        for g in [7u32, 8, 9, 10] {
+            d.extend_from_slice(&g.to_le_bytes());
+        }
+        let m = read_shadow_map_1d(&d, 12).unwrap();
+        assert_eq!(m, ShadowMap1D { light_guid: [7, 8, 9, 10], samples: vec![1.0, 0.5, 0.0] });
+        d.push(0);
+        assert!(read_shadow_map_1d(&d, 12).is_err(), "trailing bytes are a layout error");
     }
 
     #[test]

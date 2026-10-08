@@ -85,12 +85,15 @@ pub mod reflect;
 #[doc(hidden)]
 pub mod tv_screen;
 pub mod volume_light;
+pub mod lens_flare;
+pub mod caustics;
 #[doc(hidden)]
 pub mod spillway;
 #[doc(hidden)]
 pub mod water_foam;
 #[doc(hidden)]
 pub mod prop_light;
+pub mod char_light;
 #[doc(hidden)]
 pub mod loading_screen;
 #[doc(hidden)]
@@ -340,6 +343,10 @@ pub fn main() {
     }
     let mut args = parse_args();
     let game_settings = settings::GameSettings::load();
+    // The original's `DynamicShadows` and `LightEnvironmentShadows` system settings gate the
+    // dominant point light's shadow.
+    args.features.point_shadows &= game_settings.s.graphics.dynamic_shadows && game_settings.s.graphics.light_environment_shadows;
+    args.features.dynamic_decals &= game_settings.s.graphics.dynamic_decals;
     if !std::env::args().any(|a| a == "--max-tex") {
         args.max_tex = settings::max_texture_size(&game_settings.s);
     }
@@ -384,9 +391,12 @@ pub fn main() {
     .add_plugins(reflect::ReflectPlugin)
     .add_plugins(volume_light::VolumeLightPlugin)
     .add_plugins(tv_screen::TvScreenPlugin)
+    .add_plugins(lens_flare::LensFlarePlugin)
+    .add_plugins(caustics::CausticsPlugin)
     .add_plugins(spillway::SpillwayPlugin)
     .add_plugins(water_foam::WaterFoamPlugin)
     .add_plugins(prop_light::PropLightPlugin)
+    .add_plugins(char_light::CharLightPlugin)
     .add_plugins(bloom::BloomPlugin)
     .add_plugins(env_map::EnvMapOncePlugin)
     .add_plugins(warmup::WarmupPlugin)
@@ -402,7 +412,7 @@ pub fn main() {
     .add_plugins(dark_vision::DarkVisionPlugin)
     .add_plugins(world_models::WorldModelsPlugin)
     .add_plugins(power_pp::PowerPpPlugin)
-    .add_systems(Update, (atmosphere::update_fog, lighting::animate_flicker))
+    .add_systems(Update, (atmosphere::update_fog, lighting::animate_flicker, level::apply_streaming))
     // Doors and usable objects (skeletal meshes), posed for their state.
     .init_resource::<level_props::LevelProps>()
     .add_systems(Update, (level_props::spawn_props, level_props::pose_props).chain());
