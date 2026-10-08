@@ -191,7 +191,7 @@ pub fn pose_props(
             p.shown = state;
         }
         let Some(bank) = bank.as_mut() else { continue };
-        // (The model is cloned only when the pose changes, below, not every frame.)
+        // The model is borrowed below only when the pose changes (it was cloned every frame).
         if !matches!(lp.models.get(&p.model), Some(Some(_))) {
             continue;
         }

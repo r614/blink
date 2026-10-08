@@ -245,7 +245,16 @@ impl Plugin for EffectsPlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "volume_glow.wgsl");
         app.add_plugins(MaterialPlugin::<GlowMaterial>::default());
-        app.init_resource::<Effects>().init_resource::<EffectSockets>().add_systems(Update, (gameplay_effects.before(crate::audio::drive), simulate).chain());
+        app.init_resource::<Effects>().init_resource::<EffectSockets>().add_systems(
+            Update,
+            (
+                gameplay_effects.before(crate::audio::drive),
+                // After everything that places the camera or sets its projection this frame
+                // (`simulate` culls sprite meshes against that view).
+                simulate.after(crate::players::camera_follow).after(crate::cutscene::camera).after(crate::viewmodel::apply_fov).after(crate::inspect_cam),
+            )
+                .chain(),
+        );
     }
 }
 
@@ -808,26 +817,8 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
     let mut nrm = Vec::with_capacity(n * 4);
     let mut idx = Vec::with_capacity(n * 6);
     let frames = (em.sub_h * em.sub_v).max(1);
-    let look = |p: &Particle| -> (Vec3, f32, Vec3) {
-        let rel = (p.age / p.life).clamp(0.0, 1.0);
-        let mut size = p.size;
-        if let Some(d) = &em.size_over_life {
-            let m = d.eval(rel, p.r[1]);
-            for k in 0..3 {
-                if em.size_over_life_axes[k] {
-                    size[k] *= m[k];
-                }
-            }
-        }
-        let color = em.color_over_life.as_ref().map(|d| Vec3::from(d.eval(rel, p.r[0]))).unwrap_or(p.color);
-        let alpha = em.alpha_over_life.as_ref().map(|d| d.eval1(rel, p.r[0])).unwrap_or(p.alpha);
-        (color, alpha, size)
-    };
-    // Orbit: an emitter-space offset turned by the orbit rotation, added at render time.
-    let world_of = |p: &Particle| -> Vec3 {
-        let orb = if p.orbit_off != Vec3::ZERO { Quat::from_euler(EulerRot::ZYX, p.orbit_rot.z, p.orbit_rot.y, p.orbit_rot.x) * p.orbit_off } else { Vec3::ZERO };
-        if em.local_space { xf.transform_point3(p.pos + orb) } else { p.pos + xf.transform_vector3(orb) }
-    };
+    let look = |p: &Particle| particle_look(em, p);
+    let world_of = |p: &Particle| particle_world(em, xf, p);
     if em.trail.is_some() || em.beam.is_some() {
         strip_mesh(em, sim, xf, cam_pos, &look, &world_of, mesh);
         return;
@@ -878,18 +869,69 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
         idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
     if pos.is_empty() {
-        // Never upload an empty vertex buffer: one degenerate, transparent triangle.
-        pos = vec![[0.0; 3]; 3];
-        nrm = vec![[0.0, 1.0, 0.0]; 3];
-        uv = vec![[0.0; 2]; 3];
-        col = vec![[0.0; 4]; 3];
-        idx = vec![0, 1, 2];
+        clear_sprite_mesh(mesh);
+        return;
     }
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, nrm);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
     mesh.insert_indices(Indices::U32(idx));
+}
+
+/// A sprite mesh without particles. Never upload an empty vertex buffer: one degenerate,
+/// transparent triangle.
+fn clear_sprite_mesh(mesh: &mut Mesh) {
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; 3]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; 3]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32; 2]; 3]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.0f32; 4]; 3]);
+    mesh.insert_indices(Indices::U32(vec![0, 1, 2]));
+}
+
+/// A particle's colour, alpha and size at its age (colour / alpha / size over life).
+fn particle_look(em: &ParticleEmitterAsset, p: &Particle) -> (Vec3, f32, Vec3) {
+    let rel = (p.age / p.life).clamp(0.0, 1.0);
+    let mut size = p.size;
+    if let Some(d) = &em.size_over_life {
+        let m = d.eval(rel, p.r[1]);
+        for k in 0..3 {
+            if em.size_over_life_axes[k] {
+                size[k] *= m[k];
+            }
+        }
+    }
+    let color = em.color_over_life.as_ref().map(|d| Vec3::from(d.eval(rel, p.r[0]))).unwrap_or(p.color);
+    let alpha = em.alpha_over_life.as_ref().map(|d| d.eval1(rel, p.r[0])).unwrap_or(p.alpha);
+    (color, alpha, size)
+}
+
+/// A particle's drawn position (Dishonored world space). Orbit: an emitter-space offset turned
+/// by the orbit rotation, added at render time.
+fn particle_world(em: &ParticleEmitterAsset, xf: &Mat4, p: &Particle) -> Vec3 {
+    let orb = if p.orbit_off != Vec3::ZERO { Quat::from_euler(EulerRot::ZYX, p.orbit_rot.z, p.orbit_rot.y, p.orbit_rot.x) * p.orbit_off } else { Vec3::ZERO };
+    if em.local_space { xf.transform_point3(p.pos + orb) } else { p.pos + xf.transform_vector3(orb) }
+}
+
+/// Bevy-space bounding sphere of the sprites `build_mesh` draws for an emitter (each quad lies
+/// within its half-diagonal of its centre, whatever its orientation), or None without particles.
+fn sprite_bounds(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4) -> Option<(Vec3, f32)> {
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    let mut reach = 0.0f32;
+    for p in &sim.particles {
+        let (_, _, size) = particle_look(em, p);
+        let c = coords::pos(particle_world(em, xf, p));
+        let hw = size.x.abs() * 0.5 * coords::UU_TO_BEVY;
+        let hh = if em.screen_align == 1 { size.y.abs() } else { size.x.abs() } * 0.5 * coords::UU_TO_BEVY;
+        lo = lo.min(c);
+        hi = hi.max(c);
+        reach = reach.max((hw * hw + hh * hh).sqrt());
+    }
+    if !lo.is_finite() || !hi.is_finite() || !reach.is_finite() {
+        return None;
+    }
+    Some(((lo + hi) * 0.5, (hi - lo).length() * 0.5 + reach))
 }
 
 fn simulate(
@@ -900,12 +942,20 @@ fn simulate(
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut glow_mats: ResMut<Assets<GlowMaterial>>,
     mut q: Query<(Entity, &mut FxInstance, &InheritedVisibility)>,
-    cams: Query<&GlobalTransform, With<Camera3d>>,
+    cams: Query<(&GlobalTransform, &Transform, &Projection, Option<&ChildOf>), With<Camera3d>>,
     session: Option<Res<crate::session::Session>>,
     mut dframe: ResMut<DistortionFrame>,
 ) {
+    use bevy::camera::CameraProjection;
+    use bevy::camera::primitives::Sphere;
     dframe.clear();
-    let Some(cam) = cams.iter().next() else { return };
+    let Some((cam, cam_tf, cam_proj, cam_parent)) = cams.iter().next() else { return };
+    // The view this frame will be drawn from (the camera's transform as set this frame; the
+    // system runs after the camera systems). Sprite meshes outside it are not rebuilt: they are
+    // emptied once and rebuilt from the current particles when back in view, so what is drawn
+    // is unchanged. A parented camera (not used) disables this.
+    let frustum = cam_parent.is_none().then(|| cam_proj.compute_frustum(&GlobalTransform::from(*cam_tf)));
+    let in_view = |c: Vec3, r: f32| frustum.as_ref().is_none_or(|f| f.intersects_sphere(&Sphere { center: c.into(), radius: r * 1.05 + 0.1 }, false));
     let cam_pos_b = cam.translation();
     let t_now = time.elapsed_secs_wrapped();
     let cam_uu = Vec3::new(cam_pos_b.x, cam_pos_b.z, cam_pos_b.y) / coords::UU_TO_BEVY;
@@ -947,6 +997,7 @@ fn simulate(
         for (i, (em, sim)) in sys.emitters.iter().zip(inst.sims.iter_mut()).enumerate() {
             step(em, sim, &xf, dt, &mut rnd, em.collision.as_ref().map(|_| ray_fn));
             live += sim.particles.len();
+            let mut sprite_culled = false;
             if let Some((mh, color, params)) = lf.glow.get(&(inst.system, i)) {
                 let pool = &mut inst.glow_pools[i];
                 let want = sim.particles.len().min(64);
@@ -1019,16 +1070,27 @@ fn simulate(
                         };
                     }
                 }
-            } else if sprite_mesh_used(&lf, inst.system, i) && !(sim.particles.is_empty() && sim.mesh_empty) {
+            } else if sprite_mesh_used(&lf, inst.system, i) {
                 // Rebuilding a mesh re-uploads it: skip emitters that draw nothing (no sprite
-                // entity and no distortion copy) and meshes that stay empty.
-                if let Some(mut m) = inst.meshes.get(i).and_then(|h| meshes.get_mut(h)) {
-                    build_mesh(em, sim, &xf, right, up, cam_pos_b, &mut m);
-                    sim.mesh_empty = sim.particles.is_empty();
+                // entity and no distortion copy), meshes that stay empty and, emptied once,
+                // sprites entirely outside the view (trails and beams are always rebuilt).
+                let strip = em.trail.is_some() || em.beam.is_some();
+                sprite_culled = !strip && !sim.particles.is_empty() && sprite_bounds(em, sim, &xf).is_some_and(|(c, r)| !in_view(c, r));
+                let empty = sim.particles.is_empty() || sprite_culled;
+                if !(empty && sim.mesh_empty) {
+                    if let Some(mut m) = inst.meshes.get(i).and_then(|h| meshes.get_mut(h)) {
+                        if sprite_culled {
+                            clear_sprite_mesh(&mut m);
+                        } else {
+                            build_mesh(em, sim, &xf, right, up, cam_pos_b, &mut m);
+                        }
+                        sim.mesh_empty = empty;
+                    }
                 }
             }
-            // The distortion pass draws the same particles with the distortion material.
-            if let Some(ds) = lf.distortion.get(&(inst.system, i)).filter(|_| !sim.particles.is_empty()) {
+            // The distortion pass draws the same particles with the distortion material
+            // (nothing of sprites outside the view).
+            if let Some(ds) = lf.distortion.get(&(inst.system, i)).filter(|d| !sim.particles.is_empty() && !(sprite_culled && d.mesh.is_none())) {
                 let imgs = (&ds.texture, ds.opacity.as_ref(), ds.uv_distortion.as_ref());
                 if let Some(mesh) = &ds.mesh {
                     let (pos, uv, idx) = &**mesh;
