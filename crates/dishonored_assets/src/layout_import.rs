@@ -1,4 +1,4 @@
-//! Import of a [`MapLayout`] (a map that is not one of the original's, e.g. the Playground) into
+﻿//! Import of a [`MapLayout`] (a map that is not one of the original's, e.g. the Playground) into
 //! the same [`DishonoredMap`] a cooked level gives. The layout's packages are loaded only to
 //! resolve object paths: none of their actors is placed. Brushes become world-space static
 //! meshes with an original material; original static meshes, placed actors (doors, usable
@@ -259,6 +259,7 @@ fn layout_light(imp: &Importer, l: &LayoutLight, layout_slots: usize) -> std::re
         dominant: l.shadows,
         casts_shadows: l.shadows,
         guid: [0; 4],
+        function: None,
     }))
 }
 

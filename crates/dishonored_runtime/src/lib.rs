@@ -1,4 +1,4 @@
-//! Standalone Dishonored runtime (presentation + local input). Gameplay is
+﻿//! Standalone Dishonored runtime (presentation + local input). Gameplay is
 //! `dishonored_sim`, run locally (offline) or predicted against a dedicated server.
 //!
 //! ```text
@@ -376,7 +376,7 @@ pub fn main() {
     .add_plugins(dark_vision::DarkVisionPlugin)
     .add_plugins(world_models::WorldModelsPlugin)
     .add_plugins(power_pp::PowerPpPlugin)
-    .add_systems(Update, atmosphere::update_fog)
+    .add_systems(Update, (atmosphere::update_fog, lighting::animate_flicker))
     // Doors and usable objects (skeletal meshes), posed for their state.
     .init_resource::<level_props::LevelProps>()
     .add_systems(Update, (level_props::spawn_props, level_props::pose_props).chain());
