@@ -967,15 +967,18 @@ impl WorldQuery for CollisionWorld {
         let want = shape::extent_for(channels);
         let swept = b.aabb().union(&b.at(b.center + delta).aabb()).expand(1.0);
         // Best: (fraction, normal, triangle, start penetrating).
-        let mut best: Option<(f32, Vec3, u32, bool)> = None;
-        let mut consider = |r: Option<sat::SatHit>, i: u32| {
+        let best: std::cell::Cell<Option<(f32, Vec3, u32, bool)>> = std::cell::Cell::new(None);
+        // The check's best hit time so far (the shape tests compare a touch against it).
+        let best_time = || best.get().map_or(1.0, |x| x.0);
+        let consider = |r: Option<sat::SatHit>, i: u32| {
             let cand = match r {
                 Some(sat::SatHit::At(f, n)) => (f, n.normalize_or(-dir), false),
+                Some(sat::SatHit::Touch(n)) => (0.0, n.normalize_or(-dir), false),
                 Some(sat::SatHit::Start) => (0.0, -dir, true),
                 None => return,
             };
-            if best.is_none_or(|x| cand.0 < x.0) {
-                best = Some((cand.0, cand.1, i, cand.2));
+            if best.get().is_none_or(|x| cand.0 < x.0) {
+                best.set(Some((cand.0, cand.1, i, cand.2)));
             }
         };
         // Loose triangles (per-polygon collision) whose leaves overlap the swept box.
@@ -984,7 +987,7 @@ impl WorldQuery for CollisionWorld {
             if t.channels & channels == 0 || self.shape_of(i) & want == 0 || self.elem_of(i).is_some() {
                 return;
             }
-            consider(sat::box_triangle(b.center, b.half, delta, t.a, t.b, t.c), i);
+            consider(sat::box_triangle(b.center, b.half, delta, t.a, t.b, t.c, best_time()), i);
         });
         // Convex elements by their own bounds: a box inside a large element overlaps none of its
         // faces' leaves.
@@ -1003,9 +1006,9 @@ impl WorldQuery for CollisionWorld {
                 let x = &self.tris[k as usize];
                 [x.a, x.b, x.c]
             }));
-            consider(sat::box_convex(b.center, b.half, delta, &elem_tris), el.first);
+            consider(sat::box_convex(b.center, b.half, delta, &elem_tris, best_time()), el.first);
         });
-        let (f, normal, mut tri, start) = best?;
+        let (f, normal, mut tri, start) = best.get()?;
         // Contacts just past the hit (or where it starts): the faces it rests on, for walking.
         let at = b.at(b.center + delta * f + dir * if start { 0.0 } else { 0.1 });
         // An element's hit face: the one facing the hit normal best.

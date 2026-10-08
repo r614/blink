@@ -252,13 +252,22 @@ fn layout_light(imp: &Importer, l: &LayoutLight, layout_slots: usize) -> std::re
     }))
 }
 
-/// A brush as a world-space static mesh: one section, planar texture mapping in world units,
-/// per-polygon collision.
+/// A brush as a world-space static mesh: one section, planar texture mapping in world units.
+/// Collision as the original's Playground builds it (ORACLE.md "Layout maps in the original"):
+/// each box (and the ramp's wedge) is a scaled `Env_Blockout.staticmeshes.Cube_100`, whose simple
+/// box collision answers line and extent checks (one convex element per box, the simplified
+/// collision's 1 uu back-off: a pawn rests 3.73 uu above it, measured); the per-polygon triangles
+/// stay for checks that ask for complex collision.
 pub fn brush_mesh(b: &Brush, material: Option<MaterialId>, source: &str) -> StaticMeshAsset {
     let m = b.frame();
     // Each polygon in local space, wound later from its outward normal.
     let mut polys: Vec<(Vec<Vec3>, Vec3)> = Vec::new();
+    // The convex element (box or wedge) of each polygon.
+    let mut poly_elem: Vec<usize> = Vec::new();
+    let mut elems = 0usize;
     for (lo, hi) in b.local_boxes() {
+        poly_elem.extend([elems; 6]);
+        elems += 1;
         let c = |x: f32, y: f32, z: f32| Vec3::new(x, y, z);
         polys.push((vec![c(hi.x, lo.y, lo.z), c(hi.x, hi.y, lo.z), c(hi.x, hi.y, hi.z), c(hi.x, lo.y, hi.z)], Vec3::X));
         polys.push((vec![c(lo.x, lo.y, lo.z), c(lo.x, hi.y, lo.z), c(lo.x, hi.y, hi.z), c(lo.x, lo.y, hi.z)], Vec3::NEG_X));
@@ -270,6 +279,8 @@ pub fn brush_mesh(b: &Brush, material: Option<MaterialId>, source: &str) -> Stat
     if let Shape::Ramp { width, length, angle } = &b.shape {
         let (w, l) = (width / 2.0, *length);
         let h = l * angle.to_radians().tan();
+        poly_elem.extend([elems; 5]);
+        elems += 1;
         let c = |x: f32, y: f32, z: f32| Vec3::new(x, y, z);
         polys.push((vec![c(0.0, -w, 0.0), c(l, -w, 0.0), c(l, w, 0.0), c(0.0, w, 0.0)], Vec3::NEG_Z));
         polys.push((vec![c(0.0, -w, 0.0), c(l, -w, h), c(l, w, h), c(0.0, w, 0.0)], Vec3::new(-h, 0.0, l).normalize()));
@@ -283,7 +294,8 @@ pub fn brush_mesh(b: &Brush, material: Option<MaterialId>, source: &str) -> Stat
     let mut uv0 = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
     let scale = b.uv_scale.max(1.0);
-    for (poly, n_local) in polys {
+    let mut simple: Vec<Vec<[Vec3; 3]>> = vec![Vec::new(); elems];
+    for (pi, (poly, n_local)) in polys.into_iter().enumerate() {
         let n = m.transform_vector3(n_local).normalize();
         let world: Vec<Vec3> = poly.iter().map(|p| m.transform_point3(*p)).collect();
         // Planar mapping on the plane most facing the normal.
@@ -310,8 +322,10 @@ pub fn brush_mesh(b: &Brush, material: Option<MaterialId>, source: &str) -> Stat
             // its inside faces only (the "missing walls"), lit from behind.
             if (bb - a).cross(c - a).dot(n) <= 0.0 {
                 indices.extend([base, base + k as u32, base + k as u32 + 1]);
+                simple[poly_elem[pi]].push([a, bb, c]);
             } else {
                 indices.extend([base, base + k as u32 + 1, base + k as u32]);
+                simple[poly_elem[pi]].push([a, c, bb]);
             }
         }
     }
@@ -329,9 +343,9 @@ pub fn brush_mesh(b: &Brush, material: Option<MaterialId>, source: &str) -> Stat
         collision_materials: if b.collide { vec![0; tris] } else { Vec::new() },
         indices,
         sections: vec![MeshSection { first_index: 0, num_triangles: tris as u32, material, enable_collision: b.collide }],
-        simple_line: false,
-        simple_box: false,
-        simple_collision: None,
+        simple_line: b.collide,
+        simple_box: b.collide,
+        simple_collision: b.collide.then_some(simple),
         bounds_min: lo,
         bounds_max: hi,
     }
