@@ -55,6 +55,7 @@ use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
 pub mod combat;
+pub mod head;
 pub mod hearing;
 pub mod rats;
 pub mod slots;
@@ -422,6 +423,9 @@ pub struct Brain {
     /// State of the special combat behaviours ([`special`]).
     #[serde(default)]
     pub special: SpecialCombat,
+    /// The look-at head and the vision eye ([`head`]).
+    #[serde(default)]
+    pub head: head::Head,
 }
 
 fn idle_state() -> BrainState {
@@ -574,6 +578,20 @@ pub struct Crowd {
     /// The level's `DisStealthVolume`s (their light range replaces the map's inside them).
     #[serde(default)]
     pub stealth_volumes: Vec<dishonored_ir::ai::StealthVolume>,
+    /// The stealth light environment's lights and the levels' light volumes (`AiLevel`).
+    #[serde(default)]
+    pub stealth_lights: Vec<ProbeLight>,
+    #[serde(default)]
+    pub light_volumes: Vec<dishonored_ir::ai::LightVolume>,
+    /// Per (player, stealth light): the last visibility traces (bit mask over the samples, next
+    /// sample, update stamp; 0x004FF270) and the update counter.
+    #[serde(skip)]
+    pub light_vis: BTreeMap<(PlayerId, usize), (u8, u8, u64)>,
+    #[serde(skip)]
+    pub light_updates: u64,
+    /// The light at each player from the last `think` (raw, normalized).
+    #[serde(skip)]
+    pub player_lights: BTreeMap<PlayerId, (f32, f32)>,
     /// Brains of the rat pawns (`PawnKind::Rat`) and the swarm each rat was spawned in
     /// (`SimEvent::RatSpawned`).
     #[serde(default)]
@@ -1055,17 +1073,9 @@ impl Crowd {
         // The light at each player (the original samples the pawn's light environment),
         // normalized by the range of the stealth volume the player is in, else the map's
         // (`DishonoredVisibilityComponent` tick 0x00AD51E0: 0x00BD0120, 0x00BC9040).
-        let pv = &self.ai.player_visibility;
-        let light: BTreeMap<PlayerId, f32> = world_state
-            .players
-            .iter()
-            .filter(|p| p.kind == PawnKind::Human && p.alive)
-            .map(|p| {
-                let raw = if self.lights.is_empty() && self.sky_light <= 0.0 { LIGHT_LEVEL } else { light_at_with(&self.lights, self.sky_light, p.position, world) };
-                let range = dishonored_ir::ai::stealth_light_range(&self.stealth_volumes, p.position).unwrap_or([pv.light_darkest, pv.light_brightest]);
-                (p.id, light01(raw, range))
-            })
-            .collect();
+        self.light_updates += 1;
+        let humans: Vec<PlayerState> = world_state.players.iter().filter(|p| p.kind == PawnKind::Human && p.alive).copied().collect();
+        let light: BTreeMap<PlayerId, f32> = humans.iter().map(|p| (p.id, self.update_player_light(p, world).1)).collect();
         let magic = magic_modes(events, world_state, &mut self.bend_stop);
         let senses = Senses { peers: &peers, barks: &barks, busted: &busted, alarm_noise: &alarm_noise, social: &social, light: &light, audio: &self.audio, magic: &magic };
         let layout = &self.layout;
@@ -1090,6 +1100,7 @@ impl Crowd {
             b.perceive_with(me, world_state, events, &senses, world, ai, dt);
             let mut ctx = Ctx { layout, routes, users, neglect, inhibit, alarms: &mut *alarms, events: &mut ai_events, cooldown };
             let mut inp = b.act(me, world_state, &mut ctx, world, ai, dt);
+            b.step_head(me, world_state, ai, dt);
             if inp.npc_move == 0 {
                 inp.npc_move = b.attack_kind();
             }
@@ -1255,6 +1266,67 @@ impl Crowd {
         Social { factions: Some(self.factions.clone()), pawn_faction, trespass, overrides: self.overrides.clone() }
     }
 
+    /// The light at a player at `p`: the raw value of the light probe and its normalization by
+    /// the stealth volume's range there, else the map's (`DishonoredVisibilityComponent` tick
+    /// 0x00AD51E0: `m_fCurrentLightValue` / `_Normalized`; 0x00BD0120, 0x00BC9040).
+    ///
+    /// The raw value is the player's stealth light environment (`m_pStealthLightingDLE`, updated
+    /// in full every tick, `bRequiresNonLatentUpdates`) at the collision cylinder's bounds: the
+    /// `m_LightProbe` lights plus the floor level's precomputed light volume
+    /// ([`dishonored_ir::ai::stealth_light_value`], stealth.md section 11). Levels without that
+    /// data (none loaded) keep the earlier probe over the level's light actors.
+    pub fn update_player_light(&mut self, p: &PlayerState, world: &dyn WorldQuery) -> (f32, f32) {
+        let pv = &self.ai.player_visibility;
+        let origin = p.position;
+        let raw = if !self.stealth_lights.is_empty() || !self.light_volumes.is_empty() {
+            let [r, hh, sneak] = pv.cylinder;
+            let h = if p.crouched { sneak } else { hh };
+            let extent = Vec3::new(r, r, h);
+            let sphere = extent.length();
+            // The floor's level selects the light volume (a line check down from the origin).
+            let floor = world.hit_package(origin, -Vec3::Z, 262_144.0);
+            let volume = floor.as_deref().and_then(|f| self.light_volumes.iter().find(|v| v.package.eq_ignore_ascii_case(f)));
+            // `Default__DishonoredPlayerPawn.StealthLightingDLE.NumVolumeVisibilitySamples` 4:
+            // each update traces one sample per light, cycling; the light's visibility is the
+            // share of clear traces over the last 4 (reset when the light was not traced the
+            // update before).
+            const SAMPLES: usize = 4;
+            let points = dishonored_ir::ai::visibility_sample_points(SAMPLES);
+            if std::env::var_os("DISHONORED_STEALTH_LIGHT_DEBUG").is_some() {
+                eprintln!("stealth light at {origin:.0} floor {floor:?} volume {:?} band0 {:.4}", volume.map(|v| &v.package), volume.map_or(0.0, |v| v.band0_at(origin)));
+                for l in self.stealth_lights.iter().filter(|l| l.affects(origin, sphere)) {
+                    eprintln!("  kind {} at {:.0} intensity {:.4} -> {:.4} shadows {}", l.kind, l.position, l.intensity, l.intensity_at(origin), l.casts_shadows);
+                }
+            }
+            let stamp = self.light_updates;
+            let vis = &mut self.light_vis;
+            let id = p.id;
+            dishonored_ir::ai::stealth_light_value(&self.stealth_lights, volume, origin, sphere, |i, l| {
+                let e = vis.entry((id, i)).or_insert((0, 0, stamp));
+                if e.2 + 1 != stamp {
+                    *e = (0, 0, stamp);
+                }
+                let k = e.1 as usize % SAMPLES;
+                let (a, b) = dishonored_ir::ai::visibility_segment(l, origin, sphere, extent, points[k]);
+                let d = b - a;
+                let len = d.length();
+                let clear = len < 1e-3 || world.raycast(a, d / len, len, channel::ALL).is_none();
+                e.0 = if clear { e.0 | 1 << k } else { e.0 & !(1 << k) };
+                e.1 = ((k + 1) % SAMPLES) as u8;
+                e.2 = stamp;
+                e.0.count_ones() as f32 / SAMPLES as f32
+            })
+        } else if self.lights.is_empty() && self.sky_light <= 0.0 {
+            LIGHT_LEVEL
+        } else {
+            light_at_with(&self.lights, self.sky_light, origin, world)
+        };
+        let pv = &self.ai.player_visibility;
+        let range = dishonored_ir::ai::stealth_light_range(&self.stealth_volumes, origin).unwrap_or([pv.light_darkest, pv.light_brightest]);
+        let v = (raw, light01(raw, range));
+        self.player_lights.insert(p.id, v);
+        v
+    }
     /// Install the level's AI data (factions, forbidden zones, alarm bells, probe lights).
     pub fn set_level(&mut self, level: &AiLevel) {
         self.factions = level.factions.clone();
@@ -1272,6 +1344,8 @@ impl Crowd {
         pv.light_darkest = dark;
         pv.light_brightest = bright;
         self.stealth_volumes = level.stealth_volumes.clone();
+        self.stealth_lights = level.stealth_lights.clone();
+        self.light_volumes = level.light_volumes.clone();
     }
 
     /// Faction of a spawned NPC: the spawner's `m_pFactionTweakOverride`, else its pawn
@@ -1591,6 +1665,7 @@ impl Brain {
             in_fight: false,
             class: if kind == PawnKind::Guard { NpcClass::EliteGuard } else { NpcClass::Civilian },
             special: SpecialCombat::default(),
+            head: head::Head::default(),
         }
     }
 
@@ -1761,20 +1836,54 @@ impl Brain {
         self.bump(ai, NOISE, AttentionIncrease { amount: 0.0, to_level: DAL_BUSTED }, at, true, FORCED);
     }
 
-    /// Eye-space offset of a point seen by `me` (yaw only; x forward, y lateral, z up).
-    fn eye_local(me: &PlayerState, p: Vec3) -> Vec3 {
-        let d = p - (me.position + Vec3::Z * EYE);
-        let (s, c) = me.yaw.to_radians().sin_cos();
-        Vec3::new(d.x * c + d.y * s, -d.x * s + d.y * c, d.z)
+    /// The stance modifier of the head's locomotion loop (the runtime's modifier choice:
+    /// guards carry the sword, `SwordPatrol` on routine).
+    fn head_modifier(&self, _ai: &AiConfig) -> &'static str {
+        let guard = self.kind == PawnKind::Guard;
+        match self.state {
+            BrainState::Combat => if guard { "Sword" } else { "Empty" },
+            BrainState::Flee | BrainState::Cower => if guard { "PanicSword" } else { "PanicEmpty" },
+            s if s.is_routine() => if guard { "SwordPatrol" } else { "Empty" },
+            _ => if guard { "SearchSword" } else { "SearchEmpty" },
+        }
+    }
+
+    /// The look-at head after this tick's decisions: the attention process's HeadTrack request
+    /// (0x00B25890: behaviour level HeadTrack on an enemy focus; head weight 1, torso weight
+    /// `m_fHeadTrackTorsoRatio`, speed 0.5) toward the focus's eyes, then the cursor and the
+    /// eye ([`head::Head::step`]).
+    fn step_head(&mut self, me: &PlayerState, ws: &WorldState, ai: &AiConfig, dt: f32) {
+        let focus = if self.att_level == DAL_HEAD_TRACK && self.att_enemy { self.att_target.and_then(|t| ws.player(t)) } else { None };
+        let request = focus.map(|t| {
+            // `GetActorEyesViewPoint`: `BaseEyeHeight` below the standing cylinder top, the same
+            // offset from the crouched top.
+            let [eye_h, hh] = ai.player_eye;
+            let target = if t.kind == PawnKind::Human && hh > 0.0 {
+                let cur = if t.crouched { ai.player_visibility.cylinder[2] } else { hh };
+                t.position + Vec3::Z * (cur - (hh - eye_h))
+            } else {
+                t.position + Vec3::Z * EYE
+            };
+            head::LookRequest { target, head_weight: 1.0, torso_weight: ai.head_track_torso_ratio, torso_speed_reduction: true, speed: 0.5 }
+        });
+        let modifier = self.head_modifier(ai);
+        let speed = me.velocity.truncate().length();
+        self.head.step(ai, me.archetype, modifier, me.position, me.yaw, speed, request, dt);
+    }
+
+    /// The vision eye this tick: the head of the last step ([`head::Head::step`]).
+    fn vision_eye(&self, me: &PlayerState, ai: &AiConfig) -> head::Eye {
+        self.head.last_eye(ai, me.archetype, &self.head_modifier(ai), me.position, me.yaw)
     }
 
     /// The vision component's test (0x00c788e0): the target's location inside a cone, then a
     /// line-of-sight trace to one of its test points (top, middle, bottom of the pawn).
-    /// Returns the normalized vision distance.
-    fn look(me: &PlayerState, other: &PlayerState, world: &dyn WorldQuery, ai: &AiConfig) -> Option<f32> {
+    /// Returns the normalized vision distance. The cones are along the head's axis from the
+    /// `camera_jnt` eye ([`head`]).
+    fn look(veye: &head::Eye, other: &PlayerState, world: &dyn WorldQuery, ai: &AiConfig) -> Option<f32> {
         let (inner, outer) = cones(&ai.vision);
-        let (norm, _) = vision_distance(&inner, &outer, Self::eye_local(me, other.position))?;
-        let eye = me.position + Vec3::Z * EYE;
+        let (norm, _) = vision_distance(&inner, &outer, veye.local(other.position))?;
+        let eye = veye.pos;
         let clear = |p: Vec3| {
             let to = p - eye;
             let d = to.length();
@@ -1784,8 +1893,8 @@ impl Brain {
     }
 
     /// Cone and line-of-sight test (events, allies, corpses).
-    fn sees(me: &PlayerState, other: &PlayerState, world: &dyn WorldQuery, ai: &AiConfig) -> bool {
-        Self::look(me, other, world, ai).is_some()
+    fn sees(veye: &head::Eye, other: &PlayerState, world: &dyn WorldQuery, ai: &AiConfig) -> bool {
+        Self::look(veye, other, world, ai).is_some()
     }
 
     /// The target's `Attribute_Visibility`: built from light, speed and stance for players,
@@ -1831,6 +1940,7 @@ impl Brain {
         self.enemies = ws.players.iter().filter(|p| p.id != self.id && p.alive && self.relation(p.id, senses.social) == Relationship::Enemy).map(|p| p.id).collect();
         self.allies = ws.players.iter().filter(|p| p.id != self.id && self.relation(p.id, senses.social) == Relationship::Ally).map(|p| p.id).collect();
         let eye = me.position + Vec3::Z * EYE;
+        let veye = self.vision_eye(me, ai);
         // Hearing (0x00bb50d0, `hearing::heard`): strictly within the noise radius; between
         // audio cells along the precomputed portal paths; for listeners and noises outside the
         // cells, a trace from the listener to the noise (blocked: not heard).
@@ -1924,7 +2034,7 @@ impl Brain {
                     continue;
                 }
                 let witnessed = match kind {
-                    PawnKind::Guard => ws.player(src).is_some_and(|g| Self::sees(me, g, world, ai)),
+                    PawnKind::Guard => ws.player(src).is_some_and(|g| Self::sees(&veye, g, world, ai)),
                     _ => true,
                 };
                 if witnessed {
@@ -1953,7 +2063,7 @@ impl Brain {
                     let (Some(v), Some(kp)) = (ws.player(*victim), ws.player(*k)) else {
                         continue;
                     };
-                    if Self::sees(me, v, world, ai) || Self::sees(me, kp, world, ai) {
+                    if Self::sees(&veye, v, world, ai) || Self::sees(&veye, kp, world, ai) {
                         // Witnessed murder: the killer becomes an enemy at full attention.
                         self.make_hostile(*k);
                         let inc = self.profile(ai, *k).attacked_enemy;
@@ -1982,7 +2092,7 @@ impl Brain {
                 // A corpse is discovered once its seen value is non-zero (dead-NPC scalar).
                 if p.kind != PawnKind::Human && !self.corpses_seen.contains(&p.id) {
                     let prof = self.profile(ai, NOISE);
-                    let seen = !self.blind && Self::look(me, p, world, ai).is_some_and(|n| seen_rate(prof, prof.seeing_scalar_dead_npc, n, 0.0) > 0.0);
+                    let seen = !self.blind && Self::look(&veye, p, world, ai).is_some_and(|n| seen_rate(prof, prof.seeing_scalar_dead_npc, n, 0.0) > 0.0);
                     if seen {
                         self.corpses_seen.push(p.id);
                         self.found_corpses.push(p.id);
@@ -2005,7 +2115,7 @@ impl Brain {
             // (`ResponseCategory_Harmless`, a bark) in every brain reaction tweak: it changes no
             // relationship. Hostility comes from the Hostile responses (hurt by the player),
             // witnessed deaths, factions and allies' fights.
-            let seen = if self.blind { None } else { Self::look(me, p, world, ai) };
+            let seen = if self.blind { None } else { Self::look(&veye, p, world, ai) };
             let hostile = self.enemies.contains(&p.id);
             let prof = self.profile(ai, p.id).clone();
             let stop = self.stops(ai, p.id);
@@ -2054,7 +2164,7 @@ impl Brain {
             match (peer.kind, peer.state) {
                 (PawnKind::Guard, BrainState::Combat) => {
                     let Some(t) = peer.target else { continue };
-                    if self.state == BrainState::Combat || !Self::sees(me, pp, world, ai) {
+                    if self.state == BrainState::Combat || !Self::sees(&veye, pp, world, ai) {
                         continue;
                     }
                     let tp = ws.player(t).map(|p| p.position).unwrap_or(pp.position);
@@ -2063,7 +2173,7 @@ impl Brain {
                     self.bump(ai, t, inc, tp, true, reason::SEE_ALLY_COMBAT);
                 }
                 (PawnKind::Civilian, BrainState::Flee | BrainState::Cower) => {
-                    if Self::sees(me, pp, world, ai) {
+                    if Self::sees(&veye, pp, world, ai) {
                         let inc = self.profile(ai, NOISE).ally_panic_target;
                         self.bump(ai, NOISE, inc, peer.threat.unwrap_or(pp.position), false, reason::SEE_ALLY_PANIC);
                     }
@@ -2994,7 +3104,8 @@ impl Brain {
         if sighted {
             self.threat_pos = Some(t.position);
         }
-        let visible = sighted && Self::sees(me, &t, world, ai);
+        let veye = self.vision_eye(me, ai);
+        let visible = sighted && Self::sees(&veye, &t, world, ai);
         let d = t.position.distance(me.position);
         let dz = t.position.z - me.position.z;
         let reach = ai.combat.reachable_melee_range;

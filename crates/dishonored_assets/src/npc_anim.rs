@@ -356,11 +356,14 @@ pub fn load_lookat_config(content: &Content, r: &(String, String)) -> Result<Loo
             torso_range: [f32_of(m, "m_TorsoRightRange"), f32_of(m, "m_TorsoLeftRange"), f32_of(m, "m_TorsoUpRange"), f32_of(m, "m_TorsoDownRange")],
             head_horizontal_pct: f32_of(m, "m_HeadAndTorso_HorizontalPercentage"),
             head_vertical_pct: f32_of(m, "m_HeadAndTorso_VerticalPercentage"),
+            start_torso: f32_of(m, "Start_Torso"),
+            end_head: f32_of(m, "End_Head"),
+            clamp: matches!(find(m, "m_bDoClampRange").map(|x| &x.value), Some(Value::Bool(true))).then(|| [f32_of(m, "m_ClampRightRange"), f32_of(m, "m_ClampLeftRange"), f32_of(m, "m_ClampUpRange"), f32_of(m, "m_ClampDownRange")]),
             head: GRID.iter().map(|g| name_of(m, &format!("Head_AnimName_{g}"))).map(|n| if n == "None" { String::new() } else { n }).collect(),
             torso: GRID.iter().map(|g| name_of(m, &format!("Torso_AnimName_{g}"))).map(|n| if n == "None" { String::new() } else { n }).collect(),
         })
         .collect();
-    Ok(LookatConfig { modes, blink, blink_interval: [pick("MinDurationBetweenBlink", 0.5), pick("MaxDurationBetweenBlink", 6.0)], blink_rate: [pick("MinBlinkSpeed", 1.0), pick("MaxBlinkSpeed", 2.0)] })
+    Ok(LookatConfig { modes, blink, blink_interval: [pick("MinDurationBetweenBlink", 0.5), pick("MaxDurationBetweenBlink", 6.0)], blink_rate: [pick("MinBlinkSpeed", 1.0), pick("MaxBlinkSpeed", 2.0)], torso_influence_max_move_speed: pick("m_fTorsoInfluenceMaxMoveSpeed", 200.0) })
 }
 
 /// Rows (X, Y, Z, W planes) of a cooked `Matrix` struct (`WPlane` struct rows, or 64 raw bytes).

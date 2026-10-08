@@ -72,63 +72,7 @@ pub struct AnimBank {
 /// Packages that cook the Boyle NPC AnimSets, locomotion configs and animation definitions.
 const SCRIPT_PACKAGES: &[&str] = &["L_Boyle_Ext_Script", "L_Boyle_Int_Script", "L_BoyleStreet_Ext_Script"];
 
-const GUARD_SETS: &[&str] = &[
-    "Npc_EliteGuard_Generic_as.Npc_EliteGuard_Generic_as",
-    "Npc_EliteGuard_Tracking_as.Npc_EliteGuard_HeadTracking_as",
-    "Npc_EliteGuard_Tracking_as.Npc_EliteGuard_TorsoTracking_as",
-    "Npc_EliteGuard_empty_as.Npc_EliteGuard_empty_as",
-    "Npc_EliteGuard_Sword_as.Npc_EliteGuard_Sword_as",
-    "Npc_EliteGuard_Face_as.Npc_EliteGuard_Face_as",
-    "Npc_EliteGuard_Gun_as.Npc_EliteGuard_Gun_as",
-    "Npc_EliteGuard_Corpses_as.Npc_EliteGuard_Corpses_as",
-    "Npc_EliteGuard_Distractions_as.Npc_EliteGuard_Distractions_as",
-    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_Gestures_as",
-    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_GesturesLeftArm_as",
-    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_GesturesNoArm_as",
-    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_GesturesRightArm_as",
-    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_Postures_as",
-    "Npc_EliteGuard_Blink_as.Npc_EliteGuard_Blink_as",
-    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_GesturesHead_as",
-];
-/// `Pwn_AristoParty_*` (Twk_Pawn_Boyle_Party): the guard sets without sword and gun, then the
-/// tall-civilian and aristocrat empty sets.
-const ARISTO_SETS: &[&str] = &[
-    "Npc_EliteGuard_Generic_as.Npc_EliteGuard_Generic_as",
-    "Npc_EliteGuard_Tracking_as.Npc_EliteGuard_HeadTracking_as",
-    "Npc_EliteGuard_Tracking_as.Npc_EliteGuard_TorsoTracking_as",
-    "Npc_EliteGuard_empty_as.Npc_EliteGuard_empty_as",
-    "Npc_EliteGuard_Face_as.Npc_EliteGuard_Face_as",
-    "Npc_CivTall_Empty_as.Npc_CivTall_Empty_as",
-    "Npc_EliteGuard_Corpses_as.Npc_EliteGuard_Corpses_as",
-    "Npc_EliteGuard_Distractions_as.Npc_EliteGuard_Distractions_as",
-    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_Gestures_as",
-    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_GesturesLeftArm_as",
-    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_GesturesNoArm_as",
-    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_GesturesRightArm_as",
-    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_Postures_as",
-    "Npc_EliteGuard_Blink_as.Npc_EliteGuard_Blink_as",
-    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_GesturesHead_as",
-    "Npc_Aristo_Empty_as.Npc_Aristo_Empty_as",
-];
-/// `Twk_Pawn_Boyle_AristoF*`: the civilian female sets.
-const FEMALE_SETS: &[&str] = &[
-    "Npc_CivFemale_Generic_as.Npc_CivFemale_Generic_as",
-    "Npc_CivFemale_Tracking_as.Npc_CivFemale_HeadTracking_as",
-    "Npc_CivFemale_Tracking_as.Npc_CivFemale_TorsoTracking_as",
-    "Npc_CivFemale_Empty_as.Npc_CivFemale_Empty_as",
-    "Npc_CivFemale_Corpses_as.Npc_CivFemale_Corpses_as",
-    "Npc_CivFemale_Distractions_as.Npc_CivFemale_Distraction_as",
-    "Npc_CivFemale_Gestures_as.Npc_CivFemale_Gestures_as",
-    "Npc_CivFemale_Gestures_as.Npc_CivFemale_GesturesLeftArm_as",
-    "Npc_CivFemale_Gestures_as.Npc_CivFemale_GesturesNoArm_as",
-    "Npc_CivFemale_Gestures_as.Npc_CivFemale_GesturesRightArm_as",
-    "Npc_CivFemale_Gestures_as.Npc_CivFemale_Postures_as",
-    "Npc_Female_Blink_as.Npc_Female_Blink_as",
-    "Npc_CivFemale_Gestures_as.Npc_CivFemale_GesturesHead_as",
-    "Npc_CivFemale_Face_as.Npc_CivFemale_Face_as",
-];
-const GUARD_LOCO: &str = "DisLocomotionConfig.EliteGuardLocomotionConfig";
-const FEMALE_LOCO: &str = "DisLocomotionConfig.FemaleLocomotionConfig";
+use dishonored_assets::characters::{ARISTO_SETS, FEMALE_LOCO, FEMALE_SETS, GUARD_LOCO, GUARD_SETS};
 
 impl AnimBank {
     pub fn new(content: Arc<Content>) -> Self {

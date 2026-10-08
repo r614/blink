@@ -317,6 +317,11 @@ pub trait WorldQuery {
     fn climbables(&self) -> &[Climbable] {
         &[]
     }
+    /// The level package of what a line check hits first (the collision source's instance,
+    /// `<package>:<actor>`); None when the world does not know its sources.
+    fn hit_package(&self, _origin: Vec3, _dir: Vec3, _max_dist: f32) -> Option<String> {
+        None
+    }
 }
 
 
@@ -814,7 +819,12 @@ impl CollisionWorld {
         for inst in map.instances.iter().filter(|i| i.collides) {
             let mesh = &map.meshes[inst.mesh];
             let src = sources.len() as u32;
-            sources.push(format!("{} <- {}", mesh.source, inst.source));
+            // The level package first when known (the stealth light's floor level, `hit_package`).
+            if inst.level.is_empty() {
+                sources.push(format!("{} <- {}", mesh.source, inst.source));
+            } else {
+                sources.push(format!("{} <- {}:{}", mesh.source, inst.level, inst.source));
+            }
             // Surface (contact type) per section: instance override, else the mesh material.
             let section_surface: Vec<u16> = (0..mesh.sections.len())
                 .map(|i| {
@@ -918,6 +928,14 @@ impl CollisionWorld {
 impl WorldQuery for CollisionWorld {
     fn nav(&self) -> Option<&nav::NavWorld> {
         self.nav.as_deref()
+    }
+
+    fn hit_package(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<String> {
+        let h = self.raycast(origin, dir, max_dist, channel::ALL)?;
+        let src = self.sources.get(self.tris.get(h.tri as usize)?.source as usize)?;
+        // `<mesh source> <- <package>:<actor path>` (`from_map`) or `<package>:<path>`.
+        let inst = src.rsplit(" <- ").next()?;
+        inst.split(':').next().filter(|s| !s.is_empty()).map(str::to_string)
     }
 
     fn water_at(&self, p: Vec3) -> Option<WaterInfo> {
@@ -1278,6 +1296,13 @@ impl WorldQuery for Layered<'_> {
     fn climbables(&self) -> &[Climbable] {
         self.base.climbables()
     }
+    fn hit_package(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<String> {
+        // A mover layer hit first has no level package here (movers are level actors too, but
+        // their layer worlds carry no sources).
+        let reach = self.raycast(origin, dir, max_dist, channel::ALL)?.distance;
+        self.base.raycast(origin, dir, max_dist, channel::ALL).filter(|h| h.distance <= reach + 1e-3)?;
+        self.base.hit_package(origin, dir, max_dist)
+    }
 }
 
 #[cfg(test)]
@@ -1473,5 +1498,8 @@ impl WorldQuery for MapSet {
     }
     fn climbables(&self) -> &[Climbable] {
         self.cur().climbables()
+    }
+    fn hit_package(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<String> {
+        self.cur().hit_package(origin, dir, max_dist)
     }
 }

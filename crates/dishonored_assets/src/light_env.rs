@@ -220,6 +220,9 @@ pub struct EnvLight {
     /// `CastShadows && CastStaticShadows`: the light's visibility is traced.
     pub traced: bool,
     pub source: String,
+    /// `bOnlyAffectSameAndSpecifiedLevels`: the levels (package names) the light affects, its own
+    /// first then `OtherLevelsToAffect` (0x00516400); None: every level.
+    pub only_levels: Option<Vec<String>>,
 }
 
 /// `LightingChannelContainer` field names in bit order (`class_layout Engine LightingChannelContainer`).
@@ -252,9 +255,15 @@ fn template_channels(actor_class: &str) -> u32 {
     let base = 0b1_1111;
     match actor_class {
         "PointLight" | "SpotLight" | "StaticLightCollectionActor" => (base & !(1 << 3)) | (1 << 27),
+        // `Default__DirectionalLight`, `Default__SkyLight` and the dominant lights' templates set
+        // `m_LightProbe` (Engine.upk); the toggleable and movable templates keep the class default.
+        "DirectionalLight" | "SkyLight" | "DominantDirectionalLight" | "DominantPointLight" | "DominantSpotLight" => base | (1 << 27),
         _ => base,
     }
 }
+
+/// The `m_LightProbe` lighting channel bit.
+pub const CHANNEL_LIGHT_PROBE: u32 = 1 << 27;
 
 fn bool_or(props: &[Property], name: &str, d: bool) -> bool {
     match find(props, name).map(|p| &p.value) {
@@ -270,10 +279,19 @@ fn float_or(props: &[Property], name: &str, d: f32) -> f32 {
 /// `PointLight` / `SpotLight` / `DirectionalLight` / `SkyLight` actors and the components of
 /// `StaticLightCollectionActor`s (dominant, toggleable and movable lights are drawn as lights).
 pub fn read_static_lights(pkg: &Package) -> Vec<EnvLight> {
+    read_lights(pkg, false)
+}
+
+/// The light components of a level package's actors. `all`: every light actor (dominant,
+/// toggleable and movable lights too, as the world's static and dynamic light lists hold them);
+/// otherwise the static ones ([`read_static_lights`]).
+pub fn read_lights(pkg: &Package, all: bool) -> Vec<EnvLight> {
     let mut out = Vec::new();
     for ci in 0..pkg.exports.len() {
         let cclass = pkg.export_class(ci);
-        if !matches!(cclass.as_str(), "PointLightComponent" | "SpotLightComponent" | "DirectionalLightComponent" | "SkyLightComponent") {
+        let known = matches!(cclass.as_str(), "PointLightComponent" | "SpotLightComponent" | "DirectionalLightComponent" | "SkyLightComponent");
+        let dominant = matches!(cclass.as_str(), "DominantPointLightComponent" | "DominantSpotLightComponent" | "DominantDirectionalLightComponent");
+        if !(known || (all && dominant)) {
             continue;
         }
         let outer = ObjRef::from_index(pkg.exports[ci].outer);
@@ -282,7 +300,7 @@ pub fn read_static_lights(pkg: &Package) -> Vec<EnvLight> {
             continue;
         }
         let aclass = pkg.export_class(ai);
-        if !matches!(aclass.as_str(), "PointLight" | "SpotLight" | "DirectionalLight" | "SkyLight" | "StaticLightCollectionActor") {
+        if !all && !matches!(aclass.as_str(), "PointLight" | "SpotLight" | "DirectionalLight" | "SkyLight" | "StaticLightCollectionActor") {
             continue;
         }
         let Ok(ch) = pkg.read_object(ci) else { continue };
@@ -305,8 +323,8 @@ pub fn read_static_lights(pkg: &Package) -> Vec<EnvLight> {
         };
         let brightness = float_or(c, "Brightness", 1.0);
         let kind = match cclass.as_str() {
-            "SpotLightComponent" => EnvLightKind::Spot { inner_deg: float_or(c, "InnerConeAngle", 0.0), outer_deg: float_or(c, "OuterConeAngle", 44.0) },
-            "DirectionalLightComponent" => EnvLightKind::Directional,
+            "SpotLightComponent" | "DominantSpotLightComponent" => EnvLightKind::Spot { inner_deg: float_or(c, "InnerConeAngle", 0.0), outer_deg: float_or(c, "OuterConeAngle", 44.0) },
+            "DirectionalLightComponent" | "DominantDirectionalLightComponent" => EnvLightKind::Directional,
             "SkyLightComponent" => EnvLightKind::Sky,
             _ => EnvLightKind::Point,
         };
@@ -318,8 +336,23 @@ pub fn read_static_lights(pkg: &Package) -> Vec<EnvLight> {
             radius: float_or(c, "Radius", 1024.0),
             falloff_exponent: float_or(c, "FalloffExponent", 2.0),
             channels: channel_bits(c, template_channels(&aclass)),
-            traced: bool_or(c, "CastShadows", true) && bool_or(c, "CastStaticShadows", true),
+            // `Default__SkyLightComponent` clears CastShadows.
+            traced: bool_or(c, "CastShadows", cclass != "SkyLightComponent") && bool_or(c, "CastStaticShadows", true),
             source: format!("{}:{}", pkg.name, pkg.obj_path(ObjRef::Export(ci))),
+            only_levels: bool_or(c, "bOnlyAffectSameAndSpecifiedLevels", false).then(|| {
+                let mut v = vec![pkg.name.clone()];
+                // `array<name>`: count, then (name index, number) pairs.
+                if let Some((n, raw)) = find(c, "OtherLevelsToAffect").and_then(|p| p.array_raw()) {
+                    for k in 0..n {
+                        let Some(b) = raw.get(k * 8..k * 8 + 4) else { break };
+                        let idx = u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize;
+                        if let Some(name) = pkg.names.get(idx) {
+                            v.push(name.name.clone());
+                        }
+                    }
+                }
+                v
+            }),
         });
     }
     out
@@ -394,6 +427,23 @@ fn cone_angles(inner_deg: f32, outer_deg: f32) -> (f32, f32) {
     (inner * d2r, if o < lo { lo } else { o.min(1.554_343) })
 }
 
+/// The light environment's channel test (0x004DB950): the light's channels with
+/// `CompositeDynamic` read as `Dynamic` (and `Dynamic` itself cleared) against the owner's,
+/// `bInitialized` ignored.
+pub fn channels_overlap(light: u32, owner: u32) -> bool {
+    let mut ch = light & !(1 << 3);
+    if light & (1 << 4) != 0 {
+        ch = (ch & !(1 << 4)) | (1 << 3);
+    }
+    owner & ch & !1 != 0
+}
+
+/// The player's stealth light environment's channels: `Default__DishonoredPawn.StealthLightingDLE`
+/// overrides the owner's (`bOverrideOwnerLightingChannels`) with `bInitialized`,
+/// `CompositeDynamic` and `m_LightProbe`. `CompositeDynamic` never matches (a light's is read
+/// as `Dynamic`), so only `m_LightProbe` lights contribute.
+pub const STEALTH_DLE_CHANNELS: u32 = 1 | (1 << 4) | CHANNEL_LIGHT_PROBE;
+
 /// Inputs of one light environment.
 pub struct EnvQuery<'a> {
     pub origin: Vec3,
@@ -411,11 +461,7 @@ pub fn static_environment(q: &EnvQuery, mut visible: impl FnMut(Vec3, Vec3) -> b
     let mut sh = [[0.0; 9]; 3];
     for l in q.lights {
         // CompositeDynamic stands for Dynamic in the light environment's channel test.
-        let mut ch = l.channels & !(1 << 3);
-        if l.channels & (1 << 4) != 0 {
-            ch = (ch & !(1 << 4)) | (1 << 3);
-        }
-        if q.channels & ch & !1 == 0 || !l.affects(q.origin, q.sphere_radius) {
+        if !channels_overlap(l.channels, q.channels) || !l.affects(q.origin, q.sphere_radius) {
             continue;
         }
         let (pos, w) = l.position4();

@@ -420,6 +420,9 @@ pub struct MeshInstance {
     pub hidden: bool,
     pub collides: bool,
     pub source: String,
+    /// The level package the component was placed in (empty: unknown, e.g. layout maps).
+    #[serde(default)]
+    pub level: String,
     /// Baked lighting for this component (LOD0), if any.
     #[serde(default)]
     pub lightmap: Option<InstanceLightmap>,
