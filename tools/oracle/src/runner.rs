@@ -481,8 +481,8 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
     for _ in 0..s.setup.settle {
         tick += 1;
         let out = game.step(&[(ME, PlayerInput { tick, ..neutral })], &maps.set, cfg);
-        let players = mm(&game).world.players.clone();
-        present.frame(&out.events, &players, 1.0 / 60.0);
+        let w = &mm(&game).world;
+        present.frame(&out.events, w, dishonored_sim::left_hand::dark_vision_reveals(w, ME, &cfg.tuning), 1.0 / 60.0);
     }
     let first = sample(&game, &mut leg, &present);
     trace.push(0, first);
@@ -556,7 +556,7 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         }
         // Presentation: effects, sounds, animation inputs.
         let players = w.players.clone();
-        for pe in present.frame(&out.events, &players, 1.0 / 60.0) {
+        for pe in present.frame(&out.events, w, dishonored_sim::left_hand::dark_vision_reveals(w, ME, &cfg.tuning), 1.0 / 60.0) {
             trace.events.push(TraceEvent { tick: tk, kind: pe.kind.into(), object: if pe.object == 0 { String::new() } else { name_of(pe.object) }, name: pe.name, detail: pe.detail });
         }
         let v = sample(&game, &mut leg, &present);

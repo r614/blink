@@ -99,8 +99,15 @@ fn main() {
     let mut push = |label: &str, text: String| {
         out.push_str(&format!("\n// ---- {label} ----\n{text}\n"));
     };
-    for c in ["pub const PLAYER_MUZZLE", "pub const PAWN_MUZZLE", "pub const SHADOW_KILL_PS", "pub const SHADOW_KILL_DELAY", "pub const GAMEPLAY_PARTICLES", "const MAX_PARTICLES"] {
-        push("effects.rs", item(&fx, &fxp, c));
+    // Every top-level constant of effects.rs and audio.rs (effect paths, limits, windows): new
+    // ones the handlers use come along without editing this script.
+    for (src, file, label) in [(&fx, &fxp, "effects.rs"), (&au, &aup, "audio.rs")] {
+        let mut at = 0;
+        while let Some(k) = src[at..].find("\nconst ").map(|k| k + at + 1).into_iter().chain(src[at..].find("\npub const ").map(|k| k + at + 1)).min() {
+            let end = item_end(src.as_bytes(), k).unwrap_or_else(|| panic!("present shim: unterminated const in {}", file.display()));
+            push(label, src[k..end].to_string());
+            at = end;
+        }
     }
     push("effects.rs", format!("#[derive(Default)]\n{}", item(&fx, &fxp, "pub struct EffectSockets")));
     push("effects.rs", format!("#[derive(Clone, Copy, Default)]\n{}", item(&fx, &fxp, "pub struct Particle ")));
@@ -126,9 +133,6 @@ fn main() {
             body_from(&fx, &fxp, "fn gameplay_effects(", "let due:")
         ),
     );
-    for c in ["const PLAYER_OBJ", "const TEMP_OBJ"] {
-        push("audio.rs", item(&au, &aup, c));
-    }
     push("audio.rs", item(&au, &aup, "fn player<'a>("));
     push("audio.rs", item(&au, &aup, "fn surface_below("));
     push("audio.rs", item(&au, &aup, "fn surface_near("));
@@ -139,6 +143,16 @@ fn main() {
             block_in(&au, &aup, "pub fn drive(", "for ev in events {")
         ),
     );
+    // The Blink indicator's choice (`blink_indicator`: which system, where) and the attached
+    // effects' wanted set (`attached_effects`: trails, Dark Vision cones), each up to where it
+    // touches the Bevy instances.
+    let ind = body_from(&fx, &fxp, "fn blink_indicator(", "let target");
+    let ind = ind.split("let current").next().unwrap().to_string();
+    push("effects.rs (blink_indicator: choice)", format!("#[allow(unused_variables, clippy::all)]\nfn blink_indicator_want(view: Option<&SessionView>, session: Option<&Session>) -> Option<(&'static str, Vec3)> {{\n{ind}\nwant\n}}"));
+    let att = body_from(&fx, &fxp, "fn attached_effects(", "let mut want");
+    let att = att.split("let gone").next().unwrap().to_string();
+    push("effects.rs (attached_effects: wanted set)", format!("#[allow(unused_variables, clippy::all)]\nfn attached_want(view: &SessionView) -> Vec<((u8, u32), &'static str, Mat4)> {{\n{att}\nwant\n}}"));
+    push("effects.rs", item(&fx, &fxp, "fn facing("));
     push("npc_anim.rs", format!("#[derive(Debug, Clone, Copy, PartialEq)]\n{}", item(&na, &nap, "pub enum HitKind")));
     push("characters.rs", item(&ch, &chp, "fn collect_hits(").replace("crate::npc_anim::", ""));
     std::fs::write(&dst, out).unwrap();
