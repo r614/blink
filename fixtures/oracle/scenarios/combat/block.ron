@@ -1,12 +1,16 @@
+// MOVED from the Playground to Boyle Ext (round 8): the original Playground has no navmesh, so the
+// alerted guard attacked in place and never closed in or strafed. Placement: the quiet flat navmesh
+// corridor x = -8958, y -8871 .. -6671 (floor z -1318), the same 300 uu geometry rotated to +y (the
+// player faces +y, yaw 90; the guard faces back, yaw -90). Checkpoints unchanged.
 // The player holds block against an alerted guard: frontal NPC sword hits are blocked.
 (
     name: "combat/block",
     system: Combat,
-    map: "Playground",
+    map: "L_Boyle_Ext_P",
     description: "Hold block facing an alerted guard for 15 s: blocks, no sword damage taken.",
     setup: (
-        player: Some((position: (-5600, 0, 96), yaw: 0, sword_drawn: true)),
-        npcs: [(id: Some("guard"), position: Some((-5300, 0, 92)), yaw: 180, state: Some("Alerted"))],
+        player: Some((position: (-8958, -8500, -1222), yaw: 90, sword_drawn: true, snap_to_floor: true)),
+        npcs: [(id: Some("guard"), position: Some((-8958, -8200, -1218)), yaw: -90, state: Some("Alerted"))],
         settle: 1,
     ),
     ticks: 900,

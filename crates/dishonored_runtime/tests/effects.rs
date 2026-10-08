@@ -37,3 +37,16 @@ fn particles_without_lifetime_go_with_their_completed_emitter() {
     assert!(sim.done);
     assert!(sim.particles.is_empty());
 }
+
+/// The depth-biased alpha scale of the particle bases' compiled passes (36033, 35519, ...):
+/// 1 / ((1 - intensity) x 250), 1000 when the product is below 0.001; absent without the switch.
+#[test]
+fn soft_particle_scale_follows_the_compiled_passes() {
+    let mut p = dishonored_ir::MaterialParams::default();
+    assert_eq!(soft_scale(&p), 0.0);
+    p.static_switches.push(("Db_Enable_Depth_Biased_Alpha".into(), true));
+    // The base's intensity default 0.05: 1 / (0.95 x 250).
+    assert!((soft_scale(&p) - 1.0 / 237.5).abs() < 1e-7);
+    p.scalars.push(("Db_Depth_Biased_Alpha_Intensity".into(), 1.0));
+    assert_eq!(soft_scale(&p), 1000.0);
+}

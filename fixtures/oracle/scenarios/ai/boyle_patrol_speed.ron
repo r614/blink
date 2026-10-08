@@ -25,6 +25,6 @@
         (name: "walk speed", expect: [(metric: Max("npc.guard.speed2d"), value: 145.24, tol: 5, source: "EliteGuardLocomotionConfig: SwordPatrolWalk forward loop Sword_Patrol_WalkN authored 145.24 uu/s (modifier SwordPatrol x1.0); empty-handed EmptyWalkPatrol Empty_Walk_Patrol 126.4. Speed = authored loop speed is LIKELY, not measured", status: Unmeasured)]),
         (name: "distance in 20 s", expect: [(metric: Delta("npc.guard.x", 0, 1200), value: 0, tol: 0, source: "route geometry", status: Unmeasured)]),
     ],
-    record: [Pawn, Npc("guard")],
+    record: [Pawn, Npc("guard"), Bones("guard", ["+world"]), AnimState("guard")],
     capture: Some("scenario boyle_patrol_speed: guard Location per tick (probe_launch scenario); the guard is found by spawner name, speed = |d Location| / dt over the walking ticks"),
 )

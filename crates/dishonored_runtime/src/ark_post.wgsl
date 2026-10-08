@@ -36,6 +36,14 @@ struct ArkPost {
     dv_lid_color: vec4<f32>,
     // Blink's lens: (x distortion, y blur, on, 0).
     blink_lens: vec4<f32>,
+    // Possession's field: (R, G, on, material Time).
+    possess: vec4<f32>,
+    // Light shaft: (Bevy world position, on), LightShaftParameters, BloomTintAndThreshold,
+    // (BloomScreenBlendThreshold, 0, 0, 0).
+    shaft_pos: vec4<f32>,
+    shaft_params: vec4<f32>,
+    shaft_bloom: vec4<f32>,
+    shaft_misc: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> view: View;
@@ -54,6 +62,65 @@ struct ArkPost {
 @group(0) @binding(6) var field_noise: texture_2d<f32>;
 @group(0) @binding(7) var field_mask: texture_2d<f32>;
 @group(0) @binding(8) var repeat_sampler: sampler;
+// Possession's field noise: `PPG_PossessionVectors` `Texture2D_0`.
+@group(0) @binding(9) var possess_noise: texture_2d<f32>;
+
+// `PPG_PossessionVectors` (captured shader 0x9312eee076ac74a4, its disassembly translated
+// instruction by instruction; EFFECTS.md "Power screen effects"): a swirl field around the screen
+// centre. d = uv - 0.5; theta = atan2-like angle of d (the shader's polynomial atan with its
+// quadrant fix-ups), rho = |d|; m = 20 |d.x| + 10 |d.y|; s = sin(frac((5 T + m) / 2 pi + 0.5) 2 pi
+// - pi) + 0.1 sin(frac((20 T + m) ...)); the angle becomes theta + 0.03 R s and the field is
+// rg = k x rho (sin, -cos) with k = G (120 noise(0.6 uv + 0.2).r + 60 s), ba = rho (cos, sin) + 0.5
+// - uv - rg / (3 x (1280, 720)). R, G = `UniformPixelVector_1.xy`, T = `UniformPixelScalars_0.x`.
+// The first sampler (the previous field) is black here, so its 0.6 weight adds nothing.
+fn possession_field(uv: vec2<f32>) -> vec4<f32> {
+    let c2 = vec4<f32>(0.600000024, 2.0, -2.0, 0.180141002);
+    let c3 = vec4<f32>(0.0208350997, -0.0851330012, 0.999866009, 0.0);
+    let c4 = vec4<f32>(0.199999794, -1.0, 1.0, -0.330299497);
+    let c5 = vec4<f32>(0.0, 1.0, -2.0, 1.57079637);
+    let pi = 3.14159274;
+    let r0 = uv.xyxy * c2.xxyz + c4.xxyz;
+    // ScreenPositionScaleBias of a full-buffer pass: (0.5, -0.5, 0.5, 0.5).
+    let r1 = r0.zw * vec2<f32>(0.5, -0.5);
+    let ax = abs(r1.x);
+    let ay = abs(r1.y);
+    let z1 = -ax + ay;
+    let w1 = -ay + ax;
+    let q = select(vec2<f32>(ay, ax), vec2<f32>(ax, ay), z1 >= 0.0);
+    let swap = select(1.0, 0.0, w1 >= 0.0);
+    let t = (1.0 / q.y) * q.x;
+    let t2 = t * t;
+    var p = t2 * c3.x + c3.y;
+    p = t2 * p + c2.w;
+    p = t2 * p + c4.w;
+    let a = t * (t2 * p + c3.z);
+    let k0 = a * c5.z + c5.w;
+    var th = k0 * swap + a;
+    th = th + select(-pi, 0.0, r1.x >= 0.0);
+    let th2 = th + th;
+    let dyx = r0.w * -0.5 - r1.x;
+    let sel = dyx >= 0.0;
+    let n2x = select(r1.y, r1.x, sel);
+    let n2y = select(r1.x, r1.y, sel);
+    let fy = select(0.0, 1.0, n2y >= 0.0);
+    let fx = select(fy, 0.0, n2x >= 0.0);
+    th = fx * -th2 + th;
+    let m = ay * 10.0 + ax * 20.0;
+    let rho = sqrt(r1.x * r1.x + r1.y * r1.y);
+    let tt = ark.possess.w;
+    var w = vec2<f32>(tt * 5.0 + m, tt * 20.0 + m);
+    w = fract(w * 0.159154937 + 0.5) * 6.28318548 - pi;
+    let s = sin(w.x) + sin(w.y) * 0.1;
+    var ang = th + s * ark.possess.x * 0.03;
+    ang = fract(ang * 0.159154937 + 0.5) * 6.28318548 - pi;
+    let cs = vec2<f32>(cos(ang), sin(ang));
+    let pos = cs * rho + vec2<f32>(0.5, 0.5);
+    let n = textureSampleLevel(possess_noise, repeat_sampler, r0.xy, 0.0).x;
+    let kk = (n * 120.0 + s * 60.0) * ark.possess.y;
+    let tang = kk * vec2<f32>(cs.y * rho, -cs.x * rho);
+    let sample_uv = tang * vec2<f32>(-0.00026041668, -0.000462962955) + pos;
+    return vec4<f32>(tang, sample_uv - uv);
+}
 
 // `PPG_BendTimeVectors_Std_INST` (captured shader 0xbbe665d07e36986b): the vector field in
 // sixteenths of a pixel. Two pans of the noise (rg x 2 - 1) summed, x 0.5, faded over the
@@ -89,6 +156,9 @@ fn blink_field(uv: vec2<f32>) -> vec4<f32> {
 fn power_field(uv: vec2<f32>) -> vec4<f32> {
     if (ark.blink_lens.z > 0.5) {
         return blink_field(uv);
+    }
+    if (ark.possess.z > 0.5) {
+        return possession_field(uv);
     }
     return vec4<f32>(bend_field(uv), 0.0, 0.0);
 }
@@ -251,6 +321,131 @@ fn scene_depth(uv: vec2<f32>, pix: vec2<i32>) -> SceneDepth {
     return s;
 }
 
+// ---- UE3 light shafts (research/dishonored/systems/render_post.md "Light shafts") ----
+// The pass 0x00837480 per light: `Downsample` (global shader 158, the directional variant),
+// `RadialBlur` (157) and `Apply` (155), their disassembly translated. The targets are the scene
+// divided by SHAFT_FACTOR (keep in step with ark_post.rs); with the view filling them the
+// aspect terms are AspectRatioAndInvAspectRatio = (1, w / h, 1, h / w).
+const SHAFT_FACTOR: f32 = 4.0;
+
+fn shaft_origin(rt: vec2<f32>) -> vec2<f32> {
+    // TextureSpaceBlurOrigin: the light's position through the view projection, in uv, with the
+    // y axis in aspect-corrected units (0x00820300).
+    let clip = view.clip_from_world * vec4<f32>(ark.shaft_pos.xyz, 1.0);
+    let uv = (clip.xy / clip.w) * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+    return vec2<f32>(uv.x, uv.y * rt.y / rt.x);
+}
+
+fn shaft_depth(uv: vec2<f32>) -> f32 {
+    let sz = vec2<f32>(textureDimensions(source));
+    let p = clamp(vec2<i32>(uv * sz), vec2<i32>(0), vec2<i32>(sz) - vec2<i32>(1));
+    return scene_depth(uv, p).depth_uu;
+}
+
+// Shader 158: the 4-tap downsample (taps at 2 scene texels), alpha = the occlusion mask
+// (mean of saturate(depth / OcclusionDepthRange), at least the border term), rgb = the bloom of
+// the pixels beyond half the range above BloomThreshold, x 0.25, confined near the light.
+@fragment
+fn shaft_down(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+    let uv = in.uv;
+    let sz = vec2<f32>(textureDimensions(source));
+    let rt = floor(sz / SHAFT_FACTOR);
+    let origin = shaft_origin(rt);
+    let inv = vec2<f32>(1.0, rt.y / rt.x);
+    let uvmax = (rt - vec2<f32>(1.0)) / rt;
+    let t = uv / uvmax;
+    let s = vec2<f32>(1.0) - t;
+    let edge = s.x * t.x * t.y * s.y;
+    let q = 1.0 - 8.0 * edge;
+    let q2 = q * q;
+    let q4 = q2 * q2;
+    let e_fade = 1.0 - q4;
+    let o = vec2<f32>(2.0) / sz;
+    let uva = clamp(uv - vec2<f32>(o.x, 0.0), vec2<f32>(0.0), vec2<f32>(1.0));
+    let uvc = clamp(uv - vec2<f32>(0.0, o.y), vec2<f32>(0.0), vec2<f32>(1.0));
+    let uvd = clamp(uv - o, vec2<f32>(0.0), vec2<f32>(1.0));
+    let ca = textureSampleLevel(source, source_sampler, uva, 0.0).rgb;
+    let c0 = textureSampleLevel(source, source_sampler, uv, 0.0).rgb;
+    let cc = textureSampleLevel(source, source_sampler, uvc, 0.0).rgb;
+    let cd = textureSampleLevel(source, source_sampler, uvd, 0.0).rgb;
+    let dep = vec4<f32>(shaft_depth(uv), shaft_depth(uva), shaft_depth(uvc), shaft_depth(uvd));
+    let k = ark.shaft_params.x;
+    let mask = dot(clamp(dep * k, vec4<f32>(0.0), vec4<f32>(1.0)), vec4<f32>(0.25));
+    let bloom_mask = dot(clamp((dep - vec4<f32>(0.5 / k)) * k, vec4<f32>(0.0), vec4<f32>(1.0)), vec4<f32>(0.25));
+    let mean = (ca + c0 + cc + cd) * 0.25;
+    let c = mean * ark.shaft_params.y;
+    let lum = max(dot(mean, vec3<f32>(0.3, 0.59, 0.11)), 6.10351999e-05);
+    let over = lum - ark.shaft_bloom.w;
+    var bloom = vec3<f32>(0.0);
+    if (over >= 0.0) {
+        bloom = (over * (1.0 / lum) * c) * 2.0 * bloom_mask;
+    }
+    bloom = bloom * e_fade;
+    let d = origin - uv * inv;
+    let near = 1.0 - clamp(length(d) * 5.0, 0.0, 1.0);
+    bloom = bloom * (near * near);
+    return vec4<f32>(bloom * 0.25, max(mask, q4));
+}
+
+// Shader 157: 32 iterations of two taps along the segment towards the light, step
+// min(|d|, sqrt(|d| / 2)) in aspect space, the weights a (b) for a >= 0.25 else 4 a^2 on rgb and
+// a (b) on alpha, a from 2 and b from 1.96875 in steps of 0.0625, all / 64.
+@fragment
+fn shaft_blur(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+    let uv = in.uv;
+    let rt = vec2<f32>(textureDimensions(source));
+    let origin = shaft_origin(rt);
+    let inv = vec2<f32>(1.0, rt.y / rt.x);
+    let asp = vec2<f32>(1.0, rt.x / rt.y);
+    let d = origin - uv * inv;
+    let len = length(d);
+    let half_len = 0.5 * len;
+    let m = min(half_len, 0.5 * sqrt(half_len));
+    let step_asp = d * (m / max(half_len, 1e-20));
+    let step_uv = step_asp * asp;
+    let umin = vec2<f32>(0.0);
+    let umax = (rt - vec2<f32>(1.0)) / rt;
+    var acc = vec4<f32>(0.0);
+    var a = 2.0;
+    var b = 1.96875;
+    var p1 = uv;
+    var p2 = uv + step_uv * (1.0 / 64.0);
+    for (var i = 0; i < 32; i = i + 1) {
+        let w1 = select(4.0 * a * a, a, 4.0 * a * a - a >= 0.0);
+        let w2 = select(4.0 * b * b, b, 4.0 * b * b - b >= 0.0);
+        let t1 = textureSampleLevel(source, source_sampler, clamp(p1, umin, umax), 0.0);
+        let t2 = textureSampleLevel(source, source_sampler, clamp(p2, umin, umax), 0.0);
+        acc = acc + vec4<f32>(t1.rgb * w1, t1.a * a) + vec4<f32>(t2.rgb * w2, t2.a * b);
+        a = a - 0.0625;
+        b = b - 0.0625;
+        p1 = p1 + step_uv * 0.03125;
+        p2 = p2 + step_uv * 0.03125;
+    }
+    return acc * (1.0 / 64.0);
+}
+
+// Shader 155: scene x the occlusion factor (OcclusionMaskDarkness where the mask is 0,
+// 1.5 - OcclusionMaskDarkness / 2 where it is 1, 1 far from the light) plus the tinted blurred
+// bloom, attenuated by the scene's own brightness.
+@fragment
+fn shaft_apply(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+    let uv = in.uv;
+    let rt = vec2<f32>(textureDimensions(aux));
+    let origin = shaft_origin(rt);
+    let inv = vec2<f32>(1.0, rt.y / rt.x);
+    let d = origin - uv * inv;
+    let g = clamp(length(d) * 0.5, 0.0, 1.0);
+    let blurred = textureSampleLevel(aux, source_sampler, uv, 0.0);
+    let m = blurred.a * blurred.a;
+    let tint = blurred.rgb * ark.shaft_bloom.xyz;
+    let f0 = m * ark.shaft_params.z + (1.0 - m) * ark.shaft_params.w;
+    let f = g + (1.0 - g) * f0;
+    let scene = textureSampleLevel(source, source_sampler, uv, 0.0);
+    let lum = dot(scene.rgb, vec3<f32>(0.3, 0.59, 0.11));
+    let k = clamp(exp2(lum * -3.0) * ark.shaft_misc.x, 0.0, 1.0);
+    return vec4<f32>(tint * k * 4.0 + scene.rgb * f, scene.a);
+}
+
 // FDisFogPixelShader: the fogged scene plus the blurred bloom parts (`sBloomParts`, added after
 // the fog: `colour x prod(1 - f_i) + sum f_i C_i + bloom`).
 @fragment
@@ -275,7 +470,7 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     var colour = src.rgb;
     // Blink's / Bend Time's blur (Test_PPG `BlinkSwitch` / `BendTimeSwitch` -> `ArkPpNodeBlur`),
     // on the fogged scene.
-    if (ark.power_vectors.x > 0.0 || ark.blink_lens.z > 0.5) {
+    if (ark.power_vectors.x > 0.0 || ark.blink_lens.z > 0.5 || ark.possess.z > 0.5) {
         colour = power_blur(in.uv);
     }
     // Dark Vision's eyelid pass (`PPG_EyeLidFinal_Mat` / `PPG_DarkVisionFinal_Mat`, captured shader

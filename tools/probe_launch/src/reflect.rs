@@ -457,6 +457,60 @@ impl Reflect {
     /// Call a function by name on an object with JSON arguments (an object by parameter name or
     /// a positional list). Returns the return value and the out parameters.
     pub fn call(&mut self, c: &mut Client, obj: u32, func: &str, args: &Value) -> Result<Value> {
+        let (f, params, buf) = self.build_call(c, obj, func, args)?;
+        let after = if f.element_size != 0 {
+            // A function with a native index (operators, `SetLocation`...): `ProcessEvent`
+            // returns early for these, so run its exec thunk directly with a frame like the
+            // one ProcessEvent builds: Code = the function's own parameter script
+            // (`EX_NativeParm` per parameter), Locals = our parameter block.
+            self.call_native_exec(c, obj, f.addr, &buf, (f.aux2 >> 16) as usize)?
+        } else {
+            c.call_func(obj, f.addr, &buf)?
+        };
+        let mut out = Map::new();
+        for p in &params {
+            if p.flags & (CPF_OUT_PARM | CPF_RETURN_PARM) == 0 {
+                continue;
+            }
+            let o = p.offset as usize;
+            let len = (p.element_size * p.array_dim.max(1)) as usize;
+            let v = self.decode_dim(c, p, &after[o..o + len], 0)?;
+            let key = if p.flags & CPF_RETURN_PARM != 0 { "return".to_string() } else { p.name.clone() };
+            out.insert(key, v);
+        }
+        Ok(Value::Object(out))
+    }
+
+    /// A native function call prepared for a tick script: the `FFrame` and the parameter block
+    /// are written into a fresh game block; returns the exec thunk, `this` and the two stack
+    /// arguments (`Act::Native`). A function without a native index is an error.
+    pub fn prepare_native(&mut self, c: &mut Client, obj: u32, func: &str, args: &Value) -> Result<(u32, Vec<u32>)> {
+        let (f, _params, buf) = self.build_call(c, obj, func, args)?;
+        if f.element_size == 0 {
+            bail!("{func} has no native index");
+        }
+        if buf.len() > 0x600 {
+            bail!("parameter block too large");
+        }
+        let ret_off = (f.aux2 >> 16) as usize;
+        let base = c.alloc(0x800)?;
+        let (frame, locals) = (base, base + 0x100);
+        let script = c.read(f.addr + 0x50, 4)?;
+        let code = u32::from_le_bytes(script[..4].try_into().unwrap());
+        let thunk = c.read_u32(f.addr + 0x9c)?;
+        if code == 0 || thunk < 0x401000 {
+            bail!("native function {:#x} has no parameter script or thunk", f.addr);
+        }
+        let mut fr = Vec::new();
+        for w in [0x00fb_944c, 1, 0, 1, f.addr, obj, code, locals, 0, 0, 0, 0, 0, 0, 0, 0u32] {
+            fr.extend(w.to_le_bytes());
+        }
+        c.write(frame, &fr)?;
+        c.write(locals, &buf)?;
+        Ok((thunk, vec![frame, locals + ret_off as u32]))
+    }
+
+    fn build_call(&mut self, c: &mut Client, obj: u32, func: &str, args: &Value) -> Result<(FieldInfo, Vec<FieldInfo>, Vec<u8>)> {
         let (class_hint, fname) = match func.rsplit_once('.') {
             Some((cl, f)) => (Some(cl), f),
             None => (None, func),
@@ -492,27 +546,7 @@ impl Reflect {
             }
             _ => bail!("args: an object by parameter name or a list"),
         }
-        let after = if f.element_size != 0 {
-            // A function with a native index (operators, `SetLocation`...): `ProcessEvent`
-            // returns early for these, so run its exec thunk directly with a frame like the
-            // one ProcessEvent builds: Code = the function's own parameter script
-            // (`EX_NativeParm` per parameter), Locals = our parameter block.
-            self.call_native_exec(c, obj, f.addr, &buf, (f.aux2 >> 16) as usize)?
-        } else {
-            c.call_func(obj, f.addr, &buf)?
-        };
-        let mut out = Map::new();
-        for p in &params {
-            if p.flags & (CPF_OUT_PARM | CPF_RETURN_PARM) == 0 {
-                continue;
-            }
-            let o = p.offset as usize;
-            let len = (p.element_size * p.array_dim.max(1)) as usize;
-            let v = self.decode_dim(c, p, &after[o..o + len], 0)?;
-            let key = if p.flags & CPF_RETURN_PARM != 0 { "return".to_string() } else { p.name.clone() };
-            out.insert(key, v);
-        }
-        Ok(Value::Object(out))
+        Ok((f, params, buf))
     }
 
     /// Scratch memory in the game for native calls (one block per client session, reused).

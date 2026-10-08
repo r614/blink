@@ -203,7 +203,7 @@ fn load_textures(images: &mut Assets<Image>) -> (Option<Handle<Image>>, Option<H
 }
 
 /// The colour grade: blend the power's overrides into the camera's ArkPp source.
-fn grade(view: Option<Res<SessionView>>, mut souls: ResMut<Souls>, mut q: Query<&mut ArkPostSource>) {
+fn grade(view: Option<Res<SessionView>>, mut souls: ResMut<Souls>, mut q: Query<&mut ArkPostSource, Without<crate::reflect::ReflectCamera>>) {
     let w = view.as_ref().and_then(|v| v.me.as_ref()).map(|me| weight(&me.dark)).unwrap_or(0.0);
     souls.weight = w;
     for mut src in &mut q {

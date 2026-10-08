@@ -29,12 +29,16 @@
 //! shaders sample the target at `1 - u`. The near plane is the mirror plane (the projection's
 //! oblique `near_clip_plane`, Lengyel 2005), so geometry below the water surface is cut off.
 //!
-//! Not rendered: the fog of captures with `bEnableFog` (Boyle Ext, Isl Geom Master /
-//! Slave) and their post-process (`bEnablePostProcess`, Isl; U-960); Kismet's `SetEnabled` (the
-//! Streetsewer and Prison sewer captures start disabled; U-962); `generic_TRTC`, the cube render target no
-//! actor draws into (U-961).
+//! Fog and post-process of the captures with `bEnableFog` (Boyle Ext, Isl Geom Master / Slave) and
+//! `bEnablePostProcess` (Isl): the capture camera carries its own `ArkPost` pass with the level's DisFog
+//! layers and ArkPp settings (no bloom parts; LIKELY, U-960). Kismet's `SeqAct_Toggle` on a capture actor
+//! (`SceneCaptureActor.OnToggle`: the Streetsewer and Prison sewer captures start disabled) reaches the
+//! cameras through `MissionView::captures` (U-962). A `SceneCapture2DActor` (the Tower Return lens TV) is
+//! a capture with a `FixedView` instead of a mirror plane, drawing the whole scene (`tv_screen.rs` shows
+//! it). Not rendered: `generic_TRTC`, the cube render target no actor draws into (U-961).
 
 use crate::coords;
+use crate::ark_post::ArkPostSource;
 use crate::map_render::{MapGeometry, RenderFeatures};
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{ClearColorConfig, PerspectiveProjection, Projection, RenderTarget};
@@ -88,6 +92,16 @@ pub fn render_layers(bits: u32) -> RenderLayers {
     RenderLayers::from_layers(&v)
 }
 
+/// Render layer of the screens that sample a capture's target (`tv_screen.rs`): the game cameras draw it
+/// (`game_layers`), the capture cameras (layer 0 or a reflection layer) do not, so a screen never samples
+/// the target it would be drawn into.
+pub const SCREEN_LAYER: usize = 31;
+
+/// The render layers of the game and inspect cameras: the main layer and the screens'.
+pub fn game_layers() -> RenderLayers {
+    RenderLayers::from_layers(&[0, SCREEN_LAYER])
+}
+
 /// A capture camera: one `SceneCaptureReflectActor`.
 #[derive(Component)]
 pub struct ReflectCamera {
@@ -106,6 +120,45 @@ pub struct ReflectCamera {
     pub skip_if_unseen: bool,
     /// `MaxUpdateDist` in Bevy units (0: unlimited).
     pub max_dist: f32,
+    /// "package:actor" (lower case), the key of Kismet's toggles (`MissionView::captures`), and the
+    /// component's own `bEnabled` they start from.
+    pub key: String,
+    pub level_enabled: bool,
+    /// A `SceneCapture2DActor`: the fixed view (Bevy space) instead of the mirror plane.
+    pub fixed: Option<FixedView>,
+}
+
+/// The fixed camera of a `SceneCapture2DComponent` in Bevy space; `fov` is the horizontal angle
+/// (UE3's `FieldOfView`), `near` / `far` are in Bevy units.
+#[derive(Clone, Copy, Debug)]
+pub struct FixedView {
+    pub position: Vec3,
+    pub forward: Vec3,
+    pub up: Vec3,
+    pub fov: f32,
+    pub near: f32,
+    pub far: f32,
+}
+
+/// The key of a capture actor in Kismet's `MissionView::captures`: "package:actor", lower case.
+fn actor_key(source: &str) -> String {
+    match source.split_once(':') {
+        Some((pkg, path)) => format!("{pkg}:{}", path.rsplit('.').next().unwrap_or(path)).to_ascii_lowercase(),
+        None => source.to_ascii_lowercase(),
+    }
+}
+
+/// The render target of a material that samples a scene capture other than as the water's
+/// reflection (the lens TV, `tv_screen.rs`).
+pub fn screen_target(p: &dishonored_ir::MaterialParams) -> Option<&str> {
+    p.render_targets.iter().find(|(n, _)| !n.trim().eq_ignore_ascii_case(REALTIME_PARAM)).map(|(_, t)| t.as_str())
+}
+
+/// Whether Kismet's toggles of a capture actor leave it enabled: the last explicit On / Off
+/// (else the component's `bEnabled` from the level), inverted by an odd number of Toggles after it
+/// (`SceneCaptureActor.OnToggle`).
+pub fn toggled_enabled(level_enabled: bool, explicit: Option<bool>, flipped: bool) -> bool {
+    explicit.unwrap_or(level_enabled) ^ flipped
 }
 
 /// A primitive that samples a capture's render target (the water): the capture is skipped while
@@ -119,15 +172,33 @@ pub fn material_target(p: &dishonored_ir::MaterialParams) -> Option<&str> {
 }
 
 /// Spawn the map's capture cameras (inactive until `update_cameras` runs them) and return the
-/// render target images by lower-case object path.
-pub fn spawn_captures(map: &DishonoredMap, layers: &Layers, commands: &mut Commands, images: &mut Assets<Image>) -> HashMap<String, Handle<Image>> {
+/// render target images by lower-case object path. A capture with `bEnableFog` / `bEnablePostProcess`
+/// gets the level's DisFog layers / ArkPp post settings on its own `ArkPost` pass (U-960).
+pub fn spawn_captures(map: &DishonoredMap, layers: &Layers, features: &RenderFeatures, commands: &mut Commands, images: &mut Assets<Image>) -> HashMap<String, Handle<Image>> {
     let mut targets: HashMap<String, Handle<Image>> = HashMap::new();
     for c in &map.reflect_captures {
-        let Some(k) = layers.masks.iter().position(|m| *m == c.channels) else { continue };
+        // A 2D capture (the lens TV) draws the whole scene (layer 0); a reflection capture draws
+        // the layer of its channel set.
+        let layer = match &c.scene2d {
+            Some(_) if features.reflections => 0,
+            Some(_) => continue,
+            None => {
+                let Some(k) = layers.masks.iter().position(|m| *m == c.channels) else { continue };
+                k + 1
+            }
+        };
         let image = targets.entry(c.target.to_ascii_lowercase()).or_insert_with(|| images.add(Image::new_target_texture(1, 1, TARGET_FORMAT, None))).clone();
         let normal = coords::dir(c.normal).normalize_or(Vec3::Y);
         let d = normal.dot(coords::pos(c.normal * c.d));
-        commands.spawn((
+        let fixed = c.scene2d.map(|s| FixedView {
+            position: coords::pos(s.location),
+            forward: coords::dir(s.forward).normalize_or(Vec3::NEG_Z),
+            up: coords::dir(s.up).normalize_or(Vec3::Y),
+            fov: s.fov.to_radians(),
+            near: s.near * coords::UU_TO_BEVY,
+            far: s.far * coords::UU_TO_BEVY,
+        });
+        let mut e = commands.spawn((
             Camera3d::default(),
             Camera { order: -100, is_active: false, clear_color: ClearColorConfig::Custom(Color::BLACK), ..default() },
             RenderTarget::from(image.clone()),
@@ -136,7 +207,7 @@ pub fn spawn_captures(map: &DishonoredMap, layers: &Layers, commands: &mut Comma
             Msaa::Off,
             Tonemapping::None,
             DebandDither::Disabled,
-            RenderLayers::layer(k + 1),
+            RenderLayers::layer(layer),
             ReflectCamera {
                 image,
                 normal,
@@ -148,13 +219,25 @@ pub fn spawn_captures(map: &DishonoredMap, layers: &Layers, commands: &mut Comma
                 enabled: c.enabled,
                 skip_if_unseen: c.skip_if_unseen,
                 max_dist: c.max_update_dist * coords::UU_TO_BEVY,
+                key: actor_key(&c.source),
+                level_enabled: c.enabled,
+                fixed,
             },
             MapGeometry { instance: usize::MAX },
         ));
+        // The capture's own fog and post-process (`bEnableFog`, `bEnablePostProcess`): the level's
+        // DisFog layers and ArkPp settings through the same pass as the game view, without the
+        // bloom parts (LIKELY, U-960: the original's capture path for them is not decoded).
+        let fog_on = c.fog && features.fog && !map.environment.fog.is_empty();
+        let post_on = c.post_process && features.post;
+        if fog_on || post_on {
+            let src = ArkPostSource { fog: map.environment.fog.clone(), post: map.environment.post.clone(), fog_on, post_on, display_gamma: 2.2, capture: true, ..Default::default() };
+            let u = src.uniform(0.0);
+            e.insert((src, u));
+        }
     }
     targets
 }
-
 /// The size of a render target: `m_ResolutionType` of the back buffer (`TRT_FIXEDSIZE` keeps the
 /// object's size, 1x1 when it has none: half size).
 fn target_size(cam: &ReflectCamera, back_buffer: UVec2) -> UVec2 {
@@ -169,9 +252,12 @@ fn target_size(cam: &ReflectCamera, back_buffer: UVec2) -> UVec2 {
 
 /// Mirror the viewer about each capture's plane, throttle and cull the captures, and size their
 /// targets. Runs after transform propagation and before the cameras' projections are computed, so
-/// the mirrored view and its oblique near plane are those of this frame.
+/// the mirrored view and its oblique near plane are those of this frame. A 2D capture
+/// (`FixedView`) keeps its own view. Kismet's `SeqAct_Toggle`s (`MissionView::captures`) set each
+/// capture's `bEnabled` first.
 pub fn update_cameras(
     time: Res<Time>,
+    session: Option<Res<crate::session::SessionView>>,
     mains: Query<(&Camera, &GlobalTransform, &Projection), (With<Camera3d>, Without<ReflectCamera>)>,
     users: Query<(&ReflectUser, &ViewVisibility)>,
     mut caps: Query<(Entity, &mut ReflectCamera, &mut Camera, &mut Transform, &mut GlobalTransform, &mut Projection)>,
@@ -179,6 +265,15 @@ pub fn update_cameras(
 ) {
     if caps.is_empty() {
         return;
+    }
+    // Kismet's toggles of the capture actors (`SceneCaptureActor.OnToggle`).
+    if let Some(mv) = session.as_ref().and_then(|s| s.matchv.mission.as_ref()) {
+        for (_, mut rc, ..) in &mut caps {
+            let on = mv.captures.iter().find(|c| c.0.eq_ignore_ascii_case(&rc.key)).map_or(rc.level_enabled, |(_, set, flipped)| toggled_enabled(rc.level_enabled, *set, *flipped));
+            if rc.enabled != on {
+                rc.enabled = on;
+            }
+        }
     }
     let main = mains.iter().find(|(c, ..)| c.is_active);
     let Some((mcam, mgt, Projection::Perspective(mp))) = main else {
@@ -196,7 +291,8 @@ pub fn update_cameras(
     let mut best: HashMap<AssetId<Image>, (Entity, f32)> = HashMap::new();
     for (e, rc, ..) in &caps {
         let height = rc.normal.dot(p) - rc.d;
-        let eligible = rc.enabled && height > 0.0 && (rc.max_dist <= 0.0 || height <= rc.max_dist) && (!rc.skip_if_unseen || seen.contains(&rc.image.id()));
+        let in_range = rc.fixed.is_some() || (height > 0.0 && (rc.max_dist <= 0.0 || height <= rc.max_dist));
+        let eligible = rc.enabled && in_range && (!rc.skip_if_unseen || seen.contains(&rc.image.id()));
         if eligible && best.get(&rc.image.id()).is_none_or(|(_, h)| height < *h) {
             best.insert(rc.image.id(), (e, height));
         }
@@ -216,6 +312,16 @@ pub fn update_cameras(
                 i.resize(Extent3d { width: size.x, height: size.y, depth_or_array_layers: 1 });
             }
         }
+        let aspect = size.x as f32 / size.y as f32;
+        if let Some(v) = rc.fixed {
+            // A 2D capture: the actor's own view (UE3's field of view is the horizontal one).
+            let t = Transform::from_translation(v.position).looking_to(Dir3::new(v.forward).unwrap_or(Dir3::NEG_Z), Dir3::new(v.up).unwrap_or(Dir3::Y));
+            *tf = t;
+            *gt = GlobalTransform::from(t);
+            let fov = 2.0 * ((v.fov * 0.5).tan() / aspect).atan();
+            *proj = Projection::Perspective(PerspectiveProjection { fov, near: v.near, far: v.far, aspect_ratio: aspect, near_clip_plane: Vec4::new(0.0, 0.0, -1.0, -v.near) });
+            continue;
+        }
         // The mirrored viewer: position, forward and up reflected about the plane.
         let n = rc.normal;
         let height = n.dot(p) - rc.d;
@@ -228,10 +334,9 @@ pub fn update_cameras(
         // is drawn (`near_clip_plane`: normal and the negative distance from the camera).
         let c = t.to_matrix().transpose() * n.extend(-rc.d);
         let c = c / c.truncate().length().max(1e-6);
-        *proj = Projection::Perspective(PerspectiveProjection { fov: mp.fov, near: mp.near, far: mp.far, aspect_ratio: size.x as f32 / size.y as f32, near_clip_plane: c });
+        *proj = Projection::Perspective(PerspectiveProjection { fov: mp.fov, near: mp.near, far: mp.far, aspect_ratio: aspect, near_clip_plane: c });
     }
 }
-
 pub struct ReflectPlugin;
 
 impl Plugin for ReflectPlugin {

@@ -27,6 +27,6 @@
         (name: "first tune damage", expect: [(metric: FirstAt("Sim:Damage@player[cause=Musical]"), value: 0, tol: 0, source: "the original's first Musical damage after the alert", status: Unmeasured)]),
         (name: "damage taken", expect: [(metric: DropFrom("pawn.health", 0), value: 0, tol: 0, source: "the original's total over 10 s", status: Unmeasured)]),
     ],
-    record: [Pawn, Vitals, Npc("overseer"), SimEvents],
+    record: [Pawn, Vitals, Npc("overseer"), SimEvents, Bones("overseer", ["+world"]), AnimState("overseer")],
     capture: Some("scenario boyle_overseer_tune: spawn Pwn_MusicOverseer_Party at the spawner 43 point, alert it on the player; record its position and current behaviour, the player's health and mode per tick, and session read of the player's m_fPowersInhibitedUntil"),
 )

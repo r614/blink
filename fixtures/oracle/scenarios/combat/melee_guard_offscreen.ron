@@ -1,3 +1,7 @@
+// MOVED from the Playground to Boyle Ext (round 8): the original Playground has no navmesh, so the
+// alerted guard never walked up behind the player. Placement: the quiet flat navmesh corridor
+// x = -8958, y -8871 .. -6671 (floor z -1318), the same 300 uu geometry rotated to the y axis (the
+// player faces -y, yaw -90, with the guard 300 uu behind it at +y).
 // NPC melee damage and the offscreen reduction. Original rule (melee.md, decoded): an NPC slash deals
 // round(m_fAttackDamageMultiplier 1.0 x Attribute_MeleeDamage of the guard's sword) = 10 / 15 / 20 / 30
 // (Easy / Normal / Hard / Very Hard, Twk_Inv_SwordEliteGuard), and when the attacker is "effectively
@@ -7,11 +11,11 @@
 (
     name: "combat/melee_guard_offscreen",
     system: Combat,
-    map: "Playground",
+    map: "L_Boyle_Ext_P",
     description: "An alerted guard attacks the player from behind (offscreen): first hit 8 on Normal, front hit 15 (combat/guard_attack).",
     setup: (
-        player: Some((position: (-5600, 0, 96), yaw: 180)),
-        npcs: [(id: Some("guard"), position: Some((-5300, 0, 92)), yaw: 180, state: Some("Alerted"))],
+        player: Some((position: (-8958, -8150, -1222), yaw: -90, snap_to_floor: true)),
+        npcs: [(id: Some("guard"), position: Some((-8958, -7850, -1218)), yaw: -90, state: Some("Alerted"))],
         settle: 1,
     ),
     ticks: 900,

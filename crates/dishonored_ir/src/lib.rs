@@ -1,4 +1,4 @@
-﻿//! Normalized Dishonored content, independent of UE3 object semantics.
+//! Normalized Dishonored content, independent of UE3 object semantics.
 //!
 //! Coordinate frame: **Dishonored world space** â€” Z-up, left-handed, Unreal units (uu),
 //! exactly as the original game stores it. Simulation code works in this frame so
@@ -102,7 +102,24 @@ pub struct ReflectCapture {
     pub skip_if_unseen: bool,
     /// `MaxUpdateDist` (0: no limit), uu.
     pub max_update_dist: f32,
+    /// A `SceneCapture2DActor` (the Tower Return lens TV): a fixed camera instead of the mirror
+    /// plane (`normal`, `d` and `channels` are unused: it draws the whole scene).
+    #[serde(default)]
+    pub scene2d: Option<SceneCamera>,
 }
+
+/// The fixed view of a `SceneCapture2DComponent` (Dishonored world space): the actor's location and
+/// its X (forward) and Z (up) axes, the horizontal field of view in degrees and the clip planes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct SceneCamera {
+    pub location: Vec3,
+    pub forward: Vec3,
+    pub up: Vec3,
+    pub fov: f32,
+    pub near: f32,
+    pub far: f32,
+}
+
 /// UE3 `EBlendMode` of the base material.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MaterialBlend {
@@ -155,6 +172,68 @@ pub struct MaterialParams {
     /// `SceneCaptureReflectActor`): (parameter name, render target object path).
     #[serde(default)]
     pub render_targets: Vec<(String, String)>,
+    /// The material's compiled shaders in the install's `RefShaderCache-PC-D3D-SM3.upk`
+    /// (`ue3_shader`), for the runtime's original-shader path; None when no shader map matches.
+    #[serde(default)]
+    pub ue3: Option<Ue3Material>,
+}
+
+/// Texture slot value of a render target (scene captures) in [`Ue3Material::textures`]: its
+/// clear colour, black.
+pub const UE3_TEX_BLACK: TextureId = usize::MAX;
+
+/// A material linked to its compiled shader map, with the map's parameters and textures
+/// resolved for this material (instance). Adapted from dishonored-bevy by Eamon
+/// (github.com/Eamo5/dishonored-bevy), used with permission (its `format::Ue3Material`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Ue3Material {
+    /// Index of the shader map in the shader cache (`ShaderLibrary::maps`).
+    pub map: u32,
+    /// Values of the shader map's parameter nodes, in `shadercache::param_nodes` order.
+    pub params: Vec<[f32; 4]>,
+    /// Those parameters' names (what the level scripts set: `SeqAct_SetMatInstScalarParam`).
+    pub param_names: Vec<String>,
+    /// Texture of each pixel `Texture2D_N` expression ([`UE3_TEX_BLACK`]: a render target).
+    pub textures: Vec<Option<TextureId>>,
+    /// Faces (+X, -X, +Y, -Y, +Z, -Z) of each cube texture expression.
+    pub cube_textures: Vec<Option<Vec<TextureId>>>,
+    /// The base material's own blend mode, two-sidedness and lighting model.
+    pub blend: MaterialBlend,
+    pub two_sided: bool,
+    pub unlit: bool,
+}
+
+/// A time-varying material parameter (`MaterialInstanceTimeVarying` `ScalarParameterValues[]
+/// .ParameterValueCurve`): its value before it plays and its keys (seconds, value; linear).
+/// Adapted from dishonored-bevy by Eamon (github.com/Eamo5/dishonored-bevy), used with permission.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PostCurve {
+    pub param: String,
+    pub default: f32,
+    pub keys: Vec<[f32; 2]>,
+}
+
+impl PostCurve {
+    /// The value at `t` seconds (held before the first key and after the last).
+    pub fn at(&self, t: f32) -> f32 {
+        let Some(first) = self.keys.first() else { return self.default };
+        if t <= first[0] {
+            return first[1];
+        }
+        for w in self.keys.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if t <= b[0] {
+                let k = if b[0] > a[0] { (t - a[0]) / (b[0] - a[0]) } else { 1.0 };
+                return a[1] + (b[1] - a[1]) * k;
+            }
+        }
+        self.keys.last().map(|k| k[1]).unwrap_or(self.default)
+    }
+
+    /// When its last key is.
+    pub fn end(&self) -> f32 {
+        self.keys.last().map(|k| k[0]).unwrap_or(0.0)
+    }
 }
 
 /// How a particle material's shader combines the sprite texture (colour x opacity, baked into
@@ -258,6 +337,28 @@ pub struct Environment {
     /// Arkane `DisFog` layers (Dishonored has no HeightFog/ExponentialHeightFog actors).
     pub fog: Vec<FogSettings>,
     pub post: Option<PostSettings>,
+    /// Lights with `bRenderLightShafts` (UE3 light shafts: occlusion mask, radial blur, bloom).
+    #[serde(default)]
+    pub light_shafts: Vec<LightShaft>,
+}
+
+/// A directional light whose `LightComponent` has `bRenderLightShafts` (the retail shaft lights
+/// are all `DirectionalLightComponent`s, most with no direct light of their own).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LightShaft {
+    pub source: String,
+    /// `GetPosition()`: `-direction x TraceDistance`, a far world point towards the light, uu.
+    pub position: Vec3,
+    /// `OcclusionDepthRange`, `BloomScale`, `BloomThreshold`, `BloomScreenBlendThreshold`.
+    pub occlusion_depth_range: f32,
+    pub bloom_scale: f32,
+    pub bloom_threshold: f32,
+    pub bloom_screen_blend_threshold: f32,
+    /// `BloomTint` as a linear colour.
+    pub bloom_tint: [f32; 3],
+    /// `RadialBlurPercent`, `OcclusionMaskDarkness`.
+    pub radial_blur_percent: f32,
+    pub occlusion_mask_darkness: f32,
 }
 
 /// One `DisFog` actor's `DisFogComponent`.

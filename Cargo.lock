@@ -2503,6 +2503,7 @@ dependencies = [
  "glam",
  "serde",
  "ue3_package",
+ "ue3_shader",
 ]
 
 [[package]]
@@ -2682,6 +2683,7 @@ dependencies = [
  "serde",
  "serde_json",
  "ue3_package",
+ "ue3_shader",
 ]
 
 [[package]]
@@ -5980,6 +5982,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "lzokay-native",
+]
+
+[[package]]
+name = "ue3_shader"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "naga",
+ "serde",
+ "serde_json",
+ "ue3_package",
 ]
 
 [[package]]

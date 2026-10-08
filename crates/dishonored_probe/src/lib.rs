@@ -145,6 +145,8 @@ pub enum ScriptAction {
     Key(String, bool),
     Write(u32, Vec<u8>),
     Console(String),
+    /// Native call at the boundary: function, `this` (ecx), stack arguments.
+    Native(u32, u32, Vec<u32>),
 }
 
 /// One field of a struct's own `Children` chain (`FIELDS`).
@@ -923,6 +925,15 @@ impl Client {
                     p.push(2);
                     put_str(&mut p, c);
                 }
+                ScriptAction::Native(f, this, args) => {
+                    p.push(3);
+                    put_u32(&mut p, *f);
+                    put_u32(&mut p, *this);
+                    p.push(args.len() as u8);
+                    for a in args {
+                        put_u32(&mut p, *a);
+                    }
+                }
             }
         }
         self.request(op::SCRIPT_START, &p)?;
@@ -1049,6 +1060,13 @@ impl Client {
     /// shader `hash`, or, with `hash` 0, with any shader whose CTAB names contain `filter`.
     /// Returns (frame, shader hash, registers) per draw.
     pub fn ps_constants(&mut self, hash: u64, draws: u32, filter: &str) -> io::Result<Vec<(u32, u64, Vec<[f32; 4]>)>> {
+        Ok(self.ps_constants_tex(hash, draws, filter)?.into_iter().map(|(f, h, r, _)| (f, h, r)).collect())
+    }
+
+    /// Like `ps_constants`, plus the textures bound at each draw (stage, D3D resource pointer,
+    /// type, format, usage, pool, size, levels, FNV-64 of level 0's bytes for lockable textures).
+    #[allow(clippy::type_complexity)]
+    pub fn ps_constants_tex(&mut self, hash: u64, draws: u32, filter: &str) -> io::Result<Vec<(u32, u64, Vec<[f32; 4]>, Vec<TextureBinding>)>> {
         let mut p = Vec::new();
         p.extend(hash.to_le_bytes());
         put_u32(&mut p, draws);
@@ -1064,10 +1082,35 @@ impl Client {
             for _ in 0..224 {
                 regs.push([rd.f32()?, rd.f32()?, rd.f32()?, rd.f32()?]);
             }
-            out.push((frame, h, regs));
+            out.push((frame, h, regs, Vec::new()));
+        }
+        // The texture section (absent from an older DLL).
+        for o in out.iter_mut() {
+            if rd.pos >= rd.data.len() {
+                break;
+            }
+            let n = rd.u32()?;
+            for _ in 0..n {
+                o.3.push(TextureBinding { stage: rd.u32()?, ptr: rd.u32()?, ty: rd.u32()?, format: rd.u32()?, usage: rd.u32()?, pool: rd.u32()?, width: rd.u32()?, height: rd.u32()?, levels: rd.u32()?, hash: rd.u64()? });
+            }
         }
         Ok(out)
     }
+}
+
+/// A texture bound to a pixel stage at a captured draw (`ps_constants_tex`).
+#[derive(Clone, Debug)]
+pub struct TextureBinding {
+    pub stage: u32,
+    pub ptr: u32,
+    pub ty: u32,
+    pub format: u32,
+    pub usage: u32,
+    pub pool: u32,
+    pub width: u32,
+    pub height: u32,
+    pub levels: u32,
+    pub hash: u64,
 }
 
 #[cfg(test)]

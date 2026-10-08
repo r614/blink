@@ -1,0 +1,12 @@
+﻿[package]
+name = "ue3_shader"
+edition = "2021"
+version.workspace = true
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+naga = { version = "29", features = ["wgsl-in"] }
+ue3_package = { path = "../ue3_package" }
+serde_json = "1"

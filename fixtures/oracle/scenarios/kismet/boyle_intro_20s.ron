@@ -15,7 +15,9 @@
     checkpoints: [
         (name: "runs", expect: [(metric: Count("Kismet:*"), value: 1, tol: 0, cmp: AtLeast, source: "the level-change remote event starts the level's sequences", status: Static)]),
     ],
-    record: [Pawn, Kismet],
+    // Samuel (pawn DishonoredNPCPawn_N of spawner DishonoredSpawner_15 of L_BoyleStreet_Ext_Script, mesh skm_Samuel_Body at (-9462, 7832, -1943)):
+    // bones and AnimTree per tick during the intro Matinee (round 8: animation port capture).
+    record: [Pawn, Kismet, Bones("DishonoredSpawner_15", ["+world"]), AnimState("DishonoredSpawner_15")],
     event_tolerance: 0,
     capture: Some("ProcessEvent Activated / Deactivated on SequenceOp objects (EVENT_FILTER function=Activated,Deactivated class=SequenceOp) per tick for 20 s after ChangeLvl_fromHub_toBoyle"),
 )

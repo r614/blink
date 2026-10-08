@@ -1,3 +1,6 @@
+// Round 8: `sword_drawn: true` added. A fresh level leaves the right hand empty on the original, so the press
+// at tick 5 only drew the sword and the earlier capture never swung (the dummy kept 50 health); with the
+// sword given and its draw run out first, the press attacks. The port starts with the sword in hand.
 // Front assassination of an unaware guard (melee.md F4, ported): the assassinate move sets have Front / Left /
 // Right / Back variants chosen by the side the player is on (0x00BBA970), m_fAllowedAngleFromTargetDir is 360, and
 // the gate is the target's awareness (m_AssassinateOnAwareness: Unaware, Surprised, Suspicious, Begging), not the
@@ -8,7 +11,7 @@
     map: "Playground",
     description: "Swing at an unaware guard 120 uu ahead that faces the player.",
     setup: (
-        player: Some((position: (-5300, 0, 96), yaw: 180, pitch: 0)),
+        player: Some((sword_drawn: true, position: (-5300, 0, 96), yaw: 180, pitch: 0)),
         npcs: [(id: Some("dummy"), position: Some((-5420, 0, 92)), yaw: 0, state: Some("Idle"), faction: Some("None"))],
         settle: 30,
     ),

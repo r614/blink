@@ -17,13 +17,14 @@
         npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), position: Some((-3400, -3750, -217.5)), yaw: 90, state: Some("Idle"), faction: Some("None"))],
         settle: 30,
     ),
-    ticks: 240,
+    // 600 ticks (was 240): the bone capture follows the throw, the ragdoll, the rest and the get-up (round 8).
+    ticks: 600,
     input: [(tick: 5, action: Press(Secondary))],
     checkpoints: [
         (name: "damage", expect: [(metric: EventValue("Sim:Damage@guard[cause=Windblast]", "amount"), value: 13, tol: 1, source: "Twk_WindBlast m_Levels[0].m_Damage 20 x k (round); k = (1 - d3/3000)^2 with d3 = 601.3", status: Static)]),
         (name: "reaction class", expect: [(metric: Max("npc.guard.physics"), value: 4, tol: 0, cmp: AtLeast, source: "|momentum| 1259 >= 1000 (threshold consumer not decoded)", status: Unmeasured)]),
     ],
-    record: [Pawn, Vitals, Powers, Npc("guard"), SimEvents],
+    record: [Pawn, Vitals, Powers, Npc("guard"), SimEvents, Bones("guard", ["+world"]), AnimState("guard")],
     capture: Some("lab setup 60; lab power WindBlast 1; place -3400 -3150 -190 270; move the party guard 600 uu ahead; record npc.guard x/y/z/physics/health"),
 )
 

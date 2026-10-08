@@ -3,7 +3,7 @@
 
 use dishonored_ir::{DishonoredMap, MaterialParams, ReflectCapture, reflect_channel};
 use dishonored_runtime::map_render::RenderFeatures;
-use dishonored_runtime::reflect::{Layers, material_target};
+use dishonored_runtime::reflect::{Layers, material_target, screen_target, toggled_enabled};
 
 fn capture(target: &str, channels: u32) -> ReflectCapture {
     ReflectCapture { target: target.to_string(), channels, ..Default::default() }
@@ -48,4 +48,29 @@ fn the_water_names_its_render_target() {
     };
     assert_eq!(material_target(&p), Some("boyle_ext_MS.RealTime_refl"));
     assert_eq!(material_target(&MaterialParams::default()), None);
+}
+
+/// A material that samples a capture's target under another name is a screen (the lens TV).
+#[test]
+fn a_screen_names_its_render_target() {
+    let p = MaterialParams { render_targets: vec![("MaterialExpressionTextureSampleParameter2D_0".into(), "saili_FT_LensTV.screen_TextureRender".into())], ..Default::default() };
+    assert_eq!(screen_target(&p), Some("saili_FT_LensTV.screen_TextureRender"));
+    assert_eq!(material_target(&p), None);
+    let water = MaterialParams { render_targets: vec![("C_Realtime_reflection_Texture".into(), "boyle_ext_MS.RealTime_refl".into())], ..Default::default() };
+    assert_eq!(screen_target(&water), None);
+}
+
+/// `SceneCaptureActor.OnToggle`: On / Off set `bEnabled`, Toggle flips whatever it is (the level's
+/// value until Kismet sets it).
+#[test]
+fn kismet_toggles_set_the_capture_enabled_state() {
+    // Starts disabled in the level (PrsnSewer, Streetsewer): On enables it.
+    assert!(!toggled_enabled(false, None, false));
+    assert!(toggled_enabled(false, Some(true), false));
+    // Toggle without a prior On / Off flips the level's value.
+    assert!(toggled_enabled(false, None, true));
+    assert!(!toggled_enabled(true, None, true));
+    // On, then Toggle: off.
+    assert!(!toggled_enabled(false, Some(true), true));
+    assert!(!toggled_enabled(true, Some(false), false));
 }
