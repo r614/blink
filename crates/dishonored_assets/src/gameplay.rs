@@ -334,6 +334,12 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
                 soften_angle: cam.get_f32(sec, "m_fMaxLeanSoftenAngle").unwrap_or(d.soften_angle),
                 soften_speed: cam.get_f32(sec, "m_fMaxLeanSoftenSpeed").unwrap_or(d.soften_speed),
                 camera_tilt_percent: cam.get_f32(sec, "m_fCameraTiltPercent").unwrap_or(d.camera_tilt_percent),
+                // Class defaults (`defaultproperties` of DishonoredCameraInfluence:
+                // m_fFixedTimeStep 0.016667; StatePlayerMasterLeaning: m_fLeanSpeed 1000,
+                // m_fLeanReleaseTime 0.2); the camera ini is checked for an override.
+                fixed_time_step: cam.get_f32(sec, "m_fFixedTimeStep").unwrap_or(d.fixed_time_step),
+                lean_speed: d.lean_speed,
+                release_time: d.release_time,
             }
         },
         input: {
@@ -510,7 +516,7 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
         ],
         "pistol",
     )?;
-    let crossbow = weapon(
+    let mut crossbow = weapon(
         &mut l,
         &[
             ("item", "Twk_Inv_PlayerSpecific.Twk_Inv_CrossbowCorvo"),
@@ -520,6 +526,23 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
         ],
         "crossbow",
     )?;
+    // The fire action's clips (`m_FireCrossbowAction` plays `Crossbow_Fire`, `m_FireReloadFast`
+    // `Crossbow_Fire_FastReload`): the action ends at the player set's `AnimStateExit`, and the
+    // shot leaves at the weapon set's `DishonoredNotify_FireProjectile` (0x00A96890 -> the item
+    // context's fire, 0x00C38230), not on the press.
+    {
+        let (ply, wep) = ("Ply_Crossbow_as.Ply_Crossbow_as", "Crossbows_as.Crossbow_as");
+        for (key, set, seq, notify) in [
+            ("fire.exit_time", ply, "Crossbow_Fire", "DishonoredNotify_AnimStateExit"),
+            ("fire.fast_exit_time", ply, "Crossbow_Fire_FastReload", "DishonoredNotify_AnimStateExit"),
+            ("fire.notify_time", wep, "Crossbow_Fire", "DishonoredNotify_FireProjectile"),
+            ("fire.fast_notify_time", wep, "Crossbow_Fire_FastReload", "DishonoredNotify_FireProjectile"),
+        ] {
+            let t = crate::npc_anim::sequence_notify_time(content, "Startup", set, seq, notify).with_context(|| format!("Startup {set} {seq}: no {notify}"))?;
+            crossbow.values.insert(key.into(), t);
+            l.prov.insert(format!("crossbow.{key}"), format!("Startup.upk {set} {seq} {notify} Time / RateScale = {t}"));
+        }
+    }
 
     // The player visibility's speed value divides by `Attribute_GroundSpeedSprint` (0x00ac33b0).
     let mut ai = crate::ai_config::load_ai_config(content, &[]);

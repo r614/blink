@@ -98,6 +98,8 @@ pub fn start_climb(p: &mut PlayerState, i: u16, events: &mut Vec<SimEvent>) {
     p.lean = 0.0;
     p.lean_velocity = 0.0;
     p.lean_velocity_z = 0.0;
+    p.lean_state = false;
+    p.lean_ext = false;
     p.climb.on = Some(i);
     p.climb.time = 0.0;
     p.climb.jumped = false;

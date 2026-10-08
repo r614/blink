@@ -770,6 +770,9 @@
   },
   "crossbow": {
     "values": {
+      "fire.exit_time": 0.3983666,
+      "fire.fast_exit_time": 0.62483305,
+      "fire.fast_notify_time": 0.0,
       "fire.m_AimAssistChoiceInfo.m_AimAssistDistReduceSettings(0).m_fAimAssistWindowScale": 0.5,
       "fire.m_AimAssistChoiceInfo.m_AimAssistDistReduceSettings(0).m_fDistanceToReduce": 2000.0,
       "fire.m_AimAssistChoiceInfo.m_fAimAssistAngleWeight": 10000.0,
@@ -1176,6 +1179,7 @@
       "fire.m_fMaxContextHeightDifference": -1.0,
       "fire.m_fMaxContextRange": 10000.0,
       "fire.m_fRollVelocity": 100.0,
+      "fire.notify_time": 0.03361667,
       "item.m_BaseClassVersions(0).m_VersionNum": 7.0,
       "item.m_BaseClassVersions(1).m_VersionNum": 11.0,
       "item.m_BaseClassVersions(2).m_VersionNum": 3.0,

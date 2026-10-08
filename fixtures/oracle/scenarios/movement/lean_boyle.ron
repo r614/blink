@@ -1,5 +1,8 @@
 // Lean on the Boyle runway (U-048, HOOK_TRIAGE.md 2026-10-06, 60 Hz, CameraCache.POV): 20 degrees
-// held (15 + 5 soften), roll 10, 14.2 degrees 0.2 s after the press, 119.7 uu sideways and 21.4 down.
+// held (15 + 5 soften), roll 10, 119.7 uu sideways and 21.4 down. The 2026-10-08 scenario capture
+// of this run (fixed 1/60 s, `harness_out/.../movement__lean_boyle.original.json`) has the key
+// down on tick 20, the first head step on tick 22 and 16.150 degrees on tick 32, twelve ticks
+// after the press; the earlier "14.2 degrees 0.2 s after the press" was a real-time reading.
 // The original's lean state sets the head spring point's VELOCITY to m_fLeanSpeed (1000 uu/s)
 // every tick the key is held (0x00A76590 -> 0x00AC0950; DishonoredCamera_Lean 0x00AC5950: the
 // spring k 80 / c 12 pulls the head back to the rest point, which stays at 0), not a spring target
@@ -17,7 +20,7 @@
     checkpoints: [
         (name: "held angle", expect: [(metric: Abs(At("cam.lean_deg", 78)), value: 20, tol: 0.3, source: "HOOK_TRIAGE.md (U-048): 20 degrees held (15 + 5 soften)")]),
         (name: "roll", expect: [(metric: Abs(At("cam.roll", 78)), value: 10, tol: 0.3, source: "HOOK_TRIAGE.md (U-048): roll 10 (m_fCameraTiltPercent 0.5)")]),
-        (name: "onset", expect: [(metric: Abs(At("cam.lean_deg", 32)), value: 14.2, tol: 0.7, source: "HOOK_TRIAGE.md (U-048): 14.2 degrees 12 ticks after the press (the port's spring gives 10.7)")]),
+        (name: "onset", expect: [(metric: Abs(At("cam.lean_deg", 32)), value: 16.150, tol: 0.3, source: "scenario trace of the original (60 Hz), tick 32 = 12 ticks after the press: 2 x roll 8.075 (HOOK_TRIAGE.md U-048 gave 14.2 at 0.2 s of real time)")]),
     ],
     record: [Pawn, Camera],
     capture: Some("lab setup 60; measure lean (CameraCache.POV per tick), hold Q 20-80 and E 140-200"),

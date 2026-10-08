@@ -102,10 +102,16 @@ fn crossbow_stages() -> ReloadTiming {
     ReloadTiming::CROSSBOW
 }
 fn crossbow_fire_recovery() -> f32 {
-    0.398
+    0.3983666
 }
 fn crossbow_fast_fire() -> f32 {
-    0.625 / 1.5
+    0.62483305 / 1.5
+}
+fn crossbow_fire_notify() -> f32 {
+    0.03361667
+}
+fn crossbow_fast_fire_notify() -> f32 {
+    0.0
 }
 
 /// One player attack clip's `DishonoredNotify_AttackZone` and the end of its attack state.
@@ -322,6 +328,14 @@ pub struct CombatTuning {
     /// plays this action and loads it at the end, with no reload stage (0x00C2E570, 0x00C2E730).
     #[serde(default = "crossbow_fast_fire")]
     pub crossbow_fast_fire: f32,
+    /// `DishonoredNotify_FireProjectile` of `Crossbow_Fire` in `Crossbows_as` (0.0336 s): the
+    /// bolt leaves when the fire action's animation passes it, not on the press
+    /// (0x00A96890 -> the item context's fire, 0x00C38230).
+    #[serde(default = "crossbow_fire_notify")]
+    pub crossbow_fire_notify: f32,
+    /// The same notify of `Crossbow_Fire_FastReload` (0.0 s: the shot leaves on the press).
+    #[serde(default = "crossbow_fast_fire_notify")]
+    pub crossbow_fast_fire_notify: f32,
 
     // --- Windblast (CONFIRMED: Twk_WindBlast; per level, index = `m_CurrentLevel - 1`, the
     // block 0x00BF6780 / 0x00BF7090 read) ---
@@ -561,8 +575,11 @@ impl CombatTuning {
             crossbow_equip: 0.43,
             crossbow_reload: ReloadTiming::CROSSBOW.total(0.0),
             crossbow_reload_stages: ReloadTiming::CROSSBOW,
-            crossbow_fire_recovery: 0.398,
-            crossbow_fast_fire: 0.625 / 1.5,
+            crossbow_fire_recovery: v(cb, "fire.exit_time", crossbow_fire_recovery()),
+            // Crossbow_Fire_FastReload `AnimStateExit` over `m_FireReloadFast.m_fPlayRateOverride`.
+            crossbow_fast_fire: v(cb, "fire.fast_exit_time", 0.62483305) / v(cb, "fire.m_FireReloadFast.m_fPlayRateOverride", 1.5),
+            crossbow_fire_notify: v(cb, "fire.notify_time", crossbow_fire_notify()),
+            crossbow_fast_fire_notify: v(cb, "fire.fast_notify_time", crossbow_fast_fire_notify()),
 
             windblast_cost: c.windblast.mana_cost,
             windblast_angle: [v(wb, "m_Levels.m_Angle", 135.0), v(wb, "m_Levels[1].m_Angle", 135.0)],
