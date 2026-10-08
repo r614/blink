@@ -1,0 +1,23 @@
+// Dark Vision's cost and timeline from the tweaks (Twk_Powers.DarkVision.Twk_DarkVision): m_ManaCost 20,
+// both levels m_fDuration 30 and m_fDistance 2000, fade-in m_EyeLidClosingDuration 0.05, fade-out
+// m_PowerFadeOutDuration 0.2, m_fCooldownTimer 1. Use 0x00BE89E0 starts it (0x00BF82A0); the tick
+// (0x00BFBC90) spends the step on the fade-in, then the duration (0x00BF9AB0), then the fade-out.
+// The effect ends 30.05 s after the cast and the fade-out takes 0.2 s more.
+(
+    name: "powers/dark_vision_timeline",
+    system: Powers,
+    map: "L_Boyle_Ext_P",
+    description: "Cast Dark Vision level 2 in the open and let it run out: cost 20, active for 0.05 + 30 s, a second press inside the cooldown does nothing.",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true)), powers: [("DarkVision", 2)], left_hand: Some("DarkVision"), settle: 30),
+    ticks: 2000,
+    input: [
+        (tick: 5, action: Press(Secondary)),
+        (tick: 30, action: Press(Secondary)),
+    ],
+    checkpoints: [
+        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 20, tol: 0.5, source: "Twk_DarkVision m_ManaCost 20", status: Static)]),
+        (name: "duration", expect: [(metric: Between("Sim:DarkVision[active=true]", "Sim:DarkVision[active=false]"), value: 30.05, tol: 0.1, source: "fade-in 0.05 + m_fDuration 30 x (1 + SpellStrength 0); the second press (0.42 s after the cast, inside the 1 s cooldown) must not end it", status: Static)]),
+    ],
+    record: [Pawn, Vitals, Powers, SimEvents],
+    capture: Some("lab setup 60; lab power DarkVision 2; key Secondary at ticks 5 and 30; read m_fFadeInTimeRemaining / m_fTimeRemaining / m_fFadeOutTimeRemaining / m_fCooldownTimer of DisActivePowerComponent_DarkVision each tick"),
+)

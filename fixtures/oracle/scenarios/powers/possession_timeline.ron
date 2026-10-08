@@ -1,0 +1,28 @@
+// Possession level 2 on a guard (Twk_Powers_Possess, Twk_Possessable_BaseNPC): cost m_ManaCost 60;
+// range m_fPossessRange 2000 at level 2 (1000 at level 1: a human needs m_RequiredPossessPowerLevel
+// 2 anyway); m_IntroDuration 1.1 s of travel (stage 2, 0x00BFCD40), then the active stage (3,
+// 0x00BFB390) runs m_fPossessDuration 15 s (level 2 element of the possessable) x (1 + SpellStrength);
+// the timer is not stopped by anything but cinematic mode. The exit leaves m_fCancelCooldown 1.0 s
+// (stage 4, 0x00BED880) before another cast.
+(
+    name: "powers/possession_timeline",
+    system: Powers,
+    map: "L_Boyle_Ext_P",
+    description: "Possess an idle guard 300 uu ahead and wait: cost 60, intro 1.1 s, 15 s of possession, then the exit.",
+    setup: (
+        player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true)),
+        powers: [("Possess", 2)],
+        left_hand: Some("Possession"),
+        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), position: Some((-3400, -3450, -217.5)), yaw: 90, state: Some("Idle"), faction: Some("None"))],
+        settle: 30,
+    ),
+    ticks: 1500,
+    input: [(tick: 5, hold: 30, action: Press(Secondary))],
+    checkpoints: [
+        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 60, tol: 0.5, source: "Twk_Powers_Possess m_ManaCost 60", status: Static)]),
+        (name: "possessed", expect: [(metric: Count("Sim:PossessStart"), value: 1, tol: 0, source: "a released Possession on a possessable guard in range", status: Static)]),
+        (name: "duration", expect: [(metric: Between("Sim:PossessStart", "Sim:PossessEnd"), value: 15.0, tol: 0.2, source: "Twk_Possessable_BaseNPC m_Levels[1].m_fPossessDuration 15 x (1 + 0); the timer starts when the active stage starts (0x00BFB6C0)", status: Static)]),
+    ],
+    record: [Pawn, Vitals, Powers, Npc("guard"), SimEvents],
+    capture: Some("lab power Possess 2; possess the party guard from 300 uu; read m_PossessionStage (+0xB8), m_fPossessionTimer (+0x94) and the mana each tick"),
+)

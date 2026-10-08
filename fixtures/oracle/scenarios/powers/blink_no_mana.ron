@@ -1,0 +1,21 @@
+// Blink without enough mana (decoded, not measured). Starting the power asks CanUse (0x00BE71F0:
+// mana >= m_ManaCost 20 AND not active) before anything else (0x00BFC020 -> slot +0x1A4); when it is false
+// the power never enters aiming (no target marker, no m_bActive) and the "no mana" feedback plays
+// (slot +0x194 = 0x00BF33B0: `Snd_Power_Empty` style). The port starts aiming whatever the mana and
+// only fizzles at the release (blink.rs update: spend_mana at release).
+(
+    name: "powers/blink_no_mana",
+    system: Powers,
+    map: "L_Boyle_Ext_P",
+    description: "Hold Blink with 10 mana (cost 20): the original never starts aiming; the port aims and fizzles on release.",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true, mana: Some(10))), powers: [("Blink", 2)], left_hand: Some("Blink"), settle: 30),
+    ticks: 60,
+    input: [(tick: 5, hold: 20, action: Press(Secondary))],
+    checkpoints: [
+        (name: "no aiming", expect: [(metric: Max("left.blink_target"), value: 0, tol: 0, source: "decompiled 0x00BFC020: the start requires CanUse (mana >= m_ManaCost and not active)", status: Static)]),
+        (name: "no move", expect: [(metric: Count("Sim:BlinkStart"), value: 0, tol: 0, source: "no mana", status: Static)]),
+        (name: "mana kept", expect: [(metric: DropFrom("pawn.mana", 0), value: 0, tol: 0.5, source: "nothing is spent", status: Static)]),
+    ],
+    record: [Pawn, Vitals, Powers, SimEvents],
+    capture: Some("lab power Blink 2; write m_Mana 10 on the pawn; hold the Blink key; read m_bActive / m_BlinkMode of DishonoredActivePowerComponent_Blink"),
+)

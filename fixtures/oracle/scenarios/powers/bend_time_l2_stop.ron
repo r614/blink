@@ -1,0 +1,26 @@
+// Bend Time level 2 (Twk_BendTime m_Levels[1]): world dilation 0.0 (a full stop; the helper 0x009FA0D0 keeps
+// an exact 0 target), player dilation 0.9, duration 8 s, warm-up 0.15 s, cool-down 0.25 s, projectile
+// early wake-up 0.25 s, cost 60. Level 1 was measured (HOOK_TRIAGE.md): 0.15 / 0.85 / 12 s.
+(
+    name: "powers/bend_time_l2_stop",
+    system: Powers,
+    map: "L_Boyle_Ext_P",
+    description: "Cast Bend Time level 2 with a guard in view: the guard stops (rate 0), the caster runs at 0.9, 8 s long, cost 60.",
+    setup: (
+        player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true)),
+        powers: [("BendTime", 2)],
+        left_hand: Some("BendTime"),
+        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), position: Some((-3400, -3750, -217.5)), yaw: 90, state: Some("Idle"), faction: Some("None"))],
+        settle: 30,
+    ),
+    ticks: 900,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "world stops", expect: [(metric: Min("npc.guard.time_scale"), value: 0.0, tol: 0.001, source: "Twk_BendTime m_Levels[1].m_WorldDilation 0.0", status: Static)]),
+        (name: "caster rate", expect: [(metric: Min("power.time_scale"), value: 0.9, tol: 0.001, source: "m_PlayerDilation 0.9 (absolute caster rate, as level 1's 0.85)", status: Static)]),
+        (name: "duration", expect: [(metric: Between("Sim:BendTimeStart", "Sim:BendTimeEnd"), value: 8.0, tol: 0.05, source: "m_TimeDuration 8 x (1 + SpellStrength); level 1 measured 12.01 s", status: Static)]),
+        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 60, tol: 0.5, source: "Twk_BendTime m_ManaCost 60", status: Static)]),
+    ],
+    record: [Pawn, Vitals, Powers, Npc("guard"), SimEvents],
+    capture: Some("lab power BendTime 2; measure bendtime (WorldInfo.TimeDilation, the guard's CustomTimeDilation, BendTimeSeconds each tick)"),
+)

@@ -1,0 +1,21 @@
+// Devouring Swarm level 2 (Twk_DevouringSwarm): cost m_ManaCost 40, 60 rats (level 1: 30), spawn delay 0.65 s after the
+// cast notify, 30 s lifetime, detection radius 700, bite damage clamp(rats x 0.4, 2, 5) per 0.5 s after a
+// 2 s delay on NPCs (none on the player). The port keeps one group (U-503); the original spawns
+// individual crowd agents (`RatSwarm.CrowdAgent_SmallRat`, DisGameCrowdAgentSkeletalRat) - the hook
+// agent captures the actor count. Only the data-level checks are judged here.
+(
+    name: "powers/swarm_l2_cast",
+    system: Powers,
+    map: "L_Boyle_Ext_P",
+    description: "Summon a level 2 swarm on the runway: cost 40, 60 rats, summoned about 0.8 s after the press (notify 0.165 s + spawn delay 0.65 s).",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, pitch: -15, snap_to_floor: true)), powers: [("DevouringSwarm", 2)], left_hand: Some("DevouringSwarm"), settle: 30),
+    ticks: 300,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 40, tol: 0.5, source: "Twk_DevouringSwarm m_ManaCost 40", status: Static)]),
+        (name: "rats", expect: [(metric: Max("world.swarm_rats"), value: 60, tol: 0, source: "level 2 rat count of the tweak; the original's actor count is a capture request", status: Static)]),
+        (name: "summon time", expect: [(metric: FirstAt("Sim:SwarmSummoned"), value: 0.25, tol: 0.1, source: "cast notify DisNotify_DevouringSwarm 0.165 s after the press at 0.083 s (the rats appear m_fRatSwarmSpawnDelay later)", status: Unmeasured)]),
+    ],
+    record: [Pawn, Vitals, Powers, SimEvents],
+    capture: Some("lab power DevouringSwarm 2; cast at the floor 400 uu ahead; spawns watch for DisGameCrowdAgentSkeletalRat (count, tick of the first); mana"),
+)

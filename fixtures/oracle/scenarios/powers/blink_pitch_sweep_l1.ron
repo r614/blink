@@ -1,0 +1,64 @@
+// Blink targeting range as a function of the view pitch, level 1 (m_HorizDistance 1100, m_VertDistance 500).
+// One held aim, the view pitch changed every 12 ticks, the target read 8 ticks after each change
+// (the target updates every tick while aiming, 0x00BF5520). The rule (0x00BF52E0): looking level
+// or down the range is the view direction times m_HorizDistance; looking up it is
+// t = min(500 / sin(pitch), m_HorizDistance) along the view with the height capped at 500.
+// Sampling: target point minus the camera (eye), same frame on both sides (the 19.84 deg case of
+// HOOK_TRIAGE.md was measured this way). Boyle Ext at the party guard's detect point (-3201.5, -2763.3), facing west
+// (yaw 180): the port's collision leaves 1594 uu clear there at 5 deg (the runway has a wall at 957 uu), so the horizontal distance is the absolute x difference. The final
+// release of the held button travels; only the aiming is judged.
+(
+    name: "powers/blink_pitch_sweep_l1",
+    system: Powers,
+    map: "L_Boyle_Ext_P",
+    description: "Hold Blink level 1 aiming at 8 upward pitches (5 to 75 deg): horizontal and vertical offset of the target from the eye follow min(500 / sin, 1100) with the height capped at 500.",
+    setup: (player: Some((position: (-3201.5, -2763.3, 20), yaw: 180, snap_to_floor: true)), powers: [("Blink", 1)], left_hand: Some("Blink"), settle: 30),
+    ticks: 118,
+    input: [
+        (tick: 1, hold: 100, action: Press(Secondary)),
+        (tick: 2, action: Look(yaw: 180, pitch: 5)),
+        (tick: 14, action: Look(yaw: 180, pitch: 10)),
+        (tick: 26, action: Look(yaw: 180, pitch: 15)),
+        (tick: 38, action: Look(yaw: 180, pitch: 20)),
+        (tick: 50, action: Look(yaw: 180, pitch: 30)),
+        (tick: 62, action: Look(yaw: 180, pitch: 45)),
+        (tick: 74, action: Look(yaw: 180, pitch: 60)),
+        (tick: 86, action: Look(yaw: 180, pitch: 75)),
+    ],
+    checkpoints: [
+        (name: "pitch 5", expect: [
+            (metric: Abs(Diff("left.blink_tx", "cam.x", 10)), value: 1095.8, tol: 6, source: "PLAYER.md Blink step 1 (0x00BF52E0): t = min(m_VertDistance / d.z, m_HorizDistance) = 1100.0, horizontal t cos(pitch)", status: Static),
+            (metric: Diff("left.blink_tz", "cam.z", 10), value: 95.9, tol: 6, source: "v.z = min(t sin(pitch), m_VertDistance 500); matches the measured 19.84 deg case (1385.7, +500)", status: Static),
+        ]),
+        (name: "pitch 10", expect: [
+            (metric: Abs(Diff("left.blink_tx", "cam.x", 22)), value: 1083.3, tol: 6, source: "PLAYER.md Blink step 1 (0x00BF52E0): t = min(m_VertDistance / d.z, m_HorizDistance) = 1100.0, horizontal t cos(pitch)", status: Static),
+            (metric: Diff("left.blink_tz", "cam.z", 22), value: 191.0, tol: 6, source: "v.z = min(t sin(pitch), m_VertDistance 500); matches the measured 19.84 deg case (1385.7, +500)", status: Static),
+        ]),
+        (name: "pitch 15", expect: [
+            (metric: Abs(Diff("left.blink_tx", "cam.x", 34)), value: 1062.5, tol: 6, source: "PLAYER.md Blink step 1 (0x00BF52E0): t = min(m_VertDistance / d.z, m_HorizDistance) = 1100.0, horizontal t cos(pitch)", status: Static),
+            (metric: Diff("left.blink_tz", "cam.z", 34), value: 284.7, tol: 6, source: "v.z = min(t sin(pitch), m_VertDistance 500); matches the measured 19.84 deg case (1385.7, +500)", status: Static),
+        ]),
+        (name: "pitch 20", expect: [
+            (metric: Abs(Diff("left.blink_tx", "cam.x", 46)), value: 1033.7, tol: 6, source: "PLAYER.md Blink step 1 (0x00BF52E0): t = min(m_VertDistance / d.z, m_HorizDistance) = 1100.0, horizontal t cos(pitch)", status: Static),
+            (metric: Diff("left.blink_tz", "cam.z", 46), value: 376.2, tol: 6, source: "v.z = min(t sin(pitch), m_VertDistance 500); matches the measured 19.84 deg case (1385.7, +500)", status: Static),
+        ]),
+        (name: "pitch 30", expect: [
+            (metric: Abs(Diff("left.blink_tx", "cam.x", 58)), value: 866.0, tol: 6, source: "PLAYER.md Blink step 1 (0x00BF52E0): t = min(m_VertDistance / d.z, m_HorizDistance) = 1000.0, horizontal t cos(pitch)", status: Static),
+            (metric: Diff("left.blink_tz", "cam.z", 58), value: 500.0, tol: 6, source: "v.z = min(t sin(pitch), m_VertDistance 500); matches the measured 19.84 deg case (1385.7, +500)", status: Static),
+        ]),
+        (name: "pitch 45", expect: [
+            (metric: Abs(Diff("left.blink_tx", "cam.x", 70)), value: 500.0, tol: 6, source: "PLAYER.md Blink step 1 (0x00BF52E0): t = min(m_VertDistance / d.z, m_HorizDistance) = 707.1, horizontal t cos(pitch)", status: Static),
+            (metric: Diff("left.blink_tz", "cam.z", 70), value: 500.0, tol: 6, source: "v.z = min(t sin(pitch), m_VertDistance 500); matches the measured 19.84 deg case (1385.7, +500)", status: Static),
+        ]),
+        (name: "pitch 60", expect: [
+            (metric: Abs(Diff("left.blink_tx", "cam.x", 82)), value: 288.7, tol: 6, source: "PLAYER.md Blink step 1 (0x00BF52E0): t = min(m_VertDistance / d.z, m_HorizDistance) = 577.4, horizontal t cos(pitch)", status: Static),
+            (metric: Diff("left.blink_tz", "cam.z", 82), value: 500.0, tol: 6, source: "v.z = min(t sin(pitch), m_VertDistance 500); matches the measured 19.84 deg case (1385.7, +500)", status: Static),
+        ]),
+        (name: "pitch 75", expect: [
+            (metric: Abs(Diff("left.blink_tx", "cam.x", 94)), value: 134.0, tol: 6, source: "PLAYER.md Blink step 1 (0x00BF52E0): t = min(m_VertDistance / d.z, m_HorizDistance) = 517.6, horizontal t cos(pitch)", status: Static),
+            (metric: Diff("left.blink_tz", "cam.z", 94), value: 500.0, tol: 6, source: "v.z = min(t sin(pitch), m_VertDistance 500); matches the measured 19.84 deg case (1385.7, +500)", status: Static),
+        ]),
+    ],
+    record: [Pawn, Camera, Powers],
+    capture: Some("lab setup 60; lab power Blink 1; place -3201.5 -2763.3 20 180; hold the Blink key and step the view pitch 5..75 every 12 ticks; read DishonoredActivePowerComponent_Blink.m_TargetPoint (+0x60) against CameraCache.POV each tick"),
+)
