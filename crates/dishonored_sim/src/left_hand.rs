@@ -847,8 +847,10 @@ pub fn step_projectiles(
     dt: f32,
     sleep_delay: &dyn Fn(u32) -> f32,
     events: &mut Vec<SimEvent>,
-) {
+) -> Vec<(crate::state::PlayerId, Vec3)> {
     use dishonored_ir::items::HitRegion;
+    // Tallboy arrows that hit something: (shooter, explosion point).
+    let mut booms = Vec::new();
     let mut keep = Vec::with_capacity(state.projectiles.len());
     let projectiles = std::mem::take(&mut state.projectiles);
     'shots: for mut pr in projectiles {
@@ -891,6 +893,13 @@ pub fn step_projectiles(
                     // `rand()` for the pierce, from the shooter's stream (0x00C3A660 draws it
                     // after the damage, on a bullet that has not pierced yet).
                     let pierce_roll = if pr.kind == ProjectileKind::Bullet && pr.pierced.is_none() { state.player_mut(pr.owner).map(|o| o.roll()) } else { None };
+                    if pr.kind == ProjectileKind::TallboyArrow {
+                        // An explosive arrow explodes at its first impact, 10 uu off the hit
+                        // (0x00c550d0 / 0x00c5a4c0); the bow deals no damage of its own.
+                        events.push(SimEvent::ProjectileImpact { projectile: pr.id, point, victim: Some(state.players[i].id) });
+                        booms.push((pr.owner, point - dir * 10.0));
+                        continue 'shots;
+                    }
                     let v = &mut state.players[i];
                     let region = crate::hit_regions::hit_region(v, mv, hb, point, dir);
                     let head = region == HitRegion::Head;
@@ -955,7 +964,11 @@ pub fn step_projectiles(
                     continue 'shots;
                 }
                 (_, Some(w)) => {
-                    events.push(SimEvent::ProjectileImpact { projectile: pr.id, point: from + seg.normalize_or_zero() * w, victim: None });
+                    let point = from + seg.normalize_or_zero() * w;
+                    events.push(SimEvent::ProjectileImpact { projectile: pr.id, point, victim: None });
+                    if pr.kind == ProjectileKind::TallboyArrow {
+                        booms.push((pr.owner, point - dir * 10.0));
+                    }
                     continue 'shots;
                 }
                 _ => break,
@@ -967,6 +980,7 @@ pub fn step_projectiles(
         }
     }
     state.projectiles = keep;
+    booms
 }
 
 pub fn make_projectile(id: u32, owner: u32, kind: ProjectileKind, pos: Vec3, vel: Vec3, t: &CombatTuning) -> ProjectileState {
@@ -977,6 +991,8 @@ pub fn make_projectile(id: u32, owner: u32, kind: ProjectileKind, pos: Vec3, vel
         ProjectileKind::IncendiaryBolt => (t.incendiary_damage, t.incendiary_gravity_mult),
         // Grenades carry their own gravity (`step_grenades`).
         ProjectileKind::Grenade | ProjectileKind::StickyGrenade => (0.0, 0.0),
+        // Its gravity is the arrow tweak's (set by `step_world`); all its damage is the explosion's.
+        ProjectileKind::TallboyArrow => (0.0, 0.0),
     };
     ProjectileState { id, kind, owner, position: pos, velocity: vel, age: 0.0, damage, gravity_mult, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO, spawn: pos, pierced: None }
 }

@@ -132,6 +132,8 @@ pub mod npc_moves {
     pub const RAT_ATTACK: u8 = 9;
     /// Rat swarm eating a corpse.
     pub const RAT_EAT: u8 = 10;
+    /// The special NPC classes' contexts (research/dishonored/systems/ai.md F6).
+    pub use dishonored_ir::ai::special_moves::*;
 }
 
 impl PlayerInput {

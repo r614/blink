@@ -481,6 +481,13 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
     // NPC locomotion configs (authored loop speeds per stance modifier) and the elite guard's
     // GenericAction animation lengths, from the level script packages that cook them.
     out.locomotion = crate::npc_anim::package_loco_configs(content, NPC_ANIM_PACKAGES);
+    // The wolfhound's (`DisWolfhoundLocomotionConfig.WolfHoundLocomotionConfig`), cooked into
+    // Startup (with the city guard's).
+    for c in crate::npc_anim::package_loco_configs(content, &["Startup"]) {
+        if !out.locomotion.iter().any(|x| x.name == c.name) {
+            out.locomotion.push(c);
+        }
+    }
     if !out.locomotion.is_empty() {
         prov.insert("ai.locomotion".into(), format!("ArkComponentLocomotionConfig exports of {NPC_ANIM_PACKAGES:?}: {}", out.locomotion.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")));
     }
@@ -534,6 +541,8 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
     }
     // The AI noises (contact system, weapon tweaks, footfall notifies).
     noise_table(content, &db, &mut out, &mut prov);
+    // The special NPC classes (research/dishonored/systems/ai.md F6).
+    out.special = special_npcs(content, &out, &mut prov);
     out.provenance = prov;
     out
 }
@@ -688,4 +697,259 @@ fn rat_swarm(s: &TMap, d: &dishonored_ir::ai::RatSwarmConfig) -> dishonored_ir::
         flee_attempt_distance: [f("m_fFleeAttemptMinDistance", d.flee_attempt_distance[0]), f("m_fFleeAttemptMaxDistance", d.flee_attempt_distance[1])],
         flee_retry_delay: f("m_fFleeRetryDelay", d.flee_retry_delay),
     }
+}
+
+/// Level script packages that cook the special NPCs' tweaks: the Boyle street (tallboys,
+/// weepers), the Boyle interior (music-box Overseers) and the Overseer kennels (wolfhounds).
+pub const SPECIAL_NPC_PACKAGES: &[&str] = &["L_Boyle_Ext_Script", "L_Boyle_Int_Script", "L_BoyleStreet_Ext_Script", "L_Ovrsr_Kennel_Script", "L_Ovrsr_Script", "L_Ovrsr_Back_Script"];
+
+fn ranged(m: &TMap, k: &str, d: [f32; 2]) -> [f32; 2] {
+    match m.get(k) {
+        Some(TVal::Struct(s)) => [get_f32(s, "m_fMinValue").unwrap_or(d[0]), get_f32(s, "m_fMaxValue").unwrap_or(d[1])],
+        _ => d,
+    }
+}
+
+fn int_ranged(m: &TMap, k: &str, d: [i32; 2]) -> [i32; 2] {
+    match m.get(k) {
+        Some(TVal::Struct(s)) => {
+            let g = |n: &str, d: i32| match s.get(n) {
+                Some(TVal::I(v)) => *v,
+                _ => d,
+            };
+            [g("m_MinValue", d[0]), g("m_MaxValue", d[1])]
+        }
+        _ => d,
+    }
+}
+
+/// An attack item context (`DisTweaks_ItemContext` / `DisTweaks_MeleeAttack`) with the
+/// weapon's `Attribute_MeleeDamage` (Normal): one hit deals `ceil(multiplier x damage)`.
+fn special_attack(db: &TweakDb, path: &str, kind: u8, inhibition: f32, melee_damage: f32) -> Option<dishonored_ir::ai::SpecialAttack> {
+    let m = db.try_resolve(path)?;
+    let name = get_obj(&m, "m_pSpawnedObjectClass").map(|c| c.rsplit('.').next().unwrap_or(c).to_string()).unwrap_or_default();
+    let h = get_f32(&m, "m_fMaxContextHeightDifference").unwrap_or(-1.0);
+    let mult = get_f32(&m, "m_fAttackDamageMultiplier").unwrap_or(1.0);
+    Some(dishonored_ir::ai::SpecialAttack {
+        name,
+        kind,
+        min_range: get_f32(&m, "m_fMinContextRange").unwrap_or(0.0),
+        max_range: get_f32(&m, "m_fMaxContextRange").unwrap_or(f32::MAX),
+        ideal_range: get_f32(&m, "m_fIdealContextRange").unwrap_or(0.0),
+        max_height: if h < 0.0 { f32::MAX } else { h },
+        angle: get_f32(&m, "m_fAllowedAngle").unwrap_or(180.0),
+        cooldown: ranged(&m, "m_ContextCooldown", [0.0, 0.0]),
+        inhibition,
+        damage: (mult * melee_damage).ceil(),
+        unblockable: matches!(m.get("m_MainAttack"), Some(TVal::Struct(s)) if matches!(s.get("m_bUnblockable"), Some(TVal::B(true)))),
+    })
+}
+
+fn manage_attacks(db: &TweakDb, behaviour: &str, d: &dishonored_ir::ai::ManageAttacksConfig) -> dishonored_ir::ai::ManageAttacksConfig {
+    let Some(b) = db.try_resolve(behaviour) else { return d.clone() };
+    let subs: Vec<String> = match b.get("m_SubProcessTweaks") {
+        Some(TVal::List(l)) => l.iter().filter_map(|e| get_obj(e, "obj").map(str::to_string)).collect(),
+        _ => Vec::new(),
+    };
+    for p in subs {
+        let Some(s) = db.try_resolve(&p) else { continue };
+        if !s.contains_key("m_AttacksPerFlurry") && !s.contains_key("m_StaminaRecoveryDuration") {
+            continue;
+        }
+        return dishonored_ir::ai::ManageAttacksConfig {
+            attacks_per_flurry: int_ranged(&s, "m_AttacksPerFlurry", d.attacks_per_flurry),
+            stamina_recovery: ranged(&s, "m_StaminaRecoveryDuration", d.stamina_recovery),
+            aggression_regen_rate: get_f32(&s, "m_fAggressionRegenRate").unwrap_or(d.aggression_regen_rate),
+            aggression_delta_per_damage: get_f32(&s, "m_fAggressionDeltaPerDamage").unwrap_or(d.aggression_delta_per_damage),
+            cooldown_factor_at_min_aggression: get_f32(&s, "m_fCooldownFactorAtMinAggression").unwrap_or(d.cooldown_factor_at_min_aggression),
+        };
+    }
+    d.clone()
+}
+
+/// `Attribute_HealthMax` (Normal) of a pawn tweak (`m_pAttributeTweaks[1]`).
+fn pawn_health(db: &TweakDb, pawn: &str) -> Option<f32> {
+    let m = db.try_resolve(pawn)?;
+    let a = db.try_resolve(get_obj(&m, "m_pAttributeTweaks[1]")?)?;
+    get_f32(&a, "m_HealthMax.m_fBaseValue2_Normal")
+}
+
+/// `Attribute_MeleeDamage` (Normal) of an item tweak (`m_pAttributeTweak[1]`).
+fn item_melee_damage(db: &TweakDb, item: &str) -> Option<f32> {
+    let m = db.try_resolve(item)?;
+    let a = db.try_resolve(get_obj(&m, "m_pAttributeTweak[1]")?)?;
+    get_f32(&a, "m_MeleeDamage.m_fBaseValue2_Normal")
+}
+
+/// The special NPC classes' tuning from their pawn, brain, behaviour and weapon tweaks.
+fn special_npcs(content: &Content, base: &AiConfig, prov: &mut std::collections::BTreeMap<String, String>) -> dishonored_ir::ai::SpecialNpcConfig {
+    use dishonored_ir::ai::{SpecialNpcConfig, WeeperConfig};
+    use dishonored_ir::ai::special_moves as mv;
+    let mut out = SpecialNpcConfig::default();
+    let pkgs: Vec<String> = SPECIAL_NPC_PACKAGES.iter().filter(|p| content.has_package(p)).map(|s| s.to_string()).collect();
+    let Ok(db) = TweakDb::load_with(content, &pkgs) else {
+        prov.insert("ai.special".into(), "defaults (tweak database failed)".into());
+        return out;
+    };
+    let ini = Ini::load_layered(&content.root, "AI");
+    let inhibit = |k: &str| ini.get_f32("DishonoredGame.DisGlobalCombatManager", k).unwrap_or(0.0);
+    // Wolfhound: `Pwn_WolfHound_0` (the base tweak is a fallback-only template).
+    const HOUND: &str = "Twk_Pawn_WolfHound.Pwn_WolfHound_0";
+    const BITE: &str = "Twk_Inv_Wolfhound.Twk_Inv_WolfhoundBite";
+    const HOUND_COMBAT: &str = "AI_BehaviorTweaks_WolfHound.AI_Tweak_Behavior_WolfhoundCombat";
+    let h = &mut out.wolfhound;
+    h.health_max = pawn_health(&db, HOUND).unwrap_or(20.0);
+    let bite = item_melee_damage(&db, BITE).unwrap_or(15.0);
+    let ctx = |n: &str| format!("{BITE}.pNPCSpecific.{n}");
+    // The bite's contexts the port plays, in the item's slot order: the medium bite and the jump
+    // attack. Not ported: the arm attack (a sync grab: 5 damage per 0.5 s tick until the player
+    // escapes, which needs the sync-attack lock), the 90-degree turn bites, the attack from below
+    // and the rat chomp.
+    for (n, kind, inh) in [("pNPCAttackMedium", mv::WH_BITE, inhibit("m_fInhibitionTimeMediumAttack")), ("DisTweaks_WHJumpAttack_0", mv::WH_JUMP_ATTACK, inhibit("m_fInhibitionTimeWHJumpAttack"))] {
+        if let Some(mut a) = special_attack(&db, &ctx(n), kind, inh, bite) {
+            if kind == mv::WH_JUMP_ATTACK {
+                // `m_DamageOnKnockDown[1]` (Normal): the knockdown's damage.
+                a.damage = db.try_resolve(&ctx(n)).and_then(|m| match m.get("m_DamageOnKnockDown[1]") {
+                    Some(TVal::I(v)) => Some(*v as f32),
+                    _ => None,
+                }).unwrap_or(0.0);
+            }
+            h.attacks.push(a);
+        }
+    }
+    h.manage = manage_attacks(&db, HOUND_COMBAT, &h.manage);
+    h.walk_distance = db.try_resolve(&format!("{HOUND_COMBAT}.DisTweaks_AISubState_WH_CombatShortDistance_0")).and_then(|m| get_f32(&m, "m_fWalkDistance")).unwrap_or(300.0);
+    let attn = |p: &str, d: &AttentionConfig| db.try_resolve(p).map(|m| attention(&m, d));
+    h.unsuspecting = attn("Twk_Attn_Wolfhound.Twk_Attn_Wolfhound_Unsuspecting", &base.guard_unsuspecting);
+    h.suspecting = attn("Twk_Attn_Wolfhound.Twk_Attn_Wolfhound_Suspecting", &base.guard_suspecting);
+    prov.insert("ai.special.wolfhound".into(), format!("{HOUND} (health), {BITE} (contexts, MeleeDamage), {HOUND_COMBAT} (ManageAttacks, WH_CombatShortDistance m_fWalkDistance), Twk_Attn_Wolfhound_*; packages {pkgs:?}"));
+    // Weepers: `Pwn_WeeperMiddle_MTall_1` (the three Boyle weeper tweaks share these values).
+    const WEEPER: &str = "Pwn_WeeperMiddle_MTall_1.Pwn_WeeperMiddle_MTall_1";
+    const WEEP: &str = "AI_BehaviorTweaks_Weep.TweakBehaviors_Weep_Default";
+    const GRAB: &str = "Twk_EmptyHands_NPC.Twk_EmptyHands_NPC_Weeper.DisTweaks_InventoryItem_PawnSpecific_0.DisTweaks_WeeperGrab_2";
+    let d = WeeperConfig::default();
+    let w = &mut out.weeper;
+    if let Some(p) = db.try_resolve(WEEPER) {
+        w.plague_radius = get_f32(&p, "m_fPlagueRadius").unwrap_or(d.plague_radius);
+        w.plague_angle = get_f32(&p, "m_fPlagueDmgAngle").unwrap_or(d.plague_angle);
+        w.plague_period = get_f32(&p, "m_fPlagueDmgePeriod").unwrap_or(d.plague_period);
+        w.plague_damage = match p.get("m_iPlagueDmgPerTick") {
+            Some(TVal::I(v)) => *v as f32,
+            _ => d.plague_damage,
+        };
+        w.plague_length = ranged(&p, "m_fPlagueDmgLength", d.plague_length);
+    }
+    w.health_max = pawn_health(&db, WEEPER).unwrap_or(d.health_max);
+    if let Some(b) = db.try_resolve(WEEP) {
+        w.home_radius = get_f32(&b, "m_fHomeRadius").unwrap_or(d.home_radius);
+        w.lost_timer = [get_f32(&b, "m_fLostTimer_Min").unwrap_or(d.lost_timer[0]), get_f32(&b, "m_fLostTimer_Max").unwrap_or(d.lost_timer[1])];
+        w.coughing_cooldown = ranged(&b, "m_fCoughingCooldown", d.coughing_cooldown);
+        w.runners_allowed = match b.get("m_iSimultaneousRunnerAllowed") {
+            Some(TVal::I(v)) => (*v).max(0) as u32,
+            _ => d.runners_allowed,
+        };
+        w.time_before_running = ranged(&b, "m_TimeBeforeRunning", [d.time_before_running; 2])[0];
+        w.stand_still = [get_f32(&b, "m_fStandStillWeeping_Min").unwrap_or(d.stand_still[0]), get_f32(&b, "m_fStandStillWeeping_Max").unwrap_or(d.stand_still[1])];
+    }
+    if let Some(g) = db.try_resolve(GRAB) {
+        w.grab_range = get_f32(&g, "m_fMaxContextRange").unwrap_or(d.grab_range);
+        w.grab_height = get_f32(&g, "m_fMaxContextHeightDifference").unwrap_or(d.grab_height);
+        w.grab_angle = get_f32(&g, "m_fAllowedAngle").unwrap_or(d.grab_angle);
+    }
+    w.grab_inhibition = ini.get_f32("DishonoredGame.DisGlobalCombatManager", "m_fInhibitionTimeWeeperArmGrab").unwrap_or(d.grab_inhibition);
+    prov.insert("ai.special.weeper".into(), format!("{WEEPER} (plague, health), {WEEP}, {GRAB}, DefaultAI.ini m_fInhibitionTimeWeeperArmGrab"));
+    special_tallboy(&db, &Ini::load_layered(&content.root, "NPC"), &base.loudness_distances, &mut out, prov);
+    special_overseer(&db, &mut out, prov);
+    out
+}
+
+/// Tallboys: `Twk_Pawn_Tallboy.Pwn_Tallboy_Wood`, its combat behaviour and bow.
+fn special_tallboy(db: &TweakDb, npc_ini: &Ini, loudness: &[f32], out: &mut dishonored_ir::ai::SpecialNpcConfig, prov: &mut std::collections::BTreeMap<String, String>) {
+    use dishonored_ir::ai::special_moves as mv;
+    const PAWN: &str = "Twk_Pawn_Tallboy.Pwn_Tallboy_Wood";
+    const BOW: &str = "Twk_Inv_Tallboy.TallboyBowWithMelee";
+    const COMBAT: &str = "AI_BehaviorTweaks_TallBoy.AI_BehaviorTweaks_TallBoy_Combat";
+    const ARROW: &str = "Twk_Inv_Tallboy.TallboyExplosiveArrow_twk";
+    let tb = &mut out.tallboy;
+    tb.health_max = pawn_health(db, PAWN).unwrap_or(150.0);
+    let dmg = item_melee_damage(db, BOW).unwrap_or(15.0);
+    let ctx = |n: &str| format!("{BOW}.pTallboyBowRangedNPCSpecific.{n}");
+    if let Some(a) = special_attack(db, &ctx("DisTweaks_AttackNPCTallboyMelee_1"), mv::TALLBOY_STOMP, 0.0, dmg) {
+        tb.attacks = vec![a];
+    }
+    let fire = ctx("DisTweaks_NPCFireBow_1");
+    if let Some(a) = special_attack(db, &fire, mv::TALLBOY_FIRE_BOW, 0.0, 0.0) {
+        tb.bow = a;
+    }
+    if let Some(m) = db.try_resolve(&fire) {
+        tb.arrow_speed = get_f32(&m, "m_fProjectileSpeed").unwrap_or(2000.0);
+        tb.allies_hold_fire_radius = get_f32(&m, "m_fAlliesHoldFireRadius").unwrap_or(0.0);
+        tb.miss_angle = get_f32(&m, "m_fCheatAngleDeviation").unwrap_or(30.0);
+    }
+    tb.manage = manage_attacks(db, COMBAT, &tb.manage);
+    if let Some(s) = db.try_resolve(&format!("{COMBAT}.DisTweaks_AISubState_FindShootingPosition_0")) {
+        tb.fsp_avoidance = get_f32(&s, "m_fAvoidanceRadius").unwrap_or(250.0);
+        tb.fsp_give_up = get_f32(&s, "m_fTimeBeforeGivingUp").unwrap_or(3.0);
+    }
+    if let Some(a) = db.try_resolve(PAWN).and_then(|m| get_obj(&m, "m_pAttributeTweaks[1]").map(str::to_string)).and_then(|p| db.try_resolve(&p)) {
+        tb.accuracy = [get_f32(&a, "m_MaxAccuracy.m_fBaseValue2_Normal").unwrap_or(1.0), get_f32(&a, "m_MinAccuracy.m_fBaseValue2_Normal").unwrap_or(0.1)];
+    }
+    let arrow = db.try_resolve(ARROW);
+    tb.arrow_gravity_mult = arrow.as_ref().and_then(|m| get_f32(m, "m_fGravityMultiplier")).unwrap_or(0.5);
+    tb.arrow_speed *= arrow.as_ref().and_then(|m| get_f32(m, "m_fSpeedMultiplier")).unwrap_or(1.0);
+    if let Some(e) = arrow.as_ref().and_then(|m| get_obj(m, "m_pExplosionTweak").map(str::to_string)).and_then(|p| db.try_resolve(&p)) {
+        let d = dishonored_ir::items::ExplosionConfig::default();
+        let x = &mut tb.explosion;
+        x.radial_damage = get_f32(&e, "m_RadialDamage.m_fBaseValue2_Normal").unwrap_or(d.radial_damage);
+        x.damage_radius = get_f32(&e, "m_fDamageRadius").unwrap_or(d.damage_radius);
+        x.full_damage_radius = get_f32(&e, "m_fFullDamageRadius").unwrap_or(d.full_damage_radius);
+        x.player_damage_radius = get_f32(&e, "m_fPlayerDamageRadius").unwrap_or(d.player_damage_radius);
+        x.player_full_damage_radius = get_f32(&e, "m_fPlayerFullDamageRadius").unwrap_or(d.player_full_damage_radius);
+        x.radial_momentum = get_f32(&e, "m_fRadialMomentum").unwrap_or(d.radial_momentum);
+        x.extra_up_force = get_f32(&e, "m_fExtraUpForce").unwrap_or(d.extra_up_force);
+        x.attached_damage = 0.0;
+        x.ai_noise_radius = match e.get("m_AINoiseLoudness") {
+            Some(TVal::Name(n)) => crate::ai_level::LOUDNESS_NAMES.iter().position(|l| l == n).and_then(|i| loudness.get(i).copied()).unwrap_or(d.ai_noise_radius),
+            _ => d.ai_noise_radius,
+        };
+    }
+    let npc = |k: &str, d: f32| -> f32 { npc_ini.get_f32("DishonoredGame.StateNPCMasterTallboyAim", k).unwrap_or(d) };
+    tb.aim_align_deg = npc("m_fAimAlignYawDegrees", 20.0);
+    tb.aim_time = npc("m_fAimAlignTimeBeforeShooting", 0.25);
+    prov.insert("ai.special.tallboy".into(), format!("{PAWN} (health, accuracy), {BOW} (MeleeDamage, Fire Bow and Leg Attack contexts), {COMBAT} (ManageAttacks, FindShootingPosition), {ARROW} and its m_pExplosionTweak; StateNPCMasterTallboyAim m_fAimAlign*"));
+}
+
+/// Music-box Overseers: `Twk_Pawn_Boyle_Party.Pwn_MusicOverseer_Party`, the music box.
+fn special_overseer(db: &TweakDb, out: &mut dishonored_ir::ai::SpecialNpcConfig, prov: &mut std::collections::BTreeMap<String, String>) {
+    use dishonored_ir::ai::special_moves as mv;
+    const PAWN: &str = "Twk_Pawn_Boyle_Party.Pwn_MusicOverseer_Party";
+    const BOX: &str = "Twk_Inv_NPC_Overseer.Musical.Twk_Weapon_MusicBox_Default";
+    let o = &mut out.overseer;
+    o.health_max = pawn_health(db, PAWN).unwrap_or(40.0);
+    let dmg = item_melee_damage(db, BOX).unwrap_or(10.0);
+    let ctx = |n: &str| format!("{BOX}.pNPCSpecific.{n}");
+    if let Some(a) = special_attack(db, &ctx("DisTweaks_NPCBash_8"), mv::OVERSEER_BASH, 0.0, dmg) {
+        o.attacks = vec![a];
+    }
+    let combat = ctx("DisTweaks_NPCTune_Combat_0");
+    if let Some(t) = special_attack(db, &combat, mv::OVERSEER_TUNE, 0.0, 0.0) {
+        o.tune = t;
+    }
+    if let Some(m) = db.try_resolve(&combat) {
+        o.tune_damage = match m.get("m_iMusicEffectDamage") {
+            Some(TVal::I(v)) => *v as f32,
+            _ => 0.0,
+        };
+        o.stop_not_seeing = get_f32(&m, "m_fStopWhenNotSeeingTimer").unwrap_or(5.0);
+        o.stop_out_of_range = get_f32(&m, "m_fStopWhenOutOfRangeTimer").unwrap_or(1.0);
+        o.repulse = ranged(&m, "m_fRepulseForceRange", [1500.0, 6000.0]);
+        o.tune_period = get_obj(&m, "m_pTuneTweak").and_then(|t| db.try_resolve(t)).and_then(|t| get_f32(&t, "m_fMusicEffectPeriod")).unwrap_or(0.5);
+    }
+    let prot = ctx("DisTweaks_NPCTune_Protection_0");
+    if let Some(m) = db.try_resolve(&prot) {
+        o.ideal_distance = get_f32(&m, "m_fIdealContextRange").unwrap_or(1000.0);
+        o.inhibit_powers_radius = get_obj(&m, "m_pTuneTweak").and_then(|t| db.try_resolve(t)).and_then(|t| get_f32(&t, "m_fMusicEffectRadius_InhibitPowers")).unwrap_or(1500.0);
+    }
+    o.player_music_reduction = db.try_resolve("Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal").and_then(|m| get_f32(&m, "m_MusicDamageResilience.m_fBaseValue2_Normal")).unwrap_or(0.0);
+    prov.insert("ai.special.overseer".into(), format!("{PAWN} (health), {BOX} (MeleeDamage; Bash, Combat Tune and its DisTweaks_Tune, Protection Tune and its DisTweaks_Tune_Protection)"));
 }

@@ -1,0 +1,30 @@
+// A Boyle street Tallboy (`Twk_Pawn_Tallboy.Pwn_Tallboy_Wood`, placed where its spawner
+// `DishonoredSpawner_38` stands, faction Neutral_Guard_Street: Corvo is an enemy) aware of the
+// player 700 uu in front of it. DisBehaviorTallBoyCombat (ai.md F6): from a shooting position
+// the bow (`DisTweaks_NPCFireBow_1`: range 400-4500, cooldown 1-3 s, 2000 uu/s, gravity x0.5)
+// fires once the aim has been aligned 0.25 s (`StateNPCMasterTallboyAim`); the arrow explodes at
+// its first impact (`TallboyArrowExplosion_Twk`: 40 within 100 uu, falling to 0 at 500). The
+// original's `DisProjectile_Arrow_Explosive` spawns are the observable (events
+// `Projectile:ArrowExplosive`).
+(
+    name: "ai/boyle_tallboy_bow",
+    system: Ai,
+    map: "L_Boyle_Ext_P",
+    description: "A Boyle Tallboy shoots explosive arrows at a player 700 uu away.",
+    setup: (
+        player: Some((position: (-9400, -459, -1200), yaw: 180, snap_to_floor: true, health: Some(5000))),
+        npcs: [(id: Some("tallboy"), tweak: Some("Twk_Pawn_Tallboy.Pwn_Tallboy_Wood"), position: Some((-10100.0, -459.0, -1325.2)), yaw: 0, state: Some("Alerted"), faction: Some("Boyle_Factions.Neutral_Guard_Street"))],
+        settle: 1,
+    ),
+    ticks: 900,
+    input: [],
+    checkpoints: [
+        (name: "fights", expect: [(metric: TimeAt("npc.tallboy.state", 9), value: 1, tol: 0, cmp: AtMost, source: "Alerted: CombatBegin starts DisBehaviorTallBoyCombat (slot Combat)", status: Static)]),
+        (name: "shoots", expect: [(metric: FirstAt("Projectile:TallboyArrow@tallboy"), value: 1.0, tol: 0, cmp: AtMost, source: "the bow can fire at once at 700 uu (400-4500, in the 40 degree cone, clear line): the aim alignment takes 0.25 s (StateNPCMasterTallboyAim m_fAimAlignTimeBeforeShooting)", status: Static)]),
+        (name: "first arrow", expect: [(metric: FirstAt("Projectile:TallboyArrow@tallboy"), value: 0, tol: 0, source: "the original's first DisProjectile_Arrow_Explosive spawn after the Tallboy is alerted", status: Unmeasured)]),
+        (name: "arrows in 15 s", expect: [(metric: Count("Projectile:TallboyArrow@tallboy"), value: 0, tol: 0, source: "the original's DisProjectile_Arrow_Explosive count", status: Unmeasured)]),
+        (name: "damage taken", expect: [(metric: DropFrom("pawn.health", 0), value: 0, tol: 0, source: "explosions 40 within 100 uu of the player, 0 at 500 (TallboyArrowExplosion_Twk); the original's total", status: Unmeasured)]),
+    ],
+    record: [Pawn, Vitals, Npc("tallboy"), SimEvents],
+    capture: Some("scenario boyle_tallboy_bow: spawn Twk_Pawn_Tallboy.Pwn_Tallboy_Wood at the spawner 38 point, alert it on the player; record DisProjectile_Arrow_Explosive spawns, the Tallboy's position and current behaviour, the player's health per tick"),
+)

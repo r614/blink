@@ -42,7 +42,7 @@
 //! probe's scale, hearing through audio cells, the bark attachment to this port's states, and
 //! the alarm decision details.
 
-use dishonored_ir::ai::{AiConfig, AiLevel, AlarmBellDef, AttentionConfig, AttentionIncrease, DAL_BUSTED, DAL_HEAD_TRACK, DAL_INVESTIGATE, FactionTable, ForbiddenZone, PatrolRoute, PlayerVisibilityConfig, ProbeLight, Relationship, VisionConfig, reason};
+use dishonored_ir::ai::{AiConfig, AiLevel, NpcClass, AlarmBellDef, AttentionConfig, AttentionIncrease, DAL_BUSTED, DAL_HEAD_TRACK, DAL_INVESTIGATE, FactionTable, ForbiddenZone, PatrolRoute, PlayerVisibilityConfig, ProbeLight, Relationship, VisionConfig, reason};
 use std::collections::BTreeMap;
 use dishonored_sim::events::{NoiseContext, SimEvent};
 #[cfg(test)]
@@ -58,9 +58,11 @@ pub mod combat;
 pub mod hearing;
 pub mod rats;
 pub mod slots;
+pub mod special;
 
 pub use slots::{Behavior, MagicState, QueuedStim, SearchState, SearchSub, Stim, slot};
 use slots::AlarmCause;
+pub use special::SpecialCombat;
 
 pub const NPC_ID_BASE: PlayerId = 1000;
 /// Stimulus without a known identity (noises, corpses, help barks): attention toward a place.
@@ -413,6 +415,13 @@ pub struct Brain {
     /// The combat behaviour has started (its timers are rolled once per fight).
     #[serde(default)]
     pub in_fight: bool,
+    /// The pawn's NPC class (its brain tweak's Combat-slot behaviour, [`NpcClass`]): which
+    /// combat behaviour runs in the Combat slot.
+    #[serde(default)]
+    pub class: NpcClass,
+    /// State of the special combat behaviours ([`special`]).
+    #[serde(default)]
+    pub special: SpecialCombat,
 }
 
 fn idle_state() -> BrainState {
@@ -1580,6 +1589,8 @@ impl Brain {
             fire_timer: 0.0,
             give_up: 0.0,
             in_fight: false,
+            class: if kind == PawnKind::Guard { NpcClass::EliteGuard } else { NpcClass::Civilian },
+            special: SpecialCombat::default(),
         }
     }
 
@@ -1688,6 +1699,18 @@ impl Brain {
     }
 
     fn profile<'a>(&self, ai: &'a AiConfig, who: PlayerId) -> &'a AttentionConfig {
+        // The wolfhound's own profiles (`Twk_Attn_Wolfhound_*`: lower thresholds, faster leak);
+        // toward neutrals and allies it uses its unsuspecting one.
+        if self.class == NpcClass::Wolfhound {
+            let h = &ai.special.wolfhound;
+            let p = match self.profile_slot(who) {
+                P_ENEMY_SUS => h.suspecting.as_ref(),
+                _ => h.unsuspecting.as_ref(),
+            };
+            if let Some(p) = p {
+                return p;
+            }
+        }
         match (self.profile_slot(who), self.kind == PawnKind::Guard) {
             (P_NEUTRAL, _) => &ai.neutral,
             (P_ENEMY_UNS, true) => &ai.guard_unsuspecting,
@@ -2180,9 +2203,16 @@ impl Brain {
     /// The pawn's locomotion config: its own, else the elite guard's (the port's NPC
     /// archetypes animate with `EliteGuardLocomotionConfig` unless their tweak names another).
     pub fn loco_config<'a>(&self, ai: &'a AiConfig) -> Option<&'a dishonored_ir::npc_anim::LocoConfig> {
+        // The special classes' own configs (`m_pComponentLocomotionConfig` of their pawn tweaks).
+        let by_class = match self.class {
+            NpcClass::Wolfhound => "WolfHoundLocomotionConfig",
+            NpcClass::Tallboy => "TallBoyLocomotionConfig",
+            NpcClass::Weeper => "WeepTallLocomotionConfig",
+            _ => "EliteGuardLocomotionConfig",
+        };
         match self.loco {
             Some(i) => ai.locomotion.get(i as usize),
-            None => ai.locomotion.iter().find(|c| c.name.ends_with("EliteGuardLocomotionConfig")),
+            None => ai.locomotion.iter().find(|c| c.name.ends_with(by_class)).or_else(|| ai.locomotion.iter().find(|c| c.name.ends_with("EliteGuardLocomotionConfig"))),
         }
     }
 
@@ -2195,6 +2225,28 @@ impl Brain {
     /// x modifier, not measured; research/dishonored/systems/ai.md §2, F3).
     pub fn loco_speed(&self, ai: &AiConfig, run: bool) -> f32 {
         let Some(cfg) = self.loco_config(ai) else { return 0.0 };
+        // The special classes: their configs' modifiers, and the speed index the transit speed
+        // maps to (`m_TransitSpeedToLocomotionSpeed`: hound {0, 1, 3}, tallboy {0, 0, 1}).
+        let special: Option<(&[&str], usize)> = match self.class {
+            NpcClass::Wolfhound => Some((
+                match self.state {
+                    BrainState::Combat | BrainState::Notice => &["Sword", "Empty"],
+                    BrainState::Investigate | BrainState::Search => &["Search", "Empty"],
+                    _ => &["Empty"],
+                },
+                if run { 3 } else { 1 },
+            )),
+            NpcClass::Tallboy => Some((&["Empty"], 1)),
+            NpcClass::Weeper => Some((if matches!(self.state, BrainState::Investigate | BrainState::Search) { &["SearchEmpty", "Empty"] } else { &["Empty"] }, if run { 2 } else { 1 })),
+            NpcClass::MusicalOverseer if self.state == BrainState::Combat => Some((&["MusicBox", "Empty"], if run { 2 } else { 1 })),
+            _ => None,
+        };
+        if let Some((want, speed)) = special {
+            let Some(mi) = want.iter().find_map(|w| cfg.modifier(w)) else { return 0.0 };
+            let Some(mode) = cfg.mode(mi, speed).or_else(|| cfg.mode(mi, 1)) else { return 0.0 };
+            let forward = if mode.move_anims.len() >= 4 { mode.move_anims[2].1 } else { mode.move_anims.first().map_or(0.0, |a| a.1) };
+            return forward * cfg.modifiers[mi].speed_multiplier;
+        }
         let armed = self.kind == PawnKind::Guard;
         let want: &[&str] = match (self.state, armed) {
             (BrainState::Investigate | BrainState::Search | BrainState::RingAlarm, true) => &["SearchSword", "Sword"],
@@ -2946,6 +2998,13 @@ impl Brain {
         let d = t.position.distance(me.position);
         let dz = t.position.z - me.position.z;
         let reach = ai.combat.reachable_melee_range;
+        // The special classes' own combat behaviours (`special`).
+        if !matches!(self.class, NpcClass::EliteGuard | NpcClass::Civilian) {
+            let tg = special::Target { t: &t, sighted, visible, goal, d, dz };
+            if let Some(i) = self.special_combat(me, &tg, ws, world, nav, ai, inhibit, dt) {
+                return i;
+            }
+        }
         let face = yaw_to(me.position, goal);
         let mut i = PlayerInput { yaw: face, left_hand: LeftHand::Empty, ..Default::default() };
         let ctxs = &ai.combat.melee_contexts;
@@ -3345,6 +3404,7 @@ impl Brain {
         self.incoming = 0;
         self.threat_timer = 0.0;
         self.threat_needed = -1.0;
+        self.special = SpecialCombat::default();
     }
 
     /// Combat move in progress (`npc_moves`), for animation.

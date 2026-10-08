@@ -1,0 +1,32 @@
+// A Boyle party music-box Overseer (`Twk_Pawn_Boyle_Party.Pwn_MusicOverseer_Party`, placed at its
+// spawner `DishonoredSpawner_43`) alerted on the player 1200 uu in front of it.
+// DisBehaviorMusicalCombat (ai.md F6): MaintainDistance closes to 1000 uu, the combat tune
+// plays while the player is seen in 150-2000 uu within 45 degrees; every 0.3 s
+// (`m_fMusicEffectPeriod`) the player takes 0.3 x 90 (`m_iMusicEffectDamage`) Musical damage
+// less `Attribute_MusicDamageReduction` 0.93 (Normal): round(1.89) = 2 (0x00c66ef0, 0x00b5ccd0).
+// While a tune plays, powers cannot be used within 1500 uu (0x00bd7390): the Blink at tick 40 (the
+// player about 1270 uu away; the tune's repulse pushes it back from there) does not start.
+(
+    name: "ai/boyle_overseer_tune",
+    system: Ai,
+    map: "L_Boyle_Int_P",
+    description: "A music-box Overseer plays its combat tune at a player 1200 uu away; Blink is inhibited.",
+    setup: (
+        player: Some((position: (1917, 1167, 60), yaw: 90, snap_to_floor: true, health: Some(5000))),
+        items: ["AllPowers"],
+        left_hand: Some("Blink"),
+        npcs: [(id: Some("overseer"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_MusicOverseer_Party"), position: Some((1917.0, 2367.0, 60.0)), yaw: -90, state: Some("Alerted"))],
+        settle: 1,
+    ),
+    ticks: 600,
+    input: [(tick: 40, action: Press(Secondary))],
+    checkpoints: [
+        (name: "fights", expect: [(metric: TimeAt("npc.overseer.state", 9), value: 1, tol: 0, cmp: AtMost, source: "Alerted: CombatBegin starts DisBehaviorMusicalCombat", status: Static)]),
+        (name: "tune damage", expect: [(metric: EventValue("Sim:Damage@player[cause=Musical]", "amount"), value: 2, tol: 0.01, source: "round(0.3 x 90 x (1 - 0.93)) per 0.3 s effect tick (DisTweaks_NPCTune_Combat_0, Twk_Pawn_Corvo_Release m_MusicDamageResilience)", status: Static)]),
+        (name: "powers inhibited", expect: [(metric: Max("pawn.mode"), value: 2, tol: 0, cmp: AtMost, source: "ArePowersInhibited within m_fMusicEffectRadius_InhibitPowers 1500 of a playing Overseer: no Blink (mode 3)", status: Static)]),
+        (name: "first tune damage", expect: [(metric: FirstAt("Sim:Damage@player[cause=Musical]"), value: 0, tol: 0, source: "the original's first Musical damage after the alert", status: Unmeasured)]),
+        (name: "damage taken", expect: [(metric: DropFrom("pawn.health", 0), value: 0, tol: 0, source: "the original's total over 10 s", status: Unmeasured)]),
+    ],
+    record: [Pawn, Vitals, Npc("overseer"), SimEvents],
+    capture: Some("scenario boyle_overseer_tune: spawn Pwn_MusicOverseer_Party at the spawner 43 point, alert it on the player; record its position and current behaviour, the player's health and mode per tick, and session read of the player's m_fPowersInhibitedUntil"),
+)

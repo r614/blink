@@ -397,3 +397,12 @@ maps/TowerRtrn_Int
 session open map=L_TowerRtrn_Yard_P
 # collide: probe_launch collide <cache>/oracle/queries/L_TowerRtrn_Yard_P.txt <out>/L_TowerRtrn_Yard_P.results.txt  (generator harness-collision-v1)
 maps/TowerRtrn_Yard
+# --- special NPC classes (research/dishonored/systems/ai.md F6, 2026-10-08) ---
+# Each places the class's pawn tweak at its Boyle spawner point and alerts it on the player; the
+# brain channel (m_pCurrentBehavior) should show the class's combat behaviour.
+ai/boyle_tallboy_bow
+ai/boyle_weeper_plague
+ai/boyle_overseer_tune
+# The Overseer's power inhibition: the player's m_fPowersInhibitedUntil while the tune plays.
+session read object=pawn path=m_fPowersInhibitedUntil
+# ai/hound_bite needs a map that cooks the wolfhound (L_Ovrsr_*): not capturable on the port's maps.
