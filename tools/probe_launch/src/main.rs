@@ -14,6 +14,10 @@
 //! probe_launch measure <jump|fall|sprint|slide|all> [--out DIR]
 //! probe_launch kill
 //!     Ends the game process of the current session.
+//! probe_launch session start [--map M] [--hz 60] | stop | repl | <op> ['<json>' | key=value...]
+//!     The persistent hooked session and its JSON ops (session.rs, ORACLE.md).
+//! probe_launch scenario <NAME | file.ron>... [--no-reload] [--partial] [--channel ..] [--json OUT]
+//!     Per-tick trace of a scenario spec into the oracle cache (capture.rs).
 use anyhow::{Context, Result, bail};
 use dishonored_probe::Client;
 use std::path::PathBuf;
