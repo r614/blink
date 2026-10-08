@@ -333,6 +333,8 @@ pub const SPRING_RAZOR_PS: &str = "Vfx_Weapon.Effects.SpringRazor.Ps_SpringRazor
 pub const PISTOL_TRACER_PS: &str = "Vfx_Weapon.Effects.Trails.Ps_Pistol_StdTracer_01";
 pub const BOLT_TRAIL_PS: &str = "Vfx_Weapon.Effects.Trails.StdBolt_Trail";
 pub const GRENADE_TRAIL_PS: &str = "Vfx_Weapon.Effects.Grenade.Ps_Grenade_Trail";
+/// `Twk_Proj_Arrow_Flare.m_pTrailEffect`.
+pub const FLARE_TRAIL_PS: &str = "Vfx_Weapon.Effects.FlareBolts.Flare_Bolt_Trail";
 /// Dark Vision's NPC vision cones (`Twk_DarkVision` / pawn `m_VisionConePatrolTemplate`).
 pub const DV_CONE_PS: &str = "Vfx_GamePlay.DarkVision.Ps_DVision_VCone_Blue_01";
 
@@ -389,6 +391,24 @@ pub enum FxRequest {
     HandCast { path: String, at: Vec3, dir: Vec3 },
     /// A beam one-shot (`PEB2STM_UserSet` target) from `from` to `to`.
     Beam { path: &'static str, from: Vec3, to: Vec3 },
+    /// The trail of a projectile that ended within its launch tick (never in a snapshot, so
+    /// `attached_want` cannot start it): started at the launch and deactivated at once, as the
+    /// projectile's trail component is when the projectile explodes (`DeactivateSystem`); it ends
+    /// once its particles (if any) die.
+    EndedTrail { path: &'static str, xf: Mat4 },
+}
+
+/// The trail a projectile kind carries (`Twk_Proj_*` `m_pTrailEffect`): `StdBolt_Trail` for
+/// bolts and sleep darts, `Flare_Bolt_Trail` for the incendiary bolt, `Ps_Grenade_Trail` for
+/// grenades; bullets have the tracer beam instead (None).
+pub fn trail_of(kind: dishonored_sim::state::ProjectileKind) -> Option<&'static str> {
+    use dishonored_sim::state::ProjectileKind as K;
+    match kind {
+        K::Bullet => None,
+        K::Bolt | K::SleepDart => Some(BOLT_TRAIL_PS),
+        K::IncendiaryBolt => Some(FLARE_TRAIL_PS),
+        K::Grenade | K::StickyGrenade => Some(GRENADE_TRAIL_PS),
+    }
 }
 
 /// What the gameplay effects remember between frames.
@@ -416,6 +436,8 @@ pub struct FxScene<'a> {
     pub contact: Option<&'a ContactSystem>,
     pub world: Option<&'a CollisionWorld>,
     pub now: f32,
+    /// The projectiles of the snapshot (a fired one missing from it ended in its launch tick).
+    pub projectiles: &'a [ProjectileState],
 }
 
 impl FxEventState {
@@ -448,8 +470,13 @@ impl FxEventState {
                     let Some(p) = find(*defender) else { continue };
                     ("Vfx_Weapon.Effects.Ps_SwordSparks_Parry".into(), p.position + Vec3::Z * 40.0 + fwd(p.yaw) * 40.0, fwd(p.yaw))
                 }
-                SimEvent::Fired { id, bolt, projectile } => {
+                SimEvent::Fired { id, bolt, projectile, kind, origin, velocity } => {
                     self.bolts.insert(*projectile, *bolt);
+                    // A projectile already gone (it hit within its launch tick): its trail starts
+                    // and stops here; live ones get theirs from `attached_want`.
+                    if let Some(path) = trail_of(*kind).filter(|_| !s.projectiles.iter().any(|q| q.id == *projectile)) {
+                        out.push(FxRequest::EndedTrail { path, xf: facing(*origin, *velocity) });
+                    }
                     let Some(p) = find(*id) else { continue };
                     if *bolt {
                         // The crossbow's muzzle (`Twk_Inv_Crossbow`'s fire tweak), in front of the eye.
@@ -613,13 +640,8 @@ pub fn blink_indicator_want(me: Option<&PlayerState>, world: &CollisionWorld, mv
 pub fn attached_want(me: Option<&PlayerState>, others: &[PlayerState], projectiles: &[ProjectileState], reveals: &[PlayerId]) -> Vec<((u8, u32), &'static str, Mat4)> {
     let mut want: Vec<((u8, u32), &'static str, Mat4)> = Vec::new();
     for p in projectiles {
-        use dishonored_sim::state::ProjectileKind as K;
-        let path = match p.kind {
-            // The pistol tracer is a beam from the muzzle to the hit (a `Beam` request on impact).
-            K::Bullet => continue,
-            K::Bolt | K::SleepDart | K::IncendiaryBolt => BOLT_TRAIL_PS,
-            K::Grenade | K::StickyGrenade => GRENADE_TRAIL_PS,
-        };
+        // The pistol tracer is a beam from the muzzle to the hit (a `Beam` request on impact).
+        let Some(path) = trail_of(p.kind) else { continue };
         want.push(((0, p.id), path, facing(p.position, p.velocity)));
     }
     if me.is_some_and(|me| me.vitals.dark_vision_remaining > 0.0) {
@@ -673,7 +695,7 @@ impl SoundEventState {
                 posts.push((cue("sword_clash"), on(defender)));
                 posts.push((cue("sword_parry_whoosh"), on(defender)));
             }
-            SimEvent::Fired { id, bolt, projectile } => {
+            SimEvent::Fired { id, bolt, projectile, .. } => {
                 self.projectiles.insert(projectile, bolt);
                 // One shot, one sound: skipped when a fire animation's AkEvent notify already
                 // posted it for this pawn, and recorded so a later notify of the same shot is
