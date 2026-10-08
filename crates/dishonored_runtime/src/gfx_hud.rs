@@ -1,572 +1,763 @@
-//! In-game HUD rebuilt from Dishonored's own Scaleform movie (`UI_HUD_SF` `HUD`), loaded from
-//! the install at runtime: the movie is flattened into textured quads (atlas sub-rectangle +
-//! stage transform) and drawn as Bevy UI images, scaled from the 1280x720 stage.
+//! The in-game HUD: Dishonored's own Scaleform movie (`UI_HUD_SF` "HUD", with the
+//! `Common_assets.lib` library it imports from) played on a [`gfx_stage::Stage`], driven the way
+//! `DisGFxMoviePlayerHUD` drives it (its tick 0x00BB2280 and helpers). The movie's ActionScript
+//! classes are in `hud_widgets.rs`; the popup queue in `hud_popups.rs`; the HUD options in
+//! `hud_settings.rs`. See research/dishonored/HUD.md.
 //!
-//! ActionScript is not run. The pieces it drives are reproduced from simulation state:
-//! health/mana fills are cropped along the shard like the movie's `mask_mc`, crosshair variants
-//! follow the left-hand item, the crouch icon follows stance, and the equipment emblem shows
-//! the left-hand item's icon (`UI_ItemIcons_Large`, `UI_Powers_Large`) with its ammo.
+//! Per frame, from the session view:
+//! - player status (0x00B9F6E0): `FillHealthGauge(health * 100 / max, smallUpg, largeUpg,
+//!   health <= m_LowHealthThreshold (30), (health + regen) * 100 / max)` and `FillManaGauge`
+//!   (low <= m_LowManaThreshold 19) when a value changes; the gauges `Open()` / `Close()` with
+//!   the HUD visibility option (contextual: shown `m_fPlayerInfoDisplayDuration` 8 s after a
+//!   change, and while low on health or mana);
+//! - equipment (0x00B981F0): `SetWeapon(item, loaded + reserve, loaded)` / `SetPower(item,
+//!   active, enoughMana)` / `SetEmptyEquipment()` when the left hand changes;
+//! - crosshair (0x00B9FF30): the dot (`SetCrosshairState`), the item's crosshair symbol attached
+//!   as `_aspect_mc` (`DisGFxMoviePlayerHUD.m_CrosshairSettings`, DefaultUI.ini) or the
+//!   interaction crosshair (`m_InteractionCrosshairSettings`), `SetDispersion`, and the
+//!   crosshair moving to the focused interactable (`m_bCrosshairMovement`, speed 4.5);
+//! - stance icon (0x00B95ED0): "sneak" / "slide";
+//! - interactions (0x00BA6150): `interactions_window_mc.SetInteractions(name, lines)` with the
+//!   key tags converted to "[key]" (0x00BA4620);
+//! - game messages: `gameMsg_mc.SetGameMessage(msg, m_fGameMessageDuration 5 s)`;
+//! - the objective / target popups through the queue (0x00BAFE70);
+//! - the pickup log (`AddLogItem(name (count), icon)`, 0x00B98630);
+//! - subtitles and choices (`hud_dialogue.rs`).
 
-use crate::map_render::to_image;
+use crate::gfx_stage::{Draw, Event, Fonts, ImageRef, MovieData, SlotImage, SlotText, Stage, StageTextures, StageView};
+use crate::hud_popups::{PopupContent, PopupQueue};
+use crate::hud_widgets::{HudFxWidgets, HudWidgets, ObjState, TargetTexts, TaskLine};
 use crate::session::{Session, SessionView};
 use bevy::prelude::*;
-use dishonored_assets::swf::{ColorTransform, Matrix, Movie, Quad};
+use bevy::text::{LetterSpacing, LineHeight};
+use dishonored_assets::swf::Movie;
 use dishonored_sim::input::LeftHand;
 use dishonored_sim::state::LeftPhase;
 use std::collections::HashMap;
-use ue3_package::ObjRef;
-use ue3_package::properties::find;
+use std::sync::Arc;
 
-const STAGE: Vec2 = Vec2::new(1280.0, 720.0);
+/// `DisTweaks_GFxMoviePlayerHUD` values (Twk_InGameUI.Twk_GFxMoviePlayerHUD) and the HUD config
+/// (DefaultGame.ini `[DishonoredGame.DishonoredHUD]`).
+pub const LOW_HEALTH_THRESHOLD: f32 = 30.0;
+pub const LOW_MANA_THRESHOLD: f32 = 19.0;
+pub const PLAYER_INFO_DISPLAY_DURATION: f32 = 8.0;
+pub const GAME_MESSAGE_DURATION: f32 = 5.0;
+pub const TARGET_NOTIFICATION_DURATION: f32 = 5.0;
+pub const LOCATION_DISCOVERY_DURATION: f32 = 5.0;
+pub const CROSSHAIR_INTERPOLATION_SPEED: f32 = 4.5;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Group {
-    Static,
-    HealthFill,
-    HealthGhost,
-    ManaFill,
-    ManaGhost,
-    CrossDot,
-    CrossGun,
-    CrossCrossbow,
-    CrossPower,
-    Crouch,
-    /// Objectives banner (top right): match mode, clock, score.
-    Objectives,
-    /// Target notification paper (top right, below): Contracts target clues.
-    TargetNote,
-    /// Mission objective marker (`objectiveMarker_primary`), projected on the task target.
-    Marker,
-    /// Backdrop of the end-of-mission panel (`hud_obj_bkgdR`).
-    OutcomeBg,
+/// The HUD movie on its stage.
+pub struct HudMovie {
+    pub stage: Stage,
+    pub w: HudWidgets,
+    draws: Vec<Draw>,
 }
 
-#[derive(Component)]
-pub struct HudQuad {
-    group: Group,
-    quad: Quad,
-    /// A part of the gun / crossbow crosshair that `SetDispersion` moves.
-    cross: Option<CrossPart>,
+/// The HUD effects movie (`UI_HUDFX.HUDFX`: stealth shroud, damage directions), drawn under
+/// the HUD.
+pub struct FxMovie {
+    pub stage: Stage,
+    pub w: HudFxWidgets,
+    draws: Vec<Draw>,
+    view: Entity,
 }
 
-/// One quad of a crosshair part (`_parts_ext_mc` / `_parts_int_mc` . `partK`) with what the
-/// movie's `SetDispersion` script needs to move it: the part clip's authored matrix, the
-/// part's authored position and the quad's corners relative to the part origin (in the part
-/// clip's space, pixels).
-#[derive(Clone, Debug, PartialEq)]
-pub struct CrossPart {
-    pub ext: bool,
-    pub index: u8,
-    /// Crosshair centre (stage pixels).
-    pub centre: Vec2,
-    /// Authored clip matrix (2x2 columns, translation in pixels).
-    pub clip: [f32; 6],
-    /// Authored part position in the clip (pixels).
-    pub part: Vec2,
-    pub local: [Vec2; 4],
+/// `m_fMaxDamage` (Twk_GFxMoviePlayerHUD): damage giving full intensity.
+pub const MAX_DAMAGE: f32 = 70.0;
+
+/// Popup titles and HUD texts (localization: `Twk_InGameUI.int`,
+/// `DishonoredGame.int [DisGFxMoviePlayerHUD_Texts]`, `RPG.int`, ...).
+#[derive(Default, Clone)]
+pub struct HudTexts {
+    pub titles: [String; 4],
+    pub target: Option<Arc<TargetTexts>>,
+    pub ammo: [String; 8],
+    pub ammo_icons: [Option<String>; 8],
+    pub coin: (String, String),
+    pub rune: (String, String),
+    pub elixirs: [String; 2],
+    pub charm: String,
+    /// `m_EquipmentIcons[EDisPowerWheelItem]` (DefaultUI.ini `[DishonoredGame.DisGlobalUIManager]`).
+    pub equipment_icons: HashMap<u8, String>,
+    /// Key display names (Settings.int `[Keys]`).
+    pub keys: HashMap<String, String>,
+    /// `DisTweaks_ChapterTarget`s (DishonoredGame.upk `Twk_ChapterInfoList.ChapterTargets.*`):
+    /// object name (lower case) -> (`m_TargetName`, `m_TargetPortraitPath`), read on first use.
+    pub chapter_targets: Option<HashMap<String, (String, Option<String>)>>,
 }
 
-/// The crosshair layout `SetDispersion(d, p)` gives a part (decoded from the `UI_HUD_SF` "HUD"
-/// ActionScript, classes `Crosshair_Gun` / `Crosshair_Crossbow`, PLAYER.md "Ranged weapon
-/// dispersion"): the quad's stage corners and the clip alpha factor (0..1).
-/// - Gun: `_parts_int_mc._rotation = -5 p / 100`, `_parts_ext_mc._rotation = -20 p / 100`,
-///   `_parts_ext_mc._alpha = 100 - 1.5 max(0, p - 50)`; in both clips parts 0..3 go to
-///   (d, -d), (d, d), (-d, d), (-d, -d).
-/// - Crossbow (no clip rotation): `offset = -15 p / 100`; ext alpha `100 - 1.5 max(0, p - 40)`;
-///   ext part0 `_y = -d - offset`, part1 `_x = d + offset`, part2 `_y = d + offset`, part3
-///   `_x = -d - offset`, part4 `_x = d + offset + 5`, part5 `_x = -d - offset - 5`; int part0
-///   `_y = -d`, part1 (`_x = d`, `_y = -d`), part2 `_y = d`, part3 (`_x = -d`, `_y = -d`).
-///   Coordinates the script does not set keep their authored value.
-pub fn cross_layout(cp: &CrossPart, crossbow: bool, d: f32, p: f32) -> ([Vec2; 4], f32) {
-    let mut pos = cp.part;
-    let [a, b, c, dd, tx, ty] = cp.clip;
-    // AS2 `_rotation` keeps the clip's scale and replaces its rotation (degrees, clockwise).
-    let lin = |rot_deg: Option<f32>| -> [f32; 4] {
-        match rot_deg {
-            None => [a, b, c, dd],
-            Some(r) => {
-                let (sx, sy) = ((a * a + b * b).sqrt(), (c * c + dd * dd).sqrt());
-                let (s, co) = r.to_radians().sin_cos();
-                [co * sx, s * sx, -s * sy, co * sy]
-            }
-        }
-    };
-    let (m, alpha) = if !crossbow {
-        let corner = [Vec2::new(d, -d), Vec2::new(d, d), Vec2::new(-d, d), Vec2::new(-d, -d)];
-        if let Some(c) = corner.get(cp.index as usize) {
-            pos = *c;
-        }
-        if cp.ext {
-            (lin(Some(-20.0 * p / 100.0)), (100.0 - 1.5 * (p - 50.0).max(0.0)) / 100.0)
-        } else {
-            (lin(Some(-5.0 * p / 100.0)), 1.0)
-        }
-    } else {
-        let off = -15.0 * p / 100.0;
-        if cp.ext {
-            match cp.index {
-                0 => pos.y = -d - off,
-                1 => pos.x = d + off,
-                2 => pos.y = d + off,
-                3 => pos.x = -d - off,
-                4 => pos.x = d + off + 5.0,
-                5 => pos.x = -d - off - 5.0,
-                _ => {}
-            }
-            (lin(None), (100.0 - 1.5 * (p - 40.0).max(0.0)) / 100.0)
-        } else {
-            match cp.index {
-                0 => pos.y = -d,
-                1 => pos = Vec2::new(d, -d),
-                2 => pos.y = d,
-                3 => pos = Vec2::new(-d, -d),
-                _ => {}
-            }
-            (lin(None), 1.0)
-        }
-    };
-    let corners = cp.local.map(|l| {
-        let v = pos + l;
-        cp.centre + Vec2::new(tx, ty) + Vec2::new(m[0] * v.x + m[2] * v.y, m[1] * v.x + m[3] * v.y)
-    });
-    (corners, alpha.clamp(0.0, 1.0))
-}
-
-/// The crosshair parts of an exported crosshair sprite: quad path -> (ext clip, part index,
-/// clip matrix, part position), from the sprite's frame-0 display lists.
-fn cross_parts(movie: &Movie, export: &str) -> HashMap<String, (bool, u8, Matrix, Vec2)> {
+/// Read the chapter targets (the target notification's name and portrait).
+fn chapter_targets(content: &dishonored_assets::Content) -> HashMap<String, (String, Option<String>)> {
+    use ue3_package::properties::{Value, find};
     let mut out = HashMap::new();
-    let Some(sp) = movie.exports.get(export).and_then(|id| movie.sprites.get(id)) else { return out };
-    for clip in movie.display_list(sp, 0) {
-        let ext = match clip.name.as_deref() {
-            Some("_parts_ext_mc") => true,
-            Some("_parts_int_mc") => false,
-            _ => continue,
+    let Ok(pkg) = content.package("DishonoredGame") else { return out };
+    for i in 0..pkg.exports.len() {
+        if pkg.export_class(i) != "DisTweaks_ChapterTarget" {
+            continue;
+        }
+        let path = pkg.obj_path(ue3_package::ObjRef::Export(i));
+        let key = path.rsplit('.').next().unwrap_or(&path).to_ascii_lowercase();
+        let Ok(h) = pkg.read_object(i) else { continue };
+        let s = |n: &str| {
+            find(&h.properties, n).and_then(|p| match &p.value {
+                Value::Str(s) if !s.is_empty() => Some(s.clone()),
+                _ => None,
+            })
         };
-        let cm = clip.matrix.unwrap_or_default();
-        let Some(csp) = clip.character.and_then(|c| movie.sprites.get(&c)) else { continue };
-        for part in movie.display_list(csp, 0) {
-            let Some(k) = part.name.as_deref().and_then(|n| n.strip_prefix("part")).and_then(|n| n.parse::<u8>().ok()) else { continue };
-            let pm = part.matrix.unwrap_or_default();
-            let path = format!("{export}/{}/part{k}", clip.name.as_deref().unwrap_or(""));
-            out.insert(path, (ext, k, cm, Vec2::new(pm.tx, pm.ty) / 20.0));
+        if let Some(name) = s("m_TargetName") {
+            out.insert(key, (name, s("m_TargetPortraitPath")));
         }
     }
     out
 }
 
-impl HudQuad {
-    /// Group of the quad, for the HUD options (`hud_settings.rs`).
-    pub fn group_name(&self) -> &'static str {
-        match self.group {
-            Group::Static => "static",
-            Group::HealthFill | Group::HealthGhost | Group::ManaFill | Group::ManaGhost => "gauge",
-            Group::CrossDot => "cross_dot",
-            Group::CrossGun | Group::CrossCrossbow | Group::CrossPower => "cross",
-            Group::Crouch => "stance",
-            Group::Objectives => "objectives",
-            Group::TargetNote => "target_note",
-            Group::Marker => "marker",
-            Group::OutcomeBg => "outcome",
-        }
-    }
-    /// Quad belongs to the health/mana gauge frame (`masterHUD_mc`).
-    pub fn in_gauges(&self) -> bool {
-        self.quad.path.starts_with("masterHUD_mc")
-    }
-}
-
-#[derive(Component)]
-pub struct EquipIcon {
-    /// Stage-space centre and size.
-    center: Vec2,
-    size: f32,
-}
-
-#[derive(Component)]
-pub struct AmmoText {
-    pos: Vec2,
+/// What the native side last sent (so values are sent only when they change, as the original).
+#[derive(Default)]
+struct Native {
+    health: Option<(i32, i32, i32, u8)>,
+    mana: Option<(i32, i32, i32, u8)>,
+    info_timer: f32,
+    status_visible: bool,
+    ticked_once: bool,
+    equipment: Option<(u8, bool, bool, i32, i32)>,
+    crosshair_pos: Option<Vec2>,
+    marker: Option<crate::gfx_stage::Id>,
+    inv: Option<dishonored_sim::state::Inventory>,
+    game_msg_seen: u32,
+    location_seen: u32,
+    last_mission: Option<(String, u32)>,
 }
 
 #[derive(Resource, Default)]
 pub struct GfxHud {
-    icons: HashMap<&'static str, Handle<Image>>,
     pub loaded: bool,
+    pub hud: Option<HudMovie>,
+    pub fx: Option<FxMovie>,
+    pub view: Option<Entity>,
+    pub texts: HudTexts,
+    pub popups: PopupQueue,
+    native: Native,
+    /// Requests from the harness (`{"hud": ...}` steps).
+    pub tests: Vec<crate::hud_popups::HudTest>,
+    /// The install (its package cache serves the external textures).
+    pub content: Option<Arc<dishonored_assets::Content>>,
 }
 
-/// Left-hand item -> icon texture (package, Texture2D name).
-const ICONS: &[(&str, &str, &str)] = &[
-    ("blink", "UI_Powers_Large", "BlinkBig"),
-    ("windblast", "UI_Powers_Large", "WindblastBig"),
-    ("darkvision", "UI_Powers_Large", "DarkVisionBig"),
-    ("pistol", "UI_ItemIcons_Large", "Gun_Large"),
-    ("crossbow", "UI_ItemIcons_Large", "Crossbow_Large"),
-    ("sword", "UI_ItemIcons_Large", "CorvoSword_Large"),
-    ("possession", "UI_Powers_Large", "PossessionBig"),
-    ("bendtime", "UI_Powers_Large", "BendTimeBig"),
-    ("swarm", "UI_Powers_Large", "RatSwarmBig"),
-    ("grenade", "UI_ItemIcons_Large", "CorvoGrenade_Large"),
-    ("sticky", "UI_ItemIcons_Large", "CorvoStickyGrenade_Large"),
-    ("razor", "UI_ItemIcons_Large", "SpringRazor_Large"),
-    ("sleepdart", "UI_ItemIcons_Large", "CrossbowSleepDart_Large"),
-    ("flarebolt", "UI_ItemIcons_Large", "CrossbowFlareBolt_Large"),
-];
+// --- assets ---------------------------------------------------------------------------------
 
-fn movie_raw(pkg: &ue3_package::Package, name: &str) -> Option<Vec<u8>> {
-    let i = (0..pkg.exports.len()).find(|&i| pkg.export_class(i) == "SwfMovie" && pkg.obj_path(ObjRef::Export(i)).ends_with(name))?;
-    let h = pkg.read_object(i).ok()?;
-    let (n, raw) = find(&h.properties, "RawData").and_then(|p| p.array_raw())?;
-    Some(raw[..n].to_vec())
+fn read_ini_lines(content: &dishonored_assets::Content, file: &str) -> Vec<String> {
+    let p = content.root.join("DishonoredGame").join("Config").join(file);
+    std::fs::read(&p).map(|b| dishonored_assets::loc::decode(&b).lines().map(|l| l.trim().to_string()).collect()).unwrap_or_default()
 }
 
-fn texture(content: &dishonored_assets::Content, pkg: &ue3_package::Package, name: &str, images: &mut Assets<Image>) -> Option<Handle<Image>> {
-    let ti = (0..pkg.exports.len()).find(|&i| pkg.export_class(i) == "Texture2D" && pkg.obj_path(ObjRef::Export(i)).rsplit('.').next().is_some_and(|n| n.eq_ignore_ascii_case(name)))?;
-    let t = dishonored_assets::texture::read_texture(content, pkg, ti, 1024).ok()?;
-    Some(images.add(to_image(&t)))
+fn load_texts(content: &dishonored_assets::Content) -> HudTexts {
+    let loc = dishonored_assets::loc::Localization::load(&content.root, "INT", &["DishonoredGame", "RPG", "Money_twk_Abs", "Runes_twk", "Twk_InGameUI", "Settings"]);
+    let g = |s: &str, k: &str, d: &str| loc.get(s, k).map(str::to_string).unwrap_or_else(|| d.to_string());
+    let tw = "Twk_GFxMoviePlayerHUD DisTweaks_GFxMoviePlayerHUD";
+    let hud = "DisGFxMoviePlayerHUD_Texts";
+    let mut t = HudTexts {
+        titles: [
+            g(tw, "m_NewObjectivePopupTitle", "New Objective"),
+            g(tw, "m_UpdatedObjectivePopupTitle", "Objective Updated"),
+            g(tw, "m_CompletedObjectivePopupTitle", "Objective Completed"),
+            g(tw, "m_FailedObjectivePopupTitle", "Objective Failed"),
+        ],
+        target: Some(Arc::new(TargetTexts {
+            assassinated: g(hud, "t_targetAssassinated", "Target assassinated"),
+            neutralized: g(hud, "t_targetNeutralized", "Target neutralized"),
+            rescued: g(hud, "t_targetRescued", "Target rescued"),
+            spared: g(hud, "t_targetSpared", "Target spared"),
+        })),
+        ..Default::default()
+    };
+    let ammo_keys = ["Bullet", "Bullet_Explosive", "Arrow", "Arrow_Sleep", "Arrow_Flare", "SpringRazor", "Grenade", "StickyGrenade"];
+    for (i, k) in ammo_keys.iter().enumerate() {
+        t.ammo[i] = loc.get("DisAmmoType", k).unwrap_or(*k).to_string();
+    }
+    t.coin = (g("AbstractItems.Coins_AbsItm DisAbstractItem", "m_ItemName", "Coin"), g("AbstractItems.Coins_AbsItm DisAbstractItem", "m_PluralItemName", "Coins"));
+    t.rune = (g("AbstractItems.Rune_AbsItm DisAbstractItem", "m_ItemName", "Rune"), g("AbstractItems.Rune_AbsItm DisAbstractItem", "m_PluralItemName", "Runes"));
+    t.elixirs = [g("DisUISelectionType", "Health", "Health"), g("DisUISelectionType", "Mana", "Mana")];
+    t.charm = g("DisUISelectionType", "BoneCharm", "Bone Charm");
+    for ((sec, k), v) in &loc.entries {
+        if sec == "Keys" {
+            t.keys.insert(k.clone(), v.clone());
+        }
+    }
+    // DefaultUI.ini: equipment icons and the journal's ammo icon names.
+    for l in read_ini_lines(content, "DefaultUI.ini") {
+        if let Some(rest) = l.strip_prefix("m_EquipmentIcons[") {
+            if let Some((i, v)) = rest.split_once("]=") {
+                if let Ok(i) = i.parse::<u8>() {
+                    t.equipment_icons.insert(i, v.trim_matches('"').to_string());
+                }
+            }
+        }
+        if let Some(rest) = l.strip_prefix("m_AmmoTypeIconNames[") {
+            if let Some((i, v)) = rest.split_once("]=") {
+                if let Ok(i) = i.parse::<usize>() {
+                    if i < 8 {
+                        t.ammo_icons[i] = Some(format!("UI_ItemIcons_Small.{}_Small", v.trim_matches('"')));
+                    }
+                }
+            }
+        }
+    }
+    t
 }
 
-pub fn setup_gfx_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+pub fn setup_gfx_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut textures: ResMut<StageTextures>) {
     let mut hud = GfxHud::default();
     let Ok(content) = dishonored_assets::Content::locate() else { return commands.insert_resource(hud) };
-    let Ok(pkg) = content.package("UI_HUD_SF") else { return commands.insert_resource(hud) };
-    let Some(movie) = movie_raw(&pkg, "HUD").and_then(|r| Movie::parse(&r).ok()) else {
+    let fonts = Fonts::load(&content);
+    let Some(main) = MovieData::load(&content, "UI_HUD_SF", "HUD", &fonts, "") else {
         warn!("HUD movie not readable");
         return commands.insert_resource(hud);
     };
-    let root_list = movie.display_list(&movie.root, 0);
-    let placed = |name: &str| root_list.iter().find(|p| p.name.as_deref() == Some(name)).cloned();
-    let frame0 = |_: &str, _: &dishonored_assets::swf::Sprite| 0usize;
-    let mut pieces: Vec<(Group, Quad)> = Vec::new();
-    // Health / mana gauges.
-    if let Some(p) = placed("masterHUD_mc") {
-        let mut qs = Vec::new();
-        movie.flatten(p.character.unwrap_or(0), p.matrix.unwrap_or_default(), ColorTransform::default(), "masterHUD_mc", &frame0, &mut qs);
-        for q in qs {
-            // Script-driven flashes are not reproduced.
-            if q.path.contains("refill_mc") || q.path.contains("indic_mc") {
-                continue;
-            }
-            let ghost = q.color.mul[0] < 0.99;
-            let g = match (q.path.contains("_healthMeter_mc"), q.path.contains("_manaMeter_mc"), q.character) {
-                (true, _, 642) => if ghost { Group::HealthGhost } else { Group::HealthFill },
-                (_, true, 682) => if ghost { Group::ManaGhost } else { Group::ManaFill },
-                _ => Group::Static,
-            };
-            pieces.push((g, q));
-        }
+    let lib = MovieData::load(&content, "Startup", "Common_assets.lib", &fonts, "common_assets");
+    textures.load_movie(&content, "UI_HUD_SF", &main.movie, &mut images);
+    if let Some(l) = &lib {
+        textures.load_movie(&content, "Startup", &l.movie, &mut images);
     }
-    // Crosshairs: the placed dot plus the exported variants, all at screen centre.
-    let centre = placed("_dot_mc").and_then(|p| p.matrix).unwrap_or(Matrix { tx: 640.0 * 20.0, ty: 360.0 * 20.0, ..Default::default() });
-    let mut cross: HashMap<usize, CrossPart> = HashMap::new();
-    for (export, g) in [("crosshair_dot", Group::CrossDot), ("crosshair_gun", Group::CrossGun), ("crosshair_crossbow", Group::CrossCrossbow), ("crosshair_power", Group::CrossPower)] {
-        if let Some(id) = movie.exports.get(export) {
-            let mut qs = Vec::new();
-            movie.flatten(*id, centre, ColorTransform::default(), export, &frame0, &mut qs);
-            // The parts `SetDispersion` moves: their corners relative to the part origin.
-            let parts = cross_parts(&movie, export);
-            for q in qs {
-                if let Some((ext, index, cm, part)) = parts.get(&q.path) {
-                    let inv = centre.mul(cm).inverse();
-                    let local = q.dst.map(|(x, y)| {
-                        let (lx, ly) = inv.apply(x * 20.0, y * 20.0);
-                        Vec2::new(lx, ly) / 20.0 - *part
-                    });
-                    cross.insert(pieces.len(), CrossPart { ext: *ext, index: *index, centre: Vec2::new(centre.tx, centre.ty) / 20.0, clip: [cm.a, cm.b, cm.c, cm.d, cm.tx / 20.0, cm.ty / 20.0], part: *part, local });
-                }
-                pieces.push((g, q));
-            }
-        }
+    let mut stage = Stage::new(Arc::new(main), lib.into_iter().map(Arc::new).collect());
+    let w = HudWidgets::new(&mut stage);
+    hud.texts = load_texts(&content);
+    hud.hud = Some(HudMovie { stage, w, draws: Vec::new() });
+    // The effects movie first (drawn under the HUD).
+    if let Some(fx) = MovieData::load(&content, "DishonoredGame", "UI_HUDFX.HUDFX", &fonts, "") {
+        textures.load_movie(&content, "DishonoredGame", &fx.movie, &mut images);
+        let mut stage = Stage::new(Arc::new(fx), Vec::new());
+        let w = HudFxWidgets::new(&mut stage);
+        let view = crate::gfx_stage::spawn_view(&mut commands, 1, -2);
+        hud.fx = Some(FxMovie { stage, w, draws: Vec::new(), view });
     }
-    // Objectives banner and target notification (top right) carry match information.
-    for (name, g) in [("objectives_mc", Group::Objectives), ("targetNotification_mc", Group::TargetNote)] {
-        if let Some(p) = placed(name) {
-            let mut qs = Vec::new();
-            movie.flatten(p.character.unwrap_or(0), p.matrix.unwrap_or_default(), ColorTransform::default(), name, &frame0, &mut qs);
-            // Decorative schema lines and the portrait (its strokes and animated clips are
-            // timelines the port does not play: frozen at frame 0 they read as torn shards)
-            // stay out. Both panels keep the movie's own placement.
-            pieces.extend(qs.into_iter().filter(|q| !q.path.contains("schema") && !q.path.contains("_portrait_mc") && !q.path.contains("animPortrait") && !q.path.contains("objState")).map(|q| (g, q)));
-        }
-    }
-    // Stance icon (bottom left).
-    if let (Some(p), Some(id)) = (placed("playerStatesIcon_mc"), movie.exports.get("crouch")) {
-        let mut qs = Vec::new();
-        movie.flatten(*id, p.matrix.unwrap_or_default(), ColorTransform::default(), "crouch", &frame0, &mut qs);
-        pieces.extend(qs.into_iter().map(|q| (Group::Crouch, q)));
-    }
-    // Objective marker sprite at the stage origin (moved per frame) and the outcome backdrop.
-    if let Some(id) = movie.exports.get("objectiveMarker_primary") {
-        let mut qs = Vec::new();
-        movie.flatten(*id, Matrix::default(), ColorTransform::default(), "marker", &frame0, &mut qs);
-        pieces.extend(qs.into_iter().map(|q| (Group::Marker, q)));
-    }
-    if let Some(img) = movie.images.values().find(|i| i.export_name.starts_with("hud_obj_bkgdR")) {
-        let tex = img.file_name.trim_end_matches(".tga").to_string();
-        pieces.push((Group::OutcomeBg, Quad { texture: tex, src: [0.0, 0.0, img.width as f32, img.height as f32], dst: [(290.0, 190.0), (990.0, 190.0), (990.0, 470.0), (290.0, 470.0)], color: ColorTransform { mul: [1.0, 1.0, 1.0, 0.92], add: [0.0; 4] }, path: "outcome".into(), character: 0 }));
-    }
-    // Equipment emblem position (masterHUD_mc/_equipment_mc).
-    let equip = placed("masterHUD_mc").and_then(|p| {
-        let sp = movie.sprites.get(&p.character?)?;
-        let e = movie.display_list(sp, 0).into_iter().find(|c| c.name.as_deref() == Some("_equipment_mc"))?;
-        let m = p.matrix.unwrap_or_default().mul(&e.matrix.unwrap_or_default());
-        Some((Vec2::new(m.tx, m.ty) / 20.0, m.a))
-    });
-    // Text anchors: stage rectangles of the banner strips and the target paper.
-    let rect_of = |pred: &dyn Fn(&Group, &Quad) -> bool| -> Option<Rect> {
-        let mut r: Option<Rect> = None;
-        for (g, q) in pieces.iter().filter(|(g, q)| pred(g, q)) {
-            for c in q.dst {
-                let p = Vec2::new(c.0, c.1);
-                r = Some(match r {
-                    Some(r) => r.union_point(p),
-                    None => Rect::from_corners(p, p),
-                });
-            }
-            let _ = g;
-        }
-        r
-    };
-    let anchors = [
-        (TextKind::ObjTitle, rect_of(&|_, q| q.path.contains("title_mc"))),
-        (TextKind::ObjName, rect_of(&|_, q| q.path.contains("name_mc"))),
-        (TextKind::TargetBody, rect_of(&|g, _| *g == Group::TargetNote)),
-        (TextKind::Message, Some(Rect::new(290.0, 600.0, 990.0, 640.0))),
-        (TextKind::Outcome, Some(Rect::new(330.0, 225.0, 950.0, 440.0))),
-        (TextKind::Prompt, Some(PROMPT_RECT)),
-    ];
-    // Textures.
-    let mut tex: HashMap<String, Handle<Image>> = HashMap::new();
-    for (_, q) in &pieces {
-        if !tex.contains_key(&q.texture) {
-            if let Some(h) = texture(&content, &pkg, &q.texture, &mut images) {
-                tex.insert(q.texture.clone(), h);
-            }
-        }
-    }
-    for (key, pkg_name, name) in ICONS {
-        if let Some(h) = content.package(pkg_name).ok().and_then(|p| texture(&content, &p, name, &mut images)) {
-            hud.icons.insert(key, h);
-        }
-    }
-    let root = commands.spawn((Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() }, GlobalZIndex(-1), Pickable::IGNORE)).id();
-    for (i, (g, q)) in pieces.into_iter().enumerate() {
-        let Some(img) = tex.get(&q.texture) else { continue };
-        let c = q.color;
-        let color = Color::srgba(c.mul[0].clamp(0.0, 1.0), c.mul[1].clamp(0.0, 1.0), c.mul[2].clamp(0.0, 1.0), c.mul[3].clamp(0.0, 1.0));
-        commands.spawn((
-            ImageNode { image: img.clone(), rect: Some(Rect::new(q.src[0], q.src[1], q.src[2], q.src[3])), color, ..default() },
-            Node { position_type: PositionType::Absolute, ..default() },
-            UiTransform::default(),
-            HudQuad { group: g, quad: q, cross: cross.remove(&i) },
-            ChildOf(root),
-        ));
-    }
-    if let Some((pos, scale)) = equip {
-        let size = 150.0 * scale;
-        commands.spawn((ImageNode::default(), Node { position_type: PositionType::Absolute, ..default() }, Visibility::Hidden, EquipIcon { center: pos, size }, ChildOf(root)));
-        commands.spawn((
-            Text::new(""),
-            TextFont { font_size: FontSize::Px(18.0), ..default() },
-            TextColor(Color::srgb(0.93, 0.92, 0.85)),
-            TextShadow::default(),
-            Node { position_type: PositionType::Absolute, ..default() },
-            AmmoText { pos: pos + Vec2::new(size * 0.45, size * 0.1) },
-            ChildOf(root),
-        ));
-    }
-    for (kind, rect) in anchors {
-        let Some(rect) = rect else { continue };
-        commands.spawn((
-            Text::new(""),
-            TextFont { font_size: FontSize::Px(16.0), ..default() },
-            TextColor(if kind == TextKind::ObjTitle { Color::srgb(0.08, 0.08, 0.08) } else { Color::srgb(0.93, 0.91, 0.84) }),
-            TextLayout::justify(if matches!(kind, TextKind::Message | TextKind::Outcome | TextKind::Prompt) { Justify::Center } else { Justify::Right }),
-            Node { position_type: PositionType::Absolute, ..default() },
-            AnchoredText { kind, rect },
-            ChildOf(root),
-        ));
-    }
+    hud.view = Some(crate::gfx_stage::spawn_view(&mut commands, 0, -1));
     hud.loaded = true;
-    info!("HUD: {} quads from UI_HUD_SF", tex.len());
+    hud.content = Some(Arc::new(content));
+    info!("HUD: UI_HUD_SF movie on a stage ({} textures)", textures.movie.len());
     commands.insert_resource(hud);
 }
 
-/// Stage -> window transform (uniform scale, centred; GFx "show all").
-fn stage_xform(window: Vec2) -> (f32, Vec2) {
-    let s = (window.x / STAGE.x).min(window.y / STAGE.y);
-    (s, (window - STAGE * s) * 0.5)
+// --- inputs ---------------------------------------------------------------------------------
+
+/// `EDisPowerWheelItem` of the left hand (DisGlobalEnums).
+pub fn wheel_item(h: LeftHand) -> u8 {
+    match h {
+        LeftHand::Empty => 0,
+        LeftHand::Crossbow => 1,
+        LeftHand::SleepDart => 2,
+        LeftHand::IncendiaryBolt => 3,
+        LeftHand::SpringRazor => 5,
+        LeftHand::Grenade => 6,
+        LeftHand::StickyGrenade => 7,
+        LeftHand::Pistol => 8,
+        LeftHand::DarkVision => 21,
+        LeftHand::Windblast => 22,
+        LeftHand::DevouringSwarm => 23,
+        LeftHand::Blink => 24,
+        LeftHand::BendTime => 25,
+        LeftHand::Possession => 26,
+    }
 }
 
-/// Keep the bottom `f` of a quad (the shard grows away from the emblem, i.e. towards the
-/// source's top edge), like the movie's sliding `mask_mc`.
-fn crop(q: &Quad, f: f32) -> ([f32; 4], [(f32, f32); 4]) {
-    let f = f.clamp(0.0, 1.0);
-    let [x0, y0, x1, y1] = q.src;
-    let src = [x0, y1 - (y1 - y0) * f, x1, y1];
-    let lerp = |a: (f32, f32), b: (f32, f32)| (b.0 + (a.0 - b.0) * f, b.1 + (a.1 - b.1) * f);
-    let [tl, tr, br, bl] = q.dst;
-    (src, [lerp(tl, bl), lerp(tr, br), br, bl])
+/// `m_CrosshairSettings[item]` (DefaultUI.ini): crosshair symbol, dot shown, dispersion.
+pub fn crosshair_settings(item: u8) -> (Option<&'static str>, bool, bool) {
+    match item {
+        1..=3 | 10 => (Some("crosshair_crossbow"), true, true),
+        4 => (None, true, false),
+        5 | 11 | 13 => (Some("crosshair_springRazor"), true, false),
+        6 | 12 => (Some("crosshair_grenade"), true, false),
+        7 => (Some("crosshair_stickyGrenade"), true, false),
+        8 | 9 => (Some("crosshair_gun"), false, true),
+        21..=30 => (Some("crosshair_power"), true, false),
+        _ => (None, true, false),
+    }
 }
+
+fn ammo_of(m: &dishonored_sim::state::PlayerState, item: u8) -> Option<(i32, i32)> {
+    let inv = &m.inv;
+    match item {
+        8 => Some(((m.left.pistol_loaded as i32) + m.left.pistol_reserve as i32, m.left.pistol_loaded as i32)),
+        1 => Some(((m.left.bolts_loaded as i32) + m.left.bolts_reserve as i32, m.left.bolts_loaded as i32)),
+        2 => Some((inv.ammo[3] as i32, 0)),
+        3 => Some((inv.ammo[4] as i32, 0)),
+        5 => Some((inv.ammo[5] as i32, 0)),
+        6 => Some((inv.ammo[6] as i32, 0)),
+        7 => Some((inv.ammo[7] as i32, 0)),
+        _ => None,
+    }
+}
+
+/// Key tags of the original texts (`` `GBA_Use` ``, `` `k ``) as the HUD shows them on PC: the
+/// bound key's name (Settings.int `[Keys]`) in brackets (0x00BA4620 wraps it in "[" "]";
+/// mouse buttons are `$LMouseButton$`-style icons in the original, named here).
+pub fn convert_key_tags(s: &str, bindings: Option<&crate::settings::Bindings>, keys: &HashMap<String, String>) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find('`') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        if let Some(stripped) = after.strip_prefix('k') {
+            out.push_str(&format!("[{}]", key_name(bindings, keys, "GBA_Use")));
+            rest = stripped;
+            continue;
+        }
+        match after.find('`') {
+            Some(j) => {
+                let tag = &after[..j];
+                out.push_str(&format!("[{}]", key_name(bindings, keys, tag)));
+                rest = &after[j + 1..];
+            }
+            None => {
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Display name of the key bound to an action (`DefaultInput.ini` defaults when unbound here).
+fn key_name(bindings: Option<&crate::settings::Bindings>, keys: &HashMap<String, String>, action: &str) -> String {
+    let ue = bindings.and_then(|b| b.input(action)).and_then(crate::settings::name_for).map(str::to_string).unwrap_or_else(|| {
+        match action {
+            "GBA_Use" => "F",
+            "GBA_Jump" => "SpaceBar",
+            "GBA_Journal" => "J",
+            "GBA_Primary" => "LeftMouseButton",
+            "GBA_Secondary" => "RightMouseButton",
+            "GBA_Block" => "LeftControl",
+            "GBA_Zoom" => "Z",
+            other => other.trim_start_matches("GBA_").trim_start_matches("KEY_"),
+        }
+        .to_string()
+    });
+    keys.get(&ue).cloned().unwrap_or(ue)
+}
+
+// --- the per-frame native update ------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
 pub fn update_gfx_hud(
-    hud: Option<Res<GfxHud>>,
+    mut hud: ResMut<GfxHud>,
     view: Res<SessionView>,
     session: Res<Session>,
-    windows: Query<&Window>,
-    mut quads: Query<(&HudQuad, &mut Node, &mut UiTransform, &mut ImageNode, &mut Visibility), (Without<EquipIcon>, Without<AmmoText>)>,
-    mut icon: Query<(&EquipIcon, &mut Node, &mut ImageNode, &mut Visibility), (Without<HudQuad>, Without<AmmoText>)>,
-    mut ammo: Query<(&AmmoText, &mut Node, &mut Text, &mut TextFont), (Without<HudQuad>, Without<EquipIcon>)>,
-    cams: Query<(&Camera, &GlobalTransform), With<crate::players::GameCamera>>,
-    mut sent_disp: Local<Option<(f32, f32)>>,
-    popups: Res<crate::hud_popups::HudPopups>,
     time: Res<Time>,
-    overrides: Option<Res<crate::hud_settings::HudOverrides>>,
+    windows: Query<&Window>,
+    cams: Query<(&Camera, &GlobalTransform), With<crate::players::GameCamera>>,
+    settings: Option<Res<crate::settings::GameSettings>>,
+    bindings: Option<Res<crate::settings::Bindings>>,
+    local: Res<crate::input_map::LocalInput>,
+    pause: Option<Res<crate::pause_menu::PauseMenu>>,
+    loading: Option<Res<crate::loading_screen::LoadingScreen>>,
+    mut textures: ResMut<StageTextures>,
+    mut images: ResMut<Assets<Image>>,
+    mut sounds: ResMut<crate::hud_sounds::HudSounds>,
 ) {
-    let Some(hud) = hud.filter(|h| h.loaded) else { return };
-    let Some(window) = windows.iter().next() else { return };
-    let (s, off) = stage_xform(Vec2::new(window.width(), window.height()));
+    let hud = &mut *hud;
+    let Some(m) = hud.hud.as_mut() else { return };
+    let dt = time.delta_secs();
+    // The game is paused by the pause menu and while a level loads (the popup timer stops).
+    let paused = pause.as_ref().is_some_and(|p| p.open) || loading.as_ref().is_some_and(|l| l.active);
+    let hs = crate::hud_settings::options(settings.as_deref());
+    let cfg = &session.content.sim.gameplay;
     let me = view.me.as_ref();
-    let vit = &session.content.sim.gameplay.vitals;
-    let alive = me.is_some_and(|m| m.alive);
-    let health = me.map(|m| m.vitals.health / vit.health_max.max(1.0)).unwrap_or(0.0);
-    let mana = me.map(|m| m.vitals.mana / vit.mana_max.max(1.0)).unwrap_or(0.0);
-    let mana_cap = me.map(|m| m.vitals.mana_regen_cap / vit.mana_max.max(1.0)).unwrap_or(0.0).max(mana);
-    let item = me.map(|m| m.left.item).unwrap_or(LeftHand::Empty);
-    let aiming_power = me.is_some_and(|m| m.left.phase == LeftPhase::Aiming && matches!(m.left.item, LeftHand::Blink));
-    let crouched = me.is_some_and(|m| m.crouched);
-    let has_match = !view.matchv.mode.is_empty();
+    let alive = me.is_some_and(|p| p.alive);
     let mission = view.matchv.mission.as_ref();
-    let ended = mission.is_some_and(|m| m.outcome.is_some());
-    // Objective marker: active task target projected into the stage (stage units).
-    let marker = mission.and_then(|m| m.target).filter(|_| !ended).and_then(|t| {
-        let (cam, gt) = cams.iter().next()?;
-        let world = crate::coords::pos(Vec3::from(t) + Vec3::Z * 60.0);
-        let v = cam.world_to_viewport(gt, world).ok()?;
-        Some((v - off) / s)
-    });
-    // Objectives banner and target paper are popups (`hud_popups`): alpha and slide.
-    let now = time.elapsed_secs();
-    let banner = popups.banner_env(now);
-    // The target paper is its own popup (`TargetNotification`): the Contracts target or a
-    // mission's Notify action, never the task list.
-    let paper = popups.target_env(now);
-    let notified = mission.is_some_and(|m| m.notification.is_some());
-    // Crosshair spread: `SetDispersion(d, d / max x 100)` (0x00B9FF30), sent when `d` moved by
-    // at least 0.1 since the last call.
-    let disp = me.and_then(|m| dishonored_sim::left_hand::Dispersion::of(m, &session.content.sim.gameplay, &session.content.sim.tuning).map(|d| (m.left.dispersion, d.max)));
-    if let Some((d, max)) = disp {
-        if sent_disp.is_none_or(|(s, _)| (s - d).abs() >= 0.1) {
-            *sent_disp = Some((d, if max > 0.0 { d / max * 100.0 } else { 0.0 }));
-        }
-    }
-    for (hq, mut node, mut xf, mut img, mut vis) in &mut quads {
-        let (show, frac) = match hq.group {
-            Group::Static => (alive, None),
-            Group::HealthFill => (alive, Some(health)),
-            Group::HealthGhost => (alive, Some(health)),
-            Group::ManaFill => (alive, Some(mana)),
-            Group::ManaGhost => (alive, Some(mana_cap)),
-            Group::CrossDot => (alive && !aiming_power && !matches!(item, LeftHand::Pistol | LeftHand::Crossbow), None),
-            Group::CrossGun => (alive && item == LeftHand::Pistol, None),
-            Group::CrossCrossbow => (alive && item == LeftHand::Crossbow, None),
-            Group::CrossPower => (alive && aiming_power, None),
-            Group::Crouch => (alive && crouched, None),
-            Group::Objectives => (has_match && banner.shown(), None),
-            Group::TargetNote => ((view.target_info.is_some() || (notified && !ended)) && paper.shown(), None),
-            Group::Marker => (alive && marker.is_some(), None),
-            Group::OutcomeBg => (ended, None),
-        };
-        // The HUD options (hud_settings.rs) hide or fade on top of the movie's state.
-        let (opt_hide, opt_alpha) = overrides.as_ref().map(|o| o.quad(hq)).unwrap_or((false, None));
-        vis.set_if_neq(if show && !opt_hide && frac.is_none_or(|f| f > 0.001) { Visibility::Inherited } else { Visibility::Hidden });
-        let (src, dst) = match frac {
-            Some(f) => crop(&hq.quad, f),
-            None => (hq.quad.src, hq.quad.dst),
-        };
-        let dst = match (hq.group, marker) {
-            (Group::Marker, Some(at)) => dst.map(|(x, y)| (x + at.x, y + at.y)),
-            (Group::Objectives | Group::TargetNote, _) => {
-                let env = if hq.group == Group::Objectives { banner } else { paper };
-                img.color.set_alpha(hq.quad.color.mul[3].clamp(0.0, 1.0) * env.alpha);
-                dst.map(|(x, y)| (x + env.dx, y))
-            }
-            _ => dst,
-        };
-        let mut alpha = None;
-        let dst = match (&hq.cross, *sent_disp) {
-            (Some(cp), Some((d, pct))) if matches!(hq.group, Group::CrossGun | Group::CrossCrossbow) => {
-                let (corners, a) = cross_layout(cp, hq.group == Group::CrossCrossbow, d, pct);
-                alpha = Some(hq.quad.color.mul[3].clamp(0.0, 1.0) * a);
-                corners.map(|c| (c.x, c.y))
-            }
-            _ => dst,
-        };
-        // The crosshair opacity option replaces the clip alpha (as it did when applied after).
-        if let Some(a) = opt_alpha.or(alpha) {
-            if img.color.alpha() != a {
-                img.color.set_alpha(a);
-            }
-        }
-        let rect = Some(Rect::new(src[0], src[1], src[2], src[3]));
-        if img.rect != rect {
-            img.rect = rect;
-        }
-        let p = |c: (f32, f32)| Vec2::new(c.0, c.1) * s + off;
-        let (tl, tr, br, bl) = (p(dst[0]), p(dst[1]), p(dst[2]), p(dst[3]));
-        let w = (tr - tl).length();
-        let h = (bl - tl).length();
-        let c = (tl + br) * 0.5;
-        place(&mut node, px(c.x - w * 0.5), px(c.y - h * 0.5), Some(px(w)), Some(px(h)));
-        let rotation = Rot2::radians((tr - tl).y.atan2((tr - tl).x));
-        if xf.rotation != rotation {
-            xf.rotation = rotation;
-        }
-    }
-    let key = match item {
-        LeftHand::Blink => Some("blink"),
-        LeftHand::Windblast => Some("windblast"),
-        LeftHand::DarkVision => Some("darkvision"),
-        LeftHand::Pistol => Some("pistol"),
-        LeftHand::Crossbow => Some("crossbow"),
-        LeftHand::Empty => Some("sword"),
-        // The crossbow's ammo types show their bolt (UI_ItemIcons_Large, as the inventory).
-        LeftHand::SleepDart => Some("sleepdart"),
-        LeftHand::IncendiaryBolt => Some("flarebolt"),
-        LeftHand::Possession => Some("possession"),
-        LeftHand::BendTime => Some("bendtime"),
-        LeftHand::DevouringSwarm => Some("swarm"),
-        LeftHand::Grenade => Some("grenade"),
-        LeftHand::StickyGrenade => Some("sticky"),
-        LeftHand::SpringRazor => Some("razor"),
+    let cutscene = mission.is_some_and(|mv| !mv.cutscenes.is_empty());
+    let content = hud.content.clone();
+    let mut img = |path: &str| -> Option<ImageRef> {
+        let c = content.as_ref()?;
+        let (_, size) = textures.external(c, path, &mut images)?;
+        Some(ImageRef { path: path.trim_start_matches("img://").to_string(), size })
     };
-    for (ei, mut node, mut img, mut vis) in &mut icon {
-        match key.and_then(|k| hud.icons.get(k)).filter(|_| alive) {
-            Some(h) => {
-                if img.image != *h {
-                    img.image = h.clone();
+    let st = &mut m.stage;
+    let w = &mut m.w;
+    let n = &mut hud.native;
+
+    // A new match / mission: reset what was sent and the popup queue (game start delay).
+    let game = Some((view.matchv.mode.clone(), view.matchv.match_number));
+    if n.last_mission != game {
+        n.last_mission = game;
+        n.inv = None;
+        n.game_msg_seen = mission.and_then(|mv| mv.messages.last().map(|x| x.0)).unwrap_or(0);
+        n.location_seen = mission.and_then(|mv| mv.location.as_ref().map(|x| x.0)).unwrap_or(0);
+        hud.popups = PopupQueue::default();
+    }
+
+    // --- player status (gauges) ---
+    let visibility = hs.visibility;
+    let mut changed = false;
+    if let (Some(p), Some(g)) = (me, w.gauges.as_mut()) {
+        let max = dishonored_sim::powers::health_max(p, cfg).max(1.0) as i32;
+        let health = p.vitals.health.max(0.0) as i32;
+        // Bit 0: a bone charm raises the maximum; bit 1: Vitality (0x00B9F6E0).
+        let large = p.inv.power_levels[dishonored_sim::state::power::VITALITY] > 0;
+        let small = !large && max as f32 > cfg.vitals.health_max + 0.5;
+        let flags = small as u8 | (large as u8) << 1;
+        let hv = (health, 0, max, flags);
+        if n.health != Some(hv) {
+            let valid = n.health.is_some();
+            n.health = Some(hv);
+            g.fill_health(st, health as f32 * 100.0 / max as f32, small, large, health as f32 <= LOW_HEALTH_THRESHOLD, health as f32 * 100.0 / max as f32);
+            changed |= valid;
+        }
+        let mmax = dishonored_sim::powers::mana_max(p, cfg).max(1.0) as i32;
+        let mana = p.vitals.mana.max(0.0) as i32;
+        let regen = (p.vitals.mana_regen_cap - p.vitals.mana).max(0.0) as i32;
+        let has_powers = p.inv.power_levels.iter().take(6).any(|l| *l > 0);
+        let available = p.possess.host.is_none();
+        let upg = mmax as f32 > cfg.vitals.mana_max + 0.5;
+        let mflags = has_powers as u8 | (available as u8) << 1 | (upg as u8) << 2;
+        let mv = (mana, regen, mmax, mflags);
+        if n.mana != Some(mv) {
+            let valid = n.mana.is_some();
+            n.mana = Some(mv);
+            g.fill_mana(st, mana as f32 * 100.0 / mmax as f32, upg, available, !has_powers, mana as f32 <= LOW_MANA_THRESHOLD, (mana + regen) as f32 * 100.0 / mmax as f32);
+            changed |= valid;
+        }
+    }
+    // Elixirs: the refill animation (`RefillHealthGauge` / `RefillManaGauge`, 0x00B8CDA0).
+    for e in view.audio_events.iter() {
+        if let dishonored_sim::events::SimEvent::ElixirUsed { id, mana } = e {
+            if Some(*id) == me.map(|p| p.id) {
+                if let Some(g) = w.gauges.as_mut() {
+                    if *mana {
+                        g.refill_mana(st);
+                    } else {
+                        g.refill_health(st);
+                    }
                 }
-                vis.set_if_neq(Visibility::Inherited);
-            }
-            None => {
-                vis.set_if_neq(Visibility::Hidden);
+                sounds.play("H_quickPotion");
             }
         }
-        let size = ei.size * s;
-        let c = ei.center * s + off;
-        place(&mut node, px(c.x - size * 0.5), px(c.y - size * 0.5), Some(px(size)), Some(px(size)));
     }
-    for (at, mut node, mut text, mut font) in &mut ammo {
-        let p = at.pos * s + off;
-        place(&mut node, px(p.x), px(p.y), None, None);
-        set_font_size(&mut font, 18.0 * s);
-        let t = match (me, item) {
-            (Some(m), LeftHand::Pistol) if alive => format!("{} | {}", m.left.pistol_loaded, m.left.pistol_reserve),
-            (Some(m), LeftHand::Crossbow) if alive => format!("{} | {}", m.left.bolts_loaded, m.left.bolts_reserve),
-            _ => String::new(),
+    // Visibility: Always / Contextual (8 s after a change; kept while low) / Off.
+    if changed && visibility == 1 {
+        n.info_timer = PLAYER_INFO_DISPLAY_DURATION;
+    }
+    n.info_timer = (n.info_timer - dt).max(0.0);
+    let low = n.health.is_some_and(|h| h.0 as f32 <= LOW_HEALTH_THRESHOLD) || n.mana.is_some_and(|m| m.0 as f32 <= LOW_MANA_THRESHOLD && m.3 & 1 != 0);
+    let want = alive
+        && !cutscene
+        && match visibility {
+            0 => false,
+            1 => n.info_timer > 0.0 || low,
+            _ => true,
         };
-        set_text(&mut text, t);
+    if want != n.status_visible {
+        let open = n.ticked_once && want;
+        if let Some(g) = w.gauges.as_mut() {
+            if open {
+                g.open(st);
+            } else {
+                g.close(st);
+            }
+        }
+        n.status_visible = open;
     }
+    n.ticked_once = true;
+
+    // --- equipment ---
+    if let (Some(p), Some(g)) = (me, w.gauges.as_mut()) {
+        let item = wheel_item(p.left.item);
+        let power = item >= 21;
+        let active = power && p.left.phase == LeftPhase::Aiming;
+        let cost_ok = p.vitals.mana > 0.0;
+        let (total, loaded) = ammo_of(p, item).unwrap_or((-1, -1));
+        let eq = (item, active, cost_ok, total, loaded);
+        if n.equipment != Some(eq) {
+            n.equipment = Some(eq);
+            let icon = hud.texts.equipment_icons.get(&item).cloned();
+            let icon_ref = icon.as_deref().and_then(&mut img);
+            if item == 0 {
+                g.set_empty_equipment(st);
+            } else if power {
+                g.set_power(st, icon_ref, active, cost_ok);
+            } else {
+                g.set_weapon(st, icon_ref, (total >= 0).then_some(total), (item == 8).then_some(loaded));
+            }
+        }
+    }
+
+    // --- crosshair ---
+    let style = hs.crosshair_style;
+    let opacity = hs.crosshair_opacity;
+    let movement = hs.crosshair_movement;
+    let window = windows.iter().next().map(|w| Vec2::new(w.width(), w.height()));
+    let focus = mission.zip(me).and_then(|(mv, p)| crate::hud_popups::focused_interaction(mv, &view, p, local.yaw, local.pitch));
+    let (item_cross, item_dot, dispersion) = me.map(|p| crosshair_settings(wheel_item(p.left.item))).unwrap_or((None, true, false));
+    let (aspect, show_dot) = if style == 2 { (item_cross, item_dot) } else { (None, true) };
+    let interacting = focus.is_some();
+    w.crosshairs.set_aspect(st, aspect);
+    w.crosshairs.set_dot_state(st, if interacting { 2 } else { 0 });
+    // Empty: the item has no ammo.
+    let empty = me.and_then(|p| ammo_of(p, wheel_item(p.left.item))).is_some_and(|(t, _)| t <= 0);
+    w.crosshairs.set_aspect_state(st, empty as u8);
+    if dispersion {
+        if let Some((d, max)) = me.and_then(|p| dishonored_sim::left_hand::Dispersion::of(p, cfg, &session.content.sim.tuning).map(|d| (p.left.dispersion, d.max))) {
+            let pct = if max > 0.0 { d / max * 100.0 } else { 0.0 };
+            w.crosshairs.set_dispersion(st, d, pct);
+        }
+    }
+    // Position: centre, or towards the focused interactable (interpolated).
+    let centre = Vec2::new(640.0, 360.0);
+    let target = match (movement, focus.as_ref().and_then(|f| f.point), window) {
+        (true, Some(pt), Some(win)) => cams.iter().next().and_then(|(cam, gt)| {
+            let v = cam.world_to_viewport(gt, crate::coords::pos(Vec3::from(pt))).ok()?;
+            let (s, off) = crate::gfx_stage::stage_xform(win);
+            Some((v - off) / s)
+        }),
+        _ => None,
+    }
+    .unwrap_or(centre);
+    let cur = n.crosshair_pos.unwrap_or(centre);
+    let k = (CROSSHAIR_INTERPOLATION_SPEED * dt).clamp(0.0, 1.0);
+    let pos = cur + (target - cur) * k;
+    n.crosshair_pos = Some(pos);
+    let shown = alive && !cutscene && style > 0;
+    w.crosshairs.place(st, [pos.x, pos.y], shown && show_dot, shown && aspect.is_some(), opacity);
+
+    // --- task marker (`m_TaskMarkerSettings`: objectiveMarker_primary in markers_mc) ---
+    let marker_at = mission.filter(|mv| mv.outcome.is_none()).and_then(|mv| mv.target).filter(|_| hs.objective_markers && alive && !cutscene);
+    let placed = match (marker_at, window, me) {
+        (Some(t), Some(win), Some(p)) => cams.iter().next().and_then(|(cam, gt)| {
+            // m_fWorldOffsetZ 10.
+            let world = glam::Vec3::from(t) + glam::Vec3::Z * 10.0;
+            let v = cam.world_to_viewport(gt, crate::coords::pos(Vec3::new(world.x, world.y, world.z))).ok()?;
+            let (s, off) = crate::gfx_stage::stage_xform(win);
+            let sp = (v - off) / s;
+            // Kept inside the marker area (m_fMarkerAreaRatio_PC 0.9 of the screen).
+            let half = crate::gfx_stage::STAGE * 0.5 * 0.9;
+            let c = crate::gfx_stage::STAGE * 0.5;
+            let sp = c + (sp - c).clamp(-half, half);
+            Some((sp, world.distance(p.position + glam::Vec3::Z * 64.0)))
+        }),
+        _ => None,
+    };
+    let markers_mc = st.child(st.root, "markers_mc");
+    match (placed, markers_mc) {
+        (Some((sp, dist)), Some(layer)) => {
+            if n.marker.is_none_or(|m| !st.alive(m)) {
+                let d = st.next_depth(layer);
+                n.marker = st.attach(layer, "objectiveMarker_primary", "taskMarker0", d);
+                if let Some(desc) = n.marker.and_then(|m| st.child(m, "_description_mc")) {
+                    st.set_visible(desc, false);
+                }
+            }
+            if let Some(mk) = n.marker {
+                // m_ScaleVariation (10000 uu -> 90 %, 500 uu -> 150 %) and m_AlphaVariation
+                // (1000 uu -> 100, 0 uu -> 0).
+                let var = |d: f32, d0: f32, d1: f32, v0: f32, v1: f32| v0 + ((d - d0) / (d1 - d0)).clamp(0.0, 1.0) * (v1 - v0);
+                let scale = var(dist, 10000.0, 500.0, 90.0, 150.0);
+                let alpha = var(dist, 1000.0, 0.0, 100.0, 0.0);
+                st.set(mk, crate::gfx_stage::Prop::X, sp.x);
+                st.set(mk, crate::gfx_stage::Prop::Y, sp.y);
+                st.set(mk, crate::gfx_stage::Prop::XScale, scale);
+                st.set(mk, crate::gfx_stage::Prop::YScale, scale);
+                st.set(mk, crate::gfx_stage::Prop::Alpha, alpha);
+                st.set_visible(mk, true);
+            }
+        }
+        _ => {
+            if let Some(mk) = n.marker.take() {
+                st.remove(mk);
+            }
+        }
+    }
+
+    // --- stance icon ---
+    if let Some(icon) = w.state_icon.as_mut() {
+        let show = hs.player_stance && alive && !cutscene;
+        let name = me.filter(|_| show).and_then(|p| {
+            if p.slide.active {
+                Some("slide")
+            } else if p.crouched {
+                Some("sneak")
+            } else {
+                None
+            }
+        });
+        icon.set_icon(st, name);
+    }
+
+    // --- interactions window and crosshair info ---
+    let show_interactions = hs.interactions;
+    let lines = focus.as_ref().filter(|_| show_interactions && alive && !cutscene).map(|f| convert_key_tags(&f.text, bindings.as_deref(), &hud.texts.keys));
+    if let Some(iw) = w.interaction_window.as_mut() {
+        iw.set_interactions(st, "", lines.as_deref());
+    }
+    if let Some(ci) = w.crosshair_info.as_mut() {
+        ci.set_text(st, None);
+    }
+
+    // --- game messages (DisSeqAct_ShowHUDMessage) ---
+    if let (Some(mv), Some(gm)) = (mission, w.game_msg.as_mut()) {
+        if let Some((id, text)) = mv.messages.last() {
+            if *id > n.game_msg_seen {
+                n.game_msg_seen = *id;
+                gm.set_game_message(st, Some(&convert_key_tags(text, bindings.as_deref(), &hud.texts.keys)), GAME_MESSAGE_DURATION);
+            }
+        }
+    }
+
+    // --- location discovery (DisSeqAct_ShowLocationDiscovery, 0x00B95160) ---
+    if let (Some(mv), Some(loc)) = (mission, w.location.as_mut()) {
+        if let Some((id, name)) = &mv.location {
+            if *id > n.location_seen {
+                n.location_seen = *id;
+                if name.trim().is_empty() {
+                    loc.close(st);
+                } else {
+                    loc.set_location(st, name, LOCATION_DISCOVERY_DURATION);
+                }
+            }
+        }
+    }
+
+    // --- cinematic stripes ---
+    if let Some(s) = w.stripes.as_mut() {
+        s.set(st, cutscene, true);
+    }
+
+    // --- pickup log (inventory differences) ---
+    if let Some(p) = me {
+        let show_log = hs.pickup_log;
+        if let Some(prev) = n.inv.clone() {
+            let items = crate::hud_popups::pickup_items(&prev, &p.inv, &hud.texts);
+            if show_log {
+                if let Some(log) = w.pickup_log.as_mut() {
+                    for (name, icon) in items {
+                        let r = icon.as_deref().and_then(&mut img);
+                        log.add_log_item(st, &name, r);
+                    }
+                }
+            }
+        }
+        n.inv = Some(p.inv.clone());
+    }
+
+    // --- popups (objectives, target notifications) ---
+    let popups_on = hs.objective_popups;
+    if let Some(mv) = mission {
+        hud.popups.observe(mv);
+    }
+    for t in std::mem::take(&mut hud.tests) {
+        crate::hud_popups::apply_test(t, &mut hud.popups, w, st, &hud.texts, &mut img);
+    }
+    let obj_open = w.objectives.as_ref().is_some_and(|o| o.opened);
+    let tgt_open = w.target.as_ref().is_some_and(|o| o.opened);
+    if let Some(p) = hud.popups.tick(dt, paused, popups_on, obj_open, tgt_open) {
+        match p {
+            PopupContent::Objective { name, event, tasks } => {
+                let title = hud.texts.titles.get(event as usize).cloned().unwrap_or_default();
+                if let Some(o) = w.objectives.as_mut() {
+                    let tasks: Vec<TaskLine> = tasks.into_iter().map(|(d, e)| TaskLine { state: ObjState::from_index(e), description: d }).collect();
+                    o.set_objectives(st, &mut w.sounds, &name, &title, ObjState::from_index(event), if event == 3 { Vec::new() } else { tasks });
+                }
+            }
+            PopupContent::Target { name, portrait, kind } => {
+                // A mission names its `DisTweaks_ChapterTarget`: its `m_TargetName` and
+                // `m_TargetPortraitPath` (0x00B990D0: "img://" + the portrait).
+                if hud.texts.chapter_targets.is_none() {
+                    hud.texts.chapter_targets = Some(content.as_deref().map(chapter_targets).unwrap_or_default());
+                }
+                let found = hud.texts.chapter_targets.as_ref().and_then(|m| m.get(&name.to_ascii_lowercase()).cloned());
+                let (name, portrait) = match found {
+                    Some((n, p)) => (n, p.or(portrait)),
+                    None => (name, portrait),
+                };
+                let portrait = portrait.as_deref().and_then(&mut img);
+                if let (Some(t), Some(tx)) = (w.target.as_mut(), hud.texts.target.clone()) {
+                    t.set_notification(st, &mut w.sounds, &tx, &name, portrait, kind, TARGET_NOTIFICATION_DURATION);
+                }
+            }
+        }
+    }
+
+    // --- run the movie ---
+    let until = st.time + dt as f64;
+    while let Some(ev) = st.poll(until) {
+        match ev {
+            Event::Timer(k) | Event::TweenDone(k) => w.on_event(st, k),
+        }
+    }
+    for s in w.sounds.0.drain(..) {
+        sounds.play(s);
+    }
+
+    // --- HUD effects: stealth shroud (0x00B96050), damage directions (0x00B970F0) ---
+    if let Some(fx) = hud.fx.as_mut() {
+        let (fst, fw) = (&mut fx.stage, &mut fx.w);
+        let sneaking = me.is_some_and(|p| p.alive && p.crouched) && !cutscene;
+        if let Some(s) = fw.shroud.as_mut() {
+            s.set(fst, sneaking);
+        }
+        if let Some(p) = me {
+            // The frame's damage, summed (`m_LastDamageInfo`); the direction is towards the
+            // damage causer, ahead (0) without one.
+            let mut total = 0.0;
+            let mut from: Option<glam::Vec3> = None;
+            for e in view.audio_events.iter() {
+                if let dishonored_sim::events::SimEvent::Damage { victim, attacker, amount, .. } = e {
+                    if *victim == p.id && *amount > 0.0 {
+                        total += *amount;
+                        if let Some(a) = (*attacker).and_then(|a| view.others.iter().find(|o| o.id == a)) {
+                            from = Some(a.position);
+                        }
+                    }
+                }
+            }
+            if total > 0.0 && p.alive {
+                let angle = match from {
+                    Some(at) => {
+                        let d = at - p.position;
+                        let f = dishonored_sim::movement::view_vector(local.yaw, 0.0);
+                        let ahead = d.x * f.x + d.y * f.y;
+                        let right = d.y * f.x - d.x * f.y;
+                        right.atan2(ahead).to_degrees()
+                    }
+                    None => 0.0,
+                };
+                let intensity = (total / MAX_DAMAGE).clamp(0.0, 1.0) * 100.0;
+                if let Some(dd) = fw.damages.as_mut() {
+                    dd.take_damage(fst, angle, intensity, crate::gfx_stage::STAGE.x, crate::gfx_stage::STAGE.y);
+                }
+            }
+        }
+        let until = fst.time + dt as f64;
+        while let Some(ev) = fst.poll(until) {
+            match ev {
+                Event::Timer(k) | Event::TweenDone(k) => fw.on_event(fst, k),
+            }
+        }
+    }
+}
+
+/// Draw the HUD stage into its UI entities.
+#[allow(clippy::type_complexity)]
+pub fn draw_gfx_hud(
+    mut commands: Commands,
+    mut hud: ResMut<GfxHud>,
+    textures: Res<StageTextures>,
+    fonts: Option<Res<GameFonts>>,
+    windows: Query<&Window>,
+    mut views: Query<&mut StageView>,
+    mut images: Query<(&mut ImageNode, &mut Node, &mut UiTransform, &mut Visibility), (With<SlotImage>, Without<SlotText>)>,
+    mut texts: Query<(&mut Text, &mut TextFont, &mut TextColor, &mut TextLayout, &mut LineHeight, &mut LetterSpacing, &mut Node, &mut UiTransform, &mut Visibility), (With<SlotText>, Without<SlotImage>)>,
+) {
+    let hud = &mut *hud;
+    let Some(window) = windows.iter().next() else { return };
+    let size = Vec2::new(window.width(), window.height());
+    if let Some(fx) = hud.fx.as_mut() {
+        if let Ok(mut view) = views.get_mut(fx.view) {
+            fx.stage.draw(&mut fx.draws);
+            crate::gfx_stage::sync_view(&mut commands, fx.view, &mut view, &fx.draws, &textures, fonts.as_deref(), size, &mut images, &mut texts);
+        }
+    }
+    let (Some(m), Some(root)) = (hud.hud.as_mut(), hud.view) else { return };
+    let Ok(mut view) = views.get_mut(root) else { return };
+    m.stage.draw(&mut m.draws);
+    crate::gfx_stage::sync_view(&mut commands, root, &mut view, &m.draws, &textures, fonts.as_deref(), size, &mut images, &mut texts);
 }
 
 // Writing a UI component marks it changed even when the value is the same, and any changed
@@ -614,7 +805,7 @@ pub struct GameFonts {
 
 pub fn load_game_fonts(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
     let Ok(content) = dishonored_assets::Content::locate() else { return };
-    let Some(movie) = content.package("DisFonts_SF").ok().and_then(|p| movie_raw(&p, "fonts_efigs")).and_then(|r| Movie::parse(&r).ok()) else { return };
+    let Some(movie) = content.package("DisFonts_SF").ok().and_then(|p| crate::gfx_stage::movie_raw(&p, "fonts_efigs")).and_then(|r| Movie::parse(&r).ok()) else { return };
     let mut by_name = HashMap::new();
     for f in &movie.fonts {
         by_name.insert(f.name.clone(), fonts.add(Font::from_bytes(f.to_ttf(&f.name))));
@@ -627,12 +818,12 @@ pub fn load_game_fonts(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) 
     }
 }
 
-/// Give HUD text the game's fonts once they exist (body font; scoreboard uses titles).
+/// Give the debug HUD text the game's fonts once they exist (body font; scoreboard uses titles).
 pub fn apply_game_fonts(
     fonts: Option<Res<GameFonts>>,
     mut done: Local<bool>,
-    mut body: Query<&mut TextFont, (Or<(With<crate::hud::HudText>, With<AmmoText>, With<AnchoredText>)>, Without<crate::hud::Scoreboard>)>,
-    mut titles: Query<&mut TextFont, (With<crate::hud::Scoreboard>, Without<crate::hud::HudText>, Without<AmmoText>, Without<AnchoredText>)>,
+    mut body: Query<&mut TextFont, (With<crate::hud::HudText>, Without<crate::hud::Scoreboard>)>,
+    mut titles: Query<&mut TextFont, (With<crate::hud::Scoreboard>, Without<crate::hud::HudText>)>,
 ) {
     let Some(fonts) = fonts else { return };
     if *done || (body.is_empty() && titles.is_empty()) {
@@ -645,250 +836,4 @@ pub fn apply_game_fonts(
         f.font = fonts.title.clone().into();
     }
     *done = true;
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum TextKind {
-    ObjTitle,
-    ObjName,
-    TargetBody,
-    /// HUD message (bottom centre, where the movie places `gameMsg_mc`).
-    Message,
-    /// End-of-mission panel.
-    Outcome,
-    /// "F  Talk" under the crosshair.
-    Prompt,
-}
-/// Interaction prompt under the crosshair (`crosshairInfosTxt_mc`).
-const PROMPT_RECT: Rect = Rect { min: Vec2::new(440.0, 392.0), max: Vec2::new(840.0, 424.0) };
-
-/// Text laid out inside a stage-space rectangle of the movie.
-#[derive(Component)]
-pub struct AnchoredText {
-    pub kind: TextKind,
-    pub rect: Rect,
-}
-
-/// Contracts clues worded for the target paper (never coordinates).
-fn target_lines(view: &SessionView, yaw: f32) -> String {
-    use dishonored_multiplayer::contracts::{Proximity, PursuitAwareness};
-    let Some(ti) = view.target_info.as_ref() else { return String::new() };
-    let looks = match ti.appearance {
-        Some(0) => "Masked gentleman, dark coat, metal mask",
-        Some(2) => "Masked gentleman, shirtsleeves, metal mask",
-        Some(3) => "Masked lady, black mask",
-        Some(1) => "City watch uniform",
-        _ => "Unknown",
-    };
-    let dir = ti.bearing_octant.map(|o| {
-        let ang = (o as f32 * 45.0 - yaw.rem_euclid(360.0)).rem_euclid(360.0);
-        ["ahead", "ahead, left", "to your left", "behind, left", "behind you", "behind, right", "to your right", "ahead, right"][(((ang + 22.5) / 45.0) as usize) % 8]
-    });
-    let dist = match ti.proximity {
-        Some(Proximity::Far) => "far away",
-        Some(Proximity::Medium) => "some distance off",
-        Some(Proximity::Near) => "near",
-        Some(Proximity::VeryNear) => "very near",
-        None => "",
-    };
-    let mut s = format!("TARGET\n{looks}\n");
-    s += &match dir {
-        Some(d) => format!("{d}, {dist}\n"),
-        None => "Reacquiring...\n".into(),
-    };
-    s += match ti.target_awareness {
-        PursuitAwareness::Unaware => "Unaware of you",
-        PursuitAwareness::Suspicious => "Suspicious",
-        PursuitAwareness::Aware => "Aware of you",
-        PursuitAwareness::Pursuit => "Fleeing",
-    };
-    s += "\n";
-    if ti.being_chased {
-        s += "You are being chased\n";
-    } else if ti.pursuer_near {
-        s += "Your hunter is near\n";
-    }
-    if let Some(t) = ti.escaping {
-        s += &format!("Escape: {t:.0}s\n");
-    }
-    s
-}
-
-pub fn update_anchored_text(
-    view: Res<SessionView>,
-    local: Res<crate::input_map::LocalInput>,
-    time: Res<Time>,
-    mut seen: Local<HashMap<u32, f32>>,
-    windows: Query<&Window>,
-    mut texts: Query<(&AnchoredText, &mut Node, &mut Text, &mut TextFont, &mut Visibility, &mut TextColor)>,
-    popups: Res<crate::hud_popups::HudPopups>,
-    overrides: Option<Res<crate::hud_settings::HudOverrides>>,
-) {
-    let Some(window) = windows.iter().next() else { return };
-    let (s, off) = stage_xform(Vec2::new(window.width(), window.height()));
-    let m = &view.matchv;
-    let me_id = view.me.as_ref().map(|p| p.id);
-    let mine = m.scores.iter().find(|e| Some(e.id) == me_id);
-    let leader = m.scores.iter().max_by_key(|e| e.score);
-    let now = time.elapsed_secs();
-    let banner = popups.banner_env(now);
-    let paper = popups.target_env(now);
-    for (at, mut node, mut text, mut font, mut vis, mut color) in &mut texts {
-        let mission = m.mission.as_ref();
-        let (content, size) = match (at.kind, mission) {
-            (TextKind::ObjTitle, Some(mv)) => (mission_title(mv), 17.0),
-            (TextKind::ObjName, Some(mv)) => (mission_task(mv), 15.0),
-            (TextKind::TargetBody, Some(mv)) => (mission_paper(mv), 15.0),
-            (TextKind::ObjTitle, None) => (format!("{}   {}:{:02}", if m.mode.eq_ignore_ascii_case("contracts") { "CONTRACTS" } else { "FREE FOR ALL" }, (m.time_left / 60.0).floor() as i32, (m.time_left % 60.0) as i32), 17.0),
-            (TextKind::ObjName, None) => (
-                match (mine, leader) {
-                    (Some(me), Some(l)) if l.id != me.id => format!("You {}   ·   {} leads with {}", me.score, l.name, l.score),
-                    (Some(me), _) => format!("You lead with {}", me.score),
-                    _ => String::new(),
-                },
-                15.0,
-            ),
-            (TextKind::TargetBody, None) => (target_lines(&view, local.yaw), 15.0),
-            (TextKind::Message, Some(mv)) => (mission_message(mv, time.elapsed_secs(), &mut seen), 20.0),
-            (TextKind::Outcome, Some(mv)) => (mission_outcome(mv), 19.0),
-            (TextKind::Prompt, Some(mv)) => (interaction_prompt(mv, &view, local.yaw, local.pitch), 16.0),
-            (TextKind::Message | TextKind::Outcome | TextKind::Prompt, None) => (String::new(), 15.0),
-        };
-        // Banner strips and the target paper fade and slide with their popup.
-        let env = match at.kind {
-            TextKind::ObjTitle | TextKind::ObjName => Some(banner),
-            TextKind::TargetBody => Some(paper),
-            _ => None,
-        };
-        let hidden = content.is_empty() || m.mode.is_empty() || env.is_some_and(|e| !e.shown()) || overrides.as_ref().is_some_and(|o| o.text_hidden(at.kind));
-        vis.set_if_neq(if hidden { Visibility::Hidden } else { Visibility::Inherited });
-        let alpha = env.map_or(1.0, |e| e.alpha);
-        if color.0.alpha() != alpha {
-            color.0.set_alpha(alpha);
-        }
-        let dx = env.map_or(0.0, |e| e.dx) * s;
-        set_text(&mut text, content);
-        set_font_size(&mut font, size * s);
-        let min = at.rect.min * s + off;
-        let max = at.rect.max * s + off;
-        // Banner strips: right-aligned inside the strip; target paper: inset block.
-        let (inset, top) = match at.kind {
-            TextKind::TargetBody => (Vec2::new(0.1, 0.0), min.y + (max.y - min.y) * 0.3),
-            TextKind::Message | TextKind::Outcome | TextKind::Prompt => (Vec2::new(0.0, 0.0), min.y),
-            _ => (Vec2::new(0.04, 0.0), (min.y + max.y) * 0.5 - size * s * 0.65),
-        };
-        place(&mut node, px(min.x + (max.x - min.x) * inset.x + dx), px(top), Some(px((max.x - min.x) * (1.0 - 2.0 * inset.x))), None);
-    }
-}
-
-/// Banner title strip in a mission: the first visible objective with work left.
-fn mission_title(mv: &dishonored_mission::runtime::MissionView) -> String {
-    use dishonored_mission::TaskState;
-    mv.objectives
-        .iter()
-        .find(|o| !o.hidden && o.tasks.iter().any(|t| !t.hidden && t.state == TaskState::Active && !t.optional))
-        .or_else(|| mv.objectives.iter().find(|o| !o.hidden))
-        .map(|o| o.description.to_uppercase())
-        .unwrap_or_else(|| mv.title.to_uppercase())
-}
-
-/// Banner name strip: the current required task.
-fn mission_task(mv: &dishonored_mission::runtime::MissionView) -> String {
-    use dishonored_mission::TaskState;
-    if let Some(o) = &mv.outcome {
-        return o.text.clone();
-    }
-    mv.objectives
-        .iter()
-        .filter(|o| !o.hidden)
-        .flat_map(|o| o.tasks.iter())
-        .find(|t| !t.hidden && t.state == TaskState::Active && !t.optional)
-        .map(|t| t.description.clone())
-        .unwrap_or_default()
-}
-
-/// Target paper in a mission: the newest notification (the popup decides when it shows).
-fn mission_paper(mv: &dishonored_mission::runtime::MissionView) -> String {
-    mv.notification.as_ref().map(|(_, title, text)| format!("{}\n{}", title.to_uppercase(), text)).unwrap_or_default()
-}
-
-/// Newest HUD message, for four seconds after it first appears.
-fn mission_message(mv: &dishonored_mission::runtime::MissionView, now: f32, seen: &mut HashMap<u32, f32>) -> String {
-    if mv.outcome.is_some() {
-        return String::new();
-    }
-    match mv.messages.last() {
-        Some((id, text)) => {
-            let t0 = *seen.entry(*id).or_insert(now);
-            if now - t0 < 4.0 { text.clone() } else { String::new() }
-        }
-        None => String::new(),
-    }
-}
-
-/// End-of-mission summary in the shape of Dishonored's mission statistics.
-fn mission_outcome(mv: &dishonored_mission::runtime::MissionView) -> String {
-    let Some(o) = &mv.outcome else { return String::new() };
-    let st = &mv.stats;
-    let mins = (st.time / 60.0).floor() as i32;
-    let secs = (st.time % 60.0) as i32;
-    let mut s = format!("{}\n{}\n\n", if o.success { "MISSION COMPLETE" } else { "MISSION FAILED" }, o.text);
-    s += &format!("Hostiles killed  {}      Civilians killed  {}\n", st.hostiles_killed, st.civilians_killed);
-    s += &format!("Detected  {}      Alarms  {}      Time  {mins}:{secs:02}\n", st.detected, st.alarms);
-    s += &format!("Chaos  {}", if mv.high_chaos { "High" } else { "Low" });
-    let mut feats = Vec::new();
-    if st.ghost() {
-        feats.push("Ghost");
-    }
-    if st.clean_hands() {
-        feats.push("Clean Hands");
-    }
-    if !feats.is_empty() {
-        s += &format!("      {}", feats.join(", "));
-    }
-    s
-}
-
-/// Same reach/facing rule as the server (`MissionMatch::interaction`), for the prompt.
-fn interaction_prompt(mv: &dishonored_mission::runtime::MissionView, view: &SessionView, yaw: f32, pitch: f32) -> String {
-    let Some(me) = view.me.as_ref().filter(|m| m.alive) else { return String::new() };
-    if mv.outcome.is_some() {
-        return String::new();
-    }
-    // An open dialog choice replaces the prompt; `hud_dialogue` draws it in `playerChoice_mc`.
-    if mv.choices.iter().any(|c| c.0 == me.id) {
-        return String::new();
-    }
-    // On a chain: `DisTweaks_Climbable.m_StopClimbingInteractText` ("`GBA_Jump` jump off").
-    if me.mode == dishonored_sim::state::MoveMode::Climbing {
-        return "Space   Jump off".to_string();
-    }
-    let eye = me.position + glam::Vec3::Z * 64.0;
-    let fwd = dishonored_sim::movement::view_vector(yaw, pitch);
-    let mut best: Option<(f32, String)> = None;
-    let mut consider = |pos: glam::Vec3, reach: f32, prompt: &str| {
-        let d = pos - eye;
-        let dist = d.length();
-        if dist > reach || dist < 1.0 {
-            return;
-        }
-        let facing = d.normalize().dot(fwd);
-        if facing < 0.6 {
-            return;
-        }
-        let score = dist * (2.0 - facing);
-        if best.as_ref().is_none_or(|b| score < b.0) {
-            best = Some((score, prompt.to_string()));
-        }
-    };
-    for (p, prompt) in &mv.usables {
-        consider(glam::Vec3::from(*p), 220.0, prompt);
-    }
-    for (npc, prompt) in &mv.talkers {
-        let Some(id) = mv.npc_ids.iter().find(|x| &x.0 == npc).map(|x| x.1) else { continue };
-        if let Some(o) = view.others.iter().find(|o| o.id == id && o.alive) {
-            consider(o.position + glam::Vec3::Z * 40.0, 200.0, prompt);
-        }
-    }
-    best.map(|b| format!("F   {}", b.1)).unwrap_or_default()
 }

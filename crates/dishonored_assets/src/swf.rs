@@ -87,6 +87,8 @@ pub struct Place {
     pub color: Option<ColorTransform>,
     pub name: Option<String>,
     pub move_only: bool,
+    /// Mask layer: this placement clips the depths above it up to `clip_depth`.
+    pub clip_depth: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +96,131 @@ pub enum FrameOp {
     Place(Place),
     Remove(u16),
     Label(String),
+    /// A frame script (`DoAction`), reduced to the timeline commands it issues.
+    Script(Vec<ScriptOp>),
+}
+
+/// Timeline commands of a frame script. The HUD movies' frame scripts are `stop()`, `play()`,
+/// `gotoAndPlay(label | frame)` and `this._visible = bool`; anything else is `Other`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScriptOp {
+    Stop,
+    Play,
+    /// `ActionGotoFrame` (0-based frame).
+    GotoFrame(u16),
+    GotoLabel(String),
+    SetVisible(bool),
+    Other,
+}
+
+/// Decode a `DoAction` body into [`ScriptOp`]s (constant pools, pushes and the `this._visible`
+/// pattern are recognised; other actions become `Other`).
+pub fn parse_frame_script(body: &[u8]) -> Vec<ScriptOp> {
+    let mut out = Vec::new();
+    let mut p = 0usize;
+    // Last pushed values (strings / booleans), for `push 'this'; getVar; push '_visible', b; setMember`.
+    let mut pool: Vec<String> = Vec::new();
+    let mut pushed: Vec<PushVal> = Vec::new();
+    #[derive(Clone, PartialEq)]
+    enum PushVal {
+        Str(String),
+        Bool(bool),
+        Other,
+    }
+    while p < body.len() {
+        let op = body[p];
+        p += 1;
+        if op == 0 {
+            break;
+        }
+        let (len, start) = if op >= 0x80 && p + 2 <= body.len() {
+            let l = u16::from_le_bytes([body[p], body[p + 1]]) as usize;
+            p += 2;
+            (l, p)
+        } else {
+            (0, p)
+        };
+        let data = body.get(start..(start + len).min(body.len())).unwrap_or(&[]);
+        p = start + len;
+        match op {
+            0x07 => out.push(ScriptOp::Stop),
+            0x06 => out.push(ScriptOp::Play),
+            0x81 if data.len() >= 2 => out.push(ScriptOp::GotoFrame(u16::from_le_bytes([data[0], data[1]]))),
+            0x8C => {
+                let end = data.iter().position(|&c| c == 0).unwrap_or(data.len());
+                out.push(ScriptOp::GotoLabel(String::from_utf8_lossy(&data[..end]).into_owned()));
+            }
+            0x88 if data.len() >= 2 => {
+                let n = u16::from_le_bytes([data[0], data[1]]) as usize;
+                let mut q = 2;
+                pool.clear();
+                for _ in 0..n {
+                    let end = data[q..].iter().position(|&c| c == 0).map(|e| q + e).unwrap_or(data.len());
+                    pool.push(String::from_utf8_lossy(&data[q..end]).into_owned());
+                    q = end + 1;
+                    if q >= data.len() {
+                        break;
+                    }
+                }
+            }
+            0x96 => {
+                let mut q = 0;
+                while q < data.len() {
+                    let t = data[q];
+                    q += 1;
+                    match t {
+                        0 => {
+                            let end = data[q..].iter().position(|&c| c == 0).map(|e| q + e).unwrap_or(data.len());
+                            pushed.push(PushVal::Str(String::from_utf8_lossy(&data[q..end]).into_owned()));
+                            q = end + 1;
+                        }
+                        1 | 7 => {
+                            pushed.push(PushVal::Other);
+                            q += 4;
+                        }
+                        2 | 3 => pushed.push(PushVal::Other),
+                        4 => {
+                            pushed.push(PushVal::Other);
+                            q += 1;
+                        }
+                        5 => {
+                            pushed.push(PushVal::Bool(data.get(q).copied().unwrap_or(0) != 0));
+                            q += 1;
+                        }
+                        6 => {
+                            pushed.push(PushVal::Other);
+                            q += 8;
+                        }
+                        8 => {
+                            let i = data.get(q).copied().unwrap_or(0) as usize;
+                            pushed.push(pool.get(i).cloned().map(PushVal::Str).unwrap_or(PushVal::Other));
+                            q += 1;
+                        }
+                        9 => {
+                            let i = u16::from_le_bytes([data.get(q).copied().unwrap_or(0), data.get(q + 1).copied().unwrap_or(0)]) as usize;
+                            pushed.push(pool.get(i).cloned().map(PushVal::Str).unwrap_or(PushVal::Other));
+                            q += 2;
+                        }
+                        _ => break,
+                    }
+                }
+            }
+            // SetMember: `this._visible = b` (pushed: 'this' (getVar), '_visible', b).
+            0x4F => {
+                let n = pushed.len();
+                if n >= 2 && pushed[n - 2] == PushVal::Str("_visible".into()) {
+                    if let PushVal::Bool(b) = pushed[n - 1] {
+                        out.push(ScriptOp::SetVisible(b));
+                    }
+                }
+                pushed.clear();
+            }
+            0x1C | 0x4E => {}
+            0x17 => pushed.clear(),
+            _ => out.push(ScriptOp::Other),
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Default)]
@@ -153,6 +280,13 @@ pub struct EditText {
     pub html: bool,
     pub variable: String,
     pub initial: Option<String>,
+    /// `wordWrap` (flag 0x40 of the first flag byte).
+    pub word_wrap: bool,
+    /// `autoSize` (flag 0x40 of the second flag byte).
+    pub auto_size: bool,
+    /// Layout: left / right margins, indent and leading (pixels).
+    pub margins: [f32; 2],
+    pub leading: f32,
 }
 
 /// One DefineButton2 record. `states`: bit 0 up, 1 over, 2 down, 3 hit test.
@@ -331,7 +465,7 @@ fn parse_fills(b: &mut Bits, shape_ver: u8) -> Vec<Fill> {
 fn parse_edit_text(b: &mut Bits, bounds: Rect, end: usize) -> EditText {
     let f1 = b.u8();
     let f2 = b.u8();
-    let mut t = EditText { bounds, multiline: f1 & 0x20 != 0, html: f2 & 0x02 != 0, ..Default::default() };
+    let mut t = EditText { bounds, multiline: f1 & 0x20 != 0, html: f2 & 0x02 != 0, word_wrap: f1 & 0x40 != 0, auto_size: f2 & 0x40 != 0, ..Default::default() };
     let (has_text, has_color, has_max, has_font) = (f1 & 0x80 != 0, f1 & 0x04 != 0, f1 & 0x02 != 0, f1 & 0x01 != 0);
     let (has_font_class, has_layout) = (f2 & 0x80 != 0, f2 & 0x20 != 0);
     if has_font {
@@ -351,10 +485,9 @@ fn parse_edit_text(b: &mut Bits, bounds: Rect, end: usize) -> EditText {
     }
     if has_layout {
         t.align = b.u8();
+        t.margins = [b.u16() as f32 / 20.0, b.u16() as f32 / 20.0];
         b.u16();
-        b.u16();
-        b.u16();
-        b.u16();
+        t.leading = b.u16() as i16 as f32 / 20.0;
     }
     if b.pos < end {
         t.variable = b.cstr();
@@ -387,6 +520,9 @@ fn parse_place(b: &mut Bits, ver: u8, end: usize) -> Place {
     }
     if flags & 0x20 != 0 && b.pos < end {
         p.name = Some(b.cstr());
+    }
+    if flags & 0x40 != 0 && b.pos + 2 <= end {
+        p.clip_depth = Some(b.u16());
     }
     p
 }
@@ -433,6 +569,8 @@ fn parse_tags(d: &[u8], mut pos: usize, end: usize, movie: &mut Movie, sprite: &
                 frame.push(FrameOp::Remove(b.u16()));
             }
             43 => frame.push(FrameOp::Label(b.cstr())),
+            // DoAction inside a sprite (the root's frame scripts are the movie's debug harness).
+            12 if !top => frame.push(FrameOp::Script(parse_frame_script(&d[body..tend]))),
             39 if top => {
                 let id = b.u16();
                 let _frames = b.u16();
@@ -608,7 +746,7 @@ impl Movie {
                     FrameOp::Remove(d) => {
                         list.remove(d);
                     }
-                    FrameOp::Label(_) => {}
+                    FrameOp::Label(_) | FrameOp::Script(_) => {}
                 }
             }
         }

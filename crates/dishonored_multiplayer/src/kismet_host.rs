@@ -1127,7 +1127,7 @@ impl Host for H<'_> {
             }
             "DisSeqAct_ShowLocationDiscovery" => {
                 let m = cx.prop_str("m_LocationName");
-                self.act(vec![Action::Message(m)]);
+                self.act(vec![Action::Location(m)]);
                 HostResult::Done
             }
             "DisSeqAct_ShowTargetNotification" => {

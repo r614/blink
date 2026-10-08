@@ -1,94 +1,104 @@
 //! Tests of `dishonored_runtime::hud_popups` (integration tests, so they link the normal library build
 //! instead of recompiling the whole crate in test mode).
 
+use dishonored_mission::TaskState;
+use dishonored_mission::runtime::{MissionView, ObjectiveView, TaskView};
 use dishonored_runtime::hud_popups::*;
 
-fn game() -> Triggers {
-    Triggers { game: Some(("ffa".into(), 1)), score: Some((0, Some(1))), ..Default::default() }
+fn shown(c: Option<PopupContent>) -> (String, u8, usize) {
+    match c {
+        Some(PopupContent::Objective { name, event, tasks }) => (name, event, tasks.len()),
+        Some(PopupContent::Target { name, .. }) => (name, EV_TARGET, 0),
+        None => (String::new(), 255, 0),
+    }
 }
 
 #[test]
-fn banner_opens_after_the_game_start_delay_and_closes() {
-    let mut p = HudPopups::default();
-    p.step(10.0, game(), 1, false, true);
-    assert!(!p.banner_env(11.9).shown());
-    // Open tween: 0.2 s from x + 250.
-    let e = p.banner_env(12.1);
-    assert!(e.alpha > 0.9 && e.dx > 0.0 && e.dx < 10.0, "{e:?}");
-    assert_eq!(p.banner_env(13.0), Envelope { alpha: 1.0, dx: 0.0 });
-    // One line: 0.7 + 3.5 s, then the 0.25 s fade and hidden 0.5 s after Close().
-    let close = 12.0 + 4.2;
-    assert_eq!(p.banner_env(close - 0.01).alpha, 1.0);
-    let e = p.banner_env(close + 0.1);
-    assert!(e.alpha > 0.0 && e.alpha < 0.2 && e.dx > 80.0, "{e:?}");
-    assert!(!p.banner_env(close + 0.3).shown());
-    assert!(!p.banner_env(close + 1.0).shown());
+fn first_popup_waits_for_the_game_start_delay() {
+    let mut q = PopupQueue::default();
+    q.objective_added(0, "Eliminate Lady Boyle");
+    // m_fPopupDelayOnGameStart = 2 s, strictly below zero to show.
+    assert!(q.tick(1.0, false, true, false, false).is_none());
+    assert!(q.tick(0.99, false, true, false, false).is_none());
+    // Paused: the timer does not run.
+    assert!(q.tick(5.0, true, true, false, false).is_none());
+    assert_eq!(shown(q.tick(0.02, false, true, false, false)), ("Eliminate Lady Boyle".into(), EV_ADDED, 0));
 }
 
 #[test]
-fn score_lead_and_key_reopen_the_banner() {
-    let mut p = HudPopups::default();
-    p.step(0.0, game(), 1, false, true);
-    p.step(20.0, game(), 1, false, true);
-    assert!(!p.banner_env(20.0).shown());
-    let mut g = game();
-    g.score = Some((1, Some(1)));
-    p.step(21.0, g.clone(), 1, false, true);
-    assert!(p.banner_env(21.5).shown());
-    // Unchanged afterwards: closes on time.
-    p.step(30.0, g.clone(), 1, false, true);
-    assert!(!p.banner_env(30.0).shown());
-    // Leader change.
-    g.score = Some((1, Some(7)));
-    p.step(31.0, g.clone(), 1, false, true);
-    assert!(p.banner_env(31.5).shown());
-    // Journal key, also with the popups option off.
-    p.step(40.0, g.clone(), 1, true, false);
-    assert!(p.banner_env(40.5).shown());
-    g.score = Some((2, Some(7)));
-    p.step(50.0, g, 1, false, false);
-    assert!(!p.banner_env(50.5).shown());
+fn next_popup_waits_until_the_active_one_closed() {
+    let mut q = PopupQueue::default();
+    q.timer = -1.0;
+    q.objective_added(0, "A");
+    q.objective_added(1, "B");
+    assert_eq!(shown(q.tick(0.016, false, true, false, false)).0, "A");
+    // objectives_mc._opened is true while A shows (open, tasks, close + 500 ms).
+    assert!(q.tick(0.016, false, true, true, false).is_none());
+    assert!(q.tick(0.016, false, true, true, false).is_none());
+    assert_eq!(shown(q.tick(0.016, false, true, false, false)).0, "B");
+    assert!(q.tick(0.016, false, true, false, false).is_none());
 }
 
 #[test]
-fn target_paper_follows_the_target_notification() {
-    let mut p = HudPopups::default();
-    let mut g = game();
-    g.target = Some(4);
-    p.step(0.0, g.clone(), 1, false, true);
-    assert!(p.target_env(2.5).shown());
-    // 1 s open + 5 s, then 0.25 s fade, hidden 1 s after Close().
-    assert_eq!(p.target_env(2.0 + 5.9).alpha, 1.0);
-    assert!(!p.target_env(2.0 + 6.0 + 0.3).shown());
-    g.target = Some(5);
-    p.step(20.0, g, 1, false, true);
-    assert!(p.target_env(20.1).shown());
+fn task_events_merge_into_queued_popups() {
+    let mut q = PopupQueue::default();
+    q.objective_added(0, "O");
+    // Task added: merged into the queued Added popup.
+    q.task_added(0, "O", 0, "Go to the party");
+    assert_eq!(q.queue.len(), 1);
+    assert_eq!(q.queue[0].tasks.len(), 1);
+    // Task updated: only an Updated popup takes it, so a new popup.
+    q.task_updated(0, "O", 0, "Go to the party (1/2)");
+    assert_eq!(q.queue.len(), 2);
+    assert_eq!(q.queue[1].event, EV_UPDATED);
+    // Completed: merges into the Updated popup, replacing the task's earlier entry.
+    q.task_completed(0, "O", 0, "Go to the party");
+    assert_eq!(q.queue.len(), 2);
+    assert_eq!(q.queue[1].tasks.len(), 1);
+    assert_eq!(q.queue[1].tasks[0].event, EV_COMPLETED);
+    // Objective completed: the Updated popup goes, its completed task moves to the new one.
+    q.objective_ended(0, "O", false);
+    assert_eq!(q.queue.len(), 2);
+    assert_eq!(q.queue[1].event, EV_COMPLETED);
+    assert_eq!(q.queue[1].tasks.len(), 1);
+    // A failed task is dropped while a Completed popup of the objective is queued.
+    q.task_failed(0, "O", 1, "Spare her");
+    assert_eq!(q.queue.len(), 2);
 }
 
 #[test]
-fn no_match_no_popup() {
-    let mut p = HudPopups::default();
-    p.step(0.0, Triggers::default(), 0, true, true);
-    assert!(!p.banner_env(1.0).shown());
+fn popups_off_empties_the_queue() {
+    let mut q = PopupQueue::default();
+    q.timer = -1.0;
+    q.objective_added(0, "A");
+    q.objective_added(1, "B");
+    assert!(q.tick(0.016, false, false, false, false).is_none());
+    assert!(q.queue.is_empty());
 }
 
 #[test]
-fn mission_paper_opens_for_a_notification_only() {
-    let mut p = HudPopups::default();
-    let mut g = Triggers { game: Some(("mission".into(), 1)), objectives: vec![("Try the stations".into(), false, vec![("Blink".into(), 1, false)])], ..Default::default() };
-    p.step(0.0, g.clone(), 1, false, true);
-    // The banner opens after the start delay; the target paper does not (no notification).
-    assert!(p.banner_env(2.5).shown());
-    assert!(!p.target_env(2.5).shown());
-    // A task change reopens the banner, not the paper.
-    g.objectives[0].2[0].1 = 2;
-    p.step(20.0, g.clone(), 1, false, true);
-    assert!(p.banner_env(20.5).shown());
-    assert!(!p.target_env(20.5).shown());
-    // A Notify action opens the paper with the target timing (1 s + 5 s, then the fade).
-    g.notification = Some(3);
-    p.step(30.0, g, 1, false, true);
-    assert!(p.target_env(30.5).shown());
-    assert_eq!(p.target_env(35.9).alpha, 1.0);
-    assert!(!p.target_env(36.3).shown());
+fn mission_changes_become_popups() {
+    let task = |d: &str, s: TaskState| TaskView { description: d.into(), state: s, optional: false, hidden: false };
+    let mut mv = MissionView { objectives: vec![ObjectiveView { description: "Lady Boyle".into(), hidden: false, tasks: vec![task("Find her", TaskState::Active)] }], ..Default::default() };
+    let mut q = PopupQueue::default();
+    q.observe(&mv);
+    // Objective added with its task merged in.
+    assert_eq!(q.queue.len(), 1);
+    assert_eq!((q.queue[0].event, q.queue[0].tasks.len()), (EV_ADDED, 1));
+    q.queue.clear();
+    // Unchanged: nothing.
+    q.observe(&mv);
+    assert!(q.queue.is_empty());
+    // The task completes (the only required task): an Updated popup, then the objective's
+    // Completed popup takes its task.
+    mv.objectives[0].tasks[0].state = TaskState::Completed;
+    q.observe(&mv);
+    assert_eq!(q.queue.len(), 1);
+    assert_eq!(q.queue[0].event, EV_COMPLETED);
+    assert_eq!(q.queue[0].tasks[0].event, EV_COMPLETED);
+    // A target notification queues behind.
+    mv.notification = Some((7, "TargetEliminated".into(), "Twk_ChapterTarget_LadyBoyle".into()));
+    q.observe(&mv);
+    assert_eq!(q.queue.len(), 2);
+    assert_eq!(q.queue[1].event, EV_TARGET);
 }

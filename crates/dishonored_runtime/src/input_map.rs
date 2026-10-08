@@ -29,6 +29,12 @@ pub struct LocalInput {
     pub choice_open: bool,
     /// One-shot item action (`dishonored_sim::input::actions`) latched until the next tick.
     pub action: u8,
+    /// The quick-access wheel is open (`hud_wheel.rs`): it takes the mouse
+    /// (`m_bCaptureAnalogInput`) and the number keys; the player stands still.
+    pub wheel_open: bool,
+    /// The keyboard shortcuts (`GBA_Shortcut_0..9`) as the wheel's dock assigns them; None
+    /// uses the default list below.
+    pub shortcuts: Option<[Option<LeftHand>; 10]>,
 }
 
 impl LocalInput {
@@ -77,7 +83,7 @@ pub fn gather_input(
     };
     let (scale, invert, smoothing) = settings.as_ref().map(|s| (s.s.mouse_degrees_per_count(), s.s.mouse.invert_y, s.s.mouse.smoothing)).unwrap_or((0.1, false, false));
     let locked = cursor.iter().any(|c| c.grab_mode != CursorGrabMode::None);
-    if locked {
+    if locked && !local.wheel_open {
         let raw = motion.delta;
         let d = if smoothing { (raw + smooth.0) * 0.5 } else { raw };
         smooth.0 = raw;
@@ -87,6 +93,8 @@ pub fn gather_input(
     }
     let wheel = scroll.delta.y;
     let on = |action: &str| bind.pressed(action, &keys, &mouse, wheel) && (locked || !is_mouse(bind, action));
+    let wheel_open = local.wheel_open;
+    let on = |action: &str| !wheel_open && on(action);
     let axis = |pos: &str, neg: &str| -> i8 { (on(pos) as i8 - on(neg) as i8) * 127 };
     local.forward = axis("GBA_MoveForward", "GBA_MoveBackward");
     local.right = axis("GBA_StrafeRight", "GBA_StrafeLeft");
@@ -125,19 +133,26 @@ pub fn gather_input(
         }
         return;
     }
-    for (action, h) in [
-        ("GBA_Shortcut_0", LeftHand::Blink),
-        ("GBA_Shortcut_1", LeftHand::Windblast),
-        ("GBA_Shortcut_2", LeftHand::DarkVision),
-        ("GBA_Shortcut_3", LeftHand::Pistol),
-        ("GBA_Shortcut_4", LeftHand::Crossbow),
-        ("GBA_Shortcut_5", LeftHand::Possession),
-        ("GBA_Shortcut_6", LeftHand::BendTime),
-        ("GBA_Shortcut_7", LeftHand::DevouringSwarm),
-        ("GBA_Shortcut_8", LeftHand::Grenade),
-        ("GBA_Shortcut_9", LeftHand::SpringRazor),
-    ] {
-        if bind.just_pressed(action, &keys, &mouse, wheel) {
+    if wheel_open {
+        return;
+    }
+    let defaults = [
+        LeftHand::Blink,
+        LeftHand::Windblast,
+        LeftHand::DarkVision,
+        LeftHand::Pistol,
+        LeftHand::Crossbow,
+        LeftHand::Possession,
+        LeftHand::BendTime,
+        LeftHand::DevouringSwarm,
+        LeftHand::Grenade,
+        LeftHand::SpringRazor,
+    ];
+    let table = local.shortcuts.unwrap_or(defaults.map(Some));
+    for (i, h) in table.into_iter().enumerate() {
+        if let Some(h) = h
+            && bind.just_pressed(&format!("GBA_Shortcut_{i}"), &keys, &mouse, wheel)
+        {
             local.left_hand = h;
         }
     }

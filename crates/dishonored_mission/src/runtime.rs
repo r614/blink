@@ -213,6 +213,9 @@ pub struct MissionView {
     pub messages: Vec<(u32, String)>,
     /// Latest target notification (id, title, text).
     pub notification: Option<(u32, String, String)>,
+    /// Latest location discovery (id, name): `DisSeqAct_ShowLocationDiscovery`.
+    #[serde(default)]
+    pub location: Option<(u32, String)>,
     pub outcome: Option<Outcome>,
     pub stats: MissionStats,
     /// Chaos "High" on the mission-stats screen: the chaos level reached the stats op's
@@ -1071,6 +1074,10 @@ impl MissionState {
                 Action::Notify(t, x) => {
                     let id = self.id();
                     self.view.notification = Some((id, t.clone(), x.clone()));
+                }
+                Action::Location(l) => {
+                    let id = self.id();
+                    self.view.location = Some((id, l.clone()));
                 }
                 Action::Spawn(n) => {
                     if self.npc_alive.insert(n.clone()) {

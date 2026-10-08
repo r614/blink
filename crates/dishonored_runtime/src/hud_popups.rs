@@ -1,222 +1,483 @@
-//! When the top-right HUD panels show: the objectives banner (`objectives_mc`) and the target
-//! paper (`targetNotification_mc`). Both are popups in the original, never permanent panels
-//! (decoded from the `UI_HUD_SF` "HUD" ActionScript and `DisTweaks_GFxMoviePlayerHUD`; see
-//! research/dishonored/MENUS.md "Objective popups"):
+//! The HUD's popup queue and what feeds it (`DisGFxMoviePlayerHUD.m_PopupQueue`,
+//! `m_ActivePopup`, `m_fPopupTimer`; research/dishonored/HUD.md "Popups"):
 //!
-//! - `objectives_mc` is class `ObjectivesNotification`. `Open()` slides the backdrop in (alpha
-//!   0 -> 100, x + 250 -> x, 0.2 s `Strong.easeOut`), then shows the task lines after
-//!   `_tasksApparitionDelay` 700 ms, each for `_taskLifeDuration_const` 3500 ms
-//!   (`_utils.DelayedAnimation`), then `Close()`: alpha -> 0 with x + 100 over 0.2 s (backdrop)
-//!   / 0.25 s (name strip), hidden by `OnClosed` 500 ms later. Without tasks it closes after
-//!   3500 ms.
-//! - `targetNotification_mc` is class `TargetNotification`. `Open()` plays the portrait's open
-//!   timeline and after 1000 ms (`OnOpened`) waits the notification's duration
-//!   (`m_fTargetNotificationDuration` 5 s in `Twk_InGameUI.Twk_GFxMoviePlayerHUD`), then
-//!   `Close()`: alpha -> 0 over 0.25 s `Strong.easeOut`, hidden 1000 ms later.
-//! - The first popup of a game waits `m_fPopupDelayOnGameStart` (2 s).
+//! - Enqueueing (only while `m_bHandleObjectiveEvents`), one `DisObjectivePopupInfo` per popup
+//!   (objective, event, task list):
+//!   - objective added (0x00BB2480): a new popup {objective, Added};
+//!   - task added (0x00BB27C0): merged into a queued popup of the same objective whose event is
+//!     Added or Updated, else a new popup {objective, Updated, [task]};
+//!   - task updated (0x00BB28E0): merged into a queued Updated popup, else new;
+//!   - task completed (0x00BB2A00): merged into a queued Updated or Completed popup, else new;
+//!   - task failed (0x00BB2B20): merged into a queued Updated or Failed popup; dropped when a
+//!     Completed popup of the objective is queued; else new;
+//!   - objective completed / failed (0x00BB2500 / 0x00BB2660): queued Updated popups of the
+//!     objective are removed and their completed (failed) tasks move to the new
+//!     {objective, Completed (Failed)} popup;
+//!   - merging a task replaces an earlier entry of the same task (0x00B9EE60).
+//! - Showing (0x00BAFE70, every HUD tick): `m_fPopupTimer` (starts at `m_fPopupDelayOnGameStart`
+//!   2 s) counts down while the game runs; once below zero, and once the active popup's clip
+//!   reports `_opened == false` (objectives_mc, or targetNotification_mc for a target
+//!   notification), the next popup is taken from the front of the queue and shown
+//!   (`SetObjectives` / `SetNotification`). With `PSI_HUD_bShowObjectivePopups` off the queue
+//!   is emptied instead.
 //!
-//! The port's match banner (mode, clock, score) has no counterpart in the single-player HUD; it
-//! follows the objectives popup: it opens at match start (after the game-start delay), when the
-//! local score or the leader changes, when a mission objective or task changes and on the
-//! journal key (`GBA_Journal`, J: the original's on-demand objectives view is the journal's
-//! objectives tab). The Contracts target paper opens when the target changes and on the same
-//! key. The scoreboard stays on Tab (`hud.rs`).
+//! The port's missions expose objectives as a list, so the events are found by comparing the
+//! mission view with the previous one ([`PopupQueue::observe`]). An objective counts as
+//! completed when all its visible required tasks are completed (the original's objectives
+//! complete from their tasks the same way; LIKELY).
 
-use crate::session::SessionView;
-use bevy::prelude::*;
+use crate::gfx_stage::{ImageRef, Stage};
+use crate::hud_widgets::{HudWidgets, TargetKind};
+use dishonored_mission::TaskState;
+use dishonored_mission::runtime::MissionView;
 
-/// `Strong.easeOut` of `mx.transitions.easing` (quintic): 1 - (1 - t)^5.
-pub fn strong_ease_out(t: f32) -> f32 {
-    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(5)
-}
-
-/// Timings of one popup class (seconds).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PopupTiming {
-    /// Open tween (alpha in, slide from `open_dx`).
-    pub open: f32,
-    pub open_dx: f32,
-    /// From `Open()` to `Close()`.
-    pub hold: f32,
-    /// Close tween (alpha out, slide to `close_dx`).
-    pub close: f32,
-    pub close_dx: f32,
-    /// From `Close()` to hidden (`OnClosed`).
-    pub hidden_after: f32,
-}
-
-/// `ObjectivesNotification` with `tasks` task lines.
-pub fn objectives_timing(tasks: usize) -> PopupTiming {
-    let hold = if tasks > 0 { 0.7 + 3.5 * tasks as f32 } else { 3.5 };
-    PopupTiming { open: 0.2, open_dx: 250.0, hold, close: 0.25, close_dx: 100.0, hidden_after: 0.5 }
-}
-
-/// `TargetNotification` with a display duration (`m_fTargetNotificationDuration`).
-pub fn target_timing(duration: f32) -> PopupTiming {
-    // The open is the portrait's timeline (not reproduced): shown at full alpha.
-    PopupTiming { open: 0.0, open_dx: 0.0, hold: 1.0 + duration, close: 0.25, close_dx: 0.0, hidden_after: 1.0 }
-}
-
+/// `m_fPopupDelayOnGameStart`.
 pub const POPUP_DELAY_ON_GAME_START: f32 = 2.0;
-pub const TARGET_NOTIFICATION_DURATION: f32 = 5.0;
 
-/// Alpha (0..1) and horizontal offset (stage pixels) of a popup.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Envelope {
-    pub alpha: f32,
-    pub dx: f32,
+/// `EDisUIObjectiveEvent` / `EDisUITaskEvent`.
+pub const EV_ADDED: u8 = 0;
+pub const EV_UPDATED: u8 = 1;
+pub const EV_COMPLETED: u8 = 2;
+pub const EV_FAILED: u8 = 3;
+pub const EV_TARGET: u8 = 4;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TaskInfo {
+    /// Task key (objective index, task index).
+    pub task: (usize, usize),
+    pub event: u8,
+    pub description: String,
 }
 
-impl Envelope {
-    pub fn shown(&self) -> bool {
-        self.alpha > 0.001
-    }
+#[derive(Clone, Debug, PartialEq)]
+pub struct PopupInfo {
+    /// Objective index (None for a target notification).
+    pub objective: Option<usize>,
+    pub name: String,
+    pub event: u8,
+    pub tasks: Vec<TaskInfo>,
+    pub target: Option<(String, Option<String>, TargetKind)>,
 }
 
-/// One popup: when it was opened and with which timings.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Popup {
-    opened: Option<(f32, PopupTiming)>,
+/// What to show for a popup taken from the queue.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PopupContent {
+    /// `SetObjectives(name, title of event, event, [(description, task event)])`.
+    Objective { name: String, event: u8, tasks: Vec<(String, u8)> },
+    /// `SetNotification(name, portrait, kind, duration)`.
+    Target { name: String, portrait: Option<String>, kind: TargetKind },
 }
 
-impl Popup {
-    /// `Open()`: (re)start the popup at `now` (the movie clears its intervals and replays).
-    pub fn open(&mut self, now: f32, t: PopupTiming) {
-        self.opened = Some((now, t));
-    }
-
-    pub fn envelope(&self, now: f32) -> Envelope {
-        let Some((t0, t)) = self.opened else { return Envelope::default() };
-        let e = now - t0;
-        if e < 0.0 {
-            return Envelope::default();
-        }
-        if e < t.hold {
-            let k = if t.open > 0.0 { strong_ease_out(e / t.open) } else { 1.0 };
-            return Envelope { alpha: k, dx: t.open_dx * (1.0 - k) };
-        }
-        let c = e - t.hold;
-        if c >= t.hidden_after {
-            return Envelope::default();
-        }
-        let k = if t.close > 0.0 { strong_ease_out(c / t.close) } else { 1.0 };
-        Envelope { alpha: 1.0 - k, dx: t.close_dx * k }
-    }
-}
-
-/// What opens the popups, compared frame to frame.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Triggers {
-    /// Match identity (mode, match number): a new one is a game start.
-    pub game: Option<(String, u32)>,
-    /// Local score and the leader (multiplayer banner).
-    pub score: Option<(i32, Option<u32>)>,
-    /// Mission objectives: (objective, task, state, hidden) and the newest notification.
-    pub objectives: Vec<(String, bool, Vec<(String, u8, bool)>)>,
-    pub notification: Option<u32>,
-    /// Contracts target.
-    pub target: Option<u32>,
+struct Snapshot {
+    /// Per objective: (description, hidden, per task (description, state, hidden, optional)).
+    objectives: Vec<(String, bool, Vec<(String, TaskState, bool, bool)>)>,
+    notification: Option<u32>,
 }
 
-impl Triggers {
-    pub fn of(view: &SessionView) -> Self {
-        let m = &view.matchv;
-        if m.mode.is_empty() {
-            return Self::default();
+#[derive(Clone, Debug)]
+pub struct PopupQueue {
+    pub timer: f32,
+    pub active: Option<PopupInfo>,
+    pub queue: Vec<PopupInfo>,
+    /// `m_bHandleObjectiveEvents`.
+    pub handle_events: bool,
+    last: Option<Snapshot>,
+}
+
+impl Default for PopupQueue {
+    fn default() -> Self {
+        Self { timer: POPUP_DELAY_ON_GAME_START, active: None, queue: Vec::new(), handle_events: true, last: None }
+    }
+}
+
+fn merge_task(p: &mut PopupInfo, t: TaskInfo) {
+    p.tasks.retain(|x| x.task != t.task);
+    p.tasks.push(t);
+}
+
+impl PopupQueue {
+    pub fn objective_added(&mut self, obj: usize, name: &str) {
+        if self.handle_events {
+            self.queue.push(PopupInfo { objective: Some(obj), name: name.to_string(), event: EV_ADDED, tasks: Vec::new(), target: None });
         }
-        let me = view.me.as_ref().map(|p| p.id);
-        let mine = m.scores.iter().find(|e| Some(e.id) == me).map(|e| e.score);
-        let leader = m.scores.iter().max_by_key(|e| e.score).map(|e| e.id);
-        let mission = m.mission.as_ref();
-        Self {
-            game: Some((m.mode.clone(), m.match_number)),
-            score: if mission.is_none() { mine.map(|s| (s, leader)) } else { None },
-            objectives: mission
-                .map(|mv| mv.objectives.iter().map(|o| (o.description.clone(), o.hidden, o.tasks.iter().map(|t| (t.description.clone(), t.state as u8, t.hidden)).collect())).collect())
-                .unwrap_or_default(),
-            notification: mission.and_then(|mv| mv.notification.as_ref().map(|n| n.0)),
-            target: view.target_info.as_ref().and_then(|t| t.target),
-        }
-    }
-}
-
-/// Popup state of the HUD, read by `gfx_hud`.
-#[derive(Resource, Default)]
-pub struct HudPopups {
-    pub banner: Popup,
-    pub target: Popup,
-    last: Triggers,
-    /// Lines the banner shows (its "tasks"): the multiplayer score line, or the mission's
-    /// visible active tasks.
-    tasks: usize,
-}
-
-impl HudPopups {
-    pub fn banner_env(&self, now: f32) -> Envelope {
-        self.banner.envelope(now)
-    }
-    pub fn target_env(&self, now: f32) -> Envelope {
-        self.target.envelope(now)
     }
 
-    /// Compare the triggers with the last frame's and open what changed. `auto` false (the
-    /// `PSI_HUD_bShowObjectivePopups` option off) leaves only the key.
-    pub fn step(&mut self, now: f32, trig: Triggers, tasks: usize, key: bool, auto: bool) {
-        self.tasks = tasks;
-        let banner_t = objectives_timing(self.tasks);
-        let target_t = target_timing(TARGET_NOTIFICATION_DURATION);
-        let prev = std::mem::take(&mut self.last);
-        if trig.game.is_none() {
-            *self = Self::default();
+    fn task_event(&mut self, obj: usize, name: &str, t: TaskInfo, merge_into: &[u8], drop_if: &[u8]) {
+        if !self.handle_events {
             return;
         }
-        let new_game = trig.game != prev.game;
-        if auto {
-            if new_game {
-                self.banner.open(now + POPUP_DELAY_ON_GAME_START, banner_t);
-                if trig.target.is_some() {
-                    self.target.open(now + POPUP_DELAY_ON_GAME_START, target_t);
-                }
-            } else {
-                let changed = (trig.score != prev.score && prev.score.is_some() && trig.score.is_some()) || trig.objectives != prev.objectives;
-                if changed {
-                    self.banner.open(now, banner_t);
-                }
-                // `TargetNotification` opens for a target notification only: the Contracts
-                // target, or a mission's Notify action (never for the task list).
-                let notified = trig.notification != prev.notification && trig.notification.is_some();
-                if (trig.target != prev.target && trig.target.is_some()) || notified {
-                    self.target.open(now, target_t);
+        for p in self.queue.iter_mut().filter(|p| p.objective == Some(obj)) {
+            if merge_into.contains(&p.event) {
+                merge_task(p, t);
+                return;
+            }
+            if drop_if.contains(&p.event) {
+                return;
+            }
+        }
+        let mut p = PopupInfo { objective: Some(obj), name: name.to_string(), event: EV_UPDATED, tasks: Vec::new(), target: None };
+        merge_task(&mut p, t);
+        self.queue.push(p);
+    }
+
+    pub fn task_added(&mut self, obj: usize, name: &str, task: usize, desc: &str) {
+        self.task_event(obj, name, TaskInfo { task: (obj, task), event: EV_ADDED, description: desc.to_string() }, &[EV_ADDED, EV_UPDATED], &[]);
+    }
+    pub fn task_updated(&mut self, obj: usize, name: &str, task: usize, desc: &str) {
+        self.task_event(obj, name, TaskInfo { task: (obj, task), event: EV_UPDATED, description: desc.to_string() }, &[EV_UPDATED], &[]);
+    }
+    pub fn task_completed(&mut self, obj: usize, name: &str, task: usize, desc: &str) {
+        self.task_event(obj, name, TaskInfo { task: (obj, task), event: EV_COMPLETED, description: desc.to_string() }, &[EV_UPDATED, EV_COMPLETED], &[]);
+    }
+    pub fn task_failed(&mut self, obj: usize, name: &str, task: usize, desc: &str) {
+        self.task_event(obj, name, TaskInfo { task: (obj, task), event: EV_FAILED, description: desc.to_string() }, &[EV_UPDATED, EV_FAILED], &[EV_COMPLETED]);
+    }
+
+    /// Objective completed / failed: queued Updated popups of it go, their tasks with the same
+    /// end state move to the new popup.
+    pub fn objective_ended(&mut self, obj: usize, name: &str, failed: bool) {
+        if !self.handle_events {
+            return;
+        }
+        let ev = if failed { EV_FAILED } else { EV_COMPLETED };
+        let mut p = PopupInfo { objective: Some(obj), name: name.to_string(), event: ev, tasks: Vec::new(), target: None };
+        let mut i = self.queue.len();
+        while i > 0 {
+            i -= 1;
+            if self.queue[i].objective == Some(obj) && self.queue[i].event == EV_UPDATED {
+                let q = self.queue.remove(i);
+                for t in q.tasks.into_iter().filter(|t| t.event == ev) {
+                    merge_task(&mut p, t);
                 }
             }
         }
-        if key {
-            self.banner.open(now, banner_t);
-            if trig.target.is_some() || trig.notification.is_some() {
-                self.target.open(now, target_t);
+        self.queue.push(p);
+    }
+
+    /// `DisSeqAct_ShowTargetNotification` (event 4).
+    pub fn target_notification(&mut self, name: &str, portrait: Option<String>, kind: TargetKind) {
+        self.queue.push(PopupInfo { objective: None, name: name.to_string(), event: EV_TARGET, tasks: Vec::new(), target: Some((name.to_string(), portrait, kind)) });
+    }
+
+    /// One HUD tick (0x00BAFE70). `obj_open` / `target_open`: the clips' `_opened`.
+    pub fn tick(&mut self, dt: f32, paused: bool, popups_on: bool, obj_open: bool, target_open: bool) -> Option<PopupContent> {
+        if !paused {
+            self.timer -= dt;
+        }
+        let mut ready = self.timer < 0.0;
+        if let Some(a) = &self.active {
+            let open = if a.event == EV_TARGET { target_open } else { obj_open };
+            ready &= !open;
+        }
+        if !ready {
+            return None;
+        }
+        self.active = None;
+        if !popups_on {
+            self.queue.clear();
+            return None;
+        }
+        if self.queue.is_empty() {
+            return None;
+        }
+        let p = self.queue.remove(0);
+        self.active = Some(p.clone());
+        Some(match p.target {
+            Some((name, portrait, kind)) => PopupContent::Target { name, portrait, kind },
+            None => PopupContent::Objective { name: p.name, event: p.event, tasks: p.tasks.into_iter().map(|t| (t.description, t.event)).collect() },
+        })
+    }
+
+    /// Compare the mission's objectives with the last view and enqueue what changed.
+    pub fn observe(&mut self, mv: &MissionView) {
+        let snap = Snapshot {
+            objectives: mv.objectives.iter().map(|o| (o.description.clone(), o.hidden, o.tasks.iter().map(|t| (t.description.clone(), t.state, t.hidden, t.optional)).collect())).collect(),
+            notification: mv.notification.as_ref().map(|n| n.0),
+        };
+        let prev = self.last.take().unwrap_or_default();
+        for (oi, (name, hidden, tasks)) in snap.objectives.iter().enumerate() {
+            if *hidden {
+                continue;
+            }
+            let po = prev.objectives.get(oi);
+            let was_visible = po.is_some_and(|p| !p.1);
+            if !was_visible {
+                self.objective_added(oi, name);
+            }
+            for (ti, (desc, state, thidden, _)) in tasks.iter().enumerate() {
+                if *thidden || *state == TaskState::Inactive {
+                    continue;
+                }
+                let pt = po.filter(|_| was_visible).and_then(|p| p.2.get(ti)).filter(|p| !p.2);
+                let pstate = pt.map(|p| p.1).unwrap_or(TaskState::Inactive);
+                match (pstate, *state) {
+                    (TaskState::Inactive, TaskState::Active) => self.task_added(oi, name, ti, desc),
+                    (TaskState::Inactive, TaskState::Completed) | (TaskState::Active, TaskState::Completed) => self.task_completed(oi, name, ti, desc),
+                    (TaskState::Inactive, TaskState::Failed) | (TaskState::Active, TaskState::Failed) => self.task_failed(oi, name, ti, desc),
+                    (TaskState::Active, TaskState::Active) if pt.is_some_and(|p| p.0 != *desc) => self.task_updated(oi, name, ti, desc),
+                    _ => {}
+                }
+            }
+            let done = |ts: &Vec<(String, TaskState, bool, bool)>| {
+                let req: Vec<_> = ts.iter().filter(|t| !t.2 && !t.3).collect();
+                !req.is_empty() && req.iter().all(|t| t.1 == TaskState::Completed)
+            };
+            if done(tasks) && !(was_visible && po.is_some_and(|p| done(&p.2))) {
+                self.objective_ended(oi, name, false);
             }
         }
-        self.last = trig;
+        // Mission target notifications (`DisSeqAct_ShowTargetNotification`: state, target).
+        if snap.notification != prev.notification {
+            if let Some((_, state, target)) = &mv.notification {
+                let kind = match state.as_str() {
+                    s if s.contains("Neutralized") => TargetKind::Neutralized,
+                    s if s.contains("Rescued") => TargetKind::Rescued,
+                    s if s.contains("Spared") => TargetKind::Spared,
+                    _ => TargetKind::Killed,
+                };
+                if !state.contains("Active") {
+                    self.target_notification(target, None, kind);
+                }
+            }
+        }
+        self.last = Some(snap);
     }
 }
 
-/// Track the triggers each frame (before `gfx_hud` draws).
-pub fn track(
-    view: Res<SessionView>,
-    time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    bindings: Option<Res<crate::settings::Bindings>>,
-    settings: Option<Res<crate::settings::GameSettings>>,
-    local: Res<crate::input_map::LocalInput>,
-    mut popups: ResMut<HudPopups>,
-) {
-    let trig = Triggers::of(&view);
-    let tasks = match view.matchv.mission.as_ref() {
-        Some(mv) => mv.objectives.iter().filter(|o| !o.hidden).flat_map(|o| o.tasks.iter()).filter(|t| !t.hidden && t.state == dishonored_mission::TaskState::Active).count(),
-        None => 1,
+// --- interactions -----------------------------------------------------------------------------
+
+/// The interactable the player looks at (the original's interaction focus).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Focus {
+    /// Interaction text with its key tag (`` `GBA_Use` Talk ``).
+    pub text: String,
+    /// Where the crosshair moves to (world, Dishonored units).
+    pub point: Option<[f32; 3]>,
+}
+
+/// Same reach / facing rule as the server (`MissionMatch::interaction`).
+pub fn focused_interaction(mv: &MissionView, view: &crate::session::SessionView, me: &dishonored_sim::state::PlayerState, yaw: f32, pitch: f32) -> Option<Focus> {
+    if !me.alive || mv.outcome.is_some() {
+        return None;
+    }
+    // An open dialog choice replaces the interactions.
+    if mv.choices.iter().any(|c| c.0 == me.id) {
+        return None;
+    }
+    // On a chain: `DisTweaks_Climbable.m_StopClimbingInteractText` ("`GBA_Jump` Jump off").
+    if me.mode == dishonored_sim::state::MoveMode::Climbing {
+        return Some(Focus { text: "`GBA_Jump` Jump off".into(), point: None });
+    }
+    let eye = me.position + glam::Vec3::Z * 64.0;
+    let fwd = dishonored_sim::movement::view_vector(yaw, pitch);
+    let mut best: Option<(f32, String, glam::Vec3)> = None;
+    let mut consider = |pos: glam::Vec3, reach: f32, prompt: &str| {
+        let d = pos - eye;
+        let dist = d.length();
+        if dist > reach || dist < 1.0 {
+            return;
+        }
+        let facing = d.normalize().dot(fwd);
+        if facing < 0.6 {
+            return;
+        }
+        let score = dist * (2.0 - facing);
+        if best.as_ref().is_none_or(|b| score < b.0) {
+            best = Some((score, prompt.to_string(), pos));
+        }
     };
-    let key = local.enabled && bindings.is_some_and(|b| b.just_pressed("GBA_Journal", &keys, &mouse, 0.0));
-    let auto = settings.is_none_or(|s| s.s.hud.objective_popups);
-    popups.step(time.elapsed_secs(), trig, tasks, key, auto);
+    for (p, prompt) in &mv.usables {
+        consider(glam::Vec3::from(*p), 220.0, prompt);
+    }
+    for (npc, prompt) in &mv.talkers {
+        let Some(id) = mv.npc_ids.iter().find(|x| &x.0 == npc).map(|x| x.1) else { continue };
+        if let Some(o) = view.others.iter().find(|o| o.id == id && o.alive) {
+            consider(o.position + glam::Vec3::Z * 40.0, 200.0, prompt);
+        }
+    }
+    best.map(|(_, prompt, pos)| {
+        // Prompts without a key tag are Use interactions (`m_InteractText` "`GBA_Use` ...").
+        let text = if prompt.contains('`') { prompt } else { format!("`GBA_Use` {prompt}") };
+        Focus { text, point: Some(pos.to_array()) }
+    })
+}
+
+// --- pickup log -------------------------------------------------------------------------------
+
+/// What a change of the inventory adds to the pickup log: (`"name"` or `"name (count)"`,
+/// small icon `Package.Texture`) per item (`AddLogItem`, 0x00B98630).
+pub fn pickup_items(prev: &dishonored_sim::state::Inventory, now: &dishonored_sim::state::Inventory, t: &crate::gfx_hud::HudTexts) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    let fmt = |name: &str, n: i64| if n == 1 { name.to_string() } else { format!("{name} ({n})") };
+    let coins = now.coins as i64 - prev.coins as i64;
+    if coins > 0 {
+        out.push((fmt(if coins == 1 { &t.coin.0 } else { &t.coin.1 }, coins), Some("UI_ItemIcons_Small.Money_Small".to_string())));
+    }
+    let runes = now.runes as i64 - prev.runes as i64;
+    if runes > 0 {
+        out.push((fmt(if runes == 1 { &t.rune.0 } else { &t.rune.1 }, runes), Some("UI_ItemIcons_Small.Rune_Small".to_string())));
+    }
+    let charms = (now.charms_owned & !prev.charms_owned).count_ones() as i64;
+    if charms > 0 {
+        out.push((fmt(&t.charm, charms), Some("UI_ItemIcons_Small.BoneCharms_Small".to_string())));
+    }
+    for (i, icon) in ["UI_ItemIcons_Small.HealthElixir_Small", "UI_ItemIcons_Small.ManaElixir_Small"].iter().enumerate() {
+        let d = now.elixirs[i] as i64 - prev.elixirs[i] as i64;
+        if d > 0 {
+            out.push((fmt(&t.elixirs[i], d), Some(icon.to_string())));
+        }
+    }
+    for i in 0..8 {
+        let d = now.ammo[i] as i64 - prev.ammo[i] as i64;
+        if d > 0 {
+            out.push((fmt(&t.ammo[i], d), t.ammo_icons[i].clone()));
+        }
+    }
+    out
+}
+
+// --- harness ----------------------------------------------------------------------------------
+
+/// A HUD request from a script step (`{"hud": {...}}`), to show each popup and state on
+/// demand (fixtures/scripts/hud_*.json).
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HudTest {
+    /// Queue an objective popup: event 0 added, 1 updated, 2 completed, 3 failed.
+    Objective {
+        name: String,
+        event: u8,
+        #[serde(default)]
+        tasks: Vec<(String, u8)>,
+    },
+    /// Queue a target notification (state 1 killed, 2 neutralized, 3 rescued, 4 spared;
+    /// portrait `Package.Texture`).
+    Target {
+        name: String,
+        state: u8,
+        #[serde(default)]
+        portrait: Option<String>,
+    },
+    /// Add a pickup log line (`icon` `Package.Texture`).
+    Pickup {
+        name: String,
+        #[serde(default)]
+        icon: Option<String>,
+    },
+    /// Show a game message for `duration` seconds.
+    Message {
+        text: String,
+        #[serde(default = "five")]
+        duration: f32,
+    },
+    /// Show / clear the subtitle.
+    Subtitle {
+        #[serde(default)]
+        text: Option<String>,
+    },
+    /// Show / close a choice menu; `select` moves the highlight.
+    Choice {
+        #[serde(default)]
+        options: Option<Vec<String>>,
+        #[serde(default)]
+        select: Option<usize>,
+    },
+    /// Show / clear the crosshair interactions window.
+    Interaction {
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        text: Option<String>,
+    },
+    /// Show / hide the cinematic stripes.
+    Stripes { show: bool },
+    /// Show the location discovery banner (`SetLocation`, 5 s).
+    Location { name: String },
+    /// Open / close the quick-access wheel (`hud_wheel.rs`).
+    Wheel { open: bool },
+    /// Point the open wheel at an angle (degrees clockwise from the top: `SetSelectionAngle`).
+    WheelAngle { angle: f32 },
+    /// Press (or release) a number key outside the wheel: the dock shows that slot.
+    Shortcut {
+        slot: usize,
+        #[serde(default)]
+        release: bool,
+    },
+    /// A game save: the saving notification (`hud_global.rs`).
+    Saving,
+}
+
+fn five() -> f32 {
+    5.0
+}
+
+/// Apply a harness request.
+pub fn apply_test(t: HudTest, q: &mut PopupQueue, w: &mut HudWidgets, st: &mut Stage, _texts: &crate::gfx_hud::HudTexts, img: &mut dyn FnMut(&str) -> Option<ImageRef>) {
+    match t {
+        HudTest::Objective { name, event, tasks } => {
+            let obj = 1000 + q.queue.len();
+            q.queue.push(PopupInfo {
+                objective: Some(obj),
+                name,
+                event,
+                tasks: tasks.into_iter().enumerate().map(|(i, (d, e))| TaskInfo { task: (obj, i), event: e, description: d }).collect(),
+                target: None,
+            });
+        }
+        HudTest::Target { name, state, portrait } => {
+            let kind = match state {
+                2 => TargetKind::Neutralized,
+                3 => TargetKind::Rescued,
+                4 => TargetKind::Spared,
+                _ => TargetKind::Killed,
+            };
+            q.target_notification(&name, portrait, kind);
+        }
+        HudTest::Pickup { name, icon } => {
+            let r = icon.as_deref().and_then(|p| img(p));
+            if let Some(l) = w.pickup_log.as_mut() {
+                l.add_log_item(st, &name, r);
+            }
+        }
+        HudTest::Message { text, duration } => {
+            if let Some(g) = w.game_msg.as_mut() {
+                g.set_game_message(st, Some(&text), duration);
+            }
+        }
+        HudTest::Subtitle { text } => {
+            if let Some(s) = w.subtitles.as_mut() {
+                s.set_subtitles(st, text.as_deref());
+            }
+        }
+        HudTest::Choice { options, select } => {
+            if let Some(c) = w.choice.as_mut() {
+                if let Some(o) = &options {
+                    c.set_menu(st, &mut w.sounds, Some(o.as_slice()), None);
+                } else if select.is_none() {
+                    c.set_menu(st, &mut w.sounds, None, None);
+                }
+                if let Some(i) = select {
+                    c.select(st, i);
+                }
+            }
+        }
+        HudTest::Interaction { name, text } => {
+            if let Some(iw) = w.interaction_window.as_mut() {
+                iw.set_interactions(st, &name, text.as_deref());
+            }
+        }
+        HudTest::Stripes { show } => {
+            if let Some(s) = w.stripes.as_mut() {
+                s.set(st, show, true);
+            }
+        }
+        // Handled by the wheel (`hud_wheel::update_power_wheel`).
+        HudTest::Wheel { .. } | HudTest::WheelAngle { .. } | HudTest::Shortcut { .. } | HudTest::Saving => {}
+        HudTest::Location { name } => {
+            if let Some(l) = w.location.as_mut() {
+                l.set_location(st, &name, crate::gfx_hud::LOCATION_DISCOVERY_DURATION);
+            }
+        }
+    }
 }

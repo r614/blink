@@ -394,6 +394,8 @@ pub enum Action {
     Message(String),
     /// `DisSeqAct_ShowTargetNotification`: title and text on the target paper.
     Notify(String, String),
+    /// `DisSeqAct_ShowLocationDiscovery`: the location name (the HUD's `Location` widget).
+    Location(String),
     /// `DisSeqAct_StartSpawn` / despawn.
     Spawn(String),
     Despawn(String),
