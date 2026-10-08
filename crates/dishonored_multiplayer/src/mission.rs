@@ -1516,6 +1516,20 @@ impl MissionMatch {
                 Some(crate::AiPresence { id: b.id, hostile, combat, suspicion: b.suspicion_level(), music_type: if b.kind == PawnKind::Guard { 4 } else { 0 } })
             })
             .collect();
+        // Awareness markers: each living NPC's attention entry toward a human (`Attn::level`,
+        // the brain's `DisAttentionInfo` level) with the pawn's `EAIAwareness`, within the
+        // marker range (`m_fDisplay_NPCMaxDist_*` 10000 uu) of that human.
+        self.view.marks.clear();
+        for b in &self.crowd.brains {
+            let Some(p) = self.world.players.iter().find(|p| p.id == b.id && p.alive) else { continue };
+            for a in b.attn.iter().filter(|a| a.level > 0 && self.humans.contains(&a.who)) {
+                let Some(h) = self.world.players.iter().find(|h| h.id == a.who && h.alive) else { continue };
+                if h.position.distance(p.position) > 10_000.0 {
+                    continue;
+                }
+                self.view.marks.push(crate::AwarenessMark { id: b.id, who: a.who, level: a.level.min(4), awareness: p.ai_awareness, proxy: a.proxy.to_array() });
+            }
+        }
         self.last_events = out.events.clone();
         // [kismet] AI noises made by the Kismet (`DisSeqAct_AINoise`) are heard next step.
         if let Some(k) = &mut self.kismet {

@@ -673,6 +673,9 @@ pub fn animate_characters(
                 .map(|bi| uu(root_gt.transform_point(to_bevy(globals[0][bi]).w_axis.truncate())))
                 .collect();
             s.bones.insert(p.id, pts);
+            if let Some(bi) = bones.iter().position(|b| b.name.eq_ignore_ascii_case("head_jnt")) {
+                s.heads.insert(p.id, uu(root_gt.transform_point(to_bevy(globals[0][bi]).w_axis.truncate())));
+            }
         }
         for c in children.iter() {
             if let Ok((j, mut t)) = joints.get_mut(c) {

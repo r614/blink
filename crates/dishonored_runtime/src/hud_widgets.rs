@@ -2479,6 +2479,226 @@ impl Location {
 }
 
 // =============================================================================================
+// Awareness markers (`awarenessIndicator` in `markers_mc`)
+// =============================================================================================
+
+/// `Twk_GFxMoviePlayerHUD.m_AwarenessMarkerSpecificSettings` (`DisAwarenessMarkerSettings`) and
+/// `m_AwarenessMarkerSettings` (research/dishonored/HUD.md, "Awareness markers").
+pub mod awareness {
+    /// `m_fDisplay_PlayerProxyMaxDist`: the NPC's idea of where the player is must be this close.
+    pub const PLAYER_PROXY_MAX_DIST: f32 = 200.0;
+    /// `m_fDisplay_NPCMaxDist_Vision` / `_NoVision`.
+    pub const NPC_MAX_DIST: f32 = 10_000.0;
+    /// `m_fFadeOutDelay_InitiallyHidden` / `_NowHidden`, `m_fFadeOutAnimDuration` (seconds).
+    pub const FADE_DELAY_INITIAL: f32 = 0.0;
+    pub const FADE_DELAY_NOW: f32 = 1.0;
+    pub const FADE_ANIM: f32 = 3.0;
+    /// `m_fMinScaleOutsideFOV` / `m_fMaxScaleOutsideFOV`.
+    pub const MIN_SCALE_OUTSIDE: f32 = 50.0;
+    pub const MAX_SCALE_OUTSIDE: f32 = 150.0;
+    /// `m_ScaleVariation.m_EndValue` (start and end distance are both 0: constant).
+    pub const SCALE_VALUE: f32 = 75.0;
+    /// `m_AlphaVariation`: 100 from 200 uu away, down to 0 at 150 uu.
+    pub const ALPHA_START_DIST: f32 = 200.0;
+    pub const ALPHA_END_DIST: f32 = 150.0;
+    /// `m_AllowedAIAwareness` (the `EAIAwareness` values of the tweak's six names: Unaware,
+    /// AwareOfPlayer, Surprised, Suspicious, InCombat, Choked; Fearful and Begging are left out).
+    pub const ALLOWED: [u8; 6] = [0, 1, 2, 3, 5, 7];
+}
+
+/// What the native side hands a marker each frame (the arguments of the update 0x00BBD630).
+#[derive(Clone, Copy, Debug)]
+pub struct MarkerInput {
+    /// The NPC was rendered within the last 0.2 s (or passes a second visibility test).
+    pub seen: bool,
+    /// `EDisAttentionLevel` toward the player (0 when the NPC has none).
+    pub level: u8,
+    /// Where to draw it: None when it cannot be projected.
+    pub place: Option<MarkerPlace>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MarkerPlace {
+    /// Stage pixels (clamped to the marker area when off screen).
+    pub pos: [f32; 2],
+    pub offscreen: bool,
+    /// Camera to the head, Dishonored units.
+    pub distance: f32,
+    /// `tan(fov / 2)` of the camera.
+    pub tan_half_fov: f32,
+}
+
+/// One `DisAwarenessMarker` (vtable 0xD61FC0: init 0x00BC5B40, release 0x00BC5C10, tick
+/// 0x00BB9FF0, update 0x00BBD630, chevrons 0x00BBA030): two halves `left_mc` / `right_mc`
+/// (labels fadeIn, visible, quickFadeOut), each with chevrons `mc1..mc3` (fillIn, emptyOut,
+/// full, empty, busted_1..3); frame 2 of the symbol is the off-screen look.
+pub struct AwarenessMarker {
+    pub mc: Option<Id>,
+    left: Option<Id>,
+    right: Option<Id>,
+    chevrons: [[Option<Id>; 3]; 2],
+    /// +0x30: the level last shown.
+    pub level: u8,
+    /// +0x31: faded in (not yet fading out).
+    pub shown: bool,
+    /// +0x32 / +0x34: the display timer and the fade-out timer.
+    pub display_timer: f32,
+    pub fade_timer: f32,
+    /// +0x35: showing the off-screen look.
+    offscreen: bool,
+}
+
+impl AwarenessMarker {
+    pub fn new() -> Self {
+        Self { mc: None, left: None, right: None, chevrons: [[None; 3]; 2], level: 0, shown: false, display_timer: 0.0, fade_timer: 0.0, offscreen: false }
+    }
+
+    /// The clip is attached on the first time it is wanted (vslot +4).
+    fn init(&mut self, st: &mut Stage, layer: Id, name: &str) {
+        let d = st.next_depth(layer);
+        self.mc = st.attach(layer, "awarenessIndicator", name, d);
+        let Some(mc) = self.mc else { return };
+        self.left = st.child(mc, "left_mc");
+        self.right = st.child(mc, "right_mc");
+        for (h, half) in [self.left, self.right].into_iter().enumerate() {
+            for k in 0..3 {
+                self.chevrons[h][k] = half.and_then(|c| st.child(c, &format!("mc{}", k + 1)));
+            }
+        }
+        // The halves wait on their first frame until "fadeIn".
+        st.set_visible(mc, false);
+    }
+
+    /// `FUN_00bba030(level, old, animate)`: the chevrons of both halves.
+    fn set_chevrons(&mut self, st: &mut Stage, level: u8, old: u8, animate: bool) {
+        if level > 3 {
+            if level == 4 {
+                for half in 0..2 {
+                    for k in 0..3 {
+                        goto_stop(st, self.chevrons[half][k], &format!("busted_{}", k + 1));
+                    }
+                }
+            }
+            return;
+        }
+        let animate = animate && old <= 3;
+        for k in 0..3usize {
+            let full = (k as u8) < level;
+            let was = (k as u8) < old && old < 4;
+            for half in 0..2 {
+                let c = self.chevrons[half][k];
+                if animate {
+                    if full != was {
+                        goto_play(st, c, if full { "fillIn" } else { "emptyOut" });
+                    }
+                } else {
+                    goto_stop(st, c, if full { "full" } else { "empty" });
+                }
+            }
+        }
+    }
+
+    /// One frame (tick, then update). Returns true when the marker releases itself.
+    pub fn update(&mut self, st: &mut Stage, layer: Id, name: &str, dt: f32, inp: &MarkerInput) -> bool {
+        self.display_timer -= dt;
+        self.fade_timer -= dt;
+        let level = inp.level;
+        if !inp.seen {
+            if self.level < level {
+                self.display_timer = awareness::FADE_DELAY_INITIAL;
+            }
+        } else {
+            self.display_timer = awareness::FADE_DELAY_NOW;
+        }
+        let show = (1..=3).contains(&level) && self.display_timer > 0.0;
+        let busted = level == 4 && self.level != 4;
+        if self.mc.is_none() && (show || busted) {
+            self.init(st, layer, name);
+        }
+        let mut release = false;
+        if !show {
+            if busted {
+                goto_stop(st, self.left, "visible");
+                goto_stop(st, self.right, "visible");
+                self.set_chevrons(st, 4, self.level, true);
+                self.shown = false;
+                self.fade_timer = awareness::FADE_ANIM;
+            } else if !self.shown {
+                if self.mc.is_some() && self.fade_timer < 0.0 {
+                    release = true;
+                }
+            } else {
+                goto_play(st, self.left, "quickFadeOut");
+                goto_play(st, self.right, "quickFadeOut");
+                self.shown = false;
+                self.fade_timer = awareness::FADE_ANIM;
+            }
+            self.level = level;
+        } else if !self.shown {
+            goto_play(st, self.left, "fadeIn");
+            goto_play(st, self.right, "fadeIn");
+            self.set_chevrons(st, level, self.level, false);
+            self.shown = true;
+            self.level = level;
+        } else if level != self.level {
+            self.set_chevrons(st, level, self.level, true);
+            self.level = level;
+        }
+        if release {
+            self.remove(st);
+            return true;
+        }
+        let Some(mc) = self.mc else { return false };
+        let Some(pl) = inp.place else {
+            st.set_visible(mc, false);
+            return false;
+        };
+        st.set_visible(mc, true);
+        if pl.offscreen != self.offscreen {
+            st.goto_and_stop(mc, &(pl.offscreen as u32 + 1).to_string());
+            self.offscreen = pl.offscreen;
+        }
+        // Scale: 500 / max(tan(fov / 2) x distance, 1) x the scale variation; alpha from the
+        // alpha variation of the distance.
+        let var = awareness::SCALE_VALUE;
+        let mut scale = 500.0 / (pl.tan_half_fov * pl.distance).max(1.0) * var;
+        let left = (pl.pos[0] - crate::gfx_stage::STAGE.x * 0.5) <= 0.0;
+        let (rot, yscale) = if pl.offscreen {
+            let (dx, dy) = (pl.pos[0] - crate::gfx_stage::STAGE.x * 0.5, pl.pos[1] - crate::gfx_stage::STAGE.y * 0.5);
+            let len = (dx * dx + dy * dy).sqrt().max(1e-4);
+            let mut a = (dy / len).clamp(-1.0, 1.0).acos().to_degrees();
+            if !left {
+                a = 360.0 - a;
+            }
+            scale = scale.clamp(awareness::MIN_SCALE_OUTSIDE, awareness::MAX_SCALE_OUTSIDE);
+            (a + 90.0, if left { -scale } else { scale })
+        } else {
+            (0.0, scale)
+        };
+        let k = ((pl.distance - awareness::ALPHA_START_DIST) / (awareness::ALPHA_END_DIST - awareness::ALPHA_START_DIST)).clamp(0.0, 1.0);
+        st.set(mc, Prop::X, pl.pos[0]);
+        st.set(mc, Prop::Y, pl.pos[1]);
+        st.set(mc, Prop::Rotation, rot);
+        st.set(mc, Prop::XScale, scale);
+        st.set(mc, Prop::YScale, yscale);
+        st.set(mc, Prop::Alpha, 100.0 * (1.0 - k));
+        false
+    }
+
+    pub fn remove(&mut self, st: &mut Stage) {
+        if let Some(mc) = self.mc.take() {
+            st.remove(mc);
+        }
+    }
+}
+
+impl Default for AwarenessMarker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// =============================================================================================
 // HUDFX movie (UI_HUDFX.HUDFX, `DisGFxMoviePlayerHUDFX`): BlackShroud, DirectionalDamages
 // =============================================================================================
 

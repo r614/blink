@@ -26,7 +26,7 @@
 
 use crate::gfx_stage::{Draw, Event, Fonts, ImageRef, MovieData, SlotImage, SlotText, Stage, StageTextures, StageView};
 use crate::hud_popups::{PopupContent, PopupQueue};
-use crate::hud_widgets::{HudFxWidgets, HudWidgets, ObjState, TargetTexts, TaskLine};
+use crate::hud_widgets::{AwarenessMarker, HudFxWidgets, HudWidgets, MarkerInput, MarkerPlace, ObjState, TargetTexts, TaskLine, awareness};
 use crate::session::{Session, SessionView};
 use bevy::prelude::*;
 use bevy::text::{LetterSpacing, LineHeight};
@@ -126,6 +126,10 @@ struct Native {
     game_msg_seen: u32,
     location_seen: u32,
     last_mission: Option<(String, u32)>,
+    /// `m_AwarenessMarkers`: one marker per NPC pawn.
+    markers: HashMap<u32, AwarenessMarker>,
+    /// The detection stinger played (flag 0x20000 of the HUD, 0x00BAD960).
+    stinger: bool,
 }
 
 #[derive(Resource, Default)]
@@ -334,6 +338,126 @@ fn key_name(bindings: Option<&crate::settings::Bindings>, keys: &HashMap<String,
     keys.get(&ue).cloned().unwrap_or(ue)
 }
 
+// --- marker placement -----------------------------------------------------------------------
+
+/// The marker area: `m_fMarkerAreaRatio_PC` of the stage (0.9).
+pub const MARKER_AREA_RATIO: f32 = 0.9;
+
+/// Where a world point (Dishonored units) lands on the HUD stage for a marker, and whether it is
+/// off screen (outside the marker area or behind the camera: the point is then moved onto the
+/// edge of the area along the direction to it). `tan_h` is `tan(horizontal fov / 2)`.
+pub fn marker_projection(cam: &GlobalTransform, window: Vec2, tan_h: f32, world_uu: glam::Vec3) -> (Vec2, bool, f32) {
+    let w = crate::coords::pos(Vec3::new(world_uu.x, world_uu.y, world_uu.z));
+    let v = cam.affine().inverse().transform_point3(w);
+    let depth = -v.z;
+    let aspect = (window.x / window.y.max(1.0)).max(0.1);
+    let (stage_scale, offset) = crate::gfx_stage::stage_xform(window);
+    let centre = crate::gfx_stage::STAGE * 0.5;
+    let half = centre * MARKER_AREA_RATIO;
+    let dist = v.length() / crate::coords::UU_TO_BEVY;
+    // Direction on screen (y down).
+    let dir = Vec2::new(v.x, -v.y);
+    if depth > 0.01 {
+        let ndc = Vec2::new(v.x / (depth * tan_h), v.y / (depth * tan_h / aspect));
+        let px = Vec2::new((ndc.x * 0.5 + 0.5) * window.x, (0.5 - ndc.y * 0.5) * window.y);
+        let sp = (px - offset) / stage_scale;
+        let d = sp - centre;
+        if d.x.abs() <= half.x && d.y.abs() <= half.y {
+            return (sp, false, dist);
+        }
+        return (centre + d * (half.x / d.x.abs().max(1e-4)).min(half.y / d.y.abs().max(1e-4)).min(1.0), true, dist);
+    }
+    let d = if dir.length_squared() < 1e-8 { Vec2::new(0.0, 1.0) } else { dir.normalize() };
+    (centre + d * (half.x / d.x.abs().max(1e-4)).min(half.y / d.y.abs().max(1e-4)), true, dist)
+}
+
+/// The awareness marker manager (`FUN_00BAD960`) and the markers' update: one marker per NPC
+/// with a displayable attention level toward the player.
+#[allow(clippy::too_many_arguments)]
+fn update_awareness(
+    st: &mut Stage,
+    n: &mut Native,
+    dt: f32,
+    enabled: bool,
+    view: &SessionView,
+    me: Option<&dishonored_sim::state::PlayerState>,
+    cam: Option<&GlobalTransform>,
+    window: Option<Vec2>,
+    hfov_deg: f32,
+    heads: Option<&crate::effects::EffectSockets>,
+    world: &dishonored_content::MatchContent,
+    sounds: &mut crate::hud_sounds::HudSounds,
+) {
+    use dishonored_world::WorldQuery;
+    let Some(layer) = st.child(st.root, "markers_mc") else { return };
+    // Candidates: the marks toward the local player whose pawn is alive.
+    let mut cands: Vec<(u32, u8)> = Vec::new();
+    let mut stinger_cond = false;
+    if let (Some(p), true) = (me, enabled) {
+        if p.alive {
+            for m in view.matchv.marks.iter().filter(|m| m.who == p.id) {
+                let allowed = awareness::ALLOWED.contains(&m.awareness);
+                // `FUN_00BA0DE0`: a non-zero level and an allowed awareness.
+                if m.level == 0 || !allowed {
+                    continue;
+                }
+                if m.level >= 2 {
+                    stinger_cond = true;
+                }
+                let Some(pawn) = view.others.iter().find(|o| o.id == m.id && o.alive) else { continue };
+                // `FUN_00BA6E50`: the NPC's idea of where the player is must be near the player,
+                // and the NPC within the display distance.
+                if glam::Vec3::from(m.proxy).distance(p.position) >= awareness::PLAYER_PROXY_MAX_DIST || pawn.position.distance(p.position) >= awareness::NPC_MAX_DIST {
+                    continue;
+                }
+                cands.push((m.id, m.level));
+            }
+        }
+    }
+    let ids: Vec<u32> = n.markers.keys().copied().chain(cands.iter().map(|c| c.0)).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let tan_h = (hfov_deg.to_radians() * 0.5).tan();
+    for id in ids {
+        let cand = cands.iter().find(|c| c.0 == id).copied();
+        let level = cand.map(|c| c.1).unwrap_or(0);
+        let pawn = view.others.iter().find(|o| o.id == id);
+        let m = n.markers.entry(id).or_insert_with(AwarenessMarker::new);
+        if pawn.is_none_or(|p| !p.alive) && m.mc.is_none() {
+            n.markers.remove(&id);
+            continue;
+        }
+        let head = heads.and_then(|h| h.heads.get(&id).copied()).map(|h| glam::Vec3::new(h.x, h.y, h.z)).or_else(|| pawn.map(|p| p.position + glam::Vec3::Z * 60.0));
+        let mut seen = false;
+        let mut place = None;
+        if let (Some(head), Some(cam), Some(win), Some(p)) = (head, cam, window, me) {
+            let (pos, off, dist) = marker_projection(cam, win, tan_h, head);
+            // "Rendered within the last 0.2 s": on screen with a clear line to the head.
+            if !off {
+                let eye = p.position + glam::Vec3::Z * 64.0;
+                let d = head - eye;
+                let len = d.length();
+                seen = len < 1.0 || world.collision.raycast(eye, d / len, (len - 20.0).max(0.0), dishonored_world::channel::VISION).is_none();
+            }
+            place = Some(MarkerPlace { pos: pos.to_array(), offscreen: off, distance: dist, tan_half_fov: tan_h });
+        }
+        let name = format!("awareness{id}");
+        if m.update(st, layer, &name, dt, &MarkerInput { seen, level, place }) || (cand.is_none() && m.mc.is_none()) {
+            m.remove(st);
+            n.markers.remove(&id);
+        }
+    }
+    // The detection stinger (0x00BAD960, flag 0x20000): once a marker is up with an NPC at
+    // `m_AttentionLevelToPlayAwarenessStinger` (TurnToFace) or more; re-armed once none is.
+    let any = !cands.is_empty();
+    if !n.stinger {
+        if any && stinger_cond {
+            n.stinger = true;
+            sounds.play("MusicPlayerDetected");
+        }
+    } else if !any && !stinger_cond {
+        n.stinger = false;
+    }
+}
+
 // --- the per-frame native update ------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
@@ -352,6 +476,7 @@ pub fn update_gfx_hud(
     mut textures: ResMut<StageTextures>,
     mut images: ResMut<Assets<Image>>,
     mut sounds: ResMut<crate::hud_sounds::HudSounds>,
+    sockets: Option<Res<crate::effects::EffectSockets>>,
 ) {
     let hud = &mut *hud;
     let Some(m) = hud.hud.as_mut() else { return };
@@ -563,6 +688,13 @@ pub fn update_gfx_hud(
                 st.remove(mk);
             }
         }
+    }
+
+    // --- awareness markers (m_AwarenessMarkers, 0x00BAD960) ---
+    {
+        let hfov = settings.as_ref().map(|s| s.s.graphics.fov).unwrap_or(crate::viewmodel::HORIZONTAL_FOV_DEG);
+        let cam = cams.iter().next().map(|(_, gt)| gt);
+        update_awareness(st, n, dt, hs.awareness_markers && !cutscene, &view, me, cam, window, hfov, sockets.as_deref(), &session.content, &mut sounds);
     }
 
     // --- stance icon ---

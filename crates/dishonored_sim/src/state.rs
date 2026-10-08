@@ -849,6 +849,10 @@ pub struct WorldState {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct DilationLayer {
     pub caster: PlayerId,
+    /// The quick-access wheel's channel (`BTC` 6, 0x00BE4280): its rate applies to every pawn,
+    /// the caster included (Blink passes a caster rate of 1), and not to the Bend Time clock.
+    #[serde(default)]
+    pub wheel: bool,
     pub current: f32,
     pub target: f32,
     /// Units per second toward `target`; `f32::MAX` = reach it at once (blend time 0).

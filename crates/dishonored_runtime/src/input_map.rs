@@ -39,13 +39,16 @@ pub struct LocalInput {
 
 impl LocalInput {
     pub fn take_tick_input(&mut self) -> PlayerInput {
-        if let Some(o) = self.override_input {
+        // The open wheel slows the world (`buttons::WHEEL`, `dishonored_sim::powers::set_wheel_layer`).
+        let wheel = if self.wheel_open { dishonored_sim::input::buttons::WHEEL } else { 0 };
+        if let Some(mut o) = self.override_input {
             self.yaw = o.yaw;
             self.pitch = o.pitch;
             self.left_hand = o.left_hand;
+            o.buttons |= wheel;
             return o;
         }
-        let i = PlayerInput { tick: 0, forward: self.forward, right: self.right, yaw: self.yaw, pitch: self.pitch, buttons: self.held | self.latched, left_hand: self.left_hand, action: self.action, npc_move: 0, npc_speed: 0.0 };
+        let i = PlayerInput { tick: 0, forward: self.forward, right: self.right, yaw: self.yaw, pitch: self.pitch, buttons: self.held | self.latched | wheel, left_hand: self.left_hand, action: self.action, npc_move: 0, npc_speed: 0.0 };
         self.latched = 0;
         self.action = 0;
         i

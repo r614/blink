@@ -31,6 +31,9 @@ pub struct EffectSockets {
     pub muzzle: HashMap<u32, (Vec3, Vec3)>,
     /// `SHADOW_KILL_BONES` positions.
     pub bones: HashMap<u32, Vec<Vec3>>,
+    /// `head_jnt` world position (Dishonored units) of every drawn pawn: where the awareness
+    /// markers hang (`DisAwarenessMarker` constructor 0x00BCE9A0 binds to that bone).
+    pub heads: HashMap<u32, Vec3>,
 }
 
 /// Procedural glow of untextured particle mesh materials (`volume_glow.wgsl`).

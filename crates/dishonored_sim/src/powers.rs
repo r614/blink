@@ -357,7 +357,7 @@ pub fn pawn_time_scale(state: &WorldState, id: PlayerId, cfg: &GameplayConfig) -
         s *= if b.caster == id { ramp(b, b.self_dilation, cfg) } else { ramp(b, b.world_dilation, cfg) };
     }
     for l in &state.blink_layers {
-        if l.caster != id {
+        if l.wheel || l.caster != id {
             s *= l.current;
         }
     }
@@ -371,6 +371,10 @@ pub fn player_time_dilation(state: &WorldState, cfg: &GameplayConfig) -> f32 {
     let mut s = 1.0;
     for b in &state.time_bends {
         s *= ramp(b, b.self_dilation, cfg);
+    }
+    // The wheel's channel passes the same rate as caster and world (0x00BE4280).
+    for l in state.blink_layers.iter().filter(|l| l.wheel) {
+        s *= l.current;
     }
     s
 }
@@ -396,14 +400,35 @@ pub fn world_time_scale(state: &WorldState, cfg: &GameplayConfig, projectile: bo
 /// within [0.05, caster rate 1]; the layer moves from where it is to the target at
 /// `(target - current) / blend` per second (at once when the blend is 0).
 pub fn set_blink_layer(state: &mut WorldState, caster: PlayerId, target: f32, blend: f32) {
+    set_layer(state, caster, false, target, blend);
+}
+
+/// `DisGFxMoviePlayerPowerWheel.m_fBendTimeFactor` (class default 0.05): the world rate while
+/// the quick-access wheel is open (0x00BE4280 calls the dilation helper with channel 6 and
+/// this factor for the caster, the world and the third rate; 0x00BD4FC0 sets 1 back).
+pub const WHEEL_TIME_FACTOR: f32 = 0.05;
+/// `m_fTimeTransition`: the blend time of both calls. It has no default and no tweak value
+/// (0x00BE4280 passes +0x1BC straight on), so the rate changes at once.
+pub const WHEEL_TIME_TRANSITION: f32 = 0.0;
+
+/// The wheel's dilation channel for `caster`: `open` takes the world to
+/// [`WHEEL_TIME_FACTOR`], closing sets it back to 1. Only a world with a single human pawn
+/// honours it: the original wheel needs the GameInfo (`FUN_00781020`, present on the server /
+/// standalone only) and Blink's multiplayer worlds never hand one player the others' clock.
+pub fn set_wheel_layer(state: &mut WorldState, caster: PlayerId, open: bool) {
+    let single = state.players.iter().filter(|p| p.kind == PawnKind::Human).count() <= 1;
+    set_layer(state, caster, true, if open && single { WHEEL_TIME_FACTOR } else { 1.0 }, WHEEL_TIME_TRANSITION);
+}
+
+fn set_layer(state: &mut WorldState, caster: PlayerId, wheel: bool, target: f32, blend: f32) {
     let target = if target == 0.0 { 0.0 } else { target.clamp(0.05, 1.0) };
-    let i = match state.blink_layers.iter().position(|l| l.caster == caster) {
+    let i = match state.blink_layers.iter().position(|l| l.caster == caster && l.wheel == wheel) {
         Some(i) => i,
         None => {
             if target == 1.0 {
                 return;
             }
-            state.blink_layers.push(crate::state::DilationLayer { caster, current: 1.0, target: 1.0, velocity: 0.0 });
+            state.blink_layers.push(crate::state::DilationLayer { caster, wheel, current: 1.0, target: 1.0, velocity: 0.0 });
             state.blink_layers.len() - 1
         }
     };
@@ -437,7 +462,7 @@ pub fn step_blink_layers(state: &mut WorldState, dt: f32) {
 /// (0x009FCBC0): the caster's Blink slows its own Bend Time clock.
 pub fn step_time_bends(state: &mut WorldState, dt: f32, events: &mut Vec<SimEvent>) {
     for b in state.time_bends.iter_mut() {
-        let k: f32 = state.blink_layers.iter().filter(|l| l.caster == b.caster).map(|l| l.current).product();
+        let k: f32 = state.blink_layers.iter().filter(|l| !l.wheel && l.caster == b.caster).map(|l| l.current).product();
         b.elapsed += dt * k;
     }
     let ended: Vec<PlayerId> = state.time_bends.iter().filter(|b| b.elapsed > b.duration).map(|b| b.caster).collect();
