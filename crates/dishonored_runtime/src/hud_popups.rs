@@ -178,20 +178,21 @@ impl HudPopups {
                     self.target.open(now + POPUP_DELAY_ON_GAME_START, target_t);
                 }
             } else {
-                let changed = (trig.score != prev.score && prev.score.is_some() && trig.score.is_some())
-                    || trig.objectives != prev.objectives
-                    || (trig.notification != prev.notification && trig.notification.is_some());
+                let changed = (trig.score != prev.score && prev.score.is_some() && trig.score.is_some()) || trig.objectives != prev.objectives;
                 if changed {
                     self.banner.open(now, banner_t);
                 }
-                if trig.target != prev.target && trig.target.is_some() {
+                // `TargetNotification` opens for a target notification only: the Contracts
+                // target, or a mission's Notify action (never for the task list).
+                let notified = trig.notification != prev.notification && trig.notification.is_some();
+                if (trig.target != prev.target && trig.target.is_some()) || notified {
                     self.target.open(now, target_t);
                 }
             }
         }
         if key {
             self.banner.open(now, banner_t);
-            if trig.target.is_some() {
+            if trig.target.is_some() || trig.notification.is_some() {
                 self.target.open(now, target_t);
             }
         }
