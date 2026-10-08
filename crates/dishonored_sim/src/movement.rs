@@ -117,25 +117,80 @@ pub fn lean_roll(p: &PlayerState, cfg: &MovementConfig) -> f32 {
     lean_angle(p, cfg) * cfg.lean.camera_tilt_percent
 }
 
-/// Lean spring (`m_LeanConstants`, integrator 0x00AC0A00: semi-implicit Euler,
-/// `v += (-k (x - target) - c v) dt; x += v dt`), in units of the maximum angle.
+/// `StatePlayerMasterLeaning.m_fLeanSpeed`: while a lean key is held the lean state sets the
+/// head point's velocity to this many uu/s sideways every tick (0x00A76590 -> 0x00AC0950,
+/// `m_bGotExternalForce`).
+pub const LEAN_SPEED: f32 = 1000.0;
+
+/// The lean camera (`DishonoredCamera_Lean`, 0x00AC5950): the eye is a spring point
+/// (`m_HeadPoint`, `DisSpringPoint`) in the plane of the lean, at rest at the upright eye,
+/// kept on a circle of radius `L = m_fLeanHeightPct x CollisionHeight x 2` around a pivot `L`
+/// below the eye, its angle limited to `m_fMaxLeanAngle` plus the soften angle.
+///
+/// One tick (the influence's fixed step of 1/60 s):
+/// - the integrator 0x00AC0A00 (`m_LeanConstants` k 80, c 12): `a = -k x - c v` (or `-v` once
+///   nearly at rest), `v += a dt`, `x += v dt`;
+/// - with the external force of a held lean key the velocity is then put back to the
+///   lean speed (so each held tick starts at 1000 uu/s sideways);
+/// - the point goes back onto the circle; an angle past the limit is clamped
+///   (`m_bApplyingMaxAngle`) and the soften angle (0x00AC5540) grows toward
+///   `m_fMaxLeanSoftenAngle` at `m_fMaxLeanSoftenSpeed` while the head stays at the limit,
+///   otherwise decays at that rate.
+///
+/// Measured on the original at a fixed 1/60 s (`measure lean`, CameraCache.POV): the eye moves
+/// 13.33, 12.98, 12.57, 12.14, 11.66 uu sideways in the first ticks of a held lean and reaches
+/// the 15 degree limit on the sixth, then the soften angle takes it toward 20.
+///
+/// `p.lean` is the angle as a fraction of the current limit; `p.lean_velocity` and
+/// `p.lean_velocity_z` the head point's velocity in the lean plane (sideways, up).
 fn step_lean(p: &mut PlayerState, target: f32, ctx: &MoveCtx) {
     let lc = &ctx.cfg.lean;
-    p.lean_velocity += (lc.springiness * (target - p.lean) - lc.damping * p.lean_velocity) * ctx.dt;
-    let pushed = p.lean + p.lean_velocity * ctx.dt;
-    p.lean = pushed.clamp(-1.0, 1.0);
-    // Soften (0x00AC5540): while the head is held at the limit the allowed angle grows toward
-    // `m_fMaxLeanSoftenAngle` at `m_fMaxLeanSoftenSpeed`, otherwise it decays at that rate
-    // (measured on the original: 15 -> 20 degrees, about 5 / s, U-048).
-    let s = lc.soften_speed * ctx.dt;
-    if target != 0.0 && pushed.abs() >= 1.0 {
+    let dt = ctx.dt;
+    let max = if p.crouched { lc.max_angle_crouched } else { lc.max_angle };
+    let l = lc.height_pct * half_height(p, ctx.cfg) * 2.0;
+    // The head point (sideways, up) relative to the upright eye, from the current angle.
+    let a0 = (p.lean * (max + p.lean_soften)).to_radians();
+    let mut pos = glam::Vec2::new(l * a0.sin(), l * (a0.cos() - 1.0));
+    let mut vel = glam::Vec2::new(p.lean_velocity, p.lean_velocity_z);
+    let external = (target != 0.0).then(|| glam::Vec2::new(target.signum() * LEAN_SPEED, 0.0));
+    if let Some(v) = external {
+        vel = v;
+    }
+    // 0x00AC0A00: the spring toward rest (the upright eye).
+    let acc = if pos.length_squared() > 1e-4 || vel.length_squared() > 1.0 { -lc.springiness * pos - lc.damping * vel } else { -vel };
+    vel += acc * dt;
+    pos += vel * dt;
+    if let Some(v) = external {
+        vel = v;
+    }
+    // Back onto the circle around the pivot.
+    let pivot = glam::Vec2::new(0.0, -l);
+    let dir = (pos - pivot).normalize_or(glam::Vec2::Y);
+    let mut angle = dir.x.atan2(dir.y).to_degrees();
+    // The limit and the soften angle (0x00AC5540).
+    let limit = max + p.lean_soften;
+    let at_limit = angle.abs() >= limit;
+    if at_limit {
+        angle = angle.clamp(-limit, limit);
+    }
+    // `m_bApplyLeanSoften`: set by the clamp, kept while the head stays within 5 uu of where it
+    // was (0x00AC5540).
+    let moved = (glam::Vec2::new(l * angle.to_radians().sin(), l * (angle.to_radians().cos() - 1.0)) - glam::Vec2::new(l * a0.sin(), l * (a0.cos() - 1.0))).length();
+    let apply = at_limit || (p.lean.abs() >= 0.999 && moved <= 5.0);
+    let s = lc.soften_speed * dt;
+    if apply {
         p.lean_soften = (p.lean_soften + (lc.soften_angle - p.lean_soften) * s).min(lc.soften_angle);
     } else {
         p.lean_soften = (p.lean_soften - p.lean_soften * s).max(0.0);
     }
-    if target == 0.0 && p.lean.abs() < 1e-3 && p.lean_velocity.abs() < 1e-2 {
+    let limit = (max + p.lean_soften).max(1e-3);
+    p.lean = (angle / limit).clamp(-1.0, 1.0);
+    p.lean_velocity = vel.x;
+    p.lean_velocity_z = vel.y;
+    if target == 0.0 && p.lean.abs() * limit < 0.05 && vel.length() < 1.0 {
         p.lean = 0.0;
         p.lean_velocity = 0.0;
+        p.lean_velocity_z = 0.0;
     }
     // Camera collision (`m_bHandleCameraCollision`): the eye stops short of geometry.
     // Simplified to a ray from the upright eye (SPECULATIVE margin, U-048).
@@ -150,6 +205,7 @@ fn step_lean(p: &mut PlayerState, target: f32, ctx: &MoveCtx) {
             let allowed = ((h.distance - LEAN_CAMERA_MARGIN).max(0.0) / len).min(1.0);
             p.lean *= allowed;
             p.lean_velocity = 0.0;
+            p.lean_velocity_z = 0.0;
         }
     }
 }
@@ -701,6 +757,7 @@ fn walking(
     events: &mut Vec<SimEvent>,
 ) {
     let cfg = ctx.cfg;
+    let mut jump = false;
     if can_move && p.just_pressed(input, buttons::JUMP) && p.kind != PawnKind::Rat {
         if try_mantle(p, input, ctx, events) {
             return;
@@ -708,18 +765,27 @@ fn walking(
         if p.crouched {
             set_crouch(p, false, ctx);
         }
-        if !p.crouched {
-            // StatePlayerMasterJump enter (0x00A75EE0): `Velocity.Z = Attribute_JumpZ`
-            // (`JumpZCarryingCorpse` while carrying), physics Falling.
-            p.velocity.z = cfg.jump_z;
-            p.mode = MoveMode::Falling;
-            p.fall_time = 0.0;
-            p.jump = crate::state::JumpState { active: true, held: 0.0, powered: false };
-            events.push(SimEvent::Jumped { id: p.id });
-            falling(p, input, can_move, ctx.dt, ctx, events);
-            return;
-        }
+        jump = !p.crouched;
     }
+    walking_move(p, input, sword_out, can_move, ctx);
+    if jump && p.mode == MoveMode::Walking {
+        // StatePlayerMasterJump enter (0x00A75EE0): `Velocity.Z = Attribute_JumpZ`
+        // (`JumpZCarryingCorpse` while carrying), physics Falling. The jump is taken with the
+        // tick's input, after the pawn's walking physics ran this tick: the original's tick
+        // of the press ends with Velocity.Z = JumpZ and the pawn not yet risen; the climb
+        // starts with the next tick's physFalling (engine-hook trace of a standing jump at a
+        // fixed 1/60 s step, 2026-10-08).
+        p.velocity.z = cfg.jump_z;
+        p.mode = MoveMode::Falling;
+        p.fall_time = 0.0;
+        p.jump = crate::state::JumpState { active: true, held: 0.0, powered: false };
+        events.push(SimEvent::Jumped { id: p.id });
+    }
+}
+
+/// physWalking (or the slide) for one tick, then the floor check.
+fn walking_move(p: &mut PlayerState, input: &PlayerInput, sword_out: bool, can_move: bool, ctx: &MoveCtx) {
+    let cfg = ctx.cfg;
     // Slide cancel (0x00A71450): once `m_fSlideTime * m_fSlidePercentNotCancelable` has passed,
     // releasing the stick ends the slide (the cancel request's source is LIKELY the stick).
     if p.slide.active && p.slide.elapsed > cfg.slide_time * cfg.slide_percent_not_cancelable && input.forward == 0 && input.right == 0 {
