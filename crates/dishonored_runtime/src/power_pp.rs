@@ -24,30 +24,89 @@ pub const BEND_VECTOR_SCALE: f32 = 50.0;
 pub const BEND_POST_WARMUP: f32 = 0.5;
 pub const BEND_POST_COOLDOWN: f32 = 0.5;
 
-/// `PPG_EyeLidFinal_Mat` / `PPG_DarkVisionFinal_Mat` `EyeLidColor` default (0.392, 0.333, 0.275).
-pub const EYELID_COLOR: [f32; 3] = [0.392, 0.333, 0.275];
-/// `Twk_DarkVision` `m_PpPerLevelParameters`: `m_EyeLidClosingDuration`, `m_EyeLidOpeningDuration`.
-pub const EYELID_CLOSE: f32 = 0.05;
-pub const EYELID_OPEN: f32 = 0.1;
+/// The eyelid pass's colour as captured (`UniformPixelVector_1`, `effects/darkvision_eyelid_timeline.json`):
+/// `EyeLidColor` (0.392, 0.333, 0.275) in linear space (each ^2.2).
+pub const EYELID_COLOR: [f32; 3] = [0.127_529_8, 0.089_193_5, 0.058_187_2];
 
-/// The eyelid pass's `Alpha` `t` seconds after the lids start a blink (shut over the closing
-/// time, open over the opening time), or None once the blink is over.
-pub fn eyelid_alpha(t: f32) -> Option<f32> {
-    if t < EYELID_CLOSE {
-        Some(1.0 - t / EYELID_CLOSE)
-    } else if t < EYELID_CLOSE + EYELID_OPEN {
-        Some((t - EYELID_CLOSE) / EYELID_OPEN)
-    } else {
-        None
-    }
+/// Blink's lens field (`PPG_BlinkVectors`, captured shader 0x0b36c71ce1512549) is driven by two
+/// values (`UniformPixelVector_1.xy`, the post manager's `blink` / `blinkg` channels; captured in
+/// `effects/blink_lens_timeline.json`). While aiming, `x` (the lens distortion) wobbles up to its
+/// rest `m_fWarmupDistorionMinStrength` x `m_fWarmupWobbleMaxStrength` (level 2: 0.35 x 0.2 =
+/// 0.07): the captured warmup, relative to that rest, every 0.1 s.
+pub const BLINK_WARMUP_SHAPE: [f32; 12] = [0.0024, 0.32, 0.63, 0.92, 1.11, 1.24, 1.30, 1.30, 1.24, 1.11, 1.03, 1.0];
+/// `Twk_Blink` level 2: `m_fWarmupDistorionMinStrength`, `m_fWarmupWobbleMaxStrength`,
+/// `m_fMoveDistortionMaxStrength` (x at the end of the move), `m_fMoveBlurMaxStrength` (y),
+/// `m_fMoveReachMaxAtPercentage`, `m_fCooldownTime`, `m_CoolDownWobbleCount`.
+pub const BLINK_WARMUP_MIN: f32 = 0.35;
+pub const BLINK_WOBBLE_MAX: f32 = 0.2;
+pub const BLINK_MOVE_DISTORTION: f32 = 1.5;
+pub const BLINK_MOVE_BLUR: f32 = 2.5;
+pub const BLINK_REACH_MAX_AT: f32 = 0.8;
+pub const BLINK_COOLDOWN: f32 = 1.0;
+pub const BLINK_COOLDOWN_WOBBLES: f32 = 10.0;
+/// The captured cooldown decays by about 0.66 per 0.1 s (a 0.24 s time constant).
+pub const BLINK_COOLDOWN_TAU: f32 = 0.24;
+
+/// Blink's lens drive between frames.
+#[derive(Default)]
+pub struct BlinkLens {
+    /// Seconds since aiming started, or since the move ended (cooldown).
+    pub clock: f32,
+    pub aiming: bool,
+    pub travelling: bool,
+    /// (x, y) when the move ended (the cooldown decays from there).
+    pub end: Vec2,
+    pub value: Vec2,
 }
 
-/// Dark Vision's eyelid state: a blink when the power turns on and when it turns off; the pass
-/// runs (Alpha 1, the gradient's vignette) while the power is on.
-#[derive(Default)]
-struct EyelidState {
-    on: bool,
-    blink: Option<f32>,
+impl BlinkLens {
+    /// Advance by `dt`: `aiming` while the left hand aims Blink, `progress` the move's share of
+    /// its distance while travelling.
+    pub fn step(&mut self, aiming: bool, progress: Option<f32>, dt: f32) -> Vec2 {
+        match progress {
+            Some(p) => {
+                self.travelling = true;
+                self.aiming = false;
+                // Up to the move strengths at `m_fMoveReachMaxAtPercentage` of the distance (the
+                // capture: 0.11 / 0.19 at 31 %, 0.38 / 0.94 at 62 %, 1.47 / 1.88 at arrival).
+                let k = (p / BLINK_REACH_MAX_AT).clamp(0.0, 1.0).powi(3);
+                self.value = Vec2::new(BLINK_MOVE_DISTORTION * k, BLINK_MOVE_BLUR * k);
+                self.end = self.value;
+                self.clock = 0.0;
+            }
+            None if aiming => {
+                if !self.aiming {
+                    self.aiming = true;
+                    self.clock = 0.0;
+                }
+                self.travelling = false;
+                self.clock += dt;
+                let f = self.clock / 0.1;
+                let i = (f.floor() as usize).min(BLINK_WARMUP_SHAPE.len() - 1);
+                let j = (i + 1).min(BLINK_WARMUP_SHAPE.len() - 1);
+                let s = BLINK_WARMUP_SHAPE[i] + (BLINK_WARMUP_SHAPE[j] - BLINK_WARMUP_SHAPE[i]) * (f - i as f32).clamp(0.0, 1.0);
+                self.value = Vec2::new(BLINK_WARMUP_MIN * BLINK_WOBBLE_MAX * s, 0.0);
+            }
+            None => {
+                if self.travelling || self.aiming {
+                    self.travelling = false;
+                    self.aiming = false;
+                    self.end = self.value;
+                    self.clock = 0.0;
+                }
+                self.clock += dt;
+                if self.clock >= BLINK_COOLDOWN * 3.0 {
+                    self.value = Vec2::ZERO;
+                } else {
+                    let d = (-self.clock / BLINK_COOLDOWN_TAU).exp();
+                    // `m_CoolDownWobbleCount` wobbles of the distortion over `m_fCooldownTime`.
+                    let w = (std::f32::consts::PI * BLINK_COOLDOWN_WOBBLES / BLINK_COOLDOWN * self.clock).cos().abs();
+                    self.value = Vec2::new(self.end.x * d * w, self.end.y * d);
+                }
+            }
+        }
+        self.value
+    }
 }
 
 /// The field's textures, extracted for the post pass.
@@ -91,47 +150,20 @@ pub fn bend_intensity(elapsed: f32, duration: f32) -> f32 {
     up.min(down)
 }
 
-/// Blink's use of the Bend Time blur (`m_BendTimeIntensity` captured during a level-2 Blink,
-/// `effects/blink_l2.json`): it rises by 0.153 per 60 Hz frame while the pawn travels and decays
-/// by 0.57 every 5 frames afterwards (a time constant of 0.148 s), from the captured curves.
-pub const BLINK_BT_RISE: f32 = 9.2;
-pub const BLINK_BT_DECAY: f32 = 0.148;
-
-pub fn blink_bend_step(x: f32, travelling: bool, dt: f32) -> f32 {
-    if travelling { (x + BLINK_BT_RISE * dt).min(1.0) } else { x * (-dt / BLINK_BT_DECAY).exp() }
-}
-
-fn drive(view: Option<Res<SessionView>>, time: Res<Time>, mut lids: Local<EyelidState>, mut blink_bt: Local<f32>, mut q: Query<&mut ArkPostSource>) {
+fn drive(view: Option<Res<SessionView>>, time: Res<Time>, mut lens: Local<BlinkLens>, mut q: Query<&mut ArkPostSource>) {
     let me = view.as_ref().and_then(|v| v.me.as_ref());
-    let travelling = me.is_some_and(|m| m.mode == dishonored_sim::state::MoveMode::Blinking);
-    *blink_bt = blink_bend_step(*blink_bt, travelling, time.delta_secs());
-    if *blink_bt < 1e-3 {
-        *blink_bt = 0.0;
-    }
-    // Dark Vision's eyelids (LIKELY: the blink on both edges; the capture shows the pass only
-    // while the power is on, with its constants not recorded).
-    let dv_on = me.is_some_and(|m| m.vitals.dark_vision_remaining > 0.0);
-    if dv_on != lids.on {
-        lids.on = dv_on;
-        lids.blink = Some(0.0);
-    }
-    let blink_alpha = lids.blink.and_then(eyelid_alpha);
-    if let Some(t) = lids.blink.as_mut() {
-        *t += time.delta_secs();
-    }
-    if blink_alpha.is_none() {
-        lids.blink = None;
-    }
-    let eyelid = match blink_alpha {
-        Some(a) => Some(a),
-        None if dv_on => Some(1.0),
-        None => None,
-    };
+    // Dark Vision's eyelid pass runs while the power is on, its `Alpha` the power's fade (the
+    // capture: 0 -> 1 over `m_PowerFadeInDuration`, then 1, then the fade-out remaining /
+    // `m_PowerFadeOutDuration`, one frame late).
+    let eyelid = me.filter(|m| m.vitals.dark_vision_remaining > 0.0).map(|m| crate::dark_vision::weight(&m.dark));
+    // Blink's lens: aiming (the left hand aims Blink), travelling (share of the move's distance).
+    let aiming = me.is_some_and(|m| m.left.item == dishonored_sim::input::LeftHand::Blink && m.left.blink_target.is_some());
+    let progress = me.filter(|m| m.mode == dishonored_sim::state::MoveMode::Blinking).map(|m| (m.position.distance(m.blink.origin) / m.blink.max_distance.max(1.0)).clamp(0.0, 1.0));
+    let blink = lens.step(aiming, progress, time.delta_secs());
     let bend = match (view.as_ref(), me) {
         (Some(v), Some(me)) => v.time_bends.iter().find(|b| b.caster == me.id).map(|b| bend_intensity(b.elapsed, b.duration)).unwrap_or(0.0),
         _ => 0.0,
     };
-    let bend = bend.max(*blink_bt);
     let rate = me.map(|m| m.time_scale).unwrap_or(1.0);
     for mut src in &mut q {
         let t = src.bend_time + time.delta_secs() * rate;
@@ -141,6 +173,9 @@ fn drive(view: Option<Res<SessionView>>, time: Res<Time>, mut lids: Local<Eyelid
         }
         if src.eyelid != eyelid {
             src.eyelid = eyelid;
+        }
+        if src.blink_lens != blink {
+            src.blink_lens = blink;
         }
     }
 }

@@ -220,3 +220,39 @@ stealth/detect_600
 # at each DishonoredNotify_Footfall of the locomotion loop at RateScale 1. Needed: the tick of each footfall contact (trace 0x00b66a80) while
 # running at 400 / 360 uu/s and sprinting at 600 / 540, to decode the loop's play rate.
 stealth/hear_footfalls
+
+# --- physics (research/dishonored/systems/physics.md, 2026-10-08) ---
+# P-3: Windblast level 1 at 300 / 600 / 800 / 900 uu: |momentum| 1627 / 1259 / 1044 / 946 against m_fStrongHitReactThreshold 500,
+# m_fAnimRagdollThreshold 1000, m_fFullRagdollThreshold 3800. Needed per run: npc.guard x/y/z/physics/health (physics 4 Flying = the animated
+# throw, 10 RigidBody; 1 = no throw) and the tick of each change; expected: 300/600/800 throw (Flying 4 then RigidBody 10), 900 no throw.
+physics/windblast_throw_d300
+physics/windblast_throw_d600
+physics/windblast_throw_d800
+physics/windblast_throw_d900
+# P-5 (ragdoll impulse calibration): after a Windblast on a Passive guard (no Flying phase), per tick for 40 ticks the Velocity of the pawn AND of every
+# body of its SkeletalMeshComponent (GetRBLinearVelocity / body instance velocity per bone) and each body's Mass; plus the pawn's Location against the
+# Root_jnt body location. Needed to decode the 1005 uu/s: the impulse is momentum/2 split over N bodies (NX_IMPULSE), so only the masses are open.
+#   session find class=SkeletalMeshComponent name=<guard Outer.Name>; session call object=<mesh> function=GetRootBodyIndex / read per-bone body velocity (same spec as powers/windblast_l2_hit with the dummy on Boyle, not the Playground: U-806)
+# P-8: RagdollImpact damage on the L1 throw (health 33 -> 23 -> 11 at ticks 75 / 79 in the cached powers/windblast_guard_l1 trace): the damage path 0x00B5CCD0
+# calls with damage type, amount, contact normal / speed, per call.
+# --- conversations, barks, cutscenes (research/dishonored/systems/conversation.md) ---
+# C1: bark observables (AkEvent posts on the guard, tick-exact) next to the brain channels; the three session lines after it read the NPC's per-hook
+# next-allowed table (DisConversationComponent.m_DialogHookInfo_InGame[hook] = fire time + rand*(max-min); the port stores the same without the +min of the gate)
+# and the manager's last-fire table (DisConvGlobalMan.m_DialogHookInfo_InGame[hook].m_fLastFireTime), world time via worldinfo TimeSeconds.
+conversation/bark_notice_detect600
+session dump class=DisConversationComponent filter=m_DialogHookInfo_InGame limit=60
+session dump class=DisConvGlobalMan filter=m_DialogHookInfo_InGame limit=2
+session read object=worldinfo path=TimeSeconds
+# C2: arbitration of simultaneous bark requests (group caps, loud / quiet, distance weight, 2.5 s lock) and what the manager holds right after.
+conversation/bark_group_arbitration
+session dump class=DisConversationComponent filter=m_DialogHookInfo_InGame limit=60
+session dump class=DisConvGlobalMan filter=m_QueuedHookGroups limit=2
+session dump class=DisConvGlobalMan filter=m_CurDominantHook limit=2
+session read object=worldinfo path=TimeSeconds
+# C3: which tweak object the manager really uses (the port assumes the class defaults of DisTweaks_ConvSettings: the refire overrides, the 13 fire groups, 5000 / 2000 uu, weight range 0.2).
+session find class=DisTweaks_ConvSettings limit=8
+session dump class=DisTweaks_ConvSettings limit=8
+session dump class=DisConvGlobalMan filter=m_pConvSettingTweaks limit=2
+# C4: cutscene lock: player path, camera and release under scripted input during Samuel's boat intro.
+cutscene/boyle_intro_lock
+session dump class=StatePlayerMasterSoiree limit=2

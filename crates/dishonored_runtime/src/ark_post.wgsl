@@ -34,6 +34,8 @@ struct ArkPost {
     // Dark Vision's eyelid pass: (on, Alpha, 0, 0) and EyeLidColor.
     dv_eyelid: vec4<f32>,
     dv_lid_color: vec4<f32>,
+    // Blink's lens: (x distortion, y blur, on, 0).
+    blink_lens: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> view: View;
@@ -67,12 +69,36 @@ fn bend_field(uv: vec2<f32>) -> vec2<f32> {
     return v * (1.0 - m) * ark.power_vectors.y * ark.power_vectors.x;
 }
 
+// `PPG_BlinkVectors` (captured shader 0x0b36c71ce1512549, `Tex#0` = fxt_eyelid_gradient), with
+// d = uv - 0.5 and rho = |(1.975 d.x, 2 d.y)|: rg = 240 y (1 - saturate(gradient.r + 0.5 - y)) d
+// (a radial blur), ba = 0.15 x (1 - rho^3) d (a lens bulge, applied as an offset by the blur's
+// second pass); x / y = `UniformPixelVector_1.xy` (`power_pp::BlinkLens`).
+fn blink_field(uv: vec2<f32>) -> vec4<f32> {
+    let x = ark.blink_lens.x;
+    let y = ark.blink_lens.y;
+    let g = textureSampleLevel(field_mask, source_sampler, uv, 0.0).r;
+    let a = 120.0 * (1.0 - clamp(g + 0.5 - y, 0.0, 1.0));
+    let d = uv - 0.5;
+    let rho = length(vec2<f32>(1.97530866 * d.x, 2.0 * d.y));
+    let lens = 0.15 * x * (1.0 - rho * rho * rho) * d;
+    return vec4<f32>(a * 2.0 * y * d, lens);
+}
+
+// The active power's field: rg = blur vector (sixteenths of a pixel), ba = uv offset of the
+// second pass. Blink's switch comes before Bend Time's in `Test_PPG`.
+fn power_field(uv: vec2<f32>) -> vec4<f32> {
+    if (ark.blink_lens.z > 0.5) {
+        return blink_field(uv);
+    }
+    return vec4<f32>(bend_field(uv), 0.0, 0.0);
+}
+
 // `ArkPpNodeBlur` along the field (captured shaders 0xbd9a42b61794aabb then 0x6095a5daa9109b1d):
 // four taps at uv + k x field x scale (k = 0..3) averaged, first with gVectorFieldScales =
-// 1 / (16 x size) on the scene, then with 1 / (4 x size) on that result (the second pass reads
-// the field at its own pixel).
-fn bend_pass1(p: vec2<f32>, s1: vec2<f32>) -> vec3<f32> {
-    let f = bend_field(p) * s1;
+// (1 / (16 x size), 0, 0) on the scene, then with (1 / (4 x size), 1, 1) on that result: the
+// second pass starts at uv + field.ba and reads the field at its own pixel.
+fn power_pass1(p: vec2<f32>, s1: vec2<f32>) -> vec3<f32> {
+    let f = power_field(p).xy * s1;
     var sum = vec3<f32>(0.0);
     for (var k = 0; k < 4; k = k + 1) {
         sum = sum + textureSampleLevel(source, source_sampler, p + f * f32(k), 0.0).rgb;
@@ -80,14 +106,16 @@ fn bend_pass1(p: vec2<f32>, s1: vec2<f32>) -> vec3<f32> {
     return sum * 0.25;
 }
 
-fn bend_blur(uv: vec2<f32>) -> vec3<f32> {
+fn power_blur(uv: vec2<f32>) -> vec3<f32> {
     let size = vec2<f32>(textureDimensions(source));
     let s1 = 1.0 / (16.0 * size);
     let s2 = 1.0 / (4.0 * size);
-    let f = bend_field(uv) * s2;
+    let field = power_field(uv);
+    let base = uv + field.zw;
+    let f = field.xy * s2;
     var sum = vec3<f32>(0.0);
     for (var k = 0; k < 4; k = k + 1) {
-        sum = sum + bend_pass1(uv + f * f32(k), s1);
+        sum = sum + power_pass1(base + f * f32(k), s1);
     }
     return sum * 0.25;
 }
@@ -245,9 +273,10 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let pix = vec2<i32>(in.position.xy);
     let src = textureSampleLevel(source, source_sampler, in.uv, 0.0);
     var colour = src.rgb;
-    // Bend Time's blur (Test_PPG `BendTimeSwitch` -> `ArkPpNodeBlur`), on the fogged scene.
-    if (ark.power_vectors.x > 0.0) {
-        colour = bend_blur(in.uv);
+    // Blink's / Bend Time's blur (Test_PPG `BlinkSwitch` / `BendTimeSwitch` -> `ArkPpNodeBlur`),
+    // on the fogged scene.
+    if (ark.power_vectors.x > 0.0 || ark.blink_lens.z > 0.5) {
+        colour = power_blur(in.uv);
     }
     // Dark Vision's eyelid pass (`PPG_EyeLidFinal_Mat` / `PPG_DarkVisionFinal_Mat`, captured shader
     // 0x3c1c89ab574a7626): the scene (souls already blended in) x fxt_eyelid_gradient.g, faded

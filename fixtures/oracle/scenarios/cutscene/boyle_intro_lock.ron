@@ -1,0 +1,35 @@
+// Cutscene control (conversation.md findings 22-26): Samuel's boat intro on Boyle Ext
+// (`Boyle_SamuelBoatIntro`, 29.81 s, started by the level-change remote event). The player group
+// holds the player (StatePlayerMasterSoiree: PHYS_Interpolating, movement input masked, look limited
+// to yaw +-170 / pitch -15..60 by DisInterpTrackAllowPlayerLook) and the boat carries the pawn.
+// The input script presses forward, jump, primary and use during the ride and looks around: the
+// pawn's path must be the boat's alone, and the camera must follow the look input inside the limits.
+// Samuel's dialog keys (5.68 s, 16.90 s, 22.65 s) post three AkEvents on his pawn; the player is
+// detached from the boat at 29.64 s and control returns.
+// Port: the player group's players lose movement control while the matinee plays (kismet interp
+// `cutscene::started`); the camera limits are presentation-only.
+(
+    name: "cutscene/boyle_intro_lock",
+    system: Cutscene,
+    map: "L_Boyle_Ext_P",
+    description: "Boyle's intro matinee: press forward / jump / attack / use and look around for 31 s: the pawn path and release time.",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true)), kismet: true, kismet_start: Some("ChangeLvl_fromHub_toBoyle"), original_npcs: true, seed: 1),
+    ticks: 1900,
+    input: [
+        (tick: 120, action: Move(forward: 127, right: 0)),
+        (tick: 240, action: Press(Jump)),
+        (tick: 300, action: Press(Primary)),
+        (tick: 360, action: Press(Use)),
+        (tick: 420, action: Look(yaw: 90, pitch: 0)),
+        (tick: 480, action: Look(yaw: -90, pitch: 0)),
+        (tick: 540, action: Look(yaw: 0, pitch: 45)),
+        (tick: 600, action: Look(yaw: 0, pitch: -45)),
+        (tick: 900, action: Move(forward: 0, right: 0)),
+    ],
+    checkpoints: [
+        (name: "pawn moves with the boat, not the input", expect: [(metric: Delta("pawn.x", 600, 1500), value: 0.0, tol: 0.0, status: Unmeasured, source: "boat Move track relative displacement (CUTSCENES.md section 3); the original trace gives the pawn path")]),
+        (name: "released near 29.64 s", expect: [(metric: TimeAt("pawn.physics", 1), value: 0.0, tol: 0.0, cmp: AtLeast, status: Unverified, source: "Player_Attach detach key at 29.64 s; physics enum differs between the sides (compare pawn.z / speed after release instead)")]),
+    ],
+    record: [Pawn, Camera, Kismet, SimEvents, Sounds],
+    capture: Some("Boyle intro for 1900 ticks with the scripted input; pawn xyz / physics, camera yaw / pitch, Kismet activations and AkEvent posts per tick"),
+)

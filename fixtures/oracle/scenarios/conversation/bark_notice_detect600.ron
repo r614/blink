@@ -1,0 +1,28 @@
+// Bark timing against the brain: the stealth/detect_600 setup (party guard 600 uu in front of the
+// player) with the dialog observables added. In the original the Notice behaviour posts
+// DDH_ATTENTION_NOTICE_BEGIN (hook 108, fire group Attention, flags 0x1080: notice sound) when it
+// starts, Investigate/Search post the search hooks, and each hook fires through
+// FireHook (0x00ca6bd0): per-NPC refire gate, global refire gate, group lock, then the queue
+// (0x00ca5b20) next tick. The checkpoints ask for: the tick of the first AkEvent post after the
+// attention level rises (conversation.md findings 1-3, 6), and that the notice sound emits an
+// AI noise (flag 0x1000) which the guard's neighbours can hear.
+(
+    name: "conversation/bark_notice_detect600",
+    system: Conversation,
+    map: "L_Boyle_Ext_P",
+    description: "Stand 600 uu in front of the party guard for 8 s: which barks it posts and when.",
+    setup: (
+        player: Some((position: (-3201.5, -2763.3, 20), yaw: 71.37, snap_to_floor: true)),
+        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), yaw: 251.37, state: Some("Idle"))],
+        settle: 1,
+    ),
+    ticks: 480,
+    input: [],
+    checkpoints: [
+        (name: "level 1 (notice) reached", expect: [(metric: TimeToReach("npc.guard.attn_level", 1), value: 0.75, tol: 0.05, source: "stealth/detect_600 original trace: level 1 at frame 45 (the port reaches it at 0.35 s: a stealth finding, not judged here)", status: Unverified)]),
+        (name: "first bark after the notice begins", expect: [(metric: Gap(TimeToReach("npc.guard.attn_level", 1), FirstAt("Sound:*Play_*@guard")), value: 0.0, tol: 0.1, source: "DDH_ATTENTION_NOTICE_BEGIN posts on the Notice behaviour start; the queue releases it on the next manager tick (0x00ca71c0)", status: Unmeasured)]),
+        (name: "bark count over 8 s", expect: [(metric: Count("Sound:*Play_*@guard"), value: 0, tol: 0, status: Unmeasured, source: "number of AkEvent posts on the guard in 8 s on the original")]),
+    ],
+    record: [Pawn, Npc("guard"), SimEvents, Sounds],
+    capture: Some("detect_600 for 480 ticks with ProcessEvent on AkComponent / DisAkComponent (Class:...) and DisConversationComponent; then session read guard DisConversationComponent m_DialogHookInfo_InGame and DisConvGlobalMan m_DialogHookInfo_InGame"),
+)

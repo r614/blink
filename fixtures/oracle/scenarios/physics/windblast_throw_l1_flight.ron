@@ -1,0 +1,28 @@
+// Windblast level 1 on an idle guard 182.8 uu ahead (Boyle runway): the thrown NPC's initial
+// velocity and flight, against the cached original trace of powers/windblast_guard_l1.
+// Original (60 Hz): damage tick 25 (health 50 -> 33); physics Flying (4) for 27 ticks, y moves
+// -13.1 uu/tick (786 uu/s) decaying 0.55 %/tick, z rises 6.8 uu/tick and falls at ~1550 uu/s^2
+// (gravity); then physics RigidBody (10) at tick 52. Momentum (k 0.879 x (1800, 939)) =
+// (1582, 825), /2 = (791, 412): `StateNPCMasterThrown` start (0x00A81860 -> 0x00BEB6E0:
+// Velocity = momentum / m_fEffectiveMassForThrowing 2.0). The port adds the whole momentum (1582) and its damage lands 9 ticks after the press (original: 20), so only timing-independent checks are judged.
+(
+    name: "physics/windblast_throw_l1_flight",
+    system: Physics,
+    map: "L_Boyle_Ext_P",
+    description: "The thrown guard's first flight ticks after a level 1 Windblast: Velocity = momentum / 2 (Flying), not the whole momentum.",
+    setup: (
+        player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true)),
+        powers: [("WindBlast", 1)],
+        left_hand: Some("Windblast"),
+        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), position: Some((-3400, -3332.8, -217.5)), yaw: 90, state: Some("Idle"), faction: Some("None"))],
+        settle: 30,
+    ),
+    ticks: 48,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "flight apex height", expect: [(metric: Rise("npc.guard.z"), value: 55.9, tol: 6, source: "original trace powers/windblast_guard_l1: z(0) -210.1, apex -154.2 at tick 41 (Flying phase, before the RigidBody switch at tick 52); ballistic check (825/2)^2 / (2 x 1500) = 56.6", status: Measured)]),
+    ],
+    record: [Pawn, Vitals, Powers, Npc("guard"), SimEvents],
+    capture: None,
+)
+

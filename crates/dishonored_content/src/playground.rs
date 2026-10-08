@@ -22,7 +22,7 @@ pub struct NavAgent {
 }
 
 /// Bumped when the derived data below changes shape.
-const DERIVED_VERSION: u32 = 1;
+const DERIVED_VERSION: u32 = 2; // 2: brushes collide as the original's Cube_100 (simple box collision)
 
 /// The layout file of a map, when the map is a layout (`maps/<name>.ron`, lower case): next to the
 /// working directory, the executable, or the repository root of a `target/<profile>` build;

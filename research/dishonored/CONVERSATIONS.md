@@ -167,9 +167,12 @@ A hook walk that starts nothing leaves the committed state unchanged.
 - Firing a hook on an NPC (`FUN_00ca5670`, component): blocked while the owner is dead except
   for hooks 57-59; tries the one-shot trees bound to the NPC, the additional generic trees,
   then its generic tree (and each tree's `m_pFallbackTree` chain, `FUN_00ca5150`). The hook
-  node's slot 86 picks the output; the walk runs as above. On success the NPC's next allowed
-  time for that hook becomes `now + rand * (max - min)` (the minimum is not added) and the
-  global last-fire time of the hook is stored (`DisConvGlobalMan` +0x558).
+  node's slot 86 picks the output; the walk runs as above. On success the NPC's stored time for
+  that hook becomes `now + rand * (max - min)` and the global last-fire time of the hook is
+  stored (`DisConvGlobalMan` +0x558). **Correction (systems/conversation.md R1):** the request
+  gate (`FUN_00ca6bd0`) lets the hook fire again only when `now - stored > min`, so the
+  effective refire delay is `min + rand * (max - min)`; the minimum is added by the gate. The
+  request queue, weights and caps are decoded in systems/conversation.md R3.
 - The per-hook table (126 rows of 0x50 bytes at `DAT_01471d0c`, built by `FUN_00c8d820`):
   class, fire group, refire min/max/global, bust time, flags. Most AI hooks: refire 1 s / 1 s,
   flags 0x80; use/approach/Kismet/audio-log/heart hooks: 0 s; "can't reach" and "go home" 8 s;
@@ -193,8 +196,8 @@ A hook walk that starts nothing leaves the committed state unchanged.
 ## 5. Still open
 
 - The queue in `DisConvGlobalMan` (pending/firing hook groups, loud/quiet split by
-  `m_fDialogDistanceConsideredLoud`, `m_fHookWeightRandRange`): the port gates by group caps and
-  spacing only (LIKELY).
+  `m_fDialogDistanceConsideredLoud`, `m_fHookWeightRandRange`) is decoded in
+  systems/conversation.md R3 (2026-10-08); the port gates by group caps and spacing only.
 - The AI side of availability (`DDA_REJECTED_BY_AI_BEHAVIOR`, the `m_bNotWhile*` speaker flags)
   and the AI state numbers behind `SpeakerCombatStatus` and the suspicion level.
 - Matinee playback for soirees (the port plays the preview chain as a stand-in).
