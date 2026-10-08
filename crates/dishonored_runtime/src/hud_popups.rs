@@ -392,6 +392,8 @@ pub enum HudTest {
     },
     /// Show / hide the cinematic stripes.
     Stripes { show: bool },
+    /// Show the location discovery banner (SetLocation, 5 s).
+    Location { name: String },
 }
 
 fn five() -> f32 {
@@ -456,6 +458,11 @@ pub fn apply_test(t: HudTest, q: &mut PopupQueue, w: &mut HudWidgets, st: &mut S
         HudTest::Stripes { show } => {
             if let Some(s) = w.stripes.as_mut() {
                 s.set(st, show, true);
+            }
+        }
+        HudTest::Location { name } => {
+            if let Some(l) = w.location.as_mut() {
+                l.set_location(st, &name, crate::gfx_hud::LOCATION_DISCOVERY_DURATION);
             }
         }
     }

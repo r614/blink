@@ -98,6 +98,12 @@
   {"wait_ticks": 6}, {"screenshot": "hud_12_stripes_close"},
   {"wait_ticks": 24}, {"screenshot": "hud_12_stripes_gone"},
 
+  {"hud": {"kind": "location", "name": "Dunwall Tower"}},
+  {"wait_ticks": 30}, {"screenshot": "hud_12b_location_open"},
+  {"wait_ticks": 150}, {"screenshot": "hud_12b_location_hold"},
+  {"wait_ticks": 195}, {"screenshot": "hud_12b_location_close"},
+  {"wait_ticks": 60}, {"screenshot": "hud_12b_location_gone"},
+
   {"ticks": 1, "input": {"yaw": 90, "pitch": 0, "left_hand": "Empty", "buttons": ["CROUCH"]}},
   {"ticks": 12, "input": {"yaw": 90, "pitch": 0, "left_hand": "Empty"}},
   {"screenshot": "hud_13_sneak_open"},

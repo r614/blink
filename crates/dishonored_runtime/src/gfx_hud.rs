@@ -43,6 +43,7 @@ pub const LOW_MANA_THRESHOLD: f32 = 19.0;
 pub const PLAYER_INFO_DISPLAY_DURATION: f32 = 8.0;
 pub const GAME_MESSAGE_DURATION: f32 = 5.0;
 pub const TARGET_NOTIFICATION_DURATION: f32 = 5.0;
+pub const LOCATION_DISCOVERY_DURATION: f32 = 5.0;
 pub const CROSSHAIR_INTERPOLATION_SPEED: f32 = 4.5;
 
 /// The HUD movie on its stage.
@@ -123,6 +124,7 @@ struct Native {
     marker: Option<crate::gfx_stage::Id>,
     inv: Option<dishonored_sim::state::Inventory>,
     game_msg_seen: u32,
+    location_seen: u32,
     last_mission: Option<(String, u32)>,
 }
 
@@ -378,6 +380,7 @@ pub fn update_gfx_hud(
         n.last_mission = game;
         n.inv = None;
         n.game_msg_seen = mission.and_then(|mv| mv.messages.last().map(|x| x.0)).unwrap_or(0);
+        n.location_seen = mission.and_then(|mv| mv.location.as_ref().map(|x| x.0)).unwrap_or(0);
         hud.popups = PopupQueue::default();
     }
 
@@ -593,6 +596,20 @@ pub fn update_gfx_hud(
             if *id > n.game_msg_seen {
                 n.game_msg_seen = *id;
                 gm.set_game_message(st, Some(&convert_key_tags(text, bindings.as_deref(), &hud.texts.keys)), GAME_MESSAGE_DURATION);
+            }
+        }
+    }
+
+    // --- location discovery (DisSeqAct_ShowLocationDiscovery, 0x00B95160) ---
+    if let (Some(mv), Some(loc)) = (mission, w.location.as_mut()) {
+        if let Some((id, name)) = &mv.location {
+            if *id > n.location_seen {
+                n.location_seen = *id;
+                if name.trim().is_empty() {
+                    loc.close(st);
+                } else {
+                    loc.set_location(st, name, LOCATION_DISCOVERY_DURATION);
+                }
             }
         }
     }

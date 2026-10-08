@@ -2246,6 +2246,239 @@ impl Crosshairs {
 }
 
 // =============================================================================================
+// Location (hud_location, `location_mc`): location discovery
+// =============================================================================================
+
+/// `SetLocation(name, duration)` (`DisSeqAct_ShowLocationDiscovery`, native 0x00B95160 with
+/// `m_fLocationDiscoveryDuration` 5 s): the name as a big first letter, the middle part and a
+/// big last letter (`hud_location_BigLetter` / `hud_location_letter`, 3.5 px overlap),
+/// revealed by a mask widening from 10 px over 0.95 s; separators, tags and backdrop open
+/// with it (0.65 s / 0.4 s `tweenFrom`), all fading out over 0.6 s at the end.
+pub struct Location {
+    pub mc: Id,
+    sep_up: Option<Id>,
+    sep_down: Option<Id>,
+    tag_left: Option<Id>,
+    tag_right: Option<Id>,
+    bkgd: Option<Id>,
+    container: Option<Id>,
+    mask: Option<Id>,
+    mask_w: f32,
+    def_y: f32,
+    duration: f32,
+    nb_char: usize,
+    pub opened: bool,
+    interval_open: Option<u32>,
+    interval_elements: Option<u32>,
+    interval_location: Option<u32>,
+    interval_close: Option<u32>,
+}
+
+const LOC_ELEMENTS: u16 = 1;
+const LOC_LETTER: u16 = 2;
+const LOC_CLOSE: u16 = 3;
+const LOC_CLOSED: u16 = 4;
+
+impl Location {
+    pub fn new(st: &mut Stage, mc: Id) -> Self {
+        st.set_visible(mc, false);
+        st.set(mc, Prop::Alpha, 0.0);
+        let c = |st: &Stage, n: &str| st.child(mc, n);
+        Self {
+            mc,
+            sep_up: c(st, "_sepUp_mc"),
+            sep_down: c(st, "_sepDown_mc"),
+            tag_left: c(st, "_tagLeft_mc"),
+            tag_right: c(st, "_tagRight_mc"),
+            bkgd: c(st, "_bkgd_mc"),
+            container: None,
+            mask: None,
+            mask_w: 0.0,
+            def_y: st.get(mc, Prop::Y),
+            duration: 5.0,
+            nb_char: 0,
+            opened: false,
+            interval_open: None,
+            interval_elements: None,
+            interval_location: None,
+            interval_close: None,
+        }
+    }
+
+    fn clear_container(&mut self, st: &mut Stage) {
+        if let Some(c) = self.container.take() {
+            st.remove(c);
+        }
+        if let Some(m) = self.mask.take() {
+            st.remove(m);
+        }
+    }
+
+    pub fn set_location(&mut self, st: &mut Stage, name: &str, duration: f32) {
+        for iv in [&mut self.interval_open, &mut self.interval_elements, &mut self.interval_location, &mut self.interval_close] {
+            clear(st, iv);
+        }
+        st.tween_end(self.mc, false);
+        st.set(self.mc, Prop::Alpha, 100.0);
+        self.opened = true;
+        let chars: Vec<char> = name.chars().collect();
+        self.nb_char = chars.len().min(3);
+        self.duration = duration;
+        // CreateContainer.
+        self.clear_container(st);
+        let d = st.next_depth(self.mc);
+        let cont = st.create_empty(self.mc, "_location_mc", d);
+        let d = st.next_depth(self.mc);
+        self.mask = st.attach(self.mc, "hud_location_Mask", "_mask_mc", d);
+        self.container = Some(cont);
+        let mut prev: Option<Id> = None;
+        let mut first: Option<Id> = None;
+        for i in 0..self.nb_char {
+            let middle = i > 0 && i + 1 < self.nb_char;
+            let (export, text): (&str, String) = if middle {
+                ("hud_location_letter", chars[1..chars.len() - 1].iter().collect())
+            } else {
+                let ch = if i == 0 { chars[0] } else { chars[chars.len() - 1] };
+                ("hud_location_BigLetter", ch.to_string())
+            };
+            let d = st.next_depth(cont);
+            let Some(l) = st.attach(cont, export, &format!("l{i}"), d) else { continue };
+            if let Some(t) = st.child(l, "txt") {
+                st.set_auto_size(t, AutoSize::Left);
+                st.set_text(t, &text.to_uppercase());
+            }
+            st.set(l, Prop::Y, 0.0);
+            if let Some(p) = prev {
+                let pw = st.child(p, "txt").map(|t| st.width(t)).unwrap_or(0.0);
+                let x = st.get(p, Prop::X) + pw - 3.5;
+                st.set(l, Prop::X, x);
+            }
+            if first.is_none() {
+                first = Some(l);
+            }
+            prev = Some(l);
+        }
+        let half_w = st.width(cont) / 2.0;
+        self.mask_w = 2.0 * half_w + 20.0;
+        st.set_mask(cont, self.mask);
+        st.set(cont, Prop::Alpha, 0.0);
+        for l in st.children(cont) {
+            let x = st.get(l, Prop::X) - half_w;
+            st.set(l, Prop::X, x);
+        }
+        let last_w = prev.map(|p| st.width(p)).unwrap_or(0.0);
+        let first_w = first.map(|f| st.width(f)).unwrap_or(0.0);
+        if let Some(s) = self.sep_up {
+            st.tween_end(s, false);
+            st.set(s, Prop::Alpha, 100.0);
+            st.set(s, Prop::X, half_w - last_w);
+            st.set_visible(s, false);
+        }
+        if let Some(s) = self.sep_down {
+            st.tween_end(s, false);
+            st.set(s, Prop::Alpha, 100.0);
+            st.set(s, Prop::X, -half_w + first_w);
+            st.set_visible(s, false);
+        }
+        for (t, x) in [(self.tag_left, -half_w - 2.5), (self.tag_right, half_w + 2.5)] {
+            if let Some(t) = t {
+                st.tween_end(t, false);
+                st.set(t, Prop::X, x);
+                st.set(t, Prop::Alpha, 100.0);
+                st.set_visible(t, false);
+            }
+        }
+        st.set_visible(self.mc, true);
+        // SetBkgd.
+        if let Some(b) = self.bkgd {
+            let w = st.width(cont) + 2.0 * self.tag_left.map(|t| st.width(t)).unwrap_or(0.0);
+            st.tween_end(b, false);
+            st.set(b, Prop::Alpha, 100.0);
+            st.set_width(b, w + 50.0);
+            st.set_visible(b, false);
+        }
+        // Open.
+        st.set(self.mc, Prop::Y, self.def_y);
+        st.tween_end(self.mc, false);
+        st.tween_to(self.mc, 0.35, &[(Prop::Alpha, 100.0)], Ease::StrongOut, None);
+        interval(st, &mut self.interval_elements, self.nb_char as f32 * 15.0, key(W_LOC, LOC_ELEMENTS, 0));
+        interval(st, &mut self.interval_location, self.duration * 1000.0, key(W_LOC, LOC_CLOSE, 0));
+    }
+
+    fn open_elements(&mut self, st: &mut Stage) {
+        clear(st, &mut self.interval_elements);
+        visible(st, self.sep_up, true);
+        if let Some(s) = self.sep_up {
+            st.tween_from(s, 0.65, &[(Prop::X, -50.0), (Prop::Alpha, 0.0)], Ease::StrongOut, None);
+        }
+        visible(st, self.sep_down, true);
+        if let Some(s) = self.sep_down {
+            st.tween_from(s, 0.65, &[(Prop::X, 50.0), (Prop::Alpha, 0.0)], Ease::StrongOut, None);
+        }
+        for t in [self.tag_left, self.tag_right].into_iter().flatten() {
+            st.tween_from(t, 0.65, &[(Prop::X, 0.0), (Prop::Alpha, 0.0)], Ease::StrongOut, None);
+            st.set_visible(t, true);
+            st.goto_and_play(t, "open");
+        }
+        if let Some(b) = self.bkgd {
+            st.set_visible(b, true);
+            st.tween_from(b, 0.4, &[(Prop::XScale, 30.0), (Prop::Alpha, 0.0)], Ease::StrongOut, None);
+        }
+        self.open_letter(st);
+    }
+
+    fn open_letter(&mut self, st: &mut Stage) {
+        clear(st, &mut self.interval_open);
+        if let Some(m) = self.mask {
+            // `_width = 10`, then `tweenTo(0.95, {_width: _maskW})` (as an x scale).
+            st.tween_end(m, false);
+            let lw = st.local_bounds(m).map(|r| r.width()).unwrap_or(1.0).max(1e-3);
+            st.set(m, Prop::XScale, 10.0 / lw * 100.0);
+            st.tween_to(m, 0.95, &[(Prop::XScale, self.mask_w / lw * 100.0)], Ease::StrongOut, None);
+        }
+        if let Some(c) = self.container {
+            st.tween_to(c, 0.35, &[(Prop::Alpha, 100.0)], Ease::StrongOut, None);
+        }
+    }
+
+    pub fn close(&mut self, st: &mut Stage) {
+        self.opened = false;
+        clear(st, &mut self.interval_location);
+        clear(st, &mut self.interval_close);
+        st.tween_end(self.mc, false);
+        st.tween_to(self.mc, 0.6, &[(Prop::Alpha, 0.0)], Ease::StrongOut, None);
+        interval(st, &mut self.interval_close, 600.0, key(W_LOC, LOC_CLOSED, 0));
+        for s in [self.sep_up, self.sep_down].into_iter().flatten() {
+            st.tween_end(s, false);
+            st.tween_to(s, 0.45, &[(Prop::X, 0.0)], Ease::BackOut, None);
+        }
+    }
+
+    fn on_event(&mut self, st: &mut Stage, code: u16) {
+        match code {
+            LOC_ELEMENTS => {
+                self.interval_elements = None;
+                self.open_elements(st);
+            }
+            LOC_LETTER => {
+                self.interval_open = None;
+                self.open_letter(st);
+            }
+            LOC_CLOSE => {
+                self.interval_location = None;
+                self.close(st);
+            }
+            LOC_CLOSED => {
+                self.interval_close = None;
+                st.set_visible(self.mc, false);
+                self.clear_container(st);
+            }
+            _ => {}
+        }
+    }
+}
+
+// =============================================================================================
 // HUDFX movie (UI_HUDFX.HUDFX, `DisGFxMoviePlayerHUDFX`): BlackShroud, DirectionalDamages
 // =============================================================================================
 
@@ -2530,6 +2763,7 @@ pub struct HudWidgets {
     pub state_icon: Option<PlayerStatesIcons>,
     pub tutorial: Option<TutorialMessage>,
     pub stripes: Option<BlackStripes>,
+    pub location: Option<Location>,
     pub crosshairs: Crosshairs,
     pub sounds: SoundQueue,
 }
@@ -2552,14 +2786,15 @@ impl HudWidgets {
         let state_icon = c(st, "playerStatesIcon_mc").map(|m| PlayerStatesIcons::new(st, m));
         let tutorial = c(st, "tutorialMsg_mc").map(|m| TutorialMessage::new(st, m));
         let stripes = c(st, "blackStripes_mc").map(|m| BlackStripes::new(st, m));
+        let location = c(st, "location_mc").map(|m| Location::new(st, m));
         // Widgets the port does not drive yet start hidden, as their classes do.
-        for n in ["tutorialWindow_mc", "oxygenGauge_mc", "interactions_ic_mc", "interactions_icQTE_mc", "skipCutScene_mc", "location_mc", "interactionGauge_mc", "grenadeCooking_mc"] {
+        for n in ["tutorialWindow_mc", "oxygenGauge_mc", "interactions_ic_mc", "interactions_icQTE_mc", "skipCutScene_mc", "interactionGauge_mc", "grenadeCooking_mc"] {
             if let Some(m) = c(st, n) {
                 st.set_visible(m, false);
             }
         }
         let crosshairs = Crosshairs::new(st);
-        Self { objectives, target, pickup_log, gauges, crosshair_info, game_msg, interactions, interaction_window, subtitles, choice, state_icon, tutorial, stripes, crosshairs, sounds: SoundQueue::default() }
+        Self { objectives, target, pickup_log, gauges, crosshair_info, game_msg, interactions, interaction_window, subtitles, choice, state_icon, tutorial, stripes, location, crosshairs, sounds: SoundQueue::default() }
     }
 
     /// Route a stage event to its widget.
@@ -2627,7 +2862,11 @@ impl HudWidgets {
                     o.on_event(st, code)
                 }
             }
-            W_LOC => {}
+            W_LOC => {
+                if let Some(o) = self.location.as_mut() {
+                    o.on_event(st, code)
+                }
+            }
             _ => {}
         }
     }
