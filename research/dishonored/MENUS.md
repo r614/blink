@@ -125,6 +125,35 @@ pitch 22.0 and yaw 71.0 degrees. `DefaultEngine.ini` `m_MapConfig` loads the map
 The movies' `SoundHandler` class posts these names; the port posts the same names from its
 handlers.
 
+## Objective popups (HUD `objectives_mc`, `targetNotification_mc`)
+
+Decoded from the `UI_HUD_SF` "HUD" ActionScript (`swf_dump UI_HUD_SF HUD - --actions <id>`; class
+registration in the export sprites' DoInitAction: `hud_objW` -> `ObjectivesNotification`,
+`hud_tgt` -> `TargetNotification`) and `Twk_InGameUI.Twk_GFxMoviePlayerHUD`:
+
+- `ObjectivesNotification.Open()`: backdrop from alpha 0, x + 250, scale 150 % to its authored
+  props in 0.2 s (`Strong.easeOut`); task lines start after `_tasksApparitionDelay` 700 ms, one
+  every `_taskLifeDuration_const` 3500 ms (`_utils.DelayedAnimation`), then `Close()`: backdrop
+  alpha 0 / x + 100 in 0.2 s, name strip alpha 0 / x - 50 in 0.25 s, `OnClosed` hides it 500 ms
+  later. Without tasks it closes after 3500 ms.
+- `TargetNotification.Open()`: portrait open timeline, `OnOpened` after 1000 ms, then the
+  notification's duration (`m_fTargetNotificationDuration` 5 s), `Close()`: alpha 0 in 0.25 s,
+  hidden 1000 ms later.
+- The native side queues popups (`m_PopupQueue`, `m_fPopupTimer`); the first waits
+  `m_fPopupDelayOnGameStart` 2 s. Titles: "New Objective", "Objective Updated", "Objective
+  Completed", "Objective Failed".
+- No key shows them: `DefaultInput.ini` has no objectives binding; the objectives are read in
+  the journal (`GBA_Journal`, J, `Dis_ToggleJournal`). `PSI_HUD_bShowObjectivePopups` turns them off.
+
+Port (`hud_popups.rs`): the match banner (mode, clock, score: no single-player counterpart) and
+the target paper follow these rules. The banner opens 2 s after the match starts, when the
+local score or the leader changes, when a mission objective, task or notification changes, and on
+J (the journal key, as the port has no journal screen); one line (the score) gives 0.7 + 3.5 s
+shown, then the fade. The Contracts target paper opens when the target changes and on J
+(1 + 5 s, then the fade); in missions the task paper follows the banner. Re-opening restarts the
+popup (the native queue is not reproduced). With the popups option off only J opens them. The
+scoreboard (with the clock) stays on Tab.
+
 ## Where the text comes from
 
 All labels are UE3 localization (`DishonoredGame/Localization/INT/*.int`, UTF-16LE). The

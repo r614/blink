@@ -109,6 +109,37 @@ Other module classes are listed per emitter as unsupported.
   smoke, sewer smoke, street lamp, small lights, fireflies) and
   `fixtures/scripts/effects_gameplay.json` (offline: pistol, Windblast, Blink).
 
+## Particle materials (`DefaultTranslu_PMAT`)
+
+The party lanterns' system `Boyle_FX.Lights.Ps_SmallLights_01` (11 placed, e.g. at
+(-3353, -2173, -74) and (-3669, -1638, -77) by the front-door steps) has a steam emitter on
+`Vfx_Smoke.Materials.M_TB_CrouchSteam_INST` and a smoke emitter on
+`vfx_characters.Materials.cigarette_smoke_inst`, both on `Vfx_Materials.main_materials.DefaultTranslu_PMAT`
+(BLEND_Translucent, unlit). The base pass pixel shaders of the matching permutations
+(`shader_maps` + `shader_dump` of RefShaderCache-PC-D3D-SM3, `fxc /dumpbin`; static parameters
+from `mic_static`):
+
+- default (2815): rgb = vertex rgb x `D_Diffuse`.rgb x `D_DiffuseColorTweak`.rgb; alpha =
+  `O_Opacity`.r x `D_DiffuseColorTweak`.a x vertex alpha (the channel is `O_Opacity_Channel`).
+- `D_DisableDiffuse` (35485, the cigarette smoke): rgb = vertex rgb x tweak.rgb; alpha as above.
+- `Mo_Enable_Opacity_Motion` + `Mo_Enable_Diffuse_Motion` (35475, the crouch steam): two
+  rotating / panning samples of `Motion_SourceTexture01` (uv rotated about the centre by
+  0.2 x Time x `Mo_Motion_Speed`, panned by frac(-0.3 T), frac(0.2 T)) and `Motion_SourceTexture02`
+  (rotated about the origin by 0.1 T, panned by (0, frac(0.4 T))) multiply into m; `Motion_Mask`
+  is sampled at uv + 0.2 m; rgb = vertex rgb x mask.rgb x tweak.rgb, alpha = mask.r x tweak.a x
+  vertex alpha.
+
+`M_TB_CrouchSteam_INST` sets no texture: the base's defaults apply (`Motion_Mask` =
+`Vfx_Smoke.Textures.FXT_Smoke_01`, both sources `FXT_Smoke_Tile_01`, `D_Diffuse` / `O_Opacity`
+= `Vfx_PhysMat.Textures.Smoke01_d`). The port took the sprite's alpha from the `D_Diffuse`
+texture's own alpha (opaque) and tinted by `Color` (absent), so the steam and smoke drew as dark
+grey squares (`D_DiffuseColorTweak` (0.21, 0.20, 0.16)). Now the importer puts the permutation's
+colour source (D_Diffuse / white / Motion_Mask) with its opacity source in alpha into the
+diffuse slot, and the sprite material tints by `D_DiffuseColorTweak` (alpha into the opacity).
+APPROXIMATION: the motion distortion of the mask (up to 0.2 uv) is not animated and
+`D_Diffuse_Channel` = R permutations keep the RGB texture. The other particle bases (the
+additive and glow ones) are unchanged; the additive ones cannot show dark squares.
+
 ## Gameplay effects (U-165 resolved)
 
 From the tweaks (`tweaks` tool):

@@ -288,6 +288,17 @@ fn material_for(map: &DishonoredMap, em: &ParticleEmitterAsset, images: &mut Ass
     let gain: f32 = params
         .map(|p| p.scalars.iter().filter(|s| ["LightIntensity", "Opacity", "Intensity", "EmissiveIntensity", "Emissive_Intensity"].iter().any(|n| s.0.eq_ignore_ascii_case(n))).map(|s| s.1).product())
         .unwrap_or(1.0);
+    // `DefaultTranslu_PMAT` sprites (decoded shaders, EFFECTS.md "Particle materials"): the
+    // importer put the permutation's colour x opacity texture in the diffuse slot; the shader
+    // multiplies it by `D_DiffuseColorTweak` (rgb, and alpha into the opacity) and the vertex
+    // colour, nothing else.
+    let translu = params.is_some_and(|p| p.base_material.as_deref().is_some_and(|b| b.ends_with("DefaultTranslu_PMAT")));
+    let (tint, gain) = if translu {
+        let tw = params.and_then(|p| p.vectors.iter().find(|v| v.0.eq_ignore_ascii_case("D_DiffuseColorTweak")).map(|v| v.1)).unwrap_or([1.0; 4]);
+        ([tw[0], tw[1], tw[2], 1.0], tw[3])
+    } else {
+        (tint, gain)
+    };
     let image = image.or_else(|| {
         let power = params.and_then(|p| p.scalars.iter().find(|s| s.0.eq_ignore_ascii_case("SphereMask_Power")).map(|s| s.1)).unwrap_or(2.0);
         let key = usize::MAX - (power * 100.0) as usize;
@@ -453,6 +464,8 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
             for e in &s.emitters {
                 if let Some(m) = e.material {
                     info!("fx material {} {:?} {:?}", e.name, map.materials.get(m).map(|x| (&x.source, x.diffuse, &x.texture_params)), map.material_params.get(m).map(|p| (&p.scalars, &p.vectors, p.blend, &p.base_material)));
+                    let tex = |t: Option<usize>| t.and_then(|t| map.textures.get(t)).map(|t| t.source.clone());
+                    info!("fx permutation {} {:?}", e.name, map.material_params.get(m).map(|p| (&p.static_switches, &p.mask_channels, tex(p.opacity), map.materials.get(m).map(|x| x.texture_params.iter().map(|(n, t)| (n.clone(), tex(Some(*t)))).collect::<Vec<_>>()))));
                 }
             }
         }
