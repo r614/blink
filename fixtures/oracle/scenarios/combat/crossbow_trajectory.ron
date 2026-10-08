@@ -1,0 +1,42 @@
+// Bolt, sleep dart and incendiary bolt flight at 2000 uu (the shooting gallery's 40 m): the launch speed
+// and the drop. Launch speed = m_fArrowFireSpeed 20000 x max(1, Attribute_Range) x the projectile's
+// m_fSpeedMultiplier (bolt 1.0, sleep dart 0.7, incendiary 0.2: Twk_Projectiles.Twk_Proj_Arrow*);
+// flight: DisProjectile physics 0x00C546B0: v.z += GetGravityZ x m_fGravityMultiplier (bolt 1.3,
+// sleep dart 0.4, incendiary 0.5) x dt, the step uses the old velocity plus half the gain
+// (x, y unchanged). The first projectile's position and speed are recorded every tick.
+(
+    name: "combat/crossbow_trajectory",
+    system: Combat,
+    map: "Playground",
+    description: "A bolt, a sleep dart and an incendiary bolt at 2000 uu: launch speed, gravity drop, time of flight.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0, pitch: -1.976)),
+        items: ["Bolt:10", "SleepDart:10", "IncendiaryBolt:10"],
+        left_hand: Some("Crossbow"),
+        npcs: [
+        (id: Some("t0"), position: Some((-3610.956, -209.057, 92)), yaw: 174, state: Some("Passive")),
+        (id: Some("t1"), position: Some((-3600, 0, 92)), yaw: 180, state: Some("Passive")),
+        (id: Some("t2"), position: Some((-3610.956, 209.057, 92)), yaw: 186, state: Some("Passive"))
+        ],
+        settle: 150,
+    ),
+    ticks: 700,
+    input: [
+        (tick: 5, action: Look(yaw: 0, pitch: -1.976)),
+        (tick: 10, action: Press(Secondary)),
+        (tick: 200, action: Hand("SleepDart")),
+        (tick: 203, action: Look(yaw: -6, pitch: -1.976)),
+        (tick: 260, action: Press(Secondary)),
+        (tick: 400, action: Hand("IncendiaryBolt")),
+        (tick: 403, action: Look(yaw: 6, pitch: -1.976)),
+        (tick: 470, action: Press(Secondary)),
+    ],
+    checkpoints: [
+        (name: "bolt launch speed", expect: [(metric: EventValue("Projectile:Bolt", "speed"), value: 20000, tol: 5, source: "(sampled after the spawn tick's gravity step: +1.1) Twk_Inv_CrossbowCorvo m_fArrowFireSpeed 20000 x Twk_Proj_Arrow m_fSpeedMultiplier 1.0 (decompiled 0x00C38230, 0x00C540A0)", status: Static)]),
+        (name: "sleep dart launch speed", expect: [(metric: EventValue("Projectile:SleepDart", "speed"), value: 14000, tol: 5, source: "20000 x Twk_Proj_Arrow_Sleep m_fSpeedMultiplier 0.7", status: Static)]),
+        (name: "incendiary launch speed", expect: [(metric: EventValue("Projectile:IncendiaryBolt", "speed"), value: 4000, tol: 5, source: "20000 x Twk_Proj_Arrow_Flare m_fSpeedMultiplier 0.2", status: Static)]),
+        (name: "bolt flight time to 2000 uu", expect: [(metric: Between("Projectile:Bolt", "ProjectileEnd:Bolt"), value: 0.1, tol: 0.034, source: "2000 uu at 20000 uu/s; the original's value comes from the capture (the bolt's actor lives longer than its flight: it sticks)", status: Unverified)]),
+    ],
+    record: [Pawn, Powers, Projectiles, Npc("t0"), Npc("t1"), Npc("t2"), SimEvents],
+    capture: Some("lab equip DishonoredWepCrossbow 2; per tick the Location of the new DisProjectile_Arrow* actor (find class=DisProjectile_Arrow, read Location / Velocity) from the spawn to the hit; same pitch and bearings"),
+)

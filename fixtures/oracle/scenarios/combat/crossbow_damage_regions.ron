@@ -1,0 +1,42 @@
+// Crossbow bolt damage by hit region and awareness (DisProjectile_Arrow slot 239, 0x00C503D0): the
+// base is (int)Attribute_RangedDamage 20 x m_fDamageMultiplier 1.0 (0x00C4A310; the head branch,
+// m_bKillOnHeadshot, makes it 99999); a HEAD / TORSO hit on a pawn whose awareness is Unaware,
+// Surprised, Suspicious or Fearful takes m_fDamageMultiplier_Stealth 2.0; any other region (limbs)
+// is capped at m_fLegsAndArmsDamageCap 15. Four bolts at 600 uu on four aim heights.
+(
+    name: "combat/crossbow_damage_regions",
+    system: Combat,
+    map: "Playground",
+    description: "Four bolts at one distance, aim z 165 / 112 / 80 / 40: head kill, torso x2 stealth, limb cap.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0, pitch: 0)),
+        items: ["Bolt:10"],
+        left_hand: Some("Crossbow"),
+        npcs: [
+        (id: Some("c0"), position: Some((-5051.873, -244.042, 92)), yaw: 156, state: Some("Passive")),
+        (id: Some("c1"), position: Some((-5005.839, -83.504, 92)), yaw: 172, state: Some("Passive")),
+        (id: Some("c2"), position: Some((-5005.839, 83.504, 92)), yaw: 188, state: Some("Passive")),
+        (id: Some("c3"), position: Some((-5051.873, 244.042, 92)), yaw: 204, state: Some("Passive"))
+        ],
+        settle: 150,
+    ),
+    ticks: 670,
+    input: [
+        (tick: 7, action: Look(yaw: -24, pitch: -1.528)),
+        (tick: 10, action: Press(Secondary)),
+        (tick: 157, action: Look(yaw: -8, pitch: -6.56)),
+        (tick: 160, action: Press(Secondary)),
+        (tick: 307, action: Look(yaw: 8, pitch: -9.555)),
+        (tick: 310, action: Press(Secondary)),
+        (tick: 457, action: Look(yaw: 24, pitch: -13.225)),
+        (tick: 460, action: Press(Secondary)),
+    ],
+    checkpoints: [
+        (name: "head (aim z 165)", expect: [(metric: DropFrom("npc.c0.health", 5), value: 70, tol: 0, source: "decompiled: dead: m_bKillOnHeadshot sets the damage to 99999 (0x00C4A310 -> 0x00B0FAC0); the port: 20 on the body, kill on the head, no limb cap, no stealth factor: capture needed", status: Unmeasured)]),
+        (name: "torso (aim z 112)", expect: [(metric: DropFrom("npc.c1.health", 5), value: 40, tol: 0, source: "decompiled: 40 = 20 x m_fDamageMultiplier_Stealth 2.0 (torso, awareness not AwareOfPlayer / InCombat / Begging / Choked: 0x00C503D0); the port: 20 on the body, kill on the head, no limb cap, no stealth factor: capture needed", status: Unmeasured)]),
+        (name: "pelvis (aim z 80)", expect: [(metric: DropFrom("npc.c2.health", 5), value: 40, tol: 0, source: "decompiled: 40 or 15: region TORSO vs a leg bone decides (pelvis straddles); the port: 20 on the body, kill on the head, no limb cap, no stealth factor: capture needed", status: Unmeasured)]),
+        (name: "legs (aim z 40)", expect: [(metric: DropFrom("npc.c3.health", 5), value: 15, tol: 0, source: "decompiled: 15: legs / arms damage is capped at m_fLegsAndArmsDamageCap (0x00C503D0); the port: 20 on the body, kill on the head, no limb cap, no stealth factor: capture needed", status: Unmeasured)]),
+    ],
+    record: [Pawn, Powers, Projectiles, Npc("c0"), Npc("c1"), Npc("c2"), Npc("c3"), SimEvents],
+    capture: Some("lab equip DishonoredWepCrossbow 2; per bolt: guard health before / after (idle, unaware guards); same bearings and pitches"),
+)
