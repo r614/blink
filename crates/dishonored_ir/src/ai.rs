@@ -214,6 +214,15 @@ pub struct PlayerVisibilityConfig {
     /// divided by it, unclamped (0x00ac33b0).
     #[serde(default = "ground_speed_sprint")]
     pub ground_speed_sprint: f32,
+    /// The player's collision cylinder: radius, half height standing and sneaking. The stealth
+    /// light environment's bounds are the cylinder's (0x00B50720 copies them every tick):
+    /// sphere radius `|(r, r, h)|` (`UCylinderComponent::UpdateBounds`).
+    #[serde(default = "cylinder")]
+    pub cylinder: [f32; 3],
+}
+
+fn cylinder() -> [f32; 3] {
+    [35.0, 87.5, 65.0]
 }
 
 fn ground_speed_sprint() -> f32 {
@@ -237,6 +246,7 @@ impl Default for PlayerVisibilityConfig {
             light_darkest: 0.05,
             light_brightest: 1.0,
             ground_speed_sprint: 600.0,
+            cylinder: cylinder(),
         }
     }
 }
@@ -1093,7 +1103,7 @@ pub struct AlarmBellDef {
 /// A light for the AI light probe (the original samples the pawn's light environment).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ProbeLight {
-    /// 0 point, 1 spot, 2 directional.
+    /// 0 point, 1 spot, 2 directional, 3 sky (lit from straight up).
     pub kind: u8,
     pub position: glam::Vec3,
     pub direction: glam::Vec3,
@@ -1138,6 +1148,173 @@ pub struct AiLevel {
     /// The level's `DisStealthVolume`s.
     #[serde(default)]
     pub stealth_volumes: Vec<StealthVolume>,
+    /// The lights the player's stealth light environment composites (`m_LightProbe` channel,
+    /// every light list: static, dominant, toggleable, movable), with `casts_shadows` meaning
+    /// `CastShadows && CastStaticShadows` (the visibility line check).
+    #[serde(default)]
+    pub stealth_lights: Vec<ProbeLight>,
+    /// The levels' precomputed light volumes, reduced to what the stealth light reads.
+    #[serde(default)]
+    pub light_volumes: Vec<LightVolume>,
+}
+
+impl ProbeLight {
+    /// `ULightComponent::GetPosition`: (position, 1) for point and spot lights, (-axis, 0) for
+    /// directional lights, (0, 0, 1, 0) for sky lights.
+    pub fn position4(&self) -> (glam::Vec3, f32) {
+        match self.kind {
+            0 | 1 => (self.position, 1.0),
+            2 => (-self.direction, 0.0),
+            _ => (glam::Vec3::Z, 0.0),
+        }
+    }
+
+    /// Spot cone half-angles in radians as 0x00549EE0 clamps them (inner to [0, 89] deg, outer to
+    /// [inner + 0.001 rad, 1.554343 rad]).
+    fn cone(&self) -> (f32, f32) {
+        let d2r = 0.017_453_292_f32;
+        let inner = self.inner_cone.clamp(0.0, 89.0);
+        let lo = inner * d2r + 0.001;
+        let o = self.outer_cone * d2r;
+        (inner * d2r, if o < lo { lo } else { o.min(1.554_343) })
+    }
+
+    /// `AffectsBounds` for a bounds sphere (points 0x00530330: distance <= radius + sphere; spots
+    /// the cone test of 0x005499E0; directional and sky lights always).
+    pub fn affects(&self, origin: glam::Vec3, sphere: f32) -> bool {
+        match self.kind {
+            0 => (origin - self.position).length() <= self.radius + sphere,
+            1 => {
+                if (origin - self.position).length() > self.radius + sphere {
+                    return false;
+                }
+                let (_, outer) = self.cone();
+                let (sin_o, cos_o) = outer.sin_cos();
+                let apex = self.position - self.direction * (sphere / sin_o);
+                let v = origin - apex;
+                let a = self.direction.dot(v);
+                if !(a > 0.0 && v.length_squared() * cos_o * cos_o <= a * a) {
+                    return false;
+                }
+                let u = origin - self.position;
+                let b = -self.direction.dot(u);
+                b <= 0.0 || b * b < u.length_squared() * sin_o * sin_o || u.length_squared() <= sphere * sphere
+            }
+            _ => true,
+        }
+    }
+
+    /// `GetDirectIntensity` at `p` as a luminance: `intensity x max(1 - d^2/R^2, 0)^FalloffExponent`
+    /// for points (0x005306F0), times `saturate((cos - cos outer) / (cos inner - cos outer))^2`
+    /// for spots (0x00549EE0), the plain intensity for directional and sky lights.
+    pub fn intensity_at(&self, p: glam::Vec3) -> f32 {
+        let radial = || (1.0 - (p - self.position).length_squared() / (self.radius * self.radius)).max(0.0).powf(self.falloff_exponent);
+        let k = match self.kind {
+            0 => radial(),
+            1 => {
+                let (inner, outer) = self.cone();
+                let (cos_o, cos_i) = (outer.cos(), inner.cos());
+                let l = (p - self.position).normalize_or_zero();
+                let s = ((self.direction.dot(l) - cos_o) / (cos_i - cos_o)).clamp(0.0, 1.0);
+                s * s * radial()
+            }
+            _ => 1.0,
+        };
+        self.intensity * k
+    }
+}
+
+/// `DAT_01435230` = 2 sqrt(pi) (static initializer 0x00F67460), the band-0 scale of the light
+/// value (0x004E1DB0).
+pub const LIGHT_BAND0_SCALE: f32 = 3.544_907_7;
+/// `SHBasisFunction`'s band-0 constant (0x0126B100).
+pub const SH_Y00: f32 = 0.282_095;
+
+/// The visibility sample points of a light environment with `n` samples (0x004FEB30): `n - 1`
+/// points in [-1, 1)^3 from the LCG `x = x * 0x0BB38435 + 0x3619636B` (seed 0, three draws per
+/// point: z, y, then x, each `2 frac(1.mantissa) - 1`), then the centre (0, 0, 0).
+pub fn visibility_sample_points(n: usize) -> Vec<glam::Vec3> {
+    let mut out = Vec::with_capacity(n);
+    let mut x: u32 = 0;
+    let unit = |v: u32| {
+        let f = f32::from_bits(v & 0x7f_ffff | 0x3f80_0000);
+        (f - f.trunc()) * 2.0 - 1.0
+    };
+    for _ in 1..n.max(1) {
+        let a = x.wrapping_mul(0x0bb3_8435).wrapping_add(0x3619_636b);
+        let b = a.wrapping_mul(0x0bb3_8435).wrapping_add(0x3619_636b);
+        x = b.wrapping_mul(0x0bb3_8435).wrapping_add(0x3619_636b);
+        out.push(glam::Vec3::new(unit(x), unit(b), unit(a)));
+    }
+    out.push(glam::Vec3::ZERO);
+    out
+}
+
+/// One light's line check for the light environment's visibility (0x004FF270): from the
+/// visibility sample `k` placed on the bounds (the sphere point facing the light plus
+/// `extent x sample`, `bUseBooleanEnvironmentShadowing`) to the light's position (point and
+/// spot lights), or one unit along the light direction (directional and sky lights:
+/// `GetPosition` has w = 0, so the end is `start + (-axis)`).
+pub fn visibility_segment(l: &ProbeLight, origin: glam::Vec3, sphere: f32, extent: glam::Vec3, sample: glam::Vec3) -> (glam::Vec3, glam::Vec3) {
+    let (pos, w) = l.position4();
+    let to_light = (pos - origin * w).normalize_or_zero();
+    let start = origin + to_light * sphere + extent * sample;
+    let end = if w > 0.0 { pos } else { start + pos };
+    (start, end)
+}
+
+/// The stealth light value at a cylinder's bounds (`DishonoredVisibilityComponent` tick
+/// 0x00AD51E0 on `m_pStealthLightingDLE`, full update 0x005034D0 every tick, value 0x004E1DB0):
+/// every light that reaches the bounds sphere adds `Y00 x intensity x visibility` (`visibility`
+/// gives the light's visible fraction, 1 for lights without `CastShadows && CastStaticShadows`),
+/// the floor level's light volume adds its interpolated band 0; the luminance of the band-0 sum
+/// times 2 sqrt(pi), raised to 1/2.2 above 1e-4, else 0.
+pub fn stealth_light_value(lights: &[ProbeLight], volume: Option<&LightVolume>, origin: glam::Vec3, sphere: f32, mut visibility: impl FnMut(usize, &ProbeLight) -> f32) -> f32 {
+    let mut band0 = 0.0f32;
+    for (i, l) in lights.iter().enumerate() {
+        if !l.affects(origin, sphere) {
+            continue;
+        }
+        let v = if l.casts_shadows { visibility(i, l) } else { 1.0 };
+        if v <= 0.0 {
+            continue;
+        }
+        band0 += SH_Y00 * l.intensity_at(origin) * v;
+    }
+    if let Some(v) = volume {
+        band0 += v.band0_at(origin);
+    }
+    let x = band0 * LIGHT_BAND0_SCALE;
+    if x > 1e-4 { x.powf(0.454_545) } else { 0.0 }
+}
+/// A level's `PrecomputedLightVolume` as the stealth light reads it: per sample (x, y, z,
+/// radius, band-0 luminance of its SH: `Y00 x lum(IndirectRadiance + EnvironmentRadiance +
+/// AmbientRadiance)`, 0x00529710 / 0x004DA330).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LightVolume {
+    /// The level package the volume belongs to (the floor's level selects it).
+    pub package: String,
+    pub samples: Vec<[f32; 5]>,
+}
+
+impl LightVolume {
+    /// The interpolated band-0 luminance at `p` (0x0053DFA0: samples within their radius,
+    /// weight `(1 - d / R) / R`, the sum over the total weight; 0 when the weight is at most 1e-4).
+    pub fn band0_at(&self, p: glam::Vec3) -> f32 {
+        let (mut sum, mut total) = (0.0f32, 0.0f32);
+        for s in &self.samples {
+            let d2 = (glam::Vec3::new(s[0], s[1], s[2]) - p).length_squared();
+            if d2 >= s[3] * s[3] {
+                continue;
+            }
+            let inv = 1.0 / s[3];
+            let w = (1.0 - inv * d2.sqrt()) * inv;
+            sum += s[4] * w;
+            total += w;
+        }
+        if total > 1e-4 { sum / total } else { 0.0 }
+    }
 }
 
 /// A `DisStealthVolume`: while the player touches it, the visibility component normalizes the

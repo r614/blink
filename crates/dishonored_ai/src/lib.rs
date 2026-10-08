@@ -560,6 +560,20 @@ pub struct Crowd {
     /// The level's `DisStealthVolume`s (their light range replaces the map's inside them).
     #[serde(default)]
     pub stealth_volumes: Vec<dishonored_ir::ai::StealthVolume>,
+    /// The stealth light environment's lights and the levels' light volumes (`AiLevel`).
+    #[serde(default)]
+    pub stealth_lights: Vec<ProbeLight>,
+    #[serde(default)]
+    pub light_volumes: Vec<dishonored_ir::ai::LightVolume>,
+    /// Per (player, stealth light): the last visibility traces (bit mask over the samples, next
+    /// sample, update stamp; 0x004FF270) and the update counter.
+    #[serde(skip)]
+    pub light_vis: BTreeMap<(PlayerId, usize), (u8, u8, u64)>,
+    #[serde(skip)]
+    pub light_updates: u64,
+    /// The light at each player from the last `think` (raw, normalized).
+    #[serde(skip)]
+    pub player_lights: BTreeMap<PlayerId, (f32, f32)>,
     /// Brains of the rat pawns (`PawnKind::Rat`) and the swarm each rat was spawned in
     /// (`SimEvent::RatSpawned`).
     #[serde(default)]
@@ -1041,7 +1055,9 @@ impl Crowd {
         // The light at each player (the original samples the pawn's light environment),
         // normalized by the range of the stealth volume the player is in, else the map's
         // (`DishonoredVisibilityComponent` tick 0x00AD51E0: 0x00BD0120, 0x00BC9040).
-        let light: BTreeMap<PlayerId, f32> = world_state.players.iter().filter(|p| p.kind == PawnKind::Human && p.alive).map(|p| (p.id, self.player_light(p.position, world).1)).collect();
+        self.light_updates += 1;
+        let humans: Vec<PlayerState> = world_state.players.iter().filter(|p| p.kind == PawnKind::Human && p.alive).copied().collect();
+        let light: BTreeMap<PlayerId, f32> = humans.iter().map(|p| (p.id, self.update_player_light(p, world).1)).collect();
         let magic = magic_modes(events, world_state, &mut self.bend_stop);
         let senses = Senses { peers: &peers, barks: &barks, busted: &busted, alarm_noise: &alarm_noise, social: &social, light: &light, audio: &self.audio, magic: &magic };
         let layout = &self.layout;
@@ -1233,13 +1249,64 @@ impl Crowd {
     /// The light at a player at `p`: the raw value of the light probe and its normalization by
     /// the stealth volume's range there, else the map's (`DishonoredVisibilityComponent` tick
     /// 0x00AD51E0: `m_fCurrentLightValue` / `_Normalized`; 0x00BD0120, 0x00BC9040).
-    pub fn player_light(&self, p: Vec3, world: &dyn WorldQuery) -> (f32, f32) {
+    ///
+    /// The raw value is the player's stealth light environment (`m_pStealthLightingDLE`, updated
+    /// in full every tick, `bRequiresNonLatentUpdates`) at the collision cylinder's bounds: the
+    /// `m_LightProbe` lights plus the floor level's precomputed light volume
+    /// ([`dishonored_ir::ai::stealth_light_value`], stealth.md section 11). Levels without that
+    /// data (none loaded) keep the earlier probe over the level's light actors.
+    pub fn update_player_light(&mut self, p: &PlayerState, world: &dyn WorldQuery) -> (f32, f32) {
         let pv = &self.ai.player_visibility;
-        let raw = if self.lights.is_empty() && self.sky_light <= 0.0 { LIGHT_LEVEL } else { light_at_with(&self.lights, self.sky_light, p, world) };
-        let range = dishonored_ir::ai::stealth_light_range(&self.stealth_volumes, p).unwrap_or([pv.light_darkest, pv.light_brightest]);
-        (raw, light01(raw, range))
+        let origin = p.position;
+        let raw = if !self.stealth_lights.is_empty() || !self.light_volumes.is_empty() {
+            let [r, hh, sneak] = pv.cylinder;
+            let h = if p.crouched { sneak } else { hh };
+            let extent = Vec3::new(r, r, h);
+            let sphere = extent.length();
+            // The floor's level selects the light volume (a line check down from the origin).
+            let floor = world.hit_package(origin, -Vec3::Z, 262_144.0);
+            let volume = floor.as_deref().and_then(|f| self.light_volumes.iter().find(|v| v.package.eq_ignore_ascii_case(f)));
+            // `Default__DishonoredPlayerPawn.StealthLightingDLE.NumVolumeVisibilitySamples` 4:
+            // each update traces one sample per light, cycling; the light's visibility is the
+            // share of clear traces over the last 4 (reset when the light was not traced the
+            // update before).
+            const SAMPLES: usize = 4;
+            let points = dishonored_ir::ai::visibility_sample_points(SAMPLES);
+            if std::env::var_os("DISHONORED_STEALTH_LIGHT_DEBUG").is_some() {
+                eprintln!("stealth light at {origin:.0} floor {floor:?} volume {:?} band0 {:.4}", volume.map(|v| &v.package), volume.map_or(0.0, |v| v.band0_at(origin)));
+                for l in self.stealth_lights.iter().filter(|l| l.affects(origin, sphere)) {
+                    eprintln!("  kind {} at {:.0} intensity {:.4} -> {:.4} shadows {}", l.kind, l.position, l.intensity, l.intensity_at(origin), l.casts_shadows);
+                }
+            }
+            let stamp = self.light_updates;
+            let vis = &mut self.light_vis;
+            let id = p.id;
+            dishonored_ir::ai::stealth_light_value(&self.stealth_lights, volume, origin, sphere, |i, l| {
+                let e = vis.entry((id, i)).or_insert((0, 0, stamp));
+                if e.2 + 1 != stamp {
+                    *e = (0, 0, stamp);
+                }
+                let k = e.1 as usize % SAMPLES;
+                let (a, b) = dishonored_ir::ai::visibility_segment(l, origin, sphere, extent, points[k]);
+                let d = b - a;
+                let len = d.length();
+                let clear = len < 1e-3 || world.raycast(a, d / len, len, channel::ALL).is_none();
+                e.0 = if clear { e.0 | 1 << k } else { e.0 & !(1 << k) };
+                e.1 = ((k + 1) % SAMPLES) as u8;
+                e.2 = stamp;
+                e.0.count_ones() as f32 / SAMPLES as f32
+            })
+        } else if self.lights.is_empty() && self.sky_light <= 0.0 {
+            LIGHT_LEVEL
+        } else {
+            light_at_with(&self.lights, self.sky_light, origin, world)
+        };
+        let pv = &self.ai.player_visibility;
+        let range = dishonored_ir::ai::stealth_light_range(&self.stealth_volumes, origin).unwrap_or([pv.light_darkest, pv.light_brightest]);
+        let v = (raw, light01(raw, range));
+        self.player_lights.insert(p.id, v);
+        v
     }
-
     /// Install the level's AI data (factions, forbidden zones, alarm bells, probe lights).
     pub fn set_level(&mut self, level: &AiLevel) {
         self.factions = level.factions.clone();
@@ -1257,6 +1324,8 @@ impl Crowd {
         pv.light_darkest = dark;
         pv.light_brightest = bright;
         self.stealth_volumes = level.stealth_volumes.clone();
+        self.stealth_lights = level.stealth_lights.clone();
+        self.light_volumes = level.light_volumes.clone();
     }
 
     /// Faction of a spawned NPC: the spawner's `m_pFactionTweakOverride`, else its pawn

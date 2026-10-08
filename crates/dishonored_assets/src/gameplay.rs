@@ -493,6 +493,8 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
     // The player visibility's speed value divides by `Attribute_GroundSpeedSprint` (0x00ac33b0).
     let mut ai = crate::ai_config::load_ai_config(content, &[]);
     ai.player_visibility.ground_speed_sprint = movement.sprint_speed;
+    // The stealth light environment's bounds are the collision cylinder's.
+    ai.player_visibility.cylinder = [movement.collision_radius, movement.collision_half_height, movement.crouch_half_height];
 
     let items = crate::items_config::load_items_config(content, &db, &mut l.prov, &ai.loudness_distances);
     // `DisTweaks_FirePistol.m_AINoiseLoudnessWhenFiring` (an `EAINoiseLoudness`; the class

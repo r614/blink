@@ -108,6 +108,27 @@ pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String
             }
         }
         out.sky_light += sky_lights(&pkg);
+        // The stealth light environment's inputs (`m_pStealthLightingDLE`, stealth.md section 11):
+        // the `m_LightProbe` lights of every light list and the level's precomputed light volume.
+        for l in crate::light_env::read_lights(&pkg, true) {
+            // `bOnlyAffectSameAndSpecifiedLevels` lights reach the player (a pawn of the persistent
+            // level) only when they list it (0x00516400).
+            let persistent = pkgs.first().map(String::as_str).unwrap_or("");
+            let level_ok = l.only_levels.as_ref().is_none_or(|v| v.iter().any(|x| x.eq_ignore_ascii_case(persistent)));
+            if level_ok && crate::light_env::channels_overlap(l.channels, crate::light_env::STEALTH_DLE_CHANNELS) {
+                out.stealth_lights.push(stealth_light(&l));
+            }
+        }
+        if let Some(v) = crate::light_env::read_light_volume(&pkg) {
+            let samples = v
+                .iter()
+                .map(|s| {
+                    let sh = crate::light_env::sample_sh(s);
+                    [s.position.x, s.position.y, s.position.z, s.radius, 0.3 * sh[0][0] + 0.59 * sh[1][0] + 0.11 * sh[2][0]]
+                })
+                .collect();
+            out.light_volumes.push(dishonored_ir::ai::LightVolume { package: pkg.name.clone(), samples });
+        }
         if out.player_light_range.is_none() {
             out.player_light_range = map_player_light_range(&pkg, &db);
         }
@@ -152,6 +173,13 @@ pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String
 /// (`WorldInfo.MyMapInfo`) names a `DisTweaks_PlayerVisSettings` in `m_pMapPlayerVisSettings`;
 /// the visibility component uses its darkest / brightest values instead of the global ones
 /// (0x00BD0120 -> 0x00BC8E60, then 0x00BC9040 normalizes). Sublevels' map infos carry none.
+/// The player light range of a map's persistent package (its `DishonoredMapInfo`).
+pub fn map_light_range(content: &Content, package: &str) -> Option<[f32; 2]> {
+    let pkg = content.package(package).ok()?;
+    let db = TweakDb::load_with(content, &[package.to_string()]).ok()?;
+    map_player_light_range(&pkg, &db)
+}
+
 fn map_player_light_range(pkg: &Package, db: &TweakDb) -> Option<[f32; 2]> {
     for i in 0..pkg.exports.len() {
         if pkg.export_class(i) != "DishonoredMapInfo" {
@@ -170,6 +198,29 @@ fn map_player_light_range(pkg: &Package, db: &TweakDb) -> Option<[f32; 2]> {
         return Some([dark, bright]);
     }
     None
+}
+
+/// A light environment light as the stealth light reads it: its luminance (0.3 / 0.59 / 0.11 of
+/// `Brightness x LightColor`), the kind (sky lights as kind 3), the traced visibility.
+pub fn stealth_light(l: &crate::light_env::EnvLight) -> ProbeLight {
+    use crate::light_env::EnvLightKind as K;
+    let (kind, inner, outer) = match l.kind {
+        K::Point => (0, 0.0, 0.0),
+        K::Spot { inner_deg, outer_deg } => (1, inner_deg, outer_deg),
+        K::Directional => (2, 0.0, 0.0),
+        K::Sky => (3, 0.0, 0.0),
+    };
+    ProbeLight {
+        kind,
+        position: l.position,
+        direction: l.direction,
+        intensity: 0.3 * l.intensity[0] + 0.59 * l.intensity[1] + 0.11 * l.intensity[2],
+        radius: l.radius,
+        falloff_exponent: l.falloff_exponent,
+        inner_cone: inner,
+        outer_cone: outer,
+        casts_shadows: l.traced,
+    }
 }
 
 pub fn probe_light(l: &Light) -> ProbeLight {

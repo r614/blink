@@ -259,3 +259,5 @@ session dump class=StatePlayerMasterSoiree limit=2
 
 # Stealth light update (stealth.md section 10): walk the Playground lane by input (no placement writes) from (-5200,6000) east to (1500,6600), sneak off, and record DishonoredVisibilityComponent.m_fCurrentLightValue per tick; then the same placed by SetLocation. Expect per-tick changes if the cylinder bounds update.
 stealth/light_probe_lane
+
+# U-121 stealth light (stealth.md section 11): at Boyle (-3201.5,-2763.3) placed with SetLocation, read pawn.m_pStealthLightingDLE (+0x744) State: the SH arrays at +0x450/+0x480/+0x4B0 and +0x4E0/+0x510/+0x540 (band 0 = first float of each), and m_fCurrentLightValue; the same on the Playground lane at (-3500,6450) and (500,6600) with the list of lights the hook built (class, Brightness, Radius, LightColor, LightingChannels.m_LightProbe).

@@ -1970,3 +1970,10 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613â€¦c6fb` unless
 - **Result:** No stance gate in the code; the value follows the collision cylinder's bounds each tick, so a placement that does not update the components keeps the old value until the cylinder is resized (sneak). Port unchanged (samples every tick). New port channel `pawn.light` / `pawn.light01` and `stealth/light_probe_lane`: port raw 2.6-3.1 x the original; the original Playground normalizes with Boyle's 0.2 / 0.5.
 - **Confidence:** CONFIRMED (code path); the hook artifact explanation is LIKELY until a walking capture.
 - **Implementation consequence:** re-capture the lane walking by input; the light probe needs the `m_LightProbe` channel and the light volume (U-121).
+
+## 2026-10-08 — U-121: the stealth light environment ported
+- **Question:** Rebuild the player's light value from the original's stealth light environment.
+- **Evidence:** 0x004E1DB0 / 0x004DA330 (band-0 luminance x 2 sqrt(pi), bytes at 0x00F67460), 0x004DB950 (channel test), 0x00516400 (level filter), 0x004FF270 (4-sample visibility, LCG sample points of 0x004FEB30, 1-uu checks for w = 0 lights), 0x00503140 (dynamic lights through the same composite), Engine.upk light templates (`m_LightProbe`), `Default__DishonoredPawn.StealthLightingDLE` / the player's override.
+- **Result:** `stealth_light_value`, `Crowd::update_player_light`, `AiLevel::stealth_lights` / `light_volumes` (Boyle Ext: the Env level's 16425 surface samples, ~0.4 MB in the ailevel cache), `WorldQuery::hit_package` with `MeshInstance::level`. Port raw light is about 3 x the original on the Playground lane and 3.5 x the (possibly stale) Boyle reading; cause not found.
+- **Confidence:** CONFIRMED for the structure (code read), LIKELY for the Playground's light set; the magnitude is not validated.
+- **Implementation consequence:** cache keys `<map>.collision16-stealth.bin`, `<map>.ailevel3u-stealth3.json`, playground DERIVED_VERSION 3; a capture of the stealth DLE's SH state is requested.

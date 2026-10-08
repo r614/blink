@@ -470,8 +470,8 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
                 let am = |t: dishonored_ir::items::AmmoType| dishonored_sim::inventory::ammo(p, t) as f64;
                 use dishonored_ir::items::AmmoType as A;
                 v.extend([p.position.x as f64, p.position.y as f64, p.position.z as f64, p.velocity.x as f64, p.velocity.y as f64, p.velocity.z as f64, p.velocity.truncate().length() as f64, b(p.crouched), leg.idx("pawn.mode", p.mode), b(p.alive), b(p.water.under), p.water.air_used as f64]);
-                // The AI light probe at the player (`Crowd::player_light`: raw and normalized).
-                let (lr, ln) = m.crowd.player_light(p.position, &maps.set);
+                // The AI light probe at the player (`Crowd::update_player_light` in the last think: raw and normalized).
+                let (lr, ln) = m.crowd.player_lights.get(&p.id).copied().unwrap_or((f32::NAN, f32::NAN));
                 v.extend([lr as f64, ln as f64]);
                 v.extend([p.vitals.health as f64, p.vitals.mana as f64, hmax]);
                 v.extend([eye.x as f64, eye.y as f64, eye.z as f64, p.yaw as f64, p.pitch as f64, p.lean as f64, dishonored_sim::movement::lean_angle(p, mv) as f64, dishonored_sim::movement::lean_roll(p, mv) as f64]);
