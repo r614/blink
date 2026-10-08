@@ -109,3 +109,16 @@ fn rat_move_blend() {
     assert_eq!(p[0].0, "WalkSlowN");
     assert!((pct - 0.5).abs() < 1e-5);
 }
+/// `AnimNodeSequenceBlendByAim`: centred aim weighs only the centre; full right weighs only the
+/// right centre; halfway up-right splits four ways.
+#[test]
+fn aim_grid_weights() {
+    use dishonored_runtime::viewmodel::aim_weights;
+    let c = aim_weights(0.0, 0.0);
+    assert_eq!(c[4], 1.0);
+    let r = aim_weights(1.0, 0.0);
+    assert_eq!(r[7], 1.0);
+    let ur = aim_weights(0.5, 0.5);
+    assert!((ur[4] - 0.25).abs() < 1e-6 && (ur[6] - 0.25).abs() < 1e-6 && (ur[3] - 0.25).abs() < 1e-6 && (ur[7] - 0.25).abs() < 1e-6);
+    assert!((ur.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+}

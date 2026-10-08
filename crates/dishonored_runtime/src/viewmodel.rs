@@ -109,6 +109,8 @@ const CLIPS: &[&str] = &[
     "Sword_Stun_In", "Sword_Stun_Loop", "Sword_Ready_Assassination_Back_Master", "Sword_Ready_Assassination_Generic",
     "Sword_Choke_In_Master", "Sword_Choke_Loop_Master", "Sword_Choke_Win_Master", "Sword_Choke_Lose_Master", "Sword_Choke_Cancel_Master", "Sword_Choke_CarryCorpse_Master",
     "Head_Rope_Climb", "Empty_SwimIdle", "Empty_SwimN",
+    // The held gun's aim (additive, `Ply_Guns_as`).
+    "ADD_Guns_Aim_UpLeft", "ADD_Guns_Aim_CenterLeft", "ADD_Guns_Aim_DownLeft", "ADD_Guns_Aim_Up", "ADD_Guns_Aim_Center", "ADD_Guns_Aim_Down", "ADD_Guns_Aim_UpRight", "ADD_Guns_Aim_CenterRight", "ADD_Guns_Aim_DownRight",
     // Head bob and the step-up's head (additive, `Ply_Head_Locomotion_as`).
     "ADD_Head_WalkN", "ADD_Head_WalkS", "ADD_Head_WalkW", "ADD_Head_WalkE", "ADD_Head_RunN", "ADD_Head_RunS", "ADD_Head_RunW", "ADD_Head_RunE",
     "ADD_Head_SprintN", "ADD_Head_SprintS", "ADD_Head_SprintW", "ADD_Head_SprintE", "ADD_Head_SneakN", "ADD_Head_SneakS", "ADD_Head_SneakW", "ADD_Head_SneakE", "ADD_Head_Mantle_Low",
@@ -181,6 +183,59 @@ pub(crate) fn add_additive(lib: &ClipLib, clip: &str, time: f32, looped: bool, w
     }
 }
 
+/// Additive children blended by weight (`AnimNodeBlendDirectional` over additive sequences,
+/// `AnimNodeSequenceBlendByAim`): the deltas are summed by weight (rotations as a weighted
+/// quaternion sum from identity, renormalised), then added once at `w`.
+pub(crate) fn add_additive_blend(lib: &ClipLib, items: &[(String, f32, f32)], looped: bool, w: f32, pose: &mut [(Quat, Vec3)]) {
+    let items: Vec<&(String, f32, f32)> = items.iter().filter(|i| i.2 > 0.0 && lib.has(&i.0)).collect();
+    if w <= 0.0 || items.is_empty() {
+        return;
+    }
+    let mut acc: Vec<(glam::Vec4, Vec3)> = vec![(glam::Vec4::ZERO, Vec3::ZERO); pose.len()];
+    let mut total = 0.0;
+    for (clip, time, iw) in items {
+        let mut d: Pose = vec![(Quat::IDENTITY, Vec3::ZERO); pose.len()];
+        lib.sample(clip, *time, looped, &mut d);
+        for (a, (dq, dt)) in acc.iter_mut().zip(d) {
+            let q = if dq.w < 0.0 { -dq } else { dq };
+            a.0 += glam::Vec4::from(q) * *iw;
+            a.1 += dt * *iw;
+        }
+        total += *iw;
+    }
+    // Weights short of 1 blend toward the identity delta.
+    let rest = (1.0 - total).max(0.0);
+    for (p, (q, t)) in pose.iter_mut().zip(acc) {
+        let dq = Quat::from_vec4(q + glam::Vec4::new(0.0, 0.0, 0.0, rest)).normalize();
+        p.0 = (Quat::IDENTITY.slerp(dq, w.min(1.0)) * p.0).normalize();
+        p.1 += t * w.min(1.0);
+    }
+}
+
+/// `AnimNodeSequenceBlendByAim` weights over its 3x3 grid for a normalised aim (x right, y
+/// up, each in -1..1): bilinear between the centre and the side the aim leans to.
+/// Order: LU, LC, LD, CU, CC, CD, RU, RC, RD.
+pub fn aim_weights(x: f32, y: f32) -> [f32; 9] {
+    let (x, y) = (x.clamp(-1.0, 1.0), y.clamp(-1.0, 1.0));
+    let cols = [(-x).max(0.0), 1.0 - x.abs(), x.max(0.0)];
+    let rows = [y.max(0.0), 1.0 - y.abs(), (-y).max(0.0)];
+    let mut w = [0.0; 9];
+    for (c, cw) in cols.iter().enumerate() {
+        for (r, rw) in rows.iter().enumerate() {
+            w[c * 3 + r] = cw * rw;
+        }
+    }
+    w
+}
+
+/// The grid's sequence suffixes in `aim_weights` order (`m_bAutoCompleteAnimNames` builds
+/// `ADD_` + the item prefix + `Aim_` + these).
+const AIM_SUFFIXES: [&str; 9] = ["UpLeft", "CenterLeft", "DownLeft", "Up", "Center", "Down", "UpRight", "CenterRight", "DownRight"];
+/// `DishonoredSeqBlendByAim` of `Ply_Player_at`: `m_fMaxLeftDegrees` = right = up = down = 10.
+const AIM_MAX_DEGREES: f32 = 10.0;
+/// `DisTweaks_InventoryItem.m_fItemAimSpeed` (3 for Corvo's pistol, crossbow and sword, and the
+/// class default).
+const ITEM_AIM_SPEED: f32 = 3.0;
 /// `AnimNodeBlendDirectional` weights (forward, backward, left, right) for the movement
 /// direction relative to the facing (radians, positive to the right): linear between
 /// neighbouring quadrants (the cooked `Ply_Player_Nav_Default_at` snapshot, DirAngle 0.959,
@@ -688,28 +743,32 @@ const STEP_UP_BLEND: f32 = 0.2;
 /// Head bob of the full body's navigation: the directional additive of the walk / run / sprint /
 /// sneak cycle (`ADD_Head_{Walk,Run,Sprint,Sneak}{N,S,W,E}`, synced to the cycle) weighted by
 /// `AnimNodeBlendDirectional` over the movement direction. `Nav_Default` and `Nav_Sprinting`
-/// pass it through `DisAnimNodeBlendByHeadBob` (the Head Bob option, `PSI_Gameplay_HeadBobAmount`,
-/// as its weight: LIKELY); `Nav_Crouched` has no such node.
-fn head_bob(p: &PlayerState, fb: &Layer, lib: &ClipLib, amount: f32) -> Vec<(String, f32)> {
+/// pass it through `DisAnimNodeBlendByHeadBob`: its tick (0x00A88C30) weighs "Head Bob On" by
+/// `DishonoredPlayerCamera.m_BobAmount` and "Off" by the rest (1 without a player camera);
+/// the camera's begin play (0x00D06080) sets `m_BobAmount` from the options' head bob amount
+/// (`PSI_Gameplay_HeadBobAmount`) unless a camera tweak overrides it. `Nav_Crouched` has no such
+/// node.
+fn head_bob(p: &PlayerState, fb: &Layer, lib: &ClipLib, amount: f32) -> (Vec<(String, f32, f32)>, f32) {
     let (kind, gated) = match fb.key.as_str() {
         "nav_default:walk" => ("Walk", true),
         "nav_default:run" => ("Run", true),
         "nav_sprint:sprint" => ("Sprint", true),
         "nav_crouch:walk" => ("Sneak", false),
-        _ => return Vec::new(),
+        _ => return (Vec::new(), 0.0),
     };
     let w = if gated { amount.clamp(0.0, 1.0) } else { 1.0 };
     let v = p.velocity.truncate();
     let fwd = dishonored_sim::movement::forward_vector(p.yaw).truncate();
     let right = dishonored_sim::movement::right_vector(p.yaw).truncate();
     let dir = v.dot(right).atan2(v.dot(fwd));
-    directional_weights(dir)
+    let items = directional_weights(dir)
         .iter()
         .zip(["N", "S", "W", "E"])
         .filter(|(dw, _)| **dw > 0.0)
-        .map(|(dw, d)| (format!("ADD_Head_{kind}{d}"), dw * w))
-        .filter(|(c, _)| lib.has(c))
-        .collect()
+        .map(|(dw, d)| (format!("ADD_Head_{kind}{d}"), 0.0, *dw))
+        .filter(|(c, _, _)| lib.has(c))
+        .collect();
+    (items, w)
 }
 
 /// The weapon mesh's own clip, crossfaded on changes.
@@ -766,6 +825,9 @@ pub struct ViewAnim {
     step_up: Option<f32>,
     /// A won parry's sequence (`Blocking Parry`), played over the block.
     parry: Option<Play>,
+    /// The view yaw last frame (degrees) and the held item's `m_CurItemAim` (degrees).
+    prev_yaw: Option<f32>,
+    item_aim: [f32; 2],
 }
 
 /// Attack clips in `SwordState::swing_clip` order (`Attack_Seq` of the melee states
@@ -1206,12 +1268,18 @@ pub fn animate_view_rig(
             anim.prev = Some(Prev::of(m));
         }
         anim.master_local = None;
+        anim.prev_yaw = None;
         hands.sockets.clear();
         *root_vis = Visibility::Hidden;
         return;
     };
     *root_vis = Visibility::Inherited;
     let dt = time.delta_secs();
+    // The view's yaw (Dishonored degrees) from the game camera, before this frame's bob.
+    let view_yaw = cams.iter().next().map(|(_, t)| {
+        let f = t.rotation * Vec3::NEG_Z;
+        f.z.atan2(f.x).to_degrees()
+    });
     let gameplay = &session.content.sim.gameplay;
     let tuning = CombatTuning::from_config(gameplay);
     let lib = &rig.lib;
@@ -1279,7 +1347,25 @@ pub fn animate_view_rig(
     // step-up's head. The same without the additives gives the unbobbed camera.
     let fb_base = a.fb.pose(lib, &rig.bind_pose);
     let ub_pose = (a.ub.weight > 0.0).then(|| a.ub.pose(lib, &rig.bind_pose));
-    let la_pose = (a.la.weight > 0.0).then(|| a.la.pose(lib, &rig.bind_pose));
+    let mut la_pose = (a.la.weight > 0.0).then(|| a.la.pose(lib, &rig.bind_pose));
+    // The held item's aim (`DishonoredInventoryItem` tick 0x00C0B990): `m_CurItemAim` eases toward
+    // the item's target at `clamp(dt x m_fItemAimSpeed, 0, 1)`; the target (slot 102,
+    // 0x00C05CD0) is the camera's yaw last frame minus now, in degrees, and no pitch
+    // (`CameraCache` vs `LastFrameCameraCache`). `DishonoredSeqBlendByAim` (0x00A8FB20) divides
+    // it by its max degrees (10) and lays `ADD_<item prefix>Aim_*` over the left arm
+    // (`DisAnimNodeBlendItemAimAdditive`).
+    if let Some(yaw) = view_yaw {
+        let target = a.prev_yaw.map(|p| (p - yaw + 540.0).rem_euclid(360.0) - 180.0).unwrap_or(0.0);
+        let k = (dt * ITEM_AIM_SPEED).clamp(0.0, 1.0);
+        a.item_aim[0] += (target - a.item_aim[0]) * k;
+        a.item_aim[1] += (0.0 - a.item_aim[1]) * k;
+        a.prev_yaw = Some(yaw);
+    }
+    if let (Some(p), Some(pre)) = (la_pose.as_mut(), left_prefix(me.left.item)) {
+        let w = aim_weights(a.item_aim[0] / AIM_MAX_DEGREES, a.item_aim[1] / AIM_MAX_DEGREES);
+        let items: Vec<(String, f32, f32)> = AIM_SUFFIXES.iter().zip(w).map(|(s, w)| (format!("ADD_{pre}Aim_{s}"), 0.0, w)).collect();
+        add_additive_blend(lib, &items, false, 1.0, p);
+    }
     let (ub_w, la_w) = (a.ub.weight, a.la.weight);
     let filters = |fb: &[(Quat, Vec3)]| -> Pose {
         let mut l = fb.to_vec();
@@ -1293,9 +1379,11 @@ pub fn animate_view_rig(
     };
     let bob_amount = settings.as_ref().map(|s| s.s.gameplay.head_bob).unwrap_or(1.0);
     let mut fb_bob = fb_base.clone();
-    for (clip, w) in head_bob(me, &a.fb, lib, bob_amount) {
+    {
         let phase = (a.fb.time / lib.length(&a.fb.clip).max(1e-3)).rem_euclid(1.0);
-        add_additive(lib, &clip, phase * lib.length(&clip), true, w, &mut fb_bob);
+        let (items, w): (Vec<(String, f32, f32)>, f32) = head_bob(me, &a.fb, lib, bob_amount);
+        let items: Vec<(String, f32, f32)> = items.into_iter().map(|(c, _, dw)| { let t = phase * lib.length(&c); (c, t, dw) }).collect();
+        add_additive_blend(lib, &items, true, w, &mut fb_bob);
     }
     let mut locals = filters(&fb_bob);
     // `StepUpMantle` (`DisAnimNodeBlendByStepUpMantle`, `m_fBlendTime` 0.2): `ADD_Head_Mantle_Low`

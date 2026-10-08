@@ -1794,3 +1794,21 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   - The agent: `IdleAnimNames` Idle..Idle4 below `m_fMinMovementVelocity` 12.5; mesh scale 0.8..1.2. `Twk_Rat`: attached attack `SwarmAttack` / `SwarmAttack1`; Devouring Swarm spawn `Spawn` / `Spawn1` / `Spawn2`; jump attack `Jump_Attack_*`; deaths `DeathFast_*`.
   - Spawn, death, windblast and the turn additive are not played: there are no view events for them, and the turn input is not decoded.
 - **Placed razor and grenade:** they loop `SpringRazor_Idle` and `Grenade_Idle`, the only sequences their sets hold.
+
+## 2026-10-08: The item aim, the head-bob weight, the Use_Power pulse timing, rat death and spawn rules (static index)
+
+- **Item aim:** `DishonoredInventoryItem.m_CurItemAim` (+0x64, Vector2D).
+  - The inventory tick 0x00C19A20 calls 0x00C0B990 for each equipped item. That function eases `m_CurItemAim` toward the item's target by `clamp(DeltaSeconds x DisTweaks_InventoryItem.m_fItemAimSpeed, 0, 1)`; the speed is 3 for Corvo's pistol, crossbow and sword, and the class default.
+  - The target (vslot 102) is computed by 0x00C05CD0 for items and the sword: `(LastFrameCameraCache.Rotation.Yaw - CameraCache.Rotation.Yaw)` in degrees, with no pitch.
+  - Ranged weapons (0x00C2CA20) add the yaw and pitch toward the aim-assist point (0x00C14460) when there is one. The port does not model aim assist, so that term is left out.
+  - `DishonoredSeqBlendByAim` (0x00A8FB20) divides by its max degrees (10 each way) and blends `ADD_<item prefix>Aim_*` bilinearly on its 3x3 grid. Only `ADD_Guns_Aim_*` exists among the player's left-hand prefixes.
+  - Port: `viewmodel` applies it to the left arm (`aim_weights`, `add_additive_blend`).
+- **Head bob weight:** `DisAnimNodeBlendByHeadBob` (tick 0x00A88C30) weighs "On" by `DishonoredPlayerCamera.m_BobAmount` (+0x544) and "Off" by `1 - m_BobAmount` (1 without a player camera). The camera's begin play (0x00D06080) sets `m_BobAmount` from the options' head bob amount, unless a camera tweak value above 0 overrides it. CONFIRMED.
+- **Use_Power pulse (timing decoded, not applied):**
+  - The `DisItemContext_UsePower` start (0x00C44E90) sets `TatooGlowInfo` (0x00AA2060) for every power except the DLC06 Dark Vision. It uses the power tweak's `m_fGlowDuration` (1) and `m_fGlowRampDownDuration` (1).
+  - The pawn tick (0x00ABB1E0) counts the duration down, then the ramp, and sets the arm material's `m_GlowParameterName` (`Use_Power`, default 0 in `PlayerArms_Tatoo_inst`) to remaining / ramp, so it runs 1 -> 0 over the ramp.
+  - What `Use_Power` does in `Shr_DefaultPlayer` is not decoded: the cooked material keeps only its parameter expressions. The shader would have to be read.
+- **Rats:**
+  - Spawn: the agent's begin play (vslot 233, 0x00C792E0) plays a random `m_DevouringSwarmSpawnAnims` sequence only for rats of a Devouring Swarm. The sim keeps a Devouring Swarm as an aggregate (no rat pawns), so no rat pawn plays it.
+  - Death (vslot 232, 0x00C844E0): a directional `m_Death*AnimName` (side from 0x00BBE900) plays only on one damage-class branch, when fewer than 5 ... and `rand < m_fRagdollRatio`. Another branch ragdolls (0x00C6C3D0). The damage classes were not resolved, so dead rats are not drawn yet.
+  - Windblast: `m_WindBlastAnimName` (0x00C66500 and others) is not done.
