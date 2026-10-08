@@ -187,6 +187,18 @@ pub fn import_layout(content: &Content, layout: &MapLayout, opts: &ImportOptions
     Ok((imp.map, imp.stats))
 }
 
+/// An original placed actor (`"<package>:<actor>"`): its package, export index, class, placed
+/// `Location` x `Rotation` and its properties.
+pub fn placed_actor(content: &Content, from: &str) -> Result<(Arc<Package>, usize, String, Mat4, Vec<Property>)> {
+    let (pkg_name, actor_name) = from.split_once(':').with_context(|| format!("{from}: expected <package>:<actor>"))?;
+    let pkg = content.package(pkg_name).with_context(|| format!("loading {pkg_name}"))?;
+    let actor = find_placed_actor(&pkg, actor_name).with_context(|| format!("actor {from} not found"))?;
+    let props = pkg.read_object(actor)?.properties;
+    let placed = Mat4::from_translation(vec3_or(&props, "Location", Vec3::ZERO)) * rot_matrix(&props, "Rotation");
+    let class = pkg.export_class(actor);
+    Ok((pkg, actor, class, placed, props))
+}
+
 /// Export index of an actor placed in a package's persistent level, by name.
 pub fn find_placed_actor(pkg: &Package, name: &str) -> Option<usize> {
     (0..pkg.exports.len()).find(|&i| pkg.obj_name(ObjRef::Export(i)).eq_ignore_ascii_case(name) && pkg.obj_name(ObjRef::from_index(pkg.exports[i].outer)) == "PersistentLevel")

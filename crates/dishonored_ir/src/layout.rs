@@ -22,8 +22,6 @@ pub struct MapLayout {
     pub environment: Option<String>,
     /// Material of brushes that name none.
     pub default_material: String,
-    /// `WorldInfo.KillZ`: falling below it kills.
-    pub kill_z: f32,
     /// Ambient brightness the AI light probe adds everywhere (`AiLevel::sky_light`).
     pub sky_light: f32,
     pub brushes: Vec<Brush>,

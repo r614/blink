@@ -70,6 +70,33 @@ pub struct MissionDef {
     /// spawns and the scripted logic come from the original data.
     #[serde(default)]
     pub original_kismet: Option<OriginalKismet>,
+    /// What players are given when they spawn (and respawn), on top of the default loadout
+    /// (the original's `OnAddPower` / `AddInventoryItem` Kismet handlers; the Playground's
+    /// item and power bench).
+    #[serde(default)]
+    pub loadout: Option<Loadout>,
+}
+
+/// Powers and items to give a player (`Action::Equip`, `MissionDef::loadout`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct Loadout {
+    /// Back to the default loadout first (powers, ammo, elixirs, upgrades and charms).
+    pub reset: bool,
+    /// Every power at its top level.
+    pub all_powers: bool,
+    /// (power name as the power tweaks call it: `Blink`, `WindBlast`, `DarkVision`, `Possess`,
+    /// `BendTime`, `DevouringSwarm`, `Vitality`, `BloodThirsty`, `ShadowKill`, `Celerity`; level).
+    pub powers: Vec<(String, u8)>,
+    /// Every ammo type (bullets, bolts, darts, incendiary bolts, grenades, sticky grenades,
+    /// Spring Razors) to its capacity.
+    pub full_ammo: bool,
+    /// Health and mana elixirs to add (clamped to the maximum).
+    pub elixirs: (u8, u8),
+    pub runes: u16,
+    pub coins: u32,
+    /// Workshop upgrades by name (`ItemsConfig::upgrades`).
+    pub upgrades: Vec<String>,
 }
 
 /// How a mission runs the original Kismet.
@@ -220,6 +247,14 @@ pub struct NpcDef {
     /// one-shot attaches its speaker to). Defaults to `at` when that is an `Actor(..)`.
     #[serde(default)]
     pub speaker: Option<String>,
+    /// Faction tweak (`DisFaction_Defaults.Faction_Guard_Default`): what the NPC's AI treats as
+    /// enemies (the original spawner's `m_pFactionTweakOverride`). None: no faction (neutral to
+    /// everyone until alerted by a rule).
+    #[serde(default)]
+    pub faction: Option<String>,
+    /// No AI at all: the pawn stands where it is placed and only takes hits (a training dummy).
+    #[serde(default)]
+    pub passive: bool,
 }
 
 impl NpcDef {
@@ -392,6 +427,8 @@ pub enum Action {
     Conversation(String, Vec<String>),
     /// Stop conversations matching a reference (`""` = all); their `Interrupted` output runs.
     StopConversation(String),
+    /// Give every player powers and items (the original's `OnAddPower` / `AddInventoryItem`).
+    Equip(Loadout),
     /// End the mission.
     Complete(String),
     Fail(String),
