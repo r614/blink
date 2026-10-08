@@ -25,7 +25,9 @@ const MIN_FRAMES: u32 = 4;
 /// Consecutive frames with nothing waiting that end the warm-up.
 const SETTLED_FRAMES: u32 = 3;
 /// A warm-up that has not settled by now ends anyway.
-pub const TIMEOUT_SECS: f32 = 20.0;
+/// The translated original shaders need several hundred pipelines a level (about 20-60 s on a cold driver
+/// cache), so this is only a safety net against a pipeline that never finishes.
+pub const TIMEOUT_SECS: f32 = 180.0;
 
 pub struct WarmupPlugin;
 
