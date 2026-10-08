@@ -311,6 +311,52 @@ pub struct MantleConfig {
     /// `m_fLedgeGrabMantleMinEdgeHeight`: minimum edge height while falling fast.
     #[serde(default = "d_ledge_grab_min")]
     pub ledge_grab_min_edge_height: f32,
+    /// `m_bLowMantleUseStepUp`: an edge no higher than `low_max_edge_height` (and not needing
+    /// a crouch) is a step-up, not a mantle (0x00AD78D0 -> 0x00AD35E0).
+    #[serde(default)]
+    pub low_use_step_up: bool,
+    /// The mantle sequences' root motion, low / medium / high (`Ply_Player_Mantle_at`); the
+    /// mantle state moves the pawn by it (`RMM_Translate`).
+    #[serde(default)]
+    pub anims: Vec<MantleAnim>,
+    /// `Attribute_MantleAnimRate` (`m_MantleAnimRate`, Normal 1): the play rate of the mantle
+    /// sequences (`m_bScaleByMantleAnimRate`), raised by Agility.
+    #[serde(default = "d_mantle_rate")]
+    pub anim_rate: f32,
+}
+
+fn d_mantle_rate() -> f32 {
+    1.0
+}
+
+/// Root motion of one player mantle sequence (`DishonoredAnimNodeSeqMantle`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct MantleAnim {
+    pub sequence: String,
+    /// `m_fMantleTravelDistanceZ`: the sequence's own vertical travel. The node scales the
+    /// root motion's Z by mantle height / this (0x00A8F9B0); X and Y are unscaled.
+    pub travel_z: f32,
+    pub sample_rate: f32,
+    /// Length in seconds.
+    pub duration: f32,
+    /// Root bone translation per frame in pawn space, relative to frame 0: (forward, up).
+    pub root: Vec<[f32; 2]>,
+}
+
+impl MantleAnim {
+    /// Root offset (forward, up) at `t` seconds, linear between frames, held after the end.
+    pub fn root_at(&self, t: f32) -> [f32; 2] {
+        let Some(last) = self.root.last() else { return [0.0, 0.0] };
+        let f = (t.max(0.0) * self.sample_rate).min((self.root.len() - 1) as f32);
+        let i = f.floor() as usize;
+        let j = (i + 1).min(self.root.len() - 1);
+        if i >= self.root.len() - 1 {
+            return *last;
+        }
+        let a = f - i as f32;
+        let (p, q) = (self.root[i], self.root[j]);
+        [p[0] + (q[0] - p[0]) * a, p[1] + (q[1] - p[1]) * a]
+    }
 }
 
 fn d_line_step() -> f32 {
