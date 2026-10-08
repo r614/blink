@@ -179,7 +179,7 @@ pub fn follow_level(
     mut baked: ResMut<Assets<BakedMaterial>>,
     mut vis: Query<(&LevelOf, &mut Visibility)>,
     mut fx: ResMut<crate::effects::Effects>,
-    camera: Query<Entity, With<Camera3d>>,
+    camera: Query<Entity, (With<Camera3d>, Without<crate::reflect::ReflectCamera>)>,
 ) {
     let want = session.content.map_name.clone();
     let Some(target) = levels.pending.clone() else {

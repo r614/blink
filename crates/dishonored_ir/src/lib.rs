@@ -56,8 +56,53 @@ pub struct DishonoredMap {
     /// Placed doors and usable objects drawn with a skeletal mesh.
     #[serde(default)]
     pub skeletal_props: Vec<SkeletalProp>,
+    /// Placed `SceneCaptureReflectActor`s: the planar reflections that fill the water's render
+    /// targets (research/dishonored/systems/render_reflect.md).
+    #[serde(default)]
+    pub reflect_captures: Vec<ReflectCapture>,
 }
 
+/// `RenderingChannelContainer` bit of a reflection channel (declaration order of the struct:
+/// BSP, Static, Dynamic, Skeletal, Foliage, Particles, Sprites, Decals, Group_1 .. Group_10).
+/// A primitive is drawn into a capture when `MeshInstance::reflect_channels` and
+/// `ReflectCapture::channels` share a bit.
+pub mod reflect_channel {
+    pub const NAMES: [&str; 18] = ["BSP", "Static", "Dynamic", "Skeletal", "Foliage", "Particles", "Sprites", "Decals", "Group_1", "Group_2", "Group_3", "Group_4", "Group_5", "Group_6", "Group_7", "Group_8", "Group_9", "Group_10"];
+    pub const GROUP_1: u32 = 1 << 8;
+    /// `SceneCaptureReflectComponent` class defaults: BSP, Static, Dynamic, Skeletal, Particles
+    /// and Decals on (UnrealScript defaultproperties of the class).
+    pub const CAPTURE_DEFAULT: u32 = 0b1010_1111;
+}
+
+/// One `SceneCaptureReflectActor` with its `SceneCaptureReflectComponent`: the scene is drawn from
+/// the viewer mirrored about the plane (normal = the actor's X axis, through its location;
+/// `SceneCaptureReflectComponent` vtable slot 88, Dishonored.exe 0x006E8200) into the
+/// `TextureRenderTarget2D` `target`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReflectCapture {
+    pub source: String,
+    /// Object path of the `TextureTarget` (e.g. `boyle_ext_MS.RealTime_refl`).
+    pub target: String,
+    /// The render target's `m_ResolutionType` (0 fixed size, 1 full, 2 half, 3 quarter of the
+    /// back buffer) and its `SizeX` / `SizeY`.
+    pub resolution_type: u8,
+    pub size: [u32; 2],
+    /// Plane normal and offset (`normal . p = d`), Dishonored world space.
+    pub normal: Vec3,
+    pub d: f32,
+    /// `ReflectionChannels` bit set (see [`reflect_channel`]).
+    pub channels: u32,
+    /// `FrameRate`: captures per second.
+    pub frame_rate: f32,
+    /// `bEnabled` (Kismet toggles it through `SetEnabled`), `bEnableFog`, `bEnablePostProcess`,
+    /// `bSkipUpdateIfTextureUsersOccluded`.
+    pub enabled: bool,
+    pub fog: bool,
+    pub post_process: bool,
+    pub skip_if_unseen: bool,
+    /// `MaxUpdateDist` (0: no limit), uu.
+    pub max_update_dist: f32,
+}
 /// UE3 `EBlendMode` of the base material.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MaterialBlend {
@@ -106,6 +151,10 @@ pub struct MaterialParams {
     /// material's diffuse slot then holds the colour source with the opacity source in alpha.
     #[serde(default)]
     pub particle: Option<ParticleShading>,
+    /// Texture parameters bound to a `TextureRenderTarget2D` (a planar reflection filled by a
+    /// `SceneCaptureReflectActor`): (parameter name, render target object path).
+    #[serde(default)]
+    pub render_targets: Vec<(String, String)>,
 }
 
 /// How a particle material's shader combines the sprite texture (colour x opacity, baked into
@@ -453,6 +502,9 @@ pub struct MeshInstance {
     /// 1 move NPC, 2 move player, 3 crosshair, 4 projectile, 5 melee, 6 vision).
     #[serde(default = "all_trace_types")]
     pub trace_mask: u8,
+    /// The component's `ReflectionChannels` (see [`reflect_channel`]); 0 = in no reflection capture.
+    #[serde(default)]
+    pub reflect_channels: u32,
 }
 
 pub fn all_trace_types() -> u8 {

@@ -35,3 +35,9 @@ run L_Bridge_Part2_P 900 --profile
 for m in L_Boyle_Ext_P L_Flooded_FStreets_P; do run "$m" 600; done
 # 5. The dark starts (no code change; for the record).
 for m in L_Prison_P L_Ovrsr_P L_Flooded_FStreets_P; do run "$m" 600; done
+# 6. Planar reflections (SceneCaptureReflectActor, reflect.rs): the Boyle river (RealTime_refl), the Pub canal
+#    is in step 1 (water_RTR), the Streets canal, the Bridge river, the Brothel
+#    and Distillery water, the island sea (water_Foam_MAT), the Light House, the flooded Refinery.
+#    The last run is the Boyle river with --no-reflections (the cube fallback), in OUT/no_reflections.
+for m in L_Boyle_Ext_P L_Streets1_P L_Bridge_Part1a_P L_Brothel_P L_Distillery_P L_Flooded_FRefinery_P L_LightH_HighChaos_P L_Tower_P; do run "$m" 600; done
+( OUT="$OUT/no_reflections"; run L_Boyle_Ext_P 600 --no-reflections )

@@ -39,6 +39,10 @@ pub struct RenderFeatures {
     /// The dominant directional light's distance-field shadow maps on lightmapped static
     /// geometry instead of Bevy's cascades (`--no-df-shadows` turns them off).
     pub df_shadows: bool,
+    /// Planar reflections of the level's `SceneCaptureReflectActor`s on the water
+    /// (`--no-reflections` turns them off; `reflect.rs`). The original's video options have no
+    /// switch for them.
+    pub reflections: bool,
 }
 
 impl RenderFeatures {
@@ -58,6 +62,7 @@ impl RenderFeatures {
             // running game (measured, U-320). `--no-lightmap-specular` turns it off.
             lightmap_specular: on("--no-lightmap-specular"),
             df_shadows: on("--no-df-shadows"),
+            reflections: on("--no-reflections"),
         }
     }
 }
@@ -376,6 +381,10 @@ pub fn spawn_map(
 ) -> usize {
     let show_fx = features.fx;
     let image_handles: Vec<Handle<Image>> = map.textures.iter().map(|t| images.add(to_image(t))).collect();
+    // Planar reflections: the capture cameras and their render targets (reflect.rs), and the
+    // render layers the reflected primitives are drawn in.
+    let reflect_layers = crate::reflect::Layers::new(map, features);
+    let reflect_targets = crate::reflect::spawn_captures(map, &reflect_layers, commands, images);
     let default_params = MaterialParams::default();
     let material_handles: Vec<Handle<StandardMaterial>> = map
         .materials
@@ -472,6 +481,7 @@ pub fn spawn_map(
         }
         let mesh = &map.meshes[inst.mesh];
         let transform = Transform::from_matrix(coords::transform(inst.transform));
+        let reflect_bits = reflect_layers.bits(inst.reflect_channels);
         for (si, section) in mesh.sections.iter().enumerate() {
             let mat_id = inst.materials.get(si).copied().flatten().or(section.material);
             if !show_fx && mat_id.is_some_and(|m| map.materials[m].blend == BlendHint::Translucent) {
@@ -506,6 +516,7 @@ pub fn spawn_map(
                     material: mat_id.map(|m| m as u32).unwrap_or(u32::MAX),
                     atlas: lm.map(|l| l.atlas as u32),
                     cell: ((t.x / BATCH_CELL).floor() as i32, (t.y / BATCH_CELL).floor() as i32),
+                    reflect: reflect_bits,
                     uv1: has_uv1,
                     df: lm.is_some_and(|l| l.df_shadow && features.df_shadows && !map.lightmaps[l.atlas].shadow.is_empty()),
                     df_light: lm
@@ -545,6 +556,14 @@ pub fn spawn_map(
             if is_sky || translucent {
                 e.insert(bevy::light::NotShadowCaster);
             }
+            if reflect_bits != 0 {
+                e.insert(crate::reflect::render_layers(reflect_bits));
+            }
+            // The render target a water material samples as `C_Realtime_reflection_Texture`.
+            let reflect_target: Option<Handle<Image>> = mat_id
+                .and_then(|m| map.material_params.get(m))
+                .and_then(crate::reflect::material_target)
+                .and_then(|t| reflect_targets.get(&t.to_ascii_lowercase()).cloned());
             // Skies_PMAT domes: the material's own shader (sky.rs) replaces the approximation.
             if is_sky && features.materials && !inst.hidden {
                 let sky = mat_id.and_then(|m| Some((map.material_params.get(m)?, map.materials.get(m)?)));
@@ -598,10 +617,13 @@ pub fn spawn_map(
                         return None;
                     }
                     let scene = decal_scene.get_or_insert_with(|| reflection_cube(map).map(|i| images.add(i))).clone();
-                    crate::water_foam::PendingWaterFoam::new(p, &map.materials[m].texture_params, &image_handles, world_bounds_origin(mesh, inst.transform), scene)
+                    crate::water_foam::PendingWaterFoam::new(p, &map.materials[m].texture_params, &image_handles, world_bounds_origin(mesh, inst.transform), scene, reflect_target.clone())
                 })
                 .flatten()
             {
+                if let Some(h) = wf.0.reflect.clone() {
+                    e.insert(crate::reflect::ReflectUser(h));
+                }
                 e.insert(wf);
             } else if translucent && features.materials && !inst.hidden {
                 // Translucent decals (generic_translucent_PMAT): the material's own shading (decals.rs).
@@ -622,7 +644,10 @@ pub fn spawn_map(
                     }
                 });
                 // Water (river_main_PMAT): its own shading (water.rs).
-                if let Some(w) = mat_id.and_then(|m| crate::water::PendingWater::new(map.material_params.get(m)?, &map.materials[m].texture_params, &image_handles, scene.clone(), lightmap.clone())) {
+                if let Some(w) = mat_id.and_then(|m| crate::water::PendingWater::new(map.material_params.get(m)?, &map.materials[m].texture_params, &image_handles, scene.clone(), lightmap.clone(), reflect_target.clone())) {
+                    if let Some(h) = w.0.reflect.clone() {
+                        e.insert(crate::reflect::ReflectUser(h));
+                    }
                     e.insert(w);
                 } else if let Some(d) = mat_id.and_then(|m| crate::decals::PendingDecal::new(map.material_params.get(m)?, &map.materials[m].texture_params, &image_handles, scene, lightmap)) {
                     e.insert(d);
@@ -707,6 +732,9 @@ pub fn spawn_map(
     for (key, mesh) in built {
         let mat = if key.material == u32::MAX { default_material.clone() } else { material_handles[key.material as usize].clone() };
         let mut e = commands.spawn((Mesh3d(meshes.add(mesh)), Transform::IDENTITY, MapGeometry { instance: usize::MAX }));
+        if key.reflect != 0 {
+            e.insert(crate::reflect::render_layers(key.reflect));
+        }
         match key.atlas {
             // Lightmap regions are already folded into UV1: one shared material per
             // (material, atlas page).
@@ -807,6 +835,8 @@ struct BatchKey {
     /// shadows the batch (U-403).
     df_light: Option<u32>,
     cell: (i32, i32),
+    /// The capture render layers the geometry is also drawn in (`reflect::Layers::bits`).
+    reflect: u32,
     uv1: bool,
     /// The instance, for materials whose diffuse variation mask is read through the
     /// component's own lightmap UVs (`D2Variation::lightmap_uv`).

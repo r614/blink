@@ -10,8 +10,9 @@
 //          (R_ts: the camera vector reflected about the tangent-space normal, taken to world space;
 //          10608). With C_Enable_Realtime_Reflection the original samples the planar reflection
 //          render target (`boyle_ext_MS.RealTime_refl`, drawn by SceneCaptureReflectActor_0) at the
-//          screen position + intensity x n.xy instead (11099): the port has no planar reflection
-//          capture, so those instances use the cubemap term too (U-764).
+//          screen position + intensity x n.xy instead (11099): `reflect.rs` draws that target and
+//          binds it as `water_reflect`; without it (reflections off, no capture actor in the
+//          level) those instances use the cubemap term (U-764).
 //   diff   D_diffuse_texture at D_Diffuse_Tilling uv + o, mask = D_diffuse_mask[ch] at
 //          D_Diffuse_Mask_Tilling uv + o, o = n.xy x intensity x D_diffuse_Distorsion_strength
 //          (D_Enable_Diffuse_Distorsion); m = mask with D_Enable_Diffuse_on_top, else 0
@@ -50,6 +51,8 @@ struct WaterUniform {
     water_color: vec4<f32>,
     mask: vec4<f32>,
     ambient: vec4<f32>,
+    // x: 1 = the planar reflection target is bound (C_Enable_Realtime_Reflection)
+    planar: vec4<f32>,
 }
 
 struct DecalLightmap {
@@ -69,6 +72,8 @@ struct DecalLightmap {
 @group(#{MATERIAL_BIND_GROUP}) @binding(108) var water_lightmap: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var water_lightmap_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(110) var water_directional: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(111) var water_reflect: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(112) var water_reflect_sampler: sampler;
 
 // Bevy units per Unreal unit (coords::UU_TO_BEVY).
 const UU_TO_BEVY: f32 = 0.02;
@@ -110,7 +115,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let v_ts = vec3<f32>(dot(v, t), -dot(v, b), dot(v, ng));
     let r_ts = vec3<f32>(-v_ts.x, -v_ts.y, v_ts.z) + water.dist.x * n;
     let r_ws = r_ts.x * t - r_ts.y * b + r_ts.z * ng;
-    let refl = textureSample(water_scene, water_scene_sampler, r_ws).rgb * water.cube.rgb;
+    var refl = textureSample(water_scene, water_scene_sampler, r_ws).rgb * water.cube.rgb;
+    if (water.planar.x > 0.0) {
+        // C_Realtime_reflection_Texture at the screen position + intensity x n.xy (11099). The
+        // capture camera is the mirrored viewer (reflect.rs), so its image is flipped in x.
+        let sv = (in.position.xy - view_bindings::view.viewport.xy) / view_bindings::view.viewport.zw;
+        let ruv = vec2<f32>(1.0 - (sv.x + water.dist.x * n.x), sv.y + water.dist.x * n.y);
+        refl = saturate(textureSampleLevel(water_reflect, water_reflect_sampler, ruv, 0.0).rgb) * water.cube.rgb;
+    }
     // Diffuse on top, through its mask.
     let o = select(vec2<f32>(0.0), n.xy * water.dist.x * water.dist.y, water.water_color.w > 0.0);
     let diff = textureSample(water_diffuse, water_sampler, water.dist.z * uv + o).rgb;

@@ -1785,7 +1785,7 @@ pub fn place_held_bodies(
 
 /// Keep every perspective camera at the original's horizontal FOV for the current aspect
 /// (Bevy's `fov` is vertical).
-pub fn apply_fov(mut cams: Query<&mut Projection, With<Camera3d>>, settings: Option<Res<crate::settings::GameSettings>>) {
+pub fn apply_fov(mut cams: Query<&mut Projection, (With<Camera3d>, Without<crate::reflect::ReflectCamera>)>, settings: Option<Res<crate::settings::GameSettings>>) {
     // Options -> Graphics -> FOV (`PSI_GraphicsPC_FOV`, default 75 = HORIZONTAL_FOV_DEG).
     let fov = settings.map(|s| s.s.graphics.fov).unwrap_or(HORIZONTAL_FOV_DEG);
     for mut p in &mut cams {

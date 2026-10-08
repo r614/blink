@@ -79,6 +79,7 @@ pub fn import_layout(content: &Content, layout: &MapLayout, opts: &ImportOptions
             lightmap: None,
             mover: None,
             trace_mask: dishonored_ir::all_trace_types(),
+            reflect_channels: 0,
         });
     }
     for (i, m) in layout.meshes.iter().enumerate() {
@@ -102,6 +103,7 @@ pub fn import_layout(content: &Content, layout: &MapLayout, opts: &ImportOptions
             lightmap: None,
             mover: None,
             trace_mask: dishonored_ir::all_trace_types(),
+            reflect_channels: 0,
         });
         imp.stats.static_mesh_actors += 1;
     }

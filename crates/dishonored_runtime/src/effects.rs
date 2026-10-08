@@ -741,7 +741,7 @@ fn simulate(
     mut glow_mats: ResMut<Assets<GlowMaterial>>,
     mut volume_mats: ResMut<Assets<crate::volume_light::VolumeLightMaterial>>,
     mut q: Query<(Entity, &mut FxInstance, &InheritedVisibility, Option<&BeamTarget>, Option<&StopAtOnce>)>,
-    cams: Query<(&GlobalTransform, &Transform, &Projection, Option<&ChildOf>), With<Camera3d>>,
+    cams: Query<(&GlobalTransform, &Transform, &Projection, Option<&ChildOf>), (With<Camera3d>, Without<crate::reflect::ReflectCamera>)>,
     session: Option<Res<crate::session::Session>>,
     mut dframe: ResMut<DistortionFrame>,
 ) {

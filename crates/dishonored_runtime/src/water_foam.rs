@@ -9,9 +9,9 @@
 //! texture: the port drew it as an untextured translucent StandardMaterial in the fallback colour
 //! (the pink / pale sea of the Isl starts).
 //!
-//! Missing input (U-764): the reflection is `C_Realtime_reflection_Texture`, a planar reflection
-//! render target the port does not draw; the level's reflection cube stands in (as for the river
-//! water, `water.rs`).
+//! The reflection is `C_Realtime_reflection_Texture`, the planar reflection render target of the
+//! level's `SceneCaptureReflectActor` (`reflect.rs`); without one (reflections off) the level's
+//! reflection cube stands in (U-764, as for the river water, `water.rs`).
 
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
@@ -41,7 +41,8 @@ pub struct WaterFoamUniform {
     pub rain: Vec4,
     /// One-hot `F_Foam_Mask_Chanel` (R without foam).
     pub mask: Vec4,
-    /// xyz: `ObjectWorldPositionAndRadius` origin, the instance's world bounds origin (UE3 space).
+    /// xyz: `ObjectWorldPositionAndRadius` origin, the instance's world bounds origin (UE3 space);
+    /// w: 1 = the planar reflection target is bound.
     pub object: Vec4,
 }
 
@@ -100,6 +101,11 @@ pub struct WaterFoamMaterial {
     #[texture(7, dimension = "cube")]
     #[sampler(8)]
     pub scene: Option<Handle<Image>>,
+    /// `C_Realtime_reflection_Texture`: the render target of the level's `SceneCaptureReflectActor`
+    /// (`reflect.rs`), read at the screen position; replaces `scene` when bound.
+    #[texture(9)]
+    #[sampler(10)]
+    pub reflect: Option<Handle<Image>>,
 }
 
 impl Material for WaterFoamMaterial {
@@ -117,8 +123,9 @@ impl Material for WaterFoamMaterial {
 pub struct PendingWaterFoam(pub WaterFoamMaterial);
 
 impl PendingWaterFoam {
-    pub fn new(p: &MaterialParams, textures: &[(String, TextureId)], images: &[Handle<Image>], object: Vec3, scene: Option<Handle<Image>>) -> Option<PendingWaterFoam> {
-        let params = WaterFoamUniform::decode(p, object, crate::map_render::light_unit())?;
+    pub fn new(p: &MaterialParams, textures: &[(String, TextureId)], images: &[Handle<Image>], object: Vec3, scene: Option<Handle<Image>>, reflect: Option<Handle<Image>>) -> Option<PendingWaterFoam> {
+        let mut params = WaterFoamUniform::decode(p, object, crate::map_render::light_unit())?;
+        params.object.w = if reflect.is_some() { 1.0 } else { 0.0 };
         let tex = |n: &str| textures.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).and_then(|t| images.get(t.1)).cloned();
         let m = WaterFoamMaterial {
             params,
@@ -128,6 +135,7 @@ impl PendingWaterFoam {
             foam_distortion: tex(TEXTURES[3]),
             foam: tex(TEXTURES[4]),
             scene,
+            reflect,
         };
         if m.waves.is_none() || m.mask.is_none() || (params.foam_color.w > 0.0 && (m.foam.is_none() || m.foam_distortion.is_none())) || (params.foam2.z > 0.0 && m.rain.is_none()) {
             warn!("island sea: textures missing (waves {}, rain {}, mask {}, foam {} / {})", m.waves.is_some(), m.rain.is_some(), m.mask.is_some(), m.foam.is_some(), m.foam_distortion.is_some());
