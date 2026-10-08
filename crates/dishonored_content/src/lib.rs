@@ -240,7 +240,11 @@ pub fn add_level_blockers(w: CollisionWorld, content: &Content, map: &str) -> Co
     let tweaks = dishonored_assets::tweaks::TweakDb::load_with(content, &pkgs).ok();
     // Every blocking skeletal component but the climbable chains (their bodies swing with
     // physics and turn off while climbed; not modelled, U-654).
-    for src in sources.iter().filter(|s| s.component_class == "SkeletalMeshComponent" && s.active() && s.block && s.actor_block && s.class != "DisClimbable") {
+    // A skeletal component with no mesh (on itself or its archetype) has no physics asset
+    // instance, so nothing to collide with: the mesh-less `SkeletalMeshComponent0` of the
+    // usables whose visible part is their static `StaticUsablePart` (Flooded's weapon boxes,
+    // the Hound Pits audio logs; that static part is imported with the level's components).
+    for src in sources.iter().filter(|s| s.component_class == "SkeletalMeshComponent" && s.active() && s.block && s.actor_block && s.class != "DisClimbable" && !s.asset.is_empty()) {
         let actor = format!("{}:{}", src.package, src.actor);
         let prop = props.iter().find(|p| p.actor.eq_ignore_ascii_case(&actor));
         let is_door = src.class == "DisDoor" && prop.is_some_and(|p| p.door.is_some()) && !travel.iter().any(|t| t.eq_ignore_ascii_case(&actor));
@@ -283,7 +287,7 @@ pub fn add_level_blockers(w: CollisionWorld, content: &Content, map: &str) -> Co
         // reference pose has it open).
         let bodies = match prop {
             Some(prop) => dishonored_assets::prop_collision::usable_start_bodies(content, &pkgs, prop, tw.as_ref()),
-            None => dishonored_assets::prop_collision::read_prop_bodies(content, &pkgs, &actor, &Default::default()),
+            None => dishonored_assets::prop_collision::read_component_bodies(content, &pkgs, &actor, Some(&src.component), &Default::default()),
         };
         match bodies {
             Ok(b) => extra.push((b.actor, channels, dishonored_world::hit_kind::OTHER, b.tris)),
@@ -328,7 +332,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     }
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).ok();
-    let coll_path = dir.join(format!("{map}.collision16-stealth.bin"));
+    let coll_path = dir.join(format!("{map}.collision18.bin"));
     let spawn_path = dir.join(format!("{map}.spawns.json"));
     let (collision, spawns) = match (CollisionWorld::load(&coll_path), std::fs::read_to_string(&spawn_path)) {
         (Ok(w), Ok(s)) => (w, serde_json::from_str::<Vec<Spawn>>(&s).unwrap_or_default()),
@@ -491,6 +495,84 @@ pub fn travel_prompt(link: &dishonored_assets::travel::TravelLink, use_key: &str
         Some(t) => dishonored_assets::localization::with_keys(t, use_key),
         None => format!("Press {use_key} to travel"),
     }
+}
+
+/// The level changes a map's own Kismet can ask for (cached per map: `<map>.exits2.json`).
+pub fn map_exits(content: &Content, map: &str) -> Vec<dishonored_assets::travel::MapExit> {
+    let path = cache_dir().join(format!("{map}.exits2.json"));
+    if let Some(e) = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
+        return e;
+    }
+    let e = dishonored_assets::travel::map_exits(content, &map_packages(content, map));
+    std::fs::create_dir_all(cache_dir()).ok();
+    if let Ok(t) = serde_json::to_string(&e) {
+        std::fs::write(&path, t).ok();
+    }
+    e
+}
+
+/// The persistent maps of one campaign level (interiors and exteriors: Boyle Ext / Int, the
+/// Bridge parts, the Flooded District parts, Tower Return yard / interior...), from the
+/// original travel data: two maps belong together when each one's Kismet can travel to the
+/// other through a global `ChangeLvl_*` handler that does not cross a mission boundary
+/// ([`dishonored_assets::travel::MapExit::mission_boundary`]: the boat to and from the hub
+/// tracks the mission's statistics). `map` first, then the others in the order they are reached.
+pub fn level_group(content: &Content, map: &str) -> Vec<String> {
+    let mut group = vec![map.to_string()];
+    let mut i = 0;
+    while i < group.len() {
+        let here = group[i].clone();
+        for e in map_exits(content, &here).into_iter().filter(|e| !e.mission_boundary) {
+            for d in e.destinations {
+                if group.iter().any(|g| g.eq_ignore_ascii_case(&d)) || !content.has_package(&d) {
+                    continue;
+                }
+                let back = map_exits(content, &d).into_iter().any(|x| !x.mission_boundary && x.destinations.iter().any(|y| y.eq_ignore_ascii_case(&here)));
+                if back {
+                    group.push(d);
+                }
+            }
+        }
+        i += 1;
+    }
+    group
+}
+
+/// The global `ChangeLvl_*` remote event that starts a map's Kismet the way the campaign enters
+/// it: one whose handler prepares this map only, preferring the campaign's own entry (a
+/// handler that begins a mission), else one that can lead to it. None when no handler does.
+pub fn entry_event(content: &Content, map: &str) -> Option<String> {
+    let all = dishonored_assets::travel::global_entries(content);
+    let to = |d: &Vec<String>| d.iter().any(|x| x.eq_ignore_ascii_case(map));
+    let only = |d: &Vec<String>| d.len() == 1 && to(d);
+    all.iter()
+        .find(|(_, d, b)| *b && only(d))
+        .or_else(|| all.iter().find(|(_, d, _)| only(d)))
+        .or_else(|| all.iter().find(|(_, d, _)| to(d)))
+        .map(|(e, _, _)| e.clone())
+}
+
+/// A free-roam session on `map`: no mission of its own, the original Kismet of the map's
+/// campaign level running from its entry event ([`entry_event`]), the level populated by its
+/// original spawners, and every map of the level ([`level_group`]) reachable through the
+/// original travel (doors, triggers and the global `ChangeLvl_*` handlers: prepare / commit,
+/// the tagged arrival start, level state and the player's inventory kept). A level change out
+/// of the group (the boat back to the hub) ends the session as it ends a mission.
+pub fn freeroam_def(map: &str, seed: u64) -> Result<dishonored_mission::MissionDef> {
+    let content = Content::locate()?;
+    let start = entry_event(&content, map).with_context(|| format!("no global ChangeLvl_* handler prepares {map}"))?;
+    let group = level_group(&content, map);
+    let mut def = dishonored_mission::MissionDef { title: format!("Free roam: {map}"), map: map.to_string(), maps: group[1..].to_vec(), ..Default::default() };
+    def.original_npcs = group.clone();
+    def.original_kismet = Some(dishonored_mission::OriginalKismet { start_event: start, seed });
+    // A game started from the menu runs the global `Global_RealGameStarted`, which sets this
+    // flag; the levels' travel chains test it before their `ChangeLvl_*` (Boyle's doors: True ->
+    // the level change, False -> a debug console command).
+    def.flags_set.push("SF_Global_RealGameStarted".into());
+    def.settings.respawn = true;
+    // A mission needs an end; never reached (the session ends when the player leaves the level).
+    def.rules.push(dishonored_mission::RuleDef { id: None, on: dishonored_mission::Trigger::Timer(1.0e9), when: Vec::new(), then: vec![dishonored_mission::Action::Complete("end".into())], once: true, disabled: false });
+    Ok(def)
 }
 
 /// Build a mission game setup from the loaded maps (markers resolved against the levels'

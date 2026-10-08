@@ -4,8 +4,8 @@
     name: "maps/Out_HighChaos_emilyDead",
     system: Kismet,
     map: "L_Out_HighChaos_emilyDead_P",
-    description: "Smoke run: the populated level at the player's default spawn with the original Kismet started by the remote event ChangeLvl_toEpilogue (the map's entry event in the global sequence); no input, 10 s.",
-    setup: (kismet: true, kismet_start: Some("ChangeLvl_toEpilogue"), original_npcs: true, seed: 1),
+    description: "Smoke run: the populated level at the player's default spawn with the original Kismet started by the remote event ChangeLvl_fromLighthouse_toEpilogue (the map's entry event in the global sequence: EndGame_Achievements -> fromLighthouse_toEpilogue input In: CheckStoryFlag_49 Boyle_TalkedwithOutsider (both outputs lead on), CheckStoryFlag_2 SF_85AF2F6F4448BE014FCA78BCEDED2E03 False (high chaos), CheckStoryFlag_50 SF_3717380C4395474558BD60965FD75698 True -> PrepareMapChange_1 L_Out_HighChaos_emilyDead_P); no input, 10 s.",
+    setup: (kismet: true, kismet_start: Some("ChangeLvl_fromLighthouse_toEpilogue"), original_npcs: true, seed: 1, story_flags: [("SF_3717380C4395474558BD60965FD75698", true)]),
     ticks: 600,
     input: [],
     checkpoints: [

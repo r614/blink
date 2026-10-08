@@ -64,8 +64,18 @@ pub fn extract_prop_bodies(content: &Content, packages: &[String], actors: &[Str
 }
 
 /// The physics bodies of one placed actor with the bones in `pose` (others at the reference
-/// pose).
+/// pose): the skeletal mesh component its `SkeletalMeshComponent` names (the
+/// `DisSkeletalBreakable` usables and doors), else its `CollisionComponent` when that is a
+/// skeletal mesh component (`DisRiverKrust`, `DisWatchTower`: their skeletal component is a
+/// native member, `m_pSkeletalMeshCpnt` / `m_pTowerMeshCpnt`, that only `CollisionComponent`
+/// names among the serialized properties).
 pub fn read_prop_bodies(content: &Content, packages: &[String], actor: &str, pose: &BonePose) -> Result<PropBodies> {
+    read_component_bodies(content, packages, actor, None, pose)
+}
+
+/// [`read_prop_bodies`] for a named component of the actor (`component`: the component
+/// export's name, e.g. `SkeletalMeshComponent0`; None: the actor's skeletal component as above).
+pub fn read_component_bodies(content: &Content, packages: &[String], actor: &str, component: Option<&str>, pose: &BonePose) -> Result<PropBodies> {
     let (pkg_name, name) = actor.split_once(':').context("actor is <package>:<name>")?;
     let pkg = content.package(pkg_name)?;
     let i = (0..pkg.exports.len())
@@ -74,7 +84,12 @@ pub fn read_prop_bodies(content: &Content, packages: &[String], actor: &str, pos
     let h = pkg.read_object(i)?;
     let p = &h.properties;
     let mut out = PropBodies { actor: actor.to_string(), tris: Vec::new() };
-    let ObjRef::Export(ci) = obj(p, "SkeletalMeshComponent").map(ObjRef::from_index).context("no SkeletalMeshComponent")? else { anyhow::bail!("component is an import") };
+    let skeletal = |o: i32| matches!(ObjRef::from_index(o), ObjRef::Export(c) if pkg.export_class(c).contains("SkeletalMeshComponent"));
+    let comp = match component {
+        Some(c) => (0..pkg.exports.len()).find(|&e| pkg.exports[e].outer == i as i32 + 1 && pkg.obj_name(ObjRef::Export(e)).eq_ignore_ascii_case(c)).map(|e| e as i32 + 1),
+        None => obj(p, "SkeletalMeshComponent").or_else(|| obj(p, "CollisionComponent").filter(|o| skeletal(*o))),
+    };
+    let ObjRef::Export(ci) = comp.map(ObjRef::from_index).context("no SkeletalMeshComponent")? else { anyhow::bail!("component is an import") };
     let ch = pkg.read_object(ci)?;
     let c = &ch.properties;
     // The mesh and physics asset, set on the component or inherited from its archetype (a

@@ -20,6 +20,7 @@
 //! harness replay FILE         re-simulate a server replay and verify every state hash
 //! harness mission [--mission FILE]  plays a custom mission end to end (headless + dedicated server)
 //! harness travel              Ext -> Int -> Ext through the original doors; level state kept
+//! harness freeroam [--pair A,B]  free roam: every interior / exterior pair of a campaign level, both ways
 //! harness save                save mid-mission (original Boyle), load, continue: identical hashes;
 //!                             autosaves on map loads, original slots
 //! harness conversation        original Boyle conversations headless (subtitles, VO, choices,
@@ -39,6 +40,7 @@ mod audio_playback;
 mod collision;
 mod contracts;
 mod conversation;
+mod freeroam;
 mod kismet;
 mod mission;
 mod playground;
@@ -91,6 +93,7 @@ fn main() -> Result<()> {
         "audio" => audio::run(&ctx, &mut rep)?,
         "mission" => mission::run(&ctx, &mut rep)?,
         "travel" => travel::run(&ctx, &mut rep)?,
+        "freeroam" => freeroam::run(&ctx, &mut rep)?,
         "conversation" => conversation::run(&ctx, &mut rep)?,
         "kismet" => kismet::run(&ctx, &mut rep)?,
         "save" => save::run(&ctx, &mut rep)?,

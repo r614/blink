@@ -170,6 +170,11 @@ pub struct Kismet {
     pub reported: BTreeSet<String>,
     /// Recent interpreter messages (capped).
     pub log: Vec<String>,
+    /// Unsupported op and event classes, each reported once (with [`Kismet::reported`]), for
+    /// the host to surface (the oracle's trace carries them as `KismetNote`s). Drained by the
+    /// host.
+    #[serde(skip)]
+    pub notices: Vec<String>,
     /// Sequence whose ops are executing (new impulses queue into it).
     exec_seq: Option<OpId>,
     level_roots: Vec<OpId>,
@@ -307,6 +312,7 @@ impl Kismet {
             coverage: Coverage::default(),
             reported: BTreeSet::new(),
             log: Vec::new(),
+            notices: Vec::new(),
             exec_seq: None,
             level_roots: Vec::new(),
             event_index: Default::default(),
@@ -477,6 +483,21 @@ impl Kismet {
             }
         }
         self.note(format!("level loaded: {map}{}", if restored { " (state restored)" } else { "" }));
+        // Event classes of these levels that nothing activates: reported once per class.
+        let mut unfed: BTreeMap<String, u32> = BTreeMap::new();
+        for o in self.db.ops.iter().filter(|o| o.kind == Kind::Event && pk.contains(&o.package)) {
+            let engine = ["SeqEvent_LevelLoaded", "SeqEvent_RemoteEvent", "SeqEvent_SequenceActivated", "SeqEvent_Console"].iter().any(|c| self.db.is_a(&o.class, c));
+            if !engine && !host.fires_event(&o.class) {
+                *unfed.entry(o.class.clone()).or_default() += 1;
+            }
+        }
+        for (class, n) in unfed {
+            if self.reported.insert(class.clone()) {
+                let s = format!("unsupported Kismet event class {class}: {n} event(s) in {map} that the port never activates");
+                self.notices.push(s.clone());
+                self.note(s);
+            }
+        }
         let events: Vec<OpId> = (0..self.n_static() as OpId).filter(|&e| pk.contains(&self.db.ops[e as usize].package) && self.is_a(e, "SeqEvent_LevelLoaded")).collect();
         // Each output is activated by its own engine call, and only for events whose output
         // has links: "Loaded and Visible" by `Sequence` slot 106 (0x00700120), "Beginning of
@@ -1240,7 +1261,9 @@ impl Kismet {
                     HostResult::Unhandled => {
                         *self.coverage.unhandled.entry(class.clone()).or_insert(0) += 1;
                         if self.reported.insert(class.clone()) {
-                            self.note(format!("unsupported Kismet class {class} (first at {})", self.db.describe(op)));
+                            let s = format!("unsupported Kismet class {class} (first at {})", self.db.describe(op));
+                            self.notices.push(s.clone());
+                            self.note(s);
                         }
                     }
                 }
