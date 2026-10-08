@@ -1360,34 +1360,12 @@ impl Importer<'_> {
                 diffuse = self.merged_opacity(diffuse, o, ch, lo, hi).or(diffuse);
             }
         }
-        // Particle sprites on `DefaultTranslu_PMAT` (base pass pixel shaders 2815 / 35485 / 35475
-        // of RefShaderCache, EFFECTS.md "Particle materials"): colour = vertex colour x
-        // [D_Diffuse | white with D_DisableDiffuse | Motion_Mask with Mo_Enable_Diffuse_Motion]
-        // x D_DiffuseColorTweak.rgb; opacity = vertex alpha x D_DiffuseColorTweak.a x
-        // [O_Opacity channel `O_Opacity_Channel` | Motion_Mask.r with Mo_Enable_Opacity_Motion].
-        // The textures come from the instance chain or the base material's defaults (e.g.
-        // `M_TB_CrouchSteam_INST` sets none: Motion_Mask = `FXT_Smoke_01`). The diffuse slot is
-        // replaced by the texture with that opacity in alpha.
-        if chain.base_material.as_deref().is_some_and(|b| b.ends_with("DefaultTranslu_PMAT")) {
-            let tex_named = |n: &str| chain.textures.iter().chain(chain.default_textures.iter()).find(|(k, _)| k.trim().eq_ignore_ascii_case(n)).map(|v| v.1);
-            let on = |s: &str| chain.switch(s) == Some(true);
-            let mask = tex_named("Motion_Mask").and_then(|k| self.texture(k));
-            let colour = if on("Mo_Enable_Diffuse_Motion") {
-                mask
-            } else if on("D_DisableDiffuse") {
-                None
-            } else {
-                tex_named("D_Diffuse").and_then(|k| self.texture(k))
-            };
-            let opacity = if on("Mo_Enable_Opacity_Motion") { mask.map(|m| (m, 0)) } else { tex_named("O_Opacity").and_then(|k| self.texture(k)).map(|o| (o, chain.mask_channel("O_Opacity_Channel").unwrap_or(0))) };
-            if let Some((o, ch)) = opacity {
-                if let Some(t) = self.merged_opacity(colour, o, ch, 0.0, 1.0) {
-                    diffuse = Some(t);
-                }
-            } else if colour.is_some() {
-                diffuse = colour;
-            }
-        }
+        // Particle sprites (EFFECTS.md "Particle materials"): the base material's decoded shader
+        // (`particle_material::recipe`) names the colour and opacity sources; the diffuse slot
+        // is replaced by the colour source with the opacity channel in alpha, and the constants
+        // go to `MaterialParams::particle`. The textures come from the instance chain or the base
+        // material's defaults (e.g. `M_TB_CrouchSteam_INST` sets none).
+        let particle = self.particle_sprite(&chain, &mut diffuse);
         // Channel-packed masks: the static component masks name the channel (U-027). Without
         // one, an emissive slot that reuses the opacity texture reads G (vista cards: opacity
         // in R, lit windows in G).
@@ -1415,6 +1393,7 @@ impl Importer<'_> {
             scalars: chain.scalars.clone(),
             vectors: chain.vectors.clone(),
             sky,
+            particle,
             base_material: chain.base_material.clone(),
             static_switches: {
                 let mut names: Vec<String> = chain.switch_defaults.iter().map(|(n, _)| n.clone()).collect();
@@ -1494,6 +1473,96 @@ impl Importer<'_> {
         self.map.material_params.push(params);
         self.mat_ids.insert(k, Some(id));
         Some(id)
+    }
+
+    /// Particle sprite materials (`particle_material::recipe`, EFFECTS.md "Particle
+    /// materials"): bake the colour source with the opacity channel in alpha into `diffuse` and
+    /// return the shader's constants. Bases without a recipe that are translucent, additive or
+    /// masked take the first conventional opacity parameter (`OPACITY_PARAMS`) when the generic
+    /// path found none, so no sprite falls back to an opaque diffuse alpha.
+    fn particle_sprite(&mut self, chain: &material_chain::MaterialChain, diffuse: &mut Option<TextureId>) -> Option<ParticleShading> {
+        use crate::particle_material::{AlphaUse, Colour, OPACITY_PARAMS, Opacity, recipe};
+        let base = chain.base_material.as_deref()?;
+        let tex_key = |n: &str| chain.textures.iter().chain(chain.default_textures.iter()).find(|(k, _)| k.trim().eq_ignore_ascii_case(n)).map(|v| v.1);
+        let switch = |s: &str| chain.switch(s) == Some(true);
+        let mask = |s: &str| chain.mask_channel(s);
+        let scalar = |n: &str, d: f32| chain.scalars.iter().find(|(k, _)| k.trim().eq_ignore_ascii_case(n)).map(|v| v.1).unwrap_or(d);
+        let Some(r) = recipe(base, &switch, &mask) else {
+            let blend = chain.blend_mode.as_deref().unwrap_or("BLEND_Opaque");
+            if matches!(blend, "BLEND_Translucent" | "BLEND_Additive" | "BLEND_Masked") {
+                let already = material_chain::slot(chain, "o_", &[]).is_some() || chain.textures.iter().any(|(n, _)| {
+                    let l = n.to_ascii_lowercase();
+                    l.contains("opacity") || l.contains("alpha")
+                });
+                if !already {
+                    if let Some((o, ch)) = OPACITY_PARAMS.iter().find_map(|(n, m)| Some((tex_key(n)?, m.and_then(|m| chain.mask_channel(m)).unwrap_or(0)))) {
+                        if let Some(o) = self.texture(o) {
+                            *diffuse = self.merged_opacity(*diffuse, o, ch, 0.0, 1.0).or(*diffuse);
+                        }
+                    }
+                }
+            }
+            return None;
+        };
+        let colour = match &r.colour {
+            Colour::Texture { param, channel } => {
+                let t = tex_key(param).and_then(|k| self.texture(k));
+                match (t, channel) {
+                    (Some(t), Some(ch)) => self.channel_texture(t, *ch),
+                    (t, _) => t,
+                }
+            }
+            Colour::Expression(i) => chain.expression_textures.get(*i).copied().and_then(|k| self.texture(k)),
+            Colour::White => None,
+        };
+        let mut shading = ParticleShading { tint: [1.0; 3], opacity: 1.0, erode: r.erode, vertex_alpha_only: false, opacity_missing: false, radial_power: None };
+        match &r.opacity {
+            Opacity::Texture { param, channel } => {
+                // Eroding materials: the multiplier sharpens the map (alpha = saturate(H x M) at
+                // vertex alpha 0); the runtime fades by the vertex alpha (APPROXIMATION).
+                let hi = if r.erode { r.opacity_scale.map(|(n, d)| scalar(n, d)).unwrap_or(1.0) } else { 1.0 };
+                let o = tex_key(param).and_then(|k| self.texture(k));
+                match o {
+                    Some(o) => *diffuse = self.merged_opacity(colour, o, *channel, 0.0, hi).or(colour),
+                    None => {
+                        // The opacity texture did not resolve (textures off, or a missing
+                        // package): the colour with an opaque alpha, opacity from the vertex.
+                        *diffuse = colour.and_then(|c| self.merged_opacity(Some(c), c, 0, 1.0, 1.0)).or(colour);
+                        shading.vertex_alpha_only = true;
+                        shading.opacity_missing = true;
+                    }
+                }
+            }
+            Opacity::VertexOnly => {
+                // The shader ignores the texture's alpha (`mov oC0.w, v1.w`).
+                *diffuse = colour.and_then(|c| self.merged_opacity(Some(c), c, 0, 1.0, 1.0)).or(colour);
+                shading.vertex_alpha_only = true;
+            }
+            Opacity::Radial => {
+                *diffuse = None;
+                shading.radial_power = Some(scalar("G_GlowPower", 10.0));
+            }
+        }
+        if !r.erode {
+            if let Some((n, d)) = r.opacity_scale {
+                shading.opacity *= scalar(n, d);
+            }
+        }
+        if let Some((n, d)) = r.brightness {
+            let b = scalar(n, d);
+            shading.tint = shading.tint.map(|c| c * b);
+        }
+        if let Some((n, d, use_alpha)) = r.tint {
+            let v = chain.vectors.iter().find(|(k, _)| k.trim().eq_ignore_ascii_case(n)).map(|v| v.1).unwrap_or(d);
+            let k = if use_alpha == AlphaUse::Colour { v[3] } else { 1.0 };
+            for c in 0..3 {
+                shading.tint[c] *= v[c] * k;
+            }
+            if use_alpha == AlphaUse::Opacity {
+                shading.opacity *= v[3];
+            }
+        }
+        Some(shading)
     }
 
     /// Greyscale BGRA8 copy of one channel of a texture (all mips).

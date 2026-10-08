@@ -77,27 +77,9 @@ impl Material for GlowMaterial {
     }
 }
 
-/// ParticleSystems the gameplay effects use (decoded with every level, from DishonoredGame).
-pub const GAMEPLAY_PARTICLES: &[&str] = &[
-    PLAYER_MUZZLE,
-    PAWN_MUZZLE,
-    SHADOW_KILL_PS,
-    "Vfx_GamePlay.Blink.Blink_Mantle_01",
-    "Vfx_GamePlay.Windblast.Windblast_lvl2",
-    "Vfx_GamePlay.Windblast.Windblast_UndWater_lvl1",
-    "Vfx_PhysMat.pistol.Ps_Pistol_Blast",
-    "Vfx_Weapon.Effects.Ps_SwordSparks_Parry",
-    "Vfx_PhysMat.Blood.Pfx_PistolBlood_Blast",
-    "Vfx_PhysMat.Blood.Pfx_BloodSProjectile_Default",
-    "Vfx_GamePlay.Blink.Blink_Ground_01",
-    "Vfx_GamePlay.Blink.Blink_Fall_01",
-    "Vfx_GamePlay.Windblast.Windblast_lvl1",
-    "Vfx_PhysMat.pistol.Ps_PistolImpact_DirtPs_PistolImpact_Dirt",
-    "Vfx_PhysMat.pistol.Ps_PistolImpact_MetalPs_PistolImpact_Dirt",
-    "Vfx_PhysMat.pistol.Ps_PistolImpact_WoodPs_PistolImpact_Dirt",
-    "Vfx_PhysMat.Wood.Pfx_wooden_shard",
-    "Vfx_PhysMat.Water.Pfx_WaterSplash",
-];
+/// ParticleSystems the gameplay effects use (decoded with every level, from DishonoredGame):
+/// the tweaks' effects and every contact-system particle (`particle_material::GAMEPLAY_PARTICLES`).
+pub const GAMEPLAY_PARTICLES: &[&str] = dishonored_assets::particle_material::GAMEPLAY_PARTICLES;
 
 const MAX_PARTICLES: usize = 400;
 /// Placed emitters are simulated only within this distance of the camera (uu).
@@ -113,6 +95,8 @@ struct LevelFx {
     mesh_parts: HashMap<(usize, usize), (Handle<Mesh>, Handle<StandardMaterial>)>,
     /// Emitters not drawn (untextured mesh emitters).
     skipped: std::collections::HashSet<(usize, usize)>,
+    /// Sprite emitters whose material erodes by the particle alpha (`ParticleShading::erode`).
+    erode: std::collections::HashSet<(usize, usize)>,
     /// Untextured (procedural) mesh emitters: mesh, colour x intensity, glow parameters.
     glow: HashMap<(usize, usize), (Handle<Mesh>, Vec4, Vec4)>,
     /// Emitters with distortion materials, drawn again by the distortion pass.
@@ -275,6 +259,10 @@ impl Effects {
 fn material_for(map: &DishonoredMap, em: &ParticleEmitterAsset, images: &mut Assets<Image>, cache: &mut HashMap<usize, Handle<Image>>, mats: &mut Assets<StandardMaterial>) -> Handle<StandardMaterial> {
     let tex = em.material.and_then(|m| {
         let ma = map.materials.get(m)?;
+        // A decoded particle material's sprite texture is its diffuse slot (or none).
+        if map.material_params.get(m).is_some_and(|p| p.particle.is_some()) {
+            return ma.diffuse;
+        }
         ma.diffuse.or_else(|| ma.texture_params.first().map(|t| t.1)).or_else(|| map.material_params.get(m).and_then(|p| p.opacity.or(p.emissive)))
     });
     let image = tex.and_then(|t| {
@@ -300,19 +288,19 @@ fn material_for(map: &DishonoredMap, em: &ParticleEmitterAsset, images: &mut Ass
     let gain: f32 = params
         .map(|p| p.scalars.iter().filter(|s| ["LightIntensity", "Opacity", "Intensity", "EmissiveIntensity", "Emissive_Intensity"].iter().any(|n| s.0.eq_ignore_ascii_case(n))).map(|s| s.1).product())
         .unwrap_or(1.0);
-    // `DefaultTranslu_PMAT` sprites (decoded shaders, EFFECTS.md "Particle materials"): the
-    // importer put the permutation's colour x opacity texture in the diffuse slot; the shader
-    // multiplies it by `D_DiffuseColorTweak` (rgb, and alpha into the opacity) and the vertex
-    // colour, nothing else.
-    let translu = params.is_some_and(|p| p.base_material.as_deref().is_some_and(|b| b.ends_with("DefaultTranslu_PMAT")));
-    let (tint, gain) = if translu {
-        let tw = params.and_then(|p| p.vectors.iter().find(|v| v.0.eq_ignore_ascii_case("D_DiffuseColorTweak")).map(|v| v.1)).unwrap_or([1.0; 4]);
-        ([tw[0], tw[1], tw[2], 1.0], tw[3])
-    } else {
-        (tint, gain)
+    // Decoded particle materials (EFFECTS.md "Particle materials"): the importer baked the
+    // shader's colour x opacity sources into the diffuse slot; the shader multiplies them by
+    // its constants and the vertex colour, nothing else.
+    let shading = params.and_then(|p| p.particle);
+    let (tint, gain) = match shading {
+        Some(s) => ([s.tint[0], s.tint[1], s.tint[2], 1.0], s.opacity),
+        None => (tint, gain),
     };
-    let image = image.or_else(|| {
-        let power = params.and_then(|p| p.scalars.iter().find(|s| s.0.eq_ignore_ascii_case("SphereMask_Power")).map(|s| s.1)).unwrap_or(2.0);
+    // A decoded sprite with only a colour constant (no texture) draws a plain quad, as the
+    // original; only procedural glows get the radial falloff.
+    let plain = shading.is_some_and(|s| s.radial_power.is_none());
+    let image = if plain { image } else { image.or_else(|| {
+        let power = shading.and_then(|s| s.radial_power).or_else(|| params.and_then(|p| p.scalars.iter().find(|s| s.0.eq_ignore_ascii_case("SphereMask_Power")).map(|s| s.1))).unwrap_or(2.0);
         let key = usize::MAX - (power * 100.0) as usize;
         if let Some(h) = cache.get(&key) {
             return Some(h.clone());
@@ -320,7 +308,7 @@ fn material_for(map: &DishonoredMap, em: &ParticleEmitterAsset, images: &mut Ass
         let h = images.add(radial_falloff(power));
         cache.insert(key, h.clone());
         Some(h)
-    });
+    }) };
     // Emissive bug / glow materials (`E_Emissive_Color`, alpha = intensity: fireflies x25):
     // drawn additively with the emissive colour (unlit, so it reads as the glowing body).
     let emissive = params.and_then(|p| p.vectors.iter().find(|v| v.0.eq_ignore_ascii_case("E_Emissive_Color")).map(|v| v.1)).filter(|e| e[3] > 1.0);
@@ -453,6 +441,12 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
     let lf = Arc::new(LevelFx {
         by_path: map.particle_systems.iter().enumerate().map(|(i, s)| (s.source.to_ascii_lowercase(), i)).collect(),
         systems: map.particle_systems.clone(),
+        erode: map
+            .particle_systems
+            .iter()
+            .enumerate()
+            .flat_map(|(si, s)| s.emitters.iter().enumerate().filter(|(_, e)| e.material.and_then(|m| map.material_params.get(m)).and_then(|p| p.particle).is_some_and(|p| p.erode)).map(move |(ei, _)| (si, ei)))
+            .collect(),
         materials,
         mesh_parts,
         skipped,
@@ -822,7 +816,11 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
 }
 
 /// Write the sprite quads of one emitter into its mesh (Bevy space, facing the camera).
-fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right: Vec3, cam_up: Vec3, cam_pos: Vec3, mesh: &mut Mesh) {
+/// `erode`: the material erodes its opacity map by the particle alpha
+/// (`saturate((H - alpha) x Mask_Multiply)`, `ParticleShading::erode`); the importer baked
+/// `saturate(H x Mask_Multiply)` and the vertex alpha becomes `1 - alpha` (APPROXIMATION: the
+/// sprite fades where the original's shape shrinks).
+fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right: Vec3, cam_up: Vec3, cam_pos: Vec3, erode: bool, mesh: &mut Mesh) {
     let n = sim.particles.len();
     let mut pos = Vec::with_capacity(n * 4);
     let mut uv = Vec::with_capacity(n * 4);
@@ -839,6 +837,7 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
     for p in &sim.particles {
         let rel = (p.age / p.life).clamp(0.0, 1.0);
         let (color, alpha, size) = look(p);
+        let alpha = if erode { 1.0 - alpha.clamp(0.0, 1.0) } else { alpha };
         let world = world_of(p);
         let c = coords::pos(world);
         let (hw, hh) = (size.x * 0.5 * coords::UU_TO_BEVY, if em.screen_align == 1 { size.y } else { size.x } * 0.5 * coords::UU_TO_BEVY);
@@ -872,6 +871,8 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
         }
         let f = match &em.sub_image {
             Some(d) => (d.eval1(rel, p.r[2]).floor().max(0.0) as u32).min(frames - 1),
+            // `PSUVIM_Random`: a random sub-image per particle (blood splashes, 2 x 2).
+            None if em.sub_random => ((p.r[2] * frames as f32) as u32).min(frames - 1),
             None => 0,
         };
         let (fx, fy) = ((f % em.sub_h) as f32, (f / em.sub_h) as f32);
@@ -1085,7 +1086,7 @@ fn simulate(
             } else if crate::profile::perf_baseline() {
                 // Before / after timings: the old per-frame rebuild of every sprite mesh.
                 if let Some(mut m) = inst.meshes.get(i).and_then(|h| meshes.get_mut(h)) {
-                    build_mesh(em, sim, &xf, right, up, cam_pos_b, &mut m);
+                    build_mesh(em, sim, &xf, right, up, cam_pos_b, lf.erode.contains(&(inst.system, i)), &mut m);
                     sim.mesh_empty = sim.particles.is_empty();
                 }
             } else if sprite_mesh_used(&lf, inst.system, i) {
@@ -1100,7 +1101,7 @@ fn simulate(
                         if sprite_culled {
                             clear_sprite_mesh(&mut m);
                         } else {
-                            build_mesh(em, sim, &xf, right, up, cam_pos_b, &mut m);
+                            build_mesh(em, sim, &xf, right, up, cam_pos_b, lf.erode.contains(&(inst.system, i)), &mut m);
                         }
                         sim.mesh_empty = empty;
                     }

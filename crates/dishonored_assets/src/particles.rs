@@ -175,6 +175,7 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
                 em.delay = find(p, "EmitterDelay").and_then(|x| x.as_float()).unwrap_or(0.0);
                 em.sub_h = int_or(p, "SubImages_Horizontal", 1).max(1) as u32;
                 em.sub_v = int_or(p, "SubImages_Vertical", 1).max(1) as u32;
+                em.sub_random = matches!(enum_of(p, "InterpolationMethod").as_deref(), Some("PSUVIM_Random") | Some("PSUVIM_Random_Blend"));
                 // Older layout: spawn rate and bursts on the required module.
                 if em.rate.is_none() {
                     em.rate = dist(p, "SpawnRate", 1);

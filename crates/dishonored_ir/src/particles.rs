@@ -102,6 +102,10 @@ pub struct ParticleEmitterAsset {
     pub delay: f32,
     pub sub_h: u32,
     pub sub_v: u32,
+    /// `InterpolationMethod` = `PSUVIM_Random` / `PSUVIM_Random_Blend`: each particle shows a
+    /// random sub-image (without a SubImageIndex module).
+    #[serde(default)]
+    pub sub_random: bool,
     /// Spawn rate (per second) over emitter time, times the rate scale.
     pub rate: Option<Dist>,
     pub rate_scale: Option<Dist>,
