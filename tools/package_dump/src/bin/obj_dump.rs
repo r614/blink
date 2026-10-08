@@ -23,6 +23,19 @@ fn print_props(pkg: &Package, props: &[Property], indent: usize) {
                     }
                 }
                 println!("{pad}{}[{}] = {}", p.name, p.array_index, format_value(pkg, &p.value));
+                // Arrays of 4-byte elements: print them as floats (lookup tables) or object refs.
+                if let Some((n, raw)) = p.array_raw() {
+                    if n > 0 && raw.len() == n * 4 {
+                        let words = raw.chunks_exact(4).map(|c| <[u8; 4]>::try_from(c).unwrap());
+                        if p.name.eq_ignore_ascii_case("LookupTable") || p.name.ends_with("Table") {
+                            let v: Vec<f32> = words.map(f32::from_le_bytes).collect();
+                            println!("{pad}  floats = {v:?}");
+                        } else {
+                            let v: Vec<String> = words.map(|w| pkg.obj_ref_name(i32::from_le_bytes(w))).collect();
+                            println!("{pad}  refs = {v:?}");
+                        }
+                    }
+                }
             }
             v => println!("{pad}{}[{}] = {}", p.name, p.array_index, format_value(pkg, v)),
         }

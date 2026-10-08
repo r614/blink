@@ -29,7 +29,8 @@ fn boyle_ext_coverage_pinned() {
     assert_eq!(m.packages.len(), PACKAGES);
     assert_eq!((m.actors.total, m.actor_classes.total), (ACTORS, ACTOR_CLASSES));
     assert_eq!((m.kismet_ops.total, m.kismet_op_classes.total, m.kismet_vars.total), (KISMET_OPS, KISMET_OP_CLASSES, KISMET_VARS));
-    assert_eq!((m.props.total, m.prop_pairs.total), (PROPS, PROP_PAIRS));
+    // Settings on objects of HANDLED classes: grows as the port handles more classes, so a floor.
+    assert!(m.props.total >= PROPS && m.prop_pairs.total >= PROP_PAIRS, "property settings {} / pairs {} below the floor", m.props.total, m.prop_pairs.total);
     assert_eq!((m.mat_exprs.total, m.mat_expr_classes.total), (MAT_EXPRS, MAT_EXPR_CLASSES));
     assert_eq!((m.functions.native, m.functions.script, m.functions.script_bytes), (FN_NATIVE, FN_SCRIPT, FN_SCRIPT_BYTES));
     // Floors of what the port handles.
@@ -47,8 +48,8 @@ const KISMET_OP_CLASSES: u64 = 116;
 const KISMET_VARS: u64 = 1082;
 // Settings of the classes the port handles (98141 / 1815 before the collision audit named the
 // KActor family).
-const PROPS: u64 = 100597;
-const PROP_PAIRS: u64 = 1952;
+const PROPS: u64 = 101138;
+const PROP_PAIRS: u64 = 1965;
 const MAT_EXPRS: u64 = 604;
 const MAT_EXPR_CLASSES: u64 = 7;
 const FN_NATIVE: u32 = 823;
