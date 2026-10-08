@@ -141,6 +141,31 @@ struct Importer<'a> {
 /// Single-channel static component masks kept in `MaterialParams::mask_channels`.
 const MASK_CHANNELS: &[&str] = &["C_Cubemap_Mask_Channel", "O_Opacity_Mask_Channel", "S_Specular_Mask_Channel", "E_Emissive_Channel", "F_Fresnel_Mask_Channel", "D2_Diffuse_Variation_mask_channel", "S2_Specular_variation_Mask_Channel", "D_Diffuse_Mask_Chanel", "W_Distorsion_Mask_Chanel"];
 
+/// The textures a base material's compiled base pass samples, kept by name in
+/// `MaterialAsset::texture_params` for the runtime's decoded shaders (None: the generic slots only).
+fn base_raw_textures(base: &str) -> Option<&'static [&'static str]> {
+    match base.rsplit('.').next().unwrap_or(base) {
+        // Light beams (runtime volume_light.rs): `Use_rays` samples `LightRays_Mask_R` (6633).
+        "Volume_Light_PMAT" => Some(&["LightRays_Mask_R"]),
+        // Falling water sheets (runtime spillway.rs): base passes 1584 / 1585 / 1595 / 1596.
+        "water_spillway_translu_PMAT" => Some(&["Normal", "SpillWay_Texture"]),
+        _ => None,
+    }
+}
+
+/// Cube textures a base material's base pass samples (kept face by face).
+fn base_cube_textures(base: &str) -> Option<&'static [&'static str]> {
+    match base.rsplit('.').next().unwrap_or(base) {
+        "water_spillway_translu_PMAT" => Some(&["C_Cubemap_texture"]),
+        _ => None,
+    }
+}
+
+/// Base materials whose base pass samples unnamed expression textures (`Tex#i`).
+fn base_uses_expression_textures(base: &str) -> bool {
+    matches!(base.rsplit('.').next().unwrap_or(base), "water_spillway_translu_PMAT")
+}
+
 const RESOURCE_CLASSES: &[&str] = &[
     "StaticMesh",
     "Texture2D",
@@ -1226,6 +1251,7 @@ impl Importer<'_> {
                     uv1: raw.uvs.get(lmi).or(raw.uvs.get(1)).cloned().unwrap_or_default(),
                     // Sky domes sample their `Storm` texture at texture coordinate 1 (U-580).
                     uv_set1: if lmi != 1 { raw.uvs.get(1).cloned().unwrap_or_default() } else { Vec::new() },
+                    colors: raw.colors,
                     indices: raw.indices.iter().map(|&i| i as u32).collect(),
                     sections,
                     collision_triangles: raw
@@ -1425,6 +1451,9 @@ impl Importer<'_> {
         } else if chain.base_material.as_deref().is_some_and(|b| b.eq_ignore_ascii_case("Materials_ref.water_materials.river_main_PMAT")) {
             // Water (river_main_PMAT, the runtime's water.rs): the textures its base pass samples.
             &["W_Waves_normalmap", "D_diffuse_mask", "D_diffuse_texture"]
+        } else if let Some(t) = chain.base_material.as_deref().and_then(base_raw_textures) {
+            // Other base materials the runtime shades with their decoded shaders.
+            t
         } else if blend == MaterialBlend::Translucent && chain.switch("C_Enable_CubemapMask") == Some(true) {
             // Translucent decals (generic_translucent_PMAT): the scene reflection's mask.
             &["C_Cubemap_Mask"]
@@ -1449,8 +1478,20 @@ impl Importer<'_> {
                     }
                 }
             }
+            // A material's own cubemaps, face by face, as `<name>.<face>` (faces +X, -X, +Y,
+            // -Y, +Z, -Z).
+            if let Some(cubes) = chain.base_material.as_deref().and_then(base_cube_textures) {
+                for &n in cubes {
+                    let key = chain.textures.iter().chain(chain.default_textures.iter()).find(|(k, _)| k.trim().eq_ignore_ascii_case(n)).map(|v| v.1);
+                    if let Some(faces) = key.and_then(|k| self.cube_faces(k)) {
+                        for (i, t) in faces.into_iter().enumerate() {
+                            texture_params.push((format!("{n}.{i}"), t));
+                        }
+                    }
+                }
+            }
             // The base material's unnamed textures (its shaders' `Tex#i`), as `Tex<i>`.
-            if sky {
+            if sky || chain.base_material.as_deref().is_some_and(base_uses_expression_textures) {
                 for (i, k) in chain.expression_textures.iter().enumerate() {
                     if let Some(t) = self.texture(*k) {
                         texture_params.push((format!("Tex{i}"), t));
@@ -1647,6 +1688,23 @@ impl Importer<'_> {
         id
     }
 
+    /// The six faces (+X, -X, +Y, -Y, +Z, -Z) of a `TextureCube`, as level textures (a
+    /// material's own cubemap, e.g. water_spillway_translu_PMAT's `C_Cubemap_texture`).
+    fn cube_faces(&mut self, ck: Key) -> Option<Vec<TextureId>> {
+        let cpkg = self.pkgs[ck.0].clone();
+        if cpkg.export_class(ck.1) != "TextureCube" {
+            return None;
+        }
+        let ch = cpkg.read_object(ck.1).ok()?;
+        let mut faces = Vec::new();
+        for f in ["FacePosX", "FaceNegX", "FacePosY", "FaceNegY", "FacePosZ", "FaceNegZ"] {
+            let r = find(&ch.properties, f).and_then(|p| p.as_object())?;
+            let k = self.resolve(ck.0, ObjRef::from_index(r))?;
+            faces.push(self.texture(k)?);
+        }
+        Some(faces)
+    }
+
     fn texture(&mut self, k: Key) -> Option<TextureId> {
         if !self.opts.load_textures {
             return None;
@@ -1805,6 +1863,7 @@ impl Importer<'_> {
             uv0: if raw.uvs.len() == n { raw.uvs } else { vec![Vec2::ZERO; n] },
             uv1: Vec::new(),
             uv_set1: Vec::new(),
+            colors: Vec::new(),
             indices: raw.indices,
             sections: slots
                 .iter()

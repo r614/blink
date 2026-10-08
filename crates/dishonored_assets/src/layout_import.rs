@@ -339,6 +339,7 @@ pub fn brush_mesh(b: &Brush, material: Option<MaterialId>, source: &str) -> Stat
         uv0,
         uv1: Vec::new(),
         uv_set1: Vec::new(),
+        colors: Vec::new(),
         collision_triangles: if b.collide { indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect() } else { Vec::new() },
         collision_materials: if b.collide { vec![0; tris] } else { Vec::new() },
         indices,
