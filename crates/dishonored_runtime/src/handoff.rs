@@ -21,6 +21,17 @@ use bevy::window::{PrimaryWindow, WindowMode, WindowPosition};
 pub const SHOWN: &str = "BLINK_HANDOFF_SHOWN";
 /// Printed by the game before it exits back to the menu: `BLINK_HANDOFF_RETURN x y w h`.
 pub const RETURN: &str = "BLINK_HANDOFF_RETURN";
+/// Printed by the game for the pause menu's Back to Windows (`t_BackToWindows`): the launcher
+/// quits too.
+pub const QUIT: &str = "BLINK_HANDOFF_QUIT";
+
+/// Game side: Back to Windows. Tell the launcher, then exit.
+pub fn quit_to_desktop(exit: &mut MessageWriter<AppExit>) {
+    use std::io::Write;
+    println!("{QUIT}");
+    let _ = std::io::stdout().flush();
+    exit.write(AppExit::Success);
+}
 
 /// Window placement handed between the processes (outer position, physical inner size).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

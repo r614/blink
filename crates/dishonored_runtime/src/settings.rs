@@ -3,9 +3,11 @@
 //!
 //! Applied: window resolution / fullscreen / vsync (live from the options menu; at game start
 //! only when launched from the launcher, so plain CLI runs keep their window), FOV, gamma
-//! (camera colour grading), anti-aliasing on/off (MSAA), texture detail (import size cap),
-//! mouse sensitivity / smoothing / invert, key bindings, master/music/SFX/voice volume,
-//! HUD toggles (`hud_settings.rs`). Everything else is saved and shown as not yet effective.
+//! (camera colour grading), anti-aliasing (Off / MLAA as SMAA / FXAA), texture detail (import
+//! size cap, at the next level load), head bob, mouse sensitivity / smoothing / invert, key
+//! bindings, master / music / SFX / voice volume, HUD toggles (`hud_settings.rs`). The
+//! options table in `research/dishonored/MENUS.md` lists what is applied, where and when, and
+//! what the port cannot honour yet.
 
 use bevy::input::mouse::MouseButton;
 use bevy::prelude::*;
@@ -242,15 +244,35 @@ pub fn apply_window(settings: Res<GameSettings>, mut last: Local<Option<(bool, b
     }
 }
 
-/// Display gamma (2.2 neutral) as the colour-grading exponent of every 3D camera, and
-/// anti-aliasing on/off as MSAA.
+/// Display gamma (2.2 neutral) as the colour-grading exponent of every 3D camera, and the
+/// anti-aliasing mode (`PSI_GraphicsPC_AntiAliasingMode`): Off, MLAA (the morphological pass:
+/// Bevy's SMAA, the MLAA derivative) or FXAA, each without MSAA as the original renders.
+/// `DISHONORED_MSAA=1` keeps the earlier 4x MSAA (comparison renders).
 pub fn apply_camera(
+    mut commands: Commands,
     settings: Res<GameSettings>,
-    mut cams: Query<(&mut bevy::render::view::ColorGrading, Option<&mut Msaa>, Option<&mut crate::ark_post::ArkPostSource>)>,
+    mut cams: Query<(Entity, &mut bevy::render::view::ColorGrading, Option<&mut Msaa>, Option<&mut crate::ark_post::ArkPostSource>, Has<bevy::anti_alias::fxaa::Fxaa>, Has<bevy::anti_alias::smaa::Smaa>)>,
 ) {
     let n = (2.2 / settings.s.graphics.gamma.max(0.1)).clamp(0.2, 5.0);
-    let msaa = if settings.s.graphics.anti_aliasing == 0 { Msaa::Off } else { Msaa::Sample4 };
-    for (mut cg, m, ark) in &mut cams {
+    let mode = settings.s.graphics.anti_aliasing;
+    let legacy_msaa = std::env::var_os("DISHONORED_MSAA").is_some();
+    let msaa = if legacy_msaa && mode != 0 { Msaa::Sample4 } else { Msaa::Off };
+    for (e, mut cg, m, ark, has_fxaa, has_smaa) in &mut cams {
+        let (want_fxaa, want_smaa) = if legacy_msaa { (false, false) } else { (mode == 2, mode == 1) };
+        if want_fxaa != has_fxaa {
+            if want_fxaa {
+                commands.entity(e).insert(bevy::anti_alias::fxaa::Fxaa::default());
+            } else {
+                commands.entity(e).remove::<bevy::anti_alias::fxaa::Fxaa>();
+            }
+        }
+        if want_smaa != has_smaa {
+            if want_smaa {
+                commands.entity(e).insert(bevy::anti_alias::smaa::Smaa::default());
+            } else {
+                commands.entity(e).remove::<bevy::anti_alias::smaa::Smaa>();
+            }
+        }
         // With the ArkPp pass the setting is the original's display gamma (the LUT exponent is
         // m_GammaAdjustment / display gamma, 0x0090ED00); otherwise Bevy's grading gamma.
         if let Some(mut ark) = ark {
