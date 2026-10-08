@@ -12,7 +12,8 @@
 //! | `PSI_HUD_CrosshairStyle` (Off / Simple / Normal) | no crosshair / dot only / item crosshairs (0x00B9FF30) | applied |
 //! | `PSI_HUD_bCrosshairMovement` | the crosshair moves to the focused interactable | applied |
 //! | `PSI_HUD_CrosshairOpacity` | crosshair alpha (dot and aspect) | applied |
-//! | `PSI_HUD_bShowObjectiveMarkers`, `...AwarenessMarkers`, `...GrenadeMarkers`, `...HeartTargetMarkers` | the marker lists | markers not drawn yet |
+//! | `PSI_HUD_bShowObjectiveMarkers` | the task markers (`m_TaskMarkerSettings`) | applied (the mission target's marker) |
+//! | `...AwarenessMarkers`, `...GrenadeMarkers`, `...HeartTargetMarkers` | the marker lists | not drawn yet |
 //! | `PSI_HUD_bShowTutorialNotifications`, `...Highlight`, `...ContextualIcons` | tutorials, object highlight, context icons | not drawn yet |
 
 use crate::settings::GameSettings;

@@ -168,14 +168,8 @@ registration in the export sprites' DoInitAction: `hud_objW` -> `ObjectivesNotif
 - No key shows them: `DefaultInput.ini` has no objectives binding; the objectives are read in
   the journal (`GBA_Journal`, J, `Dis_ToggleJournal`). `PSI_HUD_bShowObjectivePopups` turns them off.
 
-Port (`hud_popups.rs`): the match banner (mode, clock, score: no single-player counterpart) and
-the target paper follow these rules. The banner opens 2 s after the match starts, when the
-local score or the leader changes, when a mission objective, task or notification changes, and on
-J (the journal key, as the port has no journal screen); one line (the score) gives 0.7 + 3.5 s
-shown, then the fade. The Contracts target paper opens when the target changes and on J
-(1 + 5 s, then the fade); in missions the task paper follows the banner. Re-opening restarts the
-popup (the native queue is not reproduced). With the popups option off only J opens them. The
-scoreboard (with the clock) stays on Tab.
+Port: the HUD movie itself plays (`gfx_hud.rs`, `hud_widgets.rs`) and the native queue with its
+merging rules is reproduced (`hud_popups.rs`); see HUD.md for the full decode.
 
 ## Where the text comes from
 
