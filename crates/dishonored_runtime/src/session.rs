@@ -67,8 +67,10 @@ impl Session {
         let content = maps.get(&start).cloned().expect("start map loaded");
         maps.set.set_active(&content.map_name);
         let is_mission = mission.is_some();
-        // Missions are solo/co-op against the level's NPCs: no deathmatch bots.
-        let bots = if is_mission { 0 } else { bots };
+        // Missions are solo/co-op against the level's NPCs: no deathmatch bots (the Playground
+        // takes them when asked for, `--playground --bots N`).
+        let playground = mission.as_ref().is_some_and(|m| dishonored_content::playground::is_layout_map(&m.map));
+        let bots = if is_mission && !playground { 0 } else { bots };
         let setup = if let Some(def) = mission {
             dishonored_content::mission_setup(&maps, def).unwrap_or_else(|e| panic!("mission setup: {e}"))
         } else if contracts {

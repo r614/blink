@@ -56,6 +56,15 @@ pub fn spawn_level(
     fx: &mut crate::effects::Effects,
 ) -> DishonoredMap {
     let content = Content::locate().expect("Dishonored install not found (set DISHONORED_DIR)");
+    // [playground] A map built from a layout of original assets (`maps/<name>.ron`).
+    if let Some(layout) = dishonored_content::playground::layout_for(name) {
+        let layout = layout.expect("map layout");
+        let (map, stats) = dishonored_assets::level::layout_import::import_layout(&content, &layout, &import_options(name, opts)).expect("layout import failed");
+        for e in &stats.errors {
+            warn!("layout {name}: {e}");
+        }
+        return spawn_imported(name, map, stats.instances, opts, features, commands, meshes, images, materials, baked, levels, fx);
+    }
     // --legacy-geometry: the pre-fidelity package/actor coverage (prefix-matched sublevels,
     // StaticMeshActor + StaticMeshCollectionActor only), for before/after comparisons.
     let pkgs = if opts.legacy { dishonored_assets::map_packages_by_prefix(&content, name) } else { map_packages(&content, name) };
@@ -85,6 +94,10 @@ fn import_options(name: &str, opts: &LevelOptions) -> ImportOptions {
 /// Import a level (worker-thread safe).
 fn import(name: &str, opts: &LevelOptions) -> Result<DishonoredMap, String> {
     let content = Content::locate().map_err(|e| e.to_string())?;
+    if let Some(layout) = dishonored_content::playground::layout_for(name) {
+        let layout = layout.map_err(|e| format!("{e:#}"))?;
+        return dishonored_assets::level::layout_import::import_layout(&content, &layout, &import_options(name, opts)).map(|r| r.0).map_err(|e| format!("{e:#}"));
+    }
     let pkgs = if opts.legacy { dishonored_assets::map_packages_by_prefix(&content, name) } else { map_packages(&content, name) };
     let iopts = import_options(name, opts);
     import_level(&content, name, &pkgs, &iopts).map(|r| r.0).map_err(|e| format!("{e:#}"))
