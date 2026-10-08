@@ -41,6 +41,13 @@ pub struct MaterialChain {
     /// order; textures sampled without a parameter (e.g. `Moon_PMAT`'s moon disc) survive
     /// cooking only here.
     pub expression_textures: Vec<Key>,
+    /// The base material's `FMaterialResource`: its `Id` (keys the shader cache's maps of its
+    /// static permutations) and its `UniformExpressionTextures` by position (None: a null or
+    /// unresolved reference).
+    pub base_resource: Option<([u8; 16], Vec<Option<Key>>)>,
+    /// The compiled resource the original renders with: the leaf-most instance with a static
+    /// permutation resource (`bHasStaticPermutationResource`), else the base material's.
+    pub resource: Option<([u8; 16], Vec<Option<Key>>)>,
 }
 
 impl MaterialChain {
@@ -93,6 +100,19 @@ pub fn walk(pkgs: &[Arc<Package>], start: Key, resolve: &mut dyn FnMut(usize, Ob
         if out.phys_material.is_none() {
             if let Some(pm) = find(&props, "PhysMaterial").and_then(|p| p.as_object()).filter(|o| *o != 0) {
                 out.phys_material = resolve(cur.0, ObjRef::from_index(pm));
+            }
+        }
+        let compiled = class == "Material" || matches!(find(&props, "bHasStaticPermutationResource").map(|p| &p.value), Some(Value::Bool(true)));
+        if out.resource.is_none() && compiled {
+            if let Some((id, refs)) = pkg.export_data(cur.1).ok().and_then(|data| material_resource(data, hdr.native_offset)) {
+                let refs = refs.into_iter().map(|r| if r == 0 { None } else { resolve(cur.0, ObjRef::from_index(r)) }).collect();
+                out.resource = Some((id, refs));
+            }
+        }
+        if class == "Material" {
+            if let Some((id, refs)) = pkg.export_data(cur.1).ok().and_then(|data| material_resource(data, hdr.native_offset)) {
+                let refs = refs.into_iter().map(|r| if r == 0 { None } else { resolve(cur.0, ObjRef::from_index(r)) }).collect();
+                out.base_resource = Some((id, refs));
             }
         }
         if out.static_params.is_none() && matches!(find(&props, "bHasStaticPermutationResource").map(|p| &p.value), Some(Value::Bool(true))) {
@@ -244,6 +264,15 @@ fn read_base_material(
 /// (layout read from L_Boyle_Ext_Env `Moon_PMAT`, whose two entries are the moon texture and
 /// the `Cloud` parameter's default). Returns the raw object references.
 pub fn uniform_expression_textures(data: &[u8], native_offset: usize) -> Option<Vec<i32>> {
+    material_resource(data, native_offset).map(|r| r.1)
+}
+
+/// The `FMaterialResource` at the start of a material's (or a static permutation instance's)
+/// native data: its `Id` (the raw GUID bytes the shader cache keys its maps by) and its
+/// `UniformExpressionTextures` (raw object references, in order; 0 = none). Layout as in
+/// [`uniform_expression_textures`]. Adapted from dishonored-bevy by Eamon
+/// (github.com/Eamo5/dishonored-bevy), used with permission (dhcook's `material_resource`).
+pub fn material_resource(data: &[u8], native_offset: usize) -> Option<([u8; 16], Vec<i32>)> {
     let mut p = native_offset;
     let n_err = u32_at(data, p)? as usize;
     if n_err > 64 {
@@ -258,13 +287,16 @@ pub fn uniform_expression_textures(data: &[u8], native_offset: usize) -> Option<
     if n_map > 256 {
         return None;
     }
-    p += 4 + n_map * 8 + 4 + 16 + 4;
+    p += 4 + n_map * 8 + 4;
+    let id: [u8; 16] = data.get(p..p + 16)?.try_into().ok()?;
+    p += 16 + 4;
     let n = u32_at(data, p)? as usize;
     if n > 64 {
         return None;
     }
     p += 4;
-    (0..n).map(|i| u32_at(data, p + i * 4).map(|v| v as i32)).collect()
+    let textures = (0..n).map(|i| u32_at(data, p + i * 4).map(|v| v as i32)).collect::<Option<Vec<i32>>>()?;
+    Some((id, textures))
 }
 
 /// Like [`slot`] over an arbitrary parameter list (e.g. the base material defaults).

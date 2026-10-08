@@ -4,13 +4,18 @@
 // level reaches 1 at m_DarknessLevels[1] = 12. The port's scenario civilians are mission NPCs,
 // whose victim tweak is their role's base tweak (Pwn_Civ_Base). Kills by back assassination
 // (combat/melee_assassinate_back_d120).
+//
+// Round 8 (original capture): the player must start with the sword in hand (sword_drawn: true). A fresh
+// level leaves the right hand empty, so the first press only draws the sword and the first capture held
+// the later kills only (the first real kill came after the tick-200 teleport). The console teleports
+// are now applied on the original as an engine SetLocation at their tick boundary (capture round 8).
 (
     name: "chaos/civilian_kills",
     system: Chaos,
     map: "Playground",
     description: "Assassinate two civilians from behind: the chaos score is 6 after the first and 12 (level 1) after the second.",
     setup: (
-        player: Some((position: (-5300, 0, 96), yaw: 180, pitch: 0)),
+        player: Some((position: (-5300, 0, 96), yaw: 180, pitch: 0, sword_drawn: true)),
         npcs: [
             (id: Some("civ1"), kind: Some("Civilian"), position: Some((-5420, 0, 92)), yaw: 180, state: Some("Passive")),
             (id: Some("civ2"), kind: Some("Civilian"), position: Some((-5420, 800, 92)), yaw: 180, state: Some("Passive")),

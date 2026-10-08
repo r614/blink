@@ -77,6 +77,21 @@ pub struct Particle {
     pub max_collisions: u32,
     pub frozen: bool,
     pub halted: bool,
+    /// A decal particle (`ParticleModuleTypeDataDecal`): the normal (Dishonored world) of the
+    /// surface it lies on.
+    pub normal: Option<Vec3>,
+}
+
+/// An event an emitter reports (`ParticleModuleEventGenerator`): its kind
+/// (`dishonored_ir::particles::EVENT_*`), `CustomName`, the place (Dishonored world), the
+/// surface normal of a collision and the velocity (reflected, for a collision).
+#[derive(Clone, Debug)]
+pub struct PfxEvent {
+    pub kind: u8,
+    pub name: String,
+    pub pos: Vec3,
+    pub vel: Vec3,
+    pub normal: Option<Vec3>,
 }
 
 /// World ray query for particle collision: (from, to) -> (point, normal).
@@ -95,11 +110,14 @@ pub struct EmitterSim {
     /// The emitter's sprite mesh holds no particles (the placeholder triangle): it is not
     /// rebuilt (and re-uploaded) again until particles exist.
     pub mesh_empty: bool,
+    /// Events the emitter generated since the instance last dispatched them
+    /// ([`dispatch_events`]).
+    pub events: Vec<PfxEvent>,
 }
 
 impl Default for EmitterSim {
     fn default() -> Self {
-        Self { time: 0.0, spawn_acc: 0.0, loops: 0, done: false, particles: Vec::new(), last_burst_t: -1.0, mesh_empty: true }
+        Self { time: 0.0, spawn_acc: 0.0, loops: 0, done: false, particles: Vec::new(), last_burst_t: -1.0, mesh_empty: true, events: Vec::new() }
     }
 }
 
@@ -173,7 +191,77 @@ pub fn spawn_particle(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4
         r,
         mrot: d3(&em.mesh_rotation, et, r[2], [0.0; 3]) * std::f32::consts::TAU,
         mrot_rate: d3(&em.mesh_rotation_rate, et, r[3], [0.0; 3]) * std::f32::consts::TAU,
+        normal: None,
     });
+}
+
+/// What follows a particle the emitter itself spawned: its `EPET_Spawn` events, and, for a decal
+/// emitter that no event feeds, the surface it lies on (projected along its velocity, or down,
+/// onto the world; no surface within reach, no decal. LIKELY: the engine projects the decal
+/// along the particle's motion).
+fn after_spawn(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, ray: Option<RayFn>) {
+    use dishonored_ir::particles::EVENT_SPAWN;
+    let Some(p) = sim.particles.last_mut() else { return };
+    let world = if em.local_space { xf.transform_point3(p.pos) } else { p.pos };
+    if em.decal.is_some() && em.events_in.is_empty() && p.normal.is_none() {
+        let dir = if p.vel.length_squared() > 1.0 { p.vel.normalize() } else { -Vec3::Z };
+        match ray.and_then(|ray| ray(world - dir * 8.0, world + dir * DECAL_REACH)) {
+            Some((pt, n)) => {
+                p.pos = if em.local_space { xf.inverse().transform_point3(pt) } else { pt };
+                p.normal = Some(n);
+            }
+            None => p.age = p.life,
+        }
+    }
+    let vel = p.vel;
+    for e in em.events_out.iter().filter(|e| e.kind == EVENT_SPAWN) {
+        sim.events.push(PfxEvent { kind: e.kind, name: e.name.clone(), pos: world, vel, normal: None });
+    }
+}
+
+/// How far (uu) a decal particle without an event looks for its surface.
+pub const DECAL_REACH: f32 = 120.0;
+
+/// Spawn one particle of `em` where an event happened: the emitter's modules place it relative
+/// to the event (the event point replaces the emitter's origin), `normal` is the surface it lies
+/// on and `inherit` the velocity it takes (`InheritVelocityScale` x the event's velocity).
+pub fn spawn_at(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, rnd: &mut dyn FnMut() -> f32, at: Vec3, normal: Option<Vec3>, inherit: Option<Vec3>) {
+    let before = sim.particles.len();
+    spawn_particle(em, sim, xf, rnd);
+    if sim.particles.len() == before {
+        return;
+    }
+    let shift = at - xf.w_axis.truncate();
+    let shift = if em.local_space { xf.inverse().transform_vector3(shift) } else { shift };
+    if let Some(p) = sim.particles.last_mut() {
+        p.pos += shift;
+        p.normal = normal;
+        if let Some(v) = inherit {
+            p.vel += v;
+            p.base_vel += v;
+        }
+    }
+}
+
+/// Deliver the events the emitters of an instance generated this frame to the emitters that
+/// receive them (`ParticleModuleEventReceiverSpawn`: `SpawnCount` particles at the event, taking
+/// `InheritVelocityScale` of its velocity). Always drains the events.
+pub fn dispatch_events(ems: &[ParticleEmitterAsset], sims: &mut [EmitterSim], xf: &Mat4, rnd: &mut dyn FnMut() -> f32) {
+    let events: Vec<PfxEvent> = sims.iter_mut().flat_map(|s| std::mem::take(&mut s.events)).collect();
+    if events.is_empty() {
+        return;
+    }
+    for ev in &events {
+        for (em, sim) in ems.iter().zip(sims.iter_mut()) {
+            for rx in em.events_in.iter().filter(|r| r.name == ev.name && (r.kind == dishonored_ir::particles::EVENT_ANY || r.kind == ev.kind)) {
+                let n = rx.count.as_ref().map(|d| d.eval1(sim.time, 0.5).round().max(0.0) as usize).unwrap_or(1);
+                let inherit = rx.inherit_velocity.as_ref().map(|d| Vec3::from(d.eval(sim.time, 0.5)) * ev.vel);
+                for _ in 0..n {
+                    spawn_at(em, sim, xf, rnd, ev.pos, ev.normal, inherit);
+                }
+            }
+        }
+    }
 }
 
 /// Advance one emitter by `dt`.
@@ -242,6 +330,12 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
                     let pt_s = if em.local_space { xf.inverse().transform_point3(pt) } else { pt };
                     p.pos = pt_s + n_s * 0.5;
                     moved = true;
+                    // `EPET_Collision` events (`UseReflectedImpactVector`: the velocity is the
+                    // reflected one), in world space.
+                    for e in em.events_out.iter().filter(|e| e.kind == dishonored_ir::particles::EVENT_COLLISION && (!e.first_only || p.collisions == 0)) {
+                        let w = |v: Vec3| if em.local_space { xf.transform_vector3(v) } else { v };
+                        sim.events.push(PfxEvent { kind: e.kind, name: e.name.clone(), pos: pt, vel: w(refl), normal: Some(n) });
+                    }
                     p.collisions += 1;
                     if p.collisions >= p.max_collisions {
                         match opt {
@@ -263,6 +357,15 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
         }
         p.rot += p.rot_rate * dt;
         p.mrot += p.mrot_rate * dt;
+    }
+    // `EPET_Death` events of the particles that end now.
+    if em.events_out.iter().any(|e| e.kind == dishonored_ir::particles::EVENT_DEATH) {
+        let dead: Vec<(Vec3, Vec3)> = sim.particles.iter().filter(|p| p.age >= p.life).map(|p| (if em.local_space { xf.transform_point3(p.pos) } else { p.pos }, p.vel)).collect();
+        for (pos, vel) in dead {
+            for e in em.events_out.iter().filter(|e| e.kind == dishonored_ir::particles::EVENT_DEATH) {
+                sim.events.push(PfxEvent { kind: e.kind, name: e.name.clone(), pos, vel, normal: None });
+            }
+        }
     }
     sim.particles.retain(|p| p.age < p.life);
     if sim.done {
@@ -299,6 +402,7 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
     while sim.spawn_acc >= 1.0 {
         sim.spawn_acc -= 1.0;
         spawn_particle(em, sim, xf, rnd);
+        after_spawn(em, sim, xf, ray);
     }
     let frac = t / dur;
     for (count, low, bt) in &em.bursts {
@@ -306,6 +410,7 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
             let n = if *low >= 0 { *low + (rnd() * (*count - *low + 1) as f32) as i32 } else { *count };
             for _ in 0..n.max(0) {
                 spawn_particle(em, sim, xf, rnd);
+                after_spawn(em, sim, xf, ray);
             }
         }
     }
@@ -375,6 +480,38 @@ pub fn surface_near(world: &CollisionWorld, p: Vec3) -> String {
     best.and_then(|b| world.surface_of(b.1)).unwrap_or("DisContactType_Environment").to_string()
 }
 
+/// The outward normal of the surface at a point where something struck along `dir` (the ray
+/// along it, its normal turned against it); without a direction, of the nearest surface around
+/// the point.
+pub fn normal_at(world: &CollisionWorld, p: Vec3, dir: Vec3) -> Option<Vec3> {
+    let dir = dir.normalize_or_zero();
+    if dir != Vec3::ZERO {
+        if let Some(h) = world.raycast(p - dir * 8.0, dir, 16.0, dishonored_world::channel::ALL) {
+            return Some(if h.normal.dot(dir) > 0.0 { -h.normal } else { h.normal });
+        }
+    }
+    let mut best: Option<(f32, Vec3)> = None;
+    for d in [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z] {
+        if let Some(h) = world.raycast(p - d * 12.0, d, 36.0, dishonored_world::channel::ALL) {
+            if best.is_none_or(|b| h.distance < b.0) {
+                best = Some((h.distance, if h.normal.dot(d) > 0.0 { -h.normal } else { h.normal }));
+            }
+        }
+    }
+    best.map(|b| b.1)
+}
+
+/// The decal a contact (`striker` x the surface `struck`) leaves, if its `DisContactSub_Decal`
+/// fires ([`dishonored_audio::contact::ContactDecal::fires`]): one of `m_Materials` (the original
+/// picks `rand() % Num`; here by the point, so the same hit looks the same), `m_MaxWidth` x
+/// `m_MaxHeight` uu, living `m_fLifetime`. `speed`: the contact's speed, if it has one.
+pub fn contact_decal(s: &FxScene, striker: &str, struck: &str, at: Vec3, dir: Vec3, speed: Option<f32>) -> Option<FxRequest> {
+    let cd = s.contact?.decal(striker, struck).filter(|d| d.fires(speed))?;
+    let normal = normal_at(s.world?, at, dir)?;
+    let pick = ((at.x * 7.31 + at.y * 3.17 + at.z * 1.91).abs() as usize) % cd.materials.len();
+    Some(FxRequest::Decal { material: cd.materials[pick].clone(), at, normal, dir, width: cd.max_width, height: cd.max_height, lifetime: cd.lifetime })
+}
+
 /// Contact type of the surface below a point, and its distance.
 pub fn surface_below(world: &CollisionWorld, pos: Vec3, depth: f32) -> Option<(String, f32)> {
     let hit = world.raycast(pos, -Vec3::Z, depth, dishonored_world::channel::ALL)?;
@@ -391,6 +528,10 @@ pub enum FxRequest {
     HandCast { path: String, at: Vec3, dir: Vec3 },
     /// A beam one-shot (`PEB2STM_UserSet` target) from `from` to `to`.
     Beam { path: &'static str, from: Vec3, to: Vec3 },
+    /// A gameplay decal (`DisContactSub_Decal`, [`contact_decal`]): the material's object path,
+    /// the centre and surface normal (Dishonored world), the direction it was struck along (the
+    /// decal's texture axis follows it), its size (uu) and lifetime (s).
+    Decal { material: String, at: Vec3, normal: Vec3, dir: Vec3, width: f32, height: f32, lifetime: f32 },
     /// The trail of a projectile that ended within its launch tick (never in a snapshot, so
     /// `attached_want` cannot start it): started at the launch and deactivated at once, as the
     /// projectile's trail component is when the projectile explodes (`DeactivateSystem`); it ends
@@ -425,6 +566,8 @@ pub struct FxEventState {
     pub traps: HashMap<u32, Vec3>,
     /// Pistol shots in flight: projectile id -> muzzle point (the tracer's start).
     pub shots: HashMap<u32, Vec3>,
+    /// Projectiles in flight: id -> launch direction (the decal of its impact follows it).
+    pub dirs: HashMap<u32, Vec3>,
 }
 
 /// What the gameplay effects see of the frame.
@@ -475,6 +618,7 @@ impl FxEventState {
                 }
                 SimEvent::Fired { id, bolt, projectile, kind, origin, velocity } => {
                     self.bolts.insert(*projectile, *bolt);
+                    self.dirs.insert(*projectile, velocity.normalize_or_zero());
                     // A projectile already gone (it hit within its launch tick): its trail starts
                     // and stops here; live ones get theirs from `attached_want`.
                     if let Some(path) = trail_of(*kind).filter(|_| !s.projectiles.iter().any(|q| q.id == *projectile)) {
@@ -573,23 +717,28 @@ impl FxEventState {
                     // `PEB2STM_UserSet`, one 0.1 s loop) from the muzzle to the hit, set by the shot.
                     let from = self.shots.remove(projectile).unwrap_or(*point);
                     out_beam(&mut out, PISTOL_TRACER_PS, from, *point);
+                    self.dirs.remove(projectile);
                     if victim.is_some() {
                         self.bolts.remove(projectile);
                         continue;
                     }
                     let sf = surface(*point);
                     self.bolts.remove(projectile);
+                    out.extend(contact_decal(s, "DisContactType_Bullet", &sf, *point, *point - from, None));
                     let path = s.contact.and_then(|c| c.particle("DisContactType_Bullet", &sf)).unwrap_or_else(|| "Vfx_PhysMat.pistol.Ps_PistolImpact_DirtPs_PistolImpact_Dirt".into());
                     (path, *point, Vec3::Z)
                 }
                 SimEvent::ProjectileImpact { projectile, point, victim: None } => {
                     let striker = if self.bolts.remove(projectile).unwrap_or(false) { "DisContactType_Arrow" } else { "DisContactType_Bullet" };
                     let sf = surface(*point);
+                    let dir = self.dirs.remove(projectile).unwrap_or(Vec3::ZERO);
+                    out.extend(contact_decal(s, striker, &sf, *point, dir, None));
                     let path = s.contact.and_then(|c| c.particle(striker, &sf)).unwrap_or_else(|| "Vfx_PhysMat.pistol.Ps_PistolImpact_DirtPs_PistolImpact_Dirt".into());
                     (path, *point, Vec3::Z)
                 }
                 SimEvent::ProjectileImpact { projectile, .. } => {
                     self.bolts.remove(projectile);
+                    self.dirs.remove(projectile);
                     continue;
                 }
                 _ => continue,

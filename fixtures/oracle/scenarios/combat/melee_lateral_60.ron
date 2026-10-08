@@ -1,3 +1,6 @@
+// Round 8: `sword_drawn: true` added. A fresh level leaves the right hand empty on the original, so the press
+// at tick 5 only drew the sword and the earlier capture never swung (the dummy kept 50 health); with the
+// sword given and its draw run out first, the press attacks. The port starts with the sword in hand.
 // Sword sweep width, one point of the sweep over lateral offset (60 / 90 uu to the side of the view
 // line, 140 uu ahead). m_fSweepingAttackSize is 60 (half 30) and the pawn radius 35, so the
 // design reading is a hit within about 65 uu: UNMEASURED. The port uses the same bound.
@@ -7,7 +10,7 @@
     map: "Playground",
     description: "One swing at a passive guard 140 uu ahead and 60 uu to the side.",
     setup: (
-        player: Some((position: (-5300, 0, 96), yaw: 180, pitch: -5)),
+        player: Some((sword_drawn: true, position: (-5300, 0, 96), yaw: 180, pitch: -5)),
         npcs: [(id: Some("dummy"), position: Some((-5440, 60, 92)), yaw: 0, state: Some("Passive"))],
         settle: 30,
     ),

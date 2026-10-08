@@ -1,13 +1,17 @@
+// MOVED from the Playground to Boyle Ext (round 8): the original Playground has no navmesh, so the
+// alerted guard attacked in place and never closed in or strafed. Placement: the quiet flat navmesh
+// corridor x = -8958, y -8871 .. -6671 (floor z -1318), the same 300 uu geometry rotated to +y (the
+// player faces +y, yaw 90; the guard faces back, yaw -90). Checkpoints unchanged.
 // An alerted guard fights the player, who does not defend (HOOK_TRIAGE.md 2026-10-06:
 // `DisDamageType_NPCSlash` 15, 8 on some first hits: which hits were 8 is not recorded).
 (
     name: "combat/guard_attack",
     system: Combat,
-    map: "Playground",
+    map: "L_Boyle_Ext_P",
     description: "A guard 300 uu ahead is alerted; the player stands still: the guard closes in and hits.",
     setup: (
-        player: Some((position: (-5600, 0, 96), yaw: 0, sword_drawn: true)),
-        npcs: [(id: Some("guard"), position: Some((-5300, 0, 92)), yaw: 180, state: Some("Alerted"))],
+        player: Some((position: (-8958, -8500, -1222), yaw: 90, sword_drawn: true, snap_to_floor: true)),
+        npcs: [(id: Some("guard"), position: Some((-8958, -8200, -1218)), yaw: -90, state: Some("Alerted"))],
         settle: 1,
     ),
     ticks: 900,
@@ -17,6 +21,6 @@
         (name: "slash damage", expect: [(metric: EventValue("Sim:Damage@player[cause=Sword]", "amount"), value: 15, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: DisDamageType_NPCSlash 15 (8 on some first hits)", status: Unverified)]),
         (name: "first swing", expect: [(metric: FirstAt("Sim:SwordSwing@guard"), value: 0, tol: 0, source: "time from the alert to the first swing", status: Unmeasured)]),
     ],
-    record: [Pawn, Vitals, Npc("guard"), SimEvents, Effects, Sounds, Anim],
+    record: [Pawn, Vitals, Npc("guard"), SimEvents, Effects, Sounds, Anim, Bones("guard", ["+world"]), AnimState("guard")],
     capture: Some("measure sword npc=<doorman> --defend 10 (record each damage-path call: amount, type, time)"),
 )

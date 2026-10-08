@@ -1,3 +1,6 @@
+// Round 8: `sword_drawn: true` added. A fresh level leaves the right hand empty on the original, so the press
+// at tick 5 only drew the sword and the earlier capture never swung (the dummy kept 50 health); with the
+// sword given and its draw run out first, the press attacks. The port starts with the sword in hand.
 // Sword reach, one point of the sweep over distance (160 / 230 / 260 / 300 uu between the pawns'
 // centres, straight ahead, victim facing the attacker so no assassination). Rule (research/dishonored/systems/melee.md):
 // the swing context's m_fMaxContextRange is 210 x max(Attribute_Range, 1); the sweep (m_fSweepingAttackSize 60)
@@ -10,7 +13,7 @@
     map: "Playground",
     description: "One swing at a passive guard 300 uu straight ahead: does it connect.",
     setup: (
-        player: Some((position: (-5300, 0, 96), yaw: 180, pitch: -5)),
+        player: Some((sword_drawn: true, position: (-5300, 0, 96), yaw: 180, pitch: -5)),
         npcs: [(id: Some("dummy"), position: Some((-5600, 0, 92)), yaw: 0, state: Some("Passive"))],
         settle: 30,
     ),

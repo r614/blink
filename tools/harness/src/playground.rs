@@ -11,7 +11,7 @@ use dishonored_content::{MapContents, MatchContent};
 use dishonored_mission::MissionDef;
 use dishonored_multiplayer::game::Game;
 use dishonored_multiplayer::mission::MissionMatch;
-use dishonored_sim::events::SimEvent;
+use dishonored_sim::events::{DamageCause, SimEvent};
 use dishonored_sim::input::{LeftHand, PlayerInput, buttons};
 use dishonored_sim::state::{MoveMode, PlayerState, WorldState, power};
 use dishonored_sim::{spawn_player, step_world};
@@ -616,13 +616,16 @@ fn stations_in_mission(rep: &mut Report, maps: &MapContents, def: &MissionDef) -
     let (y, pi) = p.aim(tp + Vec3::Z * 20.0);
     let before = p.events.len();
     p.step(PlayerInput { yaw: y, pitch: pi, buttons: buttons::PRIMARY, ..Default::default() });
-    p.idle(60, PlayerInput { yaw: y, pitch: pi, ..Default::default() });
-    let dmg: Vec<f32> = p.events[before..].iter().filter_map(|(_, e)| match e {
-        SimEvent::Damage { victim, amount, .. } if *victim == id => Some(*amount),
+    p.idle(240, PlayerInput { yaw: y, pitch: pi, ..Default::default() });
+    // The dummy is a brainless Passive pawn, so it is unaware of the player: on the original
+    // the press is a front assassination (health 50 -> 0, measured: ORACLE.md, combat/sword_hit_dummy).
+    let assassinated = p.events[before..].iter().any(|(_, e)| matches!(e, SimEvent::Death { victim, cause: DamageCause::Assassination, .. } if *victim == id));
+    let causes: Vec<String> = p.events[before..].iter().filter_map(|(_, e)| match e {
+        SimEvent::Damage { victim, amount, cause, .. } if *victim == id => Some(format!("{amount:.0} {cause:?}")),
+        SimEvent::Death { victim, cause, .. } if *victim == id => Some(format!("death {cause:?}")),
         _ => None,
     }).collect();
-    let still = p.m().world.player(id).map(|t| (t.position - tp).truncate().length()).unwrap_or(0.0);
-    rep.check(S, "sword dummy: a sword hit lands (10 = Attribute_MeleeDamage, melee.md F1) and the dummy does not fight back", dmg.first().is_some_and(|d| (*d - 10.0).abs() < 0.5) && still < 50.0, format!("damage {dmg:?}, dummy moved {still:.0} uu"));
+    rep.check(S, "sword dummy: the press on the unaware dummy is a front assassination, as on the original", assassinated, format!("{causes:?}"));
 
     // The stealth lane's patrol walks the generated navigation mesh between its two points.
     let guard = p.npc("patrol");

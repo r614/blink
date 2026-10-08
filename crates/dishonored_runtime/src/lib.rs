@@ -1,4 +1,4 @@
-﻿//! Standalone Dishonored runtime (presentation + local input). Gameplay is
+//! Standalone Dishonored runtime (presentation + local input). Gameplay is
 //! `dishonored_sim`, run locally (offline) or predicted against a dedicated server.
 //!
 //! ```text
@@ -83,6 +83,7 @@ pub mod water;
 #[doc(hidden)]
 pub mod reflect;
 #[doc(hidden)]
+pub mod tv_screen;
 pub mod volume_light;
 #[doc(hidden)]
 pub mod spillway;
@@ -94,9 +95,17 @@ pub mod char_light;
 #[doc(hidden)]
 pub mod loading_screen;
 #[doc(hidden)]
+pub mod warmup;
+#[doc(hidden)]
 pub mod lighting;
 #[doc(hidden)]
 pub mod map_render;
+#[doc(hidden)]
+pub mod ue3mat;
+#[doc(hidden)]
+pub mod ue3_level;
+#[doc(hidden)]
+pub mod ppgraph;
 #[doc(hidden)]
 pub mod players;
 #[doc(hidden)]
@@ -335,6 +344,7 @@ pub fn main() {
     // The original's `DynamicShadows` and `LightEnvironmentShadows` system settings gate the
     // dominant point light's shadow.
     args.features.point_shadows &= game_settings.s.graphics.dynamic_shadows && game_settings.s.graphics.light_environment_shadows;
+    args.features.dynamic_decals &= game_settings.s.graphics.dynamic_decals;
     if !std::env::args().any(|a| a == "--max-tex") {
         args.max_tex = settings::max_texture_size(&game_settings.s);
     }
@@ -368,6 +378,8 @@ pub fn main() {
     .insert_resource(audio::global_volume())
     .add_plugins(FrameTimeDiagnosticsPlugin::default())
     .add_plugins(MaterialPlugin::<map_render::BakedMaterial>::default())
+    .add_plugins(ue3mat::Ue3Plugin)
+    .add_plugins(ppgraph::PostGraphPlugin)
     .add_plugins(ark_post::ArkPostPlugin)
     .add_plugins(distortion::DistortionPlugin)
     .add_plugins(sky::SkyPlugin)
@@ -376,12 +388,14 @@ pub fn main() {
     .add_plugins(water::WaterPlugin)
     .add_plugins(reflect::ReflectPlugin)
     .add_plugins(volume_light::VolumeLightPlugin)
+    .add_plugins(tv_screen::TvScreenPlugin)
     .add_plugins(spillway::SpillwayPlugin)
     .add_plugins(water_foam::WaterFoamPlugin)
     .add_plugins(prop_light::PropLightPlugin)
     .add_plugins(char_light::CharLightPlugin)
     .add_plugins(bloom::BloomPlugin)
     .add_plugins(env_map::EnvMapOncePlugin)
+    .add_plugins(warmup::WarmupPlugin)
     .add_plugins(bevy::diagnostic::EntityCountDiagnosticsPlugin::default())
     .insert_resource(ClearColor(Color::srgb(0.08, 0.09, 0.12)))
     // Placeholder ambient; with real lights it only fills non-lightmapped meshes at night level.
@@ -503,6 +517,7 @@ pub fn main() {
             .init_resource::<viewmodel::ViewAnim>()
             .init_resource::<viewmodel::BodyFrames>()
             // Choked / carried bodies in their master's frame (the first-person rig's for the local player).
+            .add_systems(Update, viewmodel::arm_glow_apply.after(power_pp::drive))
             .add_systems(Update, viewmodel::place_held_bodies.after(players::sync_players).after(viewmodel::animate_view_rig).after(cutscene::drive).before(characters::animate_characters))
             .add_systems(FixedUpdate, (harness::script_fixed, session::fixed_tick, saves::write_autosaves).chain().run_if(pause_menu::sim_running))
             .insert_resource(saves::Saves::new(args.mission_path.clone()))
@@ -571,10 +586,12 @@ fn connect(addr: &str, args: &Args) -> NetClient {
 #[derive(Resource)]
 pub struct LevelSettings(pub level::LevelOptions);
 
-fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, mut materials: ResMut<Assets<StandardMaterial>>, mut baked: ResMut<Assets<map_render::BakedMaterial>>, mut fx: ResMut<effects::Effects>) {
+fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, mut materials: ResMut<Assets<StandardMaterial>>, mut baked: ResMut<Assets<map_render::BakedMaterial>>, mut fx_mats: ResMut<Assets<effects::FxMaterial>>, mut fx: ResMut<effects::Effects>, mut warm: ResMut<warmup::Warmup>) {
     let opts = level::LevelOptions { max_tex: args.max_tex, show_hidden: args.show_hidden, legacy: std::env::args().any(|a| a == "--legacy-geometry") };
     let mut levels = level::Levels::default();
-    let map = level::spawn_level(&args.map, &opts, &args.features, &mut commands, &mut meshes, &mut images, &mut materials, &mut baked, &mut levels, &mut fx);
+    let map = level::spawn_level(&args.map, &opts, &args.features, &mut commands, &mut meshes, &mut images, &mut materials, &mut baked, &mut fx_mats, &mut levels, &mut fx);
+    // Pipeline warm-up behind the hidden window / loading screen (`handoff::reveal` waits for it).
+    warm.begin(true, false);
 
     let spawn = map.spawn_candidates.first();
     let start = args.pos.or(spawn.map(|s| s.position + glam::Vec3::Z * 64.0)).unwrap_or(glam::Vec3::new(0.0, 0.0, 500.0));
@@ -583,13 +600,13 @@ fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Asset
     let far = if args.features.sky { 12000.0 } else { 6000.0 };
     let projection = Projection::Perspective(PerspectiveProjection { fov: 75f32.to_radians(), near: 0.005, far, ..default() });
     let camera = if args.mode == Mode::Inspect {
-        let mut cam = commands.spawn((Camera3d::default(), projection, Transform::from_translation(coords::pos(start)), FreeCam { yaw, pitch: args.pitch }));
+        let mut cam = commands.spawn((Camera3d::default(), projection, Transform::from_translation(coords::pos(start)), FreeCam { yaw, pitch: args.pitch }, reflect::game_layers()));
         if std::env::var_os("DISHONORED_NODEPTH").is_none() {
             cam.insert(bevy::core_pipeline::prepass::DepthPrepass);
         }
         cam.id()
     } else {
-        let mut cam = commands.spawn((Camera3d::default(), projection, Transform::default(), players::GameCamera { third_person: args.spectate, follow: None }, if std::env::var_os("DISHONORED_NOMSAA").is_some() { Msaa::Off } else { Msaa::Sample4 }));
+        let mut cam = commands.spawn((Camera3d::default(), projection, Transform::default(), players::GameCamera { third_person: args.spectate, follow: None }, if std::env::var_os("DISHONORED_NOMSAA").is_some() { Msaa::Off } else { Msaa::Sample4 }, reflect::game_layers()));
         // The scene-depth texture of the translucent materials (water thickness and fake fog,
         // volume light and foam depth fades; research/dishonored/systems/render_depth.md).
         // DISHONORED_NODEPTH=1 leaves the prepass out to measure its cost.

@@ -54,8 +54,9 @@ fn boyle_ext_import() {
     // objects, sinks, alarm bells, the climbable chain, the sewer gate and the bridge).
     assert_eq!(map.meshes.len(), 519);
     // Components whose static mesh comes from their archetype (collision audit): 5 meshes and
-    // 70 instances more.
-    assert_eq!(map.instances.len(), 3827);
+    // 70 instances more; one fewer since a StaticMeshActor whose component lives in its level's
+    // collection actor is left to the collection (it was placed twice, MAP_SWEEP.md).
+    assert_eq!(map.instances.len(), 3826);
     assert_eq!(stats.skeletal_props, 3);
     assert_eq!(map.spawn_candidates.len(), 5);
     // U-580: the sky dome (no LightMapCoordinateIndex, so its lightmap set is 0) keeps its

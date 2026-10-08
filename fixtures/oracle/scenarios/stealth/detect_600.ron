@@ -27,6 +27,6 @@
         (name: "busted", expect: [(metric: TimeToReach("npc.guard.attn_level", 4), value: 1.85, tol: 0.1, source: "ORACLE.md 2026-10-08: level 4 at frame 111", status: Measured)]),
         (name: "LOS norm after the head turns (inner cone)", expect: [(metric: At("npc.guard.los", 100), value: 0.169, tol: 0.01, source: "ORACLE.md 2026-10-08: 591 / 3500 once the head turned (the turn tick is not given)", status: Unverified)]),
     ],
-    record: [Pawn, Npc("guard")],
+    record: [Pawn, Npc("guard"), Bones("guard", ["+world"]), AnimState("guard")],
     capture: Some("captured 2026-10-08 (session run with npc attention channels); the camera_jnt pose per tick is still requested (capture_queue.txt)"),
 )

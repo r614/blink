@@ -292,7 +292,7 @@ fn update_characters(
     world: Res<CharLightWorld>,
     session: Option<Res<crate::session::Session>>,
     cams: Query<&GlobalTransform, With<GameCamera>>,
-    mut roots: Query<(&GlobalTransform, &Children, &mut CharLight), Without<crate::viewmodel::ViewRoot>>,
+    mut roots: Query<(&GlobalTransform, &Children, &mut CharLight, Option<&crate::npc_anim::PawnAnim>), Without<crate::viewmodel::ViewRoot>>,
     views: Query<&ViewVisibility>,
     mut mats: ResMut<Assets<CharMaterial>>,
 ) {
@@ -300,9 +300,12 @@ fn update_characters(
     let now = time.elapsed_secs();
     let unit = crate::map_render::light_unit();
     let eyes: Vec<glam::Vec3> = cams.iter().map(|c| to_ue(c.translation())).collect();
-    for (gt, children, mut st) in &mut roots {
-        // The bounds: the bind pose's sphere about the pawn.
-        let origin = to_ue(gt.transform_point(crate::coords::pos(st.sphere.0)));
+    for (gt, children, mut st, anim) in &mut roots {
+        // The bounds: the bind pose's sphere about the pawn; a body in its ragdoll (a corpse, a
+        // thrown pawn) is bounded where its bodies are (LIKELY: the original's bounds follow the
+        // posed mesh).
+        let centre = anim.and_then(|a| a.ragdoll.as_ref()).map_or(st.sphere.0, |r| r.center());
+        let origin = to_ue(gt.transform_point(crate::coords::pos(centre)));
         let radius = st.sphere.1;
         if now >= st.next_poll {
             st.next_poll = now + VISIBILITY_POLL;

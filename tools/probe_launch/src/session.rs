@@ -675,7 +675,7 @@ impl Session {
                 let ctab = cache.as_ref().and_then(|m| m.get(&hash)).cloned().unwrap_or_default();
                 drop(cache);
                 let mut out = Vec::new();
-                for (frame, _, regs) in self.c.ps_constants(hash, draws, "")? {
+                for (frame, _, regs, texs) in self.c.ps_constants_tex(hash, draws, "")? {
                     let mut m = Map::new();
                     for p in ctab.split_whitespace() {
                         let Some((name, reg)) = p.split_once('=') else { continue };
@@ -685,7 +685,8 @@ impl Session {
                         let v: Vec<[f32; 4]> = regs.iter().skip(i).take(n).copied().collect();
                         m.insert(name.to_string(), json!(v));
                     }
-                    out.push(json!({"frame": frame, "params": m}));
+                    let tex: Vec<Value> = texs.iter().map(|t| json!({"stage": t.stage, "ptr": format!("{:#x}", t.ptr), "type": t.ty, "format": format!("{:#x}", t.format), "usage": t.usage, "pool": t.pool, "width": t.width, "height": t.height, "levels": t.levels, "hash": format!("{:016x}", t.hash)})).collect();
+                    out.push(json!({"frame": frame, "params": m, "textures": tex}));
                 }
                 json!({"hash": h, "ctab": ctab, "draws": out})
             }

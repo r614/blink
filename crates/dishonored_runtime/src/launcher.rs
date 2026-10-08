@@ -586,6 +586,7 @@ pub fn run() -> AppExit {
     .add_plugins(crate::sky::SkyPlugin)
     .add_plugins(crate::bloom::BloomPlugin)
     .add_plugins(crate::env_map::EnvMapOncePlugin)
+    .add_plugins(crate::warmup::WarmupPlugin)
     .add_plugins(MenuAudioPlugin { register_source: true, music: true })
     .insert_resource(crate::audio::global_volume())
     .insert_resource(ClearColor(Color::srgb(0.05, 0.055, 0.06)))
@@ -612,7 +613,7 @@ pub fn run() -> AppExit {
     }
     let level = la.menu_level;
     app.insert_resource(script)
-        .add_systems(Startup, (move |c: Commands| launcher_bg::start(c, level), setup, crate::gfx_hud::load_game_fonts))
+        .add_systems(Startup, (move |c: Commands, f: Res<crate::map_render::RenderFeatures>| launcher_bg::start(c, level, f), setup, crate::gfx_hud::load_game_fonts))
         .add_systems(
             Update,
             (

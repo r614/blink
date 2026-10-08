@@ -377,6 +377,13 @@ impl Ragdoll {
         }
     }
 
+    /// The centre of the bodies' bounding box (pawn space): where the lying body's bounds are, for
+    /// its light environment (`char_light.rs`).
+    pub fn center(&self) -> Vec3 {
+        let (lo, hi) = self.bodies.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), b| (lo.min(b.pos), hi.max(b.pos)));
+        if self.bodies.is_empty() { Vec3::ZERO } else { (lo + hi) * 0.5 }
+    }
+
     /// Current pawn-space globals of part 0's bones.
     pub fn globals(&self) -> Vec<Mat4> {
         let n = self.bodies.len();

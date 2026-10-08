@@ -27,6 +27,7 @@ anyhow.workspace = true
 bevy = { version = "0.19", features = ["pbr_specular_textures"] }
 dishonored_assets.workspace = true
 ue3_package.workspace = true
+ue3_shader = { path = "../ue3_shader" }
 dishonored_ir.workspace = true
 dishonored_sim.workspace = true
 dishonored_world.workspace = true

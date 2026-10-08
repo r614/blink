@@ -21,25 +21,34 @@ const CAM_YAW: f32 = 12916.0 * 360.0 / 65536.0;
 
 #[derive(Resource, Default)]
 pub struct MenuBackground {
-    rx: Option<Mutex<Receiver<Option<DishonoredMap>>>>,
+    rx: Option<Mutex<Receiver<Option<(DishonoredMap, map_render::PreparedMap)>>>>,
     /// "loading", "level", "movie" (no level: the movie's own background art).
     pub state: &'static str,
+    /// The level is in the world and its pipelines are compiling (`warmup.rs`); the state stays
+    /// "loading" (the movie's own background) until they are, so the level never pops in
+    /// half-drawn or hitches the menu.
+    warming: bool,
 }
 
-pub fn start(mut commands: Commands, enabled: bool) {
+/// Import the menu level and prepare its render data on a worker thread: the main thread only
+/// adds the finished assets and spawns entities (`finish`).
+pub fn start(mut commands: Commands, enabled: bool, features: Res<map_render::RenderFeatures>) {
     if !enabled {
-        commands.insert_resource(MenuBackground { rx: None, state: "movie" });
+        commands.insert_resource(MenuBackground { rx: None, state: "movie", warming: false });
         return;
     }
     let (tx, rx) = channel();
+    let features = features.clone();
     std::thread::Builder::new()
         .name("menu-level".into())
         .spawn(move || {
-            let r = (|| -> anyhow::Result<DishonoredMap> {
+            let r = (|| -> anyhow::Result<(DishonoredMap, map_render::PreparedMap)> {
                 let content = dishonored_assets::Content::locate()?;
                 let pkgs = dishonored_assets::map_packages(&content, MENU_MAP);
                 let opts = dishonored_assets::ImportOptions { max_texture_size: 1024, other_actors: true, ..Default::default() };
-                Ok(dishonored_assets::import_level(&content, MENU_MAP, &pkgs, &opts)?.0)
+                let map = dishonored_assets::import_level(&content, MENU_MAP, &pkgs, &opts)?.0;
+                let prep = map_render::prepare_map(&map, false, &features);
+                Ok((map, prep))
             })();
             if let Err(e) = &r {
                 eprintln!("menu level unavailable: {e:#}");
@@ -47,7 +56,7 @@ pub fn start(mut commands: Commands, enabled: bool) {
             let _ = tx.send(r.ok());
         })
         .ok();
-    commands.insert_resource(MenuBackground { rx: Some(Mutex::new(rx)), state: "loading" });
+    commands.insert_resource(MenuBackground { rx: Some(Mutex::new(rx)), state: "loading", warming: false });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -60,15 +69,23 @@ pub fn finish(
     mut baked: ResMut<Assets<map_render::BakedMaterial>>,
     features: Res<map_render::RenderFeatures>,
     cams: Query<Entity, With<MenuCamera>>,
+    mut warm: ResMut<crate::warmup::Warmup>,
 ) {
+    if bg.warming {
+        if warm.done() {
+            bg.warming = false;
+            bg.state = "level";
+        }
+        return;
+    }
     let Some(rx) = &bg.rx else { return };
-    let Ok(map) = rx.lock().unwrap().try_recv() else { return };
+    let Ok(got) = rx.lock().unwrap().try_recv() else { return };
     bg.rx = None;
-    let Some(map) = map else {
+    let Some((map, prep)) = got else {
         bg.state = "movie";
         return;
     };
-    let n = map_render::spawn_map(&map, &mut commands, &mut meshes, &mut images, &mut materials, &mut baked, false, &features);
+    let n = map_render::spawn_prepared(&map, prep, &mut commands, &mut meshes, &mut images, &mut materials, &mut baked, false, &features);
     crate::lighting::spawn_lights(&map, &mut commands, &features);
     if let Some(cam) = cams.iter().next() {
         if features.materials {
@@ -80,7 +97,13 @@ pub fn finish(
         commands.insert_resource(fog);
     }
     info!("menu level: {n} entities");
-    bg.state = "level";
+    // Every pipeline the level uses is compiled before it is shown (the menu keeps its own
+    // background art meanwhile).
+    if warm.begin(false, false) {
+        bg.warming = true;
+    } else {
+        bg.state = "level";
+    }
 }
 
 #[derive(Component)]

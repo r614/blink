@@ -328,3 +328,14 @@ pub const GAMEPLAY_PARTICLES: &[&str] = &[
     "Vfx_GamePlay.RiverKrust.RK_SwordImpact",
     "vfx_characters.SmallRats.Pfx_SmallRats_Death",
 ];
+
+/// The materials of the contact system's `DisContactSub_Decal`s (`m_pMaterial` and `m_Materials`
+/// of every `m_DecalInfo`): imported with every level into `DishonoredMap::named_materials`. The
+/// particle decals' materials come with their systems (`ParticleModuleTypeDataDecal`).
+pub const GAMEPLAY_DECAL_MATERIALS: &[&str] = &[
+    "Vfx_PhysMat.Decals.Bullet_Impact_Stone_01_INST",
+    "Vfx_PhysMat.Decals.Bullet_Impact_Metal_01_INST",
+    "Vfx_PhysMat.Decals.Bullet_Impact_Wood_01_INST",
+    "Vfx_PhysMat.Decals.Arrow_Sleep_Impact_01_INST",
+    "Vfx_PhysMat.Blood.blood_splatter_decal_INST",
+];

@@ -21,6 +21,7 @@ const DEV_DRAW_INDEXED_PRIMITIVE: usize = 82;
 const DEV_DRAW_PRIMITIVE_UP: usize = 83;
 const DEV_DRAW_INDEXED_PRIMITIVE_UP: usize = 84;
 const DEV_CREATE_PIXEL_SHADER: usize = 106;
+const DEV_SET_TEXTURE: usize = 65;
 const DEV_SET_PIXEL_SHADER: usize = 107;
 const DEV_SET_PS_CONST_F: usize = 109;
 const DEV_CREATE_VERTEX_SHADER: usize = 91;
@@ -76,6 +77,10 @@ pub struct PsState {
     pub want_draws: u32,
     pub want_filter: String,
     pub got: Vec<(u32, u64, Vec<[f32; 4]>)>,
+    /// Textures bound at each draw in `got` (same order).
+    pub got_tex: Vec<Vec<TexInfo>>,
+    /// Texture bound per pixel stage (SetTexture mirror).
+    pub tex: [u32; 16],
     /// Shader hashes whose draws are skipped (`DRAW_SKIP`).
     pub skip: Vec<u64>,
     /// Per-shader (draws, primitives) while `census` is on (`DRAW_CENSUS`).
@@ -129,7 +134,7 @@ pub fn install() {
         let release: unsafe extern "system" fn(u32) -> u32 = std::mem::transmute(vfn(d3d, UNK_RELEASE) as usize);
         release(d3d);
         if let Ok(mut ps) = PS.lock() {
-            *ps = Some(PsState { shaders: HashMap::new(), current: 0, regs: vec![[0.0; 4]; 224], want_hash: 0, want_draws: 0, want_filter: String::new(), got: Vec::new(), skip: Vec::new(), census_on: false, census: HashMap::new() });
+            *ps = Some(PsState { shaders: HashMap::new(), current: 0, regs: vec![[0.0; 4]; 224], want_hash: 0, want_draws: 0, want_filter: String::new(), got: Vec::new(), got_tex: Vec::new(), tex: [0; 16], skip: Vec::new(), census_on: false, census: HashMap::new() });
         }
     }
 }
@@ -149,7 +154,8 @@ unsafe extern "system" fn create_device_hook(this: u32, adapter: u32, ty: u32, h
 
 unsafe fn hook_device(dev: u32) {
     let vt = unsafe { *(dev as *const u32) };
-    let hooks: [(usize, u32); 9] = [
+    let hooks: [(usize, u32); 10] = [
+        (DEV_SET_TEXTURE, set_texture_hook as *const () as usize as u32),
         (DEV_CREATE_VERTEX_SHADER, create_vs_hook as *const () as usize as u32),
         (DEV_PRESENT, present_hook as *const () as usize as u32),
         (DEV_DRAW_PRIMITIVE, draw_primitive_hook as *const () as usize as u32),
@@ -378,6 +384,8 @@ fn on_draw(prims: u32) -> bool {
         if let Some(h) = hit {
             let regs = ps.regs.clone();
             ps.got.push((PRESENTS.load(Relaxed), h, regs));
+            let tex = ps.tex;
+            ps.got_tex.push(describe_textures(&tex));
             ps.want_draws -= 1;
         }
     }
@@ -415,4 +423,78 @@ unsafe extern "system" fn draw_indexed_hook(dev: u32, ty: u32, base: i32, min: u
     }
     let f: unsafe extern "system" fn(u32, u32, i32, u32, u32, u32, u32) -> i32 = unsafe { std::mem::transmute(orig(DEV_DRAW_INDEXED_PRIMITIVE)) };
     unsafe { f(dev, ty, base, min, num, start, count) }
+}
+
+/// One texture bound to a pixel stage at a captured draw.
+#[derive(Clone, Debug)]
+pub struct TexInfo {
+    pub stage: u32,
+    pub ptr: u32,
+    /// `D3DRESOURCETYPE` (3 texture, 4 volume, 5 cube).
+    pub ty: u32,
+    pub format: u32,
+    pub usage: u32,
+    pub pool: u32,
+    pub width: u32,
+    pub height: u32,
+    pub levels: u32,
+    /// FNV-1a 64 of level 0's bytes (0 for render targets and unlockable textures).
+    pub hash: u64,
+}
+
+unsafe extern "system" fn set_texture_hook(dev: u32, stage: u32, tex: u32) -> i32 {
+    if stage < 16
+        && let Ok(mut g) = PS.lock()
+            && let Some(ps) = g.as_mut() {
+                ps.tex[stage as usize] = tex;
+            }
+    let f: unsafe extern "system" fn(u32, u32, u32) -> i32 = unsafe { std::mem::transmute(orig(DEV_SET_TEXTURE)) };
+    unsafe { f(dev, stage, tex) }
+}
+
+/// Bytes of level 0 for a format given the locked pitch.
+fn level_extent(format: u32, h: u32, pitch: u32) -> usize {
+    let dxt = matches!(format, 0x31545844 | 0x32545844 | 0x33545844 | 0x34545844 | 0x35545844);
+    let rows = if dxt { h.div_ceil(4) } else { h };
+    (pitch as usize) * rows as usize
+}
+
+fn describe_textures(tex: &[u32; 16]) -> Vec<TexInfo> {
+    let mut out = Vec::new();
+    for (stage, &t) in tex.iter().enumerate() {
+        if t == 0 {
+            continue;
+        }
+        unsafe {
+            let ty_fn: unsafe extern "system" fn(u32) -> u32 = std::mem::transmute(vfn(t, 10) as usize);
+            let ty = ty_fn(t);
+            let levels_fn: unsafe extern "system" fn(u32) -> u32 = std::mem::transmute(vfn(t, 13) as usize);
+            let levels = levels_fn(t);
+            let mut info = TexInfo { stage: stage as u32, ptr: t, ty, format: 0, usage: 0, pool: 0, width: 0, height: 0, levels, hash: 0 };
+            if ty == 3 {
+                let mut desc = [0u32; 8];
+                let get_desc: unsafe extern "system" fn(u32, u32, *mut u32) -> i32 = std::mem::transmute(vfn(t, 17) as usize);
+                if get_desc(t, 0, desc.as_mut_ptr()) >= 0 {
+                    info.format = desc[0];
+                    info.usage = desc[2];
+                    info.pool = desc[3];
+                    info.width = desc[6];
+                    info.height = desc[7];
+                    // Not a render target / depth stencil / default-pool texture.
+                    if info.usage & 0x3 == 0 && info.pool != 0 {
+                        let mut locked = [0u32; 2];
+                        let lock: unsafe extern "system" fn(u32, u32, *mut u32, u32, u32) -> i32 = std::mem::transmute(vfn(t, 19) as usize);
+                        if lock(t, 0, locked.as_mut_ptr(), 0, 0x10) >= 0 {
+                            let n = level_extent(info.format, info.height, locked[0]).min(8 << 20);
+                            info.hash = dishonored_probe::fnv64(std::slice::from_raw_parts(locked[1] as *const u8, n));
+                            let unlock: unsafe extern "system" fn(u32, u32) -> i32 = std::mem::transmute(vfn(t, 20) as usize);
+                            unlock(t, 0);
+                        }
+                    }
+                }
+            }
+            out.push(info);
+        }
+    }
+    out
 }
