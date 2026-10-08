@@ -132,6 +132,8 @@ pub struct ShotQueue {
     pub pending: Vec<PathBuf>,
     pub quit_in: Option<u32>,
     pub frames_since_last_shot: u32,
+    /// Screenshots requested and not yet on disk (inspect mode waits for them before quitting).
+    pub in_flight: Vec<PathBuf>,
 }
 
 #[derive(Resource, Default)]
@@ -323,13 +325,17 @@ pub fn inspect_script(
         if let Some(d) = p.parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(p));
+        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(p.clone()));
+        shots.in_flight.push(p);
         shots.frames_since_last_shot = 0;
         return;
     }
     shots.frames_since_last_shot += 1;
+    shots.in_flight.retain(|p| !p.exists());
     if let Some(n) = shots.quit_in.as_mut() {
-        if *n == 0 {
+        // Quit once the screenshots are written (readback can lag while pipelines compile),
+        // or after the cap.
+        if *n == 0 || (shots.in_flight.is_empty() && *n < 570) {
             exit.write(AppExit::Success);
         } else {
             *n -= 1;
@@ -362,7 +368,7 @@ pub fn inspect_script(
         Step::Dump { .. } | Step::Teleport { .. } | Step::View { .. } | Step::Hud { .. } => {}
         Step::Quit { .. } => {
             runner.done = true;
-            shots.quit_in = Some(30);
+            shots.quit_in = Some(600);
         }
     }
 }
