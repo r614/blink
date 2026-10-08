@@ -43,6 +43,8 @@ pub mod debug;
 #[doc(hidden)]
 pub mod dark_vision;
 #[doc(hidden)]
+pub mod world_models;
+#[doc(hidden)]
 pub mod effects;
 #[doc(hidden)]
 pub mod harness;
@@ -320,6 +322,7 @@ pub fn main() {
     .add_systems(Startup, setup_world)
     .add_plugins(effects::EffectsPlugin)
     .add_plugins(dark_vision::DarkVisionPlugin)
+    .add_plugins(world_models::WorldModelsPlugin)
     .add_systems(Update, atmosphere::update_fog)
     // Doors and usable objects (skeletal meshes), posed for their state.
     .init_resource::<level_props::LevelProps>()
