@@ -317,8 +317,14 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
     let mv = &cfg.gameplay.movement;
     let mut pos = Vec3::from(ps.position);
     if ps.snap_to_floor {
-        if let Some(h) = maps.set.raycast(pos + Vec3::Z * 100.0, -Vec3::Z, 2000.0, channel::PAWN) {
-            pos = h.point + Vec3::Z * (mv.collision_half_height + 1.0);
+        // As the hook places the original's pawn (`probe_launch` `Session::place`): the
+        // engine's line check (flags 0x20DF, `TRACE_Blocking` of the pawn's moves) from 100 uu
+        // above to 1900 below, centre at the reported floor + CollisionHeight + 1. A
+        // non-accurate line check reports its hit backed off (`engine_check`), so both sides
+        // start from the same point.
+        let (a, b) = (pos + Vec3::Z * 100.0, pos - Vec3::Z * 1900.0);
+        if let Some(h) = dishonored_world::engine_check(&mc.collision, &[], a, b, Vec3::ZERO, channel::PAWN, 0x20df) {
+            pos = a + (b - a) * h.time + Vec3::Z * (mv.collision_half_height + 1.0);
         }
     }
     {
@@ -348,9 +354,12 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
                 }
             }
         }
-        if !ps.sword_drawn && s.setup.player.is_some() {
-            // The port's pawn always holds the sword (`sword_out` unless carrying a body).
-            notes.push("sword_drawn false: the port's pawn always has the sword out (speed factor 0.9)".into());
+        if s.setup.player.is_some() {
+            // `PlayerState::sword_sheathed`: the original's pawn starts with the sword sheathed;
+            // the hook draws it (`lab give Twk_Inv_SwordCorvo`) when the spec asks.
+            if let Some(p) = m.world.player_mut(ME) {
+                p.sword_sheathed = !ps.sword_drawn;
+            }
         }
         if s.setup.keep_alive {
             notes.push("keep_alive: not applied on the port (no minimum scripted health): deaths happen".into());
@@ -392,7 +401,11 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         let m = mm_mut(&mut game);
         if n.position.is_some() || n.spawner.is_some() {
             if let Some(p) = m.world.player_mut(id) {
+                // A mission NPC placed `At(x, y, z)` spawns with yaw 0 (the place carries no
+                // rotation); a pawn without input keeps its `last_input` (step_world), so both
+                // take the scenario's rotation, as `spawn_npc` does for a placed rotation.
                 p.yaw = n.yaw;
+                p.last_input.yaw = n.yaw;
             }
         }
         if matches!(n.state.as_deref().map(|x| x.to_ascii_lowercase()).as_deref(), Some("alerted" | "combat")) {
@@ -418,7 +431,7 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         chans.push((c.to_string(), u));
     }
     for (name, _) in &tracked {
-        for (c, u) in [("x", "uu"), ("y", "uu"), ("z", "uu"), ("yaw", "deg"), ("health", "pt"), ("alive", "bool"), ("condition", "enum"), ("state", "enum"), ("stance", "enum"), ("attn", "1"), ("attn_level", "n"), ("los", "1"), ("sighted", "bool"), ("suspicion", "n"), ("time_scale", "1"), ("speed2d", "uu/s")] {
+        for (c, u) in [("x", "uu"), ("y", "uu"), ("z", "uu"), ("yaw", "deg"), ("health", "pt"), ("alive", "bool"), ("condition", "enum"), ("state", "enum"), ("stance", "enum"), ("attn", "1"), ("attn_level", "n"), ("attn_noise", "1"), ("attn_noise_level", "n"), ("los", "1"), ("sighted", "bool"), ("suspicion", "n"), ("time_scale", "1"), ("speed2d", "uu/s")] {
             chans.push((format!("npc.{name}.{c}"), u));
         }
     }
@@ -468,7 +481,8 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             }
             v.push(brain.map_or(f64::NAN, |b| leg.idx(&format!("npc.{name}.state"), b.state)));
             v.push(poses.iter().find(|x| x.0 == *id).map_or(f64::NAN, |x| leg.idx(&format!("npc.{name}.stance"), x.1)));
-            v.extend([attn.map_or(0.0, |a| a.value as f64), attn.map_or(0.0, |a| a.level as f64), attn.map_or(f64::NAN, |a| a.los_norm as f64), b(attn.is_some_and(|a| a.sighted)), brain.map_or(f64::NAN, |b| b.suspicion_level() as f64)]);
+            let noise = brain.and_then(|b| b.attn.iter().find(|a| a.who == dishonored_ai::NOISE));
+            v.extend([attn.map_or(0.0, |a| a.value as f64), attn.map_or(0.0, |a| a.level as f64), noise.map_or(0.0, |a| a.value as f64), noise.map_or(0.0, |a| a.level as f64), attn.map_or(f64::NAN, |a| a.los_norm as f64), b(attn.is_some_and(|a| a.sighted)), brain.map_or(f64::NAN, |b| b.suspicion_level() as f64)]);
             v.extend([p.map_or(f64::NAN, |p| p.time_scale as f64), p.map_or(f64::NAN, |p| p.velocity.truncate().length() as f64)]);
         }
         v
@@ -481,8 +495,8 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
     for _ in 0..s.setup.settle {
         tick += 1;
         let out = game.step(&[(ME, PlayerInput { tick, ..neutral })], &maps.set, cfg);
-        let players = mm(&game).world.players.clone();
-        present.frame(&out.events, &players, 1.0 / 60.0);
+        let w = &mm(&game).world;
+        present.frame(&out.events, w, dishonored_sim::left_hand::dark_vision_reveals(w, ME, &cfg.tuning), 1.0 / 60.0);
     }
     let first = sample(&game, &mut leg, &present);
     trace.push(0, first);
@@ -555,8 +569,7 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             trace.events.push(TraceEvent { tick: tk, kind: "ProjectileEnd".into(), object: String::new(), name: kind, detail: format!("id={id} age={age:.3}") });
         }
         // Presentation: effects, sounds, animation inputs.
-        let players = w.players.clone();
-        for pe in present.frame(&out.events, &players, 1.0 / 60.0) {
+        for pe in present.frame(&out.events, w, dishonored_sim::left_hand::dark_vision_reveals(w, ME, &cfg.tuning), 1.0 / 60.0) {
             trace.events.push(TraceEvent { tick: tk, kind: pe.kind.into(), object: if pe.object == 0 { String::new() } else { name_of(pe.object) }, name: pe.name, detail: pe.detail });
         }
         let v = sample(&game, &mut leg, &present);

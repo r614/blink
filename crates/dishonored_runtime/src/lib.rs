@@ -43,7 +43,11 @@ pub mod debug;
 #[doc(hidden)]
 pub mod dark_vision;
 #[doc(hidden)]
+pub mod world_models;
+#[doc(hidden)]
 pub mod effects;
+/// Bevy-free presentation rules (effects, sounds, reactions), shared with tools/oracle.
+pub mod present_rules;
 #[doc(hidden)]
 pub mod harness;
 #[doc(hidden)]
@@ -320,6 +324,7 @@ pub fn main() {
     .add_systems(Startup, setup_world)
     .add_plugins(effects::EffectsPlugin)
     .add_plugins(dark_vision::DarkVisionPlugin)
+    .add_plugins(world_models::WorldModelsPlugin)
     .add_systems(Update, atmosphere::update_fog)
     // Doors and usable objects (skeletal meshes), posed for their state.
     .init_resource::<level_props::LevelProps>()
@@ -417,6 +422,9 @@ pub fn main() {
             .init_resource::<hud_popups::HudPopups>()
             .add_systems(Update, hud_popups::track.after(input_map::gather_input).before(gfx_hud::update_gfx_hud).before(gfx_hud::update_anchored_text))
             .init_resource::<viewmodel::ViewAnim>()
+            .init_resource::<viewmodel::BodyFrames>()
+            // Choked / carried bodies in their master's frame (the first-person rig's for the local player).
+            .add_systems(Update, viewmodel::place_held_bodies.after(players::sync_players).after(viewmodel::animate_view_rig).after(cutscene::drive).before(characters::animate_characters))
             .add_systems(FixedUpdate, (harness::script_fixed, session::fixed_tick, saves::write_autosaves).chain().run_if(pause_menu::sim_running))
             .insert_resource(saves::Saves::new(args.mission_path.clone()))
             // [playground] station labels of layout maps

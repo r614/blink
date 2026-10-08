@@ -1,7 +1,7 @@
 // Run, then sprint, along the Boyle exterior runway (`probe_launch measure run 0.4 0.6
 // at=-3400,-3150,-190 --yaw 270`). Reference: INSTRUMENTATION.md "Release-time regression
-// baseline" (2026-10-06): plateaus 360 / 540 uu/s with the sword drawn (the port's pawn always
-// has it drawn unless carrying).
+// baseline" (2026-10-06): the spec leaves the sword sheathed (the hook draws it only for
+// `sword_drawn`), so the plateaus are the sheathed 400 / 600 uu/s (first measurements).
 (
     name: "movement/run_sprint",
     system: Movement,
@@ -15,8 +15,8 @@
         (tick: 120, hold: 44, action: Press(Sprint)),
     ],
     checkpoints: [
-        (name: "run plateau", expect: [(metric: At("pawn.speed2d", 115), value: 360, tol: 1, source: "INSTRUMENTATION.md regression baseline: run plateau 360 uu/s, sword drawn")]),
-        (name: "sprint plateau", expect: [(metric: At("pawn.speed2d", 160), value: 540, tol: 1, source: "INSTRUMENTATION.md regression baseline: sprint 540 uu/s, sword drawn")]),
+        (name: "run plateau", expect: [(metric: At("pawn.speed2d", 115), value: 400, tol: 1, source: "INSTRUMENTATION.md first measurements 2026-10-06: run 400 uu/s, sword sheathed")]),
+        (name: "sprint plateau", expect: [(metric: At("pawn.speed2d", 160), value: 600, tol: 1, source: "INSTRUMENTATION.md first measurements 2026-10-06: sprint 600 uu/s, sword sheathed")]),
     ],
     record: [Pawn],
     tolerances: [("pawn.", 0.5)],

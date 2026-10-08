@@ -15,7 +15,8 @@
     ticks: 900,
     input: [(tick: 5, action: Press(Secondary))],
     checkpoints: [
-        (name: "heard: Investigate, not more", expect: [(metric: At("npc.guard.attn", 8), value: 0.6, tol: 0.01, source: "AI.md (0x00b60ca0, CONFIRMED): a Danger sound adds 0.4 and floors the value at Investigate's start 0.6; hearing cannot raise attention above Investigate", status: Static)]),
+        (name: "heard: level Investigate", expect: [(metric: At("npc.guard.attn_noise_level", 8), value: 3, tol: 0, source: "AI.md: EDisAttentionLevel Investigate = 3; hearing cannot go above it", status: Static)]),
+        (name: "heard: Investigate, not more", expect: [(metric: At("npc.guard.attn_noise", 8), value: 0.6, tol: 0.01, source: "AI.md (0x00b60ca0, CONFIRMED): a Danger sound adds 0.4 and floors the value at Investigate's start 0.6; hearing cannot raise attention above Investigate", status: Static)]),
         (name: "investigates", expect: [(metric: TimeAt("npc.guard.state", 7), value: 15, tol: 0, cmp: AtMost, source: "a danger noise in hearing range sends a guard to investigate (DisAISubStateInvestigate)", status: Static)]),
         (name: "reaction delay", expect: [(metric: Gap(FirstAt("Sim:Fired"), TimeAt("npc.guard.state", 7)), value: 0, tol: 0, source: "shot -> investigate on the original", status: Unmeasured)]),
     ],

@@ -374,53 +374,6 @@ fn pawn_profile(bank: &mut crate::npc_anim::AnimBank, model: usize, p: &PlayerSt
     bank.model_profile.get(&model).copied().unwrap_or(guard)
 }
 
-/// Per pawn, the hits, deaths, swings and parries of this frame's simulation events.
-fn collect_hits(events: &[dishonored_sim::events::SimEvent], all: &[&PlayerState]) -> HashMap<u32, Vec<(crate::npc_anim::HitKind, glam::Vec3)>> {
-    use crate::npc_anim::HitKind as H;
-    use dishonored_sim::events::{DamageCause as C, SimEvent as E};
-    let pos = |id: Option<u32>, fallback: u32| -> glam::Vec3 {
-        let f = all.iter().find(|p| p.id == fallback);
-        match id.and_then(|i| all.iter().find(|p| p.id == i)) {
-            Some(a) => a.position,
-            None => f.map(|v| v.position + dishonored_sim::movement::forward_vector(v.yaw)).unwrap_or_default(),
-        }
-    };
-    let mut out: HashMap<u32, Vec<(H, glam::Vec3)>> = HashMap::new();
-    for e in events {
-        match *e {
-            E::Damage { victim, attacker, cause, .. } => {
-                let k = match cause {
-                    C::Sword | C::SwordCounter => Some(H::Melee),
-                    C::Pistol | C::Crossbow => Some(H::Projectile),
-                    C::PistolHeadshot | C::CrossbowHeadshot => Some(H::Headshot),
-                    C::Windblast => Some(H::Windblast),
-                    C::Assassination | C::DropAssassination => Some(H::Assassinated),
-                    _ => None,
-                };
-                if let Some(k) = k {
-                    out.entry(victim).or_default().push((k, pos(attacker, victim)));
-                }
-            }
-            E::Death { victim, killer, .. } => out.entry(victim).or_default().push((H::Death, pos(killer, victim))),
-            E::SwordSwing { id } => out.entry(id).or_default().push((H::Swing, glam::Vec3::ZERO)),
-            E::SwordParried { attacker, defender } => out.entry(defender).or_default().push((H::Parried, pos(Some(attacker), defender))),
-            E::KnockedOut { victim, by, cause } if cause != dishonored_sim::events::KnockoutCause::Choke => out.entry(victim).or_default().push((H::KnockedOut, pos(by, victim))),
-            E::ChokeEnd { attacker, victim, outcome } => {
-                use dishonored_sim::events::ChokeOutcome as O;
-                let k = match outcome {
-                    O::Win => H::ChokeWin,
-                    O::Lose => H::ChokeLose,
-                    _ => H::ChokeCancel,
-                };
-                out.entry(victim).or_default().push((k, pos(Some(attacker), victim)));
-            }
-            E::BodyDropped { carrier, body } => out.entry(body).or_default().push((H::Dropped, pos(Some(carrier), body))),
-            _ => {}
-        }
-    }
-    out
-}
-
 /// Clip and time of the full-body and upper-body chains (for the sound notifies).
 fn chain_clips(st: &crate::npc_anim::PawnAnim) -> Vec<(String, f32)> {
     [st.full.as_ref(), st.upper.as_ref()].into_iter().flatten().filter_map(|c| c.steps.get(c.i).map(|s| (s.0.clone(), c.t))).collect()
@@ -526,7 +479,7 @@ pub fn animate_characters(
     weapons: Option<Res<WeaponLibrary>>,
     mut view: ResMut<crate::session::SessionView>,
     // (Grouped: a system takes at most 16 parameters.)
-    (time, mut face_packages, anim_debug): (Res<Time>, Local<Option<(String, Vec<String>)>>, Local<AnimDebug>),
+    (time, mut face_packages, anim_debug, body_frames): (Res<Time>, Local<Option<(String, Vec<String>)>>, Local<AnimDebug>, Option<Res<crate::viewmodel::BodyFrames>>),
     roots: Query<(Entity, &CharacterRoot, &crate::players::PlayerBody, &Children, &GlobalTransform)>,
     mut joints: Query<(&Joint, &mut Transform), (Without<TpWeaponJoint>, Without<AccessoryJoint>)>,
     mut wjoints: Query<(&TpWeaponJoint, &mut Transform), (Without<Joint>, Without<AccessoryJoint>)>,
@@ -541,7 +494,7 @@ pub fn animate_characters(
     let (Some(lib), Some(mut bank)) = (lib, bank) else { return };
     let contracts = view.matchv.mode.eq_ignore_ascii_case("contracts");
     let all: Vec<&PlayerState> = view.others.iter().chain(view.me.iter()).collect();
-    let hits = collect_hits(&events, &all);
+    let hits = crate::present_rules::collect_hits(&events, &all);
     let talking = talking_pawns(&view);
     let root_models: Vec<(u32, usize)> = roots.iter().map(|r| (r.2.0, r.1.archetype)).collect();
     let faces = face_frames(&mut bank, &lib, &view, &root_models, time.elapsed_secs_f64(), &mut face_packages);
@@ -556,7 +509,12 @@ pub fn animate_characters(
         let stance = view.matchv.npc_poses.iter().find(|x| x.0 == p.id).map(|x| x.1);
         // The level floor under a pawn-space point (pawn space: origin at the pawn, turned by its
         // yaw), for the ragdoll's floor grid.
-        let (pos, yaw, hh) = (p.position, p.yaw.to_radians(), mv.collision_half_height);
+        // A body left in its choker's or carrier's frame is drawn at that anchor
+        // (`viewmodel::BodyFrames`): its ragdoll samples the level there.
+        let (pos, yaw, hh) = match body_frames.as_ref().and_then(|f| f.anchors.get(&p.id)) {
+            Some(a) => (a.pos, a.yaw.to_radians(), mv.collision_half_height),
+            None => (p.position, p.yaw.to_radians(), mv.collision_half_height),
+        };
         let world = &session.content.collision;
         let ground = move |x: f32, y: f32| -> f32 {
             use dishonored_world::WorldQuery;

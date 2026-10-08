@@ -29,6 +29,17 @@ pub struct Traversal {
     pub to: Vec3,
     pub elapsed: f32,
     pub duration: f32,
+    /// Mantle: the edge's height above the feet (`DishonoredAnimNodeBlendByMantleType` picks
+    /// low / medium / high from it against `m_LowMantleMaxEdgeHeight` /
+    /// `m_MediumMantleMaxEdgeHeight`).
+    #[serde(default)]
+    pub edge_height: f32,
+    /// Mantle: the sequence moving the pawn (index into `MantleConfig::anims`: low, medium,
+    /// high) and its play rate; `None` interpolates `from` -> `to` linearly.
+    #[serde(default)]
+    pub anim: Option<u8>,
+    #[serde(default)]
+    pub rate: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -158,6 +169,9 @@ pub struct PlayerState {
     /// `m_fCurMaxLeanSoften` (+0xA0): extra lean angle (degrees) grown while leaning at the limit.
     #[serde(default)]
     pub lean_soften: f32,
+    /// The lean head point's upward velocity (`lean_velocity` is its sideways one), uu/s.
+    #[serde(default)]
+    pub lean_velocity_z: f32,
     /// Ground-speed modifier of the previous tick (`DishonoredPawn.m_fLastSpeedModifier`):
     /// drops are blended down at `speed_blend_down_speed`, rises are instant.
     pub speed_mod: f32,
@@ -272,6 +286,12 @@ pub struct PlayerState {
     /// This pawn's deterministic random stream (xorshift32; the original uses the C runtime `rand()`).
     #[serde(default)]
     pub rng: u32,
+    /// The sword is in its sheath (no weapon drawn): the ground speed takes
+    /// `Attribute_SwordSheathedSpeedFactor` instead of the unsheathed one (measured run / sprint
+    /// 400 / 600 uu/s sheathed, 360 / 540 drawn, INSTRUMENTATION.md). The game's players start
+    /// with it drawn (nothing sheathes it yet); scenario setups set it.
+    #[serde(default)]
+    pub sword_sheathed: bool,
 }
 
 /// The attack group on a pawn: seconds under attack (`m_fInitialDelayBeforeDealingDamage`) and
@@ -515,6 +535,7 @@ impl PlayerState {
             lean: 0.0,
             lean_velocity: 0.0,
             lean_soften: 0.0,
+            lean_velocity_z: 0.0,
             speed_mod: 1.0,
             sprinting: false,
             strafing: false,
@@ -551,6 +572,7 @@ impl PlayerState {
             damage_reduction: 0.0,
             free_spell_chance: 0.0,
             rng: id.wrapping_mul(0x9E37_79B9) | 1,
+            sword_sheathed: false,
         }
     }
 

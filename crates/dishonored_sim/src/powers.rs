@@ -147,6 +147,7 @@ pub fn effective_movement<'a>(p: &PlayerState, cfg: &'a GameplayConfig) -> Cow<'
     // Agility's power jump and swim speed.
     m.power_jump_z = a("Attribute_JumpZ_PowerJump", b.power_jump_z);
     m.water.water_speed = a("Attribute_WaterSpeed", b.water.water_speed);
+    m.mantle.anim_rate = a("Attribute_MantleAnimRate", b.mantle.anim_rate);
     // A rat bite's slowdown: `Modifier_RatAttackSpeedModifier` adds -m_fPawnSlowdownPercent % of the
     // base to Attribute_GroundSpeed and Attribute_GroundSpeedSprint (0x00C891E0).
     if p.rat_slow > 0.0 && p.rat_slow_percent > 0.0 {

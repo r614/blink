@@ -1729,6 +1729,26 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Tests:** `cargo test --release -p dishonored_oracle -p oracle` (new `event_metrics_and_statuses`, `extracted_tables_present`); `oracle scenario --all`.
 - **Confidence:** CONFIRMED for the port's values (deterministic runs) and the tweak references; the Unverified rows wait for comparable captures.
 
+## 2026-10-08: Mantle motion from the sequences' root motion; synced bodies drawn at the master's root; gadget meshes
+
+- **Question:** How does the original move the pawn through a mantle, and where are choked and carried bodies drawn?
+- **Evidence:**
+  - `Sword_Ready_Mantle{Low,Medium,High}` (Startup `Ply_Sword_Locomotion_as`, Edge; `anim_root`): the root bone `root0_jnt` rises 20 / 50 / 80 uu (mesh -Y) and moves 40 uu forward (mesh +Z) over 0.633 / 0.700 / 1.033 s (19 / 21 / 31 frames). The rises equal the `m_fMantleTravelDistanceZ` of the `DishonoredAnimNodeSeqMantle` nodes of `Ply_Player_Mantle_at`. The `Sword_Sneak_*` variants carry the same root motion.
+  - `StatePlayerMasterMantle` (class registration 0x01300DF8, size 0xC0; `prop_layout`): `m_fCurrentMantleHeight` +0x7C, the intro start / target location and yaw +0x84..+0xA0, `m_fIntroTransitionTime` +0xA4, `m_bFaceEdge`.
+  - 0x00A8F9B0 (`DishonoredAnimNodeSeqMantle`): if `m_fMantleTravelDistanceZ` is not 0, it builds a transform (component rotation, scale (1, 1, `m_fCurrentMantleHeight` / travel)) and gives it to the sequence's root motion (`m_pLocomotionState` +0x2C, flag 0x4000). The vertical root motion is scaled to the height; the forward part is not.
+  - The state's tick (0x00A6C590) runs the timeout and the player cancel and does not move the pawn. The intro (0x00A636C0) slides the location and yaw linearly. Its time is the previous state's `m_fTimeToGo` when that state is a `StateSharedActionBase`, else -1 (0x00A6EC20 -> 0x00A60270). With no intro the pawn is set at the intro target at once (`SetLocation` / `SetRotation`).
+  - The request (0x00AD78D0) reads the finder result: location +0x60, yaw +0x6C, height +0x70, crouch / sneak flags +0x74. An edge no higher than `m_LowMantleMaxEdgeHeight` (120), with `m_bLowMantleUseStepUp` (true) and no crouch needed, goes to the step-up 0x00AD35E0 instead: three moves at once (to the finder location, up by the height, forward by `m_fMantleForwardMoveAmount` 20). Every other edge enters the mantle state (0x00ACD820, params copied by 0x00A63620).
+  - `Attribute_MantleAnimRate` is 1 at Normal (`pAttributeTweaksNormal`); Agility adds 50 % of the base.
+- **Port:**
+  - `MantleConfig` carries the decoded curves (`anims`, built by `dishonored_assets::gameplay::mantle_anims`), `low_use_step_up` and `anim_rate`. The config cache key is now v12x.
+  - `movement::try_mantle_from` picks the class from the thresholds, does the step-up at once, or places the pawn at the finder location and runs `mantle_root_position` (the scaled root motion) to the destination. `advance_traversal` plays it at the attribute rate.
+  - The two-leg path is gone.
+  - New tests: `mantle_path_is_the_sequence_root_motion`, `mantle_traversal_runs_the_sequence`.
+- **Not decoded:** where the finder puts its result location (its final-verify states). The port uses the pawn against the edge's face at its own height, and the height that lands the root motion on the top (U-019).
+- **Bodies:** the slave sequences of the choke and the carry are authored at the master's root. `viewmodel::place_held_bodies` therefore draws a choked or carried body there. For the local first-person master that is the rig's pawn space, whose `camera_jnt` is the view, so the carried body hangs over the shoulder where `Empty_CarryCorpse_*_Master` puts it. A released body keeps that frame (`BodyFrames` anchors, also used for its ragdoll's floor) while its slave sequence ends. A drop plays `Corpses_CarryCorpse_DropLow_Slave` before the ragdoll. A lift from a won choke plays `Generic_Choke_CarryCorpse_Slave`.
+- **Gadgets:** the left hand holds `Grenade.Grenade` (grenades and sticky grenades) and `SpringRazor.SpringRazor` with their own idles. The crossbow shows `Crossbows.bolt_01` / `Bolt_Sleep` / `Bolt_Flare` on its `Bolt_Socket` while loaded. The weapons' own sequences are now the names the sets hold (`CorvoGun_Fire_Hammer`, `Crossbow_Reload_In`, `Sword_Ready_Idle`, ...).
+- **Viewmodel states:** `Climb` (the reference pose, `Head_Rope_Climb` while moving) and `Nav_Swim` (`Empty_SwimIdle` / `Empty_SwimN`, LIKELY: that tree was not dumped).
+- **Confidence:** CONFIRMED for the curves, the thresholds, the step-up and the scaling. LIKELY for the finder location and the weapon sequence pairing.
 ## 2026-10-08: Oracle phase 2, the original side (hook)
 
 - **Question:** Can the original answer per-tick behaviour traces and by-name queries cheaply enough for automated fuzzing, from one long-lived game session?
@@ -1743,3 +1763,28 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Tools:** `crates/dishonored_probe_dll/src/{tick,reflect,script}.rs`, protocol 5 in `crates/dishonored_probe`, `tools/probe_launch/src/{session,reflect,capture}.rs`; `dishonored_oracle::diff::first_divergence` compares the event kinds both sides record. Docs: ORACLE.md "Original side: the hooked session", INSTRUMENTATION.md.
 - **Confidence:** CONFIRMED (measured live) for the layouts, the call paths and the jump ticks.
 - **Open:** U-800 (Kismet always runs in the original), U-801 (story flags not set by the runner), U-802 (NPC setup from tweaks / AI states), U-803 (sounds are not traced), U-804 (snap height and floor hover differ at tick 0).
+
+## 2026-10-08 — Oracle phase 4: port rule fixes found by the scenario library
+- **Question:** Which Measured / Static scenario failures are port rule bugs, and what is the original's rule?
+- **Evidence:** Ghidra (pool scripts FuncDecomp / OffsetScan / G_Callers): reload contexts 0x00C2AA80 / 0x00C2AC00 (f32 countdown, actions end when the f32 anim time reaches AnimStateExit); DishonoredCamera_Lean (vtable 0x0111E890): spring 0x00AC0A00 (k 80, c 12), 0x00AC5950 (external force, circle around the pivot), 0x00AC5540 (limit and soften), lean speed 1000 via 0x00A76590 -> 0x00AC0950; NPC rotation intents 0x00B799C0 / 0x00B6E970 / 0x00B71570 / 0x00B71600; hook jump trace 2026-10-08; snap line check 0x20DF.
+- **Result:**
+  - Jump: the press tick only launches (Velocity.Z 800, Falling, no move); the fall starts next tick. `movement.rs` walking(): decide the jump, walk the tick, then launch. Matches the hook trace (`movement/jump_standing`).
+  - Lean: rebuilt as the decoded spring point; the head's sideways displacement matches the original per tick (13.33 / 26.31 / 62.7). The angle still differs (lean height smoothing, U-867).
+  - Reloads: tick counts from the decoded countdown / anim-time rule (`ReloadTiming::ticks`, `action_ticks`, `countdown_ticks`); the shot leaves one tick after the fire action starts. Crossbow fire action still 2 ticks long (U-868).
+  - Sword sheathed state (`PlayerState.sword_sheathed`, protocol 9): the original runs 400 / 600 with the sword away.
+  - Hearing: the attention rule matches (0.6); the escalation to combat comes from instant NPC turning and the port-only `criminal()` rule (U-862).
+- **Confidence:** CONFIRMED for jump order, head displacement, reload stages; LIKELY for the hearing cause.
+- **Implementation consequence:** `oracle scenario --all`: 46 scenarios, 37 pass / 4 fail / 5 unmeasured (before: 35 pass / 6 fail of 41).
+
+## 2026-10-08: Oracle phase 3, the static index
+
+- **Question:** Can the original's code be queried statically, per system, cheaply enough for the porting agents: which native implements a behaviour, what the script does, where every trace call site is and with which flags?
+- **Method:** a Ghidra headless pass (`tools/ghidra_index/scripts/BlinkIndex.java`) over the analysed GOG exe writes the native lookup tables, class records and vtables, every call, string reference and trace call site (flags resolved through the decompiler's p-code), and every function's decompiled C; an UnrealScript bytecode decompiler in `dishonored_oracle::index::uscript` decompiles every script class of the install; `oracle index build` joins both into a per-exe-hash index and `oracle index ...` queries it (ORACLE.md "Static index").
+- **Findings:**
+  - Native classes register a record holding a pointer to their UTF-16 name one character past the `A` / `U` prefix, then the InternalConstructor; 2760 script classes have one with a vtable.
+  - All 2560 exec natives sit in 335 `FNativeFunctionLookup` tables; `GNatives` is not statically initialised (U-830).
+  - UClass exports carry no tagged properties (`UObject::Serialize` skips them for classes), unlike functions, states and structs.
+  - UE3 v801 bytecode: object references are 4 bytes in the file and 8 in memory, jump offsets in memory bytes; a `foreach` ends on `IteratorNext`, `IteratorPop`, and its `break` jumps to the pop.
+  - 219 trace call sites, 72 distinct constant flag values; `APawn::physWalking` (0x006BD150) is `Pawn` vtable slot 141 (+0x234) and its floor check passes 0x20DF with the pawn's extent; `DisDoor`'s `ShouldTrace` is vtable +0x1C4 (0x00A2C760) and `m_DoorState` is at +0x311, as COLLISION.md measured.
+- **Results:** 3004 classes, 4772 functions (2200 script, 169 KiB), 0 decompile failures; 73960 exe functions, 258262 calls, 49922 string references, 73682 functions decompiled to C (1 failure); queries 90-110 ms per process. `oracle index build` 493 s end to end (385 s of it the decompiler), about 100 s without the C, 6-9 s from existing tables.
+- **Confidence:** CONFIRMED for the decompiler's byte-exact parse (both sizes match on every function) and the layout and vtable spot checks; LIKELY for trace flags resolved through parameters (U-831).

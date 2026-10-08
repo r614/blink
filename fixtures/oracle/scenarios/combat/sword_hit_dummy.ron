@@ -8,7 +8,7 @@
     map: "Playground",
     description: "Swing once at a passive guard 140 uu ahead facing the player (no back assassination): timing, damage, blood, hit reaction, sounds.",
     setup: (
-        player: Some((position: (-5300, 0, 96), yaw: 180, pitch: -5)),
+        player: Some((position: (-5300, 0, 96), yaw: 180, pitch: -5, sword_drawn: true)),
         npcs: [(id: Some("dummy"), position: Some((-5440, 0, 92)), yaw: 0, state: Some("Passive"))],
         settle: 30,
     ),

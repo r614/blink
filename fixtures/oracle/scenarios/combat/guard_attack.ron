@@ -6,7 +6,7 @@
     map: "Playground",
     description: "A guard 300 uu ahead is alerted; the player stands still: the guard closes in and hits.",
     setup: (
-        player: Some((position: (-5600, 0, 96), yaw: 0)),
+        player: Some((position: (-5600, 0, 96), yaw: 0, sword_drawn: true)),
         npcs: [(id: Some("guard"), position: Some((-5300, 0, 92)), yaw: 180, state: Some("Alerted"))],
         settle: 1,
     ),

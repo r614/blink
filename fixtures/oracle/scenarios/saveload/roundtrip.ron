@@ -11,7 +11,7 @@
     checkpoints: [
         (name: "same state", expect: [(metric: Count("Console:saveload[same_state=true]"), value: 1, tol: 0, source: "a load restores exactly the saved match", status: Static)]),
         (name: "save allowed", expect: [(metric: Count("Console:saveload[allowed=true]"), value: 1, tol: 0, source: "saving is allowed while running in the open", status: Static)]),
-        (name: "keeps running", expect: [(metric: At("pawn.speed2d", 90), value: 360, tol: 1, source: "INSTRUMENTATION.md: run plateau 360 with the sword drawn (the loaded pawn runs on)")]),
+        (name: "keeps running", expect: [(metric: At("pawn.speed2d", 90), value: 400, tol: 1, source: "INSTRUMENTATION.md: run plateau 400 with the sword sheathed (the loaded pawn runs on)")]),
     ],
     record: [Pawn, Npc("dummy")],
 )

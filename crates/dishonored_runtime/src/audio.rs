@@ -19,6 +19,7 @@
 //! silences every sound of the process (test runs).
 
 use crate::coords;
+use crate::present_rules::{SAME_SOUND_WINDOW, SoundAt, SoundEventState};
 use crate::session::{Session, SessionView};
 use bevy::audio::{AddAudioSource, AudioPlayer, Decodable, PlaybackSettings, SpatialListener};
 use bevy::prelude::*;
@@ -236,18 +237,15 @@ pub struct GameAudio {
     listener_volume: Option<usize>,
     pub music: Option<MusicManager>,
     stream_spawned: bool,
-    /// Projectile id -> fired as a crossbow bolt.
-    projectiles: HashMap<u32, bool>,
+    /// What the event sounds remember (present_rules::SoundEventState): projectiles in flight,
+    /// the last post of an event per pawn (`SAME_SOUND_WINDOW`, shared with the notifies),
+    /// pawns whose animation reported notifies recently (sim fallbacks are skipped).
+    sound: SoundEventState,
     steps: HashMap<PlayerId, (Vec3, f32)>,
     /// Last footfall per (player, foot) for the 0.25 s rule.
     foot_time: HashMap<(PlayerId, i32), f32>,
-    /// Players whose animation reported notifies recently (sim fallbacks are skipped).
-    notify_driven: HashMap<PlayerId, f32>,
     /// Pawns whose animation reported footfalls recently (no stride fallback).
     footfall_driven: HashMap<PlayerId, f32>,
-    /// Last post of a notify event per pawn (first- and third-person rigs of the same pawn
-    /// may both report a clip).
-    notify_recent: HashMap<(PlayerId, String), f32>,
     temp: Vec<(ObjId, f32)>,
     next_temp: u64,
     known_players: HashSet<PlayerId>,
@@ -503,32 +501,8 @@ fn to_uu(t: &GlobalTransform) -> (Vec3, Vec3) {
 
 /// Contact type of the surface below a point (the collision triangle's physical material).
 fn surface_below(session: &Session, pos: Vec3, depth: f32) -> Option<(String, f32)> {
-    let world = &session.content.collision;
-    let hit = world.raycast(pos, -Vec3::Z, depth, dishonored_world::channel::ALL)?;
-    Some((world.surface_of(hit.tri).unwrap_or("DisContactType_Environment").to_string(), hit.distance))
+    crate::present_rules::surface_below(&session.content.collision, pos, depth)
 }
-
-/// Contact type of the nearest surface around an impact point.
-fn surface_near(session: &Session, p: Vec3) -> String {
-    let world = &session.content.collision;
-    let mut best: Option<(f32, u32)> = None;
-    for d in [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z] {
-        if let Some(hit) = world.raycast(p - d * 12.0, d, 36.0, dishonored_world::channel::ALL) {
-            if best.is_none_or(|b| hit.distance < b.0) {
-                best = Some((hit.distance, hit.tri));
-            }
-        }
-    }
-    best.and_then(|b| world.surface_of(b.1)).unwrap_or("DisContactType_Environment").to_string()
-}
-
-/// The same sound for the same pawn within this many seconds is one sound: the first- and
-/// third-person rigs of a pawn both report a clip's AkEvent notifies (not in step: their clips
-/// start on different frames), and a shot is also posted from `SimEvent::Fired`. The pistol
-/// played its shot twice when two of them were more than 0.05 s apart (the old window). Shorter
-/// than the fastest refire (`Pistol_Fire` exit 0.30 s).
-const SAME_SOUND_WINDOW: f32 = 0.2;
-
 /// Events the online client already played from its own prediction (skip the
 /// authoritative copy for the local player to avoid doubling).
 pub fn predicted_locally(e: &SimEvent, me: Option<PlayerId>) -> bool {
@@ -665,23 +639,23 @@ pub fn drive(
         e.remove_object(o, 0.0);
     }
     audio.temp.retain(|t| t.1 >= now);
-    audio.notify_driven.retain(|_, t| now - *t < 2.0);
+    audio.sound.notify_driven.retain(|_, t| now - *t < 2.0);
     audio.footfall_driven.retain(|_, t| now - *t < 2.0);
-    audio.notify_recent.retain(|_, t| now - *t < 1.0);
+    audio.sound.recent.retain(|_, t| now - *t < 1.0);
 
     // Animation notifies.
     for (pid, clip, from, to, looped) in std::mem::take(&mut anim.pending) {
         let Some(c) = audio.notifies.get(&clip).cloned() else { continue };
         let (from, to) = if looped && c.length > 0.0 { (from.rem_euclid(c.length), to.rem_euclid(c.length)) } else { (from, to) };
         for n in c.window(from, to) {
-            audio.notify_driven.insert(pid, now);
+            audio.sound.notify_driven.insert(pid, now);
             match &n.kind {
                 NotifyKind::AkEvent { event, .. } => {
                     let key = (pid, event.clone());
-                    if audio.notify_recent.get(&key).is_some_and(|t| now - *t < SAME_SOUND_WINDOW) {
+                    if audio.sound.recent.get(&key).is_some_and(|t| now - *t < SAME_SOUND_WINDOW) {
                         continue;
                     }
-                    audio.notify_recent.insert(key, now);
+                    audio.sound.recent.insert(key, now);
                     if e.post_event_name(event, PLAYER_OBJ + pid as u64) != 0 {
                         audio.notify_posts += 1;
                         audio.posted += 1;
@@ -715,96 +689,16 @@ pub fn drive(
 
     // Simulation events.
     for ev in events {
-        let subject_obj = |id: PlayerId| PLAYER_OBJ + id as u64;
-        let cue = |k: &str| cues::cue_event(k).unwrap_or("").to_string();
-        let mut posts: Vec<(String, ObjId)> = Vec::new();
-        match ev {
-            SimEvent::SwordSwing { id } if !audio.notify_driven.contains_key(&id) => posts.push((cue("sword_swing"), subject_obj(id))),
-            SimEvent::SwordBlocked { defender, .. } => posts.push((cue("sword_clash"), subject_obj(defender))),
-            SimEvent::SwordParried { defender, .. } => {
-                posts.push((cue("sword_clash"), subject_obj(defender)));
-                posts.push((cue("sword_parry_whoosh"), subject_obj(defender)));
-            }
-            SimEvent::Fired { id, bolt, projectile } => {
-                audio.projectiles.insert(projectile, bolt);
-                // One shot, one sound: skipped when a fire animation's AkEvent notify already
-                // posted it for this pawn, and recorded so a later notify of the same shot is
-                // skipped.
-                let fire = cue(if bolt { "crossbow_fire" } else { "pistol_fire" });
-                let key = (id, fire.clone());
-                if !audio.notify_recent.get(&key).is_some_and(|t| now - *t < SAME_SOUND_WINDOW) {
-                    audio.notify_recent.insert(key, now);
-                    posts.push((fire, subject_obj(id)));
-                }
-            }
-            SimEvent::Reloaded { id } => posts.push((cue("pistol_reload"), subject_obj(id))),
-            SimEvent::BlinkStart { id, .. } => posts.push((cue("blink_start"), subject_obj(id))),
-            SimEvent::BlinkEnd { id } => posts.push((cue("blink_end"), subject_obj(id))),
-            SimEvent::BlinkFizzle { id } => posts.push((cue("power_empty"), subject_obj(id))),
-            SimEvent::WindblastCast { id } => posts.push((cue("windblast"), subject_obj(id))),
-            SimEvent::DarkVision { id, active } if Some(id) == me => posts.push((cue(if active { "dark_vision_on" } else { "dark_vision_off" }), subject_obj(id))),
-            SimEvent::Jumped { id } => posts.push((cue("jump"), subject_obj(id))),
-            // `DisTweaks_Climbable.m_pClimbingSound` of both Boyle chains.
-            SimEvent::ClimbSound { id, .. } => posts.push(("Snd_P_Chain_Climbing".to_string(), subject_obj(id))),
-            SimEvent::Mantle { id, edge_height } => {
-                let k = if edge_height < 80.0 { "mantle_low" } else if edge_height < 140.0 { "mantle_medium" } else { "mantle_high" };
-                posts.push((cue(k), subject_obj(id)));
-            }
-            SimEvent::Landed { id, speed, .. } if speed > 250.0 => {
-                if let Some(p) = player(&view, id) {
-                    // JumpLand contact: big above the hard landing speed, stealth when crouched.
-                    let striker = if speed > 900.0 { "DisContactType_JumpLand_Big" } else if p.crouched { "DisContactType_JumpLand_Stealth" } else { "DisContactType_JumpLand" };
-                    let surface = surface_below(&session, p.position, 200.0).map(|s| s.0).unwrap_or_else(|| "DisContactType_Environment".into());
-                    match audio.contact.as_ref().and_then(|c| c.sound(striker, &surface)) {
-                        Some(s) => posts.push((s.event, subject_obj(id))),
-                        None => posts.push((cues::landing_event("Stone", speed > 900.0), subject_obj(id))),
-                    }
-                }
-            }
-            SimEvent::Damage { victim, cause, amount, .. } => {
-                let k = match cause {
-                    DamageCause::Sword | DamageCause::SwordCounter => Some("sword_hit_body"),
-                    DamageCause::Assassination => Some("assassinate"),
-                    DamageCause::DropAssassination => Some("assassinate_drop"),
-                    DamageCause::Pistol => Some("bullet_body"),
-                    DamageCause::PistolHeadshot => Some("bullet_head"),
-                    DamageCause::Crossbow => Some("bolt_body"),
-                    DamageCause::CrossbowHeadshot => Some("bolt_head"),
-                    _ => None,
-                };
-                if let Some(k) = k {
-                    posts.push((cue(k), subject_obj(victim)));
-                }
-                let human = player(&view, victim).is_none_or(|p| p.kind == PawnKind::Human);
-                let vo = if !human { "npc_pain" } else if amount >= 40.0 { "pain_big" } else { "pain_low" };
-                posts.push((cue(vo), subject_obj(victim)));
-            }
-            // Shadow Kill: `Twk_Pawn_DefaultNPC.m_pShadowKillSound` on the body.
-            SimEvent::BodyRemoved { body, ash: true } => posts.push((cue("shadow_kill"), subject_obj(body))),
-            SimEvent::Death { victim, .. } => {
-                posts.push((cue("death_vo"), subject_obj(victim)));
-                posts.push((cue("body_fall"), subject_obj(victim)));
-            }
-            SimEvent::ProjectileImpact { projectile, point, victim: None } => {
-                let bolt = audio.projectiles.remove(&projectile).unwrap_or(false);
-                let surface = surface_near(&session, point);
-                let striker = if bolt { "DisContactType_Arrow" } else { "DisContactType_Bullet" };
-                let obj = audio.temp_obj(&mut e, point, now);
-                match audio.contact.as_ref().and_then(|c| c.sound(striker, &surface)) {
-                    Some(s) => posts.push((s.event, obj)),
-                    None => posts.push((cues::impact_event(bolt, "Stone"), obj)),
-                }
-            }
-            SimEvent::ProjectileImpact { projectile, .. } => {
-                audio.projectiles.remove(&projectile);
-            }
-            _ => {}
-        }
-        for (ev, obj) in posts {
-            audio.post(&mut e, &ev, obj);
+        let a = &mut *audio;
+        let posts = a.sound.posts(&ev, &players, me, a.contact.as_ref(), &session.content.collision, now);
+        for (event, at) in posts {
+            let obj = match at {
+                SoundAt::Pawn(id) => PLAYER_OBJ + id as u64,
+                SoundAt::Impact(point) => audio.temp_obj(&mut e, point, now),
+            };
+            audio.post(&mut e, &event, obj);
         }
     }
-
     // Footfalls for pawns whose animation does not report notifies: one per stride.
     for p in &players {
         let driven = audio.footfall_driven.contains_key(&p.id);

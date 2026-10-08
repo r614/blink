@@ -201,8 +201,24 @@ aims (`left.blink_target`) one instance stands on the floor under the target (Gr
 target in the air (Fall) and follows it; release, cancel or travel kills it
 (`effects::blink_indicator`). The port used to spawn them as one-shots at the arrival, picked
 Fall because the pawn is Falling for a tick there, and their endless emitters left a glowing orb
-at every destination. APPROXIMATION: the Mantle variant is not chosen (no ledge test at aim
-time) and the indicator sizes are not applied. Trails and Dark Vision's cones follow their object
+at every destination. Selection: Mantle when the Blink edge finder (`try_blink_mantle`, the
+search the arrival runs) finds a ledge from the target, Ground over a floor within the
+collision height, Fall otherwise. The pawn also has `BlinkTargetingGoal` (StaticMeshComponent,
+hidden in the defaults, its mesh set natively; `BlinkTarget_PMAT` with `IndicatorType` is in
+RefShaderCache but in no package) for the goal indicator sizes 130 / 80 (DefaultPower.ini): not
+drawn. The pistol tracer `Ps_Pistol_StdTracer_01` is a `TypeDataBeam2` emitter with
+`PEB2STM_UserSet` absolute target (one 0.1 s loop): spawned at the shot's impact from the muzzle
+to the hit (`effects::spawn_beam`), as the bullet hits in its first tick.
+
+World models (`world_models.rs`, from the tweaks): grenade `Grenade.Grenade`, sticky
+`StickyBomb.StickyBomb_world_SKM`, bolts `Crossbows.bolt_01` / `Bolt_Sleep` / `Bolt_Flare`, bullet
+`Wpn_Bullet.skm_bullet`, Spring Razor `SpringRazor.SpringRazor`, rats
+`Npc_SmallRat.Mesh.Npc_SmallRat`; bind pose (their animations not played yet).
+
+Windblast: `WindBlast_Swirls_02_inst` (DefaultAdditive, `D_Disable_Diffuse`, opacity
+`WindBlast_Swirls_01_m`.r) through the recipe, the wave mesh `WindBlast_Wave_02` with
+`WindWave_Disto_02_inst` in the distortion pass. Not reproduced: depth-biased alpha
+(`Db_Enable_Depth_Biased_Alpha`, soft particles), which needs the scene depth. Trails and Dark Vision's cones follow their object
 (`effects::attached_effects`); a trail whose projectile is gone fades out.
 Remaining approximations: the Windblast origin (pawn eye height along the view), the
 underwater test (not wired), the fiery material, cast effects at the eye instead of the hand
@@ -213,10 +229,43 @@ socket.
 `dark_vision.rs`: the static uber adjustment of `Twk_DarkVision` (colour balance shadows
 (0.5, 0.1, -0.2), midtones / highlights (0.1, 0, 0), opacity 1, pre-desaturation 1,
 post-desaturation 0.5, exposure 0.1) blended into the ArkPp grade by the power's fade (0.1 s in,
-0.2 s out), and the revealed pawns redrawn through walls (no depth test, additive) with the soul
-ramp `m_LowerColor` (131, 69, 33) x 1.301 to `m_UpperColor` (202, 154, 97) x 0.9827, brighter at
-the silhouette. APPROXIMATION: `PPG_DarkVisionFinal_Mat`, `PPG_EyeLidFinal_Mat` and
-`DarkVision_Souls_INST` are not decoded; the debug capsules stay behind F3.
+0.2 s out), and the revealed pawns redrawn with `m_pSoulMaterial` =
+`AltScreen_Effects.SAVED.DarkVision_Souls_INST` (parent `DarkVision_PMAT`, BLEND opaque,
+unlit, `bUsedWithArkPostProcess`). Its shader map (RefShaderCache) has a soul pass,
+`TSoulPartMeshPixelShader<FSoulPartMeshPolicy>` (35003; skinned vertex shader 35012), and the
+ArkPp mesh passes (35005 gamma / 35006 linear, the same terms):
+
+- in front of the scene (scene depth at the pixel - (w - 5) >= 0): `Full_Color`, alpha
+  `0.7 x (0.5 + 0.5 (n_view.z + 1)^2)`;
+- hidden: `Behind_color + 0.3 x Tex#1.g` at `uv + frac(-0.05 t) + 0.4 x Tex#0.rg` (Tex#0 at
+  `uv + frac(0.05 t)`), alpha 0.8;
+- both x `1 - smoothstep(vNearFarParams.x, .y, w)`.
+
+`DarkVision_Souls_INST`: `Full_Color` (1, 0.947, 0), `Behind_color` (0.859, 0.810, 0);
+`vNearFarParams` default (1800, 2000), the power's `m_fFadeStartAtDistance` / `m_fDistance` are
+(1700, 2000) (used, LIKELY set by the power). The port draws two passes with the two depth tests
+(`SoulFrontMaterial`, `SoulBehindMaterial`), alpha blended. The items / mechanics instances
+(`m_pItemMaterial`, `m_pMechanicMaterial`, level 2) are not applied (the port reveals pawns only).
+
+The screen materials (`DisDarkVisionPpController` on `Test_PPG`'s `ArkPpNodeMaterial_9`:
+`PPG_EyeLidFinal_Mat`, `PPG_DarkVisionFinal_Mat`) have no shader map in RefShaderCache or any
+package (no other shader cache in the install), so their pass cannot be decoded from shaders;
+only the tweak's grade is applied. The debug capsules stay behind F3.
+
+## Power screen effects (the post-process chain)
+
+`Startup` `AltScreen_Effects.PostProcessChain.Test_PPG` is the game's chain: switches
+`BendTimeSwitch` / `BendTimeUnderWaterSwitch` / `BlinkSwitch` / `PossessionSwitch` /
+`AdrenalineSwitch` / `KOSwitch` / `LensSwitch` select vector-field materials
+(`PPG_BendTimeVectors_Std_INST`, `_UnderWater_INST`, `PPG_BlinkVectors_*`,
+`PPG_PossessionVectors`, `POSSESSION_IN_INST` / `OUT_INST`, `PPG_AdrenalineVectors_INST`,
+`PPG_KOVectors`, `PPG_LensVectors`) feeding `ArkPpNodeBlur.m_VectorField` (a directional blur of
+the scene along the field), with `DisPostProcessManager.PpBridge` driving the switches
+(`m_BendTimeIntensity`, `m_fPostEffectWarmupTime` / `CooldownTime` 2 s in DefaultPower.ini). None
+of the `PPG_*` materials has a shader map in RefShaderCache, so Bend Time's (and Blink's,
+Possession's) screen effect is not reproduced yet: it needs those shaders from another source
+(the oracle's capture of the running game) or the materials' expression graphs, which the cooker
+stripped.
 
 ## Distortion (U-360 resolved, U-400 open)
 

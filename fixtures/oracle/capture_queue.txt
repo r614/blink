@@ -1,0 +1,1 @@
+# One scenario name per line (or 'session <op> key=value...'); the coordinator runs this queue on the hooked original.

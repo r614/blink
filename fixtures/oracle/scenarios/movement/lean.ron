@@ -1,22 +1,34 @@
-// Holding lean left (Q) at the Playground's lean station (U-048, HOOK_TRIAGE.md 2026-10-06, 60 Hz,
-// `CameraCache.POV`): 20 degrees held (15 + 5 soften at about 5 / s), roll 10, 14.2 degrees at
-// 0.2 s; the camera 119.7 uu sideways and 21.4 down. The port's eye point is not the original's
-// camera POV (another frame of reference), so the offsets are unverified.
+// Holding lean left (Q) at the Playground's lean station. The original at a fixed 1/60 s
+// (`measure lean`, CameraCache.POV per tick, roll = half the lean angle, U-048): the angle is
+// 2.26, 4.66, 7.14, 9.67, 12.21 degrees in the first five ticks of the held key, the 15 degree
+// limit on the sixth, then the soften angle takes it toward 20 (18.2 eighteen ticks in); held
+// 20 degrees, roll 10. The camera offsets are the original's camera POV against the port's eye
+// point (another frame of reference), so they are unverified.
 (
     name: "movement/lean",
     system: Movement,
     map: "Playground",
-    description: "Hold lean left for 2 s: angle, roll, onset, camera offset.",
+    description: "Hold lean left for 2 s: the onset tick by tick, the limit, the soften angle, the roll, the camera offset.",
     setup: (player: Some((position: (-1300, 3300, 92), yaw: 0)), settle: 20),
     ticks: 120,
     input: [(tick: 1, hold: 119, action: Press(LeanLeft))],
     checkpoints: [
-        (name: "held angle", expect: [(metric: Abs(At("cam.lean_deg", 110)), value: 20, tol: 0.2, source: "HOOK_TRIAGE.md 2026-10-06 (U-048): 20 degrees held (15 + 5 soften); magnitude (sign conventions differ)")]),
-        (name: "roll", expect: [(metric: Abs(At("cam.roll", 110)), value: 10, tol: 0.2, source: "HOOK_TRIAGE.md 2026-10-06 (U-048): roll 10 (m_fCameraTiltPercent 0.5); magnitude")]),
-        (name: "onset", expect: [(metric: Abs(At("cam.lean_deg", 13)), value: 14.2, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: 14.2 degrees at 0.2 s (12 ticks after the press)")]),
+        (name: "onset (head displacement)", expect: [
+            (metric: Abs(Delta("cam.y", 1, 2)), value: 13.33, tol: 0.3, source: "lean trace 2026-10-06 (fixed 1/60 s): the camera moves 13.33 uu sideways in the first tick of the held key (head velocity set to m_fLeanSpeed 1000, then the k 80 / c 12 spring)"),
+            (metric: Abs(Delta("cam.y", 1, 3)), value: 26.31, tol: 0.5, source: "lean trace: 26.31 uu after two ticks"),
+            (metric: Abs(Delta("cam.y", 1, 6)), value: 62.68, tol: 1.5, source: "lean trace: 62.68 uu after five ticks"),
+        ]),
+        (name: "onset (angle)", expect: [
+            (metric: Abs(At("cam.lean_deg", 2)), value: 2.264, tol: 0.05, source: "lean trace: first tick, 2 x roll 1.132"),
+            (metric: Abs(At("cam.lean_deg", 6)), value: 12.206, tol: 0.15, source: "lean trace: fifth tick, 2 x roll 6.103"),
+        ]),
+        (name: "limit", expect: [(metric: Abs(At("cam.lean_deg", 7)), value: 15.0, tol: 0.1, source: "lean trace: the 15 degree limit (m_fMaxLeanAngle) on the sixth tick, 2 x roll 7.498")]),
+        (name: "soften", expect: [(metric: Abs(At("cam.lean_deg", 19)), value: 18.226, tol: 0.2, source: "lean trace: eighteenth tick, 2 x roll 9.113 (soften toward 5 at 5 / s)")]),
+        (name: "held angle", expect: [(metric: Abs(At("cam.lean_deg", 110)), value: 20, tol: 0.2, source: "HOOK_TRIAGE.md 2026-10-06 (U-048): 20 degrees held (15 + 5 soften)")]),
+        (name: "roll", expect: [(metric: Abs(At("cam.roll", 110)), value: 10, tol: 0.2, source: "HOOK_TRIAGE.md 2026-10-06 (U-048): roll 10 (m_fCameraTiltPercent 0.5)")]),
         (name: "sideways", expect: [(metric: Abs(Delta("cam.y", 0, 110)), value: 119.7, tol: 2, source: "HOOK_TRIAGE.md 2026-10-06: CameraCache.POV 119.7 uu sideways (camera POV vs the port's eye point)", status: Unverified)]),
         (name: "down", expect: [(metric: Delta("cam.z", 0, 110), value: -21.4, tol: 2, source: "HOOK_TRIAGE.md 2026-10-06: CameraCache.POV 21.4 uu down", status: Unverified)]),
     ],
     record: [Pawn, Camera],
-    capture: Some("measure lean (CameraCache.POV per tick)"),
+    capture: Some("measure lean (CameraCache.POV per tick), with the tick the key went down"),
 )

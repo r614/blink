@@ -56,6 +56,9 @@ oracle scenario [NAME...] [--system S]... [--all] [--jobs N] [--json]
 oracle sweep                                            everything cached -> one scorecard
 oracle bench import|queries --map M                     the port's costs
 oracle cache list
+oracle gen collision --map M --sampling prim --profiles enumerated --out Q   every exe trace profile
+oracle index build [--project DIR]... [--tables DIR] [--no-decomp]   static index (phase 3)
+oracle index fn|class|uscript|xref|search|natives|traces|field|vcall|stats|raw ...  (`oracle index help`)
 ```
 
 Outputs (`harness_out/oracle/...`) and caches (`$DISHONORED_CACHE/oracle`, default
@@ -161,6 +164,8 @@ cause book with the residual summary.
 | 3 | Query oracles | hook: collision, navigation, light, visibility | collision: cached captures vs headless port |
 | 4 | Behaviour traces | hook, fixed-step scenario in both, first divergence | spec + trace + diff; full-system port runner and a 46-scenario library (phase 4, below); phase 2: original traces (`probe_launch scenario`) |
 | 5 | Ghidra index | native table, vtables, cross-references per exe hash | phase 3 |
+| 4 | Behaviour traces | hook, fixed-step scenario in both, first divergence | spec + trace + diff; port runner for movement; original traces in phase 2 |
+| 5 | Static index | native table, vtables, cross-references, trace sites, decompiled C and UnrealScript per exe hash | done (phase 3, below) |
 
 ### Coverage scan
 
@@ -279,6 +284,96 @@ exterior's new capture: Boyle Ext 76784 / 76826 (99.95 %), Boyle Int 44748 / 447
 `harness collision` on its stored fixtures (fractions rounded to 1e-4) gives 99.94 % and 99.90 %.
 `harness collision` still keeps its own comparison and cause classification; moving them onto
 `dishonored_oracle::diff` is open.
+
+### Static index (probe 5, phase 3)
+
+`oracle index build` builds one index per exe hash under `$DISHONORED_CACHE/oracle/index/<exe
+sha256, 16 hex>/` (retail-derived: never committed); `oracle index ...` queries it
+(`crates/dishonored_oracle/src/index`, Ghidra script `tools/ghidra_index/scripts/BlinkIndex.java`).
+
+**Build.** Two halves, joined by name:
+1. *Exe* (`BlinkIndex.java`, one `analyzeHeadless -readOnly` pass over an analysed project; the
+   project comes from `--project DIR` (repeatable: the first unlocked copy is used) or
+   `BLINK_GHIDRA_PROJECTS`, `;`-separated; a fresh one is `analyzeHeadless <dir> dishonored -import
+   Dishonored.exe`, 860 s of auto-analysis). It writes plain tables (`tables/*.tsv`):
+   - the `FNativeFunctionLookup` tables (`{"UClassexecFoo", &UClass::execFoo}` arrays): 335
+     tables, 2560 exec functions, each labelled;
+   - class records: the UTF-16 class name each native class registers (the record points one
+     character past the `A` / `U` prefix), its InternalConstructor (the record pointer that stores a
+     vtable) and every vtable the constructor stores (the largest is the primary; the others are
+     interface vtables), slots up to the next code-referenced address;
+   - every function, every call instruction (direct; virtual: `CALL [reg+off]` or `CALL reg` after
+     `MOV reg, [reg+off]`, recorded as the slot byte offset; imports), every reference from code
+     to ASCII or UTF-16 text;
+   - trace call sites: the callers of `UWorld::SingleLineCheck` (0x0064E7A0) and
+     `UWorld::MultiLineCheck` (0x0064A860), given their real signatures, then each call's
+     `TraceFlags` resolved through the decompiler's p-code (constants, copies, casts, OR / AND,
+     phis, and up to two levels of callers when the flags are a parameter) and its `Extent`
+     resolved to a constant vector (built on the stack or a global) or marked dynamic;
+   - Ghidra's decompiled C of every function (`ParallelDecompiler`, 60 s per function) into
+     `decomp.c` with an offset table.
+2. *Script* (`index::script`, `index::uscript`): every class of the 137 script packages (from the
+   coverage scan's class definitions), with property layouts (the `UStruct::Link` rules of
+   `prop_layout`), enums, constants, structs, defaults, and every function and state decompiled
+   (below). Natives join the exe by exec name (`UActorexecTrace` = `Actor.Trace`).
+
+The research docs are read too: every 8-digit address they cite is kept with its line (`fn` shows
+them as research notes), and a backticked `Class::Function` right before an address names it.
+
+**UnrealScript decompiler** (`index::uscript`). UE3 v801 tokens (UELib's table after the
+`RangeConst` removal): 0x00-0x5A expressions, 0x60-0x6F extended natives, 0x70+ natives by index,
+resolved through every package's `FunctionDef`s (operators print as operators with their
+precedence, `super(Class).F()` from final calls to non-final functions, enum names for `switch`
+cases). Object references are 4 bytes serialized and 8 in memory, and jump offsets are in memory
+bytes: a function counts as decompiled only when the parse ends exactly at `ScriptStorageSize`
+and its in-memory position at `ScriptBytecodeSize`. Control flow is rebuilt from the jumps (if /
+else, else-if chains, while, for with its step when a `continue` jumps to it, do-until,
+foreach with break / continue, switch with break); anything else stays a labelled `goto`, so
+nothing is ever dropped.
+
+**Results (2026-10-08, GOG exe `70da9613...`).**
+
+| | |
+|---|---|
+| Script | 137 packages, 3004 classes, 4772 functions: 2200 script (169 KiB) + 2572 native, 13 state code blocks; **0 decompile failures**, 0 definition failures; 2 functions keep a `goto` (else-if inside a loop). Decompile time 0.3-0.5 s |
+| Spot checks | `DisDoor.m_DoorState` at +0x311 and `DisDoor` vtable +0x1C4 = 0x00A2C760 (`ShouldTrace`), both as COLLISION.md measured; `APawn::physWalking` (0x006BD150) is `Pawn` vtable slot 141 and its `MultiLineCheck` passes 0x20DF with the pawn's extent (COLLISION.md); `DishonoredNPCPawn.BreakConstraint`, `Actor.DisplayDebug`, `HUD.DisplayLocalMessages` read the same as UE Explorer's output (`uc_all`), with operators, loops and `continue` restored |
+| Exe | 73960 functions, 258262 calls (28909 virtual), 49922 string references; 2560 of 2572 natives with an address (the 12 left are interface stubs: `OnlineSubsystemPC`, `UIDataStoreSubscriber`...); 2760 class vtables |
+| Traces | 219 call sites, 72 distinct constant flag values (23 sites also take run-time flags); 29 profiles with a constant extent, 42 with the run-time-extent sites taken at the pawn's extent. The hook-measured movement (0x20DF), vision (0x08023086, through a parameter) and pistol (0x020A28DF) flags are among them; the crosshair's 0x01022097 is not (0x01002097 is: its complex-collision bit is added at run time) |
+| Decompiled C | 73682 functions, 1 failure, 61.1 MB |
+| Build | `oracle index build` end to end 493 s: Ghidra export 474 s (natives 3 s, classes 6 s, functions 38 s, traces 44 s, decompiler 385 s on the 16-thread machine; 681 s under load), the script 6 s, assembly 7 s. `--no-decomp` (the previous C is kept) about 100 s; from existing tables (`--tables`) 6-9 s |
+| Size | `index.bin` 7.2 MB (functions, natives, vtables, traces, decompiled-C offsets, research notes), `xref.bin` 10.9 MB (calls, string references), `script.bin` 5.0 MB, `decomp.c` 61.1 MB, `tables/` 20 MB |
+| Query latency (warm, whole process) | 90-110 ms for every command (`fn` with its C, `class`, `uscript`, `xref`, `search`, `natives`, `traces`, `field`); the index loads in 25-30 ms (own little-endian codec; serde/bincode took 350-600 ms) |
+
+**Wiring.** `Profiles::Enumerated` resolves to the index's profiles
+(`dishonored_oracle::index::enumerated_profiles`); `oracle gen collision --sampling prim
+--profiles enumerated` uses them (Boyle Ext: 1.05 M primitive-directed queries over 42 profiles,
+against 50 k over the 4 measured ones). Every report's work items get code pointers into the
+original when the index exists (`index::annotate`, from `write_report`): coverage items the
+class's constructor, vtable, natives and script functions, property items the field's offset;
+collision items the trace entry points.
+
+**Limits.** `GNatives` is filled at run time in this build (the exec pointer arrays in `.data`
+are not indexed by native number), so native numbers map to addresses through the lookup tables'
+names; a hook dump of `GNatives` would confirm the numbering (U-830). Run-time extents (mostly the
+tracing actor's cylinder) are not resolved statically (U-831). The slot offset of a virtual call
+does not say which class's vtable it goes through (`xref` lists the calls through that offset in
+any class). Ghidra's names are its own (`FUN_...`) except the exec natives, the research docs'
+names and a few hook-confirmed entry points.
+
+**For agents (usage).** Run everything from the repository root with `DISHONORED_CACHE` set (the
+dev-env scripts set it); `oracle index help` lists the commands, each prints text or, with
+`--json`, JSON. To find what implements a behaviour in the original: `oracle index search
+<regex>` (classes, script functions, exec natives, Ghidra and research names, strings, script
+bodies), then `oracle index fn <address|exec name|Class.Function|Class::vslotN>` for the native
+(callers, callees, strings, trace sites, research notes and the decompiled C; `--no-c` to skip
+the C), `oracle index class <Class>` for its layout with offsets, vtable overrides (`[ShouldTrace]`
+style names where known), natives and decompiled script (`--brief` for just fields and function
+names), `oracle index uscript <Class>[.<Function>]` for the script alone, `oracle index field
+<Class> 0x<offset>` to name a `*(this + 0x311)` seen in the C, `oracle index vcall <Class>
+<slot|0xoffset>` for a `(**(code **)(*this + 0x1c4))` call, `oracle index xref <address|text>`
+for who calls or references something, and `oracle index traces` for every trace call site with
+its flags and extent. Quote addresses as 8 hex digits. The output is retail-derived: describe
+findings in your own words in research docs and never paste decompiled code into the repository.
 
 ## Speed
 
@@ -523,13 +618,17 @@ the collision audit's captures, the measured costs.
 - Primitive-directed queries aimed at the original's primitives from the dump (each kDOP group,
   convex element and volume), densification rounds captured automatically.
 
-**Phase 3 (static index).**
+**Phase 3 (static index): done 2026-10-08** ("Static index" above).
 - Ghidra index per exe hash: native function table names, per-class vtables, cross-references,
   and the trace call sites with their flags and extents -> `TraceProfile`s (`Profiles::Enumerated`).
+  Done, plus string references and the decompiled C of every function.
 - An UnrealScript bytecode decompiler (UELib's token tables, EXISTING_WORK.md) for the 2200
   script functions (169 KiB), mostly event glue; the scan's `FunctionDef`s already locate each
-  function's bytecode.
+  function's bytecode. Done: 0 failures over the install.
 - Code pointers in dossiers from the index (which native implements the diverging behaviour).
+  Done for coverage and collision items. Open: the `GNatives` numbering from a hook dump (U-830),
+  run-time trace extents (U-831), and per-scenario pointers once phase 4's scenarios name their
+  classes.
 
 **Phase 4 (scenario library per system).** Scenarios for every system listed above, starting
 from the measured baselines of INSTRUMENTATION.md and HOOK_TRIAGE.md (movement, sword, detection,
@@ -564,14 +663,14 @@ declaration order). Events: `Sim` (every SimEvent with `key=value` details, ids 
 the view in 720-line pixels, `off_px`, the dispersion, `disp`, and `rd` = off / disp),
 `Console`, and the presentation events below.
 
-**Presentation** (`tools/oracle/src/present.rs`, U-865). `build.rs` cuts the runtime's own
-handlers out of `crates/dishonored_runtime/src` (`effects::gameplay_effects`, `effects::step`
-and `simulate`'s one-shot despawn rule, `spawn_effect`'s emitter frame, the simulation-event part
-of `audio::drive`, `characters::collect_hits`) and compiles them against stand-ins for the Bevy
-resources, so the shim cannot drift from the game: a runtime change the stand-ins do not cover
-fails the oracle build. The gameplay ParticleSystems (`GAMEPLAY_PARTICLES`) are decoded headless
-through the level importer and cached; the contact system is loaded for impact and blood paths.
-Events: `Effect` (system, instance, position, emitters, untextured emitters, emitters without a
+**Presentation** (`tools/oracle/src/present.rs`, U-865). The presentation rules live in a
+Bevy-free module, `crates/dishonored_runtime/src/present_rules.rs` (which simulation events
+ask for which effect or beam, `FxEventState::requests`; which sounds are posted where,
+`SoundEventState::posts`; the Blink indicator and attached effects; the emitter step and the
+one-shot despawn rule; `collect_hits`). The game's `effects.rs` / `audio.rs` / `characters.rs`
+call it, and the oracle compiles the same file through `#[path]`, so both run one copy of the
+rules (no source extraction, nothing to drift). The gameplay ParticleSystems (`GAMEPLAY_PARTICLES`) are decoded headless
+through the level importer and cached; the contact system is loaded for impact and blood paths.Events: `Effect` (system, instance, position, emitters, untextured emitters, emitters without a
 lifetime), `EffectEnd`, `EffectMissing` (the runtime asks for a system it did not decode),
 `Sound` (the AkEvent posted; `(no cue)` for an unmapped one), `Anim` (hit reactions).
 
@@ -618,6 +717,17 @@ and the crossbow muzzle and trail; crossbow shot to load 1.583 s (1.555, U-501);
 shot raises attention to the maximum (U-862); passive NPCs turn to yaw 0 (U-863); lean onset
 10.7 degrees at 0.2 s (14.2); sword damage 14 for 10 (U-113, classified KnownDifference).
 
+**Rule fixes (2026-10-08, after the effects merge):** 46 scenarios: 37 pass, 4 fail, 5
+unmeasured; checks 111 pass, 7 fail, 36 unmeasured, 9 unverified (before: 35 pass / 6 fail).
+Fixed in the port: the jump launches after the press tick's walk (hook trace: vz 800 then 750);
+the lean camera is the decoded spring point (head displacement per tick matches); reload and
+fire stages count ticks like the original (f32 countdown, anim time against AnimStateExit,
+the shot a tick after the fire action starts); the sword can be sheathed (400 / 600);
+the runner snaps with the engine's line check and keeps a placed NPC's yaw. Still failing:
+`ai/investigate_noise` (the guard reaches Combat: instant NPC turning and the port-only
+`criminal()` rule, U-862), `combat/crossbow_reload` (fire action two ticks long, U-868),
+`combat/sword_hit_dummy` damage (U-113, KnownDifference), `movement/lean` angle onset / limit /
+soften (lean height smoothing, U-867).
 **Usage for agents.** `oracle scenario --system powers` (or `--all`, or names, `combat/*`),
 then read `harness_out/oracle/scenario/results.json`: `totals`, `by_system` (pass, fail,
 unmeasured, error), and per scenario `status`, `first_divergence` (`against`: `original` when
