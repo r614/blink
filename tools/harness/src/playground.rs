@@ -138,6 +138,31 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     let def = MissionDef::load(std::path::Path::new(&ctx.opt("--mission").unwrap_or_else(|| "missions/playground.ron".into())))?;
     let errs = def.validate();
     rep.check(S, "mission file valid", errs.is_empty(), errs.join("; "));
+    // Every brush draws what it collides with (and the reverse), faces wound to show from
+    // outside, no blockout or dev material, and a closed boundary taller than any reachable point.
+    {
+        let layout = dishonored_content::playground::layout_for(MAP).context("maps/playground.ron")??;
+        let content = dishonored_assets::Content::locate()?;
+        let geo = dishonored_content::playground::import_layout_geometry(&content, &layout)?;
+        let errs = dishonored_content::playground::audit_brushes(&layout, &geo);
+        rep.check(S, "brushes: render faces = collision faces, wound outward, thin skins only without collision", errs.is_empty(), if errs.is_empty() { format!("{} brushes", layout.brushes.len()) } else { errs.join("; ") });
+        let dev: Vec<String> = layout.brushes.iter().filter_map(|b| b.material.clone()).chain(std::iter::once(layout.default_material.clone())).chain(layout.meshes.iter().flat_map(|m| m.materials.iter().flatten().cloned())).filter(|m| m.to_ascii_lowercase().contains("blockout") || m.to_ascii_lowercase().contains("_blk_")).collect();
+        rep.check(S, "no blockout / dev materials in the layout", dev.is_empty(), dev.join(", "));
+        // The boundary: walls on all four sides of the stations, up to 3000.
+        let world = dishonored_world::CollisionWorld::from_map(&geo);
+        let mut misses = Vec::new();
+        for (x, y, dir) in [(0.0, 0.0, Vec3::X), (0.0, 0.0, -Vec3::X), (0.0, 0.0, Vec3::Y), (0.0, 0.0, -Vec3::Y), (5500.0, -1000.0, Vec3::X), (-5500.0, 7500.0, Vec3::Y), (-5500.0, -5500.0, -Vec3::Y)] {
+            for z in [100.0f32, 1700.0, 2900.0] {
+                let from = Vec3::new(x, y, z);
+                // The boundary's inner faces: x = +-6000, y = -6000 and 8000.
+                let hit = world.raycast(from, dir, 20000.0, dishonored_world::channel::PAWN).map(|h| h.point);
+                if !hit.is_some_and(|p| p.x.abs() <= 6001.0 && (-6001.0..=8001.0).contains(&p.y)) {
+                    misses.push(format!("{from:.0?} along {dir:?}"));
+                }
+            }
+        }
+        rep.check(S, "boundary: a wall blocks every way out up to 3000 (above the highest point, 1600 + a 500 Blink)", misses.is_empty(), if misses.is_empty() { "21 rays from inside at 100 / 1700 / 2900 up".into() } else { misses.join("; ") });
+    }
     let maps = MapContents::load(&[MAP.to_string()])?;
     let mc = maps.get(MAP).context("playground")?.clone();
     let nav = mc.collision.nav.as_ref().map(|n| n.polys.len()).unwrap_or(0);

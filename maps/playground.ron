@@ -23,7 +23,7 @@
         "L_Boyle_Int_Basement",
     ],
     environment: "L_Boyle_Ext_P",
-    default_material: "Env_Blockout.materials_inst.stone_blk_192_INST",
+    default_material: "stone_wall_01.stone_wall_01_inst",
     sky_light: 0.05,
 
     brushes: [
@@ -32,68 +32,74 @@
         (at: (4800, 1000, -64), shape: Box((2400, 14000, 64)), material: "grounds.MASTER_street_cobbles_01_DRY_INST", uv_scale: 400),
         (at: (2600, -3500, -64), shape: Box((2000, 5000, 64)), material: "grounds.MASTER_street_cobbles_01_DRY_INST", uv_scale: 400),
         (at: (2600, 4500, -64), shape: Box((2000, 7000, 64)), material: "grounds.MASTER_street_cobbles_01_DRY_INST", uv_scale: 400),
-        // ---- Perimeter walls (800 high).
+        // ---- Boundary: a closed wall 3000 high all round (a Boyle facade to 800, dock stone above).
+        // The highest standing points are the fall-damage stairs' top (1600) and the 600 pillar:
+        // a Blink from there (500 up) or a mantle (230) stays well under its top.
         (at: (0, -6050, 0), shape: Box((12200, 100, 800)), material: "boyle_brick_wall_ext.boyle_brick_wall_ext_std"),
         (at: (0, 8050, 0), shape: Box((12200, 100, 800)), material: "boyle_brick_wall_ext.boyle_brick_wall_ext_std"),
         (at: (-6050, 1000, 0), shape: Box((100, 14200, 800)), material: "boyle_brick_wall_ext.boyle_brick_wall_ext_std"),
         (at: (6050, 1000, 0), shape: Box((100, 14200, 800)), material: "boyle_brick_wall_ext.boyle_brick_wall_ext_std"),
+        (at: (0, -6050, 800), shape: Box((12200, 100, 2200)), material: "stone_wall_01.stone_dock_wall_01_inst", uv_scale: 512),
+        (at: (0, 8050, 800), shape: Box((12200, 100, 2200)), material: "stone_wall_01.stone_dock_wall_01_inst", uv_scale: 512),
+        (at: (-6050, 1000, 800), shape: Box((100, 14200, 2200)), material: "stone_wall_01.stone_dock_wall_01_inst", uv_scale: 512),
+        (at: (6050, 1000, 800), shape: Box((100, 14200, 2200)), material: "stone_wall_01.stone_dock_wall_01_inst", uv_scale: 512),
 
         // ---- Start: the item and power bench (two metal tables are original meshes below).
 
         // ---- A. Step heights 30 / 44 / 50 / 56 / 60 (front faces at y -3500; walk in from y -3900).
-        (at: (-5400, -3200, 0), shape: Box((300, 600, 30))),
-        (at: (-5000, -3200, 0), shape: Box((300, 600, 44))),
-        (at: (-4600, -3200, 0), shape: Box((300, 600, 50))),
-        (at: (-4200, -3200, 0), shape: Box((300, 600, 56))),
-        (at: (-3800, -3200, 0), shape: Box((300, 600, 60))),
+        (at: (-5400, -3200, 0), shape: Box((300, 600, 30)), material: "street_cobbles_01.sidewalk_03_inst"),
+        (at: (-5000, -3200, 0), shape: Box((300, 600, 44)), material: "street_cobbles_01.sidewalk_03_inst"),
+        (at: (-4600, -3200, 0), shape: Box((300, 600, 50)), material: "street_cobbles_01.sidewalk_03_inst"),
+        (at: (-4200, -3200, 0), shape: Box((300, 600, 56)), material: "street_cobbles_01.sidewalk_03_inst"),
+        (at: (-3800, -3200, 0), shape: Box((300, 600, 60)), material: "street_cobbles_01.sidewalk_03_inst"),
 
         // ---- B. Slopes 40 / 45 / 50 / 55 / 60 degrees (400 long, rising north from y -3500).
-        (at: (-2800, -3500, 0), yaw: 90, shape: Ramp(width: 300, length: 400, angle: 40)),
-        (at: (-2400, -3500, 0), yaw: 90, shape: Ramp(width: 300, length: 400, angle: 45)),
-        (at: (-2000, -3500, 0), yaw: 90, shape: Ramp(width: 300, length: 400, angle: 50)),
-        (at: (-1600, -3500, 0), yaw: 90, shape: Ramp(width: 300, length: 400, angle: 55)),
-        (at: (-1200, -3500, 0), yaw: 90, shape: Ramp(width: 300, length: 400, angle: 60)),
+        (at: (-2800, -3500, 0), yaw: 90, shape: Ramp(width: 300, length: 400, angle: 40), material: "stone_ramp_01.stone_ramp_01_inst"),
+        (at: (-2400, -3500, 0), yaw: 90, shape: Ramp(width: 300, length: 400, angle: 45), material: "stone_ramp_01.stone_ramp_01_inst"),
+        (at: (-2000, -3500, 0), yaw: 90, shape: Ramp(width: 300, length: 400, angle: 50), material: "stone_ramp_01.stone_ramp_01_inst"),
+        (at: (-1600, -3500, 0), yaw: 90, shape: Ramp(width: 300, length: 400, angle: 55), material: "stone_ramp_01.stone_ramp_01_inst"),
+        (at: (-1200, -3500, 0), yaw: 90, shape: Ramp(width: 300, length: 400, angle: 60), material: "stone_ramp_01.stone_ramp_01_inst"),
 
         // ---- C. Mantle ledges 60 / 120 / 200 / 260 / 300 / 330 / 360 (front faces at y -3500).
-        (at: (-400, -3200, 0), shape: Box((300, 600, 60))),
-        (at: (0, -3200, 0), shape: Box((300, 600, 120))),
-        (at: (400, -3200, 0), shape: Box((300, 600, 200))),
-        (at: (800, -3200, 0), shape: Box((300, 600, 260))),
-        (at: (1200, -3200, 0), shape: Box((300, 600, 300))),
-        (at: (1600, -3200, 0), shape: Box((300, 600, 330))),
-        (at: (2000, -3200, 0), shape: Box((300, 600, 360))),
+        (at: (-400, -3200, 0), shape: Box((300, 600, 60)), material: "stone_wall_01.stone_dock_wall_01_inst"),
+        (at: (0, -3200, 0), shape: Box((300, 600, 120)), material: "stone_wall_01.stone_dock_wall_01_inst"),
+        (at: (400, -3200, 0), shape: Box((300, 600, 200)), material: "stone_wall_01.stone_dock_wall_01_inst"),
+        (at: (800, -3200, 0), shape: Box((300, 600, 260)), material: "stone_wall_01.stone_dock_wall_01_inst"),
+        (at: (1200, -3200, 0), shape: Box((300, 600, 300)), material: "stone_wall_01.stone_dock_wall_01_inst"),
+        (at: (1600, -3200, 0), shape: Box((300, 600, 330)), material: "stone_wall_01.stone_dock_wall_01_inst"),
+        (at: (2000, -3200, 0), shape: Box((300, 600, 360)), material: "stone_wall_01.stone_dock_wall_01_inst"),
 
         // ---- D. Jump gaps 100 / 200 / 300 / 400 / 500 between 240-high platforms; stairs up.
-        (at: (2800, -4500, 0), yaw: 90, shape: Stairs(width: 300, steps: 6, rise: 40, run: 100)),
-        (at: (2800, -3700, 0), shape: Box((400, 400, 240))),
-        (at: (2800, -3200, 0), shape: Box((400, 400, 240))),
-        (at: (3400, -4500, 0), yaw: 90, shape: Stairs(width: 300, steps: 6, rise: 40, run: 100)),
-        (at: (3400, -3700, 0), shape: Box((400, 400, 240))),
-        (at: (3400, -3100, 0), shape: Box((400, 400, 240))),
-        (at: (4000, -4500, 0), yaw: 90, shape: Stairs(width: 300, steps: 6, rise: 40, run: 100)),
-        (at: (4000, -3700, 0), shape: Box((400, 400, 240))),
-        (at: (4000, -3000, 0), shape: Box((400, 400, 240))),
-        (at: (4600, -4500, 0), yaw: 90, shape: Stairs(width: 300, steps: 6, rise: 40, run: 100)),
-        (at: (4600, -3700, 0), shape: Box((400, 400, 240))),
-        (at: (4600, -2900, 0), shape: Box((400, 400, 240))),
-        (at: (5200, -4500, 0), yaw: 90, shape: Stairs(width: 300, steps: 6, rise: 40, run: 100)),
-        (at: (5200, -3700, 0), shape: Box((400, 400, 240))),
-        (at: (5200, -2800, 0), shape: Box((400, 400, 240))),
+        (at: (2800, -4500, 0), yaw: 90, shape: Stairs(width: 300, steps: 6, rise: 40, run: 100), material: "stone_ramp_01.stone_ramp_01_inst"),
+        (at: (2800, -3700, 0), shape: Box((400, 400, 240)), material: "bridge_arch_set.bridge_stone_01"),
+        (at: (2800, -3200, 0), shape: Box((400, 400, 240)), material: "bridge_arch_set.bridge_stone_01"),
+        (at: (3400, -4500, 0), yaw: 90, shape: Stairs(width: 300, steps: 6, rise: 40, run: 100), material: "stone_ramp_01.stone_ramp_01_inst"),
+        (at: (3400, -3700, 0), shape: Box((400, 400, 240)), material: "bridge_arch_set.bridge_stone_01"),
+        (at: (3400, -3100, 0), shape: Box((400, 400, 240)), material: "bridge_arch_set.bridge_stone_01"),
+        (at: (4000, -4500, 0), yaw: 90, shape: Stairs(width: 300, steps: 6, rise: 40, run: 100), material: "stone_ramp_01.stone_ramp_01_inst"),
+        (at: (4000, -3700, 0), shape: Box((400, 400, 240)), material: "bridge_arch_set.bridge_stone_01"),
+        (at: (4000, -3000, 0), shape: Box((400, 400, 240)), material: "bridge_arch_set.bridge_stone_01"),
+        (at: (4600, -4500, 0), yaw: 90, shape: Stairs(width: 300, steps: 6, rise: 40, run: 100), material: "stone_ramp_01.stone_ramp_01_inst"),
+        (at: (4600, -3700, 0), shape: Box((400, 400, 240)), material: "bridge_arch_set.bridge_stone_01"),
+        (at: (4600, -2900, 0), shape: Box((400, 400, 240)), material: "bridge_arch_set.bridge_stone_01"),
+        (at: (5200, -4500, 0), yaw: 90, shape: Stairs(width: 300, steps: 6, rise: 40, run: 100), material: "stone_ramp_01.stone_ramp_01_inst"),
+        (at: (5200, -3700, 0), shape: Box((400, 400, 240)), material: "bridge_arch_set.bridge_stone_01"),
+        (at: (5200, -2800, 0), shape: Box((400, 400, 240)), material: "bridge_arch_set.bridge_stone_01"),
 
         // ---- E. Blink course: floor targets 500 / 1100 / 1600 east of the pad at x -5600, y 0,
         // pillars 400 / 500 / 600 high (the vertical range is 500), a 350 wall to Blink-mantle.
-        (at: (-5600, 0, 0), shape: Box((200, 200, 4)), material: "Env_Blockout.materials_inst.stone_blk_064_INST"),
-        (at: (-5100, 0, 0), shape: Box((150, 400, 4)), material: "Env_Blockout.materials_inst.stone_blk_064_INST"),
-        (at: (-4500, 0, 0), shape: Box((150, 400, 4)), material: "Env_Blockout.materials_inst.stone_blk_064_INST"),
-        (at: (-4000, 0, 0), shape: Box((150, 400, 4)), material: "Env_Blockout.materials_inst.stone_blk_064_INST"),
-        (at: (-3200, -900, 0), shape: Box((300, 300, 400))),
-        (at: (-3200, -300, 0), shape: Box((300, 300, 500))),
-        (at: (-3200, 300, 0), shape: Box((300, 300, 600))),
-        (at: (-2400, 1000, 0), shape: Box((100, 1000, 350))),
+        (at: (-5600, 0, 0), shape: Box((200, 200, 4)), material: "int_boyle_ground.distillery_wood_floor_brighter_inst"),
+        (at: (-5100, 0, 0), shape: Box((150, 400, 4)), material: "int_boyle_ground.distillery_wood_floor_brighter_inst"),
+        (at: (-4500, 0, 0), shape: Box((150, 400, 4)), material: "int_boyle_ground.distillery_wood_floor_brighter_inst"),
+        (at: (-4000, 0, 0), shape: Box((150, 400, 4)), material: "int_boyle_ground.distillery_wood_floor_brighter_inst"),
+        (at: (-3200, -900, 0), shape: Box((300, 300, 400)), material: "ren_mid_01.ren_mid_brick_01_inst"),
+        (at: (-3200, -300, 0), shape: Box((300, 300, 500)), material: "ren_mid_01.ren_mid_brick_01_inst"),
+        (at: (-3200, 300, 0), shape: Box((300, 300, 600)), material: "ren_mid_01.ren_mid_brick_01_inst"),
+        (at: (-2400, 1000, 0), shape: Box((100, 1000, 350)), material: "boyle_ext_MS.stone_wall_01_inst"),
 
         // ---- F. Climbable chain hanging from a beam beside a 500-high tower.
-        (at: (-1000, 400, 0), shape: Box((400, 400, 500))),
-        (at: (-1000, 100, 560), shape: Box((60, 300, 40)), material: "Env_Blockout.materials_inst.stone_blk_064_INST"),
+        (at: (-1000, 400, 0), shape: Box((400, 400, 500)), material: "warehouse_01.warehouse_brick_int_INST"),
+        (at: (-1000, 100, 560), shape: Box((60, 300, 40)), material: "basement_set_01.basement_wood_beam_01"),
 
         // ---- G. Pool: basin 600 deep (water to 30 below the floor), stairs out in the south-west.
         (at: (2600, 0, -664), shape: Box((2000, 2000, 64)), material: "basement_set_01.basement_plaster_tile"),
@@ -102,15 +108,18 @@
         (at: (2600, -1050, -664), shape: Box((2200, 100, 664)), material: "basement_set_01.basement_plaster_tile"),
         (at: (2600, 1050, -664), shape: Box((2200, 100, 664)), material: "basement_set_01.basement_plaster_tile"),
         (at: (2440, -800, -600), yaw: 180, shape: Stairs(width: 300, steps: 14, rise: 40, run: 60), material: "basement_set_01.basement_plaster_tile"),
+        // The water's surface at the volume's top (z -30): the Boyle river material, no collision
+        // (the water volume below does the swimming).
+        (at: (2600, 0, -31), shape: Box((1998, 1998, 1)), material: "boyle_ext_MS.Water_boyle_ext_INST03", collide: false, uv_scale: 1024),
 
         // ---- H. Fall-damage stairs along the east wall (up to 1600) with ledges to drop from:
         // 880 / 1040 / 1200 / 1360 / 1520 (landing speeds about 2300 / 2500 / 2680 / 2860 / 3020).
-        (at: (5700, -1600, 0), yaw: 90, shape: Stairs(width: 400, steps: 40, rise: 40, run: 100)),
-        (at: (5350, 550, 0), shape: Box((300, 100, 880))),
-        (at: (5350, 950, 0), shape: Box((300, 100, 1040))),
-        (at: (5350, 1350, 0), shape: Box((300, 100, 1200))),
-        (at: (5350, 1750, 0), shape: Box((300, 100, 1360))),
-        (at: (5350, 2150, 0), shape: Box((300, 100, 1520))),
+        (at: (5700, -1600, 0), yaw: 90, shape: Stairs(width: 400, steps: 40, rise: 40, run: 100), material: "stone_ramp_01.stone_ramp_01_inst"),
+        (at: (5350, 550, 0), shape: Box((300, 100, 880)), material: "metal_plate_hub_01.metal_plate_hub_01_INST"),
+        (at: (5350, 950, 0), shape: Box((300, 100, 1040)), material: "metal_plate_hub_01.metal_plate_hub_01_INST"),
+        (at: (5350, 1350, 0), shape: Box((300, 100, 1200)), material: "metal_plate_hub_01.metal_plate_hub_01_INST"),
+        (at: (5350, 1750, 0), shape: Box((300, 100, 1360)), material: "metal_plate_hub_01.metal_plate_hub_01_INST"),
+        (at: (5350, 2150, 0), shape: Box((300, 100, 1520)), material: "metal_plate_hub_01.metal_plate_hub_01_INST"),
 
         // ---- I. Doors and usables: a wall at y 3000 with three doorways. The doors copied with yaw -90 lie along +X from their hinge (Location), 152 wide (harness "Doors and usables" table).
         (at: (-5700, 3000, 0), shape: Box((600, 40, 400)), material: "boyle_brick_wall_ext.boyle_brick_wall_ext_std"),
@@ -119,28 +128,28 @@
         (at: (-3274, 3000, 0), shape: Box((1148, 40, 400)), material: "boyle_brick_wall_ext.boyle_brick_wall_ext_std"),
 
         // ---- J. Lean corner and crouch tunnel (clearance 150: sneaking fits, standing does not).
-        (at: (-1500, 3000, 0), shape: Box((1000, 40, 300))),
-        (at: (-1000, 3320, 0), shape: Box((40, 600, 300))),
-        (at: (-520, 3400, 0), shape: Box((40, 800, 190))),
-        (at: (-280, 3400, 0), shape: Box((40, 800, 190))),
-        (at: (-400, 3400, 150), shape: Box((280, 800, 40))),
+        (at: (-1500, 3000, 0), shape: Box((1000, 40, 300)), material: "int_mid_walls_01.int_mid_walls_INST"),
+        (at: (-1000, 3320, 0), shape: Box((40, 600, 300)), material: "int_mid_walls_01.int_mid_walls_INST"),
+        (at: (-520, 3400, 0), shape: Box((40, 800, 190)), material: "int_mid_walls_01.int_mid_walls_INST"),
+        (at: (-280, 3400, 0), shape: Box((40, 800, 190)), material: "int_mid_walls_01.int_mid_walls_INST"),
+        (at: (-400, 3400, 150), shape: Box((280, 800, 40)), material: "wood_plank_01.wood_plank_01_inst"),
 
         // ---- K. Pain volume floor (gravel), x 600..1400, y 2800..3600.
         (at: (1000, 3200, 0), shape: Box((800, 800, 2)), material: "ext_boyle_ground_01.gravel_01_map", collide: false),
 
         // ---- L. Shooting gallery: firing line y 2800; boards at 10 / 20 / 40 m (500 / 1000 / 2000).
-        (at: (3400, 3300, 0), shape: Box((200, 20, 300)), material: "Env_Blockout.materials_inst.stone_blk_064_INST"),
-        (at: (4200, 3800, 0), shape: Box((200, 20, 300)), material: "Env_Blockout.materials_inst.stone_blk_064_INST"),
-        (at: (5000, 4800, 0), shape: Box((200, 20, 300)), material: "Env_Blockout.materials_inst.stone_blk_064_INST"),
+        (at: (3400, 3300, 0), shape: Box((200, 20, 300)), material: "wood_plank_01.wood_plank_01_inst"),
+        (at: (4200, 3800, 0), shape: Box((200, 20, 300)), material: "wood_plank_01.wood_plank_01_inst"),
+        (at: (5000, 4800, 0), shape: Box((200, 20, 300)), material: "wood_plank_01.wood_plank_01_inst"),
 
         // ---- N. Stealth lane: a wall at y 6200 (open west of x -4400), a roof over the east half.
         (at: (300, 6200, 0), shape: Box((9400, 40, 450)), material: "boyle_brick_wall_ext.boyle_brick_wall_ext_std"),
-        (at: (3000, 7100, 450), shape: Box((6000, 1800, 40)), material: "Env_Blockout.materials_inst.stone_blk_064_INST"),
+        (at: (3000, 7100, 450), shape: Box((6000, 1800, 40)), material: "int_boyle_ground.distillery_wood_floor_brighter_inst"),
         // Hiding spots: alcoves in the north wall's shadow.
-        (at: (-1500, 7850, 0), shape: Box((40, 300, 300))),
-        (at: (-1100, 7850, 0), shape: Box((40, 300, 300))),
-        (at: (1500, 7850, 0), shape: Box((40, 300, 300))),
-        (at: (1900, 7850, 0), shape: Box((40, 300, 300))),
+        (at: (-1500, 7850, 0), shape: Box((40, 300, 300)), material: "stone_wall_01.wall3_moss_low_01_inst"),
+        (at: (-1100, 7850, 0), shape: Box((40, 300, 300)), material: "stone_wall_01.wall3_moss_low_01_inst"),
+        (at: (1500, 7850, 0), shape: Box((40, 300, 300)), material: "stone_wall_01.wall3_moss_low_01_inst"),
+        (at: (1900, 7850, 0), shape: Box((40, 300, 300)), material: "stone_wall_01.wall3_moss_low_01_inst"),
     ],
 
     meshes: [
@@ -182,17 +191,43 @@
     lights: [
         // The Boyle moon (dominant directional light, shadowed).
         (from: "L_Boyle_Ext_Light:DominantDirectionalLight_1"),
-        // Work lights over rows 1 to 3.
-        (at: (-4000, -3800, 900), color: (1.0, 0.9, 0.75), brightness: 2.0, radius: 3200),
-        (at: (0, -3800, 900), color: (1.0, 0.9, 0.75), brightness: 2.0, radius: 3200),
-        (at: (4000, -3800, 900), color: (1.0, 0.9, 0.75), brightness: 2.0, radius: 3200),
-        (at: (0, -5200, 600), color: (1.0, 0.9, 0.75), brightness: 2.0, radius: 2000),
-        (at: (-4000, 0, 900), color: (1.0, 0.9, 0.75), brightness: 2.0, radius: 3200),
-        (at: (0, 0, 900), color: (1.0, 0.9, 0.75), brightness: 2.0, radius: 3200),
-        (at: (4000, 0, 900), color: (1.0, 0.9, 0.75), brightness: 2.0, radius: 3200),
-        (at: (-4000, 3600, 900), color: (1.0, 0.9, 0.75), brightness: 2.0, radius: 2600),
-        (at: (0, 3600, 900), color: (1.0, 0.9, 0.75), brightness: 2.0, radius: 2600),
-        (at: (4000, 3600, 900), color: (1.0, 0.9, 0.75), brightness: 2.0, radius: 2600),
+        // Work lights: a grid 2000 apart, 700 up, over rows 1 to 3 (y -5000 .. 3000), so every
+        // face of every station is lit from at least two sides (a layout has no lightmaps;
+        // its geometry takes the dynamic lights only). Kept out of the stealth lane: the row-3
+        // lights reach y 5200 at most, behind the lane's 450 wall at y 6200.
+        (at: (-5000, -5000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (-3000, -5000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (-1000, -5000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (1000, -5000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (3000, -5000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (5000, -5000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (-5000, -3000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (-3000, -3000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (-1000, -3000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (1000, -3000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (3000, -3000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (5000, -3000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (-5000, -1000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (-3000, -1000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (-1000, -1000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (1000, -1000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (3000, -1000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (5000, -1000, 1800), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2400),
+        (at: (-5000, 1000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (-3000, 1000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (-1000, 1000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (1000, 1000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (3000, 1000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (5000, 1000, 1800), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2400),
+        (at: (-5000, 3000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (-3000, 3000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (-1000, 3000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (1000, 3000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (3000, 3000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        (at: (5000, 3000, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 2200),
+        // The pool's basin (below the floor, out of the grid's reach) and the far targets.
+        (at: (2600, 0, -150), color: (0.85, 0.95, 1.0), brightness: 1.5, radius: 1600),
+        (at: (4600, 4600, 700), color: (1.0, 0.92, 0.8), brightness: 1.6, radius: 1400),
         // The lit half of the stealth lane (street lamps).
         (at: (-3500, 6450, 420), color: (1.0, 0.8, 0.55), brightness: 4.0, radius: 1400),
         (at: (-1500, 6450, 420), color: (1.0, 0.8, 0.55), brightness: 4.0, radius: 1400),
