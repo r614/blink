@@ -1517,6 +1517,12 @@ pub struct AiLevel {
     /// The levels' precomputed light volumes, reduced to what the stealth light reads.
     #[serde(default)]
     pub light_volumes: Vec<LightVolume>,
+    /// No static shadow caster: the light environment's line checks (`TRACE_ShadowCast`, flags
+    /// 0x2397 at 0x004FF5C2) see only static-shadowing primitives, and a layout map is built in the
+    /// original from movable `InterpActor` cubes (ORACLE.md `Layout maps in the original`), so
+    /// its stealth lights are never occluded (captured: the dominant light reaches every lane point).
+    #[serde(default)]
+    pub stealth_light_unoccluded: bool,
 }
 
 impl AiLevel {
@@ -1533,7 +1539,8 @@ impl ProbeLight {
     pub fn position4(&self) -> (glam::Vec3, f32) {
         match self.kind {
             0 | 1 => (self.position, 1.0),
-            2 => (-self.direction, 0.0),
+            // `-axis x TraceDistance` (0x004E0440), carried in `radius`.
+            2 => (-self.direction * self.radius, 0.0),
             _ => (glam::Vec3::Z, 0.0),
         }
     }
@@ -1622,8 +1629,9 @@ pub fn visibility_sample_points(n: usize) -> Vec<glam::Vec3> {
 /// One light's line check for the light environment's visibility (0x004FF270): from the
 /// visibility sample `k` placed on the bounds (the sphere point facing the light plus
 /// `extent x sample`, `bUseBooleanEnvironmentShadowing`) to the light's position (point and
-/// spot lights), or one unit along the light direction (directional and sky lights:
-/// `GetPosition` has w = 0, so the end is `start + (-axis)`).
+/// spot lights), or along the light direction (`GetPosition` has w = 0, so the end is `start +
+/// position`: `-axis x TraceDistance` for directional lights, 0x004E0440; one unit up for sky
+/// lights).
 pub fn visibility_segment(l: &ProbeLight, origin: glam::Vec3, sphere: f32, extent: glam::Vec3, sample: glam::Vec3) -> (glam::Vec3, glam::Vec3) {
     let (pos, w) = l.position4();
     let to_light = (pos - origin * w).normalize_or_zero();
@@ -1637,7 +1645,7 @@ pub fn visibility_segment(l: &ProbeLight, origin: glam::Vec3, sphere: f32, exten
 /// every light that reaches the bounds sphere adds `Y00 x intensity x visibility` (`visibility`
 /// gives the light's visible fraction, 1 for lights without `CastShadows && CastStaticShadows`),
 /// the floor level's light volume adds its interpolated band 0; the luminance of the band-0 sum
-/// times 2 sqrt(pi), raised to 1/2.2 above 1e-4, else 0.
+/// times 2 sqrt(pi); above 1e-4 that over 4 pi, raised to 1/2.2, else 0.
 pub fn stealth_light_value(lights: &[ProbeLight], volume: Option<&LightVolume>, origin: glam::Vec3, sphere: f32, mut visibility: impl FnMut(usize, &ProbeLight) -> f32) -> f32 {
     let mut band0 = 0.0f32;
     for (i, l) in lights.iter().enumerate() {
@@ -1648,13 +1656,19 @@ pub fn stealth_light_value(lights: &[ProbeLight], volume: Option<&LightVolume>, 
         if v <= 0.0 {
             continue;
         }
-        band0 += SH_Y00 * l.intensity_at(origin) * v;
+        // A sky light enters as `UpperSkyFunction` x its colour (0x004DB470), whose band 0 is
+        // 1 / sqrt(pi) = 2 Y00 (captured: Boyle's sky light adds 2 x Brightness x luminance to the
+        // linear light everywhere outdoors); the others through `SHBasisFunction` (Y00).
+        let basis = if l.kind == 3 { 2.0 * SH_Y00 } else { SH_Y00 };
+        band0 += basis * l.intensity_at(origin) * v;
     }
     if let Some(v) = volume {
         band0 += v.band0_at(origin);
     }
+    // Above 1e-4 the linear value is scaled by 0.25 / pi (`fmul [0x00FB96CC]` 0.25,
+    // `fmul [0x00FB9E28]` 1 / pi, 0x004E1F02; Ghidra dropped both) before the 1/2.2 power.
     let x = band0 * LIGHT_BAND0_SCALE;
-    if x > 1e-4 { x.powf(0.454_545) } else { 0.0 }
+    if x > 1e-4 { (x * 0.25 * std::f32::consts::FRAC_1_PI).powf(0.454_545) } else { 0.0 }
 }
 /// A level's `PrecomputedLightVolume` as the stealth light reads it: per sample (x, y, z,
 /// radius, band-0 luminance of its SH: `Y00 x lum(IndirectRadiance + EnvironmentRadiance +

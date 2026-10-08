@@ -2077,3 +2077,10 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   - The swing series now shoots at 6, 13, 15, 17, 22 and 30 elapsed ticks (names match the elapsed ticks).
   - The `DISH_VM_DEBUG` log line prints each layer's clip time.
 - **Confidence:** CONFIRMED for the culling flags (Bevy source) and the tick count (script). The swing poses are from the decoded clip.
+
+## 2026-10-08: Stealth light value matched to the hook capture
+- **Question:** Make the port's stealth light value match the captured light environment (scale, light selection, occlusion).
+- **Evidence:** 0x004E1F02 (`fmul 0.25`, `fmul 1/pi` before the 1/2.2 power), 0x004E0440 (directional `GetPosition` = `-axis x TraceDistance`), 0x004FF270 (`SingleLineCheck` flags 0x2397: `TRACE_ShadowCast`), 0x004DB470 (sky light through the hemisphere functions), hook outputs `le_lane1..5`, `le_boyle1..2`.
+- **Result:** raw light `(L / 4 pi)^(1/2.2)`; directional lights traced 100000 uu; sky lights at 2 Y00; layout maps unoccluded (InterpActor cubes have no static shadowing); Boyle's sky light added to the Playground. `stealth/light_probe_lane` passes on raw light (11 / 11), new `stealth/light_probe_boyle` passes (raw and normalized).
+- **Confidence:** CONFIRMED (code and capture agree to about 1 % per light).
+- **Implementation consequence:** cache keys `<map>.ailevel6.json`, Playground DERIVED_VERSION 5. The `m_LightProbe` channel filter is kept: the live channels of every contributing light have it, and the packages store `false` on the excluded ones.

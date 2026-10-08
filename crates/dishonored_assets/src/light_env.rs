@@ -333,7 +333,8 @@ pub fn read_lights(pkg: &Package, all: bool) -> Vec<EnvLight> {
             position: world.w_axis.truncate(),
             direction: world.x_axis.truncate().normalize_or(Vec3::NEG_Z),
             intensity: color.map(|x| x * brightness),
-            radius: float_or(c, "Radius", 1024.0),
+            // Directional lights: `TraceDistance` (class default 100000), the length of their position.
+            radius: if kind == EnvLightKind::Directional { float_or(c, "TraceDistance", 100_000.0) } else { float_or(c, "Radius", 1024.0) },
             falloff_exponent: float_or(c, "FalloffExponent", 2.0),
             channels: channel_bits(c, template_channels(&aclass)),
             // `Default__SkyLightComponent` clears CastShadows.
@@ -364,7 +365,8 @@ impl EnvLight {
     fn position4(&self) -> (Vec3, f32) {
         match self.kind {
             EnvLightKind::Point | EnvLightKind::Spot { .. } => (self.position, 1.0),
-            EnvLightKind::Directional => (-self.direction, 0.0),
+            // `-axis x TraceDistance` (0x004E0440), carried in `radius`.
+            EnvLightKind::Directional => (-self.direction * self.radius, 0.0),
             EnvLightKind::Sky => (Vec3::Z, 0.0),
         }
     }
