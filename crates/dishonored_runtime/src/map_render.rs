@@ -43,6 +43,12 @@ pub struct RenderFeatures {
     /// (`--no-reflections` turns them off; `reflect.rs`). The original's video options have no
     /// switch for them.
     pub reflections: bool,
+    /// The placed lens flares (`--no-lens-flares` turns them off; `lens_flare.rs`). The original's
+    /// video options have no switch for them.
+    pub lens_flares: bool,
+    /// The caustic light functions on the static meshes the caustic lights reach
+    /// (`--no-caustics` turns them off; `caustics.rs`).
+    pub caustics: bool,
 }
 
 impl RenderFeatures {
@@ -63,6 +69,8 @@ impl RenderFeatures {
             lightmap_specular: on("--no-lightmap-specular"),
             df_shadows: on("--no-df-shadows"),
             reflections: on("--no-reflections"),
+            lens_flares: on("--no-lens-flares"),
+            caustics: on("--no-caustics"),
         }
     }
 }
@@ -434,6 +442,15 @@ pub(crate) fn build_section_mesh(map: &DishonoredMap, mi: usize, si: usize, feat
     mesh
 }
 
+/// The Kismet-streamed sublevel a package belongs to (`DishonoredMap::streamed_levels` index + 1;
+/// level streaming, `MatchView::hidden_levels`), 0 for the always-loaded levels.
+fn level_id(map: &DishonoredMap, level: &str) -> u32 {
+    if map.streamed_levels.is_empty() {
+        return 0;
+    }
+    map.streamed_levels.iter().position(|s| s.eq_ignore_ascii_case(level)).map(|p| p as u32 + 1).unwrap_or(0)
+}
+
 /// The map-only half of [`spawn_map`] (see [`PreparedMap`]); safe to run on a worker thread.
 pub fn prepare_map(map: &DishonoredMap, show_hidden: bool, features: &RenderFeatures) -> PreparedMap {
     let layers = crate::reflect::Layers::new(map, features);
@@ -464,6 +481,7 @@ pub fn prepare_map(map: &DishonoredMap, show_hidden: bool, features: &RenderFeat
         }
         let mesh = &map.meshes[inst.mesh];
         let reflect_bits = layers.bits(inst.reflect_channels);
+        let lvl = level_id(map, &inst.level);
         for (si, section) in mesh.sections.iter().enumerate() {
             let mat_id = inst.materials.get(si).copied().flatten().or(section.material);
             let translucent = mat_id.is_some_and(|m| map.materials[m].blend == BlendHint::Translucent);
@@ -501,6 +519,7 @@ pub fn prepare_map(map: &DishonoredMap, show_hidden: bool, features: &RenderFeat
                     cell: ((t.x / BATCH_CELL).floor() as i32, (t.y / BATCH_CELL).floor() as i32),
                     reflect: reflect_bits,
                     uv1: has_uv1,
+                    level: lvl,
                     df: lm.is_some_and(|l| l.df_shadow && features.df_shadows && !map.lightmaps[l.atlas].shadow.is_empty()),
                     df_light: lm
                         .and_then(|l| l.df_light.filter(|_| features.df_shadows && !map.lightmaps[l.atlas].shadow_local.is_empty()))
@@ -632,6 +651,11 @@ pub fn spawn_prepared(
         section_cache.entry((mi, si)).or_insert_with(|| meshes.add(prepared_meshes.remove(&(mi, si)).unwrap_or_else(|| build_section_mesh(map, mi, si, features)))).clone()
     };
 
+    // The caustic lights and the static meshes they reach (caustics.rs): drawn again, additively,
+    // with the light function.
+    let caustic_lights = crate::caustics::CausticLights::new(map, features);
+    let caustic_images = caustic_lights.images(&image_handles);
+    let mut caustic_receivers = 0usize;
     let mut spawned = 0;
     // The level's reflection cube for the translucent decals, built on first use.
     let mut decal_scene: Option<Option<Handle<Image>>> = None;
@@ -646,6 +670,8 @@ pub fn spawn_prepared(
         let mesh = &map.meshes[inst.mesh];
         let transform = Transform::from_matrix(coords::transform(inst.transform));
         let reflect_bits = reflect_layers.bits(inst.reflect_channels);
+        let lvl = level_id(map, &inst.level);
+        let caustic_reach = if inst.hidden { Vec::new() } else { caustic_lights.reaching(map, inst) };
         for (si, section) in mesh.sections.iter().enumerate() {
             let mat_id = inst.materials.get(si).copied().flatten().or(section.material);
             if !show_fx && mat_id.is_some_and(|m| map.materials[m].blend == BlendHint::Translucent) {
@@ -658,6 +684,25 @@ pub fn spawn_prepared(
                 info!("sky instance {} section {si}: centre ({:.0},{:.0},{:.0}) radius {:.0} uu", mesh.source, c.x, c.y, c.z, r);
             }
             let translucent = mat_id.is_some_and(|m| map.materials[m].blend == BlendHint::Translucent);
+            // Caustic light functions (caustics.rs): an opaque section a caustic light reaches is
+            // drawn again with the light's contribution (the light is not a Bevy light).
+            if !caustic_reach.is_empty() && !is_sky && !translucent && features.materials {
+                let base = mat_id.and_then(|m| materials.get(&material_handles[m]).cloned()).filter(|b| matches!(b.alpha_mode, AlphaMode::Opaque) && !b.unlit);
+                if let Some(base) = base {
+                    let mut r = commands.spawn((
+                        Mesh3d(section_mesh(inst.mesh, si, meshes)),
+                        transform,
+                        caustic_lights.pending(&caustic_reach, base, &caustic_images),
+                        bevy::light::NotShadowCaster,
+                        bevy::light::NotShadowReceiver,
+                        MapGeometry { instance: ii },
+                    ));
+                    if lvl > 0 {
+                        r.insert(crate::level::SourceLevel(std::sync::Arc::from(inst.level.as_str())));
+                    }
+                    caustic_receivers += 1;
+                }
+            }
             // Static opaque/masked sections were merged into world-space batches by
             // `prepare_map`; the bloom parts were collected there too.
             if merged.contains(&(ii, si)) {
@@ -668,6 +713,9 @@ pub fn spawn_prepared(
             // Original shaders (`ue3_level`): the full mesh now, the material once it is made.
             if let Some((part, mesh_h)) = ue3.as_ref().and_then(|u| u.part(ii, si)) {
                 let mut e = commands.spawn((Mesh3d(mesh_h), transform, MapGeometry { instance: ii }));
+                if lvl > 0 {
+                    e.insert(crate::level::SourceLevel(std::sync::Arc::from(inst.level.as_str())));
+                }
                 if is_sky || translucent {
                     e.insert(bevy::light::NotShadowCaster);
                 }
@@ -704,6 +752,9 @@ pub fn spawn_prepared(
             ));
             if is_sky || translucent {
                 e.insert(bevy::light::NotShadowCaster);
+            }
+            if lvl > 0 {
+                e.insert(crate::level::SourceLevel(std::sync::Arc::from(inst.level.as_str())));
             }
             if reflect_bits != 0 {
                 e.insert(crate::reflect::render_layers(reflect_bits));
@@ -856,6 +907,11 @@ pub fn spawn_prepared(
     for (key, mesh) in built {
         let mat = if key.material == u32::MAX { default_material.clone() } else { material_handles[key.material as usize].clone() };
         let mut e = commands.spawn((Mesh3d(meshes.add(mesh)), Transform::IDENTITY, MapGeometry { instance: usize::MAX }));
+        if key.level > 0 {
+            if let Some(l) = map.streamed_levels.get(key.level as usize - 1) {
+                e.insert(crate::level::SourceLevel(std::sync::Arc::from(l.as_str())));
+            }
+        }
         if key.reflect != 0 {
             e.insert(crate::reflect::render_layers(key.reflect));
         }
@@ -928,6 +984,9 @@ pub fn spawn_prepared(
     if n_batches > 0 {
         info!("static geometry merged into {n_batches} batches");
     }
+    if !caustic_lights.is_empty() {
+        info!("caustics: {} lights, {caustic_receivers} receiver sections", caustic_lights.len());
+    }
     if let Some(u) = ue3 {
         commands.queue(move |world: &mut World| u.apply(world));
     }
@@ -965,6 +1024,9 @@ struct BatchKey {
     /// The capture render layers the geometry is also drawn in (`reflect::Layers::bits`).
     reflect: u32,
     uv1: bool,
+    /// The Kismet-streamed sublevel the geometry belongs to (`DishonoredMap::streamed_levels`
+    /// index + 1), 0 for the always-loaded levels: a streamed-out level hides its own batches.
+    level: u32,
     /// The instance, for materials whose diffuse variation mask is read through the
     /// component's own lightmap UVs (`D2Variation::lightmap_uv`).
     d2_inst: Option<u32>,

@@ -517,7 +517,11 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
     // `--no-fx` (render comparisons) also leaves the particle effects out.
     let off = std::env::args().any(|a| a == "--no-fx") || std::env::var_os("DISH_NO_PARTICLES").is_some();
     for e in map.emitters.iter().filter(|e| e.auto_activate && !off) {
-        spawn_instance(commands, meshes, &lf, name, e.system, e.transform, false);
+        let root = spawn_instance(commands, meshes, &lf, name, e.system, e.transform, false);
+        // An emitter of a Kismet-streamed sublevel leaves with it (level streaming).
+        if let (Some(root), Some(tag)) = (root, crate::level::streamed_tag(&map.streamed_levels, crate::level::source_package(&e.source))) {
+            commands.entity(root).insert(tag);
+        }
         n += 1;
     }
     info!("effects: {name}: {} particle systems, {n} placed emitters, {} distortion emitters", map.particle_systems.len(), lf.distortion.len());

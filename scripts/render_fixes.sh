@@ -57,3 +57,19 @@ for m in L_PrsnSewer_P L_Streetsewer_P L_Flooded_FStreets_P; do run "$m" 600; do
 #    The Tower Return lens TV (SceneCapture2DActor -> saili_FT_LensTV.screen_MAT, tv_screen.rs): the
 #    Int map's start view; the TV is in the room the lens mission shows.
 for m in L_TowerRtrn_Int_P L_TowerRtrn_Yard_P; do run "$m" 900; done
+# 8. Lighting round 2 (research/dishonored/systems/render_lighting.md).
+#    Lens flares (LensFlareSource, lens_flare.rs; the original LensFlare_PMAT pixel shaders): the candle
+#    glows (Bridge Part 1a also has two free sources, the Boyle interior many candles) and the Light House
+#    beacon in the sewer-block map. Three of them also run with --no-lens-flares in OUT/no_lens_flares.
+for m in L_Bridge_Part1a_P L_Boyle_Int_P L_Brothel_P L_Streetsewer_P L_Streets1_P L_ArtDealer_P; do run "$m" 600; done
+for m in L_Bridge_Part1a_P L_Brothel_P L_Streetsewer_P; do ( OUT="$OUT/no_lens_flares"; run "$m" 600 --no-lens-flares ); done
+#    Caustic light functions (Casutics_LightFunction_PMAT: its translated pixel shader over the depth prepass;
+#    caustics.rs): the Boyle exterior's canal-side facades, the Brothel, the flooded Assassins' map, the island.
+#    --no-caustics (OUT/no_caustics) gives the plain Bevy lights these lights were before.
+for m in L_Boyle_Ext_P L_Brothel_P L_Flooded_FAssassins_P L_Isl_HighChaos_P; do run "$m" 600; done
+for m in L_Boyle_Ext_P L_Brothel_P; do ( OUT="$OUT/no_caustics"; run "$m" 600 --no-caustics ); done
+#    Streamed-out sublevels (MatchView::hidden_levels -> level::apply_streaming): --inspect has no session, so
+#    every Kismet-streamed sublevel of the map is hidden unless named in DISHONORED_STREAM_VISIBLE (comma
+#    separated package names). The Bridge and the Pub are maps with streamed sublevels; compare with the
+#    earlier runs of the same maps (before this change everything was drawn).
+for m in L_Bridge_Part1a_P L_Pub_Night_P; do run "$m" 600; done

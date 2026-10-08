@@ -20,6 +20,29 @@ use std::collections::HashMap;
 #[derive(Component)]
 pub struct LevelOf(pub String);
 
+/// The level package (`MeshInstance::level`, the part of a source id before `:`) of an entity of a
+/// Kismet-streamed sublevel: what `MatchView::hidden_levels` names. Only entities of the active
+/// map's streamed sublevels carry it ([`DishonoredMap::streamed_levels`]), so nothing else is
+/// visited when the streaming state changes.
+#[derive(Component, Clone, Debug)]
+pub struct SourceLevel(pub std::sync::Arc<str>);
+
+/// The entity's streamed sublevel is not visible now (`MatchView::hidden_levels`): it is hidden.
+#[derive(Component)]
+pub struct StreamedOut;
+
+/// The package of a source id (`<package>:<actor path>`, as the importer writes them); `""` for
+/// ids without one.
+pub fn source_package(source: &str) -> &str {
+    source.split_once(':').map(|s| s.0).unwrap_or("")
+}
+
+/// The package `package` as a streamed-level tag, when the map streams it (`streamed` are the
+/// map's `streamed_levels`).
+pub fn streamed_tag(streamed: &[String], package: &str) -> Option<SourceLevel> {
+    streamed.iter().find(|s| s.eq_ignore_ascii_case(package)).map(|s| SourceLevel(std::sync::Arc::from(s.as_str())))
+}
+
 struct LevelLook {
     environment: Environment,
     env_light: Option<bevy::light::GeneratedEnvironmentMapLight>,
@@ -29,6 +52,10 @@ struct LevelLook {
 pub struct Levels {
     /// The level currently shown (newly spawned map entities are tagged with it).
     pub active: String,
+    /// Counts level spawns, so the streaming state is applied to what a spawn added.
+    pub spawn_gen: u32,
+    /// Each spawned map's Kismet-streamed sublevels (lowercase map name).
+    pub streamed: HashMap<String, Vec<String>>,
     looks: HashMap<String, LevelLook>,
     /// A level change in progress: the target, and its import running on a worker thread.
     pending: Option<String>,
@@ -133,8 +160,14 @@ fn spawn_imported(
     crate::effects::spawn_level_effects(name, &map, commands, meshes, images, fx_mats, fx);
     crate::level_props::queue(name, &map, commands);
     info!("{}: {} instances, {} meshes, {} textures, {} entities", name, instances, map.meshes.len(), map.textures.len(), spawned);
+    let flares = crate::lens_flare::spawn_flares(name, &map, features, commands, meshes, images);
+    if flares > 0 {
+        info!("{flares} lens flares");
+    }
     let lights = lighting::spawn_lights(&map, commands, features);
     info!("{} map lights", lights);
+    levels.spawn_gen = levels.spawn_gen.wrapping_add(1);
+    levels.streamed.insert(name.to_ascii_lowercase(), map.streamed_levels.clone());
     if lights == 0 {
         // Placeholder sun when real lights are disabled (or the map has none).
         commands.spawn((
@@ -173,6 +206,51 @@ pub fn tag_level_entities(mut commands: Commands, levels: Res<Levels>, q: Query<
     }
 }
 
+/// [streaming] Hide what the active map's Kismet-streamed sublevels hold while the host does not
+/// have them visible (`MatchView::hidden_levels`; the sublevel's actors are out of the world, as
+/// UE3 removes a hidden level's actors), and show it again when they come back. Without a session
+/// (`--inspect`) the map is in the state of one opened from the console: every streamed sublevel
+/// out, but the ones named in `DISHONORED_STREAM_VISIBLE` (comma separated).
+///
+/// Runs its work only when the hidden list, the active map or the level spawns changed, over the
+/// entities that carry a [`SourceLevel`] (those of streamed sublevels), never per frame.
+pub fn apply_streaming(
+    mut commands: Commands,
+    view: Option<Res<crate::session::SessionView>>,
+    levels: Res<Levels>,
+    mut last: Local<(String, Vec<String>, u32)>,
+    fresh: Query<(), Added<SourceLevel>>,
+    mut q: Query<(Entity, &SourceLevel, Option<&LevelOf>, &mut Visibility, Has<StreamedOut>)>,
+) {
+    let hidden: Vec<String> = match view.as_deref().filter(|v| v.matchv.map.eq_ignore_ascii_case(&levels.active)) {
+        Some(v) => v.matchv.hidden_levels.clone(),
+        None => {
+            let visible: Vec<String> = std::env::var("DISHONORED_STREAM_VISIBLE").map(|s| s.split(',').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect()).unwrap_or_default();
+            levels.streamed.get(&levels.active.to_ascii_lowercase()).map(|l| l.iter().filter(|p| !visible.iter().any(|v| v.eq_ignore_ascii_case(p))).cloned().collect()).unwrap_or_default()
+        }
+    };
+    // Entities spawned later than their level (the props, a frame after) join the state too.
+    if fresh.is_empty() && levels.active == last.0 && levels.spawn_gen == last.2 && hidden == last.1 {
+        return;
+    }
+    *last = (levels.active.clone(), hidden.clone(), levels.spawn_gen);
+    for (e, level, of, mut vis, was_out) in &mut q {
+        if of.is_some_and(|of| !of.0.eq_ignore_ascii_case(&levels.active)) {
+            continue;
+        }
+        let out = hidden.iter().any(|h| h.eq_ignore_ascii_case(&level.0));
+        if out {
+            if !was_out {
+                commands.entity(e).insert(StreamedOut);
+            }
+            *vis = Visibility::Hidden;
+        } else if was_out {
+            commands.entity(e).remove::<StreamedOut>();
+            *vis = Visibility::Inherited;
+        }
+    }
+}
+
 /// Follow the session's active map (level travel): loading screen up, import on a worker
 /// thread (first visit) or re-show (later visits), switch the camera's look, screen down.
 #[allow(clippy::too_many_arguments)]
@@ -188,7 +266,7 @@ pub fn follow_level(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut baked: ResMut<Assets<BakedMaterial>>,
     mut fx_mats: ResMut<Assets<crate::effects::FxMaterial>>,
-    mut vis: Query<(&LevelOf, &mut Visibility)>,
+    mut vis: Query<(&LevelOf, &mut Visibility, Has<StreamedOut>)>,
     mut fx: ResMut<crate::effects::Effects>,
     camera: Query<Entity, (With<Camera3d>, Without<crate::reflect::ReflectCamera>)>,
     mut warm: ResMut<crate::warmup::Warmup>,
@@ -233,8 +311,9 @@ pub fn follow_level(
         }
     }
     levels.pending = None;
-    for (l, mut v) in &mut vis {
-        *v = if l.0.eq_ignore_ascii_case(&target) { Visibility::Inherited } else { Visibility::Hidden };
+    for (l, mut v, streamed_out) in &mut vis {
+        // A streamed-out sublevel stays hidden in its map (`apply_streaming`).
+        *v = if l.0.eq_ignore_ascii_case(&target) && !streamed_out { Visibility::Inherited } else { Visibility::Hidden };
     }
     levels.active = target.clone();
     fx.set_active(&target);

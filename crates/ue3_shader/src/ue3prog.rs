@@ -261,6 +261,10 @@ fn constant_value(name: &str, i: u32, stage: Stage, map: &CookedMap, ctx: &mut C
         // (post-process materials: the target's size and its inverse)
         ("GScreenResolution", _) | ("GResolution", _) => "ue_post_res()".into(),
         ("TwoSidedSign", _) => "vec4<f32>(1.0)".into(),
+        // a light function's pass (`build_fragment` users): the caller's matrix (rows of the
+        // original's `ScreenToLight`, row-vector convention) and the greyscale mix
+        ("ScreenToLight", _) => format!("ue_screen_to_light[{}]", i.min(3)),
+        ("GreyscaleFactor", _) => "ue_greyscale()".into(),
         ("ObjectWorldPositionAndRadius", _) => "vec4<f32>(ue_l2w[3].xyz, 100.0)".into(),
         ("UpperSkyColor", _) | ("LowerSkyColor", _) | ("WorldIncidentLighting", _) | ("LightColorAndFalloffExponent", _) => {
             "vec4<f32>(0.0)".into()
@@ -410,7 +414,7 @@ fn local_vf_input(usage: u32, index: u32) -> &'static str {
     }
 }
 
-const PLATFORM_BEVY: &str = r#"#import bevy_pbr::mesh_functions
+pub const PLATFORM_BEVY: &str = r#"#import bevy_pbr::mesh_functions
 #import bevy_pbr::mesh_view_bindings::view
 #ifndef PREPASS_PIPELINE
 #import bevy_pbr::mesh_view_bindings::{lights, globals}
@@ -877,6 +881,48 @@ pub fn build_post(map: &CookedMap, ps_code: &[u8]) -> Result<Program> {
 }
 
 
+/// A material's base pass pixel shader as WGSL functions for a caller's own module (a lens flare
+/// quad, a light function's pass): the uniform expressions, the translated shader and
+/// `fn ue_ps_call(tc: array<vec4<f32>, 8>, vpos: vec4<f32>) -> vec4<f32>`, which runs it with
+/// `tc[n]` as its `TEXCOORDn` inputs and returns colour 0.
+///
+/// The caller's module defines what the shader reads: `ue_mat` (`UeMaterial`, `p`: the parameter
+/// slots in `param_nodes` order), `ue_time()`, the material's textures as `ue_t{k}` /
+/// `ue_s{k}` (`Texture2D_k`), `ue_scene_color(uv)` (alpha: the scene depth in uu / 256),
+/// and for a light function `ue_screen_to_light` (`array<vec4<f32>, 4>`) and `ue_greyscale()`.
+pub fn build_fragment(map: &CookedMap, ps_code: &[u8]) -> Result<Program> {
+    let ps = stage(ps_code, "ps_")?;
+    if ps.sh.stage != Some(Stage::Pixel) {
+        bail!("not a pixel shader");
+    }
+    let mut ctx = Ctx { unknown: BTreeSet::new(), slots: 0, light: false, dyn_light: false };
+    let mut m = String::new();
+    m.push_str("fn ue_fmod(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> { return a - b * trunc(a / b); }\n");
+    m.push_str("fn ue_div(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> { return select(a / b, vec4<f32>(0.0), b == vec4<f32>(0.0)); }\n");
+    m.push_str(
+        "fn ue_append(a: vec4<f32>, b: vec4<f32>, n: u32) -> vec4<f32> {\n    if n == 1u { return vec4<f32>(a.x, b.x, b.y, b.z); }\n    if n == 2u { return vec4<f32>(a.x, a.y, b.x, b.y); }\n    return vec4<f32>(a.x, a.y, a.z, b.x);\n}\n",
+    );
+    m.push_str(&expression_functions(map, &mut ctx));
+    m.push_str(&helpers(&ps, "ps_"));
+    m.push_str(&sm3::stage_decls(&ps.sh, &ps.iface, "ps_"));
+    m.push_str(&ps.body);
+    let fill = constant_fill(&ps, "ps_", map, &mut ctx);
+    m.push_str("fn ue_ps_call(tc: array<vec4<f32>, 8>, vpos: vec4<f32>) -> vec4<f32> {\n    var ps_io: ps_Io;\n");
+    for &(_, ty, reg, usage, index) in &ps.iface.inputs {
+        let n = if ty == sm3::INPUT { format!("v{reg}") } else { format!("t{reg}") };
+        let v = if usage == 5 && index < 8 { format!("tc[{index}]") } else { "vec4<f32>(0.0)".into() };
+        let _ = writeln!(m, "    ps_io.{n} = {v};");
+    }
+    m.push_str("    ps_io.vpos = vec4<f32>(floor(vpos.xy), 0.0, 1.0);\n    ps_io.vface = vec4<f32>(1.0);\n");
+    m.push_str(&fill);
+    m.push_str("    ps_main(&ps_io);\n");
+    if sm3::output_regs(&ps.sh, sm3::COLOROUT).contains(&0) {
+        m.push_str("    return ps_io.oc0;\n}\n");
+    } else {
+        m.push_str("    return vec4<f32>(0.0);\n}\n");
+    }
+    Ok(Program { wgsl: m, unknown: ctx.unknown })
+}
 /// One of Arkane's global post-processing pixel shaders (`FArkPpMotionBlurPixelShader`...) as
 /// a full-screen pass: its samplers bound in constant-table order (binding 1 + 2i the
 /// sampler, 2 + 2i the texture), its constants from a uniform of 16 vectors in constant-table
