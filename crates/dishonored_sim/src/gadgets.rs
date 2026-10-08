@@ -59,10 +59,15 @@ pub fn explosion_damage(e: &ExplosionConfig, d: f32, player: bool) -> f32 {
 /// Explode at `pos`: radial damage with a line check, attached damage, momentum, and Spring
 /// Razors in reach are set off by the damage.
 pub fn explode(state: &mut WorldState, owner: PlayerId, pos: Vec3, stuck_to: Option<PlayerId>, kind: ProjectileKind, world: &dyn WorldQuery, cfg: &GameplayConfig, events: &mut Vec<SimEvent>) {
-    let g = grenade_cfg(cfg, kind);
-    let e = &g.explosion;
+    let e = grenade_cfg(cfg, kind).explosion.clone();
     let cause = if kind == ProjectileKind::StickyGrenade { DamageCause::StickyGrenade } else { DamageCause::Grenade };
-    events.push(SimEvent::Explosion { owner, position: pos, sticky: kind == ProjectileKind::StickyGrenade });
+    explode_with(state, owner, pos, stuck_to, &e, cause, kind == ProjectileKind::StickyGrenade, world, cfg, events);
+}
+
+/// An explosion of a given `DisTweaks_Explosion` (grenades, Tallboy arrows).
+#[allow(clippy::too_many_arguments)]
+pub fn explode_with(state: &mut WorldState, owner: PlayerId, pos: Vec3, stuck_to: Option<PlayerId>, e: &ExplosionConfig, cause: DamageCause, sticky: bool, world: &dyn WorldQuery, cfg: &GameplayConfig, events: &mut Vec<SimEvent>) {
+    events.push(SimEvent::Explosion { owner, position: pos, sticky });
     // `DisTweaks_Explosion.m_AINoiseLoudness` (`EAINoiseLoudness4`).
     events.push(SimEvent::Sound { position: pos, radius: e.ai_noise_radius, category: SoundCategory::Explosion, context: crate::events::NoiseContext::Danger, source: owner });
     let mv = &cfg.movement;

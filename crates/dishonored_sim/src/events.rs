@@ -64,6 +64,12 @@ pub enum DamageCause {
     Adrenaline,
     /// Hit by a sliding pawn (`DisDamageType_Slide`, `m_SlideDamageInfo`).
     Slide,
+    /// A music-box Overseer's combat tune (`DisDamageType_Musical`).
+    Musical,
+    /// A weeper's plague cloud (`m_iPlagueDmgPerTick`).
+    Plague,
+    /// A Tallboy arrow's explosion (`TallboyArrowExplosion_Twk`).
+    TallboyExplosion,
 }
 
 /// How a choke ended (`DisItemContext_Choke.eChokeState`).

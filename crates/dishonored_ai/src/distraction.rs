@@ -261,12 +261,13 @@ impl Brain {
     }
 
     /// The line of sight to the distractor (0x00b81010).
-    fn sees_point(me: &PlayerState, p: Vec3, world: &dyn WorldQuery, ai: &AiConfig) -> bool {
+    fn sees_point(&self, me: &PlayerState, p: Vec3, world: &dyn WorldQuery, ai: &AiConfig) -> bool {
         let (inner, outer) = cones(&ai.vision);
-        if vision_distance(&inner, &outer, Self::eye_local(me, p)).is_none() {
+        let veye = self.vision_eye(me, ai);
+        if vision_distance(&inner, &outer, veye.local(p)).is_none() {
             return false;
         }
-        let eye = me.position + Vec3::Z * EYE;
+        let eye = veye.pos;
         let to = p - eye;
         let d = to.length();
         d < 1.0 || world.raycast(eye, to / d, d, channel::VISION).is_none()
@@ -577,7 +578,7 @@ impl Crowd {
         let r = rng_next(&mut self.brains[bi].rng);
         let look = roll(c, r)?;
         let b = &self.brains[bi];
-        if d.def.require_los && !Brain::sees_point(me, d.def.position, world, ai) {
+        if d.def.require_los && !self.brains[bi].sees_point(me, d.def.position, world, ai) {
             return None;
         }
         if look {

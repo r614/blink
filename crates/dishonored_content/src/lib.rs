@@ -96,8 +96,9 @@ pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
     // v15: the integrated subsystem ports (ranged, world, melee, powers, movement, stealth).
     // v15x-physics: GameplayConfig.throw, windblast `cast.notify_time` (physics port).
     // v17: physics throw rest / get-up fields on top of v16.
-    // v17-world2: the explosions' `m_pRadialDamageType` (breakables' immune / instant-break lists).
-    let path = cache_dir().join("gameplay_config.v17-world2.json");
+    // v19: special NPC classes (ai.md F6) and AI head poses / look-at (stealth F4 / F5).
+    // v20: the explosions' `m_pRadialDamageType` (breakables' immune / instant-break lists).
+    let path = cache_dir().join("gameplay_config.v20.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);
@@ -330,7 +331,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     }
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).ok();
-    let coll_path = dir.join(format!("{map}.collision16.bin"));
+    let coll_path = dir.join(format!("{map}.collision16-stealth.bin"));
     let spawn_path = dir.join(format!("{map}.spawns.json"));
     let (collision, spawns) = match (CollisionWorld::load(&coll_path), std::fs::read_to_string(&spawn_path)) {
         (Ok(w), Ok(s)) => (w, serde_json::from_str::<Vec<Spawn>>(&s).unwrap_or_default()),
@@ -425,7 +426,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     };
     // AI level data: factions, forbidden zones, alarm bells, probe lights, distractors
     // (dishonored_ai).
-    let ai_path = dir.join(format!("{map}.ailevel4-distract2.json"));
+    let ai_path = dir.join(format!("{map}.ailevel6.json"));
     let ai_level: dishonored_ir::ai::AiLevel = match std::fs::read_to_string(&ai_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(a) => a,
         None => {
@@ -760,6 +761,9 @@ impl dishonored_world::WorldQuery for MatchContent {
     }
     fn climbables(&self) -> &[dishonored_world::Climbable] {
         self.collision.climbables()
+    }
+    fn hit_package(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<String> {
+        self.collision.hit_package(origin, dir, max_dist)
     }
 }
 

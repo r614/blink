@@ -21,6 +21,7 @@ pub mod movement;
 pub mod noise;
 pub mod powers;
 pub mod rats;
+pub mod special_npcs;
 pub mod state;
 pub mod swim;
 pub mod takedown;
@@ -223,6 +224,13 @@ pub fn step_world(
             _ => {}
         }
         let bend_active = state.time_bends.iter().any(|b| b.caster == p.id);
+        // A music-box Overseer's tune inhibits powers nearby (0x00bd7390, `ArePowersInhibited`
+        // of the power-use context): the cast is not started.
+        let left_input = if p.kind == state::PawnKind::Human && (special_npcs::is_power(input.left_hand) || special_npcs::is_power(p.left.item)) && special_npcs::powers_inhibited(state, &ins, &p, g) {
+            PlayerInput { buttons: input.buttons & !input::buttons::SECONDARY, ..input }
+        } else {
+            input
+        };
         let p = &mut state.players[i];
         let choke_lock = p.choke.phase != state::ChokePhase::None;
         let locked = combat::sword_locks_movement(p) || p.mode == MoveMode::Blinking || choke_lock || p.action_lock > 0.0 || p.carry_anim > 0.0;
@@ -239,7 +247,7 @@ pub fn step_world(
         combat::update_sword(p, &sword_input, &cfg.tuning, dt, &mut out.events);
         let mut local = Vec::new();
         let mut acts = Vec::new();
-        left_hand::update(p, &input, &ctx, g, &cfg.tuning, &mut local, &mut acts, bend_active, &mut out.events);
+        left_hand::update(p, &left_input, &ctx, g, &cfg.tuning, &mut local, &mut acts, bend_active, &mut out.events);
         actions.extend(acts.into_iter().map(|a| (i, a)));
         spawns.extend(local.into_iter().map(|(k, pos, vel)| (p.id, k, pos, vel)));
         let breath = powers::attribute(&p0, g, "Attribute_BreathCapacityIncrease", 0.0);
@@ -297,10 +305,18 @@ pub fn step_world(
         }
     }
 
+    // The special NPC classes' contexts: tunes, plague clouds, Tallboy arrows.
+    special_npcs::step(state, &ins, world, g, DT, &mut spawns, &mut out.events);
+
     for (owner, kind, pos, vel) in spawns {
         let id = state.next_projectile_id;
         state.next_projectile_id = state.next_projectile_id.wrapping_add(1);
-        state.projectiles.push(left_hand::make_projectile(id, owner, kind, pos, vel, &cfg.tuning));
+        let mut pr = left_hand::make_projectile(id, owner, kind, pos, vel, &cfg.tuning);
+        if kind == state::ProjectileKind::TallboyArrow {
+            // `TallboyExplosiveArrow_twk.m_fGravityMultiplier`.
+            pr.gravity_mult = g.ai.special.tallboy.arrow_gravity_mult;
+        }
+        state.projectiles.push(pr);
         out.events.push(SimEvent::Fired { id: owner, bolt: kind.is_bolt(), projectile: id, kind, origin: pos, velocity: vel });
     }
 
@@ -338,7 +354,11 @@ pub fn step_world(
         let sleep_delay = |id: u32| delays.iter().find(|d| d.0 == id).map_or(takedown::SLEEP_DELAY, |d| d.1);
         let bullets: Vec<(u32, PlayerId, Vec3)> = state.projectiles.iter().filter(|p| p.kind == state::ProjectileKind::Bullet).map(|p| (p.id, p.owner, p.velocity)).collect();
         let first = out.events.len();
-        left_hand::step_projectiles(state, world, mv, &cfg.tuning, &g.items.hit_bodies, &cfg.gameplay.vitals, mv.gravity_z, proj_dt, &sleep_delay, &mut out.events);
+        let booms = left_hand::step_projectiles(state, world, mv, &cfg.tuning, &g.items.hit_bodies, &cfg.gameplay.vitals, mv.gravity_z, proj_dt, &sleep_delay, &mut out.events);
+        // Tallboy arrows explode where they hit (0x00c550d0, TallboyArrowExplosion_Twk).
+        for (owner, at) in booms {
+            gadgets::explode_with(state, owner, at, None, &g.ai.special.tallboy.explosion, DamageCause::TallboyExplosion, false, world, g, &mut out.events);
+        }
         // A bullet hitting the world is a `Bullet` -> `Environment` contact: its AI noise at the
         // impact, made by the shooter.
         let impacts: Vec<(Vec3, PlayerId, f32)> = out.events[first..]

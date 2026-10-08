@@ -53,6 +53,27 @@ fn faction(db: &TweakDb, path: &str) -> Option<Faction> {
     Some(Faction { name: path.to_string(), allies: objs(&m, "m_AlliedFactions"), enemies: objs(&m, "m_EnemyFactions"), parents })
 }
 
+/// The class of the behaviour in a pawn tweak's brain's Combat slot: the brain tweak
+/// (`m_pBrainTweak`), its behaviour list (`m_BehaviorTweak[i]`, the Normal column
+/// `m_Difficulty[1]`), the first one designated `EAISlot_Combat`, its `m_pSpawnedObjectClass`.
+/// `Some("")` for a resolved brain without a combat behaviour; `None` when unresolved.
+pub fn combat_behavior_class(db: &TweakDb, pawn_tweak: &str) -> Option<String> {
+    let m = db.try_resolve(pawn_tweak)?;
+    let brain = get_obj(&m, "m_pBrainTweak").filter(|b| !b.is_empty())?.to_string();
+    let b = db.try_resolve(&brain)?;
+    let Some(TVal::List(list)) = b.get("m_BehaviorTweak") else { return Some(String::new()) };
+    for e in list {
+        let Some(path) = get_obj(e, "m_Difficulty[1]").or_else(|| get_obj(e, "m_Difficulty")).filter(|p| !p.is_empty()) else { continue };
+        let Some(bt) = db.try_resolve(path) else { continue };
+        if matches!(bt.get("m_DesignatedSlot"), Some(TVal::Name(n)) if n == "EAISlot_Combat") {
+            if let Some(c) = get_obj(&bt, "m_pSpawnedObjectClass") {
+                return Some(c.rsplit('.').next().unwrap_or(c).to_string());
+            }
+        }
+    }
+    Some(String::new())
+}
+
 /// Read the AI level data. `packages` are the map's packages (persistent level and
 /// sublevels); `tweaks` are the pawn tweaks of the map's spawners.
 pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String], loudness: &[f32]) -> Result<AiLevel> {
@@ -107,6 +128,15 @@ pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String
         }
     }
     let mut resolver = crate::collision_audit::PropResolver::new(content);
+    // The class of each pawn tweak's Combat-slot behaviour (its NPC class).
+    for t in tweaks {
+        if out.tweak_combat.contains_key(t) {
+            continue;
+        }
+        if let Some(c) = combat_behavior_class(&db, t) {
+            out.tweak_combat.insert(t.clone(), c);
+        }
+    }
     let mut seen = std::collections::BTreeSet::new();
     for name in &pkgs {
         if !seen.insert(name.to_ascii_lowercase()) {
@@ -119,6 +149,27 @@ pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String
             }
         }
         out.sky_light += sky_lights(&pkg);
+        // The stealth light environment's inputs (`m_pStealthLightingDLE`, stealth.md section 11):
+        // the `m_LightProbe` lights of every light list and the level's precomputed light volume.
+        for l in crate::light_env::read_lights(&pkg, true) {
+            // `bOnlyAffectSameAndSpecifiedLevels` lights reach the player (a pawn of the persistent
+            // level) only when they list it (0x00516400).
+            let persistent = pkgs.first().map(String::as_str).unwrap_or("");
+            let level_ok = l.only_levels.as_ref().is_none_or(|v| v.iter().any(|x| x.eq_ignore_ascii_case(persistent)));
+            if level_ok && crate::light_env::channels_overlap(l.channels, crate::light_env::STEALTH_DLE_CHANNELS) {
+                out.stealth_lights.push(stealth_light(&l));
+            }
+        }
+        if let Some(v) = crate::light_env::read_light_volume(&pkg) {
+            let samples = v
+                .iter()
+                .map(|s| {
+                    let sh = crate::light_env::sample_sh(s);
+                    [s.position.x, s.position.y, s.position.z, s.radius, 0.3 * sh[0][0] + 0.59 * sh[1][0] + 0.11 * sh[2][0]]
+                })
+                .collect();
+            out.light_volumes.push(dishonored_ir::ai::LightVolume { package: pkg.name.clone(), samples });
+        }
         if out.player_light_range.is_none() {
             out.player_light_range = map_player_light_range(&pkg, &db);
         }
@@ -168,6 +219,13 @@ pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String
 /// (`WorldInfo.MyMapInfo`) names a `DisTweaks_PlayerVisSettings` in `m_pMapPlayerVisSettings`;
 /// the visibility component uses its darkest / brightest values instead of the global ones
 /// (0x00BD0120 -> 0x00BC8E60, then 0x00BC9040 normalizes). Sublevels' map infos carry none.
+/// The player light range of a map's persistent package (its `DishonoredMapInfo`).
+pub fn map_light_range(content: &Content, package: &str) -> Option<[f32; 2]> {
+    let pkg = content.package(package).ok()?;
+    let db = TweakDb::load_with(content, &[package.to_string()]).ok()?;
+    map_player_light_range(&pkg, &db)
+}
+
 fn map_player_light_range(pkg: &Package, db: &TweakDb) -> Option<[f32; 2]> {
     for i in 0..pkg.exports.len() {
         if pkg.export_class(i) != "DishonoredMapInfo" {
@@ -186,6 +244,29 @@ fn map_player_light_range(pkg: &Package, db: &TweakDb) -> Option<[f32; 2]> {
         return Some([dark, bright]);
     }
     None
+}
+
+/// A light environment light as the stealth light reads it: its luminance (0.3 / 0.59 / 0.11 of
+/// `Brightness x LightColor`), the kind (sky lights as kind 3), the traced visibility.
+pub fn stealth_light(l: &crate::light_env::EnvLight) -> ProbeLight {
+    use crate::light_env::EnvLightKind as K;
+    let (kind, inner, outer) = match l.kind {
+        K::Point => (0, 0.0, 0.0),
+        K::Spot { inner_deg, outer_deg } => (1, inner_deg, outer_deg),
+        K::Directional => (2, 0.0, 0.0),
+        K::Sky => (3, 0.0, 0.0),
+    };
+    ProbeLight {
+        kind,
+        position: l.position,
+        direction: l.direction,
+        intensity: 0.3 * l.intensity[0] + 0.59 * l.intensity[1] + 0.11 * l.intensity[2],
+        radius: l.radius,
+        falloff_exponent: l.falloff_exponent,
+        inner_cone: inner,
+        outer_cone: outer,
+        casts_shadows: l.traced,
+    }
 }
 
 pub fn probe_light(l: &Light) -> ProbeLight {

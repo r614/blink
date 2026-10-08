@@ -412,6 +412,61 @@ sockets (elite guard `LeftHandWpn` pitch -16384, `HolsterWpn`, `Helmet`, `Mask`,
 third-person weapons use the character mesh's socket the same way, falling back to the bone when
 a mesh has none.
 
+### View and arms (decoded 2026-10-08)
+
+The first-person mesh is not glued to the camera. The camera and the arms are placed apart and
+meet through the camera bone:
+
+- **Eye position.** `DishonoredPlayerPawn` vfunc +0x630 (0x00AB2030 -> 0x00AABA60) returns the
+  world position of `DisTweaks_PlayerPawn_Camera.m_CameraBoneName` (`camera_jnt`), after the
+  skeletal controls. `DishonoredCamera_PlayerControl` (slot 80, 0x00ACBA40) uses it as the POV
+  location. `DishonoredCamera_AnimDriven` has weight 0 by default (`DefaultCamera.ini`).
+- **View rotation.** vfunc +0x3E8 (0x00AABB70) is the controller rotation plus
+  `DishonoredPlayerCamera.m_RollAmount` (0.7) times the camera bone's rotation relative to the
+  pawn: yaw, roll, and pitch minus the camera look control's own pitch. The bone matrix is turned
+  first by `DisTweaks_Pawn_Body.m_fBone_AngleOffset_Pitch` (-90 for Corvo, matrix
+  `m_AngleOffsetMatrix`, applied by 0x00B57110). That makes the bone's -Z axis forward and +X up.
+- **Look controls.** `Ply_Player_at` has three `SkelControlSingleBone` (add rotation, actor
+  space): `LookAtControl_RightHand` on `Collarbone_R_Jnt`, `LookAtControl_LeftHand` on
+  `Collarbone_L_Jnt` and `LookAtControl_Camera` on `spine_3_jnt`. The pawn's view-target update
+  (0x00AABDD0, reached from the camera through 0x00ABA860) sets them every frame:
+  - Each hand gets pitch = (additive POV pitch + controller pitch) + its item's
+    `m_ArmFollowOffset_Rot` x (1 - cos(pi x `m_ArmFollowOffset_Weight`)) / 2. That sum is scaled
+    by `m_ArmFollowWeight_Rot_*`, and the pawn's own pitch is subtracted.
+  - The camera control gets the same pitch without the offset, scaled by 1 - AnimDriven weight.
+  - Both hand weights are 1 from `DishonoredCamera_PlayerControl`. The Disable* influences can
+    lower them (U-780).
+- **Arm pitch offsets.** The player control sets `m_ArmFollowOffset_Rot_Primary` / `_Secondary`
+  pitch from the hand's item (0x00ACB8D0). It reads `m_ArmPitch_OffsetKeys` (view pitch,
+  difference in degrees) with a cosine ease between the bracketing keys, then multiplies by
+  65536 / 360.
+  - Sword, powers, grenade and Spring Razor: (-90, 10), (-10, 0), (10, 0), (90, -15).
+  - Pistol and crossbow: (-90, 2), (-10, 0), (10, 0), (90, -3).
+- **Arm offset and FOV.** The arms mesh (`DishonoredPlayerSkeletalComponent`) gets `m_Offset` =
+  (POV location - non-additive location) x `m_ArmFollowWeight`, so the arms follow the additive
+  camera moves such as lean and shake. Its render proxy (vtable 0x01124558, slot 31 0x00ADEC40)
+  re-projects the arms with `m_FOV` when `m_bUseFOV` is set. `m_FOV` is lerp(POV FOV,
+  `m_fCurFOV_Arms`, `m_MeshSpecificFOVWeight`), and it is used only when it differs from the POV
+  FOV. `m_fCurFOV_Arms` follows the world FOV target unless the target has `m_bLockArms` (zoom).
+  In normal play the arms therefore use the world FOV.
+- **Consequence for the poses.** Arms relative to the view are the mesh's arms relative to
+  `camera_jnt`, minus 70 % of that bone's animated rotation. The data puts some poses outside the
+  75-degree view:
+  - the sword idle's right hand is 15 uu ahead, 36 right and 46 below the eye, so only the blade
+    shows;
+  - the swing winds up off-screen to the right (0.1-0.2 s) and crosses the centre at about 0.27 s;
+  - the `Sword_*_Mantle*` clips move only the root and the camera, not the arms;
+  - `Powers_Cast_Windblast` draws the hand back close to the face at about 0.2 s before
+    thrusting it out (0.5 s);
+  - `Powers_Cast_Blink_In` / `_Loop` stay near `Powers_Idle`.
+
+  (`fp_probe` on the decoded clips.)
+
+Port (`viewmodel.rs`): the look controls, the arm pitch keys, the view rotation at
+`ROLL_AMOUNT`, the eye moved by the camera bone's motion from the additives and the look pivot,
+and a rig that stays level when the lean rolls the view. Not ported: the Disable* / AnimDriven
+weights (U-780) and the locked arm FOV during zoom (U-784).
+
 ## 12. FaceFX (lip sync and facial animation)
 
 Reader: `crates/dishonored_assets/src/facefx.rs` (decoded from the data alone; no FaceFX SDK

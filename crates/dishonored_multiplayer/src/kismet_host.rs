@@ -473,6 +473,9 @@ impl dishonored_world::WorldQuery for NavOverlay<'_> {
     fn climbables(&self) -> &[dishonored_world::Climbable] {
         self.inner.climbables()
     }
+    fn hit_package(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<String> {
+        self.inner.hit_package(origin, dir, max_dist)
+    }
 }
 
 /// The Kismet's game side for one step.

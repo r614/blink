@@ -408,6 +408,9 @@ pub fn trail_of(kind: dishonored_sim::state::ProjectileKind) -> Option<&'static 
         K::Bolt | K::SleepDart => Some(BOLT_TRAIL_PS),
         K::IncendiaryBolt => Some(FLARE_TRAIL_PS),
         K::Grenade | K::StickyGrenade => Some(GRENADE_TRAIL_PS),
+        // `TallboyExplosiveArrow_twk.m_pTrailEffect` (`Vfx_Weapon.Effects.WhaleOil.ps_TB_Trail`) is not
+        // in the presented effect set yet.
+        K::TallboyArrow => None,
     }
 }
 
@@ -482,8 +485,9 @@ impl FxEventState {
                         // The crossbow's muzzle (`Twk_Inv_Crossbow`'s fire tweak), in front of the eye.
                         (CROSSBOW_MUZZLE.into(), p.position + Vec3::Z * 60.0 + look(&p) * 50.0, look(&p))
                     } else {
-                        // Grenade throws also report `Fired` (a projectile without a bolt): no muzzle.
-                        if matches!(p.left.item, LeftHand::Grenade | LeftHand::StickyGrenade) {
+                        // Grenade throws also report `Fired` (a projectile without a bolt): no muzzle;
+                        // nor the Tallboy's bow (its own effects are not presented yet).
+                        if matches!(p.left.item, LeftHand::Grenade | LeftHand::StickyGrenade) || *kind == dishonored_sim::state::ProjectileKind::TallboyArrow {
                             continue;
                         }
                         let path = if Some(*id) == s.me { PLAYER_MUZZLE } else { PAWN_MUZZLE };
@@ -695,6 +699,8 @@ impl SoundEventState {
                 posts.push((cue("sword_clash"), on(defender)));
                 posts.push((cue("sword_parry_whoosh"), on(defender)));
             }
+            // The Tallboy's bow (`Snd_AI_TBoy_Arrow_Fire*`) is not in the cue set: no pistol shot.
+            SimEvent::Fired { kind: dishonored_sim::state::ProjectileKind::TallboyArrow, .. } => {}
             SimEvent::Fired { id, bolt, projectile, .. } => {
                 self.projectiles.insert(projectile, bolt);
                 // One shot, one sound: skipped when a fire animation's AkEvent notify already

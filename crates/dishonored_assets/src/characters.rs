@@ -51,6 +51,68 @@ pub const ARCHETYPE_TWEAKS: &[&str] = &[
     "Twk_Pawn_Boyle_Party.Twk_Pawn_Boyle_AristoF1",
 ];
 
+/// The AnimSets of each built-in archetype (same index as [`ARCHETYPES`]: the elite guard
+/// set list for archetype 1, the aristocrats' for 0 and 2, the female civilian's for 3; later
+/// sets win a sequence name) and their locomotion configs, as the runtime's animation bank and
+/// the AI's head bake read them.
+pub const GUARD_SETS: &[&str] = &[
+    "Npc_EliteGuard_Generic_as.Npc_EliteGuard_Generic_as",
+    "Npc_EliteGuard_Tracking_as.Npc_EliteGuard_HeadTracking_as",
+    "Npc_EliteGuard_Tracking_as.Npc_EliteGuard_TorsoTracking_as",
+    "Npc_EliteGuard_empty_as.Npc_EliteGuard_empty_as",
+    "Npc_EliteGuard_Sword_as.Npc_EliteGuard_Sword_as",
+    "Npc_EliteGuard_Face_as.Npc_EliteGuard_Face_as",
+    "Npc_EliteGuard_Gun_as.Npc_EliteGuard_Gun_as",
+    "Npc_EliteGuard_Corpses_as.Npc_EliteGuard_Corpses_as",
+    "Npc_EliteGuard_Distractions_as.Npc_EliteGuard_Distractions_as",
+    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_Gestures_as",
+    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_GesturesLeftArm_as",
+    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_GesturesNoArm_as",
+    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_GesturesRightArm_as",
+    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_Postures_as",
+    "Npc_EliteGuard_Blink_as.Npc_EliteGuard_Blink_as",
+    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_GesturesHead_as",
+];
+/// `Pwn_AristoParty_*` (Twk_Pawn_Boyle_Party): the guard sets without sword and gun, then the
+/// tall-civilian and aristocrat empty sets.
+pub const ARISTO_SETS: &[&str] = &[
+    "Npc_EliteGuard_Generic_as.Npc_EliteGuard_Generic_as",
+    "Npc_EliteGuard_Tracking_as.Npc_EliteGuard_HeadTracking_as",
+    "Npc_EliteGuard_Tracking_as.Npc_EliteGuard_TorsoTracking_as",
+    "Npc_EliteGuard_empty_as.Npc_EliteGuard_empty_as",
+    "Npc_EliteGuard_Face_as.Npc_EliteGuard_Face_as",
+    "Npc_CivTall_Empty_as.Npc_CivTall_Empty_as",
+    "Npc_EliteGuard_Corpses_as.Npc_EliteGuard_Corpses_as",
+    "Npc_EliteGuard_Distractions_as.Npc_EliteGuard_Distractions_as",
+    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_Gestures_as",
+    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_GesturesLeftArm_as",
+    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_GesturesNoArm_as",
+    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_GesturesRightArm_as",
+    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_Postures_as",
+    "Npc_EliteGuard_Blink_as.Npc_EliteGuard_Blink_as",
+    "Npc_EliteGuard_Gestures_as.Npc_EliteGuard_GesturesHead_as",
+    "Npc_Aristo_Empty_as.Npc_Aristo_Empty_as",
+];
+/// `Twk_Pawn_Boyle_AristoF*`: the civilian female sets.
+pub const FEMALE_SETS: &[&str] = &[
+    "Npc_CivFemale_Generic_as.Npc_CivFemale_Generic_as",
+    "Npc_CivFemale_Tracking_as.Npc_CivFemale_HeadTracking_as",
+    "Npc_CivFemale_Tracking_as.Npc_CivFemale_TorsoTracking_as",
+    "Npc_CivFemale_Empty_as.Npc_CivFemale_Empty_as",
+    "Npc_CivFemale_Corpses_as.Npc_CivFemale_Corpses_as",
+    "Npc_CivFemale_Distractions_as.Npc_CivFemale_Distraction_as",
+    "Npc_CivFemale_Gestures_as.Npc_CivFemale_Gestures_as",
+    "Npc_CivFemale_Gestures_as.Npc_CivFemale_GesturesLeftArm_as",
+    "Npc_CivFemale_Gestures_as.Npc_CivFemale_GesturesNoArm_as",
+    "Npc_CivFemale_Gestures_as.Npc_CivFemale_GesturesRightArm_as",
+    "Npc_CivFemale_Gestures_as.Npc_CivFemale_Postures_as",
+    "Npc_Female_Blink_as.Npc_Female_Blink_as",
+    "Npc_CivFemale_Gestures_as.Npc_CivFemale_GesturesHead_as",
+    "Npc_CivFemale_Face_as.Npc_CivFemale_Face_as",
+];
+pub const GUARD_LOCO: &str = "DisLocomotionConfig.EliteGuardLocomotionConfig";
+pub const FEMALE_LOCO: &str = "DisLocomotionConfig.FemaleLocomotionConfig";
+
 /// Load one archetype. `pawn_half_height` aligns the feet with the collision cylinder.
 pub fn load_character(content: &Content, name: &str, pawn_half_height: f32, max_tex: u32) -> Result<CharacterModel> {
     let (_, parts) = ARCHETYPES.iter().find(|a| a.0 == name).with_context(|| format!("unknown archetype {name}"))?;

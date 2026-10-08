@@ -15,6 +15,7 @@ pub mod npcs;
 pub mod particles;
 pub mod particle_material;
 pub mod npc_anim;
+pub mod head_pose;
 pub mod material_chain;
 pub mod skeletal_mesh;
 pub mod spline_mesh;

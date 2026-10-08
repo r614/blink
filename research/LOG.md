@@ -1949,7 +1949,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Result:** The original shows the slot stack directly (Soiree in slot 2 over a dormant Patrol; React in slot 7 then Patrol again). Patrol speed 116.3 = EmptyPatrol x Empty_Walk_Patrol; the port now walks 116.29. Hearing raises attention on the noise's instigator (neutral player attention 1.0 then the 2.0 / s neutral leak). Port scenarios: ai 6 pass, 0 fail, 2 unmeasured.
 - **Confidence:** CONFIRMED (decompiled + captured), LIKELY for the loop-speed rule outside the patrol.
 - **Implementation consequence:** `Brain::state` is a projection of the current behaviour; external writes become forced behaviours; `PlayerInput::npc_speed` carries NPC locomotion speeds into the sim; gameplay config key `v12x-ai1`.
-## 2026-10-08 � Stealth port: AI noise table, footfalls, landings, visibility states, stealth volumes
+## 2026-10-08: Stealth port: AI noise table, footfalls, landings, visibility states, stealth volumes
 - **Question:** Port stealth.md F1-F8: which player and world contacts make AI noise, how a footfall becomes attention, how the visibility component picks its bonus, how stealth volumes change the light range.
 - **Evidence:** 0x00BD6C20 (`DisContactSub_AINoise` fire), 0x00B40B70 (attention process noise handler: Footfall -> anomaly increase, stimulus raised to the walker), 0x00AAB7D0 (footfall striker, `Attribute_SilentRunning` / `Attribute_SilentSprinting`), 0x00A8D5F0 / 0x00B66ED0 / 0x00B66A80 (footfall notifies -> contact), 0x00AB53A0, 0x00A759F0 and 0x00A5FF10 (landing striker, `m_bIsStealthFall`, `m_fFall_Stun_Vel`, no landing for a non-jump fall of at most `m_fAnimateFallTime` 0.25 s), 0x00C2A3E0 (pistol noise at the shooter), 0x00B863C0 (Kismet noise context), 0x00AD1590 (visibility bonus order), 0x00BD0120 / 0x00C8C280 (stealth volumes); `enum_dump` of `EAINoiseContext`; the contact table read by the new loader.
 - **Result:** run 600 Footfall, sprint 1200 Anomaly, sneak / silent / stealth landing Silent, landing 400, stun landing 800, sword hit / clash 800 Threatening, bullet impact 3000 Danger, pistol 6000 Danger, corpse / sleeping body 300 Anomaly (the 200 min speed is inert: the sub is not speed-scaled). Footfall times from `Ply_Sword_Locomotion_as`. Prison: 3 stealth volumes (priorities 1/0/2, ranges none / 0.2-0.6 / 0.3-0.8).
@@ -1992,3 +1992,63 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Result:** `dishonored_ai::distraction` (+ `Behavior::Distraction`, `AiEvent::Distracted`, `Brain.lineage / distraction / distraction_countdown / look_distraction`), `dishonored_sim::world_actors` (breakables, batteries, receptacles), `dishonored_ir::world_actors`, `dishonored_assets::world_actors` and `ai_level::read_distractor`, Kismet host events and ops. Scenarios `kismet/boyle_distractor_railing` (Start 4.07 s, End 8.93 s later) and `kismet/boyle_int_bottles_grenade` (8 BreakableBroken output 0): 3 static checks pass, 4 unmeasured; all scenarios 85 pass / 8 fail / 42 unmeasured, the 8 fails identical with the main oracle.
 - **Confidence:** CONFIRMED for the rules listed as ported; LIKELY: tweak slot 2 of the pawn's tweak interface is the lineage test, the soiree ends with its matinee, the pawn countdown runs in every NPC tick. Not ported (stated in world.md 10.1): the explosion's line check to actors, non-explosion damage, loot, the battery's damage / shield / chain, the devices that draw charges, carrying batteries, the animated distraction's In / Out lengths, `m_bLowerAIAlertness`.
 - **Implementation consequence:** protocol 18 (`SoundCategory::Breakable`); gameplay config key `gameplay_config.v17-world2.json` (`ExplosionConfig.radial_damage_type`; the tracked `fixtures/config/gameplay_config.json` not regenerated, the field defaults to empty); map caches `<map>.ailevel4-distract2.json` and `<map>.worldactors1.json`; saves grow (`MissionMatch.world_actors`, `Crowd.distractors`, Brain fields; serde defaults).
+
+## 2026-10-08: Special NPC classes (systems/ai.md F6, section 12)
+- **Question:** How do music-box Overseers, Tallboys, wolfhounds and weepers fight (the port played Overseers as elite guards and tallboys / weepers as panicking civilians)?
+- **Evidence:** brain tweaks `Twk_Brain_OverSeerMusical_Default`, `BrainTweaks_TallBoy`, `BrainTweaks_WolfHound` (L_Ovrsr scripts), `BrainTweaks_Weeper`; DisBehaviorMusicalCombat vtable 011322e0 (00b13a00 / 00b13a20 / 00b13a50, 00b138a0, 00b13990, 00b13920), MaintainDistance 00b2e600, tune context 00c2b680, tune component 00c6a240 / 00c6bfc0 / 00c66ef0 / 00c75270, power gate 00bd7390 / 00b49020, Musical reduction 00b5ccd0; DisBehaviorTallBoyCombat 01132510 (00b144a0, 00b14630), FindShootingPosition 00b475e0 / 00b46960, ManageAttacks 00b470d0, bow CanDo 00c25240, launch 00c2fab0, accuracy 00b732e0, arrow 00c550d0; DisBehaviorCombatWolfhound sub-states 00b13c70 / 00b13e40 / 00b14010 / 00b13a80; DisBehaviorWeep 011272a0 (00afe030, 00affe30, 00af6bd0, 00afbe30, 00aff9e0), plague 00c70e10 / 00c86ea0; the class tweaks' contexts, attributes, locomotion configs and DefaultAI.ini inhibitions.
+- **Result:** `NpcClass` from the brain's Combat-slot behaviour (`AiLevel::tweak_combat`), fighters spawn as guards with their class health and plague flag; `dishonored_ai::special` (the four combat behaviours), `dishonored_sim::special_npcs` (combat tune damage / repulse / power inhibition, plague cloud, Tallboy arrow), `ProjectileKind::TallboyArrow` exploding on impact, unblockable special attacks; `AiConfig::special` loaded from the tweaks. Scenarios `ai/boyle_tallboy_bow`, `ai/boyle_weeper_plague`, `ai/boyle_overseer_tune`, `ai/hound_bite` pass; ai 10 pass / 2 unmeasured.
+- **Confidence:** CONFIRMED for the class selection, the decision rules and the numbers listed in ai.md section 12; LIKELY for the repulse force source, the tune context of sub-state 3, the cough start, the hound's long-distance hold.
+- **Implementation consequence:** protocol bump (PlayerState.plague, ProjectileKind::TallboyArrow, DamageCause Musical / Plague / TallboyExplosion, Brain.class / special); gameplay config cache key `v17-ai2`, AI level cache key `ailevel3u-ai2`; fixtures/config/gameplay_config.json not regenerated (special config defaults in the tests).
+## 2026-10-08: Stealth light: update rule and the Playground lane
+- **Question:** Is the player's light (`m_fCurrentLightValue`) only recomputed on a stance change, as the hook read it?
+- **Evidence:** 0x00AD51E0 (writes +0x68 every tick from `m_pStealthLightingDLE`, bytes at 0x00AD51F2), 0x005041A0 / 0x005035D0 / 0x005034D0 (`bRequiresNonLatentUpdates`: full update every tick), 0x00B50720 (OverriddenBounds = the cylinder's Bounds every tick); `Default__DishonoredPawn.StealthLightingDLE` and the player's override.
+- **Result:** No stance gate in the code; the value follows the collision cylinder's bounds each tick, so a placement that does not update the components keeps the old value until the cylinder is resized (sneak). Port unchanged (samples every tick). New port channel `pawn.light` / `pawn.light01` and `stealth/light_probe_lane`: port raw 2.6-3.1 x the original; the original Playground normalizes with Boyle's 0.2 / 0.5.
+- **Confidence:** CONFIRMED (code path); the hook artifact explanation is LIKELY until a walking capture.
+- **Implementation consequence:** re-capture the lane walking by input; the light probe needs the `m_LightProbe` channel and the light volume (U-121).
+
+## 2026-10-08: U-121: the stealth light environment ported
+- **Question:** Rebuild the player's light value from the original's stealth light environment.
+- **Evidence:** 0x004E1DB0 / 0x004DA330 (band-0 luminance x 2 sqrt(pi), bytes at 0x00F67460), 0x004DB950 (channel test), 0x00516400 (level filter), 0x004FF270 (4-sample visibility, LCG sample points of 0x004FEB30, 1-uu checks for w = 0 lights), 0x00503140 (dynamic lights through the same composite), Engine.upk light templates (`m_LightProbe`), `Default__DishonoredPawn.StealthLightingDLE` / the player's override.
+- **Result:** `stealth_light_value`, `Crowd::update_player_light`, `AiLevel::stealth_lights` / `light_volumes` (Boyle Ext: the Env level's 16425 surface samples, ~0.4 MB in the ailevel cache), `WorldQuery::hit_package` with `MeshInstance::level`. Port raw light is about 3 x the original on the Playground lane and 3.5 x the (possibly stale) Boyle reading; cause not found.
+- **Confidence:** CONFIRMED for the structure (code read), LIKELY for the Playground's light set; the magnitude is not validated.
+- **Implementation consequence:** cache keys `<map>.collision16-stealth.bin`, `<map>.ailevel3u-stealth3.json`, playground DERIVED_VERSION 3; a capture of the stealth DLE's SH state is requested.
+
+## 2026-10-08: The vision head ported (baked camera_jnt, look-at cursor)
+- **Question:** Rebuild the NPC vision eye and axis (F4 / F5) from the head bone and the look-at controller, asset-free in the sim.
+- **Evidence:** 0x00C676A0 (eye update, full read: `GetBoneMatrixLocal` 0x00718630, angle offset and LocalToWorld 0x00B57110, request / no-request / disabled branches, null zone at 0x00C680E2), `DisTweaks_Pawn_Body.m_fBone_AngleOffset_Pitch` -90 (`Twk_Pawn_DefaultNPC`), 0x00B25890 (HeadTrack request), 0x00CAA060 / 0x00954B30 (request builder, speed 0.5), 0x00955D60 (constructor constants), 0x00953FB0 / 0x00953050 (target, weights, delay, clamp, reach), 0x0094E240 / 0x0094DFF0 (`DynInterp` updates), 0x009176F0 / 0x0090C4C0 / 0x0090A140 (node split and reach), 0x00A8E320 (`DisNotify_NPCDisableLookAt`), DefaultLookatConfig modes.
+- **Result:** `dishonored_assets::head_pose` bakes `camera_jnt` (position, vision forward = bone -Z) over every stance's idle / walk loop into `AiConfig::head_poses`; `dishonored_ai::head` ports the cursor, weights and node blend; vision uses the head eye. detect_600: first LOS 0.171 (original 0.353, outer cone), after the turn 0.170 (original 0.169); detect_1300 notices at 0.88 s (original 2.82 s). With the look-at enabled and no request the original's axis is the pawn's rotation, so the outer-cone first sighting is not explained by the head model; ambient idles disable the look-at (bone axis) and the vision-target point (F6) is undecoded.
+- **Confidence:** CONFIRMED for the decoded rules (code read); the bake's mesh placement (no mesh offset component) and the stance choice are LIKELY.
+- **Implementation consequence:** cache key `gameplay_config.v18-head.json`; the archetype AnimSet lists moved to `dishonored_assets::characters`; the `camera_jnt` capture in detect_600 (queued) decides between the ambient-idle and F6 explanations.
+## 2026-10-08: First-person view and arms placement (camera bone, look controls, arm pitch offsets)
+- **Question:** The Playground shots of `viewmodel_states.json` showed:
+  - no arms in the sword swing, the Blink aim and the mantles;
+  - a large hand near the face in Windblast;
+  - only the blade tip in the sword idle.
+
+  How does the original place the first-person camera relative to the arms mesh?
+- **Evidence (static, Ghidra + cooked data):**
+  - `DishonoredCamera_PlayerControl` slot 80 (0x00ACBA40) builds the POV:
+    - location = pawn vfunc +0x630 (0x00AABA60): the `camera_jnt` world position after the skeletal controls;
+    - rotation = vfunc +0x3E8 (0x00AABB70): controller rotation + `m_RollAmount` (0.7) x the bone's rotation relative to the pawn (pitch minus the look control's pitch);
+    - the bone frame is first turned by `DisTweaks_Pawn_Body.m_fBone_AngleOffset_Pitch` -90 (`m_AngleOffsetMatrix`, 0x00B57110).
+  - `DishonoredCamera_AnimDriven` has default weight 0 (`DefaultCamera.ini`).
+  - The pawn's view-target update 0x00AABDD0 drives `Ply_Player_at`'s three look controls and the arms mesh:
+    - the collarbones get the look pitch + the item's arm pitch offset;
+    - `spine_3_jnt` gets the look pitch;
+    - the arms mesh gets `m_Offset` = the additive camera offset;
+    - arms FOV `m_FOV` = lerp(POV FOV, `m_fCurFOV_Arms`, `m_MeshSpecificFOVWeight`). The proxy re-projects with it (0x00ADEC40) only when it differs. FOV targets lock the arms only with `m_bLockArms`.
+  - Arm pitch offset (0x00ACB8D0): `m_ArmPitch_OffsetKeys` with a cosine ease, times 65536 / 360 (FMUL at 0x00ACBC0C).
+- **fp_probe of the decoded clips:**
+  - The sword idle's hand is 46 uu below the eye.
+  - `Sword_Ready_AttackRight_A_Small` winds up off-screen to the right and crosses the centre at about 0.27 s.
+  - `Sword_*_Mantle*` move only the root and the camera.
+  - Windblast draws the hand back to about 18 uu from the eye at 0.2 s.
+  - So most of the "missing" arms are the data at the captured instants, not a placement bug.
+- **Harness finding:** a `screenshot` step is captured after the fixed tick that already ran the next input step's first tick. The Blink aim shot therefore released the button, the Blink started, and the port's Blinking rule hid the rig.
+- **Port:**
+  - `viewmodel.rs` adds `apply_look_controls`, `arm_pitch_offset` (with the keys) and `view_rotation` (`ROLL_AMOUNT`).
+  - The game camera moves by the camera bone's motion from the additives and the look pivot, and turns to the view rotation.
+  - The rig undoes the lean roll, and stays drawn during a Blink's travel (U-781).
+  - `fixtures/scripts/viewmodel_states.json` waits one tick after every screenshot. It adds time series of the swing, Windblast, Blink aim and cast, and the mantles, plus look down / up and lean.
+  - Tests in `crates/dishonored_runtime/tests/viewmodel.rs`.
+- **Confidence:** CONFIRMED (decoded) for the eye, the view rotation, the look controls and the offset keys. LIKELY for a pawn pitch of 0 (UE3 `Pawn.FaceRotation` while walking or falling, U-782) and for the arms staying visible through a Blink (U-781).
