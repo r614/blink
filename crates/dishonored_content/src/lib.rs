@@ -91,7 +91,8 @@ fn load_spawns(map: &str, m: Option<&DishonoredMap>) -> Vec<Spawn> {
 }
 
 pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
-    let path = cache_dir().join("gameplay_config.v12x.json");
+    // v13r: grenade bounce / damping fields, explosion and pistol AI noise radii, hit bodies.
+    let path = cache_dir().join("gameplay_config.v13r.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);
