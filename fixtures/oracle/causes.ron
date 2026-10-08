@@ -5,6 +5,13 @@
 (
     rules: [
         (
+            id: "u113-npc-health-rule",
+            matches: "scenario:combat/sword_hit*:damage:*",
+            kind: KnownDifference,
+            cause: "NPCs get the player's 70 health by the port's rule (U-113), so a sword hit (0.2 x HealthMax) is 14 where the original guard (HealthMax 50) takes 10",
+            evidence: "HOOK_TRIAGE.md 2026-10-06: 10 of 50 per hit; research/UNKNOWNS.md U-113",
+        ),
+        (
             id: "collision-line-backoff",
             matches: "collision:*:systematic: line *",
             kind: PortMissing,

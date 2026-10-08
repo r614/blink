@@ -1,0 +1,32 @@
+// Windblast level 2 on a guard 182.8 uu ahead, level aim (HOOK_TRIAGE.md 2026-10-06, Boyle
+// Ext: 26 damage, momentum (2362, -227, 1317); cost 50). Presentation: `Twk_WindBlast` level 2
+// `m_EffectTemplate` = `Vfx_GamePlay.Windblast.Windblast_lvl2`.
+(
+    name: "powers/windblast_l2_hit",
+    system: Powers,
+    map: "Playground",
+    description: "Cast Windblast level 2 at a passive guard 182.8 uu ahead: damage, cost, the blast effect spawned and ended, the hit reaction, the knock-back.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0)),
+        powers: [("WindBlast", 2)],
+        left_hand: Some("Windblast"),
+        npcs: [(id: Some("dummy"), position: Some((-5417.2, 0, 92)), yaw: 180, state: Some("Passive"))],
+        settle: 30,
+    ),
+    ticks: 900,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "damage", expect: [(metric: EventValue("Sim:Damage@dummy[cause=Windblast]", "amount"), value: 26, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: 26 damage at 182.8 uu, level aim")]),
+        (name: "cost", expect: [(metric: DropFrom("pawn.mana", 0), value: 50, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: Windblast costs 50")]),
+        (name: "knock-back", expect: [(metric: Max("npc.dummy.speed2d"), value: 2373, tol: 50, source: "momentum (2362, -227, 1317) measured at the damage path; the pawn's horizontal speed after it is not measured", status: Unmeasured)]),
+        (name: "blast effect", expect: [
+            (metric: Count("Effect:Vfx_GamePlay.Windblast.Windblast_lvl2"), value: 1, tol: 0, source: "tweaks: Twk_Powers.Windblast.Twk_WindBlast level 2 m_EffectTemplate", status: Static),
+            (metric: Unended("Vfx_GamePlay.Windblast.*"), value: 0, tol: 0, source: "UE3 one-shot gameplay ParticleSystemComponent: destroyed when its emitters finish", status: Static),
+            (metric: Lifetime("Vfx_GamePlay.Windblast.*"), value: 0, tol: 0, source: "lifetime of Windblast_lvl2 on the original", status: Unmeasured),
+        ]),
+        (name: "hit reaction", expect: [(metric: Count("Anim:Windblast@dummy"), value: 1, tol: 0, cmp: AtLeast, source: "the original plays the windblast hit reaction on the guard (anim trace not captured)", status: Unmeasured)]),
+        (name: "sounds", expect: [(metric: Count("Sound:(no cue)"), value: 0, tol: 0, source: "each Windblast event the presentation handles has a cue", status: Static)]),
+    ],
+    record: [Pawn, Vitals, Powers, Npc("dummy"), SimEvents, Effects, Sounds, Anim],
+    capture: Some("lab setup 60; lab power WindBlast 2; measure windblast npc=<doorman> --dist 182.8; event trace of ParticleSystemComponent activations"),
+)

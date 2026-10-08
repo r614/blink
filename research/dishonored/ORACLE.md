@@ -35,7 +35,8 @@ original (Dishonored.exe + hook, phase 2)          port (library crates, headles
   diff engine, structural diff, sampling, residuals, reports and the coverage scan.
 - `tools/oracle` (CLI `oracle`): the headless port runner. Features: `import` (map import
   through `dishonored_content::load_match`, i.e. exactly the game's loader) and `scenarios`
-  (links `dishonored_sim`). `--no-default-features` links only `dishonored_world` and keeps the
+  (links the game's match: `dishonored_content`, `dishonored_multiplayer`, `dishonored_sim`,
+  `dishonored_ai`, `dishonored_audio`, plus the presentation handlers cut from the runtime). `--no-default-features` links only `dishonored_world` and keeps the
   collision fix / re-check loop under ten seconds.
 - The inner loop never runs the game: original answers are read from the cache, the port's
   derived data from a snapshot written by the game's own loader.
@@ -50,7 +51,8 @@ oracle collision [--map M]... [--ids 1,2,3]             cached original vs port
 oracle gen collision --map M --out Q [--sampling navmesh,prim] [--reach R]
 oracle densify collision --map M --out Q [--per N] [--radius R]
 oracle structure --map M                                port structure (vs a reflection dump)
-oracle scenario [NAME...]                               scenarios on the port (+ original trace)
+oracle scenario [NAME...] [--system S]... [--all] [--jobs N] [--json]
+                                                        scenarios on the port in parallel (+ original trace)
 oracle sweep                                            everything cached -> one scorecard
 oracle bench import|queries --map M                     the port's costs
 oracle cache list
@@ -157,7 +159,7 @@ cause book with the residual summary.
 | 1 | Coverage scan | static, packages vs port source | done (below) |
 | 2 | Live state dump | hook, reflection walk of GObjects / UProperty | format + diff engine; dump in phase 2 |
 | 3 | Query oracles | hook: collision, navigation, light, visibility | collision: cached captures vs headless port |
-| 4 | Behaviour traces | hook, fixed-step scenario in both, first divergence | spec + trace + diff; port runner for movement; original traces in phase 2 |
+| 4 | Behaviour traces | hook, fixed-step scenario in both, first divergence | spec + trace + diff; full-system port runner and a 46-scenario library (phase 4, below); original traces in phase 2 |
 | 5 | Ghidra index | native table, vtables, cross-references per exe hash | phase 3 |
 
 ### Coverage scan
@@ -348,10 +350,102 @@ from the measured baselines of INSTRUMENTATION.md and HOOK_TRIAGE.md (movement, 
 weapon spread, powers, grenade fuse...), each with checkpoints and recorded traces, and runner
 support per system in the port (NPC setup, powers, items, Kismet).
 
+### Phase 4 status (2026-10-08): the scenario library and the full port runner
+
+**Runner** (`tools/oracle/src/runner.rs`). Every scenario is played through the game's own
+match: the spec becomes a `MissionDef` (NPCs placed by position or original spawner with an AI
+state `Idle` / `Patrol` / `Wander` / `Alerted` / `Passive` and a faction, the loadout from
+`items` / `powers` through `apply_loadout`, story flags, the populated level's original
+spawners, the original Kismet started by its remote event, seeds), built by
+`dishonored_content::mission_setup` on `MapContents::load` (= `load_match`), then
+`GameSetup::build`, `Game::add_player` and `Game::step` at 60 Hz, as the runtime's offline
+session does. Input per tick: move, look, buttons with a hold, the left-hand selection
+(`Hand`), elixirs (`Drink`) and console hooks (`teleport`, `health`, `mana`, `power`, `give`,
+`alert`, `calm`, `saveload` = the game's `save::encode` / `save::restore` mid-run,
+`cansave`; anything else is logged as unsupported). `setup.settle` runs unrecorded ticks
+first. Setup notes (what the port could not set as specified, e.g. pawn tweaks of placed NPCs,
+`keep_alive`) ride with each result.
+
+**Channels** (always recorded): pawn (position, velocity, mode, crouch, under water, air),
+vitals, camera (eye, view, lean angle and roll), left hand (item, phase, ammo, dispersion, Blink
+target), powers (time scale, world dilation, Dark Vision, possession stage), inventory, world
+counters (projectiles, windblasts, traps, swarms and their rats, time bends), the first
+projectile, live effects / particles, and per named NPC position, yaw, health, condition, AI
+state, stance, attention on the player (value, level, LOS norm, sighted), suspicion and time
+scale. Enumerated channels carry a fixed legend in their unit (`enum:Walking,Falling,...`,
+declaration order). Events: `Sim` (every SimEvent with `key=value` details, ids as names),
+`Kismet` (activations), `Projectile` / `ProjectileEnd` (player shots carry their offset from
+the view in 720-line pixels, `off_px`, the dispersion, `disp`, and `rd` = off / disp),
+`Console`, and the presentation events below.
+
+**Presentation** (`tools/oracle/src/present.rs`, U-865). `build.rs` cuts the runtime's own
+handlers out of `crates/dishonored_runtime/src` (`effects::gameplay_effects`, `effects::step`
+and `simulate`'s one-shot despawn rule, `spawn_effect`'s emitter frame, the simulation-event part
+of `audio::drive`, `characters::collect_hits`) and compiles them against stand-ins for the Bevy
+resources, so the shim cannot drift from the game: a runtime change the stand-ins do not cover
+fails the oracle build. The gameplay ParticleSystems (`GAMEPLAY_PARTICLES`) are decoded headless
+through the level importer and cached; the contact system is loaded for impact and blood paths.
+Events: `Effect` (system, instance, position, emitters, untextured emitters, emitters without a
+lifetime), `EffectEnd`, `EffectMissing` (the runtime asks for a system it did not decode),
+`Sound` (the AkEvent posted; `(no cue)` for an unmapped one), `Anim` (hit reactions).
+
+**Spec additions** (`scenario.rs`): metrics `Final`, `Delta`, `DropFrom`, `Diff`, `TimeBelow`,
+`TimeAt`, `Gap(a, b)`, `Abs`, and event metrics over patterns `Kind:Name@object[key=value]`
+(`*` wildcards): `Count`, `FirstAt`, `Between`, `EventValue`, `EventSum`, `EventMean`,
+`EventVar`, `Lifetime` (effect spawn to end), `Unended`; comparisons `Eq` / `AtLeast` /
+`AtMost`; reference status `Measured` (hook), `Static` (tweaks or decompiled code),
+`Unverified` (measured but not known to be sampled like the port: reported, not judged, listed
+as a capture request) and `Unmeasured` (the port's value is reported as a capture request);
+`capture` (how to take the original's side). `spec_hash` now covers only the run-defining
+fields (map, setup, step, ticks, input, record, sweep), so correcting a reference keeps the
+captured traces.
+
+**Library** (`fixtures/oracle/scenarios/<system>/`, 46 scenarios): movement 14 (jump launch /
+apex / airtime, run and sprint, steps 50 / 56, slopes 45 / 55, mantles 330 / 360, falls 800 /
+1200, drowning, lean, crouch tunnel), combat 9 (sword timing and damage on a guard, guard
+attack, block, pistol hit / dispersion settle / 40-shot spread, crossbow, grenade fuse, Spring
+Razor), powers 10 (Blink level 1 / 2 / aimed up / onto the floor, Windblast level 1 / 2 on a
+guard, Dark Vision, Possession, Bend Time, Devouring Swarm), stealth 4 (detection at 600 /
+1300 on Boyle, lit / dark lane), AI 3 (patrol, hearing, a placed pawn's rotation), inventory /
+economy 3, save / load 2, Kismet 1 (Boyle's original Kismet from `ChangeLvl_fromHub_toBoyle`).
+Positions and baselines come from INSTRUMENTATION.md / HOOK_TRIAGE.md (Boyle Ext runway, the
+doorman, the party guard `DishonoredSpawner_46`) and the Playground stations; static references
+from the tweaks (`Twk_Blink.m_pGroundPS`, `Twk_WindBlast.m_EffectTemplate`,
+`Twk_Pawn_DefaultNPC.m_VisionConePatrolTemplate`, `Twk_Powers_Possess.m_pHandCastParticle`,
+`Twk_DevouringSwarm.m_pSpawnFX`, the grenade's `m_pExplosionEffect`, ...) and decoded rules
+(AI.md attention increases, COLLISION.md step / slope limits).
+
+**Results (2026-10-08, worktree branch, release build, 16 threads):** 46 scenarios in 6-10 s
+(the Boyle Kismet one 5-10 s alone; the rest 0.01-1.8 s each; maps and effects load once):
+28 pass, 13 fail, 5 unmeasured; checks 84 pass, 24 fail, 36 unmeasured, 10 unverified (46
+capture requests). Matching the hook's measurements: Blink range (1096.7 / 1597.7), aimed-up
+target (1385.8 / +500.0), travel 0.267 s, cost 20 and refund; Windblast 26 damage, cost 50; Bend
+Time 0.15 / 0.85 / 12.0 s; grenade fuse 3.0 s; pistol shot to load 1.483 s, dispersion 70 / s,
+r / d mean 0.518 and variance 0.087 over 40 settled shots; sword press to damage 0.300 s;
+run 360 / sprint 540, apex, airtime 0.533; drowning 30 s of air then 61 ticks a point; lean
+20 degrees held, roll 10; step, slope and mantle limits. Divergences: Blink arrival effect
+never ends and is always the fall one (U-860); muzzle flashes never end (U-861); a grenade
+throw shows the pistol muzzle (it is reported as `Fired`); sword hits draw no blood (the contact
+system's `Pfx_BloodMotion` is not in `GAMEPLAY_PARTICLES`); no effect at all for Dark Vision,
+Possession, Devouring Swarm, the grenade explosion and trail, Spring Razor, the pistol tracer
+and the crossbow muzzle and trail; crossbow shot to load 1.583 s (1.555, U-501); hearing a
+shot raises attention to the maximum (U-862); passive NPCs turn to yaw 0 (U-863); lean onset
+10.7 degrees at 0.2 s (14.2); sword damage 14 for 10 (U-113, classified KnownDifference).
+
+**Usage for agents.** `oracle scenario --system powers` (or `--all`, or names, `combat/*`),
+then read `harness_out/oracle/scenario/results.json`: `totals`, `by_system` (pass, fail,
+unmeasured, error), and per scenario `status`, `first_divergence` (`against`: `original` when
+a captured trace exists, else the first failing checkpoint, with its tick), `checks` (metric,
+port `actual`, `expected`, `cmp`, `status`, `reference`, `source`), `notes` and `trace_file`
+(the full trace JSON: `channels`, `frames`, `events`). `capture_requests.json` lists every
+unmeasured / unverified check with the port's value and the `capture` recipe for the hook.
+Build with `cargo build --release -p oracle` into the shared target and copy the binary away
+(other worktrees build `oracle` into the same directory).
+
 ## First port findings from the scenario runner
 
 - `movement/run_sprint`: run 360 and sprint 540 uu/s plateaus match the original.
 - `movement/jump_standing`: apex 106.667 uu matches; the vertical speed sampled after the
-  launch tick is 750 uu/s against the original's 800 on its first airborne frame. Unclassified
-  until the two sampling points are aligned (the original samples per rendered frame, the port
-  after the tick's gravity step).
+  launch tick is 750 uu/s against the original's 800 on its first airborne frame. Marked
+  `Unverified` until the two sampling points are aligned (the original samples per rendered
+  frame, the port after the tick's gravity step).

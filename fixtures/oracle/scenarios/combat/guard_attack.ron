@@ -1,0 +1,22 @@
+// An alerted guard fights the player, who does not defend (HOOK_TRIAGE.md 2026-10-06:
+// `DisDamageType_NPCSlash` 15, 8 on some first hits: which hits were 8 is not recorded).
+(
+    name: "combat/guard_attack",
+    system: Combat,
+    map: "Playground",
+    description: "A guard 300 uu ahead is alerted; the player stands still: the guard closes in and hits.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0)),
+        npcs: [(id: Some("guard"), position: Some((-5300, 0, 92)), yaw: 180, state: Some("Alerted"))],
+        settle: 1,
+    ),
+    ticks: 900,
+    input: [],
+    checkpoints: [
+        (name: "attacks", expect: [(metric: Count("Sim:SwordSwing@guard"), value: 1, tol: 0, cmp: AtLeast, source: "an alerted elite guard closes in and swings (DisBehaviorCombatEliteGuard)", status: Static)]),
+        (name: "slash damage", expect: [(metric: EventValue("Sim:Damage@player[cause=Sword]", "amount"), value: 15, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: DisDamageType_NPCSlash 15 (8 on some first hits)", status: Unverified)]),
+        (name: "first swing", expect: [(metric: FirstAt("Sim:SwordSwing@guard"), value: 0, tol: 0, source: "time from the alert to the first swing", status: Unmeasured)]),
+    ],
+    record: [Pawn, Vitals, Npc("guard"), SimEvents, Effects, Sounds, Anim],
+    capture: Some("measure sword npc=<doorman> --defend 10 (record each damage-path call: amount, type, time)"),
+)

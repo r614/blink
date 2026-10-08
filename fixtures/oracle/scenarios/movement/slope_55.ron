@@ -1,0 +1,12 @@
+// Running up a 55 degree slope: not walkable (steeper than acos 0.6428 = 50 degrees).
+(
+    name: "movement/slope_55",
+    system: Movement,
+    map: "Playground",
+    description: "Run north into the 55 degree slope: the pawn does not get up (rise below half of 400 tan 55).",
+    setup: (player: Some((position: (-1600, -3900, 92), yaw: 90)), settle: 20),
+    ticks: 180,
+    input: [(tick: 1, action: Move(forward: 127, right: 0))],
+    checkpoints: [(name: "stopped", expect: [(metric: RiseFrom("pawn.z", 0), value: 285, tol: 0, cmp: AtMost, source: "COLLISION.md: WalkableFloorZ 0.6428 live", status: Static)])],
+    record: [Pawn],
+)

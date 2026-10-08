@@ -437,6 +437,8 @@ pub fn metric_value(t: &Trace, m: &Metric) -> Option<f64> {
             let t0 = s.first()?.0;
             s.iter().find(|x| x.1 >= *thr).map(|x| (x.0 - t0) as f64 / t.tick_hz.max(1) as f64)
         }
+        // Event and channel metrics of the scenario library.
+        _ => crate::scenario::extra_metric(t, m),
     }
 }
 
@@ -567,9 +569,9 @@ mod tests {
         let cps = vec![Checkpoint {
             name: "apex".into(),
             expect: vec![
-                Expect { metric: Metric::Rise("pawn.z".into()), value: 106.67, tol: 0.5, source: "m".into() },
-                Expect { metric: Metric::TimeToReach("pawn.z".into(), 100.0), value: 2.0 / 60.0, tol: 1e-6, source: "m".into() },
-                Expect { metric: Metric::At("pawn.vz".into(), 1), value: 0.0, tol: 1.0, source: "m".into() },
+                Expect { metric: Metric::Rise("pawn.z".into()), value: 106.67, tol: 0.5, source: "m".into(), cmp: Default::default(), status: Default::default() },
+                Expect { metric: Metric::TimeToReach("pawn.z".into(), 100.0), value: 2.0 / 60.0, tol: 1e-6, source: "m".into(), cmp: Default::default(), status: Default::default() },
+                Expect { metric: Metric::At("pawn.vz".into(), 1), value: 0.0, tol: 1.0, source: "m".into(), cmp: Default::default(), status: Default::default() },
             ],
         }];
         let r = check_checkpoints(&t, &cps);

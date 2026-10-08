@@ -1,0 +1,16 @@
+// Sneak through the Playground's 150 uu high tunnel (PLAYGROUND.md): the crouched cylinder fits,
+// the standing one (CollisionHeight 87.5, 175 tall) does not.
+(
+    name: "movement/crouch_tunnel",
+    system: Movement,
+    map: "Playground",
+    description: "Crouch, then walk north through the crouch tunnel.",
+    setup: (player: Some((position: (-400, 2850, 92), yaw: 90)), settle: 20),
+    ticks: 340,
+    input: [(tick: 1, action: Press(Crouch)), (tick: 3, action: Move(forward: 127, right: 0))],
+    checkpoints: [
+        (name: "through", expect: [(metric: Max("pawn.y"), value: 3850, tol: 0, cmp: AtLeast, source: "the crouched cylinder passes a 150 uu opening (sneaking under low geometry)", status: Static)]),
+        (name: "sneak speed", expect: [(metric: At("pawn.speed2d", 120), value: 247.5, tol: 1, source: "INSTRUMENTATION.md 2026-10-06: sneak 275 uu/s with the sword sheathed; the port's pawn has it drawn (x 0.9), not measured drawn", status: Unverified)]),
+    ],
+    record: [Pawn],
+)

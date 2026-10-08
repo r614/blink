@@ -4624,8 +4624,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
+ "dishonored_ai",
+ "dishonored_assets",
+ "dishonored_audio",
  "dishonored_content",
  "dishonored_ir",
+ "dishonored_mission",
+ "dishonored_multiplayer",
  "dishonored_oracle",
  "dishonored_sim",
  "dishonored_world",

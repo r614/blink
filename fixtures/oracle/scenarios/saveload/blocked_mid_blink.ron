@@ -1,0 +1,13 @@
+// Asking to save during a Blink (the original's disable-save pushers are an approximation, U-342).
+(
+    name: "saveload/blocked_mid_blink",
+    system: SaveLoad,
+    map: "Playground",
+    description: "Ask whether saving is allowed in the middle of a Blink.",
+    setup: (player: Some((position: (-5600, 0, 96), yaw: 0)), left_hand: Some("Blink"), settle: 30),
+    ticks: 40,
+    input: [(tick: 1, hold: 10, action: Press(Secondary)), (tick: 15, action: Console("cansave"))],
+    checkpoints: [(name: "blocked", expect: [(metric: Count("Console:cansave[allowed=false]"), value: 1, tol: 0, source: "whether the original allows a save mid-Blink (U-342)", status: Unmeasured)])],
+    record: [Pawn],
+    capture: Some("blink, then request a save mid-flight; read the engine's disable-save stack +0x770"),
+)

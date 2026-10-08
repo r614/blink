@@ -1,0 +1,19 @@
+// Equip the pistol and let the dispersion settle (HOOK_TRIAGE.md 2026-10-06): equipping starts at
+// the widest dispersion 45 (720-line pixels), which shrinks to 15 at 70.0 / s (0.43 s; the
+// measurement was 0.43-0.48 s at a variable step, the rate 70.0 / s).
+(
+    name: "combat/pistol_dispersion_settle",
+    system: Combat,
+    map: "Playground",
+    description: "Switch to the pistol: dispersion 45 at the equip, 15 after (45 - 15) / 70 s.",
+    setup: (player: Some((position: (-5600, 0, 96), yaw: 0)), items: ["Bullet:10"], left_hand: Some("Empty"), settle: 20),
+    ticks: 120,
+    input: [(tick: 5, action: Hand("Pistol"))],
+    checkpoints: [
+        (name: "widest at equip", expect: [(metric: At("left.dispersion", 6), value: 45, tol: 1.2, source: "HOOK_TRIAGE.md 2026-10-06: dispersion 45 after an equip / reload")]),
+        (name: "settle rate", expect: [(metric: Delta("left.dispersion", 6, 18), value: -14.0, tol: 0.05, source: "HOOK_TRIAGE.md 2026-10-06: 45 -> 15 at 70.0 / s (12 ticks: 14.0)")]),
+        (name: "settled", expect: [(metric: Final("left.dispersion"), value: 15, tol: 0.01, source: "HOOK_TRIAGE.md 2026-10-06: shots leave at 15.0 once settled")]),
+    ],
+    record: [Pawn, Powers],
+    capture: Some("lab equip DishonoredWepPistol 2; sample m_fDispersion +0x12C per tick from the equip"),
+)

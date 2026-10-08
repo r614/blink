@@ -1,0 +1,19 @@
+// Walk off the Playground's 1200 uu fall ledge. INSTRUMENTATION.md 2026-10-06 (variable step,
+// 20-35 fps): a 1200 uu drop dealt 51 of 70; the rule `trunc(70 (v - 2250) / 650)` is confirmed at
+// 60 Hz (U-462: v 2401 / 2675 / 2775 -> 16 / 45 / 56) but those drops' heights were not
+// recorded, so the 1200 uu value is not sampled like the port's fixed step.
+(
+    name: "movement/fall_1200",
+    system: Movement,
+    map: "Playground",
+    description: "Walk west off the 1200 uu ledge: landing speed and damage.",
+    setup: (player: Some((position: (5260, 1350, 1292), yaw: 180)), settle: 20),
+    ticks: 400,
+    input: [(tick: 1, action: Move(forward: 127, right: 0))],
+    checkpoints: [
+        (name: "damage", expect: [(metric: DropFrom("pawn.health", 0), value: 51, tol: 5, source: "INSTRUMENTATION.md 2026-10-06: 1200 uu drop -> 51 at a variable frame rate", status: Unverified)]),
+        (name: "landing speed", expect: [(metric: EventValue("Sim:Landed@player", "speed"), value: 0, tol: 0, source: "landing speed of a 1200 uu drop at 60 Hz", status: Unmeasured)]),
+    ],
+    record: [Pawn, Vitals, SimEvents],
+    capture: Some("lab fixedstep 60; measure fall 1200 (TakeFallingDamage 0x00B4DCC0 speed and damage)"),
+)

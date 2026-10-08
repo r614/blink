@@ -1,0 +1,19 @@
+// Held under water in the Playground's pool (look down, swim down): swimming, then 30 s of air,
+// then 1 point every 61 ticks (U-242, HOOK_TRIAGE.md 2026-10-06, fixed 1/60 s; the under-water
+// flag follows the camera at the volume top, U-244).
+(
+    name: "movement/drown",
+    system: Movement,
+    map: "Playground",
+    description: "Dive in the pool and stay under: swimming, the first health loss after 30 s of air, ten losses 61 ticks apart.",
+    setup: (player: Some((position: (2600, 0, -400), yaw: 0, pitch: -60))),
+    ticks: 2700,
+    input: [(tick: 0, hold: 2700, action: Press(Crouch))],
+    checkpoints: [
+        (name: "swimming", expect: [(metric: TimeAt("pawn.mode", 5), value: 1, tol: 0, cmp: AtMost, source: "a pawn in a deep water volume swims (PHYS_Swimming)", status: Static)]),
+        (name: "air", expect: [(metric: Gap(TimeToReach("pawn.under", 1), TimeBelow("pawn.health", 69.5)), value: 30.0, tol: 0.034, source: "HOOK_TRIAGE.md 2026-10-06 (U-242): air 30 s")]),
+        (name: "drowning rate", expect: [(metric: Gap(TimeBelow("pawn.health", 69.5), TimeBelow("pawn.health", 59.5)), value: 10.1667, tol: 0.034, source: "HOOK_TRIAGE.md 2026-10-06 (U-242): 1 point per 61 ticks")]),
+    ],
+    record: [Pawn, Vitals],
+    capture: Some("lab fixedstep 60; hold the pawn under the river (Boyle Ext), sample +0x8A0 bit 11 and Health per tick"),
+)

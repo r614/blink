@@ -1,0 +1,35 @@
+// One pistol shot at a passive guard 500 uu ahead after the dispersion settles. Reload
+// timeline measured (HOOK_TRIAGE.md 2026-10-06, 60 Hz): shot -> load 1.483 s. Presentation
+// (tweaks): `Twk_Inv_PistolCorvo` player `m_pMuzzleFlashFX` `Ps_PlayerPistol_StdMuzzle_01`, the
+// bullet's `m_pBulletTracerFX` `Ps_Pistol_StdTracer_01`; the hit's blood from the contact system
+// (Bullet x Body).
+(
+    name: "combat/pistol_hit",
+    system: Combat,
+    map: "Playground",
+    description: "Shoot a passive guard 500 uu ahead: damage, the reload, the muzzle / tracer / blood effects, the hit reaction.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0, pitch: -2)),
+        items: ["Bullet:10"],
+        left_hand: Some("Pistol"),
+        npcs: [(id: Some("dummy"), position: Some((-5100, 0, 92)), yaw: 180, state: Some("Passive"))],
+        settle: 150,
+    ),
+    ticks: 400,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "hit", expect: [(metric: Count("Sim:Damage@dummy"), value: 1, tol: 0, source: "a settled shot at 10 m hits (dispersion 15 px of 720)", status: Static)]),
+        (name: "damage", expect: [(metric: EventValue("Sim:Damage@dummy", "amount"), value: 0, tol: 0, source: "pistol damage to a guard (body)", status: Unmeasured)]),
+        (name: "reload", expect: [(metric: Between("Sim:Fired", "Sim:Reloaded"), value: 1.483, tol: 0.017, source: "HOOK_TRIAGE.md 2026-10-06: shot -> load 1.483 s at 60 Hz")]),
+        (name: "effects", expect: [
+            (metric: Count("Effect:Vfx_Weapon.Effects.pistol.Ps_PlayerPistol_StdMuzzle_01"), value: 1, tol: 0, source: "tweaks: Twk_Inv_PistolCorvo DisTweaks_FirePistol.m_pMuzzleFlashFX", status: Static),
+            (metric: Count("Effect:Vfx_Weapon.Effects.Trails.Ps_Pistol_StdTracer_01"), value: 1, tol: 0, source: "tweaks: Twk_Projectiles.Twk_Proj_Bullet.m_pBulletTracerFX", status: Static),
+            (metric: Count("Effect:Vfx_PhysMat.Blood.*@dummy"), value: 1, tol: 0, source: "contact system: Bullet x Body particle sub-intersection", status: Static),
+            (metric: Unended("*"), value: 0, tol: 0, source: "UE3 one-shot gameplay ParticleSystemComponent: destroyed when its emitters finish (muzzle, tracer, blood)", status: Static),
+            (metric: EventValue("Effect:Vfx_PhysMat.Blood.*", "untextured"), value: 0, tol: 0, source: "the blood system draws textured sprites (the playground showed squares)", status: Static),
+        ]),
+        (name: "hit reaction", expect: [(metric: Count("Anim:Projectile@dummy"), value: 1, tol: 0, cmp: AtLeast, source: "the guard plays a hit reaction", status: Unmeasured)]),
+    ],
+    record: [Pawn, Powers, Projectiles, Npc("dummy"), SimEvents, Effects, Sounds, Anim],
+    capture: Some("lab equip DishonoredWepPistol 2; measure gun --shots 1 at a guard; event trace of ParticleSystemComponent activations"),
+)
