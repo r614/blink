@@ -355,10 +355,10 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             }
         }
         if s.setup.player.is_some() {
-            // `PlayerState::sword_sheathed`: the original's pawn starts with the sword sheathed;
-            // the hook draws it (`lab give Twk_Inv_SwordCorvo`) when the spec asks.
+            // `PlayerState::right_hand`: the original's pawn starts with nothing in the right
+            // hand; the hook gives it the sword (`lab give Twk_Inv_SwordCorvo`) when the spec asks.
             if let Some(p) = m.world.player_mut(ME) {
-                p.sword_sheathed = !ps.sword_drawn;
+                p.right_hand = if ps.sword_drawn { dishonored_sim::state::RightHandItem::Sword } else { dishonored_sim::state::RightHandItem::Empty };
             }
         }
         if s.setup.keep_alive {

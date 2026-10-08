@@ -218,7 +218,7 @@ pub fn step_world(
         let p = &mut state.players[i];
         let choke_lock = p.choke.phase != state::ChokePhase::None;
         let locked = combat::sword_locks_movement(p) || p.mode == MoveMode::Blinking || choke_lock || p.action_lock > 0.0 || p.carry_anim > 0.0;
-        let sword_out = p.carrying.is_none() && !p.sword_sheathed;
+        let sword_out = movement::sword_in_right_hand(p);
         movement::step_movement(p, &input, sword_out, !locked, &ctx, &mut out.events);
         // No sword while choking, carrying or in an action.
         let sword_input = if choke_lock || p.carrying.is_some() || p.action_lock > 0.0 {

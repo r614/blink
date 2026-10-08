@@ -293,12 +293,29 @@ pub struct PlayerState {
     /// This pawn's deterministic random stream (xorshift32; the original uses the C runtime `rand()`).
     #[serde(default)]
     pub rng: u32,
-    /// The sword is in its sheath (no weapon drawn): the ground speed takes
-    /// `Attribute_SwordSheathedSpeedFactor` instead of the unsheathed one (measured run / sprint
-    /// 400 / 600 uu/s sheathed, 360 / 540 drawn, INSTRUMENTATION.md). The game's players start
-    /// with it drawn (nothing sheathes it yet); scenario setups set it.
+    /// The item equipped in the right hand (the inventory's hand slot 1). The ground speed takes
+    /// `Attribute_SwordUnsheathedSpeedFactor` only while it is the sword class (0x00AA4700 walks
+    /// the class chain of that item), else `Attribute_SwordSheathedSpeedFactor` (measured run /
+    /// sprint 400 / 600 uu/s without the sword, 360 / 540 with it, INSTRUMENTATION.md). The
+    /// game's players hold the sword; scenario setups without `sword_drawn` start empty-handed,
+    /// as the original's pawn does before `Twk_Inv_SwordCorvo` is given.
     #[serde(default)]
-    pub sword_sheathed: bool,
+    pub right_hand: RightHandItem,
+    /// `DishonoredPlayerPawn.m_bMantleAllowed` (+0x8A0 bit 0): set every tick the pawn walks or
+    /// swims and by a Jump press (0x00ADBD00 / 0x00ADBE70), cleared when a mantle starts
+    /// (0x00ACD820). While falling the mantle request needs it.
+    #[serde(default)]
+    pub mantle_allowed: bool,
+}
+
+/// What the right hand holds (the inventory's hand slot 1, `FUN_00c04bd0(1)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RightHandItem {
+    /// The sword (`Twk_Inv_SwordCorvo`, an item of the class 0x00AA4700 tests for).
+    #[default]
+    Sword,
+    /// Nothing equipped.
+    Empty,
 }
 
 /// The attack group on a pawn: seconds under attack (`m_fInitialDelayBeforeDealingDamage`) and
@@ -579,7 +596,8 @@ impl PlayerState {
             damage_reduction: 0.0,
             free_spell_chance: 0.0,
             rng: id.wrapping_mul(0x9E37_79B9) | 1,
-            sword_sheathed: false,
+            right_hand: RightHandItem::Sword,
+            mantle_allowed: false,
         }
     }
 
