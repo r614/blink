@@ -1763,3 +1763,34 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Tools:** `crates/dishonored_probe_dll/src/{tick,reflect,script}.rs`, protocol 5 in `crates/dishonored_probe`, `tools/probe_launch/src/{session,reflect,capture}.rs`; `dishonored_oracle::diff::first_divergence` compares the event kinds both sides record. Docs: ORACLE.md "Original side: the hooked session", INSTRUMENTATION.md.
 - **Confidence:** CONFIRMED (measured live) for the layouts, the call paths and the jump ticks.
 - **Open:** U-800 (Kismet always runs in the original), U-801 (story flags not set by the runner), U-802 (NPC setup from tweaks / AI states), U-803 (sounds are not traced), U-804 (snap height and floor hover differ at tick 0).
+
+## 2026-10-08: Additive clips, head bob, hand effects, parries, slides, rats
+
+- **Additive clips:** Edge stores additive sequences as deltas from the reference pose. `ADD_Head_WalkN` (4 tracks) and `ADD_Guns_Aim_Up` (30 tracks, 1 frame) hold identity rotations and zero translations where nothing moves. The port applies them the UE3 way (`viewmodel::add_additive`): the bone turns by `slerp(identity, delta, w)` before its own rotation and moves by `w` times the offset.
+- **Head bob:** `Nav_Default`, `Nav_Sprinting` and `Nav_Crouched` lay `ADD_Head_{Walk,Run,Sprint,Sneak}{N,S,W,E}` (`Ply_Head_Locomotion_as`) over their cycle, synced to it, through `AnimNodeBlendDirectional`.
+  - The blend is linear between quadrants: the cooked snapshot at DirAngle 0.959 gives forward 0.389 and right 0.611.
+  - Default and sprint pass it through `DisAnimNodeBlendByHeadBob`, weighted by the Head Bob option (LIKELY). Crouched has no such node.
+  - The view is the camera bone, so the bobbed `camera_jnt` moves the game camera.
+  - The step-up plays `ADD_Head_Mantle_Low` the same way, through `StepUpMantle` (`DisAnimNodeBlendByStepUpMantle`, `m_fBlendTime` 0.2).
+- **Aim additive (not done):** `DishonoredSeqBlendByAim` (`ADD_<Secondary prefix>Aim_*`, max 10 degrees each way). 0x00A8FB20 normalises an offset in degrees that it reads from the left-hand item (vfunc 0x00BFEF00, +0x64 / +0x68). The code that writes that offset was not found, so the additive is not applied.
+- **Hand effects:**
+  - The Mark of the Outsider's glows are `AnimNotify_PlayParticleEffect` on the rig's `Tattoo` socket (`hand_L_jnt`) in `Ply_Powers_as`:
+    - Blink In / Loop: `Ps_Tattoo_Glow_02`; Blink Out: `_04`
+    - Windblast: `_WB`; Bend Time: `_01`; Swarm: `_04`
+    - Possession In: `_04`; Possession Loop and Out: `_03`
+    - Switch: `_01`; Out of mana: `Ps_Mana_Empty`
+    - The swimming splashes sit on the fingers.
+  - `Twk_Powers_Possess.m_pHandCastParticle` and `Twk_DevouringSwarm.m_pHandFX` attach to `m_HandCastParticleAttachSocket` / `m_HandFXSocketName` = `LeftHand_PowerCastA`.
+  - The rig's sockets (`Ply_Player.Skm_Player`): `Power`, `LeftHand_PowerCastA`, `Tattoo`, `Tatoo_Left`, `Bash_*`, `Camera_Socket`.
+  - The port decodes the notifies (`dishonored_assets::characters::particle_notifies`), fires them on the crossed clip window, and keeps attached instances on the socket (`effects::HandEffects`). Particle sizes now scale with the instance transform: the rig is drawn at 0.2, and UE3 also scales particle size by the component scale.
+  - The `Use_Power` arm-material pulse (`m_GlowParameterName`, `m_fGlowDuration` 1) is not done.
+- **Parry and stance:**
+  - The player's sword sets hold only Ready navigation (no `Sword_Idle` / `Sword_Walk` among `Ply_Sword_*`), so with the sword the non-Ready states have nothing to play and the view stays Ready.
+  - `Blocking Parry` is an `AnimNodeRandom` of `Sword_Ready_Parry_A / B / C` at 0.33 / 0.33 / 0.34. It now plays on each won parry (`SwordState::parries`).
+- **Slide:** `Ply_Player_Slide_at`: `SlideIn`, then the looping `SlideLoop`. The outro is `SlideOutSprint` when sprinting, else `SlideOutSneak`.
+- **Rats:**
+  - `ArkAnimNodeRat` (`Default__ArkAnimNodeRat`): moves WalkSlowN 55, WalkN 98, RunN 302 uu/s, max play rate 1.5.
+  - The blend (0x00913ED0): the first move faster than the agent and the one below it; weights by speed; rate = dominant length / ((lo.speed lo.w lo.len + hi.speed hi.w hi.len) / speed), capped; one shared phase.
+  - The agent: `IdleAnimNames` Idle..Idle4 below `m_fMinMovementVelocity` 12.5; mesh scale 0.8..1.2. `Twk_Rat`: attached attack `SwarmAttack` / `SwarmAttack1`; Devouring Swarm spawn `Spawn` / `Spawn1` / `Spawn2`; jump attack `Jump_Attack_*`; deaths `DeathFast_*`.
+  - Spawn, death, windblast and the turn additive are not played: there are no view events for them, and the turn input is not decoded.
+- **Placed razor and grenade:** they loop `SpringRazor_Idle` and `Grenade_Idle`, the only sequences their sets hold.

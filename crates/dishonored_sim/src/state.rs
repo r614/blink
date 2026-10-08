@@ -40,6 +40,10 @@ pub struct Traversal {
     pub anim: Option<u8>,
     #[serde(default)]
     pub rate: f32,
+    /// Step-ups so far (wrapping; kept across traversals): the first-person view plays the
+    /// step-up's head (`StepUpMantle`) on each.
+    #[serde(default)]
+    pub step_ups: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -77,6 +81,9 @@ pub struct SwordState {
     /// `m_fForceBlockTimeForPerfectParry`: block held (and parries suppressed) after a
     /// tap parry.
     pub force_block: f32,
+    /// Parries won so far (wrapping): the view plays `Blocking Parry` on each.
+    #[serde(default)]
+    pub parries: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

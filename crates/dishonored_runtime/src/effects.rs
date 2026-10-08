@@ -252,12 +252,13 @@ impl Plugin for EffectsPlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "volume_glow.wgsl");
         app.add_plugins(MaterialPlugin::<GlowMaterial>::default());
-        app.init_resource::<Effects>().init_resource::<EffectSockets>().add_systems(
+        app.init_resource::<Effects>().init_resource::<EffectSockets>().init_resource::<HandEffects>().add_systems(
             Update,
             (
                 gameplay_effects.before(crate::audio::drive),
                 blink_indicator,
                 attached_effects,
+                hand_effects.after(crate::viewmodel::animate_view_rig),
                 // After everything that places the camera or sets its projection this frame
                 // (`simulate` culls sprite meshes against that view).
                 simulate.after(crate::players::camera_follow).after(crate::cutscene::camera).after(crate::viewmodel::apply_fov).after(crate::inspect_cam),
@@ -699,7 +700,9 @@ fn spawn_particle(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, rn
         vel += local.normalize_or_zero() * vr.eval1(et, r[2]);
     }
     let (pos, vel) = if em.local_space { (local, vel) } else { (xf.transform_point3(local), xf.transform_vector3(vel)) };
-    let size = d3(&em.size, et, r[0], [1.0; 3]);
+    // A scaled instance transform scales the particles too (the first-person hand effects ride
+    // the rig drawn at `viewmodel::VIEW_SCALE`); gameplay transforms are unscaled.
+    let size = d3(&em.size, et, r[0], [1.0; 3]) * xf.x_axis.truncate().length();
     let color = d3(&em.color, et, r[1], [1.0; 3]);
     let alpha = em.alpha.as_ref().map(|d| d.eval1(et, r[1])).unwrap_or(1.0);
     let (mut orbit_off, mut orbit_rot, mut orbit_rate) = (Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
@@ -1221,6 +1224,7 @@ fn gameplay_effects(
     sockets: Res<EffectSockets>,
     session: Option<Res<crate::session::Session>>,
     time: Res<Time>,
+    mut hands: ResMut<HandEffects>,
 ) {
     let Some(mut view) = view else { return };
     let events = view.audio_events.clone();
@@ -1285,7 +1289,12 @@ fn gameplay_effects(
             // (`PossesTarget_Rats_01` for a rat).
             SimEvent::PossessStart { id, host } => {
                 let (Some(p), Some(h)) = (find(*id), find(*host)) else { continue };
-                spawn_effect(&mut commands, &mut meshes, &mut fx, POSSESSION_CAST_PS, p.position + Vec3::Z * 40.0 + look(&p) * 40.0, look(&p));
+                // `m_pHandCastParticle` on `m_HandCastParticleAttachSocket` (`LeftHand_PowerCastA`)`n                // of the first-person rig for the local player.
+                if Some(*id) == me && hands.sockets.contains_key(HAND_CAST_SOCKET) {
+                    hands.pending.push((POSSESSION_CAST_PS.into(), HAND_CAST_SOCKET.into(), true));
+                } else {
+                    spawn_effect(&mut commands, &mut meshes, &mut fx, POSSESSION_CAST_PS, p.position + Vec3::Z * 40.0 + look(&p) * 40.0, look(&p));
+                }
                 let target = if h.kind == dishonored_sim::state::PawnKind::Rat { POSSESSION_RAT_PS } else { POSSESSION_HUMAN_PS };
                 (target.into(), h.position, Vec3::Z)
             }
@@ -1297,7 +1306,10 @@ fn gameplay_effects(
             // Devouring Swarm: the hand cast and the summoning at the swarm's spot (level 2 has
             // its own system).
             SimEvent::SwarmSummoned { id, position, .. } => {
-                if let Some(p) = find(*id) {
+                // `m_pHandFX` on `m_HandFXSocketName` (`LeftHand_PowerCastA`).
+                if Some(*id) == me && hands.sockets.contains_key(HAND_CAST_SOCKET) {
+                    hands.pending.push((SWARM_CAST_PS.into(), HAND_CAST_SOCKET.into(), true));
+                } else if let Some(p) = find(*id) {
                     spawn_effect(&mut commands, &mut meshes, &mut fx, SWARM_CAST_PS, p.position + Vec3::Z * 40.0 + look(&p) * 40.0, look(&p));
                 }
                 let lvl = find(*id).map(|p| p.inv.power_levels[dishonored_sim::state::power::DEVOURING_SWARM]).unwrap_or(1);
@@ -1437,6 +1449,8 @@ pub const POSSESSION_HUMAN_PS: &str = "Vfx_GamePlay.Possession.PossesTarget_Huma
 pub const POSSESSION_RAT_PS: &str = "Vfx_GamePlay.Possession.PossesTarget_Rats_01";
 /// Devouring Swarm: the hand cast and the summoning (levels 1 / 2).
 pub const SWARM_CAST_PS: &str = "Vfx_GamePlay.RatSwarm.Ps_RSwarm_HandCast_01";
+/// `Twk_Powers_Possess.m_HandCastParticleAttachSocket` / `Twk_DevouringSwarm.m_HandFXSocketName`.
+pub const HAND_CAST_SOCKET: &str = "LeftHand_PowerCastA";
 pub const SWARM_SUMMON_PS: &str = "Vfx_GamePlay.RatSwarm.RSwarm_Summoning_lvl1";
 pub const SWARM_SUMMON2_PS: &str = "Vfx_GamePlay.RatSwarm.RSwarm_Summoning_lvl2";
 /// Grenade explosion and Spring Razor burst (`Startup`).
@@ -1505,6 +1519,52 @@ fn attached_effects(mut commands: Commands, mut fx: ResMut<Effects>, mut meshes:
         let Some(&si) = lf.by_path.get(&path.to_ascii_lowercase()) else { continue };
         if let Some(e) = spawn_instance(&mut commands, &mut meshes, &lf, &level, si, m, false) {
             fx.attached.insert(k, (e, path));
+        }
+    }
+}
+
+/// Particle notifies of the first-person rig (`AnimNotify_PlayParticleEffect` of the player
+/// sets: the Mark of the Outsider's glows on the `Tattoo` socket, the swimming splashes on the
+/// fingers) and the rig's socket / bone transforms this frame (Dishonored world space, scaled
+/// with the rig), filled by `viewmodel::animate_view_rig`.
+#[derive(Resource, Default)]
+pub struct HandEffects {
+    /// (system path, socket or bone name, attached) to start.
+    pub pending: Vec<(String, String, bool)>,
+    /// Socket or bone name -> world transform.
+    pub sockets: HashMap<String, Mat4>,
+    /// Live attached instances and their socket.
+    live: Vec<(Entity, String)>,
+}
+
+fn hand_effects(mut commands: Commands, mut fx: ResMut<Effects>, mut meshes: ResMut<Assets<Mesh>>, mut hands: ResMut<HandEffects>, mut q: Query<&mut FxInstance>) {
+    let h = &mut *hands;
+    // Attached instances follow their socket while they live (one-shots despawn themselves).
+    h.live.retain(|(e, s)| match (q.get_mut(*e), h.sockets.get(s)) {
+        (Ok(mut inst), Some(m)) => {
+            inst.set_transform(*m);
+            true
+        }
+        (Ok(mut inst), None) => {
+            inst.stop();
+            false
+        }
+        _ => false,
+    });
+    let pending = std::mem::take(&mut h.pending);
+    let Some(lf) = fx.levels.get(&fx.active).cloned() else { return };
+    let level = fx.active.clone();
+    for (path, socket, attach) in pending {
+        let Some(m) = h.sockets.get(&socket).copied() else { continue };
+        let Some(&si) = lf.by_path.get(&path.to_ascii_lowercase()) else {
+            warn!("effects: hand effect {path} not decoded for {level}");
+            continue;
+        };
+        if let Some(e) = spawn_instance(&mut commands, &mut meshes, &lf, &level, si, m, true) {
+            fx.spawned_oneshots += 1;
+            if attach {
+                h.live.push((e, socket));
+            }
         }
     }
 }

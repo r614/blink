@@ -1083,6 +1083,7 @@ pub fn try_mantle_from(p: &mut PlayerState, fwd: Vec3, min_edge: f32, ctx: &Move
         // `ADD_Head_Mantle_Low`, over `m_fLowMantleStepUpBlendTime`).
         p.position = dest;
         p.mode = MoveMode::Walking;
+        p.traversal.step_ups = p.traversal.step_ups.wrapping_add(1);
         return true;
     }
     // The mantle state sets the pawn at its intro target at once (0x00A6EC20, no intro after
@@ -1094,7 +1095,7 @@ pub fn try_mantle_from(p: &mut PlayerState, fwd: Vec3, min_edge: f32, ctx: &Move
         None => (None, 0.0),
     };
     p.position = anchor;
-    p.traversal = Traversal { from: anchor, to: dest, elapsed: 0.0, duration, edge_height: edge_h, anim: anim_i, rate };
+    p.traversal = Traversal { from: anchor, to: dest, elapsed: 0.0, duration, edge_height: edge_h, anim: anim_i, rate, step_ups: p.traversal.step_ups };
     p.mode = MoveMode::Mantling;
     true
 }
@@ -1143,7 +1144,7 @@ mod tests {
         mv.mantle.anim_rate = 1.5;
         let mut p = PlayerState::new(1, Vec3::ZERO, 0.0);
         let (from, to) = (Vec3::ZERO, Vec3::new(40.0, 0.0, 160.0));
-        p.traversal = Traversal { from, to, elapsed: 0.0, duration: high().duration / 1.5, edge_height: 160.0, anim: Some(2), rate: 1.5 };
+        p.traversal = Traversal { from, to, elapsed: 0.0, duration: high().duration / 1.5, edge_height: 160.0, anim: Some(2), rate: 1.5, step_ups: 0 };
         let mut ticks = 0;
         while !advance_traversal(&mut p, &mv, 1.0 / 60.0) {
             ticks += 1;
