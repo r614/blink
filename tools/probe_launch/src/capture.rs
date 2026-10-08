@@ -374,7 +374,7 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
         if let Some(errs) = built["errors"].as_array().filter(|e| !e.is_empty()) {
             warnings.push(format!("layout: {} parts not built: {}", errs.len(), errs.iter().filter_map(|e| e.as_str()).collect::<Vec<_>>().join("; ")));
         }
-        warnings.push("layout: lights, labels and the nav grid are not built in the original (U-806)".into());
+        warnings.push("layout: labels and the nav grid are not built in the original; lights are movable (no lightmass) (U-806)".into());
         load = json!({"load_s": lt, "control_s": c, "layout": built});
     } else if reload || !cur.eq_ignore_ascii_case(&spec.map) {
         let (l, c) = s.open_map(&spec.map, Duration::from_secs(600))?;
