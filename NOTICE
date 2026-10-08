@@ -1,0 +1,4 @@
+﻿Blink includes code adapted from dishonored-bevy by Eamon (https://github.com/Eamo5/dishonored-bevy),
+used with the author's permission:
+
+- crates/dishonored_runtime/src/warmup.rs (shader / pipeline warm-up; from game/src/warmup.rs)

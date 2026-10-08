@@ -93,6 +93,8 @@ pub mod prop_light;
 #[doc(hidden)]
 pub mod loading_screen;
 #[doc(hidden)]
+pub mod warmup;
+#[doc(hidden)]
 pub mod lighting;
 #[doc(hidden)]
 pub mod map_render;
@@ -377,6 +379,7 @@ pub fn main() {
     .add_plugins(prop_light::PropLightPlugin)
     .add_plugins(bloom::BloomPlugin)
     .add_plugins(env_map::EnvMapOncePlugin)
+    .add_plugins(warmup::WarmupPlugin)
     .add_plugins(bevy::diagnostic::EntityCountDiagnosticsPlugin::default())
     .insert_resource(ClearColor(Color::srgb(0.08, 0.09, 0.12)))
     // Placeholder ambient; with real lights it only fills non-lightmapped meshes at night level.
@@ -566,10 +569,12 @@ fn connect(addr: &str, args: &Args) -> NetClient {
 #[derive(Resource)]
 pub struct LevelSettings(pub level::LevelOptions);
 
-fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, mut materials: ResMut<Assets<StandardMaterial>>, mut baked: ResMut<Assets<map_render::BakedMaterial>>, mut fx: ResMut<effects::Effects>) {
+fn setup_world(mut commands: Commands, args: Res<Args>, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, mut materials: ResMut<Assets<StandardMaterial>>, mut baked: ResMut<Assets<map_render::BakedMaterial>>, mut fx: ResMut<effects::Effects>, mut warm: ResMut<warmup::Warmup>) {
     let opts = level::LevelOptions { max_tex: args.max_tex, show_hidden: args.show_hidden, legacy: std::env::args().any(|a| a == "--legacy-geometry") };
     let mut levels = level::Levels::default();
     let map = level::spawn_level(&args.map, &opts, &args.features, &mut commands, &mut meshes, &mut images, &mut materials, &mut baked, &mut levels, &mut fx);
+    // Pipeline warm-up behind the hidden window / loading screen (`handoff::reveal` waits for it).
+    warm.begin(true, false);
 
     let spawn = map.spawn_candidates.first();
     let start = args.pos.or(spawn.map(|s| s.position + glam::Vec3::Z * 64.0)).unwrap_or(glam::Vec3::new(0.0, 0.0, 500.0));

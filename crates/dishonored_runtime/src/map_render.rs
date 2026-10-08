@@ -369,131 +369,102 @@ fn fallback_color(seed: usize) -> Color {
     Color::hsl(h, 0.15, 0.55)
 }
 
-pub fn spawn_map(
-    map: &DishonoredMap,
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    images: &mut Assets<Image>,
-    materials: &mut Assets<StandardMaterial>,
-    baked: &mut Assets<BakedMaterial>,
-    show_hidden: bool,
-    features: &RenderFeatures,
-) -> usize {
-    let show_fx = features.fx;
-    let image_handles: Vec<Handle<Image>> = map.textures.iter().map(|t| images.add(to_image(t))).collect();
-    // Planar reflections: the capture cameras and their render targets (reflect.rs), and the
-    // render layers the reflected primitives are drawn in.
-    let reflect_layers = crate::reflect::Layers::new(map, features);
-    let reflect_targets = crate::reflect::spawn_captures(map, &reflect_layers, commands, images);
-    let default_params = MaterialParams::default();
-    let material_handles: Vec<Handle<StandardMaterial>> = map
-        .materials
-        .iter()
-        .enumerate()
-        .map(|(i, m)| {
-            let p = map.material_params.get(i).unwrap_or(&default_params);
-            materials.add(build_material(i, m, p, &image_handles, features))
-        })
-        .collect();
-    let (lightmap_handles, directional_handles): (Vec<Handle<Image>>, Vec<Handle<Image>>) = if features.lightmaps {
-        map.lightmaps
-            .iter()
-            .map(|l| (images.add(lightmap_image(l, LightmapPlane::Color)), images.add(lightmap_image(l, LightmapPlane::Directional))))
-            .unzip()
+/// Everything `spawn_map` computes from the map alone, with no world access: texture and
+/// lightmap images, the merged world-space batch meshes, the per-instance section meshes (with
+/// tangents) and the bloom parts. It is built by [`prepare_map`] (worker-thread safe, parallel
+/// inside), so the frame that adds the level to the world only moves the results into the asset
+/// collections and spawns entities (a few ms) instead of stalling for seconds.
+pub struct PreparedMap {
+    layers: crate::reflect::Layers,
+    textures: Vec<Image>,
+    lightmaps: Vec<(Image, Image)>,
+    shadows: Vec<Image>,
+    shadow_locals: Vec<Image>,
+    /// Flat-normal irradiance pages, for the atlases drawn with Bevy's own per-entity lightmaps.
+    flat: Vec<Option<Image>>,
+    /// (instance, section) pairs drawn inside a merged batch.
+    merged: std::collections::HashSet<(usize, usize)>,
+    /// One Bevy mesh per (static mesh, section) drawn per instance.
+    section_meshes: std::collections::HashMap<(usize, usize), Mesh>,
+    /// Bloom parts by material: (emissive texture, bloom colour, world-space triangles).
+    bloom_parts: std::collections::BTreeMap<usize, (usize, Vec3, Vec<f32>)>,
+    /// Lightmap rects of the instances batched alone for their diffuse variation mask.
+    d2_rects: std::collections::HashMap<u32, (Vec2, Vec2)>,
+    /// The merged batch meshes.
+    built: Vec<(BatchKey, Mesh)>,
+}
+
+/// `f` over `items` on all cores, in order.
+fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let chunk = items.len().div_ceil(threads).max(1);
+    let f = &f;
+    std::thread::scope(|s| {
+        let handles: Vec<_> = items.chunks(chunk).map(|c| s.spawn(move || c.iter().map(f).collect::<Vec<R>>())).collect();
+        handles.into_iter().flat_map(|h| h.join().expect("map preparation worker")).collect()
+    })
+}
+
+/// One Bevy mesh for a (static mesh, section) pair.
+fn build_section_mesh(map: &DishonoredMap, mi: usize, si: usize, features: &RenderFeatures) -> Mesh {
+    let m = &map.meshes[mi];
+    let positions: Vec<[f32; 3]> = m.positions.iter().map(|p| coords::pos(*p).to_array()).collect();
+    let normals: Vec<[f32; 3]> = m.normals.iter().map(|n| coords::dir(*n).normalize_or_zero().to_array()).collect();
+    let uvs: Vec<[f32; 2]> = m.uv0.iter().map(|u| u.to_array()).collect();
+    let uv1: Vec<[f32; 2]> = m.uv1.iter().map(|u| u.to_array()).collect();
+    let s = &m.sections[si];
+    let start = s.first_index as usize;
+    let end = (start + s.num_triangles as usize * 3).min(m.indices.len());
+    let idx = m.indices[start..end].to_vec();
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_indices(Indices::U32(idx));
+    if features.materials {
+        // MikkTSpace in Bevy space (equivalent to the packed UE3 basis up to
+        // the handedness flip of the coordinate change).
+        let _ = mesh.generate_tangents();
+    }
+    if m.uv1.len() == m.positions.len() {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1);
+    }
+    mesh
+}
+
+/// The map-only half of [`spawn_map`] (see [`PreparedMap`]); safe to run on a worker thread.
+pub fn prepare_map(map: &DishonoredMap, show_hidden: bool, features: &RenderFeatures) -> PreparedMap {
+    let layers = crate::reflect::Layers::new(map, features);
+    let textures = par_map(&map.textures, to_image);
+    let (lightmaps, shadows, shadow_locals) = if features.lightmaps {
+        (
+            par_map(&map.lightmaps, |l| (lightmap_image(l, LightmapPlane::Color), lightmap_image(l, LightmapPlane::Directional))),
+            par_map(&map.lightmaps, |l| shadow_image(&l.shadow, l)),
+            par_map(&map.lightmaps, |l| shadow_image(&l.shadow_local, l)),
+        )
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new())
     };
-    let shadow_handles: Vec<Handle<Image>> = if features.lightmaps { map.lightmaps.iter().map(|l| images.add(shadow_image(&l.shadow, l))).collect() } else { Vec::new() };
-    let shadow_local_handles: Vec<Handle<Image>> = if features.lightmaps { map.lightmaps.iter().map(|l| images.add(shadow_image(&l.shadow_local, l))).collect() } else { Vec::new() };
-    // Flat-normal irradiance pages for geometry drawn with Bevy's own per-entity lightmaps
-    // (translucent and unmerged instances), built on first use.
-    let mut flat_handles: Vec<Option<Handle<Image>>> = vec![None; map.lightmaps.len()];
-    let default_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.6, 0.6, 0.6),
-        cull_mode: None,
-        double_sided: true,
-        perceptual_roughness: 0.9,
-        ..default()
-    });
-    let hidden_material = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 0.2, 0.8, 0.25),
-        alpha_mode: AlphaMode::Blend,
-        cull_mode: None,
-        double_sided: true,
-        unlit: true,
-        ..default()
-    });
-
-    // One Bevy mesh per (static mesh, section), built only for geometry drawn per instance
-    // (merged batches carry their own vertices).
-    let mut section_cache: std::collections::HashMap<(usize, usize), Handle<Mesh>> = std::collections::HashMap::new();
-    let mut section_mesh = |mi: usize, si: usize, meshes: &mut Assets<Mesh>| -> Handle<Mesh> {
-        section_cache
-            .entry((mi, si))
-            .or_insert_with(|| {
-                let m = &map.meshes[mi];
-            let positions: Vec<[f32; 3]> = m.positions.iter().map(|p| coords::pos(*p).to_array()).collect();
-            let normals: Vec<[f32; 3]> = m
-                .normals
-                .iter()
-                .map(|n| coords::dir(*n).normalize_or_zero().to_array())
-                .collect();
-            let uvs: Vec<[f32; 2]> = m.uv0.iter().map(|u| u.to_array()).collect();
-            let uv1: Vec<[f32; 2]> = m.uv1.iter().map(|u| u.to_array()).collect();
-                let s = &m.sections[si];
-                    let start = s.first_index as usize;
-                    let end = (start + s.num_triangles as usize * 3).min(m.indices.len());
-                    let idx = m.indices[start..end].to_vec();
-                    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
-                        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions.clone())
-                        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals.clone())
-                        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs.clone())
-                        .with_inserted_indices(Indices::U32(idx));
-                    if features.materials {
-                        // MikkTSpace in Bevy space (equivalent to the packed UE3 basis up to
-                        // the handedness flip of the coordinate change).
-                        let _ = mesh.generate_tangents();
-                    }
-                    if m.uv1.len() == m.positions.len() {
-                        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1.clone());
-                    }
-                meshes.add(mesh)
-            })
-            .clone()
-    };
-
     let merge = std::env::var_os("DISHONORED_NO_MERGE").is_none();
     let mut batches: std::collections::HashMap<BatchKey, Batch> = std::collections::HashMap::new();
-    // Lightmap rects of the instances batched alone for their diffuse variation mask.
     let mut d2_rects: std::collections::HashMap<u32, (Vec2, Vec2)> = std::collections::HashMap::new();
-    // Bloom parts by material: (emissive texture, bloom colour, world-space triangles).
     let mut bloom_parts: std::collections::BTreeMap<usize, (usize, Vec3, Vec<f32>)> = std::collections::BTreeMap::new();
-    let mut spawned = 0;
-    // The level's reflection cube for the translucent decals, built on first use.
-    let mut decal_scene: Option<Option<Handle<Image>>> = None;
-    // Light-beam sections with their vertex colours, by (mesh, section).
-    let mut volume_light_meshes: std::collections::HashMap<(usize, usize), Handle<Mesh>> = std::collections::HashMap::new();
-    // Material cubemaps by their face textures.
-    let mut cube_cache: std::collections::HashMap<Vec<dishonored_ir::TextureId>, Option<Handle<Image>>> = std::collections::HashMap::new();
+    let mut merged = std::collections::HashSet::new();
+    let mut section_keys: std::collections::BTreeSet<(usize, usize)> = std::collections::BTreeSet::new();
+    let mut flat_needed: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     for (ii, inst) in map.instances.iter().enumerate() {
         if inst.hidden && !show_hidden {
             continue;
         }
         let mesh = &map.meshes[inst.mesh];
-        let transform = Transform::from_matrix(coords::transform(inst.transform));
-        let reflect_bits = reflect_layers.bits(inst.reflect_channels);
+        let reflect_bits = layers.bits(inst.reflect_channels);
         for (si, section) in mesh.sections.iter().enumerate() {
             let mat_id = inst.materials.get(si).copied().flatten().or(section.material);
-            if !show_fx && mat_id.is_some_and(|m| map.materials[m].blend == BlendHint::Translucent) {
+            let translucent = mat_id.is_some_and(|m| map.materials[m].blend == BlendHint::Translucent);
+            if !features.fx && translucent {
                 continue;
             }
             let is_sky = features.sky && mat_id.and_then(|m| map.material_params.get(m)).is_some_and(|p| p.sky);
-            if is_sky && std::env::var_os("DISHONORED_SKY_DEBUG").is_some() {
-                let c = inst.transform.w_axis;
-                let r = mesh.positions.iter().map(|p| inst.transform.transform_point3(glam::Vec3::from(*p)).distance(c.truncate())).fold(0.0f32, f32::max);
-                info!("sky instance {} section {si}: centre ({:.0},{:.0},{:.0}) radius {:.0} uu", mesh.source, c.x, c.y, c.z, r);
-            }
-            let translucent = mat_id.is_some_and(|m| map.materials[m].blend == BlendHint::Translucent);
             // Bloom parts (bloom.rs): the section again, in world space, for its material's
             // bloom colour.
             if !inst.hidden && features.materials && features.post {
@@ -534,8 +505,151 @@ pub fn spawn_map(
                 };
                 let b = batches.entry(key).or_default();
                 b.append(mesh, si, coords::transform(inst.transform), lm.map(|l| (l.uv_min, l.uv_max)));
+                merged.insert((ii, si));
                 continue;
             }
+            section_keys.insert((inst.mesh, si));
+            if let Some(lm) = inst.lightmap.filter(|_| !is_sky && features.lightmaps && mesh.uv1.len() == mesh.positions.len()) {
+                flat_needed.insert(lm.atlas as usize);
+            }
+        }
+    }
+    // Build batch meshes (MikkTSpace tangents dominate) across all cores.
+    let jobs: Vec<(BatchKey, std::sync::Mutex<Option<Batch>>)> = batches.into_iter().filter(|(_, b)| !b.indices.is_empty()).map(|(k, b)| (k, std::sync::Mutex::new(Some(b)))).collect();
+    let tangents = features.materials;
+    let built: Vec<(BatchKey, Mesh)> = par_map(&jobs, |(key, slot)| {
+        let b = slot.lock().ok().and_then(|mut s| s.take()).unwrap_or_default();
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, b.positions)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, b.normals)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, b.uv0)
+            .with_inserted_indices(Indices::U32(b.indices));
+        if key.uv1 {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, b.uv1);
+        }
+        if tangents {
+            let _ = mesh.generate_tangents();
+        }
+        (*key, mesh)
+    });
+    let section_keys: Vec<(usize, usize)> = section_keys.into_iter().collect();
+    let section_meshes: std::collections::HashMap<(usize, usize), Mesh> = section_keys.iter().copied().zip(par_map(&section_keys, |(mi, si)| build_section_mesh(map, *mi, *si, features))).collect();
+    let flat_needed: Vec<usize> = flat_needed.into_iter().filter(|a| *a < map.lightmaps.len()).collect();
+    let mut flat: Vec<Option<Image>> = (0..map.lightmaps.len()).map(|_| None).collect();
+    for (a, img) in flat_needed.iter().copied().zip(par_map(&flat_needed, |a| lightmap_image(&map.lightmaps[*a], LightmapPlane::Flat))) {
+        flat[a] = Some(img);
+    }
+    PreparedMap { layers, textures, lightmaps, shadows, shadow_locals, flat, merged, section_meshes, bloom_parts, d2_rects, built }
+}
+
+/// [`prepare_map`] and [`spawn_prepared`] in one call (the map is prepared on this thread's
+/// frame: use it only where nothing is on screen, e.g. before the window is shown).
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_map(
+    map: &DishonoredMap,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    images: &mut Assets<Image>,
+    materials: &mut Assets<StandardMaterial>,
+    baked: &mut Assets<BakedMaterial>,
+    show_hidden: bool,
+    features: &RenderFeatures,
+) -> usize {
+    let prep = prepare_map(map, show_hidden, features);
+    spawn_prepared(map, prep, commands, meshes, images, materials, baked, show_hidden, features)
+}
+
+/// Add a [`prepare_map`]d level to the world.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_prepared(
+    map: &DishonoredMap,
+    prep: PreparedMap,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    images: &mut Assets<Image>,
+    materials: &mut Assets<StandardMaterial>,
+    baked: &mut Assets<BakedMaterial>,
+    show_hidden: bool,
+    features: &RenderFeatures,
+) -> usize {
+    let PreparedMap { layers: reflect_layers, textures, lightmaps, shadows, shadow_locals, flat, merged, section_meshes: mut prepared_meshes, bloom_parts, d2_rects, built } = prep;
+    let show_fx = features.fx;
+    let image_handles: Vec<Handle<Image>> = textures.into_iter().map(|t| images.add(t)).collect();
+    // Planar reflections: the capture cameras and their render targets (reflect.rs), and the
+    // render layers the reflected primitives are drawn in.
+    let reflect_targets = crate::reflect::spawn_captures(map, &reflect_layers, commands, images);
+    let default_params = MaterialParams::default();
+    let material_handles: Vec<Handle<StandardMaterial>> = map
+        .materials
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let p = map.material_params.get(i).unwrap_or(&default_params);
+            materials.add(build_material(i, m, p, &image_handles, features))
+        })
+        .collect();
+    let (lightmap_handles, directional_handles): (Vec<Handle<Image>>, Vec<Handle<Image>>) = lightmaps.into_iter().map(|(c, d)| (images.add(c), images.add(d))).unzip();
+    let shadow_handles: Vec<Handle<Image>> = shadows.into_iter().map(|i| images.add(i)).collect();
+    let shadow_local_handles: Vec<Handle<Image>> = shadow_locals.into_iter().map(|i| images.add(i)).collect();
+    // Flat-normal irradiance pages for geometry drawn with Bevy's own per-entity lightmaps
+    // (translucent and unmerged instances): prepared with the map, built on first use otherwise.
+    let mut flat_handles: Vec<Option<Handle<Image>>> = flat.into_iter().map(|i| i.map(|i| images.add(i))).collect();
+    let default_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.6, 0.6, 0.6),
+        cull_mode: None,
+        double_sided: true,
+        perceptual_roughness: 0.9,
+        ..default()
+    });
+    let hidden_material = materials.add(StandardMaterial {
+        base_color: Color::srgba(1.0, 0.2, 0.8, 0.25),
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        double_sided: true,
+        unlit: true,
+        ..default()
+    });
+
+    // One Bevy mesh per (static mesh, section), built only for geometry drawn per instance
+    // (merged batches carry their own vertices).
+    let mut section_cache: std::collections::HashMap<(usize, usize), Handle<Mesh>> = std::collections::HashMap::new();
+    let mut section_mesh = |mi: usize, si: usize, meshes: &mut Assets<Mesh>| -> Handle<Mesh> {
+        section_cache.entry((mi, si)).or_insert_with(|| meshes.add(prepared_meshes.remove(&(mi, si)).unwrap_or_else(|| build_section_mesh(map, mi, si, features)))).clone()
+    };
+
+    let mut spawned = 0;
+    // The level's reflection cube for the translucent decals, built on first use.
+    let mut decal_scene: Option<Option<Handle<Image>>> = None;
+    // Light-beam sections with their vertex colours, by (mesh, section).
+    let mut volume_light_meshes: std::collections::HashMap<(usize, usize), Handle<Mesh>> = std::collections::HashMap::new();
+    // Material cubemaps by their face textures.
+    let mut cube_cache: std::collections::HashMap<Vec<dishonored_ir::TextureId>, Option<Handle<Image>>> = std::collections::HashMap::new();
+    for (ii, inst) in map.instances.iter().enumerate() {
+        if inst.hidden && !show_hidden {
+            continue;
+        }
+        let mesh = &map.meshes[inst.mesh];
+        let transform = Transform::from_matrix(coords::transform(inst.transform));
+        let reflect_bits = reflect_layers.bits(inst.reflect_channels);
+        for (si, section) in mesh.sections.iter().enumerate() {
+            let mat_id = inst.materials.get(si).copied().flatten().or(section.material);
+            if !show_fx && mat_id.is_some_and(|m| map.materials[m].blend == BlendHint::Translucent) {
+                continue;
+            }
+            let is_sky = features.sky && mat_id.and_then(|m| map.material_params.get(m)).is_some_and(|p| p.sky);
+            if is_sky && std::env::var_os("DISHONORED_SKY_DEBUG").is_some() {
+                let c = inst.transform.w_axis;
+                let r = mesh.positions.iter().map(|p| inst.transform.transform_point3(glam::Vec3::from(*p)).distance(c.truncate())).fold(0.0f32, f32::max);
+                info!("sky instance {} section {si}: centre ({:.0},{:.0},{:.0}) radius {:.0} uu", mesh.source, c.x, c.y, c.z, r);
+            }
+            let translucent = mat_id.is_some_and(|m| map.materials[m].blend == BlendHint::Translucent);
+            // Static opaque/masked sections were merged into world-space batches by
+            // `prepare_map`; the bloom parts were collected there too.
+            if merged.contains(&(ii, si)) {
+                continue;
+            }
+            // [interp] Matinee-driven actors (InterpActor) stay separate so cutscenes can move them.
+            let mover = crate::cutscene::mover_of(&inst.source, inst.transform);
             let mat = if inst.hidden {
                 hidden_material.clone()
             } else {
