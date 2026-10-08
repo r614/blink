@@ -665,8 +665,15 @@ impl Session {
                 let h = s("hash").context("hash 0x...")?;
                 let hash = u64::from_str_radix(h.trim_start_matches("0x"), 16)?;
                 let draws = num("draws").unwrap_or(1.0) as u32;
-                let names: std::collections::HashMap<u64, String> = self.c.shaders()?.into_iter().map(|s| (s.hash, s.ctab)).collect();
-                let ctab = names.get(&hash).cloned().unwrap_or_default();
+                // The CTAB names, fetched once per process (the list grows to tens of thousands
+                // of shaders after many maps; fetching it per call took seconds).
+                static CTABS: std::sync::Mutex<Option<std::collections::HashMap<u64, String>>> = std::sync::Mutex::new(None);
+                let mut cache = CTABS.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+                if cache.as_ref().is_none_or(|m| !m.contains_key(&hash)) {
+                    *cache = Some(self.c.shaders()?.into_iter().map(|s| (s.hash, s.ctab)).collect());
+                }
+                let ctab = cache.as_ref().and_then(|m| m.get(&hash)).cloned().unwrap_or_default();
+                drop(cache);
                 let mut out = Vec::new();
                 for (frame, _, regs) in self.c.ps_constants(hash, draws, "")? {
                     let mut m = Map::new();

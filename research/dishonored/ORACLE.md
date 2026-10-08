@@ -648,6 +648,26 @@ write the same file); the shader store is content-addressed and written through 
 temporary names, so sessions share it; queue results default to `<out>.<session>.json` for a
 named session.
 
+**Possession post and the arm glow (2026-10-08, round 7).** With the target in view (a guard
+300 uu ahead, L2, RMB held 30 ticks; the powers item equipped first), the PP manager's
+`m_PossessionParams` R / G (`pos` / `posg`) rise from about 1.5 s after the press, linearly
+0 -> 0.2 / 0.6 over 0.66 s, hold, and jump to 1.2 / 1.5 when the possession ends;
+`m_PossessionStateTime` holds the state's start time (4.43, then 20.35). The screen pass is
+`ps 0x9312eee076ac74a4` (`GArkPpSampler_0`, `Texture2D_0`; 78 slots: a swirl field from the
+screen angle and radius with two sines of time), constants `UniformPixelVector_1` = (pos, posg,
+0, 0) and `UniformPixelScalars_0.x` = world time; it feeds the same ArkPp vector-field blur as
+Bend Time (`0xbd9a42b61794aabb` / `0x6095a5daa9109b1d`, `gVectorFieldScales` (4.88e-5, 8.68e-5)
+at 1280 x 720). `effects/possession_l2_held.json` (census), `possession_post_timeline.json`
+(148 per-frame constant sets of 0x9312, the PP channels for 1500 ticks). The earlier capture
+missed it because the cast never happened (the powers item was not in the left hand).
+The arm glow is the player mesh's runtime material instance (`pawn.Mesh.Materials[0]`, a
+transient MIC of `Twk_Pawn_Corvo.PlayerArms_Tatoo_inst`, parent `Shr_DefaultPlayer`): its scalar
+`Use_Power` goes to 1 the tick after a cast and stays for `m_TatooGlowInfo.m_fDuration` (Blink
+and Dark Vision 1.0 s, Possession about 1.7 s, Bend Time 1.08 s), then falls linearly to 0 over
+`m_fRampDownDuration` 1.0 s (world time: slower under Bend Time). The template's other
+parameters (`P_Power_intensity`, `F_Firy_*`, `T_tatoo_Distortion*`, `Power_Hand_Color` (10, 5, 1,
+1)) are constant. `effects/arm_glow_timeline.json`. The parameter list of the runtime instance
+is empty until the first cast of a level.
 ### The capture queue (`probe_launch queue run`)
 
 `probe_launch queue run [fixtures/oracle/capture_queue.txt] [--out harness_out/oracle/capture_queue_results.json] [--skip-layouts] [--only PREFIX]`
