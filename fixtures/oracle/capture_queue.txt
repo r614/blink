@@ -111,3 +111,80 @@ ai/boyle_doorman_duel
 session read object=Default__DishonoredGlobalAIManager path=m_ReactionDelay
 session read object=Default__DishonoredGlobalAIManager path=m_MagicReactionDelay
 session props class=DishonoredAIBrain filter=Behavior
+# --- systems/world.md (chaos, doors, saves). Sessions assume L_Boyle_Ext_P freshly reloaded + setup.
+# Scenarios (inventory caps); original side = Twk_Pawn_Corvo_Release caps
+inventory/ammo_cap_grenade
+inventory/ammo_cap_grenade_belt
+inventory/elixir_cap
+inventory/drink_potency
+# U-W1: the darkness manager, its fields, the level table and deeds as the engine loaded them
+session find class=DisDarknessManager
+session props class=DisDarknessManager
+session dump class=DisDarknessManager
+session read object=Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release path=m_DarknessLevels
+session read object=Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release path=m_Deeds
+# Score clamp and level mapping (sequence, in this order; dump the manager and print the level after each):
+# expected score 0 (clamp), then 11 (level 0), 12 (level 1), 47 (1), 48 (2), 389 (9), 390 (10)
+session console command=adddarkness -50
+session dump class=DisDarknessManager
+session console command=debugdarkness
+session console command=adddarkness 11
+session console command=debugdarkness
+session console command=adddarkness 1
+session console command=debugdarkness
+session console command=adddarkness 35
+session console command=debugdarkness
+session console command=adddarkness 1
+session console command=debugdarkness
+session console command=adddarkness 341
+session console command=debugdarkness
+session console command=adddarkness 1
+session console command=debugdarkness
+# U-W7: coin cap (give a very large count, read it back)
+session find class=DishonoredInventory
+# Door states and lock flags as placed (Boyle Ext sublevel L_Boyle_Ext_Audio has 8 DisDoor, 4 locked with keys)
+session dump class=DisDoor filter=m_DoorState limit=40
+session dump class=DisDoor filter=m_bLocked limit=40
+session dump class=DisDoor filter=m_MatchingKeys limit=40
+# Door Use (sequence): DisDoor_21 (unlocked wood) at (-3215, 2710, 203), yaw -5.6 deg; stand ~100 uu from the hinge side, look at it
+# (adjust the placement with the door's collision centre from the dump above)
+session place location=-3215,2610,292 yaw=84 snap=true
+session step n=0
+session read object=DisDoor_21 path=m_DoorState
+session key key=F event=tap
+session step n=90
+session read object=DisDoor_21 path=m_DoorState
+# Locked key door DisDoor_2 at (-2023, 2315, 453) without the key: Use must not open it (state stays 0)
+session place location=-2023,2215,542 yaw=90 snap=true
+session key key=F event=tap
+session step n=90
+session read object=DisDoor_2 path=m_DoorState
+session read object=DisDoor_2 path=m_bLocked
+# U-W8 and the disable-save counters: read the engine stack idle, then during a Blink and a choke (SCENARIO saveload/blocked_mid_blink)
+session read object=engine path=m_DisallowSavingRefCount
+session read object=engine path=m_fDisallowSavingTimer
+# Bone charm pickups of Boyle: the effect index the engine assigned (F-7)
+session dump class=DisWhaleBoneCharm filter=m_Effect
+# --- stealth and detection (research/dishonored/systems/stealth.md) ---
+# Scenarios (Boyle Ext, the party guard DishonoredSpawner_46). detect_600 / detect_1300: re-capture with per-tick geometry (U-864): the guard's Location,
+# Rotation and the vision bone camera_jnt location, the player's Location, and the guard's PlayerAttnInfo m_fLastLOSDistance / m_AttentionAccumulator / m_CurrentAttentionLevel.
+stealth/detect_600
+stealth/detect_1300
+stealth/sweep_distance
+stealth/sweep_angle
+stealth/sweep_stance_speed
+stealth/attention_thresholds
+stealth/hear_footfalls
+# The sweep scenarios place the player per segment ("teleport" + "calm guard" console hooks are port-only): on the original use the session place op and write 0 to the
+# guard's PlayerAttnInfo m_AttentionAccumulator value and m_CurrentAttentionLevel at each segment start (probe_launch measure detect does this per placement).
+# Equivalent single-command captures of the existing hook: measure detect npc=<party guard> --dists 200,300,400,500,600,800,1000,1300,1700,2000 --stances stand,crouch --secs 1.0
+#   and --move strafe / --move sprint with --dists 2000 (speed term only). Keep detect.csv: it has the player and NPC locations per sample.
+# Original-side reads (live values of the data this model rests on):
+session dump class=DisAINoiseManager limit=2
+session dump class=DisTweaks_Vision filter=m_fVision limit=6
+session dump class=DishonoredVisibilityComponent limit=2
+session dump class=DisAttentionInfo_Complex filter=m_PawnAttentionTweaks limit=60
+# Eye height: camera_jnt of the party guard relative to its Location (needs the guard's SkeletalMeshComponent):
+#   session find class=SkeletalMeshComponent name=<guard Outer.Name> ; session call object=<that mesh> function=GetBoneLocation args={"BoneName":"camera_jnt","Space":0}
+# Footfall noise: with the guard turned away (write its Rotation yaw), run/sprint toward it and record `session events functions=MakeNoise classes=DisAINoiseManager`
+#   if the dispatch is a script-visible call; otherwise trace 0x00c5a760 (loudness byte at event+0x20, context at +0x21, source at +0x24).

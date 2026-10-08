@@ -469,7 +469,7 @@ Ops (arguments as JSON keys):
 |---|---|---|
 | `status` | | map, pawn, pc, tick, lockstep, parked, fixed step |
 | `open` / `reload` | `map` (default: the current one), `hz` 60, `keep_alive` true | load / control seconds; the map is fresh (the restore primitive: reload, then re-apply the setup) |
-| `setup` | `hz`, `keep_alive` | tutorials off, keep alive, fixed step |
+| `setup` | `hz`, `keep_alive` | tutorials off, keep alive, fixed step, no pause on a real focus loss (`Engine.bPauseOnLossOfFocus`; an open pause menu is closed) |
 | `give` / `power` / `equip` | `item` / `name`, `level` / `class`, `hand` | as `lab give / power / equip` |
 | `find` | `name` (`Outer.Name`, `Base_N`), `class`, `limit` | addresses and full names |
 | `read` | `object`, `path` (or none: every field, `filter`) | typed value(s) |
@@ -487,6 +487,13 @@ Ops (arguments as JSON keys):
 | `collide` | `queries` [[sx,sy,sz, ex,ey,ez, hx,hy,hz, flags]...], `source` | hits with actor / component |
 | `events` | `functions` (substrings), `classes` (is-a), `max`, or `fetch: true` | traced ProcessEvent calls with ticks |
 | `spawns` | `max`, or `fetch: true` | actors that appeared, with ticks |
+| `select_power` | `component` (`DisActivePowerComponent_DarkVision`, `DishonoredActivePowerComponent_Possess`...) | the left hand on that power (after `power`) |
+| `run` | `ticks`, `channels` {name: "object:path"}, `keys` [[tick, key, down]], `console` [[tick, cmd]], `events`, `spawns`, `damage` (pawn damage path), `every` | per-tick frames (end-of-tick state) inside the game, events / spawns / damage with ticks |
+| `attention` | `npc` | the NPC's `PlayerAttnInfo` (`DisAttentionInfo_Complex`) |
+| `layout` | `map` (or `file`), `offset` [0, 0, 20000], `reload`, `host` | builds a layout map in the host level (below) |
+| `shaders` | `since` (id) | the distinct pixel and vertex shaders the game created (D3D9 `CreatePixelShader` / `CreateVertexShader`), bytecode written to `$DISHONORED_CACHE/oracle/shaders/<exe16>/{ps,vs}_<fnv64>.bin`; id, kind, creation tick, CTAB parameter -> register layout |
+| `census` | `frames` | pixel shaders drawn per frame (draws, primitives, CTAB) while the world runs |
+| `psconst` | `hash`, `draws` | live constants of the next draws with that shader, by CTAB parameter name |
 
 Object specs: `pawn`, `pc`, `camera`, `worldinfo`, `input`, `engine`, `0x<addr>`,
 `Default__<Class>`, or an object name (`DisDoor_21`, `PersistentLevel.DisDoor_21`). Paths:
@@ -524,6 +531,114 @@ runs its Kismet: a warning), `seed`.
 | Filtered dump | 18 doors with every field 225 ms (209 KB JSON); 33 NPCs' health fields 58 ms |
 | Collision through the session | 20000 checks 0.1 s in the game (200 k/s), 4.5 s with the hit names |
 
+### Capture requests answered (2026-10-08, Boyle Ext, fixed 60 Hz, end-of-tick sampling)
+
+Measured with `session run` (tick scripts) on the running original; ticks are frames after the
+press boundary (press at k: the input acts in the tick producing frame k + 1). The Playground
+scenarios' own traces need the Playground in the original (next deliverable); these values are
+what their checkpoints ask for, measured on Boyle placements.
+
+| Request (scenario) | Original | Notes |
+|---|---|---|
+| Dark Vision L2 cost / duration (`powers/dark_vision`) | **20** mana; **30.0 s** (`m_fTimeRemaining` set to 30 the tick after the press, counting from 2 ticks later); fade in 0.033 s, fade out 0.2 s | a second press cancels it without cost; mana regenerates the 20 from 3.0 s on (1 point / 7 ticks) while it is active |
+| Bend Time L1 cost (`powers/bend_time_l1`) | **60** mana, taken 9 ticks after the press (cast animation); `TimeDilation` 1 -> 0.85 in 9 ticks (-1/60 per tick) | |
+| Possession L2 cost (`powers/possession_guard`) | **60** mana, 42 ticks (0.70 s) after the press (held 30 ticks, guard 300 uu ahead); the player travels into the guard in 4 ticks; the guard is hidden 44 ticks later | L1 cannot take a human |
+| Devouring Swarm cost / rats (`powers/devouring_swarm_l1`) | **40** mana (L1 and L2); a `DisRatSwarm` actor 39 ticks after the cost, its `DisRatSwarmSpawner` releases **30 rats (L1), 60 (L2)** over 16 ticks, individual `DisGameCrowdAgentSkeletalRat` crowd agents (pooled: the spawn watch saw 27 new ones, the rest reused); `m_fDuration` 30 s, then the swarm flees / ends and the rats despawn over about 10 s | the port's single-group model has no per-rat agents |
+| Pistol on a guard (`combat/pistol_hit`) | **45** `DishonoredDamageType_Bullet` (300 uu, body) 3 ticks after the press; plus **15** `DishonoredDamageType_BulletBlast` to pawns near the impact | |
+| Crossbow bolt on a guard (`combat/crossbow_hit`) | **40** `DisDamageType_Arrow`; the `DisProjectile_Arrow` spawns 3 ticks after the press, hits 2 ticks later at 300 uu | |
+| Grenade (`combat/grenade_fuse`) | armed when cooked in the hand (10 ticks after the press), **3.0 s** fuse from arming; thrown on release (18 ticks), launch (798.8, 2369.0, -7.7) = 2500 uu/s horizontal at -5 deg pitch, gravity 1500 uu/s^2 (-25 uu/s per tick), first displacement one tick after the spawn; impact damage 6 (`DishonoredDamageType_Projectile`); explosion (`DisExplosion`) at fuse 0: **50** to the guard at 50 hp (killed), 11 to a 10 hp NPC, **33** to the player about 1050 uu away (`DisDamageType_Grenade`) | per-tick trace in the session scratch |
+| Spring razor (`combat/spring_razor`) | placed (`DisGadget_SpringRazorPlaced`) 13 ticks after the press at a guard's feet; triggers 53 ticks later: the hook sees **5** `DisDamageType_SpringRazor` per pawn in range, but the guard's health goes 50 -> 0 (the razor kills: the amount is changed after the damage-path entry) | |
+| Windblast L2 knock-back (`powers/windblast_l2_hit`) | cost 50 the tick after the press; damage 19 ticks after: **26** (`DisDamageType_WindBlast`, momentum (756, 2243, 1307)) at 182.8 uu; the guard becomes `PHYS_RigidBody`, peak horizontal speed **1005 uu/s** 2 ticks later, then 100 `DisDamageType_Impact` (killed) 5 ticks later | the spec's 2373 is the momentum, not the ragdoll's speed |
+| NPC slash (`combat/guard_attack`) | **15** `DisDamageType_NPCSlash` (an alerted guard on an NPC) | a sword hit on an unaware guard is 99999 (a one-hit kill) |
+| Hearing (`ai/investigate_noise`) | a pistol shot fired up 800 uu behind the party guard: its `PlayerAttnInfo` jumps to 1.0 / level 3 in the shot's tick, level 4 two ticks later, the guard starts moving **3 ticks (0.05 s)** after the shot | |
+| Patrol speed (`ai/patrol`) | **116.3 uu/s** (three walking Boyle guards, steady) | |
+| Detection at the 600 placement (`stealth/detect_600`) | LOS norm **0.353 = 600 / 1700** (outer cone) at first, rate 0.339 / s; level 1 at frame 45; the head turns and the norm becomes 0.169 (= 591 / 3500, inner cone), rate 0.79 / s; level 4 at frame 111 | U-864: the 2026-10-06 0.164 was taken with the head already turned |
+| Detection at the 1300 placement (`stealth/detect_1300`) | the snapped placement is on the lower floor (z -217.8): no LOS for 30 ticks, then norm 0.78-0.88 at rate 0.1 / s, level 1 at frame 169, then 0.373 | the spec's placement is not the 2026-10-06 one |
+| Lean (`movement/lean`) | Q held: the camera moves **88.9** uu sideways and **16.0** down, roll **-10** deg; 78.5 uu at 0.2 s | HOOK_TRIAGE's 119.7 / 21.4 was measured from another pose |
+| Fall 1200 (`movement/fall_1200`) | landing speed **2675** uu/s, damage **45** (`DmgType_Fell`), gravity 3000 uu/s^2 | |
+| Sneak speed, sword drawn (`movement/crouch_tunnel`) | **247.5** uu/s (`m_bSneakModeToggled`, CollisionHeight 65) | = the port |
+| Blink L2 effects (`powers/blink_l2_level`) | the camera lens effect `Blink2.Blink_PlayerWind_01` lives 59 ticks (0.98 s); `Powers.Ps_Tattoo_Glow_02` (the hand mark) ends 23 and 29 ticks after the cast; no arrival system is recycled through the emitter pool | effect starts are not visible (spawned by script calls, which do not pass through ProcessEvent): lifetimes of pooled effects are known only from their ends (U-805) |
+| Sounds (several) | not captured (U-803) | |
+### Power screen effects: shaders and parameters (2026-10-08)
+
+The cooked PPG_* post materials (Bend Time vectors, Blink, Possession, Dark Vision) and
+`BlinkTarget_PMAT` have no shader map on disk; the running game creates their shaders, and the
+DLL keeps the bytecode of every shader it creates (`SHADER_DUMP`, protocol op 42). Shaders are
+created as materials are first used during the load (7283 distinct, 6365 PS + 918 VS, 12.7 MB on
+Boyle Ext); casting a power created no new ones, so the effect shaders come from the store and
+are identified by drawing.
+
+`tools/probe_launch/scripts/effect.ps1 -Label L -Power P -Level N -Component C` (session ops `census`,
+`select_power`, `run`, `shaders`, `psconst`) writes
+`$DISHONORED_CACHE/oracle/shaders/<exe16>/effects/<label>.json`: the census before the cast and
+while active, the shaders drawn only while active (hash, CTAB layout; bytecode in the store as
+`ps_<hash>.bin`), up to 12 constant sets per such shader, and `DisPostProcessManager`
+(`L_Boyle_Ext_P...DishonoredGameInfo.pPpManager`) parameters per tick (`m_BendTimeIntensity`,
+`m_BlinkParams`, `m_PossessionParams`, `m_PossessionStateTime`) plus `TimeDilation`. Captured:
+`bendtime_l1` (the ArkPp vector-field blur `gSrcTexture / gVectorFieldScales / gVectorFieldTexture`,
+two passes 0xbd9a42b61794aabb and 0x6095a5daa9109b1d, the vector-field material pass
+0xbbe665d07e36986b; `m_BendTimeIntensity` 0 -> 0.63 over 15 ticks), `blink_l2` (14 shaders while
+aiming, the same vector-field blur and SceneColor-sampling material passes), `darkvision_l2`
+(27, mostly the lit scene variants Dark Vision switches to), `possession_l2` (17 during the
+transfer). The "drawn only while active" sets include scene shaders whose draws changed with the
+view; decode with `fxc /dumpbin` against the CTAB names. Never committed.
+### The capture queue (`probe_launch queue run`)
+
+`probe_launch queue run [fixtures/oracle/capture_queue.txt] [--out harness_out/oracle/capture_queue_results.json] [--skip-layouts] [--only PREFIX]`
+runs the queue in the running session, in file order: a scenario name is captured like
+`probe_launch scenario NAME` (fresh map, strict setup: a setup the original cannot reproduce
+fails with the reason instead of being forced), a `session <op> key=value...` line runs that op.
+The results file maps every line to ok / failed / skipped with the reason or the answer; the
+traces go to the oracle cache. Run it from the repository root.
+
+First full run (2026-10-08, main edf53a7's queue of 101 lines: 68 scenarios, 33 session lines):
+98 ok, 3 failed in 924 s (one session; Playground specs built as layouts). The failures are
+setup gaps: `SleepDart` and `StickyGrenade` ammo (their inventory tweaks are not loaded in
+Boyle; mapping them needs their tweak names and a `DynamicLoadObject`, about an hour) and a
+mid-run `Hand` switch (scripted hand switches: the power wheel / item select path, about half a
+day). `oracle scenario` then reports a first divergence for all 68; most are at tick 0, the
+settled height: the original hovers 3.73 uu above a floor (cube or Boyle runway), the port 6.73,
+which masks later channels until that is resolved or tolerated.
+
+### Layout maps in the original (the Playground)
+
+A scenario whose map has a layout file (`maps/<map>.ron`, the Playground) is captured by
+building the layout in the host level `L_Boyle_Ext_P` at +20000 uu z (`session layout
+map=Playground`; 161 boxes, 9 meshes, 13 actors, 2 volumes in 2.5 s): every box, stair step and
+ramp is an `InterpActor` with the level blockout cube `Env_Blockout.staticmeshes.Cube_100`
+(100 uu, simple box collision) scaled and rotated to it (a `DynamicSMActor_Spawnable` turns
+`PHYS_RigidBody` and falls once a pawn steps off it); original meshes the same way; doors,
+usables, pickups and the chain copied with `Spawn(ActorTemplate = the placed original)` (the
+chain from Boyle's basement is replaced by the exterior's `DisClimbable_3`); the pool and the
+pain floor reuse a host `DishonoredWaterVolume` / `PhysicsVolume` moved and scaled. The trace's
+positions are converted back (`pawn.*`, `camera.*`, `npc.*` minus the offset). Engine checks hit
+the cubes exactly (line hits 1 uu above a top face, pawn boxes at top + 72 + 1). Not built: the
+lights (the stealth lane's light levels differ), labels and the nav grid; PhysX bodies
+(ragdolls, physics props) fall through the cubes (U-806). Measured on the original Playground:
+`movement/step_50` climbed (z 91.2 -> 141.2), `step_56` not, the 45 degree slope walked at
+400 uu/s to its 400 top, the 55 degree slope not.
+
+### NPCs in original traces
+
+- Placement by position (`npcs: [(position: ..)]`): a live NPC of the host level of the kind
+  (`*Guard*` tweaks for guards, the others for civilians; not Tallboys, the boatman, Shaw) is
+  teleported there; `Passive` unpossesses it (no controller, no AI: it takes damage and falls
+  like a dummy); `Idle` keeps its own AI; `Alerted` is approximated by filling its player attention
+  (1.0, a warning); `faction` writes `DishonoredNPCPawn.m_pCurFactionTweak` (a tweak by name,
+  `None` = null). Pawn tweaks, routes and other states are setup gaps (U-802). An NPC by
+  `spawner` is the spawner's live pawn (a pointer in its fields, its decoded arrays, or a pawn
+  pointing back at it).
+- `settle`: the placed player is set falling (`Physics` written; `SetPhysics` is ignored for
+  the player) so it lands and hovers before tick 0 like the port's settled pawn. On the
+  Playground's cubes the original hovers 3.73 uu above the floor (centre floor + 91.23), the
+  port 6.73 (94.23): reported as the first divergence of the Playground movement specs.
+- Brain channels per `Npc(id)` (through `Pawn.Controller.m_pAIBrain`, `DishonoredAIBrain`):
+  `npc.<id>.suspicion` (`m_SuspicionLevel`), `.top_attn_level`, `.top_enemy_attn_level`,
+  `.player_attn.level` / `.value` (`m_pAttentionProcess.m_pPlayerAttentionInfo`, accumulator
+  +0x8C, level +0xAC), `.attn_count` and `.attn<0..3>.level` / `.value`
+  (`m_AttentionInfos`), and `NpcBehavior` events naming the class of `m_pCurrentBehavior`
+  (+0x14C, detail `current`) and of each occupied slot of `m_ActiveBehaviorStack` (+0x100, 19
+  slots, detail `slot<k>`) whenever they change.
 ### Usage for fuzzing agents
 
 Start (or reuse) the session with `probe_launch session start --map <M>` (a running session is

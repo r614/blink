@@ -1,0 +1,16 @@
+// Elixir count clamp: 0x00C04E10 clamps count + n to [0, m_nMax*Elixir] (10).
+(
+    name: "inventory/elixir_cap",
+    system: Inventory,
+    map: "Playground",
+    description: "Give 12 health and 12 mana elixirs: both stop at 10.",
+    setup: (player: Some((position: (0, -5300, 92), yaw: 90)), items: ["HealthElixir:12", "ManaElixir:12"], settle: 5),
+    ticks: 10,
+    input: [],
+    checkpoints: [
+        (name: "health", expect: [(metric: Final("inv.elixir_health"), value: 10, tol: 0, source: "m_nMaxHealthElixir 10 (Twk_Pawn_Corvo_Release), clamp 0x00C04E10", status: Static)]),
+        (name: "mana", expect: [(metric: Final("inv.elixir_mana"), value: 10, tol: 0, source: "m_nMaxManaElixir 10, clamp 0x00C04E10", status: Static)]),
+    ],
+    record: [Pawn, Powers],
+    capture: Some("session: ModifyElixirCount +12 on each type, read m_ElixirCounts"),
+)

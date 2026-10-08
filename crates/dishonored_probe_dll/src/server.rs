@@ -758,6 +758,20 @@ fn handle(opc: u8, p: &[u8]) -> Result<Vec<u8>, String> {
             dishonored_probe::put_bytes(&mut out, &s.frames);
             put_str(&mut out, &s.errors.join("\n"));
         }
+        op::SHADER_DUMP => {
+            let since = io(rd.u32())?;
+            let v = d3d::SHADER_CODE.lock().map_err(|_| "poisoned")?;
+            let sel: Vec<&d3d::StoredShader> = v.iter().filter(|s| s.id >= since).collect();
+            put_u32(&mut out, sel.len() as u32);
+            for s in sel {
+                put_u32(&mut out, s.id);
+                out.push(s.kind);
+                out.extend(s.hash.to_le_bytes());
+                put_u32(&mut out, s.tick);
+                put_str(&mut out, &s.ctab);
+                dishonored_probe::put_bytes(&mut out, &s.code);
+            }
+        }
         op::NAME_INDEX => {
             let s = io(rd.str())?;
             let (i, n) = match engine::name_index(&s) {
