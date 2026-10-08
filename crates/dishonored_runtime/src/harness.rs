@@ -257,6 +257,11 @@ pub fn script_fixed(mut runner: ResMut<ScriptRunner>, mut local: ResMut<LocalInp
                 vreq.pending = Some(view);
             }
             Step::Teleport { teleport } => {
+                // The view comes from the local input (camera, and every later tick's input),
+                // so the step turns it too; setting only the pawn's yaw / pitch was undone on the
+                // next tick and the camera kept looking where it was.
+                local.yaw = teleport.yaw;
+                local.pitch = teleport.pitch;
                 if let crate::session::SessionKind::Offline { game, .. } = &mut session.kind {
                     if let Some(p) = game.world_mut().player_mut(crate::session::LOCAL_ID) {
                         p.position = glam::Vec3::from(teleport.pos);
