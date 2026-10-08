@@ -42,7 +42,7 @@
 //! probe's scale, hearing through audio cells, the bark attachment to this port's states, and
 //! the alarm decision details.
 
-use dishonored_ir::ai::{AiConfig, AiLevel, AlarmBellDef, AttentionConfig, AttentionIncrease, DAL_BUSTED, DAL_HEAD_TRACK, DAL_INVESTIGATE, DAL_TURN_TO_FACE, FactionTable, ForbiddenZone, PatrolRoute, PlayerVisibilityConfig, ProbeLight, Relationship, VisionConfig, reason};
+use dishonored_ir::ai::{AiConfig, AiLevel, AlarmBellDef, AttentionConfig, AttentionIncrease, DAL_BUSTED, DAL_HEAD_TRACK, DAL_INVESTIGATE, FactionTable, ForbiddenZone, PatrolRoute, PlayerVisibilityConfig, ProbeLight, Relationship, VisionConfig, reason};
 use std::collections::BTreeMap;
 use dishonored_sim::events::{SimEvent, SoundCategory};
 use dishonored_sim::input::{LeftHand, PlayerInput, buttons, npc_moves};
@@ -55,6 +55,10 @@ use serde::{Deserialize, Serialize};
 pub mod combat;
 pub mod hearing;
 pub mod rats;
+pub mod slots;
+
+pub use slots::{Behavior, MagicState, QueuedStim, SearchState, SearchSub, Stim, slot};
+use slots::AlarmCause;
 
 pub const NPC_ID_BASE: PlayerId = 1000;
 /// Stimulus without a known identity (noises, corpses, help barks): attention toward a place.
@@ -93,7 +97,9 @@ pub enum BrainState {
     WalkToPoint,
     /// Routine: standing with a group (soiree-like).
     GroupIdle,
-    /// Reaction delay before an escalation (`m_ReactionDelay`) or surprise.
+    /// Kept for the saved-state and channel legend layout: the attention behaviours start
+    /// without a delay (their stimuli's delay getter returns 0, 0x008fc830), so no brain enters
+    /// it; an external write maps to Notice.
     React,
     /// Civilian panic, running to a flee point (`DisBehaviorPanic` / `DisAISubStateFlee`).
     Flee,
@@ -113,6 +119,8 @@ pub enum BrainState {
     Cower,
     /// Going to an alarm bell and ringing it (`DisBehaviorTriggerAlarm`).
     RingAlarm,
+    /// Reacting to a power seen (`DisBehaviorMagicResponse`, slot Awe).
+    Awe,
 }
 
 /// What a crowd reports to its host after a tick.
@@ -246,9 +254,44 @@ pub struct Brain {
     /// Pawns this NPC treats as enemies (witnessed violence, attacked it, ally's enemy).
     #[serde(default)]
     pub hostile: Vec<PlayerId>,
-    /// State to enter when the reaction delay (`React`) ends.
+    /// `m_ActiveBehaviorStack`: one behaviour per `EAISlot`; the highest occupied one runs
+    /// ([`slots`]).
+    #[serde(default = "slots::routine_stack")]
+    pub slots: Vec<Option<Behavior>>,
+    /// `m_StimQueue`.
     #[serde(default)]
-    pub next: Option<BrainState>,
+    pub stims: Vec<QueuedStim>,
+    /// The attention component's top target, whether it is an enemy, and the behaviour level
+    /// stepped toward its attention level (+0x44 / +0x45).
+    #[serde(default)]
+    pub att_target: Option<PlayerId>,
+    #[serde(default)]
+    pub att_enemy: bool,
+    #[serde(default)]
+    pub att_level: u8,
+    /// The routine behaviour's sub-state (and walk goal) while another behaviour runs.
+    #[serde(default = "idle_state")]
+    pub routine: BrainState,
+    #[serde(default)]
+    pub routine_goal: Option<Vec3>,
+    /// `state` as the brain left it last tick (an external write differs).
+    #[serde(default = "idle_state")]
+    pub shown: BrainState,
+    /// Pawns this NPC treats as allies this tick (`m_bMagicUserIsAnAlly`).
+    #[serde(default)]
+    pub allies: Vec<PlayerId>,
+    /// A magic user seen while Busted on it (or a pending non-Busted witness), the window left
+    /// (+0xb0 / +0xb8 of the brain, 3 s, 0x00b23e50), and its attention level last tick.
+    #[serde(default)]
+    pub magic_pending: Option<(PlayerId, f32)>,
+    #[serde(default)]
+    pub magic_level: u8,
+    /// `DisAISubProcessManageAttacks.m_fAggression` (+0x68).
+    #[serde(default)]
+    pub aggression: f32,
+    /// The pawn's locomotion config (index into `AiConfig::locomotion`; `None`: by kind).
+    #[serde(default)]
+    pub loco: Option<u16>,
     #[serde(default)]
     pub corpses_seen: Vec<PlayerId>,
     /// Seconds since the combat target was last seen.
@@ -265,9 +308,6 @@ pub struct Brain {
     /// Combat role from the skirmish manager: melee attacker (true) or outer ring.
     #[serde(default)]
     pub melee_slot: bool,
-    /// Proxy already searched (the stimulus is not investigated again while it fades).
-    #[serde(default)]
-    pub searched: Option<Vec3>,
     /// Stop-threshold rolls in [-1, 1] per profile slot and level, scaled by
     /// `m_fStoppingVariance` (`DisAIBrainProcessAttention` 0x00b30270).
     #[serde(default)]
@@ -367,6 +407,10 @@ pub struct Brain {
     /// The combat behaviour has started (its timers are rolled once per fight).
     #[serde(default)]
     pub in_fight: bool,
+}
+
+fn idle_state() -> BrainState {
+    BrainState::Idle
 }
 
 /// What the brains of a crowd know about pawn relationships this tick.
@@ -517,6 +561,9 @@ pub struct Crowd {
     pub rat_brains: Vec<rats::RatSwarm>,
     #[serde(default)]
     pub rat_swarm: BTreeMap<PlayerId, Option<u32>>,
+    /// Bend Time casters whose bend stops time (for the witness mode of its end).
+    #[serde(default)]
+    pub bend_stop: BTreeMap<PlayerId, bool>,
 }
 
 /// `DisGlobalManager` alarm cooldown (`DefaultLevel.ini m_fAlarmCooldown`, class default 10).
@@ -731,6 +778,40 @@ pub struct Senses<'a> {
     /// Raw light value at each player.
     light: &'a BTreeMap<PlayerId, f32>,
     audio: &'a dishonored_ir::ai::AudioCells,
+    /// Powers used this tick: (user, `MagicMode` 0 / 1 / 2 of 0x00b23e50).
+    magic: &'a [(PlayerId, u8)],
+}
+
+/// The powers of last tick's events as magic witness modes (0x00bf9fb0 callers): Windblast
+/// (vslot 90) and Devouring Swarm casts and the end of a slowing Bend Time (0x00bfa200) are 0;
+/// a Blink's end (0x00bfab80), possession ending (the inactive stage 0x00bfb320) and the end of
+/// a stopping Bend Time are 1; a Blink's start (0x00bfc990), possession taking a host
+/// (0x00bfd300) and Bend Time stopping time (0x00bfa180, `m_fTimeScale` < 1e-8) are 2.
+fn magic_modes(events: &[SimEvent], ws: &WorldState, stopped: &mut BTreeMap<PlayerId, bool>) -> Vec<(PlayerId, u8)> {
+    let mut out = Vec::new();
+    for e in events {
+        match e {
+            SimEvent::WindblastCast { id } => out.push((*id, 0)),
+            SimEvent::SwarmSummoned { id, .. } => out.push((*id, 0)),
+            SimEvent::BlinkStart { id, .. } => out.push((*id, 2)),
+            SimEvent::BlinkEnd { id } => out.push((*id, 1)),
+            SimEvent::PossessStart { id, .. } => out.push((*id, 2)),
+            SimEvent::PossessEnd { id, .. } => out.push((*id, 1)),
+            SimEvent::BendTimeStart { id, .. } => {
+                let stop = ws.time_bends.iter().any(|b| b.caster == *id && b.world_dilation < 1e-8);
+                stopped.insert(*id, stop);
+                if stop {
+                    out.push((*id, 2));
+                }
+            }
+            SimEvent::BendTimeEnd { id } => {
+                let stop = stopped.remove(id).unwrap_or(false);
+                out.push((*id, if stop { 1 } else { 0 }));
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Raw light value at `p` from the level's lights (the original reads the pawn's
@@ -899,6 +980,7 @@ impl Crowd {
         self.inhibit.retain(|i| i.2 > 0.0);
         self.events.clear();
         // Route neglect timers (`m_NeglectTimer`: grows while nobody walks the route).
+        self.route_users.resize(self.routes.len(), 0);
         self.route_neglect.resize(self.routes.len(), 0.0);
         for (t, u) in self.route_neglect.iter_mut().zip(self.route_users.iter()) {
             *t = if *u > 0 { 0.0 } else { *t + dt };
@@ -907,7 +989,8 @@ impl Crowd {
         let social = self.social(world_state);
         // The light at each player (the original samples the pawn's light environment).
         let light: BTreeMap<PlayerId, f32> = world_state.players.iter().filter(|p| p.kind == PawnKind::Human && p.alive).map(|p| (p.id, if self.lights.is_empty() && self.sky_light <= 0.0 { LIGHT_LEVEL } else { light_at_with(&self.lights, self.sky_light, p.position, world) })).collect();
-        let senses = Senses { peers: &peers, barks: &barks, busted: &busted, alarm_noise: &alarm_noise, social: &social, light: &light, audio: &self.audio };
+        let magic = magic_modes(events, world_state, &mut self.bend_stop);
+        let senses = Senses { peers: &peers, barks: &barks, busted: &busted, alarm_noise: &alarm_noise, social: &social, light: &light, audio: &self.audio, magic: &magic };
         let layout = &self.layout;
         let ai = &self.ai;
         let routes = &self.routes;
@@ -925,7 +1008,8 @@ impl Crowd {
             if !me.alive {
                 continue;
             }
-            let (was, was_next) = (b.state, b.next);
+            let was = b.state;
+            b.sync_external();
             b.perceive_with(me, world_state, events, &senses, world, ai, dt);
             let mut ctx = Ctx { layout, routes, users, neglect, inhibit, alarms: &mut *alarms, events: &mut ai_events, cooldown };
             let mut inp = b.act(me, world_state, &mut ctx, world, ai, dt);
@@ -933,7 +1017,7 @@ impl Crowd {
                 inp.npc_move = b.attack_kind();
             }
             out.push((b.id, inp));
-            b.transition_barks(was, was_next, me, world_state, &peers, ai);
+            b.transition_barks(was, me, world_state, &peers, ai);
             for (hook, initiator) in b.barks.drain(..) {
                 ai_events.push(AiEvent::Bark { npc: b.id, hook, initiator });
             }
@@ -979,8 +1063,13 @@ impl Crowd {
             if possessed {
                 continue;
             }
-            let swarm = self.rat_swarm.get(&p.id).copied().flatten();
+            let swarm = self.rat_swarm.get(&p.id).copied().flatten().or(p.swarm);
             let power = swarm.and_then(|s| ws.swarms.iter().find(|x| x.id == s));
+            // An ended Devouring Swarm: its rats stop (they despawn, `dishonored_sim::powers::step_swarms`).
+            if power.is_some_and(|x| x.ending) {
+                out.push((p.id, PlayerInput { yaw: p.yaw, left_hand: LeftHand::Empty, ..Default::default() }));
+                continue;
+            }
             let count = match swarm {
                 Some(s) => ws.players.iter().filter(|q| q.kind == PawnKind::Rat && q.alive && self.rat_swarm.get(&q.id).copied().flatten() == Some(s)).count() as u32 + power.map_or(0, |x| x.rats as u32),
                 None => 1,
@@ -1003,13 +1092,23 @@ impl Crowd {
         out
     }
 
-    /// Write `PlayerState::ai_unaware` for every NPC with a brain (sleep darts' instant sleep
-    /// and Shadow Kill level 1 read it): see [`Brain::unaware_of`].
+    /// Write `PlayerState::ai_unaware` (sleep darts' instant sleep and Shadow Kill level 1 read
+    /// it, see [`Brain::unaware_of`]) and `PlayerState::ai_awareness` (the assassination gate, see
+    /// [`Brain::awareness`]) for every NPC with a brain.
     pub fn write_awareness(&self, ws: &mut WorldState) {
         for b in &self.brains {
             if let Some(p) = ws.player_mut(b.id) {
                 p.ai_unaware = b.unaware_of(NOISE);
+                p.ai_awareness = b.awareness();
             }
+        }
+        // `PlayerState::combat_opponents`: the pawn's skirmish size (the `DisGlobalCombatManager`
+        // skirmish of a target holds the brains in combat against it, 0x00C5AF60); Dark Vision
+        // reads it (0x00BF84C0). LIKELY: the port's skirmish is the set of Combat brains on that
+        // target (`assign_skirmish`).
+        for p in ws.players.iter_mut() {
+            let n = self.brains.iter().filter(|b| b.state == BrainState::Combat && b.target == Some(p.id)).count();
+            p.combat_opponents = n.min(u8::MAX as usize) as u8;
         }
     }
 
@@ -1310,11 +1409,6 @@ pub fn snap_floor(world: &dyn WorldQuery, p: Vec3) -> Option<Vec3> {
     (h.normal.z > 0.7).then(|| h.point + Vec3::Z * 90.0)
 }
 
-/// Is the pawn doing something a guard treats as criminal?
-fn criminal(p: &PlayerState) -> bool {
-    matches!(p.sword.phase, SwordPhase::Startup | SwordPhase::Active | SwordPhase::Assassinating) || p.left.phase == dishonored_sim::state::LeftPhase::Recovering
-}
-
 /// AI noise context of a simulation sound (`EAINoiseContext`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Noise {
@@ -1355,14 +1449,25 @@ impl Brain {
             attn: Vec::new(),
             suspecting: false,
             hostile: Vec::new(),
-            next: None,
+            slots: slots::routine_stack(),
+            stims: Vec::new(),
+            att_target: None,
+            att_enemy: false,
+            att_level: 0,
+            routine: BrainState::Idle,
+            routine_goal: None,
+            shown: BrainState::Idle,
+            allies: Vec::new(),
+            magic_pending: None,
+            magic_level: 0,
+            aggression: 0.0,
+            loco: None,
             corpses_seen: Vec::new(),
             lost: 0.0,
             crumbs: 0,
             ammo: if kind == PawnKind::Guard { 1 } else { 0 },
             aim: 0.0,
             melee_slot: true,
-            searched: None,
             stop_roll: Self::roll_stops(&mut (seed | 1).wrapping_mul(0x2545_F491_4F6C_DD1D)),
             melee_cd: Vec::new(),
             patrol: None,
@@ -1467,10 +1572,9 @@ impl Brain {
     /// behaviour (the native accessor was not traced): Combat; Notice / Investigate / Search
     /// (or reacting toward one); Panic (Flee / Cower); anything else.
     pub fn conv_combat_status(&self) -> u8 {
-        let s = if self.state == BrainState::React { self.next.unwrap_or(BrainState::Idle) } else { self.state };
-        match s {
+        match self.state {
             BrainState::Combat => 0,
-            BrainState::Notice | BrainState::Investigate | BrainState::Search => 1,
+            BrainState::Notice | BrainState::Investigate | BrainState::Search | BrainState::React | BrainState::Awe => 1,
             BrainState::Flee | BrainState::Cower => 2,
             _ => 3,
         }
@@ -1482,8 +1586,17 @@ impl Brain {
         self.hostile.clear();
         self.target = None;
         self.threat_pos = None;
-        self.next = None;
+        self.stims.clear();
+        self.magic_pending = None;
         self.follow.clear();
+    }
+
+    /// An external write of `state` since the brain's last tick becomes the current behaviour
+    /// ([`Brain::force`]).
+    pub fn sync_external(&mut self) {
+        if self.state != self.shown {
+            self.force(self.state);
+        }
     }
 
     /// Profile slot of a target: neutral pawns, or enemies/places while (un)suspecting.
@@ -1605,7 +1718,7 @@ impl Brain {
         let social = Social::default();
         let light: BTreeMap<PlayerId, f32> = BTreeMap::new();
         let audio = dishonored_ir::ai::AudioCells::default();
-        let senses = Senses { peers, barks, busted: ally_busted, alarm_noise: &[], social: &social, light: &light, audio: &audio };
+        let senses = Senses { peers, barks, busted: ally_busted, alarm_noise: &[], social: &social, light: &light, audio: &audio, magic: &[] };
         self.perceive_with(me, ws, events, &senses, world, ai, dt);
     }
 
@@ -1615,8 +1728,9 @@ impl Brain {
         for a in self.attn.iter_mut() {
             a.fresh = false;
         }
-        // Enemies this tick: individual, trespass and faction relationships.
+        // Enemies (and allies) this tick: individual, trespass and faction relationships.
         self.enemies = ws.players.iter().filter(|p| p.id != self.id && p.alive && self.relation(p.id, senses.social) == Relationship::Enemy).map(|p| p.id).collect();
+        self.allies = ws.players.iter().filter(|p| p.id != self.id && self.relation(p.id, senses.social) == Relationship::Ally).map(|p| p.id).collect();
         let eye = me.position + Vec3::Z * EYE;
         // Hearing (0x00bb50d0, `hearing::heard`): strictly within the noise radius; between
         // audio cells along the precomputed portal paths; for listeners and noises outside the
@@ -1663,16 +1777,22 @@ impl Brain {
                 if *source == self.id || !heard(*position, *radius) {
                     continue;
                 }
-                let prof = self.profile(ai, NOISE);
+                // The attention goes to the noise's instigator (proxy at the noise), with the
+                // profile of the relationship toward it: measured on the original
+                // (`ai/boyle_hear_shot`, a neutral party guard: player attention 1.0 at the shot,
+                // the neutral profile's danger increase to Busted's start, then its 2.0 / s leak,
+                // level HeadTrack). A noise without a pawn stays a place entry.
+                let who = if *source != NOISE && ws.player(*source).is_some() { *source } else { NOISE };
+                let prof = self.profile(ai, who);
                 let ctx = noise_context(*category);
                 let (inc, urgent) = match ctx {
                     Noise::Danger => (prof.danger_sound, true),
                     Noise::Threatening => (prof.threatening_sound, false),
                     Noise::Anomaly => (prof.anomaly_sound, false),
                 };
-                self.bump(ai, NOISE, inc, *position, urgent, reason::HEARD);
+                self.bump(ai, who, inc, *position, urgent, reason::HEARD);
                 if ctx == Noise::Danger {
-                    if let Some(a) = self.attn.iter_mut().find(|a| a.who == NOISE) {
+                    if let Some(a) = self.attn.iter_mut().find(|a| a.who == who) {
                         a.danger = true;
                     }
                 }
@@ -1718,6 +1838,11 @@ impl Brain {
                     self.make_hostile(*a);
                     let inc = self.profile(ai, *a).attacked_by;
                     self.bump(ai, *a, inc, at, true, reason::ATTACKED_BY);
+                    // `EAIStimID_AttackedByEnemy` in a fight: `m_fAggressionDeltaPerDamage`
+                    // (0x00b3e070; the back-step count is the swing-edge rule in `combat`).
+                    if self.in_fight {
+                        self.aggression = (self.aggression + ai.combat.dodge.aggression_delta_per_damage).clamp(0.0, 1.0);
+                    }
                 }
                 SimEvent::Death { victim, killer: Some(k), .. } if *k != self.id && ws.player(*k).is_some_and(|p| p.kind == PawnKind::Human) => {
                     let (Some(v), Some(kp)) = (ws.player(*victim), ws.player(*k)) else {
@@ -1771,15 +1896,11 @@ impl Brain {
             if p.kind != PawnKind::Human && !self.enemies.contains(&p.id) {
                 continue;
             }
+            // A pawn seen swinging or firing near the NPC is `m_Response_PlayerThreats`
+            // (`ResponseCategory_Harmless`, a bark) in every brain reaction tweak: it changes no
+            // relationship. Hostility comes from the Hostile responses (hurt by the player),
+            // witnessed deaths, factions and allies' fights.
             let seen = if self.blind { None } else { Self::look(me, p, world, ai) };
-            if seen.is_some() && p.kind == PawnKind::Human && criminal(p) && !self.enemies.contains(&p.id) {
-                // Seen attacking: hostile at once (`m_Response_*`, `DACRT_AttackedEnemy`).
-                self.make_hostile(p.id);
-                let inc = self.profile(ai, p.id).attacked_enemy;
-                self.bump(ai, p.id, inc, p.position, true, reason::ATTACKED_ENEMY);
-                self.threat_pos = Some(p.position);
-                continue;
-            }
             let hostile = self.enemies.contains(&p.id);
             let prof = self.profile(ai, p.id).clone();
             let stop = self.stops(ai, p.id);
@@ -1867,6 +1988,89 @@ impl Brain {
                 self.hostile.retain(|h| *h != id);
             }
         }
+        self.perceive_magic(ws, senses.magic, ai, dt);
+        // The attention component's behaviour stimuli, then the panic process.
+        self.post_attention(ws);
+        self.panic_process(ws);
+    }
+
+    /// Powers seen (`DishonoredActivePowerComponent` -> 0x00bf9fb0 -> 0x00b23e50 on every
+    /// brain): Windblast and Devouring Swarm casts and Bend Time ending a slow-down are mode 0,
+    /// a Blink's end, possession ending and Bend Time ending a stop are mode 1, a Blink's start,
+    /// possession starting and Bend Time stopping time are mode 2 (`MagicMode`).
+    fn perceive_magic(&mut self, ws: &WorldState, magic: &[(PlayerId, u8)], ai: &AiConfig, dt: f32) {
+        if let Some((_, t)) = self.magic_pending.as_mut() {
+            *t -= dt;
+        }
+        if self.magic_pending.is_some_and(|(_, t)| t <= 0.0) {
+            self.magic_pending = None;
+        }
+        for &(caster, mode) in magic {
+            if caster == self.id {
+                continue;
+            }
+            self.witness_magic(caster, mode, ws, ai);
+        }
+        // A pending witness whose attention to the user crosses into Busted (0x00b24ec0) or out
+        // of it (0x00b23160, the user disappeared) reacts then.
+        if let Some((caster, _)) = self.magic_pending {
+            let now = self.attn.iter().find(|a| a.who == caster).map_or(0, |a| a.level);
+            let at = ws.player(caster).map(|p| p.position).unwrap_or_default();
+            if now >= DAL_BUSTED && self.magic_level < DAL_BUSTED {
+                self.magic_pending = None;
+                self.post_magic(caster, at, false, ai);
+            } else if now < DAL_BUSTED && self.magic_level >= DAL_BUSTED {
+                self.magic_pending = None;
+                self.post_magic(caster, at, true, ai);
+            }
+            self.magic_level = now;
+        }
+    }
+
+    /// 0x00b23e50: a brain Busted on the user reacts at once (modes 0 and 1) or remembers it for
+    /// `3 s` (mode 2); a brain not Busted remembers it and gets `m_IncreaseForMagic` toward the
+    /// user (mode 1).
+    fn witness_magic(&mut self, caster: PlayerId, mode: u8, ws: &WorldState, ai: &AiConfig) {
+        let level = self.attn.iter().find(|a| a.who == caster).map_or(0, |a| a.level);
+        let busted = level >= DAL_BUSTED;
+        let at = ws.player(caster).map(|p| p.position).unwrap_or_default();
+        self.magic_pending = None;
+        match mode {
+            0 | 1 if busted => self.post_magic(caster, at, false, ai),
+            1 => {
+                self.magic_pending = Some((caster, 3.0));
+                self.magic_level = level;
+                let inc = self.profile(ai, caster).magic;
+                self.bump(ai, caster, inc, at, false, reason::MAGIC);
+            }
+            2 if busted => {
+                self.magic_pending = Some((caster, 3.0));
+                self.magic_level = level;
+            }
+            _ => {}
+        }
+    }
+
+    /// `EAIStimID_WitnessMagic`, delayed by `m_MagicReactionDelay`.
+    fn post_magic(&mut self, caster: PlayerId, at: Vec3, disappeared: bool, ai: &AiConfig) {
+        let [lo, hi] = ai.magic_reaction_delay;
+        let d = lo + (hi - lo) * rng_next(&mut self.rng);
+        self.post(Stim::WitnessMagic, d, caster, at, disappeared, false);
+    }
+
+    /// The civilians' panic process (`DisAIBrainProcessPanic`): `Panicked` when the strongest
+    /// stimulus is Busted, or Investigate on a live enemy (the port's reading of the panic
+    /// stimulus table, AI.md "Patrols, combat and panic").
+    fn panic_process(&mut self, ws: &WorldState) {
+        if self.kind == PawnKind::Guard || matches!(self.behavior(slot::ESCAPE), Some(Behavior::Panic { .. })) || self.stims.iter().any(|q| q.stim == Stim::Panicked) {
+            return;
+        }
+        let Some((who, level, proxy, _)) = self.focus() else { return };
+        let hostile_alive = who != NOISE && self.enemies.contains(&who) && ws.player(who).is_some_and(|p| p.alive);
+        if level >= DAL_BUSTED || (level >= DAL_INVESTIGATE && hostile_alive) {
+            let at = if hostile_alive { ws.player(who).map(|p| p.position).unwrap_or(proxy) } else { self.threat_pos.unwrap_or(proxy) };
+            self.post(Stim::Panicked, 0.0, who, at, false, true);
+        }
     }
 
     /// Strongest stimulus: (who, level, proxy, urgent). Neutral pawns only ever head-track.
@@ -1881,11 +2085,49 @@ impl Brain {
             .map(|(w, l, p, u, _)| (w, l, p, u))
     }
 
-    fn move_to(&mut self, me: &PlayerState, nav: Option<&NavWorld>, goal: Vec3, run: bool) -> PlayerInput {
+    /// Walk (or run) toward `goal` along the navmesh at the brain's locomotion speed.
+    fn move_to(&mut self, me: &PlayerState, nav: Option<&NavWorld>, goal: Vec3, run: bool, ai: &AiConfig) -> PlayerInput {
         let steer = self.follow.steer(nav, me.position, goal);
         let mut i = PlayerInput { yaw: yaw_to(me.position, steer), forward: 127, left_hand: LeftHand::Empty, ..Default::default() };
         i.buttons |= if run { buttons::SPRINT } else { buttons::WALK };
+        i.npc_speed = self.loco_speed(ai, run);
         i
+    }
+
+    /// The pawn's locomotion config: its own, else the elite guard's (the port's NPC
+    /// archetypes animate with `EliteGuardLocomotionConfig` unless their tweak names another).
+    pub fn loco_config<'a>(&self, ai: &'a AiConfig) -> Option<&'a dishonored_ir::npc_anim::LocoConfig> {
+        match self.loco {
+            Some(i) => ai.locomotion.get(i as usize),
+            None => ai.locomotion.iter().find(|c| c.name.ends_with("EliteGuardLocomotionConfig")),
+        }
+    }
+
+    /// Speed of a locomotion request (`DisLocoRequest.m_MaxSpeedIndex`: Walk 1, or Jog 2 when
+    /// running) under the stance modifier the current behaviour's body intention selects (as the
+    /// presentation picks it, except the routine: EmptyPatrol for a guard's routine, SearchSword / SearchEmpty while
+    /// investigating, Sword in combat, PanicEmpty / PanicSword in a panic, Empty otherwise): the
+    /// authored speed of the speed mode's forward (N) loop times the modifier's
+    /// `m_fSpeedMultiplier`. 0 without a locomotion config. LIKELY (speed = authored loop speed
+    /// x modifier, not measured; research/dishonored/systems/ai.md §2, F3).
+    pub fn loco_speed(&self, ai: &AiConfig, run: bool) -> f32 {
+        let Some(cfg) = self.loco_config(ai) else { return 0.0 };
+        let armed = self.kind == PawnKind::Guard;
+        let want: &[&str] = match (self.state, armed) {
+            (BrainState::Investigate | BrainState::Search | BrainState::RingAlarm, true) => &["SearchSword", "Sword"],
+            (BrainState::Investigate | BrainState::Search | BrainState::RingAlarm, false) => &["SearchEmpty", "Empty"],
+            (BrainState::Flee | BrainState::Cower, true) => &["PanicSword", "Sword"],
+            (BrainState::Flee | BrainState::Cower, false) => &["PanicEmpty", "Empty"],
+            (BrainState::Combat | BrainState::Notice | BrainState::Awe, true) => &["Sword"],
+            // A patrolling guard walks sheathed: `EmptyPatrol` (x0.92) on `Empty_Walk_Patrol`
+            // (126.4) = 116.3 uu/s, the speed measured on the original (boyle_patrol_speed).
+            (_, true) => &["EmptyPatrol", "Empty"],
+            _ => &["Empty"],
+        };
+        let Some(mi) = want.iter().find_map(|w| cfg.modifier(w)) else { return 0.0 };
+        let Some(mode) = cfg.mode(mi, if run { 2 } else { 1 }) else { return 0.0 };
+        let forward = if mode.move_anims.len() >= 4 { mode.move_anims[2].1 } else { mode.move_anims.first().map_or(0.0, |a| a.1) };
+        forward * cfg.modifiers[mi].speed_multiplier
     }
 
     fn reached(me: &PlayerState, goal: Vec3, r: f32) -> bool {
@@ -1910,31 +2152,20 @@ impl Brain {
         }
     }
 
-    /// Enter `to` after the reaction delay.
-    fn escalate(&mut self, ai: &AiConfig, to: BrainState) {
-        if self.state == to || self.next == Some(to) {
-            return;
-        }
-        let [lo, hi] = ai.reaction_delay;
-        self.next = Some(to);
-        self.state = BrainState::React;
-        self.timer = -(lo + (hi - lo) * rng_next(&mut self.rng));
-        self.follow.clear();
-    }
-
-    fn back_to_routine(&mut self) {
-        self.end_fight();
-        if matches!(self.state, BrainState::Investigate | BrainState::Search) {
-            self.searched = self.threat_pos;
-        }
-        self.next = None;
-        self.alarm_enemy = None;
-        self.target = None;
-        self.timer = 0.0;
-        self.goal = None;
-        self.follow.clear();
+    /// The routine state the Idle slot resumes with after another behaviour: a scripted walk
+    /// (`stay`) continues; otherwise a guard walks its route or returns to its post (the port's
+    /// stand-in for `DisBehaviorGoHome`'s tether, which is not ported), a civilian idles.
+    pub(crate) fn resume_routine(&mut self) -> BrainState {
         self.guard_timer = 0.0;
-        self.state = if self.kind == PawnKind::Guard { if self.has_patrol() { BrainState::Patrol } else { BrainState::Alert } } else { BrainState::Idle };
+        if self.routine == BrainState::WalkToPoint && self.stay && self.routine_goal.is_some() {
+            return BrainState::WalkToPoint;
+        }
+        self.routine_goal = None;
+        if self.kind == PawnKind::Guard {
+            if self.has_patrol() { BrainState::Patrol } else { BrainState::Alert }
+        } else {
+            BrainState::Idle
+        }
     }
 
     fn has_patrol(&self) -> bool {
@@ -2008,8 +2239,9 @@ impl Brain {
     /// Behaviour step plus a ledge guard for off-mesh movement.
     #[allow(clippy::too_many_arguments)]
     fn act(&mut self, me: &PlayerState, ws: &WorldState, ctx: &mut Ctx, world: &dyn WorldQuery, ai: &AiConfig, dt: f32) -> PlayerInput {
-        self.select(ws, ai);
-        self.consider_alarm(me, ws, ctx, ai);
+        // The brain tick (0x00b17100): the stimuli whose delay ran out are dispatched, then the
+        // current behaviour (the highest occupied slot) runs.
+        self.drain(me, ws, ctx, ai, dt);
         let mut i = self.act_inner(me, ws, ctx, world, ai, dt);
         let off_mesh = world.nav().is_none() || self.follow.failed;
         if off_mesh && i.forward > 0 && me.mode == dishonored_sim::state::MoveMode::Walking {
@@ -2031,32 +2263,32 @@ impl Brain {
                 }
             }
         }
+        self.state = self.project();
+        self.shown = self.state;
         i
     }
 
-    /// `DisBehaviorTriggerAlarm` (first in the guard behaviour list): a guard that is about to
-    /// fight an enemy (sighting), or found a corpse / witnessed a death, goes to ring the
-    /// nearest ready bell within `m_fNPCGoToAlarmCloseness` with the tweak's chance, unless the
-    /// enemy is within `m_fFightRadius` (0x00af6bd0). The bell keeps one pending ringer, the
-    /// one nearest to it (0x00a1e140).
-    fn consider_alarm(&mut self, me: &PlayerState, ws: &WorldState, ctx: &mut Ctx, ai: &AiConfig) {
-        if self.kind != PawnKind::Guard || self.bell.is_some() || ctx.cooldown > 0.0 || ctx.alarms.is_empty() {
+    /// `DisBehaviorTriggerAlarm` (first in the guard behaviour list, slot Alert): on
+    /// `EnemyBusted` (with `CombatBegin`, a sighting) or a search caused by a found corpse, a
+    /// witnessed death or a help request, a guard goes to ring the nearest ready bell within
+    /// `m_fNPCGoToAlarmCloseness` with the tweak's chance, unless the enemy is within
+    /// `m_fFightRadius` (0x00af6bd0). The bell keeps one pending ringer, the one nearest to it
+    /// (0x00a1e140). Decided once until the brain is back to its routine.
+    pub(crate) fn consider_alarm(&mut self, me: &PlayerState, ws: &WorldState, ctx: &mut Ctx, ai: &AiConfig, cause: AlarmCause, enemy: Option<PlayerId>) {
+        if self.kind != PawnKind::Guard || self.bell.is_some() || ctx.cooldown > 0.0 || ctx.alarms.is_empty() || self.alarm_enemy.is_some() {
             return;
         }
         let ta = &ai.trigger_alarm;
-        let (chance, enemy) = match (self.state, self.next) {
-            (BrainState::React, Some(BrainState::Combat)) if self.alarm_enemy.is_none() => {
+        let chance = match cause {
+            AlarmCause::Sighting => {
                 // "Alone": no other guard within the companion range (0x00af5fe0).
                 let alone = !ws.players.iter().any(|p| p.id != self.id && p.alive && p.kind == PawnKind::Guard && p.position.distance(me.position) <= ta.companion_range);
-                (if alone { ta.chance_sighting_alone } else { ta.chance_sighting_in_group }, self.target)
+                if alone { ta.chance_sighting_alone } else { ta.chance_sighting_in_group }
             }
-            (BrainState::React, Some(BrainState::Investigate)) if self.alarm_enemy.is_none() && matches!(self.cause, reason::FOUND_CORPSE | reason::HEARD_DEATH | reason::SAW_DEATH) => {
-                (if self.cause == reason::FOUND_CORPSE { ta.chance_found_corpse } else { ta.chance_witness_death }, None)
-            }
-            (BrainState::React, Some(BrainState::Investigate)) if self.alarm_enemy.is_none() && self.cause == reason::HEARD_HELP_REQUEST => (ta.chance_help, None),
-            _ => return,
+            AlarmCause::FoundCorpse => ta.chance_found_corpse,
+            AlarmCause::WitnessDeath => ta.chance_witness_death,
+            AlarmCause::Help => ta.chance_help,
         };
-        // Decided once per stimulus.
         self.alarm_enemy = Some(enemy.unwrap_or(NOISE));
         if chance <= 0.0 || rng_next(&mut self.rng) >= chance {
             return;
@@ -2078,86 +2310,7 @@ impl Brain {
         ctx.alarms[bi].enemy = enemy;
         self.bell = Some(bi);
         self.ring_wait = 0.0;
-        self.next = Some(BrainState::RingAlarm);
-    }
-
-    /// Choose the behaviour from the attention state (the brain's behaviour priorities:
-    /// Combat / Panic > Search / Investigate > Notice > routine).
-    fn select(&mut self, ws: &WorldState, ai: &AiConfig) {
-        if self.state == BrainState::RingAlarm || self.next == Some(BrainState::RingAlarm) {
-            return;
-        }
-        // Combat lasts while the target is Busted (`EAIStimID_CombatToSearch` otherwise):
-        // unseen, its attention leaks below the Busted stop or the proxy proves stale.
-        if self.state == BrainState::Combat
-            && let Some(t) = self.target
-            && self.attn.iter().find(|a| a.who == t).is_none_or(|a| a.level < DAL_BUSTED)
-        {
-            self.go_search(ai);
-            return;
-        }
-        let Some((who, level, proxy, urgent)) = self.focus() else {
-            if matches!(self.state, BrainState::Notice) {
-                self.back_to_routine();
-            }
-            return;
-        };
-        let guard = self.kind == PawnKind::Guard;
-        let hostile_alive = who != NOISE && self.enemies.contains(&who) && ws.player(who).is_some_and(|p| p.alive);
-        match level {
-            DAL_BUSTED if guard && hostile_alive => {
-                self.suspecting = true;
-                if self.state != BrainState::Combat {
-                    self.target = Some(who);
-                    self.threat_pos = Some(proxy);
-                    if self.next != Some(BrainState::Combat) {
-                        self.lost = 0.0;
-                        self.escalate(ai, BrainState::Combat);
-                    }
-                } else if self.target != Some(who) {
-                    self.target = Some(who);
-                }
-            }
-            DAL_BUSTED | DAL_INVESTIGATE if !guard && (level == DAL_BUSTED || hostile_alive) => {
-                self.suspecting = true;
-                if !matches!(self.state, BrainState::Flee | BrainState::Cower) {
-                    self.threat_pos = Some(if hostile_alive { ws.player(who).map(|p| p.position).unwrap_or(proxy) } else { self.threat_pos.unwrap_or(proxy) });
-                    self.goal = None;
-                    self.escalate(ai, BrainState::Flee);
-                } else if hostile_alive {
-                    self.threat_pos = ws.player(who).map(|p| p.position);
-                }
-            }
-            DAL_BUSTED | DAL_INVESTIGATE => {
-                self.suspecting = true;
-                let moved = self.threat_pos.is_none_or(|t| t.distance(proxy) > ai.search.proximity);
-                match self.state {
-                    BrainState::Combat | BrainState::Flee | BrainState::Cower => {}
-                    BrainState::Investigate | BrainState::Search if !moved => {}
-                    _ if self.searched.is_some_and(|s| s.distance(proxy) <= ai.search.proximity) => {}
-                    _ => {
-                        self.threat_pos = Some(proxy);
-                        self.run = urgent;
-                        if let Some(a) = self.attn.iter().find(|a| a.who == who) {
-                            self.cause = a.why;
-                            self.cause_danger = a.danger;
-                        }
-                        self.escalate(ai, BrainState::Investigate);
-                    }
-                }
-            }
-            DAL_TURN_TO_FACE => {
-                if self.state.is_routine() {
-                    self.threat_pos = Some(proxy);
-                    self.escalate(ai, BrainState::Notice);
-                }
-            }
-            _ => {
-                if self.state == BrainState::Notice {
-                    self.back_to_routine();
-                }
-            }
-        }
+        self.place(Behavior::TriggerAlarm);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2188,18 +2341,31 @@ impl Brain {
         if self.shoot.is_some() {
             return self.kismet_shoot(me, ws, ai, dt);
         }
-        match self.state {
-            BrainState::React => {
-                if self.timer >= 0.0 {
-                    let to = self.next.take().unwrap_or(BrainState::Idle);
-                    self.state = to;
-                    self.timer = 0.0;
-                    if to == BrainState::Search {
-                        self.crumbs = ai.search.crumbs;
-                    }
+        // The search animation's cooldown runs while the Search behaviour exists (0x00ae42c0).
+        if let Some(Some(Behavior::Search(s))) = self.slots.get_mut(slot::SEARCH as usize) {
+            s.anim_cooldown -= dt;
+        }
+        let cur = self.current_slot();
+        if cur != slot::IDLE {
+            self.state = self.project();
+            return match cur {
+                // `DisBehaviorNotice`: turn to face the stimulus.
+                slot::NOTICE => {
+                    let p = self.att_target.and_then(|w| self.attn.iter().find(|a| a.who == w)).map(|a| a.proxy).or(self.threat_pos).or(look);
+                    p.map(face).unwrap_or(idle)
                 }
-                self.threat_pos.map(face).unwrap_or(idle)
-            }
+                slot::SEARCH => self.act_search(me, ws, nav, ai, dt),
+                slot::COMBAT => self.combat(me, ws, world, nav, ai, ctx.inhibit, dt),
+                slot::ALERT => self.act_alarm(me, ws, ctx, nav, ai, dt),
+                slot::AWE => self.act_magic(me, ws, ai, dt),
+                slot::ESCAPE => self.act_panic(me, ws, layout, nav, ai),
+                _ => idle,
+            };
+        }
+        if !self.state.is_routine() {
+            self.state = self.resume_routine();
+        }
+        match self.state {
             BrainState::Idle => {
                 if self.stay {
                     return look.map(face).unwrap_or(idle);
@@ -2226,7 +2392,7 @@ impl Brain {
             BrainState::Wander | BrainState::WalkToPoint => match self.goal {
                 Some(g) if !self.arrived(me, g) && !(self.follow.failed && !self.stay) => {
                     let run = self.run;
-                    self.move_to(me, nav, g, run)
+                    self.move_to(me, nav, g, run, ai)
                 }
                 _ => {
                     self.goal = None;
@@ -2278,7 +2444,7 @@ impl Brain {
                     }
                     return look.map(face).unwrap_or(idle);
                 }
-                self.move_to(me, nav, p.position, false)
+                self.move_to(me, nav, p.position, false, ai)
             }
             BrainState::Patrol => {
                 if self.route.is_empty() {
@@ -2293,65 +2459,167 @@ impl Brain {
                     self.route_i = (self.route_i + 1) % self.route.len();
                     self.follow.clear();
                 }
-                self.move_to(me, nav, g, false)
+                self.move_to(me, nav, g, false, ai)
             }
             BrainState::Alert => {
                 // Guard post (`DisBehaviorGuard`): stand, look at stimuli.
                 if !Self::reached(me, self.home, 120.0) && !self.follow.failed {
                     let home = self.home;
-                    return self.move_to(me, nav, home, false);
+                    return self.move_to(me, nav, home, false, ai);
                 }
                 look.map(face).unwrap_or(idle)
             }
-            BrainState::Notice => self.threat_pos.or(look).map(face).unwrap_or(idle),
-            BrainState::Investigate => {
-                let Some(t) = self.threat_pos else {
-                    self.back_to_routine();
-                    return idle;
-                };
-                if self.kind != PawnKind::Guard {
-                    // Civilians: `DisBehaviorStationarySearch` (look toward it for 2-3 s).
-                    let [lo, hi] = ai.search.stationary_duration;
-                    if self.timer > lo + (hi - lo) * 0.5 {
-                        self.back_to_routine();
-                    }
-                    return face(t);
-                }
-                if Self::reached(me, t, ai.search.proximity) || self.follow.failed {
-                    // Reached the proxy (or it is unreachable): wait, then search.
-                    if self.next.is_none() {
-                        let [lo, hi] = ai.search.cancel_investigate_wait;
-                        self.next = Some(BrainState::Search);
-                        self.state = BrainState::React;
-                        self.timer = -(lo + (hi - lo) * rng_next(&mut self.rng));
+            _ => idle,
+        }
+    }
+
+    /// `DisBehaviorSearch` (guards) and `DisBehaviorStationarySearch` (civilians).
+    fn act_search(&mut self, me: &PlayerState, ws: &WorldState, nav: Option<&NavWorld>, ai: &AiConfig, dt: f32) -> PlayerInput {
+        let Some(Some(Behavior::Search(mut s))) = self.slots.get(slot::SEARCH as usize).cloned() else {
+            return PlayerInput { yaw: me.yaw, left_hand: LeftHand::Empty, ..Default::default() };
+        };
+        let out = self.search_step(&mut s, me, ws, nav, ai, dt);
+        if let Some(Some(Behavior::Search(slot_s))) = self.slots.get_mut(slot::SEARCH as usize) {
+            *slot_s = s;
+        }
+        self.state = self.project();
+        out
+    }
+
+    fn search_step(&mut self, s: &mut SearchState, me: &PlayerState, ws: &WorldState, nav: Option<&NavWorld>, ai: &AiConfig, dt: f32) -> PlayerInput {
+        let idle = PlayerInput { yaw: me.yaw, left_hand: LeftHand::Empty, ..Default::default() };
+        let face = |p: Vec3| PlayerInput { yaw: yaw_to(me.position, p), left_hand: LeftHand::Empty, ..Default::default() };
+        // Where the NPC believes the target is now (the attention proxy).
+        let live = self.attn.iter().find(|a| a.who == s.target).map(|a| a.proxy);
+        if s.stationary {
+            // Civilians: look toward the stimulus for the behaviour's duration.
+            s.timer -= dt;
+            if s.timer <= 0.0 {
+                self.complete(slot::SEARCH);
+                return idle;
+            }
+            return face(live.unwrap_or(s.proxy));
+        }
+        let ss = &ai.search;
+        let to_track = |b: &mut Brain, s: &mut SearchState| {
+            s.sub = SearchSub::TrackTarget;
+            b.timer = 0.0;
+            b.goal = None;
+            b.follow.clear();
+        };
+        match s.sub {
+            SearchSub::Investigate => {
+                // A moved proxy is followed (0x00b29f00: new destination, not reached, not facing).
+                if let Some(p) = live {
+                    if p.distance(s.proxy) >= 1e-4 {
+                        s.proxy = p;
+                        s.dest = p;
+                        s.reached = false;
+                        s.finished = false;
+                        s.wants_stare = false;
                         self.follow.clear();
                     }
-                    return face(t);
                 }
-                let run = self.run;
-                self.move_to(me, nav, t, run)
+                if !s.finished {
+                    // Reached within the proximity threshold (0x00b38530); the facing turn that
+                    // follows is immediate here (NPCs turn at once, U-862).
+                    if Self::reached(me, s.dest, ss.proximity) {
+                        s.reached = true;
+                        s.finished = true;
+                    } else {
+                        let run = self.run;
+                        let i = self.move_to(me, nav, s.dest, run, ai);
+                        if self.follow.failed {
+                            self.pathing_fail(s, me, nav, ai);
+                        }
+                        if !s.finished {
+                            return i;
+                        }
+                    }
+                }
+                // The investigation is over (0x00afeb00): stare at an unreachable proxy above,
+                // stand when the proxy was not reached, else the search animation (unless it ran
+                // within `m_fSearchAnimCooldown`) and then the crumbs.
+                self.follow.clear();
+                if s.wants_stare {
+                    s.sub = SearchSub::StareAtUnreachable;
+                    s.timer = ss.stare_max_time;
+                } else if !s.reached {
+                    s.sub = SearchSub::Stand;
+                    let [lo, hi] = ss.cancel_investigate_wait;
+                    s.timer = lo + (hi - lo) * rng_next(&mut self.rng);
+                } else if s.anim_cooldown > 0.0 {
+                    to_track(self, s);
+                } else {
+                    s.sub = SearchSub::GenericAction;
+                    s.timer = if s.corpse { ss.anim_corpse_check } else { ss.anim_lost_target };
+                }
+                face(s.proxy)
             }
-            BrainState::Search => {
-                // Done when attention toward the stimulus fell below the Investigate stop.
-                if self.focus().is_none_or(|f| f.1 < DAL_INVESTIGATE) || self.crumbs == 0 {
-                    self.back_to_routine();
+            SearchSub::GenericAction => {
+                s.timer -= dt;
+                if s.timer <= 0.0 {
+                    // Leaving the animation starts the cooldown (0x00af4ab0).
+                    s.anim_cooldown = ss.anim_cooldown;
+                    to_track(self, s);
+                }
+                face(s.proxy)
+            }
+            SearchSub::Stand => {
+                s.timer -= dt;
+                if s.timer <= 0.0 {
+                    to_track(self, s);
+                }
+                face(s.proxy)
+            }
+            SearchSub::StareAtUnreachable => {
+                // The timer runs only while the target is not seen (0x00af4c40); a target that
+                // moved farther than the radius from the proxy ends the stare (0x00af4440).
+                let sighted = self.attn.iter().find(|a| a.who == s.target).is_some_and(|a| a.sighted);
+                if !sighted {
+                    s.timer -= dt;
+                }
+                let away = s.target != NOISE && ws.player(s.target).is_some_and(|t| t.position.distance(s.proxy) > ss.stare_radius);
+                if away || s.timer <= 0.0 {
+                    to_track(self, s);
+                }
+                face(s.proxy)
+            }
+            SearchSub::TrackTarget => {
+                // A proxy that moved away from the searched spot is investigated again (the
+                // port's reading of `TopAttnProxyUpdated` in the search).
+                if let Some(p) = live {
+                    if p.distance(s.proxy) > ss.proximity {
+                        s.sub = SearchSub::Investigate;
+                        s.proxy = p;
+                        s.dest = p;
+                        s.reached = false;
+                        s.finished = false;
+                        s.wants_stare = false;
+                        s.fails = 0;
+                        self.goal = None;
+                        self.follow.clear();
+                        return face(p);
+                    }
+                }
+                if self.crumbs == 0 {
+                    self.complete(slot::SEARCH);
                     return idle;
                 }
-                let center = self.threat_pos.unwrap_or(me.position);
+                let center = s.proxy;
                 match self.goal {
-                    Some(g) if !Self::reached(me, g, 80.0) && !self.follow.failed => self.move_to(me, nav, g, false),
+                    Some(g) if !Self::reached(me, g, ss.track_proximity) && !self.follow.failed => self.move_to(me, nav, g, false, ai),
                     _ => {
-                        if self.timer < ai.search.heartbeat {
+                        if self.timer < ss.heartbeat {
                             return idle;
                         }
                         // Next crumb: a wander step within the angular range of the facing.
                         self.timer = 0.0;
                         self.crumbs -= 1;
-                        let s = &ai.search;
-                        let step = s.wander_min + (s.wander_max - s.wander_min) * rng_next(&mut self.rng);
+                        let step = ss.wander_min + (ss.wander_max - ss.wander_min) * rng_next(&mut self.rng);
                         let back = (center - me.position).truncate();
-                        let base_yaw = if back.length() > s.crumb_spacing { back.y.atan2(back.x).to_degrees() } else { me.yaw };
-                        let yaw = (base_yaw + (rng_next(&mut self.rng) - 0.5) * s.wander_angle_deg * 2.0).to_radians();
+                        let base_yaw = if back.length() > ss.crumb_spacing { back.y.atan2(back.x).to_degrees() } else { me.yaw };
+                        let yaw = (base_yaw + (rng_next(&mut self.rng) - 0.5) * ss.wander_angle_deg * 2.0).to_radians();
                         let p = me.position + Vec3::new(yaw.cos(), yaw.sin(), 0.0) * step;
                         self.goal = match nav {
                             Some(n) => n.closest_point(p, 400.0).map(|(_, q)| q + Vec3::Z * 90.0),
@@ -2362,97 +2630,181 @@ impl Brain {
                     }
                 }
             }
-            BrainState::Flee => {
-                let from = self.threat_pos.unwrap_or(me.position);
-                let enemy_close = self.enemies.iter().filter_map(|h| ws.player(*h)).any(|p| p.alive && p.position.distance(me.position) < ai.panic.cower_distance);
-                if enemy_close {
-                    self.state = BrainState::Cower;
-                    self.timer = 0.0;
+        }
+    }
+
+    /// `DisAISubStateInvestigate`'s PathingFail handler (0x00b33850): up to
+    /// `m_PathingFailRetryCount` retries, each toward the navmesh point nearest the destination
+    /// (scaled from the pawn by `m_fPathingFailDistanceScale` after the first) within the
+    /// pointer search box (500 uu around, 25 up, 500 down); when none differs from the current
+    /// destination the investigation is finished, and a proxy more than 500 uu above the pawn
+    /// asks for StareAtUnreachable.
+    fn pathing_fail(&mut self, s: &mut SearchState, me: &PlayerState, nav: Option<&NavWorld>, ai: &AiConfig) {
+        let ss = &ai.search;
+        s.fails += 1;
+        let allowed = if ss.pathing_fail_scale == 1.0 { if ss.pathing_fail_retries < 2 { ss.pathing_fail_retries } else { 1 } } else { ss.pathing_fail_retries };
+        let [horiz, up, down] = ss.pathing_fail_range;
+        while s.fails <= allowed {
+            let point = if s.fails > 1 { me.position + (s.dest - me.position) * ss.pathing_fail_scale } else { s.dest };
+            if let Some((_, q)) = nav.and_then(|n| n.closest_point_in(point, horiz, up, down)) {
+                let q = q + Vec3::Z * 90.0;
+                if q.distance(s.dest) >= 1e-4 {
+                    s.dest = q;
                     self.follow.clear();
-                    return face(from);
-                }
-                if self.focus().is_none_or(|f| f.1 < DAL_INVESTIGATE) {
-                    self.threat_pos = None;
-                    self.back_to_routine();
-                    return idle;
-                }
-                // Free flight straight away from the threat first, then a flee point.
-                if self.timer < ai.panic.free_flight_time || self.goal.is_none() {
-                    if self.goal.is_none() {
-                        self.goal = self.pick_flee_point(me, from, layout, nav, ai);
-                    }
-                    if self.timer < ai.panic.free_flight_time {
-                        let away = (me.position - from).truncate().normalize_or_zero();
-                        let away = if away == glam::Vec2::ZERO { glam::Vec2::X } else { away };
-                        let mut i = PlayerInput { yaw: away.y.atan2(away.x).to_degrees(), forward: 127, left_hand: LeftHand::Empty, ..Default::default() };
-                        i.buttons |= buttons::SPRINT;
-                        return i;
-                    }
-                }
-                match self.goal {
-                    Some(g) if !Self::reached(me, g, 120.0) && !self.follow.failed => self.move_to(me, nav, g, true),
-                    _ => face(from),
+                    return;
                 }
             }
-            BrainState::Cower => {
-                let from = self.threat_pos.unwrap_or(me.position);
-                let enemy_close = self.enemies.iter().filter_map(|h| ws.player(*h)).any(|p| p.alive && p.position.distance(me.position) < ai.panic.cower_distance * 1.5);
-                if !enemy_close && self.timer > 1.0 {
-                    self.state = BrainState::Flee;
-                    self.timer = ai.panic.free_flight_time;
-                    self.goal = None;
-                }
-                let mut i = face(from);
-                i.buttons |= buttons::CROUCH;
-                i
+            s.fails += 1;
+        }
+        s.finished = true;
+        if s.dest.z - me.position.z > 500.0 {
+            s.wants_stare = true;
+        }
+    }
+
+    /// `DisBehaviorMagicResponse` (slot Awe): face the magic user (unless an ally), bark
+    /// `DDH_MAGIC_WITNESSED` and finish (0x00af2800); a user that disappeared gets
+    /// `DDH_MAGIC_DISAPPEARED`, and unless it is an ally or in sight the MagicLostTarget
+    /// animation plays first (`RotationReached`, 0x00afa1e0).
+    fn act_magic(&mut self, me: &PlayerState, ws: &WorldState, ai: &AiConfig, dt: f32) -> PlayerInput {
+        let idle = PlayerInput { yaw: me.yaw, left_hand: LeftHand::Empty, ..Default::default() };
+        let Some(Some(Behavior::Magic(mut m))) = self.slots.get(slot::AWE as usize).cloned() else { return idle };
+        let at = ws.player(m.caster).map(|p| p.position).or(self.threat_pos);
+        let out = match at {
+            Some(p) if !m.ally => PlayerInput { yaw: yaw_to(me.position, p), left_hand: LeftHand::Empty, ..Default::default() },
+            _ => idle,
+        };
+        if !m.barked {
+            m.barked = true;
+            if !m.disappeared {
+                self.barks.push(("DDH_MAGIC_WITNESSED".into(), Some(m.caster)));
+                self.complete(slot::AWE);
+                return out;
             }
-            BrainState::Combat => self.combat(me, ws, world, nav, ai, ctx.inhibit, dt),
-            BrainState::RingAlarm => {
-                // `DisBehaviorTriggerAlarm`: TakePosition to the bell (running), stand
-                // `m_fWaitTimeBeforeRing` within `m_fNPCUseCloseness`, ring (GenericAction).
-                let Some(bi) = self.bell.filter(|&b| b < ctx.alarms.len()) else {
-                    self.bell = None;
-                    self.back_to_routine();
-                    return idle;
-                };
-                let enemy = ctx.alarms[bi].enemy.and_then(|e| ws.player(e)).filter(|p| p.alive).map(|p| (p.id, p.position));
-                let taken = ctx.alarms[bi].ringing || ctx.alarms[bi].ringer.is_some_and(|r| r != self.id);
-                let close = enemy.is_some_and(|(_, p)| p.distance(me.position) <= ai.trigger_alarm.fight_radius);
-                let pos = ctx.alarms[bi].def.position;
-                let finish = |b: &mut Brain| {
-                    b.bell = None;
-                    b.timer = 0.0;
-                    b.follow.clear();
-                    match enemy {
-                        Some((e, _)) if b.attn.iter().any(|a| a.who == e && a.level >= DAL_BUSTED) => {
-                            b.target = Some(e);
-                            b.state = BrainState::Combat;
-                        }
-                        _ => b.go_search(ai),
-                    }
-                };
-                if taken || close || self.follow.failed {
-                    if ctx.alarms[bi].ringer == Some(self.id) && !ctx.alarms[bi].ringing {
-                        ctx.alarms[bi].ringer = None;
-                    }
-                    finish(self);
-                    return idle;
-                }
-                if Self::reached(me, pos, ctx.alarms[bi].def.use_closeness.max(60.0)) {
-                    self.ring_wait += dt;
-                    if self.ring_wait >= ai.trigger_alarm.wait_before_ring {
-                        let a = &mut ctx.alarms[bi];
-                        a.ringing = true;
-                        a.noise_done = false;
-                        a.noise_timer = a.def.ring_delay;
-                        ctx.events.push(AiEvent::AlarmRang { bell: bi, name: a.def.name.clone(), ringer: self.id, enemy: a.enemy });
-                        finish(self);
-                    }
-                    return face(pos);
-                }
-                self.move_to(me, nav, pos, true)
+            self.barks.push(("DDH_MAGIC_DISAPPEARED".into(), Some(m.caster)));
+            let sighted = self.attn.iter().find(|a| a.who == m.caster).is_some_and(|a| a.sighted);
+            if m.ally || sighted {
+                self.complete(slot::AWE);
+                return out;
+            }
+            m.anim = Some(ai.anim_magic_lost_target);
+        }
+        if let Some(t) = m.anim.as_mut() {
+            *t -= dt;
+            if *t <= 0.0 {
+                self.complete(slot::AWE);
+                return out;
             }
         }
+        if let Some(Some(Behavior::Magic(slot_m))) = self.slots.get_mut(slot::AWE as usize) {
+            *slot_m = m;
+        }
+        out
+    }
+
+    /// `DisBehaviorPanic` (civilians): free flight away from the threat, then a flee point;
+    /// cower when an enemy is within the cower distance; over once the attention fell below
+    /// Investigate.
+    fn act_panic(&mut self, me: &PlayerState, ws: &WorldState, layout: &CrowdLayout, nav: Option<&NavWorld>, ai: &AiConfig) -> PlayerInput {
+        let idle = PlayerInput { yaw: me.yaw, left_hand: LeftHand::Empty, ..Default::default() };
+        let face = |p: Vec3| PlayerInput { yaw: yaw_to(me.position, p), left_hand: LeftHand::Empty, ..Default::default() };
+        let cower = matches!(self.behavior(slot::ESCAPE), Some(Behavior::Panic { cower: true }));
+        let set_cower = |b: &mut Brain, c: bool| {
+            if let Some(Some(Behavior::Panic { cower })) = b.slots.get_mut(slot::ESCAPE as usize) {
+                *cower = c;
+            }
+        };
+        // The threat follows a live enemy.
+        if let Some((who, _, _, _)) = self.focus() {
+            if who != NOISE && self.enemies.contains(&who) {
+                if let Some(p) = ws.player(who).filter(|p| p.alive) {
+                    self.threat_pos = Some(p.position);
+                }
+            }
+        }
+        let from = self.threat_pos.unwrap_or(me.position);
+        if cower {
+            let enemy_close = self.enemies.iter().filter_map(|h| ws.player(*h)).any(|p| p.alive && p.position.distance(me.position) < ai.panic.cower_distance * 1.5);
+            if !enemy_close && self.timer > 1.0 {
+                set_cower(self, false);
+                self.timer = ai.panic.free_flight_time;
+                self.goal = None;
+            }
+            self.state = self.project();
+            let mut i = face(from);
+            i.buttons |= buttons::CROUCH;
+            return i;
+        }
+        let enemy_close = self.enemies.iter().filter_map(|h| ws.player(*h)).any(|p| p.alive && p.position.distance(me.position) < ai.panic.cower_distance);
+        if enemy_close {
+            set_cower(self, true);
+            self.timer = 0.0;
+            self.follow.clear();
+            self.state = self.project();
+            return face(from);
+        }
+        if self.focus().is_none_or(|f| f.1 < DAL_INVESTIGATE) {
+            self.threat_pos = None;
+            self.complete(slot::ESCAPE);
+            return idle;
+        }
+        // Free flight straight away from the threat first, then a flee point.
+        if self.timer < ai.panic.free_flight_time || self.goal.is_none() {
+            if self.goal.is_none() {
+                self.goal = self.pick_flee_point(me, from, layout, nav, ai);
+            }
+            if self.timer < ai.panic.free_flight_time {
+                let away = (me.position - from).truncate().normalize_or_zero();
+                let away = if away == glam::Vec2::ZERO { glam::Vec2::X } else { away };
+                let mut i = PlayerInput { yaw: away.y.atan2(away.x).to_degrees(), forward: 127, left_hand: LeftHand::Empty, ..Default::default() };
+                i.buttons |= buttons::SPRINT;
+                i.npc_speed = self.loco_speed(ai, true);
+                return i;
+            }
+        }
+        match self.goal {
+            Some(g) if !Self::reached(me, g, 120.0) && !self.follow.failed => self.move_to(me, nav, g, true, ai),
+            _ => face(from),
+        }
+    }
+
+    /// `DisBehaviorTriggerAlarm`: TakePosition to the bell (running), stand
+    /// `m_fWaitTimeBeforeRing` within `m_fNPCUseCloseness`, ring (GenericAction). Over when
+    /// rung, taken by another guard, with the enemy within the fight radius, or unreachable.
+    fn act_alarm(&mut self, me: &PlayerState, ws: &WorldState, ctx: &mut Ctx, nav: Option<&NavWorld>, ai: &AiConfig, dt: f32) -> PlayerInput {
+        let idle = PlayerInput { yaw: me.yaw, left_hand: LeftHand::Empty, ..Default::default() };
+        let face = |p: Vec3| PlayerInput { yaw: yaw_to(me.position, p), left_hand: LeftHand::Empty, ..Default::default() };
+        let Some(bi) = self.bell.filter(|&b| b < ctx.alarms.len()) else {
+            self.bell = None;
+            self.complete(slot::ALERT);
+            return idle;
+        };
+        let enemy = ctx.alarms[bi].enemy.and_then(|e| ws.player(e)).filter(|p| p.alive).map(|p| (p.id, p.position));
+        let taken = ctx.alarms[bi].ringing || ctx.alarms[bi].ringer.is_some_and(|r| r != self.id);
+        let close = enemy.is_some_and(|(_, p)| p.distance(me.position) <= ai.trigger_alarm.fight_radius);
+        let pos = ctx.alarms[bi].def.position;
+        if taken || close || self.follow.failed {
+            if ctx.alarms[bi].ringer == Some(self.id) && !ctx.alarms[bi].ringing {
+                ctx.alarms[bi].ringer = None;
+            }
+            self.bell = None;
+            self.complete(slot::ALERT);
+            return idle;
+        }
+        if Self::reached(me, pos, ctx.alarms[bi].def.use_closeness.max(60.0)) {
+            self.ring_wait += dt;
+            if self.ring_wait >= ai.trigger_alarm.wait_before_ring {
+                let a = &mut ctx.alarms[bi];
+                a.ringing = true;
+                a.noise_done = false;
+                a.noise_timer = a.def.ring_delay;
+                ctx.events.push(AiEvent::AlarmRang { bell: bi, name: a.def.name.clone(), ringer: self.id, enemy: a.enemy });
+                self.bell = None;
+                self.complete(slot::ALERT);
+            }
+            return face(pos);
+        }
+        self.move_to(me, nav, pos, true, ai)
     }
 
     /// `DisAISubStateFlee`: a flee point outside the forbidden cone toward the threat,
@@ -2495,9 +2847,9 @@ impl Brain {
     fn combat(&mut self, me: &PlayerState, ws: &WorldState, world: &dyn WorldQuery, nav: Option<&NavWorld>, ai: &AiConfig, inhibit: &mut Vec<(PlayerId, u8, f32)>, dt: f32) -> PlayerInput {
         let idle = PlayerInput { yaw: me.yaw, left_hand: LeftHand::Empty, ..Default::default() };
         let Some(t) = self.target.and_then(|id| ws.player(id)).filter(|p| p.alive).cloned() else {
-            // Target gone: search where it was last seen.
+            // Target gone: the fight is over; the dormant search (or the routine) resumes.
             self.target = None;
-            self.go_search(ai);
+            self.complete(slot::COMBAT);
             return idle;
         };
         // The target is chased while sighted; otherwise the guard goes to the attention proxy
@@ -2526,7 +2878,11 @@ impl Brain {
             self.gun_timer = combat::roll(ai.combat.gun_usage_start, rng_next(&mut self.rng));
             self.flurry = combat::roll_i(dg.attacks_per_flurry, rng_next(&mut self.rng));
             self.stamina_timer = combat::roll(dg.stamina_recovery, rng_next(&mut self.rng));
+            // `m_fAggression`: uniform in [0, 1) when ManageAttacks starts (0x00b3dc10).
+            self.aggression = rng_next(&mut self.rng);
         }
+        // `m_fAggressionRegenRate` per second, clamped to [0, 1] (0x00b39e50).
+        self.aggression = (self.aggression + dg.aggression_regen_rate * dt).clamp(0.0, 1.0);
         self.gun_timer -= dt;
         // Attack pacing (0x00b47880): a flurry of stamina-draining attacks, then a recovery
         // pause before the next flurry.
@@ -2665,7 +3021,7 @@ impl Brain {
         if !self.melee_slot {
             // Outer skirmish ring: hold distance, stopping to shoot once the gun timer allows.
             if goal.distance(me.position) > ai.combat.pistol.max_range.min(1500.0) {
-                return self.move_to(me, nav, goal, true);
+                return self.move_to(me, nav, goal, true, ai);
             }
             if d < ai.combat.pistol.min_range {
                 i.forward = -80;
@@ -2676,7 +3032,10 @@ impl Brain {
         // the flurry has attacks left.
         if sighted && self.flurry > 0 && me.sword.phase == SwordPhase::Idle {
             if let Some(k) = combat::pick_context(ctxs, &self.melee_cd, inhibit, t.id, d, dz) {
-                self.melee_cd[k] = combat::roll(ctxs[k].cooldown, rng_next(&mut self.rng));
+                // The context's cooldown, scaled by `(1 - aggression) x
+                // m_fCooldownFactorAtMinAggression + 1` (0x00b3deb0).
+                let scale = (1.0 - self.aggression) * dg.cooldown_factor_at_min_aggression + 1.0;
+                self.melee_cd[k] = combat::roll(ctxs[k].cooldown, rng_next(&mut self.rng)) * scale;
                 if ctxs[k].inhibition > 0.0 {
                     inhibit.push((t.id, k as u8, ctxs[k].inhibition));
                 }
@@ -2706,7 +3065,7 @@ impl Brain {
             }
         }
         if !sighted || d > reach {
-            let mut m = self.move_to(me, nav, goal, true);
+            let mut m = self.move_to(me, nav, goal, true, ai);
             if sighted && d < 400.0 {
                 m.yaw = face;
             }
@@ -2783,12 +3142,11 @@ impl Brain {
     /// an ally, alarm), search end (rat / post-corpse / stop hunting, alone or group), search
     /// finding the enemy, combat start (threat, group threat, offscreen) and loss (lost /
     /// group), panic start, begging when cowering, fleeing, going to ring an alarm.
-    fn transition_barks(&mut self, was: BrainState, was_next: Option<BrainState>, me: &PlayerState, ws: &WorldState, peers: &[Peer], ai: &AiConfig) {
+    fn transition_barks(&mut self, was: BrainState, me: &PlayerState, ws: &WorldState, peers: &[Peer], ai: &AiConfig) {
         let now = self.state;
         if now == was {
             return;
         }
-        let _ = was_next;
         let target_of = |b: &Brain| b.target.or_else(|| b.attn.iter().filter(|a| a.who != NOISE).max_by(|x, y| x.value.total_cmp(&y.value)).map(|a| a.who));
         let tgt = target_of(self);
         // Another guard on the same target (group variants name it as the initiator).
@@ -2798,6 +3156,11 @@ impl Brain {
             (_, BrainState::Notice) => bark("DDH_ATTENTION_NOTICE_BEGIN", tgt),
             (BrainState::Notice, s) if s.is_routine() => bark("DDH_ATTENTION_NOTICE_END", tgt),
             (_, BrainState::RingAlarm) => bark("DDH_ALARM_GO_TO_RING_ALARM", self.alarm_enemy.filter(|e| *e != NOISE)),
+            // Combat over: the dormant search resumes.
+            (BrainState::Combat, BrainState::Investigate | BrainState::Search) => match ally(BrainState::Combat) {
+                Some(a) => bark("DDH_COMBAT_LOST_GROUP", Some(a)),
+                None => bark("DDH_COMBAT_LOST", None),
+            },
             (_, BrainState::Investigate) if self.kind != PawnKind::Guard => {
                 bark(if self.cause == reason::ALARM { "DDH_ALARM_HEAR_AND_RESPOND" } else { "DDH_ATTENTION_INVESTIGATE" }, tgt)
             }
@@ -2818,13 +3181,8 @@ impl Brain {
                 };
                 bark(h, tgt.filter(|t| *t != NOISE));
             }
-            (_, BrainState::Search) if was != BrainState::Combat && was != BrainState::React => bark("DDH_SEARCH", None),
-            (BrainState::React, BrainState::Search) => bark("DDH_SEARCH", None),
-            (BrainState::Combat, BrainState::Search) => match ally(BrainState::Combat) {
-                Some(a) => bark("DDH_COMBAT_LOST_GROUP", Some(a)),
-                None => bark("DDH_COMBAT_LOST", None),
-            },
-            (BrainState::Search, s) if s.is_routine() => {
+            (_, BrainState::Search) => bark("DDH_SEARCH", None),
+            (BrainState::Search | BrainState::Investigate, s) if s.is_routine() && self.kind == PawnKind::Guard => {
                 let hunting = self.cause == reason::SEEN || self.cause == reason::ATTACKED_BY || self.cause == reason::ATTACKED_ENEMY;
                 if hunting {
                     match ally(BrainState::Search) {
@@ -2858,18 +3216,6 @@ impl Brain {
         let _ = (me, ws);
     }
 
-    fn go_search(&mut self, ai: &AiConfig) {
-        self.end_fight();
-        self.gun_timer = -1.0;
-        self.suspecting = true;
-        self.target = None;
-        self.state = BrainState::Search;
-        self.crumbs = ai.search.crumbs;
-        self.goal = None;
-        self.timer = 0.0;
-        self.follow.clear();
-    }
-
     /// The combat behaviour ends: moves, dodges and the pistol sub-state stop.
     fn end_fight(&mut self) {
         self.in_fight = false;
@@ -2896,6 +3242,22 @@ impl Brain {
     pub fn unaware_of(&self, _who: PlayerId) -> bool {
         // The reaction delay is `EAIAwareness_Surprised` (0x00b0c1e0 returns 2): not combat yet.
         !matches!(self.state, BrainState::Combat | BrainState::RingAlarm)
+    }
+
+    /// The pawn's `EAIAwareness` (0x00B0C1E0): `Surprised` during a reaction delay, else the
+    /// awareness of the current behaviour. The port's states map to the original behaviours'
+    /// (LIKELY: the behaviours' awareness values were not read): fighting and ringing an alarm
+    /// `InCombat`, panic `Fearful`, notice / investigate / search `Suspicious`, routines
+    /// `Unaware`. `AwareOfPlayer` and `Begging` have no port state.
+    pub fn awareness(&self) -> u8 {
+        use dishonored_sim::state::awareness as a;
+        match self.state {
+            BrainState::React => a::SURPRISED,
+            BrainState::Combat | BrainState::RingAlarm => a::IN_COMBAT,
+            BrainState::Flee | BrainState::Cower => a::FEARFUL,
+            BrainState::Notice | BrainState::Investigate | BrainState::Search => a::SUSPICIOUS,
+            BrainState::Idle | BrainState::Wander | BrainState::WalkToPoint | BrainState::GroupIdle | BrainState::Patrol | BrainState::Alert => a::UNAWARE,
+        }
     }
 }
 
@@ -3096,8 +3458,11 @@ mod tests {
             t += 1;
         }
         assert!((60..75).contains(&t), "busted after {t} ticks");
-        b.select(&ws, &ai);
-        assert!(b.state == BrainState::React && b.next == Some(BrainState::Combat));
+        // The attention poster stepped the behaviour level up to Busted: the begin stimuli of
+        // every level, with no delay (0x00b25890 / 0x00b24d00, delay getter 0x008fc830).
+        let posted: Vec<Stim> = b.stims.iter().map(|q| q.stim).collect();
+        assert_eq!(posted, [Stim::NoticeBegin, Stim::SearchBegin, Stim::CombatBegin]);
+        assert!(b.stims.iter().all(|q| q.delay == 0.0 && q.who == 1));
     }
 
     #[test]
@@ -3515,20 +3880,117 @@ mod tests {
         let me = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::ZERO, 0.0);
         let ws = WorldState::default();
         b.state = BrainState::Notice;
-        b.transition_barks(BrainState::Patrol, None, &me, &ws, &[], &ai);
+        b.transition_barks(BrainState::Patrol, &me, &ws, &[], &ai);
         b.state = BrainState::Investigate;
         b.cause = reason::HEARD;
         b.cause_danger = true;
-        b.transition_barks(BrainState::React, None, &me, &ws, &[], &ai);
+        b.transition_barks(BrainState::React, &me, &ws, &[], &ai);
         b.state = BrainState::Combat;
-        b.transition_barks(BrainState::Search, None, &me, &ws, &[], &ai);
+        b.transition_barks(BrainState::Search, &me, &ws, &[], &ai);
         b.state = BrainState::Search;
-        b.transition_barks(BrainState::Combat, None, &me, &ws, &[], &ai);
+        b.transition_barks(BrainState::Combat, &me, &ws, &[], &ai);
         b.cause = reason::FOUND_CORPSE;
         b.state = BrainState::Patrol;
-        b.transition_barks(BrainState::Search, None, &me, &ws, &[], &ai);
+        b.transition_barks(BrainState::Search, &me, &ws, &[], &ai);
         let hooks: Vec<&str> = b.barks.iter().map(|x| x.0.as_str()).collect();
         assert_eq!(hooks, ["DDH_ATTENTION_NOTICE_BEGIN", "DDH_SEARCH_ADETECTION_DANGER", "DDH_SEARCH_FIND_ENEMY", "DDH_COMBAT_LOST", "DDH_SEARCH_GIVEUP_POSTCORPSE"]);
+    }
+
+    /// The slot stack: a higher slot preempts, the lower behaviour stays dormant and resumes
+    /// when the higher one finishes (0x00b11960 / 0x00b17100).
+    #[test]
+    fn higher_slots_preempt_and_lower_ones_resume() {
+        let mut b = Brain::new(NPC_ID_BASE, PawnKind::Guard, Vec3::ZERO, 1);
+        b.state = BrainState::Patrol;
+        b.sync_external();
+        b.place(Behavior::Notice);
+        assert_eq!(b.project(), BrainState::Notice);
+        b.place(Behavior::Search(SearchState { target: NOISE, ..Default::default() }));
+        b.place(Behavior::Combat);
+        assert_eq!((b.current_slot(), b.project()), (slot::COMBAT, BrainState::Combat));
+        // A Notice placed while fighting stays dormant.
+        b.place(Behavior::Notice);
+        assert_eq!(b.state, BrainState::Combat);
+        b.complete(slot::COMBAT);
+        assert_eq!(b.state, BrainState::Investigate, "the dormant search resumes");
+        b.complete(slot::SEARCH);
+        assert_eq!(b.state, BrainState::Notice);
+        b.complete(slot::NOTICE);
+        assert_eq!(b.state, BrainState::Alert, "a guard without a route returns to its post");
+    }
+
+    /// `patrol_on_startup`: `PatrolRequest` makes `DisBehaviorPatrol` adopt a route.
+    #[test]
+    fn patrol_request_adopts_a_route() {
+        let w = flat_world();
+        let mut c = Crowd::default();
+        c.routes = vec![route(2, 3, 0.0)];
+        c.route_users = vec![0];
+        let g = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(100.0, 0.0, 90.0), 0.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![g.clone()];
+        let mut b = Brain::new(g.id, PawnKind::Guard, g.position, 1);
+        b.stay = true;
+        b.request_patrol();
+        c.brains.push(b);
+        c.think(&ws, &[], &w, 1.0 / 60.0);
+        assert_eq!((c.brains[0].patrol, c.brains[0].state), (Some(0), BrainState::Patrol));
+    }
+
+    /// PathingFail (0x00b33850): without a navmesh point to retry, the investigation is over;
+    /// a proxy more than 500 uu above the pawn asks for StareAtUnreachable.
+    #[test]
+    fn failed_path_to_a_proxy_above_stares() {
+        let ai = AiConfig::default();
+        let me = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(0.0, 0.0, 90.0), 0.0);
+        let mut b = Brain::new(me.id, PawnKind::Guard, me.position, 1);
+        let mut s = SearchState { target: NOISE, proxy: Vec3::new(300.0, 0.0, 800.0), dest: Vec3::new(300.0, 0.0, 800.0), ..Default::default() };
+        b.pathing_fail(&mut s, &me, None, &ai);
+        assert!(s.finished && s.wants_stare && !s.reached);
+        let mut s2 = SearchState { target: NOISE, proxy: Vec3::new(300.0, 0.0, 300.0), dest: Vec3::new(300.0, 0.0, 300.0), ..Default::default() };
+        b.pathing_fail(&mut s2, &me, None, &ai);
+        assert!(s2.finished && !s2.wants_stare);
+    }
+
+    /// A power seen while Busted on its user: `WitnessMagic` after `m_MagicReactionDelay`; not
+    /// Busted, a mode-1 power raises attention by `m_IncreaseForMagic` (0x00b23e50).
+    #[test]
+    fn magic_witnesses() {
+        let ai = AiConfig::default();
+        let mut ws = WorldState::default();
+        ws.players = vec![pawn(1, PawnKind::Human, Vec3::new(500.0, 0.0, 90.0), 0.0)];
+        let mut b = Brain::new(NPC_ID_BASE, PawnKind::Guard, Vec3::ZERO, 1);
+        b.alert_to(&ai, 1, Vec3::new(500.0, 0.0, 90.0));
+        b.witness_magic(1, 0, &ws, &ai);
+        let q = b.stims.iter().find(|q| q.stim == Stim::WitnessMagic).expect("witness");
+        assert!(q.who == 1 && (0.2..=0.3).contains(&q.delay) && !q.flag);
+        let mut c = Brain::new(NPC_ID_BASE + 1, PawnKind::Guard, Vec3::ZERO, 2);
+        c.witness_magic(1, 1, &ws, &ai);
+        assert!(c.stims.is_empty() && c.magic_pending.is_some());
+        let a = c.attn.iter().find(|a| a.who == 1).unwrap();
+        assert!(a.why == reason::MAGIC && a.level >= DAL_HEAD_TRACK);
+    }
+
+    /// The attack cooldown is scaled by `(1 - aggression) x m_fCooldownFactorAtMinAggression + 1`.
+    #[test]
+    fn low_aggression_doubles_cooldowns() {
+        let ai = AiConfig::default();
+        let w = flat_world();
+        let guard = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(0.0, 0.0, 90.0), 0.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![guard.clone(), pawn(1, PawnKind::Human, Vec3::new(150.0, 0.0, 90.0), 180.0)];
+        let mut b = Brain::new(guard.id, PawnKind::Guard, guard.position, 1);
+        b.alert_to(&ai, 1, Vec3::new(150.0, 0.0, 90.0));
+        b.attn[0].sighted = true;
+        b.state = BrainState::Combat;
+        b.target = Some(1);
+        b.in_fight = true;
+        b.flurry = 3;
+        b.aggression = 0.0;
+        b.combat(&guard, &ws, &w, None, &ai, &mut Vec::new(), 1.0 / 60.0);
+        let k = b.melee_cd.iter().position(|c| *c > 0.0).unwrap();
+        let [lo, hi] = ai.combat.melee_contexts[k].cooldown;
+        assert!(b.melee_cd[k] >= lo * 1.99 && b.melee_cd[k] <= hi * 2.0, "{}", b.melee_cd[k]);
     }
 
     /// Rat pawns of a swarm get brains: twelve rats (the random swarm's attack group) attack a
@@ -3572,9 +4034,8 @@ mod tests {
         assert!(b.unaware_of(1));
         b.state = BrainState::Search;
         assert!(b.unaware_of(1), "suspicious is not in combat");
-        b.state = BrainState::React;
-        b.next = Some(BrainState::Combat);
-        assert!(b.unaware_of(1), "surprised is not in combat yet");
+        b.state = BrainState::Notice;
+        assert!(b.unaware_of(1), "noticing is not in combat yet");
         b.state = BrainState::Combat;
         assert!(!b.unaware_of(1));
     }

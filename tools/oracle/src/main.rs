@@ -579,7 +579,7 @@ fn cmd_scenario(a: &Args) -> Result<(Scorecard, Vec<WorkItem>)> {
             println!("{}", serde_json::to_string_pretty(&res)?);
         } else {
             // The per-system and per-scenario tables (after the residual table write_report adds).
-            for t in card.tables.iter().filter(|t| t.title == "Per system" || t.title == "Scenarios") {
+            for t in card.tables.iter().filter(|t| t.title == "Per system" || t.title == "Scenarios" || t.title.starts_with("Agreement with the original")) {
                 print!("{}", t.markdown());
             }
             let t = &res.totals;

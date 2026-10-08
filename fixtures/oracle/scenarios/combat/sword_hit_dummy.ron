@@ -1,6 +1,7 @@
 // One sword attack on a passive guard 140 uu ahead (HOOK_TRIAGE.md 2026-10-06: a hit of 10 on
-// the guard's 50 = 0.2 x HealthMax, `DisDamageType_FastHit_Right`, 0.300-0.350 s after the
-// press). The port gives NPCs the player's 70 health by rule (U-113), so its hit is 14.
+// the guard's 50, `DisDamageType_FastHit_Right`, 0.300-0.350 s after the press). The hit is the sword's
+// Attribute_MeleeDamage 10 x m_fAttackDamageMultiplier 1.0 (0x00C07C80; melee.md F1), and guards have HealthMax 50.
+// The Passive dummy has no AI: the port treats it as aware of the player, so the swing is a hit, not an assassination.
 // Presentation: blood from the contact system (Sword x Body), the hit reaction.
 (
     name: "combat/sword_hit_dummy",
@@ -17,7 +18,7 @@
     checkpoints: [
         (name: "dummy keeps facing the player", expect: [(metric: At("npc.dummy.yaw", 5), value: 0, tol: 0.5, source: "a placed pawn keeps its spawn rotation without input", status: Static)]),
         (name: "timing", expect: [(metric: Between("Sim:SwordSwing", "Sim:Damage@dummy"), value: 0.325, tol: 0.026, source: "HOOK_TRIAGE.md 2026-10-06: press -> damage 0.300-0.350 s (U-590)")]),
-        (name: "damage", expect: [(metric: EventValue("Sim:Damage@dummy", "amount"), value: 10, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: 10 of 50 per hit (0.2 x HealthMax of the guard)")]),
+        (name: "damage", expect: [(metric: EventValue("Sim:Damage@dummy", "amount"), value: 10, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: 10 of 50 per hit (the sword's Attribute_MeleeDamage 10)")]),
         (name: "blood", expect: [
             (metric: Count("Effect:Vfx_PhysMat.Blood.*@dummy"), value: 1, tol: 0, source: "contact system: Sword x Body particle sub-intersection", status: Static),
             (metric: Count("EffectMissing:*"), value: 0, tol: 0, source: "every system the contact system names exists in the packages", status: Static),

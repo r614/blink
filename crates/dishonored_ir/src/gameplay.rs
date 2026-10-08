@@ -433,10 +433,33 @@ pub struct BlinkConfig {
     /// `DisTweaks_Blink.m_bLimitVerticalDistanceFromGround`.
     #[serde(default)]
     pub limit_vertical_from_ground: bool,
+    /// `m_Levels[i].m_fBendTimeDownTime`: blend of the Blink time-dilation layer toward its
+    /// world rate when the move starts (0x00BFC990).
+    #[serde(default = "d_blink_down")]
+    pub bend_time_down_time: Vec<f32>,
+    /// `m_Levels[i].m_fBendTimeUpTime`: blend of the layer back to 1 at the end of the move and
+    /// again when the cooldown ends (0x00BE7380).
+    #[serde(default = "d_blink_up")]
+    pub bend_time_up_time: Vec<f32>,
+    /// `m_Levels[i].m_fCooldownTime`: seconds after the move (or cancel) before Blink can be
+    /// started again (0x00BED480).
+    #[serde(default = "d_blink_cooldown")]
+    pub cooldown_time: Vec<f32>,
 }
 
 fn d_blink_step_time() -> Vec<f32> {
     vec![0.01, 0.01]
+}
+// Serde defaults for configs cached before these fields were loaded: the `Twk_Blink` values
+// (both levels), so an old cache behaves as a fresh load.
+fn d_blink_down() -> Vec<f32> {
+    vec![0.9, 0.9]
+}
+fn d_blink_up() -> Vec<f32> {
+    vec![2.5, 2.5]
+}
+fn d_blink_cooldown() -> Vec<f32> {
+    vec![1.0, 1.0]
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

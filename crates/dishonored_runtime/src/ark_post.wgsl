@@ -28,6 +28,12 @@ struct ArkPost {
     misc: vec4<f32>,
     // gBloomTint: (m_Tint.rgb x m_Scale, -m_Threshold x m_Scale); used by the bloom downsample.
     bloom: vec4<f32>,
+    // Bend Time (power_pp.rs): (intensity, vector scale, 0, 0) and the two noise pans.
+    power_vectors: vec4<f32>,
+    power_pans: vec4<f32>,
+    // Dark Vision's eyelid pass: (on, Alpha, 0, 0) and EyeLidColor.
+    dv_eyelid: vec4<f32>,
+    dv_lid_color: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> view: View;
@@ -41,6 +47,50 @@ struct ArkPost {
 @group(0) @binding(4) var<uniform> ark: ArkPost;
 // `fog`: the blurred bloom parts (quarter size); `fragment`: the DOF's quarter-size copy.
 @group(0) @binding(5) var aux: texture_2d<f32>;
+// Bend Time's vector field: `PPG_BendTimeVectors` `Tex#0` = water2 (noise), `Tex#1` =
+// fxt_eyelid_gradient (mask); the noise wraps.
+@group(0) @binding(6) var field_noise: texture_2d<f32>;
+@group(0) @binding(7) var field_mask: texture_2d<f32>;
+@group(0) @binding(8) var repeat_sampler: sampler;
+
+// `PPG_BendTimeVectors_Std_INST` (captured shader 0xbbe665d07e36986b): the vector field in
+// sixteenths of a pixel. Two pans of the noise (rg x 2 - 1) summed, x 0.5, faded over the
+// outer tenth of the screen, x 0.3, minus the centred position (2 uv - 1): a pull towards the
+// screen centre, wobbled; x (1 - mask.r) x vBendTimeVectorScales.x x vBendTimeOpacity.
+fn bend_field(uv: vec2<f32>) -> vec2<f32> {
+    let n1 = textureSampleLevel(field_noise, repeat_sampler, uv + ark.power_pans.xy, 0.0).rg * 2.0 - 1.0;
+    let n2 = textureSampleLevel(field_noise, repeat_sampler, uv + ark.power_pans.zw, 0.0).rg * 2.0 - 1.0;
+    let c = uv * 2.0 - 1.0;
+    let edge = clamp(10.0 - abs(c * 10.0), vec2<f32>(0.0), vec2<f32>(1.0));
+    let v = (n1 + n2) * 0.5 * edge * 0.3 - c;
+    let m = textureSampleLevel(field_mask, source_sampler, uv, 0.0).r;
+    return v * (1.0 - m) * ark.power_vectors.y * ark.power_vectors.x;
+}
+
+// `ArkPpNodeBlur` along the field (captured shaders 0xbd9a42b61794aabb then 0x6095a5daa9109b1d):
+// four taps at uv + k x field x scale (k = 0..3) averaged, first with gVectorFieldScales =
+// 1 / (16 x size) on the scene, then with 1 / (4 x size) on that result (the second pass reads
+// the field at its own pixel).
+fn bend_pass1(p: vec2<f32>, s1: vec2<f32>) -> vec3<f32> {
+    let f = bend_field(p) * s1;
+    var sum = vec3<f32>(0.0);
+    for (var k = 0; k < 4; k = k + 1) {
+        sum = sum + textureSampleLevel(source, source_sampler, p + f * f32(k), 0.0).rgb;
+    }
+    return sum * 0.25;
+}
+
+fn bend_blur(uv: vec2<f32>) -> vec3<f32> {
+    let size = vec2<f32>(textureDimensions(source));
+    let s1 = 1.0 / (16.0 * size);
+    let s2 = 1.0 / (4.0 * size);
+    let f = bend_field(uv) * s2;
+    var sum = vec3<f32>(0.0);
+    for (var k = 0; k < 4; k = k + 1) {
+        sum = sum + bend_pass1(uv + f * f32(k), s1);
+    }
+    return sum * 0.25;
+}
 
 const LUMA = vec3<f32>(0.2126, 0.7152, 0.0722);
 
@@ -195,6 +245,18 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let pix = vec2<i32>(in.position.xy);
     let src = textureSampleLevel(source, source_sampler, in.uv, 0.0);
     var colour = src.rgb;
+    // Bend Time's blur (Test_PPG `BendTimeSwitch` -> `ArkPpNodeBlur`), on the fogged scene.
+    if (ark.power_vectors.x > 0.0) {
+        colour = bend_blur(in.uv);
+    }
+    // Dark Vision's eyelid pass (`PPG_EyeLidFinal_Mat` / `PPG_DarkVisionFinal_Mat`, captured shader
+    // 0x3c1c89ab574a7626): the scene (souls already blended in) x fxt_eyelid_gradient.g, faded
+    // towards EyeLidColor by saturate(gradient.r - (1 - 2 Alpha)); Alpha 0 = lids shut.
+    if (ark.dv_eyelid.x > 0.5) {
+        let g = textureSampleLevel(field_mask, source_sampler, in.uv, 0.0);
+        let k = clamp(g.r - (1.0 - 2.0 * ark.dv_eyelid.y), 0.0, 1.0);
+        colour = mix(ark.dv_lid_color.rgb, g.g * colour, k);
+    }
     if (ark.misc.z < 0.5) {
         return vec4<f32>(colour, src.a);
     }

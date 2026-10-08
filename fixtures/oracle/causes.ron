@@ -4,13 +4,9 @@
 // "done". Add a rule only with the evidence that establishes the cause.
 (
     rules: [
-        (
-            id: "u113-npc-health-rule",
-            matches: "scenario:combat/sword_hit*:damage:*",
-            kind: KnownDifference,
-            cause: "NPCs get the player's 70 health by the port's rule (U-113), so a sword hit (0.2 x HealthMax) is 14 where the original guard (HealthMax 50) takes 10",
-            evidence: "HOOK_TRIAGE.md 2026-10-06: 10 of 50 per hit; research/UNKNOWNS.md U-113",
-        ),
+        // Retired 2026-10-08: "u113-npc-health-rule" (sword_hit damage 14 vs 10) was a misreading.
+        // The hit is the sword's Attribute_MeleeDamage 10 x the context multiplier (0x00C07C80), not
+        // 0.2 x HealthMax, and guards have their archetype's HealthMax 50 (melee.md F1 / F9): ported.
         (
             id: "collision-line-backoff",
             matches: "collision:*:systematic: line *",

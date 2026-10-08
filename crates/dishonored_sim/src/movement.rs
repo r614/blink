@@ -291,7 +291,12 @@ pub fn speed_modifier(p: &mut PlayerState, input: &PlayerInput, cfg: &MovementCo
     } else {
         1.0
     };
-    let mut m = if p.sprinting {
+    // An NPC brain's requested locomotion speed replaces the stance speeds (the authored loop
+    // speed already includes the weapon stance).
+    let npc = input.npc_speed > 0.0;
+    let mut m = if npc {
+        input.npc_speed / ground
+    } else if p.sprinting {
         let dir = if p.strafing {
             cfg.strafe_mult_sprint
         } else if p.moving_backwards {
@@ -309,7 +314,9 @@ pub fn speed_modifier(p: &mut PlayerState, input: &PlayerInput, cfg: &MovementCo
     } else {
         base
     };
-    m *= if sword_out { cfg.sword_unsheathed_speed_factor } else { cfg.sword_sheathed_speed_factor };
+    if !npc {
+        m *= if sword_out { cfg.sword_unsheathed_speed_factor } else { cfg.sword_sheathed_speed_factor };
+    }
     let last = p.speed_mod;
     if m < last && last - m > 1e-4 {
         let a = (dt * cfg.speed_blend_down_speed).clamp(0.0, 1.0);
@@ -998,6 +1005,11 @@ pub(crate) fn falling(p: &mut PlayerState, input: &PlayerInput, can_move: bool, 
                 return;
             }
             hit_wall = true;
+            // A blasted NPC's wall contact (normal, speed before it) for the Windblast wall rule
+            // (`left_hand::windblast_wall_hits`).
+            if p.windblasted_by.is_some() && p.wall_hit.is_none() {
+                p.wall_hit = Some((n, v.length()));
+            }
             // ComputeSlideVector (slot 290): slide, never rising faster than the original move.
             let mut delta = (adjusted - n * adjusted.dot(n)) * (1.0 - t);
             if delta.z > 0.0 {

@@ -45,6 +45,8 @@ pub mod dark_vision;
 #[doc(hidden)]
 pub mod world_models;
 #[doc(hidden)]
+pub mod power_pp;
+#[doc(hidden)]
 pub mod effects;
 /// Bevy-free presentation rules (effects, sounds, reactions), shared with tools/oracle.
 pub mod present_rules;
@@ -325,6 +327,7 @@ pub fn main() {
     .add_plugins(effects::EffectsPlugin)
     .add_plugins(dark_vision::DarkVisionPlugin)
     .add_plugins(world_models::WorldModelsPlugin)
+    .add_plugins(power_pp::PowerPpPlugin)
     .add_systems(Update, atmosphere::update_fog)
     // Doors and usable objects (skeletal meshes), posed for their state.
     .init_resource::<level_props::LevelProps>()

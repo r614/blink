@@ -692,6 +692,21 @@ impl MissionMatch {
         }
         let mut b = Brain::new(s.id, s.kind, s.position, 0x5EED ^ s.id as u64);
         b.stay = !o.props.patrol_on_startup;
+        if o.props.patrol_on_startup {
+            // [ai] `EAIStimID_PatrolRequest` at startup: `DisBehaviorPatrol` adopts a route
+            // (squad, capacity, adoption range) and walks it.
+            b.request_patrol();
+        }
+        // [ai] The pawn tweak's locomotion config (`m_pComponentLocomotionConfig`): its NPC
+        // moves use that config's authored loop speeds.
+        b.loco = arch
+            .checked_sub(APPEARANCE_BASE)
+            .and_then(|i| self.view.appearances.get(i as usize))
+            .and_then(|l| l.anim.checked_sub(1))
+            .and_then(|k| self.setup.anim_profiles.get(k as usize))
+            .and_then(|p| p.locomotion.as_ref())
+            .and_then(|(_, path)| self.crowd.ai.locomotion.iter().position(|c| c.name.eq_ignore_ascii_case(path)))
+            .map(|i| i as u16);
         // [ai] DisSpawnerInfo: faction override (else the pawn tweak's), squad, and the
         // spawner's m_SpawnAtSuspicionLevel.
         b.faction = self.crowd.spawner_faction(&o.props.faction, &o.tweak);
@@ -1231,6 +1246,13 @@ impl MissionMatch {
                     }
                 }
                 dishonored_ai::AiEvent::Bark { npc, hook, initiator } => self.request_bark(*npc, hook, *initiator),
+                // A corpse the rats finished eating (0x00C6D760, `eDisEatenState_CorpseConsumed`)
+                // leaves no body.
+                dishonored_ai::AiEvent::RatEat { corpse, devoured: true, .. } => {
+                    if let Some(p) = self.world.player_mut(*corpse) {
+                        p.no_body = true;
+                    }
+                }
                 dishonored_ai::AiEvent::AlarmEnded { .. } | dishonored_ai::AiEvent::RatEat { .. } => {}
             }
         }
