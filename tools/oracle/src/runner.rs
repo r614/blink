@@ -560,7 +560,6 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             trace.events.push(TraceEvent { tick: tk, kind: "ProjectileEnd".into(), object: String::new(), name: kind, detail: format!("id={id} age={age:.3}") });
         }
         // Presentation: effects, sounds, animation inputs.
-        let players = w.players.clone();
         for pe in present.frame(&out.events, w, dishonored_sim::left_hand::dark_vision_reveals(w, ME, &cfg.tuning), 1.0 / 60.0) {
             trace.events.push(TraceEvent { tick: tk, kind: pe.kind.into(), object: if pe.object == 0 { String::new() } else { name_of(pe.object) }, name: pe.name, detail: pe.detail });
         }

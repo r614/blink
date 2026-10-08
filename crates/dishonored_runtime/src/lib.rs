@@ -46,6 +46,8 @@ pub mod dark_vision;
 pub mod world_models;
 #[doc(hidden)]
 pub mod effects;
+/// Bevy-free presentation rules (effects, sounds, reactions), shared with tools/oracle.
+pub mod present_rules;
 #[doc(hidden)]
 pub mod harness;
 #[doc(hidden)]

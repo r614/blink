@@ -1,113 +1,38 @@
 //! Headless presentation: what the runtime would play for each tick's simulation events
-//! (particle systems, sounds, animation inputs), so missing or never-ending effects show up in
-//! the trace. The event handling is the runtime's own code, compiled here against stand-ins
-//! for its Bevy resources (`build.rs` extracts it from `crates/dishonored_runtime/src`):
+//! (particle systems, sounds, animation reactions), so missing or never-ending effects show up
+//! in the trace. The decisions are the runtime's own: `crates/dishonored_runtime/src/
+//! present_rules.rs` is a Bevy-free module that the game's `effects`, `audio` and `characters`
+//! systems call and that this file compiles directly (`#[path]`):
 //!
-//! - effects: `effects::gameplay_effects` (event -> ParticleSystem, position, direction) and the
-//!   particle simulation `effects::step` with `simulate`'s one-shot despawn rule, over the
-//!   gameplay ParticleSystems the runtime decodes (`GAMEPLAY_PARTICLES`);
-//! - sounds: the simulation-event part of `audio::drive` (cue names, contact-system sounds);
-//! - animation: `characters::collect_hits` (the hit reactions `npc_anim` plays).
+//! - effects: `FxEventState::requests` (event -> ParticleSystem, position, direction, beams),
+//!   `blink_indicator_want`, `attached_want` (trails, Dark Vision cones), and the particle
+//!   simulation `step` with the one-shot end rule `one_shot_finished`, over the gameplay
+//!   ParticleSystems the runtime decodes (`GAMEPLAY_PARTICLES`);
+//! - sounds: `SoundEventState::posts` (cue names, contact-system sounds);
+//! - animation: `collect_hits` (the reactions `npc_anim` plays).
 //!
-//! The session forwards every step's events to both (`session::fixed_tick`: `audio_events`
-//! and `anim_events`); one rendered frame per tick here.
-//!
-//! Not covered (approximations of the shim, reported in ORACLE.md): animation-driven sound
-//! notifies and footfalls (no skeletal animation runs headless, so `notify_driven` stays empty
-//! and the simulation's sword-swing cue is posted), the third-person muzzle socket (no
-//! animated pistol: the eye-height fallback is used), placed level emitters.
+//! The session forwards every step's events to all three (`session::fixed_tick`); one rendered
+//! frame per tick here. What only the Bevy side does (drawing, sockets of animated meshes) is
+//! not reproduced: animation-driven sound notifies and footfalls are absent (no skeletal
+//! animation runs headless, so the simulation's sword-swing cue is posted), the third-person
+//! muzzle socket falls back to the eye point, placed level emitters are not simulated.
 
 #![allow(dead_code)]
 
+#[path = "../../../crates/dishonored_runtime/src/present_rules.rs"]
+mod present_rules;
+
+pub use present_rules::*;
 use dishonored_audio::contact::ContactSystem;
-use dishonored_audio::cues;
-use dishonored_audio::engine::ObjId;
 use dishonored_content::MatchContent;
-use dishonored_ir::particles::{ParticleEmitterAsset, ParticleSystemAsset};
-use dishonored_sim::events::{DamageCause, SimEvent};
-use dishonored_sim::input::LeftHand;
-use dishonored_sim::state::{MoveMode, PawnKind, PlayerId, PlayerState, ProjectileState};
+use dishonored_ir::particles::ParticleSystemAsset;
+use dishonored_sim::events::SimEvent;
+use dishonored_sim::state::{PlayerId, PlayerState};
 use dishonored_world::WorldQuery;
 use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-
-include!(concat!(env!("OUT_DIR"), "/present_extract.rs"));
-
-/// Stand-in for `effects::Effects`: what `gameplay_effects` touches.
-#[derive(Default)]
-pub struct FxShim {
-    rng: u64,
-    bolts: HashMap<u32, bool>,
-    delayed: Vec<(f32, String, Vec3, Vec3)>,
-    /// Placed Spring Razors: trap id -> position.
-    traps: HashMap<u32, Vec3>,
-    /// Spawn requests of this frame: (system path, position, direction).
-    spawned: Vec<(String, Vec3, Vec3)>,
-}
-
-/// Stand-in for `session::SessionView`.
-#[derive(Default)]
-pub struct SessionView {
-    pub me: Option<PlayerState>,
-    pub others: Vec<PlayerState>,
-    pub projectiles: Vec<ProjectileState>,
-    pub dark_vision_reveals: Vec<PlayerId>,
-}
-
-/// Stand-in for `session::Session`.
-pub struct Session {
-    pub content: Arc<MatchContent>,
-    pub local: Option<PlayerId>,
-}
-
-impl Session {
-    pub fn local_id(&self) -> Option<PlayerId> {
-        self.local
-    }
-}
-
-/// Stand-in for `audio::GameAudio`.
-#[derive(Default)]
-pub struct AudioShim {
-    notify_driven: HashMap<PlayerId, f32>,
-    projectiles: HashMap<u32, bool>,
-    notify_recent: HashMap<(PlayerId, String), f32>,
-    contact: Option<Arc<ContactSystem>>,
-    next_temp: u64,
-}
-
-impl AudioShim {
-    pub fn contact(&self) -> Option<&ContactSystem> {
-        self.contact.as_deref()
-    }
-    fn temp_obj(&mut self, _e: &mut EngineShim, _pos: Vec3, _now: f32) -> ObjId {
-        self.next_temp += 1;
-        TEMP_OBJ + self.next_temp
-    }
-    fn post(&mut self, e: &mut EngineShim, event: &str, obj: ObjId) {
-        e.posts.push((event.to_string(), obj));
-    }
-}
-
-/// Stand-in for the Wwise engine: the posted events.
-#[derive(Default)]
-pub struct EngineShim {
-    posts: Vec<(String, ObjId)>,
-}
-
-/// `effects::spawn_effect` without the drawing: records the request.
-fn spawn_effect(_commands: &mut (), _meshes: &mut (), fx: &mut FxShim, path: &str, at: Vec3, dir: Vec3) -> bool {
-    fx.spawned.push((path.to_string(), at, dir));
-    true
-}
-
-/// Stand-in for `effects::FxInstance` (what the despawn rule reads).
-pub struct FxInstanceShim {
-    one_shot: bool,
-    sims: Vec<EmitterSim>,
-}
 
 /// A decoded gameplay ParticleSystem with what its emitters draw with.
 #[derive(Clone, Serialize, Deserialize)]
@@ -195,25 +120,28 @@ pub struct PresentEvent {
 enum Owner {
     /// The Blink target indicator.
     Indicator,
-    /// `attached_effects`: (0, projectile) trails, (1, pawn) Dark Vision cones.
+    /// `attached_want`: (0, projectile) trails, (1, pawn) Dark Vision cones.
     Attached((u8, u32)),
 }
 
 struct LiveFx {
     inst: u32,
     owner: Option<Owner>,
+    one_shot: bool,
     path: String,
     transform: Mat4,
-    shim: FxInstanceShim,
+    sims: Vec<EmitterSim>,
 }
 
 /// The presentation state of one run.
 pub struct Presenter {
     lib: Arc<FxLibrary>,
-    fx: FxShim,
-    audio: AudioShim,
-    sockets: EffectSockets,
-    session: Session,
+    rng: u64,
+    fx: FxEventState,
+    sound: SoundEventState,
+    contact: Option<Arc<ContactSystem>>,
+    content: Arc<MatchContent>,
+    local: PlayerId,
     live: Vec<LiveFx>,
     next_inst: u32,
     now: f32,
@@ -221,16 +149,7 @@ pub struct Presenter {
 
 impl Presenter {
     pub fn new(lib: Arc<FxLibrary>, content: Arc<MatchContent>, local: PlayerId) -> Self {
-        Presenter {
-            lib,
-            fx: FxShim { rng: 0x1234_5678, ..Default::default() },
-            audio: AudioShim { contact: contact_system(), ..Default::default() },
-            sockets: EffectSockets::default(),
-            session: Session { content, local: Some(local) },
-            live: Vec::new(),
-            next_inst: 0,
-            now: 0.0,
-        }
+        Presenter { lib, rng: 0x1234_5678, fx: FxEventState::default(), sound: SoundEventState::default(), contact: contact_system(), content, local, live: Vec::new(), next_inst: 0, now: 0.0 }
     }
 
     pub fn live_effects(&self) -> usize {
@@ -238,11 +157,11 @@ impl Presenter {
     }
 
     pub fn live_particles(&self) -> usize {
-        self.live.iter().map(|l| l.shim.sims.iter().map(|s| s.particles.len()).sum::<usize>()).sum()
+        self.live.iter().map(|l| l.sims.iter().map(|s| s.particles.len()).sum::<usize>()).sum()
     }
 
-    /// Start an instance of a system (`spawn_effect` / `spawn_instance`); None when the runtime
-    /// did not decode it.
+    /// Start an instance of a system (`spawn_effect` / `spawn_beam` / `spawn_instance`); false
+    /// when the runtime did not decode it.
     fn start(&mut self, path: &str, xf: Mat4, owner: Option<Owner>, who: PlayerId, out: &mut Vec<PresentEvent>) -> bool {
         let at = xf.w_axis.truncate();
         let Some(sys) = self.lib.systems.get(&path.to_ascii_lowercase()) else {
@@ -264,8 +183,8 @@ impl Presenter {
             name: path.to_string(),
             detail: format!("inst={} kind={kind} at={:.0},{:.0},{:.0} emitters={} untextured={untextured} no_lifetime={infinite}", self.next_inst, at.x, at.y, at.z, sys.system.emitters.len()),
         });
-        let one_shot = owner.is_none();
-        self.live.push(LiveFx { inst: self.next_inst, owner, path: path.to_string(), transform: xf, shim: FxInstanceShim { one_shot, sims: sys.system.emitters.iter().map(|_| EmitterSim::default()).collect() } });
+        let sims = sys.system.emitters.iter().map(|_| EmitterSim::default()).collect();
+        self.live.push(LiveFx { inst: self.next_inst, owner, one_shot: owner.is_none(), path: path.to_string(), transform: xf, sims });
         true
     }
 
@@ -277,51 +196,58 @@ impl Presenter {
         }
     }
 
-    /// One frame: the tick's events through the runtime's handlers (one-shots), the Blink
-    /// indicator and the attached effects (trails, Dark Vision cones), then the particle step.
+    /// One frame: the tick's events through the runtime's rules (one-shots and beams), the Blink
+    /// indicator and the attached effects, the particle step, the sounds and the reactions.
     pub fn frame(&mut self, events: &[SimEvent], world: &dishonored_sim::state::WorldState, reveals: Vec<PlayerId>, dt: f32) -> Vec<PresentEvent> {
         let mut out = Vec::new();
-        let local = self.session.local;
         let players = &world.players;
-        let view = SessionView {
-            me: players.iter().find(|p| Some(p.id) == local).copied(),
-            others: players.iter().filter(|p| Some(p.id) != local).copied().collect(),
-            projectiles: world.projectiles.clone(),
-            dark_vision_reveals: reveals,
-        };
-        // One-shot effects.
-        gameplay_effects_body((), (), &mut self.fx, &view, Some(&self.audio), &self.sockets, Some(&self.session), self.now, events.to_vec());
-        for (path, at, dir) in std::mem::take(&mut self.fx.spawned) {
-            let who = nearest(players, at);
-            self.start(&path, effect_transform(at, dir), None, who, &mut out);
+        let me = players.iter().find(|p| p.id == self.local).copied();
+        let others: Vec<PlayerState> = players.iter().filter(|p| p.id != self.local).copied().collect();
+        let content = self.content.clone();
+        let (muzzle, bones) = (HashMap::new(), HashMap::new());
+        let scene = FxScene { players, me: Some(self.local), muzzle: &muzzle, bones: &bones, contact: self.contact.as_deref(), world: Some(&content.collision), now: self.now };
+        for r in self.fx.requests(events, &scene) {
+            match r {
+                FxRequest::Effect { path, at, dir } => {
+                    let who = nearest(players, at);
+                    self.start(&path, facing(at, dir), None, who, &mut out);
+                }
+                FxRequest::Beam { path, from, to } => {
+                    let who = nearest(players, from);
+                    self.start(path, facing(from, to - from), None, who, &mut out);
+                }
+            }
         }
         // The Blink indicator: one instance following the target while aiming.
-        let me = local.unwrap_or(0);
-        let want = blink_indicator_want(Some(&view), Some(&self.session));
+        let want = blink_indicator_want(me.as_ref(), &content.collision, &content.sim.gameplay.movement);
         let cur = self.live.iter().position(|l| l.owner == Some(Owner::Indicator));
         match (want, cur) {
             (None, Some(_)) => self.kill(Owner::Indicator, &mut out),
             (Some((path, at)), Some(i)) if self.live[i].path == path => self.live[i].transform = Mat4::from_translation(at),
             (Some((path, at)), _) => {
                 self.kill(Owner::Indicator, &mut out);
-                self.start(path, Mat4::from_translation(at), Some(Owner::Indicator), me, &mut out);
+                self.start(path, Mat4::from_translation(at), Some(Owner::Indicator), self.local, &mut out);
             }
             (None, None) => {}
         }
         // Attached effects: trails stop and fade out when their projectile is gone, cones are
         // killed with the power.
-        let want = attached_want(&view);
-        let owned: Vec<(u8, u32)> = self.live.iter().filter_map(|l| match l.owner {
-            Some(Owner::Attached(k)) => Some(k),
-            _ => None,
-        }).collect();
+        let want = attached_want(me.as_ref(), &others, &world.projectiles, &reveals);
+        let owned: Vec<(u8, u32)> = self
+            .live
+            .iter()
+            .filter_map(|l| match l.owner {
+                Some(Owner::Attached(k)) => Some(k),
+                _ => None,
+            })
+            .collect();
         for k in owned.into_iter().filter(|k| !want.iter().any(|w| w.0 == *k)) {
             if k.0 == 0 {
                 if let Some(l) = self.live.iter_mut().find(|l| l.owner == Some(Owner::Attached(k))) {
                     // `FxInstance::stop`: no more spawning, gone once its particles die.
                     l.owner = None;
-                    l.shim.one_shot = true;
-                    for s in &mut l.shim.sims {
+                    l.one_shot = true;
+                    for s in &mut l.sims {
                         s.done = true;
                     }
                 }
@@ -333,31 +259,33 @@ impl Presenter {
             match self.live.iter_mut().find(|l| l.owner == Some(Owner::Attached(k))) {
                 Some(l) => l.transform = m,
                 None => {
-                    self.start(path, m, Some(Owner::Attached(k)), if k.0 == 1 { k.1 } else { me }, &mut out);
+                    let who = if k.0 == 1 { k.1 } else { self.local };
+                    self.start(path, m, Some(Owner::Attached(k)), who, &mut out);
                 }
             }
-        }        // Particles (`simulate`): every live one-shot instance, then the despawn rule.
-        let world = &self.session.content.collision;
+        }
+        // Particles (`simulate`): every live instance, then the one-shot end rule.
+        let cw = &content.collision;
         let ray_closure = |a: Vec3, b: Vec3| -> Option<(Vec3, Vec3)> {
             let d = b - a;
             let len = d.length();
             if len < 1e-4 {
                 return None;
             }
-            world.raycast(a, d / len, len, dishonored_world::channel::ALL).map(|h| (h.point, h.normal))
+            cw.raycast(a, d / len, len, dishonored_world::channel::ALL).map(|h| (h.point, h.normal))
         };
         let ray_fn: RayFn = &ray_closure;
-        let fx = &mut self.fx;
+        let rng = &mut self.rng;
         let lib = &self.lib;
         let mut ended = Vec::new();
         self.live.retain_mut(|l| {
             let Some(sys) = lib.systems.get(&l.path.to_ascii_lowercase()) else { return false };
             let xf = l.transform;
-            let mut rnd = || fx.rand();
-            for (em, sim) in sys.system.emitters.iter().zip(l.shim.sims.iter_mut()) {
+            let mut rnd = || next_rand(rng);
+            for (em, sim) in sys.system.emitters.iter().zip(l.sims.iter_mut()) {
                 step(em, sim, &xf, dt, &mut rnd, em.collision.as_ref().map(|_| ray_fn));
             }
-            if despawned(&l.shim) {
+            if l.one_shot && one_shot_finished(&l.sims) {
                 ended.push((l.inst, l.path.clone()));
                 false
             } else {
@@ -368,14 +296,19 @@ impl Presenter {
             out.push(PresentEvent { kind: "EffectEnd", object: 0, name: path, detail: format!("inst={inst}") });
         }
         // Sounds.
-        self.audio.notify_recent.retain(|_, t| self.now - *t < 1.0);
-        let e = audio_events_body(&mut self.audio, EngineShim::default(), &view, &self.session, local, self.now, events.to_vec());
-        for (ev, obj) in e.posts {
-            let object = if obj >= PLAYER_OBJ && obj < TEMP_OBJ { (obj - PLAYER_OBJ) as PlayerId } else { 0 };
-            let name = if ev.is_empty() { "(no cue)".to_string() } else { ev };
-            out.push(PresentEvent { kind: "Sound", object, name, detail: if obj >= TEMP_OBJ { "at=impact".into() } else { String::new() } });
+        let now = self.now;
+        self.sound.recent.retain(|_, t| now - *t < 1.0);
+        for ev in events {
+            for (name, at) in self.sound.posts(ev, players, Some(self.local), self.contact.as_deref(), &content.collision, now) {
+                let name = if name.is_empty() { "(no cue)".to_string() } else { name };
+                let (object, detail) = match at {
+                    SoundAt::Pawn(id) => (id, String::new()),
+                    SoundAt::Impact(p) => (0, format!("at={:.0},{:.0},{:.0}", p.x, p.y, p.z)),
+                };
+                out.push(PresentEvent { kind: "Sound", object, name, detail });
+            }
         }
-        // Animation inputs.
+        // Animation reactions.
         let all: Vec<&PlayerState> = players.iter().collect();
         let mut hits: Vec<(u32, Vec<(HitKind, Vec3)>)> = collect_hits(events, &all).into_iter().collect();
         hits.sort_by_key(|h| h.0);
@@ -398,12 +331,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extracted_tables_present() {
+    fn rules_compile_with_the_runtime_tables() {
         assert!(GAMEPLAY_PARTICLES.contains(&"Vfx_GamePlay.Blink.Blink_Ground_01"));
-        assert!(PLAYER_OBJ < TEMP_OBJ);
-        let inst = FxInstanceShim { one_shot: true, sims: vec![EmitterSim::default()] };
-        assert!(!despawned(&inst), "a fresh emitter (time 0, not done) is not despawned");
-        let done = FxInstanceShim { one_shot: true, sims: vec![EmitterSim { done: true, ..Default::default() }] };
-        assert!(despawned(&done));
+        assert!(!one_shot_finished(&[EmitterSim::default()]), "a fresh emitter (time 0, not done) is not finished");
+        assert!(one_shot_finished(&[EmitterSim { done: true, ..Default::default() }]));
     }
 }
