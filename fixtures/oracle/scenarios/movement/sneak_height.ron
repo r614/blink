@@ -1,0 +1,21 @@
+// Toggle sneak standing still: the cylinder shrinks (m_fSneakHeight 65, PLAYER.md U-017, keeping
+// the feet planted: the centre should drop 87.5 - 65 = 22.5 uu) and the walk hover keeps the
+// pawn 2.7305 above the floor. INSTRUMENTATION.md measured a 61 uu drop at a slide start, which
+// is not this number: the trace and the cylinder reads decide which half-height the sneak uses.
+(
+    name: "movement/sneak_height",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Press Crouch twice, 1 s apart: the centre height while sneaking and after standing up.",
+    setup: (player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 150,
+    input: [(tick: 30, action: Press(Crouch)), (tick: 90, action: Press(Crouch))],
+    checkpoints: [
+        (name: "sneak drop", expect: [(metric: Delta("pawn.z", 25, 80), value: -22.5, tol: 1, status: Unverified, source: "PLAYER.md U-017: 87.5 - m_fSneakHeight 65; INSTRUMENTATION.md reports 61 at a slide start")]),
+        (name: "stand again", expect: [(metric: Delta("pawn.z", 25, 140), value: 0, tol: 1, status: Static, source: "the cylinder returns to 87.5 when there is headroom")]),
+    ],
+    record: [Pawn],
+    tolerances: [("pawn.", 0.5)],
+    capture: Some("lab setup 60; tick script: C tap at 30 and 90; Pawn channels; session read pawn CylinderComponent.CollisionHeight while sneaking"),
+)

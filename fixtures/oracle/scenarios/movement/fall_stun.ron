@@ -1,0 +1,23 @@
+// Hard landing stun. The player's Landed handler (DishonoredPlayerPawn vtable +0x534, 0x00AB53A0)
+// compares the landing velocity with -m_fFall_Stun_Vel (StatePlayerMasterFalling, 2200 in
+// DefaultPlayerState.ini: a drop of about 807 uu) and, beyond it, plays the stun action and
+// requests StatePlayerMasterStunned (class default m_fStunDuration 0.1 s; the shipped tweak value
+// is not read) instead of the plain landing. The port does not model the stun. A drop of 1200 uu
+// lands at about tick 54; forward is pressed at tick 70, 16 ticks after the landing, so the time
+// until the speed starts to rise shows whether the pawn answers input at once.
+(
+    name: "movement/fall_stun",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Drop 1200 uu, press forward after landing: how long the hard landing delays the first step.",
+    setup: (player: Some((position: (-3400, -3150, 984.2), yaw: 270, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 130,
+    input: [(tick: 70, action: Move(forward: 127, right: 0))],
+    checkpoints: [
+        (name: "first movement", expect: [(metric: TimeToReach("pawn.speed2d", 20), value: 0, tol: 0, status: Unmeasured, source: "no reference: capture request (with no stun the speed passes 20 uu/s one tick after the press)")]),
+    ],
+    record: [Pawn, Vitals, SimEvents],
+    tolerances: [("pawn.", 0.5)],
+    capture: Some("lab setup 60; place at z = floor + 1200 with no floor snap; tick script: W from 70; Pawn channels"),
+)

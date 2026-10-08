@@ -1,0 +1,23 @@
+// Grab the Boyle exterior chain by touch and climb. DisClimbable_3 (L_Boyle_Ext_Env) hangs from
+// (-2085, 580, 1884), 1400 uu long (PLAYER.md "Climbing"). A falling pawn that touches it grabs it
+// (collision notify 0x00A3FA70), physics Ladder; physLadder (0x00AA82C0) climbs at
+// m_fClimbingSpeed x 16383.5 x 20 = 163.8 uu/s when forward is held with the camera pitched up
+// past -m_ClimbingAimThreshold (5.5 degrees), and holds the height without input. The pawn starts
+// inside the chain's reach (20 uu from its line), 380 uu below the anchor, looking 30 degrees up.
+(
+    name: "movement/climb_chain",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Touch the hanging chain, hold still for 0.5 s, then climb with forward held.",
+    setup: (player: Some((position: (-2105, 580, 1500), yaw: 0, pitch: 30, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 150,
+    input: [(tick: 40, action: Move(forward: 127, right: 0))],
+    checkpoints: [
+        (name: "climb rate", expect: [(metric: Delta("pawn.z", 50, 110), value: 163.8, tol: 10, status: Static, source: "0x00AA82C0: step 0.0005 x 16383.5 = 8.19 uu per VInterpTo with rate 20, 163.8 uu/s")]),
+        (name: "holds without input", expect: [(metric: Delta("pawn.z", 20, 38), value: 0, tol: 3, status: Static, source: "0x00AA82C0: no acceleration, no change of height")]),
+    ],
+    record: [Pawn, SimEvents],
+    tolerances: [("pawn.", 0.5)],
+    capture: Some("lab setup 60; place at (-2105, 580, 1500) no snap, pitch 30; tick script: W from 40; Pawn channels"),
+)

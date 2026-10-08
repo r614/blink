@@ -1,0 +1,21 @@
+// Walk into a 35 uu step on the Boyle exterior (found by scanning with the port): from (-2913.4, -3899.9)
+// facing +Y at 360 uu/s the centre rises 34.7 uu in one tick at about y = -3872. MaxStepHeight is
+// 44 (live), stepUp lifts MaxStepHeight + 2.54 from 2.73 above the floor (0x006ADC10): a step of this
+// size is climbed without a stop. Records the speed through the step and the rise per tick.
+(
+    name: "movement/walk_step_35",
+    system: Movement,
+    map: "L_Boyle_Ext_P",
+    description: "Run into a 35 uu step: the rise, and whether the speed drops.",
+    setup: (player: Some((position: (-2913.4, -3899.9, -124.7), yaw: 90, sword_drawn: true))),
+    tick_hz: 60,
+    ticks: 100,
+    input: [(tick: 20, action: Move(forward: 127, right: 0))],
+    checkpoints: [
+        (name: "climbed", expect: [(metric: RiseFrom("pawn.z", 20), value: 30, tol: 0, cmp: AtLeast, status: Static, source: "step 35 uu < MaxStepHeight 44 + 2.54: climbed")]),
+        (name: "plateau after", expect: [(metric: At("pawn.speed2d", 90), value: 360, tol: 1.5, status: Static, source: "a climbed step does not stop the pawn (the speed is the achieved displacement over dt)")]),
+    ],
+    record: [Pawn],
+    tolerances: [("pawn.", 0.5)],
+    capture: Some("lab setup 60; lab equip DisWepMelee 1; place at (-2913.4, -3899.9, -124.7) no snap, yaw 90; tick script: W from 20; Pawn channels"),
+)
