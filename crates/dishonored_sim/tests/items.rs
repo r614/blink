@@ -430,3 +430,34 @@ fn takedown_scenario_is_deterministic() {
     assert_eq!(run(), run());
     let _ = MoveMode::Walking;
 }
+
+/// F-5: all 34 workshop upgrades fit the inventory mask (the 33rd and 34th were dropped by a
+/// 32-bit mask).
+#[test]
+fn every_workshop_upgrade_can_be_given() {
+    let cfg = cfg();
+    let mut p = dishonored_sim::state::PlayerState::new(1, Vec3::ZERO, 0.0);
+    for (name, _) in &cfg.gameplay.items.upgrades {
+        assert!(powers::give_upgrade(&mut p, name, &cfg.gameplay), "{name}");
+    }
+    assert_eq!(p.inv.upgrades.count_ones() as usize, cfg.gameplay.items.upgrades.len());
+}
+
+/// F-7: taking a charm effect already owned raises it to its second level (0x00ABBA90), whose
+/// value then applies; an effect id from 10,000,000 up is a scripted charm (0x00AA8EF0).
+#[test]
+fn a_charm_taken_twice_gives_its_level_two_value() {
+    let cfg = cfg();
+    let g = &cfg.gameplay;
+    let Some(slot) = g.items.charms.iter().position(|c| c.values.len() > 1) else { return };
+    let c = g.items.charms[slot].clone();
+    let mut p = dishonored_sim::state::PlayerState::new(1, Vec3::ZERO, 0.0);
+    assert_eq!(powers::charm_slot(g, slot as i32), Some(slot));
+    inventory::give_charm_effect(&mut p, g, Some(slot as i32), 0);
+    assert_eq!(powers::attribute(&p, g, &c.attribute, 0.0), c.values[0]);
+    inventory::give_charm_effect(&mut p, g, Some(slot as i32), 0);
+    assert_eq!(powers::attribute(&p, g, &c.attribute, 0.0), c.values[1]);
+    assert_eq!(powers::charm_slot(g, -1), None);
+    let base = dishonored_ir::items::SCRIPTED_CHARM_BASE;
+    assert_eq!(powers::charm_slot(g, base), (!g.items.scripted_charms.is_empty()).then_some(g.items.charms.len()));
+}

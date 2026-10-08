@@ -252,6 +252,46 @@ impl TweakDb {
         Ok(out)
     }
 
+    /// A tweak and the tweaks it inherits from, as `Pkg.Obj` paths: the object itself, then its
+    /// `m_FallbackChainCooked` names (cooked `Pkg+++Obj Class` or plain `Pkg.Obj`), nearest
+    /// first. The name test of 0x00C6F450 compares a tweak name against the tweak's own name and
+    /// this list.
+    pub fn lineage(&self, path: &str) -> Vec<String> {
+        let mut out = vec![path.to_string()];
+        let Some(loc) = self.objects.get(&path.to_ascii_lowercase()).copied() else { return out };
+        if let Ok(own) = self.read(loc) {
+            if let Some(TVal::List(fb)) = own.get("m_FallbackChainCooked") {
+                for f in fb {
+                    if let Some(TVal::Name(n)) = f.get("m_FallbackName") {
+                        out.push(tweak_path_of_name(n));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// An int array property (`TArray<int>`) of an object, from the object or the first object
+    /// of its archetype chain that sets it. The generic reader takes untyped arrays for object
+    /// references, so int arrays are read raw here.
+    pub fn int_array(&self, path: &str, prop: &str) -> Option<Vec<i32>> {
+        let mut cur = self.objects.get(&path.to_ascii_lowercase()).copied()?;
+        for _ in 0..16 {
+            let pkg = &self.pkgs[cur.0];
+            if let Ok(h) = pkg.read_object(cur.1) {
+                if let Some(p) = ue3_package::properties::find(&h.properties, prop) {
+                    return p.array_objects().ok();
+                }
+            }
+            let arch = ObjRef::from_index(pkg.exports[cur.1].archetype);
+            if arch == ObjRef::Null || pkg.obj_name(arch).starts_with("Default__") {
+                return None;
+            }
+            cur = self.objects.get(&pkg.obj_path(arch).to_ascii_lowercase()).copied()?;
+        }
+        None
+    }
+
     /// Resolve an object if present (`None` when missing or unreadable).
     pub fn try_resolve(&self, path: &str) -> Option<TMap> {
         self.resolve(path).ok()
@@ -266,6 +306,15 @@ impl TweakDb {
             .collect();
         v.sort();
         v
+    }
+}
+
+/// A tweak name as Arkane cooks it (`Pkg+++Obj Class`, `Pkg+++Obj:Sub Class`) or a plain
+/// `Pkg.Obj`, as the `Pkg.Obj` path.
+pub fn tweak_path_of_name(n: &str) -> String {
+    match n.split_once("+++") {
+        Some((pkg, rest)) => format!("{pkg}.{}", rest.split(' ').next().unwrap_or(rest)),
+        None => n.to_string(),
     }
 }
 

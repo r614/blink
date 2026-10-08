@@ -352,6 +352,9 @@ pub enum NodeKind {
     },
     /// `DisConv_IsSpeakerAvailable`: output 0 = unavailable, 1 = available.
     SpeakerAvailable,
+    /// `DisConv_CompareDarknessLevel` (0x00CA8FE0): the game's chaos level against
+    /// `m_LevelToCompare`: output 0 equal, 1 the level is lower, 2 the level is higher.
+    CompareDarknessLevel { level: i32 },
     /// `DisConv_SpeakerInStoryGroup` / `_SpeakerHasTweaks` / `_FactionBranch` /
     /// `_SpawnerBranch` / `_SpeakerSupportsDialogTree`: the first matching entry's output,
     /// else output `entries` ("Everyone Else").

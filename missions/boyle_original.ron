@@ -26,5 +26,5 @@ MissionDef(
     // Dialog graphs of every Boyle script package (DialogInputs / DialogOutputs).
     dialog_packages: ["L_BoyleStreet_Ext_Script", "L_Boyle_Ext_Script", "L_Boyle_Ext_P", "L_Boyle_Int_Script", "L_Boyle_Int_P"],
     original_kismet: OriginalKismet(start_event: "ChangeLvl_fromHub_toBoyle", seed: 1),
-    settings: MissionSettings(respawn: true, respawn_delay: 3.0, time_limit: 0.0, high_chaos_kill_ratio: 0.2),
+    settings: MissionSettings(respawn: true, respawn_delay: 3.0, time_limit: 0.0),
 )
