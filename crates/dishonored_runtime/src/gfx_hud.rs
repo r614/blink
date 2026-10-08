@@ -414,6 +414,8 @@ pub fn update_gfx_hud(
     mut ammo: Query<(&AmmoText, &mut Node, &mut Text, &mut TextFont), (Without<HudQuad>, Without<EquipIcon>)>,
     cams: Query<(&Camera, &GlobalTransform), With<crate::players::GameCamera>>,
     mut sent_disp: Local<Option<(f32, f32)>>,
+    popups: Res<crate::hud_popups::HudPopups>,
+    time: Res<Time>,
 ) {
     let Some(hud) = hud.filter(|h| h.loaded) else { return };
     let Some(window) = windows.iter().next() else { return };
@@ -437,7 +439,10 @@ pub fn update_gfx_hud(
         let v = cam.world_to_viewport(gt, world).ok()?;
         Some((v - off) / s)
     });
-    let has_match = !view.matchv.mode.is_empty();
+    // Objectives banner and target paper are popups (`hud_popups`): alpha and slide.
+    let now = time.elapsed_secs();
+    let banner = popups.banner_env(now);
+    let paper = if mission.is_some() { banner } else { popups.target_env(now) };
     // Crosshair spread: `SetDispersion(d, d / max x 100)` (0x00B9FF30), sent when `d` moved by
     // at least 0.1 since the last call.
     let disp = me.and_then(|m| dishonored_sim::left_hand::Dispersion::of(m, &session.content.sim.gameplay, &session.content.sim.tuning).map(|d| (m.left.dispersion, d.max)));
@@ -458,8 +463,8 @@ pub fn update_gfx_hud(
             Group::CrossCrossbow => (alive && item == LeftHand::Crossbow, None),
             Group::CrossPower => (alive && aiming_power, None),
             Group::Crouch => (alive && crouched, None),
-            Group::Objectives => (has_match, None),
-            Group::TargetNote => (view.target_info.is_some() || (mission.is_some() && !ended), None),
+            Group::Objectives => (has_match && banner.shown(), None),
+            Group::TargetNote => ((view.target_info.is_some() || (mission.is_some() && !ended)) && paper.shown(), None),
             Group::Marker => (alive && marker.is_some(), None),
             Group::OutcomeBg => (ended, None),
         };
@@ -470,6 +475,11 @@ pub fn update_gfx_hud(
         };
         let dst = match (hq.group, marker) {
             (Group::Marker, Some(at)) => dst.map(|(x, y)| (x + at.x, y + at.y)),
+            (Group::Objectives | Group::TargetNote, _) => {
+                let env = if hq.group == Group::Objectives { banner } else { paper };
+                img.color.set_alpha(hq.quad.color.mul[3].clamp(0.0, 1.0) * env.alpha);
+                dst.map(|(x, y)| (x + env.dx, y))
+            }
             _ => dst,
         };
         let dst = match (&hq.cross, *sent_disp) {
@@ -648,7 +658,8 @@ pub fn update_anchored_text(
     time: Res<Time>,
     mut seen: Local<HashMap<u32, f32>>,
     windows: Query<&Window>,
-    mut texts: Query<(&AnchoredText, &mut Node, &mut Text, &mut TextFont, &mut Visibility)>,
+    mut texts: Query<(&AnchoredText, &mut Node, &mut Text, &mut TextFont, &mut Visibility, &mut TextColor)>,
+    popups: Res<crate::hud_popups::HudPopups>,
 ) {
     let Some(window) = windows.iter().next() else { return };
     let (s, off) = stage_xform(Vec2::new(window.width(), window.height()));
@@ -656,7 +667,10 @@ pub fn update_anchored_text(
     let me_id = view.me.as_ref().map(|p| p.id);
     let mine = m.scores.iter().find(|e| Some(e.id) == me_id);
     let leader = m.scores.iter().max_by_key(|e| e.score);
-    for (at, mut node, mut text, mut font, mut vis) in &mut texts {
+    let now = time.elapsed_secs();
+    let banner = popups.banner_env(now);
+    let paper = if m.mission.is_some() { banner } else { popups.target_env(now) };
+    for (at, mut node, mut text, mut font, mut vis, mut color) in &mut texts {
         let mission = m.mission.as_ref();
         let (content, size) = match (at.kind, mission) {
             (TextKind::ObjTitle, Some(mv)) => (mission_title(mv), 17.0),
@@ -677,7 +691,16 @@ pub fn update_anchored_text(
             (TextKind::Prompt, Some(mv)) => (interaction_prompt(mv, &view, local.yaw, local.pitch), 16.0),
             (TextKind::Message | TextKind::Outcome | TextKind::Prompt, None) => (String::new(), 15.0),
         };
-        *vis = if content.is_empty() || m.mode.is_empty() { Visibility::Hidden } else { Visibility::Inherited };
+        // Banner strips and the target paper fade and slide with their popup.
+        let env = match at.kind {
+            TextKind::ObjTitle | TextKind::ObjName => Some(banner),
+            TextKind::TargetBody => Some(paper),
+            _ => None,
+        };
+        let hidden = env.is_some_and(|e| !e.shown());
+        *vis = if content.is_empty() || m.mode.is_empty() || hidden { Visibility::Hidden } else { Visibility::Inherited };
+        color.0.set_alpha(env.map_or(1.0, |e| e.alpha));
+        let dx = env.map_or(0.0, |e| e.dx) * s;
         text.0 = content;
         font.font_size = FontSize::Px(size * s);
         let min = at.rect.min * s + off;
@@ -688,7 +711,7 @@ pub fn update_anchored_text(
             TextKind::Message | TextKind::Outcome | TextKind::Prompt => (Vec2::new(0.0, 0.0), min.y),
             _ => (Vec2::new(0.04, 0.0), (min.y + max.y) * 0.5 - size * s * 0.65),
         };
-        node.left = px(min.x + (max.x - min.x) * inset.x);
+        node.left = px(min.x + (max.x - min.x) * inset.x + dx);
         node.width = px((max.x - min.x) * (1.0 - 2.0 * inset.x));
         node.top = px(top);
     }

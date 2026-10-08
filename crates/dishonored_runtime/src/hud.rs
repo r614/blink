@@ -132,8 +132,8 @@ pub fn update_hud(
     }
     let m = &view.matchv;
     let show = keys.pressed(KeyCode::Tab) || m.phase == MatchPhase::Ended;
-    // Mode and clock live on the objectives banner (gfx_hud); the board is Tab / match end.
-    let mut b = if show { format!("{} {:?}  to {}\n", m.mode.to_uppercase(), m.phase, m.score_limit) } else { String::new() };
+    // The objectives banner pops up (hud_popups); the board (with the clock) is Tab / match end.
+    let mut b = if show { format!("{} {:?}  {}:{:02}  to {}\n", m.mode.to_uppercase(), m.phase, (m.time_left / 60.0).floor() as i32, (m.time_left % 60.0) as i32, m.score_limit) } else { String::new() };
     if show {
         for e in &m.scores {
             b += &format!("{:<12} {:>3}  K {:>3}  D {:>3}\n", e.name, e.score, e.kills, e.deaths);

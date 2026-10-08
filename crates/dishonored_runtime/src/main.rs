@@ -64,6 +64,7 @@ mod launcher;
 mod launcher_bg;
 mod pause_menu;
 mod hud_settings;
+mod hud_popups;
 mod saves;
 /// [interp] Cutscene (matinee) presentation.
 mod cutscene;
@@ -330,6 +331,8 @@ fn main() {
             .init_gizmo_group::<debug::XRayGizmos>()
             .add_systems(Startup, (players::setup_player_assets, hud::setup_hud, debug::setup_gizmos, (characters::load_library, characters::load_animations).chain(), characters::load_weapons, viewmodel::load_view_rig, gfx_hud::setup_gfx_hud, gfx_hud::load_game_fonts))
             .init_resource::<hud::DebugHud>()
+            .init_resource::<hud_popups::HudPopups>()
+            .add_systems(Update, hud_popups::track.after(input_map::gather_input).before(gfx_hud::update_gfx_hud).before(gfx_hud::update_anchored_text))
             .init_resource::<viewmodel::ViewAnim>()
             .add_systems(FixedUpdate, (harness::script_fixed, session::fixed_tick, saves::write_autosaves).chain().run_if(pause_menu::sim_running))
             .insert_resource(saves::Saves::new(args.mission_path.clone()))

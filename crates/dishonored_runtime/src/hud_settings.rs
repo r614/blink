@@ -8,7 +8,8 @@
 //! - `PSI_HUD_CrosshairOpacity`: crosshair alpha.
 //! - `PSI_HUD_bShowPlayerStance`: the crouch icon.
 //! - `PSI_HUD_bShowObjectiveMarkers`: the projected mission marker.
-//! - `PSI_HUD_bShowObjectivePopups`: the mission notification paper and objective banner text.
+//! - `PSI_HUD_bShowObjectivePopups`: applied in `hud_popups` (no automatic objectives banner or
+//!   target paper; the journal key still opens them).
 //! - `PSI_HUD_bShowInteractions`: the "F  Talk" prompt.
 
 use crate::gfx_hud::{AnchoredText, HudQuad, TextKind};
@@ -56,7 +57,6 @@ pub fn apply(
             "cross" => h.crosshair_style < 2,
             "stance" => !h.player_stance,
             "marker" => !h.objective_markers,
-            "target_note" => !h.objective_popups,
             _ => false,
         };
         if hide {
@@ -69,7 +69,6 @@ pub fn apply(
     for (t, mut vis) in &mut texts {
         let hide = match t.kind {
             TextKind::Prompt => !h.interactions,
-            TextKind::TargetBody => !h.objective_popups,
             _ => false,
         };
         if hide {

@@ -1356,6 +1356,34 @@ impl Importer<'_> {
                 diffuse = self.merged_opacity(diffuse, o, ch, lo, hi).or(diffuse);
             }
         }
+        // Particle sprites on `DefaultTranslu_PMAT` (base pass pixel shaders 2815 / 35485 / 35475
+        // of RefShaderCache, EFFECTS.md "Particle materials"): colour = vertex colour x
+        // [D_Diffuse | white with D_DisableDiffuse | Motion_Mask with Mo_Enable_Diffuse_Motion]
+        // x D_DiffuseColorTweak.rgb; opacity = vertex alpha x D_DiffuseColorTweak.a x
+        // [O_Opacity channel `O_Opacity_Channel` | Motion_Mask.r with Mo_Enable_Opacity_Motion].
+        // The textures come from the instance chain or the base material's defaults (e.g.
+        // `M_TB_CrouchSteam_INST` sets none: Motion_Mask = `FXT_Smoke_01`). The diffuse slot is
+        // replaced by the texture with that opacity in alpha.
+        if chain.base_material.as_deref().is_some_and(|b| b.ends_with("DefaultTranslu_PMAT")) {
+            let tex_named = |n: &str| chain.textures.iter().chain(chain.default_textures.iter()).find(|(k, _)| k.trim().eq_ignore_ascii_case(n)).map(|v| v.1);
+            let on = |s: &str| chain.switch(s) == Some(true);
+            let mask = tex_named("Motion_Mask").and_then(|k| self.texture(k));
+            let colour = if on("Mo_Enable_Diffuse_Motion") {
+                mask
+            } else if on("D_DisableDiffuse") {
+                None
+            } else {
+                tex_named("D_Diffuse").and_then(|k| self.texture(k))
+            };
+            let opacity = if on("Mo_Enable_Opacity_Motion") { mask.map(|m| (m, 0)) } else { tex_named("O_Opacity").and_then(|k| self.texture(k)).map(|o| (o, chain.mask_channel("O_Opacity_Channel").unwrap_or(0))) };
+            if let Some((o, ch)) = opacity {
+                if let Some(t) = self.merged_opacity(colour, o, ch, 0.0, 1.0) {
+                    diffuse = Some(t);
+                }
+            } else if colour.is_some() {
+                diffuse = colour;
+            }
+        }
         // Channel-packed masks: the static component masks name the channel (U-027). Without
         // one, an emissive slot that reuses the opacity texture reads G (vista cards: opacity
         // in R, lit windows in G).
