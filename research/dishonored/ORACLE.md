@@ -582,6 +582,47 @@ aiming, the same vector-field blur and SceneColor-sampling material passes), `da
 (27, mostly the lit scene variants Dark Vision switches to), `possession_l2` (17 during the
 transfer). The "drawn only while active" sets include scene shaders whose draws changed with the
 view; decode with `fxc /dumpbin` against the CTAB names. Never committed.
+### Skeletal animation: bones and AnimTree state per tick (2026-10-08)
+
+Records `Bones("<subject>", [bones..])` and `AnimState("<subject>")` (subject: an NPC id of the
+spec, `player`, or an actor / component name; an empty bone list = all bones; `"+world"` in the
+list adds world-space transforms) write a sidecar `anim-<spec hash>.json` next to the trace in
+the oracle cache (the capture summary's `anim`). `session anim object=X [ticks=N]
+[bones=all|none|a,b] [world=true] [out=FILE]` records the same for N ticks in lockstep.
+
+Read per tick by the tick script (no game-thread work): the component's `LocalToWorld` (+0x60,
+row-major, translation in the last row), the whole `SpaceBases` (+0x208, `array<BoneAtom>`, 32
+bytes: quaternion X Y Z W, translation, scale; component space), and per AnimTree node
+(`Animations` +0x1E0 -> `AnimTickArray` +0x1A8, every node) its flags (`bRelevant`) and
+`NodeTotalWeight` (+0x70), for sequence nodes `AnimSeqName` / `Rate` / `CurrentTime`
+(+0xCC..+0xDF), for blend nodes the `Children` weights. Bone names from
+`SkeletalMeshComponent.GetBoneName`, node names from `NodeName`.
+
+Format: `bones` [index, name], `nodes` [name, class, sequence?, children], `frames` with only
+what changed since the previous frame (`t` = tick): `l2w` (16 values, rotation x 1e4, translation
+x 100, layout offset removed), `cs` (bone -> [qx, qy, qz, qw] x 1e4 + [tx, ty, tz] x 100,
+component space), `ws` (same, world space; with `+world`), `nodes` (node -> [weight x 1e3,
+relevant] or, for a sequence, [weight x 1e3, relevant, sequence, time x 1e3, rate x 1e3]),
+`blend` (node -> children weights x 1e3). World = component-space bone through `LocalToWorld`;
+checked against `GetBoneLocation` / `GetBoneQuaternion` (spine_1_jnt: same position, same
+rotation up to the quaternion sign). Size: a guard (118 bones, 40 nodes) for 900 ticks with
+world space was 9.4 MB, about half without.
+
+**NPC locomotion needs the level's navigation mesh.** On the Playground (built at +20000 in
+Boyle, no navmesh there) placed NPCs never move: alerted guards attack in place
+(`combat/guard_attack`, `combat/block`, `ai/combat_cadence`: x / y constant), and a patrolling
+guard holds its first route point in `DisAISubStateTakeActorPosition` (destination not
+reached). On Boyle's navmesh the same patrol setup walks at 145 uu/s (the spec's 145.24).
+Specs that need NPC movement must be placed on a real map's navmesh for the original side.
+
+**Patrol routes (`route` in a spec NPC).** A host `DishonoredRoute` with enough points is taken
+over (`setup_route`, `session route points=x,y,z;.. [type=]`): its `DishonoredNavPoint`s are
+moved to the points (Location written, components updated; guard durations, guard-forever and
+watch points cleared), its `RouteList` cut to the points, `RouteType` 1 (two-point back and
+forth), `m_SupportedSquads` emptied, `m_Capacity` / `m_AdoptionRange` -1, active, no adopters;
+the NPC spawns with the spawner's `m_bPatrolUponStartup` and the patrol manager gives it that
+route (verified: `DisBehaviorPatrol.m_pCurrentRoute` is the route, index 0 -> 1).
+
 ### Several hooked games at once (2026-10-08)
 
 Every `probe_launch` command takes `--session NAME` (or `PROBE_SESSION=NAME`): the session file
@@ -756,8 +797,13 @@ half peaks 0.5417 under the lamps (the earlier sneak-toggle readings were within
   Re-capture of the 58 NPC specs: 56 ok, `ai/patrol` and `chaos/corpse_discovered` fail on
   their patrol routes (setup gap); the NPCs stay where placed for the whole run (before, they
   went back to their spawners after ~4.3 s). Fresh guards start with `suspicion` 1 where the
-  reused host guards read 0. `combat/sword_hit_dummy`: the swing at tick 5 starts no hit on the
-  Passive dummy (no damage in 600 ticks; a press after the run kills it), reported as is.
+  reused host guards read 0. `combat/sword_hit_dummy`: the tick-5 press did nothing because the
+  runner's `sword_drawn` gave the sword again, re-equipping it: the draw blocks attacks for
+  about 1.1 s (presses before tick 36 after a 30-tick settle were ignored; from 36 on they act
+  11 ticks later). The runner now runs 75 ticks for the draw before the setup when it gives the
+  sword. The press at tick 5 then acts: on the Passive (unaware, facing) dummy it is a front
+  **assassination** (`Snd_Sword_P_ass_fastright`, health 50 -> 0, ragdoll), not a 10-point
+  hit; a hit needs an aware dummy (spec decision).
   Before 2026-10-08 a live NPC of the host level was teleported (it went home). `Passive` unpossesses it (no controller, no AI: it takes damage and falls
   like a dummy); `Idle` keeps its own AI; `Alerted` is approximated by filling its player attention
   (1.0, a warning); `faction` writes `DishonoredNPCPawn.m_pCurFactionTweak` (a tweak by name,

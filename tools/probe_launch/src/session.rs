@@ -617,6 +617,18 @@ impl Session {
                 // never committed).
                 let since = num("since").unwrap_or(0.0) as u32;
                 let dir = shader_dir()?;
+                if a.get("next_only").and_then(Value::as_bool).unwrap_or(false) {
+                    // The next shader id without the bytecode (after many map loads the whole
+                    // store is too big for one answer): the first id with nothing after it.
+                    // Ids are dense from 0: binary search with one-shader answers.
+                    let (mut lo, mut hi) = (0u32, 1u32 << 24);
+                    while lo < hi {
+                        let mid = lo + (hi - lo) / 2;
+                        if self.c.shader_dump_max(mid, 1)?.is_empty() { hi = mid } else { lo = mid + 1 }
+                    }
+                    let next = lo;
+                    return Ok(json!({"next": next, "dir": dir.display().to_string(), "shaders": []}));
+                }
                 std::fs::create_dir_all(&dir)?;
                 let v = self.c.shader_dump(since)?;
                 let mut list = Vec::new();

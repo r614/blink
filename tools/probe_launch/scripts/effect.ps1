@@ -7,7 +7,7 @@ $d = if ($env:PROBE_SCRATCH) { $env:PROBE_SCRATCH } else { Join-Path $env:TEMP "
 $pl = if ($env:PROBE_LAUNCH) { $env:PROBE_LAUNCH } else { "C:/Users/Roshan/DEV/dishonored-rs/target-agents/i686-pc-windows-msvc/release/probe_launch.exe" }
 $o = Join-Path $PSScriptRoot "op.ps1"
 function J($op, $json) { $r = & $o $op $json | ConvertFrom-Json; if (-not $r.ok) { throw "$op failed: $($r.error)" }; $r.result }
-$next = (J shaders '{"since":0}').next
+$next = (J shaders '{"next_only":true}').next
 $base = J census '{"frames":20}'
 J power "{""name"":""$Power"",""level"":$Level}" | Out-Null
 J select_power "{""component"":""$Component""}" | Out-Null
