@@ -392,7 +392,11 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         let m = mm_mut(&mut game);
         if n.position.is_some() || n.spawner.is_some() {
             if let Some(p) = m.world.player_mut(id) {
+                // A mission NPC placed `At(x, y, z)` spawns with yaw 0 (the place carries no
+                // rotation); a pawn without input keeps its `last_input` (step_world), so both
+                // take the scenario's rotation, as `spawn_npc` does for a placed rotation.
                 p.yaw = n.yaw;
+                p.last_input.yaw = n.yaw;
             }
         }
         if matches!(n.state.as_deref().map(|x| x.to_ascii_lowercase()).as_deref(), Some("alerted" | "combat")) {
@@ -418,7 +422,7 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         chans.push((c.to_string(), u));
     }
     for (name, _) in &tracked {
-        for (c, u) in [("x", "uu"), ("y", "uu"), ("z", "uu"), ("yaw", "deg"), ("health", "pt"), ("alive", "bool"), ("condition", "enum"), ("state", "enum"), ("stance", "enum"), ("attn", "1"), ("attn_level", "n"), ("los", "1"), ("sighted", "bool"), ("suspicion", "n"), ("time_scale", "1"), ("speed2d", "uu/s")] {
+        for (c, u) in [("x", "uu"), ("y", "uu"), ("z", "uu"), ("yaw", "deg"), ("health", "pt"), ("alive", "bool"), ("condition", "enum"), ("state", "enum"), ("stance", "enum"), ("attn", "1"), ("attn_level", "n"), ("attn_noise", "1"), ("attn_noise_level", "n"), ("los", "1"), ("sighted", "bool"), ("suspicion", "n"), ("time_scale", "1"), ("speed2d", "uu/s")] {
             chans.push((format!("npc.{name}.{c}"), u));
         }
     }
@@ -468,7 +472,8 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             }
             v.push(brain.map_or(f64::NAN, |b| leg.idx(&format!("npc.{name}.state"), b.state)));
             v.push(poses.iter().find(|x| x.0 == *id).map_or(f64::NAN, |x| leg.idx(&format!("npc.{name}.stance"), x.1)));
-            v.extend([attn.map_or(0.0, |a| a.value as f64), attn.map_or(0.0, |a| a.level as f64), attn.map_or(f64::NAN, |a| a.los_norm as f64), b(attn.is_some_and(|a| a.sighted)), brain.map_or(f64::NAN, |b| b.suspicion_level() as f64)]);
+            let noise = brain.and_then(|b| b.attn.iter().find(|a| a.who == dishonored_ai::NOISE));
+            v.extend([attn.map_or(0.0, |a| a.value as f64), attn.map_or(0.0, |a| a.level as f64), noise.map_or(0.0, |a| a.value as f64), noise.map_or(0.0, |a| a.level as f64), attn.map_or(f64::NAN, |a| a.los_norm as f64), b(attn.is_some_and(|a| a.sighted)), brain.map_or(f64::NAN, |b| b.suspicion_level() as f64)]);
             v.extend([p.map_or(f64::NAN, |p| p.time_scale as f64), p.map_or(f64::NAN, |p| p.velocity.truncate().length() as f64)]);
         }
         v

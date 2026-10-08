@@ -142,8 +142,12 @@ fn fire_direction(p: &mut PlayerState, cfg: &GameplayConfig, t: &CombatTuning) -
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GunReload {
     pub fast: f32,
+    /// Nominal seconds (presentation).
     pub load: f32,
     pub end: f32,
+    /// Ticks from the reload's start to the load and to its end ([`ReloadTiming::ticks`]).
+    pub load_ticks: u32,
+    pub end_ticks: u32,
 }
 
 /// [`GunReload`] of the left-hand item (crossbow ammo types share the crossbow's).
@@ -153,7 +157,13 @@ pub fn gun_reload(p: &PlayerState, cfg: &GameplayConfig, t: &CombatTuning) -> Gu
     let fast = crate::powers::attribute_for(p, cfg, "Attribute_FastReload", 0.0, host);
     let speed = crate::powers::attribute_for(p, cfg, "Attribute_ReloadSpeed", 0.0, host);
     let (load, end) = stages.stages(speed, fast);
-    GunReload { fast, load, end }
+    let (load_ticks, end_ticks) = stages.ticks(speed, fast, crate::movement::DT);
+    GunReload { fast, load, end, load_ticks, end_ticks }
+}
+
+/// Whole ticks a left-hand timer (advanced by `dt` from 0) has run.
+fn ticks_of(timer: f32, dt: f32) -> u32 {
+    (timer / dt).round().max(0.0) as u32
 }
 
 /// Load the magazine from the reserve (0x00C28C50: `min(1 + MagazineBonus, held)` rounds in).
@@ -337,11 +347,11 @@ pub fn update(
                         events.push(SimEvent::Reloaded { id: p.id });
                     }
                 }
-                LeftPhase::Recovering if p.left.timer >= t.crossbow_fire_recovery => {
+                LeftPhase::Recovering if ticks_of(p.left.timer, ctx.dt) >= crate::tuning::action_ticks(t.crossbow_fire_recovery, ctx.dt) => {
                     p.left.phase = if left > 0 { LeftPhase::Reloading } else { LeftPhase::Idle };
                     p.left.timer = 0.0;
                 }
-                LeftPhase::Reloading if p.left.timer >= g.end => {
+                LeftPhase::Reloading if ticks_of(p.left.timer, ctx.dt) >= g.end_ticks => {
                     p.left.phase = LeftPhase::Idle;
                     events.push(SimEvent::Reloaded { id: p.id });
                 }
@@ -396,6 +406,14 @@ pub fn update(
             // action and loads the bolt at its end (0x00C2E570 / 0x00C2E730).
             let fast_fire = bolt && g.fast > 0.0 && reserve_now > 0;
             let now = p.left.timer;
+            // The player's fire context starts the fire action on the press and the shot leaves
+            // on the next tick (measured at 60 Hz: shot -> reload start 0.283 s for the pistol's
+            // 0.300 s fire action, HOOK_TRIAGE.md); NPC guns are their own context (not
+            // measured): they fire on the press.
+            let delayed = p.kind == crate::state::PawnKind::Human;
+            if delayed && p.left.phase == LeftPhase::Recovering && prev_timer == 0.0 {
+                fire_gun(p, bolt, ctx, cfg, t, spawn, events);
+            }
             match p.left.phase {
                 LeftPhase::Equipping if now >= equip => p.left.phase = LeftPhase::Idle,
                 LeftPhase::Recovering if fast_fire => {
@@ -406,7 +424,9 @@ pub fn update(
                         p.left.phase = LeftPhase::Idle;
                     }
                 }
-                LeftPhase::Recovering if now >= recovery => {
+                // The fire action ends on the tick its animation reaches the AnimStateExit
+                // (`tuning::action_ticks`, counted from the press).
+                LeftPhase::Recovering if ticks_of(now, ctx.dt) >= crate::tuning::action_ticks(recovery, ctx.dt) => {
                     // The fire action's end requests a reload when the weapon is empty and ammo
                     // is held (pistol 0x00C2EA00, crossbow 0x00C2E730).
                     let loaded = if bolt { p.left.bolts_loaded } else { p.left.pistol_loaded };
@@ -414,11 +434,13 @@ pub fn update(
                     p.left.timer = 0.0;
                 }
                 LeftPhase::Reloading => {
-                    // The timed stage's end loads the magazine; the ReloadOut action follows.
-                    if prev_timer < g.load && now >= g.load && load_magazine(p, bolt, mag) {
+                    // ReloadIn, then the timed countdown whose end loads the magazine
+                    // (0x00C2AC00), then ReloadOut, in whole ticks (`ReloadTiming::ticks`).
+                    let (t0, t1) = (ticks_of(prev_timer, ctx.dt), ticks_of(now, ctx.dt));
+                    if t0 < g.load_ticks && t1 >= g.load_ticks && load_magazine(p, bolt, mag) {
                         events.push(SimEvent::Reloaded { id: p.id });
                     }
-                    if now >= g.end {
+                    if t1 >= g.end_ticks {
                         p.left.phase = LeftPhase::Idle;
                     }
                 }
@@ -427,14 +449,11 @@ pub fn update(
                     let reserve = if bolt { p.left.bolts_reserve } else { p.left.pistol_reserve };
                     if pressed && loaded > 0 {
                         if bolt { p.left.bolts_loaded -= 1 } else { p.left.pistol_loaded -= 1 }
-                        let eye = eye_position(p, ctx.cfg);
-                        let dir = fire_direction(p, cfg, t);
-                        let speed = if bolt { t.bolt_speed } else { t.bullet_speed };
-                        spawn.push((if bolt { ProjectileKind::Bolt } else { ProjectileKind::Bullet }, eye, dir * speed));
                         p.left.phase = LeftPhase::Recovering;
                         p.left.timer = 0.0;
-                        let (radius, cat) = if bolt { (500.0, SoundCategory::Crossbow) } else { (4000.0, SoundCategory::Pistol) };
-                        events.push(SimEvent::Sound { position: eye, radius, category: cat, source: p.id });
+                        if !delayed {
+                            fire_gun(p, bolt, ctx, cfg, t, spawn, events);
+                        }
                     } else if reserve > 0 && ((loaded == 0 && pressed) || (loaded < mag && input.pressed(buttons::RELOAD))) {
                         p.left.phase = LeftPhase::Reloading;
                         p.left.timer = 0.0;
@@ -447,6 +466,17 @@ pub fn update(
     }
 }
 
+/// The shot of a pistol or crossbow: the projectile from the eye through the dispersion offset
+/// (`fire_direction`), and its noise.
+#[allow(clippy::too_many_arguments)]
+fn fire_gun(p: &mut PlayerState, bolt: bool, ctx: &MoveCtx, cfg: &GameplayConfig, t: &CombatTuning, spawn: &mut Vec<(ProjectileKind, Vec3, Vec3)>, events: &mut Vec<SimEvent>) {
+    let eye = eye_position(p, ctx.cfg);
+    let dir = fire_direction(p, cfg, t);
+    let speed = if bolt { t.bolt_speed } else { t.bullet_speed };
+    spawn.push((if bolt { ProjectileKind::Bolt } else { ProjectileKind::Bullet }, eye, dir * speed));
+    let (radius, cat) = if bolt { (500.0, SoundCategory::Crossbow) } else { (4000.0, SoundCategory::Pistol) };
+    events.push(SimEvent::Sound { position: eye, radius, category: cat, source: p.id });
+}
 /// Dark Vision is in effect (`DisActivePowerComponent_DarkVision` slot +0x160: any of the fade-in,
 /// effect and fade-out timers running).
 pub fn dark_vision_active(p: &PlayerState) -> bool {
