@@ -359,6 +359,10 @@ pub struct PlayerState {
     /// collision (0x00B529C0) tests the last damage's instigator and type.
     #[serde(default)]
     pub windblasted_by: Option<PlayerId>,
+    /// The animated flight of a thrown NPC (`StateNPCMasterThrown` in `PHYS_Flying`), while
+    /// `mode` is `Falling`.
+    #[serde(default)]
+    pub thrown: ThrownState,
     /// Set by the falling move when it hit a wall this tick: (normal, speed before the hit).
     /// Transient, read by `step_world` the same tick.
     #[serde(skip)]
@@ -701,6 +705,7 @@ impl PlayerState {
             mantle_allowed: false,
             combat_opponents: 0,
             windblasted_by: None,
+            thrown: ThrownState::default(),
             wall_hit: None,
             swarm: None,
             footfall_phase: 0.0,
@@ -968,7 +973,24 @@ pub const SWARM_RELEASE_TICKS: u8 = 16;
 /// Seconds over which an ended swarm's rats despawn (MEASURED: about 10 s).
 pub const SWARM_DESPAWN_SECONDS: f32 = 10.0;
 
-/// A Windblast: `m_fWarmupTime` after the cast the origin and direction are taken from
+/// The Flying phase of a thrown NPC (`StateNPCMasterThrown`, 0x00A81860 / tick 0x00A98DD0):
+/// the pawn is in `PHYS_Flying` with `AirSpeed = |v|` at the throw, gravity added by the state
+/// each tick, until the throw animation's `DishonoredNotify_Ragdoll` (`ragdoll_at` seconds)
+/// hands it to the ragdoll (the sim's falling move).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct ThrownState {
+    pub active: bool,
+    /// Seconds of the throw animation played.
+    pub time: f32,
+    /// The ragdoll notify's time in the throw animation.
+    pub ragdoll_at: f32,
+    /// `Pawn.AirSpeed` set at the throw: the flight's speed cap.
+    pub air_speed: f32,
+    /// The flight's `CalcVelocity` friction: half the physics volume's `FluidFriction`.
+    pub friction: f32,
+}
+
+/// A Windblast: the cast animation's notify after the cast, the origin and direction are taken from
 /// the caster's view and the blast front expands at `m_Speed`; targets gathered at that
 /// moment are hit when the front reaches them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
