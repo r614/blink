@@ -1,0 +1,29 @@
+// Windblast level 1 on an idle guard 900 uu ahead on the Boyle runway: the throw rule of the
+// NPC hit reaction (research/dishonored/systems/physics.md). Blast factor k = (1 - d3/3000)^2
+// (aligned), momentum = k x (1800 along the aim, z = 1000 (1 - d3/3000)); the reaction class
+// follows |momentum| against the pawn's `Twk_Component_HitReactionThrow_NPC`
+// (m_fStrongHitReactThreshold 500, m_fAnimRagdollThreshold 1000, m_fFullRagdollThreshold 3800):
+// predicted |momentum| here = 946; between 500 and 1000: a strong hit reaction, no throw expected. A thrown NPC leaves with Velocity = momentum / 2
+// (m_fEffectiveMassForThrowing 2.0, 0x00BEB6E0).
+(
+    name: "physics/windblast_throw_d900",
+    system: Physics,
+    map: "L_Boyle_Ext_P",
+    description: "Windblast level 1 at an idle guard 900 uu ahead: |momentum| 946, between 500 and 1000: a strong hit reaction, no throw expected.",
+    setup: (
+        player: Some((position: (-3400, -3150, -190), yaw: 270, snap_to_floor: true)),
+        powers: [("WindBlast", 1)],
+        left_hand: Some("Windblast"),
+        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), position: Some((-3400, -4050, -217.5)), yaw: 90, state: Some("Idle"), faction: Some("None"))],
+        settle: 30,
+    ),
+    ticks: 240,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "damage", expect: [(metric: EventValue("Sim:Damage@guard[cause=Windblast]", "amount"), value: 10, tol: 1, source: "Twk_WindBlast m_Levels[0].m_Damage 20 x k (round); k = (1 - d3/3000)^2 with d3 = 901", status: Static)]),
+        (name: "reaction class", expect: [(metric: Max("npc.guard.physics"), value: 1, tol: 0, cmp: AtMost, source: "|momentum| 946 < 1000 (threshold consumer not decoded); a throw would show physics 4", status: Unmeasured)]),
+    ],
+    record: [Pawn, Vitals, Powers, Npc("guard"), SimEvents],
+    capture: Some("lab setup 60; lab power WindBlast 1; place -3400 -3150 -190 270; move the party guard 900 uu ahead; record npc.guard x/y/z/physics/health"),
+)
+
