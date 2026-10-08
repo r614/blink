@@ -22,7 +22,7 @@ pub struct NavAgent {
 }
 
 /// Bumped when the derived data below changes shape.
-const DERIVED_VERSION: u32 = 5; // 2: brushes collide as the original's Cube_100 (simple box collision); 3: stealth light environment (Boyle's light range, layout lights as stealth lights); 4: Boyle's sky light in the stealth lights; 5: stealth lights unoccluded (InterpActor layout)
+const DERIVED_VERSION: u32 = 6; // 2: brushes collide as the original's Cube_100 (simple box collision); 3: stealth light environment (Boyle's light range, layout lights as stealth lights); 4: Boyle's sky light in the stealth lights; 5: stealth lights unoccluded (InterpActor layout); 6: the collision world carries `channel::SHADOW` (the InterpActor cubes do not cast it), AiLevel without the unoccluded flag
 
 /// The layout file of a map, when the map is a layout (`maps/<name>.ron`, lower case): next to the
 /// working directory, the executable, or the repository root of a `target/<profile>` build;
@@ -407,7 +407,6 @@ fn derive(content: &Content, sim: &SimConfig, layout: &MapLayout) -> Result<(Col
         }
     }
     ai_level.light_volumes.clear();
-    ai_level.stealth_light_unoccluded = true;
     ai_level.sky_light = layout.sky_light;
     Ok((collision, Derived { water, volumes, climbables, pickups, usables, ai_level }))
 }

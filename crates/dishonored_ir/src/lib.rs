@@ -505,6 +505,13 @@ pub struct MeshInstance {
     /// The component's `ReflectionChannels` (see [`reflect_channel`]); 0 = in no reflection capture.
     #[serde(default)]
     pub reflect_channels: u32,
+    /// The stealth light's visibility line check (`TRACE_ShadowCast`, flags 0x2397 at 0x004FF5C2)
+    /// hits this component: it is in the primitive octree (`CollideActors`, its actor's
+    /// `bCollideActors`), `CastShadow` and `bUsePrecomputedShadows`, `bAcceptsLights`, and has no
+    /// `LightEnvironment` (the octree's line check 0x006B12C0 and `ULightComponent::AffectsPrimitive`
+    /// 0x00519760; research/dishonored/systems/stealth.md section 14).
+    #[serde(default)]
+    pub stealth_shadow: bool,
 }
 
 pub fn all_trace_types() -> u8 {

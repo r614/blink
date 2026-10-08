@@ -336,7 +336,8 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     }
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).ok();
-    let coll_path = dir.join(format!("{map}.collision19.bin"));
+    // collision20: triangles carry `channel::SHADOW` (the stealth light's line check).
+    let coll_path = dir.join(format!("{map}.collision20.bin"));
     let spawn_path = dir.join(format!("{map}.spawns.json"));
     let (collision, spawns) = match (CollisionWorld::load(&coll_path), std::fs::read_to_string(&spawn_path)) {
         (Ok(w), Ok(s)) => (w, serde_json::from_str::<Vec<Spawn>>(&s).unwrap_or_default()),
@@ -430,9 +431,10 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         pkgs
     };
     // AI level data: factions, forbidden zones, alarm bells, probe lights, distractors
-    // (dishonored_ai). ailevel8: directional stealth lights carry their TraceDistance; distractors
-    // and per-tweak health / distraction cooldowns.
-    let ai_path = dir.join(format!("{map}.ailevel8.json"));
+    // (dishonored_ai). ailevel9: directional stealth lights carry their TraceDistance; distractors
+    // and per-tweak health / distraction cooldowns; no `stealth_light_unoccluded` (the line check
+    // meets `channel::SHADOW` geometry instead).
+    let ai_path = dir.join(format!("{map}.ailevel9.json"));
     let ai_level: dishonored_ir::ai::AiLevel = match std::fs::read_to_string(&ai_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(a) => a,
         None => {

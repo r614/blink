@@ -42,6 +42,10 @@ pub mod channel {
     pub const NPC: u8 = 1 << 5;
     /// Movement of actors that are not pawns (`m_bTraceForMove_NonPawn`).
     pub const NON_PAWN: u8 = 1 << 6;
+    /// What the stealth light's visibility line check (`TRACE_ShadowCast`, flags 0x2397) meets:
+    /// the components flagged [`dishonored_ir::MeshInstance::stealth_shadow`]. It is not part of
+    /// [`ALL`] (a `DisPrimTraceMask` has no such bit): no movement or gameplay check sees it.
+    pub const SHADOW: u8 = 1 << 7;
     pub const ALL: u8 = 0x7F;
 
     /// The channels of a `DisPrimTraceMask` (bit 0 move non-pawn, 1 move NPC, 2 move player,
@@ -74,7 +78,9 @@ pub mod shape {
     /// The gameplay checks that ask for complex collision in the original: the pistol shot
     /// (flags 0x020A28DF), the crosshair (0x01022097) and the vision line of sight (0x08023086),
     /// measured with the engine hook (research/dishonored/COLLISION.md "Trace flags").
-    pub const COMPLEX_CHANNELS: u8 = super::channel::CROSSHAIR | super::channel::PROJECTILE | super::channel::VISION;
+    /// The stealth light's check (flags 0x2397 include `TRACE_ShadowCast` 0x100, which
+    /// `UStaticMeshComponent::LineCheck` reads as complex collision, `& 0x20100`) asks for it too.
+    pub const COMPLEX_CHANNELS: u8 = super::channel::CROSSHAIR | super::channel::PROJECTILE | super::channel::VISION | super::channel::SHADOW;
 
     /// The shape bit a line check on `channels` needs.
     pub fn line_for(channels: u8) -> u8 {
@@ -816,7 +822,9 @@ impl CollisionWorld {
         let (mut tri_shape, mut tri_kind, mut tri_elem) = (Vec::new(), Vec::new(), Vec::new());
         // Element ids: per instance local ids made distinct from the neighbours'.
         let mut elem_base = 0u32;
-        for inst in map.instances.iter().filter(|i| i.collides) {
+        // Colliding instances, and those that only the stealth light's line check meets (they
+        // collide in the original's octree without blocking pawns); movers are layered at run time.
+        for inst in map.instances.iter().filter(|i| i.mover.is_none() && (i.collides || i.stealth_shadow)) {
             let mesh = &map.meshes[inst.mesh];
             let src = sources.len() as u32;
             // The level package first when known (the stealth light's floor level, `hit_package`).
@@ -1167,7 +1175,11 @@ fn instance_triangles(map: &DishonoredMap, inst: &dishonored_ir::MeshInstance) -
     let mesh = &map.meshes[inst.mesh];
     let xf = inst.transform;
     let mirrored = xf.determinant() < 0.0;
-    let channels = channel::from_trace_mask(inst.trace_mask);
+    // A component that does not block pawns (`collides` false) answers no movement or gameplay
+    // check; the stealth light's check meets it when it casts a static shadow.
+    // (A mover's component collides where its actor is, whatever `collides` says.)
+    let blocks = inst.collides || inst.mover.is_some();
+    let channels = if blocks { channel::from_trace_mask(inst.trace_mask) } else { 0 } | if inst.stealth_shadow { channel::SHADOW } else { 0 };
     let simple = (if mesh.simple_line { shape::LINE } else { 0 }) | (if mesh.simple_box { shape::EXTENT } else { 0 });
     let complex = shape::BOTH & !simple;
     let mut out = Vec::new();

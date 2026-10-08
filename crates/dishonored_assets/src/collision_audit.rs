@@ -228,6 +228,45 @@ pub fn trace_mask(props: &[Property]) -> u8 {
     m
 }
 
+/// Whether the stealth light's visibility line check (`FUN_004FF270`: `SingleLineCheck` with
+/// flags 0x2397, `TRACE_ShadowCast` 0x100 among them) can hit a component, from its effective
+/// properties (`cp`) and its actor's (`actor`; `None`: no owner).
+///
+/// The check runs through `UWorld::MultiLineCheck` (0x0064A860) into the world's primitive octree
+/// (line check 0x006B12C0). With `TRACE_ShadowCast` the octree skips the movement / gameplay
+/// trace-type bit (0x00529990) and the collision test (0x00529E90) and asks instead
+/// `light.AffectsPrimitive(component, 0)` (0x00519760), after requiring `CastShadow` (+0x114 bit
+/// 20) and `bUsePrecomputedShadows` (bit 30). `AffectsPrimitive` needs the component's
+/// `LightEnvironment` to be the light's (none, for placed lights), `bAcceptsLights` (bit 27), and
+/// then the light to reach the component's bounds (implied: the check runs from inside the light's
+/// reach to the light) and its level to be loaded. The owner's `ShouldTrace` (vtable +0x1C4) must
+/// accept flags 0x2397 (`TRACE_Movers`/`TRACE_Others` without `TRACE_Blocking`: every actor does;
+/// `InterpActor::ShouldTrace` 0x00568990 answers 1). Only components attached to the octree can
+/// be met at all: those that collide (`CollideActors` and the actor's `bCollideActors`, 0x0052A0B0).
+///
+/// Not evaluated: `bAcceptsDynamicLights` (the original also lets a primitive that refuses
+/// dynamic lights count when the light is static, 0x00512850); static mesh components accept
+/// them by default.
+pub fn blocks_stealth_light(cp: &[Property], actor: Option<&[Property]>) -> bool {
+    let in_octree = flag(cp, "CollideActors") && actor.is_none_or(|a| flag(a, "bCollideActors"));
+    let light_environment = find(cp, "LightEnvironment").and_then(|p| p.as_object()).is_some_and(|o| o != 0);
+    in_octree && flag(cp, "CastShadow") && flag(cp, "bUsePrecomputedShadows") && flag(cp, "bAcceptsLights") && !light_environment
+}
+
+/// [`blocks_stealth_light`] for the `StaticMeshComponent0` of an Engine class default
+/// (`Default__<class>`): what the original's actors spawned from the class get (the Playground's
+/// cubes are `InterpActor`s). `false` when the class default is not found.
+pub fn class_blocks_stealth_light(content: &Content, class: &str) -> bool {
+    let Ok(pkg) = content.package("Engine") else { return false };
+    let actor_path = format!("Default__{class}").to_ascii_lowercase();
+    let comp_path = format!("Default__{class}.StaticMeshComponent0").to_ascii_lowercase();
+    let find_path = |want: &str| (0..pkg.exports.len()).find(|&i| pkg.obj_path(ObjRef::Export(i)).eq_ignore_ascii_case(want));
+    let (Some(a), Some(c)) = (find_path(&actor_path), find_path(&comp_path)) else { return false };
+    let mut r = PropResolver::new(content);
+    let (ap, cp) = (r.effective(&pkg, a), r.effective(&pkg, c));
+    blocks_stealth_light(&cp, Some(&ap))
+}
+
 /// One colliding primitive of a placed actor, with its effective flags.
 #[derive(Debug, Clone, Default)]
 pub struct CollisionSource {
@@ -386,6 +425,42 @@ pub fn collision_sources(content: &Content, packages: &[String]) -> Vec<Collisio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The stealth light's line check meets a `StaticMeshActor`'s mesh (precomputed shadows, no
+    /// light environment) and not the movable classes' (`InterpActor`, `KActor`, `DynamicSMActor`:
+    /// a `DynamicLightEnvironmentComponent`, no precomputed shadows).
+    #[test]
+    fn engine_class_defaults_stealth_light() {
+        let Ok(c) = Content::locate() else { return };
+        if !c.has_package("Engine") {
+            return;
+        }
+        assert!(class_blocks_stealth_light(&c, "StaticMeshActor"));
+        for movable in ["InterpActor", "DynamicSMActor", "KActor", "DynamicSMActor_Spawnable"] {
+            assert!(!class_blocks_stealth_light(&c, movable), "{movable}");
+        }
+    }
+
+    #[test]
+    fn stealth_light_flags_gate_the_hit() {
+        let b = |n: &str, v: bool| Property { name: n.into(), type_name: "BoolProperty".into(), array_index: 0, value: Value::Bool(v) };
+        let o = |n: &str, v: i32| Property { name: n.into(), type_name: "ObjectProperty".into(), array_index: 0, value: Value::Object(v) };
+        let base = vec![b("CollideActors", true), b("CastShadow", true), b("bUsePrecomputedShadows", true), b("bAcceptsLights", true)];
+        let actor = vec![b("bCollideActors", true)];
+        assert!(blocks_stealth_light(&base, Some(&actor)));
+        // Each requirement on its own.
+        for n in ["CollideActors", "CastShadow", "bUsePrecomputedShadows", "bAcceptsLights"] {
+            let mut p = base.clone();
+            merge_props(&mut p, &[b(n, false)]);
+            assert!(!blocks_stealth_light(&p, Some(&actor)), "{n}");
+        }
+        assert!(!blocks_stealth_light(&base, Some(&[b("bCollideActors", false)])));
+        let mut p = base.clone();
+        p.push(o("LightEnvironment", 17));
+        assert!(!blocks_stealth_light(&p, Some(&actor)));
+        merge_props(&mut p, &[o("LightEnvironment", 0)]);
+        assert!(blocks_stealth_light(&p, Some(&actor)));
+    }
 
     #[test]
     fn struct_members_merge_over_the_archetype() {

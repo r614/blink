@@ -602,8 +602,6 @@ pub struct Crowd {
     pub stealth_lights: Vec<ProbeLight>,
     #[serde(default)]
     pub light_volumes: Vec<dishonored_ir::ai::LightVolume>,
-    /// [`dishonored_ir::ai::AiLevel::stealth_light_unoccluded`].
-    pub stealth_light_unoccluded: bool,
     /// Per (player, stealth light): the last visibility traces (bit mask over the samples, next
     /// sample, update stamp; 0x004FF270) and the update counter.
     #[serde(skip)]
@@ -1335,7 +1333,6 @@ impl Crowd {
                 }
             }
             let stamp = self.light_updates;
-            let unoccluded = self.stealth_light_unoccluded;
             let vis = &mut self.light_vis;
             let id = p.id;
             dishonored_ir::ai::stealth_light_value(&self.stealth_lights, volume, origin, sphere, |i, l| {
@@ -1347,7 +1344,10 @@ impl Crowd {
                 let (a, b) = dishonored_ir::ai::visibility_segment(l, origin, sphere, extent, points[k]);
                 let d = b - a;
                 let len = d.length();
-                let clear = unoccluded || len < 1e-3 || world.raycast(a, d / len, len, channel::ALL).is_none();
+                // The line check of flags 0x2397 (`TRACE_ShadowCast`) meets the components that
+                // cast a static shadow (`channel::SHADOW`, stealth.md section 14), not every
+                // collider.
+                let clear = len < 1e-3 || world.raycast(a, d / len, len, channel::SHADOW).is_none();
                 e.0 = if clear { e.0 | 1 << k } else { e.0 & !(1 << k) };
                 e.1 = ((k + 1) % SAMPLES) as u8;
                 e.2 = stamp;
@@ -1386,7 +1386,6 @@ impl Crowd {
         self.tweak_health_max = level.tweak_health_max.clone();
         self.stealth_lights = level.stealth_lights.clone();
         self.light_volumes = level.light_volumes.clone();
-        self.stealth_light_unoccluded = level.stealth_light_unoccluded;
     }
 
     /// Faction of a spawned NPC: the spawner's `m_pFactionTweakOverride`, else its pawn
@@ -4291,6 +4290,39 @@ mod tests {
         assert_eq!(far, 0.0);
         // Below the floor: shadowed.
         assert_eq!(light_at(std::slice::from_ref(&l), Vec3::new(0.0, 0.0, -100.0), &w), 0.0);
+    }
+
+    /// The stealth light's visibility line check (flags 0x2397, `TRACE_ShadowCast`) meets the
+    /// geometry that casts a static shadow (`channel::SHADOW`), not every collider: a roof that
+    /// only blocks pawns lets the light through, a shadow-casting one does not (stealth.md
+    /// section 14; the Playground's `InterpActor` cubes are colliders of the first kind).
+    #[test]
+    fn stealth_light_line_check_meets_shadow_casters_only() {
+        use dishonored_world::Tri;
+        let s = 2000.0;
+        let roof = |channels: u8| {
+            let z = 250.0;
+            let (a, b, c, d) = (Vec3::new(-s, -s, z), Vec3::new(s, -s, z), Vec3::new(s, s, z), Vec3::new(-s, s, z));
+            let tri = |x: Vec3, y: Vec3, w: Vec3| Tri { a: x, b: y, c: w, n: Vec3::NEG_Z, channels, source: 0 };
+            CollisionWorld::from_triangles(vec![tri(a, b, c), tri(a, c, d)], vec!["roof".into()])
+        };
+        let level = AiLevel {
+            stealth_lights: vec![ProbeLight { kind: 0, position: Vec3::new(0.0, 0.0, 400.0), intensity: 1.0, radius: 1000.0, falloff_exponent: 2.0, casts_shadows: true, ..Default::default() }],
+            ..Default::default()
+        };
+        let value = |world: &CollisionWorld| {
+            let mut crowd = Crowd::default();
+            crowd.set_level(&level);
+            let p = pawn(1, PawnKind::Human, Vec3::new(0.0, 0.0, 100.0), 0.0);
+            // One sample is traced per update: the share of clear traces settles after four.
+            (0..4).map(|_| crowd.update_player_light(&p, world).0).last().unwrap()
+        };
+        let open = value(&CollisionWorld::from_triangles(Vec::new(), Vec::new()));
+        assert!(open > 0.1, "{open}");
+        // Blocks every pawn and gameplay check, casts no static shadow: the light reaches.
+        assert_eq!(value(&roof(channel::ALL)), open);
+        // Casts a static shadow: the light is blocked.
+        assert_eq!(value(&roof(channel::SHADOW)), 0.0);
     }
 
     #[test]
