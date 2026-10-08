@@ -1,0 +1,28 @@
+// A factionless guard (neutral to the player) facing away; the player fires the pistol 800 uu
+// behind it. The guard turns to the noise (React, then Investigate) and then sees the player
+// standing there recovering from the shot. Does a neutral guard that did not see the shot being
+// fired turn Busted on the player? The port's `criminal()` treats the pistol's Recovering phase
+// (about 1.5 s) as a visible attack; the original's reaction list has no gunshot response
+// (`DisTweaks_AIBrain_Reaction`: HurtByPlayer, DestroyWoB, Breakable_Broke, PlayerThreats
+// (Harmless), WoL_ZapObject, Carry*Corpse, WitnessPickpocket).
+(
+    name: "ai/shot_in_view_of_neutral",
+    system: Ai,
+    map: "Playground",
+    description: "A neutral guard that turns around to the shot and sees the shooter recovering.",
+    setup: (
+        player: Some((position: (-5600, 0, 96), yaw: 0, pitch: 60)),
+        items: ["Bullet:5"],
+        left_hand: Some("Pistol"),
+        npcs: [(id: Some("guard"), position: Some((-4800, 0, 92)), yaw: 0, state: Some("Idle"), faction: Some("None"))],
+        settle: 120,
+    ),
+    ticks: 600,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "never fights", expect: [(metric: TimeAt("npc.guard.state", 9), value: 0, tol: 0, source: "a neutral pawn is only head-tracked toward the player (AI.md Factions / Attention); the reaction list has no response for a fired gun", status: Unverified)]),
+        (name: "attention on the player stays below Busted", expect: [(metric: Max("npc.guard.attn_level"), value: 3, tol: 0, cmp: AtMost, source: "relationship Neutral: head-track only", status: Unverified)]),
+    ],
+    record: [Pawn, Npc("guard"), SimEvents],
+    capture: Some("scenario boyle_hear_shot answers the same question on the original"),
+)

@@ -1,0 +1,24 @@
+// The Window_Elite doorman (spawner `DishonoredSpawner_2` of the Window_Elite squad, `Pwn_EliteGuard_MTall_2_Doorman`; the name is ambiguous with Lord Shaw's spawner, so the pawn is placed by tweak, near
+// (-1611, -4599, -682); the sword baseline of INSTRUMENTATION.md) against a player standing
+// 500 uu from him and not attacking. The original-side observable is the doorman's position and
+// the player's health steps per tick: approach time, attack rhythm (flurries and the 4-5 s
+// recoveries), strafing and back steps.
+(
+    name: "ai/boyle_doorman_duel",
+    system: Ai,
+    map: "L_Boyle_Ext_P",
+    description: "A Boyle elite guard fights a motionless player for 30 s.",
+    setup: (
+        player: Some((position: (-1611, -4099, -682), yaw: -90, snap_to_floor: true)),
+        npcs: [(id: Some("doorman"), tweak: Some("Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman"), position: Some((-1611.4, -4599.3, -676)), yaw: 90, state: Some("Idle"), faction: Some("DisFaction_Defaults.Faction_Guard_Default"))],
+        settle: 1,
+    ),
+    ticks: 1800,
+    input: [],
+    checkpoints: [
+        (name: "closes in", expect: [(metric: TimeToReach("pawn.health", 69), value: 10, tol: 0, cmp: AtMost, source: "placeholder bound; the original's time to the first hit is the measurement", status: Unmeasured)]),
+        (name: "player health lost", expect: [(metric: DropFrom("pawn.health", 0), value: 0, tol: 0, source: "damage taken over 30 s of unblocked contact", status: Unmeasured)]),
+    ],
+    record: [Pawn, Vitals, Npc("doorman"), SimEvents],
+    capture: Some("scenario boyle_doorman_duel: doorman Location/health and the player's health per tick"),
+)

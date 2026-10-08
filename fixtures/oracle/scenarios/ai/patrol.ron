@@ -14,7 +14,7 @@
     checkpoints: [
         (name: "patrol state", expect: [(metric: TimeAt("npc.guard.state", 6), value: 1, tol: 0, cmp: AtMost, source: "a patrolling spawn starts in DisBehaviorPatrol", status: Static)]),
         (name: "reaches the far point", expect: [(metric: Max("npc.guard.x"), value: 900, tol: 0, cmp: AtLeast, source: "DisBehaviorPatrol walks to each route point", status: Static)]),
-        (name: "walk speed", expect: [(metric: Max("npc.guard.speed2d"), value: 0, tol: 0, source: "patrol walk speed of an elite guard", status: Unmeasured)]),
+        (name: "walk speed", expect: [(metric: Max("npc.guard.speed2d"), value: 145.24, tol: 5, source: "EliteGuardLocomotionConfig SwordPatrolWalk forward loop Sword_Patrol_WalkN authored 145.24 uu/s (the port walks at the player walk speed); speed = loop speed is LIKELY, not measured", status: Unmeasured)]),
     ],
     record: [Npc("guard")],
     capture: Some("lab npcs: sample a patrolling Boyle guard's Location and behaviour per tick"),

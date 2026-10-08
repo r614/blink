@@ -1,1 +1,7 @@
 # One scenario name per line (or 'session <op> key=value...'); the coordinator runs this queue on the hooked original.
+ai/boyle_patrol_speed
+ai/boyle_hear_shot
+ai/boyle_doorman_duel
+session read object=Default__DishonoredGlobalAIManager path=m_ReactionDelay
+session read object=Default__DishonoredGlobalAIManager path=m_MagicReactionDelay
+session props class=DishonoredAIBrain filter=Behavior

@@ -1,0 +1,27 @@
+// The Boyle party guard `DishonoredSpawner_46` (yaw 251.37, faction Neutral_Guard: the masked
+// player is neutral to the party) with the player 800 uu BEHIND it, out of its cone, firing the
+// pistol once (Pistol noise radius 4000). Compares what the original guard does after a gunshot
+// it hears but did not see coming: turn, walk to the shot, or fight. Position per tick is the
+// original-side observable (`Npc` channels: x, y, z, health, physics).
+(
+    name: "ai/boyle_hear_shot",
+    system: Ai,
+    map: "L_Boyle_Ext_P",
+    description: "Fire the pistol 800 uu behind a Boyle party guard: its reaction (turn / walk / fight).",
+    setup: (
+        player: Some((position: (-2753.9, -1437.0, -80), yaw: 71.37, pitch: 20, snap_to_floor: true)),
+        items: ["Bullet:5"],
+        left_hand: Some("Pistol"),
+        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), yaw: 251.37, state: Some("Idle"))],
+        settle: 60,
+    ),
+    ticks: 720,
+    input: [(tick: 5, action: Press(Secondary))],
+    checkpoints: [
+        (name: "heard", expect: [(metric: At("npc.guard.attn_noise", 8), value: 0.6, tol: 0.01, source: "AI.md (0x00b60ca0): Danger sound = +0.4, floored at Investigate's start 0.6", status: Static)]),
+        (name: "does not fight a neutral player", expect: [(metric: TimeAt("npc.guard.state", 9), value: 0, tol: 0, source: "Neutral_Guard has no enmity toward Corvo (AI.md Factions); a shot raises hearing attention only", status: Unverified)]),
+        (name: "moves toward the shot", expect: [(metric: TimeToReach("npc.guard.speed2d", 20), value: 2, tol: 0, cmp: AtMost, source: "react 0.18-0.30 s, then Investigate runs for Danger noise (m_SearchFromNoiseTweaks[4].m_bShouldRun)", status: Unmeasured)]),
+    ],
+    record: [Pawn, Npc("guard"), SimEvents],
+    capture: Some("scenario boyle_hear_shot: guard position per tick after one pistol shot behind it"),
+)
