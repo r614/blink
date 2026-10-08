@@ -600,6 +600,9 @@ day). `oracle scenario` then reports a first divergence for all 68; most are at 
 settled height: the original hovers 3.73 uu above a floor (cube or Boyle runway), the port 6.73,
 which masks later channels until that is resolved or tolerated.
 
+Third full run (2026-10-08, main d42497c's queue of 160 lines, this branch's build in
+`target-agents-hook`): 160 ok, 0 failed, 1098 s.
+
 ### Layout maps in the original (the Playground)
 
 A scenario whose map has a layout file (`maps/<map>.ron`, the Playground) is captured by
