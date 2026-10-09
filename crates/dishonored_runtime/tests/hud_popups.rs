@@ -102,3 +102,83 @@ fn mission_changes_become_popups() {
     assert_eq!(q.queue.len(), 2);
     assert_eq!(q.queue[1].event, EV_TARGET);
 }
+
+// --- interactions (the crosshair's focus) ------------------------------------------------------
+
+/// `m_InteractionTexts` stand-ins by `EDisUIInteraction` (the install's values are read at run time).
+fn texts() -> Vec<String> {
+    let mut t = vec![String::new(); 40];
+    t[DUI_SPECIAL_CHOKE] = "`GBA_Block` CHOKE".into();
+    t[DUI_CROSSHAIR_PICKUP] = "`GBA_Use` PICKUP".into();
+    t[DUI_CROSSHAIR_CARRY] = "`GBA_Use` CARRY".into();
+    t
+}
+
+fn focus(crosshair: Option<(dishonored_sim::crosshair::TargetRef, dishonored_sim::crosshair::CrosshairStatus)>, text: &str, name: &str, choke: bool) -> dishonored_multiplayer::MatchView {
+    let crosshair = crosshair.map(|(target, status)| dishonored_sim::crosshair::Crosshair { target, usable: true, status });
+    dishonored_multiplayer::MatchView {
+        focus: vec![dishonored_multiplayer::FocusView { player: 1, crosshair, text: text.into(), name: name.into(), point: Some([1.0, 2.0, 3.0]), choke }],
+        ..Default::default()
+    }
+}
+
+fn me() -> dishonored_sim::state::PlayerState {
+    dishonored_sim::state::PlayerState::new(1, glam::Vec3::ZERO, 0.0)
+}
+
+#[test]
+fn the_prompt_is_the_hosts_crosshair_target() {
+    use dishonored_sim::crosshair::{CrosshairStatus as St, TargetRef as T};
+    let mv = MissionView::default();
+    // A host target's prompt and name, as the host sent them; the crosshair moves to its point.
+    let f = focused_interaction(&mv, &focus(Some((T::Host(0), St::Usable)), "`GBA_Use` Talk", "Granny Rags", false), &me(), &texts()).unwrap();
+    assert_eq!((f.text.as_str(), f.name.as_str(), f.point), ("`GBA_Use` Talk", "Granny Rags", Some([1.0, 2.0, 3.0])));
+    // A prompt without a key tag is a Use interaction.
+    let f = focused_interaction(&mv, &focus(Some((T::Host(0), St::Usable)), "Open", "", false), &me(), &texts()).unwrap();
+    assert_eq!(f.text, "`GBA_Use` Open");
+    // Targets without a text of their own: the HUD's text for their kind.
+    assert_eq!(focused_interaction(&mv, &focus(Some((T::Pickup(4), St::Pickup)), "", "", false), &me(), &texts()).unwrap().text, "`GBA_Use` PICKUP");
+    assert_eq!(focused_interaction(&mv, &focus(Some((T::Body(7), St::MovableCorpse)), "", "", false), &me(), &texts()).unwrap().text, "`GBA_Use` CARRY");
+    // Nothing in focus: no window, whatever else is near.
+    assert_eq!(focused_interaction(&mv, &focus(None, "", "", false), &me(), &texts()), None);
+    // Another player's focus is not ours.
+    let mut other = me();
+    other.id = 2;
+    assert_eq!(focused_interaction(&mv, &focus(Some((T::Host(0), St::Usable)), "`GBA_Use` Talk", "", false), &other, &texts()), None);
+}
+
+#[test]
+fn the_choke_line_follows_the_use_line() {
+    use dishonored_sim::crosshair::{CrosshairStatus as St, TargetRef as T};
+    let mv = MissionView::default();
+    // A pawn that can be choked: the Block line alone.
+    let f = focused_interaction(&mv, &focus(Some((T::Pawn(9), St::Usable)), "", "", true), &me(), &texts()).unwrap();
+    assert_eq!(f.text, "`GBA_Block` CHOKE");
+    // A talker that can be choked: Talk, then the choke (crosshair group before special group).
+    let f = focused_interaction(&mv, &focus(Some((T::Host(1), St::Usable)), "`GBA_Use` Talk", "Slackjaw", true), &me(), &texts()).unwrap();
+    assert_eq!(f.text, "`GBA_Use` Talk\n`GBA_Block` CHOKE");
+    // Without the HUD's texts the choke shows nothing.
+    assert_eq!(focused_interaction(&mv, &focus(Some((T::Pawn(9), St::Usable)), "", "", true), &me(), &[]), None);
+}
+
+#[test]
+fn climbing_and_choices_replace_the_focus() {
+    use dishonored_sim::crosshair::{CrosshairStatus as St, TargetRef as T};
+    let mut mv = MissionView::default();
+    let mut p = me();
+    p.mode = dishonored_sim::state::MoveMode::Climbing;
+    assert_eq!(focused_interaction(&mv, &focus(Some((T::Host(0), St::Usable)), "`GBA_Use` Talk", "", false), &p, &texts()).unwrap().text, "`GBA_Jump` Jump off");
+    mv.choices.push((1, vec!["Yes".into()]));
+    assert_eq!(focused_interaction(&mv, &focus(Some((T::Host(0), St::Usable)), "`GBA_Use` Talk", "", false), &me(), &texts()), None);
+}
+
+/// The install's `m_InteractionTexts`: the choke's line is a Block one (skipped without the install).
+#[test]
+#[ignore]
+fn retail_interaction_texts_decode() {
+    let Ok(c) = dishonored_assets::Content::locate() else { return };
+    let loc = dishonored_assets::loc::Localization::load(&c.root, "INT", &["Twk_InGameUI"]);
+    let t = dishonored_runtime::gfx_hud::interaction_texts(&c, &loc);
+    assert!(t.get(DUI_SPECIAL_CHOKE).is_some_and(|s| s.starts_with("`GBA_Block`")), "{t:?}");
+    assert!(t.get(DUI_CROSSHAIR_CARRY).is_some_and(|s| s.contains("`GBA_Use`")), "{t:?}");
+}

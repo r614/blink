@@ -1406,6 +1406,8 @@ impl MissionMatch {
         self.world.host_targets = host.iter().map(|h| h.0.clone()).collect();
         self.host_list = host.into_iter().map(|h| h.1).collect();
         let mut out = step_world(&mut self.world, &all, world, cfg);
+        // The HUD's focus: the target this step's camera update chose, from this list.
+        self.view.focus = self.focus_views(world, cfg);
         self.world.host_targets.clear();
         // [world] The launchers' shots fly, strike and burst (before the tripwires so that a burst
         // that damages a wire trips it in the same step).
@@ -1890,6 +1892,93 @@ impl MissionMatch {
         match c.target {
             dishonored_sim::crosshair::TargetRef::Host(k) => self.host_list.get(k as usize).cloned(),
             _ => None,
+        }
+    }
+
+    /// What each human's crosshair is on and what the HUD shows for it ([`crate::FocusView`]),
+    /// read right after the sim step while `world.host_targets` still holds the list its camera
+    /// update chose from (`Host(k)` indexes `host_list`).
+    fn focus_views(&self, world: &dyn WorldQuery, cfg: &SimConfig) -> Vec<crate::FocusView> {
+        use dishonored_sim::crosshair::TargetRef;
+        let g = &cfg.gameplay;
+        let npc_name = |id: PlayerId| self.npc_by_id.get(&id).and_then(|n| self.state.view.npc_names.iter().find(|x| &x.0 == n)).map(|x| x.1.clone()).unwrap_or_default();
+        let mut out = Vec::new();
+        for p in self.world.players.iter().filter(|p| self.humans.contains(&p.id)) {
+            let mut f = crate::FocusView { player: p.id, crosshair: p.crosshair.filter(|c| c.usable), choke: dishonored_sim::crosshair::choke_target(&self.world, p, cfg).is_some(), ..Default::default() };
+            match f.crosshair.map(|c| c.target) {
+                Some(TargetRef::Prop(id)) => {
+                    if let Some(m) = self.world.movables.iter().find(|m| m.id == id) {
+                        f.text = m.prompt.clone();
+                        f.point = Some(m.center().to_array());
+                    }
+                }
+                Some(TargetRef::Pickup(id)) => {
+                    if let Some(pk) = self.world.pickups.iter().find(|x| x.id == id) {
+                        f.point = Some(dishonored_sim::inventory::pickup_position(&self.world, pk, &g.movement).to_array());
+                    }
+                }
+                Some(TargetRef::Body(id)) => f.point = self.world.player(id).map(|v| v.position.to_array()),
+                Some(TargetRef::Pawn(id)) => {
+                    f.point = self.world.player(id).map(|v| (v.position + Vec3::Z * 40.0).to_array());
+                    f.name = npc_name(id);
+                }
+                Some(TargetRef::Host(k)) => {
+                    if let Some(it) = self.host_list.get(k as usize) {
+                        let (text, name, point) = self.interaction_prompt(it);
+                        f.text = text;
+                        f.name = name;
+                        f.point = point.map(|v| v.to_array());
+                    }
+                }
+                // A climbable chain is not among the crosshair's candidates: a Use with nothing
+                // else in focus grabs the one in view (`climb::try_use_grab`), with its
+                // interactable's text.
+                None => {
+                    if let Some((_, q)) = dishonored_sim::climb::grab_target(p, world, &g.movement, g.items.inventory.interact_distance, dishonored_sim::inventory::INTERACT_COS) {
+                        f.text = "`GBA_Use` Grab".to_string();
+                        f.point = Some(q.to_array());
+                    }
+                }
+            }
+            out.push(f);
+        }
+        out
+    }
+
+    /// A host interaction's prompt (`m_InteractText`, with its key tag when it has one), the
+    /// name its window shows and the point the crosshair moves to.
+    fn interaction_prompt(&self, it: &Interaction) -> (String, String, Option<Vec3>) {
+        let npc_name = |n: &str| self.state.view.npc_names.iter().find(|x| x.0 == n).map(|x| x.1.clone()).unwrap_or_default();
+        match it {
+            Interaction::Mission(MissionEvent::Used(m)) => (self.state.usable.get(m).cloned().unwrap_or_default(), String::new(), self.state.markers.get(m).map(|x| x.0)),
+            Interaction::Mission(MissionEvent::Talked(n)) => {
+                let pos = self.id_by_npc.get(n).and_then(|id| self.world.player(*id)).map(|v| v.position + Vec3::Z * 40.0);
+                (self.state.talk.get(n).cloned().unwrap_or_default(), npc_name(n), pos)
+            }
+            Interaction::Mission(_) => Default::default(),
+            Interaction::Door(i) => self.setup.doors.get(*i).map(|d| (d.prompt.clone(), String::new(), Some(d.position + Vec3::Z * 60.0))).unwrap_or_default(),
+            Interaction::Kismet(i) => match kismet_host::usables(self).into_iter().nth(*i) {
+                Some((u, p, prompt)) => {
+                    let name = match u {
+                        kismet_host::KUse::Talk { pawn, .. } => self.npc_by_id.get(&pawn).map(|n| npc_name(n)).unwrap_or_default(),
+                        _ => String::new(),
+                    };
+                    (prompt, name, Some(p + Vec3::Z * 20.0))
+                }
+                None => Default::default(),
+            },
+            Interaction::Prop(i) => match self.setup.usables.get(*i) {
+                Some(u) => {
+                    let locked = self.props.get(&u.actor).map_or(u.locked, |s| s.locked);
+                    let prompt = if u.door_axis.is_some() && locked { u.locked_prompt.clone() } else { u.prompt.clone() };
+                    (prompt, String::new(), Some(u.center))
+                }
+                None => Default::default(),
+            },
+            Interaction::Launcher(i) => match self.setup.interactables.get(&self.current_map.to_ascii_lowercase()).and_then(|d| d.launchers.get(*i)) {
+                Some(l) => (l.prompt.clone(), l.label.clone(), Some((l.bounds_min + l.bounds_max) * 0.5)),
+                None => Default::default(),
+            },
         }
     }
 

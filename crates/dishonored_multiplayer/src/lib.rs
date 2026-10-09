@@ -120,6 +120,30 @@ pub struct MatchView {
     /// last: the clients draw each once, before their camera.
     #[serde(default)]
     pub lens_effects: Vec<LensEffectView>,
+    /// Each human's crosshair target as the host's step chose it (`dishonored_sim::crosshair`)
+    /// with what the HUD's interactions window shows for it. Host-filled in missions.
+    #[serde(default)]
+    pub focus: Vec<FocusView>,
+}
+
+/// What a player's crosshair is on (`m_pCrosshairActor`, chosen by the sim's camera update) and
+/// what its interactions window shows: the target's `m_InteractText` (with its key tag) and name,
+/// the point the crosshair moves to, and whether the Block button would choke (the choke's
+/// `DUI_Special_Choke` line).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct FocusView {
+    pub player: PlayerId,
+    /// The stored crosshair (None: nothing interactable in view).
+    pub crosshair: Option<dishonored_sim::crosshair::Crosshair>,
+    /// The target's interaction text when the host knows one (a host target's prompt, a prop's
+    /// `m_InteractText`, a climbable's); empty: the HUD's text for the target's kind.
+    pub text: String,
+    /// `m_InteractableName` (the window's title): a talker's or launcher's name.
+    pub name: String,
+    /// Where the crosshair moves to (world, Dishonored units).
+    pub point: Option<[f32; 3]>,
+    /// `crosshair::choke_target` holds: a Block press now starts a choke.
+    pub choke: bool,
 }
 
 /// A spawned camera lens effect: the spawning action (`<package>:<object path>`, the map's

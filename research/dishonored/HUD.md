@@ -119,6 +119,15 @@ crossbow symbols spread their parts by the decoded formulas (`Crosshair_Gun`,
 - `interactions_window_mc.SetInteractions(name, lines)` (0x00BA6150): the interaction texts
   joined with newlines; key tags converted by 0x00BA4620 to "[key]" (mouse buttons are
   `$LMouseButton$` icons in the original; the port writes their names).
+- The lines are `Twk_GFxMoviePlayerHUD.m_InteractionTexts[EDisUIInteraction]` (enum
+  `DisGFxMoviePlayerHUD.EDisUIInteraction`, groups `EDisUIInteractionGroup` Crosshair / Context /
+  Special) or the focused interactable's own `m_InteractText`. `DUI_Special_Choke` (3) is
+  "`GBA_Block` [Hold]", the choke's line; `DUI_Crosshair_Carry` (32) "Hold `GBA_Use` Carry",
+  `DUI_Crosshair_Pickup` (31) "`GBA_Use` Loot". The port shows the target the host's crosshair
+  rule chose (`MatchView::focus`, `dishonored_sim::crosshair`) with its prompt, then the choke
+  line when `crosshair::choke_target` holds (`hud_popups::focused_interaction`). Which line the
+  original shows for a body or a world pickup (the HUD's text or the pickup's interactable) is
+  LIKELY the HUD's.
 - `gameMsg_mc.SetGameMessage(msg, m_fGameMessageDuration 5 s)` (DisSeqAct_ShowHUDMessage).
 - `AddLogItem` 0x00B98630: "name (count)" when count != 1, only with the pickup log option;
   `PickupLog`: 3 slots, fade in / out 0.4 s, 2 s life, item steps y 0 / -50 / -100 / -150 at
