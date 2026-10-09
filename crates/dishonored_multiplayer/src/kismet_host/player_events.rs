@@ -33,6 +33,29 @@ pub struct PlayerEventState {
     /// Names of the active map's climbable chains (the index of `SimEvent::Climb`), set by the
     /// match each step.
     pub(super) climbables: Vec<String>,
+    /// The player's whole mana as `SetMana` (vslot 456, 0x00AB1A30) last stored it (+0xA60).
+    mana: BTreeMap<PlayerId, i32>,
+    /// The power in the player's left hand at the last step (`PowerEquipped`).
+    equipped: BTreeMap<PlayerId, u8>,
+}
+
+/// Output of `DisSeqEvent_PlayerManaThreshold` (`EDisPlayerManaThresholdOutput`).
+pub const MANA_ABOVE: usize = 0;
+pub const MANA_BELOW: usize = 1;
+
+/// The power index of a left-hand item (`power::*`), for the power ones.
+fn left_power(item: dishonored_sim::input::LeftHand) -> Option<usize> {
+    use dishonored_sim::input::LeftHand as L;
+    use dishonored_sim::state::power;
+    Some(match item {
+        L::Blink => power::BLINK,
+        L::Windblast => power::WINDBLAST,
+        L::DarkVision => power::DARK_VISION,
+        L::Possession => power::POSSESSION,
+        L::BendTime => power::BEND_TIME,
+        L::DevouringSwarm => power::DEVOURING_SWARM,
+        _ => return None,
+    })
 }
 
 /// Output of `DisSeqEvent_PlayerCrouch` (`EDisPlayerCrouchEventOutput`).
@@ -184,6 +207,16 @@ pub(super) fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
                     h.note(format!("choke of pawn {victim} by {attacker}: output {out}, {} event(s)", fired.len()));
                 }
             }
+            // `DisSeqEvent_AttackedByRats` (the enter of `StateNPCMasterActionMeleeSwarm`,
+            // 0x00A70450): the NPC's events, every output.
+            SimEvent::RatsAttackStart { victim, rat } => {
+                let origs = npc_origins(h, victim);
+                let evs = k.events_for("DisSeqEvent_AttackedByRats", &origs);
+                let fired = fire_events(k, h, evs, Obj::Pawn(victim), Obj::Pawn(rat), None);
+                if !fired.is_empty() {
+                    h.note(format!("pawn {victim} attacked by rats: {} event(s)", fired.len()));
+                }
+            }
             // `DisSeqEvent_Windblasted` (0x00C4DE90 ends with it after the thrown reaction was
             // started): output 1 Thrown. The "Pushed" output (0x00C53790, an NPC that resists:
             // 0x00B4B4C0) needs the armour state the port lacks.
@@ -267,6 +300,47 @@ fn player_state_events(k: &mut Kismet, h: &mut H) {
             }
             h.st.player_ev.combat.insert(p, now);
         }
+        // PlayerManaThreshold: `SetMana` (0x00AB1A30) on a change of the whole mana fires the
+        // player's events with output Below when it fell (new <= old), else Above; each event's
+        // `CheckActivate` (0x00B8E910) passes only a crossing of its `m_ManaThreshold`: Above
+        // when old <= threshold < new, Below when new < threshold <= old.
+        let mana = pl.vitals.mana.trunc() as i32;
+        match h.st.player_ev.mana.insert(p, mana) {
+            Some(old) if old != mana => {
+                let out = if mana <= old { MANA_BELOW } else { MANA_ABOVE };
+                let evs: Vec<OpId> = player_events(k, "DisSeqEvent_PlayerManaThreshold")
+                    .into_iter()
+                    .filter(|e| {
+                        let t = k.prop_int(*e, "m_ManaThreshold");
+                        if out == MANA_ABOVE { old <= t && t < mana } else { mana < t && t <= old }
+                    })
+                    .collect();
+                let fired = fire_events(k, h, evs, Obj::Pawn(p), Obj::Pawn(p), Some(vec![out]));
+                if !fired.is_empty() {
+                    h.note(format!("player {p} mana {old} -> {mana}: {} PlayerManaThreshold event(s)", fired.len()));
+                }
+            }
+            _ => {}
+        }
+        // PowerEquipped: equipping a power in the left hand (0x00C4BA70 / 0x00C44FE0 ->
+        // 0x00BF30C0 with the event class): the output named for the power, at its level.
+        // The pawn's first observed hand is its starting equipment, not an equip.
+        const NO_POWER: u8 = u8::MAX;
+        let now = left_power(pl.left.item).filter(|&pw| pl.inv.power_levels[pw] > 0);
+        let code = now.map_or(NO_POWER, |pw| pw as u8);
+        let before = h.st.player_ev.equipped.insert(p, code);
+        if let (Some(old), Some(pw)) = (before, now) {
+            if old != code {
+                let level = pl.inv.power_levels[pw];
+                let evs: Vec<OpId> = player_events(k, "DisSeqEvent_PowerEquipped");
+                for ev in evs {
+                    let Some(out) = power_used_output(k, ev, pw, level) else { continue };
+                    if fire_events(k, h, vec![ev], Obj::Pawn(p), Obj::Pawn(p), Some(vec![out])).len() == 1 {
+                        h.note(format!("power {} equipped at level {level}: {}", POWER_NAMES[pw], k.describe(ev)));
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -280,6 +354,19 @@ fn task_events(k: &mut Kismet, h: &mut H) {
         let (class, path, outputs) = match &n {
             TaskNote::Activated(path) => ("DisSeqEvent_TaskActivated", path, None),
             TaskNote::Changed(path, st) => ("DisSeqEvent_TaskStateChanged", path, Some(vec![*st as usize])),
+            // `DisSeqEvent_ObjectiveCompleted` (0x00AD0E00, kind 1): the player's events whose
+            // `m_pObjective` is the objective, every output.
+            TaskNote::ObjectiveCompleted(id) => {
+                let evs: Vec<OpId> = player_events(k, "DisSeqEvent_ObjectiveCompleted")
+                    .into_iter()
+                    .filter(|e| matches!(k.prop(*e, "m_pObjective").and_then(|v| v.as_obj().cloned()), Some(o) if obj_name(&o).eq_ignore_ascii_case(id)))
+                    .collect();
+                let fired = fire_events(k, h, evs, Obj::Pawn(p), Obj::Pawn(p), None);
+                if !fired.is_empty() {
+                    h.note(format!("objective {id} completed: {} event(s)", fired.len()));
+                }
+                continue;
+            }
         };
         let evs: Vec<OpId> = player_events(k, class).into_iter().filter(|e| task_matches(k, *e, path)).collect();
         let fired = fire_events(k, h, evs, Obj::Pawn(p), Obj::Pawn(p), outputs);

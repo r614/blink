@@ -195,4 +195,6 @@ pub enum SimEvent {
     RatSpawned { rat: PlayerId, swarm: Option<u32> },
     /// A rat bit a pawn.
     RatBite { rat: PlayerId, victim: PlayerId },
+    /// Rats set upon an NPC (its swarm-melee state starts; `rat` the first attacker).
+    RatsAttackStart { victim: PlayerId, rat: PlayerId },
 }

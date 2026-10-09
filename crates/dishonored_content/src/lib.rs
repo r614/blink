@@ -793,6 +793,7 @@ pub fn kismet_objectives(db: &dishonored_kismet::KismetDb) -> Vec<dishonored_mis
             id: o.path.rsplit('.').next().unwrap_or(&o.path).to_string(),
             description: o.description.clone(),
             hidden: true,
+            complete_when_all_tasks: o.complete_when_all_tasks,
             tasks: o
                 .tasks
                 .iter()

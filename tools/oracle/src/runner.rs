@@ -126,7 +126,7 @@ fn mission(s: &Scenario, mc: &dishonored_content::MatchContent, notes: &mut Vec<
     let mut def = MissionDef {
         title: format!("oracle {}", s.name),
         map: s.map.clone(),
-        objectives: vec![ObjectiveDef { id: "run".into(), description: "oracle scenario".into(), hidden: true, tasks: vec![TaskDef { id: "run".into(), description: "run".into(), initial: TaskState::Active, hidden: true, optional: false, target: None }] }],
+        objectives: vec![ObjectiveDef { id: "run".into(), description: "oracle scenario".into(), hidden: true, tasks: vec![TaskDef { id: "run".into(), description: "run".into(), initial: TaskState::Active, hidden: true, optional: false, target: None }], complete_when_all_tasks: false }],
         ..Default::default()
     };
     def.settings.respawn = false;

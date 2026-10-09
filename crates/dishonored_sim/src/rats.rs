@@ -205,6 +205,11 @@ pub fn step_rat_attacks(state: &mut WorldState, inputs: &[PlayerInput], dt: f32,
             v.rat_attack = Default::default();
             continue;
         }
+        // An NPC set upon enters `StateNPCMasterActionMeleeSwarm` (its enter 0x00A70450 fires
+        // `DisSeqEvent_AttackedByRats`).
+        if v.rat_attack.time == 0.0 && v.kind != PawnKind::Human && v.alive {
+            events.push(SimEvent::RatsAttackStart { victim: v.id, rat: group[0] });
+        }
         v.rat_attack.time += dt;
         if v.rat_attack.time <= t.initial_delay && v.kind != PawnKind::Human {
             continue;

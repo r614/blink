@@ -782,7 +782,7 @@ impl Builder<'_> {
                         hidden: t.hidden,
                     })
                     .collect();
-                self.db.objectives.push(Objective { path: o.path.clone(), description: desc, tasks });
+                self.db.objectives.push(Objective { path: o.path.clone(), description: desc, tasks, complete_when_all_tasks: o.complete_when_all_tasks });
             }
         }
         let _ = self.content;

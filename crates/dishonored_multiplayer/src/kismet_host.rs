@@ -153,11 +153,14 @@ pub const FED_EVENTS: &[&str] = &[
     // `player_events.rs`.
     "DisSeqEvent_PlayerCrouch",
     "DisSeqEvent_PlayerCombat",
+    "DisSeqEvent_PlayerManaThreshold",
     "DisSeqEvent_TaskActivated",
     "DisSeqEvent_TaskStateChanged",
+    "DisSeqEvent_ObjectiveCompleted",
     "DisSeqEvent_Possessed",
     "DisSeqEvt_Choke",
     "DisSeqEvent_Windblasted",
+    "DisSeqEvent_AttackedByRats",
     "DisSeqEvent_PowerUsed",
     "DisSeqEvent_Climb",
     "DisSeqEvent_Lock",
@@ -168,9 +171,9 @@ pub const FED_EVENTS: &[&str] = &[
     "DisSeqEvent_MovableDropped",
 ];
 
-/// Subclasses of [`FED_EVENTS`] classes that are not fed (`PowerEquipped` extends `PowerUsed`
-/// but fires from the equip contexts 0x00C44FE0 / 0x00C4BA70, which the port lacks).
-pub const NOT_FED_EVENTS: &[&str] = &["DisSeqEvent_PowerEquipped"];
+/// Subclasses of [`FED_EVENTS`] classes that are not fed. (`PowerEquipped`, a `PowerUsed`, is fed
+/// by `player_events.rs` from the left hand's power.)
+pub const NOT_FED_EVENTS: &[&str] = &[];
 
 /// A usable the Kismet offers (an actor with `DisSeqEvent_Used` or a pickup with
 /// `DisSeqEvent_PickupPickedUp`, or an original NPC whose one-shot has a use hook).
@@ -5027,6 +5030,15 @@ mod tests {
         let ran: Vec<usize> = sinks.iter().enumerate().filter(|(_, s)| r.ran(**s) > 0).map(|(i, _)| i).collect();
         assert_eq!(ran, [0, 5, 10], "DarkVision 1, Blink 2, Windblast 1");
         assert!(eq_sinks.iter().all(|s| r.ran(*s) == 0) && r.ran(eq) == 0, "PowerEquipped is another event");
+        // Equipping Windblast (level 1) in the left hand fires PowerEquipped's "Windblast 1" once.
+        if let Some(p) = r.m.world.player_mut(1) {
+            p.inv.power_levels[power::WINDBLAST] = 1;
+            p.left.item = dishonored_sim::input::LeftHand::Windblast;
+        }
+        r.feed_events(&[], 2);
+        r.feed_events(&[], 2);
+        let ran: Vec<usize> = eq_sinks.iter().enumerate().filter(|(_, s)| r.ran(**s) > 0).map(|(i, _)| i).collect();
+        assert_eq!(ran, [10], "Windblast 1");
     }
 
     /// `DisSeqEvent_Climb` (0x00A72B00 / 0x00A6E2C0): Start on grabbing the chain, Finish on

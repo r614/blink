@@ -118,6 +118,31 @@ fn ron_round_trip() {
     assert_eq!(def, again);
 }
 
+/// An objective with `m_bCompleteWhenAllTasksComplete` completes with its last task (0x00ACBC70
+/// after the TaskStateChanged dispatch), once: kind 1 follows the task's change.
+#[test]
+fn an_objective_completes_with_its_last_task() {
+    use dishonored_mission::runtime::TaskNote;
+    let mut def = MissionDef::from_ron(SAMPLE).unwrap();
+    for o in def.objectives.iter_mut() {
+        o.complete_when_all_tasks = true;
+    }
+    let markers = def.markers.iter().enumerate().map(|(i, m)| (m.id.clone(), (Vec3::new(i as f32 * 2000.0, 0.0, 0.0), m.radius))).collect();
+    let mut m = MissionState::new(def, markers);
+    let start = pos(&m, "start");
+    step(&mut m, start, &[]);
+    let p = pos(&m, "informant_spot");
+    step(&mut m, p, &[MissionEvent::Talked("informant".into())]);
+    step(&mut m, start + Vec3::new(0.0, 5000.0, 0.0), &[kill("host")]);
+    assert!(!m.task_log.contains(&TaskNote::ObjectiveCompleted("host".into())), "the escape is left");
+    let p = pos(&m, "exfil");
+    step(&mut m, p, &[]);
+    let n = m.task_log.iter().filter(|x| **x == TaskNote::ObjectiveCompleted("host".into())).count();
+    assert_eq!(n, 1, "{:?}", m.task_log);
+    let at = m.task_log.iter().position(|x| *x == TaskNote::ObjectiveCompleted("host".into())).unwrap();
+    assert!(matches!(&m.task_log[at - 1], TaskNote::Changed(_, TaskState::Completed)), "after the last task's change");
+}
+
 /// The objective manager's notifications (0x00AD4F60): a task becoming active raises
 /// `TaskActivated` then `TaskStateChanged`; any other change only `TaskStateChanged`; revealing an
 /// active hidden task raises `TaskActivated` (0x00AC63C0). The host turns them into Kismet events.

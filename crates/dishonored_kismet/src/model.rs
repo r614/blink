@@ -320,6 +320,9 @@ pub struct Objective {
     pub path: String,
     pub description: String,
     pub tasks: Vec<Task>,
+    /// `m_bCompleteWhenAllTasksComplete`.
+    #[serde(default)]
+    pub complete_when_all_tasks: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

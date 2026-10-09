@@ -144,6 +144,10 @@ pub struct ObjectiveDef {
     #[serde(default)]
     pub hidden: bool,
     pub tasks: Vec<TaskDef>,
+    /// `m_bCompleteWhenAllTasksComplete`: the objective completes with its last task
+    /// (0x00ACBC70, after each task state change).
+    #[serde(default)]
+    pub complete_when_all_tasks: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

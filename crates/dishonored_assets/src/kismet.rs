@@ -66,6 +66,8 @@ pub struct OriginalObjective {
     pub path: String,
     pub description: String,
     pub tasks: Vec<OriginalTask>,
+    /// `m_bCompleteWhenAllTasksComplete`.
+    pub complete_when_all_tasks: bool,
 }
 
 const EDITOR_PROPS: &[&str] = &[
@@ -170,7 +172,8 @@ pub fn read_objectives(pkg: &Package) -> Vec<OriginalObjective> {
         }
         let Ok(h) = pkg.read_object(i) else { continue };
         let path = pkg.obj_path(ObjRef::Export(i));
-        let mut obj = OriginalObjective { path: path.clone(), description: str_prop(&h.properties, "m_Description").unwrap_or_default(), tasks: Vec::new() };
+        let complete_when_all_tasks = matches!(ue3_package::properties::find(&h.properties, "m_bCompleteWhenAllTasksComplete").map(|p| &p.value), Some(ue3_package::properties::Value::Bool(true)));
+        let mut obj = OriginalObjective { path: path.clone(), description: str_prop(&h.properties, "m_Description").unwrap_or_default(), tasks: Vec::new(), complete_when_all_tasks };
         // Tasks are subobjects named `<objective>.DishonoredTask_Custom_N`.
         let prefix = format!("{path}.");
         let mut tasks: Vec<(u32, OriginalTask)> = Vec::new();

@@ -446,6 +446,9 @@ pub struct MissionState {
     task_state: Vec<Vec<TaskState>>,
     task_hidden: Vec<Vec<bool>>,
     obj_hidden: Vec<bool>,
+    /// `m_ObjectiveState` Completed (an objective completed with its last task, 0x00ACBC70).
+    #[serde(default)]
+    obj_completed: Vec<bool>,
     flags: BTreeMap<String, bool>,
     counters: BTreeMap<String, i32>,
     rule_fired: Vec<bool>,
@@ -537,6 +540,8 @@ pub enum TaskNote {
     /// Kind 5: the task's state changed (0x00AC17B0 raises it after Activated); the state is
     /// the new `EDisTaskState`.
     Changed(String, TaskState),
+    /// Kind 1: the objective (its id) completed (0x00ACBC70).
+    ObjectiveCompleted(String),
 }
 
 impl MissionState {
@@ -544,7 +549,7 @@ impl MissionState {
     pub fn new(def: MissionDef, markers: BTreeMap<String, (Vec3, f32)>) -> Self {
         let task_state = def.objectives.iter().map(|o| o.tasks.iter().map(|t| t.initial).collect()).collect();
         let task_hidden = def.objectives.iter().map(|o| o.tasks.iter().map(|t| t.hidden).collect()).collect();
-        let obj_hidden = def.objectives.iter().map(|o| o.hidden).collect();
+        let obj_hidden: Vec<bool> = def.objectives.iter().map(|o| o.hidden).collect();
         let mut flags: BTreeMap<String, bool> = def.flags.iter().map(|f| (f.clone(), false)).collect();
         for f in &def.flags_set {
             flags.insert(f.clone(), true);
@@ -564,6 +569,7 @@ impl MissionState {
             current_map: String::new(),
             task_state,
             task_hidden,
+            obj_completed: vec![false; obj_hidden.len()],
             obj_hidden,
             flags,
             counters,
@@ -1093,6 +1099,16 @@ impl MissionState {
                     self.task_log.push(TaskNote::Activated(path.to_string()));
                 }
                 self.task_log.push(TaskNote::Changed(path.to_string(), state));
+                // 0x00ACBC70 (after the TaskStateChanged dispatch, 0x00AD1320): an objective that
+                // completes with its tasks, all of them Completed, becomes Completed (kind 1).
+                let od = &self.def.objectives[o];
+                if self.obj_completed.len() != self.def.objectives.len() {
+                    self.obj_completed.resize(self.def.objectives.len(), false);
+                }
+                if od.complete_when_all_tasks && !self.obj_completed[o] && self.task_state[o].iter().all(|s| *s == TaskState::Completed) {
+                    self.obj_completed[o] = true;
+                    self.task_log.push(TaskNote::ObjectiveCompleted(od.id.clone()));
+                }
             }
         }
     }
