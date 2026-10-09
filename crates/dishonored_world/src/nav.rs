@@ -8,6 +8,10 @@
 //! `NAVEDGE_Removed` edges are skipped. The shipped meshes contain no mantle, drop-down or
 //! jump edges, so paths never leave the walkable surface except through those edges.
 //!
+//! `ArkDynamicPylon`s (pylons riding movers) keep a disconnected flag and follow their base
+//! in 50 uu translation steps; while disconnected their cross-pylon edges cost 10,000,000
+//! (`research/dishonored/systems/dynamic_pylons.md`).
+//!
 //! A* runs over polys with edge centres as entry points (UE3 also costs moves between edge
 //! centres); the corridor is then string-pulled with a funnel over the shared edges.
 
@@ -43,6 +47,8 @@ pub struct NavLink {
     /// Extra traversal cost on top of distance (`EffectiveEdgeLength - EdgeLength` for
     /// path-object edges).
     pub extra: f32,
+    /// The pylon whose mesh holds the edge (its vertices give `a` / `b`).
+    pub owner: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +69,92 @@ pub struct PathObjectState {
     pub blocking: bool,
 }
 
+/// One pylon of the map: where its polys and vertices sit in the [`NavWorld`] arrays.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PylonRt {
+    pub name: String,
+    pub package: String,
+    /// First poly and poly count.
+    pub polys: (u32, u32),
+    /// First vertex and vertex count.
+    pub verts: (u32, u32),
+    /// `Location` where the level places it.
+    pub placed: Vec3,
+    /// `ArkDynamicPylon` state (None: a static `DisPylon`).
+    pub dynamic: Option<DynamicPylonRt>,
+}
+
+/// An `ArkDynamicPylon` at run time (`research/dishonored/systems/dynamic_pylons.md`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DynamicPylonRt {
+    /// The `Base` chain (nearest first) with each base's placed location and rotation.
+    pub bases: Vec<dishonored_ir::nav::PylonBase>,
+    /// `bNeedsCostCheck`: the cross-pylon edge cost hook (`CostFor`, slot 251) runs.
+    pub needs_cost_check: bool,
+    pub state: PylonLink,
+}
+
+/// The run-time state of an `ArkDynamicPylon` (kept by the mission host between steps).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct PylonLink {
+    /// `m_bIsDisconnected` (+0x39c bit 0).
+    pub disconnected: bool,
+    /// `Actor.Location` now.
+    pub location: Vec3,
+    /// `m_PreviousPosition` (+0x3ac): where the mesh was last moved to.
+    pub previous: Vec3,
+    /// How many times the pawns moving through it were told to repath (slot 245, 0x00934c40).
+    pub aborts: u32,
+}
+
+impl PylonLink {
+    /// `ArkDynamicPylon::PostBeginPlay` (0x00934b60): connected, `m_PreviousPosition` =
+    /// `Location`.
+    pub fn placed(location: Vec3) -> Self {
+        PylonLink { disconnected: false, location, previous: location, aborts: 0 }
+    }
+
+    /// `ArkSeqAct_ChangePylonConnection` (0x00937090) on this pylon: Connect clears
+    /// `m_bIsDisconnected`; Disconnect sets it and, when it was clear, aborts the pawns moving
+    /// through the pylon (slot 245).
+    pub fn set_connected(&mut self, connected: bool) {
+        if connected {
+            self.disconnected = false;
+        } else {
+            self.disconnect();
+        }
+    }
+
+    fn disconnect(&mut self) {
+        if !self.disconnected {
+            self.disconnected = true;
+            self.aborts += 1;
+        }
+    }
+
+    /// The pylon is at `location` after its base moved (`UpdateComponents` -> slot 249,
+    /// 0x009345b0, in game): it disconnects, and once it is at least 50 uu from
+    /// `m_PreviousPosition` on some axis the mesh moves by the whole offset (returned) and
+    /// `m_PreviousPosition` becomes `location`.
+    pub fn moved(&mut self, location: Vec3) -> Option<Vec3> {
+        self.location = location;
+        self.disconnect();
+        let delta = location - self.previous;
+        if delta.abs().max_element() < DYNAMIC_PYLON_MOVE_STEP {
+            return None;
+        }
+        self.previous = location;
+        Some(delta)
+    }
+}
+
+/// `ArkDynamicPylon` slot 249 (0x009345b0): the mesh is moved only once the pylon is this far
+/// (on any axis) from where the mesh was last moved to.
+pub const DYNAMIC_PYLON_MOVE_STEP: f32 = 50.0;
+/// `ArkDynamicPylon::CostFor` (slot 251, 0x00933340): the cost of a cross-pylon edge of a
+/// disconnected pylon.
+pub const DISCONNECTED_EDGE_COST: f32 = 10_000_000.0;
+
 /// The map's navigation, ready for queries.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NavWorld {
@@ -70,6 +162,10 @@ pub struct NavWorld {
     pub polys: Vec<NavPolyRt>,
     pub links: Vec<Vec<NavLink>>,
     pub path_objects: Vec<PathObjectState>,
+    /// Every pylon, in [`NavData::pylons`] order.
+    pub pylons: Vec<PylonRt>,
+    /// Pylon of each poly.
+    pub poly_pylon: Vec<u16>,
     #[serde(skip)]
     grid: HashMap<(i32, i32), Vec<u32>>,
 }
@@ -126,13 +222,19 @@ impl NavWorld {
         }
         // Global poly index of (pylon, local poly).
         let mut poly_base = Vec::with_capacity(data.pylons.len());
-        for p in &data.pylons {
+        for (pi, p) in data.pylons.iter().enumerate() {
             let vb = w.verts.len() as u32;
-            poly_base.push(w.polys.len() as u32);
+            let pb = w.polys.len() as u32;
+            poly_base.push(pb);
             w.verts.extend(p.mesh.verts.iter().copied());
             for poly in &p.mesh.polys {
                 w.polys.push(NavPolyRt { verts: poly.verts.iter().map(|&v| vb + v as u32).collect(), center: poly.center, normal: poly.normal, min: poly.min, max: poly.max, height: poly.height });
+                w.poly_pylon.push(pi as u16);
             }
+            // `ArkDynamicPylon::PostBeginPlay` (0x00934b60): connected, `m_PreviousPosition` =
+            // `Location`.
+            let dynamic = p.dynamic.as_ref().map(|d| DynamicPylonRt { bases: d.bases.clone(), needs_cost_check: d.needs_cost_check, state: PylonLink::placed(p.location) });
+            w.pylons.push(PylonRt { name: p.name.clone(), package: p.package.clone(), polys: (pb, p.mesh.polys.len() as u32), verts: (vb, p.mesh.verts.len() as u32), placed: p.location, dynamic });
         }
         w.links = vec![Vec::new(); w.polys.len()];
         let find_pylon = |owner: usize, obj: i32, guid: &[u32; 4]| -> Option<usize> {
@@ -161,8 +263,8 @@ impl NavWorld {
                     NavEdgeClass::Base => {
                         let (p0, p1) = (e.poly0 as u32, e.poly1 as u32);
                         if p0 < n && p1 < n && p0 != p1 {
-                            w.links[(base + p0) as usize].push(NavLink { to: base + p1, a, b, kind: LinkKind::Walk, extra: 0.0 });
-                            w.links[(base + p1) as usize].push(NavLink { to: base + p0, a, b, kind: LinkKind::Walk, extra: 0.0 });
+                            w.links[(base + p0) as usize].push(NavLink { to: base + p1, a, b, kind: LinkKind::Walk, extra: 0.0, owner: pi as u16 });
+                            w.links[(base + p1) as usize].push(NavLink { to: base + p0, a, b, kind: LinkKind::Walk, extra: 0.0, owner: pi as u16 });
                         }
                     }
                     NavEdgeClass::OneWay => {
@@ -173,7 +275,7 @@ impl NavWorld {
                         // The owner (the poly listing the edge) can leave through it.
                         let owns = |q: u32| m.polys[q as usize].edges.contains(&(ei as u16));
                         let (from, to) = if owns(p1) && !owns(p0) { (p1, p0) } else { (p0, p1) };
-                        w.links[(base + from) as usize].push(NavLink { to: base + to, a, b, kind: LinkKind::OneWay, extra: 0.0 });
+                        w.links[(base + from) as usize].push(NavLink { to: base + to, a, b, kind: LinkKind::OneWay, extra: 0.0, owner: pi as u16 });
                     }
                     NavEdgeClass::CrossPylon | NavEdgeClass::PathObject => {
                         let Some(l) = &e.path_object else { continue };
@@ -196,7 +298,7 @@ impl NavWorld {
                         } else {
                             LinkKind::CrossPylon
                         };
-                        w.links[from as usize].push(NavLink { to, a, b, kind, extra: (e.effective_length - e.length).max(0.0) });
+                        w.links[from as usize].push(NavLink { to, a, b, kind, extra: (e.effective_length - e.length).max(0.0), owner: pi as u16 });
                     }
                 }
             }
@@ -343,6 +445,96 @@ impl NavWorld {
         }
     }
 
+    /// The cost a dynamic pylon puts on a link leaving poly `from`, when its cost hook decides
+    /// it. Cross-pylon edges (0x0067ab00) ask the pylon of their first poly, else of their
+    /// second, whichever has `bNeedsCostCheck`; `ArkDynamicPylon::CostFor` (0x00933340) then
+    /// costs a cross-pylon edge (`+0x2d` set) 10,000,000 while `m_bIsDisconnected`. A
+    /// path-object edge whose actor is known asks that actor instead (0x0067ace0); in-mesh
+    /// edges are never cross-pylon, so a moving or disconnected pylon keeps its own polys
+    /// walkable.
+    pub fn pylon_cost(&self, from: u32, l: &NavLink) -> Option<f32> {
+        match l.kind {
+            LinkKind::CrossPylon | LinkKind::PathObject(u16::MAX) => {}
+            _ => return None,
+        }
+        let pylon = |poly: u32| self.poly_pylon.get(poly as usize).and_then(|&i| self.pylons.get(i as usize));
+        let judge = [pylon(from), pylon(l.to)].into_iter().flatten().find_map(|p| p.dynamic.as_ref().filter(|d| d.needs_cost_check))?;
+        judge.state.disconnected.then_some(DISCONNECTED_EDGE_COST)
+    }
+
+    /// Pylon index by name (and package when given).
+    pub fn pylon_index(&self, name: &str, package: Option<&str>) -> Option<usize> {
+        self.pylons.iter().position(|p| p.name.eq_ignore_ascii_case(name) && package.is_none_or(|k| p.package.eq_ignore_ascii_case(k)))
+    }
+
+    /// `ArkSeqAct_ChangePylonConnection` on one pylon (0x00937090): Connect clears
+    /// `m_bIsDisconnected`; Disconnect sets it and, when it was clear, makes the pawns moving
+    /// through the pylon repath (slot 245). False when the pylon is not dynamic.
+    pub fn set_pylon_connected(&mut self, pylon: usize, connected: bool) -> bool {
+        let Some(d) = self.pylons.get_mut(pylon).and_then(|p| p.dynamic.as_mut()) else { return false };
+        d.state.set_connected(connected);
+        true
+    }
+
+    /// A dynamic pylon was moved to `location` (its base moved; `UpdateComponents` -> slot 249,
+    /// 0x009345b0, in game): it disconnects (aborting the pawns moving through it when it was
+    /// connected), and once it is at least 50 uu from `m_PreviousPosition` on some axis its
+    /// walkable and obstacle meshes are translated by the whole offset (no rotation: the
+    /// vertices, poly centres and bounds move, edges keep their vertices) and
+    /// `m_PreviousPosition` becomes `location`. True when the mesh moved.
+    pub fn move_dynamic_pylon(&mut self, pylon: usize, location: Vec3) -> bool {
+        let Some(d) = self.pylons.get_mut(pylon).and_then(|p| p.dynamic.as_mut()) else { return false };
+        let Some(delta) = d.state.moved(location) else { return false };
+        self.translate_pylon(pylon, delta);
+        true
+    }
+
+    /// Give a dynamic pylon a state kept elsewhere (the mission host's): its mesh moves to
+    /// `state.previous`.
+    pub fn apply_pylon_state(&mut self, pylon: usize, state: PylonLink) {
+        let Some(d) = self.pylons.get_mut(pylon).and_then(|p| p.dynamic.as_mut()) else { return };
+        let delta = state.previous - d.state.previous;
+        d.state = state;
+        if delta != Vec3::ZERO {
+            self.translate_pylon(pylon, delta);
+        }
+    }
+
+    /// Move a pylon's mesh by `delta` (vertices, polys, the portals of the edges it holds).
+    pub fn translate_pylon(&mut self, pylon: usize, delta: Vec3) {
+        let Some(p) = self.pylons.get(pylon) else { return };
+        let (v0, vn) = p.verts;
+        let (p0, pn) = p.polys;
+        for v in &mut self.verts[v0 as usize..(v0 + vn) as usize] {
+            *v += delta;
+        }
+        for poly in &mut self.polys[p0 as usize..(p0 + pn) as usize] {
+            poly.center += delta;
+            poly.min += delta;
+            poly.max += delta;
+        }
+        for l in self.links.iter_mut().flatten().filter(|l| l.owner as usize == pylon) {
+            l.a += delta;
+            l.b += delta;
+        }
+        self.build_grid();
+    }
+
+    /// Dynamic pylons whose polys a corridor crosses, with their abort counts (a follower
+    /// repaths when one changes: the pylon's `m_PawnsMovingThruPylon` were aborted).
+    pub fn corridor_pylons(&self, corridor: &[(u32, Option<usize>)]) -> Vec<(u16, u32)> {
+        let mut out: Vec<(u16, u32)> = Vec::new();
+        for &(poly, _) in corridor {
+            let Some(&pi) = self.poly_pylon.get(poly as usize) else { continue };
+            if let Some(d) = self.pylons[pi as usize].dynamic.as_ref() {
+                if !out.iter().any(|w| w.0 == pi) {
+                    out.push((pi, d.state.aborts));
+                }
+            }
+        }
+        out
+    }
+
     /// Set a path object's blocking state by name (door unlocked, blocker broken...).
     pub fn set_blocking(&mut self, name: &str, blocking: bool) -> bool {
         let mut any = false;
@@ -406,7 +598,7 @@ impl NavWorld {
                     continue;
                 }
                 let mid = (l.a + l.b) * 0.5;
-                let ng = g[ui] + pos[ui].distance(mid) + l.extra;
+                let ng = g[ui] + self.pylon_cost(u, l).unwrap_or_else(|| pos[ui].distance(mid) + l.extra);
                 if ng < g[v] {
                     g[v] = ng;
                     pos[v] = mid;
@@ -421,12 +613,19 @@ impl NavWorld {
     /// Waypoints (floor points) from `start` to `goal`, excluding the start. `None` when either
     /// end is off the mesh or no route exists.
     pub fn find_path(&self, start: Vec3, goal: Vec3, opts: &PathOpts) -> Option<Vec<Vec3>> {
+        self.find_path_watch(start, goal, opts).map(|(p, _)| p)
+    }
+
+    /// [`NavWorld::find_path`] with the dynamic pylons the route crosses
+    /// ([`NavWorld::corridor_pylons`]).
+    pub fn find_path_watch(&self, start: Vec3, goal: Vec3, opts: &PathOpts) -> Option<(Vec<Vec3>, Vec<(u16, u32)>)> {
         let (sp, s) = self.closest_point(start, 200.0)?;
         let (gp, g) = self.closest_point(goal, 300.0)?;
         if sp == gp {
-            return Some(vec![g]);
+            return Some((vec![g], self.corridor_pylons(&[(sp, None)])));
         }
         let corr = self.corridor(sp, gp, g, s, opts)?;
+        let watch = self.corridor_pylons(&corr);
         // Portals oriented (left, right) along the direction of travel.
         let mut portals: Vec<(Vec3, Vec3)> = Vec::with_capacity(corr.len() + 1);
         portals.push((s, s));
@@ -448,7 +647,7 @@ impl NavWorld {
             portals.push((left, right));
         }
         portals.push((g, g));
-        Some(string_pull(&portals))
+        Some((string_pull(&portals), watch))
     }
 }
 
@@ -525,6 +724,10 @@ pub struct Follower {
     pub replan_in: u32,
     /// The last query found no route (callers may give up on the goal).
     pub failed: bool,
+    /// Dynamic pylons the path crosses with their abort counts when it was planned: the path
+    /// is replanned when one of them aborts its pawns (`ArkDynamicPylon` slot 245).
+    #[serde(default)]
+    pub pylons: Vec<(u16, u32)>,
 }
 
 impl Follower {
@@ -537,16 +740,19 @@ impl Follower {
         };
         self.replan_in = self.replan_in.saturating_sub(1);
         let moved = self.goal.is_none_or(|g| g.truncate().distance(goal.truncate()) > 150.0 || (g.z - goal.z).abs() > 120.0);
-        if self.replan_in == 0 || moved {
+        let aborted = self.pylons.iter().any(|&(p, n)| nav.pylons.get(p as usize).and_then(|p| p.dynamic.as_ref()).is_some_and(|d| d.state.aborts != n));
+        if self.replan_in == 0 || moved || aborted {
             self.replan_in = 60;
             self.goal = Some(goal);
-            match nav.find_path(me, goal, &PathOpts::default()) {
-                Some(p) => {
+            match nav.find_path_watch(me, goal, &PathOpts::default()) {
+                Some((p, w)) => {
                     self.path = p;
+                    self.pylons = w;
                     self.failed = false;
                 }
                 None => {
                     self.path.clear();
+                    self.pylons.clear();
                     self.failed = true;
                 }
             }
@@ -620,5 +826,142 @@ mod tests {
         let w = NavWorld::from_data(&mesh());
         let p = w.find_path(Vec3::new(20.0, 100.0, 0.0), Vec3::new(380.0, 100.0, 0.0), &PathOpts::default()).unwrap();
         assert_eq!(p.len(), 1, "{p:?}");
+    }
+
+    /// A static pylon `A` (polys at x 0..200 and 400..600, joined only by a long detour edge
+    /// through y = 2000) and a dynamic pylon `B` (x 200..400) bridging them with cross-pylon
+    /// edges: `A0 -> B0` held by A, `B0 -> A1` held by B (and the reverse ones).
+    fn bridge() -> NavData {
+        use dishonored_ir::nav::{DynamicPylon, NavPathObjectLink};
+        let v = |x: f32, y: f32| Vec3::new(x, y, 0.0);
+        let poly = |vs: Vec<u16>, cx: f32| NavPoly { verts: vs, edges: vec![], center: Vec3::new(cx, 100.0, 0.0), normal: Vec3::Z, min: Vec3::new(cx - 100.0, 0.0, 0.0), max: Vec3::new(cx + 100.0, 200.0, 0.0), height: 200.0 };
+        let cross = |v0, v1, from: (i32, u16), to: (i32, u16)| NavEdge {
+            class: NavEdgeClass::CrossPylon,
+            kind: NavEdgeType::Normal,
+            v0,
+            v1,
+            poly0: 0,
+            poly1: 0,
+            length: 200.0,
+            effective_length: 200.0,
+            center: Vec3::ZERO,
+            path_object: Some(NavPathObjectLink { poly_refs: [(from.0, [0; 4], from.1, 0), (to.0, [0; 4], to.1, 0)], path_object: (0, [0; 4]), internal_id: -1 }),
+        };
+        let detour = |p0, p1| NavEdge { class: NavEdgeClass::Base, kind: NavEdgeType::Normal, v0: 8, v1: 9, poly0: p0, poly1: p1, length: 1.0, effective_length: 1.0, center: Vec3::ZERO, path_object: None };
+        let a = NavMesh {
+            source: "a".into(),
+            version: (28, 28),
+            verts: vec![v(0.0, 0.0), v(200.0, 0.0), v(200.0, 200.0), v(0.0, 200.0), v(400.0, 0.0), v(600.0, 0.0), v(600.0, 200.0), v(400.0, 200.0), v(300.0, 2000.0), v(301.0, 2000.0)],
+            polys: vec![poly(vec![0, 1, 2, 3], 100.0), poly(vec![4, 5, 6, 7], 500.0)],
+            edges: vec![detour(0, 1), cross(1, 2, (1, 0), (2, 0)), cross(4, 7, (1, 1), (2, 0))],
+            min: Vec3::ZERO,
+            max: Vec3::new(600.0, 2000.0, 0.0),
+        };
+        let b = NavMesh {
+            source: "b".into(),
+            version: (28, 28),
+            verts: vec![v(200.0, 0.0), v(400.0, 0.0), v(400.0, 200.0), v(200.0, 200.0)],
+            polys: vec![poly(vec![0, 1, 2, 3], 300.0)],
+            edges: vec![cross(1, 2, (2, 0), (1, 1)), cross(0, 3, (2, 0), (1, 0))],
+            min: Vec3::new(200.0, 0.0, 0.0),
+            max: Vec3::new(400.0, 200.0, 0.0),
+        };
+        let dynamic = Some(DynamicPylon { needs_cost_check: true, ceiling_height: 700.0, ..Default::default() });
+        NavData {
+            pylons: vec![
+                NavPylon { name: "A".into(), package: "t".into(), object_ref: 1, mesh: a, ..Default::default() },
+                NavPylon { name: "B".into(), package: "t".into(), object_ref: 2, location: Vec3::new(300.0, 100.0, 0.0), mesh: b, dynamic, ..Default::default() },
+            ],
+            path_objects: Vec::new(),
+        }
+    }
+
+    fn max_y(p: &[Vec3]) -> f32 {
+        p.iter().map(|w| w.y).fold(f32::MIN, f32::max)
+    }
+
+    #[test]
+    fn disconnected_dynamic_pylon_costs_its_cross_edges() {
+        let mut w = NavWorld::from_data(&bridge());
+        let b = w.pylon_index("B", Some("t")).unwrap();
+        assert!(w.pylons[b].dynamic.is_some() && w.pylons[w.pylon_index("A", None).unwrap()].dynamic.is_none());
+        let (s, g) = (Vec3::new(50.0, 100.0, 0.0), Vec3::new(550.0, 100.0, 0.0));
+        // Connected: straight across the dynamic pylon.
+        let p = w.find_path(s, g, &PathOpts::default()).unwrap();
+        assert!(max_y(&p) < 300.0, "{p:?}");
+        // Disconnect: its cross-pylon edges cost 10,000,000, so the detour wins.
+        assert!(w.set_pylon_connected(b, false));
+        assert_eq!(w.pylons[b].dynamic.as_ref().unwrap().state.aborts, 1);
+        let p = w.find_path(s, g, &PathOpts::default()).unwrap();
+        assert!(max_y(&p) > 1900.0, "{p:?}");
+        // A second Disconnect does not abort again; Connect restores the short route.
+        w.set_pylon_connected(b, false);
+        assert_eq!(w.pylons[b].dynamic.as_ref().unwrap().state.aborts, 1);
+        w.set_pylon_connected(b, true);
+        assert!(max_y(&w.find_path(s, g, &PathOpts::default()).unwrap()) < 300.0);
+        // The pylon's own polys stay walkable while it is disconnected.
+        w.set_pylon_connected(b, false);
+        assert!(w.find_path(Vec3::new(250.0, 50.0, 0.0), Vec3::new(350.0, 150.0, 0.0), &PathOpts::default()).is_some());
+    }
+
+    #[test]
+    fn disconnected_edge_is_a_cost_not_a_wall() {
+        // Without the detour the disconnected crossing is still the only route (10,000,000).
+        let mut data = bridge();
+        data.pylons[0].mesh.edges.remove(0);
+        let mut w = NavWorld::from_data(&data);
+        let b = w.pylon_index("B", None).unwrap();
+        w.set_pylon_connected(b, false);
+        let start = w.locate(Vec3::new(50.0, 100.0, 0.0), 60.0, 260.0).unwrap();
+        let goal = w.locate(Vec3::new(550.0, 100.0, 0.0), 60.0, 260.0).unwrap();
+        assert!(w.corridor(start, goal, Vec3::new(550.0, 100.0, 0.0), Vec3::new(50.0, 100.0, 0.0), &PathOpts::default()).is_some());
+        let l = w.links[start as usize].iter().find(|l| l.kind == LinkKind::CrossPylon).unwrap();
+        assert_eq!(w.pylon_cost(start, l), Some(DISCONNECTED_EDGE_COST));
+    }
+
+    #[test]
+    fn moving_dynamic_pylon_disconnects_then_moves_its_mesh_in_50_uu_steps() {
+        let mut w = NavWorld::from_data(&bridge());
+        let b = w.pylon_index("B", None).unwrap();
+        let placed = w.pylons[b].placed;
+        let v0 = w.pylons[b].verts.0 as usize;
+        let z = |w: &NavWorld| w.verts[v0].z;
+        // Under 50 uu on every axis: disconnected (pawns aborted), mesh unchanged.
+        assert!(!w.move_dynamic_pylon(b, placed + Vec3::new(30.0, -49.0, 49.9)));
+        let d = w.pylons[b].dynamic.clone().unwrap().state;
+        assert!(d.disconnected && d.aborts == 1 && d.previous == placed);
+        assert_eq!(z(&w), 0.0);
+        // 50 uu on one axis from where the mesh was: the whole offset is applied.
+        let to = placed + Vec3::new(0.0, 0.0, 60.0);
+        assert!(w.move_dynamic_pylon(b, to));
+        let d = w.pylons[b].dynamic.clone().unwrap().state;
+        assert_eq!((d.previous, d.aborts), (to, 1));
+        assert_eq!(z(&w), 60.0);
+        let pb = w.pylons[b].polys.0 as usize;
+        assert_eq!((w.polys[pb].center.z, w.polys[pb].min.z, w.polys[pb].max.z), (60.0, 60.0, 60.0));
+        // Edges held by B moved with it; the ones A holds keep A's vertices.
+        assert!(w.links.iter().flatten().filter(|l| l.owner as usize == b).all(|l| l.a.z == 60.0 && l.b.z == 60.0));
+        assert!(w.links.iter().flatten().filter(|l| l.owner as usize != b).all(|l| l.a.z == 0.0));
+        // The spatial index follows: B is found at its new height only.
+        assert_eq!(w.locate(Vec3::new(300.0, 100.0, 60.0), 1.0, 1.0), Some(pb as u32));
+        assert_eq!(w.locate(Vec3::new(300.0, 100.0, 0.0), 1.0, 1.0), None);
+        // Still disconnected until the Kismet connects it.
+        assert!(w.pylons[b].dynamic.as_ref().unwrap().state.disconnected);
+    }
+
+    #[test]
+    fn follower_repaths_when_a_crossed_pylon_aborts() {
+        let mut w = NavWorld::from_data(&bridge());
+        let b = w.pylon_index("B", None).unwrap();
+        let (s, g) = (Vec3::new(50.0, 100.0, 0.0), Vec3::new(550.0, 100.0, 0.0));
+        let mut f = Follower::default();
+        f.steer(Some(&w), s, g);
+        assert_eq!(f.pylons, vec![(b as u16, 0)]);
+        assert!(max_y(&f.path) < 300.0);
+        w.set_pylon_connected(b, false);
+        // The next tick replans at once (not after the 60-tick period).
+        f.steer(Some(&w), s, g);
+        assert!(max_y(&f.path) > 1900.0, "{:?}", f.path);
+        assert!(f.pylons.is_empty());
     }
 }

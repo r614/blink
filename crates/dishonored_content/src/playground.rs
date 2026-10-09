@@ -153,7 +153,7 @@ pub fn load_layout_match(content: &Content, sim: SimConfig, layout: &MapLayout) 
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).ok();
     let coll_path = dir.join(format!("{}.{key:016x}.collision.bin", layout.name));
-    let nav_path = dir.join(format!("{}.{key:016x}.nav.bin", layout.name));
+    let nav_path = dir.join(format!("{}.{key:016x}.nav2.bin", layout.name));
     let data_path = dir.join(format!("{}.{key:016x}.derived.json", layout.name));
     let cached = (CollisionWorld::load(&coll_path).ok(), std::fs::read_to_string(&data_path).ok().and_then(|t| serde_json::from_str::<Derived>(&t).ok()));
     let (mut collision, derived) = match cached {
@@ -508,7 +508,7 @@ pub fn generate_nav(world: &CollisionWorld, g: &NavGrid, mv: &NavAgent) -> disho
     let (lo, hi) = mesh.verts.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(a, b), v| (a.min(*v), b.max(*v)));
     mesh.min = lo;
     mesh.max = hi;
-    let pylon = NavPylon { name: "GeneratedPylon".into(), package: "layout".into(), object_ref: 0, location: (lo + hi) * 0.5, nav_guid: [0; 4], tall_boy: false, mesh, obstacle: None };
+    let pylon = NavPylon { name: "GeneratedPylon".into(), package: "layout".into(), object_ref: 0, location: (lo + hi) * 0.5, nav_guid: [0; 4], tall_boy: false, mesh, obstacle: None, dynamic: None };
     dishonored_world::nav::NavWorld::from_data(&NavData { pylons: vec![pylon], path_objects: Vec::new() })
 }
 

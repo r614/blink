@@ -119,9 +119,9 @@ pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
 }
 
 /// The map's original navigation mesh (the `L_*_Nav` pylons plus doors and nav blockers),
-/// cached as `cache/<map>.nav.bin`.
+/// cached as `cache/<map>.nav2.bin` (2: pylon table and dynamic pylons).
 pub fn load_nav(content: &Content, map: &str) -> Result<NavWorld> {
-    let path = cache_dir().join(format!("{map}.nav.bin"));
+    let path = cache_dir().join(format!("{map}.nav2.bin"));
     if let Ok(w) = NavWorld::load(&path) {
         if !w.polys.is_empty() {
             return Ok(w);
