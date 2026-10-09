@@ -589,10 +589,18 @@ fn run(job: &Job) -> Outcome {
     });
     match composed {
         Ok((module, info)) => {
+            let mut module = module;
             if let Some(info) = info {
                 match encode(&module, &info, preferred_format()) {
                     Ok((format, payload)) => {
-                        let _ = write_atomic(&path, &encode_file(format, &payload));
+                        let file = encode_file(format, &payload);
+                        let _ = write_atomic(&path, &file);
+                        // Hand wgpu the module as later runs will read it back, so the first run
+                        // and the cached runs give the driver the same code (and hit its cache):
+                        // a freshly composed module differs from its round trip.
+                        if let Some(round_trip) = decode_file(&file) {
+                            module = round_trip;
+                        }
                     }
                     Err(e) => warn!("shader cache: {name}: not stored: {e}"),
                 }
