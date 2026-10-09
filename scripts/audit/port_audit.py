@@ -31,6 +31,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 UTILITY_CALLERS = 120
+# The game module (DishonoredGame natives) starts here; below are the engine and Core.
+ENGINE_END = 0x009E0000
 
 ADDR_RE = re.compile(r"(?i)\b(?:0x|FUN_|LAB_)(00[0-9a-f]{6})\b")
 FUN_RE = re.compile(r"\bFUN_([0-9a-f]{8})\b")
@@ -139,6 +141,7 @@ def main():
     ap.add_argument("--file", action="append", default=[], help="only port files whose path contains this")
     ap.add_argument("--min-lines", type=int, default=6, help="frontier functions shorter than this (decompiled lines) are not listed")
     ap.add_argument("--limit", type=int, default=25)
+    ap.add_argument("--dump", type=int, default=0, help="with each frontier entry, its first N statements")
     ap.add_argument("--out", default=str(REPO / "harness_out" / "audit" / "port_audit.md"))
     a = ap.parse_args()
 
@@ -216,6 +219,10 @@ def main():
             for t in cs:
                 if t in code_cited or t not in funcs or callers[t] > UTILITY_CALLERS:
                     continue
+                # Unreal Engine 3 code (below the game module at 0x009E0000) called from engine
+                # code the port reimplements: that routine's internals, not game logic.
+                if t < ENGINE_END and f < ENGINE_END:
+                    continue
                 if ledger.get(t, ("",))[0] in ("helper", "ported", "irrelevant"):
                     continue
                 frontier[t].add(f)
@@ -257,6 +264,11 @@ def main():
                 info.append("calls cited " + ", ".join(f"{c:08x}" for c in sub))
             if info:
                 lines.append("    " + "; ".join(info))
+            if a.dump:
+                body = [l for l in funcs[t][4].split("\n") if l.strip() and not re.match(r"^\s+(undefined\d?|int|uint|float|char|bool|byte|ushort|short|longlong|ulonglong|float10|double|void|code|wchar_t)\b[^=]*;$", l)]
+                body = [l for l in body if not re.search(r"ExceptionList|puStack_|local_10 = |uStack_|DAT_013b49a8", l)]
+                for l in body[: a.dump]:
+                    lines.append("      | " + l.strip()[:150])
         if len(rows) > a.limit:
             lines.append(f"- ... {len(rows) - a.limit} more")
         if missing:

@@ -159,3 +159,33 @@
 00a77c30	helper	throw state init helper
 009facf0	helper	player tweak object
 00a71690	irrelevant	plays a camera animation (stand-up etc.)
+# blink.rs / climb.rs / darkness.rs / inventory.rs / vitals.rs (2026-10-09)
+006a1780	helper	UE3 line check / sweep setup
+0040dac0	helper	matrix to quaternion
+00bf33b0	helper	power component state check
+00bf8a90	ported	Blink range from the level tweak x attribute (blink range), LIKELY
+00be9220	ported	Blink start: ends a toggled sneak through 0x00AD3860 (with the gap of 0x00ACD960) when crouched
+00be7460	ported	Blink: the destination's height correction for a crouched landing (+0x290 half height), LIKELY
+00ac1cf0	helper	action-state flag set / clear
+00bf8b40	ported	Blink end: state reset and blink layer clear (0x00BF5520 cited)
+00bf62b0	helper	power level tweak entry
+00ab9980	irrelevant	player stat counter (climb) for the stats screen: stats counted in player_stats
+00c0c150	irrelevant	item context presentation (hand pose)
+0050d000	helper	2D vector safe normal
+00aae5a0	helper	Use handler: the carry / grab state query
+00c16d90	helper	item contexts reset loop
+00a2c3f0	helper	climbable tweak copy
+00a65dc0	helper	pawn tweak
+00ad5790	helper	interaction request object
+00be70c0	helper	power component vslot dispatch
+00bb0140	gap	HUD game message SetGameMessage with a tweak string (+0x62C) from the darkness / chaos update (0x00BB3360): check which message
+00424b60	helper	FName lookup
+006287d0	helper	array serialization
+00a4f760	irrelevant	light environment of a pawn
+00455330	helper	FString construction
+00ac1b20	helper	vector2 copy (platform dependent)
+006f2990	helper	Kismet variable lookup by name ("Target")
+00aa5ca0	gap	tutorial hint: m_AcquiredElixirTutorialMessage(_PC) on the first elixir (gameplay tutorial system)
+00b8cfe0	gap	tutorial hint 0x16 queued on the HUD (0x00BC31B0) from a pickup (gameplay tutorial system)
+00c04c80	helper	inventory item of a kind
+00cea0b0	helper	player input state check (rumble / gamepad)
