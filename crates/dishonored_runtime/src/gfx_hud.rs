@@ -183,6 +183,8 @@ struct Native {
     tw_queue: Vec<(u8, String)>,
     tw_timer: f32,
     hints: u8,
+    /// The air gauge is open (the HUD's +0x1FC bit 0x40, set by 0x00B8CE70).
+    oxygen_open: bool,
     /// Task markers the harness placed (`{"hud": {"kind": "task_markers"}}`).
     test_markers: Vec<(glam::Vec3, bool, String)>,
     game_msg_seen: u32,
@@ -942,6 +944,29 @@ pub fn update_gfx_hud(
     // --- cinematic stripes ---
     if let Some(s) = w.stripes.as_mut() {
         s.set(st, cutscene, true);
+    }
+
+    // --- air gauge: the pawn's breath tick (0x00AD7BE0) under water opens it once (0x00B8CE70)
+    // and fills it with the air left over the capacity (0x00B94EB0, `FillOxygenGauge(f x 100)`);
+    // surfacing closes it (0x00B8CF30) while the air refills ---
+    if let (Some(o), Some(p)) = (w.oxygen.as_mut(), me) {
+        let under = p.alive && p.water.under;
+        if under {
+            if !n.oxygen_open {
+                n.oxygen_open = true;
+                o.open(st);
+            }
+            let breath = dishonored_sim::powers::attribute(p, cfg, "Attribute_BreathCapacityIncrease", 0.0);
+            let max = dishonored_sim::swim::air_capacity(&cfg.movement.water, breath);
+            let left = dishonored_sim::swim::air_left(p, &cfg.movement, breath);
+            let f = if max > 0.0 { left / max } else { 0.0 };
+            if (f * 100.0 - o.value).abs() > 1e-3 {
+                o.fill(st, f * 100.0);
+            }
+        } else if n.oxygen_open {
+            n.oxygen_open = false;
+            o.close(st);
+        }
     }
 
     // --- pickup log (inventory differences) ---

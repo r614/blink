@@ -2323,6 +2323,119 @@ impl BlackStripes {
 }
 
 // =============================================================================================
+// OxygenGauge (hud_oMeter, `oxygenGauge_mc`): the air left under water
+// =============================================================================================
+
+const W_OXYGEN: u16 = 17;
+const OX_CLOSED: u16 = 1;
+const OX_GLOW: u16 = 2;
+
+pub struct OxygenGauge {
+    pub mc: Id,
+    bkgd: Option<Id>,
+    gauge: Option<Id>,
+    mask: Option<Id>,
+    indic: Option<Id>,
+    glow: Option<Id>,
+    bkgd_def: glam::Vec2,
+    gauge_def: (glam::Vec2, f32),
+    pub value: f32,
+    interval_close: Option<u32>,
+    interval_glow: Option<u32>,
+}
+
+impl OxygenGauge {
+    /// `_glowMinAlpha`, `_glowMaxAlpha`, `_glowDuration`, `_meterFillDuration`.
+    const GLOW_MIN: f32 = 15.0;
+    const GLOW_MAX: f32 = 30.0;
+    const GLOW_DURATION: f32 = 2.25;
+    const FILL_DURATION: f32 = 0.45;
+
+    /// The constructor: hidden, transparent, the parts' placed positions kept.
+    pub fn new(st: &mut Stage, mc: Id) -> Self {
+        st.set_visible(mc, false);
+        st.set(mc, Prop::Alpha, 0.0);
+        let bkgd = st.child(mc, "_bkgd_mc");
+        let gauge = st.child(mc, "_gauge_mc");
+        let sub = |st: &Stage, n: &str| gauge.and_then(|g| st.child(g, n));
+        let (mask, indic, glow) = (sub(st, "_mask_mc"), sub(st, "_indic_mc"), sub(st, "_glow_mc"));
+        let bkgd_def = bkgd.map_or(glam::Vec2::ZERO, |b| glam::Vec2::new(st.get(b, Prop::X), st.get(b, Prop::Y)));
+        let gauge_def = gauge.map_or((glam::Vec2::ZERO, 0.0), |g| (glam::Vec2::new(st.get(g, Prop::X), st.get(g, Prop::Y)), st.get(g, Prop::Rotation)));
+        Self { mc, bkgd, gauge, mask, indic, glow, bkgd_def, gauge_def, value: 100.0, interval_close: None, interval_glow: None }
+    }
+
+    /// `FillOxygenGauge(oxygenValue)` (percent): the mask scaled to the value, the indicator at
+    /// its top, shown while the air is not full.
+    pub fn fill(&mut self, st: &mut Stage, oxygen: f32) {
+        self.value = oxygen.max(0.1);
+        let Some(mask) = self.mask else { return };
+        let old = st.get(mask, Prop::YScale);
+        st.set(mask, Prop::YScale, 100.0);
+        let mask_h = st.bounds_in_parent(mask).map_or(0.0, |r| r.size().y);
+        st.set(mask, Prop::YScale, old);
+        let y = st.get(mask, Prop::Y) - mask_h * self.value / 100.0;
+        st.set(mask, Prop::YScale, self.value);
+        let alpha = if oxygen < 100.0 { 100.0 } else { 0.0 };
+        if let Some(i) = self.indic {
+            st.tween_end(i, false);
+            st.set(i, Prop::Y, y);
+            st.tween_to(i, Self::FILL_DURATION, &[(Prop::Alpha, alpha)], Ease::StrongOut, None);
+        }
+    }
+
+    /// `Open`: the background and the gauge swing in (1.35 s), the clip fades in, the glow loops.
+    pub fn open(&mut self, st: &mut Stage) {
+        clear(st, &mut self.interval_close);
+        st.set_visible(self.mc, true);
+        if let Some(b) = self.bkgd {
+            st.tween_end(b, false);
+            st.set(b, Prop::X, 10.0);
+            st.set(b, Prop::Rotation, 15.0);
+            st.tween_to(b, 1.35, &[(Prop::Rotation, 0.0), (Prop::Y, self.bkgd_def.y), (Prop::X, self.bkgd_def.x)], Ease::StrongOut, None);
+            st.goto_and_play(b, "loop");
+        }
+        if let Some(g) = self.gauge {
+            st.set(g, Prop::Rotation, 25.0);
+            st.set(g, Prop::X, 15.0);
+            st.tween_to(g, 1.35, &[(Prop::Rotation, self.gauge_def.1), (Prop::Y, self.gauge_def.0.y), (Prop::X, self.gauge_def.0.x)], Ease::StrongOut, None);
+        }
+        st.tween_to(self.mc, 0.35, &[(Prop::Alpha, 100.0)], Ease::StrongOut, None);
+        self.glow_step(st);
+    }
+
+    /// `Close`: the glow stops, the clip fades out and hides after 250 ms (`OnClosed`).
+    pub fn close(&mut self, st: &mut Stage) {
+        clear(st, &mut self.interval_glow);
+        st.tween_to(self.mc, 0.35, &[(Prop::Alpha, 0.0)], Ease::StrongOut, None);
+        interval(st, &mut self.interval_close, 250.0, key(W_OXYGEN, OX_CLOSED, 0));
+    }
+
+    /// `initGlowAnim`: the glow tweens towards the other end of 15..30 % every 2.25 s.
+    fn glow_step(&mut self, st: &mut Stage) {
+        if let Some(g) = self.glow {
+            st.tween_end(g, false);
+            let to = if st.get(g, Prop::Alpha) > Self::GLOW_MIN { Self::GLOW_MIN } else { Self::GLOW_MAX };
+            st.tween_to(g, Self::GLOW_DURATION, &[(Prop::Alpha, to)], Ease::StrongOut, None);
+        }
+        interval(st, &mut self.interval_glow, Self::GLOW_DURATION * 1000.0, key(W_OXYGEN, OX_GLOW, 0));
+    }
+
+    fn on_event(&mut self, st: &mut Stage, code: u16) {
+        match code {
+            OX_CLOSED => {
+                clear(st, &mut self.interval_close);
+                if let Some(b) = self.bkgd {
+                    st.goto_and_stop(b, "1");
+                }
+                st.set_visible(self.mc, false);
+            }
+            OX_GLOW => self.glow_step(st),
+            _ => {}
+        }
+    }
+}
+
+// =============================================================================================
 // Crosshair (`_dot_mc`, `_aspect_mc`: Crosshair / Crosshair_Gun / Crosshair_Crossbow)
 // =============================================================================================
 
@@ -3231,6 +3344,7 @@ pub struct HudWidgets {
     pub tutorial_window: Option<TutorialWindow>,
     pub stripes: Option<BlackStripes>,
     pub location: Option<Location>,
+    pub oxygen: Option<OxygenGauge>,
     pub crosshairs: Crosshairs,
     pub sounds: SoundQueue,
 }
@@ -3255,14 +3369,15 @@ impl HudWidgets {
         let tutorial_window = c(st, "tutorialWindow_mc").map(|m| TutorialWindow::new(st, m));
         let stripes = c(st, "blackStripes_mc").map(|m| BlackStripes::new(st, m));
         let location = c(st, "location_mc").map(|m| Location::new(st, m));
+        let oxygen = c(st, "oxygenGauge_mc").map(|m| OxygenGauge::new(st, m));
         // Widgets the port does not drive yet start hidden, as their classes do.
-        for n in ["oxygenGauge_mc", "interactions_ic_mc", "interactions_icQTE_mc", "skipCutScene_mc", "interactionGauge_mc", "grenadeCooking_mc"] {
+        for n in ["interactions_ic_mc", "interactions_icQTE_mc", "skipCutScene_mc", "interactionGauge_mc", "grenadeCooking_mc"] {
             if let Some(m) = c(st, n) {
                 st.set_visible(m, false);
             }
         }
         let crosshairs = Crosshairs::new(st);
-        Self { objectives, target, pickup_log, gauges, crosshair_info, game_msg, interactions, interaction_window, subtitles, choice, state_icon, tutorial, tutorial_window, stripes, location, crosshairs, sounds: SoundQueue::default() }
+        Self { objectives, target, pickup_log, gauges, crosshair_info, game_msg, interactions, interaction_window, subtitles, choice, state_icon, tutorial, tutorial_window, stripes, location, oxygen, crosshairs, sounds: SoundQueue::default() }
     }
 
     /// Route a stage event to its widget.
@@ -3337,6 +3452,11 @@ impl HudWidgets {
             }
             W_LOC => {
                 if let Some(o) = self.location.as_mut() {
+                    o.on_event(st, code)
+                }
+            }
+            W_OXYGEN => {
+                if let Some(o) = self.oxygen.as_mut() {
                     o.on_event(st, code)
                 }
             }
