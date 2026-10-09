@@ -171,7 +171,7 @@ pub fn load_model_with(content: &Content, name: &str, parts: &[(&str, &str)], ov
                 Some(mi) => *mat_ids.entry((mpkg_name.clone(), mi)).or_insert_with(|| push_material(content, &mpkg, mi, max_tex, &mut model, &mut tex_ids)),
                 _ => None,
             };
-            sections.push(MeshSection { first_index: s.first_index, num_triangles: s.num_triangles, material, enable_collision: false });
+            sections.push(MeshSection { first_index: s.first_index, num_triangles: s.num_triangles, material, enable_collision: false, material_index: s.material_index.max(0) as u32 });
         }
         model.parts.push(SkeletalMeshAsset {
             source: part.to_string(),
@@ -272,12 +272,12 @@ pub fn load_static_model(content: &Content, pkg_name: &str, path: &str, max_tex:
     let mut tex_ids = HashMap::new();
     let mut mat_ids: HashMap<usize, Option<usize>> = HashMap::new();
     let mut sections = Vec::new();
-    for s in &raw.sections {
+    for (si, s) in raw.sections.iter().enumerate() {
         let material = match ObjRef::from_index(s.material) {
             ObjRef::Export(mi) => *mat_ids.entry(mi).or_insert_with(|| push_material(content, &pkg, mi, max_tex, &mut model, &mut tex_ids)),
             _ => None,
         };
-        sections.push(MeshSection { first_index: s.first_index, num_triangles: s.num_triangles, material, enable_collision: false });
+        sections.push(MeshSection { first_index: s.first_index, num_triangles: s.num_triangles, material, enable_collision: false, material_index: si as u32 });
     }
     let n = raw.positions.len();
     model.parts.push(SkeletalMeshAsset {

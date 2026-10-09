@@ -120,6 +120,76 @@ pub struct MatchView {
     /// last: the clients draw each once, before their camera.
     #[serde(default)]
     pub lens_effects: Vec<LensEffectView>,
+    /// Level actors the Kismet highlights (`DisSeqAct_Highlight`): the clients draw each with
+    /// its interactable tweak's highlight material over its mesh.
+    #[serde(default)]
+    pub highlights: Vec<HighlightView>,
+    /// The player camera's rain emitter (`DisSeqAct_SetRainEmitter`), if the Kismet set one.
+    #[serde(default)]
+    pub rain: Option<RainView>,
+    /// The camera fade (`SeqAct_CameraFade` -> `PlayerController.ClientSetCameraFade`), if one
+    /// is enabled: the screen fade the Kismet plays around its teleports.
+    #[serde(default)]
+    pub camera_fade: Option<CameraFadeView>,
+}
+
+/// A level actor highlighted by the Kismet: `<package>:<actor>` (the map's
+/// `HighlightDef::actor`) and where the level placed it (same-named actors of different
+/// sublevels are told apart by it).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HighlightView {
+    pub actor: String,
+    pub placed: [f32; 3],
+}
+
+/// The player camera's rain set by `DisSeqAct_SetRainEmitter` (0x00B9ADF0 -> the camera's
+/// 0x00AC0570): the `Emitter` actor whose rain box follows the camera (`<package>:<actor>`, a
+/// placed emitter of the map; its template's first module gives the box's `m_Extent`), the
+/// action's drop count and impact distances, and the rain direction (`m_pRainRotationActor`'s
+/// rotation, else down).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RainView {
+    /// Bumped on every `SetRainEmitter` (the camera re-activates the emitter).
+    pub id: u32,
+    pub emitter: String,
+    pub drops: i32,
+    pub impacts_min: f32,
+    pub impacts_max: f32,
+    pub direction: [f32; 3],
+    /// The rotation actor's `Rotation` (pitch, yaw, roll; UE3 units) the emitter takes, None
+    /// without one (the emitter keeps the default rotator).
+    #[serde(default)]
+    pub rotation: Option<[i32; 3]>,
+}
+
+/// An enabled camera fade (UE3 `Camera` `FadeColor` / `FadeAlpha` / `FadeTime` /
+/// `FadeTimeRemaining`, `FadeAmount` = lerp from X to Y as the time runs out): the clients draw
+/// `color` over the view at `amount`, advancing it locally until the next snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CameraFadeView {
+    /// Bumped on every new fade.
+    pub id: u32,
+    /// sRGB colour (`FadeColor`, bytes / 255).
+    pub color: [f32; 3],
+    /// `FadeAlpha` (from, to).
+    pub alpha: [f32; 2],
+    pub time: f32,
+    pub remaining: f32,
+    /// `FadeAmount` now.
+    pub amount: f32,
+}
+
+impl CameraFadeView {
+    /// UE3 `Camera::UpdateCamera` (0x005E5EB0): with time remaining, the remaining time runs down
+    /// (not below 0) and, for a timed fade, `FadeAmount = X + (1 - remaining / time) (Y - X)`.
+    pub fn advance(&mut self, dt: f32) {
+        if self.remaining > 0.0 {
+            self.remaining = (self.remaining - dt).max(0.0);
+            if self.time > 0.0 {
+                self.amount = self.alpha[0] + (1.0 - self.remaining / self.time) * (self.alpha[1] - self.alpha[0]);
+            }
+        }
+    }
 }
 
 /// A spawned camera lens effect: the spawning action (`<package>:<object path>`, the map's

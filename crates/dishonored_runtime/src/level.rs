@@ -161,6 +161,7 @@ fn spawn_imported(
     };
     crate::effects::spawn_level_effects(name, &map, commands, meshes, images, fx_mats, fx);
     crate::level_props::queue(name, &map, commands);
+    crate::highlight::queue(name, &map, commands, meshes, features);
     info!("{}: {} instances, {} meshes, {} textures, {} entities", name, instances, map.meshes.len(), map.textures.len(), spawned);
     let flares = crate::lens_flare::spawn_flares(name, &map, features, commands, meshes, images);
     if flares > 0 {
