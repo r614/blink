@@ -322,10 +322,14 @@ fn mission_run(maps: &MapContents, def: &MissionDef) -> Result<MissionRun> {
                 if std::env::var_os("CONV_DEBUG").is_some() && tick % 120 == 0 {
                     eprintln!("t {t:.0} step {step} me {:.0} goal {gp:.0} d {d:.0}", me.position);
                 }
-                let to = gp - me.position;
                 if d < 120.0 {
-                    input.yaw = to.y.atan2(to.x).to_degrees();
-                    input.pitch = -15.0;
+                    // The Use acts on the crosshair's target: look at the NPC's torso (a marker:
+                    // at the marker).
+                    let at = match plan[step].0 {
+                        Goal::Npc(_) => gp + glam::Vec3::Z * 20.0,
+                        Goal::Marker(_) => gp,
+                    };
+                    (input.yaw, input.pitch) = dishonored_sim::crosshair::aim_at(&me, &mc.sim.gameplay.movement, at);
                     if tick % 20 == 0 {
                         input.buttons |= buttons::USE;
                     }

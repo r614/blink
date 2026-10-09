@@ -208,6 +208,9 @@ fn stat_pickup(r: &mut Run, health: i32, food: bool, bullets: u16) -> usize {
         carried_by: None,
         bounds_min: Vec3::ZERO,
         bounds_max: Vec3::ZERO,
+        local_min: Vec3::ZERO,
+        local_max: Vec3::ZERO,
+        rotation: Vec3::ZERO,
     });
     r.state.pickups.len() - 1
 }

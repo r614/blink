@@ -37,6 +37,8 @@ pub struct PlayerEventState {
     mana: BTreeMap<PlayerId, i32>,
     /// The power in the player's left hand at the last step (`PowerEquipped`).
     equipped: BTreeMap<PlayerId, u8>,
+    /// The journal was opened this step (`JournalViewed` fires next feed).
+    pub(super) journal_viewed: bool,
 }
 
 /// Output of `DisSeqEvent_PlayerManaThreshold` (`EDisPlayerManaThresholdOutput`).
@@ -291,6 +293,16 @@ pub(super) fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
         }
     }
     destroyed_events(k, h);
+    // `DisSeqEvent_JournalViewed`: the journal menu opened (0x00BD11E0), the player's events.
+    if std::mem::take(&mut h.st.player_ev.journal_viewed) {
+        if let Some(p) = h.m.humans.first().copied() {
+            let evs = player_events(k, "DisSeqEvent_JournalViewed");
+            let fired = fire_events(k, h, evs, Obj::Pawn(p), Obj::Pawn(p), None);
+            if !fired.is_empty() {
+                h.note(format!("journal viewed: {} event(s)", fired.len()));
+            }
+        }
+    }
 }
 
 /// `SeqEvent_Destroyed` (the engine's `Actor::Destroyed` -> `TriggerEventClass`): the destroyed

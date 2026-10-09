@@ -122,7 +122,10 @@ pub fn step_choke(state: &mut WorldState, ai: usize, input: &PlayerInput, dt: f3
     let p = &mut state.players[ai];
     p.choke.phase_time += dt;
     p.velocity = Vec3::ZERO;
-    let held = input.pressed(buttons::USE);
+    // The Loop holds on the choke button (`m_bChokeButton`, bound with Block); after a win the
+    // auto-carry counts Use (`m_bUseButton`).
+    let held = input.pressed(buttons::BLOCK);
+    let use_held = input.pressed(buttons::USE);
     if !a.alive {
         set_phase(p, ChokePhase::None);
         release_victim(state, vid);
@@ -164,7 +167,7 @@ pub fn step_choke(state: &mut WorldState, ai: usize, input: &PlayerInput, dt: f3
         }
         ChokePhase::Win => {
             // Holding Use counts down `m_fHoldTimeForAutoCarry`, else it is reset.
-            if held {
+            if use_held {
                 p.choke.hold -= dt;
             } else {
                 p.choke.hold = cfg.items.inventory.choke_hold_to_auto_carry;

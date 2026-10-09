@@ -76,7 +76,7 @@ impl Run {
     /// mesh, `dishonored_sim::crosshair`).
     fn pickup(&mut self, kind: PickupKind, pos: Vec3) -> u32 {
         let id = 9000 + self.state.pickups.len() as u32;
-        self.state.pickups.push(PickupState { id, name: format!("P{id}"), package: String::new(), position: pos, kind, active: true, ammo_left: [0; 8], carried_by: None, bounds_min: Vec3::splat(-8.0), bounds_max: Vec3::splat(8.0) });
+        self.state.pickups.push(PickupState { id, name: format!("P{id}"), package: String::new(), position: pos, kind, active: true, ammo_left: [0; 8], carried_by: None, bounds_min: Vec3::splat(-8.0), bounds_max: Vec3::splat(8.0), local_min: Vec3::ZERO, local_max: Vec3::ZERO, rotation: Vec3::ZERO });
         id
     }
     /// Hold a view for a tick so the camera update chooses its crosshair target; the next
@@ -179,7 +179,8 @@ fn coins_runes_and_buying_powers() {
 fn choke_knocks_out_after_choke_time_plus_animation() {
     // Guard facing +X at x=120: the player at the origin is behind it.
     let mut r = Run::new(&[(Vec3::new(120.0, 0.0, Z), 0.0)]);
-    let hold = input(0.0, 0.0, buttons::USE);
+    // The choke button (Block) held; Use held too for the auto-carry after the win.
+    let hold = input(0.0, 0.0, buttons::BLOCK | buttons::USE);
     r.step(&[(1, hold)]);
     assert_eq!(r.p(1).choke.phase, ChokePhase::In);
     assert_eq!(r.p(100).condition, Condition::BeingChoked);
@@ -202,7 +203,7 @@ fn choke_knocks_out_after_choke_time_plus_animation() {
 #[test]
 fn releasing_the_choke_lets_the_victim_go() {
     let mut r = Run::new(&[(Vec3::new(120.0, 0.0, Z), 0.0)]);
-    r.steps(60, &[(1, input(0.0, 0.0, buttons::USE))]);
+    r.steps(60, &[(1, input(0.0, 0.0, buttons::BLOCK))]);
     r.step(&[(1, input(0.0, 0.0, 0))]);
     assert_eq!(r.p(1).choke.phase, ChokePhase::Lose);
     assert_eq!(r.p(100).condition, Condition::Normal);

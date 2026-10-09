@@ -322,7 +322,12 @@ impl Play<'_> {
     /// Stand in front of a Kismet usable and press use once.
     fn use_actor(&mut self, a: u32) -> bool {
         let list = kismet_host::usables(self.m());
-        let Some((_, pos, _)) = list.iter().find(|u| matches!(u.0, kismet_host::KUse::Actor(x) | kismet_host::KUse::Pickup(x) if x == a)).cloned() else { return false };
+        let Some((u, pos, _)) = list.iter().find(|u| matches!(u.0, kismet_host::KUse::Actor(x) | kismet_host::KUse::Pickup(x) if x == a)).cloned() else { return false };
+        // Aim at the middle of what it is (a pickup's pivot can be a corner of its mesh).
+        let pos = match (&u, kismet_host::usable_box(self.m(), &u).0) {
+            (kismet_host::KUse::Pickup(_), Some((lo, hi))) => (lo + hi) * 0.5,
+            _ => pos,
+        };
         if !self.place_to_use(pos) {
             self.place_near(pos, 90.0);
         }
@@ -723,7 +728,7 @@ fn nonlethal(p: &mut Play, db: &dishonored_kismet::KismetDb) -> Result<Vec<Stage
         }
         let yaw = p.m().world.player(AGENT).unwrap().yaw;
         // Release once before the first press so the press is an edge.
-        let b = if me.choke.phase == dishonored_sim::state::ChokePhase::None && me.prev_buttons & buttons::USE != 0 { 0 } else { buttons::USE };
+        let b = if me.choke.phase == dishonored_sim::state::ChokePhase::None && me.prev_buttons & buttons::BLOCK != 0 { 0 } else { buttons::BLOCK | buttons::USE };
         p.step(PlayerInput { yaw, pitch: 0.0, buttons: b, ..Default::default() });
     }
     let her_state = p.m().world.player(her).map(|t| (t.alive, t.condition));

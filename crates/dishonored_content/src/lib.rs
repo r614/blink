@@ -493,7 +493,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         }
     };
     // Placed pickups (with the spawners that carry one), cached per map.
-    let pickup_path = dir.join(format!("{map}.pickups3.json"));
+    let pickup_path = dir.join(format!("{map}.pickups5.json"));
     let pickups: Vec<dishonored_ir::items::PlacedPickup> = match std::fs::read_to_string(&pickup_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(p) => p,
         None => {

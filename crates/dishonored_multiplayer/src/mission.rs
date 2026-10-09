@@ -1260,7 +1260,7 @@ impl MissionMatch {
         let mut out: Vec<(HostTarget, Interaction)> = Vec::new();
         let mut push = |origin: Vec3, bounds: Option<(Vec3, Vec3)>, max_distance: f32, skeletal: bool, status: St, pawn: Option<PlayerId>, it: Interaction| {
             let (lo, hi) = bounds.unwrap_or((origin, origin));
-            out.push((HostTarget { key: out.len() as u32, origin, lo, hi, max_distance, skeletal, usable: true, status, pawn, actor: None, shift: Vec3::ZERO }, it));
+            out.push((HostTarget { key: out.len() as u32, origin, lo, hi, max_distance, skeletal, usable: true, status, pawn, actor: None, shift: Vec3::ZERO, oriented: None }, it));
         };
         for m in self.state.usable.keys() {
             if self.setup.marker_map.get(m).is_some_and(|mm| !mm.eq_ignore_ascii_case(&self.current_map)) {
@@ -1315,17 +1315,20 @@ impl MissionMatch {
         for (h, it) in out.iter_mut() {
             if let Interaction::Kismet(i) = it {
                 if let Some(k) = kismet.get(*i) {
-                    let (bounds, shift) = kismet_host::usable_box(self, &k.0);
+                    let (bounds, shift, oriented) = kismet_host::usable_box(self, &k.0);
                     if let Some((lo, hi)) = bounds {
                         h.lo = lo;
                         h.hi = hi;
                     }
                     h.shift = shift;
+                    h.oriented = oriented;
                 }
             }
             h.actor = match it {
                 Interaction::Kismet(i) => kismet.get(*i).and_then(|k| kismet_host::usable_actor(self, &k.0)),
                 Interaction::Prop(i) => self.setup.usables.get(*i).and_then(|u| u.actor.split_once(':')).map(|(p, a)| (p.to_string(), a.to_string())),
+                // A travel door: its actor by name (any package of the map).
+                Interaction::Door(i) => self.setup.doors.get(*i).map(|d| (String::new(), d.door.clone())).filter(|(_, a)| !a.is_empty()),
                 _ => None,
             };
         }

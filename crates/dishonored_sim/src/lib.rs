@@ -235,6 +235,13 @@ pub fn step_world(
                 used = crosshair::use_target(state, i, c, world, cfg, &mut out.events);
             }
         }
+        // The choke button (bound with Block) on a pawn that can be choked from here starts the
+        // choke; the sword does not block on that press.
+        if !choking && !hands_busy && p.carrying.is_none() && p.holding.is_none() && p.just_pressed(&input, input::buttons::BLOCK) && p.mode == MoveMode::Walking && p.action_lock <= 0.0 && p.sword.phase == state::SwordPhase::Idle {
+            if let Some(vi) = crosshair::choke_target(state, &p, cfg).and_then(|v| state.players.iter().position(|x| x.id == v)) {
+                takedown::start_choke(state, i, vi, g, &mut out.events);
+            }
+        }
         // Use on a climbable chain (its interactable, 0x00A23130), on foot or in the air.
         if !used && !choking && !hands_busy && p.just_pressed(&input, input::buttons::USE) && p.action_lock <= 0.0 {
             climb::try_use_grab(&mut state.players[i], world, &mvc, g.items.inventory.interact_distance, inventory::INTERACT_COS, &mut out.events);

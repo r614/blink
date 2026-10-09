@@ -257,7 +257,7 @@ fn items(mc: &MatchContent, rep: &mut Report) {
     // 2. Choke a guard from behind to a knock-out, carry the body, drop it.
     let mut st = setup(&[(110.0, 0.0)]);
     let mut ev = Vec::new();
-    let hold = me(buttons::USE, LeftHand::Blink);
+    let hold = me(buttons::BLOCK | buttons::USE, LeftHand::Blink);
     let t0 = st.tick;
     let mut ko_t = None;
     for _ in 0..(8 * 60) {

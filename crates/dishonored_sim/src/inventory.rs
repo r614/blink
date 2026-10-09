@@ -177,7 +177,7 @@ pub fn spawn_pickups(state: &mut WorldState, placed: &[PlacedPickup], seed: u32,
             }
         }
         let carried_by = pp.stealable_from.as_deref().and_then(stealable_owner);
-        state.pickups.push(PickupState { id, name: pp.name.clone(), package: pp.package.clone(), position: pp.position, kind: pp.kind.clone(), active: true, ammo_left, carried_by, bounds_min: pp.bounds_min, bounds_max: pp.bounds_max });
+        state.pickups.push(PickupState { id, name: pp.name.clone(), package: pp.package.clone(), position: pp.position, kind: pp.kind.clone(), active: true, ammo_left, carried_by, bounds_min: pp.bounds_min, bounds_max: pp.bounds_max, local_min: pp.local_min, local_max: pp.local_max, rotation: pp.rotation });
     }
 }
 

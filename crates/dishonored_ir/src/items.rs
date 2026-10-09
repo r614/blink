@@ -932,4 +932,18 @@ pub struct PlacedPickup {
     pub bounds_min: Vec3,
     #[serde(default)]
     pub bounds_max: Vec3,
+    /// The same box before the actor's rotation (scaled local bounds) and that rotation
+    /// (pitch, yaw, roll in degrees): the oriented box the traces meet (zero: use the world box).
+    #[serde(default)]
+    pub local_min: Vec3,
+    #[serde(default)]
+    pub local_max: Vec3,
+    #[serde(default)]
+    pub rotation: Vec3,
+}
+
+/// The rotation of a UE3 rotator (pitch, yaw, roll in degrees), as [`rotated_box`] applies it.
+pub fn ue3_rotation(rot_deg: Vec3) -> glam::Quat {
+    let r = std::f32::consts::PI / 180.0;
+    glam::Quat::from_rotation_z(rot_deg.y * r) * glam::Quat::from_rotation_y(-rot_deg.x * r) * glam::Quat::from_rotation_x(rot_deg.z * r)
 }

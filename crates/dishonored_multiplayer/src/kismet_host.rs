@@ -89,6 +89,13 @@ pub const PRESENTATION: &[&str] = &[
     "DisSeqAct_GetPlayerStat",
     "DisSeqAct_ToggleJournal",
     "DisSeqAct_TogglePowerWheel",
+    // The usable's highlight (0x00B8F4C0 -> 0x00A30710 / 0x00A30740: flag 2 of the interactable's
+    // highlight mask; the first flag applies the interactable tweak's highlight material,
+    // 0x00A27FF0). Not rendered.
+    "DisSeqAct_Highlight",
+    // The player camera's rain emitter (0x00BA1770 -> 0x00B9ADF0: `m_NumRainDrops` impacts
+    // between `m_fRainImpactsMinDist` and `m_fRainImpactsMaxDist`). Not rendered.
+    "DisSeqAct_SetRainEmitter",
 ];
 
 /// Classes whose effect is on a system the port does not simulate (decoded; they finish with
@@ -157,6 +164,7 @@ pub const FED_EVENTS: &[&str] = &[
     "DisSeqEvent_TaskActivated",
     "DisSeqEvent_TaskStateChanged",
     "DisSeqEvent_ObjectiveCompleted",
+    "DisSeqEvent_JournalViewed",
     "DisSeqEvent_Possessed",
     "DisSeqEvt_Choke",
     "DisSeqEvent_Windblasted",
@@ -2156,6 +2164,15 @@ impl Host for H<'_> {
                 world_events(cx.k, self, evs);
                 HostResult::Done
             }
+            // `DisSeqAct_OpenJournal` (0x00BD9E10): unless the menu is up, the journal opens at
+            // `m_Tab` (0x00BD7940 -> 0x00BD2750 -> 0x00BD11E0), and opening it fires the
+            // player's `DisSeqEvent_JournalViewed` (0x00BD14A1 with the class of 0x00BBC040).
+            // The journal screen itself is not drawn.
+            "DisSeqAct_OpenJournal" => {
+                self.st.player_ev.journal_viewed = true;
+                self.note("journal opened".to_string());
+                HostResult::Done
+            }
             // `DisSeqAct_SpawnCameraLensEffect` (Activated 0x00BA1CA0 -> 0x00B9BBF0 on Spawn): the
             // effect is spawned before the player's camera (presentation: the clients draw it
             // from the map's `LensEffectDef`); "Stop Looping" ends the action's looping effects.
@@ -2399,8 +2416,30 @@ impl Host for H<'_> {
                     _ => None,
                 };
                 if let Some(to) = to {
+                    // `Actor.OnTeleport`: with `bUpdateRotation` (class default true) the target
+                    // takes the destination's `Rotation + RelativeRotation`.
+                    let turn = cx.prop("bUpdateRotation").and_then(|v| v.as_bool()).unwrap_or(true);
+                    let rel = match cx.prop("RelativeRotation") {
+                        Some(dishonored_kismet::Value::Rotator(r)) => r,
+                        _ => [0; 3],
+                    };
+                    let rot = match &d {
+                        Obj::Actor(a) if turn => Some(self.st.actor_rot.get(a).copied().map_or_else(
+                            || {
+                                let r = self.db.actors[*a as usize].rotation;
+                                rotator_quat([r[0] + rel[0], r[1] + rel[1], r[2] + rel[2]])
+                            },
+                            |q| q * rotator_quat(rel),
+                        )),
+                        _ => None,
+                    };
                     for t in cx.objects("Target") {
                         self.teleport(&t, to, yaw);
+                        if let (Obj::Actor(a), Some(q)) = (&t, rot) {
+                            if self.pawn_of(&t).is_none() {
+                                self.st.actor_rot.insert(*a, q);
+                            }
+                        }
                     }
                 }
                 HostResult::Done
@@ -3285,15 +3324,44 @@ pub fn usable_actor(m: &MissionMatch, u: &KUse) -> Option<(String, String)> {
 /// Kismet has moved the actor from where the level placed it. A trigger's is its
 /// `CylinderComponent` (radius, half height) at its location; a mesh actor's is the box of its
 /// collision triangles in the world ([`usable_actor`]), moved by the shift.
-pub fn usable_box(m: &MissionMatch, u: &KUse) -> (Option<(Vec3, Vec3)>, Vec3) {
-    let Some(run) = m.kismet.as_ref() else { return (None, Vec3::ZERO) };
-    let (KUse::Actor(a) | KUse::Pickup(a)) = u else { return (None, Vec3::ZERO) };
-    let Some(actor) = run.k.db.actors.get(*a as usize) else { return (None, Vec3::ZERO) };
+/// The rotation of a UE3 rotator (unreal units).
+fn rotator_quat(r: [i32; 3]) -> glam::Quat {
+    glam::Quat::from_mat3(&dishonored_kismet::interp::rot_matrix_units(r))
+}
+
+pub fn usable_box(m: &MissionMatch, u: &KUse) -> (Option<(Vec3, Vec3)>, Vec3, Option<(Vec3, glam::Quat, Vec3, Vec3)>) {
+    let Some(run) = m.kismet.as_ref() else { return (None, Vec3::ZERO, None) };
+    let (KUse::Actor(a) | KUse::Pickup(a)) = u else { return (None, Vec3::ZERO, None) };
+    let Some(actor) = run.k.db.actors.get(*a as usize) else { return (None, Vec3::ZERO, None) };
     let at = run.actor_pos(*a);
     let shift = at - Vec3::from(actor.location);
     match &actor.shape {
-        Some(dishonored_kismet::model::Shape::Cylinder { radius, height }) => (Some((at - Vec3::new(*radius, *radius, *height), at + Vec3::new(*radius, *radius, *height))), shift),
-        _ => (None, shift),
+        Some(dishonored_kismet::model::Shape::Cylinder { radius, height }) => (Some((at - Vec3::new(*radius, *radius, *height), at + Vec3::new(*radius, *radius, *height))), shift, None),
+        _ => {
+            // A scripted pickup: its static mesh's box (the placed pickup's bounds) where it is
+            // now; pickups do not block, so the world holds no collision of theirs.
+            let placed = m.setup.pickups.get(&m.current_map.to_ascii_lowercase()).and_then(|l| l.iter().find(|p| p.name.eq_ignore_ascii_case(&actor.name) && (p.package.is_empty() || p.package.eq_ignore_ascii_case(&actor.package))));
+            match (u, placed) {
+                (KUse::Pickup(_), Some(p)) if p.bounds_min != p.bounds_max => {
+                    // Turned as the level placed it, or as the Kismet has turned it since (a
+                    // teleport takes its destination's rotation).
+                    let turned = run.st.actor_rot.get(a).copied();
+                    if !p.local_max.cmpgt(p.local_min).any() || turned.is_none() && p.rotation == Vec3::ZERO {
+                        return (Some((at + p.bounds_min, at + p.bounds_max)), shift, None);
+                    }
+                    let q = turned.unwrap_or_else(|| dishonored_ir::items::ue3_rotation(p.rotation));
+                    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+                    for i in 0..8 {
+                        let c = Vec3::new(if i & 1 == 0 { p.local_min.x } else { p.local_max.x }, if i & 2 == 0 { p.local_min.y } else { p.local_max.y }, if i & 4 == 0 { p.local_min.z } else { p.local_max.z });
+                        let w = at + q * c;
+                        lo = lo.min(w);
+                        hi = hi.max(w);
+                    }
+                    (Some((lo, hi)), shift, Some((at, q, p.local_min, p.local_max)))
+                }
+                _ => (None, shift, None),
+            }
+        }
     }
 }
 

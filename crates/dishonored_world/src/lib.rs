@@ -1203,15 +1203,34 @@ impl CollisionWorld {
         let mut out: std::collections::HashMap<String, (Vec3, Vec3)> = std::collections::HashMap::new();
         for (src, b) in self.sources.iter().zip(per) {
             let Some(b) = b else { continue };
-            let inst = src.rsplit(" <- ").next().unwrap_or(src);
-            let inst = inst.split(" [").next().unwrap_or(inst);
-            let Some((package, path)) = inst.split_once(':') else { continue };
-            let name = path.rsplit('.').next().unwrap_or(path);
-            let e = out.entry(format!("{package}:{name}").to_ascii_lowercase()).or_insert(b);
-            e.0 = e.0.min(b.0);
-            e.1 = e.1.max(b.1);
+            // Every `<package>:<actor path>` of the chain: the instance's actor, and a layout's
+            // re-placed actor (`<layout>:<name> <- <mesh> <- <package>:<actor>`).
+            for inst in src.split(" <- ") {
+                let inst = inst.split(" [").next().unwrap_or(inst);
+                let inst = inst.split(" (").next().unwrap_or(inst);
+                let Some((mut package, mut path)) = inst.split_once(':') else { continue };
+                if package.contains('.') || package.contains(' ') {
+                    continue; // a mesh path, not an actor
+                }
+                // A layout's re-placed actor under the package it came from
+                // (`<package>:<layout>:<name>`): the layout's name.
+                if let Some((p, n)) = path.split_once(':') {
+                    (package, path) = (p, n);
+                }
+                let name = path.rsplit('.').next().unwrap_or(path);
+                let e = out.entry(format!("{package}:{name}").to_ascii_lowercase()).or_insert(b);
+                e.0 = e.0.min(b.0);
+                e.1 = e.1.max(b.1);
+            }
         }
         out
+    }
+
+    /// The box of all of the world's triangles (a mover layer's: the mover where it is placed).
+    pub fn tri_bounds(&self) -> Option<(Vec3, Vec3)> {
+        let mut it = self.tris.iter().flat_map(|t| [t.a, t.b, t.c]);
+        let first = it.next()?;
+        Some(it.fold((first, first), |(lo, hi), v| (lo.min(v), hi.max(v))))
     }
 }
 
@@ -1229,8 +1248,12 @@ impl WorldQuery for CollisionWorld {
     }
 
     fn actor_bounds(&self, package: &str, actor: &str) -> Option<(Vec3, Vec3)> {
-        let key = format!("{}:{}", package, actor).to_ascii_lowercase();
-        self.actor_boxes.get_or_init(|| self.build_actor_boxes()).get(&key).copied()
+        let boxes = self.actor_boxes.get_or_init(|| self.build_actor_boxes());
+        if package.is_empty() {
+            // Any package: the actor by name.
+            return boxes.iter().find(|(k, _)| actor_key_matches(k, "", actor)).map(|(_, b)| *b);
+        }
+        boxes.get(&format!("{}:{}", package, actor).to_ascii_lowercase()).copied()
     }
 
     fn water_at(&self, p: Vec3) -> Option<WaterInfo> {
@@ -1603,10 +1626,22 @@ impl WorldQuery for Layered<'_> {
         self.base.hit_package(origin, dir, max_dist)
     }
     fn actor_bounds(&self, package: &str, actor: &str) -> Option<(Vec3, Vec3)> {
-        self.base.actor_bounds(package, actor)
+        // A mover's collision is its layer (the layers follow `movers()`): the box of its
+        // triangles where it is placed now.
+        self.base.actor_bounds(package, actor).or_else(|| {
+            self.base.movers().iter().zip(self.layers).find(|(m, _)| actor_key_matches(&m.actor, package, actor)).and_then(|(_, l)| l.tri_bounds())
+        })
     }
     fn set_visible_levels(&self, visible: &[String]) {
         self.base.set_visible_levels(visible)
+    }
+}
+
+/// Whether `<package>:<name>` names `actor` of `package` (any package when it is empty).
+pub fn actor_key_matches(key: &str, package: &str, actor: &str) -> bool {
+    match key.split_once(':') {
+        Some((p, n)) => n.eq_ignore_ascii_case(actor) && (package.is_empty() || p.eq_ignore_ascii_case(package)),
+        None => key.eq_ignore_ascii_case(actor),
     }
 }
 

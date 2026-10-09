@@ -1051,6 +1051,14 @@ pub struct PickupState {
     pub bounds_min: Vec3,
     #[serde(default)]
     pub bounds_max: Vec3,
+    /// The oriented box: the scaled local bounds and the actor's rotation (pitch, yaw, roll in
+    /// degrees); zero: the world box stands for it.
+    #[serde(default)]
+    pub local_min: Vec3,
+    #[serde(default)]
+    pub local_max: Vec3,
+    #[serde(default)]
+    pub rotation: Vec3,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

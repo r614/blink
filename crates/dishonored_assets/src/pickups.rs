@@ -2,7 +2,7 @@
 //! gives, and the spawners that carry one as `m_pStealablePickup` (pickpocketing).
 
 use crate::content::Content;
-use crate::tweaks::{TMap, TVal, TweakDb, get, get_f32};
+use crate::tweaks::{TMap, TVal, TweakDb, get, get_f32, get_obj};
 use anyhow::Result;
 use dishonored_ir::items::{AmmoType, ElixirType, PickupKind, PlacedPickup};
 use glam::Vec3;
@@ -114,7 +114,19 @@ pub fn extract_pickups(content: &Content, packages: &[String]) -> Result<Vec<Pla
             // The world box of its mesh (the crosshair's collision stand-in): the mesh's local
             // bounds scaled by `DrawScale` x `DrawScale3D` and turned by the actor's rotation
             // (the component's `Bounds`), relative to the actor's location.
-            let (_, lo, hi) = crate::world_actors::actor_mesh_bounds(&pkg, &h.properties, &mut res);
+            let (_, mut lo, mut hi) = crate::world_actors::actor_mesh_bounds(&pkg, &h.properties, &mut res);
+            // A component without a mesh takes its tweak's (`m_pPickupStaticMesh`, set on the
+            // component at runtime: the notes' sheets).
+            if !hi.cmpgt(lo).any() {
+                if let Some(path) = get_obj(&resolved, "m_pPickupStaticMesh").filter(|p| !p.is_empty() && *p != "None") {
+                    if let Some((mp, mi)) = crate::interactables::locate_object_where(content, packages, path, |q, e| q.export_class(e) == "StaticMesh" && crate::static_mesh::read_static_mesh(q, e).is_ok()) {
+                        if let Ok(sm) = crate::static_mesh::read_static_mesh(&mp, mi) {
+                            lo = sm.bounds_origin - sm.bounds_extent;
+                            hi = sm.bounds_origin + sm.bounds_extent;
+                        }
+                    }
+                }
+            }
             let eff = res.effective(&pkg, i);
             let rot = find(&eff, "Rotation").and_then(|x| x.as_rotator()).unwrap_or([0; 3]);
             let scale3 = find(&eff, "DrawScale3D").and_then(|x| x.as_vector()).map(Vec3::from).unwrap_or(Vec3::ONE);
@@ -123,7 +135,10 @@ pub fn extract_pickups(content: &Content, packages: &[String]) -> Result<Vec<Pla
                 _ => 1.0,
             };
             let (bounds_min, bounds_max) = if hi.cmpgt(lo).any() { dishonored_ir::items::rotated_box(lo, hi, scale3 * scale, [rot[0] as f32 * (360.0 / 65536.0), rot[1] as f32 * (360.0 / 65536.0), rot[2] as f32 * (360.0 / 65536.0)]) } else { (Vec3::ZERO, Vec3::ZERO) };
-            out.push(PlacedPickup { name: pkg.obj_name(ObjRef::Export(i)).to_string(), package: name.clone(), position, tweak, kind, stealable_from: None, bounds_min, bounds_max });
+            let s = scale3 * scale;
+            let (local_min, local_max) = if hi.cmpgt(lo).any() { ((lo * s).min(hi * s), (lo * s).max(hi * s)) } else { (Vec3::ZERO, Vec3::ZERO) };
+            let rotation = Vec3::new(rot[0] as f32, rot[1] as f32, rot[2] as f32) * (360.0 / 65536.0);
+            out.push(PlacedPickup { name: pkg.obj_name(ObjRef::Export(i)).to_string(), package: name.clone(), position, tweak, kind, stealable_from: None, bounds_min, bounds_max, local_min, local_max, rotation });
         }
     }
     for (pickup, spawner) in stealables {

@@ -119,12 +119,16 @@ pub struct HostTarget {
     /// How far the host has moved that actor from where the level placed it (what the world's
     /// box is shifted by).
     pub shift: Vec3,
+    /// A turned mesh's box (pivot, rotation, local box) that stands for `lo..hi`, its world box.
+    pub oriented: Option<(Vec3, glam::Quat, Vec3, Vec3)>,
 }
 
 /// The collision stand-in of a candidate.
 #[derive(Debug, Clone)]
 enum Shape {
     Aabb(Vec3, Vec3),
+    /// A turned mesh's box: its center, rotation, local box and the world box around it.
+    Obb { pos: Vec3, rot: glam::Quat, lo: Vec3, hi: Vec3, world: (Vec3, Vec3) },
     /// A living pawn: its physics-asset bodies fitted to it (`hit_regions`).
     Rig(PlayerId),
 }
@@ -175,7 +179,11 @@ fn candidates(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: 
         let pos = inventory::pickup_position(state, pk, mv);
         out.push(Candidate {
             target: TargetRef::Pickup(pk.id),
-            shape: at(pos, pk.bounds_min, pk.bounds_max),
+            shape: if pk.local_max.cmpgt(pk.local_min).any() && pk.rotation != Vec3::ZERO {
+                Shape::Obb { pos, rot: dishonored_ir::items::ue3_rotation(pk.rotation), lo: pk.local_min, hi: pk.local_max, world: (pos + pk.bounds_min, pos + pk.bounds_max) }
+            } else {
+                at(pos, pk.bounds_min, pk.bounds_max)
+            },
             origin: pos,
             max_distance: g.items.inventory.interact_distance,
             skeletal: false,
@@ -229,9 +237,10 @@ fn candidates(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: 
         };
         out.push(Candidate {
             target: TargetRef::Host(h.key),
-            shape: match h.pawn {
-                Some(id) => Shape::Rig(id),
-                None => Shape::Aabb(lo, hi),
+            shape: match (h.pawn, h.oriented) {
+                (Some(id), _) => Shape::Rig(id),
+                (None, Some((pos, rot, l, u))) => Shape::Obb { pos, rot, lo: l, hi: u, world: (lo, hi) },
+                (None, None) => Shape::Aabb(lo, hi),
             },
             origin: h.origin,
             max_distance: h.max_distance,
@@ -248,6 +257,12 @@ fn candidates(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: 
 fn hit_t(c: &Candidate, state: &WorldState, cfg: &SimConfig, eye: Vec3, dir: Vec3, len: f32, e: f32) -> Option<f32> {
     match &c.shape {
         Shape::Aabb(lo, hi) => crate::interactables::ray_box(eye, dir, *lo - Vec3::splat(e), *hi + Vec3::splat(e), len),
+        Shape::Obb { pos, rot, lo, hi, .. } => {
+            // In the box's frame; the swept cube's reach along each of its axes.
+            let inv = rot.inverse();
+            let reach = Vec3::new((*rot * Vec3::X).abs().element_sum(), (*rot * Vec3::Y).abs().element_sum(), (*rot * Vec3::Z).abs().element_sum()) * e;
+            crate::interactables::ray_box(inv * (eye - *pos), inv * dir, *lo - reach, *hi + reach, len)
+        }
         Shape::Rig(id) => {
             let v = state.player(*id)?;
             hit_regions::ray_pawn(v, &cfg.gameplay.movement, &cfg.gameplay.items.hit_bodies, eye, dir, len, e)
@@ -259,6 +274,7 @@ fn hit_t(c: &Candidate, state: &WorldState, cfg: &SimConfig, eye: Vec3, dir: Vec
 fn bounds(c: &Candidate, state: &WorldState, cfg: &SimConfig) -> (Vec3, Vec3) {
     match &c.shape {
         Shape::Aabb(lo, hi) => (*lo, *hi),
+        Shape::Obb { world, .. } => *world,
         Shape::Rig(id) => match state.player(*id) {
             Some(v) => {
                 let mv = &cfg.gameplay.movement;
@@ -288,7 +304,14 @@ fn nearest(state: &WorldState, cfg: &SimConfig, world: &dyn WorldQuery, cands: &
         // placed them (U-650): a surface met inside a candidate's box is that candidate's own.
         let at = eye + dir * t;
         let pad = Vec3::splat(e + OWN_SURFACE);
-        let owner = cands.iter().position(|c| matches!(&c.shape, Shape::Aabb(lo, hi) if at.cmpge(*lo - pad).all() && at.cmple(*hi + pad).all()));
+        let owner = cands.iter().position(|c| match &c.shape {
+            Shape::Aabb(lo, hi) => at.cmpge(*lo - pad).all() && at.cmple(*hi + pad).all(),
+            Shape::Obb { pos, rot, lo, hi, .. } => {
+                let l = rot.inverse() * (at - *pos);
+                l.cmpge(*lo - pad).all() && l.cmple(*hi + pad).all()
+            }
+            Shape::Rig(_) => false,
+        });
         best = Some((t, owner));
     }
     for (i, c) in cands.iter().enumerate() {
@@ -344,31 +367,12 @@ pub fn target(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: 
     let eye = camera_pov(p, &cfg.gameplay.movement);
     let dir = view_vector(p.yaw, p.pitch.clamp(-89.0, 89.0));
     let cands = candidates(state, p, world, cfg);
-    if std::env::var_os("CROSSHAIR_DEBUG2").is_some() {
-        eprintln!("eye {eye:?} dir {dir:?}");
-        for c in cands.iter().filter(|c| matches!(c.target, TargetRef::Prop(_) | TargetRef::Pickup(_))) {
-            if let Shape::Aabb(lo, hi) = &c.shape {
-                if (c.origin - eye).length() < 300.0 {
-                    eprintln!("  {:?} origin {:?} box {lo:?}..{hi:?} sel {}", c.target, c.origin, c.selectable);
-                }
-            }
-        }
-    }
-    if std::env::var_os("CROSSHAIR_DEBUG3").is_some() && p.pitch.abs() > 0.0 {
-        for c in cands.iter().filter(|c| matches!(c.target, TargetRef::Host(_)) && (c.origin - eye).length() < 260.0) {
-            let (lo, hi) = bounds(c, state, cfg);
-            eprintln!("DBG3 eye {eye:?} yaw {} pitch {} -> {:?} origin {:?} box {lo:?}..{hi:?}", p.yaw, p.pitch, c.target, c.origin);
-        }
-    }
     let done = |i: usize| Some(Crosshair { target: cands[i].target, usable: true, status: cands[i].status });
 
     // 1. The narrow sweep's nearest hit.
     let first = nearest(state, cfg, world, &cands, eye, dir, len, narrow);
     // Its location: the eye along the line to the contact, zero without a hit.
     let loc = first.map_or(Vec3::ZERO, |(t, _)| eye + dir * t);
-    if std::env::var_os("CROSSHAIR_DEBUG2").is_some() {
-        eprintln!("  A: {:?}", first.map(|(t, i)| (t, i.map(|i| cands[i].target))));
-    }
     if let Some((_, Some(i))) = first {
         let c = &cands[i];
         if c.selectable && loc.distance_squared(eye) < c.max_distance * c.max_distance {
@@ -421,19 +425,27 @@ pub fn aim_at(p: &PlayerState, mv: &dishonored_ir::gameplay::MovementConfig, poi
     (q.yaw, q.pitch)
 }
 
-/// The sim's own Use on a focused target: lift, grab, take, choke. Returns whether the Use was
-/// spent (the original's Use handler returns after the focused interactable's `Interact`,
-/// whatever it did). Host targets are the host's.
+/// The pawn a choke press would take: the living pawn the crosshair is on (offered by the sim
+/// or by the host, a talkable NPC), when it can be choked from where `p` stands. The choke is
+/// the Block button's (`GBA_Block` sets `m_bBlockButton` and `m_bChokeButton`), not Use's.
+pub fn choke_target(state: &WorldState, p: &PlayerState, cfg: &SimConfig) -> Option<PlayerId> {
+    let id = match p.crosshair?.target {
+        TargetRef::Pawn(v) => v,
+        TargetRef::Host(k) => state.host_targets.iter().find(|h| h.key == k)?.pawn?,
+        _ => return None,
+    };
+    let v = state.player(id)?;
+    takedown::choke_eligible(p, v, &cfg.tuning, &cfg.gameplay.movement).then_some(id)
+}
+
+/// The sim's own Use on a focused target: lift, grab, take. Returns whether the Use was spent
+/// (the original's Use handler returns after the focused interactable's `Interact`, whatever
+/// it did). Host targets are the host's; a living pawn takes no Use (its choke is Block's).
 pub fn use_target(state: &mut WorldState, who: usize, c: Crosshair, world: &dyn WorldQuery, cfg: &SimConfig, events: &mut Vec<crate::events::SimEvent>) -> bool {
     let g = &cfg.gameplay;
     let pid = state.players[who].id;
     match c.target {
-        TargetRef::Pawn(v) => {
-            if let Some(vi) = state.players.iter().position(|x| x.id == v) {
-                takedown::start_choke(state, who, vi, g, events);
-            }
-            true
-        }
+        TargetRef::Pawn(_) => false,
         TargetRef::Body(b) => {
             takedown::lift(state, pid, b, events);
             true
