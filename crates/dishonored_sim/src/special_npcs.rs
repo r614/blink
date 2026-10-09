@@ -121,6 +121,11 @@ pub fn step(state: &mut WorldState, ins: &[PlayerInput], world: &dyn WorldQuery,
                     apply_damage(&mut state.players[vi], w.plague_damage, Some(o.id), DamageCause::Plague, events, &g.vitals);
                 }
             }
+            // The Overseer's lob: the grenade leaves from the eye along the aim at `m_fThrowSpeed`.
+            npc_moves::OVERSEER_LOB if pulse => {
+                let dir = view_vector(input.yaw, input.pitch);
+                spawns.push((o.id, ProjectileKind::Grenade, eye_position(&o, &g.movement), dir * sp.grenadier.throw_speed));
+            }
             npc_moves::TALLBOY_FIRE_BOW if pulse => {
                 let tb = &sp.tallboy;
                 let dir = view_vector(input.yaw, input.pitch);

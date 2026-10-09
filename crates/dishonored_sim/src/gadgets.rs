@@ -39,6 +39,11 @@ pub fn grenade_cfg(cfg: &GameplayConfig, kind: ProjectileKind) -> &GrenadeConfig
     if kind == ProjectileKind::StickyGrenade { &cfg.items.gadgets.sticky_grenade } else { &cfg.items.gadgets.grenade }
 }
 
+/// A grenade projectile's config: an NPC's throw (the Overseer's) takes its own projectile tweak.
+pub fn projectile_grenade_cfg<'a>(cfg: &'a GameplayConfig, pr: &ProjectileState) -> &'a GrenadeConfig {
+    if pr.npc_throw { &cfg.ai.special.grenadier.grenade } else { grenade_cfg(cfg, pr.kind) }
+}
+
 /// Throw velocity: the view direction pitched up by `m_fThrowAngle`, at `m_fThrowSpeed`.
 pub fn throw_velocity(yaw: f32, pitch: f32, g: &GrenadeConfig) -> Vec3 {
     view_vector(yaw, (pitch + g.throw_angle).clamp(-89.0, 89.0)) * g.throw_speed
@@ -123,13 +128,13 @@ pub fn step_grenades(state: &mut WorldState, world: &dyn WorldQuery, cfg: &Gamep
     let mv = &cfg.movement;
     let projectiles = std::mem::take(&mut state.projectiles);
     let mut keep = Vec::with_capacity(projectiles.len());
-    let mut booms: Vec<(PlayerId, Vec3, Option<PlayerId>, ProjectileKind)> = Vec::new();
+    let mut booms: Vec<(PlayerId, Vec3, Option<PlayerId>, ProjectileKind, bool)> = Vec::new();
     for mut pr in projectiles {
         if !pr.kind.is_grenade() {
             keep.push(pr);
             continue;
         }
-        let g = grenade_cfg(cfg, pr.kind).clone();
+        let g = projectile_grenade_cfg(cfg, &pr).clone();
         pr.age += dt;
         if pr.kind == ProjectileKind::Grenade {
             arm(&mut pr, &g);
@@ -215,7 +220,7 @@ pub fn step_grenades(state: &mut WorldState, world: &dyn WorldQuery, cfg: &Gamep
                 pr.fuse = pr.min_fuse;
             }
             if pr.fuse <= 0.0 {
-                booms.push((pr.owner, pr.position, pr.stuck_to, pr.kind));
+                booms.push((pr.owner, pr.position, pr.stuck_to, pr.kind, pr.npc_throw));
                 continue;
             }
         }
@@ -224,8 +229,13 @@ pub fn step_grenades(state: &mut WorldState, world: &dyn WorldQuery, cfg: &Gamep
         }
     }
     state.projectiles = keep;
-    for (owner, pos, stuck, kind) in booms {
-        explode(state, owner, pos, stuck, kind, world, cfg, events);
+    for (owner, pos, stuck, kind, npc) in booms {
+        if npc {
+            let e = cfg.ai.special.grenadier.grenade.explosion.clone();
+            explode_with(state, owner, pos, stuck, &e, DamageCause::Grenade, false, world, cfg, events);
+        } else {
+            explode(state, owner, pos, stuck, kind, world, cfg, events);
+        }
     }
 }
 

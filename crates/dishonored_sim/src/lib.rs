@@ -354,6 +354,10 @@ pub fn step_world(
             // `TallboyExplosiveArrow_twk.m_fGravityMultiplier`.
             pr.gravity_mult = g.ai.special.tallboy.arrow_gravity_mult;
         }
+        if kind == state::ProjectileKind::Grenade && state.player(owner).is_some_and(|p| p.kind != state::PawnKind::Human) {
+            pr.npc_throw = true;
+            pr.gravity_mult = g.ai.special.grenadier.grenade.gravity_mult;
+        }
         state.projectiles.push(pr);
         out.events.push(SimEvent::Fired { id: owner, bolt: kind.is_bolt(), projectile: id, kind, origin: pos, velocity: vel });
     }

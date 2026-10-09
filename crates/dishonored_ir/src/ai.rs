@@ -20,8 +20,8 @@ pub enum NpcClass {
     /// `DisBehaviorMusicalCombat` (the music-box Overseer).
     MusicalOverseer,
     /// `DisBehaviorOverseerCombat` (`BrainTweaks_OverSeer`, the sword Overseer): the elite
-    /// guard's melee and alarm, no pistol (`Pwn_Overseer_MTall_1` carries grenades, lobbed at an
-    /// unreachable target by `DisItemContext_NPCLobGrenadeAtUnreachable`: not ported).
+    /// guard's melee and alarm, no pistol; `Pwn_Overseer_MTall_1` carries grenades, lobbed at an
+    /// unreachable target (`DisItemContext_NPCLobGrenadeAtUnreachable`, [`GrenadierConfig`]).
     Overseer,
     /// `DisBehaviorTallBoyCombat`.
     Tallboy,
@@ -877,6 +877,9 @@ pub mod special_moves {
     pub const WEEPER_GRAB: u8 = 27;
     /// Weeper coughing the plague cloud (`DishonoredNotify_StartPlague`).
     pub const WEEPER_COUGH: u8 = 28;
+    /// Standard Overseer lobbing a grenade (`DisItemContext_NPCLobGrenadeAtUnreachable`): the
+    /// release on the Secondary press.
+    pub const OVERSEER_LOB: u8 = 29;
 }
 
 /// An attack item context of a special NPC class (`DisTweaks_ItemContext` of its weapon's
@@ -931,6 +934,51 @@ pub struct SpecialNpcConfig {
     pub weeper: WeeperConfig,
     pub tallboy: TallboyConfig,
     pub overseer: MusicalOverseerConfig,
+    /// The standard Overseer's grenade.
+    pub grenadier: GrenadierConfig,
+}
+
+/// The standard Overseer's grenade (`Twk_Inv_NPC_Overseer.Grenade.Twk_Inv_GrenadeOverseer`): its
+/// `DisItemContext_NPCLobGrenadeAtUnreachable`, the combat behaviour's FindShootingPosition and
+/// the projectile `Twk_Proj_Grenade_Overseer_Unreachable`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct GrenadierConfig {
+    /// The pawn tweak's `m_Ammo` (`Pwn_Overseer_MTall_1`: 2): the grenades carried.
+    pub grenades: u8,
+    /// The context: `min_range` is `m_fMinContextRangeWhenUnreachable`, `cooldown`
+    /// `m_ContextCooldownWhenUnreachable` (the target is unreachable whenever it is used).
+    pub lob: SpecialAttack,
+    /// `m_fThrowSpeed`, `m_fGrenadeDangerZone`.
+    pub throw_speed: f32,
+    pub danger_zone: f32,
+    /// FindShootingPosition: `m_fAvoidanceRadius`, `m_fTimeBeforeGivingUp`,
+    /// `m_fAllowedPitchDegrees`.
+    pub fsp_avoidance: f32,
+    pub fsp_give_up: f32,
+    pub fsp_pitch: f32,
+    /// The projectile's physics, fuse and explosion.
+    pub grenade: crate::items::GrenadeConfig,
+    /// `GravityZ` of the world (the arc).
+    pub gravity_z: f32,
+}
+
+impl Default for GrenadierConfig {
+    /// The shipped values (`L_Bridge_Part1c_Script`).
+    fn default() -> Self {
+        let explosion = crate::items::ExplosionConfig { radial_damage: 50.0, full_damage_radius: 100.0, damage_radius: 350.0, player_full_damage_radius: 150.0, player_damage_radius: 600.0, radial_momentum: 500.0, attached_damage: 0.0, ..Default::default() };
+        GrenadierConfig {
+            grenades: 2,
+            lob: SpecialAttack { name: "DisItemContext_NPCLobGrenadeAtUnreachable".into(), kind: special_moves::OVERSEER_LOB, min_range: 800.0, max_range: 4000.0, ideal_range: 1500.0, max_height: f32::MAX, angle: 45.0, cooldown: [3.0, 5.0], ..Default::default() },
+            throw_speed: 2500.0,
+            danger_zone: 1000.0,
+            fsp_avoidance: 250.0,
+            fsp_give_up: 3.0,
+            fsp_pitch: 50.0,
+            grenade: crate::items::GrenadeConfig { throw_angle: 0.0, min_delay_after_hit: 1.5, explosion, ..Default::default() },
+            gravity_z: 0.0,
+        }
+    }
 }
 
 impl SpecialNpcConfig {

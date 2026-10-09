@@ -518,6 +518,10 @@ pub struct Brain {
     pub rat_panic: u32,
     #[serde(default)]
     pub rat_calls: Vec<(Vec3, f32, u32)>,
+    /// The standard Overseer's grenades left (`m_Ammo`, set at its first fight; kept across
+    /// fights).
+    #[serde(default)]
+    pub grenades: Option<u8>,
 }
 
 /// A target in a vision component's candidate list: the line of sight is traced again once
@@ -1864,6 +1868,7 @@ impl Brain {
             rat_call_cd: 0.0,
             rat_panic: 0,
             rat_calls: Vec::new(),
+            grenades: None,
         }
     }
 
@@ -3730,7 +3735,7 @@ impl Brain {
         let dz = t.position.z - me.position.z;
         let reach = ai.combat.reachable_melee_range;
         // The special classes' own combat behaviours (`special`).
-        if !matches!(self.class, NpcClass::EliteGuard | NpcClass::Overseer | NpcClass::Civilian) {
+        if !matches!(self.class, NpcClass::EliteGuard | NpcClass::Civilian) {
             let tg = special::Target { t: &t, sighted, visible, goal, d, dz };
             if let Some(i) = self.special_combat(me, &tg, ws, world, nav, ai, inhibit, dt) {
                 return i;

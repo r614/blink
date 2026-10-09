@@ -862,6 +862,10 @@ pub struct ProjectileState {
     /// that fired it is no longer spared by its hits.
     #[serde(default)]
     pub source_cleared: bool,
+    /// A grenade an NPC threw (the standard Overseer's lob): its physics, fuse and explosion are
+    /// its projectile tweak's (`SpecialNpcConfig::grenadier`), not the player's.
+    #[serde(default)]
+    pub npc_throw: bool,
 }
 
 /// `DisProjectileHomingData`.

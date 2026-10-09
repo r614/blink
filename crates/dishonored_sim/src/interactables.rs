@@ -535,7 +535,7 @@ mod tests {
         let mut s = InteractablesState::new(&d);
         let dt = 1.0 / 60.0;
         let pos = Vec3::new(0.0, 1.0, 50.0);
-        let pr = ProjectileState { id: 1, kind: crate::state::ProjectileKind::Bolt, owner: 4, position: pos, velocity: Vec3::new(0.0, 600.0, 0.0), age: 0.0, damage: 0.0, gravity_mult: 0.0, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO, spawn: pos, pierced: None, homing: None, source_cleared: false };
+        let pr = ProjectileState { id: 1, kind: crate::state::ProjectileKind::Bolt, owner: 4, position: pos, velocity: Vec3::new(0.0, 600.0, 0.0), age: 0.0, damage: 0.0, gravity_mult: 0.0, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO, spawn: pos, pierced: None, homing: None, source_cleared: false, npc_throw: false };
         let ev = s.step_tripwires(&d, &[], &[pr], &[], |_| true, cyl, no_blast, dt);
         assert_eq!(ev, vec![InteractEvent::Tripwire { tripwire: 0, instigator: 4 }]);
     }

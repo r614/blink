@@ -871,7 +871,7 @@ fn rat_swarm(s: &TMap, d: &dishonored_ir::ai::RatSwarmConfig) -> dishonored_ir::
 
 /// Level script packages that cook the special NPCs' tweaks: the Boyle street (tallboys,
 /// weepers), the Boyle interior (music-box Overseers) and the Overseer kennels (wolfhounds).
-pub const SPECIAL_NPC_PACKAGES: &[&str] = &["L_Boyle_Ext_Script", "L_Boyle_Int_Script", "L_BoyleStreet_Ext_Script", "L_Ovrsr_Kennel_Script", "L_Ovrsr_Script", "L_Ovrsr_Back_Script"];
+pub const SPECIAL_NPC_PACKAGES: &[&str] = &["L_Boyle_Ext_Script", "L_Boyle_Int_Script", "L_BoyleStreet_Ext_Script", "L_Ovrsr_Kennel_Script", "L_Ovrsr_Script", "L_Ovrsr_Back_Script", "L_Bridge_Part1c_Script"];
 
 fn ranged(m: &TMap, k: &str, d: [f32; 2]) -> [f32; 2] {
     match m.get(k) {
@@ -1030,7 +1030,65 @@ fn special_npcs(content: &Content, base: &AiConfig, prov: &mut std::collections:
     prov.insert("ai.special.weeper".into(), format!("{WEEPER} (plague, health), {WEEP}, {GRAB}, DefaultAI.ini m_fInhibitionTimeWeeperArmGrab"));
     special_tallboy(&db, &Ini::load_layered(&content.root, "NPC"), &base.loudness_distances, &mut out, prov);
     special_overseer(&db, &mut out, prov);
+    special_grenadier(&db, &base.loudness_distances, &mut out, prov);
     out
+}
+
+/// Standard Overseers' grenade: the lob context of `Twk_Inv_GrenadeOverseer`, the pawn's grenades,
+/// the combat behaviour's FindShootingPosition and the projectile with its fuse and explosion.
+fn special_grenadier(db: &TweakDb, loudness: &[f32], out: &mut dishonored_ir::ai::SpecialNpcConfig, prov: &mut std::collections::BTreeMap<String, String>) {
+    use dishonored_ir::ai::special_moves as mv;
+    const LOB: &str = "Twk_Inv_NPC_Overseer.Grenade.Twk_Inv_GrenadeOverseer.DisTweaks_InventoryItem_PawnSpecific_0.DisTweaks_NPCLobGrenadeAtUnreachable_1";
+    const PAWN: &str = "Pwn_Overseer_MTall_1.Pwn_Overseer_MTall_1";
+    const FSP: &str = "AI_BehaviorTweaks_Overseer.TweaksBehavior_CombatOverseer_Default.DisTweaks_AISubState_FindShootingPosition_1";
+    const PROJ: &str = "Twk_Inv_NPC_Overseer.Grenade.Twk_Proj_Grenade_Overseer_Unreachable";
+    let g = &mut out.grenadier;
+    let d = dishonored_ir::ai::GrenadierConfig::default();
+    if let Some(mut a) = special_attack(db, LOB, mv::OVERSEER_LOB, 0.0, 0.0) {
+        if let Some(m) = db.try_resolve(LOB) {
+            a.min_range = get_f32(&m, "m_fMinContextRangeWhenUnreachable").unwrap_or(d.lob.min_range);
+            a.cooldown = ranged(&m, "m_ContextCooldownWhenUnreachable", d.lob.cooldown);
+            g.throw_speed = get_f32(&m, "m_fThrowSpeed").unwrap_or(d.throw_speed);
+            g.danger_zone = get_f32(&m, "m_fGrenadeDangerZone").unwrap_or(d.danger_zone);
+        }
+        g.lob = a;
+    }
+    if let Some(Some(n)) = db.try_resolve(PAWN).map(|m| match m.get("m_Ammo") {
+        Some(TVal::List(l)) => l.iter().find_map(|e| match e.get("m_AmmoCount") {
+            Some(TVal::I(v)) => Some((*v).clamp(0, 255) as u8),
+            _ => None,
+        }),
+        _ => None,
+    }) {
+        g.grenades = n;
+    }
+    if let Some(s) = db.try_resolve(FSP) {
+        g.fsp_avoidance = get_f32(&s, "m_fAvoidanceRadius").unwrap_or(d.fsp_avoidance);
+        g.fsp_give_up = get_f32(&s, "m_fTimeBeforeGivingUp").unwrap_or(d.fsp_give_up);
+        g.fsp_pitch = get_f32(&s, "m_fAllowedPitchDegrees").unwrap_or(d.fsp_pitch);
+    }
+    if let Some(p) = db.try_resolve(PROJ) {
+        let gr = &mut g.grenade;
+        let f = |m: &TMap, k: &str, d: f32| get_f32(m, k).unwrap_or(d);
+        gr.gravity_mult = f(&p, "m_fGravityMultiplier", d.grenade.gravity_mult);
+        gr.bounciness = f(&p, "m_fBounciness", d.grenade.bounciness);
+        gr.bounce_damping = f(&p, "m_fBounceDamping", d.grenade.bounce_damping);
+        gr.floor_bounciness = f(&p, "m_fFloorBounciness", d.grenade.floor_bounciness);
+        gr.floor_bounce_damping = f(&p, "m_fFloorBounceDamping", d.grenade.floor_bounce_damping);
+        gr.body_bounciness = f(&p, "m_fBodyBounciness", d.grenade.body_bounciness);
+        gr.body_bounce_damping = f(&p, "m_fBodyBounceDamping", d.grenade.body_bounce_damping);
+        gr.rest_z_threshold = f(&p, "m_fRigidBodyZMagThreshold", d.grenade.rest_z_threshold);
+        if let Some(c) = get_obj(&p, "m_pGrenadeComponentTweaks").map(str::to_string) {
+            if let Some(cm) = db.try_resolve(&c) {
+                gr.fuse = f(&cm, "m_fDetonationDelay", d.grenade.fuse);
+                gr.min_delay_after_hit = f(&cm, "m_fMinDetonationDelayAfterHit", d.grenade.min_delay_after_hit);
+                if let Some(e) = get_obj(&cm, "m_pExplosionTweaks").and_then(|e| crate::interactables::explosion_config(db, e, loudness)) {
+                    gr.explosion = e;
+                }
+            }
+        }
+    }
+    prov.insert("ai.special.grenadier".into(), format!("{LOB} (range, cooldown when unreachable, throw speed, danger zone), {PAWN} m_Ammo, {FSP}, {PROJ} (physics, m_pGrenadeComponentTweaks fuse and explosion)"));
 }
 
 /// Tallboys: `Twk_Pawn_Tallboy.Pwn_Tallboy_Wood`, its combat behaviour and bow.

@@ -1244,7 +1244,7 @@ pub fn make_projectile(id: u32, owner: u32, kind: ProjectileKind, pos: Vec3, vel
         // A launcher's shots are made by `launchers::LaunchersState::fire`.
         ProjectileKind::TrapArrow | ProjectileKind::TrapBolt => (0.0, 0.0),
     };
-    ProjectileState { id, kind, owner, position: pos, velocity: vel, age: 0.0, damage, gravity_mult, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO, spawn: pos, pierced: None, homing: None, source_cleared: false }
+    ProjectileState { id, kind, owner, position: pos, velocity: vel, age: 0.0, damage, gravity_mult, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO, spawn: pos, pierced: None, homing: None, source_cleared: false, npc_throw: false }
 }
 
 /// Pawns revealed to `viewer` by Dark Vision: the "souls" of living pawns within `m_fDistance`

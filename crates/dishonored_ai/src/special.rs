@@ -19,6 +19,9 @@
 //!   ManageAttacks picks the first context of the bow that can be used: the bow, else the leg
 //!   stomp (0x00b470d0); the shot waits for the aim alignment (`StateNPCMasterTallboyAim`) and hits
 //!   with the accuracy of its range (0x00b732e0), aimed at the ground under the target with lead.
+//! - **`DisBehaviorOverseerCombat`**: the elite guard's melee, and the grenade lob at an
+//!   unreachable target (`DisItemContext_NPCLobGrenadeAtUnreachable`), with FindShootingPosition
+//!   toward a point it can be thrown from.
 
 use super::*;
 use dishonored_ir::ai::{ManageAttacksConfig, SpecialAttack};
@@ -28,6 +31,11 @@ const WEEPER_RUNNER: u8 = 255;
 /// The distance a weeper that stands after a grab resumes the chase beyond (2 x the follow
 /// sub-state's arrival threshold, 0x00aff9e0).
 const WEEPER_RESUME_FACTOR: f32 = 2.0;
+/// The Overseer's lob: seconds from the throw's start to the release (UNVERIFIED: the throw
+/// animation's release notify was not read; the player's deploy releases at 0.3 s).
+pub const LOB_RELEASE: f32 = 0.3;
+/// How often the Overseer asks whether its target is reachable (a path search), seconds.
+const REACH_CHECK: f32 = 1.0;
 
 /// Weeper sub-states (`DisBehaviorWeep`).
 pub mod weep {
@@ -69,6 +77,13 @@ pub struct SpecialCombat {
     pub plague_tick: f32,
     pub lost: f32,
     pub lost_limit: f32,
+    /// Overseer: the throw in progress (time to the release, the aim yaw / pitch), the lob's
+    /// cooldown, and the target's reachability with the time to the next check.
+    pub lob_wind: f32,
+    pub lob_aim: (f32, f32),
+    pub lob_cd: f32,
+    pub unreachable: bool,
+    pub reach_cd: f32,
 }
 
 /// What the combat behaviour knows of its target this tick.
@@ -91,6 +106,38 @@ fn off_facing(me: &PlayerState, p: Vec3) -> f32 {
 /// Launch pitch (degrees, up positive) that carries a projectile at `speed` under `gravity`
 /// (negative, uu/s^2) over horizontal distance `x` to height `y` (the low arc); 45 degrees when
 /// out of reach.
+/// The launch (yaw, pitch) of a lob from `from` to `to` at `speed` under `gravity` (the low arc)
+/// when the target is within reach and the arc, sampled in eight chords up to 90% of the way, is
+/// clear of the world.
+pub fn lob_arc(from: Vec3, to: Vec3, speed: f32, gravity: f32, world: &dyn WorldQuery) -> Option<(f32, f32)> {
+    let flat = (to - from).truncate();
+    let x = flat.length();
+    if x < 1.0 {
+        return None;
+    }
+    let g = -gravity;
+    let v2 = speed * speed;
+    if g > 1e-3 && v2 * v2 - g * (g * x * x + 2.0 * (to.z - from.z) * v2) < 0.0 {
+        return None;
+    }
+    let pitch = ballistic_pitch(speed, gravity, x, to.z - from.z);
+    let (s, c) = pitch.to_radians().sin_cos();
+    let dir = flat / x;
+    let t_end = x / (speed * c).max(1.0);
+    let at = |t: f32| from + Vec3::new(dir.x, dir.y, 0.0) * speed * c * t + Vec3::Z * (speed * s * t - 0.5 * g * t * t);
+    let mut prev = from;
+    for k in 1..=8 {
+        let p = at(t_end * 0.9 * k as f32 / 8.0);
+        let seg = p - prev;
+        let len = seg.length();
+        if len > 1e-3 && world.raycast(prev, seg / len, len, channel::PROJECTILE).is_some() {
+            return None;
+        }
+        prev = p;
+    }
+    Some((yaw_to(from, to), pitch))
+}
+
 pub fn ballistic_pitch(speed: f32, gravity: f32, x: f32, y: f32) -> f32 {
     let g = -gravity;
     if g <= 1e-3 || x <= 1e-3 {
@@ -113,6 +160,7 @@ impl Brain {
             NpcClass::Weeper => Some(self.combat_weep(me, tg, nav, ai, inhibit, dt)),
             NpcClass::MusicalOverseer => Some(self.combat_musical(me, tg, nav, ai, inhibit, dt)),
             NpcClass::Tallboy => Some(self.combat_tallboy(me, tg, ws, world, nav, ai, inhibit, dt)),
+            NpcClass::Overseer => self.combat_overseer(me, tg, ws, world, nav, ai, dt),
             _ => None,
         }
     }
@@ -498,6 +546,95 @@ impl Brain {
         m
     }
 
+    /// `DisBehaviorOverseerCombat`'s grenade (`DisItemContext_NPCLobGrenadeAtUnreachable`): while
+    /// the target is unreachable (LIKELY: no navmesh path to it, asked every `REACH_CHECK` s; the
+    /// original's reachability class) and seen, with a grenade left and the context off its
+    /// `m_ContextCooldownWhenUnreachable`, the Overseer lobs one when the target lies within
+    /// [`m_fMinContextRangeWhenUnreachable`, `m_fMaxContextRange`] and `m_fAllowedAngle`, no ally of
+    /// his is within `m_fGrenadeDangerZone` of it, and the arc at `m_fThrowSpeed` is clear and no
+    /// steeper than the shooting position's `m_fAllowedPitchDegrees`; otherwise it walks to a
+    /// shooting position (FindShootingPosition, as the tallboy's). `None`: the elite guard's melee.
+    #[allow(clippy::too_many_arguments)]
+    fn combat_overseer(&mut self, me: &PlayerState, tg: &Target, ws: &WorldState, world: &dyn WorldQuery, nav: Option<&NavWorld>, ai: &AiConfig, dt: f32) -> Option<PlayerInput> {
+        let gr = &ai.special.grenadier;
+        self.special.lob_cd -= dt;
+        let face = yaw_to(me.position, tg.goal);
+        let i = PlayerInput { yaw: face, left_hand: LeftHand::Empty, ..Default::default() };
+        if self.special.lob_wind > 0.0 {
+            self.special.lob_wind -= dt;
+            let mut out = i;
+            (out.yaw, out.pitch) = self.special.lob_aim;
+            out.npc_move = npc_moves::OVERSEER_LOB;
+            if self.special.lob_wind <= 0.0 {
+                out.buttons |= buttons::SECONDARY;
+                let left = self.grenades.get_or_insert(gr.grenades);
+                *left = left.saturating_sub(1);
+                self.special.lob_cd = combat::roll(gr.lob.cooldown, rng_next(&mut self.rng));
+            }
+            return Some(out);
+        }
+        let Some(n) = nav else { return None };
+        self.special.reach_cd -= dt;
+        if self.special.reach_cd <= 0.0 {
+            self.special.reach_cd = REACH_CHECK;
+            self.special.unreachable = n.find_path(me.position, tg.goal, &Default::default()).is_none();
+        }
+        let left = *self.grenades.get_or_insert(gr.grenades);
+        if !self.special.unreachable || left == 0 || self.special.lob_cd > 0.0 || !tg.sighted || !tg.visible {
+            self.special.fsp_goal = None;
+            return None;
+        }
+        let a = &gr.lob;
+        let gravity = gr.gravity_z * gr.grenade.gravity_mult;
+        let allies_near = self.allies.iter().filter_map(|x| ws.player(*x)).any(|x| x.alive && x.id != self.id && x.position.distance(tg.t.position) <= gr.danger_zone);
+        let eye = me.position + Vec3::Z * EYE;
+        let in_range = tg.d >= a.min_range && tg.d <= a.max_range;
+        if in_range && !allies_near {
+            if let Some(aim) = lob_arc(eye, tg.t.position, gr.throw_speed, gravity, world).filter(|x| x.1 <= gr.fsp_pitch) {
+                self.special.fsp_goal = None;
+                if off_facing(me, tg.t.position) > a.angle {
+                    return Some(i);
+                }
+                self.special.lob_wind = LOB_RELEASE;
+                self.special.lob_aim = aim;
+                let mut out = i;
+                (out.yaw, out.pitch) = aim;
+                out.npc_move = npc_moves::OVERSEER_LOB;
+                return Some(out);
+            }
+        }
+        // FindShootingPosition: the point at the ideal range on the line from the target, on the
+        // navmesh, the arc from it clear; at walk, given up after `m_fTimeBeforeGivingUp` without
+        // progress.
+        if self.special.fsp_goal.is_none() {
+            let away = (me.position - tg.t.position).truncate().normalize_or(glam::Vec2::X);
+            let range = a.ideal_range.clamp(a.min_range, a.max_range);
+            let p = tg.t.position + Vec3::new(away.x, away.y, 0.0) * range;
+            let cand = n.closest_point(p, 600.0).map(|(_, q)| q + Vec3::Z * 90.0);
+            let ok = cand.filter(|c| c.truncate().distance(me.position.truncate()) > gr.fsp_avoidance && lob_arc(*c + Vec3::Z * EYE, tg.t.position, gr.throw_speed, gravity, world).is_some_and(|x| x.1 <= gr.fsp_pitch));
+            self.special.fsp_goal = ok;
+            self.special.fsp_timer = gr.fsp_give_up;
+            self.special.fsp_from = me.position;
+        }
+        let Some(goal) = self.special.fsp_goal else { return Some(i) };
+        if me.position.distance(self.special.fsp_from) > 30.0 {
+            self.special.fsp_from = me.position;
+            self.special.fsp_timer = gr.fsp_give_up;
+        } else {
+            self.special.fsp_timer -= dt;
+        }
+        if self.special.fsp_timer <= 0.0 || Self::reached(me, goal, 120.0) {
+            self.special.fsp_goal = None;
+            self.follow.clear();
+            return Some(i);
+        }
+        let mut m = self.move_to(me, nav, goal, false, ai);
+        if tg.sighted {
+            m.yaw = face;
+        }
+        Some(m)
+    }
+
     /// The bow's launch direction (0x00c2fab0): a hit (chance from `Attribute_MaxAccuracy` at the
     /// bow's min range to `Attribute_MinAccuracy` at its max range, 0x00b732e0) aims at the ground
     /// under the target with its velocity's lead; a miss aims off the target within
@@ -644,6 +781,50 @@ mod tests {
         }
         assert_eq!(ticks.len(), 4, "2 s cloud, 0.5 s period: {ticks:?}");
         assert!(ticks.windows(2).all(|p| (p[1] - p[0]).abs_diff(30) <= 1));
+    }
+
+    /// The standard Overseer lobs only at an unreachable, seen target within the context's
+    /// range, with grenades left, no ally in the danger zone, and off cooldown: one release at the
+    /// end of the throw, then `m_ContextCooldownWhenUnreachable` (3-5 s).
+    #[test]
+    fn overseer_lobs_at_unreachable_target() {
+        let mut ai = AiConfig::default();
+        ai.special.grenadier.gravity_z = -1500.0;
+        let w = floor();
+        let (me, t) = pawns(1500.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![me, t];
+        let nav = dishonored_world::nav::NavWorld::default();
+        let dt = 1.0 / 60.0;
+        let tg = Target { t: &t, sighted: true, visible: true, goal: t.position, d: 1500.0, dz: 0.0 };
+        // Without a navmesh nothing is unreachable: the melee runs.
+        let mut b = Brain::new(me.id, PawnKind::Guard, me.position, 1);
+        b.class = NpcClass::Overseer;
+        assert!(b.special_combat(&me, &tg, &ws, &w, None, &ai, &mut Vec::new(), dt).is_none());
+        // An empty navmesh: no path, so unreachable.
+        let mut releases = Vec::new();
+        for k in 0..(60 * 6) {
+            let i = b.special_combat(&me, &tg, &ws, &w, Some(&nav), &ai, &mut Vec::new(), dt);
+            if i.is_some_and(|i| i.npc_move == npc_moves::OVERSEER_LOB && i.buttons & buttons::SECONDARY != 0) {
+                releases.push(k);
+            }
+        }
+        assert_eq!(releases.len(), 2, "two grenades: {releases:?}");
+        assert!(releases[0] <= 20, "released at the throw's end: {releases:?}");
+        let gap = (releases[1] - releases[0]) as f32 * dt;
+        assert!((3.0..=5.4).contains(&gap), "cooldown {gap}");
+        assert_eq!(b.grenades, Some(0));
+        // An ally in the danger zone denies the throw.
+        let mut b2 = Brain::new(me.id, PawnKind::Guard, me.position, 2);
+        b2.class = NpcClass::Overseer;
+        let mut ally = PlayerState::new(NPC_ID_BASE + 1, Vec3::new(1400.0, 0.0, 90.0), 0.0);
+        ally.kind = PawnKind::Guard;
+        ws.players.push(ally);
+        b2.allies = vec![ally.id];
+        for _ in 0..60 {
+            let i = b2.special_combat(&me, &tg, &ws, &w, Some(&nav), &ai, &mut Vec::new(), dt);
+            assert!(!i.is_some_and(|i| i.npc_move == npc_moves::OVERSEER_LOB));
+        }
     }
 
     #[test]

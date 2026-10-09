@@ -554,6 +554,7 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
     ai.player_visibility.ground_speed_sprint = movement.sprint_speed;
     // The Tallboy's ballistic solve uses the world's GravityZ (0x00c3f2a0).
     ai.special.tallboy.gravity_z = movement.gravity_z;
+    ai.special.grenadier.gravity_z = movement.gravity_z;
     // The stealth light environment's bounds are the collision cylinder's.
     ai.player_visibility.cylinder = [movement.collision_radius, movement.collision_half_height, movement.crouch_half_height];
     // A look-at request follows the player's eyes (`GetActorEyesViewPoint`).

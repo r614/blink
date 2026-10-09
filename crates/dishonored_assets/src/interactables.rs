@@ -179,7 +179,7 @@ fn loudness_table(content: &Content) -> Vec<f32> {
 }
 
 /// A `DisTweaks_Explosion` as the grenades and the Tallboy's arrow read it (Normal difficulty).
-fn explosion_config(db: &TweakDb, path: &str, loudness: &[f32]) -> Option<dishonored_ir::items::ExplosionConfig> {
+pub(crate) fn explosion_config(db: &TweakDb, path: &str, loudness: &[f32]) -> Option<dishonored_ir::items::ExplosionConfig> {
     let e = db.try_resolve(path)?;
     let d = dishonored_ir::items::ExplosionConfig::default();
     Some(dishonored_ir::items::ExplosionConfig {
