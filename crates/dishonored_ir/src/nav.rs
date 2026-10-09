@@ -119,6 +119,34 @@ pub struct NavPylon {
     pub tall_boy: bool,
     pub mesh: NavMesh,
     pub obstacle: Option<NavMesh>,
+    /// `ArkDynamicPylon` only: the mover it rides and how it is attached.
+    #[serde(default)]
+    pub dynamic: Option<DynamicPylon>,
+}
+
+/// An `ArkDynamicPylon` (a pylon placed on a mover: lift, lock platform, boat). See
+/// `research/dishonored/systems/dynamic_pylons.md`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct DynamicPylon {
+    /// `Base` chain: the actor it is attached to, then that actor's `Base`, and so on (object
+    /// names, in the pylon's package). Empty: not based.
+    pub bases: Vec<PylonBase>,
+    /// `RelativeLocation` in the base's frame (hard attachment).
+    pub relative_location: Vec3,
+    pub hard_attach: bool,
+    /// `m_fCeilingHeight` (class default 700).
+    pub ceiling_height: f32,
+    /// `Pylon.bNeedsCostCheck` (the class sets it; the cost hook only runs when set).
+    pub needs_cost_check: bool,
+}
+
+/// One actor of a dynamic pylon's `Base` chain, where the level places it.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct PylonBase {
+    pub name: String,
+    pub location: Vec3,
+    /// Pitch, yaw, roll (65536 = 360 degrees).
+    pub rotation: [i32; 3],
 }
 
 /// Every pylon of a map.

@@ -86,6 +86,47 @@ fn boyle_navmesh_decodes_exactly() {
     assert_eq!(pylons[0].obstacle.as_ref().map(|o| o.polys.len()), Some(3612));
 }
 
+/// Every `ArkDynamicPylon` of the shipped `*_Nav` packages: its mover, attachment and mesh, and
+/// the cross-pylon edges that reach it from the level's static pylons.
+#[test]
+#[ignore]
+fn dynamic_pylons_retail() {
+    use dishonored_assets::navigation::read_package_pylons;
+    use dishonored_ir::nav::NavEdgeClass;
+    let Some(c) = content() else { return };
+    let mut names: Vec<String> = std::fs::read_dir(&c.cooked)
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter_map(|n| n.strip_suffix(".upk").map(str::to_string))
+        .filter(|n| n.to_ascii_lowercase().ends_with("_nav"))
+        .collect();
+    names.sort();
+    let mut total = 0;
+    for name in names {
+        let p = c.package(&name).unwrap();
+        if !(0..p.exports.len()).any(|i| p.export_class(i) == "ArkDynamicPylon") {
+            continue;
+        }
+        let pylons = read_package_pylons(&p).unwrap();
+        for (i, py) in pylons.iter().enumerate() {
+            let Some(d) = &py.dynamic else { continue };
+            total += 1;
+            let m = &py.mesh;
+            println!(
+                "{name}:{} at {:?} bases {:?} rel {:?} hard {} ceiling {} cost check {}: {} verts {} polys {} edges, bounds {:?}..{:?}",
+                py.name, py.location, d.bases, d.relative_location, d.hard_attach, d.ceiling_height, d.needs_cost_check, m.verts.len(), m.polys.len(), m.edges.len(), m.min, m.max
+            );
+            for (j, q) in pylons.iter().enumerate() {
+                let n = q.mesh.edges.iter().filter(|e| matches!(e.class, NavEdgeClass::CrossPylon | NavEdgeClass::PathObject) && e.path_object.as_ref().is_some_and(|l| l.poly_refs.iter().any(|r| r.0 == py.object_ref))).count();
+                if n > 0 {
+                    println!("    {n} cross edges in {} ({}) touch it", q.name, if i == j { "itself" } else { "other" });
+                }
+            }
+        }
+    }
+    assert!(total > 0);
+}
+
 #[test]
 fn ai_config_from_tweaks_and_ini() {
     let Some(c) = content() else { return };

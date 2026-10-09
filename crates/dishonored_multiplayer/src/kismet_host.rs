@@ -308,6 +308,14 @@ pub struct HostState {
     pub doors: BTreeMap<u32, (u8, bool)>,
     /// Bumped whenever a door's lock changes (the AI's navigation overlay is rebuilt).
     pub door_version: u32,
+    /// `ArkDynamicPylon`s (`package:name`, lowercase): connection, location and mesh position
+    /// as `ArkSeqAct_ChangePylonConnection` and their moving bases left them. Pylons not listed
+    /// are where the level placed them, connected.
+    #[serde(default)]
+    pub pylons: BTreeMap<String, dishonored_world::nav::PylonLink>,
+    /// Bumped whenever a dynamic pylon's state changes (the navigation overlay is rebuilt).
+    #[serde(default)]
+    pub pylon_version: u32,
     /// `SeqAct_AttachToActor`: attached actor -> (base, offset in the base's frame).
     pub attached: BTreeMap<u32, (Obj, Vec3)>,
     /// `DisSeqAct_ActivateUsable`: usable actor -> its active stage.
@@ -499,9 +507,10 @@ pub struct KismetRun {
     pub st: HostState,
     #[serde(skip)]
     pub setup: Arc<KismetSetup>,
-    /// The active map's navigation with the Kismet's door locks applied: (map, door version).
+    /// The active map's navigation with the Kismet's door locks and dynamic pylons applied:
+    /// (map, door version, pylon version).
     #[serde(skip)]
-    nav_cache: Option<(String, u32, Arc<dishonored_world::nav::NavWorld>)>,
+    nav_cache: Option<(String, u32, u32, Arc<dishonored_world::nav::NavWorld>)>,
 }
 
 impl KismetRun {
@@ -550,10 +559,13 @@ impl KismetRun {
 
     /// The navigation the AI should path on this step: the map's navmesh with the doors the
     /// Kismet locked or unlocked (`DisSeqAct_Door` Lock / Unlock) applied to their path-object
-    /// edges (a locked `DisDoor` blocks its edges, as `m_bLocked` does at level start). None
-    /// when the Kismet changed no door of this map.
+    /// edges (a locked `DisDoor` blocks its edges, as `m_bLocked` does at level start), and its
+    /// `ArkDynamicPylon`s where their bases carried them, connected or not
+    /// ([`Self::update_dynamic_pylons`]). None when the map has no dynamic pylon and the Kismet
+    /// changed no door of it.
     pub fn door_nav(&mut self, map: &str, base: Option<&dishonored_world::nav::NavWorld>) -> Option<Arc<dishonored_world::nav::NavWorld>> {
         let base = base?;
+        let dynamic = self.update_dynamic_pylons(base);
         let db = &self.k.db;
         let changes: Vec<(String, bool)> = self
             .st
@@ -562,11 +574,11 @@ impl KismetRun {
             .filter(|(a, _)| db.packages.iter().position(|p| p.eq_ignore_ascii_case(&db.actors[**a as usize].package)).and_then(|p| db.map_of_package(p as u16)).is_some_and(|m| m.eq_ignore_ascii_case(map)))
             .map(|(a, s)| (db.actors[*a as usize].name.clone(), s.1))
             .collect();
-        if changes.is_empty() {
+        if changes.is_empty() && !dynamic {
             return None;
         }
-        if let Some((m, v, n)) = &self.nav_cache {
-            if m.eq_ignore_ascii_case(map) && *v == self.st.door_version {
+        if let Some((m, v, pv, n)) = &self.nav_cache {
+            if m.eq_ignore_ascii_case(map) && *v == self.st.door_version && *pv == self.st.pylon_version {
                 return Some(n.clone());
             }
         }
@@ -576,9 +588,46 @@ impl KismetRun {
                 o.blocking = locked;
             }
         }
+        for i in 0..nav.pylons.len() {
+            if let Some(s) = self.st.pylons.get(&pylon_key(&nav.pylons[i])) {
+                nav.apply_pylon_state(i, *s);
+            }
+        }
         let nav = Arc::new(nav);
-        self.nav_cache = Some((map.to_string(), self.st.door_version, nav.clone()));
+        self.nav_cache = Some((map.to_string(), self.st.door_version, self.st.pylon_version, nav.clone()));
         Some(nav)
+    }
+
+    /// Follow the moving bases of the map's `ArkDynamicPylon`s (`base`: the map's navigation
+    /// as loaded). A pylon rides its `Base` chain rigidly: it is where the nearest base the
+    /// Kismet has moved (matinee, teleport, attachment) carries it from its placed location.
+    /// When it is somewhere new, slot 249 runs ([`dishonored_world::nav::PylonLink::moved`]:
+    /// disconnect, then the mesh follows in 50 uu steps). True when the map has dynamic pylons.
+    pub fn update_dynamic_pylons(&mut self, base: &dishonored_world::nav::NavWorld) -> bool {
+        let mut any = false;
+        for p in &base.pylons {
+            let Some(d) = &p.dynamic else { continue };
+            any = true;
+            let carried = d.bases.iter().find_map(|b| {
+                let rot = glam::Quat::from_mat3(&dishonored_kismet::interp::rot_matrix_units(b.rotation));
+                self.mover_delta(&format!("{}:{}", p.package, b.name), glam::Mat4::from_rotation_translation(rot, b.location))
+            });
+            let Some(delta) = carried else { continue };
+            let at = delta.transform_point3(p.placed);
+            let key = pylon_key(p);
+            let s = self.st.pylons.entry(key).or_insert_with(|| dishonored_world::nav::PylonLink::placed(p.placed));
+            // A base that is back where it was (or never moved) does not move the pylon; the
+            // tolerance absorbs the matrix round trip (f32 at map coordinates).
+            if s.location.distance(at) <= PYLON_MOVE_EPSILON {
+                continue;
+            }
+            let before = *s;
+            s.moved(at);
+            if s.disconnected != before.disconnected || s.previous != before.previous || s.aborts != before.aborts {
+                self.st.pylon_version += 1;
+            }
+        }
+        any
     }
 
     /// A player is answering a scripted choice (input is frozen like the original's
@@ -595,6 +644,16 @@ impl KismetRun {
     pub fn actor_pos(&self, a: u32) -> Vec3 {
         self.st.actor_pos.get(&a).copied().unwrap_or_else(|| Vec3::from(self.k.db.actors[a as usize].location))
     }
+}
+
+/// How far a dynamic pylon's carried location may differ from its last one and still count as
+/// not moved (the port's matrix round trip at map coordinates; the original moves it only when
+/// its base moves).
+pub const PYLON_MOVE_EPSILON: f32 = 0.05;
+
+/// Key of a pylon in [`HostState::pylons`]: `package:name`, lowercase.
+pub fn pylon_key(p: &dishonored_world::nav::PylonRt) -> String {
+    format!("{}:{}", p.package, p.name).to_ascii_lowercase()
 }
 
 /// A world whose navigation is replaced (doors locked or unlocked by the Kismet).
@@ -2150,6 +2209,34 @@ impl Host for H<'_> {
                     for t in cx.objects("Target") {
                         self.teleport(&t, to, yaw);
                     }
+                }
+                HostResult::Done
+            }
+            // `ArkSeqAct_ChangePylonConnection::Activated` (0x00937090): on every
+            // `ArkDynamicPylon` target, Connect (input 0, checked first) clears
+            // `m_bIsDisconnected`; Disconnect (input 1) sets it when clear and aborts the pawns
+            // moving through the pylon (slot 245, 0x00934c40, which flags their navigation
+            // process to repath); then `SequenceAction::Activated` (automatic outputs).
+            "ArkSeqAct_ChangePylonConnection" => {
+                let connect = match cx.input() {
+                    Some(0) => true,
+                    Some(1) => false,
+                    _ => return HostResult::Done,
+                };
+                for t in cx.objects("Target") {
+                    let Obj::Actor(a) = t else { continue };
+                    let act = &self.db.actors[a as usize];
+                    if act.class != "ArkDynamicPylon" {
+                        continue;
+                    }
+                    let (key, placed, name) = (format!("{}:{}", act.package, act.name).to_ascii_lowercase(), Vec3::from(act.location), act.name.clone());
+                    let s = self.st.pylons.entry(key).or_insert_with(|| dishonored_world::nav::PylonLink::placed(placed));
+                    let before = *s;
+                    s.set_connected(connect);
+                    if *s != before {
+                        self.st.pylon_version += 1;
+                    }
+                    self.note(format!("dynamic pylon {name} {}", if connect { "connected" } else { "disconnected" }));
                 }
                 HostResult::Done
             }
@@ -4167,6 +4254,105 @@ mod tests {
             // An op without `m_DLCType` asks about the enum's first value (eDisDLC_01).
             assert_eq!((r.ran(yes), r.ran(no)), if unlocked { (1, 0) } else { (0, 1) }, "{ty} listed {listed}");
         }
+    }
+
+    /// A map's navigation: static pylon `A` (polys at x 0..200 and 400..600, also joined by a
+    /// detour edge through y = 2000) and `ArkDynamicPylon` `Pylon_B` (x 200..400) riding the
+    /// mover `Lift`, joined to A by cross-pylon edges.
+    fn lift_nav() -> dishonored_world::nav::NavWorld {
+        use dishonored_ir::nav::*;
+        let v = |x: f32, y: f32| Vec3::new(x, y, 0.0);
+        let poly = |vs: Vec<u16>, cx: f32| NavPoly { verts: vs, edges: vec![], center: Vec3::new(cx, 100.0, 0.0), normal: Vec3::Z, min: Vec3::new(cx - 100.0, 0.0, 0.0), max: Vec3::new(cx + 100.0, 200.0, 0.0), height: 200.0 };
+        let edge = |class, v0, v1, refs: Option<((i32, u16), (i32, u16))>| NavEdge {
+            class,
+            kind: NavEdgeType::Normal,
+            v0,
+            v1,
+            poly0: 0,
+            poly1: 1,
+            length: 1.0,
+            effective_length: 1.0,
+            center: Vec3::ZERO,
+            path_object: refs.map(|(f, t)| NavPathObjectLink { poly_refs: [(f.0, [0; 4], f.1, 0), (t.0, [0; 4], t.1, 0)], path_object: (0, [0; 4]), internal_id: -1 }),
+        };
+        let a = NavMesh {
+            verts: vec![v(0.0, 0.0), v(200.0, 0.0), v(200.0, 200.0), v(0.0, 200.0), v(400.0, 0.0), v(600.0, 0.0), v(600.0, 200.0), v(400.0, 200.0), v(300.0, 2000.0), v(301.0, 2000.0)],
+            polys: vec![poly(vec![0, 1, 2, 3], 100.0), poly(vec![4, 5, 6, 7], 500.0)],
+            edges: vec![edge(NavEdgeClass::Base, 8, 9, None), edge(NavEdgeClass::CrossPylon, 1, 2, Some(((1, 0), (2, 0)))), edge(NavEdgeClass::CrossPylon, 4, 7, Some(((1, 1), (2, 0))))],
+            ..Default::default()
+        };
+        let b = NavMesh {
+            verts: vec![v(200.0, 0.0), v(400.0, 0.0), v(400.0, 200.0), v(200.0, 200.0)],
+            polys: vec![poly(vec![0, 1, 2, 3], 300.0)],
+            edges: vec![edge(NavEdgeClass::CrossPylon, 1, 2, Some(((2, 0), (1, 1)))), edge(NavEdgeClass::CrossPylon, 0, 3, Some(((2, 0), (1, 0))))],
+            ..Default::default()
+        };
+        let lift = PylonBase { name: "Lift".into(), location: Vec3::new(300.0, 100.0, -100.0), rotation: [0; 3] };
+        let dynamic = Some(DynamicPylon { bases: vec![lift], needs_cost_check: true, ceiling_height: 700.0, ..Default::default() });
+        dishonored_world::nav::NavWorld::from_data(&NavData {
+            pylons: vec![
+                NavPylon { name: "A".into(), package: "T".into(), object_ref: 1, mesh: a, ..Default::default() },
+                NavPylon { name: "Pylon_B".into(), package: "T".into(), object_ref: 2, location: Vec3::new(300.0, 100.0, 0.0), mesh: b, dynamic, ..Default::default() },
+            ],
+            path_objects: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn change_pylon_connection_and_a_moving_base_drive_the_ai_navigation() {
+        use dishonored_world::nav::PathOpts;
+        let mut g = GraphBuilder::new();
+        let e = g.remote_event("Start");
+        let op = g.op("ArkSeqAct_ChangePylonConnection");
+        g.inputs(op, &["Connect", "Disconnect"]);
+        g.outputs(op, &["Out"]);
+        g.link(e, 0, op, 1);
+        let pylon = g.actor("ArkDynamicPylon", "Pylon_B", [300.0, 100.0, 0.0], 0);
+        let lift = g.actor("InterpActor", "Lift", [300.0, 100.0, -100.0], 0);
+        let o = g.var("SeqVar_Object");
+        g.set(o, "ObjValue", Value::Obj(Obj::Actor(pylon)));
+        g.vars(op, "Target", "Targets", &[o]);
+        let after = g.sink();
+        g.link(op, 0, after, 0);
+        let base = lift_nav();
+        let mut r = Rig::new(g, |_| {});
+        // Before any change the map's navigation is used as loaded, connected.
+        let nav = r.run.door_nav("T", Some(&base)).unwrap();
+        let (s, goal) = (Vec3::new(50.0, 100.0, 0.0), Vec3::new(550.0, 100.0, 0.0));
+        let max_y = |p: Vec<Vec3>| p.iter().map(|w| w.y).fold(f32::MIN, f32::max);
+        assert!(max_y(nav.find_path(s, goal, &PathOpts::default()).unwrap()) < 300.0);
+        // Disconnect: the AI detours; the action fires its output.
+        r.play(2);
+        assert_eq!(r.ran(after), 1);
+        let st = r.run.st.pylons["t:pylon_b"];
+        assert!(st.disconnected && st.aborts == 1);
+        let nav = r.run.door_nav("T", Some(&base)).unwrap();
+        assert!(max_y(nav.find_path(s, goal, &PathOpts::default()).unwrap()) > 1900.0);
+        // The lift rises 30 uu: the pylon follows (already disconnected), the mesh does not.
+        r.run.st.actor_pos.insert(lift, Vec3::new(300.0, 100.0, -70.0));
+        let nav = r.run.door_nav("T", Some(&base)).unwrap();
+        let st = r.run.st.pylons["t:pylon_b"];
+        assert_eq!((st.location, st.previous, st.aborts), (Vec3::new(300.0, 100.0, 30.0), Vec3::new(300.0, 100.0, 0.0), 1));
+        let bi = nav.pylon_index("Pylon_B", None).unwrap();
+        assert_eq!(nav.verts[nav.pylons[bi].verts.0 as usize].z, 0.0);
+        // 80 uu up: the mesh moves by the whole 80.
+        r.run.st.actor_pos.insert(lift, Vec3::new(300.0, 100.0, -20.0));
+        let nav = r.run.door_nav("T", Some(&base)).unwrap();
+        assert_eq!(nav.verts[nav.pylons[bi].verts.0 as usize].z, 80.0);
+        assert_eq!(nav.pylons[bi].dynamic.as_ref().unwrap().state.previous.z, 80.0);
+        // Connect (input 0): the crossing is cheap again, wherever the mesh now is.
+        r.run.k.activate_input(op, 0);
+        r.play(1);
+        let st = r.run.st.pylons["t:pylon_b"];
+        assert!(!st.disconnected && st.aborts == 1);
+        let nav = r.run.door_nav("T", Some(&base)).unwrap();
+        let from = nav.locate(Vec3::new(50.0, 100.0, 0.0), 1.0, 1.0).unwrap();
+        let l = nav.links[from as usize].iter().find(|l| l.kind == dishonored_world::nav::LinkKind::CrossPylon).unwrap();
+        assert_eq!(nav.pylon_cost(from, l), None);
+        // The base does not move again: nothing changes (no new disconnection).
+        let v = r.run.st.pylon_version;
+        r.run.door_nav("T", Some(&base)).unwrap();
+        assert_eq!(r.run.st.pylon_version, v);
     }
 
     #[test]

@@ -22,7 +22,7 @@
 use crate::content::Content;
 use crate::util::fmatrix_rows;
 use anyhow::{Context, Result, bail, ensure};
-use dishonored_ir::nav::{NavData, NavEdge, NavEdgeClass, NavEdgeType, NavMesh, NavPathObject, NavPathObjectLink, NavPoly, NavPylon};
+use dishonored_ir::nav::{DynamicPylon, NavData, PylonBase, NavEdge, NavEdgeClass, NavEdgeType, NavMesh, NavPathObject, NavPathObjectLink, NavPoly, NavPylon};
 use glam::Vec3;
 use ue3_package::properties::{Value, find};
 use ue3_package::reader::Reader;
@@ -56,6 +56,14 @@ fn fmatrix(r: &mut Reader) -> Result<glam::Mat4> {
 
 /// Decode one `NavigationMeshBase` export.
 pub fn read_nav_mesh(pkg: &Package, export: usize) -> Result<NavMesh> {
+    read_nav_mesh_ex(pkg, export, false)
+}
+
+/// [`read_nav_mesh`] for the meshes of a pylon, `dynamic` for an `ArkDynamicPylon`. Its meshes serialize `TArray<FBorderEdgeInfo> { u16 Vert0, Vert1, Poly }` between
+/// `WorldToLocal` and `BoxBounds` (the outline of the mesh; every shipped dynamic pylon mesh has
+/// it, no static `DisPylon` mesh does), and `ArkDynamicPylon::PostBeginPlay` (0x00934b60) resets
+/// both meshes' `LocalToWorld` / `WorldToLocal` to identity, so their vertices are used as stored.
+pub fn read_nav_mesh_ex(pkg: &Package, export: usize, dynamic: bool) -> Result<NavMesh> {
     let data = pkg.export_data(export)?;
     let h = pkg.read_object(export)?;
     let mut r = Reader::at(data, h.native_offset);
@@ -97,6 +105,10 @@ pub fn read_nav_mesh(pkg: &Package, export: usize) -> Result<NavMesh> {
     }
     let local_to_world = fmatrix(&mut r)?;
     let _world_to_local = fmatrix(&mut r)?;
+    if dynamic {
+        let n = r.count(6)?;
+        r.skip(n * 6)?;
+    }
     let (min, max) = fbox(&mut r)?;
     let mut edges = Vec::with_capacity(ne);
     for class in classes {
@@ -126,7 +138,7 @@ pub fn read_nav_mesh(pkg: &Package, export: usize) -> Result<NavMesh> {
     }
     ensure!(r.remaining() == 0, "{} trailing bytes after navmesh edges", r.remaining());
     let mut mesh = NavMesh { source: format!("{}:{}", pkg.name, pkg.obj_path(ObjRef::Export(export))), version, verts, polys, edges, min, max };
-    if local_to_world != glam::Mat4::IDENTITY {
+    if !dynamic && local_to_world != glam::Mat4::IDENTITY {
         for v in mesh.verts.iter_mut() {
             *v = local_to_world.transform_point3(*v);
         }
@@ -146,7 +158,8 @@ pub fn read_package_pylons(pkg: &Package) -> Result<Vec<NavPylon>> {
     let mut out = Vec::new();
     for i in 0..pkg.exports.len() {
         let class = pkg.export_class(i);
-        if class != "DisPylon" && class != "Pylon" {
+        let dynamic = class == "ArkDynamicPylon";
+        if class != "DisPylon" && class != "Pylon" && !dynamic {
             continue;
         }
         let h = pkg.read_object(i)?;
@@ -162,12 +175,45 @@ pub fn read_package_pylons(pkg: &Package) -> Result<Vec<NavPylon>> {
         };
         let tall_boy = matches!(find(&h.properties, "m_bEnableTallBoyNavigation").map(|p| &p.value), Some(Value::Bool(true)));
         let ObjRef::Export(ne) = ObjRef::from_index(nav_ref) else { continue };
-        let mesh = read_nav_mesh(pkg, ne).with_context(|| format!("{}: navmesh of {}", pkg.name, pkg.obj_path(ObjRef::Export(i))))?;
+        let mesh = read_nav_mesh_ex(pkg, ne, dynamic).with_context(|| format!("{}: navmesh of {}", pkg.name, pkg.obj_path(ObjRef::Export(i))))?;
         let obstacle = match ObjRef::from_index(obs_ref) {
-            ObjRef::Export(oe) => Some(read_nav_mesh(pkg, oe).with_context(|| format!("{}: obstacle mesh", pkg.name))?),
+            ObjRef::Export(oe) => Some(read_nav_mesh_ex(pkg, oe, dynamic).with_context(|| format!("{}: obstacle mesh", pkg.name))?),
             _ => None,
         };
-        out.push(NavPylon { name: pkg.obj_name(ObjRef::Export(i)).to_string(), package: pkg.name.clone(), object_ref: i as i32 + 1, location, nav_guid, tall_boy, mesh, obstacle });
+        // `ArkDynamicPylon` (Engine.u): `m_fCeilingHeight` 700 and `bNeedsCostCheck` true by
+        // class default; `Base` / `RelativeLocation` / `bHardAttach` are the mover attachment.
+        let dynamic = dynamic.then(|| {
+            // The `Base` chain inside the package (a based actor's own `Base`, and so on).
+            let mut bases = Vec::new();
+            let mut props = h.properties.clone();
+            while let Some(Value::Object(r)) = find(&props, "Base").map(|p| p.value.clone()) {
+                let ObjRef::Export(b) = ObjRef::from_index(r) else { break };
+                if bases.len() > 8 {
+                    break;
+                }
+                props = match pkg.read_object(b) {
+                    Ok(o) => o.properties,
+                    Err(_) => break,
+                };
+                let location = find(&props, "Location").and_then(|p| p.as_vector()).map(Vec3::from).unwrap_or(Vec3::ZERO);
+                let rotation = match find(&props, "Rotation").map(|p| &p.value) {
+                    Some(Value::Rotator(r)) => *r,
+                    _ => [0; 3],
+                };
+                bases.push(PylonBase { name: pkg.obj_name(ObjRef::Export(b)).to_string(), location, rotation });
+            }
+            let relative_location = find(&h.properties, "RelativeLocation").and_then(|p| p.as_vector()).map(Vec3::from).unwrap_or(Vec3::ZERO);
+            let flag = |n: &str, d: bool| match find(&h.properties, n).map(|p| &p.value) {
+                Some(Value::Bool(b)) => *b,
+                _ => d,
+            };
+            let ceiling_height = match find(&h.properties, "m_fCeilingHeight").map(|p| &p.value) {
+                Some(Value::Float(f)) => *f,
+                _ => 700.0,
+            };
+            DynamicPylon { bases, relative_location, hard_attach: flag("bHardAttach", false), ceiling_height, needs_cost_check: flag("bNeedsCostCheck", true) }
+        });
+        out.push(NavPylon { name: pkg.obj_name(ObjRef::Export(i)).to_string(), package: pkg.name.clone(), object_ref: i as i32 + 1, location, nav_guid, tall_boy, mesh, obstacle, dynamic });
     }
     Ok(out)
 }
