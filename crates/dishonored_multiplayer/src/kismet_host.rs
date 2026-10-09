@@ -161,6 +161,8 @@ pub const FED_EVENTS: &[&str] = &[
     "DisSeqEvt_Choke",
     "DisSeqEvent_Windblasted",
     "DisSeqEvent_AttackedByRats",
+    "SeqEvent_Destroyed",
+    "SeqEvent_RigidBodyCollision",
     "DisSeqEvent_PowerUsed",
     "DisSeqEvent_Climb",
     "DisSeqEvent_Lock",
@@ -263,6 +265,9 @@ pub struct HostState {
     /// `NPCDoTeleportSpell` in progress: op -> its casting pawns.
     #[serde(default)]
     spells: BTreeMap<OpId, GoTo>,
+    /// Actors destroyed since the last feed (`Actor::Destroyed` -> `SeqEvent_Destroyed`).
+    #[serde(default)]
+    destroyed: Vec<Obj>,
     /// `StartSpawn` in progress: op -> (spawner originals not yet spawned, spawned so far).
     spawning: BTreeMap<OpId, (Vec<usize>, Vec<PlayerId>)>,
     /// Spawner actor -> index into `MissionSetup::original`.
@@ -777,6 +782,7 @@ impl H<'_> {
     }
 
     fn destroy(&mut self, target: &Obj) {
+        self.st.destroyed.push(target.clone());
         if let Some(p) = self.pawn_of(target) {
             self.m.world.players.retain(|x| x.id != p);
             self.m.crowd.brains.retain(|b| b.id != p);
@@ -2518,9 +2524,15 @@ impl Host for H<'_> {
             }
             // ----- conversations -----
             "DisSeqAct_DialogInputs" => {
-                let os = cx.prop_obj("m_pDialogOneShot");
-                let os = if os.is_none() { cx.objects("DialogOneShot").into_iter().next().unwrap_or_default() } else { os };
-                let Obj::Actor(a) = os else {
+                // The one-shot: the "DialogOneShot" variable (its `m_pDialogOneShot`), else the
+                // property as cooked (an object path naming the placed one-shot).
+                let linked = cx.objects("DialogOneShot").into_iter().find_map(|o| if let Obj::Actor(a) = o { Some(a) } else { None });
+                let a = linked.or_else(|| match cx.prop_obj("m_pDialogOneShot") {
+                    Obj::Actor(a) => Some(a),
+                    Obj::Path(p) => self.db.find_actor(&obj_name(&Obj::Path(p))),
+                    _ => None,
+                });
+                let Some(a) = a else {
                     return HostResult::Unhandled;
                 };
                 let actor = &self.db.actors[a as usize];
@@ -5010,6 +5022,19 @@ mod tests {
         r.feed_events(&[SimEvent::Windblasted { victim: 7, by: 1 }], 2);
         assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (0, 1));
         assert_eq!(r.run.k.ops[ev as usize].instigator, Obj::Pawn(1));
+    }
+
+    /// `SeqEvent_Destroyed`: an NPC body that is gone (eaten, ash) destroys the pawn; its events
+    /// fire with the pawn the originator.
+    #[test]
+    fn a_removed_body_fires_destroyed() {
+        let mut g = GraphBuilder::new();
+        let (ev, sinks) = event_with_sinks(&mut g, "SeqEvent_Destroyed", &["Out"]);
+        g.set(ev, "Originator", Value::Obj(Obj::Pawn(7)));
+        let mut r = Rig::new(g, |_| {});
+        add_npc(&mut r, 7);
+        r.feed_events(&[SimEvent::BodyRemoved { body: 7, ash: true }], 2);
+        assert_eq!(r.ran(sinks[0]), 1);
     }
 
     /// `DisSeqEvent_PowerUsed` (0x00BF32F0 -> 0x00BF30C0): the output named for the power plus the

@@ -207,6 +207,28 @@ pub(super) fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
                     h.note(format!("choke of pawn {victim} by {attacker}: output {out}, {} event(s)", fired.len()));
                 }
             }
+            // `SeqEvent_RigidBodyCollision` (UE3 `CheckRBCollisionEvents`): the prop's events whose
+            // `MinCollisionVelocity` the contact reaches, the prop the originator, every output; the
+            // impact velocity and location go to the event's variables.
+            SimEvent::MovableContact { movable, speed, point } => {
+                let Some((package, name)) = h.m.world.movables.iter().find(|m| m.id == movable).map(|m| (m.package.clone(), m.name.clone())) else { continue };
+                let Some(a) = h.kismet_actor(&package, &name) else { continue };
+                let evs: Vec<OpId> = k.events_for("SeqEvent_RigidBodyCollision", &[Obj::Actor(a)]).into_iter().filter(|e| speed >= k.prop_float(*e, "MinCollisionVelocity")).collect();
+                for e in &evs {
+                    k.set_link(*e, "ImpactVelocity", Value::Float(speed));
+                    k.set_link(*e, "ImpactLocation", Value::Vector(point.to_array()));
+                }
+                let fired = fire_events(k, h, evs, Obj::Actor(a), Obj::None, None);
+                if !fired.is_empty() {
+                    h.note(format!("{name} collided at {speed:.0}: {} RigidBodyCollision event(s)", fired.len()));
+                }
+            }
+            // A body gone (eaten by rats, burnt to ash): the pawn is destroyed.
+            SimEvent::BodyRemoved { body, .. } => {
+                if !h.m.humans.contains(&body) {
+                    h.st.destroyed.push(Obj::Pawn(body));
+                }
+            }
             // `DisSeqEvent_AttackedByRats` (the enter of `StateNPCMasterActionMeleeSwarm`,
             // 0x00A70450): the NPC's events, every output.
             SimEvent::RatsAttackStart { victim, rat } => {
@@ -266,6 +288,27 @@ pub(super) fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
                 }
             }
             _ => {}
+        }
+    }
+    destroyed_events(k, h);
+}
+
+/// `SeqEvent_Destroyed` (the engine's `Actor::Destroyed` -> `TriggerEventClass`): the destroyed
+/// actor's events (a pawn's under the pawn and its spawner), the actor the originator, every
+/// output.
+fn destroyed_events(k: &mut Kismet, h: &mut H) {
+    for o in std::mem::take(&mut h.st.destroyed) {
+        let origs = match &o {
+            Obj::Pawn(p) => npc_origins(h, *p),
+            other => match h.pawn_of(other) {
+                Some(p) => npc_origins(h, p),
+                None => vec![other.clone()],
+            },
+        };
+        let evs = k.events_for("SeqEvent_Destroyed", &origs);
+        let fired = fire_events(k, h, evs, o.clone(), Obj::None, None);
+        if !fired.is_empty() {
+            h.note(format!("{} destroyed: {} Destroyed event(s)", obj_name(&o), fired.len()));
         }
     }
 }

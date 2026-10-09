@@ -154,6 +154,8 @@ pub enum SimEvent {
     /// set (its index in the map's `WorldActors::breakables`), to itself. `by` is the pawn that
     /// last held or threw it.
     MovableImpact { movable: u32, speed: f32, point: Vec3, by: Option<PlayerId>, victim: Option<PlayerId>, damage: i32, breakable: Option<u32> },
+    /// A moving prop touched something (its rigid-body collision notification) at `speed`.
+    MovableContact { movable: u32, speed: f32, point: Vec3 },
     // --- powers ---
     /// A power was used (`DishonoredActivePowerComponent` slot 94, 0x00BF32F0, called from the
     /// power's activation: Windblast 0x00BFB950, Blink 0x00BFC990, Dark Vision 0x00BE89E0,

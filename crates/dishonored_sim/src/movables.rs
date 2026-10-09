@@ -407,6 +407,8 @@ fn step_fly(state: &mut WorldState, mi: usize, world: &dyn WorldQuery, cfg: &Gam
 ///   `m_fMinSpeedToCauseDamage`.
 #[allow(clippy::too_many_arguments)]
 fn impact(state: &mut WorldState, mi: usize, speed: f32, point: Vec3, victim: Option<usize>, by: Option<PlayerId>, cfg: &GameplayConfig, events: &mut Vec<SimEvent>) {
+    // The rigid-body collision notification (the Kismet's `SeqEvent_RigidBodyCollision`).
+    events.push(SimEvent::MovableContact { movable: state.movables[mi].id, speed, point });
     let mc = &cfg.items.movable;
     let noise_ok = speed >= mc.min_impact_speed && state.movables[mi].since_contact >= mc.impact_refire;
     if noise_ok {
