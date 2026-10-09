@@ -69,6 +69,7 @@ fn steps(m: &TMap, loudness: &[f32]) -> Vec<BreakStepDef> {
                 _ => NoiseContext::default(),
             },
             explosion: matches!(s.get("m_pExplosion"), Some(TVal::Obj(o)) if !o.is_empty() && o != "None"),
+            impending_explosion: matches!(s.get("m_bAISendImpendingExplosionStim"), Some(TVal::B(true))),
         })
         .collect()
 }

@@ -61,7 +61,7 @@ listed):
 | behaviour (tweak order) | slot | evaluates | notes |
 |---|---|---|---|
 | TriggerAlarm | 13 Alert | EnemyBusted, ForceRingAlarm, Help, WitnessDeath | chance tweak, see AI.md "Alarm bells" |
-| EscapeExplosion | 16 Preserve | | |
+| EscapeExplosion | 16 Preserve | Explosion, ImpendingExplosion, WitnessMagic | ported (1.4c) |
 | Follow (not interruptible) | 17 Comply | | |
 | GoHome | 10 Resign | TetherRequest | |
 | EnemyUnreachable | 12 Adapt | ReachabilityChange | menace / stare |
@@ -181,6 +181,45 @@ that kind of target (+0x84 player / +0x88 other, bit 0) block it (0x00b01020).
 | 110 Traveled | 0x00b40370 | Psychic (20) at the local player's +0xAE0 | no |
 | 114 WitnessShadowKill | 0x00b3f9e0 | SeeAllyCombat (10) at the point when the relationship test passes | no |
 | 116 DLC06_SmokeBombed, 117 DLC06_WitnessSilentExplosion | 0x00b3fd10, 0x00b3fe40 | AttackedBy_Indirect (15), level Investigate (117: the point pulled toward the NPC to the blast radius) | no (DLC) |
+
+### 1.4c EscapeExplosion and the systemic flee (CONFIRMED statically, ported 2026-10-09)
+
+`DisBehaviorEscapeExplosion` (vtable 0x011274d0, slot Preserve; tweak
+`DisTweaks_AIBehavior_EscapeExplosion`, shipped `TweakBehaviors_EscapeExplosion_Default`:
+clearance 600, discovery angle 45, end timer 5, threat radius 300, threat timer 2, 1 after the
+explosion, surprise chance 1.0; sub-states [0] Flee, [1] GenericAction):
+- Evaluate mask (slot 81, 0x00aee5a0): Explosion (39), ImpendingExplosion (51), WitnessMagic
+  (112). Only ImpendingExplosion has a poster: the AI noise path 0x00c58560 case 8 turns a noise
+  of context ImpendingExplosion into stimulus 51 carrying the noise maker. The only maker of such
+  noises is `DishonoredBreakable`'s tick (0x00a3b0d0): a step with `m_bAISendImpendingExplosionStim`
+  (the whale oil batteries' fuse steps) sets `m_fImpendingExplosionBroadcastTimer` to the class
+  default 1.0 and `m_eImpendingExplosionLoudness` to the step's loudness (0x00a3a5f0); the tick
+  counts it down and at 0 broadcasts and restarts it.
+- Accept (0x00af13b0): not the pawn's own explosive, nearer than `m_fExplosionClearance`.
+- Start (0x00af1660 / 0x00af94a0): timer = `m_fEscapeEndTimer`; inside the `m_fDiscoveryAngle`
+  cone of the pawn's facing (0x00bbfa60) the pawn reacts at once, else turns to it (0x00cba420)
+  and reacts once facing (0x00af95b0). React: with `m_fSurpriseChance` the GenericAction
+  `DisNPCAnim_Panic` (group 0; 0x00af1600 -> 0x00b2ded0(5, 0)), then the flee; else the flee
+  (0x00af1570); both bark `DDH_ESCAPE_IMPENDING_EXPLOSION` (hook 116).
+- Update (0x00af1720): the timer runs down; once `m_fEscapeThreatTimer` has passed, an enemy
+  within `m_fEscapeThreatRadius` (300 uu vertically, 0x00bc0140) ends the behaviour. The
+  explosive going off sets the timer to `m_fEscapeThreatTimerAfterExplosion` (0x00af1970).
+- Flee (`DisAISubStateFlee`, 0x00b3bea0): with `m_bUseFleePoints` the best flee point
+  (`DisNavMeshGoal_BestFleePoint`), else with `m_bUseSystemicFlee` the navmesh search with
+  `DisNavMeshGoal_SafeFromThreat` (0x00d12f40 / 0x00d122d0: per poly in path-cost order, each edge's
+  point nearest the threat's view point, pulled toward the poly centre by the pawn radius, is the
+  answer when its distance is strictly between `m_fSystemicFleeMinEnvellope` and `MaxEnvellope`)
+  and `DisFleeConstraint` (0x00b054c0: each link's cost minus the edge's distance from the threat;
+  links in the `m_fForbiddenAngle` cone toward the threat within `m_fForbiddenRadius` rejected).
+  None found: "No Flee Destination found", `PathingFail` (69).
+  The escape's flee sub-state is systemic only, 500 to 30000 uu. Every shipped panic flee
+  sub-state has `m_bUseSystemicFlee` false (flee points only), so the port's panic fallback "a
+  navmesh point 1500 uu away" has no original counterpart (open: the panic's PathingFail path).
+- Port: `dishonored_world::nav::NavWorld::{search_goal, safe_from_threat}`,
+  `dishonored_ai::Brain::{escape_from, act_escape, flee_destination}` (`Behavior::Escape`),
+  `dishonored_sim::world_actors::BreakableState::impending`, `AiConfig::escape_explosion`. Battery
+  damage (their own TakeDamage 0x00c7d340) is not ported, so no shipped breakable reaches a fuse
+  step yet.
 
 ### 1.4 What turns attention into NoticeBegin / SearchBegin / CombatBegin (superseded by 1.4a)
 

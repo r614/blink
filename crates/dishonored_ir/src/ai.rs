@@ -740,6 +740,63 @@ pub struct PanicConfig {
     pub forbidden_radius: f32,
 }
 
+/// `DisTweaks_AISubState_Flee`: how a behaviour's flee sub-state finds where to run
+/// (`DisAISubStateFlee`, 0x00B3BEA0): a flee point first when `use_flee_points`, else the
+/// systemic search (`dishonored_world::nav::NavWorld::safe_from_threat`) when `use_systemic`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FleeConfig {
+    /// `m_bUseFleePoints`, `m_bUseSystemicFlee`.
+    pub use_flee_points: bool,
+    pub use_systemic: bool,
+    /// `m_fSystemicFleeMinEnvellope` / `m_fSystemicFleeMaxEnvellope`.
+    pub systemic_min: f32,
+    pub systemic_max: f32,
+    /// `m_fForbiddenAngle` (degrees) / `m_fForbiddenRadius`.
+    pub forbidden_angle_deg: f32,
+    pub forbidden_radius: f32,
+}
+
+impl Default for FleeConfig {
+    /// `TweakBehaviors_EscapeExplosion_Default.pDisTweaks_AISubState_Flee` resolved through its
+    /// archetype and class defaults: systemic only, 500 to 30000 uu, no forbidden cone.
+    fn default() -> Self {
+        FleeConfig { use_flee_points: false, use_systemic: true, systemic_min: 500.0, systemic_max: 30000.0, forbidden_angle_deg: 0.0, forbidden_radius: 0.0 }
+    }
+}
+
+/// `DisTweaks_AIBehavior_EscapeExplosion` (`AI_BhvrTwk_EscapeExplosion.TweakBehaviors_EscapeExplosion_Default`,
+/// slot Preserve): what an NPC does about an explosive about to go off (`DisBehaviorEscapeExplosion`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct EscapeExplosionConfig {
+    /// `m_fExplosionClearance`: the explosive must be nearer than this to start the behaviour.
+    pub clearance: f32,
+    /// `m_fDiscoveryAngle` (degrees): the explosive is seen inside this cone of the pawn's facing.
+    pub discovery_angle_deg: f32,
+    /// `m_fEscapeEndTimer`: the behaviour's duration.
+    pub end_timer: f32,
+    /// `m_fEscapeThreatRadius` / `m_fEscapeThreatTimer`: once `threat_timer` has run, an enemy this
+    /// near (and 300 uu vertically) ends the escape.
+    pub threat_radius: f32,
+    pub threat_timer: f32,
+    /// `m_fEscapeThreatTimerAfterExplosion`: the time left once the explosive went off.
+    pub after_explosion: f32,
+    /// `m_fSurpriseChance`: chance of the surprise animation before fleeing.
+    pub surprise_chance: f32,
+    /// The flee sub-state (`m_SubStateTweaks[0]`).
+    pub flee: FleeConfig,
+    /// Length (s) of the surprise (`m_SubStateTweaks[1]`, GenericAction `DisNPCAnim_Panic` group 0
+    /// of the elite guard's animation definitions); 0 unloaded.
+    pub anim_surprise: f32,
+}
+
+impl Default for EscapeExplosionConfig {
+    fn default() -> Self {
+        EscapeExplosionConfig { clearance: 600.0, discovery_angle_deg: 45.0, end_timer: 5.0, threat_radius: 300.0, threat_timer: 2.0, after_explosion: 1.0, surprise_chance: 1.0, flee: FleeConfig::default(), anim_surprise: 0.0 }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CombatAiConfig {
     pub reachable_melee_range: f32,
@@ -1210,6 +1267,9 @@ pub struct AiConfig {
     pub reaction_delay: [f32; 2],
     pub search: SearchConfig,
     pub panic: PanicConfig,
+    /// `DisBehaviorEscapeExplosion`.
+    #[serde(default)]
+    pub escape_explosion: EscapeExplosionConfig,
     pub combat: CombatAiConfig,
     /// `TweaksBehavior_Guard_Default.m_fAttentionSpan`.
     pub guard_attention_span: f32,
@@ -2139,6 +2199,7 @@ impl Default for AiConfig {
                 anim_corpse_check: 5.233333,
             },
             panic: PanicConfig { cower_distance: 350.0, flee_point_claim_radius: 500.0, flee_interception_distance: 300.0, free_flight_time: 2.0, forbidden_angle_deg: 50.0, forbidden_radius: 500.0 },
+            escape_explosion: EscapeExplosionConfig::default(),
             combat: CombatAiConfig {
                 reachable_melee_range: 150.0,
                 reachable_melee_height: 150.0,

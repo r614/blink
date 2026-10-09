@@ -63,7 +63,7 @@ pub mod slots;
 pub mod special;
 pub mod watchtower;
 
-pub use slots::{Behavior, MagicState, QueuedStim, SearchState, SearchSub, Stim, slot};
+pub use slots::{Behavior, EscapePhase, EscapeState, MagicState, QueuedStim, SearchState, SearchSub, Stim, slot};
 use slots::AlarmCause;
 pub use special::SpecialCombat;
 
@@ -713,6 +713,17 @@ fn rng_next(s: &mut u64) -> f32 {
 fn yaw_to(from: Vec3, to: Vec3) -> f32 {
     let d = to - from;
     d.y.atan2(d.x).to_degrees()
+}
+
+/// Whether `at` lies within `angle_deg` of the pawn's facing, horizontally (0x00BBFA60: a point
+/// on the pawn always does).
+fn facing_within(me: &PlayerState, at: Vec3, angle_deg: f32) -> bool {
+    let d = (at - me.position).truncate();
+    if d.length_squared() < 1e-8 {
+        return true;
+    }
+    let fwd = glam::Vec2::new(me.yaw.to_radians().cos(), me.yaw.to_radians().sin());
+    fwd.dot(d.normalize()) >= angle_deg.to_radians().cos()
 }
 
 /// One vision cone of `DisTweaks_Vision`, prepared like the vision component does when the
@@ -2236,6 +2247,13 @@ impl Brain {
                 if *source == self.id || !heard(*position, *radius) {
                     continue;
                 }
+                // An explosive about to go off (the noise path 0x00C58560 case 8 posts
+                // `EAIStimID_ImpendingExplosion` with the explosive) starts the escape; it raises
+                // no attention (0x00B40B70 has no case for it).
+                if *context == NoiseContext::ImpendingExplosion {
+                    self.escape_from(me, *position, *source, ai);
+                    continue;
+                }
                 // The attention goes to the noise's instigator (proxy at the noise), with the
                 // profile of the relationship toward it: measured on the original
                 // (`ai/boyle_hear_shot`, a neutral party guard: player attention 1.0 at the shot,
@@ -2313,6 +2331,7 @@ impl Brain {
                     self.make_hostile(*attacker);
                     self.bump(ai, *attacker, AttentionIncrease { amount: 0.0, to_level: DAL_BUSTED }, at, true, reason::ATTACKED_BY);
                 }
+                SimEvent::Explosion { position, .. } => self.escape_exploded(*position, ai),
                 SimEvent::Death { victim, killer: Some(k), .. } if *k != self.id && ws.player(*k).is_some_and(|p| p.kind == PawnKind::Human) => {
                     let (Some(v), Some(kp)) = (ws.player(*victim), ws.player(*k)) else {
                         continue;
@@ -2829,6 +2848,125 @@ impl Brain {
         self.place(Behavior::TriggerAlarm);
     }
 
+    /// `EAIStimID_ImpendingExplosion` for `DisBehaviorEscapeExplosion` (evaluate 0x00AF13B0: an
+    /// explosive the pawn did not set off, nearer than `m_fExplosionClearance`): the running
+    /// escape takes the new explosive (0x00AF1460), else the behaviour starts with
+    /// `m_fEscapeEndTimer` (0x00AF1660) and decides at once (0x00AF94A0): an explosive inside
+    /// the `m_fDiscoveryAngle` cone of the pawn's facing is seen, and the pawn plays the
+    /// surprise with `m_fSurpriseChance` or flees; one outside it is turned to first.
+    pub(crate) fn escape_from(&mut self, me: &PlayerState, at: Vec3, by: PlayerId, ai: &AiConfig) {
+        let e = &ai.escape_explosion;
+        if at.distance_squared(me.position) >= e.clearance * e.clearance {
+            return;
+        }
+        if let Some(Some(Behavior::Escape(s))) = self.slots.get_mut(slot::PRESERVE as usize) {
+            s.threat = at;
+            s.by = by;
+            return;
+        }
+        let phase = if facing_within(me, at, e.discovery_angle_deg) { self.escape_reaction(ai) } else { EscapePhase::Turning };
+        self.place(Behavior::Escape(EscapeState { threat: at, by, timer: e.end_timer, phase, dest: None, searched: false }));
+    }
+
+    /// The reaction to a seen explosive: the surprise (0x00AF1600: GenericAction
+    /// `DisNPCAnim_Panic`) with `m_fSurpriseChance`, else the flee (0x00AF1570); both bark
+    /// `DDH_ESCAPE_IMPENDING_EXPLOSION`.
+    fn escape_reaction(&mut self, ai: &AiConfig) -> EscapePhase {
+        self.barks.push(("DDH_ESCAPE_IMPENDING_EXPLOSION".into(), None));
+        if rng_next(&mut self.rng) < ai.escape_explosion.surprise_chance {
+            EscapePhase::Surprise(ai.escape_explosion.anim_surprise)
+        } else {
+            EscapePhase::Flee
+        }
+    }
+
+    /// The explosive went off: the escape keeps `m_fEscapeThreatTimerAfterExplosion` (0x00AF1970).
+    fn escape_exploded(&mut self, at: Vec3, ai: &AiConfig) {
+        if let Some(Some(Behavior::Escape(s))) = self.slots.get_mut(slot::PRESERVE as usize) {
+            if s.threat.distance_squared(at) < 100.0 * 100.0 {
+                s.timer = ai.escape_explosion.after_explosion;
+            }
+        }
+    }
+
+    /// `DisBehaviorEscapeExplosion` running (slot Preserve):
+    /// - the update (0x00AF1720): the timer runs down and ends the behaviour at 0; once
+    ///   `m_fEscapeThreatTimer` has passed (time left at most `m_fEscapeEndTimer -
+    ///   m_fEscapeThreatTimer`), an enemy within `m_fEscapeThreatRadius` (and 300 uu vertically,
+    ///   0x00BC0140) ends it too;
+    /// - turning (0x00AF95B0): face the explosive until it is inside the discovery cone, then
+    ///   react as at the start;
+    /// - the surprise runs its animation, then the flee (0x00AF19B0 -> 0x00AF1570);
+    /// - the flee sub-state searches its destination once (0x00B3BEA0: a flee point when the
+    ///   tweak uses them, else the systemic search `NavWorld::safe_from_threat` from the
+    ///   explosive, its view point 50 uu up) and runs there; with none the pawn stands (the
+    ///   original posts `PathingFail`, which this behaviour does not handle).
+    fn act_escape(&mut self, me: &PlayerState, ws: &WorldState, layout: &CrowdLayout, nav: Option<&NavWorld>, ai: &AiConfig, dt: f32) -> PlayerInput {
+        let idle = PlayerInput { yaw: me.yaw, left_hand: LeftHand::Empty, ..Default::default() };
+        let Some(Some(Behavior::Escape(mut s))) = self.slots.get(slot::PRESERVE as usize).cloned() else { return idle };
+        let e = ai.escape_explosion.clone();
+        s.timer = (s.timer - dt).max(0.0);
+        let threatened = s.timer <= e.end_timer - e.threat_timer
+            && ws.players.iter().any(|p| p.alive && p.id != self.id && self.enemies.contains(&p.id) && (p.position.z - me.position.z).abs() < 300.0 && p.position.truncate().distance_squared(me.position.truncate()) < e.threat_radius * e.threat_radius);
+        if s.timer <= 0.0 || threatened {
+            self.complete(slot::PRESERVE);
+            return idle;
+        }
+        let face = PlayerInput { yaw: yaw_to(me.position, s.threat), left_hand: LeftHand::Empty, ..Default::default() };
+        let out = match s.phase {
+            EscapePhase::Turning => {
+                if facing_within(me, s.threat, e.discovery_angle_deg) {
+                    s.phase = self.escape_reaction(ai);
+                }
+                face
+            }
+            EscapePhase::Surprise(t) => {
+                let t = t - dt;
+                s.phase = if t <= 0.0 { EscapePhase::Flee } else { EscapePhase::Surprise(t) };
+                face
+            }
+            EscapePhase::Flee => {
+                if !s.searched {
+                    s.searched = true;
+                    s.dest = self.flee_destination(me, s.threat, &e.flee, layout, nav, ai);
+                }
+                match s.dest {
+                    Some(g) if !Self::reached(me, g, 120.0) && !self.follow.failed => self.move_to(me, nav, g, true, ai),
+                    _ => idle,
+                }
+            }
+        };
+        if let Some(Some(Behavior::Escape(slot_s))) = self.slots.get_mut(slot::PRESERVE as usize) {
+            *slot_s = s;
+        }
+        out
+    }
+
+    /// `DisAISubStateFlee`'s destination (0x00B3BEA0): with `m_bUseFleePoints` the best flee
+    /// point, else (or without one) with `m_bUseSystemicFlee` the systemic search; a pawn
+    /// centre (90 uu above the floor point).
+    fn flee_destination(&mut self, me: &PlayerState, threat: Vec3, f: &dishonored_ir::ai::FleeConfig, layout: &CrowdLayout, nav: Option<&NavWorld>, ai: &AiConfig) -> Option<Vec3> {
+        if f.use_flee_points && !layout.flee_points.is_empty() {
+            if let Some(p) = self.pick_flee_point(me, threat, layout, nav, ai) {
+                return Some(p);
+            }
+        }
+        if !f.use_systemic {
+            return None;
+        }
+        let q = dishonored_world::nav::SafeFromThreat {
+            threat_view: threat + Vec3::Z * 50.0,
+            flee_from: threat,
+            min: f.systemic_min,
+            max: f.systemic_max,
+            pawn_radius: dishonored_world::nav::AGENT_RADIUS,
+            forbidden_radius: f.forbidden_radius,
+            forbidden_angle_deg: f.forbidden_angle_deg,
+            max_visits: 2048,
+        };
+        nav?.safe_from_threat(me.position, &q).map(|p| p + Vec3::Z * 90.0)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn act_inner(&mut self, me: &PlayerState, ws: &WorldState, ctx: &mut Ctx, world: &dyn WorldQuery, ai: &AiConfig, dt: f32) -> PlayerInput {
         let layout = ctx.layout;
@@ -2878,6 +3016,7 @@ impl Brain {
                 slot::ALERT => self.act_alarm(me, ws, ctx, nav, ai, dt),
                 slot::AWE => self.act_magic(me, ws, ai, dt),
                 slot::ESCAPE => self.act_panic(me, ws, layout, nav, ai),
+                slot::PRESERVE => self.act_escape(me, ws, layout, nav, ai, dt),
                 _ => idle,
             };
         }
@@ -4361,6 +4500,80 @@ mod tests {
         assert!(c.brains[0].enemies.is_empty() && c.brains[0].state != BrainState::Combat);
         // The pain bark fires.
         assert!(c.events.is_empty() || c.events.iter().all(|e| !matches!(e, AiEvent::AlarmRang { .. })));
+    }
+
+    /// A flat world with a navmesh strip of 200 uu squares along x from -1000 to 1000.
+    fn strip_world() -> CollisionWorld {
+        use dishonored_ir::nav::{NavData, NavEdge, NavEdgeClass, NavEdgeType, NavMesh, NavPoly, NavPylon};
+        let v = |x: f32, y: f32| Vec3::new(x, y, 0.0);
+        let n = 10u16;
+        let verts: Vec<Vec3> = (0..=n).flat_map(|i| [v(-1000.0 + i as f32 * 200.0, 0.0), v(-1000.0 + i as f32 * 200.0, 200.0)]).collect();
+        let poly = |i: u16| {
+            let cx = -900.0 + i as f32 * 200.0;
+            NavPoly { verts: vec![2 * i, 2 * i + 2, 2 * i + 3, 2 * i + 1], edges: vec![], center: Vec3::new(cx, 100.0, 0.0), normal: Vec3::Z, min: Vec3::new(cx - 100.0, 0.0, 0.0), max: Vec3::new(cx + 100.0, 200.0, 0.0), height: 200.0 }
+        };
+        let edge = |i: u16| NavEdge { class: NavEdgeClass::Base, kind: NavEdgeType::Normal, v0: 2 * i + 2, v1: 2 * i + 3, poly0: i, poly1: i + 1, length: 200.0, effective_length: 200.0, center: Vec3::ZERO, path_object: None };
+        let m = NavMesh { source: "strip".into(), version: (28, 28), verts, polys: (0..n).map(poly).collect(), edges: (0..n - 1).map(edge).collect(), min: v(-1000.0, 0.0), max: v(1000.0, 200.0) };
+        let data = NavData { pylons: vec![NavPylon { name: "s".into(), package: "t".into(), object_ref: 1, mesh: m, ..Default::default() }], path_objects: Vec::new() };
+        let mut w = flat_world();
+        w.nav = Some(std::sync::Arc::new(dishonored_world::nav::NavWorld::from_data(&data)));
+        w
+    }
+
+    fn fuse_noise(at: Vec3, by: PlayerId) -> SimEvent {
+        SimEvent::Sound { position: at, radius: 1500.0, category: SoundCategory::Breakable, context: NoiseContext::ImpendingExplosion, source: by }
+    }
+
+    #[test]
+    fn a_seen_explosive_surprises_then_the_guard_flees_beyond_the_envelope() {
+        let mut ai = AiConfig::default();
+        ai.escape_explosion.anim_surprise = 0.5;
+        let w = strip_world();
+        let mut c = Crowd { ai: ai.clone(), ..Default::default() };
+        // The guard faces +x; the battery fuses 300 uu ahead of him.
+        let guard = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(0.0, 100.0, 90.0), 0.0);
+        let player = pawn(1, PawnKind::Human, Vec3::new(-5000.0, 5000.0, 90.0), 0.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![player.clone(), guard.clone()];
+        c.brains.push(Brain::new(guard.id, PawnKind::Guard, guard.position, 1));
+        let threat = Vec3::new(300.0, 100.0, 0.0);
+        c.think(&ws, &[fuse_noise(threat, player.id)], &w, 1.0 / 60.0);
+        let b = &c.brains[0];
+        assert!(matches!(b.behavior(slot::PRESERVE), Some(Behavior::Escape(s)) if matches!(s.phase, EscapePhase::Surprise(_))), "{:?}", b.behavior(slot::PRESERVE));
+        assert_eq!(b.state, BrainState::Cower);
+        // The surprise plays, then the flee runs to the first navmesh point beyond 500 uu.
+        for _ in 0..40 {
+            c.think(&ws, &[], &w, 1.0 / 60.0);
+        }
+        let Some(Behavior::Escape(s)) = c.brains[0].behavior(slot::PRESERVE).cloned() else { panic!("escape over too early") };
+        assert_eq!(s.phase, EscapePhase::Flee);
+        let dest = s.dest.expect("a systemic flee destination");
+        assert!(dest.x < 0.0 && dest.distance(threat + Vec3::Z * 50.0) > 500.0, "{dest:?}");
+        assert_eq!(c.brains[0].state, BrainState::Flee);
+        // It ends with `m_fEscapeEndTimer` (5 s).
+        for _ in 0..300 {
+            c.think(&ws, &[], &w, 1.0 / 60.0);
+        }
+        assert!(c.brains[0].behavior(slot::PRESERVE).is_none());
+    }
+
+    #[test]
+    fn an_explosive_behind_is_turned_to_and_a_far_or_own_one_is_ignored() {
+        let ai = AiConfig::default();
+        let w = strip_world();
+        let mut c = Crowd { ai: ai.clone(), ..Default::default() };
+        let guard = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(0.0, 100.0, 90.0), 0.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![guard.clone()];
+        c.brains.push(Brain::new(guard.id, PawnKind::Guard, guard.position, 1));
+        // Beyond `m_fExplosionClearance` (600 uu), or set off by the guard himself: nothing.
+        c.think(&ws, &[fuse_noise(Vec3::new(700.0, 100.0, 90.0), 1)], &w, 1.0 / 60.0);
+        c.think(&ws, &[fuse_noise(Vec3::new(200.0, 100.0, 90.0), guard.id)], &w, 1.0 / 60.0);
+        assert!(c.brains[0].behavior(slot::PRESERVE).is_none());
+        // Behind him: he turns to it first.
+        c.think(&ws, &[fuse_noise(Vec3::new(-300.0, 100.0, 90.0), 1)], &w, 1.0 / 60.0);
+        assert!(matches!(c.brains[0].behavior(slot::PRESERVE), Some(Behavior::Escape(s)) if s.phase == EscapePhase::Turning));
+        assert_eq!(c.brains[0].state, BrainState::Notice);
     }
 
     #[test]

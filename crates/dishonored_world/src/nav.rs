@@ -214,6 +214,49 @@ fn closest_on_segment(p: Vec2, a: Vec2, b: Vec2) -> (Vec2, f32) {
     (a + ab * t, t)
 }
 
+/// Closest point on segment `a`-`b` to `p` in 3D (0x0040F270).
+fn closest_on_segment3(p: Vec3, a: Vec3, b: Vec3) -> (Vec3, f32) {
+    let ab = b - a;
+    let t = if ab.length_squared() > 1e-6 { ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+    (a + ab * t, t)
+}
+
+/// Open-list entry of the cheapest-first searches.
+#[derive(PartialEq)]
+struct MinCost(f32, u32);
+impl Eq for MinCost {}
+impl Ord for MinCost {
+    fn cmp(&self, o: &Self) -> Ordering {
+        o.0.total_cmp(&self.0).then(o.1.cmp(&self.1))
+    }
+}
+impl PartialOrd for MinCost {
+    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
+        Some(self.cmp(o))
+    }
+}
+
+/// The parameters of [`NavWorld::safe_from_threat`]: `DisNavMeshGoal_SafeFromThreat` and
+/// `DisFleeConstraint` as `DisAISubStateFlee` sets them (0x00B331F0 / 0x00B33350).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SafeFromThreat {
+    /// `m_vCachedThreatViewPoint` (0x00D12F40): a pawn's eyes, another actor's location 50 uu
+    /// up.
+    pub threat_view: Vec3,
+    /// `DisFleeConstraint.m_vFleeFromLoc`: the threat's location.
+    pub flee_from: Vec3,
+    /// `m_fSystemicFleeMinEnvellope` / `m_fSystemicFleeMaxEnvellope`.
+    pub min: f32,
+    pub max: f32,
+    /// The pathing pawn's collision radius.
+    pub pawn_radius: f32,
+    /// `m_fForbiddenRadius` / `m_fForbiddenAngle` (degrees).
+    pub forbidden_radius: f32,
+    pub forbidden_angle_deg: f32,
+    /// `MaxPathVisits` (the goal's class default 2048).
+    pub max_visits: usize,
+}
+
 impl NavWorld {
     pub fn from_data(data: &NavData) -> NavWorld {
         let mut w = NavWorld::default();
@@ -610,6 +653,104 @@ impl NavWorld {
         None
     }
 
+    /// A path search with a goal evaluator (UE3 `UNavigationHandle` path search with a
+    /// `NavMeshGoal_*` evaluator and `NavMeshPathConstraint`s): polys are expanded from the one
+    /// under `start` cheapest first, each entered through its link's edge centre as in
+    /// [`NavWorld::corridor`]; `step(entry, link, edge centre, cost)` returns the link's cost
+    /// after the constraints, or None to reject it. The first poly after the start for which
+    /// `goal` returns a point ends the search; at most `max_visits` polys are expanded
+    /// (`MaxPathVisits`). Returns that poly and the point.
+    pub fn search_goal(&self, start: Vec3, opts: &PathOpts, max_visits: usize, mut step: impl FnMut(Vec3, &NavLink, Vec3, f32) -> Option<f32>, mut goal: impl FnMut(u32) -> Option<Vec3>) -> Option<(u32, Vec3)> {
+        let (sp, s) = self.closest_point(start, 200.0)?;
+        let n = self.polys.len();
+        let mut g = vec![f32::INFINITY; n];
+        let mut pos = vec![Vec3::ZERO; n];
+        let mut closed = vec![false; n];
+        let mut open = BinaryHeap::new();
+        g[sp as usize] = 0.0;
+        pos[sp as usize] = s;
+        open.push(MinCost(0.0, sp));
+        let mut visits = 0;
+        while let Some(MinCost(_, u)) = open.pop() {
+            let ui = u as usize;
+            if closed[ui] {
+                continue;
+            }
+            closed[ui] = true;
+            if u != sp {
+                if let Some(p) = goal(u) {
+                    return Some((u, p));
+                }
+            }
+            visits += 1;
+            if visits > max_visits {
+                return None;
+            }
+            for l in &self.links[ui] {
+                let v = l.to as usize;
+                if closed[v] || !self.link_open(l, opts) {
+                    continue;
+                }
+                let mid = (l.a + l.b) * 0.5;
+                let base = self.pylon_cost(u, l).unwrap_or_else(|| pos[ui].distance(mid) + l.extra);
+                let Some(c) = step(pos[ui], l, mid, base) else { continue };
+                let ng = g[ui] + c;
+                if ng < g[v] {
+                    g[v] = ng;
+                    pos[v] = mid;
+                    open.push(MinCost(ng, l.to));
+                }
+            }
+        }
+        None
+    }
+
+    /// The systemic flee destination (`DisAISubStateFlee` mode 2, 0x00B3BEA0): the path search
+    /// with `DisNavMeshGoal_SafeFromThreat` (0x00D12F40 / 0x00D122D0) and `DisFleeConstraint`
+    /// (0x00B054C0). Returns a floor point.
+    ///
+    /// - The goal tests each poly's edges in vertex order: the point of the edge closest to the
+    ///   threat's view point (0x0040F270), moved toward the poly's centre by the pawn's radius
+    ///   (to the centre when nearer), is the answer when its distance from the view point is
+    ///   strictly between `min` and `max` (`m_fMinDistance` / `m_fMaxDistance`, the
+    ///   sub-state's systemic flee envelopes; 0x00BC01A0). The start poly is never the goal.
+    ///   (`m_bCheckVisibility`, off in every shipped goal, is not ported.)
+    /// - The constraint lowers each link's cost by the distance from the threat to its edge
+    ///   (0x00672A00, truncated to an int), so the search runs away from the threat, and rejects
+    ///   a link whose edge centre lies within `forbidden_radius` of the threat in the cone of
+    ///   `forbidden_angle_deg` from the start toward the threat.
+    pub fn safe_from_threat(&self, start: Vec3, flee: &SafeFromThreat) -> Option<Vec3> {
+        let step = |_from: Vec3, l: &NavLink, mid: Vec3, cost: f32| {
+            let (c, _) = closest_on_segment3(flee.flee_from, l.a, l.b);
+            let cost = cost - c.distance(flee.flee_from).trunc();
+            if flee.forbidden_radius > 0.0 && mid.distance_squared(flee.flee_from) < flee.forbidden_radius * flee.forbidden_radius {
+                let to_edge = (mid - start).normalize_or_zero();
+                let to_threat = (flee.flee_from - start).normalize_or_zero();
+                if to_edge.dot(to_threat) >= flee.forbidden_angle_deg.to_radians().cos() {
+                    return None;
+                }
+            }
+            Some(cost)
+        };
+        let goal = |i: u32| {
+            let p = &self.polys[i as usize];
+            let n = p.verts.len();
+            for k in 0..n {
+                let a = self.verts[p.verts[k] as usize];
+                let b = self.verts[p.verts[(k + 1) % n] as usize];
+                let (c, _) = closest_on_segment3(flee.threat_view, a, b);
+                let to_centre = Vec3::new(p.center.x - c.x, p.center.y - c.y, 0.0);
+                let cand = if flee.pawn_radius * flee.pawn_radius < to_centre.length_squared() { c + to_centre.normalize() * flee.pawn_radius } else { p.center };
+                let d2 = cand.distance_squared(flee.threat_view);
+                if flee.min * flee.min < d2 && d2 < flee.max * flee.max {
+                    return Some(cand);
+                }
+            }
+            None
+        };
+        self.search_goal(start, &PathOpts::default(), flee.max_visits, step, goal).map(|(_, p)| p)
+    }
+
     /// Waypoints (floor points) from `start` to `goal`, excluding the start. `None` when either
     /// end is off the mesh or no route exists.
     pub fn find_path(&self, start: Vec3, goal: Vec3, opts: &PathOpts) -> Option<Vec<Vec3>> {
@@ -819,6 +960,43 @@ mod tests {
         // One-way: poly 1 owns the edge to poly 2.
         assert!(w.find_path(Vec3::new(50.0, 50.0, 0.0), Vec3::new(550.0, 100.0, 0.0), &PathOpts::default()).is_some());
         assert!(w.find_path(Vec3::new(550.0, 100.0, 0.0), Vec3::new(50.0, 50.0, 0.0), &PathOpts::default()).is_none());
+    }
+
+    /// Five 200 uu squares in a row along x (0..1000), each sharing an edge with the next.
+    fn strip() -> NavData {
+        let v = |x: f32, y: f32| Vec3::new(x, y, 0.0);
+        let verts: Vec<Vec3> = (0..6).flat_map(|i| [v(i as f32 * 200.0, 0.0), v(i as f32 * 200.0, 200.0)]).collect();
+        let poly = |i: u16| {
+            let cx = i as f32 * 200.0 + 100.0;
+            NavPoly { verts: vec![2 * i, 2 * i + 2, 2 * i + 3, 2 * i + 1], edges: vec![], center: Vec3::new(cx, 100.0, 0.0), normal: Vec3::Z, min: Vec3::new(cx - 100.0, 0.0, 0.0), max: Vec3::new(cx + 100.0, 200.0, 0.0), height: 200.0 }
+        };
+        let edge = |i: u16| NavEdge { class: NavEdgeClass::Base, kind: NavEdgeType::Normal, v0: 2 * i + 2, v1: 2 * i + 3, poly0: i, poly1: i + 1, length: 200.0, effective_length: 200.0, center: Vec3::ZERO, path_object: None };
+        let m = NavMesh { source: "strip".into(), version: (28, 28), verts, polys: (0..5).map(poly).collect(), edges: (0..4).map(edge).collect(), min: Vec3::ZERO, max: Vec3::new(1000.0, 200.0, 0.0) };
+        NavData { pylons: vec![NavPylon { name: "s".into(), package: "t".into(), object_ref: 1, mesh: m, ..Default::default() }], path_objects: Vec::new() }
+    }
+
+    #[test]
+    fn safe_from_threat_takes_the_first_edge_point_beyond_the_envelope() {
+        let w = NavWorld::from_data(&strip());
+        let threat = Vec3::new(0.0, 100.0, 0.0);
+        let mut f = SafeFromThreat { threat_view: threat + Vec3::Z * 50.0, flee_from: threat, min: 500.0, max: 30000.0, pawn_radius: 31.0, forbidden_radius: 0.0, forbidden_angle_deg: 0.0, max_visits: 2048 };
+        let p = w.safe_from_threat(Vec3::new(100.0, 100.0, 90.0), &f).unwrap();
+        // Poly 2's far edge (x 600), pulled 31 uu toward its centre: the first edge point of the
+        // first poly beyond 500 uu.
+        assert!((p - Vec3::new(569.0, 100.0, 0.0)).length() < 0.5, "{p:?}");
+        f.min = 5000.0;
+        assert_eq!(w.safe_from_threat(Vec3::new(100.0, 100.0, 90.0), &f), None);
+    }
+
+    #[test]
+    fn the_flee_constraint_forbids_running_at_the_threat() {
+        let w = NavWorld::from_data(&strip());
+        // Fleeing from a threat on the right, from the middle: the cone toward it is closed, so
+        // the answer lies to the left.
+        let threat = Vec3::new(900.0, 100.0, 0.0);
+        let f = SafeFromThreat { threat_view: threat, flee_from: threat, min: 450.0, max: 30000.0, pawn_radius: 31.0, forbidden_radius: 2000.0, forbidden_angle_deg: 60.0, max_visits: 2048 };
+        let p = w.safe_from_threat(Vec3::new(500.0, 100.0, 90.0), &f).unwrap();
+        assert!(p.x < 500.0, "{p:?}");
     }
 
     #[test]

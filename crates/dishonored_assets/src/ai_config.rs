@@ -266,6 +266,34 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
         out.panic.forbidden_angle_deg = get_f32(&m, "m_fForbiddenAngle").unwrap_or(out.panic.forbidden_angle_deg);
         out.panic.forbidden_radius = get_f32(&m, "m_fForbiddenRadius").unwrap_or(out.panic.forbidden_radius);
     }
+    // `DisBehaviorEscapeExplosion` (slot Preserve): unset values keep the archetype's and class
+    // defaults the config defaults hold.
+    const ESCAPE: &str = "AI_BhvrTwk_EscapeExplosion.TweakBehaviors_EscapeExplosion_Default";
+    if let Some(m) = beh(ESCAPE) {
+        let e = &mut out.escape_explosion;
+        e.clearance = get_f32(&m, "m_fExplosionClearance").unwrap_or(e.clearance);
+        e.discovery_angle_deg = get_f32(&m, "m_fDiscoveryAngle").unwrap_or(e.discovery_angle_deg);
+        e.end_timer = get_f32(&m, "m_fEscapeEndTimer").unwrap_or(e.end_timer);
+        e.threat_radius = get_f32(&m, "m_fEscapeThreatRadius").unwrap_or(e.threat_radius);
+        e.threat_timer = get_f32(&m, "m_fEscapeThreatTimer").unwrap_or(e.threat_timer);
+        e.after_explosion = get_f32(&m, "m_fEscapeThreatTimerAfterExplosion").unwrap_or(e.after_explosion);
+        e.surprise_chance = get_f32(&m, "m_fSurpriseChance").unwrap_or(e.surprise_chance);
+        prov.insert("ai.escape_explosion".into(), ESCAPE.into());
+    }
+    if let Some(m) = beh(&format!("{ESCAPE}.pDisTweaks_AISubState_Flee")) {
+        let f = &mut out.escape_explosion.flee;
+        let flag = |k: &str, d: bool| match m.get(k) {
+            Some(TVal::B(b)) => *b,
+            _ => d,
+        };
+        f.use_flee_points = flag("m_bUseFleePoints", f.use_flee_points);
+        f.use_systemic = flag("m_bUseSystemicFlee", f.use_systemic);
+        f.systemic_min = get_f32(&m, "m_fSystemicFleeMinEnvellope").unwrap_or(f.systemic_min);
+        f.systemic_max = get_f32(&m, "m_fSystemicFleeMaxEnvellope").unwrap_or(f.systemic_max);
+        f.forbidden_angle_deg = get_f32(&m, "m_fForbiddenAngle").unwrap_or(f.forbidden_angle_deg);
+        f.forbidden_radius = get_f32(&m, "m_fForbiddenRadius").unwrap_or(f.forbidden_radius);
+        prov.insert("ai.escape_explosion.flee".into(), format!("{ESCAPE}.pDisTweaks_AISubState_Flee"));
+    }
     if let Some(m) = beh("AI_BehaviorTweaks_TriggerAlarm.TweaksBehavior_TriggerAlarm_Party") {
         out.alarm_companion_range = get_f32(&m, "m_fCompanionRange").unwrap_or(out.alarm_companion_range);
         out.alarm_fight_radius = get_f32(&m, "m_fFightRadius").unwrap_or(out.alarm_fight_radius);
@@ -599,6 +627,24 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
         out.anim_magic_lost_target = a;
     }
     prov.insert("ai.search.anim_lengths".into(), format!("{GUARD_SWORD_SET} SequenceLength / RateScale: SearchLostTarget {} s, CorpseCheck {} s, MagicLostTarget {} s", out.search.anim_lost_target, out.search.anim_corpse_check, out.anim_magic_lost_target));
+    // EscapeExplosion's surprise: its GenericAction plays `DisNPCAnim_Panic` group 0 (0x00AF1600 ->
+    // 0x00B2DED0(5, 0)), its steps in order (a looped step plays once: the action ends with it).
+    let pkgs: Vec<String> = NPC_ANIM_PACKAGES.iter().map(|s| s.to_string()).collect();
+    if let Ok(defs) = crate::npc_anim::load_anim_defs(content, &pkgs, "DisNPCAnimDefinitions_EliteGuard") {
+        const SETS: [&str; 2] = ["Npc_EliteGuard_Generic_as.Npc_EliteGuard_Generic_as", GUARD_SWORD_SET];
+        let len = |name: &str| -> Option<(String, f32)> {
+            [name.to_string(), format!("Generic_{name}"), format!("Sword_{name}")]
+                .into_iter()
+                .find_map(|n| NPC_ANIM_PACKAGES.iter().find_map(|p| SETS.iter().find_map(|s| crate::npc_anim::sequence_play_length(content, p, s, &n).map(|v| (n.clone(), v)))))
+        };
+        if let Some(group) = defs.chain(dishonored_ir::npc_anim::NpcAnim::Panic).and_then(|c| c.groups.first()) {
+            let steps: Vec<(String, f32)> = group.steps.iter().filter_map(|s| s.names.first().and_then(|n| len(n))).collect();
+            if !steps.is_empty() {
+                out.escape_explosion.anim_surprise = steps.iter().map(|s| s.1).sum();
+                prov.insert("ai.escape_explosion.anim_surprise".into(), format!("DisNPCAnimDefinitions_EliteGuard Panic group 0: {steps:?}"));
+            }
+        }
+    }
     let crumbs = "DishonoredGame.DishonoredSearchCrumbsComponent";
     let s = &mut out.search;
     s.crumbs = ai.get(crumbs, "m_iNumSearchCrumbs").and_then(|v| v.parse().ok()).unwrap_or(s.crumbs);

@@ -134,6 +134,34 @@ pub struct MagicState {
     pub anim: Option<f32>,
 }
 
+/// The part of `DisBehaviorEscapeExplosion` running.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum EscapePhase {
+    /// Turning toward an explosive outside the discovery cone (0x00AF94A0 -> 0x00CBA420).
+    Turning,
+    /// The surprise (GenericAction `DisNPCAnim_Panic`, 0x00AF1600) with its time left.
+    Surprise(f32),
+    /// The flee sub-state (0x00AF1570) toward `EscapeState::dest`.
+    Flee,
+}
+
+/// State of a `DisBehaviorEscapeExplosion` (`m_pThreat` +0xb0, the escape timer +0xb4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EscapeState {
+    /// Where the explosive is, and who set it off (the noise's maker).
+    pub threat: Vec3,
+    pub by: PlayerId,
+    /// The time left (`m_fEscapeEndTimer` at the start, `m_fEscapeThreatTimerAfterExplosion` once
+    /// the explosive went off).
+    pub timer: f32,
+    pub phase: EscapePhase,
+    /// The flee destination (`DisAISubStateFlee`, 0x00B3BEA0); None before the flee or when none
+    /// was found.
+    pub dest: Option<Vec3>,
+    /// The destination search ran.
+    pub searched: bool,
+}
+
 /// A behaviour occupying a slot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Behavior {
@@ -156,6 +184,8 @@ pub enum Behavior {
     /// `DisBehaviorInteract` for an animated distraction (slot Distraction, the distractor's
     /// animate message 0x1b): walk to the distractor, then its soiree or animation.
     Distraction(crate::distraction::DistractionState),
+    /// `DisBehaviorEscapeExplosion` (slot Preserve, `ImpendingExplosion`).
+    Escape(EscapeState),
 }
 
 impl Behavior {
@@ -170,6 +200,7 @@ impl Behavior {
             Behavior::Magic(_) => slot::AWE,
             Behavior::Panic { .. } => slot::ESCAPE,
             Behavior::Distraction(_) => slot::DISTRACTION,
+            Behavior::Escape(_) => slot::PRESERVE,
         }
     }
 }
@@ -247,6 +278,12 @@ impl Brain {
                     BrainState::Flee
                 }
             }
+            // The escape faces the explosive, plays the panic animation (the cower's), then runs.
+            Some(Behavior::Escape(e)) => match e.phase {
+                EscapePhase::Turning => BrainState::Notice,
+                EscapePhase::Surprise(_) => BrainState::Cower,
+                EscapePhase::Flee => if e.dest.is_some() { BrainState::Flee } else { BrainState::Notice },
+            },
             // The interact behaviour walks (going to the distractor) or stands.
             Some(Behavior::Distraction(s)) => {
                 if s.phase == crate::distraction::AnimState::GoingTo {
@@ -505,6 +542,7 @@ impl Brain {
             Behavior::TriggerAlarm => Some("DisBehaviorTriggerAlarm"),
             Behavior::Magic(_) => Some("DisBehaviorMagicResponse"),
             Behavior::Panic { .. } => Some("DisBehaviorPanic"),
+            Behavior::Escape(_) => Some("DisBehaviorEscapeExplosion"),
             // The animated distraction is `DisBehaviorInteract`; a soiree's behaviour class
             // (`DisBehaviorSoiree`) is not decoded, so no class is claimed for it.
             Behavior::Distraction(s) => {

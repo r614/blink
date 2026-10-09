@@ -213,7 +213,10 @@ impl TweakDb {
             if arch == ObjRef::Null || pkg.obj_name(arch).starts_with("Default__") {
                 break;
             }
-            let Some(next) = self.objects.get(&pkg.obj_path(arch).to_ascii_lowercase()).copied() else { break };
+            // An import's path starts with its package (`DishonoredGame.Default__X.pSub`, a
+            // class default's template subobject); the index holds exports without it.
+            let p = pkg.obj_path(arch).to_ascii_lowercase();
+            let Some(next) = self.objects.get(&p).or_else(|| p.split_once('.').and_then(|(_, rest)| self.objects.get(rest))).copied() else { break };
             if chain.contains(&next) {
                 break;
             }

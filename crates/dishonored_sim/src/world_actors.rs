@@ -60,7 +60,15 @@ pub struct BreakableState {
     pub wanted: Option<usize>,
     /// The last damage's instigator (+0x15c), the maker of the steps' AI noises.
     pub instigator: Option<PlayerId>,
+    /// `m_fImpendingExplosionBroadcastTimer` / `m_eImpendingExplosionLoudness` (as a distance):
+    /// running after a step with `m_bAISendImpendingExplosionStim`.
+    pub impending_timer: f32,
+    pub impending_radius: f32,
 }
+
+/// `Default__DishonoredBreakable.m_fImpendingExplosionBroadcastTimer`: the period of the
+/// impending explosion broadcast.
+pub const IMPENDING_BROADCAST: f32 = 1.0;
 
 /// Runtime state of a battery (`m_CurrentCharges`, `m_pPlug`, `m_bRecharging`, `m_bDamaged`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -146,6 +154,12 @@ impl BreakableState {
             applied = Some(w);
             self.next_step = w + 1;
             self.step_timer = def.steps[w].step_timer;
+            // The step starts the impending explosion broadcast at the class default period with
+            // the step's loudness (0x00A3A5F0).
+            if def.steps[w].impending_explosion {
+                self.impending_timer = IMPENDING_BROADCAST;
+                self.impending_radius = def.steps[w].noise_radius;
+            }
         }
         if self.step_timer > 0.0 {
             self.step_timer -= dt;
@@ -156,6 +170,26 @@ impl BreakableState {
             }
         }
         applied
+    }
+
+    /// The impending explosion broadcast (the end of 0x00a3b0d0): the timer counts down (floored
+    /// at 0); at 0 an AI noise of context ImpendingExplosion goes out from the breakable with
+    /// the step's loudness, its instigator the maker, and the timer restarts at the class
+    /// default. It ends with the breakable (its last step).
+    pub fn impending(&mut self, def: &BreakableDef, dt: f32) -> bool {
+        if self.impending_timer <= 0.0 {
+            return false;
+        }
+        if self.next_step >= def.steps.len() && self.step_timer <= 0.0 && self.wanted.is_none_or(|w| w < self.next_step) {
+            self.impending_timer = 0.0;
+            return false;
+        }
+        self.impending_timer = (self.impending_timer - dt).max(0.0);
+        if self.impending_timer == 0.0 {
+            self.impending_timer = IMPENDING_BROADCAST;
+            return true;
+        }
+        false
     }
 
     /// `DisSeqEvent_BreakableBroken` output of a step (0x00a3a5f0: `Num(m_Steps) - step - 1`).
@@ -334,11 +368,16 @@ impl WorldActorsState {
             if d.battery.is_some() {
                 continue;
             }
-            let Some(step) = self.breakables[i].tick(d, dt) else { continue };
-            out.push(WorldEvent::Broken { breakable: i, output: BreakableState::output(d, step) });
-            let s = &d.steps[step];
-            if s.sound && s.noise_radius > 0.0 {
-                out.push(WorldEvent::Noise(SimEvent::Sound { position: d.position, radius: s.noise_radius, category: SoundCategory::Breakable, context: s.noise_context, source: self.breakables[i].instigator.unwrap_or(0) }));
+            if let Some(step) = self.breakables[i].tick(d, dt) {
+                out.push(WorldEvent::Broken { breakable: i, output: BreakableState::output(d, step) });
+                let s = &d.steps[step];
+                if s.sound && s.noise_radius > 0.0 {
+                    out.push(WorldEvent::Noise(SimEvent::Sound { position: d.position, radius: s.noise_radius, category: SoundCategory::Breakable, context: s.noise_context, source: self.breakables[i].instigator.unwrap_or(0) }));
+                }
+            }
+            if self.breakables[i].impending(d, dt) {
+                let radius = self.breakables[i].impending_radius;
+                out.push(WorldEvent::Noise(SimEvent::Sound { position: d.position, radius, category: SoundCategory::Breakable, context: crate::events::NoiseContext::ImpendingExplosion, source: self.breakables[i].instigator.unwrap_or(0) }));
             }
         }
         out
@@ -412,6 +451,29 @@ mod tests {
         assert_eq!(s.tick(&d, 0.5), None);
         assert_eq!((s.cur_health, s.wanted), (0, Some(1)));
         assert_eq!(s.tick(&d, 0.5), Some(1));
+    }
+
+    #[test]
+    fn a_fuse_step_broadcasts_the_impending_explosion_every_second_until_the_last_step() {
+        // A fuse step (2.5 s, the flag, a loudness of 1500 uu) then the blast.
+        let mut d = plank();
+        d.steps[0].step_timer = 2.5;
+        d.steps[0].impending_explosion = true;
+        d.steps[0].noise_radius = 1500.0;
+        let mut s = BreakableState::new(&d);
+        s.take_damage(&d, 10, "", Some(3));
+        let dt = 0.25;
+        let mut broadcasts = Vec::new();
+        for k in 0..16 {
+            s.tick(&d, dt);
+            if s.impending(&d, dt) {
+                broadcasts.push(k);
+            }
+        }
+        // First at 1 s (tick 3), then every second, until the blast step at 2.5 s ends it.
+        assert_eq!(broadcasts, vec![3, 7], "{broadcasts:?}");
+        assert_eq!(s.next_step, 2);
+        assert_eq!(s.impending_radius, 1500.0);
     }
 
     fn battery_defs(allow_empty: bool) -> WorldActors {

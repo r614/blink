@@ -23,6 +23,10 @@ pub struct BreakStepDef {
     pub noise_context: NoiseContext,
     /// `m_pExplosion` is set.
     pub explosion: bool,
+    /// `m_bAISendImpendingExplosionStim`: reaching the step starts the breakable's impending
+    /// explosion broadcast (0x00A3A5F0; set on the whale oil batteries' fuse steps).
+    #[serde(default)]
+    pub impending_explosion: bool,
 }
 
 /// `DisTweaks_WhaleOilBattery` (the battery-specific part).

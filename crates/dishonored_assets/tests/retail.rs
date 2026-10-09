@@ -142,6 +142,12 @@ fn ai_config_from_tweaks_and_ini() {
     assert_eq!(ai.search, d.search);
     assert_eq!(ai.panic, d.panic);
     assert_eq!(ai.combat, d.combat);
+    // The escape's tweak and flee sub-state match the documented resolved values; the surprise
+    // (the guard's Panic animation group 0) has a length.
+    let e = &ai.escape_explosion;
+    assert_eq!((e.clearance, e.discovery_angle_deg, e.end_timer, e.threat_radius, e.threat_timer, e.after_explosion, e.surprise_chance), (600.0, 45.0, 5.0, 300.0, 2.0, 1.0, 1.0));
+    assert_eq!(e.flee, d.escape_explosion.flee);
+    assert!(e.anim_surprise > 0.0, "{:?}", ai.provenance.get("ai.escape_explosion.anim_surprise"));
     assert!(ai.provenance.get("ai.vision").is_some_and(|s| s.contains("Twk_Vision_Default")));
     // Rat swarms: the random swarm and Devouring Swarm level 1 tweaks.
     assert_eq!((ai.rats.min_rat_count_per_attack_group, ai.rats.pawn_detection_radius, ai.rats.damage_per_bite), (12, 500.0, 0.4));

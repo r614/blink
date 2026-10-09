@@ -106,7 +106,8 @@ pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
     // v21: the built-in archetypes' HealthMax (ai.archetype_health_max).
     // v20: the explosions' `m_pRadialDamageType` (breakables' immune / instant-break lists).
     // v24: v23's vision regions / LOS period / ambient head loops (stealth.md section 17) plus `items.movable` (carrying props) and `ai.noise.prop_contacts / environment`.
-    let path = cache_dir().join("gameplay_config.v24.json");
+    // v25: ai.escape_explosion (DisBehaviorEscapeExplosion, its flee sub-state, the surprise length).
+    let path = cache_dir().join("gameplay_config.v25.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);
@@ -472,8 +473,8 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         }
     };
     // Breakables, whale oil batteries and receptacles (dishonored_sim::world_actors).
-    // worldactors4: walls of light carry their Windblast threshold and presentation data.
-    let wa_path = dir.join(format!("{map}.worldactors4.json"));
+    // worldactors5: break steps carry m_bAISendImpendingExplosionStim.
+    let wa_path = dir.join(format!("{map}.worldactors5.json"));
     let world_actors: dishonored_ir::world_actors::WorldActors = match std::fs::read_to_string(&wa_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(w) => w,
         None => {
