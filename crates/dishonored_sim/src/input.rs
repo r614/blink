@@ -36,6 +36,9 @@ pub mod actions {
     pub const NONE: u8 = 0;
     pub const DRINK_HEALTH: u8 = 1;
     pub const DRINK_MANA: u8 = 2;
+    /// The player opened the journal (`Dis_ToggleJournal` 0x009EE550 -> 0x00AA3290 ->
+    /// 0x00BD7940): the movie's start (0x00BD11E0) fires `DisSeqEvent_JournalViewed`.
+    pub const OPEN_JOURNAL: u8 = 3;
 }
 
 /// Left-hand selection (Dishonored binds powers and gadgets to the left hand; the

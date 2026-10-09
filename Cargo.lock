@@ -2667,6 +2667,7 @@ dependencies = [
  "dishonored_audio",
  "dishonored_bots",
  "dishonored_content",
+ "dishonored_conversation",
  "dishonored_ir",
  "dishonored_kismet",
  "dishonored_mission",

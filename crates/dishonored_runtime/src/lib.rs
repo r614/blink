@@ -146,6 +146,9 @@ pub mod launcher_bg;
 pub mod handoff;
 #[doc(hidden)]
 pub mod pause_menu;
+// [journal] the in-game journal and the end-of-mission statistics screen
+pub mod journal;
+pub mod mission_stats;
 #[doc(hidden)]
 pub mod hud_settings;
 #[doc(hidden)]
@@ -507,9 +510,9 @@ pub fn main() {
         app.insert_resource(settings::Bindings::from_settings(&game_settings.s))
             .insert_resource(game_settings.clone())
             .init_resource::<menu_ui::MenuNav>()
-            .add_systems(Startup, pause_menu::setup)
+            .add_systems(Startup, (pause_menu::setup, journal::setup, mission_stats::setup))
             .add_systems(Update, (settings::sync_bindings, settings::apply_window, settings::apply_camera))
-            .add_systems(Update, (pause_menu::toggle, menu_ui::gather_menu_input, pause_menu::handle, pause_menu::rebuild, menu_art::layout_prims).chain().before(input_map::gather_input));
+            .add_systems(Update, (pause_menu::toggle, journal::toggle, mission_stats::toggle, menu_ui::gather_menu_input, journal::handle, mission_stats::handle, pause_menu::handle, pause_menu::rebuild, journal::rebuild, mission_stats::rebuild, menu_art::layout_prims).chain().before(input_map::gather_input));
         app.insert_resource(session)
             .insert_resource(session::SessionView::default())
             .insert_resource(input_map::LocalInput { enabled: true, ..default() })

@@ -634,7 +634,7 @@ pub fn update_gfx_hud(
     let Some(m) = hud.hud.as_mut() else { return };
     let dt = time.delta_secs();
     // The game is paused by the pause menu and while a level loads (the popup timer stops).
-    let paused = pause.as_ref().is_some_and(|p| p.open) || loading.as_ref().is_some_and(|l| l.active);
+    let paused = pause.as_ref().is_some_and(|p| p.open || p.overlay != 0) || loading.as_ref().is_some_and(|l| l.active);
     let hs = crate::hud_settings::options(settings.as_deref());
     let cfg = &session.content.sim.gameplay;
     let me = view.me.as_ref();

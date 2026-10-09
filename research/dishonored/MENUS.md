@@ -380,6 +380,78 @@ list from x - 40 alpha 0 (0.3 s), rows from x + 20 (0.25 s), 20 ms apart; focus 
 questions `t_Q_LoadGame` (`t_Q_LoadGameMainMenu` from the main menu), `t_Q_SaveGame`
 (overwrite; a new slot saves at once).
 
+### Journal (`UI_Journal_SF` `Journal`, `DisGFxMoviePlayerJournal`)
+
+Port: `crates/dishonored_runtime/src/journal.rs`. Opened by `GBA_Journal` (`J`,
+`Dis_ToggleJournal` 0x009EE550 -> 0x00AA3290 -> 0x00BD7940) and `DisSeqAct_OpenJournal`
+(`m_Tab`, `EDisJournalTab` 0 objectives .. 4 inventory, 5 the objectives' chapter notes). The
+movie's start (0x00BD11E0) sets `_root.StartTabIndex` (powers / charms fall back to 0 when
+unavailable), `StartSubTabIndex`, `PowersTabAvailable`, `BoneCharmsTabAvailable`, `PlayerCoins`,
+then fires the player's `DisSeqEvent_JournalViewed` (0x00BCFAC0, class from 0x00BBC040). Class
+defaults: `bPauseGameWhileActive`, `m_bShowHUDWhileActive` false, tweak `Twk_UI_Journal`.
+
+- `JournalBase` attaches `Journal` (67: `_bkgdTabs_mc` at (-492.6, -260), alpha 45 %) at
+  (640, 360) over `bkgd_mc` (`p_bkgd`), plus `m_Vignette`. `JournalTabsOrder`: objectives 0,
+  logs 1, powers 2, bone charms 3, inventory 4 (stats 5 unused). Tabs `lib_mTabs_tab_s` at
+  (0, -260), `_offsetTabX` -60. Content clips `j_obj_mc`, `j_logs_mc`, `j_powers_mc`,
+  `j_boneCharms_mc`, `j_inventory_mc`; `OpenTabContent` slides 250 px (0.25 s),
+  `CloseJournal` 0.3 s tweens and `closeJournal` after 0.75 s.
+- Sub tabs (`JournalTabContent_tabs`): `j_SubTabsBkgd` / `j_SubTabs` at (-250, -185), `SubTab`s
+  left-aligned at -544, 25 px apart; sub-tab change hides the content in 0.15 s.
+  Objectives: Tasks / Mission clues (`t_ChapterNotes`) / Mission items; logs: Written notes /
+  Books / Audiographs; inventory (`j_InventoryScreen`): Resources, Key ring, Gadgets, Ammo,
+  Upgrades (`req_Inventory_*`, builders 0x00BD1C70 / 0x00BD19E0 / 0x00BD1F00 / 0x00BD20C0 /
+  0x00BD2340, not decoded further).
+- `j_ItemsListScreen`: list at (-512, -155), details at (355, -280).
+- `Req_ObjectivesList` (0x00BD79B0): an active objective is listed (inactive ones with the
+  history); objective state 0/1/2 -> `not_done` / `done` / `failed`, `bIsOptional` = objective
+  +0x48 bit 1; tasks listed when open, finished ones only with the history (task state 0/1
+  `not_done`, 2 `done`, 3 `failed`); primary objectives first (0x00BD0A40), optional appended
+  (0x00BC9630). `j_ObjectivesList`: section `t_PrimaryTasks` / `t_SecondaryTasks` whenever
+  `bIsOptional` changes, tasks at `_startOriginTaskX` 55, 20 px after a section, `Y` toggles
+  the history (`OnToggleObjectivesListHistory`), `X` the HUD marker.
+- Logs: `Req_Logs_Notes` / `_Books` / `_Audio` (vslot 144 0x00BD99F0 -> 0x00BD15E0) list the
+  held abstract items of `EDisJournalItemSection` 8 / 12 / 7 (`DJIS_Note`, `DJIS_Book`,
+  `DJIS_AudioLog`); class defaults `DisAbstractItem` `DJIS_Mission`, `DisAbstractItemAudioLog`
+  `DJIS_AudioLog`. Items live in `<Package>_SF.upk` (e.g. `WrittenNotes_twk_SF`), localized in
+  `<Package>.int` `[<Group.Name> <Class>]`.
+- PC keys (`InputsManager`): A Enter / Numpad 0, B Esc / Backspace / Numpad 1, X Shift / Numpad 2,
+  Y Alt / Numpad 3.
+
+### Mission statistics (`UI_MissionStats_SF` `MissionStats`, `DisGFxMoviePlayerMissionStats`)
+
+Port: `crates/dishonored_runtime/src/mission_stats.rs`. Data: `DisTweaks_MissionStats`
+(`Twk_MissionStats.Twk_M0_Prison` .. `Twk_M8_Lighthouse` in `DishonoredGameFull_P`): 12
+`m_MissionStats` rows (Hostiles Killed `HostileKill`, Civilians Killed `CivilianKill`, Alarms
+Rung, Bodies Found, Overall Chaos `ChaosLevel`, Didn't Kill Anyone `HostileKill + CivilianKill`
+checkbox, Ghost `NPCsAlerted` checkbox, Runes / Bone Charms / Shrines / Paintings / Coins
+found), `m_MissionStatsMaxValues`, `m_MissionSummaryItems` (story flag tests),
+`m_BackgroundImagePath` (`UI_MissionStatsBg_*_SF`). Texts `Twk_UI_MissionStats`.
+
+- `DisSeqAct_MissionStatsTracking` (0x009FE090): input 0 empties the pawn's tracked list
+  (+0xB7C, 0x00AB1B00) and adds the tweak's stats with their max values (0x00AB1B50); every stat
+  increment (0x00AB9560) adds to its tracked entry (0x00AA97E0); input 1 reads them (0x00AA9700),
+  the chaos row 1 when the darkness level reaches `m_ChaosLevelThreshold`, the summary bits from
+  the story flags, stores the record (0x009376D0, mission index `m_MissionNumber` + 9 / + 12 for
+  the DLCs) and saves.
+- `SetMissionStats` (vslot 120, 0x00BD3CA0) -> `_root.missionStats_mc.SetMissionStats(list,
+  pickups, missionName, img, bOpenedInMenu, bReplayAvailable)`; the name is
+  `DishonoredGameInfo.m_MissionNames[n]`. Rows (0x00BCBEA0): value `ROUND(v*2+0.5) >> 1`;
+  `ChaosLevel` -> `m_HighChaos` / `m_LowChaos`; checkbox -> boolean; stats 0x21 .. 0x25, 0x27 go
+  to the pickups list with `maxValue` and `pickUpImg` (0x00BB9BD0: coins, runes, boneCharms,
+  outsider, paintings, crackedCharms); summary lines (0x00BCBC00) or `m_EmptyMissionSummaryItem`.
+- Stats sources: kill 0x00B73990 (`NumKills`, then `HostileKill` / `CivilianKill` by
+  `Twk_PlayerStats.m_HostileNPCInfo` / `m_CivilianNPCInfo`, 0x00ACC4B0), knock-out 0x00B738F0
+  (`*PutToSleep`), bell 0x00A3D080 (`NumAlarmsTriggered`), corpse 0x00A98950, sighting
+  0x00B0BE40 (`NPCsAlerted` when the player is busted), abstract pickup 0x00C4BD60 (`GoldFound` /
+  `RuneFound` by quantity, `m_bCountForStats`), bone charm 0x00ABBA90 (`BoneCharmFound`).
+- `ms_statsScreen` (108): `_bkgd_mc` (`MS_Background`) at (640, 360), `_title_mc` (117.3, 164.6),
+  `_list_mc` (138.7, 177.25), `_pickUps_mc` (1185.95, 378.15). `MS_StatsScreen.Open`: black veil
+  in 0.75 s, then `OpenElements` (`OpenScreen`, pickups from +100 / +50 in 1.25 s, background,
+  list), `OnOpened` at 1.3 s. `MS_StatsList`: sections 25 px apart, rows at x 30, 4 px apart,
+  a row every 40 ms. Help `MissionsStats` (X replay, A continue), `MissionsStats_replayLocked`
+  (A), `MissionsStats_inMenu` (B).
+
 ## Objective popups (HUD `objectives_mc`, `targetNotification_mc`)
 
 Decoded from the `UI_HUD_SF` "HUD" ActionScript (`swf_dump UI_HUD_SF HUD - --actions <id>`; class
