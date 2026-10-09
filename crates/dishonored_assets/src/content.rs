@@ -27,6 +27,9 @@ pub fn find_install(saved: Option<&Path>) -> Option<PathBuf> {
 pub struct Content {
     pub root: PathBuf,
     pub cooked: PathBuf,
+    /// The DLC folders (`DishonoredGame/DLC/PCConsole/DLC05..07`): their packages and texture
+    /// caches are found there when `CookedPCConsole` has none of the name.
+    pub dlc: Vec<PathBuf>,
     packages: Mutex<HashMap<String, Arc<Package>>>,
     tfc: Mutex<HashMap<String, File>>,
 }
@@ -48,16 +51,31 @@ impl Content {
             "{} does not look like a Dishonored install (no DishonoredGame/CookedPCConsole)",
             root.display()
         );
+        let mut dlc: Vec<PathBuf> = std::fs::read_dir(root.join("DishonoredGame").join("DLC").join("PCConsole"))
+            .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect())
+            .unwrap_or_default();
+        dlc.sort();
         Ok(Self {
             root,
             cooked,
+            dlc,
             packages: Mutex::new(HashMap::new()),
             tfc: Mutex::new(HashMap::new()),
         })
     }
 
+    /// A package's file: `CookedPCConsole` first, then the DLC folders (the cooked one when
+    /// neither has it, for the error message).
     pub fn package_path(&self, name: &str) -> PathBuf {
-        self.cooked.join(format!("{name}.upk"))
+        self.find_file(&format!("{name}.upk"))
+    }
+
+    fn find_file(&self, file: &str) -> PathBuf {
+        let cooked = self.cooked.join(file);
+        if cooked.is_file() {
+            return cooked;
+        }
+        self.dlc.iter().map(|d| d.join(file)).find(|p| p.is_file()).unwrap_or(cooked)
     }
 
     pub fn has_package(&self, name: &str) -> bool {
@@ -79,7 +97,7 @@ impl Content {
         let mut map = self.tfc.lock().unwrap();
         let key = name.to_ascii_lowercase();
         if !map.contains_key(&key) {
-            let path = self.cooked.join(format!("{name}.tfc"));
+            let path = self.find_file(&format!("{name}.tfc"));
             let f = File::open(&path).with_context(|| format!("opening {}", path.display()))?;
             map.insert(key.clone(), f);
         }

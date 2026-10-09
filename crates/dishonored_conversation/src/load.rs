@@ -189,7 +189,18 @@ impl Loader {
         if self.db.packages.iter().any(|p| p.eq_ignore_ascii_case(name)) {
             return Ok(());
         }
-        let pkg = Package::open(self.cooked.join(format!("{name}.upk")))?;
+        // A DLC map's packages live in `DishonoredGame/DLC/PCConsole/DLC0x` next to the cooked
+        // folder.
+        let file = format!("{name}.upk");
+        let mut path = self.cooked.join(&file);
+        if !path.is_file() {
+            if let Some(dlc) = self.cooked.parent().map(|g| g.join("DLC").join("PCConsole")) {
+                if let Some(p) = std::fs::read_dir(&dlc).into_iter().flatten().flatten().map(|e| e.path().join(&file)).find(|p| p.is_file()) {
+                    path = p;
+                }
+            }
+        }
+        let pkg = Package::open(path)?;
         let pname = pkg.name.clone();
         self.db.packages.push(pname.clone());
         // Classes of interest.
@@ -466,11 +477,11 @@ impl Loader {
                     })
                 }
                 "DisConv_PlayerChoice" => NodeKind::Choice {
-                    // Cooked data omits the class default (one static choice); its text is not
-                    // read here, a neutral label stands in.
+                    // Cooked data omits the class default: one static choice,
+                    // `Default__DisConv_PlayerChoice.m_Choices_Static[0].m_ChoiceText` "Go on...".
                     options: match find(&props, "m_Choices_Static").and_then(|p| p.array_structs(&pkg).ok()) {
                         Some(v) => v.iter().map(|c| pstr(c, "m_ChoiceText").unwrap_or_default()).collect(),
-                        None => vec!["Continue".into()],
+                        None => vec!["Go on...".into()],
                     },
                     optional: find(&props, "m_Choices_Optional")
                         .and_then(|p| p.array_structs(&pkg).ok())
