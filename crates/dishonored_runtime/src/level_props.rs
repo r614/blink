@@ -54,6 +54,13 @@ pub struct LevelProp {
     clock: f32,
 }
 
+/// A prop's skinned section entity: the mesh's material slot it draws (what a highlight copy
+/// with `SetMaterial(0, ..)` replaces, `highlight.rs`).
+#[derive(Component, Clone, Copy)]
+pub struct PropSection {
+    pub slot: u32,
+}
+
 /// Two fractions in [0, 1) from an actor name: the per-instance roll of a resting loop's rate
 /// and start time (the original rolls them at random, `RiverKrustAnimSequenceSpec`).
 pub fn idle_roll(actor: &str) -> (f32, f32) {
@@ -170,6 +177,7 @@ pub fn spawn_props(
                 let js: Vec<Entity> = part.bind.iter().enumerate().map(|(bi, bm)| commands.spawn((Transform::from_matrix(*bm), Joint { part: pi, bone: bi }, ChildOf(root))).id()).collect();
                 for (si, (mesh, mat)) in part.sections.iter().enumerate() {
                     let skin = SkinnedMesh { inverse_bindposes: part.inverse_bindposes.clone(), joints: js.clone() };
+                    let slot = PropSection { slot: part.section_slots.get(si).copied().unwrap_or(si as u32) };
                     // The original's light environment (prop_light.rs) when it was computed.
                     let env = prop.light_env.filter(|_| feat.materials && feat.dynamic_lights && !feat.debug_lighting);
                     match (env, mats.get(mat)) {
@@ -177,10 +185,10 @@ pub fn spawn_props(
                             let p = part.section_materials.get(si).copied().flatten().and_then(|m| gpu.material_params.get(m));
                             let ext = crate::prop_light::prop_light(&env, p, &gpu.textures, crate::map_render::light_unit());
                             let h = prop_mats.add(crate::prop_light::PropMaterial { base: base.clone(), extension: ext });
-                            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(h), skin, Transform::default(), part.bounds, bevy::camera::visibility::NoAutoAabb, ChildOf(root)));
+                            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(h), skin, Transform::default(), part.bounds, bevy::camera::visibility::NoAutoAabb, ChildOf(root), slot));
                         }
                         _ => {
-                            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), skin, Transform::default(), part.bounds, bevy::camera::visibility::NoAutoAabb, ChildOf(root)));
+                            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat.clone()), skin, Transform::default(), part.bounds, bevy::camera::visibility::NoAutoAabb, ChildOf(root), slot));
                         }
                     }
                 }

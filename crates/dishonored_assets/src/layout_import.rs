@@ -361,7 +361,7 @@ pub fn brush_mesh(b: &Brush, material: Option<MaterialId>, source: &str) -> Stat
         collision_triangles: if b.collide { indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect() } else { Vec::new() },
         collision_materials: if b.collide { vec![0; tris] } else { Vec::new() },
         indices,
-        sections: vec![MeshSection { first_index: 0, num_triangles: tris as u32, material, enable_collision: b.collide }],
+        sections: vec![MeshSection { first_index: 0, num_triangles: tris as u32, material, enable_collision: b.collide, material_index: 0 }],
         simple_line: b.collide,
         simple_box: b.collide,
         simple_collision: b.collide.then_some(simple),

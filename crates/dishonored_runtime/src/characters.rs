@@ -22,6 +22,8 @@ pub struct PartGpu {
     pub sections: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
     /// Index into `CharacterGpu::material_params` of each section's material.
     pub section_materials: Vec<Option<usize>>,
+    /// Each section's material slot (`MeshSection::material_index`).
+    pub section_slots: Vec<u32>,
     pub inverse_bindposes: Handle<SkinnedMeshInverseBindposes>,
     /// Bind-pose joint transforms in Bevy space relative to the body root.
     pub bind: Vec<Mat4>,
@@ -160,6 +162,7 @@ pub fn upload(model: &CharacterModel, meshes: &mut Assets<Mesh>, images: &mut As
         let ib = binds.add(SkinnedMeshInverseBindposes::from(inverse));
         let mut sections = Vec::new();
         let mut section_materials = Vec::new();
+        let section_slots: Vec<u32> = p.sections.iter().map(|s| s.material_index).collect();
         for s in &p.sections {
             let start = s.first_index as usize;
             let end = (start + s.num_triangles as usize * 3).min(p.indices.len());
@@ -178,7 +181,7 @@ pub fn upload(model: &CharacterModel, meshes: &mut Assets<Mesh>, images: &mut As
             section_materials.push(s.material);
         }
         let bounds = animated_bounds(&pos);
-        parts.push(PartGpu { source: p.source.clone(), sections, section_materials, inverse_bindposes: ib, bind, bones: p.bones.clone(), mesh_to_pawn: m2p, bounds });
+        parts.push(PartGpu { source: p.source.clone(), sections, section_materials, section_slots, inverse_bindposes: ib, bind, bones: p.bones.clone(), mesh_to_pawn: m2p, bounds });
     }
     let all: Vec<glam::Vec3> = model.parts.iter().flat_map(|p| p.positions.iter().map(|v| p.mesh_to_pawn.transform_point3(*v))).collect();
     let (lo, hi) = all.iter().fold((glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN)), |(a, b), v| (a.min(*v), b.max(*v)));

@@ -18,6 +18,11 @@ pub trait ParticleCtx {
     fn import_mesh(&mut self, k: Key) -> Option<usize>;
     /// Properties of `Default__<class>` (Engine), for fields the cooked objects omit.
     fn class_default(&mut self, class: &str) -> Vec<Property>;
+    /// Every package the importer has loaded (level packages, then the library packages
+    /// `DishonoredGame` / `Startup`), for archetypes outside the level (`Default__` objects).
+    fn loaded_packages(&self) -> Vec<Arc<Package>> {
+        Vec::new()
+    }
 }
 
 fn floats(p: &Property) -> Vec<f32> {
@@ -30,11 +35,117 @@ fn floats(p: &Property) -> Vec<f32> {
 thread_local! {
     /// Class defaults of the module being decoded (fields the cooked struct omits).
     static DEFAULTS: std::cell::RefCell<Vec<Property>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Export paths (lowercase, without the package) -> export index, per loaded package name.
+    static EXPORT_PATHS: std::cell::RefCell<std::collections::HashMap<String, std::collections::HashMap<String, usize>>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The export an object reference of `pkg` names: itself for an export, else the export of
+/// the loaded package named by the import's outermost object (`DishonoredGame.Default__X.Y`).
+fn locate(ctx: &dyn ParticleCtx, pkg: &Arc<Package>, r: ObjRef) -> Option<(Arc<Package>, usize)> {
+    match r {
+        ObjRef::Null => None,
+        ObjRef::Export(i) => Some((pkg.clone(), i)),
+        ObjRef::Import(_) => {
+            let path = pkg.obj_path(r);
+            let (pname, rest) = path.split_once('.')?;
+            let target = ctx.loaded_packages().into_iter().find(|p| p.name.eq_ignore_ascii_case(pname))?;
+            let key = target.name.to_ascii_lowercase();
+            let idx = EXPORT_PATHS.with(|m| {
+                let mut m = m.borrow_mut();
+                let paths = m.entry(key).or_insert_with(|| (0..target.exports.len()).map(|i| (target.obj_path(ObjRef::Export(i)).to_ascii_lowercase(), i)).collect());
+                paths.get(&rest.to_ascii_lowercase()).copied()
+            })?;
+            Some((target, idx))
+        }
+    }
+}
+
+/// An object's properties followed by those of its archetype chain (cooked objects store only
+/// what differs from their archetype; the first match wins).
+fn props_with_archetypes(ctx: &dyn ParticleCtx, pkg: &Arc<Package>, r: ObjRef) -> Vec<Property> {
+    let mut out = Vec::new();
+    let mut cur = locate(ctx, pkg, r);
+    let mut guard = 0;
+    while let Some((p, i)) = cur.take() {
+        if let Ok(h) = p.read_object(i) {
+            out.extend(h.properties);
+        }
+        guard += 1;
+        if guard < 8 {
+            cur = locate(ctx, &p, ObjRef::from_index(p.exports[i].archetype));
+        }
+    }
+    out
+}
+
+/// A `RawDistributionFloat` that may be a `DistributionFloatParticleParameter` (never baked:
+/// the struct keeps the object, `FRawDistributionFloat::GetValue` 0x00434EF0 asks it). The
+/// parameter's fields come from its archetype chain (the class's
+/// `Default__...RequiredDistribution*` subobject in DishonoredGame names the parameter), then
+/// `Default__DistributionFloatParticleParameter`.
+fn float_dist(ctx: &mut dyn ParticleCtx, pkg: &Arc<Package>, props: &[Property], name: &str) -> dishonored_ir::particles::FloatDist {
+    use dishonored_ir::particles::{FloatDist, ParticleParam};
+    let table = dist_ex(props, name, 1, true);
+    let obj = match find(props, name).map(|p| &p.value) {
+        Some(Value::Struct(_, s)) => find(s, "Distribution").and_then(|p| p.as_object()).filter(|o| *o != 0),
+        _ => None,
+    };
+    let param = obj.and_then(|o| {
+        let r = ObjRef::from_index(o);
+        let (p, i) = locate(ctx, pkg, r)?;
+        if p.export_class(i) != "DistributionFloatParticleParameter" {
+            return None;
+        }
+        let mut chain = props_with_archetypes(ctx, pkg, r);
+        chain.extend(ctx.class_default("DistributionFloatParticleParameter"));
+        let f = |n: &str, d: f32| find(&chain, n).and_then(|x| x.as_float()).unwrap_or(d);
+        Some(ParticleParam {
+            name: match find(&chain, "ParameterName").map(|x| &x.value) {
+                Some(Value::Name(n)) => n.clone(),
+                _ => String::new(),
+            },
+            constant: f("Constant", 0.0),
+            // `DistributionFloatParameterBase` defaults: inputs and outputs 0..1.
+            min_input: f("MinInput", 0.0),
+            max_input: f("MaxInput", 1.0),
+            min_output: f("MinOutput", 0.0),
+            max_output: f("MaxOutput", 1.0),
+            mode: match enum_of(&chain, "ParamMode").as_deref() {
+                Some("DPM_Abs") | Some("1") => 1,
+                Some("DPM_Direct") | Some("2") => 2,
+                _ => 0,
+            },
+        })
+    });
+    FloatDist { table: if param.is_some() { None } else { table }, param }
+}
+
+/// The `Type` byte (axis lock of a vector table) of a raw distribution struct.
+fn dist_type(props: &[Property], name: &str) -> u8 {
+    let Some(Value::Struct(_, s)) = find(props, name).map(|p| &p.value) else { return 0 };
+    let def: Vec<Property> = DEFAULTS.with(|d| match find(&d.borrow(), name).map(|p| &p.value) {
+        Some(Value::Struct(_, v)) => v.clone(),
+        _ => Vec::new(),
+    });
+    match find(s, "Type").or_else(|| find(&def, "Type")).map(|p| &p.value) {
+        Some(Value::Byte(b)) => *b,
+        Some(Value::Int(i)) => *i as u8,
+        _ => 0,
+    }
 }
 
 /// A `RawDistributionFloat/Vector` struct property; omitted fields come from the module's
 /// class default object.
 fn dist(props: &[Property], name: &str, dims: u8) -> Option<Dist> {
+    dist_ex(props, name, dims, false)
+}
+
+/// As [`dist`]; `inherit_table`: an omitted `LookupTable` is the archetype's (UE3 serializes a
+/// struct's members against the archetype's value; the rain modules' `m_FadingRate` keeps the
+/// class default 8 that way). Only the rain modules use it so far: applying it to every module
+/// changes existing effects (an omitted `AlphaOverLife` becomes the default constant 1, an
+/// omitted Spawn `Rate` the default 20).
+fn dist_ex(props: &[Property], name: &str, dims: u8, inherit_table: bool) -> Option<Dist> {
     let p = find(props, name)?;
     let Value::Struct(_, s) = &p.value else { return None };
     let def: Vec<Property> = DEFAULTS.with(|d| match find(&d.borrow(), name).map(|p| &p.value) {
@@ -51,7 +162,7 @@ fn dist(props: &[Property], name: &str, dims: u8) -> Option<Dist> {
         Some(Value::Float(f)) => f,
         _ => 0.0,
     };
-    let table = find(s, "LookupTable").map(floats).unwrap_or_default();
+    let table = find(s, "LookupTable").or_else(|| if inherit_table { find(&def, "LookupTable") } else { None }).map(floats).unwrap_or_default();
     let op = byte("Op", 1);
     let elems = byte("LookupTableNumElements", 1).max(1);
     let chunk = byte("LookupTableChunkSize", elems * dims).max(1) as usize;
@@ -154,14 +265,20 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
             modules.push(o);
         }
     }
+    // The LOD's `Modules[0]` (after the required / spawn / type-data modules).
+    let first_listed = modules.len();
     modules.extend(find(&lod.properties, "Modules").and_then(|p| p.array_objects().ok()).unwrap_or_default());
-    for m in modules {
+    for (mi, m) in modules.into_iter().enumerate() {
         let Some(mk) = ctx.resolve_ref(lod_k.0, ObjRef::from_index(m)) else { continue };
         let mpkg = ctx.package(mk.0);
         let mclass = mpkg.export_class(mk.1);
         let Ok(mh) = mpkg.read_object(mk.1) else { continue };
         let p = &mh.properties;
-        let defaults = ctx.class_default(&mclass);
+        let mut defaults = ctx.class_default(&mclass);
+        if defaults.is_empty() {
+            // Game modules (DishonoredGame): the archetype chain (`Default__<class>`).
+            defaults = props_with_archetypes(&*ctx, &mpkg, ObjRef::from_index(mpkg.exports[mk.1].archetype));
+        }
         DEFAULTS.with(|d| *d.borrow_mut() = defaults);
         if !bool_or(p, "bEnabled", true) {
             continue;
@@ -365,6 +482,39 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
                 };
                 let kind = enum_of(p, "EventGeneratorType").or_else(|| DEFAULTS.with(|d| enum_of(&d.borrow(), "EventGeneratorType")));
                 em.events_in.push(dishonored_ir::particles::EventIn { kind: event_kind(kind.as_deref()), name, count: dist(p, "SpawnCount", 1), inherit_velocity: dist(p, "InheritVelocityScale", 3) });
+            }
+            "DisParticleModuleRainDrops" => {
+                let ext = find(p, "m_Extent").and_then(|x| x.as_vector()).or_else(|| DEFAULTS.with(|d| find(&d.borrow(), "m_Extent").and_then(|x| x.as_vector()))).unwrap_or([0.0; 3]);
+                // A distribution (or table) the module does not serialize is its archetype's.
+                let merged: Vec<Property> = p.iter().cloned().chain(DEFAULTS.with(|d| d.borrow().clone())).collect();
+                em.rain_drops = Some(dishonored_ir::particles::RainDrops {
+                    extent: ext,
+                    max_particles: float_dist(ctx, &mpkg, p, "m_MaxParticles"),
+                    spawn_kill_rate: float_dist(ctx, &mpkg, p, "m_SpawnKillRate"),
+                    start_velocity: dist_ex(&merged, "m_StartVelocity", 3, true),
+                    start_color: dist_ex(&merged, "m_StartColor", 3, true),
+                    start_alpha: dist_ex(&merged, "m_StartAlpha", 1, true),
+                    start_size: dist_ex(&merged, "m_StartSize", 3, true),
+                    fading_rate: dist_ex(&merged, "m_FadingRate", 1, true),
+                    locks: [dist_type(&merged, "m_StartVelocity"), dist_type(&merged, "m_StartColor"), dist_type(&merged, "m_StartSize")],
+                    first_module: mi == first_listed,
+                });
+            }
+            "DisParticleModuleRainImpacts" => {
+                let fixed = match find(p, "m_bFixedLocation").map(|x| &x.value) {
+                    Some(Value::Bool(b)) => *b,
+                    _ => DEFAULTS.with(|d| bool_or(&d.borrow(), "m_bFixedLocation", true)),
+                };
+                em.rain_impacts = Some(dishonored_ir::particles::RainImpacts { fixed_location: fixed });
+            }
+            "ParticleModuleSizeMultiplyVelocity" => {
+                let axes = |n: &str| match find(p, n).map(|x| &x.value) {
+                    Some(Value::Bool(b)) => *b,
+                    _ => DEFAULTS.with(|d| bool_or(&d.borrow(), n, true)),
+                };
+                if let Some(d) = dist(p, "VelocityMultiplier", 3) {
+                    em.size_mult_velocity = Some((d, [axes("MultiplyX"), axes("MultiplyY"), axes("MultiplyZ")]));
+                }
             }
             c => em.unsupported.push(c.to_string()),
         }

@@ -40,6 +40,7 @@ pub mod npc_anim;
 pub mod facefx;
 #[doc(hidden)]
 pub mod ragdoll;
+pub mod rain;
 #[doc(hidden)]
 pub mod debug;
 #[doc(hidden)]
@@ -183,6 +184,8 @@ pub mod cutscene;
 pub mod movables;
 pub mod walls_of_light;
 pub mod lens_effects;
+pub mod highlight;
+pub mod camera_fade;
 
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::input::mouse::AccumulatedMouseMotion;
@@ -402,6 +405,7 @@ pub fn main() {
     .add_plugins(reflect::ReflectPlugin)
     .add_plugins(volume_light::VolumeLightPlugin)
     .add_plugins(tv_screen::TvScreenPlugin)
+    .add_plugins((highlight::HighlightPlugin, camera_fade::CameraFadePlugin))
     .add_plugins(lens_flare::LensFlarePlugin)
     .add_plugins(caustics::CausticsPlugin)
     .add_plugins(spillway::SpillwayPlugin)

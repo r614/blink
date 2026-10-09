@@ -58,6 +58,9 @@ pub struct DishonoredMap {
     /// The camera lens effects the level's `DisSeqAct_SpawnCameraLensEffect` actions spawn.
     #[serde(default)]
     pub lens_effects: Vec<LensEffectDef>,
+    /// The highlight of the actors the level's `DisSeqAct_Highlight` actions target.
+    #[serde(default)]
+    pub highlights: Vec<HighlightDef>,
     /// Placed doors and usable objects drawn with a skeletal mesh.
     #[serde(default)]
     pub skeletal_props: Vec<SkeletalProp>,
@@ -367,6 +370,24 @@ impl MaterialParams {
     }
 }
 
+/// An actor's highlight (`DisInteractableInterface`, applied by 0x00A27FF0): its interactable
+/// tweak's (`m_pInteractableTweaks` of the actor's tweak, else `Default__DisTweaks_
+/// InteractableInterface`) `m_bAllowedToHighlight` and `m_HighLightMaterial`, drawn on element 0
+/// of a copy of the actor's mesh. `instances`: the actor's static mesh components in
+/// `DishonoredMap::instances` (pickups, keys); a usable's skeletal mesh is its `SkeletalProp`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct HighlightDef {
+    /// `<package>:<actor>`.
+    pub actor: String,
+    pub placed: [f32; 3],
+    pub allowed: bool,
+    /// Object path of `m_HighLightMaterial`, and the material decoded.
+    pub material_path: String,
+    pub material: Option<MaterialId>,
+    pub instances: Vec<usize>,
+}
+
 /// A camera lens effect (`DisEmitterCameraLensEffect` with its `DisTweaks_EmitterCameraLensEffect`,
 /// else the effect class's defaults): a particle system held `distance` in front of the camera,
 /// pulled in for a wider view (UE3 `EmitterCameraLensEffectBase::UpdateLocation`: the distance
@@ -617,6 +638,10 @@ pub struct MeshSection {
     /// Default material for this section (may be overridden per instance).
     pub material: Option<MaterialId>,
     pub enable_collision: bool,
+    /// The mesh's material slot the section draws with (a skeletal section's `MaterialIndex`;
+    /// a static mesh's element index): what a component's `SetMaterial(slot)` replaces.
+    #[serde(default)]
+    pub material_index: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

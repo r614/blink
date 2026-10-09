@@ -241,7 +241,18 @@ pub struct FxInstance {
     /// Beam emitters with `TargetMethod` = `PEB2STM_UserSet`: the end point the game set
     /// (Dishonored world), e.g. the pistol tracer to its impact.
     beam_target: Option<Vec3>,
+    /// `ParticleSystemComponent.InstanceParameters` (scalars) by lowercase name, read by
+    /// `DistributionFloatParticleParameter`s (`SetFloatParameter`).
+    float_params: HashMap<String, f32>,
+    /// Per emitter: the rain modules' state (`DisParticleModuleRainDrops` / `RainImpacts`).
+    rain: Vec<crate::rain::RainEmitterState>,
 }
+
+/// A placed `Emitter` actor's instance: its "package:actor" key (lowercase, as
+/// [`placed_emitter`] takes it), so a system that moves the actor (the camera's rain box) finds
+/// the instance the level spawned.
+#[derive(Component, Clone, Debug)]
+pub struct PlacedEmitter(pub String);
 
 pub struct EffectsPlugin;
 
@@ -251,7 +262,7 @@ impl Plugin for EffectsPlugin {
         bevy::asset::embedded_asset!(app, "particle_soft.wgsl");
         app.add_plugins(MaterialPlugin::<FxMaterial>::default()).add_systems(Update, apply_pending_soft);
         app.add_plugins(MaterialPlugin::<GlowMaterial>::default());
-        app.init_resource::<Effects>().init_resource::<EffectSockets>().init_resource::<HandEffects>().init_resource::<crate::lens_effects::LensEffects>().add_systems(
+        app.init_resource::<Effects>().init_resource::<EffectSockets>().init_resource::<HandEffects>().init_resource::<crate::lens_effects::LensEffects>().init_resource::<crate::rain::RainCamera>().add_systems(
             Update,
             (
                 gameplay_effects.before(crate::audio::drive),
@@ -261,6 +272,8 @@ impl Plugin for EffectsPlugin {
                 // Camera lens effects follow the camera placed this frame.
                 crate::lens_effects::update.after(crate::players::camera_follow).after(crate::cutscene::camera).after(crate::viewmodel::apply_fov),
                 hand_effects.after(crate::viewmodel::animate_view_rig),
+                // The player camera's rain box (moves the rain emitter before it simulates).
+                crate::rain::drive.after(crate::players::camera_follow).after(crate::cutscene::camera).after(crate::viewmodel::apply_fov),
                 // After everything that places the camera or sets its projection this frame
                 // (`simulate` culls sprite meshes against that view).
                 simulate.after(crate::players::camera_follow).after(crate::cutscene::camera).after(crate::viewmodel::apply_fov).after(crate::inspect_cam),
@@ -564,10 +577,7 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
         placed: map
             .emitters
             .iter()
-            .filter_map(|e| {
-                let (pkg, path) = e.source.split_once(':')?;
-                Some((format!("{pkg}:{}", path.rsplit('.').next()?).to_ascii_lowercase(), (e.system, e.transform, e.auto_activate)))
-            })
+            .filter_map(|e| Some((placed_key(&e.source)?, (e.system, e.transform, e.auto_activate))))
             .collect(),
         decals: map
             .named_materials
@@ -605,9 +615,10 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
     let off = std::env::args().any(|a| a == "--no-fx") || std::env::var_os("DISH_NO_PARTICLES").is_some();
     for e in map.emitters.iter().filter(|e| e.auto_activate && !off) {
         let root = spawn_instance(commands, meshes, &lf, name, e.system, e.transform, false);
-        // Its "package:actor" key: an actor that drives its emitters (a wall of light) finds it.
-        if let (Some(root), Some((pkg, path))) = (root, e.source.split_once(':')) {
-            commands.entity(root).insert(PlacedEmitter(format!("{pkg}:{}", path.rsplit('.').next().unwrap_or(path)).to_ascii_lowercase()));
+        // Its "package:actor" key: an actor that drives its emitters (a wall of light, the
+        // camera's rain box) finds it.
+        if let (Some(root), Some(key)) = (root, placed_key(&e.source)) {
+            commands.entity(root).insert(PlacedEmitter(key));
         }
         // An emitter of a Kismet-streamed sublevel leaves with it (level streaming).
         if let (Some(root), Some(tag)) = (root, crate::level::streamed_tag(&map.streamed_levels, crate::level::source_package(&e.source))) {
@@ -624,13 +635,15 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
     n
 }
 
+/// The "package:actor" key (lowercase) of a placed emitter's source ("package:path.actor").
+fn placed_key(source: &str) -> Option<String> {
+    let (pkg, path) = source.split_once(':')?;
+    Some(format!("{pkg}:{}", path.rsplit('.').next()?).to_ascii_lowercase())
+}
+
 /// [interp] A placed emitter played by a matinee's toggle track (`InterpTrackToggle`).
 #[derive(Component)]
 pub struct MatineeEmitter;
-
-/// A placed emitter the level started (`bAutoActivate`), by its "package:actor" key (lowercase).
-#[derive(Component)]
-pub struct PlacedEmitter(pub String);
 
 /// Stop an instance: it spawns no more and goes once its particles die (`DeactivateSystem`).
 pub fn stop_instance(commands: &mut Commands, e: Entity) {
@@ -654,6 +667,23 @@ impl FxInstance {
             s.done = true;
         }
     }
+    /// Deactivated (`stop`) or a one-shot.
+    pub fn stopped(&self) -> bool {
+        self.one_shot
+    }
+    /// `UParticleSystemComponent::SetFloatParameter`: a scalar instance parameter (names are
+    /// case-insensitive, as FNames).
+    pub fn set_float_param(&mut self, name: &str, value: f32) {
+        self.float_params.insert(name.to_ascii_lowercase(), value);
+    }
+    pub fn float_param(&self, name: &str) -> Option<f32> {
+        self.float_params.get(&name.to_ascii_lowercase()).copied()
+    }
+}
+
+/// A decoded system of a loaded level.
+pub fn level_system<'a>(fx: &'a Effects, level: &str, system: usize) -> Option<&'a ParticleSystemAsset> {
+    fx.levels.get(level)?.systems.get(system)
 }
 
 /// [interp] A placed emitter of the loaded levels by "package:actor": (system's level, system,
@@ -671,7 +701,7 @@ pub fn start_placed_emitter(commands: &mut Commands, meshes: &mut Assets<Mesh>, 
     let lf = fx.levels.get(&level)?.clone();
     let e = spawn_instance(commands, meshes, &lf, &level, system, transform, one_shot)?;
     if !one_shot {
-        commands.entity(e).insert(MatineeEmitter);
+        commands.entity(e).insert((MatineeEmitter, PlacedEmitter(key.to_ascii_lowercase())));
     }
     Some(e)
 }
@@ -703,6 +733,8 @@ fn spawn_instance(commands: &mut Commands, meshes: &mut Assets<Mesh>, lf: &Level
         one_shot,
         warmed: one_shot,
         beam_target: None,
+        float_params: HashMap::new(),
+        rain: s.emitters.iter().map(|_| Default::default()).collect(),
     });
     Some(root)
 }
@@ -823,7 +855,9 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
         let alpha = if erode { 1.0 - alpha.clamp(0.0, 1.0) } else { alpha };
         let world = world_of(p);
         let c = coords::pos(world);
-        let (hw, hh) = (size.x * 0.5 * coords::UU_TO_BEVY, if em.screen_align == 1 { size.y } else { size.x } * 0.5 * coords::UU_TO_BEVY);
+        // Only `PSA_Square` draws Size.X by Size.X (UE3 sprite dynamic data: Size.Y = Size.X for
+        // square sprites); rectangle and velocity-aligned sprites (the rain streaks) use Size.Y.
+        let (hw, hh) = (size.x * 0.5 * coords::UU_TO_BEVY, if em.screen_align != 0 { size.y } else { size.x } * 0.5 * coords::UU_TO_BEVY);
         let (s, co) = p.rot.sin_cos();
         // Plane of the sprite: camera facing, or locked to an emitter axis (OrientationAxisLock).
         let axis = |v: glam::Vec4| coords::dir(v.truncate()).normalize_or_zero();
@@ -909,6 +943,16 @@ fn particle_look(em: &ParticleEmitterAsset, p: &Particle) -> (Vec3, f32, Vec3) {
             }
         }
     }
+    // `ParticleModuleSizeMultiplyVelocity`: Size *= VelocityMultiplier x |Velocity| on the
+    // enabled axes (every update, from the reset size; the rain streaks' length).
+    if let Some((d, axes)) = &em.size_mult_velocity {
+        let m = Vec3::from(d.eval(rel, p.r[1])) * p.vel.length();
+        for k in 0..3 {
+            if axes[k] {
+                size[k] *= m[k];
+            }
+        }
+    }
     let color = em.color_over_life.as_ref().map(|d| Vec3::from(d.eval(rel, p.r[0]))).unwrap_or(p.color);
     let alpha = em.alpha_over_life.as_ref().map(|d| d.eval1(rel, p.r[0])).unwrap_or(p.alpha);
     (color, alpha, size)
@@ -931,7 +975,7 @@ fn sprite_bounds(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4) -> Opti
         let (_, _, size) = particle_look(em, p);
         let c = coords::pos(particle_world(em, xf, p));
         let hw = size.x.abs() * 0.5 * coords::UU_TO_BEVY;
-        let hh = if em.screen_align == 1 { size.y.abs() } else { size.x.abs() } * 0.5 * coords::UU_TO_BEVY;
+        let hh = if em.screen_align != 0 { size.y.abs() } else { size.x.abs() } * 0.5 * coords::UU_TO_BEVY;
         lo = lo.min(c);
         hi = hi.max(c);
         reach = reach.max((hw * hw + hh * hh).sqrt());
@@ -954,6 +998,7 @@ fn simulate(
     cams: Query<(&GlobalTransform, &Transform, &Projection, Option<&ChildOf>), (With<Camera3d>, Without<crate::reflect::ReflectCamera>)>,
     session: Option<Res<crate::session::Session>>,
     mut dframe: ResMut<DistortionFrame>,
+    mut rain_cam: ResMut<crate::rain::RainCamera>,
 ) {
     use bevy::camera::primitives::Sphere;
     dframe.clear();
@@ -1005,14 +1050,23 @@ fn simulate(
             inst.warmed = true;
             let steps = (sys.warmup * 15.0).min(300.0) as usize;
             for _ in 0..steps {
-                for (em, sim) in sys.emitters.iter().zip(inst.sims.iter_mut()) {
+                for (em, sim) in sys.emitters.iter().zip(inst.sims.iter_mut()).filter(|(em, _)| !crate::rain::is_rain_emitter(em)) {
                     step(em, sim, &xf, 1.0 / 15.0, &mut rnd, (em.collision.is_some() || em.decal.is_some()).then_some(ray_fn));
                 }
                 dispatch_events(&sys.emitters, &mut inst.sims, &xf, &mut rnd);
             }
         }
         for (i, (em, sim)) in sys.emitters.iter().zip(inst.sims.iter_mut()).enumerate() {
-            step(em, sim, &xf, dt, &mut rnd, (em.collision.is_some() || em.decal.is_some()).then_some(ray_fn));
+            if crate::rain::is_rain_emitter(em) {
+                // Arkane's rain modules replace the spawn rate and the particles' lifetimes.
+                let fp = &inst.float_params;
+                let params = |n: &str| fp.get(&n.to_ascii_lowercase()).copied();
+                if let Some(rs) = inst.rain.get_mut(i) {
+                    crate::rain::step_emitter(em, sim, rs, &xf, dt, &mut rnd, &params, &mut rain_cam);
+                }
+            } else {
+                step(em, sim, &xf, dt, &mut rnd, (em.collision.is_some() || em.decal.is_some()).then_some(ray_fn));
+            }
             live += sim.particles.len();
             let mut sprite_culled = false;
             if let Some((mh, color, params)) = lf.glow.get(&(inst.system, i)) {

@@ -282,6 +282,7 @@ pub fn import_level(
             imp.named_material(p);
         }
         imp.import_lens_effects(level_slots);
+        imp.import_highlights(level_slots);
     }
     imp.stats.timings.push(("actors", t.elapsed().as_secs_f32()));
     let t = std::time::Instant::now();
@@ -777,6 +778,73 @@ impl Importer<'_> {
                 self.map.lens_effects.push(def);
             }
         }
+    }
+
+    /// The highlight of the actors the level's `DisSeqAct_Highlight` actions target (their
+    /// "Target" `SeqVar_Object`s' `ObjValue`): the actor's tweak (its `m_p*Tweaks` property, e.g.
+    /// `m_pUsableObjTweaks`, `m_pInvPickupTweaks`, `m_pKeyTweaks`) -> `m_pInteractableTweaks` ->
+    /// `m_bAllowedToHighlight`, `m_HighLightMaterial` (decoded); without an interactable tweak
+    /// the class defaults (`Default__DisTweaks_InteractableInterface`: allowed, no material).
+    fn import_highlights(&mut self, slots: usize) {
+        let mut seen = std::collections::HashSet::new();
+        for slot in 0..slots {
+            let pkg = self.pkgs[slot].clone();
+            for i in 0..pkg.exports.len() {
+                if pkg.export_class(i) != "DisSeqAct_Highlight" {
+                    continue;
+                }
+                let Ok(h) = pkg.read_object(i) else { continue };
+                let Some(links) = find(&h.properties, "VariableLinks").and_then(|p| p.array_structs(&pkg).ok()) else { continue };
+                for link in links {
+                    let vars = find(&link, "LinkedVariables").and_then(|v| v.array_objects().ok()).unwrap_or_default();
+                    for v in vars {
+                        let ObjRef::Export(vi) = ObjRef::from_index(v) else { continue };
+                        let Ok(vh) = pkg.read_object(vi) else { continue };
+                        let Some(ObjRef::Export(ai)) = find(&vh.properties, "ObjValue").and_then(|p| p.as_object()).map(ObjRef::from_index) else { continue };
+                        if seen.insert((slot, ai)) {
+                            self.import_highlight(slot, ai);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn import_highlight(&mut self, slot: usize, actor: usize) {
+        let pkg = self.pkgs[slot].clone();
+        let Ok(h) = pkg.read_object(actor) else { return };
+        let name = pkg.obj_name(ObjRef::Export(actor));
+        let placed = match find(&h.properties, "Location").map(|p| &p.value) {
+            Some(Value::Vector(v)) => *v,
+            _ => [0.0; 3],
+        };
+        let tweak = h
+            .properties
+            .iter()
+            .filter(|p| p.name.starts_with("m_p") && p.name.ends_with("Tweaks"))
+            .find_map(|p| p.as_object().map(ObjRef::from_index).filter(|r| *r != ObjRef::Null).map(|r| pkg.obj_path(r)));
+        if self.tweaks.is_none() {
+            let names: Vec<String> = self.pkgs.iter().map(|p| p.name.clone()).collect();
+            self.tweaks = Some(crate::tweaks::TweakDb::load_with(self.content, &names).ok());
+        }
+        let db = self.tweaks.as_ref().and_then(|t| t.as_ref());
+        let interact = tweak.and_then(|t| db?.try_resolve(&t)).and_then(|m| crate::tweaks::get_obj(&m, "m_pInteractableTweaks").map(str::to_string)).and_then(|t| db?.try_resolve(&t));
+        let (allowed, material_path) = match &interact {
+            Some(m) => (
+                !matches!(crate::tweaks::get(m, "m_bAllowedToHighlight"), Some(crate::tweaks::TVal::B(false))),
+                crate::tweaks::get_obj(m, "m_HighLightMaterial").filter(|s| !s.is_empty() && *s != "None").unwrap_or_default().to_string(),
+            ),
+            None => (true, String::new()),
+        };
+        let material = (!material_path.is_empty()).then(|| self.index.get(&material_path.to_ascii_lowercase()).copied()).flatten().and_then(|k| self.material(k));
+        // Instances name their component's path (`<actor path>.<component> [<class>]`) and their
+        // level package.
+        let prefix = format!("{}.", pkg.obj_path(ObjRef::Export(actor))).to_ascii_lowercase();
+        // Usables copy their skeletal mesh component (0x00A1C920, the `SkeletalProp`), pickups and
+        // keys their static one (0x00A1D8C0).
+        let skeletal = find(&h.properties, "SkeletalMeshComponent").is_some();
+        let instances = if skeletal { Vec::new() } else { self.map.instances.iter().enumerate().filter(|(_, inst)| inst.level.eq_ignore_ascii_case(&pkg.name) && inst.source.to_ascii_lowercase().starts_with(&prefix)).map(|(i, _)| i).collect() };
+        self.map.highlights.push(dishonored_ir::HighlightDef { actor: format!("{}:{}", pkg.name, name), placed, allowed, material_path, material, instances });
     }
 
     /// Decode a ParticleSystem by object path (gameplay effects requested by the caller).
@@ -1822,13 +1890,14 @@ impl Importer<'_> {
         let id = match read_static_mesh(&pkg, k.1) {
             Ok(raw) => {
                 let mut sections = Vec::new();
-                for s in &raw.sections {
+                for (si, s) in raw.sections.iter().enumerate() {
                     let mat = self.resolve(k.0, ObjRef::from_index(s.material)).and_then(|mk| self.material(mk));
                     sections.push(MeshSection {
                         first_index: s.first_index,
                         num_triangles: s.num_triangles,
                         material: mat,
                         enable_collision: s.enable_collision,
+                        material_index: si as u32,
                     });
                 }
                 // Lightmap UVs: the set named by `LightMapCoordinateIndex` (serialized when
@@ -2439,6 +2508,9 @@ impl crate::particles::ParticleCtx for Importer<'_> {
     fn package(&self, slot: usize) -> Arc<Package> {
         self.pkgs[slot].clone()
     }
+    fn loaded_packages(&self) -> Vec<Arc<Package>> {
+        self.pkgs.clone()
+    }
     fn resolve_ref(&mut self, slot: usize, r: ObjRef) -> Option<Key> {
         self.resolve(slot, r)
     }
@@ -2582,7 +2654,7 @@ impl Importer<'_> {
             sections: slots
                 .iter()
                 .zip(&raw.sections)
-                .map(|(&s, sec)| MeshSection { first_index: sec.first_index, num_triangles: sec.num_triangles, material: mesh_materials.get(s).copied().flatten(), enable_collision: false })
+                .map(|(&s, sec)| MeshSection { first_index: sec.first_index, num_triangles: sec.num_triangles, material: mesh_materials.get(s).copied().flatten(), enable_collision: false, material_index: s as u32 })
                 .collect(),
             collision_triangles: Vec::new(),
             collision_materials: Vec::new(),

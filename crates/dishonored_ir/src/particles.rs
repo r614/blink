@@ -75,6 +75,122 @@ impl Dist {
     pub fn eval1(&self, t: f32, r: f32) -> f32 {
         self.eval(t, r)[0]
     }
+
+    /// A vector value with the engine's per-component random draws (`RDO_Random` tables,
+    /// 0x0042ACA0 for `FRawDistributionVector::GetValue` 0x004353B0): one `appFrand` per axis
+    /// unless the table's `Type` locks axes together (`EDVLF_XY` 1, `XZ` 2, `YZ` 3, `XYZ` 4).
+    /// Constant and extreme tables are as [`Dist::eval`].
+    pub fn eval_rand(&self, t: f32, lock: u8, rnd: &mut dyn FnMut() -> f32) -> [f32; 3] {
+        if !self.ranged || self.extreme || self.dims != 3 {
+            return self.eval(t, rnd());
+        }
+        let r = match lock & 7 {
+            1 => {
+                let a = rnd();
+                [a, a, rnd()]
+            }
+            2 => {
+                let a = rnd();
+                let b = rnd();
+                [a, b, a]
+            }
+            3 => {
+                let a = rnd();
+                let b = rnd();
+                [a, b, b]
+            }
+            4 => {
+                let a = rnd();
+                [a, a, a]
+            }
+            _ => [rnd(), rnd(), rnd()],
+        };
+        [self.eval(t, r[0])[0], self.eval(t, r[1])[1], self.eval(t, r[2])[2]]
+    }
+}
+
+/// `DistributionFloatParticleParameter`: the value of a `ParticleSystemComponent` instance
+/// parameter (`SetFloatParameter`), mapped by `ParamMode` (0x005E1FA0,
+/// `DistributionFloatParameterBase::GetValue`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ParticleParam {
+    pub name: String,
+    /// Used when the instance has no such parameter.
+    pub constant: f32,
+    pub min_input: f32,
+    pub max_input: f32,
+    pub min_output: f32,
+    pub max_output: f32,
+    /// `DistributionParamMode`: 0 `DPM_Normal`, 1 `DPM_Abs`, 2 `DPM_Direct`.
+    pub mode: u8,
+}
+
+impl ParticleParam {
+    /// 0x005E1FA0: the instance's value (else `Constant`); `DPM_Direct` returns it, `DPM_Abs`
+    /// takes its absolute value first; otherwise it is clamped to [MinInput, MaxInput] and
+    /// mapped linearly onto [MinOutput, MaxOutput] (slope 0 when MinInput >= MaxInput).
+    pub fn value(&self, instance: Option<f32>) -> f32 {
+        let mut v = instance.unwrap_or(self.constant);
+        if self.mode == 2 {
+            return v;
+        }
+        if self.mode == 1 {
+            v = v.abs();
+        }
+        let (lo, hi) = (self.min_input, self.max_input);
+        let slope = if lo < hi { (self.max_output - self.min_output) / (hi - lo) } else { 0.0 };
+        let x = if lo <= v { if hi <= v { hi } else { v } } else { lo };
+        (x - lo) * slope + self.min_output
+    }
+}
+
+/// A `RawDistributionFloat` that may be a particle parameter: the cooked table, or (when its
+/// `Distribution` is a `DistributionFloatParticleParameter`, which the cooker cannot bake) the
+/// parameter (`FRawDistributionFloat::GetValue` 0x00434EF0 calls the distribution object then).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FloatDist {
+    pub table: Option<Dist>,
+    pub param: Option<ParticleParam>,
+}
+
+impl FloatDist {
+    pub fn value(&self, t: f32, r: f32, params: &dyn Fn(&str) -> Option<f32>) -> f32 {
+        match (&self.param, &self.table) {
+            (Some(p), _) => p.value(params(&p.name)),
+            (None, Some(d)) => d.eval1(t, r),
+            _ => 0.0,
+        }
+    }
+}
+
+/// `DisParticleModuleRainDrops` (DishonoredGame): drops kept inside a box about the emitter
+/// (the player camera moves the emitter, `DishonoredPlayerCamera::SetRainEmitter`).
+/// research/dishonored/systems/rain.md.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RainDrops {
+    /// `m_Extent`: half size of the box.
+    pub extent: [f32; 3],
+    /// `m_MaxParticles` (the camera's `MaxParticles` parameter).
+    pub max_particles: FloatDist,
+    /// `m_SpawnKillRate` (the camera's `SpawnKillRate` parameter).
+    pub spawn_kill_rate: FloatDist,
+    pub start_velocity: Option<Dist>,
+    pub start_color: Option<Dist>,
+    pub start_alpha: Option<Dist>,
+    pub start_size: Option<Dist>,
+    pub fading_rate: Option<Dist>,
+    /// The `Type` (axis lock) of the vector tables: velocity, colour, size.
+    pub locks: [u8; 3],
+    /// The module is the LOD's first module (`Modules[0]`): what `DisSeqAct_SetRainEmitter`
+    /// (0x00B9ADF0) requires of the template's first emitter.
+    pub first_module: bool,
+}
+
+/// `DisParticleModuleRainImpacts`: particles placed at the impacts the camera traced.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RainImpacts {
+    /// `m_bFixedLocation`: the impact's (reflected) direction is added to the velocity.
+    pub fixed_location: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,6 +304,17 @@ pub struct ParticleEmitterAsset {
     /// `ParticleModuleEventReceiverSpawn`: events that spawn this emitter's particles.
     #[serde(default)]
     pub events_in: Vec<EventIn>,
+    /// `DisParticleModuleRainDrops`.
+    #[serde(default)]
+    pub rain_drops: Option<RainDrops>,
+    /// `DisParticleModuleRainImpacts`.
+    #[serde(default)]
+    pub rain_impacts: Option<RainImpacts>,
+    /// `ParticleModuleSizeMultiplyVelocity`: `VelocityMultiplier` (over relative time) and
+    /// MultiplyX/Y/Z: Size *= multiplier x |Velocity| on the enabled axes, at spawn and every
+    /// update.
+    #[serde(default)]
+    pub size_mult_velocity: Option<(Dist, [bool; 3])>,
     /// Module classes present but not simulated (for the import report).
     pub unsupported: Vec<String>,
 }

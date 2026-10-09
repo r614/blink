@@ -36,6 +36,9 @@ pub mod post;
 /// possession, choke, Windblast, powers, climbing, locks).
 #[path = "kismet_host/player_events.rs"]
 pub mod player_events;
+/// What the clients draw of the Kismet: highlights, the camera's rain emitter, the camera fade.
+#[path = "kismet_host/presentation.rs"]
+pub mod presentation;
 use dishonored_ai::BrainState;
 use dishonored_ir::ai::DAL_BUSTED;
 use dishonored_kismet::host::Matinee;
@@ -89,13 +92,6 @@ pub const PRESENTATION: &[&str] = &[
     "DisSeqAct_GetPlayerStat",
     "DisSeqAct_ToggleJournal",
     "DisSeqAct_TogglePowerWheel",
-    // The usable's highlight (0x00B8F4C0 -> 0x00A30710 / 0x00A30740: flag 2 of the interactable's
-    // highlight mask; the first flag applies the interactable tweak's highlight material,
-    // 0x00A27FF0). Not rendered.
-    "DisSeqAct_Highlight",
-    // The player camera's rain emitter (0x00BA1770 -> 0x00B9ADF0: `m_NumRainDrops` impacts
-    // between `m_fRainImpactsMinDist` and `m_fRainImpactsMaxDist`). Not rendered.
-    "DisSeqAct_SetRainEmitter",
 ];
 
 /// Classes whose effect is on a system the port does not simulate (decoded; they finish with
@@ -442,6 +438,9 @@ pub struct HostState {
     /// `DisSeqAct_PostProcess`: the `eEffectPp` names the Kismet requires.
     #[serde(default)]
     pub post_effects: BTreeSet<String>,
+    /// Highlights, the camera's rain emitter and the camera fade (`presentation.rs`).
+    #[serde(default)]
+    pub show: presentation::Presentation,
 }
 
 /// A player's cinematic mode (`PlayerController.SetCinematicMode` 0x00 script, then
@@ -1124,6 +1123,17 @@ impl Host for H<'_> {
             "DisSeqAct_UberPostProcess" => {
                 post::uber(self, cx);
                 HostResult::Done
+            }
+            // The Kismet bit of the targets' highlight mask (presentation.rs).
+            "DisSeqAct_Highlight" => {
+                presentation::highlight(self, cx);
+                HostResult::Done
+            }
+            // The camera's rain box emitter; the latent update fires "Rain Start" / "Rain Stop"
+            // and never finishes (presentation.rs).
+            "DisSeqAct_SetRainEmitter" => {
+                presentation::set_rain_emitter(self, cx);
+                HostResult::Latent
             }
             "DisSeqAct_PostProcess" => {
                 post::effect(self, cx);
@@ -2755,8 +2765,10 @@ impl Host for H<'_> {
                 HostResult::Latent
             }
             "SeqAct_CameraFade" => {
-                // Not drawn; its timing is kept: "Out" now, "Finished" after FadeTime.
+                // The camera fade the clients draw (presentation.rs); "Out" now, "Finished" after
+                // FadeTime.
                 *self.st.presentation.entry(class).or_insert(0) += 1;
+                presentation::camera_fade(self, cx);
                 cx.fire(0);
                 let t = cx.prop_float("FadeTime");
                 self.st.fades.insert(cx.op, t);
@@ -3197,10 +3209,12 @@ impl Host for H<'_> {
                 self.st.factories.insert(cx.op, (points, n, spawned, delay));
                 false
             }
+            "DisSeqAct_SetRainEmitter" => presentation::rain_update(self, cx, dt),
             "SeqAct_CameraFade" => {
                 let left = self.st.fades.get(&cx.op).copied().unwrap_or(0.0) - dt;
                 if left <= 0.0 {
                     self.st.fades.remove(&cx.op);
+                    presentation::camera_fade_done(self, cx);
                     cx.fire(1);
                     true
                 } else {
@@ -3611,6 +3625,7 @@ pub fn step(m: &mut MissionMatch, sim_events: &[SimEvent], dt: f32, cfg: &SimCon
             let ratio = if player != 0.0 { world / player } else { 1.0 };
             k.tick_dilated(&mut h, dt * player, ratio);
             h.st.post.step(dt * player); // FUN_00bef9b0, the post manager's Kismet slot
+            presentation::step_and_view(&mut h, dt * player); // camera fade, highlights, rain
             cutscene::apply(k, &mut h); // [interp]
             apply_streaming(k, &mut h); // [streaming]
             h.drain_spawns(k);
@@ -5625,5 +5640,122 @@ mod tests {
         r.feed_events(&[], 2);
         assert_eq!((r.ran(alt_sinks[0]), r.ran(alt_sinks[1])), (1, 1), "Interact");
         assert!(dead_sinks.iter().all(|s| r.ran(*s) == 0), "an event without an Originator is registered with nobody");
+    }
+
+    // ----- presentation (presentation.rs): what the clients draw -----
+
+    impl Rig {
+        /// `presentation::step_and_view` as `step` runs it after the interpreter.
+        fn show(&mut self, dt: f32) -> crate::MatchView {
+            let setup = self.run.setup.clone();
+            let db = self.run.k.db.clone();
+            let KismetRun { st, .. } = &mut self.run;
+            let mut h = H { m: &mut self.m, st, setup, cfg: &self.cfg, db };
+            presentation::step_and_view(&mut h, dt);
+            self.m.view.clone()
+        }
+    }
+
+    /// `Start` -> `class` (input 0) with an actor of `actor_class` linked as "Target".
+    fn start_on_actor(g: &mut GraphBuilder, class: &str, inputs: &[&str], outputs: &[&str], actor_class: &str, name: &str) -> (OpId, u32) {
+        let e = g.remote_event("Start");
+        let op = g.op(class);
+        g.inputs(op, inputs);
+        g.outputs(op, outputs);
+        g.link(e, 0, op, 0);
+        let a = g.actor(actor_class, name, [10.0, 20.0, 30.0], 0);
+        let v = g.var("SeqVar_Object");
+        g.set(v, "ObjValue", Value::Obj(Obj::Actor(a)));
+        g.vars(op, "Target", "Targets", &[v]);
+        (op, a)
+    }
+
+    #[test]
+    fn highlight_sets_and_clears_the_kismet_bit() {
+        let mut g = GraphBuilder::new();
+        let (op, a) = start_on_actor(&mut g, "DisSeqAct_Highlight", &["Highlight", "UnHighlight"], &["Out"], "DishonoredUsableObject", "DishonoredUsableObject_3");
+        let mut r = Rig::new(g, |_| {});
+        assert!(r.show(0.1).highlights.is_empty());
+        r.play(1);
+        assert!(r.run.st.show.highlighted.contains(&a));
+        let v = r.show(0.1);
+        assert_eq!(v.highlights, vec![crate::HighlightView { actor: "T:DishonoredUsableObject_3".into(), placed: [10.0, 20.0, 30.0] }]);
+        // UnHighlight.
+        r.run.k.activate_input(op, 1);
+        r.play(1);
+        assert!(r.show(0.1).highlights.is_empty());
+        // Highlighted again, then picked up / destroyed: no longer drawn.
+        r.run.k.activate_input(op, 0);
+        r.play(1);
+        r.run.st.gone.insert(a);
+        assert!(r.show(0.1).highlights.is_empty());
+    }
+
+    #[test]
+    fn camera_fade_out_persists_and_fades_back_in() {
+        let mut g = GraphBuilder::new();
+        let e = g.remote_event("Start");
+        let out = g.op("SeqAct_CameraFade");
+        g.inputs(out, &["In"]);
+        g.outputs(out, &["Out", "Finished"]);
+        g.set(out, "FadeOpacity", Value::Float(1.0));
+        g.set(out, "FadeTime", Value::Float(0.25));
+        g.set(out, "bPersistFade", Value::Bool(true));
+        g.set(out, "FadeColor", Value::Array(vec![Value::Byte(0), Value::Byte(0), Value::Byte(0), Value::Byte(255)]));
+        g.link(e, 0, out, 0);
+        let back = g.op("SeqAct_CameraFade");
+        g.inputs(back, &["In"]);
+        g.outputs(back, &["Out", "Finished"]);
+        g.set(back, "FadeOpacity", Value::Float(0.0));
+        g.set(back, "FadeTime", Value::Float(0.5));
+        g.set(back, "bPersistFade", Value::Bool(true));
+        // Fade out -> "Finished" -> fade back in (the teleport's place).
+        g.link(out, 1, back, 0);
+        let done = g.sink();
+        g.link(back, 1, done, 0);
+        let mut r = Rig::new(g, |_| {});
+        assert!(r.show(0.1).camera_fade.is_none(), "no fade before the Kismet starts one");
+        r.play(1);
+        let v = r.show(0.1).camera_fade.expect("fading");
+        assert_eq!((v.alpha, v.time, v.color), ([0.0, 1.0], 0.25, [0.0, 0.0, 0.0]));
+        assert!((v.amount - 0.4).abs() < 1e-5, "0.1 s of 0.25: {}", v.amount);
+        r.show(0.2);
+        assert_eq!(r.run.st.show.fade.amount, 1.0, "black");
+        // The fade out finishes; the fade in starts from black.
+        r.play(3);
+        let v = r.show(0.25).camera_fade.expect("fading in");
+        assert_eq!(v.alpha, [1.0, 0.0]);
+        assert!((v.amount - 0.5).abs() < 1e-5);
+        // Finished with a zero opacity: not persisted, the fade is cleared.
+        r.play(6);
+        assert_eq!(r.ran(done), 1);
+        assert!(r.show(0.1).camera_fade.is_none());
+        assert_eq!(r.run.st.show.fade.amount, 0.0);
+    }
+
+    #[test]
+    fn rain_emitter_starts_and_stops_with_the_cover() {
+        let mut g = GraphBuilder::new();
+        let (op, _) = start_on_actor(&mut g, "DisSeqAct_SetRainEmitter", &["In"], &["Out", "Rain Start", "Rain Stop"], "Emitter", "Emitter_17");
+        g.set(op, "m_NumRainDrops", Value::Int(40));
+        g.set(op, "m_fRainStartDelay", Value::Float(1.0));
+        let (start, stop) = (g.sink(), g.sink());
+        g.link(op, 1, start, 0);
+        g.link(op, 2, stop, 0);
+        let mut r = Rig::new(g, |_| {});
+        r.play(1);
+        let v = r.show(0.1).rain.expect("rain");
+        assert_eq!((v.emitter.as_str(), v.drops, v.impacts_min, v.impacts_max, v.direction, v.rotation), ("T:Emitter_17", 40, 100.0, 1000.0, [0.0, 0.0, -1.0], None));
+        // Covered: nothing; uncovered for the start delay: "Rain Start" once.
+        r.play(5);
+        assert_eq!((r.ran(start), r.ran(stop)), (0, 0));
+        r.run.st.show.uncovered = true;
+        r.play(15);
+        assert_eq!((r.ran(start), r.ran(stop)), (1, 0));
+        // Under a roof again: "Rain Stop"; the action never finishes.
+        r.run.st.show.uncovered = false;
+        r.play(1);
+        assert_eq!((r.ran(start), r.ran(stop)), (1, 1));
+        assert_eq!(r.ran(op), 1);
     }
 }

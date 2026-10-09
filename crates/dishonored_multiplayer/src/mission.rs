@@ -1742,6 +1742,7 @@ impl MissionMatch {
             }
             self.sync_darkness(cfg);
             let climbables: Vec<String> = world.climbables().iter().map(|c| c.name.clone()).collect();
+            kismet_host::presentation::rain_cover(self, world, cfg); // [kismet] the camera's rain cover test
             kismet_host::step(self, &out.events, dt, cfg, &climbables); // [kismet]
             self.sync_darkness(cfg);
             save::tick(self, dt, &cfg.gameplay.items.combat_save); // [save] autosaves
