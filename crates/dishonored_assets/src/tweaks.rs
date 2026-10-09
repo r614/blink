@@ -297,6 +297,30 @@ impl TweakDb {
         self.resolve(path).ok()
     }
 
+    /// The classes (with a CDO) that descend from `base`, base included, sorted.
+    pub fn subclasses_of(&self, base: &str) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .cdos
+            .keys()
+            .filter(|c| {
+                let mut cur = c.as_str();
+                for _ in 0..32 {
+                    if cur == base {
+                        return true;
+                    }
+                    match self.supers.get(cur) {
+                        Some(s) => cur = s,
+                        None => return false,
+                    }
+                }
+                false
+            })
+            .cloned()
+            .collect();
+        v.sort();
+        v
+    }
+
     pub fn paths_with_class(&self, class: &str) -> Vec<String> {
         let mut v: Vec<String> = self
             .objects

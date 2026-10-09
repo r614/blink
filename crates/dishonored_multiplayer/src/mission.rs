@@ -262,6 +262,9 @@ pub struct MissionSetup {
     /// Breakables, whale oil batteries and receptacles of each mission map (lowercase name).
     #[serde(default)]
     pub world_actors: BTreeMap<String, dishonored_ir::world_actors::WorldActors>,
+    /// Door keyholes and tripwires of each mission map (lowercase name).
+    #[serde(default)]
+    pub interactables: BTreeMap<String, dishonored_ir::interactables::Interactables>,
     /// [streaming] Each mission map's (lowercase name) Kismet-streamed sublevels
     /// (`LevelStreamingKismet` packages): not in the world until the Kismet streams them in.
     #[serde(default)]
@@ -430,7 +433,7 @@ impl MissionSetup {
                 }
             }
         }
-        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances, pickups: BTreeMap::new(), usables: Vec::new(), world_actors: BTreeMap::new(), streamed_levels: BTreeMap::new(), anim_profiles, kismet: None, ai_levels: maps.iter().map(|m| (m.name.to_ascii_lowercase(), m.ai_level.clone())).collect(), routes: maps
+        Ok(MissionSetup { def, markers, marker_map, start_map, starts, npcs, npc_map, crowd, crowd_map, maps: maps.iter().map(|m| m.name.clone()).collect(), doors, tagged_starts: tagged, conversations: None, flee, original, appearances, pickups: BTreeMap::new(), usables: Vec::new(), world_actors: BTreeMap::new(), interactables: BTreeMap::new(), streamed_levels: BTreeMap::new(), anim_profiles, kismet: None, ai_levels: maps.iter().map(|m| (m.name.to_ascii_lowercase(), m.ai_level.clone())).collect(), routes: maps
                 .iter()
                 .map(|m| {
                     // Snapped to the floor as `Crowd::set_routes` does for the crowd's map.
@@ -533,6 +536,13 @@ pub struct MissionMatch {
     /// [world] What they reported this step (the Kismet host fires the events).
     #[serde(skip)]
     pub world_events: Vec<dishonored_sim::world_actors::WorldEvent>,
+    /// [world] Keyhole peeks, hold times and tripped tripwires of each visited map (lowercase
+    /// name), saved with the match.
+    #[serde(default)]
+    pub interactables: BTreeMap<String, dishonored_sim::interactables::InteractablesState>,
+    /// [world] What they reported this step (the Kismet host fires the events).
+    #[serde(skip)]
+    pub interact_events: Vec<dishonored_sim::interactables::InteractEvent>,
     /// Mover collision placed where the movers are: (actor, delta) and, in the same order, the
     /// placed collision (rebuilt when a mover moves).
     #[serde(skip)]
@@ -593,6 +603,8 @@ impl MissionMatch {
             bark_voices: BTreeMap::new(),
             world_actors: BTreeMap::new(),
             world_events: Vec::new(),
+            interactables: BTreeMap::new(),
+            interact_events: Vec::new(),
             mover_keys: Vec::new(),
             mover_worlds: Vec::new(),
             levels_visible: BTreeSet::new(),
@@ -1226,6 +1238,7 @@ impl MissionMatch {
             .collect();
         kismet_host::cinematic_inputs(self, &mut all); // [kismet] SeqAct_ToggleCinematicMode
         kismet_host::track_views(self, &mut all, dt); // [kismet] DisSeqAct_PlayerTrackTarget
+        self.lock_peeking_inputs(&mut all); // [world] a pawn at a keyhole
         // Movers (`InterpActor`s) collide where the Kismet has moved them.
         self.place_movers(world);
         let placed = std::mem::take(&mut self.mover_worlds);
@@ -1252,6 +1265,8 @@ impl MissionMatch {
         all.extend(thought);
         self.crowd.write_awareness(&mut self.world);
         let out = step_world(&mut self.world, &all, world, cfg);
+        // [world] Tripwires touched or damaged, keyhole holds and peeks.
+        self.step_interactables(&all, &out.events, cfg, dt);
         // [world] Breakables, batteries and receptacles of the active map: explosions damage the
         // breakables, the receptacles plug their placed batteries, steps break.
         let key = self.current_map.to_ascii_lowercase();
@@ -1298,6 +1313,15 @@ impl MissionMatch {
                 events.push(MissionEvent::Choice { player: *id, index: k });
             }
             let pressed = inp.buttons & dishonored_sim::input::buttons::USE != 0;
+            // At a keyhole Use is the exit (Dis_ExitKeyhole), not a use of what is nearby.
+            if self.is_peeking(*id) {
+                if pressed {
+                    self.use_held.insert(*id);
+                } else {
+                    self.use_held.remove(id);
+                }
+                continue;
+            }
             // A Use that took a prop in the hands or let go of one did nothing else (the Use handler
             // 0x00AD5BA0 returns after the grab / drop).
             let prop_use = out.events.iter().any(|e| matches!(e, SimEvent::MovablePickedUp { id: p, .. } | SimEvent::MovableDropped { id: p, .. } if p == id));

@@ -54,6 +54,8 @@ pub struct MatchContent {
     pub usables: Vec<dishonored_multiplayer::mission::UsableDef>,
     /// Breakables, whale oil batteries and receptacles of the map's levels.
     pub world_actors: dishonored_ir::world_actors::WorldActors,
+    /// Door keyholes and tripwires of the map's levels.
+    pub interactables: dishonored_ir::interactables::Interactables,
 }
 
 // [playground] Maps built from a layout of original assets (`maps/*.ron`).
@@ -479,6 +481,16 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
             w
         }
     };
+    // Door keyholes and tripwires (dishonored_sim::interactables).
+    let ia_path = dir.join(format!("{map}.interactables2.json"));
+    let interactables: dishonored_ir::interactables::Interactables = match std::fs::read_to_string(&ia_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
+        Some(w) => w,
+        None => {
+            let w = dishonored_assets::interactables::extract_interactables(&content, &level_pkgs()).unwrap_or_default();
+            std::fs::write(&ia_path, serde_json::to_string(&w)?).ok();
+            w
+        }
+    };
     // Placed pickups (with the spawners that carry one), cached per map.
     let pickup_path = dir.join(format!("{map}.pickups2.json"));
     let pickups: Vec<dishonored_ir::items::PlacedPickup> = match std::fs::read_to_string(&pickup_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
@@ -490,7 +502,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
             p
         }
     };
-    Ok(MatchContent { map_name: map.to_string(), collision, levels, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts, flee_points, spawners, routes: npcs.routes.clone(), ai_level, pickups, usables: Vec::new(), world_actors })
+    Ok(MatchContent { map_name: map.to_string(), collision, levels, spawns, sim, ai_points, guard_spawns, markers, travel, tagged_starts, flee_points, spawners, routes: npcs.routes.clone(), ai_level, pickups, usables: Vec::new(), world_actors, interactables })
 }
 
 /// A distractor's soiree matinee (`m_pDistractionMatineeData`, an export of the distractor's
@@ -690,6 +702,7 @@ pub fn mission_setup(maps: &MapContents, def: dishonored_mission::MissionDef) ->
         if let Some(mc) = maps.get(&name) {
             setup.pickups.insert(name.to_ascii_lowercase(), mc.pickups.clone());
             setup.world_actors.insert(name.to_ascii_lowercase(), mc.world_actors.clone());
+            setup.interactables.insert(name.to_ascii_lowercase(), mc.interactables.clone());
             setup.streamed_levels.insert(name.to_ascii_lowercase(), mc.levels.levels.iter().map(|l| l.0.clone()).collect());
             setup.usables.extend(mc.usables.iter().cloned());
         }

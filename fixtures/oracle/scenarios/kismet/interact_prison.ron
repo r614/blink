@@ -1,0 +1,19 @@
+// Interact events (research/dishonored/systems/interactables.md): the Prison's four `DisSeqEvent_Interact`
+// (HUD-Notes-Tutorials, Objectives) have no `Originator`. `FireGeneratedEvents(user, ...)` (0x00BC7B30, called
+// by 0x00A3DF60 / 0x00A3E0B0 from the Use handler 0x00AD5BA0) walks the user pawn's GeneratedEvents, and
+// `SequenceEvent::RegisterEvent` (0x006E50B0) adds an event to its Originator's list only: these four are in
+// nobody's list. Decoded: they never fire. Needs the capture to confirm against the running original.
+(
+    name: "kismet/interact_prison",
+    system: Kismet,
+    map: "L_Prison_P",
+    description: "Use pressed at the Prison start: no DisSeqEvent_Interact (all four lack an Originator) activates.",
+    setup: (kismet: true, kismet_start: Some("ChangeLvl_fromTower_toPrison"), original_npcs: false, seed: 1, settle: 30),
+    ticks: 240,
+    input: [(tick: 30, hold: 3, action: Press(Use)), (tick: 90, hold: 40, action: Press(Use))],
+    checkpoints: [
+        (name: "never", expect: [(metric: Count("Kismet:Activated@*DisSeqEvent_Interact*"), value: 0, tol: 0, source: "decoded 0x006E50B0: an event without an Originator is registered with no actor, so FireGeneratedEvents(user) never reaches it", status: Unmeasured)]),
+    ],
+    record: [Pawn, Kismet, SimEvents],
+    capture: Some("Prison after ChangeLvl_fromTower_toPrison, Use tapped and held at the start and at the first pickup: ProcessEvent trace of DisSeqEvent_Interact activations (expected none) and of 0x00A3DF60 / 0x00A3E0B0 calls"),
+)

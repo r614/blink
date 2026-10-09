@@ -238,14 +238,17 @@ pub fn camera_follow(
         // Look comes from local input (immediate) for the local player, otherwise from
         // the followed player's replicated view.
         let (yaw, pitch) = if me.id == local_me.id && local.override_input.is_none() && !session_is_spectating(&view) { (local.yaw, local.pitch) } else { (me.yaw, me.pitch.min(10.0) - 10.0) };
-        let eye = coords::pos(eye_position(me, mv));
+        // At a keyhole the eye is the socket (StatePlayerMasterHolePeeking, interactables.md).
+        let peek = crate::tripwires::peek_view(&view).filter(|_| me.id == local_me.id);
+        let eye = peek.map(|v| coords::pos(v.eye)).unwrap_or_else(|| coords::pos(eye_position(me, mv)));
         let fwd = coords::dir(dishonored_sim::movement::view_vector(yaw, pitch));
         // Harness: DISH_TP_ORBIT=<deg> orbits the third-person camera around the followed pawn.
         let orbit = req_orbit.or_else(|| std::env::var("DISH_TP_ORBIT").ok().and_then(|s| s.parse::<f32>().ok())).unwrap_or(0.0);
         let ofwd = Quat::from_rotation_y(orbit.to_radians()) * fwd;
-        let pos = if cam.third_person { eye - ofwd * dist + Vec3::Y * height } else { eye };
-        *t = Transform::from_translation(pos).looking_to(if cam.third_person { ofwd } else { fwd }, Vec3::Y);
-        if !cam.third_person {
+        let pos = if cam.third_person && peek.is_none() { eye - ofwd * dist + Vec3::Y * height } else { eye };
+        let third = cam.third_person && peek.is_none();
+        *t = Transform::from_translation(pos).looking_to(if third { ofwd } else { fwd }, Vec3::Y);
+        if !third && peek.is_none() {
             // Lean tilt (`m_fCameraTiltPercent`): a right lean rolls the view clockwise.
             t.rotate_local_z(-dishonored_sim::movement::lean_roll(me, mv).to_radians());
         }

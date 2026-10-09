@@ -2885,15 +2885,41 @@ pub struct BlackShroud {
     pub mc: Id,
     pub opened: bool,
     interval_close: Option<u32>,
+    /// Driven by a keyhole peek (its black fade), not the stealth shroud.
+    peeking: bool,
 }
 
 impl BlackShroud {
     pub fn new(st: &mut Stage, mc: Id) -> Self {
         st.set_visible(mc, false);
         st.set(mc, Prop::Alpha, 0.0);
-        Self { mc, opened: false, interval_close: None }
+        Self { mc, opened: false, interval_close: None, peeking: false }
+    }
+    /// A keyhole peek's black fade (0..1) over the screen (StatePlayerMasterHolePeeking,
+    /// 0x00A72D50 / 0x00A63400: the camera fades to black, the view switches, the fade clears);
+    /// None gives the shroud back to the stealth state.
+    pub fn peek(&mut self, st: &mut Stage, fade: Option<f32>) {
+        match fade {
+            Some(a) => {
+                clear(st, &mut self.interval_close);
+                self.peeking = true;
+                self.opened = true;
+                st.set_visible(self.mc, a > 0.0);
+                st.set(self.mc, Prop::Alpha, a.clamp(0.0, 1.0) * 100.0);
+            }
+            None if self.peeking => {
+                self.peeking = false;
+                self.opened = false;
+                st.set_visible(self.mc, false);
+                st.set(self.mc, Prop::Alpha, 0.0);
+            }
+            None => {}
+        }
     }
     pub fn set(&mut self, st: &mut Stage, open: bool) {
+        if self.peeking {
+            return;
+        }
         if open == self.opened {
             return;
         }
@@ -3105,6 +3131,9 @@ impl DirectionalDamages {
 pub struct HudFxWidgets {
     pub shroud: Option<BlackShroud>,
     pub damages: Option<DirectionalDamages>,
+    /// The keyhole's frame: keyHole_mc and the two black rectangles beside it.
+    keyhole: Vec<Id>,
+    keyhole_up: bool,
 }
 
 impl HudFxWidgets {
@@ -3112,13 +3141,32 @@ impl HudFxWidgets {
         let root = st.root;
         let shroud = st.child(root, "blackShroud_mc").map(|m| BlackShroud::new(st, m));
         let damages = st.child(root, "directionalDamages_mc").map(|m| DirectionalDamages::new(st, m));
-        // `KeyHole` (keyhole spying) is not driven: hidden as its constructor leaves it.
+        // `KeyHole` (keyhole spying): hidden as its constructor leaves it, shown while the eye is
+        // at a keyhole (`show_keyhole`).
+        let mut keyhole = Vec::new();
         for n in ["keyHole_mc", "_black_rectangle0_mc", "_black_rectangle1_mc"] {
             if let Some(m) = st.child(root, n) {
                 st.set_visible(m, false);
+                keyhole.push(m);
             }
         }
-        Self { shroud, damages }
+        Self { shroud, damages, keyhole, keyhole_up: false }
+    }
+    /// The keyhole frame (the keyhole shape with a black rectangle on each side) over the view
+    /// while the player peeks, and the peek's black fade over it (`fade` 0..1; None: not
+    /// peeking). The frame comes up once the screen has gone black (the view switches there,
+    /// 0x00A63400) and goes with the peek.
+    pub fn show_keyhole(&mut self, st: &mut Stage, fade: Option<f32>) {
+        let up = fade.is_some() && (self.keyhole_up || fade.is_some_and(|f| f >= 1.0));
+        if up != self.keyhole_up {
+            self.keyhole_up = up;
+            for m in &self.keyhole {
+                st.set_visible(*m, up);
+            }
+        }
+        if let Some(s) = self.shroud.as_mut() {
+            s.peek(st, fade);
+        }
     }
     pub fn on_event(&mut self, st: &mut Stage, k: u64) {
         let (w, code, arg) = split(k);

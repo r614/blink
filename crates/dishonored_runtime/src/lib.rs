@@ -76,6 +76,7 @@ pub mod audio;
 pub mod level;
 #[doc(hidden)]
 pub mod level_props;
+pub mod tripwires;
 #[doc(hidden)]
 pub mod decals;
 #[doc(hidden)]
@@ -420,7 +421,11 @@ pub fn main() {
     .add_systems(Update, (atmosphere::update_fog, lighting::animate_flicker, level::apply_streaming))
     // Doors and usable objects (skeletal meshes), posed for their state.
     .init_resource::<level_props::LevelProps>()
-    .add_systems(Update, (level_props::spawn_props, level_props::pose_props).chain());
+    .add_systems(Update, (level_props::spawn_props, level_props::pose_props).chain())
+    // Tripwire beams (interactables.md).
+    .init_resource::<tripwires::TripwireBeams>()
+    .add_systems(Update, tripwires::sync_beams.run_if(resource_exists::<session::SessionView>))
+    .add_systems(Update, tripwires::sync_peek_look.before(input_map::gather_input).run_if(resource_exists::<session::SessionView>).run_if(resource_exists::<input_map::LocalInput>));
 
     if args.mode == Mode::Inspect {
         let mut runner = harness::ScriptRunner { out_dir: args.out.clone(), ..default() };

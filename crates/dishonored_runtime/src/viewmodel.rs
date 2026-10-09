@@ -1912,9 +1912,11 @@ pub fn place_held_bodies(
 
 /// Keep every perspective camera at the original's horizontal FOV for the current aspect
 /// (Bevy's `fov` is vertical).
-pub fn apply_fov(mut cams: Query<&mut Projection, (With<Camera3d>, Without<crate::reflect::ReflectCamera>)>, settings: Option<Res<crate::settings::GameSettings>>) {
+pub fn apply_fov(mut cams: Query<&mut Projection, (With<Camera3d>, Without<crate::reflect::ReflectCamera>)>, settings: Option<Res<crate::settings::GameSettings>>, view: Option<Res<crate::session::SessionView>>) {
     // Options -> Graphics -> FOV (`PSI_GraphicsPC_FOV`, default 75 = HORIZONTAL_FOV_DEG).
     let fov = settings.map(|s| s.s.graphics.fov).unwrap_or(HORIZONTAL_FOV_DEG);
+    // At a keyhole the peek's own field of view (`m_fKeyHoleFOV * (1 - magnification)`, 0x00A63400).
+    let fov = view.as_deref().and_then(crate::tripwires::peek_view).map(|v| v.fov).unwrap_or(fov);
     for mut p in &mut cams {
         if let Projection::Perspective(pp) = p.as_mut() {
             let v = 2.0 * ((fov.to_radians() * 0.5).tan() / pp.aspect_ratio.max(0.1)).atan();

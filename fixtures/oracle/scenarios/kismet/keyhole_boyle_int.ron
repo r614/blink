@@ -1,0 +1,28 @@
+// Keyholes (research/dishonored/systems/interactables.md): Use held at a shut door puts the eye to its
+// keyhole. `L_Boyle_Int_Audio:DisDoor_14` (closed, `m_fKeyHoleFOV` 75, mesh socket `KeyHole` facing -x) has a
+// `DisSeqEvent_KeyHoleUsed` (Main_Sequence.Doors.DisSeqEvent_KeyHoleUsed_1, one output "Out").
+// Decoded rule: `DisUseState_AltInteract` (0x00AD57E0) runs the door's `AltInteract` (interface slot 25,
+// 0x00A38580) once Use has been held `DisTweaks_PlayerInput.m_fAltInteractActivateTime` (0.3 s); it sets the
+// view through the socket and fires KeyHoleUsed output 0 (originator the door, instigator the pawn).
+// `StatePlayerMasterHolePeeking` (0x00A72D50 / 0x00A75BD0 / 0x00A63400): black fade, the field of view
+// becomes `m_fKeyHoleFOV * (1 - Attribute_KeyholePeepingMagnification)`; Use leaves (`Dis_ExitKeyhole`,
+// the HUD text "Use Exit Keyhole") and the exit method 0x00A2E4E0 fires output 1 (this event has no output 1).
+(
+    name: "kismet/keyhole_boyle_int",
+    system: Kismet,
+    map: "L_Boyle_Int_P",
+    description: "Hold Use facing DisDoor_14 of Boyle Int from 110 uu east: peek (KeyHoleUsed), then press Use to leave.",
+    setup: (player: Some((position: (110, -1805, 1100), yaw: 180, snap_to_floor: true)), kismet: true, kismet_start: Some("ChangeLvl_fromBoyleExterior_toBoyleInterior"), original_npcs: false, seed: 1, settle: 30),
+    ticks: 240,
+    input: [(tick: 10, hold: 90, action: Press(Use)), (tick: 150, hold: 3, action: Press(Use))],
+    checkpoints: [
+        (name: "peek", expect: [(metric: Count("Interact:PeekStart"), value: 1, tol: 0, source: "decoded 0x00AD57E0 / 0x00A38580: a hold of m_fAltInteractActivateTime on a shut keyhole door starts the peek", status: Static)]),
+        (name: "event", expect: [(metric: Count("Kismet:Activated@*Doors.DisSeqEvent_KeyHoleUsed_1[out=0]"), value: 1, tol: 0, source: "decoded 0x00A38580: KeyHoleUsed output 0, originator the door", status: Static)]),
+        (name: "field of view", expect: [(metric: Max("peek.fov"), value: 75, tol: 0.001, source: "decoded 0x00A63400: m_fKeyHoleFOV (75) x (1 - Attribute_KeyholePeepingMagnification (0))", status: Static)]),
+        (name: "left", expect: [(metric: Count("Interact:PeekEnd"), value: 1, tol: 0, source: "decoded Dis_ExitKeyhole 0x009EE510 / the state's FADE_OUT 0x00A75BD0 (0.3 s): Use leaves", status: Static)]),
+        (name: "time to peek", expect: [(metric: FirstAt("Interact:PeekStart"), value: 0.47, tol: 0.1, source: "port: Use pressed at tick 10 (0.17 s) + the hold time 0.3 s; the original counts from its own state begin", status: Unmeasured)]),
+        (name: "fade", expect: [(metric: Max("peek.fade"), value: 1, tol: 0.001, source: "decoded 0x00A72D50: the screen fades to black (0.2 s) before the view switches (0.3 s)", status: Unmeasured)]),
+    ],
+    record: [Pawn, Kismet, SimEvents],
+    capture: Some("Boyle Int after ChangeLvl_fromBoyleExterior_toBoyleInterior, player at (110, -1805, floor) yaw 180 (110 uu east of L_Boyle_Int_Audio:DisDoor_14), Use held 1.5 s: ProcessEvent trace of DisSeqEvent_KeyHoleUsed_1 and the door's AltInteract (0x00A38580), the controller's FOV and fade (0x00A63400), m_State of StatePlayerMasterHolePeeking per tick, then Use released and pressed again"),
+)
