@@ -738,6 +738,28 @@ pub struct PanicConfig {
     pub free_flight_time: f32,
     pub forbidden_angle_deg: f32,
     pub forbidden_radius: f32,
+    /// `m_eCaughtReaction` (`ECaughtReaction`): what the panic does when its flee finds no
+    /// destination (0x00afa310 -> 0x00af3470). Beg for every Boyle civilian tweak.
+    #[serde(default = "caught_beg")]
+    pub caught_reaction: CaughtReaction,
+    /// The Beg sub-state's `m_fTimeBeforeGivingUp` (GenericAction `DisNPCAnim_Beg`).
+    #[serde(default = "beg_time")]
+    pub beg_time: f32,
+}
+
+/// `ECaughtReaction`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CaughtReaction {
+    FleeAgain,
+    Beg,
+    Fight,
+}
+
+fn caught_beg() -> CaughtReaction {
+    CaughtReaction::Beg
+}
+fn beg_time() -> f32 {
+    3.0
 }
 
 /// `DisTweaks_AISubState_Flee`: how a behaviour's flee sub-state finds where to run
@@ -2198,7 +2220,7 @@ impl Default for AiConfig {
                 anim_lost_target: 3.7,
                 anim_corpse_check: 5.233333,
             },
-            panic: PanicConfig { cower_distance: 350.0, flee_point_claim_radius: 500.0, flee_interception_distance: 300.0, free_flight_time: 2.0, forbidden_angle_deg: 50.0, forbidden_radius: 500.0 },
+            panic: PanicConfig { cower_distance: 350.0, flee_point_claim_radius: 500.0, flee_interception_distance: 300.0, free_flight_time: 2.0, forbidden_angle_deg: 50.0, forbidden_radius: 500.0, caught_reaction: CaughtReaction::Beg, beg_time: 3.0 },
             escape_explosion: EscapeExplosionConfig::default(),
             combat: CombatAiConfig {
                 reachable_melee_range: 150.0,

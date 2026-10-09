@@ -266,6 +266,18 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
         out.panic.forbidden_angle_deg = get_f32(&m, "m_fForbiddenAngle").unwrap_or(out.panic.forbidden_angle_deg);
         out.panic.forbidden_radius = get_f32(&m, "m_fForbiddenRadius").unwrap_or(out.panic.forbidden_radius);
     }
+    if let Some(m) = beh("AI_BehaviorTweaks_Panic.TweaksBehavior_Panic_Civilian") {
+        out.panic.caught_reaction = match m.get("m_eCaughtReaction") {
+            Some(TVal::Name(n)) if n.ends_with("FleeAgain") => dishonored_ir::ai::CaughtReaction::FleeAgain,
+            Some(TVal::Name(n)) if n.ends_with("Fight") => dishonored_ir::ai::CaughtReaction::Fight,
+            Some(TVal::Name(n)) if n.ends_with("Beg") => dishonored_ir::ai::CaughtReaction::Beg,
+            _ => out.panic.caught_reaction,
+        };
+        prov.insert("ai.panic.caught_reaction".into(), format!("AI_BehaviorTweaks_Panic.TweaksBehavior_Panic_Civilian.m_eCaughtReaction = {:?}", out.panic.caught_reaction));
+    }
+    if let Some(m) = beh("AI_BehaviorTweaks_Panic.TweaksBehavior_Panic_Civilian.DisTweaks_AISubState_GenericAction_3") {
+        out.panic.beg_time = get_f32(&m, "m_fTimeBeforeGivingUp").unwrap_or(out.panic.beg_time);
+    }
     // `DisBehaviorEscapeExplosion` (slot Preserve): unset values keep the archetype's and class
     // defaults the config defaults hold.
     const ESCAPE: &str = "AI_BhvrTwk_EscapeExplosion.TweakBehaviors_EscapeExplosion_Default";

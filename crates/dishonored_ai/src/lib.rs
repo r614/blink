@@ -408,6 +408,9 @@ pub struct Brain {
     pub flee_point: Option<usize>,
     #[serde(default)]
     pub flee_reached: bool,
+    /// The flee sub-state searched its destination (0x00b3bea0 runs once per flee start).
+    #[serde(default)]
+    pub flee_searched: bool,
     /// Time left before the first pistol shot is allowed (`m_GunUsageStart`, `m_fGunTimer`).
     #[serde(default)]
     pub gun_timer: f32,
@@ -1780,6 +1783,7 @@ impl Brain {
         routine_started: 0,
         flee_point: None,
         flee_reached: false,
+            flee_searched: false,
             gun_timer: -1.0,
             hostile_faction: Vec::new(),
             deaf: false,
@@ -3394,10 +3398,13 @@ impl Brain {
         let from = self.threat_pos.unwrap_or(me.position);
         if cower {
             let enemy_close = self.enemies.iter().filter_map(|h| ws.player(*h)).any(|p| p.alive && p.position.distance(me.position) < ai.panic.cower_distance * 1.5);
-            if !enemy_close && self.timer > 1.0 {
+            // The begging (or cowering) ends after the Beg sub-state's give-up time; the flee
+            // starts over with a new search.
+            if !enemy_close && self.timer > ai.panic.beg_time {
                 set_cower(self, false);
                 self.timer = ai.panic.free_flight_time;
                 self.goal = None;
+                self.flee_searched = false;
             }
             self.state = self.project();
             let mut i = face(from);
@@ -3417,9 +3424,32 @@ impl Brain {
             self.complete(slot::ESCAPE);
             return idle;
         }
-        // Free flight straight away from the threat first, then a flee point.
+        // Free flight straight away from the threat first, then a flee point (searched once,
+        // 0x00b41a10 -> 0x00b3bea0). None found or the way failing is `PathingFail` (0x00afa310):
+        // `DDH_PANIC_NOWHERE_TO_HIDE`, then the tweak's caught reaction (0x00af3470).
+        if (self.goal.is_none() && self.flee_searched && self.timer >= ai.panic.free_flight_time) || (self.goal.is_some() && self.follow.failed) {
+            self.barks.push(("DDH_PANIC_NOWHERE_TO_HIDE".into(), Some(self.id)));
+            self.goal = None;
+            self.follow.clear();
+            match ai.panic.caught_reaction {
+                dishonored_ir::ai::CaughtReaction::Beg => {
+                    set_cower(self, true);
+                    self.timer = 0.0;
+                    self.state = self.project();
+                    return face(from);
+                }
+                dishonored_ir::ai::CaughtReaction::FleeAgain => self.flee_searched = false,
+                dishonored_ir::ai::CaughtReaction::Fight => {
+                    self.flee_searched = false;
+                    self.threat_pos = None;
+                    self.complete(slot::ESCAPE);
+                    return idle;
+                }
+            }
+        }
         if self.timer < ai.panic.free_flight_time || self.goal.is_none() {
-            if self.goal.is_none() {
+            if self.goal.is_none() && !self.flee_searched {
+                self.flee_searched = true;
                 self.goal = self.pick_flee_point(me, from, layout, nav, ai);
             }
             if self.timer < ai.panic.free_flight_time {
@@ -3500,7 +3530,7 @@ impl Brain {
                 continue;
             }
             let forbidden = to_threat.length() < ai.panic.forbidden_radius && dir.angle_to(to_threat).abs().to_degrees() < ai.panic.forbidden_angle_deg;
-            if forbidden || fp.distance(threat) < me.position.distance(threat) {
+            if forbidden {
                 continue;
             }
             if let Some(n) = nav {
@@ -3514,17 +3544,12 @@ impl Brain {
                 best_i = fi;
             }
         }
-        if let Some((_, p)) = best {
+        // No flee point: "No Flee Destination found" (the panic flee sub-states have
+        // `m_bUseSystemicFlee` off), the caller's `PathingFail`.
+        best.map(|(_, p)| {
             self.flee_point = Some(best_i);
-            return Some(p);
-        }
-        let away = (me.position - threat).truncate().normalize_or_zero();
-        let away = if away == glam::Vec2::ZERO { glam::Vec2::new(1.0, 0.0) } else { away };
-        let p = me.position + Vec3::new(away.x, away.y, 0.0) * 1500.0;
-        match nav {
-            Some(n) => n.closest_point(p, 800.0).map(|(_, q)| q + Vec3::Z * 90.0),
-            None => Some(p),
-        }
+            p
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

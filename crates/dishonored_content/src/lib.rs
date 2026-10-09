@@ -108,7 +108,8 @@ pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
     // v24: v23's vision regions / LOS period / ambient head loops (stealth.md section 17) plus `items.movable` (carrying props) and `ai.noise.prop_contacts / environment`.
     // v25: ai.escape_explosion (DisBehaviorEscapeExplosion, its flee sub-state, the surprise length).
     // v26: items.auto_equip_charm (m_bAutoEquipBoneCharm).
-    let path = cache_dir().join("gameplay_config.v26.json");
+    // v27: ai.panic.caught_reaction / beg_time.
+    let path = cache_dir().join("gameplay_config.v27.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);
