@@ -241,6 +241,8 @@ pub fn step_world(
         if !choking && !hands_busy && p.carrying.is_none() && p.holding.is_none() && p.just_pressed(&input, input::buttons::BLOCK) && p.mode == MoveMode::Walking && p.action_lock <= 0.0 && p.sword.phase == state::SwordPhase::Idle {
             if let Some(vi) = crosshair::choke_target(state, &p, cfg).and_then(|v| state.players.iter().position(|x| x.id == v)) {
                 takedown::start_choke(state, i, vi, g, &mut out.events);
+                // The choke state's enter (0x00A7AA00) ends a toggled sneak (0x00ACD960).
+                movement::cancel_sneak_toggle(&mut state.players[i], &ctx);
             }
         }
         // Use on a climbable chain (its interactable, 0x00A23130), on foot or in the air.

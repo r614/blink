@@ -2436,6 +2436,161 @@ impl OxygenGauge {
 }
 
 // =============================================================================================
+// InteractionGauge (hud_chGauge_, `interactionGauge_mc`; base InteractionGaugeBase): the hold
+// gauges of a usable (kind 1) and of the choke (kind 2), driven by the HUD's 0x00BA5B90 (open),
+// 0x00B94D40 (`SetGauge(value x 100)`) and 0x00B94C10 (`Close`)
+// =============================================================================================
+
+const W_IGAUGE: u16 = 18;
+const IG_CLOSED: u16 = 1;
+const IG_GLOW: u16 = 2;
+
+pub struct InteractionGauge {
+    pub mc: Id,
+    gauge: Option<Id>,
+    indic: Option<Id>,
+    mask: Option<Id>,
+    txt: Option<Id>,
+    bkgd_txt: Option<Id>,
+    glow: Option<Id>,
+    gauge_def_x: f32,
+    actionable: bool,
+    pub open: bool,
+    pub value: i32,
+    interval_close: Option<u32>,
+    interval_glow: Option<u32>,
+}
+
+impl InteractionGauge {
+    /// `_minGlow_alpha`, `_maxGlow_alpha`, `_glowDuration`.
+    const GLOW_MIN: f32 = 35.0;
+    const GLOW_MAX: f32 = 85.0;
+    const GLOW_DURATION: f32 = 0.3;
+
+    pub fn new(st: &mut Stage, mc: Id) -> Self {
+        let gauge = st.child(mc, "_gauge_mc");
+        let sub = |st: &Stage, n: &str| gauge.and_then(|g| st.child(g, n));
+        let s = Self {
+            mc,
+            gauge,
+            indic: sub(st, "_indic_mc"),
+            mask: sub(st, "_mask_mc"),
+            txt: sub(st, "_txt_mc"),
+            bkgd_txt: sub(st, "_bkgdTxt_mc"),
+            glow: sub(st, "_glow_mc"),
+            gauge_def_x: gauge.map_or(0.0, |g| st.get(g, Prop::X)),
+            actionable: false,
+            open: false,
+            value: 0,
+            interval_close: None,
+            interval_glow: None,
+        };
+        st.set_visible(mc, false);
+        st.set(mc, Prop::Alpha, 0.0);
+        s
+    }
+
+    /// `SetGauge(gaugeValue)`: the gears (actionable gauges), the mask and the indicator go to
+    /// frame `value + 1`.
+    pub fn set_gauge(&mut self, st: &mut Stage, value: i32) {
+        self.value = value;
+        let frame = (value + 1).to_string();
+        if self.actionable {
+            for n in ["_gear0_mc", "_gear1_mc", "_gear2_mc"] {
+                if let Some(g) = self.gauge.and_then(|g| st.child(g, n)) {
+                    st.goto_and_stop(g, &frame);
+                }
+            }
+        }
+        for m in [self.mask, self.indic].into_iter().flatten() {
+            st.goto_and_stop(m, &frame);
+        }
+    }
+
+    /// `Open(btnTag, isActionnableGauge)`: shown at 115 % and settling (0.5 s), the gauge
+    /// sliding in from 20 px left, the text background from 60 px right, the "HOLD <tag>" text,
+    /// blue (actionable) or red colours, the glow pulse. `text` is the converted "HOLD <key>".
+    pub fn open(&mut self, st: &mut Stage, text: &str, actionable: bool) {
+        st.set_visible(self.mc, true);
+        clear(st, &mut self.interval_close);
+        clear(st, &mut self.interval_glow);
+        self.actionable = actionable;
+        self.open = true;
+        self.set_gauge(st, 0);
+        st.set(self.mc, Prop::XScale, 115.0);
+        st.set(self.mc, Prop::YScale, 115.0);
+        st.tween_end(self.mc, false);
+        st.tween_to(self.mc, 0.5, &[(Prop::YScale, 100.0), (Prop::XScale, 100.0), (Prop::Alpha, 100.0)], Ease::StrongOut, None);
+        if let Some(g) = self.gauge {
+            st.tween_end(g, false);
+            st.set(g, Prop::Alpha, 100.0);
+            st.set(g, Prop::X, self.gauge_def_x - 20.0);
+            st.set(g, Prop::XScale, 100.0);
+            st.set(g, Prop::YScale, 100.0);
+            st.tween_to(g, 0.25, &[(Prop::X, self.gauge_def_x)], Ease::BackOut, None);
+        }
+        if let Some(b) = self.bkgd_txt {
+            st.set(b, Prop::X, 60.0);
+            st.tween_to(b, 0.35, &[(Prop::X, 0.0)], Ease::BackOut, None);
+        }
+        // `SetText` (PC: "HOLD <tag>"), on the text and its glow copy.
+        for path in ["txt_mc.txt", "txtGlow_mc.txt"] {
+            if let Some(t) = self.txt.and_then(|m| st.find(m, path)) {
+                st.set_html(t, text);
+            }
+        }
+        if let Some(g) = self.gauge {
+            st.goto_and_stop(g, if actionable { "blue" } else { "red" });
+        }
+        // `SetOffsetColor_Custom(alphaMul, r, g, b, 0)` on the glow, the text background and
+        // the text glow.
+        let (glow, bkgd, txt) = if actionable { ((1.0, [73.0, 166.0, 255.0]), (0.2, [23.0, 62.0, 229.0]), (1.0, [73.0, 166.0, 255.0])) } else { ((1.0, [229.0, 23.0, 43.0]), (0.2, [150.0, 9.0, 9.0]), (1.0, [229.0, 23.0, 43.0])) };
+        let offset = |st: &mut Stage, id: Option<Id>, (a, c): (f32, [f32; 3])| {
+            if let Some(id) = id {
+                st.set_color(id, ColorTransform { mul: [0.0, 0.0, 0.0, a], add: [c[0] / 255.0, c[1] / 255.0, c[2] / 255.0, 0.0] });
+            }
+        };
+        offset(st, self.glow, glow);
+        offset(st, self.bkgd_txt, bkgd);
+        offset(st, self.txt.and_then(|m| st.child(m, "txtGlow_mc")), txt);
+        self.update_glow(st);
+    }
+
+    /// `Close`: grows to 130 % while fading (0.25 s), hidden 250 ms later (`OnClosed`).
+    pub fn close(&mut self, st: &mut Stage) {
+        clear(st, &mut self.interval_glow);
+        clear(st, &mut self.interval_close);
+        self.open = false;
+        st.tween_to(self.mc, 0.25, &[(Prop::YScale, 130.0), (Prop::XScale, 130.0), (Prop::Alpha, 0.0)], Ease::StrongOut, None);
+        interval(st, &mut self.interval_close, 250.0, key(W_IGAUGE, IG_CLOSED, 0));
+    }
+
+    /// `UpdateGlow`: the glow and the text glow tween to the other end of 35..85 % every 0.3 s.
+    fn update_glow(&mut self, st: &mut Stage) {
+        let txt_glow = self.txt.and_then(|m| st.child(m, "txtGlow_mc"));
+        for g in [self.glow, txt_glow].into_iter().flatten() {
+            st.tween_end(g, true);
+        }
+        let to = if self.glow.is_some_and(|g| st.get(g, Prop::Alpha) > Self::GLOW_MIN) { Self::GLOW_MIN } else { Self::GLOW_MAX };
+        for g in [self.glow, txt_glow].into_iter().flatten() {
+            st.tween_to(g, Self::GLOW_DURATION, &[(Prop::Alpha, to)], Ease::StrongOut, None);
+        }
+        interval(st, &mut self.interval_glow, Self::GLOW_DURATION * 1000.0, key(W_IGAUGE, IG_GLOW, 0));
+    }
+
+    fn on_event(&mut self, st: &mut Stage, code: u16) {
+        match code {
+            IG_CLOSED => {
+                clear(st, &mut self.interval_close);
+                st.set_visible(self.mc, false);
+            }
+            IG_GLOW => self.update_glow(st),
+            _ => {}
+        }
+    }
+}
+
+// =============================================================================================
 // Crosshair (`_dot_mc`, `_aspect_mc`: Crosshair / Crosshair_Gun / Crosshair_Crossbow)
 // =============================================================================================
 
@@ -3345,6 +3500,7 @@ pub struct HudWidgets {
     pub stripes: Option<BlackStripes>,
     pub location: Option<Location>,
     pub oxygen: Option<OxygenGauge>,
+    pub interaction_gauge: Option<InteractionGauge>,
     pub crosshairs: Crosshairs,
     pub sounds: SoundQueue,
 }
@@ -3370,14 +3526,15 @@ impl HudWidgets {
         let stripes = c(st, "blackStripes_mc").map(|m| BlackStripes::new(st, m));
         let location = c(st, "location_mc").map(|m| Location::new(st, m));
         let oxygen = c(st, "oxygenGauge_mc").map(|m| OxygenGauge::new(st, m));
+        let interaction_gauge = c(st, "interactionGauge_mc").map(|m| InteractionGauge::new(st, m));
         // Widgets the port does not drive yet start hidden, as their classes do.
-        for n in ["interactions_ic_mc", "interactions_icQTE_mc", "skipCutScene_mc", "interactionGauge_mc", "grenadeCooking_mc"] {
+        for n in ["interactions_ic_mc", "interactions_icQTE_mc", "skipCutScene_mc", "grenadeCooking_mc"] {
             if let Some(m) = c(st, n) {
                 st.set_visible(m, false);
             }
         }
         let crosshairs = Crosshairs::new(st);
-        Self { objectives, target, pickup_log, gauges, crosshair_info, game_msg, interactions, interaction_window, subtitles, choice, state_icon, tutorial, tutorial_window, stripes, location, oxygen, crosshairs, sounds: SoundQueue::default() }
+        Self { objectives, target, pickup_log, gauges, crosshair_info, game_msg, interactions, interaction_window, subtitles, choice, state_icon, tutorial, tutorial_window, stripes, location, oxygen, interaction_gauge, crosshairs, sounds: SoundQueue::default() }
     }
 
     /// Route a stage event to its widget.
@@ -3457,6 +3614,11 @@ impl HudWidgets {
             }
             W_OXYGEN => {
                 if let Some(o) = self.oxygen.as_mut() {
+                    o.on_event(st, code)
+                }
+            }
+            W_IGAUGE => {
+                if let Some(o) = self.interaction_gauge.as_mut() {
                     o.on_event(st, code)
                 }
             }

@@ -1,0 +1,15 @@
+# Frontier functions of scripts/audit/port_audit.py, classified once (addr, status, note).
+# status: helper (engine / library utility), ported (reimplemented: cite it where it is),
+# irrelevant (editor, platform, network, presentation the sim does not own), gap (logic the
+# port lacks: kept in the report, flagged).
+# takedown.rs (2026-10-09)
+00402240	helper	VRand: a random unit vector
+00aa5810	helper	IsA against a cached class
+00a46800	helper	rigid body instance accessor (vslot 3)
+00a46740	helper	rigid body velocity / position read
+00c58e10	irrelevant	animation node float parameter (carried body pose)
+00b70530	irrelevant	plays the pawn's named animation (carried / dropped body pose; runtime presentation)
+00ab11a0	ported	is input-block bit 1 set (0x00AA0B30): the choke's movement lock (takedown::step_choke), bit meaning LIKELY
+00ab1160	ported	set / clear an input-block bit on pawn+0x66C[channel]: the choke masks bit 1 while held (movement lock), LIKELY
+00acd960	gap	ends a toggled sneak (m_bSneakModeToggled) on entering Mantle / Choke / Swim / Soiree / InDialog / Versus / Minigame / melee attack: choke and swim done, mantle open (spot height), dialog and soiree not
+00c09370	ported	choke state change (2 win, 4 lose, 5 cancel): takedown::set_phase

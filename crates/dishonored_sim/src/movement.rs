@@ -652,6 +652,15 @@ fn box_fits(world: &dyn WorldQuery, b: &PawnBox) -> bool {
     !contacts.iter().any(|c| c.depth > 0.5)
 }
 
+/// 0x00ACD960, from the enter of the action states (Mantle, Choke, Swim, Soiree, InDialog,
+/// Versus, Minigame, the melee attack): `m_bSneakModeToggled` is cleared, so the pawn stands up
+/// from a toggled sneak (headroom permitting; the original then plays its stand-up camera).
+pub fn cancel_sneak_toggle(p: &mut PlayerState, ctx: &MoveCtx) {
+    if p.crouched {
+        set_crouch(p, false, ctx);
+    }
+}
+
 fn set_crouch(p: &mut PlayerState, crouch: bool, ctx: &MoveCtx) {
     let cfg = ctx.cfg;
     if crouch == p.crouched {

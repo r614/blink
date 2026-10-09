@@ -79,6 +79,7 @@ pub fn start_choke(state: &mut WorldState, ai: usize, vi: usize, cfg: &GameplayC
     events.push(SimEvent::ChokeStart { attacker: a.id, victim: vid });
 }
 
+/// The choke state change (0x00C09370: 2 win, 4 lose, 5 cancel).
 fn set_phase(p: &mut PlayerState, ph: ChokePhase) {
     p.choke.phase = ph;
     p.choke.phase_time = 0.0;

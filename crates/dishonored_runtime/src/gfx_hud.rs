@@ -97,6 +97,23 @@ pub struct HudTexts {
     /// `m_InteractionTexts[EDisUIInteraction]` (Twk_GFxMoviePlayerHUD): the interactions
     /// window's lines by interaction ("`GBA_Block` [Hold]" for the choke, ...).
     pub interactions: Vec<String>,
+    /// `_root.texts.t_Hold` (the interaction gauge's "HOLD").
+    pub hold: String,
+    /// The interaction gauge's button tags by kind (0x00BA5B90): `m_UsableGaugeGBA` (1),
+    /// `m_ChokeGaugeGBA` (2), `m_SkipSceneGaugeGBA` (4).
+    pub gauge_tags: [String; 3],
+}
+
+/// `Twk_InGameUI.Twk_GFxMoviePlayerHUD`'s string properties by name.
+fn hud_tweak_string(content: &dishonored_assets::Content, name: &str) -> Option<String> {
+    use ue3_package::properties::{Value, find};
+    let pkg = content.package("DishonoredGame").ok()?;
+    let i = (0..pkg.exports.len()).find(|&i| pkg.export_class(i) == "DisTweaks_GFxMoviePlayerHUD" && pkg.obj_path(ue3_package::ObjRef::Export(i)).eq_ignore_ascii_case("Twk_InGameUI.Twk_GFxMoviePlayerHUD"))?;
+    let h = pkg.read_object(i).ok()?;
+    match find(&h.properties, name).map(|p| &p.value) {
+        Some(Value::Str(s)) => Some(s.clone()),
+        _ => None,
+    }
 }
 
 /// `Twk_InGameUI.Twk_GFxMoviePlayerHUD.m_InteractionTexts` (a static array of `DUI_MAX`
@@ -185,6 +202,9 @@ struct Native {
     hints: u8,
     /// The air gauge is open (the HUD's +0x1FC bit 0x40, set by 0x00B8CE70).
     oxygen_open: bool,
+    /// The interaction gauge's kind open (the HUD's +0x3EB: 1 usable, 2 choke, 3 grenade
+    /// cooking, 4 cutscene skip; 0 none).
+    gauge_kind: u8,
     /// Task markers the harness placed (`{"hud": {"kind": "task_markers"}}`).
     test_markers: Vec<(glam::Vec3, bool, String)>,
     game_msg_seen: u32,
@@ -253,6 +273,9 @@ fn load_texts(content: &dishonored_assets::Content) -> HudTexts {
         g(tw, "m_PressKeyToEquipBoneCharms", "New Bone Charm added<br />Press `GBA_Journal` to equip"),
     ];
     t.interactions = interaction_texts(content, &loc);
+    t.hold = g(hud, "t_Hold", "HOLD").to_uppercase();
+    // The class defaults when the object leaves one out (`DisTweaks_GFxMoviePlayerHUD`).
+    t.gauge_tags = ["m_UsableGaugeGBA", "m_ChokeGaugeGBA", "m_SkipSceneGaugeGBA"].map(|n| hud_tweak_string(content, n).unwrap_or_default());
     for ((sec, k), v) in &loc.entries {
         if sec == "Keys" {
             t.keys.insert(k.clone(), v.clone());
@@ -966,6 +989,33 @@ pub fn update_gfx_hud(
         } else if n.oxygen_open {
             n.oxygen_open = false;
             o.close(st);
+        }
+    }
+
+    // --- interaction gauge, kind 2 (the choke): opened by the choke's enter (0x00A7AA00 ->
+    // 0x00BA5B90(2): `Open("HOLD " + m_ChokeGaugeGBA, false)`, red), set every In / Loop tick
+    // to `(1 - timer / required) x 100` (0x00A71100 -> 0x00B94D40), closed by the win, the
+    // loss (0x00B94C10) and the state's exit ---
+    if let (Some(g), Some(p)) = (w.interaction_gauge.as_mut(), me) {
+        use dishonored_sim::state::ChokePhase;
+        let choking = p.alive && matches!(p.choke.phase, ChokePhase::In | ChokePhase::Loop);
+        if choking {
+            if n.gauge_kind != 2 {
+                if n.gauge_kind != 0 {
+                    g.close(st);
+                }
+                n.gauge_kind = 2;
+                let tag = convert_key_tags(&hud.texts.gauge_tags[1], bindings.as_deref(), &hud.texts.keys);
+                g.open(st, &format!("{} {tag}", hud.texts.hold), false);
+            }
+            let f = if p.choke.required > 0.0 { 1.0 - p.choke.timer / p.choke.required } else { 0.0 };
+            let v = (f.clamp(0.0, 1.0) * 100.0).floor() as i32;
+            if v != g.value {
+                g.set_gauge(st, v);
+            }
+        } else if n.gauge_kind == 2 {
+            n.gauge_kind = 0;
+            g.close(st);
         }
     }
 
