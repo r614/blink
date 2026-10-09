@@ -60,11 +60,11 @@ listed):
 
 | behaviour (tweak order) | slot | evaluates | notes |
 |---|---|---|---|
-| TriggerAlarm | 13 Alert | EnemyBusted, ForceRingAlarm, Help, WitnessDeath | chance tweak, see AI.md "Alarm bells" |
+| TriggerAlarm | 13 Alert | EnemyBusted, ForceRingAlarm, Help, WitnessDeath | ported: EnemyBusted only for `DACRT_Seen` / a witnessed kill; alone = no Ally in range; shared decision window (`m_fWaitTimeBeforeRing`), acquisition lock and one bell worked at a time (0x00af6170 / 0x00afbad0); global cooldown from the AI noise (0x00a36dd0), bell cooldown from the ring (0x00a3cec0) |
 | EscapeExplosion | 16 Preserve | Explosion, ImpendingExplosion, WitnessMagic | ported (1.4c) |
 | Follow (not interruptible) | 17 Comply | | |
-| GoHome | 10 Resign | TetherRequest | |
-| EnemyUnreachable | 12 Adapt | ReachabilityChange | menace / stare |
+| GoHome | 10 Resign | TetherRequest | ported: tether volumes (`m_TetherVolumes`) tracked by position; TetherRequest after `m_TetherDelay` (0x00b68ad0); BackOff / FinalStretch / LastTaunt per 0x00af1d30 / 0x00af1f00 / 0x00ae6070 / 0x00afcf80 (TakePosition arrival and RotationReached LIKELY; Menace not started by any decoded path) |
+| EnemyUnreachable | 12 Adapt | ReachabilityChange (81, state 2 NotReachable_Below only) | not ported: the poster of 81 is not found statically, the sub-states need NPCAttackUnder contexts |
 | CombatRatSwarm(EliteGuard) | 8 Engage | HelpFromRats (49) | ported (1.4d) |
 | **Combat** (CombatEliteGuard) | 11 Combat | CombatBegin | |
 | BattleVictory | 2 Act | BattleVictory | |
@@ -73,7 +73,7 @@ listed):
 | PatrolSearch | 0 Idle | PatrolSearchRequest | |
 | **Patrol** | 0 Idle | PatrolRequest | |
 | **Idle** | 0 Idle | BrainInit, IdleRequest | |
-| BlockingDialog / Soiree / Interact | 4, 2, 6 | BlockingDialogRequest, Soiree, ... | |
+| BlockingDialog / Soiree / Interact | 4, 2, 6 | BlockingDialogRequest, Soiree, ... | BlockingDialog ported: the dialog component posts 10 / 11 for blocking conversations (0x00b7fe50 / 0x00b7ff80); low priority in slot Act (ends on Notice / SearchBegin), else Perform; faces who talks (0x00adac60). The conversation-ending interrupts (alarm, damage, explosion, panic...) are not wired |
 | RatStomp, Stolen | 7 React | | |
 | Shoot (Kismet) | 17 Comply | ShootRequest | |
 | Guard | 0 Idle | GuardRequest | |
@@ -88,7 +88,7 @@ Patrol, Idle, Soiree, Notice (3), React (7), MagicResponse (14). City guard (`Br
 the same layout with `CombatCityGuard`, a Panic behaviour (`TweaksBehavior_Panic_CityGuard`, Escape),
 EscapePlague (9 Evade) and aggressive patrol / idle / guard variants. Overseers use
 `BrainTweaks_OverSeerMusical`: `DisBehaviorMusicalCombat` in slot Combat, a musical patrol, no pistol
-elite behaviours.
+elite behaviours. The sword Overseer (`BrainTweaks_OverSeer`, `DisBehaviorOverseerCombat`) fights as the elite guard without a pistol and lobs its two grenades (`m_Ammo`) at an unreachable target (`DisItemContext_NPCLobGrenadeAtUnreachable`, cooldown 3-5 s, danger zone 1000, FindShootingPosition with pitch <= 50; reachability asked every 1 s by a path search, LIKELY). The wolfhound keeps an unreachable target at long distance (`DisAISubStateWHCombatLongDistance`): bark positions from `DisNavMeshGoal_WolfhoundBarkPosition` in the preferred band 800-1450, repositioned every 3-5 s.
 
 Consequences (all CONFIRMED from the slot numbers):
 - Routine behaviours (Patrol, PatrolSearch, Idle, Guard, ReturnTravel) share slot 0; a request for one
