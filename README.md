@@ -67,7 +67,11 @@ Not yet ported, or ported only in part:
 - **Movers**: actors based on other movers (`Base` chains) do not carry their collision
   along (the Bridge drawbridge).
 - **Presentation**: shadow maps for every light type, the L_Out sky, the remaining
-  post-process effects, tripod animations, speaker props, the tower light beam.
+  post-process effects, tripod animations, speaker props, the tower light beam; Kismet
+  highlights of runtime-only targets (object lists, pawns) and the crosshair focus highlight;
+  per-player camera fades; the NPC teleport spell's material fade.
+- **Not yet checked on screen**: the journal and stats screens, the Kismet highlight, rain
+  and camera fade, and the new sprite sizing for non-square particles (rain streaks).
 - **HUD**: the "(Unconscious)" crosshair line still uses its own probe instead of the
   crosshair's target; pickup and body prompt texts are unconfirmed against the original.
 - **Journal and stats**: the Powers and Bone Charms tabs, the note reader, audiograph

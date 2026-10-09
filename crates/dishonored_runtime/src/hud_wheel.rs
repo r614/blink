@@ -150,7 +150,7 @@ pub enum Callback {
 
 /// Movie-space info of `_utils.ScreenPosition.GetMovieSpaceCoord(ratio)` on the 1280x720 stage
 /// (no empty space at 16:9): (coordMin, coordMax).
-fn movie_space(ratio: f32) -> (Vec2, Vec2) {
+pub(crate) fn movie_space(ratio: f32) -> (Vec2, Vec2) {
     let off = crate::gfx_stage::STAGE * (1.0 - ratio) * 0.5;
     (off, crate::gfx_stage::STAGE - off)
 }

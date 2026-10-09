@@ -2257,11 +2257,33 @@ pub struct BlackStripes {
 
 const BS_CLOSED: u16 = 1;
 
+/// `BlackStripes._stripeH`.
+const STRIPE_H: f32 = 70.0;
+
 impl BlackStripes {
+    /// The constructor: hidden, transparent, placed (`SetStripesPosition`).
     pub fn new(st: &mut Stage, mc: Id) -> Self {
         st.set_visible(mc, false);
         st.set(mc, Prop::Alpha, 0.0);
+        Self::set_stripes_position(st, mc);
         Self { mc, opened: false, interval_id: None }
+    }
+    /// `SetStripesPosition`: both bars as wide as the stage and `_stripeH + emptySpaceY` high,
+    /// the upper one at `GetMovieSpaceCoord(1).coordMin._y`, the lower one at
+    /// `_sceneH - _stripeH` (the 1280x720 stage at 16:9: no empty space).
+    fn set_stripes_position(st: &mut Stage, mc: Id) {
+        let (min, _) = crate::hud_wheel::movie_space(1.0);
+        let stage = crate::gfx_stage::STAGE;
+        if let Some(up) = st.child(mc, "_stripeUp_mc") {
+            st.set(up, Prop::Y, min.y);
+            st.set_height(up, STRIPE_H);
+            st.set_width(up, stage.x);
+        }
+        if let Some(down) = st.child(mc, "_stripeDown_mc") {
+            st.set(down, Prop::Y, stage.y - STRIPE_H);
+            st.set_height(down, STRIPE_H);
+            st.set_width(down, stage.x);
+        }
     }
     /// `SetBlackStripes(displayState, useTween)` (`_stripeH` 70; at 16:9 the stripes are not
     /// widened by `emptySpaceY`).
@@ -2273,6 +2295,8 @@ impl BlackStripes {
         self.opened = show;
         match (show, use_tween) {
             (true, true) => {
+                // `Open`: placed again, shown, faded in.
+                Self::set_stripes_position(st, self.mc);
                 st.set_visible(self.mc, true);
                 st.tween_to(self.mc, 0.25, &[(Prop::Alpha, 100.0)], Ease::StrongOut, None);
             }

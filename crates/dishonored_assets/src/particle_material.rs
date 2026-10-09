@@ -229,6 +229,11 @@ pub const OPACITY_PARAMS: &[(&str, Option<&str>)] = &[
 /// ParticleSystems the gameplay effects spawn: the effect table of EFFECTS.md (tweaks) and every
 /// particle the contact system's sub-intersections name (impacts, blood, splashes,
 /// explosions). Decoded with every level.
+/// The entries of [`GAMEPLAY_PARTICLES`] cooked only into the maps whose actors reference them
+/// (the walls of light's `WallOfLight_twk` is in their maps' packages, not in a shared one): a
+/// map without those actors does not have them.
+pub const MAP_LOCAL_PARTICLES: &[&str] = &["Vfx_GamePlay.WallLight.Lightnings3_random", "Vfx_GamePlay.WallLight.ps_shock_electrified"];
+
 pub const GAMEPLAY_PARTICLES: &[&str] = &[
     "Vfx_Weapon.Effects.pistol.Ps_PlayerPistol_StdMuzzle_01",
     "Vfx_Weapon.Effects.Ps_PistolMuzzle",

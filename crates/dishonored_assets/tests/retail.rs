@@ -222,14 +222,15 @@ fn prison_stealth_volumes() {
 /// everywhere (EFFECTS.md "Particle materials").
 #[test]
 fn gameplay_particle_sprites_have_an_opacity() {
-    use dishonored_assets::particle_material::GAMEPLAY_PARTICLES;
+    use dishonored_assets::particle_material::{GAMEPLAY_PARTICLES, MAP_LOCAL_PARTICLES};
     use dishonored_assets::texture::decode_rgba8;
     use dishonored_ir::MaterialBlend;
     let Some(c) = content() else { return };
     let pkgs = map_packages(&c, "L_Boyle_Ext_P");
     let opts = ImportOptions { load_lightmaps: false, max_texture_size: 256, extra_particles: GAMEPLAY_PARTICLES.iter().map(|s| s.to_string()).collect(), ..Default::default() };
     let (map, _) = import_level(&c, "L_Boyle_Ext_P", &pkgs, &opts).unwrap();
-    let missing: Vec<&&str> = GAMEPLAY_PARTICLES.iter().filter(|p| !map.particle_systems.iter().any(|s| s.source.eq_ignore_ascii_case(p))).collect();
+    // Boyle places no wall of light: its map-local systems are not in its packages.
+    let missing: Vec<&&str> = GAMEPLAY_PARTICLES.iter().filter(|p| !MAP_LOCAL_PARTICLES.contains(p)).filter(|p| !map.particle_systems.iter().any(|s| s.source.eq_ignore_ascii_case(p))).collect();
     assert!(missing.is_empty(), "gameplay systems not decoded: {missing:?}");
     let mut bad = Vec::new();
     for s in &map.particle_systems {

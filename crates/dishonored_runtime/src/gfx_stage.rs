@@ -1446,10 +1446,12 @@ impl StageTextures {
 
     /// An external texture by "Package.Texture" (`img://` path), with its pixel size.
     pub fn external(&mut self, content: &dishonored_assets::Content, path: &str, images: &mut Assets<Image>) -> Option<(Handle<Image>, Vec2)> {
-        if let Some(v) = self.external.get(path) {
+        // Keyed without the `img://` scheme: what `ImageRef::path` (and so the draw's
+        // `TexKey::External`) holds.
+        let path_clean = path.trim_start_matches("img://");
+        if let Some(v) = self.external.get(path_clean) {
             return v.clone();
         }
-        let path_clean = path.trim_start_matches("img://");
         let (pkg_name, tex) = path_clean.split_once('.')?;
         // "Group.Texture" names a package file (UI_portraits_objectives) or a group cooked into
         // another package (UI_EquipmentIcons, UI_ItemIcons_Small: Startup).
@@ -1475,7 +1477,10 @@ impl StageTextures {
                 }
             }
         }
-        self.external.insert(path.to_string(), loaded.clone());
+        if loaded.is_none() {
+            warn!("GFx external image not found: {path}");
+        }
+        self.external.insert(path_clean.to_string(), loaded.clone());
         loaded
     }
 }
