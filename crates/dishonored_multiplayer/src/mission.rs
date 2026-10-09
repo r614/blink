@@ -1374,7 +1374,19 @@ impl MissionMatch {
         self.lock_peeking_inputs(&mut all); // [world] a pawn at a keyhole
         // Movers (`InterpActor`s) collide where the Kismet has moved them.
         self.place_movers(world);
-        let placed = std::mem::take(&mut self.mover_worlds);
+        let mut placed = std::mem::take(&mut self.mover_worlds);
+        // [world] Walls of light that collide (powered, time running) answer the projectile and
+        // melee checks, and the sim's projectiles and Windblast see them (`dishonored_sim::walls`).
+        let wall_key = self.current_map.to_ascii_lowercase();
+        let blockers = match (self.setup.world_actors.get(&wall_key), self.world_actors.get(&wall_key)) {
+            (Some(d), Some(st)) if !d.walls_of_light.is_empty() => dishonored_sim::walls::blockers(d, st),
+            _ => Vec::new(),
+        };
+        let wall_layer = !blockers.is_empty();
+        if wall_layer {
+            placed.push(dishonored_sim::walls::layer(&blockers));
+        }
+        self.world.wall_blockers = blockers;
         let layered = dishonored_world::Layered { base: world, layers: &placed };
         let world: &dyn WorldQuery = if placed.is_empty() { world } else { &layered };
         // [kismet] Doors the original Kismet locked or unlocked change the AI's paths.
@@ -1411,6 +1423,7 @@ impl MissionMatch {
         // that damages a wire trips it in the same step).
         self.step_towers(world, cfg, &mut out.events);
         self.step_launchers(world, cfg, &mut out.events);
+        self.world.wall_blockers.clear();
         // [world] Tripwires touched or damaged, keyhole holds and peeks.
         self.step_interactables(&all, &out.events, cfg, dt);
         // [world] Breakables, batteries and receptacles of the active map: explosions damage the
@@ -1420,15 +1433,22 @@ impl MissionMatch {
             let soc = (!defs.walls_of_light.is_empty()).then(|| self.crowd.social(&self.world));
             let st = self.world_actors.entry(key).or_insert_with(|| dishonored_sim::world_actors::WorldActorsState::new(defs));
             let mut evs = st.step(defs, &out.events, &cfg.gameplay, dt);
-            // [world] Walls of light: power, shocks and burns (`dishonored_sim::walls`), at the
-            // world's rate of time.
+            // [world] Walls of light: the projectiles and Windblasts that reached one this step
+            // (their damage and vslot 223), then power, shocks and burns (`dishonored_sim::walls`),
+            // at the world's rate of time.
+            if !defs.walls_of_light.is_empty() {
+                let hits: Vec<dishonored_sim::events::SimEvent> = out.events.iter().filter(|e| matches!(e, dishonored_sim::events::SimEvent::WallOfLightHit { .. } | dishonored_sim::events::SimEvent::WallOfLightBlast { .. })).copied().collect();
+                if !hits.is_empty() {
+                    evs.extend(dishonored_sim::walls::apply_hits(defs, st, &mut self.world, &hits, &cfg.gameplay, &mut out.events));
+                }
+            }
             if let Some(soc) = soc {
                 let player = self.world.players.iter().find(|p| p.kind == dishonored_sim::state::PawnKind::Human).map(|p| p.id);
                 let ws = WallSocial { soc: &soc, player };
                 let wdt = dishonored_sim::movement::DT * dishonored_sim::powers::world_time_scale(&self.world, &cfg.gameplay, false);
                 evs.extend(dishonored_sim::walls::step(defs, st, &mut self.world, &ws, player, &cfg.gameplay, wdt, &mut out.events));
             }
-            self.view.walls = defs.walls_of_light.iter().zip(&st.walls).map(|(d, w)| crate::WallView { name: d.name.clone(), position: d.position.to_array(), powered: w.powered }).collect();
+            self.view.walls = defs.walls_of_light.iter().zip(&st.walls).map(|(d, w)| crate::WallView { name: d.name.clone(), position: d.position.to_array(), powered: w.powered, effect: (w.activation > 0.0).then(|| w.effect_point.to_array()) }).collect();
             // A movable whose breakable reached its last step is gone (whoever holds it lets go).
             for e in &evs {
                 if let dishonored_sim::world_actors::WorldEvent::Broken { breakable, output: 0 } = e {
@@ -1785,6 +1805,9 @@ impl MissionMatch {
             if let dishonored_sim::world_actors::WorldEvent::Noise(s) = e {
                 self.last_events.push(s);
             }
+        }
+        if wall_layer {
+            placed.pop();
         }
         self.mover_worlds = placed;
         out

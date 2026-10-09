@@ -755,6 +755,16 @@ impl FxEventState {
                     self.dirs.remove(projectile);
                     continue;
                 }
+                // A wall of light destroyed the projectile (no impact effects, 0x00C4F3A0): the
+                // bullet's tracer still ends where it struck.
+                SimEvent::WallOfLightHit { projectile, point, .. } => {
+                    if let Some(from) = self.shots.remove(projectile) {
+                        out_beam(&mut out, PISTOL_TRACER_PS, from, *point);
+                    }
+                    self.bolts.remove(projectile);
+                    self.dirs.remove(projectile);
+                    continue;
+                }
                 _ => continue,
             };
             out_push(&mut out, &path, at, dir);
@@ -935,7 +945,7 @@ impl SoundEventState {
                     None => posts.push((cues::impact_event(bolt, "Stone"), SoundAt::Impact(point))),
                 }
             }
-            SimEvent::ProjectileImpact { projectile, .. } => {
+            SimEvent::ProjectileImpact { projectile, .. } | SimEvent::WallOfLightHit { projectile, .. } => {
                 self.projectiles.remove(&projectile);
             }
             _ => {}

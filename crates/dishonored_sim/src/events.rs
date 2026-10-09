@@ -124,6 +124,19 @@ pub enum SimEvent {
     Damage { victim: PlayerId, attacker: Option<PlayerId>, amount: f32, cause: DamageCause },
     Death { victim: PlayerId, killer: Option<PlayerId>, cause: DamageCause },
     ProjectileImpact { projectile: u32, point: Vec3, victim: Option<PlayerId> },
+    // --- walls of light (crate::walls) ---
+    /// A projectile struck a wall of light that has collision (`wall` indexes the map's walls):
+    /// the contact processor (0x00C4F3A0) calls the wall's `TakeDamage` with the projectile as
+    /// the damage causer and destroys the projectile (no impact, no stick, no burst). The host
+    /// applies the wall's side ([`crate::walls::apply_hits`]).
+    WallOfLightHit { wall: u32, point: Vec3, projectile: u32, owner: PlayerId },
+    /// `by`'s Windblast front reached a wall of light (0x00BF6AF0 -> 0x00BE9770 -> the wall's
+    /// vslot 223): `force` is the blast factor at the wall's bounds centre (0x00BE8570).
+    WallOfLightBlast { wall: u32, force: f32, by: PlayerId },
+    /// A wall's shock at `point` (presentation): `m_ShockSound`, and with `particles` its
+    /// `m_ShockParticleSystemTemplate` (the shock 0x00A3BCE0, a rat 0x00A3E630, a
+    /// disintegration 0x00A3E7D0; a pawn's kill 0x00A3B940 plays the sound only).
+    WallOfLightShock { wall: u32, point: Vec3, particles: bool },
     /// An AI noise (`DisAINoiseInfo`): heard by listeners other than `source` strictly within
     /// `radius` (0x00C5A760); `context` is its `EAINoiseContext`.
     Sound { position: Vec3, radius: f32, category: SoundCategory, context: NoiseContext, source: PlayerId },

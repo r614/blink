@@ -304,6 +304,12 @@ impl LaunchersState {
             }
             let kind = shot_projectile(defs, li).map_or(ShotKind::Bolt, |p| p.kind);
             let attacker = Some(pr.owner).filter(|o| *o != 0);
+            // A wall of light that collides takes the hit and destroys the shot (0x00C4F3A0).
+            if let Some((wall, point)) = crate::walls::projectile_hit(state, from, from + delta, world_hit, body.map(|b| b.1)) {
+                events.push(SimEvent::WallOfLightHit { wall, point, projectile: pr.id, owner: pr.owner });
+                self.shots.remove(&pr.id);
+                continue;
+            }
             match (body, world_hit) {
                 (Some((bi, along, point)), wh) if wh.is_none_or(|w| along <= w) => {
                     events.push(SimEvent::ProjectileImpact { projectile: pr.id, point, victim: Some(state.players[bi].id) });

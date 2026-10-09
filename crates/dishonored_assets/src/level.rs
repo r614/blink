@@ -1433,11 +1433,12 @@ impl Importer<'_> {
             _ => String::new(),
         };
         use crate::collision_audit::mask as m;
-        // A Wall of Light (`DisWallOfLight::ShouldTrace`, 0x00A21B30) stops the player's
-        // projectile and melee checks while it is powered, whatever its blocking flags; the
-        // player walks into it (and is killed by its own logic).
+        // A Wall of Light (`DisWallOfLight::ShouldTrace`, 0x00A21B30) stops the projectile and
+        // melee checks only while it has collision (placed with none, 0x00A28D80; on while
+        // powered and time runs): it is not static geometry. The mission layers it in while it
+        // collides (`dishonored_sim::walls::layer`).
         if class == "DisWallOfLight" {
-            return (collide, mask & (m::PROJECTILE | m::MELEE));
+            return (false, 0);
         }
         // KActors (physics props, breakables) answer like movers (`TRACE_Movers`), so the vision
         // check sees them; other actors that are not world geometry only answer checks with

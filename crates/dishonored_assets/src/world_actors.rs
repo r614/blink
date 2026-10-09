@@ -238,8 +238,10 @@ fn wall_of_light(content: &Content, packages: &[String], pkg: &Arc<Package>, i: 
     // tweak's `m_pStaticMesh`, when set, replaces the component's mesh (the tweaks interface's
     // apply, 0x00A29110: `SetStaticMesh`); otherwise the component's own or inherited mesh.
     let mut triangles = Vec::new();
+    let mut mesh_hidden = false;
     let comp = find(&own, "StaticMeshComponent").or_else(|| find(&own, "CollisionComponent")).and_then(|p| p.as_object()).filter(|o| *o != 0).map(ObjRef::from_index);
     if let Some(ObjRef::Export(ci)) = comp {
+        mesh_hidden = matches!(find(&res.effective(pkg, ci), "HiddenGame").map(|x| &x.value), Some(ue3_package::properties::Value::Bool(true)));
         let cown = pkg.read_object(ci).map(|h| h.properties).unwrap_or_default();
         let tweak_mesh = match m.get("m_pStaticMesh") {
             Some(TVal::Obj(o)) if !o.is_empty() && o != "None" => Some(o.clone()),
@@ -268,10 +270,22 @@ fn wall_of_light(content: &Content, packages: &[String], pkg: &Arc<Package>, i: 
     if lo.x > hi.x {
         (lo, hi) = (position, position);
     }
+    // The wall's placed emitters, keyed as the level import keys placed emitters.
+    let emitters = |k: &str| -> Vec<String> {
+        find(&own, k).and_then(|x| x.array_objects().ok()).unwrap_or_default().into_iter().filter_map(|o| match ObjRef::from_index(o) {
+            ObjRef::Export(e) => Some(format!("{package}:{}", pkg.obj_name(ObjRef::Export(e)))),
+            _ => None,
+        }).collect()
+    };
+    let path = |k: &str| match m.get(k) {
+        Some(TVal::Obj(o)) if !o.is_empty() && o != "None" => o.clone(),
+        _ => String::new(),
+    };
     let def = WallOfLightDef {
         name: pkg.obj_name(ObjRef::Export(i)).to_string(),
         package: package.to_string(),
         position,
+        facing: crate::level::actor_transform(&eff).transform_vector3(Vec3::X).normalize_or(Vec3::X),
         receptacle: None,
         friendly_factions: if over.is_empty() { object_list(&m, "m_FriendlyFactions") } else { over },
         reversed: flag("m_bReversed", false),
@@ -283,6 +297,15 @@ fn wall_of_light(content: &Content, packages: &[String], pkg: &Arc<Package>, i: 
         triangles,
         bounds_min: lo,
         bounds_max: hi,
+        windblast_min_force: get_f32(&m, "m_fWindblastMinimumForce").unwrap_or(0.0),
+        mesh_hidden,
+        spark_effects: emitters("m_SparkEffects"),
+        beams: emitters("m_Beams"),
+        cross_spark: path("m_CrossSparkEffectTemplate"),
+        spark_interval: [get_f32(&m, "m_fMinSparkInterval").unwrap_or(0.0), get_f32(&m, "m_fMaxSparkInterval").unwrap_or(0.0)],
+        spark_duration: get_f32(&m, "m_fSparkDuration").unwrap_or(0.0),
+        sparks_only_while_arcing: boolean(&m, "m_bDisableSystemBetweenSparks").unwrap_or(false),
+        shock_particles: path("m_ShockParticleSystemTemplate"),
     };
     Some((def, receptacle))
 }

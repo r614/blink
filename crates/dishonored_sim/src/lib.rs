@@ -373,6 +373,7 @@ pub fn step_world(
                 started: false,
                 level,
                 range,
+                walls: Vec::new(),
             });
         }
     }
