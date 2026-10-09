@@ -153,6 +153,26 @@ pub enum AiEvent {
     /// reports the discovery 0x00A98950: the game counts `NumCorpsesDiscovered` the first time a
     /// given corpse is discovered by anyone).
     CorpseFound { npc: PlayerId, corpse: PlayerId },
+    /// A behaviour became the brain's current one (0x00b17100 -> 0x00af7670, which fires
+    /// `DisSeqEvent_BehaviorStarted` on the pawn with the behaviour instance's class compared
+    /// to the event's `m_pBehavior`). `class` is the original behaviour class
+    /// (`DisBehaviorPatrol`, `DisBehaviorPanic` ...).
+    BehaviorStarted { pawn: PlayerId, class: String },
+    /// The combat behaviour started (`DisBehaviorCombat` slot 91, 0x00af7d00, right after the
+    /// behaviour-started event): `DisSeqEvent_Combat` of the pawn with the attention target as
+    /// the originator.
+    Combat { pawn: PlayerId, target: Option<PlayerId> },
+    /// The investigate state was entered (`DisAISubStateInvestigate` slot 96, 0x00b2e050, and
+    /// `DisBehaviorStationarySearch` start, 0x00ae9fe0): `DisSeqEvent_Investigate` of the pawn
+    /// with the searched pawn as the originator.
+    Investigate { pawn: PlayerId, target: PlayerId },
+    /// The patrolling pawn reached a route point (`DisBehaviorPatrol` slot 107, 0x00afd430 ->
+    /// 0x00afd350): `DisSeqEvent_PatrolPointReached` output 0 ("From Patrol Behavior") of the
+    /// nav point at `position`.
+    PatrolPointReached { pawn: PlayerId, position: Vec3 },
+    /// The fleeing pawn reached its flee point (`DisAISubStateFlee`, 0x00b29ae0 / 0x00b29be0 ->
+    /// 0x00a47340): `DisSeqEvent_FleepointReached` of the flee point at `position`.
+    FleepointReached { pawn: PlayerId, position: Vec3 },
 }
 
 /// Runtime state of a `DisAlarmBell`.
@@ -369,6 +389,24 @@ pub struct Brain {
     /// [`AiEvent::CorpseFound`]).
     #[serde(default)]
     pub found_corpses: Vec<PlayerId>,
+    /// Kismet-facing events decided this tick (drained into `Crowd::events` within the same
+    /// tick: never part of a saved state).
+    #[serde(skip)]
+    pub fired: Vec<AiEvent>,
+    /// The current behaviour has been started (`BehaviorStarted` fired for it): cleared when the
+    /// current pointer is cleared (0x00aea8f0: the current behaviour ended, was replaced or was
+    /// preempted), set again by the next arbitration (0x00b17100).
+    #[serde(default)]
+    pub behavior_started: bool,
+    /// The routine behaviour class announced last (`slots::Brain::routine_class`).
+    #[serde(default)]
+    pub routine_started: u8,
+    /// The flee point (index into `CrowdLayout::flee_points`) the panic is running to, and
+    /// whether its arrival was reported.
+    #[serde(default)]
+    pub flee_point: Option<usize>,
+    #[serde(default)]
+    pub flee_reached: bool,
     /// Time left before the first pistol shot is allowed (`m_GunUsageStart`, `m_fGunTimer`).
     #[serde(default)]
     pub gun_timer: f32,
@@ -445,6 +483,26 @@ pub struct Brain {
     /// The look-at head and the vision eye ([`head`]).
     #[serde(default)]
     pub head: head::Head,
+    /// The ambient idle sequence this NPC plays (`Empty_Idle_03`), pinned by the scenario;
+    /// `None`: the random pick of `DisAISubProcessAmbientAnims`.
+    #[serde(default)]
+    pub ambient_pin: Option<String>,
+    /// Brain time and the player targets in its vision list (0x00C788E0): when each was last
+    /// traced and the normalized distance that trace held.
+    #[serde(default)]
+    pub vis_clock: f32,
+    #[serde(default)]
+    pub vis_cands: Vec<VisCand>,
+}
+
+/// A target in a vision component's candidate list: the line of sight is traced again once
+/// `Twk_Component_Observable_Player.m_fLOSCheckPeriod` has passed, and the last trace's result
+/// stands in between.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct VisCand {
+    pub who: PlayerId,
+    pub last: f32,
+    pub held: Option<f32>,
 }
 
 fn idle_state() -> BrainState {
@@ -848,12 +906,17 @@ impl Attn {
     /// (unless already Busted) and is refused for an unsighted target whose proxy turned out
     /// stale (`stale_proxy`, 0x00b4fce0). A refused Busted caps the value at its start.
     fn change(&mut self, prof: &AttentionConfig, stop: &[f32; 4], amount: f32, floor_level: u8, why: u8, stale_proxy: bool) {
-        let before = self.value.clamp(0.0, prof.max);
+        // The accumulator (`DisLeakyAccumulator`, +0x8c: value, leak rate, min, max) has no upper
+        // bound: its max is FLT_MAX (peeked on the class default and on live NPC controllers), and
+        // the captures keep rising past 1 at the seen rate (`stealth/detect_600`: 1.28 at tick 129,
+        // `combat/sword_hit_dummy` 3.3 at tick 200). `m_fMaxAttention` only feeds the psychic
+        // change (0x00b4c400), `prof.max`.
+        let before = self.value.max(0.0);
         let mut v = (self.value + amount).max(0.0);
         if floor_level > 0 {
             v = v.max(prof.level_value(floor_level));
         }
-        self.value = v.min(prof.max);
+        self.value = v;
         let mut lvl = level_after(self.level, self.value, before <= self.value, &prof.start, stop);
         if lvl == DAL_BUSTED {
             let refused = (self.level < DAL_BUSTED && why != FORCED && !prof.reason_can_bust(why)) || stale_proxy;
@@ -1147,6 +1210,7 @@ impl Crowd {
             for corpse in b.found_corpses.drain(..) {
                 ai_events.push(AiEvent::CorpseFound { npc: b.id, corpse });
             }
+            ai_events.append(&mut b.fired);
             let panicked = |s: BrainState| matches!(s, BrainState::Flee | BrainState::Cower);
             if b.kind != PawnKind::Guard && panicked(b.state) && !panicked(was) {
                 // `DisAISubStateFlee.bDoBarkForHelp`: call for help at talking loudness.
@@ -1683,6 +1747,11 @@ impl Brain {
             alarm_enemy: None,
             barks: Vec::new(),
             found_corpses: Vec::new(),
+        fired: Vec::new(),
+        behavior_started: false,
+        routine_started: 0,
+        flee_point: None,
+        flee_reached: false,
             gun_timer: -1.0,
             hostile_faction: Vec::new(),
             deaf: false,
@@ -1711,6 +1780,9 @@ impl Brain {
             class: if kind == PawnKind::Guard { NpcClass::EliteGuard } else { NpcClass::Civilian },
             special: SpecialCombat::default(),
             head: head::Head::default(),
+            ambient_pin: None,
+            vis_clock: 0.0,
+            vis_cands: Vec::new(),
         }
     }
 
@@ -1913,7 +1985,48 @@ impl Brain {
         });
         let modifier = self.head_modifier(ai);
         let speed = me.velocity.truncate().length();
-        self.head.step(ai, me.archetype, modifier, me.position, me.yaw, speed, request, dt);
+        // `DisAISubProcessAmbientAnims` runs under the routine behaviours while the NPC stands
+        // still (0x00B39620: not moving, 0x00B79730).
+        let amb = head::AmbientIn { eligible: self.state.is_routine() && speed <= 20.0, pin: self.ambient_pin.as_deref() };
+        self.head.step(ai, me.archetype, modifier, me.position, me.yaw, speed, request, amb, dt);
+    }
+
+    /// Start the ambient idle `seq` as if it began `age` seconds ago (a scenario that places the
+    /// NPC after the original's own run-in).
+    pub fn start_ambient(&mut self, ai: &AiConfig, seq: &str, age: f32) {
+        self.ambient_pin = Some(seq.to_string());
+        self.head.ambient = Some(head::Ambient { seq: seq.to_string(), age });
+        // The timer is rolled when the animation starts (0x00B39620): the tweak's minimum.
+        self.head.amb_timer = ai.ambient_anim_freq[0];
+    }
+
+    /// The player target's sight this tick: the vision list (0x00C788E0). Candidates are the
+    /// targets inside a cone this tick ([`Self::cone_norm`]); one that left the list is lost, a
+    /// new one is traced at once, and a listed one only once the check period has passed (the
+    /// last trace's norm stands in between). Other targets are traced every tick.
+    fn sight(&mut self, veye: &head::Eye, p: &PlayerState, world: &dyn WorldQuery, ai: &AiConfig) -> Option<f32> {
+        if p.kind != PawnKind::Human {
+            return Self::look(veye, p, world, ai);
+        }
+        let Some(norm) = Self::cone_norm(veye, p, ai) else {
+            self.vis_cands.retain(|c| c.who != p.id);
+            return None;
+        };
+        let now = self.vis_clock;
+        let i = match self.vis_cands.iter().position(|c| c.who == p.id) {
+            Some(i) => i,
+            None => {
+                self.vis_cands.push(VisCand { who: p.id, last: f32::NEG_INFINITY, held: None });
+                self.vis_cands.len() - 1
+            }
+        };
+        if ai.vision.los_period <= now - self.vis_cands[i].last {
+            let clear = Self::los_clear(veye, p, world, ai);
+            let c = &mut self.vis_cands[i];
+            c.last = now;
+            c.held = clear.then_some(norm);
+        }
+        self.vis_cands[i].held
     }
 
     /// The look-at node's head and torso aims (radians) for the animation: the same cursor and
@@ -1933,15 +2046,77 @@ impl Brain {
     /// Returns the normalized vision distance. The cones are along the head's axis from the
     /// `camera_jnt` eye ([`head`]).
     fn look(veye: &head::Eye, other: &PlayerState, world: &dyn WorldQuery, ai: &AiConfig) -> Option<f32> {
+        let norm = Self::cone_norm(veye, other, ai)?;
+        Self::los_clear(veye, other, world, ai).then_some(norm)
+    }
+
+    /// The vision gather (0x00C754C0): the target's point (`target vslot 0`) against the cones.
+    /// Returns the normalized vision distance.
+    fn cone_norm(veye: &head::Eye, other: &PlayerState, ai: &AiConfig) -> Option<f32> {
         let (inner, outer) = cones(&ai.vision);
-        let (norm, _) = vision_distance(&inner, &outer, veye.local(other.position))?;
+        let (norm, _) = vision_distance(&inner, &outer, veye.local(Self::target_point(veye, other, ai)))?;
+        Some(norm)
+    }
+
+    /// A player's collision half height (`CylinderComponent.CollisionHeight`) and vision region
+    /// type (0 standing, 1 sneaking, 2 crouching: 0x00C77FC0).
+    fn collision_height(other: &PlayerState, ai: &AiConfig) -> (f32, usize) {
+        let vs = vis_state(other);
+        let (r, h) = if vs.autocrouch { (2, ai.player_visibility.cylinder[2]) } else if vs.sneaking { (1, ai.player_visibility.cylinder[2]) } else { (0, ai.player_visibility.cylinder[1]) };
+        (h, r)
+    }
+
+    /// The point of a target the vision cones are tested against (the observable component's
+    /// `target vslot 0`, 0x00C669C0): for a pawn with a collision cylinder, the point of the
+    /// vertical segment at its location, from `Location.z - CollisionHeight` to
+    /// `Location.z + CollisionHeight`, where `up . (point - eye) = 0` (`up` the eye matrix's
+    /// third row, 0x00C676A0 stores it at +0x40), clamped to the segment. Anything else: the
+    /// location (the bounds' centre).
+    fn target_point(veye: &head::Eye, other: &PlayerState, ai: &AiConfig) -> Vec3 {
+        if other.kind != PawnKind::Human {
+            return other.position;
+        }
+        let (h, _) = Self::collision_height(other, ai);
+        let a = other.position - Vec3::Z * h;
+        let len = 2.0 * h;
+        let den = veye.up.z * len;
+        if h < 1e-8 || den == 0.0 {
+            return other.position;
+        }
+        let t = (veye.up.dot(veye.pos - a) / den).clamp(0.0, 1.0);
+        Vec3::new(a.x, a.y, a.z + len * t)
+    }
+
+    /// The line-of-sight test points of a target and the trace to them (0x00C77FC0 /
+    /// 0x00C67520, flags 0x08023086). A player's five points lie `m_fOffsetTowardsNPC` toward the
+    /// viewer from its axis: the region's centre and its four corners (`m_fWidth` wide, between
+    /// `m_fBottomHeight` and `m_fTopHeight` above the feet). One clear trace is sight.
+    fn los_clear(veye: &head::Eye, other: &PlayerState, world: &dyn WorldQuery, ai: &AiConfig) -> bool {
         let eye = veye.pos;
-        let clear = |p: Vec3| {
+        if other.kind != PawnKind::Human {
+            let clear = |p: Vec3| {
+                let to = p - eye;
+                let d = to.length();
+                d < 1.0 || !world.raycast(eye, to / d, d, channel::VISION).is_some_and(|h| h.distance < d - 40.0)
+            };
+            return [60.0, 0.0, -50.0].iter().any(|z| clear(other.position + Vec3::Z * *z));
+        }
+        let (h, ty) = Self::collision_height(other, ai);
+        let [width, toward, top, bottom] = ai.vision.vis_regions[ty];
+        let flat = (eye - other.position).truncate();
+        let dir = flat.try_normalize().unwrap_or(glam::Vec2::X);
+        let side = glam::Vec2::new(-dir.y, dir.x);
+        let at = |y: f32, z: f32| {
+            let p = other.position.truncate() + dir * toward + side * y;
+            Vec3::new(p.x, p.y, other.position.z + z)
+        };
+        let (zt, zb) = (top - h, bottom - h);
+        let pts = [at(0.0, (zt - zb) * 0.5 + zb), at(width * 0.5, zt), at(-width * 0.5, zt), at(width * 0.5, zb), at(-width * 0.5, zb)];
+        pts.iter().any(|&p| {
             let to = p - eye;
             let d = to.length();
-            d < 1.0 || !world.raycast(eye, to / d, d, channel::VISION).is_some_and(|h| h.distance < d - 40.0)
-        };
-        [60.0, 0.0, -50.0].iter().any(|z| clear(other.position + Vec3::Z * *z)).then_some(norm)
+            d < 1.0 || !world.raycast(eye, to / d, d, channel::VISION).is_some_and(|hit| hit.distance < d - 0.5)
+        })
     }
 
     /// Cone and line-of-sight test (events, allies, corpses).
@@ -1985,6 +2160,7 @@ impl Brain {
     #[allow(clippy::too_many_arguments)]
     fn perceive_with(&mut self, me: &PlayerState, ws: &WorldState, events: &[SimEvent], senses: &Senses, world: &dyn WorldQuery, ai: &AiConfig, dt: f32) {
         let (peers, barks, ally_busted) = (senses.peers, senses.barks, senses.busted);
+        self.vis_clock += dt;
         for a in self.attn.iter_mut() {
             a.fresh = false;
         }
@@ -2167,7 +2343,7 @@ impl Brain {
             // (`ResponseCategory_Harmless`, a bark) in every brain reaction tweak: it changes no
             // relationship. Hostility comes from the Hostile responses (hurt by the player),
             // witnessed deaths, factions and allies' fights.
-            let seen = if self.blind { None } else { Self::look(&veye, p, world, ai) };
+            let seen = if self.blind { None } else { self.sight(&veye, p, world, ai) };
             let hostile = self.enemies.contains(&p.id);
             let prof = self.profile(ai, p.id).clone();
             let stop = self.stops(ai, p.id);
@@ -2179,6 +2355,10 @@ impl Brain {
                 continue;
             }
             let e = self.entry(p.id, p.position);
+            // The attention tick (0x00b69150) runs before the vision tick (0x00c788e0) of the same
+            // frame: the accumulation reads the sight flag and distance the last vision tick set
+            // (`stealth/detect_600`: the original's value is 0 at tick 0 and rises from tick 1).
+            let (was_sighted, was_norm) = (e.sighted, e.los_norm);
             match seen {
                 Some(n) => {
                     e.sighted = true;
@@ -2189,9 +2369,9 @@ impl Brain {
                 None if e.sighted && hostile && near => {}
                 None => e.sighted = false,
             }
-            if e.sighted {
+            if was_sighted {
                 let scalar = if p.kind == PawnKind::Human { prof.seeing_scalar_player } else { prof.seeing_scalar_npc };
-                let rate = seen_rate(&prof, scalar, e.los_norm, vis);
+                let rate = seen_rate(&prof, scalar, was_norm, vis);
                 if rate > 0.0 {
                     e.change(&prof, &stop, rate * dt, 0, reason::SEEN, false);
                     e.why = reason::SEEN;
@@ -2735,8 +2915,14 @@ impl Brain {
                     return look.map(face).unwrap_or(idle);
                 }
                 self.goal = Some(p.position);
-                if Self::reached(me, p.position, 70.0) || self.follow.failed {
+                let at_point = Self::reached(me, p.position, 70.0);
+                if at_point || self.follow.failed {
                     self.follow.clear();
+                    if at_point {
+                        // The behaviour's arrival callback (slot 107, 0x00afd430 -> 0x00afd350)
+                        // fires `DisSeqEvent_PatrolPointReached` output 0 on the nav point.
+                        self.fired.push(AiEvent::PatrolPointReached { pawn: self.id, position: p.position });
+                    }
                     if p.guard_forever || single {
                         self.guard_timer = -1.0;
                     } else if p.guard_duration > 0.0 {
@@ -2893,6 +3079,10 @@ impl Brain {
                 if let Some(p) = live {
                     if p.distance(s.proxy) > ss.proximity {
                         s.sub = SearchSub::Investigate;
+                        // Entering the investigate sub-state (0x00b2e050) fires the event again.
+                        if s.target != NOISE {
+                            self.fired.push(AiEvent::Investigate { pawn: self.id, target: s.target });
+                        }
                         s.proxy = p;
                         s.dest = p;
                         s.reached = false;
@@ -3064,6 +3254,16 @@ impl Brain {
                 return i;
             }
         }
+        // The flee sub-state's arrival (0x00b29ae0 / 0x00b29be0): the pawn reached its flee
+        // point, `DisSeqEvent_FleepointReached` fires on it (0x00a47340) once per point.
+        if let (Some(g), Some(fi)) = (self.goal, self.flee_point) {
+            if !self.flee_reached && Self::reached(me, g, 120.0) {
+                self.flee_reached = true;
+                if let Some(fp) = layout.flee_points.get(fi) {
+                    self.fired.push(AiEvent::FleepointReached { pawn: self.id, position: *fp });
+                }
+            }
+        }
         match self.goal {
             Some(g) if !Self::reached(me, g, 120.0) && !self.follow.failed => self.move_to(me, nav, g, true, ai),
             _ => face(from),
@@ -3114,7 +3314,10 @@ impl Brain {
     fn pick_flee_point(&mut self, me: &PlayerState, threat: Vec3, layout: &CrowdLayout, nav: Option<&NavWorld>, ai: &AiConfig) -> Option<Vec3> {
         let to_threat = (threat - me.position).truncate();
         let mut best: Option<(f32, Vec3)> = None;
-        for fp in &layout.flee_points {
+        let mut best_i = 0;
+        self.flee_point = None;
+        self.flee_reached = false;
+        for (fi, fp) in layout.flee_points.iter().enumerate() {
             let dir = (*fp - me.position).truncate();
             if dir.length() < 200.0 {
                 continue;
@@ -3131,9 +3334,11 @@ impl Brain {
             let d = dir.length();
             if best.is_none_or(|b| d < b.0) {
                 best = Some((d, *fp));
+                best_i = fi;
             }
         }
         if let Some((_, p)) = best {
+            self.flee_point = Some(best_i);
             return Some(p);
         }
         let away = (me.position - threat).truncate().normalize_or_zero();
@@ -3689,6 +3894,30 @@ mod tests {
         assert!(vision_distance(&inner, &outer, dir(60.0, 0.0) * 2000.0).is_none());
         assert!(vision_distance(&inner, &outer, Vec3::new(-500.0, 0.0, 0.0)).is_none());
         assert!(vision_distance(&inner, &outer, Vec3::new(3600.0, 0.0, 0.0)).is_none());
+    }
+
+    /// The player target's point (0x00C669C0): on the vertical segment `Location.z +- CollisionHeight`,
+    /// where `up . (point - eye) = 0`, clamped to the segment.
+    #[test]
+    fn target_point_is_the_segment_point_in_the_eyes_up_plane() {
+        let mut ai = AiConfig::default();
+        ai.player_visibility.cylinder = [35.0, 87.5, 65.0];
+        let p = pawn(1, PawnKind::Human, Vec3::new(600.0, 0.0, 0.0), 0.0);
+        // A level eye: up = Z, the point is at the eye's height.
+        let eye = head::Eye::looking(Vec3::new(0.0, 0.0, 40.0), Vec3::X);
+        assert!(close(Brain::target_point(&eye, &p, &ai).z, 40.0));
+        // Above the segment: the top; below: the bottom.
+        let hi = head::Eye::looking(Vec3::new(0.0, 0.0, 200.0), Vec3::X);
+        assert!(close(Brain::target_point(&hi, &p, &ai).z, 87.5));
+        let lo = head::Eye::looking(Vec3::new(0.0, 0.0, -200.0), Vec3::X);
+        assert!(close(Brain::target_point(&lo, &p, &ai).z, -87.5));
+        // A head pitched up 20 deg tilts `up` back: the point is at eye height + 600 tan(20 deg).
+        let tilt = head::Eye::looking(Vec3::new(0.0, 0.0, -100.0), dir(0.0, 20.0));
+        let want = -100.0 + 600.0 * 20f32.to_radians().tan();
+        assert!((Brain::target_point(&tilt, &p, &ai).z - want.clamp(-87.5, 87.5)).abs() < 0.01);
+        // A non-human target is its location.
+        let g = pawn(2, PawnKind::Guard, Vec3::new(600.0, 0.0, 10.0), 0.0);
+        assert_eq!(Brain::target_point(&eye, &g, &ai), g.position);
     }
 
     #[test]
@@ -4582,5 +4811,126 @@ mod tests {
         let i = b.combat(&g, &ws, &w, None, &ai, &mut Vec::new(), 1.0 / 60.0);
         assert_eq!(i.npc_move, npc_moves::BACK_STEP);
         assert!(i.forward < 0);
+    }
+
+    /// Runs one arbitration (`drain`) of a brain with an empty world around it.
+    fn arbitrate(b: &mut Brain) {
+        let ai = AiConfig::default();
+        let me = pawn(b.id, b.kind, Vec3::ZERO, 0.0);
+        let ws = WorldState::default();
+        let layout = CrowdLayout::default();
+        let (routes, mut users, mut inhibit, mut alarms, mut events, mut dists): (Vec<PatrolRoute>, Vec<i32>, Vec<(PlayerId, u8, f32)>, Vec<AlarmBell>, Vec<AiEvent>, Vec<distraction::Distractor>) = Default::default();
+        let mut ctx = Ctx { layout: &layout, routes: &routes, users: &mut users, neglect: &[], inhibit: &mut inhibit, alarms: &mut alarms, events: &mut events, cooldown: 0.0, distractors: &mut dists };
+        b.drain(&me, &ws, &mut ctx, &ai, 1.0 / 60.0);
+    }
+
+    fn started(b: &mut Brain) -> Vec<String> {
+        b.fired.drain(..).filter_map(|e| if let AiEvent::BehaviorStarted { class, .. } = e { Some(class) } else { None }).collect()
+    }
+
+    /// `DisSeqEvent_BehaviorStarted` (0x00b17100 -> 0x00af7670): each time the current pointer
+    /// was cleared and the highest occupied slot's behaviour becomes current again, with the
+    /// behaviour's class; a dormant lower placement announces nothing, and the resumed behaviour
+    /// is started again when the one above it ends. `DisSeqEvent_Combat` (slot 91 of the combat
+    /// behaviour, 0x00af7d00) and `DisSeqEvent_Investigate` (0x00b2e050) follow the start.
+    #[test]
+    fn behavior_started_follows_the_current_pointer() {
+        let mut b = Brain::new(NPC_ID_BASE, PawnKind::Guard, Vec3::ZERO, 1);
+        b.state = BrainState::Patrol;
+        b.sync_external();
+        b.behavior_started = false;
+        b.fired.clear();
+        arbitrate(&mut b);
+        assert_eq!(started(&mut b), ["DisBehaviorPatrol"]);
+        arbitrate(&mut b);
+        assert!(b.fired.is_empty(), "nothing changed");
+        // The routine slot's behaviour replaced by another (the patrol gives way to the post):
+        // the new one starts; a scripted walk (no decoded class) announces nothing.
+        b.state = BrainState::Alert;
+        arbitrate(&mut b);
+        assert_eq!(started(&mut b), ["DisBehaviorGuard"]);
+        b.state = BrainState::WalkToPoint;
+        arbitrate(&mut b);
+        assert!(b.fired.is_empty());
+        b.state = BrainState::Patrol;
+        arbitrate(&mut b);
+        assert_eq!(started(&mut b), ["DisBehaviorPatrol"]);
+        b.place(Behavior::Notice);
+        arbitrate(&mut b);
+        assert_eq!(started(&mut b), ["DisBehaviorNotice"]);
+        b.place(Behavior::Search(SearchState { target: 5, ..Default::default() }));
+        arbitrate(&mut b);
+        assert_eq!(b.fired, [AiEvent::BehaviorStarted { pawn: NPC_ID_BASE, class: "DisBehaviorSearch".into() }, AiEvent::Investigate { pawn: NPC_ID_BASE, target: 5 }]);
+        b.fired.clear();
+        b.target = Some(7);
+        b.place(Behavior::Combat);
+        arbitrate(&mut b);
+        assert_eq!(b.fired, [AiEvent::BehaviorStarted { pawn: NPC_ID_BASE, class: "DisBehaviorCombatEliteGuard".into() }, AiEvent::Combat { pawn: NPC_ID_BASE, target: Some(7) }]);
+        b.fired.clear();
+        // Below the current behaviour: dormant, no start.
+        b.place(Behavior::Notice);
+        arbitrate(&mut b);
+        assert!(b.fired.is_empty());
+        // The combat ends: the search below it is started again.
+        b.complete(slot::COMBAT);
+        arbitrate(&mut b);
+        assert_eq!(started(&mut b), ["DisBehaviorSearch"]);
+        // A stationary search (civilians) is its own class and a searched place is no pawn.
+        let mut c = Brain::new(NPC_ID_BASE + 1, PawnKind::Civilian, Vec3::ZERO, 2);
+        c.behavior_started = true;
+        c.place(Behavior::Search(SearchState { target: NOISE, stationary: true, ..Default::default() }));
+        arbitrate(&mut c);
+        assert_eq!(c.fired, [AiEvent::BehaviorStarted { pawn: NPC_ID_BASE + 1, class: "DisBehaviorStationarySearch".into() }]);
+    }
+
+    /// `DisBehaviorPatrol` slot 107 (0x00afd430 -> 0x00afd350): reaching a route point fires
+    /// `DisSeqEvent_PatrolPointReached` (output 0) on that point, whether the guard stops there
+    /// or walks past.
+    #[test]
+    fn patrol_arrival_fires_the_point_event() {
+        let w = flat_world();
+        let mut c = Crowd::default();
+        c.routes = vec![route(2, 3, 0.0)];
+        c.route_users = vec![0];
+        let g = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(0.0, 0.0, 90.0), 0.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![g.clone()];
+        let mut b = Brain::new(g.id, PawnKind::Guard, g.position, 1);
+        b.stay = true;
+        b.request_patrol();
+        c.brains.push(b);
+        c.think(&ws, &[], &w, 1.0 / 60.0);
+        let reached: Vec<Vec3> = c.events.iter().filter_map(|e| if let AiEvent::PatrolPointReached { position, .. } = e { Some(*position) } else { None }).collect();
+        assert_eq!(reached, [Vec3::new(0.0, 0.0, 90.0)]);
+        assert!(c.events.iter().any(|e| matches!(e, AiEvent::BehaviorStarted { class, .. } if class == "DisBehaviorPatrol")));
+        // Walking on to the next point is not an arrival.
+        c.think(&ws, &[], &w, 1.0 / 60.0);
+        assert!(!c.events.iter().any(|e| matches!(e, AiEvent::PatrolPointReached { .. })));
+    }
+
+    /// `DisAISubStateFlee` (0x00b29ae0 / 0x00b29be0 -> 0x00a47340): the fleeing civilian that
+    /// arrives at its flee point fires `DisSeqEvent_FleepointReached` on it, once.
+    #[test]
+    fn flee_arrival_fires_the_flee_point_event() {
+        let ai = AiConfig::default();
+        let fp = Vec3::new(-1000.0, 0.0, 90.0);
+        let mut layout = CrowdLayout::default();
+        layout.flee_points = vec![fp];
+        let threat = pawn(1, PawnKind::Human, Vec3::new(1500.0, 0.0, 90.0), 0.0);
+        let me = pawn(NPC_ID_BASE, PawnKind::Civilian, fp, 0.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![me.clone(), threat];
+        let mut b = Brain::new(me.id, PawnKind::Civilian, me.position, 1);
+        b.alert_to(&ai, 1, Vec3::new(1500.0, 0.0, 90.0));
+        b.place(Behavior::Panic { cower: false });
+        b.timer = ai.panic.free_flight_time + 1.0;
+        // Picked from where the civilian stood when the panic began, then it ran there.
+        let start = pawn(me.id, PawnKind::Civilian, Vec3::new(0.0, 0.0, 90.0), 0.0);
+        b.goal = b.pick_flee_point(&start, Vec3::new(1500.0, 0.0, 90.0), &layout, None, &ai);
+        assert_eq!((b.goal, b.flee_point), (Some(fp), Some(0)));
+        b.act_panic(&me, &ws, &layout, None, &ai);
+        assert_eq!(b.fired, [AiEvent::FleepointReached { pawn: me.id, position: fp }]);
+        b.act_panic(&me, &ws, &layout, None, &ai);
+        assert_eq!(b.fired.len(), 1, "reported once");
     }
 }

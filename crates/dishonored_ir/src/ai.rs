@@ -618,10 +618,29 @@ pub struct VisionConfig {
     /// pawn's rotation (0x00C676A0).
     #[serde(default = "nullzone")]
     pub bone_nullzone_deg: f32,
+    /// The player's vision regions (`DisTweaks_PlayerVisRegion.m_VisRegionSettings`: standing,
+    /// sneaking, crouching): `[width, offset towards the NPC, top, bottom]`, top and bottom in
+    /// uu above the feet. They place the five line-of-sight test points of the player target
+    /// (0x00C77FC0).
+    #[serde(default = "vis_regions")]
+    pub vis_regions: [[f32; 4]; 3],
+    /// The player target's line-of-sight check period (`Twk_Component_Observable_Player`
+    /// `m_fLOSCheckPeriod`, target vslot 7): a candidate is traced again once this long has
+    /// passed since its last trace (0x00C788E0).
+    #[serde(default = "los_period")]
+    pub los_period: f32,
 }
 
 fn nullzone() -> f32 {
     5.0
+}
+
+fn vis_regions() -> [[f32; 4]; 3] {
+    [[20.0, 35.0, 150.0, 30.0], [20.0, 35.0, 90.0, 50.0], [20.0, 35.0, 60.0, 30.0]]
+}
+
+fn los_period() -> f32 {
+    0.1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1036,6 +1055,17 @@ impl AiNoise {
     }
 }
 
+impl NoiseTable {
+    /// The AI noise of a prop whose contact type is `contact` (`""`: the plain `Environment`
+    /// type) striking the world.
+    pub fn prop_contact(&self, contact: &str) -> AiNoise {
+        if contact.is_empty() {
+            return self.environment;
+        }
+        self.prop_contacts.iter().find(|(n, _)| n.eq_ignore_ascii_case(contact)).map(|(_, n)| *n).unwrap_or(self.environment)
+    }
+}
+
 /// The AI noises the simulation emits, from the contact system's `DisContactSub_AINoise`
 /// objects (`Phy_ContactSystem.ContactSystem.Dis_ContactSystem`, struck type
 /// `DisContactType_Environment` unless named) and the weapon tweaks, with radii from
@@ -1073,6 +1103,12 @@ pub struct NoiseTable {
     /// speed-scaled subs (`m_bScaleWithSpeed` false here), so every such contact makes the noise.
     pub corpse: AiNoise,
     pub sleeping_body: AiNoise,
+    /// `DisContactType_Env_*` -> `Environment`: the AI noise of a physics prop (a movable's
+    /// `m_pContactTypeOverride`) striking the world, by contact type class name; the types that
+    /// make the plain [`Self::environment`] noise (wood, stone, tile, ...) are not listed.
+    pub prop_contacts: Vec<(String, AiNoise)>,
+    /// `DisContactType_Environment` -> `Environment` (a prop without a contact type of its own).
+    pub environment: AiNoise,
     /// `DisTweaks_FirePistol.m_AINoiseLoudnessWhenFiring`, context Danger, at the shooter
     /// (0x00C2A3E0). The crossbow's fire tweak has no AI noise: firing a bolt is silent.
     pub pistol_fire: AiNoise,
@@ -1113,6 +1149,15 @@ impl Default for NoiseTable {
             bullet_impact: AiNoise::new(3000.0, Danger, 0.0),
             corpse: AiNoise::new(300.0, Anomaly, 0.0),
             sleeping_body: AiNoise::new(300.0, Anomaly, 0.0),
+            prop_contacts: vec![
+                ("DisContactType_Env_BreakableGlass".into(), AiNoise::new(500.0, Anomaly, 0.0)),
+                ("DisContactType_Env_Glass".into(), AiNoise::new(500.0, Anomaly, 0.0)),
+                ("DisContactType_Env_Metal".into(), AiNoise::new(2000.0, Anomaly, 0.0)),
+                ("DisContactType_Env_Sword".into(), AiNoise::new(2000.0, Anomaly, 0.0)),
+                ("DisContactType_Env_TallboyStilts".into(), AiNoise::new(2000.0, Anomaly, 0.0)),
+                ("DisContactType_Env_WhaleOilBattery".into(), AiNoise::new(500.0, Anomaly, 0.0)),
+            ],
+            environment: AiNoise::new(800.0, Anomaly, 0.0),
             pistol_fire: AiNoise::new(6000.0, Danger, 0.0),
             walk_clip: FootfallClip { length: 2.0, footfalls: vec![1.0000004, 1.9150001] },
             run_clip: FootfallClip { length: 0.96666664, footfalls: vec![0.466667, 0.933333] },
@@ -1222,6 +1267,11 @@ pub struct AiConfig {
     /// before the ambient `DDH_PATROL_MISC` barks (0x00b47020).
     #[serde(default = "bark_inhibition")]
     pub ambient_bark_inhibition: f32,
+    /// `DisTweaks_AISubProcess_AmbientAnims` (`m_fMinAmbientAnimFrequency`,
+    /// `m_fMaxAmbientAnimFrequency`): seconds between a patrolling / guarding NPC's ambient idle
+    /// animations (`TweaksBehavior_Patrol_Default`: 30 .. 60).
+    #[serde(default = "ambient_anim_freq")]
+    pub ambient_anim_freq: [f32; 2],
     /// The special NPC classes (tallboys, hounds, weepers, music-box Overseers).
     #[serde(default)]
     pub special: SpecialNpcConfig,
@@ -1241,6 +1291,9 @@ pub struct HeadLoop {
     pub duration: f32,
     pub sample_rate: f32,
     pub samples: Vec<[f32; 6]>,
+    /// The eye matrix's right and up axes per frame, `[rx, ry, rz, ux, uy, uz]` (the eye's roll).
+    #[serde(default)]
+    pub axes: Vec<[f32; 6]>,
 }
 
 impl HeadLoop {
@@ -1262,6 +1315,25 @@ impl HeadLoop {
     }
 }
 
+impl HeadLoop {
+    /// The eye's right and up axes at loop time `t` (wrapped; zero when the loop carries none).
+    pub fn axes_at(&self, t: f32) -> Option<[f32; 6]> {
+        let n = self.axes.len();
+        if n == 0 {
+            return None;
+        }
+        if n == 1 || self.duration <= 0.0 {
+            return Some(self.axes[0]);
+        }
+        let f = (t.rem_euclid(self.duration) * self.sample_rate).max(0.0);
+        let i = (f.floor() as usize).min(n - 1);
+        let j = (i + 1).min(n - 1);
+        let w = f - i as f32;
+        let (a, b) = (self.axes[i], self.axes[j]);
+        Some(std::array::from_fn(|k| a[k] + (b[k] - a[k]) * w))
+    }
+}
+
 /// The vision bone of one visual archetype.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct HeadPose {
@@ -1276,6 +1348,10 @@ impl HeadPose {
     pub fn find(&self, modifier: &str, speed: u8) -> Option<&HeadLoop> {
         self.loops.iter().find(|l| l.speed == speed && l.modifier.eq_ignore_ascii_case(modifier)).or_else(|| self.loops.iter().find(|l| l.speed == speed))
     }
+}
+
+fn ambient_anim_freq() -> [f32; 2] {
+    [30.0, 60.0]
 }
 
 fn bark_inhibition() -> f32 {
@@ -1980,7 +2056,7 @@ impl Default for AiConfig {
     /// `dishonored_assets::gameplay` reloads them from the install.
     fn default() -> Self {
         AiConfig {
-            vision: VisionConfig { inner_fov_deg: 45.0, inner_range: 3500.0, inner_up: 0.25, inner_down: 0.7, outer_fov_deg: 160.0, outer_range: 1700.0, outer_up: 0.1, outer_down: 0.7, bone_nullzone_deg: 5.0 },
+            vision: VisionConfig { inner_fov_deg: 45.0, inner_range: 3500.0, inner_up: 0.25, inner_down: 0.7, outer_fov_deg: 160.0, outer_range: 1700.0, outer_up: 0.1, outer_down: 0.7, bone_nullzone_deg: 5.0, vis_regions: vis_regions(), los_period: los_period() },
             guard_unsuspecting: AttentionConfig::guard_unsuspecting(),
             guard_suspecting: AttentionConfig::guard_suspecting(),
             civilian_unsuspecting: AttentionConfig::guard_unsuspecting(),
@@ -2052,8 +2128,11 @@ impl Default for AiConfig {
             head_track_torso_ratio: 0.0,
             player_eye: [0.0, 0.0],
             ambient_bark_inhibition: bark_inhibition(),
+            ambient_anim_freq: ambient_anim_freq(),
             special: SpecialNpcConfig::default(),
             provenance: BTreeMap::new(),
         }
     }
 }
+
+

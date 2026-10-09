@@ -44,10 +44,24 @@ fn set_has(content: &Content, pkg_name: &str, set: usize, sequence: &str) -> boo
 /// `R = FRotationMatrix(pitch, yaw, roll)`, new X = `R[0][0] X + R[0][1] Y + R[0][2] Z`
 /// (row 0 of a UE3 rotation matrix: `(cos p cos y, cos p sin y, sin p)`).
 pub fn vision_forward(g: &Mat4, offset_deg: [f32; 3]) -> Vec3 {
-    let (yaw, pitch) = (offset_deg[0].to_radians(), offset_deg[1].to_radians());
-    let r0 = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin());
+    vision_axes(g, offset_deg).0
+}
+
+/// The three axes of the eye matrix (`O * M`, rows of `FRotationMatrix(pitch, yaw, roll)` of the
+/// body tweak applied to the bone's axes): forward (X), right (Y) and up (Z).
+pub fn vision_axes(g: &Mat4, offset_deg: [f32; 3]) -> (Vec3, Vec3, Vec3) {
+    let (yaw, pitch, roll) = (offset_deg[0].to_radians(), offset_deg[1].to_radians(), offset_deg[2].to_radians());
+    let (sp, cp) = pitch.sin_cos();
+    let (sy, cy) = yaw.sin_cos();
+    let (sr, cr) = roll.sin_cos();
+    let rows = [
+        Vec3::new(cp * cy, cp * sy, sp),
+        Vec3::new(sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, -sr * cp),
+        Vec3::new(-(cr * sp * cy + sr * sy), cy * sr - cr * sp * sy, cr * cp),
+    ];
     let (x, y, z) = (g.transform_vector3(Vec3::X), g.transform_vector3(Vec3::Y), g.transform_vector3(Vec3::Z));
-    (x * r0.x + y * r0.y + z * r0.z).normalize_or_zero()
+    let axis = |r: Vec3| (x * r.x + y * r.y + z * r.z).normalize_or_zero();
+    (axis(rows[0]), axis(rows[1]), axis(rows[2]))
 }
 
 /// Bake `camera_jnt` over the idle and walk loops (forward loop) of every stance modifier of
@@ -57,11 +71,7 @@ pub fn vision_forward(g: &Mat4, offset_deg: [f32; 3]) -> Vec3 {
 /// (`DishonoredNPCPawn.AnimMesh` sets no `Translation`); the walk loops' root motion is
 /// discarded on X / Y (the root bone keeps its bind X / Y, the loops play in place).
 pub fn bake(content: &Content, archetype: &str, body: (&str, &str), loco: &LocoConfig, sets: &[&str], packages: &[&str], angle_offset: [f32; 3]) -> Result<HeadPose> {
-    let rig = crate::characters::load_model(content, archetype, &[body], None, 16)?;
-    let part = rig.parts.first().context("no body part")?;
-    let bone = part.bones.iter().position(|b| b.name.eq_ignore_ascii_case(VISION_BONE)).with_context(|| format!("{} has no {VISION_BONE}", body.1))?;
-    let located: Vec<(String, usize)> = sets.iter().filter_map(|s| locate_set(content, packages, s)).collect();
-    let bind_root = (part.mesh_to_pawn * crate::characters::bind_globals(&part.bones)[0]).transform_point3(Vec3::ZERO);
+    let rig = Rig::load(content, archetype, body, sets, packages)?;
     let mut loops: Vec<HeadLoop> = Vec::new();
     for (mi, m) in loco.modifiers.iter().enumerate() {
         for speed in 0..loco.speed_names.len().min(2) {
@@ -72,42 +82,90 @@ pub fn bake(content: &Content, archetype: &str, body: (&str, &str), loco: &LocoC
                 loops.push(HeadLoop { modifier: m.name.clone(), speed: speed as u8, ..l });
                 continue;
             }
-            let Some((pkg_name, set)) = located.iter().rev().find(|(p, i)| set_has(content, p, *i, &seq)).cloned() else { continue };
-            let set_path = content.package(&pkg_name)?.obj_path(ObjRef::Export(set));
-            let mut lib = crate::characters::load_anim_set(content, &pkg_name, &set_path, &[seq.as_str()])?;
-            lib.edge_order(&part.bones);
-            let Some(clip) = lib.clips.get(seq.as_str()) else { continue };
-            let track: Vec<Option<usize>> = part.bones.iter().map(|b| lib.tracks.iter().position(|t| t.eq_ignore_ascii_case(&b.name))).collect();
-            let mut samples = Vec::with_capacity(clip.num_frames);
-            for f in 0..clip.num_frames {
-                let mut bones = part.bones.clone();
-                for (bi, b) in bones.iter_mut().enumerate() {
-                    let Some(j) = track[bi] else { continue };
-                    if let Some(Some(q)) = clip.rotations.get(f).and_then(|r| r.get(j)) {
-                        b.rotation = *q;
-                    }
-                    // Translations for the root and its children only, as the runtime's sampler
-                    // (deeper bones keep their bind lengths).
-                    let par = part.bones[bi].parent;
-                    let shallow = bi == 0 || par <= 0 || part.bones.get(par as usize).is_some_and(|x| x.parent < 0);
-                    if shallow {
-                        if let Some(Some(t)) = clip.translations.get(f).and_then(|r| r.get(j)) {
-                            b.translation = *t;
-                        }
-                    }
-                }
-                let globals = crate::characters::bind_globals(&bones);
-                let g: Mat4 = part.mesh_to_pawn * globals[bone];
-                let root = (part.mesh_to_pawn * globals[0]).transform_point3(Vec3::ZERO);
-                let p = g.transform_point3(Vec3::ZERO) - Vec3::new(root.x - bind_root.x, root.y - bind_root.y, 0.0);
-                let x = vision_forward(&g, angle_offset);
-                let r = |v: f32| (v * 1000.0).round() / 1000.0;
-                samples.push([r(p.x), r(p.y), r(p.z), r(x.x), r(x.y), r(x.z)]);
+            let Some(l) = rig.sequence(content, &seq, angle_offset)? else { continue };
+            loops.push(HeadLoop { modifier: m.name.clone(), speed: speed as u8, ..l });
+        }
+    }
+    // The ambient idles (`DisAISubProcessAmbientAnims`: `Empty_Idle_01..` / `Sword_Patrol_Idle_01..`,
+    // numbered from 01 while the sequence exists), played once: `modifier` "Ambient", speed 2.
+    for prefix in AMBIENT_PREFIXES {
+        for n in 1..=AMBIENT_MAX {
+            let seq = format!("{prefix}{n:02}");
+            if let Some(l) = rig.sequence(content, &seq, angle_offset)? {
+                loops.push(HeadLoop { modifier: AMBIENT_MODIFIER.to_string(), speed: AMBIENT_SPEED, ..l });
             }
-            loops.push(HeadLoop { modifier: m.name.clone(), speed: speed as u8, sequence: seq.clone(), duration: clip.duration, sample_rate: clip.sample_rate, samples });
         }
     }
     Ok(HeadPose { archetype: archetype.to_string(), mesh: body.1.to_string(), loops })
+}
+
+/// The ambient idle sequences of the elite guard (`DisNPCAnimDefinitions_EliteGuard.AmbientIdle`
+/// groups: `Empty_Idle_01..10`, `Sword_Patrol_Idle_01..10`, the later ones absent from the sets).
+pub const AMBIENT_PREFIXES: [&str; 2] = ["Empty_Idle_", "Sword_Patrol_Idle_"];
+/// The highest ambient idle number in the definitions.
+pub const AMBIENT_MAX: u32 = 10;
+/// `HeadLoop::modifier` of an ambient idle.
+pub const AMBIENT_MODIFIER: &str = "Ambient";
+/// `HeadLoop::speed` of an ambient idle.
+pub const AMBIENT_SPEED: u8 = 2;
+
+/// A body mesh's rig and the located AnimSets, to sample `camera_jnt` over sequences.
+struct Rig {
+    part: dishonored_ir::SkeletalMeshAsset,
+    bone: usize,
+    bind_root: Vec3,
+    located: Vec<(String, usize)>,
+}
+
+impl Rig {
+    fn load(content: &Content, archetype: &str, body: (&str, &str), sets: &[&str], packages: &[&str]) -> Result<Rig> {
+        let rig = crate::characters::load_model(content, archetype, &[body], None, 16)?;
+        let part = rig.parts.into_iter().next().context("no body part")?;
+        let bone = part.bones.iter().position(|b| b.name.eq_ignore_ascii_case(VISION_BONE)).with_context(|| format!("{} has no {VISION_BONE}", body.1))?;
+        let located: Vec<(String, usize)> = sets.iter().filter_map(|s| locate_set(content, packages, s)).collect();
+        let bind_root = (part.mesh_to_pawn * crate::characters::bind_globals(&part.bones)[0]).transform_point3(Vec3::ZERO);
+        Ok(Rig { part, bone, bind_root, located })
+    }
+
+    /// `camera_jnt` over one sequence (later sets win a name); `None` when no set holds it.
+    fn sequence(&self, content: &Content, seq: &str, angle_offset: [f32; 3]) -> Result<Option<HeadLoop>> {
+        let part = &self.part;
+        let Some((pkg_name, set)) = self.located.iter().rev().find(|(p, i)| set_has(content, p, *i, seq)).cloned() else { return Ok(None) };
+        let set_path = content.package(&pkg_name)?.obj_path(ObjRef::Export(set));
+        let mut lib = crate::characters::load_anim_set(content, &pkg_name, &set_path, &[seq])?;
+        lib.edge_order(&part.bones);
+        let Some(clip) = lib.clips.get(seq) else { return Ok(None) };
+        let track: Vec<Option<usize>> = part.bones.iter().map(|b| lib.tracks.iter().position(|t| t.eq_ignore_ascii_case(&b.name))).collect();
+        let mut samples = Vec::with_capacity(clip.num_frames);
+        let mut axes = Vec::with_capacity(clip.num_frames);
+        for f in 0..clip.num_frames {
+            let mut bones = part.bones.clone();
+            for (bi, b) in bones.iter_mut().enumerate() {
+                let Some(j) = track[bi] else { continue };
+                if let Some(Some(q)) = clip.rotations.get(f).and_then(|r| r.get(j)) {
+                    b.rotation = *q;
+                }
+                // Translations for the root and its children only, as the runtime's sampler
+                // (deeper bones keep their bind lengths).
+                let par = part.bones[bi].parent;
+                let shallow = bi == 0 || par <= 0 || part.bones.get(par as usize).is_some_and(|x| x.parent < 0);
+                if shallow {
+                    if let Some(Some(t)) = clip.translations.get(f).and_then(|r| r.get(j)) {
+                        b.translation = *t;
+                    }
+                }
+            }
+            let globals = crate::characters::bind_globals(&bones);
+            let g: Mat4 = part.mesh_to_pawn * globals[self.bone];
+            let root = (part.mesh_to_pawn * globals[0]).transform_point3(Vec3::ZERO);
+            let p = g.transform_point3(Vec3::ZERO) - Vec3::new(root.x - self.bind_root.x, root.y - self.bind_root.y, 0.0);
+            let (x, y, z) = vision_axes(&g, angle_offset);
+            let r = |v: f32| (v * 1000.0).round() / 1000.0;
+            samples.push([r(p.x), r(p.y), r(p.z), r(x.x), r(x.y), r(x.z)]);
+            axes.push([r(y.x), r(y.y), r(y.z), r(z.x), r(z.y), r(z.z)]);
+        }
+        Ok(Some(HeadLoop { modifier: String::new(), speed: 0, sequence: seq.to_string(), duration: clip.duration, sample_rate: clip.sample_rate, samples, axes }))
+    }
 }
 
 #[cfg(test)]
@@ -134,3 +192,5 @@ mod tests {
         }
     }
 }
+
+

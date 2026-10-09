@@ -218,6 +218,20 @@ pub(super) fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
                     h.note(format!("climb of {name} {}: {} event(s)", if started { "started" } else { "finished" }, fired.len()));
                 }
             }
+            // `DisSeqEvent_MovablePickedUp` (0x00A45FD0, from the grab 0x00C3D030) and
+            // `DisSeqEvent_MovableDropped` (0x00A46380, from the release 0x00C45340, a drop or a
+            // throw): `FireGeneratedEvents(prop, class, prop, pawn, 0, 0)`: the prop's events,
+            // the prop the originator, the pawn the instigator, every output.
+            SimEvent::MovablePickedUp { id, movable } | SimEvent::MovableDropped { id, movable, .. } => {
+                let Some((package, name)) = h.m.world.movables.iter().find(|m| m.id == movable).map(|m| (m.package.clone(), m.name.clone())) else { continue };
+                let Some(a) = h.kismet_actor(&package, &name) else { continue };
+                let (class, what) = if matches!(e, SimEvent::MovablePickedUp { .. }) { ("DisSeqEvent_MovablePickedUp", "picked up") } else { ("DisSeqEvent_MovableDropped", "dropped") };
+                let evs = k.events_for(class, &[Obj::Actor(a)]);
+                let fired = fire_events(k, h, evs, Obj::Actor(a), Obj::Pawn(id), None);
+                if !fired.is_empty() {
+                    h.note(format!("{name} {what} by {id}: {} {class} event(s)", fired.len()));
+                }
+            }
             _ => {}
         }
     }

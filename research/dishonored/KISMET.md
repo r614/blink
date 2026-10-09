@@ -1,4 +1,4 @@
-﻿# Kismet: how Dishonored runs its level scripting, and how the port runs it
+# Kismet: how Dishonored runs its level scripting, and how the port runs it
 
 The original missions are UE3 Kismet graphs (plus Arkane's `DisSeq*` ops) cooked into the level
 packages, with one always-loaded global game sequence in `DishonoredGameFull_P`. The port loads
@@ -488,7 +488,7 @@ class descriptor name). Not fed by the port yet (the host feeds the classes in `
 | `DisSeqEvent_Possessed` | 0x00a52130, 0x00a5a990 (possessable pawn states; output 0 Started, 1 Finished), 0x00b7d110, 0x00b7d2f0 (DLC06) |
 | `DisSeqEvent_PatrolPointReached` | 0x00af2300, 0x00afd350 |
 | `DisSeqEvent_BehaviorStarted` / `Combat` | 0x00af7670 / 0x00af7d00 |
-| `DisSeqEvent_MovablePickedUp` / `MovableDropped` | 0x00a45fd0 / 0x00a46380 |
+| `DisSeqEvent_MovablePickedUp` / `MovableDropped` | 0x00a45fd0 / 0x00a46380 (fed since the movables port, see below) |
 | `DisSeqEvent_Corpse` (0 picked up, 1 dropped, 2 discovered) | 0x00a998a0, 0x00a90b50, 0x00b40740 |
 | `DisSeqEvent_PlayerCrouch` (0 stand, 1 sneak, 2 crouch; `m_OldCrouchState`) | 0x00ab0960 |
 | `DisSeqEvent_PlayerHolsterWeapon` | 0x00ab3d80 |
@@ -501,6 +501,38 @@ class descriptor name). Not fed by the port yet (the host feeds the classes in `
 | `DisSeqEvent_TeleportSpell` | 0x00c2ba40, 0x00c35280, 0x00cd7090, 0x00ce0aa0, 0x00cf12f0 |
 | `DisSeqEvent_WatchTower` / `DefenceTower` / `WallOfLight` | 0x00a2a770 / 0x00a258f0, 0x00a2fce0..0x00a2fff0 / 0x00a28f80, 0x00a29170, 0x00a3c010, 0x00a3eb10, 0x00a3eca0 |
 | `DisSeqEvent_Interact` / `AttackedByRats` / `RatPossess` | 0x00a3df60, 0x00a3e0b0 / 0x00a70450 / 0x00c7fbc0 |
+
+### AI events pass (2026-10-08)
+
+The AI-owned events of the table above, fired from the brain code that fires them in the
+engine (decompiled with `oracle index fn`), routed to the Kismet host as event activations
+(`dishonored_multiplayer::kismet_host::ai_events` / `feed`; the AI reports them as
+`dishonored_ai::AiEvent` through `Crowd::events`). All go through `FireGeneratedEvents`
+(0x00bc7b30): the events held by the actor (a spawned pawn gets its events through
+`SeqAct_AttachToEvent` duplicates, the original spawner's own events count for its pawn), each
+enabled one runs `CheckActivate(originator, instigator)`.
+
+| event | firing function | condition | output / originator / instigator | instances |
+|---|---|---|---|---|
+| `PatrolPointReached` | 0x00afd430 (`DisBehaviorPatrol` slot 107, the arrival callback `0x00af7e00` calls) -> 0x00afd350 | the patrolling pawn reached the current route point and it is a `DishonoredNavPoint` (0x00ae8a60); fires whether the point is a stop (0x00a4bab0: guard duration, forever, watch points) or passed | actor = the point; output 0 "From Patrol Behavior"; originator the point, instigator the pawn | 150 of 151 |
+| `PatrolPointReached` output 1 "From Guard Behavior" | 0x00af2300 (`DisBehaviorGuard` slot 107) | the guard behaviour reached its guard point (`+0xb8`) | not fed: the port's guards stand at a position (`Brain::home`), not at a nav point actor | 19 |
+| `BehaviorStarted` | 0x00af7670, called by the arbitration 0x00b17100 | the current-behaviour pointer was clear (the current behaviour ended 0x00aea8f0, was replaced or preempted 0x00b11960) and the highest occupied slot's behaviour becomes current; the override 0x00b8a1a0 passes when the class of that behaviour is exactly `m_pBehavior` (0x00b00d80) | no outputs given (all); originator and instigator the pawn | Idle 2, Patrol 9, Panic 45, Search 4, StationarySearch 1 (+ the classes below) |
+| `Combat` | 0x00af7d00 = `DisBehaviorCombat` slot 91 (the behaviour's own start, called by 0x00af7670 right after the event) | the combat behaviour became current | originator the attention target (0x00b4cde0), instigator the pawn | 88 |
+| `Investigate` | 0x00b2e050 (`DisAISubStateInvestigate` slot 96, entering the sub-state), 0x00ae9fe0 (`DisBehaviorStationarySearch` start) | the search behaviour became current with the investigate sub-state, or the search track returned to it; only for a pawn target (0x00a49130) | originator the searched pawn, instigator the pawn | 5 |
+| `FleepointReached` | 0x00a47340 from the flee sub-state (0x00b29ae0 tick, 0x00b29be0 message) | the fleeing pawn finished its walk to the flee point (`+0xd4`) | actor/originator = the flee point, instigator the pawn | 5 |
+| `Corpse` output 0 / 1 | 0x00a998a0 / 0x00a90b50 (corpse carry start / end) | a body lifted / dropped (`SimEvent::BodyLifted` / `BodyDropped`) | actor/originator = the body, instigator the carrier | 16 (all three outputs) |
+| `Corpse` output 2 and `CorpseDetected` | 0x00b40740 (the corpse reaction, `AiEvent::CorpseFound`) | an NPC discovers a corpse | `Corpse`: actor = corpse, instigator the observer; `CorpseDetected`: actor = observer, instigator the corpse | 16 / 0 |
+| `PawnSighted` | 0x00b0be40 / 0x00b0bef0 / 0x00b0bf30 from 0x00b24ec0, which 0x00b26b30 calls when the attention record steps through level 3 -> 4 (Busted) toward a pawn target (0x00b3b350 per record) | every relationship (0 / 1 / 2) fires it | originator and actor the observer, instigator the target pawn | 9 (5 on spawners / unattached, 4 on `DisWatchTower`) |
+| `Assassinated` output 0 "Started" | 0x00a7beb0 (`StateNPCMasterBeingAssassinated` slot 73, the victim's state entry), exact class | the NPC is killed by an assassination / drop assassination | originator the victim, instigator the assassin | 4 |
+
+Left open, with why:
+
+- `Assassinated` output 1 "Finished" (0x00a78270, state slot 92 / 85): fires on the synced animation's kill message (id 1), which the port has no animation for (it kills at the start).
+- `PlayerHeard` (0x00b04100, from 0x00b0f400 each brain tick): fires when `m_PendingPlayerHeardKismetEventActorName` (brain +0xa8) names an actor and the brain's attention level toward the player reaches the tweak's byte at `+0xa5`; the writer of that name was not found (see LOG.md).
+- `AttackedByRats` (0x00a70450, `StateNPCMasterActionMeleeSwarm` slot 73, exact class): the entry of that NPC state needs the NPC master state machine; the swarm's bite code (0x00c891e0) was decoded far enough only to see it is not in it.
+- `WatchTower` (0x00a2a770 and the others): no watch tower exists in the port.
+- `BehaviorStarted` for the classes the port's behaviours do not have: `DisBehaviorReact` (8 instances), `PatrolSearch`, `EscapeExplosion`, `CombatRatSwarm` / `CombatRatSwarmEliteGuard`, `Soiree` (8: the soiree's behaviour class is not decoded, the port runs soirees inside `DisBehaviorInteract`).
+- `ActorTouched` (0x00b040c0, 0x00b04140, 0x00b0bf70), `WitnessedInteraction` (0x00b04190), `AlarmEnded`: no instance in the 41 maps.
 
 ### Player and world events (2026-10-08)
 
@@ -527,13 +559,14 @@ those events as "class, no originator" (`player_events.rs`, `player_events()`). 
 | `DisSeqEvent_KeyHoleUsed` (37) | the door's `AltInteract` 0x00A38580 (output 0) when Use is held `m_fAltInteractActivateTime` at a shut door, its exit 0x00A2E4E0 (output 1); originator the door, instigator the player pawn, exact | `InteractEvent::KeyHole` from `dishonored_sim::interactables` (systems/interactables.md) | all 37 instances (the level ones have output 0 only) |
 | `DisSeqEvent_Tripwire` (7) | `Trip` 0x00A28B40 -> 0x00A21A30, once per wire (touch 0x00A30C00, damage 0x00A28BB0); originator the wire, instigator the tripper, inexact, no output list (every output) | `InteractEvent::Tripwire` | all 7 |
 | `DisSeqEvent_Interact` (4) | `Interact` 0x00A3DF60 (0) / `AltInteract` 0x00A3E0B0 (1) from the Use handler 0x00AD5BA0; `FireGeneratedEvents(user, ..)`: events registered with the user pawn (originator-less events are registered with nobody, 0x006E50B0) | `player_ev.interacts`, `InteractEvent::AltInteract` | none fire: the Prison's four have no Originator (UNVERIFIED) |
+| `DisSeqEvent_MovablePickedUp` (127) | the grab: `StatePlayerGrabMovable` enter 0x00A69860 -> the empty hands 0x00C3D030 -> the component's pick-up 0x00A45FD0, `FireGeneratedEvents(prop, DAT_0146736C, prop, holder, 0, 0)`: the prop's events, originator the PROP (corrected 2026-10-08: it was written as the player), instigator the pawn, every output | `SimEvent::MovablePickedUp` (`movables::grab`), the prop's Kismet actor by package and name | all 127 (needs a pick-up) |
+| `DisSeqEvent_MovableDropped` (1) | the release 0x00C45340 -> 0x00A46380 (`DAT_01467368`, the same arguments), for a drop and a throw | `SimEvent::MovableDropped` (`movables::release`) | the 1 |
+
+The movables' rules, addresses and the throw / hit / noise model are in `systems/movables.md`.
 
 Decoded but not hooked (no system in the port to hook them to; counts are level instances):
-`MovablePickedUp` (127) 0x00A45FD0 (output none = all; originator the grabbing player, instigator the
-movable; from the grab state 0x00C3D030) and `MovableDropped` (1) 0x00A46380 (0x00C45340, the carried-object
-release): the port cannot grab physics props. (`KeyHoleUsed`, `Interact` and `Tripwire` are hooked:
-see the table and systems/interactables.md; `m_pAssociatedTweak` is not a filter but the event's
-tweak output, slot 102 0x00B8E830.) `SeqEvent_RigidBodyCollision` (73) 0x0078F7D0, `SeqEvent_ParticleEvent` (26) 0x0089FC00,
+(`KeyHoleUsed`, `Interact` and `Tripwire` are hooked: see the table and systems/interactables.md; `m_pAssociatedTweak` is not a filter but the event's tweak output, slot 102 0x00B8E830.)
+`SeqEvent_RigidBodyCollision` (73) 0x0078F7D0, `SeqEvent_ParticleEvent` (26) 0x0089FC00,
 `SeqEvent_AnimNotify` (2) 0x0070F4F0, `SeqEvent_HitWall` (1, `Actor.HitWall` script): no rigid bodies,
 particles or per-actor notifies. `SeqEvent_Destroyed` (18) is `UWorld::DestroyActor` 0x00652CF0, which
 runs `CheckActivate(actor, actor, 0, 0, 0)` on the actor's Destroyed events (the instigator is the

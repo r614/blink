@@ -1,32 +1,46 @@
 // The Boyle party guard (`DishonoredSpawner_46`, yaw 251.4) sees the player standing 600 uu in
-// front of it. Original, per-tick trace (ORACLE.md "Capture requests answered", 2026-10-08): the
-// first sighting is through the OUTER cone (LOS norm 0.353 = 600 / 1700, 0.339 / s), level 1 at
-// frame 45; once the head turns toward the player the inner cone applies (norm 0.169 = 591 / 3500,
-// 0.79 / s), level 4 at frame 111. So the vision axis is the head (`camera_jnt`), not the body,
-// and HeadTrack turns the head (stealth.md F4 / F5): U-864's 0.164 was taken with the head
-// already turned. The port's head (stealth.md section 13): eye at the baked `camera_jnt`, axis the
-// pawn's rotation while no look-at request runs (look-at enabled), the HeadTrack cursor after. It
-// sees the player in the inner cone from the first tick (0.171); an outer first sighting needs the
-// look-at disabled by an ambient idle (bone axis) or another vision-target point (F6): capture queued.
+// front of it, while it plays the ambient idle `Empty_Idle_03` (the variant is pinned: `ambient`).
+//
+// Original capture (`probe_launch scenario`, `Bones("guard", ["+world"])` + `AnimState("guard")`; the
+// numbers below are read from that trace, the camera_jnt pose from its anim sidecar):
+// * the player is in the inner cone from the first tick: the seen value rises at 0.692 / s (the
+//   norm 591 / 3500 = 0.169), level 1 (HeadTrack) at tick 22, Busted at tick 87 (the value goes on
+//   rising past 1: the accumulator has no upper bound, its max is FLT_MAX);
+// * ticks 97-124 are an outer-cone window (0.246 / s, the norm 597 / 1700 = 0.351): the ambient idle
+//   pitches the head up to +20 deg, the target (the point of the player's vision segment where
+//   `eye up . (point - eye) = 0`, clamped to it: stealth.md section 17) falls out of the inner
+//   cone. The window's edges are sampled by the target's line-of-sight check (every 0.1 s, held in
+//   between), so they move by a few ticks from one capture to the next (97-124 here, 98-125 in the
+//   first capture of this setup); only the rate inside the window is checked.
+//
+// The guard's look-at is disabled while the ambient idle plays (`DisNotify_NPCDisableLookAt`), so the
+// vision axis is the animated `camera_jnt` bone, not the body (stealth.md F4 / sections 13, 16, 17).
+//
+// Dropped: the earlier numbers (outer-cone first sighting 0.353 at 0.339 / s, level 1 at 0.75 s,
+// Busted at 1.85 s, ORACLE.md 2026-10-08 "Capture requests answered") came from an earlier session run
+// that is not in the cached capture of this setup (nor of any re-capture); that run's head was in
+// another ambient idle (or none), so its numbers described another setup. They were never reproducible
+// and were removed rather than re-fitted.
 (
     name: "stealth/detect_600",
     system: Stealth,
     map: "L_Boyle_Ext_P",
-    description: "Stand 600 uu in front of the party guard: outer-cone sighting first, inner cone once the head turns.",
+    description: "Stand 600 uu in front of the party guard playing an ambient idle: inner-cone rate, time to the first attention level and to Busted, the outer-cone window.",
     setup: (
         player: Some((position: (-3201.5, -2763.3, 20), yaw: 71.37, snap_to_floor: true)),
-        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), yaw: 251.37, state: Some("Idle"))],
+        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), yaw: 251.37, state: Some("Idle"), ambient: Some("Empty_Idle_03"), ambient_age: 0.067)],
         settle: 1,
     ),
     ticks: 130,
     input: [],
     checkpoints: [
-        (name: "first LOS norm (outer cone)", expect: [(metric: At("npc.guard.los", 10), value: 0.353, tol: 0.01, source: "ORACLE.md 2026-10-08 detect_600: 600 / 1700 at first", status: Measured)]),
-        (name: "first rate", expect: [(metric: Delta("npc.guard.attn", 5, 35), value: 0.1695, tol: 0.03, source: "ORACLE.md 2026-10-08: 0.339 / s before the head turns", status: Measured)]),
-        (name: "notices", expect: [(metric: TimeToReach("npc.guard.attn_level", 1), value: 0.75, tol: 0.05, source: "ORACLE.md 2026-10-08: level 1 at frame 45", status: Measured)]),
-        (name: "busted", expect: [(metric: TimeToReach("npc.guard.attn_level", 4), value: 1.85, tol: 0.1, source: "ORACLE.md 2026-10-08: level 4 at frame 111", status: Measured)]),
-        (name: "LOS norm after the head turns (inner cone)", expect: [(metric: At("npc.guard.los", 100), value: 0.169, tol: 0.01, source: "ORACLE.md 2026-10-08: 591 / 3500 once the head turned (the turn tick is not given)", status: Unverified)]),
+        (name: "inner-cone rate", expect: [(metric: Delta("npc.guard.attn", 5, 35), value: 0.3443, tol: 0.01, source: "capture ab418571e9108fda: value 0.0596 at tick 5, 0.4039 at tick 35 (0.688 / s, inner cone 591 / 3500)", status: Measured)]),
+        (name: "notices", expect: [(metric: TimeToReach("npc.guard.attn_level", 1), value: 0.3667, tol: 0.02, source: "capture ab418571e9108fda: attention level 1 at tick 22", status: Measured)]),
+        (name: "busted", expect: [(metric: TimeToReach("npc.guard.attn_level", 4), value: 1.45, tol: 0.02, source: "capture ab418571e9108fda: attention level 4 at tick 87", status: Measured)]),
+        (name: "outer-cone window rate", expect: [(metric: Delta("npc.guard.attn", 100, 120), value: 0.0820, tol: 0.006, source: "capture ab418571e9108fda: value 1.1244 at tick 100, 1.2064 at tick 120 (0.246 / s, outer cone 597 / 1700)", status: Measured)]),
+        (name: "LOS norm (inner cone)", expect: [(metric: At("npc.guard.los", 10), value: 0.169, tol: 0.01, source: "derived from the capture's rate 0.692 / s: 591 / 3500 (the original trace has no LOS channel)", status: Unverified)]),
+        (name: "LOS norm (outer-cone window)", expect: [(metric: At("npc.guard.los", 110), value: 0.351, tol: 0.015, source: "derived from the capture's window rate 0.246 / s: 597 / 1700 (the original trace has no LOS channel)", status: Unverified)]),
     ],
     record: [Pawn, Npc("guard"), Bones("guard", ["+world"]), AnimState("guard")],
-    capture: Some("captured 2026-10-08 (session run with npc attention channels); the camera_jnt pose per tick is still requested (capture_queue.txt)"),
+    capture: Some("captured 2026-10-08 with Bones / AnimState and the ambient idle pinned (Empty_Idle_03: the rand() call at 0x00B39728 replaced by the index); trace ab418571e9108fda"),
 )

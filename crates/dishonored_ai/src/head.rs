@@ -16,7 +16,7 @@
 //!   pawn's rotation; within `m_fVision_BoneNullzone_Deg` of the pawn's rotation, the pawn's
 //!   rotation. Pullback and angle leeway are 0 in every shipped vision tweak.
 
-use dishonored_ir::ai::{AiConfig, HeadPose};
+use dishonored_ir::ai::{AiConfig, HeadLoop, HeadPose};
 use dishonored_ir::npc_anim::LookatMode;
 use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
@@ -295,8 +295,56 @@ pub struct Head {
     pub aim: [f32; 2],
     /// Loop time of the baked head pose.
     pub loop_time: f32,
-    /// The eye of the last step (world): position and forward.
-    pub eye: Option<([f32; 3], [f32; 3])>,
+    /// The eye of the last step (world): position, forward, right and up.
+    pub eye: Option<([f32; 3], [f32; 3], [f32; 3], [f32; 3])>,
+    /// The ambient idle playing (`DisAISubProcessAmbientAnims`).
+    #[serde(default)]
+    pub ambient: Option<Ambient>,
+    /// `m_fAmbientAnimTimer` (+0x68): counts down while the NPC is idle and still; the next
+    /// ambient idle starts when it passes below zero. A new NPC starts with 0.
+    #[serde(default)]
+    pub amb_timer: f32,
+    /// The CRT `rand()` state of the variant pick (0: not drawn yet, the stream starts at the
+    /// seed 1 of an unseeded CRT).
+    #[serde(default)]
+    pub amb_rng: u32,
+}
+
+/// The ambient idle sequence playing and how long it has played. While it plays the look-at is
+/// disabled (`DisNotify_NPCDisableLookAt`, whole length): the vision eye is the animated bone as is
+/// (0x00C676A0), and look-at requests are ignored.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Ambient {
+    pub seq: String,
+    pub age: f32,
+}
+
+/// The ambient node's weight ramps 0 -> 1 in 0.2 s (measured on `stealth/detect_600`: +1/12 per
+/// tick from the tick it starts), blending the idle loop's pose into the ambient sequence's.
+pub const AMBIENT_BLEND: f32 = 0.2;
+
+/// What the brain tells the head about the ambient idle this tick.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AmbientIn<'a> {
+    /// The NPC is on routine, not moving: `DisAISubProcessAmbientAnims` runs its timer.
+    pub eligible: bool,
+    /// The scenario's pinned sequence (`Empty_Idle_03`), else the pick is random.
+    pub pin: Option<&'a str>,
+}
+
+/// The MSVC CRT `rand()` (LCG 214013 / 2531011, bits 16..30).
+fn crt_rand(state: &mut u32) -> u32 {
+    if *state == 0 {
+        *state = 1;
+    }
+    *state = state.wrapping_mul(214013).wrapping_add(2531011);
+    (*state >> 16) & 0x7fff
+}
+
+/// The baked loop of a sequence name for an archetype.
+pub fn find_loop<'a>(poses: &'a [HeadPose], archetype: u8, seq: &str) -> Option<&'a HeadLoop> {
+    let pose = poses.get(archetype as usize).filter(|p| !p.loops.is_empty()).or_else(|| poses.iter().find(|p| !p.loops.is_empty()))?;
+    pose.loops.iter().find(|l| l.sequence.eq_ignore_ascii_case(seq))
 }
 
 /// The baked `camera_jnt` (pawn frame) for an archetype, stance modifier and speed index.
@@ -325,14 +373,38 @@ impl Head {
     /// One tick of the look-at component (0x00953FB0 then 0x00953050) and the node's blend,
     /// for a pawn at `pos` facing `yaw_deg` and moving at `speed`; then the vision eye.
     #[allow(clippy::too_many_arguments)]
-    pub fn step(&mut self, ai: &AiConfig, archetype: u8, modifier: &str, pos: Vec3, yaw_deg: f32, speed: f32, request: Option<LookRequest>, dt: f32) -> Eye {
+    pub fn step(&mut self, ai: &AiConfig, archetype: u8, modifier: &str, pos: Vec3, yaw_deg: f32, speed: f32, request: Option<LookRequest>, amb: AmbientIn, dt: f32) -> Eye {
         self.loop_time += dt;
         let gait = if speed > 20.0 { 1 } else { 0 };
-        let b = bone(&ai.head_poses, archetype, modifier, gait, self.loop_time);
-        let (origin, _) = match b {
-            Some(b) => Self::bone_world(pos, yaw_deg, b),
-            None => (pos + Vec3::Z * 70.0, Vec3::X),
-        };
+        // The ambient idle (DisAISubProcessAmbientAnims tick 0x00B39620).
+        self.ambient_tick(ai, archetype, modifier, amb, dt);
+        let idle = ai.head_poses.get(archetype as usize).filter(|p| !p.loops.is_empty()).or_else(|| ai.head_poses.iter().find(|p| !p.loops.is_empty())).and_then(|p| p.find(modifier, gait));
+        let b = idle.and_then(|l| l.at(self.loop_time));
+        // The bone's axes in the pawn frame (forward, right, up): the idle loop's, blended into
+        // the ambient sequence's while one plays.
+        let mut axes: Option<[Vec3; 3]> = idle.and_then(|l| Some([Vec3::from_slice(&b?[3..6]), Vec3::from_slice(&l.axes_at(self.loop_time)?[0..3]), Vec3::from_slice(&l.axes_at(self.loop_time)?[3..6])]));
+        let mut local = b.map(|b| Vec3::from_slice(&b[0..3]));
+        if let Some(a) = &self.ambient {
+            if let Some(l) = find_loop(&ai.head_poses, archetype, &a.seq) {
+                let age = a.age.max(0.0);
+                if let (Some(ab), Some(ax)) = (l.at(age), l.axes_at(age)) {
+                    let w = (age / AMBIENT_BLEND).clamp(0.0, 1.0);
+                    let (af, ar, au) = (Vec3::from_slice(&ab[3..6]), Vec3::from_slice(&ax[0..3]), Vec3::from_slice(&ax[3..6]));
+                    local = Some(match local {
+                        Some(p) => p.lerp(Vec3::from_slice(&ab[0..3]), w),
+                        None => Vec3::from_slice(&ab[0..3]),
+                    });
+                    axes = Some(match axes {
+                        Some([f, r, u]) => [f.lerp(af, w).normalize_or_zero(), r.lerp(ar, w).normalize_or_zero(), u.lerp(au, w).normalize_or_zero()],
+                        None => [af, ar, au],
+                    });
+                }
+            }
+        }
+        let (s, c) = yaw_deg.to_radians().sin_cos();
+        let rot = |v: Vec3| Vec3::new(v.x * c - v.y * s, v.x * s + v.y * c, v.z);
+        let origin = local.map(|p| pos + rot(p)).unwrap_or(pos + Vec3::Z * 70.0);
+        let bone_axes = if self.ambient.is_some() { axes.map(|[f, r, u]| [rot(f), rot(r), rot(u)]) } else { None };
         // The request (0x0094E5E0 / 0x0094E690 copy its speed and weights; without one,
         // 0x0094E8A0 sets the speeds to 0.5 and keeps the weights).
         match request {
@@ -407,9 +479,49 @@ impl Head {
         } else {
             self.aim = [0.0; 2];
         }
-        let eye = self.vision(ai, origin, yaw_deg);
-        self.eye = Some((eye.pos.into(), eye.fwd.into()));
+        let eye = self.vision(ai, origin, yaw_deg, bone_axes);
+        self.eye = Some((eye.pos.into(), eye.fwd.into(), eye.right.into(), eye.up.into()));
         eye
+    }
+
+    /// `DisAISubProcessAmbientAnims` tick (0x00B39620): while the NPC is idle and still the
+    /// timer counts down; below zero a variant of the group is picked (`rand() * n`, 0x00401940
+    /// at 0x00B39728), played, and the timer rolled again in `[min, max]` of the tweak. A
+    /// sequence that ends clears the ambient state (the look-at is enabled again). Not
+    /// eligible (moving, alerted, off routine): the animation is dropped.
+    fn ambient_tick(&mut self, ai: &AiConfig, archetype: u8, modifier: &str, amb: AmbientIn, dt: f32) {
+        if !amb.eligible {
+            self.ambient = None;
+            return;
+        }
+        if let Some(a) = &mut self.ambient {
+            a.age += dt;
+            let dur = find_loop(&ai.head_poses, archetype, &a.seq).map(|l| l.duration).unwrap_or(0.0);
+            if a.age >= dur {
+                self.ambient = None;
+            }
+        }
+        self.amb_timer -= dt;
+        if self.amb_timer < 0.0 && self.ambient.is_none() {
+            let prefix = if modifier.starts_with("Sword") { "Sword_Patrol_Idle_" } else { "Empty_Idle_" };
+            let seq = match amb.pin {
+                Some(p) => p.to_string(),
+                None => {
+                    // The variants numbered from 01 while the sequence exists.
+                    let n = (1..).take_while(|k| find_loop(&ai.head_poses, archetype, &format!("{prefix}{k:02}")).is_some()).count() as u32;
+                    if n == 0 {
+                        return;
+                    }
+                    let i = (crt_rand(&mut self.amb_rng) as f32 * n as f32 * 3.0517578e-5) as u32;
+                    format!("{prefix}{:02}", i.min(n - 1) + 1)
+                }
+            };
+            if find_loop(&ai.head_poses, archetype, &seq).is_some() {
+                self.ambient = Some(Ambient { seq, age: 0.0 });
+                let [lo, hi] = ai.ambient_anim_freq;
+                self.amb_timer = crt_rand(&mut self.amb_rng) as f32 * (hi - lo) * 3.051851e-5 + lo;
+            }
+        }
     }
 
     /// The node's head and torso parts of the current aim (radians; [`split_aim`] of the cursor
@@ -428,19 +540,23 @@ impl Head {
     /// The vision eye (0x00C676A0): the bone position; with a request the pawn's rotation
     /// turned by the blended aim, else the pawn's rotation; the null zone snaps an axis within
     /// `m_fVision_BoneNullzone_Deg` of the pawn's rotation to it.
-    pub fn vision(&self, ai: &AiConfig, origin: Vec3, yaw_deg: f32) -> Eye {
+    pub fn vision(&self, ai: &AiConfig, origin: Vec3, yaw_deg: f32, bone: Option<[Vec3; 3]>) -> Eye {
         let pawn = rot_vector(yaw_deg.to_radians(), 0.0);
-        let mut axis = if self.requested { rot_vector(yaw_deg.to_radians() + self.aim[0], self.aim[1]) } else { pawn };
-        if axis.dot(pawn).clamp(-1.0, 1.0).acos() <= ai.vision.bone_nullzone_deg.to_radians() {
-            axis = pawn;
+        // Look-at disabled (an ambient idle plays): the bone matrix as is, requests ignored.
+        let eye = match bone {
+            Some([fwd, right, up]) => Eye { pos: origin, fwd, right, up },
+            None => Eye::looking(origin, if self.requested { rot_vector(yaw_deg.to_radians() + self.aim[0], self.aim[1]) } else { pawn }),
+        };
+        if eye.fwd.dot(pawn).clamp(-1.0, 1.0).acos() <= ai.vision.bone_nullzone_deg.to_radians() {
+            return Eye::looking(origin, pawn);
         }
-        Eye::looking(origin, axis)
+        eye
     }
 
     /// The eye of the last step, or one from the pawn when the head never stepped.
     pub fn last_eye(&self, ai: &AiConfig, archetype: u8, modifier: &str, pos: Vec3, yaw_deg: f32) -> Eye {
         match self.eye {
-            Some((p, f)) => Eye::looking(p.into(), f.into()),
+            Some((p, f, r, u)) => Eye { pos: p.into(), fwd: f.into(), right: r.into(), up: u.into() },
             None => {
                 let origin = bone(&ai.head_poses, archetype, modifier, 0, 0.0).map(|b| Self::bone_world(pos, yaw_deg, b).0).unwrap_or(pos + Vec3::Z * 70.0);
                 Eye::looking(origin, rot_vector(yaw_deg.to_radians(), 0.0))
@@ -471,13 +587,13 @@ mod tests {
         let mut h = Head::default();
         let target = Vec3::new(1000.0 * 30f32.to_radians().cos(), 1000.0 * 30f32.to_radians().sin(), 70.0);
         let req = LookRequest { target, head_weight: 1.0, torso_weight: 0.0, torso_speed_reduction: true, speed: 0.5 };
-        let mut eye = h.step(&ai, 0, "Empty", Vec3::ZERO, 0.0, 0.0, Some(req), 1.0 / 30.0);
+        let mut eye = h.step(&ai, 0, "Empty", Vec3::ZERO, 0.0, 0.0, Some(req), AmbientIn::default(), 1.0 / 30.0);
         for _ in 0..60 {
-            eye = h.step(&ai, 0, "Empty", Vec3::ZERO, 0.0, 0.0, Some(req), 1.0 / 30.0);
+            eye = h.step(&ai, 0, "Empty", Vec3::ZERO, 0.0, 0.0, Some(req), AmbientIn::default(), 1.0 / 30.0);
         }
         let yaw = eye.fwd.y.atan2(eye.fwd.x).to_degrees();
         assert!((yaw - 27.0).abs() < 1.0, "{yaw}");
-        let eye = h.step(&ai, 0, "Empty", Vec3::ZERO, 0.0, 0.0, None, 1.0 / 30.0);
+        let eye = h.step(&ai, 0, "Empty", Vec3::ZERO, 0.0, 0.0, None, AmbientIn::default(), 1.0 / 30.0);
         assert!(eye.fwd.y.abs() < 1e-5);
     }
 
@@ -491,7 +607,7 @@ mod tests {
         let target = Vec3::new(1000.0 * 40f32.to_radians().cos(), 1000.0 * 40f32.to_radians().sin(), 200.0);
         let req = LookRequest { target, head_weight: 1.0, torso_weight: 0.5, torso_speed_reduction: true, speed: 0.5 };
         for _ in 0..60 {
-            h.step(&ai, 0, "Empty", Vec3::ZERO, 0.0, 0.0, Some(req), 1.0 / 30.0);
+            h.step(&ai, 0, "Empty", Vec3::ZERO, 0.0, 0.0, Some(req), AmbientIn::default(), 1.0 / 30.0);
         }
         let (head, torso) = h.parts(&ai, "Empty", 0.0);
         let sum = head + torso;
@@ -507,6 +623,50 @@ mod tests {
         assert!((r.x - 60f32.to_radians()).abs() < 1e-4 && (r.y - 6f32.to_radians()).abs() < 1e-4, "{r:?}");
         let r = reach([60.0, -60.0, 30.0, -40.0], Vec2::new(0.0, -1.0));
         assert!(r.x.abs() < 1e-4 && (r.y + 40f32.to_radians()).abs() < 1e-4, "{r:?}");
+    }
+
+    fn ambient_ai() -> AiConfig {
+        let mut ai = AiConfig::default();
+        // An idle loop and an ambient loop that pitches the head down 30 deg over one second.
+        let idle = HeadLoop { modifier: "Empty".into(), speed: 0, sequence: "Empty_Idle".into(), duration: 1.0, sample_rate: 30.0, samples: vec![[0.0, 0.0, 80.0, 1.0, 0.0, 0.0]; 2], axes: vec![[0.0, 1.0, 0.0, 0.0, 0.0, 1.0]; 2] };
+        let (s, c) = 30f32.to_radians().sin_cos();
+        let amb = HeadLoop { modifier: "Ambient".into(), speed: 2, sequence: "Empty_Idle_01".into(), duration: 1.0, sample_rate: 30.0, samples: vec![[0.0, 0.0, 80.0, 1.0, 0.0, 0.0], [0.0, 0.0, 80.0, c, 0.0, -s]], axes: vec![[0.0, 1.0, 0.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, s, 0.0, c]] };
+        ai.head_poses = vec![HeadPose { archetype: "a".into(), mesh: String::new(), loops: vec![idle, amb] }];
+        ai.ambient_anim_freq = [30.0, 60.0];
+        ai
+    }
+
+    /// `DisAISubProcessAmbientAnims`: a new head starts the variant at its first idle tick, the
+    /// look-at is disabled while it plays (the bone axis, requests ignored), and the next one is a
+    /// tweak period away. A pinned sequence is played instead of the random pick.
+    #[test]
+    fn ambient_idle_drives_the_eye_while_it_plays() {
+        let ai = ambient_ai();
+        let mut h = Head::default();
+        let amb = AmbientIn { eligible: true, pin: None };
+        let dt = 1.0 / 60.0;
+        let e0 = h.step(&ai, 0, "Empty", Vec3::ZERO, 0.0, 0.0, None, amb, dt);
+        assert_eq!(h.ambient.as_ref().map(|a| a.seq.as_str()), Some("Empty_Idle_01"));
+        assert!(e0.fwd.z.abs() < 1e-3, "{:?}", e0.fwd);
+        // 0.7 s in: the weight is 1 and the head is 21 deg down on the bone's axis.
+        let mut e = e0;
+        for _ in 0..42 {
+            e = h.step(&ai, 0, "Empty", Vec3::ZERO, 0.0, 0.0, None, amb, dt);
+        }
+        assert!(e.fwd.z < -0.3 && e.up.x > 0.2, "{e:?}");
+        // The sequence ends: the look-at is enabled again, the axis the pawn's rotation.
+        for _ in 0..30 {
+            e = h.step(&ai, 0, "Empty", Vec3::ZERO, 0.0, 0.0, None, amb, dt);
+        }
+        assert!(h.ambient.is_none() && e.fwd.z.abs() < 1e-3 && h.amb_timer > 25.0, "{:?} {}", h.ambient, h.amb_timer);
+        // Not eligible (moving or alerted): nothing plays and the timer waits.
+        let mut still = Head::default();
+        still.step(&ai, 0, "Empty", Vec3::ZERO, 0.0, 0.0, None, AmbientIn { eligible: false, pin: None }, dt);
+        assert!(still.ambient.is_none() && still.amb_timer == 0.0);
+        // A pin to a missing sequence plays nothing.
+        let mut pinned = Head::default();
+        pinned.step(&ai, 0, "Empty", Vec3::ZERO, 0.0, 0.0, None, AmbientIn { eligible: true, pin: Some("Empty_Idle_09") }, dt);
+        assert!(pinned.ambient.is_none());
     }
 
     #[test]

@@ -292,6 +292,12 @@ pub fn focused_interaction(mv: &MissionView, view: &crate::session::SessionView,
     for (p, prompt) in &mv.usables {
         consider(glam::Vec3::from(*p), 220.0, prompt, "");
     }
+    // Physics props the hands are free to take (`m_InteractText` "`GBA_Use` Carry").
+    if me.holding.is_none() && me.carrying.is_none() {
+        for m in view.movables.iter().filter(|m| m.interactable && !m.gone && m.phase != dishonored_sim::state::MovablePhase::Held && m.damage >= 0 && !m.prompt.is_empty()) {
+            consider(m.center(), m.max_distance + 20.0, &m.prompt, "");
+        }
+    }
     for (npc, prompt) in &mv.talkers {
         let Some(id) = mv.npc_ids.iter().find(|x| &x.0 == npc).map(|x| x.1) else { continue };
         if let Some(o) = view.others.iter().find(|o| o.id == id && o.alive) {

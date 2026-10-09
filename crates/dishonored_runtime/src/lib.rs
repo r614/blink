@@ -175,6 +175,9 @@ pub mod env_map;
 /// [interp] Cutscene (matinee) presentation.
 #[doc(hidden)]
 pub mod cutscene;
+/// Movable props (picked up, carried, thrown) drawn where the simulation has them.
+#[doc(hidden)]
+pub mod movables;
 
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::input::mouse::AccumulatedMouseMotion;
@@ -539,7 +542,7 @@ pub fn main() {
             // [interp] cutscenes: before the characters are animated; the director camera after the follow camera
             .init_resource::<cutscene::Cutscenes>()
             .init_resource::<cutscene::PawnPoints>()
-            .add_systems(Update, (cutscene::drive.after(players::sync_players).before(characters::animate_characters), cutscene::props.after(cutscene::drive), cutscene::emitters.after(cutscene::drive), cutscene::camera.after(players::camera_follow).before(viewmodel::animate_view_rig), cutscene::look_limits.after(input_map::gather_input).before(players::camera_follow), level_props::follow_movers.after(cutscene::drive)))
+            .add_systems(Update, (cutscene::drive.after(players::sync_players).before(characters::animate_characters), cutscene::props.after(cutscene::drive), cutscene::emitters.after(cutscene::drive), cutscene::camera.after(players::camera_follow).before(viewmodel::animate_view_rig), cutscene::look_limits.after(input_map::gather_input).before(players::camera_follow), level_props::follow_movers.after(cutscene::drive), movables::follow_props.after(level_props::follow_movers)))
             .add_systems(
                 Update,
                 (

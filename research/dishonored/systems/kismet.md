@@ -421,7 +421,7 @@ seconds).
 |---|---|---|---|
 | `DisSeqEvent_Possessed` | 154 | `0x00a52130`, `0x00a5a990`, `0x00b7d110`, `0x00b7d2f0` | possession start/end of a pawn/rat/fish |
 | `DisSeqEvent_PatrolPointReached` | 151 | `0x00af2300`, `0x00afd350` | AI patrol node reached; port's brain has patrol nodes |
-| `DisSeqEvent_MovablePickedUp` / `Dropped` | 127 / - | `0x00a45fd0` / `0x00a46380` | needs the carry system |
+| `DisSeqEvent_MovablePickedUp` / `Dropped` | 127 / - | `0x00a45fd0` / `0x00a46380` | fed by the movables port (movables.md): originator the prop, instigator the pawn |
 | `DisSeqEvent_WhaleOilReceptacle` / `WhaleOilBattery` | 125 / 35 | `0x00c7b490`, `0x00c7b6b0` / `0x00c7d660`, `0x00c81d70` | with 3.5 |
 | `DisSeqEvent_Combat` / `BehaviorStarted` | 88 / 83 | `0x00af7d00` / `0x00af7670` | brain state changes |
 | `DisSeqEvent_TaskStateChanged` | 79 | `0x00b9a8f0`, `0x00ad1320` | objective plumbing: the port already has tasks |
@@ -429,6 +429,13 @@ seconds).
 | `DisSeqCond_IsSentinel`, `IsPlayerInCombat`, `CompareBoolExtended` | 91 / 53 / 74 | - | conditions |
 | `SeqEvent_RigidBodyCollision`, `SeqAct_GetDistance` | 73 / 66 | `0x0078f7d0` | |
 | `DisSeqAct_SetAudioOcclusion` | 98 | - | presentation: add to `PRESENTATION` |
+
+Status of the AI-owned rows (2026-10-08, AI events pass; the per-event decode is in KISMET.md "AI events pass"):
+`PatrolPointReached` output 0, `BehaviorStarted`, `Combat`, `Investigate`, `FleepointReached`, `Corpse` (all three
+outputs) with `CorpseDetected`, `PawnSighted` and `Assassinated` output 0 are ported (`kismet_host::ai_events`,
+`FED_EVENTS`). Open: `PatrolPointReached` output 1 (guard post point actors), `Assassinated` output 1 (kill notify),
+`PlayerHeard` (writer of the brain's pending-name field not found), `AttackedByRats` (NPC master state entry),
+`WatchTower` (no tower in the port), `BehaviorStarted` for classes the port's behaviours lack.
 
 ---
 

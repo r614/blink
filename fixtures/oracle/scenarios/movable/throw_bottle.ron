@@ -1,0 +1,41 @@
+// Throwing a physics prop (research/dishonored/systems/movables.md): pick up bottle
+// `DishonoredMovable_29` of Boyle Int, look level and throw it (Primary with the empty hands, 0x00AB4240 ->
+// DishonoredPlayerPawn slot 381 with 1 -> the grab state's m_bThrowOnDrop -> the release 0x00C45340):
+// it leaves along the view at `Attribute_ThrowStrength` (2000 uu/s), `Instigator` the thrower
+// (0x00A4ADA0), `DisSeqEvent_MovableDropped` (0x00A46380). A glass bottle (`movable_twk.bottle_01_twk`:
+// m_fMinSpeedToBeDamaged 1000, m_fMinSpeedToCauseDamage 250, m_Damage 5, m_Health 5, one break step at
+// health 0) hit hard enough takes m_Damage and breaks (0x00A40CF0): a `DisSeqEvent_BreakableBroken` and the
+// contact noise `Env_Glass` -> `Environment` (500 uu Anomaly).
+// Port: `dishonored_sim::movables`, `dishonored_sim::world_actors`.
+(
+    name: "movable/throw_bottle",
+    system: Physics,
+    map: "L_Boyle_Int_P",
+    description: "Pick up a bottle of Boyle Int and throw it level: leaves at ThrowStrength, breaks on what it hits.",
+    setup: (player: Some((position: (-1067, -1850, 200), yaw: 270, pitch: -20, snap_to_floor: true)), kismet: true, kismet_start: Some("ChangeLvl_fromBoyleExterior_toBoyleInterior"), original_npcs: false, settle: 30, seed: 1),
+    ticks: 150,
+    input: [
+        (tick: 10, action: Press(Use)),
+        (tick: 20, action: Look(yaw: 270, pitch: 0)),
+        (tick: 40, action: Press(Primary)),
+    ],
+    checkpoints: [
+        (name: "thrown", expect: [
+            (metric: Count("Sim:MovableDropped[thrown=true]"), value: 1, tol: 0, source: "Primary while holding: the grab state's m_bThrowOnDrop (0x00AB4240 -> slot 381 with 1)", status: Static),
+            (metric: Max("mov.speed"), value: 2000, tol: 1, cmp: AtLeast, source: "Attribute_ThrowStrength 2000 along the view (units, velocity or impulse over the body's mass, LIKELY)", status: Unmeasured),
+            (metric: At("mov.vy", 42), value: -2000, tol: 5, source: "the leaving velocity along the view (yaw 270 = -Y), a tick after the release", status: Unmeasured),
+        ]),
+        (name: "hit", expect: [
+            (metric: Count("Sim:MovableImpact"), value: 1, tol: 0, source: "the first hit above m_fMinSpeedToBeDamaged (1000): the prop takes m_Damage (0x00A40CF0)", status: Unmeasured),
+            (metric: EventValue("Sim:Sound[category=Thrown]", "radius"), value: 500, tol: 0, source: "Dis_ContactSystem Env_Glass -> Environment DisContactSub_AINoise: EAINoiseLoudness1 = 500 uu, Anomaly (stealth.md 5.2)", status: Static),
+            (metric: Count("Sim:Sound[category=Thrown]"), value: 1, tol: 0, source: "one contact notification (m_fRefireDelay 0.3, class default LIKELY)", status: Unmeasured),
+        ]),
+        (name: "breaks", expect: [
+            (metric: Count("Kismet:Activated@*DisSeqEvent_BreakableBroken*[out=0]"), value: 1, tol: 0, source: "m_Damage 5 against m_Health 5 / m_DamageThreshold 1: the only step (0x00A26A90 / 0x00A3A5F0)", status: Unmeasured),
+            (metric: Final("mov.gone"), value: 1, tol: 0, source: "the last break step removes the prop", status: Unmeasured),
+            (metric: Final("mov.damage"), value: 0, tol: 0, source: "SetDamage(m_Damage - dealt) after the hit (0x00A40CF0)", status: Unmeasured),
+        ]),
+    ],
+    record: [Pawn, Camera, Kismet, SimEvents],
+    capture: Some("Boyle Int after ChangeLvl_fromBoyleExterior_toBoyleInterior, lab place -1067 -1850 on the floor facing 270 pitch -20; Use on DishonoredMovable_29 (tick 10), look level (tick 20), Primary (tick 40): the prop's Location / Velocity per tick, DisSeqEvent_MovableDropped, the contact notifications (RigidBodyCollision speed, the other actor), the AI noise posts (0x00C5A760: radius, context, position), m_Damage and m_CurHealth after the first hit"),
+)

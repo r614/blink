@@ -497,6 +497,13 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         if matches!(n.state.as_deref().map(|x| x.to_ascii_lowercase()).as_deref(), Some("alerted" | "combat")) {
             m.alert_npc(id);
         }
+        if let Some(seq) = &n.ambient {
+            // The ambient idle is playing at tick 0 for `ambient_age` s: it began that long
+            // before, so before the settle ticks and the tick's own step it has played less.
+            let dt = 1.0 / s.tick_hz.max(1) as f32;
+            let age = n.ambient_age - (s.setup.settle as f32 + 1.0) * dt;
+            m.start_ambient_idle(id, seq, age);
+        }
     }
     let name_of = |id: u32| by_id.get(&id).cloned().unwrap_or_else(|| format!("#{id}"));
 
@@ -515,6 +522,9 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         ("proj.x", "uu"), ("proj.y", "uu"), ("proj.z", "uu"), ("proj.speed", "uu/s"),
         ("fx.live", "n"), ("fx.particles", "n"),
         ("peek.active", "bool"), ("peek.fov", "deg"), ("peek.fade", "1"), ("wire.tripped", "n"),
+        // The player's physics prop (movables.md): the one in his hands, else the one he last let
+        // go of that is still moving, else the last he touched.
+        ("mov.held", "bool"), ("mov.x", "uu"), ("mov.y", "uu"), ("mov.z", "uu"), ("mov.vx", "uu/s"), ("mov.vy", "uu/s"), ("mov.vz", "uu/s"), ("mov.speed", "uu/s"), ("mov.phase", "enum"), ("mov.damage", "pt"), ("mov.gone", "bool"),
     ] {
         chans.push((c.to_string(), u));
     }
@@ -569,6 +579,15 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         // Keyholes and tripwires (interactables.md): the player's peek and the tripped wires of the map.
         let peek = m.view.peeks.iter().find(|(id, _)| *id == ME).map(|x| x.1);
         v.extend([b(peek.is_some()), peek.map_or(f64::NAN, |x| x.fov as f64), peek.map_or(f64::NAN, |x| x.fade as f64), m.view.tripwires.iter().filter(|x| x.tripped).count() as f64]);
+        {
+            use dishonored_sim::state::MovablePhase;
+            let mine = w.movables.iter().filter(|m| m.instigator == Some(ME));
+            let m = w.movables.iter().find(|m| m.holder == Some(ME)).or_else(|| mine.clone().find(|m| m.phase == MovablePhase::Fly)).or_else(|| mine.clone().last());
+            match m {
+                Some(m) => v.extend([b(m.phase == MovablePhase::Held), m.position.x as f64, m.position.y as f64, m.position.z as f64, m.velocity.x as f64, m.velocity.y as f64, m.velocity.z as f64, m.velocity.length() as f64, leg.idx("mov.phase", m.phase), m.damage as f64, b(m.gone)]),
+                None => v.extend([0.0, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, 0.0]),
+            }
+        }
         let poses = dishonored_multiplayer::npc_poses(&m.crowd.brains);
         for (name, id) in &tracked {
             let p = w.player(*id);

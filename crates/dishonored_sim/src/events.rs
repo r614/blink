@@ -32,6 +32,8 @@ pub enum SoundCategory {
     Scripted,
     /// A breakable reaching a break step (the step's `m_AINoiseLoudness`).
     Breakable,
+    /// A physics prop (a movable) striking the world: its contact type's AI noise.
+    Thrown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
@@ -66,6 +68,9 @@ pub enum DamageCause {
     Slide,
     /// A music-box Overseer's combat tune (`DisDamageType_Musical`).
     Musical,
+    /// A thrown prop striking a pawn (`DishonoredMovable.m_Damage`, the breakable's rigid-body
+    /// collision 0x00A40CF0).
+    ThrownObject,
     /// A weeper's plague cloud (`m_iPlagueDmgPerTick`).
     Plague,
     /// A Tallboy arrow's explosion (`TallboyArrowExplosion_Twk`).
@@ -127,6 +132,20 @@ pub enum SimEvent {
     KnockedOut { victim: PlayerId, by: Option<PlayerId>, cause: KnockoutCause },
     BodyLifted { carrier: PlayerId, body: PlayerId },
     BodyDropped { carrier: PlayerId, body: PlayerId },
+    // --- movable props (research/dishonored/systems/movables.md) ---
+    /// `id` took a movable prop in his hands: `DisSeqEvent_MovablePickedUp` (0x00A45FD0, from the
+    /// grab 0x00C3D030; originator the prop, instigator the pawn). `movable` indexes
+    /// `WorldState::movables`.
+    MovablePickedUp { id: PlayerId, movable: u32 },
+    /// `id` let go of a prop (`thrown`: with the throw impulse): `DisSeqEvent_MovableDropped`
+    /// (0x00A46380, from the release 0x00C45340 for both).
+    MovableDropped { id: PlayerId, movable: u32, thrown: bool },
+    /// A prop struck something at `speed` along the contact normal and that was fast enough to
+    /// matter (above its break threshold: the breakable's rigid-body collision, 0x00A40CF0): it
+    /// dealt `damage` (its `m_Damage`) to `victim`, the pawn it hit, and, when `breakable` is
+    /// set (its index in the map's `WorldActors::breakables`), to itself. `by` is the pawn that
+    /// last held or threw it.
+    MovableImpact { movable: u32, speed: f32, point: Vec3, by: Option<PlayerId>, victim: Option<PlayerId>, damage: i32, breakable: Option<u32> },
     // --- powers ---
     /// A power was used (`DishonoredActivePowerComponent` slot 94, 0x00BF32F0, called from the
     /// power's activation: Windblast 0x00BFB950, Blink 0x00BFC990, Dark Vision 0x00BE89E0,

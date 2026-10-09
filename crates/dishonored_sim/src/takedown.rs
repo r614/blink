@@ -214,6 +214,12 @@ pub fn step_choke(state: &mut WorldState, ai: usize, input: &PlayerInput, dt: f3
 
 /// The body `p` looks at within reach (dead or unconscious, not carried).
 pub fn body_in_view(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: &GameplayConfig) -> Option<PlayerId> {
+    body_focus(state, p, world, cfg).map(|b| b.0)
+}
+
+/// [`body_in_view`] with the cosine of the body's angle to the view (to rank it against the
+/// other things the crosshair could pick).
+pub fn body_focus(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: &GameplayConfig) -> Option<(PlayerId, f32)> {
     let eye = eye_position(p, &cfg.movement);
     let dir = view_vector(p.yaw, p.pitch);
     let reach = cfg.items.inventory.interact_distance + cfg.movement.collision_radius;
@@ -240,7 +246,7 @@ pub fn body_in_view(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery,
             best = Some((b.id, cos));
         }
     }
-    best.map(|b| b.0)
+    best
 }
 
 /// Lift a body (`StatePlayerGrabCorpse`).

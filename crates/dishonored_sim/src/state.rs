@@ -277,6 +277,9 @@ pub struct PlayerState {
     /// Lift / drop animation in progress (seconds left) while carrying.
     #[serde(default)]
     pub carry_anim: f32,
+    /// The physics prop in this pawn's hands (`StatePlayerGrabMovable`).
+    #[serde(default)]
+    pub holding: Option<Holding>,
     /// Possession (`DishonoredActivePowerComponent_Possess`).
     #[serde(default)]
     pub possess: PossessState,
@@ -703,6 +706,7 @@ impl PlayerState {
             carrying: None,
             carried_by: None,
             carry_anim: 0.0,
+            holding: None,
             possess: PossessState::default(),
             time_scale: 1.0,
             no_body: false,
@@ -858,6 +862,84 @@ pub struct WorldState {
     /// caster while it differs from 1.
     #[serde(default)]
     pub blink_layers: Vec<DilationLayer>,
+    /// The active map's physics props (`DishonoredMovable`): picked up, carried, dropped, thrown.
+    #[serde(default)]
+    pub movables: Vec<MovableState>,
+}
+
+/// A movable prop the player holds (`DishonoredItemEmpty.m_pGrabbed_Movable`, 0x00C3D030).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Holding {
+    /// Index in `WorldState::movables`.
+    pub movable: u32,
+    /// The pawn's ground speed factor while holding it (`DisMovableComponent.m_fMaxPawnSpeed_*` of
+    /// the prop's weight class).
+    pub speed_mult: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MovablePhase {
+    /// Lies where it is (placed, or settled after a fall).
+    #[default]
+    Rest,
+    /// In a pawn's hands.
+    Held,
+    /// Falling or flying after a release (`PHYS_RigidBody`).
+    Fly,
+}
+
+/// A placed `DishonoredMovable` at run time: the def's rule data and its rigid-body state.
+/// The rules are `dishonored_sim::movables`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MovableState {
+    pub id: u32,
+    pub name: String,
+    pub package: String,
+    /// The actor's `Location` (the mesh pivot), `Rotation` as (pitch, yaw, roll) degrees.
+    pub position: Vec3,
+    pub rotation: Vec3,
+    /// Where the level placed it (the presentation moves the placed mesh by the difference).
+    pub home: Vec3,
+    pub home_rotation: Vec3,
+    pub velocity: Vec3,
+    pub phase: MovablePhase,
+    /// The pawn holding it (`DisMovableComponent.m_pHeldBy`).
+    pub holder: Option<PlayerId>,
+    /// The pawn that held or threw it last (`Actor.Instigator`, +0x15C, set by 0x00A4ADA0 at a
+    /// throw): the maker of its noises and damage.
+    pub instigator: Option<PlayerId>,
+    /// `DishonoredBreakable.m_bDropped` (+0x384 bit 1): selects the on-drop break speed until the
+    /// first impact above `m_fMinSpeedToCauseDamage`.
+    pub dropped: bool,
+    /// The hold start (`DishonoredItemEmpty.m_Grab_Start_Pos` / `_Rot`) and the time into the
+    /// grab (`m_fGrabTime`, running while `grabbing`).
+    pub grab_from: Vec3,
+    pub grab_from_rot: Vec3,
+    pub grab_time: f32,
+    pub grabbing: bool,
+    /// Seconds since its last contact notification (the refire delay).
+    pub since_contact: f32,
+    /// Seconds a released prop has been free of the pawn that held it (its collision with him is
+    /// back once it is `m_fRadiusChannelReset` away).
+    pub released_by: Option<PlayerId>,
+    /// The prop broke (its last step): it cannot be picked up any more.
+    pub gone: bool,
+    // --- the def's data ---
+    pub weight: u8,
+    pub damage: i32,
+    pub interactable: bool,
+    pub max_distance: f32,
+    pub min_speed_to_cause_damage: f32,
+    pub min_speed_to_be_damaged: f32,
+    pub min_speed_to_be_damaged_on_drop: f32,
+    pub contact_type: String,
+    /// The mesh's local box.
+    pub bounds_min: Vec3,
+    pub bounds_max: Vec3,
+    /// Index in the map's `WorldActors::breakables` when the prop can break.
+    pub breakable: Option<u32>,
+    pub mesh: String,
+    pub prompt: String,
 }
 
 /// The world-rate part of one `BendTimeChannelInfo` (`DishonoredGameInfo.m_BendTimeInfo`,
@@ -889,11 +971,14 @@ pub struct WorldExtras {
     pub next_entity_id: u32,
     #[serde(default)]
     pub blink_layers: Vec<DilationLayer>,
+    #[serde(default)]
+    pub movables: Vec<MovableState>,
 }
 
 impl WorldState {
     pub fn extras(&self) -> WorldExtras {
         WorldExtras {
+            movables: self.movables.clone(),
             pickups: self.pickups.clone(),
             abstract_items: self.abstract_items.clone(),
             traps: self.traps.clone(),
@@ -911,6 +996,7 @@ impl WorldState {
         self.swarms = e.swarms;
         self.next_entity_id = e.next_entity_id;
         self.blink_layers = e.blink_layers;
+        self.movables = e.movables;
     }
 }
 

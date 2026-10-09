@@ -209,7 +209,10 @@ pub fn effective_movement<'a>(p: &PlayerState, cfg: &'a GameplayConfig) -> Cow<'
     let carrying = p.carrying.is_some();
     let possessed = p.condition == Condition::Possessed;
     let rat = p.kind == PawnKind::Rat;
-    if !carrying && !possessed && !rat && p.rat_slow <= 0.0 && !any_modifiers(p) {
+    // A prop in the hands: `DisMovableComponent.m_fMaxPawnSpeed_<weight class>` (DefaultItem.ini, 1.0
+    // for all four: the factor is the name's reading, its reader was not located).
+    let prop_speed = p.holding.map_or(1.0, |h| h.speed_mult);
+    if !carrying && !possessed && !rat && p.rat_slow <= 0.0 && prop_speed == 1.0 && !any_modifiers(p) {
         return Cow::Borrowed(&cfg.movement);
     }
     let b = &cfg.movement;
@@ -238,6 +241,11 @@ pub fn effective_movement<'a>(p: &PlayerState, cfg: &'a GameplayConfig) -> Cow<'
         let inv = &cfg.items.inventory;
         m.run_speed = a("Attribute_GroundSpeedCarryingCorpse", inv.carry_ground_speed);
         m.jump_z = a("Attribute_JumpZCarryingCorpse", inv.carry_jump_z);
+    }
+    if prop_speed != 1.0 {
+        m.run_speed *= prop_speed;
+        m.sprint_speed *= prop_speed;
+        m.crouch_speed *= prop_speed;
     }
     if rat {
         // Rat crowd agents move at `MaxSpeed` (`RatSwarm.CrowdAgent_SmallRat`: 350), any direction,

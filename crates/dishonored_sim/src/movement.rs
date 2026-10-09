@@ -378,7 +378,7 @@ pub fn speed_modifier(p: &mut PlayerState, input: &PlayerInput, cfg: &MovementCo
 /// the sword class. A pawn carrying a body holds no sword (INVENTORY.md "Carrying": the sword is
 /// sheathed while carrying).
 pub fn sword_in_right_hand(p: &PlayerState) -> bool {
-    p.right_hand == crate::state::RightHandItem::Sword && p.carrying.is_none()
+    p.right_hand == crate::state::RightHandItem::Sword && p.carrying.is_none() && p.holding.is_none()
 }
 
 /// Braking (`APawn::ApplyVelocityBraking`, 0x006A2AC0): in sub-steps of at most 0.03 s,
