@@ -140,7 +140,12 @@ impl<'a> Play<'a> {
 
     fn use_actor(&mut self, a: u32) -> bool {
         let list = kismet_host::usables(self.m());
-        let Some((_, pos, _)) = list.iter().find(|u| matches!(u.0, kismet_host::KUse::Actor(x) | kismet_host::KUse::Pickup(x) if x == a)).cloned() else { return false };
+        let Some((u, pos, _)) = list.iter().find(|u| matches!(u.0, kismet_host::KUse::Actor(x) | kismet_host::KUse::Pickup(x) if x == a)).cloned() else { return false };
+        // Aim at the middle of what it is (a pickup's pivot can be a corner of its mesh).
+        let pos = match (&u, kismet_host::usable_box(self.m(), &u).0) {
+            (kismet_host::KUse::Pickup(_), Some((lo, hi))) => (lo + hi) * 0.5,
+            _ => pos,
+        };
         self.place_near(pos, 90.0);
         let (yaw, pitch) = {
             let me = self.m().world.player(AGENT).unwrap();
@@ -247,8 +252,7 @@ fn stage(p: &mut Play, db: &KismetDb, i: usize) -> Result<()> {
             p.idle(1.0);
         }
         5 => {
-            let sister = guilty(p.m()).unwrap_or("Esma");
-            let spawner = match sister {
+            let sister = guilty(p.m()).unwrap_or("Esma");            let spawner = match sister {
                 "Esma" => "L_Boyle_Int_Script:DishonoredSpawner_2",
                 "Lydia" => "L_Boyle_Int_Script:DishonoredSpawner_11",
                 _ => "L_Boyle_Int_Script:DishonoredSpawner_4",
