@@ -275,7 +275,7 @@
 00a29d10	irrelevant	watch tower attack light blend and light material params (presentation)
 00a29f30	irrelevant	watch tower gun bone orientation (presentation)
 00c4c830	irrelevant	ammo type enum name for the HUD notice (DisAmmoType strings)
-00a29b30	ported	watch tower shot: NPC region point / Location + VRand x spread, ballistic solve 0x00C3F2A0 mode 0 (hacked-tower instigator: gap noted in watchtower.rs)
+00a29b30	ported	watch tower shot: a DisTallboyNPCPawn target's region point, else Location + VRand x spread, ballistic solve 0x00C3F2A0 mode 0 (hacked-tower instigator: gap noted in watchtower.rs)
 00c46160	helper	TArray find by key
 00a31740	ported	watch tower corpse noted: m_pAlreadyNotedCorpses and the Kismet output by relationship
 00aa0b30	ported	input mask test (UNKNOWNS U-444)

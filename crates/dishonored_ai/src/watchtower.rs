@@ -24,10 +24,11 @@
 //!   when the time to fire drops under `m_fSoundAttackWarningTime`; at zero it fires its
 //!   projectile from the arrow socket (0x00A29B30) and waits `m_fVolleyDelayBetweenShots`, or
 //!   after the volley's last shot `m_fDelayBetweenVolleys` (`m_VolleyShots` per volley). The shot
-//!   aims at a `DishonoredNPCPawn`'s ranged-aim point (hit region 2, 0x00B68010: taken as the
-//!   seen point) and at any other target's `Location + VRand() x m_fFireArrowMaxSpread` (a point
-//!   on the sphere, 0x00402240), through the projectile tweak's ballistic solve with lead
-//!   (0x00C3F2A0 mode 0, the point given: no floor trace, the lead keeps its height).
+//!   aims at a Tallboy's ranged-aim point (an `IsA DisTallboyNPCPawn` target, the class of the
+//!   static class struct 0x0133A080: hit region 2, 0x00B68010; Tallboys are not tower targets
+//!   here) and at any other target's `Location + VRand() x m_fFireArrowMaxSpread` (a point on the
+//!   sphere, 0x00402240), through the projectile tweak's ballistic solve with lead (0x00C3F2A0
+//!   mode 0, the point given: no floor trace, the lead keeps its height).
 //! - Attack with the enemy lost: the frantic sweep, a sine of `m_fFranticSpeed` cycles a second and
 //!   `m_fFranticRandomRange` amplitude about the last seen location, perpendicular to the line from
 //!   the tower; after `m_fStateAttackTimeout` back to Explore.
@@ -48,7 +49,7 @@ use dishonored_ir::ai::Relationship;
 use dishonored_ir::interactables::{Interactables, WatchTowerDef};
 use dishonored_sim::events::SimEvent;
 use dishonored_sim::launchers::LaunchersState;
-use dishonored_sim::state::{PawnKind, PlayerId, WorldState};
+use dishonored_sim::state::{PlayerId, WorldState};
 use dishonored_world::{WorldQuery, channel};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
@@ -251,7 +252,6 @@ impl WatchTowersState {
                         if t.time_to_fire <= 0.0 {
                             let muzzle = muzzle_at(def, t.yaw);
                             let (point, vel) = match state.player(id) {
-                                Some(p) if matches!(p.kind, PawnKind::Civilian | PawnKind::Guard) => (at, p.velocity),
                                 Some(p) => (p.position + vrand(i, t.shots_fired) * def.fire_spread, p.velocity),
                                 None => (at, Vec3::ZERO),
                             };
