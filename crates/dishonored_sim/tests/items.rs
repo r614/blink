@@ -478,6 +478,8 @@ fn a_charm_taken_twice_gives_its_level_two_value() {
     let mut p = dishonored_sim::state::PlayerState::new(1, Vec3::ZERO, 0.0);
     assert_eq!(powers::charm_slot(g, slot as i32), Some(slot));
     inventory::give_charm_effect(&mut p, g, Some(slot as i32), 0);
+    // Corvo's `m_bAutoEquipBoneCharm` is false: the player equips it from the menu.
+    p.inv.charms_equipped |= 1u64 << slot;
     assert_eq!(powers::attribute(&p, g, &c.attribute, 0.0), c.values[0]);
     inventory::give_charm_effect(&mut p, g, Some(slot as i32), 0);
     assert_eq!(powers::attribute(&p, g, &c.attribute, 0.0), c.values[1]);

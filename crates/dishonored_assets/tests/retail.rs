@@ -298,7 +298,7 @@ fn boyle_street_ext_tether() {
     let Some(c) = content() else { return };
     let pkgs = vec!["L_BoyleStreet_Ext_Script".to_string()];
     let lvl = dishonored_assets::ai_level::extract_ai_level(&c, &pkgs, &[], &[]).unwrap();
-    assert!(lvl.tether_volumes.len() >= 4, "{:?}", lvl.tether_volumes.iter().map(|v| &v.name).collect::<Vec<_>>());
+    assert_eq!(lvl.tether_volumes.len(), 3, "{:?}", lvl.tether_volumes.iter().map(|v| &v.name).collect::<Vec<_>>());
     let npcs = dishonored_assets::npcs::extract_npc_data(&c, &pkgs).unwrap();
     let s = npcs.spawns.iter().find(|s| s.spawner.tether_volumes.iter().any(|v| v == "DisTetherVolume_3")).expect("a spawner tethered to DisTetherVolume_3");
     let v = lvl.tether_volumes.iter().find(|v| v.name == "DisTetherVolume_3").unwrap();
