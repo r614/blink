@@ -2156,6 +2156,31 @@ impl Host for H<'_> {
                 world_events(cx.k, self, evs);
                 HostResult::Done
             }
+            // `DisSeqAct_SpawnCameraLensEffect` (Activated 0x00BA1CA0 -> 0x00B9BBF0 on Spawn): the
+            // effect is spawned before the player's camera (presentation: the clients draw it
+            // from the map's `LensEffectDef`); "Stop Looping" ends the action's looping effects.
+            "DisSeqAct_SpawnCameraLensEffect" => {
+                let op = cx.data();
+                let action = format!("{}:{}", self.db.package_name(op.package), op.path);
+                let list = &mut self.m.view.lens_effects;
+                match cx.input() {
+                    Some(0) => {
+                        let id = list.last().map_or(1, |l| l.id + 1);
+                        list.push(crate::LensEffectView { id, action, stopped: false });
+                        let n = list.len();
+                        if n > 16 {
+                            list.drain(..n - 16);
+                        }
+                    }
+                    Some(1) => {
+                        for l in list.iter_mut().filter(|l| l.action == action) {
+                            l.stopped = true;
+                        }
+                    }
+                    _ => {}
+                }
+                HostResult::Done
+            }
             // [world] `DisSeqAct_FireProjectile::Activated` (0x00B8F340): on Fire, with a Source and
             // a projectile tweak, the tweak's projectile spawns at the source's location, along
             // its rotation, aimed at the Target when there is one (0x00C3F2A0 with

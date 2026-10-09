@@ -116,6 +116,19 @@ pub struct MatchView {
     /// research/dishonored/systems/walls_of_light.md).
     #[serde(default)]
     pub walls: Vec<WallView>,
+    /// Camera lens effects the Kismet spawned (`DisSeqAct_SpawnCameraLensEffect`), the latest
+    /// last: the clients draw each once, before their camera.
+    #[serde(default)]
+    pub lens_effects: Vec<LensEffectView>,
+}
+
+/// A spawned camera lens effect: the spawning action (`<package>:<object path>`, the map's
+/// `LensEffectDef::action`) and whether "Stop Looping" ended it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LensEffectView {
+    pub id: u32,
+    pub action: String,
+    pub stopped: bool,
 }
 
 /// A wall of light as clients see it.

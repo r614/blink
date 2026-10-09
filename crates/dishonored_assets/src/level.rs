@@ -281,6 +281,7 @@ pub fn import_level(
         for p in &opts.extra_materials {
             imp.named_material(p);
         }
+        imp.import_lens_effects(level_slots);
     }
     imp.stats.timings.push(("actors", t.elapsed().as_secs_f32()));
     let t = std::time::Instant::now();
@@ -732,6 +733,50 @@ impl Importer<'_> {
         });
         self.ps_ids.insert(k, id);
         id
+    }
+
+    /// The camera lens effects of the level's `DisSeqAct_SpawnCameraLensEffect` actions: the
+    /// action's `m_pDisEffectTweaks` (`DisTweaks_EmitterCameraLensEffect`: `m_DefaultParticleSystem`,
+    /// `m_fDistanceFromCamera`, `m_fBaseFOV`, `m_fLifeSpan`), else its effect class's defaults
+    /// (`PS_CameraEffect`, `DistFromCamera`, `BaseFOV`); their particle systems are decoded.
+    fn import_lens_effects(&mut self, slots: usize) {
+        for slot in 0..slots {
+            let pkg = self.pkgs[slot].clone();
+            for i in 0..pkg.exports.len() {
+                if pkg.export_class(i) != "DisSeqAct_SpawnCameraLensEffect" {
+                    continue;
+                }
+                let Ok(h) = pkg.read_object(i) else { continue };
+                let obj_path = |n: &str| find(&h.properties, n).and_then(|p| p.as_object()).map(ObjRef::from_index).filter(|r| *r != ObjRef::Null).map(|r| pkg.obj_path(r));
+                let mut def = dishonored_ir::LensEffectDef { action: format!("{}:{}", pkg.name, pkg.obj_path(ObjRef::Export(i))), ..Default::default() };
+                if let Some(t) = obj_path("m_pDisEffectTweaks") {
+                    if self.tweaks.is_none() {
+                        let names: Vec<String> = self.pkgs.iter().map(|p| p.name.clone()).collect();
+                        self.tweaks = Some(crate::tweaks::TweakDb::load_with(self.content, &names).ok());
+                    }
+                    let Some(m) = self.tweaks.as_ref().and_then(|t| t.as_ref()).and_then(|db| db.try_resolve(&t)) else { continue };
+                    def.system = crate::tweaks::get_obj(&m, "m_DefaultParticleSystem").unwrap_or_default().to_string();
+                    def.distance = crate::tweaks::get_f32(&m, "m_fDistanceFromCamera").unwrap_or(0.0);
+                    def.base_fov = crate::tweaks::get_f32(&m, "m_fBaseFOV").unwrap_or(0.0);
+                    def.life_span = crate::tweaks::get_f32(&m, "m_fLifeSpan").unwrap_or(0.0);
+                } else {
+                    // The effect class's defaults (`Default__<class>`).
+                    let class = obj_path("m_pEffectClass").map(|c| c.rsplit('.').next().unwrap_or(&c).to_string()).unwrap_or_else(|| "DisEmitterCameraLensEffect".into());
+                    let Ok(game) = self.content.package("DishonoredGame") else { continue };
+                    let want = format!("Default__{class}");
+                    let Some(di) = (0..game.exports.len()).find(|&e| game.obj_name(ObjRef::Export(e)) == want) else { continue };
+                    let d = game.read_object(di).map(|h| h.properties).unwrap_or_default();
+                    def.system = find(&d, "PS_CameraEffect").and_then(|p| p.as_object()).map(ObjRef::from_index).filter(|r| *r != ObjRef::Null).map(|r| game.obj_path(r)).unwrap_or_default();
+                    def.distance = float_or(&d, "DistFromCamera", 0.0);
+                    def.base_fov = float_or(&d, "BaseFOV", 0.0);
+                }
+                if def.system.is_empty() || def.system == "None" {
+                    continue;
+                }
+                self.particle_by_path(&def.system);
+                self.map.lens_effects.push(def);
+            }
+        }
     }
 
     /// Decode a ParticleSystem by object path (gameplay effects requested by the caller).

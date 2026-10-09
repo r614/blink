@@ -201,6 +201,8 @@ fn bevy_mesh(m: &dishonored_ir::StaticMeshAsset) -> Mesh {
 pub struct Effects {
     levels: HashMap<String, Arc<LevelFx>>,
     active: String,
+    /// The levels' camera lens effects by spawning action (lowercase `<package>:<path>`).
+    pub lens: HashMap<String, dishonored_ir::LensEffectDef>,
     rng: u64,
     pub spawned_oneshots: u64,
     /// Gameplay decals made so far (`DisContactSub_Decal`).
@@ -249,13 +251,15 @@ impl Plugin for EffectsPlugin {
         bevy::asset::embedded_asset!(app, "particle_soft.wgsl");
         app.add_plugins(MaterialPlugin::<FxMaterial>::default()).add_systems(Update, apply_pending_soft);
         app.add_plugins(MaterialPlugin::<GlowMaterial>::default());
-        app.init_resource::<Effects>().init_resource::<EffectSockets>().init_resource::<HandEffects>().add_systems(
+        app.init_resource::<Effects>().init_resource::<EffectSockets>().init_resource::<HandEffects>().init_resource::<crate::lens_effects::LensEffects>().add_systems(
             Update,
             (
                 gameplay_effects.before(crate::audio::drive),
                 age_decals,
                 blink_indicator,
                 attached_effects,
+                // Camera lens effects follow the camera placed this frame.
+                crate::lens_effects::update.after(crate::players::camera_follow).after(crate::cutscene::camera).after(crate::viewmodel::apply_fov),
                 hand_effects.after(crate::viewmodel::animate_view_rig),
                 // After everything that places the camera or sets its projection this frame
                 // (`simulate` culls sprite meshes against that view).
@@ -429,6 +433,9 @@ fn radial_falloff(power: f32) -> Image {
 
 /// Register a level's particle systems and spawn its placed emitters (called on level spawn).
 pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Commands, meshes: &mut Assets<Mesh>, images: &mut Assets<Image>, mats: &mut Assets<FxMaterial>, fx: &mut Effects) -> usize {
+    for l in &map.lens_effects {
+        fx.lens.insert(l.action.to_ascii_lowercase(), l.clone());
+    }
     let mut cache = HashMap::new();
     let mut materials = HashMap::new();
     for (si, s) in map.particle_systems.iter().enumerate() {
@@ -729,6 +736,15 @@ struct BeamTarget(Vec3);
 /// An instance deactivated before its first update (`FxRequest::EndedTrail`).
 #[derive(Component)]
 struct StopAtOnce;
+
+/// Spawn a ParticleSystem by path of the active level at a Dishonored world transform; a
+/// looping instance (not `one_shot`) runs until stopped. Returns the instance entity.
+pub fn spawn_system(commands: &mut Commands, meshes: &mut Assets<Mesh>, fx: &mut Effects, path: &str, transform: Mat4, one_shot: bool) -> Option<Entity> {
+    let lf = fx.levels.get(&fx.active).cloned()?;
+    let &si = lf.by_path.get(&path.to_ascii_lowercase())?;
+    let level = fx.active.clone();
+    spawn_instance(commands, meshes, &lf, &level, si, transform, one_shot)
+}
 
 /// Spawn a gameplay effect by ParticleSystem path at a Dishonored position and direction.
 pub fn spawn_effect(commands: &mut Commands, meshes: &mut Assets<Mesh>, fx: &mut Effects, path: &str, at: Vec3, dir: Vec3) -> bool {

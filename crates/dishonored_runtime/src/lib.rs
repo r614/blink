@@ -179,6 +179,7 @@ pub mod cutscene;
 #[doc(hidden)]
 pub mod movables;
 pub mod walls_of_light;
+pub mod lens_effects;
 
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::input::mouse::AccumulatedMouseMotion;

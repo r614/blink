@@ -55,6 +55,9 @@ pub struct DishonoredMap {
     /// Placed emitters (`Emitter` actors).
     #[serde(default)]
     pub emitters: Vec<particles::EmitterInstance>,
+    /// The camera lens effects the level's `DisSeqAct_SpawnCameraLensEffect` actions spawn.
+    #[serde(default)]
+    pub lens_effects: Vec<LensEffectDef>,
     /// Placed doors and usable objects drawn with a skeletal mesh.
     #[serde(default)]
     pub skeletal_props: Vec<SkeletalProp>,
@@ -362,6 +365,22 @@ impl MaterialParams {
     pub fn mask_channel(&self, name: &str) -> Option<u8> {
         self.mask_channels.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|v| v.1)
     }
+}
+
+/// A camera lens effect (`DisEmitterCameraLensEffect` with its `DisTweaks_EmitterCameraLensEffect`,
+/// else the effect class's defaults): a particle system held `distance` in front of the camera,
+/// pulled in for a wider view (UE3 `EmitterCameraLensEffectBase::UpdateLocation`: the distance
+/// times `tan(base_fov / 2) / tan(fov / 2)`), for `life_span` seconds (0: until its particles end).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LensEffectDef {
+    /// The spawning action: `<package>:<object path>`.
+    pub action: String,
+    /// `ParticleSystem` path (`m_DefaultParticleSystem`, `PS_CameraEffect`).
+    pub system: String,
+    pub distance: f32,
+    pub base_fov: f32,
+    pub life_span: f32,
 }
 
 /// A placed actor drawn with its `SkeletalMeshComponent` (`DisDoor`, `DishonoredUsableObject`
