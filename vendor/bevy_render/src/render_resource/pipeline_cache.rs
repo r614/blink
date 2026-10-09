@@ -135,6 +135,11 @@ fn load_module(
         source: shader_source,
     };
 
+    // [blink patch] wgpu's error scopes are one stack per device: with modules now made from
+    // several pipeline tasks at once (BlinkShaderModules) the push / pop pairs must not
+    // interleave, so module creation (cheap from naga IR) is serialized here.
+    static ERROR_SCOPE: Mutex<()> = Mutex::new(());
+    let _scope_guard = ERROR_SCOPE.lock().unwrap_or_else(PoisonError::into_inner);
     let scope = render_device
         .wgpu_device()
         .push_error_scope(wgpu::ErrorFilter::Validation);
