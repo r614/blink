@@ -394,6 +394,53 @@ pub fn particle_notifies(content: &Content, pkg_name: &str, set_path: &str) -> R
     Ok(out)
 }
 
+/// The `AnimNotify_CameraEffect`s of an AnimSet's sequences: (sequence, time, lens effect class
+/// name, e.g. `DisEmitterCameraLensEffect_blood_medium`).
+pub fn camera_effect_notifies(content: &Content, pkg_name: &str, set_path: &str) -> Result<Vec<(String, f32, String)>> {
+    use ue3_package::properties::{Value, find};
+    let pkg = content.package(pkg_name)?;
+    let set = (0..pkg.exports.len()).find(|&i| pkg.obj_path(ObjRef::Export(i)).eq_ignore_ascii_case(set_path)).with_context(|| format!("{set_path} not in {pkg_name}"))?;
+    let sh = pkg.read_object(set)?;
+    let mut out = Vec::new();
+    for s in find(&sh.properties, "Sequences").context("Sequences")?.array_objects()? {
+        let ObjRef::Export(e) = ObjRef::from_index(s) else { continue };
+        let h = pkg.read_object(e)?;
+        let Some(Value::Name(sequence)) = find(&h.properties, "SequenceName").map(|p| &p.value) else { continue };
+        let Some(n) = find(&h.properties, "Notifies") else { continue };
+        for ev in n.array_structs(&pkg).unwrap_or_default() {
+            let time = find(&ev, "Time").and_then(|p| p.as_float()).unwrap_or(0.0);
+            let Some(ObjRef::Export(ni)) = find(&ev, "Notify").and_then(|p| p.as_object()).map(ObjRef::from_index) else { continue };
+            if pkg.export_class(ni) != "AnimNotify_CameraEffect" {
+                continue;
+            }
+            let props = pkg.read_object(ni)?.properties;
+            let Some(r @ (ObjRef::Export(_) | ObjRef::Import(_))) = find(&props, "CameraLensEffect").and_then(|p| p.as_object()).map(ObjRef::from_index) else { continue };
+            out.push((sequence.clone(), time, pkg.obj_name(r)));
+        }
+    }
+    Ok(out)
+}
+
+/// A camera lens effect class (`EmitterCameraLensEffectBase` subclass) as played by a notify:
+/// `Default__<class>.PS_CameraEffect` (DishonoredGame), `DistFromCamera` / `BaseFOV` / `LifeSpan`
+/// from the class or, when it does not set them, `Default__EmitterCameraLensEffectBase` (Engine:
+/// 90, 80, 10 s).
+pub fn lens_effect_class(content: &Content, class: &str) -> Option<dishonored_ir::LensEffectDef> {
+    use ue3_package::properties::find;
+    let defaults = |pkg_name: &str, name: &str| -> Option<(std::sync::Arc<ue3_package::Package>, Vec<ue3_package::properties::Property>)> {
+        let pkg = content.package(pkg_name).ok()?;
+        let want = format!("Default__{name}");
+        let i = (0..pkg.exports.len()).find(|&e| pkg.obj_name(ObjRef::Export(e)) == want)?;
+        let props = pkg.read_object(i).ok()?.properties;
+        Some((pkg, props))
+    };
+    let (game, d) = defaults("DishonoredGame", class)?;
+    let base = defaults("Engine", "EmitterCameraLensEffectBase").map(|b| b.1).unwrap_or_default();
+    let system = find(&d, "PS_CameraEffect").and_then(|p| p.as_object()).map(ObjRef::from_index).filter(|r| *r != ObjRef::Null).map(|r| game.obj_path(r))?;
+    let f = |n: &str, dflt: f32| find(&d, n).or_else(|| find(&base, n)).and_then(|p| p.as_float()).unwrap_or(dflt);
+    Some(dishonored_ir::LensEffectDef { action: class.to_string(), system, distance: f("DistFromCamera", 90.0), base_fov: f("BaseFOV", 80.0), life_span: f("LifeSpan", 10.0) })
+}
+
 /// Object path of the `AnimSet` export of a package whose own name (the last path component)
 /// is `name`, for sets whose outer is not known (the weapons' sets).
 pub fn anim_set_path(content: &Content, pkg_name: &str, name: &str) -> Result<String> {

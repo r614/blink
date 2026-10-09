@@ -440,6 +440,8 @@ pub struct ViewRig {
     lib: ClipLib,
     /// Particle notifies per sequence: (time, system, socket or bone, attached).
     pnotifies: HashMap<String, Vec<(f32, String, String, bool)>>,
+    /// Camera lens effect notifies per sequence: (time, effect).
+    cnotifies: HashMap<String, Vec<(f32, dishonored_ir::LensEffectDef)>>,
     /// The rig's sockets: name -> (bone, transform relative to it).
     sockets: HashMap<String, (usize, glam::Mat4)>,
     /// Sockets and bones the hand effects are placed on (`effects::HandEffects`).
@@ -783,12 +785,30 @@ pub fn load_view_rig(
         }
     }
     info!("first-person rig: particle notifies on {} sequences", pnotifies.len());
+    // Camera lens effects of the sets' sequences (`AnimNotify_CameraEffect`: the assassinations'
+    // blood on the lens).
+    let mut cnotifies: HashMap<String, Vec<(f32, dishonored_ir::LensEffectDef)>> = HashMap::new();
+    let mut lens_classes: HashMap<String, Option<dishonored_ir::LensEffectDef>> = HashMap::new();
+    for path in &set_paths {
+        match dishonored_assets::characters::camera_effect_notifies(&content, "Startup", path) {
+            Ok(list) => {
+                for (seq, t, class) in list {
+                    let def = lens_classes.entry(class.clone()).or_insert_with(|| dishonored_assets::characters::lens_effect_class(&content, &class)).clone();
+                    match def {
+                        Some(d) => cnotifies.entry(seq).or_default().push((t, d)),
+                        None => warn!("first-person rig: lens effect class {class} not found"),
+                    }
+                }
+            }
+            Err(e) => warn!("{path} camera notifies: {e:#}"),
+        }
+    }
     let arms_gpu = upload(&arms, &mut meshes, &mut images, &mut mats, &mut binds, &feat);
     let glow = arm_glow_materials(&content, &arms_gpu, &mut images, &mut mats);
     commands.insert_resource(ArmGlowMats(glow));
     let bind_pose = bones.iter().map(|b| (b.rotation, b.translation)).collect();
     let look_bones = [find("Collarbone_R_Jnt"), find("Collarbone_L_Jnt"), find("spine_3_jnt")];
-    commands.insert_resource(ViewRig { arms: arms_gpu, parents: parents(&bones), bones, bind_pose, m2p, weapons, bolts, lib, pnotifies, sockets: rig_sockets, effect_points, upper_body, left_arm, cam_bone, look_bones });
+    commands.insert_resource(ViewRig { arms: arms_gpu, parents: parents(&bones), bones, bind_pose, m2p, weapons, bolts, lib, pnotifies, cnotifies, sockets: rig_sockets, effect_points, upper_body, left_arm, cam_bone, look_bones });
 }
 
 /// The rig, parented to the game camera and drawn in the main view (see `VIEW_SCALE`).
@@ -1479,7 +1499,7 @@ pub fn animate_view_rig(
     mut bmeshes: Query<(&BoltMesh, &mut Visibility), (Without<ViewRoot>, Without<WeaponMesh>)>,
     mut anim_sounds: Option<ResMut<crate::audio::AnimSounds>>,
     cutscenes: Option<Res<crate::cutscene::Cutscenes>>,
-    (settings, mut hands): (Option<Res<crate::settings::GameSettings>>, ResMut<crate::effects::HandEffects>),
+    (settings, mut hands, mut lens): (Option<Res<crate::settings::GameSettings>>, ResMut<crate::effects::HandEffects>, Option<ResMut<crate::lens_effects::LensEffects>>),
 ) {
     let Some(rig) = rig else { return };
     let Ok((mut root_t, mut root_vis)) = roots.single_mut() else { return };
@@ -1556,13 +1576,20 @@ pub fn animate_view_rig(
             windows.push((l.clip.clone(), from, to, l.looped));
         }
     }
-    // Particle notifies crossed this frame (`AnimNotify_PlayParticleEffect`).
+    // Particle notifies crossed this frame (`AnimNotify_PlayParticleEffect`), and the camera
+    // lens effects (`AnimNotify_CameraEffect`).
     for (clip, from, to, looped) in &windows {
-        let Some(list) = rig.pnotifies.get(clip) else { continue };
         let len = lib.length(clip);
-        for (t, template, socket, attach) in list {
+        for (t, template, socket, attach) in rig.pnotifies.get(clip).into_iter().flatten() {
             if crossed(*t, *from, *to, len, *looped) {
                 hands.pending.push((template.clone(), socket.clone(), *attach));
+            }
+        }
+        if let Some(l) = lens.as_mut() {
+            for (t, def) in rig.cnotifies.get(clip).into_iter().flatten() {
+                if crossed(*t, *from, *to, len, *looped) {
+                    l.local.push(def.clone());
+                }
             }
         }
     }

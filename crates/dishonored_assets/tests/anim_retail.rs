@@ -150,3 +150,19 @@ fn helmeted_guard_wears_the_elite_helmet() {
     let m = dishonored_assets::characters::load_static_model(&c, &acc[0].0.0, &acc[0].0.1, 64).unwrap();
     assert!(!m.parts[0].indices.is_empty());
 }
+
+/// The assassination masters' `AnimNotify_CameraEffect`: blood on the lens
+/// (`DisEmitterCameraLensEffect_blood_medium.PS_CameraEffect`), 90 uu before the camera at a base
+/// FOV of 80 (`Default__EmitterCameraLensEffectBase`), 10 s at most.
+#[test]
+fn assassinations_put_blood_on_the_lens() {
+    let Some(c) = content() else { return };
+    let list = dishonored_assets::characters::camera_effect_notifies(&c, "Startup", "Ply_Sword_Assassination_as.Ply_Sword_Assassination_as").unwrap();
+    let back = list.iter().find(|n| n.0 == "Sword_Ready_Assassination_Back_Master").expect("the back assassination's lens effect");
+    assert!((back.1 - 0.6).abs() < 0.01, "{back:?}");
+    assert_eq!(back.2, "DisEmitterCameraLensEffect_blood_medium");
+    assert!(list.iter().filter(|n| n.2 == "DisEmitterCameraLensEffect_blood_medium").count() >= 12);
+    let def = dishonored_assets::characters::lens_effect_class(&c, &back.2).unwrap();
+    assert_eq!(def.system, "Vfx_PhysMat.Blood.Camera.ps_blood_camera_Medium");
+    assert_eq!((def.distance, def.base_fov, def.life_span), (90.0, 80.0, 10.0));
+}

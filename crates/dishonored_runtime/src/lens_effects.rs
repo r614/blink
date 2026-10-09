@@ -15,6 +15,10 @@ use bevy::prelude::*;
 pub struct LensEffects {
     seen: u32,
     live: Vec<(u32, Entity, f32, f32)>,
+    /// Lens effects the local player's animation played (`AnimNotify_CameraEffect`), to spawn.
+    pub local: Vec<dishonored_ir::LensEffectDef>,
+    /// The live ones: entity, age, distance, base FOV, life span.
+    local_live: Vec<(Entity, f32, f32, f32, f32)>,
 }
 
 /// The Dishonored world transform of a lens effect `distance` before the camera.
@@ -62,6 +66,31 @@ pub fn update(
             st.live.push((l.id, e, 0.0, def.life_span));
         }
     }
+    // The local animation's effects: a system that finishes ends them
+    // (`bDestroyOnSystemFinish`), else `LifeSpan`.
+    for def in std::mem::take(&mut st.local) {
+        let xf = lens_transform(cam, fov_distance(def.distance, def.base_fov, hfov));
+        if let Some(e) = crate::effects::spawn_system(&mut commands, &mut meshes, &mut fx, &def.system, xf, true) {
+            st.local_live.push((e, 0.0, def.distance, def.base_fov, def.life_span));
+        }
+    }
+    let mut local = Vec::new();
+    for (e, age, distance, base_fov, life) in std::mem::take(&mut st.local_live) {
+        let Ok(mut inst) = q.get_mut(e) else {
+            if age == 0.0 {
+                local.push((e, age + dt, distance, base_fov, life));
+            }
+            continue;
+        };
+        let age = age + dt;
+        inst.set_transform(lens_transform(cam, fov_distance(distance, base_fov, hfov)));
+        if life > 0.0 && age >= life {
+            inst.stop();
+            continue;
+        }
+        local.push((e, age, distance, base_fov, life));
+    }
+    st.local_live = local;
     let mut keep = Vec::new();
     for (id, e, age, life) in std::mem::take(&mut st.live) {
         let Ok(mut inst) = q.get_mut(e) else {

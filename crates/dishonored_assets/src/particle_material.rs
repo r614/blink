@@ -332,6 +332,11 @@ pub const GAMEPLAY_PARTICLES: &[&str] = &[
     "vfx_characters.overseer.Musical_overseerFX",
     "Vfx_GamePlay.RiverKrust.Ps_RiverKrust_Death",
     "Vfx_GamePlay.RiverKrust.Ps_RiverKrust_Spew",
+    // Blood on the lens (`DisEmitterCameraLensEffect_blood_*.PS_CameraEffect`, the assassination
+    // masters' `AnimNotify_CameraEffect`).
+    "Vfx_PhysMat.Blood.Camera.ps_blood_camera_light",
+    "Vfx_PhysMat.Blood.Camera.ps_blood_camera_Medium",
+    "Vfx_PhysMat.Blood.Camera.ps_blood_camera_Heavy",
     // The rest of the contact table (footfalls, landings, slides, thrown objects, creatures).
     "Vfx_PhysMat.Dirt.Ps_JumpLand_Big_DirtGravel",
     "Vfx_PhysMat.Dirt.Pfx_Thrown_Rocks",
