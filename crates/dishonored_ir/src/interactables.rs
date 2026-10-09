@@ -121,6 +121,18 @@ pub struct LauncherDef {
     pub max_distance: f32,
 }
 
+/// A `DisTweaks_Projectile` a Kismet `DisSeqAct_FireProjectile` spawns: its class (which
+/// projectile it is: `DisTweaks_Arrow` a bolt, `DisTweaks_Arrow_Flare` an incendiary bolt) and the
+/// multipliers of its launch (`m_fSpeedMultiplier`, `m_fGravityMultiplier`; slot 233 0x00C540A0).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ScriptedProjectileDef {
+    pub tweak: String,
+    pub class: String,
+    pub speed_mult: f32,
+    pub gravity_mult: f32,
+}
+
 /// The interactions of a map.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -130,6 +142,10 @@ pub struct Interactables {
     pub launchers: Vec<LauncherDef>,
     #[serde(default)]
     pub watchtowers: Vec<WatchTowerDef>,
+    /// The projectile tweaks the map's `DisSeqAct_FireProjectile` actions fire
+    /// (`m_pProjectileTweak`), one per tweak.
+    #[serde(default)]
+    pub scripted_projectiles: Vec<ScriptedProjectileDef>,
     /// `DisTweaks_PlayerInput.m_fAltInteractActivateTime` (0.3): how long Use is held before
     /// the interactable's `AltInteract` runs (the door's peek) instead of `Interact`.
     pub alt_interact_time: f32,

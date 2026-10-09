@@ -459,6 +459,20 @@ pub fn extract_interactables(content: &Content, packages: &[String]) -> Result<I
         }
         let pkg = content.package(name)?;
         for i in 0..pkg.exports.len() {
+            // The Kismet's scripted shots (`DisSeqAct_FireProjectile.m_pProjectileTweak`).
+            if pkg.export_class(i) == "DisSeqAct_FireProjectile" {
+                let tweak = pkg.read_object(i).ok().and_then(|h| obj(&h.properties, "m_pProjectileTweak")).map(|o| pkg.obj_path(ObjRef::from_index(o)));
+                if let Some(t) = tweak.filter(|t| !out.scripted_projectiles.iter().any(|s| s.tweak.eq_ignore_ascii_case(t))) {
+                    let m = db.try_resolve(&t).unwrap_or_default();
+                    out.scripted_projectiles.push(dishonored_ir::interactables::ScriptedProjectileDef {
+                        class: db.class_of(&t).unwrap_or_default(),
+                        speed_mult: get_f32(&m, "m_fSpeedMultiplier").unwrap_or(1.0),
+                        gravity_mult: get_f32(&m, "m_fGravityMultiplier").unwrap_or(1.0),
+                        tweak: t,
+                    });
+                }
+                continue;
+            }
             if pkg.obj_name(ObjRef::from_index(pkg.exports[i].outer)) != "PersistentLevel" {
                 continue;
             }

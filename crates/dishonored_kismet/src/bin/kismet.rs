@@ -41,11 +41,7 @@ fn print_op(db: &KismetDb, id: OpId) {
         println!("    out {i} \"{}\"{} -> {}", l.name, if l.disabled { " (disabled)" } else { "" }, t.join(", "));
     }
     for l in &o.vars {
-        let t: Vec<String> = l.vars.iter().map(|v| {
-            let vo = db.op(*v);
-            let named = vo.named.map(|n| format!(" => {}", db.describe(n))).unwrap_or_default();
-            format!("{} {}{named} {:?}", vo.class, db.describe(*v), vo.props.0.iter().filter(|(k, _)| !matches!(k.as_str(), "SupportedClasses")).collect::<Vec<_>>())
-        }).collect();
+        let t: Vec<String> = l.vars.iter().map(|v| format!("{} {}", db.describe(*v), var_short(db, *v))).collect();
         println!("    var \"{}\" prop={} w={} : {}", l.name, l.property, l.writeable, t.join("; "));
     }
     for l in &o.events {
@@ -72,7 +68,7 @@ fn var_short(db: &KismetDb, v: OpId) -> String {
     let t = o.named.unwrap_or(v);
     let to = db.op(t);
     let val = to.props.0.iter().filter(|(k, _)| !matches!(k.as_str(), "bDeletable" | "SupportedClasses")).map(|(k, x)| match x {
-        Value::Obj(Obj::Actor(a)) => format!("{k}={}", db.actors[*a as usize].name),
+        Value::Obj(Obj::Actor(a)) => format!("{k}={} [{}] at {:?}", db.actors[*a as usize].name, db.actors[*a as usize].class, db.actors[*a as usize].location),
         _ => format!("{k}={}", short(x)),
     }).collect::<Vec<_>>().join(",");
     if o.class == "SeqVar_Named" { format!("Named({})={}({val})", o.props.str("FindVarName"), to.class) } else { format!("{}({val})", o.class) }

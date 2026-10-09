@@ -344,6 +344,72 @@ impl LaunchersState {
     }
 }
 
+/// The low ballistic arc (0x00BEC130): the unit launch direction from `from` to `to` at `speed`
+/// under `g` (positive, uu/s^2), and the flight time when the target is in reach. Out of reach
+/// the pitch is 45 degrees (no time); points closer than 1e-4 uu aim straight up.
+pub fn ballistic(from: Vec3, to: Vec3, speed: f32, g: f32) -> (Vec3, Option<f32>) {
+    let d = to - from;
+    let h2 = d.x * d.x + d.y * d.y;
+    if d.z * d.z + h2 < 1e-8 {
+        return (Vec3::Z, None);
+    }
+    let h = h2.sqrt();
+    let mut angle = std::f32::consts::FRAC_PI_4;
+    let mut time = None;
+    if h >= 1e-8 {
+        let v2 = speed * speed;
+        let disc = v2 * v2 - (h * h * g + v2 * d.z * 2.0) * g;
+        if disc >= 1e-8 {
+            angle = ((v2 - disc.sqrt()) / (h * g)).atan();
+            time = Some(h / (angle.cos() * speed));
+        }
+    }
+    let flat = Vec3::new(d.x, d.y, 0.0).normalize_or_zero();
+    ((flat * angle.cos() + Vec3::Z * angle.sin()).normalize_or_zero(), time)
+}
+
+/// The aim of a scripted or AI shot (0x00C3F2A0, the projectile tweak's): `mode` is the action's
+/// `EDisComputeHitAccuracy`. Modes 0 and 1 solve the ballistic arc at `speed`
+/// (`m_fSpeedMultiplier` x the action's) under `g` (`m_fGravityMultiplier` x -GravityZ); mode 0
+/// then leads the target by its velocity over the flight time (flat when `flat_lead`: the floor
+/// aim of region 1) and solves again. Any other mode aims straight at the point.
+#[allow(clippy::too_many_arguments)]
+pub fn aim(mode: u8, from: Vec3, point: Vec3, target_velocity: Vec3, flat_lead: bool, speed: f32, g: f32) -> Vec3 {
+    if mode != 0 && mode != 1 {
+        return (point - from).normalize_or_zero();
+    }
+    let (dir, time) = ballistic(from, point, speed, g);
+    match (mode, time) {
+        (0, Some(t)) => {
+            let mut lead = target_velocity * t;
+            if flat_lead {
+                lead.z = 0.0;
+            }
+            ballistic(from, point + lead, speed, g).0
+        }
+        _ => dir,
+    }
+}
+
+/// A `DisSeqAct_FireProjectile` shot (0x00B8F340): the tweak's projectile spawned at the source
+/// and launched along `dir` at `speed x m_fSpeedMultiplier` with the action's damage (slot 233
+/// 0x00C540A0, `m_Damage`); it flies and strikes as the player's crossbow round of its class
+/// does (`DisProjectile_Arrow`). No instigator. Returns the projectile id.
+pub fn fire_scripted(def: &dishonored_ir::interactables::ScriptedProjectileDef, from: Vec3, dir: Vec3, speed: f32, damage: i32, state: &mut WorldState, events: &mut Vec<SimEvent>) -> Option<u32> {
+    let kind = match def.class.as_str() {
+        "DisTweaks_Arrow_Flare" => ProjectileKind::IncendiaryBolt,
+        c if c.starts_with("DisTweaks_Arrow_Sleep") => ProjectileKind::SleepDart,
+        "DisTweaks_Arrow" => ProjectileKind::Bolt,
+        _ => return None,
+    };
+    let id = state.next_projectile_id;
+    state.next_projectile_id = state.next_projectile_id.wrapping_add(1);
+    let velocity = dir * speed * def.speed_mult;
+    state.projectiles.push(ProjectileState { id, kind, owner: 0, position: from, velocity, age: 0.0, damage: damage as f32, gravity_mult: def.gravity_mult, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO, spawn: from, pierced: None });
+    events.push(SimEvent::Fired { id: 0, bolt: true, projectile: id, kind, origin: from, velocity });
+    Some(id)
+}
+
 /// The direction a launcher's shot leaves in: at the target, else along the muzzle socket.
 pub fn shot_direction(def: &LauncherDef) -> Vec3 {
     match def.target {
@@ -419,6 +485,30 @@ mod tests {
         let (a, b, c, d) = (Vec3::new(x, -2000.0, -2000.0), Vec3::new(x, 2000.0, -2000.0), Vec3::new(x, 2000.0, 2000.0), Vec3::new(x, -2000.0, 2000.0));
         let n = -Vec3::X;
         CollisionWorld::from_triangles(vec![dishonored_world::Tri { a, b, c, n, channels: channel::ALL, source: 0 }, dishonored_world::Tri { a, b: c, c: d, n, channels: channel::ALL, source: 0 }], vec![String::new()])
+    }
+
+    /// Flies `dir x speed` under `g` for `t` seconds.
+    fn land(from: Vec3, dir: Vec3, speed: f32, g: f32, t: f32) -> Vec3 {
+        from + dir * speed * t - Vec3::Z * 0.5 * g * t * t
+    }
+
+    #[test]
+    fn the_ballistic_solve_lands_on_the_point_and_leads_a_mover() {
+        let (from, to, speed, g) = (Vec3::new(0.0, 0.0, 800.0), Vec3::new(500.0, -300.0, 0.0), 900.0, 1520.0 * 1.3);
+        let (dir, t) = ballistic(from, to, speed, g);
+        let t = t.expect("in reach");
+        assert!((dir.length() - 1.0).abs() < 1e-4);
+        assert!(land(from, dir, speed, g, t).distance(to) < 1.0, "the low arc lands on the point: {:?}", land(from, dir, speed, g, t));
+        // Out of reach: 45 degrees up, no time.
+        let (far, none) = ballistic(Vec3::ZERO, Vec3::new(1.0e6, 0.0, 0.0), 900.0, g);
+        assert!(none.is_none() && (far.z - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-4);
+        // Mode 0 leads a target moving along y by its velocity over the flight time.
+        let vel = Vec3::new(0.0, 200.0, 0.0);
+        let led = aim(0, from, to, vel, false, speed, g);
+        let (_, t2) = ballistic(from, to + vel * t, speed, g);
+        assert!(land(from, led, speed, g, t2.unwrap()).distance(to + vel * t) < 1.0);
+        // Mode 2 is straight at the point.
+        assert!((aim(2, from, to, vel, false, speed, g) - (to - from).normalize()).length() < 1e-5);
     }
 
     #[test]

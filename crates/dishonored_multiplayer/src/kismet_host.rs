@@ -2079,6 +2079,61 @@ impl Host for H<'_> {
                 world_events(cx.k, self, evs);
                 HostResult::Done
             }
+            // [world] `DisSeqAct_FireProjectile::Activated` (0x00B8F340): on Fire, with a Source and
+            // a projectile tweak, the tweak's projectile spawns at the source's location, along
+            // its rotation, aimed at the Target when there is one (0x00C3F2A0 with
+            // `m_eAccuracy`, `m_eTargetRegion`: the target point, then the ballistic solve with
+            // lead), and launches at `m_fProjectileSpeed` with `m_fProjectileDamage` (class
+            // defaults 5000 and 1). The pawn target's point (the midpoint of its hit regions' ranged
+            // aim focus, 0x00BC7190) is taken as its location: `m_HitRegionInfo_Map` is filled
+            // natively and its source was not found.
+            "DisSeqAct_FireProjectile" => {
+                if !cx.has_impulse(0) {
+                    return HostResult::Done;
+                }
+                let key = self.m.current_map.to_ascii_lowercase();
+                let tweak = match cx.prop_obj("m_pProjectileTweak") {
+                    Obj::Path(p) => p,
+                    _ => return HostResult::Done,
+                };
+                let Some(def) = self.m.setup.interactables.get(&key).and_then(|d| d.scripted_projectiles.iter().find(|s| s.tweak.eq_ignore_ascii_case(&tweak)).cloned()) else {
+                    self.note(format!("FireProjectile: projectile tweak {tweak} not read"));
+                    return HostResult::Done;
+                };
+                let Some(src) = cx.objects("Source").into_iter().next() else { return HostResult::Done };
+                let Some(from) = self.pos_of(&src) else { return HostResult::Done };
+                let speed = cx.prop("m_fProjectileSpeed").and_then(|v| v.as_float()).unwrap_or(5000.0);
+                let damage = cx.prop("m_fProjectileDamage").and_then(|v| v.as_int()).unwrap_or(1);
+                let mode = cx.prop("m_eAccuracy").and_then(|v| v.as_int()).unwrap_or(0) as u8;
+                let region = cx.prop("m_eTargetRegion").and_then(|v| v.as_int()).unwrap_or(0);
+                // The source's rotation (`FUN_0040DA70`, rotator -> vector).
+                let mut dir = match src {
+                    Obj::Actor(a) => self.st.actor_rot.get(&a).map(|q| *q * Vec3::X).unwrap_or_else(|| {
+                        let r = self.db.actors[a as usize].rotation;
+                        let (p, y) = (r[0] as f32 * std::f32::consts::TAU / 65536.0, r[1] as f32 * std::f32::consts::TAU / 65536.0);
+                        Vec3::new(p.cos() * y.cos(), p.cos() * y.sin(), p.sin())
+                    }),
+                    _ => self.pawn_of(&src).and_then(|p| self.m.world.player(p)).map(|p| Vec3::new(p.yaw.to_radians().cos(), p.yaw.to_radians().sin(), 0.0)).unwrap_or(Vec3::X),
+                };
+                if let Some(t) = cx.objects("Target").into_iter().next() {
+                    let pawn = self.pawn_of(&t).and_then(|p| self.m.world.player(p)).copied();
+                    let at = pawn.map(|p| p.position).or_else(|| self.pos_of(&t));
+                    if let Some(point) = at {
+                        // Region 1 aims at the floor under the target (a 300 uu trace down,
+                        // 0x00C3F130) with a flat lead; the host has no world to trace (no shipped
+                        // action sets it), so the point stays the target's.
+                        let g = -self.cfg.gameplay.movement.gravity_z * def.gravity_mult;
+                        let vel = pawn.map(|p| p.velocity).unwrap_or(Vec3::ZERO);
+                        dir = dishonored_sim::launchers::aim(mode, from, point, vel, region == 1, speed * def.speed_mult, g);
+                    }
+                }
+                let mut evs = Vec::new();
+                if dishonored_sim::launchers::fire_scripted(&def, from, dir, speed, damage, &mut self.m.world, &mut evs).is_some() {
+                    self.note(format!("FireProjectile {} at {:.0},{:.0},{:.0}", def.tweak, from.x, from.y, from.z));
+                }
+                self.m.launcher_events.extend(evs);
+                HostResult::Done
+            }
             // [world] `DisSeqAct_WallofLightControl` (0x00A40270 -> 0x00A3F7F0): the first input
             // with an impulse (TurnOff, TurnOn, Toggle, SwitchPolarity) on every Target wall.
             "DisSeqAct_WallofLightControl" => {
