@@ -191,6 +191,7 @@ fn starter(map: &str, title: &str) -> String {
 }
 
 /// `DefaultGame.ini` `m_MissionsGame` entries: (mission number, maps in order).
+/// Adapted from dishonored-bevy by Eamon (github.com/Eamo5/dishonored-bevy), used with permission (dhcook `missions_ini`).
 fn ini_missions(content: &Content) -> Result<Vec<(i32, Vec<String>)>> {
     let ini = content.cooked.parent().context("install layout")?.join("Config").join("DefaultGame.ini");
     let text = std::fs::read_to_string(&ini).with_context(|| ini.display().to_string())?;
