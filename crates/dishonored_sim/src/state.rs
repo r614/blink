@@ -835,6 +835,11 @@ pub struct ProjectileState {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorldState {
     pub tick: u64,
+    /// Players whose Use this step goes to a target the host owns (a Kismet usable, an NPC, a
+    /// door) that is nearer the crosshair than any prop: the sim does not grab for them. Set by
+    /// the host before the step, cleared after; not part of the state.
+    #[serde(skip)]
+    pub use_claimed: Vec<PlayerId>,
     pub players: Vec<PlayerState>,
     pub projectiles: Vec<ProjectileState>,
     pub next_projectile_id: u32,

@@ -1202,6 +1202,30 @@ impl MissionMatch {
         }
     }
 
+    /// One interactable is focused at a time (`DishonoredPlayerController.m_pCrosshairActor`, +0x69c)
+    /// and the Use handler (0x00AD5BA0) acts on that one only: its `Interact`, or the grab / drop
+    /// of a prop. The sim grabs the prop it would focus; when a mission target (a Kismet usable, an
+    /// NPC, a door) is nearer the crosshair, that target is the focus and the prop stays. The
+    /// crosshair choice (the writer of +0x69c) is not decoded: "nearer the crosshair" is the rule
+    /// the port already uses between a body and a prop (`step_world`).
+    fn claim_uses(&mut self, inputs: &[(PlayerId, PlayerInput)], world: &dyn WorldQuery, cfg: &SimConfig) {
+        for (id, inp) in inputs {
+            if inp.buttons & dishonored_sim::input::buttons::USE == 0 || self.use_held.contains(id) {
+                continue;
+            }
+            let Some(mut p) = self.world.player(*id).copied() else { continue };
+            if p.holding.is_some() {
+                continue;
+            }
+            p.yaw = inp.yaw;
+            p.pitch = inp.pitch.clamp(-89.0, 89.0);
+            let Some((_, prop_cos)) = dishonored_sim::movables::focus(&self.world, &p, world, &cfg.gameplay) else { continue };
+            if self.interaction_view(*id, p.yaw, p.pitch).is_some_and(|(_, cos)| cos >= prop_cos) {
+                self.world.use_claimed.push(*id);
+            }
+        }
+    }
+
     /// A player uses a native door or usable (`MissionSetup::usables[i]`).
     fn use_prop(&mut self, player: PlayerId, i: usize) {
         let Some(u) = self.setup.usables.get(i).cloned() else { return };
@@ -1264,7 +1288,9 @@ impl MissionMatch {
         }
         all.extend(thought);
         self.crowd.write_awareness(&mut self.world);
+        self.claim_uses(&all, world, cfg);
         let out = step_world(&mut self.world, &all, world, cfg);
+        self.world.use_claimed.clear();
         // [world] Tripwires touched or damaged, keyhole holds and peeks.
         self.step_interactables(&all, &out.events, cfg, dt);
         // [world] Breakables, batteries and receptacles of the active map: explosions damage the
@@ -1722,10 +1748,22 @@ impl MissionMatch {
     /// What a player would interact with right now (nearest usable marker, talkable NPC or
     /// travel door within reach, in front of the view).
     pub fn interaction(&self, id: PlayerId) -> Option<Interaction> {
+        self.interaction_focus(id).map(|b| b.0)
+    }
+
+    /// [`Self::interaction`] with the cosine of the angle between the view and the target: the
+    /// crosshair alignment it competes with the sim's own use targets (props) by.
+    pub fn interaction_focus(&self, id: PlayerId) -> Option<(Interaction, f32)> {
+        let p = self.world.player(id)?;
+        self.interaction_view(id, p.yaw, p.pitch)
+    }
+
+    /// [`Self::interaction_focus`] for a view (the tick's input, before the sim applies it).
+    fn interaction_view(&self, id: PlayerId, yaw: f32, pitch: f32) -> Option<(Interaction, f32)> {
         let p = self.world.player(id).filter(|p| p.alive)?;
         let eye = p.position + Vec3::Z * 64.0;
-        let fwd = dishonored_sim::movement::view_vector(p.yaw, p.pitch);
-        let mut best: Option<(f32, Interaction)> = None;
+        let fwd = dishonored_sim::movement::view_vector(yaw, pitch);
+        let mut best: Option<(f32, Interaction, f32)> = None;
         let mut consider = |pos: Vec3, reach: f32, it: Interaction| {
             let d = pos - eye;
             let dist = d.length();
@@ -1738,7 +1776,7 @@ impl MissionMatch {
             }
             let score = dist * (2.0 - facing);
             if best.as_ref().is_none_or(|b| score < b.0) {
-                best = Some((score, it));
+                best = Some((score, it, facing));
             }
         };
         for m in self.state.usable.keys() {
@@ -1767,7 +1805,7 @@ impl MissionMatch {
                 consider(u.center, 220.0, Interaction::Prop(i));
             }
         }
-        best.map(|b| b.1)
+        best.map(|b| (b.1, b.2))
     }
 
     pub fn respawn_time_left(&self, id: PlayerId) -> Option<f32> {
