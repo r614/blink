@@ -103,7 +103,8 @@ pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
     // v19: special NPC classes (ai.md F6) and AI head poses / look-at (stealth F4 / F5).
     // v21: the built-in archetypes' HealthMax (ai.archetype_health_max).
     // v20: the explosions' `m_pRadialDamageType` (breakables' immune / instant-break lists).
-    let path = cache_dir().join("gameplay_config.v22.json");
+    // v22 (main): see the log. v23-detect: the vision regions / LOS period, the ambient animation period and the ambient head loops (stealth.md section 17); rename at integration (a shared key collides across branches).
+    let path = cache_dir().join("gameplay_config.v23-detect.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);

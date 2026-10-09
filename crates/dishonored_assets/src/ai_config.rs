@@ -188,7 +188,34 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
         prov.insert("ai.vision".into(), VISION.into());
     }
     let beh = |path: &str| db.try_resolve(path);
+    // The player target's vision regions (LOS test points, 0x00C77FC0) and its LOS check period.
+    if let Some(m) = beh("Twk_DefaultVisRegion.Twk_DefaultVisRegion") {
+        if let Some(TVal::List(items)) = m.get("m_VisRegionSettings") {
+            for (i, it) in items.iter().take(3).enumerate() {
+                let d = out.vision.vis_regions[i];
+                out.vision.vis_regions[i] = [
+                    get_f32(it, "m_fWidth").unwrap_or(d[0]),
+                    get_f32(it, "m_fOffsetTowardsNPC").unwrap_or(d[1]),
+                    get_f32(it, "m_fTopHeight").unwrap_or(d[2]),
+                    get_f32(it, "m_fBottomHeight").unwrap_or(d[3]),
+                ];
+            }
+            prov.insert("ai.vision.vis_regions".into(), "Twk_DefaultVisRegion.Twk_DefaultVisRegion :: m_VisRegionSettings".into());
+        }
+    }
+    if let Some(TVal::Struct(c)) = beh("Twk_Component.Twk_Component_Observable_Player").as_ref().and_then(|m| m.get("m_ComponentConfig")) {
+        if let Some(p) = get_f32(c, "m_fLOSCheckPeriod") {
+            out.vision.los_period = p;
+            prov.insert("ai.vision.los_period".into(), "Twk_Component.Twk_Component_Observable_Player :: m_ComponentConfig.m_fLOSCheckPeriod".into());
+        }
+    }
     // Ambient barks of the patrol / guard behaviours (`DisTweaks_AISubProcess_AmbientBarks`).
+    const AMBIENT_ANIMS: &str = "AI_BehaviorTweaks_Patrol.TweaksBehavior_Patrol_Default.DisTweaks_AISubProcess_AmbientAnims_0";
+    if let Some(m) = beh(AMBIENT_ANIMS) {
+        let d = out.ambient_anim_freq;
+        out.ambient_anim_freq = [get_f32(&m, "m_fMinAmbientAnimFrequency").unwrap_or(d[0]), get_f32(&m, "m_fMaxAmbientAnimFrequency").unwrap_or(d[1])];
+        prov.insert("ai.ambient_anim_freq".into(), AMBIENT_ANIMS.into());
+    }
     const AMBIENT: &str = "AI_BehaviorTweaks_Patrol.TweaksBehavior_Patrol_Default.DisTweaks_AISubProcess_AmbientBarks_0";
     if let Some(m) = beh(AMBIENT) {
         out.ambient_bark_inhibition = get_f32(&m, "m_fBarkInhibitionDuration").unwrap_or(out.ambient_bark_inhibition);

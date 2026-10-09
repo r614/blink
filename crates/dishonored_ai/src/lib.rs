@@ -445,6 +445,26 @@ pub struct Brain {
     /// The look-at head and the vision eye ([`head`]).
     #[serde(default)]
     pub head: head::Head,
+    /// The ambient idle sequence this NPC plays (`Empty_Idle_03`), pinned by the scenario;
+    /// `None`: the random pick of `DisAISubProcessAmbientAnims`.
+    #[serde(default)]
+    pub ambient_pin: Option<String>,
+    /// Brain time and the player targets in its vision list (0x00C788E0): when each was last
+    /// traced and the normalized distance that trace held.
+    #[serde(default)]
+    pub vis_clock: f32,
+    #[serde(default)]
+    pub vis_cands: Vec<VisCand>,
+}
+
+/// A target in a vision component's candidate list: the line of sight is traced again once
+/// `Twk_Component_Observable_Player.m_fLOSCheckPeriod` has passed, and the last trace's result
+/// stands in between.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct VisCand {
+    pub who: PlayerId,
+    pub last: f32,
+    pub held: Option<f32>,
 }
 
 fn idle_state() -> BrainState {
@@ -848,12 +868,17 @@ impl Attn {
     /// (unless already Busted) and is refused for an unsighted target whose proxy turned out
     /// stale (`stale_proxy`, 0x00b4fce0). A refused Busted caps the value at its start.
     fn change(&mut self, prof: &AttentionConfig, stop: &[f32; 4], amount: f32, floor_level: u8, why: u8, stale_proxy: bool) {
-        let before = self.value.clamp(0.0, prof.max);
+        // The accumulator (`DisLeakyAccumulator`, +0x8c: value, leak rate, min, max) has no upper
+        // bound: its max is FLT_MAX (peeked on the class default and on live NPC controllers), and
+        // the captures keep rising past 1 at the seen rate (`stealth/detect_600`: 1.28 at tick 129,
+        // `combat/sword_hit_dummy` 3.3 at tick 200). `m_fMaxAttention` only feeds the psychic
+        // change (0x00b4c400), `prof.max`.
+        let before = self.value.max(0.0);
         let mut v = (self.value + amount).max(0.0);
         if floor_level > 0 {
             v = v.max(prof.level_value(floor_level));
         }
-        self.value = v.min(prof.max);
+        self.value = v;
         let mut lvl = level_after(self.level, self.value, before <= self.value, &prof.start, stop);
         if lvl == DAL_BUSTED {
             let refused = (self.level < DAL_BUSTED && why != FORCED && !prof.reason_can_bust(why)) || stale_proxy;
@@ -1711,6 +1736,9 @@ impl Brain {
             class: if kind == PawnKind::Guard { NpcClass::EliteGuard } else { NpcClass::Civilian },
             special: SpecialCombat::default(),
             head: head::Head::default(),
+            ambient_pin: None,
+            vis_clock: 0.0,
+            vis_cands: Vec::new(),
         }
     }
 
@@ -1913,7 +1941,48 @@ impl Brain {
         });
         let modifier = self.head_modifier(ai);
         let speed = me.velocity.truncate().length();
-        self.head.step(ai, me.archetype, modifier, me.position, me.yaw, speed, request, dt);
+        // `DisAISubProcessAmbientAnims` runs under the routine behaviours while the NPC stands
+        // still (0x00B39620: not moving, 0x00B79730).
+        let amb = head::AmbientIn { eligible: self.state.is_routine() && speed <= 20.0, pin: self.ambient_pin.as_deref() };
+        self.head.step(ai, me.archetype, modifier, me.position, me.yaw, speed, request, amb, dt);
+    }
+
+    /// Start the ambient idle `seq` as if it began `age` seconds ago (a scenario that places the
+    /// NPC after the original's own run-in).
+    pub fn start_ambient(&mut self, ai: &AiConfig, seq: &str, age: f32) {
+        self.ambient_pin = Some(seq.to_string());
+        self.head.ambient = Some(head::Ambient { seq: seq.to_string(), age });
+        // The timer is rolled when the animation starts (0x00B39620): the tweak's minimum.
+        self.head.amb_timer = ai.ambient_anim_freq[0];
+    }
+
+    /// The player target's sight this tick: the vision list (0x00C788E0). Candidates are the
+    /// targets inside a cone this tick ([`Self::cone_norm`]); one that left the list is lost, a
+    /// new one is traced at once, and a listed one only once the check period has passed (the
+    /// last trace's norm stands in between). Other targets are traced every tick.
+    fn sight(&mut self, veye: &head::Eye, p: &PlayerState, world: &dyn WorldQuery, ai: &AiConfig) -> Option<f32> {
+        if p.kind != PawnKind::Human {
+            return Self::look(veye, p, world, ai);
+        }
+        let Some(norm) = Self::cone_norm(veye, p, ai) else {
+            self.vis_cands.retain(|c| c.who != p.id);
+            return None;
+        };
+        let now = self.vis_clock;
+        let i = match self.vis_cands.iter().position(|c| c.who == p.id) {
+            Some(i) => i,
+            None => {
+                self.vis_cands.push(VisCand { who: p.id, last: f32::NEG_INFINITY, held: None });
+                self.vis_cands.len() - 1
+            }
+        };
+        if ai.vision.los_period <= now - self.vis_cands[i].last {
+            let clear = Self::los_clear(veye, p, world, ai);
+            let c = &mut self.vis_cands[i];
+            c.last = now;
+            c.held = clear.then_some(norm);
+        }
+        self.vis_cands[i].held
     }
 
     /// The look-at node's head and torso aims (radians) for the animation: the same cursor and
@@ -1933,15 +2002,77 @@ impl Brain {
     /// Returns the normalized vision distance. The cones are along the head's axis from the
     /// `camera_jnt` eye ([`head`]).
     fn look(veye: &head::Eye, other: &PlayerState, world: &dyn WorldQuery, ai: &AiConfig) -> Option<f32> {
+        let norm = Self::cone_norm(veye, other, ai)?;
+        Self::los_clear(veye, other, world, ai).then_some(norm)
+    }
+
+    /// The vision gather (0x00C754C0): the target's point (`target vslot 0`) against the cones.
+    /// Returns the normalized vision distance.
+    fn cone_norm(veye: &head::Eye, other: &PlayerState, ai: &AiConfig) -> Option<f32> {
         let (inner, outer) = cones(&ai.vision);
-        let (norm, _) = vision_distance(&inner, &outer, veye.local(other.position))?;
+        let (norm, _) = vision_distance(&inner, &outer, veye.local(Self::target_point(veye, other, ai)))?;
+        Some(norm)
+    }
+
+    /// A player's collision half height (`CylinderComponent.CollisionHeight`) and vision region
+    /// type (0 standing, 1 sneaking, 2 crouching: 0x00C77FC0).
+    fn collision_height(other: &PlayerState, ai: &AiConfig) -> (f32, usize) {
+        let vs = vis_state(other);
+        let (r, h) = if vs.autocrouch { (2, ai.player_visibility.cylinder[2]) } else if vs.sneaking { (1, ai.player_visibility.cylinder[2]) } else { (0, ai.player_visibility.cylinder[1]) };
+        (h, r)
+    }
+
+    /// The point of a target the vision cones are tested against (the observable component's
+    /// `target vslot 0`, 0x00C669C0): for a pawn with a collision cylinder, the point of the
+    /// vertical segment at its location, from `Location.z - CollisionHeight` to
+    /// `Location.z + CollisionHeight`, where `up . (point - eye) = 0` (`up` the eye matrix's
+    /// third row, 0x00C676A0 stores it at +0x40), clamped to the segment. Anything else: the
+    /// location (the bounds' centre).
+    fn target_point(veye: &head::Eye, other: &PlayerState, ai: &AiConfig) -> Vec3 {
+        if other.kind != PawnKind::Human {
+            return other.position;
+        }
+        let (h, _) = Self::collision_height(other, ai);
+        let a = other.position - Vec3::Z * h;
+        let len = 2.0 * h;
+        let den = veye.up.z * len;
+        if h < 1e-8 || den == 0.0 {
+            return other.position;
+        }
+        let t = (veye.up.dot(veye.pos - a) / den).clamp(0.0, 1.0);
+        Vec3::new(a.x, a.y, a.z + len * t)
+    }
+
+    /// The line-of-sight test points of a target and the trace to them (0x00C77FC0 /
+    /// 0x00C67520, flags 0x08023086). A player's five points lie `m_fOffsetTowardsNPC` toward the
+    /// viewer from its axis: the region's centre and its four corners (`m_fWidth` wide, between
+    /// `m_fBottomHeight` and `m_fTopHeight` above the feet). One clear trace is sight.
+    fn los_clear(veye: &head::Eye, other: &PlayerState, world: &dyn WorldQuery, ai: &AiConfig) -> bool {
         let eye = veye.pos;
-        let clear = |p: Vec3| {
+        if other.kind != PawnKind::Human {
+            let clear = |p: Vec3| {
+                let to = p - eye;
+                let d = to.length();
+                d < 1.0 || !world.raycast(eye, to / d, d, channel::VISION).is_some_and(|h| h.distance < d - 40.0)
+            };
+            return [60.0, 0.0, -50.0].iter().any(|z| clear(other.position + Vec3::Z * *z));
+        }
+        let (h, ty) = Self::collision_height(other, ai);
+        let [width, toward, top, bottom] = ai.vision.vis_regions[ty];
+        let flat = (eye - other.position).truncate();
+        let dir = flat.try_normalize().unwrap_or(glam::Vec2::X);
+        let side = glam::Vec2::new(-dir.y, dir.x);
+        let at = |y: f32, z: f32| {
+            let p = other.position.truncate() + dir * toward + side * y;
+            Vec3::new(p.x, p.y, other.position.z + z)
+        };
+        let (zt, zb) = (top - h, bottom - h);
+        let pts = [at(0.0, (zt - zb) * 0.5 + zb), at(width * 0.5, zt), at(-width * 0.5, zt), at(width * 0.5, zb), at(-width * 0.5, zb)];
+        pts.iter().any(|&p| {
             let to = p - eye;
             let d = to.length();
-            d < 1.0 || !world.raycast(eye, to / d, d, channel::VISION).is_some_and(|h| h.distance < d - 40.0)
-        };
-        [60.0, 0.0, -50.0].iter().any(|z| clear(other.position + Vec3::Z * *z)).then_some(norm)
+            d < 1.0 || !world.raycast(eye, to / d, d, channel::VISION).is_some_and(|hit| hit.distance < d - 0.5)
+        })
     }
 
     /// Cone and line-of-sight test (events, allies, corpses).
@@ -1985,6 +2116,7 @@ impl Brain {
     #[allow(clippy::too_many_arguments)]
     fn perceive_with(&mut self, me: &PlayerState, ws: &WorldState, events: &[SimEvent], senses: &Senses, world: &dyn WorldQuery, ai: &AiConfig, dt: f32) {
         let (peers, barks, ally_busted) = (senses.peers, senses.barks, senses.busted);
+        self.vis_clock += dt;
         for a in self.attn.iter_mut() {
             a.fresh = false;
         }
@@ -2167,7 +2299,7 @@ impl Brain {
             // (`ResponseCategory_Harmless`, a bark) in every brain reaction tweak: it changes no
             // relationship. Hostility comes from the Hostile responses (hurt by the player),
             // witnessed deaths, factions and allies' fights.
-            let seen = if self.blind { None } else { Self::look(&veye, p, world, ai) };
+            let seen = if self.blind { None } else { self.sight(&veye, p, world, ai) };
             let hostile = self.enemies.contains(&p.id);
             let prof = self.profile(ai, p.id).clone();
             let stop = self.stops(ai, p.id);
@@ -2179,6 +2311,10 @@ impl Brain {
                 continue;
             }
             let e = self.entry(p.id, p.position);
+            // The attention tick (0x00b69150) runs before the vision tick (0x00c788e0) of the same
+            // frame: the accumulation reads the sight flag and distance the last vision tick set
+            // (`stealth/detect_600`: the original's value is 0 at tick 0 and rises from tick 1).
+            let (was_sighted, was_norm) = (e.sighted, e.los_norm);
             match seen {
                 Some(n) => {
                     e.sighted = true;
@@ -2189,9 +2325,9 @@ impl Brain {
                 None if e.sighted && hostile && near => {}
                 None => e.sighted = false,
             }
-            if e.sighted {
+            if was_sighted {
                 let scalar = if p.kind == PawnKind::Human { prof.seeing_scalar_player } else { prof.seeing_scalar_npc };
-                let rate = seen_rate(&prof, scalar, e.los_norm, vis);
+                let rate = seen_rate(&prof, scalar, was_norm, vis);
                 if rate > 0.0 {
                     e.change(&prof, &stop, rate * dt, 0, reason::SEEN, false);
                     e.why = reason::SEEN;
@@ -3689,6 +3825,30 @@ mod tests {
         assert!(vision_distance(&inner, &outer, dir(60.0, 0.0) * 2000.0).is_none());
         assert!(vision_distance(&inner, &outer, Vec3::new(-500.0, 0.0, 0.0)).is_none());
         assert!(vision_distance(&inner, &outer, Vec3::new(3600.0, 0.0, 0.0)).is_none());
+    }
+
+    /// The player target's point (0x00C669C0): on the vertical segment `Location.z +- CollisionHeight`,
+    /// where `up . (point - eye) = 0`, clamped to the segment.
+    #[test]
+    fn target_point_is_the_segment_point_in_the_eyes_up_plane() {
+        let mut ai = AiConfig::default();
+        ai.player_visibility.cylinder = [35.0, 87.5, 65.0];
+        let p = pawn(1, PawnKind::Human, Vec3::new(600.0, 0.0, 0.0), 0.0);
+        // A level eye: up = Z, the point is at the eye's height.
+        let eye = head::Eye::looking(Vec3::new(0.0, 0.0, 40.0), Vec3::X);
+        assert!(close(Brain::target_point(&eye, &p, &ai).z, 40.0));
+        // Above the segment: the top; below: the bottom.
+        let hi = head::Eye::looking(Vec3::new(0.0, 0.0, 200.0), Vec3::X);
+        assert!(close(Brain::target_point(&hi, &p, &ai).z, 87.5));
+        let lo = head::Eye::looking(Vec3::new(0.0, 0.0, -200.0), Vec3::X);
+        assert!(close(Brain::target_point(&lo, &p, &ai).z, -87.5));
+        // A head pitched up 20 deg tilts `up` back: the point is at eye height + 600 tan(20 deg).
+        let tilt = head::Eye::looking(Vec3::new(0.0, 0.0, -100.0), dir(0.0, 20.0));
+        let want = -100.0 + 600.0 * 20f32.to_radians().tan();
+        assert!((Brain::target_point(&tilt, &p, &ai).z - want.clamp(-87.5, 87.5)).abs() < 0.01);
+        // A non-human target is its location.
+        let g = pawn(2, PawnKind::Guard, Vec3::new(600.0, 0.0, 10.0), 0.0);
+        assert_eq!(Brain::target_point(&eye, &g, &ai), g.position);
     }
 
     #[test]
