@@ -244,6 +244,8 @@ pub fn step_world(
         } else {
             input
         };
+        // A left-hand weapon the pawn does not have (taken by the Kismet) acts as empty hands.
+        let left_input = if inventory::owns(&state.players[i], inventory::left_hand_bit(left_input.left_hand)) { left_input } else { PlayerInput { left_hand: input::LeftHand::Empty, ..left_input } };
         let p = &mut state.players[i];
         let choke_lock = p.choke.phase != state::ChokePhase::None;
         let locked = combat::sword_locks_movement(p) || p.mode == MoveMode::Blinking || choke_lock || p.action_lock > 0.0 || p.carry_anim > 0.0;
@@ -253,7 +255,7 @@ pub fn step_world(
         noise::step_footfalls(p, g, dt, &mut out.events);
         // No sword while choking, carrying or in an action; with a prop in the hands (the empty
         // hands' item is out) Primary throws it instead (0x00AB4240).
-        let sword_input = if choke_lock || p.carrying.is_some() || p.holding.is_some() || hands_busy || p.action_lock > 0.0 {
+        let sword_input = if choke_lock || p.carrying.is_some() || p.holding.is_some() || hands_busy || p.action_lock > 0.0 || !inventory::owns(p, inventory::weapon::SWORD) {
             PlayerInput { buttons: input.buttons & !(input::buttons::PRIMARY | input::buttons::BLOCK), ..input }
         } else {
             input

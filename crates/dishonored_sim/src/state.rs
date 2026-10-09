@@ -552,6 +552,11 @@ pub struct Inventory {
     /// Owned workshop upgrades (bit per `ItemsConfig::upgrades` index; 34 upgrades ship).
     #[serde(default)]
     pub upgrades: u64,
+    /// Weapons and gadgets the pawn has (`inventory::weapon`: sword, pistol, crossbow, grenade,
+    /// spring razor). The Kismet takes them (`DisSeqAct_RemoveInventoryItem`: the Prison's arrest)
+    /// and gives them back (`DisSeqAct_AddInventoryItem`); one not owned acts as empty hands.
+    #[serde(default = "crate::inventory::all_weapons")]
+    pub weapons: u8,
 }
 
 impl Default for Inventory {
@@ -562,7 +567,7 @@ impl Default for Inventory {
         power_levels[power::BLINK] = 2;
         power_levels[power::WINDBLAST] = 2;
         power_levels[power::DARK_VISION] = 2;
-        Self { ammo: [0; 8], elixirs: [0; 2], coins: 0, runes: 0, charms_owned: 0, charms_equipped: 0, charms_level2: 0, power_levels, upgrades: 0 }
+        Self { ammo: [0; 8], elixirs: [0; 2], coins: 0, runes: 0, charms_owned: 0, charms_equipped: 0, charms_level2: 0, power_levels, upgrades: 0, weapons: crate::inventory::weapon::ALL }
     }
 }
 

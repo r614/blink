@@ -185,6 +185,74 @@ pub fn item_count(state: &WorldState, owner: PlayerId, item: &str) -> i32 {
     state.abstract_items.iter().filter(|h| h.owner == owner && h.item == item).map(|h| h.quantity).sum()
 }
 
+/// Weapon and gadget ownership bits ([`crate::state::Inventory::weapons`]).
+pub mod weapon {
+    pub const SWORD: u8 = 1;
+    pub const PISTOL: u8 = 2;
+    pub const CROSSBOW: u8 = 4;
+    pub const GRENADE: u8 = 8;
+    pub const SPRING_RAZOR: u8 = 16;
+    pub const ALL: u8 = SWORD | PISTOL | CROSSBOW | GRENADE | SPRING_RAZOR;
+}
+
+pub fn all_weapons() -> u8 {
+    weapon::ALL
+}
+
+/// The ownership bits an inventory class covers: a weapon class its own bit, the base classes
+/// (`DishonoredInventoryItem`, `DishonoredWeapon`) every weapon; anything else none (abstract
+/// items go through [`give_item`]).
+pub fn weapon_bits(class: &str) -> u8 {
+    let c = class.rsplit('.').next().unwrap_or(class);
+    match c {
+        "DishonoredInventoryItem" | "DishonoredWeapon" | "DishonoredWepBase" => weapon::ALL,
+        _ if c.contains("Sword") => weapon::SWORD,
+        _ if c.contains("Pistol") => weapon::PISTOL,
+        _ if c.contains("Crossbow") => weapon::CROSSBOW,
+        _ if c.contains("Grenade") => weapon::GRENADE,
+        _ if c.contains("Razor") || c.contains("Mine") => weapon::SPRING_RAZOR,
+        _ => 0,
+    }
+}
+
+/// The ownership bit a left-hand selection needs (0: none, the powers and empty hands).
+pub fn left_hand_bit(item: crate::input::LeftHand) -> u8 {
+    use crate::input::LeftHand as L;
+    match item {
+        L::Pistol => weapon::PISTOL,
+        L::Crossbow | L::SleepDart | L::IncendiaryBolt => weapon::CROSSBOW,
+        L::Grenade | L::StickyGrenade => weapon::GRENADE,
+        L::SpringRazor => weapon::SPRING_RAZOR,
+        _ => 0,
+    }
+}
+
+pub fn owns(p: &PlayerState, bits: u8) -> bool {
+    bits == 0 || p.inv.weapons & bits == bits
+}
+
+/// `DisSeqAct_RemoveInventoryItem` (0x00BA2710 / 0x00BA2510 -> 0x00B9C430): every inventory item
+/// of `class` (a subclass test) leaves the pawn, an equipped one after it is put away. The base
+/// class takes everything: the weapons, their ammo and the elixirs (the Prison's arrest).
+pub fn remove_all_of_type(p: &mut PlayerState, class: &str) {
+    let bits = weapon_bits(class);
+    p.inv.weapons &= !bits;
+    if bits == weapon::ALL {
+        p.inv.ammo = [0; 8];
+        p.inv.elixirs = [0; 2];
+    }
+    // The hand holding a removed weapon is emptied (the unequip before the removal).
+    if !owns(p, left_hand_bit(p.left.item)) {
+        p.left.item = crate::input::LeftHand::Empty;
+    }
+}
+
+/// A weapon class given back (`DisSeqAct_AddInventoryItem` of a weapon): its ownership bit.
+pub fn give_weapon(p: &mut PlayerState, class: &str) -> bool {
+    let bits = weapon_bits(class);
+    p.inv.weapons |= bits;
+    bits != 0
+}
 /// `AddAbstractItem` / `RemoveAbstractItem` (`m_bRemoveAtZeroQuantity`).
 pub fn give_item(state: &mut WorldState, owner: PlayerId, item: &str, quantity: i32) {
     if let Some(h) = state.abstract_items.iter_mut().find(|h| h.owner == owner && h.item == item) {

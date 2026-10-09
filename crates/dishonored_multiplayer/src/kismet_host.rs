@@ -1417,9 +1417,53 @@ impl Host for H<'_> {
             "DisSeqAct_AddInventoryItem" => {
                 let Obj::Path(item) = cx.prop_obj("m_pItemToAdd") else { return HostResult::Done };
                 for p in self.players() {
-                    dishonored_sim::inventory::give_item(&mut self.m.world, p, &item, 1);
+                    // A weapon class gives the weapon back; anything else is an abstract item.
+                    let weapon = self.m.world.player_mut(p).is_some_and(|pl| dishonored_sim::inventory::give_weapon(pl, &item));
+                    if !weapon {
+                        dishonored_sim::inventory::give_item(&mut self.m.world, p, &item, 1);
+                    }
                 }
                 self.note(format!("inventory item {item} added"));
+                HostResult::Done
+            }
+            // `DisSeqCond_CompareTweaks` (0x00B8EAF0): `m_pA` and `m_pB` resolve to their tweaks
+            // (0x00B8EA60: a tweak is itself, an actor or pawn its `GetTweak`); equal fires
+            // "Exact" (0), one along the other's fallback chain (0x00C6F5C0 -> 0x00C6F360, either
+            // way round) "FallbackNonExact" (1), anything else (or a missing tweak) "NoMatch" (2).
+            "DisSeqCond_CompareTweaks" => {
+                let lineage_of = |o: Obj| -> Option<Vec<String>> {
+                    let tweak = match o {
+                        Obj::Path(p) => p,
+                        Obj::Pawn(id) => self.st.spawner.values().map(|i| &self.m.setup.original[*i]).find(|n| n.spawn.id == id)?.tweak.clone(),
+                        _ => return None,
+                    };
+                    Some(self.m.setup.original.iter().find(|n| n.tweak.eq_ignore_ascii_case(&tweak)).map(|n| n.lineage.clone()).unwrap_or_else(|| vec![tweak]))
+                };
+                let leaf = |s: &str| s.rsplit('.').next().unwrap_or(s).to_ascii_lowercase();
+                let out = match (lineage_of(cx.prop_obj("m_pA")), lineage_of(cx.prop_obj("m_pB"))) {
+                    (Some(a), Some(b)) if leaf(&a[0]) == leaf(&b[0]) => 0,
+                    (Some(a), Some(b)) if a.iter().any(|x| leaf(x) == leaf(&b[0])) || b.iter().any(|x| leaf(x) == leaf(&a[0])) => 1,
+                    _ => 2,
+                };
+                cx.fire(out);
+                HostResult::Done
+            }
+            // `DisSeqAct_RemoveInventoryItem` (Activated 0x00BA2710, remover 0x00B9C430): every
+            // inventory item of `m_pRemoveAllOfType` leaves the Target pawns ("Out" at once,
+            // "Finished" once an equipped one has been put away: the port's hands switch at once).
+            "DisSeqAct_RemoveInventoryItem" => {
+                let class = match cx.prop_obj("m_pRemoveAllOfType") {
+                    Obj::Path(c) => c,
+                    _ => return HostResult::Done,
+                };
+                for p in self.players() {
+                    if let Some(pl) = self.m.world.player_mut(p) {
+                        dishonored_sim::inventory::remove_all_of_type(pl, &class);
+                    }
+                }
+                self.note(format!("inventory: all of {class} removed"));
+                cx.fire(0);
+                cx.fire(1);
                 HostResult::Done
             }
             // `DisSeqAct_ModifyElixirCount`: the pawn's elixir count (`ModifyElixirCount`
