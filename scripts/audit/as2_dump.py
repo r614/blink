@@ -272,6 +272,7 @@ def main():
     ap.add_argument("movie")
     ap.add_argument("--grep", help="only blocks whose text matches")
     ap.add_argument("--out")
+    ap.add_argument("--audit", action="store_true", help="list each class's methods the port's runtime source never names")
     a = ap.parse_args()
     b = Path(a.movie).read_bytes()
     if b[:3] not in (b"FWS", b"GFX"):
@@ -310,6 +311,29 @@ def main():
                     images.append((None, "?", f"<tag {code} at {at}>", 0, 0))
 
     walk(o, len(b), "root")
+    if a.audit:
+        # Methods (`proto.Name = function`) per class, against the runtime's source text.
+        repo = Path(__file__).resolve().parents[2]
+        src = "\n".join(p.read_text(encoding="utf-8", errors="replace") for p in (repo / "crates" / "dishonored_runtime" / "src").rglob("*.rs"))
+        meth = re.compile(r"^\s*r\d+\.(\w+) = function")
+        rows = []
+        for where, sid, code in blocks:
+            if sid is None or not exports.get(sid, "").startswith("__Packages."):
+                continue
+            cls = exports[sid][len("__Packages."):]
+            lines = []
+            Decompiler(lines).block(code, [], {}, 1)
+            names = [m.group(1) for l in lines if (m := meth.match(l))]
+            if not names:
+                continue
+            cls_named = cls.split(".")[-1] in src
+            missing = [n for n in names if n not in src]
+            rows.append((cls, cls_named, len(names), missing))
+        print(f"# {Path(a.movie).name}: methods the runtime never names")
+        for cls, named, n, missing in sorted(rows, key=lambda r: (not r[1], -len(r[3]))):
+            if missing:
+                print(f"- {cls}{'' if named else ' (class not named in the port)'}: {len(missing)}/{n} missing: {', '.join(missing)}")
+        return
     out = [f"# {Path(a.movie).name}: {len(blocks)} script blocks, {len(exports)} exports, {len(images)} external images", ""]
     if images and not a.grep:
         out.append("## External images")
