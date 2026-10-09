@@ -237,6 +237,16 @@ fn wrap180(a: f32) -> f32 {
     (a + 180.0).rem_euclid(360.0) - 180.0
 }
 
+/// A `DisSeqAct_BackupAndClearInventory` backup held for a player: the pawn's part, the
+/// abstract items taken away and the key ring.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InvBackup {
+    pub pawn: dishonored_sim::inventory::PawnBackup,
+    pub items: Vec<(String, i32)>,
+    pub keys: Vec<String>,
+}
+
 /// Host-side state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -406,6 +416,11 @@ pub struct HostState {
     /// ring yet (keyholes and locked doors use the level's own flags).
     #[serde(default)]
     pub keys: BTreeMap<PlayerId, Vec<String>>,
+    /// `DisSeqAct_BackupAndClearInventory` backups not yet restored, per player (the
+    /// inventory's `m_InventoryBackup` while `m_bBackupIsValid`, the key ring's `m_Keys_Backup`,
+    /// the pawn's `m_Upgrades_Backup`).
+    #[serde(default)]
+    pub inv_backup: BTreeMap<PlayerId, InvBackup>,
     /// `DisSeqAct_AdrenalineToggle`: `m_bAdrenalineEnabled` as the Kismet last set it, per player
     /// (players it never touched keep the game's value). Recorded only: the port's adrenaline
     /// does not read it.
@@ -1331,9 +1346,79 @@ impl Host for H<'_> {
                 self.note(format!("level streaming {} {:?}: {}", class.trim_start_matches("SeqAct_"), input, names.join(", ")));
                 HostResult::Latent
             }
+            // The backup and clear (0x00ba8980): the skip lists are put aside, then, unless a
+            // backup is already held (0x00c19590 returns early: a second backup neither
+            // overwrites nor clears), everything else is copied and removed; force-removed items
+            // leave even when skipped; the key ring is backed up and cleared (0x00addc40), and
+            // with `m_bAlsoApplyToUpgrades` the upgrades but `m_SkipTheseUpgrades` (0x00abbe50).
+            // Chapter notes stay with `m_bSkipAllChapterNotes`.
             "DisSeqAct_BackupAndClearInventory" => {
+                let paths = |cx: &Ctx, prop: &str| -> Vec<String> {
+                    match cx.prop(prop) {
+                        Some(Value::Array(a)) => a.iter().filter_map(|x| if let Some(Obj::Path(p)) = x.as_obj() { Some(obj_name(&Obj::Path(p.clone()))) } else { None }).collect(),
+                        _ => Vec::new(),
+                    }
+                };
+                let bits = |l: &[String]| l.iter().fold(0u8, |m, n| m | dishonored_sim::inventory::weapon_bits(n));
+                let skip_items = paths(cx, "m_SkipTheseItems");
+                let skip_abstract = paths(cx, "m_SkipTheseAbstractItem");
+                let skip_upgrades = paths(cx, "m_SkipTheseUpgrades");
+                let skip_notes = cx.prop_bool("m_bSkipAllChapterNotes");
+                let upgrades = &self.cfg.gameplay.items.upgrades;
+                let opts = dishonored_sim::inventory::BackupOptions {
+                    skip_weapons: bits(&skip_items),
+                    force_remove: bits(&paths(cx, "m_ForceRemoveItems")),
+                    skip_coins: skip_abstract.iter().any(|n| n.eq_ignore_ascii_case(dishonored_sim::inventory::COINS_ITEM)),
+                    skip_runes: skip_abstract.iter().any(|n| n.eq_ignore_ascii_case(dishonored_sim::inventory::RUNE_ITEM)),
+                    also_upgrades: cx.prop_bool("m_bAlsoApplyToUpgrades"),
+                    skip_upgrades: skip_upgrades.iter().filter_map(|n| upgrades.iter().take(64).position(|(u, _)| u.eq_ignore_ascii_case(n.trim_start_matches("Twk_Upgrade_")))).fold(0u64, |m, i| m | (1 << i)),
+                };
+                for p in self.player_targets(cx) {
+                    if self.st.inv_backup.contains_key(&p) {
+                        continue;
+                    }
+                    let Some(pl) = self.m.world.player_mut(p) else { continue };
+                    let pawn = dishonored_sim::inventory::backup_and_clear(pl, &opts);
+                    let kept = |n: &str| skip_abstract.iter().any(|s| s.eq_ignore_ascii_case(n)) || (skip_notes && n.contains("ChapterLog"));
+                    let items: Vec<(String, i32)> = self.m.state.items.iter().filter(|(n, _)| !kept(n)).map(|(n, q)| (n.clone(), *q)).collect();
+                    for (n, _) in &items {
+                        self.m.state.items.remove(n);
+                    }
+                    let keys = self.st.keys.remove(&p).unwrap_or_default();
+                    self.note(format!("inventory backed up and cleared for {p}: {} abstract item(s), {} key(s)", items.len(), keys.len()));
+                    self.st.inv_backup.insert(p, InvBackup { pawn, items, keys });
+                }
                 cx.fire(0);
                 cx.fire(1);
+                HostResult::Done
+            }
+            // `DisSeqAct_RestoreInventoryFromBackup::Activated` (0x00ba2990 -> 0x00b9c640): a target
+            // without a backup fires "No Backup Found" (output 2); one with a backup gets it back
+            // additively (0x00c19d70: ammunition and elixirs clamped, abstract items added; the key
+            // ring 0x00adbf10, the upgrades 0x00ab69f0) and the backup ends. "Out" (0) always
+            // fires, "Finished" (1) when a backup was restored. (The original first unequips held
+            // items and restores them; the port's hands switch at once.)
+            "DisSeqAct_RestoreInventoryFromBackup" => {
+                let mut restored = false;
+                for p in self.player_targets(cx) {
+                    let Some(b) = self.st.inv_backup.remove(&p) else {
+                        cx.fire(2);
+                        continue;
+                    };
+                    if let Some(pl) = self.m.world.player_mut(p) {
+                        dishonored_sim::inventory::restore(pl, &b.pawn, &self.cfg.gameplay);
+                    }
+                    for (n, q) in b.items {
+                        *self.m.state.items.entry(n).or_insert(0) += q;
+                    }
+                    self.st.keys.entry(p).or_default().extend(b.keys);
+                    self.note(format!("inventory restored for {p}"));
+                    restored = true;
+                }
+                cx.fire(0);
+                if restored {
+                    cx.fire(1);
+                }
                 HostResult::Done
             }
             // `DisSeqAct_AIGuard` -> `ADishonoredNPCController::OnAIGuard` (0x00b63a80): Start

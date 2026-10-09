@@ -260,7 +260,7 @@ pub fn deactivation(class: &str) -> DeAct {
         // Empty overrides: the class fires its outputs itself.
         "SeqAct_Switch" | "SeqAct_RandomSwitch" | "SeqAct_Delay" | "SeqAct_StreamInTextures" | "DisSeqAct_StartSpawn" | "DisSeqAct_AIDoFollow" | "DisSeqAct_AIDoSimpleBehaviors" | "DisSeqAct_NPCMarkForVanish" => DeAct::None,
         // SeqAct_Latent's (PrepareMapChange and AutoSave call it from their own).
-        "SeqAct_Latent" | "DisSeqAct_Latent" | "SeqAct_PrepareMapChange" | "SeqAct_LevelStreaming" | "SeqAct_MultiLevelStreaming" | "SeqAct_LevelVisibility" | "DisSeqAct_AutoSave" | "DisSeqAct_ActivateUsable" | "DisSeqAct_BackupAndClearInventory" | "SeqAct_WaitForLevelsVisible" => DeAct::Latent,
+        "SeqAct_Latent" | "DisSeqAct_Latent" | "SeqAct_PrepareMapChange" | "SeqAct_LevelStreaming" | "SeqAct_MultiLevelStreaming" | "SeqAct_LevelVisibility" | "DisSeqAct_AutoSave" | "DisSeqAct_ActivateUsable" | "DisSeqAct_BackupAndClearInventory" | "DisSeqAct_RestoreInventoryFromBackup" | "SeqAct_WaitForLevelsVisible" => DeAct::Latent,
         "DisSeqAct_DialogScriptedChoice" => DeAct::AbortedFirst,
         // `SeqAct_IsInObjectList::DeActivated` (0x006dac10) arms output 0 ("In List") when the
         // test found something, else output 1; the interpreter fires it from `Activated`.

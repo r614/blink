@@ -36,6 +36,92 @@ pub fn ammo(p: &PlayerState, t: AmmoType) -> u16 {
     }
 }
 
+/// The pawn's part of `DisSeqAct_BackupAndClearInventory`'s backup
+/// (`DishonoredInventory.m_InventoryBackup`, 0x00C16740, and the pawn's `m_Upgrades_Backup`,
+/// 0x00ABBE50): weapons, ammunition, elixirs, coins and runes, and the upgrades when the op
+/// also applies to them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct PawnBackup {
+    pub weapons: u8,
+    pub ammo: [u16; 8],
+    pub pistol: (u8, u16),
+    pub bolts: (u8, u16),
+    pub elixirs: [u8; 2],
+    pub coins: u32,
+    pub runes: u16,
+    pub upgrades: Option<u64>,
+}
+
+/// What the op leaves alone or takes away regardless (`m_SkipTheseItems`,
+/// `m_ForceRemoveItems` as weapon bits, `m_SkipTheseAbstractItem` naming coins / runes,
+/// `m_bAlsoApplyToUpgrades` with `m_SkipTheseUpgrades` as upgrade bits).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BackupOptions {
+    pub skip_weapons: u8,
+    pub force_remove: u8,
+    pub skip_coins: bool,
+    pub skip_runes: bool,
+    pub also_upgrades: bool,
+    pub skip_upgrades: u64,
+}
+
+/// Back up and clear the pawn's inventory (0x00C19590 -> 0x00C16740 then the clear 0x00C180A0;
+/// upgrades 0x00ABBE50): what is not skipped is copied, then removed. The hands are emptied.
+/// `m_ForceRemoveItems` leave even when skipped (they are in the backup when not skipped).
+pub fn backup_and_clear(p: &mut PlayerState, o: &BackupOptions) -> PawnBackup {
+    let b = PawnBackup {
+        weapons: p.inv.weapons & !o.skip_weapons,
+        ammo: p.inv.ammo,
+        pistol: (p.left.pistol_loaded, p.left.pistol_reserve),
+        bolts: (p.left.bolts_loaded, p.left.bolts_reserve),
+        elixirs: p.inv.elixirs,
+        coins: if o.skip_coins { 0 } else { p.inv.coins },
+        runes: if o.skip_runes { 0 } else { p.inv.runes },
+        upgrades: o.also_upgrades.then_some(p.inv.upgrades & !o.skip_upgrades),
+    };
+    p.inv.weapons &= o.skip_weapons & !o.force_remove;
+    p.inv.ammo = [0; 8];
+    p.left.pistol_loaded = 0;
+    p.left.pistol_reserve = 0;
+    p.left.bolts_loaded = 0;
+    p.left.bolts_reserve = 0;
+    p.inv.elixirs = [0; 2];
+    if !o.skip_coins {
+        p.inv.coins = 0;
+    }
+    if !o.skip_runes {
+        p.inv.runes = 0;
+    }
+    if o.also_upgrades {
+        p.inv.upgrades &= o.skip_upgrades;
+    }
+    p.left.item = crate::input::LeftHand::Empty;
+    b
+}
+
+/// Restore a backup (0x00C19D70, upgrades 0x00AB69F0): additive, the ammunition and elixirs
+/// clamped by `AddAmmo` / `ModifyElixirCount`, coins and runes added.
+pub fn restore(p: &mut PlayerState, b: &PawnBackup, cfg: &GameplayConfig) {
+    p.inv.weapons |= b.weapons;
+    for t in AmmoType::ALL {
+        let n = match t {
+            AmmoType::Bullet => b.pistol.0 as u16 + b.pistol.1,
+            AmmoType::Bolt => b.bolts.0 as u16 + b.bolts.1,
+            _ => b.ammo[t as usize],
+        };
+        if n > 0 {
+            add_ammo(p, t, n, cfg);
+        }
+    }
+    add_elixirs(p, ElixirType::Health, b.elixirs[0] as i32, cfg);
+    add_elixirs(p, ElixirType::Mana, b.elixirs[1] as i32, cfg);
+    p.inv.coins = p.inv.coins.saturating_add(b.coins);
+    p.inv.runes = p.inv.runes.saturating_add(b.runes);
+    if let Some(u) = b.upgrades {
+        p.inv.upgrades |= u;
+    }
+}
+
 /// `AddAmmo` (0x00C052E0): adds what fits under the capacity, returns the amount added.
 pub fn add_ammo(p: &mut PlayerState, t: AmmoType, n: u16, cfg: &GameplayConfig) -> u16 {
     let cap = capacity(p, t, cfg);
