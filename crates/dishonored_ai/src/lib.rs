@@ -735,6 +735,10 @@ pub struct Crowd {
     /// [tether] The level's `DisTetherVolume`s.
     #[serde(default)]
     pub tether_volumes: Vec<dishonored_ir::ai::TetherVolume>,
+    /// Who claims each flee point (`DisFleeComponent.m_pNPCWhoClaimsMe`, 0x00a43c00), by index
+    /// into `layout.flee_points`.
+    #[serde(default)]
+    pub flee_claims: Vec<Option<PlayerId>>,
     /// [rats] Pawn tweak -> its brain's `DisBehaviorCombatRatSwarm`, and its call for help.
     #[serde(default)]
     pub tweak_rat_combat: BTreeMap<String, RatCombatConfig>,
@@ -1022,6 +1026,8 @@ struct Ctx<'a> {
     distractors: &'a mut [distraction::Distractor],
     /// The level's tether volumes.
     tethers: &'a [dishonored_ir::ai::TetherVolume],
+    /// Who claims each flee point (`DisFleeComponent.m_pNPCWhoClaimsMe`).
+    flee_claims: &'a mut Vec<Option<PlayerId>>,
 }
 
 /// What a brain perceives this tick besides the world state.
@@ -1257,7 +1263,6 @@ impl Crowd {
         let rat_calls = std::mem::take(&mut self.rat_calls);
         let mut new_rat_calls = Vec::new();
         let senses = Senses { peers: &peers, barks: &barks, busted: &busted, alarm_noise: &alarm_noise, social: &social, light: &light, audio: &self.audio, magic: &magic, rat_calls: &rat_calls };
-        let layout = &self.layout;
         let ai = &self.ai;
         let routes = &self.routes;
         let users = &mut self.route_users;
@@ -1266,6 +1271,9 @@ impl Crowd {
         let alarms = &mut self.alarms;
         let distractors = &mut self.distractors;
         let tethers = &self.tether_volumes;
+        self.flee_claims.resize(self.layout.flee_points.len(), None);
+        let flee_claims = &mut self.flee_claims;
+        let layout = &self.layout;
         let mut out = Vec::with_capacity(self.brains.len());
         let mut ai_events = Vec::new();
         ai_events.append(&mut distracted);
@@ -1282,7 +1290,7 @@ impl Crowd {
             b.perceive_with(me, world_state, events, &senses, world, ai, dt);
             // [tether] The pawn's tether volume and its `TetherRequest` (0x00b68ad0).
             b.track_tether(me, tethers, ai);
-            let mut ctx = Ctx { layout, routes, users, neglect, inhibit, alarms: &mut *alarms, events: &mut ai_events, cooldown, distractors: &mut *distractors, tethers };
+            let mut ctx = Ctx { layout, routes, users, neglect, inhibit, alarms: &mut *alarms, events: &mut ai_events, cooldown, distractors: &mut *distractors, tethers, flee_claims: &mut *flee_claims };
             let mut inp = b.act(me, world_state, &mut ctx, world, ai, dt);
             b.step_head(me, world_state, ai, dt);
             if inp.npc_move == 0 {
@@ -3027,7 +3035,8 @@ impl Brain {
     ///   tweak uses them, else the systemic search `NavWorld::safe_from_threat` from the
     ///   explosive, its view point 50 uu up) and runs there; with none the pawn stands (the
     ///   original posts `PathingFail`, which this behaviour does not handle).
-    fn act_escape(&mut self, me: &PlayerState, ws: &WorldState, layout: &CrowdLayout, nav: Option<&NavWorld>, ai: &AiConfig, dt: f32) -> PlayerInput {
+    #[allow(clippy::too_many_arguments)]
+    fn act_escape(&mut self, me: &PlayerState, ws: &WorldState, layout: &CrowdLayout, claims: &mut Vec<Option<PlayerId>>, nav: Option<&NavWorld>, ai: &AiConfig, dt: f32) -> PlayerInput {
         let idle = PlayerInput { yaw: me.yaw, left_hand: LeftHand::Empty, ..Default::default() };
         let Some(Some(Behavior::Escape(mut s))) = self.slots.get(slot::PRESERVE as usize).cloned() else { return idle };
         let e = ai.escape_explosion.clone();
@@ -3054,7 +3063,7 @@ impl Brain {
             EscapePhase::Flee => {
                 if !s.searched {
                     s.searched = true;
-                    s.dest = self.flee_destination(me, s.threat, &e.flee, layout, nav, ai);
+                    s.dest = self.flee_destination(me, ws, s.threat, &e.flee, layout, claims, nav, ai);
                 }
                 match s.dest {
                     Some(g) if !Self::reached(me, g, 120.0) && !self.follow.failed => self.move_to(me, nav, g, true, ai),
@@ -3071,9 +3080,10 @@ impl Brain {
     /// `DisAISubStateFlee`'s destination (0x00B3BEA0): with `m_bUseFleePoints` the best flee
     /// point, else (or without one) with `m_bUseSystemicFlee` the systemic search; a pawn
     /// centre (90 uu above the floor point).
-    fn flee_destination(&mut self, me: &PlayerState, threat: Vec3, f: &dishonored_ir::ai::FleeConfig, layout: &CrowdLayout, nav: Option<&NavWorld>, ai: &AiConfig) -> Option<Vec3> {
+    #[allow(clippy::too_many_arguments)]
+    fn flee_destination(&mut self, me: &PlayerState, ws: &WorldState, threat: Vec3, f: &dishonored_ir::ai::FleeConfig, layout: &CrowdLayout, claims: &mut Vec<Option<PlayerId>>, nav: Option<&NavWorld>, ai: &AiConfig) -> Option<Vec3> {
         if f.use_flee_points && !layout.flee_points.is_empty() {
-            if let Some(p) = self.pick_flee_point(me, threat, layout, nav, ai) {
+            if let Some(p) = self.pick_flee_point(me, ws, threat, layout, claims, nav, ai) {
                 return Some(p);
             }
         }
@@ -3141,8 +3151,8 @@ impl Brain {
                 slot::COMBAT => self.combat(me, ws, world, nav, ai, ctx.inhibit, dt),
                 slot::ALERT => self.act_alarm(me, ws, ctx, nav, ai, dt),
                 slot::AWE => self.act_magic(me, ws, ai, dt),
-                slot::ESCAPE => self.act_panic(me, ws, layout, nav, ai),
-                slot::PRESERVE => self.act_escape(me, ws, layout, nav, ai, dt),
+                slot::ESCAPE => self.act_panic(me, ws, layout, ctx.flee_claims, nav, ai),
+                slot::PRESERVE => self.act_escape(me, ws, layout, ctx.flee_claims, nav, ai, dt),
                 slot::ENGAGE => self.act_rat_swarm(me, ws, nav, ai, dt),
                 slot::RESIGN => self.act_go_home(me, ctx, nav, ai, dt),
                 // `DisBehaviorBlockingDialog` (0x00adac60): standing, facing who talks.
@@ -3503,7 +3513,7 @@ impl Brain {
     /// `DisBehaviorPanic` (civilians): free flight away from the threat, then a flee point;
     /// cower when an enemy is within the cower distance; over once the attention fell below
     /// Investigate.
-    fn act_panic(&mut self, me: &PlayerState, ws: &WorldState, layout: &CrowdLayout, nav: Option<&NavWorld>, ai: &AiConfig) -> PlayerInput {
+    fn act_panic(&mut self, me: &PlayerState, ws: &WorldState, layout: &CrowdLayout, claims: &mut Vec<Option<PlayerId>>, nav: Option<&NavWorld>, ai: &AiConfig) -> PlayerInput {
         let idle = PlayerInput { yaw: me.yaw, left_hand: LeftHand::Empty, ..Default::default() };
         let face = |p: Vec3| PlayerInput { yaw: yaw_to(me.position, p), left_hand: LeftHand::Empty, ..Default::default() };
         let cower = matches!(self.behavior(slot::ESCAPE), Some(Behavior::Panic { cower: true }));
@@ -3545,6 +3555,7 @@ impl Brain {
             return face(from);
         }
         if self.focus().is_none_or(|f| f.1 < DAL_INVESTIGATE) {
+            self.release_flee_claim(me, layout, claims, ai);
             self.threat_pos = None;
             self.complete(slot::ESCAPE);
             return idle;
@@ -3554,6 +3565,8 @@ impl Brain {
         // `DDH_PANIC_NOWHERE_TO_HIDE`, then the tweak's caught reaction (0x00af3470).
         if (self.goal.is_none() && self.flee_searched && self.timer >= ai.panic.free_flight_time) || (self.goal.is_some() && self.follow.failed) {
             self.barks.push(("DDH_PANIC_NOWHERE_TO_HIDE".into(), Some(self.id)));
+            // `caught` (0x00af3470) releases the claim first (0x00af33c0).
+            self.release_flee_claim(me, layout, claims, ai);
             self.goal = None;
             self.follow.clear();
             match ai.panic.caught_reaction {
@@ -3575,7 +3588,7 @@ impl Brain {
         if self.timer < ai.panic.free_flight_time || self.goal.is_none() {
             if self.goal.is_none() && !self.flee_searched {
                 self.flee_searched = true;
-                self.goal = self.pick_flee_point(me, from, layout, nav, ai);
+                self.goal = self.pick_flee_point(me, ws, from, layout, claims, nav, ai);
             }
             if self.timer < ai.panic.free_flight_time {
                 let away = (me.position - from).truncate().normalize_or_zero();
@@ -3845,17 +3858,45 @@ impl Brain {
         face
     }
 
-    /// `DisAISubStateFlee`: a flee point outside the forbidden cone toward the threat,
-    /// nearest first; otherwise a point on the navmesh away from the threat.
-    fn pick_flee_point(&mut self, me: &PlayerState, threat: Vec3, layout: &CrowdLayout, nav: Option<&NavWorld>, ai: &AiConfig) -> Option<Vec3> {
+    /// Release the flee point claim (0x00af33c0 -> 0x00a43bb0) unless the pawn stands within
+    /// `m_fFleePointClaimRadius` of the point.
+    fn release_flee_claim(&mut self, me: &PlayerState, layout: &CrowdLayout, claims: &mut [Option<PlayerId>], ai: &AiConfig) {
+        let Some(fi) = self.flee_point else { return };
+        if layout.flee_points.get(fi).is_some_and(|p| p.distance(me.position) <= ai.panic.flee_point_claim_radius) {
+            return;
+        }
+        if claims.get(fi) == Some(&Some(self.id)) {
+            claims[fi] = None;
+        }
+    }
+
+    /// `DisAISubStateFlee`'s destination (0x00b3bea0 with flee points): the candidates are the
+    /// level's flee points not claimed by another living pawn (0x00c45f80; a dead or removed
+    /// claimant frees its point, 0x00c3d860) and not where the pawn stands; with a navmesh the
+    /// closest by `DisFleeConstraint` path cost (`DisNavMeshGoal_BestFleePoint`,
+    /// [`NavWorld::flee_point_goal`]), without one the nearest outside the forbidden cone. The
+    /// point found is claimed for the pawn (0x00a43c00); none: `PathingFail`.
+    #[allow(clippy::too_many_arguments)]
+    fn pick_flee_point(&mut self, me: &PlayerState, ws: &WorldState, threat: Vec3, layout: &CrowdLayout, claims: &mut Vec<Option<PlayerId>>, nav: Option<&NavWorld>, ai: &AiConfig) -> Option<Vec3> {
         let to_threat = (threat - me.position).truncate();
         let mut best: Option<(f32, Vec3)> = None;
         let mut best_i = 0;
+        self.release_flee_claim(me, layout, claims, ai);
         self.flee_point = None;
         self.flee_reached = false;
+        claims.resize(layout.flee_points.len(), None);
+        let id = self.id;
+        let free = |i: usize| claims[i].is_none_or(|c| c == id || ws.player(c).is_none_or(|p| !p.alive));
+        if let Some(n) = nav {
+            let cands: Vec<(usize, Vec3)> = layout.flee_points.iter().enumerate().filter(|(i, fp)| (**fp - me.position).truncate().length() >= 200.0 && free(*i)).map(|(i, p)| (i, *p)).collect();
+            let pick = n.flee_point_goal(me.position, threat, ai.panic.forbidden_radius, ai.panic.forbidden_angle_deg, &cands, 2048)?;
+            claims[pick] = Some(id);
+            self.flee_point = Some(pick);
+            return layout.flee_points.get(pick).copied();
+        }
         for (fi, fp) in layout.flee_points.iter().enumerate() {
             let dir = (*fp - me.position).truncate();
-            if dir.length() < 200.0 {
+            if dir.length() < 200.0 || !free(fi) {
                 continue;
             }
             let forbidden = to_threat.length() < ai.panic.forbidden_radius && dir.angle_to(to_threat).abs().to_degrees() < ai.panic.forbidden_angle_deg;
@@ -3877,6 +3918,7 @@ impl Brain {
         // `m_bUseSystemicFlee` off), the caller's `PathingFail`.
         best.map(|(_, p)| {
             self.flee_point = Some(best_i);
+            claims[best_i] = Some(id);
             p
         })
     }
@@ -5238,7 +5280,8 @@ mod tests {
         let me = ws.player(b.id).unwrap().clone();
         let layout = CrowdLayout::default();
         let (routes, mut users, mut inhibit, mut events, mut dists): (Vec<PatrolRoute>, Vec<i32>, Vec<(PlayerId, u8, f32)>, Vec<AiEvent>, Vec<distraction::Distractor>) = Default::default();
-        let mut ctx = Ctx { layout: &layout, routes: &routes, users: &mut users, neglect: &[], inhibit: &mut inhibit, alarms, events: &mut events, cooldown: 0.0, distractors: &mut dists, tethers: &[] };
+        let mut claims: Vec<Option<PlayerId>> = Vec::new();
+        let mut ctx = Ctx { layout: &layout, routes: &routes, users: &mut users, neglect: &[], inhibit: &mut inhibit, alarms, events: &mut events, cooldown: 0.0, distractors: &mut dists, tethers: &[], flee_claims: &mut claims };
         b.consider_alarm(&me, ws, &mut ctx, ai, AlarmCause::Sighting, Some(enemy));
     }
 
@@ -5291,7 +5334,8 @@ mod tests {
         {
             let layout = CrowdLayout::default();
             let (routes, mut users, mut inhibit, mut events, mut dists): (Vec<PatrolRoute>, Vec<i32>, Vec<(PlayerId, u8, f32)>, Vec<AiEvent>, Vec<distraction::Distractor>) = Default::default();
-            let mut ctx = Ctx { layout: &layout, routes: &routes, users: &mut users, neglect: &[], inhibit: &mut inhibit, alarms: &mut alarms, events: &mut events, cooldown: 0.0, distractors: &mut dists, tethers: &[] };
+            let mut claims: Vec<Option<PlayerId>> = Vec::new();
+            let mut ctx = Ctx { layout: &layout, routes: &routes, users: &mut users, neglect: &[], inhibit: &mut inhibit, alarms: &mut alarms, events: &mut events, cooldown: 0.0, distractors: &mut dists, tethers: &[], flee_claims: &mut claims };
             bf.act_alarm(&far, &ws, &mut ctx, None, &ai, 1.0 / 60.0);
         }
         assert_eq!(bf.bell, None);
@@ -5727,7 +5771,8 @@ mod tests {
         let ws = WorldState::default();
         let layout = CrowdLayout::default();
         let (routes, mut users, mut inhibit, mut alarms, mut events, mut dists): (Vec<PatrolRoute>, Vec<i32>, Vec<(PlayerId, u8, f32)>, Vec<AlarmBell>, Vec<AiEvent>, Vec<distraction::Distractor>) = Default::default();
-        let mut ctx = Ctx { layout: &layout, routes: &routes, users: &mut users, neglect: &[], inhibit: &mut inhibit, alarms: &mut alarms, events: &mut events, cooldown: 0.0, distractors: &mut dists, tethers: &[] };
+        let mut claims: Vec<Option<PlayerId>> = Vec::new();
+        let mut ctx = Ctx { layout: &layout, routes: &routes, users: &mut users, neglect: &[], inhibit: &mut inhibit, alarms: &mut alarms, events: &mut events, cooldown: 0.0, distractors: &mut dists, tethers: &[], flee_claims: &mut claims };
         b.drain(&me, &ws, &mut ctx, &ai, 1.0 / 60.0);
     }
 
@@ -5833,11 +5878,17 @@ mod tests {
         b.timer = ai.panic.free_flight_time + 1.0;
         // Picked from where the civilian stood when the panic began, then it ran there.
         let start = pawn(me.id, PawnKind::Civilian, Vec3::new(0.0, 0.0, 90.0), 0.0);
-        b.goal = b.pick_flee_point(&start, Vec3::new(1500.0, 0.0, 90.0), &layout, None, &ai);
+        let mut claims = Vec::new();
+        b.goal = b.pick_flee_point(&start, &ws, Vec3::new(1500.0, 0.0, 90.0), &layout, &mut claims, None, &ai);
         assert_eq!((b.goal, b.flee_point), (Some(fp), Some(0)));
-        b.act_panic(&me, &ws, &layout, None, &ai);
+        assert_eq!(claims, vec![Some(me.id)], "the point is claimed");
+        // Another living civilian does not get a claimed point.
+        let mut other = Brain::new(NPC_ID_BASE + 7, PawnKind::Civilian, Vec3::ZERO, 2);
+        let ostart = pawn(NPC_ID_BASE + 7, PawnKind::Civilian, Vec3::new(0.0, 0.0, 90.0), 0.0);
+        assert_eq!(other.pick_flee_point(&ostart, &ws, Vec3::new(1500.0, 0.0, 90.0), &layout, &mut claims, None, &ai), None);
+        b.act_panic(&me, &ws, &layout, &mut claims, None, &ai);
         assert_eq!(b.fired, [AiEvent::FleepointReached { pawn: me.id, position: fp }]);
-        b.act_panic(&me, &ws, &layout, None, &ai);
+        b.act_panic(&me, &ws, &layout, &mut claims, None, &ai);
         assert_eq!(b.fired.len(), 1, "reported once");
     }
 }

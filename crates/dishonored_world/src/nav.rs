@@ -795,18 +795,7 @@ impl NavWorld {
     ///   a link whose edge centre lies within `forbidden_radius` of the threat in the cone of
     ///   `forbidden_angle_deg` from the start toward the threat.
     pub fn safe_from_threat(&self, start: Vec3, flee: &SafeFromThreat) -> Option<Vec3> {
-        let step = |_from: Vec3, l: &NavLink, mid: Vec3, cost: f32| {
-            let (c, _) = closest_on_segment3(flee.flee_from, l.a, l.b);
-            let cost = cost - c.distance(flee.flee_from).trunc();
-            if flee.forbidden_radius > 0.0 && mid.distance_squared(flee.flee_from) < flee.forbidden_radius * flee.forbidden_radius {
-                let to_edge = (mid - start).normalize_or_zero();
-                let to_threat = (flee.flee_from - start).normalize_or_zero();
-                if to_edge.dot(to_threat) >= flee.forbidden_angle_deg.to_radians().cos() {
-                    return None;
-                }
-            }
-            Some(cost)
-        };
+        let step = |_from: Vec3, l: &NavLink, mid: Vec3, cost: f32| flee_constraint(start, flee.flee_from, flee.forbidden_radius, flee.forbidden_angle_deg, l, mid, cost);
         let goal = |i: u32| {
             let p = &self.polys[i as usize];
             let n = p.verts.len();
@@ -824,6 +813,27 @@ impl NavWorld {
             None
         };
         self.search_goal(start, &PathOpts::default(), flee.max_visits, step, goal).map(|(_, p)| p)
+    }
+
+    /// `DisNavMeshGoal_BestFleePoint` (a `NavMeshGoal_ClosestActorInList` over the candidate flee
+    /// points, from the threat) under `DisFleeConstraint` (0x00b054c0): the first candidate (by
+    /// its key) whose poly the constrained search from `start` expands, so the closest by
+    /// constrained cost; `None` when the search reaches none (`PathingFail`). As in every goal
+    /// search, the start poly is never the goal.
+    pub fn flee_point_goal(&self, start: Vec3, flee_from: Vec3, forbidden_radius: f32, forbidden_angle_deg: f32, points: &[(usize, Vec3)], max_visits: usize) -> Option<usize> {
+        let polys: Vec<(usize, u32)> = points.iter().filter_map(|(i, p)| self.locate(*p, 60.0, 260.0).map(|q| (*i, q))).collect();
+        if polys.is_empty() {
+            return None;
+        }
+        let step = |_from: Vec3, l: &NavLink, mid: Vec3, cost: f32| flee_constraint(start, flee_from, forbidden_radius, forbidden_angle_deg, l, mid, cost);
+        let mut found = None;
+        let goal = |u: u32| {
+            let hit = polys.iter().find(|(_, q)| *q == u).map(|(i, _)| *i);
+            found = found.or(hit);
+            hit.map(|_| Vec3::ZERO)
+        };
+        self.search_goal(start, &PathOpts::default(), max_visits, step, goal)?;
+        found
     }
 
     /// Waypoints (floor points) from `start` to `goal`, excluding the start. `None` when either
@@ -1002,10 +1012,39 @@ impl Follower {
     }
 }
 
+/// `DisFleeConstraint` (0x00b054c0): a link costs less by the distance from the threat to its
+/// edge (0x00672A00, truncated to an int), so the search runs away from the threat; a link whose
+/// edge centre lies within `forbidden_radius` of the threat in the cone of `forbidden_angle_deg`
+/// from the start toward the threat is rejected.
+fn flee_constraint(start: Vec3, flee_from: Vec3, forbidden_radius: f32, forbidden_angle_deg: f32, l: &NavLink, mid: Vec3, cost: f32) -> Option<f32> {
+    let (c, _) = closest_on_segment3(flee_from, l.a, l.b);
+    let cost = cost - c.distance(flee_from).trunc();
+    if forbidden_radius > 0.0 && mid.distance_squared(flee_from) < forbidden_radius * forbidden_radius {
+        let to_edge = (mid - start).normalize_or_zero();
+        let to_threat = (flee_from - start).normalize_or_zero();
+        if to_edge.dot(to_threat) >= forbidden_angle_deg.to_radians().cos() {
+            return None;
+        }
+    }
+    Some(cost)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use dishonored_ir::nav::{NavEdge, NavMesh, NavPoly};
+
+    #[test]
+    fn the_flee_point_goal_takes_the_closest_point_away_from_the_threat() {
+        let w = NavWorld::from_data(&strip());
+        // The strip runs x 0..1000; the pawn in the middle, the threat at the right end.
+        let start = Vec3::new(500.0, 100.0, 90.0);
+        let threat = Vec3::new(1000.0, 100.0, 0.0);
+        let pts = vec![(0, Vec3::new(100.0, 100.0, 0.0)), (1, Vec3::new(900.0, 100.0, 0.0))];
+        assert_eq!(w.flee_point_goal(start, threat, 500.0, 50.0, &pts, 2048), Some(0));
+        // The only point lies in the forbidden cone toward the threat.
+        assert_eq!(w.flee_point_goal(start, threat, 600.0, 50.0, &pts[1..], 2048), None);
+    }
 
     #[test]
     fn a_path_object_is_unblocked_by_its_guid() {
