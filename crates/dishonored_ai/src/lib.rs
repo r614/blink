@@ -3574,7 +3574,7 @@ impl Brain {
         let dz = t.position.z - me.position.z;
         let reach = ai.combat.reachable_melee_range;
         // The special classes' own combat behaviours (`special`).
-        if !matches!(self.class, NpcClass::EliteGuard | NpcClass::Civilian) {
+        if !matches!(self.class, NpcClass::EliteGuard | NpcClass::Overseer | NpcClass::Civilian) {
             let tg = special::Target { t: &t, sighted, visible, goal, d, dz };
             if let Some(i) = self.special_combat(me, &tg, ws, world, nav, ai, inhibit, dt) {
                 return i;
@@ -3700,7 +3700,8 @@ impl Brain {
         let reachable = nav.is_none_or(|_| !self.follow.failed);
         let still = me.velocity.x.abs() < 1e-4 && me.velocity.y.abs() < 1e-4 && me.velocity.z.abs() < 1e-4;
         let (start, cont) = combat::pistol_willing(&ai.combat.pistol, d, visible, self.gun_timer, still, reachable, !self.melee_slot);
-        if self.ammo > 0 && (self.firing && cont || start) {
+        // The sword Overseer carries no pistol.
+        if self.ammo > 0 && self.class != NpcClass::Overseer && (self.firing && cont || start) {
             if !self.firing {
                 // Entering the sub-state (0x00b32c50): give-up and first-shot timers, the
                 // `DDH_COMBAT_RANGED_BEGIN` bark.

@@ -19,6 +19,10 @@ pub enum NpcClass {
     EliteGuard,
     /// `DisBehaviorMusicalCombat` (the music-box Overseer).
     MusicalOverseer,
+    /// `DisBehaviorOverseerCombat` (`BrainTweaks_OverSeer`, the sword Overseer): the elite
+    /// guard's melee and alarm, no pistol (`Pwn_Overseer_MTall_1` carries grenades, lobbed at an
+    /// unreachable target by `DisItemContext_NPCLobGrenadeAtUnreachable`: not ported).
+    Overseer,
     /// `DisBehaviorTallBoyCombat`.
     Tallboy,
     /// `DisBehaviorCombatWolfhound`.
@@ -32,6 +36,7 @@ impl NpcClass {
     pub fn from_combat_behavior(class: &str) -> NpcClass {
         match class {
             "DisBehaviorMusicalCombat" => NpcClass::MusicalOverseer,
+            "DisBehaviorOverseerCombat" => NpcClass::Overseer,
             "DisBehaviorTallBoyCombat" => NpcClass::Tallboy,
             "DisBehaviorCombatWolfhound" => NpcClass::Wolfhound,
             c if c.to_ascii_lowercase().contains("weep") => NpcClass::Weeper,

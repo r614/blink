@@ -615,7 +615,7 @@ impl Brain {
                         reason::HEARD_HELP_REQUEST => Some(AlarmCause::Help),
                         _ => None,
                     };
-                    if let Some(k) = kind.filter(|_| self.class == NpcClass::EliteGuard) {
+                    if let Some(k) = kind.filter(|_| matches!(self.class, NpcClass::EliteGuard | NpcClass::Overseer)) {
                         self.consider_alarm(me, ws, ctx, ai, k, None);
                     }
                 }
@@ -629,7 +629,7 @@ impl Brain {
                     self.place(Behavior::Combat);
                     // `EAIStimID_EnemyBusted`: `DisBehaviorTriggerAlarm` may take the sighting (only
                     // in the guard brains: the tallboy, hound, weeper and Overseer lists have none).
-                    if self.class == NpcClass::EliteGuard {
+                    if matches!(self.class, NpcClass::EliteGuard | NpcClass::Overseer) {
                         self.consider_alarm(me, ws, ctx, ai, AlarmCause::Sighting, Some(q.who));
                     }
                 }
