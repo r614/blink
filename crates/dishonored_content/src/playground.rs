@@ -390,6 +390,7 @@ fn derive(content: &Content, sim: &SimConfig, layout: &MapLayout) -> Result<(Col
     ai_level.zones.clear();
     ai_level.alarms.clear();
     ai_level.audio = Default::default();
+    ai_level.portal_doors.clear();
     // The original's Playground is built inside L_Boyle_Ext_P (at +20000 z, ORACLE.md "Layout
     // maps in the original"), so its visibility component normalizes with Boyle's map range.
     ai_level.player_light_range = dishonored_assets::ai_level::map_light_range(content, "L_Boyle_Ext_P");

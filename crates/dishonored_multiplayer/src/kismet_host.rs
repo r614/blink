@@ -436,8 +436,8 @@ pub struct HostState {
     #[serde(default)]
     pub brain_flags: BTreeMap<PlayerId, BTreeSet<String>>,
     /// `DisSeqAct_SetAudioOcclusion` on `DishonoredAudioPortal` actors: actor -> (occlusion for the
-    /// AI, occlusion for the player), each only once the Kismet set it. The port has no audio
-    /// portals to apply them to.
+    /// AI, occlusion for the player), each only once the Kismet set it. The AI values reach the
+    /// crowd's portals (`audio_portals.rs`); the player's are presentation (Wwise obstruction).
     #[serde(default)]
     pub audio_occlusion: BTreeMap<u32, (Option<f32>, Option<f32>)>,
     /// `SeqAct_SetVelocity` on level actors: the velocity the Kismet gave (pawns take it at once).
@@ -573,6 +573,20 @@ impl KismetRun {
     pub fn door_state(&self, actor: &str) -> Option<u8> {
         let a = self.k.db.find_actor(actor)?;
         self.st.doors.get(&a).map(|s| s.0)
+    }
+
+    /// `DisSeqAct_SetAudioOcclusion`'s AI values on the portals of `map`: (portal name, value).
+    pub fn audio_occlusion_ai(&self, map: &str) -> Vec<(String, f32)> {
+        let db = &self.k.db;
+        self.st
+            .audio_occlusion
+            .iter()
+            .filter_map(|(a, (ai, _))| {
+                let act = &db.actors[*a as usize];
+                let here = db.packages.iter().position(|p| p.eq_ignore_ascii_case(&act.package)).and_then(|p| db.map_of_package(p as u16)).is_some_and(|m| m.eq_ignore_ascii_case(map));
+                ai.filter(|_| here).map(|v| (act.name.clone(), v))
+            })
+            .collect()
     }
 
     /// Where a mover actor (`<package>:<name>`) is now relative to where the map placed it
@@ -2205,8 +2219,13 @@ impl Host for H<'_> {
                 let reason = cx.prop_str("m_Reason");
                 let delay = cx.prop_float("m_fDelay");
                 self.note(format!("game over: {reason}"));
-                let fail = Action::Fail(if reason.is_empty() { "Game over".into() } else { reason });
-                self.act(vec![if delay > 0.0 { Action::After(delay, vec![fail]) } else { fail }]);
+                let reason = if reason.is_empty() { "Game over".to_string() } else { reason };
+                // `GameOver` (0x009FA600): a pending game over yields only to a shorter wait.
+                if delay > 0.0 {
+                    self.m.state.schedule_game_over(reason, delay);
+                } else {
+                    self.act(vec![Action::Fail(reason)]);
+                }
                 HostResult::Done
             }
             // `DisSeqAct_AIDoBehavior_Base::Activated` (0x00bb1790): each NPC target's

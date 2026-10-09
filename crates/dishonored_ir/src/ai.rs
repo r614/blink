@@ -1722,6 +1722,44 @@ pub struct AiLevel {
     /// (`m_pSettings`): path -> `m_fLightValueDarkestVal`, `m_fLightValueBrightestVal`.
     #[serde(default)]
     pub vis_settings: BTreeMap<String, [f32; 2]>,
+    /// The doors of the audio package that drive a portal's AI occlusion (0x00A2C800).
+    #[serde(default)]
+    pub portal_doors: Vec<PortalDoor>,
+    /// Pawn tweak path -> its plot settings' game-over rules (`m_pPlotSettingsTweak`), for the
+    /// tweaks with at least one rule on.
+    #[serde(default)]
+    pub tweak_plot: BTreeMap<String, PlotGameOver>,
+}
+
+/// A `DisDoor` with an `m_pAudioPortal` (`UpdateAudioOcclusion` 0x00A2C800): the portal's
+/// `m_fOcclusion_HeardByAI` is the door tweak's `m_fAISoundOcclusion` while the door is closed and
+/// 0 once it is open by `m_fOccludingDoorOpeningAngle` (20 degrees) or more; always 0 with
+/// `m_bNoSoundOcclusion`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PortalDoor {
+    /// Index into [`AudioCells::portals`].
+    pub portal: usize,
+    /// `<package>:<DisDoor_N>`.
+    pub actor: String,
+    /// `m_InitialDoorState` (0 closed, 1 opened CW, 2 opened CCW).
+    pub initial: u8,
+    /// The portal's occlusion while the door is closed.
+    pub ai_occlusion: f32,
+}
+
+/// `DisTweaks_NPCPlotSettings.m_PlotSettings`: the `DisGameOverSettings` rules with
+/// `m_bGameOver` on, each as (`m_fDelay`, `m_ScreenMessage`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PlotGameOver {
+    /// `m_GameOverWhenDead` (the NPC's `Died`, 0x00B7BF50).
+    pub when_dead: Option<(f32, String)>,
+    /// `m_GameOverWhenHostileToPlayer` (0x00B59DE0 from the relationship poll; not applied, the
+    /// poll is not decoded).
+    pub when_hostile: Option<(f32, String)>,
+    /// `m_GameOverWhenPossessedByPlayer` (at the possession's end, 0x00B7D2F0).
+    pub when_possessed: Option<(f32, String)>,
 }
 
 /// A `DisTweaks_NPCTeleportSpell` (research/dishonored/systems/teleport_spell.md).

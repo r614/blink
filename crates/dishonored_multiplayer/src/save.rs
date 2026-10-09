@@ -89,6 +89,10 @@ pub struct AutosaveState {
     /// step): combat pushes `DDST_PlayerInCombat`.
     #[serde(default = "yes")]
     pub combat_disables_save: bool,
+    /// `m_bDisableAutosaveInCombat` (copied each step): combat pushes `IgnoreAutosave[0]`
+    /// (0x00AB9FA0).
+    #[serde(default = "yes")]
+    pub combat_disables_autosave: bool,
 }
 
 fn yes() -> bool {
@@ -214,9 +218,9 @@ pub fn save_blocked(m: &MissionMatch) -> Option<&'static str> {
 /// The save-disable types pushed now, from the states that push them (each player master
 /// state pushes its type on enter and pops it on exit; the item contexts, the combat tracker,
 /// cinematic mode and game over likewise). The port knows these of the original's types:
-/// Blink, GameOverPending, PlayerInCombat, Assassinate, Choice, Choke, Dead, PrePossess /
-/// Possess. Not modelled (no such state in the port): KillCam, CinematicMode (the Kismet host
-/// does not track it; a playing matinee is no stand-in), the item contexts Fatality /
+/// Blink, CinematicMode (`SeqAct_ToggleCinematicMode`), GameOverPending (an ended match or a
+/// scheduled game over), PlayerInCombat, Assassinate, Choice, Choke, Dead, PrePossess /
+/// Possess. Not modelled (no such state in the port): KillCam, the item contexts Fatality /
 /// FireCrossbow / DropAssassinate, Soiree, Minigame, Stunned, Versus, HolePeeking, Kismet, Pull.
 pub fn disallow_types(m: &MissionMatch) -> Vec<u8> {
     use dishonored_sim::state::{ChokePhase, MoveMode, PossessStage, SwordPhase};
@@ -226,8 +230,11 @@ pub fn disallow_types(m: &MissionMatch) -> Vec<u8> {
             v.push(t);
         }
     };
-    if m.view.phase == crate::MatchPhase::Ended {
+    if m.view.phase == crate::MatchPhase::Ended || m.state.game_over_pending().is_some() {
         push(ddst::GAME_OVER_PENDING);
+    }
+    if m.humans.iter().any(|h| m.kismet.as_ref().is_some_and(|k| k.st.cinematic.get(h).is_some_and(|c| c.on))) {
+        push(ddst::CINEMATIC_MODE);
     }
     for h in &m.humans {
         let Some(p) = m.world.player(*h) else { continue };
@@ -258,6 +265,13 @@ pub fn disallow_types(m: &MissionMatch) -> Vec<u8> {
     v
 }
 
+/// The pending autosave is dropped (0x00A0C530): unless built from code, when combat ignores it
+/// (`IgnoreAutosave[0]`) and no requester saves even in combat, or a dead player or a pending
+/// game over ignores it (`IgnoreAutosave[1]`).
+pub fn autosave_dropped(from_code: bool, even_in_combat: bool, ignore_combat: bool, ignore_dead_or_over: bool) -> bool {
+    !from_code && ((!even_in_combat && ignore_combat) || ignore_dead_or_over)
+}
+
 /// `DIAT_PlayerInCombat`: a guard is fighting a player (U-340).
 fn player_in_combat(m: &MissionMatch) -> bool {
     !m.engaged.is_empty()
@@ -269,6 +283,7 @@ pub(super) fn tick(m: &mut MissionMatch, dt: f32, combat: &dishonored_ir::items:
     // Save-disable types popped since the last step start their wait (0x009F95F0); the
     // engine counts the timer down.
     m.autosave.combat_disables_save = combat.disable_manual_save;
+    m.autosave.combat_disables_autosave = combat.disable_autosave;
     m.autosave.disallow_timer = (m.autosave.disallow_timer - dt).max(0.0);
     let now = disallow_types(m);
     for t in std::mem::take(&mut m.autosave.disallow_types) {
@@ -300,8 +315,10 @@ pub(super) fn tick(m: &mut MissionMatch, dt: f32, combat: &dishonored_ir::items:
     if m.autosave.pending_active && m.autosave.timer <= 0.0 {
         let a = &m.autosave;
         let even = a.pending.iter().any(|p| p.1);
-        let game_over = m.state.outcome().is_some_and(|o| !o.success);
-        let drop = !a.from_code && ((!even && player_in_combat(m)) || game_over);
+        let ignore_combat = a.combat_disables_autosave && player_in_combat(m);
+        let dead = m.humans.iter().any(|h| m.world.player(*h).is_some_and(|p| !p.alive));
+        let ignore_dead_or_over = dead || m.state.game_over_pending().is_some() || m.state.outcome().is_some_and(|o| !o.success);
+        let drop = autosave_dropped(a.from_code, even, ignore_combat, ignore_dead_or_over);
         if drop {
             // FUN_00a070b0: every pending action is denied.
             let a = &mut m.autosave;
@@ -395,4 +412,24 @@ pub fn reattach(m: &mut MissionMatch, setup: MissionSetup) {
         k.setup = Arc::new(ks.clone());
     }
     m.setup = setup;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::autosave_dropped;
+
+    #[test]
+    fn an_autosave_from_code_is_never_dropped_and_combat_yields_to_even_in_combat() {
+        for even in [false, true] {
+            for c in [false, true] {
+                for d in [false, true] {
+                    assert!(!autosave_dropped(true, even, c, d));
+                }
+            }
+        }
+        assert!(autosave_dropped(false, false, true, false));
+        assert!(!autosave_dropped(false, true, true, false));
+        assert!(autosave_dropped(false, true, false, true));
+        assert!(!autosave_dropped(false, false, false, false));
+    }
 }

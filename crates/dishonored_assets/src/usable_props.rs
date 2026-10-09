@@ -94,7 +94,7 @@ pub fn door_state(name: &str) -> u8 {
     }
 }
 
-fn name_value(props: &[Property], name: &str) -> Option<String> {
+pub(crate) fn name_value(props: &[Property], name: &str) -> Option<String> {
     match find(props, name).map(|p| &p.value) {
         Some(Value::Enum(s)) | Some(Value::Name(s)) => Some(s.clone()),
         Some(Value::Byte(b)) => Some(["DDS_Closed", "DDS_Opened_CW", "DDS_Opened_CCW"].get(*b as usize).unwrap_or(&"DDS_Closed").to_string()),

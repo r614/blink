@@ -186,6 +186,10 @@ fn boyle_int_audio_cells() {
     }
     assert!(joined >= 50, "{joined}");
     assert!(lvl.sky_light > 0.0);
+    // The doors that drive portals (17 of the 18 doors link one; most tweaks occlude 0.8).
+    assert!(lvl.portal_doors.len() >= 15, "{}", lvl.portal_doors.len());
+    assert!(lvl.portal_doors.iter().all(|d| d.portal < a.portals.len()));
+    assert!(lvl.portal_doors.iter().any(|d| (d.ai_occlusion - 0.8).abs() < 1e-6), "{:?}", lvl.portal_doors);
 }
 
 /// Boyle Ext names its own player light range (`DishonoredMapInfo.m_pMapPlayerVisSettings` =

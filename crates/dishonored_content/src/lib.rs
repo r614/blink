@@ -454,10 +454,10 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         pkgs
     };
     // AI level data: factions, forbidden zones, alarm bells, probe lights, distractors
-    // (dishonored_ai). ailevel10: pawn tweaks' teleport spells; ailevel9: directional stealth lights carry their TraceDistance; distractors
+    // (dishonored_ai). ailevel11: audio portal doors and the pawn tweaks' plot game-over rules; ailevel10: pawn tweaks' teleport spells; ailevel9: directional stealth lights carry their TraceDistance; distractors
     // and per-tweak health / distraction cooldowns; no `stealth_light_unoccluded` (the line check
     // meets `channel::SHADOW` geometry instead).
-    let ai_path = dir.join(format!("{map}.ailevel10.json"));
+    let ai_path = dir.join(format!("{map}.ailevel11.json"));
     let ai_level: dishonored_ir::ai::AiLevel = match std::fs::read_to_string(&ai_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(a) => a,
         None => {

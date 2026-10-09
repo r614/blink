@@ -857,6 +857,26 @@ impl MissionState {
         self.view.outcome.as_ref()
     }
 
+    /// The time left of a scheduled game over (a delayed `Fail`), if any (`DDST_GameOverPending`).
+    pub fn game_over_pending(&self) -> Option<f32> {
+        self.delayed.iter().filter(|(_, v)| v.iter().any(|a| matches!(a, Action::Fail(_)))).map(|(at, _)| (at - self.time).max(0.0)).min_by(f32::total_cmp)
+    }
+
+    /// `GameOver(reason, delay)` (0x009FA600): schedules the failure unless a game over with no
+    /// longer a wait is pending; the new one replaces the pending reason and delay. False when
+    /// ignored.
+    pub fn schedule_game_over(&mut self, reason: String, delay: f32) -> bool {
+        if !accepts_game_over(self.game_over_pending(), delay) {
+            return false;
+        }
+        for (_, v) in self.delayed.iter_mut() {
+            v.retain(|a| !matches!(a, Action::Fail(_)));
+        }
+        self.delayed.retain(|(_, v)| !v.is_empty());
+        self.delayed.push((self.time + delay.max(0.0), vec![Action::Fail(reason)]));
+        true
+    }
+
     pub fn task(&self, path: &str) -> Option<TaskState> {
         let (o, t) = self.def.task_index(path)?;
         Some(self.task_state[o][t])
@@ -1421,3 +1441,20 @@ impl MissionState {
     }
 }
 
+/// `GameOver` (0x009FA600): a pending game over is replaced only by a shorter wait.
+pub fn accepts_game_over(pending: Option<f32>, delay: f32) -> bool {
+    pending.is_none_or(|left| delay < left)
+}
+
+#[cfg(test)]
+mod game_over_tests {
+    use super::accepts_game_over;
+
+    #[test]
+    fn a_pending_game_over_yields_only_to_a_shorter_wait() {
+        assert!(accepts_game_over(None, 3.0));
+        assert!(accepts_game_over(Some(3.0), 1.0));
+        assert!(!accepts_game_over(Some(3.0), 3.0));
+        assert!(!accepts_game_over(Some(1.0), 3.0));
+    }
+}

@@ -29,6 +29,9 @@ pub mod kismet_host;
 // [save] Saved games and autosaves (save.rs), a child module so it can save the match.
 #[path = "save.rs"]
 pub mod save;
+// [ai] Door- and Kismet-driven audio portal occlusion (audio_portals.rs).
+#[path = "audio_portals.rs"]
+pub mod audio_portals;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -595,6 +598,9 @@ pub struct MissionMatch {
     /// streaming ops and map changes of the original Kismet set them).
     #[serde(default)]
     pub levels_visible: BTreeSet<String>,
+    /// [ai] What the current map's audio portals were last set from (`audio_portals.rs`).
+    #[serde(default)]
+    pub portal_sync: audio_portals::PortalSync,
 }
 
 impl MissionMatch {
@@ -655,6 +661,7 @@ impl MissionMatch {
             mover_keys: Vec::new(),
             mover_worlds: Vec::new(),
             levels_visible: BTreeSet::new(),
+            portal_sync: Default::default(),
         };
         // The score carried in from the previous missions (the manager's score persists).
         m.darkness.add(m.setup.def.settings.darkness);
@@ -1084,6 +1091,12 @@ impl MissionMatch {
         &self.current_map
     }
 
+    /// [ai] The plot settings' game-over rules of an original NPC (its spawner's pawn tweak).
+    fn plot_game_over(&self, id: PlayerId) -> Option<dishonored_ir::ai::PlotGameOver> {
+        let o = self.setup.original.iter().find(|o| o.spawn.id == id)?;
+        self.setup.ai_levels.get(&o.map.to_ascii_lowercase())?.tweak_plot.get(&o.tweak).cloned()
+    }
+
     /// Level travel (see module docs). Runs between steps' simulation and next think.
     fn travel(&mut self, dest_map: &str, tag: &str, cfg: &SimConfig) {
         let Some((_, _, pos, yaw)) = self.setup.tagged_starts.iter().find(|t| t.0.eq_ignore_ascii_case(dest_map) && t.1.eq_ignore_ascii_case(tag)).cloned() else { return };
@@ -1392,6 +1405,8 @@ impl MissionMatch {
         self.world.wall_blockers = blockers;
         let layered = dishonored_world::Layered { base: world, layers: &placed };
         let world: &dyn WorldQuery = if placed.is_empty() { world } else { &layered };
+        // [ai] Doors and the Kismet set the audio portals' occlusion for hearing.
+        audio_portals::update(self);
         // [kismet] Doors the original Kismet locked or unlocked change the AI's paths.
         let door_nav = self.kismet.as_mut().and_then(|k| k.door_nav(&self.current_map, world.nav()));
         let overlay = door_nav.as_deref().map(|nav| kismet_host::NavOverlay { inner: world, nav });
@@ -1537,6 +1552,13 @@ impl MissionMatch {
         }
         let mut found_stats: Vec<(&'static str, i32)> = Vec::new();
         for e in &out.events {
+            // [ai] Possessing a plot NPC ends the game when the possession ends
+            // (`m_GameOverWhenPossessedByPlayer`, 0x00B7D2F0).
+            if let SimEvent::PossessEnd { host, .. } = e {
+                if let Some((delay, msg)) = self.plot_game_over(*host).and_then(|g| g.when_possessed) {
+                    self.state.schedule_game_over(if msg.is_empty() { "Game over".into() } else { msg }, delay);
+                }
+            }
             if let SimEvent::Death { victim, killer, .. } = e {
                 let vk = self.world.player(*victim).map(|p| p.kind);
                 if self.humans.contains(victim) {
@@ -1556,6 +1578,10 @@ impl MissionMatch {
                     }
                     let kind = if k == PawnKind::Guard { NpcKind::Guard } else { NpcKind::Civilian };
                     events.push(MissionEvent::NpcKilled { npc: self.npc_by_id.get(victim).cloned(), by_player, kind });
+                    // [ai] A plot NPC's death ends the game (`m_GameOverWhenDead`, 0x00B7BF50).
+                    if let Some((delay, msg)) = self.plot_game_over(*victim).and_then(|g| g.when_dead) {
+                        self.state.schedule_game_over(if msg.is_empty() { "Game over".into() } else { msg }, delay);
+                    }
                     // The kill report (0x00B73990): a kill credited to the player raises
                     // `NumKills` with the victim's tweak, which the chaos deeds filter by class
                     // (the exact player-side test is U-W2; a knock-out reports only the sleep

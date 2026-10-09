@@ -4,9 +4,9 @@
 //! `research/dishonored/AI.md` ("Factions", "Alarm bells", "Light at the player").
 
 use crate::content::Content;
-use crate::tweaks::{TMap, TVal, TweakDb, get_f32, get_obj};
+use crate::tweaks::{TMap, TVal, TweakDb, get, get_f32, get_obj};
 use anyhow::Result;
-use dishonored_ir::ai::{AiLevel, AlarmBellDef, AudioCell, AudioCells, AudioPortal, AudioPropagation, Faction, FactionTable, ForbiddenZone, ProbeLight};
+use dishonored_ir::ai::{AiLevel, AlarmBellDef, AudioCell, AudioCells, AudioPortal, AudioPropagation, Faction, FactionTable, ForbiddenZone, PlotGameOver, PortalDoor, ProbeLight};
 use dishonored_ir::{Light, LightKind};
 use glam::{Mat3, Vec3};
 use ue3_package::properties::{Property, Value, find};
@@ -172,6 +172,26 @@ pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String
             out.tweak_health_max.insert(t.clone(), v);
         }
     }
+    // Each pawn tweak's plot game-over rules (`m_pPlotSettingsTweak` -> `m_PlotSettings`,
+    // accessor 0x00B7A020).
+    for t in tweaks {
+        if out.tweak_plot.contains_key(t) {
+            continue;
+        }
+        let Some(ps) = db.try_resolve(t).and_then(|m| get_obj(&m, "m_pPlotSettingsTweak").map(str::to_string)).filter(|p| !p.is_empty()).and_then(|p| db.try_resolve(&p)) else { continue };
+        let rule = |k: &str| {
+            let on = matches!(get(&ps, &format!("m_PlotSettings.{k}.m_bGameOver")), Some(TVal::B(true)));
+            let message = match get(&ps, &format!("m_PlotSettings.{k}.m_ScreenMessage")) {
+                Some(TVal::Str(s)) | Some(TVal::Name(s)) => s.clone(),
+                _ => String::new(),
+            };
+            on.then(|| (get_f32(&ps, &format!("m_PlotSettings.{k}.m_fDelay")).unwrap_or(0.0), message))
+        };
+        let g = PlotGameOver { when_dead: rule("m_GameOverWhenDead"), when_hostile: rule("m_GameOverWhenHostileToPlayer"), when_possessed: rule("m_GameOverWhenPossessedByPlayer") };
+        if g != PlotGameOver::default() {
+            out.tweak_plot.insert(t.clone(), g);
+        }
+    }
     // Each pawn tweak's teleport spell: its loadout items' NPC-specific direct context slots.
     for t in tweaks {
         if out.tweak_teleport.contains_key(t) {
@@ -198,8 +218,9 @@ pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String
         }
         let pkg = content.package(name)?;
         if out.audio.propagation.is_none() {
-            if let Some(a) = read_audio_cells(&pkg) {
+            if let Some((a, doors)) = read_audio_cells(&pkg, &db) {
                 out.audio = a;
+                out.portal_doors = doors;
             }
         }
         out.sky_light += sky_lights(&pkg);
@@ -346,7 +367,7 @@ pub fn probe_light(l: &Light) -> ProbeLight {
         LightKind::Spot { inner_cone_deg, outer_cone_deg } => (1, inner_cone_deg, outer_cone_deg),
         LightKind::Directional => (2, 0.0, 0.0),
     };
-    // A directional light's adius is its TraceDistance (class default 100000; 0x004E0440).
+    // A directional light's radius is its TraceDistance (class default 100000; 0x004E0440).
     let radius = if kind == 2 { 100_000.0 } else { l.radius };
     ProbeLight { kind, position: l.position, direction: l.direction, intensity: l.brightness * lum, radius, falloff_exponent: l.falloff_exponent, inner_cone: inner, outer_cone: outer, casts_shadows: l.casts_shadows }
 }
@@ -428,8 +449,10 @@ pub fn brush_world_hulls(pkg: &Package, p: &[Property]) -> Option<Vec<Vec<[f32; 
 /// The audio cells of a package that holds a `DisAudioPropagationInfo` (its WorldInfo's):
 /// `DishonoredAudioVolume`s (hulls, `m_AudioPropagationIndex`, `m_LinkedPortals`),
 /// `DishonoredAudioPortal`s (`m_WidthDir`, `m_HeightDir`, `m_PlaneNormal`, `m_fHalfWidth`,
-/// `m_fHalfHeight`, `m_pCellA/B`, `m_fOcclusion_HeardByAI`) and the path table.
-fn read_audio_cells(pkg: &Package) -> Option<AudioCells> {
+/// `m_fHalfHeight`, `m_pCellA/B`, `m_fOcclusion_HeardByAI`) and the path table; and the
+/// `DisDoor`s that drive a portal (`m_pAudioPortal`, `m_bNoSoundOcclusion`, the door tweak's
+/// `m_fAISoundOcclusion`, 0x00A2C800).
+fn read_audio_cells(pkg: &Package, db: &TweakDb) -> Option<(AudioCells, Vec<PortalDoor>)> {
     let pi = (0..pkg.exports.len()).find(|&i| pkg.export_class(i) == "DisAudioPropagationInfo")?;
     let ph = pkg.read_object(pi).ok()?;
     let pp = &ph.properties;
@@ -493,7 +516,22 @@ fn read_audio_cells(pkg: &Package) -> Option<AudioCells> {
         .collect();
     let prop_portals: Vec<usize> = obj_list(pkg, pp, "m_Portals").into_iter().map(|o| portal_ix.get(&o).copied().unwrap_or(usize::MAX)).collect();
     let propagation = AudioPropagation { dist_coeff: f32_of(pp, "m_fDistCoeff", 1.0), max_audible_distance: f32_of(pp, "m_fMaxAudibleDistance", 0.0), keys, values, data, portals: prop_portals };
-    Some(AudioCells { cells, portals, propagation: Some(propagation) })
+    let mut doors = Vec::new();
+    for i in 0..pkg.exports.len() {
+        if pkg.export_class(i) != "DisDoor" || pkg.obj_name(ObjRef::from_index(pkg.exports[i].outer)) != "PersistentLevel" {
+            continue;
+        }
+        let Ok(h) = pkg.read_object(i) else { continue };
+        let p = &h.properties;
+        let Some(&portal) = find(p, "m_pAudioPortal").and_then(|x| x.as_object()).and_then(|o| portal_ix.get(&o)) else { continue };
+        let no_occlusion = matches!(find(p, "m_bNoSoundOcclusion").map(|x| &x.value), Some(Value::Bool(true)));
+        // The door tweak, else the class default (`m_fAISoundOcclusion` 0).
+        let tweak = find(p, "m_pDoorTweaks").and_then(|x| x.as_object()).filter(|o| *o != 0).map(|o| pkg.obj_path(ObjRef::from_index(o))).and_then(|t| db.try_resolve(&t));
+        let ai_occlusion = if no_occlusion { 0.0 } else { tweak.and_then(|t| get_f32(&t, "m_fAISoundOcclusion")).unwrap_or(0.0) };
+        let initial = crate::usable_props::name_value(p, "m_InitialDoorState").map(|n| crate::usable_props::door_state(&n)).unwrap_or(0);
+        doors.push(PortalDoor { portal, actor: format!("{}:{}", pkg.name, pkg.obj_name(ObjRef::Export(i))), initial, ai_occlusion });
+    }
+    Some((AudioCells { cells, portals, propagation: Some(propagation) }, doors))
 }
 
 fn obj_list(_pkg: &Package, props: &[Property], name: &str) -> Vec<i32> {
