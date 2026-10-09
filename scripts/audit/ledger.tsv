@@ -86,3 +86,17 @@
 00a1a7c0	helper	unclamped vector lerp by (alpha - min) / (max - min)
 006a1710	helper	GetGravityZ of the actor's physics volume
 00bc72a0	helper	pawn target point wrapper (0x00BC7190, aim focus not decoded: the port uses the location)
+00c58310	ported	homing explosive arrow detonates within 115 uu of its target (DisProjectile_Arrow_Explosive vslot 103): left_hand::step_projectiles
+00c13d50	gap	projectile hit on a pawn: armour (0x00B78610, ported), physical material, then the kill cam (0x00AD4A20 -> 0x00AD0430: a camera following the projectile, the options' Kill Cam Mode): kill cam not ported, its conditions not decoded
+00ad4a20	gap	kill cam start: projectile, speed, start time, the 13-dword parameter block (0x00AD0430)
+00c89cd0	helper	AI controller target list rebuild
+00c37770	irrelevant	weapon / hand presentation update (animation sets)
+00c236d0	helper	rotator to quaternion vector rotation (unit conversion 9.58738e-05 = pi/32768)
+00bedfc0	irrelevant	Windblast front impact effects along the cone (particle / decal / sound contact)
+00bee160	irrelevant	Windblast ground impact effect (trace down from the caster)
+00a762e0	gap	look-at / camera modifier timer of the left-hand interp (0x00AACA500 layer 1): unread
+00becb30	helper	Dark Vision tracked actor list update
+008a9770	irrelevant	particle system component deactivate (UE3)
+00c0baa0	helper	weapon muzzle socket location / rotation
+00bc7c00	irrelevant	HUD crosshair / marker refresh from the controller's list
+00c0f9f0	helper	item context transition with timer callback

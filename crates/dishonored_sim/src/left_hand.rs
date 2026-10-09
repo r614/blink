@@ -1086,6 +1086,20 @@ pub fn step_projectiles(
             continue;
         }
         pr.age += dt;
+        // A homing explosive arrow within 115 uu of its target explodes there
+        // (`DisProjectile_Arrow_Explosive` vslot 103, 0x00C58310 -> 0x00C550D0).
+        if pr.kind == ProjectileKind::TallboyArrow {
+            if let Some(h) = pr.homing {
+                let target = match h.actor {
+                    Some(id) => state.player(id).map(|p| p.position),
+                    None => Some(h.position),
+                };
+                if target.is_some_and(|at| at.distance_squared(pr.position) < 13_225.0) {
+                    booms.push((pr.owner, pr.position));
+                    continue 'shots;
+                }
+            }
+        }
         // A Windblast's homing steers it first (0x00C49EE0).
         step_homing(&mut pr, &state.players, gravity_z, t, dt);
         let old_v = pr.velocity;
