@@ -224,6 +224,10 @@ fn dark_vision_fades_in_runs_and_cannot_be_cancelled_within_its_cooldown() {
     r.step(&[(1, dv(buttons::SECONDARY))]);
     let t = r.cfg.tuning.clone();
     assert_eq!(r.p(1).vitals.mana, 100.0 - t.dark_vision_cost);
+    // 0x00BE89E0 calls the use notification only when it starts the effect, not on the end press.
+    let dv_power = dishonored_sim::state::power::DARK_VISION as u8;
+    let used = |r: &Run| r.events.iter().filter(|e| matches!(e, SimEvent::PowerUsed { id: 1, power, .. } if *power == dv_power)).count();
+    assert_eq!(used(&r), 1);
     assert!(dishonored_sim::left_hand::dark_vision_active(r.p(1)));
     assert_eq!(dishonored_sim::left_hand::dark_vision_reveals(&r.state, 1, &t), vec![2]);
     // Pressing again at once does nothing (cooldown).
@@ -237,6 +241,7 @@ fn dark_vision_fades_in_runs_and_cannot_be_cancelled_within_its_cooldown() {
     r.steps(60, &[(1, dv(0))]);
     assert!(!dishonored_sim::left_hand::dark_vision_active(r.p(1)));
     assert!(dishonored_sim::left_hand::dark_vision_reveals(&r.state, 1, &t).is_empty());
+    assert_eq!(used(&r), 1, "ending it is not a use");
 }
 
 #[test]

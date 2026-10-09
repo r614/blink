@@ -1446,7 +1446,8 @@ impl MissionMatch {
                 self.apply(c, cfg);
             }
             self.sync_darkness(cfg);
-            kismet_host::step(self, &out.events, dt, cfg); // [kismet]
+            let climbables: Vec<String> = world.climbables().iter().map(|c| c.name.clone()).collect();
+            kismet_host::step(self, &out.events, dt, cfg, &climbables); // [kismet]
             self.sync_darkness(cfg);
             save::tick(self, dt, &cfg.gameplay.items.combat_save); // [save] autosaves
             if self.state.outcome().is_some() && self.view.phase != MatchPhase::Ended {

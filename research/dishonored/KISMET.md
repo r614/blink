@@ -1,9 +1,9 @@
-# Kismet: how Dishonored runs its level scripting, and how the port runs it
+﻿# Kismet: how Dishonored runs its level scripting, and how the port runs it
 
 The original missions are UE3 Kismet graphs (plus Arkane's `DisSeq*` ops) cooked into the level
 packages, with one always-loaded global game sequence in `DishonoredGameFull_P`. The port loads
 them as data and runs them with an interpreter that follows the engine code of `Dishonored.exe`
-(GOG build, SHA-256 `70da9613…c6fb`), decoded with Ghidra. Nothing from the game is copied
+(GOG build, SHA-256 `70da9613â€¦c6fb`), decoded with Ghidra. Nothing from the game is copied
 here: addresses, field offsets and behaviour are described in my own words; decompiled output
 stays in scratch folders.
 
@@ -501,3 +501,56 @@ class descriptor name). Not fed by the port yet (the host feeds the classes in `
 | `DisSeqEvent_TeleportSpell` | 0x00c2ba40, 0x00c35280, 0x00cd7090, 0x00ce0aa0, 0x00cf12f0 |
 | `DisSeqEvent_WatchTower` / `DefenceTower` / `WallOfLight` | 0x00a2a770 / 0x00a258f0, 0x00a2fce0..0x00a2fff0 / 0x00a28f80, 0x00a29170, 0x00a3c010, 0x00a3eb10, 0x00a3eca0 |
 | `DisSeqEvent_Interact` / `AttackedByRats` / `RatPossess` | 0x00a3df60, 0x00a3e0b0 / 0x00a70450 / 0x00c7fbc0 |
+
+### Player and world events (2026-10-08)
+
+The firing function of each class was read (`oracle index fn`); every engine firing goes through
+`FireGeneratedEvents(actor, class, originator, instigator, exact, outputs)` 0x00BC7B30: each
+enabled event of `actor.GeneratedEvents` of that class runs `CheckActivate(originator, instigator,
+.., outputs)`. `DAT_0145F628` is the local player pawn: the `DisSeqEvent_PlayerEvent` family
+(registration 0x00B8A140) gives an event without an `Originator` the player, so the host finds
+those events as "class, no originator" (`player_events.rs`, `player_events()`). The host code is
+`crates/dishonored_multiplayer/src/kismet_host/player_events.rs`; the sim emits the new
+`SimEvent::PowerUsed` / `Windblasted` and the mission runtime a `TaskNote` log.
+
+| event | engine firing (output) | port hook | now firing |
+|---|---|---|---|
+| `DisSeqEvent_Possessed` (154) | NPC pawn possess start 0x00B7D110 (0), end 0x00B7D2F0 (1): originator the pawn, instigator the player, exact; the `DisDLC06NPCPawn` label of the index is the first vtable with the slot, the functions are `DishonoredNPCPawn`'s own (Tallboy 0x00B7EB00 calls the first). 0x00A52130 / 0x00A5A990 are the exit / enter of the river-krust-style creature state machine (state 7), no such pawn in the port | `SimEvent::PossessStart` / `PossessEnd` of a non-rat host, events found through pawn and spawner | all 154 (NPC hosts) |
+| `DisSeqEvent_PlayerCrouch` (4) | every tick of the player pawn (0x00ABB1E0 -> 0x00AB0960): 2 if `bIsCrouched`, else 1 if sneak is toggled (0x00AC8280), else 0; fires `[state]` when it differs from `m_OldCrouchState` (+0xB6C) | `PlayerState::crouched` each step | outputs 0 and 2; output 1 (toggled, not yet crouched) never: the port applies the toggle to the crouch at once |
+| `DisSeqEvent_PlayerCombat` (15) | every tick (0x00ABBDE0 -> 0x00AB9FA0): `m_bIsInCombat` (+0x8A0 bit 3) becomes the check "a hostile on the player's list (0x00AB6960: relation 2, attention >= 4 by 0x00B0B780) has awareness `InCombat` (0x00B0C1E0 == 5)"; false->true fires output 0, true->false output 1. Also read by `DisSeqCond_IsPlayerInCombat`, which now reads this flag instead of the autosave's `engaged` set | `in_combat_now`: a brain with `awareness() == IN_COMBAT` and attention >= 4 on the player | all 15. Not modelled: the registry lookup 0x00C6CE00 and the DLC check 0x00CF7B40 of the same function |
+| `DisSeqEvent_TaskStateChanged` (79) / `TaskActivated` (2) | objective manager dispatcher 0x00AD4F60: kind 5 0x00AD1320 (output = the new `EDisTaskState`), kind 3 0x00AD1080 (all outputs); raised by 0x00AC17B0 (`SetState`: Active -> kind 3 then 5, other change -> 5), 0x00AC63C0 (hidden flag cleared on an Active task -> kind 3) and the task's registration 0x00AC6300 (both, at load). The event names the task: 0x00AD0F80 compares task and objective names. Originator the player | `MissionState::task_log` (`TaskNote`) filled by `set_task` / `ShowTask`, drained each step | all 81. Not raised: the registration pair at load, and the second `TaskActivated` of a `SetTaskState` + `SetTaskHidden(false)` pair (the port reveals a task when it activates) |
+| `DisSeqEvt_Choke` (6) | the `StateNPCMasterBeingChoked` state: enter 0x00A7C270 (0), the win 0x00A6D380 (1, choke stage 2), the loss 0x00A74720 (2, stage 4), the exit 0x00A7C4D0 (2 unless a result was given, or 1 when the next state is the knocked-out one); originator the NPC, instigator the player | `SimEvent::ChokeStart` / `ChokeEnd` (Win 1, Lose and Cancel 2) | all 6 |
+| `DisSeqEvent_Windblasted` (9) | the NPC windblast reaction: 0x00C53790 fires output 0 "Pushed" for an NPC that resists (0x00B4B4C0), else 0x00C4DE90 starts the reaction and fires 0/1 by whether the resulting state is the thrown one (class `DAT_0145F184`); instigator the caster | `SimEvent::Windblasted` where the throw starts (`step_windblasts`): output 1 | all 9 as "Thrown"; "Pushed" needs the armour state |
+| `DisSeqEvent_PowerUsed` (21) | the power component's slot 94 (0x00BF32F0 -> 0x00BF30C0): the player's events of exactly that class, the first output named for the power plus `m_CurrentLevel - 1` ("Blink 2"); called by the activation of Windblast (0x00BFB950), Blink (0x00BFC990), Dark Vision (0x00BE89E0), Devouring Swarm (0x00BFAE60) | `SimEvent::PowerUsed` at the port's matching moments (`left_hand`, `blink`, `powers`) | 4 powers. Bend Time (0x00BFA180) and Possess (0x00BE7730) activations were traced and do not call slot 94: left open. `PowerEquipped` (a subclass, 0x00C44FE0 / 0x00C4BA70, from the equip contexts) is not fed |
+| `DisSeqEvent_Lock` (25) | `Lock` 0x00A4E870 (0, always) and `Unlock` 0x00A4E910 (1, only if locked) of `DishonoredUsableObject` (doors via 0x00A32490 / 0x00A324B0); originator the usable, instigator its last user (+0x2C8) | `DisSeqAct_Lock` queues the output; fired next step | all 25 (the Kismet's own locks) |
+| `DisSeqEvent_Climb` (1) | the climb state: enter 0x00A72B00 (0), exit 0x00A6E2C0 (1), originator the chain (pawn +0xAA0), instigator the pawn | `SimEvent::Climb`, chain by name in the active map | 1 |
+
+Decoded but not hooked (no system in the port to hook them to; counts are level instances):
+`MovablePickedUp` (127) 0x00A45FD0 (output none = all; originator the grabbing player, instigator the
+movable; from the grab state 0x00C3D030) and `MovableDropped` (1) 0x00A46380 (0x00C45340, the carried-object
+release): the port cannot grab physics props. `KeyHoleUsed` (37) 0x00A38580 (output 0, the key used)
+and 0x00A2E4E0 (output 1): no keyholes and the key ring is recorded only. `Interact` (4) 0x00A3DF60
+(0) / `AltInteract` 0x00A3E0B0 (1): fired from the Use handler 0x00AD5BA0 for focused interactables that
+are not pickups, event on the user with the interactable as instigator, filtered by
+`m_pAssociatedTweak` (slot 102 0x00B8E830); the tutorial notes of the Prison. `Tripwire` (7) 0x00A21A30
+(from 0x00A28B40 `Trip(instigator)`, once; originator the tripwire, instigator the tripper): no
+tripwires. `SeqEvent_RigidBodyCollision` (73) 0x0078F7D0, `SeqEvent_ParticleEvent` (26) 0x0089FC00,
+`SeqEvent_AnimNotify` (2) 0x0070F4F0, `SeqEvent_HitWall` (1, `Actor.HitWall` script): no rigid bodies,
+particles or per-actor notifies. `SeqEvent_Destroyed` (18) is `UWorld::DestroyActor` 0x00652CF0, which
+runs `CheckActivate(actor, actor, 0, 0, 0)` on the actor's Destroyed events (the instigator is the
+destroyed actor itself, so a `bPlayerOnly` one cannot pass). `DisSeqEvent_PlayerManaThreshold` (1)
+0x00AB1A30 (output 1 when the mana threshold level falls, 0 when it rises; the vslot-456 caller is
+not decoded), `PlayerHolsterWeapon` (1) 0x00AB3D80 (no holster in the port),
+`PlayerInventoryChanged` (1) 0x00BA1A30 (from 0x00C17F20 / 0x00C18C80 / 0x00C19380, the item class
+test), `JournalViewed` (1) 0x00BB9960 / 0x00BD11E0, `ObjectiveCompleted` (3) 0x00AD0E00 (the
+port has no objective completion state: `CompleteObjective` is unsupported), `TeleportSpell` (1)
+0x00C2BA40 and siblings (DLC witches), `WallOfLight` (1), `RatPossess` (1) 0x00C7FBC0, `FishPossess`
+0x00A04820 / 0x00A06710 (output 0 / 1).
+
+Map smoke (`oracle scenario --system kismet`, 42 maps, 600 ticks, no input): the activation counts changed
+on 3 maps only, as the player does nothing and nobody possesses, chokes or blasts: Galvani2 +2
+(`DisSeqAct_Lock` of `DishonoredUsableObject_19` fires its `DisSeqEvent_Lock`), LightH_HighChaos +4 and
+LightH_LowChaos +4 (`Lighthouse_Obj.DishonoredTask_Custom_12` -> Active fires two
+`DisSeqEvent_TaskStateChanged`). The fed classes of the table no longer appear among the "never
+activated" notes of the load, and `Distracted`, `BreakableBroken`, `WhaleOilBattery` and
+`WhaleOilReceptacle` (fed all along) were added to `FED_EVENTS` so they stop being reported as unsupported.

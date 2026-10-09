@@ -128,6 +128,14 @@ pub enum SimEvent {
     BodyLifted { carrier: PlayerId, body: PlayerId },
     BodyDropped { carrier: PlayerId, body: PlayerId },
     // --- powers ---
+    /// A power was used (`DishonoredActivePowerComponent` slot 94, 0x00BF32F0, called from the
+    /// power's activation: Windblast 0x00BFB950, Blink 0x00BFC990, Dark Vision 0x00BE89E0,
+    /// Devouring Swarm 0x00BFAE60): `power` indexes [`crate::state::power`], `level` is its
+    /// `m_CurrentLevel` (1 or 2). The Kismet's `DisSeqEvent_PowerUsed` fires from it.
+    PowerUsed { id: PlayerId, power: u8, level: u8 },
+    /// An NPC was thrown by `by`'s Windblast (the thrown reaction, `DisSeqEvent_Windblasted`
+    /// output 1 from 0x00C4DE90).
+    Windblasted { victim: PlayerId, by: PlayerId },
     PossessStart { id: PlayerId, host: PlayerId },
     PossessEnd { id: PlayerId, host: PlayerId },
     BendTimeStart { id: PlayerId, level: u8 },

@@ -402,6 +402,7 @@ pub fn update(
                         p.left.phase = LeftPhase::Recovering;
                         p.left.timer = 0.0;
                         events.push(SimEvent::WindblastCast { id: p.id });
+                        events.push(SimEvent::PowerUsed { id: p.id, power: power::WINDBLAST as u8, level: p.inv.power_levels[power::WINDBLAST] });
                         // Port value: the Windblast's AI noise caller was not decoded (stealth.md section 5.4).
                         events.push(SimEvent::Sound { position: p.position, radius: 1500.0, category: SoundCategory::Windblast, context: crate::events::NoiseContext::Danger, source: p.id });
                     }
@@ -571,6 +572,8 @@ pub fn use_dark_vision(p: &mut PlayerState, cfg: &GameplayConfig, t: &CombatTuni
     p.dark.cooldown = t.dark_vision_cooldown;
     p.vitals.dark_vision_remaining = p.dark.fade_in + p.dark.remaining + p.dark.fade_out;
     events.push(SimEvent::DarkVision { id: p.id, active: true });
+    // The component's use notification (0x00BE89E0 calls slot 94 when it starts the effect).
+    events.push(SimEvent::PowerUsed { id: p.id, power: power::DARK_VISION as u8, level: p.inv.power_levels[power::DARK_VISION] });
 }
 
 /// Dark Vision tick (slot +0x13C, 0x00BFBC90): the cooldown runs down; the step is spent on the
@@ -760,6 +763,8 @@ pub fn step_windblasts(
                 // mass, then the Flying phase (physics.md P-1..P-3).
                 let m = windblast_momentum(wb.direction, t.windblast_force[lv], t.windblast_up_force[lv], d, range, k);
                 crate::movement::start_throw(v, m, th, dt);
+                // The thrown reaction (0x00C4DE90 ends in `DisSeqEvent_Windblasted` output 1).
+                events.push(SimEvent::Windblasted { victim: v.id, by: wb.caster });
                 // Last hit by this caster's Windblast (instigator and damage type, read by the
                 // NPC wall collision 0x00B529C0).
                 v.windblasted_by = Some(wb.caster);
