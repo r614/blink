@@ -129,8 +129,9 @@ pub fn charm_value(p: &PlayerState, cfg: &GameplayConfig, slot: usize) -> f32 {
 }
 
 /// Take a bone charm effect (0x00ABBA90): a charm not owned yet is added at level 0 (and
-/// equipped while a slot is free, `m_bAutoEquipBoneCharm`); one already owned goes up a level
-/// (to the "II" values), never past its last level.
+/// equipped while a slot is free only with `m_bAutoEquipBoneCharm`, false for Corvo: the
+/// player equips it from the menu); one already owned goes up a level (to the "II" values),
+/// never past its last level.
 pub fn take_charm(p: &mut PlayerState, cfg: &GameplayConfig, slot: usize) {
     let bit = 1u64 << slot;
     if p.inv.charms_owned & bit != 0 {
@@ -140,7 +141,7 @@ pub fn take_charm(p: &mut PlayerState, cfg: &GameplayConfig, slot: usize) {
         return;
     }
     p.inv.charms_owned |= bit;
-    if (p.inv.charms_equipped.count_ones() as u8) < max_charms(p, cfg) {
+    if cfg.items.auto_equip_charm && (p.inv.charms_equipped.count_ones() as u8) < max_charms(p, cfg) {
         p.inv.charms_equipped |= bit;
     }
 }

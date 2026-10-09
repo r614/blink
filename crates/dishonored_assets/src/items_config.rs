@@ -425,6 +425,9 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
         l.prov.insert("items.charms".into(), format!("{list} :: m_Charms ({} charms)", cfg.charms.len()));
         l.prov.insert("items.scripted_charms".into(), format!("{list} :: m_ScriptedCharms ({} charms)", cfg.scripted_charms.len()));
     }
+    // A new charm is equipped only with `m_bAutoEquipBoneCharm` (0x00ABBA90 tests +0x1D0 bit 4).
+    cfg.auto_equip_charm = matches!(l.db.try_resolve(CORVO).and_then(|m| m.get("m_bAutoEquipBoneCharm").cloned()), Some(TVal::B(true)));
+    l.prov.insert("items.auto_equip_charm".into(), format!("{CORVO} :: m_bAutoEquipBoneCharm = {}", cfg.auto_equip_charm));
 
     // --- chaos: `m_DarknessLevels` (TArray<int>, read raw) and `m_Deeds` ---
     let dd = DarknessConfig::default();

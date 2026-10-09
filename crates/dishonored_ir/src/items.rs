@@ -726,6 +726,10 @@ pub struct ItemsConfig {
     /// from [`SCRIPTED_CHARM_BASE`] up, 0x00AA8EF0).
     #[serde(default)]
     pub scripted_charms: Vec<BoneCharm>,
+    /// `DisTweaks_PlayerPawn.m_bAutoEquipBoneCharm` (false for Corvo): a charm taken for the
+    /// first time is equipped while a slot is free only with it (0x00ABBA90).
+    #[serde(default)]
+    pub auto_equip_charm: bool,
     /// Chaos (`DisDarknessManager`, the player tweak's `m_DarknessLevels` and `m_Deeds`).
     #[serde(default)]
     pub darkness: DarknessConfig,

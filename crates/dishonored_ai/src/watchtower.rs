@@ -203,7 +203,8 @@ impl WatchTowersState {
                 }
                 let rel = relation(def, t.hacked, faction, p.id, soc);
                 if !p.alive {
-                    if !t.noted.contains(&p.id) {
+                    // A body that is gone (ash, eaten, disintegrated) is not a corpse to note.
+                    if !p.no_body && !t.noted.contains(&p.id) {
                         t.noted.push(p.id);
                         out.push(match rel {
                             Relationship::Ally => TowerEvent::AllyCorpseSeen(i),

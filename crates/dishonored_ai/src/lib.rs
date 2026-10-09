@@ -2362,8 +2362,9 @@ impl Brain {
                 continue;
             }
             if !p.alive {
-                // A corpse is discovered once its seen value is non-zero (dead-NPC scalar).
-                if p.kind != PawnKind::Human && !self.corpses_seen.contains(&p.id) {
+                // A corpse is discovered once its seen value is non-zero (dead-NPC scalar). A body
+                // that is gone (ash, eaten, disintegrated) is no longer an actor to see.
+                if p.kind != PawnKind::Human && !p.no_body && !self.corpses_seen.contains(&p.id) {
                     let prof = self.profile(ai, NOISE);
                     let seen = !self.blind && Self::look(&veye, p, world, ai).is_some_and(|n| seen_rate(prof, prof.seeing_scalar_dead_npc, n, 0.0) > 0.0);
                     if seen {
@@ -4574,6 +4575,30 @@ mod tests {
         c.think(&ws, &[fuse_noise(Vec3::new(-300.0, 100.0, 90.0), 1)], &w, 1.0 / 60.0);
         assert!(matches!(c.brains[0].behavior(slot::PRESERVE), Some(Behavior::Escape(s)) if s.phase == EscapePhase::Turning));
         assert_eq!(c.brains[0].state, BrainState::Notice);
+    }
+
+    #[test]
+    fn a_corpse_that_is_gone_is_not_discovered() {
+        let ai = AiConfig::default();
+        let w = flat_world();
+        let mut c = Crowd { ai: ai.clone(), ..Default::default() };
+        let guard = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(0.0, 0.0, 90.0), 0.0);
+        let mut body = pawn(NPC_ID_BASE + 1, PawnKind::Civilian, Vec3::new(150.0, 0.0, 90.0), 0.0);
+        body.alive = false;
+        body.no_body = true;
+        let mut ws = WorldState::default();
+        ws.players = vec![guard.clone(), body.clone()];
+        c.brains.push(Brain::new(guard.id, PawnKind::Guard, guard.position, 1));
+        for _ in 0..30 {
+            c.think(&ws, &[], &w, 1.0 / 60.0);
+        }
+        assert!(c.brains[0].corpses_seen.is_empty());
+        // The same body still there is found.
+        ws.players[1].no_body = false;
+        for _ in 0..30 {
+            c.think(&ws, &[], &w, 1.0 / 60.0);
+        }
+        assert_eq!(c.brains[0].corpses_seen, vec![body.id]);
     }
 
     #[test]
