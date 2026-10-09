@@ -124,7 +124,7 @@ pub struct HighlightPlugin;
 impl Plugin for HighlightPlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "highlight.wgsl");
-        app.add_plugins(MaterialPlugin::<HighlightMaterial>::default()).init_resource::<Highlights>().add_systems(Update, (take_pending, update.after(take_pending)));
+        app.add_plugins(MaterialPlugin::<HighlightMaterial>::default()).init_resource::<Highlights>().add_systems(Update, (take_pending, update.after(take_pending).run_if(resource_exists::<SessionView>)));
     }
 }
 

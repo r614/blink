@@ -270,7 +270,8 @@ impl Plugin for EffectsPlugin {
                 blink_indicator,
                 attached_effects,
                 // Camera lens effects follow the camera placed this frame.
-                crate::lens_effects::update.after(crate::players::camera_follow).after(crate::cutscene::camera).after(crate::viewmodel::apply_fov),
+                // (A play session's only: `--inspect` has no session view.)
+                crate::lens_effects::update.after(crate::players::camera_follow).after(crate::cutscene::camera).after(crate::viewmodel::apply_fov).run_if(resource_exists::<crate::session::SessionView>),
                 hand_effects.after(crate::viewmodel::animate_view_rig),
                 // The player camera's rain box (moves the rain emitter before it simulates).
                 crate::rain::drive.after(crate::players::camera_follow).after(crate::cutscene::camera).after(crate::viewmodel::apply_fov),

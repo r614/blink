@@ -44,7 +44,7 @@ pub struct CameraFadePlugin;
 
 impl Plugin for CameraFadePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<CameraFade>().add_systems(Update, update);
+        app.init_resource::<CameraFade>().add_systems(Update, update.run_if(resource_exists::<SessionView>));
     }
 }
 
