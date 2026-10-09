@@ -325,6 +325,13 @@ pub trait WorldQuery {
     }
     /// The level package of what a line check hits first (the collision source's instance,
     /// `<package>:<actor>`); None when the world does not know its sources.
+    /// The collision bounds of an actor placed in the map (the box of every triangle of its
+    /// meshes), by level package and actor name; None when the world does not know it. A usable,
+    /// a door or a prop collides with the world as its actor: the crosshair's rule
+    /// (`dishonored_sim::crosshair`) takes a host's interactable as the box its collision spans.
+    fn actor_bounds(&self, _package: &str, _actor: &str) -> Option<(Vec3, Vec3)> {
+        None
+    }
     fn hit_package(&self, _origin: Vec3, _dir: Vec3, _max_dist: f32) -> Option<String> {
         None
     }
@@ -441,6 +448,9 @@ impl WorldQuery for WithLevels<'_> {
         }
         best?.1.hit_package(origin, dir, max_dist)
     }
+    fn actor_bounds(&self, package: &str, actor: &str) -> Option<(Vec3, Vec3)> {
+        self.base.actor_bounds(package, actor).or_else(|| self.levels.visible().find_map(|l| l.actor_bounds(package, actor)))
+    }
     fn set_visible_levels(&self, visible: &[String]) {
         self.levels.set_visible(visible)
     }
@@ -520,6 +530,10 @@ pub struct CollisionWorld {
     pub tris: Vec<Tri>,
     pub bvh: Bvh,
     pub sources: Vec<String>,
+    /// The collision box of each placed actor by `package:actor` (lowercase), built on first use
+    /// ([`WorldQuery::actor_bounds`]).
+    #[serde(skip)]
+    pub actor_boxes: std::sync::OnceLock<std::collections::HashMap<String, (Vec3, Vec3)>>,
     pub bounds: Option<Aabb>,
     /// Per triangle (parallel to `tris`): index into `surfaces` (0 = none). Presentation only
     /// (footsteps and impact sounds); the simulation never reads it.
@@ -971,7 +985,7 @@ impl CollisionWorld {
             .collect();
         let total = bounds.iter().fold(Aabb::EMPTY, |acc, b| acc.union(b));
         let bvh = Bvh::build(&bounds);
-        CollisionWorld { tris, bvh, sources, bounds: Some(total), nav: None, water: None, volumes: None, climbables: None, tri_surface: Vec::new(), surfaces: Vec::new(), tri_shape: Vec::new(), tri_kind: Vec::new(), tri_elem: Vec::new(), elems: Vec::new(), elem_bvh: Bvh::default(), movers: Vec::new() }
+        CollisionWorld { tris, bvh, sources, actor_boxes: Default::default(), bounds: Some(total), nav: None, water: None, volumes: None, climbables: None, tri_surface: Vec::new(), surfaces: Vec::new(), tri_shape: Vec::new(), tri_kind: Vec::new(), tri_elem: Vec::new(), elems: Vec::new(), elem_bvh: Bvh::default(), movers: Vec::new() }
     }
 
     /// Build the element table from `tri_elem` (runs of equal ids; consecutive elements must
@@ -1172,6 +1186,35 @@ impl CollisionWorld {
     }
 }
 
+impl CollisionWorld {
+    /// The box of every placed actor's triangles by `package:actor` (lowercase). A source reads
+    /// `<mesh> <- <package>:<actor path> [<class>]`; the actor is the path's last segment.
+    fn build_actor_boxes(&self) -> std::collections::HashMap<String, (Vec3, Vec3)> {
+        let mut per: Vec<Option<(Vec3, Vec3)>> = vec![None; self.sources.len()];
+        for t in &self.tris {
+            if let Some(slot) = per.get_mut(t.source as usize) {
+                for v in [t.a, t.b, t.c] {
+                    let b = slot.get_or_insert((v, v));
+                    b.0 = b.0.min(v);
+                    b.1 = b.1.max(v);
+                }
+            }
+        }
+        let mut out: std::collections::HashMap<String, (Vec3, Vec3)> = std::collections::HashMap::new();
+        for (src, b) in self.sources.iter().zip(per) {
+            let Some(b) = b else { continue };
+            let inst = src.rsplit(" <- ").next().unwrap_or(src);
+            let inst = inst.split(" [").next().unwrap_or(inst);
+            let Some((package, path)) = inst.split_once(':') else { continue };
+            let name = path.rsplit('.').next().unwrap_or(path);
+            let e = out.entry(format!("{package}:{name}").to_ascii_lowercase()).or_insert(b);
+            e.0 = e.0.min(b.0);
+            e.1 = e.1.max(b.1);
+        }
+        out
+    }
+}
+
 impl WorldQuery for CollisionWorld {
     fn nav(&self) -> Option<&nav::NavWorld> {
         self.nav.as_deref()
@@ -1183,6 +1226,11 @@ impl WorldQuery for CollisionWorld {
         // `<mesh source> <- <package>:<actor path>` (`from_map`) or `<package>:<path>`.
         let inst = src.rsplit(" <- ").next()?;
         inst.split(':').next().filter(|s| !s.is_empty()).map(str::to_string)
+    }
+
+    fn actor_bounds(&self, package: &str, actor: &str) -> Option<(Vec3, Vec3)> {
+        let key = format!("{}:{}", package, actor).to_ascii_lowercase();
+        self.actor_boxes.get_or_init(|| self.build_actor_boxes()).get(&key).copied()
     }
 
     fn water_at(&self, p: Vec3) -> Option<WaterInfo> {
@@ -1554,6 +1602,9 @@ impl WorldQuery for Layered<'_> {
         self.base.raycast(origin, dir, max_dist, channel::ALL).filter(|h| h.distance <= reach + 1e-3)?;
         self.base.hit_package(origin, dir, max_dist)
     }
+    fn actor_bounds(&self, package: &str, actor: &str) -> Option<(Vec3, Vec3)> {
+        self.base.actor_bounds(package, actor)
+    }
     fn set_visible_levels(&self, visible: &[String]) {
         self.base.set_visible_levels(visible)
     }
@@ -1778,6 +1829,9 @@ impl WorldQuery for MapSet {
     }
     fn hit_package(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<String> {
         self.cur().hit_package(origin, dir, max_dist)
+    }
+    fn actor_bounds(&self, package: &str, actor: &str) -> Option<(Vec3, Vec3)> {
+        self.cur().actor_bounds(package, actor)
     }
     fn set_visible_levels(&self, visible: &[String]) {
         self.cur().set_visible_levels(visible)

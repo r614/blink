@@ -139,38 +139,11 @@ pub fn hold_target(m: &MovableState, eye: Vec3, yaw: f32, pitch: f32, cfg: &Game
     (eye + fwd * d - up * h, Vec3::new(pitch, yaw, 0.0))
 }
 
-/// The prop the player looks at and can pick up: index and the cosine of its angle to the view.
-/// The interactable cone and reach are the pickups' (`inventory::pickup_in_view`).
-pub fn focus(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: &GameplayConfig) -> Option<(usize, f32)> {
-    let mv = &cfg.movement;
-    let eye = eye_position(p, mv);
-    let dir = view_vector(p.yaw, p.pitch);
-    let mut best: Option<(usize, f32)> = None;
-    for (i, m) in state.movables.iter().enumerate() {
-        if m.gone || !m.interactable || m.phase == MovablePhase::Held || m.damage < 0 {
-            continue;
-        }
-        let to = m.center() - eye;
-        let d = to.length();
-        let reach = m.max_distance + mv.collision_radius;
-        if d > reach || d < 1e-3 {
-            continue;
-        }
-        let cos = to.dot(dir) / d;
-        if cos < crate::inventory::INTERACT_COS {
-            continue;
-        }
-        // The crosshair line stops at world geometry in front of the prop (its own mesh is within
-        // its extent of the centre).
-        let margin = m.half().max_element() + 10.0;
-        if world.raycast(eye, to, d, channel::CROSSHAIR).is_some_and(|h| h.distance < d - margin) {
-            continue;
-        }
-        if best.is_none_or(|(_, c)| cos > c) {
-            best = Some((i, cos));
-        }
-    }
-    best
+/// The world box of a prop: its mesh's local box turned by the actor's rotation (the component's
+/// `Bounds`, an axis-aligned box about the pivot), at the pivot.
+pub fn world_box(m: &MovableState) -> (Vec3, Vec3) {
+    let (lo, hi) = dishonored_ir::items::rotated_box(m.bounds_min, m.bounds_max, Vec3::ONE, [m.rotation.x, m.rotation.y, m.rotation.z]);
+    (m.position + lo, m.position + hi)
 }
 
 /// `StatePlayerGrabMovable` entered: the prop goes to the empty hands (0x00C3D030).

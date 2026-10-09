@@ -1,0 +1,54 @@
+// The crosshair target with several candidates in view (research/dishonored/systems/crosshair.md):
+// Boyle Int's table of fruit and bottles at the start. The pawn stands 130 uu from the row; the view
+// sweeps over a bottle (DishonoredMovable_29, a physics prop) and a pear (DisStatPickup_4, a pickup)
+// 16 uu to its side, and over the edges where the choice is made by the two box sweeps
+// (`DisTweaks_PlayerInput` m_fUsableObjectExtentNarrow 2 / Broad 10, m_fUsableObjectDist 300): the
+// original's `m_pCrosshairActor` is read every tick (the writer 0x00AA6280 runs once per camera
+// update) and a `Crosshair` event is recorded whenever it, its interact flag or its status changes.
+// Port: `dishonored_sim::crosshair`.
+(
+    name: "movable/crosshair_row",
+    system: Physics,
+    map: "L_Boyle_Int_P",
+    description: "Look along Boyle Int's fruit table: which of the bottle and the pear the crosshair is on, and where its edges are.",
+    setup: (player: Some((position: (-1067, -1850, 200), yaw: 270, pitch: 0, snap_to_floor: true)), kismet: true, kismet_start: Some("ChangeLvl_fromBoyleExterior_toBoyleInterior"), original_npcs: false, settle: 30, seed: 1),
+    ticks: 110,
+    input: [
+        // 0: level view, nothing in front
+        (tick: 10, action: Look(yaw: 270, pitch: -20)),
+        // 10: the bottle (the narrow sweep's nearest hit, a physics prop)
+        (tick: 20, action: Look(yaw: 270, pitch: -8)),
+        // 20: well above the bottle: no target
+        (tick: 30, action: Look(yaw: 264, pitch: -21)),
+        // 30: 6 degrees aside: the narrow sweep misses the bottle and hits a wall within its reach,
+        // the broad sweep (10 uu) lists the bottle: target (0x00AB70F0 stage 2)
+        (tick: 40, action: Look(yaw: 258, pitch: -21)),
+        // 40: 12 degrees aside: the broad sweep misses it
+        (tick: 50, action: Look(yaw: 270, pitch: -31)),
+        // 50: the bottle, with the pear beside it
+        (tick: 60, action: Look(yaw: 280, pitch: -31)),
+        // 60: the pear, a pickup (the nearest hit of the narrow sweep)
+        (tick: 70, action: Look(yaw: 290, pitch: -31)),
+        // 70: beyond the pear
+        (tick: 80, action: Look(yaw: 270, pitch: -34)),
+        // 80: the pear again, low
+        (tick: 90, action: Look(yaw: 270, pitch: -45)),
+        // 90: the table's front edge
+        (tick: 100, action: Look(yaw: 90, pitch: 0)),
+        // 100: away
+    ],
+    checkpoints: [
+        (name: "first targets", expect: [
+            (metric: FirstAt("Crosshair:DishonoredMovable_29"), value: 0.183333, tol: 0.001, source: "m_pCrosshairActor at tick 11 on the original (the writer 0x00AA6280, every tick), captured 2026-10-09", status: Measured),
+            (metric: FirstAt("Crosshair:DisStatPickup_4"), value: 0.85, tol: 0.001, source: "m_pCrosshairActor at tick 51 on the original, captured 2026-10-09", status: Measured),
+            (metric: EventValue("Crosshair:DishonoredMovable_29", "status"), value: 8, tol: 0, source: "m_CrosshairStatus CHS_OVER_MOVABLE_OBJECT (the interactable's vslot +0xC)", status: Measured),
+            (metric: EventValue("Crosshair:DisStatPickup_4", "status"), value: 2, tol: 0, source: "m_CrosshairStatus CHS_OVER_PICKUP", status: Measured),
+        ]),
+        (name: "the target changes where the sweeps decide", expect: [
+            (metric: Count("Crosshair:DishonoredMovable_29"), value: 2, tol: 0, source: "bottle at ticks 11 and 31 (a narrow-sweep hit, then the broad sweep 6 degrees aside), not at 258 degrees", status: Measured),
+            (metric: Count("Crosshair:DisStatPickup_4"), value: 2, tol: 0, source: "pear at ticks 51 (yaw 280) and 81 (pitch -34)", status: Measured),
+            (metric: Count("Crosshair:None"), value: 4, tol: 0, source: "no target at ticks 21, 41, 71 and 91", status: Measured),
+        ]),
+    ],    record: [Pawn, Camera, Crosshair, SimEvents],
+    capture: Some("Boyle Int after ChangeLvl_fromBoyleExterior_toBoyleInterior, lab place -1067 -1850 on the floor facing 270; the view held per phase; DishonoredPlayerController.m_pCrosshairActor / m_CrosshairStatus / m_bCanInteractWithCrosshairActor per tick"),
+)

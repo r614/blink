@@ -121,6 +121,8 @@ impl<'a> Play<'a> {
     }
     /// Press use once (and release).
     fn use_once(&mut self, yaw: f32, pitch: f32) {
+        // The Use acts on the crosshair the last camera update chose: hold the view a tick first.
+        self.step(PlayerInput { yaw, pitch, ..Default::default() });
         self.step(PlayerInput { yaw, pitch, buttons: buttons::USE, ..Default::default() });
         self.idle(5, PlayerInput { yaw, pitch, ..Default::default() });
     }
@@ -128,8 +130,7 @@ impl<'a> Play<'a> {
     fn aim(&self, at: Vec3) -> (f32, f32) {
         let mc = self.maps.get(MAP).unwrap();
         let p = self.p();
-        let d = at - dishonored_sim::movement::eye_position(&p, &mc.sim.gameplay.movement);
-        (d.y.atan2(d.x).to_degrees(), d.z.atan2(d.truncate().length()).to_degrees())
+        dishonored_sim::crosshair::aim_at(&p, &mc.sim.gameplay.movement, at)
     }
 }
 

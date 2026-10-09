@@ -302,13 +302,18 @@ mod tests {
         use crate::mission::Interaction;
         let (mut m, cfg) = rig(Interactables { launchers: vec![launcher()], ..Default::default() });
         let world = dishonored_world::CollisionWorld::from_triangles(Vec::new(), Vec::new());
+        // The crosshair is chosen by each step's camera update (`dishonored_sim::crosshair`).
+        let focus = |m: &mut crate::mission::MissionMatch, at: Vec3, yaw: f32| {
+            let p = m.world.player_mut(1).unwrap();
+            p.position = at;
+            p.velocity = Vec3::ZERO;
+            m.step(&[(1, dishonored_sim::input::PlayerInput { yaw, ..Default::default() })], &world, &cfg);
+            m.interaction(1)
+        };
+        assert_eq!(focus(&mut m, Vec3::new(-120.0, 0.0, 70.0), 0.0), Some(Interaction::Launcher(0)), "the view enters the tripod's bounds within m_fMaxDistance");
+        assert_eq!(focus(&mut m, Vec3::new(-400.0, 0.0, 70.0), 0.0), None, "out of reach");
+        assert_eq!(focus(&mut m, Vec3::new(-120.0, 0.0, 70.0), 180.0), None, "looking away");
         m.world.player_mut(1).unwrap().position = Vec3::new(-120.0, 0.0, 70.0);
-        assert_eq!(m.interaction(1), Some(Interaction::Launcher(0)), "the view enters the tripod's bounds within m_fMaxDistance");
-        m.world.player_mut(1).unwrap().position = Vec3::new(-400.0, 0.0, 70.0);
-        assert_eq!(m.interaction(1), None, "out of reach");
-        m.world.player_mut(1).unwrap().position = Vec3::new(-120.0, 0.0, 70.0);
-        m.world.player_mut(1).unwrap().yaw = 180.0;
-        assert_eq!(m.interaction(1), None, "looking away");
         let mut events = Vec::new();
         m.step_launchers(&world, &cfg, &mut events);
         assert_eq!((m.view.launchers.len(), m.view.launchers[0].armed, m.view.launchers[0].harvested), (1, true, false));

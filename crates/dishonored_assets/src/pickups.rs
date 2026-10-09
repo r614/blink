@@ -59,6 +59,7 @@ fn kind_of(class: &str, tweak: &TMap) -> Option<PickupKind> {
 /// against the same packages.
 pub fn extract_pickups(content: &Content, packages: &[String]) -> Result<Vec<PlacedPickup>> {
     let db = TweakDb::load_with(content, packages)?;
+    let mut res = crate::collision_audit::PropResolver::new(content);
     let mut out: Vec<PlacedPickup> = Vec::new();
     let mut stealables: Vec<(String, String)> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -110,7 +111,19 @@ pub fn extract_pickups(content: &Content, packages: &[String]) -> Result<Vec<Pla
                     }
                 }
             }
-            out.push(PlacedPickup { name: pkg.obj_name(ObjRef::Export(i)).to_string(), package: name.clone(), position, tweak, kind, stealable_from: None });
+            // The world box of its mesh (the crosshair's collision stand-in): the mesh's local
+            // bounds scaled by `DrawScale` x `DrawScale3D` and turned by the actor's rotation
+            // (the component's `Bounds`), relative to the actor's location.
+            let (_, lo, hi) = crate::world_actors::actor_mesh_bounds(&pkg, &h.properties, &mut res);
+            let eff = res.effective(&pkg, i);
+            let rot = find(&eff, "Rotation").and_then(|x| x.as_rotator()).unwrap_or([0; 3]);
+            let scale3 = find(&eff, "DrawScale3D").and_then(|x| x.as_vector()).map(Vec3::from).unwrap_or(Vec3::ONE);
+            let scale = match find(&eff, "DrawScale").map(|p| &p.value) {
+                Some(Value::Float(f)) => *f,
+                _ => 1.0,
+            };
+            let (bounds_min, bounds_max) = if hi.cmpgt(lo).any() { dishonored_ir::items::rotated_box(lo, hi, scale3 * scale, [rot[0] as f32 * (360.0 / 65536.0), rot[1] as f32 * (360.0 / 65536.0), rot[2] as f32 * (360.0 / 65536.0)]) } else { (Vec3::ZERO, Vec3::ZERO) };
+            out.push(PlacedPickup { name: pkg.obj_name(ObjRef::Export(i)).to_string(), package: name.clone(), position, tweak, kind, stealable_from: None, bounds_min, bounds_max });
         }
     }
     for (pickup, spawner) in stealables {

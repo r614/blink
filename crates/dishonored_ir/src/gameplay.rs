@@ -92,6 +92,10 @@ pub struct MovementConfig {
     /// driven by a spring (`m_LeanConstants`).
     #[serde(default)]
     pub lean: LeanConfig,
+    /// The player camera's resting position (`CameraCache.POV.Location`) as a function of the
+    /// view pitch, measured on the original ([`CameraRig`]).
+    #[serde(default)]
+    pub camera: CameraRig,
     /// Swimming and breath (`StatePlayerMasterSwim`, `APawn::physSwimming`,
     /// `DisTweaks_PlayerPawn.m_fApnea*`, `Attribute_Drowning*`).
     #[serde(default)]
@@ -185,6 +189,39 @@ impl Default for WaterMoveConfig {
             drowning_damage: 1.0,
             drowning_step: 1.0,
         }
+    }
+}
+
+/// The player camera's position at rest (no lean, no bob): the eye sits on an arc about a neck
+/// pivot, `POV = pivot + R (sin(phi0 - pitch), cos(phi0 - pitch))` in the (view-forward, up)
+/// plane, the pivot measured from the top of the pawn's collision cylinder. Measured 2026-10-09
+/// on Boyle Int (`CameraCache.POV.Location` of the standing pawn at 15 pitches from -85 to 85
+/// degrees, fixed 60 Hz: least squares fit, residual below 0.1 uu; the crouched pawn's camera
+/// keeps the same arc from its lower cylinder top within 1 uu). The arc comes from the
+/// `DishonoredPlayerCamera` influences (the look-pitch pose of the arms rig's camera joint),
+/// not from a tweak value: U-980.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct CameraRig {
+    /// The arc's centre: forward of the pawn's location, and above the top of its cylinder.
+    pub pivot_forward: f32,
+    pub pivot_up: f32,
+    /// The arc's radius and its angle from vertical at pitch 0 (degrees, towards forward).
+    pub radius: f32,
+    pub phi0: f32,
+}
+
+impl Default for CameraRig {
+    fn default() -> Self {
+        // The fit's centre, 46.582 above the middle of the 87.5 cylinder: -40.918 from its top.
+        Self { pivot_forward: -0.6152, pivot_up: -40.918, radius: 31.892, phi0: 10.462 }
+    }
+}
+
+impl CameraRig {
+    /// (forward, up from the cylinder top) of the camera at a pitch in degrees.
+    pub fn offset(&self, pitch_deg: f32) -> (f32, f32) {
+        let a = (self.phi0 - pitch_deg).to_radians();
+        (self.pivot_forward + self.radius * a.sin(), self.pivot_up + self.radius * a.cos())
     }
 }
 

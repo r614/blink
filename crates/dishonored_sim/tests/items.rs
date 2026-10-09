@@ -72,12 +72,23 @@ impl Run {
     fn pm(&mut self, id: u32) -> &mut dishonored_sim::state::PlayerState {
         self.state.player_mut(id).unwrap()
     }
+    /// A pickup with a 16 uu box mesh (a pickup is hit by the crosshair's sweeps like any
+    /// mesh, `dishonored_sim::crosshair`).
     fn pickup(&mut self, kind: PickupKind, pos: Vec3) -> u32 {
         let id = 9000 + self.state.pickups.len() as u32;
-        self.state.pickups.push(PickupState { id, name: format!("P{id}"), package: String::new(), position: pos, kind, active: true, ammo_left: [0; 8], carried_by: None });
+        self.state.pickups.push(PickupState { id, name: format!("P{id}"), package: String::new(), position: pos, kind, active: true, ammo_left: [0; 8], carried_by: None, bounds_min: Vec3::splat(-8.0), bounds_max: Vec3::splat(8.0) });
         id
     }
+    /// Hold a view for a tick so the camera update chooses its crosshair target; the next
+    /// tick's Use acts on it (the original's Use reads `m_pCrosshairActor`, measured).
+    fn look(&mut self, yaw: f32, pitch: f32) {
+        self.step(&[(1, input(yaw, pitch, 0))]);
+    }
 }
+
+/// Where the crosshair at pitch -20 meets x = 120 from the standing pawn at the origin (the
+/// camera's arc: `CameraRig`).
+const AIM_Z: f32 = 128.0;
 
 fn input(yaw: f32, pitch: f32, buttons: u16) -> PlayerInput {
     PlayerInput { yaw, pitch, buttons, ..Default::default() }
@@ -86,7 +97,8 @@ fn input(yaw: f32, pitch: f32, buttons: u16) -> PlayerInput {
 #[test]
 fn elixir_pickup_and_drink() {
     let mut r = Run::new(&[]);
-    let pk = r.pickup(PickupKind::Elixir(ElixirType::Health), Vec3::new(120.0, 0.0, 40.0));
+    let pk = r.pickup(PickupKind::Elixir(ElixirType::Health), Vec3::new(120.0, 0.0, AIM_Z));
+    r.look(0.0, -20.0);
     r.step(&[(1, input(0.0, -20.0, buttons::USE))]);
     r.step(&[(1, input(0.0, -20.0, 0))]);
     assert!(r.events.iter().any(|e| matches!(e, SimEvent::PickedUp { pickup, .. } if *pickup == pk)));
@@ -113,7 +125,8 @@ fn elixir_pickup_and_drink() {
 fn elixir_pickup_refused_at_max() {
     let mut r = Run::new(&[]);
     r.pm(1).inv.elixirs[0] = r.cfg.gameplay.items.inventory.max_health_elixirs;
-    r.pickup(PickupKind::Elixir(ElixirType::Health), Vec3::new(120.0, 0.0, 40.0));
+    r.pickup(PickupKind::Elixir(ElixirType::Health), Vec3::new(120.0, 0.0, AIM_Z));
+    r.look(0.0, -20.0);
     r.step(&[(1, input(0.0, -20.0, buttons::USE))]);
     assert!(r.state.pickups[0].active);
 }
@@ -131,8 +144,9 @@ fn ammo_capacity_and_partial_stat_pickup() {
     r.pm(1).inv.ammo[AmmoType::SleepDart as usize] = 5;
     let mut ammo = [(0i16, 0i16); 8];
     ammo[AmmoType::SleepDart as usize] = (8, 8);
-    r.pickup(PickupKind::Stat { health: 0, mana: 0, food: false, ammo }, Vec3::new(120.0, 0.0, 40.0));
+    r.pickup(PickupKind::Stat { health: 0, mana: 0, food: false, ammo }, Vec3::new(120.0, 0.0, AIM_Z));
     r.state.pickups[0].ammo_left[AmmoType::SleepDart as usize] = 8;
+    r.look(0.0, -20.0);
     r.step(&[(1, input(0.0, -20.0, buttons::USE))]);
     assert_eq!(r.p(1).inv.ammo[AmmoType::SleepDart as usize], 10);
     assert!(r.state.pickups[0].active);
@@ -142,9 +156,10 @@ fn ammo_capacity_and_partial_stat_pickup() {
 #[test]
 fn coins_runes_and_buying_powers() {
     let mut r = Run::new(&[]);
-    r.pickup(PickupKind::Abstract { item: "Money_twk_Abs.AbstractItems.Coins_AbsItm".into(), quantity: 150, note: false, key_item: true }, Vec3::new(120.0, 0.0, 40.0));
-    r.pickup(PickupKind::Abstract { item: "Runes_twk.AbstractItems.Rune_AbsItm".into(), quantity: 1, note: false, key_item: true }, Vec3::new(120.0, 8.0, 40.0));
-    r.pickup(PickupKind::Abstract { item: "Boyle.Key_AbsItm".into(), quantity: 1, note: false, key_item: true }, Vec3::new(120.0, -8.0, 40.0));
+    r.pickup(PickupKind::Abstract { item: "Money_twk_Abs.AbstractItems.Coins_AbsItm".into(), quantity: 150, note: false, key_item: true }, Vec3::new(120.0, 0.0, AIM_Z));
+    r.pickup(PickupKind::Abstract { item: "Runes_twk.AbstractItems.Rune_AbsItm".into(), quantity: 1, note: false, key_item: true }, Vec3::new(150.0, 0.0, AIM_Z - 10.0));
+    r.pickup(PickupKind::Abstract { item: "Boyle.Key_AbsItm".into(), quantity: 1, note: false, key_item: true }, Vec3::new(180.0, 0.0, AIM_Z - 20.0));
+    r.look(0.0, -20.0);
     for _ in 0..3 {
         r.step(&[(1, input(0.0, -20.0, buttons::USE))]);
         r.step(&[(1, input(0.0, -20.0, 0))]);
@@ -198,6 +213,7 @@ fn releasing_the_choke_lets_the_victim_go() {
 fn carrying_is_slower_and_drop_puts_the_body_down() {
     let mut r = Run::new(&[(Vec3::new(60.0, 0.0, Z), 0.0)]);
     r.pm(100).condition = Condition::Unconscious;
+    r.look(0.0, -40.0);
     r.step(&[(1, input(0.0, -40.0, buttons::USE))]);
     r.step(&[(1, input(0.0, 0.0, 0))]);
     assert_eq!(r.p(1).carrying, Some(100));

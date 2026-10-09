@@ -77,6 +77,8 @@ impl Run {
         // On a shelf just below the crosshair (the placed prop floats: it rests where it is).
         let at = Vec3::new(120.0, 0.0, r.eye().z - 30.0);
         movables::spawn(&mut r.state, &bottle(at));
+        // The camera update that follows chooses the crosshair target the Use acts on.
+        r.steps(1, &[]);
         r.events.clear();
         r
     }
@@ -169,17 +171,20 @@ fn the_grab_slides_the_prop_over_the_initial_grab_time() {
 #[test]
 fn no_pickup_out_of_reach_or_out_of_view() {
     let mut r = Run::new(&[]);
-    // Looking away.
+    // Looking away: the view is held a tick (the camera update), then Use.
+    r.step(&[(1, PlayerInput { yaw: 120.0, ..input(0) })]);
     r.step(&[(1, PlayerInput { yaw: 120.0, ..input(buttons::USE) })]);
     assert_eq!(picked_up(&r.events), 0);
-    // Too far (m_fMaxDistance 200 + the pawn's radius).
+    // Too far (past the trace's m_fUsableObjectDist 300).
     let mut r = Run::new(&[]);
     r.state.movables[0].position.x = 420.0;
+    r.step(&[(1, input(0))]);
     r.step(&[(1, input(buttons::USE))]);
     assert_eq!(picked_up(&r.events), 0);
     // A prop that is not interactable (the candlesticks, the rope) stays.
     let mut r = Run::new(&[]);
     r.state.movables[0].interactable = false;
+    r.step(&[(1, input(0))]);
     r.step(&[(1, input(buttons::USE))]);
     assert_eq!(picked_up(&r.events), 0);
 }
@@ -305,32 +310,38 @@ fn damage_and_a_dead_holder_drop_the_prop() {
 fn a_broken_prop_cannot_be_picked_up_again() {
     let mut r = Run::new(&[]);
     movables::on_broken(&mut r.state, 0);
+    r.step(&[(1, input(0))]);
     r.step(&[(1, input(buttons::USE))]);
     assert_eq!(picked_up(&r.events), 0);
 }
 
-/// An unconscious guard whose aim point is `body_off` degrees off the view and the bottle's centre
-/// `bottle_off` degrees off it, both in front of the player.
+/// An unconscious guard lying `body_off` degrees off the view and the bottle's centre `bottle_off`
+/// degrees off it, both in front of the player (the camera's location, `movement::camera_pov`).
 fn crosshair_contest(body_off: f32, bottle_off: f32) -> Run {
     let mut r = Run::new(&[(Vec3::new(-400.0, 0.0, Z), 0.0)]);
-    let eye = r.eye();
+    let eye = movement::camera_pov(r.p(), &r.cfg.gameplay.movement);
     let at = |deg: f32, dist: f32| eye + Vec3::new(deg.to_radians().cos(), deg.to_radians().sin(), 0.0) * dist;
-    let hh = movement::half_height(r.state.player(100).unwrap(), &r.cfg.gameplay.movement);
+    let mv = r.cfg.gameplay.movement.clone();
+    let hh = movement::half_height(r.state.player(100).unwrap(), &mv);
     let b = r.state.player_mut(100).unwrap();
     b.condition = dishonored_sim::state::Condition::Unconscious;
-    b.position = at(body_off, 100.0) + Vec3::Z * (hh * 0.5);
+    // Its box (lying along its yaw 0) is centred on the view's line `body_off` degrees off.
+    b.yaw = 0.0;
+    b.position = at(body_off, 100.0) + Vec3::Z * (hh - mv.collision_radius);
     let m = &mut r.state.movables[0];
     m.position = at(bottle_off, 120.0) - m.center_offset();
+    // The camera update, then the Use.
+    r.step(&[(1, input(0))]);
     r.step(&[(1, input(buttons::USE))]);
     r
 }
 
 #[test]
-fn only_the_prop_or_the_body_nearer_the_crosshair_is_taken() {
-    let r = crosshair_contest(0.0, 20.0);
+fn only_the_prop_or_the_body_under_the_crosshair_is_taken() {
+    let r = crosshair_contest(0.0, 25.0);
     assert_eq!(r.p().carrying, Some(100), "{:?}", r.events);
     assert_eq!(picked_up(&r.events), 0);
-    let r = crosshair_contest(20.0, 0.0);
+    let r = crosshair_contest(25.0, 0.0);
     assert_eq!(r.p().carrying, None);
     assert_eq!(picked_up(&r.events), 1, "{:?}", r.events);
 }

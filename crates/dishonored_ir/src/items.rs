@@ -75,6 +75,15 @@ pub struct InventoryConfig {
     pub max_mana_elixirs: u8,
     /// `DisTweaks_InteractableInterface.m_fMaxDistance` (class default; pickups do not override it).
     pub interact_distance: f32,
+    /// `DisTweaks_PlayerInput.m_fUsableObjectDist` / `m_fUsableObjectExtentBroad` /
+    /// `m_fUsableObjectExtentNarrow`: the crosshair trace's length and the half extents of its
+    /// two box sweeps (the focus rule 0x00AB70F0, `dishonored_sim::crosshair`).
+    #[serde(default = "d_usable_dist")]
+    pub usable_object_dist: f32,
+    #[serde(default = "d_usable_broad")]
+    pub usable_object_extent_broad: f32,
+    #[serde(default = "d_usable_narrow")]
+    pub usable_object_extent_narrow: f32,
     /// `Attribute_ChokeTime`, added to the choke animation length (0x00A7AA00).
     pub choke_time: f32,
     /// Length of the choke animation the timer adds (`FUN_00c4de20` of anim state 0x5f): the
@@ -116,6 +125,16 @@ pub struct InventoryConfig {
     pub offscreen_melee_reduction: [f32; 4],
 }
 
+fn d_usable_dist() -> f32 {
+    300.0
+}
+fn d_usable_broad() -> f32 {
+    10.0
+}
+fn d_usable_narrow() -> f32 {
+    2.0
+}
+
 fn d_xbow_headshot() -> f32 {
     1.2
 }
@@ -139,6 +158,9 @@ impl Default for InventoryConfig {
             max_health_elixirs: 10,
             max_mana_elixirs: 10,
             interact_distance: 200.0,
+            usable_object_dist: d_usable_dist(),
+            usable_object_extent_broad: d_usable_broad(),
+            usable_object_extent_narrow: d_usable_narrow(),
             choke_time: 1.5,
             choke_anim_time: 5.033,
             choke_hold_to_auto_carry: 0.2,
@@ -872,6 +894,25 @@ pub enum PickupKind {
     Inventory { item: String },
 }
 
+/// The axis-aligned box (relative to the actor's location) of a local box scaled and turned by a
+/// UE3 rotation (pitch, yaw, roll in degrees): the world `Bounds` of a mesh component.
+pub fn rotated_box(lo: Vec3, hi: Vec3, scale: Vec3, rot_deg: [f32; 3]) -> (Vec3, Vec3) {
+    // UE3's rotation matrix: yaw about Z, pitch about Y (positive pitch raises the nose), roll about X.
+    let r = std::f32::consts::PI / 180.0;
+    let q = glam::Quat::from_rotation_z(rot_deg[1] * r) * glam::Quat::from_rotation_y(-rot_deg[0] * r) * glam::Quat::from_rotation_x(rot_deg[2] * r);
+    let (a, b) = (lo * scale, hi * scale);
+    let (a, b) = (a.min(b), a.max(b));
+    let mut mn = Vec3::splat(f32::INFINITY);
+    let mut mx = Vec3::splat(f32::NEG_INFINITY);
+    for i in 0..8 {
+        let c = Vec3::new(if i & 1 == 0 { a.x } else { b.x }, if i & 2 == 0 { a.y } else { b.y }, if i & 4 == 0 { a.z } else { b.z });
+        let w = q * c;
+        mn = mn.min(w);
+        mx = mx.max(w);
+    }
+    (mn, mx)
+}
+
 /// A pickup actor placed in a level.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlacedPickup {
@@ -885,4 +926,10 @@ pub struct PlacedPickup {
     /// Spawner whose `m_pStealablePickup` this is (carried by that NPC, pickpocketable).
     #[serde(default)]
     pub stealable_from: Option<String>,
+    /// The world box of its mesh relative to `position` (zero when the mesh was not found):
+    /// what the crosshair's traces meet (`dishonored_sim::crosshair`).
+    #[serde(default)]
+    pub bounds_min: Vec3,
+    #[serde(default)]
+    pub bounds_max: Vec3,
 }
