@@ -128,7 +128,7 @@ Sessions: the first two at the engine's variable step (20-35 fps), the third at 
 | Dispersion after a reload | 45 -> 15 at 70.0 /s (0.43-0.48 s at variable step) | 70 /s | same |
 | Pistol: shot -> reload start / timed stage / load (60 Hz) | 0.283 / 0.716 / 1.483 s | 0.30 / 0.726 / 1.476 | same within a tick per stage (the shot leaves one tick after the fire action starts) |
 | Pistol: earliest next shot after a shot (60 Hz, fire tapped every 2 ticks) | 1.816 s (load + 0.333), dispersion 21.7 | 1.778 s | same within the stage ticks (ReloadOut 0.302 + 2 ticks) |
-| Crossbow: shot -> reload start / timed stage / load (60 Hz) | 0.351 / 0.535 / 1.555 s | 0.398 recovery, In 0.173, `m_fReloadTime` 1.0 | **U-501 confirmed**: the timed stage lasts 1.02 s (1.0 + a tick) |
+| Crossbow: shot -> reload start / timed stage / load (60 Hz) | 0.351 / 0.535 / 1.555 s | 0.398 recovery, In 0.173, `m_fReloadTime` 1.0 | **U-501 confirmed**: the timed stage lasts 1.02 s (1.0 + a tick); 2026-10-08: the shot leaves on the clip's `FireProjectile` notify (third tick of the action), so shot -> load is 94 ticks, 1.567 s (systems/ranged.md F14) |
 | Slot 98 (U-421) | shots leave at the current dispersion (15.0 for 150 settled shots), then 45 | shot then max | confirmed unused on the fire path |
 | Movement / camera dispersion increase (U-422) | strafing and turning (800 rotator units per tick) leave 15.0; sprinting holds 45 | not modelled | **confirmed unused** |
 | Blink range, level 1 / 2, level aim | 1100.0 / 1600.0 uu from the eye, horizontally | 1100 / 1600 | same (`m_CurrentLevel` 1 = level 1 = `m_Levels[0]`) |
@@ -169,7 +169,7 @@ hash of `shader_maps` blobs), `measure lean | bendtime | grenade`.
 | ArkPp LUT bake constants (U-582) | exposure 1.231144, gamma 0.431818 (0.95 / 2.2), contrast 1.081794 | same | **same** |
 | UE3 gamma pass (PS 1875, `InverseGamma` 1/2.2) | drawn, but skipping it changes nothing; the uber pass writes the screen | not drawn | same result |
 | Moon glow (U-580) | the sky dome's `Storm` texture at texture coordinate 1 (skip / `Storm_Intensity` 0 removes it) | sampled at the lightmap set (0) | **fixed** |
-| Lean (U-048) | 20 degrees held (15 + 5 soften at about 5 / s), 119.7 uu sideways, 21.4 down, roll 10; 14.2 degrees at 0.2 s | 15 degrees, no roll | **fixed** (the onset is still slower: 10.7 at 0.2 s) |
+| Lean (U-048) | 20 degrees held (15 + 5 soften at about 5 / s), 119.7 uu sideways, 21.4 down, roll 10; 14.2 degrees at 0.2 s | 15 degrees, no roll | **fixed** (2026-10-08: the 14.2 at 0.2 s was a real-time reading; at a fixed 1/60 s the original is 16.15 twelve ticks after the press and the port now equals the per-tick capture, systems/movement.md Rule 7) |
 | Drowning (U-242) | air 30 s, then 1 point per 61 ticks to death; no regeneration while drowning (regeneration works under water with air) | regeneration held health at 10 | **fixed** |
 | Under-water flag (U-244) | set while the camera is below the volume top (-2071.02 set, -2068.27 clear) | eye in the volume | **same** |
 | Bend Time level 1 (U-109) | `TimeDilation` 1 -> 0.85 over 0.15 s, back over 0.25 s from 11.76 s, ends at 12.01 s (real); `BendTimeSeconds` at 0.15 x real | same | **same** |

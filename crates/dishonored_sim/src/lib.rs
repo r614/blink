@@ -123,6 +123,17 @@ pub fn step_world(
         let keep = input::buttons::JUMP | input::buttons::CROUCH | input::buttons::SPRINT | input::buttons::WALK;
         ins[h] = PlayerInput { tick: pi.tick, forward: pi.forward, right: pi.right, yaw: pi.yaw, pitch: pi.pitch, buttons: pi.buttons & keep, left_hand: state.players[h].left.item, action: 0, npc_move: 0, npc_speed: 0.0 };
     }
+    // The quick-access wheel (`input::buttons::WHEEL`) slows the world while it is open.
+    for i in 0..state.players.len() {
+        let p = &state.players[i];
+        if p.kind != state::PawnKind::Human {
+            continue;
+        }
+        let (id, open) = (p.id, p.alive && ins[i].pressed(input::buttons::WHEEL));
+        if open || state.blink_layers.iter().any(|l| l.wheel && l.caster == id) {
+            powers::set_wheel_layer(state, id, open);
+        }
+    }
     // Bend Time: each pawn's rate this tick; the player's armour (`Attribute_DamageReduction`,
     // the Armor upgrade, applied by the player's TakeDamage 0x00AB0A30).
     for i in 0..state.players.len() {

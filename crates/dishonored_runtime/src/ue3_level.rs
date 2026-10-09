@@ -96,6 +96,9 @@ pub fn prepare(map: &DishonoredMap, features: &RenderFeatures) -> Option<Prepare
         policy: Policy,
         lit: bool,
         set1: bool,
+        /// the depth-only program it takes (masked: with its clipping); None: translucent
+        depth: Option<bool>,
+        blend: Blend,
     }
     let mut cands = Vec::new();
     for (ii, inst) in map.instances.iter().enumerate() {
@@ -120,11 +123,21 @@ pub fn prepare(map: &DishonoredMap, features: &RenderFeatures) -> Option<Prepare
             let policy = if lightmapped { Policy::DirectionalLightMap } else { Policy::NoLightMap };
             let lit = !ue.unlit && matches!(ue.blend, Blend::Opaque | Blend::Masked);
             let set1 = !lightmapped && mesh.uv_set1.len() == mesh.positions.len();
-            cands.push(Cand { ii, si, mat, map: ue.map, policy, lit, set1 });
+            let depth = match ue.blend {
+                Blend::Opaque => Some(false),
+                Blend::Masked => Some(true),
+                _ => None,
+            };
+            cands.push(Cand { ii, si, mat, map: ue.map, policy, lit, set1, depth, blend: ue.blend });
         }
     }
     let built = build_programs(cands.iter().map(|c| (c.map, c.policy, c.lit)));
     cands.retain(|c| built.contains(&(c.map, c.policy, c.lit)));
+    // the depth-only programs (depth prepass, shadows), across all cores too
+    {
+        let keys: Vec<(u32, Policy, bool)> = cands.iter().filter_map(|c| Some((c.map, c.policy, c.depth?))).collect::<HashSet<_>>().into_iter().collect();
+        crate::map_render::par_map(&keys, |k| ue3mat::depth_wgsl(k.0, k.1, k.2).is_some());
+    }
 
     // the instance buffer: entry 0 the scene, then one per instance drawn here
     let stride = INSTANCE_STRIDE as usize;
@@ -261,6 +274,25 @@ pub fn prepare(map: &DishonoredMap, features: &RenderFeatures) -> Option<Prepare
     // the light passes' programs (lit materials only: `ue3_light_material`)
     let light_ok = |mat: usize| map.material_params[mat].ue3.as_ref().is_some_and(|ue| !ue.unlit && matches!(ue.blend, Blend::Opaque | Blend::Masked) && ue.params.len() <= DYN_SHADOW_SLOT);
     let light_built = build_programs(cands.iter().filter(|c| light_ok(c.mat)).flat_map(|c| inst_passes.get(&c.ii).into_iter().flatten().map(move |p| (c.map, p.policy, false))));
+
+    // start composing their pipeline variants (the def lists recorded for each kind of use) on
+    // the shader pool, while the level finishes loading
+    if ue3mat::shader_cache_enabled() {
+        let mut uses: HashSet<((u32, Policy, bool), bool, u8)> = HashSet::new();
+        for c in &cands {
+            uses.insert(((c.map, c.policy, c.lit), false, ue3mat::blend_code(c.blend)));
+            if let Some(masked) = c.depth {
+                uses.insert(((c.map, c.policy, masked), true, masked as u8));
+            }
+            if light_ok(c.mat) {
+                for p in inst_passes.get(&c.ii).into_iter().flatten().filter(|p| light_built.contains(&(c.map, p.policy, false))) {
+                    // (a light pass: additive, `ue3_light_material`)
+                    uses.insert(((c.map, p.policy, false), false, 3));
+                }
+            }
+        }
+        ue3mat::prefetch_variants(uses.into_iter().collect());
+    }
 
     let mut parts = HashMap::new();
     for c in &cands {
@@ -546,6 +578,8 @@ impl Ue3Spawn {
             });
         });
         info!("original shaders: {made} surfaces ({fallbacks} fell back to the standard material), {passes} dynamic light passes");
+        let s = world.resource::<Ue3Programs>().stats();
+        info!("pipelines: {} programs ({} distinct), {} depth/shadow variants ({} requested)", s.programs, s.distinct, s.depth_variants, s.depth_requests);
     }
 }
 
@@ -615,6 +649,18 @@ impl MatBuilder<'_> {
         let lit = !ue.unlit && matches!(ue.blend, Blend::Opaque | Blend::Masked) && !matches!(policy, Policy::PointLight | Policy::SpotLight | Policy::PointLightShadowed | Policy::SpotLightShadowed);
         let program = programs.get(ue.map, policy, lit, shaders)?;
         m.key = Ue3Key::new(program, ue.blend, ue.two_sided);
+        // opaque and masked surfaces take UE3's depth-only shaders in the depth and shadow
+        // passes (a dynamic light's pass is never drawn in them)
+        if matches!(policy, Policy::NoLightMap | Policy::DirectionalLightMap) {
+            let masked = match ue.blend {
+                Blend::Opaque => Some(false),
+                Blend::Masked => Some(true),
+                _ => None,
+            };
+            if let Some(d) = masked.and_then(|masked| programs.get_depth(ue.map, policy, masked, shaders)) {
+                m.key.depth = d;
+            }
+        }
         m.map = ue.map;
         m.mat_id = id;
         m.light_ok = !ue.unlit && matches!(ue.blend, Blend::Opaque | Blend::Masked) && ue.params.len() <= DYN_SHADOW_SLOT;

@@ -264,19 +264,45 @@ runs `m_fLeanReleaseTime` 0.2 s with no request, then the state ends. `Dishonore
 3. The head's angle from the pivot is limited to `m_fMaxLeanAngle` 15 (crouched 15) plus `m_fCurMaxLeanSoften`;
    while the head is held at the limit the soften term approaches `m_fMaxLeanSoftenAngle` 5 at
    `m_fMaxLeanSoftenSpeed` 5 / s, else decays at that rate. Held: 20 deg, 119.7 uu sideways, 21.4 down,
-   camera roll `m_fCameraTiltPercent` 0.5 x angle = 10 (measured 2026-10-06). 14.2 deg 12 ticks after the press.
+   camera roll `m_fCameraTiltPercent` 0.5 x angle = 10 (measured 2026-10-06).
 4. Camera collision (`m_bHandleCameraCollision`, ratio 0.6) cancels the velocity component into a wall.
+5. The influence is a fixed-step camera influence: `m_bUseFixedTimeStep`, `m_fFixedTimeStep` 0.016667
+   (class default of `DishonoredCameraInfluence`), an accumulator `m_fAccumulatedDelta` (+0x48) and the
+   step `m_fCurFixedTimeStep` (+0x4C) that `0x00AC5950` takes as its `dt`; the view (`0x00ACAAB0`)
+   interpolates the head point between the last two steps by `m_fAccumulatedDelta / m_fCurFixedTimeStep`
+   and builds its rotation from the interpolated head direction (`0x00ACAAB0` -> `0x0041D720`: the roll
+   is `atan2(dy, dz)` of the head from the pivot), blended by `m_fCameraTiltPercent`. The 60 Hz frame
+   (1/60 s = 0.016666651 in the trace's `world.dt`) is shorter than the 0.016667 step, so the first frame
+   of a fresh influence spends no step: the head starts moving one frame after the lean state's first
+   write, then one step per frame.
 
-My integration of this model (velocity replaced each tick, k 80, c 12, sphere 350, limit 15 + soften)
-gives 12.3 deg at 6 ticks and 16.5 at 12 ticks for 1000 uu/s, and 13.8 at 12 ticks for 600; the measured
-14.2 at 12 ticks sits between, so the speed unit or the interpolation phase is not exactly what I
-modelled; the shape (fast onset, hitting the limit within about 0.2 s) is what the port lacks.
-Port: `movement::step_lean`, `lean_offset`: the held angle, roll, sideways and drop match the
-measurement; the onset does not (10.7 deg at 0.2 s) because it springs a normalized angle toward a
-target at the maximum (MV-4). The port also lets a lean stand only below 10 uu/s; the original's
-break rule (`m_fBreakLean_Speed_PC` 200 in `DisTweaks_PlayerInput`, `m_fLean_Trigger_Threshold` 0.5 for
-sticks) is not decoded (scenario `lean_moving`).
-
+Re-measured 2026-10-08 (scenario captures `movement/lean` and `movement/lean_boyle`, the hook's
+CameraCache.POV per tick at a fixed 1/60 s, key down on tick 1 / 20 / 140): the lean angle (2 x roll) is
+2.175, 4.307, 6.383, 8.405, 10.360, 12.272, 14.117, 15.007, 15.425, 15.798 ... 17.908 (twentieth tick),
+20.0 held; the first step runs on the third tick after a press on tick 1 (all three presses seen, both leans of
+`lean_boyle` included). The model of items 1-3 (velocity replaced each held
+step with 1000 uu/s, k 80 / c 12 semi-implicit Euler at dt 1/60, sphere 350, limit 15 + soften) gives
+2.182, 4.310, 6.384, 8.403, 10.365, 12.270, 14.117, 15.000, 15.417 on the steps after the first
+frame, within the rotator quantisation (0.0055 deg x 2). The "2.26 / 12.21 / 15.0 on the sixth tick" and
+"14.2 deg 12 ticks after the press" of the 2026-10-06 hand trace do not agree with these captures (its
+15 degrees on the sixth tick is not reachable at 1000 uu/s: the sixth step is 12.27) and are
+superseded: 12 ticks after the press the original reads 16.150 (`lean_boyle`), the port 16.149.
+The camera POV position in the same captures is eased in (its y moves 2.66 uu on the first step
+against the head point's 13.3, its z climbs 10 -> 148 over 60 ticks after the setup teleport), so the
+sideways onset (13.33 / 26.31 / 62.68 uu of the earlier trace) is Unverified; the held 119.7 uu sideways
+agrees.
+Port: `movement::step_lean` (the frame: `lean_state_tick` and the accumulator), `lean_step` (one fixed
+step), `lean_offset`. `PlayerState.lean_state / lean_release / lean_acc / lean_ext`;
+`LeanConfig.fixed_time_step / lean_speed / release_time` are the class defaults (not in any tweak
+or ini). The port also lets a lean stand only below 10 uu/s; the original's break rule
+(`m_fBreakLean_Speed_PC` 200 in `DisTweaks_PlayerInput`, `m_fLean_Trigger_Threshold` 0.5 for sticks) is
+not decoded (scenario `lean_moving`).
+Open (release): after the key is up the original keeps the angle at the limit for six steps and then
+falls faster than the port (first drops 1.19, 1.36, 1.46, 1.54 deg against the port's 0.23, 0.62, 0.91,
+1.13; undershoot -0.90 against -0.82). The decoded limiter re-places the head on the limit each
+clamped step (0x00AC5540 `FUN_00402bc0`), which gives three pinned steps; a head that is not re-placed
+while the spring pulls it back fits the original to 0.14 deg rms, so the stretch is real but its source
+(the camera step loop, the sleep path or the weight) is not decoded. No scenario judges it.
 ## Rule 8: swimming and breath
 
 - Entry: a pawn whose physics volume becomes a `bWaterVolume` switches to Swimming; `startSwimming`
@@ -342,7 +368,7 @@ values.
 | MV-1 | ported | `movement::falling`: after a wall hit `v = 2 measured - (measured.xy, v0.z)` under the usual condition (re-read 0x006BF0E0: the wall branch overwrites the saved old xy with the measured ones, `fVar9` keeps the old vz). Gravity against a wall is now 3000 uu/s^2 as in free flight |
 | MV-2 | ported | `PlayerState.mantle_allowed` (set in `step_movement` while walking / swimming, by a Jump press in `jump_press_mantle`, cleared by the mantle state, not by the step-up: 0x00ADBD00 / 0x00ADBE70 / 0x00AD78D0 / 0x00ACD820). Walking mantles only on the Jump press (before the jump; a step-up leaves the pawn walking and its physics runs that tick); falling every tick with the flag and Jump down; no stick test anywhere. `mantle_still_144`, `mantle_wall_144`, `mantle_air_98_hold` now mantle, `_tap` does not |
 | MV-3 | ported | `swim::swimming`: request while Jump is down, no head-above-water or forward condition (`m_bAutomaticallyMantleInWater` false in the shipped tweaks, not loaded) |
-| MV-4 | already in main (scenario agent), reconciled | `step_lean` follows 0x00A76590 -> 0x00AC0950 (velocity replaced each held tick), 0x00AC0A00 (integrator), 0x00AC5950 (projection on the circle), 0x00AC5540 (limit and soften). Re-read: 0x00AC5540 also blends `m_fCurLeanAngle` (+0x9C) toward the stance's max angle at 10 / s, but activation (0x00AC5420) sets both it and `m_fCurLeanHeight` to their targets, so with the shipped 15 / 15 angles it is a no-op; the limit is applied per rotator axis (pitch, roll) of the head direction. Open: the per-tick angle (2.18 vs 2.26 deg at tick 1, 10.4 vs 12.2 at tick 5) while the sideways displacement matches (U-867); `lean_boyle`'s "14.2 deg 12 ticks after the press" contradicts the fixed-step `lean` trace (15 deg on the sixth tick), so that check's source should be re-measured; the new hook value (88.9 sideways, 16 down, roll -10) is not yet in a spec |
+| MV-4 | already in main (scenario agent), reconciled | `step_lean` follows 0x00A76590 -> 0x00AC0950 (velocity replaced each held tick), 0x00AC0A00 (integrator), 0x00AC5950 (projection on the circle), 0x00AC5540 (limit and soften). Re-read: 0x00AC5540 also blends `m_fCurLeanAngle` (+0x9C) toward the stance's max angle at 10 / s, but activation (0x00AC5420) sets both it and `m_fCurLeanHeight` to their targets, so with the shipped 15 / 15 angles it is a no-op; the limit is applied per rotator axis (pitch, roll) of the head direction. **Ported 2026-10-08** (see Rule 7): the "slow ramp" was the specs' stale hand trace, not the head spring; the port's angle series already equalled the new original captures, one frame early. Rebuilt: the lean state (key press starts it, `m_fReleaseTimer` 0.2 s) and the influence's fixed-step accumulator (0.016667 step, first 1/60 s frame spends none), so the first step runs one frame after the first write as in the original. `lean` / `lean_boyle` checks re-based on the captures (angle and roll Measured; the POV-position onset Unverified). Open: the release (six pinned steps in the original, three in the port) |
 | MV-5 | decoded; not ported (the measurement shows no movement effect) | The landing branch of 0x00AB53A0 does not request `StatePlayerMasterStunned`: `FUN_00A70F20` builds a request for the generic action state (class getter 0x00A6E020, also used by the mantle request) with `DisTweaks_PlayerPawn_NavigationActions` +0xB8 = `m_Action_JumpLandBig` (`Jump_Land_Big`; the small landings are +0xE4 / +0x110 / +0x13C / +0x168). Its state tree `Ply_Player_Land_at` plays `Ply_Generic_as.Generic_JumpLandBig` (0.967 s; `AnimNotify_Rumble` 0.022, `DishonoredNotify_CameraPitchTarget` 0.393 to -66.9 deg pitch, `AnimStateExit` 0.935) at `Attribute_LandAnimRate` (`m_bScaleByLandAnimRate`; base 1, Agility +50 %). The action's tweak sets `m_bActionUsesLeftHand` and `m_bAutomaticallyStopSneaking` and leaves `m_bCanMove` / `m_bCanLook` unset. Threshold `m_fFall_Stun_Vel` 2200 (`DefaultPlayerState.ini`), strictly faster. The captured original (`movement/fall_stun`, the cache read with the new `oracle cache show`) lands at -2650 uu/s, takes 45 damage and keeps running at 360 uu/s with W held on the five ticks after the landing (no braking): the action does not stop movement. A movement lock ported from the tweak's unset `m_bCanMove` was therefore reverted; what remains is presentation (camera pitch, rumble) and the unverified sneak stop / left-hand block. (`m_fStunDuration` 0.1 belongs to the Stunned state, reached from melee: `Sword_Ready_Versus_BigLose` carries `DishonoredNotify_Stunned` at 1.300.) |
 | MV-6 | ported (the decoded parts) | `movement::find_mantle_spot` rebuilt from 0x00AC6B80 / 0x00AD6410 / 0x00ADA6F0 / 0x00AD6600 / 0x00AD69B0 / 0x00ADA4C0 / 0x00ACCAD0 / 0x00AC6D40: box traces with `Pawn.CrouchHeight` (33) as the half height, the clear height above the feet, heights on a grid ending 0.1 below `min(clear - c, MaxEdgeHeight + c)`, faces outside the angle limits passed over (not a failure), the search re-aimed along the face normal with `m_fMantleForwardMoveAmount` after the first face, the edge height quantized to that grid (box bottom), the destination slope test, the crouch flag from a standing box. Spot location `(face contact xy, feet + H)`. The step-up (0x00AD35E0) is three blocked moves (to the spot, up by the edge, forward 20), velocity and physics untouched. The 6 x 6 grid (0x00AD5F40) only rescues a steep top of an actor with `DisMantleableInterface`: correction to the row above; not ported (the port's world has no actor data) |
 | MV-7 | ported | `PlayerState.right_hand: RightHandItem` replaces `sword_sheathed`; `movement::sword_in_right_hand` (sword class in hand slot 1, no body carried). The oracle runner sets `Empty` without `sword_drawn` |
@@ -359,8 +385,7 @@ root motion agree with the code and with the measurements in HOOK_TRIAGE.md / IN
 ## Scenarios (fixtures/oracle/scenarios/movement/) and capture requests
 
 24 new specs next to the 14 existing ones; the whole directory runs in 0.5 s on the port
-(`oracle scenario --system Movement`: 24 pass, 2 fail, 12 unmeasured; the two failures are the known lean
-onset). All new ones are on `L_Boyle_Ext_P` (the original only runs the Boyle maps), sword equipped on
+(`oracle scenario --system Movement`: 24 pass, 2 fail, 12 unmeasured when written; the two failures were the lean onset, ported since: 26 pass, 0 fail, 12 unmeasured). All new ones are on `L_Boyle_Ext_P` (the original only runs the Boyle maps), sword equipped on
 both sides, 60 Hz, and are in `fixtures/oracle/capture_queue.txt`, together with the by-name reads below.
 Most start at the runway `(-3400, -3150)` facing 270. The mantle, step and slope scenarios start at
 places found by scanning the port's Boyle exterior with 648 temporary runs (a 9 x 9 grid, four facings,
@@ -382,7 +407,7 @@ port values below are what the port does now; none is a reference for the origin
 | `mantle_wall_144` | 6 | pinned against a 144 uu face, Jump press | Unmeasured | medium mantle at the press tick, ends 132.2 above the start |
 | `mantle_still_144` | 6 (MV-2) | the same, no stick input | Unmeasured; the original should mantle | jumps, no mantle |
 | `mantle_air_98_tap` / `_hold` | 6 (MV-2) | run, jump at an edge 97.6 uu high, Jump tapped / held | Unmeasured; the original should mantle only in `_hold` | both mantle at tick 69 |
-| `lean_boyle`, `lean_moving` | 7 | held lean, released; lean while running | Measured 20 / 10 / 14.2; Unmeasured | 20.0 / 10.0 / **10.7** (fails); no lean while running |
+| `lean_boyle`, `lean_moving` | 7 | held lean, released; lean while running | Measured 20 / 10 / 16.15; Unmeasured | 20.0 / 10.0 / 16.15; no lean while running |
 | `swim_entry` | 8 | fall 220 uu into the sea, drift, Jump 1 s, forward | Static (swims); Unmeasured | switch at tick 24 (centre 19 uu under the surface), speed halves at entry, sinks to 250 uu under, 348 uu/s forward |
 | `drown_boyle` | 8 | held under | Measured: 30 s, 61 ticks per point | matches |
 | `climb_chain` | 9 | touch and climb the exterior chain | Static 163.8 uu/s | 163.8, holds height without input |

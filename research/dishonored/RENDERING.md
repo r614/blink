@@ -624,3 +624,49 @@ Frame time is measured, not guessed. Every change here must leave the frames as 
   before checking whether its pose had changed.
 - Lip sync (`characters.rs`): the map's package list was re-read from the install every frame
   a line played. It is now kept per map.
+
+### Level load: the original shaders' pipelines
+
+A level's original-shader materials (`ue3mat.rs`) need several hundred programs (L_Boyle_Ext_P:
+about 295 colour and 45 depth-only programs of about 29 KB of WGSL each), times the views that
+draw them. Bevy composes a pipeline's shader (naga_oil: imports, shader defs, parse) in
+`ShaderCache::get`, under the pipeline cache's single shader cache lock, so these compositions
+ran one after another: the warm-up took 27 s on DX12 with a warm driver cache and 41-51 s on
+Vulkan, and the persistent wgpu pipeline cache cut only 10 s of it.
+
+`ue3_shader_cache.rs` composes them off the render thread instead:
+
+- Variants: `Ue3Material::specialize` hands over its final def list (Bevy adds nothing after
+  it; the material is not bindless). The list is a function of the view (main pass:
+  `MeshPipeline` defs such as MULTISAMPLED, DEPTH_PREPASS, VIEW_PROJECTION_*, TONEMAP_*,
+  SHADOW_FILTER_METHOD_*; prepass and shadow views: `PrepassPipeline` defs such as
+  PREPASS_PIPELINE, UNCLIPPED_DEPTH_ORTHO_EMULATION), the mesh layout (VERTEX_*) and the
+  material key (alpha mode: BLEND_*, MAY_DISCARD; UE_FOREGROUND / UE_FOREGROUND_WORLD). The
+  global AVAILABLE_STORAGE_BUFFER_BINDINGS is added as Bevy's extraction does. Each list is
+  recorded per material class (depth-only program or colour program, prepass or main pass,
+  blend, foreground flags) in `<cache>/shaders/variants.json`.
+- Composition: a pool of worker threads (cores - 1), each with its own naga_oil `Composer`
+  holding Bevy's import modules (with the same sources and defs as Bevy's own composer, so the
+  modules come out the same). A level's worker (`ue3_level::prepare`) starts every program
+  times its class's recorded def lists before the spawn. A def list seen for the first time is
+  composed when `specialize` asks for it, and the pipeline waits for it.
+- Hand-off: the vendored bevy_render (`BlinkShaderModules`, [blink patch]) takes the composed
+  naga IR. The pipeline task creates the wgpu module itself, outside the shader cache lock.
+  Bevy does no composition for these shaders, and wgpu does no parsing: IR goes straight to
+  validation and to the backend's writer (HLSL + DXC/FXC on DX12, SPIR-V on Vulkan) at
+  pipeline creation.
+- Disk cache: `<cache>/shaders/<key>.bin`. The key hashes the program's WGSL, the defs, the
+  backend, the import sources and the crate, Bevy and naga versions. The payload is SPIR-V
+  (naga spv-out, read back and validated when it is written; a variant that does not round-trip
+  is stored as WGSL). A later run parses it on the pool and registers the IR, with no
+  composition.
+- Log: `shaders: N programs x V variants (M modules), C from disk cache, P composed in X s on T
+  threads` once the pool drains (a batch). `shader variants: new def list for ...` is logged
+  when a list is recorded.
+- Switches:
+  - `DISHONORED_NO_SHADER_CACHE=1`: no disk cache (compose every run).
+  - `DISHONORED_NO_SHADER_CACHE=all`: Bevy composes, as before.
+  - `DISHONORED_SHADER_FORMAT=wgsl`: store WGSL instead of SPIR-V.
+
+  A variant that fails to compose here falls back to Bevy (its WGSL with the same defs) and is
+  counted as "left to Bevy".

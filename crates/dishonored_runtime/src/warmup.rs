@@ -45,8 +45,35 @@ impl Plugin for WarmupPlugin {
 #[derive(Resource, Clone, Default)]
 struct Waiting(Arc<AtomicUsize>);
 
-fn count_waiting(cache: Res<PipelineCache>, waiting: Res<Waiting>) {
-    waiting.0.store(cache.waiting_pipelines().count(), Ordering::Relaxed);
+fn count_waiting(cache: Res<PipelineCache>, waiting: Res<Waiting>, mut last: Local<usize>) {
+    let n = cache.waiting_pipelines().count();
+    waiting.0.store(n, Ordering::Relaxed);
+    // A compile burst has finished: persist what was compiled (`configure_pipeline_cache`).
+    if *last > 0 && n == 0 {
+        if let Some(bytes) = cache.save_wgpu_pipeline_cache() {
+            info!("pipeline cache saved ({bytes} bytes)");
+        }
+    }
+    *last = n;
+}
+
+/// Compiled pipelines persist across runs. On Vulkan (`WGPU_BACKEND=vulkan`, the backend with wgpu's
+/// `PIPELINE_CACHE`) the vendored bevy_render keeps its pipeline cache in `<cache>/pipelines`
+/// (`BLINK_PIPELINE_CACHE_DIR`); on DX12, the default, the driver's own shader cache does it.
+/// Measured on L_Boyle_Ext_P: DX12 with a warm driver cache 26.8 s, Vulkan 50.7 s cold / 41.3 s
+/// with the cache (the composition of the translated shaders, not the driver compile, dominates).
+/// Call before the render plugin starts.
+pub fn configure_pipeline_cache() {
+    if std::env::var_os("DISHONORED_NO_PIPELINE_CACHE").is_some() {
+        return;
+    }
+    let dir = dishonored_content::cache_dir().join("pipelines");
+    // SAFETY: called at startup, before any other thread reads the environment.
+    unsafe {
+        if std::env::var_os("BLINK_PIPELINE_CACHE_DIR").is_none() {
+            std::env::set_var("BLINK_PIPELINE_CACHE_DIR", &dir);
+        }
+    }
 }
 
 /// Meshes drawn whatever the view while warming up (only their culling flag is undone after).

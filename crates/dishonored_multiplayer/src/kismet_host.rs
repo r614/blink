@@ -82,7 +82,6 @@ pub const PRESENTATION: &[&str] = &[
     "SeqAct_ConsoleCommand",
     "DisSeqAct_ToggleHUDElement",
     "DisSeqAct_ToggleTutorial",
-    "DisSeqAct_SetTutorialMessage",
     "DisSeqAct_SetCurrentChapter",
     "DisSeqAct_EvalAchievement",
     "DisSeqAct_ToggleAchievementEval",
@@ -234,6 +233,8 @@ pub struct HostState {
     pub off: BTreeSet<u32>,
     /// Task path -> its HUD target (`UpdateTaskTarget`).
     pub targets: BTreeMap<String, Obj>,
+    /// Task path -> its marker's description (`UpdateTaskTarget.m_TargetName`).
+    pub target_names: BTreeMap<String, String>,
     /// Open scripted choice: (op, player, options, picked).
     pub choice: Option<(OpId, PlayerId, Vec<String>, Option<usize>)>,
     /// `AIGoToActor` in progress: op -> (pawn, goal).
@@ -1269,12 +1270,15 @@ impl Host for H<'_> {
             }
             "DisSeqAct_UpdateTaskTarget" => {
                 let target = cx.linked_values("Target").into_iter().next().or_else(|| Some(cx.prop_obj("m_pTargetActor")).filter(|o| !o.is_none()));
+                let name = cx.prop_str("m_TargetName");
                 for t in self.tasks(cx, "Task") {
                     match &target {
                         Some(o) => {
+                            self.st.target_names.insert(t.clone(), name.clone());
                             self.st.targets.insert(t, o.clone());
                         }
                         None => {
+                            self.st.target_names.remove(&t);
                             self.st.targets.remove(&t);
                         }
                     }
@@ -1296,6 +1300,16 @@ impl Host for H<'_> {
             "DisSeqAct_ShowHUDMessage" => {
                 let m = cx.prop_str("m_Message");
                 self.act(vec![Action::Message(m)]);
+                HostResult::Done
+            }
+            // The tutorial line (`tutorialMsg_mc`): `m_TutorialMessage` for `m_fDuration` seconds
+            // (0x00BAE4A0; the game's own tutorials do not go through this op).
+            "DisSeqAct_SetTutorialMessage" => {
+                let t = cx.prop_str("m_TutorialMessage");
+                let secs = cx.prop("m_fDuration").and_then(|v| v.as_float()).unwrap_or(0.0);
+                if !t.is_empty() {
+                    self.act(vec![Action::Tutorial(t, secs)]);
+                }
                 HostResult::Done
             }
             "DisSeqAct_ShowLocationDiscovery" => {
@@ -1324,6 +1338,12 @@ impl Host for H<'_> {
                 let have = self.m.state.items.get(&item).copied().unwrap_or(0);
                 let now = if add { have + q.max(1) } else if q <= 0 { 0 } else { (have - q).max(0) };
                 self.note(format!("abstract item {item}: {have} -> {now}"));
+                // A mission clue (a chapter log): the tutorial window with the note
+                // (`m_PressKeyToReadChapterNoteMessage`, text left to the HUD). The trigger is
+                // from dishonored-bevy's `campaign.rs` (Eamon, used with permission).
+                if add && have == 0 && item.contains("ChapterLog") {
+                    self.act(vec![Action::TutorialWindow(1, String::new())]);
+                }
                 if now > 0 {
                     self.m.state.items.insert(item, now);
                 } else {
@@ -3575,8 +3595,10 @@ pub fn view(m: &MissionMatch, mv: &mut dishonored_mission::runtime::MissionView)
             mv.choices.push((*p, opts.clone()));
         }
     }
-    // HUD marker: first visible active task (in objective order) with a Kismet target.
+    // HUD markers: every visible active task (in objective order) with a Kismet target
+    // (`m_TaskMarkers`); the first one is the single `target`.
     let mut target = None;
+    let mut markers = Vec::new();
     for (oi, o) in m.state.def.objectives.iter().enumerate() {
         let ov = mv.objectives.get(oi);
         if ov.is_none_or(|v| v.hidden) {
@@ -3598,16 +3620,14 @@ pub fn view(m: &MissionMatch, mv: &mut dishonored_mission::runtime::MissionView)
                 _ => None,
             };
             if let Some(p) = pos {
-                target = Some(p.to_array());
-                break;
+                target.get_or_insert(p.to_array());
+                markers.push(dishonored_mission::runtime::TaskMarkerView { pos: p.to_array(), optional: tv.optional, name: run.st.target_names.get(&path).cloned().unwrap_or_default() });
             }
-        }
-        if target.is_some() {
-            break;
         }
     }
     if target.is_some() {
         mv.target = target;
+        mv.task_markers = markers;
     }
     mv.cutscenes = cutscene::view(run); // [interp]
     mv.post_fx = run.st.post.view();

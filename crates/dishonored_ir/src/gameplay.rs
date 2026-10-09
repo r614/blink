@@ -204,8 +204,31 @@ pub struct LeanConfig {
     /// `m_fCameraTiltPercent`: camera roll as a fraction of the lean angle.
     #[serde(default = "d_tilt")]
     pub camera_tilt_percent: f32,
+    /// `DishonoredCameraInfluence.m_fFixedTimeStep` (class default 0.016667): the lean camera
+    /// advances in whole steps of this length (`m_bUseFixedTimeStep`), from an accumulator
+    /// (`m_fAccumulatedDelta`) fed by the frame time; the view interpolates by its fraction
+    /// (0x00ACAAB0).
+    #[serde(default = "d_fixed_step")]
+    pub fixed_time_step: f32,
+    /// `StatePlayerMasterLeaning.m_fLeanSpeed` (class default 1000): the head point's velocity
+    /// while a lean key is held (0x00A76590).
+    #[serde(default = "d_lean_speed")]
+    pub lean_speed: f32,
+    /// `StatePlayerMasterLeaning.m_fLeanReleaseTime` (class default 0.2): how long the state
+    /// outlives the key.
+    #[serde(default = "d_release_time")]
+    pub release_time: f32,
 }
 
+fn d_fixed_step() -> f32 {
+    0.016667
+}
+fn d_lean_speed() -> f32 {
+    1000.0
+}
+fn d_release_time() -> f32 {
+    0.2
+}
 fn d_soften_angle() -> f32 {
     5.0
 }
@@ -218,7 +241,7 @@ fn d_tilt() -> f32 {
 
 impl Default for LeanConfig {
     fn default() -> Self {
-        Self { height_pct: 2.0, max_angle: 15.0, max_angle_crouched: 15.0, springiness: 80.0, damping: 12.0, soften_angle: 5.0, soften_speed: 5.0, camera_tilt_percent: 0.5 }
+        Self { height_pct: 2.0, max_angle: 15.0, max_angle_crouched: 15.0, springiness: 80.0, damping: 12.0, soften_angle: 5.0, soften_speed: 5.0, camera_tilt_percent: 0.5, fixed_time_step: d_fixed_step(), lean_speed: d_lean_speed(), release_time: d_release_time() }
     }
 }
 

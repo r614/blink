@@ -576,6 +576,7 @@ pub fn run() -> AppExit {
     let gs = GameSettings::load();
     let (size, mode, present) = crate::settings::startup_window(la.size, la.size.is_none() && gs.s.graphics.fullscreen, &gs.s);
     let launcher = Launcher::new(&gs);
+    crate::warmup::configure_pipeline_cache();
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window { title: "Dishonored".into(), resolution: size.into(), mode, present_mode: present, ..default() }),

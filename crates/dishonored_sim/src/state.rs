@@ -223,6 +223,20 @@ pub struct PlayerState {
     /// The lean head point's upward velocity (`lean_velocity` is its sideways one), uu/s.
     #[serde(default)]
     pub lean_velocity_z: f32,
+    /// `StatePlayerMasterLeaning` is the pawn's master state (started by a lean key press).
+    #[serde(default)]
+    pub lean_state: bool,
+    /// The state's `m_fReleaseTimer` (+0x54): seconds left to the state after the key is up.
+    #[serde(default)]
+    pub lean_release: f32,
+    /// The lean camera influence's `m_fAccumulatedDelta` (+0x48): frame time not yet spent on a
+    /// fixed step.
+    #[serde(default)]
+    pub lean_acc: f32,
+    /// `m_bGotExternalForce` (+0xA4 bit 1): the head velocity was written by the lean state
+    /// and is put back after each step until a frame has run its steps.
+    #[serde(default)]
+    pub lean_ext: bool,
     /// Ground-speed modifier of the previous tick (`DishonoredPawn.m_fLastSpeedModifier`):
     /// drops are blended down at `speed_blend_down_speed`, rises are instant.
     pub speed_mod: f32,
@@ -669,6 +683,10 @@ impl PlayerState {
             lean_velocity: 0.0,
             lean_soften: 0.0,
             lean_velocity_z: 0.0,
+            lean_state: false,
+            lean_release: 0.0,
+            lean_acc: 0.0,
+            lean_ext: false,
             speed_mod: 1.0,
             sprinting: false,
             strafing: false,
@@ -849,6 +867,10 @@ pub struct WorldState {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct DilationLayer {
     pub caster: PlayerId,
+    /// The quick-access wheel's channel (`BTC` 6, 0x00BE4280): its rate applies to every pawn,
+    /// the caster included (Blink passes a caster rate of 1), and not to the Bend Time clock.
+    #[serde(default)]
+    pub wheel: bool,
     pub current: f32,
     pub target: f32,
     /// Units per second toward `target`; `f32::MAX` = reach it at once (blend time 0).

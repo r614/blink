@@ -350,6 +350,12 @@ pub fn update(
             };
             let g = gun_reload(p, cfg, t);
             let left = crate::inventory::ammo(p, ammo);
+            // The bolt leaves when the fire clip's `DishonoredNotify_FireProjectile` passes
+            // (`bolt_shot_tick`), as the crossbow's own bolts do.
+            let shot_tick = bolt_shot_tick(t, g.fast > 0.0 && left > 0, ctx.dt);
+            if p.left.phase == LeftPhase::Recovering && shot_tick > 0 && ticks_of(prev_timer, ctx.dt) < shot_tick && ticks_of(p.left.timer, ctx.dt) >= shot_tick {
+                fire_special_bolt(p, kind, speed, ctx, cfg, t, spawn);
+            }
             match p.left.phase {
                 LeftPhase::Equipping if p.left.timer >= t.crossbow_equip => p.left.phase = LeftPhase::Idle,
                 // With Attribute_FastReload the shot that leaves a round plays the fast fire action,
@@ -372,11 +378,11 @@ pub fn update(
                     crate::inventory::remove_ammo(p, ammo, 1);
                     // The crossbow's shot (`fire_gun`): `m_fArrowSpawnDistance` along the
                     // dispersed direction, speed scaled by `max(1, Attribute_Range)`, no AI noise.
-                    let eye = eye_position(p, ctx.cfg);
-                    let dir = fire_direction(p, cfg, t);
-                    spawn.push((kind, eye + dir * t.bolt_spawn_distance, dir * speed * crossbow_range_scale(p, cfg)));
                     p.left.phase = LeftPhase::Recovering;
                     p.left.timer = 0.0;
+                    if bolt_shot_tick(t, g.fast > 0.0 && left > 1, ctx.dt) == 0 {
+                        fire_special_bolt(p, kind, speed, ctx, cfg, t, spawn);
+                    }
                 }
                 _ => {}
             }
@@ -427,7 +433,10 @@ pub fn update(
             // 0.300 s fire action, HOOK_TRIAGE.md); NPC guns are their own context (not
             // measured): they fire on the press.
             let delayed = p.kind == crate::state::PawnKind::Human;
-            if delayed && p.left.phase == LeftPhase::Recovering && prev_timer == 0.0 {
+            // Ticks after the press on which the shot leaves: the crossbow's fire clip carries a
+            // `DishonoredNotify_FireProjectile` (`bolt_shot_tick`); the pistol's has none.
+            let shot_tick = if bolt { bolt_shot_tick(t, fast_fire, ctx.dt) } else { 1 };
+            if delayed && p.left.phase == LeftPhase::Recovering && shot_tick > 0 && ticks_of(prev_timer, ctx.dt) < shot_tick && ticks_of(now, ctx.dt) >= shot_tick {
                 fire_gun(p, bolt, ctx, cfg, t, spawn, events);
             }
             match p.left.phase {
@@ -467,7 +476,7 @@ pub fn update(
                         if bolt { p.left.bolts_loaded -= 1 } else { p.left.pistol_loaded -= 1 }
                         p.left.phase = LeftPhase::Recovering;
                         p.left.timer = 0.0;
-                        if !delayed {
+                        if !delayed || shot_tick == 0 {
                             fire_gun(p, bolt, ctx, cfg, t, spawn, events);
                         }
                     } else if reserve > 0 && ((loaded == 0 && pressed) || (loaded < mag && input.pressed(buttons::RELOAD))) {
@@ -480,6 +489,27 @@ pub fn update(
         }
         LeftHand::Empty => {}
     }
+}
+
+/// Ticks after the press on which a crossbow bolt leaves (0 = on the press tick). The fire
+/// action's animation advances by the frame time from the press tick, so the notify
+/// (`CombatTuning::crossbow_fire_notify`, 0.0336 s of `Crossbow_Fire`; 0 s of
+/// `Crossbow_Fire_FastReload`, used with `Attribute_FastReload` while bolts remain) fires on the
+/// tick whose animation time first reaches it ([`crate::tuning::action_ticks`] counts the
+/// advances including the press tick's). Measured in the original (60 Hz): fire sound on the
+/// press tick, bolt spawned two ticks later.
+pub fn bolt_shot_tick(t: &CombatTuning, fast: bool, dt: f32) -> u32 {
+    let at = if fast { t.crossbow_fast_fire_notify } else { t.crossbow_fire_notify };
+    crate::tuning::action_ticks(at, dt).saturating_sub(1)
+}
+
+/// A sleep dart or incendiary bolt leaves the crossbow (the shot of `fire_gun` for the other
+/// ammunition): `m_fArrowSpawnDistance` along the dispersed direction, speed scaled by
+/// `max(1, Attribute_Range)`, no AI noise.
+fn fire_special_bolt(p: &mut PlayerState, kind: ProjectileKind, speed: f32, ctx: &MoveCtx, cfg: &GameplayConfig, t: &CombatTuning, spawn: &mut Vec<(ProjectileKind, Vec3, Vec3)>) {
+    let eye = eye_position(p, ctx.cfg);
+    let dir = fire_direction(p, cfg, t);
+    spawn.push((kind, eye + dir * t.bolt_spawn_distance, dir * speed * crossbow_range_scale(p, cfg)));
 }
 
 /// The crossbow's `max(1, Attribute_Range)` (0x00C38230: the launch speed `m_fArrowFireSpeed`
