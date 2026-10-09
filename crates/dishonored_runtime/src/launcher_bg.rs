@@ -24,13 +24,16 @@ pub struct MenuBackground {
     rx: Option<Mutex<Receiver<Option<(DishonoredMap, map_render::PreparedMap)>>>>,
     /// "loading", "level", "movie" (no level: the movie's own background art).
     pub state: &'static str,
+    /// The level is in the world and its pipelines are compiling (`warmup.rs`); the state stays
+    /// "loading" until they are.
+    warming: bool,
 }
 
 /// Import the menu level and prepare its render data on a worker thread: the main thread only
 /// adds the finished assets and spawns entities (`finish`).
 pub fn start(mut commands: Commands, enabled: bool, features: Res<map_render::RenderFeatures>) {
     if !enabled {
-        commands.insert_resource(MenuBackground { rx: None, state: "movie" });
+        commands.insert_resource(MenuBackground { rx: None, state: "movie", warming: false });
         return;
     }
     let (tx, rx) = channel();
@@ -52,7 +55,7 @@ pub fn start(mut commands: Commands, enabled: bool, features: Res<map_render::Re
             let _ = tx.send(r.ok());
         })
         .ok();
-    commands.insert_resource(MenuBackground { rx: Some(Mutex::new(rx)), state: "loading" });
+    commands.insert_resource(MenuBackground { rx: Some(Mutex::new(rx)), state: "loading", warming: false });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -65,7 +68,15 @@ pub fn finish(
     mut baked: ResMut<Assets<map_render::BakedMaterial>>,
     features: Res<map_render::RenderFeatures>,
     cams: Query<Entity, With<MenuCamera>>,
+    mut warm: ResMut<crate::warmup::Warmup>,
 ) {
+    if bg.warming {
+        if warm.done() {
+            bg.warming = false;
+            bg.state = "level";
+        }
+        return;
+    }
     let Some(rx) = &bg.rx else { return };
     let Ok(got) = rx.lock().unwrap().try_recv() else { return };
     bg.rx = None;
@@ -85,10 +96,16 @@ pub fn finish(
         commands.insert_resource(fog);
     }
     info!("menu level: {n} entities");
-    // The menu level never holds the menu for a warm-up (the menu's input timing stays the
-    // original's 0.58 s): its surfaces appear as their pipelines finish compiling. The warm-up
-    // behind the loading screen is for real level loads (`level.rs`, `handoff::reveal`).
-    bg.state = "level";
+    // The level's first frames queue every pipeline of its several hundred programs (a stall of
+    // about a second on the render thread, plus compile hitches). They run in the warm-up, with the
+    // state still "loading" (the movie's own background), so the stall is over before the level is
+    // reported and the main menu's 0.58 s opening never meets it. The warm-up gates nothing: it
+    // neither pauses the clock nor holds the menu's input (`Launcher::input_ready`).
+    if warm.begin(false, false) {
+        bg.warming = true;
+    } else {
+        bg.state = "level";
+    }
 }
 
 #[derive(Component)]
