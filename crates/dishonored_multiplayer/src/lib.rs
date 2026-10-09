@@ -155,6 +155,12 @@ pub struct FocusView {
     pub point: Option<[f32; 3]>,
     /// `crosshair::choke_target` holds: a Block press now starts a choke.
     pub choke: bool,
+    /// The interaction probe's `m_bCanAssassinate` / `m_bCanDropAssassinate` (0x00BA50F0 /
+    /// 0x00BA5420): the Special and SpecialQTE interaction groups.
+    #[serde(default)]
+    pub assassinate: bool,
+    #[serde(default)]
+    pub drop_assassinate: bool,
 }
 
 /// A level actor highlighted by the Kismet: `<package>:<actor>` (the map's

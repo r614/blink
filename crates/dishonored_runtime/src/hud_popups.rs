@@ -263,11 +263,12 @@ pub const DUI_SPECIAL_CHOKE: usize = 3;
 pub const DUI_CROSSHAIR_PICKUP: usize = 31;
 pub const DUI_CROSSHAIR_CARRY: usize = 32;
 
-/// The interactions window for the local player: exactly what the host's sim chose as the
-/// crosshair target (`MatchView::focus`, `dishonored_sim::crosshair`) with its prompt, plus the
-/// choke line (`m_InteractionTexts[DUI_Special_Choke]`, "`GBA_Block` [Hold]") when a Block press
-/// would choke. `texts` is `Twk_GFxMoviePlayerHUD.m_InteractionTexts`, by `EDisUIInteraction`.
-/// The lines are joined with newlines, crosshair group first, special group last (0x00BA6150).
+/// The interactions window for the local player (the Crosshair interaction group, 0x00BA6150):
+/// exactly what the host's sim chose as the crosshair target (`MatchView::focus`,
+/// `dishonored_sim::crosshair`) with its prompt. `texts` is
+/// `Twk_GFxMoviePlayerHUD.m_InteractionTexts`, by `EDisUIInteraction`. The choke and assassinate
+/// prompts are the Special group's icons, the chain's lines the Context group
+/// ([`interaction_groups`]).
 pub fn focused_interaction(mv: &MissionView, matchv: &dishonored_multiplayer::MatchView, me: &dishonored_sim::state::PlayerState, texts: &[String]) -> Option<Focus> {
     use dishonored_sim::crosshair::CrosshairStatus;
     if !me.alive || mv.outcome.is_some() {
@@ -277,9 +278,9 @@ pub fn focused_interaction(mv: &MissionView, matchv: &dishonored_multiplayer::Ma
     if mv.choices.iter().any(|c| c.0 == me.id) {
         return None;
     }
-    // On a chain: `DisTweaks_Climbable.m_StopClimbingInteractText` ("`GBA_Jump` Jump off").
+    // On a chain the climb state's builder returns early with its Context lines (0x00A67830).
     if me.mode == dishonored_sim::state::MoveMode::Climbing {
-        return Some(Focus { text: "`GBA_Jump` Jump off".into(), point: None, name: String::new() });
+        return None;
     }
     let f = matchv.focus.iter().find(|f| f.player == me.id)?;
     let text = |i: usize| texts.get(i).filter(|s| !s.is_empty()).cloned();
@@ -296,13 +297,68 @@ pub fn focused_interaction(mv: &MissionView, matchv: &dishonored_multiplayer::Ma
         }
     };
     lines.extend(use_line);
-    if f.choke {
-        lines.extend(text(DUI_SPECIAL_CHOKE));
-    }
     if lines.is_empty() {
         return None;
     }
     Some(Focus { text: lines.join("\n"), point: f.point, name: f.name.clone() })
+}
+
+/// The Context, Special and SpecialQTE interaction groups (`EDisUIInteraction` ids, ascending;
+/// 0x00B87D20 picks the group of an id).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InteractionGroups {
+    pub context: Vec<usize>,
+    pub special: Vec<usize>,
+    pub qte: Vec<usize>,
+}
+
+/// `EDisUIInteraction` ids of the groups the port builds.
+pub const DUI_SPECIAL_ASSASSINATE: usize = 4;
+pub const DUI_QTE_DROP_ASSASSINATE: usize = 5;
+pub const DUI_CONTEXT_DROP_MOVABLE: usize = 8;
+pub const DUI_CONTEXT_THROW_MOVABLE: usize = 9;
+pub const DUI_CONTEXT_DROP_CORPSE: usize = 10;
+pub const DUI_CONTEXT_THROW_CORPSE: usize = 11;
+pub const DUI_CONTEXT_CHAIN_DROP: usize = 12;
+pub const DUI_CONTEXT_CHAIN_JUMP: usize = 13;
+pub const DUI_CONTEXT_EXIT_KEYHOLE: usize = 14;
+
+/// The interaction builder (0x00AA9130) for the groups the window does not show: a state's own
+/// builder first, returning early (the chain 0x00A67830: Context 12 and 13; the keyhole peek
+/// 0x00A5FF60: Context 14); else the focus's special flags (0x00B8CC60: a drop assassination,
+/// QTE 5, wins over the assassination, Special 4; the choke, Special 3) and the context of what
+/// the hands hold (a prop: 8 and 9; a body: 10 and 11). Mantle, steal, adrenaline kill and the
+/// power-cancel lines are not built (their sim state is missing).
+pub fn interaction_groups(mv: &MissionView, matchv: &dishonored_multiplayer::MatchView, me: &dishonored_sim::state::PlayerState, peeking: bool) -> InteractionGroups {
+    let mut g = InteractionGroups::default();
+    if !me.alive || mv.outcome.is_some() || mv.choices.iter().any(|c| c.0 == me.id) {
+        return g;
+    }
+    if me.mode == dishonored_sim::state::MoveMode::Climbing {
+        g.context = vec![DUI_CONTEXT_CHAIN_DROP, DUI_CONTEXT_CHAIN_JUMP];
+        return g;
+    }
+    if peeking {
+        g.context = vec![DUI_CONTEXT_EXIT_KEYHOLE];
+        return g;
+    }
+    if let Some(f) = matchv.focus.iter().find(|f| f.player == me.id) {
+        if f.drop_assassinate {
+            g.qte.push(DUI_QTE_DROP_ASSASSINATE);
+        } else if f.assassinate {
+            g.special.push(DUI_SPECIAL_ASSASSINATE);
+        }
+        if f.choke {
+            g.special.push(DUI_SPECIAL_CHOKE);
+        }
+        g.special.sort_unstable();
+    }
+    if me.holding.is_some() {
+        g.context = vec![DUI_CONTEXT_DROP_MOVABLE, DUI_CONTEXT_THROW_MOVABLE];
+    } else if me.carrying.is_some() {
+        g.context = vec![DUI_CONTEXT_DROP_CORPSE, DUI_CONTEXT_THROW_CORPSE];
+    }
+    g
 }
 
 /// `m_AsleepCrosshairText` (the pawn tweaks' value): the crosshair's info line over someone
@@ -419,6 +475,18 @@ pub enum HudTest {
         #[serde(default)]
         text: Option<String>,
     },
+    /// Show / close the Special (or SpecialQTE) interaction icons: `EDisUIInteraction` ids
+    /// (1 mantle .. 6 adrenaline kill) with the HUD's texts; empty closes.
+    Icons {
+        ids: Vec<u8>,
+        #[serde(default)]
+        qte: bool,
+    },
+    /// Show / clear the Context interactions text (`interactions_txt_mc`).
+    ContextText {
+        #[serde(default)]
+        text: Option<String>,
+    },
     /// Show / hide the cinematic stripes.
     Stripes { show: bool },
     /// Show the location discovery banner (`SetLocation`, 5 s).
@@ -517,6 +585,19 @@ pub fn apply_test(t: HudTest, q: &mut PopupQueue, w: &mut HudWidgets, st: &mut S
         HudTest::Interaction { name, text } => {
             if let Some(iw) = w.interaction_window.as_mut() {
                 iw.set_interactions(st, &name, text.as_deref());
+            }
+        }
+        HudTest::Icons { ids, qte } => {
+            let list: Vec<(u8, String)> = ids.iter().map(|&i| (i, _texts.interactions.get(i as usize).cloned().unwrap_or_default())).collect();
+            let list = (!list.is_empty()).then_some(list);
+            let w = if qte { w.interaction_qte.as_mut() } else { w.interaction_icons.as_mut() };
+            if let Some(ic) = w {
+                ic.set_interactions(st, list.as_deref());
+            }
+        }
+        HudTest::ContextText { text } => {
+            if let Some(im) = w.interactions.as_mut() {
+                im.set_interactions(st, text.as_deref());
             }
         }
         HudTest::Stripes { show } => {

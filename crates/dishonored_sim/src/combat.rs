@@ -389,6 +389,23 @@ fn in_view(a: &PlayerState, v: &PlayerState, world: &dyn WorldQuery, mv: &Moveme
 /// `m_AssassinateOnAwareness` table allows (0x00C09060) and that is not running
 /// (`m_bCanAssassinateRunners` off, 0x00C090D0). Another player (the fork's PvP rule): from
 /// behind, not blocking.
+/// The HUD's interaction probe `m_bCanAssassinate` (0x00BA50F0): a walking, free player whose
+/// usable crosshair is on the pawn the assassinate context selects (LIKELY: the context's target
+/// compared with the crosshair actor, the equality helper was not followed to its end).
+pub fn can_assassinate(p: &PlayerState, state: &WorldState, world: &dyn WorldQuery, mv: &MovementConfig, t: &CombatTuning) -> bool {
+    use crate::crosshair::TargetRef;
+    if p.kind != PawnKind::Human || !p.alive || p.incapacitated() || p.carrying.is_some() || p.sword.phase == SwordPhase::Assassinating || p.mode != crate::state::MoveMode::Walking {
+        return false;
+    }
+    let Some(TargetRef::Pawn(v)) = p.crosshair.filter(|c| c.usable).map(|c| c.target) else { return false };
+    find_assassination(p, state, world, mv, t).is_some_and(|i| state.players[i].id == v)
+}
+
+/// `m_bCanDropAssassinate` (0x00BA5420): falling with a drop-assassination target below.
+pub fn can_drop_assassinate(p: &PlayerState, state: &WorldState, world: &dyn WorldQuery, mv: &MovementConfig, t: &CombatTuning) -> bool {
+    p.kind == PawnKind::Human && p.alive && p.mode == crate::state::MoveMode::Falling && find_drop_assassination(p, state, world, mv, t).is_some()
+}
+
 fn find_assassination(a: &PlayerState, state: &WorldState, world: &dyn WorldQuery, mv: &MovementConfig, t: &CombatTuning) -> Option<usize> {
     let range = context_reach(a, t, t.assassinate_range, t.assassinate_ray_scale);
     let mut best: Option<(usize, f32)> = None;

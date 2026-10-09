@@ -877,6 +877,31 @@ pub fn update_gfx_hud(
     if let Some(iw) = w.interaction_window.as_mut() {
         iw.set_interactions(st, focus.as_ref().map(|f| f.name.as_str()).unwrap_or(""), lines.as_deref());
     }
+    // The other interaction groups (0x00BACB10): Context on `interactions_txt_mc` (with
+    // `m_bShowInteractions`, only while the window has no lines; the lines are joined like the
+    // window's, LIKELY), Special / SpecialQTE on the icon widgets (`m_bShowContextualIcons`). Each
+    // text goes through the tag conversion (0x00BA4620); an empty group closes its widget.
+    if let (Some(mv), Some(p)) = (mission, me) {
+        let peeking = crate::tripwires::peek_view(&view).is_some();
+        let groups = if alive && !cutscene { crate::hud_popups::interaction_groups(mv, &view.matchv, p, peeking) } else { Default::default() };
+        let text = |i: usize| hud.texts.interactions.get(i).filter(|s| !s.is_empty()).map(|s| convert_key_tags(s, bindings.as_deref(), &hud.texts.keys));
+        let context: Vec<String> = groups.context.iter().filter_map(|&i| text(i)).collect();
+        let context = (show_interactions && lines.is_none() && !context.is_empty()).then(|| context.join("\n"));
+        if let Some(im) = w.interactions.as_mut() {
+            im.set_interactions(st, context.as_deref());
+        }
+        let icons = |ids: &[usize]| -> Option<Vec<(u8, String)>> {
+            let v: Vec<(u8, String)> = ids.iter().filter_map(|&i| text(i).map(|t| (i as u8, t))).collect();
+            (hs.contextual_icons && !v.is_empty()).then_some(v)
+        };
+        let (special, qte) = (icons(&groups.special), icons(&groups.qte));
+        if let Some(ic) = w.interaction_icons.as_mut() {
+            ic.set_interactions(st, special.as_deref());
+        }
+        if let Some(ic) = w.interaction_qte.as_mut() {
+            ic.set_interactions(st, qte.as_deref());
+        }
+    }
     // The crosshair's info line over someone asleep (`m_CrosshairFocusText`).
     let sleeper = me.filter(|_| alive && !cutscene).and_then(|p| crate::hud_popups::focused_sleeper(&view, p, local.yaw, local.pitch)).map(|_| crate::hud_popups::ASLEEP_CROSSHAIR_TEXT);
     if let Some(ci) = w.crosshair_info.as_mut() {

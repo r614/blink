@@ -2077,7 +2077,7 @@ impl MissionMatch {
         let npc_name = |id: PlayerId| self.npc_by_id.get(&id).and_then(|n| self.state.view.npc_names.iter().find(|x| &x.0 == n)).map(|x| x.1.clone()).unwrap_or_default();
         let mut out = Vec::new();
         for p in self.world.players.iter().filter(|p| self.humans.contains(&p.id)) {
-            let mut f = crate::FocusView { player: p.id, crosshair: p.crosshair.filter(|c| c.usable), choke: dishonored_sim::crosshair::choke_target(&self.world, p, cfg).is_some(), ..Default::default() };
+            let mut f = crate::FocusView { player: p.id, crosshair: p.crosshair.filter(|c| c.usable), choke: dishonored_sim::crosshair::choke_target(&self.world, p, cfg).is_some(), assassinate: dishonored_sim::combat::can_assassinate(p, &self.world, world, &cfg.gameplay.movement, &cfg.tuning), drop_assassinate: dishonored_sim::combat::can_drop_assassinate(p, &self.world, world, &cfg.gameplay.movement, &cfg.tuning), ..Default::default() };
             match f.crosshair.map(|c| c.target) {
                 Some(TargetRef::Prop(id)) => {
                     if let Some(m) = self.world.movables.iter().find(|m| m.id == id) {

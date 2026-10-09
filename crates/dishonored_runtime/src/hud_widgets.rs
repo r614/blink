@@ -1936,6 +1936,173 @@ impl InteractionsWindow {
 }
 
 // =============================================================================================
+// InteractionsIcons (hud_interactionIcons, `interactions_ic_mc`) and InteractionsIcons_QTE
+// (hud_interactionIcons_QTE, `interactions_icQTE_mc`): the Special and SpecialQTE interaction
+// groups (0x00BA6630 / 0x00BA6920: `SetInteractions([{iconIdx, txt}])`)
+// =============================================================================================
+
+const W_ICONS: u16 = 19;
+const W_QTE: u16 = 22;
+const IC_CLOSED: u16 = 1;
+const QTE_PULSE: u16 = 2;
+
+pub struct InteractionsIcons {
+    pub mc: Id,
+    widget: u16,
+    qte: bool,
+    icons: Option<Id>,
+    ic: Option<Id>,
+    nb_icons: u32,
+    pub opened: bool,
+    interval_anim: Option<u32>,
+    pub list: Option<Vec<(u8, String)>>,
+}
+
+impl InteractionsIcons {
+    /// The constructor (`_interactions_mc = this`); the clip starts hidden until `Open`.
+    pub fn new(st: &mut Stage, mc: Id, qte: bool) -> Self {
+        st.set_visible(mc, false);
+        Self { mc, widget: if qte { W_QTE } else { W_ICONS }, qte, icons: None, ic: None, nb_icons: 0, opened: false, interval_anim: None, list: None }
+    }
+
+    /// `SetInteractions(list | null)`: null closes; else the icons are rebuilt and the clip opens.
+    /// The native side sends a group only when it changed.
+    pub fn set_interactions(&mut self, st: &mut Stage, list: Option<&[(u8, String)]>) {
+        if self.list.as_deref() == list {
+            return;
+        }
+        self.list = list.map(|l| l.to_vec());
+        match list {
+            None => self.close(st),
+            Some(l) => {
+                self.set_icons(st, l);
+                if !self.opened {
+                    self.open(st);
+                }
+            }
+        }
+    }
+
+    /// `CreateContainer`: a fresh `_icons_mc`.
+    fn create_container(&mut self, st: &mut Stage) {
+        self.nb_icons = 0;
+        if let Some(c) = self.icons.take() {
+            st.remove(c);
+        }
+        let d = st.next_depth(self.mc);
+        self.icons = Some(st.create_empty(self.mc, "_icons_mc", d));
+    }
+
+    /// `SetIconMovieClip(idx, e)`: an `hud_interactionIc` with the text and the icon frame of
+    /// `iconIdx` (1 mantle, 2 pickpocket, 3 choke, 4 assassination, 5 drop_assassination,
+    /// 6 adrenaline_kill).
+    fn set_icon_movie_clip(&mut self, st: &mut Stage, idx: usize, e: &(u8, String)) -> Option<Id> {
+        let c = self.icons?;
+        let d = st.next_depth(c);
+        let ic = st.attach(c, "hud_interactionIc", &format!("ic{idx}"), d)?;
+        if let Some(t) = st.child(ic, "txt") {
+            st.set_html(t, &e.1);
+        }
+        let label = match e.0 {
+            1 => "mantle",
+            2 => "pickpocket",
+            3 => "choke",
+            4 => "assassination",
+            5 => "drop_assassination",
+            6 => "adrenaline_kill",
+            _ => "",
+        };
+        if let Some(i) = st.child(ic, "ic").filter(|_| !label.is_empty()) {
+            st.goto_and_stop(i, label);
+        }
+        Some(ic)
+    }
+
+    /// `SetIcons(list)`: the icons stacked upward from the middle, 5 apart, at x -368; the QTE
+    /// variant shows the first entry only, beside its icon, with the pulsing stroke.
+    fn set_icons(&mut self, st: &mut Stage, list: &[(u8, String)]) {
+        if self.qte {
+            clear(st, &mut self.interval_anim);
+            self.create_container(st);
+            self.ic = list.first().and_then(|e| self.set_icon_movie_clip(st, 0, e));
+            if let Some(ic) = self.ic {
+                let w = st.child(ic, "ic").map(|i| st.width(i)).unwrap_or(0.0);
+                st.set(ic, Prop::X, 0.5 * w + 20.0);
+                if let Some(s) = st.child(ic, "_stroke_mc") {
+                    st.goto_and_stop(s, "2");
+                }
+                self.nb_icons += 1;
+            }
+            self.anim_pulse(st);
+            return;
+        }
+        self.create_container(st);
+        let mut prev: Option<Id> = None;
+        for (i, e) in list.iter().enumerate() {
+            let Some(ic) = self.set_icon_movie_clip(st, i, e) else { continue };
+            st.set(ic, Prop::X, -368.0);
+            let y = match prev {
+                None => (0.0 - st.height(ic)) * 0.5,
+                Some(p) => st.get(p, Prop::Y) - st.height(p) - 5.0,
+            };
+            st.set(ic, Prop::Y, y);
+            self.nb_icons += 1;
+            prev = Some(ic);
+        }
+    }
+
+    /// `Open` / `PlayOpenAnimation`: fade in (0.35 s); the QTE variant pops in from 110 %
+    /// (0.2 s, `Back.easeOut`).
+    fn open(&mut self, st: &mut Stage) {
+        st.set_visible(self.mc, true);
+        self.opened = true;
+        st.tween_end(self.mc, false);
+        st.set(self.mc, Prop::Alpha, 0.0);
+        if self.qte {
+            st.set(self.mc, Prop::XScale, 110.0);
+            st.set(self.mc, Prop::YScale, 110.0);
+            st.tween_to(self.mc, 0.2, &[(Prop::YScale, 100.0), (Prop::XScale, 100.0), (Prop::Alpha, 100.0)], Ease::BackOut, None);
+        } else {
+            st.tween_to(self.mc, 0.35, &[(Prop::Alpha, 100.0)], Ease::StrongOut, None);
+        }
+    }
+
+    /// `Close`: fade out (0.25 s), then `onClosed` hides the clip and drops the icons.
+    fn close(&mut self, st: &mut Stage) {
+        clear(st, &mut self.interval_anim);
+        self.opened = false;
+        st.tween_to(self.mc, 0.25, &[(Prop::Alpha, 0.0)], Ease::StrongOut, Some(key(self.widget, IC_CLOSED, 0)));
+    }
+
+    /// `AnimPulse`: the stroke from 90 % opaque to 120 % transparent (0.2 s), every 500 ms.
+    fn anim_pulse(&mut self, st: &mut Stage) {
+        clear(st, &mut self.interval_anim);
+        if let Some(s) = self.ic.and_then(|ic| st.child(ic, "_stroke_mc")) {
+            st.tween_end(s, false);
+            st.set(s, Prop::XScale, 90.0);
+            st.set(s, Prop::YScale, 90.0);
+            st.set(s, Prop::Alpha, 100.0);
+            st.tween_to(s, 0.2, &[(Prop::YScale, 120.0), (Prop::XScale, 120.0), (Prop::Alpha, 0.0)], Ease::StrongOut, None);
+        }
+        interval(st, &mut self.interval_anim, 0.2 * 1000.0 + 300.0, key(self.widget, QTE_PULSE, 0));
+    }
+
+    fn on_event(&mut self, st: &mut Stage, code: u16) {
+        match code {
+            IC_CLOSED if !self.opened => {
+                st.set_visible(self.mc, false);
+                if let Some(c) = self.icons.take() {
+                    st.remove(c);
+                }
+                self.ic = None;
+            }
+            QTE_PULSE => self.anim_pulse(st),
+            _ => {}
+        }
+    }
+}
+
+// =============================================================================================
 // PlayerChoice (hud_playerChoice, `playerChoice_mc`; a `_common.GenericMenu`)
 // =============================================================================================
 
@@ -3492,6 +3659,9 @@ pub struct HudWidgets {
     pub game_msg: Option<InteractionsMessage>,
     pub interactions: Option<InteractionsMessage>,
     pub interaction_window: Option<InteractionsWindow>,
+    /// `interactions_ic_mc` / `interactions_icQTE_mc` (the Special / SpecialQTE groups).
+    pub interaction_icons: Option<InteractionsIcons>,
+    pub interaction_qte: Option<InteractionsIcons>,
     pub subtitles: Option<Subtitles>,
     pub choice: Option<PlayerChoice>,
     pub state_icon: Option<PlayerStatesIcons>,
@@ -3518,6 +3688,8 @@ impl HudWidgets {
         let game_msg = c(st, "gameMsg_mc").map(|m| InteractionsMessage::new(st, m, 0));
         let interactions = c(st, "interactions_txt_mc").map(|m| InteractionsMessage::new(st, m, 1));
         let interaction_window = c(st, "interactions_window_mc").map(|m| InteractionsWindow::new(st, m));
+        let interaction_icons = c(st, "interactions_ic_mc").map(|m| InteractionsIcons::new(st, m, false));
+        let interaction_qte = c(st, "interactions_icQTE_mc").map(|m| InteractionsIcons::new(st, m, true));
         let subtitles = c(st, "subtitles_mc").map(|m| Subtitles::new(st, m));
         let choice = c(st, "playerChoice_mc").map(|m| PlayerChoice::new(st, m));
         let state_icon = c(st, "playerStatesIcon_mc").map(|m| PlayerStatesIcons::new(st, m));
@@ -3528,13 +3700,13 @@ impl HudWidgets {
         let oxygen = c(st, "oxygenGauge_mc").map(|m| OxygenGauge::new(st, m));
         let interaction_gauge = c(st, "interactionGauge_mc").map(|m| InteractionGauge::new(st, m));
         // Widgets the port does not drive yet start hidden, as their classes do.
-        for n in ["interactions_ic_mc", "interactions_icQTE_mc", "skipCutScene_mc", "grenadeCooking_mc"] {
+        for n in ["skipCutScene_mc", "grenadeCooking_mc"] {
             if let Some(m) = c(st, n) {
                 st.set_visible(m, false);
             }
         }
         let crosshairs = Crosshairs::new(st);
-        Self { objectives, target, pickup_log, gauges, crosshair_info, game_msg, interactions, interaction_window, subtitles, choice, state_icon, tutorial, tutorial_window, stripes, location, oxygen, interaction_gauge, crosshairs, sounds: SoundQueue::default() }
+        Self { objectives, target, pickup_log, gauges, crosshair_info, game_msg, interactions, interaction_window, interaction_icons, interaction_qte, subtitles, choice, state_icon, tutorial, tutorial_window, stripes, location, oxygen, interaction_gauge, crosshairs, sounds: SoundQueue::default() }
     }
 
     /// Route a stage event to its widget.
@@ -3619,6 +3791,16 @@ impl HudWidgets {
             }
             W_IGAUGE => {
                 if let Some(o) = self.interaction_gauge.as_mut() {
+                    o.on_event(st, code)
+                }
+            }
+            W_ICONS => {
+                if let Some(o) = self.interaction_icons.as_mut() {
+                    o.on_event(st, code)
+                }
+            }
+            W_QTE => {
+                if let Some(o) = self.interaction_qte.as_mut() {
                     o.on_event(st, code)
                 }
             }
