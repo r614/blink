@@ -306,6 +306,8 @@ pub fn update(
                 p.mode = MoveMode::Blinking;
                 p.velocity = Vec3::ZERO;
                 events.push(SimEvent::BlinkStart { id: p.id, from, to });
+                // 0x00BFC990 calls the component's use notification (slot 94) as the blink starts.
+                events.push(SimEvent::PowerUsed { id: p.id, power: crate::state::power::BLINK as u8, level: p.inv.power_levels[crate::state::power::BLINK] });
                 // Port value: no Blink AI noise was found in the original (stealth.md section 5.4).
                 events.push(SimEvent::Sound { position: from, radius: 400.0, category: SoundCategory::Blink, context: crate::events::NoiseContext::Anomaly, source: p.id });
             }

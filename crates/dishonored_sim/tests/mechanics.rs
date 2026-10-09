@@ -351,6 +351,9 @@ fn blink_to_platform_costs_mana_and_refunds() {
     r.steps(40, &[(1, blink(0))]);
     let p = r.p(1);
     assert!(r.events.iter().any(|e| matches!(e, SimEvent::BlinkStart { .. })));
+    // 0x00BFC990 calls the power's use notification as the blink starts: once, with the level.
+    let blink_power = dishonored_sim::state::power::BLINK as u8;
+    assert_eq!(r.events.iter().filter(|e| matches!(e, SimEvent::PowerUsed { id: 1, power, level: 2 } if *power == blink_power)).count(), 1);
     assert!(p.position.x > 850.0, "blinked x {}", p.position.x);
     assert!((p.position.z - (200.0 + STAND_Z + HOVER)).abs() < 5.0, "on platform z {}", p.position.z);
     assert_eq!(p.vitals.mana, 80.0);
@@ -647,6 +650,14 @@ fn windblast_pushes_and_damages() {
     let k = (1.0 - d / 3000.0).powi(2);
     let expect = 70.0 - (30.0 * k + 0.5).floor();
     assert!((v.vitals.health - expect).abs() <= 1.0, "health {} expected ~{expect}", v.vitals.health);
+    // The power's use notification (slot 94, 0x00BF32F0) fires once at the press, with the caster's
+    // level; the thrown NPC (not the player) reports the Windblasted reaction.
+    let used: Vec<_> = r.events.iter().filter(|e| matches!(e, SimEvent::PowerUsed { .. })).collect();
+    assert_eq!(used.len(), 1, "{used:?}");
+    assert!(matches!(used[0], SimEvent::PowerUsed { id: 1, power, level: 2 } if *power as usize == dishonored_sim::state::power::WINDBLAST));
+    let blasted: Vec<_> = r.events.iter().filter(|e| matches!(e, SimEvent::Windblasted { .. })).collect();
+    assert_eq!(blasted.len(), 1, "{blasted:?}");
+    assert!(matches!(blasted[0], SimEvent::Windblasted { victim: 3, by: 1 }));
 }
 
 /// The throw of an NPC (research/dishonored/systems/physics.md P-1..P-3): the momentum clamp

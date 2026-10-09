@@ -497,6 +497,23 @@ pub struct MissionState {
     /// ran (else the mission's `chaos_level_threshold`): the HUD's High / Low.
     #[serde(default)]
     pub chaos_threshold: Option<i32>,
+    /// The objective manager's task notifications since the host last drained them (the original
+    /// dispatcher 0x00AD4F60: kind 3 `TaskActivated` 0x00AD1080, kind 5 `TaskStateChanged`
+    /// 0x00AD1320), in the order the task code raised them.
+    #[serde(skip)]
+    pub task_log: Vec<TaskNote>,
+}
+
+/// A task notification (`DishonoredTask` -> the objective manager): what the original raises
+/// through 0x00BBE6A0 when a task changes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TaskNote {
+    /// Kind 3: the task became active and visible (`SetState(Active)` 0x00AC17B0, or its hidden
+    /// flag cleared while active, 0x00AC63C0). Path `Objective.Task`.
+    Activated(String),
+    /// Kind 5: the task's state changed (0x00AC17B0 raises it after Activated); the state is
+    /// the new `EDisTaskState`.
+    Changed(String, TaskState),
 }
 
 impl MissionState {
@@ -562,6 +579,7 @@ impl MissionState {
             darkness_score: 0,
             darkness_level: 0,
             chaos_threshold: None,
+            task_log: Vec::new(),
         };
         s.refresh_view(&BTreeMap::new());
         s
@@ -1047,6 +1065,11 @@ impl MissionState {
                     self.obj_hidden[o] = false;
                 }
                 queue.push_back(Ev::Task(path.to_string(), state));
+                // 0x00AC17B0: Active raises TaskActivated, then every change TaskStateChanged.
+                if state == TaskState::Active {
+                    self.task_log.push(TaskNote::Activated(path.to_string()));
+                }
+                self.task_log.push(TaskNote::Changed(path.to_string(), state));
             }
         }
     }
@@ -1059,6 +1082,10 @@ impl MissionState {
                 Action::ShowTask(t) | Action::HideTask(t) => {
                     if let Some((o, i)) = self.def.task_index(t) {
                         let hide = matches!(a, Action::HideTask(_));
+                        // 0x00AC63C0: clearing the hidden flag of an active task raises TaskActivated.
+                        if !hide && self.task_hidden[o][i] && self.task_state[o][i] == TaskState::Active {
+                            self.task_log.push(TaskNote::Activated(t.clone()));
+                        }
                         self.task_hidden[o][i] = hide;
                         if !hide {
                             self.obj_hidden[o] = false;

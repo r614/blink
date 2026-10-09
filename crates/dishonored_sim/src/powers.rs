@@ -715,6 +715,9 @@ pub fn summon_swarm(state: &mut WorldState, caster: PlayerId, world: &dyn WorldQ
     state.next_entity_id = state.next_entity_id.wrapping_add(1);
     state.swarms.push(SwarmState { id, owner: caster, level, position: pos, spawn_delay: cfg.items.swarm.spawn_delay, age: 0.0, rats: l.rat_count, release_ticks: 0, ending: false, rats_at_end: 0 });
     events.push(SimEvent::SwarmSummoned { id: caster, swarm: id, position: pos });
+    // The swarm component's activation (0x00BFAE60) calls the use notification (slot 94) once
+    // its destination is valid.
+    events.push(SimEvent::PowerUsed { id: caster, power: power::DEVOURING_SWARM as u8, level: p.inv.power_levels[power::DEVOURING_SWARM] });
 }
 
 /// The Devouring Swarm actor (`DisRatSwarm` with its `DisRatSwarmSpawner`), MEASURED 2026-10-08:
