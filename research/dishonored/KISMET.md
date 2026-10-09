@@ -501,3 +501,35 @@ class descriptor name). Not fed by the port yet (the host feeds the classes in `
 | `DisSeqEvent_TeleportSpell` | 0x00c2ba40, 0x00c35280, 0x00cd7090, 0x00ce0aa0, 0x00cf12f0 |
 | `DisSeqEvent_WatchTower` / `DefenceTower` / `WallOfLight` | 0x00a2a770 / 0x00a258f0, 0x00a2fce0..0x00a2fff0 / 0x00a28f80, 0x00a29170, 0x00a3c010, 0x00a3eb10, 0x00a3eca0 |
 | `DisSeqEvent_Interact` / `AttackedByRats` / `RatPossess` | 0x00a3df60, 0x00a3e0b0 / 0x00a70450 / 0x00c7fbc0 |
+
+### AI events pass (2026-10-08)
+
+The AI-owned events of the table above, fired from the brain code that fires them in the
+engine (decompiled with `oracle index fn`), routed to the Kismet host as event activations
+(`dishonored_multiplayer::kismet_host::ai_events` / `feed`; the AI reports them as
+`dishonored_ai::AiEvent` through `Crowd::events`). All go through `FireGeneratedEvents`
+(0x00bc7b30): the events held by the actor (a spawned pawn gets its events through
+`SeqAct_AttachToEvent` duplicates, the original spawner's own events count for its pawn), each
+enabled one runs `CheckActivate(originator, instigator)`.
+
+| event | firing function | condition | output / originator / instigator | instances |
+|---|---|---|---|---|
+| `PatrolPointReached` | 0x00afd430 (`DisBehaviorPatrol` slot 107, the arrival callback `0x00af7e00` calls) -> 0x00afd350 | the patrolling pawn reached the current route point and it is a `DishonoredNavPoint` (0x00ae8a60); fires whether the point is a stop (0x00a4bab0: guard duration, forever, watch points) or passed | actor = the point; output 0 "From Patrol Behavior"; originator the point, instigator the pawn | 150 of 151 |
+| `PatrolPointReached` output 1 "From Guard Behavior" | 0x00af2300 (`DisBehaviorGuard` slot 107) | the guard behaviour reached its guard point (`+0xb8`) | not fed: the port's guards stand at a position (`Brain::home`), not at a nav point actor | 19 |
+| `BehaviorStarted` | 0x00af7670, called by the arbitration 0x00b17100 | the current-behaviour pointer was clear (the current behaviour ended 0x00aea8f0, was replaced or preempted 0x00b11960) and the highest occupied slot's behaviour becomes current; the override 0x00b8a1a0 passes when the class of that behaviour is exactly `m_pBehavior` (0x00b00d80) | no outputs given (all); originator and instigator the pawn | Idle 2, Patrol 9, Panic 45, Search 4, StationarySearch 1 (+ the classes below) |
+| `Combat` | 0x00af7d00 = `DisBehaviorCombat` slot 91 (the behaviour's own start, called by 0x00af7670 right after the event) | the combat behaviour became current | originator the attention target (0x00b4cde0), instigator the pawn | 88 |
+| `Investigate` | 0x00b2e050 (`DisAISubStateInvestigate` slot 96, entering the sub-state), 0x00ae9fe0 (`DisBehaviorStationarySearch` start) | the search behaviour became current with the investigate sub-state, or the search track returned to it; only for a pawn target (0x00a49130) | originator the searched pawn, instigator the pawn | 5 |
+| `FleepointReached` | 0x00a47340 from the flee sub-state (0x00b29ae0 tick, 0x00b29be0 message) | the fleeing pawn finished its walk to the flee point (`+0xd4`) | actor/originator = the flee point, instigator the pawn | 5 |
+| `Corpse` output 0 / 1 | 0x00a998a0 / 0x00a90b50 (corpse carry start / end) | a body lifted / dropped (`SimEvent::BodyLifted` / `BodyDropped`) | actor/originator = the body, instigator the carrier | 16 (all three outputs) |
+| `Corpse` output 2 and `CorpseDetected` | 0x00b40740 (the corpse reaction, `AiEvent::CorpseFound`) | an NPC discovers a corpse | `Corpse`: actor = corpse, instigator the observer; `CorpseDetected`: actor = observer, instigator the corpse | 16 / 0 |
+| `PawnSighted` | 0x00b0be40 / 0x00b0bef0 / 0x00b0bf30 from 0x00b24ec0, which 0x00b26b30 calls when the attention record steps through level 3 -> 4 (Busted) toward a pawn target (0x00b3b350 per record) | every relationship (0 / 1 / 2) fires it | originator and actor the observer, instigator the target pawn | 9 (5 on spawners / unattached, 4 on `DisWatchTower`) |
+| `Assassinated` output 0 "Started" | 0x00a7beb0 (`StateNPCMasterBeingAssassinated` slot 73, the victim's state entry), exact class | the NPC is killed by an assassination / drop assassination | originator the victim, instigator the assassin | 4 |
+
+Left open, with why:
+
+- `Assassinated` output 1 "Finished" (0x00a78270, state slot 92 / 85): fires on the synced animation's kill message (id 1), which the port has no animation for (it kills at the start).
+- `PlayerHeard` (0x00b04100, from 0x00b0f400 each brain tick): fires when `m_PendingPlayerHeardKismetEventActorName` (brain +0xa8) names an actor and the brain's attention level toward the player reaches the tweak's byte at `+0xa5`; the writer of that name was not found (see LOG.md).
+- `AttackedByRats` (0x00a70450, `StateNPCMasterActionMeleeSwarm` slot 73, exact class): the entry of that NPC state needs the NPC master state machine; the swarm's bite code (0x00c891e0) was decoded far enough only to see it is not in it.
+- `WatchTower` (0x00a2a770 and the others): no watch tower exists in the port.
+- `BehaviorStarted` for the classes the port's behaviours do not have: `DisBehaviorReact` (8 instances), `PatrolSearch`, `EscapeExplosion`, `CombatRatSwarm` / `CombatRatSwarmEliteGuard`, `Soiree` (8: the soiree's behaviour class is not decoded, the port runs soirees inside `DisBehaviorInteract`).
+- `ActorTouched` (0x00b040c0, 0x00b04140, 0x00b0bf70), `WitnessedInteraction` (0x00b04190), `AlarmEnded`: no instance in the 41 maps.

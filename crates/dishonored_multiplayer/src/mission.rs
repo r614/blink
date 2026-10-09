@@ -1396,7 +1396,15 @@ impl MissionMatch {
                     }
                 }
                 // [distraction] The Kismet host fires `DisSeqEvent_Distracted`.
-                dishonored_ai::AiEvent::AlarmEnded { .. } | dishonored_ai::AiEvent::RatEat { .. } | dishonored_ai::AiEvent::Distracted { .. } => {}
+                // The Kismet host fires these (`kismet_host::ai_events`).
+                dishonored_ai::AiEvent::AlarmEnded { .. }
+                | dishonored_ai::AiEvent::RatEat { .. }
+                | dishonored_ai::AiEvent::Distracted { .. }
+                | dishonored_ai::AiEvent::BehaviorStarted { .. }
+                | dishonored_ai::AiEvent::Combat { .. }
+                | dishonored_ai::AiEvent::Investigate { .. }
+                | dishonored_ai::AiEvent::PatrolPointReached { .. }
+                | dishonored_ai::AiEvent::FleepointReached { .. } => {}
             }
         }
         // Respawns (if the mission allows them).

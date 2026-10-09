@@ -298,7 +298,9 @@ impl Brain {
         self.slots[s] = Some(b);
         self.on_current_change(prev, prev_state);
         if s as u8 == self.current_slot() {
-            // A restarted current behaviour also starts over.
+            // A restarted current behaviour also starts over (the current pointer was cleared:
+            // 0x00b11960 -> 0x00aea8f0) and is announced by the next arbitration.
+            self.behavior_started = false;
             self.timer = 0.0;
             self.follow.clear();
             self.state = self.project();
@@ -316,6 +318,11 @@ impl Brain {
         let prev_state = self.state;
         if let Some(old) = self.slots[s as usize].take() {
             self.on_abort(&old);
+            // The current behaviour ended: the highest remaining one is started by the next
+            // arbitration (0x00b17100: current == 0 -> pick it, 0x00af7670).
+            if s == prev {
+                self.behavior_started = false;
+            }
         }
         self.on_current_change(prev, prev_state);
     }
@@ -358,6 +365,7 @@ impl Brain {
         }
         self.state = s;
         self.shown = s;
+        self.behavior_started = false;
     }
 
     /// Queue a stimulus.
@@ -425,22 +433,99 @@ impl Brain {
     /// Release the stimuli whose delay ran out, in queue order, and dispatch them.
     pub(crate) fn drain(&mut self, me: &PlayerState, ws: &WorldState, ctx: &mut Ctx, ai: &AiConfig, dt: f32) {
         self.ensure_stack();
-        if self.stims.is_empty() {
-            return;
-        }
-        let mut due = Vec::new();
-        let mut keep = Vec::new();
-        for mut q in std::mem::take(&mut self.stims) {
-            if q.delay <= 0.0 {
-                due.push(q);
-            } else {
-                q.delay -= dt;
-                keep.push(q);
+        if !self.stims.is_empty() {
+            let mut due = Vec::new();
+            let mut keep = Vec::new();
+            for mut q in std::mem::take(&mut self.stims) {
+                if q.delay <= 0.0 {
+                    due.push(q);
+                } else {
+                    q.delay -= dt;
+                    keep.push(q);
+                }
+            }
+            self.stims = keep;
+            for q in due {
+                self.dispatch(&q, me, ws, ctx, ai);
             }
         }
-        self.stims = keep;
-        for q in due {
-            self.dispatch(&q, me, ws, ctx, ai);
+        self.start_current(ctx);
+    }
+
+    /// Which routine behaviour the routine sub-state stands for: 1 `DisBehaviorIdle`, 2
+    /// `DisBehaviorPatrol`, 3 `DisBehaviorGuard`; 0 for the states of the scripted walks, whose
+    /// behaviour class is not decoded.
+    fn routine_class(&self) -> u8 {
+        match self.state {
+            BrainState::Patrol => 2,
+            BrainState::Alert => 3,
+            BrainState::Idle | BrainState::Wander | BrainState::GroupIdle => 1,
+            _ => 0,
+        }
+    }
+
+    fn routine_class_name(&self) -> Option<&'static str> {
+        match self.routine_class() {
+            1 => Some("DisBehaviorIdle"),
+            2 => Some("DisBehaviorPatrol"),
+            3 => Some("DisBehaviorGuard"),
+            _ => None,
+        }
+    }
+
+    /// The arbitration's last step (0x00b17100): with no current behaviour, the highest occupied
+    /// slot's becomes current (0x00af7670) and its start fires `DisSeqEvent_BehaviorStarted` on
+    /// the pawn; the behaviour's own start (virtual slot 91) follows: the combat behaviour fires
+    /// `DisSeqEvent_Combat` (0x00af7d00) and the search states `DisSeqEvent_Investigate`
+    /// (0x00b2e050 on entering the investigate sub-state, 0x00ae9fe0 for the stationary search).
+    fn start_current(&mut self, ctx: &Ctx) {
+        let cur = self.current_slot();
+        // The routine slot holds one behaviour at a time (`DisBehaviorIdle`, `Patrol`, `Guard`):
+        // the port keeps them as one routine with a sub-state, so a change of the routine's
+        // class while it is current is a behaviour replaced in its slot, which starts the new one.
+        if self.behavior_started && cur == slot::IDLE && self.routine_class() != self.routine_started {
+            self.behavior_started = false;
+        }
+        if self.behavior_started {
+            return;
+        }
+        self.behavior_started = true;
+        let Some(b) = self.behavior(cur).cloned() else { return };
+        let class = match &b {
+            // The routine slot's behaviour by what the routine is doing: patrolling a route,
+            // standing at a guard post, or the idle behaviour (`BrainInit` starts
+            // `DisBehaviorIdle`). Scripted walks are another behaviour class that is not decoded.
+            Behavior::Routine => {
+                self.routine_started = self.routine_class();
+                self.routine_class_name()
+            }
+            Behavior::Notice => Some("DisBehaviorNotice"),
+            Behavior::Search(s) => Some(if s.stationary { "DisBehaviorStationarySearch" } else { "DisBehaviorSearch" }),
+            Behavior::Combat => Some("DisBehaviorCombatEliteGuard"),
+            Behavior::TriggerAlarm => Some("DisBehaviorTriggerAlarm"),
+            Behavior::Magic(_) => Some("DisBehaviorMagicResponse"),
+            Behavior::Panic { .. } => Some("DisBehaviorPanic"),
+            // The animated distraction is `DisBehaviorInteract`; a soiree's behaviour class
+            // (`DisBehaviorSoiree`) is not decoded, so no class is claimed for it.
+            Behavior::Distraction(s) => {
+                if ctx.distractors.get(s.distractor).is_some_and(|d| d.def.soiree) {
+                    None
+                } else {
+                    Some("DisBehaviorInteract")
+                }
+            }
+        };
+        if let Some(class) = class {
+            self.fired.push(AiEvent::BehaviorStarted { pawn: self.id, class: class.to_string() });
+        }
+        match &b {
+            Behavior::Combat => self.fired.push(AiEvent::Combat { pawn: self.id, target: self.target }),
+            Behavior::Search(s) if s.sub == SearchSub::Investigate || s.stationary => {
+                if s.target != NOISE {
+                    self.fired.push(AiEvent::Investigate { pawn: self.id, target: s.target });
+                }
+            }
+            _ => {}
         }
     }
 

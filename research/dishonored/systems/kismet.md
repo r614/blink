@@ -430,6 +430,13 @@ seconds).
 | `SeqEvent_RigidBodyCollision`, `SeqAct_GetDistance` | 73 / 66 | `0x0078f7d0` | |
 | `DisSeqAct_SetAudioOcclusion` | 98 | - | presentation: add to `PRESENTATION` |
 
+Status of the AI-owned rows (2026-10-08, AI events pass; the per-event decode is in KISMET.md "AI events pass"):
+`PatrolPointReached` output 0, `BehaviorStarted`, `Combat`, `Investigate`, `FleepointReached`, `Corpse` (all three
+outputs) with `CorpseDetected`, `PawnSighted` and `Assassinated` output 0 are ported (`kismet_host::ai_events`,
+`FED_EVENTS`). Open: `PatrolPointReached` output 1 (guard post point actors), `Assassinated` output 1 (kill notify),
+`PlayerHeard` (writer of the brain's pending-name field not found), `AttackedByRats` (NPC master state entry),
+`WatchTower` (no tower in the port), `BehaviorStarted` for classes the port's behaviours lack.
+
 ---
 
 ## 4. Findings (each with the fix)

@@ -33,6 +33,7 @@ pub mod cutscene;
 #[path = "kismet_host/post.rs"]
 pub mod post;
 use dishonored_ai::BrainState;
+use dishonored_ir::ai::DAL_BUSTED;
 use dishonored_kismet::host::Matinee;
 use dishonored_kismet::runtime::Ctx;
 use dishonored_kismet::{Host, HostResult, Kismet, KismetDb, Obj, OpId, Value};
@@ -128,6 +129,17 @@ pub const FED_EVENTS: &[&str] = &[
     "DisSeqEvent_DialogOutputs",
     "DisSeqEvent_AttentionIncreasedTo",
     "DisSeqEvent_AttentionDecreasedTo",
+    // The AI's events (`ai_events`).
+    "DisSeqEvent_BehaviorStarted",
+    "DisSeqEvent_Combat",
+    "DisSeqEvent_Investigate",
+    "DisSeqEvent_PatrolPointReached",
+    "DisSeqEvent_FleepointReached",
+    "DisSeqEvent_Corpse",
+    "DisSeqEvent_CorpseDetected",
+    "DisSeqEvent_PawnSighted",
+    // Output 0 "Started" only (`SimEvent::Death` of an assassination).
+    "DisSeqEvent_Assassinated",
 ];
 
 /// A usable the Kismet offers (an actor with `DisSeqEvent_Used` or a pickup with
@@ -3031,6 +3043,16 @@ fn attention_events(k: &mut Kismet, h: &mut H) {
         if from == to || !h.m.world.player(observer).is_some_and(|p| p.alive) {
             continue;
         }
+        // `DisSeqEvent_PawnSighted`: stepping the level through 3 -> 4 (Busted) calls the
+        // sighting handler 0x00b24ec0 (0x00b26b30), which fires the event whatever the
+        // relationship, originator the observer, instigator the target pawn (0x00b0be40,
+        // 0x00b0bef0, 0x00b0bf30).
+        if from < DAL_BUSTED && to >= DAL_BUSTED {
+            let n = fire_generated(k, h, "DisSeqEvent_PawnSighted", &pawn_origs(h, observer), Obj::Pawn(observer), Obj::Pawn(target), None);
+            if !n.is_empty() {
+                h.note(format!("pawn {observer} sighted {target}: {} event(s)", n.len()));
+            }
+        }
         let class = if from < to { "DisSeqEvent_AttentionIncreasedTo" } else { "DisSeqEvent_AttentionDecreasedTo" };
         let mut origs = vec![Obj::Pawn(observer)];
         if let Some((&a, _)) = h.st.spawner.iter().find(|(_, i)| h.m.setup.original[**i].spawn.id == observer) {
@@ -3049,6 +3071,130 @@ fn attention_events(k: &mut Kismet, h: &mut H) {
             if k.check_activate(h, ev, Obj::Pawn(observer), Obj::Pawn(target), false, None, false) {
                 h.note(format!("attention of pawn {observer} on {target}: {from} -> {to}: {}", k.describe(ev)));
             }
+        }
+    }
+}
+
+/// What a pawn's `GeneratedEvents` hold, as the interpreter indexes them: the pawn itself
+/// (events duplicated onto a spawned pawn) and the original spawner that made it.
+fn pawn_origs(h: &H, id: PlayerId) -> Vec<Obj> {
+    let mut origs = vec![Obj::Pawn(id)];
+    if let Some((&a, _)) = h.st.spawner.iter().find(|(_, i)| h.m.setup.original[**i].spawn.id == id) {
+        origs.push(Obj::Actor(a));
+    }
+    origs
+}
+
+/// The level actor of class `class` (or a subclass) the AI's point at `at` stands for: AI nav
+/// points and flee points are known to the port by position only, and the crowd snaps them to
+/// the floor (`Crowd::set_routes`), which changes their height but not their place. The
+/// actor at the same place, nearest in height.
+fn actor_at(h: &H, class: &str, at: Vec3) -> Option<u32> {
+    let near = |a: &dishonored_kismet::model::Actor| Vec3::from(a.location).truncate().distance(at.truncate()) < 0.5 && (a.location[2] - at.z).abs() < 150.0;
+    h.db.actors.iter().enumerate().filter(|(_, a)| near(a) && h.db.is_a(&a.class, class)).min_by(|x, y| (x.1.location[2] - at.z).abs().total_cmp(&(y.1.location[2] - at.z).abs())).map(|(i, _)| i as u32)
+}
+
+/// The class a `class<DishonoredAIBehavior>` property names (`DishonoredGame.DisBehaviorPanic`).
+fn behavior_class(v: &Value) -> Option<String> {
+    match v {
+        Value::Obj(Obj::Path(p)) => Some(p.rsplit(['.', ':']).next().unwrap_or(p).to_string()),
+        _ => None,
+    }
+}
+
+/// Fire the events of `class` held by `actor` with the engine's `FireGeneratedEvents`
+/// (0x00bc7b30): each enabled one runs `CheckActivate(originator, instigator)`. Returns the
+/// events that activated.
+fn fire_generated(k: &mut Kismet, h: &mut H, class: &str, actor: &[Obj], originator: Obj, instigator: Obj, indices: Option<Vec<usize>>) -> Vec<OpId> {
+    fire_generated_with(k, h, class, false, actor, originator, instigator, indices)
+}
+
+/// [`fire_generated`] with the engine's `exact` flag: only events of exactly `class`, not of a
+/// subclass.
+#[allow(clippy::too_many_arguments)]
+fn fire_generated_with(k: &mut Kismet, h: &mut H, class: &str, exact: bool, actor: &[Obj], originator: Obj, instigator: Obj, indices: Option<Vec<usize>>) -> Vec<OpId> {
+    let mut fired = Vec::new();
+    for ev in k.events_for(class, actor) {
+        if exact && !k.op(ev).class.eq_ignore_ascii_case(class) {
+            continue;
+        }
+        let before = k.ops[ev as usize].trigger_count;
+        k.check_activate(h, ev, originator.clone(), instigator.clone(), false, indices.clone(), false);
+        if k.ops[ev as usize].trigger_count > before {
+            fired.push(ev);
+        }
+    }
+    fired
+}
+
+/// The AI's Kismet events (kismet.md 3.7, KISMET.md "Op coverage pass"): each is fired from the
+/// brain code the engine fires it from.
+///
+/// - `DisSeqEvent_BehaviorStarted` (0x00af7670): the pawn's current behaviour started; the
+///   override (0x00b8a1a0) passes when the class of the highest occupied slot's behaviour is
+///   exactly the event's `m_pBehavior`. Originator and instigator are the pawn.
+/// - `DisSeqEvent_Combat` (0x00af7d00): the combat behaviour started; originator the attention
+///   target, instigator the pawn.
+/// - `DisSeqEvent_Investigate` (0x00b2e050, 0x00ae9fe0): the investigate state was entered;
+///   originator the searched pawn, instigator the pawn.
+/// - `DisSeqEvent_PatrolPointReached` (0x00afd350): output 0 ("From Patrol Behavior") on the nav
+///   point the patrolling pawn reached; originator the point, instigator the pawn. (The guard
+///   behaviour's output 1, 0x00af2300, needs the guard-post point actor the port's guards do not
+///   carry.)
+/// - `DisSeqEvent_FleepointReached` (0x00a47340): on the flee point the pawn reached.
+/// - `DisSeqEvent_Corpse` output 2 (0x00b40740) and `DisSeqEvent_CorpseDetected` (same
+///   function): the corpse reaction; `Corpse` fires on the corpse with the observer as the
+///   instigator, `CorpseDetected` on the observer with the corpse as the instigator.
+fn ai_events(k: &mut Kismet, h: &mut H) {
+    let events = h.m.crowd.events.clone();
+    for e in events {
+        match e {
+            dishonored_ai::AiEvent::BehaviorStarted { pawn, class } => {
+                let origs = pawn_origs(h, pawn);
+                for ev in k.events_for("DisSeqEvent_BehaviorStarted", &origs) {
+                    if k.prop(ev, "m_pBehavior").as_ref().and_then(behavior_class).is_none_or(|c| c != class) {
+                        continue;
+                    }
+                    if k.check_activate(h, ev, Obj::Pawn(pawn), Obj::Pawn(pawn), false, None, false) {
+                        h.note(format!("pawn {pawn} started {class}: {}", k.describe(ev)));
+                    }
+                }
+            }
+            dishonored_ai::AiEvent::Combat { pawn, target } => {
+                let Some(t) = target else { continue };
+                let n = fire_generated(k, h, "DisSeqEvent_Combat", &pawn_origs(h, pawn), Obj::Pawn(t), Obj::Pawn(pawn), None);
+                if !n.is_empty() {
+                    h.note(format!("pawn {pawn} started combat against {t}: {} event(s)", n.len()));
+                }
+            }
+            dishonored_ai::AiEvent::Investigate { pawn, target } => {
+                let n = fire_generated(k, h, "DisSeqEvent_Investigate", &pawn_origs(h, pawn), Obj::Pawn(target), Obj::Pawn(pawn), None);
+                if !n.is_empty() {
+                    h.note(format!("pawn {pawn} investigates {target}: {} event(s)", n.len()));
+                }
+            }
+            dishonored_ai::AiEvent::PatrolPointReached { pawn, position } => {
+                let Some(a) = actor_at(h, "DishonoredNavPoint", position) else { continue };
+                let n = k.trigger(h, "DisSeqEvent_PatrolPointReached", &[Obj::Actor(a)], Obj::Pawn(pawn), Some(vec![0]));
+                if !n.is_empty() {
+                    h.note(format!("pawn {pawn} reached patrol point {}", h.db.actors[a as usize].name));
+                }
+            }
+            dishonored_ai::AiEvent::FleepointReached { pawn, position } => {
+                let Some(a) = actor_at(h, "DisFleePointActor", position) else { continue };
+                let n = k.trigger(h, "DisSeqEvent_FleepointReached", &[Obj::Actor(a)], Obj::Pawn(pawn), None);
+                if !n.is_empty() {
+                    h.note(format!("pawn {pawn} reached flee point {}", h.db.actors[a as usize].name));
+                }
+            }
+            dishonored_ai::AiEvent::CorpseFound { npc, corpse } => {
+                let n = fire_generated(k, h, "DisSeqEvent_Corpse", &pawn_origs(h, corpse), Obj::Pawn(corpse), Obj::Pawn(npc), Some(vec![2]));
+                let d = fire_generated(k, h, "DisSeqEvent_CorpseDetected", &pawn_origs(h, npc), Obj::Pawn(npc), Obj::Pawn(corpse), None);
+                if !n.is_empty() || !d.is_empty() {
+                    h.note(format!("pawn {npc} discovered corpse {corpse}: {} corpse / {} detected event(s)", n.len(), d.len()));
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -3193,6 +3339,26 @@ fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
             SimEvent::Fired { id, .. } => {
                 *h.st.shots.entry(*id).or_insert(0) += 1;
             }
+            // `DisSeqEvent_Assassinated` output 0 "Started" (0x00a7beb0, the victim's
+            // `StateNPCMasterBeingAssassinated` entry; exact class, originator and instigator
+            // the pawn and the player). The port kills the victim as the assassination starts, so
+            // that is the moment; output 1 "Finished" (0x00a78270) comes from the sync
+            // animation's kill notify, which the port does not have.
+            SimEvent::Death { victim, killer: Some(killer), cause: dishonored_sim::events::DamageCause::Assassination | dishonored_sim::events::DamageCause::DropAssassination, .. } if !h.m.humans.contains(victim) => {
+                let n = fire_generated_with(k, h, "DisSeqEvent_Assassinated", true, &pawn_origs(h, *victim), Obj::Pawn(*victim), Obj::Pawn(*killer), Some(vec![0]));
+                if !n.is_empty() {
+                    h.note(format!("pawn {victim} assassinated by {killer}: {} event(s)", n.len()));
+                }
+            }
+            // `DisSeqEvent_Corpse` outputs 0 / 1 (0x00a998a0 / 0x00a90b50): a body picked up /
+            // dropped, fired on the body with the carrier as the instigator.
+            SimEvent::BodyLifted { carrier, body } | SimEvent::BodyDropped { carrier, body } => {
+                let lifted = matches!(e, SimEvent::BodyLifted { .. });
+                let n = fire_generated(k, h, "DisSeqEvent_Corpse", &pawn_origs(h, *body), Obj::Pawn(*body), Obj::Pawn(*carrier), Some(vec![if lifted { 0 } else { 1 }]));
+                if !n.is_empty() {
+                    h.note(format!("body {body} {} by {carrier}: {} corpse event(s)", if lifted { "picked up" } else { "dropped" }, n.len()));
+                }
+            }
             SimEvent::KnockedOut { victim, by, cause } => {
                 if h.m.humans.contains(victim) {
                     continue;
@@ -3260,6 +3426,7 @@ fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
         }
     }
     attention_events(k, h);
+    ai_events(k, h);
     // Touches (players; NPC pawns for events that are not player-only).
     let touch_events = k.events_for("SeqEvent_Touch", &[]);
     for e in touch_events {
@@ -4073,5 +4240,173 @@ mod tests {
         let p = r.pawn().clone();
         assert!((p.position.x - 10.0).abs() < 1e-3 && (p.position.y - 20.0).abs() < 1e-3, "{:?}", p.position);
         assert!((p.yaw - 90.0).abs() < 1e-3);
+    }
+
+    // ----- the AI's events (`ai_events`, kismet.md 3.7) -----
+
+    use dishonored_ai::AiEvent;
+    use dishonored_kismet::Kind;
+
+    /// An AI event op of `class` held by `originator` with the given outputs, and a sink after
+    /// each output.
+    fn ai_event(g: &mut GraphBuilder, class: &str, originator: Obj, outs: &[&str]) -> (OpId, Vec<OpId>) {
+        let chain = [class, "SequenceEvent", "SequenceOp", "SequenceObject", "Object"].map(String::from).to_vec();
+        g.db.classes.insert(class.into(), chain);
+        let e = g.add(class, Kind::Event, Some(0));
+        g.outputs(e, outs);
+        g.set(e, "Originator", Value::Obj(originator));
+        let sinks: Vec<OpId> = (0..outs.len()).map(|i| {
+            let s = g.sink();
+            g.link(e, i, s, 0);
+            s
+        }).collect();
+        (e, sinks)
+    }
+
+    impl Rig {
+        /// One host feed (the gameplay events of a step) and a few interpreter ticks.
+        fn feed(&mut self, sim: &[SimEvent]) {
+            let setup = self.run.setup.clone();
+            let db = self.run.k.db.clone();
+            let KismetRun { k, st, .. } = &mut self.run;
+            let mut h = H { m: &mut self.m, st, setup, cfg: &self.cfg, db };
+            k.players = h.m.humans.clone();
+            super::feed(k, &mut h, sim);
+            for _ in 0..3 {
+                k.tick(&mut h, 0.1);
+            }
+        }
+
+        /// The AI events of a step, as the crowd reports them.
+        fn ai(&mut self, events: Vec<AiEvent>) {
+            self.m.crowd.events = events;
+            self.feed(&[]);
+            self.m.crowd.events.clear();
+        }
+    }
+
+    /// `DisSeqEvent_PatrolPointReached` fires on the nav point the pawn reached: output 0 is
+    /// "From Patrol Behavior", the guard behaviour's output 1 stays silent.
+    #[test]
+    fn patrol_point_reached_fires_on_the_point_actor() {
+        let mut g = GraphBuilder::new();
+        g.remote_event("Start");
+        g.db.classes.insert("DishonoredNavPoint".into(), ["DishonoredNavPoint", "NavigationPoint", "Actor", "Object"].map(String::from).to_vec());
+        let (near, far) = (g.actor("DishonoredNavPoint", "Near", [100.0, 0.0, 90.0], 0), g.actor("DishonoredNavPoint", "Far", [900.0, 0.0, 90.0], 0));
+        let (_, near_sinks) = ai_event(&mut g, "DisSeqEvent_PatrolPointReached", Obj::Actor(near), &["From Patrol Behavior", "From Guard Behavior"]);
+        let (_, far_sinks) = ai_event(&mut g, "DisSeqEvent_PatrolPointReached", Obj::Actor(far), &["Out"]);
+        let mut r = Rig::new(g, |_| {});
+        r.play(1);
+        r.ai(vec![AiEvent::PatrolPointReached { pawn: 1000, position: Vec3::new(100.0, 0.0, 90.0) }]);
+        assert_eq!((r.ran(near_sinks[0]), r.ran(near_sinks[1]), r.ran(far_sinks[0])), (1, 0, 0));
+        // A position with no nav point (the port's fallback loops) fires nothing.
+        r.ai(vec![AiEvent::PatrolPointReached { pawn: 1000, position: Vec3::new(5000.0, 0.0, 90.0) }]);
+        assert_eq!(r.ran(near_sinks[0]), 1);
+    }
+
+    /// `DisSeqEvent_BehaviorStarted` passes only for the exact class of `m_pBehavior`
+    /// (0x00b8a1a0 -> 0x00b00d80), on the pawn's own events.
+    #[test]
+    fn behavior_started_matches_the_class_of_the_behavior() {
+        let mut g = GraphBuilder::new();
+        g.remote_event("Start");
+        let class = |n: &str| Value::Obj(Obj::Path(format!("DishonoredGame.{n}")));
+        let (panic, patrol, other) = (ai_event(&mut g, "DisSeqEvent_BehaviorStarted", Obj::Pawn(1000), &["Out"]), ai_event(&mut g, "DisSeqEvent_BehaviorStarted", Obj::Pawn(1000), &["Out"]), ai_event(&mut g, "DisSeqEvent_BehaviorStarted", Obj::Pawn(1001), &["Out"]));
+        g.set(panic.0, "m_pBehavior", class("DisBehaviorPanic"));
+        g.set(patrol.0, "m_pBehavior", class("DisBehaviorPatrol"));
+        g.set(other.0, "m_pBehavior", class("DisBehaviorPanic"));
+        let mut r = Rig::new(g, |_| {});
+        r.play(1);
+        r.ai(vec![AiEvent::BehaviorStarted { pawn: 1000, class: "DisBehaviorPanic".into() }]);
+        assert_eq!((r.ran(panic.1[0]), r.ran(patrol.1[0]), r.ran(other.1[0])), (1, 0, 0));
+        r.ai(vec![AiEvent::BehaviorStarted { pawn: 1000, class: "DisBehaviorPatrol".into() }]);
+        assert_eq!((r.ran(panic.1[0]), r.ran(patrol.1[0]), r.ran(other.1[0])), (1, 1, 0));
+    }
+
+    /// Combat, Investigate and Fleepoint events: held by the pawn (or the flee point), fired
+    /// when the AI reports the behaviour's start.
+    #[test]
+    fn combat_investigate_and_fleepoint_events_fire() {
+        let mut g = GraphBuilder::new();
+        g.remote_event("Start");
+        g.db.classes.insert("DisFleePointActor".into(), ["DisFleePointActor", "Actor", "Object"].map(String::from).to_vec());
+        let flee = g.actor("DisFleePointActor", "Flee", [-300.0, 40.0, 90.0], 0);
+        let combat = ai_event(&mut g, "DisSeqEvent_Combat", Obj::Pawn(1000), &["Out"]);
+        let investigate = ai_event(&mut g, "DisSeqEvent_Investigate", Obj::Pawn(1000), &["Out"]);
+        let fleepoint = ai_event(&mut g, "DisSeqEvent_FleepointReached", Obj::Actor(flee), &["Out"]);
+        let mut r = Rig::new(g, |_| {});
+        r.play(1);
+        r.ai(vec![AiEvent::Combat { pawn: 1001, target: Some(1) }]);
+        assert_eq!(r.ran(combat.1[0]), 0, "another pawn's combat");
+        r.ai(vec![AiEvent::Combat { pawn: 1000, target: Some(1) }, AiEvent::Investigate { pawn: 1000, target: 1 }, AiEvent::FleepointReached { pawn: 1000, position: Vec3::new(-300.0, 40.0, 90.0) }]);
+        assert_eq!((r.ran(combat.1[0]), r.ran(investigate.1[0]), r.ran(fleepoint.1[0])), (1, 1, 1));
+    }
+
+    /// `DisSeqEvent_Corpse`: output 0 when a body is picked up, 1 dropped (0x00a998a0 /
+    /// 0x00a90b50, on the body, the carrier the instigator), 2 when an NPC discovers it
+    /// (0x00b40740, which also fires `DisSeqEvent_CorpseDetected` on the observer).
+    #[test]
+    fn corpse_events_use_their_outputs() {
+        let mut g = GraphBuilder::new();
+        g.remote_event("Start");
+        let corpse = ai_event(&mut g, "DisSeqEvent_Corpse", Obj::Pawn(1000), &["Picked Up", "Dropped", "Discovered"]);
+        let detected = ai_event(&mut g, "DisSeqEvent_CorpseDetected", Obj::Pawn(1001), &["Out"]);
+        let mut r = Rig::new(g, |_| {});
+        r.play(1);
+        r.feed(&[SimEvent::BodyLifted { carrier: 1, body: 1000 }]);
+        assert_eq!((r.ran(corpse.1[0]), r.ran(corpse.1[1]), r.ran(corpse.1[2])), (1, 0, 0));
+        r.feed(&[SimEvent::BodyDropped { carrier: 1, body: 1000 }]);
+        assert_eq!((r.ran(corpse.1[0]), r.ran(corpse.1[1]), r.ran(corpse.1[2])), (1, 1, 0));
+        r.feed(&[SimEvent::BodyLifted { carrier: 1, body: 1002 }]);
+        assert_eq!(r.ran(corpse.1[0]), 1, "another body");
+        r.ai(vec![AiEvent::CorpseFound { npc: 1001, corpse: 1000 }]);
+        assert_eq!((r.ran(corpse.1[2]), r.ran(detected.1[0])), (1, 1));
+    }
+
+    /// `DisSeqEvent_Assassinated` output 0 ("Started"): an NPC killed by a (drop) assassination,
+    /// exact class; other kills, and the other output, stay silent.
+    #[test]
+    fn assassinated_started_fires_for_assassination_kills_only() {
+        use dishonored_sim::events::DamageCause;
+        let mut g = GraphBuilder::new();
+        g.remote_event("Start");
+        let ev = ai_event(&mut g, "DisSeqEvent_Assassinated", Obj::Pawn(1000), &["Started", "Finished"]);
+        let mut r = Rig::new(g, |_| {});
+        r.play(1);
+        r.feed(&[SimEvent::Death { victim: 1000, killer: Some(1), cause: DamageCause::Sword }]);
+        assert_eq!(r.ran(ev.1[0]), 0);
+        r.feed(&[SimEvent::Death { victim: 1000, killer: Some(1), cause: DamageCause::DropAssassination }]);
+        assert_eq!((r.ran(ev.1[0]), r.ran(ev.1[1])), (1, 0));
+    }
+
+    /// `DisSeqEvent_PawnSighted` (0x00b26b30 -> 0x00b24ec0): fires when the attention toward a
+    /// pawn steps through 3 -> 4 (Busted), on the observer, once for the climb.
+    #[test]
+    fn pawn_sighted_fires_when_attention_reaches_busted() {
+        let mut g = GraphBuilder::new();
+        g.remote_event("Start");
+        let sighted = ai_event(&mut g, "DisSeqEvent_PawnSighted", Obj::Pawn(1000), &["Out"]);
+        let mut r = Rig::new(g, |_| {});
+        r.play(1);
+        let cfg = sim_cfg();
+        let mut guard = dishonored_sim::state::PlayerState::new(1000, Vec3::new(500.0, 0.0, 90.0), 0.0);
+        guard.kind = PawnKind::Guard;
+        r.m.world.players.push(guard);
+        let _ = cfg;
+        r.m.crowd.brains.push(dishonored_ai::Brain::new(1000, PawnKind::Guard, Vec3::new(500.0, 0.0, 90.0), 1));
+        let set = |r: &mut Rig, level: u8| {
+            r.m.crowd.brains[0].attn = vec![dishonored_ai::Attn { who: 1, value: 1.0, level, proxy: Vec3::ZERO, fresh: false, urgent: false, sighted: true, los_norm: 0.5, why: 0, danger: false }];
+            r.feed(&[]);
+        };
+        set(&mut r, 2);
+        set(&mut r, 3);
+        assert_eq!(r.ran(sighted.1[0]), 0, "Search is not a sighting");
+        set(&mut r, 4);
+        assert_eq!(r.ran(sighted.1[0]), 1);
+        set(&mut r, 4);
+        assert_eq!(r.ran(sighted.1[0]), 1, "Busted held");
+        set(&mut r, 0);
+        set(&mut r, 4);
+        assert_eq!(r.ran(sighted.1[0]), 2, "a jump from nothing passes the step too");
     }
 }

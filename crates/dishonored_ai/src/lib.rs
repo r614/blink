@@ -153,6 +153,26 @@ pub enum AiEvent {
     /// reports the discovery 0x00A98950: the game counts `NumCorpsesDiscovered` the first time a
     /// given corpse is discovered by anyone).
     CorpseFound { npc: PlayerId, corpse: PlayerId },
+    /// A behaviour became the brain's current one (0x00b17100 -> 0x00af7670, which fires
+    /// `DisSeqEvent_BehaviorStarted` on the pawn with the behaviour instance's class compared
+    /// to the event's `m_pBehavior`). `class` is the original behaviour class
+    /// (`DisBehaviorPatrol`, `DisBehaviorPanic` ...).
+    BehaviorStarted { pawn: PlayerId, class: String },
+    /// The combat behaviour started (`DisBehaviorCombat` slot 91, 0x00af7d00, right after the
+    /// behaviour-started event): `DisSeqEvent_Combat` of the pawn with the attention target as
+    /// the originator.
+    Combat { pawn: PlayerId, target: Option<PlayerId> },
+    /// The investigate state was entered (`DisAISubStateInvestigate` slot 96, 0x00b2e050, and
+    /// `DisBehaviorStationarySearch` start, 0x00ae9fe0): `DisSeqEvent_Investigate` of the pawn
+    /// with the searched pawn as the originator.
+    Investigate { pawn: PlayerId, target: PlayerId },
+    /// The patrolling pawn reached a route point (`DisBehaviorPatrol` slot 107, 0x00afd430 ->
+    /// 0x00afd350): `DisSeqEvent_PatrolPointReached` output 0 ("From Patrol Behavior") of the
+    /// nav point at `position`.
+    PatrolPointReached { pawn: PlayerId, position: Vec3 },
+    /// The fleeing pawn reached its flee point (`DisAISubStateFlee`, 0x00b29ae0 / 0x00b29be0 ->
+    /// 0x00a47340): `DisSeqEvent_FleepointReached` of the flee point at `position`.
+    FleepointReached { pawn: PlayerId, position: Vec3 },
 }
 
 /// Runtime state of a `DisAlarmBell`.
@@ -369,6 +389,24 @@ pub struct Brain {
     /// [`AiEvent::CorpseFound`]).
     #[serde(default)]
     pub found_corpses: Vec<PlayerId>,
+    /// Kismet-facing events decided this tick (drained into `Crowd::events` within the same
+    /// tick: never part of a saved state).
+    #[serde(skip)]
+    pub fired: Vec<AiEvent>,
+    /// The current behaviour has been started (`BehaviorStarted` fired for it): cleared when the
+    /// current pointer is cleared (0x00aea8f0: the current behaviour ended, was replaced or was
+    /// preempted), set again by the next arbitration (0x00b17100).
+    #[serde(default)]
+    pub behavior_started: bool,
+    /// The routine behaviour class announced last (`slots::Brain::routine_class`).
+    #[serde(default)]
+    pub routine_started: u8,
+    /// The flee point (index into `CrowdLayout::flee_points`) the panic is running to, and
+    /// whether its arrival was reported.
+    #[serde(default)]
+    pub flee_point: Option<usize>,
+    #[serde(default)]
+    pub flee_reached: bool,
     /// Time left before the first pistol shot is allowed (`m_GunUsageStart`, `m_fGunTimer`).
     #[serde(default)]
     pub gun_timer: f32,
@@ -1147,6 +1185,7 @@ impl Crowd {
             for corpse in b.found_corpses.drain(..) {
                 ai_events.push(AiEvent::CorpseFound { npc: b.id, corpse });
             }
+            ai_events.append(&mut b.fired);
             let panicked = |s: BrainState| matches!(s, BrainState::Flee | BrainState::Cower);
             if b.kind != PawnKind::Guard && panicked(b.state) && !panicked(was) {
                 // `DisAISubStateFlee.bDoBarkForHelp`: call for help at talking loudness.
@@ -1683,6 +1722,11 @@ impl Brain {
             alarm_enemy: None,
             barks: Vec::new(),
             found_corpses: Vec::new(),
+        fired: Vec::new(),
+        behavior_started: false,
+        routine_started: 0,
+        flee_point: None,
+        flee_reached: false,
             gun_timer: -1.0,
             hostile_faction: Vec::new(),
             deaf: false,
@@ -2735,8 +2779,14 @@ impl Brain {
                     return look.map(face).unwrap_or(idle);
                 }
                 self.goal = Some(p.position);
-                if Self::reached(me, p.position, 70.0) || self.follow.failed {
+                let at_point = Self::reached(me, p.position, 70.0);
+                if at_point || self.follow.failed {
                     self.follow.clear();
+                    if at_point {
+                        // The behaviour's arrival callback (slot 107, 0x00afd430 -> 0x00afd350)
+                        // fires `DisSeqEvent_PatrolPointReached` output 0 on the nav point.
+                        self.fired.push(AiEvent::PatrolPointReached { pawn: self.id, position: p.position });
+                    }
                     if p.guard_forever || single {
                         self.guard_timer = -1.0;
                     } else if p.guard_duration > 0.0 {
@@ -2893,6 +2943,10 @@ impl Brain {
                 if let Some(p) = live {
                     if p.distance(s.proxy) > ss.proximity {
                         s.sub = SearchSub::Investigate;
+                        // Entering the investigate sub-state (0x00b2e050) fires the event again.
+                        if s.target != NOISE {
+                            self.fired.push(AiEvent::Investigate { pawn: self.id, target: s.target });
+                        }
                         s.proxy = p;
                         s.dest = p;
                         s.reached = false;
@@ -3064,6 +3118,16 @@ impl Brain {
                 return i;
             }
         }
+        // The flee sub-state's arrival (0x00b29ae0 / 0x00b29be0): the pawn reached its flee
+        // point, `DisSeqEvent_FleepointReached` fires on it (0x00a47340) once per point.
+        if let (Some(g), Some(fi)) = (self.goal, self.flee_point) {
+            if !self.flee_reached && Self::reached(me, g, 120.0) {
+                self.flee_reached = true;
+                if let Some(fp) = layout.flee_points.get(fi) {
+                    self.fired.push(AiEvent::FleepointReached { pawn: self.id, position: *fp });
+                }
+            }
+        }
         match self.goal {
             Some(g) if !Self::reached(me, g, 120.0) && !self.follow.failed => self.move_to(me, nav, g, true, ai),
             _ => face(from),
@@ -3114,7 +3178,10 @@ impl Brain {
     fn pick_flee_point(&mut self, me: &PlayerState, threat: Vec3, layout: &CrowdLayout, nav: Option<&NavWorld>, ai: &AiConfig) -> Option<Vec3> {
         let to_threat = (threat - me.position).truncate();
         let mut best: Option<(f32, Vec3)> = None;
-        for fp in &layout.flee_points {
+        let mut best_i = 0;
+        self.flee_point = None;
+        self.flee_reached = false;
+        for (fi, fp) in layout.flee_points.iter().enumerate() {
             let dir = (*fp - me.position).truncate();
             if dir.length() < 200.0 {
                 continue;
@@ -3131,9 +3198,11 @@ impl Brain {
             let d = dir.length();
             if best.is_none_or(|b| d < b.0) {
                 best = Some((d, *fp));
+                best_i = fi;
             }
         }
         if let Some((_, p)) = best {
+            self.flee_point = Some(best_i);
             return Some(p);
         }
         let away = (me.position - threat).truncate().normalize_or_zero();
@@ -4582,5 +4651,126 @@ mod tests {
         let i = b.combat(&g, &ws, &w, None, &ai, &mut Vec::new(), 1.0 / 60.0);
         assert_eq!(i.npc_move, npc_moves::BACK_STEP);
         assert!(i.forward < 0);
+    }
+
+    /// Runs one arbitration (`drain`) of a brain with an empty world around it.
+    fn arbitrate(b: &mut Brain) {
+        let ai = AiConfig::default();
+        let me = pawn(b.id, b.kind, Vec3::ZERO, 0.0);
+        let ws = WorldState::default();
+        let layout = CrowdLayout::default();
+        let (routes, mut users, mut inhibit, mut alarms, mut events, mut dists): (Vec<PatrolRoute>, Vec<i32>, Vec<(PlayerId, u8, f32)>, Vec<AlarmBell>, Vec<AiEvent>, Vec<distraction::Distractor>) = Default::default();
+        let mut ctx = Ctx { layout: &layout, routes: &routes, users: &mut users, neglect: &[], inhibit: &mut inhibit, alarms: &mut alarms, events: &mut events, cooldown: 0.0, distractors: &mut dists };
+        b.drain(&me, &ws, &mut ctx, &ai, 1.0 / 60.0);
+    }
+
+    fn started(b: &mut Brain) -> Vec<String> {
+        b.fired.drain(..).filter_map(|e| if let AiEvent::BehaviorStarted { class, .. } = e { Some(class) } else { None }).collect()
+    }
+
+    /// `DisSeqEvent_BehaviorStarted` (0x00b17100 -> 0x00af7670): each time the current pointer
+    /// was cleared and the highest occupied slot's behaviour becomes current again, with the
+    /// behaviour's class; a dormant lower placement announces nothing, and the resumed behaviour
+    /// is started again when the one above it ends. `DisSeqEvent_Combat` (slot 91 of the combat
+    /// behaviour, 0x00af7d00) and `DisSeqEvent_Investigate` (0x00b2e050) follow the start.
+    #[test]
+    fn behavior_started_follows_the_current_pointer() {
+        let mut b = Brain::new(NPC_ID_BASE, PawnKind::Guard, Vec3::ZERO, 1);
+        b.state = BrainState::Patrol;
+        b.sync_external();
+        b.behavior_started = false;
+        b.fired.clear();
+        arbitrate(&mut b);
+        assert_eq!(started(&mut b), ["DisBehaviorPatrol"]);
+        arbitrate(&mut b);
+        assert!(b.fired.is_empty(), "nothing changed");
+        // The routine slot's behaviour replaced by another (the patrol gives way to the post):
+        // the new one starts; a scripted walk (no decoded class) announces nothing.
+        b.state = BrainState::Alert;
+        arbitrate(&mut b);
+        assert_eq!(started(&mut b), ["DisBehaviorGuard"]);
+        b.state = BrainState::WalkToPoint;
+        arbitrate(&mut b);
+        assert!(b.fired.is_empty());
+        b.state = BrainState::Patrol;
+        arbitrate(&mut b);
+        assert_eq!(started(&mut b), ["DisBehaviorPatrol"]);
+        b.place(Behavior::Notice);
+        arbitrate(&mut b);
+        assert_eq!(started(&mut b), ["DisBehaviorNotice"]);
+        b.place(Behavior::Search(SearchState { target: 5, ..Default::default() }));
+        arbitrate(&mut b);
+        assert_eq!(b.fired, [AiEvent::BehaviorStarted { pawn: NPC_ID_BASE, class: "DisBehaviorSearch".into() }, AiEvent::Investigate { pawn: NPC_ID_BASE, target: 5 }]);
+        b.fired.clear();
+        b.target = Some(7);
+        b.place(Behavior::Combat);
+        arbitrate(&mut b);
+        assert_eq!(b.fired, [AiEvent::BehaviorStarted { pawn: NPC_ID_BASE, class: "DisBehaviorCombatEliteGuard".into() }, AiEvent::Combat { pawn: NPC_ID_BASE, target: Some(7) }]);
+        b.fired.clear();
+        // Below the current behaviour: dormant, no start.
+        b.place(Behavior::Notice);
+        arbitrate(&mut b);
+        assert!(b.fired.is_empty());
+        // The combat ends: the search below it is started again.
+        b.complete(slot::COMBAT);
+        arbitrate(&mut b);
+        assert_eq!(started(&mut b), ["DisBehaviorSearch"]);
+        // A stationary search (civilians) is its own class and a searched place is no pawn.
+        let mut c = Brain::new(NPC_ID_BASE + 1, PawnKind::Civilian, Vec3::ZERO, 2);
+        c.behavior_started = true;
+        c.place(Behavior::Search(SearchState { target: NOISE, stationary: true, ..Default::default() }));
+        arbitrate(&mut c);
+        assert_eq!(c.fired, [AiEvent::BehaviorStarted { pawn: NPC_ID_BASE + 1, class: "DisBehaviorStationarySearch".into() }]);
+    }
+
+    /// `DisBehaviorPatrol` slot 107 (0x00afd430 -> 0x00afd350): reaching a route point fires
+    /// `DisSeqEvent_PatrolPointReached` (output 0) on that point, whether the guard stops there
+    /// or walks past.
+    #[test]
+    fn patrol_arrival_fires_the_point_event() {
+        let w = flat_world();
+        let mut c = Crowd::default();
+        c.routes = vec![route(2, 3, 0.0)];
+        c.route_users = vec![0];
+        let g = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(0.0, 0.0, 90.0), 0.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![g.clone()];
+        let mut b = Brain::new(g.id, PawnKind::Guard, g.position, 1);
+        b.stay = true;
+        b.request_patrol();
+        c.brains.push(b);
+        c.think(&ws, &[], &w, 1.0 / 60.0);
+        let reached: Vec<Vec3> = c.events.iter().filter_map(|e| if let AiEvent::PatrolPointReached { position, .. } = e { Some(*position) } else { None }).collect();
+        assert_eq!(reached, [Vec3::new(0.0, 0.0, 90.0)]);
+        assert!(c.events.iter().any(|e| matches!(e, AiEvent::BehaviorStarted { class, .. } if class == "DisBehaviorPatrol")));
+        // Walking on to the next point is not an arrival.
+        c.think(&ws, &[], &w, 1.0 / 60.0);
+        assert!(!c.events.iter().any(|e| matches!(e, AiEvent::PatrolPointReached { .. })));
+    }
+
+    /// `DisAISubStateFlee` (0x00b29ae0 / 0x00b29be0 -> 0x00a47340): the fleeing civilian that
+    /// arrives at its flee point fires `DisSeqEvent_FleepointReached` on it, once.
+    #[test]
+    fn flee_arrival_fires_the_flee_point_event() {
+        let ai = AiConfig::default();
+        let fp = Vec3::new(-1000.0, 0.0, 90.0);
+        let mut layout = CrowdLayout::default();
+        layout.flee_points = vec![fp];
+        let threat = pawn(1, PawnKind::Human, Vec3::new(1500.0, 0.0, 90.0), 0.0);
+        let me = pawn(NPC_ID_BASE, PawnKind::Civilian, fp, 0.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![me.clone(), threat];
+        let mut b = Brain::new(me.id, PawnKind::Civilian, me.position, 1);
+        b.alert_to(&ai, 1, Vec3::new(1500.0, 0.0, 90.0));
+        b.place(Behavior::Panic { cower: false });
+        b.timer = ai.panic.free_flight_time + 1.0;
+        // Picked from where the civilian stood when the panic began, then it ran there.
+        let start = pawn(me.id, PawnKind::Civilian, Vec3::new(0.0, 0.0, 90.0), 0.0);
+        b.goal = b.pick_flee_point(&start, Vec3::new(1500.0, 0.0, 90.0), &layout, None, &ai);
+        assert_eq!((b.goal, b.flee_point), (Some(fp), Some(0)));
+        b.act_panic(&me, &ws, &layout, None, &ai);
+        assert_eq!(b.fired, [AiEvent::FleepointReached { pawn: me.id, position: fp }]);
+        b.act_panic(&me, &ws, &layout, None, &ai);
+        assert_eq!(b.fired.len(), 1, "reported once");
     }
 }
