@@ -9,6 +9,7 @@
 pub mod adrenaline;
 pub mod blink;
 pub mod climb;
+pub mod dlc06;
 pub mod crosshair;
 pub mod combat;
 pub mod darkness;
