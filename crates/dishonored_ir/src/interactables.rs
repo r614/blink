@@ -180,7 +180,7 @@ pub struct WatchTowerDef {
     pub light_rot_speed_deg: f32,
     pub light_lowest_deg: f32,
     pub light_highest_deg: f32,
-    /// `m_fStateExploreSpeedIncrease` (per second, the bonus capped at 100).
+    /// `m_fStateExploreSpeedIncrease` (per second; at most 100 a tick, the sum is not capped).
     pub explore_speed_increase: f32,
     pub attack_timeout: f32,
     pub attack_initial_delay: f32,

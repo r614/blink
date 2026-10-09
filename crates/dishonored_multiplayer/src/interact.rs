@@ -167,7 +167,7 @@ impl MissionMatch {
         let towers = self.towers.entry(key.clone()).or_insert_with(|| dishonored_ai::watchtower::WatchTowersState::new(defs));
         let launchers = self.launchers.entry(key).or_insert_with(|| LaunchersState::new(defs));
         let mut out = Vec::new();
-        towers.step(defs, &mut self.world, launchers, &soc, world, &tracked, dt, &mut out, events);
+        towers.step(defs, &mut self.world, launchers, &soc, world, &tracked, dt, cfg.gameplay.movement.gravity_z, &mut out, events);
         self.tower_events.extend(out);
     }
 

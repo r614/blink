@@ -5,9 +5,15 @@
 //!   tower on and off (`DisSeqAct_WatchTower`) and a rewired panel reverses its polarity
 //!   (`m_bPolarityReversed`: `m_HackedDispositions` replace its faction's relations and it sees
 //!   through `m_pHackedVisionTweak`).
-//! - Every tick the tower and its light turn towards their goal at `m_fStateMaxTowerRotSpeedDeg` /
-//!   `m_fStateMaxLightRotSpeedDeg`, the light's pitch kept between `m_fStateLightLowestRotDeg`
-//!   below and `m_fStateLightHighestRotDeg` above the horizon, and the vision component
+//! - Every tick the tower and its light turn towards their goal (0x00A30E40) at
+//!   `m_fStateMaxTowerRotSpeedDeg` / `m_fStateMaxLightRotSpeedDeg` times `m_fSpeedPercentBonus + 1`,
+//!   the light's pitch kept between `m_fStateLightLowestRotDeg` below and
+//!   `m_fStateLightHighestRotDeg` above the horizon; the first aim snaps to the goal
+//!   (`m_bYawAndPitchSet`). The bonus grows in Explore by `m_fStateExploreSpeedIncrease x dt` (at
+//!   most 100 a tick, the sum is not capped) and is 0 on entering or leaving Explore (0x00A31280).
+//!   The goal angles are taken from the light (offset from the tower's axis), the fixed point of
+//!   the original's closed form (`m_fTowerToLightXDist` / `YDist` with an `asin` correction), and
+//!   the vision component
 //!   (`DisCpntType_VisionWatchtower`, the AI's vision cones from the light socket; in attack the
 //!   field of view is scaled by `m_fAttackFOVMultiplier`) reports the best seen actor and its
 //!   suspicion (0x00A21CC0; 3: a live enemy).
@@ -16,24 +22,33 @@
 //!   first shot.
 //! - Attack with the enemy in view: the tower aims at it; the warning sound plays once a volley
 //!   when the time to fire drops under `m_fSoundAttackWarningTime`; at zero it fires its
-//!   projectile from the arrow socket (0x00B14E80) and waits `m_fVolleyDelayBetweenShots`, or
-//!   after the volley's last shot `m_fDelayBetweenVolleys` (`m_VolleyShots` per volley).
+//!   projectile from the arrow socket (0x00A29B30) and waits `m_fVolleyDelayBetweenShots`, or
+//!   after the volley's last shot `m_fDelayBetweenVolleys` (`m_VolleyShots` per volley). The shot
+//!   aims at a `DishonoredNPCPawn`'s ranged-aim point (hit region 2, 0x00B68010: taken as the
+//!   seen point) and at any other target's `Location + VRand() x m_fFireArrowMaxSpread` (a point
+//!   on the sphere, 0x00402240), through the projectile tweak's ballistic solve with lead
+//!   (0x00C3F2A0 mode 0, the point given: no floor trace, the lead keeps its height).
 //! - Attack with the enemy lost: the frantic sweep, a sine of `m_fFranticSpeed` cycles a second and
 //!   `m_fFranticRandomRange` amplitude about the last seen location, perpendicular to the line from
 //!   the tower; after `m_fStateAttackTimeout` back to Explore.
 //! - Corpses in view fire the Kismet's neutral / ally / enemy corpse outputs once each.
 //!
-//! Not decoded: the explore animation when no tracked actor is set (the tower holds its yaw), the
-//! spread's exact distribution (`m_fFireArrowMaxSpread`: uniform within that radius about the
-//! target, LIKELY), the squad alerts (`m_SupportedSquads`, `m_AllyAttentionLevelToTrack`), the
-//! light blinding and rat repulsion, and the battery drain.
+//! Not ported: the explore animation when no tracked actor is set (the tower holds its yaw); the
+//! ally tracking (0x00A3C370: in Explore the light follows `m_AllysPlayerLocation`, the player
+//! location known to an NPC of `m_SupportedSquads` at `m_AllyAttentionLevelToTrack` or above,
+//! which also zeroes the bonus); the reversed tower's battery drain (0x00A2A140: every
+//! `m_fReversedBatteryChargeTime` s while `m_bPolarityReversed` with a receptacle attached, the
+//! receptacle's 0x00C85170(2)); a hacked tower's projectile instigated by the player (0x00A29B30
+//! sets it from `m_bPolarityReversed`); the light blinding and rat repulsion. Presentation only:
+//! the attack light blend (0x00A29D10), the gun and light bone controls (0x00A29F30, 0x00A29910)
+//! and the rotation sound RTPCs.
 
 use crate::Social;
 use dishonored_ir::ai::Relationship;
 use dishonored_ir::interactables::{Interactables, WatchTowerDef};
 use dishonored_sim::events::SimEvent;
 use dishonored_sim::launchers::LaunchersState;
-use dishonored_sim::state::{PlayerId, WorldState};
+use dishonored_sim::state::{PawnKind, PlayerId, WorldState};
 use dishonored_world::{WorldQuery, channel};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
@@ -61,6 +76,8 @@ pub struct TowerState {
     pub lost: f32,
     /// `m_fSpeedPercentBonus` (+0x2c8).
     pub speed_bonus: f32,
+    /// `m_bYawAndPitchSet`: the first aim snaps.
+    pub aimed: bool,
     /// `m_bPolarityReversed`.
     pub hacked: bool,
     /// A Kismet `WatchTowerShootAtTarget` target (`m_pScriptedTarget`).
@@ -130,9 +147,11 @@ impl WatchTowersState {
         };
         if on && t.state == DEACTIVATED {
             t.state = EXPLORE;
+            t.speed_bonus = 0.0;
             Some(TowerEvent::Activated(i))
         } else if !on && t.state != DEACTIVATED {
             t.state = DEACTIVATED;
+            t.speed_bonus = 0.0;
             t.target = None;
             Some(TowerEvent::Deactivated(i))
         } else {
@@ -148,9 +167,10 @@ impl WatchTowersState {
         }
     }
 
-    /// Step every tower (`dt` seconds). `tracked` gives an explore-tracked actor's location.
+    /// Step every tower (`dt` seconds). `tracked` gives an explore-tracked actor's location;
+    /// `gravity_z` is the world's `GravityZ` (the shot's ballistic solve).
     #[allow(clippy::too_many_arguments)]
-    pub fn step(&mut self, defs: &Interactables, state: &mut WorldState, launchers: &mut LaunchersState, soc: &Social, world: &dyn WorldQuery, tracked: &dyn Fn(&str) -> Option<Vec3>, dt: f32, out: &mut Vec<TowerEvent>, events: &mut Vec<SimEvent>) {
+    pub fn step(&mut self, defs: &Interactables, state: &mut WorldState, launchers: &mut LaunchersState, soc: &Social, world: &dyn WorldQuery, tracked: &dyn Fn(&str) -> Option<Vec3>, dt: f32, gravity_z: f32, out: &mut Vec<TowerEvent>, events: &mut Vec<SimEvent>) {
         self.sync(defs);
         for (i, def) in defs.watchtowers.iter().enumerate() {
             let t = &mut self.towers[i];
@@ -204,10 +224,11 @@ impl WatchTowersState {
             let goal: Option<Vec3>;
             match t.state {
                 EXPLORE => {
-                    t.speed_bonus = (t.speed_bonus + (def.explore_speed_increase * dt).min(100.0)).min(100.0);
+                    t.speed_bonus += (def.explore_speed_increase * dt).min(100.0);
                     goal = tracked(&def.explore_tracked);
                     if let Some((id, _, at)) = best {
                         t.state = ATTACK;
+                        t.speed_bonus = 0.0;
                         t.target = Some(id);
                         t.last_target = at;
                         t.time_to_fire = def.attack_initial_delay;
@@ -229,8 +250,13 @@ impl WatchTowersState {
                         t.time_to_fire -= dt;
                         if t.time_to_fire <= 0.0 {
                             let muzzle = muzzle_at(def, t.yaw);
-                            let aim = at + spread(def.fire_spread, i, t.shots_fired);
-                            let dir = (aim - muzzle).normalize_or_zero();
+                            let (point, vel) = match state.player(id) {
+                                Some(p) if matches!(p.kind, PawnKind::Civilian | PawnKind::Guard) => (at, p.velocity),
+                                Some(p) => (p.position + vrand(i, t.shots_fired) * def.fire_spread, p.velocity),
+                                None => (at, Vec3::ZERO),
+                            };
+                            let g = -gravity_z * def.projectile.gravity_mult;
+                            let dir = dishonored_sim::launchers::aim(0, muzzle, point, vel, false, def.projectile.speed, g);
                             launchers.fire_tower(defs, i, muzzle, dir * def.projectile.speed, state, events);
                             t.shots_fired = t.shots_fired.wrapping_add(1);
                             out.push(TowerEvent::Shot(i));
@@ -253,6 +279,7 @@ impl WatchTowersState {
                         t.lost += dt;
                         if t.lost >= def.attack_timeout {
                             t.state = EXPLORE;
+                            t.speed_bonus = 0.0;
                             t.target = None;
                             t.scripted = None;
                         }
@@ -263,8 +290,15 @@ impl WatchTowersState {
                 let to = g - eye;
                 let want_yaw = to.y.atan2(to.x).to_degrees();
                 let want_pitch = to.z.atan2(to.truncate().length()).to_degrees().clamp(-def.light_lowest_deg, def.light_highest_deg);
-                t.yaw = turn(t.yaw, want_yaw, def.tower_rot_speed_deg * dt);
-                t.pitch = turn(t.pitch, want_pitch, def.light_rot_speed_deg * dt);
+                if t.aimed {
+                    let mult = t.speed_bonus + 1.0;
+                    t.yaw = turn(t.yaw, want_yaw, def.tower_rot_speed_deg * mult * dt);
+                    t.pitch = turn(t.pitch, want_pitch, def.light_rot_speed_deg * mult * dt);
+                } else {
+                    t.aimed = true;
+                    t.yaw = want_yaw;
+                    t.pitch = want_pitch;
+                }
             }
         }
     }
@@ -334,21 +368,25 @@ fn turn(from: f32, to: f32, step: f32) -> f32 {
     from + d.clamp(-step, step)
 }
 
-/// The shot's spread: a point within `radius` of the target, deterministic per tower and shot.
-fn spread(radius: f32, tower: usize, shot: u32) -> Vec3 {
-    if radius <= 0.0 {
-        return Vec3::ZERO;
-    }
+/// `VRand()` (0x00402240): a unit vector from a point drawn in the cube [-1, 1]^3 until it lies in
+/// the unit ball, normalised. The draws are a hash of the tower and the shot (deterministic).
+fn vrand(tower: usize, shot: u32) -> Vec3 {
     let mut h = (tower as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (shot as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
     let mut next = || {
-        h ^= h >> 33;
-        h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
-        h ^= h >> 33;
-        (h >> 11) as f32 / (1u64 << 53) as f32
+        h = h.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = h;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        (z >> 11) as f32 / (1u64 << 53) as f32 * 2.0 - 1.0
     };
-    let a = next() * std::f32::consts::TAU;
-    let r = next().sqrt() * radius;
-    Vec3::new(a.cos() * r, a.sin() * r, (next() - 0.5) * r)
+    loop {
+        let v = Vec3::new(next(), next(), next());
+        let l2 = v.length_squared();
+        if l2 <= 1.0 && l2 > 1e-8 {
+            return v / l2.sqrt();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -370,11 +408,15 @@ mod tests {
     }
 
     #[test]
-    fn spread_stays_within_its_radius_and_repeats() {
-        for s in 0..50 {
-            let v = spread(200.0, 1, s);
-            assert!(v.truncate().length() <= 200.0 + 1e-3);
-            assert_eq!(v, spread(200.0, 1, s));
+    fn vrand_is_a_repeatable_unit_vector() {
+        let mut sum = Vec3::ZERO;
+        for s in 0..400 {
+            let v = vrand(1, s);
+            assert!((v.length() - 1.0).abs() < 1e-4, "{v:?}");
+            assert_eq!(v, vrand(1, s));
+            sum += v;
         }
+        // Spread over the sphere, not bunched on one side.
+        assert!(sum.length() / 400.0 < 0.15, "{sum:?}");
     }
 }

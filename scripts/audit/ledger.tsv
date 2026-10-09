@@ -241,3 +241,62 @@
 00a23bf0	helper	TArray of interface pairs add
 00a1edc0	irrelevant	door / usable skeletal animation play
 00aab030	helper	keyhole view end through 0x00A63330
+# events.rs / launchers.rs / lib.rs / movables.rs (2026-10-09)
+00a4a2b0	gap	moves a held / released prop: MoveActor sweep when no physics handle (movables.md M-3: the held prop is not swept against the world, OPEN)
+00956cb0	irrelevant	engine component attach (interactables.md: no gameplay)
+00c58560	ported	AI noise context switch (stealth.md S-noise; noise.rs)
+00bedc90	ported	sight check of the Windblast target (powers.md; left_hand windblast)
+0058a4a0	helper	UE3 collision flag setter (CollideActors / BlockActors / BlockRigidBody)
+00a388b0	gap	local player's wall-of-light shock: gathers NPCs (DishonoredPawn IsA) and posts an AI stimulus through DishonoredGlobalAIManager+0xC4 (0x00A2EE00): AI perception of the act
+007aceb0	helper	URB_BodyInstance::SetFixed (physics)
+00a9c9b0	gap	tutorial hint 0x19 (0x00ABFF80) when a usable of kind 5 is within the tweak's range (gameplay tutorial system)
+00aa9980	irrelevant	controller force-feedback / light-bar state from the pawn's speed (engine 0x008F0xxx player input device)
+00bf9fb0	ported	WitnessMagic notify for powers (ai.md F8)
+00b0f0f0	ported	AI noise filter by context (contact.rs / stealth.md)
+00aadba0	gap	Heart tutorial hint (m_HeartTargetTutorialMessage)
+00aa9b60	ported	noise hearing for the local player (stealth.md)
+00bf0ec0	gap	sum of a prop's rigid-body masses: the breakable's damage with m_Damage 0 is round(mass x speed x 0.005) (0x00A40CF0; movables.md OPEN, needs a mass per prop)
+00a8fe10	gap	drop-assassination tutorial hint (m_DropAssassinationNoteTitle)
+00bc89d0	helper	set a collision channel on an actor's components (recursive)
+0081c130	helper	TMap / TArray find
+00402d60	helper	quaternion to matrix
+00bf7000	irrelevant	power level's AkEvent play (presentation)
+00a35110	gap	AI stimulus for a local-player kill by a wall of light (0x00A2EC90, AI perception)
+00be7240	ported	move start save (PLAYER.md, blink)
+00c5ce90	ported	disintegration of a pawn's body (events WallOfLightShock / disintegrate)
+00a30690	ported	DishonoredKActor collision: 'player deserves blame' flag then SeqEvent_RigidBodyCollision (MovableContact event)
+00c3d590	ported	hearing test of a noise listener (stealth.md)
+00bbf2c0	helper	GameInfo vfunc 0x3D4 test
+00bcf970	irrelevant	WorldInfo emitter pool spawn (presentation; effects.rs)
+00a09f90	ported	AI noise from tweak-driven callers (stealth.md)
+006eac90	ported	SequenceAction::Activated (kismet host)
+00a30e40	ported	watch tower aim (watchtower.rs): goal angles, (bonus+1) turn rates, first-aim snap; rotation RTPCs presentation
+00a3c370	gap	watch tower ally tracking: m_pAllyAwareOfPlayer / m_AllysPlayerLocation (supported squads, m_AllyAttentionLevelToTrack)
+00a29d10	irrelevant	watch tower attack light blend and light material params (presentation)
+00a29f30	irrelevant	watch tower gun bone orientation (presentation)
+00c4c830	irrelevant	ammo type enum name for the HUD notice (DisAmmoType strings)
+00a29b30	ported	watch tower shot: NPC region point / Location + VRand x spread, ballistic solve 0x00C3F2A0 mode 0 (hacked-tower instigator: gap noted in watchtower.rs)
+00c46160	helper	TArray find by key
+00a31740	ported	watch tower corpse noted: m_pAlreadyNotedCorpses and the Kismet output by relationship
+00aa0b30	ported	input mask test (UNKNOWNS U-444)
+00c4ccc0	helper	danger shape registration wrapper
+00a2e8d0	helper	TArray add (0x28 stride)
+00a2a140	gap	reversed watch tower drains its battery every m_fReversedBatteryChargeTime s (0x00C85170(2))
+00c43b80	ported	projectile life timer
+00b0fac0	ported	adrenaline instant-kill damage (melee.md)
+00a29ad0	helper	watch tower projectile socket location
+00a31860	ported	watch tower: scripted / ally location sets the last target and enters Attack
+00718190	ported	cylinder height for the cutscene camera (CUTSCENES.md)
+0078f7d0	ported	SeqEvent_RigidBodyCollision (KISMET.md)
+00a74fa0	gap	soiree state camera blend (UNKNOWNS U-542)
+00c85f40	ported	conversation manager tick (CONVERSATIONS.md)
+00aa76c0	ported	hand slot equip / unequip (0x00B51790; inventory)
+00be96d0	irrelevant	item sound on use (presentation)
+00aad800	helper	hand slot 1 item test
+00a676f0	ported	takedown abort to phase 4 (takedown set_phase 0x00C09370)
+00b4f580	helper	tweak getter
+00cf9930	helper	delegate / listener dispatch
+00a62750	ported	drop request through slot 92 (movables release)
+00a46330	ported	collision channel after the grab (movables step_held)
+00ac2990	ported	grab lerp (movables hold_target)
+00a46860	helper	component vfunc thunk
