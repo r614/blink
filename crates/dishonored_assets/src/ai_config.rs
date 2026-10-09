@@ -306,6 +306,17 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
         f.forbidden_radius = get_f32(&m, "m_fForbiddenRadius").unwrap_or(f.forbidden_radius);
         prov.insert("ai.escape_explosion.flee".into(), format!("{ESCAPE}.pDisTweaks_AISubState_Flee"));
     }
+    const GO_HOME: &str = "AI_BehaviorTweaks_Misc.TweaksBehavior_GoHome_Default";
+    if let Some(m) = beh(GO_HOME) {
+        let g = &mut out.go_home;
+        g.back_off_range = get_f32(&m, "m_fBackOffRange").unwrap_or(g.back_off_range);
+        g.taunt_range = get_f32(&m, "m_fTauntRange").unwrap_or(g.taunt_range);
+        g.full_speed = match m.get("m_bFullSpeed") {
+            Some(TVal::B(b)) => *b,
+            _ => g.full_speed,
+        };
+        prov.insert("ai.go_home".into(), GO_HOME.into());
+    }
     if let Some(m) = beh("AI_BehaviorTweaks_TriggerAlarm.TweaksBehavior_TriggerAlarm_Party") {
         out.alarm_companion_range = get_f32(&m, "m_fCompanionRange").unwrap_or(out.alarm_companion_range);
         out.alarm_fight_radius = get_f32(&m, "m_fFightRadius").unwrap_or(out.alarm_fight_radius);
@@ -542,6 +553,10 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
         out.reaction_delay = r;
         prov.insert("ai.reaction_delay".into(), "DefaultAI.ini [DishonoredGame.DishonoredGlobalAIManager] m_ReactionDelay".into());
     }
+    if let Some(r) = range(ai.get("DishonoredGame.DishonoredGlobalAIManager", "m_TetherDelay")) {
+        out.tether_delay = r;
+        prov.insert("ai.tether_delay".into(), "DefaultAI.ini [DishonoredGame.DishonoredGlobalAIManager] m_TetherDelay".into());
+    }
     if let Some(r) = range(ai.get("DishonoredGame.DishonoredGlobalAIManager", "m_MagicReactionDelay")) {
         out.magic_reaction_delay = r;
         prov.insert("ai.magic_reaction_delay".into(), "DefaultAI.ini [DishonoredGame.DishonoredGlobalAIManager] m_MagicReactionDelay".into());
@@ -649,6 +664,14 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
                 .into_iter()
                 .find_map(|n| NPC_ANIM_PACKAGES.iter().find_map(|p| SETS.iter().find_map(|s| crate::npc_anim::sequence_play_length(content, p, s, &n).map(|v| (n.clone(), v)))))
         };
+        // GoHome's LastTaunt: GenericAction `DisNPCAnim_Taunt` group 0.
+        if let Some(group) = defs.chain(dishonored_ir::npc_anim::NpcAnim::Taunt).and_then(|c| c.groups.first()) {
+            let steps: Vec<(String, f32)> = group.steps.iter().filter_map(|s| s.names.first().and_then(|n| len(n))).collect();
+            if !steps.is_empty() {
+                out.go_home.anim_taunt = steps.iter().map(|s| s.1).sum();
+                prov.insert("ai.go_home.anim_taunt".into(), format!("DisNPCAnimDefinitions_EliteGuard Taunt group 0: {steps:?}"));
+            }
+        }
         if let Some(group) = defs.chain(dishonored_ir::npc_anim::NpcAnim::Panic).and_then(|c| c.groups.first()) {
             let steps: Vec<(String, f32)> = group.steps.iter().filter_map(|s| s.names.first().and_then(|n| len(n))).collect();
             if !steps.is_empty() {

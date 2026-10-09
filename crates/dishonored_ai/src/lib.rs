@@ -63,7 +63,7 @@ pub mod slots;
 pub mod special;
 pub mod watchtower;
 
-pub use slots::{Behavior, EscapePhase, EscapeState, MagicState, QueuedStim, RatSub, RatSwarmState, SearchState, SearchSub, Stim, slot};
+pub use slots::{Behavior, EscapePhase, EscapeState, GoHomeState, GoHomeSub, MagicState, QueuedStim, RatSub, RatSwarmState, SearchState, SearchSub, Stim, slot};
 use slots::AlarmCause;
 pub use special::SpecialCombat;
 
@@ -522,6 +522,14 @@ pub struct Brain {
     /// fights).
     #[serde(default)]
     pub grenades: Option<u8>,
+    /// [tether] The spawner's tether volumes (indices into `Crowd::tether_volumes`), the pawn's
+    /// current one (+0xdc0) and the one last notified (+0xdbc).
+    #[serde(default)]
+    pub tether: Vec<u16>,
+    #[serde(default)]
+    pub tether_now: Option<u16>,
+    #[serde(default)]
+    pub tether_last: Option<u16>,
 }
 
 /// A target in a vision component's candidate list: the line of sight is traced again once
@@ -720,6 +728,9 @@ pub struct Crowd {
     /// Pawn tweak -> its teleport spell (whalers, Daud).
     #[serde(default)]
     pub tweak_teleport: BTreeMap<String, dishonored_ir::ai::TeleportSpellConfig>,
+    /// [tether] The level's `DisTetherVolume`s.
+    #[serde(default)]
+    pub tether_volumes: Vec<dishonored_ir::ai::TetherVolume>,
     /// [rats] Pawn tweak -> its brain's `DisBehaviorCombatRatSwarm`, and its call for help.
     #[serde(default)]
     pub tweak_rat_combat: BTreeMap<String, RatCombatConfig>,
@@ -737,6 +748,9 @@ pub struct Crowd {
     #[serde(default)]
     pub vis_settings: BTreeMap<String, [f32; 2]>,
 }
+
+/// GoHome's TakePosition arrival distance (LIKELY: the sub-state tweak's threshold was not read).
+const GO_HOME_REACH: f32 = 100.0;
 
 /// `DisGlobalManager` alarm cooldown (`DefaultLevel.ini m_fAlarmCooldown`, class default 10).
 pub const ALARM_COOLDOWN: f32 = 10.0;
@@ -1002,6 +1016,8 @@ struct Ctx<'a> {
     cooldown: f32,
     /// The level's distractors.
     distractors: &'a mut [distraction::Distractor],
+    /// The level's tether volumes.
+    tethers: &'a [dishonored_ir::ai::TetherVolume],
 }
 
 /// What a brain perceives this tick besides the world state.
@@ -1245,6 +1261,7 @@ impl Crowd {
         let inhibit = &mut self.inhibit;
         let alarms = &mut self.alarms;
         let distractors = &mut self.distractors;
+        let tethers = &self.tether_volumes;
         let mut out = Vec::with_capacity(self.brains.len());
         let mut ai_events = Vec::new();
         ai_events.append(&mut distracted);
@@ -1259,7 +1276,9 @@ impl Crowd {
             let was = b.state;
             b.sync_external();
             b.perceive_with(me, world_state, events, &senses, world, ai, dt);
-            let mut ctx = Ctx { layout, routes, users, neglect, inhibit, alarms: &mut *alarms, events: &mut ai_events, cooldown, distractors: &mut *distractors };
+            // [tether] The pawn's tether volume and its `TetherRequest` (0x00b68ad0).
+            b.track_tether(me, tethers, ai);
+            let mut ctx = Ctx { layout, routes, users, neglect, inhibit, alarms: &mut *alarms, events: &mut ai_events, cooldown, distractors: &mut *distractors, tethers };
             let mut inp = b.act(me, world_state, &mut ctx, world, ai, dt);
             b.step_head(me, world_state, ai, dt);
             if inp.npc_move == 0 {
@@ -1524,6 +1543,7 @@ impl Crowd {
         self.tweak_health_max = level.tweak_health_max.clone();
         self.tweak_teleport = level.tweak_teleport.clone();
         self.tweak_rat_combat = level.tweak_rat_combat.clone();
+        self.tether_volumes = level.tether_volumes.clone();
         self.tweak_rat_call = level.tweak_rat_call.clone();
         self.vis_settings = level.vis_settings.clone();
         // A new map's player pawn has no scripted settings.
@@ -1869,6 +1889,9 @@ impl Brain {
             rat_panic: 0,
             rat_calls: Vec::new(),
             grenades: None,
+            tether: Vec::new(),
+            tether_now: None,
+            tether_last: None,
         }
     }
 
@@ -3116,6 +3139,7 @@ impl Brain {
                 slot::ESCAPE => self.act_panic(me, ws, layout, nav, ai),
                 slot::PRESERVE => self.act_escape(me, ws, layout, nav, ai, dt),
                 slot::ENGAGE => self.act_rat_swarm(me, ws, nav, ai, dt),
+                slot::RESIGN => self.act_go_home(me, ctx, nav, ai, dt),
                 _ => idle,
             };
         }
@@ -3620,6 +3644,143 @@ impl Brain {
             return face(pos);
         }
         self.move_to(me, nav, pos, true, ai)
+    }
+
+    /// The pawn's tether volume (the port tests its position where the original has Touch /
+    /// UnTouch, 0x00c92b40 / 0x00c92b90): the current one is kept while the pawn is still inside it
+    /// (UnTouch keeps it while another enabled listed volume holds the pawn, 0x00b699d0), else the
+    /// first enabled volume of its list holding it (0x00b699b0). A change from the last notified
+    /// one posts `TetherRequest` with `m_TetherDelay` (0x00b68ad0 -> 0x00b195c0): leaving posts the
+    /// old volume with `outside`, entering the new one.
+    pub(crate) fn track_tether(&mut self, me: &PlayerState, vols: &[dishonored_ir::ai::TetherVolume], ai: &AiConfig) {
+        if self.tether.is_empty() || !me.alive {
+            return;
+        }
+        let inside = |i: u16| vols.get(i as usize).is_some_and(|v| v.enabled && v.contains(me.position));
+        let now = if self.tether_now.is_some_and(inside) { self.tether_now } else { self.tether.iter().copied().find(|&i| inside(i)) };
+        self.tether_now = now;
+        if now != self.tether_last {
+            let delay = combat::roll(ai.tether_delay, rng_next(&mut self.rng));
+            let (volume, outside) = match now {
+                None => (self.tether_last, true),
+                Some(v) => (Some(v), false),
+            };
+            self.post(Stim::TetherRequest, delay, volume.map_or(NOISE, |v| v as PlayerId), me.position, outside, false);
+            self.tether_last = now;
+        }
+    }
+
+    /// The enemy GoHome reads (0x00b504f0, 0x00b4cbc0 == 4; LIKELY: the attention's top target at
+    /// Busted): its id and proxy.
+    fn busted_proxy(&self) -> Option<(PlayerId, Vec3)> {
+        let w = self.att_target?;
+        self.attn.iter().find(|a| a.who == w && a.level >= DAL_BUSTED && self.enemies.contains(&w)).map(|a| (a.who, a.proxy))
+    }
+
+    /// `DisBehaviorGoHome` start (0x00af1d30): the rotation flag clears; with a valid enemy the
+    /// pawn backs off toward its home (TakePosition, running with `m_bFullSpeed`, sub-state
+    /// BackOff) and barks `DDH_COMBAT_GOING_HOME`; without one it walks home (FinalStretch).
+    pub(crate) fn start_go_home(&mut self, volume: Option<u16>, ai: &AiConfig) {
+        let enemy = self.busted_proxy();
+        let mut s = GoHomeState { volume, outside: true, ..Default::default() };
+        match enemy {
+            Some((_, p)) => {
+                s.sub = GoHomeSub::BackOff;
+                s.run = ai.go_home.full_speed;
+                s.start_pos = p;
+            }
+            None => s.sub = GoHomeSub::FinalStretch,
+        }
+        self.place(Behavior::GoHome(s));
+        if let Some((who, _)) = enemy {
+            self.barks.push(("DDH_COMBAT_GOING_HOME".into(), Some(who)));
+        }
+    }
+
+    /// `DisBehaviorGoHome` running (slot Resign):
+    /// - the finish test (slot 95, 0x00ae6070): once not outside, finished when the enemy's proxy
+    ///   lies in the tether volume, or with no enemy or no volume; a disabled volume finishes it;
+    /// - after a TakePosition (slot 109, 0x00afcf80): outside the volume with the home inside it,
+    ///   home again (FinalStretch); outside both, the tether is dropped (not outside, no volume);
+    /// - between sub-states (slot 107, 0x00af1f00): no enemy: home (FinalStretch); beyond
+    ///   `m_fBackOffRange` of where the enemy was and beyond `m_fTauntRange` of it, the LastTaunt
+    ///   once the pawn faces it; else home.
+    ///
+    /// TakePosition's arrival (its tweak was not read) is `GO_HOME_REACH` (LIKELY); the
+    /// RotationReached stimulus is the pawn facing the enemy within 10 degrees (LIKELY).
+    fn act_go_home(&mut self, me: &PlayerState, ctx: &Ctx, nav: Option<&NavWorld>, ai: &AiConfig, dt: f32) -> PlayerInput {
+        let idle = PlayerInput { yaw: me.yaw, left_hand: LeftHand::Empty, ..Default::default() };
+        let Some(Some(Behavior::GoHome(mut s))) = self.slots.get(slot::RESIGN as usize).cloned() else { return idle };
+        let gh = &ai.go_home;
+        let vol = |i: u16| ctx.tethers.get(i as usize);
+        let enemy = self.busted_proxy();
+        if !s.outside {
+            s.finished = match (s.volume.and_then(vol), enemy) {
+                (Some(v), Some((_, p))) => v.contains(p),
+                _ => true,
+            };
+        }
+        if s.volume.and_then(vol).is_some_and(|v| !v.enabled) {
+            s.finished = true;
+        }
+        if s.finished {
+            self.complete(slot::RESIGN);
+            return idle;
+        }
+        let home = self.home;
+        let face = |p: Vec3| PlayerInput { yaw: yaw_to(me.position, p), left_hand: LeftHand::Empty, ..Default::default() };
+        let running = match s.sub {
+            GoHomeSub::BackOff | GoHomeSub::FinalStretch => !Self::reached(me, home, GO_HOME_REACH),
+            GoHomeSub::LastTaunt => {
+                s.timer -= dt;
+                s.timer > 0.0
+            }
+            GoHomeSub::Menace => false,
+        };
+        if let Some((_, p)) = enemy {
+            if facing_within(me, p, 10.0) {
+                s.rotation_reached = true;
+            }
+        }
+        if !running {
+            if matches!(s.sub, GoHomeSub::BackOff | GoHomeSub::FinalStretch) {
+                if let Some(v) = s.volume.and_then(vol) {
+                    if !v.contains(me.position) && !v.contains(home) {
+                        s.outside = false;
+                        s.volume = None;
+                    }
+                }
+            }
+            match enemy {
+                None => {
+                    s.sub = GoHomeSub::FinalStretch;
+                    s.run = gh.full_speed;
+                }
+                Some((_, p)) => {
+                    if me.position.distance(s.start_pos) > gh.back_off_range {
+                        if me.position.distance(p) > gh.taunt_range {
+                            if s.rotation_reached && s.sub != GoHomeSub::LastTaunt {
+                                s.sub = GoHomeSub::LastTaunt;
+                                s.timer = gh.anim_taunt;
+                            }
+                        } else {
+                            s.sub = GoHomeSub::FinalStretch;
+                            s.run = gh.full_speed;
+                        }
+                    }
+                }
+            }
+        }
+        let sub = s.sub;
+        let run = s.run;
+        if let Some(slot) = self.slots.get_mut(slot::RESIGN as usize) {
+            *slot = Some(Behavior::GoHome(s));
+        }
+        self.state = self.project();
+        match sub {
+            GoHomeSub::BackOff | GoHomeSub::FinalStretch if !Self::reached(me, home, GO_HOME_REACH) => self.move_to(me, nav, home, run, ai),
+            _ => enemy.map(|e| face(e.1)).unwrap_or(idle),
+        }
     }
 
     /// `DisBehaviorCombatRatSwarm` running (slot Engage). It completes once the swarm no longer
@@ -4708,6 +4869,39 @@ mod tests {
         w
     }
 
+    /// The tether tracker (0x00b68ad0): entering the volume posts an inside `TetherRequest` and
+    /// leaving it an outside one, each with `m_TetherDelay`; only the outside one starts
+    /// `DisBehaviorGoHome` (0x00ae3ed0), and inside it the behaviour finishes.
+    #[test]
+    fn leaving_the_tether_volume_sends_the_guard_home() {
+        use dishonored_ir::ai::TetherVolume;
+        let ai = AiConfig::default();
+        let boxv = |c: Vec3, h: f32| vec![[1.0, 0.0, 0.0, c.x + h], [-1.0, 0.0, 0.0, -(c.x - h)], [0.0, 1.0, 0.0, c.y + h], [0.0, -1.0, 0.0, -(c.y - h)], [0.0, 0.0, 1.0, c.z + h], [0.0, 0.0, -1.0, -(c.z - h)]];
+        let vols = vec![TetherVolume { name: "DisTetherVolume_0".into(), package: "P".into(), enabled: true, hulls: vec![boxv(Vec3::ZERO, 500.0)] }];
+        let mut me = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(0.0, 0.0, 90.0), 0.0);
+        let mut b = Brain::new(me.id, PawnKind::Guard, me.position, 1);
+        b.tether = vec![0];
+        b.track_tether(&me, &vols, &ai);
+        assert_eq!(b.stims.len(), 1);
+        assert!(!b.stims[0].flag && b.stims[0].who == 0 && (6.0..=8.0).contains(&b.stims[0].delay));
+        b.stims.clear();
+        me.position.x = 900.0;
+        b.track_tether(&me, &vols, &ai);
+        assert_eq!(b.stims.len(), 1);
+        assert!(b.stims[0].flag && b.stims[0].who == 0);
+        // The outside request starts the behaviour; an inside one does not.
+        b.stims[0].delay = 0.0;
+        let mut inside = b.stims[0].clone();
+        inside.flag = false;
+        let mut b2 = Brain::new(me.id, PawnKind::Guard, Vec3::ZERO, 2);
+        b2.stims = vec![inside];
+        arbitrate(&mut b2);
+        assert!(b2.behavior(slot::RESIGN).is_none());
+        arbitrate(&mut b);
+        assert!(matches!(b.behavior(slot::RESIGN), Some(Behavior::GoHome(s)) if s.outside && s.sub == GoHomeSub::FinalStretch));
+        assert!(started(&mut b).contains(&"DisBehaviorGoHome".to_string()));
+    }
+
     /// A hound with an unreachable target (off the strip) picks a bark position in the preferred
     /// band, at least the move minimum away, runs there, and once there finishes and waits 3-5 s
     /// (0x00b44630, 0x00b427b0).
@@ -5014,7 +5208,7 @@ mod tests {
         let me = ws.player(b.id).unwrap().clone();
         let layout = CrowdLayout::default();
         let (routes, mut users, mut inhibit, mut events, mut dists): (Vec<PatrolRoute>, Vec<i32>, Vec<(PlayerId, u8, f32)>, Vec<AiEvent>, Vec<distraction::Distractor>) = Default::default();
-        let mut ctx = Ctx { layout: &layout, routes: &routes, users: &mut users, neglect: &[], inhibit: &mut inhibit, alarms, events: &mut events, cooldown: 0.0, distractors: &mut dists };
+        let mut ctx = Ctx { layout: &layout, routes: &routes, users: &mut users, neglect: &[], inhibit: &mut inhibit, alarms, events: &mut events, cooldown: 0.0, distractors: &mut dists, tethers: &[] };
         b.consider_alarm(&me, ws, &mut ctx, ai, AlarmCause::Sighting, Some(enemy));
     }
 
@@ -5067,7 +5261,7 @@ mod tests {
         {
             let layout = CrowdLayout::default();
             let (routes, mut users, mut inhibit, mut events, mut dists): (Vec<PatrolRoute>, Vec<i32>, Vec<(PlayerId, u8, f32)>, Vec<AiEvent>, Vec<distraction::Distractor>) = Default::default();
-            let mut ctx = Ctx { layout: &layout, routes: &routes, users: &mut users, neglect: &[], inhibit: &mut inhibit, alarms: &mut alarms, events: &mut events, cooldown: 0.0, distractors: &mut dists };
+            let mut ctx = Ctx { layout: &layout, routes: &routes, users: &mut users, neglect: &[], inhibit: &mut inhibit, alarms: &mut alarms, events: &mut events, cooldown: 0.0, distractors: &mut dists, tethers: &[] };
             bf.act_alarm(&far, &ws, &mut ctx, None, &ai, 1.0 / 60.0);
         }
         assert_eq!(bf.bell, None);
@@ -5503,7 +5697,7 @@ mod tests {
         let ws = WorldState::default();
         let layout = CrowdLayout::default();
         let (routes, mut users, mut inhibit, mut alarms, mut events, mut dists): (Vec<PatrolRoute>, Vec<i32>, Vec<(PlayerId, u8, f32)>, Vec<AlarmBell>, Vec<AiEvent>, Vec<distraction::Distractor>) = Default::default();
-        let mut ctx = Ctx { layout: &layout, routes: &routes, users: &mut users, neglect: &[], inhibit: &mut inhibit, alarms: &mut alarms, events: &mut events, cooldown: 0.0, distractors: &mut dists };
+        let mut ctx = Ctx { layout: &layout, routes: &routes, users: &mut users, neglect: &[], inhibit: &mut inhibit, alarms: &mut alarms, events: &mut events, cooldown: 0.0, distractors: &mut dists, tethers: &[] };
         b.drain(&me, &ws, &mut ctx, &ai, 1.0 / 60.0);
     }
 

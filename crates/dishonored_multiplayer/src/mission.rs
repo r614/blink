@@ -915,6 +915,8 @@ impl MissionMatch {
         // `m_fDistractionCooldownTime`.
         b.lineage = o.lineage.clone();
         b.distraction_cooldown_time = self.crowd.tweak_distraction_cooldown.get(&o.tweak).copied().unwrap_or(0.0);
+        // [tether] The spawner's tether volumes (`m_TetherVolumes`, actors of its package).
+        b.tether = o.props.tether_volumes.iter().filter_map(|n| self.crowd.tether_volumes.iter().position(|v| v.name.eq_ignore_ascii_case(n) && v.package.eq_ignore_ascii_case(&o.package)).or_else(|| self.crowd.tether_volumes.iter().position(|v| v.name.eq_ignore_ascii_case(n)))).map(|i| i as u16).collect();
         // [rats] The brain's `DisBehaviorCombatRatSwarm` and the pawn's call for help.
         b.rat_combat = self.crowd.tweak_rat_combat.get(&o.tweak).cloned();
         b.rat_call_radius = self.crowd.tweak_rat_call.get(&o.tweak).copied().unwrap_or(0.0);

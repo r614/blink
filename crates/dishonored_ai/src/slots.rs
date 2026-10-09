@@ -63,6 +63,9 @@ pub enum Stim {
     Panicked,
     /// 112: a power seen (0x00b23e50); `flag` is `m_bDisappeared`.
     WitnessMagic,
+    /// 104: the pawn's tether volume changed (0x00b68ad0 via 0x00b195c0, delayed by
+    /// `m_TetherDelay`); `who` is the volume (`NOISE`: none), `flag` that the pawn left it.
+    TetherRequest,
     /// 49: a call for help against a swarm heard (the noise path 0x00C58560 case RatSwarm,
     /// template 0x00B18490); `who` is the swarm, `flag` that it has one. (94 `SightedRatSwarm`,
     /// the behaviour's other evaluated stimulus, is never posted: its template 0x00B1DD90 is only
@@ -137,6 +140,36 @@ pub struct MagicState {
     pub ally: bool,
     pub barked: bool,
     pub anim: Option<f32>,
+}
+
+/// `DisBehaviorGoHome` sub-states (`EDisGoHomeSubStates`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum GoHomeSub {
+    /// TakePosition home with the enemy still valid.
+    #[default]
+    BackOff,
+    /// TakePosition home.
+    FinalStretch,
+    /// Not started by any decoded path (`m_fTauntMinTime` / `MaxTime`).
+    Menace,
+    /// GenericAction `DisNPCAnim_Taunt`.
+    LastTaunt,
+}
+
+/// State of a `DisBehaviorGoHome`: `m_bFinishedTethering`, `m_bOutsideTheTetherZone`,
+/// `m_bRotationReached` (+0xa0 bits 0-2), `m_pTetherVolume` (+0xa8, an index into the crowd's
+/// tether volumes), `m_EnemyStartingPosition` (+0xbc), the sub-state, whether it runs home
+/// (`m_bFullSpeed`), and the LastTaunt time left.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct GoHomeState {
+    pub volume: Option<u16>,
+    pub outside: bool,
+    pub finished: bool,
+    pub rotation_reached: bool,
+    pub start_pos: Vec3,
+    pub sub: GoHomeSub,
+    pub run: bool,
+    pub timer: f32,
 }
 
 /// `DisBehaviorCombatRatSwarm` sub-states in tweak order: Stand (facing the swarm while the
@@ -230,6 +263,8 @@ pub enum Behavior {
     Escape(EscapeState),
     /// `DisBehaviorCombatRatSwarm` (slot Engage, `HelpFromRats`).
     RatSwarm(RatSwarmState),
+    /// `DisBehaviorGoHome` (slot Resign, `TetherRequest` from outside the zone).
+    GoHome(GoHomeState),
 }
 
 impl Behavior {
@@ -246,6 +281,7 @@ impl Behavior {
             Behavior::Distraction(_) => slot::DISTRACTION,
             Behavior::Escape(_) => slot::PRESERVE,
             Behavior::RatSwarm(_) => slot::ENGAGE,
+            Behavior::GoHome(_) => slot::RESIGN,
         }
     }
 }
@@ -331,6 +367,8 @@ impl Brain {
             },
             // Standing toward the swarm, or going to it.
             Some(Behavior::RatSwarm(s)) => if s.sub == RatSub::TakeActorPosition { BrainState::WalkToPoint } else { BrainState::Notice },
+            // Going home, or the last taunt toward the enemy.
+            Some(Behavior::GoHome(s)) => if s.sub == GoHomeSub::LastTaunt { BrainState::Notice } else { BrainState::WalkToPoint },
             // The interact behaviour walks (going to the distractor) or stands.
             Some(Behavior::Distraction(s)) => {
                 if s.phase == crate::distraction::AnimState::GoingTo {
@@ -590,6 +628,7 @@ impl Brain {
             Behavior::Magic(_) => Some("DisBehaviorMagicResponse"),
             Behavior::Panic { .. } => Some("DisBehaviorPanic"),
             Behavior::Escape(_) => Some("DisBehaviorEscapeExplosion"),
+            Behavior::GoHome(_) => Some("DisBehaviorGoHome"),
             Behavior::RatSwarm(_) => Some(if self.rat_combat.as_ref().is_some_and(|c| c.elite) { "DisBehaviorCombatRatSwarmEliteGuard" } else { "DisBehaviorCombatRatSwarm" }),
             // The animated distraction is `DisBehaviorInteract`; a soiree's behaviour class
             // (`DisBehaviorSoiree`) is not decoded, so no class is claimed for it.
@@ -725,6 +764,18 @@ impl Brain {
                     if cfg.ally_request_radius > 0.0 {
                         self.rat_calls.push((me.position, cfg.ally_request_radius, swarm));
                     }
+                }
+            }
+            // A running `DisBehaviorGoHome` takes the request's volume and `outside`
+            // (0x00ae3a20); otherwise the behaviour starts on a request from outside the zone
+            // (0x00ae53b0 -> 0x00ae3ed0).
+            Stim::TetherRequest => {
+                let volume = (q.who != NOISE).then_some(q.who as u16);
+                if let Some(Some(Behavior::GoHome(s))) = self.slots.get_mut(slot::RESIGN as usize) {
+                    s.volume = volume;
+                    s.outside = q.flag;
+                } else if q.flag {
+                    self.start_go_home(volume, ai);
                 }
             }
             Stim::WitnessMagic => {
