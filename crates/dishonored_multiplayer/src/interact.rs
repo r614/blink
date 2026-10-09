@@ -9,9 +9,11 @@
 //!   client-facing view (`MatchView::peeks`, `MatchView::tripwires`) is filled.
 
 use crate::mission::MissionMatch;
-use crate::TripwireView;
+use crate::{LauncherView, TripwireView};
 use dishonored_sim::input::PlayerInput;
 use dishonored_sim::interactables::{InteractEvent, InteractablesState};
+use dishonored_sim::launchers::LaunchersState;
+use dishonored_world::WorldQuery;
 use dishonored_sim::state::PlayerId;
 use dishonored_sim::SimConfig;
 use dishonored_sim::events::SimEvent;
@@ -115,6 +117,107 @@ impl MissionMatch {
     pub(crate) fn take_interact_events(&mut self) -> Vec<InteractEvent> {
         std::mem::take(&mut self.interact_events)
     }
+
+    /// `DisSeqAct_ActivateProjectileLauncher` -> `Fire` (0x00A33F70) on the launcher `name` of
+    /// `package` in the active map, with the action's `m_pProjInstigator` (`owner`, 0 for none).
+    /// Returns whether a shot left (the launcher exists and was armed).
+    pub fn fire_launcher(&mut self, package: &str, name: &str, owner: PlayerId) -> bool {
+        let key = self.interactables_key();
+        let Some(defs) = self.setup.interactables.get(&key) else { return false };
+        let Some(i) = LaunchersState::find(defs, Some(package), name).or_else(|| LaunchersState::find(defs, None, name)) else { return false };
+        let st = self.launchers.entry(key).or_insert_with(|| LaunchersState::new(defs));
+        st.fire(defs, i, owner, &mut self.world, &mut self.launcher_events)
+    }
+
+    /// `SeqAct_Toggle` on a launcher (`OnToggle_Native`, 0x009ED800): input 0 arms, 1 disarms, 2
+    /// flips. Returns whether the actor is a launcher of the map.
+    pub fn toggle_launcher(&mut self, package: &str, name: &str, input: usize) -> bool {
+        let key = self.interactables_key();
+        let Some(defs) = self.setup.interactables.get(&key) else { return false };
+        let Some(i) = LaunchersState::find(defs, Some(package), name).or_else(|| LaunchersState::find(defs, None, name)) else { return false };
+        self.launchers.entry(key).or_insert_with(|| LaunchersState::new(defs)).toggle(defs, i, input);
+        true
+    }
+
+    /// Whether launcher `name` of the active map is armed (`m_bArmed`).
+    pub fn launcher_armed(&self, package: &str, name: &str) -> Option<bool> {
+        let key = self.interactables_key();
+        let defs = self.setup.interactables.get(&key)?;
+        let i = LaunchersState::find(defs, Some(package), name).or_else(|| LaunchersState::find(defs, None, name))?;
+        Some(self.launchers.get(&key).and_then(|s| s.launchers.get(i)).map_or(defs.launchers[i].armed, |l| l.armed))
+    }
+
+    /// The launchers' shots after the world stepped, and the clients' view of the launchers.
+    pub(crate) fn step_launchers(&mut self, world: &dyn WorldQuery, cfg: &SimConfig, events: &mut Vec<SimEvent>) {
+        events.append(&mut self.launcher_events);
+        let key = self.interactables_key();
+        let hidden = self.hidden_levels();
+        let Some(defs) = self.setup.interactables.get(&key) else {
+            self.view.launchers.clear();
+            return;
+        };
+        if defs.launchers.is_empty() {
+            self.view.launchers.clear();
+            return;
+        }
+        let st = self.launchers.entry(key).or_insert_with(|| LaunchersState::new(defs));
+        if st.launchers.len() != defs.launchers.len() {
+            *st = LaunchersState::new(defs);
+        }
+        // Projectiles fly at the world's projectile time scale (Bend Time slows them).
+        let dt = dishonored_sim::movement::DT * dishonored_sim::powers::world_time_scale(&self.world, &cfg.gameplay, true);
+        if dt > 0.0 {
+            st.step_shots(&mut self.world, defs, world, &cfg.gameplay, dt, events);
+        }
+        self.view.launchers = defs
+            .launchers
+            .iter()
+            .zip(&st.launchers)
+            .filter(|(l, _)| !hidden.iter().any(|h| h.eq_ignore_ascii_case(&l.package)))
+            .map(|(l, s)| LauncherView {
+                actor: format!("{}:{}", l.package, l.name),
+                position: l.position.to_array(),
+                bounds_min: l.bounds_min.to_array(),
+                bounds_max: l.bounds_max.to_array(),
+                max_distance: l.max_distance,
+                armed: s.armed,
+                harvested: s.harvested,
+                fired: s.fired,
+                defused: s.defused,
+                prompt: l.prompt.clone(),
+                label: l.label.clone(),
+            })
+            .collect();
+    }
+
+    /// The player pressed Use at launcher `i` of the active map: `Interact` (0x00A3B6E0), then
+    /// the generic wrapper's (0x00A3DF60) `DisSeqEvent_Interact` and use message.
+    pub(crate) fn interact_launcher(&mut self, player: PlayerId, i: usize, cfg: &SimConfig) {
+        let key = self.interactables_key();
+        let Some(defs) = self.setup.interactables.get(&key) else { return };
+        let Some(def) = defs.launchers.get(i) else { return };
+        // `m_pItemRequiredToHarvestAmmo`: held in the mission's abstract items.
+        let has_item = def.required_item.is_empty() || self.state.items.get(&def.required_item).copied().unwrap_or(0) > 0;
+        let st = self.launchers.entry(key).or_insert_with(|| LaunchersState::new(defs));
+        let Some(p) = self.world.player_mut(player) else { return };
+        if !p.alive {
+            return;
+        }
+        let r = st.interact(defs, i, p, has_item, &cfg.gameplay);
+        let mut lines = Vec::new();
+        if r.used && !def.use_message.is_empty() {
+            lines.push(def.use_message.clone());
+        }
+        if r.cannot_use_message && !def.cannot_use_message.is_empty() {
+            lines.push(def.cannot_use_message.clone());
+        }
+        if r.used {
+            self.interact_events.push(InteractEvent::Launcher { launcher: i, player });
+        }
+        for l in lines {
+            let _ = self.state.apply(&[dishonored_mission::Action::Message(l)], &std::collections::BTreeMap::new());
+        }
+    }
 }
 
 /// The ends of a wire's bodies: the two vertices farthest apart.
@@ -170,6 +273,75 @@ mod tests {
         let st = m.interactables.get("t").unwrap().clone();
         let back: dishonored_sim::interactables::InteractablesState = serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
         assert_eq!(back, st);
+    }
+
+    fn launcher() -> dishonored_ir::interactables::LauncherDef {
+        use dishonored_ir::interactables::{LauncherDef, LauncherProjectile, ShotKind};
+        LauncherDef {
+            name: "DisProjectileLauncher_0".into(),
+            package: "T".into(),
+            position: Vec3::new(0.0, 0.0, 100.0),
+            muzzle: Vec3::new(0.0, 0.0, 130.0),
+            muzzle_forward: Vec3::X,
+            target: Some(Vec3::new(1000.0, 0.0, 130.0)),
+            armed: true,
+            bounds_min: Vec3::new(-30.0, -30.0, 100.0),
+            bounds_max: Vec3::new(30.0, 30.0, 160.0),
+            projectile: LauncherProjectile { kind: ShotKind::ExplosiveArrow, speed: 2000.0, damage: 10, headshot_mult: 1.0, damage_multiplier: 1.0, gravity_mult: 0.5, explosion: Some(Default::default()), ..Default::default() },
+            harvest: vec![(4, 1)],
+            prompt: "`GBA_Use` Disarm".into(),
+            label: "Projectile Launcher".into(),
+            use_message: "Launcher disarmed".into(),
+            max_distance: 200.0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_launcher_in_view_is_the_interaction_and_its_view_follows_its_state() {
+        use crate::mission::Interaction;
+        let (mut m, cfg) = rig(Interactables { launchers: vec![launcher()], ..Default::default() });
+        let world = dishonored_world::CollisionWorld::from_triangles(Vec::new(), Vec::new());
+        m.world.player_mut(1).unwrap().position = Vec3::new(-120.0, 0.0, 70.0);
+        assert_eq!(m.interaction(1), Some(Interaction::Launcher(0)), "the view enters the tripod's bounds within m_fMaxDistance");
+        m.world.player_mut(1).unwrap().position = Vec3::new(-400.0, 0.0, 70.0);
+        assert_eq!(m.interaction(1), None, "out of reach");
+        m.world.player_mut(1).unwrap().position = Vec3::new(-120.0, 0.0, 70.0);
+        m.world.player_mut(1).unwrap().yaw = 180.0;
+        assert_eq!(m.interaction(1), None, "looking away");
+        let mut events = Vec::new();
+        m.step_launchers(&world, &cfg, &mut events);
+        assert_eq!((m.view.launchers.len(), m.view.launchers[0].armed, m.view.launchers[0].harvested), (1, true, false));
+        assert_eq!(m.view.launchers[0].prompt, "`GBA_Use` Disarm");
+        // Use: disarmed, the bolt taken, the use message queued for the HUD, the Interact event for the Kismet.
+        m.interact_launcher(1, 0, &cfg);
+        m.step_launchers(&world, &cfg, &mut events);
+        assert_eq!((m.view.launchers[0].armed, m.view.launchers[0].harvested, m.view.launchers[0].defused), (false, true, true));
+        assert_eq!(m.take_interact_events(), vec![InteractEvent::Launcher { launcher: 0, player: 1 }]);
+        assert!(!m.fire_launcher("T", "DisProjectileLauncher_0", 0), "a disarmed launcher no longer fires");
+        // A saved game keeps the launchers (and the shots in flight).
+        let st = m.launchers.get("t").unwrap().clone();
+        let back: dishonored_sim::launchers::LaunchersState = serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
+        assert_eq!(back, st);
+    }
+
+    #[test]
+    fn a_fired_shot_flies_in_the_mission_step_and_the_burst_reaches_the_events() {
+        let (mut m, cfg) = rig(Interactables { launchers: vec![launcher()], ..Default::default() });
+        let (a, b, c, d) = (Vec3::new(900.0, -2000.0, -2000.0), Vec3::new(900.0, 2000.0, -2000.0), Vec3::new(900.0, 2000.0, 2000.0), Vec3::new(900.0, -2000.0, 2000.0));
+        let n = -Vec3::X;
+        let tri = |a, b, c| dishonored_world::Tri { a, b, c, n, channels: dishonored_world::channel::ALL, source: 0 };
+        let world = dishonored_world::CollisionWorld::from_triangles(vec![tri(a, b, c), tri(a, c, d)], vec![String::new()]);
+        m.world.player_mut(1).unwrap().position = Vec3::new(800.0, 700.0, 130.0);
+        assert!(m.fire_launcher("T", "DisProjectileLauncher_0", 0));
+        let mut events = Vec::new();
+        for _ in 0..60 {
+            m.step_launchers(&world, &cfg, &mut events);
+        }
+        assert!(events.iter().any(|e| matches!(e, dishonored_sim::events::SimEvent::Fired { .. })), "the Kismet-fired shot is reported with the first step");
+        assert!(events.iter().any(|e| matches!(e, dishonored_sim::events::SimEvent::Explosion { .. })), "it bursts at the wall");
+        assert!(m.world.projectiles.is_empty());
+        assert!(m.launchers["t"].shots.is_empty());
     }
 
     #[test]

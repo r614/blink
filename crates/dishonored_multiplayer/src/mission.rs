@@ -470,6 +470,9 @@ pub enum Interaction {
     Kismet(usize),
     /// Index into `MissionSetup::usables` (a native door or usable).
     Prop(usize),
+    /// [world] Index into the active map's `Interactables::launchers`: the launcher in view
+    /// (disarm and harvest, `dishonored_sim::launchers`).
+    Launcher(usize),
 }
 
 /// The whole match state serializes for saved games (`save.rs`) except the setup, which the
@@ -543,6 +546,15 @@ pub struct MissionMatch {
     /// [world] What they reported this step (the Kismet host fires the events).
     #[serde(skip)]
     pub interact_events: Vec<dishonored_sim::interactables::InteractEvent>,
+    /// [world] Projectile launchers of each visited map (lowercase name): armed / harvested and
+    /// the shots in flight (research/dishonored/systems/interactables.md section 2), saved with
+    /// the match.
+    #[serde(default)]
+    pub launchers: BTreeMap<String, dishonored_sim::launchers::LaunchersState>,
+    /// [world] Events of shots the Kismet fired between steps (`SimEvent::Fired`), delivered with
+    /// the next step's.
+    #[serde(skip)]
+    pub launcher_events: Vec<SimEvent>,
     /// Mover collision placed where the movers are: (actor, delta) and, in the same order, the
     /// placed collision (rebuilt when a mover moves).
     #[serde(skip)]
@@ -605,6 +617,8 @@ impl MissionMatch {
             world_events: Vec::new(),
             interactables: BTreeMap::new(),
             interact_events: Vec::new(),
+            launchers: BTreeMap::new(),
+            launcher_events: Vec::new(),
             mover_keys: Vec::new(),
             mover_worlds: Vec::new(),
             levels_visible: BTreeSet::new(),
@@ -1264,7 +1278,10 @@ impl MissionMatch {
         }
         all.extend(thought);
         self.crowd.write_awareness(&mut self.world);
-        let out = step_world(&mut self.world, &all, world, cfg);
+        let mut out = step_world(&mut self.world, &all, world, cfg);
+        // [world] The launchers' shots fly, strike and burst (before the tripwires so that a burst
+        // that damages a wire trips it in the same step).
+        self.step_launchers(world, cfg, &mut out.events);
         // [world] Tripwires touched or damaged, keyhole holds and peeks.
         self.step_interactables(&all, &out.events, cfg, dt);
         // [world] Breakables, batteries and receptacles of the active map: explosions damage the
@@ -1342,6 +1359,7 @@ impl MissionMatch {
                     }
                     Some(Interaction::Kismet(i)) => kismet_host::use_usable(self, *id, i),
                     Some(Interaction::Prop(i)) => self.use_prop(*id, i),
+                    Some(Interaction::Launcher(i)) => self.interact_launcher(*id, i, cfg),
                     None => {}
                 }
             } else if !pressed {
@@ -1761,6 +1779,17 @@ impl MissionMatch {
         }
         for (pos, reach, it) in kismet_host::interactions(self) {
             consider(pos, reach, it); // [kismet]
+        }
+        // [world] A launcher the view meets within its interactable's reach (the point where the
+        // view enters its collision bounds stands for it).
+        if let Some(defs) = self.setup.interactables.get(&self.current_map.to_ascii_lowercase()) {
+            if !defs.launchers.is_empty() {
+                let hidden = self.hidden_levels();
+                let present = |i: usize| !hidden.iter().any(|h| h.eq_ignore_ascii_case(&defs.launchers[i].package));
+                if let Some((i, t)) = dishonored_sim::launchers::LaunchersState::focused(defs, eye, fwd, present) {
+                    consider(eye + fwd * t, defs.launchers[i].max_distance, Interaction::Launcher(i));
+                }
+            }
         }
         for (i, u) in self.setup.usables.iter().enumerate() {
             if u.map.eq_ignore_ascii_case(&self.current_map) {

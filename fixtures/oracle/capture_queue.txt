@@ -499,3 +499,6 @@ combat/melee_reach_d300
 kismet/keyhole_boyle_int
 kismet/tripwire_prsnsewer
 kismet/interact_prison
+# --- projectile launchers (research/dishonored/systems/interactables.md section 2): the tripwire's launcher, disarm and harvest ---
+kismet/launcher_prsnsewer
+kismet/launcher_disarm_prsnsewer

@@ -556,6 +556,11 @@ pub fn trail_of(kind: dishonored_sim::state::ProjectileKind) -> Option<&'static 
         // `TallboyExplosiveArrow_twk.m_pTrailEffect` (`Vfx_Weapon.Effects.WhaleOil.ps_TB_Trail`) is not
         // in the presented effect set yet.
         K::TallboyArrow => None,
+        // The trap's explosive arrow carries the same `ps_TB_Trail` (`TrapExplosiveArrow_twk`), also
+        // not presented yet; the Overseers' Back launcher's plain arrow (`Twk_Proj_Arrow`) the
+        // standard bolt trail.
+        K::TrapArrow => None,
+        K::TrapBolt => Some(BOLT_TRAIL_PS),
     }
 }
 
@@ -628,6 +633,11 @@ impl FxEventState {
                     if let Some(path) = trail_of(*kind).filter(|_| !s.projectiles.iter().any(|q| q.id == *projectile)) {
                         out.push(FxRequest::EndedTrail { path, xf: facing(*origin, *velocity) });
                     }
+                    // A launcher's shot leaves its tripod, not a pawn's hand: no muzzle effect (its
+                    // `id` is the sequence's instigator, if any).
+                    if kind.is_launcher_shot() {
+                        continue;
+                    }
                     let Some(p) = find(*id) else { continue };
                     if *bolt {
                         // The crossbow's muzzle (`Twk_Inv_Crossbow`'s fire tweak), in front of the eye.
@@ -692,7 +702,7 @@ impl FxEventState {
                     let Some(p) = find(*victim) else { continue };
                     let striker = match cause {
                         DamageCause::Pistol | DamageCause::PistolHeadshot => "DisContactType_Bullet",
-                        DamageCause::Crossbow | DamageCause::CrossbowHeadshot => "DisContactType_Arrow",
+                        DamageCause::Crossbow | DamageCause::CrossbowHeadshot | DamageCause::TrapShot => "DisContactType_Arrow",
                         DamageCause::Sword | DamageCause::SwordCounter | DamageCause::Assassination | DamageCause::DropAssassination => "DisContactType_Sword",
                         _ => continue,
                     };
@@ -854,6 +864,8 @@ impl SoundEventState {
             }
             // The Tallboy's bow (`Snd_AI_TBoy_Arrow_Fire*`) is not in the cue set: no pistol shot.
             SimEvent::Fired { kind: dishonored_sim::state::ProjectileKind::TallboyArrow, .. } => {}
+            // A launcher's shot (`m_pSoundEvent_InAir`, the launch's own sounds) is not in the cue set.
+            SimEvent::Fired { kind, .. } if kind.is_launcher_shot() => {}
             SimEvent::Fired { id, bolt, projectile, .. } => {
                 self.projectiles.insert(projectile, bolt);
                 // One shot, one sound: skipped when a fire animation's AkEvent notify already
@@ -897,7 +909,7 @@ impl SoundEventState {
                     DamageCause::DropAssassination => Some("assassinate_drop"),
                     DamageCause::Pistol => Some("bullet_body"),
                     DamageCause::PistolHeadshot => Some("bullet_head"),
-                    DamageCause::Crossbow => Some("bolt_body"),
+                    DamageCause::Crossbow | DamageCause::TrapShot => Some("bolt_body"),
                     DamageCause::CrossbowHeadshot => Some("bolt_head"),
                     _ => None,
                 };

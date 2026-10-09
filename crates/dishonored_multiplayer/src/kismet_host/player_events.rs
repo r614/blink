@@ -341,6 +341,12 @@ fn interact_events(k: &mut Kismet, h: &mut H) {
                 let Some(a) = h.kismet_actor(&d.package, &d.name) else { continue };
                 fire_interact(k, h, player, a, INTERACT_ALT);
             }
+            // The wrapper 0x00A3DF60 after the launcher's `Interact` (0x00A3B6E0) answered "used".
+            InteractEvent::Launcher { launcher, player } => {
+                let Some(l) = defs.as_ref().and_then(|d| d.launchers.get(launcher)) else { continue };
+                let Some(a) = h.kismet_actor(&l.package, &l.name) else { continue };
+                fire_interact(k, h, player, a, INTERACT_USE);
+            }
         }
     }
     for (user, a) in std::mem::take(&mut h.st.player_ev.interacts) {

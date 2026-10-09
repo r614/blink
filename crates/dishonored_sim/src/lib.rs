@@ -31,6 +31,7 @@ pub mod volumes;
 pub mod movables;
 pub mod world_actors;
 pub mod interactables;
+pub mod launchers;
 
 use dishonored_ir::gameplay::GameplayConfig;
 use dishonored_world::WorldQuery;

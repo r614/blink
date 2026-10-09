@@ -82,6 +82,10 @@ pub enum InteractEvent {
     KeyHole { keyhole: usize, player: PlayerId, used: bool },
     /// `DisSeqEvent_Interact` output 1 (`AltInteract`) of the interactable the user held Use on.
     AltInteract { keyhole: usize, player: PlayerId },
+    /// `DisSeqEvent_Interact` output 0 of a launcher the player disarmed or took ammunition from
+    /// (index into `Interactables::launchers`; `launchers::LaunchersState::interact` returned
+    /// "used").
+    Launcher { launcher: usize, player: PlayerId },
 }
 
 /// `eDisPeekingState`.
@@ -210,7 +214,7 @@ pub fn segment_touches(triangles: &[[Vec3; 3]], a: Vec3, b: Vec3, radius: f32) -
 
 /// A ray against an axis-aligned box: the distance along `dir` (unit) to the entry, if within
 /// `reach`.
-fn ray_box(origin: Vec3, dir: Vec3, lo: Vec3, hi: Vec3, reach: f32) -> Option<f32> {
+pub fn ray_box(origin: Vec3, dir: Vec3, lo: Vec3, hi: Vec3, reach: f32) -> Option<f32> {
     let mut t0 = 0.0f32;
     let mut t1 = reach;
     for i in 0..3 {

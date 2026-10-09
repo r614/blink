@@ -1,0 +1,36 @@
+// Projectile launchers (research/dishonored/systems/interactables.md section 2): the player's Interact on
+// DisProjectileLauncher_3 of the Prison Sewer (0x00A3B6E0). Its interface slot 9 (0x00633610) answers "no alternate
+// action", so Use runs Interact at the press: an armed launcher is disarmed (m_DeactivatedAnimName, 0x00A34280) and,
+// unless harvested, its tweak's m_HarvestedAmmo (WhiskeyLauncher_twk: one incendiary bolt, type 4) goes into the
+// inventory (AddAmmo 0x00C052E0); the generic wrapper shows m_UseMessage ("Launcher disarmed") and fires
+// DisSeqEvent_Interact output 0. m_bHarvested is stored from what the press harvested on every path, so a press that
+// takes nothing clears it (the second press takes nothing, the third takes again): decoded, never observed.
+(
+    name: "kismet/launcher_disarm_prsnsewer",
+    system: Kismet,
+    map: "L_PrsnSewer_P",
+    description: "Stand before DisProjectileLauncher_3 of the Prison Sewer and press Use three times: the first disarms it and takes a bolt, the second takes nothing, the third takes again.",
+    setup: (kismet: true, kismet_start: Some("ChangeLvl_fromPrison_toSewer"), original_npcs: false, seed: 1, settle: 30),
+    ticks: 160,
+    input: [
+        (tick: 2, action: Console("teleport 2090 3179 3180 0")),
+        (tick: 4, action: Look(yaw: 0, pitch: -59.8)),
+        (tick: 20, hold: 2, action: Press(Use)),
+        (tick: 60, hold: 2, action: Press(Use)),
+        (tick: 100, hold: 2, action: Press(Use)),
+    ],
+    checkpoints: [
+        (name: "disarm", expect: [
+            (metric: Count("Interact:LauncherDefuse"), value: 1, tol: 0, source: "decoded 0x00A3B6E0 -> 0x00A34280: an armed launcher is disarmed by Interact, once", status: Static),
+            (metric: At("launcher.armed", 25), value: 2, tol: 0, source: "the Sewer's other two tripods stay armed", status: Static),
+        ]),
+        (name: "ammunition", expect: [
+            (metric: Delta("inv.incendiary", 15, 25), value: 1, tol: 0, source: "decoded 0x00A3B6E0: m_HarvestedAmmo[4] = 1 (WhiskeyLauncher_twk) through AddAmmo 0x00C052E0", status: Static),
+            (metric: Count("Interact:LauncherHarvest"), value: 1, tol: 0, cmp: AtLeast, source: "decoded 0x00A3B6E0: m_bHarvested set by a press that added ammunition", status: Static),
+        ]),
+        (name: "second press", expect: [(metric: Delta("inv.incendiary", 50, 70), value: 0, tol: 0, source: "decoded 0x00A3B6E0: harvested already, the press takes nothing (and clears m_bHarvested)", status: Unmeasured)]),
+        (name: "third press", expect: [(metric: Delta("inv.incendiary", 90, 110), value: 1, tol: 0, source: "decoded 0x00A3B6E0: the flag was cleared by the failed press, so the ammunition is given again", status: Unmeasured)]),
+    ],
+    record: [Pawn, Kismet, SimEvents],
+    capture: Some("Prison Sewer after ChangeLvl_fromPrison_toSewer, player teleported to (2090, 3179, 3180) looking down at DisProjectileLauncher_3: Use pressed at ticks 20, 60 and 100: DisProjectileLauncher_3.m_bArmed / m_bHarvested per tick, the player's incendiary bolt count, the DisSeqEvent_Interact activations, the HUD use message"),
+)
