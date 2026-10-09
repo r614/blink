@@ -1062,12 +1062,12 @@ impl Runner {
             SpeakerSlot::OneShot(k) if k >= 0 => Some(k as usize + 1),
             _ => None,
         };
-        let os_nick = os_index.and_then(|k| os.and_then(|o| o.speakers.get(k))).map(|s| s.nick.clone()).filter(|s| !s.is_empty());
-        let name = nick.or(os_nick).unwrap_or_else(|| match slot {
-            SpeakerSlot::Player => "Corvo".into(),
-            _ => String::new(),
-        });
-        Speaker { name: name.replace('_', " "), npc: self.slot_npc(idx, &slot), player: slot == SpeakerSlot::Player }
+        let os_speaker = os_index.and_then(|k| os.and_then(|o| o.speakers.get(k)));
+        let os_nick = os_speaker.map(|s| s.nick.clone()).filter(|s| !s.is_empty());
+        // A DLC06 one-shot's `m_PlayerAsSpeaker` is reported as the player (0x00ceb120).
+        let player = slot == SpeakerSlot::Player || os_speaker.is_some_and(|s| s.player);
+        let name = nick.or(os_nick).unwrap_or_else(|| if slot == SpeakerSlot::Player { "Corvo".into() } else { String::new() });
+        Speaker { name: name.replace('_', " "), npc: if player { None } else { self.slot_npc(idx, &slot) }, player }
     }
 
     /// The original actor a node's speaker slot is attached to (`m_pAttachedActor`).

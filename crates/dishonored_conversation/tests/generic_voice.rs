@@ -31,3 +31,14 @@ fn elite_guard_voice_barks() {
     assert!(!started.is_empty(), "no generic bark starts");
 }
 
+#[test]
+fn dlc06_one_shots_load_with_the_player_as_last_speaker() {
+    let Some(c) = cooked() else { return };
+    let Ok(db) = load_packages(&c, &["DLC06_Tower_Script".to_string()], &mut NoVo) else { return };
+    let os: Vec<_> = db.oneshots.iter().filter(|o| o.package.eq_ignore_ascii_case("DLC06_Tower_Script")).collect();
+    assert_eq!(os.len(), 4);
+    for o in os {
+        let last = o.speakers.last().unwrap();
+        assert!(last.player && last.actor.is_none(), "{}: {:?}", o.name, o.speakers);
+    }
+}

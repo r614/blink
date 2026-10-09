@@ -50,7 +50,7 @@ fn make_db(convs: Vec<Conversation>, nodes: Vec<Node>, hooks: Vec<NodeId>) -> Ar
     let n = convs.len() as u32;
     Arc::new(ConversationDb {
         packages: vec!["P".into()],
-        oneshots: vec![OneShot { package: "P".into(), name: "OS".into(), path: "OS".into(), tree: Some(0), speakers: vec![OneShotSpeaker { nick: "Me".into(), actor: Some("Spawner_1".into()), voice: None }], location: [0.0; 3] }],
+        oneshots: vec![OneShot { package: "P".into(), name: "OS".into(), path: "OS".into(), tree: Some(0), speakers: vec![OneShotSpeaker { nick: "Me".into(), actor: Some("Spawner_1".into()), voice: None, player: false }], location: [0.0; 3] }],
         trees: vec![Tree { package: "P".into(), path: "T".into(), oneshot: Some(0), hooks, conversations: (0..n).collect(), fallback: None }],
         conversations: convs,
         nodes,

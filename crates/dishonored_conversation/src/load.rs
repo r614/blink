@@ -216,7 +216,8 @@ impl Loader {
             }
             let c = pkg.export_class(i);
             match c.as_str() {
-                "DisDialogOneShot" => oneshots.push(i),
+                // The DLC06 subclass adds the player as the last speaker.
+                "DisDialogOneShot" | "DisDLC06DialogOneShot" => oneshots.push(i),
                 "DisDialogTree" | "DisDialogTree_OneShot" => trees.push(i),
                 "DisConversation" => convs.push(i),
                 "DisDialogVoiceData" | "DisDialogVoiceData_OneShot" => voices.push(i),
@@ -300,6 +301,7 @@ impl Loader {
                 nick: pstr(s, "m_SpeakerNickName").unwrap_or_default(),
                 actor: pobj_name(&pkg, s, "m_pAttachedActor"),
                 voice: pobj(s, "m_pVoiceData").map(|v| pkg.obj_path(ObjRef::Export(v))),
+                player: false,
             };
             let mut speakers = Vec::new();
             let mut vids = Vec::new();
@@ -313,6 +315,12 @@ impl Loader {
             for s in find(&props, "m_OtherSpeakers").and_then(|p| p.array_structs(&pkg).ok()).unwrap_or_default() {
                 speakers.push(speaker(&s));
                 vids.push(pobj(&s, "m_pVoiceData"));
+            }
+            // `DisDLC06DialogOneShot.m_PlayerAsSpeaker` (0x00d01f50): the local player, after the
+            // other speakers, with no attached actor.
+            if let Some(Value::Struct(_, s)) = prop(&props, "m_PlayerAsSpeaker") {
+                speakers.push(OneShotSpeaker { actor: None, player: true, ..speaker(s) });
+                vids.push(pobj(s, "m_pVoiceData"));
             }
             let id = os_id[&i];
             os_speaker_voice.insert(id, vids);

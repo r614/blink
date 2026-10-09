@@ -56,6 +56,10 @@ pub struct OneShotSpeaker {
     pub actor: Option<String>,
     /// `m_pVoiceData` object path.
     pub voice: Option<String>,
+    /// `DisDLC06DialogOneShot.m_PlayerAsSpeaker`: the speaker is the local player pawn (vslot 233,
+    /// 0x00ceb120), appended after `m_OtherSpeakers` (vslot 235, 0x00d01f50).
+    #[serde(default)]
+    pub player: bool,
 }
 
 /// `DisDialogTree` / `DisDialogTree_OneShot`.
