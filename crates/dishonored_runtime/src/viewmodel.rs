@@ -114,7 +114,9 @@ const CLIPS: &[&str] = &[
     "Sword_Ready_Idle", "Sword_Ready_Walk", "Sword_Ready_Run", "Sword_Ready_Sprint", "Sword_Ready_Jump",
     "Sword_Sneak_Idle", "Sword_Sneak_Walk", "Sword_Sneak_Jump",
     "Sword_Ready_MantleLow", "Sword_Ready_MantleMedium", "Sword_Ready_MantleHigh", "Sword_Sneak_MantleLow", "Sword_Sneak_MantleMedium", "Sword_Sneak_MantleHigh",
-    "Sword_Stun_In", "Sword_Stun_Loop", "Sword_Ready_Assassination_Back_Master", "Sword_Ready_Assassination_Generic",
+    "Sword_Stun_In", "Sword_Stun_Loop", "Sword_Ready_Assassination_Generic",
+    "Sword_Ready_Assassination_Front_Master", "Sword_Ready_Assassination_Left_Master", "Sword_Ready_Assassination_Right_Master", "Sword_Ready_Assassination_Back_Master",
+    "Sword_Ready_Assassination_DropFront_Master", "Sword_Ready_Assassination_DropLeft_Master", "Sword_Ready_Assassination_DropRight_Master", "Sword_Ready_Assassination_DropBack_Master",
     "Sword_Choke_In_Master", "Sword_Choke_Loop_Master", "Sword_Choke_Win_Master", "Sword_Choke_Lose_Master", "Sword_Choke_Cancel_Master", "Sword_Choke_CarryCorpse_Master",
     "Head_Rope_Climb", "Empty_SwimIdle", "Empty_SwimN",
     // The held gun's aim (additive, `Ply_Guns_as`).
@@ -1228,10 +1230,12 @@ fn full_body(p: &PlayerState, a: &ViewAnim, lib: &ClipLib, gameplay: &GameplayCo
         return (once("carry_drop", "Empty_CarryCorpse_DropLow_Master", BLEND_ACTION), true);
     }
     match p.sword.phase {
-        // `Assassinate_BackA` (KillSeq Ready_Assassination_Back_Master), else the upper-body
-        // `Assassinate_GenericA`.
+        // The move's master in `Ply_Player_Assassinate_at`'s KillSeq (`DisTweaks_Assassinate`
+        // `m_Front/Left/Right/Back` -> `Assassinate_<dir>`, the drop set's `Assassinate_Drop_<dir>`),
+        // else the upper-body `Assassinate_GenericA`.
         SwordPhase::Assassinating => {
-            if let Some(c) = pick(lib, &["Sword_Ready_Assassination_Back_Master", "Sword_Ready_Assassination_Generic"]) {
+            let m = ASSASSINATION_MASTERS[(p.sword.assassination_move as usize).min(ASSASSINATION_MASTERS.len() - 1)];
+            if let Some(c) = pick(lib, &[m, "Sword_Ready_Assassination_Generic"]) {
                 return (once("assassinate", c, BLEND_ACTION), true);
             }
         }
@@ -1821,6 +1825,19 @@ pub fn animate_view_rig(
     }
 }
 
+/// `Ply_Sword_Assassination_as` masters by `SwordState::assassination_move` (front, left, right,
+/// back; then the drop assassinations).
+const ASSASSINATION_MASTERS: [&str; 8] = [
+    "Sword_Ready_Assassination_Front_Master",
+    "Sword_Ready_Assassination_Left_Master",
+    "Sword_Ready_Assassination_Right_Master",
+    "Sword_Ready_Assassination_Back_Master",
+    "Sword_Ready_Assassination_DropFront_Master",
+    "Sword_Ready_Assassination_DropLeft_Master",
+    "Sword_Ready_Assassination_DropRight_Master",
+    "Sword_Ready_Assassination_DropBack_Master",
+];
+
 /// A body left where its choke or carry ended (Dishonored-space root position and yaw), kept
 /// until the simulation moves it.
 #[derive(Clone, Copy, Debug)]
@@ -1831,7 +1848,8 @@ pub struct BodyAnchor {
 }
 
 /// Bodies drawn in another pawn's frame. Synced sequences (`Generic_Choke_*_Slave`,
-/// `Corpses_CarryCorpse_*_Slave`) are authored at the master's root, so a choked or carried
+/// `Corpses_CarryCorpse_*_Slave`, `Generic_Assassination_*_Slave`: every slave's root starts at
+/// the origin with its master's) are authored at the master's root, so a choked, assassinated or carried
 /// body is drawn there: for the local first-person master, the rig's own pawn space (whose
 /// `camera_jnt` is the view, so the carried body hangs where the master sequence puts it,
 /// over the shoulder), else the master's body root. A body released from a choke or a carry
@@ -1896,12 +1914,18 @@ pub fn place_held_bodies(
         let held = if let Some(c) = p.carried_by {
             frame_of(c)
         } else {
-            // In a choke, or playing its Win / Lose slave while the master is in that state.
+            // In a choke, or playing its Win / Lose slave while the master is in that state; or the
+            // victim of a running assassination (its slave synced to the master's sequence).
             let choker = p.condition_by.and_then(|c| all.iter().find(|q| q.id == c));
             let in_choke = choker.is_some_and(|c| {
                 p.condition == Condition::BeingChoked || (c.choke.target == Some(p.id) && matches!(c.choke.phase, ChokePhase::Win | ChokePhase::Lose))
             });
-            if in_choke { choker.and_then(|c| frame_of(c.id)).map(|(_, level)| (level, level)) } else { None }
+            let assassin = all.iter().find(|q| q.sword.phase == SwordPhase::Assassinating && q.sword.assassination_target == Some(p.id));
+            if in_choke {
+                choker.and_then(|c| frame_of(c.id)).map(|(_, level)| (level, level))
+            } else {
+                assassin.and_then(|a| frame_of(a.id)).map(|(_, level)| (level, level))
+            }
         };
         if let Some((shown, level)) = held {
             live.insert(p.id, shown);

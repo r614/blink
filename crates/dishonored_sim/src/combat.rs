@@ -266,6 +266,7 @@ pub fn resolve_sword_hits(state: &mut WorldState, world: &dyn WorldQuery, g: &Ga
                     a.sword.timer = 0.0;
                     a.sword.lock_time = if drop { t.drop_assassination_times[dir] } else { t.assassination_times[dir] };
                     a.sword.assassination_target = Some(vid);
+                    a.sword.assassination_move = dir as u8 + if drop { 4 } else { 0 };
                     a.velocity = Vec3::ZERO;
                 }
                 let v = &mut state.players[vi];

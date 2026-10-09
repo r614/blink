@@ -100,6 +100,11 @@ pub struct SwordState {
     /// Length of the current assassination (the played clip's `AnimStateExit`).
     #[serde(default)]
     pub lock_time: f32,
+    /// The current assassination's move: its direction from the victim (0 front, 1 left, 2 right,
+    /// 3 back, 0x00BBA970), plus 4 for a drop assassination (the master
+    /// `Sword_Ready_Assassination_{Front,Left,Right,Back}_Master` / `_Drop*_Master`).
+    #[serde(default)]
+    pub assassination_move: u8,
 }
 
 impl SwordState {
