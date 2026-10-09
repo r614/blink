@@ -58,6 +58,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("addr", nargs="+")
     ap.add_argument("--brief", action="store_true", help="signature, callers and callees only")
+    ap.add_argument("--head", type=int, default=0, help="only the first N lines of each body (locals skipped)")
     a = ap.parse_args()
     src, (spans, callers) = index()
     cites = defaultdict(list)
@@ -78,7 +79,12 @@ def main():
         print("callers: " + ", ".join(tag(c) for c in sorted(callers.get(addr, ()))[:12]))
         callees = sorted({int(c, 16) for c in pa.FUN_RE.findall("\n".join(body))} - {addr})
         print("callees: " + ", ".join(tag(c) for c in callees[:20]))
-        if not a.brief:
+        if a.head:
+            # Skip the declarations: the first statement after the locals' blank line.
+            k = next((t for t, l in enumerate(body) if t > 2 and l.strip() == ""), 2)
+            print(body[0])
+            print("\n".join(l for l in body[k + 1:k + 1 + a.head] if l.strip()))
+        elif not a.brief:
             print("\n".join(body))
         print()
 

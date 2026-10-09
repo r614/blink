@@ -13,3 +13,16 @@
 00ab1160	ported	set / clear an input-block bit on pawn+0x66C[channel]: the choke masks bit 1 while held (movement lock), LIKELY
 00acd960	gap	ends a toggled sneak (m_bSneakModeToggled) on entering Mantle / Choke / Swim / Soiree / InDialog / Versus / Minigame / melee attack: choke and swim done, mantle open (spot height), dialog and soiree not
 00c09370	ported	choke state change (2 win, 4 lose, 5 cancel): takedown::set_phase
+# swim.rs (2026-10-09)
+00ad4240	ported	air capacity refresh (max = 0x00ACF570; full or over the new max -> the new max): swim::air_left from air_used; a capacity change mid-dive keeps air used instead of air left (edge case)
+00b58bf0	irrelevant	post-process volume blend of the volumes the view is in (underwater PP, blend 1 / time): runtime presentation
+006b71e0	ported	UE3 swim step (physSwimming's move with TwoWallAdjust): swim::swimming, LIKELY
+00a72190	irrelevant	action state plays its slot animation (presentation)
+00c05500	irrelevant	animation slot selection (presentation)
+00c17eb0	irrelevant	plays a named animation on a slot (presentation)
+00ab1d00	helper	request an action-state transition (the port's states are explicit)
+00bbf1f0	helper	is the player controller in normal play (not a cinematic / special controller class)
+004afdb0	helper	struct initializer
+00bf3a50	irrelevant	power screen effects (Blinded, Bend Time opacity, Outsider vision, noise params): runtime power_pp
+00a8fe10	gap	drop-assassination tutorial hint (m_DropAssassinationNoteTitle) when above an NPC within range and the tutorial option is on
+00aadba0	gap	Heart tutorial hint (m_HeartTargetTutorialMessage) near a Heart target

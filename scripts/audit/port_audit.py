@@ -156,9 +156,12 @@ def main():
     # Mechanical helpers, not logic: short bodies without identifier strings, and the template
     # array operations (their bounds assert) of moderate length.
     auto_helper = set()
+    isa = re.compile(r"\+ 0x30\); \w+ != 0; \w+ = \*\(int \*\)\(\w+ \+ 0x44\)\)")
     for f, (cs, ss, vs, size, text) in funcs.items():
         named = any(IDENT_RE.match(s) for s in ss if "ArrayNum" not in s)
-        if (size <= 12 and not named) or ("ArrayNum" in text and size <= 40 and not named):
+        stmts = [l.strip() for l in text.split("\n") if l.strip().endswith(";")]
+        plain_init = size <= 40 and stmts and all(re.match(r"^\*?\(?\w[\w\[\]\s\*\(\)\+]*=\s*[\w\.\-]+;$", s) or s == "return;" for s in stmts)
+        if (size <= 12 and not named) or ("ArrayNum" in text and size <= 40 and not named) or (isa.search(text) and size <= 20) or plain_init:
             auto_helper.add(f)
     for f in auto_helper:
         ledger.setdefault(f, ("helper", "auto"))
