@@ -63,6 +63,11 @@ pub enum Stim {
     Panicked,
     /// 112: a power seen (0x00b23e50); `flag` is `m_bDisappeared`.
     WitnessMagic,
+    /// 10 / 11: a blocking conversation of the pawn started / ended (its dialog component,
+    /// 0x00b7fe50 / 0x00b7ff80); `who` is the conversation instance, `flag` the request's
+    /// low-priority flag.
+    BlockingDialogRequest,
+    BlockingDialogEnd,
     /// 104: the pawn's tether volume changed (0x00b68ad0 via 0x00b195c0, delayed by
     /// `m_TetherDelay`); `who` is the volume (`NOISE`: none), `flag` that the pawn left it.
     TetherRequest,
@@ -140,6 +145,15 @@ pub struct MagicState {
     pub ally: bool,
     pub barked: bool,
     pub anim: Option<f32>,
+}
+
+/// State of a `DisBehaviorBlockingDialog`: the conversation instance (`m_iDlgRunningInstanceID`),
+/// the variant (low priority: `TwksBehavior_BlockingDialog_LowPriority` in slot Act, with
+/// `m_bStopBlockingForAINotice`; else HighPriority in slot Perform).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DialogState {
+    pub instance: u32,
+    pub low: bool,
 }
 
 /// `DisBehaviorGoHome` sub-states (`EDisGoHomeSubStates`).
@@ -265,6 +279,8 @@ pub enum Behavior {
     RatSwarm(RatSwarmState),
     /// `DisBehaviorGoHome` (slot Resign, `TetherRequest` from outside the zone).
     GoHome(GoHomeState),
+    /// `DisBehaviorBlockingDialog` (slot Act or Perform, `BlockingDialogRequest`).
+    BlockingDialog(DialogState),
 }
 
 impl Behavior {
@@ -282,6 +298,7 @@ impl Behavior {
             Behavior::Escape(_) => slot::PRESERVE,
             Behavior::RatSwarm(_) => slot::ENGAGE,
             Behavior::GoHome(_) => slot::RESIGN,
+            Behavior::BlockingDialog(d) => if d.low { slot::ACT } else { slot::PERFORM },
         }
     }
 }
@@ -367,6 +384,8 @@ impl Brain {
             },
             // Standing toward the swarm, or going to it.
             Some(Behavior::RatSwarm(s)) => if s.sub == RatSub::TakeActorPosition { BrainState::WalkToPoint } else { BrainState::Notice },
+            // Standing in the conversation.
+            Some(Behavior::BlockingDialog(_)) => BrainState::Idle,
             // Going home, or the last taunt toward the enemy.
             Some(Behavior::GoHome(s)) => if s.sub == GoHomeSub::LastTaunt { BrainState::Notice } else { BrainState::WalkToPoint },
             // The interact behaviour walks (going to the distractor) or stands.
@@ -501,6 +520,26 @@ impl Brain {
         self.post(Stim::PatrolRequest, 0.0, NOISE, self.home, false, false);
     }
 
+    /// `NoticeBegin` / `SearchBegin` force the low-priority blocking dialog to finish
+    /// (`m_bForceFinish`, 0x00ad22f0).
+    fn notice_ends_low_dialog(&mut self) {
+        if matches!(self.behavior(slot::ACT), Some(Behavior::BlockingDialog(d)) if d.low) {
+            self.complete(slot::ACT);
+        }
+    }
+
+    /// [dialog] A blocking conversation of this pawn started (`EAIStimID_BlockingDialogRequest`
+    /// from its dialog component, 0x00b7fe50): `low` is the request's priority flag.
+    pub fn blocking_dialog_start(&mut self, instance: u32, low: bool) {
+        self.post(Stim::BlockingDialogRequest, 0.0, instance as PlayerId, self.home, low, false);
+    }
+
+    /// [dialog] It ended (`EAIStimID_BlockingDialogEnd`, 0x00b7ff80).
+    pub fn blocking_dialog_end(&mut self, instance: u32) {
+        self.post(Stim::BlockingDialogEnd, 0.0, instance as PlayerId, self.home, false, false);
+        self.dialog_look = None;
+    }
+
     /// The attention poster (see the module docs): step the behaviour level toward the top
     /// target's level, posting the behaviour stimuli. `focus` is the strongest stimulus.
     pub(crate) fn post_attention(&mut self, ws: &WorldState) {
@@ -629,6 +668,7 @@ impl Brain {
             Behavior::Panic { .. } => Some("DisBehaviorPanic"),
             Behavior::Escape(_) => Some("DisBehaviorEscapeExplosion"),
             Behavior::GoHome(_) => Some("DisBehaviorGoHome"),
+            Behavior::BlockingDialog(_) => Some("DisBehaviorBlockingDialog"),
             Behavior::RatSwarm(_) => Some(if self.rat_combat.as_ref().is_some_and(|c| c.elite) { "DisBehaviorCombatRatSwarmEliteGuard" } else { "DisBehaviorCombatRatSwarm" }),
             // The animated distraction is `DisBehaviorInteract`; a soiree's behaviour class
             // (`DisBehaviorSoiree`) is not decoded, so no class is claimed for it.
@@ -675,10 +715,12 @@ impl Brain {
                 }
             }
             Stim::NoticeBegin => {
+                self.notice_ends_low_dialog();
                 self.threat_pos = Some(q.at);
                 self.place(Behavior::Notice);
             }
             Stim::SearchBegin => {
+                self.notice_ends_low_dialog();
                 self.suspecting = true;
                 self.threat_pos = Some(q.at);
                 self.run = q.urgent;
@@ -763,6 +805,24 @@ impl Brain {
                     self.place(Behavior::RatSwarm(RatSwarmState { swarm, remaining: cfg.max_setup_time, ..Default::default() }));
                     if cfg.ally_request_radius > 0.0 {
                         self.rat_calls.push((me.position, cfg.ally_request_radius, swarm));
+                    }
+                }
+            }
+            // `DisBehaviorBlockingDialog`: the variant whose `m_bStopBlockingForAINotice` matches
+            // the request's flag takes it (0x00ad2240); a running one takes the new instance
+            // (0x00ad2340); the end with its instance finishes it (0x00ac2600).
+            Stim::BlockingDialogRequest => {
+                let s = if q.flag { slot::ACT } else { slot::PERFORM };
+                if let Some(Some(Behavior::BlockingDialog(d))) = self.slots.get_mut(s as usize) {
+                    d.instance = q.who;
+                } else {
+                    self.place(Behavior::BlockingDialog(DialogState { instance: q.who, low: q.flag }));
+                }
+            }
+            Stim::BlockingDialogEnd => {
+                for s in [slot::ACT, slot::PERFORM] {
+                    if matches!(self.behavior(s), Some(Behavior::BlockingDialog(d)) if d.instance == q.who) {
+                        self.complete(s);
                     }
                 }
             }

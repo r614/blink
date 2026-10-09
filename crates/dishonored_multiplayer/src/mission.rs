@@ -601,6 +601,10 @@ pub struct MissionMatch {
     /// [ai] What the current map's audio portals were last set from (`audio_portals.rs`).
     #[serde(default)]
     pub portal_sync: audio_portals::PortalSync,
+    /// [dialog] The blocking conversations running: instance -> the NPC speakers held in
+    /// `DisBehaviorBlockingDialog`.
+    #[serde(default)]
+    pub dialog_blocks: BTreeMap<u32, Vec<PlayerId>>,
 }
 
 impl MissionMatch {
@@ -662,6 +666,7 @@ impl MissionMatch {
             mover_worlds: Vec::new(),
             levels_visible: BTreeSet::new(),
             portal_sync: Default::default(),
+            dialog_blocks: BTreeMap::new(),
         };
         // The score carried in from the previous missions (the manager's score persists).
         m.darkness.add(m.setup.def.settings.darkness);
@@ -1094,6 +1099,69 @@ impl MissionMatch {
     /// The persistent map clients should show and hosts should collide against.
     pub fn current_map(&self) -> &str {
         &self.current_map
+    }
+
+    /// [dialog] The NPC a conversation speaker name stands for: a mission NPC, else an original
+    /// spawner of the current map that has spawned.
+    fn speaker_id(&self, name: &str) -> Option<PlayerId> {
+        self.id_by_npc.get(name).copied().or_else(|| self.setup.original.iter().find(|o| o.name.eq_ignore_ascii_case(name) && o.map.eq_ignore_ascii_case(&self.current_map) && self.original_spawned.contains(&o.spawn.id)).map(|o| o.spawn.id))
+    }
+
+    /// [dialog] `EAIStimID_BlockingDialogRequest` / `End` (the pawn's dialog component, 0x00b7fe50
+    /// / 0x00b7ff80): the bound NPC speakers of each blocking conversation (`m_bBlocking`) stand in
+    /// `DisBehaviorBlockingDialog` while it runs, facing who talks (0x00adac60: the speaker of the
+    /// current line, else the initiator). The request's priority flag is the conversation's low
+    /// priority (LIKELY: the flag the dialog component passes was not traced to its source).
+    fn blocking_dialogs(&mut self) {
+        let Some(db) = self.setup.conversations.as_ref() else { return };
+        type Live = (u32, bool, Vec<PlayerId>, Option<PlayerId>, Option<(Option<String>, bool)>);
+        let mut live: Vec<Live> = Vec::new();
+        if let Some(r) = self.state.conv.as_ref() {
+            for inst in r.active() {
+                let Some(c) = inst.conversation.and_then(|c| db.conversations.get(c as usize)) else { continue };
+                if !c.blocking {
+                    continue;
+                }
+                let npcs: Vec<PlayerId> = inst.bindings.iter().flatten().filter_map(|n| self.speaker_id(n)).collect();
+                let line = inst.line.as_ref().map(|l| (l.speaker.npc.clone(), l.speaker.player));
+                live.push((inst.id, c.priority == dishonored_conversation::model::Priority::Low, npcs, inst.initiator, line));
+            }
+        }
+        let ended: Vec<u32> = self.dialog_blocks.keys().filter(|id| !live.iter().any(|l| l.0 == **id)).copied().collect();
+        for id in ended {
+            for p in self.dialog_blocks.remove(&id).unwrap_or_default() {
+                if let Some(b) = self.crowd.brains.iter_mut().find(|b| b.id == p) {
+                    b.blocking_dialog_end(id);
+                }
+            }
+        }
+        let mut looks: Vec<(PlayerId, Vec3)> = Vec::new();
+        for (id, low, npcs, initiator, line) in &live {
+            if !self.dialog_blocks.contains_key(id) {
+                for p in npcs {
+                    if let Some(b) = self.crowd.brains.iter_mut().find(|b| b.id == *p) {
+                        b.blocking_dialog_start(*id, *low);
+                    }
+                }
+                self.dialog_blocks.insert(*id, npcs.clone());
+            }
+            let talker = match line {
+                Some((Some(n), _)) => self.speaker_id(n),
+                Some((None, true)) => *initiator,
+                _ => None,
+            };
+            for p in npcs {
+                let target = talker.filter(|t| t != p).or(*initiator).or_else(|| npcs.iter().copied().find(|q| q != p));
+                if let Some(pos) = target.and_then(|t| self.world.player(t)).map(|x| x.position) {
+                    looks.push((*p, pos));
+                }
+            }
+        }
+        for (p, pos) in looks {
+            if let Some(b) = self.crowd.brains.iter_mut().find(|b| b.id == p) {
+                b.dialog_look = Some(pos);
+            }
+        }
     }
 
     /// [ai] The plot settings' game-over rules of an original NPC (its spawner's pawn tweak).
@@ -1784,6 +1852,7 @@ impl MissionMatch {
             let climbables: Vec<String> = world.climbables().iter().map(|c| c.name.clone()).collect();
             kismet_host::presentation::rain_cover(self, world, cfg); // [kismet] the camera's rain cover test
             kismet_host::step(self, &out.events, dt, cfg, &climbables); // [kismet]
+            self.blocking_dialogs(); // [dialog] speakers stand while their conversation runs
             self.sync_darkness(cfg);
             save::tick(self, dt, &cfg.gameplay.items.combat_save); // [save] autosaves
             if self.state.outcome().is_some() && self.view.phase != MatchPhase::Ended {

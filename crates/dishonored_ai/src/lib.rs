@@ -63,7 +63,7 @@ pub mod slots;
 pub mod special;
 pub mod watchtower;
 
-pub use slots::{Behavior, EscapePhase, EscapeState, GoHomeState, GoHomeSub, MagicState, QueuedStim, RatSub, RatSwarmState, SearchState, SearchSub, Stim, slot};
+pub use slots::{Behavior, DialogState, EscapePhase, EscapeState, GoHomeState, GoHomeSub, MagicState, QueuedStim, RatSub, RatSwarmState, SearchState, SearchSub, Stim, slot};
 use slots::AlarmCause;
 pub use special::SpecialCombat;
 
@@ -530,6 +530,10 @@ pub struct Brain {
     pub tether_now: Option<u16>,
     #[serde(default)]
     pub tether_last: Option<u16>,
+    /// [dialog] Where the blocking dialog faces (who talks in the conversation, set by the host
+    /// each tick; 0x00adac60).
+    #[serde(skip)]
+    pub dialog_look: Option<Vec3>,
 }
 
 /// A target in a vision component's candidate list: the line of sight is traced again once
@@ -1892,6 +1896,7 @@ impl Brain {
             tether: Vec::new(),
             tether_now: None,
             tether_last: None,
+            dialog_look: None,
         }
     }
 
@@ -3140,6 +3145,8 @@ impl Brain {
                 slot::PRESERVE => self.act_escape(me, ws, layout, nav, ai, dt),
                 slot::ENGAGE => self.act_rat_swarm(me, ws, nav, ai, dt),
                 slot::RESIGN => self.act_go_home(me, ctx, nav, ai, dt),
+                // `DisBehaviorBlockingDialog` (0x00adac60): standing, facing who talks.
+                slot::ACT | slot::PERFORM if matches!(self.behavior(cur), Some(Behavior::BlockingDialog(_))) => self.dialog_look.map(face).unwrap_or(idle),
                 _ => idle,
             };
         }
@@ -4867,6 +4874,29 @@ mod tests {
         let mut w = flat_world();
         w.nav = Some(std::sync::Arc::new(dishonored_world::nav::NavWorld::from_data(&data)));
         w
+    }
+
+    /// A blocking conversation's request starts the variant of its priority flag (slot Act for a
+    /// low one, Perform otherwise); its end finishes it; `NoticeBegin` ends only the low one.
+    #[test]
+    fn a_blocking_dialog_holds_the_pawn_until_its_end() {
+        let mut b = Brain::new(NPC_ID_BASE, PawnKind::Guard, Vec3::ZERO, 1);
+        b.blocking_dialog_start(7, false);
+        arbitrate(&mut b);
+        assert!(matches!(b.behavior(slot::PERFORM), Some(Behavior::BlockingDialog(d)) if d.instance == 7));
+        assert!(started(&mut b).contains(&"DisBehaviorBlockingDialog".to_string()));
+        b.blocking_dialog_end(6);
+        arbitrate(&mut b);
+        assert!(b.behavior(slot::PERFORM).is_some(), "another instance's end");
+        b.blocking_dialog_end(7);
+        arbitrate(&mut b);
+        assert!(b.behavior(slot::PERFORM).is_none());
+        b.blocking_dialog_start(8, true);
+        arbitrate(&mut b);
+        assert!(b.behavior(slot::ACT).is_some());
+        b.post(Stim::NoticeBegin, 0.0, NOISE, Vec3::X, false, false);
+        arbitrate(&mut b);
+        assert!(b.behavior(slot::ACT).is_none(), "the low-priority dialog stops for a notice");
     }
 
     /// The tether tracker (0x00b68ad0): entering the volume posts an inside `TetherRequest` and
