@@ -12,7 +12,7 @@ use ue3_package::properties::{Value, find};
 /// Actor class -> the property holding its tweak.
 fn tweak_property(class: &str) -> Option<&'static str> {
     Some(match class {
-        "DisAbstractItemPickup" | "DisAbstractItemPickupNote" | "DisAbstractItemPickupAudioLog" | "DisWhaleBoneCharm" => "m_pTweaks",
+        "DisAbstractItemPickup" | "DisAbstractItemPickupNote" | "DisAbstractItemPickupAudioLog" | "DisWhaleBoneCharm" | "DisDLC07WhaleBoneCharmCracked" => "m_pTweaks",
         "DisStatPickup" => "m_pStatPickupTweaks",
         "DishonoredInventoryPickup" => "m_pInvPickupTweaks",
         "DisElixirHealth" | "DisElixirMana" => "m_pPickupTweaks",
@@ -50,6 +50,7 @@ fn kind_of(class: &str, tweak: &TMap) -> Option<PickupKind> {
         "DisElixirHealth" => PickupKind::Elixir(ElixirType::Health),
         "DisElixirMana" => PickupKind::Elixir(ElixirType::Mana),
         "DisWhaleBoneCharm" => PickupKind::BoneCharm(None),
+        "DisDLC07WhaleBoneCharmCracked" => PickupKind::CrackedCharm(None),
         "DishonoredInventoryPickup" => PickupKind::Inventory { item: obj("m_pItem") },
         _ => return None,
     })
@@ -98,7 +99,7 @@ pub fn extract_pickups(content: &Content, packages: &[String]) -> Result<Vec<Pla
             let resolved = db.try_resolve(&tweak).unwrap_or_default();
             let Some(mut kind) = kind_of(&class, &resolved) else { continue };
             // `DisWhaleBoneCharm.m_Effect` on the placed actor (class default -1: no effect).
-            if let PickupKind::BoneCharm(e) = &mut kind {
+            if let PickupKind::BoneCharm(e) | PickupKind::CrackedCharm(e) = &mut kind {
                 if let Some(Value::Int(v)) = find(&h.properties, "m_Effect").map(|p| &p.value) {
                     *e = (*v >= 0).then_some(*v);
                 }

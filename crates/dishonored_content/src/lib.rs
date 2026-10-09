@@ -109,7 +109,7 @@ pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
     // v25: ai.escape_explosion (DisBehaviorEscapeExplosion, its flee sub-state, the surprise length).
     // v26: items.auto_equip_charm (m_bAutoEquipBoneCharm).
     // v27: ai.panic.caught_reaction / beg_time.
-    let path = cache_dir().join("gameplay_config.v27.json");
+    let path = cache_dir().join("gameplay_config.v28.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);

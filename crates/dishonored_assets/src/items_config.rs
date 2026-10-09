@@ -6,7 +6,7 @@
 
 use crate::content::Content;
 use crate::ini::Ini;
-use crate::tweaks::{TMap, TVal, TweakDb, get, get_f32};
+use crate::tweaks::{TMap, TVal, TweakDb, get, get_f32, get_obj};
 use dishonored_ir::items::*;
 use std::collections::BTreeMap;
 
@@ -425,6 +425,43 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
         l.prov.insert("items.charms".into(), format!("{list} :: m_Charms ({} charms)", cfg.charms.len()));
         l.prov.insert("items.scripted_charms".into(), format!("{list} :: m_ScriptedCharms ({} charms)", cfg.scripted_charms.len()));
     }
+    // --- DLC07 cracked charms: Daud's `m_pCrackedCharmListTweaks` (each entry's `m_Levels(0)`) ---
+    if content.has_package(DAUD07_PACKAGE) {
+        if let Ok(db) = TweakDb::load_with(content, &[DAUD07_PACKAGE.to_string()]) {
+            let daud = db.try_resolve(DAUD07).unwrap_or_default();
+            let list = get_obj(&daud, "m_pCrackedCharmListTweaks").map(str::to_string).and_then(|p| db.try_resolve(&p)).unwrap_or_default();
+            let read = |key: &str| -> Vec<CrackedCharm> {
+                let Some(TVal::List(charms)) = list.get(key) else { return Vec::new() };
+                charms
+                    .iter()
+                    .filter_map(|c| {
+                        let Some(TVal::List(levels)) = c.get("m_Levels") else { return None };
+                        let lv = levels.first()?;
+                        let s = |k: &str| match lv.get(k) {
+                            Some(TVal::Str(s)) => s.trim().to_string(),
+                            _ => String::new(),
+                        };
+                        let mut modifiers = Vec::new();
+                        if let Some(TVal::List(attrs)) = lv.get("m_Attributes") {
+                            for a in attrs {
+                                let Some(TVal::Name(attribute)) = a.get("m_AttributeName") else { continue };
+                                let kind = match a.get("m_AttributeType") {
+                                    Some(TVal::Name(t)) | Some(TVal::Str(t)) => modifier_type(t),
+                                    _ => ModifierType::AddVal,
+                                };
+                                modifiers.push(AttributeModifier { attribute: attribute.clone(), kind, value: get_f32(a, "m_fValue").unwrap_or(0.0) });
+                            }
+                        }
+                        Some(CrackedCharm { name: s("m_Name"), text: s("m_Text"), modifiers })
+                    })
+                    .collect()
+            };
+            cfg.cracked_charms = read("m_CrackedCharms");
+            cfg.scripted_cracked_charms = read("m_ScriptedCrackedCharms");
+            cfg.cracked_auto_equip = matches!(daud.get("m_bAutoEquipBoneCharm"), Some(TVal::B(true)));
+            l.prov.insert("items.cracked_charms".into(), format!("{DAUD07} :: m_pCrackedCharmListTweaks ({} + {} scripted)", cfg.cracked_charms.len(), cfg.scripted_cracked_charms.len()));
+        }
+    }
     // A new charm is equipped only with `m_bAutoEquipBoneCharm` (0x00ABBA90 tests +0x1D0 bit 4).
     cfg.auto_equip_charm = matches!(l.db.try_resolve(CORVO).and_then(|m| m.get("m_bAutoEquipBoneCharm").cloned()), Some(TVal::B(true)));
     l.prov.insert("items.auto_equip_charm".into(), format!("{CORVO} :: m_bAutoEquipBoneCharm = {}", cfg.auto_equip_charm));
@@ -591,17 +628,26 @@ pub fn parse_power(s: &str) -> Option<PassivePower> {
     Some(PassivePower { name, levels })
 }
 
+/// DLC07 Daud's player tweak (the cracked charms' list) and its package.
+const DAUD07: &str = "DLC07_Twk_Player_Daud.DLC07_Twk_Player_Daud_Release";
+const DAUD07_PACKAGE: &str = "DLC07_Twk_Player_Daud_SF";
+
+/// `eDisAttributeModifierType` by name.
+fn modifier_type(t: &str) -> ModifierType {
+    match t {
+        "eDisAttributeModifierType_AddVal" => ModifierType::AddVal,
+        "eDisAttributeModifierType_SetVal" => ModifierType::SetVal,
+        "eDisAttributeModifierType_AddBasePercent" => ModifierType::AddBasePercent,
+        _ => ModifierType::Other,
+    }
+}
+
 fn parse_level(s: &str) -> (i32, Vec<AttributeModifier>) {
     let cost = s.split("m_RuneCost=").nth(1).and_then(|r| r.split([',', ')']).next()).and_then(|v| v.trim().parse().ok()).unwrap_or(0);
     let mut mods = Vec::new();
     for part in s.split("m_AttributeName=\"").skip(1) {
         let attribute = part.split('"').next().unwrap_or("").to_string();
-        let kind = match part.split("m_ModType=").nth(1).and_then(|r| r.split([',', ')']).next()).unwrap_or("") {
-            "eDisAttributeModifierType_AddVal" => ModifierType::AddVal,
-            "eDisAttributeModifierType_SetVal" => ModifierType::SetVal,
-            "eDisAttributeModifierType_AddBasePercent" => ModifierType::AddBasePercent,
-            _ => ModifierType::Other,
-        };
+        let kind = modifier_type(part.split("m_ModType=").nth(1).and_then(|r| r.split([',', ')']).next()).unwrap_or(""));
         let value = part.split("m_fModValue=").nth(1).and_then(|r| r.split([',', ')']).next()).and_then(|v| v.trim().parse().ok()).unwrap_or(0.0);
         mods.push(AttributeModifier { attribute, kind, value });
     }

@@ -384,6 +384,17 @@ pub struct PassivePower {
     pub levels: Vec<(i32, Vec<AttributeModifier>)>,
 }
 
+/// A DLC07 cracked whale bone charm ("Corrupted Charm", `DisDLC07WhaleBoneCharmCrackedInfo`, one
+/// level): its `m_Name`, `m_Text` and `m_Attributes` (`m_AttributeName`, `m_AttributeType`,
+/// `m_fValue`), each applied with its own modifier type while equipped (0x00D026B0).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct CrackedCharm {
+    pub name: String,
+    pub text: String,
+    pub modifiers: Vec<AttributeModifier>,
+}
+
 /// `DisTweaks_WhaleBoneCharmList.m_Charms` entry: an attribute raised by the charm's value.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BoneCharm {
@@ -730,6 +741,15 @@ pub struct ItemsConfig {
     /// first time is equipped while a slot is free only with it (0x00ABBA90).
     #[serde(default)]
     pub auto_equip_charm: bool,
+    /// DLC07's cracked charms (`DisDLC07Tweaks_WhaleBoneCharmCrackedList` of
+    /// `DLC07_Twk_Player_Daud_Release`: `m_CrackedCharms`, `m_ScriptedCrackedCharms`), empty without
+    /// DLC07, and that pawn tweak's `m_bAutoEquipBoneCharm` (false for Daud).
+    #[serde(default)]
+    pub cracked_charms: Vec<CrackedCharm>,
+    #[serde(default)]
+    pub scripted_cracked_charms: Vec<CrackedCharm>,
+    #[serde(default)]
+    pub cracked_auto_equip: bool,
     /// Chaos (`DisDarknessManager`, the player tweak's `m_DarknessLevels` and `m_Deeds`).
     #[serde(default)]
     pub darkness: DarknessConfig,
@@ -761,6 +781,10 @@ impl Default for CombatSaveConfig {
 /// A bone charm effect id at or above this indexes `m_ScriptedCharms` (`id - base`), below it
 /// `m_Charms` (0x00AA8EF0).
 pub const SCRIPTED_CHARM_BASE: i32 = 10_000_000;
+
+/// A cracked charm effect id at or above this indexes `m_ScriptedCrackedCharms` (`id - base`),
+/// below it `m_CrackedCharms` (0x00CF5CC0).
+pub const SCRIPTED_CRACKED_CHARM_BASE: i32 = 10_000_000;
 
 /// One `DisTweaks_PlayerPawn.m_Deeds` entry (`DisDarknessDeed`): every `threshold` units of
 /// `stat` raised against a matching victim add `value` to the chaos score (0x00C4D2C0).
@@ -894,6 +918,10 @@ pub enum PickupKind {
     /// index into `m_Charms`, from it up into `m_ScriptedCharms`); None = -1 (no effect: the
     /// pickup refuses to be taken, 0x00A19D50). Set by the level or `DisSeqAct_SetBoneCharmEffect`.
     BoneCharm(Option<i32>),
+    /// `DisDLC07WhaleBoneCharmCracked.m_Effect` (class default -1: a random cracked charm not
+    /// handed out yet, 0x00CFCB80; below [`SCRIPTED_CRACKED_CHARM_BASE`] an index into
+    /// `m_CrackedCharms`).
+    CrackedCharm(Option<i32>),
     /// `DishonoredInventoryPickup`: an inventory item (weapon, gadget).
     Inventory { item: String },
 }

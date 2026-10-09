@@ -485,3 +485,50 @@ fn a_charm_taken_twice_gives_its_level_two_value() {
     let base = dishonored_ir::items::SCRIPTED_CHARM_BASE;
     assert_eq!(powers::charm_slot(g, base), (!g.items.scripted_charms.is_empty()).then_some(g.items.charms.len()));
 }
+
+/// DLC07 cracked charms (0x00D026B0): each modifier applies with its own type while equipped
+/// (Tank: `AddBasePercent` -30 of a 200 ground speed; Statuesque: `SetVal` 0 wins over the
+/// passive powers' and regular charms' adds); their slots follow the regular ones in the masks.
+#[test]
+fn a_cracked_charm_applies_its_typed_modifiers() {
+    use dishonored_ir::items::{AttributeModifier, CrackedCharm, ModifierType};
+    let mut cfg = cfg();
+    let m = |a: &str, kind: ModifierType, value: f32| AttributeModifier { attribute: a.into(), kind, value };
+    cfg.gameplay.items.cracked_charms = vec![
+        CrackedCharm { name: "Tank".into(), text: String::new(), modifiers: vec![m("Attribute_GroundSpeed", ModifierType::AddBasePercent, -30.0), m("Attribute_DamageTakenMultiplier", ModifierType::AddVal, -0.3)] },
+        CrackedCharm { name: "Statuesque".into(), text: String::new(), modifiers: vec![m("Attribute_ManaRegenAdditivePortion", ModifierType::SetVal, 0.0)] },
+    ];
+    cfg.gameplay.items.cracked_auto_equip = true;
+    let g = &cfg.gameplay;
+    let mut p = dishonored_sim::state::PlayerState::new(1, Vec3::ZERO, 0.0);
+    assert_eq!(powers::attribute(&p, g, "Attribute_GroundSpeed", 200.0), 200.0);
+    let tank = powers::cracked_charm_slot(g, 0).unwrap();
+    let statuesque = powers::cracked_charm_slot(g, 1).unwrap();
+    assert!(tank >= powers::charm_slots(g) && statuesque == tank + 1 && statuesque < 64);
+    assert!((0..powers::charm_slots(g) as i32).all(|e| powers::charm_slot(g, e) != Some(tank)));
+    inventory::give_cracked_charm_effect(&mut p, g, Some(0), 0);
+    assert!((powers::attribute(&p, g, "Attribute_GroundSpeed", 200.0) - 140.0).abs() < 1e-4);
+    inventory::give_cracked_charm_effect(&mut p, g, Some(1), 0);
+    assert_eq!(powers::attribute(&p, g, "Attribute_ManaRegenAdditivePortion", 0.5), 0.0);
+    p.inv.charms_equipped = 0;
+    assert_eq!(powers::attribute(&p, g, "Attribute_GroundSpeed", 200.0), 200.0);
+}
+
+/// A cracked charm pickup without `m_Effect` gives one not owned yet (the original's pool,
+/// 0x00CFCB80; the port's order from the pickup id), and is not equipped without
+/// `m_bAutoEquipBoneCharm` (Daud).
+#[test]
+fn cracked_charm_without_effect_picks_an_unowned_one() {
+    use dishonored_ir::items::CrackedCharm;
+    let mut cfg = cfg();
+    cfg.gameplay.items.cracked_charms = (0..3).map(|i| CrackedCharm { name: format!("C{i}"), ..Default::default() }).collect();
+    cfg.gameplay.items.cracked_auto_equip = false;
+    let g = &cfg.gameplay;
+    let mut p = dishonored_sim::state::PlayerState::new(1, Vec3::ZERO, 0.0);
+    for _ in 0..3 {
+        inventory::give_cracked_charm_effect(&mut p, g, None, 1);
+    }
+    let r = powers::cracked_slots(g);
+    assert!(r.clone().all(|s| p.inv.charms_owned & (1u64 << s) != 0));
+    assert_eq!(p.inv.charms_equipped, 0);
+}

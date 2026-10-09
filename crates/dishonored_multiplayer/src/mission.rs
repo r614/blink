@@ -1621,6 +1621,7 @@ impl MissionMatch {
                         let found = match &pk.kind {
                             dishonored_ir::items::PickupKind::Abstract { item, quantity, .. } => dishonored_sim::player_stats::abstract_pickup_stat(item).map(|s| (s, *quantity)),
                             dishonored_ir::items::PickupKind::BoneCharm(_) => Some((dishonored_sim::player_stats::BONE_CHARM_FOUND, 1)),
+                            dishonored_ir::items::PickupKind::CrackedCharm(_) => Some((dishonored_sim::player_stats::CRACKED_CHARM_FOUND, 1)),
                             _ => None,
                         };
                         events.push(MissionEvent::PickedUp { player: *id, pickup: pk.name.clone(), item });

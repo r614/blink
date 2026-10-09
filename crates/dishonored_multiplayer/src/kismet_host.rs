@@ -1595,8 +1595,9 @@ impl Host for H<'_> {
             }
             // `DisSeqAct_SetBoneCharmEffect` -> `DisWhaleBoneCharm.OnSetBoneCharmEffect` (slot 241,
             // 0x00A22970): the charm targets take the op's `m_Effect` (a regular effect they held
-            // goes back to the game's pool, which the port does not model, U-W12).
-            "DisSeqAct_SetBoneCharmEffect" => {
+            // goes back to the game's pool, which the port does not model, U-W12). DLC07's
+            // `DisDLC07SeqAct_SetBoneCharmCrackedEffect` does the same on cracked charms (0x00CF7ED0).
+            "DisSeqAct_SetBoneCharmEffect" | "DisDLC07SeqAct_SetBoneCharmCrackedEffect" => {
                 let e = cx.prop("m_Effect").and_then(|v| v.as_int()).unwrap_or(-1);
                 for t in cx.objects("Target") {
                     let Obj::Actor(a) = t else { continue };
@@ -1604,7 +1605,7 @@ impl Host for H<'_> {
                     let (name, pkg) = (act.name.clone(), act.package.clone());
                     self.st.charm_effect.insert(a, e);
                     for pk in self.m.world.pickups.iter_mut().filter(|p| p.name.eq_ignore_ascii_case(&name) && (p.package.is_empty() || p.package.eq_ignore_ascii_case(&pkg))) {
-                        if let dishonored_ir::items::PickupKind::BoneCharm(x) = &mut pk.kind {
+                        if let dishonored_ir::items::PickupKind::BoneCharm(x) | dishonored_ir::items::PickupKind::CrackedCharm(x) = &mut pk.kind {
                             *x = (e >= 0).then_some(e);
                         }
                     }
@@ -4103,11 +4104,17 @@ fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
                     let item = obj_name(&Obj::Path(p));
                     *h.m.state.items.entry(item).or_insert(0) += 1;
                 }
-                // A bone charm gives its effect (0x00A19D50 -> 0x00ABBA90).
-                if h.db.actors[a as usize].class == "DisWhaleBoneCharm" {
+                // A bone charm gives its effect (0x00A19D50 -> 0x00ABBA90), a cracked one its
+                // cracked charm (0x00D05140).
+                let class = h.db.actors[a as usize].class.clone();
+                if class == "DisWhaleBoneCharm" || class == "DisDLC07WhaleBoneCharmCracked" {
                     let e = h.st.charm_effect.get(&a).copied().or_else(|| h.db.actors[a as usize].props.get("m_Effect").and_then(|v| v.as_int())).filter(|e| *e >= 0);
                     if let Some(pl) = h.m.world.player_mut(p) {
-                        dishonored_sim::inventory::give_charm_effect(pl, &h.cfg.gameplay, e, a);
+                        if class == "DisWhaleBoneCharm" {
+                            dishonored_sim::inventory::give_charm_effect(pl, &h.cfg.gameplay, e, a);
+                        } else {
+                            dishonored_sim::inventory::give_cracked_charm_effect(pl, &h.cfg.gameplay, e, a);
+                        }
                     }
                 }
                 let fired = k.trigger(h, "DisSeqEvent_PickupPickedUp", &[Obj::Actor(a)], Obj::Pawn(p), None);

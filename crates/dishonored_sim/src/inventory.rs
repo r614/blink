@@ -357,7 +357,7 @@ pub fn can_take(p: &PlayerState, pk: &PickupState, cfg: &GameplayConfig) -> bool
             *health != 0 || *mana != 0 || AmmoType::ALL.iter().any(|t| pk.ammo_left[*t as usize] > 0 && ammo(p, *t) < capacity(p, *t, cfg))
         }
         PickupKind::Abstract { item, .. } => !item.is_empty(),
-        PickupKind::BoneCharm(_) => true,
+        PickupKind::BoneCharm(_) | PickupKind::CrackedCharm(_) => true,
         PickupKind::Inventory { .. } => true,
     }
 }
@@ -414,6 +414,7 @@ pub fn take(state: &mut WorldState, pi: usize, who: usize, cfg: &GameplayConfig,
             }
         }
         PickupKind::BoneCharm(effect) => give_charm_effect(&mut state.players[who], cfg, *effect, pk.id),
+        PickupKind::CrackedCharm(effect) => give_cracked_charm_effect(&mut state.players[who], cfg, *effect, pk.id),
         PickupKind::Inventory { item } => give_item(state, pid, item, 1),
     }
     if used_up {
@@ -433,6 +434,19 @@ pub fn give_charm_effect(p: &mut PlayerState, cfg: &GameplayConfig, effect: Opti
     let pick = effect.and_then(|e| crate::powers::charm_slot(cfg, e)).or_else(|| (0..n).map(|k| (k + salt as usize) % n.max(1)).find(|i| p.inv.charms_owned & (1u64 << i) == 0));
     if let Some(slot) = pick {
         crate::powers::take_charm(p, cfg, slot);
+    }
+}
+
+/// A cracked charm pickup is taken (0x00D05140): the charm of its `m_Effect`. Without one the
+/// original draws from a pool holding each cracked charm not handed out yet (0x00D023A0 builds
+/// it, 0x00CFCB80 takes `rand() % Num` and removes it); the port gives the first cracked charm
+/// not owned yet, in list order from `salt` (the pickup id: a deterministic stand-in, U-W12).
+pub fn give_cracked_charm_effect(p: &mut PlayerState, cfg: &GameplayConfig, effect: Option<i32>, salt: u32) {
+    let r = crate::powers::cracked_slots(cfg);
+    let n = cfg.items.cracked_charms.len().min(r.len());
+    let pick = effect.and_then(|e| crate::powers::cracked_charm_slot(cfg, e)).or_else(|| (0..n).map(|k| r.start + (k + salt as usize) % n.max(1)).find(|s| p.inv.charms_owned & (1u64 << s) == 0));
+    if let Some(slot) = pick {
+        crate::powers::take_cracked_charm(p, cfg, slot);
     }
 }
 

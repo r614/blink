@@ -72,6 +72,21 @@ pub fn attribute_for(p: &PlayerState, cfg: &GameplayConfig, name: &str, base: f3
                 v += charm_value(p, cfg, slot);
             }
         }
+        // An equipped cracked charm's modifiers, each with its own type (0x00D026B0).
+        for slot in cracked_slots(cfg) {
+            let Some(c) = cracked_charm(cfg, slot) else { continue };
+            if p.inv.charms_equipped & (1u64 << slot) == 0 {
+                continue;
+            }
+            for m in c.modifiers.iter().filter(|m| m.attribute == name) {
+                match m.kind {
+                    ModifierType::AddVal => v += m.value,
+                    ModifierType::SetVal => v = m.value,
+                    ModifierType::AddBasePercent => v += base * m.value / 100.0,
+                    ModifierType::Other => {}
+                }
+            }
+        }
     }
     v
 }
@@ -118,6 +133,51 @@ pub fn charm_slot(cfg: &GameplayConfig, effect: i32) -> Option<usize> {
         e => Some((e - base) as usize).filter(|j| *j < cfg.items.scripted_charms.len())? + n,
     };
     (slot < 64).then_some(slot)
+}
+
+/// DLC07 cracked charm slots: after the regular ones in the same masks (equipped cracked and
+/// regular charms share `m_MaxActivatedBoneCharmCount`), `m_CrackedCharms` then
+/// `m_ScriptedCrackedCharms`, within the 64 bits.
+pub fn cracked_slots(cfg: &GameplayConfig) -> std::ops::Range<usize> {
+    let start = charm_slots(cfg);
+    start..(start + cfg.items.cracked_charms.len() + cfg.items.scripted_cracked_charms.len()).min(64)
+}
+
+/// The cracked charm of a slot.
+pub fn cracked_charm(cfg: &GameplayConfig, slot: usize) -> Option<&dishonored_ir::items::CrackedCharm> {
+    let r = cracked_slots(cfg);
+    if !r.contains(&slot) {
+        return None;
+    }
+    let (i, n) = (slot - r.start, cfg.items.cracked_charms.len());
+    if i < n { cfg.items.cracked_charms.get(i) } else { cfg.items.scripted_cracked_charms.get(i - n) }
+}
+
+/// The slot of a cracked charm effect (0x00CF5CC0: below `SCRIPTED_CRACKED_CHARM_BASE` an index
+/// into `m_CrackedCharms`, from it up into `m_ScriptedCrackedCharms`).
+pub fn cracked_charm_slot(cfg: &GameplayConfig, effect: i32) -> Option<usize> {
+    let base = dishonored_ir::items::SCRIPTED_CRACKED_CHARM_BASE;
+    let n = cfg.items.cracked_charms.len();
+    let i = match effect {
+        e if e < 0 => return None,
+        e if e < base => Some(e as usize).filter(|i| *i < n)?,
+        e => Some((e - base) as usize).filter(|j| *j < cfg.items.scripted_cracked_charms.len())? + n,
+    };
+    let slot = charm_slots(cfg) + i;
+    (slot < 64).then_some(slot)
+}
+
+/// Take a cracked charm (0x00D05140): owned from now on (they have one level); equipped while
+/// a slot is free only with the pawn tweak's `m_bAutoEquipBoneCharm` (false for Daud).
+pub fn take_cracked_charm(p: &mut PlayerState, cfg: &GameplayConfig, slot: usize) {
+    let bit = 1u64 << slot;
+    if p.inv.charms_owned & bit != 0 {
+        return;
+    }
+    p.inv.charms_owned |= bit;
+    if cfg.items.cracked_auto_equip && (p.inv.charms_equipped.count_ones() as u8) < max_charms(p, cfg) {
+        p.inv.charms_equipped |= bit;
+    }
 }
 
 /// The value an owned charm gives: `m_Levels[level].m_fValue` at its current level (the
@@ -230,6 +290,10 @@ pub fn effective_movement<'a>(p: &PlayerState, cfg: &'a GameplayConfig) -> Cow<'
     // Agility's power jump and swim speed.
     m.power_jump_z = a("Attribute_JumpZ_PowerJump", b.power_jump_z);
     m.water.water_speed = a("Attribute_WaterSpeed", b.water.water_speed);
+    // `Attribute_GroundSpeedWalk` (a `DisAttribute`, base 200) and the no-stroke swim speed
+    // (0x00A60690: `(Attribute_SwimMaxSpeedNoStroke + 1) * max`): only the cracked charms touch them.
+    m.walk_speed = a("Attribute_GroundSpeedWalk", b.walk_speed);
+    m.water.max_speed_no_stroke = (1.0 + a("Attribute_SwimMaxSpeedNoStroke", 0.0)) * b.water.max_speed_no_stroke;
     m.mantle.anim_rate = a("Attribute_MantleAnimRate", b.mantle.anim_rate);
     // A rat bite's slowdown: `Modifier_RatAttackSpeedModifier` adds -m_fPawnSlowdownPercent % of the
     // base to Attribute_GroundSpeed and Attribute_GroundSpeedSprint (0x00C891E0).
