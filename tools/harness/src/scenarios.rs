@@ -214,16 +214,24 @@ fn items(mc: &MatchContent, rep: &mut Report) {
             }
             settle(mc, &mut st, 60);
             let mut p = *st.player(1).unwrap();
-            let eye = dishonored_sim::movement::eye_position(&p, &cfg.gameplay.movement);
-            let d = pp.position - eye;
-            yaw = d.y.atan2(d.x).to_degrees();
-            pitch = (d.z / d.truncate().length().max(1.0)).atan().to_degrees();
-            p.yaw = yaw;
-            p.pitch = pitch;
-            if p.mode == dishonored_sim::state::MoveMode::Walking && dishonored_sim::inventory::pickup_in_view(&st, &p, &mc.collision, &cfg.gameplay).is_some() {
+            // Aim at the centre of its mesh from the camera (the camera's place depends on the
+            // pitch: two passes settle it).
+            let aim = pp.position + (pp.bounds_min + pp.bounds_max) * 0.5;
+            for _ in 0..3 {
+                let eye = dishonored_sim::movement::camera_pov(&p, &cfg.gameplay.movement);
+                let d = aim - eye;
+                yaw = d.y.atan2(d.x).to_degrees();
+                pitch = (d.z / d.truncate().length().max(1.0)).atan().to_degrees();
+                p.yaw = yaw;
+                p.pitch = pitch;
+            }
+            let on_it = dishonored_sim::crosshair::target(&st, &p, &mc.collision, cfg).is_some_and(|c| matches!(c.target, dishonored_sim::crosshair::TargetRef::Pickup(_)));
+            if p.mode == dishonored_sim::state::MoveMode::Walking && on_it {
                 break;
             }
         }
+        // The Use acts on the crosshair the last camera update chose: hold the view a tick first.
+        step(&mut st, &[(1, PlayerInput { yaw, pitch, ..Default::default() })], &mut ev);
         step(&mut st, &[(1, PlayerInput { yaw, pitch, buttons: buttons::USE, ..Default::default() })], &mut ev);
         let got = st.player(1).unwrap().inv.elixirs[0];
         st.player_mut(1).unwrap().vitals.health = 15.0;

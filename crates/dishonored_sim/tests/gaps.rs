@@ -206,6 +206,8 @@ fn stat_pickup(r: &mut Run, health: i32, food: bool, bullets: u16) -> usize {
         active: true,
         ammo_left,
         carried_by: None,
+        bounds_min: Vec3::ZERO,
+        bounds_max: Vec3::ZERO,
     });
     r.state.pickups.len() - 1
 }
@@ -317,6 +319,9 @@ fn attack_drops_a_carried_body_without_throwing_it() {
     let mut r = Run::new(&[(Vec3::new(60.0, 0.0, Z), 0.0)]);
     r.pm(100).condition = Condition::Unconscious;
     let look = |b| PlayerInput { pitch: -40.0, buttons: b, ..Default::default() };
+    // The Use acts on the crosshair the previous camera update chose (measured on the original,
+    // research/dishonored/systems/crosshair.md): the view is held a tick before the press.
+    r.step(&[(1, look(0))]);
     r.step(&[(1, look(buttons::USE))]);
     r.step(&[(1, look(0))]);
     assert_eq!(r.p(1).carrying, Some(100));

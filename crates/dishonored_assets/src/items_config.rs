@@ -94,6 +94,9 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
     inv.max_equipped_charms = l.f(&corvo, CORVO, "m_MaxActivatedBoneCharmCount", "items.inventory.max_equipped_charms", d.max_equipped_charms as f32) as u8;
     let interact = l.obj("Default__DisTweaks_InteractableInterface");
     inv.interact_distance = l.f(&interact, "Default__DisTweaks_InteractableInterface", "m_fMaxDistance", "items.inventory.interact_distance", d.interact_distance);
+    inv.usable_object_dist = l.f(&input, input_path, "m_fUsableObjectDist", "items.inventory.usable_object_dist", d.usable_object_dist);
+    inv.usable_object_extent_broad = l.f(&input, input_path, "m_fUsableObjectExtentBroad", "items.inventory.usable_object_extent_broad", d.usable_object_extent_broad);
+    inv.usable_object_extent_narrow = l.f(&input, input_path, "m_fUsableObjectExtentNarrow", "items.inventory.usable_object_extent_narrow", d.usable_object_extent_narrow);
     inv.choke_time = l.attr(&attrs, &attrs_path, "m_ChokeTime", "items.inventory.choke_time", d.choke_time);
     l.prov.insert("items.inventory.choke_anim_time".into(), "Startup.upk Ply_Sword_Choke_as Sword_Choke_Loop_Master length 5.033 s (anim state 0x5f mapping LIKELY, U-101)".into());
     inv.choke_hold_to_auto_carry = l.f(&input, input_path, "m_fChokeHoldToAutoCarry", "items.inventory.choke_hold_to_auto_carry", d.choke_hold_to_auto_carry);

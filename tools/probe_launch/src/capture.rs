@@ -742,6 +742,13 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
         ch.add_path(s, "camera", "deg", cam, "CameraCache.POV.Rotation")?;
         ch.add_path(s, "camera.fov", "deg", cam, "CameraCache.POV.FOV")?;
     }
+    if want(&Record::Crosshair) {
+        ch.add_path(s, "crosshair.status", "enum", pc, "m_CrosshairStatus")?;
+        ch.add_path(s, "crosshair.usable", "bool", pc, "m_bCanInteractWithCrosshairActor")?;
+        // The actor: a hidden pointer channel, turned into `Crosshair` events below.
+        let pl = s.r.place(&mut s.c, pc, "m_pCrosshairActor")?;
+        ch.add("crosshair.actor", "ptr", pl.addr, Kind::Ptr);
+    }
     for r in &spec.record {
         if let Record::Npc(name) = r {
             let np = match placed.get(name) {
@@ -1002,6 +1009,29 @@ pub fn capture(s: &mut Session, spec: &Scenario, reload: bool, partial: bool, ex
     let mut class_names: HashMap<u32, String> = HashMap::new();
     for &i in &hidden {
         let cname = trace.channels[i].name.clone();
+        if cname == "crosshair.actor" {
+            // `m_pCrosshairActor` -> a `Crosshair` event whenever the actor, the interact flag or the
+            // status changes (the name the actor has, `None` for no actor).
+            let col = |n: &str| trace.channels.iter().position(|c| c.name == n);
+            let (si, ui) = (col("crosshair.status"), col("crosshair.usable"));
+            let mut prev: Option<(u32, i64, i64)> = None;
+            let mut evs = Vec::new();
+            for fr in &trace.frames {
+                let obj = if fr.values[i].is_nan() { 0 } else { fr.values[i] as u32 };
+                let st = si.map_or(0, |k| fr.values[k] as i64);
+                let us = ui.map_or(0, |k| fr.values[k] as i64);
+                let now = (obj, st, us);
+                if prev == Some(now) || (prev.is_none() && obj == 0 && st == 0 && us == 0) {
+                    prev = Some(now);
+                    continue;
+                }
+                prev = Some(now);
+                let who = if obj == 0 { "None".to_string() } else { name(s, obj).rsplit('.').next().unwrap_or("").to_string() };
+                evs.push(TraceEvent { tick: fr.tick, kind: "Crosshair".into(), object: "player".into(), name: who, detail: format!("status={st} usable={us}") });
+            }
+            trace.events.extend(evs);
+            continue;
+        }
         let (npc, what) = cname.strip_prefix("npc.").and_then(|r| r.split_once(".brain.")).map(|(a, b)| (a.to_string(), b.to_string())).unwrap_or_default();
         let mut prev = f64::NAN;
         for fr in &trace.frames {

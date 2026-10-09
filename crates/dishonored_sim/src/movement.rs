@@ -94,6 +94,24 @@ pub fn eye_position(p: &PlayerState, cfg: &MovementConfig) -> Vec3 {
     eye
 }
 
+/// The player camera's location (`CameraCache.POV.Location`) at rest: the eye on the camera
+/// rig's pitch arc ([`dishonored_ir::gameplay::CameraRig`], measured on the original), measured
+/// from the top of the pawn's collision cylinder and forward along the view's yaw, swung
+/// sideways by the lean as [`eye_position`] is. The crosshair's traces start here
+/// (`ViewTarget.POV`, 0x00AD80A0 -> 0x00AB7B80).
+pub fn camera_pov(p: &PlayerState, cfg: &MovementConfig) -> Vec3 {
+    if p.kind == PawnKind::Rat {
+        return eye_position(p, cfg);
+    }
+    let (fwd, up) = cfg.camera.offset(p.pitch.clamp(-89.0, 89.0));
+    let (sy, cy) = p.yaw.to_radians().sin_cos();
+    let mut pov = p.position + Vec3::new(cy * fwd, sy * fwd, half_height(p, cfg) + up);
+    if p.lean != 0.0 {
+        pov += lean_offset(p, cfg);
+    }
+    pov
+}
+
 /// `DishonoredCamera_Lean` (0x00AC5420 / 0x00AC5950): the eye is a spring point kept at
 /// `m_fCurLeanHeight = m_fLeanHeightPct x CollisionHeight x 2` from a pivot that far below
 /// it, so a lean of angle `a` moves it `L sin a` sideways and `L (1 - cos a)` down, `a`

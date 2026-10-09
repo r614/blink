@@ -280,6 +280,10 @@ pub struct PlayerState {
     /// The physics prop in this pawn's hands (`StatePlayerGrabMovable`).
     #[serde(default)]
     pub holding: Option<Holding>,
+    /// `m_pCrosshairActor` with its interact flag and status: the interactable the Use acts on
+    /// and the HUD's prompt shows, chosen by the last tick's camera update ([`crate::crosshair`]).
+    #[serde(default)]
+    pub crosshair: Option<crate::crosshair::Crosshair>,
     /// Possession (`DishonoredActivePowerComponent_Possess`).
     #[serde(default)]
     pub possess: PossessState,
@@ -707,6 +711,7 @@ impl PlayerState {
             carried_by: None,
             carry_anim: 0.0,
             holding: None,
+            crosshair: None,
             possess: PossessState::default(),
             time_scale: 1.0,
             no_body: false,
@@ -845,11 +850,11 @@ pub struct ProjectileState {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorldState {
     pub tick: u64,
-    /// Players whose Use this step goes to a target the host owns (a Kismet usable, an NPC, a
-    /// door) that is nearer the crosshair than any prop: the sim does not grab for them. Set by
-    /// the host before the step, cleared after; not part of the state.
+    /// The interactables the host owns (a mission's usables, doors, talkers, Kismet usables,
+    /// launchers), offered to the crosshair's choice ([`crate::crosshair`]) beside the sim's own.
+    /// Set by the host before the step; not part of the state.
     #[serde(skip)]
-    pub use_claimed: Vec<PlayerId>,
+    pub host_targets: Vec<crate::crosshair::HostTarget>,
     pub players: Vec<PlayerState>,
     pub projectiles: Vec<ProjectileState>,
     pub next_projectile_id: u32,
@@ -1031,6 +1036,12 @@ pub struct PickupState {
     pub ammo_left: [u16; 8],
     /// Carried by this NPC (`m_pStealablePickup`): follows it, can be pickpocketed.
     pub carried_by: Option<PlayerId>,
+    /// The world box of its mesh relative to `position` (both zero: a point): what the crosshair
+    /// traces meet.
+    #[serde(default)]
+    pub bounds_min: Vec3,
+    #[serde(default)]
+    pub bounds_max: Vec3,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

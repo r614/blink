@@ -41,6 +41,23 @@ fn st_num(m: &std::collections::HashMap<String, String>, k: &str) -> u64 {
     m.get(k).and_then(|v| v.parse().ok()).unwrap_or(0)
 }
 
+/// A dword argument: a JSON number, a "0x.." / decimal string, or "f:1.5" (a float's bits).
+fn mem_u32(v: &Value) -> Result<u32> {
+    match v {
+        Value::Number(n) => Ok(n.as_i64().map(|i| i as u32).or_else(|| n.as_u64().map(|u| u as u32)).context("dword")?),
+        Value::String(s) if s.starts_with("f:") => Ok(s[2..].parse::<f32>()?.to_bits()),
+        Value::String(s) => Ok(match s.strip_prefix("0x") {
+            Some(h) => u32::from_str_radix(h, 16)?,
+            None => s.parse::<i64>()? as u32,
+        }),
+        _ => bail!("dword argument"),
+    }
+}
+
+fn mem_arg(a: &Value, k: &str) -> Result<u32> {
+    mem_u32(a.get(k).with_context(|| format!("{k} missing"))?)
+}
+
 fn args_f32(v: &Value) -> Option<[f32; 3]> {
     // "x,y,z" (key=value arguments) as well as [x, y, z].
     if let Some(s) = v.as_str() {
@@ -508,6 +525,52 @@ impl Session {
                     out.push(json!({"hit": x.hit, "time": x.time, "location": x.location, "normal": x.normal, "actor": actor, "component": comp}));
                 }
                 json!({"results": out})
+            }
+            "move" => {
+                // {"object": name | 0xADDR, "location": [x, y, z], "yaw": deg}: an actor moved through `Actor.SetLocation`
+                // (a parked game: lockstep) and, with `yaw`, turned.
+                let o = self.r.object(&mut self.c, s("object").context("object")?, None)?;
+                let loc = a.get("location").and_then(args_f32).context("location [x, y, z]")?;
+                let at = crate::lab::move_actor_r(&mut self.c, &mut self.r, o, loc)?;
+                if let Some(y) = num("yaw") {
+                    crate::lab::set_actor_yaw(&mut self.c, &mut self.r, o, y as f32)?;
+                }
+                json!({"location": at})
+            }
+            "alloc" => {
+                // {"size": N}: a zeroed scratch block in the game (for native-call arguments).
+                json!({"addr": hex(self.c.alloc(num("size").unwrap_or(256.0) as u32)?)})
+            }
+            "read_mem" => {
+                // {"addr": A, "len": N}: raw bytes as hex.
+                let (addr, len) = (mem_arg(a, "addr")?, num("len").unwrap_or(4.0) as u32);
+                let b = self.c.read(addr, len)?;
+                json!({"hex": b.iter().map(|x| format!("{x:02x}")).collect::<String>()})
+            }
+            "write_mem" => {
+                // {"addr": A, "values": [u32 | "f:1.5" | "b:0a0b.."...]}: dwords (or a float, or raw hex bytes) from A.
+                let mut at = mem_arg(a, "addr")?;
+                for v in a.get("values").and_then(Value::as_array).context("values")? {
+                    let bytes: Vec<u8> = match v {
+                        Value::String(s) if s.starts_with("f:") => s[2..].parse::<f32>()?.to_le_bytes().to_vec(),
+                        Value::String(s) if s.starts_with("b:") => (0..s.len() - 2).step_by(2).map(|i| u8::from_str_radix(&s[2 + i..4 + i], 16)).collect::<Result<_, _>>()?,
+                        _ => (mem_u32(v)?).to_le_bytes().to_vec(),
+                    };
+                    self.c.write(at, &bytes)?;
+                    at += bytes.len() as u32;
+                }
+                json!({"end": hex(at)})
+            }
+            "ncall" => {
+                // {"func": A, "this": ecx, "args": [u32 | "f:1.5" | "0x.."], "float": bool}: a native call on the game thread.
+                let args: Vec<u32> = a
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .map(|v| v.iter().map(mem_u32).collect::<Result<_>>())
+                    .transpose()?
+                    .unwrap_or_default();
+                let (eax, st0) = self.c.native_call(mem_arg(a, "func")?, a.get("this").map(mem_u32).transpose()?.unwrap_or(0), &args, a.get("float").and_then(Value::as_bool).unwrap_or(false))?;
+                json!({"eax": eax, "eax_hex": hex(eax), "st0": st0})
             }
             "events" => {
                 // {"functions": ["Touch", "Pawn.Landed"], "classes": ["SequenceOp"], "max": N}

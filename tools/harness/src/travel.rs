@@ -67,7 +67,9 @@ struct Travelled {
 /// the game run a second.
 fn use_door(g: &mut Game, maps: &MapContents, door: &TravelDoor, answer: usize, tick: &mut u64) -> Result<Travelled> {
     let world = maps.get(&door.map).context("door map")?;
-    let (spot, yaw, pitch) = approach(&world.collision, door).context("no clear approach to the door")?;
+    let (spot, _, _) = approach(&world.collision, door).context("no clear approach to the door")?;
+    // The view line from the camera (its place depends on the pitch) through the door's target.
+    let (yaw, pitch) = dishonored_sim::crosshair::aim_at(&dishonored_sim::state::PlayerState::new(AGENT, spot, 0.0), &maps.maps[0].sim.gameplay.movement, door.position + Vec3::Z * 60.0);
     let Game::Mission(m) = g else { anyhow::bail!("not a mission") };
     let me = m.world.player_mut(AGENT).context("agent")?;
     me.position = spot;

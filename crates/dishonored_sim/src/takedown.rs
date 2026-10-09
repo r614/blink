@@ -19,7 +19,7 @@
 
 use crate::events::{ChokeOutcome, KnockoutCause, SimEvent, SoundCategory};
 use crate::input::{PlayerInput, buttons};
-use crate::movement::{eye_position, forward_vector, view_vector};
+use crate::movement::forward_vector;
 use crate::state::{ChokePhase, Condition, MoveMode, PawnKind, PlayerId, PlayerState, WorldState};
 use crate::tuning::CombatTuning;
 use dishonored_ir::gameplay::GameplayConfig;
@@ -46,31 +46,16 @@ fn angle_deg(a: Vec3, b: Vec3) -> f32 {
     a.normalize_or_zero().dot(b.normalize_or_zero()).clamp(-1.0, 1.0).acos().to_degrees()
 }
 
-/// Choke target: an NPC in reach behind it, the same geometry as the back assassination
-/// context (`DisTweaks_Choke` inherits its range from the sword's contexts; LIKELY, U-103).
-pub fn choke_target(state: &WorldState, a: &PlayerState, world: &dyn WorldQuery, cfg: &GameplayConfig, t: &CombatTuning) -> Option<usize> {
-    let eye = eye_position(a, &cfg.movement);
-    let dir = view_vector(a.yaw, a.pitch);
-    let mut best: Option<(usize, f32)> = None;
-    for (i, v) in state.players.iter().enumerate() {
-        if v.id == a.id || !v.alive || v.kind == PawnKind::Human || v.condition != Condition::Normal || v.carried_by.is_some() {
-            continue;
-        }
-        let to_v = v.position - a.position;
-        let behind = angle_deg(-forward_vector(v.yaw), -to_v) <= t.back_half_angle;
-        if !(to_v.length() <= t.assassinate_range * 0.6 && behind && angle_deg(dir, to_v) <= 45.0) {
-            continue;
-        }
-        let to = v.position - eye;
-        if world.raycast(eye, to, to.length(), channel::MELEE).is_some_and(|h| h.distance < to.length() - cfg.movement.collision_radius) {
-            continue;
-        }
-        let d = to_v.length();
-        if best.is_none_or(|(_, bd)| d < bd) {
-            best = Some((i, d));
-        }
+/// Whether `a` can choke `v` from where it stands: a living pawn that is not a player, not
+/// already in a takedown or carried, within the back assassination's reach and behind it
+/// (the `CanInteract` of the choke's interactable; the view cone is the crosshair's trace).
+pub fn choke_eligible(a: &PlayerState, v: &PlayerState, t: &CombatTuning, _mv: &dishonored_ir::gameplay::MovementConfig) -> bool {
+    if v.id == a.id || !v.alive || v.kind == PawnKind::Human || v.condition != Condition::Normal || v.carried_by.is_some() {
+        return false;
     }
-    best.map(|b| b.0)
+    let to_v = v.position - a.position;
+    let behind = angle_deg(-forward_vector(v.yaw), -to_v) <= t.back_half_angle;
+    to_v.length() <= t.assassinate_range * 0.6 && behind
 }
 
 /// Start a choke (0x00A7AA00): `m_fRequiredTime = m_fTimer = ChokeTime + anim length`.
@@ -210,43 +195,6 @@ pub fn step_choke(state: &mut WorldState, ai: usize, input: &PlayerInput, dt: f3
         }
         ChokePhase::None => false,
     }
-}
-
-/// The body `p` looks at within reach (dead or unconscious, not carried).
-pub fn body_in_view(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: &GameplayConfig) -> Option<PlayerId> {
-    body_focus(state, p, world, cfg).map(|b| b.0)
-}
-
-/// [`body_in_view`] with the cosine of the body's angle to the view (to rank it against the
-/// other things the crosshair could pick).
-pub fn body_focus(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: &GameplayConfig) -> Option<(PlayerId, f32)> {
-    let eye = eye_position(p, &cfg.movement);
-    let dir = view_vector(p.yaw, p.pitch);
-    let reach = cfg.items.inventory.interact_distance + cfg.movement.collision_radius;
-    let mut best: Option<(PlayerId, f32)> = None;
-    for b in &state.players {
-        if b.id == p.id || !b.is_body() {
-            continue;
-        }
-        // A body lies on the floor: aim at a point just above its feet.
-        let pos = b.position - Vec3::Z * (crate::movement::half_height(b, &cfg.movement) * 0.5);
-        let to = pos - eye;
-        let d = to.length();
-        if d > reach || d < 1.0 {
-            continue;
-        }
-        let cos = to.dot(dir) / d;
-        if cos < crate::inventory::INTERACT_COS {
-            continue;
-        }
-        if world.raycast(eye, to, d, channel::MELEE).is_some_and(|h| h.distance < d - 30.0) {
-            continue;
-        }
-        if best.is_none_or(|(_, c)| cos > c) {
-            best = Some((b.id, cos));
-        }
-    }
-    best
 }
 
 /// Lift a body (`StatePlayerGrabCorpse`).

@@ -350,6 +350,12 @@ pub enum Record {
     Npc(String),
     /// Kismet op activations (events).
     Kismet,
+    /// The crosshair target (`DishonoredPlayerController.m_pCrosshairActor` and its interact flag
+    /// and status, `dishonored_sim::crosshair`): channels `crosshair.status` (`eCrossHairStatus`)
+    /// and `crosshair.usable`, and a `Crosshair` event whenever the target changes (object
+    /// `player`, name the actor's name, `None` when there is none; detail `status=<n>
+    /// usable=<0|1>`).
+    Crosshair,
     /// ProcessEvent calls whose function name contains one of the filters (original only).
     ProcessEvent(Vec<String>),
     /// The port's simulation events (sounds, hits, deaths).

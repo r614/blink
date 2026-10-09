@@ -528,6 +528,8 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         // The player's physics prop (movables.md): the one in his hands, else the one he last let
         // go of that is still moving, else the last he touched.
         ("mov.held", "bool"), ("mov.x", "uu"), ("mov.y", "uu"), ("mov.z", "uu"), ("mov.vx", "uu/s"), ("mov.vy", "uu/s"), ("mov.vz", "uu/s"), ("mov.speed", "uu/s"), ("mov.phase", "enum"), ("mov.damage", "pt"), ("mov.gone", "bool"),
+        // The crosshair target (`dishonored_sim::crosshair`): `eCrossHairStatus` and the interact flag.
+        ("crosshair.status", "enum"), ("crosshair.usable", "bool"),
     ] {
         chans.push((c.to_string(), u));
     }
@@ -599,6 +601,10 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
                 None => v.extend([0.0, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, 0.0]),
             }
         }
+        {
+            let c = w.player(ME).and_then(|p| p.crosshair);
+            v.extend([c.map_or(0.0, |c| c.status as u8 as f64), b(c.is_some_and(|c| c.usable))]);
+        }
         let poses = dishonored_multiplayer::npc_poses(&m.crowd.brains);
         for (name, id) in &tracked {
             let p = w.player(*id);
@@ -641,6 +647,7 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
     }
     let mut conv_seen = mm(&game).state.conv_log.len();
     let (mut peek_was, mut wires_seen) = (false, 0usize);
+    let mut crosshair_was: (Option<String>, Option<(u8, bool)>) = (None, None);
     let mut launchers_seen = (0usize, 0usize, 0usize);
     mm_mut(&mut game).state.hook_log.clear();
     for (t, ti) in timeline.iter().enumerate() {
@@ -672,6 +679,23 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             let (name, detail) = event_detail(e, &name_of);
             let object = detail.split_whitespace().next().and_then(|f| f.split_once('=')).map(|x| x.1.to_string()).unwrap_or_default();
             trace.events.push(TraceEvent { tick: tk, kind: "Sim".into(), object, name, detail });
+        }
+        // The crosshair target: an event whenever it, its interact flag or its status changes.
+        {
+            let m = mm(&game);
+            let c = m.world.player(ME).and_then(|p| p.crosshair);
+            let name = match c.map(|c| c.target) {
+                Some(dishonored_sim::crosshair::TargetRef::Prop(id)) => m.world.movables.iter().find(|x| x.id == id).map(|x| x.name.clone()),
+                Some(dishonored_sim::crosshair::TargetRef::Pickup(id)) => m.world.pickups.iter().find(|x| x.id == id).map(|x| x.name.clone()),
+                Some(dishonored_sim::crosshair::TargetRef::Body(id) | dishonored_sim::crosshair::TargetRef::Pawn(id)) => Some(name_of(id)),
+                Some(dishonored_sim::crosshair::TargetRef::Host(_)) => m.interaction(ME).map(|it| m.interaction_name(&it)),
+                None => None,
+            };
+            let now = (name.clone(), c.map(|c| (c.status as u8, c.usable)));
+            if now != crosshair_was {
+                trace.events.push(TraceEvent { tick: tk, kind: "Crosshair".into(), object: "player".into(), name: name.unwrap_or_else(|| "None".into()), detail: c.map(|c| format!("status={} usable={}", c.status as u8, c.usable as u8)).unwrap_or_else(|| "status=0 usable=0".into()) });
+                crosshair_was = now;
+            }
         }
         // Door keyholes and tripwires: the peek starting and ending, each tripwire that tripped.
         {

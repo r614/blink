@@ -131,12 +131,11 @@ impl<'a> Play<'a> {
                 }
             }
         }
+        let mv = self.maps.maps[0].sim.gameplay.movement.clone();
         let me = self.mm().world.player_mut(AGENT).expect("agent");
         me.position = best;
         me.velocity = Vec3::ZERO;
-        let to = pos - (best + Vec3::Z * 64.0);
-        me.yaw = to.y.atan2(to.x).to_degrees();
-        me.pitch = (to.z / to.truncate().length().max(1.0)).atan().to_degrees();
+        (me.yaw, me.pitch) = dishonored_sim::crosshair::aim_at(me, &mv, pos);
     }
 
     fn use_actor(&mut self, a: u32) -> bool {

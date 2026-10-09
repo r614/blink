@@ -493,7 +493,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         }
     };
     // Placed pickups (with the spawners that carry one), cached per map.
-    let pickup_path = dir.join(format!("{map}.pickups2.json"));
+    let pickup_path = dir.join(format!("{map}.pickups3.json"));
     let pickups: Vec<dishonored_ir::items::PlacedPickup> = match std::fs::read_to_string(&pickup_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(p) => p,
         None => {
@@ -891,6 +891,9 @@ impl dishonored_world::WorldQuery for MatchContent {
     }
     fn hit_package(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<String> {
         self.world().hit_package(origin, dir, max_dist)
+    }
+    fn actor_bounds(&self, package: &str, actor: &str) -> Option<(Vec3, Vec3)> {
+        self.world().actor_bounds(package, actor)
     }
     fn set_visible_levels(&self, visible: &[String]) {
         self.levels.set_visible(visible)

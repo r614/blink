@@ -9,6 +9,7 @@
 pub mod adrenaline;
 pub mod blink;
 pub mod climb;
+pub mod crosshair;
 pub mod combat;
 pub mod darkness;
 pub mod events;
@@ -215,21 +216,11 @@ pub fn step_world(
         let p = state.players[i];
         let mut used = false;
         if !choking && !hands_busy && p.carrying.is_none() && p.holding.is_none() && p.just_pressed(&input, input::buttons::USE) && p.mode == MoveMode::Walking && p.action_lock <= 0.0 && p.sword.phase == state::SwordPhase::Idle {
-            used = true;
-            if let Some(vi) = takedown::choke_target(state, &p, world, g, &cfg.tuning) {
-                takedown::start_choke(state, i, vi, g, &mut out.events);
-            } else if !inventory::try_use_pickup(state, i, world, g, &mut out.events) {
-                // The crosshair picks the body or the prop nearer its centre.
-                let body = takedown::body_focus(state, &p, world, g);
-                // A host target nearer the crosshair is the focus: the Use is its (the Use handler
-                // acts on the one focused interactable).
-                let prop = movables::focus(state, &p, world, g).filter(|_| !state.use_claimed.contains(&p.id));
-                match (body, prop) {
-                    (Some((b, bc)), Some((_, pc))) if bc >= pc => takedown::lift(state, p.id, b, &mut out.events),
-                    (Some((b, _)), None) => takedown::lift(state, p.id, b, &mut out.events),
-                    (_, Some((mi, _))) => movables::grab(state, i, mi, g, &mut out.events),
-                    (None, None) => used = false,
-                }
+            // The Use handler (0x00AD5BA0) acts on `m_pCrosshairActor`, the one interactable the
+            // last camera update chose (`crosshair::target`, stored at the end of the last step),
+            // when its interact flag is set; a host target is the host's to use.
+            if let Some(c) = p.crosshair.filter(|c| c.usable) {
+                used = crosshair::use_target(state, i, c, world, cfg, &mut out.events);
             }
         }
         // Use on a climbable chain (its interactable, 0x00A23130), on foot or in the air.
@@ -517,6 +508,13 @@ pub fn step_world(
         })
         .collect();
     noise::body_falls(state, &fell, g, &mut out.events);
+
+    // The camera update (0x00AD80A0): each pawn's crosshair target for the view and the world as
+    // this tick leaves them; the next tick's Use and the HUD read it.
+    let focus: Vec<Option<crosshair::Crosshair>> = state.players.iter().map(|p| if p.kind == state::PawnKind::Human { crosshair::target(state, p, world, cfg) } else { None }).collect();
+    for (p, c) in state.players.iter_mut().zip(focus) {
+        p.crosshair = c;
+    }
 
     state.tick += 1;
     out

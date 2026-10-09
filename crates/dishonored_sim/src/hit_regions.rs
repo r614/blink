@@ -48,6 +48,49 @@ pub fn hit_region(v: &PlayerState, mv: &MovementConfig, hb: &HitBodyConfig, poin
     best.map(|b| b.1).unwrap_or_else(|| nearest(hb, p))
 }
 
+/// Where a line along `dir` (unit) from `origin` first meets a pawn's physics-asset bodies, grown by
+/// `inflate` (the half extent of a swept box, taken as a sphere): the distance along the line
+/// within `len`. The rig is fitted to the pawn as in [`hit_region`]; a pawn without bodies
+/// falls back to its cylinder.
+pub fn ray_pawn(v: &PlayerState, mv: &MovementConfig, hb: &HitBodyConfig, origin: Vec3, dir: Vec3, len: f32, inflate: f32) -> Option<f32> {
+    let hh = half_height(v, mv);
+    if hb.bodies.is_empty() || hb.half_height <= 0.0 {
+        let r = mv.collision_radius + inflate;
+        return crate::interactables::ray_box(origin, dir, v.position - Vec3::new(r, r, hh + inflate), v.position + Vec3::new(r, r, hh + inflate), len);
+    }
+    let s = hh / hb.half_height;
+    let (sy, cy) = v.yaw.to_radians().sin_cos();
+    let fwd = Vec3::new(cy, sy, 0.0);
+    let right = Vec3::new(-sy, cy, 0.0);
+    let local = |w: Vec3| Vec3::new(w.dot(fwd), w.dot(right), w.z / s);
+    let o = local(origin - v.position);
+    let d = local(dir);
+    let dl = d.length();
+    if dl < 1e-6 {
+        return None;
+    }
+    let d = d / dl;
+    let ll = len * dl;
+    let mut best: Option<f32> = None;
+    for b in &hb.bodies {
+        let mut g = b.clone();
+        // The swept box's reach grows each body: a capsule's radius, a box's half extents.
+        if g.capsule {
+            g.half[0] += inflate;
+        } else {
+            for h in g.half.iter_mut() {
+                *h += inflate;
+            }
+        }
+        if let Some(t) = ray_body(&g, o, d, ll) {
+            if best.is_none_or(|bt| t < bt) {
+                best = Some(t);
+            }
+        }
+    }
+    best.map(|t| t / dl)
+}
+
 fn axes(b: &HitBody) -> [Vec3; 3] {
     [Vec3::from(b.axes[0]), Vec3::from(b.axes[1]), Vec3::from(b.axes[2])]
 }

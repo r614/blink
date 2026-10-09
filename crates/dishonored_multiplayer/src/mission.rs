@@ -499,6 +499,10 @@ pub struct MissionMatch {
     alerted: BTreeSet<PlayerId>,
     started: bool,
     use_held: BTreeSet<PlayerId>,
+    /// The host interactables the last step offered the crosshair, by `HostTarget::key` (what a
+    /// stored `TargetRef::Host` means). Rebuilt every step; not saved.
+    #[serde(skip)]
+    host_list: Vec<Interaction>,
     pending_travel: Option<(String, String)>,
     /// Each NPC's own archetype before material swaps (`ClearMaterials` restores it).
     own_look: BTreeMap<PlayerId, u8>,
@@ -598,6 +602,7 @@ impl MissionMatch {
             alerted: BTreeSet::new(),
             started: false,
             use_held: BTreeSet::new(),
+            host_list: Vec::new(),
             pending_travel: None,
             choosing: BTreeMap::new(),
             original_spawned: BTreeSet::new(),
@@ -1216,28 +1221,87 @@ impl MissionMatch {
         }
     }
 
-    /// One interactable is focused at a time (`DishonoredPlayerController.m_pCrosshairActor`, +0x69c)
-    /// and the Use handler (0x00AD5BA0) acts on that one only: its `Interact`, or the grab / drop
-    /// of a prop. The sim grabs the prop it would focus; when a mission target (a Kismet usable, an
-    /// NPC, a door) is nearer the crosshair, that target is the focus and the prop stays. The
-    /// crosshair choice (the writer of +0x69c) is not decoded: "nearer the crosshair" is the rule
-    /// the port already uses between a body and a prop (`step_world`).
-    fn claim_uses(&mut self, inputs: &[(PlayerId, PlayerInput)], world: &dyn WorldQuery, cfg: &SimConfig) {
-        for (id, inp) in inputs {
-            if inp.buttons & dishonored_sim::input::buttons::USE == 0 || self.use_held.contains(id) {
+    /// The interactables this layer owns, offered to the sim's crosshair rule
+    /// (`dishonored_sim::crosshair`) beside the sim's own: a mission's usable markers, talkable
+    /// NPCs, travel doors, Kismet usables, launchers and native props. Each is the actor's
+    /// collision as far as it is known (a launcher's bounds; a point for the rest, whose
+    /// collision the port has not extracted: U-981) and the `Interaction` its Use runs.
+    fn host_targets(&self, cfg: &SimConfig) -> Vec<(dishonored_sim::crosshair::HostTarget, Interaction)> {
+        use dishonored_sim::crosshair::{CrosshairStatus as St, HostTarget};
+        let reach = cfg.gameplay.items.inventory.interact_distance;
+        let mut out: Vec<(HostTarget, Interaction)> = Vec::new();
+        let mut push = |origin: Vec3, bounds: Option<(Vec3, Vec3)>, max_distance: f32, skeletal: bool, status: St, pawn: Option<PlayerId>, it: Interaction| {
+            let (lo, hi) = bounds.unwrap_or((origin, origin));
+            out.push((HostTarget { key: out.len() as u32, origin, lo, hi, max_distance, skeletal, usable: true, status, pawn, actor: None, shift: Vec3::ZERO }, it));
+        };
+        for m in self.state.usable.keys() {
+            if self.setup.marker_map.get(m).is_some_and(|mm| !mm.eq_ignore_ascii_case(&self.current_map)) {
                 continue;
             }
-            let Some(mut p) = self.world.player(*id).copied() else { continue };
-            if p.holding.is_some() {
-                continue;
-            }
-            p.yaw = inp.yaw;
-            p.pitch = inp.pitch.clamp(-89.0, 89.0);
-            let Some((_, prop_cos)) = dishonored_sim::movables::focus(&self.world, &p, world, &cfg.gameplay) else { continue };
-            if self.interaction_view(*id, p.yaw, p.pitch).is_some_and(|(_, cos)| cos >= prop_cos) {
-                self.world.use_claimed.push(*id);
+            if let Some((pos, _)) = self.state.markers.get(m) {
+                push(*pos, None, reach, true, St::Usable, None, Interaction::Mission(MissionEvent::Used(m.clone())));
             }
         }
+        for n in self.state.talk.keys() {
+            if let Some(id) = self.id_by_npc.get(n).copied() {
+                if let Some(np) = self.world.player(id).filter(|x| x.alive) {
+                    push(np.position, None, reach, true, St::Usable, Some(id), Interaction::Mission(MissionEvent::Talked(n.clone())));
+                }
+            }
+        }
+        for (i, d) in self.setup.doors.iter().enumerate() {
+            if d.map.eq_ignore_ascii_case(&self.current_map) {
+                let status = if d.dest_map.is_empty() { St::Usable } else { St::DoorLevelTransition };
+                push(d.position + Vec3::Z * 60.0, None, reach, true, status, None, Interaction::Door(i));
+            }
+        }
+        // [kismet]
+        for (i, (u, pos, _)) in kismet_host::usables(self).into_iter().enumerate() {
+            let (status, pawn, skeletal) = match &u {
+                kismet_host::KUse::Pickup(_) => (St::Pickup, None, false),
+                kismet_host::KUse::Talk { pawn, .. } => (St::Usable, Some(*pawn), true),
+                _ => (St::Usable, None, true),
+            };
+            push(pos, None, reach, skeletal, status, pawn, Interaction::Kismet(i));
+        }
+        // [world] A launcher: its tripod's collision bounds, its interactable's `m_fMaxDistance`.
+        if let Some(defs) = self.setup.interactables.get(&self.current_map.to_ascii_lowercase()) {
+            let hidden = self.hidden_levels();
+            for (i, l) in defs.launchers.iter().enumerate() {
+                if hidden.iter().any(|h| h.eq_ignore_ascii_case(&l.package)) {
+                    continue;
+                }
+                push(l.position, Some((l.bounds_min, l.bounds_max)), l.max_distance, false, St::Usable, None, Interaction::Launcher(i));
+            }
+        }
+        for (i, u) in self.setup.usables.iter().enumerate() {
+            if u.map.eq_ignore_ascii_case(&self.current_map) {
+                let locked = self.props.get(&u.actor).map_or(u.locked, |s| s.locked);
+                let status = if u.door_axis.is_some() && locked { St::DoorLockedUnbreakable } else { St::Usable };
+                push(u.center, None, reach, true, status, None, Interaction::Prop(i));
+            }
+        }
+        // The placed actors the world holds the collision of: a Kismet usable's, a native
+        // usable's (`<package>:<actor>`).
+        let kismet = kismet_host::usables(self);
+        for (h, it) in out.iter_mut() {
+            if let Interaction::Kismet(i) = it {
+                if let Some(k) = kismet.get(*i) {
+                    let (bounds, shift) = kismet_host::usable_box(self, &k.0);
+                    if let Some((lo, hi)) = bounds {
+                        h.lo = lo;
+                        h.hi = hi;
+                    }
+                    h.shift = shift;
+                }
+            }
+            h.actor = match it {
+                Interaction::Kismet(i) => kismet.get(*i).and_then(|k| kismet_host::usable_actor(self, &k.0)),
+                Interaction::Prop(i) => self.setup.usables.get(*i).and_then(|u| u.actor.split_once(':')).map(|(p, a)| (p.to_string(), a.to_string())),
+                _ => None,
+            };
+        }
+        out
     }
 
     /// A player uses a native door or usable (`MissionSetup::usables[i]`).
@@ -1302,9 +1366,16 @@ impl MissionMatch {
         }
         all.extend(thought);
         self.crowd.write_awareness(&mut self.world);
-        self.claim_uses(&all, world, cfg);
+        // The Use of this tick acts on what the last tick's camera update chose (the stored
+        // crosshair), so its host target is read from the list that update saw; this step's
+        // update then chooses among the list built now.
+        let focus_before: Vec<(PlayerId, Option<dishonored_sim::crosshair::Crosshair>)> = self.world.players.iter().map(|p| (p.id, p.crosshair)).collect();
+        let used_list = std::mem::take(&mut self.host_list);
+        let host = self.host_targets(cfg);
+        self.world.host_targets = host.iter().map(|h| h.0.clone()).collect();
+        self.host_list = host.into_iter().map(|h| h.1).collect();
         let mut out = step_world(&mut self.world, &all, world, cfg);
-        self.world.use_claimed.clear();
+        self.world.host_targets.clear();
         // [world] The launchers' shots fly, strike and burst (before the tripwires so that a burst
         // that damages a wire trips it in the same step).
         self.step_launchers(world, cfg, &mut out.events);
@@ -1372,7 +1443,12 @@ impl MissionMatch {
                 if prop_use {
                     continue;
                 }
-                match self.interaction(*id) {
+                let focused = focus_before.iter().find(|f| f.0 == *id).and_then(|f| f.1).filter(|c| c.usable);
+                let it = match focused.map(|c| c.target) {
+                    Some(dishonored_sim::crosshair::TargetRef::Host(k)) => used_list.get(k as usize).cloned(),
+                    _ => None,
+                };
+                match it {
                     Some(Interaction::Mission(MissionEvent::Talked(npc))) => events.push(MissionEvent::TalkedBy { npc, player: *id }),
                     Some(Interaction::Mission(e)) => events.push(e),
                     Some(Interaction::Door(i)) => {
@@ -1763,78 +1839,41 @@ impl MissionMatch {
         }
     }
 
-    /// What a player would interact with right now (nearest usable marker, talkable NPC or
-    /// travel door within reach, in front of the view).
+    /// What the player's crosshair is on that is the mission layer's to use (the host target the
+    /// sim's last camera update chose, `dishonored_sim::crosshair`): what a Use now would
+    /// interact with, and what the HUD's prompt shows. A sim-owned target (a prop, a pickup, a
+    /// body) is the sim's own Use, not an `Interaction`.
     pub fn interaction(&self, id: PlayerId) -> Option<Interaction> {
-        self.interaction_focus(id).map(|b| b.0)
+        let c = self.world.player(id)?.crosshair.filter(|c| c.usable)?;
+        match c.target {
+            dishonored_sim::crosshair::TargetRef::Host(k) => self.host_list.get(k as usize).cloned(),
+            _ => None,
+        }
     }
 
-    /// [`Self::interaction`] with the cosine of the angle between the view and the target: the
-    /// crosshair alignment it competes with the sim's own use targets (props) by.
-    pub fn interaction_focus(&self, id: PlayerId) -> Option<(Interaction, f32)> {
-        let p = self.world.player(id)?;
-        self.interaction_view(id, p.yaw, p.pitch)
-    }
-
-    /// [`Self::interaction_focus`] for a view (the tick's input, before the sim applies it).
-    fn interaction_view(&self, id: PlayerId, yaw: f32, pitch: f32) -> Option<(Interaction, f32)> {
-        let p = self.world.player(id).filter(|p| p.alive)?;
-        let eye = p.position + Vec3::Z * 64.0;
-        let fwd = dishonored_sim::movement::view_vector(yaw, pitch);
-        let mut best: Option<(f32, Interaction, f32)> = None;
-        let mut consider = |pos: Vec3, reach: f32, it: Interaction| {
-            let d = pos - eye;
-            let dist = d.length();
-            if dist > reach || dist < 1.0 {
-                return;
-            }
-            let facing = d.normalize().dot(fwd);
-            if facing < 0.6 {
-                return;
-            }
-            let score = dist * (2.0 - facing);
-            if best.as_ref().is_none_or(|b| score < b.0) {
-                best = Some((score, it, facing));
-            }
-        };
-        for m in self.state.usable.keys() {
-            if self.setup.marker_map.get(m).is_some_and(|mm| !mm.eq_ignore_ascii_case(&self.current_map)) {
-                continue;
-            }
-            if let Some((pos, _)) = self.state.markers.get(m) {
-                consider(*pos, 220.0, Interaction::Mission(MissionEvent::Used(m.clone())));
-            }
-        }
-        for n in self.state.talk.keys() {
-            if let Some(np) = self.id_by_npc.get(n).and_then(|i| self.world.player(*i)).filter(|x| x.alive) {
-                consider(np.position + Vec3::Z * 40.0, 200.0, Interaction::Mission(MissionEvent::Talked(n.clone())));
-            }
-        }
-        for (i, d) in self.setup.doors.iter().enumerate() {
-            if d.map.eq_ignore_ascii_case(&self.current_map) {
-                consider(d.position + Vec3::Z * 60.0, 220.0, Interaction::Door(i));
-            }
-        }
-        for (pos, reach, it) in kismet_host::interactions(self) {
-            consider(pos, reach, it); // [kismet]
-        }
-        // [world] A launcher the view meets within its interactable's reach (the point where the
-        // view enters its collision bounds stands for it).
-        if let Some(defs) = self.setup.interactables.get(&self.current_map.to_ascii_lowercase()) {
-            if !defs.launchers.is_empty() {
-                let hidden = self.hidden_levels();
-                let present = |i: usize| !hidden.iter().any(|h| h.eq_ignore_ascii_case(&defs.launchers[i].package));
-                if let Some((i, t)) = dishonored_sim::launchers::LaunchersState::focused(defs, eye, fwd, present) {
-                    consider(eye + fwd * t, defs.launchers[i].max_distance, Interaction::Launcher(i));
+    /// The name of the actor behind a host interaction (what the original's `m_pCrosshairActor`
+    /// is called): the Kismet usable's actor, the native usable's, the launcher's, the door's, the
+    /// marker's or the NPC's id.
+    pub fn interaction_name(&self, it: &Interaction) -> String {
+        match it {
+            Interaction::Mission(MissionEvent::Used(m)) => m.clone(),
+            Interaction::Mission(MissionEvent::Talked(n)) => n.clone(),
+            Interaction::Mission(_) => String::new(),
+            Interaction::Door(i) => self.setup.doors.get(*i).map(|d| d.door.clone()).unwrap_or_default(),
+            Interaction::Kismet(i) => {
+                let list = kismet_host::usables(self);
+                match list.get(*i) {
+                    Some((u, _, _)) => match (kismet_host::usable_actor(self, u), u) {
+                        (Some((_, name)), _) => name,
+                        (None, kismet_host::KUse::Talk { pawn, .. }) => self.npc_by_id.get(pawn).cloned().unwrap_or_else(|| format!("#{pawn}")),
+                        _ => String::new(),
+                    },
+                    None => String::new(),
                 }
             }
+            Interaction::Prop(i) => self.setup.usables.get(*i).map(|u| u.actor.rsplit(':').next().unwrap_or(&u.actor).to_string()).unwrap_or_default(),
+            Interaction::Launcher(i) => self.setup.interactables.get(&self.current_map.to_ascii_lowercase()).and_then(|d| d.launchers.get(*i)).map(|l| l.name.clone()).unwrap_or_default(),
         }
-        for (i, u) in self.setup.usables.iter().enumerate() {
-            if u.map.eq_ignore_ascii_case(&self.current_map) {
-                consider(u.center, 220.0, Interaction::Prop(i));
-            }
-        }
-        best.map(|b| (b.1, b.2))
     }
 
     pub fn respawn_time_left(&self, id: PlayerId) -> Option<f32> {

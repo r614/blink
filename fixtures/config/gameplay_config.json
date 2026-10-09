@@ -58,6 +58,12 @@
     "slide_time": 1.1,
     "slide_deactivate_angle": 25.0,
     "slide_percent_not_cancelable": 0.5,
+    "camera": {
+      "pivot_forward": -0.6152,
+      "pivot_up": -40.918,
+      "radius": 31.892,
+      "phi0": 10.462
+    },
     "lean": {
       "height_pct": 2.0,
       "max_angle": 15.0,
@@ -3966,6 +3972,9 @@
       "max_health_elixirs": 10,
       "max_mana_elixirs": 10,
       "interact_distance": 200.0,
+      "usable_object_dist": 300.0,
+      "usable_object_extent_broad": 10.0,
+      "usable_object_extent_narrow": 2.0,
       "choke_time": 1.5,
       "choke_anim_time": 5.033,
       "choke_hold_to_auto_carry": 0.2,
@@ -5103,6 +5112,10 @@
     "items.inventory.crossbow_ranged_damage": "Twk_Inv_PlayerSpecific.Twk_Inv_CrossbowCorvo.DisTweaks_InventoryItem_Attributes_21 :: m_RangedDamage.m_fBaseValue2_Normal = 20",
     "items.inventory.health_elixir_value": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_nHealthElixirValue = 40",
     "items.inventory.interact_distance": "Default__DisTweaks_InteractableInterface :: m_fMaxDistance = 200",
+    "items.inventory.usable_object_dist": "Twk_Pawn_DefaultPlayer.Twk_Pawn_PlayerInput :: m_fUsableObjectDist = 300",
+    "items.inventory.usable_object_extent_broad": "Twk_Pawn_DefaultPlayer.Twk_Pawn_PlayerInput :: m_fUsableObjectExtentBroad = 10",
+    "items.inventory.usable_object_extent_narrow": "Twk_Pawn_DefaultPlayer.Twk_Pawn_PlayerInput :: m_fUsableObjectExtentNarrow = 2",
+    "movement.camera": "measured on the original, CameraCache.POV.Location at 15 pitches (research/dishonored/systems/crosshair.md, U-980)",
     "items.inventory.mana_elixir_value": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_nManaElixirValue = 50",
     "items.inventory.max_equipped_charms": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_MaxActivatedBoneCharmCount = 3",
     "items.inventory.max_health_elixirs": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release :: m_nMaxHealthElixir = 10",

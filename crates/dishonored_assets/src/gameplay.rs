@@ -342,6 +342,11 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
                 release_time: d.release_time,
             }
         },
+        camera: {
+            // Measured, not read: the arc of the player camera's rest position (U-980).
+            l.prov.insert("movement.camera".into(), "measured on the original, CameraCache.POV.Location at 15 pitches (research/dishonored/systems/crosshair.md, U-980)".into());
+            dishonored_ir::gameplay::CameraRig::default()
+        },
         input: {
             let ip = PLAYER_INPUT;
             let pi = l.obj(ip)?;

@@ -17,12 +17,11 @@
 //!   keys, notes).
 
 use crate::events::SimEvent;
-use crate::movement::{eye_position, view_vector};
 use crate::powers::attribute;
 use crate::state::{HeldItem, PickupState, PlayerId, PlayerState, WorldState};
 use dishonored_ir::gameplay::GameplayConfig;
 use dishonored_ir::items::{AmmoType, ElixirType, PickupKind, PlacedPickup};
-use dishonored_world::{WorldQuery, channel};
+use dishonored_world::WorldQuery;
 use glam::Vec3;
 
 pub const COINS_ITEM: &str = "Coins_AbsItm";
@@ -178,7 +177,7 @@ pub fn spawn_pickups(state: &mut WorldState, placed: &[PlacedPickup], seed: u32,
             }
         }
         let carried_by = pp.stealable_from.as_deref().and_then(stealable_owner);
-        state.pickups.push(PickupState { id, name: pp.name.clone(), package: pp.package.clone(), position: pp.position, kind: pp.kind.clone(), active: true, ammo_left, carried_by });
+        state.pickups.push(PickupState { id, name: pp.name.clone(), package: pp.package.clone(), position: pp.position, kind: pp.kind.clone(), active: true, ammo_left, carried_by, bounds_min: pp.bounds_min, bounds_max: pp.bounds_max });
     }
 }
 
@@ -283,37 +282,6 @@ pub fn give_charm_effect(p: &mut PlayerState, cfg: &GameplayConfig, effect: Opti
     }
 }
 
-/// The pickup `p` is looking at within `m_fMaxDistance` (closest to the view direction, visible).
-pub fn pickup_in_view(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: &GameplayConfig) -> Option<usize> {
-    let eye = eye_position(p, &cfg.movement);
-    let dir = view_vector(p.yaw, p.pitch);
-    let reach = cfg.items.inventory.interact_distance;
-    let mut best: Option<(usize, f32)> = None;
-    for (i, pk) in state.pickups.iter().enumerate() {
-        if !pk.active {
-            continue;
-        }
-        let pos = pickup_position(state, pk, &cfg.movement);
-        let to = pos - eye;
-        let d = to.length();
-        if d > reach || d < 1e-3 {
-            continue;
-        }
-        let cos = to.dot(dir) / d;
-        // Highlight cone (LIKELY: the original traces the crosshair against the item's mesh).
-        if cos < INTERACT_COS {
-            continue;
-        }
-        if world.raycast(eye, to, d, channel::MELEE).is_some_and(|h| h.distance < d - 10.0) {
-            continue;
-        }
-        if best.is_none_or(|(_, c)| cos > c) {
-            best = Some((i, cos));
-        }
-    }
-    best.map(|b| b.0)
-}
-
 /// `cos(30 deg)`: how far off the crosshair an item can be and still be used.
 pub const INTERACT_COS: f32 = 0.866;
 
@@ -325,10 +293,10 @@ pub fn pickup_position(state: &WorldState, pk: &PickupState, mv: &dishonored_ir:
     }
 }
 
-/// Use (F) on a pickup: returns true when something was taken.
-pub fn try_use_pickup(state: &mut WorldState, who: usize, world: &dyn WorldQuery, cfg: &GameplayConfig, events: &mut Vec<SimEvent>) -> bool {
+/// Use on the focused pickup `pi`: taken when the player can (the original's interact does what
+/// it can and the Use handler is done either way). Returns true when something was taken.
+pub fn use_pickup(state: &mut WorldState, who: usize, pi: usize, _world: &dyn WorldQuery, cfg: &GameplayConfig, events: &mut Vec<SimEvent>) -> bool {
     let p = state.players[who];
-    let Some(pi) = pickup_in_view(state, &p, world, cfg) else { return false };
     if !can_take(&p, &state.pickups[pi], cfg) {
         return false;
     }

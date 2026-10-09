@@ -637,6 +637,9 @@ impl dishonored_world::WorldQuery for NavOverlay<'_> {
     fn hit_package(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<String> {
         self.inner.hit_package(origin, dir, max_dist)
     }
+    fn actor_bounds(&self, package: &str, actor: &str) -> Option<(Vec3, Vec3)> {
+        self.inner.actor_bounds(package, actor)
+    }
 }
 
 /// The Kismet's game side for one step.
@@ -2964,6 +2967,32 @@ pub fn scripted_pickups(m: &MissionMatch) -> Vec<(String, String)> {
             _ => None,
         })
         .collect()
+}
+
+/// The placed actor (level package, actor name) of a Kismet usable: the collision the world
+/// holds for it (`WorldQuery::actor_bounds`).
+pub fn usable_actor(m: &MissionMatch, u: &KUse) -> Option<(String, String)> {
+    let run = m.kismet.as_ref()?;
+    match u {
+        KUse::Actor(a) | KUse::Pickup(a) => run.k.db.actors.get(*a as usize).map(|x| (x.package.clone(), x.name.clone())),
+        KUse::Talk { .. } => None,
+    }
+}
+
+/// The collision box of a Kismet usable as far as the level data holds it, and how far the
+/// Kismet has moved the actor from where the level placed it. A trigger's is its
+/// `CylinderComponent` (radius, half height) at its location; a mesh actor's is the box of its
+/// collision triangles in the world ([`usable_actor`]), moved by the shift.
+pub fn usable_box(m: &MissionMatch, u: &KUse) -> (Option<(Vec3, Vec3)>, Vec3) {
+    let Some(run) = m.kismet.as_ref() else { return (None, Vec3::ZERO) };
+    let (KUse::Actor(a) | KUse::Pickup(a)) = u else { return (None, Vec3::ZERO) };
+    let Some(actor) = run.k.db.actors.get(*a as usize) else { return (None, Vec3::ZERO) };
+    let at = run.actor_pos(*a);
+    let shift = at - Vec3::from(actor.location);
+    match &actor.shape {
+        Some(dishonored_kismet::model::Shape::Cylinder { radius, height }) => (Some((at - Vec3::new(*radius, *radius, *height), at + Vec3::new(*radius, *radius, *height))), shift),
+        _ => (None, shift),
+    }
 }
 
 /// Interaction candidates for `MissionMatch::interaction`.

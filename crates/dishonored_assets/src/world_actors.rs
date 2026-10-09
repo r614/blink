@@ -120,25 +120,12 @@ fn weight_class(m: &TMap) -> u8 {
     }
 }
 
-/// A placed movable: its `DisTweaks_Movable` (class defaults `DisTweaks_Movable` /
-/// `DisTweaks_StaticBreakable` when the tweak leaves a field), the static mesh and its box.
-fn movable(content: &Content, pkg: &Arc<Package>, i: usize, package: &str, class: &str, db: &TweakDb, res: &mut PropResolver) -> Option<MovableDef> {
-    let tweak = res.inherited_object_path(pkg, i, "m_pMovableTweaks")?;
-    let m = db.try_resolve(&tweak)?;
-    let own = pkg.read_object(i).ok()?.properties;
-    let eff = res.effective(pkg, i);
-    let rot = find(&eff, "Rotation").and_then(|x| x.as_rotator()).unwrap_or([0; 3]);
-    let flag = |k: &str| boolean(&m, k).unwrap_or(false);
-    let interact = get(&m, "m_pInteractableTweaks").and_then(|v| if let TVal::Obj(o) = v { db.try_resolve(o) } else { None }).unwrap_or_default();
-    let max_distance = get_f32(&interact, "m_fMaxDistance").unwrap_or(200.0);
-    let prompt = match interact.get("m_InteractText") {
-        Some(TVal::Str(s)) => s.clone(),
-        _ => String::new(),
-    };
-    // The static mesh of the actor's `StaticMeshComponent` (its own, else the archetype's).
+/// The static mesh of an actor's `StaticMeshComponent` (its own, else the archetype's): its path
+/// and its local bounding box (min, max; zero when the mesh is not found).
+pub(crate) fn actor_mesh_bounds(pkg: &Arc<Package>, own: &[ue3_package::properties::Property], res: &mut PropResolver) -> (String, Vec3, Vec3) {
     let mut mesh = String::new();
     let (mut bmin, mut bmax) = (Vec3::ZERO, Vec3::ZERO);
-    let comp = find(&own, "StaticMeshComponent").and_then(|p| p.as_object()).filter(|o| *o != 0).map(|o| ObjRef::from_index(o));
+    let comp = find(own, "StaticMeshComponent").and_then(|p| p.as_object()).filter(|o| *o != 0).map(|o| ObjRef::from_index(o));
     if let Some(ObjRef::Export(ci)) = comp.filter(|c| matches!(c, ObjRef::Export(_))) {
         let cown = pkg.read_object(ci).map(|h| h.properties).unwrap_or_default();
         let located = match find(&cown, "StaticMesh").and_then(|p| p.as_object()).filter(|o| *o != 0) {
@@ -158,6 +145,26 @@ fn movable(content: &Content, pkg: &Arc<Package>, i: usize, package: &str, class
             }
         }
     }
+    (mesh, bmin, bmax)
+}
+
+/// A placed movable: its `DisTweaks_Movable` (class defaults `DisTweaks_Movable` /
+/// `DisTweaks_StaticBreakable` when the tweak leaves a field), the static mesh and its box.
+fn movable(content: &Content, pkg: &Arc<Package>, i: usize, package: &str, class: &str, db: &TweakDb, res: &mut PropResolver) -> Option<MovableDef> {
+    let tweak = res.inherited_object_path(pkg, i, "m_pMovableTweaks")?;
+    let m = db.try_resolve(&tweak)?;
+    let own = pkg.read_object(i).ok()?.properties;
+    let eff = res.effective(pkg, i);
+    let rot = find(&eff, "Rotation").and_then(|x| x.as_rotator()).unwrap_or([0; 3]);
+    let flag = |k: &str| boolean(&m, k).unwrap_or(false);
+    let interact = get(&m, "m_pInteractableTweaks").and_then(|v| if let TVal::Obj(o) = v { db.try_resolve(o) } else { None }).unwrap_or_default();
+    let max_distance = get_f32(&interact, "m_fMaxDistance").unwrap_or(200.0);
+    let prompt = match interact.get("m_InteractText") {
+        Some(TVal::Str(s)) => s.clone(),
+        _ => String::new(),
+    };
+    // The static mesh of the actor's `StaticMeshComponent` (its own, else the archetype's).
+    let (mesh, bmin, bmax) = actor_mesh_bounds(pkg, &own, res);
     let _ = content;
     Some(MovableDef {
         name: pkg.obj_name(ObjRef::Export(i)).to_string(),
