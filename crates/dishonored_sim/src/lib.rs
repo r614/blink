@@ -221,7 +221,9 @@ pub fn step_world(
             } else if !inventory::try_use_pickup(state, i, world, g, &mut out.events) {
                 // The crosshair picks the body or the prop nearer its centre.
                 let body = takedown::body_focus(state, &p, world, g);
-                let prop = movables::focus(state, &p, world, g);
+                // A host target nearer the crosshair is the focus: the Use is its (the Use handler
+                // acts on the one focused interactable).
+                let prop = movables::focus(state, &p, world, g).filter(|_| !state.use_claimed.contains(&p.id));
                 match (body, prop) {
                     (Some((b, bc)), Some((_, pc))) if bc >= pc => takedown::lift(state, p.id, b, &mut out.events),
                     (Some((b, _)), None) => takedown::lift(state, p.id, b, &mut out.events),
