@@ -1,20 +1,20 @@
 # Research Log
 
 Each entry: Question / Evidence / Experiment / Result / Confidence / Implementation consequence.
-Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless noted.
+Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613â€¦c6fb` unless noted.
 
 ---
 
-## 2026-10-04 — Installation fingerprint
+## 2026-10-04 â€” Installation fingerprint
 - **Question:** What exactly is the canonical target?
 - **Evidence:** GOG registry key `GOG.com\Games\1701063787`, `goggame-1701063787.info`, file hashes.
 - **Experiment:** Hash and version query of the install.
-- **Result:** buildId 56034905455963308; exe 18,041,856 B, SHA-256 `70da9613…c6fb`;
+- **Result:** buildId 56034905455963308; exe 18,041,856 B, SHA-256 `70da9613â€¦c6fb`;
   FileVersion is the uninformative `1,0,0,0`. Details are in `dishonored/GAME_FILES.md`.
 - **Confidence:** CONFIRMED
 - **Implementation consequence:** Every binary-level finding is tagged with this hash.
 
-## 2026-10-04 — Package container format
+## 2026-10-04 â€” Package container format
 - **Question:** Can cooked packages be read without the engine?
 - **Evidence:** The header of `L_Streets1_P.upk` shows tag `9E2A83C1`, version `0x321`/`0x1E`
   and compression flag 2, followed by a chunk table.
@@ -26,7 +26,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Confidence:** CONFIRMED
 - **Implementation consequence:** Package reading is no longer a blocker (U-001, U-002).
 
-## 2026-10-04 — Object flag dword order and script state frames
+## 2026-10-04 â€” Object flag dword order and script state frames
 - **Question:** Why do some placed StaticMeshActors fail to parse?
 - **Evidence:** Data for `StaticMeshActor_1737` starts with two import references, then
   `FFFFFFFF 00000000`, then `0000`, then `FFFFFFFF`, then NetIndex. The export's flag
@@ -40,7 +40,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Implementation consequence:** `Export::object_flags` is recombined as hi:lo. The state
   frame has no StateStack array at this version.
 
-## 2026-10-04 — Component and class-specific prefixes
+## 2026-10-04 â€” Component and class-specific prefixes
 - **Question:** What precedes NetIndex for components?
 - **Evidence:** StaticMeshComponent data starts with `00000000 00000000` before the first tag.
   DistributionFloatUniform has the same prefix. DominantDirectionalLightComponent starts
@@ -53,19 +53,19 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Confidence:** CONFIRMED for level content, STRONG for script packages
 - **Implementation consequence:** These rules live in `Package::read_object`.
 
-## 2026-10-04 — StaticMesh layout and the kDOP quirk
+## 2026-10-04 â€” StaticMesh layout and the kDOP quirk
 - **Question:** How is `UStaticMesh` serialized?
 - **Evidence:** Hex of `air_duct_01.air_duct_09`. The kDOP nodes have element size 32,
   not the compact 6-byte format expected at v>=770. UEViewer has an explicit
-  `GAME_Dishonored → old_kdop` branch.
+  `GAME_Dishonored â†’ old_kdop` branch.
 - **Experiment:** Implemented the decoder and imported every mesh in Boyle Ext.
 - **Result:** 405/405 meshes decode. Positions, packed tangents, half-float UVs and
   u16 indices are all consistent with the stated counts.
 - **Confidence:** STRONG
-- **Implementation consequence:** kDOP triangles (u16×3 + material) give per-poly
+- **Implementation consequence:** kDOP triangles (u16Ã—3 + material) give per-poly
   collision for free. They are the starting point for M5.
 
-## 2026-10-04 — Gameplay trace channels on primitives
+## 2026-10-04 â€” Gameplay trace channels on primitives
 - **Question:** Do primitives carry Dishonored-specific collision semantics?
 - **Evidence:** Every StaticMeshComponent has `m_CollisionTraceTypes: DisPrimTraceMask`
   with booleans for Crosshair, Projectile, Melee and VisionLOS traces.
@@ -75,7 +75,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Implementation consequence:** `WorldQuery` needs trace channels that mirror these
   flags, or Blink, projectile, melee and AI LOS results will not match the original.
 
-## 2026-10-04 — Data-driven gameplay constants in INIs
+## 2026-10-04 â€” Data-driven gameplay constants in INIs
 - **Question:** Where do power and movement tuning values live?
 - **Evidence:** `DefaultPlayer.ini` has `m_fMaxFallSpeed=2000.0`, and `m_Powers=` entries
   that define Agility levels as attribute modifiers (`Attribute_JumpZ_PowerJump +1300`,
@@ -89,7 +89,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Implementation consequence:** Add an INI reader to `dishonored_assets`. The
   simulation should take constants from INI + class defaults, not hard-coded numbers.
 
-## 2026-10-04 — First render of an original map (M4)
+## 2026-10-04 â€” First render of an original map (M4)
 - **Question:** Does the decoded geometry come out in the right place, at the right scale, with usable textures?
 - **Evidence:** Bevy screenshots of `L_Boyle_Ext_P` and its sublevels: an aerial shot from (-6000,-6000,6000) and a street-level shot from PlayerStart_1 (-2663,-1879,98).
 - **Experiment:** Converted to Bevy space with a Y/Z swap and 0.02 m/uu. Collection matrices are applied as `ParentToWorld * component local`. BC textures are uploaded directly with their mip chains.
@@ -97,20 +97,20 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Confidence:** STRONG (visual). The transform convention still needs a numeric check against the original game (U-011).
 - **Implementation consequence:** M4 is reached. Remaining visual gaps are unresolved cross-package materials (U-005, e.g. street cobbles), translucent FX cards (hidden by default) and lightmaps (U-013). None of these block collision work.
 
-## 2026-10-04 — Sony Edge animation decoded (U-008)
+## 2026-10-04 â€” Sony Edge animation decoded (U-008)
 - **Question:** Can Dishonored's `ACF_EdgeAnim` clips (all 113,232 sequences) be decoded without Sony's SDK?
 - **Evidence:** Static analysis of Dishonored.exe (hash above) with `exe_probe`. The only reference to tag `0x45413035` is in the blend-tree evaluator `0x009DBC10`. From there I followed the frame-set decompressor `0x009DADA0`, the constant-channel decoder `0x009CD3A0` (reproduced instruction by instruction: packing-spec bit fields, fixed/float component decode, smallest-three recomposition, big-endian bit streams) and the animated-channel decoder `0x009CE380` (argument layout).
-- **Experiment:** I implemented the decoder in Rust and checked it against the data. Initial-frame section sizes equal the summed spec bit widths, and key-section sizes equal popcount(mask) x spec bits exactly in every set tested. Set boundaries line up byte-exactly. Channel-major key order gives smooth trajectories (1.3–7 deg/key) where frame-major gives noise (49–91 deg). I also rendered stick figures of Idle/WalkN/RunN on the elite-guard skeleton.
+- **Experiment:** I implemented the decoder in Rust and checked it against the data. Initial-frame section sizes equal the summed spec bit widths, and key-section sizes equal popcount(mask) x spec bits exactly in every set tested. Set boundaries line up byte-exactly. Channel-major key order gives smooth trajectories (1.3â€“7 deg/key) where frame-major gives noise (49â€“91 deg). I also rendered stick figures of Idle/WalkN/RunN on the elite-guard skeleton.
 - **Result:** Walk and run cycles decode correctly: alternating legs, counter-swinging arms, knee drive. Format documented in `research/dishonored/animation/EDGE_ANIM.md`.
 - **Confidence:** STRONG (structure CONFIRMED by exact size accounting; motion validated visually; interpolation nlerp vs the binary's polynomial slerp is LIKELY close)
 - **Implementation consequence:** Characters play decoded locomotion (idle / walk / run in 4 directions, rotation-only retargeting by bone name). Phase II NPC and player animation is unblocked. The fixed-format channel paths (flag bits clear) remain to be ported if the survey shows they are used.
 
-## 2026-10-04 — Combat timings from animation notifies (U-021)
+## 2026-10-04 â€” Combat timings from animation notifies (U-021)
 - **Question:** What are the sword swing, parry, equip and reload timings that the original drives from animation?
 - **Evidence:** `map_dump anim_notifies` lists AnimSequence lengths, rate scales and AnimNotify events for the player AnimSets in Startup.upk (Edge decoder now available).
-  - `Ply_Sword_Attack_as`, "Small" attacks: `DishonoredNotify_AttackZone` starts at 0.104–0.158 s and lasts 0.186–0.243 s; `AttackInterruptable` ≈ 0.58–0.63 s; `AnimStateExit` 0.78–0.95 s.
+  - `Ply_Sword_Attack_as`, "Small" attacks: `DishonoredNotify_AttackZone` starts at 0.104â€“0.158 s and lasts 0.186â€“0.243 s; `AttackInterruptable` â‰ˆ 0.58â€“0.63 s; `AnimStateExit` 0.78â€“0.95 s.
   - `Ply_Sword_Versus_as`: `DisNotify_BlockParryZone` from t=0.001 with duration 0.430 (0.422 sneaking).
-  - `Ply_Sword_Assassination_as`: `Sword_Ready_Assassination_Back` exits at 1.886 s and the drop variants at 1.90–1.97 s.
+  - `Ply_Sword_Assassination_as`: `Sword_Ready_Assassination_Back` exits at 1.886 s and the drop variants at 1.90â€“1.97 s.
   - `Ply_Pistol_as`: Fire exits at 0.30 s, Reload_In takes 0.433 s and Reload_Out 0.333 s. `CorvoGun_Mag_as`: Mag_0to1 takes 0.433 s.
   - `Ply_Crossbow_as`: Fire exits at 0.398 s, Reload_In 0.233 s, Reload_Out 0.333 s. `Crossbows_as`: RapidReload takes 0.4 s.
   - `Ply_Guns_as`: Equip exits at 0.43 s.
@@ -125,7 +125,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Confidence:** LIKELY. Notify times are CONFIRMED data. Mapping them to gameplay windows (for example, reload = sum of the In/Mag/Out sequences) is an inference. Stagger and blocked recoil are still SPECULATIVE.
 - **Implementation consequence:** U-021 is mostly resolved. Swings are faster and parries more forgiving than the earlier guesses.
 
-## 2026-10-04 — First-person rig and Edge joint order
+## 2026-10-04 â€” First-person rig and Edge joint order
 - **Question:** Can the first-person view use Corvo's real arms, weapons and animations?
 - **Evidence:**
   - `Engine.upk` contains `Ply_Player.Skm_Player`, a 79-bone full-body rig. It has `camera_jnt`, `handAttachment_R/L_jnt` and legs.
@@ -134,8 +134,8 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   - The `fp_probe` tool poses the rig and prints bones relative to the camera bone.
 - **Experiment:**
   1. Track mapping. Under `TrackBoneNames` order, `head_jnt` received exactly camera_jnt's bind translation. Re-mapping Edge joints to the set's tracks sorted by skeleton bone index made every animated translation match its bind length.
-  2. Camera frame. The rig is placed so the animated camera bone coincides with the game camera (forward = −Z, right = +Y, up = +X of camera_jnt).
-  3. Sockets. I compared candidate socket conventions numerically (blade axis against the fist's pinky→index axis) and visually with scripted screenshots.
+  2. Camera frame. The rig is placed so the animated camera bone coincides with the game camera (forward = âˆ’Z, right = +Y, up = +X of camera_jnt).
+  3. Sockets. I compared candidate socket conventions numerically (blade axis against the fist's pinkyâ†’index axis) and visually with scripted screenshots.
   4. FOV. `DefaultCamera.ini` `m_fDefaultFOV=75` is applied as a horizontal FOV. It had been fed to Bevy as a vertical FOV, which made the world view much too wide.
 - **Result:** The first-person view shows the following:
   - the left hand in the power idle, lower left
@@ -153,7 +153,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   - FOV: CONFIRMED value; the horizontal interpretation is LIKELY (UE3 convention).
 - **Implementation consequence:** `crates/dishonored_runtime/src/viewmodel.rs` adds an overlay camera on render layer 1 with its own depth. Its clip state machine is presentation-only, driven by sword/left-hand phase, movement mode, speed and crouch.
 
-## 2026-10-04 — Contracts bots navigate the original nav points
+## 2026-10-04 â€” Contracts bots navigate the original nav points
 - **Question:** Why did the 10-minute 8-bot Contracts harness produce 0 kills?
 - **Evidence:** Per-bot traces showed every bot frozen against geometry within 10 s. Bots steered in a straight line toward their target.
 - **Experiment:** Built `dishonored_bots::nav::NavGraph` over the map's original AI points and PlayerStarts:
@@ -165,7 +165,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Confidence:** CONFIRMED (harness).
 - **Implementation consequence:** Contracts bots in the harness use the nav graph. Test bots remain clients that act only through `PlayerInput`.
 
-## 2026-10-04 — Third-person weapons and animation states
+## 2026-10-04 â€” Third-person weapons and animation states
 - **Question:** Do remote players, guards and civilians hold weapons and animate according to what they are doing?
 - **Evidence:**
   - NPC skeletons (elite guard, male and female aristocrats) have the same `handAttachment_R/L_jnt` sockets as the player rig.
@@ -179,11 +179,11 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Result:** In FFA, players run with the sword in the right hand; swings, blocks, gun fire and reloads use NPC clips. In Contracts, players hide weapons until they draw (attack, block, aim, fire) and use the civilian gait, so they blend into the crowd. Deaths play a death clip instead of standing. Offline bots now use the nav graph too.
 - **Confidence:** STRONG (visual) for clip choice. Socket convention LIKELY (U-025). There is no crouch or jump locomotion in the NPC sets; crouched armed idle uses `Sword_Cover_Loop`.
 - **Implementation consequence:** `crates/dishonored_runtime/src/characters.rs` (`WeaponLibrary`, `shown_weapons`, `choose_tp_clip`). The grey placeholder sword is gone whenever character models load.
-## 2026-10-04 — Baked lighting: component lightmaps (U-013)
+## 2026-10-04 â€” Baked lighting: component lightmaps (U-013)
 - **Question:** Where and how are lightmaps stored on Boyle Ext static geometry, and can they drive Bevy's lightmap path?
 - **Evidence:** Hex of `L_Boyle_Ext_Env` `StaticMeshActor_1737.StaticMeshComponent0` after its properties
   (offset 0x218): LOD count 1, one ShadowMap2D ref, zero shadow vertex buffers, `LightMapType = 2`,
-  6 light GUIDs, then 3 × (object ref + 3 floats), UV scale/bias, then a single zero byte that ends
+  6 light GUIDs, then 3 Ã— (object ref + 3 floats), UV scale/bias, then a single zero byte that ends
   the export. The two non-null references are `NormalizedAverageColor0_139` (scale 1,1,1) and
   `DirectionalMaxComponent0_139` (HDR scale). Env holds 185 textures of each name plus 11 more in
   other sublevels, all DXT1 in `Lighting.tfc`. `StaticMeshCollectionActor` components use the same layout.
@@ -204,7 +204,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   lights that UE3 also renders dynamically (dominant + movable). Normal maps cannot modulate the
   baked light until a custom material samples both coefficient textures.
 
-## 2026-10-04 — Cross-package materials (U-005) and Arkane material slots
+## 2026-10-04 â€” Cross-package materials (U-005) and Arkane material slots
 - **Question:** Why do ~145 resource references stay unresolved, and what do the material parameters mean?
 - **Evidence:** `find_export` (new, `tools/package_dump/src/bin/find_export.rs`) over all 470 packages: every
   unresolved Boyle Ext texture import (`grounds.street_cobbles_01_d`, `Materials_ref.Textures.normalmap_N`, ...)
@@ -233,7 +233,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Implementation consequence:** `LIBRARY_PACKAGES` adds ~15 MB of packages to the import (import now ~5.5 s).
   Decoding the MIC `StaticParameters` (static switch values) would remove the explicit-only heuristic.
 
-## 2026-10-04 — Map coverage: streaming levels, BSP, non-static actors (lead request)
+## 2026-10-04 â€” Map coverage: streaming levels, BSP, non-static actors (lead request)
 - **Question:** Where do the reported geometry gaps come from?
 - **Evidence:** `L_Boyle_Ext_P` `WorldInfo_4.StreamingLevels` = 7 `LevelStreamingAlwaysLoaded` with
   `PackageName` Audio, Env, Fx, Light, Nav, Script and **`L_BoyleStreet_Ext_Script`** (missed by the
@@ -256,7 +256,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   collision world now includes the 30 static `L_BoyleStreet_Ext_Script` collection components. Other-actor
   instances are not collidable, so doors/movables/pickups do not block the simulation.
 
-## 2026-10-04 — Reflection cubemap and FX cards
+## 2026-10-04 â€” Reflection cubemap and FX cards
 - **Question:** Where do `C_` cubemap reflections come from, and can the translucent cards be shown?
 - **Evidence:** `WorldInfo_4.mSceneReflection -> Level_Cubemap.BOYLE.boyle_ext_cubemap` (TextureCube,
   `FacePosX..FaceNegZ` -> six 256x256 DXT1 `CubemapFace*` Texture2D, no mips) in `L_Boyle_Ext_P`. 59
@@ -273,7 +273,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Implementation consequence:** A custom material would be needed for Arkane's per-material cubemap mask
   and the scrolling fog/smoke parameters (`Mo_Motion_Speed`, `UV_Multiply_*`).
 
-## 2026-10-04 — Dynamic lights
+## 2026-10-04 â€” Dynamic lights
 - **Question:** Which lights must be rendered in real time, and with what parameters?
 - **Evidence:** `L_Boyle_Ext_Light`: 1 `DominantDirectionalLight` (moon: Brightness 0.25, LightColor (164,209,255),
   pitch ~-18 deg), 2 `DominantSpotLight`, 1 `DominantPointLight`; 3 `StaticLightCollectionActor`s with 216 spot +
@@ -293,7 +293,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   cascades instead of the cooked `DominantLightShadowMap` / per-component distance-field `ShadowMap2D`).
 - **Implementation consequence:** Light functions (`LightFunction`, 3 in Light) and lighting channels are ignored.
 
-## 2026-10-04 — Atmosphere and post
+## 2026-10-04 â€” Atmosphere and post
 - **Question:** Where are fog and post-process settings, and how do they map to Bevy?
 - **Evidence:** Boyle Ext has no HeightFog/ExponentialHeightFog/PostProcessVolume actors. Fog is Arkane's
   `Engine.DisFog` actor + `DisFogComponent` (3 placed in `L_Boyle_Ext_Env`): `Opacity`, `LightColor`,
@@ -319,7 +319,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Implementation consequence:** Matching brightness needs original-game captures (U-011); the exposure can
   be tuned with `DISHONORED_EV_BIAS` / `DISHONORED_TONEMAP` without rebuilding.
 
-## 2026-10-04 — Skydome, moon and backdrop cards
+## 2026-10-04 â€” Skydome, moon and backdrop cards
 - **Question:** What forms the sky and the distant city, and why did it look wrong?
 - **Evidence:** `StaticMeshCollectionActor_32[99]` = `Skies.SkyDome_Multi_UV` (bounds +-205,852 uu, height 123,511,
   centred at (35379, -6871, 1793)) with `Skies02.BOYLE.Boyle_2_inst` (base `Skies.Skies_PMAT`, MLM_Unlit:
@@ -341,7 +341,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   colour stays the old dark blue: the sky gradient's bottom colour rendered as saturated cyan in gaps below the
   dome rim.
 
-## 2026-10-04 — Fidelity harness
+## 2026-10-04 â€” Fidelity harness
 - **Question:** How do we keep before/after evidence for every visual feature reproducible?
 - **Experiment:** `harness fidelity` (`tools/harness/src/fidelity.rs`): one `dishonored_runtime --inspect --script`
   run per feature config (full, baseline, no-lightmaps, no-materials, no-fx, no-dynamic-lights, no-fog, no-post,
@@ -353,7 +353,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Implementation consequence:** Once original-game captures exist at the same poses, the SSIM table turns the
   approximations above (lightmap formula, light falloff, exposure) into measurable targets.
 
-## 2026-10-04 — Frame time
+## 2026-10-04 â€” Frame time
 - **Question:** What do the fidelity features cost?
 - **Evidence:** HUD fps after 35 s of the offline game (960x540, 1 bot, same spawn), `harness_out/perf/*/t35.png`:
   baseline 160, full renderer with 208 separate lightmap atlases 18, `--no-lightmaps` 81. After shelf-packing all
@@ -367,12 +367,12 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Implementation consequence:** Needs a proper GPU profile before shipping; merging static meshes per material
   would cut draw calls the most.
 
-## 2026-10-04 — HUD rebuilt from the game's Scaleform movie
+## 2026-10-04 â€” HUD rebuilt from the game's Scaleform movie
 - **Question:** Can the in-game UI match the original without hand-drawing it?
 - **Evidence:**
   - `UI_HUD_SF.upk` holds `UI_HUD.HUD`, an uncompressed GFx v8 movie (313 KB; stage 1280x720), plus 11 `Texture2D` atlas pages.
   - Tag 1009 (external image) uses 32-bit ids. Atlas pages are `0x0009_xxxx`, and tag 1008 (sub-image) names its page by the low 16 bits; truncating ids to 16 bits made the standalone images collide with the pages.
-  - The root timeline places `masterHUD_mc` at (95.5, 54). Inside it, `_healthMeter_mc` is rotated 15° and `_manaMeter_mc` 30°, both drawn through sliding `mask_mc` layers with `upgd2/4/6` labels, beside `_equipment_mc`. It also places `_dot_mc` at centre (with exported `crosshair_gun/_crossbow/_power`), `playerStatesIcon_mc` bottom-left, and `objectives_mc`/`targetNotification_mc` top-right.
+  - The root timeline places `masterHUD_mc` at (95.5, 54). Inside it, `_healthMeter_mc` is rotated 15Â° and `_manaMeter_mc` 30Â°, both drawn through sliding `mask_mc` layers with `upgd2/4/6` labels, beside `_equipment_mc`. It also places `_dot_mc` at centre (with exported `crosshair_gun/_crossbow/_power`), `playerStatesIcon_mc` bottom-left, and `objectives_mc`/`targetNotification_mc` top-right.
   - `DisFonts_SF` `fonts_efigs` embeds "Emerge BF" and "ChaletComprime-CologneEighty" as `DefineFont3` (188 glyphs each).
 - **Experiment:**
   - `dishonored_assets::swf` parses shapes (bitmap fills), sprites, display lists, exports and external images, and flattens a sprite into textured quads.
@@ -386,7 +386,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Confidence:** CONFIRMED (layout, textures and fonts come straight from the movie). Script-driven animation (refill flashes, upgrade lengths, the stealth indicator) is not reproduced.
 - **Implementation consequence:** `crates/dishonored_runtime/src/gfx_hud.rs`. Nothing from the movie is written to disk or committed; research renders go to `harness_out/` only.
 
-## 2026-10-04 — Audio containers and codecs
+## 2026-10-04 â€” Audio containers and codecs
 - **Question:** How is the game's audio stored, and which codecs must be decoded?
 - **Evidence:** 503 `.pck` files (base + DLC) start with `AKPK`; each holds one soundbank (BKHD version 65)
   and a stream table. `audio_dump survey`: 3,265 embedded + 1,908 streamed media files, all RIFF/WAVE with
@@ -396,7 +396,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Confidence:** CONFIRMED
 - **Implementation consequence:** Only Wwise Vorbis needs a decoder.
 
-## 2026-10-04 — Wwise Vorbis codebooks come from the game executable
+## 2026-10-04 â€” Wwise Vorbis codebooks come from the game executable
 - **Question:** The setup headers reference external codebooks by 10-bit index (44 codebooks in a 228-byte
   setup). Where can the codebook library come from without third-party files?
 - **Evidence:** The Wwise runtime is statically linked into `Dishonored.exe`. `exescan` finds a run of 599
@@ -410,7 +410,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Confidence:** CONFIRMED
 - **Implementation consequence:** Audio decodes from the install alone; nothing is downloaded or shipped.
 
-## 2026-10-04 — Event ids and names
+## 2026-10-04 â€” Event ids and names
 - **Question:** How are events named, and how do game objects reference them?
 - **Evidence:** `STID` only names banks. 9,821 `AkEvent` exports (1,553 distinct names) in the base packages,
   each with `RequiredBank`. `ak_survey`: FNV-1 32-bit of the lowercased name matches a bank event id for
@@ -424,7 +424,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Confidence:** CONFIRMED (hash, names); the SimEvent -> event choice is a design mapping (see AUDIO_FORMAT.md).
 - **Implementation consequence:** No name table has to be stored; ids are computed from names.
 
-## 2026-10-04 — HIRC v65 resolution
+## 2026-10-04 â€” HIRC v65 resolution
 - **Question:** Can events be resolved to playable media without a complete v65 HIRC parser?
 - **Evidence:** Play actions target sounds/containers; every node stores its direct parent after the FX block;
   Sound sources give media id and stream type; SetState actions carry (group, state); switch containers
@@ -440,7 +440,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Implementation consequence:** Random containers are played as weighted random picks, sequence containers
   as random, switches by state when known else by default switch; ambience re-picks when a pick ends.
 
-## 2026-10-04 — Runtime audio
+## 2026-10-04 â€” Runtime audio
 - **Question:** How should simulation events become sound, presentation-only?
 - **Experiment:** `crates/dishonored_runtime/src/audio.rs`: worker-thread load + decode, `SimEvent` mapping,
   movement-generated footsteps (surface from the colliding mesh name), local player 2D, others 3D with
@@ -450,7 +450,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Confidence:** APPROXIMATION for footstep surfaces, stride lengths, ambience looping and emitter selection.
 - **Implementation consequence:** Original-game captures (U-011) are needed to tune footstep cadence/levels.
 
-## 2026-10-05 — Frame time: lightmap slots, render views, batching
+## 2026-10-05 â€” Frame time: lightmap slots, render views, batching
 - **Question:** Why did the full renderer drop to about 30 fps (baseline 165)?
 - **Evidence:**
   - Bevy `RenderDiagnosticsPlugin` GPU timings reported under 1 ms for the instrumented passes, so the time was elsewhere.
@@ -467,7 +467,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Confidence:** STRONG for attribution (traces). Absolute fps needs a focused-window measurement.
 - **Implementation consequence:** `DISHONORED_NO_MERGE=1` keeps the per-instance path for comparison, and `--profile` logs fps and render-pass timings. The extension path does not compile Bevy's `LIGHTMAP` define, so global ambient also reaches baked meshes. Ambient is 60 with level lights, so the effect is small.
 
-## 2026-10-05 — How Dishonored builds missions; custom mission framework
+## 2026-10-05 â€” How Dishonored builds missions; custom mission framework
 - **Question:** How are the original missions authored, and what should a custom mission framework look like?
 - **Evidence:** `kismet_dump` / `mission original` on the Boyle packages:
   - `DishonoredObjective` "Assassinate Lady Boyle" has 27 `DishonoredTask_Custom` tasks (initial state, hidden flag). They include the costume identification step, lethal and non-lethal variants per sister and dress, optional clues and the escape.
@@ -520,7 +520,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Implementation:** `MissionState` owns a `Runner`. Actions `Conversation(ref, [npc..])` / `StopConversation(ref)`, triggers `ConversationOutput(name)` / `ConversationEnded(ref)`, `NpcDef.talk_conversation` (use hook or a conversation), `NpcDef.speaker` (original spawner -> speaker binding), approach hooks, story flags shared with the mission flags by `SF_*` name. The current lines and choice are replicated in `MissionView.dialogue` / `.choice`; the choice also joins `MissionView.choices` (the shared `CHOICE_n` input; the chooser stands still). The host loads the graphs (`dishonored_content::load_mission_conversations`, cached under `cache/`) into `MissionSetup` (stored in replays). Runtime: `hud_dialogue.rs` draws subtitles in `subtitles_mc` and choices in `playerChoice_mc`; `dialogue_vo.rs` plays each line's VO 3D on the speaker's pawn (Wwise attenuation curve) or 2D.
 - **Validation:** `harness conversation` 17/17: 81 runs over every conversation of 8 key one-shots (both choice policies), 114/114 reached lines with text and decodable VO, 21 choices, required outputs and flags, flag-check polarity; the mission end to end (doorman refuses, Lydia's choices through the number keys, Miss White's output and flag reach the rules, Brisby's approach then use hook, "Come In" completes the mission), view replication and determinism; a rendered client capture with subtitle and choice screenshots and 3D VO.
 - **Confidence:** CONFIRMED for the data model, hook/name mapping and VO resolution; LIKELY for condition and soiree output order; timing details and concurrency are APPROXIMATIONS (U-035..U-038).
-## 2026-10-05 — Original navigation is a UE3 navmesh (replaces the invented waypoint graph)
+## 2026-10-05 â€” Original navigation is a UE3 navmesh (replaces the invented waypoint graph)
 - **Question:** What is in the `L_*_Nav` packages, and can bots/NPCs path on it instead of the invented AI-point graph?
 - **Evidence:** `L_Boyle_Ext_Nav` holds one `DisPylon` (Arkane `Pylon` subclass) with two `NavigationMeshBase` exports (walkable mesh and obstacle mesh), `NavMeshBoundsVolume`s and the empty `DisPatrolManager`/`DisFleePointManager`. No PathNode/ReachSpec network anywhere. `ENavMeshEdgeType` values read from `Engine.upk`. Path-object GUIDs match `DisDoor.NavGuid` and `DishonoredBreakableNavBlock.m_NavGuid`.
 - **Experiment:** Decoded the native serialization step by step (`nav_dump`, `enum_dump`); format in `research/dishonored/NAVIGATION.md`. Reader `dishonored_assets::navigation`, IR `dishonored_ir::nav`, pathfinding `dishonored_world::nav` (poly A* + funnel, door/blocker gating). Survey of the whole game; real-map test `crates/dishonored_content/tests/real_nav.rs`.
@@ -532,7 +532,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Confidence:** CONFIRMED (layout, sizes, cross-references); UE3 field names LIKELY; two cross-pylon fields UNKNOWN (U-046).
 - **Implementation consequence:** `CollisionWorld` carries the map's `NavWorld` (cached `cache/<map>.nav.bin`); Contracts/FFA bots, offline session bots, the harness mission agent and NPC brains path on it through `WorldQuery::nav()`. The previous `NavGraph` (AI points + raycast and drop edges) is gone; bots no longer take drops the original data does not have.
 
-## 2026-10-05 — NPC perception and behaviour from Arkane's AI tweaks
+## 2026-10-05 â€” NPC perception and behaviour from Arkane's AI tweaks
 - **Question:** Which original data drives NPC perception and reactions, and how close can `dishonored_ai` follow it?
 - **Evidence:** pawn tweaks (`Twk_Pawn_Boyle_Party.*`, level script packages) -> brain tweaks (`AI_BrainTweaks_Elite.BrainTweaks_Guard_Elite_Party`, `AI_BrainTweaks_Civilian.BrainTweaks_Civilian`) -> attention process -> `DisTweaks_PawnAttention` profiles (`Twk_Attn_Guard_Unsuspecting/Suspecting`, `Twk_Attn_Default_Neutral`, `Twk_Attn_Noncombatant_*`), `Twk_Vision_Default`, behaviour/sub-state tweaks (Search, Panic, Combat, TriggerAlarm, Guard), `DefaultAI.ini` (noise loudness table, reaction delay, search crumbs, skirmish caps), `DefaultNPC.ini`. Enums via `enum_dump`. Arkane tweak inheritance (`m_FallbackChainCooked`, `m_FallbackSkip`) now resolved by `TweakDb`.
 - **Experiment:** `AiConfig` loader (`dishonored_assets::ai_config`, retail test checks it against the documented values); brains rewritten around per-stimulus attention with the original thresholds/leaks/increases, vision cones, noise contexts, reaction delay, Notice/Investigate/Search/Combat/Panic behaviours, skirmish caps, flee points and help barks (`research/dishonored/AI.md`). Harness runs before (`harness_out/baseline_*`, binaries built at b23dec7) and after.
@@ -542,7 +542,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   - Harness (3-minute Contracts, same seeds): contract kills 10 -> 7, pursuits 14 -> 9, guard-combat ticks 4,565 -> 13,685, civilian-flee ticks 13,792 -> 206,173 (panics last until attention leaks below the Investigate stop: 0.015-0.025/s), NPC deaths 1 -> 5. Mission: completes (host at 13 s, done at 23 s) but the assassination is now witnessed (wider original outer cone 160 deg / 1700 uu): detected 7, alarms 2, one agent death.
 - **Confidence:** data CONFIRMED; vision-rate combination SPECULATIVE (U-041); no-amount increase semantics LIKELY (U-042); patrol topology, attack patterns, alarms OPEN (U-043, U-044).
 - **Implementation consequence:** `SimConfig.gameplay.ai` (cache `gameplay_config.v2.json`) feeds every crowd at match start; mission `Alert`/`Calm` commands go through the attention model.
-## 2026-10-05 — Menus, settings and the launcher
+## 2026-10-05 â€” Menus, settings and the launcher
 - **Question:** How are the original main, pause and options menus built, where do their texts
   and settings come from, and can the port reproduce them from the install?
 - **Evidence:**
@@ -723,7 +723,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 
 - **Question:** How does the original turn vision, hearing and stimuli into attention and
   behaviour (U-041..U-045)?
-- **Evidence / method:** Ghidra on `Dishonored.exe` (70da9613…). New helpers in
+- **Evidence / method:** Ghidra on `Dishonored.exe` (70da9613â€¦). New helpers in
   `research/ghidra/`: `FuncDecomp.java` (functions with callees; seeds by address, name,
   `str:` string users, `ref:` data users, `vt:` whole vtable; lists the constants each function
   reads), `OffsetScan.java` (functions using given field offsets). `ClassDecomp.java` now picks
@@ -954,7 +954,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   the Engine class defaults, `DisLookatConfig.DefaultLookatConfig`, the elite guard physics
   asset and sockets; `tweaks` for pawn, armour and behaviour tweaks; `npc_anim_dump` for the
   chains and player sets; the 0x00B7F8A0 decompile from the previous round for the accessories.
-- **Findings** (details in `dishonored/ANIMATION.md` §2-§11, `animation/EDGE_ANIM.md`):
+- **Findings** (details in `dishonored/ANIMATION.md` Â§2-Â§11, `animation/EDGE_ANIM.md`):
   - Locomotion node: polar velocity smoothing (2000 / 100 / 0.1 class defaults), diagonal ratio
     `cos + sin` of the angle between loops, sync-group rate `len * speed / sum(w * speed * len)`
     times the modifier's speed multiplier, modifier crossfade 0.5 s, transitions only below
@@ -1214,7 +1214,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 
 - **Question:** What do the 44 Boyle `InterpTrackFaceFX` tracks hold, where is the lip sync data, and how does it move the head?
 - **Method:** new `export_hex` tool on the cooked tracks, `FaceFXAnimSet` and `FaceFXAsset` exports; the archive layout read from the bytes (string tables, counts, record sizes checked against the next record), then a reader decoding every Boyle archive to its last byte (`facefx_dump`); `obj_dump` / `skel_dump` to tie actors to head meshes and to compare the reference pose with the mesh bind pose.
-- **Findings** (`dishonored/ANIMATION.md` §12): the cooked FaceFX tracks are empty (12 bytes each, 18 + 16 + 10). Lip sync is the voice data's `FaceFXAnimSet`: one animation per blurb GUID, Hermite curves on face graph nodes, blend 0.16 / 0.22 s. The head mesh's `FaceFXAsset` holds the master bone list (reference, inverse reference rotation, bone pose links with position delta and absolute rotation) and the compiled face graph (combiners and bone poses, linear and type-2 links; ranges with their reciprocals). FaceFX is right-handed: Y mirrored against the mesh.
+- **Findings** (`dishonored/ANIMATION.md` Â§12): the cooked FaceFX tracks are empty (12 bytes each, 18 + 16 + 10). Lip sync is the voice data's `FaceFXAnimSet`: one animation per blurb GUID, Hermite curves on face graph nodes, blend 0.16 / 0.22 s. The head mesh's `FaceFXAsset` holds the master bone list (reference, inverse reference rotation, bone pose links with position delta and absolute rotation) and the compiled face graph (combiners and bone poses, linear and type-2 links; ranges with their reciprocals). FaceFX is right-handed: Y mirrored against the mesh.
 - **Port changes:** `dishonored_assets::facefx` (reader, curve / graph / bone evaluation); `DialogueLineView.blurb`; `runtime::facefx` (anim index over the map's packages, actor per model from its parts' `FaceFXAsset`, line start clock); `npc_anim::animate` applies the bone offsets after the face slot, before look-at.
 - **Tests:** `dishonored_assets` `facefx::hermite_and_links`, `facefx::boyle_facefx` (every Boyle actor and set decodes; servant graph wiring, jaw open about 20 degrees, a servant line opens the mouth; skipped without the install).
 - **Confidence:** CONFIRMED for the layout, the empty tracks and the actor / set links; LIKELY for the blending rules and for playback being tied to the blurb (U-380).
@@ -1241,7 +1241,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 
 - **Question:** How does the original blend FaceFX bone poses and combine them with the animation (U-380)?
 - **Method:** exe string scan (FaceFX RTTI, the link function formula strings, `SHOWFACEFXBONES`); Ghidra `StrUsers` (console command 0x006C75A0 -> flag 0x01448FD4), `Decomp` on its users, `OffsetScan` for `SkeletalMeshComponent.FaceFXActorInstance` (+0x390), `Decomp` of the 0x390 users; `prop_layout` / `obj_dump` for `FaceFXBlendMode` and its default.
-- **Findings** (`dishonored/ANIMATION.md` §12): 0x00725EA0 is the FaceFX update. Position = reference + sum of value x delta. Rotation = deltas `slerp(ref, pose, w) x ref^-1` multiplied onto the reference (true slerp when the dot is at most 0.55, else lerp), then normalized. Additive blend mode (the engine default, not overridden): position += FaceFX - mesh reference; rotation = (FaceFX x mesh reference^-1) x animated, after the whole AnimTree. Link function types follow the registration order of their classes; one-clamp is `1 if x <= 1 else 1 / x` (the reader had it wrong; unused in Boyle).
+- **Findings** (`dishonored/ANIMATION.md` Â§12): 0x00725EA0 is the FaceFX update. Position = reference + sum of value x delta. Rotation = deltas `slerp(ref, pose, w) x ref^-1` multiplied onto the reference (true slerp when the dot is at most 0.55, else lerp), then normalized. Additive blend mode (the engine default, not overridden): position += FaceFX - mesh reference; rotation = (FaceFX x mesh reference^-1) x animated, after the whole AnimTree. Link function types follow the registration order of their classes; one-clamp is `1 if x <= 1 else 1 / x` (the reader had it wrong; unused in Boyle).
 - **Port changes:** `facefx::bone_poses` (replaces `bone_deltas`) with the original slerp; the runtime builds additive offsets against the bind pose and applies them after the AnimTree layers, pre-multiplied.
 - **Tests:** `dishonored_assets` facefx tests (slerp branches, one-clamp, jaw open about 20 degrees through the new blend).
 - **Confidence:** CONFIRMED for the blending and the combine; graph evaluation and blend in / out remain LIKELY.
@@ -1533,7 +1533,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
   LIKELY for the viewpoint explanation (U-572); APPROXIMATION for the skeletal scenery's lighting
   and pose (U-571). Open: U-570 (wind not drawn, complex permutations), U-573 (base-pass ambient).
 
-- Merge reconcile (foliage survey × usable props): static reference-pose skeletal instancing is limited to `DisClimbable` and unscripted `SkeletalMeshActor`s; doors, usables, water sources and alarm bells come only from `usable_props` (animated). Boyle Ext: 514 meshes, 3757 instances, 3 static skeletal props.
+- Merge reconcile (foliage survey Ã— usable props): static reference-pose skeletal instancing is limited to `DisClimbable` and unscripted `SkeletalMeshActor`s; doors, usables, water sources and alarm bells come only from `usable_props` (animated). Boyle Ext: 514 meshes, 3757 instances, 3 static skeletal props.
 
 ## 2026-10-06: Camera, exposure and the moon (U-320, U-322, U-573 resolved; U-580..U-584)
 
@@ -1764,7 +1764,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Confidence:** CONFIRMED (measured live) for the layouts, the call paths and the jump ticks.
 - **Open:** U-800 (Kismet always runs in the original), U-801 (story flags not set by the runner), U-802 (NPC setup from tweaks / AI states), U-803 (sounds are not traced), U-804 (snap height and floor hover differ at tick 0).
 
-## 2026-10-08 — Oracle phase 4: port rule fixes found by the scenario library
+## 2026-10-08 â€” Oracle phase 4: port rule fixes found by the scenario library
 - **Question:** Which Measured / Static scenario failures are port rule bugs, and what is the original's rule?
 - **Evidence:** Ghidra (pool scripts FuncDecomp / OffsetScan / G_Callers): reload contexts 0x00C2AA80 / 0x00C2AC00 (f32 countdown, actions end when the f32 anim time reaches AnimStateExit); DishonoredCamera_Lean (vtable 0x0111E890): spring 0x00AC0A00 (k 80, c 12), 0x00AC5950 (external force, circle around the pivot), 0x00AC5540 (limit and soften), lean speed 1000 via 0x00A76590 -> 0x00AC0950; NPC rotation intents 0x00B799C0 / 0x00B6E970 / 0x00B71570 / 0x00B71600; hook jump trace 2026-10-08; snap line check 0x20DF.
 - **Result:**
@@ -1942,7 +1942,7 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Findings:** EFFECTS.md "Power screen effects": the Bend Time field and its two blur passes (fully decoded with constants), Blink's use of the Bend Time blur, the Dark Vision eyelid pass; Blink's lens field disassembled without constants; no Possession screen pass captured. A trail whose projectile dies at once: started and deactivated in the same tick (the trail component is deactivated with the projectile).
 - **Port:** `power_pp.rs` (intensity curves, textures), `ark_post.rs` / `.wgsl` (field, blur, eyelid pass, new bindings), `SessionView.time_bends`; `SimEvent::Fired` now carries kind, origin and velocity; `FxRequest::EndedTrail`, `StopAtOnce`; oracle presenter mirrors it; `Flare_Bolt_Trail` for incendiary bolts.
 - **Confidence:** CONFIRMED for the shader terms and the Bend Time constants; LIKELY for the eyelid Alpha curve; curve-fit (from the capture) for Blink's blur intensity.
-## 2026-10-08: AI brain rebuilt on the slot model (systems/ai.md �1.4a, �11)
+## 2026-10-08: AI brain rebuilt on the slot model (systems/ai.md ï¿½1.4a, ï¿½11)
 - **Question:** How does the original turn attention into behaviours, and does the port's React / select state machine match?
 - **Evidence:** The attention-behaviour stimuli (ids 63 / 87 / 17) are built only by 0x00b24d00, called by 0x00b25890, which steps the attention component's behaviour level one level at a time toward the top target's (begins up, ends down: 0x00b22ec0), only for an enemy top target (+0x45 == 2); their delay getter returns 0 (0x008fc830), while `m_ReactionDelay` is the delay of SearchRequest / Help (0x00b01650) and `m_MagicReactionDelay` of WitnessMagic (0x00b016e0). Investigate's PathingFail handler 0x00b33850, Search's decision 0x00afeb00 (StareAtUnreachable / Stand / GenericAction with `m_fSearchAnimCooldown` / TrackTarget), ManageAttacks aggression (0x00b3dc10, 0x00b39e50, 0x00b3e070, 0x00b3deb0), WitnessMagic (0x00b23e50 and the power callers of 0x00bf9fb0), MagicResponse (0x00af2800).
 - **Experiment:** Ported into `dishonored_ai::slots` (slot stack, stimulus queue, attention poster) and the behaviours; compared with the original brain channels (NpcBehavior per slot, player attention) of `ai/boyle_hear_shot`, `ai/boyle_doorman_duel` and the measured patrol speed.
@@ -2176,3 +2176,16 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613…c6fb` unless
 - **Result:** the host fires ten event classes from the sim and mission events (`kismet_host/player_events.rs`, 154 Possessed, 4 PlayerCrouch, 15 PlayerCombat, 79 + 2 Task events, 6 Choke, 9 Windblasted, 21 PowerUsed (four powers), 25 Lock, 1 Climb); `DisSeqCond_IsPlayerInCombat` reads the decoded `m_bIsInCombat` flag instead of the autosave set. The rest (movables, keyholes, interact, tripwires, rigid bodies, particles, destroyed, holster, inventory, journal, mana threshold, objective completed) have a decoded firing rule but no system in the port.
 - **Confidence:** CONFIRMED for the firing functions, outputs and conditions of the fed classes; LIKELY for the port's `PlayerCombat` (the registry and DLC terms of 0x00AB9FA0 are not modelled), for the PowerUsed moments of Windblast and Swarm (the activations were read, the port's cast press / notify stands for the call), and for `Windblasted` output 1 (the pushed/thrown choice by the resulting state class was read, not the class name).
 - **Implementation consequence:** `SimEvent::PowerUsed` / `Windblasted`; `MissionState::task_log`; `kismet_host::step` takes the climbable names; `HostState.player_ev` (serde default); `FED_EVENTS` gains the classes (and `NOT_FED_EVENTS` keeps `PowerEquipped` out); no protocol change.
+## 2026-10-08: Lean onset and crossbow shot time re-read against the scenario captures (movement.md MV-4, ranged.md F14)
+- **Question:** Why does the port's lean ramp run slow against the original (`movement/lean`, `lean_boyle`), and why is `combat/crossbow_hit` shot -> load 1.583 s against 1.555 s?
+- **Evidence:** the original-side scenario captures (`harness_out/oracle/scenario/traces/*.original.json`): lean angle 2.175, 4.307, 6.383 ... 15.007 (tenth tick) per tick at a fixed 1/60 s, first head step on the third tick after a press (three presses); the port's angle series, replayed in a standalone model, equals it to 0.01 degrees one frame earlier. 0x00AC5950 / 0x00AC5540 / 0x00ACAAB0 / 0x0041D720 / 0x00A76590 / 0x00AC0950 / 0x00AC5420 re-read (roll = atan2(dy, dz) of the interpolated head from the pivot; fixed-step fields +0x48 / +0x4C / +0x58). Crossbow: `Crossbows_as.Crossbow_as` `Crossbow_Fire` `DishonoredNotify_FireProjectile` 0.0336 s (`anim_notifies`), `Ply_Crossbow_as` `AnimStateExit` 0.3984, capture: fire sound tick 6, bolt tick 8, reload sound tick 30, `Reload_Out` sound tick 102.
+- **Result:** the lean spring was right; the old checks (2.264 / 12.206 / 15.0 on the sixth tick, 14.2 at 12 ticks) came from a hand trace that the captures contradict. What the port lacked: the lean influence is a fixed-step influence (0.016667 s step, accumulator) whose first 1/60 s frame spends no step, and the lean state's release timer. The crossbow bolt leaves on the fire clip's `FireProjectile` notify (third tick of the action), not on the next tick; the action end, reload In and timed stage already agreed with the capture.
+- **Confidence:** CONFIRMED for the angle series, the notify and the capture ticks; LIKELY for the stepping loop (not located; read from the interpolation in 0x00ACAAB0). Open: the lean release (original pins the angle six steps, the port three; a head that the limiter does not re-place fits at 0.14 deg rms), the camera POV position easing in the captures.
+- **Implementation consequence:** `PlayerState.lean_state / lean_release / lean_acc / lean_ext` (protocol 24), `LeanConfig.fixed_time_step / lean_speed / release_time`, `movement::{lean_state_tick, step_lean, lean_step}`; `CombatTuning.crossbow_fire_notify / crossbow_fast_fire_notify`, `left_hand::bolt_shot_tick` (crossbow, sleep dart, incendiary bolt), the crossbow fire times read from the AnimSets into `crossbow.values["fire.*_time"]`; `lean` / `lean_boyle` checks re-based on the captures.
+
+## 2026-10-08: Movable props (pick up, carry, drop, throw) and the MovablePickedUp / MovableDropped events
+- **Question:** What does the original do when Corvo picks up a `DishonoredMovable` (bottle, glass, pan, crate), carries it, drops it and throws it, and what do the hits do (damage, break, noise)?
+- **Evidence:** `oracle index fn` of the grab state `StatePlayerGrabMovable` (0x00A6FEF0 / 0x00A698C0 / 0x00A77540 / 0x00A77600 -> 0x00A69860 / 0x00A698E0), the empty hands' item `DishonoredItemEmpty` (0x00C3D030 grab, 0x00C4C440 tick, 0x00C4C510 -> 0x00C4C190 hold place, 0x00C45340 release), the component (0x00A45FD0 pick-up, 0x00A46380 release, 0x00A465E0 tick), the pawn slots 380-383 (0x00AB34C0, 0x00AAD900, 0x00B519F0, 0x00B51A20), the Use handler 0x00AD5BA0 and the action handler 0x00AB4240, the breakable collision 0x00A40CF0 with the movable's `GetDamage` / `SetDamage` (0x00A428C0 / 0x00A428D0); `tweaks` of `Twk_EmptyHands`, `movable_twk.*`; DefaultItem.ini `[DisMovableComponent]`; the Startup AnimSets (no prop clip); dishonored-bevy `props.rs` / `carry.rs` read (controls agree, positions and the weight shares are guesses; nothing copied).
+- **Result:** systems/movables.md (M-1 .. M-9). Use picks the focused interactable up (`MovablePickedUp`, originator the PROP: KISMET.md had it reversed), the prop hangs at `eye + forward x (box.min.x + box.max.x + 100) - up x (box.min.z + box.max.z + 70 - show height)` with the camera's rotation after a 0.066 s slide; Use drops, Primary throws it along the view at `Attribute_ThrowStrength` 2000 (`MovableDropped` for both); damage and the other states drop it; hits above `m_fMinSpeedToBeDamaged` / `CauseDamage` / on-drop speeds deal `m_Damage` to the pawn hit and to the prop (a bottle breaks), with the contact type's AI noise (Env_Glass 500 uu Anomaly). No carry animation exists for props.
+- **Confidence:** CONFIRMED for the structure, addresses, tweak data and the hold formula; LIKELY for the throw units (velocity), the `m_Damage` amount on a struck pawn, the `m_bDropped` setter (drop only), the contact notification gates (50 / 0.3) and the focus cone; OPEN: the height test on a struck pawn, the `m_Damage` 0 speed-and-mass formula, bounce / friction, the swept `MoveActor` of a held prop, the candle prefabs' pick-up events (candlesticks have no `m_bInteractable`).
+- **Implementation consequence:** protocol 27; `dishonored_sim::movables` (new), `WorldState::movables`, `PlayerState::holding`, `SimEvent::MovablePickedUp / MovableDropped / MovableImpact`, `SoundCategory::Thrown`, `DamageCause::ThrownObject`; `MovableDef` (`WorldActors::movables`, cache `worldactors2`), `MovableConfig` (`items.movable`), `NoiseTable::prop_contacts / environment`; Kismet host feeds the two events; `MissionMatch` spawns / saves / removes the props per map and streamed level; runtime `movables.rs` (placed mesh follows the sim, HUD prompt "Carry"); oracle channels `mov.*` and `fixtures/oracle/scenarios/movable/*` (queued in capture_queue.txt).

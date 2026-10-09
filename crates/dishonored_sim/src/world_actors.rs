@@ -300,6 +300,14 @@ impl WorldActorsState {
             out.extend(ev);
         }
         for e in events {
+            // A movable striking something fast: the same actor's breakable takes its `m_Damage`
+            // (the self `TakeDamage` of the rigid-body collision, 0x00A40CF0).
+            if let SimEvent::MovableImpact { breakable: Some(b), damage, by, .. } = e {
+                if let (Some(d), Some(s)) = (defs.breakables.get(*b as usize), self.breakables.get_mut(*b as usize)) {
+                    s.take_damage(d, *damage, "", *by);
+                }
+                continue;
+            }
             let SimEvent::Explosion { owner, position, sticky } = e else { continue };
             let kind = if *sticky { ProjectileKind::StickyGrenade } else { ProjectileKind::Grenade };
             let ex = &grenade_cfg(cfg, kind).explosion;
@@ -399,7 +407,7 @@ mod tests {
 
     fn battery_defs(allow_empty: bool) -> WorldActors {
         let bat = BreakableDef { name: "Bat".into(), health: 10, battery: Some(BatteryDef { max_charges: 50, initial_charges: 50, pawn_cost: 5, animal_cost: 1, watchtower_cost: 1, ..Default::default() }), ..Default::default() };
-        WorldActors { breakables: vec![bat], receptacles: vec![ReceptacleDef { name: "Rec".into(), battery: Some("Bat".into()), allow_empty, ..Default::default() }] }
+        WorldActors { breakables: vec![bat], receptacles: vec![ReceptacleDef { name: "Rec".into(), battery: Some("Bat".into()), allow_empty, ..Default::default() }], ..Default::default() }
     }
 
     #[test]

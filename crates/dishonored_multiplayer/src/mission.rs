@@ -447,6 +447,9 @@ impl MissionSetup {
 struct LevelState {
     npcs: Vec<PlayerState>,
     pickups: Vec<dishonored_sim::state::PickupState>,
+    /// The physics props (picked up, thrown or broken ones stay so).
+    #[serde(default)]
+    movables: Vec<dishonored_sim::state::MovableState>,
     brains: Vec<Brain>,
     layout: CrowdLayout,
     spawns: Vec<NpcSpawn>,
@@ -680,6 +683,7 @@ impl MissionMatch {
                 let seed = self.setup.def.title.bytes().fold(0x811C_9DC5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
                 dishonored_sim::inventory::spawn_pickups(&mut self.world, &placed, seed, &|_: &str| None);
             }
+            self.spawn_movables(Some(package));
         } else {
             self.levels_visible.remove(&key);
             if !here {
@@ -692,6 +696,18 @@ impl MissionMatch {
                 self.original_spawned.remove(&id);
             }
             self.world.pickups.retain(|p| !p.package.eq_ignore_ascii_case(package));
+            dishonored_sim::movables::remove_package(&mut self.world, package);
+        }
+    }
+
+    /// The map's placed movable props of the levels that are present.
+    fn spawn_movables(&mut self, only_package: Option<&str>) {
+        let Some(defs) = self.setup.world_actors.get(&self.current_map.to_ascii_lowercase()) else { return };
+        let defs: Vec<_> = defs.movables.iter().filter(|m| only_package.is_none_or(|p| m.package.eq_ignore_ascii_case(p))).cloned().collect();
+        for m in defs {
+            if self.level_present(&m.package) {
+                dishonored_sim::movables::spawn(&mut self.world, &m);
+            }
         }
     }
 
@@ -739,6 +755,8 @@ impl MissionMatch {
                 self.spawn_mission_npc(i, cfg);
             }
         }
+        // The map's physics props (`DishonoredMovable`).
+        self.spawn_movables(None);
         // The map's placed pickups; a spawner's `m_pStealablePickup` rides on its pawn.
         if let Some(mut placed) = self.setup.pickups.get(&self.current_map.to_ascii_lowercase()).cloned() {
             // [kismet] Pickups with a `DisSeqEvent_PickupPickedUp` stay Kismet usables.
@@ -1017,7 +1035,17 @@ impl MissionMatch {
             let npcs: Vec<PlayerState> = self.world.players.iter().filter(|p| !humans.contains(&p.id)).cloned().collect();
             let fresh = Crowd { ai: self.crowd.ai.clone(), ..Default::default() };
             let crowd = std::mem::replace(&mut self.crowd, fresh);
-            self.saved.insert(self.current_map.to_ascii_lowercase(), LevelState { npcs, pickups: std::mem::take(&mut self.world.pickups), brains: crowd.brains.clone(), layout: crowd.layout.clone(), spawns: crowd.spawns.clone(), level: Crowd { brains: Vec::new(), ..crowd } });
+            // A prop in a player's hands goes with him (it is dropped where the level is left).
+            for h in &humans {
+                if let Some(p) = self.world.player_mut(*h) {
+                    p.holding = None;
+                }
+            }
+            for m in self.world.movables.iter_mut().filter(|m| m.phase == dishonored_sim::state::MovablePhase::Held) {
+                m.phase = dishonored_sim::state::MovablePhase::Rest;
+                m.holder = None;
+            }
+            self.saved.insert(self.current_map.to_ascii_lowercase(), LevelState { npcs, pickups: std::mem::take(&mut self.world.pickups), movables: std::mem::take(&mut self.world.movables), brains: crowd.brains.clone(), layout: crowd.layout.clone(), spawns: crowd.spawns.clone(), level: Crowd { brains: Vec::new(), ..crowd } });
             self.world.players.retain(|p| humans.contains(&p.id));
             self.world.projectiles.clear();
             // [streaming] The persistent map change drops the old map's streamed sublevels.
@@ -1031,6 +1059,7 @@ impl MissionMatch {
                 Some(ls) => {
                     self.world.players.extend(ls.npcs);
                     self.world.pickups = ls.pickups;
+                    self.world.movables = ls.movables;
                     let routes = self.setup.routes.get(&self.current_map.to_ascii_lowercase()).cloned().unwrap_or_default();
                     self.crowd = Crowd { brains: ls.brains, layout: ls.layout, spawns: ls.spawns, ai: self.crowd.ai.clone(), routes, factions: ls.level.factions, player_faction: ls.level.player_faction, tweak_factions: ls.level.tweak_factions, zones: ls.level.zones, overrides: ls.level.overrides, alarms: ls.level.alarms, lights: ls.level.lights, distractors: ls.level.distractors, tweak_distraction_cooldown: ls.level.tweak_distraction_cooldown, tweak_health_max: ls.level.tweak_health_max, ..Default::default() };
                 }
@@ -1229,6 +1258,12 @@ impl MissionMatch {
         if let Some(defs) = self.setup.world_actors.get(&key) {
             let st = self.world_actors.entry(key).or_insert_with(|| dishonored_sim::world_actors::WorldActorsState::new(defs));
             let evs = st.step(defs, &out.events, &cfg.gameplay, dt);
+            // A movable whose breakable reached its last step is gone (whoever holds it lets go).
+            for e in &evs {
+                if let dishonored_sim::world_actors::WorldEvent::Broken { breakable, output: 0 } = e {
+                    dishonored_sim::movables::on_broken(&mut self.world, *breakable as u32);
+                }
+            }
             self.world_events.extend(evs);
         }
         let mut events = Vec::new();
@@ -1263,7 +1298,13 @@ impl MissionMatch {
                 events.push(MissionEvent::Choice { player: *id, index: k });
             }
             let pressed = inp.buttons & dishonored_sim::input::buttons::USE != 0;
+            // A Use that took a prop in the hands or let go of one did nothing else (the Use handler
+            // 0x00AD5BA0 returns after the grab / drop).
+            let prop_use = out.events.iter().any(|e| matches!(e, SimEvent::MovablePickedUp { id: p, .. } | SimEvent::MovableDropped { id: p, .. } if p == id));
             if pressed && self.use_held.insert(*id) {
+                if prop_use {
+                    continue;
+                }
                 match self.interaction(*id) {
                     Some(Interaction::Mission(MissionEvent::Talked(npc))) => events.push(MissionEvent::TalkedBy { npc, player: *id }),
                     Some(Interaction::Mission(e)) => events.push(e),

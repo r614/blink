@@ -28,6 +28,7 @@ pub mod takedown;
 pub mod tuning;
 pub mod vitals;
 pub mod volumes;
+pub mod movables;
 pub mod world_actors;
 
 use dishonored_ir::gameplay::GameplayConfig;
@@ -207,22 +208,28 @@ pub fn step_world(
         state.players[i].pitch = input.pitch.clamp(-89.0, 89.0);
         let choking = takedown::step_choke(state, i, &input, dt, g, &mut out.events);
         takedown::step_carry(state, i, &input, dt, world, g, &mut out.events);
+        // A prop in the hands: Use drops it, Primary throws it (the press does nothing else).
+        let hands_busy = movables::step_holder(state, i, &input, world, g, &mut out.events);
         let p = state.players[i];
         let mut used = false;
-        if !choking && p.carrying.is_none() && p.just_pressed(&input, input::buttons::USE) && p.mode == MoveMode::Walking && p.action_lock <= 0.0 && p.sword.phase == state::SwordPhase::Idle {
+        if !choking && !hands_busy && p.carrying.is_none() && p.holding.is_none() && p.just_pressed(&input, input::buttons::USE) && p.mode == MoveMode::Walking && p.action_lock <= 0.0 && p.sword.phase == state::SwordPhase::Idle {
             used = true;
             if let Some(vi) = takedown::choke_target(state, &p, world, g, &cfg.tuning) {
                 takedown::start_choke(state, i, vi, g, &mut out.events);
             } else if !inventory::try_use_pickup(state, i, world, g, &mut out.events) {
-                if let Some(b) = takedown::body_in_view(state, &p, world, g) {
-                    takedown::lift(state, p.id, b, &mut out.events);
-                } else {
-                    used = false;
+                // The crosshair picks the body or the prop nearer its centre.
+                let body = takedown::body_focus(state, &p, world, g);
+                let prop = movables::focus(state, &p, world, g);
+                match (body, prop) {
+                    (Some((b, bc)), Some((_, pc))) if bc >= pc => takedown::lift(state, p.id, b, &mut out.events),
+                    (Some((b, _)), None) => takedown::lift(state, p.id, b, &mut out.events),
+                    (_, Some((mi, _))) => movables::grab(state, i, mi, g, &mut out.events),
+                    (None, None) => used = false,
                 }
             }
         }
         // Use on a climbable chain (its interactable, 0x00A23130), on foot or in the air.
-        if !used && !choking && p.just_pressed(&input, input::buttons::USE) && p.action_lock <= 0.0 {
+        if !used && !choking && !hands_busy && p.just_pressed(&input, input::buttons::USE) && p.action_lock <= 0.0 {
             climb::try_use_grab(&mut state.players[i], world, &mvc, g.items.inventory.interact_distance, inventory::INTERACT_COS, &mut out.events);
         }
         match input.action {
@@ -249,8 +256,9 @@ pub fn step_world(
         movement::step_movement(p, &input, sword_out, !locked, &ctx, &mut out.events);
         noise::track_fall(&p0, p);
         noise::step_footfalls(p, g, dt, &mut out.events);
-        // No sword while choking, carrying or in an action.
-        let sword_input = if choke_lock || p.carrying.is_some() || p.action_lock > 0.0 {
+        // No sword while choking, carrying or in an action; with a prop in the hands (the empty
+        // hands' item is out) Primary throws it instead (0x00AB4240).
+        let sword_input = if choke_lock || p.carrying.is_some() || p.holding.is_some() || hands_busy || p.action_lock > 0.0 {
             PlayerInput { buttons: input.buttons & !(input::buttons::PRIMARY | input::buttons::BLOCK), ..input }
         } else {
             input
@@ -355,6 +363,10 @@ pub fn step_world(
     // A Windblasted NPC hitting a wall (its rigid-body collision, 0x00B529C0).
     left_hand::windblast_wall_hits(state, &cfg.tuning, &g.vitals, &mut out.events);
     let world_dt = DT * powers::world_time_scale(state, g, false);
+    // Movable props: held ones follow their holder, free ones fall and strike.
+    if world_dt > 0.0 {
+        movables::step(state, world, g, world_dt, &mut out.events);
+    }
     let proj_dt = DT * powers::world_time_scale(state, g, true);
     if world_dt > 0.0 {
         left_hand::step_windblasts(state, world, mv, &cfg.gameplay.vitals, &cfg.gameplay.throw, &cfg.tuning, world_dt, &mut out.events);
@@ -575,6 +587,12 @@ pub fn state_hash(state: &WorldState) -> u64 {
     }
     for pk in &state.pickups {
         mix(pk.id as u64 | (pk.active as u64) << 32);
+    }
+    for m in &state.movables {
+        mix(m.id as u64 | (m.phase as u64) << 32 | (m.gone as u64) << 34);
+        for f in [m.position.x, m.position.y, m.position.z] {
+            mix(f.to_bits() as u64);
+        }
     }
     for t in &state.traps {
         mix(t.id as u64 | (t.triggered as u64) << 32 | (t.detonated as u64) << 33);

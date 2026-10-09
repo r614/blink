@@ -15,7 +15,7 @@ use crate::content::Content;
 use crate::tweaks::{TMap, TVal, TweakDb, get, get_f32};
 use anyhow::Result;
 use dishonored_ir::ai::NoiseContext;
-use dishonored_ir::world_actors::{BatteryDef, BreakStepDef, BreakableDef, ReceptacleDef, WorldActors};
+use dishonored_ir::world_actors::{BatteryDef, BreakStepDef, BreakableDef, MovableDef, ReceptacleDef, WorldActors};
 use glam::Vec3;
 use std::sync::Arc;
 use ue3_package::properties::find;
@@ -109,6 +109,85 @@ fn breakable(pkg: &Arc<Package>, i: usize, package: &str, class: &str, db: &Twea
     })
 }
 
+/// Placed classes of the movables (`DishonoredMovable` and the DLC05 subclass).
+pub const MOVABLE_CLASSES: &[&str] = &["DishonoredMovable", "DisDLC05_Movable"];
+
+fn weight_class(m: &TMap) -> u8 {
+    match get(m, "m_MovableParams.m_WeightClass") {
+        Some(TVal::Name(n)) => ["MWC_Tiny", "MWC_Small", "MWC_Medium", "MWC_Large"].iter().position(|x| x == n).unwrap_or(0) as u8,
+        Some(TVal::I(v)) => (*v).clamp(0, 3) as u8,
+        _ => 0,
+    }
+}
+
+/// A placed movable: its `DisTweaks_Movable` (class defaults `DisTweaks_Movable` /
+/// `DisTweaks_StaticBreakable` when the tweak leaves a field), the static mesh and its box.
+fn movable(content: &Content, pkg: &Arc<Package>, i: usize, package: &str, class: &str, db: &TweakDb, res: &mut PropResolver) -> Option<MovableDef> {
+    let tweak = res.inherited_object_path(pkg, i, "m_pMovableTweaks")?;
+    let m = db.try_resolve(&tweak)?;
+    let own = pkg.read_object(i).ok()?.properties;
+    let eff = res.effective(pkg, i);
+    let rot = find(&eff, "Rotation").and_then(|x| x.as_rotator()).unwrap_or([0; 3]);
+    let flag = |k: &str| boolean(&m, k).unwrap_or(false);
+    let interact = get(&m, "m_pInteractableTweaks").and_then(|v| if let TVal::Obj(o) = v { db.try_resolve(o) } else { None }).unwrap_or_default();
+    let max_distance = get_f32(&interact, "m_fMaxDistance").unwrap_or(200.0);
+    let prompt = match interact.get("m_InteractText") {
+        Some(TVal::Str(s)) => s.clone(),
+        _ => String::new(),
+    };
+    // The static mesh of the actor's `StaticMeshComponent` (its own, else the archetype's).
+    let mut mesh = String::new();
+    let (mut bmin, mut bmax) = (Vec3::ZERO, Vec3::ZERO);
+    let comp = find(&own, "StaticMeshComponent").and_then(|p| p.as_object()).filter(|o| *o != 0).map(|o| ObjRef::from_index(o));
+    if let Some(ObjRef::Export(ci)) = comp.filter(|c| matches!(c, ObjRef::Export(_))) {
+        let cown = pkg.read_object(ci).map(|h| h.properties).unwrap_or_default();
+        let located = match find(&cown, "StaticMesh").and_then(|p| p.as_object()).filter(|o| *o != 0) {
+            Some(o) => {
+                mesh = pkg.obj_path(ObjRef::from_index(o));
+                res.locate(pkg, ObjRef::from_index(o), &[])
+            }
+            None => res.inherited_object_path(pkg, ci, "StaticMesh").and_then(|p| {
+                mesh = p.clone();
+                res.locate_path(&p)
+            }),
+        };
+        if let Some((mp, mi)) = located {
+            if let Ok(sm) = crate::static_mesh::read_static_mesh(&mp, mi) {
+                bmin = sm.bounds_origin - sm.bounds_extent;
+                bmax = sm.bounds_origin + sm.bounds_extent;
+            }
+        }
+    }
+    let _ = content;
+    Some(MovableDef {
+        name: pkg.obj_name(ObjRef::Export(i)).to_string(),
+        package: package.to_string(),
+        class: class.to_string(),
+        position: Vec3::from(find(&eff, "Location").and_then(|x| x.as_vector()).unwrap_or([0.0; 3])),
+        rotation: Vec3::new(rot[0] as f32, rot[1] as f32, rot[2] as f32) * (360.0 / 65536.0),
+        tweak,
+        weight: weight_class(&m),
+        damage: int(&m, "m_MovableParams.m_Damage").unwrap_or(5),
+        interactable: flag("m_bInteractable"),
+        key_item: flag("m_bIsKeyItem"),
+        blocks_player: flag("m_bBlocksPlayer"),
+        never_blocks_player: flag("m_bNeverBlocksPlayer"),
+        max_distance,
+        prompt,
+        min_speed_to_cause_damage: get_f32(&m, "m_fMinSpeedToCauseDamage").unwrap_or(250.0),
+        min_speed_to_be_damaged: get_f32(&m, "m_fMinSpeedToBeDamaged").unwrap_or(100.0),
+        min_speed_to_be_damaged_on_drop: get_f32(&m, "m_fMinSpeedToBeDamagedOnDrop").unwrap_or(800.0),
+        contact_type: match m.get("m_pContactTypeOverride") {
+            Some(TVal::Obj(o)) | Some(TVal::Name(o)) => o.rsplit('.').next().unwrap_or(o).to_string(),
+            _ => String::new(),
+        },
+        mesh,
+        bounds_min: bmin,
+        bounds_max: bmax,
+        breakable: None,
+    })
+}
+
 fn receptacle(pkg: &Arc<Package>, i: usize, package: &str, db: &TweakDb, res: &mut PropResolver) -> Option<ReceptacleDef> {
     let props = pkg.read_object(i).ok()?.properties;
     let tweak = res.inherited_object_path(pkg, i, "m_pWhaleOilTweaks").unwrap_or_default();
@@ -144,6 +223,12 @@ pub fn extract_world_actors(content: &Content, packages: &[String], loudness: &[
                 continue;
             }
             let class = pkg.export_class(i);
+            if MOVABLE_CLASSES.contains(&class.as_str()) {
+                if let Some(mut mv) = movable(content, &pkg, i, name, &class, &db, &mut res) {
+                    mv.package = name.to_string();
+                    out.movables.push(mv);
+                }
+            }
             if BREAKABLE_CLASSES.contains(&class.as_str()) {
                 if let Some(b) = breakable(&pkg, i, name, &class, &db, &mut res, loudness) {
                     out.breakables.push(b);
@@ -154,6 +239,10 @@ pub fn extract_world_actors(content: &Content, packages: &[String], loudness: &[
                 }
             }
         }
+    }
+    // A movable that breaks is the same actor as its breakable.
+    for m in out.movables.iter_mut() {
+        m.breakable = out.breakables.iter().position(|b| b.name.eq_ignore_ascii_case(&m.name) && b.package.eq_ignore_ascii_case(&m.package));
     }
     Ok(out)
 }

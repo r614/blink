@@ -525,6 +525,29 @@ pub fn load_items_config(content: &Content, db: &TweakDb, prov: &mut BTreeMap<St
         }
     }
     l.prov.insert("items.passive_powers".into(), format!("DefaultPlayer.ini [DishonoredGame.DishonoredPowersComponent] m_Powers ({} powers)", cfg.passive_powers.len()));
+
+    // --- carrying physics props: the empty hands' tweak and DisMovableComponent (DefaultItem.ini) ---
+    let hands = "Twk_EmptyHands.Twk_EmptyHands";
+    let hm = l.obj(hands);
+    let dm = MovableConfig::default();
+    let mv = &mut cfg.movable;
+    mv.initial_grab_time = l.f(&hm, hands, "m_fInitialGrabTime", "items.movable.initial_grab_time", dm.initial_grab_time);
+    mv.hold_dist = l.f(&hm, hands, "m_fMovableHoldDist", "items.movable.hold_dist", dm.hold_dist);
+    for (i, k) in ["Tiny", "Small", "Medium", "Large"].iter().enumerate() {
+        mv.show_height[i] = l.f(&hm, hands, &format!("m_fShowMovableHeight_{k}"), &format!("items.movable.show_height[{i}]"), dm.show_height[i]);
+    }
+    let item_ini = Ini::load_layered(&content.root, "Item");
+    let sec = "DishonoredGame.DisMovableComponent";
+    for (i, k) in ["Tiny", "Small", "Medium", "Large"].iter().enumerate() {
+        if let Some(v) = item_ini.get_f32(sec, &format!("m_fMaxPawnSpeed_{k}")) {
+            mv.max_pawn_speed[i] = v;
+        }
+    }
+    if let Some(v) = item_ini.get_f32(sec, "m_fRadiusChannelReset") {
+        mv.radius_channel_reset = v;
+    }
+    l.prov.insert("items.movable.max_pawn_speed".into(), format!("DefaultItem.ini [{sec}] m_fMaxPawnSpeed_* = {:?} (class default 1.0)", cfg.movable.max_pawn_speed));
+    l.prov.insert("items.movable.contact".into(), "DishonoredKActor class defaults m_ContactPhysicsInfo: m_fMinImpactSpeed 50, m_fRefireDelay 0.3".into());
     cfg
 }
 

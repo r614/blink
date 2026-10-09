@@ -646,9 +646,43 @@ impl Default for ShadowKillConfig {
     }
 }
 
+/// Carrying physics props (`DishonoredItemEmpty` with `DisTweaks_ItemEmpty`, `DisMovableComponent`,
+/// `DishonoredKActor`'s contact info): research/dishonored/systems/movables.md.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MovableConfig {
+    /// `DisTweaks_ItemEmpty.m_fInitialGrabTime` (0x00C4C190: the object slides from where it was
+    /// grabbed to the hold position over this time).
+    pub initial_grab_time: f32,
+    /// `m_fMovableHoldDist` (-100): the hold distance in front of the eye is
+    /// `box.min.x + box.max.x - hold_dist`.
+    pub hold_dist: f32,
+    /// `m_fShowMovableHeight_{Tiny,Small,Medium,Large}`: the object hangs
+    /// `box.min.z + box.max.z + 70 - show_height` below the eye.
+    pub show_height: [f32; 4],
+    /// `DisMovableComponent.m_fMaxPawnSpeed_{Tiny,Small,Medium,Large}` (DefaultItem.ini): the pawn's
+    /// ground speed factor while holding a prop of that weight class.
+    pub max_pawn_speed: [f32; 4],
+    /// `DisMovableComponent.m_fRadiusChannelReset`: a released prop collides with its holder again
+    /// once it is this far from him.
+    pub radius_channel_reset: f32,
+    /// `DishonoredKActor.m_ContactPhysicsInfo` (class defaults): `m_fMinImpactSpeed` and
+    /// `m_fRefireDelay` of the contact notifications.
+    pub min_impact_speed: f32,
+    pub impact_refire: f32,
+}
+
+impl Default for MovableConfig {
+    fn default() -> Self {
+        Self { initial_grab_time: 0.066, hold_dist: -100.0, show_height: [75.0, 90.0, 90.0, 90.0], max_pawn_speed: [1.0; 4], radius_channel_reset: 200.0, min_impact_speed: 50.0, impact_refire: 0.3 }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ItemsConfig {
     pub inventory: InventoryConfig,
+    /// Carrying and throwing physics props.
+    #[serde(default)]
+    pub movable: MovableConfig,
     pub possess: PossessConfig,
     pub bend_time: BendTimeConfig,
     pub swarm: SwarmConfig,

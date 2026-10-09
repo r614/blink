@@ -1,0 +1,32 @@
+// Dropping a carried prop (research/dishonored/systems/movables.md): Use while holding (0x00AD5BA0 ->
+// pawn slot 381 with 0 -> 0x00C45340 without the impulse): the prop is released where it hangs (a
+// trace from the pawn moves it back out of geometry), `DisSeqEvent_MovableDropped` (0x00A46380), then it
+// falls as a rigid body. A bottle dropped from the hands falls well below m_fMinSpeedToBeDamaged 1000:
+// it does not break.
+// Port: `dishonored_sim::movables`.
+(
+    name: "movable/drop_bottle",
+    system: Physics,
+    map: "L_Boyle_Int_P",
+    description: "Pick up a bottle of Boyle Int and drop it: released at rest, falls, does not break.",
+    setup: (player: Some((position: (-1067, -1850, 200), yaw: 270, pitch: -20, snap_to_floor: true)), kismet: true, kismet_start: Some("ChangeLvl_fromBoyleExterior_toBoyleInterior"), original_npcs: false, settle: 30, seed: 1),
+    ticks: 150,
+    input: [
+        (tick: 10, action: Press(Use)),
+        (tick: 20, action: Look(yaw: 270, pitch: 0)),
+        (tick: 40, action: Press(Use)),
+    ],
+    checkpoints: [
+        (name: "dropped", expect: [
+            (metric: Count("Sim:MovableDropped[thrown=false]"), value: 1, tol: 0, source: "Use while holding: slot 381 with 0", status: Static),
+            (metric: Count("Sim:MovablePickedUp"), value: 1, tol: 0, source: "the dropping press does not pick anything up", status: Static),
+            (metric: Count("Sim:MovableImpact"), value: 0, tol: 0, source: "a drop is below m_fMinSpeedToBeDamaged (1000)", status: Static),
+        ]),
+        (name: "lands", expect: [
+            (metric: Final("mov.speed"), value: 0, tol: 0, source: "the prop comes to rest (bounded model: no bounce; the original's rest is UNMEASURED)", status: Unmeasured),
+            (metric: Count("Sim:Sound[category=Thrown]"), value: 1, tol: 0, source: "Env_Glass -> Environment AI noise on the landing (500 uu, Anomaly) above m_fMinImpactSpeed 50 (LIKELY)", status: Unmeasured),
+        ]),
+    ],
+    record: [Pawn, Camera, Kismet, SimEvents],
+    capture: Some("Boyle Int after ChangeLvl_fromBoyleExterior_toBoyleInterior, lab place -1067 -1850 on the floor facing 270 pitch -20; Use on DishonoredMovable_29 (tick 10), look level (tick 20), Use again (tick 40): the prop's Location / Velocity per tick, m_bDropped, DisSeqEvent_MovableDropped, the landing contact (speed, AI noise)"),
+)

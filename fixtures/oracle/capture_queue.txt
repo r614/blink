@@ -235,6 +235,19 @@ physics/windblast_throw_d900
 #   session find class=SkeletalMeshComponent name=<guard Outer.Name>; session call object=<mesh> function=GetRootBodyIndex / read per-bone body velocity (same spec as powers/windblast_l2_hit with the dummy on Boyle, not the Playground: U-806)
 # P-8: RagdollImpact damage on the L1 throw (health 33 -> 23 -> 11 at ticks 75 / 79 in the cached powers/windblast_guard_l1 trace): the damage path 0x00B5CCD0
 # calls with damage type, amount, contact normal / speed, per call.
+# --- movables (research/dishonored/systems/movables.md, 2026-10-08): pick up, carry, drop, throw a Boyle Int bottle (DishonoredMovable_29) ---
+# M-3: the held prop's Location / Rotation per tick for the 80 ticks after the grab (the 0.066 s slide, then eye + forward x 100.24 - up x 40.66 with the camera's
+#   rotation), the camera location, m_fGrabTime; the tick of DisSeqEvent_MovablePickedUp against the Use press.
+#   session call object=<DishonoredMovable_29 .MovableComp> function=... (m_pHeldBy, m_pBody); GetLocation / GetRotation of the actor per tick
+movable/pickup_bottle
+# M-5 / M-8: the drop: m_bDropped after it, the prop's Velocity per tick (zero at release), the landing contact (RigidBodyCollision speed, the other actor)
+#   and the AI noise post at the landing (0x00C5A760: radius 500?, context Anomaly, position); whether the prop bounces or rests.
+movable/drop_bottle
+# M-6 / M-7: the throw: the prop's Location / Velocity per tick (is |v| 2000 at the first tick, or an impulse over the body's mass?), the first contact
+#   (speed along the normal, the other actor), m_Damage and m_CurHealth before / after, the BreakableBroken tick, the contact AI noise (radius, context),
+#   m_bDropped at the hit. Repeat with a candlestick (DishonoredMovable_11, weight Medium, be 100 / on drop 800) and against a guard (the pawn damage
+#   amount and the height test of 0x00A40CF0).
+movable/throw_bottle
 # --- conversations, barks, cutscenes (research/dishonored/systems/conversation.md) ---
 # C1: bark observables (AkEvent posts on the guard, tick-exact) next to the brain channels; the three session lines after it read the NPC's per-hook
 # next-allowed table (DisConversationComponent.m_DialogHookInfo_InGame[hook] = fire time + rand*(max-min); the port stores the same without the +min of the gate)
