@@ -1,24 +1,46 @@
-// As `stealth/detect_600` at 1300 uu. The placement snaps to the sunken courtyard floor (z -217.8 in the original,
-// ORACLE.md 2026-10-08): no LOS for 30 ticks, then norm 0.78-0.88 (the outer cone, 1326-1496 uu over 1700) at about
-// 0.1 / s, level 1 at frame 169, later 0.373. The port sees the player in the inner cone (1328.4 / 3500 = 0.3795) from the
-// start: the same head-pose difference as detect_600 (stealth.md F4 / F5). The 2026-10-06 values (0.358, 0.226 / s) were
-// from another placement and are dropped.
+// As `stealth/detect_600` at 1300 uu, with the ambient idle `Empty_Idle_04` pinned. The placement snaps
+// to the sunken courtyard floor (z -219.7 in the original, the guard stands 1308 uu away and 280 uu above).
+//
+// Original capture (trace 2ab2cb46af4ff958, `Bones("guard", ["+world"])` + `AnimState("guard")`):
+// * ticks 1-19 the player is in the inner cone (norm 1328 / 3500 = 0.38, 0.19 / s), the value reaches
+//   0.060 at tick 19;
+// * tick 20 it is lost (value 0.027, then 0 from tick 21) and stays lost until tick 183: the guard's head
+//   dips (Empty_Idle_04 pitches the head down to -60 deg and turns it away), the point of the player's
+//   vision segment that the vision tests (`eye up . (point - eye) = 0`, clamped to the segment, stealth.md
+//   section 17) leaves both cones at tick 17 and the loss is noticed by the line-of-sight check at tick 19.
+//   It is not the line of sight (the eye sees the player's upper points throughout) and not the sighting
+//   distance;
+// * the player re-enters the inner cone at tick 179, the value rises again from tick 183 (0.0537 at 199);
+//   level 1 is never reached in 200 ticks.
+//
+// The port reproduces the first block's rate, the loss, its length and the re-entry. Known deviation: the
+// baked `Empty_Idle_04` head track runs about 4 ticks behind the capture and 3 deg higher, so the loss is
+// seen at tick 23 (not 20) and the second sighting is lost again at tick 198 (the head is rolled 55 deg
+// there and the port's player target sits just outside the inner cone). Those two are not checked.
+//
+// Dropped: the earlier numbers (0.83 outer-cone norm after 30 lost ticks, level 1 at 2.817 s, ORACLE.md
+// 2026-10-08) came from another run whose ambient idle was not recorded; the cached capture of that run
+// never reached level 1 either, and no recorded variant reproduces them.
 (
     name: "stealth/detect_1300",
     system: Stealth,
     map: "L_Boyle_Ext_P",
-    description: "Stand 1300 uu in front of the party guard (on the lower floor): LOS norm and time to the first attention level.",
+    description: "Stand 1300 uu in front of the party guard (on the lower floor) while it plays an ambient idle: the first sighting, its loss when the head dips, the re-sighting.",
     setup: (
         player: Some((position: (-3424.9, -3427.3, 20), yaw: 71.37, snap_to_floor: true)),
-        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), yaw: 251.37, state: Some("Idle"))],
+        npcs: [(id: Some("guard"), spawner: Some("DishonoredSpawner_46"), yaw: 251.37, state: Some("Idle"), ambient: Some("Empty_Idle_04"), ambient_age: 0.067)],
         settle: 1,
     ),
     ticks: 200,
     input: [],
     checkpoints: [
-        (name: "LOS norm (outer cone)", expect: [(metric: At("npc.guard.los", 60), value: 0.83, tol: 0.05, source: "ORACLE.md 2026-10-08 detect_1300: 0.78-0.88 after the first 30 ticks (per-tick values not given)", status: Unverified)]),
-        (name: "notices", expect: [(metric: TimeToReach("npc.guard.attn_level", 1), value: 2.817, tol: 0.1, source: "ORACLE.md 2026-10-08: level 1 at frame 169", status: Measured)]),
+        (name: "first rate", expect: [(metric: Delta("npc.guard.attn", 2, 12), value: 0.0315, tol: 0.005, source: "capture 2ab2cb46af4ff958: value 0.0084 at tick 2, 0.0399 at tick 12 (0.19 / s, inner cone 1328 / 3500)", status: Measured)]),
+        (name: "lost", expect: [(metric: At("npc.guard.attn", 27), value: 0.0, tol: 0.003, source: "capture 2ab2cb46af4ff958: the value is 0 from tick 21 to tick 182", status: Measured)]),
+        (name: "still lost", expect: [(metric: At("npc.guard.attn", 100), value: 0.0, tol: 0.003, source: "capture 2ab2cb46af4ff958: the value is 0 from tick 21 to tick 182", status: Measured)]),
+        (name: "sighted again", expect: [(metric: Delta("npc.guard.attn", 184, 190), value: 0.0183, tol: 0.006, source: "capture 2ab2cb46af4ff958: value 0.0060 at tick 184, 0.0243 at tick 190 (0.18 / s)", status: Measured)]),
+        (name: "no attention level", expect: [(metric: Max("npc.guard.attn_level"), value: 0.0, tol: 0.0, source: "capture 2ab2cb46af4ff958: level 0 throughout (the value never passes 0.06)", status: Measured)]),
+        (name: "loss tick", expect: [(metric: At("npc.guard.attn", 22), value: 0.0, tol: 0.003, source: "capture 2ab2cb46af4ff958: the value is 0.027 at tick 20 and 0 from tick 21; the port loses the player at tick 23 (baked head track deviation, see the header)", status: Unverified)]),
     ],
-    record: [Pawn, Npc("guard")],
-    capture: Some("captured 2026-10-08; per-tick los values and the camera_jnt pose requested (capture_queue.txt)"),
+    record: [Pawn, Npc("guard"), Bones("guard", ["+world"]), AnimState("guard")],
+    capture: Some("captured 2026-10-08 with Bones / AnimState and the ambient idle pinned (Empty_Idle_04); trace 2ab2cb46af4ff958"),
 )

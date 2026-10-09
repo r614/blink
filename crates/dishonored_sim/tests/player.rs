@@ -224,6 +224,10 @@ fn dark_vision_fades_in_runs_and_cannot_be_cancelled_within_its_cooldown() {
     r.step(&[(1, dv(buttons::SECONDARY))]);
     let t = r.cfg.tuning.clone();
     assert_eq!(r.p(1).vitals.mana, 100.0 - t.dark_vision_cost);
+    // 0x00BE89E0 calls the use notification only when it starts the effect, not on the end press.
+    let dv_power = dishonored_sim::state::power::DARK_VISION as u8;
+    let used = |r: &Run| r.events.iter().filter(|e| matches!(e, SimEvent::PowerUsed { id: 1, power, .. } if *power == dv_power)).count();
+    assert_eq!(used(&r), 1);
     assert!(dishonored_sim::left_hand::dark_vision_active(r.p(1)));
     assert_eq!(dishonored_sim::left_hand::dark_vision_reveals(&r.state, 1, &t), vec![2]);
     // Pressing again at once does nothing (cooldown).
@@ -237,6 +241,7 @@ fn dark_vision_fades_in_runs_and_cannot_be_cancelled_within_its_cooldown() {
     r.steps(60, &[(1, dv(0))]);
     assert!(!dishonored_sim::left_hand::dark_vision_active(r.p(1)));
     assert!(dishonored_sim::left_hand::dark_vision_reveals(&r.state, 1, &t).is_empty());
+    assert_eq!(used(&r), 1, "ending it is not a use");
 }
 
 #[test]
@@ -549,6 +554,31 @@ fn blink_cooldown_no_mana_and_world_slow() {
     r.pm(1).vitals.mana = 10.0;
     r.steps(5, &[(1, bl(buttons::SECONDARY))]);
     assert!(r.p(1).left.blink_target.is_none());
+}
+
+/// The quick-access wheel (`buttons::WHEEL`) takes every pawn, the caster included, to
+/// `m_fBendTimeFactor` at once while it is open (0x00BE4280 / 0x00BD4FC0), and back to 1 when it
+/// closes; a world with a second human pawn ignores it.
+#[test]
+fn wheel_slows_the_world_in_a_single_human_world_only() {
+    let mut r = Run::new(&[(1, Vec3::new(0., 0., 92.), 0.)]);
+    spawn_npc(&mut r.state, 100, PawnKind::Civilian, 1, Vec3::new(-1500., 0., 92.), 0.0, &r.cfg);
+    r.steps(5, &[]);
+    assert_eq!(r.p(100).time_scale, 1.0);
+    let wheel = PlayerInput { buttons: buttons::WHEEL, ..Default::default() };
+    r.steps(3, &[(1, wheel)]);
+    assert!((r.p(100).time_scale - powers::WHEEL_TIME_FACTOR).abs() < 1e-6, "npc rate {}", r.p(100).time_scale);
+    assert!((r.p(1).time_scale - powers::WHEEL_TIME_FACTOR).abs() < 1e-6, "caster rate {}", r.p(1).time_scale);
+    assert!((powers::player_time_dilation(&r.state, &r.cfg.gameplay) - powers::WHEEL_TIME_FACTOR).abs() < 1e-6);
+    r.steps(3, &[(1, PlayerInput::default())]);
+    assert_eq!(r.p(100).time_scale, 1.0);
+    assert_eq!(r.p(1).time_scale, 1.0);
+    assert!(r.state.blink_layers.is_empty());
+    // Two human pawns: the button does nothing.
+    let mut r = Run::new(&[(1, Vec3::new(0., 0., 92.), 0.), (2, Vec3::new(300., 0., 92.), 0.)]);
+    r.steps(3, &[(1, wheel)]);
+    assert_eq!(r.p(2).time_scale, 1.0);
+    assert_eq!(r.p(1).time_scale, 1.0);
 }
 
 /// The dilation helper (0x009FA0D0) and the layer step (0x009FCBC0): a non-zero target below

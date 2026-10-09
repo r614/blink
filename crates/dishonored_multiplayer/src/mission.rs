@@ -909,6 +909,15 @@ impl MissionMatch {
         }
     }
 
+    /// An NPC plays the ambient idle `seq` (`Empty_Idle_03`), already `age` seconds in. A
+    /// negative `age` counts down to its start. The pick is pinned to it.
+    pub fn start_ambient_idle(&mut self, id: PlayerId, seq: &str, age: f32) {
+        let ai = self.crowd.ai.clone();
+        if let Some(b) = self.crowd.brains.iter_mut().find(|b| b.id == id) {
+            b.start_ambient(&ai, seq, age);
+        }
+    }
+
     /// Put an NPC brain into combat (guards) or flight (civilians) against the nearest player.
     pub fn alert_npc(&mut self, id: PlayerId) {
         let pos = self.world.player(id).map(|p| p.position).unwrap_or(Vec3::ZERO);
@@ -1454,7 +1463,8 @@ impl MissionMatch {
                 self.apply(c, cfg);
             }
             self.sync_darkness(cfg);
-            kismet_host::step(self, &out.events, dt, cfg); // [kismet]
+            let climbables: Vec<String> = world.climbables().iter().map(|c| c.name.clone()).collect();
+            kismet_host::step(self, &out.events, dt, cfg, &climbables); // [kismet]
             self.sync_darkness(cfg);
             save::tick(self, dt, &cfg.gameplay.items.combat_save); // [save] autosaves
             if self.state.outcome().is_some() && self.view.phase != MatchPhase::Ended {
@@ -1524,6 +1534,20 @@ impl MissionMatch {
                 Some(crate::AiPresence { id: b.id, hostile, combat, suspicion: b.suspicion_level(), music_type: if b.kind == PawnKind::Guard { 4 } else { 0 } })
             })
             .collect();
+        // Awareness markers: each living NPC's attention entry toward a human (`Attn::level`,
+        // the brain's `DisAttentionInfo` level) with the pawn's `EAIAwareness`, within the
+        // marker range (`m_fDisplay_NPCMaxDist_*` 10000 uu) of that human.
+        self.view.marks.clear();
+        for b in &self.crowd.brains {
+            let Some(p) = self.world.players.iter().find(|p| p.id == b.id && p.alive) else { continue };
+            for a in b.attn.iter().filter(|a| a.level > 0 && self.humans.contains(&a.who)) {
+                let Some(h) = self.world.players.iter().find(|h| h.id == a.who && h.alive) else { continue };
+                if h.position.distance(p.position) > 10_000.0 {
+                    continue;
+                }
+                self.view.marks.push(crate::AwarenessMark { id: b.id, who: a.who, level: a.level.min(4), awareness: p.ai_awareness, proxy: a.proxy.to_array() });
+            }
+        }
         self.last_events = out.events.clone();
         // [kismet] AI noises made by the Kismet (`DisSeqAct_AINoise`) are heard next step.
         if let Some(k) = &mut self.kismet {

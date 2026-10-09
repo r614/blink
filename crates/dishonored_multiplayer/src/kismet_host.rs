@@ -32,6 +32,10 @@ pub mod cutscene;
 /// The Kismet screen grades (`DisSeqAct_UberPostProcess`, `DisSeqAct_PostProcess`).
 #[path = "kismet_host/post.rs"]
 pub mod post;
+/// Player- and world-side events fired through `FireGeneratedEvents` (crouch, combat, tasks,
+/// possession, choke, Windblast, powers, climbing, locks).
+#[path = "kismet_host/player_events.rs"]
+pub mod player_events;
 use dishonored_ai::BrainState;
 use dishonored_ir::ai::DAL_BUSTED;
 use dishonored_kismet::host::Matinee;
@@ -79,7 +83,6 @@ pub const PRESENTATION: &[&str] = &[
     "SeqAct_ConsoleCommand",
     "DisSeqAct_ToggleHUDElement",
     "DisSeqAct_ToggleTutorial",
-    "DisSeqAct_SetTutorialMessage",
     "DisSeqAct_SetCurrentChapter",
     "DisSeqAct_EvalAchievement",
     "DisSeqAct_ToggleAchievementEval",
@@ -140,7 +143,28 @@ pub const FED_EVENTS: &[&str] = &[
     "DisSeqEvent_PawnSighted",
     // Output 0 "Started" only (`SimEvent::Death` of an assassination).
     "DisSeqEvent_Assassinated",
+    // Fed by `world_events` and the distraction feed above (they were missing from the list, so
+    // the load-time notes called them unsupported).
+    "DisSeqEvent_Distracted",
+    "DisSeqEvent_BreakableBroken",
+    "DisSeqEvent_WhaleOilBattery",
+    "DisSeqEvent_WhaleOilReceptacle",
+    // `player_events.rs`.
+    "DisSeqEvent_PlayerCrouch",
+    "DisSeqEvent_PlayerCombat",
+    "DisSeqEvent_TaskActivated",
+    "DisSeqEvent_TaskStateChanged",
+    "DisSeqEvent_Possessed",
+    "DisSeqEvt_Choke",
+    "DisSeqEvent_Windblasted",
+    "DisSeqEvent_PowerUsed",
+    "DisSeqEvent_Climb",
+    "DisSeqEvent_Lock",
 ];
+
+/// Subclasses of [`FED_EVENTS`] classes that are not fed (`PowerEquipped` extends `PowerUsed`
+/// but fires from the equip contexts 0x00C44FE0 / 0x00C4BA70, which the port lacks).
+pub const NOT_FED_EVENTS: &[&str] = &["DisSeqEvent_PowerEquipped"];
 
 /// A usable the Kismet offers (an actor with `DisSeqEvent_Used` or a pickup with
 /// `DisSeqEvent_PickupPickedUp`, or an original NPC whose one-shot has a use hook).
@@ -221,6 +245,8 @@ pub struct HostState {
     pub off: BTreeSet<u32>,
     /// Task path -> its HUD target (`UpdateTaskTarget`).
     pub targets: BTreeMap<String, Obj>,
+    /// Task path -> its marker's description (`UpdateTaskTarget.m_TargetName`).
+    pub target_names: BTreeMap<String, String>,
     /// Open scripted choice: (op, player, options, picked).
     pub choice: Option<(OpId, PlayerId, Vec<String>, Option<usize>)>,
     /// `AIGoToActor` in progress: op -> (pawn, goal).
@@ -374,6 +400,9 @@ pub struct HostState {
     /// Recorded only: the port has no rigid bodies to move.
     #[serde(default)]
     pub velocity: BTreeMap<u32, Vec3>,
+    /// Bookkeeping of the player- and world-side event feeders (`player_events.rs`).
+    #[serde(default)]
+    pub player_ev: player_events::PlayerEventState,
     /// The post manager's Kismet slot (`DisSeqAct_UberPostProcess`, `post.rs`).
     #[serde(default)]
     pub post: post::KismetPost,
@@ -916,7 +945,7 @@ impl Host for H<'_> {
     }
 
     fn fires_event(&self, class: &str) -> bool {
-        FED_EVENTS.iter().any(|c| self.db.is_a(class, c))
+        !NOT_FED_EVENTS.iter().any(|c| self.db.is_a(class, c)) && FED_EVENTS.iter().any(|c| self.db.is_a(class, c))
     }
 
     fn matinee(&mut self, cx: &mut Ctx, what: Matinee) {
@@ -1253,12 +1282,15 @@ impl Host for H<'_> {
             }
             "DisSeqAct_UpdateTaskTarget" => {
                 let target = cx.linked_values("Target").into_iter().next().or_else(|| Some(cx.prop_obj("m_pTargetActor")).filter(|o| !o.is_none()));
+                let name = cx.prop_str("m_TargetName");
                 for t in self.tasks(cx, "Task") {
                     match &target {
                         Some(o) => {
+                            self.st.target_names.insert(t.clone(), name.clone());
                             self.st.targets.insert(t, o.clone());
                         }
                         None => {
+                            self.st.target_names.remove(&t);
                             self.st.targets.remove(&t);
                         }
                     }
@@ -1280,6 +1312,16 @@ impl Host for H<'_> {
             "DisSeqAct_ShowHUDMessage" => {
                 let m = cx.prop_str("m_Message");
                 self.act(vec![Action::Message(m)]);
+                HostResult::Done
+            }
+            // The tutorial line (`tutorialMsg_mc`): `m_TutorialMessage` for `m_fDuration` seconds
+            // (0x00BAE4A0; the game's own tutorials do not go through this op).
+            "DisSeqAct_SetTutorialMessage" => {
+                let t = cx.prop_str("m_TutorialMessage");
+                let secs = cx.prop("m_fDuration").and_then(|v| v.as_float()).unwrap_or(0.0);
+                if !t.is_empty() {
+                    self.act(vec![Action::Tutorial(t, secs)]);
+                }
                 HostResult::Done
             }
             "DisSeqAct_ShowLocationDiscovery" => {
@@ -1308,6 +1350,12 @@ impl Host for H<'_> {
                 let have = self.m.state.items.get(&item).copied().unwrap_or(0);
                 let now = if add { have + q.max(1) } else if q <= 0 { 0 } else { (have - q).max(0) };
                 self.note(format!("abstract item {item}: {have} -> {now}"));
+                // A mission clue (a chapter log): the tutorial window with the note
+                // (`m_PressKeyToReadChapterNoteMessage`, text left to the HUD). The trigger is
+                // from dishonored-bevy's `campaign.rs` (Eamon, used with permission).
+                if add && have == 0 && item.contains("ChapterLog") {
+                    self.act(vec![Action::TutorialWindow(1, String::new())]);
+                }
                 if now > 0 {
                     self.m.state.items.insert(item, now);
                 } else {
@@ -2121,14 +2169,24 @@ impl Host for H<'_> {
                     let Obj::Actor(a) = t else { continue };
                     let act = &self.db.actors[a as usize];
                     let name = act.name.clone();
+                    let was_locked;
                     if act.class.contains("Door") {
                         let (state, locked) = self.door(a);
+                        was_locked = locked;
                         self.st.doors.insert(a, (state, lock));
                         if locked != lock {
                             self.st.door_version += 1;
                         }
                     } else {
+                        was_locked = self.usable_locked(a);
                         self.st.usable_locked.insert(a, lock);
+                    }
+                    // `DisSeqEvent_Lock`: `Lock` (0x00A4E870) fires output 0 whenever it runs;
+                    // `Unlock` (0x00A4E910) fires output 1 only when the usable was locked. The
+                    // instigator is the usable's last user.
+                    if lock || was_locked {
+                        let user = self.st.player_ev.usable_user.get(&a).copied();
+                        self.st.player_ev.locks.push((a, if lock { player_events::LOCK_LOCKED } else { player_events::LOCK_UNLOCKED }, user));
                     }
                     self.note(format!("{} {name}", if lock { "locked" } else { "unlocked" }));
                 }
@@ -2371,10 +2429,11 @@ impl Host for H<'_> {
             }
             // `DisSeqCond_IsPlayerInCombat::Activated` (0x00b8efc0): output 0 ("In Combat") when
             // `DishonoredPlayerPawn.m_bIsInCombat` (0x00aa2350: bit 3 of +0x8a0) is set, else
-            // output 1. What writes the flag is not decoded; the port answers with the
-            // autosave's combat test (a guard fighting a player, U-340: `MissionMatch::engaged`).
+            // output 1. The flag's writer is `PlayerCombat` 0x00AB9FA0 (`player_events.rs`),
+            // which the host keeps per player.
             "DisSeqCond_IsPlayerInCombat" => {
-                cx.fire(if self.m.engaged.is_empty() { 1 } else { 0 });
+                let in_combat = self.st.player_ev.combat.values().any(|c| *c);
+                cx.fire(if in_combat { 0 } else { 1 });
                 HostResult::Done
             }
             // `DisSeqCond_IsDLCUnlocked::Activated` (0x00b8ee30): output 1 ("Locked") when the
@@ -2958,11 +3017,17 @@ pub fn track_views(m: &mut MissionMatch, inputs: &mut [(PlayerId, dishonored_sim
 }
 
 /// One step of the Kismet: feed gameplay events, tick, apply map changes.
-pub fn step(m: &mut MissionMatch, sim_events: &[SimEvent], dt: f32, cfg: &SimConfig) {
+///
+/// `climbables`: the names of the active map's climbable chains, in the order the simulation
+/// indexes them (`SimEvent::Climb`).
+pub fn step(m: &mut MissionMatch, sim_events: &[SimEvent], dt: f32, cfg: &SimConfig, climbables: &[String]) {
     let Some(mut run) = m.kismet.take() else { return };
     let setup = run.setup.clone();
     let db = run.k.db.clone();
     run.k.players = m.humans.clone();
+    if run.st.player_ev.climbables != climbables {
+        run.st.player_ev.climbables = climbables.to_vec();
+    }
     {
         let KismetRun { k, st, .. } = &mut run;
         let mut h = H { m, st, setup: setup.clone(), cfg, db: db.clone() };
@@ -3265,6 +3330,9 @@ fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
     }
     // Uses.
     for (p, u) in std::mem::take(&mut h.st.uses) {
+        if let KUse::Actor(a) = &u {
+            h.st.player_ev.usable_user.insert(*a, p);
+        }
         match u {
             KUse::Actor(a) if h.usable_locked(a) => {
                 // A locked usable is not used: its `DisSeqEvent_Used` fires the special
@@ -3427,6 +3495,9 @@ fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
     }
     attention_events(k, h);
     ai_events(k, h);
+    // Player- and world-side events (crouch, combat, tasks, possession, choke, Windblast, powers,
+    // climbing, locks): `player_events.rs`.
+    player_events::feed(k, h, sim_events);
     // Touches (players; NPC pawns for events that are not player-only).
     let touch_events = k.events_for("SeqEvent_Touch", &[]);
     for e in touch_events {
@@ -3691,8 +3762,10 @@ pub fn view(m: &MissionMatch, mv: &mut dishonored_mission::runtime::MissionView)
             mv.choices.push((*p, opts.clone()));
         }
     }
-    // HUD marker: first visible active task (in objective order) with a Kismet target.
+    // HUD markers: every visible active task (in objective order) with a Kismet target
+    // (`m_TaskMarkers`); the first one is the single `target`.
     let mut target = None;
+    let mut markers = Vec::new();
     for (oi, o) in m.state.def.objectives.iter().enumerate() {
         let ov = mv.objectives.get(oi);
         if ov.is_none_or(|v| v.hidden) {
@@ -3714,16 +3787,14 @@ pub fn view(m: &MissionMatch, mv: &mut dishonored_mission::runtime::MissionView)
                 _ => None,
             };
             if let Some(p) = pos {
-                target = Some(p.to_array());
-                break;
+                target.get_or_insert(p.to_array());
+                markers.push(dishonored_mission::runtime::TaskMarkerView { pos: p.to_array(), optional: tv.optional, name: run.st.target_names.get(&path).cloned().unwrap_or_default() });
             }
-        }
-        if target.is_some() {
-            break;
         }
     }
     if target.is_some() {
         mv.target = target;
+        mv.task_markers = markers;
     }
     mv.cutscenes = cutscene::view(run); // [interp]
     mv.post_fx = run.st.post.view();
@@ -3908,6 +3979,37 @@ mod tests {
         fn pawn(&mut self) -> &mut dishonored_sim::state::PlayerState {
             self.m.world.player_mut(1).unwrap()
         }
+
+        /// One step as `step` runs it: the start event once, the gameplay events fed, then `ticks`
+        /// of the interpreter.
+        fn feed_events(&mut self, events: &[SimEvent], ticks: u32) {
+            let setup = self.run.setup.clone();
+            let db = self.run.k.db.clone();
+            let KismetRun { k, st, .. } = &mut self.run;
+            let mut h = H { m: &mut self.m, st, setup, cfg: &self.cfg, db };
+            k.players = h.m.humans.clone();
+            if !h.st.started {
+                h.st.started = true;
+                let inst = h.players_obj();
+                k.remote_event(&mut h, "Start", inst);
+            }
+            feed(k, &mut h, events);
+            for _ in 0..ticks {
+                k.tick(&mut h, 0.1);
+            }
+        }
+    }
+
+    /// A `PlayerEvent`-family (or any) event of `class` in the root sequence with the named outputs,
+    /// each leading to its own sink; returns the event and the sinks.
+    fn event_with_sinks(g: &mut GraphBuilder, class: &str, outs: &[&str]) -> (OpId, Vec<OpId>) {
+        let e = g.add(class, dishonored_kismet::Kind::Event, Some(0));
+        g.outputs(e, outs);
+        let sinks: Vec<OpId> = outs.iter().map(|_| g.sink()).collect();
+        for (i, s) in sinks.iter().enumerate() {
+            g.link(e, i, *s, 0);
+        }
+        (e, sinks)
     }
 
     /// `Start` -> op (input 0), the player on a `bAllPlayers` variable linked as "Target".
@@ -3980,7 +4082,9 @@ mod tests {
     }
 
     #[test]
-    fn player_in_combat_is_the_engaged_test() {
+    fn player_in_combat_reads_the_players_combat_flag() {
+        // `m_bIsInCombat` (0x00AA2350) is written by `PlayerCombat` (0x00AB9FA0, see
+        // `player_events.rs`); the old stand-in, the autosave's `engaged` set, no longer decides.
         for engaged in [false, true] {
             let mut g = GraphBuilder::new();
             let e = g.remote_event("Start");
@@ -3993,8 +4097,9 @@ mod tests {
             g.link(c, 0, yes, 0);
             g.link(c, 1, no, 0);
             let mut r = Rig::new(g, |_| {});
+            r.m.engaged.insert(2);
             if engaged {
-                r.m.engaged.insert(2);
+                r.run.st.player_ev.combat.insert(1, true);
             }
             r.play(2);
             assert_eq!((r.ran(yes), r.ran(no)), if engaged { (1, 0) } else { (0, 1) });
@@ -4408,5 +4513,218 @@ mod tests {
         set(&mut r, 0);
         set(&mut r, 4);
         assert_eq!(r.ran(sighted.1[0]), 2, "a jump from nothing passes the step too");
+    }
+
+    // ----- player- and world-side events (player_events.rs) -----
+
+    /// A NPC pawn `id` in the match's world (a guard standing at the origin).
+    fn add_npc(r: &mut Rig, id: PlayerId) {
+        let mut npc = dishonored_sim::state::PlayerState::new(id, Vec3::new(500.0, 0.0, 0.0), 0.0);
+        npc.kind = PawnKind::Guard;
+        r.m.world.players.push(npc);
+    }
+
+    /// `PlayerCrouch` (0x00AB0960): the output of the new stance fires once per change, from the
+    /// player's own events (no `Originator`), with the player as originator and instigator.
+    #[test]
+    fn player_crouch_fires_the_output_of_the_new_stance() {
+        let mut g = GraphBuilder::new();
+        let (ev, sinks) = event_with_sinks(&mut g, "DisSeqEvent_PlayerCrouch", &["Stand Up", "Start Sneak", "Crouch"]);
+        g.set(ev, "bPlayerOnly", Value::Bool(true));
+        let mut r = Rig::new(g, |_| {});
+        r.feed_events(&[], 2);
+        assert_eq!(sinks.iter().map(|s| r.ran(*s)).collect::<Vec<_>>(), [0, 0, 0], "standing at the start: no change");
+        r.pawn().crouched = true;
+        r.feed_events(&[], 2);
+        r.feed_events(&[], 2);
+        assert_eq!(sinks.iter().map(|s| r.ran(*s)).collect::<Vec<_>>(), [0, 0, 1], "one Crouch for the change, none while it holds");
+        r.pawn().crouched = false;
+        r.feed_events(&[], 2);
+        assert_eq!(sinks.iter().map(|s| r.ran(*s)).collect::<Vec<_>>(), [1, 0, 1], "Stand Up");
+        assert_eq!(r.run.k.ops[ev as usize].instigator, Obj::Pawn(1));
+    }
+
+    /// `PlayerCombat` (0x00AB9FA0): output 0 when a hostile in combat tracks the player at
+    /// Busted, output 1 when none does any more; `DisSeqCond_IsPlayerInCombat` reads the flag.
+    #[test]
+    fn player_combat_enters_and_exits_with_busted_hostiles() {
+        use dishonored_ai::{Attn, Brain};
+        let mut g = GraphBuilder::new();
+        let (_, sinks) = event_with_sinks(&mut g, "DisSeqEvent_PlayerCombat", &["Entered Combat", "Exited Combat"]);
+        let mut r = Rig::new(g, |_| {});
+        add_npc(&mut r, 7);
+        let mut b = Brain::new(7, PawnKind::Guard, Vec3::ZERO, 1);
+        b.state = BrainState::Combat;
+        // Spotted only (Investigate): not combat yet.
+        b.attn.push(Attn { who: 1, value: 1.0, level: 3, proxy: Vec3::ZERO, fresh: false, urgent: false, sighted: true, los_norm: 0.0, why: 0, danger: false });
+        r.m.crowd.brains.push(b);
+        r.feed_events(&[], 2);
+        assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (0, 0));
+        r.m.crowd.brains[0].attn[0].level = 4;
+        r.feed_events(&[], 2);
+        assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (1, 0));
+        assert!(r.run.st.player_ev.combat[&1]);
+        // Fighting someone else, or calming down, ends it.
+        r.m.crowd.brains[0].state = BrainState::Search;
+        r.feed_events(&[], 2);
+        assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (1, 1));
+        assert!(!r.run.st.player_ev.combat[&1]);
+    }
+
+    /// `DisSeqEvent_TaskStateChanged` / `TaskActivated` (0x00AD1320 / 0x00AD1080): the event names
+    /// the task; a state change passes the new state as its output, an activation fires all.
+    #[test]
+    fn task_events_follow_the_objective_managers_notifications() {
+        use dishonored_mission::runtime::TaskNote;
+        let mut g = GraphBuilder::new();
+        let (changed, c_sinks) = event_with_sinks(&mut g, "DisSeqEvent_TaskStateChanged", &["Inactive", "Active", "Completed", "Failed"]);
+        let (activated, a_sinks) = event_with_sinks(&mut g, "DisSeqEvent_TaskActivated", &["Out"]);
+        let (other, o_sinks) = event_with_sinks(&mut g, "DisSeqEvent_TaskStateChanged", &["Inactive", "Active", "Completed", "Failed"]);
+        for (e, task) in [(changed, "Obj_A.Obj.Task_1"), (activated, "Obj_A.Obj.Task_1"), (other, "Obj_A.Obj.Task_2")] {
+            g.set(e, "m_pObjective", Value::Obj(Obj::Path("Obj_A.Obj".into())));
+            g.set(e, "m_pTask", Value::Obj(Obj::Path(task.into())));
+            g.set(e, "bPlayerOnly", Value::Bool(true));
+        }
+        let mut r = Rig::new(g, |_| {});
+        r.m.state.task_log.push(TaskNote::Activated("Obj.Task_1".into()));
+        r.m.state.task_log.push(TaskNote::Changed("Obj.Task_1".into(), dishonored_mission::TaskState::Active));
+        r.feed_events(&[], 2);
+        assert_eq!(a_sinks.iter().map(|s| r.ran(*s)).collect::<Vec<_>>(), [1]);
+        assert_eq!(c_sinks.iter().map(|s| r.ran(*s)).collect::<Vec<_>>(), [0, 1, 0, 0]);
+        assert_eq!(o_sinks.iter().map(|s| r.ran(*s)).sum::<u32>(), 0, "another task's event stays quiet");
+        r.m.state.task_log.push(TaskNote::Changed("Obj.Task_1".into(), dishonored_mission::TaskState::Failed));
+        r.feed_events(&[], 2);
+        assert_eq!(c_sinks.iter().map(|s| r.ran(*s)).collect::<Vec<_>>(), [0, 1, 0, 1]);
+        assert!(r.m.state.task_log.is_empty(), "the notifications were consumed");
+    }
+
+    /// `DisSeqEvent_Possessed` (0x00B7D110 / 0x00B7D2F0): Started when the player takes an NPC,
+    /// Finished when it leaves; found through the pawn; rats are not this event's.
+    #[test]
+    fn possessed_fires_started_and_finished_for_npc_hosts() {
+        let mut g = GraphBuilder::new();
+        let (ev, sinks) = event_with_sinks(&mut g, "DisSeqEvent_Possessed", &["Started", "Finished"]);
+        g.set(ev, "Originator", Value::Obj(Obj::Pawn(7)));
+        let mut r = Rig::new(g, |_| {});
+        add_npc(&mut r, 7);
+        add_npc(&mut r, 8);
+        r.feed_events(&[SimEvent::PossessStart { id: 1, host: 8 }], 2);
+        assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (0, 0), "another pawn's event");
+        r.feed_events(&[SimEvent::PossessStart { id: 1, host: 7 }], 2);
+        assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (1, 0));
+        assert_eq!(r.run.k.ops[ev as usize].instigator, Obj::Pawn(1), "the possessor");
+        r.feed_events(&[SimEvent::PossessEnd { id: 1, host: 7 }], 2);
+        assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (1, 1));
+        // A rat host is another class (`RatPossess`).
+        r.m.world.player_mut(7).unwrap().kind = PawnKind::Rat;
+        r.feed_events(&[SimEvent::PossessStart { id: 1, host: 7 }], 2);
+        assert_eq!(r.ran(sinks[0]), 1);
+    }
+
+    /// `DisSeqEvt_Choke`: Started when the choke begins, Win on the knock-out, Lose when the
+    /// victim breaks free or leaves the state.
+    #[test]
+    fn choke_fires_started_win_and_lose() {
+        use dishonored_sim::events::ChokeOutcome;
+        for (outcome, out) in [(ChokeOutcome::Win, 1), (ChokeOutcome::Lose, 2), (ChokeOutcome::Cancel, 2)] {
+            let mut g = GraphBuilder::new();
+            let (ev, sinks) = event_with_sinks(&mut g, "DisSeqEvt_Choke", &["Started", "Win", "Lose"]);
+            g.set(ev, "Originator", Value::Obj(Obj::Pawn(7)));
+            let mut r = Rig::new(g, |_| {});
+            add_npc(&mut r, 7);
+            r.feed_events(&[SimEvent::ChokeStart { attacker: 1, victim: 7 }], 2);
+            assert_eq!(sinks.iter().map(|s| r.ran(*s)).collect::<Vec<_>>(), [1, 0, 0]);
+            r.feed_events(&[SimEvent::ChokeEnd { attacker: 1, victim: 7, outcome }], 2);
+            let mut want = [1, 0, 0];
+            want[out] = 1;
+            assert_eq!(sinks.iter().map(|s| r.ran(*s)).collect::<Vec<_>>(), want, "{outcome:?}");
+        }
+    }
+
+    /// `DisSeqEvent_Windblasted` (0x00C4DE90): a thrown NPC fires output 1 with the caster as
+    /// instigator.
+    #[test]
+    fn windblasted_fires_thrown_for_the_hit_npc() {
+        let mut g = GraphBuilder::new();
+        let (ev, sinks) = event_with_sinks(&mut g, "DisSeqEvent_Windblasted", &["Pushed", "Thrown"]);
+        g.set(ev, "Originator", Value::Obj(Obj::Pawn(7)));
+        let mut r = Rig::new(g, |_| {});
+        add_npc(&mut r, 7);
+        r.feed_events(&[SimEvent::Windblasted { victim: 7, by: 1 }], 2);
+        assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (0, 1));
+        assert_eq!(r.run.k.ops[ev as usize].instigator, Obj::Pawn(1));
+    }
+
+    /// `DisSeqEvent_PowerUsed` (0x00BF32F0 -> 0x00BF30C0): the output named for the power plus the
+    /// level less one; `PowerEquipped` (a subclass) is not this event.
+    #[test]
+    fn power_used_picks_the_output_of_the_power_and_level() {
+        let outs = ["DarkVision 1", "DarkVision 2", "BendTime 1", "BendTime 2", "Blink 1", "Blink 2", "DevouringSwarm 1", "DevouringSwarm 2", "Possess 1", "Possess 2", "Windblast 1", "Windblast 2"];
+        let mut g = GraphBuilder::new();
+        let (ev, sinks) = event_with_sinks(&mut g, "DisSeqEvent_PowerUsed", &outs);
+        g.set(ev, "bPlayerOnly", Value::Bool(true));
+        let (eq, eq_sinks) = event_with_sinks(&mut g, "DisSeqEvent_PowerEquipped", &outs);
+        g.db.classes.insert("DisSeqEvent_PowerEquipped".into(), vec!["DisSeqEvent_PowerEquipped".into(), "DisSeqEvent_PowerUsed".into(), "SequenceEvent".into()]);
+        let mut r = Rig::new(g, |_| {});
+        use dishonored_sim::state::power;
+        r.feed_events(&[SimEvent::PowerUsed { id: 1, power: power::BLINK as u8, level: 2 }], 2);
+        r.feed_events(&[SimEvent::PowerUsed { id: 1, power: power::WINDBLAST as u8, level: 1 }], 2);
+        r.feed_events(&[SimEvent::PowerUsed { id: 1, power: power::DARK_VISION as u8, level: 1 }], 2);
+        let ran: Vec<usize> = sinks.iter().enumerate().filter(|(_, s)| r.ran(**s) > 0).map(|(i, _)| i).collect();
+        assert_eq!(ran, [0, 5, 10], "DarkVision 1, Blink 2, Windblast 1");
+        assert!(eq_sinks.iter().all(|s| r.ran(*s) == 0) && r.ran(eq) == 0, "PowerEquipped is another event");
+    }
+
+    /// `DisSeqEvent_Climb` (0x00A72B00 / 0x00A6E2C0): Start on grabbing the chain, Finish on
+    /// letting go, from the chain's events with the pawn as instigator.
+    #[test]
+    fn climb_fires_start_and_finish_on_the_chain() {
+        let mut g = GraphBuilder::new();
+        let chain = g.actor("DisClimbable", "Chain_3", [0.0, 0.0, 0.0], 0);
+        g.db.maps.push(("T".into(), vec![0]));
+        let (ev, sinks) = event_with_sinks(&mut g, "DisSeqEvent_Climb", &["Start", "Finish"]);
+        g.set(ev, "Originator", Value::Obj(Obj::Actor(chain)));
+        let mut r = Rig::new(g, |_| {});
+        r.run.st.player_ev.climbables = vec!["Chain_1".into(), "Chain_3".into()];
+        r.feed_events(&[SimEvent::Climb { id: 1, climbable: 0, started: true }], 2);
+        assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (0, 0), "another chain");
+        r.feed_events(&[SimEvent::Climb { id: 1, climbable: 1, started: true }], 2);
+        assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (1, 0));
+        r.feed_events(&[SimEvent::Climb { id: 1, climbable: 1, started: false }], 2);
+        assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (1, 1));
+    }
+
+    /// `DisSeqEvent_Lock` (0x00A4E870 / 0x00A4E910): the Kismet's own Lock fires OnLocked every
+    /// time; Unlock fires OnUnlocked only when the usable was locked.
+    #[test]
+    fn lock_events_fire_with_the_locks_the_kismet_sets() {
+        let mut g = GraphBuilder::new();
+        let chest = g.actor("DishonoredUsableObject", "Chest", [0.0, 0.0, 0.0], 0);
+        let e = g.remote_event("Start");
+        let lock = g.op("DisSeqAct_Lock");
+        g.inputs(lock, &["Lock", "Unlock"]);
+        g.outputs(lock, &["Out"]);
+        let target = g.var("SeqVar_Object");
+        g.set(target, "ObjValue", Value::Obj(Obj::Actor(chest)));
+        g.vars(lock, "Target", "Targets", &[target]);
+        g.link(e, 0, lock, 1); // Unlock first: the chest is not locked, so no OnUnlocked
+        let (ev, sinks) = event_with_sinks(&mut g, "DisSeqEvent_Lock", &["OnLocked", "OnUnlocked"]);
+        g.set(ev, "Originator", Value::Obj(Obj::Actor(chest)));
+        let mut r = Rig::new(g, |_| {});
+        r.play(2);
+        r.feed_events(&[], 2);
+        assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (0, 0), "unlocking an unlocked usable");
+        r.run.k.activate_input(lock, 0);
+        r.play(1);
+        r.feed_events(&[], 2);
+        assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (1, 0), "Lock");
+        r.run.k.activate_input(lock, 0);
+        r.play(1);
+        r.feed_events(&[], 2);
+        assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (2, 0), "locking again fires again");
+        r.run.k.activate_input(lock, 1);
+        r.play(1);
+        r.feed_events(&[], 2);
+        assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (2, 1), "Unlock of a locked usable");
     }
 }

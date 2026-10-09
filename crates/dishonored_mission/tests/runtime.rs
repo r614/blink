@@ -46,6 +46,9 @@ fn clean_run_completes_with_optional_goals() {
     assert!(m.flag("know_host"));
     assert_eq!(m.task("host.kill"), Some(TaskState::Active));
     assert_eq!(m.view.target, Some([500.0, 500.0, 0.0]), "marker follows the host");
+    // The HUD's task marker list carries every active task with a target, with the target's name.
+    assert!(m.view.task_markers.iter().any(|t| t.pos == [500.0, 500.0, 0.0] && !t.optional), "{:?}", m.view.task_markers);
+    assert!(m.view.npc_names.iter().all(|(id, name)| !id.is_empty() && !name.is_empty()));
     step(&mut m, start + Vec3::new(0.0, 5000.0, 0.0), &[kill("host")]);
     assert!(m.flag("host_dead"));
     assert_eq!(m.task("host.escape"), Some(TaskState::Active));
@@ -113,4 +116,26 @@ fn ron_round_trip() {
     let def = MissionDef::from_ron(SAMPLE).unwrap();
     let again = MissionDef::from_ron(&def.to_ron()).unwrap();
     assert_eq!(def, again);
+}
+
+/// The objective manager's notifications (0x00AD4F60): a task becoming active raises
+/// `TaskActivated` then `TaskStateChanged`; any other change only `TaskStateChanged`; revealing an
+/// active hidden task raises `TaskActivated` (0x00AC63C0). The host turns them into Kismet events.
+#[test]
+fn task_changes_are_logged_for_the_kismet_host() {
+    use dishonored_mission::runtime::TaskNote;
+    let mut m = mission();
+    let start = pos(&m, "start");
+    step(&mut m, start, &[]);
+    m.task_log.clear();
+    let p = pos(&m, "informant_spot");
+    step(&mut m, p, &[MissionEvent::Talked("informant".into())]);
+    assert_eq!(m.task("host.kill"), Some(TaskState::Active));
+    let at = m.task_log.iter().position(|n| *n == TaskNote::Activated("host.kill".into())).expect("host.kill activated");
+    assert_eq!(m.task_log.get(at + 1), Some(&TaskNote::Changed("host.kill".into(), TaskState::Active)), "Activated comes first, then the state change");
+    m.task_log.clear();
+    step(&mut m, start + Vec3::new(0.0, 5000.0, 0.0), &[kill("host")]);
+    assert_eq!(m.task("host.kill"), Some(TaskState::Completed));
+    assert!(m.task_log.contains(&TaskNote::Changed("host.kill".into(), TaskState::Completed)));
+    assert!(!m.task_log.contains(&TaskNote::Activated("host.kill".into())), "completing is not an activation");
 }

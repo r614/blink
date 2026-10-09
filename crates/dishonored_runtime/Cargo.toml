@@ -25,6 +25,10 @@ test = false
 [dependencies]
 anyhow.workspace = true
 bevy = { version = "0.19", features = ["pbr_specular_textures"] }
+# the original-shader programs composed with Bevy's imports off the render thread and cached on
+# disk (ue3_shader_cache.rs); the versions Bevy 0.19.1 / wgpu 29 use
+naga = { version = "29", features = ["wgsl-in", "wgsl-out", "spv-in", "spv-out"] }
+naga_oil = { version = "0.22", default-features = false }
 dishonored_assets.workspace = true
 ue3_package.workspace = true
 ue3_shader = { path = "../ue3_shader" }

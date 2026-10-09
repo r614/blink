@@ -106,6 +106,7 @@ pub mod map_render;
 pub mod ue3mat;
 #[doc(hidden)]
 pub mod ue3_level;
+pub mod ue3_shader_cache;
 #[doc(hidden)]
 pub mod ppgraph;
 #[doc(hidden)]
@@ -357,6 +358,7 @@ pub fn main() {
     } else {
         (args.size, bevy::window::WindowMode::Windowed, if std::env::var_os("DISHONORED_NOVSYNC").is_some() { bevy::window::PresentMode::AutoNoVsync } else { bevy::window::PresentMode::AutoVsync })
     };
+    warmup::configure_pipeline_cache();
     let mut app = App::new();
     // Started by the launcher: open hidden where the launcher window is, and show once frames
     // are coming (`handoff.rs`), so menu and match share one window on screen.

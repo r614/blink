@@ -55,7 +55,25 @@ pub struct PauseMenu {
     msg_focus: (usize, f64),
     list_sel: usize,
     now: f64,
+    /// The game over screen (`PauseScreen.ShowGameOverMenu(reason)`): the player died; the
+    /// message is `m_GameOverMessage`, else the pause tweak's `m_PlayerDiedMessage`.
+    pub game_over: Option<String>,
+    /// Seconds the local player has been dead (starts the game over screen).
+    dead_for: f32,
 }
+
+impl PauseMenu {
+    /// The entries of the screen up: the pause list or the game over list.
+    fn items(&self) -> &'static [(&'static str, &'static str, &'static str)] {
+        if self.game_over.is_some() { GAME_OVER_ITEMS } else { ITEMS }
+    }
+}
+
+/// `DisTweaks_GFxMoviePlayerPauseMenu.m_PlayerDiedMessage` (the tweak's value).
+pub const PLAYER_DIED_MESSAGE: &str = "You have met your demise.";
+/// Seconds between the death and the game over screen (APPROXIMATION, U-889: the native trigger
+/// is not traced).
+pub const GAME_OVER_DELAY: f32 = 2.0;
 
 /// Entries: (id, text section, key, locked when).
 const ITEMS: &[(&str, &str, &str)] = &[
@@ -64,6 +82,15 @@ const ITEMS: &[(&str, &str, &str)] = &[
     ("pause:load", SEC_MENU, "t_LoadGamePauseMenu"),
     ("pause:options", SEC_BASE, "t_Options"),
     ("pause:help", SEC_MENU, "t_Help"),
+    ("pause:quit", SEC_MENU, "t_BackToMainMenu"),
+    ("pause:windows", SEC_MENU, "t_BackToWindows"),
+];
+
+/// `PauseScreen.SetGameOverMenu`: Resume From Last Save (`bSkipCloseMenu`), Load game, Back to
+/// Main Menu, Back to Windows.
+const GAME_OVER_ITEMS: &[(&str, &str, &str)] = &[
+    ("go:continue", SEC_MENU, "t_ContinueFromLastSave"),
+    ("go:load", SEC_MENU, "t_LoadASpecificSave"),
     ("pause:quit", SEC_MENU, "t_BackToMainMenu"),
     ("pause:windows", SEC_MENU, "t_BackToWindows"),
 ];
@@ -89,7 +116,9 @@ pub fn sim_running(p: Option<Res<PauseMenu>>, loading: Option<Res<crate::loading
 
 fn locked(id: &str, saves: Option<&crate::saves::Saves>) -> bool {
     match id {
-        "pause:save" | "pause:load" => saves.is_none(),
+        "pause:save" | "pause:load" | "go:load" => saves.is_none(),
+        // (`lockState: !_isContinueGame`: a save to continue from)
+        "go:continue" => saves.is_none_or(|s| s.list().is_empty()),
         // No tutorial notes in the port (`ShowPauseMenu(showHelpButton)` false).
         "pause:help" => true,
         _ => false,
@@ -106,7 +135,10 @@ fn open_screen(p: &mut PauseMenu, art: &MenuArt, sounds: &mut MenuSounds, now: f
     p.closing = None;
     p.input_from = now + 0.15;
     p.pending = None;
-    sounds.play("OpenScreen");
+    // (the game over screen plays `GO_OpenGameOverMenu` instead: `ShowGameOverMenu`)
+    sounds.play(if p.game_over.is_some() { "GO_OpenGameOverMenu" } else { "OpenScreen" });
+    let game_over = p.game_over.is_some();
+    let n_items = p.items().len();
     let a = &mut p.anim;
     if let Some((ch, m)) = pm.root_child("pauseMenu_mc") {
         a.author("pm", Props::from_matrix(&m, 100.0));
@@ -158,6 +190,18 @@ fn open_screen(p: &mut PauseMenu, art: &MenuArt, sounds: &mut MenuSounds, now: f
     let tx = ah(a, "_title_mc/_txt_mc");
     a.at(t + 0.25, &k("_title_mc/_txt_mc"), Act::Set(P::new().alpha(0.0).x(tx.x - 20.0).scale(200.0).rot(-5.0)));
     a.at(t + 0.25, &k("_title_mc/_txt_mc"), Act::To(P::all(tx), 0.25, Ease::StrongOut));
+    // `GameOverTitle` (`_gameOver_mc`, `OpenTitle` at 30 ms): the text in from 150 px right and
+    // the backing from 350 px left, 0.25 s `Strong.easeOut`.
+    if game_over {
+        let gt = ah(a, "_gameOver_mc/_txt_mc");
+        a.now(now, &k("_gameOver_mc"), Act::Set(P::new().visible(false)));
+        a.at(t, &k("_gameOver_mc"), Act::Set(P::new().visible(true)));
+        a.at(t, &k("_gameOver_mc/_txt_mc"), Act::Set(P::new().alpha(0.0).x(gt.x + 150.0)));
+        a.at(t, &k("_gameOver_mc/_txt_mc"), Act::To(P::all(gt), 0.25, Ease::StrongOut));
+        let gb = ah(a, "_gameOver_mc/_bkgd_mc");
+        a.at(t, &k("_gameOver_mc/_bkgd_mc"), Act::Set(P::new().alpha(0.0).x(gb.x - 350.0)));
+        a.at(t, &k("_gameOver_mc/_bkgd_mc"), Act::To(P::all(gb), 0.25, Ease::StrongOut));
+    }
     // 80 ms: the strokes.
     for (s, dy, d, e) in [("_line0_mc", -150.0, 0.25, Ease::StrongInOut), ("_line1_mc", 250.0, 0.45, Ease::StrongInOut), ("_line2_mc", 250.0, 0.25, Ease::StrongOut)] {
         let lp = ah(a, s);
@@ -175,6 +219,9 @@ fn open_screen(p: &mut PauseMenu, art: &MenuArt, sounds: &mut MenuSounds, now: f
     let co = ah(a, "_corvo_mc");
     a.at(now + 0.22, &k("_corvo_mc"), Act::Set(P::new().visible(true).scale(280.0).alpha(0.0).x(co.x - 10.0).y(co.y + 200.0)));
     a.at(now + 0.22, &k("_corvo_mc"), Act::To(P::all(co), 0.25, Ease::StrongOut));
+    if game_over {
+        a.at(now + 0.22, &k("_corvo_mc"), Act::Play("anim_slice".into()));
+    }
     // 260 ms: the blades fly in (`AnimatedBlades.Open`).
     a.at(now + 0.26, &k("_blades_mc"), Act::Set(P::new().visible(true)));
     if let Some(bl) = pm.root_child("pauseMenu_mc").and_then(|(ch, _)| pm.child(ch, "_blades_mc")).map(|c| c.0) {
@@ -192,7 +239,7 @@ fn open_screen(p: &mut PauseMenu, art: &MenuArt, sounds: &mut MenuSounds, now: f
     }
     // 275 ms: the list (`OpenMenu`: alpha 100 in 0.25 s; items every 50 ms).
     a.at(now + 0.275, &k("_menu_mc"), Act::To(P::new().alpha(100.0).scale(90.0).rot(-10.0), 0.25, Ease::StrongOut));
-    for i in 0..ITEMS.len() {
+    for i in 0..n_items {
         let kk = format!("pm/item/{i}");
         a.forget(&kk);
         a.author(&kk, Props::default());
@@ -204,7 +251,8 @@ fn open_screen(p: &mut PauseMenu, art: &MenuArt, sounds: &mut MenuSounds, now: f
     // The current entry's timeline is on `over` (its x tween is overridden by the open tween).
     let sel = p.sel;
     p.anim.now(now, &format!("pm/item/{sel}"), Act::Play("over".into()));
-    parallax(&mut p.anim, sel, ITEMS.len(), now);
+    let n = p.items().len();
+    parallax(&mut p.anim, sel, n, now);
 }
 
 /// `AnimatedBackground.Open` (`bkgd_mc`, when the movie starts) and `Vignette.Open`.
@@ -299,10 +347,42 @@ fn close_screen(p: &mut PauseMenu, sounds: &mut MenuSounds, now: f64, back_to_ga
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn toggle(keys: Res<ButtonInput<KeyCode>>, mut p: ResMut<PauseMenu>, mut nav: ResMut<MenuNav>, mut local: ResMut<crate::input_map::LocalInput>, mut sounds: ResMut<MenuSounds>, art: Option<Res<MenuArt>>, time: Res<Time<Real>>, mut vis: Query<&mut Visibility, With<menu_art::MenuLayer>>) {
+pub fn toggle(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut p: ResMut<PauseMenu>,
+    mut nav: ResMut<MenuNav>,
+    mut local: ResMut<crate::input_map::LocalInput>,
+    mut sounds: ResMut<MenuSounds>,
+    art: Option<Res<MenuArt>>,
+    time: Res<Time<Real>>,
+    mut vis: Query<&mut Visibility, With<menu_art::MenuLayer>>,
+    (view, session): (Res<crate::session::SessionView>, Res<crate::session::Session>),
+    hud: Option<ResMut<crate::gfx_hud::GfxHud>>,
+) {
     let now = time.elapsed_secs_f64();
     p.now = now;
-    if !p.open && ((keys.just_pressed(KeyCode::Escape) && local.override_input.is_none()) || p.request) {
+    // Harness: `{"hud": {"kind": "game_over"}}`.
+    if let Some(mut h) = hud {
+        let before = h.tests.len();
+        h.tests.retain(|t| !matches!(t, crate::hud_popups::HudTest::GameOver));
+        if h.tests.len() != before && !p.open {
+            p.game_over = Some(PLAYER_DIED_MESSAGE.to_string());
+            p.request = true;
+        }
+    }
+    // The player is dead in an offline mission that does not respawn him: the game over screen
+    // (`PauseScreen.ShowGameOverMenu`) after a moment.
+    let dead = view.me.as_ref().is_some_and(|m| !m.alive) && view.respawn_in.is_none() && view.matchv.mission.is_some() && matches!(session.kind, crate::session::SessionKind::Offline { .. });
+    if !dead {
+        p.dead_for = 0.0;
+    } else if !p.open {
+        p.dead_for += time.delta_secs();
+        if p.dead_for >= GAME_OVER_DELAY && p.game_over.is_none() {
+            p.game_over = Some(PLAYER_DIED_MESSAGE.to_string());
+            p.request = true;
+        }
+    }
+    if !p.open && ((keys.just_pressed(KeyCode::Escape) && local.override_input.is_none() && !dead) || p.request) {
         p.request = false;
         p.open = true;
         p.dirty = true;
@@ -343,6 +423,7 @@ pub fn toggle(keys: Res<ButtonInput<KeyCode>>, mut p: ResMut<PauseMenu>, mut nav
 
 fn finish_close(p: &mut PauseMenu, nav: &mut MenuNav, local: &mut crate::input_map::LocalInput) {
     p.open = false;
+    p.game_over = None;
     p.options = None;
     p.list = None;
     p.closing = None;
@@ -381,7 +462,15 @@ pub fn handle(
     if let Some((at, id)) = p.pending.clone() {
         if now >= at {
             p.pending = None;
-            run_entry(&mut p, &id, art.as_deref(), texts.as_deref(), &mut sounds, saves.as_deref(), now);
+            if id == "go:continue" {
+                // `OnLoadLastSaveClicked`: `Dis_Load 0`, the newest save.
+                if let Some(s) = saves.as_mut() {
+                    s.load_slot(0);
+                }
+                close_screen(&mut p, &mut sounds, now, true);
+            } else {
+                run_entry(&mut p, &id, art.as_deref(), texts.as_deref(), &mut sounds, saves.as_deref(), now);
+            }
         }
     }
     // The question was answered.
@@ -473,7 +562,7 @@ pub fn handle(
                     if let Some(a) = art.as_deref() {
                         open_screen(&mut p, a, &mut sounds, now, false);
                     }
-                    nav.focus = Some(ITEMS[p.sel].0.into());
+                    nav.focus = Some(p.items()[p.sel].0.into());
                 }
                 Outcome::Ask(purpose, payload) => {
                     if let (Some(a), Some(t)) = (art.as_deref(), texts.as_deref()) {
@@ -537,10 +626,10 @@ pub fn handle(
         match ev {
             MenuEvent::Focus(id) => {
                 sounds.play("Move");
-                if let Some(i) = ITEMS.iter().position(|x| x.0 == id) {
+                if let Some(i) = p.items().iter().position(|x| x.0 == id) {
                     if i != p.sel {
-                        let lk_old = locked(ITEMS[p.sel].0, saves.as_deref());
-                        let lk_new = locked(ITEMS[i].0, saves.as_deref());
+                        let lk_old = locked(p.items()[p.sel].0, saves.as_deref());
+                        let lk_new = locked(p.items()[i].0, saves.as_deref());
                         let ko = format!("pm/item/{}", p.sel);
                         let a = &mut p.anim;
                         a.now(now, &ko, Act::To(P::new().scale(100.0).x(0.0).alpha(100.0), 0.25, Ease::StrongOut));
@@ -549,18 +638,21 @@ pub fn handle(
                         a.now(now, &kn, Act::To(P::new().scale(100.0).x(30.0).alpha(100.0), 0.25, Ease::BackOut));
                         a.now(now, &kn, Act::Play(if lk_new { "over_lock" } else { "over" }.into()));
                         p.sel = i;
-                        parallax(&mut p.anim, i, ITEMS.len(), now);
+                        let n = p.items().len();
+                        parallax(&mut p.anim, i, n, now);
                     }
                 }
             }
+            // (the game over list has nothing to go back to)
+            MenuEvent::Back if p.game_over.is_some() => {}
             MenuEvent::Back => {
                 // `PauseScreen.BPressed`: `back`, then resume.
                 sounds.play("back");
                 close_screen(&mut p, &mut sounds, now, true);
             }
             MenuEvent::Activate { id, .. } => {
-                let Some(i) = ITEMS.iter().position(|x| x.0 == id) else { continue };
-                if locked(ITEMS[i].0, saves.as_deref()) {
+                let Some(i) = p.items().iter().position(|x| x.0 == id) else { continue };
+                if locked(p.items()[i].0, saves.as_deref()) {
                     sounds.play("Failure");
                     continue;
                 }
@@ -595,7 +687,7 @@ fn run_entry(p: &mut PauseMenu, id: &str, art: Option<&MenuArt>, t: Option<&Menu
             p.options = Some(o);
             p.input_from = now;
         }
-        "pause:save" | "pause:load" => {
+        "pause:save" | "pause:load" | "go:load" => {
             let saving = id == "pause:save";
             let (Some(s), Some(t)) = (saves, t) else { return };
             close_screen(p, sounds, now, false);
@@ -694,28 +786,40 @@ fn build_panel(dl: &mut DisplayList, p: &PauseMenu, pm: &MovieArt, t: &MenuTexts
     let ovr = p.anim.ovr("pm", now);
     let clock = (now - p.opened_at) as f32;
     // Game-over decoration and the menu container are script-driven (the entries are drawn below).
+    let go = p.game_over.is_some();
     let hide = |q: &str| match q {
-        "_gameOver_mc" | "_menu_mc" => Some(Props { visible: false, ..Props::default() }),
+        "_gameOver_mc" if !go => Some(Props { visible: false, ..Props::default() }),
+        "_menu_mc" => Some(Props { visible: false, ..Props::default() }),
         other => ovr(other),
     };
     let (clab, csecs) = p.anim.timeline("pm/_compass_mc", now).map(|(l, s)| (l.to_string(), s)).unwrap_or(("default".into(), 0.0));
-    let st = States::default().with_timed("_compass_mc", &clab, csecs).with("_corvo_mc", "#0").clock(clock);
+    let st = States::default().with_timed("_compass_mc", &clab, csecs).clock(clock);
+    // (the mask portrait: frame 0, or the game over slice animation)
+    let st = match p.anim.timeline("pm/_corvo_mc", now) {
+        Some((lab, secs)) if go => st.with_timed("_corvo_mc", lab, secs),
+        _ => st.with("_corvo_mc", "#0"),
+    };
     dl.movie_fx(pm, ch, rm, &st, root.alpha / 100.0, &hide, false);
     // The title text ("PAUSE", upper-cased into the text and both shadows).
     for f in DisplayList::fields_fx(pm, ch, rm, &st, &hide) {
+        if f.path.starts_with("_gameOver_mc") && go {
+            // `GameOverTitle.SetTitle`: the reason as it is.
+            dl.field_text(pm, &f, p.game_over.as_deref().unwrap_or_default(), None);
+            continue;
+        }
         if !f.path.starts_with("_title_mc") {
             continue;
         }
-        dl.field_text(pm, &f, &t.t(SEC_MENU, "t_Pause").to_uppercase(), None);
+        dl.field_text(pm, &f, &t.t(SEC_MENU, if go { "t_GameOver" } else { "t_Pause" }).to_uppercase(), None);
     }
     // Entries, bottom-aligned in `_menu_mc` (90 %, -10 deg).
     let Some(item) = pm.export("p_pauseMenu_item") else { return };
     let mp = p.anim.get("pm/_menu_mc", now);
     let menu_m = rm.mul(&Props { x: mp.x, y: mp.y, xscale: mp.xscale, yscale: mp.yscale, rotation: mp.rotation, ..Props::default() }.matrix());
-    let n = ITEMS.len();
+    let n = p.items().len();
     let h_all = n as f32 * ITEM_H + (n as f32 - 1.0) * ITEM_GAP;
     let mask = mask_rect(pm, ch, rm, &p.anim, now);
-    for (i, (id, sec, key)) in ITEMS.iter().enumerate() {
+    for (i, (id, sec, key)) in p.items().iter().enumerate() {
         let k = format!("pm/item/{i}");
         let ip = p.anim.get(&k, now);
         let a = ip.alpha / 100.0 * mp.alpha / 100.0 * root.alpha / 100.0;
@@ -829,7 +933,7 @@ pub fn rebuild(
     let dl = build(&p, &art, &t, &gs, &nav, saves.as_deref(), now);
     nav.set_items(dl.items.clone());
     if p.msg.is_none() && p.options.is_none() && p.list.is_none() {
-        let want = ITEMS[p.sel].0;
+        let want = p.items()[p.sel].0;
         if nav.focus.as_deref() != Some(want) && nav.items.iter().any(|i| i.id == want) {
             nav.focus = Some(want.into());
         }

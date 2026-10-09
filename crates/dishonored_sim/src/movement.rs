@@ -117,51 +117,100 @@ pub fn lean_roll(p: &PlayerState, cfg: &MovementConfig) -> f32 {
     lean_angle(p, cfg) * cfg.lean.camera_tilt_percent
 }
 
-/// `StatePlayerMasterLeaning.m_fLeanSpeed`: while a lean key is held the lean state sets the
-/// head point's velocity to this many uu/s sideways every tick (0x00A76590 -> 0x00AC0950,
-/// `m_bGotExternalForce`).
-pub const LEAN_SPEED: f32 = 1000.0;
+/// The lean master state (`StatePlayerMasterLeaning`) for one tick.
+///
+/// - The state starts on a lean key press (0x00A764C0) and its camera influence starts with an
+///   empty fixed-step accumulator (the lean traces show no head motion on the press tick: the
+///   first frame's time, 1/60 s, is short of the influence's 0.016667 step).
+/// - Its tick (0x00A76590) writes the head point's velocity - `m_fLeanSpeed` along the lean
+///   direction - on every tick a key is held (0x00AC0950, which also flags `m_bGotExternalForce`)
+///   and re-arms `m_fReleaseTimer` with `m_fLeanReleaseTime`; without a key the timer runs down
+///   by the frame time and the state ends when it is zero or less. Nothing is written then: the
+///   head point keeps whatever velocity the spring left it.
+fn lean_state_tick(p: &mut PlayerState, key: f32, ctx: &MoveCtx) {
+    let lc = &ctx.cfg.lean;
+    if !p.lean_state {
+        if key == 0.0 {
+            return;
+        }
+        p.lean_state = true;
+        p.lean_release = 0.0;
+        p.lean_acc = 0.0;
+    }
+    if key != 0.0 {
+        p.lean_velocity = key.signum() * lc.lean_speed;
+        p.lean_velocity_z = 0.0;
+        p.lean_ext = true;
+        p.lean_release = lc.release_time;
+    } else {
+        p.lean_release -= ctx.dt;
+        if p.lean_release <= 0.0 {
+            p.lean_state = false;
+        }
+    }
+}
 
-/// The lean camera (`DishonoredCamera_Lean`, 0x00AC5950): the eye is a spring point
-/// (`m_HeadPoint`, `DisSpringPoint`) in the plane of the lean, at rest at the upright eye,
+/// One frame of the lean influence (`DishonoredCamera_Lean`): the lean state's tick, then as
+/// many fixed steps (`m_fFixedTimeStep`, `m_bUseFixedTimeStep`) as the frame time fills in the
+/// accumulator `m_fAccumulatedDelta`. A frame that ran steps clears `m_bGotExternalForce`
+/// (0x00AC5950's last argument).
+///
+/// The loop that spends the accumulator is the camera's base update, not decoded; its shape is
+/// read from the view (0x00ACAAB0 interpolates the head point by `m_fAccumulatedDelta /
+/// m_fCurFixedTimeStep` between the last two steps) and from the lean traces, where the first
+/// held tick moves nothing and every later tick runs exactly one step. The view interpolation
+/// is not modelled: at 60 Hz the fraction is 0.99998 after every step.
+fn step_lean(p: &mut PlayerState, key: f32, ctx: &MoveCtx) {
+    lean_state_tick(p, key, ctx);
+    let step = ctx.cfg.lean.fixed_time_step.max(1e-4);
+    p.lean_acc += ctx.dt;
+    let mut ran = false;
+    while p.lean_acc >= step {
+        lean_step(p, step, ctx);
+        p.lean_acc -= step;
+        ran = true;
+    }
+    if ran {
+        p.lean_ext = false;
+    }
+}
+
+/// One fixed step of the lean camera (`DishonoredCamera_Lean`, 0x00AC5950): the eye is a spring
+/// point (`m_HeadPoint`, `DisSpringPoint`) in the plane of the lean, at rest at the upright eye,
 /// kept on a circle of radius `L = m_fLeanHeightPct x CollisionHeight x 2` around a pivot `L`
 /// below the eye, its angle limited to `m_fMaxLeanAngle` plus the soften angle.
 ///
-/// One tick (the influence's fixed step of 1/60 s):
 /// - the integrator 0x00AC0A00 (`m_LeanConstants` k 80, c 12): `a = -k x - c v` (or `-v` once
 ///   nearly at rest), `v += a dt`, `x += v dt`;
-/// - with the external force of a held lean key the velocity is then put back to the
-///   lean speed (so each held tick starts at 1000 uu/s sideways);
+/// - with `m_bGotExternalForce` the velocity is then put back to what the lean state wrote
+///   (so each held tick starts at `m_fLeanSpeed` sideways);
 /// - the point goes back onto the circle; an angle past the limit is clamped
 ///   (`m_bApplyingMaxAngle`) and the soften angle (0x00AC5540) grows toward
 ///   `m_fMaxLeanSoftenAngle` at `m_fMaxLeanSoftenSpeed` while the head stays at the limit,
 ///   otherwise decays at that rate.
 ///
-/// Measured on the original at a fixed 1/60 s (`measure lean`, CameraCache.POV): the eye moves
-/// 13.33, 12.98, 12.57, 12.14, 11.66 uu sideways in the first ticks of a held lean and reaches
-/// the 15 degree limit on the sixth, then the soften angle takes it toward 20.
+/// Original at a fixed 1/60 s (the scenario trace, CameraCache.POV roll x 2): the angle is
+/// 2.18, 4.31, 6.38, 8.40, 10.36, 12.27, 14.12 degrees on the first held steps, 15.007 on the
+/// eighth (the limit, soften starting), 17.9 on the nineteenth and 20 held; this model gives the
+/// same values to 0.01 degrees.
 ///
 /// `p.lean` is the angle as a fraction of the current limit; `p.lean_velocity` and
 /// `p.lean_velocity_z` the head point's velocity in the lean plane (sideways, up).
-fn step_lean(p: &mut PlayerState, target: f32, ctx: &MoveCtx) {
+fn lean_step(p: &mut PlayerState, dt: f32, ctx: &MoveCtx) {
     let lc = &ctx.cfg.lean;
-    let dt = ctx.dt;
     let max = if p.crouched { lc.max_angle_crouched } else { lc.max_angle };
     let l = lc.height_pct * half_height(p, ctx.cfg) * 2.0;
     // The head point (sideways, up) relative to the upright eye, from the current angle.
     let a0 = (p.lean * (max + p.lean_soften)).to_radians();
     let mut pos = glam::Vec2::new(l * a0.sin(), l * (a0.cos() - 1.0));
     let mut vel = glam::Vec2::new(p.lean_velocity, p.lean_velocity_z);
-    let external = (target != 0.0).then(|| glam::Vec2::new(target.signum() * LEAN_SPEED, 0.0));
-    if let Some(v) = external {
-        vel = v;
-    }
+    let saved = vel;
     // 0x00AC0A00: the spring toward rest (the upright eye).
     let acc = if pos.length_squared() > 1e-4 || vel.length_squared() > 1.0 { -lc.springiness * pos - lc.damping * vel } else { -vel };
     vel += acc * dt;
     pos += vel * dt;
-    if let Some(v) = external {
-        vel = v;
+    if p.lean_ext {
+        vel = saved;
     }
     // Back onto the circle around the pivot.
     let pivot = glam::Vec2::new(0.0, -l);
@@ -187,7 +236,7 @@ fn step_lean(p: &mut PlayerState, target: f32, ctx: &MoveCtx) {
     p.lean = (angle / limit).clamp(-1.0, 1.0);
     p.lean_velocity = vel.x;
     p.lean_velocity_z = vel.y;
-    if target == 0.0 && p.lean.abs() * limit < 0.05 && vel.length() < 1.0 {
+    if !p.lean_ext && p.lean.abs() * limit < 0.05 && vel.length() < 1.0 {
         p.lean = 0.0;
         p.lean_velocity = 0.0;
         p.lean_velocity_z = 0.0;
@@ -209,7 +258,6 @@ fn step_lean(p: &mut PlayerState, target: f32, ctx: &MoveCtx) {
         }
     }
 }
-
 /// Distance kept between the leaning eye and walls (SPECULATIVE).
 pub const LEAN_CAMERA_MARGIN: f32 = 10.0;
 

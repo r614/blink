@@ -106,6 +106,18 @@ pub struct NpcSetup {
     /// Patrol points (with `state: Patrol`).
     #[serde(default)]
     pub route: Vec<[f32; 3]>,
+    /// The ambient idle the NPC plays (`Empty_Idle_03`; the variant `DisAISubProcessAmbientAnims`
+    /// picks with `rand()`). The original side pins the pick (`probe_launch`: the `rand()` call at
+    /// 0x00B39728 is replaced by the index, the number of the name minus 1), the port's AI plays
+    /// that sequence. `None`: the original's own random pick, the port's CRT stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ambient: Option<String>,
+    /// How long the ambient idle has played at tick 0 (s): an observation of the original's
+    /// run-in (`AnimState`: node time 0.067 s at tick 0, the animation having started at the
+    /// first AI tick of the setup), used by the port only.
+    /// (Not part of the spec hash: the original run does not read it.)
+    #[serde(default, skip_serializing)]
+    pub ambient_age: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

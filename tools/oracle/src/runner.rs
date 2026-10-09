@@ -497,6 +497,13 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         if matches!(n.state.as_deref().map(|x| x.to_ascii_lowercase()).as_deref(), Some("alerted" | "combat")) {
             m.alert_npc(id);
         }
+        if let Some(seq) = &n.ambient {
+            // The ambient idle is playing at tick 0 for `ambient_age` s: it began that long
+            // before, so before the settle ticks and the tick's own step it has played less.
+            let dt = 1.0 / s.tick_hz.max(1) as f32;
+            let age = n.ambient_age - (s.setup.settle as f32 + 1.0) * dt;
+            m.start_ambient_idle(id, seq, age);
+        }
     }
     let name_of = |id: u32| by_id.get(&id).cloned().unwrap_or_else(|| format!("#{id}"));
 
