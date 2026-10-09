@@ -55,6 +55,27 @@ Experimental. Playable, with known bugs, on Lady Boyle's Last Party (`L_Boyle_*`
 
 Open questions are tracked in `research/UNKNOWNS.md`.
 
+### Pending features
+
+Not yet ported, or ported only in part:
+
+- **AI**: the whalers' combat behaviour (`DisBehaviorAssassinCombat`: combat and escape
+  teleports, the attract / pull spell); the rest of the bark call sites.
+- **Powers**: possession of rats and fish.
+- **Walls of light**: sword and explosion hits, their sounds and AI noises, possessed
+  creatures touching them.
+- **Movers**: actors based on other movers (`Base` chains) do not carry their collision
+  along (the Bridge drawbridge).
+- **Presentation**: shadow maps for every light type, the L_Out sky, the remaining
+  post-process effects, tripod animations, speaker props, the tower light beam.
+- **HUD**: the "(Unconscious)" crosshair line still uses its own probe instead of the
+  crosshair's target; pickup and body prompt texts are unconfirmed against the original.
+- **Journal and stats**: the Powers and Bone Charms tabs, the note reader, audiograph
+  playback, map items; the stats screen's replay and the coin-bonus charm.
+- **Modes**: interaction prompts are shown in missions only (not FFA or Contracts).
+- **Coverage**: screenshots of every map, and the oracle capture backlog
+  (`fixtures/oracle/capture_queue.txt`).
+
 ## Platforms
 
 | Platform | State |
