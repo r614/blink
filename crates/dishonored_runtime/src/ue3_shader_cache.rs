@@ -217,6 +217,15 @@ fn track_imports(
         *ENV.write().unwrap() = None;
         return;
     }
+    // Imports under `#ifdef`s (e.g. bevy_pbr::skinning behind SKINNED) are not in a module's
+    // listed imports, so the closure above misses them: every named module is offered too.
+    for (path, s) in &by_path {
+        if matches!(path, ShaderImport::Custom(_)) && !imports.contains_key(*path) {
+            let mut s = (*s).clone();
+            s.shader_defs.extend(global_defs.iter().cloned());
+            imports.insert((*path).clone(), s);
+        }
+    }
     let mut names: Vec<(String, &Shader)> = imports.iter().map(|(i, s)| (i.module_name().into_owned(), s)).collect();
     names.sort_by(|a, b| a.0.cmp(&b.0));
     let mut parts: Vec<&[u8]> = Vec::new();
