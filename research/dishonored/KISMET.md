@@ -488,7 +488,7 @@ class descriptor name). Not fed by the port yet (the host feeds the classes in `
 | `DisSeqEvent_Possessed` | 0x00a52130, 0x00a5a990 (possessable pawn states; output 0 Started, 1 Finished), 0x00b7d110, 0x00b7d2f0 (DLC06) |
 | `DisSeqEvent_PatrolPointReached` | 0x00af2300, 0x00afd350 |
 | `DisSeqEvent_BehaviorStarted` / `Combat` | 0x00af7670 / 0x00af7d00 |
-| `DisSeqEvent_MovablePickedUp` / `MovableDropped` | 0x00a45fd0 / 0x00a46380 |
+| `DisSeqEvent_MovablePickedUp` / `MovableDropped` | 0x00a45fd0 / 0x00a46380 (fed since the movables port, see below) |
 | `DisSeqEvent_Corpse` (0 picked up, 1 dropped, 2 discovered) | 0x00a998a0, 0x00a90b50, 0x00b40740 |
 | `DisSeqEvent_PlayerCrouch` (0 stand, 1 sneak, 2 crouch; `m_OldCrouchState`) | 0x00ab0960 |
 | `DisSeqEvent_PlayerHolsterWeapon` | 0x00ab3d80 |
@@ -524,11 +524,13 @@ those events as "class, no originator" (`player_events.rs`, `player_events()`). 
 | `DisSeqEvent_PowerUsed` (21) | the power component's slot 94 (0x00BF32F0 -> 0x00BF30C0): the player's events of exactly that class, the first output named for the power plus `m_CurrentLevel - 1` ("Blink 2"); called by the activation of Windblast (0x00BFB950), Blink (0x00BFC990), Dark Vision (0x00BE89E0), Devouring Swarm (0x00BFAE60) | `SimEvent::PowerUsed` at the port's matching moments (`left_hand`, `blink`, `powers`) | 4 powers. Bend Time (0x00BFA180) and Possess (0x00BE7730) activations were traced and do not call slot 94: left open. `PowerEquipped` (a subclass, 0x00C44FE0 / 0x00C4BA70, from the equip contexts) is not fed |
 | `DisSeqEvent_Lock` (25) | `Lock` 0x00A4E870 (0, always) and `Unlock` 0x00A4E910 (1, only if locked) of `DishonoredUsableObject` (doors via 0x00A32490 / 0x00A324B0); originator the usable, instigator its last user (+0x2C8) | `DisSeqAct_Lock` queues the output; fired next step | all 25 (the Kismet's own locks) |
 | `DisSeqEvent_Climb` (1) | the climb state: enter 0x00A72B00 (0), exit 0x00A6E2C0 (1), originator the chain (pawn +0xAA0), instigator the pawn | `SimEvent::Climb`, chain by name in the active map | 1 |
+| `DisSeqEvent_MovablePickedUp` (127) | the grab: `StatePlayerGrabMovable` enter 0x00A69860 -> the empty hands 0x00C3D030 -> the component's pick-up 0x00A45FD0, `FireGeneratedEvents(prop, DAT_0146736C, prop, holder, 0, 0)`: the prop's events, originator the PROP (corrected 2026-10-08: it was written as the player), instigator the pawn, every output | `SimEvent::MovablePickedUp` (`movables::grab`), the prop's Kismet actor by package and name | all 127 (needs a pick-up) |
+| `DisSeqEvent_MovableDropped` (1) | the release 0x00C45340 -> 0x00A46380 (`DAT_01467368`, the same arguments), for a drop and a throw | `SimEvent::MovableDropped` (`movables::release`) | the 1 |
+
+The movables' rules, addresses and the throw / hit / noise model are in `systems/movables.md`.
 
 Decoded but not hooked (no system in the port to hook them to; counts are level instances):
-`MovablePickedUp` (127) 0x00A45FD0 (output none = all; originator the grabbing player, instigator the
-movable; from the grab state 0x00C3D030) and `MovableDropped` (1) 0x00A46380 (0x00C45340, the carried-object
-release): the port cannot grab physics props. `KeyHoleUsed` (37) 0x00A38580 (output 0, the key used)
+`KeyHoleUsed` (37) 0x00A38580 (output 0, the key used)
 and 0x00A2E4E0 (output 1): no keyholes and the key ring is recorded only. `Interact` (4) 0x00A3DF60
 (0) / `AltInteract` 0x00A3E0B0 (1): fired from the Use handler 0x00AD5BA0 for focused interactables that
 are not pickups, event on the user with the interactable as instigator, filtered by

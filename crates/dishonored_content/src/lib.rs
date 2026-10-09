@@ -103,7 +103,8 @@ pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
     // v19: special NPC classes (ai.md F6) and AI head poses / look-at (stealth F4 / F5).
     // v21: the built-in archetypes' HealthMax (ai.archetype_health_max).
     // v20: the explosions' `m_pRadialDamageType` (breakables' immune / instant-break lists).
-    let path = cache_dir().join("gameplay_config.v22.json");
+    // v23: `items.movable` (carrying props) and `ai.noise.prop_contacts / environment`.
+    let path = cache_dir().join("gameplay_config.v23.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);
@@ -469,7 +470,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         }
     };
     // Breakables, whale oil batteries and receptacles (dishonored_sim::world_actors).
-    let wa_path = dir.join(format!("{map}.worldactors1.json"));
+    let wa_path = dir.join(format!("{map}.worldactors2.json"));
     let world_actors: dishonored_ir::world_actors::WorldActors = match std::fs::read_to_string(&wa_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(w) => w,
         None => {

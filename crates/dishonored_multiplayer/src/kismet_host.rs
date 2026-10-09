@@ -148,6 +148,8 @@ pub const FED_EVENTS: &[&str] = &[
     "DisSeqEvent_PowerUsed",
     "DisSeqEvent_Climb",
     "DisSeqEvent_Lock",
+    "DisSeqEvent_MovablePickedUp",
+    "DisSeqEvent_MovableDropped",
 ];
 
 /// Subclasses of [`FED_EVENTS`] classes that are not fed (`PowerEquipped` extends `PowerUsed`
@@ -4357,6 +4359,34 @@ mod tests {
         assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (1, 0));
         r.feed_events(&[SimEvent::Climb { id: 1, climbable: 1, started: false }], 2);
         assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (1, 1));
+    }
+
+    /// `DisSeqEvent_MovablePickedUp` / `MovableDropped` (0x00A45FD0 / 0x00A46380): the prop's own
+    /// events, the prop the originator and the pawn the instigator, every output; another prop's
+    /// event stays quiet, and a thrown prop fires Dropped like a dropped one.
+    #[test]
+    fn movable_events_fire_on_the_prop_with_the_pawn_as_instigator() {
+        use dishonored_ir::world_actors::MovableDef;
+        let mut g = GraphBuilder::new();
+        let (a, b) = (g.actor("DishonoredMovable", "DishonoredMovable_5", [0.0; 3], 0), g.actor("DishonoredMovable", "DishonoredMovable_6", [10.0, 0.0, 0.0], 0));
+        let (picked, p_sinks) = event_with_sinks(&mut g, "DisSeqEvent_MovablePickedUp", &["Out"]);
+        let (dropped, d_sinks) = event_with_sinks(&mut g, "DisSeqEvent_MovableDropped", &["Out"]);
+        let (other, o_sinks) = event_with_sinks(&mut g, "DisSeqEvent_MovablePickedUp", &["Out"]);
+        for (e, actor) in [(picked, a), (dropped, a), (other, b)] {
+            g.set(e, "Originator", Value::Obj(Obj::Actor(actor)));
+        }
+        let mut r = Rig::new(g, |_| {});
+        let at = |name: &str| MovableDef { name: name.into(), package: "T".into(), interactable: true, damage: 5, ..Default::default() };
+        dishonored_sim::movables::spawn(&mut r.m.world, &at("DishonoredMovable_5"));
+        dishonored_sim::movables::spawn(&mut r.m.world, &at("DishonoredMovable_6"));
+        let id = r.m.world.movables[0].id;
+        r.feed_events(&[SimEvent::MovablePickedUp { id: 1, movable: id }], 2);
+        assert_eq!((r.ran(p_sinks[0]), r.ran(d_sinks[0]), r.ran(o_sinks[0])), (1, 0, 0));
+        assert_eq!(r.run.k.ops[picked as usize].instigator, Obj::Pawn(1), "the pawn is the instigator");
+        r.feed_events(&[SimEvent::MovableDropped { id: 1, movable: id, thrown: true }], 2);
+        assert_eq!((r.ran(p_sinks[0]), r.ran(d_sinks[0]), r.ran(o_sinks[0])), (1, 1, 0));
+        r.feed_events(&[SimEvent::MovableDropped { id: 1, movable: id, thrown: false }], 2);
+        assert_eq!(r.ran(d_sinks[0]), 2);
     }
 
     /// `DisSeqEvent_Lock` (0x00A4E870 / 0x00A4E910): the Kismet's own Lock fires OnLocked every

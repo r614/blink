@@ -1036,6 +1036,17 @@ impl AiNoise {
     }
 }
 
+impl NoiseTable {
+    /// The AI noise of a prop whose contact type is `contact` (`""`: the plain `Environment`
+    /// type) striking the world.
+    pub fn prop_contact(&self, contact: &str) -> AiNoise {
+        if contact.is_empty() {
+            return self.environment;
+        }
+        self.prop_contacts.iter().find(|(n, _)| n.eq_ignore_ascii_case(contact)).map(|(_, n)| *n).unwrap_or(self.environment)
+    }
+}
+
 /// The AI noises the simulation emits, from the contact system's `DisContactSub_AINoise`
 /// objects (`Phy_ContactSystem.ContactSystem.Dis_ContactSystem`, struck type
 /// `DisContactType_Environment` unless named) and the weapon tweaks, with radii from
@@ -1073,6 +1084,12 @@ pub struct NoiseTable {
     /// speed-scaled subs (`m_bScaleWithSpeed` false here), so every such contact makes the noise.
     pub corpse: AiNoise,
     pub sleeping_body: AiNoise,
+    /// `DisContactType_Env_*` -> `Environment`: the AI noise of a physics prop (a movable's
+    /// `m_pContactTypeOverride`) striking the world, by contact type class name; the types that
+    /// make the plain [`Self::environment`] noise (wood, stone, tile, ...) are not listed.
+    pub prop_contacts: Vec<(String, AiNoise)>,
+    /// `DisContactType_Environment` -> `Environment` (a prop without a contact type of its own).
+    pub environment: AiNoise,
     /// `DisTweaks_FirePistol.m_AINoiseLoudnessWhenFiring`, context Danger, at the shooter
     /// (0x00C2A3E0). The crossbow's fire tweak has no AI noise: firing a bolt is silent.
     pub pistol_fire: AiNoise,
@@ -1113,6 +1130,15 @@ impl Default for NoiseTable {
             bullet_impact: AiNoise::new(3000.0, Danger, 0.0),
             corpse: AiNoise::new(300.0, Anomaly, 0.0),
             sleeping_body: AiNoise::new(300.0, Anomaly, 0.0),
+            prop_contacts: vec![
+                ("DisContactType_Env_BreakableGlass".into(), AiNoise::new(500.0, Anomaly, 0.0)),
+                ("DisContactType_Env_Glass".into(), AiNoise::new(500.0, Anomaly, 0.0)),
+                ("DisContactType_Env_Metal".into(), AiNoise::new(2000.0, Anomaly, 0.0)),
+                ("DisContactType_Env_Sword".into(), AiNoise::new(2000.0, Anomaly, 0.0)),
+                ("DisContactType_Env_TallboyStilts".into(), AiNoise::new(2000.0, Anomaly, 0.0)),
+                ("DisContactType_Env_WhaleOilBattery".into(), AiNoise::new(500.0, Anomaly, 0.0)),
+            ],
+            environment: AiNoise::new(800.0, Anomaly, 0.0),
             pistol_fire: AiNoise::new(6000.0, Danger, 0.0),
             walk_clip: FootfallClip { length: 2.0, footfalls: vec![1.0000004, 1.9150001] },
             run_clip: FootfallClip { length: 0.96666664, footfalls: vec![0.466667, 0.933333] },
