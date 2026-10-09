@@ -136,6 +136,8 @@ pub struct WallOfLightDef {
     pub name: String,
     pub package: String,
     pub position: Vec3,
+    /// The actor's X axis (its `Rotation`): the shock particles are spawned along it.
+    pub facing: Vec3,
     /// The receptacle powering it (index into `WorldActors::receptacles`): `m_pAttachedReceptacle`,
     /// else the receptacle listing the wall in `m_aAttachedActors`.
     pub receptacle: Option<usize>,
@@ -153,6 +155,26 @@ pub struct WallOfLightDef {
     pub triangles: Vec<[Vec3; 3]>,
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
+    /// The tweak's `m_fWindblastMinimumForce`: a Windblast reaching the wall with at least this
+    /// blast factor shocks it and costs a charge (0x00A3BEF0).
+    pub windblast_min_force: f32,
+    /// The mesh component's `HiddenGame` (its own or its archetype's): the mesh is the editor's
+    /// stand-in, the wall is seen through its emitters.
+    pub mesh_hidden: bool,
+    /// Presentation: the placed `Emitter`s of `m_SparkEffects` (on while powered, 0x00A3EB10 /
+    /// 0x00A3ECA0) and `m_Beams` (on while the kill effect runs, their beam ends at the effect's
+    /// point: 0x00A30CA0, off at its end 0x00A28F80), as `package:actor`.
+    pub spark_effects: Vec<String>,
+    pub beams: Vec<String>,
+    /// The tweak's `m_CrossSparkEffectTemplate` (a `ParticleSystem` path; the wall's tick arcs it
+    /// between two random spark emitters every `m_fMinSparkInterval`..`m_fMaxSparkInterval` s
+    /// for `m_fSparkDuration` s, active only then with `m_bDisableSystemBetweenSparks`) and
+    /// `m_ShockParticleSystemTemplate`.
+    pub cross_spark: String,
+    pub spark_interval: [f32; 2],
+    pub spark_duration: f32,
+    pub sparks_only_while_arcing: bool,
+    pub shock_particles: String,
 }
 
 /// The world actors of one map.

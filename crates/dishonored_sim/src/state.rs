@@ -864,6 +864,11 @@ pub struct WorldState {
     /// Set by the host before the step; not part of the state.
     #[serde(skip)]
     pub host_targets: Vec<crate::crosshair::HostTarget>,
+    /// The walls of light that have collision this step (`COLLIDE_TouchAll`: powered, time
+    /// running): projectiles crossing one are disintegrated and Windblast gathers them
+    /// ([`crate::walls`]). Set by the host before the step; not part of the state.
+    #[serde(skip)]
+    pub wall_blockers: Vec<crate::walls::WallBlocker>,
     pub players: Vec<PlayerState>,
     pub projectiles: Vec<ProjectileState>,
     pub next_projectile_id: u32,
@@ -1180,6 +1185,10 @@ pub struct WindblastState {
     /// `m_Distance x (1 + Attribute_SpellStrength)`: the gather radius and the front's cap.
     #[serde(default)]
     pub range: f32,
+    /// Walls of light gathered with the targets (indices into the map's walls), still to be
+    /// reached.
+    #[serde(default)]
+    pub walls: Vec<u32>,
 }
 
 fn wb_level() -> u8 {

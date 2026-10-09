@@ -728,6 +728,8 @@ pub fn step_windblasts(
                 .filter(|v| v.position.distance(wb.origin) < range && windblast_factor(dir, v.position, wb.origin, range, cos_half) > 0.0)
                 .map(|v| v.id)
                 .collect();
+            // The colliding walls of light are gathered the same way (their bounds centre).
+            wb.walls = state.wall_blockers.iter().filter(|b| b.center().distance(wb.origin) < range && windblast_factor(dir, b.center(), wb.origin, range, cos_half) > 0.0).map(|b| b.wall).collect();
             // Projectiles in the cone are knocked away (the original redirects them).
             let (o, d) = (wb.origin, dir);
             state.projectiles.retain(|pr| windblast_factor(d, pr.position, o, range, cos_half) <= 0.0 || pr.position.distance(o) >= range);
@@ -778,12 +780,36 @@ pub fn step_windblasts(
             apply_damage(v, dmg, Some(wb.caster), DamageCause::Windblast, events, vitals);
         }
         wb.targets = remaining;
+        // A wall of light the front passed (0x00BF6AF0, after the sight check to its bounds
+        // centre, the wall itself excluded) takes the blast in its vslot 223 instead of a push
+        // (`crate::walls::apply_hits`); one no longer colliding was left out of the world.
+        let mut walls_left = Vec::new();
+        for &w in &wb.walls {
+            let Some(b) = state.wall_blockers.iter().find(|b| b.wall == w) else { continue };
+            let c = b.center();
+            let d = c.distance(wb.origin);
+            if d > reach {
+                walls_left.push(w);
+                continue;
+            }
+            let to = c - wb.origin;
+            if let Some(h) = world.raycast(wb.origin, to, d, channel::PROJECTILE) {
+                let own = h.point.cmpge(b.lo - Vec3::ONE).all() && h.point.cmple(b.hi + Vec3::ONE).all();
+                if !own && h.distance < d - mv.collision_radius {
+                    continue;
+                }
+            }
+            let k = windblast_factor(wb.direction, c, wb.origin, range, cos_half);
+            events.push(SimEvent::WallOfLightBlast { wall: w, force: k, by: wb.caster });
+        }
+        wb.walls = walls_left;
         wb.elapsed += dt;
         if reach >= range {
             wb.targets.clear();
+            wb.walls.clear();
         }
     }
-    blasts.retain(|wb| !wb.started || !wb.targets.is_empty());
+    blasts.retain(|wb| !wb.started || !wb.targets.is_empty() || !wb.walls.is_empty());
     state.windblasts = blasts;
 }
 
@@ -923,6 +949,11 @@ pub fn step_projectiles(
                         body = Some((i, along, on_seg));
                     }
                 }
+            }
+            // A wall of light that collides takes the hit and destroys the projectile (0x00C4F3A0).
+            if let Some((wall, point)) = crate::walls::projectile_hit(state, from, to, world_hit, body.map(|b| b.1)) {
+                events.push(SimEvent::WallOfLightHit { wall, point, projectile: pr.id, owner: pr.owner });
+                continue 'shots;
             }
             match (body, world_hit) {
                 (Some((i, along, point)), wh) if wh.is_none_or(|w| along <= w) => {

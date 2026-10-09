@@ -347,9 +347,9 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     }
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).ok();
-    // collision21 / levels21: triangles carry `channel::SHADOW` (the stealth light's line check); the always-loaded levels' collision, and one world per Kismet-streamed sublevel.
-    let coll_path = dir.join(format!("{map}.collision21.bin"));
-    let levels_path = dir.join(format!("{map}.levels21.bin"));
+    // collision22 / levels22: triangles carry `channel::SHADOW` (the stealth light's line check); the always-loaded levels' collision, and one world per Kismet-streamed sublevel. 22: walls of light are not static (layered while they collide).
+    let coll_path = dir.join(format!("{map}.collision22.bin"));
+    let levels_path = dir.join(format!("{map}.levels22.bin"));
     let streamed = dishonored_assets::kismet_streamed_levels(&content, map);
     let cached = match (CollisionWorld::load(&coll_path), dishonored_world::StreamedLevels::load_levels(&levels_path), std::fs::read_to_string(&spawn_path_of(&dir, map))) {
         (Ok(w), Ok(l), Ok(s)) => Some((w, l, serde_json::from_str::<Vec<Spawn>>(&s).unwrap_or_default())),
@@ -472,7 +472,8 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         }
     };
     // Breakables, whale oil batteries and receptacles (dishonored_sim::world_actors).
-    let wa_path = dir.join(format!("{map}.worldactors3.json"));
+    // worldactors4: walls of light carry their Windblast threshold and presentation data.
+    let wa_path = dir.join(format!("{map}.worldactors4.json"));
     let world_actors: dishonored_ir::world_actors::WorldActors = match std::fs::read_to_string(&wa_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(w) => w,
         None => {

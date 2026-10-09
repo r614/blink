@@ -548,6 +548,8 @@ pub fn main() {
             .init_resource::<cutscene::Cutscenes>()
             .init_resource::<cutscene::PawnPoints>()
             .add_systems(Update, (cutscene::drive.after(players::sync_players).before(characters::animate_characters), cutscene::props.after(cutscene::drive), cutscene::emitters.after(cutscene::drive), cutscene::camera.after(players::camera_follow).before(viewmodel::animate_view_rig), cutscene::look_limits.after(input_map::gather_input).before(players::camera_follow), level_props::follow_movers.after(cutscene::drive), movables::follow_props.after(level_props::follow_movers), walls_of_light::show_walls))
+            .init_resource::<walls_of_light::WallsFx>()
+            .add_systems(Update, walls_of_light::drive_wall_emitters)
             .add_systems(
                 Update,
                 (

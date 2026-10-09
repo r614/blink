@@ -163,6 +163,12 @@ pub fn step_grenades(state: &mut WorldState, world: &dyn WorldQuery, cfg: &Gamep
                     }
                 }
             }
+            // A wall of light that collides takes the hit and destroys the grenade (0x00C4F3A0):
+            // no bounce, no explosion.
+            if let Some((wall, point)) = crate::walls::projectile_hit(state, pr.position, pr.position + delta, world_hit.map(|h| h.distance), pawn.map(|p| p.1)) {
+                events.push(SimEvent::WallOfLightHit { wall, point, projectile: pr.id, owner: pr.owner });
+                continue;
+            }
             match (pawn, world_hit) {
                 (Some((vid, along, point, n)), wh) if wh.is_none_or(|w| along <= w.distance) => {
                     arm(&mut pr, &g);

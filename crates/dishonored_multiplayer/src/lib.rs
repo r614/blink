@@ -163,6 +163,9 @@ pub struct WallView {
     pub name: String,
     pub position: [f32; 3],
     pub powered: bool,
+    /// While the kill effect (or a shock) runs: where the wall's beams end.
+    #[serde(default)]
+    pub effect: Option<[f32; 3]>,
 }
 
 /// A launcher as clients see it: its place and bounds (the interaction focus), its state and

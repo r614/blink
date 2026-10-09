@@ -605,6 +605,10 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
     let off = std::env::args().any(|a| a == "--no-fx") || std::env::var_os("DISH_NO_PARTICLES").is_some();
     for e in map.emitters.iter().filter(|e| e.auto_activate && !off) {
         let root = spawn_instance(commands, meshes, &lf, name, e.system, e.transform, false);
+        // Its "package:actor" key: an actor that drives its emitters (a wall of light) finds it.
+        if let (Some(root), Some((pkg, path))) = (root, e.source.split_once(':')) {
+            commands.entity(root).insert(PlacedEmitter(format!("{pkg}:{}", path.rsplit('.').next().unwrap_or(path)).to_ascii_lowercase()));
+        }
         // An emitter of a Kismet-streamed sublevel leaves with it (level streaming).
         if let (Some(root), Some(tag)) = (root, crate::level::streamed_tag(&map.streamed_levels, crate::level::source_package(&e.source))) {
             commands.entity(root).insert(tag);
@@ -623,6 +627,20 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
 /// [interp] A placed emitter played by a matinee's toggle track (`InterpTrackToggle`).
 #[derive(Component)]
 pub struct MatineeEmitter;
+
+/// A placed emitter the level started (`bAutoActivate`), by its "package:actor" key (lowercase).
+#[derive(Component)]
+pub struct PlacedEmitter(pub String);
+
+/// Stop an instance: it spawns no more and goes once its particles die (`DeactivateSystem`).
+pub fn stop_instance(commands: &mut Commands, e: Entity) {
+    commands.entity(e).try_insert(StopAtOnce);
+}
+
+/// Set (or move) the user-set end of an instance's beams (`SetBeamTargetPoint`).
+pub fn set_beam_target(commands: &mut Commands, e: Entity, to: Vec3) {
+    commands.entity(e).try_insert(BeamTarget(to));
+}
 
 impl FxInstance {
     /// [interp] Move the emitter (Dishonored world transform).
@@ -1189,6 +1207,15 @@ fn gameplay_effects(
     let players: Vec<PlayerState> = view.me.iter().chain(view.others.iter()).copied().collect();
     let scene = FxScene { players: &players, me, muzzle: &sockets.muzzle, bones: &sockets.bones, contact: audio.as_ref().and_then(|a| a.contact()), world: session.as_ref().map(|s| &s.content.collision), now, projectiles: &view.projectiles };
     let requests = fx.rules.requests(&events, &scene);
+    // A wall of light's shock (`m_ShockParticleSystemTemplate` at the point, the wall's rotation:
+    // 0x00A3BCE0 / 0x00A3E630 / 0x00A3E7D0 spawn it there).
+    if let Some(s) = session.as_ref() {
+        for e in &events {
+            let dishonored_sim::events::SimEvent::WallOfLightShock { wall, point, particles: true } = *e else { continue };
+            let Some(d) = s.content.world_actors.walls_of_light.get(wall as usize).filter(|d| !d.shock_particles.is_empty()) else { continue };
+            spawn_effect(&mut commands, &mut meshes, &mut fx, &d.shock_particles, point, d.facing);
+        }
+    }
     // `DisDecalManager`'s pool: (entity, made, last seen).
     let mut pool: Vec<(Entity, f32, f32)> = decals.iter().map(|(e, d)| (e, d.born, d.seen)).collect();
     let decals_on = features.as_deref().is_none_or(|f| f.dynamic_decals);

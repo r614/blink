@@ -323,6 +323,10 @@ pub const GAMEPLAY_PARTICLES: &[&str] = &[
     "Vfx_PhysMat.Slide.PS_Slide_Mud",
     "Vfx_PhysMat.Slide.PS_Slide_Generic",
     "Vfx_PhysMat.Slide.PS_Slide_Dirt",
+    // Walls of light (`WallOfLight_twk`): `m_CrossSparkEffectTemplate` and
+    // `m_ShockParticleSystemTemplate`.
+    "Vfx_GamePlay.WallLight.Lightnings3_random",
+    "Vfx_GamePlay.WallLight.ps_shock_electrified",
     "Vfx_GamePlay.RiverKrust.Ps_RiverKrust_Explo",
     "Vfx_GamePlay.RiverKrust.RK_Impact_Default",
     "Vfx_GamePlay.RiverKrust.RK_SwordImpact",
