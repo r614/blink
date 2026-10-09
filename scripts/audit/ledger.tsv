@@ -100,3 +100,62 @@
 00c0baa0	helper	weapon muzzle socket location / rotation
 00bc7c00	irrelevant	HUD crosshair / marker refresh from the controller's list
 00c0f9f0	helper	item context transition with timer callback
+# movement.rs (2026-10-09)
+00645b00	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+0068e260	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+005e6350	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+007bde20	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+0056d7e0	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+0040dfc0	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+008aa690	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+0065fc60	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+006cc8d0	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+006aca00	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+006ab690	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+00568440	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+0093e0d0	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+0058a7c0	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+00649340	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+005989f0	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+006ab2b0	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+0040d570	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+005292d0	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+00961db0	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+00589d90	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+00759db0	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+0040df70	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+006a0540	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+0040d260	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+004b1080	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+0093ed30	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+006b4d80	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+0069f8a0	helper	UE3 engine internal of a ported engine routine (physWalking / MoveActor / camera)
+00aa3f80	gap	the slide's movement (StatePlayerMasterSlide 0x00A6F440 -> 0x00AA3F80): a substepped falling-style integrator (gravity added each step, landing 0x00AA1740 / 0x00AA3A10, swimming switch), so a slide follows gravity and can leave a ledge; the port slides with v.z = 0 through walk_move: rewrite with a test
+00a6ef40	gap	slide / walk transitions: ends a toggled sneak (0x00ACD960) and shakes the camera (0x00AA5F90): unread in detail
+00ad3860	gap	the sneak toggle's end, second variant (camera transition 0x218): with 0x00ACD960
+00b5f870	irrelevant	ragdoll setup from the physics asset (Sensor bodies)
+00a86f20	irrelevant	thrown NPC ragdoll (Root_jnt)
+00c42af0	irrelevant	thrown NPC ragdoll impulse
+00b60320	irrelevant	ragdoll constraint cleanup
+00c4d940	helper	animation tree node search
+00ac4bb0	irrelevant	camera update part (eye position smoothing)
+00abfbd0	irrelevant	camera update part
+00a75450	irrelevant	stance change camera / animation (sneak in / out)
+00a72ed0	irrelevant	camera animation of an action state
+00a60fa0	irrelevant	animation slot state
+00a60f40	irrelevant	animation node flags
+00ac3430	helper	box fits check for the stand-up
+00bbff60	helper	vector sign / mirror helper
+00bcfff0	helper	line check wrapper
+00bc8f60	helper	mantle helper
+00a27f30	helper	climbable touch flag + touch (UE3)
+00a61250	irrelevant	animation debug name
+00ac1e30	helper	struct copy
+00b6e920	helper	hit reaction slots reset
+00b6e160	helper	location of an actor or a vector
+00c410b0	irrelevant	stops attached particle systems
+00b49820	helper	pawn state query
+00a67c50	helper	swim state helper
+00a77c30	helper	throw state init helper
+009facf0	helper	player tweak object
+00a71690	irrelevant	plays a camera animation (stand-up etc.)
