@@ -303,7 +303,27 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
                 em.delay = find(p, "EmitterDelay").and_then(|x| x.as_float()).unwrap_or(0.0);
                 em.sub_h = int_or(p, "SubImages_Horizontal", 1).max(1) as u32;
                 em.sub_v = int_or(p, "SubImages_Vertical", 1).max(1) as u32;
-                em.sub_random = matches!(enum_of(p, "InterpolationMethod").as_deref(), Some("PSUVIM_Random") | Some("PSUVIM_Random_Blend"));
+                em.sub_method = match enum_of(p, "InterpolationMethod").as_deref() {
+                    Some("PSUVIM_Linear") => 1,
+                    Some("PSUVIM_Linear_Blend") => 2,
+                    Some("PSUVIM_Random") => 3,
+                    Some("PSUVIM_Random_Blend") => 4,
+                    _ => 0,
+                };
+                em.sub_random = matches!(em.sub_method, 3 | 4);
+                em.sort_mode = match enum_of(p, "SortMode").as_deref() {
+                    Some("PSORTMODE_ViewProjDepth") => 1,
+                    Some("PSORTMODE_DistanceToView") => 2,
+                    Some("PSORTMODE_Age_OldestFirst") => 3,
+                    Some("PSORTMODE_Age_NewestFirst") => 4,
+                    _ => 0,
+                };
+                let f = |n: &str| find(p, n).and_then(|x| x.as_float()).unwrap_or(0.0);
+                em.delay_low = bool_or(p, "bEmitterDelayUseRange", false).then(|| f("EmitterDelayLow"));
+                em.duration_low = bool_or(p, "bEmitterDurationUseRange", false).then(|| f("EmitterDurationLow"));
+                em.delay_first_loop_only = bool_or(p, "bDelayFirstLoopOnly", false);
+                em.duration_recalc = bool_or(p, "bDurationRecalcEachLoop", false);
+                em.kill_on_deactivate = bool_or(p, "bKillOnDeactivate", false);
                 // Older layout: spawn rate and bursts on the required module.
                 if em.rate.is_none() {
                     em.rate = dist(p, "SpawnRate", 1);
@@ -324,6 +344,7 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
             "ParticleModuleVelocity" => {
                 em.velocity = dist(p, "StartVelocity", 3);
                 em.velocity_radial = dist(p, "StartVelocityRadial", 1);
+                em.velocity_world = bool_or(p, "bInWorldSpace", false);
             }
             "ParticleModuleRotation" => em.rotation = dist(p, "StartRotation", 1),
             "ParticleModuleRotationRate" => em.rotation_rate = dist(p, "StartRotationRate", 1),
@@ -335,7 +356,39 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
                 em.color_over_life = dist(p, "ColorOverLife", 3);
                 em.alpha_over_life = dist(p, "AlphaOverLife", 1);
             }
-            "ParticleModuleAcceleration" => em.acceleration = dist(p, "Acceleration", 3),
+            "ParticleModuleAcceleration" => {
+                em.acceleration = dist(p, "Acceleration", 3);
+                em.accel_world = bool_or(p, "bAlwaysInWorldSpace", false);
+            }
+            "ParticleModuleAccelerationOverLifetime" => em.accel_over_life = dist(p, "AccelOverLife", 3).map(|d| (d, bool_or(p, "bAlwaysInWorldSpace", false))),
+            "ParticleModuleColorScaleOverLife" => {
+                em.color_scale_over_life = Some((dist(p, "ColorScaleOverLife", 3), dist(p, "AlphaScaleOverLife", 1), bool_or(p, "bEmitterTime", false)));
+            }
+            "ParticleModuleRotationRateMultiplyLife" => em.rotation_rate_life = dist(p, "LifeMultiplier", 1),
+            "ParticleModuleMeshRotationRateOverLife" => em.mesh_rotation_rate_life = dist(p, "RotRate", 3).map(|d| (d, bool_or(p, "bScaleRotRate", false))),
+            "ParticleModuleSizeScale" => em.size_scale = dist(p, "SizeScale", 3),
+            "ParticleModuleSizeScaleByTime" => {
+                // `Default__ParticleModuleSizeScaleByTime`: every axis enabled.
+                em.size_scale_by_time = dist(p, "SizeScaleByTime", 3).map(|d| (d, [bool_or(p, "bEnableX", true), bool_or(p, "bEnableY", true), bool_or(p, "bEnableZ", true)]));
+            }
+            "ParticleModuleKillHeight" => em.kill_height = dist(p, "Height", 1).map(|d| (d, bool_or(p, "bAbsolute", false), bool_or(p, "bFloor", false))),
+            "ParticleModuleVelocityInheritParent" => {
+                // `Default__ParticleModuleVelocityInheritParent`: Scale (1, 1, 1).
+                em.velocity_inherit_parent = Some(dist(p, "Scale", 3).unwrap_or_else(|| Dist::constant([1.0; 3], 3)));
+            }
+            "ParticleModuleLocationEmitter" => {
+                let name = match find(p, "EmitterName").map(|x| &x.value) {
+                    Some(Value::Name(n)) => n.clone(),
+                    _ => String::new(),
+                };
+                // `Default__ParticleModuleLocationEmitter`: InheritSourceVelocityScale 1.
+                let scale = find(p, "InheritSourceVelocityScale").and_then(|x| x.as_float()).unwrap_or(1.0);
+                em.location_emitter = Some(dishonored_ir::particles::LocationEmitter {
+                    emitter: name,
+                    sequential: enum_of(p, "SelectionMethod").as_deref() == Some("ELESM_Sequential"),
+                    inherit_velocity: bool_or(p, "InheritSourceVelocity", false).then_some(scale),
+                });
+            }
             "ParticleModuleVelocityOverLifetime" => {
                 em.vel_over_life = dist(p, "VelOverLife", 3).map(|d| (d, bool_or(p, "Absolute", false)));
             }
@@ -402,22 +455,34 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
                 }
             }
             "ParticleModuleLocation" => em.location = dist(p, "StartLocation", 3),
-            "ParticleModuleLocationPrimitiveSphere" => {
-                em.sphere = Some((
-                    dist(p, "StartRadius", 1).unwrap_or_else(|| Dist::constant([50.0; 3], 1)),
-                    [bool_or(p, "Positive_X", true), bool_or(p, "Positive_Y", true), bool_or(p, "Positive_Z", true)],
-                    bool_or(p, "SurfaceOnly", false),
-                    bool_or(p, "Velocity", false).then(|| dist(p, "VelocityScale", 1).unwrap_or_else(|| Dist::constant([1.0; 3], 1))),
-                ));
+            "ParticleModuleLocationPrimitiveSphere" | "ParticleModuleLocationPrimitiveCylinder" => {
+                // `Default__ParticleModuleLocationPrimitiveBase`: every axis sign on, VelocityScale
+                // 1; the cylinder's `RadialVelocity` on; StartRadius / StartHeight 50.
+                let cyl = mclass == "ParticleModuleLocationPrimitiveCylinder";
+                let prim = dishonored_ir::particles::LocationPrimitive {
+                    positive: [bool_or(p, "Positive_X", true), bool_or(p, "Positive_Y", true), bool_or(p, "Positive_Z", true)],
+                    negative: [bool_or(p, "Negative_X", true), bool_or(p, "Negative_Y", true), bool_or(p, "Negative_Z", true)],
+                    surface_only: bool_or(p, "SurfaceOnly", false),
+                    velocity: bool_or(p, "Velocity", false).then(|| dist(p, "VelocityScale", 1).unwrap_or_else(|| Dist::constant([1.0; 3], 1))),
+                    start_location: dist(p, "StartLocation", 3),
+                    radius: dist(p, "StartRadius", 1).unwrap_or_else(|| Dist::constant([50.0; 3], 1)),
+                    height: cyl.then(|| dist(p, "StartHeight", 1).unwrap_or_else(|| Dist::constant([50.0; 3], 1))),
+                    height_axis: match enum_of(p, "HeightAxis").as_deref() {
+                        Some("PMLPC_HEIGHTAXIS_X") | Some("0") => 0,
+                        Some("PMLPC_HEIGHTAXIS_Y") | Some("1") => 1,
+                        _ => 2,
+                    },
+                    radial_velocity: bool_or(p, "RadialVelocity", true),
+                };
+                if cyl {
+                    em.cylinder = Some(prim);
+                } else {
+                    em.sphere = Some(prim);
+                }
             }
-            "ParticleModuleLocationPrimitiveCylinder" => {
-                em.cylinder = Some((
-                    dist(p, "StartRadius", 1).unwrap_or_else(|| Dist::constant([50.0; 3], 1)),
-                    dist(p, "StartHeight", 1).unwrap_or_else(|| Dist::constant([50.0; 3], 1)),
-                    bool_or(p, "SurfaceOnly", false),
-                ));
-            }
-            "ParticleModuleSubImageIndex" => em.sub_image = dist(p, "SubImageIndex", 1),
+            // UE3's class is `ParticleModuleSubUV` (its `SubImageIndex` curve); no
+            // `ParticleModuleSubImageIndex` exists in the install.
+            "ParticleModuleSubUV" | "ParticleModuleSubImageIndex" => em.sub_image = dist(p, "SubImageIndex", 1),
             "ParticleModuleTypeDataMesh" => {
                 if let Some(o) = find(p, "Mesh").and_then(|x| x.as_object()).filter(|o| *o != 0) {
                     em.mesh = Some(mpkg.obj_path(ObjRef::from_index(o)));

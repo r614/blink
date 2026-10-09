@@ -555,7 +555,7 @@ pub fn animate_characters(
     mut anim_sounds: Option<ResMut<crate::audio::AnimSounds>>,
     session: Res<crate::session::Session>,
     mut sockets: Option<ResMut<crate::effects::EffectSockets>>,
-    mut pawn_points: Option<ResMut<crate::cutscene::PawnPoints>>,
+    (mut pawn_points, mut pawn_fx): (Option<ResMut<crate::cutscene::PawnPoints>>, Option<ResMut<crate::effects::PawnEffects>>),
 ) {
     let events = std::mem::take(&mut view.anim_events);
     let (Some(lib), Some(mut bank)) = (lib, bank) else { return };
@@ -608,10 +608,26 @@ pub fn animate_characters(
                 .collect()
         };
         let input = crate::npc_anim::AnimInput { p, stance, armed, talking: talking.contains(&p.id), dt, hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), look_target: look_target(p, stance, talking.contains(&p.id), &all), head: view.matchv.npc_heads.iter().find(|h| h.id == p.id).copied(), face: faces.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), floor: -mv.collision_half_height, ground: Some(&ground), walls: Some(&walls), gravity: mv.gravity_z, carrier_speed: p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).map(|c| c.velocity.truncate().length()).unwrap_or(0.0) };
+        // Particle notifies the chains crossed this frame: (system, socket or bone, attached).
+        let mut fired: Vec<(String, String, bool)> = Vec::new();
         let pose = match states.get_mut(entity) {
             Ok(mut st) => {
                 let before = chain_clips(&st);
                 let pose = crate::npc_anim::animate(&mut bank, &lib, root.archetype, profile, &mut st, &input);
+                // `AnimNotify_PlayParticleEffect` of the full-body and upper-body chains: a clip
+                // started this frame fires from its start (a notify at 0 too).
+                for (clip, t1) in chain_clips(&st) {
+                    let t0 = before.iter().find(|b| b.0 == clip).map(|b| b.1);
+                    for (t, template, point, attach) in bank.particle_notifies(profile, &clip) {
+                        let crossed = match t0 {
+                            Some(t0) => t0 < t && t <= t1,
+                            None => t <= t1,
+                        };
+                        if crossed {
+                            fired.push((template, point, attach));
+                        }
+                    }
+                }
                 // Sound notifies (AnimNotify_AkEvent, footfalls) of the clip windows advanced.
                 if let Some(snd) = anim_sounds.as_mut() {
                     for (clip, t1) in chain_clips(&st) {
@@ -670,6 +686,31 @@ pub fn animate_characters(
                 if let Some(l) = local {
                     pp.points.insert((p.id, name), crate::cutscene::from_bevy(root_gt.to_matrix() * to_bevy(l)));
                 }
+            }
+        }
+        // Sockets (else bones) of the particle notifies fired now and of the attached effects
+        // still playing on this pawn (Dishonored world transforms).
+        if let Some(fx) = pawn_fx.as_mut() {
+            let point = |name: &str| -> Option<glam::Mat4> {
+                let local = lib
+                    .sockets
+                    .get(&root.archetype)
+                    .and_then(|v| v.iter().find(|s| s.name.eq_ignore_ascii_case(name)))
+                    .map(|s| globals[s.part][s.bone] * s.local)
+                    .or_else(|| model.parts.iter().enumerate().find_map(|(pi, part)| part.bones.iter().position(|b| b.name.eq_ignore_ascii_case(name)).map(|bi| globals[pi][bi])))?;
+                Some(crate::cutscene::from_bevy(root_gt.to_matrix() * to_bevy(local)))
+            };
+            for (template, name, attach) in fired {
+                if let Some(m) = point(&name) {
+                    fx.pending.push((template, p.id, name.clone(), m, attach));
+                    fx.points.insert((p.id, name), m);
+                }
+            }
+            for name in fx.wanted(p.id) {
+                match point(&name) {
+                    Some(m) => fx.points.insert((p.id, name), m),
+                    None => fx.points.remove(&(p.id, name)),
+                };
             }
         }
         // Bones the Shadow Kill ash attaches to (`m_ShadowKillFXs`), world space.

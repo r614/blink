@@ -30,6 +30,9 @@ pub struct SetData {
     pub seqs: HashMap<String, (usize, String)>,
     /// lowercase sequence name -> time of its `DishonoredNotify_Ragdoll` (physics hand-over).
     pub ragdoll: HashMap<String, f32>,
+    /// lowercase sequence name -> its `AnimNotify_PlayParticleEffect`s: (time, system path, socket
+    /// or bone, attached).
+    pub pfx: HashMap<String, Vec<(f32, String, String, bool)>>,
 }
 
 pub struct Profile {
@@ -140,6 +143,7 @@ impl AnimBank {
         let tracks: Vec<String> = (0..n).map(|_| ue3_package::FName::read(&mut rd).map(|f| pkg.name(f)).unwrap_or_default()).collect();
         let mut seqs = HashMap::new();
         let mut ragdoll = HashMap::new();
+        let mut pfx: HashMap<String, Vec<(f32, String, String, bool)>> = HashMap::new();
         for s in find(&h.properties, "Sequences").and_then(|p| p.array_objects().ok()).unwrap_or_default() {
             let ObjRef::Export(x) = ObjRef::from_index(s) else { continue };
             let Ok(sh) = pkg.read_object(x) else { continue };
@@ -148,14 +152,30 @@ impl AnimBank {
                 // `DishonoredNotify_Ragdoll`: the death hands the body to physics here.
                 for ev in find(&sh.properties, "Notifies").and_then(|p| p.array_structs(&pkg).ok()).unwrap_or_default() {
                     let Some(ObjRef::Export(ni)) = find(&ev, "Notify").and_then(|p| p.as_object()).map(ObjRef::from_index) else { continue };
-                    if pkg.export_class(ni) == "DishonoredNotify_Ragdoll" {
-                        let t = find(&ev, "Time").and_then(|p| p.as_float()).unwrap_or(0.0);
-                        ragdoll.entry(name.to_ascii_lowercase()).or_insert(t);
+                    let t = find(&ev, "Time").and_then(|p| p.as_float()).unwrap_or(0.0);
+                    match pkg.export_class(ni).as_str() {
+                        "DishonoredNotify_Ragdoll" => {
+                            ragdoll.entry(name.to_ascii_lowercase()).or_insert(t);
+                        }
+                        // The system plays on the socket (else the bone) of the mesh, attached or
+                        // where it was.
+                        "AnimNotify_PlayParticleEffect" => {
+                            let Ok(nh) = pkg.read_object(ni) else { continue };
+                            let nm = |k: &str| match find(&nh.properties, k).map(|p| &p.value) {
+                                Some(Value::Name(v)) if v != "None" => v.clone(),
+                                _ => String::new(),
+                            };
+                            let Some(r @ (ObjRef::Export(_) | ObjRef::Import(_))) = find(&nh.properties, "PSTemplate").and_then(|p| p.as_object()).map(ObjRef::from_index) else { continue };
+                            let point = if nm("SocketName").is_empty() { nm("BoneName") } else { nm("SocketName") };
+                            let attach = matches!(find(&nh.properties, "bAttach").map(|p| &p.value), Some(Value::Bool(true)));
+                            pfx.entry(name.to_ascii_lowercase()).or_default().push((t, pkg.obj_path(r), point, attach));
+                        }
+                        _ => {}
                     }
                 }
             }
         }
-        self.sets.push(SetData { pkg: r.0.clone(), tracks, seqs, ragdoll });
+        self.sets.push(SetData { pkg: r.0.clone(), tracks, seqs, ragdoll, pfx });
         self.set_index.insert(key, self.sets.len() - 1);
         Some(self.sets.len() - 1)
     }
@@ -196,6 +216,14 @@ impl AnimBank {
 
     pub fn has(&mut self, profile: usize, name: &str) -> bool {
         self.holder(profile, name).is_some()
+    }
+
+    /// The particle notifies (time, system, socket or bone, attached) of a profile's sequence.
+    pub fn particle_notifies(&mut self, profile: usize, name: &str) -> Vec<(f32, String, String, bool)> {
+        match self.holder(profile, name) {
+            Some(s) => self.sets[s].pfx.get(&name.to_ascii_lowercase()).cloned().unwrap_or_default(),
+            None => Vec::new(),
+        }
     }
 
     /// Decode (once) a sequence for a profile.

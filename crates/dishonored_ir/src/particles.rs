@@ -243,11 +243,11 @@ pub struct ParticleEmitterAsset {
     pub acceleration: Option<Dist>,
     pub drag: Option<Dist>,
     pub location: Option<Dist>,
-    /// `ParticleModuleLocationPrimitiveSphere`: radius, positive axes, surface only, velocity
-    /// (scale).
-    pub sphere: Option<(Dist, [bool; 3], bool, Option<Dist>)>,
-    /// `ParticleModuleLocationPrimitiveCylinder`: radius, height, surface only.
-    pub cylinder: Option<(Dist, Dist, bool)>,
+    /// `ParticleModuleLocationPrimitiveSphere` / `Cylinder` (the cylinder carries its height).
+    #[serde(default)]
+    pub sphere: Option<LocationPrimitive>,
+    #[serde(default)]
+    pub cylinder: Option<LocationPrimitive>,
     pub sub_image: Option<Dist>,
     /// Mesh emitter (`ParticleModuleTypeDataMesh`).
     pub mesh: Option<String>,
@@ -315,8 +315,96 @@ pub struct ParticleEmitterAsset {
     /// update.
     #[serde(default)]
     pub size_mult_velocity: Option<(Dist, [bool; 3])>,
+    /// `ParticleModuleVelocity.bInWorldSpace`: the start velocity is not turned by the component
+    /// (0x008B8C20).
+    #[serde(default)]
+    pub velocity_world: bool,
+    /// `ParticleModuleAcceleration.bAlwaysInWorldSpace` (0x008B5A20 / 0x008B5D50).
+    #[serde(default)]
+    pub accel_world: bool,
+    /// `ParticleModuleAccelerationOverLifetime`: `AccelOverLife` at the relative time,
+    /// `bAlwaysInWorldSpace` (0x008B67A0).
+    #[serde(default)]
+    pub accel_over_life: Option<(Dist, bool)>,
+    /// `ParticleModuleColorScaleOverLife`: `ColorScaleOverLife`, `AlphaScaleOverLife`,
+    /// `bEmitterTime` (0x0089F040 / 0x008BA1E0).
+    #[serde(default)]
+    pub color_scale_over_life: Option<(Option<Dist>, Option<Dist>, bool)>,
+    /// `ParticleModuleRotationRateMultiplyLife.LifeMultiplier` (0x0089E270).
+    #[serde(default)]
+    pub rotation_rate_life: Option<Dist>,
+    /// `ParticleModuleMeshRotationRateOverLife`: `RotRate` (turns), `bScaleRotRate` (0x008A5000).
+    #[serde(default)]
+    pub mesh_rotation_rate_life: Option<(Dist, bool)>,
+    /// `ParticleModuleSizeScale.SizeScale`: Size = BaseSize x scale (0x0089E040).
+    #[serde(default)]
+    pub size_scale: Option<Dist>,
+    /// `ParticleModuleSizeScaleByTime`: `SizeScaleByTime` over the particle's own clock,
+    /// `bEnableX/Y/Z` (0x0089E120).
+    #[serde(default)]
+    pub size_scale_by_time: Option<(Dist, [bool; 3])>,
+    /// `ParticleModuleKillHeight`: `Height`, `bAbsolute`, `bFloor` (0x008BA960).
+    #[serde(default)]
+    pub kill_height: Option<(Dist, bool, bool)>,
+    /// `ParticleModuleVelocityInheritParent.Scale` (0x008B92A0).
+    #[serde(default)]
+    pub velocity_inherit_parent: Option<Dist>,
+    /// `ParticleModuleLocationEmitter` (0x008ABCE0).
+    #[serde(default)]
+    pub location_emitter: Option<LocationEmitter>,
+    /// `ParticleModuleRequired.InterpolationMethod` (`EParticleSubUVInterpMethod`: 0 none,
+    /// 1 linear, 2 linear blend, 3 random, 4 random blend).
+    #[serde(default)]
+    pub sub_method: u8,
+    /// `ParticleModuleRequired.SortMode` (`EParticleSortMode`: 0 none, 1 view-projection depth,
+    /// 2 distance to the view, 3 oldest first, 4 newest first).
+    #[serde(default)]
+    pub sort_mode: u8,
+    /// `EmitterDelayLow` / `EmitterDurationLow` with `bEmitterDelayUseRange` /
+    /// `bEmitterDurationUseRange`, `bDelayFirstLoopOnly`, `bDurationRecalcEachLoop`
+    /// (0x00882DF0, 0x00887270).
+    #[serde(default)]
+    pub delay_low: Option<f32>,
+    #[serde(default)]
+    pub duration_low: Option<f32>,
+    #[serde(default)]
+    pub delay_first_loop_only: bool,
+    #[serde(default)]
+    pub duration_recalc: bool,
+    /// `ParticleModuleRequired.bKillOnDeactivate`: a deactivated instance kills the emitter's
+    /// particles at once (others let them live out their lifetime).
+    #[serde(default)]
+    pub kill_on_deactivate: bool,
     /// Module classes present but not simulated (for the import report).
     pub unsupported: Vec<String>,
+}
+
+/// `ParticleModuleLocationPrimitiveBase` as a sphere or a cylinder (spawn 0x008B42A0 /
+/// 0x008B3A40): the signs a sample may take on each axis (`Positive_X/Y/Z`, `Negative_X/Y/Z`;
+/// all on in `Default__ParticleModuleLocationPrimitiveBase`), `SurfaceOnly`, `Velocity` (the
+/// offset becomes velocity x `VelocityScale`) and `StartLocation`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LocationPrimitive {
+    pub positive: [bool; 3],
+    pub negative: [bool; 3],
+    pub surface_only: bool,
+    pub velocity: Option<Dist>,
+    pub start_location: Option<Dist>,
+    pub radius: Dist,
+    /// Cylinder: `StartHeight`, `HeightAxis` (0 X, 1 Y, 2 Z), `RadialVelocity`.
+    pub height: Option<Dist>,
+    pub height_axis: u8,
+    pub radial_velocity: bool,
+}
+
+/// `ParticleModuleLocationEmitter`: spawn at a live particle of the emitter named `EmitterName`
+/// (`SelectionMethod` random or sequential), adding its velocity x `InheritSourceVelocityScale`
+/// with `InheritSourceVelocity`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LocationEmitter {
+    pub emitter: String,
+    pub sequential: bool,
+    pub inherit_velocity: Option<f32>,
 }
 
 /// `ParticleModuleTypeDataDecal` (`m_pDecalMaterial`, `m_bNoClip`, `m_bProjectOnSkeletalMeshes`).

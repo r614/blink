@@ -36,6 +36,62 @@ pub struct EffectSockets {
     pub heads: HashMap<u32, Vec3>,
 }
 
+/// Particle notifies of the third-person animations (`AnimNotify_PlayParticleEffect` of the NPC
+/// sets: the assassination blood on the neck sockets, sever-limb stumps, puke...): written by the
+/// character animation, played by [`pawn_effects`].
+#[derive(Resource, Default)]
+pub struct PawnEffects {
+    /// (system path, pawn, socket or bone, world transform then, attached) to start.
+    pub pending: Vec<(String, u32, String, Mat4, bool)>,
+    /// (pawn, socket or bone) -> world transform this frame.
+    pub points: HashMap<(u32, String), Mat4>,
+    /// Live attached instances and the point they follow.
+    live: Vec<(Entity, u32, String)>,
+}
+
+impl PawnEffects {
+    /// The points of a pawn its attached effects follow.
+    pub fn wanted(&self, pawn: u32) -> Vec<String> {
+        let mut v: Vec<String> = self.live.iter().filter(|l| l.1 == pawn).map(|l| l.2.clone()).collect();
+        v.dedup();
+        v
+    }
+}
+
+fn pawn_effects(mut commands: Commands, mut fx: ResMut<Effects>, mut meshes: ResMut<Assets<Mesh>>, mut pawns: ResMut<PawnEffects>, mut q: Query<&mut FxInstance>) {
+    let h = &mut *pawns;
+    // Attached instances follow their point while they live; a pawn no longer animated
+    // deactivates them (one-shots despawn themselves).
+    h.live.retain(|(e, pawn, point)| match (q.get_mut(*e), h.points.get(&(*pawn, point.clone()))) {
+        (Ok(mut inst), Some(m)) => {
+            inst.set_transform(*m);
+            true
+        }
+        (Ok(mut inst), None) => {
+            inst.stop();
+            false
+        }
+        _ => false,
+    });
+    let pending = std::mem::take(&mut h.pending);
+    let Some(lf) = fx.levels.get(&fx.active).cloned() else { return };
+    let level = fx.active.clone();
+    for (path, pawn, point, m, attach) in pending {
+        let Some(&si) = lf.by_path.get(&path.to_ascii_lowercase()) else {
+            warn!("effects: animation effect {path} not decoded for {level}");
+            continue;
+        };
+        if let Some(e) = spawn_instance(&mut commands, &mut meshes, &lf, &level, si, m, true) {
+            fx.spawned_oneshots += 1;
+            if attach {
+                h.live.push((e, pawn, point));
+            }
+        }
+    }
+    // Points are written again next frame for what still plays.
+    h.points.retain(|k, _| h.live.iter().any(|l| l.1 == k.0 && l.2 == k.1));
+}
+
 /// Procedural glow of untextured particle mesh materials (`volume_glow.wgsl`).
 #[derive(Asset, bevy::render::render_resource::AsBindGroup, Reflect, Debug, Clone)]
 pub struct GlowMaterial {
@@ -262,7 +318,7 @@ impl Plugin for EffectsPlugin {
         bevy::asset::embedded_asset!(app, "particle_soft.wgsl");
         app.add_plugins(MaterialPlugin::<FxMaterial>::default()).add_systems(Update, apply_pending_soft);
         app.add_plugins(MaterialPlugin::<GlowMaterial>::default());
-        app.init_resource::<Effects>().init_resource::<EffectSockets>().init_resource::<HandEffects>().init_resource::<crate::lens_effects::LensEffects>().init_resource::<crate::rain::RainCamera>().add_systems(
+        app.init_resource::<Effects>().init_resource::<EffectSockets>().init_resource::<HandEffects>().init_resource::<PawnEffects>().init_resource::<crate::lens_effects::LensEffects>().init_resource::<crate::rain::RainCamera>().add_systems(
             Update,
             (
                 gameplay_effects.before(crate::audio::drive),
@@ -273,6 +329,7 @@ impl Plugin for EffectsPlugin {
                 // (A play session's only: `--inspect` has no session view.)
                 crate::lens_effects::update.after(crate::players::camera_follow).after(crate::cutscene::camera).after(crate::viewmodel::apply_fov).run_if(resource_exists::<crate::session::SessionView>),
                 hand_effects.after(crate::viewmodel::animate_view_rig),
+                pawn_effects.after(crate::characters::animate_characters),
                 // The player camera's rain box (moves the rain emitter before it simulates).
                 crate::rain::drive.after(crate::players::camera_follow).after(crate::cutscene::camera).after(crate::viewmodel::apply_fov),
                 // After everything that places the camera or sets its projection this frame
@@ -666,6 +723,7 @@ impl FxInstance {
         self.one_shot = true;
         for s in &mut self.sims {
             s.done = true;
+            s.deactivated = true;
         }
     }
     /// Deactivated (`stop`) or a one-shot.
@@ -837,13 +895,24 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
     let mut nrm = Vec::with_capacity(n * 4);
     let mut idx = Vec::with_capacity(n * 6);
     let frames = (em.sub_h * em.sub_v).max(1);
-    let look = |p: &Particle| particle_look(em, p);
+    let look = |p: &Particle| particle_look(em, p, sim.loop_time);
     let world_of = |p: &Particle| particle_world(em, xf, p);
     if em.trail.is_some() || em.beam.is_some() {
         strip_mesh(em, sim, xf, cam_pos, &look, &world_of, beam_target, mesh);
         return;
     }
-    for p in &sim.particles {
+    // `SortMode`: back to front by view depth (1) or distance to the view (2), oldest (3) or
+    // newest (4) first; unsorted particles draw in spawn order.
+    let mut order: Vec<&Particle> = sim.particles.iter().collect();
+    let fwd = cam_up.cross(cam_right);
+    match em.sort_mode {
+        1 => order.sort_by(|a, b| (coords::pos(world_of(b)) - cam_pos).dot(fwd).total_cmp(&(coords::pos(world_of(a)) - cam_pos).dot(fwd))),
+        2 => order.sort_by(|a, b| coords::pos(world_of(b)).distance_squared(cam_pos).total_cmp(&coords::pos(world_of(a)).distance_squared(cam_pos))),
+        3 => order.sort_by(|a, b| b.age.total_cmp(&a.age)),
+        4 => order.sort_by(|a, b| a.age.total_cmp(&b.age)),
+        _ => {}
+    }
+    for p in order {
         // A decal emitter's particle lies on the surface it was placed on; one without
         // (not placed yet) is not drawn.
         let decal_normal = match (&em.decal, p.normal) {
@@ -898,11 +967,13 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
             nrm.push([0.0, 1.0, 0.0]);
             col.push([color.x.max(0.0), color.y.max(0.0), color.z.max(0.0), alpha.clamp(0.0, 1.0)]);
         }
-        let f = match &em.sub_image {
-            Some(d) => (d.eval1(rel, p.r[2]).floor().max(0.0) as u32).min(frames - 1),
-            // `PSUVIM_Random`: a random sub-image per particle (blood splashes, 2 x 2).
-            None if em.sub_random => ((p.r[2] * frames as f32) as u32).min(frames - 1),
-            None => 0,
+        // `DetermineImageIndex` (0x008B5390): linear methods take `(int)SubImageIndex(relative
+        // time)` clamped to the frames; random methods a random frame (`RandomImageChanges` 0:
+        // drawn once); `PSUVIM_None` keeps the first frame.
+        let f = match (em.sub_method, &em.sub_image) {
+            (1 | 2, Some(d)) => (d.eval1(rel, p.r[2]).max(0.0) as u32).min(frames - 1),
+            (3 | 4, _) => ((p.r[2] * frames as f32) as u32).min(frames - 1),
+            _ => 0,
         };
         let (fx, fy) = ((f % em.sub_h) as f32, (f / em.sub_h) as f32);
         let (w, h) = (1.0 / em.sub_h as f32, 1.0 / em.sub_v as f32);
@@ -932,14 +1003,28 @@ fn clear_sprite_mesh(mesh: &mut Mesh) {
     mesh.insert_indices(Indices::U32(vec![0, 1, 2]));
 }
 
-/// A particle's colour, alpha and size at its age (colour / alpha / size over life).
-fn particle_look(em: &ParticleEmitterAsset, p: &Particle) -> (Vec3, f32, Vec3) {
+/// A particle's colour, alpha and size at its age: `ParticleModuleSizeScale` (Size = BaseSize x
+/// scale, 0x0089E040), size over life, `SizeScaleByTime` over the particle's clock (0x0089E120)
+/// and size by velocity; colour / alpha over life, scaled by `ColorScaleOverLife` (0x008BA1E0: at
+/// the relative time, or the emitter time `et` with `bEmitterTime`).
+fn particle_look(em: &ParticleEmitterAsset, p: &Particle, et: f32) -> (Vec3, f32, Vec3) {
     let rel = (p.age / p.life).clamp(0.0, 1.0);
-    let mut size = p.size;
+    let mut size = match &em.size_scale {
+        Some(d) => p.size * Vec3::from(d.eval(rel, p.r[1])),
+        None => p.size,
+    };
     if let Some(d) = &em.size_over_life {
         let m = d.eval(rel, p.r[1]);
         for k in 0..3 {
             if em.size_over_life_axes[k] {
+                size[k] *= m[k];
+            }
+        }
+    }
+    if let Some((d, axes)) = &em.size_scale_by_time {
+        let m = d.eval(p.age, p.r[1]);
+        for k in 0..3 {
+            if axes[k] {
                 size[k] *= m[k];
             }
         }
@@ -954,8 +1039,17 @@ fn particle_look(em: &ParticleEmitterAsset, p: &Particle) -> (Vec3, f32, Vec3) {
             }
         }
     }
-    let color = em.color_over_life.as_ref().map(|d| Vec3::from(d.eval(rel, p.r[0]))).unwrap_or(p.color);
-    let alpha = em.alpha_over_life.as_ref().map(|d| d.eval1(rel, p.r[0])).unwrap_or(p.alpha);
+    let mut color = em.color_over_life.as_ref().map(|d| Vec3::from(d.eval(rel, p.r[0]))).unwrap_or(p.color);
+    let mut alpha = em.alpha_over_life.as_ref().map(|d| d.eval1(rel, p.r[0])).unwrap_or(p.alpha);
+    if let Some((cs, als, emitter_time)) = &em.color_scale_over_life {
+        let t = if *emitter_time { et } else { rel };
+        if let Some(d) = cs {
+            color *= Vec3::from(d.eval(t, p.r[0]));
+        }
+        if let Some(d) = als {
+            alpha *= d.eval1(t, p.r[0]);
+        }
+    }
     (color, alpha, size)
 }
 
@@ -973,7 +1067,7 @@ fn sprite_bounds(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4) -> Opti
     let mut hi = Vec3::splat(f32::NEG_INFINITY);
     let mut reach = 0.0f32;
     for p in &sim.particles {
-        let (_, _, size) = particle_look(em, p);
+        let (_, _, size) = particle_look(em, p, sim.loop_time);
         let c = coords::pos(particle_world(em, xf, p));
         let hw = size.x.abs() * 0.5 * coords::UU_TO_BEVY;
         let hh = if em.screen_align != 0 { size.y.abs() } else { size.x.abs() } * 0.5 * coords::UU_TO_BEVY;
@@ -1051,12 +1145,14 @@ fn simulate(
             inst.warmed = true;
             let steps = (sys.warmup * 15.0).min(300.0) as usize;
             for _ in 0..steps {
+                feed_location_sources(&sys.emitters, &mut inst.sims, &xf);
                 for (em, sim) in sys.emitters.iter().zip(inst.sims.iter_mut()).filter(|(em, _)| !crate::rain::is_rain_emitter(em)) {
                     step(em, sim, &xf, 1.0 / 15.0, &mut rnd, (em.collision.is_some() || em.decal.is_some()).then_some(ray_fn));
                 }
                 dispatch_events(&sys.emitters, &mut inst.sims, &xf, &mut rnd);
             }
         }
+        feed_location_sources(&sys.emitters, &mut inst.sims, &xf);
         for (i, (em, sim)) in sys.emitters.iter().zip(inst.sims.iter_mut()).enumerate() {
             if crate::rain::is_rain_emitter(em) {
                 // Arkane's rain modules replace the spawn rate and the particles' lifetimes.
@@ -1085,7 +1181,7 @@ fn simulate(
                     }
                 }
                 for (k, p) in sim.particles.iter().take(want).enumerate() {
-                    let (world, c, a) = mesh_particle(em, p, &xf);
+                    let (world, c, a) = mesh_particle(em, p, &xf, sim.loop_time);
                     commands.entity(pool[k].0).insert(Transform::from_matrix(coords::transform(world)));
                     if let Some(mut m) = glow_mats.get_mut(&pool[k].1) {
                         let (s, _, t) = world.to_scale_rotation_translation();
@@ -1110,7 +1206,7 @@ fn simulate(
                     }
                 }
                 for (k, p) in sim.particles.iter().take(want).enumerate() {
-                    let (world, c, a) = mesh_particle(em, p, &xf);
+                    let (world, c, a) = mesh_particle(em, p, &xf, sim.loop_time);
                     commands.entity(pool[k].0).insert(Transform::from_matrix(coords::transform(world)));
                     if let Some(mut m) = volume_mats.get_mut(&pool[k].1) {
                         m.params.mesh_color = Vec4::new(c.x, c.y, c.z, a);
@@ -1135,16 +1231,8 @@ fn simulate(
                     }
                 }
                 for (k, p) in sim.particles.iter().take(want).enumerate() {
-                    let rel = (p.age / p.life).clamp(0.0, 1.0);
-                    let mut size = p.size;
-                    if let Some(d) = &em.size_over_life {
-                        let m = d.eval(rel, p.r[1]);
-                        for a in 0..3 {
-                            if em.size_over_life_axes[a] {
-                                size[a] *= m[a];
-                            }
-                        }
-                    }
+                    let (color, alpha, size) = particle_look(em, p, sim.loop_time);
+                    let alpha = alpha.clamp(0.0, 1.0);
                     let rot = Mat4::from_rotation_z(p.mrot.z) * Mat4::from_rotation_y(p.mrot.y) * Mat4::from_rotation_x(p.mrot.x);
                     let local = Mat4::from_translation(p.pos) * rot * Mat4::from_scale(size);
                     let world = if em.local_space {
@@ -1155,8 +1243,6 @@ fn simulate(
                     };
                     commands.entity(pool[k].0).insert(Transform::from_matrix(coords::transform(world)));
                     // Particle colour and alpha drive the material (ParticleColor in the material).
-                    let color = em.color_over_life.as_ref().map(|d| Vec3::from(d.eval(rel, p.r[0]))).unwrap_or(p.color);
-                    let alpha = em.alpha_over_life.as_ref().map(|d| d.eval1(rel, p.r[0])).unwrap_or(p.alpha).clamp(0.0, 1.0);
                     if let Some(mut m) = mats.get_mut(&pool[k].1) {
                         m.base.base_color = if em.blend == ParticleBlend::Additive || m.base.alpha_mode == AlphaMode::Add {
                             Color::linear_rgb(color.x * alpha * pool[k].2.red, color.y * alpha * pool[k].2.green, color.z * alpha * pool[k].2.blue)
@@ -1196,7 +1282,7 @@ fn simulate(
                 if let Some(mesh) = &ds.mesh {
                     let (pos, uv, idx) = &**mesh;
                     let tris = sim.particles.iter().take(64).flat_map(|p| {
-                        let (world, _, a) = mesh_particle(em, p, &xf);
+                        let (world, _, a) = mesh_particle(em, p, &xf, sim.loop_time);
                         // The axis swap mirrors: reverse the winding (no culling, but keep it consistent).
                         idx.chunks_exact(3).flat_map(move |t| [t[0], t[2], t[1]]).filter_map(move |k| {
                             let k = k as usize;
@@ -1446,17 +1532,8 @@ pub fn blink_indicator_live(fx: &Effects) -> Option<&'static str> {
 
 /// World transform (Dishonored space), colour and alpha of a mesh-emitter particle: the mesh
 /// scaled by the particle size (and size over life), turned by its mesh rotation.
-fn mesh_particle(em: &ParticleEmitterAsset, p: &Particle, xf: &Mat4) -> (Mat4, Vec3, f32) {
-    let rel = (p.age / p.life).clamp(0.0, 1.0);
-    let mut size = p.size;
-    if let Some(d) = &em.size_over_life {
-        let m = d.eval(rel, p.r[1]);
-        for a in 0..3 {
-            if em.size_over_life_axes[a] {
-                size[a] *= m[a];
-            }
-        }
-    }
+fn mesh_particle(em: &ParticleEmitterAsset, p: &Particle, xf: &Mat4, et: f32) -> (Mat4, Vec3, f32) {
+    let (color, alpha, size) = particle_look(em, p, et);
     let rot = Mat4::from_rotation_z(p.mrot.z) * Mat4::from_rotation_y(p.mrot.y) * Mat4::from_rotation_x(p.mrot.x);
     let world = if em.local_space {
         *xf * Mat4::from_translation(p.pos) * rot * Mat4::from_scale(size)
@@ -1464,9 +1541,7 @@ fn mesh_particle(em: &ParticleEmitterAsset, p: &Particle, xf: &Mat4) -> (Mat4, V
         let (_, r, _) = xf.to_scale_rotation_translation();
         Mat4::from_translation(p.pos) * Mat4::from_quat(r) * rot * Mat4::from_scale(size)
     };
-    let color = em.color_over_life.as_ref().map(|d| Vec3::from(d.eval(rel, p.r[0]))).unwrap_or(p.color);
-    let alpha = em.alpha_over_life.as_ref().map(|d| d.eval1(rel, p.r[0])).unwrap_or(p.alpha).clamp(0.0, 1.0);
-    (world, color, alpha)
+    (world, color, alpha.clamp(0.0, 1.0))
 }
 
 /// Trail / ribbon and beam emitters as camera-facing strips (UE3 `TypeDataTrail2` /

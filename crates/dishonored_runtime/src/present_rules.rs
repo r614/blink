@@ -68,6 +68,9 @@ pub struct Particle {
     /// UE3 `BaseVelocity`: accelerations integrate into it; per-frame modules (velocity over
     /// life, attractors) derive `vel` from it.
     pub base_vel: Vec3,
+    /// `ParticleModuleAcceleration`'s value, drawn at spawn at the emitter time (0x008B5A20
+    /// keeps it in the particle's payload).
+    pub accel: Vec3,
     /// Orbit (summed over the orbit modules): offset, rotation and rotation rate (radians).
     pub orbit_off: Vec3,
     pub orbit_rot: Vec3,
@@ -113,11 +116,174 @@ pub struct EmitterSim {
     /// Events the emitter generated since the instance last dispatched them
     /// ([`dispatch_events`]).
     pub events: Vec<PfxEvent>,
+    /// `SetupEmitterDuration` (0x00882DF0) ran: the loop's delay (`CurrentDelay`) and length
+    /// (`EmitterDuration` plus the delay), and the time within the loop (`EmitterTime`).
+    pub setup: bool,
+    pub cur_delay: f32,
+    pub cur_dur: f32,
+    pub loop_time: f32,
+    /// The instance's velocity (`PartSysVelocity`, from its origin's motion) for
+    /// `ParticleModuleVelocityInheritParent`.
+    pub parent_vel: Vec3,
+    pub last_origin: Option<Vec3>,
+    /// `ParticleModuleLocationEmitter`: the source emitter's live particles (world position,
+    /// velocity), fed by [`feed_location_sources`] before the step, and the sequential pick.
+    pub loc_src: Vec<(Vec3, Vec3)>,
+    pub loc_seq: usize,
+    /// The instance was deactivated (`bKillOnDeactivate` emitters lose their particles).
+    pub deactivated: bool,
 }
 
 impl Default for EmitterSim {
     fn default() -> Self {
-        Self { time: 0.0, spawn_acc: 0.0, loops: 0, done: false, particles: Vec::new(), last_burst_t: -1.0, mesh_empty: true, events: Vec::new() }
+        Self {
+            time: 0.0,
+            spawn_acc: 0.0,
+            loops: 0,
+            done: false,
+            particles: Vec::new(),
+            last_burst_t: -1.0,
+            mesh_empty: true,
+            events: Vec::new(),
+            setup: false,
+            cur_delay: 0.0,
+            cur_dur: 0.0,
+            loop_time: 0.0,
+            parent_vel: Vec3::ZERO,
+            last_origin: None,
+            loc_src: Vec::new(),
+            loc_seq: 0,
+            deactivated: false,
+        }
+    }
+}
+
+/// `DetermineUnitDirection` (0x0089D900): one draw per axis, in [-1, 1] when both signs are
+/// allowed, [0, 1] or [-1, 0] for one sign, 0 for none.
+fn unit_direction(positive: [bool; 3], negative: [bool; 3], rnd: &mut dyn FnMut() -> f32) -> Vec3 {
+    let r = [rnd(), rnd(), rnd()];
+    let mut v = Vec3::ZERO;
+    for k in 0..3 {
+        v[k] = match (positive[k], negative[k]) {
+            (true, true) => r[k] * 2.0 - 1.0,
+            (true, false) => r[k],
+            (false, true) => -r[k],
+            _ => 0.0,
+        };
+    }
+    v
+}
+
+/// A location primitive's offset (emitter space, `StartLocation` included) and the velocity it
+/// adds. Sphere (0x008B42A0): the unit sample u x radius, each enabled axis clamped to
+/// |normalize(u)| x radius (u itself normalized with `SurfaceOnly`), disabled axes 0. Cylinder
+/// (0x008B3A40): the same on the two radial axes against the normalized radial direction, the
+/// height axis u x height / 2. `Velocity`: the offset x `VelocityScale`, without its height part
+/// for a cylinder with `RadialVelocity`.
+fn primitive_offset(prim: &dishonored_ir::particles::LocationPrimitive, et: f32, rnd: &mut dyn FnMut() -> f32) -> (Vec3, Vec3) {
+    let start = prim.start_location.as_ref().map(|d| Vec3::from(d.eval_rand(et, 0, rnd))).unwrap_or(Vec3::ZERO);
+    let mut u = unit_direction(prim.positive, prim.negative, rnd);
+    let radius = prim.radius.eval1(et, rnd());
+    let enabled = |k: usize| prim.positive[k] || prim.negative[k];
+    let clamp = |v: f32, m: f32| v.clamp(-m.abs(), m.abs());
+    let mut off = Vec3::ZERO;
+    let ha = prim.height_axis.min(2) as usize;
+    match &prim.height {
+        None => {
+            let n = u.normalize_or_zero();
+            if prim.surface_only {
+                u = n;
+            }
+            for k in 0..3 {
+                if enabled(k) {
+                    off[k] = clamp(u[k] * radius, n[k] * radius);
+                }
+            }
+        }
+        Some(h) => {
+            let (a0, a1) = match ha {
+                0 => (1, 2),
+                1 => (0, 2),
+                _ => (0, 1),
+            };
+            let half = h.eval1(et, rnd()) * 0.5;
+            let n2 = glam::Vec2::new(u[a0], u[a1]).normalize_or_zero();
+            let (r0, r1) = if prim.surface_only { (n2.x, n2.y) } else { (u[a0], u[a1]) };
+            for (k, rv, nv) in [(a0, r0, n2.x), (a1, r1, n2.y)] {
+                if enabled(k) {
+                    off[k] = clamp(rv * radius, nv * radius);
+                }
+            }
+            if enabled(ha) {
+                off[ha] = clamp(u[ha] * half, half);
+            }
+        }
+    }
+    let vel = match &prim.velocity {
+        Some(s) => {
+            let mut v = off;
+            if prim.height.is_some() && prim.radial_velocity {
+                v[ha] = 0.0;
+            }
+            v * s.eval1(et, rnd())
+        }
+        None => Vec3::ZERO,
+    };
+    (start + off, vel)
+}
+
+/// `ParticleModuleLocationEmitter` (0x008ABCE0): the source particle, picked at random among the
+/// source emitter's live ones or the next in turn (wrapping to the first).
+fn pick_source(le: &dishonored_ir::particles::LocationEmitter, sim: &mut EmitterSim, rnd: &mut dyn FnMut() -> f32) -> Option<(Vec3, Vec3)> {
+    let n = sim.loc_src.len();
+    if n == 0 {
+        return None;
+    }
+    let i = if le.sequential {
+        sim.loc_seq += 1;
+        if sim.loc_seq >= n {
+            sim.loc_seq = 0;
+        }
+        sim.loc_seq
+    } else {
+        ((rnd() * n as f32) as usize).min(n - 1)
+    };
+    sim.loc_src.get(i).copied()
+}
+
+/// Give each emitter with a `ParticleModuleLocationEmitter` the live particles (world position,
+/// velocity) of the instance's emitter it names.
+pub fn feed_location_sources(ems: &[ParticleEmitterAsset], sims: &mut [EmitterSim], xf: &Mat4) {
+    for i in 0..ems.len().min(sims.len()) {
+        let Some(le) = &ems[i].location_emitter else { continue };
+        let src: Vec<(Vec3, Vec3)> = match ems.iter().position(|e| e.name == le.emitter) {
+            Some(j) if j < sims.len() => {
+                let w = |p: &Particle| if ems[j].local_space { (xf.transform_point3(p.pos), xf.transform_vector3(p.vel)) } else { (p.pos, p.vel) };
+                sims[j].particles.iter().map(w).collect()
+            }
+            _ => Vec::new(),
+        };
+        sims[i].loc_src = src;
+    }
+}
+
+/// `SetupEmitterDuration` (0x00882DF0): the loop's delay (`EmitterDelay`, or a draw in
+/// [`EmitterDelayLow`, `EmitterDelay`]) and its length (`EmitterDuration` or a draw in
+/// [`EmitterDurationLow`, `EmitterDuration`], plus the delay; the delay leaves it after the first
+/// loop with `bDelayFirstLoopOnly` unless the emitter plays a single loop).
+fn setup_duration(em: &ParticleEmitterAsset, sim: &mut EmitterSim, rnd: &mut dyn FnMut() -> f32) {
+    sim.setup = true;
+    sim.cur_delay = match em.delay_low {
+        Some(lo) => (em.delay - lo) * rnd() + lo,
+        None => em.delay,
+    };
+    let d = match em.duration_low {
+        Some(lo) => (em.duration - lo) * rnd() + lo,
+        None => em.duration,
+    };
+    sim.cur_dur = d + sim.cur_delay;
+    if sim.loops == 1 && em.delay_first_loop_only && (em.loops == 0 || em.loops > 1) {
+        sim.cur_dur -= sim.cur_delay;
     }
 }
 
@@ -134,30 +300,41 @@ pub fn spawn_particle(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4
     // No lifetime module (or 0): the particle lives until the emitter is destroyed (UE3).
     let life = em.lifetime.as_ref().map(|d| d.eval1(et, r[0])).filter(|l| *l > 0.0).unwrap_or(f32::INFINITY);
     let mut local = d3(&em.location, et, r[1], [0.0; 3]);
-    let mut vel = d3(&em.velocity, et, r[2], [0.0; 3]);
-    if let Some((radius, pos_axes, surface, velocity)) = &em.sphere {
-        let mut v = Vec3::new(rnd() * 2.0 - 1.0, rnd() * 2.0 - 1.0, rnd() * 2.0 - 1.0);
-        for k in 0..3 {
-            if !pos_axes[k] {
-                v[k] = -v[k].abs();
-            }
-        }
-        let v = v.normalize_or_zero();
-        let rad = radius.eval1(et, r[3]) * if *surface { 1.0 } else { rnd().cbrt() };
-        local += v * rad;
-        if let Some(vs) = velocity {
-            vel += v * rad * vs.eval1(et, r[3]);
-        }
+    let start_v = d3(&em.velocity, et, r[2], [0.0; 3]);
+    let mut prim_vel = Vec3::ZERO;
+    for prim in [em.sphere.as_ref(), em.cylinder.as_ref()].into_iter().flatten() {
+        let (off, v) = primitive_offset(prim, et, rnd);
+        local += off;
+        prim_vel += v;
     }
-    if let Some((radius, height, surface)) = &em.cylinder {
-        let a = rnd() * std::f32::consts::TAU;
-        let rad = radius.eval1(et, r[3]) * if *surface { 1.0 } else { rnd().sqrt() };
-        local += Vec3::new(a.cos() * rad, a.sin() * rad, (rnd() - 0.5) * height.eval1(et, r[3]));
+    let radial = em.velocity_radial.as_ref().map(|vr| local.normalize_or_zero() * vr.eval1(et, r[2])).unwrap_or(Vec3::ZERO);
+    // `ParticleModuleLocationEmitter`: at a particle of the source emitter (the other location
+    // modules' offsets on top).
+    let src = em.location_emitter.as_ref().and_then(|le| pick_source(le, sim, rnd));
+    let inv = xf.inverse();
+    // The start velocity turns with the component unless `bInWorldSpace` (a local emitter turns
+    // a world one into its space); radial and primitive velocities follow the location (0x008B8C20).
+    let (pos, mut vel) = if em.local_space {
+        let base = src.map(|s| inv.transform_point3(s.0)).unwrap_or(Vec3::ZERO);
+        let sv = if em.velocity_world { inv.transform_vector3(start_v) } else { start_v };
+        (base + local, sv + radial + prim_vel)
+    } else {
+        let pos = match src {
+            Some(s) => s.0 + xf.transform_vector3(local),
+            None => xf.transform_point3(local),
+        };
+        let sv = if em.velocity_world { start_v } else { xf.transform_vector3(start_v) };
+        (pos, sv + xf.transform_vector3(radial + prim_vel))
+    };
+    if let (Some(k), Some(s)) = (em.location_emitter.as_ref().and_then(|le| le.inherit_velocity), src) {
+        vel += if em.local_space { inv.transform_vector3(s.1) } else { s.1 } * k;
     }
-    if let Some(vr) = &em.velocity_radial {
-        vel += local.normalize_or_zero() * vr.eval1(et, r[2]);
+    // `ParticleModuleVelocityInheritParent` (0x008B92A0): Scale x the instance's velocity.
+    if let Some(d) = &em.velocity_inherit_parent {
+        let pv = if em.local_space { inv.transform_vector3(sim.parent_vel) } else { sim.parent_vel };
+        vel += Vec3::from(d.eval(et, r[2])) * pv;
     }
-    let (pos, vel) = if em.local_space { (local, vel) } else { (xf.transform_point3(local), xf.transform_vector3(vel)) };
+    let accel = d3(&em.acceleration, et, r[3], [0.0; 3]);
     // A scaled instance transform scales the particles too (the first-person hand effects ride
     // the rig drawn at the viewmodel scale); gameplay transforms are unscaled.
     let size = d3(&em.size, et, r[0], [1.0; 3]) * xf.x_axis.truncate().length();
@@ -174,6 +351,7 @@ pub fn spawn_particle(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4
         pos,
         vel,
         base_vel: vel,
+        accel,
         orbit_off,
         orbit_rot,
         orbit_rate,
@@ -270,8 +448,20 @@ pub fn dispatch_events(ems: &[ParticleEmitterAsset], sims: &mut [EmitterSim], xf
 
 /// Advance one emitter by `dt`.
 pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32, rnd: &mut dyn FnMut() -> f32, ray: Option<RayFn>) {
-    // Particles.
-    let accel = |p: &Particle| d3(&em.acceleration, p.age / p.life, p.r[3], [0.0; 3]);
+    // The instance's velocity (`PartSysVelocity`: its origin's motion over the frame).
+    let origin = xf.w_axis.truncate();
+    sim.parent_vel = match sim.last_origin {
+        Some(o) if dt > 0.0 => (origin - o) / dt,
+        _ => Vec3::ZERO,
+    };
+    sim.last_origin = Some(origin);
+    if sim.deactivated && em.kill_on_deactivate {
+        sim.particles.clear();
+    }
+    // Accelerations are in world axes, or in the emitter's for a local emitter; a local emitter
+    // turns a `bAlwaysInWorldSpace` one into its space (0x008B5A20 / 0x008B5D50, 0x008B67A0).
+    let inv = xf.inverse();
+    let space = |a: Vec3, world: bool| if world && em.local_space { inv.transform_vector3(a) } else { a };
     // Emitter-space points to the particle space (world unless local space).
     let to_space = |v: Vec3| if em.local_space { v } else { xf.transform_point3(v) };
     let et = sim.time;
@@ -282,8 +472,10 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
         if p.frozen {
             continue;
         }
-        let a = accel(p);
-        let a = if em.local_space { a } else { xf.transform_vector3(a) };
+        let mut a = space(p.accel, em.accel_world);
+        if let Some((d, world)) = &em.accel_over_life {
+            a += space(Vec3::from(d.eval(rel, p.r[3])), *world);
+        }
         p.base_vel += a * dt;
         if let Some(d) = &em.drag {
             p.base_vel *= (1.0 - d.eval1(rel, p.r[2]) * dt).max(0.0);
@@ -359,7 +551,19 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
         if !moved {
             p.pos = next;
         }
-        p.rot += p.rot_rate * dt;
+        // `ParticleModuleRotationRateMultiplyLife` scales the (reset) rate every update
+        // (0x0089E270); `MeshRotationRateOverLife` adds to (or scales) the mesh rate every update
+        // (0x008A5000).
+        let rr = em.rotation_rate_life.as_ref().map_or(1.0, |d| d.eval1(rel, p.r[2]));
+        p.rot += p.rot_rate * rr * dt;
+        if let Some((d, scale)) = &em.mesh_rotation_rate_life {
+            let v = Vec3::from(d.eval(rel, p.r[3])) * std::f32::consts::TAU;
+            if *scale {
+                p.mrot_rate *= v;
+            } else {
+                p.mrot_rate += v;
+            }
+        }
         p.mrot += p.mrot_rate * dt;
     }
     // `EPET_Death` events of the particles that end now.
@@ -368,6 +572,17 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
         for (pos, vel) in dead {
             for e in em.events_out.iter().filter(|e| e.kind == dishonored_ir::particles::EVENT_DEATH) {
                 sim.events.push(PfxEvent { kind: e.kind, name: e.name.clone(), pos, vel, normal: None });
+            }
+        }
+    }
+    // `ParticleModuleKillHeight` (0x008BA960): particles above the height (below it with
+    // `bFloor`) are killed; the height is relative to the component unless `bAbsolute`.
+    if let Some((h, absolute, floor)) = &em.kill_height {
+        let height = h.eval1(et, 0.5) + if *absolute { 0.0 } else { origin.z };
+        for p in sim.particles.iter_mut() {
+            let z = if em.local_space { xf.transform_point3(p.pos).z } else { p.pos.z };
+            if (*floor && z < height) || (!*floor && z > height) {
+                p.age = p.life;
             }
         }
     }
@@ -380,25 +595,36 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
         return;
     }
     // Emitter time, loops, spawn rate and bursts (burst times are fractions of the duration).
+    // `Tick_EmitterTimeSetup` (0x00887270): the loop runs its delay then its duration; a loop
+    // ends at the duration plus the delay (`SetupEmitterDuration` 0x00882DF0); the delay holds
+    // every loop, or the first only with `bDelayFirstLoopOnly`. Loops only advance for an emitter
+    // with a length (UE3 tests `EmitterDuration > 0`): a zero-duration emitter bursts once,
+    // instead of re-firing its time-0 burst every frame (particles without a Lifetime module would
+    // pile up forever).
+    if !sim.setup {
+        setup_duration(em, sim, rnd);
+    }
     let before = sim.time;
     sim.time += dt;
-    if sim.time < em.delay {
-        return;
-    }
-    let dur = em.duration.max(1e-3);
-    let mut t = sim.time - em.delay;
-    // Loops only advance for an emitter with a duration (UE3 tests `EmitterDuration > 0`): a
-    // zero-duration emitter bursts once, instead of re-firing its time-0 burst every frame
-    // (particles without a Lifetime module would pile up forever).
-    if em.duration > 1e-3 && t >= dur * (sim.loops + 1) as f32 {
+    sim.loop_time += dt;
+    if sim.cur_dur > 1e-3 && sim.loop_time >= sim.cur_dur {
+        sim.loop_time -= sim.cur_dur;
         sim.loops += 1;
         sim.last_burst_t = -1.0;
         if em.loops > 0 && sim.loops >= em.loops {
             sim.done = true;
             return;
         }
+        if em.duration_recalc || (em.delay_first_loop_only && sim.loops == 1) {
+            setup_duration(em, sim, rnd);
+        }
     }
-    t -= dur * sim.loops as f32;
+    let delay = if em.delay_first_loop_only && sim.loops > 0 { 0.0 } else { sim.cur_delay };
+    let t = sim.loop_time - delay;
+    if t < 0.0 {
+        return;
+    }
+    let dur = (sim.cur_dur - delay).max(1e-3);
     let rate = em.rate.as_ref().map(|d| d.eval1(t, 0.5)).unwrap_or(0.0) * em.rate_scale.as_ref().map(|d| d.eval1(t, 0.5)).unwrap_or(1.0);
     sim.spawn_acc += rate.max(0.0) * dt;
     let saved = sim.time;
