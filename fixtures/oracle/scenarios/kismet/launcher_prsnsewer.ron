@@ -1,0 +1,43 @@
+// Projectile launchers (research/dishonored/systems/interactables.md section 2): the Prison Sewer's DisTripwire_2
+// leads into DisSeqAct_ActivateProjectileLauncher whose target is DisProjectileLauncher_3, a whiskey tripod with the
+// trap's explosive arrow. Decoded rules: 0x00B9B1D0 fires every DisProjectileLauncher target; 0x00A33F70 (Fire) does
+// nothing unless m_bArmed, spawns the tweak's projectile at the m_FiringSocketName socket, aims it straight at
+// m_pTarget (mode 2 of 0x00C3F2A0, not the ballistic solver), launches it at m_fProjectileSpeed x m_fSpeedMultiplier
+// (0x00C540A0) and clears m_bArmed; the arrow explodes at its first impact (0x00C550D0) with TrapArrowExplosion_twk
+// (30 within 300, 0 at 600; players 150 / 600; EAINoiseLoudness4) after the direct hit of m_Damage x
+// m_fDamageMultiplier (0x00C4A310). The walk is the tripwire scenario's, so the arrow meets the pawn beyond the wire.
+(
+    name: "kismet/launcher_prsnsewer",
+    system: Kismet,
+    map: "L_PrsnSewer_P",
+    description: "Walk across DisTripwire_2 of the Prison Sewer: its launcher (DisProjectileLauncher_3) fires one explosive arrow at its TargetPoint, which bursts at its first impact.",
+    setup: (kismet: true, kismet_start: Some("ChangeLvl_fromPrison_toSewer"), original_npcs: false, seed: 1, settle: 30),
+    ticks: 300,
+    input: [(tick: 2, action: Console("teleport 2700 3120 3180 0")), (tick: 5, action: Move(forward: 127, right: 0))],
+    checkpoints: [
+        (name: "action", expect: [(metric: Count("Kismet:Activated@*DisSeqAct_ActivateProjectileLauncher*"), value: 1, tol: 0, source: "decoded 0x00B9B1D0: the wire's Tripwire event reaches the action once", status: Static)]),
+        (name: "fires once", expect: [
+            (metric: Count("Interact:LauncherFire"), value: 1, tol: 0, source: "decoded 0x00A33F70: the armed launcher of the action's Target fires", status: Static),
+            (metric: Count("Projectile:TrapArrow"), value: 1, tol: 0, source: "decoded 0x00A33F70: one projectile per Fire, then m_bArmed is cleared", status: Static),
+        ]),
+        (name: "launch", expect: [
+            (metric: EventValue("Projectile:TrapArrow", "speed"), value: 2000, tol: 0.5, source: "decoded 0x00C540A0: m_fProjectileSpeed 2000 (WhiskeyLauncher_twk) x m_fSpeedMultiplier 1 (TrapExplosiveArrow_twk)", status: Static),
+            (metric: EventValue("Projectile:TrapArrow", "dmg"), value: 10, tol: 0, source: "decoded 0x00C540A0: m_Damage = m_fProjectileDamage 10 x m_fDamageMultiplier 1 (0x00C4A310)", status: Static),
+        ]),
+        (name: "burst", expect: [
+            (metric: Count("Sim:Explosion"), value: 1, tol: 0, source: "decoded 0x00C550D0 / 0x00C5A4C0: the explosive arrow bursts once, at its first impact", status: Static),
+            (metric: EventValue("Sim:Sound[category=Explosion]", "radius"), value: 6000, tol: 0.5, source: "TrapArrowExplosion_twk m_AINoiseLoudness EAINoiseLoudness4 -> DefaultAI.ini m_LoudnessDistanceArray[15]", status: Static),
+        ]),
+        (name: "state", expect: [
+            (metric: Final("launcher.fired"), value: 1, tol: 0, source: "only the launcher the action targets fired", status: Static),
+            (metric: Final("launcher.armed"), value: 2, tol: 0, source: "the Sewer's other two tripods stay armed", status: Static),
+        ]),
+        (name: "no delay", expect: [(metric: Between("Interact:Tripwire", "Interact:LauncherFire"), value: 0.0, tol: 0.02, source: "decoded 0x00A33F70 spawns the projectile inline in the activation pass (no delay); the port's host runs one step after the world step", status: Unmeasured)]),
+        (name: "flight", expect: [
+            (metric: Between("Projectile:TrapArrow", "Sim:ProjectileImpact"), value: 0.3, tol: 0.1, source: "port: about 640 uu from the tripod to the pawn at 2000 uu/s under TrapExplosiveArrow_twk gravity x0.5", status: Unmeasured),
+            (metric: EventValue("Sim:Damage[cause=TrapExplosion]", "amount"), value: 30, tol: 1, source: "TrapArrowExplosion_twk m_RadialDamage 30, the pawn within m_fPlayerFullDamageRadius 150 of the burst", status: Unmeasured),
+        ]),
+    ],
+    record: [Pawn, Kismet, SimEvents],
+    capture: Some("Prison Sewer after ChangeLvl_fromPrison_toSewer, player teleported to (2700, 3120, 3180) yaw 0 walking +x: ProcessEvent trace of DisSeqAct_ActivateProjectileLauncher activations, DisProjectileLauncher_3.m_bArmed per tick, the spawned DisProjectile_Arrow_Explosive's location and velocity per tick, its Explode, the DisExplosion spawn, and the player's health"),
+)

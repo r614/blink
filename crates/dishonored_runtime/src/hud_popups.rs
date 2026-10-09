@@ -298,6 +298,15 @@ pub fn focused_interaction(mv: &MissionView, view: &crate::session::SessionView,
             consider(m.center(), m.max_distance + 20.0, &m.prompt, "");
         }
     }
+    // Projectile launchers (`DisProjectileLauncher`): the view entering the tripod's collision
+    // bounds within its interactable's `m_fMaxDistance` (the server's `launchers::focused`); the
+    // prompt and title are the interactable tweak's ("`GBA_Use` Disarm", "Projectile Launcher").
+    for l in view.matchv.launchers.iter().filter(|l| !l.prompt.is_empty()) {
+        let (lo, hi) = (glam::Vec3::from(l.bounds_min), glam::Vec3::from(l.bounds_max));
+        if let Some(t) = dishonored_sim::interactables::ray_box(eye, fwd, lo, hi, l.max_distance) {
+            consider(eye + fwd * t, l.max_distance, &l.prompt, &l.label);
+        }
+    }
     for (npc, prompt) in &mv.talkers {
         let Some(id) = mv.npc_ids.iter().find(|x| &x.0 == npc).map(|x| x.1) else { continue };
         if let Some(o) = view.others.iter().find(|o| o.id == id && o.alive) {

@@ -100,6 +100,10 @@ fn projectile_key(k: ProjectileKind) -> &'static str {
         ProjectileKind::StickyGrenade => "sticky",
         // The Tallboy arrow (`Wpn_TallBoyBow.Wpn_TB_Arrow`) is not in the model set: the flare bolt.
         ProjectileKind::TallboyArrow => "flare",
+        // `TrapExplosiveArrow_twk.m_bInvisible`: not drawn (see `sync`); the Overseers' Back launcher's
+        // plain arrow is the crossbow bolt's model.
+        ProjectileKind::TrapArrow => "invisible",
+        ProjectileKind::TrapBolt => "bolt",
     }
 }
 
@@ -204,6 +208,10 @@ fn sync(mut commands: Commands, mut wm: ResMut<WorldModels>, view: Option<Res<Se
     // (key, transform, horizontal speed, biting) per wanted instance.
     let mut want: Vec<((u8, u32), &'static str, Transform, f32, bool)> = Vec::new();
     for p in &view.projectiles {
+        // An invisible projectile (the trap's explosive arrow) has no model.
+        if p.kind == ProjectileKind::TrapArrow {
+            continue;
+        }
         let key = projectile_key(p.kind);
         // Grenades stuck to something keep their last facing (the velocity is zero).
         want.push(((0, p.id), key, oriented(p.position, p.velocity, glam::Vec3::Z), 0.0, false));

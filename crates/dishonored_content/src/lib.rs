@@ -481,8 +481,9 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
             w
         }
     };
-    // Door keyholes and tripwires (dishonored_sim::interactables).
-    let ia_path = dir.join(format!("{map}.interactables2.json"));
+    // Door keyholes, tripwires and projectile launchers (dishonored_sim::interactables /
+    // launchers). `interactables3`: the launchers (an older cache parses but has none).
+    let ia_path = dir.join(format!("{map}.interactables3.json"));
     let interactables: dishonored_ir::interactables::Interactables = match std::fs::read_to_string(&ia_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(w) => w,
         None => {

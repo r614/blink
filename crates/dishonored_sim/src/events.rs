@@ -75,6 +75,11 @@ pub enum DamageCause {
     Plague,
     /// A Tallboy arrow's explosion (`TallboyArrowExplosion_Twk`).
     TallboyExplosion,
+    /// A launcher's projectile striking a pawn (`DisProjectile` slot 239: `m_Damage x
+    /// m_fDamageMultiplier`).
+    TrapShot,
+    /// A launcher's explosive arrow bursting (`TrapArrowExplosion_Twk`).
+    TrapExplosion,
 }
 
 /// How a choke ended (`DisItemContext_Choke.eChokeState`).

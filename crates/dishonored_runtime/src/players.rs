@@ -194,7 +194,8 @@ pub fn sync_projectiles(mut commands: Commands, view: Res<SessionView>, assets: 
         commands.entity(e).despawn();
     }
     // Kinds with their original model (`world_models`) are drawn there.
-    for p in view.projectiles.iter().filter(|p| !world_models.as_ref().is_some_and(|w| w.draws(p.kind))) {
+    // The trap's explosive arrow is invisible (`TrapExplosiveArrow_twk.m_bInvisible`): no tracer either.
+    for p in view.projectiles.iter().filter(|p| p.kind != dishonored_sim::state::ProjectileKind::TrapArrow && !world_models.as_ref().is_some_and(|w| w.draws(p.kind))) {
         commands.spawn((Mesh3d(assets.projectile.clone()), MeshMaterial3d(assets.tracer.clone()), Transform::from_translation(coords::pos(p.position)), ProjectileVisual));
     }
 }

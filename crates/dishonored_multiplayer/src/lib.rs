@@ -108,6 +108,33 @@ pub struct MatchView {
     /// The active map's tripwires (`DisTripwire`): their ends and whether they have tripped.
     #[serde(default)]
     pub tripwires: Vec<TripwireView>,
+    /// The active map's projectile launchers (`DisProjectileLauncher`): where they are, whether
+    /// they are armed, and the disarm prompt (research/dishonored/systems/interactables.md).
+    #[serde(default)]
+    pub launchers: Vec<LauncherView>,
+}
+
+/// A launcher as clients see it: its place and bounds (the interaction focus), its state and
+/// the interactable tweak's prompt and label.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LauncherView {
+    /// `<package>:<actor>`.
+    pub actor: String,
+    pub position: [f32; 3],
+    pub bounds_min: [f32; 3],
+    pub bounds_max: [f32; 3],
+    /// `m_fMaxDistance` of its interactable tweak.
+    pub max_distance: f32,
+    /// `m_bArmed` / `m_bHarvested`.
+    pub armed: bool,
+    pub harvested: bool,
+    /// The tripped / deactivated animations have been started (`m_TrippedAnimName`,
+    /// `m_DeactivatedAnimName`): a launcher that fired, a launcher that was defused.
+    pub fired: bool,
+    pub defused: bool,
+    /// `m_InteractText` (with its key tag) and `m_Name`.
+    pub prompt: String,
+    pub label: String,
 }
 
 /// A tripwire as clients draw it: the wire between its ends, snapped once tripped.

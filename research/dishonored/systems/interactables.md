@@ -2,7 +2,8 @@
 
 Scope: the three world interactions whose Kismet events were decoded but never fired
 (`KISMET.md`, "Player and world events"): `DisSeqEvent_KeyHoleUsed` (37 level instances),
-`DisSeqEvent_Tripwire` (7) and `DisSeqEvent_Interact` (4). Evidence levels as elsewhere: CONFIRMED
+`DisSeqEvent_Tripwire` (7) and `DisSeqEvent_Interact` (4), and the projectile launchers the
+tripwires' scripts fire (section 2a). Evidence levels as elsewhere: CONFIRMED
 (read from the decompiled code or game data), LIKELY, UNVERIFIED (needs a capture; never judged).
 Addresses are virtual addresses in the GOG exe (sha256 `70da9613...`). Findings are in our own
 words. Code: `dishonored_sim::interactables` (rules), `dishonored_assets::interactables`
@@ -73,11 +74,71 @@ carries it. Jumping or Blinking over it does not touch it.
 
 **The action.** The level's Kismet decides: `Tripwire` -> `DisSeqAct_ActivateProjectileLauncher`
 (0x00B9B1D0: each "Target" that is a `DisProjectileLauncher` fires, 0x00A33F70), `SeqAct_Gate`s.
-The launcher (`DisProjectileLauncher` < `DisSkeletalBreakable`, `m_bArmed`) plays its tripped
-animation, spawns the tweak's projectile (`m_pProjectileTweak`, `m_fProjectileSpeed`,
-`m_fProjectileDamage`) at its `m_FiringSocketName` ("Muzzle") toward `m_pTarget` and disarms.
 Disarming is the launcher's interactable (`m_bHarvested`, `m_HarvestedAmmo`, a required item),
-not the wire's. Launchers are not ported: see F-6.
+not the wire's. The launcher is section 2a.
+
+## 2a. Projectile launchers
+
+Code: `dishonored_sim::launchers` (rules), `dishonored_assets::interactables::launcher` (placed
+tripods and their tweaks), `dishonored_multiplayer::interact` (the mission side),
+`kismet_host` (`DisSeqAct_ActivateProjectileLauncher`, `SeqAct_Toggle`). Three shipped maps have
+them: the Prison Sewer (3 tripods, `WhiskeyLauncher_twk`), the Distillery (4, the same) and the
+Overseers' Back (1, `BoltLauncher_twk`). Every `m_pTarget` is a `TargetPoint`; two Distillery
+tripods have none.
+
+**The action (CONFIRMED, 0x00B9B1D0).** A latent action (`DisSeqAct_ActivateProjectileLauncher <
+SeqAct_Latent`, field `m_pProjInstigator`, a pawn property that no level sets) whose `Activated`
+walks the "Target" link and calls `Fire` (0x00A33F70) on every `DisProjectileLauncher`, then
+`SequenceAction::Activated`: it finishes in its own pass and its "Out" follows at once.
+
+**Fire (CONFIRMED, 0x00A33F70).** Only if `m_bArmed` (bit 0 of +0x2A8). It plays the tweak's
+`m_TrippedAnimName` (`TripodTrap_Fire`; `SetAnim` slot 97, `PlayAnim` slot 77, no loop), takes
+the muzzle from `GetSocketWorldLocationAndRotation` (0x00732530) for `m_FiringSocketName`
+(`Grenade_Socket` in both shipped tweaks; the class default is `Muzzle`), and, when the tweak has
+a projectile, spawns it there with the socket's rotation (0x00C66070 -> the tweak's spawn slot,
+instigator `m_pProjInstigator`). The aim is `FUN_00C3F2A0` in **mode 2**, its straight branch
+(modes 0 and 1 run the ballistic solver 0x00BEC130): `target location - muzzle`, normalised
+(0x004019E0); a pawn target would be the midpoint of two of its body points (0x00BC7190), any
+other actor its collision component's location. Without `m_pTarget` the direction is the socket's
+forward axis (`FUN_0040DA70`, rotator -> vector). The shot is **not** aimed over gravity. It then
+runs `DisProjectile` slot 233 (0x00C540A0; the explosive arrow's 0x00C54E70 adds its hooks):
+velocity = `m_fProjectileSpeed x direction x DisTweaks_Projectile.m_fSpeedMultiplier` (+0x98),
+`m_Damage` = `m_fProjectileDamage` (int), `m_fHeadshotMultiplier` = `m_fProjectileHeadshotMult`.
+The function ends by clearing `m_bArmed`: one shot per arming, with no delay.
+
+**Flight and burst (CONFIRMED).** The projectile falls under `GetGravityZ x m_fGravityMultiplier`
+(0x00C54F00 predicts it that way: 0.5 for the trap arrow, 1 for the plain arrow). A contact runs
+the generic processor 0x00C4F3A0: the hit pawn takes slot 239 (0x00C4A310: `m_Damage x
+m_fDamageMultiplier`, 10) through `TakeDamage`; the explosive arrow's contact handler (slot 103,
+0x00C5A4C0 -> 0x00C550D0) then spawns the tweak's `m_pExplosionTweak` `DisExplosion` 10 uu back
+along the impact direction, instigated by the arrow's instigator, once. `TrapExplosiveArrow_twk`
+(class `DisTweaks_Arrow_Explosive`, invisible, gravity 0.5, trail `ps_TB_Trail`) uses
+`TrapArrowExplosion_twk`: `m_RadialDamage` 30 on all four difficulties inside
+`m_fFullDamageRadius` 300 (players 150), falling to 0 at `m_fDamageRadius` 600 (players 600),
+`m_fRadialMomentum` 1500, `m_fExtraUpForce` 500, `m_AINoiseLoudness` `EAINoiseLoudness4`
+(6000 uu, a Danger noise), the grenade's explosion effect and sound. The port runs it through
+the grenades' `gadgets::explode_with`. The Overseers' Back launcher's `Twk_Proj_Arrows.Twk_Proj_Arrow`
+is a `DisTweaks_Projectile_ThrownObject`: no explosion, the direct hit only.
+
+**Interact (CONFIRMED, interface slot 24, 0x00A3B6E0).** Slot 9 of the launcher's interface
+(0x00633610) is "no alternate action", so the Use state (0x00AD5BA0 -> 0x00A3DF60) runs `Interact`
+at the press. (1) An armed launcher is disarmed (0x00A34280: `m_bArmed` cleared, the tweak's
+`m_DeactivatedAnimName` `TripodTrap_Defuse` plays). (2) If not `m_bHarvested` and the tweak
+needs no item (`m_pItemRequiredToHarvestAmmo`) or the player holds it (0x00C0B890), each of the
+12 `m_HarvestedAmmo` counts goes into the inventory (`AddAmmo` 0x00C052E0: what fits under the
+capacity); the whiskey tripod gives 1 incendiary bolt (type 4), the bolt launcher 1 bolt (type 2);
+any amount added counts as a harvest (the projectile tweak's pickup sound, the HUD ammo notice
+0x00B94FB0). (3) Otherwise the projectile tweak's cannot-pickup sound plays and, when the launcher
+was not armed, its interactable's `m_CannotUseMessage`. (4) `m_bHarvested` is then **stored from
+what step 2 did on every path** (`bit1 = local_10`), so a press that took nothing clears it: the
+second press after a harvest takes nothing, the third takes again (UNVERIFIED, decoded; needs
+the capture). (5) It answers "used" when it was armed or harvested now; the wrapper fires
+`DisSeqEvent_Interact` output 0 (instigator the launcher) and shows the interactable's
+`m_UseMessage` ("Launcher disarmed"). The prompt is the interactable tweak's `m_InteractText`
+("`GBA_Use` Disarm", title `m_Name` "Projectile Launcher") within `m_fMaxDistance` 200.
+`AltInteract` (slot 25, 0x00A33E30) only fills the user's interaction-slot table and answers
+"used". `SeqAct_Toggle` on a launcher (`OnToggle_Native` 0x009ED800 -> slot 238, 0x00A21650):
+Turn On arms, Turn Off disarms, otherwise it flips.
 
 ## 3. Interact
 
@@ -103,7 +164,9 @@ with nobody, they cannot fire in the original either. UNVERIFIED until the captu
 | F-3 | Exit: Use leaves (fade-out 0.3 s), output 1 at the request; a dead pawn or an opened door ends it | ported; exit timing and the door-opened end are LIKELY |
 | F-4 | Tripwire trips once on touch (not by rats) or damage (not Windblast); `Tripwire` fires every output | ported: `interactables::step_tripwires` |
 | F-5 | Interact output 0 on the use of a Kismet usable, output 1 on a door's hold; events registered with the user pawn | ported; the Prison events are dead data (UNVERIFIED) |
-| F-6 | Projectile launchers (fire on `ActivateProjectileLauncher`, disarm, harvest) | left open: needs a tweak-driven projectile with its own explosion; `DisSeqAct_ActivateProjectileLauncher` is not run by the host |
+| F-6 | Projectile launchers (fire on `ActivateProjectileLauncher`, disarm, harvest) | ported: `launchers::{fire, step_shots, interact, toggle, focused}`, `MissionMatch::{fire_launcher, interact_launcher, step_launchers}`, the host's `DisSeqAct_ActivateProjectileLauncher` and `SeqAct_Toggle`; section 2a |
+| F-9 | The harvested flag is stored from the press on every path (second press takes nothing, third takes again) | ported as decoded; UNVERIFIED (scenario `kismet/launcher_disarm_prsnsewer`, Unmeasured) |
+| F-10 | Launcher muzzle pose, the tripped / defused animations, the sounds and HUD ammo notice, the `ps_TB_Trail` trail, `AltInteract`, the focus probe's gating, the no-socket muzzle, `DisSkeletalBreakable` damage | left open (the muzzle is the idle bind pose, LIKELY; the state is replicated for a future animation, no skeletal mesh is driven) |
 | F-7 | Camera scan of the peek (0x00AA6FE0), the exit event's exact moment, the peek's look sensitivity limit in the input path | left open (not decoded / presentation input) |
 | F-8 | Projectile contact with a wire uses a 1 uu radius; the shipped projectile collision extents were not read | Unmeasured |
 
@@ -118,11 +181,23 @@ the door; the view faces the way the pawn already looks (dot of the socket forwa
 view), not "away from Corvo's side"; a wire trips on the physics asset's bodies for any live
 non-rat actor, a projectile or damage (not Windblast), not on Corvo's capsule alone against the
 pulley bones; the wire event fires every output. Their launcher code (`launch`, `aim`,
-`fly_darts`, disarm) is not taken: it needs the projectile tweaks the sim does not model (F-6).
+`fly_darts`, `disarm_focus`) was read: the shape (a sequence fires the tripod; the shot sweeps
+through characters and then the world; the player disarms it for ammunition) is kept, the rules
+are the decoded ones. Where the decompile disagrees, the decompile wins: no ballistic `aim` arc
+(mode 2 of 0x00C3F2A0 is a straight line; the arrow falls under its own gravity), no fire
+delay (the shot leaves in the activation's pass, not at `def.fire_at`), the speed is
+`m_fProjectileSpeed x m_fSpeedMultiplier`, the target is `m_pTarget` (without one the socket's
+forward axis, not "at Corvo"), the burst is the tweak's explosion (30 / 300 / 600, players
+150 / 600) after a 10-point direct hit, the prompt reach is 200 uu on the tripod's collision
+bounds (not a 0.8 view cone), and disarming is one press that also gives the ammunition.
 
 ## 6. Scenarios and captures
 
-`kismet/keyhole_boyle_int`, `kismet/tripwire_prsnsewer`, `kismet/interact_prison` (queued in
-`fixtures/oracle/capture_queue.txt`). Static checks: the peek starts once, `KeyHoleUsed` fires,
+`kismet/keyhole_boyle_int`, `kismet/tripwire_prsnsewer`, `kismet/interact_prison`,
+`kismet/launcher_prsnsewer`, `kismet/launcher_disarm_prsnsewer` (queued in
+`fixtures/oracle/capture_queue.txt`). Launcher checks: Static (action runs once, one shot per
+`Fire`, speed 2000, `m_Damage` 10, one burst, the 6000 uu noise, launcher counts, the disarm and
+the bolt given); Unmeasured (the one-tick host latency, the flight time, the burst damage 30 at
+the pawn, the second and third press). Static checks: the peek starts once, `KeyHoleUsed` fires,
 the FOV is 75, the peek ends; the wire trips once and its events fire. Unmeasured: the peek's
 start time, the black fade, the trip time, and that the Prison's Interact events never fire.

@@ -104,7 +104,8 @@ pub fn explode_with(state: &mut WorldState, owner: PlayerId, pos: Vec3, stuck_to
             }
         }
         if v.alive {
-            apply_damage(v, dmg.round(), Some(owner), cause, events, &cfg.vitals);
+            // Owner 0 is nobody (a launcher's arrow with no `m_pProjInstigator`): no attacker.
+            apply_damage(v, dmg.round(), Some(owner).filter(|o| *o != 0), cause, events, &cfg.vitals);
         }
     }
     let react = cfg.items.gadgets.springrazor.damage_reaction_time;

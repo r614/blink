@@ -786,11 +786,21 @@ pub enum ProjectileKind {
     /// A Tallboy's explosive arrow (`TallboyExplosiveArrow_twk`, class
     /// `DisProjectile_Arrow_Explosive`): explodes at its first impact (`TallboyArrowExplosion_Twk`).
     TallboyArrow,
+    /// A `DisProjectileLauncher`'s explosive arrow (`SecuritySystems_twk.TripodTrap.TrapExplosiveArrow_twk`,
+    /// class `DisProjectile_Arrow_Explosive`): flown and exploded by `launchers::step_shots`.
+    TrapArrow,
+    /// A `DisProjectileLauncher`'s plain projectile (the Overseers' Back launcher's
+    /// `DisProjectile_ThrownObject`): the direct hit only (`launchers::step_shots`).
+    TrapBolt,
 }
 
 impl ProjectileKind {
     pub fn is_bolt(self) -> bool {
         matches!(self, Self::Bolt | Self::SleepDart | Self::IncendiaryBolt)
+    }
+    /// Fired by a launcher: stepped by `launchers::step_shots`.
+    pub fn is_launcher_shot(self) -> bool {
+        matches!(self, Self::TrapArrow | Self::TrapBolt)
     }
     pub fn is_grenade(self) -> bool {
         matches!(self, Self::Grenade | Self::StickyGrenade)

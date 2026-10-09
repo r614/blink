@@ -990,6 +990,13 @@ impl Host for H<'_> {
                 self.m.crowd.toggle_distractor(i, mode);
                 continue;
             }
+            // [world] `DisProjectileLauncher.OnToggle_Native` (0x009ED800 -> 0x00A21650): input 0
+            // arms, 1 disarms, 2 flips `m_bArmed`.
+            if let Some(act) = cx.k.db.actors.get(*a as usize).filter(|x| x.class == "DisProjectileLauncher") {
+                if self.m.toggle_launcher(&act.package, &act.name, mode as usize) {
+                    continue;
+                }
+            }
             let on = match mode {
                 0 => true,
                 1 => false,
@@ -1797,6 +1804,25 @@ impl Host for H<'_> {
                 };
                 self.st.noises.push(SimEvent::Sound { position: pos, radius, category: dishonored_sim::events::SoundCategory::Scripted, context, source });
                 self.note(format!("AI noise {radius:.0} uu at {:.0},{:.0}", pos.x, pos.y));
+                HostResult::Done
+            }
+            // `DisSeqAct_ActivateProjectileLauncher::Activated` (0x00B9B1D0): every "Target" that is
+            // a `DisProjectileLauncher` fires (`Fire`, 0x00A33F70: only an armed one, one shot,
+            // straight at its `m_pTarget` or along its muzzle, no delay), instigated by the
+            // action's `m_pProjInstigator` (none in the shipped levels). The latent action
+            // finishes in the same pass.
+            "DisSeqAct_ActivateProjectileLauncher" => {
+                let instigator = Some(cx.prop_obj("m_pProjInstigator")).filter(|o| !o.is_none()).and_then(|o| self.pawn_of(&o)).unwrap_or(0);
+                for t in cx.objects("Target") {
+                    let Obj::Actor(a) = t else { continue };
+                    let actor = &self.db.actors[a as usize];
+                    if actor.class != "DisProjectileLauncher" {
+                        continue;
+                    }
+                    let (package, name) = (actor.package.clone(), actor.name.clone());
+                    let fired = self.m.fire_launcher(&package, &name, instigator);
+                    self.note(format!("launcher {name}: {}", if fired { "fires" } else { "is not armed" }));
+                }
                 HostResult::Done
             }
             // `DisSeqAct_AlarmBell::Activated` (0x00b91ac0): the first input (Turn Off / Turn
@@ -4784,6 +4810,105 @@ mod tests {
         r.m.interact_events.push(InteractEvent::Tripwire { tripwire: 0, instigator: 1 });
         r.feed_events(&[], 2);
         assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (1, 1), "0x00A21A30 passes no outputs: all of them");
+    }
+
+    /// A Prison Sewer launcher: the trap's explosive arrow at a target point, one incendiary bolt.
+    fn launcher_def(name: &str) -> dishonored_ir::interactables::LauncherDef {
+        use dishonored_ir::interactables::{LauncherDef, LauncherProjectile, ShotKind};
+        LauncherDef {
+            name: name.into(),
+            package: "T".into(),
+            position: Vec3::new(0.0, 0.0, 100.0),
+            muzzle: Vec3::new(0.0, 0.0, 130.0),
+            muzzle_forward: Vec3::X,
+            target: Some(Vec3::new(1000.0, 0.0, 130.0)),
+            armed: true,
+            projectile: LauncherProjectile { kind: ShotKind::ExplosiveArrow, speed: 2000.0, damage: 10, headshot_mult: 1.0, damage_multiplier: 1.0, gravity_mult: 0.5, explosion: Some(Default::default()), ..Default::default() },
+            harvest: vec![(4, 1)],
+            max_distance: 200.0,
+            ..Default::default()
+        }
+    }
+
+    /// `DisSeqAct_ActivateProjectileLauncher` (0x00B9B1D0 -> `Fire` 0x00A33F70): the Prison Sewer's
+    /// authoring, a tripped wire's `Tripwire` event into the action whose "Target" is the launcher.
+    /// The launcher fires its one shot at once and the action finishes in the same pass; a
+    /// launcher the `SeqAct_Toggle` turned off (`OnToggle_Native`, 0x009ED800) stays quiet.
+    #[test]
+    fn a_tripped_wire_fires_its_launcher_through_activate_projectile_launcher() {
+        use dishonored_ir::interactables::{Interactables, TripwireDef};
+        use dishonored_sim::interactables::InteractEvent;
+        let mut g = GraphBuilder::new();
+        let wire = g.actor("DisTripwire", "DisTripwire_2", [0.0, 0.0, 0.0], 0);
+        let (l0, l1) = (g.actor("DisProjectileLauncher", "DisProjectileLauncher_0", [0.0, 0.0, 100.0], 0), g.actor("DisProjectileLauncher", "DisProjectileLauncher_1", [0.0, 500.0, 100.0], 0));
+        g.db.maps.push(("T".into(), vec![0]));
+        let (ev, _) = event_with_sinks(&mut g, "DisSeqEvent_Tripwire", &["Tripped", "Deactivated"]);
+        g.set(ev, "Originator", Value::Obj(Obj::Actor(wire)));
+        let act = g.op("DisSeqAct_ActivateProjectileLauncher");
+        g.inputs(act, &["In"]);
+        g.outputs(act, &["Out"]);
+        let targets: Vec<OpId> = [l0, l1].iter().map(|l| {
+            let v = g.var("SeqVar_Object");
+            g.set(v, "ObjValue", Value::Obj(Obj::Actor(*l)));
+            v
+        }).collect();
+        g.vars(act, "Target", "Targets", &targets);
+        g.link(ev, 0, act, 0);
+        let done = g.sink();
+        g.link(act, 0, done, 0);
+        // Start: the second launcher is turned off by a SeqAct_Toggle ("Turn Off").
+        let start = g.remote_event("Start");
+        let tog = g.op("SeqAct_Toggle");
+        g.inputs(tog, &["Turn On", "Turn Off", "Toggle"]);
+        g.outputs(tog, &["Out"]);
+        let off = g.var("SeqVar_Object");
+        g.set(off, "ObjValue", Value::Obj(Obj::Actor(l1)));
+        g.vars(tog, "Target", "Targets", &[off]);
+        g.link(start, 0, tog, 1);
+        let mut r = Rig::new(g, |_| {});
+        let mut second = launcher_def("DisProjectileLauncher_1");
+        second.muzzle = Vec3::new(0.0, 500.0, 130.0);
+        r.m.setup.interactables.insert("t".into(), Interactables { tripwires: vec![TripwireDef { name: "DisTripwire_2".into(), package: "T".into(), ..Default::default() }], launchers: vec![launcher_def("DisProjectileLauncher_0"), second], ..Default::default() });
+        r.feed_events(&[], 2);
+        assert_eq!(r.m.launcher_armed("T", "DisProjectileLauncher_1"), Some(false), "SeqAct_Toggle Turn Off");
+        assert_eq!(r.m.launcher_armed("T", "DisProjectileLauncher_0"), Some(true));
+        assert!(r.m.world.projectiles.is_empty(), "nothing fires before the wire trips");
+        r.m.interact_events.push(InteractEvent::Tripwire { tripwire: 0, instigator: 1 });
+        r.feed_events(&[], 2);
+        assert_eq!((r.ran(act), r.ran(done)), (1, 1), "the latent action finishes in its pass");
+        assert_eq!(r.m.world.projectiles.len(), 1, "only the armed launcher shoots");
+        let shot = r.m.world.projectiles[0];
+        assert_eq!((shot.kind, shot.owner, shot.position), (dishonored_sim::state::ProjectileKind::TrapArrow, 0, Vec3::new(0.0, 0.0, 130.0)));
+        assert!((shot.velocity - Vec3::new(2000.0, 0.0, 0.0)).length() < 1e-2, "at its target point at m_fProjectileSpeed");
+        assert_eq!(r.m.launcher_armed("T", "DisProjectileLauncher_0"), Some(false), "one shot per arming");
+        assert!(r.m.launcher_events.iter().any(|e| matches!(e, SimEvent::Fired { kind: dishonored_sim::state::ProjectileKind::TrapArrow, .. })), "the launch is reported with the next step's events");
+    }
+
+    /// The player's `Interact` on a launcher (0x00A3B6E0) in the mission: the press disarms and
+    /// takes the ammunition, the use message shows, and the wrapper's `DisSeqEvent_Interact`
+    /// output 0 reaches the events of the user with the launcher as instigator.
+    #[test]
+    fn disarming_a_launcher_gives_the_ammunition_and_fires_interact() {
+        use dishonored_ir::interactables::Interactables;
+        let mut g = GraphBuilder::new();
+        let l0 = g.actor("DisProjectileLauncher", "DisProjectileLauncher_0", [0.0, 0.0, 100.0], 0);
+        g.db.maps.push(("T".into(), vec![0]));
+        let (alt, alt_sinks) = event_with_sinks(&mut g, "DisSeqEvent_Interact", &["Interact", "AltInteract"]);
+        g.set(alt, "Originator", Value::Obj(Obj::Pawn(1)));
+        let mut r = Rig::new(g, |_| {});
+        let mut def = launcher_def("DisProjectileLauncher_0");
+        def.use_message = "Launcher disarmed".into();
+        def.bounds_min = Vec3::new(-30.0, -30.0, 100.0);
+        def.bounds_max = Vec3::new(30.0, 30.0, 160.0);
+        r.m.setup.interactables.insert("t".into(), Interactables { launchers: vec![def], ..Default::default() });
+        let _ = l0;
+        let before = dishonored_sim::inventory::ammo(r.m.world.player(1).unwrap(), dishonored_ir::items::AmmoType::IncendiaryBolt);
+        r.m.interact_launcher(1, 0, &r.cfg);
+        assert_eq!(dishonored_sim::inventory::ammo(r.m.world.player(1).unwrap(), dishonored_ir::items::AmmoType::IncendiaryBolt), before + 1);
+        assert_eq!(r.m.launcher_armed("T", "DisProjectileLauncher_0"), Some(false));
+        r.feed_events(&[], 2);
+        assert_eq!((r.ran(alt_sinks[0]), r.ran(alt_sinks[1])), (1, 0), "DisSeqEvent_Interact output 0");
+        assert!(!r.m.fire_launcher("T", "DisProjectileLauncher_0", 0), "a disarmed launcher no longer fires");
     }
 
     /// `DisSeqEvent_KeyHoleUsed`: output 0 when the eye goes to the keyhole (0x00A38580), output 1

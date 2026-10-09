@@ -38,6 +38,9 @@ impl B {
             ("SeqVar_Bool", &["SeqVar_Bool", "SequenceVariable", "SequenceObject"]),
             ("InterpData", &["InterpData", "SequenceVariable", "SequenceObject"]),
             ("TestRecord", &["TestRecord", "SequenceAction", "SequenceOp"]),
+            ("DisSeqEvent_Tripwire", &["DisSeqEvent_Tripwire", "SequenceEvent", "SequenceOp"]),
+            ("DisSeqAct_ActivateProjectileLauncher", &["DisSeqAct_ActivateProjectileLauncher", "SeqAct_Latent", "SequenceAction", "SequenceOp"]),
+            ("SeqVar_Object", &["SeqVar_Object", "SequenceVariable", "SequenceObject"]),
         ];
         db.classes = chains.iter().map(|(c, ch)| (c.to_string(), ch.iter().map(|s| s.to_string()).collect())).collect();
         B { db }
@@ -126,6 +129,8 @@ struct Rec {
     tick: u32,
     hits: Vec<(u32, OpId, usize)>,
     flags: BTreeMap<String, bool>,
+    /// `DisSeqAct_ActivateProjectileLauncher` activations: (tick, the "Target" objects).
+    launches: Vec<(u32, Vec<Obj>)>,
 }
 
 impl Host for Rec {
@@ -141,6 +146,11 @@ impl Host for Rec {
     fn activated(&mut self, cx: &mut Ctx) -> HostResult {
         if cx.class() == "TestRecord" {
             self.hits.push((self.tick, cx.op, cx.input().unwrap_or(99)));
+            return HostResult::Done;
+        }
+        if cx.class() == "DisSeqAct_ActivateProjectileLauncher" {
+            let targets = cx.objects("Target");
+            self.launches.push((self.tick, targets));
             return HostResult::Done;
         }
         HostResult::Unhandled
@@ -211,6 +221,40 @@ fn gate_without_auto_close_and_close_input() {
     fire(&mut k, &mut h, e);
     tick(&mut k, &mut h, 1);
     assert_eq!(h.hits.len(), 3, "closed gate blocks");
+}
+
+/// The Prison Sewer's authoring (research/dishonored/systems/interactables.md): a tripwire's
+/// `Tripwire` event leads into `DisSeqAct_ActivateProjectileLauncher`, whose "Target" links
+/// name the launchers. The host's `Activated` (0x00B9B1D0) gets every linked target in order, in
+/// the tick the event reaches it; the action is latent but finishes in its own pass, so its
+/// "Out" runs on in the same pass and a closed gate between wire and launcher stops it.
+#[test]
+fn a_tripwire_event_reaches_activate_projectile_launcher_with_its_targets_and_finishes_at_once() {
+    let mut b = B::new();
+    let s = b.root(0);
+    let e = b.event(s, "DisSeqEvent_Tripwire", vec![("MaxTriggerCount", Value::Int(0))]);
+    let g = b.add(0, "SeqAct_Gate", Kind::Action, Some(s), &["In", "Open", "Close", "Toggle"], &["Out"], vec![("bOpen", Value::Bool(true))]);
+    let act = b.add(0, "DisSeqAct_ActivateProjectileLauncher", Kind::Action, Some(s), &["In"], &["Out"], vec![]);
+    let r = b.record(s);
+    let targets: Vec<OpId> = [7, 9].iter().map(|n| b.add(0, "SeqVar_Object", Kind::Variable, Some(s), &[], &[], vec![("ObjValue", Value::Obj(Obj::Actor(*n)))])).collect();
+    b.var_link(act, "Target", targets, "");
+    b.link(e, 0, g, 0);
+    b.link(g, 0, act, 0);
+    b.link(act, 0, r, 0);
+    let mut k = b.build(1);
+    let mut h = Rec::default();
+    assert!(fire(&mut k, &mut h, e));
+    tick(&mut k, &mut h, 1);
+    assert_eq!(h.launches, vec![(1, vec![Obj::Actor(7), Obj::Actor(9)])], "every Target, in link order");
+    assert_eq!(h.hits.len(), 1, "the latent action's Out followed in the same pass");
+    assert_eq!(h.hits[0].0, 1);
+    // Closed gate: the wire's event goes no further.
+    k.activate_input(g, 2);
+    tick(&mut k, &mut h, 1);
+    assert!(fire(&mut k, &mut h, e));
+    tick(&mut k, &mut h, 1);
+    assert_eq!(h.launches.len(), 1);
+    assert_eq!(h.hits.len(), 1);
 }
 
 #[test]

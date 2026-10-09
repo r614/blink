@@ -522,6 +522,9 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         ("proj.x", "uu"), ("proj.y", "uu"), ("proj.z", "uu"), ("proj.speed", "uu/s"),
         ("fx.live", "n"), ("fx.particles", "n"),
         ("peek.active", "bool"), ("peek.fov", "deg"), ("peek.fade", "1"), ("wire.tripped", "n"),
+        // Projectile launchers (interactables.md section 2): of the map's, how many are still armed,
+        // have fired, have been defused or harvested by the player, and the launcher shots in flight.
+        ("launcher.armed", "n"), ("launcher.fired", "n"), ("launcher.defused", "n"), ("launcher.harvested", "n"), ("launcher.shots", "n"),
         // The player's physics prop (movables.md): the one in his hands, else the one he last let
         // go of that is still moving, else the last he touched.
         ("mov.held", "bool"), ("mov.x", "uu"), ("mov.y", "uu"), ("mov.z", "uu"), ("mov.vx", "uu/s"), ("mov.vy", "uu/s"), ("mov.vz", "uu/s"), ("mov.speed", "uu/s"), ("mov.phase", "enum"), ("mov.damage", "pt"), ("mov.gone", "bool"),
@@ -579,6 +582,14 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         // Keyholes and tripwires (interactables.md): the player's peek and the tripped wires of the map.
         let peek = m.view.peeks.iter().find(|(id, _)| *id == ME).map(|x| x.1);
         v.extend([b(peek.is_some()), peek.map_or(f64::NAN, |x| x.fov as f64), peek.map_or(f64::NAN, |x| x.fade as f64), m.view.tripwires.iter().filter(|x| x.tripped).count() as f64]);
+        let ls = &m.view.launchers;
+        v.extend([
+            ls.iter().filter(|l| l.armed).count() as f64,
+            ls.iter().filter(|l| l.fired).count() as f64,
+            ls.iter().filter(|l| l.defused).count() as f64,
+            ls.iter().filter(|l| l.harvested).count() as f64,
+            w.projectiles.iter().filter(|p| p.kind.is_launcher_shot()).count() as f64,
+        ]);
         {
             use dishonored_sim::state::MovablePhase;
             let mine = w.movables.iter().filter(|m| m.instigator == Some(ME));
@@ -630,6 +641,7 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
     }
     let mut conv_seen = mm(&game).state.conv_log.len();
     let (mut peek_was, mut wires_seen) = (false, 0usize);
+    let mut launchers_seen = (0usize, 0usize, 0usize);
     mm_mut(&mut game).state.hook_log.clear();
     for (t, ti) in timeline.iter().enumerate() {
         let tk = t as u32 + 1;
@@ -674,6 +686,15 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
                 trace.events.push(TraceEvent { tick: tk, kind: "Interact".into(), object: String::new(), name: "Tripwire".into(), detail: format!("tripped={tripped}") });
             }
             wires_seen = tripped;
+            // Launchers: each that fired, was defused or was harvested since the last step.
+            let ls = &m.view.launchers;
+            let now = (ls.iter().filter(|l| l.fired).count(), ls.iter().filter(|l| l.defused).count(), ls.iter().filter(|l| l.harvested).count());
+            for (seen, n, name) in [(launchers_seen.0, now.0, "LauncherFire"), (launchers_seen.1, now.1, "LauncherDefuse"), (launchers_seen.2, now.2, "LauncherHarvest")] {
+                for _ in seen..n {
+                    trace.events.push(TraceEvent { tick: tk, kind: "Interact".into(), object: String::new(), name: name.into(), detail: format!("count={n}") });
+                }
+            }
+            launchers_seen = now;
         }
         // Kismet: one `Kismet` event per op `Activated` / `Deactivated`, in call order, named as
         // the original's ProcessEvent trace names the op (compared on tick, object, name); the

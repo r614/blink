@@ -889,7 +889,8 @@ pub fn step_projectiles(
     let mut keep = Vec::with_capacity(state.projectiles.len());
     let projectiles = std::mem::take(&mut state.projectiles);
     'shots: for mut pr in projectiles {
-        if pr.kind.is_grenade() {
+        // Grenades have their own step; a launcher's shots are flown by `launchers::step_shots`.
+        if pr.kind.is_grenade() || pr.kind.is_launcher_shot() {
             keep.push(pr);
             continue;
         }
@@ -1028,6 +1029,8 @@ pub fn make_projectile(id: u32, owner: u32, kind: ProjectileKind, pos: Vec3, vel
         ProjectileKind::Grenade | ProjectileKind::StickyGrenade => (0.0, 0.0),
         // Its gravity is the arrow tweak's (set by `step_world`); all its damage is the explosion's.
         ProjectileKind::TallboyArrow => (0.0, 0.0),
+        // A launcher's shots are made by `launchers::LaunchersState::fire`.
+        ProjectileKind::TrapArrow | ProjectileKind::TrapBolt => (0.0, 0.0),
     };
     ProjectileState { id, kind, owner, position: pos, velocity: vel, age: 0.0, damage, gravity_mult, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO, spawn: pos, pierced: None }
 }
