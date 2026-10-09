@@ -4708,6 +4708,40 @@ mod tests {
         w
     }
 
+    /// A hound with an unreachable target (off the strip) picks a bark position in the preferred
+    /// band, at least the move minimum away, runs there, and once there finishes and waits 3-5 s
+    /// (0x00b44630, 0x00b427b0).
+    #[test]
+    fn hound_repositions_into_the_preferred_band() {
+        let ai = AiConfig::default();
+        let w = strip_world();
+        let nav = w.nav().unwrap();
+        let c = &ai.special.wolfhound.long;
+        let start = Vec3::new(-900.0, 100.0, 90.0);
+        let target = Vec3::new(500.0, 1200.0, 90.0);
+        let p = special::bark_position(nav, start, target, c, &[], &w).expect("a bark position");
+        let d = (p - target).truncate().length();
+        assert!((800.0..=1450.0).contains(&d), "{p:?} at {d}");
+        assert!((p - start).truncate().length() >= 600.0, "{p:?}");
+        assert!(nav.locate(p, 60.0, 260.0).is_some(), "{p:?} on the mesh");
+        let mut me = pawn(NPC_ID_BASE, PawnKind::Guard, start, 0.0);
+        let t = pawn(1, PawnKind::Human, target, 0.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![me, t];
+        let mut b = Brain::new(me.id, PawnKind::Guard, start, 3);
+        b.class = NpcClass::Wolfhound;
+        let dt = 1.0 / 60.0;
+        let tg = special::Target { t: &t, sighted: true, visible: true, goal: t.position, d: target.distance(start), dz: 0.0 };
+        let i = b.special_combat(&me, &tg, &ws, &w, Some(nav), &ai, &mut Vec::new(), dt).unwrap();
+        let goal = b.special.repos_goal.expect("a reposition started");
+        assert!(i.forward != 0, "running there");
+        me.position = goal;
+        let tg = special::Target { t: &t, sighted: true, visible: true, goal: t.position, d: target.distance(goal), dz: 0.0 };
+        b.special_combat(&me, &tg, &ws, &w, Some(nav), &ai, &mut Vec::new(), dt).unwrap();
+        assert!(b.special.repos_goal.is_none());
+        assert!(b.special.repos_timer.is_some_and(|x| (3.0..=5.0).contains(&x)), "{:?}", b.special.repos_timer);
+    }
+
     fn fuse_noise(at: Vec3, by: PlayerId) -> SimEvent {
         SimEvent::Sound { position: at, radius: 1500.0, category: SoundCategory::Breakable, context: NoiseContext::ImpendingExplosion, source: by }
     }

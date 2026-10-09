@@ -1014,6 +1014,37 @@ pub struct WolfhoundConfig {
     /// The hound's attention profiles (`Twk_Attn_Wolfhound_*`).
     pub unsuspecting: Option<AttentionConfig>,
     pub suspecting: Option<AttentionConfig>,
+    /// CombatLongDistance: an unreachable target is kept at long distance.
+    #[serde(default)]
+    pub long: WolfhoundLongConfig,
+}
+
+/// `DisAISubStateWHCombatLongDistance` with its goal `DisNavMeshGoal_WolfhoundBarkPosition`: how
+/// a hound keeps an unreachable target at long distance (horizontal distances).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct WolfhoundLongConfig {
+    /// `m_LongRangeAllowedDistance`, `m_LongRangePreferredDistance`.
+    pub allowed: [f32; 2],
+    pub preferred: [f32; 2],
+    /// `m_fLongRangeRepositionMoveDistanceMin`, `m_LongRangeRepositionFrequency` (s).
+    pub move_min: f32,
+    pub freq: [f32; 2],
+    /// The goal's `m_NumLineChecksAllowedPerSearch`, `m_fGoalPolyFloodFillStepX`, `MaxPathVisits`.
+    pub line_checks: u32,
+    pub step: f32,
+    pub max_visits: usize,
+    /// The sub-state's `m_fFindPathMinTimeBetweenAttempts`.
+    pub find_path_gap: f32,
+    /// Claimed positions keep this far apart (0x00bdd340 / 0x00bdd4f0).
+    pub claim_spacing: f32,
+}
+
+impl Default for WolfhoundLongConfig {
+    /// `AI_Tweak_Behavior_WolfhoundCombat` and the class defaults.
+    fn default() -> Self {
+        WolfhoundLongConfig { allowed: [650.0, 1600.0], preferred: [800.0, 1450.0], move_min: 600.0, freq: [3.0, 5.0], line_checks: 2, step: 300.0, max_visits: 48, find_path_gap: 1.0, claim_spacing: 200.0 }
+    }
 }
 
 /// `DisBehaviorWeep` (`TweakBehaviors_Weep_Default`), the arm grab and the plague cloud of the

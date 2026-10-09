@@ -4,7 +4,8 @@
 //!
 //! - **`DisBehaviorCombatWolfhound`**: chase at the run loop, walk within `m_fWalkDistance`,
 //!   bite with the bite's contexts under ManageAttacks pacing (flurries, stamina, aggression).
-//!   An unreachable target is held at long distance (0x00b13a80 / 0x00b14010).
+//!   An unreachable target is kept at long distance (CombatLongDistance, 0x00b44630): the hound
+//!   repositions to bark positions in the preferred band every 3-5 s.
 //! - **`DisBehaviorWeep`**: follow the target (walk), run once fewer than
 //!   `m_iSimultaneousRunnerAllowed` weepers run (0x00afbe30) and grab
 //!   (`DisItemContext_WeeperGrab`); weep standing after a grab; cough a plague cloud every
@@ -84,6 +85,14 @@ pub struct SpecialCombat {
     pub lob_cd: f32,
     pub unreachable: bool,
     pub reach_cd: f32,
+    /// Wolfhound CombatLongDistance: running, the time to the next reposition (`None`: off,
+    /// `m_fNextRepositionTime` -1), the time to the next path search, the bark position run to
+    /// and where the run started.
+    pub long_on: bool,
+    pub repos_timer: Option<f32>,
+    pub find_cd: f32,
+    pub repos_goal: Option<Vec3>,
+    pub repos_from: Vec3,
 }
 
 /// What the combat behaviour knows of its target this tick.
@@ -138,6 +147,50 @@ pub fn lob_arc(from: Vec3, to: Vec3, speed: f32, gravity: f32, world: &dyn World
     Some((yaw_to(from, to), pitch))
 }
 
+/// `DisNavMeshGoal_WolfhoundBarkPosition`: the polys a search from `start` expands (cheapest
+/// first, at most `MaxPathVisits`) are sampled (each poly's box clipped to the box of half size
+/// the preferred maximum around the target, a grid of step at most `m_fGoalPolyFloodFillStepX`,
+/// up to 128 points, EvaluateGoal 0x00b2c230); the pick (0x00b427b0) keeps the points within the
+/// preferred band of the target and at least `move_min` from the start, not within
+/// `claim_spacing` of a claimed position, by path cost, and takes the first of
+/// `m_NumLineChecksAllowedPerSearch` with a clear line from its eye height to the target, else
+/// `list[checks % count]`. Returns a pawn centre.
+pub fn bark_position(nav: &NavWorld, start: Vec3, target: Vec3, c: &dishonored_ir::ai::WolfhoundLongConfig, claimed: &[Vec3], world: &dyn WorldQuery) -> Option<Vec3> {
+    let half = glam::Vec2::splat(c.preferred[1]);
+    let (lo, hi) = (target.truncate() - half, target.truncate() + half);
+    let mut pts: Vec<(Vec3, f32)> = Vec::new();
+    'polys: for (poly, cost) in nav.expand(start, &Default::default(), c.max_visits) {
+        for p in nav.sample_poly(poly, lo, hi, c.step) {
+            if pts.len() >= 128 {
+                break 'polys;
+            }
+            pts.push((p + Vec3::Z * 90.0, cost));
+        }
+    }
+    let (p0, p1) = (c.preferred[0] * c.preferred[0], c.preferred[1] * c.preferred[1]);
+    let mut cand: Vec<(Vec3, f32)> = pts
+        .into_iter()
+        .filter(|(p, _)| {
+            let d2 = (*p - target).truncate().length_squared();
+            d2 >= p0 && d2 <= p1 && (*p - start).truncate().length_squared() >= c.move_min * c.move_min && !claimed.iter().any(|q| q.distance(*p) < c.claim_spacing)
+        })
+        .collect();
+    if cand.is_empty() {
+        return None;
+    }
+    cand.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let checks = (c.line_checks.max(1) as usize).min(cand.len());
+    for (p, _) in cand.iter().take(checks) {
+        let eye = *p + Vec3::Z * EYE;
+        let seg = target - eye;
+        let len = seg.length();
+        if len < 1.0 || !world.raycast(eye, seg / len, len, channel::VISION).is_some_and(|h| h.distance < len - 40.0) {
+            return Some(*p);
+        }
+    }
+    Some(cand[checks % cand.len()].0)
+}
+
 pub fn ballistic_pitch(speed: f32, gravity: f32, x: f32, y: f32) -> f32 {
     let g = -gravity;
     if g <= 1e-3 || x <= 1e-3 {
@@ -156,7 +209,7 @@ impl Brain {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn special_combat(&mut self, me: &PlayerState, tg: &Target, ws: &WorldState, world: &dyn WorldQuery, nav: Option<&NavWorld>, ai: &AiConfig, inhibit: &mut Vec<(PlayerId, u8, f32)>, dt: f32) -> Option<PlayerInput> {
         match self.class {
-            NpcClass::Wolfhound => Some(self.combat_hound(me, tg, nav, ai, inhibit, dt)),
+            NpcClass::Wolfhound => Some(self.combat_hound(me, tg, ws, world, nav, ai, inhibit, dt)),
             NpcClass::Weeper => Some(self.combat_weep(me, tg, nav, ai, inhibit, dt)),
             NpcClass::MusicalOverseer => Some(self.combat_musical(me, tg, nav, ai, inhibit, dt)),
             NpcClass::Tallboy => Some(self.combat_tallboy(me, tg, ws, world, nav, ai, inhibit, dt)),
@@ -227,8 +280,93 @@ impl Brain {
         i
     }
 
+    /// Whether the target is unreachable (LIKELY: no navmesh path to it, asked every
+    /// `REACH_CHECK` s; the original's reachability class, 0x00ae50f0).
+    fn target_unreachable(&mut self, me: &PlayerState, goal: Vec3, nav: &NavWorld, dt: f32) -> bool {
+        self.special.reach_cd -= dt;
+        if self.special.reach_cd <= 0.0 {
+            self.special.reach_cd = REACH_CHECK;
+            self.special.unreachable = nav.find_path(me.position, goal, &Default::default()).is_none();
+        }
+        self.special.unreachable
+    }
+
+    /// `DisAISubStateWHCombatLongDistance` (start 0x00b44ff0, tick 0x00b44630, search 0x00b41db0,
+    /// finish 0x00b39220): without a reposition, one starts when its timer is due or the hound is
+    /// outside the allowed band (searches at most every `m_fFindPathMinTimeBetweenAttempts`);
+    /// running to the bark position, it is searched again when it left the allowed band, and
+    /// finishes once the hound moved more than `m_fLongRangeRepositionMoveDistanceMin`, is inside
+    /// the preferred band and no claimed position is near (allies stand for the original's
+    /// registry, UNVERIFIED), or arrived; a finish stops and sets the next reposition 3-5 s away.
+    /// The start runs the tick and finishes when no reposition started.
+    #[allow(clippy::too_many_arguments)]
+    fn hound_long_distance(&mut self, me: &PlayerState, tg: &Target, ws: &WorldState, world: &dyn WorldQuery, nav: &NavWorld, ai: &AiConfig, dt: f32) -> PlayerInput {
+        let c = &ai.special.wolfhound.long;
+        let face = yaw_to(me.position, tg.goal);
+        let stand = PlayerInput { yaw: face, left_hand: LeftHand::Empty, ..Default::default() };
+        let d = (tg.t.position - me.position).truncate().length();
+        let band = |x: f32, b: [f32; 2]| x >= b[0] && x <= b[1];
+        let claimed: Vec<Vec3> = self.allies.iter().filter_map(|a| ws.player(*a)).filter(|p| p.alive && p.id != self.id).map(|p| p.position).collect();
+        let finish = |s: &mut Self| {
+            s.special.repos_goal = None;
+            s.follow.clear();
+            s.special.repos_timer = Some(combat::roll(c.freq, rng_next(&mut s.rng)));
+        };
+        let start = !self.special.long_on;
+        if start {
+            self.special.long_on = true;
+            self.special.repos_timer = None;
+            self.special.repos_goal = None;
+            self.follow.clear();
+        }
+        self.special.find_cd -= dt;
+        if let Some(t) = self.special.repos_timer.as_mut() {
+            *t -= dt;
+        }
+        match self.special.repos_goal {
+            None => {
+                let due = self.special.repos_timer.is_some_and(|t| t <= 0.0);
+                if (due || !band(d, c.allowed)) && self.special.find_cd <= 0.0 {
+                    self.special.find_cd = c.find_path_gap;
+                    if let Some(p) = bark_position(nav, me.position, tg.t.position, c, &claimed, world) {
+                        self.special.repos_goal = Some(p);
+                        self.special.repos_from = me.position;
+                        self.special.repos_timer = None;
+                    }
+                }
+                if start && self.special.repos_goal.is_none() {
+                    finish(self);
+                }
+            }
+            Some(g) => {
+                if !band((g - tg.t.position).truncate().length(), c.allowed) {
+                    self.special.repos_goal = None;
+                    self.special.find_cd = 0.0;
+                } else {
+                    let moved = (me.position - self.special.repos_from).truncate().length() > c.move_min;
+                    let crowded = claimed.iter().any(|p| p.distance(me.position) < c.claim_spacing);
+                    if (moved && band(d, c.preferred) && !crowded) || Self::reached(me, g, 60.0) || self.follow.failed {
+                        finish(self);
+                    }
+                }
+            }
+        }
+        match self.special.repos_goal {
+            // The hound runs (`MaxSpeedIndex` 2) to the bark position.
+            Some(g) => {
+                let mut m = self.move_to(me, Some(nav), g, true, ai);
+                if tg.sighted && d < 600.0 {
+                    m.yaw = face;
+                }
+                m
+            }
+            None => stand,
+        }
+    }
+
     /// `DisBehaviorCombatWolfhound`.
-    fn combat_hound(&mut self, me: &PlayerState, tg: &Target, nav: Option<&NavWorld>, ai: &AiConfig, inhibit: &mut Vec<(PlayerId, u8, f32)>, dt: f32) -> PlayerInput {
+    #[allow(clippy::too_many_arguments)]
+    fn combat_hound(&mut self, me: &PlayerState, tg: &Target, ws: &WorldState, world: &dyn WorldQuery, nav: Option<&NavWorld>, ai: &AiConfig, inhibit: &mut Vec<(PlayerId, u8, f32)>, dt: f32) -> PlayerInput {
         let h = &ai.special.wolfhound;
         self.manage_tick(&h.manage, h.attacks.len(), dt);
         let face = yaw_to(me.position, tg.goal);
@@ -236,10 +374,11 @@ impl Brain {
         if let Some(out) = self.attack_in_progress(me, tg.d, tg.sighted, ai, dt, i) {
             return out;
         }
-        // Unreachable: CombatLongDistance (hold, bark; the bark context is not ported).
-        if nav.is_some() && self.follow.failed {
-            self.follow.clear();
-            return i;
+        // Unreachable: CombatLongDistance (sub-state 2; reachable again: MeleeChase, 0x00b13a80 /
+        // 0x00b14010).
+        match nav {
+            Some(n) if self.target_unreachable(me, tg.goal, n, dt) => return self.hound_long_distance(me, tg, ws, world, n, ai, dt),
+            _ => self.special.long_on = false,
         }
         if tg.sighted && self.flurry > 0 && me.sword.phase == SwordPhase::Idle {
             if let Some(k) = self.pick_special(&h.attacks, me, tg, inhibit) {
@@ -574,13 +713,9 @@ impl Brain {
             return Some(out);
         }
         let Some(n) = nav else { return None };
-        self.special.reach_cd -= dt;
-        if self.special.reach_cd <= 0.0 {
-            self.special.reach_cd = REACH_CHECK;
-            self.special.unreachable = n.find_path(me.position, tg.goal, &Default::default()).is_none();
-        }
+        let unreachable = self.target_unreachable(me, tg.goal, n, dt);
         let left = *self.grenades.get_or_insert(gr.grenades);
-        if !self.special.unreachable || left == 0 || self.special.lob_cd > 0.0 || !tg.sighted || !tg.visible {
+        if !unreachable || left == 0 || self.special.lob_cd > 0.0 || !tg.sighted || !tg.visible {
             self.special.fsp_goal = None;
             return None;
         }

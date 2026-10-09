@@ -989,6 +989,26 @@ fn special_npcs(content: &Content, base: &AiConfig, prov: &mut std::collections:
     }
     h.manage = manage_attacks(&db, HOUND_COMBAT, &h.manage);
     h.walk_distance = db.try_resolve(&format!("{HOUND_COMBAT}.DisTweaks_AISubState_WH_CombatShortDistance_0")).and_then(|m| get_f32(&m, "m_fWalkDistance")).unwrap_or(300.0);
+    // CombatLongDistance: the behaviour's long-range bands and the sub-state / goal class defaults.
+    if let Some(m) = db.try_resolve(HOUND_COMBAT) {
+        let l = &mut h.long;
+        l.allowed = ranged(&m, "m_LongRangeAllowedDistance", l.allowed);
+        l.preferred = ranged(&m, "m_LongRangePreferredDistance", l.preferred);
+        l.move_min = get_f32(&m, "m_fLongRangeRepositionMoveDistanceMin").unwrap_or(l.move_min);
+        l.freq = ranged(&m, "m_LongRangeRepositionFrequency", l.freq);
+    }
+    if let Ok(s) = db.class_defaults("DisAISubStateWHCombatLongDistance") {
+        h.long.find_path_gap = get_f32(&s, "m_fFindPathMinTimeBetweenAttempts").unwrap_or(h.long.find_path_gap);
+    }
+    if let Ok(g) = db.class_defaults("DisNavMeshGoal_WolfhoundBarkPosition") {
+        if let Some(TVal::I(v)) = g.get("m_NumLineChecksAllowedPerSearch") {
+            h.long.line_checks = (*v).max(0) as u32;
+        }
+        h.long.step = get_f32(&g, "m_fGoalPolyFloodFillStepX").unwrap_or(h.long.step);
+        if let Some(TVal::I(v)) = g.get("MaxPathVisits") {
+            h.long.max_visits = (*v).max(1) as usize;
+        }
+    }
     let attn = |p: &str, d: &AttentionConfig| db.try_resolve(p).map(|m| attention(&m, d));
     h.unsuspecting = attn("Twk_Attn_Wolfhound.Twk_Attn_Wolfhound_Unsuspecting", &base.guard_unsuspecting);
     h.suspecting = attn("Twk_Attn_Wolfhound.Twk_Attn_Wolfhound_Suspecting", &base.guard_suspecting);

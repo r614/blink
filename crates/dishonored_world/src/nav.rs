@@ -664,6 +664,70 @@ impl NavWorld {
         None
     }
 
+    /// The polys a path search from `start` expands, cheapest first, with the cost of reaching
+    /// each (entered through its link's edge centre, as [`NavWorld::search_goal`]), at most
+    /// `max_visits` (UE3 `MaxPathVisits`): what a collecting goal evaluator sees.
+    pub fn expand(&self, start: Vec3, opts: &PathOpts, max_visits: usize) -> Vec<(u32, f32)> {
+        let mut out = Vec::new();
+        let Some((sp, s)) = self.closest_point(start, 200.0) else { return out };
+        let n = self.polys.len();
+        let mut g = vec![f32::INFINITY; n];
+        let mut pos = vec![Vec3::ZERO; n];
+        let mut closed = vec![false; n];
+        let mut open = BinaryHeap::new();
+        g[sp as usize] = 0.0;
+        pos[sp as usize] = s;
+        open.push(MinCost(0.0, sp));
+        while let Some(MinCost(_, u)) = open.pop() {
+            let ui = u as usize;
+            if closed[ui] {
+                continue;
+            }
+            closed[ui] = true;
+            out.push((u, g[ui]));
+            if out.len() >= max_visits {
+                break;
+            }
+            for l in &self.links[ui] {
+                let v = l.to as usize;
+                if closed[v] || !self.link_open(l, opts) {
+                    continue;
+                }
+                let mid = (l.a + l.b) * 0.5;
+                let ng = g[ui] + self.pylon_cost(u, l).unwrap_or_else(|| pos[ui].distance(mid) + l.extra);
+                if ng < g[v] {
+                    g[v] = ng;
+                    pos[v] = mid;
+                    open.push(MinCost(ng, l.to));
+                }
+            }
+        }
+        out
+    }
+
+    /// Floor points of poly `i` on a grid of step at most `step` over its box clipped to
+    /// [`lo`, `hi`] (cell centres inside the poly).
+    pub fn sample_poly(&self, i: u32, lo: Vec2, hi: Vec2, step: f32) -> Vec<Vec3> {
+        let p = &self.polys[i as usize];
+        let (x0, y0, x1, y1) = (p.min.x.max(lo.x), p.min.y.max(lo.y), p.max.x.min(hi.x), p.max.y.min(hi.y));
+        if x1 <= x0 || y1 <= y0 {
+            return Vec::new();
+        }
+        let step = step.max(1.0);
+        let (nx, ny) = (((x1 - x0) / step).ceil().max(1.0) as usize, ((y1 - y0) / step).ceil().max(1.0) as usize);
+        let (sx, sy) = ((x1 - x0) / nx as f32, (y1 - y0) / ny as f32);
+        let mut out = Vec::new();
+        for a in 0..nx {
+            for b in 0..ny {
+                let q = Vec2::new(x0 + (a as f32 + 0.5) * sx, y0 + (b as f32 + 0.5) * sy);
+                if self.contains_xy(i, q, 0.5) {
+                    out.push(Vec3::new(q.x, q.y, self.poly_z(i, q.x, q.y)));
+                }
+            }
+        }
+        out
+    }
+
     /// A path search with a goal evaluator (UE3 `UNavigationHandle` path search with a
     /// `NavMeshGoal_*` evaluator and `NavMeshPathConstraint`s): polys are expanded from the one
     /// under `start` cheapest first, each entered through its link's edge centre as in
