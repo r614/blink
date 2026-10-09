@@ -129,3 +129,8 @@ disconnected_edge_is_a_cost_not_a_wall, moving_dynamic_pylon_disconnects_then_mo
 follower_repaths_when_a_crossed_pylon_aborts}`; `dishonored_multiplayer`
 `kismet_host::tests::change_pylon_connection_and_a_moving_base_drive_the_ai_navigation`; retail dump
 `dishonored_assets` `dynamic_pylons_retail` (ignored).
+
+Smoke runs (`oracle scenario maps/Bridge_Part1a maps/Bridge_Part1b`, 10 s, original Kismet): on both
+maps the action now runs (Disconnect, input 1, in the first 0.1 s: the 1a water-lock matinee's
+`Started`, the 1b `PlayDrawbridge` event) and fires `Out`; the 1a original trace shows the same
+activation (`input=1`). The 1b original trace has no activation of it to compare.
