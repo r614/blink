@@ -630,7 +630,10 @@ impl Brain {
                     // `EAIStimID_EnemyBusted`: `DisBehaviorTriggerAlarm` may take the sighting (only
                     // in the guard brains: the tallboy, hound, weeper and Overseer lists have none).
                     if matches!(self.class, NpcClass::EliteGuard | NpcClass::Overseer) {
-                        self.consider_alarm(me, ws, ctx, ai, AlarmCause::Sighting, Some(q.who));
+                        let why = self.attn.iter().find(|a| a.who == q.who).map(|a| a.why);
+                        if let Some(k) = alarm_cause_for_busted(why) {
+                            self.consider_alarm(me, ws, ctx, ai, k, Some(q.who));
+                        }
                     }
                 }
             }
@@ -681,4 +684,17 @@ pub(crate) enum AlarmCause {
     FoundCorpse,
     WitnessDeath,
     Help,
+}
+
+/// The alarm decision of `EAIStimID_EnemyBusted` by the reason of the attention increase that
+/// made the pawn Busted (the stimulus's reason byte): a sighting (`DACRT_Seen`) is a sighting; a
+/// witnessed kill (the port raises Busted at the killer, the original's WitnessDeath 0x00afb940)
+/// a witnessed death; any other cause (attacked, heard, psychic, magic, touched, an ally's state)
+/// is fought without a bell.
+pub(crate) fn alarm_cause_for_busted(why: Option<u8>) -> Option<AlarmCause> {
+    match why? {
+        reason::SEEN => Some(AlarmCause::Sighting),
+        reason::ATTACKED_ENEMY | reason::SAW_DEATH => Some(AlarmCause::WitnessDeath),
+        _ => None,
+    }
 }

@@ -2158,6 +2158,7 @@ impl Host for H<'_> {
                         } else {
                             b.ringing = false;
                             b.ringer = None;
+                            b.acquired = false;
                             b.cooldown = f32::INFINITY;
                         }
                     }

@@ -1477,8 +1477,9 @@ fn near_ratio() -> f32 {
 /// `DisTweaks_AIBehavior_TriggerAlarm`: when a guard goes to ring an alarm bell. The chance is
 /// picked by what made the guard aware (sighting alone / in a group, found corpse, witnessed
 /// death, help request); a guard is "alone" when no other pawn within `companion_range` is an
-/// ally (`m_bCompanionMustBeAlly`) of the same squad (`m_bCompanionMustMatchSquad`)
-/// (0x00af5fe0). An enemy within `fight_radius` is fought instead (0x00af6bd0).
+/// ally (`m_bCompanionMustBeAlly`) of the same squad (`m_bCompanionMustMatchSquad`, set by no
+/// tweak and not modelled) (0x00af5fe0). An enemy within `fight_radius` is fought instead
+/// (0x00af5ec0).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TriggerAlarmConfig {
     pub chance_sighting_alone: f32,

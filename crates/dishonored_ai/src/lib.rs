@@ -185,11 +185,20 @@ pub struct AlarmBell {
     /// Seconds until the AI noise and the spawns (`m_fDelayBeforeAINoise`); <= 0 once done.
     pub noise_timer: f32,
     pub noise_done: bool,
-    /// `m_fCooldownTimer` (`m_fTimeInBetweenUses`) after it stops.
+    /// `m_fCooldownTimer`: `m_fTimeInBetweenUses` from the ring (0x00a3cec0), running while it
+    /// rings.
     pub cooldown: f32,
-    /// The guard on his way to ring it (`m_pNPCOnHisWayToRing`) and the alarm's enemy.
+    /// The guard deciding to ring it or on his way to ring it, and the alarm's enemy.
     pub ringer: Option<PlayerId>,
     pub enemy: Option<PlayerId>,
+    /// The ringer has decided (`m_pNPCOnHisWayToRing` set, 0x00afbad0): no other guard takes
+    /// the bell any more.
+    #[serde(default)]
+    pub acquired: bool,
+    /// The shared decision timer (`m_fDecisionTimer`, `m_fWaitTimeBeforeRing`), inherited by a
+    /// nearer guard that takes the bell over before it is acquired.
+    #[serde(default)]
+    pub decision: f32,
 }
 
 impl BrainState {
@@ -371,11 +380,9 @@ pub struct Brain {
     /// The stimulus was a danger noise (`EAINoiseContext_Danger` and above).
     #[serde(default)]
     pub cause_danger: bool,
-    /// Bell (index into `Crowd::alarms`) this guard goes to ring, and its wait timer.
+    /// Bell (index into `Crowd::alarms`) this guard decides to ring or goes to ring.
     #[serde(default)]
     pub bell: Option<usize>,
-    #[serde(default)]
-    pub ring_wait: f32,
     /// Enemy the alarm is about.
     #[serde(default)]
     pub alarm_enemy: Option<PlayerId>,
@@ -634,7 +641,8 @@ pub struct Crowd {
     pub overrides: Vec<(u16, Recipient, Relationship)>,
     #[serde(default)]
     pub alarms: Vec<AlarmBell>,
-    /// `DisAlarmGlobalManager.m_fAlarmCooldownTimer` (`m_fAlarmCooldown` after an alarm ends).
+    /// `DisAlarmGlobalManager.m_fAlarmCooldownTimer`: `m_fAlarmCooldown` from an alarm's AI
+    /// noise (0x00a36dd0).
     #[serde(default)]
     pub alarm_cooldown: f32,
     /// Alarm AI noises from last tick: (bell position, radius).
@@ -1325,21 +1333,28 @@ impl Crowd {
     }
 
     /// Alarm bells after the brains acted (`DisAlarmBell` tick 0x00a3d0c0): a ringing bell
-    /// sends its AI noise and asks its spawners after `m_fAlarmRingDelayBeforeAINoise`
-    /// (0x00a36dd0); it stops once no NPC hunts its enemy (0x00a37410), and the global
-    /// cooldown starts when no bell rings.
+    /// sends its AI noise and asks its spawners after `m_fAlarmRingDelayBeforeAINoise`, which
+    /// starts the global cooldown (0x00a36dd0); it stops once no NPC hunts its enemy
+    /// (0x00a37410). A bell whose ringer no longer runs the alarm behaviour (it ended, or the
+    /// pawn died) is released (0x00aef9a0 -> 0x00a19ed0, 0x00a374e0).
     fn tick_alarms(&mut self, ws: &WorldState, dt: f32) {
         self.alarm_cooldown = (self.alarm_cooldown - dt).max(0.0);
         for i in 0..self.alarms.len() {
+            let held = self.alarms[i].ringer.is_some_and(|r| ws.player(r).is_some_and(|p| p.alive) && self.brains.iter().any(|b| b.id == r && b.bell == Some(i)));
             let a = &mut self.alarms[i];
             a.cooldown = (a.cooldown - dt).max(0.0);
             if !a.ringing {
+                if !held {
+                    a.ringer = None;
+                    a.acquired = false;
+                }
                 continue;
             }
             if !a.noise_done {
                 a.noise_timer -= dt;
                 if a.noise_timer <= 0.0 {
                     a.noise_done = true;
+                    self.alarm_cooldown = ALARM_COOLDOWN;
                     self.alarm_noise.push((a.def.position, a.def.loudness));
                     let enemy_pos = a.enemy.and_then(|e| ws.player(e)).map(|p| p.position);
                     self.events.push(AiEvent::AlarmSpawn { bell: i, enemy: a.enemy, enemy_pos });
@@ -1351,11 +1366,8 @@ impl Crowd {
                 let a = &mut self.alarms[i];
                 a.ringing = false;
                 a.ringer = None;
-                a.cooldown = a.def.time_between_uses;
+                a.acquired = false;
                 self.events.push(AiEvent::AlarmEnded { bell: i });
-                if !self.alarms.iter().any(|x| x.ringing) {
-                    self.alarm_cooldown = ALARM_COOLDOWN;
-                }
             }
         }
     }
@@ -1774,7 +1786,6 @@ impl Brain {
             cause_danger: false,
             ambient_bark_timer: None,
             bell: None,
-            ring_wait: 0.0,
             alarm_enemy: None,
             barks: Vec::new(),
             found_corpses: Vec::new(),
@@ -2808,12 +2819,14 @@ impl Brain {
         i
     }
 
-    /// `DisBehaviorTriggerAlarm` (first in the guard behaviour list, slot Alert): on
-    /// `EnemyBusted` (with `CombatBegin`, a sighting) or a search caused by a found corpse, a
-    /// witnessed death or a help request, a guard goes to ring the nearest ready bell within
-    /// `m_fNPCGoToAlarmCloseness` with the tweak's chance, unless the enemy is within
-    /// `m_fFightRadius` (0x00af6bd0). The bell keeps one pending ringer, the one nearest to it
-    /// (0x00a1e140). Decided once until the brain is back to its routine.
+    /// `DisBehaviorTriggerAlarm` evaluate (first in the guard behaviour list, slot Alert): on
+    /// `EnemyBusted` (a sighting or a witnessed kill, [`slots::alarm_cause_for_busted`]) or a
+    /// search caused by a found corpse, a witnessed death or a help request, a guard considers a
+    /// bell with the tweak's chance, unless the enemy is within `m_fFightRadius` (0x00af5ec0).
+    /// The bell (0x00af6170 / 0x00c55d70): the one already being decided on or run to (the global
+    /// lock), else the nearest ready bell strictly within `m_fNPCGoToAlarmCloseness`. It keeps
+    /// one ringer: the guard nearer to it while the decision runs (the timer carries over), nobody
+    /// else once acquired (0x00afbad0). Decided once until the brain is back to its routine.
     pub(crate) fn consider_alarm(&mut self, me: &PlayerState, ws: &WorldState, ctx: &mut Ctx, ai: &AiConfig, cause: AlarmCause, enemy: Option<PlayerId>) {
         if self.kind != PawnKind::Guard || self.bell.is_some() || ctx.cooldown > 0.0 || ctx.alarms.is_empty() || self.alarm_enemy.is_some() {
             return;
@@ -2821,8 +2834,9 @@ impl Brain {
         let ta = &ai.trigger_alarm;
         let chance = match cause {
             AlarmCause::Sighting => {
-                // "Alone": no other guard within the companion range (0x00af5fe0).
-                let alone = !ws.players.iter().any(|p| p.id != self.id && p.alive && p.kind == PawnKind::Guard && p.position.distance(me.position) <= ta.companion_range);
+                // "Alone": no other pawn within the companion range that is an ally
+                // (`m_bCompanionMustBeAlly`, 0x00af5fe0; the squad flag is set by no tweak).
+                let alone = !ws.players.iter().any(|p| p.id != self.id && p.alive && p.position.distance(me.position) <= ta.companion_range && (!ta.companion_must_be_ally || self.allies.contains(&p.id)));
                 if alone { ta.chance_sighting_alone } else { ta.chance_sighting_in_group }
             }
             AlarmCause::FoundCorpse => ta.chance_found_corpse,
@@ -2838,18 +2852,30 @@ impl Brain {
                 return;
             }
         }
-        let d2 = |a: &AlarmBell| a.def.position.distance(me.position);
-        let pick = ctx.alarms.iter().enumerate().filter(|(_, a)| !a.ringing && a.cooldown <= 0.0 && d2(a) <= a.def.go_closeness).min_by(|a, b| d2(a.1).total_cmp(&d2(b.1)).then(a.0.cmp(&b.0)));
-        let Some((bi, bell)) = pick else { return };
-        if let Some(r) = bell.ringer.filter(|r| *r != self.id) {
-            if ws.player(r).is_some_and(|p| p.alive && p.position.distance(bell.def.position) <= d2(bell)) {
-                return;
-            }
+        let me_id = self.id;
+        let holder = |a: &AlarmBell| a.ringer.filter(|r| ws.player(*r).is_some_and(|p| p.alive));
+        let dist = |a: &AlarmBell| a.def.position.distance(me.position);
+        // `IsReady` (0x00a1e240) and the closeness (strict, 0x00c55d70).
+        let ready = |a: &AlarmBell| !a.ringing && a.cooldown <= 0.0 && (!a.acquired || holder(a) == Some(me_id)) && dist(a) < a.def.go_closeness;
+        // `m_pCurrentAlarmBeingTriggered`: while one bell is being worked, only that one.
+        let locked = ctx.alarms.iter().position(|a| !a.ringing && holder(a).is_some());
+        let pick = match locked {
+            Some(l) => ready(&ctx.alarms[l]).then_some(l),
+            None => ctx.alarms.iter().enumerate().filter(|(_, a)| ready(a)).min_by(|a, b| dist(a.1).total_cmp(&dist(b.1)).then(a.0.cmp(&b.0))).map(|(i, _)| i),
+        };
+        let Some(bi) = pick else { return };
+        let bell = &ctx.alarms[bi];
+        let other = holder(bell).filter(|r| *r != me_id);
+        if other.and_then(|r| ws.player(r)).is_some_and(|p| p.position.distance(bell.def.position) <= dist(bell)) {
+            return;
         }
-        ctx.alarms[bi].ringer = Some(self.id);
-        ctx.alarms[bi].enemy = enemy;
+        let a = &mut ctx.alarms[bi];
+        if other.is_none() {
+            a.decision = ta.wait_before_ring;
+        }
+        a.ringer = Some(me_id);
+        a.enemy = enemy;
         self.bell = Some(bi);
-        self.ring_wait = 0.0;
         self.place(Behavior::TriggerAlarm);
     }
 
@@ -3477,9 +3503,12 @@ impl Brain {
         }
     }
 
-    /// `DisBehaviorTriggerAlarm`: TakePosition to the bell (running), stand
-    /// `m_fWaitTimeBeforeRing` within `m_fNPCUseCloseness`, ring (GenericAction). Over when
-    /// rung, taken by another guard, with the enemy within the fight radius, or unreachable.
+    /// `DisBehaviorTriggerAlarm`: the decision (AlarmDecision): the ringer stands facing the
+    /// enemy while the bell's shared `m_fDecisionTimer` (`m_fWaitTimeBeforeRing`) runs down, then
+    /// acquires the bell (0x00afbad0); TakePosition to the bell (running) and ring it once within
+    /// `m_fNPCUseCloseness` (GenericAction), which releases the lock (0x00af5760 / 0x00a3d080).
+    /// Over when rung, taken by another guard, unreachable, or once acquired with the enemy
+    /// inside the fight radius in front (0x00af57c0).
     fn act_alarm(&mut self, me: &PlayerState, ws: &WorldState, ctx: &mut Ctx, nav: Option<&NavWorld>, ai: &AiConfig, dt: f32) -> PlayerInput {
         let idle = PlayerInput { yaw: me.yaw, left_hand: LeftHand::Empty, ..Default::default() };
         let face = |p: Vec3| PlayerInput { yaw: yaw_to(me.position, p), left_hand: LeftHand::Empty, ..Default::default() };
@@ -3489,28 +3518,37 @@ impl Brain {
             return idle;
         };
         let enemy = ctx.alarms[bi].enemy.and_then(|e| ws.player(e)).filter(|p| p.alive).map(|p| (p.id, p.position));
-        let taken = ctx.alarms[bi].ringing || ctx.alarms[bi].ringer.is_some_and(|r| r != self.id);
-        let close = enemy.is_some_and(|(_, p)| p.distance(me.position) <= ai.trigger_alarm.fight_radius);
+        let taken = ctx.alarms[bi].ringing || ctx.alarms[bi].ringer != Some(self.id);
+        let close = ctx.alarms[bi].acquired && enemy.is_some_and(|(_, p)| p.distance(me.position) < ai.trigger_alarm.fight_radius && facing_within(me, p, 90.0));
         let pos = ctx.alarms[bi].def.position;
         if taken || close || self.follow.failed {
             if ctx.alarms[bi].ringer == Some(self.id) && !ctx.alarms[bi].ringing {
                 ctx.alarms[bi].ringer = None;
+                ctx.alarms[bi].acquired = false;
             }
             self.bell = None;
             self.complete(slot::ALERT);
             return idle;
         }
-        if Self::reached(me, pos, ctx.alarms[bi].def.use_closeness.max(60.0)) {
-            self.ring_wait += dt;
-            if self.ring_wait >= ai.trigger_alarm.wait_before_ring {
-                let a = &mut ctx.alarms[bi];
-                a.ringing = true;
-                a.noise_done = false;
-                a.noise_timer = a.def.ring_delay;
-                ctx.events.push(AiEvent::AlarmRang { bell: bi, name: a.def.name.clone(), ringer: self.id, enemy: a.enemy });
-                self.bell = None;
-                self.complete(slot::ALERT);
+        if !ctx.alarms[bi].acquired {
+            let a = &mut ctx.alarms[bi];
+            a.decision -= dt;
+            if a.decision <= 0.0 {
+                a.acquired = true;
             }
+            return face(enemy.map_or(pos, |(_, p)| p));
+        }
+        if Self::reached(me, pos, ctx.alarms[bi].def.use_closeness.max(60.0)) {
+            let a = &mut ctx.alarms[bi];
+            a.ringing = true;
+            a.noise_done = false;
+            a.noise_timer = a.def.ring_delay;
+            a.cooldown = a.def.time_between_uses;
+            a.ringer = None;
+            a.acquired = false;
+            ctx.events.push(AiEvent::AlarmRang { bell: bi, name: a.def.name.clone(), ringer: self.id, enemy: a.enemy });
+            self.bell = None;
+            self.complete(slot::ALERT);
             return face(pos);
         }
         self.move_to(me, nav, pos, true, ai)
@@ -4782,6 +4820,106 @@ mod tests {
         // The bell's noise reaches the guard next tick as an alarm stimulus (it hunts the
         // enemy already); the bell rings while the enemy is hunted.
         assert!(c.alarms[0].ringing);
+    }
+
+    /// The global cooldown starts at the alarm's AI noise (0x00a36dd0) and the bell's own one at
+    /// the ring (0x00a3cec0): neither is restarted when the alarm ends.
+    #[test]
+    fn alarm_cooldown_starts_at_the_noise_not_at_the_end() {
+        let mut c = Crowd::default();
+        let def = AlarmBellDef { time_between_uses: 30.0, ..Default::default() };
+        c.alarms = vec![AlarmBell { def, ringing: true, noise_timer: 0.01, cooldown: 5.0, ..Default::default() }];
+        let ws = WorldState::default();
+        c.tick_alarms(&ws, 0.02);
+        assert!(c.alarms[0].ringing && c.alarms[0].noise_done);
+        assert_eq!(c.alarm_cooldown, ALARM_COOLDOWN);
+        // Nobody hunts the (absent) enemy: the alarm ends, the timers only ran down.
+        c.tick_alarms(&ws, 0.5);
+        assert!(!c.alarms[0].ringing);
+        assert!(c.alarm_cooldown < ALARM_COOLDOWN && c.alarm_cooldown > 9.0, "{}", c.alarm_cooldown);
+        assert!(c.alarms[0].cooldown < 5.0, "{}", c.alarms[0].cooldown);
+    }
+
+    #[test]
+    fn busted_rings_only_on_a_sighting_or_a_witnessed_kill() {
+        use slots::alarm_cause_for_busted as f;
+        assert_eq!(f(Some(reason::SEEN)), Some(AlarmCause::Sighting));
+        assert_eq!(f(Some(reason::ATTACKED_ENEMY)), Some(AlarmCause::WitnessDeath));
+        assert_eq!(f(Some(reason::SAW_DEATH)), Some(AlarmCause::WitnessDeath));
+        for r in [reason::ATTACKED_BY, reason::HEARD, reason::PSYCHIC, reason::MAGIC, reason::TOUCHED] {
+            assert_eq!(f(Some(r)), None, "{r}");
+        }
+        assert_eq!(f(None), None);
+    }
+
+    /// Runs `consider_alarm` for one guard brain against `alarms`.
+    fn consider(b: &mut Brain, ws: &WorldState, alarms: &mut [AlarmBell], ai: &AiConfig, enemy: PlayerId) {
+        let me = ws.player(b.id).unwrap().clone();
+        let layout = CrowdLayout::default();
+        let (routes, mut users, mut inhibit, mut events, mut dists): (Vec<PatrolRoute>, Vec<i32>, Vec<(PlayerId, u8, f32)>, Vec<AiEvent>, Vec<distraction::Distractor>) = Default::default();
+        let mut ctx = Ctx { layout: &layout, routes: &routes, users: &mut users, neglect: &[], inhibit: &mut inhibit, alarms, events: &mut events, cooldown: 0.0, distractors: &mut dists };
+        b.consider_alarm(&me, ws, &mut ctx, ai, AlarmCause::Sighting, Some(enemy));
+    }
+
+    /// "Alone" (0x00af5fe0) counts only Ally pawns in range with `m_bCompanionMustBeAlly`.
+    #[test]
+    fn a_guard_with_only_non_allies_near_is_alone() {
+        let mut ai = AiConfig::default();
+        ai.trigger_alarm.chance_sighting_alone = 1.0;
+        ai.trigger_alarm.chance_sighting_in_group = 0.0;
+        ai.trigger_alarm.companion_must_be_ally = true;
+        let bell = AlarmBell { def: AlarmBellDef { position: Vec3::new(-800.0, 0.0, 90.0), go_closeness: 5000.0, ..Default::default() }, ..Default::default() };
+        let g = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(0.0, 0.0, 90.0), 0.0);
+        let other = pawn(NPC_ID_BASE + 1, PawnKind::Guard, Vec3::new(500.0, 0.0, 90.0), 0.0);
+        let p = pawn(1, PawnKind::Human, Vec3::new(3000.0, 0.0, 90.0), 180.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![g.clone(), other.clone(), p.clone()];
+        for (allied, rings) in [(true, false), (false, true)] {
+            let mut b = Brain::new(g.id, PawnKind::Guard, g.position, 4);
+            b.allies = if allied { vec![other.id] } else { Vec::new() };
+            let mut alarms = vec![bell.clone()];
+            consider(&mut b, &ws, &mut alarms, &ai, p.id);
+            assert_eq!(b.bell.is_some(), rings, "allied {allied}");
+        }
+    }
+
+    /// Two guards consider the same bell: the nearer one holds it and inherits the decision
+    /// timer; the farther one gives up; once acquired nobody else takes it (0x00af6170 /
+    /// 0x00afbad0).
+    #[test]
+    fn the_nearer_guard_takes_the_bell_until_it_is_acquired() {
+        let ai = AiConfig::default();
+        let bell = AlarmBell { def: AlarmBellDef { position: Vec3::ZERO, go_closeness: 5000.0, ..Default::default() }, ..Default::default() };
+        let far = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(1000.0, 0.0, 0.0), 0.0);
+        let near = pawn(NPC_ID_BASE + 1, PawnKind::Guard, Vec3::new(300.0, 0.0, 0.0), 0.0);
+        let third = pawn(NPC_ID_BASE + 2, PawnKind::Guard, Vec3::new(100.0, 0.0, 0.0), 0.0);
+        let p = pawn(1, PawnKind::Human, Vec3::new(4000.0, 0.0, 0.0), 180.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![far.clone(), near.clone(), third.clone(), p.clone()];
+        let mut alarms = vec![bell];
+        let mut bf = Brain::new(far.id, PawnKind::Guard, far.position, 1);
+        consider(&mut bf, &ws, &mut alarms, &ai, p.id);
+        assert_eq!((bf.bell, alarms[0].ringer), (Some(0), Some(far.id)));
+        assert_eq!(alarms[0].decision, ai.trigger_alarm.wait_before_ring);
+        alarms[0].decision = 0.1;
+        let mut bn = Brain::new(near.id, PawnKind::Guard, near.position, 2);
+        consider(&mut bn, &ws, &mut alarms, &ai, p.id);
+        assert_eq!((bn.bell, alarms[0].ringer), (Some(0), Some(near.id)));
+        assert_eq!(alarms[0].decision, 0.1, "the decision timer carries over");
+        // The farther guard's behaviour sees the bell taken.
+        {
+            let layout = CrowdLayout::default();
+            let (routes, mut users, mut inhibit, mut events, mut dists): (Vec<PatrolRoute>, Vec<i32>, Vec<(PlayerId, u8, f32)>, Vec<AiEvent>, Vec<distraction::Distractor>) = Default::default();
+            let mut ctx = Ctx { layout: &layout, routes: &routes, users: &mut users, neglect: &[], inhibit: &mut inhibit, alarms: &mut alarms, events: &mut events, cooldown: 0.0, distractors: &mut dists };
+            bf.act_alarm(&far, &ws, &mut ctx, None, &ai, 1.0 / 60.0);
+        }
+        assert_eq!(bf.bell, None);
+        assert_eq!(alarms[0].ringer, Some(near.id));
+        alarms[0].acquired = true;
+        let mut bt = Brain::new(third.id, PawnKind::Guard, third.position, 3);
+        consider(&mut bt, &ws, &mut alarms, &ai, p.id);
+        assert_eq!(bt.bell, None);
+        assert_eq!(alarms[0].ringer, Some(near.id));
     }
 
     #[test]
