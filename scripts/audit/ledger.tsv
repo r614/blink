@@ -189,3 +189,55 @@
 00b8cfe0	gap	tutorial hint 0x16 queued on the HUD (0x00BC31B0) from a pickup (gameplay tutorial system)
 00c04c80	helper	inventory item of a kind
 00cea0b0	helper	player input state check (rumble / gamepad)
+# crosshair.rs / gadgets.rs / input.rs / interactables.rs (2026-10-09)
+00b96250	ported	native side of the cinematic stripes' size per aspect (_stripeH, _stripeUp_mc / _stripeDown_mc): BlackStripes::set_stripes_position at the 16:9 stage
+00ba0890	irrelevant	HUD awareness / marker layout pass
+00b97b20	irrelevant	HUD SetBlur (menus over the game)
+00b8d540	irrelevant	HUD element screen placement
+00baf540	helper	HUD flags reset on focus change
+00aa2dc0	helper	interactable in-reach test (m_fMaxDistance)
+00a21550	helper	interactable tweak
+00c57d60	ported	grenade stops its physics after the fuse / stick (gadgets grenade step), LIKELY
+00654d10	helper	UE3 actor tick dilation / lifetime
+00c2d440	helper	spring razor tweak point
+00c2d4f0	helper	spring razor tweak point
+00c2d8c0	ported	spring razor arming (gadgets), LIKELY
+00bc7680	helper	player pawn state check
+00bbec00	helper	actor sound / noise registration (the AI noise system's actor hook)
+00c57d00	helper	grenade tweak sub-object check
+00a2e860	helper	TArray add
+00bc7880	irrelevant	grenade light / particle attach
+006e3a80	irrelevant	destroys an emitter (UE3)
+00c215f0	helper	spring razor rotation helper
+00c2d3f0	helper	spring razor radius x tweak
+00c59ed0	irrelevant	grenade HUD marker / light cleanup
+005683e0	helper	collision box of a component (UE3)
+00da6820	helper	GFx Invoke (Scaleform runtime)
+0099a240	helper	controller input action table walk (UE3)
+00ba4270	irrelevant	journal open (native Rust journal UI instead of the SWF's root variables)
+00ba3fd0	irrelevant	journal movie init (native Rust journal UI)
+00bac840	irrelevant	HUD message queue pop
+00c3daf0	helper	can the player open the journal / wheel now (state checks)
+00bc35e0	ported	shortcut selection highlight (hud_wheel SetShortcutSelection)
+00d110a0	helper	array reset
+00bbc070	ported	CloseJournal (runtime journal close)
+00cc73c0	helper	conversation choice availability
+00b87860	helper	viewport rectangle
+0099ae50	helper	movie player lookup
+00cd8220	helper	TArray add
+00bc07b0	helper	player coins (inventory)
+006519c0	helper	struct initializer
+00a06e20	helper	FString initializer
+00aa0620	irrelevant	HUD message slots clear
+0097ab20	helper	GFxValue bool
+00aa0b00	helper	input-block bit set / clear on a pawn
+00a3b560	ported	usable interaction events (DisSeqEvent_Interact output, interactables)
+005750e0	helper	UE3 actor ticking / relevancy flags
+00a63330	ported	keyhole peek HUD (keyHole_mc, the two black rectangles: hud_widgets)
+00a332c0	helper	interface pointer pair
+00b8d080	ported	keyhole HUD open (hud_widgets keyhole frame)
+00b8d1c0	ported	keyhole HUD close
+00bbf150	helper	player controller class check
+00a23bf0	helper	TArray of interface pairs add
+00a1edc0	irrelevant	door / usable skeletal animation play
+00aab030	helper	keyhole view end through 0x00A63330
