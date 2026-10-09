@@ -227,9 +227,6 @@ fn candidates(state: &WorldState, p: &PlayerState, world: &dyn WorldQuery, cfg: 
             Some((package, actor)) if h.lo == h.hi => world.actor_bounds(package, actor).map_or((h.lo, h.hi), |(l, u)| (l + h.shift, u + h.shift)),
             _ => (h.lo, h.hi),
         };
-        if std::env::var_os("CROSSHAIR_DEBUG").is_some() {
-            eprintln!("host {} actor {:?} origin {:?} given {:?}..{:?} used {:?}..{:?} shift {:?}", h.key, h.actor, h.origin, h.lo, h.hi, lo, hi, h.shift);
-        }
         out.push(Candidate {
             target: TargetRef::Host(h.key),
             shape: match h.pawn {

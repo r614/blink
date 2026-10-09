@@ -5,6 +5,9 @@
 //! mission original <map>            the original objectives/tasks and Kismet summary
 //! mission new      <map> [title]    print a starter mission (RON) for the map
 //! mission check    <file.ron>       parse + validate (references, actors in the level)
+//! mission starts                    the global game sequence's level changes (ChangeLvl_* -> map, sublevels)
+//! mission cook     [out dir]        one MissionDef per DefaultGame.ini m_MissionsGame entry, started by the
+//!                                   global level change into its first map (default: <cache>/missions)
 //! mission graph    <file.ron>       rule graph as Graphviz DOT (events -> rules -> actions)
 //! ```
 //! Output that lists original data (markers, objectives) is derived from the install: use it
@@ -90,6 +93,22 @@ fn main() -> Result<()> {
                 println!("start {:<14} tag {:<28} ({:.0},{:.0},{:.0})", s.name, s.tag, s.position.x, s.position.y, s.position.z);
             }
         }
+        "starts" => {
+            let c = Content::locate()?;
+            for s in campaign_starts(&c)? {
+                println!("{:<40} -> {:<24} {:?}", s.event, s.map, s.secondary);
+            }
+        }
+        "cook" => {
+            let c = Content::locate()?;
+            let out = a.get(1).map(std::path::PathBuf::from).unwrap_or_else(|| dishonored_content::cache_dir().join("missions"));
+            std::fs::create_dir_all(&out)?;
+            for (file, def) in cook_campaign(&c)? {
+                let path = out.join(&file);
+                std::fs::write(&path, ron::ser::to_string_pretty(&def, ron::ser::PrettyConfig::default())?)?;
+                println!("{:<34} {:<26} start {:<36} maps {}", file, def.map, def.original_kismet.as_ref().map(|k| k.start_event.as_str()).unwrap_or("-"), def.maps.join(" "));
+            }
+        }
         "new" => {
             let map = a.get(1).context("map")?;
             let title = a.get(2).cloned().unwrap_or_else(|| "New Mission".into());
@@ -169,4 +188,120 @@ const STARTER: &str = include_str!("starter.ron");
 
 fn starter(map: &str, title: &str) -> String {
     STARTER.replace("{MAP}", map).replace("{TITLE}", title)
+}
+
+/// `DefaultGame.ini` `m_MissionsGame` entries: (mission number, maps in order).
+fn ini_missions(content: &Content) -> Result<Vec<(i32, Vec<String>)>> {
+    let ini = content.cooked.parent().context("install layout")?.join("Config").join("DefaultGame.ini");
+    let text = std::fs::read_to_string(&ini).with_context(|| ini.display().to_string())?;
+    let mut out = Vec::new();
+    for line in text.lines().map(str::trim) {
+        let Some(rest) = line.strip_prefix(".m_MissionsGame=") else { continue };
+        let num = rest.split("MissionNumber=").nth(1).and_then(|r| r.split(',').next()).and_then(|v| v.trim().parse::<i32>().ok());
+        let maps: Vec<String> = rest
+            .split("Maps=(")
+            .nth(1)
+            .and_then(|r| r.split(')').next())
+            .map(|m| m.split(',').map(|x| x.trim().trim_matches('"').trim().to_string()).filter(|x| !x.is_empty()).collect())
+            .unwrap_or_default();
+        if let Some(n) = num {
+            out.push((n, maps));
+        }
+    }
+    Ok(out)
+}
+
+/// A global level change: the `ChangeLvl_*` remote event (`SeqEvent_RemoteEvent.EventName`), the
+/// map its `SeqAct_PrepareMapChange` loads (`MainLevelName`) and the sublevels loaded with it
+/// (`InitiallyLoadedSecondaryLevelNames`: which Pub script a hub visit runs).
+struct LevelChange {
+    event: String,
+    map: String,
+    secondary: Vec<String>,
+}
+
+fn campaign_starts(content: &Content) -> Result<Vec<LevelChange>> {
+    let db = dishonored_kismet::load::load(content, &["DishonoredGameFull_P".to_string()], &[])?;
+    let mut out = Vec::new();
+    for ev in db.ops.iter().filter(|o| o.class == "SeqEvent_RemoteEvent") {
+        let name = ev.props.str("EventName").to_string();
+        if !name.starts_with("ChangeLvl_") {
+            continue;
+        }
+        // Breadth-first along the output links to the first PrepareMapChange (gates, story-flag
+        // conditions and delays may sit in between).
+        let mut seen = std::collections::HashSet::new();
+        let mut queue: std::collections::VecDeque<dishonored_kismet::OpId> = ev.outputs.iter().flat_map(|o| o.links.iter().map(|l| l.0)).collect();
+        while let Some(id) = queue.pop_front() {
+            if !seen.insert(id) || seen.len() > 96 {
+                continue;
+            }
+            let op = db.op(id);
+            if op.class == "SeqAct_PrepareMapChange" {
+                let secondary = op.props.get("InitiallyLoadedSecondaryLevelNames").map(|v| v.as_array().iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+                out.push(LevelChange { event: name.clone(), map: op.props.str("MainLevelName").to_string(), secondary });
+                break;
+            }
+            queue.extend(op.outputs.iter().flat_map(|o| o.links.iter().map(|l| l.0)));
+            // A sequence's inputs start the SeqEvent_SequenceActivated inside it.
+            queue.extend(op.inputs.iter().filter_map(|i| i.linked_op));
+        }
+    }
+    Ok(out)
+}
+/// One mission definition per `m_MissionsGame` entry whose first map a global level change
+/// loads, run by the original Kismet (the campaign flow of the persistent level, as the
+/// original's: the map's scripts end the mission with their own `ChangeLvl_*` remote event).
+fn cook_campaign(content: &Content) -> Result<Vec<(String, MissionDef)>> {
+    let starts = campaign_starts(content)?;
+    let mut out = Vec::new();
+    for (i, (num, maps)) in ini_missions(content)?.into_iter().enumerate() {
+        let persistent: Vec<String> = maps.iter().filter(|m| m.ends_with("_P") && content.has_package(m)).cloned().collect();
+        // The mission proper starts where the hub (the Pub) or the prologue hands over to the
+        // mission's own first map; a hub-only entry (the Pub visits) starts at the hub with its
+        // script sublevel.
+        let is_hub = |m: &String| m.to_ascii_lowercase().starts_with("l_pub_");
+        let own: Vec<&String> = persistent.iter().filter(|m| !is_hub(m)).collect();
+        let scripts: Vec<&String> = maps.iter().filter(|m| !m.ends_with("_P")).collect();
+        let found = own.iter().find_map(|first| {
+            let into: Vec<&LevelChange> = starts.iter().filter(|s| s.map.eq_ignore_ascii_case(first)).collect();
+            into.iter().copied().find(|s| s.event.contains("fromHub") || s.event.contains("fromTower")).or_else(|| into.first().copied()).map(|c| ((*first).clone(), c))
+        }).or_else(|| {
+            let first = persistent.first()?;
+            starts.iter().find(|s| s.map.eq_ignore_ascii_case(first) && scripts.iter().all(|sc| s.secondary.iter().any(|x| x.eq_ignore_ascii_case(sc)))).map(|c| (first.clone(), c))
+        });
+        let Some((first, change)) = found else {
+            eprintln!("mission {num} ({persistent:?}): no global level change loads it; skipped");
+            continue;
+        };
+        let mut dialog: Vec<String> = Vec::new();
+        for m in &persistent {
+            for p in dishonored_assets::map_packages(content, m) {
+                if !dialog.iter().any(|d: &String| d.eq_ignore_ascii_case(&p)) {
+                    dialog.push(p);
+                }
+            }
+        }
+        // Script-only sublevels named in the mission list (`L_Pub_FromPrison_Script`...) stream
+        // with their persistent map; their dialog graphs are loaded too.
+        for m in maps.iter().filter(|m| !m.ends_with("_P") && content.has_package(m)) {
+            if !dialog.iter().any(|d| d.eq_ignore_ascii_case(m)) {
+                dialog.push(m.clone());
+            }
+        }
+        let def = MissionDef {
+            title: format!("Mission {num}: {first}"),
+            map: first.clone(),
+            maps: persistent.iter().filter(|m| !m.eq_ignore_ascii_case(&first)).cloned().collect(),
+            briefing: format!("Cooked from DefaultGame.ini m_MissionsGame {i}; started by {}.", change.event),
+            flags_set: vec!["SF_Global_RealGameStarted".into()],
+            original_npcs: persistent.clone(),
+            dialog_packages: dialog,
+            original_kismet: Some(dishonored_mission::OriginalKismet { start_event: change.event.clone(), seed: 1 }),
+            settings: dishonored_mission::MissionSettings { respawn: true, respawn_delay: 3.0, time_limit: 0.0, ..Default::default() },
+            ..Default::default()
+        };
+        out.push((format!("m{:02}_{}.ron", i, first.trim_start_matches("L_").trim_end_matches("_P").to_ascii_lowercase()), def));
+    }
+    Ok(out)
 }

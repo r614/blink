@@ -4033,7 +4033,9 @@ dependencies = [
  "anyhow",
  "dishonored_assets",
  "dishonored_content",
+ "dishonored_kismet",
  "dishonored_mission",
+ "ron",
 ]
 
 [[package]]
