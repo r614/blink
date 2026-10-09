@@ -1424,6 +1424,9 @@ pub struct AiConfig {
     /// `DisBehaviorGoHome` (`TweaksBehavior_GoHome_Default`).
     #[serde(default)]
     pub go_home: GoHomeConfig,
+    /// `DisAISubProcessHeadTrackPause` of the patrol and TakePosition behaviours.
+    #[serde(default)]
+    pub head_track_pause: HeadTrackPauseConfig,
     /// Length (s) of the elite guard's MagicLostTarget animation (`Sword_Magic_OutOfSight`),
     /// the GenericAction of `DisBehaviorMagicResponse` when the caster disappeared; 0 unloaded.
     #[serde(default)]
@@ -1827,12 +1830,29 @@ pub struct AiLevel {
     pub tether_volumes: Vec<TetherVolume>,
 }
 
+/// `DisTweaks_AISubProcess_HeadTrackPause`: `m_fRearHalfAngleWidthToPause_Deg`,
+/// `m_fFrontHalfAngleWidthToResume_Deg` (the same in every shipped copy: Patrol, PatrolSearch,
+/// TakePosition, NeutralSuspicious).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct HeadTrackPauseConfig {
+    pub rear_half_deg: f32,
+    pub front_resume_deg: f32,
+}
+
+impl Default for HeadTrackPauseConfig {
+    fn default() -> Self {
+        HeadTrackPauseConfig { rear_half_deg: 45.0, front_resume_deg: 90.0 }
+    }
+}
+
 fn tether_delay() -> [f32; 2] {
     [6.0, 8.0]
 }
 
-/// `DisTweaks_AIBehavior_GoHome`: `m_fBackOffRange`, `m_fTauntRange`, `m_bFullSpeed`, and the
-/// length of its LastTaunt GenericAction (`DisNPCAnim_Taunt`, the elite guard's group 0).
+/// `DisTweaks_AIBehavior_GoHome`: `m_fBackOffRange`, `m_fTauntRange`, `m_bFullSpeed`, the length
+/// of its LastTaunt GenericAction (`DisNPCAnim_Taunt`, the elite guard's group 0) and its Menace
+/// sub-state's `m_fTauntMinTime` / `m_fTauntMaxTime`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct GoHomeConfig {
@@ -1840,11 +1860,12 @@ pub struct GoHomeConfig {
     pub taunt_range: f32,
     pub full_speed: bool,
     pub anim_taunt: f32,
+    pub menace_time: [f32; 2],
 }
 
 impl Default for GoHomeConfig {
     fn default() -> Self {
-        GoHomeConfig { back_off_range: 250.0, taunt_range: 500.0, full_speed: true, anim_taunt: 0.0 }
+        GoHomeConfig { back_off_range: 250.0, taunt_range: 500.0, full_speed: true, anim_taunt: 0.0, menace_time: [30.0, 35.0] }
     }
 }
 
@@ -2455,6 +2476,7 @@ impl Default for AiConfig {
             magic_reaction_delay: [0.2, 0.3],
             tether_delay: tether_delay(),
             go_home: GoHomeConfig::default(),
+            head_track_pause: HeadTrackPauseConfig::default(),
             anim_magic_lost_target: 0.0,
             locomotion: Vec::new(),
             head_poses: Vec::new(),

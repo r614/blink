@@ -306,6 +306,13 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
         f.forbidden_radius = get_f32(&m, "m_fForbiddenRadius").unwrap_or(f.forbidden_radius);
         prov.insert("ai.escape_explosion.flee".into(), format!("{ESCAPE}.pDisTweaks_AISubState_Flee"));
     }
+    const HEAD_PAUSE: &str = "AI_BehaviorTweaks_Patrol.TweaksBehavior_Patrol_Default.DisTweaks_AISubProcess_HeadTrackPause_0";
+    if let Some(m) = beh(HEAD_PAUSE) {
+        let h = &mut out.head_track_pause;
+        h.rear_half_deg = get_f32(&m, "m_fRearHalfAngleWidthToPause_Deg").unwrap_or(h.rear_half_deg);
+        h.front_resume_deg = get_f32(&m, "m_fFrontHalfAngleWidthToResume_Deg").unwrap_or(h.front_resume_deg);
+        prov.insert("ai.head_track_pause".into(), HEAD_PAUSE.into());
+    }
     const GO_HOME: &str = "AI_BehaviorTweaks_Misc.TweaksBehavior_GoHome_Default";
     if let Some(m) = beh(GO_HOME) {
         let g = &mut out.go_home;
@@ -316,6 +323,10 @@ pub fn load_ai_config(content: &Content, extra: &[String]) -> AiConfig {
             _ => g.full_speed,
         };
         prov.insert("ai.go_home".into(), GO_HOME.into());
+    }
+    if let Some(m) = beh(&format!("{GO_HOME}.DisTweaks_AISubState_Menace_1")) {
+        let g = &mut out.go_home;
+        g.menace_time = [get_f32(&m, "m_fTauntMinTime").unwrap_or(g.menace_time[0]), get_f32(&m, "m_fTauntMaxTime").unwrap_or(g.menace_time[1])];
     }
     if let Some(m) = beh("AI_BehaviorTweaks_TriggerAlarm.TweaksBehavior_TriggerAlarm_Party") {
         out.alarm_companion_range = get_f32(&m, "m_fCompanionRange").unwrap_or(out.alarm_companion_range);

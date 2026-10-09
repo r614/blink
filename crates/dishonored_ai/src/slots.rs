@@ -164,7 +164,8 @@ pub enum GoHomeSub {
     BackOff,
     /// TakePosition home.
     FinalStretch,
-    /// Not started by any decoded path (`m_fTauntMinTime` / `MaxTime`).
+    /// Taunting the enemy for `m_fTauntMinTime`..`m_fTauntMaxTime` after the last taunt
+    /// (0x00af20a0).
     Menace,
     /// GenericAction `DisNPCAnim_Taunt`.
     LastTaunt,
@@ -750,6 +751,15 @@ impl Brain {
                 }
             }
             Stim::CombatBegin => {
+                // A running `DisBehaviorGoHome` takes the enemy (0x00afd120): its proxy is where the
+                // enemy started, and walking home it backs off instead.
+                if let Some(Some(Behavior::GoHome(s))) = self.slots.get_mut(slot::RESIGN as usize) {
+                    s.start_pos = q.at;
+                    if s.sub == GoHomeSub::FinalStretch {
+                        s.sub = GoHomeSub::BackOff;
+                        s.run = ai.go_home.full_speed;
+                    }
+                }
                 if guard {
                     self.suspecting = true;
                     self.target = Some(q.who);

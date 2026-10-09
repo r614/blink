@@ -534,6 +534,14 @@ pub struct Brain {
     /// each tick; 0x00adac60).
     #[serde(skip)]
     pub dialog_look: Option<Vec3>,
+    /// HeadTrackPause: pausing (`m_bIsPausing`), the heading when the pause began
+    /// (`m_OriginalPauseYaw`) and the side it turns to (the FaceTo request).
+    #[serde(default)]
+    pub track_pause: bool,
+    #[serde(default)]
+    pub track_pause_yaw: f32,
+    #[serde(default)]
+    pub track_face: Option<f32>,
 }
 
 /// A target in a vision component's candidate list: the line of sight is traced again once
@@ -1905,6 +1913,9 @@ impl Brain {
             tether_now: None,
             tether_last: None,
             dialog_look: None,
+            track_pause: false,
+            track_pause_yaw: 0.0,
+            track_face: None,
         }
     }
 
@@ -3189,6 +3200,12 @@ impl Brain {
             }
             BrainState::Wander | BrainState::WalkToPoint => match self.goal {
                 Some(g) if !self.arrived(me, g) && !(self.follow.failed && !self.stay) => {
+                    // A scripted go-to is TakePosition, which carries the head-track pause.
+                    if self.stay && self.state == BrainState::WalkToPoint {
+                        if let Some(paused) = self.head_track_pause(me, look, ai) {
+                            return paused;
+                        }
+                    }
                     let run = self.run;
                     self.move_to(me, nav, g, run, ai)
                 }
@@ -3232,6 +3249,9 @@ impl Brain {
                 }
                 self.goal = Some(p.position);
                 let at_point = Self::reached(me, p.position, 70.0);
+                if let Some(paused) = self.head_track_pause(me, look, ai) {
+                    return paused;
+                }
                 if at_point || self.follow.failed {
                     self.follow.clear();
                     if at_point {
@@ -3724,7 +3744,9 @@ impl Brain {
     ///   home again (FinalStretch); outside both, the tether is dropped (not outside, no volume);
     /// - between sub-states (slot 107, 0x00af1f00): no enemy: home (FinalStretch); beyond
     ///   `m_fBackOffRange` of where the enemy was and beyond `m_fTauntRange` of it, the LastTaunt
-    ///   once the pawn faces it; else home.
+    ///   once the pawn faces it; else home;
+    /// - the LastTaunt's end (0x00af20a0): Menace (facing the enemy for `m_fTauntMinTime` ..
+    ///   `MaxTime`) while the enemy is valid, else finished; Menace's end (0x00af2100): home.
     ///
     /// TakePosition's arrival (its tweak was not read) is `GO_HOME_REACH` (LIKELY); the
     /// RotationReached stimulus is the pawn facing the enemy within 10 degrees (LIKELY).
@@ -3755,14 +3777,30 @@ impl Brain {
                 s.timer -= dt;
                 s.timer > 0.0
             }
-            GoHomeSub::Menace => false,
+            GoHomeSub::Menace => {
+                s.timer -= dt;
+                s.timer > 0.0
+            }
         };
         if let Some((_, p)) = enemy {
             if facing_within(me, p, 10.0) {
                 s.rotation_reached = true;
             }
         }
-        if !running {
+        if !running && s.sub == GoHomeSub::LastTaunt {
+            // The last taunt ended (0x00af20a0): Menace while the enemy is valid, else finished.
+            if enemy.is_some() {
+                s.sub = GoHomeSub::Menace;
+                s.timer = combat::roll(gh.menace_time, rng_next(&mut self.rng));
+            } else {
+                self.complete(slot::RESIGN);
+                return idle;
+            }
+        } else if !running && s.sub == GoHomeSub::Menace {
+            // Menace ended (0x00af2100): home.
+            s.sub = GoHomeSub::FinalStretch;
+            s.run = gh.full_speed;
+        } else if !running {
             if matches!(s.sub, GoHomeSub::BackOff | GoHomeSub::FinalStretch) {
                 if let Some(v) = s.volume.and_then(vol) {
                     if !v.contains(me.position) && !v.contains(home) {
@@ -3801,6 +3839,41 @@ impl Brain {
             GoHomeSub::BackOff | GoHomeSub::FinalStretch if !Self::reached(me, home, GO_HOME_REACH) => self.move_to(me, nav, home, run, ai),
             _ => enemy.map(|e| face(e.1)).unwrap_or(idle),
         }
+    }
+
+    /// `DisAISubProcessHeadTrackPause` (tick 0x00b3adb0) of the patrol and TakePosition walks:
+    /// with a head-track proxy, when its direction is at least `m_fFrontHalfAngleWidthToResume_Deg`
+    /// off the heading stored at the pause's start and within `m_fRearHalfAngleWidthToPause_Deg` of
+    /// the pawn's back, the pawn stops (a stop locomotion request) and turns to the side of the
+    /// proxy (FaceTo the back +- 90 degrees, recomputed every tick); the first tick of a pause
+    /// stores the heading (0x00b00eb0: toward the locomotion's destination while it moves, else
+    /// yaw 0). Once the proxy lies within the front width of that heading, or without a proxy, the
+    /// requests are cancelled and the walk resumes. `Some`: the paused input.
+    fn head_track_pause(&mut self, me: &PlayerState, look: Option<Vec3>, ai: &AiConfig) -> Option<PlayerInput> {
+        let cfg = &ai.head_track_pause;
+        let wrap = |a: f32| (a + 180.0).rem_euclid(360.0) - 180.0;
+        let Some(p) = look else {
+            self.track_pause = false;
+            self.track_face = None;
+            return None;
+        };
+        let yp = yaw_to(me.position, p);
+        if wrap(yp - self.track_pause_yaw).abs() >= cfg.front_resume_deg {
+            let rear = me.yaw + 180.0;
+            let d2 = wrap(yp - rear);
+            if d2.abs() < cfg.rear_half_deg {
+                if !self.track_pause {
+                    self.track_pause_yaw = self.follow.path.first().filter(|_| me.velocity.truncate().length() > 1.0).map_or(0.0, |w| yaw_to(me.position, *w));
+                }
+                let side = if d2 > 0.0 { 1.0 } else if d2 < 0.0 { -1.0 } else { 0.0 };
+                self.track_face = Some(wrap(rear + side * 90.0));
+                self.track_pause = true;
+            }
+            return self.track_face.filter(|_| self.track_pause).map(|y| PlayerInput { yaw: y, left_hand: LeftHand::Empty, ..Default::default() });
+        }
+        self.track_pause = false;
+        self.track_face = None;
+        None
     }
 
     /// `DisBehaviorCombatRatSwarm` running (slot Engage). It completes once the swarm no longer
@@ -4916,6 +4989,28 @@ mod tests {
         let mut w = flat_world();
         w.nav = Some(std::sync::Arc::new(dishonored_world::nav::NavWorld::from_data(&data)));
         w
+    }
+
+    /// HeadTrackPause (0x00b3adb0): a proxy 20 degrees off the pawn's back stops it and turns it to
+    /// that side; once the proxy is within 90 degrees of the heading stored at the pause, it walks on.
+    #[test]
+    fn a_stimulus_behind_pauses_the_patrol_until_it_is_ahead() {
+        let ai = AiConfig::default();
+        let mut me = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::ZERO, 0.0);
+        me.velocity = Vec3::new(100.0, 0.0, 0.0);
+        let mut b = Brain::new(me.id, PawnKind::Guard, Vec3::ZERO, 1);
+        b.follow.path = vec![Vec3::new(500.0, 0.0, 0.0)];
+        // Behind and a little to the left (+y): the back is yaw 180, the proxy at yaw 160.
+        let behind = Vec3::new(-500.0 * 20f32.to_radians().cos(), 500.0 * 20f32.to_radians().sin(), 0.0);
+        let i = b.head_track_pause(&me, Some(behind), &ai).expect("paused");
+        assert!(b.track_pause && b.track_pause_yaw.abs() < 1e-3);
+        assert!((i.yaw - 90.0).abs() < 1e-3 || (i.yaw + 270.0).abs() < 1e-3, "turns to the proxy's side: {}", i.yaw);
+        assert_eq!(i.forward, 0);
+        // Ahead of the stored heading (yaw 0): the walk resumes.
+        assert!(b.head_track_pause(&me, Some(Vec3::new(500.0, 100.0, 0.0)), &ai).is_none());
+        assert!(!b.track_pause);
+        // No proxy: nothing.
+        assert!(b.head_track_pause(&me, None, &ai).is_none());
     }
 
     /// A blocking conversation's request starts the variant of its priority flag (slot Act for a
