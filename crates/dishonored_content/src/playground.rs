@@ -212,6 +212,7 @@ pub fn load_layout_match(content: &Content, sim: SimConfig, layout: &MapLayout) 
         pickups: derived.pickups,
         usables: derived.usables,
         world_actors: Default::default(),
+        interactables: Default::default(),
     })
 }
 

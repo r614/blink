@@ -24,6 +24,9 @@ pub struct PlayerEventState {
     /// Lock / unlock outputs of usables and doors the Kismet changed, fired next step:
     /// (actor, `DisSeqEvent_Lock` output, last user).
     pub(super) locks: Vec<(u32, usize, Option<PlayerId>)>,
+    /// Kismet usables a player used (not pickups, not talks): `Interact` fires for each next step
+    /// (0x00A3DF60 after the interactable's own use): (user, usable actor).
+    pub(super) interacts: Vec<(PlayerId, u32)>,
     /// The pawn that last used a usable (`DishonoredUsableObject` +0x2C8: the instigator of its
     /// lock events).
     pub(super) usable_user: BTreeMap<u32, PlayerId>,
@@ -52,6 +55,12 @@ pub const POSSESSED_FINISHED: usize = 1;
 /// Outputs of `DisSeqEvent_Lock` (`EDisLockKismetEvent`).
 pub const LOCK_LOCKED: usize = 0;
 pub const LOCK_UNLOCKED: usize = 1;
+/// Outputs of `DisSeqEvent_KeyHoleUsed`.
+pub const KEYHOLE_USED: usize = 0;
+pub const KEYHOLE_UNUSED: usize = 1;
+/// Outputs of `DisSeqEvent_Interact` (`EDisInteractKismetEvent`).
+pub const INTERACT_USE: usize = 0;
+pub const INTERACT_ALT: usize = 1;
 /// Outputs of `DisSeqEvent_Climb` (`EDisClimbEventOutput`).
 pub const CLIMB_START: usize = 0;
 pub const CLIMB_FINISH: usize = 1;
@@ -137,6 +146,7 @@ pub(super) fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
     player_state_events(k, h);
     task_events(k, h);
     lock_events(k, h);
+    interact_events(k, h);
     for e in sim_events {
         match *e {
             // `DisSeqEvent_Possessed` of a possessed NPC pawn (0x00B7D110 / 0x00B7D2F0 are the
@@ -275,5 +285,60 @@ fn lock_events(k: &mut Kismet, h: &mut H) {
         if !fired.is_empty() {
             h.note(format!("{} {}: {} Lock event(s)", h.db.actors[a as usize].name, if out == LOCK_LOCKED { "locked" } else { "unlocked" }, fired.len()));
         }
+    }
+}
+
+/// Door keyholes, tripwires and the generic Interact event (research/dishonored/systems/
+/// interactables.md).
+///
+/// - `DisSeqEvent_Tripwire` (0x00A21A30, from `Trip` 0x00A28B40): originator the tripwire,
+///   instigator the tripper, inexact class, no output list (every output).
+/// - `DisSeqEvent_KeyHoleUsed` (0x00A38580 output 0, 0x00A2E4E0 output 1): originator the door,
+///   instigator the pawn, exact class.
+/// - `DisSeqEvent_Interact` (0x00A3DF60 output 0 `Interact`, 0x00A3E0B0 output 1 `AltInteract`):
+///   `FireGeneratedEvents(user, ...)` reaches the events registered with the user pawn
+///   (`SequenceEvent::RegisterEvent`, 0x006E50B0, registers an event with its `Originator` only),
+///   instigator the interactable, exact class. The Prison's four instances have no `Originator`
+///   and so never fire in the original either.
+fn interact_events(k: &mut Kismet, h: &mut H) {
+    use dishonored_sim::interactables::InteractEvent;
+    let defs = h.m.setup.interactables.get(&h.m.current_map.to_ascii_lowercase()).cloned();
+    for e in h.m.take_interact_events() {
+        match e {
+            InteractEvent::Tripwire { tripwire, instigator } => {
+                let Some(w) = defs.as_ref().and_then(|d| d.tripwires.get(tripwire)) else { continue };
+                let Some(a) = h.kismet_actor(&w.package, &w.name) else { continue };
+                let fired = k.trigger(h, "DisSeqEvent_Tripwire", &[Obj::Actor(a)], Obj::Pawn(instigator), None);
+                if !fired.is_empty() {
+                    h.note(format!("{}:{} tripped by pawn {instigator}: {} Tripwire event(s)", w.package, w.name, fired.len()));
+                }
+            }
+            InteractEvent::KeyHole { keyhole, player, used } => {
+                let Some(d) = defs.as_ref().and_then(|d| d.keyholes.get(keyhole)) else { continue };
+                let Some(a) = h.kismet_actor(&d.package, &d.name) else { continue };
+                let evs = k.events_for("DisSeqEvent_KeyHoleUsed", &[Obj::Actor(a)]);
+                let fired = fire_events(k, h, evs, Obj::Actor(a), Obj::Pawn(player), Some(vec![if used { KEYHOLE_USED } else { KEYHOLE_UNUSED }]));
+                if !fired.is_empty() {
+                    h.note(format!("{}:{} keyhole {} by pawn {player}: {} event(s)", d.package, d.name, if used { "used" } else { "left" }, fired.len()));
+                }
+            }
+            InteractEvent::AltInteract { keyhole, player } => {
+                let Some(d) = defs.as_ref().and_then(|d| d.keyholes.get(keyhole)) else { continue };
+                let Some(a) = h.kismet_actor(&d.package, &d.name) else { continue };
+                fire_interact(k, h, player, a, INTERACT_ALT);
+            }
+        }
+    }
+    for (user, a) in std::mem::take(&mut h.st.player_ev.interacts) {
+        fire_interact(k, h, user, a, INTERACT_USE);
+    }
+}
+
+/// `FireGeneratedEvents(user, DisSeqEvent_Interact, user, interactable, exact 1, [output])`.
+fn fire_interact(k: &mut Kismet, h: &mut H, user: PlayerId, interactable: u32, output: usize) {
+    let evs: Vec<OpId> = k.events_for("DisSeqEvent_Interact", &[Obj::Pawn(user)]).into_iter().filter(|e| k.class(*e) == "DisSeqEvent_Interact").collect();
+    let fired = fire_events(k, h, evs, Obj::Pawn(user), Obj::Actor(interactable), Some(vec![output]));
+    if !fired.is_empty() {
+        h.note(format!("pawn {user} {} {}: {} Interact event(s)", if output == INTERACT_ALT { "alt-interacted" } else { "interacted" }, h.db.actors[interactable as usize].name, fired.len()));
     }
 }

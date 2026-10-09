@@ -1,0 +1,21 @@
+// Tripwires (research/dishonored/systems/interactables.md): a pawn walking into `DisTripwire_2` of the Prison
+// Sewer trips it once: `DisSeqEvent_Tripwire` (originator the wire, instigator the tripper; all outputs).
+// Decoded rules: Touch 0x00A30C00 trips on any live actor that is not a rat (DisGameCrowdAgentSkeletalRat /
+// DisRatSwarm); Trip 0x00A28B40 only from ETS_Armed; 0x00A21A30 fires the event with no output list.
+(
+    name: "kismet/tripwire_prsnsewer",
+    system: Kismet,
+    map: "L_PrsnSewer_P",
+    description: "Walk across DisTripwire_2 of the Prison Sewer at its middle: it trips once and its Tripwire event fires.",
+    setup: (kismet: true, kismet_start: Some("ChangeLvl_fromPrison_toSewer"), original_npcs: false, seed: 1, settle: 30),
+    ticks: 300,
+    input: [(tick: 2, action: Console("teleport 2700 3120 3180 0")), (tick: 5, action: Move(forward: 127, right: 0))],
+    checkpoints: [
+        (name: "tripped", expect: [(metric: Count("Interact:Tripwire"), value: 1, tol: 0, source: "decoded 0x00A30C00 / 0x00A28B40: the wire trips when the pawn touches it, once", status: Static)]),
+        (name: "event", expect: [(metric: Count("Kismet:Activated@*DisSeqEvent_Tripwire*"), value: 1, tol: 0, cmp: AtLeast, source: "decoded 0x00A21A30: the Tripwire events of the wire fire", status: Static)]),
+        (name: "wires", expect: [(metric: Final("wire.tripped"), value: 1, tol: 0, source: "m_TripwireStatus ETS_Tripped stays (0x00A19130 saves it)", status: Static)]),
+        (name: "trip time", expect: [(metric: FirstAt("Interact:Tripwire"), value: 0.48, tol: 0.3, source: "port: the walk from 121 uu (the wire at x 2817..2825, the pawn's radius 34 reaches it at about 87 uu); the original's touch event comes from the physics asset's overlap", status: Unmeasured)]),
+    ],
+    record: [Pawn, Kismet, SimEvents],
+    capture: Some("Prison Sewer after ChangeLvl_fromPrison_toSewer, player teleported to (2700, 3120, 3180) yaw 0 walking +x: ProcessEvent trace of DisSeqEvent_Tripwire activations, DisTripwire_2.m_TripwireStatus per tick, the pawn's location when it flips"),
+)

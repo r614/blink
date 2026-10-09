@@ -524,17 +524,16 @@ those events as "class, no originator" (`player_events.rs`, `player_events()`). 
 | `DisSeqEvent_PowerUsed` (21) | the power component's slot 94 (0x00BF32F0 -> 0x00BF30C0): the player's events of exactly that class, the first output named for the power plus `m_CurrentLevel - 1` ("Blink 2"); called by the activation of Windblast (0x00BFB950), Blink (0x00BFC990), Dark Vision (0x00BE89E0), Devouring Swarm (0x00BFAE60) | `SimEvent::PowerUsed` at the port's matching moments (`left_hand`, `blink`, `powers`) | 4 powers. Bend Time (0x00BFA180) and Possess (0x00BE7730) activations were traced and do not call slot 94: left open. `PowerEquipped` (a subclass, 0x00C44FE0 / 0x00C4BA70, from the equip contexts) is not fed |
 | `DisSeqEvent_Lock` (25) | `Lock` 0x00A4E870 (0, always) and `Unlock` 0x00A4E910 (1, only if locked) of `DishonoredUsableObject` (doors via 0x00A32490 / 0x00A324B0); originator the usable, instigator its last user (+0x2C8) | `DisSeqAct_Lock` queues the output; fired next step | all 25 (the Kismet's own locks) |
 | `DisSeqEvent_Climb` (1) | the climb state: enter 0x00A72B00 (0), exit 0x00A6E2C0 (1), originator the chain (pawn +0xAA0), instigator the pawn | `SimEvent::Climb`, chain by name in the active map | 1 |
+| `DisSeqEvent_KeyHoleUsed` (37) | the door's `AltInteract` 0x00A38580 (output 0) when Use is held `m_fAltInteractActivateTime` at a shut door, its exit 0x00A2E4E0 (output 1); originator the door, instigator the player pawn, exact | `InteractEvent::KeyHole` from `dishonored_sim::interactables` (systems/interactables.md) | all 37 instances (the level ones have output 0 only) |
+| `DisSeqEvent_Tripwire` (7) | `Trip` 0x00A28B40 -> 0x00A21A30, once per wire (touch 0x00A30C00, damage 0x00A28BB0); originator the wire, instigator the tripper, inexact, no output list (every output) | `InteractEvent::Tripwire` | all 7 |
+| `DisSeqEvent_Interact` (4) | `Interact` 0x00A3DF60 (0) / `AltInteract` 0x00A3E0B0 (1) from the Use handler 0x00AD5BA0; `FireGeneratedEvents(user, ..)`: events registered with the user pawn (originator-less events are registered with nobody, 0x006E50B0) | `player_ev.interacts`, `InteractEvent::AltInteract` | none fire: the Prison's four have no Originator (UNVERIFIED) |
 
 Decoded but not hooked (no system in the port to hook them to; counts are level instances):
 `MovablePickedUp` (127) 0x00A45FD0 (output none = all; originator the grabbing player, instigator the
 movable; from the grab state 0x00C3D030) and `MovableDropped` (1) 0x00A46380 (0x00C45340, the carried-object
-release): the port cannot grab physics props. `KeyHoleUsed` (37) 0x00A38580 (output 0, the key used)
-and 0x00A2E4E0 (output 1): no keyholes and the key ring is recorded only. `Interact` (4) 0x00A3DF60
-(0) / `AltInteract` 0x00A3E0B0 (1): fired from the Use handler 0x00AD5BA0 for focused interactables that
-are not pickups, event on the user with the interactable as instigator, filtered by
-`m_pAssociatedTweak` (slot 102 0x00B8E830); the tutorial notes of the Prison. `Tripwire` (7) 0x00A21A30
-(from 0x00A28B40 `Trip(instigator)`, once; originator the tripwire, instigator the tripper): no
-tripwires. `SeqEvent_RigidBodyCollision` (73) 0x0078F7D0, `SeqEvent_ParticleEvent` (26) 0x0089FC00,
+release): the port cannot grab physics props. (`KeyHoleUsed`, `Interact` and `Tripwire` are hooked:
+see the table and systems/interactables.md; `m_pAssociatedTweak` is not a filter but the event's
+tweak output, slot 102 0x00B8E830.) `SeqEvent_RigidBodyCollision` (73) 0x0078F7D0, `SeqEvent_ParticleEvent` (26) 0x0089FC00,
 `SeqEvent_AnimNotify` (2) 0x0070F4F0, `SeqEvent_HitWall` (1, `Actor.HitWall` script): no rigid bodies,
 particles or per-actor notifies. `SeqEvent_Destroyed` (18) is `UWorld::DestroyActor` 0x00652CF0, which
 runs `CheckActivate(actor, actor, 0, 0, 0)` on the actor's Destroyed events (the instigator is the

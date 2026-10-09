@@ -5,6 +5,7 @@
 pub mod contracts;
 pub mod ffa;
 pub mod game;
+pub mod interact;
 pub mod mission;
 
 use dishonored_sim::state::PlayerId;
@@ -100,6 +101,23 @@ pub struct MatchView {
     /// every snapshot: the animation turns the visible head the way the AI looks.
     #[serde(default)]
     pub npc_heads: Vec<dishonored_ir::npc_anim::NpcHead>,
+    /// Players with their eye at a door keyhole (`StatePlayerMasterHolePeeking`): the view the
+    /// client renders (the eye, the field of view, the black fade). Host-filled.
+    #[serde(default)]
+    pub peeks: Vec<(PlayerId, dishonored_sim::interactables::PeekView)>,
+    /// The active map's tripwires (`DisTripwire`): their ends and whether they have tripped.
+    #[serde(default)]
+    pub tripwires: Vec<TripwireView>,
+}
+
+/// A tripwire as clients draw it: the wire between its ends, snapped once tripped.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TripwireView {
+    /// `<package>:<actor>`.
+    pub actor: String,
+    pub a: [f32; 3],
+    pub b: [f32; 3],
+    pub tripped: bool,
 }
 
 /// An NPC look: skeletal mesh parts (package, object path; body first, then head) and material

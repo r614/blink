@@ -1009,6 +1009,8 @@ pub fn update_gfx_hud(
         if let Some(s) = fw.shroud.as_mut() {
             s.set(fst, sneaking);
         }
+        // At a keyhole: the frame and the black fade of the peek (interactables.md).
+        fw.show_keyhole(fst, crate::tripwires::peek_view(&view).map(|v| v.fade));
         if let Some(p) = me {
             // The frame's damage, summed (`m_LastDamageInfo`); the direction is towards the
             // damage causer, ahead (0) without one.

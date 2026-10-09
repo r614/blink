@@ -482,3 +482,7 @@ combat/melee_reach_d160
 combat/melee_reach_d230
 combat/melee_reach_d260
 combat/melee_reach_d300
+# --- interactables (research/dishonored/systems/interactables.md): keyholes, tripwires, Interact ---
+kismet/keyhole_boyle_int
+kismet/tripwire_prsnsewer
+kismet/interact_prison

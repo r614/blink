@@ -148,6 +148,9 @@ pub const FED_EVENTS: &[&str] = &[
     "DisSeqEvent_PowerUsed",
     "DisSeqEvent_Climb",
     "DisSeqEvent_Lock",
+    "DisSeqEvent_KeyHoleUsed",
+    "DisSeqEvent_Tripwire",
+    "DisSeqEvent_Interact",
 ];
 
 /// Subclasses of [`FED_EVENTS`] classes that are not fed (`PowerEquipped` extends `PowerUsed`
@@ -2933,6 +2936,11 @@ pub fn use_usable(m: &mut MissionMatch, player: PlayerId, i: usize) {
     let list = usables(m);
     let Some((u, _, _)) = list.into_iter().nth(i) else { return };
     if let Some(run) = &mut m.kismet {
+        // The Use handler (0x00AD5BA0) calls the interactable's Interact (0x00A3DF60) for every focused
+        // interactable but pickups (0x00A3E200 fires no event): DisSeqEvent_Interact output 0.
+        if let KUse::Actor(a) = &u {
+            run.st.player_ev.interacts.push((player, *a));
+        }
         run.st.uses.push((player, u));
     }
 }
@@ -4391,5 +4399,57 @@ mod tests {
         r.play(1);
         r.feed_events(&[], 2);
         assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (2, 1), "Unlock of a locked usable");
+    }
+
+    /// `DisSeqEvent_Tripwire` (0x00A21A30 from `Trip` 0x00A28B40): originator the wire,
+    /// instigator the tripper, no output list so every output ("Tripped" and "Deactivated").
+    #[test]
+    fn tripwire_fires_every_output_with_the_tripper_as_instigator() {
+        use dishonored_ir::interactables::{Interactables, TripwireDef};
+        use dishonored_sim::interactables::InteractEvent;
+        let mut g = GraphBuilder::new();
+        let wire = g.actor("DisTripwire", "DisTripwire_2", [0.0, 0.0, 0.0], 0);
+        g.db.maps.push(("T".into(), vec![0]));
+        let (ev, sinks) = event_with_sinks(&mut g, "DisSeqEvent_Tripwire", &["Tripped", "Deactivated"]);
+        g.set(ev, "Originator", Value::Obj(Obj::Actor(wire)));
+        let mut r = Rig::new(g, |_| {});
+        r.m.setup.interactables.insert("t".into(), Interactables { tripwires: vec![TripwireDef { name: "DisTripwire_2".into(), package: "T".into(), ..Default::default() }], ..Default::default() });
+        r.feed_events(&[], 2);
+        assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (0, 0));
+        r.m.interact_events.push(InteractEvent::Tripwire { tripwire: 0, instigator: 1 });
+        r.feed_events(&[], 2);
+        assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (1, 1), "0x00A21A30 passes no outputs: all of them");
+    }
+
+    /// `DisSeqEvent_KeyHoleUsed`: output 0 when the eye goes to the keyhole (0x00A38580), output 1
+    /// when it leaves (0x00A2E4E0), originator the door; the `AltInteract` of the door fires
+    /// `DisSeqEvent_Interact` output 1 for the events of the user.
+    #[test]
+    fn keyhole_events_fire_used_and_unused_and_alt_interact_reaches_the_user() {
+        use dishonored_ir::interactables::{Interactables, KeyholeDef};
+        use dishonored_sim::interactables::InteractEvent;
+        let mut g = GraphBuilder::new();
+        let door = g.actor("DisDoor", "DisDoor_5", [0.0, 0.0, 0.0], 0);
+        g.db.maps.push(("T".into(), vec![0]));
+        let (ev, sinks) = event_with_sinks(&mut g, "DisSeqEvent_KeyHoleUsed", &["Used", "Unused"]);
+        g.set(ev, "Originator", Value::Obj(Obj::Actor(door)));
+        let (alt, alt_sinks) = event_with_sinks(&mut g, "DisSeqEvent_Interact", &["Interact", "AltInteract"]);
+        g.set(alt, "Originator", Value::Obj(Obj::Pawn(1)));
+        // The Prison's authoring: no Originator, registered with nobody (0x006E50B0).
+        let (_, dead_sinks) = event_with_sinks(&mut g, "DisSeqEvent_Interact", &["Interact", "AltInteract"]);
+        let mut r = Rig::new(g, |_| {});
+        r.m.setup.interactables.insert("t".into(), Interactables { keyholes: vec![KeyholeDef { name: "DisDoor_5".into(), package: "T".into(), ..Default::default() }], ..Default::default() });
+        r.m.interact_events.extend([InteractEvent::KeyHole { keyhole: 0, player: 1, used: true }, InteractEvent::AltInteract { keyhole: 0, player: 1 }]);
+        r.feed_events(&[], 2);
+        assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (1, 0), "Used");
+        assert_eq!((r.ran(alt_sinks[0]), r.ran(alt_sinks[1])), (0, 1), "AltInteract of the door");
+        r.m.interact_events.push(InteractEvent::KeyHole { keyhole: 0, player: 1, used: false });
+        r.feed_events(&[], 2);
+        assert_eq!((r.ran(sinks[0]), r.ran(sinks[1])), (1, 1), "Unused");
+        // A Kismet usable used by the player: Interact output 0.
+        r.run.st.player_ev.interacts.push((1, door));
+        r.feed_events(&[], 2);
+        assert_eq!((r.ran(alt_sinks[0]), r.ran(alt_sinks[1])), (1, 1), "Interact");
+        assert!(dead_sinks.iter().all(|s| r.ran(*s) == 0), "an event without an Originator is registered with nobody");
     }
 }

@@ -15,6 +15,7 @@ pub mod particles;
 pub mod npc_anim;
 pub mod spawners;
 pub mod world_actors;
+pub mod interactables;
 
 use glam::{Mat4, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
@@ -837,3 +838,4 @@ pub struct CharacterModel {
     pub material_params: Vec<MaterialParams>,
     pub textures: Vec<TextureAsset>,
 }
+

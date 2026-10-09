@@ -514,6 +514,7 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         ("darkness.score", "n"), ("darkness.level", "n"), ("darkness.corpses_found", "n"), ("darkness.high", "bool"),
         ("proj.x", "uu"), ("proj.y", "uu"), ("proj.z", "uu"), ("proj.speed", "uu/s"),
         ("fx.live", "n"), ("fx.particles", "n"),
+        ("peek.active", "bool"), ("peek.fov", "deg"), ("peek.fade", "1"), ("wire.tripped", "n"),
     ] {
         chans.push((c.to_string(), u));
     }
@@ -565,6 +566,9 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             None => v.extend([f64::NAN; 4]),
         }
         v.extend([present.live_effects() as f64, present.live_particles() as f64]);
+        // Keyholes and tripwires (interactables.md): the player's peek and the tripped wires of the map.
+        let peek = m.view.peeks.iter().find(|(id, _)| *id == ME).map(|x| x.1);
+        v.extend([b(peek.is_some()), peek.map_or(f64::NAN, |x| x.fov as f64), peek.map_or(f64::NAN, |x| x.fade as f64), m.view.tripwires.iter().filter(|x| x.tripped).count() as f64]);
         let poses = dishonored_multiplayer::npc_poses(&m.crowd.brains);
         for (name, id) in &tracked {
             let p = w.player(*id);
@@ -606,6 +610,7 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         k.k.activations.clear();
     }
     let mut conv_seen = mm(&game).state.conv_log.len();
+    let (mut peek_was, mut wires_seen) = (false, 0usize);
     mm_mut(&mut game).state.hook_log.clear();
     for (t, ti) in timeline.iter().enumerate() {
         let tk = t as u32 + 1;
@@ -636,6 +641,20 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             let (name, detail) = event_detail(e, &name_of);
             let object = detail.split_whitespace().next().and_then(|f| f.split_once('=')).map(|x| x.1.to_string()).unwrap_or_default();
             trace.events.push(TraceEvent { tick: tk, kind: "Sim".into(), object, name, detail });
+        }
+        // Door keyholes and tripwires: the peek starting and ending, each tripwire that tripped.
+        {
+            let m = mm(&game);
+            let now = m.view.peeks.iter().find(|(id, _)| *id == ME).map(|x| x.1);
+            if now.is_some() != peek_was {
+                trace.events.push(TraceEvent { tick: tk, kind: "Interact".into(), object: "player".into(), name: if now.is_some() { "PeekStart" } else { "PeekEnd" }.into(), detail: now.map(|v| format!("keyhole={} fov={:.3}", v.keyhole, v.fov)).unwrap_or_default() });
+                peek_was = now.is_some();
+            }
+            let tripped = m.view.tripwires.iter().filter(|x| x.tripped).count();
+            for _ in wires_seen..tripped {
+                trace.events.push(TraceEvent { tick: tk, kind: "Interact".into(), object: String::new(), name: "Tripwire".into(), detail: format!("tripped={tripped}") });
+            }
+            wires_seen = tripped;
         }
         // Kismet: one `Kismet` event per op `Activated` / `Deactivated`, in call order, named as
         // the original's ProcessEvent trace names the op (compared on tick, object, name); the

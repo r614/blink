@@ -533,6 +533,8 @@ Triggered: `DisSeqEvent_Used`, `DisSeqEvent_PickupPickedUp`, `DisSeqEvent_Spawne
 (comments in `kismet_host.rs`), `DisSeqEvent_DialogOutputs`, `SeqEvent_RemoteEvent`,
 `SeqEvent_LevelLoaded`/`LevelStartup`/`SequenceActivated`, `SeqEvent_Console`.
 
+(Update 2026-10-08: `Tripwire`, `KeyHoleUsed` and `Interact` are now fed; see systems/interactables.md.)
+
 Not triggered (the native fire sites to port, appendix A): Distracted, AttentionIncreased/DecreasedTo,
 BreakableBroken, Possessed, PatrolPointReached, Combat, BehaviorStarted, Investigate, PawnSighted,
 PlayerHeard, CorpseDetected, Corpse, Assassinated, Choke, Windblasted, TeleportSpell, Tripwire,

@@ -29,6 +29,7 @@ pub mod tuning;
 pub mod vitals;
 pub mod volumes;
 pub mod world_actors;
+pub mod interactables;
 
 use dishonored_ir::gameplay::GameplayConfig;
 use dishonored_world::WorldQuery;
