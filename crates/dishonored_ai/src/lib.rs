@@ -44,7 +44,7 @@
 
 use dishonored_ir::ai::{AiConfig, AiLevel, NpcClass, AlarmBellDef, AttentionConfig, AttentionIncrease, DAL_BUSTED, DAL_HEAD_TRACK, DAL_INVESTIGATE, FactionTable, ForbiddenZone, PatrolRoute, PlayerVisibilityConfig, ProbeLight, Relationship, VisionConfig, reason};
 use std::collections::BTreeMap;
-use dishonored_sim::events::{NoiseContext, SimEvent};
+use dishonored_sim::events::{ChokeOutcome, NoiseContext, SimEvent};
 #[cfg(test)]
 use dishonored_sim::events::SoundCategory;
 use dishonored_sim::input::{LeftHand, PlayerInput, buttons, npc_moves};
@@ -2304,6 +2304,15 @@ impl Brain {
                         self.aggression = (self.aggression + ai.combat.dodge.aggression_delta_per_damage).clamp(0.0, 1.0);
                     }
                 }
+                // `EAIStimID_EscapedBeingChoked`: a choke the attacker let go of (choke state 4,
+                // 0x00A74720) makes him an enemy (0x00B04480, `Relationship_Enemy`) and the
+                // attention handler (0x00B3FC20) raises `DACRT_AttackedBy` to Busted at him. A
+                // cancelled choke (state 5) posts nothing.
+                SimEvent::ChokeEnd { attacker, victim, outcome: ChokeOutcome::Lose } if *victim == self.id && me.alive => {
+                    let Some(at) = ws.player(*attacker).map(|p| p.position) else { continue };
+                    self.make_hostile(*attacker);
+                    self.bump(ai, *attacker, AttentionIncrease { amount: 0.0, to_level: DAL_BUSTED }, at, true, reason::ATTACKED_BY);
+                }
                 SimEvent::Death { victim, killer: Some(k), .. } if *k != self.id && ws.player(*k).is_some_and(|p| p.kind == PawnKind::Human) => {
                     let (Some(v), Some(kp)) = (ws.player(*victim), ws.player(*k)) else {
                         continue;
@@ -4352,6 +4361,28 @@ mod tests {
         assert!(c.brains[0].enemies.is_empty() && c.brains[0].state != BrainState::Combat);
         // The pain bark fires.
         assert!(c.events.is_empty() || c.events.iter().all(|e| !matches!(e, AiEvent::AlarmRang { .. })));
+    }
+
+    #[test]
+    fn a_lost_choke_busts_the_victim_on_the_choker() {
+        let ai = AiConfig::default();
+        let w = flat_world();
+        let mut c = Crowd { ai: ai.clone(), ..Default::default() };
+        // The guard faces away from the player standing behind him.
+        let guard = pawn(NPC_ID_BASE, PawnKind::Guard, Vec3::new(0.0, 0.0, 90.0), 0.0);
+        let player = pawn(1, PawnKind::Human, Vec3::new(-60.0, 0.0, 90.0), 0.0);
+        let mut ws = WorldState::default();
+        ws.players = vec![player.clone(), guard.clone()];
+        c.brains.push(Brain::new(guard.id, PawnKind::Guard, guard.position, 1));
+        let cancel = SimEvent::ChokeEnd { attacker: player.id, victim: guard.id, outcome: ChokeOutcome::Cancel };
+        c.think(&ws, std::slice::from_ref(&cancel), &w, 1.0 / 60.0);
+        assert!(!c.brains[0].hostile.contains(&player.id), "a cancelled choke posts nothing");
+        let lose = SimEvent::ChokeEnd { attacker: player.id, victim: guard.id, outcome: ChokeOutcome::Lose };
+        c.think(&ws, std::slice::from_ref(&lose), &w, 1.0 / 60.0);
+        let b = &c.brains[0];
+        assert!(b.hostile.contains(&player.id));
+        let a = b.attn.iter().find(|a| a.who == player.id).expect("attention toward the choker");
+        assert!(a.level == DAL_BUSTED && a.why == reason::ATTACKED_BY, "{a:?}");
     }
 
     #[test]

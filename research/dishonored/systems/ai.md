@@ -140,6 +140,48 @@ Traced from the three constructors of the attention-behaviour stimulus class (0x
 So the "React" state of the old port (a reaction delay before every escalation) has no original
 counterpart; the escalation rule `Brain::select` assumed is replaced by this poster.
 
+### 1.4b The attention process's stimulus handlers (CONFIRMED statically, 2026-10-09)
+
+`DisAIBrainProcessAttention` (vtable 0x0113cb80) slot 81 (+0x144, 0x00b47d40) returns the handler
+for a stimulus id (the byte at +4 of a `DisStim`; the dispatcher 0x00b3b2f0 calls it when the
+process's mask byte for the id has bit 0). Each handler is a one-call thunk to the method below.
+Stimulus templates store their id in their constructor (`*(byte *)(this + 4) = id`), which gives
+the posters (`scripts/audit/stimuli.py`). An attention increase is built as
+{reason (`EDisAttentionChangeReasonType`, 0x00b00c00), amount / level (0x00b01550, the level byte
+`EDisAttentionLevelForIncrease`), location} and applied to the target's attention entry
+(0x00b3b460 finds or adds it, 0x00b482e0 -> entry vslot 79) unless the brain's sense flags for
+that kind of target (+0x84 player / +0x88 other, bit 0) block it (0x00b01020).
+
+| stimulus (`EAIStimID`) | method | effect | port |
+|---|---|---|---|
+| 2 Alarm | 0x00b40f60 | the alarm's increase at its actor | ported (`reason::ALARM`) |
+| 14 ClearAllMinAttention, 15 ClearAttention, 16 ClearMinAttentionForTarget | 0x00b30ce0, 0x00b30ae0, 0x00b36620 | min attention / entries cleared | no |
+| 22 DialogAttentionChange | 0x00b40050 | TalkedTo (12) at the speaker, the level the stimulus carries | no |
+| 23 DeathByWoL | 0x00b41090 | at the victim's location | no |
+| 26 DiscoveredCorpse, 111 WitnessDeath | 0x00b40740 (111 also 0x00b16ad0) | the corpse reaction | ported |
+| 31 DoorUsedByPlayerWhileWary | 0x00b40150 | Seen (19), level Investigate, at the local player | no (door use by a wary NPC's view) |
+| 35 EscapedBeingChoked, 36 EscapedBeingPossessed | 0x00b3fc20 | AttackedBy (16), level Busted, at the stimulus pawn | 35 ported (a lost choke, 0x00A74720 also makes the choker an enemy, 0x00B04480); 36 is posted only for plot NPCs (`DisNPCPlotSettings.m_GameOverWhenPossessedByPlayer`, 0x00A745A0) |
+| 37 EvadedMelee_Incoming | 0x00b3f8c0 | AttackedBy (16) at the attacker when the relationship test 0x00b30310 passes | no |
+| 38 EvadedMelee_Outgoing, 62 MeleeConnected_Outgoing | 0x00b40990 | the fight's target bookkeeping | no |
+| 41 ForceRingAlarm | 0x00b3faf0 | sets +0x40; reason 13 (`DACRT_Magic` by the enum), level Investigate, at the stimulus point or pawn | no |
+| 46 HeardSomething | 0x00b40b70 | hearing (section 10) | ported |
+| 47 HeardCorpseSplat | 0x00b40240 | Heard (7), level Investigate, at the corpse; only for the local player's body drops | no |
+| 48 Help | 0x00b40640 | help request | ported |
+| 52 IncomingDamage | 0x00b3f530 | AttackedBy (16) at the attacker, or AttackedBy_Indirect (15) at the stimulus point when its flag (+0x20 bit 0) is set; sense bits 0 and 3 block it | AttackedBy from `SimEvent::Damage` only |
+| 61 MaxOutAttention | 0x00b3f6a0 | Psychic (20), level Max, at the target | ported |
+| 65 NoticeRequest | 0x00b3f7f0 | HeardNoticeRequest (4) from an ally (relationship 1) | no |
+| 74 PlayerHideoutTransition | 0x00b467a0 | the hideout min attention | partial |
+| 78 / 79 / 80 PsychicAttention* | 0x00b3f780, 0x00b365e0, 0x00b30b70 | psychic attention on / off | ported |
+| 81 ReachabilityChange | 0x00b464e0 | | no |
+| 90 SearchRequest | 0x00b40ab0 | ally search request | ported |
+| 91 SetMinAttentionForTarget | 0x00b3f7b0 | min attention (type, level) | no |
+| 98 SuspicionLevelChanged | 0x00b29140 | +0xb8 bit 1 | no |
+| 99 TargetSighted, 101 TargetUnsighted | 0x00b3f3f0, 0x00b365b0 | | structural |
+| 100 TargetTouched | 0x00b3f420 | Touched (18) when the stimulus flag is set | ported (touching rate) |
+| 110 Traveled | 0x00b40370 | Psychic (20) at the local player's +0xAE0 | no |
+| 114 WitnessShadowKill | 0x00b3f9e0 | SeeAllyCombat (10) at the point when the relationship test passes | no |
+| 116 DLC06_SmokeBombed, 117 DLC06_WitnessSilentExplosion | 0x00b3fd10, 0x00b3fe40 | AttackedBy_Indirect (15), level Investigate (117: the point pulled toward the NPC to the blast radius) | no (DLC) |
+
 ### 1.4 What turns attention into NoticeBegin / SearchBegin / CombatBegin (superseded by 1.4a)
 
 The three attention-driven behaviours evaluate only their `*Begin` stimulus, and `AttentionBehaviorBegin`

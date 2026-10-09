@@ -107,10 +107,13 @@ def static_classes(exe):
     return out
 
 
-def load_classes(funcs, texts):
-    """funcs: {addr: (callees, ...)} of decomp.c; texts: {addr: vtable VA stored as *param_1}."""
+def load_classes(funcs, stores):
+    """funcs: {addr: (callees, ...)} of decomp.c; stores: {addr: [vtable VAs stored as *param_1,
+    in order]}. A class's `parent` is the class of the vtable its constructor stores first (an
+    inlined base constructor), else of the one base constructor it calls."""
     exe = Exe()
     found = static_classes(exe)
+    texts = {a: v[-1] for a, v in stores.items()}
     vt_starts = set(texts.values())
     classes = {}
     for sva, name, pkg, size, ictor in found:
@@ -136,5 +139,21 @@ def load_classes(funcs, texts):
                     break
                 slots.append(x)
                 va += 4
-        classes[name] = {"package": pkg, "size": size, "struct": sva, "ictor": ictor, "ctor": ctor, "vtable": vt, "slots": slots}
+        parent_vt = None
+        if ctor:
+            if len(stores[ctor]) >= 2 and stores[ctor][0] != vt:
+                parent_vt = stores[ctor][0]
+            else:
+                bases = {texts[b] for b in funcs.get(ctor, (set(),))[0] if b in texts and texts[b] != vt}
+                parent_vt = next(iter(bases)) if len(bases) == 1 else None
+        classes[name] = {"package": pkg, "size": size, "struct": sva, "ictor": ictor, "ctor": ctor, "vtable": vt, "slots": slots, "parent_vt": parent_vt}
+    # The linker folds identical vtables (/OPT:ICF): several classes can share one. The parent is
+    # then the sharer whose name has the longest common prefix with the child's.
+    by_vt = {}
+    for n, c in classes.items():
+        if c["vtable"]:
+            by_vt.setdefault(c["vtable"], []).append(n)
+    for n, c in classes.items():
+        cands = by_vt.get(c.pop("parent_vt"), [])
+        c["parent"] = max(cands, key=lambda m: (len(os.path.commonprefix([m, n])), -len(m))) if cands else None
     return classes

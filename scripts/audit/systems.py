@@ -77,10 +77,10 @@ def load():
     funcs = {a: (c, s, n) for a, (c, s, _v, n, _t) in parsed.items()}
     vts = {}
     for a, (_c, _s, _v, _n, t) in parsed.items():
-        # The last store: an inlined base constructor stores its own vtable first.
+        # Every store in order: an inlined base constructor stores its own vtable first.
         m = VT_RE.findall(t)
         if m:
-            vts[a] = int(m[-1], 16)
+            vts[a] = [int(x, 16) for x in m]
     with open(src, encoding="utf-8", errors="replace") as f:
         nat = natives(f.read().split("\n"))
     data = (funcs, nat, load_classes(funcs, vts))
