@@ -290,6 +290,26 @@ pub struct CombatTuning {
     pub incendiary_speed: f32,
     #[serde(default)]
     pub incendiary_gravity_mult: f32,
+    /// `DisTweaks_Projectile.m_fSpeedMultiplier` of the bolts (the homing's ballistic aim,
+    /// 0x00C49EE0, uses it again): arrow, sleep dart, incendiary bolt; 1 for the other kinds.
+    #[serde(default = "one")]
+    pub bolt_speed_mult: f32,
+    #[serde(default = "one")]
+    pub sleep_dart_speed_mult: f32,
+    #[serde(default = "one")]
+    pub incendiary_speed_mult: f32,
+    /// A projectile's Windblast reaction (`DisTweaks_Projectile`, 0x00C4F290; no shipped projectile
+    /// tweak overrides the class defaults): `m_WindblastBehavior` (0 none, 1 normal, 2 push
+    /// toward the suggested target, 3 homing), `m_fMass` (the push's divisor),
+    /// `m_fWindblastHomingTime`, `m_fWindblastVelocityMultiplier`.
+    #[serde(default = "homing_behavior")]
+    pub projectile_windblast_behavior: u8,
+    #[serde(default = "one")]
+    pub projectile_mass: f32,
+    #[serde(default = "homing_time")]
+    pub projectile_windblast_homing_time: f32,
+    #[serde(default = "homing_mult")]
+    pub projectile_windblast_velocity_mult: f32,
     /// Melee reach scale from forward speed (0x00AB2050 / 0x00C0A060): factor
     /// `1 + clamp((v . view - m_fMinSpeedRayScale) * m_fRaySpeedScale, 0, m_fRaySpeedScale_Max)`
     /// blended by `m_fRayScalePercent` (DefaultPlayer.ini, `DisTweaks_MeleeAttackPlayer`).
@@ -456,6 +476,18 @@ fn drop_ray_scale() -> f32 {
 fn assassinate_awareness() -> [bool; 8] {
     [true, false, true, true, false, false, true, false]
 }
+/// `DisPWB_Homing`, `m_fWindblastHomingTime` 1.6, `m_fWindblastVelocityMultiplier` 1.2
+/// (`Default__DisTweaks_Projectile`).
+fn homing_behavior() -> u8 {
+    3
+}
+fn homing_time() -> f32 {
+    1.6
+}
+fn homing_mult() -> f32 {
+    1.2
+}
+
 fn drop_rule() -> DropRule {
     DropRule { hit_window: 4.0, min_drop_down_vel: 100.0, max_allowed_drop_jump_vel: 0.0, min_drop_dist: 0.0, max_drop_dist: 350.0 }
 }
@@ -554,6 +586,13 @@ impl CombatTuning {
             incendiary_damage: c.items.inventory.crossbow_ranged_damage.trunc() * c.items.gadgets.incendiary_bolt.damage_mult,
             incendiary_speed: v(cb, "fire.m_fArrowFireSpeed", 20000.0) * c.items.gadgets.incendiary_bolt.speed_mult,
             incendiary_gravity_mult: c.items.gadgets.incendiary_bolt.gravity_mult,
+            bolt_speed_mult: v(cb, "projectile.m_fSpeedMultiplier", 1.0),
+            sleep_dart_speed_mult: c.items.gadgets.sleep_dart.speed_mult,
+            incendiary_speed_mult: c.items.gadgets.incendiary_bolt.speed_mult,
+            projectile_windblast_behavior: homing_behavior(),
+            projectile_mass: v(cb, "projectile.m_fMass", 1.0),
+            projectile_windblast_homing_time: v(cb, "projectile.m_fWindblastHomingTime", homing_time()),
+            projectile_windblast_velocity_mult: v(cb, "projectile.m_fWindblastVelocityMultiplier", homing_mult()),
             reach_min_speed: c.items.inventory.melee_ray_speed[0],
             reach_speed_scale: c.items.inventory.melee_ray_speed[1],
             reach_speed_scale_max: c.items.inventory.melee_ray_speed[2],

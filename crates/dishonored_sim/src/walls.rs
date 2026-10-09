@@ -909,7 +909,7 @@ mod tests {
         let mut caster = pawn(1, -200.0, PawnKind::Human);
         caster.position.z = 250.0 - crate::movement::eye_position(&caster, &c.movement).z + caster.position.z;
         w.players = vec![caster];
-        w.windblasts.push(crate::state::WindblastState { caster: 1, warmup: 0.0, elapsed: 0.0, origin: Vec3::ZERO, direction: Vec3::X, targets: Vec::new(), started: false, level: 0, range: 0.0, walls: Vec::new() });
+        w.windblasts.push(crate::state::WindblastState { caster: 1, warmup: 0.0, elapsed: 0.0, origin: Vec3::ZERO, direction: Vec3::X, targets: Vec::new(), started: false, level: 0, range: 0.0, walls: Vec::new(), projectiles: Vec::new(), suggested: None });
         let mut sim = Vec::new();
         for _ in 0..30 {
             crate::left_hand::step_windblasts(&mut w, &world, &c.movement, &c.vitals, &c.throw, &t, 1.0 / 30.0, &mut sim);

@@ -175,7 +175,7 @@ impl LaunchersState {
         state.next_projectile_id = state.next_projectile_id.wrapping_add(1);
         // `m_Damage x m_fDamageMultiplier` (0x00C4A310) is what a hit pawn takes.
         let damage = pr.damage as f32 * pr.damage_multiplier;
-        state.projectiles.push(ProjectileState { id, kind, owner, position: from, velocity, age: 0.0, damage, gravity_mult: pr.gravity_mult, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO, spawn: from, pierced: None });
+        state.projectiles.push(ProjectileState { id, kind, owner, position: from, velocity, age: 0.0, damage, gravity_mult: pr.gravity_mult, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO, spawn: from, pierced: None, homing: None, source_cleared: false });
         self.shots.insert(id, i);
         events.push(SimEvent::Fired { id: owner, bolt: false, projectile: id, kind, origin: from, velocity });
         true
@@ -194,7 +194,7 @@ impl LaunchersState {
         let id = state.next_projectile_id;
         state.next_projectile_id = state.next_projectile_id.wrapping_add(1);
         let damage = pr.damage as f32 * pr.damage_multiplier;
-        state.projectiles.push(ProjectileState { id, kind, owner: 0, position: from, velocity, age: 0.0, damage, gravity_mult: pr.gravity_mult, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO, spawn: from, pierced: None });
+        state.projectiles.push(ProjectileState { id, kind, owner: 0, position: from, velocity, age: 0.0, damage, gravity_mult: pr.gravity_mult, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO, spawn: from, pierced: None, homing: None, source_cleared: false });
         self.shots.insert(id, TOWER_SHOT_BASE + tower);
         events.push(SimEvent::Fired { id: 0, bolt: false, projectile: id, kind, origin: from, velocity });
     }
@@ -411,7 +411,7 @@ pub fn fire_scripted(def: &dishonored_ir::interactables::ScriptedProjectileDef, 
     let id = state.next_projectile_id;
     state.next_projectile_id = state.next_projectile_id.wrapping_add(1);
     let velocity = dir * speed * def.speed_mult;
-    state.projectiles.push(ProjectileState { id, kind, owner: 0, position: from, velocity, age: 0.0, damage: damage as f32, gravity_mult: def.gravity_mult, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO, spawn: from, pierced: None });
+    state.projectiles.push(ProjectileState { id, kind, owner: 0, position: from, velocity, age: 0.0, damage: damage as f32, gravity_mult: def.gravity_mult, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO, spawn: from, pierced: None, homing: None, source_cleared: false });
     events.push(SimEvent::Fired { id: 0, bolt: true, projectile: id, kind, origin: from, velocity });
     Some(id)
 }

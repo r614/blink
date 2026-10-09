@@ -854,6 +854,28 @@ pub struct ProjectileState {
     /// takes `m_fPostPiercingDamageRatio` and stops it.
     #[serde(default)]
     pub pierced: Option<PlayerId>,
+    /// `DisProjectile.m_HomingData`: set by a Windblast's front (0x00C4A650), flown by
+    /// 0x00C49EE0.
+    #[serde(default)]
+    pub homing: Option<ProjectileHoming>,
+    /// `m_pSourceActor` cleared by a Windblast's reaction (0x00C4A430 / 0x00C4A650): the pawn
+    /// that fired it is no longer spared by its hits.
+    #[serde(default)]
+    pub source_cleared: bool,
+}
+
+/// `DisProjectileHomingData`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct ProjectileHoming {
+    /// `m_eType`: a position (`m_PositionTarget`) or an actor (`m_ActorTarget`).
+    pub actor: Option<PlayerId>,
+    pub position: Vec3,
+    /// `m_fSpeed`.
+    pub speed: f32,
+    /// `m_fTimeLeft`.
+    pub time_left: f32,
+    /// `m_fMaxCorrectionAngle_Deg`.
+    pub max_angle: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1189,6 +1211,13 @@ pub struct WindblastState {
     /// reached.
     #[serde(default)]
     pub walls: Vec<u32>,
+    /// Projectiles gathered with the targets, still to be reached (their reaction: 0x00C4F290).
+    #[serde(default)]
+    pub projectiles: Vec<u32>,
+    /// `m_pSuggestedTarget` (0x00BEE2A0): the gathered pawn the front has not reached that lies
+    /// nearest the blast's direction; a homing projectile aims at it.
+    #[serde(default)]
+    pub suggested: Option<PlayerId>,
 }
 
 fn wb_level() -> u8 {

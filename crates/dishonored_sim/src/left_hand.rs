@@ -730,9 +730,31 @@ pub fn step_windblasts(
                 .collect();
             // The colliding walls of light are gathered the same way (their bounds centre).
             wb.walls = state.wall_blockers.iter().filter(|b| b.center().distance(wb.origin) < range && windblast_factor(dir, b.center(), wb.origin, range, cos_half) > 0.0).map(|b| b.wall).collect();
-            // Projectiles in the cone are knocked away (the original redirects them).
+            // Projectiles are gathered the same way: the front reaches them below (0x00C4F290).
             let (o, d) = (wb.origin, dir);
-            state.projectiles.retain(|pr| windblast_factor(d, pr.position, o, range, cos_half) <= 0.0 || pr.position.distance(o) >= range);
+            wb.projectiles = state.projectiles.iter().filter(|pr| pr.position.distance(o) < range && windblast_factor(d, pr.position, o, range, cos_half) > 0.0).map(|pr| pr.id).collect();
+            wb.suggested = None;
+        }
+        // `m_pSuggestedTarget` (0x00BEE2A0, at the reach before this step): kept while it exists,
+        // else the gathered living pawn beyond the front whose direction from the origin is
+        // nearest the blast's (a positive dot product).
+        let prev_reach = (wb.elapsed * t.windblast_speed[lv]).min(range);
+        if wb.suggested.is_some_and(|s| state.player(s).is_none()) {
+            wb.suggested = None;
+        }
+        if wb.suggested.is_none() {
+            let mut best = (0.0f32, None);
+            for &vid in &wb.targets {
+                let Some(v) = state.player(vid).filter(|v| v.alive) else { continue };
+                let to = v.position - wb.origin;
+                if to.length_squared() > prev_reach * prev_reach {
+                    let dot = wb.direction.dot(to.normalize_or_zero());
+                    if best.0 < dot {
+                        best = (dot, Some(vid));
+                    }
+                }
+            }
+            wb.suggested = best.1;
         }
         // Front advance (0x00BF7090): reach = (elapsed + dt) * speed, capped at the range.
         let reach = ((wb.elapsed + dt) * t.windblast_speed[lv]).min(range);
@@ -803,13 +825,47 @@ pub fn step_windblasts(
             events.push(SimEvent::WallOfLightBlast { wall: w, force: k, by: wb.caster });
         }
         wb.walls = walls_left;
+        // A projectile the front passed (the same sight check to its location) reacts by its
+        // tweak's `m_WindblastBehavior` (0x00C4F290, k = the blast factor at it).
+        let mut projectiles_left = Vec::new();
+        let suggested = wb.suggested.and_then(|s| state.player(s).map(|p| (s, p.position)));
+        for &pid in &wb.projectiles {
+            let Some(pi) = state.projectiles.iter().position(|p| p.id == pid) else { continue };
+            let at = state.projectiles[pi].position;
+            let d = at.distance(wb.origin);
+            if d > reach {
+                projectiles_left.push(pid);
+                continue;
+            }
+            if d > 1e-3 {
+                if let Some(h) = world.raycast(wb.origin, at - wb.origin, d, channel::PROJECTILE) {
+                    if h.distance < d - 1.0 {
+                        continue;
+                    }
+                }
+            }
+            let k = windblast_factor(wb.direction, at, wb.origin, range, cos_half);
+            if k <= 0.0 {
+                continue;
+            }
+            let force = t.windblast_force[lv] * k;
+            let pr = &mut state.projectiles[pi];
+            match t.projectile_windblast_behavior {
+                1 => windblast_push(pr, wb.direction, force, None, t),
+                2 => windblast_push(pr, wb.direction, force, suggested.map(|s| s.1), t),
+                3 => windblast_homing(pr, wb.caster, wb.origin, wb.direction, suggested, world, t),
+                _ => {}
+            }
+        }
+        wb.projectiles = projectiles_left;
         wb.elapsed += dt;
         if reach >= range {
             wb.targets.clear();
             wb.walls.clear();
+            wb.projectiles.clear();
         }
     }
-    blasts.retain(|wb| !wb.started || !wb.targets.is_empty() || !wb.walls.is_empty());
+    blasts.retain(|wb| !wb.started || !wb.targets.is_empty() || !wb.walls.is_empty() || !wb.projectiles.is_empty());
     state.windblasts = blasts;
 }
 
@@ -895,6 +951,115 @@ pub fn windblast_wall_hits(state: &mut WorldState, t: &CombatTuning, vitals: &di
     }
 }
 
+/// A projectile pushed by a Windblast (0x00C4A430, behaviours Normal and PushTowardNPC): the
+/// velocity keeps only its part along the push (none when it points away), never downward, then
+/// gains `force / m_fMass` along it and `0.15 force / m_fMass` up. The push goes along the blast,
+/// or toward `target`. `m_pSourceActor` is cleared.
+pub fn windblast_push(pr: &mut ProjectileState, dir: Vec3, force: f32, target: Option<Vec3>, t: &CombatTuning) {
+    if t.projectile_mass <= 0.0 {
+        return;
+    }
+    pr.source_cleared = true;
+    pr.homing = None;
+    let d = match target {
+        Some(p) => (p - pr.position).try_normalize().unwrap_or(Vec3::ZERO),
+        None => dir,
+    };
+    let along = pr.velocity.dot(d);
+    let mut v = if along > 0.0 { d * along } else { Vec3::ZERO };
+    v.z = v.z.max(0.0);
+    let s = 1.0 / t.projectile_mass;
+    v.x += d.x * force * s;
+    v.y += d.y * force * s;
+    v.z += force * 0.15 * s;
+    pr.velocity = v;
+}
+
+/// A projectile a Windblast sends homing (0x00C4A650, behaviour Homing): it becomes the
+/// caster's (instigator) and its source is cleared; when the suggested target lies within a
+/// 0.8 dot product of the projectile's direction from the blast origin it homes on that pawn,
+/// else on what the blast's line hits within 10000 uu (its end without a hit); at
+/// `m_fWindblastVelocityMultiplier x` its speed for `m_fWindblastHomingTime`, turning up to the
+/// default 360 degrees.
+pub fn windblast_homing(pr: &mut ProjectileState, caster: crate::state::PlayerId, origin: Vec3, dir: Vec3, suggested: Option<(crate::state::PlayerId, Vec3)>, world: &dyn WorldQuery, t: &CombatTuning) {
+    pr.source_cleared = true;
+    pr.owner = caster;
+    let speed = t.projectile_windblast_velocity_mult * pr.velocity.length();
+    let from_origin = (pr.position - origin).normalize_or_zero();
+    let homing = |actor, position| crate::state::ProjectileHoming { actor, position, speed, time_left: t.projectile_windblast_homing_time, max_angle: 360.0 };
+    if let Some((id, at)) = suggested {
+        let to = (at - pr.position).normalize_or_zero();
+        if to.dot(from_origin) > 0.8 {
+            pr.homing = Some(homing(Some(id), Vec3::ZERO));
+            return;
+        }
+    }
+    let end = origin + dir * 10000.0;
+    let point = world.raycast(origin, dir, 10000.0, channel::PROJECTILE).map_or(end, |h| origin + dir * h.distance);
+    pr.homing = Some(homing(None, point));
+}
+
+/// `DisTweaks_Projectile.m_fSpeedMultiplier` of a projectile kind (the bolts'; 1 for the rest).
+fn speed_mult(kind: ProjectileKind, t: &CombatTuning) -> f32 {
+    match kind {
+        ProjectileKind::Bolt => t.bolt_speed_mult,
+        ProjectileKind::SleepDart => t.sleep_dart_speed_mult,
+        ProjectileKind::IncendiaryBolt => t.incendiary_speed_mult,
+        _ => 1.0,
+    }
+}
+
+/// The homing step (0x00C49EE0), before the move: the time runs down; the wanted velocity is
+/// `m_fSpeed` toward the position, or along the low ballistic arc (0x00BEC130 at `m_fSpeed x
+/// m_fSpeedMultiplier`, gravity x `m_fGravityMultiplier`) toward the pawn (its location: the
+/// hit regions' aim focus 0x00BC7190 is not decoded); a velocity turned further than
+/// `m_fMaxCorrectionAngle_Deg` from it ends the homing, within 400 uu of the target or 30 degrees
+/// of it the velocity takes it, else it moves 20 % of the way (0x00A1A7C0, per step); the homing
+/// ends when the time runs out, the pawn is gone, or the step passes within 50 uu of the target.
+pub fn step_homing(pr: &mut ProjectileState, players: &[PlayerState], gravity_z: f32, t: &CombatTuning, dt: f32) {
+    let Some(mut h) = pr.homing else { return };
+    if dt <= 0.0 {
+        return;
+    }
+    h.time_left -= dt;
+    let mut done = h.time_left < 0.0;
+    let (target, want) = match h.actor {
+        None => (h.position, (h.position - pr.position).try_normalize().unwrap_or(Vec3::ZERO)),
+        Some(id) => match players.iter().find(|p| p.id == id) {
+            Some(p) => {
+                let g = -gravity_z * pr.gravity_mult;
+                (p.position, crate::launchers::ballistic(pr.position, p.position, h.speed * speed_mult(pr.kind, t), g).0)
+            }
+            None => {
+                pr.homing = None;
+                return;
+            }
+        },
+    };
+    let wanted = want * h.speed;
+    if !done {
+        let c = pr.velocity.length();
+        if c > 1e-8 {
+            let angle = (pr.velocity.dot(want) / c).clamp(-1.0, 1.0).acos().to_degrees();
+            if h.max_angle < angle {
+                done = true;
+            } else if (target - pr.position).length_squared() < 160_000.0 || angle < 30.0 {
+                pr.velocity = wanted;
+            } else {
+                pr.velocity += (wanted - pr.velocity) * 0.2;
+            }
+        } else {
+            pr.velocity += (wanted - pr.velocity) * 0.2;
+        }
+    }
+    // 0x0040F270: the target's distance to this step's move.
+    let next = pr.position + pr.velocity * dt;
+    let seg = next - pr.position;
+    let u = if seg.length_squared() > 1e-12 { ((target - pr.position).dot(seg) / seg.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+    let passed = (pr.position + seg * u).distance(target) < 50.0;
+    pr.homing = if done || passed { None } else { Some(h) };
+}
+
 /// Advance projectiles: sub-stepped segment tests against world and player bodies.
 #[allow(clippy::too_many_arguments)]
 pub fn step_projectiles(
@@ -921,6 +1086,8 @@ pub fn step_projectiles(
             continue;
         }
         pr.age += dt;
+        // A Windblast's homing steers it first (0x00C49EE0).
+        step_homing(&mut pr, &state.players, gravity_z, t, dt);
         let old_v = pr.velocity;
         pr.velocity.z += gravity_z * pr.gravity_mult * dt;
         let delta = (old_v + pr.velocity) * 0.5 * dt;
@@ -936,7 +1103,7 @@ pub fn step_projectiles(
             // Body hits (capsule vs segment), owner and the pierced pawn excluded.
             let mut body: Option<(usize, f32, Vec3)> = None;
             for (i, v) in state.players.iter().enumerate() {
-                if !v.alive || v.id == pr.owner || Some(v.id) == pr.pierced || v.carried_by.is_some() || crate::powers::is_hidden(v) {
+                if !v.alive || (v.id == pr.owner && !pr.source_cleared) || Some(v.id) == pr.pierced || v.carried_by.is_some() || crate::powers::is_hidden(v) {
                     continue;
                 }
                 let hh = crate::movement::half_height(v, mv);
@@ -1063,7 +1230,7 @@ pub fn make_projectile(id: u32, owner: u32, kind: ProjectileKind, pos: Vec3, vel
         // A launcher's shots are made by `launchers::LaunchersState::fire`.
         ProjectileKind::TrapArrow | ProjectileKind::TrapBolt => (0.0, 0.0),
     };
-    ProjectileState { id, kind, owner, position: pos, velocity: vel, age: 0.0, damage, gravity_mult, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO, spawn: pos, pierced: None }
+    ProjectileState { id, kind, owner, position: pos, velocity: vel, age: 0.0, damage, gravity_mult, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO, spawn: pos, pierced: None, homing: None, source_cleared: false }
 }
 
 /// Pawns revealed to `viewer` by Dark Vision: the "souls" of living pawns within `m_fDistance`
@@ -1080,4 +1247,81 @@ pub fn dark_vision_reveals(state: &WorldState, viewer: u32, t: &CombatTuning) ->
         .filter(|o| o.id != viewer && o.alive && !crate::powers::is_hidden(o) && o.position.distance(v.position) <= t.dark_vision_distance)
         .map(|o| o.id)
         .collect()
+}
+
+
+#[cfg(test)]
+mod windblast_projectile_tests {
+    use super::*;
+    use crate::state::{PawnKind, ProjectileHoming};
+
+    fn tuning() -> CombatTuning {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/config/gameplay_config.json");
+        CombatTuning::from_config(&crate::SimConfig::from_json(&std::fs::read_to_string(path).unwrap()).unwrap().gameplay)
+    }
+
+    fn bolt(pos: Vec3, vel: Vec3, t: &CombatTuning) -> ProjectileState {
+        make_projectile(1, 7, ProjectileKind::Bolt, pos, vel, t)
+    }
+
+    #[test]
+    fn the_class_defaults_make_every_projectile_home() {
+        let t = tuning();
+        assert_eq!(t.projectile_windblast_behavior, 3);
+        assert_eq!((t.projectile_windblast_homing_time, t.projectile_windblast_velocity_mult, t.projectile_mass), (1.6, 1.2, 1.0));
+    }
+
+    #[test]
+    fn a_push_keeps_the_velocity_along_it_never_down_and_adds_the_impulse() {
+        let t = tuning();
+        // Flying back at the caster (against the blast): only the impulse is left.
+        let mut pr = bolt(Vec3::ZERO, Vec3::new(-3000.0, 0.0, -100.0), &t);
+        windblast_push(&mut pr, Vec3::X, 1000.0, None, &t);
+        assert_eq!(pr.velocity, Vec3::new(1000.0, 0.0, 150.0));
+        assert!(pr.source_cleared && pr.owner == 7, "the instigator stays the shooter");
+        // Along the blast, partly down: the part along it is kept, its z clamped at 0.
+        let mut pr = bolt(Vec3::ZERO, Vec3::new(2000.0, 500.0, -300.0), &t);
+        let d = Vec3::new(0.8, 0.0, -0.6);
+        windblast_push(&mut pr, d, 100.0, None, &t);
+        let along = Vec3::new(2000.0, 500.0, -300.0).dot(d);
+        assert!((pr.velocity - Vec3::new(d.x * along + 80.0, 0.0, 15.0)).length() < 1e-2, "{:?}", pr.velocity);
+    }
+
+    #[test]
+    fn homing_turns_by_a_fifth_far_away_and_takes_the_velocity_near_the_target() {
+        let t = tuning();
+        let h = ProjectileHoming { actor: None, position: Vec3::new(0.0, 2000.0, 0.0), speed: 1000.0, time_left: 1.6, max_angle: 360.0 };
+        // Far (> 400 uu) and turned 90 degrees: 20 % of the way to the wanted velocity.
+        let mut pr = bolt(Vec3::ZERO, Vec3::new(1000.0, 0.0, 0.0), &t);
+        pr.homing = Some(h);
+        step_homing(&mut pr, &[], -1500.0, &t, 1.0 / 60.0);
+        assert!((pr.velocity - Vec3::new(800.0, 200.0, 0.0)).length() < 1e-2, "{:?}", pr.velocity);
+        assert!(pr.homing.is_some_and(|x| (x.time_left - (1.6 - 1.0 / 60.0)).abs() < 1e-5));
+        // Within 400 uu: the wanted velocity at once.
+        let mut pr = bolt(Vec3::new(0.0, 1700.0, 0.0), Vec3::new(1000.0, 0.0, 0.0), &t);
+        pr.homing = Some(h);
+        step_homing(&mut pr, &[], -1500.0, &t, 1.0 / 60.0);
+        assert!((pr.velocity - Vec3::new(0.0, 1000.0, 0.0)).length() < 1e-2);
+        // A step passing within 50 uu ends it; so does the time running out.
+        let mut pr = bolt(Vec3::new(0.0, 1990.0, 0.0), Vec3::new(0.0, 1000.0, 0.0), &t);
+        pr.homing = Some(h);
+        step_homing(&mut pr, &[], -1500.0, &t, 1.0 / 60.0);
+        assert!(pr.homing.is_none());
+        let mut pr = bolt(Vec3::ZERO, Vec3::new(0.0, 1000.0, 0.0), &t);
+        pr.homing = Some(ProjectileHoming { time_left: 0.01, ..h });
+        step_homing(&mut pr, &[], -1500.0, &t, 1.0 / 60.0);
+        assert!(pr.homing.is_none());
+    }
+
+    #[test]
+    fn homing_on_a_pawn_that_is_gone_stops() {
+        let t = tuning();
+        let mut pr = bolt(Vec3::ZERO, Vec3::new(1000.0, 0.0, 0.0), &t);
+        pr.homing = Some(ProjectileHoming { actor: Some(42), position: Vec3::ZERO, speed: 1200.0, time_left: 1.6, max_angle: 360.0 });
+        let mut p = PlayerState::new(9, Vec3::new(3000.0, 0.0, 0.0), 0.0);
+        p.kind = PawnKind::Guard;
+        step_homing(&mut pr, &[p], -1500.0, &t, 1.0 / 60.0);
+        assert!(pr.homing.is_none());
+        assert_eq!(pr.velocity, Vec3::new(1000.0, 0.0, 0.0));
+    }
 }

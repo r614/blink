@@ -77,3 +77,12 @@
 009599c0	helper	possessed pawn controller swap (AI controller)
 00c6fc20	helper	IsA cast
 00bbf010	helper	base actor of a pawn (not destroyed / hidden)
+# left_hand.rs (2026-10-09)
+00c4f290	ported	projectile Windblast reaction by m_WindblastBehavior: left_hand::step_windblasts (was a deletion)
+00c4a430	ported	Windblast push of a projectile: left_hand::windblast_push
+00c4a650	ported	Windblast homing setup: left_hand::windblast_homing
+00c49ee0	ported	projectile homing step: left_hand::step_homing
+00bee2a0	ported	Windblast m_pSuggestedTarget pick: left_hand::step_windblasts
+00a1a7c0	helper	unclamped vector lerp by (alpha - min) / (max - min)
+006a1710	helper	GetGravityZ of the actor's physics volume
+00bc72a0	helper	pawn target point wrapper (0x00BC7190, aim focus not decoded: the port uses the location)

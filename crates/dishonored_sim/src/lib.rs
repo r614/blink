@@ -377,6 +377,8 @@ pub fn step_world(
                 level,
                 range,
                 walls: Vec::new(),
+                projectiles: Vec::new(),
+                suggested: None,
             });
         }
     }
