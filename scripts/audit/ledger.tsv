@@ -37,7 +37,7 @@
 00c13c10	irrelevant	impact sound event (Wwise) on a hit
 00c22990	irrelevant	item context animation play / stop (presentation)
 00c09c70	ported	attack direction vs block resolution through 0x00BBA970 (cited) / 0x00BC6D90
-00ab2ba0	gap	sets m_fFocusTimer (+0x8E8) from the tweak after a kill with an item (+0x6FC): focus / slow-motion beat, not ported
+00ab2ba0	gap	parry / kill focus: sets m_fFocusTimer (+0x8E8) from the pawn tweak (+0x100 -> +0xF0); the player tick (0x00AAC610) holds post-process override layer 3 (0x00ACA5D0: the tweak's settings at +0xF8, blend +0xF4) while it runs, then clears it (0x00ACA6E0): client post layer, not ported
 00b4a270	helper	context-type dispatch (vslots 0x658..0x664)
 00c083a0	helper	action-state transition request
 00bffcd0	helper	player controller state check
@@ -47,3 +47,33 @@
 00bc9000	helper	physical material of a hit (0x00B66950, cited)
 009fb090	helper	tweak object of an actor (vslot 4)
 0056cc00	helper	collision cylinder radius / height
+# powers.rs (2026-10-09)
+00bf66a0	gap	possession target feedback: HUD game message m_TargetObstructedMessage (1) / m_TargetBusyMessage (2) / m_DisallowPossessionMessage (3) while aiming Possession, set by the targeting (0x00BF8DD0, 0x00BFB320, 0x00BFCD40, 0x00BFD300); the port shows nothing
+00aa5dd0	gap	tutorial hint: m_UseElixirTutorialMessage(_PC) (gameplay tutorial system)
+00bb4cb0	ported	bone charm pickup: the m_PressKeyToEquipBoneCharms tutorial window (gfx_hud tutorial windows)
+00ab1870	ported	charm slot equip (Whale Bone Charm %s): powers charm slots, LIKELY
+00ab5f00	helper	charm slot lookup -> 0x00AB1870
+00ab1710	helper	charm slot index of a charm
+00812c80	helper	TArray AddUninitialized
+00429080	helper	TMap pair find
+00b36c00	helper	TArray RemoveItem
+00ace170	irrelevant	buy-power log line ("%s %i (%i)")
+00be7100	helper	wheel selection index set
+00c7ed80	helper	actor component attach / update (UE3)
+00bf37e0	irrelevant	possession presentation (particle system activation, materials)
+00acd8b0	irrelevant	possession camera animation
+00c79450	helper	AI controller state check
+00bf87c0	ported	possession cancel cooldown check (m_fCancelCooldown): powers, LIKELY
+00bf3660	helper	possession target interface check
+00bf5220	helper	possession tweak by level
+00b603c0	gap	pawn tweak flags (+0x1B8 bits 7 / 8) drive vslot 0x600 on vitals refresh: unread
+00579bd0	helper	SetHidden (UE3)
+009fcaa0	irrelevant	time stop: pauses / resumes the world's audio (0x008A9770)
+00bf8c00	ported	swarm rat placement (summon_swarm), LIKELY
+00be9310	ported	swarm spawn point along the aim (summon_swarm), LIKELY
+00be94d0	irrelevant	swarm spawn particle system
+00c859d0	helper	TMap find-or-add
+00c89040	helper	navigation lookup (rats' follow)
+009599c0	helper	possessed pawn controller swap (AI controller)
+00c6fc20	helper	IsA cast
+00bbf010	helper	base actor of a pawn (not destroyed / hidden)
