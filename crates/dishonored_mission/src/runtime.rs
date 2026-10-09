@@ -213,6 +213,54 @@ pub struct Outcome {
     pub text: String,
 }
 
+/// The mission's statistics record (`DisSeqAct_MissionStatsTracking` input 1, 0x009FE090, stored
+/// by 0x009376D0): the tracked values when the mission ended, the chaos entry (1 when the chaos
+/// level reached `m_ChaosLevelThreshold`, else 0) and the story flags its summary items test.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct MissionStatsRecord {
+    /// `m_pMissionStatsTweaks` (object path, e.g. `Twk_MissionStats.Twk_M0_Prison`).
+    pub tweak: String,
+    /// Tracked stats at the end (`EDisPlayerStat` name, value).
+    pub stats: Vec<(String, f32)>,
+    /// `ePlayerStat_ChaosLevel` rows read 1 (High) or 0 (Low).
+    pub chaos_high: bool,
+    /// Story flags set at the end (`m_StoryFlagName`s): the summary items' `m_StoryFlag` tests
+    /// (0x00C049F0 / 0x00AB1370 against `m_bStoryFlagValue`).
+    pub flags: Vec<String>,
+}
+
+impl MissionStatsRecord {
+    /// The value a stats row reads (0x009FE090): its stat, plus its additional stat when
+    /// `m_bAddOtherStat`; a chaos row reads 1 or 0.
+    pub fn row_value(&self, stat: &str, additional: Option<&str>) -> f32 {
+        if stat == "ePlayerStat_ChaosLevel" {
+            return if self.chaos_high { 1.0 } else { 0.0 };
+        }
+        let v = |s: &str| self.stats.iter().filter(|(k, _)| k == s).map(|(_, v)| *v).sum::<f32>();
+        v(stat) + additional.map(v).unwrap_or(0.0)
+    }
+
+    /// Whether a story flag was set when the record was made.
+    pub fn flag(&self, name: &str) -> bool {
+        self.flags.iter().any(|f| f.eq_ignore_ascii_case(name))
+    }
+}
+
+impl MissionView {
+    /// Add to a tracked stat (0x00AA97E0).
+    pub fn add_player_stat(&mut self, stat: &str, amount: f32) {
+        match self.player_stats.iter_mut().find(|(k, _)| k == stat) {
+            Some((_, v)) => *v += amount,
+            None => self.player_stats.push((stat.to_string(), amount)),
+        }
+    }
+
+    /// A tracked stat's value (0 when never raised).
+    pub fn player_stat(&self, stat: &str) -> f32 {
+        self.player_stats.iter().find(|(k, _)| k == stat).map(|(_, v)| *v).unwrap_or(0.0)
+    }
+}
+
 /// A Kismet screen grade: the ArkPp settings the action overrides (by `m_*` name, as the
 /// level's post settings carry them) blended in by `weight` (0..1).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -254,6 +302,22 @@ pub struct MissionView {
     pub darkness_score: i32,
     #[serde(default)]
     pub darkness_level: i32,
+    /// The mission's tracked player statistics (`EDisPlayerStat` name, value; the pawn's list at
+    /// +0xB7C, `dishonored_sim::player_stats`): what the player raised since the last
+    /// `DisSeqAct_MissionStatsTracking` start, or since the mission started.
+    #[serde(default)]
+    pub player_stats: Vec<(String, f32)>,
+    /// What `DisSeqAct_MissionStatsTracking` input 1 recorded for the stats screen.
+    #[serde(default)]
+    pub stats_record: Option<MissionStatsRecord>,
+    /// `DisSeqAct_ShowMissionStats` activations so far: the clients open the end-of-mission
+    /// statistics screen when this grows.
+    #[serde(default)]
+    pub stats_shown: u32,
+    /// `DisSeqAct_OpenJournal` (0x00BD9E10): (activations so far, `m_Tab`); the clients open the
+    /// journal at that tab when the count grows.
+    #[serde(default)]
+    pub journal_open: Option<(u32, i32)>,
     /// World position the HUD marker points at (active task target).
     pub target: Option<[f32; 3]>,
     pub sounds: Vec<(u32, String)>,
@@ -800,6 +864,11 @@ impl MissionState {
 
     pub fn flag(&self, f: &str) -> bool {
         self.flags.get(f).copied().unwrap_or(false)
+    }
+
+    /// The names of the flags set now.
+    pub fn flags_set(&self) -> Vec<String> {
+        self.flags.iter().filter(|(_, v)| **v).map(|(k, _)| k.clone()).collect()
     }
 
     /// Initial NPC route/behaviour commands (call once after spawning mission NPCs).
@@ -1351,3 +1420,4 @@ impl MissionState {
         self.view.target = best.map(|b| b.1);
     }
 }
+

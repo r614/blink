@@ -105,6 +105,9 @@ pub const MOVIES: &[(&str, &str, &str)] = &[
     ("common", "Startup", "Common_assets.lib"),
     ("global", "DishonoredGame", "UI_Global.Global"),
     ("load", "Startup", "UI_LoadGame.LoadGame"),
+    // The journal (`DisGFxMoviePlayerJournal`) and the end-of-mission statistics screen.
+    ("journal", "UI_Journal_SF", "Journal"),
+    ("stats", "UI_MissionStats_SF", "MissionStats"),
 ];
 
 pub fn load_menu_art(keys: &[&'static str], images: &mut Assets<Image>) -> MenuArt {

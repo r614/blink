@@ -60,7 +60,14 @@ pub struct PauseMenu {
     pub game_over: Option<String>,
     /// Seconds the local player has been dead (starts the game over screen).
     dead_for: f32,
+    /// Other full-screen movies up ([`OVERLAY_JOURNAL`], [`OVERLAY_STATS`]): they pause an
+    /// offline match too (`bPauseGameWhileActive`), free the cursor and keep this menu closed.
+    pub overlay: u8,
 }
+
+/// [`PauseMenu::overlay`] bits.
+pub const OVERLAY_JOURNAL: u8 = 1;
+pub const OVERLAY_STATS: u8 = 2;
 
 impl PauseMenu {
     /// The entries of the screen up: the pause list or the game over list.
@@ -102,7 +109,7 @@ const ITEM_GAP: f32 = 5.0;
 pub fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let root = menu_art::spawn_layer(&mut commands, 50);
     commands.entity(root).insert(Visibility::Hidden);
-    commands.insert_resource(menu_ui::load_menu_art(&["pause", "options", "gamma", "common", "global", "load"], &mut images));
+    commands.insert_resource(menu_ui::load_menu_art(&["pause", "options", "gamma", "common", "global", "load", "journal", "stats"], &mut images));
     commands.insert_resource(MenuTexts::load());
     commands.insert_resource(PauseMenu { root: Some(root), from_launcher: std::env::args().any(|a| a == "--from-launcher"), anim: Anim::new(0xa5e), ..default() });
 }
@@ -110,7 +117,7 @@ pub fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
 /// Fixed-tick run condition: an offline match stops while paused.
 pub fn sim_running(p: Option<Res<PauseMenu>>, loading: Option<Res<crate::loading_screen::LoadingScreen>>, session: Res<crate::session::Session>) -> bool {
     // The loading screen also stops an offline match (the original loads levels synchronously).
-    let stopped = p.is_some_and(|p| p.open) || loading.is_some_and(|l| l.active);
+    let stopped = p.is_some_and(|p| p.open || p.overlay != 0) || loading.is_some_and(|l| l.active);
     !(stopped && matches!(session.kind, crate::session::SessionKind::Offline { .. }))
 }
 
@@ -382,7 +389,7 @@ pub fn toggle(
             p.request = true;
         }
     }
-    if !p.open && ((keys.just_pressed(KeyCode::Escape) && local.override_input.is_none() && !dead) || p.request) {
+    if !p.open && ((keys.just_pressed(KeyCode::Escape) && local.override_input.is_none() && !dead && p.overlay == 0) || p.request) {
         p.request = false;
         p.open = true;
         p.dirty = true;

@@ -48,6 +48,8 @@ pub struct SessionView {
     pub time_bends: Vec<dishonored_sim::state::TimeBendState>,
     /// The map's physics props (held, thrown, broken ones are drawn by `movables::follow_props`).
     pub movables: Vec<dishonored_sim::state::MovableState>,
+    /// The local player's abstract items (object paths, pickup order): the journal's logs.
+    pub abstract_items: Vec<String>,
     pub matchv: MatchView,
     pub tick: u64,
     pub connected: bool,
@@ -179,6 +181,7 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
             view.traps = w.traps.clone();
             view.time_bends = w.time_bends.clone();
             view.movables = w.movables.clone();
+            view.abstract_items = w.abstract_items.iter().filter(|h| h.owner == LOCAL_ID).map(|h| h.item.clone()).collect();
             view.tick = w.tick;
             view.dark_vision_reveals = dishonored_sim::left_hand::dark_vision_reveals(w, LOCAL_ID, &sim.tuning);
             view.matchv = game.view().clone();
@@ -229,6 +232,7 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
             view.traps = client.predicted.traps.clone();
             view.time_bends = client.predicted.time_bends.clone();
             view.movables = client.predicted.movables.clone();
+            view.abstract_items = client.predicted.abstract_items.iter().filter(|h| Some(h.owner) == me).map(|h| h.item.clone()).collect();
             view.matchv = client.matchv.clone();
             view.tick = client.metrics.server_tick;
             view.connected = client.state == ConnState::Connected;

@@ -683,6 +683,8 @@ impl MissionMatch {
     /// A player statistic was raised (the stat increment 0x00AB9560 ends with the deed check
     /// 0x00C4D2C0): the chaos deeds on that stat count it.
     pub fn player_stat(&mut self, stat: &str, victim: Option<&[String]>, amount: i32, cfg: &SimConfig) {
+        // The mission's tracked stats (0x00AA97E0, after the deeds): the stats screen reads them.
+        self.state.view.add_player_stat(stat, amount as f32);
         if self.darkness.notify_deed(&cfg.gameplay.items.darkness, stat, victim, amount).is_some() {
             self.sync_darkness(cfg);
         }
@@ -1369,6 +1371,7 @@ impl MissionMatch {
                 }
             })
             .collect();
+        kismet_host::journal_inputs(self, inputs); // [kismet] DisSeqEvent_JournalViewed
         kismet_host::cinematic_inputs(self, &mut all); // [kismet] SeqAct_ToggleCinematicMode
         kismet_host::track_views(self, &mut all, dt); // [kismet] DisSeqAct_PlayerTrackTarget
         self.lock_peeking_inputs(&mut all); // [world] a pawn at a keyhole
@@ -1510,6 +1513,7 @@ impl MissionMatch {
                 self.use_held.remove(id);
             }
         }
+        let mut found_stats: Vec<(&'static str, i32)> = Vec::new();
         for e in &out.events {
             if let SimEvent::Death { victim, killer, .. } = e {
                 let vk = self.world.player(*victim).map(|p| p.kind);
@@ -1537,6 +1541,10 @@ impl MissionMatch {
                     if by_player && *killer != Some(*victim) && k != PawnKind::Rat {
                         let lineage = self.victim_lineage(*victim, k);
                         self.player_stat(dishonored_sim::darkness::stat::NUM_KILLS, Some(&lineage), 1, cfg);
+                        // Then `HostileKill` / `CivilianKill` by `Twk_PlayerStats`' NPC types.
+                        if let Some(s) = dishonored_sim::player_stats::kill_stat(&lineage) {
+                            self.player_stat(s, Some(&lineage), 1, cfg);
+                        }
                     }
                     self.crowd.brains.retain(|b| b.id != *victim);
                 }
@@ -1549,11 +1557,32 @@ impl MissionMatch {
                             dishonored_ir::items::PickupKind::Abstract { item, .. } | dishonored_ir::items::PickupKind::Inventory { item } => Some(item.clone()),
                             _ => None,
                         };
+                        // Found pickups (0x00C4BD60: coins / runes by the quantity given; 0x00ABBA90:
+                        // a bone charm).
+                        let found = match &pk.kind {
+                            dishonored_ir::items::PickupKind::Abstract { item, quantity, .. } => dishonored_sim::player_stats::abstract_pickup_stat(item).map(|s| (s, *quantity)),
+                            dishonored_ir::items::PickupKind::BoneCharm(_) => Some((dishonored_sim::player_stats::BONE_CHARM_FOUND, 1)),
+                            _ => None,
+                        };
                         events.push(MissionEvent::PickedUp { player: *id, pickup: pk.name.clone(), item });
+                        if let Some((s, n)) = found.filter(|_| self.humans.contains(id)) {
+                            found_stats.push((s, n));
+                        }
+                    }
+                    for (s, n) in found_stats.drain(..) {
+                        self.player_stat(s, None, n, cfg);
                     }
                 }
                 SimEvent::KnockedOut { victim, by, .. } if !self.humans.contains(victim) => {
                     let by_player = by.is_some_and(|k| self.humans.contains(&k));
+                    if by_player {
+                        // `HostilePutToSleep` / `CivilianPutToSleep` (0x00B738F0).
+                        let vk = self.world.player(*victim).map(|p| p.kind).unwrap_or(PawnKind::Civilian);
+                        let lineage = self.victim_lineage(*victim, vk);
+                        if let Some(s) = dishonored_sim::player_stats::sleep_stat(&lineage) {
+                            self.player_stat(s, Some(&lineage), 1, cfg);
+                        }
+                    }
                     let kind = if self.world.player(*victim).is_some_and(|p| p.kind == PawnKind::Guard) { NpcKind::Guard } else { NpcKind::Civilian };
                     events.push(MissionEvent::NpcKnockedOut { npc: self.npc_by_id.get(victim).cloned(), by_player, kind });
                     // Unconscious for good: its brain stops (the sim ignores its input anyway).

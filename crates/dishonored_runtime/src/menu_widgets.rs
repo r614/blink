@@ -235,7 +235,7 @@ impl HelpBar {
 
 /// A text key from whichever menu section holds it.
 pub fn texts_any(t: &MenuTexts, key: &str) -> String {
-    for sec in [SEC_BASE, crate::menu_ui::SEC_MENU, crate::menu_ui::SEC_MAIN] {
+    for sec in [SEC_BASE, crate::menu_ui::SEC_MENU, crate::menu_ui::SEC_MAIN, crate::journal::SEC_JOURNAL, "DisGFxMoviePlayerMissionStats_Texts"] {
         if let Some(s) = t.loc.get(sec, key) {
             return dishonored_assets::loc::plain(s);
         }

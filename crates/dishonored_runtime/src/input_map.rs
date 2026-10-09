@@ -149,7 +149,7 @@ pub fn cursor_lock(
     paused: Option<Res<crate::pause_menu::PauseMenu>>,
     mut q: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
-    let open = paused.is_some_and(|p| p.open);
+    let open = paused.is_some_and(|p| p.open || p.overlay != 0);
     for mut c in &mut q {
         if open {
             if c.grab_mode != CursorGrabMode::None {

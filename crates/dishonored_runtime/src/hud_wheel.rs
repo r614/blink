@@ -1843,7 +1843,7 @@ pub fn update_power_wheel(
         }
     }
     n.since_close += dt;
-    let paused = pause.as_ref().is_some_and(|p| p.open);
+    let paused = pause.as_ref().is_some_and(|p| p.open || p.overlay != 0);
     let cutscene = view.matchv.mission.as_ref().is_some_and(|mv| !mv.cutscenes.is_empty());
     let can_open = me.is_some_and(|p| p.alive) && !paused && !cutscene && !local.choice_open && local.enabled;
     let default_bindings;

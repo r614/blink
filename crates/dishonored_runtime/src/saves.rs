@@ -103,7 +103,7 @@ fn map_name(map: &str) -> String {
 
 /// Quicksave / quickload keys (only while playing, not in a menu).
 pub fn hotkeys(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseButton>>, bindings: Res<crate::settings::Bindings>, pause: Res<crate::pause_menu::PauseMenu>, mut saves: ResMut<Saves>) {
-    if pause.open {
+    if pause.open || pause.overlay != 0 {
         return;
     }
     if bindings.just_pressed("GBA_QuickSave", &keys, &mouse, 0.0) {

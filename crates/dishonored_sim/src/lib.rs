@@ -20,6 +20,7 @@ pub mod inventory;
 pub mod left_hand;
 pub mod movement;
 pub mod noise;
+pub mod player_stats;
 pub mod powers;
 pub mod rats;
 pub mod special_npcs;

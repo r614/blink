@@ -2167,10 +2167,13 @@ impl Host for H<'_> {
             // `DisSeqAct_OpenJournal` (0x00BD9E10): unless the menu is up, the journal opens at
             // `m_Tab` (0x00BD7940 -> 0x00BD2750 -> 0x00BD11E0), and opening it fires the
             // player's `DisSeqEvent_JournalViewed` (0x00BD14A1 with the class of 0x00BBC040).
-            // The journal screen itself is not drawn.
+            // The clients open their journal at that tab (`MissionView::journal_open`).
             "DisSeqAct_OpenJournal" => {
                 self.st.player_ev.journal_viewed = true;
-                self.note("journal opened".to_string());
+                let tab = cx.prop("m_Tab").and_then(|v| journal_tab(&v)).unwrap_or(0);
+                let n = self.m.state.view.journal_open.map_or(0, |j| j.0) + 1;
+                self.m.state.view.journal_open = Some((n, tab));
+                self.note(format!("journal opened at tab {tab}"));
                 HostResult::Done
             }
             // `DisSeqAct_SpawnCameraLensEffect` (Activated 0x00BA1CA0 -> 0x00B9BBF0 on Spawn): the
@@ -2359,10 +2362,28 @@ impl Host for H<'_> {
             }
             // `DisSeqAct_MissionStatsTracking` (0x009FE090): the stats screen's chaos entry is
             // High when the chaos level reaches `m_ChaosLevelThreshold`.
+            // Input 0 empties the pawn's tracked stats (0x00AB1B00) and tracks the tweak's rows;
+            // input 1 records them for the stats screen (chaos rows 1 when the level reaches the
+            // threshold, the summary items' story flags) and empties the list (0x009376D0 stores
+            // the record, 0x009334E0 saves). The port tracks every stat while a mission runs, so
+            // the record holds all of them; the screen reads its tweak's rows.
             "DisSeqAct_MissionStatsTracking" => {
                 *self.st.presentation.entry(class).or_insert(0) += 1;
                 // An op that leaves the threshold unset has the class default 0.
-                self.m.state.chaos_threshold = Some(cx.prop("m_ChaosLevelThreshold").and_then(|v| v.as_int()).unwrap_or(0));
+                let threshold = cx.prop("m_ChaosLevelThreshold").and_then(|v| v.as_int()).unwrap_or(0);
+                self.m.state.chaos_threshold = Some(threshold);
+                let tweak = match cx.prop("m_pMissionStatsTweaks") {
+                    Some(Value::Obj(Obj::Path(p))) => p,
+                    _ => String::new(),
+                };
+                if cx.input() == Some(1) {
+                    let rec = dishonored_mission::runtime::MissionStatsRecord { tweak: tweak.clone(), stats: self.m.state.view.player_stats.clone(), chaos_high: self.m.state.darkness_level >= threshold, flags: self.m.state.flags_set() };
+                    self.note(format!("mission stats recorded ({tweak}, {} stats)", rec.stats.len()));
+                    self.m.state.view.stats_record = Some(rec);
+                } else {
+                    self.note(format!("mission stats tracking started ({tweak})"));
+                }
+                self.m.state.view.player_stats.clear();
                 HostResult::Done
             }
             "DisSeqAct_NPCSetMaterials" => {
@@ -2655,9 +2676,11 @@ impl Host for H<'_> {
                 HostResult::Latent
             }
             "DisSeqAct_ShowMissionStats" => {
-                // The end-of-mission statistics screen: shown and closed at once (the player
-                // closes it in the original), so "Out" then "Closed".
+                // The end-of-mission statistics screen: the clients show it
+                // (`MissionView::stats_shown`); the host does not wait for it to close (the
+                // player closes it in the original), so "Out" then "Closed".
                 *self.st.presentation.entry(class).or_insert(0) += 1;
+                self.m.state.view.stats_shown += 1;
                 self.note("mission statistics screen".into());
                 cx.fire(0);
                 cx.fire_name("Closed");
@@ -3396,6 +3419,16 @@ pub fn choice(m: &mut MissionMatch, player: PlayerId, index: usize) -> bool {
     }
 }
 
+/// A human player opened the journal (`actions::OPEN_JOURNAL`: `Dis_ToggleJournal` 0x009EE550 ->
+/// 0x00AA3290 -> 0x00BD7940); its start (0x00BD11E0) fires the player's
+/// `DisSeqEvent_JournalViewed` (fired on the next feed, as `DisSeqAct_OpenJournal` does).
+pub fn journal_inputs(m: &mut MissionMatch, inputs: &[(PlayerId, dishonored_sim::input::PlayerInput)]) {
+    let opened = inputs.iter().any(|(id, i)| i.action == dishonored_sim::input::actions::OPEN_JOURNAL && m.humans.contains(id));
+    if let (true, Some(run)) = (opened, m.kismet.as_mut()) {
+        run.st.player_ev.journal_viewed = true;
+    }
+}
+
 /// Cinematic mode (`SeqAct_ToggleCinematicMode`) applied to the players' inputs before the
 /// world steps: movement input ignored (`IgnoreMoveInput`), the view kept where it is
 /// (`IgnoreLookInput`), and the buttons ignored with `bDisableInput`
@@ -3504,6 +3537,16 @@ pub fn step(m: &mut MissionMatch, sim_events: &[SimEvent], dt: f32, cfg: &SimCon
     m.kismet = Some(run);
 }
 
+/// `DisGFxMoviePlayerJournal.EDisJournalTab` by name (`DJT_Objectives` 0 .. `DJT_Sub_ChapterNotes` 5).
+fn journal_tab(v: &Value) -> Option<i32> {
+    match v {
+        Value::Enum(s) | Value::Name(s) => ["DJT_Objectives", "DJT_Logs", "DJT_Powers", "DJT_BoneCharms", "DJT_Inventory", "DJT_Sub_ChapterNotes"].iter().position(|n| n.eq_ignore_ascii_case(s)).map(|i| i as i32),
+        Value::Byte(b) => Some(*b as i32),
+        Value::Int(i) => Some(*i),
+        _ => None,
+    }
+}
+
 /// `EDisAttentionLevel` by name (`DAL_Unaware` 0 .. `DAL_Busted` 4).
 fn attention_level(v: &Value) -> Option<u8> {
     match v {
@@ -3548,6 +3591,13 @@ fn attention_events(k: &mut Kismet, h: &mut H) {
         // relationship, originator the observer, instigator the target pawn (0x00b0be40,
         // 0x00b0bef0, 0x00b0bf30).
         if from < DAL_BUSTED && to >= DAL_BUSTED {
+            // 0x00B0BE40: a player target raises `NPCsAlerted` with the observer's tweak.
+            if h.m.humans.contains(&target) {
+                let kind = h.m.world.player(observer).map(|p| p.kind).unwrap_or(dishonored_sim::state::PawnKind::Guard);
+                let lineage = h.m.victim_lineage(observer, kind);
+                let cfg = h.cfg;
+                h.m.player_stat(dishonored_sim::player_stats::NPCS_ALERTED, Some(&lineage), 1, cfg);
+            }
             let n = fire_generated(k, h, "DisSeqEvent_PawnSighted", &pawn_origs(h, observer), Obj::Pawn(observer), Obj::Pawn(target), None);
             if !n.is_empty() {
                 h.note(format!("pawn {observer} sighted {target}: {} event(s)", n.len()));
