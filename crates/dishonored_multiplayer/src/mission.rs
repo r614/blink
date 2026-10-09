@@ -475,6 +475,26 @@ pub enum Interaction {
     Launcher(usize),
 }
 
+/// The touch filter's faction questions (`dishonored_sim::walls::WallSocial`) answered by the
+/// crowd's social state: a pawn's faction along its fallback chain (0x00C6F360), and the player's
+/// relationship to it.
+struct WallSocial<'a> {
+    soc: &'a dishonored_ai::Social,
+    player: Option<PlayerId>,
+}
+
+impl dishonored_sim::walls::WallSocial for WallSocial<'_> {
+    fn in_factions(&self, pawn: PlayerId, factions: &[String]) -> bool {
+        let (Some(t), Some(&f)) = (self.soc.factions.as_ref(), self.soc.pawn_faction.get(&pawn)) else { return false };
+        factions.iter().filter_map(|n| t.index(n)).any(|x| t.isa(f, x))
+    }
+
+    fn player_enemy(&self, pawn: PlayerId) -> bool {
+        let Some(&mine) = self.player.and_then(|p| self.soc.pawn_faction.get(&p)) else { return false };
+        self.soc.faction_relation(mine, pawn) == dishonored_ir::ai::Relationship::Enemy
+    }
+}
+
 /// The whole match state serializes for saved games (`save.rs`) except the setup, which the
 /// loader rebuilds from the mission and re-attaches. New fields need serde
 /// (`#[serde(default)]` keeps older saves loading).
@@ -1394,8 +1414,18 @@ impl MissionMatch {
         // breakables, the receptacles plug their placed batteries, steps break.
         let key = self.current_map.to_ascii_lowercase();
         if let Some(defs) = self.setup.world_actors.get(&key) {
+            let soc = (!defs.walls_of_light.is_empty()).then(|| self.crowd.social(&self.world));
             let st = self.world_actors.entry(key).or_insert_with(|| dishonored_sim::world_actors::WorldActorsState::new(defs));
-            let evs = st.step(defs, &out.events, &cfg.gameplay, dt);
+            let mut evs = st.step(defs, &out.events, &cfg.gameplay, dt);
+            // [world] Walls of light: power, shocks and burns (`dishonored_sim::walls`), at the
+            // world's rate of time.
+            if let Some(soc) = soc {
+                let player = self.world.players.iter().find(|p| p.kind == dishonored_sim::state::PawnKind::Human).map(|p| p.id);
+                let ws = WallSocial { soc: &soc, player };
+                let wdt = dishonored_sim::movement::DT * dishonored_sim::powers::world_time_scale(&self.world, &cfg.gameplay, false);
+                evs.extend(dishonored_sim::walls::step(defs, st, &mut self.world, &ws, player, &cfg.gameplay, wdt, &mut out.events));
+            }
+            self.view.walls = defs.walls_of_light.iter().zip(&st.walls).map(|(d, w)| crate::WallView { name: d.name.clone(), position: d.position.to_array(), powered: w.powered }).collect();
             // A movable whose breakable reached its last step is gone (whoever holds it lets go).
             for e in &evs {
                 if let dishonored_sim::world_actors::WorldEvent::Broken { breakable, output: 0 } = e {

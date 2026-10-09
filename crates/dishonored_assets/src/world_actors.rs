@@ -15,7 +15,7 @@ use crate::content::Content;
 use crate::tweaks::{TMap, TVal, TweakDb, get, get_f32};
 use anyhow::Result;
 use dishonored_ir::ai::NoiseContext;
-use dishonored_ir::world_actors::{BatteryDef, BreakStepDef, BreakableDef, MovableDef, ReceptacleDef, WorldActors};
+use dishonored_ir::world_actors::{BatteryDef, BreakStepDef, BreakableDef, MovableDef, ReceptacleDef, WallOfLightDef, WorldActors};
 use glam::Vec3;
 use std::sync::Arc;
 use ue3_package::properties::find;
@@ -212,6 +212,81 @@ fn receptacle(pkg: &Arc<Package>, i: usize, package: &str, db: &TweakDb, res: &m
     })
 }
 
+/// Object names of a tweak's object list (`array<DisTweaks_Faction>`): full paths.
+fn object_list(m: &TMap, k: &str) -> Vec<String> {
+    match m.get(k) {
+        Some(TVal::List(l)) => l.iter().filter_map(|e| e.values().find_map(|v| if let TVal::Obj(s) = v { Some(s.clone()) } else { None })).filter(|s| !s.is_empty() && s != "None").collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A placed `DisWallOfLight`: its tweak (`m_pWallOfLightTweaks`), placed flags and friendly
+/// factions override, and its static mesh's collision triangles under the actor's and the
+/// component's transforms. The receptacle is resolved by the caller.
+fn wall_of_light(content: &Content, packages: &[String], pkg: &Arc<Package>, i: usize, package: &str, db: &TweakDb, res: &mut PropResolver) -> Option<(WallOfLightDef, Option<String>)> {
+    let tweak = res.inherited_object_path(pkg, i, "m_pWallOfLightTweaks")?;
+    let m = db.try_resolve(&tweak)?;
+    let own = pkg.read_object(i).ok()?.properties;
+    let eff = res.effective(pkg, i);
+    let flag = |k: &str, d: bool| match find(&eff, k).map(|x| &x.value) {
+        Some(ue3_package::properties::Value::Bool(b)) => *b,
+        _ => d,
+    };
+    let over: Vec<String> = find(&own, "m_FriendlyFactionsOverride").and_then(|x| x.array_objects().ok()).unwrap_or_default().into_iter().filter(|&o| o != 0).map(|o| pkg.obj_path(ObjRef::from_index(o))).collect();
+    let receptacle = find(&own, "m_pAttachedReceptacle").and_then(|x| x.as_object()).filter(|&o| o != 0).map(|o| pkg.obj_name(ObjRef::from_index(o)).to_string());
+    // The collision triangles: the mesh's kDOP tree (per-poly collision), local to world. The
+    // tweak's `m_pStaticMesh`, when set, replaces the component's mesh (the tweaks interface's
+    // apply, 0x00A29110: `SetStaticMesh`); otherwise the component's own or inherited mesh.
+    let mut triangles = Vec::new();
+    let comp = find(&own, "StaticMeshComponent").or_else(|| find(&own, "CollisionComponent")).and_then(|p| p.as_object()).filter(|o| *o != 0).map(ObjRef::from_index);
+    if let Some(ObjRef::Export(ci)) = comp {
+        let cown = pkg.read_object(ci).map(|h| h.properties).unwrap_or_default();
+        let tweak_mesh = match m.get("m_pStaticMesh") {
+            Some(TVal::Obj(o)) if !o.is_empty() && o != "None" => Some(o.clone()),
+            _ => None,
+        };
+        let located = match (tweak_mesh, find(&cown, "StaticMesh").and_then(|p| p.as_object()).filter(|o| *o != 0)) {
+            (Some(p), _) => crate::interactables::locate_object_where(content, packages, &p, |q, e| q.export_class(e) == "StaticMesh" && crate::static_mesh::read_static_mesh(q, e).is_ok()),
+            (None, Some(o)) => res.locate(pkg, ObjRef::from_index(o), &[]),
+            (None, None) => res.inherited_object_path(pkg, ci, "StaticMesh").and_then(|p| res.locate_path(&p)),
+        };
+        if let Some((mp, mi)) = located {
+            if let Ok(sm) = crate::static_mesh::read_static_mesh(&mp, mi) {
+                let tf = crate::level::actor_transform(&eff) * crate::level::component_transform(&cown);
+                let at = |k: u16| sm.positions.get(k as usize).map(|&v| tf.transform_point3(v));
+                let src: Vec<[u16; 3]> = if sm.kdop_triangles.is_empty() { sm.indices.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect() } else { sm.kdop_triangles.iter().map(|t| [t[0], t[1], t[2]]).collect() };
+                triangles = src.iter().filter_map(|t| Some([at(t[0])?, at(t[1])?, at(t[2])?])).collect();
+            }
+        }
+    }
+    let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+    for v in triangles.iter().flatten() {
+        lo = lo.min(*v);
+        hi = hi.max(*v);
+    }
+    let position = Vec3::from(find(&eff, "Location").and_then(|x| x.as_vector()).unwrap_or([0.0; 3]));
+    if lo.x > hi.x {
+        (lo, hi) = (position, position);
+    }
+    let def = WallOfLightDef {
+        name: pkg.obj_name(ObjRef::Export(i)).to_string(),
+        package: package.to_string(),
+        position,
+        receptacle: None,
+        friendly_factions: if over.is_empty() { object_list(&m, "m_FriendlyFactions") } else { over },
+        reversed: flag("m_bReversed", false),
+        enabled: flag("m_bEnabled", true),
+        damage: int(&m, "m_Damage").unwrap_or(0),
+        jib: boolean(&m, "m_bJib").unwrap_or(false),
+        activation_time: get_f32(&m, "m_ActivationTime").unwrap_or(0.0),
+        activation_time_pawn: get_f32(&m, "m_ActivationTimeForPawnEffect").unwrap_or(0.0),
+        triangles,
+        bounds_min: lo,
+        bounds_max: hi,
+    };
+    Some((def, receptacle))
+}
+
 /// Read the world actors of a map. `packages` are the map's packages; `loudness` is
 /// `m_LoudnessDistanceArray` (the steps' AI noise loudness as a distance).
 pub fn extract_world_actors(content: &Content, packages: &[String], loudness: &[f32]) -> Result<WorldActors> {
@@ -220,6 +295,7 @@ pub fn extract_world_actors(content: &Content, packages: &[String], loudness: &[
     let mut res = PropResolver::new(content);
     let mut out = WorldActors::default();
     let mut seen = std::collections::BTreeSet::new();
+    let mut wall_receptacles = Vec::new();
     for name in &pkgs {
         if !seen.insert(name.to_ascii_lowercase()) {
             continue;
@@ -244,8 +320,21 @@ pub fn extract_world_actors(content: &Content, packages: &[String], loudness: &[
                 if let Some(r) = receptacle(&pkg, i, name, &db, &mut res) {
                     out.receptacles.push(r);
                 }
+            } else if class == "DisWallOfLight" {
+                if let Some((w, r)) = wall_of_light(content, &pkgs, &pkg, i, name, &db, &mut res) {
+                    out.walls_of_light.push(w);
+                    wall_receptacles.push(r);
+                }
             }
         }
+    }
+    // The wall's receptacle: its own `m_pAttachedReceptacle`, else the receptacle that lists it
+    // (`m_aAttachedActors`, which registers the wall as a consumer: 0x00C73430).
+    for (w, r) in out.walls_of_light.iter_mut().zip(wall_receptacles) {
+        w.receptacle = match r {
+            Some(n) => out.receptacles.iter().position(|x| x.name.eq_ignore_ascii_case(&n) && x.package.eq_ignore_ascii_case(&w.package)).or_else(|| out.receptacles.iter().position(|x| x.name.eq_ignore_ascii_case(&n))),
+            None => out.receptacles.iter().position(|x| x.attached.iter().any(|a| a.eq_ignore_ascii_case(&w.name))),
+        };
     }
     // A movable that breaks is the same actor as its breakable.
     for m in out.movables.iter_mut() {

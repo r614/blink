@@ -1063,6 +1063,12 @@ fn dump(p: &Play) {
     for (t, path, s) in &p.tasks {
         println!("[{t:.1}] {path} -> {s:?}");
     }
+    // [world] Walls of light: power and collision (`dishonored_sim::walls`).
+    if let Some(st) = m.world_actors.get(&m.current_map.to_ascii_lowercase()) {
+        for (v, w) in m.view.walls.iter().zip(&st.walls) {
+            println!("wall {} powered {} enabled {} collision {} reversed {}", v.name, w.powered, w.enabled, w.collision, w.reversed);
+        }
+    }
     if let Some(v) = &m.view.mission {
         for o in &v.objectives {
             if o.hidden {

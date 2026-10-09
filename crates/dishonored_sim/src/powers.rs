@@ -373,6 +373,12 @@ fn ramp(b: &TimeBendState, target: f32, cfg: &GameplayConfig) -> f32 {
     }
 }
 
+/// Whether a Bend Time's world dilation is stopped (below 1e-8): the GameInfo's
+/// `m_BendTimeInfo` channel that the walls of light read (0x00A3EEE0).
+pub fn world_time_stopped(state: &WorldState, cfg: &GameplayConfig) -> bool {
+    state.time_bends.iter().any(|b| ramp(b, b.world_dilation, cfg) < 1e-8)
+}
+
 /// Rate of time for a pawn. The GameInfo tick (0x009FCBC0) multiplies the channels' rates: the
 /// player rate (`WorldInfo.TimeDilation`) is the product of the channels' player dilations and
 /// the world rate the product of their world dilations (no channel the powers use is

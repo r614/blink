@@ -112,6 +112,20 @@ pub struct MatchView {
     /// they are armed, and the disarm prompt (research/dishonored/systems/interactables.md).
     #[serde(default)]
     pub launchers: Vec<LauncherView>,
+    /// The active map's walls of light (`DisWallOfLight`): whether each is shown (powered on;
+    /// research/dishonored/systems/walls_of_light.md).
+    #[serde(default)]
+    pub walls: Vec<WallView>,
+}
+
+/// A wall of light as clients see it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WallView {
+    /// The actor's object name (`DisWallOfLight_0`) and placed location (same-named walls of
+    /// different sublevels are told apart by it).
+    pub name: String,
+    pub position: [f32; 3],
+    pub powered: bool,
 }
 
 /// A launcher as clients see it: its place and bounds (the interaction focus), its state and

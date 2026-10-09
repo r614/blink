@@ -33,6 +33,7 @@ pub mod movables;
 pub mod world_actors;
 pub mod interactables;
 pub mod launchers;
+pub mod walls;
 
 use dishonored_ir::gameplay::GameplayConfig;
 use dishonored_world::WorldQuery;

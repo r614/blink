@@ -518,11 +518,13 @@ pub fn prepare_map(map: &DishonoredMap, show_hidden: bool, features: &RenderFeat
             // translucent, sky and debug geometry stays per instance.
             // [interp] Matinee-driven actors (InterpActor) stay separate so cutscenes can move them.
             let mover = crate::cutscene::mover_of(&inst.source, inst.transform);
-            // Movable props (picked up and thrown by the player) stay separate too.
+            // Movable props (picked up and thrown by the player) stay separate too, and walls of
+            // light (hidden while unpowered).
             let prop = crate::movables::prop_of(&inst.source, inst.transform);
+            let wall = crate::walls_of_light::wall_of(&inst.source, inst.transform);
             // The lens TV (tv_screen.rs) samples a scene capture's target: drawn per instance.
             let screen = features.materials && features.reflections && !inst.hidden && mat_id.and_then(|m| map.material_params.get(m)).and_then(crate::reflect::screen_target).is_some();
-            if merge && !inst.hidden && !is_sky && !translucent && mover.is_none() && prop.is_none() && !screen {
+            if merge && !inst.hidden && !is_sky && !translucent && mover.is_none() && prop.is_none() && wall.is_none() && !screen {
                 let has_uv1 = mesh.uv1.len() == mesh.positions.len();
                 let lm = inst.lightmap.filter(|_| features.lightmaps && has_uv1);
                 let t = inst.transform.w_axis;
@@ -724,9 +726,13 @@ pub fn spawn_prepared(
             // [interp] Matinee-driven actors (InterpActor) stay separate so cutscenes can move them.
             let mover = crate::cutscene::mover_of(&inst.source, inst.transform);
             let prop = crate::movables::prop_of(&inst.source, inst.transform);
+            let wall = crate::walls_of_light::wall_of(&inst.source, inst.transform);
             // Original shaders (`ue3_level`): the full mesh now, the material once it is made.
             if let Some((part, mesh_h)) = ue3.as_ref().and_then(|u| u.part(ii, si)) {
                 let mut e = commands.spawn((Mesh3d(mesh_h), transform, MapGeometry { instance: ii }));
+                if let Some(w) = wall.clone() {
+                    e.insert(w);
+                }
                 if lvl > 0 {
                     e.insert(crate::level::SourceLevel(std::sync::Arc::from(inst.level.as_str())));
                 }
@@ -889,6 +895,9 @@ pub fn spawn_prepared(
             }
             if let Some(p) = prop {
                 e.insert(p);
+            }
+            if let Some(w) = wall {
+                e.insert(w);
             }
             if let Some(lm) = inst.lightmap.filter(|_| !is_sky && features.lightmaps && mesh.uv1.len() == mesh.positions.len()) {
                 e.insert(bevy::pbr::Lightmap {

@@ -93,14 +93,13 @@ pub const PRESENTATION: &[&str] = &[
 
 /// Classes whose effect is on a system the port does not simulate (decoded; they finish with
 /// their automatic outputs and are counted apart): rat spawners and swarm behaviours, the
-/// Outsider's render settings, walls of light, scripted time dilation, possession overrides,
+/// Outsider's render settings, scripted time dilation, possession overrides,
 /// player power cancel / weapon switching / camera and head tracking, minimum health,
 /// damage instigator overrides, the protect-neutrals AI flag, loadouts.
 pub const NOT_MODELLED: &[&str] = &[
     "DisSeqAct_ActivateRatSpawner",
     "DisSeqAct_SetRatSwarmCustomBehavior",
     "DisSeqAct_OutsiderConfig",
-    "DisSeqAct_WallofLightControl",
     "DisSeqAct_BendTime",
     "DisSeqAct_OverridePossess",
     "DisSeqAct_CancelPlayerActivePower",
@@ -148,6 +147,7 @@ pub const FED_EVENTS: &[&str] = &[
     "DisSeqEvent_Distracted",
     "DisSeqEvent_BreakableBroken",
     "DisSeqEvent_WatchTower",
+    "DisSeqEvent_WallOfLight",
     "DisSeqEvent_WhaleOilBattery",
     "DisSeqEvent_WhaleOilReceptacle",
     // `player_events.rs`.
@@ -923,6 +923,12 @@ fn world_events(k: &mut Kismet, h: &mut H, evs: Vec<dishonored_sim::world_actors
                 let b = &defs.breakables[battery];
                 ("DisSeqEvent_WhaleOilReceptacle", h.kismet_actor(&r.package, &r.name), h.kismet_actor(&b.package, &b.name).map(Obj::Actor).unwrap_or_default(), output)
             }
+            // The wall's notifications (0x00BC7B30 with the wall as originator and instigator).
+            WorldEvent::WallOfLight { wall, output } => {
+                let w = &defs.walls_of_light[wall];
+                let a = h.kismet_actor(&w.package, &w.name);
+                ("DisSeqEvent_WallOfLight", a, a.map(Obj::Actor).unwrap_or_default(), output)
+            }
         };
         let Some(a) = actor else { continue };
         let fired = k.trigger(h, class, &[Obj::Actor(a)], instigator, Some(vec![output]));
@@ -1450,7 +1456,8 @@ impl Host for H<'_> {
                     }
                 }
                 HostResult::Done
-            }            // `DisSeqCond_CompareTweaks` (0x00B8EAF0): `m_pA` and `m_pB` resolve to their tweaks
+            }
+            // `DisSeqCond_CompareTweaks` (0x00B8EAF0): `m_pA` and `m_pB` resolve to their tweaks
             // (0x00B8EA60: a tweak is itself, an actor or pawn its `GetTweak`); equal fires
             // "Exact" (0), one along the other's fallback chain (0x00C6F5C0 -> 0x00C6F360, either
             // way round) "FallbackNonExact" (1), anything else (or a missing tweak) "NoMatch" (2).
@@ -2066,8 +2073,25 @@ impl Host for H<'_> {
                         }
                         evs.extend(st.plug(&defs, r, b, true).1);
                     } else {
-                        evs.extend(st.eject(b));
+                        evs.extend(st.eject(&defs, b));
                     }
+                }
+                world_events(cx.k, self, evs);
+                HostResult::Done
+            }
+            // [world] `DisSeqAct_WallofLightControl` (0x00A40270 -> 0x00A3F7F0): the first input
+            // with an impulse (TurnOff, TurnOn, Toggle, SwitchPolarity) on every Target wall.
+            "DisSeqAct_WallofLightControl" => {
+                let Some(defs) = self.world_defs() else { return HostResult::Done };
+                let action = cx.input().unwrap_or(0);
+                let key = self.m.current_map.to_ascii_lowercase();
+                let mut evs = Vec::new();
+                for t in cx.objects("Target") {
+                    let Obj::Actor(a) = t else { continue };
+                    let act = &self.db.actors[a as usize];
+                    let Some(w) = dishonored_sim::walls::find(&defs, Some(&act.package), &act.name).or_else(|| dishonored_sim::walls::find(&defs, None, &act.name)) else { continue };
+                    let st = self.m.world_actors.entry(key.clone()).or_insert_with(|| dishonored_sim::world_actors::WorldActorsState::new(&defs));
+                    evs.extend(dishonored_sim::walls::kismet_action(&defs, st, w, action));
                 }
                 world_events(cx.k, self, evs);
                 HostResult::Done

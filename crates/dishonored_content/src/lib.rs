@@ -472,7 +472,7 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         }
     };
     // Breakables, whale oil batteries and receptacles (dishonored_sim::world_actors).
-    let wa_path = dir.join(format!("{map}.worldactors2.json"));
+    let wa_path = dir.join(format!("{map}.worldactors3.json"));
     let world_actors: dishonored_ir::world_actors::WorldActors = match std::fs::read_to_string(&wa_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(w) => w,
         None => {

@@ -157,7 +157,7 @@ fn locate_object(content: &Content, packages: &[String], path: &str) -> Option<(
 
 /// Like [`locate_object`], taking the first object `accept` agrees to (a mesh whose data reads:
 /// a level script package can hold a data-less export of a mesh that lives in another package).
-fn locate_object_where(content: &Content, packages: &[String], path: &str, accept: impl Fn(&std::sync::Arc<Package>, usize) -> bool) -> Option<(std::sync::Arc<Package>, usize)> {
+pub(crate) fn locate_object_where(content: &Content, packages: &[String], path: &str, accept: impl Fn(&std::sync::Arc<Package>, usize) -> bool) -> Option<(std::sync::Arc<Package>, usize)> {
     for q in packages.iter().map(String::as_str).chain(crate::level::LIBRARY_PACKAGES.iter().copied()) {
         let Ok(q) = content.package(q) else { continue };
         if let Some(e) = (0..q.exports.len()).find(|&e| {

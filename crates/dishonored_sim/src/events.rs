@@ -80,6 +80,9 @@ pub enum DamageCause {
     TrapShot,
     /// A launcher's explosive arrow bursting (`TrapArrowExplosion_Twk`).
     TrapExplosion,
+    /// A wall of light's shock (`DisDamageType_WallOfLight`, an energy type: no damage
+    /// reduction).
+    WallOfLight,
 }
 
 /// How a choke ended (`DisItemContext_Choke.eChokeState`).

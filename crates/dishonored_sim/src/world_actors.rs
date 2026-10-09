@@ -95,6 +95,8 @@ pub enum WorldEvent {
     Receptacle { receptacle: usize, battery: usize, output: usize },
     /// An AI noise (a breaking step's).
     Noise(SimEvent),
+    /// `DisSeqEvent_WallOfLight` output of a wall (index into `walls_of_light`).
+    WallOfLight { wall: usize, output: usize },
 }
 
 /// The world actors of the active map.
@@ -107,6 +109,8 @@ pub struct WorldActorsState {
     pub batteries: std::collections::BTreeMap<usize, BatteryState>,
     /// One per `WorldActors::receptacles`.
     pub receptacles: Vec<ReceptacleState>,
+    /// One per `WorldActors::walls_of_light`.
+    pub walls: Vec<crate::walls::WallState>,
 }
 
 impl BreakableState {
@@ -164,7 +168,7 @@ impl WorldActorsState {
     /// Fresh state for a map: health from the tweaks, batteries with `m_InitialNumberOfCharges`
     /// (vslot 131, 0x00c850c0: `SetCharges(initial, 0)`).
     pub fn new(defs: &WorldActors) -> Self {
-        let mut s = WorldActorsState { breakables: defs.breakables.iter().map(BreakableState::new).collect(), batteries: Default::default(), receptacles: vec![ReceptacleState::default(); defs.receptacles.len()] };
+        let mut s = WorldActorsState { breakables: defs.breakables.iter().map(BreakableState::new).collect(), batteries: Default::default(), receptacles: vec![ReceptacleState::default(); defs.receptacles.len()], walls: defs.walls_of_light.iter().map(crate::walls::WallState::new).collect() };
         for (i, d) in defs.breakables.iter().enumerate() {
             if let Some(b) = &d.battery {
                 s.batteries.insert(i, BatteryState { charges: 0, ..Default::default() });
@@ -197,7 +201,7 @@ impl WorldActorsState {
             out.push(WorldEvent::Battery { battery, output: if n < 1 { 1 } else { 0 } });
         }
         if b.charges < 1 && !b.recharging {
-            out.extend(self.eject(battery));
+            out.extend(self.eject(defs, battery));
         }
         out
     }
@@ -205,7 +209,7 @@ impl WorldActorsState {
     /// The battery leaves its receptacle (0x00c7d190 -> 0x00c7b6b0). The physical ejection's
     /// shield test (0x00c7b1a0, a trace for a usable object in the way) is not modelled: the
     /// battery always leaves.
-    pub fn eject(&mut self, battery: usize) -> Vec<WorldEvent> {
+    pub fn eject(&mut self, defs: &WorldActors, battery: usize) -> Vec<WorldEvent> {
         let Some(b) = self.batteries.get_mut(&battery) else { return Vec::new() };
         let Some(r) = b.plug.take() else { return Vec::new() };
         b.recharging = false;
@@ -214,7 +218,10 @@ impl WorldActorsState {
                 rs.attached = None;
             }
         }
-        vec![WorldEvent::Receptacle { receptacle: r, battery, output: 1 }]
+        // The consumers' unplug callbacks (0x00C7B6B0 calls each, then notifies).
+        let mut out = crate::walls::receptacle_changed(defs, self, r, false);
+        out.push(WorldEvent::Receptacle { receptacle: r, battery, output: 1 });
+        out
     }
 
     /// Plug a battery in a receptacle (0x00c7b490). Returns whether it is plugged, and the events.
@@ -244,8 +251,10 @@ impl WorldActorsState {
         let b = self.batteries.get_mut(&battery).unwrap();
         b.plug = Some(receptacle);
         b.recharging = allow;
+        self.receptacles[receptacle].attached = Some(battery);
+        // The consumers' plug callbacks (0x00C7B490 calls each, whatever `notify`).
+        out.extend(crate::walls::receptacle_changed(defs, self, receptacle, true));
         let rs = &mut self.receptacles[receptacle];
-        rs.attached = Some(battery);
         if notify {
             out.push(WorldEvent::Receptacle { receptacle, battery, output: 0 });
         }
@@ -286,7 +295,7 @@ impl WorldActorsState {
     /// collision has no actor identity to ignore the victim's own geometry.
     pub fn step(&mut self, defs: &WorldActors, events: &[SimEvent], cfg: &GameplayConfig, dt: f32) -> Vec<WorldEvent> {
         let mut out = Vec::new();
-        if self.breakables.len() != defs.breakables.len() || self.receptacles.len() != defs.receptacles.len() {
+        if self.breakables.len() != defs.breakables.len() || self.receptacles.len() != defs.receptacles.len() || self.walls.len() != defs.walls_of_light.len() {
             *self = WorldActorsState::new(defs);
         }
         for r in 0..defs.receptacles.len() {

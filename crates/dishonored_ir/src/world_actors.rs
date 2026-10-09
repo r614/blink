@@ -128,6 +128,33 @@ pub struct ReceptacleDef {
     pub attached: Vec<String>,
 }
 
+/// A placed `DisWallOfLight` with its `DisTweaks_WallOfLight` (research/dishonored/systems/
+/// walls_of_light.md).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct WallOfLightDef {
+    pub name: String,
+    pub package: String,
+    pub position: Vec3,
+    /// The receptacle powering it (index into `WorldActors::receptacles`): `m_pAttachedReceptacle`,
+    /// else the receptacle listing the wall in `m_aAttachedActors`.
+    pub receptacle: Option<usize>,
+    /// `m_FriendlyFactionsOverride` when it has entries, else the tweak's `m_FriendlyFactions`.
+    pub friendly_factions: Vec<String>,
+    /// `m_bReversed`, `m_bEnabled` as placed.
+    pub reversed: bool,
+    pub enabled: bool,
+    /// The tweak's `m_Damage`, `m_bJib`, `m_ActivationTime`, `m_ActivationTimeForPawnEffect`.
+    pub damage: i32,
+    pub jib: bool,
+    pub activation_time: f32,
+    pub activation_time_pawn: f32,
+    /// The static mesh's collision triangles (its kDOP tree's) in world space.
+    pub triangles: Vec<[Vec3; 3]>,
+    pub bounds_min: Vec3,
+    pub bounds_max: Vec3,
+}
+
 /// The world actors of one map.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -136,4 +163,5 @@ pub struct WorldActors {
     pub receptacles: Vec<ReceptacleDef>,
     /// The placed movables (all of them, whatever their health).
     pub movables: Vec<MovableDef>,
+    pub walls_of_light: Vec<WallOfLightDef>,
 }
