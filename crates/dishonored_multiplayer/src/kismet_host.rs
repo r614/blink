@@ -257,6 +257,9 @@ pub struct HostState {
     pub choice: Option<(OpId, PlayerId, Vec<String>, Option<usize>)>,
     /// `AIGoToActor` in progress: op -> (pawn, goal).
     goto: BTreeMap<OpId, GoTo>,
+    /// `NPCDoTeleportSpell` in progress: op -> its casting pawns.
+    #[serde(default)]
+    spells: BTreeMap<OpId, GoTo>,
     /// `StartSpawn` in progress: op -> (spawner originals not yet spawned, spawned so far).
     spawning: BTreeMap<OpId, (Vec<usize>, Vec<PlayerId>)>,
     /// Spawner actor -> index into `MissionSetup::original`.
@@ -1636,6 +1639,71 @@ impl Host for H<'_> {
                 self.st.goto.insert(cx.op, GoTo { pawns: started, yaw, last_ok: false });
                 HostResult::Latent
             }
+            // `DisSeqAct_NPCDoTeleportSpell` (latent; Update 0x00B90530, the pawn's handler
+            // `OnNPCDoTeleportSpell` 0x00B5DD40): Start makes each Target pawn cast its teleport
+            // spell (`teleport_spell`) to `m_pDestinationActor` (an exact teleport taking the
+            // destination's rotation, `m_fReappearanceDelay` the custom delay, the destination its
+            // new home with `m_bSetNewHomeActor`); "Out" fires at once. A pawn without the spell
+            // (its hand's context) reports Interrupted. Each pawn reports once: Success (Last)
+            // when the last one ends having teleported, Interrupted (Any) for each that did not.
+            "DisSeqAct_NPCDoTeleportSpell" => {
+                if cx.input() != Some(0) {
+                    return HostResult::Done;
+                }
+                let pawns: Vec<PlayerId> = cx.objects("Target").into_iter().filter_map(|o| self.pawn_of(&o)).collect();
+                let dest = cx.objects("Destination").into_iter().next().or_else(|| Some(cx.prop_obj("m_pDestinationActor")).filter(|o| !o.is_none()));
+                let goal = dest.as_ref().and_then(|d| self.pos_of(d));
+                let yaw = match &dest {
+                    Some(Obj::Actor(a)) => Some(self.db.actors[*a as usize].yaw_deg()),
+                    _ => None,
+                };
+                let delay = cx.prop("m_fReappearanceDelay").and_then(|v| v.as_float()).unwrap_or(-1.0);
+                let set_home = cx.prop_bool("m_bSetNewHomeActor");
+                cx.fire(0);
+                let Some(g) = goal else { return HostResult::Done };
+                let mut started = Vec::new();
+                for p in pawns {
+                    if !self.m.world.player(p).is_some_and(|x| x.alive) {
+                        continue;
+                    }
+                    let tweak = self.m.setup.original.iter().find(|o| o.spawn.id == p).map(|o| o.tweak.clone()).unwrap_or_default();
+                    let Some(spell) = self.m.crowd.tweak_teleport.get(&tweak).copied() else {
+                        self.note(format!("pawn {p} has no teleport spell ({tweak}): interrupted"));
+                        cx.fire(2);
+                        continue;
+                    };
+                    if let Some(pl) = self.m.world.player_mut(p) {
+                        dishonored_sim::teleport_spell::start_exact(pl, &spell, g, yaw, delay);
+                    }
+                    if set_home {
+                        if let Some(b) = self.m.crowd.brains.iter_mut().find(|b| b.id == p) {
+                            b.home = g;
+                            b.goal = None;
+                        }
+                    }
+                    started.push(p);
+                }
+                if started.is_empty() {
+                    return HostResult::Done;
+                }
+                self.st.spells.insert(cx.op, GoTo { pawns: started, yaw, last_ok: false });
+                HostResult::Latent
+            }
+            // `DisSeqAct_SetPlayerVisSettings::Activated` (0x00B8AB50): with settings, the player
+            // pawn's `m_pScriptedPlayerVisSettings` becomes them (its light normalization, after
+            // a stealth volume's, 0x00BD0120).
+            "DisSeqAct_SetPlayerVisSettings" => {
+                if let Obj::Path(p) = cx.prop_obj("m_pSettings") {
+                    match self.m.crowd.vis_settings.get(&p).copied() {
+                        Some(r) => {
+                            self.m.crowd.scripted_light_range = Some(r);
+                            self.note(format!("player vis settings {p}: light {:.3}..{:.3}", r[0], r[1]));
+                        }
+                        None => self.note(format!("player vis settings {p} not read")),
+                    }
+                }
+                HostResult::Done
+            }
             "DisSeqAct_AISetPatrol" => {
                 for o in cx.objects("Target") {
                     if let Some(p) = self.pawn_of(&o) {
@@ -2984,6 +3052,53 @@ impl Host for H<'_> {
                 let _ = failed;
                 self.st.spawning.remove(&cx.op);
                 cx.fire(1);
+                true
+            }
+            "DisSeqAct_NPCDoTeleportSpell" => {
+                let Some(mut run) = self.st.spells.remove(&cx.op) else { return true };
+                if cx.has_impulse(1) {
+                    // Abort: each casting pawn's spell ends (0x00B4ACF0(2)): Interrupted.
+                    for p in &run.pawns {
+                        if let Some(pl) = self.m.world.player_mut(*p) {
+                            dishonored_sim::teleport_spell::abort(pl);
+                            pl.spell = Default::default();
+                        }
+                    }
+                    cx.fire(2);
+                    return true;
+                }
+                let mut left = Vec::new();
+                for p in std::mem::take(&mut run.pawns) {
+                    let r = match self.m.world.player_mut(p) {
+                        Some(pl) if pl.spell.stage == dishonored_sim::teleport_spell::stage::DONE => {
+                            let r = pl.spell.result;
+                            pl.spell = Default::default();
+                            r
+                        }
+                        Some(pl) if dishonored_sim::teleport_spell::active(pl) => 0,
+                        // Gone or no longer casting: interrupted.
+                        _ => 2,
+                    };
+                    match r {
+                        0 => left.push(p),
+                        1 => {
+                            run.last_ok = true;
+                            self.note(format!("pawn {p} teleported ({})", cx.describe()));
+                        }
+                        _ => {
+                            run.last_ok = false;
+                            cx.fire(2);
+                        }
+                    }
+                }
+                if !left.is_empty() {
+                    run.pawns = left;
+                    self.st.spells.insert(cx.op, run);
+                    return false;
+                }
+                if run.last_ok {
+                    cx.fire(1);
+                }
                 true
             }
             "DisSeqAct_AIGoToActor" => {

@@ -412,6 +412,9 @@ pub struct PlayerState {
     /// `StatePlayerMasterFalling.m_bCameFromJump`: the fall state was entered from the jump.
     #[serde(default)]
     pub fall_from_jump: bool,
+    /// An NPC's teleport spell (`DisItemContext_NPCTeleportSpell`, whalers and Daud).
+    #[serde(default)]
+    pub spell: crate::teleport_spell::SpellState,
 }
 
 /// What the right hand holds (the inventory's hand slot 1, `FUN_00c04bd0(1)`).
@@ -749,6 +752,7 @@ impl PlayerState {
             footfall_phase: 0.0,
             stealth_fall: false,
             fall_from_jump: false,
+            spell: Default::default(),
         }
     }
 

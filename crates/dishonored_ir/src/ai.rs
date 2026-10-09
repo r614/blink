@@ -1622,9 +1622,41 @@ pub struct AiLevel {
     /// Pawn tweak path -> its `m_fDistractionCooldownTime` (the pawn's distraction cooldown).
     #[serde(default)]
     pub tweak_distraction_cooldown: BTreeMap<String, f32>,
-    /// Pawn tweak path -> its `Attribute_HealthMax` (Normal, `m_pAttributeTweaks[1]`).
+    /// Pawn tweak path -> its `m_pAttributeTweaks[1]` health (Normal).
     #[serde(default)]
     pub tweak_health_max: BTreeMap<String, f32>,
+    /// Pawn tweak path -> the teleport spell of its loadout (`m_ContentInventoryLoadout` item ->
+    /// `m_pNPCSpecificTweaks.m_ContextSlots_Direct` of class `DisTweaks_NPCTeleportSpell`): the
+    /// whalers' and Daud's hands.
+    #[serde(default)]
+    pub tweak_teleport: BTreeMap<String, TeleportSpellConfig>,
+    /// The `DisTweaks_PlayerVisSettings` the level's `DisSeqAct_SetPlayerVisSettings` actions set
+    /// (`m_pSettings`): path -> `m_fLightValueDarkestVal`, `m_fLightValueBrightestVal`.
+    #[serde(default)]
+    pub vis_settings: BTreeMap<String, [f32; 2]>,
+}
+
+/// A `DisTweaks_NPCTeleportSpell` (research/dishonored/systems/teleport_spell.md).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct TeleportSpellConfig {
+    /// `m_fDisappearanceFadeOutTime`, `m_fReappearanceFadeInTime`.
+    pub fade_out: f32,
+    pub fade_in: f32,
+    /// `m_TeleportDelay` (min, max): the time fully hidden.
+    pub delay: [f32; 2],
+    /// `m_DistanceFromTarget` (min, max): a combat teleport's distance from its target.
+    pub distance: [f32; 2],
+    /// `m_ContextCooldown`, `m_ContextCooldownWhenUnreachable` (min, max).
+    pub cooldown: [f32; 2],
+    pub cooldown_unreachable: [f32; 2],
+    /// `m_fIdealContextRange`, `m_fMaxContextRange`, `m_fAllowedAngle`,
+    /// `m_fAllowedAngleFromTargetDir`, `m_fMinEscapeDistance`.
+    pub ideal_range: f32,
+    pub max_range: f32,
+    pub allowed_angle: f32,
+    pub angle_from_target: f32,
+    pub min_escape: f32,
 }
 
 impl AiLevel {

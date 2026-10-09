@@ -688,6 +688,16 @@ pub struct Crowd {
     /// Pawn tweak -> `Attribute_HealthMax` (Normal), for spawned NPCs.
     #[serde(default)]
     pub tweak_health_max: BTreeMap<String, f32>,
+    /// Pawn tweak -> its teleport spell (whalers, Daud).
+    #[serde(default)]
+    pub tweak_teleport: BTreeMap<String, dishonored_ir::ai::TeleportSpellConfig>,
+    /// The player's scripted vis settings (`DisSeqAct_SetPlayerVisSettings` ->
+    /// `m_pScriptedPlayerVisSettings`): their darkest / brightest light values.
+    #[serde(default)]
+    pub scripted_light_range: Option<[f32; 2]>,
+    /// `DisTweaks_PlayerVisSettings` path -> darkest / brightest, for the level's actions.
+    #[serde(default)]
+    pub vis_settings: BTreeMap<String, [f32; 2]>,
 }
 
 /// `DisGlobalManager` alarm cooldown (`DefaultLevel.ini m_fAlarmCooldown`, class default 10).
@@ -1424,7 +1434,9 @@ impl Crowd {
             light_at_with(&self.lights, self.sky_light, origin, world)
         };
         let pv = &self.ai.player_visibility;
-        let range = dishonored_ir::ai::stealth_light_range(&self.stealth_volumes, origin).unwrap_or([pv.light_darkest, pv.light_brightest]);
+        // 0x00BD0120: the player's stealth volume settings, else its scripted settings
+        // (`m_pScriptedPlayerVisSettings`, `DisSeqAct_SetPlayerVisSettings`), else the map's.
+        let range = dishonored_ir::ai::stealth_light_range(&self.stealth_volumes, origin).or(self.scripted_light_range).unwrap_or([pv.light_darkest, pv.light_brightest]);
         let v = (raw, light01(raw, range));
         self.player_lights.insert(p.id, v);
         v
@@ -1449,6 +1461,10 @@ impl Crowd {
         self.set_distractors(&level.distractors);
         self.tweak_distraction_cooldown = level.tweak_distraction_cooldown.clone();
         self.tweak_health_max = level.tweak_health_max.clone();
+        self.tweak_teleport = level.tweak_teleport.clone();
+        self.vis_settings = level.vis_settings.clone();
+        // A new map's player pawn has no scripted settings.
+        self.scripted_light_range = None;
         self.stealth_lights = level.stealth_lights.clone();
         self.light_volumes = level.light_volumes.clone();
     }

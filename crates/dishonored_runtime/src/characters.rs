@@ -702,7 +702,7 @@ pub fn animate_characters(
         for c in children.iter() {
             if let Ok((wm, mut vis)) = wmeshes.get_mut(c) {
                 let k = weapons.weapons[wm.0].kind;
-                let show = p.alive && p.condition != dishonored_sim::state::Condition::Unconscious && p.carried_by.is_none() && p.mode != MoveMode::Blinking && (Some(k) == right_w || Some(k) == left_w);
+                let show = p.alive && p.condition != dishonored_sim::state::Condition::Unconscious && p.carried_by.is_none() && p.mode != MoveMode::Blinking && !dishonored_sim::teleport_spell::hidden(p) && (Some(k) == right_w || Some(k) == left_w);
                 *vis = if show { Visibility::Inherited } else { Visibility::Hidden };
             }
             if let Ok((wj, mut t)) = wjoints.get_mut(c) {

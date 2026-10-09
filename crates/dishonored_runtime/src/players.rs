@@ -137,7 +137,8 @@ pub fn sync_players(
                 if let Some(mesh) = mesh.as_mut() { mesh.0 = if p.crouched { assets.crouch_body.clone() } else { assets.body.clone() }; }
                 if let Some(mat) = mat.as_mut() { mat.0 = if p.alive { assets.materials[p.id as usize % assets.materials.len()].clone() } else { assets.dead.clone() }; }
                 let hide = Some(p.id) == me_id && !third && cams.iter().all(|c| c.follow.is_none_or(|f| f == p.id));
-                *vis = if hide || p.mode == MoveMode::Blinking { Visibility::Hidden } else { Visibility::Inherited };
+                // A teleporting NPC is gone while fully faded out (`teleport_spell`).
+                *vis = if hide || p.mode == MoveMode::Blinking || dishonored_sim::teleport_spell::hidden(p) { Visibility::Hidden } else { Visibility::Inherited };
             }
             None => { commands.entity(e).despawn(); }
         }

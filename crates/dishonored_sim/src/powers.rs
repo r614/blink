@@ -744,9 +744,10 @@ pub fn end_possession(state: &mut WorldState, who: usize, had_host: bool, ctx: &
     p.possess.cooldown = cfg.items.possess.cancel_cooldown;
 }
 
-/// A possessor is hidden inside its host: not hittable, not visible (hook for perception).
+/// A possessor is hidden inside its host, and a teleporting NPC while faded out: not hittable,
+/// not visible (hook for perception).
 pub fn is_hidden(p: &PlayerState) -> bool {
-    matches!(p.possess.stage, PossessStage::PrePossess | PossessStage::Active)
+    matches!(p.possess.stage, PossessStage::PrePossess | PossessStage::Active) || crate::teleport_spell::hidden(p)
 }
 
 // ---------------------------------------------------------------------------------------

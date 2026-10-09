@@ -1,5 +1,5 @@
-//! Finds the tweak classes and objects whose properties mention a text (skipped without the
-//! install). `DH_TWEAK_TEXT=m_FocusRegions cargo test -p dishonored_assets --test tweak_search_retail -- --ignored --nocapture`
+//! Finds the tweak objects whose properties mention a text (skipped without the install).
+//! `DH_TWEAK_TEXT=Twk_Inv_AssassinHand DH_TWEAK_PACKAGES=L_Flooded_FIntro_Script cargo test -p dishonored_assets --test tweak_search_retail -- --ignored --nocapture`
 
 use dishonored_assets::Content;
 use dishonored_assets::tweaks::{TweakDb, dump};
@@ -9,23 +9,18 @@ use dishonored_assets::tweaks::{TweakDb, dump};
 fn search() {
     let Ok(c) = Content::locate() else { return };
     let text = std::env::var("DH_TWEAK_TEXT").unwrap_or_else(|_| "m_FocusRegions".into());
-    let db = TweakDb::load(&c).unwrap();
+    let pkgs: Vec<String> = std::env::var("DH_TWEAK_PACKAGES").unwrap_or_default().split(',').filter(|s| !s.is_empty()).map(str::to_string).collect();
+    let db = TweakDb::load_with(&c, &pkgs).unwrap();
     let mut classes = db.subclasses_of("DisTweaksBase");
     classes.push("DisTweaksBase".into());
     for class in &classes {
-        let Ok(m) = db.class_defaults(class) else { continue };
-        let mut s = String::new();
-        dump(&m, 0, &mut s);
-        if s.contains(&text) {
-            println!("class {class}:");
-            for l in s.lines().filter(|l| l.contains(&text)).take(4) {
-                println!("    {l}");
-            }
-            for p in db.paths_with_class(class).iter().take(3) {
-                let mut s = String::new();
-                dump(&db.try_resolve(p).unwrap_or_default(), 2, &mut s);
-                let pos = s.find(&text).unwrap_or(0);
-                println!("  object {p}: {}", s[pos.saturating_sub(200)..(pos + 2500).min(s.len())].replace('\n', " | "));
+        for p in db.paths_with_class(class) {
+            let mut s = String::new();
+            dump(&db.try_resolve(&p).unwrap_or_default(), 0, &mut s);
+            if let Some(pos) = s.find(&text) {
+                let line_start = s[..pos].rfind('\n').map_or(0, |i| i + 1);
+                let line_end = s[pos..].find('\n').map_or(s.len(), |i| pos + i);
+                println!("{class} {p}: {}", s[line_start..line_end].trim());
             }
         }
     }

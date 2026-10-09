@@ -34,6 +34,7 @@ pub mod world_actors;
 pub mod interactables;
 pub mod launchers;
 pub mod walls;
+pub mod teleport_spell;
 
 use dishonored_ir::gameplay::GameplayConfig;
 use dishonored_world::WorldQuery;
@@ -164,6 +165,8 @@ pub fn step_world(
         let ctx = MoveCtx { world, cfg: &mvc, dt };
         if !p0.alive || p0.incapacitated() {
             let p = &mut state.players[i];
+            // A teleport spell ends with its caster (the context is popped: Interrupted).
+            teleport_spell::abort(p);
             // The Blink component still ticks (a dead caster deactivates it, 0x00BFC5D0).
             let mut acts = Vec::new();
             blink::tick_cooldown(p, dt, &g.blink, &mut acts);
@@ -179,6 +182,14 @@ pub fn step_world(
             }
             takedown::step_afflictions(state, i, dt, g, &mut out.events);
             let p = &mut state.players[i];
+            p.prev_buttons = input.buttons;
+            p.last_input = input;
+            continue;
+        }
+        if teleport_spell::active(&p0) {
+            // Casting the teleport spell: the pawn does nothing else (`teleport_spell`).
+            let p = &mut state.players[i];
+            teleport_spell::step(p, dt);
             p.prev_buttons = input.buttons;
             p.last_input = input;
             continue;

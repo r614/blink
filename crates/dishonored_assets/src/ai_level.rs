@@ -43,6 +43,41 @@ fn objs(m: &TMap, key: &str) -> Vec<String> {
     }
 }
 
+/// A pawn tweak's teleport spell: the first `DisTweaks_NPCTeleportSpell` among the direct and
+/// primary context slots of its loadout items' NPC-specific tweaks.
+fn teleport_spell(db: &TweakDb, pawn: &str) -> Option<dishonored_ir::ai::TeleportSpellConfig> {
+    let m = db.try_resolve(pawn)?;
+    for item in objs(&m, "m_ContentInventoryLoadout") {
+        let Some(spec) = db.try_resolve(&item).and_then(|i| get_obj(&i, "m_pNPCSpecificTweaks").map(str::to_string)).and_then(|s| db.try_resolve(&s)) else { continue };
+        for slots in ["m_ContextSlots_Direct", "m_ContextSlots_Primary"] {
+            let Some(TVal::List(l)) = spec.get(slots) else { continue };
+            for s in l {
+                let Some(ctx) = get_obj(s, "m_pItemContext") else { continue };
+                if db.class_of(ctx).as_deref() != Some("DisTweaks_NPCTeleportSpell") {
+                    continue;
+                }
+                let t = db.try_resolve(ctx)?;
+                let f = |k: &str| get_f32(&t, k).unwrap_or(0.0);
+                let r = |k: &str| [get_f32(&t, &format!("{k}.m_fMinValue")).unwrap_or(0.0), get_f32(&t, &format!("{k}.m_fMaxValue")).unwrap_or(0.0)];
+                return Some(dishonored_ir::ai::TeleportSpellConfig {
+                    fade_out: f("m_fDisappearanceFadeOutTime"),
+                    fade_in: f("m_fReappearanceFadeInTime"),
+                    delay: r("m_TeleportDelay"),
+                    distance: r("m_DistanceFromTarget"),
+                    cooldown: r("m_ContextCooldown"),
+                    cooldown_unreachable: r("m_ContextCooldownWhenUnreachable"),
+                    ideal_range: f("m_fIdealContextRange"),
+                    max_range: f("m_fMaxContextRange"),
+                    allowed_angle: f("m_fAllowedAngle"),
+                    angle_from_target: f("m_fAllowedAngleFromTargetDir"),
+                    min_escape: f("m_fMinEscapeDistance"),
+                });
+            }
+        }
+    }
+    None
+}
+
 fn faction(db: &TweakDb, path: &str) -> Option<Faction> {
     let m = db.try_resolve(path)?;
     // The fallback chain is a list of `Pkg.Obj` names (nearest first).
@@ -137,6 +172,15 @@ pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String
             out.tweak_health_max.insert(t.clone(), v);
         }
     }
+    // Each pawn tweak's teleport spell: its loadout items' NPC-specific direct context slots.
+    for t in tweaks {
+        if out.tweak_teleport.contains_key(t) {
+            continue;
+        }
+        if let Some(c) = teleport_spell(&db, t) {
+            out.tweak_teleport.insert(t.clone(), c);
+        }
+    }
     let mut resolver = crate::collision_audit::PropResolver::new(content);
     // The class of each pawn tweak's Combat-slot behaviour (its NPC class).
     for t in tweaks {
@@ -182,6 +226,20 @@ pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String
         }
         if out.player_light_range.is_none() {
             out.player_light_range = map_player_light_range(&pkg, &db);
+        }
+        // The settings the level's `DisSeqAct_SetPlayerVisSettings` actions set (`m_pSettings`).
+        for i in 0..pkg.exports.len() {
+            if pkg.export_class(i) != "DisSeqAct_SetPlayerVisSettings" {
+                continue;
+            }
+            let Some(r) = pkg.read_object(i).ok().and_then(|h| find(&h.properties, "m_pSettings").and_then(|p| p.as_object())).map(ObjRef::from_index).filter(|r| *r != ObjRef::Null) else { continue };
+            let path = pkg.obj_path(r);
+            if let Some(m) = db.try_resolve(&path) {
+                let (d, b) = (get_f32(&m, "m_fLightValueDarkestVal"), get_f32(&m, "m_fLightValueBrightestVal"));
+                if let (Some(d), Some(b)) = (d, b) {
+                    out.vis_settings.insert(path, [d, b]);
+                }
+            }
         }
         for i in 0..pkg.exports.len() {
             if pkg.obj_name(ObjRef::from_index(pkg.exports[i].outer)) != "PersistentLevel" {
