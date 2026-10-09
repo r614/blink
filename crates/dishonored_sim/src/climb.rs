@@ -143,12 +143,24 @@ pub fn try_touch_grab(p: &mut PlayerState, ctx: &MoveCtx, events: &mut Vec<SimEv
 /// The chain is the one whose body line passes nearest the crosshair within `reach` of the eye
 /// and `cos_limit` of the view (the pickups' rule), with a clear line to it.
 pub fn try_use_grab(p: &mut PlayerState, world: &dyn WorldQuery, cfg: &dishonored_ir::gameplay::MovementConfig, reach: f32, cos_limit: f32, events: &mut Vec<SimEvent>) -> bool {
+    match grab_target(p, world, cfg, reach, cos_limit) {
+        Some((i, _)) => {
+            start_climb(p, i, events);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The chain a Use would grab now ([`try_use_grab`]'s choice) and the point of its body line
+/// nearest the view: what the HUD's prompt points at.
+pub fn grab_target(p: &PlayerState, world: &dyn WorldQuery, cfg: &dishonored_ir::gameplay::MovementConfig, reach: f32, cos_limit: f32) -> Option<(u16, Vec3)> {
     if !can_grab(p) || !matches!(p.mode, MoveMode::Walking | MoveMode::Falling) {
-        return false;
+        return None;
     }
     let eye = crate::movement::eye_position(p, cfg);
     let dir = crate::movement::view_vector(p.yaw, p.pitch);
-    let mut best: Option<(u16, f32)> = None;
+    let mut best: Option<(u16, f32, Vec3)> = None;
     for (i, c) in world.climbables().iter().enumerate() {
         // Closest point of the chain to the view ray.
         let ab = c.bottom - c.top;
@@ -172,17 +184,11 @@ pub fn try_use_grab(p: &mut PlayerState, world: &dyn WorldQuery, cfg: &dishonore
         if world.raycast(eye, to, d, channel::PAWN).is_some_and(|h| h.distance < d - c.body_half_width - 1.0) {
             continue;
         }
-        if best.is_none_or(|(_, bc)| cos > bc) {
-            best = Some((i as u16, cos));
+        if best.is_none_or(|(_, bc, _)| cos > bc) {
+            best = Some((i as u16, cos, q));
         }
     }
-    match best {
-        Some((i, _)) => {
-            start_climb(p, i, events);
-            true
-        }
-        None => false,
-    }
+    best.map(|(i, _, q)| (i, q))
 }
 
 /// Leave the chain (climb state exit 0x00A6E2C0 into Jump or Falling).

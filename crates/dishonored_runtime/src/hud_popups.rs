@@ -258,8 +258,18 @@ pub struct Focus {
     pub name: String,
 }
 
-/// Same reach / facing rule as the server (`MissionMatch::interaction`).
-pub fn focused_interaction(mv: &MissionView, view: &crate::session::SessionView, me: &dishonored_sim::state::PlayerState, yaw: f32, pitch: f32) -> Option<Focus> {
+/// `EDisUIInteraction` (DisGFxMoviePlayerHUD), the index of `m_InteractionTexts`.
+pub const DUI_SPECIAL_CHOKE: usize = 3;
+pub const DUI_CROSSHAIR_PICKUP: usize = 31;
+pub const DUI_CROSSHAIR_CARRY: usize = 32;
+
+/// The interactions window for the local player: exactly what the host's sim chose as the
+/// crosshair target (`MatchView::focus`, `dishonored_sim::crosshair`) with its prompt, plus the
+/// choke line (`m_InteractionTexts[DUI_Special_Choke]`, "`GBA_Block` [Hold]") when a Block press
+/// would choke. `texts` is `Twk_GFxMoviePlayerHUD.m_InteractionTexts`, by `EDisUIInteraction`.
+/// The lines are joined with newlines, crosshair group first, special group last (0x00BA6150).
+pub fn focused_interaction(mv: &MissionView, matchv: &dishonored_multiplayer::MatchView, me: &dishonored_sim::state::PlayerState, texts: &[String]) -> Option<Focus> {
+    use dishonored_sim::crosshair::CrosshairStatus;
     if !me.alive || mv.outcome.is_some() {
         return None;
     }
@@ -271,54 +281,28 @@ pub fn focused_interaction(mv: &MissionView, view: &crate::session::SessionView,
     if me.mode == dishonored_sim::state::MoveMode::Climbing {
         return Some(Focus { text: "`GBA_Jump` Jump off".into(), point: None, name: String::new() });
     }
-    let eye = me.position + glam::Vec3::Z * 64.0;
-    let fwd = dishonored_sim::movement::view_vector(yaw, pitch);
-    let mut best: Option<(f32, String, glam::Vec3, String)> = None;
-    let mut consider = |pos: glam::Vec3, reach: f32, prompt: &str, name: &str| {
-        let d = pos - eye;
-        let dist = d.length();
-        if dist > reach || dist < 1.0 {
-            return;
-        }
-        let facing = d.normalize().dot(fwd);
-        if facing < 0.6 {
-            return;
-        }
-        let score = dist * (2.0 - facing);
-        if best.as_ref().is_none_or(|b| score < b.0) {
-            best = Some((score, prompt.to_string(), pos, name.to_string()));
+    let f = matchv.focus.iter().find(|f| f.player == me.id)?;
+    let text = |i: usize| texts.get(i).filter(|s| !s.is_empty()).cloned();
+    let mut lines: Vec<String> = Vec::new();
+    let use_line = if !f.text.is_empty() {
+        // Prompts without a key tag are Use interactions (`m_InteractText` "`GBA_Use` ...").
+        Some(if f.text.contains('`') { f.text.clone() } else { format!("`GBA_Use` {}", f.text) })
+    } else {
+        // A target with no text of its own: the HUD's text for its kind.
+        match f.crosshair.map(|c| c.status) {
+            Some(CrosshairStatus::Pickup) => text(DUI_CROSSHAIR_PICKUP),
+            Some(CrosshairStatus::MovableCorpse) => text(DUI_CROSSHAIR_CARRY),
+            _ => None,
         }
     };
-    for (p, prompt) in &mv.usables {
-        consider(glam::Vec3::from(*p), 220.0, prompt, "");
+    lines.extend(use_line);
+    if f.choke {
+        lines.extend(text(DUI_SPECIAL_CHOKE));
     }
-    // Physics props the hands are free to take (`m_InteractText` "`GBA_Use` Carry").
-    if me.holding.is_none() && me.carrying.is_none() {
-        for m in view.movables.iter().filter(|m| m.interactable && !m.gone && m.phase != dishonored_sim::state::MovablePhase::Held && m.damage >= 0 && !m.prompt.is_empty()) {
-            consider(m.center(), m.max_distance + 20.0, &m.prompt, "");
-        }
+    if lines.is_empty() {
+        return None;
     }
-    // Projectile launchers (`DisProjectileLauncher`): the view entering the tripod's collision
-    // bounds within its interactable's `m_fMaxDistance` (the server's `launchers::focused`); the
-    // prompt and title are the interactable tweak's ("`GBA_Use` Disarm", "Projectile Launcher").
-    for l in view.matchv.launchers.iter().filter(|l| !l.prompt.is_empty()) {
-        let (lo, hi) = (glam::Vec3::from(l.bounds_min), glam::Vec3::from(l.bounds_max));
-        if let Some(t) = dishonored_sim::interactables::ray_box(eye, fwd, lo, hi, l.max_distance) {
-            consider(eye + fwd * t, l.max_distance, &l.prompt, &l.label);
-        }
-    }
-    for (npc, prompt) in &mv.talkers {
-        let Some(id) = mv.npc_ids.iter().find(|x| &x.0 == npc).map(|x| x.1) else { continue };
-        if let Some(o) = view.others.iter().find(|o| o.id == id && o.alive) {
-            let name = mv.npc_names.iter().find(|x| &x.0 == npc).map(|x| x.1.as_str()).unwrap_or("");
-            consider(o.position + glam::Vec3::Z * 40.0, 200.0, prompt, name);
-        }
-    }
-    best.map(|(_, prompt, pos, name)| {
-        // Prompts without a key tag are Use interactions (`m_InteractText` "`GBA_Use` ...").
-        let text = if prompt.contains('`') { prompt } else { format!("`GBA_Use` {prompt}") };
-        Focus { text, point: Some(pos.to_array()), name }
-    })
+    Some(Focus { text: lines.join("\n"), point: f.point, name: f.name.clone() })
 }
 
 /// `m_AsleepCrosshairText` (the pawn tweaks' value): the crosshair's info line over someone

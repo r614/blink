@@ -361,8 +361,14 @@ mod tests {
             m.interaction(1)
         };
         assert_eq!(focus(&mut m, Vec3::new(-120.0, 0.0, 70.0), 0.0), Some(Interaction::Launcher(0)), "the view enters the tripod's bounds within m_fMaxDistance");
+        // The HUD's focus is that same target with the launcher's prompt and title.
+        let f = m.view.focus.iter().find(|f| f.player == 1).unwrap().clone();
+        assert!(matches!(f.crosshair.map(|c| c.target), Some(dishonored_sim::crosshair::TargetRef::Host(_))));
+        assert_eq!((f.text.as_str(), f.name.as_str(), f.point, f.choke), ("`GBA_Use` Disarm", "Projectile Launcher", Some([0.0, 0.0, 130.0]), false));
         assert_eq!(focus(&mut m, Vec3::new(-400.0, 0.0, 70.0), 0.0), None, "out of reach");
         assert_eq!(focus(&mut m, Vec3::new(-120.0, 0.0, 70.0), 180.0), None, "looking away");
+        let f = m.view.focus.iter().find(|f| f.player == 1).unwrap();
+        assert_eq!((f.crosshair, f.text.as_str()), (None, ""), "nothing in focus, no prompt");
         m.world.player_mut(1).unwrap().position = Vec3::new(-120.0, 0.0, 70.0);
         let mut events = Vec::new();
         m.step_launchers(&world, &cfg, &mut events);
@@ -378,6 +384,35 @@ mod tests {
         let st = m.launchers.get("t").unwrap().clone();
         let back: dishonored_sim::launchers::LaunchersState = serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
         assert_eq!(back, st);
+    }
+
+    #[test]
+    fn the_focus_offers_the_choke_only_from_behind_a_pawn_in_view() {
+        use dishonored_sim::crosshair::TargetRef;
+        let (mut m, cfg) = rig(Interactables::default());
+        let world = dishonored_world::CollisionWorld::from_triangles(Vec::new(), Vec::new());
+        dishonored_sim::spawn_npc(&mut m.world, 1000, dishonored_sim::state::PawnKind::Guard, 0, Vec3::new(80.0, 0.0, 0.0), 0.0, &cfg);
+        let step = |m: &mut crate::mission::MissionMatch, npc_yaw: f32| {
+            m.world.player_mut(1000).unwrap().yaw = npc_yaw;
+            for id in [1, 1000] {
+                let p = m.world.player_mut(id).unwrap();
+                p.position.z = 0.0;
+                p.velocity = Vec3::ZERO;
+            }
+            let npc = m.world.player(1000).unwrap().position + Vec3::Z * 20.0;
+            let (yaw, pitch) = dishonored_sim::crosshair::aim_at(m.world.player(1).unwrap(), &cfg.gameplay.movement, npc);
+            m.step(&[(1, PlayerInput { yaw, pitch, ..Default::default() }), (1000, PlayerInput { yaw: npc_yaw, ..Default::default() })], &world, &cfg);
+            m.view.focus.iter().find(|f| f.player == 1).unwrap().clone()
+        };
+        // Behind the guard (it faces away, +X): the crosshair is on it and Block would choke.
+        let f = step(&mut m, 0.0);
+        assert_eq!(f.crosshair.map(|c| c.target), Some(TargetRef::Pawn(1000)), "{f:?}");
+        assert!(f.choke);
+        assert!(f.text.is_empty(), "a living pawn takes no Use");
+        // Facing the player: no choke, so the pawn is not an interactable at all.
+        let f = step(&mut m, 180.0);
+        assert!(!f.choke);
+        assert_eq!(f.crosshair, None);
     }
 
     #[test]

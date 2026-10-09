@@ -94,6 +94,46 @@ pub struct HudTexts {
     /// `DisTweaks_ChapterTarget`s (DishonoredGame.upk `Twk_ChapterInfoList.ChapterTargets.*`):
     /// object name (lower case) -> (`m_TargetName`, `m_TargetPortraitPath`), read on first use.
     pub chapter_targets: Option<HashMap<String, (String, Option<String>)>>,
+    /// `m_InteractionTexts[EDisUIInteraction]` (Twk_GFxMoviePlayerHUD): the interactions
+    /// window's lines by interaction ("`GBA_Block` [Hold]" for the choke, ...).
+    pub interactions: Vec<String>,
+}
+
+/// `Twk_InGameUI.Twk_GFxMoviePlayerHUD.m_InteractionTexts` (a static array of `DUI_MAX`
+/// strings; the entries the object leaves out are empty), with the localization's values over
+/// them (`[Twk_GFxMoviePlayerHUD DisTweaks_GFxMoviePlayerHUD]`).
+pub fn interaction_texts(content: &dishonored_assets::Content, loc: &dishonored_assets::loc::Localization) -> Vec<String> {
+    use ue3_package::properties::Value;
+    let mut out: Vec<String> = Vec::new();
+    let mut put = |i: usize, s: String| {
+        if out.len() <= i {
+            out.resize(i + 1, String::new());
+        }
+        out[i] = s;
+    };
+    if let Ok(pkg) = content.package("DishonoredGame") {
+        for i in 0..pkg.exports.len() {
+            if pkg.export_class(i) != "DisTweaks_GFxMoviePlayerHUD" {
+                continue;
+            }
+            let path = pkg.obj_path(ue3_package::ObjRef::Export(i));
+            if !path.eq_ignore_ascii_case("Twk_InGameUI.Twk_GFxMoviePlayerHUD") {
+                continue;
+            }
+            let Ok(h) = pkg.read_object(i) else { continue };
+            for p in h.properties.iter().filter(|p| p.name.eq_ignore_ascii_case("m_InteractionTexts")) {
+                if let Value::Str(s) = &p.value {
+                    put(p.array_index.max(0) as usize, s.clone());
+                }
+            }
+        }
+    }
+    for i in 0..64 {
+        if let Some(s) = loc.get("Twk_GFxMoviePlayerHUD DisTweaks_GFxMoviePlayerHUD", &format!("m_InteractionTexts[{i}]")) {
+            put(i, s.to_string());
+        }
+    }
+    out
 }
 
 /// Read the chapter targets (the target notification's name and portrait).
@@ -210,6 +250,7 @@ fn load_texts(content: &dishonored_assets::Content) -> HudTexts {
         g(tw, "m_PressKeyToBuyPowers", "New Rune added<br />Press `GBA_Journal` to acquire Powers"),
         g(tw, "m_PressKeyToEquipBoneCharms", "New Bone Charm added<br />Press `GBA_Journal` to equip"),
     ];
+    t.interactions = interaction_texts(content, &loc);
     for ((sec, k), v) in &loc.entries {
         if sec == "Keys" {
             t.keys.insert(k.clone(), v.clone());
@@ -727,7 +768,7 @@ pub fn update_gfx_hud(
     let opacity = hs.crosshair_opacity;
     let movement = hs.crosshair_movement;
     let window = windows.iter().next().map(|w| Vec2::new(w.width(), w.height()));
-    let focus = mission.zip(me).and_then(|(mv, p)| crate::hud_popups::focused_interaction(mv, &view, p, local.yaw, local.pitch));
+    let focus = mission.zip(me).and_then(|(mv, p)| crate::hud_popups::focused_interaction(mv, &view.matchv, p, &hud.texts.interactions));
     let (item_cross, item_dot, dispersion) = me.map(|p| crosshair_settings(wheel_item(p.left.item))).unwrap_or((None, true, false));
     let (aspect, show_dot) = if style == 2 { (item_cross, item_dot) } else { (None, true) };
     let interacting = focus.is_some();
