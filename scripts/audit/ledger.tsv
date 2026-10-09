@@ -26,3 +26,24 @@
 00bf3a50	irrelevant	power screen effects (Blinded, Bend Time opacity, Outsider vision, noise params): runtime power_pp
 00a8fe10	gap	drop-assassination tutorial hint (m_DropAssassinationNoteTitle) when above an NPC within range and the tutorial option is on
 00aadba0	gap	Heart tutorial hint (m_HeartTargetTutorialMessage) near a Heart target
+# combat.rs (2026-10-09)
+00c06920	gap	parry camera shake direction from the attacker's swing shape (0xE4-byte entries, 0x00C027B0); the block handler 0x00C22B60 then shakes the camera by m_fBlockCameraShakeScale x the attacker's m_fCamShake_OnParry (0x00AA5F90) and turns it to the attacker for m_fBlockCameraTrackTime (0x00AB4DE0) unless the attacker's context is in m_BlockCameraTrackExcludeContexts: client camera, not ported
+00c12a80	helper	registers / clears a timer callback (kind 3)
+00a8fd30	gap	tutorial hint: m_BlockTutorialMessage (gameplay tutorial system 0x00ABFF80 / 0x00ABFEE0, not ported)
+00acf4c0	gap	tutorial hint: m_PerfectBlockTutorialMessage (gameplay tutorial system)
+00ac4610	gap	tutorial hint 0x18 armed (0x00ABFF80) from the sword hit resolution (gameplay tutorial system)
+00abff80	gap	gameplay tutorial hint: armed with a delay when the HUD's tutorial option is on (+0x304 bit 0x10); 0x00ABFEE0 counts it down, queues the hint on the HUD (0x00BC31B0) and restores time-dilation channel 10 (0x009FA0D0)
+00abfee0	gap	gameplay tutorial hint countdown -> HUD queue + time dilation channel 10 restore
+00c13c10	irrelevant	impact sound event (Wwise) on a hit
+00c22990	irrelevant	item context animation play / stop (presentation)
+00c09c70	ported	attack direction vs block resolution through 0x00BBA970 (cited) / 0x00BC6D90
+00ab2ba0	gap	sets m_fFocusTimer (+0x8E8) from the tweak after a kill with an item (+0x6FC): focus / slow-motion beat, not ported
+00b4a270	helper	context-type dispatch (vslots 0x658..0x664)
+00c083a0	helper	action-state transition request
+00bffcd0	helper	player controller state check
+00bbf2f0	helper	player controller vslot 0x438 check
+00a66df0	helper	team / relationship test (+0x84 / +0x88)
+00bbaff0	helper	eye / base location of a pawn (vehicle-aware)
+00bc9000	helper	physical material of a hit (0x00B66950, cited)
+009fb090	helper	tweak object of an actor (vslot 4)
+0056cc00	helper	collision cylinder radius / height
