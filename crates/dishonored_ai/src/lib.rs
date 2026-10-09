@@ -42,7 +42,7 @@
 //! probe's scale, hearing through audio cells, the bark attachment to this port's states, and
 //! the alarm decision details.
 
-use dishonored_ir::ai::{AiConfig, AiLevel, NpcClass, AlarmBellDef, AttentionConfig, AttentionIncrease, DAL_BUSTED, DAL_HEAD_TRACK, DAL_INVESTIGATE, FactionTable, ForbiddenZone, PatrolRoute, PlayerVisibilityConfig, ProbeLight, Relationship, VisionConfig, reason};
+use dishonored_ir::ai::{AiConfig, AiLevel, NpcClass, AlarmBellDef, RatCombatConfig, AttentionConfig, AttentionIncrease, DAL_BUSTED, DAL_HEAD_TRACK, DAL_INVESTIGATE, FactionTable, ForbiddenZone, PatrolRoute, PlayerVisibilityConfig, ProbeLight, Relationship, VisionConfig, reason};
 use std::collections::BTreeMap;
 use dishonored_sim::events::{ChokeOutcome, NoiseContext, SimEvent};
 #[cfg(test)]
@@ -63,7 +63,7 @@ pub mod slots;
 pub mod special;
 pub mod watchtower;
 
-pub use slots::{Behavior, EscapePhase, EscapeState, MagicState, QueuedStim, SearchState, SearchSub, Stim, slot};
+pub use slots::{Behavior, EscapePhase, EscapeState, MagicState, QueuedStim, RatSub, RatSwarmState, SearchState, SearchSub, Stim, slot};
 use slots::AlarmCause;
 pub use special::SpecialCombat;
 
@@ -504,6 +504,20 @@ pub struct Brain {
     pub vis_clock: f32,
     #[serde(default)]
     pub vis_cands: Vec<VisCand>,
+    /// [rats] The `DisBehaviorCombatRatSwarm` the pawn tweak's brain lists, the pawn's call for
+    /// help against a swarm (`m_SwarmCallForHelpLoudness` as a distance) and the time until it
+    /// may call again (once a second, 0x00A6AD20), `m_PanicCount` (kept across restarts: the
+    /// start 0x00B167A0 never resets it), and the calls made this tick (position, radius, swarm).
+    #[serde(default)]
+    pub rat_combat: Option<RatCombatConfig>,
+    #[serde(default)]
+    pub rat_call_radius: f32,
+    #[serde(default)]
+    pub rat_call_cd: f32,
+    #[serde(default)]
+    pub rat_panic: u32,
+    #[serde(default)]
+    pub rat_calls: Vec<(Vec3, f32, u32)>,
 }
 
 /// A target in a vision component's candidate list: the line of sight is traced again once
@@ -702,6 +716,15 @@ pub struct Crowd {
     /// Pawn tweak -> its teleport spell (whalers, Daud).
     #[serde(default)]
     pub tweak_teleport: BTreeMap<String, dishonored_ir::ai::TeleportSpellConfig>,
+    /// [rats] Pawn tweak -> its brain's `DisBehaviorCombatRatSwarm`, and its call for help.
+    #[serde(default)]
+    pub tweak_rat_combat: BTreeMap<String, RatCombatConfig>,
+    #[serde(default)]
+    pub tweak_rat_call: BTreeMap<String, f32>,
+    /// [rats] Calls for help against a swarm made last tick (the noise path 0x00C58560 case
+    /// RatSwarm): position, radius, maker, swarm.
+    #[serde(default)]
+    pub rat_calls: Vec<(Vec3, f32, PlayerId, u32)>,
     /// The player's scripted vis settings (`DisSeqAct_SetPlayerVisSettings` ->
     /// `m_pScriptedPlayerVisSettings`): their darkest / brightest light values.
     #[serde(default)]
@@ -989,6 +1012,8 @@ pub struct Senses<'a> {
     audio: &'a dishonored_ir::ai::AudioCells,
     /// Powers used this tick: (user, `MagicMode` 0 / 1 / 2 of 0x00b23e50).
     magic: &'a [(PlayerId, u8)],
+    /// Last tick's calls for help against a swarm (position, radius, maker, swarm).
+    rat_calls: &'a [(Vec3, f32, PlayerId, u32)],
 }
 
 /// The powers of last tick's events as magic witness modes (0x00bf9fb0 callers): Windblast
@@ -1205,7 +1230,9 @@ impl Crowd {
         let magic = magic_modes(events, world_state, &mut self.bend_stop);
         // [distraction] The distraction manager and the distractors tick before the brains.
         let mut distracted = self.tick_distractions(world_state, world, dt);
-        let senses = Senses { peers: &peers, barks: &barks, busted: &busted, alarm_noise: &alarm_noise, social: &social, light: &light, audio: &self.audio, magic: &magic };
+        let rat_calls = std::mem::take(&mut self.rat_calls);
+        let mut new_rat_calls = Vec::new();
+        let senses = Senses { peers: &peers, barks: &barks, busted: &busted, alarm_noise: &alarm_noise, social: &social, light: &light, audio: &self.audio, magic: &magic, rat_calls: &rat_calls };
         let layout = &self.layout;
         let ai = &self.ai;
         let routes = &self.routes;
@@ -1243,6 +1270,9 @@ impl Crowd {
             for corpse in b.found_corpses.drain(..) {
                 ai_events.push(AiEvent::CorpseFound { npc: b.id, corpse });
             }
+            for (p, r, swarm) in b.rat_calls.drain(..) {
+                new_rat_calls.push((p, r, b.id, swarm));
+            }
             ai_events.append(&mut b.fired);
             let panicked = |s: BrainState| matches!(s, BrainState::Flee | BrainState::Cower);
             if b.kind != PawnKind::Guard && panicked(b.state) && !panicked(was) {
@@ -1257,6 +1287,7 @@ impl Crowd {
         }
         self.barks = new_barks;
         self.ally_busted = new_busted;
+        self.rat_calls = new_rat_calls;
         self.events = ai_events;
         self.tick_alarms(world_state, dt);
         out.extend(self.think_rats(world_state, events, world, dt));
@@ -1488,6 +1519,8 @@ impl Crowd {
         self.tweak_distraction_cooldown = level.tweak_distraction_cooldown.clone();
         self.tweak_health_max = level.tweak_health_max.clone();
         self.tweak_teleport = level.tweak_teleport.clone();
+        self.tweak_rat_combat = level.tweak_rat_combat.clone();
+        self.tweak_rat_call = level.tweak_rat_call.clone();
         self.vis_settings = level.vis_settings.clone();
         // A new map's player pawn has no scripted settings.
         self.scripted_light_range = None;
@@ -1826,6 +1859,11 @@ impl Brain {
             ambient_pin: None,
             vis_clock: 0.0,
             vis_cands: Vec::new(),
+            rat_combat: None,
+            rat_call_radius: 0.0,
+            rat_call_cd: 0.0,
+            rat_panic: 0,
+            rat_calls: Vec::new(),
         }
     }
 
@@ -2196,7 +2234,7 @@ impl Brain {
         let social = Social::default();
         let light: BTreeMap<PlayerId, f32> = BTreeMap::new();
         let audio = dishonored_ir::ai::AudioCells::default();
-        let senses = Senses { peers, barks, busted: ally_busted, alarm_noise: &[], social: &social, light: &light, audio: &audio, magic: &[] };
+        let senses = Senses { peers, barks, busted: ally_busted, alarm_noise: &[], social: &social, light: &light, audio: &audio, magic: &[], rat_calls: &[] };
         self.perceive_with(me, ws, events, &senses, world, ai, dt);
     }
 
@@ -2252,6 +2290,30 @@ impl Brain {
                 self.bump(ai, NOISE, inc, p, true, reason::ALARM);
                 if self.kind != PawnKind::Guard {
                     self.panic_from(ai, p);
+                }
+            }
+        }
+        // [rats] Set upon by a swarm (the pawn's attacked-by-rats callback 0x00B71440, while in its
+        // swarm melee state, -> 0x00A6AD20): a bite makes the pawn call for help, at most once a
+        // second, at `m_SwarmCallForHelpLoudness`, the noise carrying the swarm.
+        self.rat_call_cd = (self.rat_call_cd - dt).max(0.0);
+        for e in events {
+            if let SimEvent::RatBite { rat, victim } = e {
+                if *victim == self.id && self.rat_call_cd <= 0.0 && self.rat_call_radius > 0.0 {
+                    if let Some(s) = ws.player(*rat).and_then(|r| r.swarm) {
+                        self.rat_calls.push((me.position, self.rat_call_radius, s));
+                        self.rat_call_cd = 1.0;
+                    }
+                }
+            }
+        }
+        // [rats] A call for help against a swarm heard (the noise path 0x00C58560 case RatSwarm:
+        // a living NPC's noise carrying the swarm) posts `EAIStimID_HelpFromRats` with the swarm;
+        // it raises no attention.
+        if self.rat_combat.is_some() {
+            for &(p, r, maker, swarm) in senses.rat_calls {
+                if maker != self.id && heard(p, r) {
+                    self.post(Stim::HelpFromRats, 0.0, swarm as PlayerId, p, true, false);
                 }
             }
         }
@@ -3048,6 +3110,7 @@ impl Brain {
                 slot::AWE => self.act_magic(me, ws, ai, dt),
                 slot::ESCAPE => self.act_panic(me, ws, layout, nav, ai),
                 slot::PRESERVE => self.act_escape(me, ws, layout, nav, ai, dt),
+                slot::ENGAGE => self.act_rat_swarm(me, ws, nav, ai, dt),
                 _ => idle,
             };
         }
@@ -3552,6 +3615,61 @@ impl Brain {
             return face(pos);
         }
         self.move_to(me, nav, pos, true, ai)
+    }
+
+    /// `DisBehaviorCombatRatSwarm` running (slot Engage). It completes once the swarm no longer
+    /// threatens the pawn (slot 93, 0x00B00920). The update (slot 107, 0x00B228D0): standing
+    /// toward the swarm, the setup time runs down; with fewer friendly pawns set upon by the swarm
+    /// (self included, 0x00C6CE50) than `m_MinCombatGroupSize` the pawn waits while the time
+    /// lasts and no rat is on it, then panics (stimulus `Panicked` with the swarm, 0x00B19170) the
+    /// first `m_MaxPanicCount` times and commits after that; with enough it commits at once.
+    /// Committed, it takes position at the swarm's rat nearest to it (TakeActorPosition, LIKELY:
+    /// running to within 100 uu, then facing it; the target is the nearest rat attacking the pawn
+    /// else the swarm actor, slot 111 0x00B00A00, which the port's swarm has no separate actor for).
+    fn act_rat_swarm(&mut self, me: &PlayerState, ws: &WorldState, nav: Option<&NavWorld>, ai: &AiConfig, dt: f32) -> PlayerInput {
+        let idle = PlayerInput { yaw: me.yaw, left_hand: LeftHand::Empty, ..Default::default() };
+        let Some(Some(Behavior::RatSwarm(mut s))) = self.slots.get(slot::ENGAGE as usize).cloned() else { return idle };
+        if s.finished || !slots::swarm_threatens(ws, s.swarm, me, ai) {
+            self.complete(slot::ENGAGE);
+            return idle;
+        }
+        let cfg = self.rat_combat.clone().unwrap_or_default();
+        let nearest = ws.players.iter().filter(|p| p.kind == PawnKind::Rat && p.alive && p.swarm == Some(s.swarm)).min_by(|a, b| a.position.distance(me.position).total_cmp(&b.position.distance(me.position)).then(a.id.cmp(&b.id))).map(|p| (p.id, p.position));
+        let swarm_pos = nearest.map(|n| n.1).or_else(|| ws.swarms.iter().find(|x| x.id == s.swarm).map(|x| x.position)).unwrap_or(me.position);
+        if s.sub == RatSub::Stand {
+            s.remaining -= dt;
+            let others = ws.players.iter().filter(|p| p.id != self.id && p.alive && p.rat_attack.time > 0.0 && self.allies.contains(&p.id)).count() as i32;
+            let mut commit = true;
+            if others + 1 < cfg.min_group_size {
+                if s.remaining >= 0.0 && me.rat_attack.time <= 0.0 {
+                    commit = false;
+                } else {
+                    let old = self.rat_panic;
+                    self.rat_panic += 1;
+                    if (old as i32) < cfg.max_panic_count {
+                        self.post(Stim::Panicked, 0.0, NOISE, swarm_pos, false, false);
+                        self.complete(slot::ENGAGE);
+                        return idle;
+                    }
+                }
+            }
+            if commit {
+                s.sub = RatSub::TakeActorPosition;
+            }
+        }
+        if s.sub == RatSub::TakeActorPosition {
+            s.target = nearest.map(|n| n.0);
+        }
+        let sub = s.sub;
+        if let Some(slot) = self.slots.get_mut(slot::ENGAGE as usize) {
+            *slot = Some(Behavior::RatSwarm(s));
+        }
+        self.state = self.project();
+        let face = PlayerInput { yaw: yaw_to(me.position, swarm_pos), left_hand: LeftHand::Empty, ..Default::default() };
+        if sub == RatSub::TakeActorPosition && swarm_pos.truncate().distance(me.position.truncate()) > 100.0 {
+            return self.move_to(me, nav, swarm_pos, true, ai);
+        }
+        face
     }
 
     /// `DisAISubStateFlee`: a flee point outside the forbidden cone toward the threat,
@@ -4920,6 +5038,71 @@ mod tests {
         consider(&mut bt, &ws, &mut alarms, &ai, p.id);
         assert_eq!(bt.bell, None);
         assert_eq!(alarms[0].ringer, Some(near.id));
+    }
+
+    /// The rats' test world: a victim set upon by swarm 7's rat, a guard whose brain lists
+    /// `DisBehaviorCombatRatSwarmEliteGuard` 800 uu away, and swarm 8's rat farther.
+    fn rat_scene(rc: RatCombatConfig) -> (Crowd, WorldState, CollisionWorld) {
+        use dishonored_sim::state::SwarmState;
+        let mut ai = AiConfig::default();
+        ai.devouring_swarm.swarm_type = 3;
+        ai.devouring_swarm.min_rat_count_per_attack_group = 1;
+        let mut c = Crowd { ai, ..Default::default() };
+        let victim = pawn(NPC_ID_BASE, PawnKind::Civilian, Vec3::new(0.0, 0.0, 90.0), 0.0);
+        let g = pawn(NPC_ID_BASE + 1, PawnKind::Guard, Vec3::new(800.0, 0.0, 90.0), 180.0);
+        let mut rat = pawn(5000, PawnKind::Rat, Vec3::new(30.0, 0.0, 5.0), 180.0);
+        rat.swarm = Some(7);
+        let mut rat8 = pawn(5001, PawnKind::Rat, Vec3::new(-900.0, 0.0, 5.0), 0.0);
+        rat8.swarm = Some(8);
+        let mut ws = WorldState::default();
+        ws.players = vec![victim, g, rat, rat8];
+        let swarm = |id: u32| SwarmState { id, owner: 1, level: 0, position: Vec3::ZERO, spawn_delay: 0.0, age: 1.0, rats: 0, release_ticks: 0, ending: false, rats_at_end: 0 };
+        ws.swarms = vec![swarm(7), swarm(8)];
+        let mut bv = Brain::new(victim.id, PawnKind::Civilian, victim.position, 1);
+        bv.rat_call_radius = 2000.0;
+        let mut bg = Brain::new(g.id, PawnKind::Guard, g.position, 2);
+        bg.rat_combat = Some(rc);
+        c.brains = vec![bv, bg];
+        (c, ws, flat_world())
+    }
+
+    /// A bitten NPC calls for help (0x00A6AD20, once a second); a guard whose brain lists the rat
+    /// combat hears it next tick (`HelpFromRats`, 0x00C58560), starts it, calls its own allies
+    /// (0x00B167A0) and, with `m_MinCombatGroupSize` 0, commits at once; a running one takes a
+    /// new call's swarm without starting over (0x00B00A90); it ends with the swarm.
+    #[test]
+    fn a_rat_victim_calls_for_help_and_a_guard_answers() {
+        let (mut c, mut ws, w) = rat_scene(RatCombatConfig { min_group_size: 0, ally_request_radius: 6000.0, max_setup_time: 3.0, max_panic_count: 1, elite: true });
+        let (victim, g) = (NPC_ID_BASE, NPC_ID_BASE + 1);
+        let bite = SimEvent::RatBite { rat: 5000, victim };
+        c.think(&ws, std::slice::from_ref(&bite), &w, 1.0 / 60.0);
+        assert_eq!(c.rat_calls, vec![(Vec3::new(0.0, 0.0, 90.0), 2000.0, victim, 7)]);
+        c.think(&ws, std::slice::from_ref(&bite), &w, 1.0 / 60.0);
+        assert!(!c.rat_calls.iter().any(|x| x.2 == victim), "a second call waits a second");
+        assert!(matches!(c.brains[1].behavior(slot::ENGAGE), Some(Behavior::RatSwarm(s)) if s.swarm == 7 && s.sub == RatSub::TakeActorPosition));
+        assert!(c.rat_calls.iter().any(|x| x.2 == g && x.3 == 7), "the guard calls its allies");
+        assert!(c.events.contains(&AiEvent::BehaviorStarted { pawn: g, class: "DisBehaviorCombatRatSwarmEliteGuard".into() }));
+        c.rat_calls = vec![(Vec3::ZERO, 2000.0, victim, 8)];
+        c.think(&ws, &[], &w, 1.0 / 60.0);
+        assert!(matches!(c.brains[1].behavior(slot::ENGAGE), Some(Behavior::RatSwarm(s)) if s.swarm == 8 && s.sub == RatSub::TakeActorPosition));
+        ws.swarms[1].ending = true;
+        c.think(&ws, &[], &w, 1.0 / 60.0);
+        assert!(c.brains[1].behavior(slot::ENGAGE).is_none());
+    }
+
+    /// Short of `m_MinCombatGroupSize` once the setup time is out, the pawn panics the first
+    /// `m_MaxPanicCount` times (0x00B228D0), then commits.
+    #[test]
+    fn a_lone_guard_panics_before_it_commits_against_rats() {
+        let (mut c, ws, w) = rat_scene(RatCombatConfig { min_group_size: 3, ally_request_radius: 0.0, max_setup_time: 0.0, max_panic_count: 1, elite: false });
+        let victim = NPC_ID_BASE;
+        c.rat_calls = vec![(Vec3::ZERO, 2000.0, victim, 7)];
+        c.think(&ws, &[], &w, 1.0 / 60.0);
+        assert!(c.brains[1].behavior(slot::ENGAGE).is_none());
+        assert_eq!(c.brains[1].rat_panic, 1);
+        c.rat_calls = vec![(Vec3::ZERO, 2000.0, victim, 7)];
+        c.think(&ws, &[], &w, 1.0 / 60.0);
+        assert!(matches!(c.brains[1].behavior(slot::ENGAGE), Some(Behavior::RatSwarm(s)) if s.sub == RatSub::TakeActorPosition));
     }
 
     #[test]

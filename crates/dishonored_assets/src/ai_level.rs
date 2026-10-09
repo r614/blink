@@ -6,7 +6,7 @@
 use crate::content::Content;
 use crate::tweaks::{TMap, TVal, TweakDb, get, get_f32, get_obj};
 use anyhow::Result;
-use dishonored_ir::ai::{AiLevel, AlarmBellDef, AudioCell, AudioCells, AudioPortal, AudioPropagation, Faction, FactionTable, ForbiddenZone, PlotGameOver, PortalDoor, ProbeLight};
+use dishonored_ir::ai::{AiLevel, AlarmBellDef, AudioCell, AudioCells, AudioPortal, AudioPropagation, Faction, FactionTable, ForbiddenZone, PlotGameOver, PortalDoor, ProbeLight, RatCombatConfig};
 use dishonored_ir::{Light, LightKind};
 use glam::{Mat3, Vec3};
 use ue3_package::properties::{Property, Value, find};
@@ -109,6 +109,43 @@ pub fn combat_behavior_class(db: &TweakDb, pawn_tweak: &str) -> Option<String> {
     Some(String::new())
 }
 
+/// An `EAINoiseLoudness` value (name or index) as a distance.
+fn loudness_radius(v: Option<&TVal>, loudness: &[f32]) -> Option<f32> {
+    match v? {
+        TVal::Name(n) | TVal::Str(n) => LOUDNESS_NAMES.iter().position(|x| x == n).and_then(|i| loudness.get(i).copied()),
+        TVal::I(i) => loudness.get(*i as usize).copied(),
+        _ => None,
+    }
+}
+
+/// The `DisBehaviorCombatRatSwarm` (or its EliteGuard subclass) a pawn tweak's brain lists
+/// (`m_pBrainTweak` -> `m_BehaviorTweak[i].m_Difficulty[1]`, by `m_pSpawnedObjectClass`).
+fn rat_combat(db: &TweakDb, pawn: &TMap, loudness: &[f32]) -> Option<RatCombatConfig> {
+    let brain = get_obj(pawn, "m_pBrainTweak").filter(|b| !b.is_empty())?.to_string();
+    let b = db.try_resolve(&brain)?;
+    let Some(TVal::List(list)) = b.get("m_BehaviorTweak") else { return None };
+    for e in list {
+        let Some(path) = get_obj(e, "m_Difficulty[1]").or_else(|| get_obj(e, "m_Difficulty")).filter(|p| !p.is_empty()) else { continue };
+        let Some(bt) = db.try_resolve(path) else { continue };
+        let Some(class) = get_obj(&bt, "m_pSpawnedObjectClass").map(|c| c.rsplit('.').next().unwrap_or(c).to_string()) else { continue };
+        if !class.starts_with("DisBehaviorCombatRatSwarm") {
+            continue;
+        }
+        let int = |k: &str| match get(&bt, k) {
+            Some(TVal::I(v)) => Some(*v),
+            _ => None,
+        };
+        return Some(RatCombatConfig {
+            min_group_size: int("m_MinCombatGroupSize").unwrap_or(3),
+            ally_request_radius: loudness_radius(bt.get("m_AllyRequestLoudness"), loudness).unwrap_or(0.0),
+            max_setup_time: get_f32(&bt, "m_fMaxCombatGroupSetupTime").unwrap_or(2.0),
+            max_panic_count: int("m_MaxPanicCount").unwrap_or(2),
+            elite: class.ends_with("EliteGuard"),
+        });
+    }
+    None
+}
+
 /// Read the AI level data. `packages` are the map's packages (persistent level and
 /// sublevels); `tweaks` are the pawn tweaks of the map's spawners.
 pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String], loudness: &[f32]) -> Result<AiLevel> {
@@ -190,6 +227,22 @@ pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String
         let g = PlotGameOver { when_dead: rule("m_GameOverWhenDead"), when_hostile: rule("m_GameOverWhenHostileToPlayer"), when_possessed: rule("m_GameOverWhenPossessedByPlayer") };
         if g != PlotGameOver::default() {
             out.tweak_plot.insert(t.clone(), g);
+        }
+    }
+    // [rats] Each pawn tweak's `DisBehaviorCombatRatSwarm` and its call for help against a swarm
+    // (`m_pCombatTweaks.m_SwarmCallForHelpLoudness`, else the class default's).
+    for t in tweaks {
+        let Some(m) = db.try_resolve(t) else { continue };
+        if !out.tweak_rat_call.contains_key(t) {
+            let combat = get_obj(&m, "m_pCombatTweaks").filter(|c| !c.is_empty()).map(str::to_string).and_then(|c| db.try_resolve(&c)).or_else(|| db.try_resolve("Default__DisTweaks_NPCPawn_Combat"));
+            if let Some(r) = combat.and_then(|c| loudness_radius(c.get("m_SwarmCallForHelpLoudness"), loudness)).filter(|r| *r > 0.0) {
+                out.tweak_rat_call.insert(t.clone(), r);
+            }
+        }
+        if !out.tweak_rat_combat.contains_key(t) {
+            if let Some(c) = rat_combat(&db, &m, loudness) {
+                out.tweak_rat_combat.insert(t.clone(), c);
+            }
         }
     }
     // Each pawn tweak's teleport spell: its loadout items' NPC-specific direct context slots.

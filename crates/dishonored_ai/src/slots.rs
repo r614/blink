@@ -63,6 +63,11 @@ pub enum Stim {
     Panicked,
     /// 112: a power seen (0x00b23e50); `flag` is `m_bDisappeared`.
     WitnessMagic,
+    /// 49: a call for help against a swarm heard (the noise path 0x00C58560 case RatSwarm,
+    /// template 0x00B18490); `who` is the swarm, `flag` that it has one. (94 `SightedRatSwarm`,
+    /// the behaviour's other evaluated stimulus, is never posted: its template 0x00B1DD90 is only
+    /// registered.)
+    HelpFromRats,
 }
 
 /// A queued stimulus (`DisStimRef`): the stimulus, its remaining delay, and its payload (the
@@ -134,6 +139,43 @@ pub struct MagicState {
     pub anim: Option<f32>,
 }
 
+/// `DisBehaviorCombatRatSwarm` sub-states in tweak order: Stand (facing the swarm while the
+/// group forms), TakeActorPosition (committed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RatSub {
+    #[default]
+    Stand,
+    TakeActorPosition,
+}
+
+/// State of a `DisBehaviorCombatRatSwarm` (`m_pRatSwarm` +0xa0, `m_fRemainingCombatGroupSetupTime`
+/// +0xa4, `m_pTargetActor` +0xa8, `m_bIsFinished` +0xac).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RatSwarmState {
+    pub swarm: u32,
+    pub remaining: f32,
+    pub target: Option<PlayerId>,
+    pub sub: RatSub,
+    pub finished: bool,
+}
+
+/// The swarm threatens `me` (0x00C71DF0): it is not ending, it is aggressive and has the rats
+/// for an attack group (0x00C71DA0: `m_InitialRatCountToBeAggressive`,
+/// `m_MinRatCountPerAttackGroup`; a Devouring Swarm always attacks), and `me` is a living rat
+/// target.
+pub(crate) fn swarm_threatens(ws: &WorldState, swarm: u32, me: &PlayerState, ai: &AiConfig) -> bool {
+    if !me.alive || me.no_body {
+        return false;
+    }
+    let power = ws.swarms.iter().find(|s| s.id == swarm);
+    if power.is_some_and(|s| s.ending) {
+        return false;
+    }
+    let rats = ws.players.iter().filter(|p| p.kind == PawnKind::Rat && p.alive && p.swarm == Some(swarm)).count() as i32 + power.map_or(0, |s| s.rats as i32);
+    let cfg = if power.is_some() { &ai.devouring_swarm } else { &ai.rats };
+    rats > 0 && (cfg.swarm_type == 3 || rats >= cfg.initial_rat_count_to_be_aggressive) && rats >= cfg.min_rat_count_per_attack_group
+}
+
 /// The part of `DisBehaviorEscapeExplosion` running.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum EscapePhase {
@@ -186,6 +228,8 @@ pub enum Behavior {
     Distraction(crate::distraction::DistractionState),
     /// `DisBehaviorEscapeExplosion` (slot Preserve, `ImpendingExplosion`).
     Escape(EscapeState),
+    /// `DisBehaviorCombatRatSwarm` (slot Engage, `HelpFromRats`).
+    RatSwarm(RatSwarmState),
 }
 
 impl Behavior {
@@ -201,6 +245,7 @@ impl Behavior {
             Behavior::Panic { .. } => slot::ESCAPE,
             Behavior::Distraction(_) => slot::DISTRACTION,
             Behavior::Escape(_) => slot::PRESERVE,
+            Behavior::RatSwarm(_) => slot::ENGAGE,
         }
     }
 }
@@ -284,6 +329,8 @@ impl Brain {
                 EscapePhase::Surprise(_) => BrainState::Cower,
                 EscapePhase::Flee => if e.dest.is_some() { BrainState::Flee } else { BrainState::Notice },
             },
+            // Standing toward the swarm, or going to it.
+            Some(Behavior::RatSwarm(s)) => if s.sub == RatSub::TakeActorPosition { BrainState::WalkToPoint } else { BrainState::Notice },
             // The interact behaviour walks (going to the distractor) or stands.
             Some(Behavior::Distraction(s)) => {
                 if s.phase == crate::distraction::AnimState::GoingTo {
@@ -543,6 +590,7 @@ impl Brain {
             Behavior::Magic(_) => Some("DisBehaviorMagicResponse"),
             Behavior::Panic { .. } => Some("DisBehaviorPanic"),
             Behavior::Escape(_) => Some("DisBehaviorEscapeExplosion"),
+            Behavior::RatSwarm(_) => Some(if self.rat_combat.as_ref().is_some_and(|c| c.elite) { "DisBehaviorCombatRatSwarmEliteGuard" } else { "DisBehaviorCombatRatSwarm" }),
             // The animated distraction is `DisBehaviorInteract`; a soiree's behaviour class
             // (`DisBehaviorSoiree`) is not decoded, so no class is claimed for it.
             Behavior::Distraction(s) => {
@@ -660,6 +708,22 @@ impl Brain {
                     } else {
                         self.routine = BrainState::Patrol;
                         self.routine_goal = None;
+                    }
+                }
+            }
+            // A running `DisBehaviorCombatRatSwarm` takes the call's swarm (0x00B00A90) and the
+            // stimulus goes no further; otherwise the behaviour starts when the call names a swarm
+            // that threatens the pawn (0x00B00A50): the setup time (slot 106, 0x00B0EA50), then
+            // the start (0x00B167A0) calls the allies (`m_AllyRequestLoudness`, context RatSwarm,
+            // the swarm attached) and stands toward the swarm.
+            Stim::HelpFromRats => {
+                let swarm = q.who as u32;
+                if let Some(Some(Behavior::RatSwarm(s))) = self.slots.get_mut(slot::ENGAGE as usize) {
+                    s.swarm = swarm;
+                } else if let Some(cfg) = self.rat_combat.clone().filter(|_| q.flag && swarm_threatens(ws, swarm, me, ai)) {
+                    self.place(Behavior::RatSwarm(RatSwarmState { swarm, remaining: cfg.max_setup_time, ..Default::default() }));
+                    if cfg.ally_request_radius > 0.0 {
+                        self.rat_calls.push((me.position, cfg.ally_request_radius, swarm));
                     }
                 }
             }

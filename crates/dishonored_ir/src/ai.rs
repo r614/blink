@@ -1729,6 +1729,30 @@ pub struct AiLevel {
     /// tweaks with at least one rule on.
     #[serde(default)]
     pub tweak_plot: BTreeMap<String, PlotGameOver>,
+    /// Pawn tweak path -> the `DisBehaviorCombatRatSwarm` its brain lists, if any.
+    #[serde(default)]
+    pub tweak_rat_combat: BTreeMap<String, RatCombatConfig>,
+    /// Pawn tweak path -> its call for help against a swarm
+    /// (`m_pCombatTweaks.m_SwarmCallForHelpLoudness` as a distance, 0x00A6AD20).
+    #[serde(default)]
+    pub tweak_rat_call: BTreeMap<String, f32>,
+}
+
+/// `DisTweaks_AIBehavior_CombatRatSwarm` (`DisBehaviorCombatRatSwarm`, slot Engage): how a pawn
+/// answers a call for help against a rat swarm.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct RatCombatConfig {
+    /// `m_MinCombatGroupSize`: friendly pawns (self included) the swarm must be attacking before
+    /// the pawn commits (0x00B228D0).
+    pub min_group_size: i32,
+    /// `m_AllyRequestLoudness` as a distance: the start's call to the allies (0x00B167A0).
+    pub ally_request_radius: f32,
+    /// `m_fMaxCombatGroupSetupTime`, `m_MaxPanicCount`.
+    pub max_setup_time: f32,
+    pub max_panic_count: i32,
+    /// The brain lists the `DisBehaviorCombatRatSwarmEliteGuard` subclass.
+    pub elite: bool,
 }
 
 /// A `DisDoor` with an `m_pAudioPortal` (`UpdateAudioOcclusion` 0x00A2C800): the portal's

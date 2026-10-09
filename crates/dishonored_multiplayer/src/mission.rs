@@ -915,6 +915,9 @@ impl MissionMatch {
         // `m_fDistractionCooldownTime`.
         b.lineage = o.lineage.clone();
         b.distraction_cooldown_time = self.crowd.tweak_distraction_cooldown.get(&o.tweak).copied().unwrap_or(0.0);
+        // [rats] The brain's `DisBehaviorCombatRatSwarm` and the pawn's call for help.
+        b.rat_combat = self.crowd.tweak_rat_combat.get(&o.tweak).cloned();
+        b.rat_call_radius = self.crowd.tweak_rat_call.get(&o.tweak).copied().unwrap_or(0.0);
         b.squad = o.props.squad.clone();
         b.suspecting = o.props.at_suspicion.as_deref() == Some("DAISL_Suspecting");
         self.crowd.brains.retain(|x| x.id != s.id);

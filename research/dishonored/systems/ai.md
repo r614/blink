@@ -65,7 +65,7 @@ listed):
 | Follow (not interruptible) | 17 Comply | | |
 | GoHome | 10 Resign | TetherRequest | |
 | EnemyUnreachable | 12 Adapt | ReachabilityChange | menace / stare |
-| CombatRatSwarm(EliteGuard) | 8 Engage | | rats |
+| CombatRatSwarm(EliteGuard) | 8 Engage | HelpFromRats (49) | ported (1.4d) |
 | **Combat** (CombatEliteGuard) | 11 Combat | CombatBegin | |
 | BattleVictory | 2 Act | BattleVictory | |
 | **Search** | 5 Search | SearchBegin | |
@@ -220,6 +220,42 @@ explosion, surprise chance 1.0; sub-states [0] Flee, [1] GenericAction):
   `dishonored_sim::world_actors::BreakableState::impending`, `AiConfig::escape_explosion`. Battery
   damage (their own TakeDamage 0x00c7d340) is not ported, so no shipped breakable reaches a fuse
   step yet.
+
+### 1.4d Rat swarms: the call for help and `DisBehaviorCombatRatSwarm` (CONFIRMED statically, 2026-10-09)
+
+- **Trigger.** The behaviour evaluates `HelpFromRats` (49) and `SightedRatSwarm` (94), but 94 is never
+  posted: its template 0x00B1DD90 is referenced only by a static initializer that registers it (size
+  0x18, at 0x01464508), and nothing reads that slot. 49 comes from the noise path 0x00C58560, case
+  context 7 (`EAINoiseContext_RatSwarm`): the noise's maker must be a `DishonoredNPCPawn` with a living
+  brain (0x00B599B0) and it must carry a `DisRatSwarm` (0x00A1A8C0). The stimulus holds the requester
+  (+0x14) and the swarm (+0x18). Context 7 posts nothing else, so it raises no attention.
+- **Who calls.** (a) A pawn set upon by a swarm: its attacked-by-rats callback (pawn vslot, 0x00B71440)
+  first enters the swarm melee state, then on each later call runs 0x00A6AD20. That makes a context 7 noise
+  at the pawn, at `DisTweaks_NPCPawn_Combat.m_SwarmCallForHelpLoudness` (+0xf4, class default
+  `EAINoiseLoudness20m`, no instance overrides it), at most once a second. (b) The behaviour's start
+  (0x00B167A0), at `m_AllyRequestLoudness`.
+- **Behaviour.**
+  - Evaluate 0x00B00A50: the stimulus carries a swarm and the swarm threatens the pawn (0x00C71DF0:
+    not ending, aggressive, enough rats for an attack group, the pawn a rat target).
+  - A running instance only takes the new swarm (0x00B00A90), so calls bouncing between guards do not
+    restart it.
+  - Start: setup time `m_fMaxCombatGroupSetupTime` (0x00B0EA50), then the ally call and Stand toward the
+    swarm.
+  - Update 0x00B228D0: with fewer friendly pawns set upon (self included) than `m_MinCombatGroupSize`,
+    the pawn waits while the setup time lasts and no rat is on it. It then panics (stimulus 68) the
+    first `m_MaxPanicCount` times and commits after that; with enough pawns it commits at once.
+  - Committed: TakeActorPosition at the target (the nearest rat attacking the pawn, else the swarm).
+  - It completes when the swarm no longer threatens the pawn (0x00B00920).
+- **Data.** Brains list `TweaksBehavior_CombatRatSwarm_Default` (city guards, thugs, overseers, crazy
+  dudes) or `TweaksBehavior_CombatRatSwarmEliteGuard` (elite guards, Overseer HMaster / Campbell, Lord
+  Regent). Both ship min group 0, setup 3.0 s, max panic 1 and the class-default ally loudness
+  `EAINoiseLoudness4`, so guards commit at once. Civilian brains do not list it.
+- **Port.** `AiLevel::tweak_rat_combat` / `tweak_rat_call` feed `Brain::rat_combat` / `rat_call_radius`,
+  and calls travel one tick in `Crowd::rat_calls` (heard with `hearing::heard`).
+  - LIKELY: TakeActorPosition runs to within 100 uu of the swarm's nearest rat (the sub-state is not
+    decoded).
+  - Not ported: the EliteGuard's FirePistol sub-state, and killing rats (RatStomp / RatCrusher). A
+    committed guard reaches the rats but cannot hurt them yet.
 
 ### 1.4 What turns attention into NoticeBegin / SearchBegin / CombatBegin (superseded by 1.4a)
 
