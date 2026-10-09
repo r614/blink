@@ -631,6 +631,24 @@ pub struct VisionConfig {
     pub los_period: f32,
 }
 
+impl Default for VisionConfig {
+    fn default() -> Self {
+        Self {
+            inner_fov_deg: 0.0,
+            inner_range: 0.0,
+            inner_up: 0.0,
+            inner_down: 0.0,
+            outer_fov_deg: 0.0,
+            outer_range: 0.0,
+            outer_up: 0.0,
+            outer_down: 0.0,
+            bone_nullzone_deg: nullzone(),
+            vis_regions: vis_regions(),
+            los_period: los_period(),
+        }
+    }
+}
+
 fn nullzone() -> f32 {
     5.0
 }

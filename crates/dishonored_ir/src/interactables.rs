@@ -128,10 +128,64 @@ pub struct Interactables {
     pub keyholes: Vec<KeyholeDef>,
     pub tripwires: Vec<TripwireDef>,
     pub launchers: Vec<LauncherDef>,
+    #[serde(default)]
+    pub watchtowers: Vec<WatchTowerDef>,
     /// `DisTweaks_PlayerInput.m_fAltInteractActivateTime` (0.3): how long Use is held before
     /// the interactable's `AltInteract` runs (the door's peek) instead of `Interact`.
     pub alt_interact_time: f32,
     /// The `DishonoredDamageType` classes whose default `m_bDontTriggerTripWire` is set
     /// (0x00A28BB0 tests it on the damage type of every `TakeDamage` of a tripwire).
     pub no_trip_damage_types: Vec<String>,
+}
+
+/// A placed `DisWatchTower` and its `DisTweaks_WatchTower` (research/dishonored/systems/
+/// watchtowers.md). The tower turns (`m_fStateMaxTowerRotSpeedDeg`) and its light pitches
+/// (`m_fStateMaxLightRotSpeedDeg`, limited to `m_fStateLightLowestRotDeg` below and
+/// `m_fStateLightHighestRotDeg` above the horizon); it sees through its vision tweak from the light
+/// socket (`DisCpntType_VisionWatchtower`, `m_pVisionTweak` / `m_pHackedVisionTweak` once hacked)
+/// and fires volleys of its projectile at a live enemy (the update 0x00A3C640).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct WatchTowerDef {
+    pub name: String,
+    pub package: String,
+    pub position: Vec3,
+    /// The tower's placed yaw (UE degrees) and the world positions of its light and its arrow
+    /// socket at the bind pose (the yaw turns them about the tower's axis).
+    pub yaw_deg: f32,
+    pub light: Vec3,
+    pub muzzle: Vec3,
+    /// `m_pFactionTweak` and, once hacked, `m_HackedDispositions` (faction -> relationship).
+    pub faction: String,
+    pub hacked_dispositions: Vec<(String, String)>,
+    pub vision: crate::ai::VisionConfig,
+    pub hacked_vision: crate::ai::VisionConfig,
+    pub tower_rot_speed_deg: f32,
+    pub light_rot_speed_deg: f32,
+    pub light_lowest_deg: f32,
+    pub light_highest_deg: f32,
+    /// `m_fStateExploreSpeedIncrease` (per second, the bonus capped at 100).
+    pub explore_speed_increase: f32,
+    pub attack_timeout: f32,
+    pub attack_initial_delay: f32,
+    pub frantic_speed: f32,
+    pub frantic_range: f32,
+    pub volley_shots: i32,
+    pub volley_delay: f32,
+    pub delay_between_volleys: f32,
+    pub fire_spread: f32,
+    pub warning_time: f32,
+    /// `m_fAttackFOVMultiplier` / `m_fHackedAttackFOVMultiplier`.
+    pub attack_fov_mult: f32,
+    pub hacked_attack_fov_mult: f32,
+    pub projectile: LauncherProjectile,
+    /// `m_AINoiseLoudness` (the shots' noise) and `m_AllyAttentionLevelToTrack`.
+    pub noise_loudness: String,
+    pub ally_attention_to_track: String,
+    /// `bEnabled`-style placed state: the tower starts active (`WatchTowerState_Explore`).
+    pub active: bool,
+    /// `m_pExploreTracked`: the actor (an `InterpActor` a matinee moves, `Package:Name`) the
+    /// light follows while exploring; and `m_SupportedSquads` (squad names).
+    pub explore_tracked: String,
+    pub squads: Vec<String>,
 }

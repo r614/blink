@@ -555,6 +555,12 @@ pub struct MissionMatch {
     /// the match.
     #[serde(default)]
     pub launchers: BTreeMap<String, dishonored_sim::launchers::LaunchersState>,
+    /// [watchtowers] Each map's watch towers (`dishonored_ai::watchtower`), by map.
+    #[serde(default)]
+    pub towers: BTreeMap<String, dishonored_ai::watchtower::WatchTowersState>,
+    /// [watchtowers] What the towers reported this step, for the Kismet (`DisSeqEvent_WatchTower`).
+    #[serde(skip)]
+    pub tower_events: Vec<dishonored_ai::watchtower::TowerEvent>,
     /// [world] Events of shots the Kismet fired between steps (`SimEvent::Fired`), delivered with
     /// the next step's.
     #[serde(skip)]
@@ -623,6 +629,8 @@ impl MissionMatch {
             interactables: BTreeMap::new(),
             interact_events: Vec::new(),
             launchers: BTreeMap::new(),
+            towers: BTreeMap::new(),
+            tower_events: Vec::new(),
             launcher_events: Vec::new(),
             mover_keys: Vec::new(),
             mover_worlds: Vec::new(),
@@ -1378,6 +1386,7 @@ impl MissionMatch {
         self.world.host_targets.clear();
         // [world] The launchers' shots fly, strike and burst (before the tripwires so that a burst
         // that damages a wire trips it in the same step).
+        self.step_towers(world, cfg, &mut out.events);
         self.step_launchers(world, cfg, &mut out.events);
         // [world] Tripwires touched or damaged, keyhole holds and peeks.
         self.step_interactables(&all, &out.events, cfg, dt);

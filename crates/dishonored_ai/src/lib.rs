@@ -61,6 +61,7 @@ pub mod hearing;
 pub mod rats;
 pub mod slots;
 pub mod special;
+pub mod watchtower;
 
 pub use slots::{Behavior, MagicState, QueuedStim, SearchState, SearchSub, Stim, slot};
 use slots::AlarmCause;

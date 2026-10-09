@@ -25,7 +25,7 @@ use crate::content::Content;
 use crate::skeletal_mesh::read_skeletal_mesh;
 use crate::tweaks::{TVal, TweakDb, get, get_f32, get_obj};
 use anyhow::Result;
-use dishonored_ir::interactables::{Interactables, KeyholeDef, LauncherDef, LauncherProjectile, ShotKind, TripwireDef};
+use dishonored_ir::interactables::{Interactables, KeyholeDef, LauncherDef, LauncherProjectile, ShotKind, TripwireDef, WatchTowerDef};
 use glam::{Mat4, Vec3};
 use ue3_package::properties::{Property, Value, find};
 use ue3_package::{ObjRef, Package};
@@ -202,6 +202,12 @@ fn explosion_config(db: &TweakDb, path: &str, loudness: &[f32]) -> Option<dishon
 
 /// The launcher's projectile (`m_pProjectileTweak` with the launcher's own speed and damage).
 fn launcher_projectile(db: &TweakDb, t: &crate::tweaks::TMap, loudness: &[f32]) -> LauncherProjectile {
+    launcher_projectile_with(db, t, "m_fProjectileDamage", loudness)
+}
+
+/// The projectile of a launcher or tower tweak, its direct damage read from `damage_key`
+/// (`m_fProjectileDamage` on launchers, `m_ProjectileDamage` (an int) on watch towers).
+fn launcher_projectile_with(db: &TweakDb, t: &crate::tweaks::TMap, damage_key: &str, loudness: &[f32]) -> LauncherProjectile {
     let tweak = get_obj(t, "m_pProjectileTweak").unwrap_or_default().to_string();
     let pm = db.try_resolve(&tweak).unwrap_or_default();
     let class = db.class_of(&tweak).unwrap_or_default();
@@ -210,7 +216,7 @@ fn launcher_projectile(db: &TweakDb, t: &crate::tweaks::TMap, loudness: &[f32]) 
         kind: if explosion.is_some() { ShotKind::ExplosiveArrow } else { ShotKind::Bolt },
         class,
         speed: get_f32(t, "m_fProjectileSpeed").unwrap_or(0.0) * get_f32(&pm, "m_fSpeedMultiplier").unwrap_or(1.0),
-        damage: get_f32(t, "m_fProjectileDamage").unwrap_or(0.0) as i32,
+        damage: get_f32(t, damage_key).unwrap_or(0.0) as i32,
         headshot_mult: get_f32(t, "m_fProjectileHeadshotMult").unwrap_or(1.0),
         damage_multiplier: get_f32(&pm, "m_fDamageMultiplier").unwrap_or(1.0),
         gravity_mult: get_f32(&pm, "m_fGravityMultiplier").unwrap_or(1.0),
@@ -220,6 +226,123 @@ fn launcher_projectile(db: &TweakDb, t: &crate::tweaks::TMap, loudness: &[f32]) 
     }
 }
 
+/// A `DisTweaks_Vision` (the AI's vision reader, `ai_config`): the cones from the light socket.
+fn vision_tweak(db: &TweakDb, path: &str) -> dishonored_ir::ai::VisionConfig {
+    let mut v = dishonored_ir::ai::VisionConfig::default();
+    let Some(m) = db.try_resolve(path) else { return v };
+    let g = |k: &str, d: f32| get_f32(&m, k).unwrap_or(d);
+    v.inner_fov_deg = g("m_fVision_InnerFOV_Deg", v.inner_fov_deg);
+    v.outer_fov_deg = g("m_fVision_OuterFOV_Deg", v.outer_fov_deg);
+    v.inner_range = g("m_fVision_InnerMaxRange", v.inner_range);
+    v.outer_range = g("m_fVision_OuterMaxRange", v.outer_range);
+    v.inner_up = g("m_fVision_InnerVerticalFOVScale_Up", v.inner_up);
+    v.inner_down = g("m_fVision_InnerVerticalFOVScale_Down", v.inner_down);
+    v.outer_up = g("m_fVision_OuterVerticalFOVScale_Up", v.outer_up);
+    v.outer_down = g("m_fVision_OuterVerticalFOVScale_Down", v.outer_down);
+    v.bone_nullzone_deg = g("m_fVision_BoneNullzone_Deg", v.bone_nullzone_deg);
+    v
+}
+
+/// A placed `DisWatchTower` (`m_pWatchTowerTweaks`, `DisTweaks_WatchTower`): its light and arrow
+/// sockets through the tower mesh's bind pose, its vision tweaks, rotation and attack values and
+/// its projectile (the launcher reader: `m_pProjectileTweak` with the tower's own speed, damage
+/// and headshot multiplier).
+fn watchtower(content: &Content, packages: &[String], pkg: &std::sync::Arc<Package>, i: usize, db: &TweakDb, loudness: &[f32]) -> Option<WatchTowerDef> {
+    let h = pkg.read_object(i).ok()?;
+    let p = &h.properties;
+    let mut res = crate::collision_audit::PropResolver::new(content);
+    let tweak_path = res.inherited_object_path(pkg, i, "m_pWatchTowerTweaks")?;
+    let t = db.try_resolve(&tweak_path)?;
+    let f = |k: &str, d: f32| get_f32(&t, k).unwrap_or(d);
+    let o = |k: &str| get_obj(&t, k).unwrap_or_default().to_string();
+    let n = |k: &str| match get(&t, k) {
+        Some(TVal::Name(s)) | Some(TVal::Str(s)) if s != "None" => s.clone(),
+        _ => String::new(),
+    };
+    let position = find(p, "Location").and_then(|x| x.as_vector()).map(Vec3::from).unwrap_or(Vec3::ZERO);
+    let yaw_deg = find(p, "Rotation").and_then(|x| x.as_rotator()).map(|r| r[1] as f32 * 360.0 / 65536.0).unwrap_or(0.0);
+    // The light and arrow sockets of the tower mesh at its bind pose, under the actor's transform.
+    let mut light = position;
+    let mut muzzle = position;
+    if let Some((mpkg, mi)) = locate_object_where(content, packages, &o("m_pTowerMesh"), |q, e| q.export_class(e) == "SkeletalMesh" && read_skeletal_mesh(q, e).is_ok()) {
+        if let Ok(mesh) = read_skeletal_mesh(&mpkg, mi) {
+            let bones: Vec<dishonored_ir::BoneAsset> = mesh.bones.iter().map(|b| dishonored_ir::BoneAsset { name: b.name.clone(), parent: b.parent, rotation: b.orientation, translation: b.position }).collect();
+            let g = crate::characters::bind_globals(&bones);
+            let m2c = crate::util::rotator_matrix(mesh.rot_origin[0], mesh.rot_origin[1], mesh.rot_origin[2]) * Mat4::from_translation(mesh.mesh_origin);
+            let to_world = crate::level::actor_transform(p) * m2c;
+            if let Ok(sockets) = crate::characters::mesh_sockets(content, &mpkg.name, &mpkg.obj_path(ObjRef::Export(mi))) {
+                let at = |name: &str| -> Option<Vec3> {
+                    let s = sockets.iter().find(|s| s.name.eq_ignore_ascii_case(name))?;
+                    let bi = bones.iter().position(|b| b.name.eq_ignore_ascii_case(&s.bone))?;
+                    Some((to_world * g[bi] * Mat4::from_translation(s.location)).w_axis.truncate())
+                };
+                let vision_bone = db.try_resolve(&o("m_pVisionTweak")).and_then(|v| match get(&v, "m_Vision_BoneName") {
+                    Some(TVal::Name(s)) => Some(s.clone()),
+                    _ => None,
+                });
+                light = at(vision_bone.as_deref().unwrap_or("Light_Socket")).unwrap_or(position);
+                muzzle = at(&n("m_ProjectileSocket")).or_else(|| at("Arrow_Socket")).unwrap_or(light);
+            }
+        }
+    }
+    let projectile = launcher_projectile_with(db, &t, "m_ProjectileDamage", loudness);
+    let hacked = match get(&t, "m_HackedDispositions") {
+        Some(TVal::List(items)) => items
+            .iter()
+            .filter_map(|d| {
+                let fac = match get(d, "m_pFaction") {
+                    Some(TVal::Obj(o)) => o.clone(),
+                    _ => return None,
+                };
+                let rel = match get(d, "m_Relationship") {
+                    Some(TVal::Name(s)) | Some(TVal::Str(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                Some((fac, rel))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let squads = match find(p, "m_SupportedSquads").map(|x| x.array_structs(pkg)) {
+        Some(Ok(items)) => items.iter().filter_map(|s| name_prop(s, "m_SquadName")).collect(),
+        _ => Vec::new(),
+    };
+    let tracked = obj(p, "m_pExploreTracked").map(|r| format!("{}:{}", pkg.name, pkg.obj_name(ObjRef::from_index(r)))).unwrap_or_default();
+    Some(WatchTowerDef {
+        name: pkg.obj_name(ObjRef::Export(i)),
+        package: pkg.name.clone(),
+        position,
+        yaw_deg,
+        light,
+        muzzle,
+        faction: o("m_pFactionTweak"),
+        hacked_dispositions: hacked,
+        vision: vision_tweak(db, &o("m_pVisionTweak")),
+        hacked_vision: vision_tweak(db, &o("m_pHackedVisionTweak")),
+        tower_rot_speed_deg: f("m_fStateMaxTowerRotSpeedDeg", 0.0),
+        light_rot_speed_deg: f("m_fStateMaxLightRotSpeedDeg", 0.0),
+        light_lowest_deg: f("m_fStateLightLowestRotDeg", 0.0),
+        light_highest_deg: f("m_fStateLightHighestRotDeg", 0.0),
+        explore_speed_increase: f("m_fStateExploreSpeedIncrease", 0.0),
+        attack_timeout: f("m_fStateAttackTimeout", 0.0),
+        attack_initial_delay: f("m_fStateAttackInitialDelay", 0.0),
+        frantic_speed: f("m_fFranticSpeed", 0.0),
+        frantic_range: f("m_fFranticRandomRange", 0.0),
+        volley_shots: f("m_VolleyShots", 1.0) as i32,
+        volley_delay: f("m_fVolleyDelayBetweenShots", 0.0),
+        delay_between_volleys: f("m_fDelayBetweenVolleys", 0.0),
+        fire_spread: f("m_fFireArrowMaxSpread", 0.0),
+        warning_time: f("m_fSoundAttackWarningTime", 0.0),
+        attack_fov_mult: f("m_fAttackFOVMultiplier", 1.0),
+        hacked_attack_fov_mult: f("m_fHackedAttackFOVMultiplier", 1.0),
+        projectile,
+        noise_loudness: n("m_AINoiseLoudness"),
+        ally_attention_to_track: n("m_AllyAttentionLevelToTrack"),
+        active: true,
+        explore_tracked: tracked,
+        squads,
+    })
+}
 /// A placed `DisProjectileLauncher`: its tweak (`DisTweaks_ProjectileLauncher`; the mesh and
 /// physics asset are put on the component at runtime like the tripwire's), the muzzle socket
 /// through the mesh's bind pose, the target actor's location, the collision bounds the focus
@@ -342,6 +465,7 @@ pub fn extract_interactables(content: &Content, packages: &[String]) -> Result<I
             match pkg.export_class(i).as_str() {
                 "DisTripwire" => out.tripwires.extend(tripwire(content, &pkgs, &pkg, i, &db)),
                 "DisProjectileLauncher" => out.launchers.extend(launcher(content, &pkgs, &pkg, i, &db, &loudness)),
+                "DisWatchTower" => out.watchtowers.extend(watchtower(content, &pkgs, &pkg, i, &db, &loudness)),
                 _ => {}
             }
         }
@@ -425,13 +549,39 @@ mod tests {
         assert_eq!(dist.launchers.iter().filter(|l| l.target.is_none()).count(), 2, "two aim along their muzzle");
     }
 
+    /// The shipped watch towers (skipped without the retail install): two on Streets2 and one in
+    /// the Tower Return yard, all on the guard faction with a 20 deg / 6000 uu beam (360 deg once
+    /// hacked), firing `WatchTowerExplosiveArrow_twk` in volleys of three; the arrow has no
+    /// direct damage (`m_ProjectileDamage` unset): the explosion does it.
+    #[test]
+    fn retail_watchtowers() {
+        let Ok(content) = Content::locate() else { return };
+        let streets = extract_interactables(&content, &crate::map_packages(&content, "L_Streets2_P")).unwrap();
+        let yard = extract_interactables(&content, &crate::map_packages(&content, "L_TowerRtrn_Yard_P")).unwrap();
+        assert_eq!((streets.watchtowers.len(), yard.watchtowers.len()), (2, 1));
+        for w in streets.watchtowers.iter().chain(&yard.watchtowers) {
+            assert!(w.active, "{}", w.name);
+            assert_eq!(w.faction, "DisFaction_Defaults.Faction_Guard_Default");
+            assert_eq!(w.hacked_dispositions.len(), 2);
+            assert_eq!((w.vision.inner_fov_deg, w.vision.inner_range, w.vision.outer_range), (20.0, 6000.0, 0.0));
+            assert_eq!((w.hacked_vision.inner_fov_deg, w.hacked_vision.inner_range, w.hacked_vision.outer_range), (360.0, 4000.0, 1000.0));
+            assert_eq!((w.tower_rot_speed_deg, w.light_rot_speed_deg, w.light_lowest_deg, w.light_highest_deg), (40.0, 40.0, 70.0, 60.0));
+            assert_eq!((w.attack_timeout, w.attack_initial_delay, w.volley_shots, w.volley_delay, w.delay_between_volleys), (7.0, 2.0, 3, 0.2, 4.0));
+            assert_eq!((w.fire_spread, w.warning_time, w.attack_fov_mult), (200.0, 1.5, 1.5));
+            assert_eq!(w.projectile.tweak, "WatchTower_Twk.WatchTowerExplosiveArrow_twk");
+            assert_eq!((w.projectile.kind, w.projectile.speed, w.projectile.damage, w.projectile.gravity_mult), (ShotKind::ExplosiveArrow, 2250.0, 0, 0.25));
+            assert!(w.light.z - w.position.z > 1000.0, "{}: the light {:?} tops the tower at {:?}", w.name, w.light, w.position);
+            assert!(!w.explore_tracked.is_empty(), "{} follows its matinee actor", w.name);
+        }
+    }
+
     /// Prints the keyholes and tripwires of a few maps (needs the retail install).
     /// `cargo test -p dishonored_assets dump_interactables -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn dump_interactables() {
         let Ok(content) = Content::locate() else { return };
-        for map in ["L_PrsnSewer_P", "L_Distillery_P", "L_Ovrsr_Back_P", "L_Boyle_Int_P", "L_Prison_P"] {
+        for map in ["L_PrsnSewer_P", "L_Distillery_P", "L_Ovrsr_Back_P", "L_Boyle_Int_P", "L_Prison_P", "L_Streets2_P", "L_TowerRtrn_Yard_P"] {
             let pkgs = crate::map_packages(&content, map);
             let ia = extract_interactables(&content, &pkgs).unwrap();
             println!("== {map}: {} keyholes, {} tripwires; no-trip damage types {:?}", ia.keyholes.len(), ia.tripwires.len(), ia.no_trip_damage_types);
@@ -450,6 +600,9 @@ mod tests {
             }
             for l in &ia.launchers {
                 println!("  launcher {}:{} at {:?} muzzle {:?} fwd {:?} target {:?} armed {} bounds {:?}..{:?} {:?} harvest {:?}", l.package, l.name, l.position, l.muzzle, l.muzzle_forward, l.target, l.armed, l.bounds_min, l.bounds_max, l.projectile, l.harvest);
+            }
+            for w in &ia.watchtowers {
+                println!("  watchtower {w:?}");
             }
         }
     }

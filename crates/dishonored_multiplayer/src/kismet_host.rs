@@ -147,6 +147,7 @@ pub const FED_EVENTS: &[&str] = &[
     // the load-time notes called them unsupported).
     "DisSeqEvent_Distracted",
     "DisSeqEvent_BreakableBroken",
+    "DisSeqEvent_WatchTower",
     "DisSeqEvent_WhaleOilBattery",
     "DisSeqEvent_WhaleOilReceptacle",
     // `player_events.rs`.
@@ -1426,7 +1427,30 @@ impl Host for H<'_> {
                 self.note(format!("inventory item {item} added"));
                 HostResult::Done
             }
-            // `DisSeqCond_CompareTweaks` (0x00B8EAF0): `m_pA` and `m_pB` resolve to their tweaks
+// `DisSeqAct_WatchTower` (`EDisWatchTowerKismetAction` by input: turn off, turn on,
+            // toggle, set explore tracked, set alert tracked, switch polarity) on its Target towers.
+            "DisSeqAct_WatchTower" => {
+                let action = cx.input().unwrap_or(0) as u8;
+                for t in cx.objects("Target") {
+                    if let Obj::Actor(a) = t {
+                        let name = self.db.actors[a as usize].name.clone();
+                        self.m.tower_action(&name, action);
+                    }
+                }
+                HostResult::Done
+            }
+            // `DisSeqAct_WatchTowerShootAtTarget` (exec 0x00957A40): the Target towers attack
+            // `m_pTargetActor` (`m_pScriptedTarget`).
+            "DisSeqAct_WatchTowerShootAtTarget" => {
+                let Some(target) = self.pawn_of(&cx.prop_obj("m_pTargetActor")) else { return HostResult::Done };
+                for t in cx.objects("Target") {
+                    if let Obj::Actor(a) = t {
+                        let name = self.db.actors[a as usize].name.clone();
+                        self.m.tower_shoot_at(&name, target);
+                    }
+                }
+                HostResult::Done
+            }            // `DisSeqCond_CompareTweaks` (0x00B8EAF0): `m_pA` and `m_pB` resolve to their tweaks
             // (0x00B8EA60: a tweak is itself, an actor or pawn its `GetTweak`); equal fires
             // "Exact" (0), one along the other's fallback chain (0x00C6F5C0 -> 0x00C6F360, either
             // way round) "FallbackNonExact" (1), anything else (or a missing tweak) "NoMatch" (2).
@@ -3373,12 +3397,39 @@ fn ai_events(k: &mut Kismet, h: &mut H) {
     }
 }
 
+/// [watchtowers] Tower reports -> `DisSeqEvent_WatchTower` on the tower actor.
+fn tower_events(k: &mut Kismet, h: &mut H, evs: Vec<dishonored_ai::watchtower::TowerEvent>) {
+    use dishonored_ai::watchtower::TowerEvent as T;
+    for e in evs {
+        let (tower, output) = match e {
+            T::Activated(i) => (i, 0),
+            T::Deactivated(i) => (i, 1),
+            T::NeutralCorpseSeen(i) => (i, 2),
+            T::AllyCorpseSeen(i) => (i, 3),
+            T::EnemyCorpseSeen(i) => (i, 4),
+            T::Hacked(i) => (i, 5),
+            T::Warning(_) | T::Shot(_) => continue,
+        };
+        let Some((package, name)) = h.m.tower_name(tower) else { continue };
+        let Some(a) = h.kismet_actor(&package, &name) else { continue };
+        let fired = k.trigger(h, "DisSeqEvent_WatchTower", &[Obj::Actor(a)], Obj::Actor(a), Some(vec![output]));
+        if !fired.is_empty() {
+            h.note(format!("DisSeqEvent_WatchTower output {output} of {package}:{name}"));
+        }
+    }
+}
+
 /// Gameplay -> Kismet events.
 fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
     h.drain_spawns(k);
     // [world] Breakables, batteries and receptacles of this step.
     let evs = std::mem::take(&mut h.m.world_events);
     world_events(k, h, evs);
+    // [watchtowers] The towers' reports -> `DisSeqEvent_WatchTower` (originator the tower; output
+    // `EDisDisSeqEvent_WatchTowerKismetEvent`: activated, deactivated, neutral / ally / enemy
+    // corpse seen, hacked).
+    let tevs = std::mem::take(&mut h.m.tower_events);
+    tower_events(k, h, tevs);
     // [distraction] `FireDistracted` (0x00b79b80): every `DisSeqEvent_Distracted` of the
     // distractor (originator) checks with the pawn as instigator and the output as its index.
     let distracted: Vec<(usize, PlayerId, u8)> = h.m.crowd.events.iter().filter_map(|e| match e {

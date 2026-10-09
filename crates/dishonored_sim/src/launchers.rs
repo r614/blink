@@ -81,6 +81,18 @@ pub const EXPLOSION_BACKOFF: f32 = 10.0;
 /// A launched projectile that has not hit anything is dropped after this long (the port's cap,
 /// as for the Tallboy's arrow; the projectile's own `LifeSpan` was not read).
 pub const SHOT_LIFETIME: f32 = 5.0;
+/// Shots of the watch towers share the table: their key is this plus the tower's index
+/// (`Interactables::watchtowers`).
+pub const TOWER_SHOT_BASE: usize = 1 << 20;
+
+/// The projectile a shot was fired with (a launcher's or a watch tower's).
+fn shot_projectile(defs: &Interactables, key: usize) -> Option<&dishonored_ir::interactables::LauncherProjectile> {
+    if key >= TOWER_SHOT_BASE {
+        defs.watchtowers.get(key - TOWER_SHOT_BASE).map(|w| &w.projectile)
+    } else {
+        defs.launchers.get(key).map(|l| &l.projectile)
+    }
+}
 
 /// `m_bArmed` / `m_bHarvested` of one launcher, and whether its animations have played.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -169,6 +181,23 @@ impl LaunchersState {
         true
     }
 
+
+    /// A watch tower's shot (the update 0x00A3C640 -> 0x00B14E80 from its arrow socket): `velocity`
+    /// along the aim with the tower's projectile; it flies, strikes and bursts like a launcher's.
+    pub fn fire_tower(&mut self, defs: &Interactables, tower: usize, from: Vec3, velocity: Vec3, state: &mut WorldState, events: &mut Vec<SimEvent>) {
+        let Some(def) = defs.watchtowers.get(tower) else { return };
+        let pr = &def.projectile;
+        let kind = match pr.kind {
+            ShotKind::ExplosiveArrow => ProjectileKind::TrapArrow,
+            ShotKind::Bolt => ProjectileKind::TrapBolt,
+        };
+        let id = state.next_projectile_id;
+        state.next_projectile_id = state.next_projectile_id.wrapping_add(1);
+        let damage = pr.damage as f32 * pr.damage_multiplier;
+        state.projectiles.push(ProjectileState { id, kind, owner: 0, position: from, velocity, age: 0.0, damage, gravity_mult: pr.gravity_mult, armed: false, fuse: 0.0, min_fuse: 0.0, stuck_to: None, stuck: false, stuck_offset: Vec3::ZERO, spawn: from, pierced: None });
+        self.shots.insert(id, TOWER_SHOT_BASE + tower);
+        events.push(SimEvent::Fired { id: 0, bolt: false, projectile: id, kind, origin: from, velocity });
+    }
     /// `SeqAct_Toggle` on a launcher (`OnToggle_Native` 0x009ED800 -> slot 238, 0x00A21650):
     /// `input` is the toggle's input (0 turn on, 1 turn off, 2 toggle); `bToggled`-style
     /// actions that set neither leave it.
@@ -273,7 +302,7 @@ impl LaunchersState {
                     }
                 }
             }
-            let kind = defs.launchers.get(li).map_or(ShotKind::Bolt, |l| l.projectile.kind);
+            let kind = shot_projectile(defs, li).map_or(ShotKind::Bolt, |p| p.kind);
             let attacker = Some(pr.owner).filter(|o| *o != 0);
             match (body, world_hit) {
                 (Some((bi, along, point)), wh) if wh.is_none_or(|w| along <= w) => {
@@ -282,7 +311,7 @@ impl LaunchersState {
                     // on the head `m_fHeadshotMultiplier` (the launcher's `m_fProjectileHeadshotMult`, 1
                     // in the shipped tweaks) scales it.
                     let head = crate::hit_regions::hit_region(&state.players[bi], mv, &cfg.items.hit_bodies, point, dir) == dishonored_ir::items::HitRegion::Head;
-                    let damage = if head { pr.damage * defs.launchers.get(li).map_or(1.0, |l| l.projectile.headshot_mult) } else { pr.damage };
+                    let damage = if head { pr.damage * shot_projectile(defs, li).map_or(1.0, |p| p.headshot_mult) } else { pr.damage };
                     crate::vitals::apply_damage(&mut state.players[bi], damage, attacker, DamageCause::TrapShot, events, &cfg.vitals);
                     if kind == ShotKind::ExplosiveArrow {
                         booms.push((li, pr.owner, point - dir * EXPLOSION_BACKOFF));
@@ -309,7 +338,7 @@ impl LaunchersState {
         let live: Vec<u32> = state.projectiles.iter().map(|p| p.id).collect();
         self.shots.retain(|id, _| live.contains(id));
         for (li, owner, at) in booms {
-            let Some(x) = defs.launchers.get(li).and_then(|l| l.projectile.explosion.as_ref()) else { continue };
+            let Some(x) = shot_projectile(defs, li).and_then(|p| p.explosion.as_ref()) else { continue };
             crate::gadgets::explode_with(state, owner, at, None, x, DamageCause::TrapExplosion, false, world, cfg, events);
         }
     }

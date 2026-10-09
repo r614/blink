@@ -147,6 +147,55 @@ impl MissionMatch {
         Some(self.launchers.get(&key).and_then(|s| s.launchers.get(i)).map_or(defs.launchers[i].armed, |l| l.armed))
     }
 
+/// The watch towers of the active map (`dishonored_ai::watchtower`), stepped before their
+    /// shots fly (`step_launchers`). The explore-tracked actors are read where the Kismet has moved
+    /// them (their matinees).
+    pub(crate) fn step_towers(&mut self, world: &dyn WorldQuery, cfg: &SimConfig, events: &mut Vec<SimEvent>) {
+        let key = self.interactables_key();
+        let Some(defs) = self.setup.interactables.get(&key) else { return };
+        if defs.watchtowers.is_empty() {
+            return;
+        }
+        let soc = self.crowd.social(&self.world);
+        let run = self.kismet.as_ref();
+        let tracked = |reference: &str| -> Option<glam::Vec3> {
+            let run = run?;
+            let a = run.k.db.find_actor(reference)?;
+            Some(run.st.actor_pos.get(&a).copied().unwrap_or_else(|| glam::Vec3::from(run.k.db.actors[a as usize].location)))
+        };
+        let dt = dishonored_sim::movement::DT * dishonored_sim::powers::world_time_scale(&self.world, &cfg.gameplay, false);
+        let towers = self.towers.entry(key.clone()).or_insert_with(|| dishonored_ai::watchtower::WatchTowersState::new(defs));
+        let launchers = self.launchers.entry(key).or_insert_with(|| LaunchersState::new(defs));
+        let mut out = Vec::new();
+        towers.step(defs, &mut self.world, launchers, &soc, world, &tracked, dt, &mut out, events);
+        self.tower_events.extend(out);
+    }
+
+    /// `DisSeqAct_WatchTower` / `DisSeqAct_WatchTowerShootAtTarget` on tower `name` of the active
+    /// map. Returns whether it is a tower of the map.
+    pub fn tower_action(&mut self, name: &str, action: u8) -> bool {
+        let key = self.interactables_key();
+        let Some(defs) = self.setup.interactables.get(&key) else { return false };
+        let Some(i) = dishonored_ai::watchtower::WatchTowersState::find(defs, name) else { return false };
+        let ev = self.towers.entry(key).or_insert_with(|| dishonored_ai::watchtower::WatchTowersState::new(defs)).kismet_action(defs, i, action);
+        self.tower_events.extend(ev);
+        true
+    }
+
+    pub fn tower_shoot_at(&mut self, name: &str, target: PlayerId) -> bool {
+        let key = self.interactables_key();
+        let Some(defs) = self.setup.interactables.get(&key) else { return false };
+        let Some(i) = dishonored_ai::watchtower::WatchTowersState::find(defs, name) else { return false };
+        self.towers.entry(key).or_insert_with(|| dishonored_ai::watchtower::WatchTowersState::new(defs)).shoot_at(defs, i, target);
+        true
+    }
+
+    /// The tower names of the active map (for routing the Kismet's events).
+    pub fn tower_name(&self, i: usize) -> Option<(String, String)> {
+        let defs = self.setup.interactables.get(&self.interactables_key())?;
+        defs.watchtowers.get(i).map(|w| (w.package.clone(), w.name.clone()))
+    }
+
     /// The launchers' shots after the world stepped, and the clients' view of the launchers.
     pub(crate) fn step_launchers(&mut self, world: &dyn WorldQuery, cfg: &SimConfig, events: &mut Vec<SimEvent>) {
         events.append(&mut self.launcher_events);
@@ -156,7 +205,8 @@ impl MissionMatch {
             self.view.launchers.clear();
             return;
         };
-        if defs.launchers.is_empty() {
+        // (Watch towers' shots fly here too: a map with towers and no launchers still steps.)
+        if defs.launchers.is_empty() && defs.watchtowers.is_empty() {
             self.view.launchers.clear();
             return;
         }
