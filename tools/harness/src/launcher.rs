@@ -129,6 +129,9 @@ pub fn run(ctx: &Ctx, rep: &mut Report) -> Result<()> {
     // The original takes input 0.58 s after the main menu opens (`PlayOpenAnimation`: 180 ms,
     // then `MainMenuButtonBar.Open` 400 ms before `InitInputs`); nothing else may hold it back
     // (asset or menu-level loading). Allowance: a few frames at a busy machine's rate.
+    // The timing is read once the menu has taken input: the sounds are usually decoded long
+    // before the menu opens, so reading right after `main` would catch it inside its 0.58 s.
+    let (_, s1) = c.wait(10.0, |s| s["timing"]["input_ready_s"].as_f64().is_some());
     let tm = &s1["timing"];
     let (drawn, ready) = (tm["menu_drawn_s"].as_f64(), tm["input_ready_s"].as_f64());
     let delay = drawn.zip(ready).map(|(d, r)| r - d);

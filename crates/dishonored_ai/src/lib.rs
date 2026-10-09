@@ -2523,14 +2523,25 @@ impl Brain {
 
     /// Strongest stimulus: (who, level, proxy, urgent). Neutral pawns only ever head-track.
     fn focus(&self) -> Option<(PlayerId, u8, Vec3, bool)> {
-        self.attn
-            .iter()
-            .map(|a| {
-                let lvl = if a.who != NOISE && !self.enemies.contains(&a.who) { a.level.min(DAL_HEAD_TRACK) } else { a.level };
-                (a.who, lvl, a.proxy, a.urgent, a.value)
-            })
-            .max_by(|a, b| a.1.cmp(&b.1).then(a.4.total_cmp(&b.4)).then(b.0.cmp(&a.0)))
-            .map(|(w, l, p, u, _)| (w, l, p, u))
+        // The top target (0x00b305a0): each entry with a level above 0 gets a priority from its
+        // relationship (an enemy 5, a neutral 3, an ally 2); a higher priority replaces the best
+        // so far, and one of equal priority only with a strictly higher level. An entry of the
+        // same level and priority never replaces it (the first in the list stands): the
+        // accumulator's value plays no part. A noise place is no pawn relationship, so it ranks
+        // as neutral (the port's poster still treats its stimuli as an enemy's).
+        let mut best: Option<(u8, u8, (PlayerId, u8, Vec3, bool))> = None;
+        for a in self.attn.iter() {
+            let enemy = a.who != NOISE && self.enemies.contains(&a.who);
+            let lvl = if a.who != NOISE && !enemy { a.level.min(DAL_HEAD_TRACK) } else { a.level };
+            if lvl == 0 {
+                continue;
+            }
+            let prio = if enemy { 5 } else { 3 };
+            if best.as_ref().is_none_or(|b| b.0 < prio || (b.0 == prio && b.1 < lvl)) {
+                best = Some((prio, lvl, (a.who, lvl, a.proxy, a.urgent)));
+            }
+        }
+        best.map(|b| b.2)
     }
 
     /// Walk (or run) toward `goal` along the navmesh at the brain's locomotion speed.
