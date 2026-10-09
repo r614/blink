@@ -27,6 +27,22 @@ pub struct BreakStepDef {
     /// explosion broadcast (0x00A3A5F0; set on the whale oil batteries' fuse steps).
     #[serde(default)]
     pub impending_explosion: bool,
+    /// The step has no `m_pStaticMesh` and no `m_aMaterials`: it takes the actor out (its
+    /// components switch off, 0x00A3A5F0).
+    #[serde(default)]
+    pub removes: bool,
+}
+
+/// `DishonoredBreakableNavBlock`: the navmesh path object a breakable blocks.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct NavBlockDef {
+    /// `m_NavGuid` (the path-object edges' owner GUID).
+    pub guid: [u32; 4],
+    /// `m_bIsCurrentlyBlockingNavigation` as placed.
+    pub blocking: bool,
+    /// `m_bShouldBlockNavigationWhenDestroyed`: the state after the last step (0x00A305A0).
+    pub block_when_destroyed: bool,
 }
 
 /// `DisTweaks_WhaleOilBattery` (the battery-specific part).
@@ -68,6 +84,9 @@ pub struct BreakableDef {
     pub loot_step: i32,
     /// The battery tweak, for a `DisWhaleOilBattery`.
     pub battery: Option<BatteryDef>,
+    /// The navigation it blocks, for a `DishonoredBreakableNavBlock`.
+    #[serde(default)]
+    pub nav: Option<NavBlockDef>,
 }
 
 /// A placed movable (`DishonoredMovable`, `DisDLC05_Movable`) with its `DisTweaks_Movable`: the

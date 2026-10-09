@@ -1407,6 +1407,14 @@ impl MissionMatch {
         let world: &dyn WorldQuery = if placed.is_empty() { world } else { &layered };
         // [ai] Doors and the Kismet set the audio portals' occlusion for hearing.
         audio_portals::update(self);
+        // [world] Broken nav blockers open their path objects (0x00A305A0).
+        let nav_blocks = match (self.setup.world_actors.get(&wall_key), self.world_actors.get(&wall_key)) {
+            (Some(d), Some(st)) => st.nav_blocks(d),
+            _ => Vec::new(),
+        };
+        if let Some(k) = self.kismet.as_mut() {
+            k.set_nav_blocks(nav_blocks);
+        }
         // [kismet] Doors the original Kismet locked or unlocked change the AI's paths.
         let door_nav = self.kismet.as_mut().and_then(|k| k.door_nav(&self.current_map, world.nav()));
         let overlay = door_nav.as_deref().map(|nav| kismet_host::NavOverlay { inner: world, nav });
@@ -1930,8 +1938,9 @@ impl MissionMatch {
             self.mover_worlds.clear();
         }
         for (i, m) in movers.iter().enumerate() {
-            // [streaming] A mover of a hidden Kismet-streamed sublevel is not in the world.
-            if !self.level_present(dishonored_world::source_package(&m.actor).unwrap_or("")) {
+            // [streaming] A mover of a hidden Kismet-streamed sublevel is not in the world, nor is
+            // a nav blocker a step took out ([world]).
+            if !self.level_present(dishonored_world::source_package(&m.actor).unwrap_or("")) || self.mover_gone(&m.actor) {
                 match self.mover_keys.get(i) {
                     Some(k) if k.2 == u8::MAX => {}
                     Some(_) => {
@@ -1959,6 +1968,16 @@ impl MissionMatch {
                     self.mover_worlds.push(m.placed_in(state, delta));
                 }
             }
+        }
+    }
+
+    /// [world] A breakable nav blocker (`<package>:<name>`) taken out by a step without mesh or
+    /// materials: its collision is gone (0x00A3A5F0).
+    fn mover_gone(&self, actor: &str) -> bool {
+        let key = self.current_map.to_ascii_lowercase();
+        match (self.setup.world_actors.get(&key), self.world_actors.get(&key)) {
+            (Some(d), Some(st)) => st.gone(d, actor),
+            _ => false,
         }
     }
 

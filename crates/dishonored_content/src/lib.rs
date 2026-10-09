@@ -350,9 +350,9 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
     }
     let dir = cache_dir();
     std::fs::create_dir_all(&dir).ok();
-    // collision22 / levels22: triangles carry `channel::SHADOW` (the stealth light's line check); the always-loaded levels' collision, and one world per Kismet-streamed sublevel. 22: walls of light are not static (layered while they collide).
-    let coll_path = dir.join(format!("{map}.collision22.bin"));
-    let levels_path = dir.join(format!("{map}.levels22.bin"));
+    // collision23 / levels23: breakable nav blockers are movers (their collision goes when they break). 22: triangles carry `channel::SHADOW` (the stealth light's line check); the always-loaded levels' collision, and one world per Kismet-streamed sublevel. 22: walls of light are not static (layered while they collide).
+    let coll_path = dir.join(format!("{map}.collision23.bin"));
+    let levels_path = dir.join(format!("{map}.levels23.bin"));
     let streamed = dishonored_assets::kismet_streamed_levels(&content, map);
     let cached = match (CollisionWorld::load(&coll_path), dishonored_world::StreamedLevels::load_levels(&levels_path), std::fs::read_to_string(&spawn_path_of(&dir, map))) {
         (Ok(w), Ok(l), Ok(s)) => Some((w, l, serde_json::from_str::<Vec<Spawn>>(&s).unwrap_or_default())),
@@ -475,8 +475,8 @@ pub fn load_match(map: &str) -> Result<MatchContent> {
         }
     };
     // Breakables, whale oil batteries and receptacles (dishonored_sim::world_actors).
-    // worldactors5: break steps carry m_bAISendImpendingExplosionStim.
-    let wa_path = dir.join(format!("{map}.worldactors5.json"));
+    // worldactors6: break steps carry `removes`, nav blockers their path object. worldactors5: break steps carry m_bAISendImpendingExplosionStim.
+    let wa_path = dir.join(format!("{map}.worldactors6.json"));
     let world_actors: dishonored_ir::world_actors::WorldActors = match std::fs::read_to_string(&wa_path).ok().and_then(|t| serde_json::from_str(&t).ok()) {
         Some(w) => w,
         None => {

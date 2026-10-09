@@ -541,10 +541,16 @@ pub struct KismetRun {
     pub st: HostState,
     #[serde(skip)]
     pub setup: Arc<KismetSetup>,
-    /// The active map's navigation with the Kismet's door locks and dynamic pylons applied:
-    /// (map, door version, pylon version).
+    /// The active map's navigation with the Kismet's door locks, dynamic pylons and broken nav
+    /// blockers applied: (map, door version, pylon version, nav-block version).
     #[serde(skip)]
-    nav_cache: Option<(String, u32, u32, Arc<dishonored_world::nav::NavWorld>)>,
+    nav_cache: Option<(String, u32, u32, u32, Arc<dishonored_world::nav::NavWorld>)>,
+    /// The nav blockers whose state is not the placed one (`m_NavGuid`, blocking), as the mission
+    /// last handed them ([`Self::set_nav_blocks`]), and a version bumped when they change.
+    #[serde(skip)]
+    nav_blocks: Vec<([u32; 4], bool)>,
+    #[serde(skip)]
+    nav_block_version: u32,
 }
 
 impl KismetRun {
@@ -565,7 +571,7 @@ impl KismetRun {
                 st.spawner_actor.insert(i, ai as u32);
             }
         }
-        KismetRun { k, st, setup: Arc::new(setup.clone()), nav_cache: None }
+        KismetRun { k, st, setup: Arc::new(setup.clone()), nav_cache: None, nav_blocks: Vec::new(), nav_block_version: 0 }
     }
 
     /// The state the Kismet set a door (`<package>:<name>`) to (`EDisDoorState`: 0 closed,
@@ -605,12 +611,21 @@ impl KismetRun {
         Some(glam::Mat4::from_rotation_translation(rot, pos) * placed.inverse())
     }
 
+    /// The current map's nav blockers whose state is not the placed one (the breakables' steps,
+    /// `WorldActorsState::nav_blocks`).
+    pub fn set_nav_blocks(&mut self, blocks: Vec<([u32; 4], bool)>) {
+        if blocks != self.nav_blocks {
+            self.nav_blocks = blocks;
+            self.nav_block_version = self.nav_block_version.wrapping_add(1);
+        }
+    }
+
     /// The navigation the AI should path on this step: the map's navmesh with the doors the
     /// Kismet locked or unlocked (`DisSeqAct_Door` Lock / Unlock) applied to their path-object
-    /// edges (a locked `DisDoor` blocks its edges, as `m_bLocked` does at level start), and its
-    /// `ArkDynamicPylon`s where their bases carried them, connected or not
-    /// ([`Self::update_dynamic_pylons`]). None when the map has no dynamic pylon and the Kismet
-    /// changed no door of it.
+    /// edges (a locked `DisDoor` blocks its edges, as `m_bLocked` does at level start), the
+    /// broken nav blockers' edges ([`Self::set_nav_blocks`]), and its `ArkDynamicPylon`s where
+    /// their bases carried them, connected or not ([`Self::update_dynamic_pylons`]). None when
+    /// the map has no dynamic pylon and nothing changed a door or a blocker of it.
     pub fn door_nav(&mut self, map: &str, base: Option<&dishonored_world::nav::NavWorld>) -> Option<Arc<dishonored_world::nav::NavWorld>> {
         let base = base?;
         let dynamic = self.update_dynamic_pylons(base);
@@ -622,11 +637,11 @@ impl KismetRun {
             .filter(|(a, _)| db.packages.iter().position(|p| p.eq_ignore_ascii_case(&db.actors[**a as usize].package)).and_then(|p| db.map_of_package(p as u16)).is_some_and(|m| m.eq_ignore_ascii_case(map)))
             .map(|(a, s)| (db.actors[*a as usize].name.clone(), s.1))
             .collect();
-        if changes.is_empty() && !dynamic {
+        if changes.is_empty() && !dynamic && self.nav_blocks.is_empty() {
             return None;
         }
-        if let Some((m, v, pv, n)) = &self.nav_cache {
-            if m.eq_ignore_ascii_case(map) && *v == self.st.door_version && *pv == self.st.pylon_version {
+        if let Some((m, v, pv, bv, n)) = &self.nav_cache {
+            if m.eq_ignore_ascii_case(map) && *v == self.st.door_version && *pv == self.st.pylon_version && *bv == self.nav_block_version {
                 return Some(n.clone());
             }
         }
@@ -636,13 +651,16 @@ impl KismetRun {
                 o.blocking = locked;
             }
         }
+        for (guid, blocking) in &self.nav_blocks {
+            nav.set_blocking_guid(*guid, *blocking);
+        }
         for i in 0..nav.pylons.len() {
             if let Some(s) = self.st.pylons.get(&pylon_key(&nav.pylons[i])) {
                 nav.apply_pylon_state(i, *s);
             }
         }
         let nav = Arc::new(nav);
-        self.nav_cache = Some((map.to_string(), self.st.door_version, self.st.pylon_version, nav.clone()));
+        self.nav_cache = Some((map.to_string(), self.st.door_version, self.st.pylon_version, self.nav_block_version, nav.clone()));
         Some(nav)
     }
 
@@ -1016,6 +1034,8 @@ fn world_events(k: &mut Kismet, h: &mut H, evs: Vec<dishonored_sim::world_actors
                 h.st.noises.push(s);
                 continue;
             }
+            // The navigation follows the breakables' state (`set_nav_blocks`); no Kismet event.
+            WorldEvent::NavBlock { .. } => continue,
             WorldEvent::Broken { breakable, output } => {
                 let d = &defs.breakables[breakable];
                 ("DisSeqEvent_BreakableBroken", h.kismet_actor(&d.package, &d.name), Obj::None, output)

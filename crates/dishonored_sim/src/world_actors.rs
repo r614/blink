@@ -105,6 +105,9 @@ pub enum WorldEvent {
     Noise(SimEvent),
     /// `DisSeqEvent_WallOfLight` output of a wall (index into `walls_of_light`).
     WallOfLight { wall: usize, output: usize },
+    /// A nav blocker's last step set its navigation state (`m_bIsCurrentlyBlockingNavigation :=
+    /// m_bShouldBlockNavigationWhenDestroyed`, 0x00A305A0).
+    NavBlock { breakable: usize, blocking: bool },
 }
 
 /// The world actors of the active map.
@@ -313,6 +316,29 @@ impl WorldActorsState {
         (true, self.set_charges(defs, battery, charges - c, true))
     }
 
+    /// The nav blockers whose state is not the placed one: (`m_NavGuid`, blocking). The state
+    /// follows the steps (after the last one, `m_bShouldBlockNavigationWhenDestroyed`).
+    pub fn nav_blocks(&self, defs: &WorldActors) -> Vec<([u32; 4], bool)> {
+        defs.breakables
+            .iter()
+            .zip(&self.breakables)
+            .filter_map(|(d, s)| {
+                let nav = d.nav.as_ref()?;
+                let now = if !d.steps.is_empty() && s.next_step >= d.steps.len() { nav.block_when_destroyed } else { nav.blocking };
+                (now != nav.blocking).then_some((nav.guid, now))
+            })
+            .collect()
+    }
+
+    /// Whether a nav blocker (`<package>:<name>`) is out of the world: a step that takes the actor
+    /// out (no mesh, no materials) was applied (0x00A3A5F0).
+    pub fn gone(&self, defs: &WorldActors, actor: &str) -> bool {
+        let Some((package, name)) = actor.split_once(':') else { return false };
+        let Some(i) = Self::find(defs, Some(package), name) else { return false };
+        let (d, s) = (&defs.breakables[i], self.breakables.get(i));
+        d.nav.is_some() && s.is_some_and(|s| d.steps.iter().take(s.next_step).any(|st| st.removes))
+    }
+
     /// Whether a receptacle powers its devices (a battery is attached).
     pub fn powered(&self, receptacle: usize) -> bool {
         self.receptacles.get(receptacle).is_some_and(|r| r.attached.is_some())
@@ -369,6 +395,10 @@ impl WorldActorsState {
                 continue;
             }
             if let Some(step) = self.breakables[i].tick(d, dt) {
+                // The nav blocker's step hook (vslot 237, 0x00A305A0) runs first.
+                if let Some(nav) = d.nav.as_ref().filter(|_| step + 1 == d.steps.len()) {
+                    out.push(WorldEvent::NavBlock { breakable: i, blocking: nav.block_when_destroyed });
+                }
                 out.push(WorldEvent::Broken { breakable: i, output: BreakableState::output(d, step) });
                 let s = &d.steps[step];
                 if s.sound && s.noise_radius > 0.0 {
@@ -410,6 +440,41 @@ mod tests {
         assert_eq!((s.cur_health, s.wanted), (0, Some(1)));
         assert_eq!(s.tick(&d, 0.1), Some(1));
         assert_eq!(BreakableState::output(&d, 1), 0, "the last step is output 0 (100%)");
+    }
+
+    /// A nav blocker unblocks with its last step (0x00A305A0) unless it blocks when destroyed;
+    /// its collision goes with a step that has no mesh and no materials.
+    #[test]
+    fn a_broken_nav_blocker_opens_its_path_object() {
+        use dishonored_ir::world_actors::NavBlockDef;
+        let mut d = plank();
+        d.package = "L_Boyle_Ext_Env".into();
+        d.name = "DishonoredBreakableNavBlock_0".into();
+        d.steps[1].removes = true;
+        d.nav = Some(NavBlockDef { guid: [7, 0, 0, 0], blocking: true, block_when_destroyed: false });
+        let defs = WorldActors { breakables: vec![d.clone()], ..Default::default() };
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/config/gameplay_config.json");
+        let cfg = crate::SimConfig::from_json(&std::fs::read_to_string(path).unwrap()).unwrap().gameplay;
+        let mut st = WorldActorsState::new(&defs);
+        let key = "L_Boyle_Ext_Env:DishonoredBreakableNavBlock_0";
+        st.breakables[0].take_damage(&d, 10, "", None);
+        let ev = st.step(&defs, &[], &cfg, 0.1);
+        assert!(!ev.iter().any(|e| matches!(e, WorldEvent::NavBlock { .. })));
+        assert!(st.nav_blocks(&defs).is_empty() && !st.gone(&defs, key));
+        st.breakables[0].take_damage(&d, 50, "", None);
+        let ev = st.step(&defs, &[], &cfg, 0.1);
+        assert_eq!(ev[0], WorldEvent::NavBlock { breakable: 0, blocking: false });
+        assert_eq!(st.nav_blocks(&defs), vec![([7, 0, 0, 0], false)]);
+        assert!(st.gone(&defs, key));
+        // Blocking when destroyed: the state stays the placed one.
+        let mut d2 = d.clone();
+        d2.nav.as_mut().unwrap().block_when_destroyed = true;
+        let defs2 = WorldActors { breakables: vec![d2.clone()], ..Default::default() };
+        let mut st2 = WorldActorsState::new(&defs2);
+        st2.breakables[0].take_damage(&d2, 30, "", None);
+        let ev = st2.step(&defs2, &[], &cfg, 0.1);
+        assert_eq!(ev[0], WorldEvent::NavBlock { breakable: 0, blocking: true });
+        assert!(st2.nav_blocks(&defs2).is_empty());
     }
 
     #[test]

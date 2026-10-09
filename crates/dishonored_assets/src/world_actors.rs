@@ -15,10 +15,10 @@ use crate::content::Content;
 use crate::tweaks::{TMap, TVal, TweakDb, get, get_f32};
 use anyhow::Result;
 use dishonored_ir::ai::NoiseContext;
-use dishonored_ir::world_actors::{BatteryDef, BreakStepDef, BreakableDef, MovableDef, ReceptacleDef, WallOfLightDef, WorldActors};
+use dishonored_ir::world_actors::{BatteryDef, BreakStepDef, BreakableDef, MovableDef, NavBlockDef, ReceptacleDef, WallOfLightDef, WorldActors};
 use glam::Vec3;
 use std::sync::Arc;
-use ue3_package::properties::find;
+use ue3_package::properties::{Value, find};
 use ue3_package::{ObjRef, Package};
 
 /// Placed classes of the `DishonoredBreakable` family (`oracle index class`).
@@ -70,6 +70,7 @@ fn steps(m: &TMap, loudness: &[f32]) -> Vec<BreakStepDef> {
             },
             explosion: matches!(s.get("m_pExplosion"), Some(TVal::Obj(o)) if !o.is_empty() && o != "None"),
             impending_explosion: matches!(s.get("m_bAISendImpendingExplosionStim"), Some(TVal::B(true))),
+            removes: !matches!(s.get("m_pStaticMesh"), Some(TVal::Obj(o)) if !o.is_empty() && o != "None") && !matches!(s.get("m_aMaterials"), Some(TVal::List(l)) if !l.is_empty()),
         })
         .collect()
 }
@@ -94,6 +95,15 @@ fn breakable(pkg: &Arc<Package>, i: usize, package: &str, class: &str, db: &Twea
         ignore_shield: boolean(&m, "m_bIgnoreShield").unwrap_or(false),
         eject_speed: get_f32(&m, "m_fEjectSpeed").unwrap_or(0.0),
     });
+    // A nav blocker's path object and flags (class defaults false).
+    let nav = (class == "DishonoredBreakableNavBlock").then(|| {
+        let flag = |k: &str| matches!(find(&props, k).map(|x| &x.value), Some(Value::Bool(true)));
+        let guid = match find(&props, "m_NavGuid").map(|x| &x.value) {
+            Some(Value::Guid(g)) => *g,
+            _ => [0; 4],
+        };
+        NavBlockDef { guid, blocking: flag("m_bIsCurrentlyBlockingNavigation"), block_when_destroyed: flag("m_bShouldBlockNavigationWhenDestroyed") }
+    });
     Some(BreakableDef {
         name: pkg.obj_name(ObjRef::Export(i)).to_string(),
         package: package.to_string(),
@@ -107,6 +117,7 @@ fn breakable(pkg: &Arc<Package>, i: usize, package: &str, class: &str, db: &Twea
         instant_break: classes(&m, "m_pInstantBreakDamageTypes"),
         loot_step: int(&m, "m_WhichStepDropsLoot").unwrap_or(0),
         battery,
+        nav,
     })
 }
 

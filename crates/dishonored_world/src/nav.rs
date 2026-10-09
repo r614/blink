@@ -588,6 +588,17 @@ impl NavWorld {
         any
     }
 
+    /// Set a path object's blocking state by its GUID (a `DishonoredBreakableNavBlock`'s
+    /// `m_NavGuid`).
+    pub fn set_blocking_guid(&mut self, guid: [u32; 4], blocking: bool) -> bool {
+        let mut any = false;
+        for o in self.path_objects.iter_mut().filter(|o| o.guid == guid) {
+            o.blocking = blocking;
+            any = true;
+        }
+        any
+    }
+
     /// A* over polys: the corridor (poly ids) and the links taken.
     pub fn corridor(&self, start: u32, goal: u32, goal_pos: Vec3, start_pos: Vec3, opts: &PathOpts) -> Option<Vec<(u32, Option<usize>)>> {
         #[derive(PartialEq)]
@@ -931,6 +942,16 @@ impl Follower {
 mod tests {
     use super::*;
     use dishonored_ir::nav::{NavEdge, NavMesh, NavPoly};
+
+    #[test]
+    fn a_path_object_is_unblocked_by_its_guid() {
+        let mut w = NavWorld::default();
+        let po = |g: u32| PathObjectState { guid: [g, 0, 0, 0], name: format!("NavBlock_{g}"), class: "DishonoredBreakableNavBlock".into(), blocking: true };
+        w.path_objects = vec![po(1), po(2)];
+        assert!(w.set_blocking_guid([2, 0, 0, 0], false));
+        assert!(w.path_objects[0].blocking && !w.path_objects[1].blocking);
+        assert!(!w.set_blocking_guid([3, 0, 0, 0], false));
+    }
 
     /// Two unit squares side by side sharing an edge, plus a third reachable one-way.
     fn mesh() -> NavData {

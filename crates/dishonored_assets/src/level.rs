@@ -420,7 +420,6 @@ const STATIC_BLOCKER_CLASSES: &[&str] = &[
     "DisStaticMeshActor",
     "DisStaticCollisionActor",
     "DishonoredMovable",
-    "DishonoredBreakableNavBlock",
     "KActor",
     "DisAlarmBell",
     "DisSpeaker_PA",
@@ -1248,8 +1247,9 @@ impl Importer<'_> {
         let world = actor_transform(&props);
         let class = pkg.export_class(actor);
         // An `InterpActor` blocks pawns where it is at run time: its colliding components
-        // (effective flags, `component_collision`) become mover collision.
-        let mover = (class == "InterpActor").then(|| dishonored_ir::MoverRef {
+        // (effective flags, `component_collision`) become mover collision. So does a breakable nav
+        // blocker, whose collision goes when a step takes it out (0x00A3A5F0).
+        let mover = (class == "InterpActor" || class == "DishonoredBreakableNavBlock").then(|| dishonored_ir::MoverRef {
             actor: format!("{}:{}", pkg.name, pkg.obj_name(ObjRef::Export(actor))),
             actor_to_world: Mat4::from_translation(vec3_or(&props, "Location", Vec3::ZERO)) * rot_matrix(&props, "Rotation"),
         });
