@@ -1,0 +1,34 @@
+// Picking up a physics prop (research/dishonored/systems/movables.md): a bottle on a table of Boyle Int
+// (L_Boyle_Int_Script `DishonoredMovable_29`, `movable_twk.bottle_01_twk`: weight Tiny, m_bInteractable,
+// glass; pivot (-1067, -1987, 102)). Use on the focused prop -> `StatePlayerGrabMovable` -> the empty
+// hands' `m_pGrabbed_Movable` (0x00C3D030) -> `DisSeqEvent_MovablePickedUp` (0x00A45FD0); the prop is then
+// held at eye + forward x D - up x H with the camera's rotation (0x00C4C190: D = box.min.x + box.max.x
+// - m_fMovableHoldDist(-100) = 100.24, H = box.min.z + box.max.z + 70 - m_fShowMovableHeight_Tiny(75)
+// = 40.66), reached after m_fInitialGrabTime (0.066 s).
+// With the view pitched -20 degrees the pivot hangs D sin(-20) - H cos(-20) = -72.50 below the eye.
+// Port: `dishonored_sim::movables`.
+(
+    name: "movable/pickup_bottle",
+    system: Physics,
+    map: "L_Boyle_Int_P",
+    description: "Use on a bottle of Boyle Int: picked up, then held in front of the eye.",
+    setup: (player: Some((position: (-1067, -1850, 200), yaw: 270, pitch: -20, snap_to_floor: true)), kismet: true, kismet_start: Some("ChangeLvl_fromBoyleExterior_toBoyleInterior"), original_npcs: false, settle: 30, seed: 1),
+    ticks: 90,
+    input: [(tick: 10, action: Press(Use))],
+    checkpoints: [
+        (name: "picked up", expect: [
+            (metric: Count("Sim:MovablePickedUp"), value: 1, tol: 0, source: "Use on the focused interactable movable (m_bInteractable, reach m_fMaxDistance 200): one pick-up", status: Static),
+            (metric: Final("mov.held"), value: 1, tol: 0, source: "the empty hands hold it (DishonoredItemEmpty.m_pGrabbed_Movable)", status: Static),
+            (metric: Final("mov.speed"), value: 0, tol: 0, source: "a held prop is placed, not simulated (m_bDoPhysicsWhenHoldingMovable false)", status: Static),
+        ]),
+        (name: "hold place", expect: [
+            (metric: Diff("mov.z", "cam.z", 89), value: -72.50, tol: 0.05, source: "0x00C4C190: eye + forward x D - up x H at pitch -20 (box of bottle_01: -6.86..7.11 x, 0.02..45.64 z)", status: Unmeasured),
+            (metric: Diff("cam.y", "mov.y", 89), value: 80.29, tol: 0.05, source: "0x00C4C190 at yaw 270, pitch -20 (D cos 20 - H sin 20 along the view)", status: Unmeasured),
+        ]),
+        (name: "timing", expect: [
+            (metric: FirstAt("Sim:MovablePickedUp"), value: 0.1833, tol: 0.0334, source: "the Use press at tick 10; the original enters the grab state a tick or two later (UNVERIFIED)", status: Unmeasured),
+        ]),
+    ],
+    record: [Pawn, Camera, Kismet, SimEvents],
+    capture: Some("Boyle Int after ChangeLvl_fromBoyleExterior_toBoyleInterior, lab place -1067 -1850 on the floor facing 270 pitch -20; press Use on DishonoredMovable_29 (tick 10): DisSeqEvent_MovablePickedUp and the grab state's transitions (ProcessEvent), the prop's Location / Rotation per tick for 80 ticks (DisMovableComponent.m_pBody, m_pHeldBy) and the camera location"),
+)

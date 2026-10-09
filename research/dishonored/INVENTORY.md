@@ -104,7 +104,7 @@ an NPC carries (pickpocketing). Boyle Ext (with the street script) has 68: 54 ab
   (`EDisCorpseDropType` Low / High / NoMove / ForceCenter / FetalPose); leaving the state (slot 76,
   0x00A69A50) releases the corpse without an impulse. `Attribute_ThrowStrength` (FName 0x0145E1B8)
   is read only by the carried-object release 0x00C45340 (physics props thrown along the view at
-  that strength).
+  that strength; ported in `dishonored_sim::movables`, see systems/movables.md).
 - The sim: Use lifts the body under the crosshair (dead or unconscious), Use or attack drops it in
   front (attack: U-504); only Blink is usable while carrying; the sword is sheathed.
 

@@ -695,6 +695,24 @@ fn noise_table(content: &Content, db: &TweakDb, out: &mut AiConfig, prov: &mut s
             set("bullet_impact", &mut t.bullet_impact, "Bullet", ENV);
             set("corpse", &mut t.corpse, "Corpse", ENV);
             set("sleeping_body", &mut t.sleeping_body, "SleepingBody", ENV);
+            set("environment", &mut t.environment, "Environment", ENV);
+            // Physics props (a movable's contact type) striking the world: every `Env_*` striker.
+            let mut strikers: std::collections::BTreeSet<String> = cs.ai_noises().map(|(s, _, _)| s.to_string()).collect();
+            strikers.extend(cs.parents.keys().cloned());
+            t.prop_contacts.clear();
+            for s in strikers.into_iter().filter(|s| s.starts_with("DisContactType_Env_")) {
+                if let Some(n) = cs.ai_noise(&s, "DisContactType_Environment") {
+                    let r = if n.loudness == "EAINoiseSilent" { Some(0.0) } else { radius(&n.loudness) };
+                    if let (Some(r), Some(ctx)) = (r, NoiseContext::from_name(&n.context)) {
+                        let noise = AiNoise::new(r, ctx, if n.volume.scale_with_speed { n.volume.min_speed } else { 0.0 });
+                        // The types that make the plain `Environment` noise (800 uu, most of them) need no entry.
+                        if noise != t.environment {
+                            t.prop_contacts.push((s.clone(), noise));
+                        }
+                        prov.insert(format!("ai.noise.prop_contacts.{s}"), format!("Dis_ContactSystem ({s}, Environment) DisContactSub_AINoise {} {} min speed {} (scaled {})", n.loudness, n.context, n.volume.min_speed, n.volume.scale_with_speed));
+                    }
+                }
+            }
         }
         None => {
             prov.insert("ai.noise".into(), "defaults (Dis_ContactSystem not loaded)".into());

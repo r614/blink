@@ -119,6 +119,19 @@ impl<'c> PropResolver<'c> {
         }
     }
 
+    /// The export an object path (`Package.Group.Name`, as [`Self::inherited_object_path`] returns
+    /// it) names: in the package of its first segment.
+    pub fn locate_path(&mut self, path: &str) -> Option<(Arc<Package>, usize)> {
+        let top = path.split('.').next()?;
+        if !self.content.has_package(top) {
+            return None;
+        }
+        let q = self.content.package(top).ok()?;
+        let idx = self.path_index(&q);
+        let i = *idx.get(&path.to_ascii_lowercase())?;
+        Some((q, i))
+    }
+
     /// The class default object an export without a serialized archetype derives from: its
     /// class's `Default__<Class>`, or for a class default object its super class's.
     fn class_default(&mut self, pkg: &Arc<Package>, i: usize) -> Option<(Arc<Package>, usize)> {

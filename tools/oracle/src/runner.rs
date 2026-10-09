@@ -521,6 +521,9 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         ("darkness.score", "n"), ("darkness.level", "n"), ("darkness.corpses_found", "n"), ("darkness.high", "bool"),
         ("proj.x", "uu"), ("proj.y", "uu"), ("proj.z", "uu"), ("proj.speed", "uu/s"),
         ("fx.live", "n"), ("fx.particles", "n"),
+        // The player's physics prop (movables.md): the one in his hands, else the one he last let
+        // go of that is still moving, else the last he touched.
+        ("mov.held", "bool"), ("mov.x", "uu"), ("mov.y", "uu"), ("mov.z", "uu"), ("mov.vx", "uu/s"), ("mov.vy", "uu/s"), ("mov.vz", "uu/s"), ("mov.speed", "uu/s"), ("mov.phase", "enum"), ("mov.damage", "pt"), ("mov.gone", "bool"),
     ] {
         chans.push((c.to_string(), u));
     }
@@ -572,6 +575,15 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             None => v.extend([f64::NAN; 4]),
         }
         v.extend([present.live_effects() as f64, present.live_particles() as f64]);
+        {
+            use dishonored_sim::state::MovablePhase;
+            let mine = w.movables.iter().filter(|m| m.instigator == Some(ME));
+            let m = w.movables.iter().find(|m| m.holder == Some(ME)).or_else(|| mine.clone().find(|m| m.phase == MovablePhase::Fly)).or_else(|| mine.clone().last());
+            match m {
+                Some(m) => v.extend([b(m.phase == MovablePhase::Held), m.position.x as f64, m.position.y as f64, m.position.z as f64, m.velocity.x as f64, m.velocity.y as f64, m.velocity.z as f64, m.velocity.length() as f64, leg.idx("mov.phase", m.phase), m.damage as f64, b(m.gone)]),
+                None => v.extend([0.0, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, 0.0]),
+            }
+        }
         let poses = dishonored_multiplayer::npc_poses(&m.crowd.brains);
         for (name, id) in &tracked {
             let p = w.player(*id);

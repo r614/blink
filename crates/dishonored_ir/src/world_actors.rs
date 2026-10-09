@@ -66,6 +66,50 @@ pub struct BreakableDef {
     pub battery: Option<BatteryDef>,
 }
 
+/// A placed movable (`DishonoredMovable`, `DisDLC05_Movable`) with its `DisTweaks_Movable`: the
+/// physics prop the player can pick up (`m_bInteractable`), carry, drop and throw
+/// (research/dishonored/systems/movables.md). Breaking is the same actor's [`BreakableDef`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct MovableDef {
+    pub name: String,
+    pub package: String,
+    pub class: String,
+    pub position: Vec3,
+    /// `Rotation` as (pitch, yaw, roll) in degrees (`Rotator` units of 360 / 65536).
+    pub rotation: Vec3,
+    /// The `DisTweaks_Movable` (`m_pMovableTweaks`, set or inherited).
+    pub tweak: String,
+    /// `m_MovableParams.m_WeightClass` (`EMovableWeightClass`: 0 Tiny, 1 Small, 2 Medium, 3 Large).
+    pub weight: u8,
+    /// `m_MovableParams.m_Damage` (copied to `DishonoredMovable.m_Damage`, +0x404).
+    pub damage: i32,
+    /// `m_bInteractable`, `m_bIsKeyItem`, `m_bBlocksPlayer`, `m_bNeverBlocksPlayer`.
+    pub interactable: bool,
+    pub key_item: bool,
+    pub blocks_player: bool,
+    pub never_blocks_player: bool,
+    /// `DisTweaks_InteractableInterface.m_fMaxDistance` of `m_pInteractableTweaks`.
+    pub max_distance: f32,
+    /// `m_InteractText` of the same tweak (the HUD prompt: "`GBA_Use` Carry").
+    pub prompt: String,
+    /// `DisTweaks_StaticBreakable.m_fMinSpeedToCauseDamage` / `m_fMinSpeedToBeDamaged` /
+    /// `m_fMinSpeedToBeDamagedOnDrop` (the rigid-body collision of a breakable, 0x00A40CF0).
+    pub min_speed_to_cause_damage: f32,
+    pub min_speed_to_be_damaged: f32,
+    pub min_speed_to_be_damaged_on_drop: f32,
+    /// `DisTweaks_KActor.m_pContactTypeOverride` (a `DisContactType_*` class name), if set.
+    pub contact_type: String,
+    /// The static mesh object path of the actor's `StaticMeshComponent` (presentation).
+    pub mesh: String,
+    /// The mesh's local bounding box (`FBox` min / max, `StaticMesh.Bounds`): the component's
+    /// `GetBoundingBox` (interface slot 5, 0x00A46820) that the hold position reads.
+    pub bounds_min: Vec3,
+    pub bounds_max: Vec3,
+    /// Index in [`WorldActors::breakables`] of the same actor (it has a break tweak with a health).
+    pub breakable: Option<usize>,
+}
+
 /// A placed `DisWhaleOilReceptacle` with its `DisTweaks_WhaleOilReceptacle`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -90,4 +134,6 @@ pub struct ReceptacleDef {
 pub struct WorldActors {
     pub breakables: Vec<BreakableDef>,
     pub receptacles: Vec<ReceptacleDef>,
+    /// The placed movables (all of them, whatever their health).
+    pub movables: Vec<MovableDef>,
 }
