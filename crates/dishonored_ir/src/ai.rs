@@ -1815,6 +1815,31 @@ pub struct AiLevel {
     /// (`m_pCombatTweaks.m_SwarmCallForHelpLoudness` as a distance, 0x00A6AD20).
     #[serde(default)]
     pub tweak_rat_call: BTreeMap<String, f32>,
+    /// The level's `DisTetherVolume`s (the spawners' `m_TetherVolumes` name them).
+    #[serde(default)]
+    pub tether_volumes: Vec<TetherVolume>,
+}
+
+/// A `DisTetherVolume`: a brush a spawner's pawn is tethered to (its Touch / UnTouch 0x00c92b40 /
+/// 0x00c92b90 set the pawn's current tether volume, whose change posts `TetherRequest`,
+/// 0x00b68ad0).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct TetherVolume {
+    pub name: String,
+    pub package: String,
+    /// The enabled flag (bit 0 of +0x274, no placed volume sets it; a Kismet action toggles it,
+    /// 0x00c8c370): on by default.
+    pub enabled: bool,
+    /// World-space convex hulls of the brush, as planes (nx, ny, nz, d): inside when
+    /// `n . p <= d` for every plane of one hull.
+    pub hulls: Vec<Vec<[f32; 4]>>,
+}
+
+impl TetherVolume {
+    pub fn contains(&self, p: glam::Vec3) -> bool {
+        self.hulls.iter().any(|h| !h.is_empty() && h.iter().all(|pl| pl[0] * p.x + pl[1] * p.y + pl[2] * p.z <= pl[3] + 1e-3))
+    }
 }
 
 /// `DisTweaks_AIBehavior_CombatRatSwarm` (`DisBehaviorCombatRatSwarm`, slot Engage): how a pawn

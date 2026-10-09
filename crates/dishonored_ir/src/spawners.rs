@@ -22,11 +22,14 @@ pub struct SpawnerProps {
     /// `DisTravelSpawner.m_PlayerTravelLocationTags`: spawns when the player arrives at one of
     /// these travel tags (empty for plain spawners).
     pub travel_tags: Vec<String>,
+    /// `m_TetherVolumes` (+0x47c): the `DisTetherVolume` actors its pawn is tethered to.
+    #[serde(default)]
+    pub tether_volumes: Vec<String>,
 }
 
 impl Default for SpawnerProps {
     fn default() -> Self {
-        SpawnerProps { on_begin_play: true, at_suspicion: None, squad: String::new(), patrol_on_startup: false, aware_on_startup: false, capable_of_fleeing: true, spawn_dead: false, knocked_out: false, faction: String::new(), travel_tags: Vec::new() }
+        SpawnerProps { on_begin_play: true, at_suspicion: None, squad: String::new(), patrol_on_startup: false, aware_on_startup: false, capable_of_fleeing: true, spawn_dead: false, knocked_out: false, faction: String::new(), travel_tags: Vec::new(), tether_volumes: Vec::new() }
     }
 }
 

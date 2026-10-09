@@ -290,3 +290,17 @@ fn window_beam_vertex_colours() {
     assert_eq!(m.colors.len(), 34);
     assert!(m.colors.iter().any(|c| c[0] == 255) && m.colors.iter().any(|c| c[0] == 0));
 }
+
+/// Boyle street's tether volumes and the spawner tethered to `DisTetherVolume_3`: its spawn lies
+/// inside that volume's hull.
+#[test]
+fn boyle_street_ext_tether() {
+    let Some(c) = content() else { return };
+    let pkgs = vec!["L_BoyleStreet_Ext_Script".to_string()];
+    let lvl = dishonored_assets::ai_level::extract_ai_level(&c, &pkgs, &[], &[]).unwrap();
+    assert!(lvl.tether_volumes.len() >= 4, "{:?}", lvl.tether_volumes.iter().map(|v| &v.name).collect::<Vec<_>>());
+    let npcs = dishonored_assets::npcs::extract_npc_data(&c, &pkgs).unwrap();
+    let s = npcs.spawns.iter().find(|s| s.spawner.tether_volumes.iter().any(|v| v == "DisTetherVolume_3")).expect("a spawner tethered to DisTetherVolume_3");
+    let v = lvl.tether_volumes.iter().find(|v| v.name == "DisTetherVolume_3").unwrap();
+    assert!(v.contains(s.position) || v.contains(s.position - glam::Vec3::Z * 90.0), "{:?}", s.position);
+}

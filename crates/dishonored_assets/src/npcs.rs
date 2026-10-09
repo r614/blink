@@ -257,6 +257,8 @@ fn spawner_props(pkg: &ue3_package::Package, props: &[ue3_package::properties::P
     if let Some(Value::Object(o)) = find(props, "m_pFactionTweakOverride").map(|p| &p.value) {
         s.faction = pkg.obj_path(ObjRef::from_index(*o));
     }
+    // `m_TetherVolumes`: the tether volume actors (same package).
+    s.tether_volumes = find(props, "m_TetherVolumes").and_then(|p| p.array_objects().ok()).unwrap_or_default().into_iter().map(ObjRef::from_index).filter(|r| *r != ObjRef::Null).map(|r| pkg.obj_name(r).to_string()).collect();
     // Array of FName: i32 count, then (index, number) pairs.
     if let Some(Value::Array(raw)) = find(props, "m_PlayerTravelLocationTags").map(|p| &p.value) {
         let rd = |o: usize| raw.get(o..o + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));

@@ -339,6 +339,11 @@ pub fn extract_ai_level(content: &Content, packages: &[String], tweaks: &[String
                         out.stealth_volumes.push(v);
                     }
                 }
+                "DisTetherVolume" => {
+                    if let Some(hulls) = pkg.read_object(i).ok().and_then(|h| brush_world_hulls(&pkg, &h.properties)).filter(|h| !h.is_empty()) {
+                        out.tether_volumes.push(dishonored_ir::ai::TetherVolume { name: pkg.obj_name(ObjRef::Export(i)).to_string(), package: name.clone(), enabled: true, hulls });
+                    }
+                }
                 "DisNPCDistractor" => {
                     if let Some(d) = read_distractor(&pkg, i, name, &mut resolver) {
                         out.distractors.push(d);
