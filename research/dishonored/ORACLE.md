@@ -608,6 +608,17 @@ checked against `GetBoneLocation` / `GetBoneQuaternion` (spine_1_jnt: same posit
 rotation up to the quaternion sign). Size: a guard (118 bones, 40 nodes) for 900 ticks with
 world space was 9.4 MB, about half without.
 
+**Comparing the port.** The port writes its own per-frame bone transforms with the `DISH_ANIM_DUMP`
+environment variable: run a harness scenario with `DISH_ANIM_DUMP=<pawn_id>:<file.jsonl>` to write
+one JSON object per line with the same fields as `dump_bones` (tick, id, bones [name, q, t], full,
+upper sequences). To compare against a capture sidecar, use `oracle anim compare --capture
+anim-<hash>.json --port <file.jsonl>` (the tool reconstructs the delta-encoded capture frames,
+aligns the ticks by searching for the offset that minimizes mean bone rotation error over -30..+30
+ticks, and reports per-bone statistics: mean and max rotation angle in degrees, mean translation
+error in Dishonored units). Pass `--bones bone,bone` to compare specific bones (default: all bones
+present in both), `--offset N` to skip the search and use a fixed tick offset, `--pawn ID` to
+filter the port dump to one pawn id, and `--json OUT` to write the results as JSON.
+
 **NPC locomotion needs the level's navigation mesh.** On the Playground (built at +20000 in
 Boyle, no navmesh there) placed NPCs never move: alerted guards attack in place
 (`combat/guard_attack`, `combat/block`, `ai/combat_cadence`: x / y constant), and a patrolling

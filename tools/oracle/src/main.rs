@@ -10,6 +10,9 @@
 //!                                            query batch for `probe_launch collide`
 //! oracle densify collision --map M --out Q.txt [--per N] [--radius R]   queries around disagreements
 //! oracle structure --map M                   port collision structure (vs a cached reflection dump)
+//! oracle anim info FILE                      skeletal animation capture statistics
+//! oracle anim compare --capture F --port F [--bones B,B] [--offset N] [--pawn ID] [--json OUT]
+//!                                            compare port dump vs oracle capture
 //! oracle scenario [NAME...] [--system S]... [--all] [--jobs N] [--json] [--dir DIR] [--out DIR]
 //! oracle sweep [--out DIR] [--no-coverage]   every cached map and scenario -> scorecard + work list
 //! oracle bench import|queries --map M        measure the port's costs
@@ -20,6 +23,7 @@
 //! Outputs go to `harness_out/oracle/<command>/` (gitignored); cached answers and port
 //! snapshots to the oracle cache (`$DISHONORED_CACHE/oracle`).
 
+mod anim;
 mod querygen;
 mod port;
 #[cfg(feature = "scenarios")]
@@ -114,13 +118,14 @@ fn main() -> Result<()> {
         "navspots" => cmd_navspots(&a),
         "navlines" => cmd_navlines(&a),
         "structure" => cmd_structure(&a),
+        "anim" => anim::cmd_anim(&a),
         "scenario" => cmd_scenario(&a).map(|_| ()),
         "sweep" => cmd_sweep(&a),
         "bench" => cmd_bench(&a),
         "cache" => cmd_cache(&a),
         "index" => dishonored_oracle::index::cli::run(&a.0[1..]),
         _ => {
-            eprintln!("{}", include_str!("main.rs").lines().skip(2).take(18).map(|l| l.trim_start_matches("//! ")).collect::<Vec<_>>().join("\n"));
+            eprintln!("{}", include_str!("main.rs").lines().skip(2).take(20).map(|l| l.trim_start_matches("//! ")).collect::<Vec<_>>().join("\n"));
             bail!("unknown command `{cmd}`")
         }
     }
