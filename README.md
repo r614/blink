@@ -79,6 +79,37 @@ Not yet ported, or ported only in part:
 - **Modes**: interaction prompts are shown in missions only (not FFA or Contracts).
 - **Coverage**: screenshots of every map, and the oracle capture backlog
   (`fixtures/oracle/capture_queue.txt`).
+- **Paired kills**: the master and slave pawns are not yet placed at the animations' authored
+  spacing (`research/UNKNOWNS.md` U-969), so the sword can sit in front of the victim's face and
+  the player's arm and body can pass through the victim. Also missing: camera shakes
+  (`DisNotify_CameraShake`), the gored and eaten sever states, dramatic targets
+  (`Front_Special`), double kills and the Tallboy's moves.
+- **Campaign**: no campaign entry in the main menu yet. The cooked campaign missions
+  (`tools/mission cook`) are not offered by the launcher.
+
+### Known issues
+
+Reported from play testing, not yet fixed:
+
+- **Input**: conversation choices only respond to the gamepad (the prompt shows the A button).
+- **Window**: the mouse cursor appears and the game loses focus when a match starts from the
+  menu and when going back to it. The window also minimizes on the way back to the main menu.
+- **Settings**: the resolution cannot be changed.
+- **HUD and menus**:
+  - the crouch (stealth) overlay draws a large square in the middle of the screen;
+  - a stray square texture shows on the menu's message box ("All unsaved progress...");
+  - the letterbox bars do not reach the screen's edges on ultrawide displays.
+- **Effects**:
+  - blood renders black;
+  - the camera's lens blood renders as white blobs;
+  - particles start early or late against their events and stay too long.
+- **Audio**:
+  - throwing a grenade plays a gunshot;
+  - combat sounds are out of sync with their events.
+- **NPC animation**:
+  - NPC animations are very jerky;
+  - alerted and fighting NPCs move out of step with their animations.
+- **Performance**: frame rates are very low in Free Roam.
 
 ## Platforms
 
