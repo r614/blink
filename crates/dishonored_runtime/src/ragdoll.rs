@@ -19,13 +19,13 @@ use glam::{Mat4, Quat, Vec3};
 
 /// Fixed step (seconds) and constraint passes per step.
 pub const STEP: f32 = 1.0 / 60.0;
-const ITERATIONS: usize = 8;
+pub const ITERATIONS: usize = 8;
 /// Velocity kept per step (air drag of the point masses).
-const DAMPING: f32 = 0.985;
+pub const DAMPING: f32 = 0.985;
 /// Horizontal velocity kept on floor contact.
-const FRICTION: f32 = 0.6;
+pub const FRICTION: f32 = 0.6;
 /// A ragdoll stops after this long (PhysX puts resting bodies to sleep).
-const MAX_TIME: f32 = 4.0;
+pub const MAX_TIME: f32 = 4.0;
 
 pub struct Body {
     pub bone: usize,

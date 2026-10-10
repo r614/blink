@@ -230,9 +230,18 @@ pub const OPACITY_PARAMS: &[(&str, Option<&str>)] = &[
 /// particle the contact system's sub-intersections name (impacts, blood, splashes,
 /// explosions). Decoded with every level.
 /// The entries of [`GAMEPLAY_PARTICLES`] cooked only into the maps whose actors reference them
-/// (the walls of light's `WallOfLight_twk` is in their maps' packages, not in a shared one): a
-/// map without those actors does not have them.
-pub const MAP_LOCAL_PARTICLES: &[&str] = &["Vfx_GamePlay.WallLight.Lightnings3_random", "Vfx_GamePlay.WallLight.ps_shock_electrified"];
+/// (the walls of light's `WallOfLight_twk` is in their maps' packages, not in a shared one; the
+/// AnimSets of the river krusts, the musical overseer and the spitting-fire deaths are cooked with
+/// the maps that place those pawns): a map without those actors does not have them.
+pub const MAP_LOCAL_PARTICLES: &[&str] = &[
+    "Vfx_GamePlay.WallLight.Lightnings3_random",
+    "Vfx_GamePlay.WallLight.ps_shock_electrified",
+    "Vfx_PhysMat.Blood.Pfx_BloodMotion_BKP",
+    "Vfx_GamePlay.SpittingFire.SpittingFire",
+    "vfx_characters.overseer.Musical_overseerFX",
+    "Vfx_GamePlay.RiverKrust.Ps_RiverKrust_Death",
+    "Vfx_GamePlay.RiverKrust.Ps_RiverKrust_Spew",
+];
 
 pub const GAMEPLAY_PARTICLES: &[&str] = &[
     "Vfx_Weapon.Effects.pistol.Ps_PlayerPistol_StdMuzzle_01",

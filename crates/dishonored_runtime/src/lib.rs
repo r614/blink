@@ -34,6 +34,7 @@ pub mod coords;
 pub mod game_dir;
 #[doc(hidden)]
 pub mod characters;
+pub mod dropped_weapons;
 #[doc(hidden)]
 pub mod npc_anim;
 #[doc(hidden)]
@@ -539,6 +540,9 @@ pub fn main() {
             .add_systems(Update, (hud_wheel::update_power_wheel.before(input_map::gather_input).after(pause_menu::rebuild), hud_wheel::draw_power_wheel.after(hud_wheel::update_power_wheel).after(gfx_hud::draw_gfx_hud)))
             .init_resource::<viewmodel::ViewAnim>()
             .init_resource::<viewmodel::BodyFrames>()
+            // Weapons dead pawns let go of (`DisNotify_DropItem`), after the poses that drop them.
+            .init_resource::<dropped_weapons::DroppedWeapons>()
+            .add_systems(Update, dropped_weapons::update.after(characters::animate_characters))
             // Choked / carried bodies in their master's frame (the first-person rig's for the local player).
             .add_systems(Update, viewmodel::arm_glow_apply.after(power_pp::drive))
             .add_systems(Update, viewmodel::place_held_bodies.after(players::sync_players).after(viewmodel::animate_view_rig).after(cutscene::drive).before(characters::animate_characters))

@@ -150,6 +150,45 @@ pub fn extract_pickups(content: &Content, packages: &[String]) -> Result<Vec<Pla
     Ok(out)
 }
 
+/// What an inventory item leaves on the floor when its holder drops it: the item tweak's
+/// `m_pPickupToDrop` (a `DisTweaks_InventoryPickup`) and that pickup's `m_pPickupStaticMesh`,
+/// spawned with `m_fPickupToDrop_Chance` (class default 1.0) by the item's Drop (0x00C0FB30 ->
+/// 0x00C0BC00).
+#[derive(Debug, Clone)]
+pub struct DroppedPickup {
+    pub tweak: String,
+    /// The pickup's static mesh: (package holding its data, object path).
+    pub mesh: (String, String),
+    pub chance: f32,
+}
+
+/// The pickup an item tweak (`DisTweaks_InventoryItem`) drops, resolved over `packages` and the
+/// tweak packages.
+pub fn dropped_pickup(content: &Content, packages: &[String], item: &str) -> Result<DroppedPickup> {
+    dropped_pickup_in(content, &TweakDb::load_with(content, packages)?, packages, item)
+}
+
+/// [`dropped_pickup`] with a loaded tweak database (several items in one pass).
+pub fn dropped_pickup_in(content: &Content, db: &TweakDb, packages: &[String], item: &str) -> Result<DroppedPickup> {
+    use anyhow::Context;
+    let set = |m: &TMap, k: &str| get_obj(m, k).filter(|p| !p.is_empty() && *p != "None").map(str::to_string);
+    let it = db.resolve(item)?;
+    let tweak = set(&it, "m_pPickupToDrop").with_context(|| format!("{item}: no m_pPickupToDrop"))?;
+    let chance = get_f32(&it, "m_fPickupToDrop_Chance").unwrap_or(0.0);
+    let path = set(&db.resolve(&tweak)?, "m_pPickupStaticMesh").with_context(|| format!("{tweak}: no m_pPickupStaticMesh"))?;
+    // The first package holding the mesh with its data (a level package can hold a data-less
+    // export of a mesh cooked elsewhere).
+    let names = packages.iter().map(String::as_str).chain(crate::level::LIBRARY_PACKAGES.iter().copied());
+    for name in names {
+        let Ok(q) = content.package(name) else { continue };
+        let found = (0..q.exports.len()).any(|e| q.export_class(e) == "StaticMesh" && q.obj_path(ObjRef::Export(e)).eq_ignore_ascii_case(&path) && crate::static_mesh::read_static_mesh(&q, e).is_ok());
+        if found {
+            return Ok(DroppedPickup { tweak, mesh: (name.to_string(), path), chance });
+        }
+    }
+    anyhow::bail!("{tweak}: static mesh {path} not found")
+}
+
 /// The ammo a stat pickup can give (min, max) by type, for display.
 pub fn ammo_summary(k: &PickupKind) -> Vec<(AmmoType, i16, i16)> {
     match k {

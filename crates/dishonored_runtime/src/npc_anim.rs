@@ -33,6 +33,22 @@ pub struct SetData {
     /// lowercase sequence name -> its `AnimNotify_PlayParticleEffect`s: (time, system path, socket
     /// or bone, attached).
     pub pfx: HashMap<String, Vec<(f32, String, String, bool)>>,
+    /// lowercase sequence name -> its `DisNotify_DropItem`s.
+    pub drops: HashMap<String, Vec<DropNotify>>,
+}
+
+/// A `DisNotify_DropItem` (0x00A8D400): a dead pawn (health below 1, pawn slot 348 0x00B49480)
+/// lets go of its items.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DropNotify {
+    pub t: f32,
+    /// `m_WhichItem` (`DisWhichEquippedItemToDrop`): 0 every equipped item, 1 every attached
+    /// item, 2 the item of `m_ByUsage`.
+    pub which: u8,
+    /// `m_ByUsage` (`EDisEquipUsage`) is not the secondary usage (the off hand).
+    pub primary: bool,
+    /// `m_DropVelocity`, in the pawn mesh's frame (turned by its LocalToWorld).
+    pub velocity: glam::Vec3,
 }
 
 pub struct Profile {
@@ -144,6 +160,7 @@ impl AnimBank {
         let mut seqs = HashMap::new();
         let mut ragdoll = HashMap::new();
         let mut pfx: HashMap<String, Vec<(f32, String, String, bool)>> = HashMap::new();
+        let mut drops: HashMap<String, Vec<DropNotify>> = HashMap::new();
         for s in find(&h.properties, "Sequences").and_then(|p| p.array_objects().ok()).unwrap_or_default() {
             let ObjRef::Export(x) = ObjRef::from_index(s) else { continue };
             let Ok(sh) = pkg.read_object(x) else { continue };
@@ -170,12 +187,27 @@ impl AnimBank {
                             let attach = matches!(find(&nh.properties, "bAttach").map(|p| &p.value), Some(Value::Bool(true)));
                             pfx.entry(name.to_ascii_lowercase()).or_default().push((t, pkg.obj_path(r), point, attach));
                         }
+                        "DisNotify_DropItem" => {
+                            let Ok(nh) = pkg.read_object(ni) else { continue };
+                            let en = |k: &str| match find(&nh.properties, k).map(|p| &p.value) {
+                                Some(Value::Enum(v) | Value::Name(v)) => v.clone(),
+                                _ => String::new(),
+                            };
+                            let which = match en("m_WhichItem").as_str() {
+                                "DisWhichEquippedItemToDrop_All_Attached" => 1,
+                                "DisWhichEquippedItemToDrop_ByEquipUsage" => 2,
+                                _ => 0,
+                            };
+                            let usage = en("m_ByUsage");
+                            let velocity = find(&nh.properties, "m_DropVelocity").and_then(|p| p.as_vector()).map(glam::Vec3::from).unwrap_or(glam::Vec3::ZERO);
+                            drops.entry(name.to_ascii_lowercase()).or_default().push(DropNotify { t, which, primary: usage != "EDisEquipUsage_Secondary", velocity });
+                        }
                         _ => {}
                     }
                 }
             }
         }
-        self.sets.push(SetData { pkg: r.0.clone(), tracks, seqs, ragdoll, pfx });
+        self.sets.push(SetData { pkg: r.0.clone(), tracks, seqs, ragdoll, pfx, drops });
         self.set_index.insert(key, self.sets.len() - 1);
         Some(self.sets.len() - 1)
     }
@@ -222,6 +254,14 @@ impl AnimBank {
     pub fn particle_notifies(&mut self, profile: usize, name: &str) -> Vec<(f32, String, String, bool)> {
         match self.holder(profile, name) {
             Some(s) => self.sets[s].pfx.get(&name.to_ascii_lowercase()).cloned().unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The `DisNotify_DropItem`s of a profile's sequence.
+    pub fn drop_notifies(&mut self, profile: usize, name: &str) -> Vec<DropNotify> {
+        match self.holder(profile, name) {
+            Some(s) => self.sets[s].drops.get(&name.to_ascii_lowercase()).cloned().unwrap_or_default(),
             None => Vec::new(),
         }
     }

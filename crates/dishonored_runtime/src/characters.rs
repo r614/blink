@@ -272,12 +272,22 @@ pub enum TpWeapon {
     Crossbow,
 }
 
-const TP_WEAPONS: &[(TpWeapon, &str, &str, bool)] = &[
-    (TpWeapon::PlayerSword, "Wpn_PlySwords.Wpn_PlySword01", "handAttachment_R_jnt", true),
-    (TpWeapon::GuardSword, "Wpn_EliteSword.Wpn_EliteSword", "handAttachment_R_jnt", true),
-    (TpWeapon::Pistol, "Wpn_PlyGuns.Wpn_PlyGunElite", "handAttachment_L_jnt", false),
-    (TpWeapon::Crossbow, "Crossbows.crossbow_01", "handAttachment_L_jnt", false),
+/// (weapon, skeletal mesh, hand bone, blade, the item tweak it stands for: what it drops).
+const TP_WEAPONS: &[(TpWeapon, &str, &str, bool, &str)] = &[
+    (TpWeapon::PlayerSword, "Wpn_PlySwords.Wpn_PlySword01", "handAttachment_R_jnt", true, "Twk_Inv_PlayerSpecific.Twk_Inv_SwordCorvo"),
+    (TpWeapon::GuardSword, "Wpn_EliteSword.Wpn_EliteSword", "handAttachment_R_jnt", true, "Twk_Inv_EliteGuard.Twk_Inv_SwordEliteGuard"),
+    (TpWeapon::Pistol, "Wpn_PlyGuns.Wpn_PlyGunElite", "handAttachment_L_jnt", false, "Twk_Inv_PlayerSpecific.Twk_Inv_PistolCorvo"),
+    (TpWeapon::Crossbow, "Crossbows.crossbow_01", "handAttachment_L_jnt", false, "Twk_Inv_PlayerSpecific.Twk_Inv_CrossbowCorvo"),
 ];
+
+/// The pickup a weapon leaves when its holder drops it (`dropped_weapons`): its static mesh, the
+/// mesh's box (mesh space) and the drop's chance.
+pub struct DropPickupGpu {
+    pub gpu: CharacterGpu,
+    pub lo: glam::Vec3,
+    pub hi: glam::Vec3,
+    pub chance: f32,
+}
 
 pub struct TpWeaponGpu {
     pub kind: TpWeapon,
@@ -293,6 +303,7 @@ pub struct TpWeaponGpu {
     /// The `Spitfire` socket of the weapon mesh (`DisTweaks_FirePistol.m_MuzzleSocketName`):
     /// (bone, location in the bone).
     pub muzzle: Option<(usize, glam::Vec3)>,
+    pub pickup: Option<DropPickupGpu>,
 }
 
 /// A `SkeletalMeshSocket` of a mesh: (bone name, relative location).
@@ -331,7 +342,10 @@ pub fn load_weapons(
     let feat = features.map(|f| f.clone()).unwrap_or_else(|| crate::map_render::RenderFeatures::from_flags(&|_| false));
     let mut lib = WeaponLibrary::default();
     let Ok(content) = dishonored_assets::Content::locate() else { return };
-    for (kind, path, socket, blade) in TP_WEAPONS {
+    // The item tweaks: the Boyle guard's sword is cooked in its script package.
+    let tweak_pkgs = vec!["L_Boyle_Ext_Script".to_string()];
+    let db = dishonored_assets::tweaks::TweakDb::load_with(&content, &tweak_pkgs).map_err(|e| warn!("weapon tweaks: {e:#}")).ok();
+    for (kind, path, socket, blade, item) in TP_WEAPONS {
         match dishonored_assets::characters::load_model(&content, path, &[("Startup", path)], None, 512) {
             Ok(w) => {
                 let part = &w.parts[0];
@@ -339,7 +353,19 @@ pub fn load_weapons(
                 let to_socket = if *blade { glam::Mat4::from_rotation_z(std::f32::consts::PI) * inv } else { inv };
                 let sock = if *blade { "RightHandWpn" } else { "LeftHandWpn" };
                 let muzzle = content.package("Startup").ok().and_then(|pkg| mesh_socket(&pkg, path, "Spitfire")).and_then(|(bone, loc)| part.bones.iter().position(|b| b.name.eq_ignore_ascii_case(&bone)).map(|bi| (bi, loc)));
-                lib.weapons.push(TpWeaponGpu { kind: *kind, socket_name: socket, to_socket, bind: bind_globals(&part.bones), m2p: part.mesh_to_pawn, socket: sock, muzzle, gpu: upload(&w, &mut meshes, &mut images, &mut mats, &mut binds, &feat) });
+                // What it drops (`m_pPickupToDrop`).
+                let drop = db.as_ref().and_then(|db| dishonored_assets::pickups::dropped_pickup_in(&content, db, &tweak_pkgs, item).map_err(|e| warn!("weapon {item} pickup: {e:#}")).ok());
+                let pickup = drop.and_then(|d| match dishonored_assets::characters::load_static_model(&content, &d.mesh.0, &d.mesh.1, 512) {
+                    Ok(m) => {
+                        let (lo, hi) = m.parts[0].positions.iter().fold((glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN)), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+                        Some(DropPickupGpu { gpu: upload(&m, &mut meshes, &mut images, &mut mats, &mut binds, &feat), lo, hi, chance: d.chance })
+                    }
+                    Err(e) => {
+                        warn!("pickup mesh {}: {e:#}", d.mesh.1);
+                        None
+                    }
+                });
+                lib.weapons.push(TpWeaponGpu { kind: *kind, socket_name: socket, to_socket, bind: bind_globals(&part.bones), m2p: part.mesh_to_pawn, socket: sock, muzzle, pickup, gpu: upload(&w, &mut meshes, &mut images, &mut mats, &mut binds, &feat) });
             }
             Err(e) => warn!("weapon {path}: {e:#}"),
         }
@@ -555,7 +581,7 @@ pub fn animate_characters(
     mut anim_sounds: Option<ResMut<crate::audio::AnimSounds>>,
     session: Res<crate::session::Session>,
     mut sockets: Option<ResMut<crate::effects::EffectSockets>>,
-    (mut pawn_points, mut pawn_fx): (Option<ResMut<crate::cutscene::PawnPoints>>, Option<ResMut<crate::effects::PawnEffects>>),
+    (mut pawn_points, mut pawn_fx, mut drops): (Option<ResMut<crate::cutscene::PawnPoints>>, Option<ResMut<crate::effects::PawnEffects>>, Option<ResMut<crate::dropped_weapons::DroppedWeapons>>),
 ) {
     let events = std::mem::take(&mut view.anim_events);
     let (Some(lib), Some(mut bank)) = (lib, bank) else { return };
@@ -611,10 +637,16 @@ pub fn animate_characters(
         let input = crate::npc_anim::AnimInput { p, stance, action, armed, talking: talking.contains(&p.id), dt, hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), look_target: look_target(p, stance, talking.contains(&p.id), &all), head: view.matchv.npc_heads.iter().find(|h| h.id == p.id).copied(), face: faces.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), floor: -mv.collision_half_height, ground: Some(&ground), walls: Some(&walls), gravity: mv.gravity_z, carrier_speed: p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).map(|c| c.velocity.truncate().length()).unwrap_or(0.0) };
         // Particle notifies the chains crossed this frame: (system, socket or bone, attached).
         let mut fired: Vec<(String, String, bool)> = Vec::new();
+        // A `DisNotify_DropItem` crossed this frame; the limp death started (the ragdoll took the
+        // body) or the dead pawn plays nothing more: what drops its weapons.
+        let mut drop_notify: Option<crate::npc_anim::DropNotify> = None;
+        let mut limp = false;
         let pose = match states.get_mut(entity) {
             Ok(mut st) => {
                 let before = chain_clips(&st);
+                let was_limp = st.ragdoll.is_some();
                 let pose = crate::npc_anim::animate(&mut bank, &lib, root.archetype, profile, &mut st, &input);
+                limp = (!was_limp && st.ragdoll.is_some()) || (st.full.is_none() && st.ragdoll.is_none());
                 // `AnimNotify_PlayParticleEffect` of the full-body and upper-body chains: a clip
                 // started this frame fires from its start (a notify at 0 too).
                 for (clip, t1) in chain_clips(&st) {
@@ -626,6 +658,15 @@ pub fn animate_characters(
                         };
                         if crossed {
                             fired.push((template, point, attach));
+                        }
+                    }
+                    for d in bank.drop_notifies(profile, &clip) {
+                        let crossed = match t0 {
+                            Some(t0) => t0 < d.t && d.t <= t1,
+                            None => d.t <= t1,
+                        };
+                        if crossed {
+                            drop_notify = Some(d);
                         }
                     }
                 }
@@ -744,22 +785,66 @@ pub fn animate_characters(
         }
         let Some(weapons) = weapons.as_ref() else { continue };
         let body_bones = &model.parts[0].bones;
+        // The weapon mesh's frame in pawn space: the character mesh's weapon socket, then the
+        // weapon's Origin / RotOrigin (U-025); meshes without the socket keep the bone with the
+        // earlier visual offset.
+        let weapon_frame = |w: &TpWeaponGpu| -> Option<glam::Mat4> {
+            if let Some(s) = lib.sockets.get(&root.archetype).and_then(|v| v.iter().find(|s| s.name.eq_ignore_ascii_case(w.socket))) {
+                return Some(globals[s.part][s.bone] * s.local * w.m2p);
+            }
+            let sock = body_bones.iter().position(|b| b.name.eq_ignore_ascii_case(w.socket_name))?;
+            Some(globals[0][sock] * w.to_socket)
+        };
+        let to_world = |m: glam::Mat4| crate::cutscene::from_bevy(root_gt.to_matrix() * to_bevy(m));
         for c in children.iter() {
             if let Ok((wm, mut vis)) = wmeshes.get_mut(c) {
-                let k = weapons.weapons[wm.0].kind;
-                let show = p.alive && p.condition != dishonored_sim::state::Condition::Unconscious && p.carried_by.is_none() && p.mode != MoveMode::Blinking && !dishonored_sim::teleport_spell::hidden(p) && (Some(k) == right_w || Some(k) == left_w);
+                let w = &weapons.weapons[wm.0];
+                let held = Some(w.kind) == right_w || Some(w.kind) == left_w;
+                let key = (p.id, wm.0);
+                let mut gone = false;
+                if let Some(drops) = drops.as_mut() {
+                    if p.alive {
+                        drops.dropped.remove(&key);
+                    }
+                    gone = drops.dropped.contains(&key);
+                    let frame = weapon_frame(w).map(to_world);
+                    // A dead pawn lets go (pawn slot 348: health below 1): at its animation's drop
+                    // notify (the notify's usage picks the hand), when it goes limp, or when it plays
+                    // nothing more. A corpse never seen holding the weapon has nothing to drop.
+                    if !p.alive && held && !gone {
+                        let right_hand = w.socket == "RightHandWpn";
+                        let notify = drop_notify.filter(|d| d.which != 2 || d.primary == right_hand);
+                        if !drops.held.contains(&key) {
+                            drops.dropped.insert(key);
+                            gone = true;
+                        } else if notify.is_some() || limp {
+                            // `m_DropVelocity` turned by the pawn mesh's LocalToWorld.
+                            let velocity = notify.map(|d| to_world(model.parts[0].mesh_to_pawn).transform_vector3(d.velocity)).unwrap_or(glam::Vec3::ZERO);
+                            if let (Some(f), Some(pk)) = (frame, w.pickup.as_ref()) {
+                                // The roll (0x00C0BC00: spawned when the chance is at least rand() / RAND_MAX).
+                                let mut seed = ((p.id as u64) << 32) ^ wm.0 as u64;
+                                if pk.chance >= crate::present_rules::next_rand(&mut seed) {
+                                    drops.pending.push(crate::dropped_weapons::DropRequest { pawn: p.id, weapon: wm.0, frame: f * crate::dropped_weapons::pickup_turn(), velocity });
+                                }
+                            }
+                            drops.dropped.insert(key);
+                            gone = true;
+                        }
+                    }
+                    if held && !gone && frame.is_some() && p.condition != dishonored_sim::state::Condition::Unconscious && p.carried_by.is_none() {
+                        drops.held.insert(key);
+                    } else {
+                        drops.held.remove(&key);
+                    }
+                }
+                let show = (p.alive || !gone) && p.condition != dishonored_sim::state::Condition::Unconscious && p.carried_by.is_none() && p.mode != MoveMode::Blinking && !dishonored_sim::teleport_spell::hidden(p) && held;
                 *vis = if show { Visibility::Inherited } else { Visibility::Hidden };
             }
             if let Ok((wj, mut t)) = wjoints.get_mut(c) {
                 let w = &weapons.weapons[wj.weapon];
-                // The character mesh's weapon socket, then the weapon's Origin / RotOrigin (U-025);
-                // meshes without the socket keep the bone with the earlier visual offset.
-                if let Some(s) = lib.sockets.get(&root.archetype).and_then(|v| v.iter().find(|s| s.name.eq_ignore_ascii_case(w.socket))) {
-                    *t = Transform::from_matrix(to_bevy(globals[s.part][s.bone] * s.local * w.m2p * w.bind[wj.bone]));
-                    continue;
+                if let Some(f) = weapon_frame(w) {
+                    *t = Transform::from_matrix(to_bevy(f * w.bind[wj.bone]));
                 }
-                let Some(sock) = body_bones.iter().position(|b| b.name.eq_ignore_ascii_case(w.socket_name)) else { continue };
-                *t = Transform::from_matrix(to_bevy(globals[0][sock] * w.to_socket * w.bind[wj.bone]));
             }
         }
         // Muzzle socket of the shown pistol (world space, Dishonored units) for the muzzle flash.
