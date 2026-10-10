@@ -1270,7 +1270,7 @@ pub enum HitKind {
 
 /// Per pawn, the hits, deaths, swings and parries of this frame's simulation events, with the
 /// point they come from.
-pub fn collect_hits(events: &[SimEvent], all: &[&PlayerState]) -> HashMap<u32, Vec<(HitKind, Vec3)>> {
+pub fn collect_hits(events: &[(u64, SimEvent)], all: &[&PlayerState]) -> HashMap<u32, Vec<(HitKind, Vec3, u64)>> {
     use HitKind as H;
     use dishonored_sim::events::{DamageCause as C, SimEvent as E};
     let pos = |id: Option<u32>, fallback: u32| -> Vec3 {
@@ -1280,8 +1280,8 @@ pub fn collect_hits(events: &[SimEvent], all: &[&PlayerState]) -> HashMap<u32, V
             None => f.map(|v| v.position + dishonored_sim::movement::forward_vector(v.yaw)).unwrap_or_default(),
         }
     };
-    let mut out: HashMap<u32, Vec<(H, Vec3)>> = HashMap::new();
-    for e in events {
+    let mut out: HashMap<u32, Vec<(H, Vec3, u64)>> = HashMap::new();
+    for (tick, e) in events {
         match *e {
             E::Damage { victim, attacker, cause, .. } => {
                 // A sword kill the attacker plays as a paired move (`SwordState::assassination_move`
@@ -1296,7 +1296,7 @@ pub fn collect_hits(events: &[SimEvent], all: &[&PlayerState]) -> HashMap<u32, V
                     _ => None,
                 };
                 if let Some(k) = k {
-                    out.entry(victim).or_default().push((k, pos(attacker, victim)));
+                    out.entry(victim).or_default().push((k, pos(attacker, victim), *tick));
                 }
             }
             // The death chains named after their damage (`DisNPCAnim_DeathPlague`,
@@ -1310,24 +1310,24 @@ pub fn collect_hits(events: &[SimEvent], all: &[&PlayerState]) -> HashMap<u32, V
                     _ => None,
                 };
                 if let Some(s) = slave {
-                    out.entry(victim).or_default().push((s, pos(killer, victim)));
+                    out.entry(victim).or_default().push((s, pos(killer, victim), *tick));
                 }
                 let k = match cause {
                     C::Plague => H::DeathPlague,
                     C::Rats | C::RatBite => H::DeathSwarm,
                     _ => H::Death,
                 };
-                out.entry(victim).or_default().push((k, pos(killer, victim)))
+                out.entry(victim).or_default().push((k, pos(killer, victim), *tick))
             }
             // A synced finisher: the victim plays the state's slave (the generic swing has none).
             E::Fatality { id, victim, variant, slave, .. } => {
                 if let Some(anim) = dishonored_ir::npc_anim::NpcAnim::fatality_slave(slave) {
-                    out.entry(victim).or_default().push((H::Fatality { anim, group: variant }, pos(Some(id), victim)));
+                    out.entry(victim).or_default().push((H::Fatality { anim, group: variant }, pos(Some(id), victim), *tick));
                 }
             }
-            E::SwordSwing { id } => out.entry(id).or_default().push((H::Swing, Vec3::ZERO)),
-            E::SwordParried { attacker, defender } => out.entry(defender).or_default().push((H::Parried, pos(Some(attacker), defender))),
-            E::KnockedOut { victim, by, cause } if cause != dishonored_sim::events::KnockoutCause::Choke => out.entry(victim).or_default().push((H::KnockedOut, pos(by, victim))),
+            E::SwordSwing { id } => out.entry(id).or_default().push((H::Swing, Vec3::ZERO, *tick)),
+            E::SwordParried { attacker, defender } => out.entry(defender).or_default().push((H::Parried, pos(Some(attacker), defender), *tick)),
+            E::KnockedOut { victim, by, cause } if cause != dishonored_sim::events::KnockoutCause::Choke => out.entry(victim).or_default().push((H::KnockedOut, pos(by, victim), *tick)),
             E::ChokeEnd { attacker, victim, outcome } => {
                 use dishonored_sim::events::ChokeOutcome as O;
                 let k = match outcome {
@@ -1335,9 +1335,9 @@ pub fn collect_hits(events: &[SimEvent], all: &[&PlayerState]) -> HashMap<u32, V
                     O::Lose => H::ChokeLose,
                     _ => H::ChokeCancel,
                 };
-                out.entry(victim).or_default().push((k, pos(Some(attacker), victim)));
+                out.entry(victim).or_default().push((k, pos(Some(attacker), victim), *tick));
             }
-            E::BodyDropped { carrier, body } => out.entry(body).or_default().push((H::Dropped, pos(Some(carrier), body))),
+            E::BodyDropped { carrier, body } => out.entry(body).or_default().push((H::Dropped, pos(Some(carrier), body), *tick)),
             _ => {}
         }
     }

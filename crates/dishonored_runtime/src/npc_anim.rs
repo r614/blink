@@ -861,8 +861,10 @@ pub struct AnimInput<'a> {
     pub armed: bool,
     pub talking: bool,
     pub dt: f32,
-    /// Hit / death events this frame: (kind, source position).
-    pub hits: &'a [(HitKind, Vec3)],
+    /// The current view tick (for age calculations on tick-stamped events).
+    pub tick: u64,
+    /// Hit / death events this frame: (kind, source position, tick produced).
+    pub hits: &'a [(HitKind, Vec3, u64)],
     /// Floor height in pawn space (the model stands on it) and gravity (uu/s^2, negative), for
     /// the ragdoll.
     pub floor: f32,
@@ -1291,7 +1293,7 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
         st.shot = fire;
     }
     // Event-driven actions.
-    for (kind, from) in i.hits {
+    for (kind, from, hit_tick) in i.hits {
         let q = hit_angle(p, *from);
         let next = match kind {
             HitKind::Death | HitKind::DeathFast | HitKind::DeathPlague | HitKind::DeathSwarm => {
@@ -1393,10 +1395,13 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
             }
             _ => None,
         };
-        if let Some(c) = next {
+        if let Some(mut c) = next {
             if st.full.as_ref().is_some_and(|f| f.hold && f.key == "dead") {
                 continue;
             }
+            // Advance the chain's time by the event's age in simulation ticks.
+            let event_age = ((i.tick.saturating_sub(*hit_tick)) as f32 * dishonored_sim::movement::DT).min(bank.duration(profile, &c.steps[c.i].0).unwrap_or(0.0));
+            c.t = event_age;
             let w = st.full.as_ref().map_or(0.0, |f| f.weight);
             st.full = Some(Chain { weight: w * 0.5, ..c });
         }

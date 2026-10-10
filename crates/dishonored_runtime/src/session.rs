@@ -66,7 +66,8 @@ pub struct SessionView {
     /// Simulation events for audio presentation (see `crate::audio`).
     pub audio_events: Vec<SimEvent>,
     /// Simulation events for third-person animation (hits, deaths, swings; `crate::npc_anim`).
-    pub anim_events: Vec<SimEvent>,
+    /// Tuples of (tick produced, event) for tick-stamped reactions.
+    pub anim_events: Vec<(u64, SimEvent)>,
 }
 
 impl Session {
@@ -167,14 +168,18 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
                 }
             }
             let out = game.step(&inputs, world, sim);
+            let w = game.world();
+            // Events are produced during step_world, before the tick is incremented. Since the
+            // tick is incremented at the end of step_world, events should be stamped with the
+            // tick value before the increment (the tick whose step produced them).
+            let event_tick = w.tick.saturating_sub(1);
             view.audio_events.extend(out.events.iter().copied());
-            view.anim_events.extend(out.events.iter().copied());
+            view.anim_events.extend(out.events.iter().map(|e| (event_tick, *e)));
             for e in &out.events {
                 if let Some(s) = describe(e, game.view(), &game.world().players) {
                     view.feed.push(s);
                 }
             }
-            let w = game.world();
             view.me = w.player(LOCAL_ID).copied();
             view.others = w.players.iter().filter(|p| p.id != LOCAL_ID).copied().collect();
             view.projectiles = w.projectiles.clone();
@@ -214,11 +219,13 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
             client.send_input(input, world, sim);
             if client.state == ConnState::Connected {
                 view.audio_events.extend(client.local_events.iter().copied());
-                view.anim_events.extend(client.local_events.iter().copied());
+                // Predicted local events are stamped with the client's predicted world tick.
+                let predicted_tick = client.predicted.tick;
+                view.anim_events.extend(client.local_events.iter().map(|e| (predicted_tick, *e)));
             }
             let me = client.player_id;
-            for (_, e) in client.events.drain(..) {
-                view.anim_events.push(e);
+            for (tick, e) in client.events.drain(..) {
+                view.anim_events.push((tick, e));
                 if !crate::audio::predicted_locally(&e, me) {
                     view.audio_events.push(e);
                 }

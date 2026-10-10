@@ -578,7 +578,7 @@ pub fn animate_characters(
     weapons: Option<Res<WeaponLibrary>>,
     mut view: ResMut<crate::session::SessionView>,
     // (Grouped: a system takes at most 16 parameters.)
-    (time, mut face_packages, anim_debug, body_frames): (Res<Time>, Local<Option<(String, Vec<String>)>>, Local<AnimDebug>, Option<Res<crate::viewmodel::BodyFrames>>),
+    (time, mut face_packages, anim_debug, body_frames, mut last_tick): (Res<Time>, Local<Option<(String, Vec<String>)>>, Local<AnimDebug>, Option<Res<crate::viewmodel::BodyFrames>>, Local<u64>),
     roots: Query<(Entity, &CharacterRoot, &crate::players::PlayerBody, &Children, &GlobalTransform, Option<&InheritedVisibility>)>,
     mut joints: Query<(&Joint, &mut Transform), (Without<TpWeaponJoint>, Without<AccessoryJoint>)>,
     mut wjoints: Query<(&TpWeaponJoint, &mut Transform), (Without<Joint>, Without<AccessoryJoint>)>,
@@ -592,7 +592,7 @@ pub fn animate_characters(
     let events = std::mem::take(&mut view.anim_events);
     // Bodies the sim removed, for their burn (`ash_bodies`).
     if let Some(ash) = ash.as_mut() {
-        for e in &events {
+        for (_, e) in &events {
             if let dishonored_sim::events::SimEvent::BodyRemoved { body, ash: burnt } = e {
                 ash.removed.insert(*body, (*burnt, time.elapsed_secs_f64()));
             }
@@ -601,13 +601,20 @@ pub fn animate_characters(
     let (Some(lib), Some(mut bank)) = (lib, bank) else { return };
     let contracts = view.matchv.mode.eq_ignore_ascii_case("contracts");
     let all: Vec<&PlayerState> = view.others.iter().chain(view.me.iter()).collect();
-    let hits = crate::present_rules::collect_hits(&events, &all);
+    let hits = crate::present_rules::collect_hits(&events[..], &all);
     let talking = talking_pawns(&view);
     let root_models: Vec<(u32, usize)> = roots.iter().map(|r| (r.2.0, r.1.archetype)).collect();
     let faces = face_frames(&mut bank, &lib, &view, &root_models, time.elapsed_secs_f64(), &mut face_packages);
     // Each pawn's chains tick with its dilated time (`PlayerState::time_scale`: Bend Time, a
     // finisher's slow motion).
-    let dt = time.delta_secs().min(0.1);
+    // Advance animation by fixed simulation steps: on the first run set the last tick to the
+    // view tick; then advance by the ticks since last presentation, clamped to avoid large jumps.
+    if *last_tick == 0 {
+        *last_tick = view.tick;
+    }
+    let ticks = view.tick.saturating_sub(*last_tick).min(6);
+    *last_tick = view.tick;
+    let dt = ticks as f32 * dishonored_sim::movement::DT;
     let mv = &session.content.sim.gameplay.movement;
     for (entity, root, body, children, root_gt, root_vis) in &roots {
         let Some(p) = all.iter().find(|p| p.id == body.0).copied() else { continue };
@@ -650,7 +657,7 @@ pub fn animate_characters(
                 .collect()
         };
         let action = view.matchv.npc_actions.iter().find(|x| x.0 == p.id).map(|x| (x.1, x.2));
-        let input = crate::npc_anim::AnimInput { p, stance, action, armed, talking: talking.contains(&p.id), dt: dt * p.time_scale.max(0.0), hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), look_target: look_target(p, stance, talking.contains(&p.id), &all), head: view.matchv.npc_heads.iter().find(|h| h.id == p.id).copied(), face: faces.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), floor: -mv.collision_half_height, ground: Some(&ground), walls: Some(&walls), gravity: mv.gravity_z, carrier_speed: p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).map(|c| c.velocity.truncate().length()).unwrap_or(0.0) };
+        let input = crate::npc_anim::AnimInput { p, stance, action, armed, talking: talking.contains(&p.id), dt: dt * p.time_scale.max(0.0), tick: view.tick, hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), look_target: look_target(p, stance, talking.contains(&p.id), &all), head: view.matchv.npc_heads.iter().find(|h| h.id == p.id).copied(), face: faces.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), floor: -mv.collision_half_height, ground: Some(&ground), walls: Some(&walls), gravity: mv.gravity_z, carrier_speed: p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).map(|c| c.velocity.truncate().length()).unwrap_or(0.0) };
         // Particle notifies the chains crossed this frame: (system, socket or bone, attached).
         let mut fired: Vec<(String, String, bool)> = Vec::new();
         // A `DisNotify_DropItem` crossed this frame; the limp death started (the ragdoll took the

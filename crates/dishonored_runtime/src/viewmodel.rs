@@ -1553,6 +1553,7 @@ pub fn animate_view_rig(
     view: Res<SessionView>,
     session: Res<crate::session::Session>,
     time: Res<Time>,
+    mut last_tick: Local<u64>,
     mut cams: Query<(&GameCamera, &mut Transform), (Without<ViewRoot>, Without<ViewJoint>, Without<WeaponJoint>, Without<BoltJoint>)>,
     mut roots: Query<(&mut Transform, &mut Visibility), (With<ViewRoot>, Without<ViewJoint>, Without<WeaponJoint>, Without<WeaponMesh>)>,
     mut joints: Query<(&ViewJoint, &mut Transform), (Without<ViewRoot>, Without<WeaponJoint>)>,
@@ -1585,7 +1586,14 @@ pub fn animate_view_rig(
     };
     *root_vis = Visibility::Inherited;
     // The rig's tree ticks with the pawn's dilated time (Bend Time, a finisher's slow motion).
-    let dt = time.delta_secs().min(0.1) * me.time_scale.max(0.0);
+    // Advance animation by fixed simulation steps: on the first run set the last tick to the
+    // view tick; then advance by the ticks since last presentation, clamped to avoid large jumps.
+    if *last_tick == 0 {
+        *last_tick = view.tick;
+    }
+    let ticks = view.tick.saturating_sub(*last_tick).min(6);
+    *last_tick = view.tick;
+    let dt = ticks as f32 * dishonored_sim::movement::DT * me.time_scale.max(0.0);
     // The view's yaw (Dishonored degrees) from the game camera, before this frame's bob.
     let view_yaw = cams.iter().next().map(|(_, t)| {
         let f = t.rotation * Vec3::NEG_Z;
