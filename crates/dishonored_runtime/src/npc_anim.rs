@@ -28,17 +28,8 @@ pub struct SetData {
     pub tracks: Vec<String>,
     /// lowercase sequence name -> (export, original name)
     pub seqs: HashMap<String, (usize, String)>,
-    /// lowercase sequence name -> time of its `DishonoredNotify_Ragdoll` (physics hand-over).
-    pub ragdoll: HashMap<String, f32>,
-    /// lowercase sequence name -> its `AnimNotify_PlayParticleEffect`s: (time, system path, socket
-    /// or bone, attached).
-    pub pfx: HashMap<String, Vec<(f32, String, String, bool)>>,
-    /// lowercase sequence name -> its `DisNotify_DropItem`s.
-    pub drops: HashMap<String, Vec<DropNotify>>,
-    /// lowercase sequence name -> its `DisNotify_Trails` windows: (time, duration).
-    pub trails: HashMap<String, Vec<(f32, f32)>>,
-    /// lowercase sequence name -> its `DishonoredNotify_SeverLimb`s.
-    pub severs: HashMap<String, Vec<SeverNotify>>,
+    /// lowercase sequence name -> all notifies of the sequence, sorted by time.
+    pub notifies: HashMap<String, Vec<Notify>>,
 }
 
 /// A `DishonoredNotify_SeverLimb` (0x00A966D0, the notify's values over its class defaults:
@@ -58,6 +49,34 @@ pub struct SeverNotify {
     pub mode: u8,
     /// `m_fImpulseStrength`.
     pub strength: f32,
+}
+
+/// One notify in an animation sequence: time, duration, and type-specific data.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Notify {
+    /// Time within the sequence (seconds).
+    pub t: f32,
+    /// Duration of the notify window (for trails and other windowed events).
+    pub duration: f32,
+    /// The notify's kind and type-specific data.
+    pub kind: NotifyKind,
+}
+
+/// The type and data of a notify.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NotifyKind {
+    /// Physics hand-over point (`DishonoredNotify_Ragdoll`).
+    Ragdoll,
+    /// Particle effect (`AnimNotify_PlayParticleEffect`): system path, socket or bone, attached.
+    PlayParticleEffect { template: String, point: String, attach: bool },
+    /// Item drop (`DisNotify_DropItem`).
+    DropItem(DropNotify),
+    /// Melee trail window (`DisNotify_Trails`).
+    Trails,
+    /// Limb severance (`DishonoredNotify_SeverLimb`).
+    SeverLimb(SeverNotify),
+    /// Any other notify class (coverage of unknown types).
+    Other { class: String },
 }
 
 /// A `DisNotify_DropItem` (0x00A8D400): a dead pawn (health below 1, pawn slot 348 0x00B49480)
@@ -120,6 +139,19 @@ pub struct AnimBank {
 const SCRIPT_PACKAGES: &[&str] = &["L_Boyle_Ext_Script", "L_Boyle_Int_Script", "L_BoyleStreet_Ext_Script"];
 
 use dishonored_assets::characters::{ARISTO_SETS, FEMALE_LOCO, FEMALE_SETS, GUARD_LOCO, GUARD_SETS};
+
+/// Notifies that crossed the time window [t0, t1].
+/// A notify at time `t` crosses if `t0 < t <= t1` (when `t0` is `Some`), or `t <= t1` (when `t0` is `None`).
+fn crossing(notifies: &[Notify], t0: Option<f32>, t1: f32) -> Vec<Notify> {
+    notifies
+        .iter()
+        .filter(|n| match t0 {
+            Some(t0) => t0 < n.t && n.t <= t1,
+            None => n.t <= t1,
+        })
+        .cloned()
+        .collect()
+}
 
 impl AnimBank {
     pub fn new(content: Arc<Content>) -> Self {
@@ -186,26 +218,20 @@ impl AnimBank {
         let mut rd = ue3_package::reader::Reader::new(raw);
         let tracks: Vec<String> = (0..n).map(|_| ue3_package::FName::read(&mut rd).map(|f| pkg.name(f)).unwrap_or_default()).collect();
         let mut seqs = HashMap::new();
-        let mut ragdoll = HashMap::new();
-        let mut pfx: HashMap<String, Vec<(f32, String, String, bool)>> = HashMap::new();
-        let mut drops: HashMap<String, Vec<DropNotify>> = HashMap::new();
-        let mut trails: HashMap<String, Vec<(f32, f32)>> = HashMap::new();
-        let mut severs: HashMap<String, Vec<SeverNotify>> = HashMap::new();
+        let mut notifies: HashMap<String, Vec<Notify>> = HashMap::new();
         for s in find(&h.properties, "Sequences").and_then(|p| p.array_objects().ok()).unwrap_or_default() {
             let ObjRef::Export(x) = ObjRef::from_index(s) else { continue };
             let Ok(sh) = pkg.read_object(x) else { continue };
             if let Some(Value::Name(name)) = find(&sh.properties, "SequenceName").map(|p| &p.value) {
                 seqs.insert(name.to_ascii_lowercase(), (x, name.clone()));
-                // `DishonoredNotify_Ragdoll`: the death hands the body to physics here.
+                let mut seq_notifies: Vec<Notify> = Vec::new();
                 for ev in find(&sh.properties, "Notifies").and_then(|p| p.array_structs(&pkg).ok()).unwrap_or_default() {
                     let Some(ObjRef::Export(ni)) = find(&ev, "Notify").and_then(|p| p.as_object()).map(ObjRef::from_index) else { continue };
                     let t = find(&ev, "Time").and_then(|p| p.as_float()).unwrap_or(0.0);
-                    match pkg.export_class(ni).as_str() {
-                        "DishonoredNotify_Ragdoll" => {
-                            ragdoll.entry(name.to_ascii_lowercase()).or_insert(t);
-                        }
-                        // The system plays on the socket (else the bone) of the mesh, attached or
-                        // where it was.
+                    let duration = find(&ev, "Duration").and_then(|p| p.as_float()).unwrap_or(0.0);
+                    let class = pkg.export_class(ni);
+                    let kind = match class.as_str() {
+                        "DishonoredNotify_Ragdoll" => NotifyKind::Ragdoll,
                         "AnimNotify_PlayParticleEffect" => {
                             let Ok(nh) = pkg.read_object(ni) else { continue };
                             let nm = |k: &str| match find(&nh.properties, k).map(|p| &p.value) {
@@ -215,13 +241,9 @@ impl AnimBank {
                             let Some(r @ (ObjRef::Export(_) | ObjRef::Import(_))) = find(&nh.properties, "PSTemplate").and_then(|p| p.as_object()).map(ObjRef::from_index) else { continue };
                             let point = if nm("SocketName").is_empty() { nm("BoneName") } else { nm("SocketName") };
                             let attach = matches!(find(&nh.properties, "bAttach").map(|p| &p.value), Some(Value::Bool(true)));
-                            pfx.entry(name.to_ascii_lowercase()).or_default().push((t, pkg.obj_path(r), point, attach));
+                            NotifyKind::PlayParticleEffect { template: pkg.obj_path(r), point, attach }
                         }
-                        // The melee item's swing trail runs over the notify's duration.
-                        "DisNotify_Trails" => {
-                            let d = find(&ev, "Duration").and_then(|p| p.as_float()).unwrap_or(0.0);
-                            trails.entry(name.to_ascii_lowercase()).or_default().push((t, d));
-                        }
+                        "DisNotify_Trails" => NotifyKind::Trails,
                         "DisNotify_DropItem" => {
                             let Ok(nh) = pkg.read_object(ni) else { continue };
                             let en = |k: &str| match find(&nh.properties, k).map(|p| &p.value) {
@@ -235,7 +257,7 @@ impl AnimBank {
                             };
                             let usage = en("m_ByUsage");
                             let velocity = find(&nh.properties, "m_DropVelocity").and_then(|p| p.as_vector()).map(glam::Vec3::from).unwrap_or(glam::Vec3::ZERO);
-                            drops.entry(name.to_ascii_lowercase()).or_default().push(DropNotify { t, which, primary: usage != "EDisEquipUsage_Secondary", velocity });
+                            NotifyKind::DropItem(DropNotify { t, which, primary: usage != "EDisEquipUsage_Secondary", velocity })
                         }
                         "DishonoredNotify_SeverLimb" => {
                             let Ok(nh) = pkg.read_object(ni) else { continue };
@@ -254,14 +276,17 @@ impl AnimBank {
                                 _ => 0,
                             };
                             let strength = find(&nh.properties, "m_fImpulseStrength").and_then(|p| p.as_float()).unwrap_or(300.0);
-                            severs.entry(name.to_ascii_lowercase()).or_default().push(SeverNotify { t, bone, blood: flag("m_bUseBlood", true), hide: flag("m_bHideLimb", false), ragdoll: flag("m_bGoToRagdoll", true), mode, strength });
+                            NotifyKind::SeverLimb(SeverNotify { t, bone, blood: flag("m_bUseBlood", true), hide: flag("m_bHideLimb", false), ragdoll: flag("m_bGoToRagdoll", true), mode, strength })
                         }
-                        _ => {}
-                    }
+                        _ => NotifyKind::Other { class: class.clone() },
+                    };
+                    seq_notifies.push(Notify { t, duration, kind });
                 }
+                seq_notifies.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
+                notifies.insert(name.to_ascii_lowercase(), seq_notifies);
             }
         }
-        self.sets.push(SetData { pkg: r.0.clone(), tracks, seqs, ragdoll, pfx, drops, trails, severs });
+        self.sets.push(SetData { pkg: r.0.clone(), tracks, seqs, notifies });
         self.set_index.insert(key, self.sets.len() - 1);
         Some(self.sets.len() - 1)
     }
@@ -305,36 +330,44 @@ impl AnimBank {
         self.holder(profile, name).is_some()
     }
 
-    /// The particle notifies (time, system, socket or bone, attached) of a profile's sequence.
-    pub fn particle_notifies(&mut self, profile: usize, name: &str) -> Vec<(f32, String, String, bool)> {
+    /// All notifies of a profile's sequence, cloned.
+    pub fn notifies(&mut self, profile: usize, name: &str) -> Vec<Notify> {
         match self.holder(profile, name) {
-            Some(s) => self.sets[s].pfx.get(&name.to_ascii_lowercase()).cloned().unwrap_or_default(),
+            Some(s) => self.sets[s].notifies.get(&name.to_ascii_lowercase()).cloned().unwrap_or_default(),
             None => Vec::new(),
         }
+    }
+
+    /// Notifies of a profile's sequence that crossed the time window.
+    /// A notify at time `t` crosses if `t0 < t <= t1` (when `t0` is `Some`), or `t <= t1` (when `t0` is `None`).
+    pub fn crossed(&mut self, profile: usize, clip: &str, t0: Option<f32>, t1: f32) -> Vec<Notify> {
+        let notifies = self.notifies(profile, clip);
+        crossing(&notifies, t0, t1)
     }
 
     /// Whether a `DisNotify_Trails` window of a profile's sequence covers `t`.
     pub fn trailing(&mut self, profile: usize, name: &str, t: f32) -> bool {
         match self.holder(profile, name) {
-            Some(s) => self.sets[s].trails.get(&name.to_ascii_lowercase()).is_some_and(|w| w.iter().any(|(t0, d)| t >= *t0 && t < t0 + d)),
+            Some(s) => {
+                if let Some(nots) = self.sets[s].notifies.get(&name.to_ascii_lowercase()) {
+                    nots.iter().any(|n| matches!(n.kind, NotifyKind::Trails) && t >= n.t && t < n.t + n.duration)
+                } else {
+                    false
+                }
+            }
             None => false,
         }
     }
 
-    /// The `DishonoredNotify_SeverLimb`s of a profile's sequence.
-    pub fn sever_notifies(&mut self, profile: usize, name: &str) -> Vec<SeverNotify> {
-        match self.holder(profile, name) {
-            Some(s) => self.sets[s].severs.get(&name.to_ascii_lowercase()).cloned().unwrap_or_default(),
-            None => Vec::new(),
-        }
-    }
-
-    /// The `DisNotify_DropItem`s of a profile's sequence.
-    pub fn drop_notifies(&mut self, profile: usize, name: &str) -> Vec<DropNotify> {
-        match self.holder(profile, name) {
-            Some(s) => self.sets[s].drops.get(&name.to_ascii_lowercase()).cloned().unwrap_or_default(),
-            None => Vec::new(),
-        }
+    /// Time of the sequence's `DishonoredNotify_Ragdoll`, when it has one (first occurrence).
+    pub fn ragdoll_time(&mut self, profile: usize, name: &str) -> Option<f32> {
+        let set = self.holder(profile, name)?;
+        self.sets[set]
+            .notifies
+            .get(&name.to_ascii_lowercase())?
+            .iter()
+            .find(|n| matches!(n.kind, NotifyKind::Ragdoll))
+            .map(|n| n.t)
     }
 
     /// Decode (once) a sequence for a profile.
@@ -460,12 +493,6 @@ impl AnimBank {
                 })
                 .collect(),
         )
-    }
-
-    /// Time of the sequence's `DishonoredNotify_Ragdoll`, when it has one.
-    pub fn ragdoll_time(&mut self, profile: usize, name: &str) -> Option<f32> {
-        let set = self.holder(profile, name)?;
-        self.sets[set].ragdoll.get(&name.to_ascii_lowercase()).copied()
     }
 
     pub fn duration(&mut self, profile: usize, name: &str) -> Option<f32> {
@@ -2081,4 +2108,35 @@ pub fn globals(part: &PartGpu, pose: &[Option<Key>]) -> Vec<glam::Mat4> {
         }
     }
     dishonored_assets::characters::bind_globals(&bones).iter().map(|g| part.mesh_to_pawn * *g).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_crossing_semantics() {
+        let n0 = Notify { t: 0.0, duration: 0.0, kind: NotifyKind::Ragdoll };
+        let n05 = Notify { t: 0.5, duration: 0.0, kind: NotifyKind::Ragdoll };
+        let n1 = Notify { t: 1.0, duration: 0.0, kind: NotifyKind::Ragdoll };
+        let notifies = vec![n0.clone(), n05.clone(), n1.clone()];
+
+        // Notify at t=0 fires when the clip started this frame (t0 == None).
+        assert!(crossing(&notifies, None, 0.0).contains(&n0));
+        
+        // Notify at t=0 does not fire for t0 == Some(0.0).
+        assert!(!crossing(&notifies, Some(0.0), 1.0).contains(&n0));
+        
+        // Notify at t=0.5 fires for (Some(0.4), 0.5).
+        assert!(crossing(&notifies, Some(0.4), 0.5).contains(&n05));
+        
+        // Notify at t=0.5 does not fire for (Some(0.5), 0.6) (t0 < t is false).
+        assert!(!crossing(&notifies, Some(0.5), 0.6).contains(&n05));
+        
+        // Notify at t=1.0 fires for (Some(0.4), 1.0).
+        assert!(crossing(&notifies, Some(0.4), 1.0).contains(&n1));
+        
+        // Notify at t=1.0 does not fire for (Some(0.4), 0.9) (t > t1).
+        assert!(!crossing(&notifies, Some(0.4), 0.9).contains(&n1));
+    }
 }
