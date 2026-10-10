@@ -7,17 +7,16 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613â€¦c6fb` un
 
 ## 2026-10-10 â€” AnimTree node-graph IR decoder
 
-**Question:** Can cooked `AnimTree` assets be faithfully decoded from their node graph structure?
-
-**Evidence:** The hand-reconstructed `Npc_Common_at.NPC_Human_at` tree (ANIMATION.md section 2) lists 11+ named nodes with specific classes (AnimNodeBlendByPhysics, DisAnimNodeSlot, ArkAnimNodeLocomotion, etc.), children indexed into the tree array by export deduplication, and skeletal control chains. The `Animations` property points to the root; each node has `Children` struct array (name, anim ref, weight, mirror/additive flags); `SkelControlLists` chains controls via `NextControl` linked list.
-
-**Experiment:** Implemented `anim_tree::load_anim_tree(content, pkg, path)` that finds the `AnimTree` export, walks `Children` recursively, dedupes shared nodes by export index, and chains skeletal controls. Built IR type `AnimTreeAsset` with decoded properties (sequence names/rates, blend-by-bone branches with exclude flag, locomotion rates 2000/100/0.1, etc.). Added `npc_anim_dump tree <pkg> <path>` subcommand and retail test asserting NPC_Human_at structure.
-
-**Result:** All three trees (NPC_Human_at, NPC_Dead_at, Ply_Player_at) decode successfully. NPC_Human_at root is confirmed AnimNodeBlendByPhysics “NPCPhysicsBlend”, 32+ nodes including AdditiveReactSlot, PoseBlender, MatineeStackNode, FaceFilter (head_jnt exclude), LocoBlender (2000/100/0.1), LookatBlender, and skeletal control DisSkelControl_FootPlacement. Player tree has upper-body and left-arm filters with expected spine/collarbone branches. Full class inventory: AnimNodeBlendByPhysics, DisAnimNodeSlot, AnimNodeSlot, ArkAnimNodeBlendPose, ArkAnimNodeStack, AnimNodeBlendPerBone, AnimNodeAdditiveBlending, ArkAnimNodeLocomotion, ArkAnimNodeLookAt, AnimNodeSequence.
-
-**Confidence:** CONFIRMED - structure matches hand reconstruction, tests pass on retail data.
-
-**Implementation consequence:** AnimTree decoding complete (no evaluator yet; slot playback, locomotion blending, and skeleton walking remain for runtime). Future: aim-offset grids, full ArkAnimNodeLookAt properties, class-default fallback for unset fields.
+- **Question:** Can the cooked `AnimTree` assets be decoded as node graphs, so that one evaluator can play every tree instead of the hand-coded layers of `NPC_Human_at` and the player's pickers (research/ARCHITECTURE.md)?
+- **Method:** `obj_dump` of the `Startup` `DishonoredAnimTree` exports and of the `NPC_Human_at` nodes for the cooked property names; `research/dishonored/ANIMATION.md` section 2 as the reference structure.
+- **Findings:**
+  - The tree object (`DishonoredAnimTree`, itself a blend node) holds the root in `Children[0].Anim`; every node's `Children[]` is `AnimBlendChild` (`Name`, `Anim`, `Weight`, `bMirrorSkeleton`, `bIsAdditive`); shared children (the `AdditiveReactSlot` under every physics mode) are one export reached from several parents.
+  - Engine classes keep UE3's names: sequence nodes (`AnimNodeSequence`, Arkane's `DishonoredAnimNodeSeq`) `AnimSeqName`, `bLooping`, `bPlaying`, `SynchGroupName` (`LocoGroup`), `RootBoneOption[3]` / `RootRotationOption[3]`, `Rate` unset (1); `AnimNodeBlendPerBone` `BranchStartBoneName`, `bForceLocalSpaceBlend`, Arkane's `m_bExcludeBranchBones`; slots `bEarlyAnimEndNotify`. `ArkAnimNodeLookAt` lists its grids in `Anims[].AnimName` (nine head, nine torso). `NPC_Human_at`'s `ArkAnimNodeLocomotion` overrides only `m_fTurnFastBlendDuration`; `m_fVelocityMaxBlendSpeed` 2000, `m_fVelocityMaxDif` 100, `m_fVelocityMinBlendSpeedRatio` 0.1 and `m_fModifierBlendDuration` 0.5 come from `Engine.Default__ArkAnimNodeLocomotion`.
+  - `SkelControlLists[]` (`BoneName`, `ControlHead`, chained by `NextControl`): `NPC_Human_at` has the spine bender on `spine_0_jnt`, single-bone controls on both eyes and `DisSkelControl_FootPlacement` on both feet (`FootPlacement_Left` / `_Right`, the values of ANIMATION.md section 2). `AnimGroups`: `FootCycles` and `LocoGroup`.
+  - Node classes across `NPC_Human_at`, `NPC_Dead_at` and `Ply_Player_at`: AnimNodeBlendByPhysics, DisAnimNodeSlot, AnimNodeSlot, ArkAnimNodeBlendPose, ArkAnimNodeStack, AnimNodeBlendPerBone, AnimNodeAdditiveBlending, ArkAnimNodeLocomotion, ArkAnimNodeLookAt, AnimNodeSequence, DishonoredAnimNodeSeq (and the player tree's Dishonored* nodes, kept as `Other` with their raw properties).
+- **Implementation:** `dishonored_ir::anim_tree` (`AnimTreeAsset`, `AnimNode` with `NodeProps` per class and every property as `raw`, so an unmodelled class is kept, never dropped), `dishonored_assets::anim_tree::load_anim_tree`, `npc_anim_dump tree <pkg> <path>` (`research/dishonored/animation/ANIMTREE_NPC_HUMAN.md` is its output). No evaluator yet.
+- **Validation:** `crates/dishonored_assets/tests/anim_tree_retail.rs`: the structure of ANIMATION.md section 2 (root, the named nodes and their classes, `FaceFilter` `head_jnt` excluded, `UpperBodyFilter` `spine_0_jnt`, the locomotion tunables, the look-at grids, `LocoGroup` loops, the foot placement controls) and the player tree's `UpperBodyFilter` / `LeftArmFilter` branches.
+- **Open:** the evaluator (ARCHITECTURE.md step 3); `RootBoneOption` / `RootRotationOption` and the Dishonored* player node classes are kept raw until it needs them.
 
 ---
 

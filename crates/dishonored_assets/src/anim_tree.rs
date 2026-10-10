@@ -77,14 +77,18 @@ fn collect_raw(pkg: &Package, props: &[Property]) -> Vec<(String, String)> {
 /// assign a unique index in the tree's nodes array (deduped by export index).
 struct NodeDecoder {
     pkg: std::sync::Arc<ue3_package::Package>,
+    /// `Engine.Default__ArkAnimNodeLocomotion`: the tunables a tree's locomotion node leaves at
+    /// the class default (`NPC_Human_at`'s overrides only `m_fTurnFastBlendDuration`).
+    loco_defaults: Vec<Property>,
     nodes_by_export: HashMap<usize, usize>,  // export index -> node index
     nodes: Vec<AnimNode>,
 }
 
 impl NodeDecoder {
-    fn new(pkg: std::sync::Arc<ue3_package::Package>) -> Self {
+    fn new(pkg: std::sync::Arc<ue3_package::Package>, loco_defaults: Vec<Property>) -> Self {
         Self {
             pkg,
+            loco_defaults,
             nodes_by_export: HashMap::new(),
             nodes: Vec::new(),
         }
@@ -110,7 +114,7 @@ impl NodeDecoder {
         };
 
         // Decode properties based on class.
-        let props = decode_node_props(&self.pkg, &class, &h.properties);
+        let props = decode_node_props(&self.pkg, &class, &h.properties, &self.loco_defaults);
 
         // Decode children.
         let children_structs = structs(&self.pkg, &h.properties, "Children");
@@ -161,68 +165,50 @@ impl NodeDecoder {
     }
 }
 
-/// Decode node properties based on class type.
-fn decode_node_props(pkg: &Package, class: &str, props: &[Property]) -> NodeProps {
+/// Decode the node-class fields that drive evaluation. Property names as cooked (`obj_dump`
+/// of the `NPC_Human_at` nodes, 2026-10-10): UE3's own names on the engine classes
+/// (`AnimSeqName`, `BranchStartBoneName`, `bForceLocalSpaceBlend`...), Arkane's `m_` names on
+/// the fields they added.
+fn decode_node_props(pkg: &Package, class: &str, props: &[Property], loco_defaults: &[Property]) -> NodeProps {
     match class {
-        "AnimNodeSequence" => {
-            let seq = name_of(props, "m_AnimSeqName");
-            let rate = f32_of(props, "m_fPlayRate");
-            let looping = bool_of(props, "m_bLooping");
-            let playing = bool_of(props, "m_bPlaying");
-            let no_notifies = bool_of(props, "m_bDontUseRefPoseOnNonDefinedBones");
-            let sync_group = name_of(props, "m_SyncGroupName");
-            NodeProps::Sequence {
-                seq,
-                rate,
-                looping,
-                playing,
-                no_notifies,
-                sync_group,
-            }
-        }
-        "AnimNodeBlendPerBone" => {
-            let mut branches = names(pkg, props, "m_PerBoneBlendBones");
-            if branches.is_empty() {
-                branches = names(pkg, props, "PerBoneBlendBones");
-            }
-            let local_space = bool_of(props, "m_bLocalSpaceBlend");
-            let exclude_branch = bool_of(props, "m_bExcludeBranchBones");
-            NodeProps::BlendPerBone {
-                branches,
-                local_space,
-                exclude_branch,
-            }
-        }
-        "DisAnimNodeSlot" | "AnimNodeSlot" => {
-            let early_anim_end = bool_of(props, "m_bEarlyAnimEnd");
-            NodeProps::Slot { early_anim_end }
-        }
+        // `AnimNodeSequence` and Arkane's `DishonoredAnimNodeSeq*` subclasses (the NPC tree's
+        // loops and slot channels, the player's state sequences, the mantle sequence).
+        c if c == "AnimNodeSequence" || c.contains("AnimNodeSeq") => NodeProps::Sequence {
+            seq: name_of(props, "AnimSeqName"),
+            // `Rate` is left at the class default (1) by every node of the cooked trees.
+            rate: find(props, "Rate").and_then(|p| p.as_float()).unwrap_or(1.0),
+            looping: bool_of(props, "bLooping"),
+            playing: bool_of(props, "bPlaying"),
+            no_notifies: bool_of(props, "bNoNotifies"),
+            sync_group: name_of(props, "SynchGroupName"),
+        },
+        "AnimNodeBlendPerBone" | "DisAnimNodeBlendPerBone" => NodeProps::BlendPerBone {
+            branches: names(pkg, props, "BranchStartBoneName"),
+            local_space: bool_of(props, "bForceLocalSpaceBlend"),
+            exclude_branch: bool_of(props, "m_bExcludeBranchBones"),
+        },
+        "DisAnimNodeSlot" | "AnimNodeSlot" => NodeProps::Slot { early_anim_end: bool_of(props, "bEarlyAnimEndNotify") },
         "AnimNodeAdditiveBlending" => NodeProps::AdditiveBlending,
         "AnimNodeBlendByPhysics" => NodeProps::BlendByPhysics,
         "AnimNodeBlendList" => NodeProps::BlendList,
-        "ArkAnimNodeLookAt" => {
-            // Look for aim grids in properties (e.g., aim offset sequence arrays).
-            let grids = Vec::new(); // TODO: decode aim grids if present
-            NodeProps::AimOffset { grids }
-        }
+        // `Anims[]`: the 3x3 head grid, then the 3x3 torso grid (`ADD_Empty_AimHeadIdle_UpLeft`
+        // ... `ADD_Empty_AimTorsoIdle_DownRight`; ANIMATION.md section 9).
+        "ArkAnimNodeLookAt" => NodeProps::AimOffset { grids: structs(pkg, props, "Anims").iter().map(|a| name_of(a, "AnimName")).collect() },
+        // The player's state trees: other AnimTree assets the node instantiates at run time.
+        c if c.contains("AnimNodeStatePicker") || c.contains("AnimNodeTreeRef") => NodeProps::TreeRef {
+            templates: structs(pkg, props, "m_PossibleTemplates")
+                .iter()
+                .map(|t| {
+                    let path = find(t, "m_pAnimTree_Template").and_then(|p| p.as_object()).map(|i| pkg.obj_path(ObjRef::from_index(i))).unwrap_or_default();
+                    (name_of(t, "m_AnimTree_Name"), path)
+                })
+                .collect(),
+        },
+        // The velocity smoothing and modifier crossfade tunables (ANIMATION.md section 3), the
+        // node's value over the class default.
         "ArkAnimNodeLocomotion" => {
-            let rate = f32_of(props, "m_fPlayRate");
-            let rate = if rate == 0.0 { 2000.0 } else { rate };
-
-            let range = f32_of(props, "m_fPlayRateRange");
-            let range = if range == 0.0 { 100.0 } else { range };
-
-            let min_ratio = f32_of(props, "m_fMinPlayRateRatio");
-            let min_ratio = if min_ratio == 0.0 { 0.1 } else { min_ratio };
-
-            let modifier_blend = f32_of(props, "m_fModifierBlendTime");
-
-            NodeProps::Locomotion {
-                rate,
-                range,
-                min_ratio,
-                modifier_blend,
-            }
+            let f = |n: &str| find(props, n).or_else(|| find(loco_defaults, n)).and_then(|p| p.as_float()).unwrap_or(0.0);
+            NodeProps::Locomotion { rate: f("m_fVelocityMaxBlendSpeed"), range: f("m_fVelocityMaxDif"), min_ratio: f("m_fVelocityMinBlendSpeedRatio"), modifier_blend: f("m_fModifierBlendDuration") }
         }
         _ => NodeProps::Other,
     }
@@ -234,6 +220,10 @@ pub fn load_anim_tree(content: &Content, pkg: &str, path: &str) -> Result<AnimTr
 
     let tree_idx = find_export(&pkg_arc, path)
         .with_context(|| format!("AnimTree {} not found in {}", path, pkg))?;
+    // The trees are package-named objects (`Ply_Player_at.Ply_Player_at`): a bare package name
+    // finds the package's own export, which is no tree.
+    let tree_class = pkg_arc.export_class(tree_idx);
+    anyhow::ensure!(tree_class.ends_with("AnimTree"), "{path} in {pkg} is a {tree_class}, not an AnimTree");
 
     let h = pkg_arc.read_object(tree_idx)?;
     let tree_name = pkg_arc.obj_path(ObjRef::Export(tree_idx));
@@ -248,7 +238,8 @@ pub fn load_anim_tree(content: &Content, pkg: &str, path: &str) -> Result<AnimTr
             _ => None,
         });
 
-    let mut decoder = NodeDecoder::new(pkg_arc.clone());
+    let loco_defaults = content.package("Engine").ok().and_then(|e| find_export(&e, "Default__ArkAnimNodeLocomotion").and_then(|d| e.read_object(d).ok()).map(|h| h.properties)).unwrap_or_default();
+    let mut decoder = NodeDecoder::new(pkg_arc.clone(), loco_defaults);
 
     let root = if let Some(e) = root_export {
         Some(decoder.decode_node(e)?)
@@ -256,9 +247,10 @@ pub fn load_anim_tree(content: &Content, pkg: &str, path: &str) -> Result<AnimTr
         None
     };
 
-    // Decode skeletal control lists.
+    // Skeletal control lists: `SkelControlLists[]` of `BoneName` and `ControlHead`, each control
+    // naming the next in its chain (`NextControl`) and itself (`ControlName`).
     let mut skel_controls = Vec::new();
-    for skel_entry in structs(&pkg_arc, &h.properties, "m_SkelControlLists") {
+    for skel_entry in structs(&pkg_arc, &h.properties, "SkelControlLists") {
         let bone = name_of(&skel_entry, "BoneName");
         if bone.is_empty() || bone == "None" {
             continue;
@@ -281,11 +273,14 @@ pub fn load_anim_tree(content: &Content, pkg: &str, path: &str) -> Result<AnimTr
             };
 
             let ctrl_class = pkg_arc.export_class(ctrl_idx);
-            let ctrl_name = pkg_arc.obj_path(ObjRef::Export(ctrl_idx));
-            controls.push((
-                ctrl_class,
-                ctrl_name.split('.').last().unwrap_or(&ctrl_name).to_string(),
-            ));
+            let ctrl_name = match name_of(&ctrl_h.properties, "ControlName") {
+                n if !n.is_empty() && n != "None" => n,
+                _ => {
+                    let p = pkg_arc.obj_path(ObjRef::Export(ctrl_idx));
+                    p.split('.').last().unwrap_or(&p).to_string()
+                }
+            };
+            controls.push((ctrl_class, ctrl_name));
 
             // Read the next control in the chain.
             control_ref = match find(&ctrl_h.properties, "NextControl").and_then(|p| p.as_object()) {

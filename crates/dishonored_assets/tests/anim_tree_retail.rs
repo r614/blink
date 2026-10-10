@@ -1,161 +1,120 @@
-//! AnimTree asset decoding against the canonical GOG build (skipped without the install).
+//! AnimTree decoding against the canonical GOG build (skipped without the install): the
+//! structure research/dishonored/ANIMATION.md section 2 reconstructed by hand.
 
 use dishonored_assets::Content;
 use dishonored_assets::anim_tree::load_anim_tree;
-use dishonored_ir::anim_tree::NodeProps;
+use dishonored_ir::anim_tree::{AnimNode, AnimTreeAsset, NodeProps};
 
 fn content() -> Option<Content> {
     Content::locate().ok()
 }
 
-#[test]
-fn npc_human_animtree() {
-    let Some(c) = content() else { return };
-    let tree = load_anim_tree(&c, "Startup", "Npc_Common_at.NPC_Human_at").expect("load NPC_Human_at");
+fn node<'a>(tree: &'a AnimTreeAsset, name: &str) -> &'a AnimNode {
+    tree.nodes.iter().find(|n| n.name == name).unwrap_or_else(|| panic!("no node {name} in {}", tree.name))
+}
 
-    // Root should be AnimNodeBlendByPhysics named NPCPhysicsBlend.
-    let root_idx = tree.root.expect("root exists");
-    let root = &tree.nodes[root_idx];
-    assert_eq!(root.class, "AnimNodeBlendByPhysics", "root is BlendByPhysics");
-    assert_eq!(root.name, "NPCPhysicsBlend", "root named NPCPhysicsBlend");
-
-    // Collect node names for easy lookup.
-    let mut nodes_by_name = std::collections::HashMap::new();
-    for (i, node) in tree.nodes.iter().enumerate() {
-        nodes_by_name.insert(node.name.clone(), i);
-    }
-
-    // Check for expected nodes.
-    let expected_names = [
-        "AdditiveReactSlot",
-        "PoseBlender",
-        "MatineeStackNode",
-        "FaceFilter",
-        "BlinkBlender",
-        "UpperBodyFilter",
-        "FullBodySlot",
-        "LocoBlender",
-        "UpperBodySlot",
-        "FaceSlot",
-        "LookatBlender",
-    ];
-
-    for name in &expected_names {
-        assert!(
-            nodes_by_name.contains_key(*name),
-            "expected node '{}' not found in tree",
-            name
-        );
-    }
-
-    // Check specific node properties.
-    let additive_slot = nodes_by_name.get("AdditiveReactSlot").map(|&i| &tree.nodes[i]);
-    assert!(additive_slot.is_some(), "AdditiveReactSlot exists");
-    assert_eq!(
-        additive_slot.unwrap().class,
-        "DisAnimNodeSlot",
-        "AdditiveReactSlot is DisAnimNodeSlot"
-    );
-
-    let pose_blender = nodes_by_name.get("PoseBlender").map(|&i| &tree.nodes[i]);
-    assert!(pose_blender.is_some(), "PoseBlender exists");
-    assert_eq!(
-        pose_blender.unwrap().class,
-        "ArkAnimNodeBlendPose",
-        "PoseBlender is ArkAnimNodeBlendPose"
-    );
-
-    let face_filter = nodes_by_name.get("FaceFilter").map(|&i| &tree.nodes[i]);
-    if let Some(ff) = face_filter {
-        assert_eq!(ff.class, "AnimNodeBlendPerBone", "FaceFilter is BlendPerBone");
-        if let NodeProps::BlendPerBone { branches: _, exclude_branch, .. } = &ff.props {
-            // TODO: property name for branches might be variant; test for existence only for now
-            assert!(*exclude_branch, "FaceFilter excludes branch");
-        }
-    }
-
-    let upper_body_filter = nodes_by_name.get("UpperBodyFilter").map(|&i| &tree.nodes[i]);
-    if let Some(ubf) = upper_body_filter {
-        assert_eq!(ubf.class, "AnimNodeBlendPerBone", "UpperBodyFilter is BlendPerBone");
-        // TODO: property name for branches might be variant; test for existence only for now
-    }
-
-    let loco = nodes_by_name.get("LocoBlender").map(|&i| &tree.nodes[i]);
-    if let Some(l) = loco {
-        assert_eq!(l.class, "ArkAnimNodeLocomotion", "LocoBlender is ArkAnimNodeLocomotion");
-        if let NodeProps::Locomotion { rate, range, min_ratio, .. } = l.props {
-            assert_eq!(rate, 2000.0, "LocoBlender rate = 2000");
-            assert_eq!(range, 100.0, "LocoBlender range = 100");
-            assert_eq!(min_ratio, 0.1, "LocoBlender min_ratio = 0.1");
-        }
-    }
-
-    // At least 30 nodes.
-    assert!(
-        tree.nodes.len() >= 30,
-        "tree has at least 30 nodes, found {}",
-        tree.nodes.len()
-    );
-
-    // Check for skeletal controls (if any).
-    // TODO: property name or structure for skel controls might need verification
-    if !tree.skel_controls.is_empty() {
-        let has_foot_placement = tree
-            .skel_controls
-            .iter()
-            .any(|entry| entry.controls.iter().any(|(class, _)| class == "DisSkelControl_FootPlacement"));
-        if has_foot_placement {
-            // success - DisSkelControl_FootPlacement found
-        }
+fn branches(n: &AnimNode) -> (Vec<String>, bool, bool) {
+    match &n.props {
+        NodeProps::BlendPerBone { branches, local_space, exclude_branch } => (branches.clone(), *local_space, *exclude_branch),
+        other => panic!("{} is not a per-bone blend: {other:?}", n.name),
     }
 }
 
 #[test]
-fn npc_dead_animtree() {
+fn the_npc_tree_decodes_to_its_documented_structure() {
     let Some(c) = content() else { return };
-    let tree = load_anim_tree(&c, "Startup", "Npc_Common_at.NPC_Dead_at").expect("load NPC_Dead_at");
-
-    // Root should be AnimNodeBlendByPhysics.
-    let root_idx = tree.root.expect("root exists");
-    let root = &tree.nodes[root_idx];
-    assert_eq!(root.class, "AnimNodeBlendByPhysics", "NPC_Dead root is BlendByPhysics");
-
-    // Should have a DisAnimNodeSlot child as FullBodySlot.
-    let mut found_slot = false;
-    for child in &root.children {
-        if let Some(child_idx) = child.node {
-            let child_node = &tree.nodes[child_idx];
-            if child_node.class == "DisAnimNodeSlot" {
-                found_slot = true;
-                break;
-            }
-        }
+    let tree = load_anim_tree(&c, "Startup", "Npc_Common_at.NPC_Human_at").unwrap();
+    let root = &tree.nodes[tree.root.expect("root")];
+    assert_eq!((root.class.as_str(), root.name.as_str()), ("AnimNodeBlendByPhysics", "NPCPhysicsBlend"));
+    assert!(tree.nodes.len() >= 30, "{} nodes", tree.nodes.len());
+    for (name, class) in [
+        ("AdditiveReactSlot", "DisAnimNodeSlot"),
+        ("PoseBlender", "ArkAnimNodeBlendPose"),
+        ("MatineeStackNode", "ArkAnimNodeStack"),
+        ("FaceFilter", "AnimNodeBlendPerBone"),
+        ("BlinkBlender", "ArkAnimNodeStack"),
+        ("UpperBodyFilter", "AnimNodeBlendPerBone"),
+        ("FullBodySlot", "DisAnimNodeSlot"),
+        ("LocoBlender", "ArkAnimNodeLocomotion"),
+        ("UpperBodySlot", "DisAnimNodeSlot"),
+        ("FaceSlot", "AnimNodeSlot"),
+        ("LookatBlender", "ArkAnimNodeLookAt"),
+    ] {
+        assert_eq!(node(&tree, name).class, class, "{name}");
     }
-    assert!(found_slot, "NPC_Dead has a DisAnimNodeSlot child");
+    // The face slot drives the bones below `head_jnt`, not `head_jnt` itself; both filters
+    // blend in component space.
+    assert_eq!(branches(node(&tree, "FaceFilter")), (vec!["head_jnt".to_string()], true, true));
+    let (upper, _, _) = branches(node(&tree, "UpperBodyFilter"));
+    assert_eq!(upper, vec!["spine_0_jnt".to_string()]);
+    // The shared child: one node, reached from every physics mode of the root.
+    let additive = tree.nodes.iter().position(|n| n.name == "AdditiveReactSlot").unwrap();
+    assert!(root.children.iter().filter(|c| c.node == Some(additive)).count() >= 2, "AdditiveReactSlot shared under the physics modes");
+    // The locomotion tunables (class defaults: the tree's node only sets the fast turn blend).
+    match node(&tree, "LocoBlender").props {
+        NodeProps::Locomotion { rate, range, min_ratio, modifier_blend } => {
+            assert_eq!((rate, range, min_ratio, modifier_blend), (2000.0, 100.0, 0.1, 0.5));
+        }
+        ref other => panic!("LocoBlender: {other:?}"),
+    }
+    // Its first speed-mode slot is the idle loop in the `LocoGroup` sync group; the blink
+    // channel is the `Blink` sequence.
+    let loco = node(&tree, "LocoBlender");
+    assert_eq!(loco.children.len(), 9, "8 speed mode slots + the specific anim");
+    let first = &tree.nodes[loco.children[0].node.expect("SpeedModeSlot0")];
+    match &first.props {
+        NodeProps::Sequence { seq, looping, sync_group, rate, .. } => {
+            assert_eq!((seq.as_str(), *looping, sync_group.as_str(), *rate), ("Empty_Idle", true, "LocoGroup", 1.0));
+        }
+        other => panic!("SpeedModeSlot0: {other:?}"),
+    }
+    let blink = node(&tree, "BlinkBlender");
+    let blink_seq = &tree.nodes[blink.children[1].node.expect("blink channel")];
+    assert!(matches!(&blink_seq.props, NodeProps::Sequence { seq, .. } if seq == "Blink"), "{:?}", blink_seq.props);
+    // The look-at grids: nine head, nine torso.
+    match &node(&tree, "LookatBlender").props {
+        NodeProps::AimOffset { grids } => {
+            assert_eq!(grids.len(), 18);
+            assert_eq!(grids[0], "ADD_Empty_AimHeadIdle_UpLeft");
+            assert_eq!(grids[9], "ADD_Empty_AimTorsoIdle_UpLeft");
+        }
+        other => panic!("LookatBlender: {other:?}"),
+    }
+    // Skeletal controls: foot placement on both feet, the spine bender, the eyes.
+    let feet: Vec<&str> = tree.skel_controls.iter().filter(|e| e.controls.iter().any(|(c, _)| c == "DisSkelControl_FootPlacement")).map(|e| e.bone.as_str()).collect();
+    assert_eq!(feet, ["foot_R_jnt", "foot_L_jnt"]);
+    assert!(tree.skel_controls.iter().any(|e| e.bone == "spine_0_jnt" && e.controls[0].0 == "DisSkelControl_SpineBender"));
+    // Every node keeps its raw properties.
+    assert!(tree.nodes.iter().all(|n| !n.raw.is_empty() || n.children.is_empty()));
 }
 
 #[test]
-fn player_animtree() {
+fn the_dead_tree_is_a_physics_blend_over_one_slot() {
     let Some(c) = content() else { return };
-    let tree = load_anim_tree(&c, "Startup", "Ply_Player_at").expect("load Ply_Player_at");
+    let tree = load_anim_tree(&c, "Startup", "Npc_Common_at.NPC_Dead_at").unwrap();
+    let root = &tree.nodes[tree.root.expect("root")];
+    assert_eq!(root.class, "AnimNodeBlendByPhysics");
+    assert!(root.children.iter().filter_map(|c| c.node).any(|i| tree.nodes[i].class == "DisAnimNodeSlot"));
+}
 
-    // Collect node names for easy lookup.
-    let mut nodes_by_name = std::collections::HashMap::new();
-    for (i, node) in tree.nodes.iter().enumerate() {
-        nodes_by_name.insert(node.name.clone(), i);
+#[test]
+fn the_player_tree_filters_match_the_viewmodel() {
+    let Some(c) = content() else { return };
+    // The player trees are package-named objects; a bare package name is refused.
+    assert!(load_anim_tree(&c, "Startup", "Ply_Player_at").is_err());
+    let tree = load_anim_tree(&c, "Startup", "Ply_Player_at.Ply_Player_at").unwrap();
+    // `viewmodel.rs`: `UpperBodyFilter` branches spine_3_jnt, Collarbone_R_Jnt, Collarbone_L_Jnt;
+    // `LeftArmFilter` Collarbone_L_Jnt; both blend in component space.
+    let (upper, upper_local, _) = branches(node(&tree, "UpperBodyFilter"));
+    for b in ["spine_3_jnt", "Collarbone_R_Jnt", "Collarbone_L_Jnt"] {
+        assert!(upper.iter().any(|x| x.eq_ignore_ascii_case(b)), "UpperBodyFilter {upper:?} lacks {b}");
     }
-
-    // Check for UpperBodyFilter exists.
-    if let Some(&upper_idx) = nodes_by_name.get("UpperBodyFilter") {
-        let upper_node = &tree.nodes[upper_idx];
-        assert_eq!(upper_node.class, "AnimNodeBlendPerBone", "UpperBodyFilter is BlendPerBone");
-        // TODO: property name for branches might be variant; test for existence only for now
-    }
-
-    // Check for LeftArmFilter exists.
-    if let Some(&left_idx) = nodes_by_name.get("LeftArmFilter") {
-        let left_node = &tree.nodes[left_idx];
-        assert_eq!(left_node.class, "AnimNodeBlendPerBone", "LeftArmFilter is BlendPerBone");
-        // TODO: property name for branches might be variant; test for existence only for now
-    }
+    let (left, left_local, _) = branches(node(&tree, "LeftArmFilter"));
+    assert_eq!(left.len(), 1);
+    assert!(left[0].eq_ignore_ascii_case("Collarbone_L_Jnt"), "{left:?}");
+    assert!(!upper_local && !left_local, "the player's filters blend in component space (not bForceLocalSpaceBlend; viewmodel.rs)");
+    // The state pickers instantiate other tree assets (`Ply_Player_MeleeAttack_at`...).
+    let refs: Vec<&AnimNode> = tree.nodes.iter().filter(|n| matches!(n.props, NodeProps::TreeRef { .. })).collect();
+    assert!(!refs.is_empty(), "no state picker / tree ref in the player tree");
+    assert!(refs.iter().any(|n| matches!(&n.props, NodeProps::TreeRef { templates } if templates.iter().any(|(name, path)| name == "MeleeAttack" && path.ends_with("Ply_Player_MeleeAttack_at")))), "{:?}", refs.iter().map(|n| &n.props).collect::<Vec<_>>());
 }

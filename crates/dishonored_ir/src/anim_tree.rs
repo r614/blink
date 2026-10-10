@@ -64,23 +64,35 @@ pub struct SkelControlEntry {
 /// Node-specific properties: parsed fields that drive evaluation. Unknown classes use `Other`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NodeProps {
-    /// `AnimNodeSequence`: a single sequence with playback state.
+    /// `AnimNodeSequence` and the `DishonoredAnimNodeSeq*` subclasses: one sequence player.
     Sequence {
-        seq: String,           // Sequence name
-        rate: f32,              // PlayRate
-        looping: bool,          // bLooping
-        playing: bool,          // bPlaying
-        no_notifies: bool,      // bDontUseRefPoseOnNonDefinedBones / similar
-        sync_group: String,     // SyncGroup
+        /// `AnimSeqName`.
+        seq: String,
+        /// `Rate` (1 when the node does not set it).
+        rate: f32,
+        /// `bLooping`.
+        looping: bool,
+        /// `bPlaying`.
+        playing: bool,
+        /// `bNoNotifies`.
+        no_notifies: bool,
+        /// `SynchGroupName` (`LocoGroup` for the locomotion loops).
+        sync_group: String,
     },
-    /// `AnimNodeBlendPerBone`: blend by branch bone (exclude option).
+    /// `AnimNodeBlendPerBone` / `DisAnimNodeBlendPerBone`: the target child from the branch
+    /// bones down.
     BlendPerBone {
-        branches: Vec<String>,  // Bone names for per-bone blending
-        local_space: bool,      // bLocalSpaceBlend
-        exclude_branch: bool,   // bExcludeBranchBones
+        /// `BranchStartBoneName`.
+        branches: Vec<String>,
+        /// `bForceLocalSpaceBlend`.
+        local_space: bool,
+        /// `m_bExcludeBranchBones`: the branch bones themselves stay with the source.
+        exclude_branch: bool,
     },
-    /// `DisAnimNodeSlot` / `AnimNodeSlot`: a slot that plays child animations in channels.
+    /// `DisAnimNodeSlot` / `AnimNodeSlot`: the source child under channels that play requested
+    /// sequences.
     Slot {
+        /// `bEarlyAnimEndNotify`.
         early_anim_end: bool,
     },
     /// `AnimNodeAdditiveBlending`: additive blending (base + additive).
@@ -89,16 +101,29 @@ pub enum NodeProps {
     BlendByPhysics,
     /// `AnimNodeBlendList`: list of children, selected by index (not commonly used in retail).
     BlendList,
-    /// `ArkAnimNodeLookAt`: look-at aiming (AimOffset with aim grids).
+    /// `ArkAnimNodeLookAt`: the additive aim grids (`Anims[].AnimName`: nine head, nine torso).
     AimOffset {
-        grids: Vec<String>,  // Grid sequence names if present
+        grids: Vec<String>,
     },
-    /// `ArkAnimNodeLocomotion`: locomotion with speed modes and foot placement.
+    /// `DishonoredAnimNodeStatePicker` / `DishonoredAnimNodeTreeRef_*`: the player's state
+    /// trees, instantiated from other AnimTree assets at run time (`m_PossibleTemplates[]`:
+    /// `m_AnimTree_Name`, `m_pAnimTree_Template`). The templates are not walked here; a tree
+    /// evaluator loads them by path.
+    TreeRef {
+        /// (template name, object path of the AnimTree asset).
+        templates: Vec<(String, String)>,
+    },
+    /// `ArkAnimNodeLocomotion` (ANIMATION.md section 3), the node's value over the class
+    /// default (`Engine.Default__ArkAnimNodeLocomotion`: 2000, 100, 0.1, 0.5).
     Locomotion {
-        rate: f32,           // PlayRate (from `m_fPlayRate` or class default 2000)
-        range: f32,          // LegacyPlayRateRange (from `m_fPlayRateRange` or 100)
-        min_ratio: f32,      // LegacyMinPlayRateRatio (from `m_fMinPlayRateRatio` or 0.1)
-        modifier_blend: f32, // ModifierBlendTime (from `m_fModifierBlendTime` or 0)
+        /// `m_fVelocityMaxBlendSpeed`.
+        rate: f32,
+        /// `m_fVelocityMaxDif`.
+        range: f32,
+        /// `m_fVelocityMinBlendSpeedRatio`.
+        min_ratio: f32,
+        /// `m_fModifierBlendDuration`.
+        modifier_blend: f32,
     },
     /// An `ArkAnimNodeStack` or other unmodelled node: keep raw properties.
     Other,

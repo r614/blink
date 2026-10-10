@@ -140,6 +140,11 @@ fn print_tree_node(
                 props_str = format!(" grids={:?}", grids);
             }
         }
+        NodeProps::TreeRef { templates } => {
+            if !templates.is_empty() {
+                props_str = format!(" templates={:?}", templates.iter().map(|(n, p)| format!("{n}={p}")).collect::<Vec<_>>());
+            }
+        }
         _ => {}
     }
 
