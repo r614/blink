@@ -1277,6 +1277,8 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
                 let a = if *backhand { NpcAnim::ShortFatalityBackhand } else { NpcAnim::ShortFatalityForehand };
                 bank.chain(profile, a, Some(*group as usize), 0.0, i.armed, r, "assassinated")
             }
+            // A finisher's slave, in the attacker's frame (`viewmodel::BodyFrames`).
+            HitKind::Fatality { anim, group } => bank.chain(profile, *anim, Some(*group as usize), 0.0, i.armed, r, "assassinated"),
             // A sleep dart's "death" (`m_bSlowDeathOnly`): the death sequence, then the ragdoll.
             HitKind::KnockedOut => bank.chain(profile, NpcAnim::Death, None, q, i.armed, r, "dead").map(|mut c| {
                 c.hold = true;

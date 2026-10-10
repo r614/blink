@@ -119,6 +119,11 @@ const CLIPS: &[&str] = &[
     "Sword_Ready_Assassination_Front_Master", "Sword_Ready_Assassination_Left_Master", "Sword_Ready_Assassination_Right_Master", "Sword_Ready_Assassination_Back_Master",
     "Sword_Ready_Assassination_DropFront_Master", "Sword_Ready_Assassination_DropLeft_Master", "Sword_Ready_Assassination_DropRight_Master", "Sword_Ready_Assassination_DropBack_Master",
     "Sword_Ready_Fatality_SmallFront_Right_A_Master", "Sword_Ready_Fatality_SmallFront_Right_B_Master", "Sword_Ready_Fatality_SmallFront_Left_A_Master", "Sword_Ready_Fatality_SmallFront_Left_B_Master",
+    // The finishers' masters (`GameplayConfig::fatality`; the generic swings play on the upper body).
+    "Sword_Ready_Fatality_Front_A_Master", "Sword_Ready_Fatality_Front_B_Master",
+    "Sword_Ready_Fatality_FastFront_A_Master", "Sword_Ready_Fatality_FastFront_B_Master", "Sword_Ready_Fatality_FastFront_C_Master", "Sword_Ready_Fatality_FastFront_D_Master",
+    "Sword_Ready_Fatality_Behead_A_Master", "Sword_Ready_Fatality_Behead_B_Master", "Sword_Ready_Fatality_KnockDown_Master",
+    "Sword_Ready_Fatality_Generic_Left_A", "Sword_Ready_Fatality_Generic_Right_A",
     "Sword_Choke_In_Master", "Sword_Choke_Loop_Master", "Sword_Choke_Win_Master", "Sword_Choke_Lose_Master", "Sword_Choke_Cancel_Master", "Sword_Choke_CarryCorpse_Master",
     "Head_Rope_Climb", "Empty_SwimIdle", "Empty_SwimN",
     // The held gun's aim (additive, `Ply_Guns_as`).
@@ -946,11 +951,19 @@ impl Layer {
         };
     }
 
-    fn pose(&mut self, lib: &ClipLib, bind: &[(Quat, Vec3)]) -> Pose {
+    /// The layer's pose; with `root_motion`, the clip's root bone stays as its first frame has it
+    /// (`RMM_Translate` / `RMRM_RotateActor`: its travel moves the pawn,
+    /// `dishonored_sim::sync_motion`, and its turn turns the view).
+    fn pose(&mut self, lib: &ClipLib, bind: &[(Quat, Vec3)], root_motion: bool) -> Pose {
         // Bones the sequence does not drive keep the reference pose (a sequence player's
         // default; the gun and power sets drive only bones 0 and 1 and the left arm).
         let mut pose = bind.to_vec();
         lib.sample(&self.clip, self.time, self.looped, &mut pose);
+        if root_motion && !pose.is_empty() {
+            let mut first = bind.to_vec();
+            lib.sample(&self.clip, 0.0, false, &mut first);
+            pose[0] = first[0];
+        }
         let w = if self.blend > 0.0 { (self.fade / self.blend).clamp(0.0, 1.0) } else { 1.0 };
         let done = match &self.from {
             Some(from) if w < 1.0 && from.len() == pose.len() => {
@@ -1259,6 +1272,13 @@ fn full_body(p: &PlayerState, a: &ViewAnim, lib: &ClipLib, gameplay: &GameplayCo
         // The move's master in `Ply_Player_Assassinate_at`'s KillSeq (`DisTweaks_Assassinate`
         // `m_Front/Left/Right/Back` -> `Assassinate_<dir>`, the drop set's `Assassinate_Drop_<dir>`),
         // else the upper-body `Assassinate_GenericA`.
+        // A finisher's state (`Fatality_Front_A` ...: blend 0.2, blocks children) plays its
+        // master; the generic swing (`Fatality_GenericA` / `B`) is an upper-body state.
+        SwordPhase::Assassinating if p.sword.assassination_move == dishonored_sim::fatality::FATALITY_MOVE => {
+            if let Some(c) = fatality_clip(p, gameplay).filter(|c| !c.upper_body && lib.has(&c.master)) {
+                return (once(format!("fatality:{}", c.master), &c.master, BLEND_ACTION), true);
+            }
+        }
         SwordPhase::Assassinating => {
             let m = ASSASSINATION_MASTERS[(p.sword.assassination_move as usize).min(ASSASSINATION_MASTERS.len() - 1)];
             if let Some(c) = pick(lib, &[m, "Sword_Ready_Assassination_Generic"]) {
@@ -1356,8 +1376,21 @@ fn full_body(p: &PlayerState, a: &ViewAnim, lib: &ClipLib, gameplay: &GameplayCo
     (looping(format!("nav_{tree}:{child}"), clip, r, if same_tree { BLEND_SPEED } else { BLEND_NAV }), false)
 }
 
+/// The running finisher's state (`SwordState::fatality`).
+fn fatality_clip<'a>(p: &PlayerState, gameplay: &'a GameplayConfig) -> Option<&'a dishonored_ir::gameplay::FatalityClip> {
+    let run = p.sword.fatality?;
+    gameplay.fatality.moves.get(run.action as usize)?.get(run.variant as usize)
+}
+
 /// Upper-body state (`UpperBodyStatePicker`), if any.
-fn upper_body(p: &PlayerState, a: &mut ViewAnim, lib: &ClipLib) -> Option<Play> {
+fn upper_body(p: &PlayerState, a: &mut ViewAnim, lib: &ClipLib, gameplay: &GameplayConfig) -> Option<Play> {
+    // The generic finisher's swing (`Fatality_GenericA` / `B`, `Attack_Seq`, blend 0.2).
+    if p.sword.phase == SwordPhase::Assassinating && p.sword.assassination_move == dishonored_sim::fatality::FATALITY_MOVE {
+        if let Some(c) = fatality_clip(p, gameplay).filter(|c| c.upper_body && lib.has(&c.master)) {
+            a.ub_shot = None;
+            return Some(once(format!("fatality:{}", c.master), &c.master, BLEND_ACTION));
+        }
+    }
     match p.sword.phase {
         // The simulation picks the clip (its damage zone times the hit, `SwingTiming`).
         SwordPhase::Startup | SwordPhase::Active | SwordPhase::Recovery => {
@@ -1551,7 +1584,8 @@ pub fn animate_view_rig(
         return;
     };
     *root_vis = Visibility::Inherited;
-    let dt = time.delta_secs();
+    // The rig's tree ticks with the pawn's dilated time (Bend Time, a finisher's slow motion).
+    let dt = time.delta_secs().min(0.1) * me.time_scale.max(0.0);
     // The view's yaw (Dishonored degrees) from the game camera, before this frame's bob.
     let view_yaw = cams.iter().next().map(|(_, t)| {
         let f = t.rotation * Vec3::NEG_Z;
@@ -1574,7 +1608,7 @@ pub fn animate_view_rig(
         a.ub_shot = None;
         a.la_shot = None;
     }
-    let ub_play = if blocks { None } else { upper_body(me, a, lib) };
+    let ub_play = if blocks { None } else { upper_body(me, a, lib, gameplay) };
     match ub_play {
         Some(pl) => {
             a.ub.set(&pl);
@@ -1639,9 +1673,10 @@ pub fn animate_view_rig(
 
     // Compose: full body (with its head bob), then the filters in component space, then the
     // step-up's head. The same without the additives gives the unbobbed camera.
-    let fb_base = a.fb.pose(lib, &rig.bind_pose);
-    let ub_pose = (a.ub.weight > 0.0).then(|| a.ub.pose(lib, &rig.bind_pose));
-    let mut la_pose = (a.la.weight > 0.0).then(|| a.la.pose(lib, &rig.bind_pose));
+    let fb_root = gameplay.root_motion.contains_key(&a.fb.clip);
+    let fb_base = a.fb.pose(lib, &rig.bind_pose, fb_root);
+    let ub_pose = (a.ub.weight > 0.0).then(|| a.ub.pose(lib, &rig.bind_pose, false));
+    let mut la_pose = (a.la.weight > 0.0).then(|| a.la.pose(lib, &rig.bind_pose, false));
     // The held item's aim (`DishonoredInventoryItem` tick 0x00C0B990): `m_CurItemAim` eases toward
     // the item's target at `clamp(dt x m_fItemAimSpeed, 0, 1)`; the target (slot 102,
     // 0x00C05CD0) is the camera's yaw last frame minus now, in degrees, and no pitch
@@ -1774,10 +1809,13 @@ pub fn animate_view_rig(
     // the bone's motion from those (head bob, the step-up's head, the look pivot about
     // `spine_3_jnt`) moves it, and it turns to the view rotation above (and the lean roll).
     let delta = cam.w_axis.truncate() - cam0.w_axis.truncate();
+    // A root-motion master's turn (`RMRM_RotateActor`) turns the pawn and its view; the rig's root
+    // keeps its first frame (`Layer::pose`).
+    let turn = if fb_root { gameplay.root_motion.get(&a.fb.clip).map_or(0.0, |r| r.yaw_at(a.fb.time)) } else { 0.0 };
     let mut cam_world = Mat4::IDENTITY;
     for (_, mut ct) in &mut cams {
         let f = ct.rotation * Vec3::NEG_Z;
-        let fh = Vec3::new(f.x, 0.0, f.z).try_normalize().unwrap_or(Vec3::NEG_Z);
+        let fh = Quat::from_rotation_y(-turn.to_radians()) * Vec3::new(f.x, 0.0, f.z).try_normalize().unwrap_or(Vec3::NEG_Z);
         let rh = fh.cross(Vec3::Y);
         let map = |p: glam::Vec3| fh * p.x + rh * p.y + Vec3::Y * p.z;
         let (vf, vu) = (view_rot * glam::Vec3::X, view_rot * glam::Vec3::Z);
@@ -1872,24 +1910,27 @@ pub fn animate_view_rig(
     }
 }
 
-/// Paired-move masters by `SwordState::assassination_move`: `Ply_Sword_Assassination_as` (front,
-/// left, right, back; then the drop assassinations), then the synced short fatalities of
-/// `Ply_Sword_Fatality_as` (`ShortFatality_Forehand{A,B}` / `Backhand{A,B}`: the slave groups'
-/// `Generic_Fatality_SmallFront_{Right,Left}_{A,B}_Slave` name their masters).
-const ASSASSINATION_MASTERS: [&str; 12] = [
-    "Sword_Ready_Assassination_Front_Master",
-    "Sword_Ready_Assassination_Left_Master",
-    "Sword_Ready_Assassination_Right_Master",
-    "Sword_Ready_Assassination_Back_Master",
-    "Sword_Ready_Assassination_DropFront_Master",
-    "Sword_Ready_Assassination_DropLeft_Master",
-    "Sword_Ready_Assassination_DropRight_Master",
-    "Sword_Ready_Assassination_DropBack_Master",
-    "Sword_Ready_Fatality_SmallFront_Right_A_Master",
-    "Sword_Ready_Fatality_SmallFront_Right_B_Master",
-    "Sword_Ready_Fatality_SmallFront_Left_A_Master",
-    "Sword_Ready_Fatality_SmallFront_Left_B_Master",
-];
+use dishonored_ir::gameplay::ASSASSINATION_MASTERS;
+
+/// The victim's yaw (degrees) in a paired move of `master`: the direction the move was picked
+/// for (0x00BBA970: front, left, right, back) turned into the master's yaw at the start, so the
+/// master stands exactly there (`m_bDoNotRotateSlave` off). Finisher actions name their direction;
+/// the head chop and the knockdowns are frontal.
+fn slave_yaw(master: &PlayerState) -> f32 {
+    use dishonored_ir::gameplay::fatality_move as fm;
+    let dir = match master.sword.assassination_move {
+        m if m < 8 => (m % 4) as usize,
+        m if m < 12 => 0,
+        _ => match master.sword.fatality.map(|r| r.action as usize) {
+            Some(fm::LEFT | fm::LEFT_FAST) => 1,
+            Some(fm::RIGHT | fm::RIGHT_FAST) => 2,
+            Some(fm::BACK | fm::BACK_FAST) => 3,
+            _ => 0,
+        },
+    };
+    // The master's direction from the victim is the reverse of its own facing.
+    master.sword.root_yaw + [180.0, -90.0, 90.0, 0.0][dir]
+}
 
 /// A body left where its choke or carry ended (Dishonored-space root position and yaw), kept
 /// until the simulation moves it.
@@ -1977,7 +2018,13 @@ pub fn place_held_bodies(
             if in_choke {
                 choker.and_then(|c| frame_of(c.id)).map(|(_, level)| (level, level))
             } else {
-                assassin.and_then(|a| frame_of(a.id)).map(|(_, level)| (level, level))
+                // A paired move's victim plays its slave where it stood, turned to the move's
+                // relation to the master's yaw at the start; the master reaches it by its root
+                // motion (`dishonored_sim::sync_motion`).
+                assassin.and_then(|a| roots.get(&p.id).map(|t| {
+                    let t = Transform { rotation: Quat::from_rotation_y(-slave_yaw(a).to_radians()), ..*t };
+                    (t, t)
+                }))
             }
         };
         if let Some((shown, level)) = held {

@@ -37,6 +37,8 @@ pub mod interactables;
 pub mod launchers;
 pub mod walls;
 pub mod teleport_spell;
+pub mod fatality;
+pub mod sync_motion;
 
 use dishonored_ir::gameplay::GameplayConfig;
 use dishonored_world::WorldQuery;
@@ -366,6 +368,8 @@ pub fn step_world(
     // Health before the sword resolves (assassinations give adrenaline by the victim's health).
     let pre_health: Vec<(PlayerId, f32)> = state.players.iter().map(|p| (p.id, p.vitals.health)).collect();
     combat::resolve_sword_hits(state, world, g, &cfg.tuning, &mut out.events);
+    fatality::step(state, g, &mut out.events);
+    sync_motion::step(state, world, g);
     movement::slide_impacts(state, mv, &cfg.gameplay.vitals, &mut out.events);
 
     for e in &out.events {
@@ -429,6 +433,7 @@ pub fn step_world(
     }
     powers::step_time_bends(state, DT, &mut out.events);
     powers::step_blink_layers(state, DT);
+    fatality::step_dilation(state, DT);
     inventory::update_carried(state, mv);
 
     volumes::step_pain(state, world, cfg, &mut out.events);

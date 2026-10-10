@@ -605,6 +605,8 @@ pub fn animate_characters(
     let talking = talking_pawns(&view);
     let root_models: Vec<(u32, usize)> = roots.iter().map(|r| (r.2.0, r.1.archetype)).collect();
     let faces = face_frames(&mut bank, &lib, &view, &root_models, time.elapsed_secs_f64(), &mut face_packages);
+    // Each pawn's chains tick with its dilated time (`PlayerState::time_scale`: Bend Time, a
+    // finisher's slow motion).
     let dt = time.delta_secs().min(0.1);
     let mv = &session.content.sim.gameplay.movement;
     for (entity, root, body, children, root_gt, root_vis) in &roots {
@@ -648,7 +650,7 @@ pub fn animate_characters(
                 .collect()
         };
         let action = view.matchv.npc_actions.iter().find(|x| x.0 == p.id).map(|x| (x.1, x.2));
-        let input = crate::npc_anim::AnimInput { p, stance, action, armed, talking: talking.contains(&p.id), dt, hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), look_target: look_target(p, stance, talking.contains(&p.id), &all), head: view.matchv.npc_heads.iter().find(|h| h.id == p.id).copied(), face: faces.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), floor: -mv.collision_half_height, ground: Some(&ground), walls: Some(&walls), gravity: mv.gravity_z, carrier_speed: p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).map(|c| c.velocity.truncate().length()).unwrap_or(0.0) };
+        let input = crate::npc_anim::AnimInput { p, stance, action, armed, talking: talking.contains(&p.id), dt: dt * p.time_scale.max(0.0), hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), look_target: look_target(p, stance, talking.contains(&p.id), &all), head: view.matchv.npc_heads.iter().find(|h| h.id == p.id).copied(), face: faces.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), floor: -mv.collision_half_height, ground: Some(&ground), walls: Some(&walls), gravity: mv.gravity_z, carrier_speed: p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).map(|c| c.velocity.truncate().length()).unwrap_or(0.0) };
         // Particle notifies the chains crossed this frame: (system, socket or bone, attached).
         let mut fired: Vec<(String, String, bool)> = Vec::new();
         // A `DisNotify_DropItem` crossed this frame; the limp death started (the ragdoll took the

@@ -5007,6 +5007,341 @@
     "mult_drop_assassinate": 1.5,
     "parry_win": 20.0
   },
+  "fatality": {
+    "behead_chance": 0.25,
+    "slomo_chance": 0.75,
+    "slomo_min_interval": 30.0,
+    "slomo_realtime_chance": 0.9,
+    "generic_chance": 0.0,
+    "finishers_before_slow": [
+      4,
+      8
+    ],
+    "time_before_slow": [
+      90.0,
+      120.0
+    ],
+    "adrenaline_mult": 1.0,
+    "max_height_difference": 50.0,
+    "moves": [
+      [
+        {
+          "state": "Fatality_Front_A",
+          "master": "Sword_Ready_Fatality_Front_A_Master",
+          "exit": 2.1,
+          "slave": 88,
+          "upper_body": false,
+          "hit": null,
+          "bends": [
+            {
+              "start": 0.1,
+              "duration": 0.22,
+              "world": 0.4,
+              "player": 0.4,
+              "blend_in": 0.1,
+              "blend_out": 0.01,
+              "adrenaline": true
+            },
+            {
+              "start": 1.5,
+              "duration": 0.5,
+              "world": 0.2,
+              "player": 0.4,
+              "blend_in": 0.01,
+              "blend_out": 0.06,
+              "adrenaline": true
+            }
+          ]
+        },
+        {
+          "state": "Fatality_Front_B",
+          "master": "Sword_Ready_Fatality_Front_B_Master",
+          "exit": 2.00626,
+          "slave": 88,
+          "upper_body": false,
+          "hit": null,
+          "bends": [
+            {
+              "start": 0.1,
+              "duration": 0.22,
+              "world": 0.4,
+              "player": 0.4,
+              "blend_in": 0.1,
+              "blend_out": 0.01,
+              "adrenaline": true
+            },
+            {
+              "start": 1.14378,
+              "duration": 0.5,
+              "world": 0.2,
+              "player": 0.4,
+              "blend_in": 0.01,
+              "blend_out": 0.06,
+              "adrenaline": true
+            }
+          ]
+        }
+      ],
+      [],
+      [],
+      [],
+      [
+        {
+          "state": "Fatality_FastFront_A",
+          "master": "Sword_Ready_Fatality_FastFront_A_Master",
+          "exit": 1.4,
+          "slave": 89,
+          "upper_body": false,
+          "hit": null,
+          "bends": [
+            {
+              "start": 0.1,
+              "duration": 0.24,
+              "world": 0.4,
+              "player": 0.4,
+              "blend_in": 0.1,
+              "blend_out": 0.01,
+              "adrenaline": true
+            },
+            {
+              "start": 0.9,
+              "duration": 0.48,
+              "world": 0.2,
+              "player": 0.4,
+              "blend_in": 0.01,
+              "blend_out": 0.06,
+              "adrenaline": true
+            }
+          ]
+        },
+        {
+          "state": "Fatality_FastFront_B",
+          "master": "Sword_Ready_Fatality_FastFront_B_Master",
+          "exit": 1.4,
+          "slave": 89,
+          "upper_body": false,
+          "hit": null,
+          "bends": [
+            {
+              "start": 0.1,
+              "duration": 0.24,
+              "world": 0.2,
+              "player": 0.2,
+              "blend_in": 0.1,
+              "blend_out": 0.001,
+              "adrenaline": true
+            },
+            {
+              "start": 0.8,
+              "duration": 0.48,
+              "world": 0.4,
+              "player": 0.4,
+              "blend_in": 0.01,
+              "blend_out": 0.06,
+              "adrenaline": true
+            }
+          ]
+        },
+        {
+          "state": "Fatality_FastFront_C",
+          "master": "Sword_Ready_Fatality_FastFront_C_Master",
+          "exit": 1.4,
+          "slave": 89,
+          "upper_body": false,
+          "hit": null,
+          "bends": [
+            {
+              "start": 0.1,
+              "duration": 0.24,
+              "world": 0.4,
+              "player": 0.4,
+              "blend_in": 0.1,
+              "blend_out": 0.01,
+              "adrenaline": true
+            },
+            {
+              "start": 0.8,
+              "duration": 0.48,
+              "world": 0.2,
+              "player": 0.4,
+              "blend_in": 0.01,
+              "blend_out": 0.06,
+              "adrenaline": true
+            }
+          ]
+        },
+        {
+          "state": "Fatality_FastFront_D",
+          "master": "Sword_Ready_Fatality_FastFront_D_Master",
+          "exit": 1.4,
+          "slave": 89,
+          "upper_body": false,
+          "hit": null,
+          "bends": [
+            {
+              "start": 0.1,
+              "duration": 0.24,
+              "world": 0.4,
+              "player": 0.4,
+              "blend_in": 0.1,
+              "blend_out": 0.01,
+              "adrenaline": true
+            },
+            {
+              "start": 0.9,
+              "duration": 0.48,
+              "world": 0.2,
+              "player": 0.4,
+              "blend_in": 0.01,
+              "blend_out": 0.06,
+              "adrenaline": true
+            }
+          ]
+        }
+      ],
+      [],
+      [],
+      [],
+      [
+        {
+          "state": "Fatality_HeadChopA",
+          "master": "Sword_Ready_Fatality_Behead_A_Master",
+          "exit": 1.5,
+          "slave": 91,
+          "upper_body": false,
+          "hit": null,
+          "bends": [
+            {
+              "start": 0.1,
+              "duration": 0.25,
+              "world": 0.4,
+              "player": 0.4,
+              "blend_in": 0.1,
+              "blend_out": 0.01,
+              "adrenaline": true
+            },
+            {
+              "start": 0.48,
+              "duration": 0.5,
+              "world": 0.2,
+              "player": 0.4,
+              "blend_in": 0.01,
+              "blend_out": 0.06,
+              "adrenaline": true
+            }
+          ]
+        },
+        {
+          "state": "Fatality_HeadChopB",
+          "master": "Sword_Ready_Fatality_Behead_B_Master",
+          "exit": 1.5,
+          "slave": 91,
+          "upper_body": false,
+          "hit": null,
+          "bends": [
+            {
+              "start": 0.1,
+              "duration": 0.25,
+              "world": 0.4,
+              "player": 0.4,
+              "blend_in": 0.1,
+              "blend_out": 0.01,
+              "adrenaline": true
+            },
+            {
+              "start": 0.5,
+              "duration": 0.5,
+              "world": 0.2,
+              "player": 0.4,
+              "blend_in": 0.01,
+              "blend_out": 0.06,
+              "adrenaline": true
+            }
+          ]
+        }
+      ],
+      [
+        {
+          "state": "Fatality_KnockdownA",
+          "master": "Sword_Ready_Fatality_KnockDown_Master",
+          "exit": 1.4694169,
+          "slave": 90,
+          "upper_body": false,
+          "hit": null,
+          "bends": []
+        }
+      ],
+      [
+        {
+          "state": "Fatality_KnockdownA",
+          "master": "Sword_Ready_Fatality_KnockDown_Master",
+          "exit": 1.4694169,
+          "slave": 90,
+          "upper_body": false,
+          "hit": null,
+          "bends": []
+        }
+      ],
+      [
+        {
+          "state": "Fatality_GenericA",
+          "master": "Sword_Ready_Fatality_Generic_Left_A",
+          "exit": 1.3265828,
+          "slave": 0,
+          "upper_body": true,
+          "hit": 0.39125,
+          "bends": [
+            {
+              "start": 0.1,
+              "duration": 0.24,
+              "world": 0.4,
+              "player": 0.4,
+              "blend_in": 0.1,
+              "blend_out": 0.01,
+              "adrenaline": true
+            },
+            {
+              "start": 0.5267229,
+              "duration": 0.48,
+              "world": 0.2,
+              "player": 0.4,
+              "blend_in": 0.01,
+              "blend_out": 0.1,
+              "adrenaline": true
+            }
+          ]
+        },
+        {
+          "state": "Fatality_GenericB",
+          "master": "Sword_Ready_Fatality_Generic_Right_A",
+          "exit": 1.3230829,
+          "slave": 0,
+          "upper_body": true,
+          "hit": 0.4556667,
+          "bends": [
+            {
+              "start": 0.1,
+              "duration": 0.24,
+              "world": 0.4,
+              "player": 0.4,
+              "blend_in": 0.1,
+              "blend_out": 0.01,
+              "adrenaline": true
+            },
+            {
+              "start": 0.55855656,
+              "duration": 0.48,
+              "world": 0.2,
+              "player": 0.4,
+              "blend_in": 0.01,
+              "blend_out": 0.1,
+              "adrenaline": true
+            }
+          ]
+        }
+      ]
+    ]
+  },
   "provenance": {
     "adrenaline.burn_rate": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_AdrenalineBurnRate.m_fBaseValue2_Normal = 1",
     "adrenaline.cooldown": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_AdrenalineCooldown.m_fBaseValue2_Normal = 10",

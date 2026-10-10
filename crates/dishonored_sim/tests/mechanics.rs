@@ -533,6 +533,57 @@ fn a_killing_blow_is_a_synced_short_fatality() {
     }
 }
 
+/// The fatality context (`dishonored_sim::fatality`: 0x00C14B40, 0x00C10EF0, 0x00C0E380,
+/// 0x00C0DFD0): with exactly one enemy engaging, a killing blow that rolls the slow-motion
+/// finisher plays a fatality instead of the swing (the front's fast action while fast finishers
+/// remain), locked for its master's exit; the master's adrenaline bend-time windows slow the world
+/// unless the finisher plays in real time. Without that engaged enemy the press is a plain swing.
+#[test]
+fn a_slow_motion_finisher_kills_with_a_fatality() {
+    use dishonored_ir::gameplay::fatality_move as fm;
+    use dishonored_sim::state::awareness;
+    for (opponents, realtime) in [(1u8, false), (1, true), (0, false)] {
+        let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.)]);
+        r.cfg.gameplay.fatality.slomo_chance = 1.0;
+        r.cfg.gameplay.fatality.slomo_realtime_chance = if realtime { 1.0 } else { 0.0 };
+        r.cfg.gameplay.fatality.behead_chance = 0.0;
+        with_guard(&mut r, 100, Vec3::new(120., 0., STAND_Z + 1.), 180.0, awareness::IN_COMBAT);
+        r.settle();
+        r.state.player_mut(100).unwrap().vitals.health = 10.0;
+        r.state.player_mut(1).unwrap().combat_opponents = opponents;
+        r.step(&[(1, input(0., 0, buttons::PRIMARY)), (100, input(180.0, 0, 0))]);
+        let started = r.events.iter().find_map(|e| if let SimEvent::Fatality { id: 1, victim: 100, action, variant, .. } = e { Some((*action, *variant)) } else { None });
+        if opponents != 1 {
+            assert!(started.is_none(), "no slow-motion finisher without one engaged enemy");
+            continue;
+        }
+        let (action, variant) = started.expect("a fatality");
+        assert_eq!(action as usize, fm::FRONT_FAST);
+        let clip = r.cfg.gameplay.fatality.moves[action as usize][variant as usize].clone();
+        let p = r.p(1);
+        assert_eq!(p.sword.phase, SwordPhase::Assassinating);
+        assert_eq!(p.sword.assassination_target, Some(100));
+        assert!((p.sword.lock_time - clip.exit).abs() < 1e-6);
+        assert!(!r.p(100).alive, "the victim dies");
+        let target = clip.bends.iter().filter(|w| w.adrenaline).map(|w| w.world).fold(1.0f32, f32::min);
+        let mut slowest: f32 = 1.0;
+        for _ in 0..600 {
+            r.step(&[(1, input(0., 0, 0))]);
+            slowest = slowest.min(dishonored_sim::powers::world_time_scale(&r.state, &r.cfg.gameplay, false));
+            if r.p(1).sword.phase != SwordPhase::Assassinating {
+                break;
+            }
+        }
+        if realtime {
+            assert_eq!(slowest, 1.0, "a real-time finisher keeps the world's rate");
+        } else {
+            assert!(slowest <= target + 0.02, "slowed to {slowest}, window {target}");
+        }
+        assert_ne!(r.p(1).sword.phase, SwordPhase::Assassinating);
+        assert!(r.state.finisher_dilation.is_empty(), "the dilation ends with the finisher");
+    }
+}
+
 /// melee.md F4: the assassinate context (0x00C0D8F0) takes an NPC on any side within its reach
 /// (275) when `m_AssassinateOnAwareness` allows its awareness, and refuses running targets; the
 /// kill plays the move set of the side (0x00BBA970), whose clip sets the lock.
@@ -577,6 +628,46 @@ fn unaware_guards_are_assassinated_from_any_side() {
     assert!(r.p(100).velocity.truncate().length() > 300.0, "running");
     r.step(&[(1, input(0., 0, buttons::PRIMARY)), (100, run)]);
     assert!(!r.events.iter().any(|e| matches!(e, SimEvent::Death { cause: DamageCause::Assassination, .. })));
+}
+
+/// The assassination's master moves the player by its root motion (`RMM_Translate`): out along the
+/// yaw it started with and back as the clip's root returns, through the walking move's collision;
+/// the victim stays where it stood.
+#[test]
+fn an_assassination_moves_the_player_by_its_masters_root_motion() {
+    use dishonored_ir::gameplay::{ASSASSINATION_MASTERS, RootMotion};
+    use dishonored_sim::state::awareness;
+    // 30 samples per second: out 90 uu over the first second, back over the next.
+    let keys: Vec<[f32; 2]> = (0..=60).map(|i: i32| [90.0 * (30 - (30 - i).abs()) as f32 / 30.0, 0.0]).collect();
+    let rm = RootMotion { rate: 30.0, keys, yaw: Vec::new() };
+    for wall in [false, true] {
+        let world = floor_world(|tris| {
+            if wall {
+                quad(tris, Vec3::new(90., -200., 0.), Vec3::new(90., 200., 0.), Vec3::new(90., 200., 300.), Vec3::new(90., -200., 300.));
+            }
+        });
+        let mut r = Run::new(world, &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.)]);
+        r.cfg.gameplay.root_motion.insert(ASSASSINATION_MASTERS[0].into(), rm.clone());
+        with_guard(&mut r, 100, Vec3::new(60., 0., STAND_Z + 1.), 180.0, awareness::UNAWARE);
+        r.settle();
+        let x0 = r.p(1).position.x;
+        r.step(&[(1, input(0., 0, buttons::PRIMARY)), (100, input(180.0, 0, 0))]);
+        assert!(r.events.iter().any(|e| matches!(e, SimEvent::Death { victim: 100, cause: DamageCause::Assassination, .. })), "wall {wall}: assassinated");
+        assert_eq!(r.p(1).sword.assassination_move, 0, "a front assassination");
+        let body = r.p(100).position;
+        let mut peak = x0;
+        for _ in 0..150 {
+            r.step(&[(1, input(30., 0, 0))]);
+            peak = peak.max(r.p(1).position.x);
+        }
+        let reach = if wall { 90.0 - r.cfg.gameplay.movement.collision_radius - x0 } else { 90.0 };
+        assert!((peak - x0 - reach).abs() < 2.0, "wall {wall}: out {}", peak - x0);
+        assert!(r.p(1).position.y.abs() < 1.0, "along the start yaw, not the view's");
+        if !wall {
+            assert!((r.p(1).position.x - x0).abs() < 1.0, "back where it started: {}", r.p(1).position.x - x0);
+        }
+        assert!(r.p(100).position.truncate().distance(body.truncate()) < 1.0, "the victim stays: {:?} from {body:?}", r.p(100).position);
+    }
 }
 
 /// melee.md F2 / F3 / F8: an NPC slash deals the guards' sword `MeleeDamage` (15 on Normal)

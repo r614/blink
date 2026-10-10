@@ -814,7 +814,7 @@ fn nav_walk_move(p: &mut PlayerState, delta: Vec3, ctx: &MoveCtx) -> bool {
 }
 
 /// The horizontal part of physWalking's move: the move, then stepUp on a barrier.
-fn walk_move(p: &mut PlayerState, delta: Vec3, ctx: &MoveCtx) {
+pub(crate) fn walk_move(p: &mut PlayerState, delta: Vec3, ctx: &MoveCtx) {
     if delta.abs().max_element() < 1e-4 {
         return;
     }

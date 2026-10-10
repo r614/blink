@@ -30,6 +30,7 @@ pub mod items_config;
 pub mod pickups;
 pub mod melee_trail;
 pub mod shadow_kill;
+pub mod fatality;
 pub mod ini;
 pub mod kismet;
 pub mod font;

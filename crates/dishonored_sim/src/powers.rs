@@ -460,6 +460,10 @@ pub fn pawn_time_scale(state: &WorldState, id: PlayerId, cfg: &GameplayConfig) -
             s *= l.current;
         }
     }
+    // A finisher's channel: its caster at the player rate, every other pawn at the world rate.
+    for f in &state.finisher_dilation {
+        s *= if f.caster == id { f.player[0] } else { f.world[0] };
+    }
     s
 }
 
@@ -474,6 +478,9 @@ pub fn player_time_dilation(state: &WorldState, cfg: &GameplayConfig) -> f32 {
     // The wheel's channel passes the same rate as caster and world (0x00BE4280).
     for l in state.blink_layers.iter().filter(|l| l.wheel) {
         s *= l.current;
+    }
+    for f in &state.finisher_dilation {
+        s *= f.player[0];
     }
     s
 }
@@ -491,6 +498,9 @@ pub fn world_time_scale(state: &WorldState, cfg: &GameplayConfig, projectile: bo
     }
     for l in &state.blink_layers {
         s *= l.current;
+    }
+    for f in &state.finisher_dilation {
+        s *= f.world[0];
     }
     s
 }

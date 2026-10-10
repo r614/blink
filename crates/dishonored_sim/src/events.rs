@@ -205,6 +205,10 @@ pub enum SimEvent {
     AdrenalineFull { id: PlayerId },
     /// An adrenaline attack was released (the next sword attack with a full gauge).
     AdrenalineAttack { id: PlayerId },
+    /// A finisher kill started (`crate::fatality`): the action
+    /// (`dishonored_ir::gameplay::fatality_move`), its state and the victim's slave chain
+    /// (`eDisNPCAnimations`, group `variant`; 0 for the generic swing).
+    Fatality { id: PlayerId, victim: PlayerId, action: u8, variant: u8, slave: u8 },
     // --- rats (hooks for `dishonored_ai`) ---
     /// A rat pawn was spawned (by a swarm, a spawner or a mission).
     RatSpawned { rat: PlayerId, swarm: Option<u32> },

@@ -274,6 +274,56 @@ impl TweakDb {
         out
     }
 
+    /// The objects whose properties make up a resolved tweak, strongest first: the object, its
+    /// archetype chain, its `m_FallbackChainCooked` tweaks (nearest first) and the class
+    /// defaults (class, then superclasses). For properties the generic map cannot type (name
+    /// arrays), read the first object that sets the property.
+    pub fn raw_lineage(&self, path: &str) -> Vec<(Arc<Package>, usize)> {
+        let mut out: Vec<(usize, usize)> = Vec::new();
+        let Some(loc) = self.objects.get(&path.to_ascii_lowercase()).copied() else { return Vec::new() };
+        out.push(loc);
+        let mut cur = loc;
+        while out.len() < 16 {
+            let pkg = &self.pkgs[cur.0];
+            let arch = ObjRef::from_index(pkg.exports[cur.1].archetype);
+            if arch == ObjRef::Null || pkg.obj_name(arch).starts_with("Default__") {
+                break;
+            }
+            let p = pkg.obj_path(arch).to_ascii_lowercase();
+            let Some(next) = self.objects.get(&p).or_else(|| p.split_once('.').and_then(|(_, rest)| self.objects.get(rest))).copied() else { break };
+            if out.contains(&next) {
+                break;
+            }
+            out.push(next);
+            cur = next;
+        }
+        if let Ok(own) = self.read(loc) {
+            if let Some(TVal::List(fb)) = own.get("m_FallbackChainCooked") {
+                for f in fb {
+                    if let Some(TVal::Name(n)) = f.get("m_FallbackName") {
+                        let p = tweak_path_of_name(n).replace(':', ".");
+                        if let Some(l) = self.objects.get(&p.to_ascii_lowercase()).copied() {
+                            if !out.contains(&l) {
+                                out.push(l);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut class = self.pkgs[loc.0].export_class(loc.1);
+        for _ in 0..32 {
+            if let Some(c) = self.cdos.get(&class).copied() {
+                out.push(c);
+            }
+            match self.supers.get(&class) {
+                Some(s) => class = s.clone(),
+                None => break,
+            }
+        }
+        out.into_iter().map(|(s, i)| (self.pkgs[s].clone(), i)).collect()
+    }
+
     /// An int array property (`TArray<int>`) of an object, from the object or the first object
     /// of its archetype chain that sets it. The generic reader takes untyped arrays for object
     /// references, so int arrays are read raw here.

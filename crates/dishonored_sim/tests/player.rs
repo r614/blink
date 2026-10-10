@@ -203,18 +203,31 @@ fn blood_thirsty_fills_and_the_finisher_kills_an_npc() {
     r.steps(30, &[(1, input(0., 0, 0))]);
     assert!(r.p(1).adrenaline.full, "value {}", r.p(1).adrenaline.value);
     assert!(r.p(100).alive);
-    // The next hit is a finisher.
+    // The next press is the Bash slot's fatality (an adrenaline finisher): the guard dies, the gauge
+    // is spent and the kill adds `m_fAdrenalineMultOnHit` x its health (0x00C0DFD0).
     r.steps(30, &[(1, input(0., 0, 0))]);
+    let health = r.p(100).vitals.health;
     r.step(&[(1, input(0., 0, buttons::PRIMARY))]);
+    assert!(r.events.iter().any(|e| matches!(e, SimEvent::Fatality { id: 1, victim: 100, .. })));
     r.steps(30, &[(1, input(0., 0, 0))]);
     assert!(!r.p(100).alive);
     assert!(r.events.iter().any(|e| matches!(e, SimEvent::Death { victim: 100, cause: DamageCause::Adrenaline, .. })));
-    assert_eq!(r.p(1).adrenaline.value, 0.0);
+    let after = health * g.fatality.adrenaline_mult;
+    assert!((r.p(1).adrenaline.value - after).abs() < 1e-3, "{} vs {after}", r.p(1).adrenaline.value);
+    assert!(!r.p(1).adrenaline.full);
+    // (After the finisher and its slow motion.)
+    for _ in 0..600 {
+        if r.p(1).sword.phase != dishonored_sim::state::SwordPhase::Assassinating && r.state.finisher_dilation.is_empty() {
+            break;
+        }
+        r.step(&[(1, input(0., 0, 0))]);
+    }
     // Idle for longer than the cooldown: the gauge burns at 1/s.
     dishonored_sim::adrenaline::gain(r.pm(1), 50.0, &g, &mut ev);
+    let v0 = r.p(1).adrenaline.value;
     r.steps(60 * 12, &[(1, input(0., 0, 0))]);
     let v = r.p(1).adrenaline.value;
-    assert!((v - 48.0).abs() < 0.2, "burned to {v}");
+    assert!((v - (v0 - 2.0)).abs() < 0.2, "burned to {v} from {v0}");
 }
 
 #[test]

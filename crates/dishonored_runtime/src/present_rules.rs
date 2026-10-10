@@ -1256,6 +1256,8 @@ pub enum HitKind {
     AssassinatedDrop,
     /// A synced short fatality's victim: backhand or forehand, the group (A / B).
     ShortFatality { backhand: bool, group: u8 },
+    /// A finisher's victim: the state's slave chain and its group (`SimEvent::Fatality`).
+    Fatality { anim: dishonored_ir::npc_anim::NpcAnim, group: u8 },
     /// Knocked out by something other than a choke (sleep dart): falls like a death.
     KnockedOut,
     /// Choke victim: the choke ended (won: knocked out, lost: broke free, cancelled).
@@ -1284,15 +1286,13 @@ pub fn collect_hits(events: &[SimEvent], all: &[&PlayerState]) -> HashMap<u32, V
             E::Damage { victim, attacker, cause, .. } => {
                 // A sword kill the attacker plays as a paired move (`SwordState::assassination_move`
                 // 8..11): the victim plays its slave.
-                let synced = attacker.and_then(|a| all.iter().find(|p| p.id == a)).filter(|a| a.sword.phase == dishonored_sim::state::SwordPhase::Assassinating && a.sword.assassination_target == Some(victim) && a.sword.assassination_move >= 8).map(|a| a.sword.assassination_move - 8);
+                let synced = attacker.and_then(|a| all.iter().find(|p| p.id == a)).filter(|a| a.sword.phase == dishonored_sim::state::SwordPhase::Assassinating && a.sword.assassination_target == Some(victim) && (8..12).contains(&a.sword.assassination_move)).map(|a| a.sword.assassination_move - 8);
                 let k = match cause {
                     C::Sword | C::SwordCounter if synced.is_some() => synced.map(|m| H::ShortFatality { backhand: m >= 2, group: m % 2 }),
                     C::Sword | C::SwordCounter => Some(H::Melee),
                     C::Pistol | C::Crossbow => Some(H::Projectile),
                     C::PistolHeadshot | C::CrossbowHeadshot => Some(H::Headshot),
                     C::Windblast => Some(H::Windblast),
-                    C::Assassination => Some(H::Assassinated),
-                    C::DropAssassination => Some(H::AssassinatedDrop),
                     _ => None,
                 };
                 if let Some(k) = k {
@@ -1302,12 +1302,28 @@ pub fn collect_hits(events: &[SimEvent], all: &[&PlayerState]) -> HashMap<u32, V
             // The death chains named after their damage (`DisNPCAnim_DeathPlague`,
             // `DisNPCAnim_DeathSwarmAttack`; LIKELY: the code choosing them was not traced, U-890).
             E::Death { victim, killer, cause } => {
+                // An assassination kills outright (`vitals::kill`, no damage event): the victim
+                // plays the move's slave, which its death then keeps.
+                let slave = match cause {
+                    C::Assassination => Some(H::Assassinated),
+                    C::DropAssassination => Some(H::AssassinatedDrop),
+                    _ => None,
+                };
+                if let Some(s) = slave {
+                    out.entry(victim).or_default().push((s, pos(killer, victim)));
+                }
                 let k = match cause {
                     C::Plague => H::DeathPlague,
                     C::Rats | C::RatBite => H::DeathSwarm,
                     _ => H::Death,
                 };
                 out.entry(victim).or_default().push((k, pos(killer, victim)))
+            }
+            // A synced finisher: the victim plays the state's slave (the generic swing has none).
+            E::Fatality { id, victim, variant, slave, .. } => {
+                if let Some(anim) = dishonored_ir::npc_anim::NpcAnim::fatality_slave(slave) {
+                    out.entry(victim).or_default().push((H::Fatality { anim, group: variant }, pos(Some(id), victim)));
+                }
             }
             E::SwordSwing { id } => out.entry(id).or_default().push((H::Swing, Vec3::ZERO)),
             E::SwordParried { attacker, defender } => out.entry(defender).or_default().push((H::Parried, pos(Some(attacker), defender))),

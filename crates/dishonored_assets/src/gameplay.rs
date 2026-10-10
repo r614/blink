@@ -586,9 +586,15 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
             parry_win: mv("block.m_fAdrenalineAddedParryWin", d.parry_win),
         }
     };
+    let fatality = crate::fatality::load_fatality(content, &db)?;
+    l.prov.insert("fatality".into(), format!("{} (move set 0, Twk_Pawn_Corvo states, Ply_Sword_Fatality_as notifies)", crate::fatality::FATALITY));
+    let root_motion = crate::fatality::load_root_motion(content, &fatality)?;
+    l.prov.insert("root_motion".into(), "Ply_Sword_Assassination_as / Ply_Sword_Fatality_as masters' root0_jnt track, Engine Ply_Player.Skm_Player RotOrigin".into());
     Ok(GameplayConfig {
         adrenaline,
         throw,
+        fatality,
+        root_motion,
         items,
         movement,
         vitals,

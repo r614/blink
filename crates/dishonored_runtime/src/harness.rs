@@ -73,6 +73,10 @@ pub enum Step {
     Camera { camera: CameraStep },
     /// Offline sessions only: place the local player (Dishonored units, degrees).
     Teleport { teleport: CameraStep },
+    /// Offline sessions only: give the local player Blood Thirsty with a full gauge.
+    Adrenaline { adrenaline: bool },
+    /// Offline sessions only: set a power's level on the local player (`state::power` index).
+    Power { power: [u8; 2] },
     /// Game camera: third person, follow a pawn id, orbit angle (degrees) around it.
     View { view: ViewStep },
     /// Game mode: show a HUD popup or state (`hud_popups::HudTest`), e.g.
@@ -291,6 +295,26 @@ pub fn script_fixed(
                     }
                 }
             }
+            Step::Adrenaline { adrenaline } => {
+                let g = session.content.sim.gameplay.clone();
+                if let crate::session::SessionKind::Offline { game, .. } = &mut session.kind {
+                    if let Some(p) = game.world_mut().player_mut(crate::session::LOCAL_ID) {
+                        p.inv.power_levels[dishonored_sim::state::power::BLOOD_THIRSTY] = adrenaline as u8;
+                        let mut ev = Vec::new();
+                        let max = dishonored_sim::adrenaline::max(p, &g);
+                        dishonored_sim::adrenaline::gain(p, max, &g, &mut ev);
+                    }
+                }
+            }
+            Step::Power { power: [i, level] } => {
+                if let crate::session::SessionKind::Offline { game, .. } = &mut session.kind {
+                    if let Some(p) = game.world_mut().player_mut(crate::session::LOCAL_ID) {
+                        if let Some(l) = p.inv.power_levels.get_mut(i as usize) {
+                            *l = level;
+                        }
+                    }
+                }
+            }
             Step::Quit { .. } => {
                 runner.done = true;
                 shots.quit_in = Some(30);
@@ -366,7 +390,7 @@ pub fn inspect_script(
             }
             shots.pending.push(runner.out_dir.join(format!("{screenshot}.png")))
         }
-        Step::Dump { .. } | Step::Teleport { .. } | Step::View { .. } | Step::Hud { .. } => {}
+        Step::Dump { .. } | Step::Teleport { .. } | Step::Adrenaline { .. } | Step::Power { .. } | Step::View { .. } | Step::Hud { .. } => {}
         Step::Quit { .. } => {
             runner.done = true;
             shots.quit_in = Some(600);

@@ -115,7 +115,7 @@ pub fn context_reach(a: &PlayerState, t: &CombatTuning, range: f32, percent: f32
 }
 
 /// Distance from the attacker's swing segment to the victim's body axis.
-fn body_distance(eye: Vec3, dir: Vec3, range: f32, v: &PlayerState, mv: &MovementConfig) -> (f32, f32) {
+pub(crate) fn body_distance(eye: Vec3, dir: Vec3, range: f32, v: &PlayerState, mv: &MovementConfig) -> (f32, f32) {
     let hh = half_height(v, mv);
     let a0 = v.position - Vec3::Z * (hh - mv.collision_radius);
     let a1 = v.position + Vec3::Z * (hh - mv.collision_radius);
@@ -245,6 +245,11 @@ pub fn resolve_sword_hits(state: &mut WorldState, world: &dyn WorldQuery, g: &Ga
         // `_Finisher` < `_MeleeAttackPlayer`; `DisItemContext_DropAssassinate`): NPC swings
         // are their own `DisItemContext_NPCAttack*` moves and never assassinate.
         if attacker.kind == PawnKind::Human && attacker.sword.phase != SwordPhase::Assassinating {
+            // With a full Blood Thirsty gauge the press asks the Bash slot first (0x00AAEF40): the
+            // fatality context as an adrenaline finisher (`crate::fatality`).
+            if wants_attack && attacker.mode == MoveMode::Walking && crate::adrenaline::is_full(&attacker, g) && crate::fatality::try_start(state, ai, crate::fatality::Slot::Bash, world, g, t, events) {
+                continue;
+            }
             // The drop context is evaluated every tick of the fall (0x00C14960 caches it per
             // tick); the attack fires it while the button is down.
             let held = attacker.last_input.buttons & buttons::PRIMARY != 0;
@@ -267,10 +272,16 @@ pub fn resolve_sword_hits(state: &mut WorldState, world: &dyn WorldQuery, g: &Ga
                     a.sword.lock_time = if drop { t.drop_assassination_times[dir] } else { t.assassination_times[dir] };
                     a.sword.assassination_target = Some(vid);
                     a.sword.assassination_move = dir as u8 + if drop { 4 } else { 0 };
+                    a.sword.root_t = 0.0;
+                    a.sword.root_yaw = a.yaw;
                     a.velocity = Vec3::ZERO;
                 }
                 let v = &mut state.players[vi];
                 kill(v, Some(attacker.id), cause, events);
+                continue;
+            }
+            // Then the primary slot's fatality, before the plain attack.
+            if wants_attack && attacker.mode == MoveMode::Walking && crate::fatality::try_start(state, ai, crate::fatality::Slot::Primary, world, g, t, events) {
                 continue;
             }
         }
@@ -347,14 +358,6 @@ pub fn resolve_sword_hits(state: &mut WorldState, world: &dyn WorldQuery, g: &Ga
                 crate::noise::emit(events, &noise.sword_weapon, victim.position, SoundCategory::SwordBlock, attacker.id, 0.0);
                 continue;
             }
-            // Blood Thirsty: with a full gauge the attack on an NPC is a finisher (0x00C10EF0).
-            if attacker.adrenaline.full && victim.kind != PawnKind::Human {
-                crate::adrenaline::spend(&mut state.players[ai], events);
-                let v = &mut state.players[vi];
-                crate::noise::emit(events, &noise.sword_body, v.position, SoundCategory::SwordImpact, attacker.id, 0.0);
-                kill(v, Some(attacker.id), DamageCause::Adrenaline, events);
-                continue;
-            }
             // The offscreen reduction holds when the swing started offscreen for this player and
             // the attacker is still not seen (0x00C33DD0 re-tests 0x00BBEF40).
             let offscreen = attacker.sword.offscreen_to == Some(victim.id) && !seen_by(&victim, &attacker, world, mv);
@@ -370,6 +373,8 @@ pub fn resolve_sword_hits(state: &mut WorldState, world: &dyn WorldQuery, g: &Ga
                 a.sword.lock_time = t.short_fatality_times[(m - 8) as usize];
                 a.sword.assassination_target = Some(victim.id);
                 a.sword.assassination_move = m;
+                a.sword.root_t = 0.0;
+                a.sword.root_yaw = a.yaw;
                 a.velocity = Vec3::ZERO;
             }
             let v = &mut state.players[vi];

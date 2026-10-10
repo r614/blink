@@ -107,6 +107,55 @@ pub struct SwordState {
     /// `Sword_Ready_Fatality_SmallFront_{Right,Left}_{A,B}_Master`).
     #[serde(default)]
     pub assassination_move: u8,
+    /// The finisher kill playing (`crate::fatality`), when `assassination_move` is
+    /// [`crate::fatality::FATALITY_MOVE`].
+    #[serde(default)]
+    pub fatality: Option<FatalityRun>,
+    /// The paired move's root motion (`crate::sync_motion`): the master clip time it has moved the
+    /// pawn to, and the yaw it runs along (the master's at the move's start).
+    #[serde(default)]
+    pub root_t: f32,
+    #[serde(default)]
+    pub root_yaw: f32,
+}
+
+/// A finisher kill of the player's fatality context (`DisItemContext_Fatality`): the action
+/// (`dishonored_ir::gameplay::fatality_move`) and its state, and whether the master's
+/// `DisNotify_AdrenalineBendTime_Ranged` windows apply (an exclusive finisher, adrenaline or
+/// slow motion, that does not play in real time).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct FatalityRun {
+    pub action: u8,
+    pub variant: u8,
+    pub slow_motion: bool,
+    /// The victim, and whether an unsynced swing has yet to kill it.
+    pub victim: PlayerId,
+    pub pending: bool,
+    /// The master time the tick last processed (bend windows, the swing's hit).
+    pub clock: f32,
+}
+
+/// `DisItemContext_Finisher` / `_Fatality` pacing of a player (0x00C09ED0, 0x00C0DFD0): fast
+/// finishers left before a slow one, the slow timer and when the last slow one played, whether a
+/// fast one was seen since, and when the last slow-motion finisher played (0: never).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct FinisherState {
+    pub init: bool,
+    pub fast_left: i32,
+    pub slow_timer: f32,
+    pub last_slow: f32,
+    pub seen_fast: bool,
+    pub last_slomo: f32,
+}
+
+/// A finisher's time dilation (channel 4 of the dilation helper 0x009FA0D0, set by its master's
+/// bend-time windows): every other pawn runs at the world rate, the caster at the player rate,
+/// each `[current, target, velocity]` blending toward its target (velocity `f32::MAX`: at once).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FinisherDilation {
+    pub caster: PlayerId,
+    pub world: [f32; 3],
+    pub player: [f32; 3],
 }
 
 impl SwordState {
@@ -388,6 +437,9 @@ pub struct PlayerState {
     /// by 0x00C5AF60). Dark Vision ends in combat (0x00BF84C0). 0 when no AI sets it.
     #[serde(default)]
     pub combat_opponents: u8,
+    /// The fatality context's finisher pacing (`crate::fatality`).
+    #[serde(default)]
+    pub finisher: FinisherState,
     /// The pawn was last hit by this pawn's Windblast and has not landed since: the NPC rigid-body
     /// collision (0x00B529C0) tests the last damage's instigator and type.
     #[serde(default)]
@@ -752,6 +804,7 @@ impl PlayerState {
             right_hand: RightHandItem::Sword,
             mantle_allowed: false,
             combat_opponents: 0,
+            finisher: FinisherState::default(),
             windblasted_by: None,
             thrown: ThrownState::default(),
             wall_hit: None,
@@ -929,6 +982,9 @@ pub struct WorldState {
     /// caster while it differs from 1.
     #[serde(default)]
     pub blink_layers: Vec<DilationLayer>,
+    /// The finishers' time dilations (one per caster while it differs from 1).
+    #[serde(default)]
+    pub finisher_dilation: Vec<FinisherDilation>,
     /// The active map's physics props (`DishonoredMovable`): picked up, carried, dropped, thrown.
     #[serde(default)]
     pub movables: Vec<MovableState>,
@@ -1039,6 +1095,8 @@ pub struct WorldExtras {
     #[serde(default)]
     pub blink_layers: Vec<DilationLayer>,
     #[serde(default)]
+    pub finisher_dilation: Vec<FinisherDilation>,
+    #[serde(default)]
     pub movables: Vec<MovableState>,
 }
 
@@ -1053,6 +1111,7 @@ impl WorldState {
             swarms: self.swarms.clone(),
             next_entity_id: self.next_entity_id,
             blink_layers: self.blink_layers.clone(),
+            finisher_dilation: self.finisher_dilation.clone(),
         }
     }
     pub fn set_extras(&mut self, e: WorldExtras) {
@@ -1063,6 +1122,7 @@ impl WorldState {
         self.swarms = e.swarms;
         self.next_entity_id = e.next_entity_id;
         self.blink_layers = e.blink_layers;
+        self.finisher_dilation = e.finisher_dilation;
         self.movables = e.movables;
     }
 }

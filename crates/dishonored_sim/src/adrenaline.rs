@@ -12,9 +12,10 @@
 //!   `Attribute_AdrenalineOnRatKill` (0x00AACE60);
 //! - tick (0x00AB2120): after `Attribute_AdrenalineCooldown` (10 s) without a gain, the value
 //!   burns at `Attribute_AdrenalineBurnRate` (1/s);
-//! - with a full gauge the next melee attack on an NPC is a finisher (0x00C10EF0: the attack
-//!   context qualifies as a kill move): the NPC dies (`DisDamageType_ImpactHit_Adrenaline`) and the
-//!   gauge is spent. Players are not finished (the context needs an NPC target, U-113).
+//! - with a full gauge the attack press asks the sword's Bash slot first: the fatality context
+//!   as an adrenaline finisher (`crate::fatality`, 0x00C10EF0) kills the NPC in reach with a
+//!   finisher, spends the gauge and adds `m_fAdrenalineMultOnHit` x its health. Players are not
+//!   finished (the context needs an NPC target, U-113).
 
 use crate::events::SimEvent;
 use crate::state::{PlayerState, power};

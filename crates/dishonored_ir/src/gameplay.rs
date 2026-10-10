@@ -581,6 +581,158 @@ impl Default for ThrowConfig {
     }
 }
 
+/// A bend-time window of a finisher's master clip (`DisNotify_BendTime_Ranged`; with `adrenaline`,
+/// the `DisNotify_AdrenalineBendTime_Ranged` only an exclusive, not real-time finisher honours):
+/// from `start` for `duration` seconds of the clip the world runs at `world` and the player at
+/// `player`, blended in and out over the transition times (the dilation helper 0x009FA0D0,
+/// channel 4).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct BendWindow {
+    pub start: f32,
+    pub duration: f32,
+    pub world: f32,
+    pub player: f32,
+    pub blend_in: f32,
+    pub blend_out: f32,
+    pub adrenaline: bool,
+}
+
+/// One animation state of a finisher action (`DisItemAction.m_AnimStates`): the player state, its
+/// master sequence (the pawn tweak's state, item prefix applied), the length of the action (the
+/// master's `DishonoredNotify_AnimStateExit`, else its length), the victim's slave chain
+/// (`m_SlaveAction.m_Animation`, an `eDisNPCAnimations` index; 0 for an unsynced action) whose
+/// group is the state's index in the action, and the master's bend-time windows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FatalityClip {
+    pub state: String,
+    pub master: String,
+    pub exit: f32,
+    pub slave: u8,
+    /// The state plays on the upper body (`DisTweaks_PlayerPawn_UpperBodyAnimation`).
+    #[serde(default)]
+    pub upper_body: bool,
+    /// An unsynced swing's hit: when its `DishonoredNotify_AttackZone`'s damage zone opens (the
+    /// zone's end less `m_fDamageZoneMaxTime`, 0x00A8E760).
+    #[serde(default)]
+    pub hit: Option<f32>,
+    pub bends: Vec<BendWindow>,
+}
+
+/// The actions of a fatality move set, by [`FatalityConfig::moves`] index.
+pub mod fatality_move {
+    pub const FRONT: usize = 0;
+    pub const LEFT: usize = 1;
+    pub const RIGHT: usize = 2;
+    pub const BACK: usize = 3;
+    pub const FRONT_FAST: usize = 4;
+    pub const LEFT_FAST: usize = 5;
+    pub const RIGHT_FAST: usize = 6;
+    pub const BACK_FAST: usize = 7;
+    pub const HEAD_CHOP: usize = 8;
+    pub const KNOCKDOWN: usize = 9;
+    pub const KNOCKDOWN_FAST: usize = 10;
+    /// `m_Generic`: an unsynced kill swing.
+    pub const GENERIC: usize = 11;
+    pub const COUNT: usize = 12;
+    /// The `DisFatalityMoveSet` fields, in this order.
+    pub const FIELDS: [&str; COUNT] = ["m_Front", "m_Left", "m_Right", "m_Back", "m_Front_Fast", "m_Left_Fast", "m_Right_Fast", "m_Back_Fast", "m_HeadChop", "m_Knockdown", "m_Knockdown_Fast", "m_Generic"];
+}
+
+/// The player sword's `DisTweaks_Fatality` (the finisher kills; `dishonored_sim::fatality`): move
+/// set 0 (humans) and the `DisTweaks_Finisher` slow-finisher pacing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FatalityConfig {
+    pub behead_chance: f32,
+    pub slomo_chance: f32,
+    pub slomo_min_interval: f32,
+    pub slomo_realtime_chance: f32,
+    pub generic_chance: f32,
+    /// `m_NumFinishersBeforeSlow_Min/Max`, `m_fTimeBeforeSlow_Min/Max`.
+    pub finishers_before_slow: [i32; 2],
+    pub time_before_slow: [f32; 2],
+    /// `m_fAdrenalineMultOnHit`: adrenaline gained x the victim's health.
+    pub adrenaline_mult: f32,
+    /// `m_fMaxContextHeightDifference`: the target's height difference limit.
+    pub max_height_difference: f32,
+    /// Per [`fatality_move`] action, its states (empty: the action has none).
+    pub moves: Vec<Vec<FatalityClip>>,
+}
+
+// Serde default for configs cached before the field was loaded: the loaded chances and pacing,
+// no actions (no fatality plays until the config is decoded again).
+impl Default for FatalityConfig {
+    fn default() -> Self {
+        Self {
+            behead_chance: 0.25,
+            slomo_chance: 0.75,
+            slomo_min_interval: 30.0,
+            slomo_realtime_chance: 0.9,
+            generic_chance: 0.0,
+            finishers_before_slow: [4, 8],
+            time_before_slow: [90.0, 120.0],
+            adrenaline_mult: 1.0,
+            max_height_difference: 50.0,
+            moves: vec![Vec::new(); fatality_move::COUNT],
+        }
+    }
+}
+
+/// The root motion of a player master sequence (its state's `m_RootMotionMode` `RMM_Translate`
+/// and `m_RootMotionRotationMode` `RMRM_RotateActor`: the root bone's travel moves the pawn and its
+/// turn turns it): the root bone's offset from its first frame in the pawn's frame (forward,
+/// right) and its yaw from the first frame (degrees, positive to the right), `rate` samples per
+/// second.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RootMotion {
+    pub rate: f32,
+    pub keys: Vec<[f32; 2]>,
+    #[serde(default)]
+    pub yaw: Vec<f32>,
+}
+
+impl RootMotion {
+    /// Sample index and blend of clip time `t` over `n` samples (held past the ends).
+    fn span(&self, t: f32, n: usize) -> Option<(usize, usize, f32)> {
+        let last = n.checked_sub(1)?;
+        let x = (t * self.rate).clamp(0.0, last as f32);
+        let i = (x.floor() as usize).min(last);
+        Some((i, (i + 1).min(last), x - i as f32))
+    }
+
+    /// The offset at clip time `t` (linear between samples).
+    pub fn at(&self, t: f32) -> [f32; 2] {
+        let Some((i, j, f)) = self.span(t, self.keys.len()) else { return [0.0; 2] };
+        let (a, b) = (self.keys[i], self.keys[j]);
+        [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]
+    }
+
+    /// The yaw at clip time `t` (linear between samples).
+    pub fn yaw_at(&self, t: f32) -> f32 {
+        let Some((i, j, f)) = self.span(t, self.yaw.len()) else { return 0.0 };
+        self.yaw[i] + (self.yaw[j] - self.yaw[i]) * f
+    }
+}
+
+/// The masters of the player's paired moves, by `SwordState::assassination_move`:
+/// `Ply_Sword_Assassination_as`'s front, left, right and back assassinations
+/// (`DisTweaks_Assassinate` `m_Front/m_Left/m_Right/m_Back` -> `Assassinate_<dir>`), the drop set's
+/// (`Assassinate_Drop_<dir>`), then the synced short fatalities of `Ply_Sword_Fatality_as`
+/// (`ShortFatality_Forehand{A,B}` / `Backhand{A,B}`).
+pub const ASSASSINATION_MASTERS: [&str; 12] = [
+    "Sword_Ready_Assassination_Front_Master",
+    "Sword_Ready_Assassination_Left_Master",
+    "Sword_Ready_Assassination_Right_Master",
+    "Sword_Ready_Assassination_Back_Master",
+    "Sword_Ready_Assassination_DropFront_Master",
+    "Sword_Ready_Assassination_DropLeft_Master",
+    "Sword_Ready_Assassination_DropRight_Master",
+    "Sword_Ready_Assassination_DropBack_Master",
+    "Sword_Ready_Fatality_SmallFront_Right_A_Master",
+    "Sword_Ready_Fatality_SmallFront_Right_B_Master",
+    "Sword_Ready_Fatality_SmallFront_Left_A_Master",
+    "Sword_Ready_Fatality_SmallFront_Left_B_Master",
+];
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct PowerConfig {
     pub mana_cost: f32,
@@ -616,6 +768,12 @@ pub struct GameplayConfig {
     /// The NPC throw (`StateNPCMasterThrown`, `Twk_Component_HitReactionThrow_NPC`).
     #[serde(default)]
     pub throw: ThrowConfig,
+    /// The player sword's finisher kills (`DisTweaks_Fatality`).
+    #[serde(default)]
+    pub fatality: FatalityConfig,
+    /// The paired moves' masters' root motion, by sequence name.
+    #[serde(default)]
+    pub root_motion: BTreeMap<String, RootMotion>,
     /// field -> evidence (tweak object path / INI key / class default / UE3 stock).
     pub provenance: BTreeMap<String, String>,
 }

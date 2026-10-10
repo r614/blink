@@ -303,7 +303,12 @@ pub enum NpcAnim {
     Assassination = 76,
     AssassinationDrop = 77,
     AssassinationFast = 78,
+    /// The finishers' slaves (`DisItemContext_Fatality` states' `m_eSlaveAnimation`).
     Fatality = 88,
+    FatalityFast = 89,
+    FatalityKnockDown = 90,
+    FatalityHeadChop = 91,
+    FatalityHeadChopFast = 92,
     ShortFatalityForehand = 93,
     ShortFatalityBackhand = 94,
     Choke = 95,
@@ -323,6 +328,20 @@ pub enum NpcAnim {
     /// The music box held: `DisWepMusicBox` slots 81 / 96 (0x00C291F0, 0x00C29220) set the
     /// pawn's `m_WalkUpperBodyDesire` to it.
     MusicBoxIdle = 121,
+}
+
+impl NpcAnim {
+    /// A finisher state's slave (`eDisNPCAnimations` 88..92).
+    pub fn fatality_slave(index: u8) -> Option<NpcAnim> {
+        Some(match index {
+            88 => NpcAnim::Fatality,
+            89 => NpcAnim::FatalityFast,
+            90 => NpcAnim::FatalityKnockDown,
+            91 => NpcAnim::FatalityHeadChop,
+            92 => NpcAnim::FatalityHeadChopFast,
+            _ => return None,
+        })
+    }
 }
 
 /// Names of `eDisNPCAnimations` (DishonoredGame `DisAnimDefinitions`), for tools and docs.
