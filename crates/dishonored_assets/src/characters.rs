@@ -421,6 +421,31 @@ pub fn camera_effect_notifies(content: &Content, pkg_name: &str, set_path: &str)
     Ok(out)
 }
 
+/// The `DisNotify_Trails` windows of an AnimSet's sequences: (sequence, time, duration).
+pub fn trail_notifies(content: &Content, pkg_name: &str, set_path: &str) -> Result<Vec<(String, f32, f32)>> {
+    use ue3_package::properties::{Value, find};
+    let pkg = content.package(pkg_name)?;
+    let set = (0..pkg.exports.len()).find(|&i| pkg.obj_path(ObjRef::Export(i)).eq_ignore_ascii_case(set_path)).with_context(|| format!("{set_path} not in {pkg_name}"))?;
+    let sh = pkg.read_object(set)?;
+    let mut out = Vec::new();
+    for s in find(&sh.properties, "Sequences").context("Sequences")?.array_objects()? {
+        let ObjRef::Export(e) = ObjRef::from_index(s) else { continue };
+        let h = pkg.read_object(e)?;
+        let Some(Value::Name(sequence)) = find(&h.properties, "SequenceName").map(|p| &p.value) else { continue };
+        let Some(n) = find(&h.properties, "Notifies") else { continue };
+        for ev in n.array_structs(&pkg).unwrap_or_default() {
+            let Some(ObjRef::Export(ni)) = find(&ev, "Notify").and_then(|p| p.as_object()).map(ObjRef::from_index) else { continue };
+            if pkg.export_class(ni) != "DisNotify_Trails" {
+                continue;
+            }
+            let time = find(&ev, "Time").and_then(|p| p.as_float()).unwrap_or(0.0);
+            let duration = find(&ev, "Duration").and_then(|p| p.as_float()).unwrap_or(0.0);
+            out.push((sequence.clone(), time, duration));
+        }
+    }
+    Ok(out)
+}
+
 /// A camera lens effect class (`EmitterCameraLensEffectBase` subclass) as played by a notify:
 /// `Default__<class>.PS_CameraEffect` (DishonoredGame), `DistFromCamera` / `BaseFOV` / `LifeSpan`
 /// from the class or, when it does not set them, `Default__EmitterCameraLensEffectBase` (Engine:

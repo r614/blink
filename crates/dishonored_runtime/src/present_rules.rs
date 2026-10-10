@@ -83,6 +83,23 @@ pub struct Particle {
     /// A decal particle (`ParticleModuleTypeDataDecal`): the normal (Dishonored world) of the
     /// surface it lies on.
     pub normal: Option<Vec3>,
+    /// An AnimTrail knot's second edge (`pos` is the first).
+    pub edge2: Vec3,
+}
+
+/// AnimTrail source data (`ParticleModuleTypeDataAnimTrail`): the two edges the game sets for an
+/// update and their tangents (the motion over the last record, 0x00C02090 -> 0x008AB910),
+/// Dishonored world.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TrailSource {
+    pub edges: [Vec3; 2],
+    pub tangents: [Vec3; 2],
+}
+
+/// The cubic Hermite point between `p0` (tangent `m0`) and `p1` (tangent `m1`) at `f`.
+pub fn hermite(p0: Vec3, m0: Vec3, p1: Vec3, m1: Vec3, f: f32) -> Vec3 {
+    let (f2, f3) = (f * f, f * f * f);
+    p0 * (2.0 * f3 - 3.0 * f2 + 1.0) + m0 * (f3 - 2.0 * f2 + f) + p1 * (3.0 * f2 - 2.0 * f3) + m1 * (f3 - f2)
 }
 
 /// An event an emitter reports (`ParticleModuleEventGenerator`): its kind
@@ -132,6 +149,10 @@ pub struct EmitterSim {
     pub loc_seq: usize,
     /// The instance was deactivated (`bKillOnDeactivate` emitters lose their particles).
     pub deactivated: bool,
+    /// AnimTrail: the source data set for this update, and the last update's (the knots of this
+    /// update lie on the spline between them; a frame without data breaks the trail).
+    pub trail_src: Option<TrailSource>,
+    pub trail_last: Option<TrailSource>,
 }
 
 impl Default for EmitterSim {
@@ -154,6 +175,8 @@ impl Default for EmitterSim {
             loc_src: Vec::new(),
             loc_seq: 0,
             deactivated: false,
+            trail_src: None,
+            trail_last: None,
         }
     }
 }
@@ -370,6 +393,7 @@ pub fn spawn_particle(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4
         mrot: d3(&em.mesh_rotation, et, r[2], [0.0; 3]) * std::f32::consts::TAU,
         mrot_rate: d3(&em.mesh_rotation_rate, et, r[3], [0.0; 3]) * std::f32::consts::TAU,
         normal: None,
+        edge2: pos,
     });
 }
 
@@ -629,6 +653,38 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
     sim.spawn_acc += rate.max(0.0) * dt;
     let saved = sim.time;
     sim.time = t;
+    if em.trail.as_ref().is_some_and(|t| t.anim) {
+        // AnimTrail: the knots spawned this update (the spawn rate) lie on the spline from the last
+        // source data to this update's, the last one on it; the first update spawns one there. No
+        // data, no knots.
+        let n = sim.spawn_acc.floor().max(0.0) as usize;
+        sim.spawn_acc -= n as f32;
+        match sim.trail_src.take() {
+            Some(src) => {
+                let last = sim.trail_last;
+                let count = if last.is_some() { n } else { 1 };
+                for k in 1..=count {
+                    let f = k as f32 / count as f32;
+                    let edge = |i: usize| match last {
+                        Some(l) => hermite(l.edges[i], l.tangents[i], src.edges[i], src.tangents[i], f),
+                        None => src.edges[i],
+                    };
+                    spawn_particle(em, sim, xf, rnd);
+                    if let Some(p) = sim.particles.last_mut() {
+                        p.pos = edge(0);
+                        p.edge2 = edge(1);
+                        p.vel = Vec3::ZERO;
+                        p.base_vel = Vec3::ZERO;
+                        p.accel = Vec3::ZERO;
+                    }
+                }
+                sim.trail_last = Some(src);
+            }
+            None => sim.trail_last = None,
+        }
+        sim.time = saved;
+        return;
+    }
     while sim.spawn_acc >= 1.0 {
         sim.spawn_acc -= 1.0;
         spawn_particle(em, sim, xf, rnd);

@@ -446,6 +446,11 @@ pub struct ViewRig {
     pnotifies: HashMap<String, Vec<(f32, String, String, bool)>>,
     /// Camera lens effect notifies per sequence: (time, effect).
     cnotifies: HashMap<String, Vec<(f32, dishonored_ir::LensEffectDef)>>,
+    /// `DisNotify_Trails` windows per sequence: (time, duration).
+    tnotifies: HashMap<String, Vec<(f32, f32)>>,
+    /// The sword's swing trail (`melee_trail` of `Twk_Inv_SwordCorvo`): its template and the
+    /// extent's corner sockets on the sword mesh (bone, location).
+    sword_trail: Option<(String, [(usize, glam::Vec3); 2])>,
     /// The rig's sockets: name -> (bone, transform relative to it).
     sockets: HashMap<String, (usize, glam::Mat4)>,
     /// Sockets and bones the hand effects are placed on (`effects::HandEffects`).
@@ -807,12 +812,31 @@ pub fn load_view_rig(
             Err(e) => warn!("{path} camera notifies: {e:#}"),
         }
     }
+    // The sword swings' trail windows and the sword's trail (`Twk_Inv_SwordCorvo`).
+    let mut tnotifies: HashMap<String, Vec<(f32, f32)>> = HashMap::new();
+    for path in &set_paths {
+        match dishonored_assets::characters::trail_notifies(&content, "Startup", path) {
+            Ok(list) => {
+                for (seq, t, d) in list {
+                    tnotifies.entry(seq).or_default().push((t, d));
+                }
+            }
+            Err(e) => warn!("{path} trail notifies: {e:#}"),
+        }
+    }
+    let sword_trail = weapons.iter().find(|w| w.held == Held::Sword).and_then(|w| {
+        let db = dishonored_assets::tweaks::TweakDb::load(&content).ok()?;
+        let t = dishonored_assets::melee_trail::melee_trail_in(&db, "Twk_Inv_PlayerSpecific.Twk_Inv_SwordCorvo").map_err(|e| warn!("sword trail: {e:#}")).ok()??;
+        let sockets = dishonored_assets::characters::mesh_sockets(&content, "Startup", "Wpn_PlySwords.Wpn_PlySword01").unwrap_or_default();
+        let corner = |name: &str| sockets.iter().find(|s| s.name.eq_ignore_ascii_case(name)).and_then(|s| w.bones.iter().position(|b| b.name.eq_ignore_ascii_case(&s.bone)).map(|bi| (bi, s.location)));
+        Some((t.template, [corner(&t.sockets[0])?, corner(&t.sockets[1])?]))
+    });
     let arms_gpu = upload(&arms, &mut meshes, &mut images, &mut mats, &mut binds, &feat);
     let glow = arm_glow_materials(&content, &arms_gpu, &mut images, &mut mats);
     commands.insert_resource(ArmGlowMats(glow));
     let bind_pose = bones.iter().map(|b| (b.rotation, b.translation)).collect();
     let look_bones = [find("Collarbone_R_Jnt"), find("Collarbone_L_Jnt"), find("spine_3_jnt")];
-    commands.insert_resource(ViewRig { arms: arms_gpu, parents: parents(&bones), bones, bind_pose, m2p, weapons, bolts, lib, pnotifies, cnotifies, sockets: rig_sockets, effect_points, upper_body, left_arm, cam_bone, look_bones });
+    commands.insert_resource(ViewRig { arms: arms_gpu, parents: parents(&bones), bones, bind_pose, m2p, weapons, bolts, lib, pnotifies, cnotifies, tnotifies, sword_trail, sockets: rig_sockets, effect_points, upper_body, left_arm, cam_bone, look_bones });
 }
 
 /// The rig, parented to the game camera and drawn in the main view (see `VIEW_SCALE`).
@@ -1505,7 +1529,7 @@ pub fn animate_view_rig(
     mut bmeshes: Query<(&BoltMesh, &mut Visibility), (Without<ViewRoot>, Without<WeaponMesh>)>,
     mut anim_sounds: Option<ResMut<crate::audio::AnimSounds>>,
     cutscenes: Option<Res<crate::cutscene::Cutscenes>>,
-    (settings, mut hands, mut lens): (Option<Res<crate::settings::GameSettings>>, ResMut<crate::effects::HandEffects>, Option<ResMut<crate::lens_effects::LensEffects>>),
+    (settings, mut hands, mut lens, mut trails): (Option<Res<crate::settings::GameSettings>>, ResMut<crate::effects::HandEffects>, Option<ResMut<crate::lens_effects::LensEffects>>, Option<ResMut<crate::weapon_trails::WeaponTrails>>),
 ) {
     let Some(rig) = rig else { return };
     let Ok((mut root_t, mut root_vis)) = roots.single_mut() else { return };
@@ -1576,10 +1600,17 @@ pub fn animate_view_rig(
 
     // Advance; the left hand's locomotion follows the full body's in a shared sync group.
     let mut windows: Vec<(String, f32, f32, bool)> = Vec::new();
-    for l in [&mut a.fb, &mut a.ub, &mut a.la] {
+    // The sword's layer (`Held::Sword` follows the upper body above half weight, else the full
+    // body) in a `DisNotify_Trails` window: the blade trails.
+    let mut trailing = false;
+    let sword_layer = if a.ub.weight > 0.5 { 1 } else { 0 };
+    for (li, l) in [&mut a.fb, &mut a.ub, &mut a.la].into_iter().enumerate() {
         let (from, to) = advance_layer(l, dt, anim_sounds.as_deref_mut(), me.id);
         if l.notifies && l.weight > 0.0 {
             windows.push((l.clip.clone(), from, to, l.looped));
+        }
+        if li == sword_layer && rig.tnotifies.get(&l.clip).is_some_and(|w| w.iter().any(|(t0, d)| to >= *t0 && to < t0 + d)) {
+            trailing = true;
         }
     }
     // Particle notifies crossed this frame (`AnimNotify_PlayParticleEffect`), and the camera
@@ -1770,6 +1801,20 @@ pub fn animate_view_rig(
             },
         };
         hands.sockets.insert(name.clone(), crate::cutscene::from_bevy(root_world * to_bevy(local)));
+    }
+    // The sword's trail on its blade corners (in the rig's scaled frame, like the hand effects).
+    if let (true, Some((template, corners)), Some(tr)) = (trailing, rig.sword_trail.as_ref(), trails.as_mut()) {
+        if let Some((wi, w)) = rig.weapons.iter().enumerate().find(|(_, w)| w.held == Held::Sword) {
+            let carrying = me.carrying.is_some() || a.fb.key == "carry_drop";
+            if !carrying {
+                let corner = |k: usize| {
+                    let wb = wglobals.get(wi).and_then(|g| g.get(corners[k].0)).copied().unwrap_or(w.bind[corners[k].0]);
+                    let local = rig.m2p * globals[w.socket] * w.socket_rel * w.m2p * wb * glam::Mat4::from_translation(corners[k].1);
+                    crate::cutscene::from_bevy(root_world * to_bevy(local)).w_axis.truncate()
+                };
+                tr.sources.push(((me.id, crate::weapon_trails::FIRST_PERSON), template.clone(), corner(0), corner(1)));
+            }
+        }
     }
     for (j, mut t) in &mut joints {
         *t = Transform::from_matrix(to_bevy(rig.m2p * globals[j.0]));

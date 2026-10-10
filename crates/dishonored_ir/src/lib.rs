@@ -355,6 +355,10 @@ pub struct ParticleShading {
     pub erode: bool,
     #[serde(default)]
     pub erode_scale: f32,
+    /// With `erode`: the look-up smoke erosion instead (`Look_Up_Smoke_translu_PMAT`), alpha =
+    /// `smoothstep(saturate((H - (1 - vertex alpha)) / vertex alpha)) x vertex alpha x opacity`.
+    #[serde(default)]
+    pub erode_smooth: bool,
     /// The shader ignores the texture's opacity: only the vertex alpha (and `opacity`) count
     /// (`Default_Simple_Translucent_PMAT` without `MA_Use_Masked_Alpha`).
     pub vertex_alpha_only: bool,

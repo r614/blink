@@ -53,6 +53,8 @@ pub struct Recipe {
     pub opacity_scale: Option<(&'static str, f32)>,
     /// The vertex alpha erodes the opacity map (height-map blood, water splash).
     pub erode: bool,
+    /// With `erode`: the look-up smoke's smoothstep erosion (`ParticleShading::erode_smooth`).
+    pub erode_smooth: bool,
 }
 
 const WHITE: [f32; 4] = [1.0; 4];
@@ -84,7 +86,7 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             } else {
                 Opacity::Texture { param: "O_Opacity", channel: mask("O_Opacity_Channel").unwrap_or(0) }
             };
-            Recipe { colour, opacity, tint: Some(("D_DiffuseColorTweak", WHITE, AlphaUse::Opacity)), brightness: None, opacity_scale: None, erode: false }
+            Recipe { colour, opacity, tint: Some(("D_DiffuseColorTweak", WHITE, AlphaUse::Opacity)), brightness: None, opacity_scale: None, erode: false, erode_smooth: false }
         }
         // 37612..37620: rgb = D_Diffuse x vertex (D_DisableDiffuse: D_Diffuse_color.rgb x .a),
         // alpha = vertex alpha, x MA_MaskTexture[MA_Mask_Channel] with MA_Use_Masked_Alpha.
@@ -97,6 +99,7 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
                 brightness: None,
                 opacity_scale: None,
                 erode: false,
+                erode_smooth: false,
             }
         }
         // 6086..6105: rgb = D_Diffuse x D_Diffuse_Brightness (B_Enable_Blood: x DiffuseColor.rgb
@@ -112,6 +115,7 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
                 brightness: (!blood).then_some(("D_Diffuse_Brightness", 1.0)),
                 opacity_scale: Some(("Mask_Multiply", 20.0)),
                 erode: true,
+                erode_smooth: false,
             }
         }
         // 5807 / 5820 / 5872 (BLEND_Masked): rgb = lerp of two sub-images of D_diffuse_texture x
@@ -124,6 +128,7 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             brightness: Some(("D_Diffuse_Brightness", 1.0)),
             opacity_scale: Some(("Mask_Multiply", 20.0)),
             erode: true,
+            erode_smooth: false,
         },
         // 0x60a95c8: rgb ~ D_DiffuseAlpha x vertex (plus a lit term), alpha = O_Opacity[channel] x
         // vertex alpha.
@@ -134,6 +139,7 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             brightness: None,
             opacity_scale: None,
             erode: false,
+            erode_smooth: false,
         },
         // 0x69d877a / 0x6a3f7ee: rgb = R_Reflexion2d (normal-distorted) x D_DiffuseColorTweak.rgb x
         // .a x vertex red, alpha = Alpha[Alpha_Mask] x vertex alpha (additive: rgb x alpha).
@@ -144,6 +150,7 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             brightness: None,
             opacity_scale: None,
             erode: false,
+            erode_smooth: false,
         },
         // 0x62006c7 (additive): rgb = Tex#0 x Tex#0 (two droplet scales) x Brightness, x
         // saturate((Shape.r - vertex alpha) x Max_Opacity).
@@ -154,6 +161,7 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             brightness: Some(("Brightness", 1.0)),
             opacity_scale: Some(("Max_Opacity", 1.0)),
             erode: true,
+            erode_smooth: false,
         },
         // 0x6201d3c: rgb = F_Fire_Color_Texture x F_Fire_Color.rgb x .a (eroded by D_Diffuse.r
         // with the vertex red) + smoke light, alpha = D_Diffuse.b x vertex alpha.
@@ -164,6 +172,7 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             brightness: None,
             opacity_scale: None,
             erode: false,
+            erode_smooth: false,
         },
         // 0x60bcd89: rgb = gradient Tex#1 looked up by Tex#0.g (power vertex green) x
         // lookup_color, alpha = smoothstep of Diffuse.r against the vertex red x vertex alpha.
@@ -175,6 +184,7 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             brightness: None,
             opacity_scale: None,
             erode: false,
+            erode_smooth: false,
         },
         // 0x6a19303: rgb = Color.rgb x Color.a (lerp to ColorAlert by Alert), alpha =
         // A_Alpha.r x (1 + inferno) x Opacity x vertex alpha.
@@ -185,6 +195,20 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             brightness: None,
             opacity_scale: Some(("Opacity", 0.25)),
             erode: false,
+            erode_smooth: false,
+        },
+        // 36275 / 36277 (translucent, alpha_channel R / B), 37106 (two-sided): rgb =
+        // diffuse_color2.rgb (no texture, no vertex colour), alpha = smoothstep(saturate((A_Alpha[ch]
+        // - (1 - vertex alpha)) / vertex alpha)) x diffuse_color2.a x vertex alpha (the one-sided
+        // base also fades by the scene depth over (1 - Depth_Bias) x 64: `effects::soft_scale`).
+        "Look_Up_Smoke_translu_PMAT" | "Look_Up_Smoke_translu_2sided_PMAT" => Recipe {
+            colour: Colour::White,
+            opacity: Opacity::Texture { param: "A_Alpha", channel: mask("alpha_channel").unwrap_or(0) },
+            tint: Some(("diffuse_color2", WHITE, AlphaUse::Opacity)),
+            brightness: None,
+            opacity_scale: None,
+            erode: true,
+            erode_smooth: true,
         },
         // 0x60faee0 (additive): rgb = G_GlowColor.rgb x vertex x (max(1 - 2r, 0)^G_GlowPower +
         // 0.1 r^2) x G_GlowColor.a x vertex alpha; no texture.
@@ -195,6 +219,7 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             brightness: None,
             opacity_scale: None,
             erode: false,
+            erode_smooth: false,
         },
         _ => return None,
     };
@@ -308,6 +333,9 @@ pub const GAMEPLAY_PARTICLES: &[&str] = &[
     "Vfx_Weapon.Effects.Trails.StdBolt_Trail",
     "Vfx_Weapon.Effects.FlareBolts.Flare_Bolt_Trail",
     "Vfx_Weapon.Effects.Ps_CrossBowMuzzle",
+    // Melee weapon trails (the sword items' melee extents' `m_ParticleSystemComponent`, an
+    // AnimTrail fed the extent's corners during `DisNotify_Trails`).
+    "Vfx_Weapon.Effects.Trails.Sword_Trail",
     // The left hand's Mark of the Outsider: `AnimNotify_PlayParticleEffect` on the `Tattoo`
     // socket of `Ply_Powers_as` casts, switch and out of mana.
     "Vfx_GamePlay.Powers.Ps_Tattoo_Glow_01",

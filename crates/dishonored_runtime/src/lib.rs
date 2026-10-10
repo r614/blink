@@ -35,6 +35,8 @@ pub mod game_dir;
 #[doc(hidden)]
 pub mod characters;
 pub mod dropped_weapons;
+pub mod ash_bodies;
+pub mod weapon_trails;
 #[doc(hidden)]
 pub mod npc_anim;
 #[doc(hidden)]
@@ -543,6 +545,9 @@ pub fn main() {
             // Weapons dead pawns let go of (`DisNotify_DropItem`), after the poses that drop them.
             .init_resource::<dropped_weapons::DroppedWeapons>()
             .add_systems(Update, dropped_weapons::update.after(characters::animate_characters))
+            // Bodies burnt to ash: their sequence after this frame's poses and visibility.
+            .init_resource::<ash_bodies::AshBodies>()
+            .add_systems(Update, ash_bodies::update.after(characters::animate_characters).after(players::sync_players))
             // Choked / carried bodies in their master's frame (the first-person rig's for the local player).
             .add_systems(Update, viewmodel::arm_glow_apply.after(power_pp::drive))
             .add_systems(Update, viewmodel::place_held_bodies.after(players::sync_players).after(viewmodel::animate_view_rig).after(cutscene::drive).before(characters::animate_characters))

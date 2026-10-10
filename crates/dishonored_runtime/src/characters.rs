@@ -248,6 +248,7 @@ pub fn spawn_character(commands: &mut Commands, root: Entity, lib: &CharacterLib
                 Transform::default(),
                 part.bounds,
                 bevy::camera::visibility::NoAutoAabb,
+                crate::ash_bodies::BodyPartMesh,
                 ChildOf(root),
             ));
         }
@@ -304,6 +305,9 @@ pub struct TpWeaponGpu {
     /// (bone, location in the bone).
     pub muzzle: Option<(usize, glam::Vec3)>,
     pub pickup: Option<DropPickupGpu>,
+    /// The swing trail (`melee_trail`): its template and the extent's two corner sockets (bone,
+    /// location).
+    pub trail: Option<(String, [(usize, glam::Vec3); 2])>,
 }
 
 /// A `SkeletalMeshSocket` of a mesh: (bone name, relative location).
@@ -352,7 +356,9 @@ pub fn load_weapons(
                 let inv = part.mesh_to_pawn.inverse();
                 let to_socket = if *blade { glam::Mat4::from_rotation_z(std::f32::consts::PI) * inv } else { inv };
                 let sock = if *blade { "RightHandWpn" } else { "LeftHandWpn" };
-                let muzzle = content.package("Startup").ok().and_then(|pkg| mesh_socket(&pkg, path, "Spitfire")).and_then(|(bone, loc)| part.bones.iter().position(|b| b.name.eq_ignore_ascii_case(&bone)).map(|bi| (bi, loc)));
+                let bone_socket = |name: &str| content.package("Startup").ok().and_then(|pkg| mesh_socket(&pkg, path, name)).and_then(|(bone, loc)| part.bones.iter().position(|b| b.name.eq_ignore_ascii_case(&bone)).map(|bi| (bi, loc)));
+                let muzzle = bone_socket("Spitfire");
+                let trail = db.as_ref().and_then(|db| dishonored_assets::melee_trail::melee_trail_in(db, item).map_err(|e| warn!("weapon {item} trail: {e:#}")).ok().flatten()).and_then(|t| Some((t.template, [bone_socket(&t.sockets[0])?, bone_socket(&t.sockets[1])?])));
                 // What it drops (`m_pPickupToDrop`).
                 let drop = db.as_ref().and_then(|db| dishonored_assets::pickups::dropped_pickup_in(&content, db, &tweak_pkgs, item).map_err(|e| warn!("weapon {item} pickup: {e:#}")).ok());
                 let pickup = drop.and_then(|d| match dishonored_assets::characters::load_static_model(&content, &d.mesh.0, &d.mesh.1, 512) {
@@ -365,7 +371,7 @@ pub fn load_weapons(
                         None
                     }
                 });
-                lib.weapons.push(TpWeaponGpu { kind: *kind, socket_name: socket, to_socket, bind: bind_globals(&part.bones), m2p: part.mesh_to_pawn, socket: sock, muzzle, pickup, gpu: upload(&w, &mut meshes, &mut images, &mut mats, &mut binds, &feat) });
+                lib.weapons.push(TpWeaponGpu { kind: *kind, socket_name: socket, to_socket, bind: bind_globals(&part.bones), m2p: part.mesh_to_pawn, socket: sock, muzzle, pickup, trail, gpu: upload(&w, &mut meshes, &mut images, &mut mats, &mut binds, &feat) });
             }
             Err(e) => warn!("weapon {path}: {e:#}"),
         }
@@ -573,7 +579,7 @@ pub fn animate_characters(
     mut view: ResMut<crate::session::SessionView>,
     // (Grouped: a system takes at most 16 parameters.)
     (time, mut face_packages, anim_debug, body_frames): (Res<Time>, Local<Option<(String, Vec<String>)>>, Local<AnimDebug>, Option<Res<crate::viewmodel::BodyFrames>>),
-    roots: Query<(Entity, &CharacterRoot, &crate::players::PlayerBody, &Children, &GlobalTransform)>,
+    roots: Query<(Entity, &CharacterRoot, &crate::players::PlayerBody, &Children, &GlobalTransform, Option<&InheritedVisibility>)>,
     mut joints: Query<(&Joint, &mut Transform), (Without<TpWeaponJoint>, Without<AccessoryJoint>)>,
     mut wjoints: Query<(&TpWeaponJoint, &mut Transform), (Without<Joint>, Without<AccessoryJoint>)>,
     mut ajoints: Query<(&AccessoryJoint, &mut Transform), (Without<Joint>, Without<TpWeaponJoint>)>,
@@ -581,9 +587,17 @@ pub fn animate_characters(
     mut anim_sounds: Option<ResMut<crate::audio::AnimSounds>>,
     session: Res<crate::session::Session>,
     mut sockets: Option<ResMut<crate::effects::EffectSockets>>,
-    (mut pawn_points, mut pawn_fx, mut drops): (Option<ResMut<crate::cutscene::PawnPoints>>, Option<ResMut<crate::effects::PawnEffects>>, Option<ResMut<crate::dropped_weapons::DroppedWeapons>>),
+    (mut pawn_points, mut pawn_fx, mut drops, mut trails, mut ash): (Option<ResMut<crate::cutscene::PawnPoints>>, Option<ResMut<crate::effects::PawnEffects>>, Option<ResMut<crate::dropped_weapons::DroppedWeapons>>, Option<ResMut<crate::weapon_trails::WeaponTrails>>, Option<ResMut<crate::ash_bodies::AshBodies>>),
 ) {
     let events = std::mem::take(&mut view.anim_events);
+    // Bodies the sim removed, for their burn (`ash_bodies`).
+    if let Some(ash) = ash.as_mut() {
+        for e in &events {
+            if let dishonored_sim::events::SimEvent::BodyRemoved { body, ash: burnt } = e {
+                ash.removed.insert(*body, (*burnt, time.elapsed_secs_f64()));
+            }
+        }
+    }
     let (Some(lib), Some(mut bank)) = (lib, bank) else { return };
     let contracts = view.matchv.mode.eq_ignore_ascii_case("contracts");
     let all: Vec<&PlayerState> = view.others.iter().chain(view.me.iter()).collect();
@@ -593,7 +607,7 @@ pub fn animate_characters(
     let faces = face_frames(&mut bank, &lib, &view, &root_models, time.elapsed_secs_f64(), &mut face_packages);
     let dt = time.delta_secs().min(0.1);
     let mv = &session.content.sim.gameplay.movement;
-    for (entity, root, body, children, root_gt) in &roots {
+    for (entity, root, body, children, root_gt, root_vis) in &roots {
         let Some(p) = all.iter().find(|p| p.id == body.0).copied() else { continue };
         let model = &lib.models[root.archetype];
         let (right_w, left_w) = shown_weapons(p, contracts);
@@ -641,12 +655,15 @@ pub fn animate_characters(
         // body) or the dead pawn plays nothing more: what drops its weapons.
         let mut drop_notify: Option<crate::npc_anim::DropNotify> = None;
         let mut limp = false;
+        // A `DisNotify_Trails` window of a chain covers its time: the held swords trail.
+        let mut trailing = false;
         let pose = match states.get_mut(entity) {
             Ok(mut st) => {
                 let before = chain_clips(&st);
                 let was_limp = st.ragdoll.is_some();
                 let pose = crate::npc_anim::animate(&mut bank, &lib, root.archetype, profile, &mut st, &input);
                 limp = (!was_limp && st.ragdoll.is_some()) || (st.full.is_none() && st.ragdoll.is_none());
+                trailing = chain_clips(&st).iter().any(|(clip, t)| bank.trailing(profile, clip, *t));
                 // `AnimNotify_PlayParticleEffect` of the full-body and upper-body chains: a clip
                 // started this frame fires from its start (a notify at 0 too).
                 for (clip, t1) in chain_clips(&st) {
@@ -839,6 +856,12 @@ pub fn animate_characters(
                 }
                 let show = (p.alive || !gone) && p.condition != dishonored_sim::state::Condition::Unconscious && p.carried_by.is_none() && p.mode != MoveMode::Blinking && !dishonored_sim::teleport_spell::hidden(p) && held;
                 *vis = if show { Visibility::Inherited } else { Visibility::Hidden };
+                // The blade's corners feed its swing trail.
+                // (Not from a body that is not drawn: the local player's own in first person.)
+                if let (true, true, Some((template, sockets)), Some(f), Some(tr)) = (show && root_vis.is_none_or(|v| v.get()), trailing, w.trail.as_ref(), weapon_frame(w), trails.as_mut()) {
+                    let corner = |k: usize| to_world(f * w.bind[sockets[k].0]).transform_point3(sockets[k].1);
+                    tr.sources.push(((p.id, wm.0 as u32), template.clone(), corner(0), corner(1)));
+                }
             }
             if let Ok((wj, mut t)) = wjoints.get_mut(c) {
                 let w = &weapons.weapons[wj.weapon];

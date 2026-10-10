@@ -2228,7 +2228,7 @@ impl Importer<'_> {
             Colour::Expression(i) => chain.expression_textures.get(*i).copied().and_then(|k| self.texture(k)),
             Colour::White => None,
         };
-        let mut shading = ParticleShading { tint: [1.0; 3], opacity: 1.0, erode: r.erode, erode_scale: 0.0, vertex_alpha_only: false, opacity_missing: false, radial_power: None };
+        let mut shading = ParticleShading { tint: [1.0; 3], opacity: 1.0, erode: r.erode, erode_scale: 0.0, erode_smooth: r.erode_smooth, vertex_alpha_only: false, opacity_missing: false, radial_power: None };
         if r.erode {
             shading.erode_scale = r.opacity_scale.map(|(n, d)| scalar(n, d)).unwrap_or(1.0);
         }

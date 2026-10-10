@@ -28,6 +28,8 @@ pub mod facefx;
 pub mod gameplay;
 pub mod items_config;
 pub mod pickups;
+pub mod melee_trail;
+pub mod shadow_kill;
 pub mod ini;
 pub mod kismet;
 pub mod font;

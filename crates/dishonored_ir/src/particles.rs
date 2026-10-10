@@ -462,6 +462,14 @@ pub struct TrailParams {
     /// Texture repeats along the whole strip.
     pub tiling: f32,
     pub ribbon: bool,
+    /// `ParticleModuleTypeDataAnimTrail`: knots span the two edges the game sets each update
+    /// (a weapon's melee extent corners) instead of facing the camera.
+    #[serde(default)]
+    pub anim: bool,
+    /// AnimTrail `bRenderTessellation`: segments longer than `DistanceTessellationStepSize` are
+    /// subdivided along the knots' spline.
+    #[serde(default)]
+    pub tessellation_step: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

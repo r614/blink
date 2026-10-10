@@ -35,6 +35,8 @@ pub struct SetData {
     pub pfx: HashMap<String, Vec<(f32, String, String, bool)>>,
     /// lowercase sequence name -> its `DisNotify_DropItem`s.
     pub drops: HashMap<String, Vec<DropNotify>>,
+    /// lowercase sequence name -> its `DisNotify_Trails` windows: (time, duration).
+    pub trails: HashMap<String, Vec<(f32, f32)>>,
 }
 
 /// A `DisNotify_DropItem` (0x00A8D400): a dead pawn (health below 1, pawn slot 348 0x00B49480)
@@ -161,6 +163,7 @@ impl AnimBank {
         let mut ragdoll = HashMap::new();
         let mut pfx: HashMap<String, Vec<(f32, String, String, bool)>> = HashMap::new();
         let mut drops: HashMap<String, Vec<DropNotify>> = HashMap::new();
+        let mut trails: HashMap<String, Vec<(f32, f32)>> = HashMap::new();
         for s in find(&h.properties, "Sequences").and_then(|p| p.array_objects().ok()).unwrap_or_default() {
             let ObjRef::Export(x) = ObjRef::from_index(s) else { continue };
             let Ok(sh) = pkg.read_object(x) else { continue };
@@ -187,6 +190,11 @@ impl AnimBank {
                             let attach = matches!(find(&nh.properties, "bAttach").map(|p| &p.value), Some(Value::Bool(true)));
                             pfx.entry(name.to_ascii_lowercase()).or_default().push((t, pkg.obj_path(r), point, attach));
                         }
+                        // The melee item's swing trail runs over the notify's duration.
+                        "DisNotify_Trails" => {
+                            let d = find(&ev, "Duration").and_then(|p| p.as_float()).unwrap_or(0.0);
+                            trails.entry(name.to_ascii_lowercase()).or_default().push((t, d));
+                        }
                         "DisNotify_DropItem" => {
                             let Ok(nh) = pkg.read_object(ni) else { continue };
                             let en = |k: &str| match find(&nh.properties, k).map(|p| &p.value) {
@@ -207,7 +215,7 @@ impl AnimBank {
                 }
             }
         }
-        self.sets.push(SetData { pkg: r.0.clone(), tracks, seqs, ragdoll, pfx, drops });
+        self.sets.push(SetData { pkg: r.0.clone(), tracks, seqs, ragdoll, pfx, drops, trails });
         self.set_index.insert(key, self.sets.len() - 1);
         Some(self.sets.len() - 1)
     }
@@ -255,6 +263,14 @@ impl AnimBank {
         match self.holder(profile, name) {
             Some(s) => self.sets[s].pfx.get(&name.to_ascii_lowercase()).cloned().unwrap_or_default(),
             None => Vec::new(),
+        }
+    }
+
+    /// Whether a `DisNotify_Trails` window of a profile's sequence covers `t`.
+    pub fn trailing(&mut self, profile: usize, name: &str, t: f32) -> bool {
+        match self.holder(profile, name) {
+            Some(s) => self.sets[s].trails.get(&name.to_ascii_lowercase()).is_some_and(|w| w.iter().any(|(t0, d)| t >= *t0 && t < t0 + d)),
+            None => false,
         }
     }
 

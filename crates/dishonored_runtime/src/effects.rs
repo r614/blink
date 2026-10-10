@@ -145,10 +145,14 @@ pub type FxMaterial = bevy::pbr::ExtendedMaterial<StandardMaterial, SoftFade>;
 /// product is below 0.001. (Volume_Light_PMAT uses 50, `volume_light.rs`.)
 pub fn soft_scale(p: &dishonored_ir::MaterialParams) -> f32 {
     let scalar = |n: &str, d: f32| p.scalars.iter().find(|s| s.0.trim().eq_ignore_ascii_case(n)).map(|s| s.1).unwrap_or(d);
+    let one_sided_smoke = p.base_material.as_deref().is_some_and(|b| b.rsplit('.').next().is_some_and(|n| n.eq_ignore_ascii_case("Look_Up_Smoke_translu_PMAT")));
     let (range, intensity) = if p.switch("Db_Enable_Depth_Biased_Alpha") == Some(true) {
         (250.0, scalar("Db_Depth_Biased_Alpha_Intensity", 0.05))
     } else if p.switch("Da_Enable_Depth_Biased_Alpha") == Some(true) {
         (500.0, scalar("Da_Depth_Biased_Alpha_Intensity", 0.5))
+    } else if one_sided_smoke {
+        // `Look_Up_Smoke_translu_PMAT` always fades (36275: x 64, `Depth_Bias`).
+        (64.0, scalar("Depth_Bias", 0.0))
     } else {
         return 0.0;
     };
@@ -319,7 +323,7 @@ impl Plugin for EffectsPlugin {
         bevy::asset::embedded_asset!(app, "particle_soft.wgsl");
         app.add_plugins(MaterialPlugin::<FxMaterial>::default()).add_systems(Update, apply_pending_soft);
         app.add_plugins(MaterialPlugin::<GlowMaterial>::default());
-        app.init_resource::<Effects>().init_resource::<EffectSockets>().init_resource::<HandEffects>().init_resource::<PawnEffects>().init_resource::<crate::lens_effects::LensEffects>().init_resource::<crate::rain::RainCamera>().add_systems(
+        app.init_resource::<Effects>().init_resource::<EffectSockets>().init_resource::<HandEffects>().init_resource::<PawnEffects>().init_resource::<crate::weapon_trails::WeaponTrails>().init_resource::<crate::lens_effects::LensEffects>().init_resource::<crate::rain::RainCamera>().add_systems(
             Update,
             (
                 gameplay_effects.before(crate::audio::drive),
@@ -331,6 +335,8 @@ impl Plugin for EffectsPlugin {
                 crate::lens_effects::update.after(crate::players::camera_follow).after(crate::cutscene::camera).after(crate::viewmodel::apply_fov).run_if(resource_exists::<crate::session::SessionView>),
                 hand_effects.after(crate::viewmodel::animate_view_rig),
                 pawn_effects.after(crate::characters::animate_characters),
+                // Swing trails: the poses of this frame set their sources.
+                crate::weapon_trails::drive.after(crate::characters::animate_characters).after(crate::viewmodel::animate_view_rig),
                 // The player camera's rain box (moves the rain emitter before it simulates).
                 crate::rain::drive.after(crate::players::camera_follow).after(crate::cutscene::camera).after(crate::viewmodel::apply_fov),
                 // After everything that places the camera or sets its projection this frame
@@ -415,17 +421,23 @@ fn material_for(map: &DishonoredMap, em: &ParticleEmitterAsset, images: &mut Ass
         Some(e) => (AlphaMode::Add, [e[0], e[1], e[2], 1.0], e[3].min(4.0)),
         None => (alpha_mode, tint, gain),
     };
+    // The look-up smoke erodes the raw height and applies its opacity after (soft.z).
+    let smooth = shading.is_some_and(|s| s.erode && s.erode_smooth);
     let base_color = if alpha_mode == AlphaMode::Add {
         Color::linear_rgb(tint[0] * gain, tint[1] * gain, tint[2] * gain)
     } else {
-        Color::linear_rgba(tint[0], tint[1], tint[2], gain.clamp(0.0, 1.0))
+        Color::linear_rgba(tint[0], tint[1], tint[2], if smooth { 1.0 } else { gain.clamp(0.0, 1.0) })
     };
     // Depth-biased alpha (soft particles): Db_Enable_Depth_Biased_Alpha permutations fade by the scene depth.
     let soft = params.map(soft_scale).unwrap_or(0.0);
-    let erode = shading.filter(|s| s.erode).map(|s| s.erode_scale.max(1e-3)).unwrap_or(0.0);
+    let erode = match shading.filter(|s| s.erode) {
+        Some(s) if s.erode_smooth => -1.0,
+        Some(s) => s.erode_scale.max(1e-3),
+        None => 0.0,
+    };
     mats.add(FxMaterial {
         base: StandardMaterial { base_color, base_color_texture: image, unlit: true, alpha_mode, cull_mode: None, double_sided: true, fog_enabled: alpha_mode != AlphaMode::Add, ..default() },
-        extension: SoftFade { soft: Vec4::new(soft, erode, 0.0, 0.0) },
+        extension: SoftFade { soft: Vec4::new(soft, erode, if smooth { gain.clamp(0.0, 1.0) } else { 0.0 }, 0.0) },
     })
 }
 
@@ -715,6 +727,12 @@ pub fn set_beam_target(commands: &mut Commands, e: Entity, to: Vec3) {
     commands.entity(e).try_insert(BeamTarget(to));
 }
 
+/// Give an instance's AnimTrail emitters this update's source data (the instance moves to the
+/// first edge).
+pub fn feed_trail(commands: &mut Commands, e: Entity, src: TrailSource) {
+    commands.entity(e).try_insert(TrailFeed(src));
+}
+
 impl FxInstance {
     /// [interp] Move the emitter (Dishonored world transform).
     pub fn set_transform(&mut self, m: Mat4) {
@@ -847,6 +865,10 @@ struct BeamTarget(Vec3);
 /// An instance deactivated before its first update (`FxRequest::EndedTrail`).
 #[derive(Component)]
 struct StopAtOnce;
+
+/// AnimTrail source data for an instance's next update ([`feed_trail`]).
+#[derive(Component)]
+struct TrailFeed(TrailSource);
 
 /// Spawn a ParticleSystem by path of the active level at a Dishonored world transform; a
 /// looping instance (not `one_shot`) runs until stopped. Returns the instance entity.
@@ -1100,7 +1122,7 @@ fn simulate(
     mut mats: ResMut<Assets<FxMaterial>>,
     mut glow_mats: ResMut<Assets<GlowMaterial>>,
     mut volume_mats: ResMut<Assets<crate::volume_light::VolumeLightMaterial>>,
-    mut q: Query<(Entity, &mut FxInstance, &InheritedVisibility, Option<&BeamTarget>, Option<&StopAtOnce>)>,
+    mut q: Query<(Entity, &mut FxInstance, &InheritedVisibility, Option<&BeamTarget>, Option<&StopAtOnce>, Option<&TrailFeed>)>,
     cams: Query<(&GlobalTransform, &Transform, &Projection, Option<&ChildOf>), (With<Camera3d>, Without<crate::reflect::ReflectCamera>)>,
     session: Option<Res<crate::session::Session>>,
     mut dframe: ResMut<DistortionFrame>,
@@ -1132,14 +1154,21 @@ fn simulate(
     };
     let ray_fn: RayFn = &ray_closure;
     let mut live = 0;
-    fx.live_oneshots = q.iter().filter(|(_, i, _, _, _)| i.one_shot).count();
-    for (e, mut inst, vis, beam, stop_now) in &mut q {
+    fx.live_oneshots = q.iter().filter(|(_, i, _, _, _, _)| i.one_shot).count();
+    for (e, mut inst, vis, beam, stop_now, trail) in &mut q {
         if stop_now.is_some() {
             inst.stop();
             commands.entity(e).remove::<StopAtOnce>();
         }
         if let Some(b) = beam {
             inst.beam_target = Some(b.0);
+        }
+        if let Some(t) = trail {
+            inst.transform = Mat4::from_translation(t.0.edges[0]);
+            for s in inst.sims.iter_mut() {
+                s.trail_src = Some(t.0);
+            }
+            commands.entity(e).remove::<TrailFeed>();
         }
         if !vis.get() && !inst.one_shot {
             continue;
@@ -1555,6 +1584,57 @@ fn mesh_particle(em: &ParticleEmitterAsset, p: &Particle, xf: &Mat4, et: f32) ->
     (world, color, alpha.clamp(0.0, 1.0))
 }
 
+/// An AnimTrail's strip (Bevy space): each knot (oldest first) spans its two edges; U runs along
+/// the trail (the tiling over its length), V across (0 at the first edge). With render
+/// tessellation a segment longer than the step is subdivided on the Hermite spline of its knots,
+/// whose tangents are recalculated from the neighbouring knots (`bTangentRecalculationEveryFrame`).
+#[allow(clippy::too_many_arguments)]
+fn anim_trail_strip(t: &dishonored_ir::particles::TrailParams, sim: &EmitterSim, look: &dyn Fn(&Particle) -> (Vec3, f32, Vec3), pos: &mut Vec<[f32; 3]>, uv: &mut Vec<[f32; 2]>, col: &mut Vec<[f32; 4]>, idx: &mut Vec<u32>) {
+    let knots = &sim.particles;
+    if knots.len() < 2 {
+        return;
+    }
+    let colour = |p: &Particle| {
+        let (c, a, _) = look(p);
+        [c.x.max(0.0), c.y.max(0.0), c.z.max(0.0), a.clamp(0.0, 1.0)]
+    };
+    let edge = |k: usize, i: usize| if i == 0 { knots[k].pos } else { knots[k].edge2 };
+    let tangent = |k: usize, i: usize| (edge((k + 1).min(knots.len() - 1), i) - edge(k.saturating_sub(1), i)) * if k == 0 || k + 1 == knots.len() { 1.0 } else { 0.5 };
+    // (first edge, second edge, colour) along the trail.
+    let mut rows: Vec<(Vec3, Vec3, [f32; 4])> = Vec::with_capacity(knots.len());
+    for k in 0..knots.len() {
+        rows.push((edge(k, 0), edge(k, 1), colour(&knots[k])));
+        if k + 1 == knots.len() {
+            break;
+        }
+        let len = (edge(k + 1, 0) - edge(k, 0)).length().max((edge(k + 1, 1) - edge(k, 1)).length());
+        let n = t.tessellation_step.filter(|s| *s > 1e-3).map_or(1, |s| (len / s).ceil().clamp(1.0, 16.0) as usize);
+        let (c0, c1) = (colour(&knots[k]), colour(&knots[k + 1]));
+        for j in 1..n {
+            let f = j as f32 / n as f32;
+            let e = |i: usize| hermite(edge(k, i), tangent(k, i), edge(k + 1, i), tangent(k + 1, i), f);
+            let c = [0, 1, 2, 3].map(|q| c0[q] + (c1[q] - c0[q]) * f);
+            rows.push((e(0), e(1), c));
+        }
+    }
+    let base = pos.len() as u32;
+    let total = (rows.len() - 1) as f32;
+    for (k, (a, b, c)) in rows.iter().enumerate() {
+        // Newest knot first along U.
+        let u = (1.0 - k as f32 / total) * t.tiling.max(1e-3);
+        pos.push(coords::pos(*a).to_array());
+        pos.push(coords::pos(*b).to_array());
+        uv.push([u, 0.0]);
+        uv.push([u, 1.0]);
+        col.push(*c);
+        col.push(*c);
+    }
+    for k in 0..rows.len() as u32 - 1 {
+        let a = base + k * 2;
+        idx.extend_from_slice(&[a, a + 1, a + 3, a, a + 3, a + 2]);
+    }
+}
+
 /// Trail / ribbon and beam emitters as camera-facing strips (UE3 `TypeDataTrail2` /
 /// `TypeDataRibbon`: the emitter's particles in spawn order joined into one strip, width the
 /// particle size; `TypeDataBeam2`: each particle a beam from the emitter origin along its X
@@ -1566,6 +1646,9 @@ fn strip_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_pos: V
     let mut uv: Vec<[f32; 2]> = Vec::new();
     let mut col: Vec<[f32; 4]> = Vec::new();
     let mut idx: Vec<u32> = Vec::new();
+    if let Some(t) = em.trail.as_ref().filter(|t| t.anim) {
+        anim_trail_strip(t, sim, look, &mut pos, &mut uv, &mut col, &mut idx);
+    }
     // One strip through `pts` (Bevy space) with per-point half widths and colours.
     let mut strip = |pts: &[(Vec3, f32, [f32; 4])], tiling: f32| {
         if pts.len() < 2 {
@@ -1595,9 +1678,10 @@ fn strip_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_pos: V
         let (color, alpha, size) = look(p);
         (coords::pos(world_of(p)), size.x * 0.5 * coords::UU_TO_BEVY, [color.x.max(0.0), color.y.max(0.0), color.z.max(0.0), alpha.clamp(0.0, 1.0)])
     };
-    if let Some(t) = &em.trail {
+    if let Some(t) = em.trail.as_ref().filter(|t| !t.anim) {
         let pts: Vec<(Vec3, f32, [f32; 4])> = sim.particles.iter().map(point).collect();
         strip(&pts, t.tiling.max(1e-3));
+    } else if em.trail.is_some() {
     } else if let Some(b) = &em.beam {
         let origin = xf.w_axis.truncate();
         for (i, p) in sim.particles.iter().enumerate() {

@@ -432,9 +432,13 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
                 ));
             }
             "ParticleModuleTypeDataTrail2" | "ParticleModuleTypeDataRibbon" | "ParticleModuleTypeDataAnimTrail" => {
+                let anim = mclass == "ParticleModuleTypeDataAnimTrail";
+                let tess = anim && matches!(find(p, "bRenderTessellation").map(|x| &x.value), Some(Value::Bool(true)));
                 em.trail = Some(dishonored_ir::particles::TrailParams {
                     tiling: 1.0,
                     ribbon: mclass != "ParticleModuleTypeDataTrail2",
+                    anim,
+                    tessellation_step: tess.then(|| find(p, "DistanceTessellationStepSize").and_then(|x| x.as_float()).unwrap_or(15.0)),
                 });
             }
             "ParticleModuleTypeDataBeam2" => {

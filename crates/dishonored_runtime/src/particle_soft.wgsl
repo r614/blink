@@ -26,8 +26,10 @@
 
 // x: k (0 = the material has no depth-biased alpha); y: the height-map erosion's multiplier
 // (HeightMapAnim / SubUV_HeightMap / WaterSplash bases: alpha = saturate((H - vertex alpha) x
-// Mask_Multiply), 0 = none). Eroding sprites keep their vertex alpha at 1 (the material alpha is
-// the baked height H) and carry the particle's alpha in the second UV set.
+// Mask_Multiply), 0 = none), or -1 for the look-up smoke's erosion (Look_Up_Smoke_translu_PMAT,
+// 36275 / 37106: alpha = smoothstep(saturate((H - (1 - vertex alpha)) / vertex alpha)) x vertex
+// alpha x z, z = diffuse_color2.a). Eroding sprites keep their vertex alpha at 1 (the material
+// alpha is the baked height H) and carry the particle's alpha in the second UV set.
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> soft: vec4<f32>;
 
 // Bevy units per Unreal unit (coords::UU_TO_BEVY).
@@ -36,14 +38,17 @@ const UU_TO_BEVY: f32 = 0.02;
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
-    if (soft.y > 0.0) {
 #ifdef VERTEX_UVS_B
-        let va = in.uv_b.x;
+    let va = in.uv_b.x;
 #else
-        let va = 0.0;
+    let va = 0.0;
 #endif
+    if (soft.y > 0.0) {
         // Before the mask's discard (the masked SubUV_HeightMap clips below 1/3).
         pbr_input.material.base_color.a = saturate((pbr_input.material.base_color.a - va) * soft.y);
+    } else if (soft.y < 0.0) {
+        let t = saturate((pbr_input.material.base_color.a - (1.0 - va)) / max(va, 1.0e-6));
+        pbr_input.material.base_color.a = t * t * (3.0 - 2.0 * t) * va * soft.z;
     }
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
     if (soft.x > 0.0) {
