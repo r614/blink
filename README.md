@@ -112,7 +112,8 @@ Reported from play testing, not yet fixed:
     its window loses focus (`BaseEngine.ini` `[Engine.Engine] bPauseOnLossOfFocus=TRUE`).
 - **NPC animation**:
   - NPC animations are very jerky;
-  - alerted and fighting NPCs move out of step with their animations.
+  - alerted and fighting NPCs move out of step with their animations;
+  - death animations and their particles look incomplete.
 - **Performance**: frame rates are very low in Free Roam.
 
 ## Platforms
