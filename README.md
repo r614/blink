@@ -99,6 +99,8 @@ Reported from play testing, not yet fixed:
   - the crouch (stealth) overlay draws a large square in the middle of the screen;
   - a stray square texture shows on the menu's message box ("All unsaved progress...");
   - the letterbox bars do not reach the screen's edges on ultrawide displays.
+- **Rendering**: the Playground pool's water (the Boyle river material
+  `boyle_ext_MS.Water_boyle_ext_INST03`) renders as an opaque green surface with dark stripes.
 - **Effects**:
   - blood renders black;
   - the camera's lens blood renders as white blobs;
