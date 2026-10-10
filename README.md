@@ -53,7 +53,9 @@ Experimental. Playable, with known bugs, on Lady Boyle's Last Party (`L_Boyle_*`
 | AI, Kismet, conversations, barks, audio, HUD | done for the target map |
 | Launcher | main menu, missions, server browser / creator, every original option (`research/dishonored/MENUS.md`) |
 
-Open questions are tracked in `research/UNKNOWNS.md`.
+Open questions are tracked in `research/UNKNOWNS.md`. The shape the code is moving to
+(subsystems over one tick-stamped event stream, composed by the original's data) is in
+`research/ARCHITECTURE.md`.
 
 ### Pending features
 
