@@ -93,7 +93,7 @@ Reported from play testing, not yet fixed:
 
 - **Input**: conversation choices only respond to the gamepad (the prompt shows the A button).
 - **Window**: the mouse cursor appears and the game loses focus when a match starts from the
-  menu and when going back to it. The window also minimizes on the way back to the main menu.
+  menu, when going back to it, and when opening or closing the pause menu. The window also minimizes on the way back to the main menu.
 - **Settings**: the resolution cannot be changed.
 - **HUD and menus**:
   - the crouch (stealth) overlay draws a large square in the middle of the screen;
