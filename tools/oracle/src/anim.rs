@@ -142,7 +142,7 @@ pub fn cmd_anim_info(path: &str) -> Result<()> {
         println!("  Frames: {}", frames.len());
         if frames.len() > 0 {
             let first_tick = frames.iter().find_map(|f| f.t).unwrap_or(0);
-            let last_tick = frames.iter().find_map(|f| f.t).unwrap_or(0);
+            let last_tick = frames.iter().filter_map(|f| f.t).last().unwrap_or(0);
             println!("    Tick range: {} to {}", first_tick, last_tick);
 
             let has_cs = frames.iter().filter(|f| f.cs.is_some()).count();
@@ -151,30 +151,19 @@ pub fn cmd_anim_info(path: &str) -> Result<()> {
             println!("    With cs: {}, nodes: {}, blend: {}", has_cs, has_nodes, has_blend);
         }
 
-        // Find sequences that play (weight > 0)
-        if let Some(nodes_list) = body.nodes.as_ref() {
-            let mut playing_seqs = std::collections::HashSet::new();
-            for frame in frames {
-                if let Some(frame_nodes) = &frame.nodes {
-                    for (node_idx, values) in frame_nodes {
-                        if let Ok(idx) = node_idx.parse::<usize>() {
-                            if let Some(node) = nodes_list.get(idx) {
-                                if node.sequence == Some(true) && values.len() >= 1 {
-                                    if let Some(w) = values[0].as_i64() {
-                                        let weight = w as f32 / 1000.0;
-                                        if weight > 0.0 && !node.name.is_empty() && node.name != "None" {
-                                            playing_seqs.insert(node.name.clone());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+        // Sequences that play (a sequence node with weight > 0), per reconstructed frame: the
+        // node list names only the nodes with a `NodeName` (the `DishonoredAnimNodeSeq`s have
+        // none), the frames carry the sequence each node plays.
+        let full = reconstruct_frames(body)?;
+        let mut playing: BTreeMap<String, usize> = BTreeMap::new();
+        for f in &full {
+            let distinct: std::collections::BTreeSet<String> = get_playing_sequences(f).into_iter().collect();
+            for s in distinct {
+                *playing.entry(s).or_insert(0) += 1;
             }
-            if !playing_seqs.is_empty() {
-                println!("  Playing sequences: {}", playing_seqs.iter().cloned().collect::<Vec<_>>().join(", "));
-            }
+        }
+        if !playing.is_empty() {
+            println!("  Playing sequences (frames with weight > 0): {}", playing.iter().map(|(s, n)| format!("{s} ({n})")).collect::<Vec<_>>().join(", "));
         }
         println!();
     }
@@ -344,8 +333,19 @@ struct ComparisonResults {
     bones: HashMap<String, BoneStats>,
     overall: BoneStats,
     worst_bones: Vec<(String, BoneStats)>,
-    worst_ticks: Vec<(u64, Vec<(String, f32, f32)>)>,
+    worst_ticks: Vec<WorstTick>,
     sequences: SequenceStats,
+}
+
+/// One aligned tick's error: the mean rotation difference over the compared bones and the bone
+/// that differs most.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorstTick {
+    port_tick: u64,
+    capture_tick: u64,
+    mean_angle: f32,
+    worst_bone: String,
+    worst_angle: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -433,16 +433,19 @@ fn compare_animations(
     }
 
     let mut seq_mismatches = Vec::new();
+    let mut seq_mismatch_count = 0usize;
     let mut seq_offset_diffs = Vec::new();
+    let mut ticks: Vec<WorstTick> = Vec::new();
 
     for pf in port_frames {
-        let capture_idx = (pf.tick as i32 + offset) as usize;
-        if capture_idx >= capture_frames.len() {
+        let capture_idx = pf.tick as i64 + offset as i64;
+        if capture_idx < 0 || capture_idx as usize >= capture_frames.len() {
             continue;
         }
-        let cf = &capture_frames[capture_idx];
+        let cf = &capture_frames[capture_idx as usize];
 
         // Compare bones
+        let (mut tick_sum, mut tick_n, mut tick_worst) = (0.0f32, 0usize, (String::new(), 0.0f32));
         for bone in bones {
             if let (Some(c_bone), Some(p_bone)) =
                 (cf.bones.get(bone), pf.bones.iter().find(|b| &b.name == bone))
@@ -459,13 +462,22 @@ fn compare_animations(
                     entry.2 += trans_diff;
                     entry.3 += 1;
                 }
+                tick_sum += angle;
+                tick_n += 1;
+                if angle > tick_worst.1 {
+                    tick_worst = (bone.clone(), angle);
+                }
             }
+        }
+        if tick_n > 0 {
+            ticks.push(WorstTick { port_tick: pf.tick, capture_tick: cf.tick, mean_angle: tick_sum / tick_n as f32, worst_bone: tick_worst.0, worst_angle: tick_worst.1 });
         }
 
         // Compare sequences
         let capture_seqs = get_playing_sequences(cf);
         if let Some(port_seq) = &pf.full {
             if !capture_seqs.contains(&port_seq.seq) {
+                seq_mismatch_count += 1;
                 if seq_mismatches.len() < 10 {
                     seq_mismatches.push(SequenceMismatch {
                         tick: pf.tick,
@@ -473,12 +485,14 @@ fn compare_animations(
                         port_seq: Some(port_seq.seq.clone()),
                     });
                 }
-            } else {
-                // Same sequence, check time offset
-                seq_offset_diffs.push(pf.full.as_ref().unwrap().t);
+            } else if let Some(ct) = capture_time(cf, &port_seq.seq) {
+                // The same sequence on both sides: how far ahead the port's playhead runs.
+                seq_offset_diffs.push(port_seq.t - ct);
             }
         }
     }
+    ticks.sort_by(|a, b| b.mean_angle.total_cmp(&a.mean_angle));
+    ticks.truncate(10);
 
     // Compute per-bone stats
     let mut bones_map = HashMap::new();
@@ -520,9 +534,9 @@ fn compare_animations(
         bones: bones_map,
         overall,
         worst_bones: worst_bones.into_iter().take(10).collect(),
-        worst_ticks: Vec::new(),
+        worst_ticks: ticks,
         sequences: SequenceStats {
-            mismatches: seq_mismatches.len(),
+            mismatches: seq_mismatch_count,
             examples: seq_mismatches,
             same_seq_offset: if seq_offset_diffs.is_empty() {
                 None
@@ -533,11 +547,12 @@ fn compare_animations(
     })
 }
 
+/// The sequences playing in a frame (sequence nodes with weight > 0; `None` is an idle node).
 fn get_playing_sequences(frame: &FullFrame) -> Vec<String> {
     let mut seqs = Vec::new();
     for (_, node) in &frame.nodes {
         if let NodeState::Sequence { weight, seq, .. } = node {
-            if *weight > 0.0 && !seq.is_empty() {
+            if *weight > 0.0 && !seq.is_empty() && seq != "None" {
                 seqs.push(seq.clone());
             }
         }
@@ -545,24 +560,47 @@ fn get_playing_sequences(frame: &FullFrame) -> Vec<String> {
     seqs
 }
 
-fn print_comparison_report(results: &ComparisonResults, offset: i32, _bones: &[String]) {
-    println!("Offset: {} ticks", offset);
+/// The playhead (seconds) of the heaviest node playing `seq` in a frame.
+fn capture_time(frame: &FullFrame, seq_name: &str) -> Option<f32> {
+    frame
+        .nodes
+        .values()
+        .filter_map(|n| match n {
+            NodeState::Sequence { weight, seq, time, .. } if seq == seq_name && *weight > 0.0 => Some((*weight, *time)),
+            _ => None,
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, t)| t)
+}
+
+fn print_comparison_report(results: &ComparisonResults, offset: i32, bones: &[String]) {
+    println!("Offset: {offset} ticks (capture tick = port tick + offset); {} bones compared", bones.len());
     println!();
-    println!("Overall: mean angle {:.2}°, max angle {:.2}°, mean translation {:.2} uu",
-        results.overall.mean_angle, results.overall.max_angle, results.overall.mean_translation);
+    println!("Overall: mean angle {:.2} deg, max angle {:.2} deg, mean translation {:.2} uu over {} samples",
+        results.overall.mean_angle, results.overall.max_angle, results.overall.mean_translation, results.overall.samples);
     println!();
 
     println!("Worst 10 bones:");
     for (bone, stats) in &results.worst_bones {
-        println!("  {}: mean {:.2}°, max {:.2}°, trans {:.2} uu ({} samples)",
+        println!("  {}: mean {:.2} deg, max {:.2} deg, trans {:.2} uu ({} samples)",
             bone, stats.mean_angle, stats.max_angle, stats.mean_translation, stats.samples);
     }
     println!();
 
-    println!("Sequences: {} mismatches", results.sequences.mismatches);
+    println!("Worst 10 ticks (port tick -> capture tick: mean angle; worst bone):");
+    for t in &results.worst_ticks {
+        println!("  {} -> {}: {:.2} deg; {} {:.2} deg", t.port_tick, t.capture_tick, t.mean_angle, t.worst_bone, t.worst_angle);
+    }
+    println!();
+
+    println!("Sequences: {} ticks where the port's full-body sequence is not playing in the capture", results.sequences.mismatches);
     for m in &results.sequences.examples {
         println!("  Tick {}: capture {:?}, port {:?}",
             m.tick, m.capture_seqs, m.port_seq);
+    }
+    match results.sequences.same_seq_offset {
+        Some(d) => println!("Same sequence on both sides: the port's playhead runs {:+.3} s ({:+.1} ticks) from the capture's", d, d * 60.0),
+        None => println!("Same sequence on both sides: never"),
     }
 }
 
