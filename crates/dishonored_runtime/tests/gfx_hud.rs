@@ -11,7 +11,7 @@ use std::sync::Arc;
 /// per frame from frame 4, stop at 9) -> "box" (a 10x10 red square, shape 1).
 fn movie() -> Movie {
     let mut m = Movie { frame_rate: 30.0, ..Default::default() };
-    m.shapes.insert(1, Shape { bounds: Rect { xmin: 0.0, xmax: 200.0, ymin: 0.0, ymax: 200.0 }, fills: vec![Fill::Solid([255, 0, 0, 255])] });
+    m.shapes.insert(1, Shape { bounds: Rect { xmin: 0.0, xmax: 200.0, ymin: 0.0, ymax: 200.0 }, fills: vec![Fill::Solid([255, 0, 0, 255])], edges: [[0.0, 0.0, 200.0, 0.0], [200.0, 0.0, 200.0, 200.0], [200.0, 200.0, 0.0, 200.0], [0.0, 200.0, 0.0, 0.0]].map(|e| (0, e)).to_vec() });
     let mut s = Sprite::default();
     for f in 0..10usize {
         let mut ops = Vec::new();
@@ -81,10 +81,15 @@ fn scripted_clips_leave_the_timeline_and_draw_where_set() {
     assert!((st.get(bx, Prop::X) - 7.0).abs() < 1e-3);
     let mut draws = Vec::new();
     st.draw(&mut draws);
-    let Some(Draw::Solid { dst, rgba }) = draws.first() else { panic!("{draws:?}") };
-    assert!((dst[0].x - 107.0).abs() < 1e-3 && (dst[0].y - 50.0).abs() < 1e-3, "{dst:?}");
-    assert!((dst[2].x - 117.0).abs() < 1e-3);
-    assert_eq!(*rgba, [1.0, 0.0, 0.0, 1.0]);
+    // The square's raster (`swf_shape`), one raster pixel (half a stage pixel) of padding
+    // around its bounds.
+    let Some(Draw::Quad { tex: TexKey::Shape(_, 1), dst, rgba, .. }) = draws.first() else { panic!("{draws:?}") };
+    assert!((dst[0].x - 106.5).abs() < 1e-3 && (dst[0].y - 49.5).abs() < 1e-3, "{dst:?}");
+    assert!((dst[2].x - 117.5).abs() < 1e-3);
+    assert_eq!(*rgba, [1.0; 4]);
+    let r = dishonored_assets::swf_shape::rasterize(&movie().shapes[&1]).unwrap();
+    let c = ((r.height / 2 * r.width + r.width / 2) * 4) as usize;
+    assert_eq!(&r.rgba[c..c + 4], &[255, 0, 0, 255]);
     // Invisible and zero-alpha clips draw nothing.
     st.set(clip, Prop::Alpha, 0.0);
     st.draw(&mut draws);

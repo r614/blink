@@ -3352,6 +3352,11 @@ impl BlackShroud {
     pub fn new(st: &mut Stage, mc: Id) -> Self {
         st.set_visible(mc, false);
         st.set(mc, Prop::Alpha, 0.0);
+        // The HUD layout (0x00B96250, on every viewport change) sizes the clip to the stage's
+        // extent on screen (`_width` / `_height`): its 512 x 512 vignette (`HUDFX_I29`, black with
+        // the shroud in its alpha) covers the whole view; the stage shows all of 1280 x 720.
+        st.set_width(mc, crate::gfx_stage::STAGE.x);
+        st.set_height(mc, crate::gfx_stage::STAGE.y);
         Self { mc, opened: false, interval_close: None, peeking: false }
     }
     /// A keyhole peek's black fade (0..1) over the screen (StatePlayerMasterHolePeeking,

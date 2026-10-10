@@ -70,13 +70,29 @@ pub enum Fill {
     Solid([u8; 4]),
     /// Bitmap fill: character id of the bitmap and the bitmap->shape matrix (twips).
     Bitmap { bitmap: u16, matrix: Matrix, smoothed: bool, clipped: bool },
-    Gradient,
+    Gradient(Gradient),
+}
+
+/// A gradient fill (`FILLSTYLE` 0x10 linear, 0x12 radial, 0x13 focal radial): the matrix maps the
+/// gradient square (-16384..16384 twips) into the shape; `SpreadMode` (0 pad, 1 reflect, 2
+/// repeat); stops as (ratio 0..1, RGBA 0..1); the focal point (-1..1 on the x axis).
+#[derive(Debug, Clone)]
+pub struct Gradient {
+    pub matrix: Matrix,
+    pub radial: bool,
+    pub focal: f32,
+    pub spread: u8,
+    pub stops: Vec<(f32, [f32; 4])>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Shape {
     pub bounds: Rect,
+    /// Every fill style of the shape (the records' `NewStyles` arrays appended).
     pub fills: Vec<Fill>,
+    /// The edges (twips; curves flattened) beside each fill style: (index into `fills`,
+    /// [x0, y0, x1, y1]); an edge between two fills is listed for both.
+    pub edges: Vec<(usize, [f32; 4])>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -239,6 +255,8 @@ pub struct ExternalImage {
 
 #[derive(Debug, Clone, Default)]
 pub struct Movie {
+    /// A hash of the movie's data (keys the textures made from its shapes).
+    pub key: u64,
     pub version: u8,
     pub frame_size: Rect,
     pub frame_rate: f32,
@@ -432,24 +450,19 @@ fn parse_fills(b: &mut Bits, shape_ver: u8) -> Vec<Fill> {
                 out.push(Fill::Solid(rgba));
             }
             0x10 | 0x12 | 0x13 => {
-                let _m = b.matrix();
+                let matrix = b.matrix();
                 b.align();
                 let flags = b.u8();
                 let count = (flags & 15) as usize;
+                let mut stops = Vec::with_capacity(count);
                 for _ in 0..count {
-                    b.u8();
-                    if shape_ver >= 3 {
-                        b.u32();
-                    } else {
-                        b.u8();
-                        b.u8();
-                        b.u8();
-                    }
+                    let ratio = b.u8() as f32 / 255.0;
+                    let c = if shape_ver >= 3 { [b.u8(), b.u8(), b.u8(), b.u8()] } else { [b.u8(), b.u8(), b.u8(), 255] };
+                    stops.push((ratio, c.map(|v| v as f32 / 255.0)));
                 }
-                if t == 0x13 {
-                    b.u16();
-                }
-                out.push(Fill::Gradient);
+                // FIXED8 focal point.
+                let focal = if t == 0x13 { b.u16() as i16 as f32 / 256.0 } else { 0.0 };
+                out.push(Fill::Gradient(Gradient { matrix, radial: t != 0x10, focal, spread: flags >> 6, stops }));
             }
             0x40..=0x43 => {
                 let bitmap = b.u16();
@@ -460,6 +473,144 @@ fn parse_fills(b: &mut Bits, shape_ver: u8) -> Vec<Fill> {
         }
     }
     out
+}
+
+/// Skip a `LINESTYLEARRAY` (lines are not drawn by the HUD; `LINESTYLE2` of DefineShape4 may
+/// carry a fill).
+fn skip_line_styles(b: &mut Bits, shape_ver: u8) {
+    let mut n = b.u8() as usize;
+    if n == 0xff {
+        n = b.u16() as usize;
+    }
+    for _ in 0..n {
+        b.u16();
+        if shape_ver >= 4 {
+            let _start_cap = b.ub(2);
+            let join = b.ub(2);
+            let has_fill = b.ub(1) == 1;
+            b.ub(5);
+            b.ub(1);
+            let _end_cap = b.ub(2);
+            if join == 2 {
+                b.u16();
+            }
+            if has_fill {
+                // One fill style (a FILLSTYLEARRAY of one, without its count).
+                let t = b.u8();
+                match t {
+                    0x00 => {
+                        b.u32();
+                    }
+                    0x10 | 0x12 | 0x13 => {
+                        b.matrix();
+                        b.align();
+                        let flags = b.u8();
+                        for _ in 0..(flags & 15) {
+                            b.u8();
+                            b.u32();
+                        }
+                        if t == 0x13 {
+                            b.u16();
+                        }
+                    }
+                    _ => {
+                        b.u16();
+                        b.matrix();
+                    }
+                }
+            } else {
+                b.u32();
+            }
+        } else if shape_ver >= 3 {
+            b.u32();
+        } else {
+            b.u8();
+            b.u8();
+            b.u8();
+        }
+    }
+}
+
+/// The edge records of a shape (`SHAPE` records after the style arrays): style changes (move,
+/// FillStyle0 / FillStyle1 / LineStyle, NewStyles appending to `fills`), straight edges and
+/// quadratic curves (flattened), each edge listed for the fill styles on both sides.
+fn parse_shape_records(b: &mut Bits, shape_ver: u8, end: usize, fills: &mut Vec<Fill>) -> Vec<(usize, [f32; 4])> {
+    let mut edges = Vec::new();
+    b.align();
+    let mut fill_bits = b.ub(4);
+    let mut line_bits = b.ub(4);
+    let (mut x, mut y) = (0.0f32, 0.0f32);
+    let (mut f0, mut f1) = (0u32, 0u32);
+    let mut base = 0usize;
+    let push = |edges: &mut Vec<(usize, [f32; 4])>, base: usize, f0: u32, f1: u32, s: [f32; 4]| {
+        for f in [f0, f1] {
+            if f > 0 {
+                edges.push((base + f as usize - 1, s));
+            }
+        }
+    };
+    while b.pos < end {
+        if b.ub(1) == 0 {
+            let flags = b.ub(5);
+            if flags == 0 {
+                break;
+            }
+            if flags & 1 != 0 {
+                let n = b.ub(5);
+                x = b.sb(n) as f32;
+                y = b.sb(n) as f32;
+            }
+            if flags & 2 != 0 {
+                f0 = b.ub(fill_bits);
+            }
+            if flags & 4 != 0 {
+                f1 = b.ub(fill_bits);
+            }
+            if flags & 8 != 0 {
+                b.ub(line_bits);
+            }
+            if flags & 16 != 0 && shape_ver >= 2 {
+                base = fills.len();
+                fills.extend(parse_fills(b, shape_ver));
+                skip_line_styles(b, shape_ver);
+                b.align();
+                fill_bits = b.ub(4);
+                line_bits = b.ub(4);
+            }
+        } else if b.ub(1) == 1 {
+            let n = b.ub(4) + 2;
+            let (dx, dy) = if b.ub(1) == 1 {
+                (b.sb(n) as f32, b.sb(n) as f32)
+            } else if b.ub(1) == 1 {
+                (0.0, b.sb(n) as f32)
+            } else {
+                (b.sb(n) as f32, 0.0)
+            };
+            push(&mut edges, base, f0, f1, [x, y, x + dx, y + dy]);
+            x += dx;
+            y += dy;
+        } else {
+            let n = b.ub(4) + 2;
+            let (cx, cy) = (x + b.sb(n) as f32, y + b.sb(n) as f32);
+            let (ax, ay) = (cx + b.sb(n) as f32, cy + b.sb(n) as f32);
+            // Flattened by length (about one segment per 2 pixels of a 20-twip pixel, 2 .. 32).
+            let len = ((cx - x).hypot(cy - y) + (ax - cx).hypot(ay - cy)) / 40.0;
+            let steps = (len.ceil() as usize).clamp(2, 32);
+            let (mut px, mut py) = (x, y);
+            for k in 1..=steps {
+                let t = k as f32 / steps as f32;
+                let u = 1.0 - t;
+                let qx = u * u * x + 2.0 * u * t * cx + t * t * ax;
+                let qy = u * u * y + 2.0 * u * t * cy + t * t * ay;
+                push(&mut edges, base, f0, f1, [px, py, qx, qy]);
+                px = qx;
+                py = qy;
+            }
+            x = ax;
+            y = ay;
+        }
+    }
+    edges
 }
 
 fn parse_edit_text(b: &mut Bits, bounds: Rect, end: usize) -> EditText {
@@ -561,8 +712,10 @@ fn parse_tags(d: &[u8], mut pos: usize, end: usize, movie: &mut Movie, sprite: &
                     32 => 3,
                     _ => 4,
                 };
-                let fills = parse_fills(&mut b, ver);
-                movie.shapes.insert(id, Shape { bounds, fills });
+                let mut fills = parse_fills(&mut b, ver);
+                skip_line_styles(&mut b, ver);
+                let edges = parse_shape_records(&mut b, ver, tend, &mut fills);
+                movie.shapes.insert(id, Shape { bounds, fills, edges });
             }
             26 | 70 => frame.push(FrameOp::Place(parse_place(&mut b, if code == 26 { 2 } else { 3 }, tend))),
             28 => {
@@ -669,7 +822,9 @@ impl Movie {
         if raw.len() < 8 || !(&raw[0..3] == b"GFX" || &raw[0..3] == b"FWS") {
             bail!("not an uncompressed GFx/SWF movie");
         }
-        let mut m = Movie { version: raw[3], ..Default::default() };
+        // FNV-1a of the data.
+        let key = raw.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x0100_0000_01b3));
+        let mut m = Movie { key, version: raw[3], ..Default::default() };
         let mut b = Bits::new(raw, 8);
         m.frame_size = b.rect();
         let fr = b.u16();

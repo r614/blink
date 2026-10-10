@@ -22,6 +22,7 @@ pub mod spline_mesh;
 pub mod static_mesh;
 pub mod swf;
 pub mod swf_font;
+pub mod swf_shape;
 pub mod edge_anim;
 pub mod facefx;
 pub mod gameplay;

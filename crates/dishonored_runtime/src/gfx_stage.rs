@@ -1239,6 +1239,18 @@ impl Stage {
                 let (px, py) = m.apply(x, y);
                 Vec2::new(px, py) / 20.0
             });
+            // Solid and gradient fills: the shape's raster over the extent it covers.
+            if dishonored_assets::swf_shape::has_vector_fill(sh) {
+                let (w, h, o, sc) = dishonored_assets::swf_shape::raster_dims(sh);
+                let (x1, y1) = (o.0 + w as f32 / sc, o.1 + h as f32 / sc);
+                let rc = [(o.0, o.1), (x1, o.1), (x1, y1), (o.0, y1)].map(|(x, y)| {
+                    let (px, py) = m.apply(x, y);
+                    Vec2::new(px, py) / 20.0
+                });
+                if let Some((src, dst)) = clip_quad([0.0, 0.0, w as f32, h as f32], rc, masks.as_slice()) {
+                    out.push(Draw::Quad { tex: TexKey::Shape(mv.key, n.character), src, dst, rgba: rgba([1.0; 4]) });
+                }
+            }
             for fill in &sh.fills {
                 match fill {
                     Fill::Bitmap { bitmap, matrix, .. } => {
@@ -1258,17 +1270,8 @@ impl Stage {
                         }
                         break;
                     }
-                    Fill::Solid(col) => {
-                        let base = [col[0] as f32 / 255.0, col[1] as f32 / 255.0, col[2] as f32 / 255.0, col[3] as f32 / 255.0];
-                        let rc = rgba(base);
-                        if rc[3] > 0.002 {
-                            if let Some((_, dst)) = clip_quad([0.0, 0.0, 1.0, 1.0], corners, masks.as_slice()) {
-                                out.push(Draw::Solid { dst, rgba: rc });
-                            }
-                        }
-                        break;
-                    }
-                    Fill::Gradient => {}
+                    // Drawn from the raster above.
+                    Fill::Solid(_) | Fill::Gradient(_) => {}
                 }
             }
         }
@@ -1404,6 +1407,8 @@ fn clip_quad(src: [f32; 4], dst: [Vec2; 4], masks: &[[Vec2; 4]]) -> Option<([f32
 pub enum TexKey {
     Movie(String),
     External(String),
+    /// A vector shape's raster (`swf_shape::rasterize`): (movie key, shape id).
+    Shape(u64, u16),
 }
 
 /// A flattened draw item (stage pixels).
@@ -1424,11 +1429,29 @@ pub enum Draw {
 pub struct StageTextures {
     pub movie: HashMap<String, Handle<Image>>,
     pub external: HashMap<String, Option<(Handle<Image>, Vec2)>>,
+    /// The movies' vector shapes rasterized: (movie key, shape id).
+    pub shapes: HashMap<(u64, u16), Handle<Image>>,
 }
 
 impl StageTextures {
     /// Decode every image the movie names from its package.
     pub fn load_movie(&mut self, content: &dishonored_assets::Content, package: &str, movie: &Movie, images: &mut Assets<Image>) {
+        // Vector shapes (solid and gradient fills on their edges) as the player draws them.
+        for (id, sh) in &movie.shapes {
+            if self.shapes.contains_key(&(movie.key, *id)) {
+                continue;
+            }
+            if let Some(r) = dishonored_assets::swf_shape::rasterize(sh) {
+                let img = Image::new(
+                    bevy::render::render_resource::Extent3d { width: r.width, height: r.height, depth_or_array_layers: 1 },
+                    bevy::render::render_resource::TextureDimension::D2,
+                    r.rgba,
+                    bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+                    bevy::asset::RenderAssetUsages::RENDER_WORLD,
+                );
+                self.shapes.insert((movie.key, *id), images.add(img));
+            }
+        }
         let Ok(pkg) = content.package(package) else { return };
         for im in movie.images.values() {
             let key = im.file_name.trim_end_matches(".tga").trim_end_matches(".dds").to_string();
@@ -1568,6 +1591,7 @@ pub fn sync_view(
                     let h = match tex {
                         TexKey::Movie(k) => textures.movie.get(k).cloned(),
                         TexKey::External(p) => textures.external.get(p).cloned().flatten().map(|(h, _)| h),
+                        TexKey::Shape(m, id) => textures.shapes.get(&(*m, *id)).cloned(),
                     };
                     h.map(|h| (h, Some(Rect::new(src[0], src[1], src[2], src[3])), *dst, *rgba))
                 }

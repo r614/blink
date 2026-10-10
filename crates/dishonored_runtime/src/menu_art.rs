@@ -361,7 +361,7 @@ impl MovieArt {
                         out.push(Flat::Solid(dst, rgba, path.to_string()));
                         break;
                     }
-                    Fill::Gradient => {}
+                    Fill::Gradient(_) => {}
                 }
             }
             return;
