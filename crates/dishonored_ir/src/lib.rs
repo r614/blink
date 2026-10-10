@@ -6,6 +6,7 @@
 //! convert to their own frame (see `dishonored_runtime::coords`).
 
 pub mod ai;
+pub mod anim_tree;
 pub mod env_light;
 pub mod gameplay;
 pub mod items;

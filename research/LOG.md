@@ -5,6 +5,21 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613â€¦c6fb` un
 
 ---
 
+## 2026-10-10 â€” AnimTree node-graph IR decoder
+
+- **Question:** Can the cooked `AnimTree` assets be decoded as node graphs, so that one evaluator can play every tree instead of the hand-coded layers of `NPC_Human_at` and the player's pickers (research/ARCHITECTURE.md)?
+- **Method:** `obj_dump` of the `Startup` `DishonoredAnimTree` exports and of the `NPC_Human_at` nodes for the cooked property names; `research/dishonored/ANIMATION.md` section 2 as the reference structure.
+- **Findings:**
+  - The tree object (`DishonoredAnimTree`, itself a blend node) holds the root in `Children[0].Anim`; every node's `Children[]` is `AnimBlendChild` (`Name`, `Anim`, `Weight`, `bMirrorSkeleton`, `bIsAdditive`); shared children (the `AdditiveReactSlot` under every physics mode) are one export reached from several parents.
+  - Engine classes keep UE3's names: sequence nodes (`AnimNodeSequence`, Arkane's `DishonoredAnimNodeSeq`) `AnimSeqName`, `bLooping`, `bPlaying`, `SynchGroupName` (`LocoGroup`), `RootBoneOption[3]` / `RootRotationOption[3]`, `Rate` unset (1); `AnimNodeBlendPerBone` `BranchStartBoneName`, `bForceLocalSpaceBlend`, Arkane's `m_bExcludeBranchBones`; slots `bEarlyAnimEndNotify`. `ArkAnimNodeLookAt` lists its grids in `Anims[].AnimName` (nine head, nine torso). `NPC_Human_at`'s `ArkAnimNodeLocomotion` overrides only `m_fTurnFastBlendDuration`; `m_fVelocityMaxBlendSpeed` 2000, `m_fVelocityMaxDif` 100, `m_fVelocityMinBlendSpeedRatio` 0.1 and `m_fModifierBlendDuration` 0.5 come from `Engine.Default__ArkAnimNodeLocomotion`.
+  - `SkelControlLists[]` (`BoneName`, `ControlHead`, chained by `NextControl`): `NPC_Human_at` has the spine bender on `spine_0_jnt`, single-bone controls on both eyes and `DisSkelControl_FootPlacement` on both feet (`FootPlacement_Left` / `_Right`, the values of ANIMATION.md section 2). `AnimGroups`: `FootCycles` and `LocoGroup`.
+  - Node classes across `NPC_Human_at`, `NPC_Dead_at` and `Ply_Player_at`: AnimNodeBlendByPhysics, DisAnimNodeSlot, AnimNodeSlot, ArkAnimNodeBlendPose, ArkAnimNodeStack, AnimNodeBlendPerBone, AnimNodeAdditiveBlending, ArkAnimNodeLocomotion, ArkAnimNodeLookAt, AnimNodeSequence, DishonoredAnimNodeSeq (and the player tree's Dishonored* nodes, kept as `Other` with their raw properties).
+- **Implementation:** `dishonored_ir::anim_tree` (`AnimTreeAsset`, `AnimNode` with `NodeProps` per class and every property as `raw`, so an unmodelled class is kept, never dropped), `dishonored_assets::anim_tree::load_anim_tree`, `npc_anim_dump tree <pkg> <path>` (`research/dishonored/animation/ANIMTREE_NPC_HUMAN.md` is its output). No evaluator yet.
+- **Validation:** `crates/dishonored_assets/tests/anim_tree_retail.rs`: the structure of ANIMATION.md section 2 (root, the named nodes and their classes, `FaceFilter` `head_jnt` excluded, `UpperBodyFilter` `spine_0_jnt`, the locomotion tunables, the look-at grids, `LocoGroup` loops, the foot placement controls) and the player tree's `UpperBodyFilter` / `LeftArmFilter` branches.
+- **Open:** the evaluator (ARCHITECTURE.md step 3); `RootBoneOption` / `RootRotationOption` and the Dishonored* player node classes are kept raw until it needs them.
+
+---
+
 ## 2026-10-04 â€” Installation fingerprint
 - **Question:** What exactly is the canonical target?
 - **Evidence:** GOG registry key `GOG.com\Games\1701063787`, `goggame-1701063787.info`, file hashes.
