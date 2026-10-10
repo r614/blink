@@ -483,6 +483,8 @@ impl Chain {
 pub struct PawnAnim {
     /// The AI combat move last seen in the pawn's input (`PlayerInput::npc_move`).
     pub last_move: u8,
+    /// The behaviour's GenericAction request played last (its serial).
+    pub action_serial: u32,
     pub phase: f32,
     pub modifier: String,
     pub prev_modifier: Option<(String, f32)>,
@@ -743,6 +745,8 @@ impl AnimBank {
 pub struct AnimInput<'a> {
     pub p: &'a dishonored_sim::state::PlayerState,
     pub stance: Option<NpcStance>,
+    /// The behaviour's GenericAction request: (`eDisNPCAnimations` index, serial).
+    pub action: Option<(u8, u32)>,
     pub armed: bool,
     pub talking: bool,
     pub dt: f32,
@@ -1382,6 +1386,25 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
             };
             if let Some(c) = a.and_then(|a| bank.chain(profile, a, None, 0.0, true, r, "gun")) {
                 st.full = Some(c);
+            }
+        }
+        // A behaviour's GenericAction (`DisAISubStateGenericAction`: the chain its tweak names, full
+        // body): the alarm ring, the search's corpse check / lost target, GoHome's last taunt, the
+        // explosive surprise.
+        if let Some((anim, serial)) = i.action {
+            if serial != st.action_serial {
+                st.action_serial = serial;
+                let a = match anim {
+                    5 => Some(NpcAnim::Panic),
+                    32 => Some(NpcAnim::Taunt),
+                    35 => Some(NpcAnim::TriggerAlarm),
+                    36 => Some(NpcAnim::CorpseCheck),
+                    37 => Some(NpcAnim::SearchLostTarget),
+                    _ => None,
+                };
+                if let Some(c) = a.and_then(|a| bank.chain(profile, a, None, 0.0, i.armed, r, "action")) {
+                    st.full = Some(c);
+                }
             }
         }
         let stance = i.stance;

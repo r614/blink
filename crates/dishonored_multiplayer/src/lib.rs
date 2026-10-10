@@ -79,6 +79,10 @@ pub struct MatchView {
     /// AI pawns' presentation stance (brain state), every snapshot.
     #[serde(default)]
     pub npc_poses: Vec<(PlayerId, dishonored_ir::npc_anim::NpcStance)>,
+    /// The GenericAction animation each AI pawn's behaviour last asked for: (pawn,
+    /// `eDisNPCAnimations` index, request serial).
+    #[serde(default)]
+    pub npc_actions: Vec<(PlayerId, u8, u32)>,
     /// Active persistent map (changes on level travel; clients reload the renderer).
     #[serde(default)]
     pub map: String,
@@ -309,6 +313,12 @@ pub fn npc_heads(brains: &[dishonored_ai::Brain], ai: &dishonored_ir::ai::AiConf
             (!still).then_some(dishonored_ir::npc_anim::NpcHead { id: b.id, head, torso })
         })
         .collect()
+}
+
+/// The behaviours' GenericAction animation requests (`dishonored_ai::Brain::anim_request`) of
+/// the pawns that made one.
+pub fn npc_actions(brains: &[dishonored_ai::Brain]) -> Vec<(PlayerId, u8, u32)> {
+    brains.iter().filter(|b| b.anim_request.serial != 0).map(|b| (b.id, b.anim_request.anim, b.anim_request.serial)).collect()
 }
 
 /// Presentation stance of every AI pawn, from its brain state (animation only: locomotion

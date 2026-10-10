@@ -130,6 +130,28 @@ pub enum BrainState {
     Awe,
 }
 
+/// A GenericAction animation request of a behaviour: the `eDisNPCAnimations` index and a serial
+/// counting the requests (0: none yet).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnimRequest {
+    pub anim: u8,
+    pub serial: u32,
+}
+
+impl AnimRequest {
+    pub fn ask(&mut self, anim: u8) {
+        self.anim = anim;
+        self.serial = self.serial.wrapping_add(1).max(1);
+    }
+}
+
+/// `eDisNPCAnimations` the behaviours' GenericActions name (`dishonored_ir::npc_anim::NpcAnim`).
+pub const NPC_ANIM_PANIC: u8 = 5;
+pub const NPC_ANIM_TAUNT: u8 = 32;
+pub const NPC_ANIM_TRIGGER_ALARM: u8 = 35;
+pub const NPC_ANIM_CORPSE_CHECK: u8 = 36;
+pub const NPC_ANIM_SEARCH_LOST_TARGET: u8 = 37;
+
 /// What a crowd reports to its host after a tick.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AiEvent {
@@ -534,6 +556,11 @@ pub struct Brain {
     /// each tick; 0x00adac60).
     #[serde(skip)]
     pub dialog_look: Option<Vec3>,
+    /// The GenericAction animation the behaviour last asked for (`eDisNPCAnimations` index) and
+    /// a serial counting the requests (0: none yet): the presentation plays the chain when the
+    /// serial changes ([`AnimRequest`]).
+    #[serde(default)]
+    pub anim_request: AnimRequest,
     /// HeadTrackPause: pausing (`m_bIsPausing`), the heading when the pause began
     /// (`m_OriginalPauseYaw`) and the side it turns to (the FaceTo request).
     #[serde(default)]
@@ -1913,6 +1940,7 @@ impl Brain {
             tether_now: None,
             tether_last: None,
             dialog_look: None,
+            anim_request: AnimRequest::default(),
             track_pause: false,
             track_pause_yaw: 0.0,
             track_face: None,
@@ -3019,6 +3047,7 @@ impl Brain {
     fn escape_reaction(&mut self, ai: &AiConfig) -> EscapePhase {
         self.barks.push(("DDH_ESCAPE_IMPENDING_EXPLOSION".into(), None));
         if rng_next(&mut self.rng) < ai.escape_explosion.surprise_chance {
+            self.anim_request.ask(NPC_ANIM_PANIC);
             EscapePhase::Surprise(ai.escape_explosion.anim_surprise)
         } else {
             EscapePhase::Flee
@@ -3377,6 +3406,7 @@ impl Brain {
                 } else {
                     s.sub = SearchSub::GenericAction;
                     s.timer = if s.corpse { ss.anim_corpse_check } else { ss.anim_lost_target };
+                    self.anim_request.ask(if s.corpse { NPC_ANIM_CORPSE_CHECK } else { NPC_ANIM_SEARCH_LOST_TARGET });
                 }
                 face(s.proxy)
             }
@@ -3679,6 +3709,8 @@ impl Brain {
             a.ringer = None;
             a.acquired = false;
             ctx.events.push(AiEvent::AlarmRang { bell: bi, name: a.def.name.clone(), ringer: self.id, enemy: a.enemy });
+            // `DisBehaviorTriggerAlarm`'s ring at the bell: `DisNPCAnim_TriggerAlarm`.
+            self.anim_request.ask(NPC_ANIM_TRIGGER_ALARM);
             self.bell = None;
             self.complete(slot::ALERT);
             return face(pos);
@@ -3820,6 +3852,7 @@ impl Brain {
                             if s.rotation_reached && s.sub != GoHomeSub::LastTaunt {
                                 s.sub = GoHomeSub::LastTaunt;
                                 s.timer = gh.anim_taunt;
+                                self.anim_request.ask(NPC_ANIM_TAUNT);
                             }
                         } else {
                             s.sub = GoHomeSub::FinalStretch;
@@ -5319,6 +5352,9 @@ mod tests {
                 match e {
                     AiEvent::AlarmRang { ringer, .. } => {
                         assert_eq!(*ringer, g.id);
+                        // The ring plays `DisNPCAnim_TriggerAlarm` (the behaviour's GenericAction).
+                        assert_eq!(c.brains[0].anim_request.anim, NPC_ANIM_TRIGGER_ALARM);
+                        assert!(c.brains[0].anim_request.serial > 0);
                         rang = true;
                     }
                     AiEvent::AlarmSpawn { enemy, .. } => {
