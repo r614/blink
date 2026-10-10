@@ -27,7 +27,7 @@ struct CaptureNode {
     #[serde(skip_serializing_if = "Option::is_none")]
     sequence: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    children: Option<Vec<usize>>,
+    children: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
