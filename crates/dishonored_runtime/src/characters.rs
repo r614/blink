@@ -672,31 +672,18 @@ pub fn animate_characters(
                 // started this frame fires from its start (a notify at 0 too).
                 for (clip, t1) in chain_clips(&st) {
                     let t0 = before.iter().find(|b| b.0 == clip).map(|b| b.1);
-                    for (t, template, point, attach) in bank.particle_notifies(profile, &clip) {
-                        let crossed = match t0 {
-                            Some(t0) => t0 < t && t <= t1,
-                            None => t <= t1,
-                        };
-                        if crossed {
-                            fired.push((template, point, attach));
-                        }
-                    }
-                    for d in bank.drop_notifies(profile, &clip) {
-                        let crossed = match t0 {
-                            Some(t0) => t0 < d.t && d.t <= t1,
-                            None => d.t <= t1,
-                        };
-                        if crossed {
-                            drop_notify = Some(d);
-                        }
-                    }
-                    for s in bank.sever_notifies(profile, &clip) {
-                        let crossed = match t0 {
-                            Some(t0) => t0 < s.t && s.t <= t1,
-                            None => s.t <= t1,
-                        };
-                        if crossed {
-                            severs.push(s);
+                    for n in bank.crossed(profile, &clip, t0, t1) {
+                        match n.kind {
+                            crate::npc_anim::NotifyKind::PlayParticleEffect { template, point, attach } => {
+                                fired.push((template, point, attach));
+                            }
+                            crate::npc_anim::NotifyKind::DropItem(d) => {
+                                drop_notify = Some(d);
+                            }
+                            crate::npc_anim::NotifyKind::SeverLimb(s) => {
+                                severs.push(s);
+                            }
+                            _ => {}
                         }
                     }
                 }
