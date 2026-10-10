@@ -65,7 +65,9 @@ enum NodeState {
     Sequence { weight: f32, relevant: bool, seq: String, time: f32, rate: f32 },
 }
 
-/// Port dump frame.
+/// Port dump frame (`characters::dump_bones`): the whole record is read, the comparison uses
+/// the tick, the bones and the full-body slot.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 struct PortFrame {
     tick: u64,
@@ -81,6 +83,7 @@ struct PortFrame {
     bones: Vec<PortBone>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 struct PortSeq {
     key: String,
@@ -383,11 +386,11 @@ fn find_best_offset(
         let mut count = 0;
 
         for pf in port_frames {
-            let capture_idx = (pf.tick as i32 + offset) as usize;
-            if capture_idx >= capture_frames.len() {
+            let capture_idx = pf.tick as i64 + offset as i64;
+            if capture_idx < 0 || capture_idx as usize >= capture_frames.len() {
                 continue;
             }
-            let cf = &capture_frames[capture_idx];
+            let cf = &capture_frames[capture_idx as usize];
 
             for bone in bones {
                 if let (Some(c_bone), Some(p_bone)) =
@@ -714,42 +717,19 @@ mod tests {
 
     #[test]
     fn test_offset_search() {
-        let capture_frame = FullFrame {
-            tick: 0,
-            bones: vec![("bone_0".into(), BoneTransform { q: [0.0, 0.0, 0.0, 1.0], t: [0.0, 0.0, 0.0] })]
-                .into_iter()
-                .collect(),
-            nodes: HashMap::new(),
+        // Frame i turns the bone i x 10 degrees about Z; the port dump is the same motion
+        // starting 3 ticks later, so the capture tick is the port tick - 3 (identical frames
+        // would score every offset alike).
+        let turn = |i: usize| {
+            let q = Quat::from_axis_angle(glam::Vec3::Z, (i as f32 * 10.0).to_radians());
+            [q.x, q.y, q.z, q.w]
         };
-
-        let capture_frames = vec![
-            capture_frame.clone(),
-            capture_frame.clone(),
-            capture_frame.clone(),
-            capture_frame.clone(),
-            capture_frame.clone(),
-        ];
-
-        let mut port_frames = Vec::new();
-        for i in 0..5 {
-            port_frames.push(PortFrame {
-                tick: (i + 3) as u64,
-                id: 1,
-                pos: [0.0, 0.0, 0.0],
-                yaw: 0.0,
-                modifier: None,
-                vel: None,
-                phase: None,
-                full: None,
-                upper: None,
-                ragdoll: false,
-                bones: vec![PortBone {
-                    name: "bone_0".into(),
-                    q: [0.0, 0.0, 0.0, 1.0],
-                    t: [0.0, 0.0, 0.0],
-                }],
-            });
-        }
+        let capture_frames: Vec<FullFrame> = (0..8)
+            .map(|i| FullFrame { tick: i as u64, bones: vec![("bone_0".to_string(), BoneTransform { q: turn(i), t: [0.0; 3] })].into_iter().collect(), nodes: HashMap::new() })
+            .collect();
+        let port_frames: Vec<PortFrame> = (0..5)
+            .map(|i| PortFrame { tick: (i + 3) as u64, id: 1, pos: [0.0; 3], yaw: 0.0, modifier: None, vel: None, phase: None, full: None, upper: None, ragdoll: false, bones: vec![PortBone { name: "bone_0".into(), q: turn(i), t: [0.0; 3] }] })
+            .collect();
 
         let bones = vec!["bone_0".to_string()];
         let offset = find_best_offset(&capture_frames, &port_frames, &bones).unwrap();
