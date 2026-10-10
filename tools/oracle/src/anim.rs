@@ -3,6 +3,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use glam::Quat;
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::collections::{BTreeMap, HashMap};
 
 /// Parse the oracle capture sidecar JSON.
@@ -39,7 +40,7 @@ struct CaptureFrame {
     #[serde(skip_serializing_if = "Option::is_none")]
     ws: Option<BTreeMap<String, Vec<i32>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    nodes: Option<BTreeMap<String, Vec<i32>>>,
+    nodes: Option<BTreeMap<String, Vec<serde_json::Value>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     blend: Option<BTreeMap<String, Vec<i32>>>,
 }
@@ -159,9 +160,11 @@ pub fn cmd_anim_info(path: &str) -> Result<()> {
                         if let Ok(idx) = node_idx.parse::<usize>() {
                             if let Some(node) = nodes_list.get(idx) {
                                 if node.sequence == Some(true) && values.len() >= 1 {
-                                    let weight = values[0] as f32 / 1000.0;
-                                    if weight > 0.0 && !node.name.is_empty() && node.name != "None" {
-                                        playing_seqs.insert(node.name.clone());
+                                    if let Some(w) = values[0].as_i64() {
+                                        let weight = w as f32 / 1000.0;
+                                        if weight > 0.0 && !node.name.is_empty() && node.name != "None" {
+                                            playing_seqs.insert(node.name.clone());
+                                        }
                                     }
                                 }
                             }
@@ -221,19 +224,29 @@ fn reconstruct_frames(body: &CaptureBody) -> Result<Vec<FullFrame>> {
                 if values.is_empty() {
                     continue;
                 }
-                let weight = values[0] as f32 / 1000.0;
-                let relevant = values.len() > 1 && values[1] != 0;
+                let weight = match values.get(0) {
+                    Some(v) => v.as_i64().unwrap_or(0) as f32 / 1000.0,
+                    None => 0.0,
+                };
+                let relevant = match values.get(1) {
+                    Some(v) => v.as_i64().unwrap_or(0) != 0,
+                    None => false,
+                };
 
                 if values.len() >= 5 {
                     // Sequence node
-                    let seq = if values[2] < 0 {
-                        "".to_string()
-                    } else {
-                        // Try to decode the sequence name from the value if needed
-                        values.get(2).map(|_| "".to_string()).unwrap_or_default()
+                    let seq = match values.get(2) {
+                        Some(v) => v.as_str().unwrap_or("").to_string(),
+                        None => "".to_string(),
                     };
-                    let time = values.get(3).map(|v| *v as f32 / 1000.0).unwrap_or(0.0);
-                    let rate = values.get(4).map(|v| *v as f32 / 1000.0).unwrap_or(1.0);
+                    let time = match values.get(3) {
+                        Some(v) => v.as_i64().unwrap_or(0) as f32 / 1000.0,
+                        None => 0.0,
+                    };
+                    let rate = match values.get(4) {
+                        Some(v) => v.as_i64().unwrap_or(1000) as f32 / 1000.0,
+                        None => 1.0,
+                    };
                     last_nodes.insert(
                         node_idx.clone(),
                         NodeState::Sequence { weight, relevant, seq, time, rate },
