@@ -639,6 +639,9 @@ pub fn resolve_appearances(content: &Content, level_packages: &[String], tweaks:
         if let Some(TVal::Obj(o)) = m.get("m_pPhysicsAsset") {
             a.anim.physics = locate(o);
         }
+        if let Some(TVal::Obj(o)) = m.get("m_pSeveredLimbInfo") {
+            a.anim.severed_limbs = locate(o);
+        }
         // Look-at configs are cooked into DishonoredGame (`DisLookatConfig.*`).
         if let Some(TVal::Obj(o)) = m.get("m_pComponentLookatConfig") {
             a.anim.lookat = locate(o).or_else(|| Some(("DishonoredGame".to_string(), o.clone())));

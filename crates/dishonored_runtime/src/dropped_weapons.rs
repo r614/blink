@@ -25,7 +25,7 @@
 //! grid and wall triangles, around the drop point). Resting on an edge is unstable for that
 //! body, so a blade settles flat as its hull does. It runs at the ragdoll's fixed step.
 
-use crate::ragdoll::{DAMPING, FRICTION, FloorGrid, ITERATIONS, MAX_TIME, STEP, WallTri, frame};
+use crate::ragdoll::{DAMPING, FRICTION, FloorGrid, ITERATIONS, MAX_TIME, SLEEP_SPEED, SLEEP_TIME, STEP, WallTri, frame};
 use bevy::prelude::*;
 use std::collections::HashSet;
 
@@ -89,6 +89,8 @@ pub struct Dropped {
     gravity: f32,
     pub elapsed: f32,
     acc: f32,
+    /// Seconds every point has moved slower than PhysX's sleep speed.
+    still: f32,
     entities: Vec<Entity>,
 }
 
@@ -108,7 +110,7 @@ impl Dropped {
             }
         }
         let back = velocity * STEP;
-        Dropped { pawn, origin, pts: p0, prev: p0.map(|p| p - back), rest, p0, m0, radius, floor: FloorGrid::sample(floor_at), walls: walls.iter().filter_map(|t| WallTri::new(*t)).collect(), gravity, elapsed: 0.0, acc: 0.0, entities: Vec::new() }
+        Dropped { pawn, origin, pts: p0, prev: p0.map(|p| p - back), rest, p0, m0, radius, floor: FloorGrid::sample(floor_at), walls: walls.iter().filter_map(|t| WallTri::new(*t)).collect(), gravity, elapsed: 0.0, acc: 0.0, still: 0.0, entities: Vec::new() }
     }
 
     pub fn step(&mut self) {
@@ -156,13 +158,19 @@ impl Dropped {
         }
     }
 
-    /// Advance by `dt` real seconds (fixed steps); a pickup sleeps after the ragdoll's time.
+    /// Advance by `dt` real seconds (fixed steps); a pickup sleeps as the ragdoll does (PhysX's
+    /// sleep speed held for its sleep time, at the latest after the ragdoll's time).
     pub fn advance(&mut self, dt: f32) {
         self.acc += dt;
         while self.acc >= STEP && self.elapsed < MAX_TIME {
             self.acc -= STEP;
             self.elapsed += STEP;
             self.step();
+            let fastest = (0..4).map(|i| (self.pts[i] - self.prev[i]).length() / STEP).fold(0.0f32, f32::max);
+            self.still = if fastest < SLEEP_SPEED { self.still + STEP } else { 0.0 };
+            if self.still >= SLEEP_TIME {
+                self.elapsed = self.elapsed.max(MAX_TIME);
+            }
         }
     }
 

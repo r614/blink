@@ -10,6 +10,12 @@
 //! It runs at a fixed step from the pose sampled exactly at the notify time, so a corpse settles
 //! the same way on every run. The simulation's corpse position stays authoritative: the ragdoll
 //! only moves bones inside the pawn's frame.
+//!
+//! A joint's swing cone is centred on the child's direction in the reference pose (a PhysX joint
+//! limits the bodies' relative turn from the constraint frames, which UE3 sets from the reference
+//! skeleton), carried by the parent segment's turn. Bodies go to sleep as PhysX's do (the SDK
+//! defaults UE3 keeps: below 0.15 m/s, 7.5 uu/s, for 20 steps of 1/50 s), at the latest after
+//! [`MAX_TIME`].
 
 use crate::characters::PartGpu;
 use dishonored_ir::BoneAsset;
@@ -26,6 +32,11 @@ pub const DAMPING: f32 = 0.985;
 pub const FRICTION: f32 = 0.6;
 /// A ragdoll stops after this long (PhysX puts resting bodies to sleep).
 pub const MAX_TIME: f32 = 4.0;
+/// PhysX's default sleep speed (`NX_DEFAULT_SLEEP_LIN_VEL_SQUARED` 0.15^2 m^2/s^2: 0.15 m/s = 7.5
+/// uu/s at 50 uu/m) and the time below it before a body sleeps (`NX_SLEEP_INTERVAL` 20 steps of
+/// 1/50 s).
+pub const SLEEP_SPEED: f32 = 7.5;
+pub const SLEEP_TIME: f32 = 0.4;
 
 pub struct Body {
     pub bone: usize,
@@ -40,6 +51,8 @@ pub struct Body {
     pub swing: f32,
     /// Start pose: global (pawn space) transform of the bone.
     pub g0: Mat4,
+    /// Reference pose: global (pawn space) transform of the bone (the swing cone's centre).
+    pub b0: Mat4,
 }
 
 pub struct Ragdoll {
@@ -54,6 +67,8 @@ pub struct Ragdoll {
     pub gravity: f32,
     pub elapsed: f32,
     pub acc: f32,
+    /// Seconds every body has moved slower than [`SLEEP_SPEED`].
+    pub still: f32,
 }
 
 /// Floor heights (pawn space) on a square grid around the pawn's origin, sampled once.
@@ -192,17 +207,19 @@ pub fn frame(a1: Vec3, a2: Vec3, b1: Vec3, b2: Vec3) -> Quat {
 }
 
 impl Ragdoll {
-    /// Build from part 0's bones and the start / previous-step globals (pawn space). `floor` is
-    /// the floor height under a pawn-space point, `walls` the level's collision triangles around
-    /// the pawn (pawn space; only the steep ones are kept), `gravity` uu/s^2 (negative, down).
-    pub fn new(asset: &PhysicsAssetData, part: &[BoneAsset], g0: &[Mat4], g_prev: &[Mat4], floor_at: &dyn Fn(f32, f32) -> f32, walls: &[[Vec3; 3]], gravity: f32) -> Option<Ragdoll> {
+    /// Build from part 0's bones, their reference-pose globals and the start / previous-step
+    /// globals (pawn space). `floor` is the floor height under a pawn-space point, `walls` the
+    /// level's collision triangles around the pawn (pawn space; only the steep ones are kept),
+    /// `gravity` uu/s^2 (negative, down).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(asset: &PhysicsAssetData, part: &[BoneAsset], bind: &[Mat4], g0: &[Mat4], g_prev: &[Mat4], floor_at: &dyn Fn(f32, f32) -> f32, walls: &[[Vec3; 3]], gravity: f32) -> Option<Ragdoll> {
         let find = |n: &str| part.iter().position(|b| b.name.eq_ignore_ascii_case(n));
         let mut bodies: Vec<Body> = Vec::new();
         for b in &asset.bodies {
             let Some(bone) = find(&b.bone) else { continue };
             let pos = g0[bone].w_axis.truncate();
             let prev = g_prev.get(bone).map(|g| g.w_axis.truncate()).unwrap_or(pos);
-            bodies.push(Body { bone, parent: None, child: None, child2: None, pos, prev, radius: b.radius.max(2.0), rest: 0.0, swing: std::f32::consts::PI, g0: g0[bone] });
+            bodies.push(Body { bone, parent: None, child: None, child2: None, pos, prev, radius: b.radius.max(2.0), rest: 0.0, swing: std::f32::consts::PI, g0: g0[bone], b0: bind.get(bone).copied().unwrap_or(g0[bone]) });
         }
         if bodies.len() < 2 {
             return None;
@@ -262,7 +279,7 @@ impl Ragdoll {
             })
             .collect();
         let walls = walls.iter().filter_map(|t| WallTri::new(*t)).collect();
-        Some(Ragdoll { bodies, owner, top, g0: g0.to_vec(), floor: FloorGrid::sample(floor_at), walls, gravity, elapsed: 0.0, acc: 0.0 })
+        Some(Ragdoll { bodies, owner, top, g0: g0.to_vec(), floor: FloorGrid::sample(floor_at), walls, gravity, elapsed: 0.0, acc: 0.0, still: 0.0 })
     }
 
     /// Parents before children.
@@ -304,13 +321,13 @@ impl Ragdoll {
                 self.bodies[i].pos -= corr;
                 self.bodies[p].pos += corr;
             }
-            // Swing cones: the child segment stays within the limit of its start direction,
-            // carried by the parent segment's turn.
+            // Swing cones: the child segment stays within the limit of its reference-pose
+            // direction, carried by the parent segment's turn.
             for &i in &order {
                 let Some(p) = self.bodies[i].parent else { continue };
                 let Some(gp) = self.bodies[p].parent else { continue };
-                let rest_dir = (self.bodies[i].g0.w_axis - self.bodies[p].g0.w_axis).truncate();
-                let par0 = (self.bodies[p].g0.w_axis - self.bodies[gp].g0.w_axis).truncate();
+                let rest_dir = (self.bodies[i].b0.w_axis - self.bodies[p].b0.w_axis).truncate();
+                let par0 = (self.bodies[p].b0.w_axis - self.bodies[gp].b0.w_axis).truncate();
                 let par = self.bodies[p].pos - self.bodies[gp].pos;
                 let want = arc(par0, par) * rest_dir;
                 let cur = self.bodies[i].pos - self.bodies[p].pos;
@@ -356,24 +373,39 @@ impl Ragdoll {
         }
     }
 
+    /// Whether the bodies sleep (PhysX's sleep test, or the time cap).
+    pub fn asleep(&self) -> bool {
+        self.elapsed >= MAX_TIME
+    }
+
+    /// One fixed step, then the sleep test: every body slower than [`SLEEP_SPEED`] for
+    /// [`SLEEP_TIME`] puts the ragdoll to sleep.
+    fn tick(&mut self) {
+        self.elapsed += STEP;
+        self.step();
+        let fastest = self.bodies.iter().map(|b| (b.pos - b.prev).length() / STEP).fold(0.0f32, f32::max);
+        self.still = if fastest < SLEEP_SPEED { self.still + STEP } else { 0.0 };
+        if self.still >= SLEEP_TIME {
+            self.elapsed = self.elapsed.max(MAX_TIME);
+        }
+    }
+
     /// Advance by `dt` real seconds (fixed steps; the result does not depend on frame times).
     pub fn advance(&mut self, dt: f32) {
-        if self.elapsed >= MAX_TIME {
+        if self.asleep() {
             return;
         }
         self.acc += dt;
-        while self.acc >= STEP && self.elapsed < MAX_TIME {
+        while self.acc >= STEP && !self.asleep() {
             self.acc -= STEP;
-            self.elapsed += STEP;
-            self.step();
+            self.tick();
         }
     }
 
     /// Run to rest at once (a corpse first seen after it fell).
     pub fn settle(&mut self) {
-        while self.elapsed < MAX_TIME {
-            self.elapsed += STEP;
-            self.step();
+        while !self.asleep() {
+            self.tick();
         }
     }
 
@@ -440,5 +472,52 @@ impl Ragdoll {
             .iter()
             .map(|part| part.bones.iter().map(|b| p0.bones.iter().position(|x| x.name.eq_ignore_ascii_case(&b.name)).map(|i| local[i])).collect())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dishonored_ir::npc_anim::{PhysBody, PhysConstraint};
+
+    /// A three-body chain (root, mid, tip) along +x; bones are their bodies.
+    fn chain(swing: f32) -> (PhysicsAssetData, Vec<BoneAsset>, Vec<Mat4>) {
+        let names = ["root", "mid", "tip"];
+        let bones: Vec<BoneAsset> = names.iter().enumerate().map(|(i, n)| BoneAsset { name: n.to_string(), parent: i as i32 - 1, rotation: Quat::IDENTITY, translation: if i == 0 { Vec3::ZERO } else { Vec3::X * 20.0 } }).collect();
+        let bodies = names.iter().map(|n| PhysBody { bone: n.to_string(), radius: 5.0, ..Default::default() }).collect();
+        let constraints = vec![
+            PhysConstraint { bone1: "mid".into(), bone2: "root".into(), swing_limited: true, swing1: swing, swing2: swing, ..Default::default() },
+            PhysConstraint { bone1: "tip".into(), bone2: "mid".into(), swing_limited: true, swing1: swing, swing2: swing, ..Default::default() },
+        ];
+        let bind = (0..3).map(|i| Mat4::from_translation(Vec3::X * 20.0 * i as f32)).collect();
+        (PhysicsAssetData { name: "test".into(), bodies, constraints }, bones, bind)
+    }
+
+    /// A ragdoll lying still on the floor sleeps after PhysX's sleep time, long before the cap.
+    #[test]
+    fn a_resting_ragdoll_sleeps() {
+        let (asset, bones, bind) = chain(45.0);
+        let g0: Vec<Mat4> = bind.iter().map(|m| Mat4::from_translation(Vec3::Z * 5.0) * *m).collect();
+        let mut rd = Ragdoll::new(&asset, &bones, &bind, &g0, &g0, &|_, _| 0.0, &[], -1000.0).unwrap();
+        rd.advance(1.0);
+        assert!(rd.asleep(), "still awake after a second ({} s still)", rd.still);
+        assert!(rd.elapsed >= MAX_TIME);
+    }
+
+    /// The swing cone is centred on the reference pose: a tip bent past its limit at the hand-over
+    /// comes back within the limit of its reference direction.
+    #[test]
+    fn the_swing_cone_is_centred_on_the_reference_pose() {
+        let (asset, bones, bind) = chain(20.0);
+        // Hand-over: the tip folded 90 degrees up from the line, high in the air, no gravity.
+        let up = Vec3::Z * 200.0;
+        let g0 = vec![Mat4::from_translation(up), Mat4::from_translation(up + Vec3::X * 20.0), Mat4::from_translation(up + Vec3::X * 20.0 + Vec3::Z * 20.0)];
+        let mut rd = Ragdoll::new(&asset, &bones, &bind, &g0, &g0, &|_, _| -1000.0, &[], 0.0).unwrap();
+        for _ in 0..30 {
+            rd.step();
+        }
+        let (r, m, t) = (rd.bodies[0].pos, rd.bodies[1].pos, rd.bodies[2].pos);
+        let ang = (m - r).angle_between(t - m).to_degrees();
+        assert!(ang <= 21.0, "tip at {ang} degrees from its parent segment");
     }
 }

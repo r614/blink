@@ -915,10 +915,17 @@ pub struct MapContents {
 
 impl MapContents {
     pub fn load(maps: &[String]) -> Result<Self> {
+        Self::load_patched(maps, &|_| {})
+    }
+
+    /// [`MapContents::load`], each map edited by `patch` before it is shared.
+    pub fn load_patched(maps: &[String], patch: &dyn Fn(&mut MatchContent)) -> Result<Self> {
         let mut loaded = Vec::new();
         for m in maps {
             if !loaded.iter().any(|x: &std::sync::Arc<MatchContent>| x.map_name.eq_ignore_ascii_case(m)) {
-                loaded.push(std::sync::Arc::new(load_match(m)?));
+                let mut c = load_match(m)?;
+                patch(&mut c);
+                loaded.push(std::sync::Arc::new(c));
             }
         }
         let set = dishonored_world::MapSet::new(loaded.iter().map(|m| (m.map_name.clone(), m.clone() as std::sync::Arc<dyn dishonored_world::WorldQuery + Send + Sync>)).collect());

@@ -77,6 +77,7 @@ pub enum Step {
     Adrenaline { adrenaline: bool },
     /// Offline sessions only: set a power's level on the local player (`state::power` index).
     Power { power: [u8; 2] },
+
     /// Game camera: third person, follow a pawn id, orbit angle (degrees) around it.
     View { view: ViewStep },
     /// Game mode: show a HUD popup or state (`hud_popups::HudTest`), e.g.
@@ -197,6 +198,7 @@ pub fn state_json(view: &SessionView, session: &Session) -> serde_json::Value {
             "blink_target": p.left.blink_target.map(|t| [t.x, t.y, t.z]),
             "pistol": [p.left.pistol_loaded, p.left.pistol_reserve as u8], "dark_vision": p.vitals.dark_vision_remaining,
             "kind": format!("{:?}", p.kind), "archetype": p.archetype,
+            "fatality": p.sword.fatality.map(|f| [f.action, f.variant]),
             "stance": view.matchv.npc_poses.iter().find(|x| x.0 == p.id).map(|x| format!("{:?}", x.1)),
             "look": (p.archetype as usize).checked_sub(dishonored_multiplayer::mission::APPEARANCE_BASE as usize).and_then(|i| view.matchv.appearances.get(i)).and_then(|l| l.parts.first()).map(|b| b.1.clone()),
         })

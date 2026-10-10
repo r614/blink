@@ -35,6 +35,52 @@ pub struct AnimProfile {
     /// Boyle pawn. Empty: none.
     #[serde(default)]
     pub empty_prefix: String,
+    /// `DisTweaks_NPCPawn.m_pSeveredLimbInfo` (the limbs a sever cuts off: their blood and lens
+    /// effects).
+    #[serde(default)]
+    pub severed_limbs: Option<(String, String)>,
+}
+
+/// A `DisSeveredLimbInfo` (`m_pSeveredLimbInfo` of the NPC pawn tweaks: `SLInfo_Default`,
+/// `SLInfo_Elite`, ...): per limb its break bone and particle effects, and the camera lens effect
+/// a sever (gore, eating) puts on a camera close by.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SeveredLimbInfo {
+    pub limbs: Vec<SeveredLimb>,
+    /// `m_CameraEffectEmitterInfoWhenSevered` / `WhenGored` / `WhenEaten`.
+    pub lens_severed: Option<LensOnContact>,
+    pub lens_gored: Option<LensOnContact>,
+    pub lens_eaten: Option<LensOnContact>,
+}
+
+/// `DisSeveredLimb`: `m_BoneBreakName`, `m_ParticleEffects`, `m_AlsoSeverWhenGored`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SeveredLimb {
+    pub bone: String,
+    pub particles: Vec<LimbParticle>,
+    pub also_sever_when_gored: Vec<String>,
+}
+
+/// `DisSeveredLimbParticleInfo`: a particle system on the mesh's socket (else bone)
+/// `m_LocationName`, attached or not, played for a sever, a gore or an eating.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LimbParticle {
+    pub location: String,
+    pub attach: bool,
+    pub severed: bool,
+    pub gored: bool,
+    pub eaten: bool,
+    /// The system's object path.
+    pub template: String,
+}
+
+/// `DisContactSub_CameraEffectEmitterInfo`: the lens effect class, played on a camera within
+/// `distance` with `probability`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LensOnContact {
+    pub class: String,
+    pub distance: f32,
+    pub probability: f32,
 }
 
 impl AnimProfile {

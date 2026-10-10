@@ -37,6 +37,27 @@ pub struct SetData {
     pub drops: HashMap<String, Vec<DropNotify>>,
     /// lowercase sequence name -> its `DisNotify_Trails` windows: (time, duration).
     pub trails: HashMap<String, Vec<(f32, f32)>>,
+    /// lowercase sequence name -> its `DishonoredNotify_SeverLimb`s.
+    pub severs: HashMap<String, Vec<SeverNotify>>,
+}
+
+/// A `DishonoredNotify_SeverLimb` (0x00A966D0, the notify's values over its class defaults:
+/// blood, no hiding, ragdoll, impulse 300): the pawn's limb at `bone` is cut off (0x00B6CC10,
+/// `crate::severed_limbs`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SeverNotify {
+    pub t: f32,
+    pub bone: String,
+    /// `m_bUseBlood`: the limb's particle effects play.
+    pub blood: bool,
+    /// `m_bHideLimb`: the limb only disappears (no severed piece).
+    pub hide: bool,
+    /// `m_bGoToRagdoll`.
+    pub ragdoll: bool,
+    /// `m_ImpulseMode`: 0 none, 1 / 2 / 3 the severed bone's X / Y / Z axis.
+    pub mode: u8,
+    /// `m_fImpulseStrength`.
+    pub strength: f32,
 }
 
 /// A `DisNotify_DropItem` (0x00A8D400): a dead pawn (health below 1, pawn slot 348 0x00B49480)
@@ -64,6 +85,8 @@ pub struct Profile {
     pub physics: Option<Arc<PhysicsAssetData>>,
     /// The pawn tweak's `ArkComponentLookatConfig` (look-at grids, blinking).
     pub lookat: Option<Arc<LookatConfig>>,
+    /// The pawn tweak's `DisSeveredLimbInfo`.
+    pub limbs: Option<Arc<SeveredLimbInfo>>,
     /// Item prefixes of item-prefixed steps: [primary item held, empty hands]
     /// (`AnimProfile::prefix`).
     pub prefix: [String; 2],
@@ -144,6 +167,9 @@ impl AnimBank {
             // The Boyle tweaks' sword (`Twk_Inv_SwordEliteGuard`) and empty hands.
             item_prefix: if archetype == 1 { "Sword_".to_string() } else { String::new() },
             empty_prefix: "Empty_".to_string(),
+            // The limb info of the Boyle party tweaks (`Twk_Pawn_Boyle_Party`), the only one the
+            // Boyle packages cook.
+            severed_limbs: Some(("L_Boyle_Ext_Script".to_string(), "NPC_Common.SeveredLimbsInfo.SLInfo_Elite".to_string())),
         }
     }
 
@@ -164,6 +190,7 @@ impl AnimBank {
         let mut pfx: HashMap<String, Vec<(f32, String, String, bool)>> = HashMap::new();
         let mut drops: HashMap<String, Vec<DropNotify>> = HashMap::new();
         let mut trails: HashMap<String, Vec<(f32, f32)>> = HashMap::new();
+        let mut severs: HashMap<String, Vec<SeverNotify>> = HashMap::new();
         for s in find(&h.properties, "Sequences").and_then(|p| p.array_objects().ok()).unwrap_or_default() {
             let ObjRef::Export(x) = ObjRef::from_index(s) else { continue };
             let Ok(sh) = pkg.read_object(x) else { continue };
@@ -210,12 +237,31 @@ impl AnimBank {
                             let velocity = find(&nh.properties, "m_DropVelocity").and_then(|p| p.as_vector()).map(glam::Vec3::from).unwrap_or(glam::Vec3::ZERO);
                             drops.entry(name.to_ascii_lowercase()).or_default().push(DropNotify { t, which, primary: usage != "EDisEquipUsage_Secondary", velocity });
                         }
+                        "DishonoredNotify_SeverLimb" => {
+                            let Ok(nh) = pkg.read_object(ni) else { continue };
+                            let flag = |k: &str, default: bool| match find(&nh.properties, k).map(|p| &p.value) {
+                                Some(Value::Bool(b)) => *b,
+                                _ => default,
+                            };
+                            let bone = match find(&nh.properties, "m_SeverBoneName").map(|p| &p.value) {
+                                Some(Value::Name(b)) if b != "None" => b.clone(),
+                                _ => continue,
+                            };
+                            let mode = match find(&nh.properties, "m_ImpulseMode").map(|p| &p.value) {
+                                Some(Value::Enum(e) | Value::Name(e)) if e.ends_with("SeverBoneX") => 1,
+                                Some(Value::Enum(e) | Value::Name(e)) if e.ends_with("SeverBoneY") => 2,
+                                Some(Value::Enum(e) | Value::Name(e)) if e.ends_with("SeverBoneZ") => 3,
+                                _ => 0,
+                            };
+                            let strength = find(&nh.properties, "m_fImpulseStrength").and_then(|p| p.as_float()).unwrap_or(300.0);
+                            severs.entry(name.to_ascii_lowercase()).or_default().push(SeverNotify { t, bone, blood: flag("m_bUseBlood", true), hide: flag("m_bHideLimb", false), ragdoll: flag("m_bGoToRagdoll", true), mode, strength });
+                        }
                         _ => {}
                     }
                 }
             }
         }
-        self.sets.push(SetData { pkg: r.0.clone(), tracks, seqs, ragdoll, pfx, drops, trails });
+        self.sets.push(SetData { pkg: r.0.clone(), tracks, seqs, ragdoll, pfx, drops, trails, severs });
         self.set_index.insert(key, self.sets.len() - 1);
         Some(self.sets.len() - 1)
     }
@@ -237,7 +283,8 @@ impl AnimBank {
         let default_lookat = ("DishonoredGame".to_string(), "DisLookatConfig.DefaultLookatConfig".to_string());
         let lookat = p.lookat.as_ref().and_then(|r| dishonored_assets::npc_anim::load_lookat_config(&self.content, r).ok()).or_else(|| p.lookat.as_ref().and_then(|_| dishonored_assets::npc_anim::load_lookat_config(&self.content, &default_lookat).ok())).map(Arc::new);
         let prefix = [p.prefix(true).to_string(), p.prefix(false).to_string()];
-        self.profiles.push(Profile { sets, loco, defs, lookup: HashMap::new(), physics, lookat, prefix });
+        let limbs = p.severed_limbs.as_ref().and_then(|r| dishonored_assets::npc_anim::load_severed_limb_info(&self.content, r).map_err(|e| warn!("severed limbs {}: {e:#}", r.1)).ok()).map(Arc::new);
+        self.profiles.push(Profile { sets, loco, defs, lookup: HashMap::new(), physics, lookat, prefix, limbs });
         self.profile_index.insert(p.clone(), self.profiles.len() - 1);
         self.profiles.len() - 1
     }
@@ -271,6 +318,14 @@ impl AnimBank {
         match self.holder(profile, name) {
             Some(s) => self.sets[s].trails.get(&name.to_ascii_lowercase()).is_some_and(|w| w.iter().any(|(t0, d)| t >= *t0 && t < t0 + d)),
             None => false,
+        }
+    }
+
+    /// The `DishonoredNotify_SeverLimb`s of a profile's sequence.
+    pub fn sever_notifies(&mut self, profile: usize, name: &str) -> Vec<SeverNotify> {
+        match self.holder(profile, name) {
+            Some(s) => self.sets[s].severs.get(&name.to_ascii_lowercase()).cloned().unwrap_or_default(),
+            None => Vec::new(),
         }
     }
 
@@ -1720,7 +1775,8 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
                 let g0 = globals(&parts[0], &p_now[0]);
                 let g1 = globals(&parts[0], &p_prev[0]);
                 let walls = i.walls.map(|w| w()).unwrap_or_default();
-                if let Some(mut rd) = crate::ragdoll::Ragdoll::new(&phys, &parts[0].bones, &g0, &g1, i.ground.unwrap_or(&|_, _| i.floor), &walls, i.gravity) {
+                let bind = globals(&parts[0], &vec![None; parts[0].bones.len()]);
+                if let Some(mut rd) = crate::ragdoll::Ragdoll::new(&phys, &parts[0].bones, &bind, &g0, &g1, i.ground.unwrap_or(&|_, _| i.floor), &walls, i.gravity) {
                     if st.settle {
                         rd.settle();
                     } else {
@@ -1932,8 +1988,8 @@ impl AnimBank {
         }
         let loco = self.profiles[profile].loco.clone();
         // The matinee's sets extend the pawn's profile; look-at and physics stay the pawn's.
-        let (lookat, physics, prefix) = (self.profiles[profile].lookat.clone(), self.profiles[profile].physics.clone(), self.profiles[profile].prefix.clone());
-        self.profiles.push(Profile { sets, loco, defs: None, lookup: HashMap::new(), lookat, physics, prefix });
+        let (lookat, physics, prefix, limbs) = (self.profiles[profile].lookat.clone(), self.profiles[profile].physics.clone(), self.profiles[profile].prefix.clone(), self.profiles[profile].limbs.clone());
+        self.profiles.push(Profile { sets, loco, defs: None, lookup: HashMap::new(), lookat, physics, prefix, limbs });
         let id = self.profiles.len() - 1;
         self.derived.insert(key, id);
         id

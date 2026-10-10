@@ -35,6 +35,7 @@ pub mod game_dir;
 #[doc(hidden)]
 pub mod characters;
 pub mod dropped_weapons;
+pub mod severed_limbs;
 pub mod ash_bodies;
 pub mod weapon_trails;
 #[doc(hidden)]
@@ -232,6 +233,26 @@ pub struct Args {
     lat: f32,
     loss: f32,
     size: (u32, u32),
+    /// `--gameplay-patch JSON`: a JSON merge patch over every map's `GameplayConfig` (tests and
+    /// captures, e.g. `{"fatality":{"behead_chance":1.0}}`).
+    gameplay_patch: Option<serde_json::Value>,
+}
+
+/// RFC 7386 merge of `patch` into `target`: objects merge key by key, `null` removes, anything else
+/// replaces.
+fn merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    match (target, patch) {
+        (serde_json::Value::Object(t), serde_json::Value::Object(p)) => {
+            for (k, v) in p {
+                if v.is_null() {
+                    t.remove(k);
+                } else {
+                    merge_patch(t.entry(k.clone()).or_insert(serde_json::Value::Null), v);
+                }
+            }
+        }
+        (t, p) => *t = p.clone(),
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -306,6 +327,7 @@ fn parse_args() -> Args {
         lat: get("--lat").and_then(|s| s.parse().ok()).unwrap_or(0.0),
         loss: get("--loss").and_then(|s| s.parse().ok()).unwrap_or(0.0),
         size,
+        gameplay_patch: get("--gameplay-patch").map(|s| serde_json::from_str(&s).unwrap_or_else(|e| panic!("--gameplay-patch: {e}"))),
     }
 }
 
@@ -458,7 +480,16 @@ pub fn main() {
             Some(def) => dishonored_content::mission_maps(def),
             None => vec![args.map.clone()],
         };
-        let content = Arc::new(dishonored_content::MapContents::load(&names).expect("loading match content from the install"));
+        let patch = |m: &mut dishonored_content::MatchContent| {
+            if let Some(patch) = &args.gameplay_patch {
+                info!("--gameplay-patch on {}", m.map_name);
+                let mut v = serde_json::to_value(&m.sim.gameplay).expect("gameplay config");
+                merge_patch(&mut v, patch);
+                m.sim.gameplay = serde_json::from_value(v).unwrap_or_else(|e| panic!("--gameplay-patch: {e}"));
+            }
+        };
+        let contents = dishonored_content::MapContents::load_patched(&names, &patch).expect("loading match content from the install");
+        let content = Arc::new(contents);
         let session = match &args.mode {
             Mode::Offline => {
                 let mut s = session::Session::offline(content.clone(), args.bots, args.spectate, args.contracts, args.mission.clone());
@@ -545,6 +576,8 @@ pub fn main() {
             // Weapons dead pawns let go of (`DisNotify_DropItem`), after the poses that drop them.
             .init_resource::<dropped_weapons::DroppedWeapons>()
             .add_systems(Update, dropped_weapons::update.after(characters::animate_characters))
+            .init_resource::<severed_limbs::SeveredLimbs>()
+            .add_systems(Update, (severed_limbs::update.after(characters::animate_characters).after(players::camera_follow), severed_limbs::pose_pieces).chain())
             // Bodies burnt to ash: their sequence after this frame's poses and visibility.
             .init_resource::<ash_bodies::AshBodies>()
             .add_systems(Update, ash_bodies::update.after(characters::animate_characters).after(players::sync_players))

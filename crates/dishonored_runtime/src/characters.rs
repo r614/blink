@@ -587,7 +587,7 @@ pub fn animate_characters(
     mut anim_sounds: Option<ResMut<crate::audio::AnimSounds>>,
     session: Res<crate::session::Session>,
     mut sockets: Option<ResMut<crate::effects::EffectSockets>>,
-    (mut pawn_points, mut pawn_fx, mut drops, mut trails, mut ash): (Option<ResMut<crate::cutscene::PawnPoints>>, Option<ResMut<crate::effects::PawnEffects>>, Option<ResMut<crate::dropped_weapons::DroppedWeapons>>, Option<ResMut<crate::weapon_trails::WeaponTrails>>, Option<ResMut<crate::ash_bodies::AshBodies>>),
+    (mut pawn_points, mut pawn_fx, mut drops, mut trails, mut ash, mut limbs): (Option<ResMut<crate::cutscene::PawnPoints>>, Option<ResMut<crate::effects::PawnEffects>>, Option<ResMut<crate::dropped_weapons::DroppedWeapons>>, Option<ResMut<crate::weapon_trails::WeaponTrails>>, Option<ResMut<crate::ash_bodies::AshBodies>>, Option<ResMut<crate::severed_limbs::SeveredLimbs>>),
 ) {
     let events = std::mem::take(&mut view.anim_events);
     // Bodies the sim removed, for their burn (`ash_bodies`).
@@ -659,6 +659,8 @@ pub fn animate_characters(
         let mut limp = false;
         // A `DisNotify_Trails` window of a chain covers its time: the held swords trail.
         let mut trailing = false;
+        // `DishonoredNotify_SeverLimb`s crossed this frame.
+        let mut severs: Vec<crate::npc_anim::SeverNotify> = Vec::new();
         let pose = match states.get_mut(entity) {
             Ok(mut st) => {
                 let before = chain_clips(&st);
@@ -688,6 +690,19 @@ pub fn animate_characters(
                             drop_notify = Some(d);
                         }
                     }
+                    for s in bank.sever_notifies(profile, &clip) {
+                        let crossed = match t0 {
+                            Some(t0) => t0 < s.t && s.t <= t1,
+                            None => s.t <= t1,
+                        };
+                        if crossed {
+                            severs.push(s);
+                        }
+                    }
+                }
+                // A sever with `m_bGoToRagdoll` hands a dead body to the ragdoll.
+                if !p.alive && st.ragdoll.is_none() && severs.iter().any(|s| s.ragdoll) {
+                    st.dropped = true;
                 }
                 // Sound notifies (AnimNotify_AkEvent, footfalls) of the clip windows advanced.
                 if let Some(snd) = anim_sounds.as_mut() {
@@ -734,6 +749,94 @@ pub fn animate_characters(
                 info!("anim {} mod={} vel={:.0},{:.0} full={} upper={} ragdoll={} root={:?} pelvis={:?}", p.id, st.modifier, st.vel.0, st.vel.1, slot(&st.full), slot(&st.upper), st.ragdoll.is_some(), pose[0].first().copied().flatten().map(|k| k.t), globals[0].get(1).map(|m| m.w_axis.truncate()));
             }
         }
+        // Limbs cut off now (0x00B6CC10): a limb the mesh's physics asset has a body for, not
+        // already cut (nor a limb above it); its particles "when severed", and the severed piece.
+        if let Some(sl) = limbs.as_mut() {
+            let world = |m: glam::Mat4| crate::cutscene::from_bevy(root_gt.to_matrix() * to_bevy(m));
+            let bones0 = &model.parts[0].bones;
+            for s in std::mem::take(&mut severs) {
+                let Some(bi) = bones0.iter().position(|b| b.name.eq_ignore_ascii_case(&s.bone)) else { continue };
+                let mut chain: Vec<&str> = Vec::new();
+                let mut k = bi as i32;
+                while k >= 0 && (k as usize) < bones0.len() {
+                    chain.push(&bones0[k as usize].name);
+                    k = if k == 0 { -1 } else { bones0[k as usize].parent };
+                }
+                let phys = bank.profiles[profile].physics.clone();
+                if sl.is_cut(p.id, &chain) || !phys.as_ref().is_some_and(|ph| ph.bodies.iter().any(|b| b.bone.eq_ignore_ascii_case(&s.bone))) {
+                    continue;
+                }
+                sl.severed.entry(p.id).or_default().push(s.bone.clone());
+                let info = bank.profiles[profile].limbs.clone();
+                let limb = info.as_ref().and_then(|i| i.limbs.iter().find(|l| l.bone.eq_ignore_ascii_case(&s.bone)));
+                if s.blood {
+                    for lp in limb.into_iter().flat_map(|l| l.particles.iter()).filter(|lp| lp.severed) {
+                        fired.push((lp.template.clone(), lp.location.clone(), lp.attach));
+                    }
+                }
+                if s.hide {
+                    continue;
+                }
+                // The piece: the subtree posed as now, everything else collapsed onto the cut.
+                let cut_at = globals[0][bi].w_axis.truncate();
+                let cut = [s.bone.clone()];
+                let joints: Vec<Vec<glam::Mat4>> = model
+                    .parts
+                    .iter()
+                    .enumerate()
+                    .map(|(pi, part)| {
+                        let roots = crate::severed_limbs::cut_roots(&part.bones, &cut);
+                        let at = roots.iter().flatten().next().map(|r| globals[pi][*r].w_axis.truncate()).unwrap_or(cut_at);
+                        (0..part.bones.len()).map(|b| if roots[b].is_some() { globals[pi][b] } else { crate::severed_limbs::collapsed(at) }).collect()
+                    })
+                    .collect();
+                let accessories: Vec<glam::Mat4> = lib
+                    .accessories
+                    .get(&root.archetype)
+                    .into_iter()
+                    .flatten()
+                    .map(|a| {
+                        let inside = model.parts.get(a.part).is_some_and(|part| crate::severed_limbs::cut_roots(&part.bones, &cut).get(a.bone).copied().flatten().is_some());
+                        if inside { globals[a.part][a.bone] * a.local } else { crate::severed_limbs::collapsed(cut_at) }
+                    })
+                    .collect();
+                // The rigid body's box: the subtree's physics bodies in the severed bone's frame.
+                let to_bone = globals[0][bi].inverse();
+                let roots0 = crate::severed_limbs::cut_roots(bones0, &cut);
+                let (mut lo, mut hi) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
+                for b in phys.iter().flat_map(|ph| ph.bodies.iter()) {
+                    let Some(bb) = bones0.iter().position(|x| x.name.eq_ignore_ascii_case(&b.bone)).filter(|bb| roots0[*bb].is_some()) else { continue };
+                    let c = to_bone.transform_point3(globals[0][bb].transform_point3(glam::Vec3::from(b.center)));
+                    let r = b.radius + b.length * 0.5;
+                    lo = lo.min(c - glam::Vec3::splat(r));
+                    hi = hi.max(c + glam::Vec3::splat(r));
+                }
+                if lo.x > hi.x {
+                    (lo, hi) = (glam::Vec3::splat(-8.0), glam::Vec3::splat(8.0));
+                }
+                let bone_world = world(globals[0][bi]);
+                let axis = match s.mode {
+                    1 => bone_world.x_axis.truncate(),
+                    2 => bone_world.y_axis.truncate(),
+                    3 => bone_world.z_axis.truncate(),
+                    _ => glam::Vec3::ZERO,
+                };
+                sl.pending.push(crate::severed_limbs::SeverRequest {
+                    pawn: p.id,
+                    archetype: root.archetype,
+                    root: world(glam::Mat4::IDENTITY),
+                    bone: bone_world,
+                    joints,
+                    accessories,
+                    lo,
+                    hi,
+                    velocity: axis.normalize_or_zero() * s.strength,
+                    lens: info.as_ref().and_then(|i| i.lens_severed.clone()),
+                });
+            }
+        }
+        // The cut subtrees, per part and bone: the subtree root each bone falls under.
+        let cut: Option<Vec<Vec<Option<usize>>>> = limbs.as_ref().and_then(|sl| sl.severed.get(&p.id)).map(|c| model.parts.iter().map(|part| crate::severed_limbs::cut_roots(&part.bones, c)).collect());
         // [interp] Bones and sockets matinee attachments hold objects on (a prop in the hand).
         if let Some(pp) = pawn_points.as_mut() {
             let wanted: Vec<String> = pp.wanted.iter().filter(|w| w.0 == p.id).map(|w| w.1.clone()).collect();
@@ -788,16 +891,21 @@ pub fn animate_characters(
                 s.heads.insert(p.id, uu(root_gt.transform_point(to_bevy(globals[0][bi]).w_axis.truncate())));
             }
         }
+        // A cut subtree is drawn collapsed onto its cut (`severed_limbs`).
+        let cut_of = |part: usize, bone: usize| -> Option<glam::Mat4> {
+            let r = cut.as_ref()?.get(part)?.get(bone).copied().flatten()?;
+            Some(crate::severed_limbs::collapsed(globals[part][r].w_axis.truncate()))
+        };
         for c in children.iter() {
             if let Ok((j, mut t)) = joints.get_mut(c) {
                 if let Some(m) = globals.get(j.part).and_then(|v| v.get(j.bone)) {
-                    *t = Transform::from_matrix(to_bevy(*m));
+                    *t = crate::severed_limbs::joint_transform(cut_of(j.part, j.bone).unwrap_or(*m));
                 }
             }
             if let Ok((a, mut t)) = ajoints.get_mut(c) {
                 if let Some(acc) = lib.accessories.get(&root.archetype).and_then(|v| v.get(a.0)) {
                     if let Some(m) = globals.get(acc.part).and_then(|v| v.get(acc.bone)) {
-                        *t = Transform::from_matrix(to_bevy(*m * acc.local));
+                        *t = crate::severed_limbs::joint_transform(cut_of(acc.part, acc.bone).unwrap_or(*m * acc.local));
                     }
                 }
             }

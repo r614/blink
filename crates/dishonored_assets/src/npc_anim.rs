@@ -443,6 +443,65 @@ pub fn load_hit_bodies(content: &Content, package: &str, physics: &str, mesh: &s
     Ok(out)
 }
 
+/// An `array<name>` property (8-byte name references).
+fn name_array(pkg: &Package, p: &Property) -> Vec<String> {
+    let Value::Array(b) = &p.value else { return Vec::new() };
+    let Some(n) = b.get(..4).map(|x| i32::from_le_bytes(x.try_into().unwrap_or_default())) else { return Vec::new() };
+    if n <= 0 || b.len() != 4 + 8 * n as usize {
+        return Vec::new();
+    }
+    b[4..]
+        .chunks_exact(8)
+        .filter_map(|c| {
+            let (i, k) = (i32::from_le_bytes(c[..4].try_into().ok()?), i32::from_le_bytes(c[4..].try_into().ok()?));
+            let base = pkg.names.get(usize::try_from(i).ok()?)?.name.clone();
+            Some(if k > 0 { format!("{base}_{}", k - 1) } else { base })
+        })
+        .collect()
+}
+
+/// Load a `DisSeveredLimbInfo` by (package, object path).
+pub fn load_severed_limb_info(content: &Content, r: &(String, String)) -> Result<SeveredLimbInfo> {
+    let pkg = content.package(&r.0)?;
+    let i = find_export(&pkg, &r.1).with_context(|| format!("{} not in {}", r.1, r.0))?;
+    let h = pkg.read_object(i)?;
+    let name = |props: &[Property], k: &str| match find(props, k).map(|p| &p.value) {
+        Some(Value::Name(n)) if n != "None" => n.clone(),
+        _ => String::new(),
+    };
+    let flag = |props: &[Property], k: &str| matches!(find(props, k).map(|p| &p.value), Some(Value::Bool(true)));
+    let object = |props: &[Property], k: &str| find(props, k).and_then(|p| p.as_object()).map(ObjRef::from_index).filter(|o| !matches!(o, ObjRef::Null)).map(|o| pkg.obj_path(o));
+    let mut out = SeveredLimbInfo::default();
+    for limb in find(&h.properties, "m_SeveredLimbInfo").and_then(|p| p.array_structs(&pkg).ok()).unwrap_or_default() {
+        let particles = find(&limb, "m_ParticleEffects")
+            .and_then(|p| p.array_structs(&pkg).ok())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|e| {
+                Some(LimbParticle {
+                    location: name(e, "m_LocationName"),
+                    attach: flag(e, "m_bAttach"),
+                    severed: flag(e, "m_bUseWhenSevered"),
+                    gored: flag(e, "m_bUseWhenGored"),
+                    eaten: flag(e, "m_bUseWhenEaten"),
+                    template: object(e, "m_pParticleEmitter")?,
+                })
+            })
+            .collect();
+        let also_sever_when_gored = find(&limb, "m_AlsoSeverWhenGored").map(|p| name_array(&pkg, p)).unwrap_or_default();
+        out.limbs.push(SeveredLimb { bone: name(&limb, "m_BoneBreakName"), particles, also_sever_when_gored });
+    }
+    let lens = |k: &str| -> Option<LensOnContact> {
+        let Some(Value::Struct(_, s)) = find(&h.properties, k).map(|p| &p.value) else { return None };
+        let class = object(s, "m_pEffectClass")?.rsplit('.').next()?.to_string();
+        Some(LensOnContact { class, distance: f32_of(s, "m_fAffectingDistance"), probability: f32_of(s, "m_fAffectingProbability") })
+    };
+    out.lens_severed = lens("m_CameraEffectEmitterInfoWhenSevered");
+    out.lens_gored = lens("m_CameraEffectEmitterInfoWhenGored");
+    out.lens_eaten = lens("m_CameraEffectEmitterInfoWhenEaten");
+    Ok(out)
+}
+
 /// Load a physics asset by (package, object path).
 pub fn load_physics_asset(content: &Content, r: &(String, String)) -> Result<PhysicsAssetData> {
     let pkg = content.package(&r.0)?;
